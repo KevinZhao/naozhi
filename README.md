@@ -130,4 +130,4 @@ deploy/                      systemd + 部署脚本
 
 ## License
 
-Private.
+[BSL 1.1](LICENSE) — 源码可读可改，个人和非生产用途免费。生产环境商用或作为托管服务提供需获得授权。2030-03-21 后自动转为 Apache 2.0。
