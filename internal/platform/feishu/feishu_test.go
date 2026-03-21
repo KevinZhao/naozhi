@@ -273,6 +273,25 @@ func TestParseSDKEvent_ImageMessage(t *testing.T) {
 	}
 }
 
+func TestParseSDKEvent_ImageMessage_EmptyKey(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")},
+			},
+			Message: &larkim.EventMessage{
+				MessageType: strPtr("image"),
+				ChatId:      strPtr("oc_chat1"),
+				Content:     strPtr(`{"image_key":""}`),
+			},
+		},
+	}
+	_, _, ok := parseSDKEvent(event)
+	if ok {
+		t.Error("expected ok=false for image message with empty image_key")
+	}
+}
+
 func TestParseSDKEvent_UnsupportedType(t *testing.T) {
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{

@@ -453,3 +453,169 @@ func TestNewUserMessage(t *testing.T) {
 		t.Errorf("Content = %v, want \"hello world\"", msg.Message.Content)
 	}
 }
+
+func TestNewUserMessage_WithImages(t *testing.T) {
+	images := []ImageData{
+		{Data: []byte("fake-png-data"), MimeType: "image/png"},
+		{Data: []byte("fake-jpeg-data"), MimeType: "image/jpeg"},
+	}
+	msg := NewUserMessage("describe this", images)
+
+	if msg.Type != "user" || msg.Message.Role != "user" {
+		t.Fatalf("unexpected type/role: %q / %q", msg.Type, msg.Message.Role)
+	}
+
+	// Content must be a slice, not a string
+	blocks, ok := msg.Message.Content.([]any)
+	if !ok {
+		t.Fatalf("Content type = %T, want []any", msg.Message.Content)
+	}
+	// 2 images + 1 text block
+	if len(blocks) != 3 {
+		t.Fatalf("len(blocks) = %d, want 3", len(blocks))
+	}
+
+	// Marshal and re-parse to verify JSON structure
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var raw map[string]json.RawMessage
+	json.Unmarshal(data, &raw)
+	var inner map[string]json.RawMessage
+	json.Unmarshal(raw["message"], &inner)
+
+	var contentBlocks []map[string]any
+	if err := json.Unmarshal(inner["content"], &contentBlocks); err != nil {
+		t.Fatalf("failed to parse content blocks: %v", err)
+	}
+
+	// First two blocks should be images
+	for i := 0; i < 2; i++ {
+		if contentBlocks[i]["type"] != "image" {
+			t.Errorf("block[%d].type = %v, want image", i, contentBlocks[i]["type"])
+		}
+		src, _ := contentBlocks[i]["source"].(map[string]any)
+		if src["type"] != "base64" {
+			t.Errorf("block[%d].source.type = %v, want base64", i, src["type"])
+		}
+		if src["data"] == nil || src["data"] == "" {
+			t.Errorf("block[%d].source.data is empty", i)
+		}
+	}
+	// Verify first image media_type
+	src0, _ := contentBlocks[0]["source"].(map[string]any)
+	if src0["media_type"] != "image/png" {
+		t.Errorf("block[0].source.media_type = %v, want image/png", src0["media_type"])
+	}
+	// Verify second image media_type
+	src1, _ := contentBlocks[1]["source"].(map[string]any)
+	if src1["media_type"] != "image/jpeg" {
+		t.Errorf("block[1].source.media_type = %v, want image/jpeg", src1["media_type"])
+	}
+
+	// Last block should be text
+	if contentBlocks[2]["type"] != "text" {
+		t.Errorf("block[2].type = %v, want text", contentBlocks[2]["type"])
+	}
+	if contentBlocks[2]["text"] != "describe this" {
+		t.Errorf("block[2].text = %v, want 'describe this'", contentBlocks[2]["text"])
+	}
+}
+
+func TestNewUserMessage_WithImages_EmptyText(t *testing.T) {
+	images := []ImageData{{Data: []byte("img"), MimeType: "image/png"}}
+	msg := NewUserMessage("", images)
+
+	blocks, ok := msg.Message.Content.([]any)
+	if !ok {
+		t.Fatalf("Content type = %T, want []any", msg.Message.Content)
+	}
+	// Only 1 image block, no text block when text is empty
+	if len(blocks) != 1 {
+		t.Fatalf("len(blocks) = %d, want 1", len(blocks))
+	}
+}
+
+func TestClaudeProtocol_WriteMessage_WithImages(t *testing.T) {
+	p := &ClaudeProtocol{}
+	var buf bytes.Buffer
+	images := []ImageData{
+		{Data: []byte("png-bytes"), MimeType: "image/png"},
+	}
+	if err := p.WriteMessage(&buf, "what is this?", images); err != nil {
+		t.Fatal(err)
+	}
+
+	// Parse the NDJSON line
+	var parsed map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &parsed); err != nil {
+		t.Fatal(err)
+	}
+
+	var inner map[string]json.RawMessage
+	json.Unmarshal(parsed["message"], &inner)
+
+	var contentBlocks []map[string]any
+	if err := json.Unmarshal(inner["content"], &contentBlocks); err != nil {
+		t.Fatalf("content should be array for multimodal, got error: %v", err)
+	}
+	if len(contentBlocks) != 2 {
+		t.Fatalf("len(contentBlocks) = %d, want 2 (1 image + 1 text)", len(contentBlocks))
+	}
+	if contentBlocks[0]["type"] != "image" {
+		t.Errorf("block[0].type = %v, want image", contentBlocks[0]["type"])
+	}
+	if contentBlocks[1]["type"] != "text" {
+		t.Errorf("block[1].type = %v, want text", contentBlocks[1]["type"])
+	}
+}
+
+func TestACPProtocol_WriteMessage_WithImages(t *testing.T) {
+	p := &ACPProtocol{sessionID: "sess_img"}
+	var buf bytes.Buffer
+	images := []ImageData{
+		{Data: []byte("jpeg-bytes"), MimeType: "image/jpeg"},
+	}
+	if err := p.WriteMessage(&buf, "analyze", images); err != nil {
+		t.Fatal(err)
+	}
+
+	var req map[string]json.RawMessage
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &req); err != nil {
+		t.Fatal(err)
+	}
+	if string(req["method"]) != `"session/prompt"` {
+		t.Errorf("method = %s, want session/prompt", req["method"])
+	}
+
+	var params map[string]json.RawMessage
+	json.Unmarshal(req["params"], &params)
+
+	var sessionID string
+	json.Unmarshal(params["sessionId"], &sessionID)
+	if sessionID != "sess_img" {
+		t.Errorf("sessionId = %q, want sess_img", sessionID)
+	}
+
+	var prompt []map[string]any
+	if err := json.Unmarshal(params["prompt"], &prompt); err != nil {
+		t.Fatalf("prompt parse error: %v", err)
+	}
+	if len(prompt) != 2 {
+		t.Fatalf("len(prompt) = %d, want 2 (1 image + 1 text)", len(prompt))
+	}
+	if prompt[0]["type"] != "image" {
+		t.Errorf("prompt[0].type = %v, want image", prompt[0]["type"])
+	}
+	src, _ := prompt[0]["source"].(map[string]any)
+	if src["media_type"] != "image/jpeg" {
+		t.Errorf("prompt[0].source.media_type = %v, want image/jpeg", src["media_type"])
+	}
+	if prompt[1]["type"] != "text" {
+		t.Errorf("prompt[1].type = %v, want text", prompt[1]["type"])
+	}
+	if prompt[1]["text"] != "analyze" {
+		t.Errorf("prompt[1].text = %v, want analyze", prompt[1]["text"])
+	}
+}
