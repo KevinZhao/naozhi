@@ -447,11 +447,14 @@ func (s *Server) handleCdCommand(ctx context.Context, msg platform.IncomingMessa
 		}
 	}
 
-	// Resolve to absolute path
-	absPath, err := filepath.Abs(path)
-	if err != nil {
-		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "路径无效: " + err.Error()})
-		return
+	// Resolve relative paths against the chat's current workspace, not naozhi's cwd
+	var absPath string
+	if filepath.IsAbs(path) {
+		absPath = filepath.Clean(path)
+	} else {
+		chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
+		currentWS := s.router.GetWorkspace(chatKey)
+		absPath = filepath.Join(currentWS, path)
 	}
 
 	// Verify directory exists
