@@ -6,14 +6,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // SpawnOptions configures how a claude CLI process is spawned.
 type SpawnOptions struct {
-	Model      string
-	ResumeID   string   // session ID to resume (empty = new session)
-	ExtraArgs  []string // additional CLI args
-	WorkingDir string
+	Model           string
+	ResumeID        string   // session ID to resume (empty = new session)
+	ExtraArgs       []string // additional CLI args
+	WorkingDir      string
+	NoOutputTimeout time.Duration // kill process if no output for this long
+	TotalTimeout    time.Duration // kill process if total turn exceeds this
 }
 
 // Wrapper manages spawning claude CLI processes.
@@ -25,13 +28,18 @@ type Wrapper struct {
 // If path is empty, defaults to ~/.local/bin/claude.
 func NewWrapper(cliPath string) *Wrapper {
 	if cliPath == "" {
-		home, _ := os.UserHomeDir()
-		cliPath = filepath.Join(home, ".local", "bin", "claude")
+		home, err := os.UserHomeDir()
+		if err == nil {
+			cliPath = filepath.Join(home, ".local", "bin", "claude")
+		} else {
+			cliPath = "claude" // fallback to PATH lookup
+		}
 	}
 	// Expand ~ prefix
 	if strings.HasPrefix(cliPath, "~/") {
-		home, _ := os.UserHomeDir()
-		cliPath = filepath.Join(home, cliPath[2:])
+		if home, err := os.UserHomeDir(); err == nil {
+			cliPath = filepath.Join(home, cliPath[2:])
+		}
 	}
 	return &Wrapper{CLIPath: cliPath}
 }
@@ -62,7 +70,7 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 		cwd = os.TempDir()
 	}
 
-	proc, err := newProcess(ctx, w.CLIPath, args, cwd)
+	proc, err := newProcess(ctx, w.CLIPath, args, cwd, opts.NoOutputTimeout, opts.TotalTimeout)
 	if err != nil {
 		return nil, fmt.Errorf("spawn claude: %w", err)
 	}

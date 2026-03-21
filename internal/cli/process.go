@@ -22,6 +22,13 @@ const (
 	StateDead
 )
 
+const (
+	// DefaultNoOutputTimeout is the fallback if no watchdog config is provided.
+	DefaultNoOutputTimeout = 2 * time.Minute
+	// DefaultTotalTimeout is the fallback if no watchdog config is provided.
+	DefaultTotalTimeout = 5 * time.Minute
+)
+
 func (s ProcessState) String() string {
 	switch s {
 	case StateSpawning:
@@ -50,10 +57,13 @@ type Process struct {
 	eventCh chan Event
 	// done is closed when the process exits
 	done chan struct{}
+
+	noOutputTimeout time.Duration
+	totalTimeout    time.Duration
 }
 
 // newProcess starts a claude CLI process with the given args.
-func newProcess(ctx context.Context, cliPath string, args []string, cwd string) (*Process, error) {
+func newProcess(ctx context.Context, cliPath string, args []string, cwd string, noOutputTimeout, totalTimeout time.Duration) (*Process, error) {
 	slog.Info("spawning cli process", "cli", cliPath, "args", args, "cwd", cwd)
 
 	cmd := exec.CommandContext(ctx, cliPath, args...)
@@ -91,12 +101,14 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string) 
 	}()
 
 	p := &Process{
-		cmd:     cmd,
-		stdin:   stdin,
-		scanner: bufio.NewScanner(stdout),
-		State:   StateSpawning,
-		eventCh: make(chan Event, 64),
-		done:    make(chan struct{}),
+		cmd:             cmd,
+		stdin:           stdin,
+		scanner:         bufio.NewScanner(stdout),
+		State:           StateSpawning,
+		eventCh:         make(chan Event, 64),
+		done:            make(chan struct{}),
+		noOutputTimeout: noOutputTimeout,
+		totalTimeout:    totalTimeout,
 	}
 
 	// Set scanner buffer for potentially large NDJSON lines
@@ -104,9 +116,6 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string) 
 
 	// Start stdout reader goroutine
 	go p.readLoop()
-
-	// Note: init event only arrives after the first message is sent to stdin.
-	// waitInit is called inside Send() on the first call.
 
 	return p, nil
 }
@@ -135,30 +144,6 @@ func (p *Process) readLoop() {
 	p.mu.Lock()
 	p.State = StateDead
 	p.mu.Unlock()
-}
-
-// waitInit blocks until the first system/init event arrives or timeout.
-func (p *Process) waitInit(timeout time.Duration) error {
-	timer := time.NewTimer(timeout)
-	defer timer.Stop()
-
-	for {
-		select {
-		case ev, ok := <-p.eventCh:
-			if !ok {
-				return fmt.Errorf("process exited before init")
-			}
-			if ev.Type == "system" && ev.SubType == "init" {
-				p.mu.Lock()
-				p.SessionID = ev.SessionID
-				p.State = StateReady
-				p.mu.Unlock()
-				return nil
-			}
-		case <-timer.C:
-			return fmt.Errorf("timeout waiting for init event")
-		}
-	}
 }
 
 // EventCallback is called for each intermediate event during Send.
@@ -194,6 +179,20 @@ func (p *Process) Send(ctx context.Context, text string, onEvent EventCallback) 
 		return nil, fmt.Errorf("write stdin: %w", err)
 	}
 
+	// Watchdog timers (defaults if not configured)
+	noOutputDur := p.noOutputTimeout
+	if noOutputDur <= 0 {
+		noOutputDur = DefaultNoOutputTimeout
+	}
+	totalDur := p.totalTimeout
+	if totalDur <= 0 {
+		totalDur = DefaultTotalTimeout
+	}
+	noOutputTimer := time.NewTimer(noOutputDur)
+	defer noOutputTimer.Stop()
+	totalTimer := time.NewTimer(totalDur)
+	defer totalTimer.Stop()
+
 	// Read events until result
 	for {
 		select {
@@ -203,6 +202,15 @@ func (p *Process) Send(ctx context.Context, text string, onEvent EventCallback) 
 			if !ok {
 				return nil, fmt.Errorf("process exited during send")
 			}
+
+			// Reset no-output watchdog on any event
+			if !noOutputTimer.Stop() {
+				select {
+				case <-noOutputTimer.C:
+				default:
+				}
+			}
+			noOutputTimer.Reset(noOutputDur)
 
 			// Capture session ID from init event (first message only)
 			if ev.Type == "system" && ev.SubType == "init" && p.SessionID == "" {
@@ -232,6 +240,14 @@ func (p *Process) Send(ctx context.Context, text string, onEvent EventCallback) 
 					CostUSD:   ev.CostUSD,
 				}, nil
 			}
+		case <-noOutputTimer.C:
+			slog.Error("watchdog: no output timeout", "timeout", noOutputDur)
+			p.Kill()
+			return nil, fmt.Errorf("no output timeout (%s)", noOutputDur)
+		case <-totalTimer.C:
+			slog.Error("watchdog: total timeout", "timeout", totalDur)
+			p.Kill()
+			return nil, fmt.Errorf("total timeout (%s)", totalDur)
 		}
 	}
 }
@@ -244,6 +260,13 @@ func (p *Process) Alive() bool {
 	default:
 		return true
 	}
+}
+
+// IsRunning returns true if the process is currently processing a message.
+func (p *Process) IsRunning() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.State == StateRunning
 }
 
 // Kill forcefully terminates the process.

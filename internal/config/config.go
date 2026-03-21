@@ -11,11 +11,18 @@ import (
 )
 
 type Config struct {
-	Server    ServerConfig    `yaml:"server"`
-	CLI       CLIConfig       `yaml:"cli"`
-	Session   SessionConfig   `yaml:"session"`
-	Platforms PlatformConfigs `yaml:"platforms"`
-	Log       LogConfig       `yaml:"log"`
+	Server        ServerConfig           `yaml:"server"`
+	CLI           CLIConfig              `yaml:"cli"`
+	Session       SessionConfig          `yaml:"session"`
+	Platforms     PlatformConfigs        `yaml:"platforms"`
+	Agents        map[string]AgentConfig `yaml:"agents"`
+	AgentCommands map[string]string      `yaml:"agent_commands"`
+	Log           LogConfig              `yaml:"log"`
+}
+
+type AgentConfig struct {
+	Model string   `yaml:"model"`
+	Args  []string `yaml:"args"`
 }
 
 type ServerConfig struct {
@@ -47,6 +54,7 @@ type PlatformConfigs struct {
 type FeishuConfig struct {
 	AppID             string `yaml:"app_id"`
 	AppSecret         string `yaml:"app_secret"`
+	ConnectionMode    string `yaml:"connection_mode"` // "websocket" (default) | "webhook"
 	VerificationToken string `yaml:"verification_token"`
 	EncryptKey        string `yaml:"encrypt_key"`
 	MaxReplyLength    int    `yaml:"max_reply_length"`
@@ -99,6 +107,19 @@ func (c *Config) ParseTTL() time.Duration {
 		return 30 * time.Minute
 	}
 	return d
+}
+
+// ParseWatchdog returns the watchdog timeout durations.
+func (c *Config) ParseWatchdog() (noOutputTimeout, totalTimeout time.Duration) {
+	noOutputTimeout, _ = time.ParseDuration(c.Session.Watchdog.NoOutputTimeout)
+	if noOutputTimeout <= 0 {
+		noOutputTimeout = 2 * time.Minute
+	}
+	totalTimeout, _ = time.ParseDuration(c.Session.Watchdog.TotalTimeout)
+	if totalTimeout <= 0 {
+		totalTimeout = 5 * time.Minute
+	}
+	return
 }
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)

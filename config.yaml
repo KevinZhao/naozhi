@@ -15,6 +15,18 @@ session:
     total_timeout: "300s"
   store_path: "~/.naozhi/sessions.json"
 
+agents:
+  code-reviewer:
+    model: "sonnet"
+    args: ["--append-system-prompt", "You are a code review expert. Review code for quality, security, and maintainability."]
+  researcher:
+    model: "opus"
+    args: ["--append-system-prompt", "You are a deep research expert. Decompose questions, search from multiple angles, and synthesize findings."]
+
+agent_commands:
+  review: "code-reviewer"
+  research: "researcher"
+
 platforms:
   feishu:
     app_id: "${IM_APP_ID}"

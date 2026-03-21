@@ -37,6 +37,13 @@ func (s *ManagedSession) Send(ctx context.Context, text string, onEvent cli.Even
 	return result, nil
 }
 
+// getSessionID returns the session ID safely under sendMu.
+func (s *ManagedSession) getSessionID() string {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	return s.SessionID
+}
+
 // SessionKey builds a session key from components.
 func SessionKey(platform, chatType, id, agentID string) string {
 	if agentID == "" {

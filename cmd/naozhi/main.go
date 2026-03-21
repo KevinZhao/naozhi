@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -41,13 +45,20 @@ func main() {
 	// CLI Wrapper
 	wrapper := cli.NewWrapper(cfg.CLI.Path)
 
+	// Parse watchdog and store path
+	noOutputTimeout, totalTimeout := cfg.ParseWatchdog()
+	storePath := expandHome(cfg.Session.StorePath)
+
 	// Session Router
 	router := session.NewRouter(session.RouterConfig{
-		Wrapper:   wrapper,
-		MaxProcs:  cfg.Session.MaxProcs,
-		TTL:       cfg.ParseTTL(),
-		Model:     cfg.CLI.Model,
-		ExtraArgs: cfg.CLI.Args,
+		Wrapper:         wrapper,
+		MaxProcs:        cfg.Session.MaxProcs,
+		TTL:             cfg.ParseTTL(),
+		Model:           cfg.CLI.Model,
+		ExtraArgs:       cfg.CLI.Args,
+		StorePath:       storePath,
+		NoOutputTimeout: noOutputTimeout,
+		TotalTimeout:    totalTimeout,
 	})
 
 	// Context with cancellation for graceful shutdown
@@ -63,6 +74,7 @@ func main() {
 		f := feishu.New(feishu.Config{
 			AppID:             cfg.Platforms.Feishu.AppID,
 			AppSecret:         cfg.Platforms.Feishu.AppSecret,
+			ConnectionMode:    cfg.Platforms.Feishu.ConnectionMode,
 			VerificationToken: cfg.Platforms.Feishu.VerificationToken,
 			EncryptKey:        cfg.Platforms.Feishu.EncryptKey,
 			MaxReplyLen:       cfg.Platforms.Feishu.MaxReplyLength,
@@ -75,8 +87,25 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Build agent opts from config
+	agents := make(map[string]session.AgentOpts)
+	for id, ac := range cfg.Agents {
+		agents[id] = session.AgentOpts{
+			Model:     ac.Model,
+			ExtraArgs: ac.Args,
+		}
+	}
+
+	// Validate agent_commands reference existing agents
+	for cmd, agentID := range cfg.AgentCommands {
+		if _, ok := agents[agentID]; !ok {
+			slog.Error("agent_commands references undefined agent", "command", cmd, "agent", agentID)
+			os.Exit(1)
+		}
+	}
+
 	// Server
-	srv := server.New(cfg.Server.Addr, router, platforms)
+	srv := server.New(cfg.Server.Addr, router, platforms, agents, cfg.AgentCommands)
 
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -95,8 +124,19 @@ func main() {
 		"platforms", len(platforms),
 	)
 
-	if err := srv.Start(ctx); err != nil && err.Error() != "http: Server closed" {
+	if err := srv.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
 	}
+}
+
+func expandHome(path string) string {
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+		return filepath.Join(home, path[2:])
+	}
+	return path
 }
