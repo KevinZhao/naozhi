@@ -4,7 +4,9 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/pathutil"
@@ -27,18 +29,70 @@ type Wrapper struct {
 }
 
 // NewWrapper creates a Wrapper with the given CLI path and protocol.
-// If path is empty, defaults to ~/.local/bin/claude.
+// If path is empty, auto-detects from known install locations and PATH.
 func NewWrapper(cliPath string, proto Protocol) *Wrapper {
 	if cliPath == "" {
-		home, err := os.UserHomeDir()
-		if err == nil {
-			cliPath = filepath.Join(home, ".local", "bin", "claude")
-		} else {
-			cliPath = "claude"
-		}
+		cliPath = detectCLI(proto.Name())
 	}
 	cliPath = pathutil.ExpandHome(cliPath)
 	return &Wrapper{CLIPath: cliPath, Protocol: proto}
+}
+
+// detectCLI finds the CLI binary by checking known install paths then PATH.
+func detectCLI(backend string) string {
+	name := "claude"
+	if backend == "kiro" {
+		name = "kiro-cli"
+	}
+
+	for _, p := range candidatePaths(name) {
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+
+	// Fallback: check PATH
+	if p, err := exec.LookPath(name); err == nil {
+		return p
+	}
+
+	// Last resort: bare name, let exec resolve at spawn time
+	return name
+}
+
+// candidatePaths returns OS-specific install locations to probe.
+func candidatePaths(name string) []string {
+	home, _ := os.UserHomeDir()
+	if home == "" {
+		return nil
+	}
+
+	ext := ""
+	if runtime.GOOS == "windows" {
+		ext = ".exe"
+	}
+
+	var paths []string
+
+	// Native installer (all platforms)
+	paths = append(paths, filepath.Join(home, ".local", "bin", name+ext))
+
+	switch runtime.GOOS {
+	case "darwin":
+		// Homebrew Apple Silicon
+		paths = append(paths, filepath.Join("/opt/homebrew/bin", name))
+		// Homebrew Intel
+		paths = append(paths, filepath.Join("/usr/local/bin", name))
+	case "linux":
+		paths = append(paths, filepath.Join("/usr/local/bin", name))
+	case "windows":
+		// npm global (Windows)
+		if appdata := os.Getenv("APPDATA"); appdata != "" {
+			paths = append(paths, filepath.Join(appdata, "npm", name+".cmd"))
+		}
+	}
+
+	return paths
 }
 
 // Spawn starts a new long-lived CLI process.
