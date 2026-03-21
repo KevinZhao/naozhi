@@ -30,9 +30,10 @@ type ServerConfig struct {
 }
 
 type CLIConfig struct {
-	Path  string   `yaml:"path"`
-	Model string   `yaml:"model"`
-	Args  []string `yaml:"args"`
+	Backend string   `yaml:"backend"` // "claude" (default) | "kiro"
+	Path    string   `yaml:"path"`
+	Model   string   `yaml:"model"`
+	Args    []string `yaml:"args"`
 }
 
 type SessionConfig struct {
@@ -48,7 +49,9 @@ type WatchdogConfig struct {
 }
 
 type PlatformConfigs struct {
-	Feishu *FeishuConfig `yaml:"feishu"`
+	Feishu  *FeishuConfig  `yaml:"feishu"`
+	Slack   *SlackConfig   `yaml:"slack"`
+	Discord *DiscordConfig `yaml:"discord"`
 }
 
 type FeishuConfig struct {
@@ -63,6 +66,17 @@ type FeishuConfig struct {
 type LogConfig struct {
 	Level string `yaml:"level"`
 	File  string `yaml:"file"`
+}
+
+type SlackConfig struct {
+	BotToken       string `yaml:"bot_token"`
+	AppToken       string `yaml:"app_token"` // xapp- token for Socket Mode
+	MaxReplyLength int    `yaml:"max_reply_length"`
+}
+
+type DiscordConfig struct {
+	BotToken       string `yaml:"bot_token"`
+	MaxReplyLength int    `yaml:"max_reply_length"`
 }
 
 // Load reads and parses a YAML config file.

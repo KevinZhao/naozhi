@@ -14,14 +14,14 @@ import (
 // registerWebhook registers the Feishu webhook HTTP handler.
 func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHandler) {
 	mux.HandleFunc("POST /webhook/feishu", func(w http.ResponseWriter, r *http.Request) {
-		body, err := io.ReadAll(r.Body)
+		defer r.Body.Close()
+		body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
 			return
 		}
-		defer r.Body.Close()
 
-		slog.Info("feishu webhook received", "body_len", len(body), "body", string(body[:min(len(body), 500)]))
+		slog.Debug("feishu webhook received", "body_len", len(body), "body", string(body[:min(len(body), 500)]))
 
 		// Parse the outer envelope
 		var envelope struct {
@@ -48,9 +48,13 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			return
 		}
 
-		// Token verification (v1 events)
-		if envelope.Token != "" && f.cfg.VerificationToken != "" {
-			if envelope.Token != f.cfg.VerificationToken {
+		// Token verification (v1: top-level token, v2: header.token)
+		if f.cfg.VerificationToken != "" {
+			token := envelope.Token
+			if envelope.Header != nil && envelope.Header.Token != "" {
+				token = envelope.Header.Token
+			}
+			if token != f.cfg.VerificationToken {
 				slog.Warn("feishu token mismatch")
 				w.WriteHeader(http.StatusUnauthorized)
 				return

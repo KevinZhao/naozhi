@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-// SpawnOptions configures how a claude CLI process is spawned.
+// SpawnOptions configures how a CLI process is spawned.
 type SpawnOptions struct {
 	Model           string
 	ResumeID        string   // session ID to resume (empty = new session)
@@ -19,61 +19,59 @@ type SpawnOptions struct {
 	TotalTimeout    time.Duration // kill process if total turn exceeds this
 }
 
-// Wrapper manages spawning claude CLI processes.
+// Wrapper manages spawning CLI processes.
 type Wrapper struct {
-	CLIPath string
+	CLIPath  string
+	Protocol Protocol
 }
 
-// NewWrapper creates a Wrapper with the given CLI path.
+// NewWrapper creates a Wrapper with the given CLI path and protocol.
 // If path is empty, defaults to ~/.local/bin/claude.
-func NewWrapper(cliPath string) *Wrapper {
+func NewWrapper(cliPath string, proto Protocol) *Wrapper {
 	if cliPath == "" {
 		home, err := os.UserHomeDir()
 		if err == nil {
 			cliPath = filepath.Join(home, ".local", "bin", "claude")
 		} else {
-			cliPath = "claude" // fallback to PATH lookup
+			cliPath = "claude"
 		}
 	}
-	// Expand ~ prefix
 	if strings.HasPrefix(cliPath, "~/") {
 		if home, err := os.UserHomeDir(); err == nil {
 			cliPath = filepath.Join(home, cliPath[2:])
 		}
 	}
-	return &Wrapper{CLIPath: cliPath}
+	return &Wrapper{CLIPath: cliPath, Protocol: proto}
 }
 
-// Spawn starts a new long-lived claude CLI process.
+// Spawn starts a new long-lived CLI process.
 func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error) {
-	args := []string{
-		"-p",
-		"--output-format", "stream-json",
-		"--input-format", "stream-json",
-		"--verbose",
-		"--setting-sources", "",
-		"--dangerously-skip-permissions",
-	}
-
-	if opts.Model != "" {
-		args = append(args, "--model", opts.Model)
-	}
-
-	if opts.ResumeID != "" {
-		args = append(args, "--resume", opts.ResumeID)
-	}
-
-	args = append(args, opts.ExtraArgs...)
+	args := w.Protocol.BuildArgs(opts)
 
 	cwd := opts.WorkingDir
 	if cwd == "" {
 		cwd = os.TempDir()
 	}
 
-	proc, err := newProcess(ctx, w.CLIPath, args, cwd, opts.NoOutputTimeout, opts.TotalTimeout)
+	proc, err := newProcess(ctx, w.CLIPath, args, cwd, opts.NoOutputTimeout, opts.TotalTimeout, w.Protocol)
 	if err != nil {
-		return nil, fmt.Errorf("spawn claude: %w", err)
+		return nil, fmt.Errorf("spawn agent: %w", err)
 	}
 
+	// Run protocol-specific initialization handshake before starting readLoop
+	rw := &JSONRW{
+		W: proc.stdin,
+		R: &bufioLineReader{scanner: proc.scanner},
+	}
+	sessionID, err := w.Protocol.Init(rw, opts.ResumeID)
+	if err != nil {
+		proc.Kill()
+		return nil, fmt.Errorf("protocol init: %w", err)
+	}
+	if sessionID != "" {
+		proc.SessionID = sessionID
+	}
+
+	proc.startReadLoop()
 	return proc, nil
 }

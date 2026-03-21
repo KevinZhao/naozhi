@@ -10,6 +10,9 @@ type Event struct {
 	Result    string            `json:"result,omitempty"`
 	CostUSD   float64           `json:"total_cost_usd,omitempty"`
 	Message   *AssistantMessage `json:"message,omitempty"`
+
+	// RPCRequestID is set for ACP permission_request events that need a response.
+	RPCRequestID int `json:"-"`
 }
 
 type AssistantMessage struct {

@@ -36,6 +36,7 @@ type Feishu struct {
 	handler platform.MessageHandler
 	cancel  context.CancelFunc
 	done    chan struct{}
+	started bool
 }
 
 // New creates a Feishu platform adapter.
@@ -65,6 +66,10 @@ func (f *Feishu) RegisterRoutes(mux *http.ServeMux, handler platform.MessageHand
 
 // Start implements RunnablePlatform. Launches WebSocket connection in WS mode.
 func (f *Feishu) Start(handler platform.MessageHandler) error {
+	if f.started {
+		return fmt.Errorf("feishu platform already started")
+	}
+	f.started = true
 	f.handler = handler
 	if f.mode == "websocket" {
 		slog.Info("feishu using websocket mode (no public IP needed)")
@@ -155,7 +160,9 @@ func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) err
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result)
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return fmt.Errorf("decode edit response: %w", err)
+	}
 	if result.Code != 0 {
 		return fmt.Errorf("feishu edit error: code=%d msg=%s", result.Code, result.Msg)
 	}
@@ -182,7 +189,7 @@ func (f *Feishu) getAccessToken(ctx context.Context) (string, error) {
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("request token: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -192,7 +199,7 @@ func (f *Feishu) getAccessToken(ctx context.Context) (string, error) {
 		Expire            int    `json:"expire"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
+		return "", fmt.Errorf("decode token response: %w", err)
 	}
 	if result.Code != 0 {
 		return "", fmt.Errorf("get token error: code=%d", result.Code)

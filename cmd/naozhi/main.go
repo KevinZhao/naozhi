@@ -15,7 +15,9 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/platform"
+	discordplatform "github.com/naozhi/naozhi/internal/platform/discord"
 	"github.com/naozhi/naozhi/internal/platform/feishu"
+	slackplatform "github.com/naozhi/naozhi/internal/platform/slack"
 	"github.com/naozhi/naozhi/internal/server"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -42,8 +44,15 @@ func main() {
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
 
-	// CLI Wrapper
-	wrapper := cli.NewWrapper(cfg.CLI.Path)
+	// CLI Protocol + Wrapper
+	var proto cli.Protocol
+	switch cfg.CLI.Backend {
+	case "kiro":
+		proto = &cli.ACPProtocol{}
+	default:
+		proto = &cli.ClaudeProtocol{}
+	}
+	wrapper := cli.NewWrapper(cfg.CLI.Path, proto)
 
 	// Parse watchdog and store path
 	noOutputTimeout, totalTimeout := cfg.ParseWatchdog()
@@ -80,6 +89,21 @@ func main() {
 			MaxReplyLen:       cfg.Platforms.Feishu.MaxReplyLength,
 		})
 		platforms["feishu"] = f
+	}
+	if cfg.Platforms.Slack != nil {
+		s := slackplatform.New(slackplatform.Config{
+			BotToken:    cfg.Platforms.Slack.BotToken,
+			AppToken:    cfg.Platforms.Slack.AppToken,
+			MaxReplyLen: cfg.Platforms.Slack.MaxReplyLength,
+		})
+		platforms["slack"] = s
+	}
+	if cfg.Platforms.Discord != nil {
+		d := discordplatform.New(discordplatform.Config{
+			BotToken:    cfg.Platforms.Discord.BotToken,
+			MaxReplyLen: cfg.Platforms.Discord.MaxReplyLength,
+		})
+		platforms["discord"] = d
 	}
 
 	if len(platforms) == 0 {
@@ -119,6 +143,7 @@ func main() {
 
 	slog.Info("naozhi starting",
 		"addr", cfg.Server.Addr,
+		"backend", cfg.CLI.Backend,
 		"model", cfg.CLI.Model,
 		"max_procs", cfg.Session.MaxProcs,
 		"platforms", len(platforms),

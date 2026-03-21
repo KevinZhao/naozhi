@@ -63,6 +63,16 @@ func (s *Server) Start(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		slog.Info("shutting down server")
+
+		// Stop RunnablePlatforms (e.g. WebSocket connections)
+		for _, p := range s.platforms {
+			if rp, ok := p.(platform.RunnablePlatform); ok {
+				if err := rp.Stop(); err != nil {
+					slog.Error("stop platform", "name", p.Name(), "err", err)
+				}
+			}
+		}
+
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 		srv.Shutdown(shutdownCtx)

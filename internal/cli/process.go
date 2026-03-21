@@ -3,7 +3,6 @@ package cli
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
@@ -12,7 +11,7 @@ import (
 	"time"
 )
 
-// ProcessState represents the lifecycle state of a claude CLI process.
+// ProcessState represents the lifecycle state of a CLI process.
 type ProcessState int
 
 const (
@@ -23,10 +22,8 @@ const (
 )
 
 const (
-	// DefaultNoOutputTimeout is the fallback if no watchdog config is provided.
 	DefaultNoOutputTimeout = 2 * time.Minute
-	// DefaultTotalTimeout is the fallback if no watchdog config is provided.
-	DefaultTotalTimeout = 5 * time.Minute
+	DefaultTotalTimeout    = 5 * time.Minute
 )
 
 func (s ProcessState) String() string {
@@ -44,27 +41,27 @@ func (s ProcessState) String() string {
 	}
 }
 
-// Process manages a long-lived claude CLI subprocess.
+// Process manages a long-lived CLI subprocess.
 type Process struct {
-	cmd       *exec.Cmd
-	stdin     io.WriteCloser
-	scanner   *bufio.Scanner
+	cmd      *exec.Cmd
+	stdin    io.WriteCloser
+	scanner  *bufio.Scanner
+	protocol Protocol
+
 	SessionID string
 	State     ProcessState
 	mu        sync.Mutex
 
-	// eventCh delivers parsed events from stdout reader goroutine
 	eventCh chan Event
-	// done is closed when the process exits
-	done chan struct{}
+	done    chan struct{}
 
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
 }
 
-// newProcess starts a claude CLI process with the given args.
-func newProcess(ctx context.Context, cliPath string, args []string, cwd string, noOutputTimeout, totalTimeout time.Duration) (*Process, error) {
-	slog.Info("spawning cli process", "cli", cliPath, "args", args, "cwd", cwd)
+// newProcess starts a CLI process with the given args.
+func newProcess(ctx context.Context, cliPath string, args []string, cwd string, noOutputTimeout, totalTimeout time.Duration, proto Protocol) (*Process, error) {
+	slog.Info("spawning cli process", "cli", cliPath, "args", args, "cwd", cwd, "protocol", proto.Name())
 
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	if cwd != "" {
@@ -80,7 +77,6 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string, 
 		stdin.Close()
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
-	// Capture stderr for debugging
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
 		stdin.Close()
@@ -92,11 +88,10 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string, 
 		return nil, fmt.Errorf("start cli: %w", err)
 	}
 
-	// Drain stderr in background and log
 	go func() {
 		scanner := bufio.NewScanner(stderrPipe)
 		for scanner.Scan() {
-			slog.Debug("claude stderr", "line", scanner.Text())
+			slog.Debug("cli stderr", "line", scanner.Text())
 		}
 	}()
 
@@ -104,6 +99,7 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string, 
 		cmd:             cmd,
 		stdin:           stdin,
 		scanner:         bufio.NewScanner(stdout),
+		protocol:        proto,
 		State:           StateSpawning,
 		eventCh:         make(chan Event, 64),
 		done:            make(chan struct{}),
@@ -111,13 +107,14 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string, 
 		totalTimeout:    totalTimeout,
 	}
 
-	// Set scanner buffer for potentially large NDJSON lines
 	p.scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
 
-	// Start stdout reader goroutine
-	go p.readLoop()
-
 	return p, nil
+}
+
+// startReadLoop begins the stdout reader goroutine. Called after protocol Init.
+func (p *Process) startReadLoop() {
+	go p.readLoop()
 }
 
 // readLoop reads stdout NDJSON lines and sends parsed events to eventCh.
@@ -130,12 +127,15 @@ func (p *Process) readLoop() {
 		if len(line) == 0 {
 			continue
 		}
-		var ev Event
-		if err := json.Unmarshal(line, &ev); err != nil {
+		ev, _, err := p.protocol.ReadEvent(line)
+		if err != nil {
 			continue
 		}
-		// Skip hook events
-		if ev.Type == "system" && (ev.SubType == "hook_started" || ev.SubType == "hook_response") {
+		if ev.Type == "" {
+			continue
+		}
+		// Let protocol handle internal events (e.g., ACP permission auto-grant)
+		if p.protocol.HandleEvent(p.stdin, ev) {
 			continue
 		}
 		p.eventCh <- ev
@@ -150,7 +150,6 @@ func (p *Process) readLoop() {
 type EventCallback func(ev Event)
 
 // Send writes a user message to stdin and reads events until result.
-// The onEvent callback is called for intermediate events (thinking, tool_use).
 func (p *Process) Send(ctx context.Context, text string, onEvent EventCallback) (*SendResult, error) {
 	p.mu.Lock()
 	if p.State == StateRunning {
@@ -168,18 +167,10 @@ func (p *Process) Send(ctx context.Context, text string, onEvent EventCallback) 
 		p.mu.Unlock()
 	}()
 
-	// Write message to stdin
-	msg := NewUserMessage(text)
-	data, err := json.Marshal(msg)
-	if err != nil {
-		return nil, fmt.Errorf("marshal message: %w", err)
-	}
-	data = append(data, '\n')
-	if _, err := p.stdin.Write(data); err != nil {
-		return nil, fmt.Errorf("write stdin: %w", err)
+	if err := p.protocol.WriteMessage(p.stdin, text); err != nil {
+		return nil, fmt.Errorf("write message: %w", err)
 	}
 
-	// Watchdog timers (defaults if not configured)
 	noOutputDur := p.noOutputTimeout
 	if noOutputDur <= 0 {
 		noOutputDur = DefaultNoOutputTimeout
@@ -193,7 +184,6 @@ func (p *Process) Send(ctx context.Context, text string, onEvent EventCallback) 
 	totalTimer := time.NewTimer(totalDur)
 	defer totalTimer.Stop()
 
-	// Read events until result
 	for {
 		select {
 		case <-ctx.Done():
@@ -203,7 +193,6 @@ func (p *Process) Send(ctx context.Context, text string, onEvent EventCallback) 
 				return nil, fmt.Errorf("process exited during send")
 			}
 
-			// Reset no-output watchdog on any event
 			if !noOutputTimer.Stop() {
 				select {
 				case <-noOutputTimer.C:
@@ -212,7 +201,7 @@ func (p *Process) Send(ctx context.Context, text string, onEvent EventCallback) 
 			}
 			noOutputTimer.Reset(noOutputDur)
 
-			// Capture session ID from init event (first message only)
+			// Capture session ID from init event
 			if ev.Type == "system" && ev.SubType == "init" && p.SessionID == "" {
 				p.SessionID = ev.SessionID
 				slog.Info("session initialized", "session_id", ev.SessionID)
@@ -281,7 +270,6 @@ func (p *Process) Kill() {
 // Close gracefully shuts down by closing stdin.
 func (p *Process) Close() {
 	p.stdin.Close()
-	// Wait for process to exit (with timeout)
 	select {
 	case <-p.done:
 	case <-time.After(5 * time.Second):
