@@ -146,7 +146,7 @@ func main() {
 	}
 
 	// Server
-	srv := server.New(cfg.Server.Addr, router, platforms, agents, cfg.AgentCommands, scheduler)
+	srv := server.New(cfg.Server.Addr, router, platforms, agents, cfg.AgentCommands, scheduler, cfg.CLI.Backend)
 
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)

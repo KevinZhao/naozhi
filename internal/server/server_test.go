@@ -60,14 +60,14 @@ func (m *mockPlatform) allReplies() []platform.OutgoingMessage {
 func newTestServer(p *mockPlatform) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
-	return New(":0", router, platforms, nil, nil, nil)
+	return New(":0", router, platforms, nil, nil, nil, "claude")
 }
 
 func newTestServerWithScheduler(p *mockPlatform) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
 	sched := cron.NewScheduler(cron.SchedulerConfig{})
-	return New(":0", router, platforms, nil, nil, sched)
+	return New(":0", router, platforms, nil, nil, sched, "claude")
 }
 
 // ─── handleHealth ─────────────────────────────────────────────────────────────
@@ -211,7 +211,7 @@ func TestBuildMessageHandler_NewResetsNamedAgent(t *testing.T) {
 	platforms := map[string]platform.Platform{"test": p}
 	agentCommands := map[string]string{"review": "code-reviewer"}
 	agents := map[string]session.AgentOpts{"code-reviewer": {}}
-	srv := New(":0", router, platforms, agents, agentCommands, nil)
+	srv := New(":0", router, platforms, agents, agentCommands, nil, "claude")
 	handler := srv.buildMessageHandler()
 
 	handler(context.Background(), platform.IncomingMessage{

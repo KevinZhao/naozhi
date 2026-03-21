@@ -34,10 +34,15 @@ type Server struct {
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
 	scheduler     *cron.Scheduler
+	backendTag    string // e.g., "cc" or "kiro", appended to replies
 }
 
 // New creates a new Server.
-func New(addr string, router *session.Router, platforms map[string]platform.Platform, agents map[string]session.AgentOpts, agentCommands map[string]string, scheduler *cron.Scheduler) *Server {
+func New(addr string, router *session.Router, platforms map[string]platform.Platform, agents map[string]session.AgentOpts, agentCommands map[string]string, scheduler *cron.Scheduler, backend string) *Server {
+	tag := "cc"
+	if backend == "kiro" {
+		tag = "kiro"
+	}
 	return &Server{
 		addr:          addr,
 		mux:           http.NewServeMux(),
@@ -48,6 +53,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		agents:        agents,
 		agentCommands: agentCommands,
 		scheduler:     scheduler,
+		backendTag:    tag,
 	}
 }
 
@@ -201,8 +207,13 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 
 		log.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD)
 
-		// Extract local image file paths from CLI output
+		// Append backend tag and cost to reply
 		replyText := result.Text
+		if result.CostUSD > 0 {
+			replyText += fmt.Sprintf("\n\n— %s · $%.4f", s.backendTag, result.CostUSD)
+		} else {
+			replyText += "\n\n— " + s.backendTag
+		}
 		var outImages []platform.Image
 		for _, path := range extractImagePaths(replyText) {
 			data, err := os.ReadFile(path)
