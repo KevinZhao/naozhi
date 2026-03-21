@@ -9,7 +9,21 @@ permissions:
   contents: write
 
 jobs:
+  check-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Verify tag is on master
+        run: |
+          if ! git branch -r --contains "${{ github.sha }}" | grep -q 'origin/master'; then
+            echo "::error::Tag must be on master branch"
+            exit 1
+          fi
+
   build:
+    needs: check-branch
     runs-on: ubuntu-latest
     strategy:
       matrix:
