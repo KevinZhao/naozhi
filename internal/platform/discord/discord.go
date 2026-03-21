@@ -1,8 +1,10 @@
 package discord
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -98,8 +100,38 @@ func (d *Discord) Stop() error {
 	return nil
 }
 
-// Reply sends a message to a Discord channel.
+// Reply sends a message to a Discord channel. Handles text and/or images.
 func (d *Discord) Reply(ctx context.Context, msg platform.OutgoingMessage) (string, error) {
+	// If images, send as file attachments
+	if len(msg.Images) > 0 {
+		var files []*discordgo.File
+		for i, img := range msg.Images {
+			ext := ".png"
+			switch img.MimeType {
+			case "image/jpeg":
+				ext = ".jpg"
+			case "image/gif":
+				ext = ".gif"
+			case "image/webp":
+				ext = ".webp"
+			}
+			files = append(files, &discordgo.File{
+				Name:        fmt.Sprintf("image_%d%s", i, ext),
+				ContentType: img.MimeType,
+				Reader:      bytes.NewReader(img.Data),
+			})
+		}
+		ms := &discordgo.MessageSend{
+			Content: msg.Text,
+			Files:   files,
+		}
+		m, err := d.session.ChannelMessageSendComplex(msg.ChatID, ms, discordgo.WithContext(ctx))
+		if err != nil {
+			return "", fmt.Errorf("discord send with images: %w", err)
+		}
+		return msg.ChatID + ":" + m.ID, nil
+	}
+
 	m, err := d.session.ChannelMessageSend(msg.ChatID, msg.Text, discordgo.WithContext(ctx))
 	if err != nil {
 		return "", fmt.Errorf("discord send: %w", err)
@@ -142,7 +174,22 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 		}
 	}
 	text = strings.TrimSpace(text)
-	if text == "" {
+
+	// Download image attachments from Discord CDN
+	var images []platform.Image
+	for _, att := range m.Attachments {
+		if !isImageContentType(att.ContentType) {
+			continue
+		}
+		data, mime, err := downloadURL(att.URL)
+		if err != nil {
+			slog.Warn("discord download attachment failed", "err", err, "url", att.URL)
+			continue
+		}
+		images = append(images, platform.Image{Data: data, MimeType: mime})
+	}
+
+	if text == "" && len(images) == 0 {
 		return
 	}
 
@@ -159,7 +206,32 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 		ChatType:  chatType,
 		Text:      text,
 		MentionMe: mentionMe,
+		Images:    images,
 	}
 
 	go d.handler(context.Background(), msg)
+}
+
+func isImageContentType(ct string) bool {
+	return strings.HasPrefix(ct, "image/")
+}
+
+func downloadURL(url string) ([]byte, string, error) {
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("status %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024))
+	if err != nil {
+		return nil, "", err
+	}
+	ct := resp.Header.Get("Content-Type")
+	if ct == "" {
+		ct = "image/png"
+	}
+	return data, ct, nil
 }

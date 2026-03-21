@@ -5,8 +5,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/pathutil"
 )
 
 // SpawnOptions configures how a CLI process is spawned.
@@ -36,11 +37,7 @@ func NewWrapper(cliPath string, proto Protocol) *Wrapper {
 			cliPath = "claude"
 		}
 	}
-	if strings.HasPrefix(cliPath, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			cliPath = filepath.Join(home, cliPath[2:])
-		}
-	}
+	cliPath = pathutil.ExpandHome(cliPath)
 	return &Wrapper{CLIPath: cliPath, Protocol: proto}
 }
 

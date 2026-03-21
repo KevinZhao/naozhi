@@ -1,6 +1,7 @@
 package slack
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -111,8 +112,33 @@ func (s *Slack) Stop() error {
 	return nil
 }
 
-// Reply sends a message to a Slack channel.
+// Reply sends a message to a Slack channel. Handles text and/or images.
 func (s *Slack) Reply(ctx context.Context, msg platform.OutgoingMessage) (string, error) {
+	// Upload images as file attachments
+	for _, img := range msg.Images {
+		ext := ".png"
+		switch img.MimeType {
+		case "image/jpeg":
+			ext = ".jpg"
+		case "image/gif":
+			ext = ".gif"
+		}
+		_, err := s.api.UploadFileContext(ctx, slack.UploadFileParameters{
+			Channel:  msg.ChatID,
+			Filename: "image" + ext,
+			FileSize: len(img.Data),
+			Reader:   bytes.NewReader(img.Data),
+		})
+		if err != nil {
+			slog.Warn("slack upload image failed", "err", err)
+		}
+	}
+
+	// Send text if present
+	if msg.Text == "" {
+		return "", nil
+	}
+
 	opts := []slack.MsgOption{
 		slack.MsgOptionText(msg.Text, false),
 	}

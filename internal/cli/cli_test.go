@@ -44,15 +44,18 @@ func TestClaudeProtocol_BuildArgs_NoResume(t *testing.T) {
 func TestClaudeProtocol_WriteMessage(t *testing.T) {
 	p := &ClaudeProtocol{}
 	var buf bytes.Buffer
-	if err := p.WriteMessage(&buf, "hello"); err != nil {
+	if err := p.WriteMessage(&buf, "hello", nil); err != nil {
 		t.Fatal(err)
 	}
 	var msg InputMessage
 	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &msg); err != nil {
 		t.Fatal(err)
 	}
-	if msg.Type != "user" || msg.Message.Content != "hello" {
-		t.Errorf("got %+v", msg)
+	if msg.Type != "user" {
+		t.Errorf("Type = %q, want user", msg.Type)
+	}
+	if s, ok := msg.Message.Content.(string); !ok || s != "hello" {
+		t.Errorf("Content = %v, want \"hello\"", msg.Message.Content)
 	}
 }
 
@@ -156,7 +159,7 @@ func TestACPProtocol_BuildArgs(t *testing.T) {
 func TestACPProtocol_WriteMessage(t *testing.T) {
 	p := &ACPProtocol{sessionID: "sess_test"}
 	var buf bytes.Buffer
-	if err := p.WriteMessage(&buf, "hello acp"); err != nil {
+	if err := p.WriteMessage(&buf, "hello acp", nil); err != nil {
 		t.Fatal(err)
 	}
 	var req RPCRequest
@@ -439,14 +442,14 @@ func TestProcessStateString(t *testing.T) {
 }
 
 func TestNewUserMessage(t *testing.T) {
-	msg := NewUserMessage("hello world")
+	msg := NewUserMessage("hello world", nil)
 	if msg.Type != "user" {
 		t.Errorf("Type = %q, want %q", msg.Type, "user")
 	}
 	if msg.Message.Role != "user" {
 		t.Errorf("Role = %q, want %q", msg.Message.Role, "user")
 	}
-	if msg.Message.Content != "hello world" {
-		t.Errorf("Content = %q, want %q", msg.Message.Content, "hello world")
+	if s, ok := msg.Message.Content.(string); !ok || s != "hello world" {
+		t.Errorf("Content = %v, want \"hello world\"", msg.Message.Content)
 	}
 }

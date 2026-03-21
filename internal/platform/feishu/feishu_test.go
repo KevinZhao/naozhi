@@ -158,9 +158,12 @@ func TestParseSDKEvent_TextMessage(t *testing.T) {
 		},
 	}
 
-	msg, ok := parseSDKEvent(event)
+	msg, imageKey, ok := parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true")
+	}
+	if imageKey != "" {
+		t.Errorf("imageKey = %q, want empty for text message", imageKey)
 	}
 	if msg.Platform != "feishu" {
 		t.Errorf("Platform = %q, want feishu", msg.Platform)
@@ -203,7 +206,7 @@ func TestParseSDKEvent_DirectMessage(t *testing.T) {
 		},
 	}
 
-	msg, ok := parseSDKEvent(event)
+	msg, _, ok := parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
@@ -233,7 +236,7 @@ func TestParseSDKEvent_WithMentions(t *testing.T) {
 		},
 	}
 
-	msg, ok := parseSDKEvent(event)
+	msg, _, ok := parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
@@ -245,19 +248,44 @@ func TestParseSDKEvent_WithMentions(t *testing.T) {
 	}
 }
 
-func TestParseSDKEvent_NonText(t *testing.T) {
+func TestParseSDKEvent_ImageMessage(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")},
+			},
+			Message: &larkim.EventMessage{
+				MessageType: strPtr("image"),
+				ChatId:      strPtr("oc_chat1"),
+				Content:     strPtr(`{"image_key":"img_v3_xxx"}`),
+			},
+		},
+	}
+	msg, imageKey, ok := parseSDKEvent(event)
+	if !ok {
+		t.Fatal("expected ok=true for image message")
+	}
+	if imageKey != "img_v3_xxx" {
+		t.Errorf("imageKey = %q, want img_v3_xxx", imageKey)
+	}
+	if msg.Text != "" {
+		t.Errorf("Text = %q, want empty for image message", msg.Text)
+	}
+}
+
+func TestParseSDKEvent_UnsupportedType(t *testing.T) {
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Message: &larkim.EventMessage{
-				MessageType: strPtr("image"),
+				MessageType: strPtr("file"),
 				ChatId:      strPtr("oc_chat1"),
 				Content:     strPtr(`{}`),
 			},
 		},
 	}
-	_, ok := parseSDKEvent(event)
+	_, _, ok := parseSDKEvent(event)
 	if ok {
-		t.Error("expected ok=false for non-text message")
+		t.Error("expected ok=false for unsupported message type")
 	}
 }
 
@@ -274,7 +302,7 @@ func TestParseSDKEvent_EmptyText(t *testing.T) {
 			},
 		},
 	}
-	_, ok := parseSDKEvent(event)
+	_, _, ok := parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for empty text")
 	}
@@ -297,14 +325,14 @@ func TestParseSDKEvent_MentionOnlyText(t *testing.T) {
 			},
 		},
 	}
-	_, ok := parseSDKEvent(event)
+	_, _, ok := parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for mention-only text")
 	}
 }
 
 func TestParseSDKEvent_NilEvent(t *testing.T) {
-	_, ok := parseSDKEvent(nil)
+	_, _, ok := parseSDKEvent(nil)
 	if ok {
 		t.Error("expected ok=false for nil event")
 	}
@@ -314,7 +342,7 @@ func TestParseSDKEvent_NilMessage(t *testing.T) {
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{},
 	}
-	_, ok := parseSDKEvent(event)
+	_, _, ok := parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for nil message")
 	}

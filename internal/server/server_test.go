@@ -1,6 +1,10 @@
 package server
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/naozhi/naozhi/internal/routing"
+)
 
 func TestSplitText(t *testing.T) {
 	tests := []struct {
@@ -115,12 +119,12 @@ func TestResolveAgent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.text, func(t *testing.T) {
-			agent, text := resolveAgent(tt.text, cmds)
+			agent, text := routing.ResolveAgent(tt.text, cmds)
 			if agent != tt.wantAgent {
-				t.Errorf("resolveAgent(%q).agent = %q, want %q", tt.text, agent, tt.wantAgent)
+				t.Errorf("ResolveAgent(%q).agent = %q, want %q", tt.text, agent, tt.wantAgent)
 			}
 			if text != tt.wantText {
-				t.Errorf("resolveAgent(%q).text = %q, want %q", tt.text, text, tt.wantText)
+				t.Errorf("ResolveAgent(%q).text = %q, want %q", tt.text, text, tt.wantText)
 			}
 		})
 	}

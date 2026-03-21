@@ -10,6 +10,11 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
+const (
+	shutdownTimeout      = 30 * time.Second
+	shutdownPollInterval = 500 * time.Millisecond
+)
+
 // Router manages session key -> ManagedSession mapping.
 type Router struct {
 	mu        sync.Mutex
@@ -274,7 +279,7 @@ func (r *Router) Shutdown() {
 	r.mu.Lock()
 
 	// Wait for running sessions to complete (up to 30s)
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(shutdownTimeout)
 	for {
 		running := false
 		for _, s := range r.sessions {
@@ -287,7 +292,7 @@ func (r *Router) Shutdown() {
 			break
 		}
 		r.mu.Unlock()
-		time.Sleep(500 * time.Millisecond)
+		time.Sleep(shutdownPollInterval)
 		r.mu.Lock()
 	}
 

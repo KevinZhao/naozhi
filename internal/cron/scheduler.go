@@ -11,6 +11,7 @@ import (
 	robfigcron "github.com/robfig/cron/v3"
 
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/routing"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -239,7 +240,7 @@ func (s *Scheduler) execute(j *Job) {
 	ctx, cancel := context.WithTimeout(s.stopCtx, s.execTimeout)
 	defer cancel()
 
-	agentID, cleanText := resolveAgent(j.Prompt, s.agentCommands)
+	agentID, cleanText := routing.ResolveAgent(j.Prompt, s.agentCommands)
 	opts := s.agents[agentID]
 	key := "cron:" + j.ID
 
@@ -255,7 +256,7 @@ func (s *Scheduler) execute(j *Job) {
 		return
 	}
 
-	result, err := sess.Send(ctx, cleanText, nil)
+	result, err := sess.Send(ctx, cleanText, nil, nil)
 	if err != nil {
 		log.Error("cron send error", "err", err)
 		if _, rerr := p.Reply(ctx, platform.OutgoingMessage{
@@ -274,23 +275,6 @@ func (s *Scheduler) execute(j *Job) {
 	}); rerr != nil {
 		log.Error("reply failed", "err", rerr)
 	}
-}
-
-// resolveAgent parses a /command prefix and returns the agent ID and clean text.
-func resolveAgent(text string, agentCommands map[string]string) (agentID, cleanText string) {
-	if !strings.HasPrefix(text, "/") {
-		return "general", text
-	}
-	parts := strings.SplitN(text, " ", 2)
-	cmd := strings.TrimPrefix(parts[0], "/")
-	rest := ""
-	if len(parts) > 1 {
-		rest = parts[1]
-	}
-	if id, ok := agentCommands[cmd]; ok {
-		return id, rest
-	}
-	return "general", text
 }
 
 // findByPrefix finds a job by ID prefix scoped to a specific chat.

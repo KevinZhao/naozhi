@@ -21,8 +21,8 @@ type Protocol interface {
 	// Returns sessionID if established during init (empty if deferred to first message).
 	Init(rw *JSONRW, resumeID string) (sessionID string, err error)
 
-	// WriteMessage writes a user message to the agent's stdin.
-	WriteMessage(w io.Writer, text string) error
+	// WriteMessage writes a user message (with optional images) to the agent's stdin.
+	WriteMessage(w io.Writer, text string, images []ImageData) error
 
 	// ReadEvent parses a single NDJSON line from stdout into a unified Event.
 	// Returns the event, whether this event completes the current turn, and any error.

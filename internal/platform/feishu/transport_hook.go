@@ -109,30 +109,13 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			return
 		}
 
-		// Only handle text messages
-		if event.Message.MessageType != "text" {
+		// Only handle text and image messages
+		msgType := event.Message.MessageType
+		if msgType != "text" && msgType != "image" {
 			return
 		}
 
-		// Extract text content
-		var content struct {
-			Text string `json:"text"`
-		}
-		if err := json.Unmarshal([]byte(event.Message.Content), &content); err != nil {
-			return
-		}
-
-		text := content.Text
-		// Remove @mention prefix
-		for _, m := range event.Message.Mentions {
-			text = strings.ReplaceAll(text, m.Key, "")
-		}
-		text = strings.TrimSpace(text)
-		if text == "" {
-			return
-		}
-
-		// Build incoming message
+		// Build base incoming message
 		eventID := ""
 		if envelope.Header != nil {
 			eventID = envelope.Header.EventID
@@ -149,11 +132,44 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			UserID:    event.Sender.SenderID.OpenID,
 			ChatID:    event.Message.ChatID,
 			ChatType:  chatType,
-			Text:      text,
 			MentionMe: len(event.Message.Mentions) > 0,
 		}
 
-		// Async processing (use background context, not request context)
-		go handler(context.Background(), msg)
+		switch msgType {
+		case "text":
+			var content struct {
+				Text string `json:"text"`
+			}
+			if err := json.Unmarshal([]byte(event.Message.Content), &content); err != nil {
+				return
+			}
+			text := content.Text
+			for _, m := range event.Message.Mentions {
+				text = strings.ReplaceAll(text, m.Key, "")
+			}
+			text = strings.TrimSpace(text)
+			if text == "" {
+				return
+			}
+			msg.Text = text
+			go handler(context.Background(), msg)
+
+		case "image":
+			var content struct {
+				ImageKey string `json:"image_key"`
+			}
+			if err := json.Unmarshal([]byte(event.Message.Content), &content); err != nil || content.ImageKey == "" {
+				return
+			}
+			go func() {
+				data, mime, err := f.DownloadImage(context.Background(), content.ImageKey)
+				if err != nil {
+					slog.Error("feishu download image failed", "err", err, "key", content.ImageKey)
+					return
+				}
+				msg.Images = []platform.Image{{Data: data, MimeType: mime}}
+				handler(context.Background(), msg)
+			}()
+		}
 	})
 }

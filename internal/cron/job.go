@@ -26,7 +26,7 @@ type Job struct {
 // generateID returns an 8-char hex string.
 func generateID() string {
 	b := make([]byte, 4)
-	rand.Read(b)
+	_, _ = rand.Read(b)
 	return fmt.Sprintf("%x", b)
 }
 

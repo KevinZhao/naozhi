@@ -8,6 +8,12 @@ import (
 // MessageHandler is the callback invoked when a platform receives a message.
 type MessageHandler func(ctx context.Context, msg IncomingMessage)
 
+// Image represents an image attachment downloaded by a platform or to be sent.
+type Image struct {
+	Data     []byte
+	MimeType string // e.g., "image/png", "image/jpeg"
+}
+
 // IncomingMessage is the platform-agnostic inbound message.
 type IncomingMessage struct {
 	Platform  string
@@ -17,6 +23,7 @@ type IncomingMessage struct {
 	ChatType  string // "direct" | "group"
 	Text      string
 	MentionMe bool
+	Images    []Image
 }
 
 // OutgoingMessage is the platform-agnostic outbound message.
@@ -24,6 +31,7 @@ type OutgoingMessage struct {
 	ChatID   string
 	Text     string
 	ThreadID string
+	Images   []Image
 }
 
 // Platform is the interface every IM platform must implement.

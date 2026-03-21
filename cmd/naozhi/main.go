@@ -8,13 +8,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings"
 	"syscall"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/pathutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	discordplatform "github.com/naozhi/naozhi/internal/platform/discord"
 	"github.com/naozhi/naozhi/internal/platform/feishu"
@@ -59,7 +58,7 @@ func main() {
 
 	// Parse watchdog and store path
 	noOutputTimeout, totalTimeout := cfg.ParseWatchdog()
-	storePath := expandHome(cfg.Session.StorePath)
+	storePath := pathutil.ExpandHome(cfg.Session.StorePath)
 
 	// Session Router
 	router := session.NewRouter(session.RouterConfig{
@@ -137,7 +136,7 @@ func main() {
 		Platforms:     platforms,
 		Agents:        agents,
 		AgentCommands: cfg.AgentCommands,
-		StorePath:     expandHome(cfg.Cron.StorePath),
+		StorePath:     pathutil.ExpandHome(cfg.Cron.StorePath),
 		MaxJobs:       cfg.Cron.MaxJobs,
 		ExecTimeout:   cfg.ParseExecutionTimeout(),
 	})
@@ -173,15 +172,4 @@ func main() {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
 	}
-}
-
-func expandHome(path string) string {
-	if strings.HasPrefix(path, "~/") {
-		home, err := os.UserHomeDir()
-		if err != nil {
-			return path
-		}
-		return filepath.Join(home, path[2:])
-	}
-	return path
 }

@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -85,17 +86,33 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string) (string, error) {
 	return p.sessionID, nil
 }
 
-func (p *ACPProtocol) WriteMessage(w io.Writer, text string) error {
+func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData) error {
 	p.mu.Lock()
 	p.textBuf = "" // reset text accumulator for new turn
 	p.mu.Unlock()
+
+	// Build prompt content blocks
+	var prompt []any
+	for _, img := range images {
+		prompt = append(prompt, map[string]any{
+			"type": "image",
+			"source": map[string]string{
+				"type":       "base64",
+				"media_type": img.MimeType,
+				"data":       base64.StdEncoding.EncodeToString(img.Data),
+			},
+		})
+	}
+	if text != "" || len(prompt) == 0 {
+		prompt = append(prompt, map[string]string{"type": "text", "text": text})
+	}
 
 	id := p.allocID()
 	req := RPCRequest{
 		JSONRPC: "2.0", ID: id, Method: "session/prompt",
 		Params: map[string]any{
 			"sessionId": p.sessionID,
-			"prompt":    []map[string]string{{"type": "text", "text": text}},
+			"prompt":    prompt,
 		},
 	}
 	data, err := json.Marshal(req)

@@ -24,6 +24,8 @@ const (
 const (
 	DefaultNoOutputTimeout = 2 * time.Minute
 	DefaultTotalTimeout    = 5 * time.Minute
+	maxScannerBufBytes     = 1024 * 1024
+	processCloseTimeout    = 5 * time.Second
 )
 
 func (s ProcessState) String() string {
@@ -111,7 +113,7 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string, 
 		totalTimeout:    totalTimeout,
 	}
 
-	p.scanner.Buffer(make([]byte, 0, 1024*1024), 1024*1024)
+	p.scanner.Buffer(make([]byte, 0, maxScannerBufBytes), maxScannerBufBytes)
 
 	return p, nil
 }
@@ -159,7 +161,7 @@ func (p *Process) readLoop() {
 type EventCallback func(ev Event)
 
 // Send writes a user message to stdin and reads events until result.
-func (p *Process) Send(ctx context.Context, text string, onEvent EventCallback) (*SendResult, error) {
+func (p *Process) Send(ctx context.Context, text string, images []ImageData, onEvent EventCallback) (*SendResult, error) {
 	p.mu.Lock()
 	if p.State == StateRunning {
 		p.mu.Unlock()
@@ -176,7 +178,7 @@ func (p *Process) Send(ctx context.Context, text string, onEvent EventCallback) 
 		p.mu.Unlock()
 	}()
 
-	if err := p.protocol.WriteMessage(p.stdin, text); err != nil {
+	if err := p.protocol.WriteMessage(p.stdin, text, images); err != nil {
 		return nil, fmt.Errorf("write message: %w", err)
 	}
 
@@ -285,7 +287,7 @@ func (p *Process) Close() {
 	p.stdin.Close()
 	select {
 	case <-p.done:
-	case <-time.After(5 * time.Second):
+	case <-time.After(processCloseTimeout):
 		p.Kill()
 		return
 	}

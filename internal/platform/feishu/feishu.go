@@ -4,15 +4,20 @@ import (
 	"bytes"
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
 )
+
+var feishuHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 // Config holds Feishu app credentials.
 type Config struct {
@@ -28,6 +33,7 @@ type Config struct {
 type Feishu struct {
 	cfg         Config
 	mode        string // resolved connection mode
+	baseURL     string // API base URL (overridable for testing)
 	accessToken string
 	tokenExpiry time.Time
 	tokenMu     sync.Mutex
@@ -48,7 +54,7 @@ func New(cfg Config) *Feishu {
 	if mode == "" {
 		mode = "websocket"
 	}
-	return &Feishu{cfg: cfg, mode: mode}
+	return &Feishu{cfg: cfg, mode: mode, baseURL: "https://open.feishu.cn"}
 }
 
 func (f *Feishu) Name() string { return "feishu" }
@@ -88,27 +94,61 @@ func (f *Feishu) Stop() error {
 	return nil
 }
 
-// Reply sends a text message to a Feishu chat.
+// Reply sends a message to a Feishu chat. Handles text and/or images.
 func (f *Feishu) Reply(ctx context.Context, msg platform.OutgoingMessage) (string, error) {
+	var lastMsgID string
+
+	// Send text message
+	if msg.Text != "" {
+		id, err := f.sendText(ctx, msg.ChatID, msg.Text)
+		if err != nil {
+			return "", err
+		}
+		lastMsgID = id
+	}
+
+	// Send image messages
+	for _, img := range msg.Images {
+		id, err := f.sendImage(ctx, msg.ChatID, img)
+		if err != nil {
+			slog.Warn("feishu send image failed", "err", err)
+			continue
+		}
+		lastMsgID = id
+	}
+
+	return lastMsgID, nil
+}
+
+func (f *Feishu) sendText(ctx context.Context, chatID, text string) (string, error) {
 	token, err := f.getAccessToken(ctx)
 	if err != nil {
 		return "", fmt.Errorf("get access token: %w", err)
 	}
 
-	content, _ := json.Marshal(map[string]string{"text": msg.Text})
-	reqBody, _ := json.Marshal(map[string]interface{}{
-		"receive_id": msg.ChatID,
+	content, err := json.Marshal(map[string]string{"text": text})
+	if err != nil {
+		return "", fmt.Errorf("marshal content: %w", err)
+	}
+	reqBody, err := json.Marshal(map[string]interface{}{
+		"receive_id": chatID,
 		"msg_type":   "text",
 		"content":    string(content),
 	})
+	if err != nil {
+		return "", fmt.Errorf("marshal request body: %w", err)
+	}
 
-	req, _ := http.NewRequestWithContext(ctx, "POST",
-		"https://open.feishu.cn/open-apis/im/v1/messages?receive_id_type=chat_id",
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		f.baseURL+"/open-apis/im/v1/messages?receive_id_type=chat_id",
 		bytes.NewReader(reqBody))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := feishuHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("send message: %w", err)
 	}
@@ -131,6 +171,146 @@ func (f *Feishu) Reply(ctx context.Context, msg platform.OutgoingMessage) (strin
 	return result.Data.MessageID, nil
 }
 
+func (f *Feishu) sendImage(ctx context.Context, chatID string, img platform.Image) (string, error) {
+	imageKey, err := f.uploadImage(ctx, img.Data)
+	if err != nil {
+		return "", fmt.Errorf("upload image: %w", err)
+	}
+
+	token, err := f.getAccessToken(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get access token: %w", err)
+	}
+
+	content, err := json.Marshal(map[string]string{"image_key": imageKey})
+	if err != nil {
+		return "", fmt.Errorf("marshal content: %w", err)
+	}
+	reqBody, err := json.Marshal(map[string]interface{}{
+		"receive_id": chatID,
+		"msg_type":   "image",
+		"content":    string(content),
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal request body: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		f.baseURL+"/open-apis/im/v1/messages?receive_id_type=chat_id",
+		bytes.NewReader(reqBody))
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := feishuHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("send image message: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Code int `json:"code"`
+		Data struct {
+			MessageID string `json:"message_id"`
+		} `json:"data"`
+		Msg string `json:"msg"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode response: %w", err)
+	}
+	if result.Code != 0 {
+		return "", fmt.Errorf("feishu send image error: code=%d msg=%s", result.Code, result.Msg)
+	}
+	return result.Data.MessageID, nil
+}
+
+// DownloadImage downloads an image by image_key from Feishu API.
+func (f *Feishu) DownloadImage(ctx context.Context, imageKey string) ([]byte, string, error) {
+	token, err := f.getAccessToken(ctx)
+	if err != nil {
+		return nil, "", fmt.Errorf("get access token: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET",
+		f.baseURL+"/open-apis/im/v1/images/"+imageKey, nil)
+	if err != nil {
+		return nil, "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := feishuHTTPClient.Do(req)
+	if err != nil {
+		return nil, "", fmt.Errorf("download image: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", fmt.Errorf("download image: status %d", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024)) // 10MB max
+	if err != nil {
+		return nil, "", fmt.Errorf("read image body: %w", err)
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if contentType == "" || contentType == "application/octet-stream" {
+		contentType = "image/png"
+	}
+	return data, contentType, nil
+}
+
+// uploadImage uploads image data to Feishu and returns the image_key.
+func (f *Feishu) uploadImage(ctx context.Context, data []byte) (string, error) {
+	token, err := f.getAccessToken(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get access token: %w", err)
+	}
+
+	var buf bytes.Buffer
+	w := multipart.NewWriter(&buf)
+	w.WriteField("image_type", "message")
+	part, err := w.CreateFormFile("image", "image.png")
+	if err != nil {
+		return "", fmt.Errorf("create form file: %w", err)
+	}
+	if _, err := part.Write(data); err != nil {
+		return "", fmt.Errorf("write image data: %w", err)
+	}
+	w.Close()
+
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		f.baseURL+"/open-apis/im/v1/images", &buf)
+	if err != nil {
+		return "", fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := feishuHTTPClient.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("upload image: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Code int `json:"code"`
+		Data struct {
+			ImageKey string `json:"image_key"`
+		} `json:"data"`
+		Msg string `json:"msg"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return "", fmt.Errorf("decode upload response: %w", err)
+	}
+	if result.Code != 0 {
+		return "", fmt.Errorf("feishu upload error: code=%d msg=%s", result.Code, result.Msg)
+	}
+	return result.Data.ImageKey, nil
+}
+
 // EditMessage updates an existing Feishu message.
 func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) error {
 	token, err := f.getAccessToken(ctx)
@@ -138,19 +318,28 @@ func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) err
 		return fmt.Errorf("get access token: %w", err)
 	}
 
-	content, _ := json.Marshal(map[string]string{"text": text})
-	reqBody, _ := json.Marshal(map[string]interface{}{
+	content, err := json.Marshal(map[string]string{"text": text})
+	if err != nil {
+		return fmt.Errorf("marshal content: %w", err)
+	}
+	reqBody, err := json.Marshal(map[string]interface{}{
 		"msg_type": "text",
 		"content":  string(content),
 	})
+	if err != nil {
+		return fmt.Errorf("marshal request body: %w", err)
+	}
 
-	req, _ := http.NewRequestWithContext(ctx, "PUT",
-		"https://open.feishu.cn/open-apis/im/v1/messages/"+msgID,
+	req, err := http.NewRequestWithContext(ctx, "PUT",
+		f.baseURL+"/open-apis/im/v1/messages/"+msgID,
 		bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+token)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := feishuHTTPClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("edit message: %w", err)
 	}
@@ -178,16 +367,27 @@ func (f *Feishu) getAccessToken(ctx context.Context) (string, error) {
 		return f.accessToken, nil
 	}
 
-	reqBody, _ := json.Marshal(map[string]string{
+	reqBody, err := json.Marshal(map[string]string{
 		"app_id":     f.cfg.AppID,
 		"app_secret": f.cfg.AppSecret,
 	})
-	req, _ := http.NewRequestWithContext(ctx, "POST",
-		"https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+	if err != nil {
+		return "", fmt.Errorf("marshal token request: %w", err)
+	}
+
+	// Use a bounded context for the token refresh to avoid holding tokenMu indefinitely
+	refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(refreshCtx, "POST",
+		f.baseURL+"/open-apis/auth/v3/tenant_access_token/internal",
 		bytes.NewReader(reqBody))
+	if err != nil {
+		return "", fmt.Errorf("create token request: %w", err)
+	}
 	req.Header.Set("Content-Type", "application/json")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := feishuHTTPClient.Do(req)
 	if err != nil {
 		return "", fmt.Errorf("request token: %w", err)
 	}
@@ -217,5 +417,6 @@ func verifySignature(timestamp, nonce, encryptKey string, body []byte, signature
 	}
 	content := timestamp + nonce + encryptKey + string(body)
 	h := sha256.Sum256([]byte(content))
-	return fmt.Sprintf("%x", h) == signature
+	computed := fmt.Sprintf("%x", h)
+	return subtle.ConstantTimeCompare([]byte(computed), []byte(signature)) == 1
 }

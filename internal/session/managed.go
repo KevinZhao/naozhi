@@ -34,12 +34,12 @@ func (s *ManagedSession) touchLastActive() {
 
 // Send delivers a message to the claude process and returns the result.
 // Messages to the same session are serialized via sendMu.
-func (s *ManagedSession) Send(ctx context.Context, text string, onEvent cli.EventCallback) (*cli.SendResult, error) {
+func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
 	s.touchLastActive()
-	result, err := s.process.Send(ctx, text, onEvent)
+	result, err := s.process.Send(ctx, text, images, onEvent)
 	if err != nil {
 		return nil, err
 	}

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -13,7 +14,13 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/routing"
 	"github.com/naozhi/naozhi/internal/session"
+)
+
+const (
+	defaultDedupCapacity = 10000
+	shutdownTimeout      = 30 * time.Second
 )
 
 // Server is the HTTP entry point for Naozhi.
@@ -36,7 +43,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		mux:           http.NewServeMux(),
 		platforms:     platforms,
 		router:        router,
-		dedup:         platform.NewDedup(10000),
+		dedup:         platform.NewDedup(defaultDedupCapacity),
 		startedAt:     time.Now(),
 		agents:        agents,
 		agentCommands: agentCommands,
@@ -62,7 +69,13 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	slog.Info("server starting", "addr", s.addr)
 
-	srv := &http.Server{Addr: s.addr, Handler: s.mux}
+	srv := &http.Server{
+		Addr:         s.addr,
+		Handler:      s.mux,
+		ReadTimeout:  15 * time.Second,
+		WriteTimeout: 60 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
 	go func() {
 		<-ctx.Done()
 		slog.Info("shutting down server")
@@ -76,9 +89,11 @@ func (s *Server) Start(ctx context.Context) error {
 			}
 		}
 
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
-		srv.Shutdown(shutdownCtx)
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			slog.Error("server shutdown error", "err", err)
+		}
 	}()
 
 	return srv.ListenAndServe()
@@ -128,8 +143,8 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		}
 
 		// Resolve agent from command prefix (e.g. "/review code" -> agent=code-reviewer, text="code")
-		agentID, cleanText := resolveAgent(trimmed, s.agentCommands)
-		if cleanText == "" {
+		agentID, cleanText := routing.ResolveAgent(trimmed, s.agentCommands)
+		if cleanText == "" && len(msg.Images) == 0 {
 			if agentID != "general" {
 				if p := s.platforms[msg.Platform]; p != nil {
 					p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "请在指令后输入内容。"})
@@ -169,9 +184,15 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 			})
 		}
 
-		log.Info("message received", "agent", agentID, "text_len", len(cleanText))
+		// Convert platform images to CLI image data
+		var images []cli.ImageData
+		for _, img := range msg.Images {
+			images = append(images, cli.ImageData{Data: img.Data, MimeType: img.MimeType})
+		}
 
-		result, err := sess.Send(ctx, cleanText, onEvent)
+		log.Info("message received", "agent", agentID, "text_len", len(cleanText), "images", len(images))
+
+		result, err := sess.Send(ctx, cleanText, images, onEvent)
 		if err != nil {
 			log.Error("send to claude", "err", err)
 			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "处理失败，请重试。"})
@@ -180,34 +201,40 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 
 		log.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD)
 
-		// Edit "thinking..." to final result, or send new message
+		// Extract local image file paths from CLI output
 		replyText := result.Text
-		if thinkingMsgID != "" {
-			if err := p.EditMessage(ctx, thinkingMsgID, replyText); err != nil {
-				slog.Warn("edit message failed, sending new", "err", err)
+		var outImages []platform.Image
+		for _, path := range extractImagePaths(replyText) {
+			data, err := os.ReadFile(path)
+			if err != nil {
+				continue
+			}
+			outImages = append(outImages, platform.Image{Data: data, MimeType: mimeFromPath(path)})
+			replyText = strings.ReplaceAll(replyText, path, "[图片]")
+		}
+
+		// Edit "thinking..." to final result, or send new message
+		if replyText != "" {
+			if thinkingMsgID != "" {
+				if err := p.EditMessage(ctx, thinkingMsgID, replyText); err != nil {
+					slog.Warn("edit message failed, sending new", "err", err)
+					s.sendSplitReply(ctx, p, msg.ChatID, replyText)
+				}
+			} else {
 				s.sendSplitReply(ctx, p, msg.ChatID, replyText)
 			}
-		} else {
-			s.sendSplitReply(ctx, p, msg.ChatID, replyText)
+		}
+
+		// Send extracted images
+		for _, img := range outImages {
+			if _, err := p.Reply(ctx, platform.OutgoingMessage{
+				ChatID: msg.ChatID,
+				Images: []platform.Image{img},
+			}); err != nil {
+				slog.Warn("send image failed", "err", err)
+			}
 		}
 	}
-}
-
-// resolveAgent parses a /command prefix and returns the agent ID and clean text.
-func resolveAgent(text string, agentCommands map[string]string) (agentID, cleanText string) {
-	if !strings.HasPrefix(text, "/") {
-		return "general", text
-	}
-	parts := strings.SplitN(text, " ", 2)
-	cmd := strings.TrimPrefix(parts[0], "/")
-	rest := ""
-	if len(parts) > 1 {
-		rest = parts[1]
-	}
-	if id, ok := agentCommands[cmd]; ok {
-		return id, rest
-	}
-	return "general", text
 }
 
 // sendSplitReply sends a reply, splitting into multiple messages if too long.
@@ -250,11 +277,13 @@ func splitText(text string, maxLen int) []string {
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	active, total := s.router.Stats()
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]interface{}{
+	if err := json.NewEncoder(w).Encode(map[string]interface{}{
 		"status":   "ok",
 		"uptime":   time.Since(s.startedAt).Round(time.Second).String(),
 		"sessions": map[string]int{"active": active, "total": total},
-	})
+	}); err != nil {
+		slog.Error("encode health response", "err", err)
+	}
 }
 
 // handleCronCommand dispatches /cron subcommands.

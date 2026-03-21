@@ -33,8 +33,8 @@ func (p *ClaudeProtocol) Init(_ *JSONRW, _ string) (string, error) {
 	return "", nil
 }
 
-func (p *ClaudeProtocol) WriteMessage(w io.Writer, text string) error {
-	msg := NewUserMessage(text)
+func (p *ClaudeProtocol) WriteMessage(w io.Writer, text string, images []ImageData) error {
+	msg := NewUserMessage(text, images)
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
