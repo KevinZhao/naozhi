@@ -24,7 +24,11 @@ type Router struct {
 	ttl       time.Duration
 	model     string
 	extraArgs []string
-	workspace string // fixed cwd for CLI processes
+	workspace string // default cwd for CLI processes
+
+	// workspaceOverrides stores per-chat workspace overrides.
+	// Key format: "platform:chatType:chatID"
+	workspaceOverrides map[string]string
 
 	// activeCount tracks currently alive processes
 	activeCount int
@@ -56,16 +60,17 @@ func NewRouter(cfg RouterConfig) *Router {
 		cfg.TTL = 30 * time.Minute
 	}
 	r := &Router{
-		sessions:        make(map[string]*ManagedSession),
-		wrapper:         cfg.Wrapper,
-		maxProcs:        cfg.MaxProcs,
-		ttl:             cfg.TTL,
-		model:           cfg.Model,
-		extraArgs:       cfg.ExtraArgs,
-		workspace:       cfg.Workspace,
-		storePath:       cfg.StorePath,
-		noOutputTimeout: cfg.NoOutputTimeout,
-		totalTimeout:    cfg.TotalTimeout,
+		sessions:           make(map[string]*ManagedSession),
+		wrapper:            cfg.Wrapper,
+		maxProcs:           cfg.MaxProcs,
+		ttl:                cfg.TTL,
+		model:              cfg.Model,
+		extraArgs:          cfg.ExtraArgs,
+		workspace:          cfg.Workspace,
+		workspaceOverrides: make(map[string]string),
+		storePath:          cfg.StorePath,
+		noOutputTimeout:    cfg.NoOutputTimeout,
+		totalTimeout:       cfg.TotalTimeout,
 	}
 
 	// Restore sessions from store
@@ -78,6 +83,58 @@ func NewRouter(cfg RouterConfig) *Router {
 		}
 	}
 	return r
+}
+
+// ChatKey builds a chat-level key (without agent suffix) for workspace overrides.
+func ChatKey(platform, chatType, chatID string) string {
+	return platform + ":" + chatType + ":" + chatID
+}
+
+// SetWorkspace sets the working directory override for a chat.
+func (r *Router) SetWorkspace(chatKey, path string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.workspaceOverrides[chatKey] = path
+}
+
+// GetWorkspace returns the effective workspace for a chat key.
+func (r *Router) GetWorkspace(chatKey string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if ws, ok := r.workspaceOverrides[chatKey]; ok {
+		return ws
+	}
+	return r.workspace
+}
+
+// ResetChat resets all sessions belonging to a chat (all agents).
+func (r *Router) ResetChat(chatKeyPrefix string) {
+	r.mu.Lock()
+	var toClose []processIface
+	var toDelete []string
+	for key, s := range r.sessions {
+		// Session key: "platform:chatType:chatID:agentID"
+		// Chat key:    "platform:chatType:chatID"
+		// Match if session key starts with chatKey + ":"
+		if len(key) > len(chatKeyPrefix) && key[:len(chatKeyPrefix)+1] == chatKeyPrefix+":" {
+			toDelete = append(toDelete, key)
+			if s.process != nil && s.process.Alive() {
+				toClose = append(toClose, s.process)
+			}
+		}
+	}
+	for _, key := range toDelete {
+		delete(r.sessions, key)
+	}
+	r.mu.Unlock()
+
+	for _, proc := range toClose {
+		proc.Close()
+	}
+
+	r.mu.Lock()
+	r.countActive()
+	r.mu.Unlock()
 }
 
 // AgentOpts provides per-agent overrides for session creation.
@@ -148,11 +205,21 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	copy(args, r.extraArgs)
 	args = append(args, opts.ExtraArgs...)
 
+	// Determine workspace: check per-chat override first, then default
+	workspace := r.workspace
+	// Extract chat key prefix from session key (strip last :agentID segment)
+	if idx := lastIndexByte(key, ':'); idx >= 0 {
+		chatKey := key[:idx]
+		if ws, ok := r.workspaceOverrides[chatKey]; ok {
+			workspace = ws
+		}
+	}
+
 	spawnOpts := cli.SpawnOptions{
 		Model:           model,
 		ResumeID:        resumeID,
 		ExtraArgs:       args,
-		WorkingDir:      r.workspace,
+		WorkingDir:      workspace,
 		NoOutputTimeout: r.noOutputTimeout,
 		TotalTimeout:    r.totalTimeout,
 	}
@@ -341,6 +408,15 @@ func (r *Router) Shutdown() {
 		}(proc)
 	}
 	wg.Wait()
+}
+
+func lastIndexByte(s string, c byte) int {
+	for i := len(s) - 1; i >= 0; i-- {
+		if s[i] == c {
+			return i
+		}
+	}
+	return -1
 }
 
 // Stats returns current session statistics.
