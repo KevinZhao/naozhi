@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -172,7 +173,7 @@ func (f *Feishu) sendText(ctx context.Context, chatID, text string) (string, err
 }
 
 func (f *Feishu) sendImage(ctx context.Context, chatID string, img platform.Image) (string, error) {
-	imageKey, err := f.uploadImage(ctx, img.Data)
+	imageKey, err := f.uploadImage(ctx, img.Data, img.MimeType)
 	if err != nil {
 		return "", fmt.Errorf("upload image: %w", err)
 	}
@@ -256,6 +257,10 @@ func (f *Feishu) DownloadImage(ctx context.Context, imageKey string) ([]byte, st
 	}
 
 	contentType := resp.Header.Get("Content-Type")
+	// Strip MIME parameters (e.g., "image/png; name=file.png" → "image/png")
+	if i := strings.IndexByte(contentType, ';'); i >= 0 {
+		contentType = strings.TrimSpace(contentType[:i])
+	}
 	if contentType == "" || contentType == "application/octet-stream" {
 		contentType = "image/png"
 	}
@@ -263,16 +268,29 @@ func (f *Feishu) DownloadImage(ctx context.Context, imageKey string) ([]byte, st
 }
 
 // uploadImage uploads image data to Feishu and returns the image_key.
-func (f *Feishu) uploadImage(ctx context.Context, data []byte) (string, error) {
+func (f *Feishu) uploadImage(ctx context.Context, data []byte, mimeType string) (string, error) {
 	token, err := f.getAccessToken(ctx)
 	if err != nil {
 		return "", fmt.Errorf("get access token: %w", err)
 	}
 
+	// Derive filename extension from MIME type
+	filename := "image.png"
+	switch mimeType {
+	case "image/jpeg":
+		filename = "image.jpg"
+	case "image/gif":
+		filename = "image.gif"
+	case "image/webp":
+		filename = "image.webp"
+	}
+
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)
-	w.WriteField("image_type", "message")
-	part, err := w.CreateFormFile("image", "image.png")
+	if err := w.WriteField("image_type", "message"); err != nil {
+		return "", fmt.Errorf("write image_type field: %w", err)
+	}
+	part, err := w.CreateFormFile("image", filename)
 	if err != nil {
 		return "", fmt.Errorf("create form file: %w", err)
 	}

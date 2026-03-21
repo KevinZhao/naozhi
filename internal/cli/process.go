@@ -25,8 +25,10 @@ const (
 	DefaultNoOutputTimeout = 2 * time.Minute
 	DefaultTotalTimeout    = 5 * time.Minute
 	maxScannerBufBytes     = 1024 * 1024
-	processCloseTimeout    = 5 * time.Second
 )
+
+// processCloseTimeout is a var (not const) so tests can override it.
+var processCloseTimeout = 5 * time.Second
 
 func (s ProcessState) String() string {
 	switch s {

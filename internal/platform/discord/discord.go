@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
 
@@ -175,21 +176,20 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 	}
 	text = strings.TrimSpace(text)
 
-	// Download image attachments from Discord CDN
-	var images []platform.Image
+	// Collect image attachment metadata; download happens asynchronously
+	type pendingImage struct {
+		url         string
+		contentType string
+	}
+	var pending []pendingImage
 	for _, att := range m.Attachments {
 		if !isImageContentType(att.ContentType) {
 			continue
 		}
-		data, mime, err := downloadURL(att.URL)
-		if err != nil {
-			slog.Warn("discord download attachment failed", "err", err, "url", att.URL)
-			continue
-		}
-		images = append(images, platform.Image{Data: data, MimeType: mime})
+		pending = append(pending, pendingImage{url: att.URL, contentType: att.ContentType})
 	}
 
-	if text == "" && len(images) == 0 {
+	if text == "" && len(pending) == 0 {
 		return
 	}
 
@@ -206,18 +206,30 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 		ChatType:  chatType,
 		Text:      text,
 		MentionMe: mentionMe,
-		Images:    images,
 	}
 
-	go d.handler(context.Background(), msg)
+	// Download images in the async goroutine, not in discordgo's event dispatch
+	go func() {
+		for _, p := range pending {
+			data, mime, err := downloadURL(p.url)
+			if err != nil {
+				slog.Warn("discord download attachment failed", "err", err, "url", p.url)
+				continue
+			}
+			msg.Images = append(msg.Images, platform.Image{Data: data, MimeType: mime})
+		}
+		d.handler(context.Background(), msg)
+	}()
 }
 
 func isImageContentType(ct string) bool {
 	return strings.HasPrefix(ct, "image/")
 }
 
+var discordHTTPClient = &http.Client{Timeout: 15 * time.Second}
+
 func downloadURL(url string) ([]byte, string, error) {
-	resp, err := http.Get(url)
+	resp, err := discordHTTPClient.Get(url)
 	if err != nil {
 		return nil, "", err
 	}
@@ -229,9 +241,16 @@ func downloadURL(url string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	ct := resp.Header.Get("Content-Type")
+	ct := stripMIMEParams(resp.Header.Get("Content-Type"))
 	if ct == "" {
 		ct = "image/png"
 	}
 	return data, ct, nil
+}
+
+func stripMIMEParams(ct string) string {
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	return strings.TrimSpace(ct)
 }

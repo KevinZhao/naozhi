@@ -2,12 +2,21 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 )
+
+// processIface abstracts the CLI process lifecycle methods used by the router
+// and session layer. *cli.Process satisfies this interface.
+type processIface interface {
+	Alive() bool
+	IsRunning() bool
+	Close()
+}
 
 // ManagedSession wraps a claude CLI process with session metadata.
 type ManagedSession struct {
@@ -18,7 +27,7 @@ type ManagedSession struct {
 	// between Send() (under sendMu) and Cleanup/evictOldest (under r.mu).
 	lastActive atomic.Int64
 
-	process *cli.Process
+	process processIface
 	sendMu  sync.Mutex // serializes messages to the same session
 }
 
@@ -38,15 +47,20 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
+	cp, ok := s.process.(*cli.Process)
+	if !ok {
+		return nil, fmt.Errorf("session process does not support sending")
+	}
+
 	s.touchLastActive()
-	result, err := s.process.Send(ctx, text, images, onEvent)
+	result, err := cp.Send(ctx, text, images, onEvent)
 	if err != nil {
 		return nil, err
 	}
 
 	// Capture session ID from first successful send
-	if s.SessionID == "" && s.process.SessionID != "" {
-		s.SessionID = s.process.SessionID
+	if s.SessionID == "" && cp.SessionID != "" {
+		s.SessionID = cp.SessionID
 	}
 	return result, nil
 }

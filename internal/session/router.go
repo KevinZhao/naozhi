@@ -236,7 +236,7 @@ func (r *Router) Cleanup() {
 
 	type expiredEntry struct {
 		key  string
-		proc *cli.Process
+		proc processIface
 	}
 	var expired []expiredEntry
 
@@ -302,7 +302,7 @@ func (r *Router) Shutdown() {
 	}
 
 	// Collect processes to close, then release lock to close concurrently
-	var procs []*cli.Process
+	var procs []processIface
 	for key, s := range r.sessions {
 		if s.process != nil && s.process.Alive() {
 			slog.Info("shutting down session", "key", key)
@@ -314,7 +314,7 @@ func (r *Router) Shutdown() {
 	var wg sync.WaitGroup
 	for _, proc := range procs {
 		wg.Add(1)
-		go func(p *cli.Process) {
+		go func(p processIface) {
 			defer wg.Done()
 			p.Close()
 		}(proc)
