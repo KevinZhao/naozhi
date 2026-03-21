@@ -378,7 +378,7 @@ func TestGetOrCreate_ExistingAliveSession(t *testing.T) {
 	injected := injectSession(r, "feishu:direct:user1:general", proc)
 	injected.SessionID = "existing-sess"
 
-	s, err := r.GetOrCreate(context.Background(), "feishu:direct:user1:general", AgentOpts{})
+	s, _, err := r.GetOrCreate(context.Background(), "feishu:direct:user1:general", AgentOpts{})
 	if err != nil {
 		t.Fatalf("GetOrCreate error: %v", err)
 	}
@@ -397,7 +397,7 @@ func TestGetOrCreate_ExistingAlive_TouchesLastActive(t *testing.T) {
 	oldActive := s.GetLastActive()
 	time.Sleep(2 * time.Millisecond)
 
-	_, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{})
+	_, _, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -408,7 +408,7 @@ func TestGetOrCreate_ExistingAlive_TouchesLastActive(t *testing.T) {
 
 func TestGetOrCreate_NewSession_SpawnError(t *testing.T) {
 	r := newTestRouter(3)
-	_, err := r.GetOrCreate(context.Background(), "feishu:direct:user1:general", AgentOpts{})
+	_, _, err := r.GetOrCreate(context.Background(), "feishu:direct:user1:general", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected error from spawn with nonexistent CLI")
 	}
@@ -425,7 +425,7 @@ func TestGetOrCreate_DeadSession_AttemptResume(t *testing.T) {
 		process:   newDeadProc(),
 	}
 
-	_, err := r.GetOrCreate(context.Background(), "feishu:direct:user1:general", AgentOpts{})
+	_, _, err := r.GetOrCreate(context.Background(), "feishu:direct:user1:general", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected error (spawn fails with nonexistent CLI)")
 	}
@@ -442,7 +442,7 @@ func TestGetOrCreate_NilProcessSession_AttemptSpawn(t *testing.T) {
 		SessionID: "restored-sess",
 	}
 
-	_, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{})
+	_, _, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected spawn error")
 	}
@@ -462,7 +462,7 @@ func TestGetOrCreate_AgentOptsOverride(t *testing.T) {
 	}
 
 	// Even with overrides, spawn will still fail — we just verify no panic.
-	_, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{
+	_, _, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{
 		Model:     "override-model",
 		ExtraArgs: []string{"--extra"},
 	})
@@ -481,7 +481,7 @@ func TestMaxProcs_AllRunning_ReturnsError(t *testing.T) {
 		injectSession(r, fmt.Sprintf("key%d", i), newRunningProc())
 	}
 
-	_, err := r.GetOrCreate(context.Background(), "new-key", AgentOpts{})
+	_, _, err := r.GetOrCreate(context.Background(), "new-key", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected error when max procs reached and all busy")
 	}
@@ -496,7 +496,7 @@ func TestMaxProcs_EvictsIdleThenSpawnFails(t *testing.T) {
 	s := injectSession(r, "old-key", oldProc)
 	s.lastActive.Store(time.Now().Add(-1 * time.Hour).UnixNano())
 
-	_, err := r.GetOrCreate(context.Background(), "new-key", AgentOpts{})
+	_, _, err := r.GetOrCreate(context.Background(), "new-key", AgentOpts{})
 	// Spawn fails (nonexistent CLI), but eviction should have happened first.
 	if err == nil {
 		// If a CLI happened to be installed on this machine, just skip.
@@ -515,7 +515,7 @@ func TestMaxProcs_EvictFailsWhenAllRunning(t *testing.T) {
 	r := newTestRouter(1)
 	injectSession(r, "running-key", newRunningProc())
 
-	_, err := r.GetOrCreate(context.Background(), "new-key", AgentOpts{})
+	_, _, err := r.GetOrCreate(context.Background(), "new-key", AgentOpts{})
 	if err == nil {
 		t.Fatal("expected error: max procs with all running")
 	}
@@ -767,7 +767,7 @@ func TestConcurrentGetOrCreate_SameKey_Race(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = r.GetOrCreate(context.Background(), key, AgentOpts{})
+			_, _, _ = r.GetOrCreate(context.Background(), key, AgentOpts{})
 		}()
 	}
 	wg.Wait()
@@ -782,7 +782,7 @@ func TestConcurrentGetOrCreate_DifferentKeys_Race(t *testing.T) {
 		key := fmt.Sprintf("feishu:direct:user%d:general", i)
 		go func(k string) {
 			defer wg.Done()
-			_, _ = r.GetOrCreate(context.Background(), k, AgentOpts{})
+			_, _, _ = r.GetOrCreate(context.Background(), k, AgentOpts{})
 		}(key)
 	}
 	wg.Wait()

@@ -24,6 +24,7 @@ type Router struct {
 	ttl       time.Duration
 	model     string
 	extraArgs []string
+	workspace string // fixed cwd for CLI processes
 
 	// activeCount tracks currently alive processes
 	activeCount int
@@ -40,6 +41,7 @@ type RouterConfig struct {
 	TTL             time.Duration
 	Model           string
 	ExtraArgs       []string
+	Workspace       string
 	StorePath       string
 	NoOutputTimeout time.Duration
 	TotalTimeout    time.Duration
@@ -60,6 +62,7 @@ func NewRouter(cfg RouterConfig) *Router {
 		ttl:             cfg.TTL,
 		model:           cfg.Model,
 		extraArgs:       cfg.ExtraArgs,
+		workspace:       cfg.Workspace,
 		storePath:       cfg.StorePath,
 		noOutputTimeout: cfg.NoOutputTimeout,
 		totalTimeout:    cfg.TotalTimeout,
@@ -83,23 +86,40 @@ type AgentOpts struct {
 	ExtraArgs []string
 }
 
+// SessionStatus indicates how a session was obtained.
+type SessionStatus int
+
+const (
+	SessionExisting SessionStatus = iota // reused a live session
+	SessionResumed                       // resumed a dead session
+	SessionNew                           // created a brand new session
+)
+
 // GetOrCreate returns an existing session or creates a new one.
 // AgentOpts overrides the router defaults for model and args.
-func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, error) {
+func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, SessionStatus, error) {
 	r.mu.Lock()
 
 	if s, ok := r.sessions[key]; ok {
 		if s.process != nil && s.process.Alive() {
 			s.touchLastActive()
 			r.mu.Unlock()
-			return s, nil
+			return s, SessionExisting, nil
 		}
 		slog.Info("session process dead, resuming", "key", key, "session_id", s.getSessionID())
-		return r.spawnSession(ctx, key, s.getSessionID(), opts)
+		s, err := r.spawnSession(ctx, key, s.getSessionID(), opts)
+		if err != nil {
+			return nil, 0, err
+		}
+		return s, SessionResumed, nil
 	}
 
 	slog.Info("creating new session", "key", key)
-	return r.spawnSession(ctx, key, "", opts)
+	s, err := r.spawnSession(ctx, key, "", opts)
+	if err != nil {
+		return nil, 0, err
+	}
+	return s, SessionNew, nil
 }
 
 // spawnSession creates a new process, optionally resuming an existing session.
@@ -132,6 +152,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		Model:           model,
 		ResumeID:        resumeID,
 		ExtraArgs:       args,
+		WorkingDir:      r.workspace,
 		NoOutputTimeout: r.noOutputTimeout,
 		TotalTimeout:    r.totalTimeout,
 	}

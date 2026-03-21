@@ -70,3 +70,16 @@
 - 使用 `\x00` 作分隔符？
 - 或 URL-encode 每个组件？
 - 实际风险评估：IM 平台的 ChatID 是否可能包含 `:`？
+
+---
+
+### M-7 [MEDIUM] Kiro 模型无法通过 IM 动态切换
+
+**文件**: `config.yaml`, `cli/protocol_acp.go`
+
+当前 kiro backend 的模型在 config.yaml 中静态配置，无法通过 IM 指令动态切换。用户需要通过 IM 命令（如 `/model opus`）在运行时变更 kiro 使用的模型。
+
+**待讨论**:
+- 新增 `/model <name>` IM 指令？作用域：per-session vs per-agent vs 全局？
+- kiro ACP 协议是否支持在 session 内切换模型？（需确认 `session/prompt` params）
+- 如不支持 session 内切换，是否需要 reset session 后以新模型重建？

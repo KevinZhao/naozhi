@@ -227,15 +227,15 @@ func (f *Feishu) sendImage(ctx context.Context, chatID string, img platform.Imag
 	return result.Data.MessageID, nil
 }
 
-// DownloadImage downloads an image by image_key from Feishu API.
-func (f *Feishu) DownloadImage(ctx context.Context, imageKey string) ([]byte, string, error) {
+// DownloadImage downloads an image from a message via Feishu API.
+func (f *Feishu) DownloadImage(ctx context.Context, messageID, fileKey string) ([]byte, string, error) {
 	token, err := f.getAccessToken(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("get access token: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET",
-		f.baseURL+"/open-apis/im/v1/images/"+imageKey, nil)
+		f.baseURL+"/open-apis/im/v1/messages/"+messageID+"/resources/"+fileKey+"?type=image", nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("create request: %w", err)
 	}
@@ -248,7 +248,8 @@ func (f *Feishu) DownloadImage(ctx context.Context, imageKey string) ([]byte, st
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, "", fmt.Errorf("download image: status %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		return nil, "", fmt.Errorf("download image: status %d, body: %s", resp.StatusCode, body)
 	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024)) // 10MB max

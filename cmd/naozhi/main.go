@@ -59,6 +59,11 @@ func main() {
 	// Parse watchdog and store path
 	noOutputTimeout, totalTimeout := cfg.ParseWatchdog()
 	storePath := pathutil.ExpandHome(cfg.Session.StorePath)
+	workspace := pathutil.ExpandHome(cfg.Session.Workspace)
+	if err := os.MkdirAll(workspace, 0755); err != nil {
+		slog.Error("create workspace dir", "path", workspace, "err", err)
+		os.Exit(1)
+	}
 
 	// Session Router
 	router := session.NewRouter(session.RouterConfig{
@@ -67,6 +72,7 @@ func main() {
 		TTL:             cfg.ParseTTL(),
 		Model:           cfg.CLI.Model,
 		ExtraArgs:       cfg.CLI.Args,
+		Workspace:       workspace,
 		StorePath:       storePath,
 		NoOutputTimeout: noOutputTimeout,
 		TotalTimeout:    totalTimeout,

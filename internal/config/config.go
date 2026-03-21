@@ -42,6 +42,7 @@ type SessionConfig struct {
 	TTL       string         `yaml:"ttl"`
 	Watchdog  WatchdogConfig `yaml:"watchdog"`
 	StorePath string         `yaml:"store_path"`
+	Workspace string         `yaml:"workspace"` // fixed cwd for CLI processes (default ~/.naozhi/workspace)
 }
 
 type WatchdogConfig struct {
@@ -116,6 +117,9 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
+	}
+	if cfg.Session.Workspace == "" {
+		cfg.Session.Workspace = "~/.naozhi/workspace"
 	}
 
 	return &cfg, nil

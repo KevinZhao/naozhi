@@ -158,7 +158,7 @@ func TestParseSDKEvent_TextMessage(t *testing.T) {
 		},
 	}
 
-	msg, imageKey, ok := parseSDKEvent(event)
+	msg, _, imageKey, ok := parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
@@ -206,7 +206,7 @@ func TestParseSDKEvent_DirectMessage(t *testing.T) {
 		},
 	}
 
-	msg, _, ok := parseSDKEvent(event)
+	msg, _, _, ok := parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
@@ -236,7 +236,7 @@ func TestParseSDKEvent_WithMentions(t *testing.T) {
 		},
 	}
 
-	msg, _, ok := parseSDKEvent(event)
+	msg, _, _, ok := parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
@@ -261,7 +261,7 @@ func TestParseSDKEvent_ImageMessage(t *testing.T) {
 			},
 		},
 	}
-	msg, imageKey, ok := parseSDKEvent(event)
+	msg, _, imageKey, ok := parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true for image message")
 	}
@@ -286,7 +286,7 @@ func TestParseSDKEvent_ImageMessage_EmptyKey(t *testing.T) {
 			},
 		},
 	}
-	_, _, ok := parseSDKEvent(event)
+	_, _, _, ok := parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for image message with empty image_key")
 	}
@@ -302,7 +302,7 @@ func TestParseSDKEvent_UnsupportedType(t *testing.T) {
 			},
 		},
 	}
-	_, _, ok := parseSDKEvent(event)
+	_, _, _, ok := parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for unsupported message type")
 	}
@@ -321,7 +321,7 @@ func TestParseSDKEvent_EmptyText(t *testing.T) {
 			},
 		},
 	}
-	_, _, ok := parseSDKEvent(event)
+	_, _, _, ok := parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for empty text")
 	}
@@ -344,14 +344,14 @@ func TestParseSDKEvent_MentionOnlyText(t *testing.T) {
 			},
 		},
 	}
-	_, _, ok := parseSDKEvent(event)
+	_, _, _, ok := parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for mention-only text")
 	}
 }
 
 func TestParseSDKEvent_NilEvent(t *testing.T) {
-	_, _, ok := parseSDKEvent(nil)
+	_, _, _, ok := parseSDKEvent(nil)
 	if ok {
 		t.Error("expected ok=false for nil event")
 	}
@@ -361,7 +361,7 @@ func TestParseSDKEvent_NilMessage(t *testing.T) {
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{},
 	}
-	_, _, ok := parseSDKEvent(event)
+	_, _, _, ok := parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for nil message")
 	}

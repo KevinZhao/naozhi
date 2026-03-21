@@ -244,7 +244,7 @@ func (s *Scheduler) execute(j *Job) {
 	opts := s.agents[agentID]
 	key := "cron:" + j.ID
 
-	sess, err := s.router.GetOrCreate(ctx, key, opts)
+	sess, _, err := s.router.GetOrCreate(ctx, key, opts)
 	if err != nil {
 		log.Error("cron session error", "err", err)
 		if _, rerr := p.Reply(ctx, platform.OutgoingMessage{

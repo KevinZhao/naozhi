@@ -162,7 +162,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				return
 			}
 			go func() {
-				data, mime, err := f.DownloadImage(context.Background(), content.ImageKey)
+				data, mime, err := f.DownloadImage(context.Background(), event.Message.MessageID, content.ImageKey)
 				if err != nil {
 					slog.Error("feishu download image failed", "err", err, "key", content.ImageKey)
 					return

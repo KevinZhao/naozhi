@@ -162,7 +162,7 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		opts := s.agents[agentID] // zero value = use router defaults
 		key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
 
-		sess, err := s.router.GetOrCreate(ctx, key, opts)
+		sess, sessStatus, err := s.router.GetOrCreate(ctx, key, opts)
 		if err != nil {
 			log.Error("get session", "err", err)
 			if p := s.platforms[msg.Platform]; p != nil {
@@ -175,6 +175,11 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		if p == nil {
 			log.Error("unknown platform")
 			return
+		}
+
+		// Notify user when previous session context was lost
+		if sessStatus == session.SessionNew {
+			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "新会话已创建（之前的上下文已失效）。"})
 		}
 
 		// Send "thinking..." indicator

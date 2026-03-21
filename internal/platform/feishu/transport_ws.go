@@ -24,13 +24,13 @@ func (f *Feishu) startWebSocket() error {
 	eventHandler := dispatcher.NewEventDispatcher(
 		f.cfg.VerificationToken, f.cfg.EncryptKey,
 	).OnP2MessageReceiveV1(func(_ context.Context, event *larkim.P2MessageReceiveV1) error {
-		msg, imageKey, ok := parseSDKEvent(event)
+		msg, messageID, imageKey, ok := parseSDKEvent(event)
 		if !ok {
 			return nil
 		}
 		if imageKey != "" {
 			go func() {
-				data, mime, err := f.DownloadImage(context.Background(), imageKey)
+				data, mime, err := f.DownloadImage(context.Background(), messageID, imageKey)
 				if err != nil {
 					slog.Error("feishu ws download image failed", "err", err, "key", imageKey)
 					return
@@ -62,24 +62,24 @@ func (f *Feishu) startWebSocket() error {
 }
 
 // parseSDKEvent converts a Feishu SDK event to platform.IncomingMessage.
-// Returns the message, an image_key (non-empty for image messages), and whether parsing succeeded.
-func parseSDKEvent(event *larkim.P2MessageReceiveV1) (platform.IncomingMessage, string, bool) {
+// Returns the message, message_id, an image_key (non-empty for image messages), and whether parsing succeeded.
+func parseSDKEvent(event *larkim.P2MessageReceiveV1) (platform.IncomingMessage, string, string, bool) {
 	if event == nil || event.Event == nil || event.Event.Message == nil {
-		return platform.IncomingMessage{}, "", false
+		return platform.IncomingMessage{}, "", "", false
 	}
 
 	msg := event.Event.Message
 	if msg.MessageType == nil {
-		return platform.IncomingMessage{}, "", false
+		return platform.IncomingMessage{}, "", "", false
 	}
 
 	msgType := *msg.MessageType
 	if msgType != "text" && msgType != "image" {
-		return platform.IncomingMessage{}, "", false
+		return platform.IncomingMessage{}, "", "", false
 	}
 
 	if msg.Content == nil {
-		return platform.IncomingMessage{}, "", false
+		return platform.IncomingMessage{}, "", "", false
 	}
 
 	chatType := "direct"
@@ -102,6 +102,11 @@ func parseSDKEvent(event *larkim.P2MessageReceiveV1) (platform.IncomingMessage, 
 		eventID = event.EventV2Base.Header.EventID
 	}
 
+	messageID := ""
+	if msg.MessageId != nil {
+		messageID = *msg.MessageId
+	}
+
 	hasMention := len(msg.Mentions) > 0
 
 	result := platform.IncomingMessage{
@@ -119,7 +124,7 @@ func parseSDKEvent(event *larkim.P2MessageReceiveV1) (platform.IncomingMessage, 
 			Text string `json:"text"`
 		}
 		if err := json.Unmarshal([]byte(*msg.Content), &content); err != nil {
-			return platform.IncomingMessage{}, "", false
+			return platform.IncomingMessage{}, "", "", false
 		}
 		text := content.Text
 		for _, m := range msg.Mentions {
@@ -129,21 +134,21 @@ func parseSDKEvent(event *larkim.P2MessageReceiveV1) (platform.IncomingMessage, 
 		}
 		text = strings.TrimSpace(text)
 		if text == "" {
-			return platform.IncomingMessage{}, "", false
+			return platform.IncomingMessage{}, "", "", false
 		}
 		result.Text = text
-		return result, "", true
+		return result, "", "", true
 
 	case "image":
 		var content struct {
 			ImageKey string `json:"image_key"`
 		}
 		if err := json.Unmarshal([]byte(*msg.Content), &content); err != nil || content.ImageKey == "" {
-			return platform.IncomingMessage{}, "", false
+			return platform.IncomingMessage{}, "", "", false
 		}
-		return result, content.ImageKey, true
+		return result, messageID, content.ImageKey, true
 
 	default:
-		return platform.IncomingMessage{}, "", false
+		return platform.IncomingMessage{}, "", "", false
 	}
 }
