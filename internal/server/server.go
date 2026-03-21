@@ -160,7 +160,7 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		if err != nil {
 			log.Error("get session", "err", err)
 			if p := s.platforms[msg.Platform]; p != nil {
-				p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "系统繁忙，请稍后重试。"})
+				p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "会话异常，请发送 /new 重置后重试。"})
 			}
 			return
 		}
@@ -195,7 +195,7 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		result, err := sess.Send(ctx, cleanText, images, onEvent)
 		if err != nil {
 			log.Error("send to claude", "err", err)
-			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "处理失败，请重试。"})
+			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "处理失败，请发送 /new 重置后重试。"})
 			return
 		}
 
