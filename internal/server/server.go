@@ -207,13 +207,8 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 
 		log.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD)
 
-		// Append backend tag and cost to reply
-		replyText := result.Text
-		if result.CostUSD > 0 {
-			replyText += fmt.Sprintf("\n\n— %s · $%.4f", s.backendTag, result.CostUSD)
-		} else {
-			replyText += "\n\n— " + s.backendTag
-		}
+		// Append backend tag to reply
+		replyText := result.Text + "\n\n— " + s.backendTag
 		var outImages []platform.Image
 		for _, path := range extractImagePaths(replyText) {
 			data, err := os.ReadFile(path)
