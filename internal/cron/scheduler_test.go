@@ -206,7 +206,9 @@ func TestSchedulerPauseResume(t *testing.T) {
 	defer s.Stop()
 
 	job := &Job{Schedule: "@hourly", Prompt: "test", Platform: "p", ChatID: "c"}
-	s.AddJob(job)
+	if err := s.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
 
 	_, err := s.PauseJob(job.ID[:4], "p", "c")
 	if err != nil {
@@ -243,7 +245,9 @@ func TestSchedulerDelete(t *testing.T) {
 	defer s.Stop()
 
 	job := &Job{Schedule: "@hourly", Prompt: "test", Platform: "p", ChatID: "c"}
-	s.AddJob(job)
+	if err := s.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
 
 	_, err := s.DeleteJob(job.ID[:4], "p", "c")
 	if err != nil {
