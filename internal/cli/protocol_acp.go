@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"sync"
+	"time"
 )
 
 // ACPProtocol implements Protocol for the Agent Client Protocol (JSON-RPC 2.0).
@@ -226,25 +227,43 @@ func (p *ACPProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) error {
 
 // readUntilResponse reads lines until a JSON-RPC response with the matching ID is found.
 // Notifications are silently consumed during this process.
+// Times out after 30 seconds to prevent deadlocking the caller.
 func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage, error) {
-	for {
-		line, eof, err := rw.R.ReadLine()
-		if err != nil || eof {
-			return nil, fmt.Errorf("unexpected EOF during ACP init")
-		}
-		if len(line) == 0 {
-			continue
-		}
-		var msg RPCMessage
-		if err := json.Unmarshal(line, &msg); err != nil {
-			continue
-		}
-		if msg.IsResponse() && msg.ID != nil && *msg.ID == expectedID {
-			if msg.Error != nil {
-				return nil, fmt.Errorf("rpc error %d: %s", msg.Error.Code, msg.Error.Message)
+	type readResult struct {
+		msg *RPCMessage
+		err error
+	}
+	ch := make(chan readResult, 1)
+	go func() {
+		for {
+			line, eof, err := rw.R.ReadLine()
+			if err != nil || eof {
+				ch <- readResult{nil, fmt.Errorf("unexpected EOF during ACP init")}
+				return
 			}
-			return &msg, nil
+			if len(line) == 0 {
+				continue
+			}
+			var msg RPCMessage
+			if err := json.Unmarshal(line, &msg); err != nil {
+				continue
+			}
+			if msg.IsResponse() && msg.ID != nil && *msg.ID == expectedID {
+				if msg.Error != nil {
+					ch <- readResult{nil, fmt.Errorf("rpc error %d: %s", msg.Error.Code, msg.Error.Message)}
+					return
+				}
+				ch <- readResult{&msg, nil}
+				return
+			}
+			// Skip notifications during init
 		}
-		// Skip notifications during init
+	}()
+
+	select {
+	case r := <-ch:
+		return r.msg, r.err
+	case <-time.After(30 * time.Second):
+		return nil, fmt.Errorf("timeout waiting for ACP response (id=%d)", expectedID)
 	}
 }

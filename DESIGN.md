@@ -1,35 +1,34 @@
-# Naozhi — Claude Code 即时通信网关
+# Naozhi — AI Agent 即时通信网关
 
-基于 Claude Code CLI 的轻量消息路由层，将 CC 的完整能力暴露给即时通信渠道。
+基于 AI CLI Agent 的轻量消息路由层，通过可插拔的协议抽象（stream-json / ACP）将 agent 的完整能力暴露给即时通信渠道。
 
 ## 核心思路
 
-不重造轮子，用 Go 写一个薄薄的消息路由服务，底层直接 spawn 本机已配置好的 `claude` CLI（含 ECC 插件、claude-mem、MCP servers），将完整的 agent 能力暴露给即时通信渠道。
+不重造轮子，用 Go 写一个薄薄的消息路由服务，底层直接 spawn 本机已配置好的 AI CLI agent（Claude CLI 或 Kiro），将完整的 agent 能力暴露给即时通信渠道。
 
 ## 架构
 
 ```
-消息渠道 (飞书/Slack/Telegram/...)
-       | webhook
+消息渠道 (飞书/Slack/Discord/...)
+       | webhook / websocket
        v
 +----------------------------------+
 |         Naozhi Gateway (Go)        |
 |                                  |
-|  Platform Adapter                |  <- 解析各平台消息格式
+|  Platform Adapter                |  <- 飞书/Slack/Discord 消息解析
 |       |                          |
 |  Session Router                  |  <- session key -> 进程映射 + 并发控制
 |       |                          |
-|  CLI Wrapper (长生命周期进程)      |  <- stdin/stdout stream-json 持久通信
+|  CLI Wrapper + Protocol          |  <- 可插拔协议层
 |       |                          |
 |  Session Pool                    |
-|    +-- user:alice -> claude 进程  |
-|    +-- user:bob   -> claude 进程  |
-|    +-- group:xxx  -> claude 进程  |
+|    +-- alice:general   -> 进程 A  |
+|    +-- alice:reviewer  -> 进程 B  |
+|    +-- group:xxx       -> 进程 C  |
 |                                  |
-|  本机 claude CLI                  |
-|    + ECC plugins (skills/agents) |
-|    + claude-mem (跨会话记忆)      |
-|    + MCP servers (Playwright等)  |
+|  AI CLI Backend                  |
+|    claude (stream-json)          |
+|    kiro   (ACP / JSON-RPC 2.0)  |
 |                                  |
 |  Cron Scheduler                  |  <- 定时任务调度
 +----------------------------------+
@@ -194,55 +193,77 @@ claude CLI 子进程的状态机：
 状态说明：
 - **Spawning**: 进程启动中，等待 init 事件。超时 10s 未收到 init 则 kill
 - **Ready**: 进程空闲，可接受新消息
-- **Running**: 正在处理消息，等待 result。设置 watchdog: 无输出超时 120s + 总超时 300s
+- **Running**: 正在处理消息，等待 result。启用 Watchdog: 无输出超时 120s（配置默认值）+ 总超时 300s（配置默认值）。任何一个超时触发即杀死进程
 - **Dead**: 进程已退出，保留 session_id 供 resume
 - **Discarded**: 无法恢复，丢弃
 
+Watchdog 机制：
+- `no_output_timeout`（默认 2min）：若连续无输出事件，杀死进程
+- `total_timeout`（默认 5min）：本轮总耗时超限，杀死进程
+- 两个定时器任意一个触发则认为挂起，立即终止进程
+- 有新事件时重置 no_output_timeout（但不重置 total_timeout）
+
 ## 模块设计
 
-### 1. CLI Wrapper (~200 行)
+### 1. CLI Wrapper + Protocol Layer
 
-核心协议层，管理长生命周期的 claude CLI 子进程。
+管理长生命周期 AI CLI 子进程，通过可插拔的 Protocol 接口适配不同后端。
 
 - 启动持久进程，通过 stdin/stdout 持续通信
-- 使用本机 CLI (`~/.local/bin/claude`)，继承完整插件生态
-- 解析 stream-json NDJSON 输出流，以 `type=result` 标记轮次完成
-- 进程健康检查、异常重启、优雅关闭
+- Protocol 接口抽象消息格式、初始化握手、事件解析
+- Wrapper.Spawn → Protocol.Init (握手) → startReadLoop
+- 进程健康检查、watchdog 超时、优雅关闭
+
+**Protocol 接口**:
 
 ```go
-type Process struct {
-    cmd     *exec.Cmd
-    stdin   io.WriteCloser
-    stdout  io.ReadCloser
-    session string // claude session_id, 首次 init 事件获取
+type Protocol interface {
+    Name() string                                    // "stream-json" | "acp"
+    BuildArgs(opts SpawnOptions) []string             // 构建 CLI 启动参数
+    Init(rw *JSONRW, resumeID string) (string, error) // 协议握手 (ACP: initialize + session/new)
+    WriteMessage(w io.Writer, text string) error      // 写入用户消息
+    ReadEvent(line []byte) (Event, bool, error)       // 解析事件 (bool=轮次完成)
+    HandleEvent(w io.Writer, ev Event) bool           // 处理内部事件 (如 ACP 权限自动授权)
+}
+```
+
+**两种实现**:
+
+| 维度 | ClaudeProtocol (stream-json) | ACPProtocol (JSON-RPC 2.0) |
+|------|------------------------------|---------------------------|
+| 后端 | claude CLI | kiro CLI |
+| 输入 | `{"type":"user","message":...}` | `session/prompt` RPC |
+| 输出 | NDJSON `type=result` | `session/update` 通知 + RPC response |
+| 握手 | 无 (session ID 从 init 事件获取) | `initialize` + `session/new` or `session/load` |
+| 恢复 | `--resume {sessionId}` | `session/load` RPC |
+| 权限 | `--dangerously-skip-permissions` | auto-grant `session/request_permission` |
+| 文本 | result 事件直接携带 | 累积 `agent_message_chunk` 文本 |
+
+```go
+type Wrapper struct {
+    CLIPath  string
+    Protocol Protocol
 }
 
-type CLIWrapper struct {
-    CLIPath string // 默认 ~/.local/bin/claude
-}
-
-// 启动长生命周期进程
-func (c *CLIWrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error)
-
-// 向持久进程发送消息，返回本轮 result
-func (p *Process) Send(ctx context.Context, text string) (<-chan Event, error)
-
-// 关闭进程
-func (p *Process) Close() error
+func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error)
+func (p *Process) Send(ctx context.Context, text string, onEvent EventCallback) (*SendResult, error)
+func (p *Process) Close()
+func (p *Process) Kill()
 ```
 
 ### 2. Session Router (~300 行)
 
 管理 session key 到长生命周期 claude 进程的映射。
 
-- session key: `{channel}:{chatType}:{id}:{agentId}`
+- session key: `{platform}:{chatType}:{userId}:{agentId}`
   - 如 `feishu:direct:alice:general`、`feishu:group:xxx:general`
-  - Phase 2+: `feishu:direct:alice:code-reviewer`、`feishu:direct:alice:researcher`
+  - Agent 支持：`feishu:direct:alice:code-reviewer`、`feishu:direct:alice:researcher`
 - 每个 session key 绑定一个持久 claude 进程
 - 空闲超时清理进程（默认 30min），回收后保留 session_id，下次 `--resume` 恢复 (~2s 冷启动)
-- 并发控制：信号量限制最大活跃进程数
-- 同一 session 的消息串行处理（排队）
-- 持久化到 JSON 文件 (`~/.naozhi/sessions.json`)
+- 并发控制：信号量限制最大活跃进程数，超出排队
+- 同一 session 的消息串行处理（排队，通过 sendMu 保护）
+- 持久化到 JSON 文件 (`~/.naozhi/sessions.json`)，启动时恢复
+- 关闭前等待 running 完成（超时 30s），然后保存 store
 
 **并发模型** (已验证: 每个 claude 进程 ~350MB RSS):
 
@@ -267,6 +288,11 @@ charlie 出队    -> spawn 进程 D           [3/3]
 alice 再来      -> --resume 恢复 (~2s)    [3/3 或排队]
 ```
 
+**并发安全性**：
+- `Reset()` 释放锁后再阻塞 Close()，避免死锁
+- `evictOldest()` 先从 map 中删除（设 process=nil），再释放锁后调用 Close()，保证其他 goroutine 不会选中该进程
+- `getSessionID()` 在 sendMu 下读取，避免 Send() 进行中时的数据竞争
+
 ```go
 type SessionRouter struct {
     mu       sync.Mutex
@@ -277,19 +303,17 @@ type SessionRouter struct {
 
 type ManagedSession struct {
     Key        string
-    Process    *Process   // 长生命周期 claude 进程
+    SessionID  string               // 从 init 事件获取（下次 resume 用）
+    process    *cli.Process         // 长生命周期 claude 进程
     LastActive time.Time
-    Platform   string     // "feishu", "slack"
-    UserID     string
-    ChatType   string     // "direct" | "group"
-    msgQueue   chan string // 串行消息队列
+    sendMu     sync.Mutex           // 保护消息串行
 }
 
-// key 示例: "feishu:direct:alice", "feishu:group:xxx"
-func (r *SessionRouter) GetOrCreate(key string) (*ManagedSession, error)
-func (r *SessionRouter) Cleanup()
-func (r *SessionRouter) Save() error   // 持久化到 sessions.json
-func (r *SessionRouter) Load() error   // 启动时恢复
+// key 示例: "feishu:direct:alice:general", "feishu:group:xxx:code-reviewer"
+func (r *SessionRouter) GetOrCreate(key string, opts AgentOpts) (*ManagedSession, error)
+func (r *SessionRouter) Reset(key string)     // 用户 /new 时调用
+func (r *SessionRouter) Cleanup()             // 清理空闲 session
+func (r *SessionRouter) Shutdown()            // 优雅关闭：等待 running 完成 + 保存 store
 ```
 
 ### 3. Platform Adapter (~200 行/平台)
@@ -343,12 +367,12 @@ type RunnablePlatform interface {
 
 **各平台差异由实现内部消化**：
 
-| 平台 | 接收方式 | 接口类型 | 验证 | 消息限制 | 特殊能力 |
-|------|---------|----------|------|---------|---------|
-| 飞书 | HTTP webhook | `Platform` | 签名 + challenge | 4000 字符 | 卡片消息 |
-| Slack | HTTP webhook | `Platform` | Signing secret | 4000 字符 | Block Kit |
-| Telegram | Long polling / webhook | `RunnablePlatform` | Bot token | 4096 字符 | Markdown |
-| Discord | WebSocket gateway | `RunnablePlatform` | Bot token | 2000 字符 | Embed |
+| 平台 | 接收方式 | 接口类型 | 验证 | 消息限制 | 状态 |
+|------|---------|----------|------|---------|------|
+| 飞书 | WebSocket (默认) / HTTP webhook | `RunnablePlatform` | 签名 + challenge | 4000 字符 | **已实现** |
+| Slack | Socket Mode (WebSocket) | `RunnablePlatform` | Bot/App token | 4000 字符 | **已实现** |
+| Discord | WebSocket gateway | `RunnablePlatform` | Bot token | 2000 字符 | **已实现** |
+| Telegram | Long polling / webhook | `RunnablePlatform` | Bot token | 4096 字符 | 计划中 |
 
 **Gateway 启动流程**：
 
@@ -476,10 +500,11 @@ naozhi/
 # ~/.naozhi/config.yaml
 
 server:
-  addr: ":8080"
+  addr: ":8180"
 
 cli:
-  path: "~/.local/bin/claude"    # claude 二进制路径
+  backend: "claude"              # "claude" (default) | "kiro"
+  path: "~/.local/bin/claude"    # CLI 二进制路径
   model: "sonnet"                # 默认模型
   args:                          # 额外 CLI 参数
     - "--dangerously-skip-permissions"
@@ -488,17 +513,44 @@ session:
   max_procs: 3                   # 最大并发 claude 进程数 (每进程 ~350MB)
   ttl: "30m"                     # 空闲 session 回收超时 (回收后保留 session_id, resume 恢复)
   watchdog:
-    no_output_timeout: "120s"    # 无输出超时 (kill 进程)
-    total_timeout: "300s"        # 单轮总超时
-  store_path: "~/.naozhi/sessions.json"
+    no_output_timeout: "120s"    # 无输出超时 (kill 进程), 默认 2min
+    total_timeout: "300s"        # 单轮总超时, 默认 5min
+  store_path: "~/.naozhi/sessions.json"  # session 持久化路径
+
+# Agent 定义: agent_id -> model + args
+agents:
+  general:
+    model: "sonnet"
+    args: []
+  code-reviewer:
+    model: "sonnet"
+    args: ["--append-system-prompt", "You are a code review expert..."]
+  researcher:
+    model: "opus"
+    args: ["--append-system-prompt", "You are a research expert..."]
+
+# 命令 -> agent 映射
+agent_commands:
+  review: "code-reviewer"
+  research: "researcher"
 
 platforms:
   feishu:
     app_id: "${IM_APP_ID}"
     app_secret: "${IM_APP_SECRET}"
+    connection_mode: "webhook"        # "websocket" (default) | "webhook"
     verification_token: "${IM_VERIFICATION_TOKEN}"
-    encrypt_key: "${IM_ENCRYPT_KEY}"     # 可选
+    encrypt_key: "${IM_ENCRYPT_KEY}"   # 可选, 用于 v2 签名校验 (SHA-256)
     max_reply_length: 4000                    # 超过则分割
+
+  slack:
+    bot_token: "${SLACK_BOT_TOKEN}"           # xoxb- token
+    app_token: "${SLACK_APP_TOKEN}"           # xapp- token for Socket Mode
+    max_reply_length: 4000
+
+  discord:
+    bot_token: "${DISCORD_BOT_TOKEN}"
+    max_reply_length: 2000
 
 log:
   level: "info"                  # debug/info/warn/error
@@ -506,6 +558,21 @@ log:
 ```
 
 环境变量支持 `${VAR}` 语法，敏感信息不写入文件。
+
+**Agent 配置说明**：
+- `agents`: 定义可用的 agent 及其运行时配置
+  - `model`: 使用的 AI 模型（支持覆盖 cli.model）
+  - `args`: 额外的 claude CLI 参数（通常用 `--append-system-prompt` 给 system prompt）
+- `agent_commands`: 将用户指令映射到 agent
+  - 启动时校验：所有 agent_commands 中的 agentId 必须在 agents 中定义
+
+**Feishu 配置说明**：
+- `connection_mode`: 传输模式
+  - `websocket`: 使用飞书 WebSocket 网关（推荐，无需公网 IP）
+  - `webhook`: HTTP webhook（需要公网 IP + HTTPS）
+- `encrypt_key`: v2 签名校验密钥
+  - 若配置，使用 SHA-256 校验 `X-Lark-Signature` 头
+  - 若不配置，跳过签名校验
 
 ## 与 OpenClaw 架构对比 (参考分析)
 
@@ -823,26 +890,24 @@ Phase 1 采用**策略 4: thinking 推一次 + result 推最终**：
 **实现**：
 - session key 扩展为 `{platform}:{chatType}:{userId}:{agentId}`
 - 不同 agent 的 session 相互独立（各自的 claude 进程和上下文）
-- 同一用户可以同时有多个 agent session
+- 同一用户可以同时有多个 agent session（如同时与 code-reviewer 和 researcher 聊天）
+- 指令格式：`/{cmd} {args}`，如 `/review file.go`、`/research blockchain`
+- Agent 命令无参数时返回提示：`请在指令后输入内容。`
+- 指令错误时返回提示：`未知的 agent: {cmd}`
+- `/new` 重置 general agent；`/new review` 重置 code-reviewer agent；`/new unknown` 返回错误
 
-**指令解析**（在 MessageHandler 中）：
+**指令解析**（在 server.buildMessageHandler 中）：
 
 ```go
-func resolveAgent(text string) (agentId string, cleanText string) {
-    // "/review PR#123" -> ("code-reviewer", "PR#123")
-    // "/research xxx"  -> ("researcher", "xxx")
-    // "普通消息"        -> ("general", "普通消息")
-    if strings.HasPrefix(text, "/") {
-        parts := strings.SplitN(text, " ", 2)
-        cmd := strings.TrimPrefix(parts[0], "/")
-        rest := ""
-        if len(parts) > 1 { rest = parts[1] }
-        if agentId, ok := agentCommands[cmd]; ok {
-            return agentId, rest
-        }
-    }
-    return "general", text
-}
+// 识别指令格式和 agent 映射
+agentID, cleanText := resolveAgent(text, agentCommands)
+// "/review PR#123" -> ("code-reviewer", "PR#123")
+// "/research xxx"  -> ("researcher", "xxx")
+// "普通消息"        -> ("general", "普通消息")
+
+// 使用 agent 配置中的 model + extra args spawn 进程
+opts := agents[agentID]
+sess, _ := router.GetOrCreate(key, opts)
 ```
 
 **Agent 配置**：
@@ -853,41 +918,44 @@ agents:
   general:
     model: "sonnet"
     args: []                         # 使用默认 system prompt
+
   code-reviewer:
     model: "sonnet"
-    args: ["--agent", "code-reviewer"]
+    args: ["--append-system-prompt", "You are a code review expert..."]
+
   researcher:
     model: "opus"
-    args: ["--agent", "researcher", "--effort", "max"]
-  ops:
-    model: "sonnet"
-    args: ["--append-system-prompt", "你是运维专家，可以使用 Bash 工具检查服务状态"]
+    args: ["--append-system-prompt", "You are a research expert..."]
 
 # 指令 -> agent 映射
 agent_commands:
   review: "code-reviewer"
   research: "researcher"
-  ops: "ops"
 ```
+
+**启动校验**：
+- main.go 加载 config 后，遍历 agent_commands，检查每个 agent 是否在 agents map 中存在
+- 若有未定义的 agent，启动失败并提示错误
 
 **进程模型变化**：
 
 ```
 Session Pool (之前: 1 用户 = 1 进程)
 +-- feishu:direct:alice:general        -> claude 进程 A (sonnet)
-+-- feishu:direct:alice:code-reviewer  -> claude 进程 B (sonnet, --agent code-reviewer)
-+-- feishu:direct:alice:researcher     -> claude 进程 C (opus, --agent researcher)
++-- feishu:direct:alice:code-reviewer  -> claude 进程 B (sonnet, --append-system-prompt)
++-- feishu:direct:alice:researcher     -> claude 进程 C (opus, --append-system-prompt)
 ```
 
 同一用户的不同 agent 是独立进程、独立上下文、可以用不同模型。
 并发限制按总进程数（不按用户），超出排队。
 
-**Phase 1 scope**: 只实现 `general` 默认 agent，不做指令路由。
-**Phase 2+**: 加指令解析和多 agent 配置。
+**Phase 2+ 扩展**：
+- 新增 agent 只需在 config.yaml 中配置 agents + agent_commands，无需改代码
+- 支持动态 agent 添加（需要 config 热重载）
 
 ## 优雅关闭
 
-Gateway 收到 SIGTERM 时：
+Gateway 收到 SIGTERM/SIGINT 时：
 
 ```
 1. 停止接受新 webhook (listener 关闭)
@@ -898,6 +966,12 @@ Gateway 收到 SIGTERM 时：
 ```
 
 重启后：从 sessions.json 恢复 session key → session_id 映射，所有进程状态为 Dead，下次消息 `--resume` 恢复。
+
+实现细节：
+- `Router.Shutdown()` 持有 mu 等待 running 完成
+- 关闭前调用 `saveStore()` 保存 session_id 映射
+- 关闭时调用 `Process.Close()` 通过关闭 stdin 让进程优雅退出
+- Process.Close() 等待最多 5s，超时后强杀
 
 ## 可观测性
 
@@ -1013,7 +1087,29 @@ deploy/
 ## 开发计划
 
 1. Phase 1: CLI Wrapper + 飞书 Platform — 基础消息收发 **[已完成]**
-2. Phase 2: Session Router 增强 — 多轮对话 + `/new` 重置 + "思考中..." 进度
-3. Phase 3: Agent 路由 — `/review`、`/research` 等指令路由到不同 agent
-4. Phase 4: Cron Scheduler — 定时任务
-5. Phase 5: 更多 Platform (Slack/Telegram)
+   - Stream-json 协议
+   - 长生命周期进程管理
+   - 飞书 webhook 接入
+
+2. Phase 2: Session Router 增强 **[已完成]**
+   - 多轮对话 + `/new` 重置 + "思考中..." 进度提示
+   - Watchdog（无输出超时 + 总超时）
+   - Session 持久化到 sessions.json，支持重启恢复
+   - Graceful shutdown（等待 running → 保存 → 关闭）
+   - Feishu v2 签名验证 + WebSocket/Webhook 双传输
+   - 并发控制（信号量 + LRU 驱逐）
+
+3. Phase 3: Agent 路由 **[已完成]**
+   - Session key 扩展: `{platform}:{chatType}:{userId}:{agentId}`
+   - Agent 配置（model + extra args）+ 启动校验
+   - 命令解析（`/review` → code-reviewer）
+
+4. Phase 4: 多后端 + 多平台 **[已完成]**
+   - Protocol 接口抽象: ClaudeProtocol (stream-json) + ACPProtocol (JSON-RPC 2.0 / Kiro)
+   - `cli.backend` 配置切换后端
+   - Slack 平台（Socket Mode）
+   - Discord 平台（WebSocket gateway）
+   - 飞书 WebSocket 传输模式
+
+5. Phase 5: Cron Scheduler — 定时任务
+6. Phase 6: 更多 Platform (Telegram)

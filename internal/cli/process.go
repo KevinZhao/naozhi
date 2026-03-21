@@ -52,8 +52,11 @@ type Process struct {
 	State     ProcessState
 	mu        sync.Mutex
 
-	eventCh chan Event
-	done    chan struct{}
+	eventCh  chan Event
+	done     chan struct{}
+	killCh   chan struct{} // closed by Kill() to unblock readLoop's channel send
+	killOnce sync.Once
+	waitOnce sync.Once // ensures cmd.Wait() is called exactly once
 
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
@@ -103,6 +106,7 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string, 
 		State:           StateSpawning,
 		eventCh:         make(chan Event, 64),
 		done:            make(chan struct{}),
+		killCh:          make(chan struct{}),
 		noOutputTimeout: noOutputTimeout,
 		totalTimeout:    totalTimeout,
 	}
@@ -138,7 +142,12 @@ func (p *Process) readLoop() {
 		if p.protocol.HandleEvent(p.stdin, ev) {
 			continue
 		}
-		p.eventCh <- ev
+		// Use select to avoid blocking forever if Kill() is called while eventCh is full
+		select {
+		case p.eventCh <- ev:
+		case <-p.killCh:
+			return
+		}
 	}
 
 	p.mu.Lock()
@@ -259,12 +268,16 @@ func (p *Process) IsRunning() bool {
 }
 
 // Kill forcefully terminates the process.
+// Safe to call concurrently — all operations are guarded by Once.
 func (p *Process) Kill() {
-	p.stdin.Close()
-	if p.cmd.Process != nil {
-		p.cmd.Process.Kill()
-	}
-	p.cmd.Wait()
+	p.killOnce.Do(func() {
+		close(p.killCh)
+		p.stdin.Close()
+		if p.cmd.Process != nil {
+			p.cmd.Process.Kill()
+		}
+	})
+	p.waitOnce.Do(func() { p.cmd.Wait() })
 }
 
 // Close gracefully shuts down by closing stdin.
@@ -274,5 +287,8 @@ func (p *Process) Close() {
 	case <-p.done:
 	case <-time.After(5 * time.Second):
 		p.Kill()
+		return
 	}
+	// Reap the child process to avoid zombies
+	p.waitOnce.Do(func() { p.cmd.Wait() })
 }

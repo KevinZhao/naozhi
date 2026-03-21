@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -25,10 +26,11 @@ type Server struct {
 	startedAt     time.Time
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
+	scheduler     *cron.Scheduler
 }
 
 // New creates a new Server.
-func New(addr string, router *session.Router, platforms map[string]platform.Platform, agents map[string]session.AgentOpts, agentCommands map[string]string) *Server {
+func New(addr string, router *session.Router, platforms map[string]platform.Platform, agents map[string]session.AgentOpts, agentCommands map[string]string, scheduler *cron.Scheduler) *Server {
 	return &Server{
 		addr:          addr,
 		mux:           http.NewServeMux(),
@@ -38,6 +40,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		startedAt:     time.Now(),
 		agents:        agents,
 		agentCommands: agentCommands,
+		scheduler:     scheduler,
 	}
 }
 
@@ -89,6 +92,14 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 
 		log := slog.With("platform", msg.Platform, "user", msg.UserID, "chat", msg.ChatID)
 		trimmed := strings.TrimSpace(msg.Text)
+
+		// Handle /cron commands
+		if trimmed == "/cron" || strings.HasPrefix(trimmed, "/cron ") {
+			if s.scheduler != nil {
+				s.handleCronCommand(ctx, msg, trimmed, log)
+			}
+			return
+		}
 
 		// Handle /new [agent] reset command
 		if trimmed == "/new" || strings.HasPrefix(trimmed, "/new ") {
@@ -244,4 +255,134 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"uptime":   time.Since(s.startedAt).Round(time.Second).String(),
 		"sessions": map[string]int{"active": active, "total": total},
 	})
+}
+
+// handleCronCommand dispatches /cron subcommands.
+func (s *Server) handleCronCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) {
+	p := s.platforms[msg.Platform]
+	if p == nil {
+		return
+	}
+	reply := func(text string) {
+		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: text})
+	}
+
+	// Parse subcommand: /cron <sub> [args...]
+	parts := strings.SplitN(trimmed, " ", 3)
+	sub := ""
+	if len(parts) >= 2 {
+		sub = parts[1]
+	}
+
+	switch sub {
+	case "add":
+		if len(parts) < 3 {
+			reply("用法: /cron add \"<schedule>\" <prompt>\n例: /cron add \"@every 30m\" 检查服务状态")
+			return
+		}
+		schedule, prompt, err := parseCronAdd(parts[2])
+		if err != nil {
+			reply("格式错误: " + err.Error() + "\n用法: /cron add \"<schedule>\" <prompt>")
+			return
+		}
+		job := &cron.Job{
+			Schedule:  schedule,
+			Prompt:    prompt,
+			Platform:  msg.Platform,
+			ChatID:    msg.ChatID,
+			ChatType:  msg.ChatType,
+			CreatedBy: msg.UserID,
+		}
+		if err := s.scheduler.AddJob(job); err != nil {
+			reply("创建失败: " + err.Error())
+			return
+		}
+		next := s.scheduler.NextRun(job)
+		reply(fmt.Sprintf("Job %s 已创建。Schedule: %s, Next: %s", job.ID, job.Schedule, next.Format("01/02 15:04")))
+		log.Info("cron job created", "id", job.ID, "schedule", job.Schedule)
+
+	case "list":
+		jobs := s.scheduler.ListJobs(msg.Platform, msg.ChatID)
+		if len(jobs) == 0 {
+			reply("当前聊天没有定时任务。")
+			return
+		}
+		var sb strings.Builder
+		sb.WriteString("定时任务:\n")
+		for _, j := range jobs {
+			status := ""
+			if j.Paused {
+				status = " [暂停]"
+			}
+			sb.WriteString(fmt.Sprintf("  %s  %-20s %s%s\n", j.ID, j.Schedule, j.Prompt, status))
+		}
+		reply(sb.String())
+
+	case "del":
+		if len(parts) < 3 {
+			reply("用法: /cron del <id>")
+			return
+		}
+		j, err := s.scheduler.DeleteJob(parts[2], msg.Platform, msg.ChatID)
+		if err != nil {
+			reply("删除失败: " + err.Error())
+			return
+		}
+		reply(fmt.Sprintf("Job %s 已删除。", j.ID))
+		log.Info("cron job deleted", "id", j.ID)
+
+	case "pause":
+		if len(parts) < 3 {
+			reply("用法: /cron pause <id>")
+			return
+		}
+		j, err := s.scheduler.PauseJob(parts[2], msg.Platform, msg.ChatID)
+		if err != nil {
+			reply("暂停失败: " + err.Error())
+			return
+		}
+		reply(fmt.Sprintf("Job %s 已暂停。", j.ID))
+		log.Info("cron job paused", "id", j.ID)
+
+	case "resume":
+		if len(parts) < 3 {
+			reply("用法: /cron resume <id>")
+			return
+		}
+		j, err := s.scheduler.ResumeJob(parts[2], msg.Platform, msg.ChatID)
+		if err != nil {
+			reply("恢复失败: " + err.Error())
+			return
+		}
+		next := s.scheduler.NextRun(j)
+		reply(fmt.Sprintf("Job %s 已恢复。Next: %s", j.ID, next.Format("01/02 15:04")))
+		log.Info("cron job resumed", "id", j.ID)
+
+	default:
+		reply("用法: /cron <add|list|del|pause|resume>\n" +
+			"  /cron add \"@every 30m\" 检查服务状态\n" +
+			"  /cron add \"0 9 * * 1-5\" /review 扫描 open PRs\n" +
+			"  /cron list\n" +
+			"  /cron del <id>\n" +
+			"  /cron pause <id>\n" +
+			"  /cron resume <id>")
+	}
+}
+
+// parseCronAdd parses the args of /cron add: "schedule" prompt
+func parseCronAdd(args string) (schedule, prompt string, err error) {
+	// Expect: "schedule" prompt
+	if !strings.HasPrefix(args, "\"") {
+		return "", "", fmt.Errorf("schedule must be quoted, e.g. \"@every 30m\"")
+	}
+	end := strings.Index(args[1:], "\"")
+	if end < 0 {
+		return "", "", fmt.Errorf("missing closing quote for schedule")
+	}
+	schedule = args[1 : end+1]
+	prompt = strings.TrimSpace(args[end+2:])
+	if prompt == "" {
+		return "", "", fmt.Errorf("prompt cannot be empty")
+	}
+	return schedule, prompt, nil
 }

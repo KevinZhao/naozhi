@@ -17,6 +17,7 @@ type Config struct {
 	Platforms     PlatformConfigs        `yaml:"platforms"`
 	Agents        map[string]AgentConfig `yaml:"agents"`
 	AgentCommands map[string]string      `yaml:"agent_commands"`
+	Cron          CronConfig             `yaml:"cron"`
 	Log           LogConfig              `yaml:"log"`
 }
 
@@ -61,6 +62,12 @@ type FeishuConfig struct {
 	VerificationToken string `yaml:"verification_token"`
 	EncryptKey        string `yaml:"encrypt_key"`
 	MaxReplyLength    int    `yaml:"max_reply_length"`
+}
+
+type CronConfig struct {
+	StorePath        string `yaml:"store_path"`
+	MaxJobs          int    `yaml:"max_jobs"`
+	ExecutionTimeout string `yaml:"execution_timeout"`
 }
 
 type LogConfig struct {
@@ -134,6 +141,18 @@ func (c *Config) ParseWatchdog() (noOutputTimeout, totalTimeout time.Duration) {
 		totalTimeout = 5 * time.Minute
 	}
 	return
+}
+
+// ParseExecutionTimeout returns the cron execution timeout duration.
+func (c *Config) ParseExecutionTimeout() time.Duration {
+	if c.Cron.ExecutionTimeout == "" {
+		return 5 * time.Minute
+	}
+	d, err := time.ParseDuration(c.Cron.ExecutionTimeout)
+	if err != nil {
+		return 5 * time.Minute
+	}
+	return d
 }
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)

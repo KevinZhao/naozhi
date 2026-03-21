@@ -27,6 +27,11 @@ agent_commands:
   review: "code-reviewer"
   research: "researcher"
 
+cron:
+  store_path: "~/.naozhi/cron_jobs.json"
+  max_jobs: 50
+  execution_timeout: "300s"
+
 platforms:
   feishu:
     app_id: "${IM_APP_ID}"

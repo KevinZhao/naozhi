@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -10,12 +11,25 @@ import (
 
 // ManagedSession wraps a claude CLI process with session metadata.
 type ManagedSession struct {
-	Key        string
-	SessionID  string
-	LastActive time.Time
+	Key       string
+	SessionID string
+
+	// lastActive stores time.UnixNano atomically to avoid data races
+	// between Send() (under sendMu) and Cleanup/evictOldest (under r.mu).
+	lastActive atomic.Int64
 
 	process *cli.Process
 	sendMu  sync.Mutex // serializes messages to the same session
+}
+
+// GetLastActive returns the last active time.
+func (s *ManagedSession) GetLastActive() time.Time {
+	return time.Unix(0, s.lastActive.Load())
+}
+
+// touchLastActive updates the last active timestamp.
+func (s *ManagedSession) touchLastActive() {
+	s.lastActive.Store(time.Now().UnixNano())
 }
 
 // Send delivers a message to the claude process and returns the result.
@@ -24,7 +38,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, onEvent cli.Even
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
-	s.LastActive = time.Now()
+	s.touchLastActive()
 	result, err := s.process.Send(ctx, text, onEvent)
 	if err != nil {
 		return nil, err

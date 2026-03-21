@@ -63,6 +63,37 @@ func TestSplitTextPreferNewline(t *testing.T) {
 	}
 }
 
+func TestParseCronAdd(t *testing.T) {
+	tests := []struct {
+		args         string
+		wantSchedule string
+		wantPrompt   string
+		wantErr      bool
+	}{
+		{`"@every 30m" check status`, "@every 30m", "check status", false},
+		{`"0 9 * * 1-5" /review scan PRs`, "0 9 * * 1-5", "/review scan PRs", false},
+		{`"@daily" summarize`, "@daily", "summarize", false},
+		{`"@every 1h"`, "", "", true},    // missing prompt
+		{`no quotes here`, "", "", true}, // no opening quote
+		{`"unclosed`, "", "", true},      // no closing quote
+	}
+	for _, tt := range tests {
+		t.Run(tt.args, func(t *testing.T) {
+			schedule, prompt, err := parseCronAdd(tt.args)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("parseCronAdd(%q): err=%v, wantErr=%v", tt.args, err, tt.wantErr)
+				return
+			}
+			if schedule != tt.wantSchedule {
+				t.Errorf("schedule = %q, want %q", schedule, tt.wantSchedule)
+			}
+			if prompt != tt.wantPrompt {
+				t.Errorf("prompt = %q, want %q", prompt, tt.wantPrompt)
+			}
+		})
+	}
+}
+
 func TestResolveAgent(t *testing.T) {
 	cmds := map[string]string{
 		"review":   "code-reviewer",

@@ -28,9 +28,9 @@ Set `INSTANCE_ID` in `deploy/deploy.sh` before first deploy.
 
 ## Architecture
 
-Naozhi is an IM gateway that wraps the `claude` CLI as a long-lived subprocess, communicating via the stream-json NDJSON protocol over stdin/stdout. The entire agent loop (tools, context, reasoning) is delegated to the CLI — Naozhi is just the routing layer.
+Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI or Kiro) as long-lived subprocesses. Communication uses a pluggable Protocol interface: `ClaudeProtocol` (stream-json NDJSON over stdin/stdout) or `ACPProtocol` (JSON-RPC 2.0 Agent Client Protocol). The entire agent loop (tools, context, reasoning) is delegated to the CLI — Naozhi is just the routing layer.
 
-**Request flow**: Feishu webhook → HTTP handler → async goroutine → session router → claude CLI stdin → read stdout until `type=result` → Feishu reply API.
+**Request flow**: IM platform → message handler → async goroutine → session router → CLI stdin → read stdout until turn complete → platform reply API.
 
 **Key constraint**: Feishu requires 200 response within 3s. The webhook handler returns 200 immediately and processes asynchronously via `go handler(context.Background(), msg)`.
 
@@ -38,37 +38,98 @@ Naozhi is an IM gateway that wraps the `claude` CLI as a long-lived subprocess, 
 
 ```
 cmd/naozhi/main.go
-  → config      (YAML loading, env var expansion)
-  → cli         (spawn and manage claude CLI processes)
-  → session     (map session keys to processes, concurrency control)
-  → platform    (Platform interface + feishu implementation)
-  → server      (HTTP routing, message handler, reply logic)
+  → config      (YAML loading, env var expansion, agent config validation)
+  → cli         (Protocol interface + spawn/manage CLI processes with watchdog)
+  → session     (map session keys to processes, concurrency control, persistence)
+  → platform    (Platform interface + feishu/slack/discord implementations)
+  → server      (HTTP routing, message handler, agent routing, reply logic)
 ```
 
 ### CLI Process Lifecycle
 
-Each claude CLI process is long-lived (stdin/stdout stay open across turns). The `system/init` event only arrives **after** the first message is written to stdin, not at process start. Session ID is captured from the init event inside `Process.Send()`.
+Each CLI process is long-lived (stdin/stdout stay open across turns). The Wrapper selects a Protocol based on `cli.backend` config:
+- `claude` (default): `ClaudeProtocol` — stream-json, session ID from init event
+- `kiro`: `ACPProtocol` — JSON-RPC 2.0, session ID from `session/new` response
 
-Process states: `Spawning → Ready ↔ Running → Dead`. Dead processes with a SessionID can be resumed via `--resume`.
+Protocol.Init() runs after spawn but before readLoop, handling any handshake (no-op for Claude, initialize + session/new for ACP). Session ID is captured during Init or from the first Send.
 
-### stream-json Protocol
+Process states: `Spawning → Ready ↔ Running → Dead`. Dead processes with a SessionID can be resumed via `--resume` (Claude) or `session/load` (ACP).
 
-- Input (stdin): `{"type":"user","message":{"role":"user","content":"..."}}\n`
-- Output (stdout): NDJSON lines with `type` field: `system/init`, `assistant`, `result`
-- `type=result` signals turn completion
-- Hook events (`hook_started`, `hook_response`) are filtered out in `readLoop`
-- Must use `--setting-sources ""` to avoid Stop hook death loops from plugins
-- Must use `--verbose` or stream-json output fails
+**Watchdog**: During Running state, two timers enforce limits:
+- `no_output_timeout` (default 2min): Reset on any event; if triggered, kill process
+- `total_timeout` (default 5min): Single shot; if triggered, kill process
+
+### Protocol Interface
+
+```go
+type Protocol interface {
+    Name() string
+    BuildArgs(opts SpawnOptions) []string
+    Init(rw *JSONRW, resumeID string) (sessionID string, err error)
+    WriteMessage(w io.Writer, text string) error
+    ReadEvent(line []byte) (ev Event, done bool, err error)
+    HandleEvent(w io.Writer, ev Event) (handled bool)
+}
+```
+
+- `ClaudeProtocol`: stream-json NDJSON, hook filtering, `--setting-sources ""` isolation
+- `ACPProtocol`: JSON-RPC 2.0, auto-grants `session/request_permission`, accumulates `agent_message_chunk` text
 
 ### Platform Adapter Pattern
 
 Platforms implement `Platform` interface and register their own webhook routes via `RegisterRoutes(mux, handler)`. The platform calls `handler(ctx, msg)` when a message arrives — the server never parses platform-specific formats.
 
-Platforms needing background goroutines (Telegram polling, Discord WebSocket) implement `RunnablePlatform` with `Start()/Stop()`.
+Platforms needing background goroutines implement `RunnablePlatform` with `Start()/Stop()`:
+
+| Platform | Transport | Interface |
+|----------|-----------|-----------|
+| Feishu   | WebSocket (default) or HTTP webhook | `RunnablePlatform` |
+| Slack    | Socket Mode (WebSocket) | `RunnablePlatform` |
+| Discord  | WebSocket gateway | `RunnablePlatform` |
+
+### Session Management & Agent Routing
+
+Session key format: `{platform}:{chatType}:{userId}:{agentId}` (e.g., `feishu:direct:alice:code-reviewer`).
+
+Each session is independent:
+- Owns one long-lived claude process
+- Maintains separate context and session ID
+- Uses per-session model/args from agent config
+
+Different commands route to different agents:
+- `/review xxx` → `code-reviewer` agent (sonnet, custom system prompt)
+- `/research xxx` → `researcher` agent (opus, custom system prompt)
+- Plain messages → `general` agent (default)
+- `/new` resets general; `/new review` resets code-reviewer
+
+On startup, validate all `agent_commands` entries reference existing agents in config.
+
+### Session Persistence
+
+Sessions are persisted to `~/.naozhi/sessions.json` at startup and shutdown:
+- Each entry stores `key` and `session_id`
+- On restart, dead sessions are loaded
+- Next message to a dead session resumes via `--resume`
+- Captures session_id under sendMu to avoid Send() data races
+
+### Graceful Shutdown
+
+On SIGTERM:
+1. Stop accepting webhooks
+2. Wait for running sessions to complete (timeout 30s)
+3. Save session store
+4. Close all processes (via stdin close)
 
 ## Config
 
-`config.yaml` supports `${ENV_VAR}` expansion. Feishu credentials come from `EnvironmentFile` in systemd (`~/.naozhi/env`).
+`config.yaml` supports `${ENV_VAR}` expansion. Includes:
+- **cli**: Backend (`claude`|`kiro`), path, model, extra args
+- **session**: Concurrency (max_procs), idle timeout (ttl), watchdog timers (no_output_timeout, total_timeout), persistence path
+- **agents**: Map of agent_id → (model, extra args). Each agent spawns with custom system prompt via `--append-system-prompt`
+- **agent_commands**: Map of command → agent_id for routing (e.g., `/review` → `code-reviewer`)
+- **platforms**: Feishu (app credentials, connection_mode, encrypt_key), Slack (bot_token, app_token for Socket Mode), Discord (bot_token)
+
+Feishu credentials come from environment or config. v2 signature verification uses SHA-256 hash of `timestamp + nonce + encrypt_key + body`.
 
 ## Deployment
 

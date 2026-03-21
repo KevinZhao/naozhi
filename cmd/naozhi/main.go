@@ -14,6 +14,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/platform"
 	discordplatform "github.com/naozhi/naozhi/internal/platform/discord"
 	"github.com/naozhi/naozhi/internal/platform/feishu"
@@ -21,6 +22,8 @@ import (
 	"github.com/naozhi/naozhi/internal/server"
 	"github.com/naozhi/naozhi/internal/session"
 )
+
+var version = "dev"
 
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
@@ -128,8 +131,23 @@ func main() {
 		}
 	}
 
+	// Cron Scheduler
+	scheduler := cron.NewScheduler(cron.SchedulerConfig{
+		Router:        router,
+		Platforms:     platforms,
+		Agents:        agents,
+		AgentCommands: cfg.AgentCommands,
+		StorePath:     expandHome(cfg.Cron.StorePath),
+		MaxJobs:       cfg.Cron.MaxJobs,
+		ExecTimeout:   cfg.ParseExecutionTimeout(),
+	})
+	if err := scheduler.Start(); err != nil {
+		slog.Error("start cron scheduler", "err", err)
+		os.Exit(1)
+	}
+
 	// Server
-	srv := server.New(cfg.Server.Addr, router, platforms, agents, cfg.AgentCommands)
+	srv := server.New(cfg.Server.Addr, router, platforms, agents, cfg.AgentCommands, scheduler)
 
 	// Graceful shutdown
 	sigCh := make(chan os.Signal, 1)
@@ -138,10 +156,12 @@ func main() {
 		sig := <-sigCh
 		slog.Info("received signal", "signal", sig)
 		cancel()
+		scheduler.Stop()
 		router.Shutdown()
 	}()
 
 	slog.Info("naozhi starting",
+		"version", version,
 		"addr", cfg.Server.Addr,
 		"backend", cfg.CLI.Backend,
 		"model", cfg.CLI.Model,

@@ -82,15 +82,15 @@ type AgentOpts struct {
 // AgentOpts overrides the router defaults for model and args.
 func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, error) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	if s, ok := r.sessions[key]; ok {
 		if s.process != nil && s.process.Alive() {
-			s.LastActive = time.Now()
+			s.touchLastActive()
+			r.mu.Unlock()
 			return s, nil
 		}
-		slog.Info("session process dead, resuming", "key", key, "session_id", s.SessionID)
-		return r.spawnSession(ctx, key, s.SessionID, opts)
+		slog.Info("session process dead, resuming", "key", key, "session_id", s.getSessionID())
+		return r.spawnSession(ctx, key, s.getSessionID(), opts)
 	}
 
 	slog.Info("creating new session", "key", key)
@@ -98,15 +98,18 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 }
 
 // spawnSession creates a new process, optionally resuming an existing session.
-// Caller must hold r.mu.
+// Caller must hold r.mu. Releases r.mu during Spawn() to avoid blocking other
+// goroutines during potentially slow protocol init (e.g., ACP handshake).
 func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, opts AgentOpts) (*ManagedSession, error) {
 	r.countActive()
 	if r.activeCount >= r.maxProcs {
 		if !r.evictOldest() {
+			r.mu.Unlock()
 			return nil, fmt.Errorf("max concurrent processes reached (%d), all busy", r.maxProcs)
 		}
 		r.countActive()
 		if r.activeCount >= r.maxProcs {
+			r.mu.Unlock()
 			return nil, fmt.Errorf("max concurrent processes reached (%d), all busy", r.maxProcs)
 		}
 	}
@@ -120,28 +123,42 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	copy(args, r.extraArgs)
 	args = append(args, opts.ExtraArgs...)
 
-	proc, err := r.wrapper.Spawn(ctx, cli.SpawnOptions{
+	spawnOpts := cli.SpawnOptions{
 		Model:           model,
 		ResumeID:        resumeID,
 		ExtraArgs:       args,
 		NoOutputTimeout: r.noOutputTimeout,
 		TotalTimeout:    r.totalTimeout,
-	})
+	}
+
+	// Release lock during Spawn (may block on ACP Init handshake)
+	r.mu.Unlock()
+	proc, err := r.wrapper.Spawn(ctx, spawnOpts)
+	r.mu.Lock()
 	if err != nil {
+		r.mu.Unlock()
 		return nil, fmt.Errorf("spawn process: %w", err)
 	}
 
-	s := &ManagedSession{
-		Key:        key,
-		SessionID:  resumeID,
-		process:    proc,
-		LastActive: time.Now(),
-		sendMu:     sync.Mutex{},
+	// TOCTOU guard: another goroutine may have spawned this key while we were unlocked
+	if existing, ok := r.sessions[key]; ok && existing.process != nil && existing.process.Alive() {
+		r.mu.Unlock()
+		proc.Close() // discard the redundant process
+		return existing, nil
 	}
+
+	s := &ManagedSession{
+		Key:       key,
+		SessionID: resumeID,
+		process:   proc,
+		sendMu:    sync.Mutex{},
+	}
+	s.touchLastActive()
 	r.sessions[key] = s
 	r.activeCount++
 
 	slog.Info("session spawned", "key", key, "active", r.activeCount)
+	r.mu.Unlock()
 	return s, nil
 }
 
@@ -165,17 +182,17 @@ func (r *Router) evictOldest() bool {
 		if s.process == nil || !s.process.Alive() || s.process.IsRunning() {
 			continue
 		}
-		if oldest == nil || s.LastActive.Before(oldest.LastActive) {
+		if oldest == nil || s.GetLastActive().Before(oldest.GetLastActive()) {
 			oldest = s
 		}
 	}
 	if oldest == nil {
 		return false
 	}
-	slog.Info("evicting oldest session", "key", oldest.Key, "idle", time.Since(oldest.LastActive))
-	// Detach process before releasing lock so no other goroutine selects it
+	slog.Info("evicting oldest session", "key", oldest.Key, "idle", time.Since(oldest.GetLastActive()))
+	// Keep oldest.process non-nil so concurrent holders don't get nil-panic.
+	// After Close(), Alive() returns false — countActive() will stop counting it.
 	proc := oldest.process
-	oldest.process = nil
 	r.mu.Unlock()
 	proc.Close()
 	r.mu.Lock()
@@ -208,19 +225,32 @@ func (r *Router) Reset(key string) {
 }
 
 // Cleanup closes sessions idle beyond TTL.
+// Releases r.mu during Close() to avoid blocking message processing.
 func (r *Router) Cleanup() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
+
+	type expiredEntry struct {
+		key  string
+		proc *cli.Process
+	}
+	var expired []expiredEntry
 
 	now := time.Now()
 	for key, s := range r.sessions {
-		if s.process != nil && s.process.Alive() && now.Sub(s.LastActive) > r.ttl {
-			slog.Info("session expired", "key", key, "idle", now.Sub(s.LastActive))
-			s.process.Close()
-			r.activeCount--
-			// Keep the session entry (with SessionID) for resume
+		if s.process != nil && s.process.Alive() && !s.process.IsRunning() && now.Sub(s.GetLastActive()) > r.ttl {
+			slog.Info("session expired", "key", key, "idle", now.Sub(s.GetLastActive()))
+			expired = append(expired, expiredEntry{key, s.process})
 		}
 	}
+	r.mu.Unlock()
+
+	for _, e := range expired {
+		e.proc.Close()
+	}
+
+	r.mu.Lock()
+	r.countActive()
+	r.mu.Unlock()
 }
 
 // StartCleanupLoop runs Cleanup periodically.
@@ -242,7 +272,6 @@ func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 // Shutdown gracefully closes all sessions, waiting for running ones to complete.
 func (r *Router) Shutdown() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
 
 	// Wait for running sessions to complete (up to 30s)
 	deadline := time.Now().Add(30 * time.Second)
@@ -267,12 +296,25 @@ func (r *Router) Shutdown() {
 		slog.Error("save session store on shutdown", "err", err)
 	}
 
+	// Collect processes to close, then release lock to close concurrently
+	var procs []*cli.Process
 	for key, s := range r.sessions {
 		if s.process != nil && s.process.Alive() {
 			slog.Info("shutting down session", "key", key)
-			s.process.Close()
+			procs = append(procs, s.process)
 		}
 	}
+	r.mu.Unlock()
+
+	var wg sync.WaitGroup
+	for _, proc := range procs {
+		wg.Add(1)
+		go func(p *cli.Process) {
+			defer wg.Done()
+			p.Close()
+		}(proc)
+	}
+	wg.Wait()
 }
 
 // Stats returns current session statistics.

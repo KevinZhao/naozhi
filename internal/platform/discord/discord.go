@@ -69,11 +69,14 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 
 	sess.AddHandler(d.onMessageCreate)
 
+	// Assign session BEFORE Open() so handlers don't hit nil d.session.
+	// If Open() fails, nil it out.
+	d.session = sess
+
 	if err := sess.Open(); err != nil {
+		d.session = nil
 		return fmt.Errorf("open discord gateway: %w", err)
 	}
-
-	d.session = sess
 
 	if sess.State != nil && sess.State.User != nil {
 		d.botID = sess.State.User.ID
