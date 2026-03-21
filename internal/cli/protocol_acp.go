@@ -60,7 +60,7 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string) (string, error) {
 		newID := p.allocID()
 		newReq := RPCRequest{
 			JSONRPC: "2.0", ID: newID, Method: "session/new",
-			Params: map[string]any{"cwd": cwd},
+			Params: map[string]any{"cwd": cwd, "mcpServers": []any{}},
 		}
 		data, err := json.Marshal(newReq)
 		if err != nil {
