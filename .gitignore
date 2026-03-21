@@ -1,0 +1,6 @@
+bin/
+*.exe
+.claude/
+.naozhi/
+sdk-test/
+/tmp/

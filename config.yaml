@@ -1,0 +1,27 @@
+server:
+  addr: ":8180"
+
+cli:
+  path: "~/.local/bin/claude"
+  model: "sonnet"
+  args:
+    - "--dangerously-skip-permissions"
+
+session:
+  max_procs: 3
+  ttl: "30m"
+  watchdog:
+    no_output_timeout: "120s"
+    total_timeout: "300s"
+  store_path: "~/.naozhi/sessions.json"
+
+platforms:
+  feishu:
+    app_id: "${IM_APP_ID}"
+    app_secret: "${IM_APP_SECRET}"
+    verification_token: "${IM_VERIFICATION_TOKEN}"
+    encrypt_key: "${IM_ENCRYPT_KEY}"
+    max_reply_length: 4000
+
+log:
+  level: "info"
