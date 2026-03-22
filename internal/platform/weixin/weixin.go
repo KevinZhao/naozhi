@@ -47,6 +47,9 @@ func (w *Weixin) Name() string { return "weixin" }
 
 func (w *Weixin) MaxReplyLength() int { return w.cfg.MaxReplyLen }
 
+// SupportsInterimMessages returns false — iLink Bot context_token is single-use.
+func (w *Weixin) SupportsInterimMessages() bool { return false }
+
 // RegisterRoutes is a no-op (long-poll, no inbound HTTP).
 func (w *Weixin) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
 

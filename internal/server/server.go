@@ -178,7 +178,7 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		}
 
 		// Notify user when previous session context was lost
-		if sessStatus == session.SessionNew {
+		if sessStatus == session.SessionNew && platform.SupportsInterimMessages(p) {
 			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "新会话已创建（之前的上下文已失效）。"})
 		}
 
@@ -187,6 +187,9 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		var thinkingSent sync.Once
 
 		onEvent := func(ev cli.Event) {
+			if !platform.SupportsInterimMessages(p) {
+				return
+			}
 			thinkingSent.Do(func() {
 				id, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "思考中..."})
 				if err == nil {

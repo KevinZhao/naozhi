@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -18,7 +19,15 @@ const (
 	defaultBaseURL         = "https://ilinkai.weixin.qq.com"
 	defaultLongPollTimeout = 35 * time.Second
 	defaultAPITimeout      = 15 * time.Second
+	channelVersion         = "naozhi-1.0.0"
 )
+
+// baseInfo is attached to every outgoing API request.
+// Without this field, iLink server falls back to one-shot mode
+// and silently drops all sendMessage calls after the first one.
+type baseInfo struct {
+	ChannelVersion string `json:"channel_version"`
+}
 
 // apiClient wraps the iLink Bot HTTP API.
 type apiClient struct {
@@ -48,6 +57,12 @@ func randomWechatUIN() string {
 	_, _ = rand.Read(b)
 	n := binary.BigEndian.Uint32(b)
 	return base64.StdEncoding.EncodeToString([]byte(fmt.Sprintf("%d", n)))
+}
+
+func generateClientID() string {
+	b := make([]byte, 8)
+	_, _ = rand.Read(b)
+	return fmt.Sprintf("naozhi-%x", b)
 }
 
 func (c *apiClient) post(ctx context.Context, endpoint string, body any) ([]byte, error) {
@@ -88,7 +103,8 @@ func (c *apiClient) post(ctx context.Context, endpoint string, body any) ([]byte
 // --- getUpdates ---
 
 type getUpdatesReq struct {
-	GetUpdatesBuf string `json:"get_updates_buf"`
+	GetUpdatesBuf string   `json:"get_updates_buf"`
+	BaseInfo      baseInfo `json:"base_info"`
 }
 
 type weixinMessage struct {
@@ -96,6 +112,7 @@ type weixinMessage struct {
 	MessageID    int           `json:"message_id,omitempty"`
 	FromUserID   string        `json:"from_user_id,omitempty"`
 	ToUserID     string        `json:"to_user_id,omitempty"`
+	ClientID     string        `json:"client_id,omitempty"`
 	CreateTimeMs int64         `json:"create_time_ms,omitempty"`
 	SessionID    string        `json:"session_id,omitempty"`
 	MessageType  int           `json:"message_type,omitempty"`
@@ -131,7 +148,10 @@ type getUpdatesResp struct {
 }
 
 func (c *apiClient) getUpdates(ctx context.Context, cursor string) (*getUpdatesResp, error) {
-	data, err := c.post(ctx, "ilink/bot/getupdates", getUpdatesReq{GetUpdatesBuf: cursor})
+	data, err := c.post(ctx, "ilink/bot/getupdates", getUpdatesReq{
+		GetUpdatesBuf: cursor,
+		BaseInfo:      baseInfo{ChannelVersion: channelVersion},
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -145,13 +165,16 @@ func (c *apiClient) getUpdates(ctx context.Context, cursor string) (*getUpdatesR
 // --- sendMessage ---
 
 type sendMessageReq struct {
-	Msg weixinMessage `json:"msg"`
+	Msg      weixinMessage `json:"msg"`
+	BaseInfo baseInfo      `json:"base_info"`
 }
 
 func (c *apiClient) sendMessage(ctx context.Context, to, text, contextToken string) error {
 	req := sendMessageReq{
 		Msg: weixinMessage{
+			FromUserID:   "", // must be empty per OpenClaw Weixin plugin
 			ToUserID:     to,
+			ClientID:     generateClientID(),
 			MessageType:  msgTypeBOT,
 			MessageState: msgStateFinish,
 			ContextToken: contextToken,
@@ -159,9 +182,63 @@ func (c *apiClient) sendMessage(ctx context.Context, to, text, contextToken stri
 				{Type: msgItemTypeText, TextItem: &textItem{Text: text}},
 			},
 		},
+		BaseInfo: baseInfo{ChannelVersion: channelVersion},
 	}
-	_, err := c.post(ctx, "ilink/bot/sendmessage", req)
+	data, err := c.post(ctx, "ilink/bot/sendmessage", req)
+	if err != nil {
+		return err
+	}
+	slog.Debug("weixin sendMessage", "to", to, "resp", string(data))
+	return nil
+}
+
+// --- sendTyping ---
+
+type sendTypingReq struct {
+	ILinkUserID  string   `json:"ilink_user_id"`
+	TypingTicket string   `json:"typing_ticket"`
+	Status       int      `json:"status"`
+	BaseInfo     baseInfo `json:"base_info"`
+}
+
+func (c *apiClient) sendTyping(ctx context.Context, userID, typingTicket string) error {
+	_, err := c.post(ctx, "ilink/bot/sendtyping", sendTypingReq{
+		ILinkUserID:  userID,
+		TypingTicket: typingTicket,
+		Status:       1, // typing
+		BaseInfo:     baseInfo{ChannelVersion: channelVersion},
+	})
 	return err
+}
+
+// --- getConfig ---
+
+type getConfigReq struct {
+	ILinkUserID  string   `json:"ilink_user_id"`
+	ContextToken string   `json:"context_token,omitempty"`
+	BaseInfo     baseInfo `json:"base_info"`
+}
+
+type getConfigResp struct {
+	Ret          int    `json:"ret"`
+	ErrMsg       string `json:"errmsg,omitempty"`
+	TypingTicket string `json:"typing_ticket,omitempty"`
+}
+
+func (c *apiClient) getConfig(ctx context.Context, userID, contextToken string) (*getConfigResp, error) {
+	data, err := c.post(ctx, "ilink/bot/getconfig", getConfigReq{
+		ILinkUserID:  userID,
+		ContextToken: contextToken,
+		BaseInfo:     baseInfo{ChannelVersion: channelVersion},
+	})
+	if err != nil {
+		return nil, err
+	}
+	var resp getConfigResp
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, fmt.Errorf("unmarshal getConfig: %w", err)
+	}
+	return &resp, nil
 }
 
 // --- QR login ---

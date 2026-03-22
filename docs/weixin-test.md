@@ -56,3 +56,43 @@ bin/naozhi --config config.yaml
 - 发消息：`POST ilink/bot/sendmessage`，需回传 `context_token`
 - 认证：`Authorization: Bearer <bot_token>`，无需 App ID/Secret
 - 连续失败 3 次自动退避 30 秒
+
+## 踩坑记录：多轮对话必须携带 base_info
+
+### 问题
+
+使用 iLink Bot API 时，第一条 `sendMessage` 能正常送达微信，但第二条及之后的消息全部静默丢弃（API 返回 `{}` 无错误）。
+
+### 根因
+
+iLink Bot API 要求每个请求体携带 `base_info` 字段：
+
+```json
+{
+  "msg": { ... },
+  "base_info": { "channel_version": "naozhi-1.0.0" }
+}
+```
+
+缺少 `base_info` 时，iLink 服务端将客户端视为非标准接入，**降级为一次性回复模式**——仅允许每次扫码后发送一条消息。
+
+### 发现过程
+
+通过分析腾讯官方 OpenClaw 微信插件 `@tencent-weixin/openclaw-weixin`（npm 包）的源码发现。该插件也使用同样的 HTTP API（`getupdates` / `sendmessage`），但每个请求都带了 `base_info: { channel_version }`。
+
+### 完整修复清单
+
+| 修复项 | 说明 |
+|--------|------|
+| `base_info.channel_version` | 每个请求体必须携带，标识客户端版本 |
+| `msg.client_id` | sendMessage 时带唯一请求 ID |
+| `msg.from_user_id` | 设为空字符串 `""`，不是 bot ID |
+| `ilink/bot/getconfig` | 新 API：获取 `typing_ticket` |
+| `ilink/bot/sendtyping` | 新 API：发送"正在输入"指示器 |
+
+### 参考
+
+- 官方插件包：`npm pack @tencent-weixin/openclaw-weixin`
+- 安装器：`npx -y @tencent-weixin/openclaw-weixin-cli@latest install`
+- iLink Bot API 无公开文档，以上均通过逆向插件源码获得
+

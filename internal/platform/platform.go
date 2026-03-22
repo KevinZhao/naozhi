@@ -43,6 +43,19 @@ type Platform interface {
 	MaxReplyLength() int
 }
 
+// SupportsInterimMessages reports whether a platform can handle interim
+// notifications (e.g. "thinking...", "new session") before the final reply.
+// Platforms like WeChat iLink use single-use reply tokens and should return false.
+func SupportsInterimMessages(p Platform) bool {
+	type interim interface {
+		SupportsInterimMessages() bool
+	}
+	if i, ok := p.(interim); ok {
+		return i.SupportsInterimMessages()
+	}
+	return true // default: supported
+}
+
 // RunnablePlatform extends Platform for platforms needing background goroutines.
 type RunnablePlatform interface {
 	Platform
