@@ -169,15 +169,30 @@ func (p *ACPProtocol) ReadEvent(line []byte) (Event, bool, error) {
 	return Event{}, false, nil
 }
 
+type permissionResponse struct {
+	JSONRPC string           `json:"jsonrpc"`
+	ID      int              `json:"id"`
+	Result  permissionResult `json:"result"`
+}
+
+type permissionResult struct {
+	Outcome permissionOutcome `json:"outcome"`
+}
+
+type permissionOutcome struct {
+	Outcome  string `json:"outcome"`
+	OptionID string `json:"optionId"`
+}
+
 func (p *ACPProtocol) HandleEvent(w io.Writer, ev Event) bool {
 	if ev.Type != "permission_request" {
 		return false
 	}
-	resp := map[string]any{
-		"jsonrpc": "2.0",
-		"id":      ev.RPCRequestID,
-		"result": map[string]any{
-			"outcome": map[string]string{"outcome": "selected", "optionId": "allow-once"},
+	resp := permissionResponse{
+		JSONRPC: "2.0",
+		ID:      ev.RPCRequestID,
+		Result: permissionResult{
+			Outcome: permissionOutcome{Outcome: "selected", OptionID: "allow-once"},
 		},
 	}
 	data, err := json.Marshal(resp)
@@ -280,10 +295,12 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 		}
 	}()
 
+	timer := time.NewTimer(30 * time.Second)
+	defer timer.Stop()
 	select {
 	case r := <-ch:
 		return r.msg, r.err
-	case <-time.After(30 * time.Second):
+	case <-timer.C:
 		return nil, fmt.Errorf("timeout waiting for ACP response (id=%d)", expectedID)
 	}
 }

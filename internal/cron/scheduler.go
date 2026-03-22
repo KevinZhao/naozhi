@@ -53,7 +53,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	}
 	stopCtx, stopCancel := context.WithCancel(context.Background())
 	return &Scheduler{
-		cron:          robfigcron.New(),
+		cron:          robfigcron.New(robfigcron.WithChain(robfigcron.SkipIfStillRunning(robfigcron.DefaultLogger))),
 		jobs:          make(map[string]*Job),
 		router:        cfg.Router,
 		platforms:     cfg.Platforms,

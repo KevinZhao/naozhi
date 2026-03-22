@@ -1,6 +1,7 @@
 package weixin
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/base64"
@@ -72,7 +73,7 @@ func (c *apiClient) post(ctx context.Context, endpoint string, body any) ([]byte
 	}
 
 	u := c.baseURL + "/" + endpoint
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, strings.NewReader(string(payload)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("new request: %w", err)
 	}

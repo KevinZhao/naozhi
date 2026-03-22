@@ -51,10 +51,7 @@ type LineReader interface {
 
 // WriteLine writes a JSON-encoded value followed by a newline.
 func (rw *JSONRW) WriteLine(data []byte) error {
-	buf := make([]byte, len(data)+1)
-	copy(buf, data)
-	buf[len(data)] = '\n'
-	_, err := rw.W.Write(buf)
+	_, err := rw.W.Write(append(data, '\n'))
 	return err
 }
 

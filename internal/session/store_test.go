@@ -11,18 +11,9 @@ func TestSaveAndLoadStore(t *testing.T) {
 	path := filepath.Join(dir, "sessions.json")
 
 	sessions := map[string]*ManagedSession{
-		"feishu:direct:alice:general": {
-			Key:       "feishu:direct:alice:general",
-			SessionID: "sess-111",
-		},
-		"feishu:group:xxx:general": {
-			Key:       "feishu:group:xxx:general",
-			SessionID: "sess-222",
-		},
-		"feishu:direct:bob:general": {
-			Key:       "feishu:direct:bob:general",
-			SessionID: "", // empty session ID should be skipped
-		},
+		"feishu:direct:alice:general": newSessionWithID("feishu:direct:alice:general", "sess-111"),
+		"feishu:group:xxx:general":    newSessionWithID("feishu:group:xxx:general", "sess-222"),
+		"feishu:direct:bob:general":   {Key: "feishu:direct:bob:general"}, // empty session ID should be skipped
 	}
 
 	if err := saveStore(path, sessions); err != nil {
@@ -65,7 +56,7 @@ func TestSaveStoreCreatesDirectory(t *testing.T) {
 	path := filepath.Join(dir, "sub", "dir", "sessions.json")
 
 	sessions := map[string]*ManagedSession{
-		"test:key": {Key: "test:key", SessionID: "sess-1"},
+		"test:key": newSessionWithID("test:key", "sess-1"),
 	}
 	if err := saveStore(path, sessions); err != nil {
 		t.Fatalf("saveStore() error: %v", err)
