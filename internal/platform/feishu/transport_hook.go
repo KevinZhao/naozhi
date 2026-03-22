@@ -2,6 +2,7 @@ package feishu
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"io"
 	"log/slog"
@@ -41,20 +42,13 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			return
 		}
 
-		// Challenge verification
-		if envelope.Type == "url_verification" {
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"challenge": envelope.Challenge})
-			return
-		}
-
 		// Token verification (v1: top-level token, v2: header.token)
 		if f.cfg.VerificationToken != "" {
 			token := envelope.Token
 			if envelope.Header != nil && envelope.Header.Token != "" {
 				token = envelope.Header.Token
 			}
-			if token != f.cfg.VerificationToken {
+			if subtle.ConstantTimeCompare([]byte(token), []byte(f.cfg.VerificationToken)) != 1 {
 				slog.Warn("feishu token mismatch")
 				w.WriteHeader(http.StatusUnauthorized)
 				return
@@ -71,6 +65,13 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
+		}
+
+		// Challenge verification (after authentication)
+		if envelope.Type == "url_verification" {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]string{"challenge": envelope.Challenge})
+			return
 		}
 
 		// Return 200 immediately

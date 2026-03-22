@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
@@ -266,21 +267,25 @@ func (s *Server) sendSplitReply(ctx context.Context, p platform.Platform, chatID
 	}
 }
 
-func splitText(text string, maxLen int) []string {
-	if len(text) <= maxLen {
+func splitText(text string, maxRunes int) []string {
+	if utf8.RuneCountInString(text) <= maxRunes {
 		return []string{text}
 	}
 	var chunks []string
-	for len(text) > 0 {
-		end := maxLen
-		if end > len(text) {
-			end = len(text)
+	for text != "" {
+		if utf8.RuneCountInString(text) <= maxRunes {
+			chunks = append(chunks, text)
+			break
 		}
-		// Try to split at newline
-		if end < len(text) {
-			if idx := strings.LastIndex(text[:end], "\n"); idx > maxLen/2 {
-				end = idx + 1
-			}
+		// Advance maxRunes runes to find byte offset
+		end := 0
+		for i := 0; i < maxRunes && end < len(text); i++ {
+			_, size := utf8.DecodeRuneInString(text[end:])
+			end += size
+		}
+		// Prefer splitting at a newline in the second half
+		if idx := strings.LastIndex(text[:end], "\n"); idx > end/2 {
+			end = idx + 1
 		}
 		chunks = append(chunks, text[:end])
 		text = text[end:]

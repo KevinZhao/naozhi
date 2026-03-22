@@ -7,6 +7,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	robfigcron "github.com/robfig/cron/v3"
 
@@ -249,7 +250,7 @@ func (s *Scheduler) execute(j *Job) {
 		log.Error("cron session error", "err", err)
 		if _, rerr := p.Reply(ctx, platform.OutgoingMessage{
 			ChatID: j.ChatID,
-			Text:   fmt.Sprintf("[Cron %s] skipped: %s", j.ID, err),
+			Text:   fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", j.ID),
 		}); rerr != nil {
 			log.Error("reply failed", "err", rerr)
 		}
@@ -261,7 +262,7 @@ func (s *Scheduler) execute(j *Job) {
 		log.Error("cron send error", "err", err)
 		if _, rerr := p.Reply(ctx, platform.OutgoingMessage{
 			ChatID: j.ChatID,
-			Text:   fmt.Sprintf("[Cron %s] failed: %s", j.ID, err),
+			Text:   fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", j.ID),
 		}); rerr != nil {
 			log.Error("reply failed", "err", rerr)
 		}
@@ -269,11 +270,19 @@ func (s *Scheduler) execute(j *Job) {
 	}
 
 	log.Info("cron job completed", "result_len", len(result.Text))
-	if _, rerr := p.Reply(ctx, platform.OutgoingMessage{
-		ChatID: j.ChatID,
-		Text:   fmt.Sprintf("[Cron %s] %s", j.ID, result.Text),
-	}); rerr != nil {
-		log.Error("reply failed", "err", rerr)
+	replyText := fmt.Sprintf("[Cron %s] %s", j.ID, result.Text)
+	maxLen := p.MaxReplyLength()
+	if maxLen <= 0 {
+		maxLen = 4000
+	}
+	chunks := splitReply(replyText, maxLen)
+	for _, chunk := range chunks {
+		if _, rerr := p.Reply(ctx, platform.OutgoingMessage{
+			ChatID: j.ChatID,
+			Text:   chunk,
+		}); rerr != nil {
+			log.Error("reply failed", "err", rerr)
+		}
 	}
 }
 
@@ -303,4 +312,29 @@ func (s *Scheduler) save() {
 	if err := saveJobs(s.storePath, s.jobs); err != nil {
 		slog.Error("save cron store", "err", err)
 	}
+}
+
+// splitReply splits text into chunks of at most maxRunes runes.
+func splitReply(text string, maxRunes int) []string {
+	if utf8.RuneCountInString(text) <= maxRunes {
+		return []string{text}
+	}
+	var chunks []string
+	for text != "" {
+		if utf8.RuneCountInString(text) <= maxRunes {
+			chunks = append(chunks, text)
+			break
+		}
+		end := 0
+		for i := 0; i < maxRunes && end < len(text); i++ {
+			_, size := utf8.DecodeRuneInString(text[end:])
+			end += size
+		}
+		if idx := strings.LastIndex(text[:end], "\n"); idx > end/2 {
+			end = idx + 1
+		}
+		chunks = append(chunks, text[:end])
+		text = text[end:]
+	}
+	return chunks
 }

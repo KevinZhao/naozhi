@@ -13,7 +13,7 @@ func saveJobs(path string, jobs map[string]*Job) error {
 		return nil
 	}
 	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0755); err != nil {
+		if err := os.MkdirAll(dir, 0700); err != nil {
 			return fmt.Errorf("create cron store directory: %w", err)
 		}
 	}

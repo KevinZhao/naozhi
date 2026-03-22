@@ -12,6 +12,10 @@ type Protocol interface {
 	// Name returns the protocol identifier (e.g., "stream-json", "acp").
 	Name() string
 
+	// Clone returns a fresh Protocol instance for a new process.
+	// Stateless protocols may return the receiver; stateful ones must return a new instance.
+	Clone() Protocol
+
 	// BuildArgs returns CLI arguments to launch the agent in this protocol mode.
 	// For ACP, Model and ResumeID are handled via RPC in Init, not CLI flags.
 	BuildArgs(opts SpawnOptions) []string

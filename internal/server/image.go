@@ -28,8 +28,11 @@ func extractImagePaths(text string) []string {
 		if seen[path] {
 			continue
 		}
-		// Resolve to absolute canonical path to prevent traversal
-		cleaned := filepath.Clean(path)
+		// Resolve symlinks and canonicalize to prevent traversal
+		cleaned, err := filepath.EvalSymlinks(path)
+		if err != nil {
+			continue
+		}
 		if !isUnderSafeDir(cleaned) {
 			continue
 		}

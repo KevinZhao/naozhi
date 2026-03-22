@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,10 +18,12 @@ type ACPProtocol struct {
 	nextID    int
 	sessionID string
 	// textBuf accumulates assistant_message_chunk text during a turn
-	textBuf string
+	textBuf strings.Builder
 }
 
 func (p *ACPProtocol) Name() string { return "acp" }
+
+func (p *ACPProtocol) Clone() Protocol { return &ACPProtocol{} }
 
 func (p *ACPProtocol) BuildArgs(opts SpawnOptions) []string {
 	args := []string{"acp"}
@@ -88,7 +91,7 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string) (string, error) {
 
 func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData) error {
 	p.mu.Lock()
-	p.textBuf = "" // reset text accumulator for new turn
+	p.textBuf.Reset() // reset text accumulator for new turn
 	p.mu.Unlock()
 
 	// Build prompt content blocks
@@ -151,8 +154,8 @@ func (p *ACPProtocol) ReadEvent(line []byte) (Event, bool, error) {
 		}
 
 		p.mu.Lock()
-		text := p.textBuf
-		p.textBuf = ""
+		text := p.textBuf.String()
+		p.textBuf.Reset()
 		p.mu.Unlock()
 
 		ev := Event{
@@ -200,7 +203,7 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 		var content ACPTextContent
 		if err := json.Unmarshal(update.Update.Content, &content); err == nil && content.Text != "" {
 			p.mu.Lock()
-			p.textBuf += content.Text
+			p.textBuf.WriteString(content.Text)
 			p.mu.Unlock()
 		}
 		return Event{Type: "assistant", SessionID: update.SessionID}, false, nil

@@ -97,14 +97,15 @@ func candidatePaths(name string) []string {
 
 // Spawn starts a new long-lived CLI process.
 func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error) {
-	args := w.Protocol.BuildArgs(opts)
+	proto := w.Protocol.Clone()
+	args := proto.BuildArgs(opts)
 
 	cwd := opts.WorkingDir
 	if cwd == "" {
 		cwd = os.TempDir()
 	}
 
-	proc, err := newProcess(ctx, w.CLIPath, args, cwd, opts.NoOutputTimeout, opts.TotalTimeout, w.Protocol)
+	proc, err := newProcess(ctx, w.CLIPath, args, cwd, opts.NoOutputTimeout, opts.TotalTimeout, proto)
 	if err != nil {
 		return nil, fmt.Errorf("spawn agent: %w", err)
 	}
@@ -114,7 +115,7 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 		W: proc.stdin,
 		R: &bufioLineReader{scanner: proc.scanner},
 	}
-	sessionID, err := w.Protocol.Init(rw, opts.ResumeID)
+	sessionID, err := proto.Init(rw, opts.ResumeID)
 	if err != nil {
 		proc.Kill()
 		return nil, fmt.Errorf("protocol init: %w", err)

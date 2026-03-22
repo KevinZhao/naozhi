@@ -68,7 +68,8 @@ type Process struct {
 
 // newProcess starts a CLI process with the given args.
 func newProcess(ctx context.Context, cliPath string, args []string, cwd string, noOutputTimeout, totalTimeout time.Duration, proto Protocol) (*Process, error) {
-	slog.Info("spawning cli process", "cli", cliPath, "args", args, "cwd", cwd, "protocol", proto.Name())
+	slog.Info("spawning cli process", "cli", cliPath, "protocol", proto.Name())
+	slog.Debug("cli process details", "args", args, "cwd", cwd)
 
 	cmd := exec.CommandContext(ctx, cliPath, args...)
 	if cwd != "" {
@@ -137,6 +138,7 @@ func (p *Process) readLoop() {
 		}
 		ev, _, err := p.protocol.ReadEvent(line)
 		if err != nil {
+			slog.Debug("readLoop: skip unparseable event", "err", err)
 			continue
 		}
 		if ev.Type == "" {

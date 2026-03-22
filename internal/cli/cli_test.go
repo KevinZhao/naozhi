@@ -189,7 +189,7 @@ func TestACPProtocol_ReadEvent_SessionUpdate_TextChunk(t *testing.T) {
 	}
 	// Verify text accumulated (same goroutine, no readLoop running)
 	p.mu.Lock()
-	got := p.textBuf
+	got := p.textBuf.String()
 	p.mu.Unlock()
 	if got != "hello " {
 		t.Errorf("textBuf = %q, want 'hello '", got)
@@ -201,7 +201,7 @@ func TestACPProtocol_ReadEvent_SessionUpdate_TextChunk(t *testing.T) {
 		t.Fatal(err)
 	}
 	p.mu.Lock()
-	got = p.textBuf
+	got = p.textBuf.String()
 	p.mu.Unlock()
 	if got != "hello world" {
 		t.Errorf("textBuf = %q, want 'hello world'", got)
@@ -226,7 +226,7 @@ func TestACPProtocol_ReadEvent_ToolCall(t *testing.T) {
 func TestACPProtocol_ReadEvent_Response_TurnComplete(t *testing.T) {
 	p := &ACPProtocol{sessionID: "sess_1"}
 	p.mu.Lock()
-	p.textBuf = "final answer"
+	p.textBuf.WriteString("final answer")
 	p.mu.Unlock()
 
 	line := []byte(`{"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}}`)
@@ -247,8 +247,8 @@ func TestACPProtocol_ReadEvent_Response_TurnComplete(t *testing.T) {
 		t.Errorf("SessionID = %q, want sess_1", ev.SessionID)
 	}
 	// textBuf should be cleared
-	if p.textBuf != "" {
-		t.Errorf("textBuf should be cleared, got %q", p.textBuf)
+	if p.textBuf.Len() != 0 {
+		t.Errorf("textBuf should be cleared, got %q", p.textBuf.String())
 	}
 }
 
@@ -326,7 +326,7 @@ func TestRPCMessage_IsRequest(t *testing.T) {
 func TestACPProtocol_ReadEvent_ErrorResponse(t *testing.T) {
 	p := &ACPProtocol{sessionID: "sess_1"}
 	p.mu.Lock()
-	p.textBuf = "partial text"
+	p.textBuf.WriteString("partial text")
 	p.mu.Unlock()
 
 	line := []byte(`{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"model overloaded"}}`)
