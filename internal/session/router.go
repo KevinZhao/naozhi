@@ -75,9 +75,13 @@ func NewRouter(cfg RouterConfig) *Router {
 
 	// Restore sessions from store
 	if restored := loadStore(r.storePath); restored != nil {
-		for key, sessionID := range restored {
-			s := &ManagedSession{Key: key}
-			s.setSessionID(sessionID)
+		for key, entry := range restored {
+			s := &ManagedSession{
+				Key:       key,
+				workspace: entry.Workspace,
+				totalCost: entry.TotalCost,
+			}
+			s.setSessionID(entry.SessionID)
 			r.sessions[key] = s
 		}
 	}
@@ -225,6 +229,10 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 
 	// Release lock during Spawn (may block on ACP Init handshake)
 	r.mu.Unlock()
+	if r.wrapper == nil {
+		r.mu.Lock()
+		return nil, fmt.Errorf("spawn process: no CLI wrapper configured")
+	}
 	proc, err := r.wrapper.Spawn(ctx, spawnOpts)
 	r.mu.Lock()
 	if err != nil {
@@ -240,9 +248,10 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	}
 
 	s := &ManagedSession{
-		Key:     key,
-		process: proc,
-		sendMu:  sync.Mutex{},
+		Key:       key,
+		process:   proc,
+		workspace: workspace,
+		sendMu:    sync.Mutex{},
 	}
 	s.setSessionID(resumeID)
 	s.touchLastActive()
@@ -282,6 +291,7 @@ func (r *Router) evictOldest() bool {
 		return false
 	}
 	slog.Info("evicting oldest session", "key", oldest.Key, "idle", time.Since(oldest.GetLastActive()))
+	oldest.deathReason = "evicted"
 	// Keep oldest.process non-nil so concurrent holders don't get nil-panic.
 	// After Close(), Alive() returns false — countActive() will stop counting it.
 	proc := oldest.process
@@ -331,6 +341,7 @@ func (r *Router) Cleanup() {
 	for key, s := range r.sessions {
 		if s.process != nil && s.process.Alive() && !s.process.IsRunning() && now.Sub(s.GetLastActive()) > r.ttl {
 			slog.Info("session expired", "key", key, "idle", now.Sub(s.GetLastActive()))
+			s.deathReason = "idle_timeout"
 			expired = append(expired, expiredEntry{key, s.process})
 		}
 	}

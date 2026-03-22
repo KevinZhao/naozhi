@@ -72,9 +72,10 @@ func (f *fakeProcess) GetState() cli.ProcessState {
 	return cli.StateReady
 }
 
-func (f *fakeProcess) TotalCost() float64             { return 0 }
-func (f *fakeProcess) EventEntries() []cli.EventEntry { return nil }
-func (f *fakeProcess) ProtocolName() string           { return "test" }
+func (f *fakeProcess) TotalCost() float64                         { return 0 }
+func (f *fakeProcess) EventEntries() []cli.EventEntry             { return nil }
+func (f *fakeProcess) EventEntriesSince(_ int64) []cli.EventEntry { return nil }
+func (f *fakeProcess) ProtocolName() string                       { return "test" }
 
 // setRunning safely changes the running state (used in shutdown tests).
 func (f *fakeProcess) setRunning(v bool) {
@@ -713,7 +714,7 @@ func TestShutdownSavesStore(t *testing.T) {
 	if loaded == nil {
 		t.Fatal("store should have been saved after shutdown")
 	}
-	if loaded["feishu:direct:user1:general"] != "sess-abc" {
+	if loaded["feishu:direct:user1:general"].SessionID != "sess-abc" {
 		t.Errorf("session not found in saved store: %v", loaded)
 	}
 }

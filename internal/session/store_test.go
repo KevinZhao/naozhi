@@ -24,11 +24,11 @@ func TestSaveAndLoadStore(t *testing.T) {
 	if len(restored) != 2 {
 		t.Fatalf("loadStore() returned %d entries, want 2", len(restored))
 	}
-	if restored["feishu:direct:alice:general"] != "sess-111" {
-		t.Errorf("alice session = %q, want %q", restored["feishu:direct:alice:general"], "sess-111")
+	if restored["feishu:direct:alice:general"].SessionID != "sess-111" {
+		t.Errorf("alice session = %q, want %q", restored["feishu:direct:alice:general"].SessionID, "sess-111")
 	}
-	if restored["feishu:group:xxx:general"] != "sess-222" {
-		t.Errorf("group session = %q, want %q", restored["feishu:group:xxx:general"], "sess-222")
+	if restored["feishu:group:xxx:general"].SessionID != "sess-222" {
+		t.Errorf("group session = %q, want %q", restored["feishu:group:xxx:general"].SessionID, "sess-222")
 	}
 }
 

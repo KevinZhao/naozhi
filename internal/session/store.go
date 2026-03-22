@@ -8,9 +8,11 @@ import (
 	"path/filepath"
 )
 
-type sessionEntry struct {
-	Key       string `json:"key"`
-	SessionID string `json:"session_id"`
+type storeEntry struct {
+	Key       string  `json:"key"`
+	SessionID string  `json:"session_id"`
+	TotalCost float64 `json:"total_cost,omitempty"`
+	Workspace string  `json:"workspace,omitempty"`
 }
 
 func saveStore(path string, sessions map[string]*ManagedSession) error {
@@ -23,13 +25,21 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 		}
 	}
 
-	entries := make([]sessionEntry, 0, len(sessions))
+	entries := make([]storeEntry, 0, len(sessions))
 	for _, s := range sessions {
 		// Use getSessionID to avoid data race with concurrent Send
 		if sid := s.getSessionID(); sid != "" {
-			entries = append(entries, sessionEntry{
+			var cost float64
+			if s.process != nil {
+				cost = s.process.TotalCost()
+			} else {
+				cost = s.totalCost
+			}
+			entries = append(entries, storeEntry{
 				Key:       s.Key,
 				SessionID: sid,
+				TotalCost: cost,
+				Workspace: s.workspace,
 			})
 		}
 	}
@@ -45,7 +55,7 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 	return os.Rename(tmp, path)
 }
 
-func loadStore(path string) map[string]string {
+func loadStore(path string) map[string]*storeEntry {
 	if path == "" {
 		return nil
 	}
@@ -57,16 +67,16 @@ func loadStore(path string) map[string]string {
 		return nil
 	}
 
-	var entries []sessionEntry
+	var entries []storeEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
 		slog.Warn("parse session store failed", "err", err)
 		return nil
 	}
 
-	m := make(map[string]string, len(entries))
-	for _, e := range entries {
+	m := make(map[string]*storeEntry, len(entries))
+	for i, e := range entries {
 		if e.Key != "" && e.SessionID != "" {
-			m[e.Key] = e.SessionID
+			m[e.Key] = &entries[i]
 		}
 	}
 	slog.Info("loaded session store", "count", len(m), "path", path)

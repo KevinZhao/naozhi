@@ -27,17 +27,18 @@ const (
 
 // Server is the HTTP entry point for Naozhi.
 type Server struct {
-	addr          string
-	mux           *http.ServeMux
-	platforms     map[string]platform.Platform
-	router        *session.Router
-	dedup         *platform.Dedup
-	sessionGuard  *sessionGuard
-	startedAt     time.Time
-	agents        map[string]session.AgentOpts
-	agentCommands map[string]string
-	scheduler     *cron.Scheduler
-	backendTag    string // e.g., "cc" or "kiro", appended to replies
+	addr           string
+	mux            *http.ServeMux
+	platforms      map[string]platform.Platform
+	router         *session.Router
+	dedup          *platform.Dedup
+	sessionGuard   *sessionGuard
+	startedAt      time.Time
+	agents         map[string]session.AgentOpts
+	agentCommands  map[string]string
+	scheduler      *cron.Scheduler
+	backendTag     string // e.g., "cc" or "kiro", appended to replies
+	dashboardToken string // optional bearer token for dashboard API
 }
 
 // sessionGuard prevents multiple concurrent messages to the same session.
@@ -85,6 +86,11 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		scheduler:     scheduler,
 		backendTag:    tag,
 	}
+}
+
+// SetDashboardToken sets the optional bearer token required for dashboard send API.
+func (s *Server) SetDashboardToken(token string) {
+	s.dashboardToken = token
 }
 
 // Start registers routes and begins serving.
@@ -238,29 +244,55 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "新会话已创建（之前的上下文已失效）。"})
 		}
 
-		// H3: Send "thinking..." indicator asynchronously to avoid blocking event loop
-		thinkingCh := make(chan string, 1)
-		thinkingTrigger := make(chan struct{})
+		// Status tracking: accumulate event lines and push to IM
+		var (
+			statusLines    []string
+			thinkingMsgID  string
+			lastStatusEdit time.Time
+			msgIDReady     = make(chan struct{})
+		)
 		var thinkingSent sync.Once
 
-		if platform.SupportsInterimMessages(p) {
-			go func() {
-				select {
-				case <-thinkingTrigger:
-					id, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "思考中..."})
-					if err == nil {
-						thinkingCh <- id
-					}
-				case <-ctx.Done():
-				}
-				close(thinkingCh)
-			}()
-		} else {
-			close(thinkingCh)
+		if !platform.SupportsInterimMessages(p) {
+			close(msgIDReady)
 		}
 
 		onEvent := func(ev cli.Event) {
-			thinkingSent.Do(func() { close(thinkingTrigger) })
+			if !platform.SupportsInterimMessages(p) {
+				return
+			}
+
+			line := formatEventLine(ev)
+			if line == "" {
+				line = "💭 思考中..."
+			}
+
+			statusLines = appendStatusLine(statusLines, line)
+			text := strings.Join(statusLines, "\n")
+
+			// First event: send status message async
+			thinkingSent.Do(func() {
+				lastStatusEdit = time.Now()
+				snapshot := text
+				go func() {
+					defer close(msgIDReady)
+					id, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: snapshot})
+					if err == nil {
+						thinkingMsgID = id
+					}
+				}()
+			})
+
+			// Subsequent events: rate-limited edit
+			select {
+			case <-msgIDReady:
+				if thinkingMsgID != "" && time.Since(lastStatusEdit) >= 2*time.Second {
+					if err := p.EditMessage(ctx, thinkingMsgID, text); err == nil {
+						lastStatusEdit = time.Now()
+					}
+				}
+			default:
+			}
 		}
 
 		// Convert platform images to CLI image data
@@ -292,17 +324,13 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 			replyText = strings.ReplaceAll(replyText, path, "[图片]")
 		}
 
-		// Collect thinkingMsgID from async goroutine
-		var thinkingMsgID string
+		// Wait for status message to be sent (non-blocking if no interim support)
 		select {
-		case id, ok := <-thinkingCh:
-			if ok {
-				thinkingMsgID = id
-			}
+		case <-msgIDReady:
 		default:
 		}
 
-		// Edit "thinking..." to final result, or send new message
+		// Edit status to final result, or send new message
 		if replyText != "" {
 			if thinkingMsgID != "" {
 				if err := p.EditMessage(ctx, thinkingMsgID, replyText); err != nil {

@@ -21,6 +21,7 @@ type processIface interface {
 	GetState() cli.ProcessState
 	TotalCost() float64
 	EventEntries() []cli.EventEntry
+	EventEntriesSince(afterMS int64) []cli.EventEntry
 	ProtocolName() string
 }
 
@@ -36,8 +37,11 @@ type ManagedSession struct {
 	// between Send() (under sendMu) and Cleanup/evictOldest (under r.mu).
 	lastActive atomic.Int64
 
-	process processIface
-	sendMu  sync.Mutex // serializes messages to the same session
+	process     processIface
+	sendMu      sync.Mutex // serializes messages to the same session
+	workspace   string     // effective cwd at spawn time
+	deathReason string     // why process died, empty if alive
+	totalCost   float64    // cached cost when process is nil
 }
 
 // GetLastActive returns the last active time.
@@ -59,6 +63,12 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	s.touchLastActive()
 	result, err := s.process.Send(ctx, text, images, onEvent)
 	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "no output timeout") {
+			s.deathReason = "no_output_timeout"
+		} else if strings.Contains(msg, "total timeout") {
+			s.deathReason = "total_timeout"
+		}
 		return nil, err
 	}
 
@@ -93,22 +103,28 @@ func SessionKey(platform, chatType, id, agentID string) string {
 
 // SessionSnapshot is a point-in-time view of a session for the dashboard API.
 type SessionSnapshot struct {
-	Key        string  `json:"key"`
-	Platform   string  `json:"platform"`
-	Agent      string  `json:"agent"`
-	SessionID  string  `json:"session_id"`
-	State      string  `json:"state"`
-	Protocol   string  `json:"protocol"`
-	LastActive int64   `json:"last_active"` // unix ms
-	TotalCost  float64 `json:"total_cost"`
+	Key         string  `json:"key"`
+	Platform    string  `json:"platform"`
+	Agent       string  `json:"agent"`
+	SessionID   string  `json:"session_id"`
+	State       string  `json:"state"`
+	Protocol    string  `json:"protocol"`
+	LastActive  int64   `json:"last_active"` // unix ms
+	TotalCost   float64 `json:"total_cost"`
+	Workspace   string  `json:"workspace,omitempty"`
+	DeathReason string  `json:"death_reason,omitempty"`
+	ChatType    string  `json:"chat_type,omitempty"`
+	ChatID      string  `json:"chat_id,omitempty"`
 }
 
 // Snapshot returns a point-in-time view of this session.
 func (s *ManagedSession) Snapshot() SessionSnapshot {
 	snap := SessionSnapshot{
-		Key:        s.Key,
-		SessionID:  s.getSessionID(),
-		LastActive: s.GetLastActive().UnixMilli(),
+		Key:         s.Key,
+		SessionID:   s.getSessionID(),
+		LastActive:  s.GetLastActive().UnixMilli(),
+		Workspace:   s.workspace,
+		DeathReason: s.deathReason,
 	}
 
 	// Parse key: platform:chatType:userId:agentId
@@ -116,11 +132,18 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 	if len(parts) >= 1 {
 		snap.Platform = parts[0]
 	}
+	if len(parts) >= 2 {
+		snap.ChatType = parts[1]
+	}
+	if len(parts) >= 3 {
+		snap.ChatID = parts[2]
+	}
 	if len(parts) >= 4 {
 		snap.Agent = parts[3]
 	}
 
 	if s.process == nil {
+		snap.TotalCost = s.totalCost
 		if snap.SessionID != "" {
 			snap.State = "suspended"
 		} else {
@@ -140,4 +163,12 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 		return nil
 	}
 	return s.process.EventEntries()
+}
+
+// EventEntriesSince returns the event log entries after the given unix ms timestamp.
+func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
+	if s.process == nil {
+		return nil
+	}
+	return s.process.EventEntriesSince(afterMS)
 }

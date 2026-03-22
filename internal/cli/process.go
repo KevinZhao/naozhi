@@ -380,3 +380,8 @@ func (p *Process) ProtocolName() string {
 func (p *Process) EventEntries() []EventEntry {
 	return p.eventLog.Entries()
 }
+
+// EventEntriesSince returns event log entries after the given unix ms timestamp.
+func (p *Process) EventEntriesSince(afterMS int64) []EventEntry {
+	return p.eventLog.EntriesSince(afterMS)
+}
