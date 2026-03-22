@@ -64,6 +64,9 @@ type Process struct {
 
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
+
+	eventLog  *EventLog
+	totalCost float64
 }
 
 // newProcess starts a CLI process with the given args.
@@ -114,9 +117,10 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string, 
 		killCh:          make(chan struct{}),
 		noOutputTimeout: noOutputTimeout,
 		totalTimeout:    totalTimeout,
+		eventLog:        NewEventLog(0),
 	}
 
-	p.scanner.Buffer(make([]byte, 0, maxScannerBufBytes), maxScannerBufBytes)
+	p.scanner.Buffer(make([]byte, 0, 64*1024), maxScannerBufBytes)
 
 	return p, nil
 }
@@ -208,6 +212,8 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 				return nil, fmt.Errorf("process exited during send")
 			}
 
+			p.logEvent(ev)
+
 			if !noOutputTimer.Stop() {
 				select {
 				case <-noOutputTimer.C:
@@ -289,12 +295,88 @@ func (p *Process) Kill() {
 // Close gracefully shuts down by closing stdin.
 func (p *Process) Close() {
 	p.stdin.Close()
+	timer := time.NewTimer(processCloseTimeout)
+	defer timer.Stop()
 	select {
 	case <-p.done:
-	case <-time.After(processCloseTimeout):
+	case <-timer.C:
 		p.Kill()
 		return
 	}
 	// Reap the child process to avoid zombies
 	p.waitOnce.Do(func() { p.cmd.Wait() })
+}
+
+// logEvent converts an Event to an EventEntry and appends it to the event log.
+func (p *Process) logEvent(ev Event) {
+	entry := EventEntry{Time: time.Now().UnixMilli()}
+
+	switch ev.Type {
+	case "system":
+		entry.Type = "system"
+		entry.Summary = ev.SubType
+		if ev.SubType == "init" {
+			entry.Summary = "Session initialized"
+		}
+	case "assistant":
+		if ev.Message == nil {
+			return
+		}
+		// Log only the first recognized content block per event.
+		// An assistant event typically carries one primary block;
+		// if multiple exist (e.g., tool_use + text), tool_use wins.
+		for _, block := range ev.Message.Content {
+			switch block.Type {
+			case "thinking":
+				entry.Type = "thinking"
+				entry.Summary = TruncateRunes(block.Text, 120)
+			case "tool_use":
+				entry.Type = "tool_use"
+				entry.Summary = block.Name
+			case "text":
+				entry.Type = "text"
+				entry.Summary = TruncateRunes(block.Text, 120)
+			default:
+				continue
+			}
+			p.eventLog.Append(entry)
+			return
+		}
+		return
+	case "result":
+		entry.Type = "result"
+		entry.Summary = TruncateRunes(ev.Result, 200)
+		entry.Cost = ev.CostUSD
+		p.mu.Lock()
+		p.totalCost = ev.CostUSD
+		p.mu.Unlock()
+	default:
+		return
+	}
+
+	p.eventLog.Append(entry)
+}
+
+// GetState returns the current process state.
+func (p *Process) GetState() ProcessState {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.State
+}
+
+// TotalCost returns the cumulative cost.
+func (p *Process) TotalCost() float64 {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.totalCost
+}
+
+// ProtocolName returns the protocol name.
+func (p *Process) ProtocolName() string {
+	return p.protocol.Name()
+}
+
+// EventEntries returns a copy of all event log entries.
+func (p *Process) EventEntries() []EventEntry {
+	return p.eventLog.Entries()
 }

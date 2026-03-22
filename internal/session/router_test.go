@@ -60,6 +60,22 @@ func (f *fakeProcess) Send(_ context.Context, _ string, _ []cli.ImageData, _ cli
 	return &cli.SendResult{Text: "fake"}, nil
 }
 
+func (f *fakeProcess) GetState() cli.ProcessState {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if !f.isAlive {
+		return cli.StateDead
+	}
+	if f.isRunning {
+		return cli.StateRunning
+	}
+	return cli.StateReady
+}
+
+func (f *fakeProcess) TotalCost() float64             { return 0 }
+func (f *fakeProcess) EventEntries() []cli.EventEntry { return nil }
+func (f *fakeProcess) ProtocolName() string           { return "test" }
+
 // setRunning safely changes the running state (used in shutdown tests).
 func (f *fakeProcess) setRunning(v bool) {
 	f.mu.Lock()
@@ -93,6 +109,13 @@ func injectSession(r *Router, key string, proc processIface) *ManagedSession {
 	return s
 }
 
+// newSessionWithID creates a ManagedSession with the given key and session ID.
+func newSessionWithID(key, sessID string) *ManagedSession {
+	s := &ManagedSession{Key: key}
+	s.setSessionID(sessID)
+	return s
+}
+
 // ---------------------------------------------------------------------------
 // NewRouter
 // ---------------------------------------------------------------------------
@@ -112,8 +135,8 @@ func TestNewRouterStoreRestore(t *testing.T) {
 	storePath := filepath.Join(dir, "sessions.json")
 
 	saved := map[string]*ManagedSession{
-		"feishu:direct:alice:general": {Key: "feishu:direct:alice:general", SessionID: "sess-111"},
-		"feishu:direct:bob:general":   {Key: "feishu:direct:bob:general", SessionID: "sess-222"},
+		"feishu:direct:alice:general": newSessionWithID("feishu:direct:alice:general", "sess-111"),
+		"feishu:direct:bob:general":   newSessionWithID("feishu:direct:bob:general", "sess-222"),
 	}
 	if err := saveStore(storePath, saved); err != nil {
 		t.Fatalf("saveStore: %v", err)
@@ -132,7 +155,7 @@ func TestNewRouterStoreRestore(t *testing.T) {
 	r.mu.Lock()
 	s1 := r.sessions["feishu:direct:alice:general"]
 	r.mu.Unlock()
-	if s1 == nil || s1.SessionID != "sess-111" {
+	if s1 == nil || s1.getSessionID() != "sess-111" {
 		t.Errorf("alice session not restored: %+v", s1)
 	}
 }
@@ -181,10 +204,7 @@ func TestStatsWithDeadSession(t *testing.T) {
 func TestStatsNilProcessSession(t *testing.T) {
 	r := newTestRouter(3)
 	// Simulates a session restored from store (no live process yet).
-	r.sessions["restored-key"] = &ManagedSession{
-		Key:       "restored-key",
-		SessionID: "sess-restore",
-	}
+	r.sessions["restored-key"] = newSessionWithID("restored-key", "sess-restore")
 
 	active, total := r.Stats()
 	if active != 0 || total != 1 {
@@ -197,7 +217,7 @@ func TestStatsMixedSessions(t *testing.T) {
 	injectSession(r, "alive1", newIdleProc())
 	injectSession(r, "alive2", newRunningProc())
 	injectSession(r, "dead1", newDeadProc())
-	r.sessions["restored"] = &ManagedSession{Key: "restored", SessionID: "sess-x"}
+	r.sessions["restored"] = newSessionWithID("restored", "sess-x")
 
 	active, total := r.Stats()
 	if active != 2 || total != 4 {
@@ -220,7 +240,8 @@ func TestResetNonExistentKey(t *testing.T) {
 
 func TestResetNilProcessSession(t *testing.T) {
 	r := newTestRouter(3)
-	r.sessions["key1"] = &ManagedSession{Key: "key1", SessionID: "sess-1"}
+	r.sessions["key1"] = &ManagedSession{Key: "key1"}
+	r.sessions["key1"].setSessionID("sess-1")
 
 	r.Reset("key1")
 
@@ -319,7 +340,8 @@ func TestCleanupSkipsNilProcess(t *testing.T) {
 		maxProcs: 3,
 		ttl:      1 * time.Minute,
 	}
-	r.sessions["key1"] = &ManagedSession{Key: "key1", SessionID: "sess-1"}
+	r.sessions["key1"] = &ManagedSession{Key: "key1"}
+	r.sessions["key1"].setSessionID("sess-1")
 
 	r.Cleanup() // must not panic
 
@@ -380,7 +402,7 @@ func TestGetOrCreate_ExistingAliveSession(t *testing.T) {
 	r := newTestRouter(3)
 	proc := newIdleProc()
 	injected := injectSession(r, "feishu:direct:user1:general", proc)
-	injected.SessionID = "existing-sess"
+	injected.setSessionID("existing-sess")
 
 	s, _, err := r.GetOrCreate(context.Background(), "feishu:direct:user1:general", AgentOpts{})
 	if err != nil {
@@ -389,8 +411,8 @@ func TestGetOrCreate_ExistingAliveSession(t *testing.T) {
 	if s != injected {
 		t.Error("should return existing session, not spawn a new one")
 	}
-	if s.SessionID != "existing-sess" {
-		t.Errorf("SessionID = %q, want 'existing-sess'", s.SessionID)
+	if s.getSessionID() != "existing-sess" {
+		t.Errorf("SessionID = %q, want 'existing-sess'", s.getSessionID())
 	}
 }
 
@@ -423,11 +445,9 @@ func TestGetOrCreate_NewSession_SpawnError(t *testing.T) {
 
 func TestGetOrCreate_DeadSession_AttemptResume(t *testing.T) {
 	r := newTestRouter(3)
-	r.sessions["feishu:direct:user1:general"] = &ManagedSession{
-		Key:       "feishu:direct:user1:general",
-		SessionID: "old-sess-id",
-		process:   newDeadProc(),
-	}
+	s := newSessionWithID("feishu:direct:user1:general", "old-sess-id")
+	s.process = newDeadProc()
+	r.sessions["feishu:direct:user1:general"] = s
 
 	_, _, err := r.GetOrCreate(context.Background(), "feishu:direct:user1:general", AgentOpts{})
 	if err == nil {
@@ -441,10 +461,7 @@ func TestGetOrCreate_DeadSession_AttemptResume(t *testing.T) {
 func TestGetOrCreate_NilProcessSession_AttemptSpawn(t *testing.T) {
 	r := newTestRouter(3)
 	// Restored session with no process (like after restart).
-	r.sessions["key1"] = &ManagedSession{
-		Key:       "key1",
-		SessionID: "restored-sess",
-	}
+	r.sessions["key1"] = newSessionWithID("key1", "restored-sess")
 
 	_, _, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{})
 	if err == nil {
@@ -630,7 +647,7 @@ func TestEvictOldestPicksOldest(t *testing.T) {
 
 func TestEvictOldestSkipsNilProcess(t *testing.T) {
 	r := &Router{sessions: make(map[string]*ManagedSession)}
-	r.sessions["nil-key"] = &ManagedSession{Key: "nil-key", SessionID: "sess-1"}
+	r.sessions["nil-key"] = newSessionWithID("nil-key", "sess-1")
 
 	r.mu.Lock()
 	evicted := r.evictOldest()
@@ -688,10 +705,7 @@ func TestShutdownSavesStore(t *testing.T) {
 		ttl:       30 * time.Minute,
 		storePath: storePath,
 	}
-	r.sessions["feishu:direct:user1:general"] = &ManagedSession{
-		Key:       "feishu:direct:user1:general",
-		SessionID: "sess-abc",
-	}
+	r.sessions["feishu:direct:user1:general"] = newSessionWithID("feishu:direct:user1:general", "sess-abc")
 
 	r.Shutdown()
 

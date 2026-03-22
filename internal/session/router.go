@@ -76,10 +76,9 @@ func NewRouter(cfg RouterConfig) *Router {
 	// Restore sessions from store
 	if restored := loadStore(r.storePath); restored != nil {
 		for key, sessionID := range restored {
-			r.sessions[key] = &ManagedSession{
-				Key:       key,
-				SessionID: sessionID,
-			}
+			s := &ManagedSession{Key: key}
+			s.setSessionID(sessionID)
+			r.sessions[key] = s
 		}
 	}
 	return r
@@ -241,11 +240,11 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	}
 
 	s := &ManagedSession{
-		Key:       key,
-		SessionID: resumeID,
-		process:   proc,
-		sendMu:    sync.Mutex{},
+		Key:     key,
+		process: proc,
+		sendMu:  sync.Mutex{},
 	}
+	s.setSessionID(resumeID)
 	s.touchLastActive()
 	r.sessions[key] = s
 	r.activeCount++
@@ -425,4 +424,29 @@ func (r *Router) Stats() (active, total int) {
 	defer r.mu.Unlock()
 	r.countActive()
 	return r.activeCount, len(r.sessions)
+}
+
+// ListSessions returns a snapshot of all sessions for the dashboard.
+// Collects references under r.mu, then releases before snapshotting
+// to avoid blocking the router while getSessionID() waits on sendMu.
+func (r *Router) ListSessions() []SessionSnapshot {
+	r.mu.Lock()
+	refs := make([]*ManagedSession, 0, len(r.sessions))
+	for _, s := range r.sessions {
+		refs = append(refs, s)
+	}
+	r.mu.Unlock()
+
+	snapshots := make([]SessionSnapshot, 0, len(refs))
+	for _, s := range refs {
+		snapshots = append(snapshots, s.Snapshot())
+	}
+	return snapshots
+}
+
+// GetSession returns the session for the given key, or nil.
+func (r *Router) GetSession(key string) *ManagedSession {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.sessions[key]
 }

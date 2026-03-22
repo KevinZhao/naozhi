@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>naozhi dashboard</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;background:#0d1117;color:#c9d1d9}
+.container{display:flex;height:100vh}
+
+.sidebar{width:300px;min-width:300px;border-right:1px solid #30363d;display:flex;flex-direction:column}
+.sidebar-header{padding:16px;border-bottom:1px solid #30363d}
+.sidebar-header h1{font-size:16px;color:#f0f6fc;font-weight:600}
+.sidebar-header .stats{font-size:12px;color:#8b949e;margin-top:4px}
+.session-list{flex:1;overflow-y:auto}
+
+.session-card{padding:12px 16px;border-bottom:1px solid #21262d;cursor:pointer;transition:background .15s;border-left:3px solid transparent}
+.session-card:hover{background:#161b22}
+.session-card.active{background:#1f2937;border-left-color:#58a6ff}
+.session-card .platform{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
+.session-card .agent{font-size:14px;color:#f0f6fc;margin:2px 0;font-weight:500}
+.session-card .meta{font-size:11px;color:#8b949e;display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+
+.badge{display:inline-block;padding:1px 6px;border-radius:10px;font-size:10px;font-weight:600}
+.badge.running{background:#238636;color:#fff}
+.badge.ready{background:#1f6feb;color:#fff}
+.badge.dead{background:#484f58;color:#c9d1d9}
+.badge.suspended{background:#9e6a03;color:#fff}
+.badge.spawning{background:#d29922;color:#fff}
+
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.main-header{padding:16px 20px;border-bottom:1px solid #30363d;flex-shrink:0}
+.main-header h2{font-size:14px;color:#f0f6fc;font-weight:600;word-break:break-all}
+.main-header .detail{font-size:12px;color:#8b949e;margin-top:4px;display:flex;gap:16px;flex-wrap:wrap}
+.main-header .detail span{white-space:nowrap}
+
+.events{flex:1;overflow-y:auto;padding:8px 0}
+.event{display:flex;gap:10px;padding:5px 20px;transition:background .1s}
+.event:hover{background:#161b22}
+.event-time{font-size:11px;color:#484f58;min-width:72px;font-family:monospace;padding-top:2px}
+.event-icon{width:18px;text-align:center;font-size:13px;padding-top:1px}
+.event-content{flex:1;font-size:13px;line-height:1.5;word-break:break-word;white-space:pre-wrap}
+.event.thinking .event-content{color:#a5d6ff}
+.event.tool_use .event-content{color:#d2a8ff}
+.event.result .event-content{color:#7ee787}
+.event.system .event-content{color:#8b949e}
+.event.text .event-content{color:#c9d1d9}
+.event .cost{color:#8b949e;font-size:11px;margin-left:6px}
+
+.empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:#484f58;font-size:14px}
+.no-sessions{padding:40px 16px;text-align:center;color:#484f58;font-size:13px}
+
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
+.pulse{animation:pulse 2s ease-in-out infinite}
+
+.running-indicator{display:inline-block;width:6px;height:6px;border-radius:50%;background:#3fb950;margin-right:4px;animation:pulse 2s ease-in-out infinite}
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="sidebar">
+    <div class="sidebar-header">
+      <h1>naozhi dashboard</h1>
+      <div class="stats" id="stats">connecting...</div>
+    </div>
+    <div class="session-list" id="session-list">
+      <div class="no-sessions">loading...</div>
+    </div>
+  </div>
+  <div class="main" id="main">
+    <div class="empty-state">select a session to inspect</div>
+  </div>
+</div>
+<script>
+let selectedKey = null;
+let eventTimer = null;
+let lastEventTime = 0;
+
+async function fetchSessions() {
+  try {
+    const r = await fetch('/api/sessions');
+    const data = await r.json();
+    renderSidebar(data);
+  } catch (e) {
+    document.getElementById('stats').textContent = 'error: ' + e.message;
+  }
+}
+
+function renderSidebar(data) {
+  const st = data.stats;
+  document.getElementById('stats').textContent =
+    st.active + ' active / ' + st.total + ' total \u00b7 ' + st.uptime + ' \u00b7 ' + st.backend;
+
+  const list = document.getElementById('session-list');
+  const sessions = data.sessions || [];
+
+  const order = {running:0, spawning:1, ready:2, suspended:3, dead:4};
+  sessions.sort((a, b) => {
+    const d = (order[a.state]||5) - (order[b.state]||5);
+    return d !== 0 ? d : b.last_active - a.last_active;
+  });
+
+  if (sessions.length === 0) {
+    list.innerHTML = '<div class="no-sessions">no sessions</div>';
+    return;
+  }
+
+  list.innerHTML = sessions.map(s => {
+    const cls = selectedKey === s.key ? 'session-card active' : 'session-card';
+    const ago = timeAgo(s.last_active);
+    const cost = s.total_cost > 0 ? '$' + s.total_cost.toFixed(3) : '';
+    const proto = s.protocol || '\u2014';
+    const ri = s.state === 'running' ? '<span class="running-indicator"></span>' : '';
+    return '<div class="' + cls + '" data-key="' + esc(s.key) + '" onclick="selectSession(this.dataset.key)">' +
+      '<div class="platform">' + esc(s.platform) + ' \u00b7 ' + esc(proto) + '</div>' +
+      '<div class="agent">' + ri + esc(s.agent || 'general') + '</div>' +
+      '<div class="meta"><span class="badge ' + s.state + '">' + s.state + '</span>' +
+      '<span>' + ago + '</span>' +
+      (cost ? '<span>' + cost + '</span>' : '') +
+      '</div></div>';
+  }).join('');
+}
+
+function selectSession(key) {
+  selectedKey = key;
+  lastEventTime = 0;
+  document.querySelectorAll('.session-card').forEach(el => {
+    el.classList.toggle('active', el.dataset.key === key);
+  });
+  fetchEvents();
+  if (eventTimer) clearInterval(eventTimer);
+  eventTimer = setInterval(fetchEvents, 1000);
+}
+
+async function fetchEvents() {
+  if (!selectedKey) return;
+  try {
+    const r = await fetch('/api/sessions/events?key=' + encodeURIComponent(selectedKey));
+    if (!r.ok) {
+      renderMain(null, 'session not found');
+      return;
+    }
+    const events = await r.json();
+    renderMain(events);
+  } catch (e) {
+    console.error('fetch events:', e);
+  }
+}
+
+function renderMain(events, error) {
+  const main = document.getElementById('main');
+  if (error) {
+    main.innerHTML = '<div class="empty-state">' + esc(error) + '</div>';
+    return;
+  }
+
+  const ev = events || [];
+  const icons = {
+    init:'~', system:'\u2699', thinking:'\u{1f4ad}', tool_use:'\u{1f527}',
+    text:'\u{1f4ac}', result:'\u2705'
+  };
+
+  const evHtml = ev.map(e => {
+    const t = new Date(e.time).toLocaleTimeString('zh-CN', {hour12:false});
+    const icon = icons[e.type] || '\u00b7';
+    const costStr = e.cost > 0 ? '<span class="cost">$' + e.cost.toFixed(3) + '</span>' : '';
+    return '<div class="event ' + (e.type||'') + '">' +
+      '<span class="event-time">' + t + '</span>' +
+      '<span class="event-icon">' + icon + '</span>' +
+      '<div class="event-content">' + esc(e.summary || e.type) + costStr + '</div>' +
+      '</div>';
+  }).join('');
+
+  // Find session info from sidebar
+  let sessionId = '', state = '', proto = '', cost = '';
+  const card = document.querySelector('.session-card.active');
+  if (card) {
+    state = card.querySelector('.badge') ? card.querySelector('.badge').textContent : '';
+  }
+
+  main.innerHTML =
+    '<div class="main-header">' +
+      '<h2>' + esc(selectedKey) + '</h2>' +
+      '<div class="detail">' +
+        '<span>' + ev.length + ' events</span>' +
+        '<span>' + state + '</span>' +
+      '</div>' +
+    '</div>' +
+    '<div class="events" id="events-scroll">' +
+      (evHtml || '<div class="empty-state">no events yet</div>') +
+    '</div>';
+
+  // Auto-scroll to bottom
+  const el = document.getElementById('events-scroll');
+  if (el) el.scrollTop = el.scrollHeight;
+}
+
+function timeAgo(ms) {
+  if (!ms) return '\u2014';
+  const d = Date.now() - ms;
+  if (d < 60000) return Math.floor(d/1000) + 's ago';
+  if (d < 3600000) return Math.floor(d/60000) + 'm ago';
+  if (d < 86400000) return Math.floor(d/3600000) + 'h ago';
+  return Math.floor(d/86400000) + 'd ago';
+}
+
+function esc(s) {
+  if (!s) return '';
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+fetchSessions();
+setInterval(fetchSessions, 3000);
+</script>
+</body>
+</html>

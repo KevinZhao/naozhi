@@ -75,6 +75,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	s.mux.HandleFunc("GET /health", s.handleHealth)
+	s.registerDashboard()
 	slog.Info("server starting", "addr", s.addr)
 
 	srv := &http.Server{

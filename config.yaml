@@ -34,10 +34,10 @@ cron:
 
 platforms:
   feishu:
-    app_id: "${IM_APP_ID}"
-    app_secret: "${IM_APP_SECRET}"
-    verification_token: "${IM_VERIFICATION_TOKEN}"
-    encrypt_key: "${IM_ENCRYPT_KEY}"
+    app_id: "${FEISHU_APP_ID}"
+    app_secret: "${FEISHU_APP_SECRET}"
+    verification_token: "${FEISHU_VERIFICATION_TOKEN}"
+    encrypt_key: "${FEISHU_ENCRYPT_KEY}"
     max_reply_length: 4000
 
 log:
