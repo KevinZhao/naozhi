@@ -11,7 +11,7 @@ const maxImageFileSize = 10 * 1024 * 1024 // 10MB
 
 // safeImageDirs are the only directory prefixes from which image files may be read.
 // This prevents prompt-injection attacks that trick the CLI into emitting arbitrary paths.
-var safeImageDirs = []string{"/tmp/", os.TempDir() + "/"}
+var safeImageDirs = []string{"/tmp/"}
 
 // imagePathRe matches absolute file paths ending in common image extensions.
 var imagePathRe = regexp.MustCompile(`(/\S+\.(?:png|jpg|jpeg|gif|webp|bmp))`)
@@ -25,12 +25,12 @@ func extractImagePaths(text string) []string {
 	for _, path := range matches {
 		// Clean trailing punctuation that regex may capture
 		path = strings.TrimRight(path, ".,;:!?)]}>\"'")
-		if seen[path] {
-			continue
-		}
 		// Resolve symlinks and canonicalize to prevent traversal
 		cleaned, err := filepath.EvalSymlinks(path)
 		if err != nil {
+			continue
+		}
+		if seen[cleaned] {
 			continue
 		}
 		if !isUnderSafeDir(cleaned) {
@@ -44,7 +44,7 @@ func extractImagePaths(text string) []string {
 			continue
 		}
 		valid = append(valid, cleaned)
-		seen[path] = true
+		seen[cleaned] = true
 	}
 	return valid
 }

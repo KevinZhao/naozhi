@@ -2,7 +2,6 @@ package session
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,6 +15,7 @@ type processIface interface {
 	Alive() bool
 	IsRunning() bool
 	Close()
+	Send(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
 }
 
 // ManagedSession wraps a claude CLI process with session metadata.
@@ -47,20 +47,15 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
-	cp, ok := s.process.(*cli.Process)
-	if !ok {
-		return nil, fmt.Errorf("session process does not support sending")
-	}
-
 	s.touchLastActive()
-	result, err := cp.Send(ctx, text, images, onEvent)
+	result, err := s.process.Send(ctx, text, images, onEvent)
 	if err != nil {
 		return nil, err
 	}
 
 	// Capture session ID from first successful send
-	if s.SessionID == "" && cp.SessionID != "" {
-		s.SessionID = cp.SessionID
+	if s.SessionID == "" && result.SessionID != "" {
+		s.SessionID = result.SessionID
 	}
 	return result, nil
 }

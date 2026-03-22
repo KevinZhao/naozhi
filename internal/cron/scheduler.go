@@ -114,7 +114,23 @@ func (s *Scheduler) AddJob(j *Job) error {
 		return fmt.Errorf("max cron jobs reached (%d)", s.maxJobs)
 	}
 
+	// Per-chat limit to prevent one chat from exhausting global quota
+	const maxJobsPerChat = 10
+	chatCount := 0
+	for _, existing := range s.jobs {
+		if existing.Platform == j.Platform && existing.ChatID == j.ChatID {
+			chatCount++
+		}
+	}
+	if chatCount >= maxJobsPerChat {
+		return fmt.Errorf("per-chat cron limit reached (%d)", maxJobsPerChat)
+	}
+
 	j.ID = generateID()
+	// Retry on unlikely ID collision
+	for _, exists := s.jobs[j.ID]; exists; _, exists = s.jobs[j.ID] {
+		j.ID = generateID()
+	}
 	j.CreatedAt = time.Now()
 
 	if err := s.registerJob(j); err != nil {

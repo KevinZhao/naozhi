@@ -53,7 +53,7 @@ func SupportsInterimMessages(p Platform) bool {
 	if i, ok := p.(interim); ok {
 		return i.SupportsInterimMessages()
 	}
-	return true // default: supported
+	return false // default: not supported (opt-in)
 }
 
 // RunnablePlatform extends Platform for platforms needing background goroutines.

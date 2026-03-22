@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -26,6 +27,18 @@ import (
 var version = "dev"
 
 func main() {
+	// Subcommands (before flag.Parse)
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "setup":
+			runSetup(os.Args[2:])
+			return
+		case "version", "--version":
+			fmt.Println(version)
+			return
+		}
+	}
+
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	flag.Parse()
 
@@ -61,7 +74,7 @@ func main() {
 	noOutputTimeout, totalTimeout := cfg.ParseWatchdog()
 	storePath := pathutil.ExpandHome(cfg.Session.StorePath)
 	workspace := pathutil.ExpandHome(cfg.Session.Workspace)
-	if err := os.MkdirAll(workspace, 0755); err != nil {
+	if err := os.MkdirAll(workspace, 0700); err != nil {
 		slog.Error("create workspace dir", "path", workspace, "err", err)
 		os.Exit(1)
 	}
@@ -164,6 +177,7 @@ func main() {
 	srv := server.New(cfg.Server.Addr, router, platforms, agents, cfg.AgentCommands, scheduler, cfg.CLI.Backend)
 
 	// Graceful shutdown
+	shutdownDone := make(chan struct{})
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
@@ -172,6 +186,7 @@ func main() {
 		cancel()
 		scheduler.Stop()
 		router.Shutdown()
+		close(shutdownDone)
 	}()
 
 	slog.Info("naozhi starting",
@@ -187,4 +202,5 @@ func main() {
 		slog.Error("server error", "err", err)
 		os.Exit(1)
 	}
+	<-shutdownDone
 }

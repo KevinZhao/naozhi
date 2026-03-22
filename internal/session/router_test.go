@@ -56,6 +56,10 @@ func (f *fakeProcess) Close() {
 	})
 }
 
+func (f *fakeProcess) Send(_ context.Context, _ string, _ []cli.ImageData, _ cli.EventCallback) (*cli.SendResult, error) {
+	return &cli.SendResult{Text: "fake"}, nil
+}
+
 // setRunning safely changes the running state (used in shutdown tests).
 func (f *fakeProcess) setRunning(v bool) {
 	f.mu.Lock()

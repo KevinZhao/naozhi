@@ -43,6 +43,7 @@ type Feishu struct {
 	handler platform.MessageHandler
 	cancel  context.CancelFunc
 	done    chan struct{}
+	startMu sync.Mutex
 	started bool
 }
 
@@ -62,6 +63,8 @@ func (f *Feishu) Name() string { return "feishu" }
 
 func (f *Feishu) MaxReplyLength() int { return f.cfg.MaxReplyLen }
 
+func (f *Feishu) SupportsInterimMessages() bool { return true }
+
 func (f *Feishu) Mode() string { return f.mode }
 
 // RegisterRoutes registers webhook routes (only in webhook mode).
@@ -73,10 +76,14 @@ func (f *Feishu) RegisterRoutes(mux *http.ServeMux, handler platform.MessageHand
 
 // Start implements RunnablePlatform. Launches WebSocket connection in WS mode.
 func (f *Feishu) Start(handler platform.MessageHandler) error {
+	f.startMu.Lock()
 	if f.started {
+		f.startMu.Unlock()
 		return fmt.Errorf("feishu platform already started")
 	}
 	f.started = true
+	f.startMu.Unlock()
+
 	f.handler = handler
 	if f.mode == "websocket" {
 		slog.Info("feishu using websocket mode (no public IP needed)")

@@ -44,6 +44,8 @@ func (d *Discord) Name() string { return "discord" }
 
 func (d *Discord) MaxReplyLength() int { return d.cfg.MaxReplyLen }
 
+func (d *Discord) SupportsInterimMessages() bool { return true }
+
 // RegisterRoutes is a no-op for Discord (WebSocket gateway, no inbound HTTP).
 func (d *Discord) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
 
@@ -223,7 +225,11 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 }
 
 func isImageContentType(ct string) bool {
-	return strings.HasPrefix(ct, "image/")
+	switch strings.ToLower(strings.TrimSpace(ct)) {
+	case "image/png", "image/jpeg", "image/gif", "image/webp", "image/bmp":
+		return true
+	}
+	return false
 }
 
 var discordHTTPClient = &http.Client{Timeout: 15 * time.Second}

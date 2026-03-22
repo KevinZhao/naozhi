@@ -48,6 +48,8 @@ func (s *Slack) Name() string { return "slack" }
 
 func (s *Slack) MaxReplyLength() int { return s.cfg.MaxReplyLen }
 
+func (s *Slack) SupportsInterimMessages() bool { return true }
+
 // RegisterRoutes is a no-op for Socket Mode (no inbound HTTP needed).
 func (s *Slack) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
 

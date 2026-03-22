@@ -70,7 +70,9 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		// Challenge verification (after authentication)
 		if envelope.Type == "url_verification" {
 			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(map[string]string{"challenge": envelope.Challenge})
+			if err := json.NewEncoder(w).Encode(map[string]string{"challenge": envelope.Challenge}); err != nil {
+				slog.Warn("feishu challenge encode failed", "err", err)
+			}
 			return
 		}
 

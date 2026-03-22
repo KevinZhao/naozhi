@@ -45,7 +45,7 @@ func newAPIClient(baseURL, token string) *apiClient {
 		baseURL: baseURL,
 		token:   token,
 		httpClient: &http.Client{
-			Timeout: 0, // per-request timeout via context
+			Timeout: defaultLongPollTimeout + 10*time.Second, // covers long-poll (35s) + margin
 		},
 	}
 }
