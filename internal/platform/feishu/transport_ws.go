@@ -30,16 +30,16 @@ func (f *Feishu) startWebSocket() error {
 		}
 		if imageKey != "" {
 			go func() {
-				data, mime, err := f.DownloadImage(context.Background(), messageID, imageKey)
+				data, mime, err := f.DownloadImage(ctx, messageID, imageKey)
 				if err != nil {
 					slog.Error("feishu ws download image failed", "err", err, "key", imageKey)
 					return
 				}
 				msg.Images = []platform.Image{{Data: data, MimeType: mime}}
-				handler(context.Background(), msg)
+				handler(ctx, msg)
 			}()
 		} else {
-			go handler(context.Background(), msg)
+			go handler(ctx, msg)
 		}
 		return nil
 	})

@@ -72,6 +72,13 @@ func (c *apiClient) post(ctx context.Context, endpoint string, body any) ([]byte
 		return nil, fmt.Errorf("marshal body: %w", err)
 	}
 
+	// Use shorter timeout for non-polling endpoints
+	if !strings.Contains(endpoint, "getupdates") {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultAPITimeout)
+		defer cancel()
+	}
+
 	u := c.baseURL + "/" + endpoint
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u, bytes.NewReader(payload))
 	if err != nil {

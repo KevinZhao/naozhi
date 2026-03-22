@@ -29,6 +29,7 @@ type Slack struct {
 	api     *slack.Client
 	handler platform.MessageHandler
 	cancel  context.CancelFunc
+	ctx     context.Context // lifecycle context, cancelled on Stop
 	done    chan struct{}
 	startMu sync.Mutex
 	started bool
@@ -76,6 +77,7 @@ func (s *Slack) Start(handler platform.MessageHandler) error {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
+	s.ctx = ctx
 	s.done = make(chan struct{})
 
 	client := socketmode.New(s.api)
@@ -233,5 +235,5 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 		MentionMe: mentionMe,
 	}
 
-	go s.handler(context.Background(), msg)
+	go s.handler(s.ctx, msg)
 }

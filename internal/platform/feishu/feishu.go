@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
+	"golang.org/x/sync/singleflight"
 )
 
 var feishuHTTPClient = &http.Client{Timeout: 10 * time.Second}
@@ -37,7 +38,8 @@ type Feishu struct {
 	baseURL     string // API base URL (overridable for testing)
 	accessToken string
 	tokenExpiry time.Time
-	tokenMu     sync.Mutex
+	tokenMu     sync.RWMutex
+	tokenGroup  singleflight.Group
 
 	// WebSocket lifecycle
 	handler platform.MessageHandler
@@ -385,55 +387,76 @@ func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) err
 }
 
 // getAccessToken returns a valid tenant access token, refreshing if needed.
+// Uses singleflight to merge concurrent refresh requests.
 func (f *Feishu) getAccessToken(ctx context.Context) (string, error) {
-	f.tokenMu.Lock()
-	defer f.tokenMu.Unlock()
-
+	// Fast path: RLock to check cached token
+	f.tokenMu.RLock()
 	if f.accessToken != "" && time.Now().Before(f.tokenExpiry) {
-		return f.accessToken, nil
+		token := f.accessToken
+		f.tokenMu.RUnlock()
+		return token, nil
 	}
+	f.tokenMu.RUnlock()
 
-	reqBody, err := json.Marshal(map[string]string{
-		"app_id":     f.cfg.AppID,
-		"app_secret": f.cfg.AppSecret,
+	// Slow path: singleflight merges concurrent refresh calls
+	v, err, _ := f.tokenGroup.Do("token", func() (any, error) {
+		// Double-check under read lock
+		f.tokenMu.RLock()
+		if f.accessToken != "" && time.Now().Before(f.tokenExpiry) {
+			token := f.accessToken
+			f.tokenMu.RUnlock()
+			return token, nil
+		}
+		f.tokenMu.RUnlock()
+
+		reqBody, err := json.Marshal(map[string]string{
+			"app_id":     f.cfg.AppID,
+			"app_secret": f.cfg.AppSecret,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("marshal token request: %w", err)
+		}
+
+		refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+
+		req, err := http.NewRequestWithContext(refreshCtx, "POST",
+			f.baseURL+"/open-apis/auth/v3/tenant_access_token/internal",
+			bytes.NewReader(reqBody))
+		if err != nil {
+			return nil, fmt.Errorf("create token request: %w", err)
+		}
+		req.Header.Set("Content-Type", "application/json")
+
+		resp, err := feishuHTTPClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("request token: %w", err)
+		}
+		defer resp.Body.Close()
+
+		var result struct {
+			Code              int    `json:"code"`
+			TenantAccessToken string `json:"tenant_access_token"`
+			Expire            int    `json:"expire"`
+		}
+		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+			return nil, fmt.Errorf("decode token response: %w", err)
+		}
+		if result.Code != 0 {
+			return nil, fmt.Errorf("get token error: code=%d", result.Code)
+		}
+
+		f.tokenMu.Lock()
+		f.accessToken = result.TenantAccessToken
+		f.tokenExpiry = time.Now().Add(time.Duration(result.Expire-60) * time.Second)
+		f.tokenMu.Unlock()
+
+		return result.TenantAccessToken, nil
 	})
 	if err != nil {
-		return "", fmt.Errorf("marshal token request: %w", err)
+		return "", err
 	}
-
-	// Use a bounded context for the token refresh to avoid holding tokenMu indefinitely
-	refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(refreshCtx, "POST",
-		f.baseURL+"/open-apis/auth/v3/tenant_access_token/internal",
-		bytes.NewReader(reqBody))
-	if err != nil {
-		return "", fmt.Errorf("create token request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := feishuHTTPClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("request token: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Code              int    `json:"code"`
-		TenantAccessToken string `json:"tenant_access_token"`
-		Expire            int    `json:"expire"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode token response: %w", err)
-	}
-	if result.Code != 0 {
-		return "", fmt.Errorf("get token error: code=%d", result.Code)
-	}
-
-	f.accessToken = result.TenantAccessToken
-	f.tokenExpiry = time.Now().Add(time.Duration(result.Expire-60) * time.Second) // refresh 60s early
-	return f.accessToken, nil
+	return v.(string), nil
 }
 
 // verifySignature verifies the request signature (for encrypt_key mode).

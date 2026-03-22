@@ -32,11 +32,38 @@ type Server struct {
 	platforms     map[string]platform.Platform
 	router        *session.Router
 	dedup         *platform.Dedup
+	sessionGuard  *sessionGuard
 	startedAt     time.Time
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
 	scheduler     *cron.Scheduler
 	backendTag    string // e.g., "cc" or "kiro", appended to replies
+}
+
+// sessionGuard prevents multiple concurrent messages to the same session.
+type sessionGuard struct {
+	mu     sync.Mutex
+	active map[string]struct{}
+}
+
+func newSessionGuard() *sessionGuard {
+	return &sessionGuard{active: make(map[string]struct{})}
+}
+
+func (g *sessionGuard) TryAcquire(key string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if _, ok := g.active[key]; ok {
+		return false
+	}
+	g.active[key] = struct{}{}
+	return true
+}
+
+func (g *sessionGuard) Release(key string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	delete(g.active, key)
 }
 
 // New creates a new Server.
@@ -51,6 +78,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		platforms:     platforms,
 		router:        router,
 		dedup:         platform.NewDedup(defaultDedupCapacity),
+		sessionGuard:  newSessionGuard(),
 		startedAt:     time.Now(),
 		agents:        agents,
 		agentCommands: agentCommands,
@@ -181,6 +209,15 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		opts := s.agents[agentID] // zero value = use router defaults
 		key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
 
+		// H1: Prevent goroutine accumulation — only one message per session at a time
+		if !s.sessionGuard.TryAcquire(key) {
+			if p := s.platforms[msg.Platform]; p != nil {
+				p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "正在处理上一条消息，请稍候..."})
+			}
+			return
+		}
+		defer s.sessionGuard.Release(key)
+
 		sess, sessStatus, err := s.router.GetOrCreate(ctx, key, opts)
 		if err != nil {
 			log.Error("get session", "err", err)
@@ -201,20 +238,29 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "新会话已创建（之前的上下文已失效）。"})
 		}
 
-		// Send "thinking..." indicator
-		var thinkingMsgID string
+		// H3: Send "thinking..." indicator asynchronously to avoid blocking event loop
+		thinkingCh := make(chan string, 1)
+		thinkingTrigger := make(chan struct{})
 		var thinkingSent sync.Once
 
-		onEvent := func(ev cli.Event) {
-			if !platform.SupportsInterimMessages(p) {
-				return
-			}
-			thinkingSent.Do(func() {
-				id, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "思考中..."})
-				if err == nil {
-					thinkingMsgID = id
+		if platform.SupportsInterimMessages(p) {
+			go func() {
+				select {
+				case <-thinkingTrigger:
+					id, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "思考中..."})
+					if err == nil {
+						thinkingCh <- id
+					}
+				case <-ctx.Done():
 				}
-			})
+				close(thinkingCh)
+			}()
+		} else {
+			close(thinkingCh)
+		}
+
+		onEvent := func(ev cli.Event) {
+			thinkingSent.Do(func() { close(thinkingTrigger) })
 		}
 
 		// Convert platform images to CLI image data
@@ -244,6 +290,16 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 			}
 			outImages = append(outImages, platform.Image{Data: data, MimeType: mimeFromPath(path)})
 			replyText = strings.ReplaceAll(replyText, path, "[图片]")
+		}
+
+		// Collect thinkingMsgID from async goroutine
+		var thinkingMsgID string
+		select {
+		case id, ok := <-thinkingCh:
+			if ok {
+				thinkingMsgID = id
+			}
+		default:
 		}
 
 		// Edit "thinking..." to final result, or send new message

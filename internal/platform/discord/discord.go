@@ -24,12 +24,15 @@ type Config struct {
 
 // Discord implements Platform and RunnablePlatform via WebSocket gateway.
 type Discord struct {
-	cfg     Config
-	session *discordgo.Session
-	handler platform.MessageHandler
-	startMu sync.Mutex
-	started bool
-	botID   string
+	cfg        Config
+	session    *discordgo.Session
+	handler    platform.MessageHandler
+	startMu    sync.Mutex
+	started    bool
+	botID      string
+	stopCtx    context.Context
+	stopCancel context.CancelFunc
+	handlerWg  sync.WaitGroup
 }
 
 // New creates a Discord platform adapter.
@@ -63,6 +66,10 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 
 	d.handler = handler
 
+	ctx, cancel := context.WithCancel(context.Background())
+	d.stopCtx = ctx
+	d.stopCancel = cancel
+
 	sess, err := discordgo.New("Bot " + d.cfg.BotToken)
 	if err != nil {
 		return fmt.Errorf("create discord session: %w", err)
@@ -95,10 +102,20 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 
 // Stop implements RunnablePlatform. Closes Discord WebSocket gateway.
 func (d *Discord) Stop() error {
+	if d.stopCancel != nil {
+		d.stopCancel()
+	}
 	if d.session != nil {
 		if err := d.session.Close(); err != nil {
 			return fmt.Errorf("close discord session: %w", err)
 		}
+	}
+	done := make(chan struct{})
+	go func() { d.handlerWg.Wait(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		slog.Warn("discord: timed out waiting for handler goroutines")
 	}
 	return nil
 }
@@ -211,7 +228,9 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 	}
 
 	// Download images in the async goroutine, not in discordgo's event dispatch
+	d.handlerWg.Add(1)
 	go func() {
+		defer d.handlerWg.Done()
 		for _, p := range pending {
 			data, mime, err := downloadURL(p.url)
 			if err != nil {
@@ -220,7 +239,7 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 			}
 			msg.Images = append(msg.Images, platform.Image{Data: data, MimeType: mime})
 		}
-		d.handler(context.Background(), msg)
+		d.handler(d.stopCtx, msg)
 	}()
 }
 
