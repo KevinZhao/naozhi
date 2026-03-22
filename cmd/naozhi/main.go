@@ -18,6 +18,7 @@ import (
 	discordplatform "github.com/naozhi/naozhi/internal/platform/discord"
 	"github.com/naozhi/naozhi/internal/platform/feishu"
 	slackplatform "github.com/naozhi/naozhi/internal/platform/slack"
+	weixinplatform "github.com/naozhi/naozhi/internal/platform/weixin"
 	"github.com/naozhi/naozhi/internal/server"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -112,6 +113,14 @@ func main() {
 			MaxReplyLen: cfg.Platforms.Discord.MaxReplyLength,
 		})
 		platforms["discord"] = d
+	}
+	if cfg.Platforms.Weixin != nil {
+		wx := weixinplatform.New(weixinplatform.Config{
+			Token:       cfg.Platforms.Weixin.Token,
+			BaseURL:     cfg.Platforms.Weixin.BaseURL,
+			MaxReplyLen: cfg.Platforms.Weixin.MaxReplyLength,
+		})
+		platforms["weixin"] = wx
 	}
 
 	if len(platforms) == 0 {

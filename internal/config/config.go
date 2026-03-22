@@ -54,6 +54,7 @@ type PlatformConfigs struct {
 	Feishu  *FeishuConfig  `yaml:"feishu"`
 	Slack   *SlackConfig   `yaml:"slack"`
 	Discord *DiscordConfig `yaml:"discord"`
+	Weixin  *WeixinConfig  `yaml:"weixin"`
 }
 
 type FeishuConfig struct {
@@ -84,6 +85,12 @@ type SlackConfig struct {
 
 type DiscordConfig struct {
 	BotToken       string `yaml:"bot_token"`
+	MaxReplyLength int    `yaml:"max_reply_length"`
+}
+
+type WeixinConfig struct {
+	Token          string `yaml:"token"`
+	BaseURL        string `yaml:"base_url"`
 	MaxReplyLength int    `yaml:"max_reply_length"`
 }
 
@@ -120,6 +127,45 @@ func Load(path string) (*Config, error) {
 	}
 	if cfg.Session.Workspace == "" {
 		cfg.Session.Workspace = "~/.naozhi/workspace"
+	}
+
+	// Validate duration fields
+	if cfg.Session.TTL != "" {
+		if _, err := time.ParseDuration(cfg.Session.TTL); err != nil {
+			return nil, fmt.Errorf("invalid session.ttl %q: %w", cfg.Session.TTL, err)
+		}
+	}
+	if cfg.Session.Watchdog.NoOutputTimeout != "" {
+		if _, err := time.ParseDuration(cfg.Session.Watchdog.NoOutputTimeout); err != nil {
+			return nil, fmt.Errorf("invalid session.watchdog.no_output_timeout %q: %w", cfg.Session.Watchdog.NoOutputTimeout, err)
+		}
+	}
+	if cfg.Session.Watchdog.TotalTimeout != "" {
+		if _, err := time.ParseDuration(cfg.Session.Watchdog.TotalTimeout); err != nil {
+			return nil, fmt.Errorf("invalid session.watchdog.total_timeout %q: %w", cfg.Session.Watchdog.TotalTimeout, err)
+		}
+	}
+
+	// Warn if config values contain unexpanded env var placeholders
+	if cfg.Platforms.Feishu != nil {
+		if containsEnvPlaceholder(cfg.Platforms.Feishu.AppID) || containsEnvPlaceholder(cfg.Platforms.Feishu.AppSecret) {
+			return nil, fmt.Errorf("feishu app_id or app_secret contains unexpanded ${VAR} — check environment variables")
+		}
+	}
+	if cfg.Platforms.Slack != nil {
+		if containsEnvPlaceholder(cfg.Platforms.Slack.BotToken) {
+			return nil, fmt.Errorf("slack bot_token contains unexpanded ${VAR} — check environment variables")
+		}
+	}
+	if cfg.Platforms.Discord != nil {
+		if containsEnvPlaceholder(cfg.Platforms.Discord.BotToken) {
+			return nil, fmt.Errorf("discord bot_token contains unexpanded ${VAR} — check environment variables")
+		}
+	}
+	if cfg.Platforms.Weixin != nil {
+		if containsEnvPlaceholder(cfg.Platforms.Weixin.Token) {
+			return nil, fmt.Errorf("weixin token contains unexpanded ${VAR} — check environment variables")
+		}
 	}
 
 	return &cfg, nil
@@ -169,4 +215,8 @@ func expandEnvVars(s string) string {
 		}
 		return match
 	})
+}
+
+func containsEnvPlaceholder(s string) bool {
+	return strings.Contains(s, "${")
 }
