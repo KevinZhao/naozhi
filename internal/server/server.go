@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -119,6 +120,22 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		if trimmed == "/cron" || strings.HasPrefix(trimmed, "/cron ") {
 			if s.scheduler != nil {
 				s.handleCronCommand(ctx, msg, trimmed, log)
+			}
+			return
+		}
+
+		// Handle /cd <path> to change working directory
+		if strings.HasPrefix(trimmed, "/cd ") {
+			s.handleCdCommand(ctx, msg, trimmed, log)
+			return
+		}
+
+		// Handle /pwd to show current working directory
+		if trimmed == "/pwd" {
+			chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
+			ws := s.router.GetWorkspace(chatKey)
+			if p := s.platforms[msg.Platform]; p != nil {
+				p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "当前工作目录: " + ws})
 			}
 			return
 		}
@@ -415,6 +432,52 @@ func (s *Server) handleCronCommand(ctx context.Context, msg platform.IncomingMes
 			"  /cron pause <id>\n" +
 			"  /cron resume <id>")
 	}
+}
+
+// handleCdCommand changes the working directory for all sessions in a chat.
+func (s *Server) handleCdCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) {
+	p := s.platforms[msg.Platform]
+	if p == nil {
+		return
+	}
+
+	path := strings.TrimSpace(strings.TrimPrefix(trimmed, "/cd"))
+	if path == "" {
+		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "用法: /cd <目录路径>\n例: /cd /home/ubuntu/my-project"})
+		return
+	}
+
+	// Expand ~ to home directory
+	if strings.HasPrefix(path, "~") {
+		home, err := os.UserHomeDir()
+		if err == nil {
+			path = filepath.Join(home, path[1:])
+		}
+	}
+
+	// Resolve relative paths against the chat's current workspace, not naozhi's cwd
+	var absPath string
+	if filepath.IsAbs(path) {
+		absPath = filepath.Clean(path)
+	} else {
+		chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
+		currentWS := s.router.GetWorkspace(chatKey)
+		absPath = filepath.Join(currentWS, path)
+	}
+
+	// Verify directory exists
+	info, err := os.Stat(absPath)
+	if err != nil || !info.IsDir() {
+		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "目录不存在: " + absPath})
+		return
+	}
+
+	chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
+	s.router.SetWorkspace(chatKey, absPath)
+	s.router.ResetChat(chatKey)
+
+	p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "工作目录已切换到: " + absPath + "\n所有会话已重置，新消息将在此目录下执行。"})
+	log.Info("workspace changed", "chat_key", chatKey, "path", absPath)
 }
 
 // parseCronAdd parses the args of /cron add: "schedule" prompt
