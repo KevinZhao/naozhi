@@ -409,6 +409,14 @@ func (p *Process) PID() int {
 	return 0
 }
 
+// InjectHistory pre-populates the event log with historical entries.
+// Must be called before any Send() to avoid interleaving with live events.
+func (p *Process) InjectHistory(entries []EventEntry) {
+	for _, e := range entries {
+		p.eventLog.Append(e)
+	}
+}
+
 // EventEntries returns a copy of all event log entries.
 func (p *Process) EventEntries() []EventEntry {
 	return p.eventLog.Entries()

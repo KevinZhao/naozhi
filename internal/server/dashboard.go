@@ -410,7 +410,14 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("session takeover", "key", key, "session_id", req.SessionID, "pid", req.PID, "cwd", cwd)
-	_ = sess // used for side effect of spawning
+
+	// Load conversation history from Claude's local JSONL
+	if s.claudeDir != "" {
+		if entries, err := discovery.LoadHistory(s.claudeDir, req.SessionID); err == nil && len(entries) > 0 {
+			sess.InjectHistory(entries)
+			slog.Info("loaded session history", "key", key, "entries", len(entries))
+		}
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "key": key})

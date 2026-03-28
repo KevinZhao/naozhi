@@ -43,6 +43,11 @@ func (p *TestProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
 func (p *TestProcess) ProtocolName() string                       { return "test" }
 func (p *TestProcess) SubscribeEvents() (<-chan struct{}, func()) { return p.EventLog.Subscribe() }
 func (p *TestProcess) PID() int                                   { return 0 }
+func (p *TestProcess) InjectHistory(entries []cli.EventEntry) {
+	for _, e := range entries {
+		p.EventLog.Append(e)
+	}
+}
 
 // InjectSession inserts a session with the given TestProcess into the router.
 // For use in tests that need sessions without spawning real CLI processes.

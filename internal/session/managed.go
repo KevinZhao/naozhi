@@ -25,6 +25,7 @@ type processIface interface {
 	ProtocolName() string
 	SubscribeEvents() (<-chan struct{}, func())
 	PID() int
+	InjectHistory(entries []cli.EventEntry)
 }
 
 // ManagedSession wraps a claude CLI process with session metadata.
@@ -188,4 +189,14 @@ func (s *ManagedSession) SubscribeEvents() (<-chan struct{}, func()) {
 		return ch, func() {}
 	}
 	return proc.SubscribeEvents()
+}
+
+// InjectHistory pre-populates the event log with historical entries.
+func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
+	s.sendMu.Lock()
+	proc := s.process
+	s.sendMu.Unlock()
+	if proc != nil {
+		proc.InjectHistory(entries)
+	}
 }
