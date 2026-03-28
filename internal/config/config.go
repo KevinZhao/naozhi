@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"regexp"
 	"strings"
@@ -17,8 +18,15 @@ type Config struct {
 	Platforms     PlatformConfigs        `yaml:"platforms"`
 	Agents        map[string]AgentConfig `yaml:"agents"`
 	AgentCommands map[string]string      `yaml:"agent_commands"`
+	Nodes         map[string]NodeConfig  `yaml:"nodes"`
 	Cron          CronConfig             `yaml:"cron"`
 	Log           LogConfig              `yaml:"log"`
+}
+
+type NodeConfig struct {
+	URL         string `yaml:"url"`
+	Token       string `yaml:"token"`
+	DisplayName string `yaml:"display_name"`
 }
 
 type AgentConfig struct {
@@ -165,6 +173,23 @@ func Load(path string) (*Config, error) {
 	if cfg.Platforms.Weixin != nil {
 		if containsEnvPlaceholder(cfg.Platforms.Weixin.Token) {
 			return nil, fmt.Errorf("weixin token contains unexpanded ${VAR} — check environment variables")
+		}
+	}
+
+	// Validate node configs
+	for id, nc := range cfg.Nodes {
+		if nc.URL == "" {
+			return nil, fmt.Errorf("node %q: url is required", id)
+		}
+		if strings.HasSuffix(nc.URL, "/") {
+			return nil, fmt.Errorf("node %q: url must not have trailing slash", id)
+		}
+		u, err := url.Parse(nc.URL)
+		if err != nil {
+			return nil, fmt.Errorf("node %q: invalid url: %w", id, err)
+		}
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return nil, fmt.Errorf("node %q: url must be http or https", id)
 		}
 	}
 

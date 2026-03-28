@@ -39,6 +39,9 @@ type Server struct {
 	scheduler      *cron.Scheduler
 	backendTag     string // e.g., "cc" or "kiro", appended to replies
 	dashboardToken string // optional bearer token for dashboard API
+	hub            *Hub   // WebSocket hub
+	nodes          map[string]*NodeClient
+	claudeDir      string // path to ~/.claude for session discovery
 }
 
 // sessionGuard prevents multiple concurrent messages to the same session.
@@ -73,6 +76,10 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 	if backend == "kiro" {
 		tag = "kiro"
 	}
+	claudeDir := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		claudeDir = filepath.Join(home, ".claude")
+	}
 	return &Server{
 		addr:          addr,
 		mux:           http.NewServeMux(),
@@ -85,12 +92,18 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		agentCommands: agentCommands,
 		scheduler:     scheduler,
 		backendTag:    tag,
+		claudeDir:     claudeDir,
 	}
 }
 
 // SetDashboardToken sets the optional bearer token required for dashboard send API.
 func (s *Server) SetDashboardToken(token string) {
 	s.dashboardToken = token
+}
+
+// SetNodes configures remote node clients for multi-node aggregation.
+func (s *Server) SetNodes(nodes map[string]*NodeClient) {
+	s.nodes = nodes
 }
 
 // Start registers routes and begins serving.
@@ -122,6 +135,11 @@ func (s *Server) Start(ctx context.Context) error {
 	go func() {
 		<-ctx.Done()
 		slog.Info("shutting down server")
+
+		// Shutdown WebSocket hub
+		if s.hub != nil {
+			s.hub.Shutdown()
+		}
 
 		// Stop RunnablePlatforms (e.g. WebSocket connections)
 		for _, p := range s.platforms {

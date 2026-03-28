@@ -76,6 +76,10 @@ func (f *fakeProcess) TotalCost() float64                         { return 0 }
 func (f *fakeProcess) EventEntries() []cli.EventEntry             { return nil }
 func (f *fakeProcess) EventEntriesSince(_ int64) []cli.EventEntry { return nil }
 func (f *fakeProcess) ProtocolName() string                       { return "test" }
+func (f *fakeProcess) SubscribeEvents() (<-chan struct{}, func()) {
+	ch := make(chan struct{})
+	return ch, func() {}
+}
 
 // setRunning safely changes the running state (used in shutdown tests).
 func (f *fakeProcess) setRunning(v bool) {

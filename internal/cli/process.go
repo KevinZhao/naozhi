@@ -186,6 +186,18 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 		p.mu.Unlock()
 	}()
 
+	// Log user message before sending
+	userEntry := EventEntry{
+		Time:    time.Now().UnixMilli(),
+		Type:    "user",
+		Summary: TruncateRunes(text, 120),
+		Detail:  TruncateRunes(text, 2000),
+	}
+	if len(images) > 0 {
+		userEntry.Summary += fmt.Sprintf(" [+%d image(s)]", len(images))
+	}
+	p.eventLog.Append(userEntry)
+
 	if err := p.protocol.WriteMessage(p.stdin, text, images); err != nil {
 		return nil, fmt.Errorf("write message: %w", err)
 	}
@@ -212,8 +224,6 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 				return nil, fmt.Errorf("process exited during send")
 			}
 
-			p.logEvent(ev)
-
 			if !noOutputTimer.Stop() {
 				select {
 				case <-noOutputTimer.C:
@@ -222,12 +232,17 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 			}
 			noOutputTimer.Reset(noOutputDur)
 
-			// Capture session ID from init event
-			if ev.Type == "system" && ev.SubType == "init" && p.SessionID == "" {
-				p.SessionID = ev.SessionID
-				slog.Info("session initialized", "session_id", ev.SessionID)
+			// Capture session ID from first init event; skip logging subsequent inits
+			if ev.Type == "system" && ev.SubType == "init" {
+				if p.SessionID == "" {
+					p.SessionID = ev.SessionID
+					slog.Info("session initialized", "session_id", ev.SessionID)
+					p.logEvent(ev)
+				}
 				continue
 			}
+
+			p.logEvent(ev)
 
 			// Deliver intermediate events via callback
 			if onEvent != nil && ev.Type == "assistant" && ev.Message != nil {
@@ -322,20 +337,21 @@ func (p *Process) logEvent(ev Event) {
 		if ev.Message == nil {
 			return
 		}
-		// Log only the first recognized content block per event.
-		// An assistant event typically carries one primary block;
-		// if multiple exist (e.g., tool_use + text), tool_use wins.
 		for _, block := range ev.Message.Content {
 			switch block.Type {
 			case "thinking":
 				entry.Type = "thinking"
 				entry.Summary = TruncateRunes(block.Text, 120)
+				entry.Detail = TruncateRunes(block.Text, 500)
 			case "tool_use":
 				entry.Type = "tool_use"
 				entry.Summary = block.Name
+				entry.Tool = block.Name
+				entry.Detail = formatToolDetail(block)
 			case "text":
 				entry.Type = "text"
 				entry.Summary = TruncateRunes(block.Text, 120)
+				entry.Detail = TruncateRunes(block.Text, 2000)
 			default:
 				continue
 			}
@@ -346,6 +362,7 @@ func (p *Process) logEvent(ev Event) {
 	case "result":
 		entry.Type = "result"
 		entry.Summary = TruncateRunes(ev.Result, 200)
+		entry.Detail = TruncateRunes(ev.Result, 4000)
 		entry.Cost = ev.CostUSD
 		p.mu.Lock()
 		p.totalCost = ev.CostUSD
@@ -355,6 +372,14 @@ func (p *Process) logEvent(ev Event) {
 	}
 
 	p.eventLog.Append(entry)
+}
+
+// formatToolDetail returns a detail string for tool_use events.
+func formatToolDetail(block ContentBlock) string {
+	if len(block.Input) == 0 {
+		return block.Name
+	}
+	return block.Name + ": " + TruncateRunes(string(block.Input), 500)
 }
 
 // GetState returns the current process state.
@@ -376,6 +401,14 @@ func (p *Process) ProtocolName() string {
 	return p.protocol.Name()
 }
 
+// PID returns the OS process ID.
+func (p *Process) PID() int {
+	if p.cmd != nil && p.cmd.Process != nil {
+		return p.cmd.Process.Pid
+	}
+	return 0
+}
+
 // EventEntries returns a copy of all event log entries.
 func (p *Process) EventEntries() []EventEntry {
 	return p.eventLog.Entries()
@@ -384,4 +417,9 @@ func (p *Process) EventEntries() []EventEntry {
 // EventEntriesSince returns event log entries after the given unix ms timestamp.
 func (p *Process) EventEntriesSince(afterMS int64) []EventEntry {
 	return p.eventLog.EntriesSince(afterMS)
+}
+
+// SubscribeEvents returns a notification channel and unsubscribe function for the event log.
+func (p *Process) SubscribeEvents() (<-chan struct{}, func()) {
+	return p.eventLog.Subscribe()
 }

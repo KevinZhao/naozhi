@@ -461,3 +461,40 @@ func (r *Router) GetSession(key string) *ManagedSession {
 	defer r.mu.Unlock()
 	return r.sessions[key]
 }
+
+// ManagedPIDs returns the OS PIDs of all alive managed processes.
+func (r *Router) ManagedPIDs() map[int]bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	pids := make(map[int]bool)
+	for _, s := range r.sessions {
+		if s.process != nil && s.process.Alive() {
+			if pid := s.process.PID(); pid > 0 {
+				pids[pid] = true
+			}
+		}
+	}
+	return pids
+}
+
+// Takeover creates a managed session by resuming an external Claude CLI session.
+// The caller must ensure the original process has been terminated before calling.
+func (r *Router) Takeover(ctx context.Context, key string, sessionID string, workspace string, opts AgentOpts) (*ManagedSession, error) {
+	r.mu.Lock()
+	// If key already exists and alive, return it
+	if s, ok := r.sessions[key]; ok && s.process != nil && s.process.Alive() {
+		r.mu.Unlock()
+		return s, nil
+	}
+	// Set workspace override for the chat key prefix
+	if idx := lastIndexByte(key, ':'); idx >= 0 {
+		chatKey := key[:idx]
+		r.workspaceOverrides[chatKey] = workspace
+	}
+	s, err := r.spawnSession(ctx, key, sessionID, opts)
+	if err != nil {
+		return nil, err
+	}
+	s.workspace = workspace
+	return s, nil
+}

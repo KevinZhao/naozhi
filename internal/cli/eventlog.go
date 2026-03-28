@@ -14,6 +14,13 @@ type EventEntry struct {
 	Type    string  `json:"type"`              // init, thinking, tool_use, text, result, system
 	Summary string  `json:"summary,omitempty"` // brief description
 	Cost    float64 `json:"cost,omitempty"`    // cumulative cost (result events only)
+	Detail  string  `json:"detail,omitempty"`  // fuller content for terminal view
+	Tool    string  `json:"tool,omitempty"`    // tool name for tool_use events
+}
+
+type subscriber struct {
+	ch        chan struct{} // buffered(1)
+	closeOnce sync.Once
 }
 
 // EventLog is a thread-safe, bounded event log.
@@ -21,6 +28,9 @@ type EventLog struct {
 	mu      sync.RWMutex
 	entries []EventEntry
 	maxSize int
+
+	subMu       sync.Mutex
+	subscribers []*subscriber
 }
 
 // NewEventLog creates an event log with the given max size.
@@ -32,9 +42,9 @@ func NewEventLog(maxSize int) *EventLog {
 }
 
 // Append adds an entry to the log, dropping oldest if full.
+// Signals all subscribers non-blockingly after appending.
 func (l *EventLog) Append(e EventEntry) {
 	l.mu.Lock()
-	defer l.mu.Unlock()
 	if e.Time == 0 {
 		e.Time = time.Now().UnixMilli()
 	}
@@ -47,6 +57,38 @@ func (l *EventLog) Append(e EventEntry) {
 		copy(l.entries, l.entries[drop:])
 		l.entries = l.entries[:len(l.entries)-drop]
 	}
+	l.mu.Unlock()
+
+	l.subMu.Lock()
+	for _, sub := range l.subscribers {
+		select {
+		case sub.ch <- struct{}{}:
+		default:
+		}
+	}
+	l.subMu.Unlock()
+}
+
+// Subscribe returns a notification channel and an unsubscribe function.
+// The channel receives a signal (non-blocking) whenever Append is called.
+func (l *EventLog) Subscribe() (<-chan struct{}, func()) {
+	sub := &subscriber{ch: make(chan struct{}, 1)}
+	l.subMu.Lock()
+	l.subscribers = append(l.subscribers, sub)
+	l.subMu.Unlock()
+
+	unsub := func() {
+		l.subMu.Lock()
+		defer l.subMu.Unlock()
+		for i, s := range l.subscribers {
+			if s == sub {
+				l.subscribers = append(l.subscribers[:i], l.subscribers[i+1:]...)
+				break
+			}
+		}
+		sub.closeOnce.Do(func() { close(sub.ch) })
+	}
+	return sub.ch, unsub
 }
 
 // Entries returns a copy of all entries.

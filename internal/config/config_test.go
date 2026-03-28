@@ -123,3 +123,74 @@ func TestLoadDefaults(t *testing.T) {
 		t.Errorf("default log level = %q, want %q", cfg.Log.Level, "info")
 	}
 }
+
+func TestLoadNodeConfig(t *testing.T) {
+	tmpFile := t.TempDir() + "/config.yaml"
+	os.WriteFile(tmpFile, []byte(`
+nodes:
+  macbook:
+    url: "http://10.0.0.2:8180"
+    token: "secret"
+    display_name: "MacBook Pro"
+`), 0644)
+
+	cfg, err := Load(tmpFile)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if len(cfg.Nodes) != 1 {
+		t.Fatalf("expected 1 node, got %d", len(cfg.Nodes))
+	}
+	n := cfg.Nodes["macbook"]
+	if n.URL != "http://10.0.0.2:8180" {
+		t.Errorf("url = %q", n.URL)
+	}
+	if n.Token != "secret" {
+		t.Errorf("token = %q", n.Token)
+	}
+	if n.DisplayName != "MacBook Pro" {
+		t.Errorf("display_name = %q", n.DisplayName)
+	}
+}
+
+func TestLoadNodeConfig_TrailingSlash(t *testing.T) {
+	tmpFile := t.TempDir() + "/config.yaml"
+	os.WriteFile(tmpFile, []byte(`
+nodes:
+  bad:
+    url: "http://10.0.0.2:8180/"
+`), 0644)
+
+	_, err := Load(tmpFile)
+	if err == nil {
+		t.Fatal("expected error for trailing slash")
+	}
+}
+
+func TestLoadNodeConfig_InvalidScheme(t *testing.T) {
+	tmpFile := t.TempDir() + "/config.yaml"
+	os.WriteFile(tmpFile, []byte(`
+nodes:
+  bad:
+    url: "ftp://10.0.0.2:8180"
+`), 0644)
+
+	_, err := Load(tmpFile)
+	if err == nil {
+		t.Fatal("expected error for non-http URL")
+	}
+}
+
+func TestLoadNodeConfig_MissingURL(t *testing.T) {
+	tmpFile := t.TempDir() + "/config.yaml"
+	os.WriteFile(tmpFile, []byte(`
+nodes:
+  bad:
+    token: "secret"
+`), 0644)
+
+	_, err := Load(tmpFile)
+	if err == nil {
+		t.Fatal("expected error for missing URL")
+	}
+}

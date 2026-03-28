@@ -10,6 +10,7 @@ cli:
 session:
   max_procs: 3
   ttl: "30m"
+  workspace: "/home/ec2-user/workspace"
   watchdog:
     no_output_timeout: "120s"
     total_timeout: "300s"
@@ -42,3 +43,9 @@ platforms:
 
 log:
   level: "info"
+
+nodes:
+  macbook:
+    url: "http://192.168.1.101:8180"
+    token: ""
+    display_name: "MacBook Pro"

@@ -137,8 +137,7 @@ func main() {
 	}
 
 	if len(platforms) == 0 {
-		slog.Error("no platforms configured")
-		os.Exit(1)
+		slog.Warn("no platforms configured, running in dashboard-only mode")
 	}
 
 	// Build agent opts from config
@@ -175,6 +174,16 @@ func main() {
 
 	// Server
 	srv := server.New(cfg.Server.Addr, router, platforms, agents, cfg.AgentCommands, scheduler, cfg.CLI.Backend)
+
+	// Configure remote nodes for multi-node aggregation
+	if len(cfg.Nodes) > 0 {
+		nodes := make(map[string]*server.NodeClient, len(cfg.Nodes))
+		for id, nc := range cfg.Nodes {
+			nodes[id] = server.NewNodeClient(id, nc.URL, nc.Token, nc.DisplayName)
+		}
+		srv.SetNodes(nodes)
+		slog.Info("multi-node configured", "nodes", len(nodes))
+	}
 
 	// Graceful shutdown
 	shutdownDone := make(chan struct{})

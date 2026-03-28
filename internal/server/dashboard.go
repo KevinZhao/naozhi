@@ -4,24 +4,34 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/session"
 )
 
 //go:embed static/dashboard.html
 var dashboardHTML embed.FS
 
 func (s *Server) registerDashboard() {
+	s.hub = NewHub(s.router, s.agents, s.agentCommands, s.dashboardToken, s.sessionGuard, s.nodes)
+
 	s.mux.HandleFunc("GET /api/sessions", s.handleAPISessions)
 	s.mux.HandleFunc("GET /api/sessions/events", s.handleAPISessionEvents)
 	s.mux.HandleFunc("POST /api/sessions/send", s.handleAPISend)
+	s.mux.HandleFunc("GET /api/discovered", s.handleAPIDiscovered)
+	s.mux.HandleFunc("POST /api/discovered/takeover", s.handleAPITakeover)
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
+	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -40,16 +50,77 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 	snapshots := s.router.ListSessions()
 	active, total := s.router.Stats()
 
-	resp := map[string]any{
-		"sessions": snapshots,
-		"stats": map[string]any{
-			"active":  active,
-			"total":   total,
-			"uptime":  time.Since(s.startedAt).Round(time.Second).String(),
-			"backend": s.backendTag,
-		},
+	stats := map[string]any{
+		"active":  active,
+		"total":   total,
+		"uptime":  time.Since(s.startedAt).Round(time.Second).String(),
+		"backend": s.backendTag,
 	}
 
+	// No remote nodes: use existing response format
+	if len(s.nodes) == 0 {
+		resp := map[string]any{
+			"sessions": snapshots,
+			"stats":    stats,
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			slog.Error("encode sessions response", "err", err)
+		}
+		return
+	}
+
+	// Multi-node: tag local sessions and merge with remote
+	allSessions := make([]any, 0, len(snapshots))
+	for i := range snapshots {
+		snapshots[i].Node = "local"
+		allSessions = append(allSessions, snapshots[i])
+	}
+
+	nodeStatus := map[string]any{
+		"local": map[string]any{"display_name": "Local", "status": "ok"},
+	}
+
+	type fetchResult struct {
+		nodeID   string
+		sessions []map[string]any
+		err      error
+	}
+	ch := make(chan fetchResult, len(s.nodes))
+	for id, nc := range s.nodes {
+		go func(id string, nc *NodeClient) {
+			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+			defer cancel()
+			sessions, err := nc.FetchSessions(ctx)
+			ch <- fetchResult{id, sessions, err}
+		}(id, nc)
+	}
+	for i := 0; i < len(s.nodes); i++ {
+		res := <-ch
+		nc := s.nodes[res.nodeID]
+		if res.err != nil {
+			slog.Warn("fetch remote sessions", "node", res.nodeID, "err", res.err)
+			nodeStatus[res.nodeID] = map[string]any{
+				"display_name": nc.DisplayName,
+				"status":       "error",
+			}
+			continue
+		}
+		nodeStatus[res.nodeID] = map[string]any{
+			"display_name": nc.DisplayName,
+			"status":       "ok",
+		}
+		for _, rs := range res.sessions {
+			rs["node"] = res.nodeID
+			allSessions = append(allSessions, rs)
+		}
+	}
+
+	resp := map[string]any{
+		"sessions": allSessions,
+		"stats":    stats,
+		"nodes":    nodeStatus,
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		slog.Error("encode sessions response", "err", err)
@@ -63,6 +134,36 @@ func (s *Server) handleAPISessionEvents(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Remote node proxy
+	node := r.URL.Query().Get("node")
+	if node != "" && node != "local" {
+		nc, ok := s.nodes[node]
+		if !ok {
+			http.Error(w, "unknown node: "+node, http.StatusBadRequest)
+			return
+		}
+		var after int64
+		if afterStr := r.URL.Query().Get("after"); afterStr != "" {
+			var parseErr error
+			after, parseErr = strconv.ParseInt(afterStr, 10, 64)
+			if parseErr != nil {
+				http.Error(w, "invalid after parameter", http.StatusBadRequest)
+				return
+			}
+		}
+		entries, err := nc.FetchEvents(r.Context(), key, after)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(entries); err != nil {
+			slog.Error("encode remote events response", "err", err)
+		}
+		return
+	}
+
+	// Local
 	sess := s.router.GetSession(key)
 	if sess == nil {
 		http.Error(w, "session not found", http.StatusNotFound)
@@ -97,7 +198,7 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var key, text string
+	var key, text, node string
 	var images []cli.ImageData
 
 	ct := r.Header.Get("Content-Type")
@@ -108,6 +209,7 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 		}
 		key = r.FormValue("key")
 		text = r.FormValue("text")
+		node = r.FormValue("node")
 
 		files := r.MultipartForm.File["files"]
 		if len(files) > 5 {
@@ -141,6 +243,7 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 		var req struct {
 			Key  string `json:"key"`
 			Text string `json:"text"`
+			Node string `json:"node"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -148,6 +251,7 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 		}
 		key = req.Key
 		text = req.Text
+		node = req.Node
 	}
 
 	if key == "" {
@@ -156,6 +260,28 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 	}
 	if text == "" && len(images) == 0 {
 		http.Error(w, "text or files required", http.StatusBadRequest)
+		return
+	}
+
+	// Remote node proxy
+	if node != "" && node != "local" {
+		nc, ok := s.nodes[node]
+		if !ok {
+			http.Error(w, "unknown node: "+node, http.StatusBadRequest)
+			return
+		}
+		capturedKey, capturedText := key, text
+		go func() {
+			ctx := context.Background()
+			if err := nc.Send(ctx, capturedKey, capturedText); err != nil {
+				slog.Error("remote send", "node", node, "key", capturedKey, "err", err)
+			}
+		}()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		if err := json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "key": key}); err != nil {
+			slog.Error("encode accepted response", "err", err)
+		}
 		return
 	}
 
@@ -198,4 +324,94 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "key": key}); err != nil {
 		slog.Error("encode accepted response", "err", err)
 	}
+}
+
+func (s *Server) handleAPIDiscovered(w http.ResponseWriter, r *http.Request) {
+	if s.claudeDir == "" {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{})
+		return
+	}
+
+	excludePIDs := s.router.ManagedPIDs()
+	sessions, err := discovery.Scan(s.claudeDir, excludePIDs)
+	if err != nil {
+		slog.Warn("discovery scan", "err", err)
+		sessions = nil
+	}
+	if sessions == nil {
+		sessions = []discovery.DiscoveredSession{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(sessions); err != nil {
+		slog.Error("encode discovered response", "err", err)
+	}
+}
+
+func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
+	// Optional bearer token auth
+	if s.dashboardToken != "" {
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != s.dashboardToken {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+	}
+
+	var req struct {
+		PID       int    `json:"pid"`
+		SessionID string `json:"session_id"`
+		CWD       string `json:"cwd"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.PID <= 0 || req.SessionID == "" {
+		http.Error(w, "pid and session_id are required", http.StatusBadRequest)
+		return
+	}
+
+	// Kill the original process
+	if err := syscall.Kill(req.PID, syscall.SIGTERM); err != nil {
+		http.Error(w, fmt.Sprintf("kill process %d: %v", req.PID, err), http.StatusBadRequest)
+		return
+	}
+
+	// Wait for process to exit (up to 5 seconds)
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(req.PID, 0); err != nil {
+			break // process exited
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	// Force kill if still alive
+	_ = syscall.Kill(req.PID, syscall.SIGKILL)
+
+	// Generate session key
+	cwd := req.CWD
+	if cwd == "" {
+		cwd = "unknown"
+	}
+	base := filepath.Base(cwd)
+	key := "local:takeover:" + base + ":general"
+
+	// Takeover via router
+	opts := s.agents["general"]
+	sess, err := s.router.Takeover(r.Context(), key, req.SessionID, cwd, session.AgentOpts{
+		Model:     opts.Model,
+		ExtraArgs: opts.ExtraArgs,
+	})
+	if err != nil {
+		http.Error(w, "takeover failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	slog.Info("session takeover", "key", key, "session_id", req.SessionID, "pid", req.PID, "cwd", cwd)
+	_ = sess // used for side effect of spawning
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "key": key})
 }

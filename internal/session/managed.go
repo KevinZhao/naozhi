@@ -23,6 +23,8 @@ type processIface interface {
 	EventEntries() []cli.EventEntry
 	EventEntriesSince(afterMS int64) []cli.EventEntry
 	ProtocolName() string
+	SubscribeEvents() (<-chan struct{}, func())
+	PID() int
 }
 
 // ManagedSession wraps a claude CLI process with session metadata.
@@ -115,6 +117,7 @@ type SessionSnapshot struct {
 	DeathReason string  `json:"death_reason,omitempty"`
 	ChatType    string  `json:"chat_type,omitempty"`
 	ChatID      string  `json:"chat_id,omitempty"`
+	Node        string  `json:"node,omitempty"`
 }
 
 // Snapshot returns a point-in-time view of this session.
@@ -171,4 +174,18 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 		return nil
 	}
 	return s.process.EventEntriesSince(afterMS)
+}
+
+// SubscribeEvents subscribes to event log notifications for this session.
+// If the session has no process, returns a closed channel and a no-op unsubscribe.
+func (s *ManagedSession) SubscribeEvents() (<-chan struct{}, func()) {
+	s.sendMu.Lock()
+	proc := s.process
+	s.sendMu.Unlock()
+	if proc == nil {
+		ch := make(chan struct{})
+		close(ch)
+		return ch, func() {}
+	}
+	return proc.SubscribeEvents()
 }

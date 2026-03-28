@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"sync"
 	"testing"
+	"time"
 )
 
 func TestNewEventLog_DefaultSize(t *testing.T) {
@@ -110,5 +112,130 @@ func TestTruncateRunes_Unicode(t *testing.T) {
 	got := TruncateRunes("你好世界测试", 4)
 	if got != "你好世界..." {
 		t.Errorf("got %q, want %q", got, "你好世界...")
+	}
+}
+
+// ─── Subscribe tests ─────────────────────────────────────────────────────────
+
+func TestEventLog_Subscribe_Notified(t *testing.T) {
+	l := NewEventLog(100)
+	ch, unsub := l.Subscribe()
+	defer unsub()
+
+	l.Append(EventEntry{Time: 1000, Type: "test"})
+
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Error("subscriber should be notified on Append")
+	}
+}
+
+func TestEventLog_Subscribe_NonBlockingWhenFull(t *testing.T) {
+	l := NewEventLog(100)
+	ch, unsub := l.Subscribe()
+	defer unsub()
+
+	// Fill the buffered(1) channel
+	l.Append(EventEntry{Time: 1000, Type: "a"})
+	<-ch
+
+	// Fill the channel again
+	l.Append(EventEntry{Time: 2000, Type: "b"})
+
+	// Append again without draining: must not block
+	done := make(chan struct{})
+	go func() {
+		l.Append(EventEntry{Time: 3000, Type: "c"})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Error("Append should not block when subscriber channel is full")
+	}
+}
+
+func TestEventLog_Subscribe_MultipleSubscribers(t *testing.T) {
+	l := NewEventLog(100)
+	ch1, unsub1 := l.Subscribe()
+	defer unsub1()
+	ch2, unsub2 := l.Subscribe()
+	defer unsub2()
+
+	l.Append(EventEntry{Time: 1000, Type: "test"})
+
+	for i, ch := range []<-chan struct{}{ch1, ch2} {
+		select {
+		case <-ch:
+		case <-time.After(time.Second):
+			t.Errorf("subscriber %d should be notified", i)
+		}
+	}
+}
+
+func TestEventLog_Unsubscribe_Cleanup(t *testing.T) {
+	l := NewEventLog(100)
+	_, unsub := l.Subscribe()
+
+	l.subMu.Lock()
+	count := len(l.subscribers)
+	l.subMu.Unlock()
+	if count != 1 {
+		t.Fatalf("subscribers = %d, want 1", count)
+	}
+
+	unsub()
+
+	l.subMu.Lock()
+	count = len(l.subscribers)
+	l.subMu.Unlock()
+	if count != 0 {
+		t.Errorf("subscribers after unsub = %d, want 0", count)
+	}
+}
+
+func TestEventLog_Unsubscribe_Idempotent(t *testing.T) {
+	l := NewEventLog(100)
+	_, unsub := l.Subscribe()
+	unsub()
+	unsub() // should not panic
+}
+
+func TestEventLog_Subscribe_ConcurrentSafe(t *testing.T) {
+	l := NewEventLog(100)
+	var wg sync.WaitGroup
+
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			ch, unsub := l.Subscribe()
+			l.Append(EventEntry{Time: time.Now().UnixMilli(), Type: "concurrent"})
+			select {
+			case <-ch:
+			case <-time.After(time.Second):
+			}
+			unsub()
+		}()
+	}
+	wg.Wait()
+}
+
+func TestEventLog_DetailAndToolFields(t *testing.T) {
+	l := NewEventLog(10)
+	l.Append(EventEntry{
+		Time:   1000,
+		Type:   "tool_use",
+		Tool:   "Read",
+		Detail: "Read: /path/to/file",
+	})
+	entries := l.Entries()
+	if entries[0].Tool != "Read" {
+		t.Errorf("Tool = %q, want Read", entries[0].Tool)
+	}
+	if entries[0].Detail != "Read: /path/to/file" {
+		t.Errorf("Detail = %q, want Read: /path/to/file", entries[0].Detail)
 	}
 }

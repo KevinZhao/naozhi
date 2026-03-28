@@ -47,12 +47,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .event-time{font-size:11px;color:#484f58;min-width:72px;font-family:monospace;padding-top:2px}
 .event-icon{width:18px;text-align:center;font-size:13px;padding-top:1px}
 .event-content{flex:1;font-size:13px;line-height:1.5;word-break:break-word;white-space:pre-wrap}
-.event.thinking .event-content{color:#a5d6ff}
+.event.thinking .event-content{color:#a5d6ff;font-style:italic}
 .event.tool_use .event-content{color:#d2a8ff}
 .event.result .event-content{color:#7ee787}
-.event.system .event-content{color:#8b949e}
+.event.system .event-content{color:#8b949e;font-size:12px}
 .event.text .event-content{color:#c9d1d9}
+.event.user .event-content{color:#58a6ff;font-weight:500}
+.event.user{background:rgba(88,166,255,.05)}
 .event .cost{color:#8b949e;font-size:11px;margin-left:6px}
+.event-detail{color:#8b949e;font-size:12px;margin-top:2px;white-space:pre-wrap;word-break:break-word}
+.event .tool-name{display:inline-block;background:#30363d;color:#d2a8ff;padding:0 6px;border-radius:4px;font-size:11px;font-weight:600;margin-right:6px}
+.event.result{margin:2px 0}
+.event.result .event-content{background:rgba(126,231,135,.05);padding:4px 8px;border-radius:4px;border-left:2px solid #3fb950}
+.cost-badge{display:inline-block;background:#21262d;color:#8b949e;padding:0 5px;border-radius:4px;font-size:10px;margin-left:6px;font-weight:600}
 
 .empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:#484f58;font-size:14px}
 .no-sessions{padding:40px 16px;text-align:center;color:#484f58;font-size:13px}
@@ -91,6 +98,66 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .modal .modal-btns{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
 .modal .modal-btns button{padding:6px 16px;border-radius:6px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:13px}
 .modal .modal-btns button.primary{background:#238636;border-color:#238636;color:#fff}
+
+/* WS connection status */
+.ws-badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:2px 8px;border-radius:10px;background:#21262d;margin-top:6px}
+.ws-dot{width:6px;height:6px;border-radius:50%;display:inline-block;flex-shrink:0}
+.ws-dot.green{background:#3fb950}
+.ws-dot.yellow{background:#d29922;animation:pulse 1.5s ease-in-out infinite}
+.ws-dot.red{background:#da3633}
+.ws-dot.gray{background:#484f58}
+
+/* WS history/live separator */
+.ws-separator{text-align:center;padding:8px 20px;position:relative}
+.ws-separator::before{content:'';position:absolute;left:20px;right:20px;top:50%;border-top:1px dashed #30363d}
+.ws-separator span{position:relative;background:#0d1117;padding:0 8px;font-size:10px;color:#484f58;text-transform:uppercase;letter-spacing:1px}
+
+/* Toast variants */
+.toast.warning{background:#9e6a03}
+.toast.success{background:#238636}
+
+/* Session state indicator in main header */
+.state-indicator{display:none;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:middle}
+.state-indicator.running,.state-indicator.dead{display:inline-block}
+.state-indicator.running{background:#3fb950;animation:pulse 2s ease-in-out infinite}
+.state-indicator.dead{background:#da3633}
+
+.node-badge{display:inline-block;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:600;letter-spacing:.3px;color:#fff;vertical-align:middle;margin-right:4px}
+.node-status{font-size:12px;color:#8b949e;margin-top:6px;line-height:1.8}
+.node-status .node-name{margin-right:2px}
+.node-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin:0 1px 0 6px;vertical-align:middle}
+.node-dot:first-child{margin-left:0}
+.node-dot.ok{background:#3fb950}
+.node-dot.error{background:#da3633}
+.node-info{color:#8b949e;font-size:12px}
+.new-session-btn{display:block;width:calc(100% - 32px);margin:8px 16px;padding:8px;border:1px dashed #30363d;border-radius:8px;background:transparent;color:#8b949e;font-size:13px;cursor:pointer;text-align:center;transition:all .15s}
+.new-session-btn:hover{border-color:#58a6ff;color:#58a6ff;background:#161b22}
+
+/* Markdown rendering */
+.md-pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 12px;margin:6px 0;overflow-x:auto;font-size:12px;line-height:1.5}
+.md-pre code{color:#e6edf3;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;white-space:pre}
+.md-code{background:#30363d;color:#e6edf3;padding:1px 5px;border-radius:4px;font-size:12px;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace}
+.md-h1,.md-h2,.md-h3,.md-h4{display:block;color:#f0f6fc;margin:8px 0 4px}
+.md-h1{font-size:15px}.md-h2{font-size:14px}.md-h3{font-size:13px}
+.md-ul{margin:4px 0 4px 16px;padding:0;list-style:disc}
+.md-ul li{margin:2px 0;line-height:1.5}
+.md-link{color:#58a6ff;text-decoration:none}
+.md-link:hover{text-decoration:underline}
+
+/* Discovered sessions */
+.discovered-section{border-bottom:1px solid #30363d;padding:8px 0}
+.discovered-header{display:flex;align-items:center;justify-content:space-between;padding:4px 16px}
+.discovered-header span{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
+.btn-scan{font-size:11px;padding:2px 8px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#8b949e;cursor:pointer}
+.btn-scan:hover{border-color:#58a6ff;color:#58a6ff}
+.discovered-card{padding:8px 16px;border-bottom:1px solid #21262d;display:flex;align-items:center;gap:8px}
+.discovered-card .dc-info{flex:1;min-width:0}
+.discovered-card .dc-cwd{font-size:13px;color:#f0f6fc;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.discovered-card .dc-meta{font-size:11px;color:#8b949e;display:flex;gap:6px;margin-top:2px}
+.discovered-card .dc-tag{display:inline-block;padding:1px 5px;border-radius:4px;font-size:10px;background:#21262d;color:#8b949e}
+.btn-takeover{font-size:11px;padding:4px 10px;border:1px solid #d29922;border-radius:6px;background:transparent;color:#d29922;cursor:pointer;white-space:nowrap}
+.btn-takeover:hover{background:#d29922;color:#fff}
+.btn-takeover.taking{opacity:.5;pointer-events:none}
 </style>
 </head>
 <body>
@@ -99,6 +166,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
     <div class="sidebar-header">
       <h1>naozhi dashboard</h1>
       <div class="stats" id="stats">connecting...</div>
+      <div class="ws-badge" id="ws-status"><span class="ws-dot gray"></span>WS Off</div>
+      <button class="new-session-btn" onclick="showNewSessionModal()">+ new session</button>
+    </div>
+    <div class="discovered-section" id="discovered-section">
+      <div class="discovered-header">
+        <span>Discovered Processes</span>
+        <button class="btn-scan" onclick="scanDiscovered()">scan</button>
+      </div>
+      <div id="discovered-list"><div style="padding:4px 16px;font-size:11px;color:#484f58">scanning...</div></div>
     </div>
     <div class="session-list" id="session-list">
       <div class="no-sessions">loading...</div>
@@ -116,6 +192,8 @@ let lastEventTime = 0;
 let sessionsData = {};
 let pendingFiles = [];
 let sending = false;
+let selectedNode = 'local';
+let nodesData = {};
 
 function getToken() { return localStorage.getItem('naozhi_dashboard_token') || ''; }
 function setToken(t) { localStorage.setItem('naozhi_dashboard_token', t); }
@@ -124,7 +202,11 @@ async function fetchSessions() {
   try {
     const r = await fetch('/api/sessions');
     const data = await r.json();
-    (data.sessions || []).forEach(s => { sessionsData[s.key] = s; });
+    if (data.nodes) nodesData = data.nodes;
+    (data.sessions || []).forEach(s => {
+      const n = s.node || 'local';
+      sessionsData[sid(s.key, n)] = s;
+    });
     renderSidebar(data);
   } catch (e) {
     document.getElementById('stats').textContent = 'error: ' + e.message;
@@ -135,6 +217,25 @@ function renderSidebar(data) {
   const st = data.stats;
   document.getElementById('stats').textContent =
     st.active + ' active / ' + st.total + ' total \u00b7 ' + st.uptime + ' \u00b7 ' + st.backend;
+
+  // Node status line
+  let nodeEl = document.getElementById('node-status');
+  if (isMultiNode()) {
+    if (!nodeEl) {
+      nodeEl = document.createElement('div');
+      nodeEl.id = 'node-status';
+      nodeEl.className = 'node-status';
+      document.getElementById('ws-status').insertAdjacentElement('afterend', nodeEl);
+    }
+    nodeEl.innerHTML = 'Nodes: ' + Object.keys(nodesData).map(nid => {
+      const n = nodesData[nid];
+      const dotCls = (n.status === 'ok') ? 'ok' : 'error';
+      return '<span class="node-name">' + esc(n.display_name || nid) + '</span>' +
+        '<span class="node-dot ' + dotCls + '"></span>';
+    }).join(' ');
+  } else if (nodeEl) {
+    nodeEl.remove();
+  }
 
   const list = document.getElementById('session-list');
   const sessions = data.sessions || [];
@@ -150,17 +251,21 @@ function renderSidebar(data) {
     return;
   }
 
+  const multi = isMultiNode();
   list.innerHTML = sessions.map(s => {
+    const sNode = s.node || 'local';
     const isDead = s.state === 'dead' || s.state === 'suspended';
-    const cls = (selectedKey === s.key ? 'session-card active' : 'session-card') + (isDead ? ' dead-card' : '');
+    const isActive = selectedKey === s.key && selectedNode === sNode;
+    const cls = (isActive ? 'session-card active' : 'session-card') + (isDead ? ' dead-card' : '');
     const ago = timeAgo(s.last_active);
     const cost = s.total_cost > 0 ? '$' + s.total_cost.toFixed(3) : '';
     const proto = s.protocol || '\u2014';
     const ri = s.state === 'running' ? '<span class="running-indicator"></span>' : '';
     const deathTag = s.death_reason ? ' <span class="death-tag">' + esc(s.death_reason.replace(/_/g,' ')) + '</span>' : '';
     const ws = s.workspace ? shortPath(s.workspace) : '';
-    return '<div class="' + cls + '" data-key="' + esc(s.key) + '" onclick="selectSession(this.dataset.key)">' +
-      '<div class="platform">' + esc(s.platform) + ' \u00b7 ' + esc(proto) + '</div>' +
+    const nodeBadge = multi ? '<span class="node-badge" style="background:' + nodeColor(sNode) + '">' + esc(sNode) + '</span>' : '';
+    return '<div class="' + cls + '" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="selectSession(this.dataset.key,this.dataset.node)">' +
+      '<div class="platform">' + nodeBadge + esc(s.platform) + ' \u00b7 ' + esc(proto) + '</div>' +
       '<div class="agent">' + ri + esc(s.agent || 'general') + '</div>' +
       '<div class="meta"><span class="badge ' + s.state + '">' + s.state + '</span>' + deathTag +
       '<span>' + ago + '</span>' +
@@ -171,32 +276,52 @@ function renderSidebar(data) {
   }).join('');
 }
 
-function selectSession(key) {
+function selectSession(key, node) {
+  node = node || 'local';
+  const prevKey = selectedKey;
+  const prevNode = selectedNode;
   selectedKey = key;
+  selectedNode = node;
   lastEventTime = 0;
   document.querySelectorAll('.session-card').forEach(el => {
-    el.classList.toggle('active', el.dataset.key === key);
+    el.classList.toggle('active', el.dataset.key === key && (el.dataset.node || 'local') === node);
   });
   renderMainShell();
-  fetchEvents(true);
-  if (eventTimer) clearInterval(eventTimer);
-  eventTimer = setInterval(() => fetchEvents(false), 1000);
+
+  const changed = prevKey !== key || prevNode !== node;
+  if (wsm.isConnected()) {
+    if (prevKey && changed) wsm.unsubscribe();
+    wsm.lastEventTimeWs = 0;
+    wsm.subscribe(key, node);
+    if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
+  } else {
+    fetchEvents(true);
+    if (eventTimer) clearInterval(eventTimer);
+    eventTimer = setInterval(() => fetchEvents(false), 1000);
+  }
 }
 
 function renderMainShell() {
   const main = document.getElementById('main');
-  const s = sessionsData[selectedKey] || {};
+  const s = sessionsData[sid(selectedKey, selectedNode)] || {};
   const ws = s.workspace || '';
   const deathInfo = s.death_reason ? '<span class="death-tag">' + esc(s.death_reason.replace(/_/g,' ')) + '</span>' : '';
   const chatInfo = (s.chat_type && s.chat_id) ? esc(s.chat_type) + ':' + esc(s.chat_id).substring(0,12) : '';
   const cost = s.total_cost > 0 ? '$' + s.total_cost.toFixed(4) : '$0';
+  const nodeDisplay = isMultiNode() && selectedNode ? (function() {
+    const nd = nodesData[selectedNode];
+    const label = nd && nd.display_name ? esc(selectedNode) + ' (' + esc(nd.display_name) + ')' : esc(selectedNode);
+    return '<span class="node-info">' + label + '</span>';
+  })() : '';
 
   main.innerHTML =
     '<div class="main-header">' +
       '<h2>' + esc(selectedKey) + '</h2>' +
       '<div class="detail">' +
+        '<span class="state-indicator ' + (s.state||'') + '"></span>' +
         '<span class="badge ' + (s.state||'') + '">' + (s.state||'?') + '</span>' +
         deathInfo +
+        nodeDisplay +
         (chatInfo ? '<span>' + chatInfo + '</span>' : '') +
         '<span>' + cost + '</span>' +
         '<span>' + (s.protocol || '') + '</span>' +
@@ -225,6 +350,7 @@ async function fetchEvents(full) {
   if (!selectedKey) return;
   try {
     let url = '/api/sessions/events?key=' + encodeURIComponent(selectedKey);
+    if (selectedNode && selectedNode !== 'local') url += '&node=' + encodeURIComponent(selectedNode);
     if (!full && lastEventTime > 0) url += '&after=' + lastEventTime;
 
     const r = await fetch(url);
@@ -261,14 +387,30 @@ function appendEvents(events) {
 }
 
 function eventHtml(e) {
-  const icons = {init:'~',system:'\u2699',thinking:'\u{1f4ad}',tool_use:'\u{1f527}',text:'\u{1f4ac}',result:'\u2705'};
+  const icons = {init:'~',system:'\u2699',thinking:'\u{1f4ad}',tool_use:'\u{1f527}',text:'\u{1f4ac}',result:'\u2705',user:'\u{1f464}'};
   const t = new Date(e.time).toLocaleTimeString('zh-CN',{hour12:false});
   const icon = icons[e.type] || '\u00b7';
-  const costStr = e.cost > 0 ? '<span class="cost">$' + e.cost.toFixed(3) + '</span>' : '';
-  return '<div class="event ' + (e.type||'') + '">' +
+  const costStr = e.cost > 0 ? '<span class="cost-badge">$' + e.cost.toFixed(3) + '</span>' : '';
+
+  let content = '';
+  if (e.type === 'tool_use') {
+    const toolTag = e.tool ? '<span class="tool-name">' + esc(e.tool) + '</span>' : '';
+    content = toolTag + esc(e.summary || e.type) + costStr;
+    if (e.detail && e.detail !== e.summary) {
+      content += '<div class="event-detail">' + esc(e.detail) + '</div>';
+    }
+  } else if (e.type === 'system') {
+    content = esc(e.summary || e.type) + costStr;
+  } else if (e.type === 'text' || e.type === 'result') {
+    content = renderMd(e.detail || e.summary || e.type) + costStr;
+  } else {
+    content = esc(e.detail || e.summary || e.type) + costStr;
+  }
+
+  return '<div class="event ' + esc(e.type||'') + '">' +
     '<span class="event-time">' + t + '</span>' +
     '<span class="event-icon">' + icon + '</span>' +
-    '<div class="event-content">' + esc(e.summary || e.type) + costStr + '</div></div>';
+    '<div class="event-content">' + content + '</div></div>';
 }
 
 // --- Send message ---
@@ -293,21 +435,36 @@ async function sendMessage() {
   if (btn) btn.classList.add('sending');
   if (input) { input.value = ''; input.style.height = 'auto'; }
 
+  // WS path: send via WebSocket when connected and no files
+  if (wsm.isConnected() && pendingFiles.length === 0) {
+    const id = 'r' + (++wsm.sendCounter);
+    const sendMsg = { type: 'send', key: selectedKey, text: text, id: id };
+    if (selectedNode && selectedNode !== 'local') sendMsg.node = selectedNode;
+    wsm.send(sendMsg);
+    sending = false;
+    if (btn) btn.classList.remove('sending');
+    return;
+  }
+
+  // HTTP POST fallback
   try {
     const headers = {};
     const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
 
-    let body, contentType;
+    let body;
     if (pendingFiles.length > 0) {
       const fd = new FormData();
       fd.append('key', selectedKey);
+      if (selectedNode && selectedNode !== 'local') fd.append('node', selectedNode);
       if (text) fd.append('text', text);
       pendingFiles.forEach(f => fd.append('files', f));
       body = fd;
     } else {
       headers['Content-Type'] = 'application/json';
-      body = JSON.stringify({key: selectedKey, text: text});
+      const payload = {key: selectedKey, text: text};
+      if (selectedNode && selectedNode !== 'local') payload.node = selectedNode;
+      body = JSON.stringify(payload);
     }
 
     const r = await fetch('/api/sessions/send', {method:'POST', headers, body});
@@ -329,13 +486,17 @@ async function sendMessage() {
     pendingFiles = [];
     renderFilePreviews();
 
-    // Speed up polling for quick feedback
-    if (eventTimer) clearInterval(eventTimer);
-    eventTimer = setInterval(() => fetchEvents(false), 500);
-    setTimeout(() => {
+    // Speed up polling when WS not connected
+    if (!wsm.isConnected()) {
       if (eventTimer) clearInterval(eventTimer);
-      eventTimer = setInterval(() => fetchEvents(false), 1000);
-    }, 15000);
+      eventTimer = setInterval(() => fetchEvents(false), 500);
+      setTimeout(() => {
+        if (eventTimer) clearInterval(eventTimer);
+        if (!wsm.isConnected()) {
+          eventTimer = setInterval(() => fetchEvents(false), 1000);
+        }
+      }, 15000);
+    }
   } catch (e) {
     showToast('send error: ' + e.message);
   } finally {
@@ -395,8 +556,75 @@ function saveToken() {
   if (input && input.value) {
     setToken(input.value.trim());
     showToast('token saved, retry your message');
+    wsm.disconnect();
+    wsm.connect();
   }
   document.querySelector('.modal-overlay').remove();
+}
+
+function showNewSessionModal() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  overlay.innerHTML =
+    '<div class="modal">' +
+      '<h3>New Session</h3>' +
+      '<label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px">Session Name</label>' +
+      '<input id="new-session-name" type="text" placeholder="e.g. my-project" style="margin-bottom:12px">' +
+      '<label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px">Agent</label>' +
+      '<select id="new-session-agent" style="width:100%;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px">' +
+        '<option value="general">general</option>' +
+      '</select>' +
+      '<div class="modal-btns">' +
+        '<button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
+        '<button class="primary" onclick="createNewSession()">create</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+
+  // Populate agents from existing sessions
+  const agentSelect = document.getElementById('new-session-agent');
+  const seen = new Set(['general']);
+  Object.values(sessionsData).forEach(s => {
+    if (s.agent && !seen.has(s.agent)) {
+      seen.add(s.agent);
+      const opt = document.createElement('option');
+      opt.value = s.agent;
+      opt.textContent = s.agent;
+      agentSelect.appendChild(opt);
+    }
+  });
+
+  setTimeout(() => document.getElementById('new-session-name').focus(), 100);
+}
+
+function createNewSession() {
+  const nameInput = document.getElementById('new-session-name');
+  const agentSelect = document.getElementById('new-session-agent');
+  const name = (nameInput ? nameInput.value.trim() : '') || 'session-' + Date.now();
+  const agent = agentSelect ? agentSelect.value : 'general';
+
+  const key = 'dashboard:direct:' + name + ':' + agent;
+  document.querySelector('.modal-overlay').remove();
+
+  selectSession(key, 'local');
+
+  // Send an initial empty greeting to create the session
+  const text = 'hi';
+  if (wsm.isConnected()) {
+    const id = 'r' + (++wsm.sendCounter);
+    wsm.send({ type: 'send', key: key, text: text, id: id });
+  } else {
+    const headers = {};
+    const token = getToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    headers['Content-Type'] = 'application/json';
+    fetch('/api/sessions/send', {
+      method: 'POST', headers,
+      body: JSON.stringify({ key: key, text: text })
+    }).then(() => {
+      setTimeout(() => fetchSessions(), 2000);
+    });
+  }
 }
 
 // --- Utilities ---
@@ -439,8 +667,435 @@ function esc(s) {
   return d.innerHTML;
 }
 
+/* Lightweight Markdown renderer for text/result events */
+function renderMd(s) {
+  if (!s) return '';
+  // Split by fenced code blocks first to avoid processing inside them
+  const parts = s.split(/(```[\s\S]*?```)/g);
+  return parts.map(part => {
+    if (part.startsWith('```')) {
+      const m = part.match(/^```(\w*)\n?([\s\S]*?)```$/);
+      const lang = m && m[1] ? ' data-lang="' + esc(m[1]) + '"' : '';
+      const code = m ? esc(m[2].replace(/\n$/, '')) : esc(part.slice(3, -3));
+      return '<pre class="md-pre"><code' + lang + '>' + code + '</code></pre>';
+    }
+    // Process line by line for block elements
+    const lines = part.split('\n');
+    let html = '';
+    let inList = false;
+    for (let i = 0; i < lines.length; i++) {
+      let line = lines[i];
+      // Headings
+      const hm = line.match(/^(#{1,4})\s+(.+)$/);
+      if (hm) {
+        if (inList) { html += '</ul>'; inList = false; }
+        const level = hm[1].length;
+        html += '<strong class="md-h' + level + '">' + inlineMd(hm[2]) + '</strong>\n';
+        continue;
+      }
+      // Unordered list
+      if (/^\s*[-*]\s+/.test(line)) {
+        if (!inList) { html += '<ul class="md-ul">'; inList = true; }
+        html += '<li>' + inlineMd(line.replace(/^\s*[-*]\s+/, '')) + '</li>';
+        continue;
+      }
+      // Ordered list
+      if (/^\s*\d+\.\s+/.test(line)) {
+        if (!inList) { html += '<ul class="md-ul">'; inList = true; }
+        html += '<li>' + inlineMd(line.replace(/^\s*\d+\.\s+/, '')) + '</li>';
+        continue;
+      }
+      if (inList) { html += '</ul>'; inList = false; }
+      html += inlineMd(line) + '\n';
+    }
+    if (inList) html += '</ul>';
+    return html;
+  }).join('');
+}
+
+/* Inline markdown: bold, italic, code, links */
+function inlineMd(s) {
+  s = esc(s);
+  s = s.replace(/`([^`]+)`/g, '<code class="md-code">$1</code>');
+  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+  s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="md-link" target="_blank">$1</a>');
+  return s;
+}
+
+function sid(key, node) { return key + '\t' + (node || 'local'); }
+
+function isMultiNode() {
+  const keys = Object.keys(nodesData);
+  return keys.length > 1 || (keys.length === 1 && keys[0] !== 'local');
+}
+
+const NODE_COLORS = ['#388bfd','#a371f7','#3fb950','#d29922','#f78166','#db61a2','#79c0ff','#56d364'];
+function nodeColor(name) {
+  if (!name || name === 'local') return '#484f58';
+  let h = 0;
+  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
+  return NODE_COLORS[Math.abs(h) % NODE_COLORS.length];
+}
+
+/* ===== WebSocket Connection Manager ===== */
+
+const WS_STATES = { OFF: 'off', CONNECTING: 'connecting', AUTH: 'authenticating', CONNECTED: 'connected', DISCONNECTED: 'disconnected' };
+
+const wsm = {
+  conn: null,
+  state: WS_STATES.OFF,
+  backoff: 1000,
+  maxBackoff: 30000,
+  reconnectTimer: null,
+  pingTimer: null,
+  subscribedKey: null,
+  subscribedNode: null,
+  lastEventTimeWs: 0,
+  sendCounter: 0,
+  _initialSubscribe: false,
+
+  connect() {
+    const token = getToken();
+    if (!token) { this.setState(WS_STATES.OFF); return; }
+    if (this.conn && (this.conn.readyState === WebSocket.OPEN || this.conn.readyState === WebSocket.CONNECTING)) return;
+
+    this.setState(WS_STATES.CONNECTING);
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    this.conn = new WebSocket(proto + '//' + location.host + '/ws');
+
+    this.conn.onopen = () => {
+      this.setState(WS_STATES.AUTH);
+      this.conn.send(JSON.stringify({ type: 'auth', token: token }));
+    };
+
+    this.conn.onmessage = (evt) => {
+      try { this.onMessage(JSON.parse(evt.data)); }
+      catch (err) { console.error('ws parse error:', err); }
+    };
+
+    this.conn.onclose = () => {
+      this.cleanup();
+      this.setState(WS_STATES.DISCONNECTED);
+      this.scheduleReconnect();
+    };
+
+    this.conn.onerror = () => {};
+  },
+
+  cleanup() {
+    if (this.pingTimer) { clearInterval(this.pingTimer); this.pingTimer = null; }
+  },
+
+  disconnect() {
+    if (this.reconnectTimer) { clearTimeout(this.reconnectTimer); this.reconnectTimer = null; }
+    this.cleanup();
+    if (this.conn) { this.conn.close(); this.conn = null; }
+    this.subscribedKey = null;
+    this.subscribedNode = null;
+    this.setState(WS_STATES.OFF);
+  },
+
+  scheduleReconnect() {
+    if (this.reconnectTimer) return;
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.connect();
+    }, this.backoff);
+    this.backoff = Math.min(this.backoff * 2, this.maxBackoff);
+  },
+
+  onMessage(msg) {
+    switch (msg.type) {
+      case 'auth_ok':
+        this.setState(WS_STATES.CONNECTED);
+        this.backoff = 1000;
+        this.startPing();
+        this.onConnected();
+        break;
+      case 'auth_fail':
+        showToast('WS auth failed: ' + (msg.error || 'invalid token'));
+        this.conn.close();
+        break;
+      case 'history':
+        this.onHistory(msg);
+        break;
+      case 'event':
+        this.onEvent(msg);
+        break;
+      case 'send_ack':
+        this.onSendAck(msg);
+        break;
+      case 'session_state':
+        this.onSessionState(msg);
+        break;
+      case 'pong':
+        break;
+    }
+  },
+
+  startPing() {
+    if (this.pingTimer) clearInterval(this.pingTimer);
+    this.pingTimer = setInterval(() => {
+      if (this.conn && this.conn.readyState === WebSocket.OPEN) {
+        this.conn.send(JSON.stringify({ type: 'ping' }));
+      }
+    }, 30000);
+  },
+
+  send(msg) {
+    if (this.conn && this.conn.readyState === WebSocket.OPEN) {
+      this.conn.send(JSON.stringify(msg));
+      return true;
+    }
+    return false;
+  },
+
+  subscribe(key, node) {
+    node = node || 'local';
+    this.subscribedKey = key;
+    this.subscribedNode = node;
+    const msg = { type: 'subscribe', key: key };
+    if (node && node !== 'local') msg.node = node;
+    this._initialSubscribe = (this.lastEventTimeWs === 0);
+    if (this.lastEventTimeWs > 0) msg.after = this.lastEventTimeWs;
+    this.send(msg);
+  },
+
+  unsubscribe() {
+    if (this.subscribedKey) {
+      const msg = { type: 'unsubscribe', key: this.subscribedKey };
+      if (this.subscribedNode && this.subscribedNode !== 'local') msg.node = this.subscribedNode;
+      this.send(msg);
+    }
+    this.subscribedKey = null;
+    this.subscribedNode = null;
+    this.lastEventTimeWs = 0;
+  },
+
+  /* -- WS event handlers -- */
+
+  onConnected() {
+    if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
+    if (selectedKey) {
+      if (lastEventTime > 0 && this.lastEventTimeWs === 0) {
+        this.lastEventTimeWs = lastEventTime;
+      }
+      this.subscribe(selectedKey, selectedNode);
+    }
+  },
+
+  onHistory(msg) {
+    if (msg.key !== selectedKey || (msg.node || 'local') !== selectedNode) return;
+    const el = document.getElementById('events-scroll');
+    if (!el) return;
+    const events = msg.events || [];
+    const isInitial = this._initialSubscribe;
+    this._initialSubscribe = false;
+
+    if (isInitial) {
+      el.innerHTML = events.map(e => eventHtml(e)).join('') || '<div class="empty-state">no events yet</div>';
+      if (events.length > 0) {
+        el.insertAdjacentHTML('beforeend', '<div class="ws-separator"><span>live</span></div>');
+      }
+      el.scrollTop = el.scrollHeight;
+    } else {
+      const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+      events.forEach(e => { el.insertAdjacentHTML('beforeend', eventHtml(e)); });
+      if (wasBottom) el.scrollTop = el.scrollHeight;
+    }
+
+    if (events.length > 0) {
+      const last = events[events.length - 1];
+      if (last.time > this.lastEventTimeWs) this.lastEventTimeWs = last.time;
+    }
+  },
+
+  onEvent(msg) {
+    if (msg.key !== selectedKey || (msg.node || 'local') !== selectedNode) return;
+    const ev = msg.event;
+    if (!ev) return;
+    const el = document.getElementById('events-scroll');
+    if (!el) return;
+    const empty = el.querySelector('.empty-state');
+    if (empty) empty.remove();
+    const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+    el.insertAdjacentHTML('beforeend', eventHtml(ev));
+    if (wasBottom) el.scrollTop = el.scrollHeight;
+    if (ev.time > this.lastEventTimeWs) this.lastEventTimeWs = ev.time;
+  },
+
+  onSendAck(msg) {
+    if (msg.status === 'accepted') {
+      flashSendBtn();
+    } else if (msg.status === 'busy') {
+      showToastVariant('session busy, please wait', 'warning');
+    } else if (msg.status === 'error') {
+      showToastVariant('send error: ' + (msg.error || 'unknown'), 'error');
+    }
+  },
+
+  onSessionState(msg) {
+    const msgNode = msg.node || 'local';
+    const sKey = sid(msg.key, msgNode);
+    if (sessionsData[sKey]) {
+      sessionsData[sKey].state = msg.state;
+      if (msg.reason) sessionsData[sKey].death_reason = msg.reason;
+    }
+    let card = null;
+    document.querySelectorAll('.session-card').forEach(c => {
+      if (c.dataset.key === msg.key && (c.dataset.node || 'local') === msgNode) card = c;
+    });
+    if (card) {
+      const badge = card.querySelector('.badge');
+      if (badge) { badge.className = 'badge ' + msg.state; badge.textContent = msg.state; }
+      card.classList.toggle('dead-card', msg.state === 'dead' || msg.state === 'suspended');
+    }
+    if (msg.key === selectedKey && msgNode === selectedNode) updateMainState(msg.state, msg.reason);
+  },
+
+  setState(s) {
+    this.state = s;
+    renderWsStatus();
+    if (s === WS_STATES.DISCONNECTED && selectedKey && !eventTimer) {
+      lastEventTime = this.lastEventTimeWs;
+      eventTimer = setInterval(() => fetchEvents(false), 1000);
+    }
+  },
+
+  isConnected() { return this.state === WS_STATES.CONNECTED; }
+};
+
+/* ===== WS Helper Functions ===== */
+
+function renderWsStatus() {
+  const el = document.getElementById('ws-status');
+  if (!el) return;
+  const map = {
+    off: ['gray', 'WS Off'],
+    connecting: ['yellow', 'Connecting...'],
+    authenticating: ['yellow', 'Authenticating...'],
+    connected: ['green', 'WS Connected'],
+    disconnected: ['red', 'Reconnecting...']
+  };
+  const [color, label] = map[wsm.state] || ['gray', wsm.state];
+  el.innerHTML = '<span class="ws-dot ' + color + '"></span>' + label;
+}
+
+function updateMainState(state, reason) {
+  const header = document.querySelector('.main-header');
+  if (!header) return;
+  const badge = header.querySelector('.badge');
+  if (badge) { badge.className = 'badge ' + state; badge.textContent = state; }
+  const indicator = header.querySelector('.state-indicator');
+  if (indicator) { indicator.className = 'state-indicator ' + state; }
+  if (reason) {
+    let dt = header.querySelector('.death-tag');
+    if (!dt) {
+      dt = document.createElement('span');
+      dt.className = 'death-tag';
+      if (badge) badge.insertAdjacentElement('afterend', dt);
+    }
+    dt.textContent = reason.replace(/_/g, ' ');
+  }
+}
+
+function flashSendBtn() {
+  const btn = document.getElementById('btn-send');
+  if (!btn) return;
+  btn.style.boxShadow = '0 0 8px #3fb950';
+  setTimeout(() => { btn.style.boxShadow = ''; }, 600);
+}
+
+function showToastVariant(msg, variant) {
+  const el = document.getElementById('toast');
+  el.textContent = msg;
+  el.className = 'toast show' + (variant ? ' ' + variant : '');
+  setTimeout(() => { el.className = 'toast'; }, 3000);
+}
+
+/* ===== Discovery & Takeover ===== */
+
+async function scanDiscovered() {
+  try {
+    const r = await fetch('/api/discovered');
+    const sessions = await r.json();
+    renderDiscovered(sessions || []);
+  } catch (e) {
+    showToast('scan error: ' + e.message);
+  }
+}
+
+function renderDiscovered(sessions) {
+  const section = document.getElementById('discovered-section');
+  const list = document.getElementById('discovered-list');
+  if (sessions.length === 0) {
+    list.innerHTML = '<div style="padding:4px 16px;font-size:11px;color:#484f58">no external processes</div>';
+    return;
+  }
+  section.style.display = '';
+  list.innerHTML = sessions.map(s => {
+    const cwd = s.cwd || 'unknown';
+    const base = cwd.split('/').pop() || cwd;
+    const ago = timeAgo(s.started_at);
+    const kind = s.kind || '';
+    const entry = s.entrypoint || '';
+    return '<div class="discovered-card">' +
+      '<div class="dc-info">' +
+        '<div class="dc-cwd" title="' + esc(cwd) + '">' + esc(base) + '</div>' +
+        '<div class="dc-meta">' +
+          '<span>PID ' + s.pid + '</span>' +
+          '<span>' + ago + '</span>' +
+          (kind ? '<span class="dc-tag">' + esc(kind) + '</span>' : '') +
+          (entry ? '<span class="dc-tag">' + esc(entry) + '</span>' : '') +
+        '</div>' +
+      '</div>' +
+      '<button class="btn-takeover" onclick="takeover(' + s.pid + ',\'' + esc(s.session_id) + '\',\'' + esc(cwd).replace(/'/g, "\\'") + '\')">takeover</button>' +
+    '</div>';
+  }).join('');
+}
+
+async function takeover(pid, sessionId, cwd) {
+  const btn = event.target;
+  btn.classList.add('taking');
+  btn.textContent = 'taking over...';
+  try {
+    const headers = {'Content-Type': 'application/json'};
+    const token = getToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const r = await fetch('/api/discovered/takeover', {
+      method: 'POST', headers,
+      body: JSON.stringify({pid: pid, session_id: sessionId, cwd: cwd})
+    });
+    if (!r.ok) {
+      const text = await r.text();
+      showToast('takeover failed: ' + text);
+      btn.classList.remove('taking');
+      btn.textContent = 'takeover';
+      return;
+    }
+    const data = await r.json();
+    showToastVariant('session taken over', 'success');
+    // Refresh
+    await scanDiscovered();
+    await fetchSessions();
+    if (data.key) {
+      selectSession(data.key, 'local');
+    }
+  } catch (e) {
+    showToast('takeover error: ' + e.message);
+    btn.classList.remove('taking');
+    btn.textContent = 'takeover';
+  }
+}
+
+/* ===== Initialization ===== */
+
 fetchSessions();
 setInterval(fetchSessions, 3000);
+scanDiscovered();
+setInterval(scanDiscovered, 5000);
+wsm.connect();
 </script>
 </body>
 </html>
