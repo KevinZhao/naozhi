@@ -328,7 +328,7 @@ async function fetchSessions() {
 function renderSidebar(data) {
   const st = data.stats;
   document.getElementById('stats').textContent =
-    st.active + '/' + (st.max_procs || '?') + ' active \u00b7 ' + st.total + ' total \u00b7 ' + st.uptime + ' \u00b7 ' + st.backend;
+    st.running + ' running \u00b7 ' + st.ready + ' ready / ' + (st.max_procs || '?') + ' \u00b7 ' + st.total + ' total \u00b7 ' + st.uptime + ' \u00b7 ' + st.backend;
 
   // Remove legacy node-status line (node info now lives in sidebar groups)
   const nodeEl = document.getElementById('node-status');
