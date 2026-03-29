@@ -8,12 +8,12 @@ cli:
     - "--dangerously-skip-permissions"
 
 session:
-  max_procs: 3
+  max_procs: 20
   ttl: "30m"
   workspace: "/home/ec2-user/workspace"
   watchdog:
-    no_output_timeout: "120s"
-    total_timeout: "300s"
+    no_output_timeout: "1800s"
+    total_timeout: "14400s"
   store_path: "~/.naozhi/sessions.json"
 
 agents:

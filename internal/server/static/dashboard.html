@@ -37,6 +37,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .badge.dead{background:#484f58;color:#c9d1d9}
 .badge.suspended{background:#9e6a03;color:#fff}
 .badge.spawning{background:#d29922;color:#fff}
+.badge.new{background:#1f6feb;color:#fff;border:1px dashed #58a6ff}
 .death-tag{font-size:10px;color:#8b949e;background:#21262d;padding:1px 4px;border-radius:4px}
 
 .main{flex:1;display:flex;flex-direction:column;overflow:hidden}
@@ -53,6 +54,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .event-time{font-size:12px;color:#484f58;min-width:72px;font-family:monospace;padding-top:2px}
 .event-icon{width:18px;text-align:center;font-size:14px;padding-top:1px}
 .event-content{flex:1;font-size:14px;line-height:1.5;word-break:break-word;white-space:pre-wrap}
+.event.text .event-content,.event.result .event-content{white-space:normal}
+.md-blank{display:block;height:0.35em}
 .event.thinking .event-content{color:#a5d6ff;font-style:italic}
 .event.tool_use .event-content{color:#d2a8ff}
 .event.result .event-content{color:#7ee787}
@@ -60,12 +63,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .event.text .event-content{color:#c9d1d9}
 .event.user .event-content{color:#58a6ff;font-weight:500}
 .event.user{background:rgba(88,166,255,.05)}
-.event .cost{color:#8b949e;font-size:11px;margin-left:6px}
 .event-detail{color:#8b949e;font-size:12px;margin-top:2px;white-space:pre-wrap;word-break:break-word}
 .event .tool-name{display:inline-block;background:#30363d;color:#d2a8ff;padding:0 6px;border-radius:4px;font-size:11px;font-weight:600;margin-right:6px}
 .event.result{margin:2px 0}
 .event.result .event-content{background:rgba(126,231,135,.05);padding:4px 8px;border-radius:4px;border-left:2px solid #3fb950}
-.cost-badge{display:inline-block;background:#21262d;color:#8b949e;padding:0 5px;border-radius:4px;font-size:10px;margin-left:6px;font-weight:600}
 
 .event.tool-summary{background:rgba(210,168,255,.04)}
 .event.tool-summary .event-content{color:#8b949e;font-size:12px}
@@ -160,6 +161,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .md-table th{background:#161b22;color:#f0f6fc;font-weight:600;font-size:12px}
 .md-table td{color:#c9d1d9}
 .md-table tr:hover td{background:rgba(88,166,255,.04)}
+.mermaid-wrap{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px;margin:6px 0;overflow-x:auto;text-align:center}
+.mermaid-wrap svg{max-width:100%;height:auto}
+.ts-subagent{display:inline-block;background:#1f2937;color:#a5d6ff;padding:0 5px;border-radius:4px;font-size:10px;font-weight:600;margin-left:2px}
 
 /* Discovered sessions */
 .discovered-section{border-bottom:1px solid #30363d;padding:8px 0}
@@ -179,6 +183,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .btn-takeover.taking{opacity:.5;pointer-events:none}
 .discovered-card.active{background:#1f2937;border-left:3px solid #d29922}
 </style>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
 </head>
 <body>
 <div class="container">
@@ -218,22 +223,93 @@ let sessionPollTimer = null;
 let discoveredPollTimer = null;
 let previewTimer = null;
 let previewEventCount = 0;
+let sessionCounter = 0;
+let availableAgents = ['general'];
+let defaultWorkspace = '';
+const sessionWorkspaces = {};
 
 function getToken() { return localStorage.getItem('naozhi_dashboard_token') || ''; }
 function setToken(t) { localStorage.setItem('naozhi_dashboard_token', t); }
 
+// Pending dashboard sessions — persisted in localStorage so they survive refresh/restart
+function loadPendingSessions() {
+  try {
+    const raw = localStorage.getItem('naozhi_pending_sessions');
+    if (!raw) return;
+    const entries = JSON.parse(raw);
+    for (const e of entries) {
+      if (e.key && !sessionWorkspaces[e.key]) sessionWorkspaces[e.key] = e.workspace || '';
+    }
+  } catch (_) {}
+}
+
+function savePendingSessions() {
+  const entries = Object.entries(sessionWorkspaces).map(([key, ws]) => ({ key, workspace: ws }));
+  if (entries.length > 0) {
+    localStorage.setItem('naozhi_pending_sessions', JSON.stringify(entries));
+  } else {
+    localStorage.removeItem('naozhi_pending_sessions');
+  }
+}
+
+function removePendingSession(key) {
+  delete sessionWorkspaces[key];
+  savePendingSessions();
+}
+
 async function fetchSessions() {
   try {
-    const r = await fetch('/api/sessions');
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/sessions', { headers });
+    if (!r.ok) return;
     const data = await r.json();
     const json = JSON.stringify(data);
     if (json === lastSessionsJSON) return;
     lastSessionsJSON = json;
     if (data.nodes) nodesData = data.nodes;
+    if (data.stats.agents) availableAgents = data.stats.agents;
+    if (data.stats.default_workspace) defaultWorkspace = data.stats.default_workspace;
+
+    // Track which keys the backend knows about
+    const backendKeys = new Set();
     (data.sessions || []).forEach(s => {
       const n = s.node || 'local';
       sessionsData[sid(s.key, n)] = s;
+      backendKeys.add(s.key);
     });
+
+    // Remove pending sessions that now exist in backend
+    let pendingChanged = false;
+    for (const key of Object.keys(sessionWorkspaces)) {
+      if (backendKeys.has(key)) {
+        delete sessionWorkspaces[key];
+        pendingChanged = true;
+      }
+    }
+    if (pendingChanged) savePendingSessions();
+
+    // Merge pending dashboard sessions into data for sidebar rendering
+    const pendingKeys = Object.keys(sessionWorkspaces);
+    if (pendingKeys.length > 0) {
+      if (!data.sessions) data.sessions = [];
+      for (const key of pendingKeys) {
+        if (!backendKeys.has(key)) {
+          const parts = key.split(':');
+          data.sessions.push({
+            key: key,
+            state: 'new',
+            platform: parts[0] || 'dashboard',
+            agent: parts[3] || 'general',
+            workspace: sessionWorkspaces[key],
+            last_active: 0,
+            node: 'local',
+          });
+        }
+      }
+    }
+
     renderSidebar(data);
   } catch (e) {
     document.getElementById('stats').textContent = 'error: ' + e.message;
@@ -243,7 +319,7 @@ async function fetchSessions() {
 function renderSidebar(data) {
   const st = data.stats;
   document.getElementById('stats').textContent =
-    st.active + ' active / ' + st.total + ' total \u00b7 ' + st.uptime + ' \u00b7 ' + st.backend;
+    st.active + '/' + (st.max_procs || '?') + ' active \u00b7 ' + st.total + ' total \u00b7 ' + st.uptime + ' \u00b7 ' + st.backend;
 
   // Node status line
   let nodeEl = document.getElementById('node-status');
@@ -267,13 +343,13 @@ function renderSidebar(data) {
   const list = document.getElementById('session-list');
   const sessions = data.sessions || [];
 
-  const order = {running:0, spawning:1, ready:2, suspended:3, dead:4};
+  const order = {running:0, spawning:1, ready:2, new:3, suspended:4, dead:5};
   sessions.sort((a, b) => {
     const d = (order[a.state]||5) - (order[b.state]||5);
     return d !== 0 ? d : b.last_active - a.last_active;
   });
 
-  if (sessions.length === 0) {
+  if (sessions.length === 0 && Object.keys(sessionWorkspaces).length === 0) {
     list.innerHTML = '<div class="no-sessions">no sessions</div>';
     return;
   }
@@ -285,7 +361,6 @@ function renderSidebar(data) {
     const isActive = selectedKey === s.key && selectedNode === sNode;
     const cls = (isActive ? 'session-card active' : 'session-card') + (isDead ? ' dead-card' : '');
     const ago = timeAgo(s.last_active);
-    const cost = s.total_cost > 0 ? '$' + s.total_cost.toFixed(3) : '';
     const proto = s.protocol || '\u2014';
     const ri = s.state === 'running' ? '<span class="running-indicator"></span>' : '';
     const deathTag = s.death_reason ? ' <span class="death-tag">' + esc(s.death_reason.replace(/_/g,' ')) + '</span>' : '';
@@ -301,7 +376,6 @@ function renderSidebar(data) {
       (activity ? '<div class="session-activity">' + esc(activity) + '</div>' : '') +
       '<div class="meta"><span class="badge ' + s.state + '">' + s.state + '</span>' + deathTag +
       '<span>' + ago + '</span>' +
-      (cost ? '<span>' + cost + '</span>' : '') +
       '</div>' +
       (ws ? '<div class="workspace-hint">' + esc(ws) + '</div>' : '') +
       '</div>';
@@ -336,6 +410,21 @@ function selectSession(key, node) {
 }
 
 async function dismissSession(key) {
+  if (!confirm('确定删除此会话？此操作不可撤回。')) return;
+
+  // If it's a pending (never-sent) session, just remove from localStorage
+  if (sessionWorkspaces[key] !== undefined) {
+    removePendingSession(key);
+    delete sessionsData[sid(key, 'local')];
+    if (selectedKey === key) {
+      selectedKey = null;
+      document.getElementById('main').innerHTML = '<div class="empty-state">select a session</div>';
+    }
+    lastSessionsJSON = '';
+    fetchSessions();
+    return;
+  }
+
   try {
     const headers = {'Content-Type': 'application/json'};
     const token = getToken();
@@ -363,7 +452,6 @@ function renderMainShell() {
   const ws = s.workspace || '';
   const deathInfo = s.death_reason ? '<span class="death-tag">' + esc(s.death_reason.replace(/_/g,' ')) + '</span>' : '';
   const chatInfo = (s.chat_type && s.chat_id) ? esc(s.chat_type) + ':' + esc(s.chat_id).substring(0,12) : '';
-  const cost = s.total_cost > 0 ? '$' + s.total_cost.toFixed(4) : '$0';
   const nodeDisplay = isMultiNode() && selectedNode ? (function() {
     const nd = nodesData[selectedNode];
     const label = nd && nd.display_name ? esc(selectedNode) + ' (' + esc(nd.display_name) + ')' : esc(selectedNode);
@@ -379,7 +467,6 @@ function renderMainShell() {
         deathInfo +
         nodeDisplay +
         (chatInfo ? '<span>' + chatInfo + '</span>' : '') +
-        '<span>' + cost + '</span>' +
         '<span>' + (s.protocol || '') + '</span>' +
       '</div>' +
       (ws ? '<div class="workspace-path" onclick="copyText(\'' + esc(ws).replace(/'/g,"\\'") + '\')" title="click to copy">' + esc(ws) + '</div>' : '') +
@@ -409,8 +496,10 @@ async function fetchEvents(full) {
     if (selectedNode && selectedNode !== 'local') url += '&node=' + encodeURIComponent(selectedNode);
     if (!full && lastEventTime > 0) url += '&after=' + lastEventTime;
 
-    const r = await fetch(url);
-    if (!r.ok) return;
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch(url, { headers });
     const events = await r.json();
     if (!events || events.length === 0) return;
 
@@ -432,6 +521,7 @@ function renderEvents(events) {
   const display = processEventsForDisplay(events);
   el.innerHTML = display.map(eventHtml).filter(Boolean).join('') || '<div class="empty-state">no events yet</div>';
   el.scrollTop = el.scrollHeight;
+  runMermaid();
 }
 
 function appendEvents(events) {
@@ -441,12 +531,13 @@ function appendEvents(events) {
   if (empty) empty.remove();
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   events.forEach(e => {
-    if (e.type === 'tool_use') { if (e.tool) turnToolAccum[e.tool] = (turnToolAccum[e.tool] || 0) + 1; updatePendingSummary(); return; }
+    if (e.type === 'tool_use') { if (e.tool) turnToolAccum[toolKey(e)] = (turnToolAccum[toolKey(e)] || 0) + 1; updatePendingSummary(); return; }
     if (e.type === 'result') return;
     if (Object.keys(turnToolAccum).length > 0) finalizePendingSummary();
     const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h);
   });
   if (wasBottom) el.scrollTop = el.scrollHeight;
+  runMermaid();
 }
 
 function eventHtml(e) {
@@ -455,21 +546,20 @@ function eventHtml(e) {
   const icons = {init:'~',system:'\u2699',thinking:'\u{1f4ad}',text:'\u{1f4ac}',user:'\u{1f464}'};
   const t = new Date(e.time).toLocaleTimeString('zh-CN',{hour12:false});
   const icon = icons[e.type] || '\u00b7';
-  const costStr = e.cost > 0 ? '<span class="cost-badge">$' + e.cost.toFixed(3) + '</span>' : '';
 
   let content = '';
   if (e.type === 'tool_use') {
     const toolTag = e.tool ? '<span class="tool-name">' + esc(e.tool) + '</span>' : '';
-    content = toolTag + esc(e.summary || e.type) + costStr;
+    content = toolTag + esc(e.summary || e.type);
     if (e.detail && e.detail !== e.summary) {
       content += '<div class="event-detail">' + esc(e.detail) + '</div>';
     }
   } else if (e.type === 'system') {
-    content = esc(e.summary || e.type) + costStr;
+    content = esc(e.summary || e.type);
   } else if (e.type === 'text' || e.type === 'result') {
-    content = renderMd(e.detail || e.summary || e.type) + costStr;
+    content = renderMd(e.detail || e.summary || e.type);
   } else {
-    content = esc(e.detail || e.summary || e.type) + costStr;
+    content = esc(e.detail || e.summary || e.type);
   }
 
   return '<div class="event ' + esc(e.type||'') + '">' +
@@ -506,6 +596,10 @@ async function sendMessage() {
     const id = 'r' + (++wsm.sendCounter);
     const sendMsg = { type: 'send', key: selectedKey, text: text, id: id };
     if (selectedNode && selectedNode !== 'local') sendMsg.node = selectedNode;
+    if (sessionWorkspaces[selectedKey]) {
+      sendMsg.workspace = sessionWorkspaces[selectedKey];
+      delete sessionWorkspaces[selectedKey];
+    }
     wsm.send(sendMsg);
     sending = false;
     if (btn) btn.classList.remove('sending');
@@ -524,12 +618,20 @@ async function sendMessage() {
       fd.append('key', selectedKey);
       if (selectedNode && selectedNode !== 'local') fd.append('node', selectedNode);
       if (text) fd.append('text', text);
+      if (sessionWorkspaces[selectedKey]) {
+        fd.append('workspace', sessionWorkspaces[selectedKey]);
+        delete sessionWorkspaces[selectedKey];
+      }
       pendingFiles.forEach(f => fd.append('files', f));
       body = fd;
     } else {
       headers['Content-Type'] = 'application/json';
       const payload = {key: selectedKey, text: text};
       if (selectedNode && selectedNode !== 'local') payload.node = selectedNode;
+      if (sessionWorkspaces[selectedKey]) {
+        payload.workspace = sessionWorkspaces[selectedKey];
+        delete sessionWorkspaces[selectedKey];
+      }
       body = JSON.stringify(payload);
     }
 
@@ -641,17 +743,48 @@ function saveToken() {
 }
 
 function createNewSession() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const ws = defaultWorkspace || '/home/ec2-user/workspace';
+  overlay.innerHTML =
+    '<div class="modal">' +
+      '<h3>New Session</h3>' +
+      '<div style="margin-bottom:12px">' +
+        '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px">Workspace</label>' +
+        '<input id="new-workspace" style="width:100%;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;outline:none" placeholder="' + esc(ws) + '" value="' + esc(ws) + '">' +
+      '</div>' +
+      '<div class="modal-btns">' +
+        '<button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
+        '<button class="primary" onclick="doCreateSession()">create</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  setTimeout(() => document.getElementById('new-workspace').focus(), 100);
+}
+
+function doCreateSession() {
+  const agent = 'general';
+  const workspace = document.getElementById('new-workspace').value.trim();
+  document.querySelector('.modal-overlay').remove();
+
+  sessionCounter++;
   const now = new Date();
-  const name = 'session-' + now.toISOString().slice(0,10) + '-' + now.toTimeString().slice(0,5).replace(':','');
-  const key = 'dashboard:direct:' + name + ':general';
+  const ts = now.toISOString().slice(0,10) + '-' +
+    now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
+  const key = 'dashboard:direct:' + ts + ':' + agent;
+
+  if (workspace) sessionWorkspaces[key] = workspace;
+  savePendingSessions();
 
   stopPreviewPolling();
   selectedKey = key;
   selectedNode = 'local';
   lastEventTime = 0;
-  resetToolStats();
+  turnToolAccum = {};
   document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
   renderMainShell();
+  lastSessionsJSON = '';
+  fetchSessions();
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
 }
 
@@ -695,6 +828,25 @@ function esc(s) {
   return d.innerHTML;
 }
 
+function runMermaid() {
+  if (!window.mermaid) return;
+  let hasNew = false;
+  Object.entries(mermaidPending).forEach(([id, code]) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.textContent = code;
+    el.className = 'mermaid';
+    delete mermaidPending[id];
+    hasNew = true;
+  });
+  if (hasNew) mermaid.run({ nodes: document.querySelectorAll('.mermaid') });
+}
+
+if (window.mermaid) mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'strict' });
+
+let mermaidCounter = 0;
+const mermaidPending = {};
+
 /* Lightweight Markdown renderer for text/result events */
 function renderMd(s) {
   if (!s) return '';
@@ -703,9 +855,15 @@ function renderMd(s) {
   return parts.map(part => {
     if (part.startsWith('```')) {
       const m = part.match(/^```(\w*)\n?([\s\S]*?)```$/);
-      const lang = m && m[1] ? ' data-lang="' + esc(m[1]) + '"' : '';
-      const code = m ? esc(m[2].replace(/\n$/, '')) : esc(part.slice(3, -3));
-      return '<pre class="md-pre"><code' + lang + '>' + code + '</code></pre>';
+      const lang = m ? m[1] : '';
+      const code = m ? m[2].replace(/\n$/, '') : part.slice(3, -3);
+      if (lang === 'mermaid') {
+        const id = 'mmd-' + (++mermaidCounter);
+        mermaidPending[id] = code;
+        return '<div class="mermaid-wrap"><pre id="' + id + '" class="mermaid-pending"></pre></div>';
+      }
+      const langAttr = lang ? ' data-lang="' + esc(lang) + '"' : '';
+      return '<pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre>';
     }
     // Process line by line for block elements
     const lines = part.split('\n');
@@ -734,13 +892,17 @@ function renderMd(s) {
         continue;
       }
       if (inList) { html += '</ul>'; inList = false; }
+      if (line === '') {
+        html += '<div class="md-blank"></div>';
+        continue;
+      }
       if (/^\|.+\|$/.test(line.trim())) {
         let tbl = [line];
         while (i + 1 < lines.length && /^\|.+\|$/.test(lines[i + 1].trim())) { tbl.push(lines[++i]); }
         html += renderTable(tbl);
         continue;
       }
-      html += inlineMd(line) + '\n';
+      html += inlineMd(line) + '<br>';
     }
     if (inList) html += '</ul>';
     return html;
@@ -753,7 +915,12 @@ function inlineMd(s) {
   s = s.replace(/`([^`]+)`/g, '<code class="md-code">$1</code>');
   s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
-  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" class="md-link" target="_blank">$1</a>');
+  s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, text, url) {
+    if (/^https?:\/\//i.test(url) || /^mailto:/i.test(url)) {
+      return '<a href="' + url + '" class="md-link" target="_blank" rel="noopener noreferrer">' + text + '</a>';
+    }
+    return text;
+  });
   return s;
 }
 
@@ -772,7 +939,7 @@ function processEventsForDisplay(events) {
   const out = [];
   let accum = {};
   for (const e of events) {
-    if (e.type === 'tool_use') { if (e.tool) accum[e.tool] = (accum[e.tool] || 0) + 1; continue; }
+    if (e.type === 'tool_use') { if (e.tool) accum[toolKey(e)] = (accum[toolKey(e)] || 0) + 1; continue; }
     if (e.type === 'result') continue;
     if (Object.keys(accum).length > 0) { out.push({ type: 'tool_summary', tools: accum }); accum = {}; }
     out.push(e);
@@ -781,12 +948,24 @@ function processEventsForDisplay(events) {
   return out;
 }
 
+function toolKey(e) {
+  return (e.tool === 'Agent' && e.subagent) ? 'Agent\x00' + e.subagent : (e.tool || 'unknown');
+}
+
+function toolKeyDisplay(key) {
+  const sep = key.indexOf('\x00');
+  if (sep < 0) return { name: key, sub: '' };
+  return { name: key.slice(0, sep), sub: key.slice(sep + 1) };
+}
+
 function toolSummaryHtml(tools) {
   const entries = Object.entries(tools).sort((a,b) => b[1] - a[1]);
   const total = entries.reduce((s, t) => s + t[1], 0);
-  const items = entries.map(([name, count]) =>
-    '<span class="ts-name">' + esc(name) + '</span> <span class="ts-count">\u00d7' + count + '</span>'
-  ).join('\u2002');
+  const items = entries.map(([key, count]) => {
+    const {name, sub} = toolKeyDisplay(key);
+    const subHtml = sub ? ' <span class="ts-subagent">' + esc(sub) + '</span>' : '';
+    return '<span class="ts-name">' + esc(name) + '</span>' + subHtml + ' <span class="ts-count">\u00d7' + count + '</span>';
+  }).join('\u2002');
   return '<div class="event tool-summary"><span class="event-time"></span><span class="event-icon">\u{1f527}</span>' +
     '<div class="event-content">' + total + ' calls\u2002' + items + '</div></div>';
 }
@@ -803,9 +982,11 @@ function updatePendingSummary() {
   }
   const entries = Object.entries(turnToolAccum).sort((a,b) => b[1] - a[1]);
   const total = entries.reduce((s, t) => s + t[1], 0);
-  const items = entries.map(([name, count]) =>
-    '<span class="ts-name">' + esc(name) + '</span> <span class="ts-count">\u00d7' + count + '</span>'
-  ).join('\u2002');
+  const items = entries.map(([key, count]) => {
+    const {name, sub} = toolKeyDisplay(key);
+    const subHtml = sub ? ' <span class="ts-subagent">' + esc(sub) + '</span>' : '';
+    return '<span class="ts-name">' + esc(name) + '</span>' + subHtml + ' <span class="ts-count">\u00d7' + count + '</span>';
+  }).join('\u2002');
   el.innerHTML = '<span class="event-time"></span><span class="event-icon">\u{1f527}</span>' +
     '<div class="event-content">' + total + ' calls\u2002' + items + '</div>';
   const wasBottom = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 30;
@@ -1022,10 +1203,12 @@ const wsm = {
         el.insertAdjacentHTML('beforeend', '<div class="ws-separator"><span>live</span></div>');
       }
       el.scrollTop = el.scrollHeight;
+      runMermaid();
     } else {
       const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
       display.forEach(e => { const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h); });
       if (wasBottom) el.scrollTop = el.scrollHeight;
+      runMermaid();
     }
 
     if (events.length > 0) {
@@ -1040,7 +1223,7 @@ const wsm = {
     if (!ev) return;
     if (ev.time > this.lastEventTimeWs) this.lastEventTimeWs = ev.time;
     if (ev.type === 'tool_use') {
-      if (ev.tool) turnToolAccum[ev.tool] = (turnToolAccum[ev.tool] || 0) + 1;
+      if (ev.tool) turnToolAccum[toolKey(ev)] = (turnToolAccum[toolKey(ev)] || 0) + 1;
       updatePendingSummary();
       return;
     }
@@ -1055,11 +1238,23 @@ const wsm = {
     const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
     el.insertAdjacentHTML('beforeend', html);
     if (wasBottom) el.scrollTop = el.scrollHeight;
+    runMermaid();
   },
 
   onSendAck(msg) {
     if (msg.status === 'accepted') {
       flashSendBtn();
+      // For new sessions: backend needs time to spawn the process before
+      // the session appears in the API. Retry subscribe after a short delay.
+      const ackKey = msg.key || selectedKey;
+      if (ackKey && !wsm.subscribedKey && !wsm._pendingSubscribeKey) {
+        setTimeout(() => {
+          if (selectedKey === ackKey && !wsm.subscribedKey && !wsm._pendingSubscribeKey) {
+            wsm.lastEventTimeWs = 0;
+            wsm.subscribe(ackKey, selectedNode);
+          }
+        }, 1500);
+      }
     } else if (msg.status === 'busy') {
       showToastVariant('session busy, please wait', 'warning');
     } else if (msg.status === 'error') {
@@ -1167,7 +1362,10 @@ function stopPreviewPolling() {
 
 async function scanDiscovered() {
   try {
-    const r = await fetch('/api/discovered');
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/discovered', { headers });
     const sessions = await r.json();
     renderDiscovered(sessions || []);
   } catch (e) {
@@ -1187,21 +1385,23 @@ function renderDiscovered(sessions) {
     const cwd = s.cwd || 'unknown';
     const base = cwd.split('/').pop() || cwd;
     const ago = timeAgo(s.last_active || s.started_at);
-    return '<div class="discovered-card" data-pid="' + s.pid + '" onclick="previewDiscovered(\'' + esc(s.session_id) + '\',\'' + esc(cwd).replace(/'/g, "\\'") + '\',' + s.pid + ')" style="cursor:pointer">' +
+    const pst = s.proc_start_time || 0;
+    return '<div class="discovered-card" data-pid="' + s.pid + '" onclick="previewDiscovered(\'' + esc(s.session_id) + '\',\'' + esc(cwd).replace(/'/g, "\\'") + '\',' + s.pid + ',' + pst + ')" style="cursor:pointer">' +
       '<div class="dc-info">' +
         '<div class="dc-cwd" title="' + esc(cwd) + '">' + esc(base) + '</div>' +
         (s.summary ? '<div class="dc-summary">' + esc(s.summary) + '</div>' : '') +
         (s.last_prompt ? '<div class="dc-prompt" title="' + esc(s.last_prompt) + '">' + esc(s.last_prompt) + '</div>' : '') +
         '<div class="dc-meta">' +
+          '<span>PID ' + s.pid + '</span>' +
           '<span>' + ago + '</span>' +
         '</div>' +
       '</div>' +
-      '<button class="btn-takeover" onclick="takeover(' + s.pid + ',\'' + esc(s.session_id) + '\',\'' + esc(cwd).replace(/'/g, "\\'") + '\')">takeover</button>' +
+      '<button class="btn-takeover" onclick="event.stopPropagation();takeover(' + s.pid + ',\'' + esc(s.session_id) + '\',\'' + esc(cwd).replace(/'/g, "\\'") + '\',' + pst + ')">takeover</button>' +
     '</div>';
   }).join('');
 }
 
-async function previewDiscovered(sessionId, cwd, pid) {
+async function previewDiscovered(sessionId, cwd, pid, procStartTime) {
   stopPreviewPolling();
   // Deselect any managed session
   selectedKey = null;
@@ -1225,7 +1425,7 @@ async function previewDiscovered(sessionId, cwd, pid) {
     '</div>' +
     '<div class="events" id="events-scroll"><div class="empty-state">loading...</div></div>' +
     '<div class="input-area" style="padding:8px 20px;text-align:center">' +
-      '<button class="btn-takeover" style="width:100%;padding:10px;font-size:14px" onclick="takeover(' + pid + ',\'' + esc(sessionId) + '\',\'' + esc(cwd).replace(/'/g,"\\'") + '\')">Takeover this session</button>' +
+      '<button class="btn-takeover" style="width:100%;padding:10px;font-size:14px" onclick="takeover(' + pid + ',\'' + esc(sessionId) + '\',\'' + esc(cwd).replace(/'/g,"\\'") + '\',' + (procStartTime||0) + ')">Takeover this session</button>' +
     '</div>';
 
   try {
@@ -1258,7 +1458,7 @@ async function previewDiscovered(sessionId, cwd, pid) {
         if (empty) empty.remove();
         const wasBottom = el2.scrollTop + el2.clientHeight >= el2.scrollHeight - 30;
         fresh.forEach(e => {
-          if (e.type === 'tool_use') { if (e.tool) turnToolAccum[e.tool] = (turnToolAccum[e.tool] || 0) + 1; updatePendingSummary(); return; }
+          if (e.type === 'tool_use') { if (e.tool) turnToolAccum[toolKey(e)] = (turnToolAccum[toolKey(e)] || 0) + 1; updatePendingSummary(); return; }
           if (e.type === 'result') return;
           if (Object.keys(turnToolAccum).length > 0) finalizePendingSummary();
           const h = eventHtml(e); if (h) el2.insertAdjacentHTML('beforeend', h);
@@ -1271,7 +1471,7 @@ async function previewDiscovered(sessionId, cwd, pid) {
   }
 }
 
-async function takeover(pid, sessionId, cwd) {
+async function takeover(pid, sessionId, cwd, procStartTime) {
   const btn = event.target;
   btn.classList.add('taking');
   btn.textContent = 'taking over...';
@@ -1281,7 +1481,7 @@ async function takeover(pid, sessionId, cwd) {
     if (token) headers['Authorization'] = 'Bearer ' + token;
     const r = await fetch('/api/discovered/takeover', {
       method: 'POST', headers,
-      body: JSON.stringify({pid: pid, session_id: sessionId, cwd: cwd})
+      body: JSON.stringify({pid: pid, session_id: sessionId, cwd: cwd, proc_start_time: procStartTime || 0})
     });
     if (!r.ok) {
       const text = await r.text();
@@ -1310,6 +1510,7 @@ async function takeover(pid, sessionId, cwd) {
 
 /* ===== Initialization ===== */
 
+loadPendingSessions();
 fetchSessions();
 sessionPollTimer = setInterval(fetchSessions, 5000);
 scanDiscovered();
