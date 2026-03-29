@@ -3,11 +3,13 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os/exec"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -83,6 +85,7 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string, 
 	slog.Debug("cli process details", "args", args, "cwd", cwd)
 
 	cmd := exec.CommandContext(ctx, cliPath, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
@@ -323,11 +326,12 @@ func (p *Process) IsRunning() bool {
 	return p.State == StateRunning
 }
 
-// Interrupt sends SIGINT to the CLI process to cancel the current turn.
+// Interrupt sends SIGINT to the CLI process group to cancel the current turn.
+// Uses negative PID to signal the entire process group (created via Setpgid).
 // The process stays alive and can accept new messages after the interrupt.
 func (p *Process) Interrupt() {
 	if p.cmd.Process != nil {
-		if err := p.cmd.Process.Signal(syscall.SIGINT); err != nil {
+		if err := syscall.Kill(-p.cmd.Process.Pid, syscall.SIGINT); err != nil {
 			slog.Warn("interrupt signal failed", "pid", p.cmd.Process.Pid, "err", err)
 		}
 	}
@@ -372,6 +376,12 @@ func (p *Process) logEvent(ev Event) {
 		if ev.SubType == "init" {
 			entry.Summary = "Session initialized"
 		}
+		// Skip noisy system events that add no value in the dashboard
+		switch ev.SubType {
+		case "task_progress", "task_started", "task_notification",
+			"stop_hook_summary", "turn_duration", "hook_started", "hook_response":
+			return
+		}
 	case "assistant":
 		if ev.Message == nil {
 			return
@@ -387,6 +397,9 @@ func (p *Process) logEvent(ev Event) {
 				entry.Summary = block.Name
 				entry.Tool = block.Name
 				entry.Detail = formatToolDetail(block)
+				if block.Name == "Agent" {
+					entry.Subagent = extractSubagentType(block.Input)
+				}
 			case "text":
 				entry.Type = "text"
 				entry.Summary = TruncateRunes(block.Text, 120)
@@ -413,12 +426,92 @@ func (p *Process) logEvent(ev Event) {
 	p.eventLog.Append(entry)
 }
 
-// formatToolDetail returns a detail string for tool_use events.
+// extractSubagentType extracts the subagent_type field from an Agent tool input.
+func extractSubagentType(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var inp struct {
+		SubagentType string `json:"subagent_type"`
+	}
+	if err := json.Unmarshal(input, &inp); err == nil {
+		return inp.SubagentType
+	}
+	return ""
+}
+
+// formatToolDetail returns a human-readable detail string for tool_use events.
 func formatToolDetail(block ContentBlock) string {
 	if len(block.Input) == 0 {
 		return block.Name
 	}
-	return block.Name + ": " + TruncateRunes(string(block.Input), 500)
+	return FormatToolInput(block.Name, block.Input)
+}
+
+// FormatToolInput extracts a human-readable summary from a tool's JSON input.
+// Shared by live event logging and JSONL history loading.
+func FormatToolInput(toolName string, input json.RawMessage) string {
+	var inp map[string]json.RawMessage
+	if json.Unmarshal(input, &inp) != nil {
+		return toolName + ": " + TruncateRunes(string(input), 300)
+	}
+
+	getStr := func(key string) string {
+		raw, ok := inp[key]
+		if !ok || len(raw) == 0 {
+			return ""
+		}
+		var s string
+		if json.Unmarshal(raw, &s) == nil {
+			return s
+		}
+		return ""
+	}
+
+	shortPath := func(p string) string {
+		const homePrefix = "/home/"
+		if i := strings.Index(p, homePrefix); i >= 0 {
+			rest := p[i+len(homePrefix):]
+			if j := strings.Index(rest, "/"); j >= 0 {
+				return "~" + rest[j:]
+			}
+		}
+		if len(p) > 50 {
+			return "..." + p[len(p)-47:]
+		}
+		return p
+	}
+
+	switch toolName {
+	case "Read":
+		return toolName + " " + shortPath(getStr("file_path"))
+	case "Write":
+		return toolName + " " + shortPath(getStr("file_path"))
+	case "Edit":
+		return toolName + " " + shortPath(getStr("file_path"))
+	case "Glob":
+		return toolName + " " + getStr("pattern")
+	case "Grep":
+		s := toolName + " " + getStr("pattern")
+		if path := getStr("path"); path != "" {
+			s += " in " + shortPath(path)
+		}
+		return s
+	case "Bash":
+		if desc := getStr("description"); desc != "" {
+			return toolName + " " + desc
+		}
+		return toolName + " " + TruncateRunes(getStr("command"), 80)
+	case "Agent":
+		return toolName + " " + TruncateRunes(getStr("description"), 60)
+	default:
+		for _, key := range []string{"description", "file_path", "path", "command", "pattern", "prompt"} {
+			if v := getStr(key); v != "" {
+				return toolName + " " + TruncateRunes(v, 80)
+			}
+		}
+		return toolName + ": " + TruncateRunes(string(input), 300)
+	}
 }
 
 // GetState returns the current process state.

@@ -7,6 +7,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/session"
 )
 
 // ─── handleAPISessionEvents ──────────────────────────────────────────────────
@@ -207,5 +209,121 @@ func TestHandleAPISend_ResponseIsJSON(t *testing.T) {
 	ct := w.Header().Get("Content-Type")
 	if !strings.HasPrefix(ct, "application/json") {
 		t.Errorf("Content-Type = %q, want application/json", ct)
+	}
+}
+
+// ─── handleAPISessions: stats include agents and workspace ──────────────────
+
+func TestHandleAPISessions_StatsIncludeAgentsAndWorkspace(t *testing.T) {
+	agents := map[string]session.AgentOpts{
+		"code-reviewer": {Model: "sonnet"},
+		"researcher":    {Model: "opus"},
+	}
+	router := session.NewRouter(session.RouterConfig{
+		MaxProcs:  5,
+		Workspace: "/test/workspace",
+	})
+	srv := New(":0", router, nil, agents, nil, nil, "claude")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+	w := httptest.NewRecorder()
+	srv.handleAPISessions(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	stats, ok := resp["stats"].(map[string]any)
+	if !ok {
+		t.Fatal("stats field missing")
+	}
+
+	// Check max_procs
+	if mp, ok := stats["max_procs"].(float64); !ok || int(mp) != 5 {
+		t.Errorf("max_procs = %v, want 5", stats["max_procs"])
+	}
+
+	// Check default_workspace
+	if ws, ok := stats["default_workspace"].(string); !ok || ws != "/test/workspace" {
+		t.Errorf("default_workspace = %v, want /test/workspace", stats["default_workspace"])
+	}
+
+	// Check agents list includes "general" and configured agents
+	agentsList, ok := stats["agents"].([]any)
+	if !ok {
+		t.Fatal("agents field missing or not array")
+	}
+	agentSet := make(map[string]bool)
+	for _, a := range agentsList {
+		agentSet[a.(string)] = true
+	}
+	if !agentSet["general"] {
+		t.Error("agents should include 'general'")
+	}
+	if !agentSet["code-reviewer"] {
+		t.Error("agents should include 'code-reviewer'")
+	}
+	if !agentSet["researcher"] {
+		t.Error("agents should include 'researcher'")
+	}
+}
+
+// ─── handleAPISend: workspace override ──────────────────────────────────────
+
+func TestHandleAPISend_WorkspaceOverride(t *testing.T) {
+	tmpDir := t.TempDir()
+	router := session.NewRouter(session.RouterConfig{
+		Workspace: "/default/workspace",
+	})
+	srv := New(":0", router, nil, nil, nil, nil, "claude")
+
+	key := "dashboard:direct:test-session:general"
+	body := `{"key":"` + key + `","text":"hi","workspace":"` + tmpDir + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleAPISend(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", w.Code)
+	}
+
+	// Verify workspace was set for the chat key
+	chatKey := "dashboard:direct:test-session"
+	ws := router.GetWorkspace(chatKey)
+	if ws != tmpDir {
+		t.Errorf("workspace = %q, want %q", ws, tmpDir)
+	}
+}
+
+func TestHandleAPISend_WorkspaceInvalidDir(t *testing.T) {
+	router := session.NewRouter(session.RouterConfig{
+		Workspace: "/default/workspace",
+	})
+	srv := New(":0", router, nil, nil, nil, nil, "claude")
+
+	key := "dashboard:direct:test-session:general"
+	body := `{"key":"` + key + `","text":"hi","workspace":"/nonexistent/path/xyz"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.handleAPISend(w, req)
+
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202", w.Code)
+	}
+
+	// Verify workspace was NOT set (invalid path ignored)
+	chatKey := "dashboard:direct:test-session"
+	ws := router.GetWorkspace(chatKey)
+	if ws != "/default/workspace" {
+		t.Errorf("workspace = %q, want /default/workspace (invalid path should be ignored)", ws)
 	}
 }

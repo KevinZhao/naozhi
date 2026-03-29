@@ -195,6 +195,17 @@ func (c *apiClient) sendMessage(ctx context.Context, to, text, contextToken stri
 	if err != nil {
 		return err
 	}
+	var resp struct {
+		Ret     int    `json:"ret"`
+		ErrCode int    `json:"errcode"`
+		ErrMsg  string `json:"errmsg"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return fmt.Errorf("unmarshal sendMessage response: %w", err)
+	}
+	if resp.Ret != 0 {
+		return fmt.Errorf("sendMessage failed: ret=%d errcode=%d errmsg=%s", resp.Ret, resp.ErrCode, resp.ErrMsg)
+	}
 	slog.Debug("weixin sendMessage", "to", to, "resp", string(data))
 	return nil
 }

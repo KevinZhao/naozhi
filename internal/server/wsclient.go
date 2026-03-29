@@ -39,6 +39,9 @@ func (c *wsClient) sendJSON(v interface{}) {
 	select {
 	case c.send <- data:
 	case <-c.done:
+	default:
+		// Drop message if client buffer is full to prevent deadlocking
+		// the hub mutex when broadcasting to slow clients.
 	}
 }
 

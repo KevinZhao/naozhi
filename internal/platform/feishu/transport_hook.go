@@ -155,7 +155,11 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				return
 			}
 			msg.Text = text
-			go handler(context.Background(), msg)
+			f.wg.Add(1)
+			go func() {
+				defer f.wg.Done()
+				handler(context.Background(), msg)
+			}()
 
 		case "image":
 			var content struct {
@@ -164,7 +168,9 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			if err := json.Unmarshal([]byte(event.Message.Content), &content); err != nil || content.ImageKey == "" {
 				return
 			}
+			f.wg.Add(1)
 			go func() {
+				defer f.wg.Done()
 				data, mime, err := f.DownloadImage(context.Background(), event.Message.MessageID, content.ImageKey)
 				if err != nil {
 					slog.Error("feishu download image failed", "err", err, "key", content.ImageKey)

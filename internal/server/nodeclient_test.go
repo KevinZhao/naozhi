@@ -272,6 +272,8 @@ func TestHandleAPISessions_WithRemoteNodes(t *testing.T) {
 	srv.nodes = map[string]*NodeClient{
 		"macbook": NewNodeClient("macbook", remote.URL, "", "MacBook"),
 	}
+	// Pre-populate cache
+	srv.refreshNodeCache()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
@@ -319,6 +321,8 @@ func TestHandleAPISessions_RemoteNodeError(t *testing.T) {
 	srv.nodes = map[string]*NodeClient{
 		"bad-node": NewNodeClient("bad-node", remote.URL, "", "Bad"),
 	}
+	// Pre-populate cache
+	srv.refreshNodeCache()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()

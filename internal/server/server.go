@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -42,16 +43,25 @@ type Server struct {
 	hub            *Hub   // WebSocket hub
 	nodes          map[string]*NodeClient
 	claudeDir      string // path to ~/.claude for session discovery
+
+	// Background-cached remote node sessions to avoid blocking /api/sessions
+	nodeCacheMu  sync.RWMutex
+	nodeSessions map[string][]map[string]any // nodeID -> cached sessions
+	nodeStatus   map[string]string           // nodeID -> "ok" | "error"
 }
 
 // sessionGuard prevents multiple concurrent messages to the same session.
 type sessionGuard struct {
-	mu     sync.Mutex
-	active map[string]struct{}
+	mu       sync.Mutex
+	active   map[string]struct{}
+	lastWait map[string]time.Time // tracks last "please wait" reply per key
 }
 
 func newSessionGuard() *sessionGuard {
-	return &sessionGuard{active: make(map[string]struct{})}
+	return &sessionGuard{
+		active:   make(map[string]struct{}),
+		lastWait: make(map[string]time.Time),
+	}
 }
 
 func (g *sessionGuard) TryAcquire(key string) bool {
@@ -61,6 +71,18 @@ func (g *sessionGuard) TryAcquire(key string) bool {
 		return false
 	}
 	g.active[key] = struct{}{}
+	return true
+}
+
+// ShouldSendWait returns true if enough time has passed since the last
+// "please wait" reply for this key (avoids spamming the user).
+func (g *sessionGuard) ShouldSendWait(key string) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if time.Since(g.lastWait[key]) < 3*time.Second {
+		return false
+	}
+	g.lastWait[key] = time.Now()
 	return true
 }
 
@@ -110,19 +132,26 @@ func (s *Server) SetNodes(nodes map[string]*NodeClient) {
 func (s *Server) Start(ctx context.Context) error {
 	handler := s.buildMessageHandler()
 
+	var startedPlatforms []platform.RunnablePlatform
 	for _, p := range s.platforms {
 		p.RegisterRoutes(s.mux, handler)
 		slog.Info("platform registered", "name", p.Name())
 
 		if rp, ok := p.(platform.RunnablePlatform); ok {
 			if err := rp.Start(handler); err != nil {
+				// Stop already-started platforms to avoid connection leaks
+				for _, sp := range startedPlatforms {
+					sp.Stop()
+				}
 				return fmt.Errorf("start platform %s: %w", p.Name(), err)
 			}
+			startedPlatforms = append(startedPlatforms, rp)
 		}
 	}
 
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.registerDashboard()
+	s.startNodeCacheLoop(ctx)
 	slog.Info("server starting", "addr", s.addr)
 
 	srv := &http.Server{
@@ -177,6 +206,27 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 			return
 		}
 
+		// Handle /help command
+		if trimmed == "/help" {
+			if p := s.platforms[msg.Platform]; p != nil {
+				help := "可用命令:\n" +
+					"  /help — 显示此帮助\n" +
+					"  /new [agent] — 重置会话\n" +
+					"  /clear — 重置会话（同 /new）\n" +
+					"  /cd <路径> — 切换工作目录\n" +
+					"  /pwd — 显示当前工作目录\n" +
+					"  /cron <add|list|del|pause|resume> — 定时任务"
+				if len(s.agentCommands) > 0 {
+					help += "\n\n可用 Agent:"
+					for cmd, agentID := range s.agentCommands {
+						help += "\n  /" + cmd + " → " + agentID
+					}
+				}
+				p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: help})
+			}
+			return
+		}
+
 		// Handle /cd <path> to change working directory
 		if strings.HasPrefix(trimmed, "/cd ") {
 			s.handleCdCommand(ctx, msg, trimmed, log)
@@ -204,7 +254,15 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 					agentToReset = id
 				} else {
 					if p := s.platforms[msg.Platform]; p != nil {
-						p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "未知的 agent: " + parts[1]})
+						errMsg := "未知的 agent: " + parts[1]
+						if len(s.agentCommands) > 0 {
+							var names []string
+							for cmd := range s.agentCommands {
+								names = append(names, cmd)
+							}
+							errMsg += "\n可用: " + strings.Join(names, ", ")
+						}
+						p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg})
 					}
 					return
 				}
@@ -239,7 +297,9 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		// H1: Prevent goroutine accumulation — only one message per session at a time
 		if !s.sessionGuard.TryAcquire(key) {
 			if p := s.platforms[msg.Platform]; p != nil {
-				p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "正在处理上一条消息，请稍候..."})
+				if s.sessionGuard.ShouldSendWait(key) {
+					p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "正在处理上一条消息，请稍候..."})
+				}
 			}
 			return
 		}
@@ -249,7 +309,17 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		if err != nil {
 			log.Error("get session", "err", err)
 			if p := s.platforms[msg.Platform]; p != nil {
-				p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "会话异常，请发送 /new 重置后重试。"})
+				errStr := err.Error()
+				var errMsg string
+				switch {
+				case strings.Contains(errStr, "max concurrent"):
+					errMsg = "当前处理已满，请稍后重试。"
+				case strings.Contains(errStr, "context canceled"):
+					errMsg = "系统正在重启，请稍后重试。"
+				default:
+					errMsg = "会话创建失败，请发送 /new 重置后重试。"
+				}
+				p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg})
 			}
 			return
 		}
@@ -307,7 +377,7 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 			// Subsequent events: rate-limited edit
 			select {
 			case <-msgIDReady:
-				if thinkingMsgID != "" && time.Since(lastStatusEdit) >= 2*time.Second {
+				if thinkingMsgID != "" && time.Since(lastStatusEdit) >= 1*time.Second {
 					if err := p.EditMessage(ctx, thinkingMsgID, text); err == nil {
 						lastStatusEdit = time.Now()
 					}
@@ -327,7 +397,16 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		result, err := sess.Send(ctx, cleanText, images, onEvent)
 		if err != nil {
 			log.Error("send to claude", "err", err)
-			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "处理失败，请发送 /new 重置后重试。"})
+			var errMsg string
+			switch {
+			case errors.Is(err, cli.ErrNoOutputTimeout):
+				errMsg = "⏱️ 处理超时（2 分钟无输出），请简化任务后重试。"
+			case errors.Is(err, cli.ErrTotalTimeout):
+				errMsg = "⏱️ 处理超时（总耗时过长），请拆分为更小的任务。"
+			default:
+				errMsg = "处理失败，请发送 /new 重置后重试。"
+			}
+			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg})
 			return
 		}
 
@@ -382,7 +461,11 @@ func (s *Server) sendSplitReply(ctx context.Context, p platform.Platform, chatID
 	}
 
 	chunks := splitText(text, maxLen)
-	for _, chunk := range chunks {
+	total := len(chunks)
+	for i, chunk := range chunks {
+		if total > 1 {
+			chunk += fmt.Sprintf("\n— [%d/%d]", i+1, total)
+		}
 		if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: chatID, Text: chunk}); err != nil {
 			slog.Error("reply failed", "err", err)
 		}
@@ -425,6 +508,73 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	}); err != nil {
 		slog.Error("encode health response", "err", err)
 	}
+}
+
+// startNodeCacheLoop periodically fetches remote node sessions in the background
+// so /api/sessions never blocks on unreachable nodes.
+func (s *Server) startNodeCacheLoop(ctx context.Context) {
+	if len(s.nodes) == 0 {
+		return
+	}
+	// Eager first fetch in background
+	go s.refreshNodeCache()
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.refreshNodeCache()
+			}
+		}
+	}()
+}
+
+func (s *Server) refreshNodeCache() {
+	type result struct {
+		nodeID   string
+		sessions []map[string]any
+		err      error
+	}
+	ch := make(chan result, len(s.nodes))
+	for id, nc := range s.nodes {
+		go func(id string, nc *NodeClient) {
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			sessions, err := nc.FetchSessions(ctx)
+			ch <- result{id, sessions, err}
+		}(id, nc)
+	}
+
+	newSessions := make(map[string][]map[string]any, len(s.nodes))
+	newStatus := make(map[string]string, len(s.nodes))
+
+	for i := 0; i < len(s.nodes); i++ {
+		res := <-ch
+		if res.err != nil {
+			slog.Debug("node cache refresh", "node", res.nodeID, "err", res.err)
+			newStatus[res.nodeID] = "error"
+			continue
+		}
+		newStatus[res.nodeID] = "ok"
+		for _, rs := range res.sessions {
+			rs["node"] = res.nodeID
+		}
+		newSessions[res.nodeID] = res.sessions
+	}
+
+	s.nodeCacheMu.Lock()
+	s.nodeSessions = newSessions
+	s.nodeStatus = newStatus
+	s.nodeCacheMu.Unlock()
+}
+
+func (s *Server) getCachedNodeSessions() (map[string][]map[string]any, map[string]string) {
+	s.nodeCacheMu.RLock()
+	defer s.nodeCacheMu.RUnlock()
+	return s.nodeSessions, s.nodeStatus
 }
 
 // handleCronCommand dispatches /cron subcommands.

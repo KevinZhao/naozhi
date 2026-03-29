@@ -10,12 +10,13 @@ const defaultEventLogSize = 200
 
 // EventEntry is a simplified event record for the dashboard.
 type EventEntry struct {
-	Time    int64   `json:"time"`              // unix ms
-	Type    string  `json:"type"`              // init, thinking, tool_use, text, result, system
-	Summary string  `json:"summary,omitempty"` // brief description
-	Cost    float64 `json:"cost,omitempty"`    // cumulative cost (result events only)
-	Detail  string  `json:"detail,omitempty"`  // fuller content for terminal view
-	Tool    string  `json:"tool,omitempty"`    // tool name for tool_use events
+	Time     int64   `json:"time"`               // unix ms
+	Type     string  `json:"type"`               // init, thinking, tool_use, text, result, system
+	Summary  string  `json:"summary,omitempty"`  // brief description
+	Cost     float64 `json:"cost,omitempty"`     // cumulative cost (result events only)
+	Detail   string  `json:"detail,omitempty"`   // fuller content for terminal view
+	Tool     string  `json:"tool,omitempty"`     // tool name for tool_use events
+	Subagent string  `json:"subagent,omitempty"` // subagent_type for Agent tool calls
 }
 
 type subscriber struct {

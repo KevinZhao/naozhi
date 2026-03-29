@@ -65,21 +65,35 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' wss: ws:; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("dashboard write", "err", err)
 	}
 }
 
 func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
+	if !s.checkBearerAuth(w, r) {
+		return
+	}
 	snapshots := s.router.ListSessions()
 	active, total := s.router.Stats()
 
 	stats := map[string]any{
-		"active":  active,
-		"total":   total,
-		"uptime":  time.Since(s.startedAt).Round(time.Second).String(),
-		"backend": s.backendTag,
+		"active":            active,
+		"total":             total,
+		"uptime":            time.Since(s.startedAt).Round(time.Second).String(),
+		"backend":           s.backendTag,
+		"max_procs":         s.router.MaxProcs(),
+		"default_workspace": s.router.DefaultWorkspace(),
 	}
+
+	// Include available agent IDs for dashboard session creation
+	agentIDs := make([]string, 0, len(s.agents)+1)
+	agentIDs = append(agentIDs, "general")
+	for id := range s.agents {
+		agentIDs = append(agentIDs, id)
+	}
+	stats["agents"] = agentIDs
 
 	// No remote nodes: use existing response format
 	if len(s.nodes) == 0 {
@@ -94,7 +108,7 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Multi-node: tag local sessions and merge with remote
+	// Multi-node: tag local sessions and merge with cached remote sessions
 	allSessions := make([]any, 0, len(snapshots))
 	for i := range snapshots {
 		snapshots[i].Node = "local"
@@ -105,37 +119,17 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		"local": map[string]any{"display_name": "Local", "status": "ok"},
 	}
 
-	type fetchResult struct {
-		nodeID   string
-		sessions []map[string]any
-		err      error
-	}
-	ch := make(chan fetchResult, len(s.nodes))
+	cachedSessions, cachedStatus := s.getCachedNodeSessions()
 	for id, nc := range s.nodes {
-		go func(id string, nc *NodeClient) {
-			ctx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
-			defer cancel()
-			sessions, err := nc.FetchSessions(ctx)
-			ch <- fetchResult{id, sessions, err}
-		}(id, nc)
-	}
-	for i := 0; i < len(s.nodes); i++ {
-		res := <-ch
-		nc := s.nodes[res.nodeID]
-		if res.err != nil {
-			slog.Warn("fetch remote sessions", "node", res.nodeID, "err", res.err)
-			nodeStatus[res.nodeID] = map[string]any{
-				"display_name": nc.DisplayName,
-				"status":       "error",
-			}
-			continue
+		status := cachedStatus[id]
+		if status == "" {
+			status = "unknown"
 		}
-		nodeStatus[res.nodeID] = map[string]any{
+		nodeStatus[id] = map[string]any{
 			"display_name": nc.DisplayName,
-			"status":       "ok",
+			"status":       status,
 		}
-		for _, rs := range res.sessions {
-			rs["node"] = res.nodeID
+		for _, rs := range cachedSessions[id] {
 			allSessions = append(allSessions, rs)
 		}
 	}
@@ -152,6 +146,9 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPISessionEvents(w http.ResponseWriter, r *http.Request) {
+	if !s.checkBearerAuth(w, r) {
+		return
+	}
 	key := r.URL.Query().Get("key")
 	if key == "" {
 		http.Error(w, "missing key parameter", http.StatusBadRequest)
@@ -220,6 +217,7 @@ func (s *Server) handleAPISessionDelete(w http.ResponseWriter, r *http.Request) 
 	var req struct {
 		Key string `json:"key"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
 		http.Error(w, "key is required", http.StatusBadRequest)
 		return
@@ -239,7 +237,7 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var key, text, node string
+	var key, text, node, workspace string
 	var images []cli.ImageData
 
 	ct := r.Header.Get("Content-Type")
@@ -251,6 +249,7 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 		key = r.FormValue("key")
 		text = r.FormValue("text")
 		node = r.FormValue("node")
+		workspace = r.FormValue("workspace")
 
 		files := r.MultipartForm.File["files"]
 		if len(files) > 5 {
@@ -282,9 +281,10 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 		}
 	} else {
 		var req struct {
-			Key  string `json:"key"`
-			Text string `json:"text"`
-			Node string `json:"node"`
+			Key       string `json:"key"`
+			Text      string `json:"text"`
+			Node      string `json:"node"`
+			Workspace string `json:"workspace"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -293,6 +293,7 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 		key = req.Key
 		text = req.Text
 		node = req.Node
+		workspace = req.Workspace
 	}
 
 	if key == "" {
@@ -339,6 +340,16 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Set workspace override for new dashboard sessions
+	if workspace != "" {
+		if info, err := os.Stat(workspace); err == nil && info.IsDir() {
+			if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
+				chatKey := key[:idx]
+				s.router.SetWorkspace(chatKey, workspace)
+			}
+		}
+	}
+
 	if !s.sessionGuard.TryAcquire(key) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
@@ -353,7 +364,12 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer s.sessionGuard.Release(key)
 
-		ctx := context.Background()
+		var ctx context.Context
+		if s.hub != nil {
+			ctx = s.hub.ctx
+		} else {
+			ctx = context.Background()
+		}
 
 		parts := strings.SplitN(key, ":", 4)
 		agentID := "general"
@@ -430,16 +446,28 @@ func (s *Server) handleAPIDiscoveredPreview(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(entries)
 }
 
+// verifyProcIdentity checks that the process at pid still has the expected
+// start time, guarding against PID reuse between scan and signal.
+func verifyProcIdentity(pid int, expectedStartTime uint64) bool {
+	actual, err := discovery.ProcStartTime(pid)
+	if err != nil {
+		return false
+	}
+	return actual == expectedStartTime
+}
+
 func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 	if !s.checkBearerAuth(w, r) {
 		return
 	}
 
 	var req struct {
-		PID       int    `json:"pid"`
-		SessionID string `json:"session_id"`
-		CWD       string `json:"cwd"`
+		PID           int    `json:"pid"`
+		SessionID     string `json:"session_id"`
+		CWD           string `json:"cwd"`
+		ProcStartTime uint64 `json:"proc_start_time"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
@@ -466,40 +494,7 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Kill the original process
-	if err := syscall.Kill(req.PID, syscall.SIGTERM); err != nil {
-		http.Error(w, fmt.Sprintf("kill process %d: %v", req.PID, err), http.StatusBadRequest)
-		return
-	}
-
-	// Wait for process to exit (up to 5 seconds)
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(req.PID, 0); err != nil {
-			break // process exited
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	// Force kill if still alive
-	_ = syscall.Kill(req.PID, syscall.SIGKILL)
-
-	// Remove stale session file so it won't reappear in discovery scans
-	if s.claudeDir != "" {
-		staleFile := filepath.Join(s.claudeDir, "sessions", fmt.Sprintf("%d.json", req.PID))
-		_ = os.Remove(staleFile)
-	}
-
-	// Remove session lock dir from /tmp so --resume can reacquire the session.
-	// Claude CLI creates /tmp/claude-{UID}/{encoded-cwd}/{sessionID}/ and doesn't
-	// clean up after SIGKILL.
-	if req.CWD != "" && req.SessionID != "" {
-		encodedCWD := strings.ReplaceAll(req.CWD, "/", "-")
-		lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, req.SessionID)
-		_ = os.RemoveAll(lockDir)
-	}
-
-	// Generate session key using full CWD to avoid collisions
-	// between directories with the same base name.
+	// Compute session key before launching goroutine so we can return it immediately.
 	cwd := req.CWD
 	if cwd == "" {
 		cwd = "unknown"
@@ -507,28 +502,76 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 	cwdKey := strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
 	key := "local:takeover:" + cwdKey + ":general"
 
-	// Takeover via router — use Background context so the spawned process
-	// outlives the HTTP request.
-	opts := s.agents["general"]
-	sess, err := s.router.Takeover(context.Background(), key, req.SessionID, cwd, session.AgentOpts{
-		Model:     opts.Model,
-		ExtraArgs: opts.ExtraArgs,
-	})
-	if err != nil {
-		http.Error(w, "takeover failed: "+err.Error(), http.StatusInternalServerError)
+	// Kill the original process.
+	// Verify PID identity before sending signal (TOCTOU guard).
+	if req.ProcStartTime != 0 && !verifyProcIdentity(req.PID, req.ProcStartTime) {
+		http.Error(w, "process identity changed (PID reused)", http.StatusConflict)
+		return
+	}
+	if err := syscall.Kill(req.PID, syscall.SIGTERM); err != nil {
+		http.Error(w, fmt.Sprintf("kill process %d: %v", req.PID, err), http.StatusBadRequest)
 		return
 	}
 
-	slog.Info("session takeover", "key", key, "session_id", req.SessionID, "pid", req.PID, "cwd", cwd)
+	// Capture locals for the background goroutine.
+	pid := req.PID
+	sessionID := req.SessionID
+	reqCWD := req.CWD
+	procStartTime := req.ProcStartTime
+	claudeDir := s.claudeDir
+	agentOpts := s.agents["general"]
 
-	// Load conversation history from Claude's local JSONL
-	if s.claudeDir != "" {
-		if entries, err := discovery.LoadHistory(s.claudeDir, req.SessionID, cwd); err == nil && len(entries) > 0 {
-			sess.InjectHistory(entries)
-			slog.Info("loaded session history", "key", key, "entries", len(entries))
+	go func() {
+		// Wait for process to exit (up to 5 seconds).
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if err := syscall.Kill(pid, 0); err != nil {
+				break // process exited
+			}
+			time.Sleep(200 * time.Millisecond)
 		}
-	}
+		// Force kill if still alive — re-verify PID identity to avoid killing
+		// an unrelated process that reused the PID during the wait window.
+		if procStartTime == 0 || verifyProcIdentity(pid, procStartTime) {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+
+		// Remove stale session file so it won't reappear in discovery scans.
+		if claudeDir != "" {
+			staleFile := filepath.Join(claudeDir, "sessions", fmt.Sprintf("%d.json", pid))
+			_ = os.Remove(staleFile)
+		}
+
+		// Remove session lock dir from /tmp so --resume can reacquire the session.
+		// Claude CLI creates /tmp/claude-{UID}/{encoded-cwd}/{sessionID}/ and doesn't
+		// clean up after SIGKILL.
+		if reqCWD != "" && sessionID != "" {
+			encodedCWD := strings.ReplaceAll(reqCWD, "/", "-")
+			lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID)
+			_ = os.RemoveAll(lockDir)
+		}
+
+		// Takeover via router — use Background context so the spawned process
+		// outlives the HTTP request.
+		_, err := s.router.Takeover(context.Background(), key, sessionID, cwd, session.AgentOpts{
+			Model:     agentOpts.Model,
+			ExtraArgs: agentOpts.ExtraArgs,
+		})
+		if err != nil {
+			slog.Error("session takeover failed", "key", key, "session_id", sessionID, "pid", pid, "err", err)
+			if s.hub != nil {
+				s.hub.broadcastState(key, "dead", "takeover_failed")
+				s.hub.BroadcastSessionsUpdate()
+			}
+			return
+		}
+
+		slog.Info("session takeover", "key", key, "session_id", sessionID, "pid", pid, "cwd", cwd)
+		// Note: spawnSession already loads JSONL history when resumeID is set.
+		s.hub.BroadcastSessionsUpdate()
+	}()
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok", "key": key})
+	w.WriteHeader(http.StatusAccepted)
+	json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "key": key})
 }

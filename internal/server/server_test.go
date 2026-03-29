@@ -403,10 +403,15 @@ func TestSendSplitReply_LongMessageSplitsCorrectly(t *testing.T) {
 	}
 	combined := ""
 	for _, r := range p.allReplies() {
-		if len(r.Text) > 10 {
-			t.Errorf("reply chunk len %d exceeds maxLen 10: %q", len(r.Text), r.Text)
+		// Strip the trailing split marker (e.g., "\n— [1/4]") before checking
+		chunk := r.Text
+		if idx := strings.LastIndex(chunk, "\n— ["); idx >= 0 {
+			chunk = chunk[:idx]
 		}
-		combined += r.Text
+		if len(chunk) > 10 {
+			t.Errorf("reply content len %d exceeds maxLen 10: %q", len(chunk), chunk)
+		}
+		combined += chunk
 	}
 	if combined != text {
 		t.Errorf("combined replies = %q, want %q", combined, text)

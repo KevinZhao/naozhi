@@ -138,6 +138,16 @@ func TestNewRouterDefaults(t *testing.T) {
 	}
 }
 
+func TestRouterDefaultWorkspaceAndMaxProcs(t *testing.T) {
+	r := NewRouter(RouterConfig{MaxProcs: 7, Workspace: "/my/workspace"})
+	if got := r.DefaultWorkspace(); got != "/my/workspace" {
+		t.Errorf("DefaultWorkspace() = %q, want /my/workspace", got)
+	}
+	if got := r.MaxProcs(); got != 7 {
+		t.Errorf("MaxProcs() = %d, want 7", got)
+	}
+}
+
 func TestNewRouterStoreRestore(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "sessions.json")

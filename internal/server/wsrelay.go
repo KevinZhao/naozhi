@@ -15,22 +15,24 @@ import (
 // wsRelay maintains a persistent WS connection to a remote node
 // and forwards events to local browser clients.
 type wsRelay struct {
-	node    *NodeClient
-	hub     *Hub
-	mu      sync.Mutex
-	writeMu sync.Mutex // serializes writes to the WS connection
-	conn    *websocket.Conn
-	subs    map[string][]*wsClient // remote session key -> local clients
-	done    chan struct{}
-	closed  bool
+	node      *NodeClient
+	hub       *Hub
+	mu        sync.Mutex
+	writeMu   sync.Mutex // serializes writes to the WS connection
+	conn      *websocket.Conn
+	subs      map[string][]*wsClient // remote session key -> local clients
+	lastEvent map[string]int64       // key -> last event unix ms (for reconnect)
+	done      chan struct{}
+	closed    bool
 }
 
 func newWSRelay(node *NodeClient, hub *Hub) *wsRelay {
 	return &wsRelay{
-		node: node,
-		hub:  hub,
-		subs: make(map[string][]*wsClient),
-		done: make(chan struct{}),
+		node:      node,
+		hub:       hub,
+		subs:      make(map[string][]*wsClient),
+		lastEvent: make(map[string]int64),
+		done:      make(chan struct{}),
 	}
 }
 
@@ -223,6 +225,10 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 		r.mu.Lock()
 		clients := make([]*wsClient, len(r.subs[msg.Key]))
 		copy(clients, r.subs[msg.Key])
+		// Track last event time for reconnect resubscribe
+		if msg.Type == "event" && msg.Event != nil && msg.Event.Time > r.lastEvent[msg.Key] {
+			r.lastEvent[msg.Key] = msg.Event.Time
+		}
 		r.mu.Unlock()
 
 		for _, c := range clients {
@@ -248,20 +254,24 @@ func (r *wsRelay) reconnect() {
 			continue
 		}
 
-		// Resubscribe to all active keys
+		// Resubscribe to all active keys with last-seen timestamps
 		r.mu.Lock()
-		keys := make([]string, 0, len(r.subs))
+		type resub struct {
+			key   string
+			after int64
+		}
+		resubscribes := make([]resub, 0, len(r.subs))
 		for key := range r.subs {
 			if len(r.subs[key]) > 0 {
-				keys = append(keys, key)
+				resubscribes = append(resubscribes, resub{key, r.lastEvent[key]})
 			}
 		}
 		r.mu.Unlock()
 
-		for _, key := range keys {
-			r.writeJSON(wsClientMsg{Type: "subscribe", Key: key})
+		for _, e := range resubscribes {
+			r.writeJSON(wsClientMsg{Type: "subscribe", Key: e.key, After: e.after})
 		}
-		slog.Info("relay reconnected", "node", r.node.ID, "keys", len(keys))
+		slog.Info("relay reconnected", "node", r.node.ID, "keys", len(resubscribes))
 		return
 	}
 }
@@ -290,6 +300,8 @@ func (r *wsRelay) writeJSON(v any) {
 		return
 	}
 	r.writeMu.Lock()
-	conn.WriteJSON(v)
+	if err := conn.WriteJSON(v); err != nil {
+		slog.Warn("relay write failed", "node", r.node.ID, "err", err)
+	}
 	r.writeMu.Unlock()
 }

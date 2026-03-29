@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -14,7 +16,17 @@ import (
 )
 
 var wsUpgrader = websocket.Upgrader{
-	CheckOrigin:     func(r *http.Request) bool { return true },
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true // same-origin requests omit Origin
+		}
+		u, err := url.Parse(origin)
+		if err != nil {
+			return false
+		}
+		return u.Host == r.Host
+	},
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
 }
@@ -30,10 +42,13 @@ type Hub struct {
 	guard     *sessionGuard
 	nodes     map[string]*NodeClient
 	relays    map[string]*wsRelay // node ID -> relay (lazy)
+	ctx       context.Context     // cancelled on Shutdown to stop in-flight sends
+	cancel    context.CancelFunc
 }
 
 // NewHub creates a new WebSocket hub.
 func NewHub(router *session.Router, agents map[string]session.AgentOpts, agentCmds map[string]string, dashToken string, guard *sessionGuard, nodes map[string]*NodeClient) *Hub {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Hub{
 		clients:   make(map[*wsClient]struct{}),
 		router:    router,
@@ -43,6 +58,8 @@ func NewHub(router *session.Router, agents map[string]session.AgentOpts, agentCm
 		guard:     guard,
 		nodes:     nodes,
 		relays:    make(map[string]*wsRelay),
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 }
 
@@ -96,7 +113,7 @@ func (h *Hub) unregister(c *wsClient) {
 }
 
 func (h *Hub) handleAuth(c *wsClient, msg wsClientMsg) {
-	if h.dashToken == "" || msg.Token == h.dashToken {
+	if h.dashToken == "" || subtle.ConstantTimeCompare([]byte(msg.Token), []byte(h.dashToken)) == 1 {
 		c.authenticated.Store(true)
 		c.sendJSON(wsServerMsg{Type: "auth_ok"})
 	} else {
@@ -211,16 +228,20 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 		return
 	}
 
+	// Set workspace override for new dashboard sessions
+	if msg.Workspace != "" {
+		if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
+			chatKey := key[:idx]
+			h.router.SetWorkspace(chatKey, msg.Workspace)
+		}
+	}
+
 	c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "accepted", Key: key})
 
 	go func() {
 		defer h.guard.Release(key)
 
-		// Notify subscribers: running
-		h.broadcastState(key, "running", "")
-		h.BroadcastSessionsUpdate()
-
-		ctx := context.Background()
+		ctx := h.ctx
 		parts := strings.SplitN(key, ":", 4)
 		agentID := "general"
 		if len(parts) == 4 {
@@ -233,6 +254,12 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 			slog.Error("ws send: get session", "key", key, "err", err)
 			return
 		}
+
+		// Notify AFTER session exists so clients can auto-subscribe.
+		// For new sessions, spawnSession already called BroadcastSessionsUpdate
+		// via notifyChange; for existing sessions we need this explicit call.
+		h.broadcastState(key, "running", "")
+		h.BroadcastSessionsUpdate()
 
 		if _, err := sess.Send(ctx, msg.Text, nil, nil); err != nil {
 			slog.Error("ws send: send", "key", key, "err", err)
@@ -317,6 +344,7 @@ func (h *Hub) BroadcastSessionsUpdate() {
 
 // Shutdown closes all WebSocket client connections and relays.
 func (h *Hub) Shutdown() {
+	h.cancel() // cancel in-flight send goroutines
 	h.mu.Lock()
 	// Close all relays
 	for id, relay := range h.relays {

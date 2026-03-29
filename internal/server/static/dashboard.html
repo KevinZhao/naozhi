@@ -6,39 +6,39 @@
 <title>naozhi dashboard</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;background:#0d1117;color:#c9d1d9;font-size:15px}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;background:#0d1117;color:#c9d1d9;font-size:16px}
 .container{display:flex;height:100vh}
 
 .sidebar{width:320px;min-width:320px;border-right:1px solid #30363d;display:flex;flex-direction:column}
 .sidebar-header{padding:16px;border-bottom:1px solid #30363d}
-.sidebar-header h1{font-size:18px;color:#f0f6fc;font-weight:600}
-.sidebar-header .stats{font-size:13px;color:#8b949e;margin-top:4px}
+.sidebar-header h1{font-size:19px;color:#f0f6fc;font-weight:600}
+.sidebar-header .stats{font-size:14px;color:#8b949e;margin-top:4px}
 .session-list{flex:1;overflow-y:auto}
 
 .session-card{padding:10px 16px;border-bottom:1px solid #21262d;cursor:pointer;transition:background .15s;border-left:3px solid transparent}
 .session-card:hover{background:#161b22}
 .session-card.active{background:#1f2937;border-left-color:#58a6ff}
 .session-card.dead-card{opacity:.6}
-.session-card .platform{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
-.session-card .agent{font-size:15px;color:#f0f6fc;margin:2px 0;font-weight:500}
+.session-card .platform{font-size:13px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
+.session-card .agent{font-size:16px;color:#f0f6fc;margin:2px 0;font-weight:500}
 .session-card.dead-card .agent{text-decoration:line-through;color:#8b949e}
-.session-card .meta{font-size:12px;color:#8b949e;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-.session-card .workspace-hint{font-size:11px;color:#484f58;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.session-card .session-prompt{font-size:12px;color:#a5d6ff;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.session-card .session-activity{font-size:11px;color:#8b949e;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-style:italic}
-.session-card .btn-dismiss{position:absolute;top:4px;right:6px;background:none;border:none;color:#484f58;font-size:16px;cursor:pointer;padding:0 4px;line-height:1;opacity:0;transition:opacity .15s}
+.session-card .meta{font-size:13px;color:#8b949e;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.session-card .workspace-hint{font-size:12px;color:#484f58;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.session-card .session-prompt{font-size:13px;color:#a5d6ff;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.session-card .session-activity{font-size:12px;color:#8b949e;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-style:italic}
+.session-card .btn-dismiss{position:absolute;top:4px;right:6px;background:none;border:none;color:#484f58;font-size:17px;cursor:pointer;padding:0 4px;line-height:1;opacity:0;transition:opacity .15s}
 .session-card:hover .btn-dismiss{opacity:1}
 .session-card .btn-dismiss:hover{color:#da3633}
 .session-card{position:relative}
 
-.badge{display:inline-block;padding:2px 7px;border-radius:10px;font-size:11px;font-weight:600}
+.badge{display:inline-block;padding:2px 7px;border-radius:10px;font-size:12px;font-weight:600}
 .badge.running{background:#238636;color:#fff}
 .badge.ready{background:#1f6feb;color:#fff}
 .badge.dead{background:#484f58;color:#c9d1d9}
 .badge.suspended{background:#9e6a03;color:#fff}
 .badge.spawning{background:#d29922;color:#fff}
 .badge.new{background:#1f6feb;color:#fff;border:1px dashed #58a6ff}
-.death-tag{font-size:10px;color:#8b949e;background:#21262d;padding:1px 4px;border-radius:4px}
+.death-tag{font-size:11px;color:#8b949e;background:#21262d;padding:1px 4px;border-radius:4px}
 
 .main{flex:1;display:flex;flex-direction:column;overflow:hidden}
 .main-header{padding:12px 20px;border-bottom:1px solid #30363d;flex-shrink:0}

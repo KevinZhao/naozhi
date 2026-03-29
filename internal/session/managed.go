@@ -45,9 +45,9 @@ type ManagedSession struct {
 	process     processIface
 	sendMu      sync.Mutex // serializes messages to the same session
 	sendCancel  atomic.Pointer[context.CancelFunc]
-	workspace   string  // effective cwd at spawn time
-	deathReason string  // why process died, empty if alive
-	totalCost   float64 // cached cost when process is nil
+	workspace   string       // effective cwd at spawn time
+	deathReason atomic.Value // string: why process died, empty if alive
+	totalCost   float64      // cached cost when process is nil
 
 	// persistedHistory stores event entries that survive process restarts.
 	// Populated by InjectHistory and carried over when the process is replaced.
@@ -81,9 +81,9 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	result, err := s.process.Send(ctx, text, images, onEvent)
 	if err != nil {
 		if errors.Is(err, cli.ErrNoOutputTimeout) {
-			s.deathReason = "no_output_timeout"
+			s.deathReason.Store("no_output_timeout")
 		} else if errors.Is(err, cli.ErrTotalTimeout) {
-			s.deathReason = "total_timeout"
+			s.deathReason.Store("total_timeout")
 		}
 		return nil, err
 	}
@@ -157,11 +157,13 @@ type SessionSnapshot struct {
 // Snapshot returns a point-in-time view of this session.
 func (s *ManagedSession) Snapshot() SessionSnapshot {
 	snap := SessionSnapshot{
-		Key:         s.Key,
-		SessionID:   s.getSessionID(),
-		LastActive:  s.GetLastActive().UnixMilli(),
-		Workspace:   s.workspace,
-		DeathReason: s.deathReason,
+		Key:        s.Key,
+		SessionID:  s.getSessionID(),
+		LastActive: s.GetLastActive().UnixMilli(),
+		Workspace:  s.workspace,
+	}
+	if dr, ok := s.deathReason.Load().(string); ok {
+		snap.DeathReason = dr
 	}
 
 	// Parse key: platform:chatType:userId:agentId
@@ -261,10 +263,9 @@ func (s *ManagedSession) SubscribeEvents() (<-chan struct{}, func()) {
 // Entries are saved to persistedHistory so they survive process restarts.
 func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
 	s.persistedHistory = append(s.persistedHistory, entries...)
-	proc := s.process
-	s.sendMu.Unlock()
-	if proc != nil {
-		proc.InjectHistory(entries)
+	if s.process != nil {
+		s.process.InjectHistory(entries)
 	}
 }

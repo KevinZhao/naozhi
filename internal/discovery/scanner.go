@@ -4,9 +4,13 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -15,15 +19,16 @@ import (
 
 // DiscoveredSession represents a Claude CLI process found on the system.
 type DiscoveredSession struct {
-	PID        int    `json:"pid"`
-	SessionID  string `json:"session_id"`
-	CWD        string `json:"cwd"`
-	StartedAt  int64  `json:"started_at"`            // unix ms
-	LastActive int64  `json:"last_active"`           // unix ms (from JSONL mtime, fallback to started_at)
-	Kind       string `json:"kind"`                  // "interactive" etc.
-	Entrypoint string `json:"entrypoint"`            // "cli" etc.
-	Summary    string `json:"summary,omitempty"`     // Claude-generated session name from sessions-index
-	LastPrompt string `json:"last_prompt,omitempty"` // most recent user message
+	PID           int    `json:"pid"`
+	SessionID     string `json:"session_id"`
+	CWD           string `json:"cwd"`
+	StartedAt     int64  `json:"started_at"`            // unix ms
+	LastActive    int64  `json:"last_active"`           // unix ms (from JSONL mtime, fallback to started_at)
+	Kind          string `json:"kind"`                  // "interactive" etc.
+	Entrypoint    string `json:"entrypoint"`            // "cli" etc.
+	Summary       string `json:"summary,omitempty"`     // Claude-generated session name from sessions-index
+	LastPrompt    string `json:"last_prompt,omitempty"` // most recent user message
+	ProcStartTime uint64 `json:"proc_start_time"`       // /proc/PID/stat field 22, used to verify PID identity
 }
 
 // sessionFile mirrors the JSON schema of ~/.claude/sessions/{PID}.json.
@@ -34,6 +39,12 @@ type sessionFile struct {
 	StartedAt  int64  `json:"startedAt"`
 	Kind       string `json:"kind"`
 	Entrypoint string `json:"entrypoint"`
+}
+
+// scanCandidate holds intermediate state during session scanning.
+type scanCandidate struct {
+	sf         sessionFile
+	lastActive int64
 }
 
 // Scan reads ~/.claude/sessions/*.json and returns live Claude CLI processes
@@ -48,7 +59,9 @@ func Scan(claudeDir string, excludePIDs map[int]bool) ([]DiscoveredSession, erro
 		return nil, err
 	}
 
-	var result []DiscoveredSession
+	// First pass: collect alive sessions with their original session IDs.
+	var candidates []scanCandidate
+
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 			continue
@@ -73,26 +86,91 @@ func Scan(claudeDir string, excludePIDs map[int]bool) ([]DiscoveredSession, erro
 			continue
 		}
 
-		// Skip naozhi-managed processes
 		if excludePIDs[sf.PID] {
 			continue
 		}
 
-		// Check if process is alive
 		if !processAlive(sf.PID) {
 			continue
 		}
 
+		la := jsonlMtime(claudeDir, sf.CWD, sf.SessionID, sf.StartedAt)
+		candidates = append(candidates, scanCandidate{sf: sf, lastActive: la})
+	}
+
+	// Second pass: upgrade stale session IDs. CLI doesn't update {pid}.json
+	// after /clear, so the session ID may be outdated. For each CWD, find
+	// recent JSONL files and assign them to PIDs.
+	// Strategy: sort PIDs by original staleness (most stale first = most
+	// likely to have done /clear), assign newest unassigned JSONL to each.
+	type cwdGroup struct {
+		indices []int // indices into candidates
+	}
+	groups := map[string]*cwdGroup{}
+	for i, c := range candidates {
+		g, ok := groups[c.sf.CWD]
+		if !ok {
+			g = &cwdGroup{}
+			groups[c.sf.CWD] = g
+		}
+		g.indices = append(g.indices, i)
+	}
+
+	for cwd, g := range groups {
+		// Skip session ID upgrade when multiple processes share the same CWD.
+		// The heuristic is non-deterministic with multiple live processes and
+		// can swap session IDs between scans, causing takeover to target the
+		// wrong process.
+		if len(g.indices) > 1 {
+			continue
+		}
+
+		recentJSONLs := listJSONLsByMtime(claudeDir, cwd)
+		if len(recentJSONLs) == 0 {
+			continue
+		}
+
+		// Build set of "claimed" session IDs (original assignments)
+		claimed := map[string]bool{}
+		for _, idx := range g.indices {
+			claimed[candidates[idx].sf.SessionID] = true
+		}
+
+		// Sort group indices by staleness (most stale first)
+		sortByLastActive(g.indices, candidates)
+
+		for _, idx := range g.indices {
+			c := &candidates[idx]
+			// Find newest unclaimed JSONL newer than this PID's current session
+			for _, jl := range recentJSONLs {
+				if claimed[jl.id] {
+					continue
+				}
+				if jl.mtime > c.lastActive {
+					c.sf.SessionID = jl.id // will be used below
+					c.lastActive = jl.mtime
+					claimed[jl.id] = true
+					break
+				}
+			}
+		}
+	}
+
+	var result []DiscoveredSession
+	for i := range candidates {
+		c := &candidates[i]
+		pst, _ := ProcStartTime(c.sf.PID)
 		result = append(result, DiscoveredSession{
-			PID:        sf.PID,
-			SessionID:  sf.SessionID,
-			CWD:        sf.CWD,
-			StartedAt:  sf.StartedAt,
-			LastActive: jsonlMtime(claudeDir, sf.CWD, sf.SessionID, sf.StartedAt),
-			Kind:       sf.Kind,
-			Entrypoint: sf.Entrypoint,
-			Summary:    lookupSummary(claudeDir, sf.CWD, sf.SessionID),
-			LastPrompt: extractLastPrompt(claudeDir, sf.CWD, sf.SessionID),
+			PID:           c.sf.PID,
+			SessionID:     c.sf.SessionID,
+			CWD:           c.sf.CWD,
+			StartedAt:     c.sf.StartedAt,
+			LastActive:    c.lastActive,
+			Kind:          c.sf.Kind,
+			Entrypoint:    c.sf.Entrypoint,
+			Summary:       lookupSummary(claudeDir, c.sf.CWD, c.sf.SessionID),
+			LastPrompt:    extractLastPrompt(claudeDir, c.sf.CWD, c.sf.SessionID),
+			ProcStartTime: pst,
 		})
 	}
 	return result, nil
@@ -106,6 +184,48 @@ func processAlive(pid int) bool {
 	}
 	// Signal 0 tests existence without actually sending a signal.
 	return proc.Signal(syscall.Signal(0)) == nil
+}
+
+type jsonlEntry struct {
+	id    string // session UUID (filename without .jsonl)
+	mtime int64  // unix ms
+}
+
+// listJSONLsByMtime returns JSONL files in the project dir sorted by mtime desc.
+func listJSONLsByMtime(claudeDir, cwd string) []jsonlEntry {
+	projDir := filepath.Join(claudeDir, "projects", projDirName(cwd))
+	entries, err := os.ReadDir(projDir)
+	if err != nil {
+		return nil
+	}
+
+	var result []jsonlEntry
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		info, err := e.Info()
+		if err != nil {
+			continue
+		}
+		result = append(result, jsonlEntry{
+			id:    strings.TrimSuffix(name, ".jsonl"),
+			mtime: info.ModTime().UnixMilli(),
+		})
+	}
+
+	sort.Slice(result, func(i, j int) bool {
+		return result[i].mtime > result[j].mtime // newest first
+	})
+	return result
+}
+
+// sortByLastActive sorts candidate indices by lastActive ascending (most stale first).
+func sortByLastActive(indices []int, candidates []scanCandidate) {
+	sort.Slice(indices, func(i, j int) bool {
+		return candidates[indices[i]].lastActive < candidates[indices[j]].lastActive
+	})
 }
 
 // projDirName converts a CWD path to the Claude project directory name.
@@ -182,7 +302,9 @@ func extractLastPrompt(claudeDir, cwd, sessionID string) string {
 		offset = 0
 	}
 	if offset > 0 {
-		f.Seek(offset, io.SeekStart)
+		if _, err := f.Seek(offset, io.SeekStart); err != nil {
+			slog.Warn("seek failed in JSONL preview", "err", err)
+		}
 	}
 
 	var lastPrompt string
@@ -249,4 +371,28 @@ func findJSONLPath(claudeDir, cwd, sessionID string) string {
 		return candidate
 	}
 	return ""
+}
+
+// ProcStartTime reads the start time (field 22) from /proc/{pid}/stat.
+// This value uniquely identifies a process instance even after PID reuse.
+// Field 2 (comm) may contain spaces/parentheses, so we locate the last ')' first.
+func ProcStartTime(pid int) (uint64, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return 0, err
+	}
+	// Find the end of the comm field (last ')') to avoid parsing issues
+	// with process names that contain spaces or parentheses.
+	idx := bytes.LastIndexByte(data, ')')
+	if idx < 0 || idx+2 >= len(data) {
+		return 0, fmt.Errorf("malformed /proc/%d/stat", pid)
+	}
+	// Fields after comm start at index 3 (1-based). We need field 22 (starttime),
+	// which is field index 22-3 = 19 in the remaining space-separated fields.
+	fields := strings.Fields(string(data[idx+2:]))
+	const startTimeIdx = 19 // 0-based index in fields after ')'
+	if len(fields) <= startTimeIdx {
+		return 0, fmt.Errorf("/proc/%d/stat: too few fields", pid)
+	}
+	return strconv.ParseUint(fields[startTimeIdx], 10, 64)
 }

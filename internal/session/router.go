@@ -36,6 +36,9 @@ type Router struct {
 	// activeCount tracks currently alive processes
 	activeCount int
 
+	// pendingSpawns tracks Spawn() calls in progress (lock released during spawn)
+	pendingSpawns int
+
 	storePath       string
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
@@ -90,6 +93,26 @@ func NewRouter(cfg RouterConfig) *Router {
 			}
 			s.setSessionID(entry.SessionID)
 			r.sessions[key] = s
+		}
+		// Async-load JSONL history for suspended sessions so the dashboard
+		// shows conversation history without waiting for the next message.
+		if r.claudeDir != "" {
+			for _, s := range r.sessions {
+				s := s
+				go func() {
+					sid := s.getSessionID()
+					if sid == "" {
+						return
+					}
+					entries, err := discovery.LoadHistory(r.claudeDir, sid, s.workspace)
+					if err != nil || len(entries) == 0 {
+						return
+					}
+					s.InjectHistory(entries)
+					slog.Info("loaded suspended session history on startup", "key", s.Key, "entries", len(entries))
+					r.notifyChange()
+				}()
+			}
 		}
 	}
 	return r
@@ -212,13 +235,13 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 // goroutines during potentially slow protocol init (e.g., ACP handshake).
 func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, opts AgentOpts) (*ManagedSession, error) {
 	r.countActive()
-	if r.activeCount >= r.maxProcs {
+	if r.activeCount+r.pendingSpawns >= r.maxProcs {
 		if !r.evictOldest() {
 			r.mu.Unlock()
 			return nil, fmt.Errorf("max concurrent processes reached (%d), all busy", r.maxProcs)
 		}
 		r.countActive()
-		if r.activeCount >= r.maxProcs {
+		if r.activeCount+r.pendingSpawns >= r.maxProcs {
 			r.mu.Unlock()
 			return nil, fmt.Errorf("max concurrent processes reached (%d), all busy", r.maxProcs)
 		}
@@ -253,12 +276,17 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	}
 
 	// Release lock during Spawn (may block on ACP Init handshake)
+	r.pendingSpawns++
 	r.mu.Unlock()
 	if r.wrapper == nil {
+		r.mu.Lock()
+		r.pendingSpawns--
+		r.mu.Unlock()
 		return nil, fmt.Errorf("spawn process: no CLI wrapper configured")
 	}
 	proc, err := r.wrapper.Spawn(ctx, spawnOpts)
 	r.mu.Lock()
+	r.pendingSpawns--
 	if err != nil {
 		r.mu.Unlock()
 		return nil, fmt.Errorf("spawn process: %w", err)
@@ -341,7 +369,7 @@ func (r *Router) evictOldest() bool {
 		return false
 	}
 	slog.Info("evicting oldest session", "key", oldest.Key, "idle", time.Since(oldest.GetLastActive()))
-	oldest.deathReason = "evicted"
+	oldest.deathReason.Store("evicted")
 	// Keep oldest.process non-nil so concurrent holders don't get nil-panic.
 	// After Close(), Alive() returns false — countActive() will stop counting it.
 	proc := oldest.process
@@ -419,7 +447,7 @@ func (r *Router) Cleanup() {
 	for key, s := range r.sessions {
 		if s.process != nil && s.process.Alive() && !s.process.IsRunning() && now.Sub(s.GetLastActive()) > r.ttl {
 			slog.Info("session expired", "key", key, "idle", now.Sub(s.GetLastActive()))
-			s.deathReason = "idle_timeout"
+			s.deathReason.Store("idle_timeout")
 			expired = append(expired, expiredEntry{key, s.process})
 		}
 	}
@@ -524,6 +552,16 @@ func (r *Router) Shutdown() {
 	wg.Wait()
 }
 
+// DefaultWorkspace returns the router's default working directory.
+func (r *Router) DefaultWorkspace() string {
+	return r.workspace
+}
+
+// MaxProcs returns the maximum number of concurrent CLI processes.
+func (r *Router) MaxProcs() int {
+	return r.maxProcs
+}
+
 // Stats returns current session statistics.
 func (r *Router) Stats() (active, total int) {
 	r.mu.Lock()
@@ -585,21 +623,39 @@ func (r *Router) ManagedPIDs() map[int]bool {
 }
 
 // Takeover creates a managed session to replace an external Claude CLI session.
-// It starts a fresh process (no --resume) and uses InjectHistory for UI continuity.
-// The caller must ensure the original process has been terminated before calling.
+// It uses --resume to preserve the conversation context, and loads JSONL history
+// for dashboard display. The caller must ensure the original process has been
+// terminated before calling.
 func (r *Router) Takeover(ctx context.Context, key string, sessionID string, workspace string, opts AgentOpts) (*ManagedSession, error) {
 	r.mu.Lock()
-	// If key already exists and alive, return it
-	if s, ok := r.sessions[key]; ok && s.process != nil && s.process.Alive() {
-		r.mu.Unlock()
-		return s, nil
+	// If key already exists (e.g. re-takeover same CWD), close the old process
+	if s, ok := r.sessions[key]; ok {
+		if s.process != nil && s.process.Alive() {
+			oldSession := s
+			proc := s.process
+			r.mu.Unlock()
+			proc.Close()
+			r.mu.Lock()
+			// Only delete if no concurrent goroutine replaced this session
+			if cur, ok := r.sessions[key]; ok && cur == oldSession {
+				delete(r.sessions, key)
+			} else if cur != nil && cur.process != nil && cur.process.Alive() {
+				// Concurrent GetOrCreate created a new session during Close();
+				// abort takeover rather than silently returning wrong session.
+				r.mu.Unlock()
+				return nil, fmt.Errorf("concurrent session created for key %s during takeover", key)
+			}
+		} else {
+			delete(r.sessions, key)
+		}
+		r.countActive()
 	}
 	// Set workspace override for the chat key prefix
 	if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
 		chatKey := key[:idx]
 		r.workspaceOverrides[chatKey] = workspace
 	}
-	s, err := r.spawnSession(ctx, key, "", opts)
+	s, err := r.spawnSession(ctx, key, sessionID, opts)
 	if err != nil {
 		return nil, err
 	}

@@ -24,9 +24,10 @@ type Weixin struct {
 	api     *apiClient
 	handler platform.MessageHandler
 
-	startMu sync.Mutex
-	started bool
-	cancel  context.CancelFunc
+	startMu   sync.Mutex
+	started   bool
+	cancel    context.CancelFunc
+	handlerWg sync.WaitGroup // tracks in-flight message handler goroutines
 
 	// contextTokens caches the latest context_token per user for reply.
 	contextTokens sync.Map // map[userID]string
@@ -79,6 +80,7 @@ func (w *Weixin) Stop() error {
 	if w.cancel != nil {
 		w.cancel()
 	}
+	w.handlerWg.Wait()
 	return nil
 }
 
@@ -194,7 +196,11 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 				MentionMe: true, // direct messages always mention the bot
 			}
 
-			go w.handler(context.Background(), incoming)
+			w.handlerWg.Add(1)
+			go func() {
+				defer w.handlerWg.Done()
+				w.handler(context.Background(), incoming)
+			}()
 		}
 	}
 }

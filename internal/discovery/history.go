@@ -3,6 +3,7 @@ package discovery
 import (
 	"bufio"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -57,7 +58,10 @@ func findSessionJSONL(claudeDir, sessionID string) (string, error) {
 	projectsDir := filepath.Join(claudeDir, "projects")
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
-		return "", nil
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("read projects dir: %w", err)
 	}
 	for _, e := range entries {
 		if !e.IsDir() {
@@ -133,16 +137,13 @@ func parseJSONL(path string) ([]cli.EventEntry, error) {
 						Detail:  cli.TruncateRunes(b.Text, 2000),
 					})
 				case "tool_use":
-					detail := b.Name
-					if len(b.Input) > 0 {
-						detail += ": " + cli.TruncateRunes(string(b.Input), 500)
-					}
+					summary := cli.FormatToolInput(b.Name, b.Input)
 					entries = append(entries, cli.EventEntry{
 						Time:    ts,
 						Type:    "tool_use",
-						Summary: b.Name,
+						Summary: summary,
 						Tool:    b.Name,
-						Detail:  detail,
+						Detail:  summary,
 					})
 				case "thinking":
 					if strings.TrimSpace(b.Text) == "" {

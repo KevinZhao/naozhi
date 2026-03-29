@@ -10,7 +10,7 @@ type ClaudeProtocol struct{}
 
 func (p *ClaudeProtocol) Name() string { return "stream-json" }
 
-func (p *ClaudeProtocol) Clone() Protocol { return p }
+func (p *ClaudeProtocol) Clone() Protocol { return &ClaudeProtocol{} }
 
 func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	args := []string{

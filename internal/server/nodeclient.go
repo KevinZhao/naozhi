@@ -59,6 +59,7 @@ func (n *NodeClient) FetchSessions(ctx context.Context) ([]map[string]any, error
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
 		return nil, fmt.Errorf("fetch sessions from %s: status %d", n.ID, resp.StatusCode)
 	}
 
@@ -84,6 +85,7 @@ func (n *NodeClient) FetchEvents(ctx context.Context, key string, after int64) (
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
 		return nil, fmt.Errorf("fetch events from %s: status %d", n.ID, resp.StatusCode)
 	}
 
@@ -105,6 +107,7 @@ func (n *NodeClient) Send(ctx context.Context, key, text string) error {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		io.Copy(io.Discard, resp.Body)
 		return fmt.Errorf("send to %s: status %d", n.ID, resp.StatusCode)
 	}
 	return nil

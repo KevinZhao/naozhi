@@ -25,15 +25,16 @@ type Config struct {
 
 // Slack implements Platform and RunnablePlatform via Socket Mode.
 type Slack struct {
-	cfg     Config
-	api     *slack.Client
-	handler platform.MessageHandler
-	cancel  context.CancelFunc
-	ctx     context.Context // lifecycle context, cancelled on Stop
-	done    chan struct{}
-	startMu sync.Mutex
-	started bool
-	botID   string
+	cfg       Config
+	api       *slack.Client
+	handler   platform.MessageHandler
+	cancel    context.CancelFunc
+	ctx       context.Context // lifecycle context, cancelled on Stop
+	done      chan struct{}
+	startMu   sync.Mutex
+	started   bool
+	botID     string
+	handlerWg sync.WaitGroup // tracks in-flight message handler goroutines
 }
 
 // New creates a Slack platform adapter.
@@ -113,6 +114,7 @@ func (s *Slack) Stop() error {
 		s.cancel()
 		<-s.done
 	}
+	s.handlerWg.Wait()
 	return nil
 }
 
@@ -235,5 +237,9 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 		MentionMe: mentionMe,
 	}
 
-	go s.handler(s.ctx, msg)
+	s.handlerWg.Add(1)
+	go func() {
+		defer s.handlerWg.Done()
+		s.handler(s.ctx, msg)
+	}()
 }
