@@ -97,9 +97,11 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 
 // Interrupt sends SIGINT to the CLI process and cancels the current Send context.
 // This is the equivalent of pressing Escape in Claude Code.
-// Uses atomic load so it does not block on sendMu — Send can be interrupted mid-flight.
 func (s *ManagedSession) Interrupt() bool {
+	s.sendMu.Lock()
 	proc := s.process
+	s.sendMu.Unlock()
+
 	if proc == nil || !proc.IsRunning() {
 		return false
 	}
@@ -240,10 +242,13 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 
 // SubscribeEvents subscribes to event log notifications for this session.
 // If the session has no process, returns a closed channel and a no-op unsubscribe.
+//
+// NOTE: This intentionally does NOT acquire sendMu. The process field is set
+// once during spawnSession (under the router lock) before any Send() call,
+// so reading it here is safe. Acquiring sendMu would block until an in-flight
+// Send() completes, preventing real-time event streaming to dashboard subscribers.
 func (s *ManagedSession) SubscribeEvents() (<-chan struct{}, func()) {
-	s.sendMu.Lock()
 	proc := s.process
-	s.sendMu.Unlock()
 	if proc == nil {
 		ch := make(chan struct{})
 		close(ch)

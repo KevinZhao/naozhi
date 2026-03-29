@@ -75,12 +75,3 @@ func mimeFromPath(path string) string {
 		return "image/png"
 	}
 }
-
-// stripMIMEParams extracts the bare media type from a Content-Type value
-// that may contain parameters (e.g., "image/png; name=file.png" → "image/png").
-func stripMIMEParams(ct string) string {
-	if i := strings.IndexByte(ct, ';'); i >= 0 {
-		ct = ct[:i]
-	}
-	return strings.TrimSpace(ct)
-}

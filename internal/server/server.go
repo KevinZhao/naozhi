@@ -194,7 +194,10 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		}
 
 		// Handle /new [agent] reset command
-		if trimmed == "/new" || strings.HasPrefix(trimmed, "/new ") {
+		// /clear is a Claude Code built-in that doesn't work in stream-json mode,
+		// so we alias it to /new for equivalent behavior.
+		if trimmed == "/new" || strings.HasPrefix(trimmed, "/new ") ||
+			trimmed == "/clear" {
 			agentToReset := "general"
 			if parts := strings.SplitN(trimmed, " ", 2); len(parts) > 1 {
 				if id, ok := s.agentCommands[parts[1]]; ok {
@@ -342,11 +345,10 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 			replyText = strings.ReplaceAll(replyText, path, "[图片]")
 		}
 
-		// Wait for status message to be sent (non-blocking if no interim support)
-		select {
-		case <-msgIDReady:
-		default:
-		}
+		// Wait for status message to be sent before reading thinkingMsgID.
+		// This must be a blocking receive to establish a happens-before
+		// relationship with the goroutine that writes thinkingMsgID.
+		<-msgIDReady
 
 		// Edit status to final result, or send new message
 		if replyText != "" {

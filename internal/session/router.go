@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/discovery"
 )
 
 const (
@@ -26,6 +27,7 @@ type Router struct {
 	model     string
 	extraArgs []string
 	workspace string // default cwd for CLI processes
+	claudeDir string // ~/.claude dir for loading session history
 
 	// workspaceOverrides stores per-chat workspace overrides.
 	// Key format: "platform:chatType:chatID"
@@ -52,6 +54,7 @@ type RouterConfig struct {
 	StorePath       string
 	NoOutputTimeout time.Duration
 	TotalTimeout    time.Duration
+	ClaudeDir       string
 }
 
 // NewRouter creates a session router.
@@ -70,6 +73,7 @@ func NewRouter(cfg RouterConfig) *Router {
 		model:              cfg.Model,
 		extraArgs:          cfg.ExtraArgs,
 		workspace:          cfg.Workspace,
+		claudeDir:          cfg.ClaudeDir,
 		workspaceOverrides: make(map[string]string),
 		storePath:          cfg.StorePath,
 		noOutputTimeout:    cfg.NoOutputTimeout,
@@ -251,7 +255,6 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// Release lock during Spawn (may block on ACP Init handshake)
 	r.mu.Unlock()
 	if r.wrapper == nil {
-		r.mu.Lock()
 		return nil, fmt.Errorf("spawn process: no CLI wrapper configured")
 	}
 	proc, err := r.wrapper.Spawn(ctx, spawnOpts)
@@ -296,6 +299,16 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 
 	slog.Info("session spawned", "key", key, "active", r.activeCount)
 	r.mu.Unlock()
+
+	// Load conversation history from Claude's local JSONL when resuming.
+	// This restores dashboard event display after service restarts.
+	if resumeID != "" && r.claudeDir != "" && len(oldHistory) == 0 {
+		if entries, err := discovery.LoadHistory(r.claudeDir, resumeID, workspace); err == nil && len(entries) > 0 {
+			s.InjectHistory(entries)
+			slog.Info("loaded session history on resume", "key", key, "entries", len(entries))
+		}
+	}
+
 	r.notifyChange()
 	return s, nil
 }
@@ -418,9 +431,31 @@ func (r *Router) Cleanup() {
 
 	r.mu.Lock()
 	r.countActive()
+
+	// Prune orphaned sessions: nil process, no session ID, past TTL
+	var pruned int
+	now2 := time.Now()
+	for key, s := range r.sessions {
+		if s.process == nil && s.getSessionID() == "" && now2.Sub(s.GetLastActive()) > r.ttl {
+			delete(r.sessions, key)
+			pruned++
+			continue
+		}
+		// Prune dead sessions with no resumable session ID
+		if s.process != nil && !s.process.Alive() && s.getSessionID() == "" && now2.Sub(s.GetLastActive()) > r.ttl {
+			delete(r.sessions, key)
+			pruned++
+			continue
+		}
+		// Prune old dead sessions even with session ID (prevents unbounded growth)
+		if s.process != nil && !s.process.Alive() && now2.Sub(s.GetLastActive()) > 7*r.ttl {
+			delete(r.sessions, key)
+			pruned++
+		}
+	}
 	r.mu.Unlock()
 
-	if len(expired) > 0 {
+	if len(expired) > 0 || pruned > 0 {
 		r.notifyChange()
 	}
 }
@@ -568,6 +603,5 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 	if err != nil {
 		return nil, err
 	}
-	s.workspace = workspace
 	return s, nil
 }

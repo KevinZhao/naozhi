@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -80,6 +81,10 @@ func main() {
 	}
 
 	// Session Router
+	claudeDir := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		claudeDir = filepath.Join(home, ".claude")
+	}
 	router := session.NewRouter(session.RouterConfig{
 		Wrapper:         wrapper,
 		MaxProcs:        cfg.Session.MaxProcs,
@@ -90,6 +95,7 @@ func main() {
 		StorePath:       storePath,
 		NoOutputTimeout: noOutputTimeout,
 		TotalTimeout:    totalTimeout,
+		ClaudeDir:       claudeDir,
 	})
 
 	// Context with cancellation for graceful shutdown

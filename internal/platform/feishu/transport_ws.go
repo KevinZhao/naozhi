@@ -29,7 +29,9 @@ func (f *Feishu) startWebSocket() error {
 			return nil
 		}
 		if imageKey != "" {
+			f.wg.Add(1)
 			go func() {
+				defer f.wg.Done()
 				data, mime, err := f.DownloadImage(ctx, messageID, imageKey)
 				if err != nil {
 					slog.Error("feishu ws download image failed", "err", err, "key", imageKey)
@@ -39,7 +41,11 @@ func (f *Feishu) startWebSocket() error {
 				handler(ctx, msg)
 			}()
 		} else {
-			go handler(ctx, msg)
+			f.wg.Add(1)
+			go func() {
+				defer f.wg.Done()
+				handler(ctx, msg)
+			}()
 		}
 		return nil
 	})

@@ -45,6 +45,7 @@ type Feishu struct {
 	handler platform.MessageHandler
 	cancel  context.CancelFunc
 	done    chan struct{}
+	wg      sync.WaitGroup // tracks in-flight message handler goroutines
 	startMu sync.Mutex
 	started bool
 }
@@ -99,6 +100,7 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 func (f *Feishu) Stop() error {
 	if f.cancel != nil {
 		f.cancel()
+		f.wg.Wait() // wait for in-flight message handlers to finish
 		<-f.done
 	}
 	return nil
@@ -131,6 +133,64 @@ func (f *Feishu) Reply(ctx context.Context, msg platform.OutgoingMessage) (strin
 }
 
 func (f *Feishu) sendText(ctx context.Context, chatID, text string) (string, error) {
+	if hasMarkdown(text) {
+		return f.sendCard(ctx, chatID, text)
+	}
+	return f.sendPlainText(ctx, chatID, text)
+}
+
+// hasMarkdown detects whether text contains markdown formatting worth rendering.
+func hasMarkdown(text string) bool {
+	if strings.Contains(text, "```") {
+		return true
+	}
+	for _, line := range strings.SplitN(text, "\n", 50) {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "# ") || strings.HasPrefix(trimmed, "## ") ||
+			strings.HasPrefix(trimmed, "### ") || strings.HasPrefix(trimmed, "- ") ||
+			strings.HasPrefix(trimmed, "* ") || strings.HasPrefix(trimmed, "1. ") ||
+			strings.HasPrefix(trimmed, "> ") || strings.HasPrefix(trimmed, "| ") {
+			return true
+		}
+	}
+	if strings.Contains(text, "**") || strings.Contains(text, "__") {
+		return true
+	}
+	return false
+}
+
+// sendCard sends a Feishu interactive card with markdown content.
+func (f *Feishu) sendCard(ctx context.Context, chatID, text string) (string, error) {
+	token, err := f.getAccessToken(ctx)
+	if err != nil {
+		return "", fmt.Errorf("get access token: %w", err)
+	}
+
+	card := map[string]interface{}{
+		"elements": []interface{}{
+			map[string]interface{}{
+				"tag":     "markdown",
+				"content": text,
+			},
+		},
+	}
+	cardJSON, err := json.Marshal(card)
+	if err != nil {
+		return "", fmt.Errorf("marshal card: %w", err)
+	}
+	reqBody, err := json.Marshal(map[string]interface{}{
+		"receive_id": chatID,
+		"msg_type":   "interactive",
+		"content":    string(cardJSON),
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal request body: %w", err)
+	}
+
+	return f.postMessage(ctx, token, reqBody)
+}
+
+func (f *Feishu) sendPlainText(ctx context.Context, chatID, text string) (string, error) {
 	token, err := f.getAccessToken(ctx)
 	if err != nil {
 		return "", fmt.Errorf("get access token: %w", err)
@@ -149,6 +209,11 @@ func (f *Feishu) sendText(ctx context.Context, chatID, text string) (string, err
 		return "", fmt.Errorf("marshal request body: %w", err)
 	}
 
+	return f.postMessage(ctx, token, reqBody)
+}
+
+// postMessage sends a prepared message payload to the Feishu API.
+func (f *Feishu) postMessage(ctx context.Context, token string, reqBody []byte) (string, error) {
 	req, err := http.NewRequestWithContext(ctx, "POST",
 		f.baseURL+"/open-apis/im/v1/messages?receive_id_type=chat_id",
 		bytes.NewReader(reqBody))
@@ -340,7 +405,13 @@ func (f *Feishu) uploadImage(ctx context.Context, data []byte, mimeType string) 
 }
 
 // EditMessage updates an existing Feishu message.
+// Returns an error for markdown content (card messages can't replace text messages),
+// letting the caller fall back to sending a new card message.
 func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) error {
+	if hasMarkdown(text) {
+		return fmt.Errorf("markdown content requires card message, cannot edit text message")
+	}
+
 	token, err := f.getAccessToken(ctx)
 	if err != nil {
 		return fmt.Errorf("get access token: %w", err)
@@ -417,7 +488,7 @@ func (f *Feishu) getAccessToken(ctx context.Context) (string, error) {
 			return nil, fmt.Errorf("marshal token request: %w", err)
 		}
 
-		refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		refreshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
 		req, err := http.NewRequestWithContext(refreshCtx, "POST",

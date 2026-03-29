@@ -548,12 +548,13 @@ func TestHub_RemoteSend_UnknownNode(t *testing.T) {
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
 func newTestWSClient() *wsClient {
-	return &wsClient{
+	c := &wsClient{
 		send:          make(chan []byte, 256),
 		done:          make(chan struct{}),
-		authenticated: true,
 		subscriptions: make(map[string]func()),
 	}
+	c.authenticated.Store(true)
+	return c
 }
 
 func readClientMsg(t *testing.T, c *wsClient, timeout time.Duration) wsServerMsg {

@@ -176,8 +176,10 @@ func (p *Process) readLoop() {
 		slog.Info("readLoop: stdout EOF, process exiting")
 	}
 
-	// Capture exit code for debugging
-	if p.cmd != nil && p.cmd.ProcessState == nil {
+	// Reap the child process to collect exit status.
+	// waitOnce must be called before reading ProcessState to establish
+	// a happens-before relationship (ProcessState is written by Wait).
+	if p.cmd != nil {
 		p.waitOnce.Do(func() { _ = p.cmd.Wait() })
 	}
 	if p.cmd != nil && p.cmd.ProcessState != nil {
@@ -242,6 +244,9 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 	for {
 		select {
 		case <-ctx.Done():
+			// Kill the process to drain eventCh and prevent stale events
+			// from corrupting the next Send() call.
+			p.Kill()
 			return nil, ctx.Err()
 		case ev, ok := <-p.eventCh:
 			if !ok {

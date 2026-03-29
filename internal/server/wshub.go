@@ -57,9 +57,11 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		conn:          conn,
 		send:          make(chan []byte, 256),
 		hub:           h,
-		authenticated: h.dashToken == "",
 		subscriptions: make(map[string]func()),
 		done:          make(chan struct{}),
+	}
+	if h.dashToken == "" {
+		c.authenticated.Store(true)
 	}
 	h.register(c)
 	go c.writePump()
@@ -95,7 +97,7 @@ func (h *Hub) unregister(c *wsClient) {
 
 func (h *Hub) handleAuth(c *wsClient, msg wsClientMsg) {
 	if h.dashToken == "" || msg.Token == h.dashToken {
-		c.authenticated = true
+		c.authenticated.Store(true)
 		c.sendJSON(wsServerMsg{Type: "auth_ok"})
 	} else {
 		c.sendJSON(wsServerMsg{Type: "auth_fail", Error: "invalid token"})
@@ -191,6 +193,16 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 	}
 	if msg.Text == "" {
 		c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "text is required"})
+		return
+	}
+
+	// Handle /clear from dashboard — CLI built-in doesn't work in stream-json
+	trimmed := strings.TrimSpace(msg.Text)
+	if trimmed == "/clear" || trimmed == "/new" {
+		h.router.Reset(key)
+		c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "accepted", Key: key})
+		h.broadcastState(key, "dead", "user_reset")
+		h.BroadcastSessionsUpdate()
 		return
 	}
 
@@ -297,7 +309,7 @@ func (h *Hub) BroadcastSessionsUpdate() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for c := range h.clients {
-		if c.authenticated {
+		if c.authenticated.Load() {
 			c.sendJSON(msg)
 		}
 	}

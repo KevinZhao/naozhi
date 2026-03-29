@@ -3,6 +3,7 @@ package server
 import (
 	"encoding/json"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -20,7 +21,7 @@ type wsClient struct {
 	conn          *websocket.Conn
 	send          chan []byte
 	hub           *Hub
-	authenticated bool
+	authenticated atomic.Bool
 	subscriptions map[string]func() // key -> unsubscribe function
 	done          chan struct{}
 	doneOnce      sync.Once
@@ -55,7 +56,7 @@ func (c *wsClient) readPump() {
 		return nil
 	})
 
-	if !c.authenticated {
+	if !c.authenticated.Load() {
 		c.conn.SetReadDeadline(time.Now().Add(wsAuthTimeout))
 	}
 
@@ -73,28 +74,28 @@ func (c *wsClient) readPump() {
 		switch msg.Type {
 		case "auth":
 			c.hub.handleAuth(c, msg)
-			if c.authenticated {
+			if c.authenticated.Load() {
 				c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
 			}
 		case "subscribe":
-			if !c.authenticated {
+			if !c.authenticated.Load() {
 				c.sendJSON(wsServerMsg{Type: "error", Error: "not authenticated"})
 				continue
 			}
 			c.hub.handleSubscribe(c, msg)
 		case "unsubscribe":
-			if !c.authenticated {
+			if !c.authenticated.Load() {
 				continue
 			}
 			c.hub.handleUnsubscribe(c, msg)
 		case "send":
-			if !c.authenticated {
+			if !c.authenticated.Load() {
 				c.sendJSON(wsServerMsg{Type: "error", Error: "not authenticated"})
 				continue
 			}
 			c.hub.handleSend(c, msg)
 		case "interrupt":
-			if !c.authenticated {
+			if !c.authenticated.Load() {
 				c.sendJSON(wsServerMsg{Type: "error", Error: "not authenticated"})
 				continue
 			}

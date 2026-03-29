@@ -67,13 +67,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .event.result .event-content{background:rgba(126,231,135,.05);padding:4px 8px;border-radius:4px;border-left:2px solid #3fb950}
 .cost-badge{display:inline-block;background:#21262d;color:#8b949e;padding:0 5px;border-radius:4px;font-size:10px;margin-left:6px;font-weight:600}
 
-.tool-stats{padding:6px 20px;border-bottom:1px solid #21262d;display:flex;gap:8px;flex-wrap:wrap;font-size:12px;color:#8b949e;align-items:center}
-.tool-stats:empty{display:none}
-.tool-stats .ts-label{color:#484f58;margin-right:2px;font-size:11px}
-.tool-stat-item{display:inline-flex;align-items:center;gap:3px;padding:1px 8px;background:#161b22;border-radius:10px;border:1px solid transparent;transition:all .3s}
-.tool-stat-item.flash{border-color:#58a6ff;background:#1f2937}
-.ts-name{color:#d2a8ff;font-size:11px}
-.ts-count{color:#8b949e;font-family:monospace;font-size:11px}
+.event.tool-summary{background:rgba(210,168,255,.04)}
+.event.tool-summary .event-content{color:#8b949e;font-size:12px}
+.event.tool-summary .ts-name{color:#d2a8ff}
+.event.tool-summary .ts-count{color:#8b949e;font-family:monospace}
+.event.tool-summary.pulse .event-content{animation:pulse 2s ease-in-out infinite}
 
 .empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:#484f58;font-size:14px}
 .no-sessions{padding:40px 16px;text-align:center;color:#484f58;font-size:13px}
@@ -189,7 +187,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
       <h1>naozhi dashboard</h1>
       <div class="stats" id="stats">connecting...</div>
       <div class="ws-badge" id="ws-status"><span class="ws-dot gray"></span>WS Off</div>
-      <button class="new-session-btn" onclick="showNewSessionModal()">+ new session</button>
+      <button class="new-session-btn" onclick="createNewSession()">+ new session</button>
     </div>
     <div class="discovered-section" id="discovered-section">
       <div class="discovered-header">
@@ -317,7 +315,7 @@ function selectSession(key, node) {
   selectedKey = key;
   selectedNode = node;
   lastEventTime = 0;
-  resetToolStats();
+  turnToolAccum = {};
   stopPreviewPolling();
   document.querySelectorAll('.session-card').forEach(el => {
     el.classList.toggle('active', el.dataset.key === key && (el.dataset.node || 'local') === node);
@@ -386,7 +384,6 @@ function renderMainShell() {
       '</div>' +
       (ws ? '<div class="workspace-path" onclick="copyText(\'' + esc(ws).replace(/'/g,"\\'") + '\')" title="click to copy">' + esc(ws) + '</div>' : '') +
     '</div>' +
-    '<div class="tool-stats" id="tool-stats"></div>' +
     '<div class="events" id="events-scroll"></div>' +
     '<div class="input-area" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
@@ -431,10 +428,9 @@ async function fetchEvents(full) {
 function renderEvents(events) {
   const el = document.getElementById('events-scroll');
   if (!el) return;
-  resetToolStats();
-  countToolEvents(events);
-  renderToolStats();
-  el.innerHTML = events.map(eventHtml).filter(Boolean).join('') || '<div class="empty-state">no events yet</div>';
+  turnToolAccum = {};
+  const display = processEventsForDisplay(events);
+  el.innerHTML = display.map(eventHtml).filter(Boolean).join('') || '<div class="empty-state">no events yet</div>';
   el.scrollTop = el.scrollHeight;
 }
 
@@ -444,13 +440,18 @@ function appendEvents(events) {
   const empty = el.querySelector('.empty-state');
   if (empty) empty.remove();
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
-  if (countToolEvents(events)) renderToolStats();
-  events.forEach(e => { const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h); });
+  events.forEach(e => {
+    if (e.type === 'tool_use') { if (e.tool) turnToolAccum[e.tool] = (turnToolAccum[e.tool] || 0) + 1; updatePendingSummary(); return; }
+    if (e.type === 'result') return;
+    if (Object.keys(turnToolAccum).length > 0) finalizePendingSummary();
+    const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h);
+  });
   if (wasBottom) el.scrollTop = el.scrollHeight;
 }
 
 function eventHtml(e) {
   if (e.type === 'tool_use' || e.type === 'result') return '';
+  if (e.type === 'tool_summary') return toolSummaryHtml(e.tools);
   const icons = {init:'~',system:'\u2699',thinking:'\u{1f4ad}',text:'\u{1f4ac}',user:'\u{1f464}'};
   const t = new Date(e.time).toLocaleTimeString('zh-CN',{hour12:false});
   const icon = icons[e.type] || '\u00b7';
@@ -602,6 +603,8 @@ function removeFile(idx) {
 function renderFilePreviews() {
   const el = document.getElementById('file-preview');
   if (!el) return;
+  // Revoke old blob URLs to prevent memory leaks
+  el.querySelectorAll('img[src^="blob:"]').forEach(img => URL.revokeObjectURL(img.src));
   el.innerHTML = pendingFiles.map((f, i) => {
     const url = URL.createObjectURL(f);
     return '<div class="file-thumb"><img src="' + url + '"><button class="remove" onclick="removeFile(' + i + ')">\u00d7</button></div>';
@@ -637,54 +640,17 @@ function saveToken() {
   document.querySelector('.modal-overlay').remove();
 }
 
-function showNewSessionModal() {
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  overlay.innerHTML =
-    '<div class="modal">' +
-      '<h3>New Session</h3>' +
-      '<label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px">Session Name</label>' +
-      '<input id="new-session-name" type="text" placeholder="e.g. my-project" style="margin-bottom:12px">' +
-      '<label style="display:block;font-size:12px;color:#8b949e;margin-bottom:4px">Agent</label>' +
-      '<select id="new-session-agent" style="width:100%;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px">' +
-        '<option value="general">general</option>' +
-      '</select>' +
-      '<div class="modal-btns">' +
-        '<button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
-        '<button class="primary" onclick="createNewSession()">create</button>' +
-      '</div>' +
-    '</div>';
-  document.body.appendChild(overlay);
-
-  // Populate agents from existing sessions
-  const agentSelect = document.getElementById('new-session-agent');
-  const seen = new Set(['general']);
-  Object.values(sessionsData).forEach(s => {
-    if (s.agent && !seen.has(s.agent)) {
-      seen.add(s.agent);
-      const opt = document.createElement('option');
-      opt.value = s.agent;
-      opt.textContent = s.agent;
-      agentSelect.appendChild(opt);
-    }
-  });
-
-  setTimeout(() => document.getElementById('new-session-name').focus(), 100);
-}
-
 function createNewSession() {
-  const nameInput = document.getElementById('new-session-name');
-  const agentSelect = document.getElementById('new-session-agent');
-  const name = (nameInput ? nameInput.value.trim() : '') || 'session-' + Date.now();
-  const agent = agentSelect ? agentSelect.value : 'general';
+  const now = new Date();
+  const name = 'session-' + now.toISOString().slice(0,10) + '-' + now.toTimeString().slice(0,5).replace(':','');
+  const key = 'dashboard:direct:' + name + ':general';
 
-  const key = 'dashboard:direct:' + name + ':' + agent;
-  document.querySelector('.modal-overlay').remove();
-
-  // Set key and render UI without subscribing (session doesn't exist yet)
+  stopPreviewPolling();
   selectedKey = key;
   selectedNode = 'local';
   lastEventTime = 0;
+  resetToolStats();
+  document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
   renderMainShell();
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
 }
@@ -800,29 +766,56 @@ function renderTable(lines) {
   return h + '</tbody></table>';
 }
 
-let toolStats = {};
-function resetToolStats() { toolStats = {}; }
-function countToolEvents(events) {
-  let changed = false;
-  events.forEach(e => { if (e.type === 'tool_use' && e.tool) { toolStats[e.tool] = (toolStats[e.tool] || 0) + 1; changed = true; } });
-  return changed;
+let turnToolAccum = {};
+
+function processEventsForDisplay(events) {
+  const out = [];
+  let accum = {};
+  for (const e of events) {
+    if (e.type === 'tool_use') { if (e.tool) accum[e.tool] = (accum[e.tool] || 0) + 1; continue; }
+    if (e.type === 'result') continue;
+    if (Object.keys(accum).length > 0) { out.push({ type: 'tool_summary', tools: accum }); accum = {}; }
+    out.push(e);
+  }
+  if (Object.keys(accum).length > 0) out.push({ type: 'tool_summary', tools: accum });
+  return out;
 }
-function renderToolStats() {
-  const el = document.getElementById('tool-stats');
-  if (!el) return;
-  const tools = Object.entries(toolStats).sort((a,b) => b[1] - a[1]);
-  if (tools.length === 0) { el.innerHTML = ''; return; }
-  const total = tools.reduce((s, t) => s + t[1], 0);
-  el.innerHTML = '<span class="ts-label">\u{1f527} ' + total + ' calls</span>' +
-    tools.map(([name, count]) =>
-      '<span class="tool-stat-item" data-tool="' + esc(name) + '"><span class="ts-name">' + esc(name) + '</span><span class="ts-count">\u00d7' + count + '</span></span>'
-    ).join('');
+
+function toolSummaryHtml(tools) {
+  const entries = Object.entries(tools).sort((a,b) => b[1] - a[1]);
+  const total = entries.reduce((s, t) => s + t[1], 0);
+  const items = entries.map(([name, count]) =>
+    '<span class="ts-name">' + esc(name) + '</span> <span class="ts-count">\u00d7' + count + '</span>'
+  ).join('\u2002');
+  return '<div class="event tool-summary"><span class="event-time"></span><span class="event-icon">\u{1f527}</span>' +
+    '<div class="event-content">' + total + ' calls\u2002' + items + '</div></div>';
 }
-function flashToolStat(name) {
-  const el = document.querySelector('.tool-stat-item[data-tool="' + CSS.escape(name) + '"]');
-  if (!el) return;
-  el.classList.add('flash');
-  setTimeout(() => el.classList.remove('flash'), 600);
+
+function updatePendingSummary() {
+  const scroll = document.getElementById('events-scroll');
+  if (!scroll) return;
+  let el = document.getElementById('pending-tool-summary');
+  if (!el) {
+    const empty = scroll.querySelector('.empty-state');
+    if (empty) empty.remove();
+    scroll.insertAdjacentHTML('beforeend', '<div id="pending-tool-summary" class="event tool-summary pulse"></div>');
+    el = document.getElementById('pending-tool-summary');
+  }
+  const entries = Object.entries(turnToolAccum).sort((a,b) => b[1] - a[1]);
+  const total = entries.reduce((s, t) => s + t[1], 0);
+  const items = entries.map(([name, count]) =>
+    '<span class="ts-name">' + esc(name) + '</span> <span class="ts-count">\u00d7' + count + '</span>'
+  ).join('\u2002');
+  el.innerHTML = '<span class="event-time"></span><span class="event-icon">\u{1f527}</span>' +
+    '<div class="event-content">' + total + ' calls\u2002' + items + '</div>';
+  const wasBottom = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 30;
+  if (wasBottom) scroll.scrollTop = scroll.scrollHeight;
+}
+
+function finalizePendingSummary() {
+  const el = document.getElementById('pending-tool-summary');
+  if (el) { el.removeAttribute('id'); el.classList.remove('pulse'); }
+  turnToolAccum = {};
 }
 
 function sid(key, node) { return key + '\t' + (node || 'local'); }
@@ -1020,18 +1013,18 @@ const wsm = {
     const isInitial = this._initialSubscribe;
     this._initialSubscribe = false;
 
-    countToolEvents(events);
-    renderToolStats();
+    const display = processEventsForDisplay(events);
 
     if (isInitial) {
-      el.innerHTML = events.map(eventHtml).filter(Boolean).join('') || '<div class="empty-state">no events yet</div>';
+      turnToolAccum = {};
+      el.innerHTML = display.map(eventHtml).filter(Boolean).join('') || '<div class="empty-state">no events yet</div>';
       if (events.length > 0) {
         el.insertAdjacentHTML('beforeend', '<div class="ws-separator"><span>live</span></div>');
       }
       el.scrollTop = el.scrollHeight;
     } else {
       const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
-      events.forEach(e => { const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h); });
+      display.forEach(e => { const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h); });
       if (wasBottom) el.scrollTop = el.scrollHeight;
     }
 
@@ -1046,11 +1039,13 @@ const wsm = {
     const ev = msg.event;
     if (!ev) return;
     if (ev.time > this.lastEventTimeWs) this.lastEventTimeWs = ev.time;
-    if (ev.type === 'tool_use' && ev.tool) {
-      toolStats[ev.tool] = (toolStats[ev.tool] || 0) + 1;
-      renderToolStats();
-      flashToolStat(ev.tool);
+    if (ev.type === 'tool_use') {
+      if (ev.tool) turnToolAccum[ev.tool] = (turnToolAccum[ev.tool] || 0) + 1;
+      updatePendingSummary();
+      return;
     }
+    if (ev.type === 'result') return;
+    if (Object.keys(turnToolAccum).length > 0) finalizePendingSummary();
     const html = eventHtml(ev);
     if (!html) return;
     const el = document.getElementById('events-scroll');
@@ -1228,7 +1223,6 @@ async function previewDiscovered(sessionId, cwd, pid) {
       '<div class="detail"><span>PID ' + pid + '</span><span>' + esc(sessionId.substring(0,8)) + '</span></div>' +
       '<div class="workspace-path" onclick="copyText(\'' + esc(cwd).replace(/'/g,"\\'") + '\')" title="click to copy">' + esc(cwd) + '</div>' +
     '</div>' +
-    '<div class="tool-stats" id="tool-stats"></div>' +
     '<div class="events" id="events-scroll"><div class="empty-state">loading...</div></div>' +
     '<div class="input-area" style="padding:8px 20px;text-align:center">' +
       '<button class="btn-takeover" style="width:100%;padding:10px;font-size:14px" onclick="takeover(' + pid + ',\'' + esc(sessionId) + '\',\'' + esc(cwd).replace(/'/g,"\\'") + '\')">Takeover this session</button>' +
@@ -1240,13 +1234,12 @@ async function previewDiscovered(sessionId, cwd, pid) {
     const events = await r.json();
     const el = document.getElementById('events-scroll');
     if (!el) return;
-    resetToolStats();
-    countToolEvents(events);
-    renderToolStats();
+    turnToolAccum = {};
+    const display = processEventsForDisplay(events);
     if (events.length === 0) {
       el.innerHTML = '<div class="empty-state">no conversation history</div>';
     } else {
-      el.innerHTML = events.map(eventHtml).filter(Boolean).join('');
+      el.innerHTML = display.map(eventHtml).filter(Boolean).join('');
       el.scrollTop = el.scrollHeight;
     }
     previewEventCount = events.length;
@@ -1263,9 +1256,13 @@ async function previewDiscovered(sessionId, cwd, pid) {
         if (!el2) { stopPreviewPolling(); return; }
         const empty = el2.querySelector('.empty-state');
         if (empty) empty.remove();
-        if (countToolEvents(fresh)) renderToolStats();
         const wasBottom = el2.scrollTop + el2.clientHeight >= el2.scrollHeight - 30;
-        fresh.forEach(e => { const h = eventHtml(e); if (h) el2.insertAdjacentHTML('beforeend', h); });
+        fresh.forEach(e => {
+          if (e.type === 'tool_use') { if (e.tool) turnToolAccum[e.tool] = (turnToolAccum[e.tool] || 0) + 1; updatePendingSummary(); return; }
+          if (e.type === 'result') return;
+          if (Object.keys(turnToolAccum).length > 0) finalizePendingSummary();
+          const h = eventHtml(e); if (h) el2.insertAdjacentHTML('beforeend', h);
+        });
         if (wasBottom) el2.scrollTop = el2.scrollHeight;
       } catch (_) {}
     }, 2000);

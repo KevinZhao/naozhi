@@ -291,9 +291,12 @@ func (s *Scheduler) execute(j *Job) {
 	if maxLen <= 0 {
 		maxLen = 4000
 	}
+	// Use a fresh context for replies — the execution ctx may be near deadline.
+	replyCtx, replyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer replyCancel()
 	chunks := splitReply(replyText, maxLen)
 	for _, chunk := range chunks {
-		if _, rerr := p.Reply(ctx, platform.OutgoingMessage{
+		if _, rerr := p.Reply(replyCtx, platform.OutgoingMessage{
 			ChatID: j.ChatID,
 			Text:   chunk,
 		}); rerr != nil {

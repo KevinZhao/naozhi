@@ -367,13 +367,14 @@ func TestCleanupSkipsDeadProcess(t *testing.T) {
 	}
 	proc := newDeadProc()
 	s := injectSession(r, "key1", proc)
-	s.lastActive.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	s.lastActive.Store(time.Now().Add(-5 * time.Minute).UnixNano())
+	s.setSessionID("resumable-sess") // has session ID → kept for resumption
 
-	r.Cleanup() // dead process — Cleanup skips it (already dead)
+	r.Cleanup() // dead process with session ID — kept within 7*TTL
 
 	_, total := r.Stats()
 	if total != 1 {
-		t.Errorf("dead session should remain in map after cleanup, total = %d", total)
+		t.Errorf("dead session with session ID should remain in map after cleanup, total = %d", total)
 	}
 }
 

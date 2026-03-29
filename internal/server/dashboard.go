@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -49,7 +50,8 @@ func (s *Server) checkBearerAuth(w http.ResponseWriter, r *http.Request) bool {
 		return true
 	}
 	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") && strings.TrimPrefix(auth, "Bearer ") == s.dashboardToken {
+	token := strings.TrimPrefix(auth, "Bearer ")
+	if strings.HasPrefix(auth, "Bearer ") && subtle.ConstantTimeCompare([]byte(token), []byte(s.dashboardToken)) == 1 {
 		return true
 	}
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -233,13 +235,8 @@ func (s *Server) handleAPISessionDelete(w http.ResponseWriter, r *http.Request) 
 }
 
 func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
-	// Optional bearer token auth
-	if s.dashboardToken != "" {
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != s.dashboardToken {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+	if !s.checkBearerAuth(w, r) {
+		return
 	}
 
 	var key, text, node string
@@ -304,6 +301,19 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 	}
 	if text == "" && len(images) == 0 {
 		http.Error(w, "text or files required", http.StatusBadRequest)
+		return
+	}
+
+	// Handle /clear and /new — CLI built-in doesn't work in stream-json
+	trimmed := strings.TrimSpace(text)
+	if trimmed == "/clear" || trimmed == "/new" {
+		s.router.Reset(key)
+		if s.hub != nil {
+			s.hub.broadcastState(key, "dead", "user_reset")
+			s.hub.BroadcastSessionsUpdate()
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]string{"key": key, "status": "reset"})
 		return
 	}
 
@@ -437,6 +447,23 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 	if req.PID <= 0 || req.SessionID == "" || !validSessionID.MatchString(req.SessionID) {
 		http.Error(w, "pid and session_id are required", http.StatusBadRequest)
 		return
+	}
+
+	// C2 fix: verify PID is in the discovered list before killing
+	if s.claudeDir != "" {
+		excludePIDs := s.router.ManagedPIDs()
+		discovered, _ := discovery.Scan(s.claudeDir, excludePIDs)
+		pidFound := false
+		for _, d := range discovered {
+			if d.PID == req.PID && d.SessionID == req.SessionID {
+				pidFound = true
+				break
+			}
+		}
+		if !pidFound {
+			http.Error(w, "pid not found in discovered sessions", http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Kill the original process
