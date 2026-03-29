@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -36,6 +37,8 @@ type Router struct {
 	storePath       string
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
+
+	onChange func() // called (outside lock) when session list changes
 }
 
 // RouterConfig holds configuration for the session router.
@@ -88,6 +91,23 @@ func NewRouter(cfg RouterConfig) *Router {
 	return r
 }
 
+// SetOnChange registers a callback invoked when the session list changes.
+func (r *Router) SetOnChange(fn func()) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.onChange = fn
+}
+
+// notifyChange calls the onChange callback if set. Must be called outside r.mu.
+func (r *Router) notifyChange() {
+	r.mu.Lock()
+	fn := r.onChange
+	r.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
+}
+
 // ChatKey builds a chat-level key (without agent suffix) for workspace overrides.
 func ChatKey(platform, chatType, chatID string) string {
 	return platform + ":" + chatType + ":" + chatID
@@ -138,6 +158,7 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 	r.mu.Lock()
 	r.countActive()
 	r.mu.Unlock()
+	r.notifyChange()
 }
 
 // AgentOpts provides per-agent overrides for session creation.
@@ -211,7 +232,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// Determine workspace: check per-chat override first, then default
 	workspace := r.workspace
 	// Extract chat key prefix from session key (strip last :agentID segment)
-	if idx := lastIndexByte(key, ':'); idx >= 0 {
+	if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
 		chatKey := key[:idx]
 		if ws, ok := r.workspaceOverrides[chatKey]; ok {
 			workspace = ws
@@ -247,11 +268,26 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		return existing, nil
 	}
 
+	// Carry over persisted history from old session (e.g. takeover history)
+	var oldHistory []cli.EventEntry
+	if old, ok := r.sessions[key]; ok {
+		old.sendMu.Lock()
+		if len(old.persistedHistory) > 0 {
+			oldHistory = make([]cli.EventEntry, len(old.persistedHistory))
+			copy(oldHistory, old.persistedHistory)
+		}
+		old.sendMu.Unlock()
+	}
+
 	s := &ManagedSession{
-		Key:       key,
-		process:   proc,
-		workspace: workspace,
-		sendMu:    sync.Mutex{},
+		Key:              key,
+		process:          proc,
+		workspace:        workspace,
+		sendMu:           sync.Mutex{},
+		persistedHistory: oldHistory,
+	}
+	if len(oldHistory) > 0 {
+		proc.InjectHistory(oldHistory)
 	}
 	s.setSessionID(resumeID)
 	s.touchLastActive()
@@ -260,6 +296,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 
 	slog.Info("session spawned", "key", key, "active", r.activeCount)
 	r.mu.Unlock()
+	r.notifyChange()
 	return s, nil
 }
 
@@ -324,6 +361,34 @@ func (r *Router) Reset(key string) {
 	r.countActive()
 	r.mu.Unlock()
 	slog.Info("session reset", "key", key)
+	r.notifyChange()
+}
+
+// Remove removes a session from the router without killing its process.
+// Used by the dashboard to hide sessions from the list.
+func (r *Router) Remove(key string) bool {
+	r.mu.Lock()
+	s, ok := r.sessions[key]
+	if !ok {
+		r.mu.Unlock()
+		return false
+	}
+
+	// Kill process if alive
+	proc := s.process
+	delete(r.sessions, key)
+	r.mu.Unlock()
+
+	if proc != nil && proc.Alive() {
+		proc.Close()
+	}
+
+	r.mu.Lock()
+	r.countActive()
+	r.mu.Unlock()
+	slog.Info("session removed", "key", key)
+	r.notifyChange()
+	return true
 }
 
 // Cleanup closes sessions idle beyond TTL.
@@ -354,6 +419,10 @@ func (r *Router) Cleanup() {
 	r.mu.Lock()
 	r.countActive()
 	r.mu.Unlock()
+
+	if len(expired) > 0 {
+		r.notifyChange()
+	}
 }
 
 // StartCleanupLoop runs Cleanup periodically.
@@ -420,15 +489,6 @@ func (r *Router) Shutdown() {
 	wg.Wait()
 }
 
-func lastIndexByte(s string, c byte) int {
-	for i := len(s) - 1; i >= 0; i-- {
-		if s[i] == c {
-			return i
-		}
-	}
-	return -1
-}
-
 // Stats returns current session statistics.
 func (r *Router) Stats() (active, total int) {
 	r.mu.Lock()
@@ -462,6 +522,18 @@ func (r *Router) GetSession(key string) *ManagedSession {
 	return r.sessions[key]
 }
 
+// InterruptSession sends SIGINT to the CLI process for the given session key.
+// Returns true if the session was found and interrupted.
+func (r *Router) InterruptSession(key string) bool {
+	r.mu.Lock()
+	s := r.sessions[key]
+	r.mu.Unlock()
+	if s == nil {
+		return false
+	}
+	return s.Interrupt()
+}
+
 // ManagedPIDs returns the OS PIDs of all alive managed processes.
 func (r *Router) ManagedPIDs() map[int]bool {
 	r.mu.Lock()
@@ -477,7 +549,8 @@ func (r *Router) ManagedPIDs() map[int]bool {
 	return pids
 }
 
-// Takeover creates a managed session by resuming an external Claude CLI session.
+// Takeover creates a managed session to replace an external Claude CLI session.
+// It starts a fresh process (no --resume) and uses InjectHistory for UI continuity.
 // The caller must ensure the original process has been terminated before calling.
 func (r *Router) Takeover(ctx context.Context, key string, sessionID string, workspace string, opts AgentOpts) (*ManagedSession, error) {
 	r.mu.Lock()
@@ -487,11 +560,11 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 		return s, nil
 	}
 	// Set workspace override for the chat key prefix
-	if idx := lastIndexByte(key, ':'); idx >= 0 {
+	if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
 		chatKey := key[:idx]
 		r.workspaceOverrides[chatKey] = workspace
 	}
-	s, err := r.spawnSession(ctx, key, sessionID, opts)
+	s, err := r.spawnSession(ctx, key, "", opts)
 	if err != nil {
 		return nil, err
 	}

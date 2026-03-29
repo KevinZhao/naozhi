@@ -8,7 +8,9 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -19,19 +21,39 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
+var validSessionID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
 //go:embed static/dashboard.html
 var dashboardHTML embed.FS
 
 func (s *Server) registerDashboard() {
 	s.hub = NewHub(s.router, s.agents, s.agentCommands, s.dashboardToken, s.sessionGuard, s.nodes)
 
+	// Push session list changes to WS clients
+	s.router.SetOnChange(func() { s.hub.BroadcastSessionsUpdate() })
+
 	s.mux.HandleFunc("GET /api/sessions", s.handleAPISessions)
 	s.mux.HandleFunc("GET /api/sessions/events", s.handleAPISessionEvents)
 	s.mux.HandleFunc("POST /api/sessions/send", s.handleAPISend)
+	s.mux.HandleFunc("DELETE /api/sessions", s.handleAPISessionDelete)
 	s.mux.HandleFunc("GET /api/discovered", s.handleAPIDiscovered)
+	s.mux.HandleFunc("GET /api/discovered/preview", s.handleAPIDiscoveredPreview)
 	s.mux.HandleFunc("POST /api/discovered/takeover", s.handleAPITakeover)
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
+}
+
+// checkBearerAuth validates the dashboard API token. Returns true if authorized.
+func (s *Server) checkBearerAuth(w http.ResponseWriter, r *http.Request) bool {
+	if s.dashboardToken == "" {
+		return true
+	}
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") && strings.TrimPrefix(auth, "Bearer ") == s.dashboardToken {
+		return true
+	}
+	http.Error(w, "unauthorized", http.StatusUnauthorized)
+	return false
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
@@ -188,6 +210,28 @@ func (s *Server) handleAPISessionEvents(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+func (s *Server) handleAPISessionDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.checkBearerAuth(w, r) {
+		return
+	}
+
+	var req struct {
+		Key string `json:"key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
+		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+
+	if !s.router.Remove(req.Key) {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
 func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 	// Optional bearer token auth
 	if s.dashboardToken != "" {
@@ -327,6 +371,9 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAPIDiscovered(w http.ResponseWriter, r *http.Request) {
+	if !s.checkBearerAuth(w, r) {
+		return
+	}
 	if s.claudeDir == "" {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode([]any{})
@@ -349,14 +396,33 @@ func (s *Server) handleAPIDiscovered(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleAPIDiscoveredPreview(w http.ResponseWriter, r *http.Request) {
+	if !s.checkBearerAuth(w, r) {
+		return
+	}
+	sessionID := r.URL.Query().Get("session_id")
+	if sessionID == "" || s.claudeDir == "" || !validSessionID.MatchString(sessionID) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{})
+		return
+	}
+
+	entries, err := discovery.LoadHistory(s.claudeDir, sessionID)
+	if err != nil {
+		slog.Warn("preview load history", "session_id", sessionID, "err", err)
+		entries = nil
+	}
+	if entries == nil {
+		entries = []cli.EventEntry{}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(entries)
+}
+
 func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
-	// Optional bearer token auth
-	if s.dashboardToken != "" {
-		auth := r.Header.Get("Authorization")
-		if !strings.HasPrefix(auth, "Bearer ") || strings.TrimPrefix(auth, "Bearer ") != s.dashboardToken {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
+	if !s.checkBearerAuth(w, r) {
+		return
 	}
 
 	var req struct {
@@ -368,7 +434,7 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if req.PID <= 0 || req.SessionID == "" {
+	if req.PID <= 0 || req.SessionID == "" || !validSessionID.MatchString(req.SessionID) {
 		http.Error(w, "pid and session_id are required", http.StatusBadRequest)
 		return
 	}
@@ -390,17 +456,34 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 	// Force kill if still alive
 	_ = syscall.Kill(req.PID, syscall.SIGKILL)
 
-	// Generate session key
+	// Remove stale session file so it won't reappear in discovery scans
+	if s.claudeDir != "" {
+		staleFile := filepath.Join(s.claudeDir, "sessions", fmt.Sprintf("%d.json", req.PID))
+		_ = os.Remove(staleFile)
+	}
+
+	// Remove session lock dir from /tmp so --resume can reacquire the session.
+	// Claude CLI creates /tmp/claude-{UID}/{encoded-cwd}/{sessionID}/ and doesn't
+	// clean up after SIGKILL.
+	if req.CWD != "" && req.SessionID != "" {
+		encodedCWD := strings.ReplaceAll(req.CWD, "/", "-")
+		lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, req.SessionID)
+		_ = os.RemoveAll(lockDir)
+	}
+
+	// Generate session key using full CWD to avoid collisions
+	// between directories with the same base name.
 	cwd := req.CWD
 	if cwd == "" {
 		cwd = "unknown"
 	}
-	base := filepath.Base(cwd)
-	key := "local:takeover:" + base + ":general"
+	cwdKey := strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
+	key := "local:takeover:" + cwdKey + ":general"
 
-	// Takeover via router
+	// Takeover via router — use Background context so the spawned process
+	// outlives the HTTP request.
 	opts := s.agents["general"]
-	sess, err := s.router.Takeover(r.Context(), key, req.SessionID, cwd, session.AgentOpts{
+	sess, err := s.router.Takeover(context.Background(), key, req.SessionID, cwd, session.AgentOpts{
 		Model:     opts.Model,
 		ExtraArgs: opts.ExtraArgs,
 	})
@@ -413,7 +496,7 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 
 	// Load conversation history from Claude's local JSONL
 	if s.claudeDir != "" {
-		if entries, err := discovery.LoadHistory(s.claudeDir, req.SessionID); err == nil && len(entries) > 0 {
+		if entries, err := discovery.LoadHistory(s.claudeDir, req.SessionID, cwd); err == nil && len(entries) > 0 {
 			sess.InjectHistory(entries)
 			slog.Info("loaded session history", "key", key, "entries", len(entries))
 		}

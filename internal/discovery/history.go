@@ -19,23 +19,35 @@ type historyLine struct {
 }
 
 type historyMessage struct {
-	Role    string            `json:"role"`
-	Content json.RawMessage   `json:"content"` // string or []block
+	Role    string          `json:"role"`
+	Content json.RawMessage `json:"content"` // string or []block
 }
 
 type historyBlock struct {
-	Type  string `json:"type"`
-	Text  string `json:"text"`
-	Name  string `json:"name"`  // tool_use
+	Type  string          `json:"type"`
+	Text  string          `json:"text"`
+	Name  string          `json:"name"`  // tool_use
 	Input json.RawMessage `json:"input"` // tool_use
 }
 
 // LoadHistory finds and parses the JSONL for sessionID under claudeDir/projects/,
 // returning EventEntries for user and assistant messages.
-func LoadHistory(claudeDir, sessionID string) ([]cli.EventEntry, error) {
-	path, err := findSessionJSONL(claudeDir, sessionID)
-	if err != nil || path == "" {
-		return nil, err
+// If cwd is provided, the JSONL is located directly via the CWD-based path (O(1)).
+// Otherwise falls back to scanning all project directories.
+func LoadHistory(claudeDir, sessionID string, cwd ...string) ([]cli.EventEntry, error) {
+	var path string
+	if len(cwd) > 0 && cwd[0] != "" {
+		candidate := filepath.Join(claudeDir, "projects", projDirName(cwd[0]), sessionID+".jsonl")
+		if _, err := os.Stat(candidate); err == nil {
+			path = candidate
+		}
+	}
+	if path == "" {
+		var err error
+		path, err = findSessionJSONL(claudeDir, sessionID)
+		if err != nil || path == "" {
+			return nil, err
+		}
 	}
 	return parseJSONL(path)
 }

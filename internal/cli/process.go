@@ -3,11 +3,13 @@ package cli
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"os/exec"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -25,6 +27,12 @@ const (
 	DefaultNoOutputTimeout = 2 * time.Minute
 	DefaultTotalTimeout    = 5 * time.Minute
 	maxScannerBufBytes     = 1024 * 1024
+)
+
+// Sentinel errors for watchdog timeouts.
+var (
+	ErrNoOutputTimeout = errors.New("no output timeout")
+	ErrTotalTimeout    = errors.New("total timeout")
 )
 
 // processCloseTimeout is a var (not const) so tests can override it.
@@ -127,6 +135,9 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string, 
 
 // startReadLoop begins the stdout reader goroutine. Called after protocol Init.
 func (p *Process) startReadLoop() {
+	p.mu.Lock()
+	p.State = StateReady
+	p.mu.Unlock()
 	go p.readLoop()
 }
 
@@ -158,6 +169,19 @@ func (p *Process) readLoop() {
 		case <-p.killCh:
 			return
 		}
+	}
+	if err := p.scanner.Err(); err != nil {
+		slog.Warn("readLoop: scanner error", "err", err)
+	} else {
+		slog.Info("readLoop: stdout EOF, process exiting")
+	}
+
+	// Capture exit code for debugging
+	if p.cmd != nil && p.cmd.ProcessState == nil {
+		p.waitOnce.Do(func() { _ = p.cmd.Wait() })
+	}
+	if p.cmd != nil && p.cmd.ProcessState != nil {
+		slog.Info("readLoop: process exit", "exit_code", p.cmd.ProcessState.ExitCode(), "pid", p.cmd.Process.Pid)
 	}
 
 	p.mu.Lock()
@@ -268,11 +292,11 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 		case <-noOutputTimer.C:
 			slog.Error("watchdog: no output timeout", "timeout", noOutputDur)
 			p.Kill()
-			return nil, fmt.Errorf("no output timeout (%s)", noOutputDur)
+			return nil, fmt.Errorf("%w (%s)", ErrNoOutputTimeout, noOutputDur)
 		case <-totalTimer.C:
 			slog.Error("watchdog: total timeout", "timeout", totalDur)
 			p.Kill()
-			return nil, fmt.Errorf("total timeout (%s)", totalDur)
+			return nil, fmt.Errorf("%w (%s)", ErrTotalTimeout, totalDur)
 		}
 	}
 }
@@ -292,6 +316,16 @@ func (p *Process) IsRunning() bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	return p.State == StateRunning
+}
+
+// Interrupt sends SIGINT to the CLI process to cancel the current turn.
+// The process stays alive and can accept new messages after the interrupt.
+func (p *Process) Interrupt() {
+	if p.cmd.Process != nil {
+		if err := p.cmd.Process.Signal(syscall.SIGINT); err != nil {
+			slog.Warn("interrupt signal failed", "pid", p.cmd.Process.Pid, "err", err)
+		}
+	}
 }
 
 // Kill forcefully terminates the process.

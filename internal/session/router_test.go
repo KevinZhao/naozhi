@@ -76,6 +76,9 @@ func (f *fakeProcess) TotalCost() float64                         { return 0 }
 func (f *fakeProcess) EventEntries() []cli.EventEntry             { return nil }
 func (f *fakeProcess) EventEntriesSince(_ int64) []cli.EventEntry { return nil }
 func (f *fakeProcess) ProtocolName() string                       { return "test" }
+func (f *fakeProcess) Interrupt()                                 {}
+func (f *fakeProcess) PID() int                                   { return 0 }
+func (f *fakeProcess) InjectHistory(_ []cli.EventEntry)           {}
 func (f *fakeProcess) SubscribeEvents() (<-chan struct{}, func()) {
 	ch := make(chan struct{})
 	return ch, func() {}

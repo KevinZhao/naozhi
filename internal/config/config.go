@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"log/slog"
 	"net/url"
 	"os"
 	"regexp"
@@ -207,11 +208,23 @@ func (c *Config) ParseTTL() time.Duration {
 
 // ParseWatchdog returns the watchdog timeout durations.
 func (c *Config) ParseWatchdog() (noOutputTimeout, totalTimeout time.Duration) {
-	noOutputTimeout, _ = time.ParseDuration(c.Session.Watchdog.NoOutputTimeout)
+	if c.Session.Watchdog.NoOutputTimeout != "" {
+		var err error
+		noOutputTimeout, err = time.ParseDuration(c.Session.Watchdog.NoOutputTimeout)
+		if err != nil {
+			slog.Warn("invalid watchdog.no_output_timeout, using default", "value", c.Session.Watchdog.NoOutputTimeout, "err", err)
+		}
+	}
 	if noOutputTimeout <= 0 {
 		noOutputTimeout = 2 * time.Minute
 	}
-	totalTimeout, _ = time.ParseDuration(c.Session.Watchdog.TotalTimeout)
+	if c.Session.Watchdog.TotalTimeout != "" {
+		var err error
+		totalTimeout, err = time.ParseDuration(c.Session.Watchdog.TotalTimeout)
+		if err != nil {
+			slog.Warn("invalid watchdog.total_timeout, using default", "value", c.Session.Watchdog.TotalTimeout, "err", err)
+		}
+	}
 	if totalTimeout <= 0 {
 		totalTimeout = 5 * time.Minute
 	}

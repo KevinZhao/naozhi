@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +17,7 @@ type processIface interface {
 	Alive() bool
 	IsRunning() bool
 	Close()
+	Interrupt()
 	Send(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
 	// Dashboard introspection
 	GetState() cli.ProcessState
@@ -42,9 +44,14 @@ type ManagedSession struct {
 
 	process     processIface
 	sendMu      sync.Mutex // serializes messages to the same session
-	workspace   string     // effective cwd at spawn time
-	deathReason string     // why process died, empty if alive
-	totalCost   float64    // cached cost when process is nil
+	sendCancel  atomic.Pointer[context.CancelFunc]
+	workspace   string  // effective cwd at spawn time
+	deathReason string  // why process died, empty if alive
+	totalCost   float64 // cached cost when process is nil
+
+	// persistedHistory stores event entries that survive process restarts.
+	// Populated by InjectHistory and carried over when the process is replaced.
+	persistedHistory []cli.EventEntry
 }
 
 // GetLastActive returns the last active time.
@@ -63,13 +70,19 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
+	ctx, cancel := context.WithCancel(ctx)
+	s.sendCancel.Store(&cancel)
+	defer func() {
+		s.sendCancel.Store(nil)
+		cancel()
+	}()
+
 	s.touchLastActive()
 	result, err := s.process.Send(ctx, text, images, onEvent)
 	if err != nil {
-		msg := err.Error()
-		if strings.Contains(msg, "no output timeout") {
+		if errors.Is(err, cli.ErrNoOutputTimeout) {
 			s.deathReason = "no_output_timeout"
-		} else if strings.Contains(msg, "total timeout") {
+		} else if errors.Is(err, cli.ErrTotalTimeout) {
 			s.deathReason = "total_timeout"
 		}
 		return nil, err
@@ -80,6 +93,22 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 		s.setSessionID(result.SessionID)
 	}
 	return result, nil
+}
+
+// Interrupt sends SIGINT to the CLI process and cancels the current Send context.
+// This is the equivalent of pressing Escape in Claude Code.
+// Uses atomic load so it does not block on sendMu — Send can be interrupted mid-flight.
+func (s *ManagedSession) Interrupt() bool {
+	proc := s.process
+	if proc == nil || !proc.IsRunning() {
+		return false
+	}
+
+	proc.Interrupt()
+	if cp := s.sendCancel.Load(); cp != nil {
+		(*cp)()
+	}
+	return true
 }
 
 // getSessionID returns the session ID lock-free via atomic.Value.
@@ -106,19 +135,21 @@ func SessionKey(platform, chatType, id, agentID string) string {
 
 // SessionSnapshot is a point-in-time view of a session for the dashboard API.
 type SessionSnapshot struct {
-	Key         string  `json:"key"`
-	Platform    string  `json:"platform"`
-	Agent       string  `json:"agent"`
-	SessionID   string  `json:"session_id"`
-	State       string  `json:"state"`
-	Protocol    string  `json:"protocol"`
-	LastActive  int64   `json:"last_active"` // unix ms
-	TotalCost   float64 `json:"total_cost"`
-	Workspace   string  `json:"workspace,omitempty"`
-	DeathReason string  `json:"death_reason,omitempty"`
-	ChatType    string  `json:"chat_type,omitempty"`
-	ChatID      string  `json:"chat_id,omitempty"`
-	Node        string  `json:"node,omitempty"`
+	Key          string  `json:"key"`
+	Platform     string  `json:"platform"`
+	Agent        string  `json:"agent"`
+	SessionID    string  `json:"session_id"`
+	State        string  `json:"state"`
+	Protocol     string  `json:"protocol"`
+	LastActive   int64   `json:"last_active"` // unix ms
+	TotalCost    float64 `json:"total_cost"`
+	Workspace    string  `json:"workspace,omitempty"`
+	DeathReason  string  `json:"death_reason,omitempty"`
+	ChatType     string  `json:"chat_type,omitempty"`
+	ChatID       string  `json:"chat_id,omitempty"`
+	Node         string  `json:"node,omitempty"`
+	LastPrompt   string  `json:"last_prompt,omitempty"`   // most recent user message
+	LastActivity string  `json:"last_activity,omitempty"` // most recent tool/thinking status
 }
 
 // Snapshot returns a point-in-time view of this session.
@@ -158,23 +189,53 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		snap.Protocol = s.process.ProtocolName()
 		snap.TotalCost = s.process.TotalCost()
 	}
+
+	// Extract last prompt and activity from event log (scan backwards)
+	entries := s.EventEntries()
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		if snap.LastActivity == "" && (e.Type == "tool_use" || e.Type == "thinking") {
+			snap.LastActivity = e.Summary
+		}
+		if snap.LastPrompt == "" && e.Type == "user" {
+			snap.LastPrompt = e.Summary
+		}
+		if snap.LastPrompt != "" && snap.LastActivity != "" {
+			break
+		}
+	}
+
 	return snap
 }
 
 // EventEntries returns the event log entries for this session.
+// Returns persisted history when the process is nil or dead.
 func (s *ManagedSession) EventEntries() []cli.EventEntry {
-	if s.process == nil {
-		return nil
+	if s.process != nil {
+		return s.process.EventEntries()
 	}
-	return s.process.EventEntries()
+	s.sendMu.Lock()
+	out := make([]cli.EventEntry, len(s.persistedHistory))
+	copy(out, s.persistedHistory)
+	s.sendMu.Unlock()
+	return out
 }
 
 // EventEntriesSince returns the event log entries after the given unix ms timestamp.
 func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
-	if s.process == nil {
-		return nil
+	if s.process != nil {
+		return s.process.EventEntriesSince(afterMS)
 	}
-	return s.process.EventEntriesSince(afterMS)
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	for i, e := range s.persistedHistory {
+		if e.Time > afterMS {
+			out := make([]cli.EventEntry, len(s.persistedHistory)-i)
+			copy(out, s.persistedHistory[i:])
+			return out
+		}
+	}
+	return nil
 }
 
 // SubscribeEvents subscribes to event log notifications for this session.
@@ -192,8 +253,10 @@ func (s *ManagedSession) SubscribeEvents() (<-chan struct{}, func()) {
 }
 
 // InjectHistory pre-populates the event log with historical entries.
+// Entries are saved to persistedHistory so they survive process restarts.
 func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	s.sendMu.Lock()
+	s.persistedHistory = append(s.persistedHistory, entries...)
 	proc := s.process
 	s.sendMu.Unlock()
 	if proc != nil {

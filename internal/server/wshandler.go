@@ -6,7 +6,7 @@ import (
 
 // wsClientMsg is a message sent from the WebSocket client.
 type wsClientMsg struct {
-	Type  string `json:"type"`            // auth, subscribe, unsubscribe, send, ping
+	Type  string `json:"type"`            // auth, subscribe, unsubscribe, send, interrupt, ping
 	Token string `json:"token,omitempty"` // auth token
 	Key   string `json:"key,omitempty"`   // session key
 	Text  string `json:"text,omitempty"`  // message text (send)

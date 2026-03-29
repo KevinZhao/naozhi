@@ -206,6 +206,7 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 
 		// Notify subscribers: running
 		h.broadcastState(key, "running", "")
+		h.BroadcastSessionsUpdate()
 
 		ctx := context.Background()
 		parts := strings.SplitN(key, ":", 4)
@@ -233,7 +234,24 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 		} else {
 			h.broadcastState(key, "ready", "")
 		}
+		h.BroadcastSessionsUpdate()
 	}()
+}
+
+func (h *Hub) handleInterrupt(c *wsClient, msg wsClientMsg) {
+	key := msg.Key
+	if key == "" {
+		c.sendJSON(wsServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Error: "key is required"})
+		return
+	}
+
+	ok := h.router.InterruptSession(key)
+	if ok {
+		slog.Info("session interrupted via dashboard", "key", key)
+		c.sendJSON(wsServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "ok", Key: key})
+	} else {
+		c.sendJSON(wsServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "not_running", Key: key})
+	}
 }
 
 func (h *Hub) eventPushLoop(c *wsClient, key string, notify <-chan struct{}, sess *session.ManagedSession, lastTime int64) {
@@ -268,6 +286,18 @@ func (h *Hub) broadcastState(key, state, reason string) {
 	defer h.mu.Unlock()
 	for c := range h.clients {
 		if _, ok := c.subscriptions[key]; ok {
+			c.sendJSON(msg)
+		}
+	}
+}
+
+// BroadcastSessionsUpdate notifies all connected WS clients that the session list changed.
+func (h *Hub) BroadcastSessionsUpdate() {
+	msg := wsServerMsg{Type: "sessions_update"}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		if c.authenticated {
 			c.sendJSON(msg)
 		}
 	}

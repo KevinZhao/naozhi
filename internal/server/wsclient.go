@@ -93,6 +93,12 @@ func (c *wsClient) readPump() {
 				continue
 			}
 			c.hub.handleSend(c, msg)
+		case "interrupt":
+			if !c.authenticated {
+				c.sendJSON(wsServerMsg{Type: "error", Error: "not authenticated"})
+				continue
+			}
+			c.hub.handleInterrupt(c, msg)
 		case "ping":
 			c.sendJSON(wsServerMsg{Type: "pong"})
 		}
