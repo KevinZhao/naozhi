@@ -12,22 +12,20 @@ import (
 	"github.com/naozhi/naozhi/internal/discovery"
 )
 
-const (
-	shutdownTimeout      = 30 * time.Second
-	shutdownPollInterval = 500 * time.Millisecond
-)
+const shutdownTimeout = 30 * time.Second
 
 // Router manages session key -> ManagedSession mapping.
 type Router struct {
-	mu        sync.Mutex
-	sessions  map[string]*ManagedSession
-	wrapper   *cli.Wrapper
-	maxProcs  int
-	ttl       time.Duration
-	model     string
-	extraArgs []string
-	workspace string // default cwd for CLI processes
-	claudeDir string // ~/.claude dir for loading session history
+	mu           sync.Mutex
+	shutdownCond *sync.Cond // signaled when process state changes; conditioned on mu
+	sessions     map[string]*ManagedSession
+	wrapper      *cli.Wrapper
+	maxProcs     int
+	ttl          time.Duration
+	model        string
+	extraArgs    []string
+	workspace    string // default cwd for CLI processes
+	claudeDir    string // ~/.claude dir for loading session history
 
 	// workspaceOverrides stores per-chat workspace overrides.
 	// Key format: "platform:chatType:chatID"
@@ -82,6 +80,7 @@ func NewRouter(cfg RouterConfig) *Router {
 		noOutputTimeout:    cfg.NoOutputTimeout,
 		totalTimeout:       cfg.TotalTimeout,
 	}
+	r.shutdownCond = sync.NewCond(&r.mu)
 
 	// Restore sessions from store
 	if restored := loadStore(r.storePath); restored != nil {
@@ -180,6 +179,9 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 
 	for _, proc := range toClose {
 		proc.Close()
+	}
+	if r.shutdownCond != nil {
+		r.shutdownCond.Broadcast()
 	}
 
 	r.mu.Lock()
@@ -299,15 +301,26 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		return existing, nil
 	}
 
-	// Carry over persisted history from old session (e.g. takeover history)
+	// Get old session reference, then release r.mu to copy history under sendMu only
+	old := r.sessions[key]
+	r.mu.Unlock()
+
 	var oldHistory []cli.EventEntry
-	if old, ok := r.sessions[key]; ok {
+	if old != nil {
 		old.sendMu.Lock()
 		if len(old.persistedHistory) > 0 {
 			oldHistory = make([]cli.EventEntry, len(old.persistedHistory))
 			copy(oldHistory, old.persistedHistory)
 		}
 		old.sendMu.Unlock()
+	}
+
+	r.mu.Lock()
+	// Re-check TOCTOU after re-acquiring lock (another goroutine may have spawned)
+	if existing, ok := r.sessions[key]; ok && existing.process != nil && existing.process.Alive() {
+		r.mu.Unlock()
+		proc.Close()
+		return existing, nil
 	}
 
 	s := &ManagedSession{
@@ -375,6 +388,9 @@ func (r *Router) evictOldest() bool {
 	proc := oldest.process
 	r.mu.Unlock()
 	proc.Close()
+	if r.shutdownCond != nil {
+		r.shutdownCond.Broadcast()
+	}
 	r.mu.Lock()
 	r.countActive()
 	return true
@@ -396,6 +412,9 @@ func (r *Router) Reset(key string) {
 
 	if proc != nil && proc.Alive() {
 		proc.Close()
+	}
+	if r.shutdownCond != nil {
+		r.shutdownCond.Broadcast()
 	}
 
 	r.mu.Lock()
@@ -422,6 +441,9 @@ func (r *Router) Remove(key string) bool {
 
 	if proc != nil && proc.Alive() {
 		proc.Close()
+	}
+	if r.shutdownCond != nil {
+		r.shutdownCond.Broadcast()
 	}
 
 	r.mu.Lock()
@@ -455,6 +477,9 @@ func (r *Router) Cleanup() {
 
 	for _, e := range expired {
 		e.proc.Close()
+	}
+	if r.shutdownCond != nil {
+		r.shutdownCond.Broadcast()
 	}
 
 	r.mu.Lock()
@@ -506,9 +531,17 @@ func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 
 // Shutdown gracefully closes all sessions, waiting for running ones to complete.
 func (r *Router) Shutdown() {
+	// Deadline goroutine: broadcast to unblock Wait() when timeout expires
+	go func() {
+		time.Sleep(shutdownTimeout)
+		if r.shutdownCond != nil {
+			r.shutdownCond.Broadcast()
+		}
+	}()
+
 	r.mu.Lock()
 
-	// Wait for running sessions to complete (up to 30s)
+	// Wait for running sessions to complete (up to shutdownTimeout)
 	deadline := time.Now().Add(shutdownTimeout)
 	for {
 		running := false
@@ -521,15 +554,22 @@ func (r *Router) Shutdown() {
 		if !running || time.Now().After(deadline) {
 			break
 		}
-		r.mu.Unlock()
-		time.Sleep(shutdownPollInterval)
-		r.mu.Lock()
+		if r.shutdownCond != nil {
+			r.shutdownCond.Wait() // atomically releases and re-acquires r.mu
+		} else {
+			// Fallback for tests without shutdownCond
+			r.mu.Unlock()
+			time.Sleep(100 * time.Millisecond)
+			r.mu.Lock()
+		}
 	}
 
-	// Save session state before closing
-	if err := saveStore(r.storePath, r.sessions); err != nil {
-		slog.Error("save session store on shutdown", "err", err)
+	// Snapshot sessions for saving outside lock
+	sessionsCopy := make(map[string]*ManagedSession, len(r.sessions))
+	for k, v := range r.sessions {
+		sessionsCopy[k] = v
 	}
+	storePath := r.storePath
 
 	// Collect processes to close, then release lock to close concurrently
 	var procs []processIface
@@ -540,6 +580,11 @@ func (r *Router) Shutdown() {
 		}
 	}
 	r.mu.Unlock()
+
+	// Save session state outside lock (avoids JSON marshal + file I/O under mutex)
+	if err := saveStore(storePath, sessionsCopy); err != nil {
+		slog.Error("save session store on shutdown", "err", err)
+	}
 
 	var wg sync.WaitGroup
 	for _, proc := range procs {
@@ -563,10 +608,12 @@ func (r *Router) MaxProcs() int {
 }
 
 // Stats returns current session statistics.
+// active = non-dead sessions (alive process or suspended with a session ID);
+// total = all sessions including dead ones.
 func (r *Router) Stats() (active, total int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.countActive()
+	r.countActive() // keeps activeCount up-to-date for capacity management
 	return r.activeCount, len(r.sessions)
 }
 

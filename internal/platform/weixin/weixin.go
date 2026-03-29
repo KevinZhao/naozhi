@@ -199,7 +199,7 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 			w.handlerWg.Add(1)
 			go func() {
 				defer w.handlerWg.Done()
-				w.handler(context.Background(), incoming)
+				w.handler(ctx, incoming)
 			}()
 		}
 	}

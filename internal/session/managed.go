@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -42,6 +43,19 @@ type ManagedSession struct {
 	// between Send() (under sendMu) and Cleanup/evictOldest (under r.mu).
 	lastActive atomic.Int64
 
+	// lastPrompt caches the most recent user message summary (atomic for lock-free Snapshot reads).
+	lastPrompt atomic.Value // stores string
+
+	// lastActivity caches the most recent tool_use/thinking summary.
+	lastActivity atomic.Value // stores string
+
+	// Cached key parts, parsed once via keyOnce. Key is immutable.
+	keyOnce     sync.Once
+	keyPlatform string
+	keyChatType string
+	keyChatID   string
+	keyAgentID  string
+
 	process     processIface
 	sendMu      sync.Mutex // serializes messages to the same session
 	sendCancel  atomic.Pointer[context.CancelFunc]
@@ -78,7 +92,34 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	}()
 
 	s.touchLastActive()
-	result, err := s.process.Send(ctx, text, images, onEvent)
+
+	// Cache the user prompt for Snapshot (matches how process.go logs user events).
+	prompt := cli.TruncateRunes(text, 120)
+	if len(images) > 0 {
+		prompt += fmt.Sprintf(" [+%d image(s)]", len(images))
+	}
+	s.lastPrompt.Store(prompt)
+
+	// Wrap onEvent to track last tool_use/thinking for Snapshot.
+	wrappedOnEvent := func(ev cli.Event) {
+		if ev.Type == "assistant" && ev.Message != nil {
+			for _, block := range ev.Message.Content {
+				if block.Type == "thinking" {
+					s.lastActivity.Store(cli.TruncateRunes(block.Text, 120))
+					break
+				}
+				if block.Type == "tool_use" {
+					s.lastActivity.Store(block.Name)
+					break
+				}
+			}
+		}
+		if onEvent != nil {
+			onEvent(ev)
+		}
+	}
+
+	result, err := s.process.Send(ctx, text, images, wrappedOnEvent)
 	if err != nil {
 		if errors.Is(err, cli.ErrNoOutputTimeout) {
 			s.deathReason.Store("no_output_timeout")
@@ -127,6 +168,25 @@ func (s *ManagedSession) setSessionID(id string) {
 	s.sessionID.Store(id)
 }
 
+// parseKeyParts lazily parses the immutable session key into cached components.
+func (s *ManagedSession) parseKeyParts() {
+	s.keyOnce.Do(func() {
+		parts := strings.SplitN(s.Key, ":", 4)
+		if len(parts) >= 1 {
+			s.keyPlatform = parts[0]
+		}
+		if len(parts) >= 2 {
+			s.keyChatType = parts[1]
+		}
+		if len(parts) >= 3 {
+			s.keyChatID = parts[2]
+		}
+		if len(parts) >= 4 {
+			s.keyAgentID = parts[3]
+		}
+	})
+}
+
 // SessionKey builds a session key from components.
 func SessionKey(platform, chatType, id, agentID string) string {
 	if agentID == "" {
@@ -156,29 +216,19 @@ type SessionSnapshot struct {
 
 // Snapshot returns a point-in-time view of this session.
 func (s *ManagedSession) Snapshot() SessionSnapshot {
+	s.parseKeyParts()
 	snap := SessionSnapshot{
 		Key:        s.Key,
+		Platform:   s.keyPlatform,
+		ChatType:   s.keyChatType,
+		ChatID:     s.keyChatID,
+		Agent:      s.keyAgentID,
 		SessionID:  s.getSessionID(),
 		LastActive: s.GetLastActive().UnixMilli(),
 		Workspace:  s.workspace,
 	}
 	if dr, ok := s.deathReason.Load().(string); ok {
 		snap.DeathReason = dr
-	}
-
-	// Parse key: platform:chatType:userId:agentId
-	parts := strings.SplitN(s.Key, ":", 4)
-	if len(parts) >= 1 {
-		snap.Platform = parts[0]
-	}
-	if len(parts) >= 2 {
-		snap.ChatType = parts[1]
-	}
-	if len(parts) >= 3 {
-		snap.ChatID = parts[2]
-	}
-	if len(parts) >= 4 {
-		snap.Agent = parts[3]
 	}
 
 	if s.process == nil {
@@ -194,19 +244,12 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		snap.TotalCost = s.process.TotalCost()
 	}
 
-	// Extract last prompt and activity from event log (scan backwards)
-	entries := s.EventEntries()
-	for i := len(entries) - 1; i >= 0; i-- {
-		e := entries[i]
-		if snap.LastActivity == "" && (e.Type == "tool_use" || e.Type == "thinking") {
-			snap.LastActivity = e.Summary
-		}
-		if snap.LastPrompt == "" && e.Type == "user" {
-			snap.LastPrompt = e.Summary
-		}
-		if snap.LastPrompt != "" && snap.LastActivity != "" {
-			break
-		}
+	// Read cached values instead of copying the full event log.
+	if v := s.lastPrompt.Load(); v != nil {
+		snap.LastPrompt = v.(string)
+	}
+	if v := s.lastActivity.Load(); v != nil {
+		snap.LastActivity = v.(string)
 	}
 
 	return snap
@@ -267,5 +310,21 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	s.persistedHistory = append(s.persistedHistory, entries...)
 	if s.process != nil {
 		s.process.InjectHistory(entries)
+	}
+	// Update cached snapshot values from injected history (only if not yet set by Send).
+	var prompt, activity string
+	for _, e := range entries {
+		switch e.Type {
+		case "user":
+			prompt = e.Summary
+		case "tool_use", "thinking":
+			activity = e.Summary
+		}
+	}
+	if prompt != "" && s.lastPrompt.Load() == nil {
+		s.lastPrompt.Store(prompt)
+	}
+	if activity != "" && s.lastActivity.Load() == nil {
+		s.lastActivity.Store(activity)
 	}
 }

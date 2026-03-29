@@ -78,8 +78,20 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 	snapshots := s.router.ListSessions()
 	active, total := s.router.Stats()
 
+	var running, ready int
+	for _, snap := range snapshots {
+		switch snap.State {
+		case "running", "spawning":
+			running++
+		case "ready":
+			ready++
+		}
+	}
+
 	stats := map[string]any{
 		"active":            active,
+		"running":           running,
+		"ready":             ready,
 		"total":             total,
 		"uptime":            time.Since(s.startedAt).Round(time.Second).String(),
 		"backend":           s.backendTag,

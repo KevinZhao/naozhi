@@ -448,6 +448,34 @@ func formatToolDetail(block ContentBlock) string {
 	return FormatToolInput(block.Name, block.Input)
 }
 
+// getStr extracts a string value for the given key from a JSON object map.
+func getStr(m map[string]json.RawMessage, key string) string {
+	raw, ok := m[key]
+	if !ok || len(raw) == 0 {
+		return ""
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return s
+	}
+	return ""
+}
+
+// shortPath abbreviates a file path by replacing the home directory with ~.
+func shortPath(p string) string {
+	const homePrefix = "/home/"
+	if i := strings.Index(p, homePrefix); i >= 0 {
+		rest := p[i+len(homePrefix):]
+		if j := strings.Index(rest, "/"); j >= 0 {
+			return "~" + rest[j:]
+		}
+	}
+	if len(p) > 50 {
+		return "..." + p[len(p)-47:]
+	}
+	return p
+}
+
 // FormatToolInput extracts a human-readable summary from a tool's JSON input.
 // Shared by live event logging and JSONL history loading.
 func FormatToolInput(toolName string, input json.RawMessage) string {
@@ -456,57 +484,31 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 		return toolName + ": " + TruncateRunes(string(input), 300)
 	}
 
-	getStr := func(key string) string {
-		raw, ok := inp[key]
-		if !ok || len(raw) == 0 {
-			return ""
-		}
-		var s string
-		if json.Unmarshal(raw, &s) == nil {
-			return s
-		}
-		return ""
-	}
-
-	shortPath := func(p string) string {
-		const homePrefix = "/home/"
-		if i := strings.Index(p, homePrefix); i >= 0 {
-			rest := p[i+len(homePrefix):]
-			if j := strings.Index(rest, "/"); j >= 0 {
-				return "~" + rest[j:]
-			}
-		}
-		if len(p) > 50 {
-			return "..." + p[len(p)-47:]
-		}
-		return p
-	}
-
 	switch toolName {
 	case "Read":
-		return toolName + " " + shortPath(getStr("file_path"))
+		return toolName + " " + shortPath(getStr(inp, "file_path"))
 	case "Write":
-		return toolName + " " + shortPath(getStr("file_path"))
+		return toolName + " " + shortPath(getStr(inp, "file_path"))
 	case "Edit":
-		return toolName + " " + shortPath(getStr("file_path"))
+		return toolName + " " + shortPath(getStr(inp, "file_path"))
 	case "Glob":
-		return toolName + " " + getStr("pattern")
+		return toolName + " " + getStr(inp, "pattern")
 	case "Grep":
-		s := toolName + " " + getStr("pattern")
-		if path := getStr("path"); path != "" {
+		s := toolName + " " + getStr(inp, "pattern")
+		if path := getStr(inp, "path"); path != "" {
 			s += " in " + shortPath(path)
 		}
 		return s
 	case "Bash":
-		if desc := getStr("description"); desc != "" {
+		if desc := getStr(inp, "description"); desc != "" {
 			return toolName + " " + desc
 		}
-		return toolName + " " + TruncateRunes(getStr("command"), 80)
+		return toolName + " " + TruncateRunes(getStr(inp, "command"), 80)
 	case "Agent":
-		return toolName + " " + TruncateRunes(getStr("description"), 60)
+		return toolName + " " + TruncateRunes(getStr(inp, "description"), 60)
 	default:
 		for _, key := range []string{"description", "file_path", "path", "command", "pattern", "prompt"} {
-			if v := getStr(key); v != "" {
+			if v := getStr(inp, key); v != "" {
 				return toolName + " " + TruncateRunes(v, 80)
 			}
 		}

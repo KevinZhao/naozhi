@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"crypto/subtle"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -27,8 +28,8 @@ var wsUpgrader = websocket.Upgrader{
 		}
 		return u.Host == r.Host
 	},
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
+	ReadBufferSize:  8192,
+	WriteBufferSize: 8192,
 }
 
 // Hub manages WebSocket client connections and event subscriptions.
@@ -307,7 +308,11 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, notify <-chan struct{}, ses
 					return
 				default:
 				}
-				c.sendJSON(wsServerMsg{Type: "event", Key: key, Event: &entries[i]})
+				data, err := json.Marshal(wsServerMsg{Type: "event", Key: key, Event: &entries[i]})
+				if err != nil {
+					continue
+				}
+				c.sendRaw(data)
 				if entries[i].Time > lastTime {
 					lastTime = entries[i].Time
 				}
@@ -320,24 +325,30 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, notify <-chan struct{}, ses
 
 // broadcastState sends a session_state message to all clients subscribed to the given key.
 func (h *Hub) broadcastState(key, state, reason string) {
-	msg := wsServerMsg{Type: "session_state", Key: key, State: state, Reason: reason}
+	data, err := json.Marshal(wsServerMsg{Type: "session_state", Key: key, State: state, Reason: reason})
+	if err != nil {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for c := range h.clients {
 		if _, ok := c.subscriptions[key]; ok {
-			c.sendJSON(msg)
+			c.sendRaw(data)
 		}
 	}
 }
 
 // BroadcastSessionsUpdate notifies all connected WS clients that the session list changed.
 func (h *Hub) BroadcastSessionsUpdate() {
-	msg := wsServerMsg{Type: "sessions_update"}
+	data, err := json.Marshal(wsServerMsg{Type: "sessions_update"})
+	if err != nil {
+		return
+	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	for c := range h.clients {
 		if c.authenticated.Load() {
-			c.sendJSON(msg)
+			c.sendRaw(data)
 		}
 	}
 }
@@ -351,17 +362,22 @@ func (h *Hub) Shutdown() {
 		relay.Close()
 		delete(h.relays, id)
 	}
+	conns := make([]*websocket.Conn, 0, len(h.clients))
 	for c := range h.clients {
 		for _, unsub := range c.subscriptions {
 			unsub()
 		}
 		c.subscriptions = nil
 		if c.conn != nil {
-			c.conn.Close()
+			conns = append(conns, c.conn)
 		}
 		delete(h.clients, c)
 	}
 	h.mu.Unlock()
+
+	for _, conn := range conns {
+		conn.Close()
+	}
 }
 
 // ─── Remote node handlers ────────────────────────────────────────────────────
@@ -411,7 +427,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg wsClientMsg) {
 	c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "accepted", Key: msg.Key, Node: nodeID})
 
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
 		defer cancel()
 		if err := nc.Send(ctx, msg.Key, msg.Text); err != nil {
 			slog.Error("remote ws send failed", "node", nodeID, "key", msg.Key, "err", err)

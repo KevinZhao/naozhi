@@ -144,7 +144,15 @@ func hasMarkdown(text string) bool {
 	if strings.Contains(text, "```") {
 		return true
 	}
-	for _, line := range strings.SplitN(text, "\n", 50) {
+	remaining := text
+	for i := 0; remaining != "" && i < 50; i++ {
+		line := remaining
+		if idx := strings.IndexByte(remaining, '\n'); idx >= 0 {
+			line = remaining[:idx]
+			remaining = remaining[idx+1:]
+		} else {
+			remaining = ""
+		}
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "# ") || strings.HasPrefix(trimmed, "## ") ||
 			strings.HasPrefix(trimmed, "### ") || strings.HasPrefix(trimmed, "- ") ||

@@ -95,8 +95,9 @@ func (s *Scheduler) Stop() {
 	ctx := s.cron.Stop()
 	<-ctx.Done()
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if err := saveJobs(s.storePath, s.jobs); err != nil {
+	snap := s.snapshotJobs()
+	s.mu.Unlock()
+	if err := saveJobs(s.storePath, snap); err != nil {
 		slog.Error("save cron store on shutdown", "err", err)
 	}
 }
@@ -108,9 +109,9 @@ func (s *Scheduler) AddJob(j *Job) error {
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if len(s.jobs) >= s.maxJobs {
+		s.mu.Unlock()
 		return fmt.Errorf("max cron jobs reached (%d)", s.maxJobs)
 	}
 
@@ -123,6 +124,7 @@ func (s *Scheduler) AddJob(j *Job) error {
 		}
 	}
 	if chatCount >= maxJobsPerChat {
+		s.mu.Unlock()
 		return fmt.Errorf("per-chat cron limit reached (%d)", maxJobsPerChat)
 	}
 
@@ -134,10 +136,14 @@ func (s *Scheduler) AddJob(j *Job) error {
 	j.CreatedAt = time.Now()
 
 	if err := s.registerJob(j); err != nil {
+		s.mu.Unlock()
 		return err
 	}
 	s.jobs[j.ID] = j
-	s.save()
+	snap := s.snapshotJobs()
+	s.mu.Unlock()
+
+	s.saveSnapshot(snap)
 	return nil
 }
 
@@ -158,10 +164,10 @@ func (s *Scheduler) ListJobs(plat, chatID string) []*Job {
 // DeleteJob removes a job by ID prefix (scoped to the given chat).
 func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	j, err := s.findByPrefix(idPrefix, plat, chatID)
 	if err != nil {
+		s.mu.Unlock()
 		return nil, err
 	}
 
@@ -172,20 +178,24 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 		s.router.Reset("cron:" + j.ID)
 	}
 	delete(s.jobs, j.ID)
-	s.save()
+	snap := s.snapshotJobs()
+	s.mu.Unlock()
+
+	s.saveSnapshot(snap)
 	return j, nil
 }
 
 // PauseJob pauses a job by ID prefix.
 func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	j, err := s.findByPrefix(idPrefix, plat, chatID)
 	if err != nil {
+		s.mu.Unlock()
 		return nil, err
 	}
 	if j.Paused {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("job %s already paused", j.ID)
 	}
 
@@ -194,28 +204,36 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 		j.entryID = 0
 	}
 	j.Paused = true
-	s.save()
+	snap := s.snapshotJobs()
+	s.mu.Unlock()
+
+	s.saveSnapshot(snap)
 	return j, nil
 }
 
 // ResumeJob resumes a paused job by ID prefix.
 func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	j, err := s.findByPrefix(idPrefix, plat, chatID)
 	if err != nil {
+		s.mu.Unlock()
 		return nil, err
 	}
 	if !j.Paused {
+		s.mu.Unlock()
 		return nil, fmt.Errorf("job %s is not paused", j.ID)
 	}
 
 	if err := s.registerJob(j); err != nil {
+		s.mu.Unlock()
 		return nil, err
 	}
 	j.Paused = false
-	s.save()
+	snap := s.snapshotJobs()
+	s.mu.Unlock()
+
+	s.saveSnapshot(snap)
 	return j, nil
 }
 
@@ -327,8 +345,18 @@ func (s *Scheduler) findByPrefix(idPrefix, plat, chatID string) (*Job, error) {
 	}
 }
 
-func (s *Scheduler) save() {
-	if err := saveJobs(s.storePath, s.jobs); err != nil {
+// snapshotJobs returns a shallow copy of the jobs map, safe to use outside the lock.
+func (s *Scheduler) snapshotJobs() map[string]*Job {
+	snap := make(map[string]*Job, len(s.jobs))
+	for k, v := range s.jobs {
+		snap[k] = v
+	}
+	return snap
+}
+
+// saveSnapshot persists a jobs snapshot to disk. No lock required.
+func (s *Scheduler) saveSnapshot(snapshot map[string]*Job) {
+	if err := saveJobs(s.storePath, snapshot); err != nil {
 		slog.Error("save cron store", "err", err)
 	}
 }

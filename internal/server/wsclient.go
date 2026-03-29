@@ -36,6 +36,11 @@ func (c *wsClient) sendJSON(v interface{}) {
 	if err != nil {
 		return
 	}
+	c.sendRaw(data)
+}
+
+// sendRaw sends pre-marshalled bytes to the client's send channel (non-blocking).
+func (c *wsClient) sendRaw(data []byte) {
 	select {
 	case c.send <- data:
 	case <-c.done:

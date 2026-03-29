@@ -6,7 +6,7 @@
 <title>naozhi dashboard</title>
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;background:#0d1117;color:#c9d1d9;font-size:16px}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;background:#0d1117;color:#c9d1d9;font-size:20px}
 .container{display:flex;height:100vh}
 
 .sidebar{width:320px;min-width:320px;border-right:1px solid #30363d;display:flex;flex-direction:column}
@@ -42,40 +42,40 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 
 .main{flex:1;display:flex;flex-direction:column;overflow:hidden}
 .main-header{padding:12px 20px;border-bottom:1px solid #30363d;flex-shrink:0}
-.main-header h2{font-size:16px;color:#f0f6fc;font-weight:600;word-break:break-all}
-.main-header .detail{font-size:13px;color:#8b949e;margin-top:4px;display:flex;gap:12px;flex-wrap:wrap}
+.main-header h2{font-size:17px;color:#f0f6fc;font-weight:600;word-break:break-all}
+.main-header .detail{font-size:14px;color:#8b949e;margin-top:4px;display:flex;gap:12px;flex-wrap:wrap}
 .main-header .detail span{white-space:nowrap}
-.main-header .workspace-path{font-size:12px;color:#58a6ff;margin-top:4px;cursor:pointer;word-break:break-all}
+.main-header .workspace-path{font-size:13px;color:#58a6ff;margin-top:4px;cursor:pointer;word-break:break-all}
 .main-header .workspace-path:hover{text-decoration:underline}
 
 .events{flex:1;overflow-y:auto;padding:8px 0}
 .event{display:flex;gap:10px;padding:5px 20px;transition:background .1s}
 .event:hover{background:#161b22}
-.event-time{font-size:12px;color:#484f58;min-width:72px;font-family:monospace;padding-top:2px}
-.event-icon{width:18px;text-align:center;font-size:14px;padding-top:1px}
-.event-content{flex:1;font-size:14px;line-height:1.5;word-break:break-word;white-space:pre-wrap}
+.event-time{font-size:13px;color:#484f58;min-width:72px;font-family:monospace;padding-top:2px}
+.event-icon{width:18px;text-align:center;font-size:15px;padding-top:1px}
+.event-content{flex:1;font-size:15px;line-height:1.5;word-break:break-word;white-space:pre-wrap}
 .event.text .event-content,.event.result .event-content{white-space:normal}
 .md-blank{display:block;height:0.35em}
 .event.thinking .event-content{color:#a5d6ff;font-style:italic}
 .event.tool_use .event-content{color:#d2a8ff}
 .event.result .event-content{color:#7ee787}
-.event.system .event-content{color:#8b949e;font-size:13px}
+.event.system .event-content{color:#8b949e;font-size:14px}
 .event.text .event-content{color:#c9d1d9}
 .event.user .event-content{color:#58a6ff;font-weight:500}
 .event.user{background:rgba(88,166,255,.05)}
-.event-detail{color:#8b949e;font-size:12px;margin-top:2px;white-space:pre-wrap;word-break:break-word}
-.event .tool-name{display:inline-block;background:#30363d;color:#d2a8ff;padding:0 6px;border-radius:4px;font-size:11px;font-weight:600;margin-right:6px}
+.event-detail{color:#8b949e;font-size:13px;margin-top:2px;white-space:pre-wrap;word-break:break-word}
+.event .tool-name{display:inline-block;background:#30363d;color:#d2a8ff;padding:0 6px;border-radius:4px;font-size:12px;font-weight:600;margin-right:6px}
 .event.result{margin:2px 0}
 .event.result .event-content{background:rgba(126,231,135,.05);padding:4px 8px;border-radius:4px;border-left:2px solid #3fb950}
 
 .event.tool-summary{background:rgba(210,168,255,.04)}
-.event.tool-summary .event-content{color:#8b949e;font-size:12px}
+.event.tool-summary .event-content{color:#8b949e;font-size:13px}
 .event.tool-summary .ts-name{color:#d2a8ff}
 .event.tool-summary .ts-count{color:#8b949e;font-family:monospace}
 .event.tool-summary.pulse .event-content{animation:pulse 2s ease-in-out infinite}
 
-.empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:#484f58;font-size:14px}
-.no-sessions{padding:40px 16px;text-align:center;color:#484f58;font-size:13px}
+.empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:#484f58;font-size:15px}
+.no-sessions{padding:40px 16px;text-align:center;color:#484f58;font-size:14px}
 
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 .pulse{animation:pulse 2s ease-in-out infinite}
@@ -87,33 +87,33 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .file-preview{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
 .file-thumb{position:relative;width:48px;height:48px;border-radius:6px;overflow:hidden;border:1px solid #30363d}
 .file-thumb img{width:100%;height:100%;object-fit:cover}
-.file-thumb .remove{position:absolute;top:-4px;right:-4px;width:16px;height:16px;background:#da3633;color:#fff;border:none;border-radius:50%;font-size:10px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1}
+.file-thumb .remove{position:absolute;top:-4px;right:-4px;width:16px;height:16px;background:#da3633;color:#fff;border:none;border-radius:50%;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1}
 .input-row{display:flex;gap:8px;align-items:flex-end}
-.input-row textarea{flex:1;background:#161b22;border:1px solid #30363d;border-radius:8px;color:#c9d1d9;padding:8px 12px;font-family:inherit;font-size:14px;resize:none;min-height:38px;max-height:120px;outline:none;line-height:1.4}
+.input-row textarea{flex:1;background:#161b22;border:1px solid #30363d;border-radius:8px;color:#c9d1d9;padding:8px 12px;font-family:inherit;font-size:15px;resize:none;min-height:38px;max-height:120px;outline:none;line-height:1.4}
 .input-row textarea:focus{border-color:#58a6ff}
 .input-row textarea::placeholder{color:#484f58}
-.btn-icon{width:36px;height:36px;border:1px solid #30363d;border-radius:8px;background:#161b22;color:#8b949e;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:16px;transition:all .15s}
+.btn-icon{width:36px;height:36px;border:1px solid #30363d;border-radius:8px;background:#161b22;color:#8b949e;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:17px;transition:all .15s}
 .btn-icon:hover{background:#1f2937;color:#c9d1d9;border-color:#484f58}
 .btn-icon.sending{opacity:.5;pointer-events:none}
 .btn-send{background:#238636;border-color:#238636;color:#fff}
 .btn-send:hover{background:#2ea043}
 
 /* Toast */
-.toast{position:fixed;bottom:20px;right:20px;background:#da3633;color:#fff;padding:8px 16px;border-radius:8px;font-size:13px;z-index:100;opacity:0;transition:opacity .3s}
+.toast{position:fixed;bottom:20px;right:20px;background:#da3633;color:#fff;padding:8px 16px;border-radius:8px;font-size:14px;z-index:100;opacity:0;transition:opacity .3s}
 .toast.show{opacity:1}
 
 /* Auth modal */
 .modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:200}
 .modal{background:#161b22;border:1px solid #30363d;border-radius:12px;padding:24px;width:360px}
-.modal h3{font-size:14px;color:#f0f6fc;margin-bottom:12px}
-.modal input{width:100%;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;outline:none}
+.modal h3{font-size:15px;color:#f0f6fc;margin-bottom:12px}
+.modal input{width:100%;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;outline:none}
 .modal input:focus{border-color:#58a6ff}
 .modal .modal-btns{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
-.modal .modal-btns button{padding:6px 16px;border-radius:6px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:13px}
+.modal .modal-btns button{padding:6px 16px;border-radius:6px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:14px}
 .modal .modal-btns button.primary{background:#238636;border-color:#238636;color:#fff}
 
 /* WS connection status */
-.ws-badge{display:inline-flex;align-items:center;gap:4px;font-size:11px;padding:2px 8px;border-radius:10px;background:#21262d;margin-top:6px}
+.ws-badge{display:inline-flex;align-items:center;gap:4px;font-size:12px;padding:2px 8px;border-radius:10px;background:#21262d;margin-top:6px}
 .ws-dot{width:6px;height:6px;border-radius:50%;display:inline-block;flex-shrink:0}
 .ws-dot.green{background:#3fb950}
 .ws-dot.yellow{background:#d29922;animation:pulse 1.5s ease-in-out infinite}
@@ -123,7 +123,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 /* WS history/live separator */
 .ws-separator{text-align:center;padding:8px 20px;position:relative}
 .ws-separator::before{content:'';position:absolute;left:20px;right:20px;top:50%;border-top:1px dashed #30363d}
-.ws-separator span{position:relative;background:#0d1117;padding:0 8px;font-size:10px;color:#484f58;text-transform:uppercase;letter-spacing:1px}
+.ws-separator span{position:relative;background:#0d1117;padding:0 8px;font-size:11px;color:#484f58;text-transform:uppercase;letter-spacing:1px}
 
 /* Toast variants */
 .toast.warning{background:#9e6a03}
@@ -135,41 +135,50 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .state-indicator.running{background:#3fb950;animation:pulse 2s ease-in-out infinite}
 .state-indicator.dead{background:#da3633}
 
-.node-badge{display:inline-block;padding:1px 5px;border-radius:4px;font-size:9px;font-weight:600;letter-spacing:.3px;color:#fff;vertical-align:middle;margin-right:4px}
-.node-status{font-size:12px;color:#8b949e;margin-top:6px;line-height:1.8}
+.node-badge{display:inline-block;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:.3px;color:#fff;vertical-align:middle;margin-right:4px}
+.node-status{font-size:13px;color:#8b949e;margin-top:6px;line-height:1.8}
 .node-status .node-name{margin-right:2px}
 .node-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin:0 1px 0 6px;vertical-align:middle}
 .node-dot:first-child{margin-left:0}
 .node-dot.ok{background:#3fb950}
 .node-dot.error{background:#da3633}
-.node-info{color:#8b949e;font-size:12px}
-.new-session-btn{display:block;width:calc(100% - 32px);margin:8px 16px;padding:8px;border:1px dashed #30363d;border-radius:8px;background:transparent;color:#8b949e;font-size:13px;cursor:pointer;text-align:center;transition:all .15s}
+.node-info{color:#8b949e;font-size:13px}
+.node-group{border-bottom:1px solid #21262d}
+.node-group summary.node-group-header{display:flex;align-items:center;gap:6px;padding:7px 16px;cursor:pointer;color:#8b949e;font-size:12px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;list-style:none;user-select:none}
+.node-group summary.node-group-header::-webkit-details-marker{display:none}
+.node-group summary.node-group-header:hover{background:#161b22;color:#c9d1d9}
+.ng-arrow{font-size:9px;color:#484f58;transition:transform .15s;display:inline-block}
+.node-group[open] .ng-arrow{transform:rotate(90deg)}
+.ng-name{flex:1}
+.ng-count{color:#484f58;font-weight:400;font-size:11px}
+.ng-running{color:#3fb950;font-weight:400;font-size:11px}
+.new-session-btn{display:block;width:calc(100% - 32px);margin:8px 16px;padding:8px;border:1px dashed #30363d;border-radius:8px;background:transparent;color:#8b949e;font-size:14px;cursor:pointer;text-align:center;transition:all .15s}
 .new-session-btn:hover{border-color:#58a6ff;color:#58a6ff;background:#161b22}
 
 /* Markdown rendering */
-.md-pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 12px;margin:6px 0;overflow-x:auto;font-size:12px;line-height:1.5}
+.md-pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 12px;margin:6px 0;overflow-x:auto;font-size:13px;line-height:1.5}
 .md-pre code{color:#e6edf3;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;white-space:pre}
-.md-code{background:#30363d;color:#e6edf3;padding:1px 5px;border-radius:4px;font-size:12px;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace}
+.md-code{background:#30363d;color:#e6edf3;padding:1px 5px;border-radius:4px;font-size:13px;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace}
 .md-h1,.md-h2,.md-h3,.md-h4{display:block;color:#f0f6fc;margin:8px 0 4px}
-.md-h1{font-size:15px}.md-h2{font-size:14px}.md-h3{font-size:13px}
+.md-h1{font-size:16px}.md-h2{font-size:15px}.md-h3{font-size:14px}
 .md-ul{margin:4px 0 4px 16px;padding:0;list-style:disc}
 .md-ul li{margin:2px 0;line-height:1.5}
 .md-link{color:#58a6ff;text-decoration:none}
 .md-link:hover{text-decoration:underline}
-.md-table{width:100%;border-collapse:collapse;margin:6px 0;font-size:13px}
+.md-table{width:100%;border-collapse:collapse;margin:6px 0;font-size:14px}
 .md-table th,.md-table td{border:1px solid #30363d;padding:5px 10px;text-align:left}
-.md-table th{background:#161b22;color:#f0f6fc;font-weight:600;font-size:12px}
+.md-table th{background:#161b22;color:#f0f6fc;font-weight:600;font-size:13px}
 .md-table td{color:#c9d1d9}
 .md-table tr:hover td{background:rgba(88,166,255,.04)}
 .mermaid-wrap{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px;margin:6px 0;overflow-x:auto;text-align:center}
 .mermaid-wrap svg{max-width:100%;height:auto}
-.ts-subagent{display:inline-block;background:#1f2937;color:#a5d6ff;padding:0 5px;border-radius:4px;font-size:10px;font-weight:600;margin-left:2px}
+.ts-subagent{display:inline-block;background:#1f2937;color:#a5d6ff;padding:0 5px;border-radius:4px;font-size:11px;font-weight:600;margin-left:2px}
 
 /* Discovered sessions */
 .discovered-section{border-bottom:1px solid #30363d;padding:8px 0}
 .discovered-header{display:flex;align-items:center;justify-content:space-between;padding:4px 16px}
-.discovered-header span{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
-.btn-scan{font-size:11px;padding:2px 8px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#8b949e;cursor:pointer}
+.discovered-header span{font-size:12px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
+.btn-scan{font-size:12px;padding:2px 8px;border:1px solid #30363d;border-radius:6px;background:#161b22;color:#8b949e;cursor:pointer}
 .btn-scan:hover{border-color:#58a6ff;color:#58a6ff}
 .discovered-card{padding:8px 16px;border-bottom:1px solid #21262d;display:flex;align-items:center;gap:8px}
 .discovered-card .dc-info{flex:1;min-width:0}
@@ -321,24 +330,9 @@ function renderSidebar(data) {
   document.getElementById('stats').textContent =
     st.active + '/' + (st.max_procs || '?') + ' active \u00b7 ' + st.total + ' total \u00b7 ' + st.uptime + ' \u00b7 ' + st.backend;
 
-  // Node status line
-  let nodeEl = document.getElementById('node-status');
-  if (isMultiNode()) {
-    if (!nodeEl) {
-      nodeEl = document.createElement('div');
-      nodeEl.id = 'node-status';
-      nodeEl.className = 'node-status';
-      document.getElementById('ws-status').insertAdjacentElement('afterend', nodeEl);
-    }
-    nodeEl.innerHTML = 'Nodes: ' + Object.keys(nodesData).map(nid => {
-      const n = nodesData[nid];
-      const dotCls = (n.status === 'ok') ? 'ok' : 'error';
-      return '<span class="node-name">' + esc(n.display_name || nid) + '</span>' +
-        '<span class="node-dot ' + dotCls + '"></span>';
-    }).join(' ');
-  } else if (nodeEl) {
-    nodeEl.remove();
-  }
+  // Remove legacy node-status line (node info now lives in sidebar groups)
+  const nodeEl = document.getElementById('node-status');
+  if (nodeEl) nodeEl.remove();
 
   const list = document.getElementById('session-list');
   const sessions = data.sessions || [];
@@ -354,32 +348,61 @@ function renderSidebar(data) {
     return;
   }
 
-  const multi = isMultiNode();
-  list.innerHTML = sessions.map(s => {
-    const sNode = s.node || 'local';
-    const isDead = s.state === 'dead' || s.state === 'suspended';
-    const isActive = selectedKey === s.key && selectedNode === sNode;
-    const cls = (isActive ? 'session-card active' : 'session-card') + (isDead ? ' dead-card' : '');
-    const ago = timeAgo(s.last_active);
-    const proto = s.protocol || '\u2014';
-    const ri = s.state === 'running' ? '<span class="running-indicator"></span>' : '';
-    const deathTag = s.death_reason ? ' <span class="death-tag">' + esc(s.death_reason.replace(/_/g,' ')) + '</span>' : '';
-    const ws = s.workspace ? shortPath(s.workspace) : '';
-    const nodeBadge = multi ? '<span class="node-badge" style="background:' + nodeColor(sNode) + '">' + esc(sNode) + '</span>' : '';
-    const prompt = s.last_prompt || '';
-    const activity = s.last_activity || '';
-    return '<div class="' + cls + '" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="selectSession(this.dataset.key,this.dataset.node)">' +
-      '<button class="btn-dismiss" onclick="event.stopPropagation();dismissSession(\'' + esc(s.key).replace(/'/g,"\\'") + '\')" title="remove">&times;</button>' +
-      '<div class="platform">' + nodeBadge + esc(s.platform) + ' \u00b7 ' + esc(proto) + '</div>' +
-      '<div class="agent">' + ri + esc(s.agent || 'general') + '</div>' +
-      (prompt ? '<div class="session-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' : '') +
-      (activity ? '<div class="session-activity">' + esc(activity) + '</div>' : '') +
-      '<div class="meta"><span class="badge ' + s.state + '">' + s.state + '</span>' + deathTag +
-      '<span>' + ago + '</span>' +
-      '</div>' +
-      (ws ? '<div class="workspace-hint">' + esc(ws) + '</div>' : '') +
-      '</div>';
-  }).join('');
+  if (!isMultiNode()) {
+    list.innerHTML = sessions.map(sessionCardHtml).join('');
+  } else {
+    const groups = {};
+    sessions.forEach(s => {
+      const n = s.node || 'local';
+      if (!groups[n]) groups[n] = [];
+      groups[n].push(s);
+    });
+    const collapsed = getCollapsedNodes();
+    list.innerHTML = Object.keys(groups).map(nid => {
+      const nd = nodesData[nid] || {};
+      const dotCls = nd.status === 'ok' ? 'ok' : 'error';
+      const displayName = nd.display_name || nid;
+      const grp = groups[nid];
+      const running = grp.filter(s => s.state === 'running' || s.state === 'spawning').length;
+      const countHtml = running > 0
+        ? '<span class="ng-running">' + running + ' running</span>'
+        : '<span class="ng-count">' + grp.length + '</span>';
+      return '<details class="node-group"' + (collapsed.has(nid) ? '' : ' open') +
+        ' data-node="' + esc(nid) + '" ontoggle="saveNodeToggle(this)">' +
+        '<summary class="node-group-header">' +
+        '<span class="ng-arrow">&#9658;</span>' +
+        '<span class="node-dot ' + dotCls + '"></span>' +
+        '<span class="ng-name">' + esc(displayName) + '</span>' +
+        countHtml + '</summary>' +
+        grp.map(sessionCardHtml).join('') +
+        '</details>';
+    }).join('');
+  }
+}
+
+function sessionCardHtml(s) {
+  const sNode = s.node || 'local';
+  const isDead = s.state === 'dead' || s.state === 'suspended';
+  const isActive = selectedKey === s.key && selectedNode === sNode;
+  const cls = (isActive ? 'session-card active' : 'session-card') + (isDead ? ' dead-card' : '');
+  const ago = timeAgo(s.last_active);
+  const proto = s.protocol || '\u2014';
+  const ri = s.state === 'running' ? '<span class="running-indicator"></span>' : '';
+  const deathTag = s.death_reason ? ' <span class="death-tag">' + esc(s.death_reason.replace(/_/g,' ')) + '</span>' : '';
+  const ws = s.workspace ? shortPath(s.workspace) : '';
+  const prompt = s.last_prompt || '';
+  const activity = s.last_activity || '';
+  return '<div class="' + cls + '" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="selectSession(this.dataset.key,this.dataset.node)">' +
+    '<button class="btn-dismiss" onclick="event.stopPropagation();dismissSession(\'' + esc(s.key).replace(/'/g,"\\'") + '\',\'' + esc(sNode).replace(/'/g,"\\'") + '\')" title="remove">&times;</button>' +
+    '<div class="platform">' + esc(s.platform) + ' \u00b7 ' + esc(proto) + '</div>' +
+    '<div class="agent">' + ri + esc(s.agent || 'general') + '</div>' +
+    (prompt ? '<div class="session-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' : '') +
+    (activity ? '<div class="session-activity">' + esc(activity) + '</div>' : '') +
+    '<div class="meta"><span class="badge ' + s.state + '">' + s.state + '</span>' + deathTag +
+    '<span>' + ago + '</span>' +
+    '</div>' +
+    (ws ? '<div class="workspace-hint">' + esc(ws) + '</div>' : '') +
+    '</div>';
 }
 
 function selectSession(key, node) {
@@ -409,13 +432,14 @@ function selectSession(key, node) {
   }
 }
 
-async function dismissSession(key) {
+async function dismissSession(key, node) {
+  node = node || 'local';
   if (!confirm('确定删除此会话？此操作不可撤回。')) return;
 
   // If it's a pending (never-sent) session, just remove from localStorage
   if (sessionWorkspaces[key] !== undefined) {
     removePendingSession(key);
-    delete sessionsData[sid(key, 'local')];
+    delete sessionsData[sid(key, node)];
     if (selectedKey === key) {
       selectedKey = null;
       document.getElementById('main').innerHTML = '<div class="empty-state">select a session</div>';
@@ -435,7 +459,7 @@ async function dismissSession(key) {
       showToast('remove failed: ' + text);
       return;
     }
-    delete sessionsData[sid(key, 'local')];
+    delete sessionsData[sid(key, node)];
     if (selectedKey === key) {
       selectedKey = null;
       if (wsm.subscribedKey === key) wsm.unsubscribe();
@@ -541,11 +565,11 @@ function appendEvents(events) {
 }
 
 function eventHtml(e) {
-  if (e.type === 'tool_use' || e.type === 'result') return '';
+  if (e.type === 'tool_use' || e.type === 'result' || e.type === 'thinking') return '';
   if (e.type === 'tool_summary') return toolSummaryHtml(e.tools);
-  const icons = {init:'~',system:'\u2699',thinking:'\u{1f4ad}',text:'\u{1f4ac}',user:'\u{1f464}'};
+  const icons = {init:'~',system:'\u2699',user:'\u{1f464}'};
   const t = new Date(e.time).toLocaleTimeString('zh-CN',{hour12:false});
-  const icon = icons[e.type] || '\u00b7';
+  const icon = icons[e.type] || '';
 
   let content = '';
   if (e.type === 'tool_use') {
@@ -751,7 +775,7 @@ function createNewSession() {
       '<h3>New Session</h3>' +
       '<div style="margin-bottom:12px">' +
         '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px">Workspace</label>' +
-        '<input id="new-workspace" style="width:100%;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;outline:none" placeholder="' + esc(ws) + '" value="' + esc(ws) + '">' +
+        '<input id="new-workspace" style="width:100%;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;outline:none" placeholder="' + esc(ws) + '" value="' + esc(ws) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
       '</div>' +
       '<div class="modal-btns">' +
         '<button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
@@ -763,15 +787,15 @@ function createNewSession() {
 }
 
 function doCreateSession() {
-  const agent = 'general';
   const workspace = document.getElementById('new-workspace').value.trim();
+  const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'session') : 'session';
   document.querySelector('.modal-overlay').remove();
 
   sessionCounter++;
   const now = new Date();
   const ts = now.toISOString().slice(0,10) + '-' +
     now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
-  const key = 'dashboard:direct:' + ts + ':' + agent;
+  const key = 'dashboard:direct:' + ts + ':' + folderName;
 
   if (workspace) sessionWorkspaces[key] = workspace;
   savePendingSessions();
@@ -1006,12 +1030,17 @@ function isMultiNode() {
   return keys.length > 1 || (keys.length === 1 && keys[0] !== 'local');
 }
 
-const NODE_COLORS = ['#388bfd','#a371f7','#3fb950','#d29922','#f78166','#db61a2','#79c0ff','#56d364'];
-function nodeColor(name) {
-  if (!name || name === 'local') return '#484f58';
-  let h = 0;
-  for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) | 0;
-  return NODE_COLORS[Math.abs(h) % NODE_COLORS.length];
+function getCollapsedNodes() {
+  try { return new Set(JSON.parse(localStorage.getItem('naozhi_collapsed_nodes') || '[]')); }
+  catch(_) { return new Set(); }
+}
+
+function saveNodeToggle(el) {
+  const nid = el.dataset.node;
+  if (!nid) return;
+  const collapsed = getCollapsedNodes();
+  if (el.open) collapsed.delete(nid); else collapsed.add(nid);
+  localStorage.setItem('naozhi_collapsed_nodes', JSON.stringify([...collapsed]));
 }
 
 /* ===== WebSocket Connection Manager ===== */
@@ -1386,12 +1415,15 @@ function renderDiscovered(sessions) {
     const base = cwd.split('/').pop() || cwd;
     const ago = timeAgo(s.last_active || s.started_at);
     const pst = s.proc_start_time || 0;
+    const state = s.state || 'ready';
+    const ri = state === 'running' ? '<span class="running-indicator"></span>' : '';
     return '<div class="discovered-card" data-pid="' + s.pid + '" onclick="previewDiscovered(\'' + esc(s.session_id) + '\',\'' + esc(cwd).replace(/'/g, "\\'") + '\',' + s.pid + ',' + pst + ')" style="cursor:pointer">' +
       '<div class="dc-info">' +
         '<div class="dc-cwd" title="' + esc(cwd) + '">' + esc(base) + '</div>' +
         (s.summary ? '<div class="dc-summary">' + esc(s.summary) + '</div>' : '') +
         (s.last_prompt ? '<div class="dc-prompt" title="' + esc(s.last_prompt) + '">' + esc(s.last_prompt) + '</div>' : '') +
         '<div class="dc-meta">' +
+          ri + '<span class="badge ' + state + '">' + state + '</span>' +
           '<span>PID ' + s.pid + '</span>' +
           '<span>' + ago + '</span>' +
         '</div>' +
@@ -1419,7 +1451,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime) {
   const main = document.getElementById('main');
   main.innerHTML =
     '<div class="main-header">' +
-      '<h2>Preview: ' + esc(base) + ' <span class="badge" style="background:#9e6a03;color:#fff">external</span></h2>' +
+      '<h2>' + esc(base) + ' <span class="badge" style="background:#9e6a03;color:#fff">external</span></h2>' +
       '<div class="detail"><span>PID ' + pid + '</span><span>' + esc(sessionId.substring(0,8)) + '</span></div>' +
       '<div class="workspace-path" onclick="copyText(\'' + esc(cwd).replace(/'/g,"\\'") + '\')" title="click to copy">' + esc(cwd) + '</div>' +
     '</div>' +

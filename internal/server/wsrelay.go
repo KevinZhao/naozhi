@@ -242,10 +242,12 @@ func (r *wsRelay) reconnect() {
 	maxBackoff := 30 * time.Second
 
 	for {
+		t := time.NewTimer(backoff)
 		select {
 		case <-r.done:
+			t.Stop()
 			return
-		case <-time.After(backoff):
+		case <-t.C:
 		}
 
 		if err := r.connect(); err != nil {
@@ -300,6 +302,7 @@ func (r *wsRelay) writeJSON(v any) {
 		return
 	}
 	r.writeMu.Lock()
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := conn.WriteJSON(v); err != nil {
 		slog.Warn("relay write failed", "node", r.node.ID, "err", err)
 	}

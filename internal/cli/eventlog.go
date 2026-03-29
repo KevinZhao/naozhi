@@ -2,6 +2,7 @@ package cli
 
 import (
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 )
@@ -29,6 +30,11 @@ type EventLog struct {
 	mu      sync.RWMutex
 	entries []EventEntry
 	maxSize int
+
+	// Cached summaries updated atomically on Append for efficient access
+	// without copying all entries.
+	lastPromptSummary   atomic.Value // string: most recent "user" entry summary
+	lastActivitySummary atomic.Value // string: most recent "tool_use"/"thinking" entry summary
 
 	subMu       sync.Mutex
 	subscribers []*subscriber
@@ -59,6 +65,14 @@ func (l *EventLog) Append(e EventEntry) {
 		l.entries = l.entries[:len(l.entries)-drop]
 	}
 	l.mu.Unlock()
+
+	// Update cached summaries (atomic, no lock needed).
+	switch e.Type {
+	case "user":
+		l.lastPromptSummary.Store(e.Summary)
+	case "tool_use", "thinking":
+		l.lastActivitySummary.Store(e.Summary)
+	}
 
 	l.subMu.Lock()
 	for _, sub := range l.subscribers {
@@ -113,6 +127,22 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 		}
 	}
 	return nil
+}
+
+// LastPromptSummary returns the summary of the most recent "user" entry.
+func (l *EventLog) LastPromptSummary() string {
+	if v := l.lastPromptSummary.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
+}
+
+// LastActivitySummary returns the summary of the most recent "tool_use" or "thinking" entry.
+func (l *EventLog) LastActivitySummary() string {
+	if v := l.lastActivitySummary.Load(); v != nil {
+		return v.(string)
+	}
+	return ""
 }
 
 // TruncateRunes truncates s to at most maxRunes runes, appending "..." if truncated.

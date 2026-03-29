@@ -13,9 +13,14 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 )
+
+// runningThreshold is the JSONL mtime recency window used to classify a
+// discovered process as "running" (actively writing) vs "ready" (idle).
+const runningThreshold = 5 * time.Second
 
 // DiscoveredSession represents a Claude CLI process found on the system.
 type DiscoveredSession struct {
@@ -24,6 +29,7 @@ type DiscoveredSession struct {
 	CWD           string `json:"cwd"`
 	StartedAt     int64  `json:"started_at"`            // unix ms
 	LastActive    int64  `json:"last_active"`           // unix ms (from JSONL mtime, fallback to started_at)
+	State         string `json:"state"`                 // "running" or "ready"
 	Kind          string `json:"kind"`                  // "interactive" etc.
 	Entrypoint    string `json:"entrypoint"`            // "cli" etc.
 	Summary       string `json:"summary,omitempty"`     // Claude-generated session name from sessions-index
@@ -156,19 +162,56 @@ func Scan(claudeDir string, excludePIDs map[int]bool) ([]DiscoveredSession, erro
 		}
 	}
 
+	// Cache parsed sessions-index.json per project directory to avoid
+	// re-reading the same file for every session sharing a CWD.
+	indexCache := make(map[string]*sessionsIndex)
+	cachedLookupSummary := func(cwd, sessionID string) string {
+		indexPath := filepath.Join(claudeDir, "projects", projDirName(cwd), "sessions-index.json")
+		idx, ok := indexCache[indexPath]
+		if !ok {
+			data, err := os.ReadFile(indexPath)
+			if err != nil {
+				indexCache[indexPath] = nil
+				return ""
+			}
+			var parsed sessionsIndex
+			if err := json.Unmarshal(data, &parsed); err != nil {
+				indexCache[indexPath] = nil
+				return ""
+			}
+			idx = &parsed
+			indexCache[indexPath] = idx
+		}
+		if idx == nil {
+			return ""
+		}
+		for _, e := range idx.Entries {
+			if e.SessionID == sessionID {
+				return e.Summary
+			}
+		}
+		return ""
+	}
+
+	nowMs := time.Now().UnixMilli()
 	var result []DiscoveredSession
 	for i := range candidates {
 		c := &candidates[i]
 		pst, _ := ProcStartTime(c.sf.PID)
+		state := "ready"
+		if c.lastActive > nowMs-int64(runningThreshold/time.Millisecond) {
+			state = "running"
+		}
 		result = append(result, DiscoveredSession{
 			PID:           c.sf.PID,
 			SessionID:     c.sf.SessionID,
 			CWD:           c.sf.CWD,
 			StartedAt:     c.sf.StartedAt,
 			LastActive:    c.lastActive,
+			State:         state,
 			Kind:          c.sf.Kind,
 			Entrypoint:    c.sf.Entrypoint,
-			Summary:       lookupSummary(claudeDir, c.sf.CWD, c.sf.SessionID),
+			Summary:       cachedLookupSummary(c.sf.CWD, c.sf.SessionID),
 			LastPrompt:    extractLastPrompt(claudeDir, c.sf.CWD, c.sf.SessionID),
 			ProcStartTime: pst,
 		})

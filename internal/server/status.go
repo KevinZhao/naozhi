@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -69,19 +70,37 @@ func extractParam(input json.RawMessage, key string) string {
 	if len(input) == 0 {
 		return ""
 	}
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(input, &m); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(input))
+	t, err := dec.Token()
+	if err != nil {
 		return ""
 	}
-	val, ok := m[key]
-	if !ok {
+	if delim, ok := t.(json.Delim); !ok || delim != '{' {
 		return ""
 	}
-	var s string
-	if err := json.Unmarshal(val, &s); err != nil {
-		return ""
+	for dec.More() {
+		t, err = dec.Token()
+		if err != nil {
+			return ""
+		}
+		k, ok := t.(string)
+		if !ok {
+			return ""
+		}
+		if k == key {
+			var s string
+			if dec.Decode(&s) == nil {
+				return s
+			}
+			return ""
+		}
+		// Skip value we don't need
+		var skip json.RawMessage
+		if err := dec.Decode(&skip); err != nil {
+			return ""
+		}
 	}
-	return s
+	return ""
 }
 
 // shortenPath returns dir/base for readability.
@@ -96,11 +115,17 @@ func shortenPath(p string) string {
 
 // firstLine returns the first non-empty line of s.
 func firstLine(s string) string {
-	for _, line := range strings.SplitN(s, "\n", 3) {
-		line = strings.TrimSpace(line)
-		if line != "" {
-			return line
+	s = strings.TrimSpace(s)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		first := strings.TrimSpace(s[:i])
+		if first != "" {
+			return first
 		}
+		rest := strings.TrimSpace(s[i+1:])
+		if j := strings.IndexByte(rest, '\n'); j >= 0 {
+			return strings.TrimSpace(rest[:j])
+		}
+		return rest
 	}
 	return s
 }
