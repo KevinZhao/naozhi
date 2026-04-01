@@ -20,14 +20,16 @@ import (
 func newTestHub(token string) (*Hub, *session.Router) {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := newSessionGuard()
-	hub := NewHub(router, nil, nil, token, guard, nil)
+	var nodesMu sync.RWMutex
+	hub := NewHub(router, nil, nil, token, guard, nil, &nodesMu)
 	return hub, router
 }
 
 func newTestHubWithAgents(token string, agents map[string]session.AgentOpts) (*Hub, *session.Router) {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := newSessionGuard()
-	hub := NewHub(router, agents, nil, token, guard, nil)
+	var nodesMu sync.RWMutex
+	hub := NewHub(router, agents, nil, token, guard, nil, &nodesMu)
 	return hub, router
 }
 

@@ -41,14 +41,14 @@ type Hub struct {
 	agentCmds map[string]string
 	dashToken string
 	guard     *sessionGuard
-	nodes     map[string]*NodeClient
-	relays    map[string]*wsRelay // node ID -> relay (lazy)
-	ctx       context.Context     // cancelled on Shutdown to stop in-flight sends
+	nodes     map[string]NodeConn
+	nodesMu   *sync.RWMutex   // shared with Server.nodesMu — all nodes map access must use this
+	ctx       context.Context // cancelled on Shutdown to stop in-flight sends
 	cancel    context.CancelFunc
 }
 
 // NewHub creates a new WebSocket hub.
-func NewHub(router *session.Router, agents map[string]session.AgentOpts, agentCmds map[string]string, dashToken string, guard *sessionGuard, nodes map[string]*NodeClient) *Hub {
+func NewHub(router *session.Router, agents map[string]session.AgentOpts, agentCmds map[string]string, dashToken string, guard *sessionGuard, nodes map[string]NodeConn, nodesMu *sync.RWMutex) *Hub {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Hub{
 		clients:   make(map[*wsClient]struct{}),
@@ -58,7 +58,7 @@ func NewHub(router *session.Router, agents map[string]session.AgentOpts, agentCm
 		dashToken: dashToken,
 		guard:     guard,
 		nodes:     nodes,
-		relays:    make(map[string]*wsRelay),
+		nodesMu:   nodesMu,
 		ctx:       ctx,
 		cancel:    cancel,
 	}
@@ -101,15 +101,18 @@ func (h *Hub) unregister(c *wsClient) {
 		}
 		c.subscriptions = nil
 	}
-	// Collect relays to clean up (release hub lock before calling relay methods)
-	relays := make([]*wsRelay, 0, len(h.relays))
-	for _, relay := range h.relays {
-		relays = append(relays, relay)
-	}
 	h.mu.Unlock()
 
-	for _, relay := range relays {
-		relay.RemoveClient(c)
+	// Snapshot nodes under nodesMu to avoid data race
+	h.nodesMu.RLock()
+	nodes := make([]NodeConn, 0, len(h.nodes))
+	for _, conn := range h.nodes {
+		nodes = append(nodes, conn)
+	}
+	h.nodesMu.RUnlock()
+
+	for _, conn := range nodes {
+		conn.RemoveClient(c)
 	}
 }
 
@@ -224,11 +227,6 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 		return
 	}
 
-	if !h.guard.TryAcquire(key) {
-		c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "busy", Key: key})
-		return
-	}
-
 	// Set workspace override for new dashboard sessions
 	if msg.Workspace != "" {
 		if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
@@ -237,8 +235,14 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 		}
 	}
 
+	if !h.guard.TryAcquire(key) {
+		c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "busy", Key: key})
+		return
+	}
+
 	c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "accepted", Key: key})
 
+	capturedText := msg.Text
 	go func() {
 		defer h.guard.Release(key)
 
@@ -262,7 +266,7 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 		h.broadcastState(key, "running", "")
 		h.BroadcastSessionsUpdate()
 
-		if _, err := sess.Send(ctx, msg.Text, nil, nil); err != nil {
+		if _, err := sess.Send(ctx, capturedText, nil, nil); err != nil {
 			slog.Error("ws send: send", "key", key, "err", err)
 		}
 
@@ -272,7 +276,8 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 			snap := sess2.Snapshot()
 			h.broadcastState(key, snap.State, snap.DeathReason)
 		} else {
-			h.broadcastState(key, "ready", "")
+			// Session was removed (e.g. concurrent Reset) while we were running.
+			h.broadcastState(key, "dead", "user_reset")
 		}
 		h.BroadcastSessionsUpdate()
 	}()
@@ -356,12 +361,20 @@ func (h *Hub) BroadcastSessionsUpdate() {
 // Shutdown closes all WebSocket client connections and relays.
 func (h *Hub) Shutdown() {
 	h.cancel() // cancel in-flight send goroutines
-	h.mu.Lock()
-	// Close all relays
-	for id, relay := range h.relays {
-		relay.Close()
-		delete(h.relays, id)
+
+	// Close node connections under nodesMu
+	h.nodesMu.RLock()
+	nodeConns := make([]NodeConn, 0, len(h.nodes))
+	for _, conn := range h.nodes {
+		nodeConns = append(nodeConns, conn)
 	}
+	h.nodesMu.RUnlock()
+	for _, conn := range nodeConns {
+		conn.Close()
+	}
+
+	// Close client connections
+	h.mu.Lock()
 	conns := make([]*websocket.Conn, 0, len(h.clients))
 	for c := range h.clients {
 		for _, unsub := range c.subscriptions {
@@ -383,41 +396,32 @@ func (h *Hub) Shutdown() {
 // ─── Remote node handlers ────────────────────────────────────────────────────
 
 func (h *Hub) handleRemoteSubscribe(c *wsClient, msg wsClientMsg) {
-	nodeID := msg.Node
-	h.mu.Lock()
-	nc, ok := h.nodes[nodeID]
+	h.nodesMu.RLock()
+	conn, ok := h.nodes[msg.Node]
+	h.nodesMu.RUnlock()
 	if !ok {
-		h.mu.Unlock()
-		c.sendJSON(wsServerMsg{Type: "error", Key: msg.Key, Error: "unknown node: " + nodeID})
+		c.sendJSON(wsServerMsg{Type: "error", Key: msg.Key, Error: "unknown node: " + msg.Node})
 		return
 	}
-	relay, exists := h.relays[nodeID]
-	if !exists {
-		relay = newWSRelay(nc, h)
-		h.relays[nodeID] = relay
-	}
-	h.mu.Unlock()
-
-	relay.Subscribe(c, msg.Key, msg.After)
+	conn.Subscribe(c, msg.Key, msg.After)
 }
 
 func (h *Hub) handleRemoteUnsubscribe(c *wsClient, msg wsClientMsg) {
-	nodeID := msg.Node
-	h.mu.Lock()
-	relay, exists := h.relays[nodeID]
-	h.mu.Unlock()
-	if !exists {
-		c.sendJSON(wsServerMsg{Type: "unsubscribed", Key: msg.Key, Node: nodeID})
+	h.nodesMu.RLock()
+	conn, ok := h.nodes[msg.Node]
+	h.nodesMu.RUnlock()
+	if !ok {
+		c.sendJSON(wsServerMsg{Type: "unsubscribed", Key: msg.Key, Node: msg.Node})
 		return
 	}
-	relay.Unsubscribe(c, msg.Key)
+	conn.Unsubscribe(c, msg.Key)
 }
 
 func (h *Hub) handleRemoteSend(c *wsClient, msg wsClientMsg) {
 	nodeID := msg.Node
-	h.mu.Lock()
+	h.nodesMu.RLock()
 	nc, ok := h.nodes[nodeID]
-	h.mu.Unlock()
+	h.nodesMu.RUnlock()
 
 	if !ok {
 		c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "unknown node: " + nodeID})
@@ -433,4 +437,25 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg wsClientMsg) {
 			slog.Error("remote ws send failed", "node", nodeID, "key", msg.Key, "err", err)
 		}
 	}()
+}
+
+// NotifyNodeChange broadcasts a sessions_update so clients refresh after a node connects/disconnects.
+func (h *Hub) NotifyNodeChange() {
+	h.BroadcastSessionsUpdate()
+}
+
+// PurgeNodeSubscriptions notifies all browser clients that a node disconnected,
+// so they can deselect stale sessions.
+func (h *Hub) PurgeNodeSubscriptions(nodeID string) {
+	data, err := json.Marshal(wsServerMsg{Type: "error", Node: nodeID, Error: "node disconnected"})
+	if err != nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		if c.authenticated.Load() {
+			c.sendRaw(data)
+		}
+	}
 }

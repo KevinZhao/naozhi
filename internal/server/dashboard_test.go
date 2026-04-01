@@ -327,3 +327,86 @@ func TestHandleAPISend_WorkspaceInvalidDir(t *testing.T) {
 		t.Errorf("workspace = %q, want /default/workspace (invalid path should be ignored)", ws)
 	}
 }
+
+// ─── multi-node API routing ──────────────────────────────────────────────────
+
+// TestHandleAPISessions_NodeAggregation verifies that /api/sessions merges remote
+// node sessions (from cache) and includes the nodes status map.
+func TestHandleAPISessions_NodeAggregation(t *testing.T) {
+	// Mock remote node serving /api/sessions with one session
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/sessions":
+			json.NewEncoder(w).Encode(map[string]any{
+				"sessions": []map[string]any{
+					{"key": "feishu:direct:bob:general", "state": "ready"},
+				},
+			})
+		case "/api/projects":
+			json.NewEncoder(w).Encode([]map[string]any{})
+		case "/api/discovered":
+			json.NewEncoder(w).Encode([]map[string]any{})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer remote.Close()
+
+	srv := newTestServer(&mockPlatform{})
+	srv.SetNodes(map[string]NodeConn{
+		"macbook": NewNodeClient("macbook", remote.URL, "", "MacBook Pro"),
+	})
+
+	// Populate the cache synchronously
+	srv.refreshNodeCache()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
+	w := httptest.NewRecorder()
+	srv.handleAPISessions(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var resp map[string]any
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+
+	// nodes map must include macbook
+	nodes, ok := resp["nodes"].(map[string]any)
+	if !ok {
+		t.Fatal("nodes field missing")
+	}
+	if _, ok := nodes["macbook"]; !ok {
+		t.Error("nodes should contain 'macbook'")
+	}
+	if macbook, ok := nodes["macbook"].(map[string]any); ok {
+		if macbook["status"] != "ok" {
+			t.Errorf("macbook status = %v, want ok", macbook["status"])
+		}
+		if macbook["display_name"] != "MacBook Pro" {
+			t.Errorf("macbook display_name = %v, want 'MacBook Pro'", macbook["display_name"])
+		}
+	}
+
+	// sessions must include the remote session with node="macbook"
+	sessions, ok := resp["sessions"].([]any)
+	if !ok {
+		t.Fatal("sessions field missing")
+	}
+	var found bool
+	for _, s := range sessions {
+		sm, ok := s.(map[string]any)
+		if !ok {
+			continue
+		}
+		if sm["key"] == "feishu:direct:bob:general" && sm["node"] == "macbook" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("remote session with node='macbook' not found in aggregated sessions")
+	}
+}

@@ -1,0 +1,11 @@
+{
+  "name": "naozhi dashboard",
+  "short_name": "naozhi",
+  "start_url": "/dashboard",
+  "display": "standalone",
+  "background_color": "#0d1117",
+  "theme_color": "#0d1117",
+  "icons": [
+    { "src": "/favicon.ico", "sizes": "any", "type": "image/x-icon" }
+  ]
+}

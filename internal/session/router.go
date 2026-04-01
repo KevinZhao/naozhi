@@ -19,13 +19,17 @@ type Router struct {
 	mu           sync.Mutex
 	shutdownCond *sync.Cond // signaled when process state changes; conditioned on mu
 	sessions     map[string]*ManagedSession
-	wrapper      *cli.Wrapper
-	maxProcs     int
-	ttl          time.Duration
-	model        string
-	extraArgs    []string
-	workspace    string // default cwd for CLI processes
-	claudeDir    string // ~/.claude dir for loading session history
+	// sessionsByChat is a secondary index: chat key → session keys.
+	// Enables O(k) ResetChat instead of O(n) full scan (k = agents per chat, typically 1-3).
+	// Nil in test-created routers; all helpers below are nil-safe.
+	sessionsByChat map[string][]string
+	wrapper        *cli.Wrapper
+	maxProcs       int
+	ttl            time.Duration
+	model          string
+	extraArgs      []string
+	workspace      string // default cwd for CLI processes
+	claudeDir      string // ~/.claude dir for loading session history
 
 	// workspaceOverrides stores per-chat workspace overrides.
 	// Key format: "platform:chatType:chatID"
@@ -42,6 +46,50 @@ type Router struct {
 	totalTimeout    time.Duration
 
 	onChange func() // called (outside lock) when session list changes
+}
+
+// chatKeyFor strips the last ":agentID" segment from a session key to get the chat key.
+func chatKeyFor(key string) string {
+	if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
+		return key[:idx]
+	}
+	return key
+}
+
+// indexAdd adds key to the chat→sessions index. No-op when index is nil.
+// Must be called under r.mu.
+func (r *Router) indexAdd(key string) {
+	if r.sessionsByChat == nil {
+		return
+	}
+	ck := chatKeyFor(key)
+	for _, k := range r.sessionsByChat[ck] {
+		if k == key {
+			return
+		}
+	}
+	r.sessionsByChat[ck] = append(r.sessionsByChat[ck], key)
+}
+
+// indexDel removes key from the chat→sessions index. No-op when index is nil.
+// Must be called under r.mu.
+func (r *Router) indexDel(key string) {
+	if r.sessionsByChat == nil {
+		return
+	}
+	ck := chatKeyFor(key)
+	keys := r.sessionsByChat[ck]
+	for i, k := range keys {
+		if k == key {
+			last := len(keys) - 1
+			keys[i] = keys[last]
+			r.sessionsByChat[ck] = keys[:last]
+			if len(r.sessionsByChat[ck]) == 0 {
+				delete(r.sessionsByChat, ck)
+			}
+			return
+		}
+	}
 }
 
 // RouterConfig holds configuration for the session router.
@@ -68,6 +116,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	}
 	r := &Router{
 		sessions:           make(map[string]*ManagedSession),
+		sessionsByChat:     make(map[string][]string),
 		wrapper:            cfg.Wrapper,
 		maxProcs:           cfg.MaxProcs,
 		ttl:                cfg.TTL,
@@ -89,9 +138,11 @@ func NewRouter(cfg RouterConfig) *Router {
 				Key:       key,
 				workspace: entry.Workspace,
 				totalCost: entry.TotalCost,
+				Exempt:    strings.HasPrefix(key, "project:"),
 			}
 			s.setSessionID(entry.SessionID)
 			r.sessions[key] = s
+			r.indexAdd(key)
 		}
 		// Async-load JSONL history for suspended sessions so the dashboard
 		// shows conversation history without waiting for the next message.
@@ -160,20 +211,33 @@ func (r *Router) GetWorkspace(chatKey string) string {
 func (r *Router) ResetChat(chatKeyPrefix string) {
 	r.mu.Lock()
 	var toClose []processIface
-	var toDelete []string
-	for key, s := range r.sessions {
-		// Session key: "platform:chatType:chatID:agentID"
-		// Chat key:    "platform:chatType:chatID"
-		// Match if session key starts with chatKey + ":"
-		if len(key) > len(chatKeyPrefix) && key[:len(chatKeyPrefix)+1] == chatKeyPrefix+":" {
-			toDelete = append(toDelete, key)
+	if r.sessionsByChat != nil {
+		// O(k) path via index (k = agents per chat, typically 1-3).
+		for _, key := range r.sessionsByChat[chatKeyPrefix] {
+			s := r.sessions[key]
+			if s == nil {
+				continue
+			}
 			if s.process != nil && s.process.Alive() {
 				toClose = append(toClose, s.process)
 			}
+			delete(r.sessions, key)
 		}
-	}
-	for _, key := range toDelete {
-		delete(r.sessions, key)
+		delete(r.sessionsByChat, chatKeyPrefix)
+	} else {
+		// Fallback O(n) scan for test-created routers without index.
+		var toDelete []string
+		for key, s := range r.sessions {
+			if len(key) > len(chatKeyPrefix) && key[:len(chatKeyPrefix)+1] == chatKeyPrefix+":" {
+				toDelete = append(toDelete, key)
+				if s.process != nil && s.process.Alive() {
+					toClose = append(toClose, s.process)
+				}
+			}
+		}
+		for _, key := range toDelete {
+			delete(r.sessions, key)
+		}
 	}
 	r.mu.Unlock()
 
@@ -194,6 +258,8 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 type AgentOpts struct {
 	Model     string
 	ExtraArgs []string
+	Workspace string // override workspace (empty = use default/chat override)
+	Exempt    bool   // exempt from TTL, eviction, and activeCount (planner sessions)
 }
 
 // SessionStatus indicates how a session was obtained.
@@ -236,16 +302,19 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 // Caller must hold r.mu. Releases r.mu during Spawn() to avoid blocking other
 // goroutines during potentially slow protocol init (e.g., ACP handshake).
 func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, opts AgentOpts) (*ManagedSession, error) {
-	r.countActive()
-	if r.activeCount+r.pendingSpawns >= r.maxProcs {
-		if !r.evictOldest() {
-			r.mu.Unlock()
-			return nil, fmt.Errorf("max concurrent processes reached (%d), all busy", r.maxProcs)
-		}
+	// Exempt sessions (planners) bypass maxProcs capacity check
+	if !opts.Exempt {
 		r.countActive()
 		if r.activeCount+r.pendingSpawns >= r.maxProcs {
-			r.mu.Unlock()
-			return nil, fmt.Errorf("max concurrent processes reached (%d), all busy", r.maxProcs)
+			if !r.evictOldest() {
+				r.mu.Unlock()
+				return nil, fmt.Errorf("max concurrent processes reached (%d), all busy", r.maxProcs)
+			}
+			r.countActive()
+			if r.activeCount+r.pendingSpawns >= r.maxProcs {
+				r.mu.Unlock()
+				return nil, fmt.Errorf("max concurrent processes reached (%d), all busy", r.maxProcs)
+			}
 		}
 	}
 
@@ -258,13 +327,24 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	copy(args, r.extraArgs)
 	args = append(args, opts.ExtraArgs...)
 
-	// Determine workspace: check per-chat override first, then default
+	// Determine workspace: opts override > per-chat override > old session workspace > default
 	workspace := r.workspace
-	// Extract chat key prefix from session key (strip last :agentID segment)
-	if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
-		chatKey := key[:idx]
+	workspaceOverridden := false
+	if opts.Workspace != "" {
+		workspace = opts.Workspace
+		workspaceOverridden = true
+	} else if chatKey := chatKeyFor(key); chatKey != key {
 		if ws, ok := r.workspaceOverrides[chatKey]; ok {
 			workspace = ws
+			workspaceOverridden = true
+		}
+	}
+	// When resuming after restart, workspaceOverrides is empty (not persisted across restarts).
+	// Fall back to the old session's stored workspace so --resume finds the session in the
+	// correct project directory (Claude stores sessions under ~/.claude/projects/<sha256(cwd)>/).
+	if !workspaceOverridden && resumeID != "" {
+		if old := r.sessions[key]; old != nil && old.workspace != "" {
+			workspace = old.workspace
 		}
 	}
 
@@ -308,7 +388,12 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	var oldHistory []cli.EventEntry
 	if old != nil {
 		old.sendMu.Lock()
-		if len(old.persistedHistory) > 0 {
+		if old.process != nil && !old.process.Alive() {
+			// Dead process: EventEntries() includes both injected history and live events
+			// logged during the last run. Use this instead of persistedHistory, which only
+			// holds the JSONL-loaded snapshot and misses events accumulated since that load.
+			oldHistory = old.process.EventEntries()
+		} else if len(old.persistedHistory) > 0 {
 			oldHistory = make([]cli.EventEntry, len(old.persistedHistory))
 			copy(oldHistory, old.persistedHistory)
 		}
@@ -329,6 +414,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		workspace:        workspace,
 		sendMu:           sync.Mutex{},
 		persistedHistory: oldHistory,
+		Exempt:           opts.Exempt,
 	}
 	if len(oldHistory) > 0 {
 		proc.InjectHistory(oldHistory)
@@ -336,9 +422,12 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	s.setSessionID(resumeID)
 	s.touchLastActive()
 	r.sessions[key] = s
-	r.activeCount++
+	r.indexAdd(key)
+	if !opts.Exempt {
+		r.activeCount++
+	}
 
-	slog.Info("session spawned", "key", key, "active", r.activeCount)
+	slog.Info("session spawned", "key", key, "active", r.activeCount, "exempt", opts.Exempt)
 	r.mu.Unlock()
 
 	// Load conversation history from Claude's local JSONL when resuming.
@@ -355,9 +444,13 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 }
 
 // countActive recounts alive processes (corrects drift from undetected exits).
+// Exempt sessions are not counted toward max_procs capacity.
 func (r *Router) countActive() {
 	count := 0
 	for _, s := range r.sessions {
+		if s.Exempt {
+			continue
+		}
 		if s.process != nil && s.process.Alive() {
 			count++
 		}
@@ -371,6 +464,9 @@ func (r *Router) countActive() {
 func (r *Router) evictOldest() bool {
 	var oldest *ManagedSession
 	for _, s := range r.sessions {
+		if s.Exempt {
+			continue // planner sessions are never evicted
+		}
 		if s.process == nil || !s.process.Alive() || s.process.IsRunning() {
 			continue
 		}
@@ -407,6 +503,7 @@ func (r *Router) Reset(key string) {
 	}
 
 	proc := s.process
+	r.indexDel(key)
 	delete(r.sessions, key)
 	r.mu.Unlock()
 
@@ -436,6 +533,7 @@ func (r *Router) Remove(key string) bool {
 
 	// Kill process if alive
 	proc := s.process
+	r.indexDel(key)
 	delete(r.sessions, key)
 	r.mu.Unlock()
 
@@ -467,6 +565,9 @@ func (r *Router) Cleanup() {
 
 	now := time.Now()
 	for key, s := range r.sessions {
+		if s.Exempt {
+			continue // planner sessions are never expired by TTL
+		}
 		if s.process != nil && s.process.Alive() && !s.process.IsRunning() && now.Sub(s.GetLastActive()) > r.ttl {
 			slog.Info("session expired", "key", key, "idle", now.Sub(s.GetLastActive()))
 			s.deathReason.Store("idle_timeout")
@@ -489,19 +590,25 @@ func (r *Router) Cleanup() {
 	var pruned int
 	now2 := time.Now()
 	for key, s := range r.sessions {
+		if s.Exempt {
+			continue // planner sessions are never pruned
+		}
 		if s.process == nil && s.getSessionID() == "" && now2.Sub(s.GetLastActive()) > r.ttl {
+			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
 			continue
 		}
 		// Prune dead sessions with no resumable session ID
 		if s.process != nil && !s.process.Alive() && s.getSessionID() == "" && now2.Sub(s.GetLastActive()) > r.ttl {
+			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
 			continue
 		}
 		// Prune old dead sessions even with session ID (prevents unbounded growth)
 		if s.process != nil && !s.process.Alive() && now2.Sub(s.GetLastActive()) > 7*r.ttl {
+			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
 		}
@@ -608,8 +715,8 @@ func (r *Router) MaxProcs() int {
 }
 
 // Stats returns current session statistics.
-// active = non-dead sessions (alive process or suspended with a session ID);
-// total = all sessions including dead ones.
+// active = sessions with a live process (ready or running, excluding exempt);
+// total = all sessions in the map including dead and suspended ones.
 func (r *Router) Stats() (active, total int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -685,6 +792,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			r.mu.Lock()
 			// Only delete if no concurrent goroutine replaced this session
 			if cur, ok := r.sessions[key]; ok && cur == oldSession {
+				r.indexDel(key)
 				delete(r.sessions, key)
 			} else if cur != nil && cur.process != nil && cur.process.Alive() {
 				// Concurrent GetOrCreate created a new session during Close();
@@ -692,14 +800,18 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 				r.mu.Unlock()
 				return nil, fmt.Errorf("concurrent session created for key %s during takeover", key)
 			}
+			// Implicit else: concurrent goroutine replaced the session with a dead
+			// one. Leave r.sessions[key] as-is — spawnSession below will overwrite
+			// it and call indexAdd, keeping the index consistent. No indexDel here
+			// because we are not removing from r.sessions.
 		} else {
+			r.indexDel(key)
 			delete(r.sessions, key)
 		}
 		r.countActive()
 	}
 	// Set workspace override for the chat key prefix
-	if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
-		chatKey := key[:idx]
+	if chatKey := chatKeyFor(key); chatKey != key {
 		r.workspaceOverrides[chatKey] = workspace
 	}
 	s, err := r.spawnSession(ctx, key, sessionID, opts)

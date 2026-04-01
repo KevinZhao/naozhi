@@ -128,8 +128,7 @@ func TestWSRelay_ConnectAndSubscribe(t *testing.T) {
 	defer ts.Close()
 
 	nc := NewNodeClient("remote", ts.URL, "secret", "Remote")
-	hub, _ := newTestHub("")
-	relay := newWSRelay(nc, hub)
+	relay := newWSRelay(nc)
 	defer relay.Close()
 
 	client := newTestWSClient()
@@ -153,8 +152,7 @@ func TestWSRelay_EventForwarding(t *testing.T) {
 	defer ts.Close()
 
 	nc := NewNodeClient("remote", ts.URL, "", "Remote")
-	hub, _ := newTestHub("")
-	relay := newWSRelay(nc, hub)
+	relay := newWSRelay(nc)
 	defer relay.Close()
 
 	client := newTestWSClient()
@@ -190,8 +188,7 @@ func TestWSRelay_MultipleClients(t *testing.T) {
 	defer ts.Close()
 
 	nc := NewNodeClient("remote", ts.URL, "", "Remote")
-	hub, _ := newTestHub("")
-	relay := newWSRelay(nc, hub)
+	relay := newWSRelay(nc)
 	defer relay.Close()
 
 	client1 := newTestWSClient()
@@ -238,8 +235,7 @@ func TestWSRelay_Unsubscribe(t *testing.T) {
 	defer ts.Close()
 
 	nc := NewNodeClient("remote", ts.URL, "", "Remote")
-	hub, _ := newTestHub("")
-	relay := newWSRelay(nc, hub)
+	relay := newWSRelay(nc)
 	defer relay.Close()
 
 	client := newTestWSClient()
@@ -268,8 +264,7 @@ func TestWSRelay_Close(t *testing.T) {
 	defer ts.Close()
 
 	nc := NewNodeClient("remote", ts.URL, "", "Remote")
-	hub, _ := newTestHub("")
-	relay := newWSRelay(nc, hub)
+	relay := newWSRelay(nc)
 
 	client := newTestWSClient()
 	relay.Subscribe(client, "test:d:u:general", 0)
@@ -295,8 +290,7 @@ func TestWSRelay_Reconnect(t *testing.T) {
 	defer ts.Close()
 
 	nc := NewNodeClient("remote", ts.URL, "", "Remote")
-	hub, _ := newTestHub("")
-	relay := newWSRelay(nc, hub)
+	relay := newWSRelay(nc)
 	defer relay.Close()
 
 	client := newTestWSClient()
@@ -328,8 +322,7 @@ func TestWSRelay_AuthFailed(t *testing.T) {
 	defer ts.Close()
 
 	nc := NewNodeClient("remote", ts.URL, "wrong-token", "Remote")
-	hub, _ := newTestHub("")
-	relay := newWSRelay(nc, hub)
+	relay := newWSRelay(nc)
 	defer relay.Close()
 
 	client := newTestWSClient()
@@ -347,8 +340,7 @@ func TestWSRelay_RemoveClient(t *testing.T) {
 	defer ts.Close()
 
 	nc := NewNodeClient("remote", ts.URL, "", "Remote")
-	hub, _ := newTestHub("")
-	relay := newWSRelay(nc, hub)
+	relay := newWSRelay(nc)
 	defer relay.Close()
 
 	client := newTestWSClient()
@@ -374,12 +366,13 @@ func TestHub_RemoteSubscribe(t *testing.T) {
 	ts := httptest.NewServer(mock.handler)
 	defer ts.Close()
 
-	nodes := map[string]*NodeClient{
+	nodes := map[string]NodeConn{
 		"remote": NewNodeClient("remote", ts.URL, "", "Remote"),
 	}
 	router := session.NewRouter(session.RouterConfig{})
 	guard := newSessionGuard()
-	hub := NewHub(router, nil, nil, "", guard, nodes)
+	var nodesMu sync.RWMutex
+	hub := NewHub(router, nil, nil, "", guard, nodes, &nodesMu)
 	defer hub.Shutdown()
 
 	client := newTestWSClient()

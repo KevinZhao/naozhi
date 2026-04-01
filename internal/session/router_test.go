@@ -21,6 +21,7 @@ type fakeProcess struct {
 	isAlive   bool
 	isRunning bool
 	closeOnce sync.Once
+	entries   []cli.EventEntry // returned by EventEntries
 }
 
 func newIdleProc() *fakeProcess {
@@ -33,6 +34,10 @@ func newRunningProc() *fakeProcess {
 
 func newDeadProc() *fakeProcess {
 	return &fakeProcess{isAlive: false, isRunning: false}
+}
+
+func newDeadProcWithEntries(entries []cli.EventEntry) *fakeProcess {
+	return &fakeProcess{isAlive: false, entries: entries}
 }
 
 func (f *fakeProcess) Alive() bool {
@@ -72,13 +77,33 @@ func (f *fakeProcess) GetState() cli.ProcessState {
 	return cli.StateReady
 }
 
-func (f *fakeProcess) TotalCost() float64                         { return 0 }
-func (f *fakeProcess) EventEntries() []cli.EventEntry             { return nil }
-func (f *fakeProcess) EventEntriesSince(_ int64) []cli.EventEntry { return nil }
-func (f *fakeProcess) ProtocolName() string                       { return "test" }
-func (f *fakeProcess) Interrupt()                                 {}
-func (f *fakeProcess) PID() int                                   { return 0 }
-func (f *fakeProcess) InjectHistory(_ []cli.EventEntry)           {}
+func (f *fakeProcess) TotalCost() float64 { return 0 }
+func (f *fakeProcess) EventEntries() []cli.EventEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.entries) == 0 {
+		return nil
+	}
+	cp := make([]cli.EventEntry, len(f.entries))
+	copy(cp, f.entries)
+	return cp
+}
+func (f *fakeProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i, e := range f.entries {
+		if e.Time > afterMS {
+			cp := make([]cli.EventEntry, len(f.entries)-i)
+			copy(cp, f.entries[i:])
+			return cp
+		}
+	}
+	return nil
+}
+func (f *fakeProcess) ProtocolName() string                    { return "test" }
+func (f *fakeProcess) Interrupt()                              {}
+func (f *fakeProcess) PID() int                                { return 0 }
+func (f *fakeProcess) InjectHistory(_ []cli.EventEntry)        {}
 func (f *fakeProcess) SubscribeEvents() (<-chan struct{}, func()) {
 	ch := make(chan struct{})
 	return ch, func() {}
@@ -919,4 +944,95 @@ func TestStartCleanupLoop_StopsOnContextCancel(t *testing.T) {
 
 	cancel() // cancelling the context should stop the goroutine (no hang)
 	time.Sleep(50 * time.Millisecond)
+}
+
+// ---------------------------------------------------------------------------
+// History capture in spawnSession
+// ---------------------------------------------------------------------------
+
+// captureHistoryFrom simulates the history-collection branch in spawnSession:
+// prefer dead process EventEntries (includes live events) over persistedHistory.
+func captureHistoryFrom(s *ManagedSession) []cli.EventEntry {
+	var captured []cli.EventEntry
+	s.sendMu.Lock()
+	if s.process != nil && !s.process.Alive() {
+		captured = s.process.EventEntries()
+	} else if len(s.persistedHistory) > 0 {
+		captured = make([]cli.EventEntry, len(s.persistedHistory))
+		copy(captured, s.persistedHistory)
+	}
+	s.sendMu.Unlock()
+	return captured
+}
+
+// TestHistoryCapture_DeadProcessUsesEventEntries verifies that the
+// spawnSession history-collection logic prefers process.EventEntries() over
+// persistedHistory when the old process is dead. This ensures live events
+// accumulated since the last JSONL load are preserved across process restarts.
+func TestHistoryCapture_DeadProcessUsesEventEntries(t *testing.T) {
+	liveEntries := []cli.EventEntry{
+		{Time: 1000, Type: "user", Summary: "first message"},
+		{Time: 2000, Type: "text", Summary: "first reply"},
+		{Time: 3000, Type: "user", Summary: "second message (live)"},
+		{Time: 4000, Type: "text", Summary: "second reply (live)"},
+	}
+	stalePersisted := []cli.EventEntry{
+		{Time: 1000, Type: "user", Summary: "first message"},
+		{Time: 2000, Type: "text", Summary: "first reply"},
+	}
+
+	proc := newDeadProcWithEntries(liveEntries)
+	s := &ManagedSession{
+		Key:              "test-key",
+		process:          proc,
+		persistedHistory: stalePersisted,
+	}
+
+	captured := captureHistoryFrom(s)
+
+	if len(captured) != len(liveEntries) {
+		t.Fatalf("captured %d entries, want %d", len(captured), len(liveEntries))
+	}
+	// Verify we got the live entries (not the stale persisted ones).
+	if captured[len(captured)-1].Summary != "second reply (live)" {
+		t.Errorf("last entry = %q, want 'second reply (live)'", captured[len(captured)-1].Summary)
+	}
+}
+
+// TestHistoryCapture_NilProcessFallsBackToPersistedHistory verifies that when
+// the old session has no process (service-restart scenario), persistedHistory
+// is used as the history source, with JSONL reload as a further fallback.
+func TestHistoryCapture_NilProcessFallsBackToPersistedHistory(t *testing.T) {
+	persisted := []cli.EventEntry{
+		{Time: 1000, Type: "user", Summary: "startup-loaded entry"},
+	}
+
+	s := &ManagedSession{
+		Key:              "test-key",
+		process:          nil,
+		persistedHistory: persisted,
+	}
+
+	captured := captureHistoryFrom(s)
+
+	if len(captured) != len(persisted) {
+		t.Fatalf("captured %d entries, want %d", len(captured), len(persisted))
+	}
+	if captured[0].Summary != "startup-loaded entry" {
+		t.Errorf("entry summary = %q, want 'startup-loaded entry'", captured[0].Summary)
+	}
+}
+
+// TestHistoryCapture_EmptyFallsBackToJSONL verifies that when the old session
+// has neither a dead process nor persistedHistory, captured history is empty,
+// triggering the JSONL-load path in spawnSession.
+func TestHistoryCapture_EmptyFallsBackToJSONL(t *testing.T) {
+	s := &ManagedSession{
+		Key:     "test-key",
+		process: nil,
+	}
+
+	if captured := captureHistoryFrom(s); len(captured) != 0 {
+		t.Errorf("captured %d entries, want 0 (JSONL fallback should be triggered)", len(captured))
+	}
 }

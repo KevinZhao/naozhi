@@ -269,7 +269,7 @@ func TestHandleAPISessions_WithRemoteNodes(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes = map[string]*NodeClient{
+	srv.nodes = map[string]NodeConn{
 		"macbook": NewNodeClient("macbook", remote.URL, "", "MacBook"),
 	}
 	// Pre-populate cache
@@ -318,7 +318,7 @@ func TestHandleAPISessions_RemoteNodeError(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes = map[string]*NodeClient{
+	srv.nodes = map[string]NodeConn{
 		"bad-node": NewNodeClient("bad-node", remote.URL, "", "Bad"),
 	}
 	// Pre-populate cache
@@ -355,7 +355,7 @@ func TestHandleAPISessionEvents_RemoteNode(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes = map[string]*NodeClient{
+	srv.nodes = map[string]NodeConn{
 		"macbook": NewNodeClient("macbook", remote.URL, "", "MacBook"),
 	}
 
@@ -408,7 +408,7 @@ func TestHandleAPISend_RemoteNode(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes = map[string]*NodeClient{
+	srv.nodes = map[string]NodeConn{
 		"macbook": NewNodeClient("macbook", remote.URL, "", "MacBook"),
 	}
 
@@ -439,7 +439,7 @@ func TestHandleAPISend_RemoteNode(t *testing.T) {
 
 func TestHandleAPISend_UnknownNode(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes = map[string]*NodeClient{}
+	srv.nodes = map[string]NodeConn{}
 
 	body := `{"key":"test:d:u:general","text":"hello","node":"unknown"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
@@ -491,12 +491,13 @@ func TestHub_RemoteSend(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	nodes := map[string]*NodeClient{
+	nodes := map[string]NodeConn{
 		"remote": NewNodeClient("remote", ts.URL, "", "Remote"),
 	}
 	router := session.NewRouter(session.RouterConfig{})
 	guard := newSessionGuard()
-	hub := NewHub(router, nil, nil, "", guard, nodes)
+	var nodesMu sync.RWMutex
+	hub := NewHub(router, nil, nil, "", guard, nodes, &nodesMu)
 	defer hub.Shutdown()
 
 	client := newTestWSClient()

@@ -7,7 +7,7 @@ import (
 	"unicode/utf8"
 )
 
-const defaultEventLogSize = 200
+const defaultEventLogSize = 500
 
 // EventEntry is a simplified event record for the dashboard.
 type EventEntry struct {
@@ -25,10 +25,12 @@ type subscriber struct {
 	closeOnce sync.Once
 }
 
-// EventLog is a thread-safe, bounded event log.
+// EventLog is a thread-safe, bounded event log backed by a ring buffer.
 type EventLog struct {
 	mu      sync.RWMutex
-	entries []EventEntry
+	entries []EventEntry // ring buffer, pre-allocated to maxSize
+	head    int          // next write position
+	count   int          // number of valid entries (0..maxSize)
 	maxSize int
 
 	// Cached summaries updated atomically on Append for efficient access
@@ -45,24 +47,20 @@ func NewEventLog(maxSize int) *EventLog {
 	if maxSize <= 0 {
 		maxSize = defaultEventLogSize
 	}
-	return &EventLog{maxSize: maxSize, entries: make([]EventEntry, 0, 32)}
+	return &EventLog{maxSize: maxSize, entries: make([]EventEntry, maxSize)}
 }
 
-// Append adds an entry to the log, dropping oldest if full.
+// Append adds an entry to the log, overwriting the oldest entry when full.
 // Signals all subscribers non-blockingly after appending.
 func (l *EventLog) Append(e EventEntry) {
 	l.mu.Lock()
 	if e.Time == 0 {
 		e.Time = time.Now().UnixMilli()
 	}
-	l.entries = append(l.entries, e)
-	if len(l.entries) > l.maxSize {
-		drop := l.maxSize / 4
-		if drop < 1 {
-			drop = 1
-		}
-		copy(l.entries, l.entries[drop:])
-		l.entries = l.entries[:len(l.entries)-drop]
+	l.entries[l.head] = e
+	l.head = (l.head + 1) % l.maxSize
+	if l.count < l.maxSize {
+		l.count++
 	}
 	l.mu.Unlock()
 
@@ -70,7 +68,7 @@ func (l *EventLog) Append(e EventEntry) {
 	switch e.Type {
 	case "user":
 		l.lastPromptSummary.Store(e.Summary)
-	case "tool_use", "thinking":
+	case "tool_use", "thinking", "agent":
 		l.lastActivitySummary.Store(e.Summary)
 	}
 
@@ -106,23 +104,31 @@ func (l *EventLog) Subscribe() (<-chan struct{}, func()) {
 	return sub.ch, unsub
 }
 
-// Entries returns a copy of all entries.
+// Entries returns a copy of all entries in chronological order.
 func (l *EventLog) Entries() []EventEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	out := make([]EventEntry, len(l.entries))
-	copy(out, l.entries)
+	out := make([]EventEntry, l.count)
+	start := (l.head - l.count + l.maxSize) % l.maxSize
+	for i := 0; i < l.count; i++ {
+		out[i] = l.entries[(start+i)%l.maxSize]
+	}
 	return out
 }
 
-// EntriesSince returns entries after the given unix ms timestamp.
+// EntriesSince returns entries after the given unix ms timestamp, in chronological order.
 func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	for i, e := range l.entries {
-		if e.Time > afterMS {
-			out := make([]EventEntry, len(l.entries)-i)
-			copy(out, l.entries[i:])
+	start := (l.head - l.count + l.maxSize) % l.maxSize
+	for i := 0; i < l.count; i++ {
+		idx := (start + i) % l.maxSize
+		if l.entries[idx].Time > afterMS {
+			remaining := l.count - i
+			out := make([]EventEntry, remaining)
+			for j := 0; j < remaining; j++ {
+				out[j] = l.entries[(idx+j)%l.maxSize]
+			}
 			return out
 		}
 	}

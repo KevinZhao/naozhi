@@ -2,7 +2,9 @@ package platform
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
+	"time"
 )
 
 // MessageHandler is the callback invoked when a platform receives a message.
@@ -61,4 +63,34 @@ type RunnablePlatform interface {
 	Platform
 	Start(handler MessageHandler) error
 	Stop() error
+}
+
+// ReplyWithRetry calls p.Reply up to maxAttempts times with exponential backoff
+// starting at 500 ms, doubling each retry up to 4 s. It returns on the first
+// success. If all attempts fail the last error is returned.
+func ReplyWithRetry(ctx context.Context, p Platform, msg OutgoingMessage, maxAttempts int) (string, error) {
+	backoff := 500 * time.Millisecond
+	var lastErr error
+	for i := 0; i < maxAttempts; i++ {
+		if i > 0 {
+			timer := time.NewTimer(backoff)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
+				return "", ctx.Err()
+			case <-timer.C:
+			}
+			if backoff < 4*time.Second {
+				backoff *= 2
+			}
+		}
+		id, err := p.Reply(ctx, msg)
+		if err == nil {
+			return id, nil
+		}
+		lastErr = err
+		slog.Warn("platform reply attempt failed", "platform", p.Name(), "chat", msg.ChatID, "attempt", i+1, "err", err)
+	}
+	slog.Error("platform reply failed after all attempts", "platform", p.Name(), "chat", msg.ChatID, "attempts", maxAttempts, "err", lastErr)
+	return "", lastErr
 }

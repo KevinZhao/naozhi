@@ -9,14 +9,18 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/routing"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -41,44 +45,52 @@ type Server struct {
 	backendTag     string // e.g., "cc" or "kiro", appended to replies
 	dashboardToken string // optional bearer token for dashboard API
 	hub            *Hub   // WebSocket hub
-	nodes          map[string]*NodeClient
+	nodes          map[string]NodeConn
+	nodesMu        sync.RWMutex
 	claudeDir      string // path to ~/.claude for session discovery
+	projectMgr     *project.Manager
+	workspaceID    string // local workspace identity
+	workspaceName  string
+
+	// Watchdog configuration stored for user-facing timeout error messages.
+	noOutputTimeout time.Duration
+	totalTimeout    time.Duration
+
+	// Watchdog kill counters — incremented atomically, exposed via /health.
+	watchdogNoOutputKills atomic.Int64
+	watchdogTotalKills    atomic.Int64
 
 	// Background-cached remote node sessions to avoid blocking /api/sessions
-	nodeCacheMu  sync.RWMutex
-	nodeSessions map[string][]map[string]any // nodeID -> cached sessions
-	nodeStatus   map[string]string           // nodeID -> "ok" | "error"
+	nodeCacheMu    sync.RWMutex
+	nodeSessions   map[string][]map[string]any // nodeID -> cached sessions
+	nodeProjects   map[string][]map[string]any // nodeID -> cached projects
+	nodeDiscovered map[string][]map[string]any // nodeID -> cached discovered
+	nodeStatus     map[string]string           // nodeID -> "ok" | "error"
 }
 
 // sessionGuard prevents multiple concurrent messages to the same session.
 type sessionGuard struct {
-	mu       sync.Mutex
-	active   map[string]struct{}
+	active   sync.Map             // string → struct{}: sessions currently processing a message
+	waitMu   sync.Mutex           // guards lastWait
 	lastWait map[string]time.Time // tracks last "please wait" reply per key
 }
 
 func newSessionGuard() *sessionGuard {
 	return &sessionGuard{
-		active:   make(map[string]struct{}),
 		lastWait: make(map[string]time.Time),
 	}
 }
 
 func (g *sessionGuard) TryAcquire(key string) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if _, ok := g.active[key]; ok {
-		return false
-	}
-	g.active[key] = struct{}{}
-	return true
+	_, loaded := g.active.LoadOrStore(key, struct{}{})
+	return !loaded
 }
 
 // ShouldSendWait returns true if enough time has passed since the last
 // "please wait" reply for this key (avoids spamming the user).
 func (g *sessionGuard) ShouldSendWait(key string) bool {
-	g.mu.Lock()
-	defer g.mu.Unlock()
+	g.waitMu.Lock()
+	defer g.waitMu.Unlock()
 	if time.Since(g.lastWait[key]) < 3*time.Second {
 		return false
 	}
@@ -87,9 +99,7 @@ func (g *sessionGuard) ShouldSendWait(key string) bool {
 }
 
 func (g *sessionGuard) Release(key string) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	delete(g.active, key)
+	g.active.Delete(key)
 }
 
 // New creates a new Server.
@@ -115,7 +125,19 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		scheduler:     scheduler,
 		backendTag:    tag,
 		claudeDir:     claudeDir,
+		nodes:         make(map[string]NodeConn),
 	}
+}
+
+// SetWorkspaceIdentity sets the local workspace ID and display name.
+func (s *Server) SetWorkspaceIdentity(id, name string) {
+	s.workspaceID = id
+	s.workspaceName = name
+}
+
+// SetProjectManager sets the project manager for project-based routing.
+func (s *Server) SetProjectManager(mgr *project.Manager) {
+	s.projectMgr = mgr
 }
 
 // SetDashboardToken sets the optional bearer token required for dashboard send API.
@@ -123,9 +145,45 @@ func (s *Server) SetDashboardToken(token string) {
 	s.dashboardToken = token
 }
 
+// SetWatchdogTimeouts stores the configured watchdog durations so they can be
+// shown in user-facing timeout error messages and exposed via /health.
+func (s *Server) SetWatchdogTimeouts(noOutput, total time.Duration) {
+	s.noOutputTimeout = noOutput
+	s.totalTimeout = total
+}
+
 // SetNodes configures remote node clients for multi-node aggregation.
-func (s *Server) SetNodes(nodes map[string]*NodeClient) {
+func (s *Server) SetNodes(nodes map[string]NodeConn) {
 	s.nodes = nodes
+}
+
+// SetReverseNodeServer wires up a ReverseNodeServer so reverse-connecting nodes
+// are dynamically registered/deregistered in Server.nodes.
+func (s *Server) SetReverseNodeServer(rns *ReverseNodeServer) {
+	rns.onRegister = func(id string, rc *ReverseNodeConn) {
+		s.nodesMu.Lock()
+		s.nodes[id] = rc
+		s.nodesMu.Unlock()
+		go s.refreshNodeCacheFor(id)
+		if s.hub != nil {
+			s.hub.BroadcastSessionsUpdate()
+		}
+	}
+	rns.onDeregister = func(id string) {
+		s.nodesMu.Lock()
+		delete(s.nodes, id)
+		s.nodesMu.Unlock()
+		s.nodeCacheMu.Lock()
+		delete(s.nodeSessions, id)
+		delete(s.nodeProjects, id)
+		delete(s.nodeDiscovered, id)
+		s.nodeStatus[id] = "error"
+		s.nodeCacheMu.Unlock()
+		if s.hub != nil {
+			s.hub.PurgeNodeSubscriptions(id)
+			s.hub.BroadcastSessionsUpdate()
+		}
+	}
 }
 
 // Start registers routes and begins serving.
@@ -152,6 +210,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.registerDashboard()
 	s.startNodeCacheLoop(ctx)
+	s.startProjectScanLoop(ctx)
 	slog.Info("server starting", "addr", s.addr)
 
 	srv := &http.Server{
@@ -215,6 +274,7 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 					"  /clear — 重置会话（同 /new）\n" +
 					"  /cd <路径> — 切换工作目录\n" +
 					"  /pwd — 显示当前工作目录\n" +
+					"  /project [name|off|list] — 项目绑定\n" +
 					"  /cron <add|list|del|pause|resume> — 定时任务"
 				if len(s.agentCommands) > 0 {
 					help += "\n\n可用 Agent:"
@@ -229,6 +289,15 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 
 		// Handle /cd <path> to change working directory
 		if strings.HasPrefix(trimmed, "/cd ") {
+			// Block /cd when chat is bound to a project
+			if s.projectMgr != nil {
+				if proj := s.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
+					if p := s.platforms[msg.Platform]; p != nil {
+						p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: fmt.Sprintf("当前已绑定项目 %s，工作目录固定为项目路径。如需切换，请先 /project off 解绑。", proj.Name)})
+					}
+					return
+				}
+			}
 			s.handleCdCommand(ctx, msg, trimmed, log)
 			return
 		}
@@ -243,18 +312,55 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 			return
 		}
 
+		// Handle /project [name|off] command
+		if trimmed == "/project" || strings.HasPrefix(trimmed, "/project ") {
+			s.handleProjectCommand(ctx, msg, trimmed, log)
+			return
+		}
+
 		// Handle /new [agent] reset command
 		// /clear is a Claude Code built-in that doesn't work in stream-json mode,
 		// so we alias it to /new for equivalent behavior.
 		if trimmed == "/new" || strings.HasPrefix(trimmed, "/new ") ||
 			trimmed == "/clear" {
-			agentToReset := "general"
+			agentToReset := ""
 			if parts := strings.SplitN(trimmed, " ", 2); len(parts) > 1 {
-				if id, ok := s.agentCommands[parts[1]]; ok {
-					agentToReset = id
+				agentToReset = parts[1]
+			}
+
+			// In project-bound mode: /new resets planner, /new {agent} resets that agent
+			if s.projectMgr != nil {
+				if proj := s.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
+					if agentToReset == "" {
+						// Reset planner
+						s.router.Reset(proj.PlannerSessionKey())
+						if p := s.platforms[msg.Platform]; p != nil {
+							p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "项目 " + proj.Name + " 的 planner 已重置。"})
+						}
+					} else {
+						// Reset specific agent
+						if id, ok := s.agentCommands[agentToReset]; ok {
+							key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, id)
+							s.router.Reset(key)
+							if p := s.platforms[msg.Platform]; p != nil {
+								p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "会话已重置 (" + id + ")。"})
+							}
+						} else if p := s.platforms[msg.Platform]; p != nil {
+							p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "未知的 agent: " + agentToReset})
+						}
+					}
+					return
+				}
+			}
+
+			// Original behavior (not project-bound)
+			agentID := "general"
+			if agentToReset != "" {
+				if id, ok := s.agentCommands[agentToReset]; ok {
+					agentID = id
 				} else {
 					if p := s.platforms[msg.Platform]; p != nil {
-						errMsg := "未知的 agent: " + parts[1]
+						errMsg := "未知的 agent: " + agentToReset
 						if len(s.agentCommands) > 0 {
 							var names []string
 							for cmd := range s.agentCommands {
@@ -267,16 +373,16 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 					return
 				}
 			}
-			key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentToReset)
+			key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
 			s.router.Reset(key)
 			if p := s.platforms[msg.Platform]; p != nil {
 				label := ""
-				if agentToReset != "general" {
-					label = " (" + agentToReset + ")"
+				if agentID != "general" {
+					label = " (" + agentID + ")"
 				}
 				p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "对话已重置" + label + "。"})
 			}
-			log.Info("session reset by user", "agent", agentToReset)
+			log.Info("session reset by user", "agent", agentID)
 			return
 		}
 
@@ -291,8 +397,34 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 			return
 		}
 
+		// Determine session key and opts: project-bound chat routes to planner
+		var key string
 		opts := s.agents[agentID] // zero value = use router defaults
-		key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+
+		if s.projectMgr != nil {
+			if proj := s.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
+				if agentID == "general" {
+					// Plain messages -> planner
+					key = proj.PlannerSessionKey()
+					opts.Exempt = true
+					opts.Workspace = proj.Path
+					if m := s.projectMgr.EffectivePlannerModel(proj); m != "" {
+						opts.Model = m
+					}
+					if p := s.projectMgr.EffectivePlannerPrompt(proj); p != "" {
+						// Cap-trick to isolate from shared backing array
+						opts.ExtraArgs = append(opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)], "--append-system-prompt", p)
+					}
+				} else {
+					// Agent commands -> per-chat session with project workspace
+					key = session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+					opts.Workspace = proj.Path
+				}
+			}
+		}
+		if key == "" {
+			key = session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+		}
 
 		// H1: Prevent goroutine accumulation — only one message per session at a time
 		if !s.sessionGuard.TryAcquire(key) {
@@ -400,13 +532,15 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 			var errMsg string
 			switch {
 			case errors.Is(err, cli.ErrNoOutputTimeout):
-				errMsg = "⏱️ 处理超时（2 分钟无输出），请简化任务后重试。"
+				s.watchdogNoOutputKills.Add(1)
+				errMsg = fmt.Sprintf("⏱️ 处理超时（%s 无输出），请简化任务后重试。", formatChineseDuration(s.noOutputTimeout))
 			case errors.Is(err, cli.ErrTotalTimeout):
-				errMsg = "⏱️ 处理超时（总耗时过长），请拆分为更小的任务。"
+				s.watchdogTotalKills.Add(1)
+				errMsg = fmt.Sprintf("⏱️ 处理超时（总耗时超过 %s），请拆分为更小的任务。", formatChineseDuration(s.totalTimeout))
 			default:
 				errMsg = "处理失败，请发送 /new 重置后重试。"
 			}
-			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg})
+			platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, 3)
 			return
 		}
 
@@ -454,6 +588,7 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 }
 
 // sendSplitReply sends a reply, splitting into multiple messages if too long.
+// Each chunk is retried up to 3 times with exponential backoff.
 func (s *Server) sendSplitReply(ctx context.Context, p platform.Platform, chatID, text string) {
 	maxLen := p.MaxReplyLength()
 	if maxLen <= 0 {
@@ -466,8 +601,8 @@ func (s *Server) sendSplitReply(ctx context.Context, p platform.Platform, chatID
 		if total > 1 {
 			chunk += fmt.Sprintf("\n— [%d/%d]", i+1, total)
 		}
-		if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: chatID, Text: chunk}); err != nil {
-			slog.Error("reply failed", "err", err)
+		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: chunk}, 3); err != nil {
+			slog.Error("reply chunk failed after retries", "chat", chatID, "chunk", i+1, "err", err)
 		}
 	}
 }
@@ -478,15 +613,17 @@ func splitText(text string, maxRunes int) []string {
 	}
 	var chunks []string
 	for text != "" {
-		if utf8.RuneCountInString(text) <= maxRunes {
-			chunks = append(chunks, text)
-			break
-		}
-		// Advance maxRunes runes to find byte offset
-		end := 0
-		for i := 0; i < maxRunes && end < len(text); i++ {
+		// Advance up to maxRunes runes to find the byte boundary.
+		end, count := 0, 0
+		for count < maxRunes && end < len(text) {
 			_, size := utf8.DecodeRuneInString(text[end:])
 			end += size
+			count++
+		}
+		if end == len(text) {
+			// Remaining text fits within maxRunes — last chunk.
+			chunks = append(chunks, text)
+			break
 		}
 		// Prefer splitting at a newline in the second half
 		if idx := strings.LastIndex(text[:end], "\n"); idx > end/2 {
@@ -500,20 +637,84 @@ func splitText(text string, maxRunes int) []string {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	active, total := s.router.Stats()
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]interface{}{
+	resp := map[string]interface{}{
 		"status":   "ok",
 		"uptime":   time.Since(s.startedAt).Round(time.Second).String(),
 		"sessions": map[string]int{"active": active, "total": total},
-	}); err != nil {
+	}
+	// Extended system info only for authenticated requests
+	if s.isAuthenticated(r) {
+		resp["workspace_id"] = s.workspaceID
+		resp["workspace_name"] = s.workspaceName
+		resp["system"] = systemInfo()
+		resp["watchdog"] = map[string]any{
+			"no_output_kills":   s.watchdogNoOutputKills.Load(),
+			"total_kills":       s.watchdogTotalKills.Load(),
+			"no_output_timeout": s.noOutputTimeout.String(),
+			"total_timeout":     s.totalTimeout.String(),
+		}
+	}
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
 		slog.Error("encode health response", "err", err)
 	}
+}
+
+// formatChineseDuration formats a duration into a short Chinese string for user messages.
+// Examples: 2m → "2 分钟", 30m → "30 分钟", 4h → "4 小时", 90s → "90 秒".
+func formatChineseDuration(d time.Duration) string {
+	if d <= 0 {
+		return "未知"
+	}
+	if d >= time.Hour && d%time.Hour == 0 {
+		return fmt.Sprintf("%d 小时", int(d.Hours()))
+	}
+	if d >= time.Minute && d%time.Minute == 0 {
+		return fmt.Sprintf("%d 分钟", int(d.Minutes()))
+	}
+	return fmt.Sprintf("%d 秒", int(d.Seconds()))
+}
+
+// systemInfo returns compact system fingerprint for the workspace info bar.
+// Cached after first call since values are static for the process lifetime.
+var (
+	sysInfoOnce sync.Once
+	sysInfoVal  map[string]any
+)
+
+func systemInfo() map[string]any {
+	sysInfoOnce.Do(func() {
+		memMB := 0
+		if data, err := os.ReadFile("/proc/meminfo"); err == nil {
+			for _, line := range strings.Split(string(data), "\n") {
+				if strings.HasPrefix(line, "MemTotal:") {
+					fields := strings.Fields(line)
+					if len(fields) >= 2 {
+						if kb, err := strconv.Atoi(fields[1]); err == nil {
+							memMB = kb / 1024
+						}
+					}
+					break
+				}
+			}
+		}
+		sysInfoVal = map[string]any{
+			"os":        runtime.GOOS,
+			"arch":      runtime.GOARCH,
+			"cpus":      runtime.NumCPU(),
+			"memory_mb": memMB,
+		}
+	})
+	return sysInfoVal
 }
 
 // startNodeCacheLoop periodically fetches remote node sessions in the background
 // so /api/sessions never blocks on unreachable nodes.
 func (s *Server) startNodeCacheLoop(ctx context.Context) {
-	if len(s.nodes) == 0 {
+	s.nodesMu.RLock()
+	hasNodes := len(s.nodes) > 0
+	s.nodesMu.RUnlock()
+	if !hasNodes {
 		return
 	}
 	// Eager first fetch in background
@@ -532,26 +733,89 @@ func (s *Server) startNodeCacheLoop(ctx context.Context) {
 	}()
 }
 
-func (s *Server) refreshNodeCache() {
-	type result struct {
-		nodeID   string
-		sessions []map[string]any
-		err      error
+// startProjectScanLoop periodically rescans the projects root for CLAUDE.md changes
+// and cleans up orphaned planner sessions for removed projects.
+func (s *Server) startProjectScanLoop(ctx context.Context) {
+	if s.projectMgr == nil {
+		return
 	}
-	ch := make(chan result, len(s.nodes))
-	for id, nc := range s.nodes {
-		go func(id string, nc *NodeClient) {
-			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				oldNames := s.projectMgr.ProjectNames()
+				if err := s.projectMgr.Scan(); err != nil {
+					slog.Warn("project rescan", "err", err)
+					continue
+				}
+				newNames := s.projectMgr.ProjectNames()
+
+				// Detect removed projects and clean up orphaned planner sessions
+				changed := len(oldNames) != len(newNames)
+				for name := range oldNames {
+					if _, ok := newNames[name]; !ok {
+						changed = true
+						plannerKey := project.PlannerKeyFor(name)
+						if s.router.Remove(plannerKey) {
+							slog.Info("removed orphaned planner", "project", name)
+						}
+					}
+				}
+				if changed {
+					slog.Info("project list changed", "count", len(newNames))
+					if s.hub != nil {
+						s.hub.BroadcastSessionsUpdate()
+					}
+				}
+			}
+		}
+	}()
+}
+
+func (s *Server) refreshNodeCache() {
+	s.nodesMu.RLock()
+	nodesCopy := make(map[string]NodeConn, len(s.nodes))
+	for k, v := range s.nodes {
+		nodesCopy[k] = v
+	}
+	s.nodesMu.RUnlock()
+
+	type result struct {
+		nodeID     string
+		sessions   []map[string]any
+		projects   []map[string]any
+		discovered []map[string]any
+		err        error
+	}
+	ch := make(chan result, len(nodesCopy))
+	for id, nc := range nodesCopy {
+		go func(id string, nc NodeConn) {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
-			sessions, err := nc.FetchSessions(ctx)
-			ch <- result{id, sessions, err}
+			var wg sync.WaitGroup
+			var sessions []map[string]any
+			var projects []map[string]any
+			var discovered []map[string]any
+			var sessErr error
+			wg.Add(3)
+			go func() { defer wg.Done(); sessions, sessErr = nc.FetchSessions(ctx) }()
+			go func() { defer wg.Done(); projects, _ = nc.FetchProjects(ctx) }()
+			go func() { defer wg.Done(); discovered, _ = nc.FetchDiscovered(ctx) }()
+			wg.Wait()
+			ch <- result{id, sessions, projects, discovered, sessErr}
 		}(id, nc)
 	}
 
-	newSessions := make(map[string][]map[string]any, len(s.nodes))
-	newStatus := make(map[string]string, len(s.nodes))
+	newSessions := make(map[string][]map[string]any, len(nodesCopy))
+	newProjects := make(map[string][]map[string]any, len(nodesCopy))
+	newDiscovered := make(map[string][]map[string]any, len(nodesCopy))
+	newStatus := make(map[string]string, len(nodesCopy))
 
-	for i := 0; i < len(s.nodes); i++ {
+	for i := 0; i < len(nodesCopy); i++ {
 		res := <-ch
 		if res.err != nil {
 			slog.Debug("node cache refresh", "node", res.nodeID, "err", res.err)
@@ -563,18 +827,89 @@ func (s *Server) refreshNodeCache() {
 			rs["node"] = res.nodeID
 		}
 		newSessions[res.nodeID] = res.sessions
+		for _, rp := range res.projects {
+			rp["node"] = res.nodeID
+		}
+		newProjects[res.nodeID] = res.projects
+		for _, rd := range res.discovered {
+			rd["node"] = res.nodeID
+		}
+		newDiscovered[res.nodeID] = res.discovered
 	}
 
 	s.nodeCacheMu.Lock()
 	s.nodeSessions = newSessions
+	s.nodeProjects = newProjects
+	s.nodeDiscovered = newDiscovered
 	s.nodeStatus = newStatus
 	s.nodeCacheMu.Unlock()
+}
+
+// refreshNodeCacheFor fetches and caches data for a single node immediately.
+// Called on reverse-node connect and on sessions_changed push (Phase 4).
+func (s *Server) refreshNodeCacheFor(id string) {
+	s.nodesMu.RLock()
+	nc, ok := s.nodes[id]
+	s.nodesMu.RUnlock()
+	if !ok {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	var sessions, projects, discovered []map[string]any
+	wg.Add(3)
+	go func() { defer wg.Done(); sessions, _ = nc.FetchSessions(ctx) }()
+	go func() { defer wg.Done(); projects, _ = nc.FetchProjects(ctx) }()
+	go func() { defer wg.Done(); discovered, _ = nc.FetchDiscovered(ctx) }()
+	wg.Wait()
+
+	for _, rs := range sessions {
+		rs["node"] = id
+	}
+	for _, rp := range projects {
+		rp["node"] = id
+	}
+	for _, rd := range discovered {
+		rd["node"] = id
+	}
+
+	s.nodeCacheMu.Lock()
+	if s.nodeSessions == nil {
+		s.nodeSessions = make(map[string][]map[string]any)
+		s.nodeProjects = make(map[string][]map[string]any)
+		s.nodeDiscovered = make(map[string][]map[string]any)
+		s.nodeStatus = make(map[string]string)
+	}
+	s.nodeSessions[id] = sessions
+	s.nodeProjects[id] = projects
+	s.nodeDiscovered[id] = discovered
+	s.nodeStatus[id] = "ok"
+	s.nodeCacheMu.Unlock()
+
+	if s.hub != nil {
+		s.hub.BroadcastSessionsUpdate()
+	}
 }
 
 func (s *Server) getCachedNodeSessions() (map[string][]map[string]any, map[string]string) {
 	s.nodeCacheMu.RLock()
 	defer s.nodeCacheMu.RUnlock()
 	return s.nodeSessions, s.nodeStatus
+}
+
+func (s *Server) getCachedNodeProjects() map[string][]map[string]any {
+	s.nodeCacheMu.RLock()
+	defer s.nodeCacheMu.RUnlock()
+	return s.nodeProjects
+}
+
+func (s *Server) getCachedNodeDiscovered() map[string][]map[string]any {
+	s.nodeCacheMu.RLock()
+	defer s.nodeCacheMu.RUnlock()
+	return s.nodeDiscovered
 }
 
 // handleCronCommand dispatches /cron subcommands.
@@ -687,6 +1022,73 @@ func (s *Server) handleCronCommand(ctx context.Context, msg platform.IncomingMes
 			"  /cron pause <id>\n" +
 			"  /cron resume <id>")
 	}
+}
+
+// handleProjectCommand handles /project [name|off] commands.
+func (s *Server) handleProjectCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) {
+	p := s.platforms[msg.Platform]
+	if p == nil {
+		return
+	}
+
+	if s.projectMgr == nil {
+		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "项目功能未启用（未配置 projects.root）。"})
+		return
+	}
+
+	arg := strings.TrimSpace(strings.TrimPrefix(trimmed, "/project"))
+
+	// /project — show current binding
+	if arg == "" {
+		proj := s.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID)
+		if proj == nil {
+			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "当前未绑定项目。\n用法: /project <项目名> 绑定"})
+		} else {
+			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: fmt.Sprintf("当前绑定: %s (%s)", proj.Name, proj.Path)})
+		}
+		return
+	}
+
+	// /project off — unbind
+	if arg == "off" {
+		if err := s.projectMgr.UnbindAllChat(msg.Platform, msg.ChatType, msg.ChatID); err != nil {
+			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "解绑失败: " + err.Error()})
+			return
+		}
+		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "已解绑项目，恢复默认路由。"})
+		log.Info("project unbound", "chat", msg.ChatID)
+		return
+	}
+
+	// /project list — list all projects
+	if arg == "list" {
+		projects := s.projectMgr.All()
+		if len(projects) == 0 {
+			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "无可用项目。"})
+			return
+		}
+		var lines []string
+		for _, proj := range projects {
+			lines = append(lines, fmt.Sprintf("  %s — %s", proj.Name, proj.Path))
+		}
+		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "可用项目:\n" + strings.Join(lines, "\n")})
+		return
+	}
+
+	// /project <name> — bind to project
+	proj := s.projectMgr.Get(arg)
+	if proj == nil {
+		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "项目不存在: " + arg + "\n使用 /project list 查看可用项目。"})
+		return
+	}
+
+	if err := s.projectMgr.BindChat(proj.Name, msg.Platform, msg.ChatType, msg.ChatID); err != nil {
+		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "绑定失败: " + err.Error()})
+		return
+	}
+
+	p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: fmt.Sprintf("已绑定项目: %s\n后续消息将路由到该项目的 planner。", proj.Name)})
+	log.Info("project bound", "project", proj.Name, "chat", msg.ChatID)
 }
 
 // handleCdCommand changes the working directory for all sessions in a chat.

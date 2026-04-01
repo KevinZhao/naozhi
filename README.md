@@ -277,7 +277,7 @@ deploy/                       systemd + 部署脚本
 
 ## 设计文档
 
-完整架构设计见 [DESIGN.md](DESIGN.md)。
+完整架构设计见 [DESIGN.md](docs/DESIGN.md)。
 
 ## License
 

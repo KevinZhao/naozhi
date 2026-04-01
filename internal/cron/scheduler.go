@@ -279,27 +279,27 @@ func (s *Scheduler) execute(j *Job) {
 	opts := s.agents[agentID]
 	key := "cron:" + j.ID
 
+	// errReplyCtx: short-lived context for sending error notifications.
+	errReplyCtx, errReplyCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer errReplyCancel()
+
 	sess, _, err := s.router.GetOrCreate(ctx, key, opts)
 	if err != nil {
 		log.Error("cron session error", "err", err)
-		if _, rerr := p.Reply(ctx, platform.OutgoingMessage{
+		platform.ReplyWithRetry(errReplyCtx, p, platform.OutgoingMessage{
 			ChatID: j.ChatID,
 			Text:   fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", j.ID),
-		}); rerr != nil {
-			log.Error("reply failed", "err", rerr)
-		}
+		}, 3)
 		return
 	}
 
 	result, err := sess.Send(ctx, cleanText, nil, nil)
 	if err != nil {
 		log.Error("cron send error", "err", err)
-		if _, rerr := p.Reply(ctx, platform.OutgoingMessage{
+		platform.ReplyWithRetry(errReplyCtx, p, platform.OutgoingMessage{
 			ChatID: j.ChatID,
 			Text:   fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", j.ID),
-		}); rerr != nil {
-			log.Error("reply failed", "err", rerr)
-		}
+		}, 3)
 		return
 	}
 
@@ -314,12 +314,10 @@ func (s *Scheduler) execute(j *Job) {
 	defer replyCancel()
 	chunks := splitReply(replyText, maxLen)
 	for _, chunk := range chunks {
-		if _, rerr := p.Reply(replyCtx, platform.OutgoingMessage{
+		platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
 			ChatID: j.ChatID,
 			Text:   chunk,
-		}); rerr != nil {
-			log.Error("reply failed", "err", rerr)
-		}
+		}, 3)
 	}
 }
 
@@ -368,14 +366,17 @@ func splitReply(text string, maxRunes int) []string {
 	}
 	var chunks []string
 	for text != "" {
-		if utf8.RuneCountInString(text) <= maxRunes {
-			chunks = append(chunks, text)
-			break
-		}
-		end := 0
-		for i := 0; i < maxRunes && end < len(text); i++ {
+		// Advance up to maxRunes runes to find the byte boundary.
+		end, count := 0, 0
+		for count < maxRunes && end < len(text) {
 			_, size := utf8.DecodeRuneInString(text[end:])
 			end += size
+			count++
+		}
+		if end == len(text) {
+			// Remaining text fits within maxRunes — last chunk.
+			chunks = append(chunks, text)
+			break
 		}
 		if idx := strings.LastIndex(text[:end], "\n"); idx > end/2 {
 			end = idx + 1

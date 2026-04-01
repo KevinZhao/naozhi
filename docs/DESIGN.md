@@ -46,7 +46,7 @@ claude -p \
   --input-format stream-json \
   --verbose \                    # 必须，否则 stream-json 输出报错
   --model sonnet \
-  --setting-sources user \       # 只加载用户级配置，跳过 project/local 级 hooks
+  --setting-sources "" \         # 跳过所有外部配置，隔离宿主 hooks 防死循环
   --dangerously-skip-permissions
 ```
 
@@ -54,7 +54,7 @@ claude -p \
 
 死循环根因：**插件的 Stop hooks**（claude-mem 的 summarize + ECC 的 4 个 Stop hooks）在 stream-json 模式下被注入为 user message，触发模型回复循环。
 
-解决方案：`--setting-sources user` — 只加载用户级配置（`~/.claude/settings.json`），跳过 project/local 级别。实测结果：
+解决方案：`--setting-sources ""` — 跳过所有外部配置源，隔离宿主 hooks。实测结果：
 - MCP servers 全部加载 (claude-mem, eks, playwright, gmail, mysql)
 - 30 秒内零 Stop hook 回馈，无死循环
 - ECC skills 和 agents 可用
@@ -87,7 +87,7 @@ claude -p \
 ### 已知陷阱
 
 - **`--verbose` 是必需的**，不加会报 `stream-json requires --verbose`
-- **宿主 hooks 会死循环** — 插件的 Stop hooks 在 stream-json 模式下被注入为 user message。已通过 `--setting-sources user` 解决（只加载用户级配置，跳过插件级 Stop hooks）
+- **宿主 hooks 会死循环** — 插件的 Stop hooks 在 stream-json 模式下被注入为 user message。已通过 `--setting-sources ""` 解决（跳过所有外部配置源）
 - **`type: "user_message"` 无效** — 被静默忽略，不报错也不回复
 
 ## 请求全链路
@@ -516,6 +516,28 @@ session:
     no_output_timeout: "120s"    # 无输出超时 (kill 进程), 默认 2min
     total_timeout: "300s"        # 单轮总超时, 默认 5min
   store_path: "~/.naozhi/sessions.json"  # session 持久化路径
+
+# Workspace 身份
+workspace:
+  id: "my-node"                  # 节点标识 (默认 hostname)
+  name: "My Workspace"           # 显示名
+
+# Project 管理 (可选)
+projects:
+  root: "/home/ec2-user/workspace"  # 项目根目录, 子目录自动成为项目
+
+# 多节点聚合 (可选)
+nodes:
+  macbook:
+    url: "http://10.0.0.2:8180"
+    token: "shared-secret"
+    display_name: "MacBook Pro"
+
+# 反向连接 (子节点配置, 可选)
+upstream:
+  url: "wss://primary:8180/ws-node"
+  node_id: "remote-1"
+  token: "shared-secret"
 
 # Agent 定义: agent_id -> model + args
 agents:
@@ -1006,7 +1028,7 @@ Gateway 收到 SIGTERM/SIGINT 时：
 - **stream-json 协议变化** — CLI 官方格式，输出端有文档，但输入格式和完整事件 schema 无文档。Agent SDK 内部使用同一协议，协议稳定性与 SDK 一致
 - **并发限制** — 每个 claude 进程 ~350MB RSS (已验证)。t4g.small (2GB) 建议限制 2-3 并发，超出排队
 - **CLI 版本锁定** — 建议固定 CLI 版本，测试通过后再升级
-- **hooks 隔离** — 已通过 `--setting-sources user` 解决。插件 Stop hooks 不加载，MCP/skills 正常
+- **hooks 隔离** — 已通过 `--setting-sources ""` 解决。插件 Stop hooks 不加载，MCP/skills 正常
 - **进程僵尸** — 需定期健康检查，清理无响应进程
 
 ## 部署架构
@@ -1111,5 +1133,601 @@ deploy/
    - Discord 平台（WebSocket gateway）
    - 飞书 WebSocket 传输模式
 
-5. Phase 5: Cron Scheduler — 定时任务
-6. Phase 6: 更多 Platform (Telegram)
+5. Phase 5: Cron Scheduler — 定时任务 **[已完成]**
+6. Phase 6: Multi-Node — 多节点聚合 **[已完成]**
+   - NodeClient HTTP 聚合 + WS Relay 实时转发
+   - 反向连接 (NAT 穿越): Connector + ReverseNodeConn
+7. Phase 7: Workspace → Project → Session 三层组织
+   - 7.0: ProjectManager + Planner + IM 路由 **[已完成]**
+   - 7.1: Discovered sessions 合并进 sidebar **[已完成]**
+   - 7.2: Node 身份 (workspace.id/name) **[已完成]**
+   - 7.3: 远程 projects + discovered 聚合 **[已完成]**
+   - 7.4: 跨 workspace 操作 proxy
+
+---
+
+## Phase 7: Project (Folder) 组织
+
+### 核心概念
+
+**Project (项目) = 文件系统目录**。`projects_root` 下每个子目录自动成为一个项目，目录名即项目名。项目是 session 的组织单位，也是 IM 消息的默认路由目标。
+
+```
+projects_root: /home/ec2-user/workspace/
+├── naozhi/                   <- Project "naozhi"
+│   └── .naozhi/
+│       └── project.yaml      <- 项目配置
+├── daydream/                 <- Project "daydream"
+│   └── .naozhi/
+│       └── project.yaml
+└── research/                 <- Project "research"
+    └── .naozhi/
+        └── project.yaml
+```
+
+**核心约束**：
+- 一个 session 只属于一个 project（由 workspace 路径决定），不允许跨 project
+- Session 内的 claude CLI / kiro 进程可以自由访问任意目录，project 只影响归属展示和 planner 路由
+- `projects_root` 全局唯一，在 `config.yaml` 中配置
+
+---
+
+### Planner Agent
+
+每个 Project 有一个专属的 **Planner** — 常驻的 claude CLI 进程，是项目的"主脑"。
+
+**定位**：
+- **IM 的默认接入点**：IM 渠道绑定到某个 project 后，消息默认路由到该 project 的 planner
+- **项目感知**：workspace 固定为项目路径，可以直接读写项目文件、查看 git 状态
+- **协调其他 session**：通过 dashboard API 或 cron 可以向其他 session 发消息
+- **Memory 关联**：使用项目专属 memory 文件（`.naozhi/MEMORY.md`）
+
+**Session Key 格式**：
+
+```
+project:{projectName}:planner
+```
+
+示例：`project:naozhi:planner`、`project:daydream:planner`
+
+**共享上下文**：planner 是 project 级别的，所有绑定到该项目的 IM chat 共享同一个 planner 进程和对话上下文。这是有意为之——planner 代表整个项目的"主脑"，而非单个用户的私有会话。
+
+**生命周期特殊规则**：
+- **免 TTL**：不受空闲超时影响。Router 的 Cleanup 跳过 `exempt` session；7×TTL 的死亡裁剪同样跳过
+- **不计入 `max_procs`**：Router 用整数计数器 `activeCount + pendingSpawns >= maxProcs` 判断是否超限。`exempt` session 不计入 `activeCount`，也不被 `evictOldest` 选中。planner 进程存在于 Router 的 sessions map 中，但对其他普通 session 的并发配额透明
+- **自动重启**：planner 无需特殊监控。`router.GetOrCreate` 对 dead session 的现有处理（自动 `--resume` 重建进程）已经够用。IM 消息到达时直接调 `GetOrCreate("project:naozhi:planner", ...)` 即可；`EnsurePlanner` 仅用于服务启动时可选的预热
+- **初始 Prompt**：通过 `--append-system-prompt` 注入，内容从 `project.yaml` 的 `planner_prompt` 字段读取（待设计具体内容）
+
+---
+
+### IM 路由变更
+
+当前路由逻辑（platform + chat → session）扩展为支持 project 绑定：
+
+```
+IM 消息到达
+    |
+    +-> 该 chat 是否绑定了 project?
+          |
+          +-- 是 -> 路由到 project 的 planner session
+          |         key: project:{name}:planner
+          |
+          +-- 否 -> 原有逻辑 (session key = platform:chatType:chatID:general)
+```
+
+**绑定方式**：
+
+1. **命令绑定**（用户在 IM 中发送）：
+   ```
+   /project naozhi          <- 将当前 chat 绑定到 naozhi 项目的 planner
+   /project                 <- 查看当前 chat 的 project 绑定
+   /project off             <- 解绑，恢复默认路由
+   ```
+
+2. **配置绑定**（`config.yaml` 中静态配置）：
+   ```yaml
+   projects:
+     naozhi:
+       chat_bindings:
+         - platform: feishu
+           chat_id: "xxx"
+   ```
+
+绑定信息持久化到各项目的 `.naozhi/project.yaml`（`chat_bindings` 字段），保持项目配置自包含，项目目录迁移时绑定关系随之保留。
+
+**Planner 内的 agent 分发**：
+
+绑定后，普通消息默认去 planner，agent 命令仍然有效。agent session 沿用现有 key 格式，Router 设置 workspace 为项目路径：
+```
+/review PR#123    -> platform:chatType:chatID:code-reviewer  (workspace 设为项目路径)
+普通消息          -> project:{name}:planner
+```
+
+agent session 是 per-chat 的（key 含 chatID），planner 是 per-project 的（key 不含 chatID）。
+
+**`/new` 行为**：
+
+在 project 绑定的 chat 中：
+```
+/new         <- 重置 planner 对话上下文（所有绑定此项目的 chat 共享，均受影响）
+/new review  <- 只重置当前 chat 的 code-reviewer session（不影响 planner）
+```
+
+---
+
+### 数据模型
+
+#### Project 结构
+
+```go
+// internal/project/project.go
+
+type Project struct {
+    Name string    // 目录名 (唯一 ID)
+    Path string    // 绝对路径 (/home/ec2-user/workspace/naozhi)
+    Config ProjectConfig
+}
+
+type ProjectConfig struct {
+    // Git 同步
+    GitSync    bool   `yaml:"git_sync"`
+    GitRemote  string `yaml:"git_remote"`
+
+    // Memory
+    MemoryFile string `yaml:"memory_file"` // 默认 ".naozhi/MEMORY.md"
+
+    // Planner
+    PlannerModel  string `yaml:"planner_model"`  // 默认用全局 model
+    PlannerPrompt string `yaml:"planner_prompt"`  // --append-system-prompt 内容 (待设计)
+
+    // IM 绑定 (可选，也可通过命令动态绑定)
+    ChatBindings []ChatBinding `yaml:"chat_bindings"`
+}
+
+type ChatBinding struct {
+    Platform string `yaml:"platform"`
+    ChatID   string `yaml:"chat_id"`
+    ChatType string `yaml:"chat_type"`
+}
+```
+
+#### ManagedSession 变更
+
+```go
+type ManagedSession struct {
+    // ... 现有字段 ...
+
+    // exempt=true: 不计入 activeCount、不被 evictOldest 选中、不被 Cleanup TTL/7×TTL 裁剪
+    // 用于 planner session，使其对普通 session 的并发配额透明
+    exempt  bool
+}
+```
+
+---
+
+### ProjectManager 组件
+
+新增 `internal/project/manager.go`：
+
+```go
+type Manager struct {
+    root     string
+    mu       sync.RWMutex
+    projects map[string]*Project   // name -> project
+
+    router *session.Router         // 用于 EnsurePlanner
+}
+
+// Scan 扫描 root 下所有子目录，读取 .naozhi/project.yaml
+func (m *Manager) Scan() error
+
+// Get 获取项目（不存在返回 nil）
+func (m *Manager) Get(name string) *Project
+
+// All 返回所有项目（按目录名排序）
+func (m *Manager) All() []*Project
+
+// ForWorkspace 通过 workspace 路径反查项目（用于 session 归属）
+// 使用前缀匹配：/workspace/naozhi/src/components 归属于 "naozhi" 项目
+func (m *Manager) ForWorkspace(path string) *Project
+
+// EnsurePlanner 为项目预热 planner session（可选，用于服务启动时）
+// IM 消息路由时直接调 router.GetOrCreate 即可，GetOrCreate 会自动恢复 dead planner
+func (m *Manager) EnsurePlanner(p *Project) (*session.ManagedSession, error)
+
+// SaveConfig 写入 project.yaml
+func (m *Manager) SaveConfig(name string, cfg ProjectConfig) error
+
+// ProjectForChat 查找 chat 绑定的 project（用于 IM 路由）
+func (m *Manager) ProjectForChat(platform, chatType, chatID string) *Project
+```
+
+**与 Router 的关系**：
+- ProjectManager 持有 Router 引用，调用 `router.GetOrCreate` 创建/恢复 planner session
+- Planner session 在 Router 的 `sessions` map 中正常存储，`project:` 是保留命名空间前缀，不与现有 `platform:chatType:chatID:agentID` 格式冲突
+- `exempt=true` 使 planner 在以下三处被跳过：`Cleanup` 的 TTL 裁剪、`Cleanup` 的 7×TTL 死亡裁剪、`evictOldest` 的候选选择
+- `exempt` session 不计入 `activeCount`，普通 session 的 `max_procs` 配额不受影响
+
+---
+
+### Dashboard 变更
+
+#### 侧边栏（左栏）
+
+```
++-----------------------------+
+|  Projects                   |
+|                             |
+|  ▼ naozhi            [⚙]  |
+|    ● planner                |   <- 常驻，特殊图标，不同颜色
+|    ○ feishu:code-review    |
+|    ○ slack:general         |
+|                             |
+|  ▶ daydream          [⚙]  |   <- 折叠
+|                             |
+|  ▶ research          [⚙]  |   <- 折叠
+|                             |
+|  ── 未归属 Sessions ──       |
+|    ○ discord:general       |
++-----------------------------+
+```
+
+#### Session 归属计算（后端）
+
+`/api/sessions` 响应新增 `project` 字段：
+
+```json
+{
+  "key": "feishu:1:C123:general",
+  "project": "naozhi",
+  "workspace": "/home/ec2-user/workspace/naozhi",
+  ...
+}
+```
+
+后端通过 `projectManager.ForWorkspace(session.workspace)` 填充，planner session 直接从 key 解析。
+
+#### 项目设置面板（`[⚙]` 按钮）
+
+```
+Project: naozhi
+Path:    /home/ec2-user/workspace/naozhi
+
+[Planner]
+Status:  ● running   (project:naozhi:planner)
+Model:   [claude-sonnet-4-6      ▾]
+Prompt:  [edit...]
+
+[IM Bindings]
+  feishu:direct:alice    [解绑]
+  slack:channel:C123     [解绑]
+  [+ 添加绑定]  <- 弹出表单：选择 platform + 输入 chat ID
+
+[Git Sync]
+☐ Enabled
+Remote: ___________________________
+
+[Memory]
+File:   .naozhi/MEMORY.md   (14.2 KB)
+```
+
+注："+ 添加绑定"通过表单手动输入 platform 和 chat ID，或从当前在线 session 列表中选择（dashboard 可见所有 session 的 chatID）。
+
+#### 新增 API Endpoints
+
+| Endpoint | Method | 说明 |
+|----------|--------|------|
+| `/api/projects` | GET | 列出所有项目及 planner 状态 |
+| `/api/projects/{name}/config` | GET/PUT | 读写 project.yaml |
+| `/api/projects/{name}/planner/restart` | POST | 重启 planner |
+
+---
+
+### 配置格式变更
+
+```yaml
+# config.yaml 新增/变更字段
+
+# Workspace 身份（本机 naozhi 实例）
+workspace:
+  id: "ec2-dev"                # 唯一标识（默认 hostname）
+  name: "EC2 Dev"              # 展示名（默认同 id）
+
+session:
+  cwd: "/home/ec2-user/workspace"  # 原 workspace 字段，改名为 cwd（向后兼容：workspace 仍可用）
+
+# 远程 workspace（原 nodes，workspaces 为推荐名，nodes 仍兼容）
+workspaces:
+  macbook:
+    url: "http://192.168.1.101:8180"
+    name: "MacBook Pro"
+
+projects:
+  root: "~/workspace"      # projects_root，扫描此目录下所有子目录
+
+  # 可选：全局 planner 默认配置（可被 project.yaml 覆盖）
+  planner_defaults:
+    model: "claude-sonnet-4-6"
+    # prompt: 待设计
+```
+
+**术语链**：`workspace` (实例) → `project` (目录) → `session` (会话)
+
+**向后兼容**：
+- `session.workspace` 仍可用，加载时自动映射到 `session.cwd`
+- `nodes` 仍可用，加载时自动映射到 `workspaces`
+- 不配置 `workspace.id` 时默认取 hostname
+
+---
+
+### 实现步骤 (Phase 7)
+
+Phase 7 分为四个子阶段，逐步从单机 project 组织演进到跨 workspace 管理。
+
+#### Phase 7.0: ProjectManager + Planner + IM 路由 [已完成]
+
+- `internal/project/` 包：Scan/Get/All/ProjectForChat/ResolveWorkspaces/BindChat/UnbindChat
+- ManagedSession.Exempt + Router 三处跳过 (countActive/evictOldest/Cleanup)
+- `/project` 命令、planner 路由、`/cd` 互斥、`/new` 区分 planner/agent
+- Dashboard 侧边栏按 project 分组，planner 置顶紫色标识
+- `/api/projects`、`/api/projects/config`、`/api/projects/planner/restart` 端点
+
+#### Phase 7.1: Discovered Sessions 合并进 Folder [待实现]
+
+**目标**：消除 "Discovered Processes" 独立区域，所有 session（managed + discovered）按 folder 统一聚合。
+
+**后端**：
+- `DiscoveredSession` 加 `Project string` 字段
+- `handleAPIDiscovered` 用 `ResolveWorkspaces` 批量解析 `cwd → project`
+
+**前端**：
+- 删除 `discovered-section` 独立区域
+- `fetchSessions` + `scanDiscovered` 结果合并为统一 item 列表：
+  ```
+  type: "managed" | "discovered"
+  project: string  // 从 project 字段或 cwd 解析
+  ```
+- `renderSidebar` 合并渲染：每个 folder group 内 planner 最前，managed 按 state 排，discovered 排最后
+- discovered 卡片用 `◇` 图标 + "external" badge + 内联 takeover 按钮
+- 点击 discovered 卡片保持现有 `previewDiscovered` 行为
+- 未匹配任何 project 的 discovered session 归入 "未归属" 分组
+
+**不改**：`/api/sessions` 和 `/api/discovered` 保持两个独立端点。
+
+#### Phase 7.2: Node 身份 + 配置增强 [待实现]
+
+**目标**：每个 naozhi 实例有明确身份，为跨实例聚合做基础。
+
+**配置变更**：
+
+```yaml
+# config.yaml 新增（nodes 保持不变，向后兼容）
+node:
+  id: "ec2-prod"           # 本机唯一标识（默认 hostname）
+  display_name: "EC2 Prod"  # 展示名（默认同 id）
+
+# 远程实例仍用 nodes（不改名，不破坏现有配置）
+nodes:
+  macbook:
+    url: "http://192.168.1.101:8180"
+    display_name: "MacBook Pro"
+```
+
+`node.id` 是寻址基础。不配置时默认为 `os.Hostname()`。
+
+**API 变更**：
+- `GET /health` 响应加 `node_id` 和 `display_name`
+- `GET /api/sessions` 的 `stats` 加 `node_id`
+
+**前端**：
+- 单 workspace（无 remote nodes）：直接显示 project groups（现有行为不变）
+- 多 workspace：最外层按 node 分组，每个 node 下再按 project 分组
+  ```
+  🖥 EC2 Prod [●]
+    ▼ naozhi/
+      ● planner
+      ○ feishu:general
+      ◇ PID 12345
+    ▶ daydream/
+
+  💻 MacBook Pro [●]
+    ▼ brain/
+      ● planner
+    ▶ webapp/
+  ```
+- 单 workspace 时自动折叠 node 层（不增加视觉层级）
+
+#### Phase 7.3: 远程 Projects + Discovered 聚合 [待实现]
+
+**目标**：聚合节点能看到远程实例的 projects 和 discovered sessions。
+
+**NodeClient 扩展**：
+
+```go
+// 新增方法
+func (n *NodeClient) FetchProjects(ctx) ([]ProjectInfo, error)
+func (n *NodeClient) FetchDiscovered(ctx) ([]DiscoveredSession, error)
+```
+
+**nodeCache 扩展**：
+
+```go
+type nodeCache struct {
+    sessions   []SessionSnapshot      // 已有
+    projects   []ProjectInfo          // 新增
+    discovered []DiscoveredSession    // 新增
+    status     string
+    fetchedAt  time.Time
+}
+```
+
+缓存刷新间隔：sessions + projects 每 10s（已有频率），discovered 每 30s（更低频，因为是扫描 /proc）。
+
+**Dashboard**：
+- 远程 node 的 sessions、projects、discovered 全部合并进统一 sidebar tree
+- 远程 discovered 卡片的 takeover 按钮通过 proxy 转发
+
+#### Phase 7.4: 跨 Workspace 操作 Proxy [待实现]
+
+**目标**：从聚合节点可以对远程实例执行完整操作。
+
+**操作矩阵**：
+
+| 操作 | 本机 | 远程（proxy 转发） |
+|------|------|-------------------|
+| 查看 sessions/events | ✅ 已有 | ✅ 已有 |
+| 发送消息 | ✅ 已有 | ✅ 已有 |
+| takeover discovered | ✅ 已有 | 新增 proxy |
+| planner restart | ✅ 已有 | 新增 proxy |
+| project config CRUD | ✅ 已有 | 新增 proxy |
+| /project bind (IM) | ✅ | ❌ 只影响本机路由 |
+
+**NodeClient 新增**：
+
+```go
+func (n *NodeClient) Takeover(ctx, pid, sessionID, cwd string) error
+func (n *NodeClient) RestartPlanner(ctx, projectName string) error
+func (n *NodeClient) UpdateProjectConfig(ctx, name string, cfg ProjectConfig) error
+```
+
+**不引入全局 session key**：跨 workspace 路由不改变 session key 格式。前端通过 `node` 维度区分本机和远程，API 调用时带 `node` 参数由 server 决定本地处理还是 proxy 转发（现有模式）。
+
+---
+
+### 补充设计细节
+
+#### `/cd` 与 `/project` 的交互
+
+当 chat 已绑定 project 时，planner 的 workspace 固定为项目路径，不允许通过 `/cd` 修改：
+
+```
+用户在已绑定 naozhi 的 chat 中发 /cd /tmp
+  -> 回复: "当前已绑定项目 naozhi，工作目录固定为项目路径。如需切换，请先 /project off 解绑。"
+```
+
+`/cd` 只在未绑定 project 的 chat 中可用，保持现有行为不变。
+
+#### `exempt` 标记的持久化与恢复
+
+`storeEntry` 不新增字段。重启加载时，通过 session key 的 `project:` 前缀推导 `exempt=true`：
+
+```go
+// loadStore 后恢复 exempt 标记
+if strings.HasPrefix(entry.Key, "project:") {
+    session.exempt = true
+}
+```
+
+#### `countActive` 跳过 exempt session
+
+Router 的 `countActive()` 遍历 sessions 计算存活进程数，需排除 exempt session：
+
+```go
+func (r *Router) countActive() {
+    count := 0
+    for _, s := range r.sessions {
+        if s.exempt {
+            continue  // planner 不占名额
+        }
+        if s.process != nil && s.process.Alive() {
+            count++
+        }
+    }
+    r.activeCount = count
+}
+```
+
+#### Graceful Shutdown 中的 Planner 处理
+
+Planner 在 shutdown 时与普通 session 一致：等待 running 完成 → 保存 store → 关闭 stdin。`exempt` 只影响日常 TTL/eviction，不影响 shutdown 流程。
+
+---
+
+### 功能验收矩阵
+
+以下从用户视角描述 Phase 7 实现后可验收的全部功能。每条可直接作为集成测试 case。
+
+#### 一、Project 自动发现
+
+| # | 场景 | 前置条件 | 操作 | 预期结果 |
+|---|------|---------|------|---------|
+| 1.1 | 启动时扫描 projects_root | `~/workspace/` 下有 naozhi, daydream, research 三个目录 | 启动 naozhi 服务 | `GET /api/projects` 返回 3 个 project，name 分别为 naozhi/daydream/research |
+| 1.2 | 跳过非目录文件 | `~/workspace/` 下有 README.md 文件 | 启动 | `/api/projects` 不含 README.md |
+| 1.3 | 跳过隐藏目录 | `~/workspace/.git` 存在 | 启动 | `/api/projects` 不含 .git |
+| 1.4 | 无 project.yaml 的目录也被发现 | `~/workspace/new-project/` 存在但无 `.naozhi/project.yaml` | 启动 | `/api/projects` 包含 new-project，config 为默认值 |
+| 1.5 | 有 project.yaml 的目录读取配置 | `~/workspace/naozhi/.naozhi/project.yaml` 配置了 `planner_model: opus` | 启动 | `GET /api/projects` 中 naozhi 的 planner_model 为 opus |
+| 1.6 | projects_root 不存在 | config 中 `projects.root` 指向不存在的目录 | 启动 | 启动失败，错误信息包含 "projects root not found" |
+
+#### 二、Planner 生命周期
+
+| # | 场景 | 前置条件 | 操作 | 预期结果 |
+|---|------|---------|------|---------|
+| 2.1 | 首次消息触发 planner 创建 | 项目 naozhi 存在，无 planner session | IM 发消息到已绑定 naozhi 的 chat | Router 中出现 key=`project:naozhi:planner` 的 session，状态为 ready/running |
+| 2.2 | Planner 不受 TTL 影响 | Planner session 空闲超过 TTL (30min) | 等待 Cleanup 执行 | Planner 仍然 alive，不被关闭 |
+| 2.3 | Planner 不受 7×TTL 死亡裁剪 | Planner 进程死亡，空闲超过 7×TTL | 等待 Cleanup 执行 | Planner session 仍在 sessions map 中，未被删除 |
+| 2.4 | Planner 不被 evict | `max_procs=2`，2 个普通 session 存活，新消息到达 | Router 尝试 evictOldest | 只从普通 session 中选最旧的驱逐，planner 不被选中 |
+| 2.5 | Planner 不计入 activeCount | `max_procs=3`，1 个 planner + 3 个普通 session | 检查 activeCount | activeCount=3（只计普通 session），不触发 maxProcs 限制 |
+| 2.6 | Planner 死亡后自动恢复 | Planner 进程意外退出 (state=dead) | IM 再发消息 | `GetOrCreate` 自动 `--resume` 恢复，对话上下文保留 |
+| 2.7 | Planner 的 workspace 固定 | Planner 创建时 workspace 为项目路径 | 查看 planner process 的 CWD | 为 `/home/.../workspace/naozhi`，不受 `/cd` 影响 |
+| 2.8 | Planner 使用自定义 model | `project.yaml` 中 `planner_model: opus` | Planner 被创建 | CLI 启动参数包含 `--model opus` |
+| 2.9 | Planner 注入 system prompt | `project.yaml` 中 `planner_prompt: "你是 naozhi 的规划者"` | Planner 被创建 | CLI 启动参数包含 `--append-system-prompt "你是 naozhi 的规划者"` |
+| 2.10 | 服务重启后 planner 恢复 | Planner 有 session_id，服务重启 | 加载 store，IM 发消息 | Planner 通过 `--resume` 恢复，上下文保留；`exempt` 从 `project:` 前缀推导 |
+
+#### 三、IM-to-Project 路由
+
+| # | 场景 | 前置条件 | 操作 | 预期结果 |
+|---|------|---------|------|---------|
+| 3.1 | `/project` 命令绑定 | 项目 naozhi 存在 | 飞书发 `/project naozhi` | 回复确认绑定；后续普通消息路由到 `project:naozhi:planner` |
+| 3.2 | `/project` 查看当前绑定 | Chat 已绑定 naozhi | 飞书发 `/project` | 回复 "当前绑定: naozhi (/home/.../workspace/naozhi)" |
+| 3.3 | `/project off` 解绑 | Chat 已绑定 naozhi | 飞书发 `/project off` | 回复确认解绑；后续消息恢复原有路由 (general session) |
+| 3.4 | `/project` 绑定不存在的项目 | 项目 xxx 不存在 | 飞书发 `/project xxx` | 回复 "项目不存在: xxx" |
+| 3.5 | 绑定后普通消息走 planner | Chat 已绑定 naozhi | 飞书发 "帮我看看 git log" | 消息发送到 `project:naozhi:planner` session |
+| 3.6 | 绑定后 agent 命令仍生效 | Chat 已绑定 naozhi，`/review` 映射到 code-reviewer | 飞书发 `/review main.go` | 消息发送到 `feishu:direct:alice:code-reviewer`，workspace 为 naozhi 项目路径 |
+| 3.7 | 未绑定时走原有路由 | Chat 未绑定任何 project | 飞书发普通消息 | 消息发送到 `feishu:direct:alice:general`（现有行为） |
+| 3.8 | 配置绑定（静态） | `project.yaml` 中有 `chat_bindings: [{platform: feishu, chat_id: C123}]` | 启动后飞书 C123 发消息 | 消息路由到对应项目的 planner |
+| 3.9 | 绑定持久化 | 通过 `/project naozhi` 绑定 | 重启服务 | 绑定仍然有效（从 `project.yaml` 的 `chat_bindings` 加载） |
+| 3.10 | `/cd` 在绑定状态下被禁止 | Chat 已绑定 naozhi | 飞书发 `/cd /tmp` | 回复 "当前已绑定项目 naozhi，工作目录固定为项目路径。如需切换，请先 /project off 解绑。" |
+| 3.11 | 多 chat 共享同一 planner | 飞书 Alice 和 Slack Bob 都绑定 naozhi | Alice 发消息，Bob 发消息 | 两条消息都路由到同一个 `project:naozhi:planner` session，共享上下文 |
+
+#### 四、`/new` 在 Project 模式下的行为
+
+| # | 场景 | 前置条件 | 操作 | 预期结果 |
+|---|------|---------|------|---------|
+| 4.1 | `/new` 重置 planner | Chat 绑定 naozhi，planner 有上下文 | 飞书发 `/new` | Planner session 被 Reset，下次消息创建全新进程，上下文清空 |
+| 4.2 | `/new` 影响所有共享方 | Alice 和 Bob 都绑定 naozhi | Alice 发 `/new` | Planner 重置，Bob 下次发消息也是全新上下文 |
+| 4.3 | `/new review` 只重置 agent | Chat 绑定 naozhi，有 code-reviewer session | 飞书发 `/new review` | 只重置 `feishu:direct:alice:code-reviewer`，planner 不受影响 |
+
+#### 五、Dashboard 展示
+
+| # | 场景 | 前置条件 | 操作 | 预期结果 |
+|---|------|---------|------|---------|
+| 5.1 | Session 按 project 分组 | 有 naozhi project + 2 个归属 session + 1 个未归属 session | 打开 dashboard | 侧边栏显示 "naozhi" 折叠组（含 planner + 2 session）+ "未归属 Sessions" 组（含 1 session） |
+| 5.2 | Planner 置顶显示 | naozhi 下有 planner + code-reviewer + general | 查看 naozhi 组 | Planner 在最上面，有特殊图标/颜色标识 |
+| 5.3 | Session 通过 workspace 前缀归属 | Session workspace 为 `/workspace/naozhi/src` | 查看 dashboard | 该 session 显示在 naozhi project 下 |
+| 5.4 | 无 project 的 session 归到 "未归属" | Session workspace 为 `/tmp/test` | 查看 dashboard | 该 session 显示在 "未归属 Sessions" 分组 |
+| 5.5 | 项目设置面板 | 点击 naozhi 的 `[⚙]` | 面板打开 | 显示 planner 状态、model、IM bindings 列表、Git Sync 开关、Memory 文件信息 |
+| 5.6 | `/api/sessions` 含 project 字段 | 存在归属 naozhi 的 session | `GET /api/sessions` | 每个 session 有 `"project": "naozhi"` 或 `"project": ""`（未归属） |
+| 5.7 | `/api/projects` 接口 | 有 3 个项目 | `GET /api/projects` | 返回数组，每项含 name/path/planner_status/config 字段 |
+
+#### 六、项目配置管理
+
+| # | 场景 | 前置条件 | 操作 | 预期结果 |
+|---|------|---------|------|---------|
+| 6.1 | 读取项目配置 | naozhi 有 project.yaml | `GET /api/projects/naozhi/config` | 返回 ProjectConfig JSON |
+| 6.2 | 更新项目配置 | naozhi 存在 | `PUT /api/projects/naozhi/config` 带 `{"planner_model":"opus"}` | `.naozhi/project.yaml` 被更新，返回 200 |
+| 6.3 | 添加 IM 绑定 | naozhi 存在 | `PUT /api/projects/naozhi/config` 添加 chat_binding | `project.yaml` 写入新绑定，后续该 chat 消息走 planner |
+| 6.4 | 删除 IM 绑定 | naozhi 有一个绑定 | `PUT /api/projects/naozhi/config` 移除 binding | 绑定生效解除，该 chat 消息恢复默认路由 |
+| 6.5 | 重启 planner | planner 在运行 | `POST /api/projects/naozhi/planner/restart` | 当前 planner 进程被 kill，新进程用最新配置启动 |
+| 6.6 | 不存在的项目 | 无 xxx 项目 | `GET /api/projects/xxx/config` | 返回 404 |
+
+#### 七、与现有功能兼容性
+
+| # | 场景 | 预期结果 |
+|---|------|---------|
+| 7.1 | 未配置 `projects.root` | 服务正常启动，Phase 7 功能全部禁用，现有行为不受影响 |
+| 7.2 | 未绑定 project 的 chat | 消息路由、`/cd`、`/new`、agent 命令全部保持现有行为 |
+| 7.3 | Graceful shutdown 含 planner | Planner running 时收到 SIGTERM：等待完成 → 保存 store（含 planner session_id）→ 关闭 |
+| 7.4 | 多节点聚合 | 远程 node 的 session 如有 workspace 在本机 projects_root 下，可归属到 project（尽力归属，不强制） |
+| 7.5 | Cron 任务在 project 下执行 | Cron job 配置了 workspace 在项目路径下，其 session 归属到对应 project |
+| 7.6 | Session 持久化含 planner | `sessions.json` 中含 `project:naozhi:planner` 条目，重启后正确恢复 exempt 标记 |
+| 7.7 | `/project` 解绑后 `/cd` 恢复 | 先 `/project off` 再 `/cd /tmp`：正常工作，无报错 |

@@ -14,6 +14,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/connector"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/pathutil"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -21,6 +22,7 @@ import (
 	"github.com/naozhi/naozhi/internal/platform/feishu"
 	slackplatform "github.com/naozhi/naozhi/internal/platform/slack"
 	weixinplatform "github.com/naozhi/naozhi/internal/platform/weixin"
+	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/server"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -74,7 +76,7 @@ func main() {
 	// Parse watchdog and store path
 	noOutputTimeout, totalTimeout := cfg.ParseWatchdog()
 	storePath := pathutil.ExpandHome(cfg.Session.StorePath)
-	workspace := pathutil.ExpandHome(cfg.Session.Workspace)
+	workspace := pathutil.ExpandHome(cfg.Session.CWD)
 	if err := os.MkdirAll(workspace, 0700); err != nil {
 		slog.Error("create workspace dir", "path", workspace, "err", err)
 		os.Exit(1)
@@ -180,15 +182,58 @@ func main() {
 
 	// Server
 	srv := server.New(cfg.Server.Addr, router, platforms, agents, cfg.AgentCommands, scheduler, cfg.CLI.Backend)
+	srv.SetWorkspaceIdentity(cfg.Workspace.ID, cfg.Workspace.Name)
+	srv.SetWatchdogTimeouts(noOutputTimeout, totalTimeout)
+
+	// Project Manager (optional, enabled when projects.root is configured)
+	var projectMgr *project.Manager
+	if cfg.Projects.Root != "" {
+		root := pathutil.ExpandHome(cfg.Projects.Root)
+		mgr, err := project.NewManager(root, project.PlannerDefaults{
+			Model:  cfg.Projects.PlannerDefaults.Model,
+			Prompt: cfg.Projects.PlannerDefaults.Prompt,
+		})
+		if err != nil {
+			slog.Error("init project manager", "err", err)
+			os.Exit(1)
+		}
+		if err := mgr.Scan(); err != nil {
+			slog.Error("scan projects", "err", err)
+			os.Exit(1)
+		}
+		projectMgr = mgr
+		srv.SetProjectManager(mgr)
+		slog.Info("projects enabled", "root", root, "count", len(mgr.All()))
+	}
 
 	// Configure remote nodes for multi-node aggregation
 	if len(cfg.Nodes) > 0 {
-		nodes := make(map[string]*server.NodeClient, len(cfg.Nodes))
+		nodes := make(map[string]server.NodeConn, len(cfg.Nodes))
 		for id, nc := range cfg.Nodes {
 			nodes[id] = server.NewNodeClient(id, nc.URL, nc.Token, nc.DisplayName)
 		}
 		srv.SetNodes(nodes)
 		slog.Info("multi-node configured", "nodes", len(nodes))
+	}
+
+	// Configure reverse-connecting nodes (NAT traversal)
+	if len(cfg.ReverseNodes) > 0 {
+		rns := server.NewReverseNodeServer(cfg.ReverseNodes)
+		srv.SetReverseNodeServer(rns)
+		slog.Info("reverse node auth configured", "nodes", len(cfg.ReverseNodes))
+	}
+
+	// Start upstream connector (this node connects to a primary)
+	if cfg.Upstream != nil {
+		connCfg := &connector.UpstreamConfig{
+			URL:         cfg.Upstream.URL,
+			NodeID:      cfg.Upstream.NodeID,
+			Token:       cfg.Upstream.Token,
+			DisplayName: cfg.Upstream.DisplayName,
+		}
+		conn := connector.New(connCfg, router, projectMgr)
+		go conn.Run(ctx)
+		slog.Info("upstream connector starting", "url", cfg.Upstream.URL, "node_id", cfg.Upstream.NodeID)
 	}
 
 	// Graceful shutdown
@@ -207,6 +252,8 @@ func main() {
 	slog.Info("naozhi starting",
 		"version", version,
 		"addr", cfg.Server.Addr,
+		"workspace_id", cfg.Workspace.ID,
+		"workspace_name", cfg.Workspace.Name,
 		"backend", cfg.CLI.Backend,
 		"model", cfg.CLI.Model,
 		"max_procs", cfg.Session.MaxProcs,

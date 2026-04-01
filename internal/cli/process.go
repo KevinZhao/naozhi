@@ -146,8 +146,11 @@ func (p *Process) startReadLoop() {
 
 // readLoop reads stdout NDJSON lines and sends parsed events to eventCh.
 func (p *Process) readLoop() {
-	defer close(p.done)
+	// close(p.done) must run before close(p.eventCh) so that Alive() returns
+	// false by the time any consumer of eventCh (e.g. Send) can observe the
+	// channel closing. Defers run LIFO, so declare done first.
 	defer close(p.eventCh)
+	defer close(p.done)
 
 	for p.scanner.Scan() {
 		line := p.scanner.Bytes()
@@ -170,6 +173,9 @@ func (p *Process) readLoop() {
 		select {
 		case p.eventCh <- ev:
 		case <-p.killCh:
+			p.mu.Lock()
+			p.State = StateDead
+			p.mu.Unlock()
 			return
 		}
 	}
@@ -247,8 +253,8 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 	for {
 		select {
 		case <-ctx.Done():
-			// Kill the process to drain eventCh and prevent stale events
-			// from corrupting the next Send() call.
+			// Stop the process: readLoop will close eventCh once it exits,
+			// preventing stale events from being seen by a future Send() call.
 			p.Kill()
 			return nil, ctx.Err()
 		case ev, ok := <-p.eventCh:
@@ -391,19 +397,21 @@ func (p *Process) logEvent(ev Event) {
 			case "thinking":
 				entry.Type = "thinking"
 				entry.Summary = TruncateRunes(block.Text, 120)
-				entry.Detail = TruncateRunes(block.Text, 500)
+				entry.Detail = TruncateRunes(block.Text, 2000)
 			case "tool_use":
 				entry.Type = "tool_use"
 				entry.Summary = block.Name
 				entry.Tool = block.Name
 				entry.Detail = formatToolDetail(block)
 				if block.Name == "Agent" {
+					entry.Type = "agent"
 					entry.Subagent = extractSubagentType(block.Input)
+					entry.Summary = extractAgentDescription(block.Input)
 				}
 			case "text":
 				entry.Type = "text"
 				entry.Summary = TruncateRunes(block.Text, 120)
-				entry.Detail = TruncateRunes(block.Text, 2000)
+				entry.Detail = TruncateRunes(block.Text, 16000)
 			default:
 				continue
 			}
@@ -414,7 +422,7 @@ func (p *Process) logEvent(ev Event) {
 	case "result":
 		entry.Type = "result"
 		entry.Summary = TruncateRunes(ev.Result, 200)
-		entry.Detail = TruncateRunes(ev.Result, 4000)
+		entry.Detail = TruncateRunes(ev.Result, 16000)
 		entry.Cost = ev.CostUSD
 		p.mu.Lock()
 		p.totalCost = ev.CostUSD
@@ -424,6 +432,20 @@ func (p *Process) logEvent(ev Event) {
 	}
 
 	p.eventLog.Append(entry)
+}
+
+// extractAgentDescription extracts the description field from an Agent tool input.
+func extractAgentDescription(input json.RawMessage) string {
+	if len(input) == 0 {
+		return ""
+	}
+	var inp struct {
+		Description string `json:"description"`
+	}
+	if err := json.Unmarshal(input, &inp); err == nil {
+		return TruncateRunes(inp.Description, 120)
+	}
+	return ""
 }
 
 // extractSubagentType extracts the subagent_type field from an Agent tool input.

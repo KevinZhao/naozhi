@@ -1,0 +1,351 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Naozhi Architecture</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif; background: #0d1117; color: #c9d1d9; padding: 40px; }
+h1 { color: #f0f6fc; font-size: 28px; margin-bottom: 8px; }
+h2 { color: #58a6ff; font-size: 18px; margin: 32px 0 16px; }
+.subtitle { color: #8b949e; font-size: 14px; margin-bottom: 32px; }
+.diagram { background: #161b22; border: 1px solid #30363d; border-radius: 12px; padding: 40px; margin: 24px 0; overflow-x: auto; }
+svg { display: block; margin: 0 auto; }
+
+/* Entry points */
+.entry { fill: #1f6feb; }
+.entry-text { fill: #fff; font-size: 13px; font-weight: 600; }
+
+/* Core components */
+.core { fill: #238636; }
+.core-text { fill: #fff; font-size: 12px; font-weight: 600; }
+
+/* Sub components */
+.sub { fill: #21262d; stroke: #30363d; stroke-width: 1.5; }
+.sub-text { fill: #c9d1d9; font-size: 11px; }
+
+/* Process */
+.process { fill: #9e6a03; }
+.process-text { fill: #fff; font-size: 12px; font-weight: 600; }
+
+/* External */
+.external { fill: #30363d; stroke: #484f58; stroke-width: 1.5; }
+.external-text { fill: #8b949e; font-size: 11px; }
+
+/* Arrows */
+.arrow { stroke: #484f58; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead); }
+.arrow-bold { stroke: #58a6ff; stroke-width: 2; fill: none; marker-end: url(#arrowhead-blue); }
+.arrow-event { stroke: #3fb950; stroke-width: 1.5; fill: none; stroke-dasharray: 6,3; marker-end: url(#arrowhead-green); }
+.arrow-data { stroke: #d29922; stroke-width: 1.5; fill: none; marker-end: url(#arrowhead-yellow); }
+
+/* Labels */
+.label { fill: #8b949e; font-size: 10px; }
+.label-bold { fill: #58a6ff; font-size: 10px; font-weight: 600; }
+
+/* Section boxes */
+.section { fill: none; stroke: #30363d; stroke-width: 1; stroke-dasharray: 4,4; rx: 8; }
+.section-label { fill: #484f58; font-size: 11px; font-weight: 600; letter-spacing: 1px; }
+
+/* Legend */
+.legend { margin-top: 24px; display: flex; gap: 24px; flex-wrap: wrap; font-size: 12px; color: #8b949e; }
+.legend-item { display: flex; align-items: center; gap: 6px; }
+.legend-dot { width: 12px; height: 12px; border-radius: 3px; }
+
+/* Summary table */
+table { width: 100%; border-collapse: collapse; margin: 16px 0; }
+th, td { border: 1px solid #30363d; padding: 8px 12px; text-align: left; font-size: 13px; }
+th { background: #161b22; color: #f0f6fc; font-weight: 600; }
+td { color: #c9d1d9; }
+code { background: #30363d; padding: 1px 5px; border-radius: 4px; font-size: 12px; color: #e6edf3; }
+</style>
+</head>
+<body>
+
+<h1>Naozhi Architecture</h1>
+<p class="subtitle">Multi-Entry Claude CLI Gateway with Unified Session Management</p>
+
+<div class="diagram">
+<svg width="1000" height="820" viewBox="0 0 1000 820">
+<defs>
+  <marker id="arrowhead" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#484f58"/></marker>
+  <marker id="arrowhead-blue" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#58a6ff"/></marker>
+  <marker id="arrowhead-green" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#3fb950"/></marker>
+  <marker id="arrowhead-yellow" markerWidth="8" markerHeight="6" refX="8" refY="3" orient="auto"><polygon points="0 0, 8 3, 0 6" fill="#d29922"/></marker>
+  <filter id="shadow"><feDropShadow dx="0" dy="2" stdDeviation="3" flood-opacity="0.3"/></filter>
+</defs>
+
+<!-- ==================== ENTRY POINTS (Top) ==================== -->
+<text class="section-label" x="500" y="20" text-anchor="middle">ENTRY POINTS</text>
+
+<!-- Feishu -->
+<rect x="30" y="35" width="140" height="50" rx="8" class="entry" filter="url(#shadow)"/>
+<text x="100" y="57" text-anchor="middle" class="entry-text">Feishu</text>
+<text x="100" y="72" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">WebSocket / Webhook</text>
+
+<!-- Slack -->
+<rect x="190" y="35" width="120" height="50" rx="8" class="entry" filter="url(#shadow)"/>
+<text x="250" y="57" text-anchor="middle" class="entry-text">Slack</text>
+<text x="250" y="72" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">Socket Mode</text>
+
+<!-- Discord -->
+<rect x="330" y="35" width="120" height="50" rx="8" class="entry" filter="url(#shadow)"/>
+<text x="390" y="57" text-anchor="middle" class="entry-text">Discord</text>
+<text x="390" y="72" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">Gateway</text>
+
+<!-- Dashboard -->
+<rect x="530" y="35" width="160" height="50" rx="8" class="entry" filter="url(#shadow)"/>
+<text x="610" y="57" text-anchor="middle" class="entry-text">Dashboard</text>
+<text x="610" y="72" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">HTTP + WebSocket</text>
+
+<!-- Terminal -->
+<rect x="770" y="35" width="190" height="50" rx="8" class="entry" filter="url(#shadow)"/>
+<text x="865" y="57" text-anchor="middle" class="entry-text">Terminal (Discovery)</text>
+<text x="865" y="72" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">Local claude CLI</text>
+
+<!-- ==================== PLATFORM LAYER ==================== -->
+<rect x="20" y="110" width="450" height="70" rx="8" class="section"/>
+<text class="section-label" x="245" y="128" text-anchor="middle">PLATFORM ADAPTERS</text>
+
+<rect x="35" y="135" width="120" height="34" rx="6" class="sub"/>
+<text x="95" y="157" text-anchor="middle" class="sub-text">FeishuAdapter</text>
+
+<rect x="165" y="135" width="95" height="34" rx="6" class="sub"/>
+<text x="212" y="157" text-anchor="middle" class="sub-text">SlackAdapter</text>
+
+<rect x="270" y="135" width="95" height="34" rx="6" class="sub"/>
+<text x="317" y="157" text-anchor="middle" class="sub-text">DiscordAdapter</text>
+
+<rect x="375" y="135" width="85" height="34" rx="6" class="sub"/>
+<text x="417" y="157" text-anchor="middle" class="sub-text">WeixinAdapter</text>
+
+<!-- Arrows: entries to adapters -->
+<path d="M100 85 L100 135" class="arrow"/>
+<path d="M250 85 L212 135" class="arrow"/>
+<path d="M390 85 L317 135" class="arrow"/>
+
+<!-- ==================== SERVER LAYER ==================== -->
+<rect x="20" y="210" width="960" height="130" rx="8" class="section"/>
+<text class="section-label" x="500" y="228" text-anchor="middle">SERVER (HTTP + WebSocket)</text>
+
+<!-- Message Handler -->
+<rect x="40" y="240" width="200" height="85" rx="8" class="core" filter="url(#shadow)"/>
+<text x="140" y="262" text-anchor="middle" class="core-text">Message Handler</text>
+<text x="140" y="278" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">Dedup / Command Parse</text>
+<text x="140" y="292" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">Agent Routing</text>
+<text x="140" y="306" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">Session Guard</text>
+
+<!-- Dashboard API -->
+<rect x="270" y="240" width="200" height="85" rx="8" class="core" filter="url(#shadow)"/>
+<text x="370" y="262" text-anchor="middle" class="core-text">Dashboard API</text>
+<text x="370" y="278" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">REST: sessions/events</text>
+<text x="370" y="292" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">Send / Delete / Takeover</text>
+<text x="370" y="306" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">Discovery Scan</text>
+
+<!-- WS Hub -->
+<rect x="500" y="240" width="200" height="85" rx="8" class="core" filter="url(#shadow)"/>
+<text x="600" y="262" text-anchor="middle" class="core-text">WebSocket Hub</text>
+<text x="600" y="278" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">Subscribe / Unsubscribe</text>
+<text x="600" y="292" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">Event Push Loop</text>
+<text x="600" y="306" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">Remote Node Relay</text>
+
+<!-- Cron -->
+<rect x="730" y="240" width="170" height="85" rx="8" class="core" filter="url(#shadow)"/>
+<text x="815" y="262" text-anchor="middle" class="core-text">Cron Scheduler</text>
+<text x="815" y="278" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">Scheduled Jobs</text>
+<text x="815" y="292" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">robfig/cron</text>
+<text x="815" y="306" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">Prompt Execution</text>
+
+<!-- Arrows: platforms to server -->
+<path d="M245 169 L140 240" class="arrow-bold"/>
+<!-- Dashboard to server -->
+<path d="M610 85 L610 130 L500 130 L370 240" class="arrow-bold"/>
+<path d="M610 85 L610 130 L600 130 L600 240" class="arrow-bold"/>
+
+<!-- ==================== SESSION LAYER ==================== -->
+<rect x="100" y="375" width="560" height="100" rx="8" class="section"/>
+<text class="section-label" x="380" y="393" text-anchor="middle">SESSION MANAGEMENT</text>
+
+<!-- Router -->
+<rect x="120" y="403" width="250" height="60" rx="8" class="core" filter="url(#shadow)"/>
+<text x="245" y="425" text-anchor="middle" class="core-text">Session Router</text>
+<text x="245" y="441" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">Key → ManagedSession Map</text>
+<text x="245" y="455" text-anchor="middle" style="fill:#a5d6ff;font-size:10px">Spawn / Resume / Evict / TTL</text>
+
+<!-- Managed Session -->
+<rect x="400" y="403" width="240" height="60" rx="8" class="sub" filter="url(#shadow)"/>
+<text x="520" y="425" text-anchor="middle" style="fill:#f0f6fc;font-size:12px;font-weight:600">ManagedSession</text>
+<text x="520" y="441" text-anchor="middle" class="sub-text">Send / Interrupt / Snapshot</text>
+<text x="520" y="455" text-anchor="middle" class="sub-text">EventLog Subscribe</text>
+
+<!-- Arrows: server to router -->
+<path d="M140 325 L245 403" class="arrow-bold"/>
+<path d="M370 325 L300 403" class="arrow-bold"/>
+<path d="M600 325 L520 403" class="arrow-bold"/>
+<path d="M815 325 L380 403" class="arrow"/>
+
+<!-- Arrow: router to managed session -->
+<path d="M370 433 L400 433" class="arrow"/>
+
+<!-- ==================== CLI LAYER ==================== -->
+<rect x="100" y="510" width="560" height="110" rx="8" class="section"/>
+<text class="section-label" x="380" y="528" text-anchor="middle">CLI PROCESS MANAGEMENT</text>
+
+<!-- Wrapper -->
+<rect x="120" y="538" width="180" height="70" rx="8" class="process" filter="url(#shadow)"/>
+<text x="210" y="560" text-anchor="middle" class="process-text">CLI Wrapper</text>
+<text x="210" y="576" text-anchor="middle" style="fill:#ffd700;font-size:10px">Process Spawn</text>
+<text x="210" y="592" text-anchor="middle" style="fill:#ffd700;font-size:10px">Protocol Detection</text>
+
+<!-- Process -->
+<rect x="330" y="538" width="180" height="70" rx="8" class="process" filter="url(#shadow)"/>
+<text x="420" y="560" text-anchor="middle" class="process-text">Process</text>
+<text x="420" y="576" text-anchor="middle" style="fill:#ffd700;font-size:10px">stdin/stdout Loop</text>
+<text x="420" y="592" text-anchor="middle" style="fill:#ffd700;font-size:10px">Watchdog Timers</text>
+
+<!-- Event Log -->
+<rect x="540" y="538" width="110" height="70" rx="8" class="sub" filter="url(#shadow)"/>
+<text x="595" y="563" text-anchor="middle" style="fill:#3fb950;font-size:12px;font-weight:600">EventLog</text>
+<text x="595" y="579" text-anchor="middle" class="sub-text">Ring Buffer</text>
+<text x="595" y="593" text-anchor="middle" class="sub-text">Subscribers</text>
+
+<!-- Arrows: session to cli -->
+<path d="M245 463 L210 538" class="arrow-bold"/>
+<path d="M520 463 L420 538" class="arrow-bold"/>
+
+<!-- Arrow: process to eventlog -->
+<path d="M510 573 L540 573" class="arrow-event"/>
+
+<!-- Arrow: eventlog back to hub (events) -->
+<path d="M595 538 L595 510 L660 510 L660 380 L600 325" class="arrow-event"/>
+<text x="665" y="445" class="label-bold" transform="rotate(-90,665,445)">real-time events</text>
+
+<!-- ==================== PROTOCOL LAYER ==================== -->
+<rect x="100" y="650" width="400" height="60" rx="8" class="section"/>
+<text class="section-label" x="300" y="668" text-anchor="middle">PROTOCOL ABSTRACTION</text>
+
+<rect x="120" y="676" width="170" height="28" rx="6" class="sub"/>
+<text x="205" y="695" text-anchor="middle" class="sub-text">ClaudeProtocol (stream-json)</text>
+
+<rect x="310" y="676" width="170" height="28" rx="6" class="sub"/>
+<text x="395" y="695" text-anchor="middle" class="sub-text">ACPProtocol (JSON-RPC 2.0)</text>
+
+<path d="M210 608 L210 676" class="arrow"/>
+<path d="M420 608 L395 676" class="arrow"/>
+
+<!-- ==================== EXTERNAL CLI ==================== -->
+<rect x="120" y="740" width="170" height="45" rx="8" class="external" filter="url(#shadow)"/>
+<text x="205" y="762" text-anchor="middle" style="fill:#f0f6fc;font-size:12px;font-weight:600">claude CLI</text>
+<text x="205" y="778" text-anchor="middle" class="external-text">Long-lived subprocess</text>
+
+<rect x="310" y="740" width="170" height="45" rx="8" class="external" filter="url(#shadow)"/>
+<text x="395" y="762" text-anchor="middle" style="fill:#f0f6fc;font-size:12px;font-weight:600">kiro CLI</text>
+<text x="395" y="778" text-anchor="middle" class="external-text">Long-lived subprocess</text>
+
+<path d="M205 704 L205 740" class="arrow"/>
+<path d="M395 704 L395 740" class="arrow"/>
+
+<!-- ==================== PERSISTENCE (Right side) ==================== -->
+<rect x="720" y="375" width="250" height="250" rx="8" class="section"/>
+<text class="section-label" x="845" y="393" text-anchor="middle">PERSISTENCE &amp; DISCOVERY</text>
+
+<rect x="735" y="405" width="220" height="35" rx="6" class="sub"/>
+<text x="845" y="420" text-anchor="middle" class="sub-text">Session Store</text>
+<text x="845" y="434" text-anchor="middle" style="fill:#484f58;font-size:9px">~/.naozhi/sessions.json</text>
+
+<rect x="735" y="450" width="220" height="35" rx="6" class="sub"/>
+<text x="845" y="465" text-anchor="middle" class="sub-text">Cron Job Store</text>
+<text x="845" y="479" text-anchor="middle" style="fill:#484f58;font-size:9px">~/.naozhi/cron_jobs.json</text>
+
+<rect x="735" y="497" width="220" height="35" rx="6" class="sub"/>
+<text x="845" y="512" text-anchor="middle" class="sub-text">Claude JSONL History</text>
+<text x="845" y="526" text-anchor="middle" style="fill:#484f58;font-size:9px">~/.claude/projects/*/session.jsonl</text>
+
+<rect x="735" y="545" width="220" height="35" rx="6" class="sub"/>
+<text x="845" y="560" text-anchor="middle" class="sub-text">Discovery Scanner</text>
+<text x="845" y="574" text-anchor="middle" style="fill:#484f58;font-size:9px">~/.claude/sessions/*.json</text>
+
+<rect x="735" y="590" width="220" height="28" rx="6" class="external"/>
+<text x="845" y="609" text-anchor="middle" class="external-text">External claude CLI processes</text>
+
+<!-- Arrows: persistence connections -->
+<path d="M370 433 L735 422" class="arrow-data"/>
+<path d="M370 292 L730 467" class="arrow" style="stroke:#30363d"/>
+<path d="M370 306 L735 562" class="arrow-data"/>
+
+<!-- Discovery to Takeover -->
+<path d="M865 85 L865 130 L735 130 L590 240" class="arrow-bold"/>
+<text x="790" y="120" class="label" text-anchor="middle">scan &amp; takeover</text>
+
+<!-- ==================== MULTI-NODE (Bottom right) ==================== -->
+<rect x="720" y="650" width="250" height="75" rx="8" class="section"/>
+<text class="section-label" x="845" y="668" text-anchor="middle">MULTI-NODE</text>
+
+<rect x="735" y="680" width="100" height="34" rx="6" class="sub"/>
+<text x="785" y="701" text-anchor="middle" class="sub-text">NodeClient</text>
+
+<rect x="855" y="680" width="100" height="34" rx="6" class="external"/>
+<text x="905" y="701" text-anchor="middle" class="external-text">Remote Node</text>
+
+<path d="M835 697 L855 697" class="arrow"/>
+
+<!-- Arrow: hub to multi-node -->
+<path d="M700 300 L785 300 L785 680" class="arrow" style="stroke:#d29922"/>
+<text x="740" y="290" class="label">relay</text>
+
+</svg>
+</div>
+
+<div class="legend">
+  <div class="legend-item"><div class="legend-dot" style="background:#1f6feb"></div>Entry Points (IM / Dashboard / Terminal)</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#238636"></div>Core Components</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#9e6a03"></div>CLI Process Layer</div>
+  <div class="legend-item"><div class="legend-dot" style="background:#30363d;border:1px solid #484f58"></div>Sub-components / External</div>
+  <div class="legend-item"><svg width="40" height="12"><line x1="0" y1="6" x2="40" y2="6" stroke="#58a6ff" stroke-width="2"/></svg>Request Flow</div>
+  <div class="legend-item"><svg width="40" height="12"><line x1="0" y1="6" x2="40" y2="6" stroke="#3fb950" stroke-width="1.5" stroke-dasharray="6,3"/></svg>Event Stream</div>
+  <div class="legend-item"><svg width="40" height="12"><line x1="0" y1="6" x2="40" y2="6" stroke="#d29922" stroke-width="1.5"/></svg>Data / Persistence</div>
+</div>
+
+<h2>Session Key Format</h2>
+<table>
+<tr><th>Entry Point</th><th>Key Pattern</th><th>Example</th></tr>
+<tr><td>Feishu</td><td><code>{platform}:{chatType}:{chatID}:{agent}</code></td><td><code>feishu:direct:oc_abc123:general</code></td></tr>
+<tr><td>Slack</td><td><code>{platform}:{chatType}:{chatID}:{agent}</code></td><td><code>slack:direct:U123:code-reviewer</code></td></tr>
+<tr><td>Dashboard</td><td><code>dashboard:direct:{name}:{agent}</code></td><td><code>dashboard:direct:session-2026-03-29:general</code></td></tr>
+<tr><td>Takeover</td><td><code>local:takeover:{cwd-key}:{agent}</code></td><td><code>local:takeover:home-user-project:general</code></td></tr>
+<tr><td>Cron</td><td><code>{platform}:{chatType}:{chatID}:{agent}</code></td><td><code>feishu:direct:oc_abc:general</code></td></tr>
+</table>
+
+<h2>Request Flow Summary</h2>
+<table>
+<tr><th>Flow</th><th>Path</th></tr>
+<tr><td>IM Message</td><td>IM Platform → Platform Adapter → Message Handler → Router.GetOrCreate → Process.Send → EventLog → Reply to IM</td></tr>
+<tr><td>Dashboard Chat</td><td>Browser → WS Hub / REST API → Router.GetOrCreate → Process.Send → EventLog → WS Push to Browser</td></tr>
+<tr><td>Discovery</td><td>Browser → GET /api/discovered → Scan ~/.claude → Render in sidebar</td></tr>
+<tr><td>Takeover</td><td>Browser → POST /api/discovered/takeover → Kill external → Router.Takeover(--resume) → LoadHistory → Managed Session</td></tr>
+<tr><td>Cron Job</td><td>Timer fires → Scheduler → Router.GetOrCreate → Process.Send → Reply to IM</td></tr>
+</table>
+
+<h2>Process Lifecycle</h2>
+<table>
+<tr><th>State</th><th>Trigger</th><th>Description</th></tr>
+<tr><td><code>Spawning</code></td><td>GetOrCreate / Takeover</td><td>Process starting, protocol Init handshake</td></tr>
+<tr><td><code>Ready</code></td><td>Init complete / Send complete</td><td>Waiting for next message</td></tr>
+<tr><td><code>Running</code></td><td>Send() called</td><td>Processing user message, events flowing</td></tr>
+<tr><td><code>Dead</code></td><td>Exit / Timeout / Kill</td><td>Next message triggers resume via <code>--resume {sessionID}</code></td></tr>
+<tr><td><code>Suspended</code></td><td>Service restart</td><td>Loaded from session store, no process. Resume on next message</td></tr>
+</table>
+
+<h2>Core Design Principles</h2>
+<table>
+<tr><th>Principle</th><th>Implementation</th></tr>
+<tr><td>Zero External Dependencies</td><td>All state file-based (JSON). No Redis, no DB, no MQ.</td></tr>
+<tr><td>Protocol Abstraction</td><td><code>Protocol</code> interface: Claude (stream-json) or Kiro (JSON-RPC 2.0)</td></tr>
+<tr><td>Long-lived Processes</td><td>CLI subprocess stays open across turns. stdin/stdout stay connected.</td></tr>
+<tr><td>Session Resumability</td><td>Dead sessions resume via <code>--resume {sessionID}</code>. History loaded from JSONL.</td></tr>
+<tr><td>Unified Management</td><td>Dashboard sees all sessions (IM, dashboard, takeover) with real-time events.</td></tr>
+<tr><td>Multi-Node</td><td>NodeClient + WS Relay aggregates remote naozhi instances into one dashboard.</td></tr>
+</table>
+
+</body>
+</html>

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -19,8 +20,11 @@ type NodeClient struct {
 	ID          string
 	URL         string // e.g. "http://10.0.0.2:8180"
 	Token       string // dashboard bearer token
-	DisplayName string
+	displayName string
 	httpClient  *http.Client
+
+	relayMu sync.Mutex
+	relay   *wsRelay
 }
 
 // NewNodeClient creates a NodeClient with a 10s timeout.
@@ -29,7 +33,7 @@ func NewNodeClient(id, url, token, displayName string) *NodeClient {
 		ID:          id,
 		URL:         url,
 		Token:       token,
-		DisplayName: displayName,
+		displayName: displayName,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
 		},
@@ -135,4 +139,130 @@ func (n *NodeClient) Health(ctx context.Context) error {
 		return fmt.Errorf("health check %s: status is %q", n.ID, result.Status)
 	}
 	return nil
+}
+
+// FetchProjects fetches projects from the remote node via GET /api/projects.
+func (n *NodeClient) FetchProjects(ctx context.Context) ([]map[string]any, error) {
+	resp, err := n.doRequest(ctx, http.MethodGet, "/api/projects", nil)
+	if err != nil {
+		return nil, fmt.Errorf("fetch projects from %s: %w", n.ID, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("fetch projects from %s: status %d", n.ID, resp.StatusCode)
+	}
+
+	var result []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode projects from %s: %w", n.ID, err)
+	}
+	return result, nil
+}
+
+// FetchDiscovered fetches discovered sessions from the remote node via GET /api/discovered.
+func (n *NodeClient) FetchDiscovered(ctx context.Context) ([]map[string]any, error) {
+	resp, err := n.doRequest(ctx, http.MethodGet, "/api/discovered", nil)
+	if err != nil {
+		return nil, fmt.Errorf("fetch discovered from %s: %w", n.ID, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("fetch discovered from %s: status %d", n.ID, resp.StatusCode)
+	}
+
+	var result []map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode discovered from %s: %w", n.ID, err)
+	}
+	return result, nil
+}
+
+// ProxyTakeover forwards a takeover request to the remote node.
+func (n *NodeClient) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStartTime uint64) error {
+	payload := map[string]any{"pid": pid, "session_id": sessionID, "cwd": cwd, "proc_start_time": procStartTime}
+	data, _ := json.Marshal(payload)
+	resp, err := n.doRequest(ctx, http.MethodPost, "/api/discovered/takeover", bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("proxy takeover to %s: %w", n.ID, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("proxy takeover to %s: status %d: %s", n.ID, resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// ProxyRestartPlanner forwards a planner restart request to the remote node.
+func (n *NodeClient) ProxyRestartPlanner(ctx context.Context, projectName string) error {
+	resp, err := n.doRequest(ctx, http.MethodPost, "/api/projects/planner/restart?name="+url.QueryEscape(projectName), nil)
+	if err != nil {
+		return fmt.Errorf("proxy restart planner to %s: %w", n.ID, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("proxy restart planner to %s: status %d: %s", n.ID, resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+// ProxyUpdateConfig forwards a project config update to the remote node.
+func (n *NodeClient) ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error {
+	resp, err := n.doRequest(ctx, http.MethodPut, "/api/projects/config?name="+url.QueryEscape(projectName), bytes.NewReader(cfg))
+	if err != nil {
+		return fmt.Errorf("proxy update config to %s: %w", n.ID, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("proxy update config to %s: status %d: %s", n.ID, resp.StatusCode, string(body))
+	}
+	return nil
+}
+
+func (n *NodeClient) NodeID() string      { return n.ID }
+func (n *NodeClient) DisplayName() string { return n.displayName }
+func (n *NodeClient) Status() string      { return "ok" }
+
+func (n *NodeClient) Subscribe(c *wsClient, key string, after int64) {
+	n.relayMu.Lock()
+	if n.relay == nil {
+		n.relay = newWSRelay(n)
+	}
+	relay := n.relay
+	n.relayMu.Unlock()
+	relay.Subscribe(c, key, after)
+}
+
+func (n *NodeClient) Unsubscribe(c *wsClient, key string) {
+	n.relayMu.Lock()
+	relay := n.relay
+	n.relayMu.Unlock()
+	if relay != nil {
+		relay.Unsubscribe(c, key)
+	}
+}
+
+func (n *NodeClient) RemoveClient(c *wsClient) {
+	n.relayMu.Lock()
+	relay := n.relay
+	n.relayMu.Unlock()
+	if relay != nil {
+		relay.RemoveClient(c)
+	}
+}
+
+func (n *NodeClient) Close() {
+	n.relayMu.Lock()
+	relay := n.relay
+	n.relay = nil
+	n.relayMu.Unlock()
+	if relay != nil {
+		relay.Close()
+	}
 }

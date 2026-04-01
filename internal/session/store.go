@@ -52,7 +52,11 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func loadStore(path string) map[string]*storeEntry {

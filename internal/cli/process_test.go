@@ -302,6 +302,16 @@ func TestProcess_ReadLoop_ExitsOnKillCh(t *testing.T) {
 		t.Error("readLoop did not exit after killCh was closed")
 	}
 
+	p.mu.Lock()
+	state := p.State
+	p.mu.Unlock()
+	if state != StateDead {
+		t.Errorf("State = %v after killCh exit, want StateDead", state)
+	}
+	if p.Alive() {
+		t.Error("Alive() = true after killCh exit, want false")
+	}
+
 	pw.Close()
 }
 

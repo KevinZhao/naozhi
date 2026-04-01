@@ -19,6 +19,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -27,8 +28,11 @@ var validSessionID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0
 //go:embed static/dashboard.html
 var dashboardHTML embed.FS
 
+//go:embed static/manifest.json
+var manifestJSON embed.FS
+
 func (s *Server) registerDashboard() {
-	s.hub = NewHub(s.router, s.agents, s.agentCommands, s.dashboardToken, s.sessionGuard, s.nodes)
+	s.hub = NewHub(s.router, s.agents, s.agentCommands, s.dashboardToken, s.sessionGuard, s.nodes, &s.nodesMu)
 
 	// Push session list changes to WS clients
 	s.router.SetOnChange(func() { s.hub.BroadcastSessionsUpdate() })
@@ -40,18 +44,29 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /api/discovered", s.handleAPIDiscovered)
 	s.mux.HandleFunc("GET /api/discovered/preview", s.handleAPIDiscoveredPreview)
 	s.mux.HandleFunc("POST /api/discovered/takeover", s.handleAPITakeover)
+	s.mux.HandleFunc("GET /api/projects", s.handleAPIProjects)
+	s.mux.HandleFunc("GET /api/projects/config", s.handleAPIProjectConfigGet)
+	s.mux.HandleFunc("PUT /api/projects/config", s.handleAPIProjectConfigPut)
+	s.mux.HandleFunc("POST /api/projects/planner/restart", s.handleAPIProjectPlannerRestart)
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
+	s.mux.HandleFunc("GET /manifest.json", s.handleManifest)
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
 }
 
-// checkBearerAuth validates the dashboard API token. Returns true if authorized.
-func (s *Server) checkBearerAuth(w http.ResponseWriter, r *http.Request) bool {
+// isAuthenticated checks auth without writing an error response. Used by
+// endpoints that serve partial data to unauthenticated callers (e.g. /health).
+func (s *Server) isAuthenticated(r *http.Request) bool {
 	if s.dashboardToken == "" {
 		return true
 	}
 	auth := r.Header.Get("Authorization")
 	token := strings.TrimPrefix(auth, "Bearer ")
-	if strings.HasPrefix(auth, "Bearer ") && subtle.ConstantTimeCompare([]byte(token), []byte(s.dashboardToken)) == 1 {
+	return strings.HasPrefix(auth, "Bearer ") && subtle.ConstantTimeCompare([]byte(token), []byte(s.dashboardToken)) == 1
+}
+
+// checkBearerAuth validates the dashboard API token. Returns true if authorized.
+func (s *Server) checkBearerAuth(w http.ResponseWriter, r *http.Request) bool {
+	if s.isAuthenticated(r) {
 		return true
 	}
 	http.Error(w, "unauthorized", http.StatusUnauthorized)
@@ -66,8 +81,23 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' wss: ws:; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("dashboard write", "err", err)
+	}
+}
+
+func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
+	data, err := manifestJSON.ReadFile("static/manifest.json")
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/manifest+json")
+	w.Header().Set("Cache-Control", "max-age=3600")
+	if _, err := w.Write(data); err != nil {
+		slog.Debug("manifest write", "err", err)
 	}
 }
 
@@ -76,6 +106,31 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	snapshots := s.router.ListSessions()
+
+	// Fill project field from ProjectManager
+	if s.projectMgr != nil {
+		// Collect unique workspace paths for batch resolution (single lock acquisition)
+		var workspaces []string
+		for i := range snapshots {
+			if !project.IsPlannerKey(snapshots[i].Key) && snapshots[i].Workspace != "" {
+				workspaces = append(workspaces, snapshots[i].Workspace)
+			}
+		}
+		wsMap := s.projectMgr.ResolveWorkspaces(workspaces)
+
+		for i := range snapshots {
+			if project.IsPlannerKey(snapshots[i].Key) {
+				parts := strings.SplitN(snapshots[i].Key, ":", 3)
+				if len(parts) == 3 {
+					snapshots[i].Project = parts[1]
+					snapshots[i].IsPlanner = true
+				}
+			} else if name := wsMap[snapshots[i].Workspace]; name != "" {
+				snapshots[i].Project = name
+			}
+		}
+	}
+
 	active, total := s.router.Stats()
 
 	var running, ready int
@@ -97,6 +152,13 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		"backend":           s.backendTag,
 		"max_procs":         s.router.MaxProcs(),
 		"default_workspace": s.router.DefaultWorkspace(),
+		"workspace_id":      s.workspaceID,
+		"workspace_name":    s.workspaceName,
+		"system":            systemInfo(),
+		"watchdog": map[string]any{
+			"no_output_kills": s.watchdogNoOutputKills.Load(),
+			"total_kills":     s.watchdogTotalKills.Load(),
+		},
 	}
 
 	// Include available agent IDs for dashboard session creation
@@ -107,8 +169,43 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 	}
 	stats["agents"] = agentIDs
 
+	// Include project list for dashboard sidebar rendering
+	if s.projectMgr != nil {
+		projects := s.projectMgr.All()
+		projectList := make([]map[string]string, 0, len(projects))
+		for _, p := range projects {
+			projectList = append(projectList, map[string]string{"name": p.Name, "path": p.Path, "node": "local"})
+		}
+		// Merge remote projects for multi-node
+		s.nodesMu.RLock()
+		hasNodes := len(s.nodes) > 0
+		s.nodesMu.RUnlock()
+		if hasNodes {
+			cachedProjects := s.getCachedNodeProjects()
+			for _, items := range cachedProjects {
+				for _, item := range items {
+					name, _ := item["name"].(string)
+					path, _ := item["path"].(string)
+					node, _ := item["node"].(string)
+					if name != "" {
+						projectList = append(projectList, map[string]string{"name": name, "path": path, "node": node})
+					}
+				}
+			}
+		}
+		stats["projects"] = projectList
+	}
+
+	// Take a snapshot of nodes under lock for thread-safe access
+	s.nodesMu.RLock()
+	nodesSnapshot := make(map[string]NodeConn, len(s.nodes))
+	for k, v := range s.nodes {
+		nodesSnapshot[k] = v
+	}
+	s.nodesMu.RUnlock()
+
 	// No remote nodes: use existing response format
-	if len(s.nodes) == 0 {
+	if len(nodesSnapshot) == 0 {
 		resp := map[string]any{
 			"sessions": snapshots,
 			"stats":    stats,
@@ -132,13 +229,13 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cachedSessions, cachedStatus := s.getCachedNodeSessions()
-	for id, nc := range s.nodes {
+	for id, nc := range nodesSnapshot {
 		status := cachedStatus[id]
 		if status == "" {
 			status = "unknown"
 		}
 		nodeStatus[id] = map[string]any{
-			"display_name": nc.DisplayName,
+			"display_name": nc.DisplayName(),
 			"status":       status,
 		}
 		for _, rs := range cachedSessions[id] {
@@ -170,9 +267,11 @@ func (s *Server) handleAPISessionEvents(w http.ResponseWriter, r *http.Request) 
 	// Remote node proxy
 	node := r.URL.Query().Get("node")
 	if node != "" && node != "local" {
+		s.nodesMu.RLock()
 		nc, ok := s.nodes[node]
+		s.nodesMu.RUnlock()
 		if !ok {
-			http.Error(w, "unknown node: "+node, http.StatusBadRequest)
+			http.Error(w, "unknown node", http.StatusBadRequest)
 			return
 		}
 		var after int64
@@ -186,7 +285,8 @@ func (s *Server) handleAPISessionEvents(w http.ResponseWriter, r *http.Request) 
 		}
 		entries, err := nc.FetchEvents(r.Context(), key, after)
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
+			slog.Warn("remote fetch events failed", "node", node, "key", key, "err", err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -332,9 +432,11 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 
 	// Remote node proxy
 	if node != "" && node != "local" {
+		s.nodesMu.RLock()
 		nc, ok := s.nodes[node]
+		s.nodesMu.RUnlock()
 		if !ok {
-			http.Error(w, "unknown node: "+node, http.StatusBadRequest)
+			http.Error(w, "unknown node", http.StatusBadRequest)
 			return
 		}
 		capturedKey, capturedText := key, text
@@ -366,7 +468,7 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusConflict)
 		if err := json.NewEncoder(w).Encode(map[string]string{"error": "session busy"}); err != nil {
-			slog.Error("encode conflict response", "err", err)
+			slog.Error("encode busy response", "err", err)
 		}
 		return
 	}
@@ -390,6 +492,24 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 		}
 
 		opts := s.agents[agentID]
+		if project.IsPlannerKey(key) {
+			opts.Exempt = true
+			if s.projectMgr != nil {
+				pParts := strings.SplitN(key, ":", 3)
+				if len(pParts) == 3 {
+					if p := s.projectMgr.Get(pParts[1]); p != nil {
+						opts.Workspace = p.Path
+						if m := s.projectMgr.EffectivePlannerModel(p); m != "" {
+							opts.Model = m
+						}
+						if prompt := s.projectMgr.EffectivePlannerPrompt(p); prompt != "" {
+							opts.ExtraArgs = append(opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)],
+								"--append-system-prompt", prompt)
+						}
+					}
+				}
+			}
+		}
 		sess, _, err := s.router.GetOrCreate(ctx, key, opts)
 		if err != nil {
 			slog.Error("dashboard send: get session", "key", key, "err", err)
@@ -426,6 +546,44 @@ func (s *Server) handleAPIDiscovered(w http.ResponseWriter, r *http.Request) {
 	}
 	if sessions == nil {
 		sessions = []discovery.DiscoveredSession{}
+	}
+
+	// Resolve CWD → project name
+	if s.projectMgr != nil && len(sessions) > 0 {
+		cwds := make([]string, len(sessions))
+		for i, d := range sessions {
+			cwds[i] = d.CWD
+		}
+		cwdMap := s.projectMgr.ResolveWorkspaces(cwds)
+		for i := range sessions {
+			sessions[i].Project = cwdMap[sessions[i].CWD]
+		}
+	}
+
+	// Merge remote discovered sessions
+	s.nodesMu.RLock()
+	hasDiscoveredNodes := len(s.nodes) > 0
+	s.nodesMu.RUnlock()
+	if hasDiscoveredNodes {
+		// Tag local sessions with node="local"
+		for i := range sessions {
+			sessions[i].Node = "local"
+		}
+		cachedDiscovered := s.getCachedNodeDiscovered()
+		allDiscovered := make([]any, 0, len(sessions))
+		for _, d := range sessions {
+			allDiscovered = append(allDiscovered, d)
+		}
+		for _, items := range cachedDiscovered {
+			for _, item := range items {
+				allDiscovered = append(allDiscovered, item)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(allDiscovered); err != nil {
+			slog.Error("encode discovered response", "err", err)
+		}
+		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
@@ -478,6 +636,7 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 		SessionID     string `json:"session_id"`
 		CWD           string `json:"cwd"`
 		ProcStartTime uint64 `json:"proc_start_time"`
+		Node          string `json:"node"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -486,6 +645,26 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.PID <= 0 || req.SessionID == "" || !validSessionID.MatchString(req.SessionID) {
 		http.Error(w, "pid and session_id are required", http.StatusBadRequest)
+		return
+	}
+
+	// Remote node proxy
+	if req.Node != "" && req.Node != "local" {
+		s.nodesMu.RLock()
+		nc, ok := s.nodes[req.Node]
+		s.nodesMu.RUnlock()
+		if !ok {
+			http.Error(w, "unknown node", http.StatusBadRequest)
+			return
+		}
+		if err := nc.ProxyTakeover(r.Context(), req.PID, req.SessionID, req.CWD, req.ProcStartTime); err != nil {
+			slog.Warn("proxy takeover failed", "node", req.Node, "err", err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		json.NewEncoder(w).Encode(map[string]string{"status": "accepted"})
 		return
 	}
 
@@ -542,9 +721,10 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
-		// Force kill if still alive — re-verify PID identity to avoid killing
-		// an unrelated process that reused the PID during the wait window.
-		if procStartTime == 0 || verifyProcIdentity(pid, procStartTime) {
+		// Force kill if still alive — only when we can verify PID identity,
+		// to avoid killing an unrelated process that reused the PID during
+		// the wait window. If procStartTime was not supplied (0), skip SIGKILL.
+		if procStartTime != 0 && verifyProcIdentity(pid, procStartTime) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 

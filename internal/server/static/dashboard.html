@@ -2,8 +2,13 @@
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content">
 <title>naozhi dashboard</title>
+<link rel="manifest" href="/manifest.json">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black">
+<meta name="theme-color" content="#0d1117">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;background:#0d1117;color:#c9d1d9;font-size:20px}
@@ -13,7 +18,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .sidebar-header{padding:16px;border-bottom:1px solid #30363d}
 .sidebar-header h1{font-size:19px;color:#f0f6fc;font-weight:600}
 .sidebar-header .stats{font-size:14px;color:#8b949e;margin-top:4px}
-.session-list{flex:1;overflow-y:auto}
+.session-list{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#30363d transparent}
 
 .session-card{padding:10px 16px;border-bottom:1px solid #21262d;cursor:pointer;transition:background .15s;border-left:3px solid transparent}
 .session-card:hover{background:#161b22}
@@ -23,7 +28,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .session-card .agent{font-size:16px;color:#f0f6fc;margin:2px 0;font-weight:500}
 .session-card.dead-card .agent{text-decoration:line-through;color:#8b949e}
 .session-card .meta{font-size:13px;color:#8b949e;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-.session-card .workspace-hint{font-size:12px;color:#484f58;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.session-card .workspace-hint{font-size:12px;color:#6e7681;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .session-card .session-prompt{font-size:13px;color:#a5d6ff;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .session-card .session-activity{font-size:12px;color:#8b949e;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-style:italic}
 .session-card .btn-dismiss{position:absolute;top:4px;right:6px;background:none;border:none;color:#484f58;font-size:17px;cursor:pointer;padding:0 4px;line-height:1;opacity:0;transition:opacity .15s}
@@ -48,33 +53,24 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .main-header .workspace-path{font-size:13px;color:#58a6ff;margin-top:4px;cursor:pointer;word-break:break-all}
 .main-header .workspace-path:hover{text-decoration:underline}
 
-.events{flex:1;overflow-y:auto;padding:8px 0}
+.events{flex:1;overflow-y:auto;padding:8px 0;scrollbar-width:thin;scrollbar-color:#30363d transparent}
 .event{display:flex;gap:10px;padding:5px 20px;transition:background .1s}
 .event:hover{background:#161b22}
-.event-time{font-size:13px;color:#484f58;min-width:72px;font-family:monospace;padding-top:2px}
 .event-icon{width:18px;text-align:center;font-size:15px;padding-top:1px}
 .event-content{flex:1;font-size:15px;line-height:1.5;word-break:break-word;white-space:pre-wrap}
 .event.text .event-content,.event.result .event-content{white-space:normal}
 .md-blank{display:block;height:0.35em}
 .event.thinking .event-content{color:#a5d6ff;font-style:italic}
-.event.tool_use .event-content{color:#d2a8ff}
 .event.result .event-content{color:#7ee787}
 .event.system .event-content{color:#8b949e;font-size:14px}
 .event.text .event-content{color:#c9d1d9}
 .event.user .event-content{color:#58a6ff;font-weight:500}
 .event.user{background:rgba(88,166,255,.05)}
-.event-detail{color:#8b949e;font-size:13px;margin-top:2px;white-space:pre-wrap;word-break:break-word}
-.event .tool-name{display:inline-block;background:#30363d;color:#d2a8ff;padding:0 6px;border-radius:4px;font-size:12px;font-weight:600;margin-right:6px}
 .event.result{margin:2px 0}
 .event.result .event-content{background:rgba(126,231,135,.05);padding:4px 8px;border-radius:4px;border-left:2px solid #3fb950}
-
-.event.tool-summary{background:rgba(210,168,255,.04)}
-.event.tool-summary .event-content{color:#8b949e;font-size:13px}
-.event.tool-summary .ts-name{color:#d2a8ff}
-.event.tool-summary .ts-count{color:#8b949e;font-family:monospace}
-.event.tool-summary.pulse .event-content{animation:pulse 2s ease-in-out infinite}
-
-.empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:#484f58;font-size:15px}
+.event.agent .event-content{color:#a5d6ff}
+.event.agent{background:rgba(56,139,253,.05);border-left:2px solid #388bfd}
+.empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:#6e7681;font-size:15px}
 .no-sessions{padding:40px 16px;text-align:center;color:#484f58;font-size:14px}
 
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
@@ -99,8 +95,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .btn-send:hover{background:#2ea043}
 
 /* Toast */
-.toast{position:fixed;bottom:20px;right:20px;background:#da3633;color:#fff;padding:8px 16px;border-radius:8px;font-size:14px;z-index:100;opacity:0;transition:opacity .3s}
-.toast.show{opacity:1}
+.toast{position:fixed;bottom:20px;right:20px;background:#da3633;color:#fff;padding:8px 16px;border-radius:8px;font-size:14px;z-index:100;opacity:0;pointer-events:none;transition:opacity .3s}
+.toast.show{opacity:1;pointer-events:auto}
 
 /* Auth modal */
 .modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:200}
@@ -143,21 +139,53 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .node-dot.ok{background:#3fb950}
 .node-dot.error{background:#da3633}
 .node-info{color:#8b949e;font-size:13px}
-.node-group{border-bottom:1px solid #21262d}
-.node-group summary.node-group-header{display:flex;align-items:center;gap:6px;padding:7px 16px;cursor:pointer;color:#8b949e;font-size:12px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;list-style:none;user-select:none}
+.node-group{border-bottom:none}
+.node-group summary.node-group-header{display:flex;align-items:center;gap:6px;padding:8px 16px;cursor:pointer;color:#c9d1d9;font-size:12px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;list-style:none;user-select:none;background:#161b22;border-top:1px solid #30363d;border-bottom:1px solid #21262d;position:sticky;top:0;z-index:1}
 .node-group summary.node-group-header::-webkit-details-marker{display:none}
-.node-group summary.node-group-header:hover{background:#161b22;color:#c9d1d9}
-.ng-arrow{font-size:9px;color:#484f58;transition:transform .15s;display:inline-block}
+.node-group summary.node-group-header:hover{background:#1c2129;color:#f0f6fc}
+.ng-arrow{font-size:11px;color:#8b949e;transition:transform .15s;display:inline-block}
 .node-group[open] .ng-arrow{transform:rotate(90deg)}
-.ng-name{flex:1}
-.ng-count{color:#484f58;font-weight:400;font-size:11px}
+.ng-name{flex:1;color:#e6edf3}
+.ng-count{color:#8b949e;font-weight:400;font-size:11px}
 .ng-running{color:#3fb950;font-weight:400;font-size:11px}
 .new-session-btn{display:block;width:calc(100% - 32px);margin:8px 16px;padding:8px;border:1px dashed #30363d;border-radius:8px;background:transparent;color:#8b949e;font-size:14px;cursor:pointer;text-align:center;transition:all .15s}
 .new-session-btn:hover{border-color:#58a6ff;color:#58a6ff;background:#161b22}
+.ng-new-btn{background:none;border:none;color:#484f58;font-size:14px;cursor:pointer;padding:2px 6px;margin-left:4px;border-radius:4px;line-height:1;transition:all .15s;flex-shrink:0}
+.ng-new-btn:hover{color:#58a6ff;background:#161b22}
+
+/* Project group styles — golden color scheme */
+.project-group>summary.node-group-header{background:#1a1500;border-top-color:#3d2e00;border-bottom-color:#2a1f00;color:#b8860b}
+.project-group>summary.node-group-header:hover{background:#221c00;color:#d4a017}
+.project-group>summary.node-group-header .ng-arrow{color:#7a5c00}
+.project-group>summary.node-group-header .ng-name{color:#d4a017}
+.project-group>summary.node-group-header .ng-count{color:#7a5c00}
+.project-group>summary.node-group-header .ng-running{color:#d4a017}
+.project-group>summary.node-group-header .ng-new-btn{color:#7a5c00}
+.project-group>summary.node-group-header .ng-new-btn:hover{color:#d4a017;background:#2a1f00}
+.node-group .project-group>summary.node-group-header{padding-left:28px}
+.planner-indicator{display:inline-block;width:8px;height:8px;border-radius:50%;background:#a371f7;margin-right:4px}
+.session-card.planner-card{border-left-color:#a371f7}
+.session-card.planner-card .agent{color:#a371f7}
+.project-settings-btn{background:none;border:none;color:#484f58;font-size:13px;cursor:pointer;padding:2px 4px;margin-left:auto}
+.project-settings-btn:hover{color:#c9d1d9}
+/* CLI (discovered) sessions in folder groups */
+.session-card.cli-card{border-left-color:#4a3000}
+.session-card.cli-card.active{border-left-color:#d29922}
+
+/* Workspace info bar */
+.ws-info-bar{padding:8px 16px;border-bottom:1px solid #30363d;background:#161b22;display:flex;align-items:center;gap:8px}
+.ws-info-bar .ws-dot-lg{width:8px;height:8px;border-radius:50%;background:#3fb950;flex-shrink:0}
+.ws-info-bar .ws-name{font-size:13px;color:#f0f6fc;font-weight:600}
+.ws-info-bar .ws-sys{font-size:11px;color:#8b949e;margin-left:auto;white-space:nowrap}
 
 /* Markdown rendering */
 .md-pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 12px;margin:6px 0;overflow-x:auto;font-size:13px;line-height:1.5}
 .md-pre code{color:#e6edf3;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;white-space:pre}
+.md-code-wrap{position:relative}
+.md-copy-btn{position:absolute;top:6px;right:6px;background:#21262d;border:1px solid #30363d;border-radius:4px;color:#8b949e;font-size:11px;padding:2px 8px;cursor:pointer;opacity:0;transition:opacity .15s,color .15s,border-color .15s;line-height:1.6}
+.md-code-wrap:hover .md-copy-btn{opacity:1}
+.md-copy-btn:hover{background:#30363d;color:#c9d1d9}
+.md-copy-btn.copied{color:#3fb950;border-color:#3fb950}
 .md-code{background:#30363d;color:#e6edf3;padding:1px 5px;border-radius:4px;font-size:13px;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace}
 .md-h1,.md-h2,.md-h3,.md-h4{display:block;color:#f0f6fc;margin:8px 0 4px}
 .md-h1{font-size:16px}.md-h2{font-size:15px}.md-h3{font-size:14px}
@@ -191,8 +219,45 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .btn-takeover:hover{background:#d29922;color:#fff}
 .btn-takeover.taking{opacity:.5;pointer-events:none}
 .discovered-card.active{background:#1f2937;border-left:3px solid #d29922}
+
+/* ===== Mobile (≤768px) ===== */
+.btn-mobile-back{display:none}
+@media(max-width:768px){
+  /* Container: block so each panel stacks */
+  .container{display:block;height:100vh;overflow:hidden}
+  /* Sidebar: full-screen drawer, hidden off-left by default */
+  .sidebar{position:fixed;inset:0;width:100%;min-width:0;z-index:10;background:#0d1117;transform:translateX(-100%);transition:transform .25s ease;border-right:none;overflow-y:auto}
+  body.mobile-list-view .sidebar{transform:translateX(0)}
+  /* Main: full-screen flex column, sits behind sidebar */
+  .main{position:fixed;inset:0;display:flex;flex-direction:column;z-index:5}
+  /* Back button: hidden on desktop, shown on mobile */
+  .btn-mobile-back{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:36px;height:36px;background:none;border:none;color:#8b949e;font-size:20px;cursor:pointer;padding:0;border-radius:6px;-webkit-tap-highlight-color:transparent}
+  .btn-mobile-back:active{color:#c9d1d9}
+  /* Main header: flex row so back button sits left of content */
+  .main-header{display:flex;align-items:flex-start;gap:0;padding:10px 12px}
+  .main-header-content{flex:1;min-width:0}
+  /* Input area: safe area bottom padding */
+  .input-area{flex-shrink:0;padding-left:12px;padding-right:12px;padding-bottom:max(12px,env(safe-area-inset-bottom))}
+  /* Dismiss button always visible on touch screens */
+  .session-card .btn-dismiss{opacity:.6}
+  /* Modal never wider than screen */
+  .modal{width:min(360px,calc(100vw - 32px))}
+  /* Toast at top so keyboard doesn't cover it */
+  .toast{bottom:auto;top:16px;right:16px;left:16px;text-align:center}
+  /* Remove tap flash on interactive elements */
+  .session-card,.btn-icon,.btn-send,.new-session-btn{-webkit-tap-highlight-color:transparent}
+  .sidebar-header{display:flex;flex-wrap:wrap;align-items:center}
+  .ws-badge{margin-top:0;margin-left:auto}
+  .session-list{overflow-x:hidden}
+  .session-card[data-key]{touch-action:pan-y}
+  .session-card.swiping{transition:none!important;user-select:none}
+  .modal-overlay{align-items:flex-end}
+  .modal{width:100%;border-radius:16px 16px 0 0;padding-bottom:max(20px,env(safe-area-inset-bottom));animation:sheet-in .25s ease}
+  .modal::before{content:'';display:block;width:36px;height:4px;background:#484f58;border-radius:2px;margin:0 auto 16px}
+}
+@keyframes sheet-in{from{transform:translateY(100%)}to{transform:translateY(0)}}
 </style>
-<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js" integrity="sha384-tI0sDqjGJcqrQ8e/XKiQGS+ee11v5knTNWx2goxMBxe4DO9U0uKlfxJtYB9ILZ4j" crossorigin="anonymous"></script>
 </head>
 <body>
 <div class="container">
@@ -203,11 +268,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
       <div class="ws-badge" id="ws-status"><span class="ws-dot gray"></span>WS Off</div>
       <button class="new-session-btn" onclick="createNewSession()">+ new session</button>
     </div>
-    <div class="discovered-section" id="discovered-section">
+    <div class="ws-info-bar" id="ws-info-bar" style="display:none">
+      <span class="ws-dot-lg"></span>
+      <span class="ws-name" id="ws-info-name"></span>
+      <span class="ws-sys" id="ws-info-sys"></span>
+    </div>
+    <div class="discovered-section" id="discovered-section" style="display:none">
       <div class="discovered-header">
         <span>Discovered Processes</span>
       </div>
-      <div id="discovered-list"><div style="padding:4px 16px;font-size:11px;color:#484f58">scanning...</div></div>
+      <div id="discovered-list"></div>
     </div>
     <div class="session-list" id="session-list">
       <div class="no-sessions">loading...</div>
@@ -222,6 +292,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 let selectedKey = null;
 let eventTimer = null;
 let lastEventTime = 0;
+let lastCompositionEnd = 0;
 let sessionsData = {};
 let pendingFiles = [];
 let sending = false;
@@ -230,11 +301,13 @@ let nodesData = {};
 let lastSessionsJSON = '';
 let sessionPollTimer = null;
 let discoveredPollTimer = null;
+let discoveredItems = []; // discovered sessions, merged into sidebar
 let previewTimer = null;
 let previewEventCount = 0;
 let sessionCounter = 0;
 let availableAgents = ['general'];
 let defaultWorkspace = '';
+let projectsData = []; // [{name, path, node}] from API
 const sessionWorkspaces = {};
 
 function getToken() { return localStorage.getItem('naozhi_dashboard_token') || ''; }
@@ -280,6 +353,7 @@ async function fetchSessions() {
     if (data.nodes) nodesData = data.nodes;
     if (data.stats.agents) availableAgents = data.stats.agents;
     if (data.stats.default_workspace) defaultWorkspace = data.stats.default_workspace;
+    if (data.stats.projects) projectsData = data.stats.projects;
 
     // Track which keys the backend knows about
     const backendKeys = new Set();
@@ -314,6 +388,7 @@ async function fetchSessions() {
             workspace: sessionWorkspaces[key],
             last_active: 0,
             node: 'local',
+            project: matchProject(sessionWorkspaces[key]),
           });
         }
       }
@@ -328,9 +403,22 @@ async function fetchSessions() {
 function renderSidebar(data) {
   const st = data.stats;
   document.getElementById('stats').textContent =
-    st.running + ' running \u00b7 ' + st.ready + ' ready / ' + (st.max_procs || '?') + ' \u00b7 ' + st.total + ' total \u00b7 ' + st.uptime + ' \u00b7 ' + st.backend;
+    st.total + ' sessions \u00b7 ' + st.running + ' running \u00b7 ' + st.ready + '/' + (st.max_procs || '?') + ' slots \u00b7 ' + st.uptime;
 
-  // Remove legacy node-status line (node info now lives in sidebar groups)
+  // Update workspace info bar
+  const wsBar = document.getElementById('ws-info-bar');
+  const wsName = st.workspace_name || st.workspace_id || '';
+  if (wsName) {
+    wsBar.style.display = '';
+    document.getElementById('ws-info-name').textContent = wsName;
+    const sys = st.system;
+    if (sys) {
+      let memStr = sys.memory_mb > 0 ? (sys.memory_mb >= 1024 ? (sys.memory_mb / 1024).toFixed(1) + 'G' : sys.memory_mb + 'M') : '';
+      document.getElementById('ws-info-sys').textContent =
+        sys.os + '/' + sys.arch + ' \u00b7 ' + sys.cpus + 'C' + (memStr ? '/' + memStr : '');
+    }
+  }
+
   const nodeEl = document.getElementById('node-status');
   if (nodeEl) nodeEl.remove();
 
@@ -343,65 +431,241 @@ function renderSidebar(data) {
     return d !== 0 ? d : b.last_active - a.last_active;
   });
 
-  if (sessions.length === 0 && Object.keys(sessionWorkspaces).length === 0) {
+  if (sessions.length === 0 && discoveredItems.length === 0 && Object.keys(sessionWorkspaces).length === 0 && projectsData.length === 0) {
     list.innerHTML = '<div class="no-sessions">no sessions</div>';
     return;
   }
 
-  if (!isMultiNode()) {
+  const hasProjects = projectsData.length > 0;
+  const multiWs = isMultiNode();
+  const hasRemoteSessions = multiWs && sessions.some(s => s.node && s.node !== 'local');
+
+  if (hasRemoteSessions && hasProjects) {
+    list.innerHTML = renderThreeLevel(sessions, discoveredItems);
+  } else if (hasProjects) {
+    list.innerHTML = renderTwoLevel(sessions, discoveredItems);
+  } else if (!multiWs) {
     list.innerHTML = sessions.map(sessionCardHtml).join('');
   } else {
-    const groups = {};
-    sessions.forEach(s => {
-      const n = s.node || 'local';
-      if (!groups[n]) groups[n] = [];
-      groups[n].push(s);
-    });
-    const collapsed = getCollapsedNodes();
-    list.innerHTML = Object.keys(groups).map(nid => {
-      const nd = nodesData[nid] || {};
-      const dotCls = nd.status === 'ok' ? 'ok' : 'error';
-      const displayName = nd.display_name || nid;
-      const grp = groups[nid];
-      const running = grp.filter(s => s.state === 'running' || s.state === 'spawning').length;
-      const countHtml = running > 0
-        ? '<span class="ng-running">' + running + ' running</span>'
-        : '<span class="ng-count">' + grp.length + '</span>';
-      return '<details class="node-group"' + (collapsed.has(nid) ? '' : ' open') +
-        ' data-node="' + esc(nid) + '" ontoggle="saveNodeToggle(this)">' +
-        '<summary class="node-group-header">' +
-        '<span class="ng-arrow">&#9658;</span>' +
-        '<span class="node-dot ' + dotCls + '"></span>' +
-        '<span class="ng-name">' + esc(displayName) + '</span>' +
-        countHtml + '</summary>' +
-        grp.map(sessionCardHtml).join('') +
-        '</details>';
-    }).join('');
+    list.innerHTML = renderNodeGroups(sessions);
   }
+}
+
+// Match a workspace path to a project from projectsData (longest prefix wins)
+function matchProject(workspace) {
+  if (!workspace || !projectsData || projectsData.length === 0) return '';
+  const ws = workspace.endsWith('/') ? workspace : workspace + '/';
+  let best = '', bestLen = 0;
+  for (const p of projectsData) {
+    const prefix = p.path.endsWith('/') ? p.path : p.path + '/';
+    if (ws.startsWith(prefix) && p.path.length > bestLen) {
+      best = p.name; bestLen = p.path.length;
+    }
+  }
+  return best;
+}
+
+// Build project groups driven by a projects list. Unmatched sessions go to _unmatched.
+function buildProjectGroups(sessions, discovered, projects) {
+  projects = projects || projectsData;
+  const projectGroups = {};
+  for (const p of projects) {
+    if (!projectGroups[p.name]) projectGroups[p.name] = { managed: [], discovered: [], path: p.path };
+  }
+
+  const unmatched = { managed: [], discovered: [], path: '' };
+
+  sessions.forEach(s => {
+    if (s.project && projectGroups[s.project]) {
+      projectGroups[s.project].managed.push(s);
+    } else {
+      unmatched.managed.push(s);
+    }
+  });
+
+  discovered.forEach(d => {
+    if (d.project && projectGroups[d.project]) {
+      projectGroups[d.project].discovered.push(d);
+    } else {
+      unmatched.discovered.push(d);
+    }
+  });
+
+  return { projectGroups, unmatched };
+}
+
+function renderProjectGroupHtml(pname, grp, collapsed) {
+  grp.managed.sort((a, b) => {
+    if (a.is_planner && !b.is_planner) return -1;
+    if (!a.is_planner && b.is_planner) return 1;
+    return 0;
+  });
+  const totalCount = grp.managed.length + grp.discovered.length;
+  const running = grp.managed.filter(s => s.state === 'running' || s.state === 'spawning').length
+    + grp.discovered.filter(d => d.state === 'running').length;
+  const countHtml = running > 0
+    ? '<span class="ng-running">' + running + ' running</span>'
+    : '<span class="ng-count" title="' + totalCount + ' sessions">' + totalCount + '</span>';
+  const path = grp.path || '';
+  return '<details class="node-group project-group"' + (collapsed.has('proj:'+pname) ? '' : ' open') +
+    ' data-node="proj:' + esc(pname) + '" ontoggle="saveNodeToggle(this)">' +
+    '<summary class="node-group-header">' +
+    '<span class="ng-arrow">&#9658;</span>' +
+    '<span class="ng-name">' + esc(pname) + '</span>' +
+    countHtml +
+    '<button class="ng-new-btn" data-path="' + esc(path) + '" data-project="' + esc(pname) + '" onclick="event.stopPropagation();event.preventDefault();createSessionInProject(this.dataset.path,this.dataset.project)" title="new session">+</button>' +
+    '</summary>' +
+    grp.managed.map(sessionCardHtml).join('') +
+    grp.discovered.map(discoveredInlineHtml).join('') +
+    '</details>';
+}
+
+// Single workspace: project → session
+function renderTwoLevel(sessions, discovered) {
+  const { projectGroups, unmatched } = buildProjectGroups(sessions, discovered);
+  const collapsed = getCollapsedNodes();
+  let html = Object.keys(projectGroups).sort()
+    .map(pname => renderProjectGroupHtml(pname, projectGroups[pname], collapsed)).join('');
+  if (unmatched.managed.length > 0 || unmatched.discovered.length > 0) {
+    html += renderUnmatchedHtml(unmatched, collapsed);
+  }
+  return html;
+}
+
+function renderUnmatchedHtml(grp, collapsed) {
+  const total = grp.managed.length + grp.discovered.length;
+  return '<details class="node-group project-group"' + (collapsed.has('_other') ? '' : ' open') +
+    ' data-node="_other" ontoggle="saveNodeToggle(this)">' +
+    '<summary class="node-group-header">' +
+    '<span class="ng-arrow">&#9658;</span>' +
+    '<span class="ng-name">\u5176\u4ed6</span>' +
+    '<span class="ng-count" title="' + total + ' sessions">' + total + '</span></summary>' +
+    grp.managed.map(sessionCardHtml).join('') +
+    grp.discovered.map(discoveredInlineHtml).join('') +
+    '</details>';
+}
+
+// Multi-workspace: workspace → project → session
+function renderThreeLevel(sessions, discovered) {
+  // Group everything by node first
+  const nodeItems = {};  // nodeID -> { sessions: [], discovered: [] }
+  sessions.forEach(s => {
+    const n = s.node || 'local';
+    if (!nodeItems[n]) nodeItems[n] = { sessions: [], discovered: [] };
+    nodeItems[n].sessions.push(s);
+  });
+  discovered.forEach(d => {
+    const n = d.node || 'local';
+    if (!nodeItems[n]) nodeItems[n] = { sessions: [], discovered: [] };
+    nodeItems[n].discovered.push(d);
+  });
+
+  const nodeIds = ['local', ...Object.keys(nodeItems).filter(n => n !== 'local').sort()];
+  const collapsed = getCollapsedNodes();
+
+  let html = nodeIds.map(nid => {
+    const ni = nodeItems[nid] || { sessions: [], discovered: [] };
+    const nd = nodesData[nid] || {};
+    const dotCls = nd.status === 'ok' || nid === 'local' ? 'ok' : 'error';
+    const displayName = nid === 'local'
+      ? (document.getElementById('ws-info-name').textContent || 'Local')
+      : (nd.display_name || nid);
+    const nodeProjects = projectsData.filter(p => (p.node || 'local') === nid);
+    const { projectGroups, unmatched } = buildProjectGroups(ni.sessions, ni.discovered, nodeProjects);
+    const totalCount = ni.sessions.length + ni.discovered.length;
+
+    let innerHtml = Object.keys(projectGroups).sort()
+      .map(pname => renderProjectGroupHtml(pname, projectGroups[pname], collapsed)).join('');
+    if (unmatched.managed.length > 0 || unmatched.discovered.length > 0) {
+      innerHtml += renderUnmatchedHtml(unmatched, collapsed);
+    }
+
+    return '<details class="node-group"' + (collapsed.has(nid) ? '' : ' open') +
+      ' data-node="' + esc(nid) + '" ontoggle="saveNodeToggle(this)">' +
+      '<summary class="node-group-header">' +
+      '<span class="ng-arrow">&#9658;</span>' +
+      '<span class="node-dot ' + dotCls + '"></span>' +
+      '<span class="ng-name">' + esc(displayName) + '</span>' +
+      '<span class="ng-count" title="' + totalCount + ' sessions">' + totalCount + '</span></summary>' +
+      innerHtml +
+      '</details>';
+  }).join('');
+  return html;
+}
+
+// Ensures the currently selected session card is visible even if it falls outside
+// all node groups (e.g. a pending session whose node isn't in the sessions list).
+function renderSelectedOrphanCard(sessions) {
+  if (!selectedKey) return '';
+  const inList = sessions.some(s => s.key === selectedKey && (s.node || 'local') === (selectedNode || 'local'));
+  if (inList) return '';
+  const s = sessionsData[sid(selectedKey, selectedNode || 'local')];
+  if (!s) return '';
+  return sessionCardHtml(s);
+}
+
+// Legacy node-only groups (no projects configured)
+function renderNodeGroups(sessions) {
+  const groups = {};
+  sessions.forEach(s => {
+    const n = s.node || 'local';
+    if (!groups[n]) groups[n] = [];
+    groups[n].push(s);
+  });
+  if (!groups['local']) groups['local'] = [];
+  const nodeIds = ['local', ...Object.keys(groups).filter(n => n !== 'local')];
+  const collapsed = getCollapsedNodes();
+  return nodeIds.map(nid => {
+    const nd = nodesData[nid] || {};
+    const dotCls = nd.status === 'ok' || nid === 'local' ? 'ok' : 'error';
+    const displayName = nid === 'local'
+      ? (document.getElementById('ws-info-name').textContent || 'Local')
+      : (nd.display_name || nid);
+    const grp = groups[nid];
+    const running = grp.filter(s => s.state === 'running' || s.state === 'spawning').length;
+    const countHtml = running > 0
+      ? '<span class="ng-running">' + running + ' running</span>'
+      : '<span class="ng-count" title="' + grp.length + ' sessions">' + grp.length + '</span>';
+    return '<details class="node-group"' + (collapsed.has(nid) ? '' : ' open') +
+      ' data-node="' + esc(nid) + '" ontoggle="saveNodeToggle(this)">' +
+      '<summary class="node-group-header">' +
+      '<span class="ng-arrow">&#9658;</span>' +
+      '<span class="node-dot ' + dotCls + '"></span>' +
+      '<span class="ng-name">' + esc(displayName) + '</span>' +
+      countHtml + '</summary>' +
+      grp.map(sessionCardHtml).join('') +
+      '</details>';
+  }).join('');
 }
 
 function sessionCardHtml(s) {
   const sNode = s.node || 'local';
   const isDead = s.state === 'dead' || s.state === 'suspended';
   const isActive = selectedKey === s.key && selectedNode === sNode;
-  const cls = (isActive ? 'session-card active' : 'session-card') + (isDead ? ' dead-card' : '');
-  const ago = timeAgo(s.last_active);
-  const proto = s.protocol || '\u2014';
+  const isPlanner = s.is_planner;
+  const cls = (isActive ? 'session-card active' : 'session-card') + (isDead ? ' dead-card' : '') + (isPlanner ? ' planner-card' : '');
+  const ago = s.last_active ? timeAgo(s.last_active) : sessionTimeHint(s.key);
   const ri = s.state === 'running' ? '<span class="running-indicator"></span>' : '';
+  const pi = isPlanner ? '<span class="planner-indicator"></span>' : '';
   const deathTag = s.death_reason ? ' <span class="death-tag">' + esc(s.death_reason.replace(/_/g,' ')) + '</span>' : '';
   const ws = s.workspace ? shortPath(s.workspace) : '';
   const prompt = s.last_prompt || '';
   const activity = s.last_activity || '';
+  const agentLabel = isPlanner ? 'planner' : (s.agent || 'general');
+  const showPlatform = isPlanner ? 'project' : (s.platform || '');
+  const platformLabel = showPlatform.toLowerCase() === 'local' && !isMultiNode() ? '' : showPlatform;
+  const nodeBadge = isMultiNode() && sNode !== 'local'
+    ? '<span class="node-badge" style="background:' + nodeColor(sNode) + '">' + esc(sNode) + '</span>'
+    : '';
   return '<div class="' + cls + '" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="selectSession(this.dataset.key,this.dataset.node)">' +
-    '<button class="btn-dismiss" onclick="event.stopPropagation();dismissSession(\'' + esc(s.key).replace(/'/g,"\\'") + '\',\'' + esc(sNode).replace(/'/g,"\\'") + '\')" title="remove">&times;</button>' +
-    '<div class="platform">' + esc(s.platform) + ' \u00b7 ' + esc(proto) + '</div>' +
-    '<div class="agent">' + ri + esc(s.agent || 'general') + '</div>' +
+    '<button class="btn-dismiss" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove">&times;</button>' +
+    '<div class="platform">' + esc(platformLabel) + '</div>' +
+    (agentLabel !== 'general' ? '<div class="agent">' + pi + ri + esc(agentLabel) + '</div>' : '') +
     (prompt ? '<div class="session-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' : '') +
-    (activity ? '<div class="session-activity">' + esc(activity) + '</div>' : '') +
+    (activity ? '<div class="session-activity" title="' + esc(activity) + '">' + esc(activity) + '</div>' : '') +
     '<div class="meta"><span class="badge ' + s.state + '">' + s.state + '</span>' + deathTag +
-    '<span>' + ago + '</span>' +
+    nodeBadge + '<span>' + ago + '</span>' +
     '</div>' +
-    (ws ? '<div class="workspace-hint">' + esc(ws) + '</div>' : '') +
     '</div>';
 }
 
@@ -412,7 +676,7 @@ function selectSession(key, node) {
   selectedKey = key;
   selectedNode = node;
   lastEventTime = 0;
-  turnToolAccum = {};
+  mobileEnterChat();
   stopPreviewPolling();
   document.querySelectorAll('.session-card').forEach(el => {
     el.classList.toggle('active', el.dataset.key === key && (el.dataset.node || 'local') === node);
@@ -434,7 +698,6 @@ function selectSession(key, node) {
 
 async function dismissSession(key, node) {
   node = node || 'local';
-  if (!confirm('确定删除此会话？此操作不可撤回。')) return;
 
   // If it's a pending (never-sent) session, just remove from localStorage
   if (sessionWorkspaces[key] !== undefined) {
@@ -476,31 +739,36 @@ function renderMainShell() {
   const ws = s.workspace || '';
   const deathInfo = s.death_reason ? '<span class="death-tag">' + esc(s.death_reason.replace(/_/g,' ')) + '</span>' : '';
   const chatInfo = (s.chat_type && s.chat_id) ? esc(s.chat_type) + ':' + esc(s.chat_id).substring(0,12) : '';
-  const nodeDisplay = isMultiNode() && selectedNode ? (function() {
+  const nodeDisplay = isMultiNode() && selectedNode && selectedNode !== 'local' ? (function() {
     const nd = nodesData[selectedNode];
     const label = nd && nd.display_name ? esc(selectedNode) + ' (' + esc(nd.display_name) + ')' : esc(selectedNode);
     return '<span class="node-info">' + label + '</span>';
   })() : '';
 
+  const keyParts = (selectedKey || '').split(':');
+  const displayName = s.agent || keyParts[keyParts.length - 1] || selectedKey || '';
+
   main.innerHTML =
     '<div class="main-header">' +
-      '<h2>' + esc(selectedKey) + '</h2>' +
+      '<button class="btn-mobile-back" onclick="mobileBack()" title="back">&#8592;</button>' +
+      '<div class="main-header-content">' +
+      '<h2>' + esc(displayName) + '</h2>' +
       '<div class="detail">' +
         '<span class="state-indicator ' + (s.state||'') + '"></span>' +
         '<span class="badge ' + (s.state||'') + '">' + (s.state||'?') + '</span>' +
         deathInfo +
         nodeDisplay +
         (chatInfo ? '<span>' + chatInfo + '</span>' : '') +
-        '<span>' + (s.protocol || '') + '</span>' +
       '</div>' +
-      (ws ? '<div class="workspace-path" onclick="copyText(\'' + esc(ws).replace(/'/g,"\\'") + '\')" title="click to copy">' + esc(ws) + '</div>' : '') +
+      (ws ? '<div class="workspace-path" data-copy="' + esc(ws) + '" onclick="copyText(this.dataset.copy)" title="click to copy">' + esc(ws) + '</div>' : '') +
+      '</div>' +
     '</div>' +
     '<div class="events" id="events-scroll"></div>' +
     '<div class="input-area" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
         '<button class="btn-icon" onclick="openFilePicker()" title="upload image">&#x1f4ce;</button>' +
-        '<textarea id="msg-input" rows="1" placeholder="send a message..." onkeydown="handleKey(event)" oninput="autoGrow(this)"></textarea>' +
+        '<textarea id="msg-input" rows="1" placeholder="send a message..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()" oninput="autoGrow(this)"></textarea>' +
         '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="send">&#x27a4;</button>' +
       '</div>' +
       '<input type="file" id="file-input" accept="image/*" multiple style="display:none" onchange="handleFiles(this.files)">' +
@@ -511,6 +779,14 @@ function renderMainShell() {
   ia.addEventListener('dragover', e => { e.preventDefault(); ia.style.borderColor='#58a6ff'; });
   ia.addEventListener('dragleave', () => { ia.style.borderColor=''; });
   ia.addEventListener('drop', e => { e.preventDefault(); ia.style.borderColor=''; handleFiles(e.dataTransfer.files); });
+  // Double-tap events feed → focus input (mobile)
+  let lastTapMs = 0;
+  document.getElementById('events-scroll').addEventListener('touchend', e => {
+    if (!isMobile() || e.target.closest('a,button,code,pre')) return;
+    const now = Date.now();
+    if (now - lastTapMs < 300) { document.getElementById('msg-input')?.focus(); lastTapMs = 0; }
+    else lastTapMs = now;
+  }, {passive:true});
 }
 
 async function fetchEvents(full) {
@@ -541,7 +817,6 @@ async function fetchEvents(full) {
 function renderEvents(events) {
   const el = document.getElementById('events-scroll');
   if (!el) return;
-  turnToolAccum = {};
   const display = processEventsForDisplay(events);
   el.innerHTML = display.map(eventHtml).filter(Boolean).join('') || '<div class="empty-state">no events yet</div>';
   el.scrollTop = el.scrollHeight;
@@ -555,9 +830,7 @@ function appendEvents(events) {
   if (empty) empty.remove();
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   events.forEach(e => {
-    if (e.type === 'tool_use') { if (e.tool) turnToolAccum[toolKey(e)] = (turnToolAccum[toolKey(e)] || 0) + 1; updatePendingSummary(); return; }
-    if (e.type === 'result') return;
-    if (Object.keys(turnToolAccum).length > 0) finalizePendingSummary();
+    if (e.type === 'tool_use' || e.type === 'result') return;
     const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h);
   });
   if (wasBottom) el.scrollTop = el.scrollHeight;
@@ -566,28 +839,25 @@ function appendEvents(events) {
 
 function eventHtml(e) {
   if (e.type === 'tool_use' || e.type === 'result' || e.type === 'thinking') return '';
-  if (e.type === 'tool_summary') return toolSummaryHtml(e.tools);
-  const icons = {init:'~',system:'\u2699',user:'\u{1f464}'};
-  const t = new Date(e.time).toLocaleTimeString('zh-CN',{hour12:false});
+  // Filter out Claude Code system XML injected as user messages
+  const raw = e.detail || e.summary || '';
+  if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return '';
+  const icons = {init:'~',system:'\u2699',user:'\u{1f464}',agent:'\u26a1'};
   const icon = icons[e.type] || '';
 
   let content = '';
-  if (e.type === 'tool_use') {
-    const toolTag = e.tool ? '<span class="tool-name">' + esc(e.tool) + '</span>' : '';
-    content = toolTag + esc(e.summary || e.type);
-    if (e.detail && e.detail !== e.summary) {
-      content += '<div class="event-detail">' + esc(e.detail) + '</div>';
-    }
-  } else if (e.type === 'system') {
+  if (e.type === 'system') {
     content = esc(e.summary || e.type);
   } else if (e.type === 'text' || e.type === 'result') {
     content = renderMd(e.detail || e.summary || e.type);
+  } else if (e.type === 'agent') {
+    const badge = e.subagent ? '<span class="ts-subagent">' + esc(e.subagent) + '</span> ' : '';
+    content = badge + esc(e.summary || '');
   } else {
     content = esc(e.detail || e.summary || e.type);
   }
 
   return '<div class="event ' + esc(e.type||'') + '">' +
-    '<span class="event-time">' + t + '</span>' +
     '<span class="event-icon">' + icon + '</span>' +
     '<div class="event-content">' + content + '</div></div>';
 }
@@ -596,7 +866,7 @@ function eventHtml(e) {
 
 function handleKey(e) {
   if (e.key === 'Escape') { e.preventDefault(); interruptSession(); return; }
-  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) { e.preventDefault(); sendMessage(); }
+  if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && Date.now() - lastCompositionEnd > 30) { e.preventDefault(); sendMessage(); }
 }
 
 function autoGrow(el) {
@@ -665,8 +935,8 @@ async function sendMessage() {
       showAuthModal();
       return;
     }
-    if (r.status === 409) {
-      showToast('session busy, please wait');
+    if (r.status === 429) {
+      showToast('message queue full, please wait');
       return;
     }
     if (!r.ok) {
@@ -801,10 +1071,34 @@ function doCreateSession() {
   savePendingSessions();
 
   stopPreviewPolling();
+  wsm.unsubscribe();
   selectedKey = key;
   selectedNode = 'local';
   lastEventTime = 0;
-  turnToolAccum = {};
+  mobileEnterChat();
+  document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
+  renderMainShell();
+  lastSessionsJSON = '';
+  fetchSessions();
+  setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
+}
+
+function createSessionInProject(projectPath, projectName) {
+  sessionCounter++;
+  const now = new Date();
+  const ts = now.toISOString().slice(0,10) + '-' +
+    now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
+  const key = 'dashboard:direct:' + ts + ':' + projectName;
+
+  sessionWorkspaces[key] = projectPath;
+  savePendingSessions();
+
+  stopPreviewPolling();
+  wsm.unsubscribe();
+  selectedKey = key;
+  selectedNode = 'local';
+  lastEventTime = 0;
+  mobileEnterChat();
   document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
   renderMainShell();
   lastSessionsJSON = '';
@@ -825,6 +1119,15 @@ function copyText(text) {
   navigator.clipboard.writeText(text).then(() => showToast('copied'));
 }
 
+function copyCodeBlock(btn) {
+  const code = btn.closest('.md-code-wrap').querySelector('code');
+  navigator.clipboard.writeText(code.textContent).then(() => {
+    btn.textContent = 'copied!';
+    btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500);
+  });
+}
+
 function shortPath(p) {
   const home = '/home/';
   const i = p.indexOf(home);
@@ -843,6 +1146,12 @@ function timeAgo(ms) {
   if (d < 3600000) return Math.floor(d/60000) + 'm ago';
   if (d < 86400000) return Math.floor(d/3600000) + 'h ago';
   return Math.floor(d/86400000) + 'd ago';
+}
+
+function sessionTimeHint(key) {
+  const m = (key || '').match(/:(\d{4})-(\d{2})-(\d{2})-(\d{2})(\d{2})(\d{2})/);
+  if (m) return m[2] + '/' + m[3] + ' ' + m[4] + ':' + m[5];
+  return '\u2014';
 }
 
 function esc(s) {
@@ -887,7 +1196,7 @@ function renderMd(s) {
         return '<div class="mermaid-wrap"><pre id="' + id + '" class="mermaid-pending"></pre></div>';
       }
       const langAttr = lang ? ' data-lang="' + esc(lang) + '"' : '';
-      return '<pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre>';
+      return '<div class="md-code-wrap"><pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre><button class="md-copy-btn" onclick="copyCodeBlock(this)">copy</button></div>';
     }
     // Process line by line for block elements
     const lines = part.split('\n');
@@ -957,70 +1266,8 @@ function renderTable(lines) {
   return h + '</tbody></table>';
 }
 
-let turnToolAccum = {};
-
 function processEventsForDisplay(events) {
-  const out = [];
-  let accum = {};
-  for (const e of events) {
-    if (e.type === 'tool_use') { if (e.tool) accum[toolKey(e)] = (accum[toolKey(e)] || 0) + 1; continue; }
-    if (e.type === 'result') continue;
-    if (Object.keys(accum).length > 0) { out.push({ type: 'tool_summary', tools: accum }); accum = {}; }
-    out.push(e);
-  }
-  if (Object.keys(accum).length > 0) out.push({ type: 'tool_summary', tools: accum });
-  return out;
-}
-
-function toolKey(e) {
-  return (e.tool === 'Agent' && e.subagent) ? 'Agent\x00' + e.subagent : (e.tool || 'unknown');
-}
-
-function toolKeyDisplay(key) {
-  const sep = key.indexOf('\x00');
-  if (sep < 0) return { name: key, sub: '' };
-  return { name: key.slice(0, sep), sub: key.slice(sep + 1) };
-}
-
-function toolSummaryHtml(tools) {
-  const entries = Object.entries(tools).sort((a,b) => b[1] - a[1]);
-  const total = entries.reduce((s, t) => s + t[1], 0);
-  const items = entries.map(([key, count]) => {
-    const {name, sub} = toolKeyDisplay(key);
-    const subHtml = sub ? ' <span class="ts-subagent">' + esc(sub) + '</span>' : '';
-    return '<span class="ts-name">' + esc(name) + '</span>' + subHtml + ' <span class="ts-count">\u00d7' + count + '</span>';
-  }).join('\u2002');
-  return '<div class="event tool-summary"><span class="event-time"></span><span class="event-icon">\u{1f527}</span>' +
-    '<div class="event-content">' + total + ' calls\u2002' + items + '</div></div>';
-}
-
-function updatePendingSummary() {
-  const scroll = document.getElementById('events-scroll');
-  if (!scroll) return;
-  let el = document.getElementById('pending-tool-summary');
-  if (!el) {
-    const empty = scroll.querySelector('.empty-state');
-    if (empty) empty.remove();
-    scroll.insertAdjacentHTML('beforeend', '<div id="pending-tool-summary" class="event tool-summary pulse"></div>');
-    el = document.getElementById('pending-tool-summary');
-  }
-  const entries = Object.entries(turnToolAccum).sort((a,b) => b[1] - a[1]);
-  const total = entries.reduce((s, t) => s + t[1], 0);
-  const items = entries.map(([key, count]) => {
-    const {name, sub} = toolKeyDisplay(key);
-    const subHtml = sub ? ' <span class="ts-subagent">' + esc(sub) + '</span>' : '';
-    return '<span class="ts-name">' + esc(name) + '</span>' + subHtml + ' <span class="ts-count">\u00d7' + count + '</span>';
-  }).join('\u2002');
-  el.innerHTML = '<span class="event-time"></span><span class="event-icon">\u{1f527}</span>' +
-    '<div class="event-content">' + total + ' calls\u2002' + items + '</div>';
-  const wasBottom = scroll.scrollTop + scroll.clientHeight >= scroll.scrollHeight - 30;
-  if (wasBottom) scroll.scrollTop = scroll.scrollHeight;
-}
-
-function finalizePendingSummary() {
-  const el = document.getElementById('pending-tool-summary');
-  if (el) { el.removeAttribute('id'); el.classList.remove('pulse'); }
-  turnToolAccum = {};
+  return events.filter(e => e.type !== 'tool_use' && e.type !== 'result');
 }
 
 function sid(key, node) { return key + '\t' + (node || 'local'); }
@@ -1028,6 +1275,13 @@ function sid(key, node) { return key + '\t' + (node || 'local'); }
 function isMultiNode() {
   const keys = Object.keys(nodesData);
   return keys.length > 1 || (keys.length === 1 && keys[0] !== 'local');
+}
+
+const NODE_BADGE_COLORS = ['#1f6feb','#0550ae','#1a7f37','#6e40c9','#9a6700','#cf222e'];
+function nodeColor(id) {
+  let h = 0;
+  for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+  return NODE_BADGE_COLORS[h % NODE_BADGE_COLORS.length];
 }
 
 function getCollapsedNodes() {
@@ -1226,7 +1480,6 @@ const wsm = {
     const display = processEventsForDisplay(events);
 
     if (isInitial) {
-      turnToolAccum = {};
       el.innerHTML = display.map(eventHtml).filter(Boolean).join('') || '<div class="empty-state">no events yet</div>';
       if (events.length > 0) {
         el.insertAdjacentHTML('beforeend', '<div class="ws-separator"><span>live</span></div>');
@@ -1251,13 +1504,7 @@ const wsm = {
     const ev = msg.event;
     if (!ev) return;
     if (ev.time > this.lastEventTimeWs) this.lastEventTimeWs = ev.time;
-    if (ev.type === 'tool_use') {
-      if (ev.tool) turnToolAccum[toolKey(ev)] = (turnToolAccum[toolKey(ev)] || 0) + 1;
-      updatePendingSummary();
-      return;
-    }
-    if (ev.type === 'result') return;
-    if (Object.keys(turnToolAccum).length > 0) finalizePendingSummary();
+    if (ev.type === 'tool_use' || ev.type === 'result') return;
     const html = eventHtml(ev);
     if (!html) return;
     const el = document.getElementById('events-scroll');
@@ -1284,8 +1531,6 @@ const wsm = {
           }
         }, 1500);
       }
-    } else if (msg.status === 'busy') {
-      showToastVariant('session busy, please wait', 'warning');
     } else if (msg.status === 'error') {
       showToastVariant('send error: ' + (msg.error || 'unknown'), 'error');
     }
@@ -1395,42 +1640,39 @@ async function scanDiscovered() {
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch('/api/discovered', { headers });
-    const sessions = await r.json();
-    renderDiscovered(sessions || []);
+    discoveredItems = (await r.json()) || [];
+    // Trigger sidebar re-render to merge discovered into project groups
+    lastSessionsJSON = '';
+    fetchSessions();
   } catch (e) {
     showToast('scan error: ' + e.message);
   }
 }
 
 function renderDiscovered(sessions) {
-  const section = document.getElementById('discovered-section');
-  const list = document.getElementById('discovered-list');
-  if (sessions.length === 0) {
-    list.innerHTML = '<div style="padding:4px 16px;font-size:11px;color:#484f58">no external processes</div>';
-    return;
-  }
-  section.style.display = '';
-  list.innerHTML = sessions.map(s => {
-    const cwd = s.cwd || 'unknown';
-    const base = cwd.split('/').pop() || cwd;
-    const ago = timeAgo(s.last_active || s.started_at);
-    const pst = s.proc_start_time || 0;
-    const state = s.state || 'ready';
-    const ri = state === 'running' ? '<span class="running-indicator"></span>' : '';
-    return '<div class="discovered-card" data-pid="' + s.pid + '" onclick="previewDiscovered(\'' + esc(s.session_id) + '\',\'' + esc(cwd).replace(/'/g, "\\'") + '\',' + s.pid + ',' + pst + ')" style="cursor:pointer">' +
-      '<div class="dc-info">' +
-        '<div class="dc-cwd" title="' + esc(cwd) + '">' + esc(base) + '</div>' +
-        (s.summary ? '<div class="dc-summary">' + esc(s.summary) + '</div>' : '') +
-        (s.last_prompt ? '<div class="dc-prompt" title="' + esc(s.last_prompt) + '">' + esc(s.last_prompt) + '</div>' : '') +
-        '<div class="dc-meta">' +
-          ri + '<span class="badge ' + state + '">' + state + '</span>' +
-          '<span>PID ' + s.pid + '</span>' +
-          '<span>' + ago + '</span>' +
-        '</div>' +
-      '</div>' +
-      '<button class="btn-takeover" onclick="event.stopPropagation();takeover(' + s.pid + ',\'' + esc(s.session_id) + '\',\'' + esc(cwd).replace(/'/g, "\\'") + '\',' + pst + ')">takeover</button>' +
-    '</div>';
-  }).join('');
+  // Legacy renderer — no longer used, discovered items merged into sidebar
+}
+
+function discoveredInlineHtml(s) {
+  const cwd = s.cwd || 'unknown';
+  const ago = timeAgo(s.last_active || s.started_at);
+  const pst = s.proc_start_time || 0;
+  const state = s.state || 'ready';
+  const ri = state === 'running' ? '<span class="running-indicator"></span>' : '';
+  const prompt = s.last_prompt || s.summary || '';
+  return '<div class="session-card cli-card" data-pid="' + s.pid + '" data-session-id="' + esc(s.session_id) + '" data-cwd="' + esc(cwd) + '" data-pst="' + pst + '" onclick="handleDiscoveredClick(this)">' +
+    '<div class="platform">cli</div>' +
+    (prompt ? '<div class="session-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' : '') +
+    '<div class="meta">' +
+      '<span class="badge ' + state + '">' + state + '</span>' +
+      '<span>PID ' + s.pid + '</span>' +
+      '<span>' + ago + '</span>' +
+    '</div>' +
+  '</div>';
+}
+
+function handleDiscoveredClick(el) {
+  previewDiscovered(el.dataset.sessionId, el.dataset.cwd, Number(el.dataset.pid), Number(el.dataset.pst));
 }
 
 async function previewDiscovered(sessionId, cwd, pid, procStartTime) {
@@ -1441,23 +1683,27 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime) {
   if (wsm.subscribedKey) wsm.unsubscribe();
   if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
   document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
+  mobileEnterChat();
 
   // Highlight the discovered card
-  document.querySelectorAll('.discovered-card').forEach(el => el.classList.remove('active'));
-  const card = document.querySelector('.discovered-card[data-pid="' + pid + '"]');
+  document.querySelectorAll('.cli-card').forEach(el => el.classList.remove('active'));
+  const card = document.querySelector('.cli-card[data-pid="' + pid + '"]');
   if (card) card.classList.add('active');
 
   const base = cwd.split('/').pop() || cwd;
   const main = document.getElementById('main');
   main.innerHTML =
     '<div class="main-header">' +
-      '<h2>' + esc(base) + ' <span class="badge" style="background:#9e6a03;color:#fff">external</span></h2>' +
-      '<div class="detail"><span>PID ' + pid + '</span><span>' + esc(sessionId.substring(0,8)) + '</span></div>' +
-      '<div class="workspace-path" onclick="copyText(\'' + esc(cwd).replace(/'/g,"\\'") + '\')" title="click to copy">' + esc(cwd) + '</div>' +
+      '<button class="btn-mobile-back" onclick="mobileBack()" title="back">&#8592;</button>' +
+      '<div class="main-header-content">' +
+        '<h2>' + esc(base) + ' <span class="badge" style="background:#9e6a03;color:#fff">external</span></h2>' +
+        '<div class="detail"><span>PID ' + pid + '</span></div>' +
+        '<div class="workspace-path" data-copy="' + esc(cwd) + '" onclick="copyText(this.dataset.copy)" title="click to copy">' + esc(cwd) + '</div>' +
+      '</div>' +
     '</div>' +
     '<div class="events" id="events-scroll"><div class="empty-state">loading...</div></div>' +
     '<div class="input-area" style="padding:8px 20px;text-align:center">' +
-      '<button class="btn-takeover" style="width:100%;padding:10px;font-size:14px" onclick="takeover(' + pid + ',\'' + esc(sessionId) + '\',\'' + esc(cwd).replace(/'/g,"\\'") + '\',' + (procStartTime||0) + ')">Takeover this session</button>' +
+      '<button class="btn-takeover" style="width:100%;padding:10px;font-size:14px" data-pid="' + pid + '" data-session-id="' + esc(sessionId) + '" data-cwd="' + esc(cwd) + '" data-pst="' + (procStartTime||0) + '" onclick="handleTakeoverClick(this)">Takeover this session</button>' +
     '</div>';
 
   try {
@@ -1466,7 +1712,6 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime) {
     const events = await r.json();
     const el = document.getElementById('events-scroll');
     if (!el) return;
-    turnToolAccum = {};
     const display = processEventsForDisplay(events);
     if (events.length === 0) {
       el.innerHTML = '<div class="empty-state">no conversation history</div>';
@@ -1490,9 +1735,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime) {
         if (empty) empty.remove();
         const wasBottom = el2.scrollTop + el2.clientHeight >= el2.scrollHeight - 30;
         fresh.forEach(e => {
-          if (e.type === 'tool_use') { if (e.tool) turnToolAccum[toolKey(e)] = (turnToolAccum[toolKey(e)] || 0) + 1; updatePendingSummary(); return; }
-          if (e.type === 'result') return;
-          if (Object.keys(turnToolAccum).length > 0) finalizePendingSummary();
+          if (e.type === 'tool_use' || e.type === 'result') return;
           const h = eventHtml(e); if (h) el2.insertAdjacentHTML('beforeend', h);
         });
         if (wasBottom) el2.scrollTop = el2.scrollHeight;
@@ -1503,7 +1746,11 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime) {
   }
 }
 
-async function takeover(pid, sessionId, cwd, procStartTime) {
+function handleTakeoverClick(el) {
+  takeover(Number(el.dataset.pid), el.dataset.sessionId, el.dataset.cwd, Number(el.dataset.pst));
+}
+
+async function takeover(pid, sessionId, cwd, procStartTime, node) {
   const btn = event.target;
   btn.classList.add('taking');
   btn.textContent = 'taking over...';
@@ -1513,7 +1760,7 @@ async function takeover(pid, sessionId, cwd, procStartTime) {
     if (token) headers['Authorization'] = 'Bearer ' + token;
     const r = await fetch('/api/discovered/takeover', {
       method: 'POST', headers,
-      body: JSON.stringify({pid: pid, session_id: sessionId, cwd: cwd, proc_start_time: procStartTime || 0})
+      body: JSON.stringify({pid: pid, session_id: sessionId, cwd: cwd, proc_start_time: procStartTime || 0, node: node || ''})
     });
     if (!r.ok) {
       const text = await r.text();
@@ -1525,7 +1772,7 @@ async function takeover(pid, sessionId, cwd, procStartTime) {
     const data = await r.json();
     showToastVariant('session taken over', 'success');
     // Immediately remove the discovered card from DOM
-    const card = document.querySelector('.discovered-card[data-pid="' + pid + '"]');
+    const card = document.querySelector('.cli-card[data-pid="' + pid + '"]');
     if (card) card.remove();
     // Force refresh (clear cache so renderSidebar runs)
     lastSessionsJSON = '';
@@ -1540,6 +1787,90 @@ async function takeover(pid, sessionId, cwd, procStartTime) {
   }
 }
 
+/* ===== Mobile Navigation ===== */
+
+const mobileQuery = window.matchMedia('(max-width:768px)');
+function isMobile() { return mobileQuery.matches; }
+
+// Re-initialise when crossing the 768px breakpoint (e.g. orientation change)
+mobileQuery.addEventListener('change', e => {
+  if (!e.matches) {
+    document.body.classList.remove('mobile-list-view', 'mobile-chat-view');
+  } else {
+    initMobile();
+  }
+});
+
+function mobileEnterChat() {
+  if (!isMobile()) return;
+  history.pushState({ view: 'chat' }, '');
+  document.body.classList.remove('mobile-list-view');
+  document.body.classList.add('mobile-chat-view');
+}
+
+function mobileBack() {
+  document.body.classList.remove('mobile-chat-view');
+  document.body.classList.add('mobile-list-view');
+  if (document.activeElement) document.activeElement.blur();
+}
+
+// Handle Android back button and iOS swipe-back gesture
+window.addEventListener('popstate', () => {
+  if (isMobile() && document.body.classList.contains('mobile-chat-view')) {
+    mobileBack();
+  }
+});
+
+function initMobile() {
+  if (!isMobile()) return;
+  const hasSession = !!selectedKey;
+  document.body.classList.toggle('mobile-chat-view', hasSession);
+  document.body.classList.toggle('mobile-list-view', !hasSession);
+}
+
+function initSwipeDelete() {
+  const list = document.getElementById('session-list');
+  if (!list) return;
+  let card = null, startX = 0, startY = 0, tracking = false;
+  list.addEventListener('touchstart', e => {
+    if (e.touches.length !== 1) { card = null; return; }
+    const c = e.target.closest('.session-card[data-key]');
+    if (!c) return;
+    card = c; startX = e.touches[0].clientX; startY = e.touches[0].clientY; tracking = false;
+  }, {passive:true});
+  list.addEventListener('touchmove', e => {
+    if (!card) return;
+    const dx = e.touches[0].clientX - startX;
+    const dy = e.touches[0].clientY - startY;
+    if (!tracking) {
+      if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
+      if (Math.abs(dy) >= Math.abs(dx)) { card = null; return; }
+      tracking = true;
+    }
+    if (dx >= 0) return;
+    card.classList.add('swiping');
+    card.style.transform = 'translateX(' + dx + 'px)';
+    card.style.background = 'rgba(218,54,51,' + Math.min(0.35, -dx / card.offsetWidth * 0.6) + ')';
+  }, {passive:true});
+  list.addEventListener('touchend', e => {
+    if (!card || !tracking) { card = null; tracking = false; return; }
+    const dx = e.changedTouches[0].clientX - startX;
+    const c = card; card = null; tracking = false;
+    c.classList.remove('swiping');
+    if (dx < -c.offsetWidth * 0.4) {
+      c.style.transition = 'transform .2s ease, opacity .2s ease';
+      c.style.transform = 'translateX(-100%)';
+      c.style.opacity = '0';
+      setTimeout(() => dismissSession(c.dataset.key, c.dataset.node || 'local'), 180);
+    } else {
+      c.style.transition = 'transform .2s ease, background .2s ease';
+      c.style.transform = '';
+      c.style.background = '';
+      setTimeout(() => { c.style.transition = ''; }, 200);
+    }
+  }, {passive:true});
+}
+
 /* ===== Initialization ===== */
 
 loadPendingSessions();
@@ -1548,6 +1879,8 @@ sessionPollTimer = setInterval(fetchSessions, 5000);
 scanDiscovered();
 discoveredPollTimer = setInterval(scanDiscovered, 5000);
 wsm.connect();
+initMobile();
+initSwipeDelete();
 </script>
 </body>
 </html>

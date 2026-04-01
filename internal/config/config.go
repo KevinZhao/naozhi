@@ -13,19 +13,48 @@ import (
 )
 
 type Config struct {
-	Server        ServerConfig           `yaml:"server"`
-	CLI           CLIConfig              `yaml:"cli"`
-	Session       SessionConfig          `yaml:"session"`
-	Platforms     PlatformConfigs        `yaml:"platforms"`
-	Agents        map[string]AgentConfig `yaml:"agents"`
-	AgentCommands map[string]string      `yaml:"agent_commands"`
-	Nodes         map[string]NodeConfig  `yaml:"nodes"`
-	Cron          CronConfig             `yaml:"cron"`
-	Log           LogConfig              `yaml:"log"`
+	Server        ServerConfig                `yaml:"server"`
+	CLI           CLIConfig                   `yaml:"cli"`
+	Session       SessionConfig               `yaml:"session"`
+	Platforms     PlatformConfigs             `yaml:"platforms"`
+	Agents        map[string]AgentConfig      `yaml:"agents"`
+	AgentCommands map[string]string           `yaml:"agent_commands"`
+	Nodes         map[string]NodeConfig       `yaml:"nodes"`
+	Workspaces    map[string]NodeConfig       `yaml:"workspaces"` // alias for nodes (preferred name)
+	ReverseNodes  map[string]ReverseNodeEntry `yaml:"reverse_nodes"`
+	Upstream      *UpstreamConfig             `yaml:"upstream"`
+	Workspace     WorkspaceConfig             `yaml:"workspace"` // local workspace identity
+	Cron          CronConfig                  `yaml:"cron"`
+	Log           LogConfig                   `yaml:"log"`
+	Projects      ProjectsConfig              `yaml:"projects"`
+}
+
+// WorkspaceConfig identifies this naozhi instance.
+type WorkspaceConfig struct {
+	ID   string `yaml:"id"`   // unique identifier (default: hostname)
+	Name string `yaml:"name"` // display name (default: id)
+}
+
+type ProjectsConfig struct {
+	Root            string          `yaml:"root"`                       // projects root directory
+	PlannerDefaults PlannerDefaults `yaml:"planner_defaults,omitempty"` // global planner defaults
+}
+
+type PlannerDefaults struct {
+	Model  string `yaml:"model,omitempty"`
+	Prompt string `yaml:"prompt,omitempty"`
 }
 
 type NodeConfig struct {
 	URL         string `yaml:"url"`
+	Token       string `yaml:"token"`
+	DisplayName string `yaml:"display_name"`
+}
+
+// UpstreamConfig configures this node to connect as a reverse node to a primary.
+type UpstreamConfig struct {
+	URL         string `yaml:"url"`
+	NodeID      string `yaml:"node_id"`
 	Token       string `yaml:"token"`
 	DisplayName string `yaml:"display_name"`
 }
@@ -51,7 +80,8 @@ type SessionConfig struct {
 	TTL       string         `yaml:"ttl"`
 	Watchdog  WatchdogConfig `yaml:"watchdog"`
 	StorePath string         `yaml:"store_path"`
-	Workspace string         `yaml:"workspace"` // fixed cwd for CLI processes (default ~/.naozhi/workspace)
+	CWD       string         `yaml:"cwd"`       // default working directory for CLI processes
+	Workspace string         `yaml:"workspace"` // deprecated alias for cwd (backward compat)
 }
 
 type WatchdogConfig struct {
@@ -137,6 +167,34 @@ func Load(path string) (*Config, error) {
 	if cfg.Session.Workspace == "" {
 		cfg.Session.Workspace = "~/.naozhi/workspace"
 	}
+	// cwd takes precedence over deprecated workspace field
+	if cfg.Session.CWD != "" {
+		if cfg.Session.Workspace != "" && cfg.Session.Workspace != cfg.Session.CWD {
+			slog.Warn("both 'session.cwd' and deprecated 'session.workspace' configured; using 'cwd'")
+		}
+		cfg.Session.Workspace = cfg.Session.CWD
+	} else {
+		cfg.Session.CWD = cfg.Session.Workspace
+	}
+
+	// Merge workspaces → nodes (workspaces is the preferred name)
+	if len(cfg.Workspaces) > 0 && len(cfg.Nodes) == 0 {
+		cfg.Nodes = cfg.Workspaces
+	} else if len(cfg.Workspaces) > 0 && len(cfg.Nodes) > 0 {
+		slog.Warn("both 'nodes' and 'workspaces' configured; using 'nodes', ignoring 'workspaces'")
+	}
+
+	// Workspace identity defaults
+	if cfg.Workspace.ID == "" {
+		if h, err := os.Hostname(); err == nil {
+			cfg.Workspace.ID = h
+		} else {
+			cfg.Workspace.ID = "local"
+		}
+	}
+	if cfg.Workspace.Name == "" {
+		cfg.Workspace.Name = cfg.Workspace.ID
+	}
 
 	// Validate duration fields
 	if cfg.Session.TTL != "" {
@@ -191,6 +249,21 @@ func Load(path string) (*Config, error) {
 		}
 		if u.Scheme != "http" && u.Scheme != "https" {
 			return nil, fmt.Errorf("node %q: url must be http or https", id)
+		}
+	}
+
+	if cfg.Upstream != nil {
+		if cfg.Upstream.URL == "" {
+			return nil, fmt.Errorf("upstream.url is required")
+		}
+		if !strings.HasPrefix(cfg.Upstream.URL, "wss://") {
+			return nil, fmt.Errorf("upstream.url must use wss:// scheme for secure token transmission")
+		}
+		if cfg.Upstream.NodeID == "" {
+			return nil, fmt.Errorf("upstream.node_id is required")
+		}
+		if cfg.Upstream.Token == "" {
+			return nil, fmt.Errorf("upstream.token is required")
 		}
 	}
 

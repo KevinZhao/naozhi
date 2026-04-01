@@ -35,6 +35,8 @@ type DiscoveredSession struct {
 	Summary       string `json:"summary,omitempty"`     // Claude-generated session name from sessions-index
 	LastPrompt    string `json:"last_prompt,omitempty"` // most recent user message
 	ProcStartTime uint64 `json:"proc_start_time"`       // /proc/PID/stat field 22, used to verify PID identity
+	Project       string `json:"project,omitempty"`     // project name resolved from CWD (filled by server)
+	Node          string `json:"node,omitempty"`        // workspace/node ID (filled by server for multi-node)
 }
 
 // sessionFile mirrors the JSON schema of ~/.claude/sessions/{PID}.json.
@@ -297,27 +299,6 @@ type sessionsIndexEntry struct {
 	SessionID   string `json:"sessionId"`
 	Summary     string `json:"summary"`
 	FirstPrompt string `json:"firstPrompt"`
-}
-
-// lookupSummary reads the sessions-index.json for the project and returns the
-// Claude-generated summary for the given session ID.
-func lookupSummary(claudeDir, cwd, sessionID string) string {
-	indexPath := filepath.Join(claudeDir, "projects", projDirName(cwd), "sessions-index.json")
-
-	data, err := os.ReadFile(indexPath)
-	if err != nil {
-		return ""
-	}
-	var idx sessionsIndex
-	if err := json.Unmarshal(data, &idx); err != nil {
-		return ""
-	}
-	for _, e := range idx.Entries {
-		if e.SessionID == sessionID {
-			return e.Summary
-		}
-	}
-	return ""
 }
 
 // extractLastPrompt reads the JSONL file backwards to find the last user message.

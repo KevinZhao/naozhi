@@ -1,6 +1,10 @@
 server:
   addr: ":8180"
 
+workspace:
+  id: "ec2-dev"
+  name: "EC2 Dev"
+
 cli:
   path: "~/.local/bin/claude"
   model: "sonnet"
@@ -10,7 +14,7 @@ cli:
 session:
   max_procs: 20
   ttl: "30m"
-  workspace: "/home/ec2-user/workspace"
+  cwd: "/home/ec2-user/workspace"
   watchdog:
     no_output_timeout: "1800s"
     total_timeout: "14400s"
@@ -44,7 +48,12 @@ platforms:
 log:
   level: "info"
 
-nodes:
+projects:
+  root: "/home/ec2-user/workspace"
+  planner_defaults:
+    model: "sonnet"
+
+workspaces:
   macbook:
     url: "http://192.168.1.101:8180"
     token: ""

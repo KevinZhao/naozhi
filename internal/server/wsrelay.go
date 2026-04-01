@@ -16,7 +16,6 @@ import (
 // and forwards events to local browser clients.
 type wsRelay struct {
 	node      *NodeClient
-	hub       *Hub
 	mu        sync.Mutex
 	writeMu   sync.Mutex // serializes writes to the WS connection
 	conn      *websocket.Conn
@@ -26,10 +25,9 @@ type wsRelay struct {
 	closed    bool
 }
 
-func newWSRelay(node *NodeClient, hub *Hub) *wsRelay {
+func newWSRelay(node *NodeClient) *wsRelay {
 	return &wsRelay{
 		node:      node,
-		hub:       hub,
 		subs:      make(map[string][]*wsClient),
 		lastEvent: make(map[string]int64),
 		done:      make(chan struct{}),

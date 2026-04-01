@@ -66,6 +66,10 @@ type ManagedSession struct {
 	// persistedHistory stores event entries that survive process restarts.
 	// Populated by InjectHistory and carried over when the process is replaced.
 	persistedHistory []cli.EventEntry
+
+	// Exempt marks this session as exempt from TTL cleanup, eviction, and activeCount.
+	// Used for planner sessions that should persist indefinitely.
+	Exempt bool
 }
 
 // GetLastActive returns the last active time.
@@ -148,9 +152,6 @@ func (s *ManagedSession) Interrupt() bool {
 	}
 
 	proc.Interrupt()
-	if cp := s.sendCancel.Load(); cp != nil {
-		(*cp)()
-	}
 	return true
 }
 
@@ -212,6 +213,8 @@ type SessionSnapshot struct {
 	Node         string  `json:"node,omitempty"`
 	LastPrompt   string  `json:"last_prompt,omitempty"`   // most recent user message
 	LastActivity string  `json:"last_activity,omitempty"` // most recent tool/thinking status
+	Project      string  `json:"project,omitempty"`       // project name (filled by server)
+	IsPlanner    bool    `json:"is_planner,omitempty"`    // true for project planner sessions
 }
 
 // Snapshot returns a point-in-time view of this session.

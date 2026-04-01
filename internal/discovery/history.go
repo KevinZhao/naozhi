@@ -82,7 +82,7 @@ func parseJSONL(path string) ([]cli.EventEntry, error) {
 	}
 	defer f.Close()
 
-	var entries []cli.EventEntry
+	entries := make([]cli.EventEntry, 0, 128)
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
 
