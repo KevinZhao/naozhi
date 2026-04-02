@@ -5,11 +5,14 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ## Build & Run
 
 ```bash
-go build ./...                                    # check compilation
-CGO_ENABLED=0 go build -o bin/naozhi ./cmd/naozhi/  # build binary
-go vet ./...                                      # lint
+go build ./...                                       # check compilation
+CGO_ENABLED=0 go build -o bin/naozhi ./cmd/naozhi/   # build binary
+go vet ./...                                         # lint
+go test ./...                                        # run all tests
+go test ./internal/cli/...                           # run tests for one package
+go test -run TestCandidatePaths ./internal/cli/...   # run a single test
 
-bin/naozhi --config config.yaml                   # run locally
+bin/naozhi --config config.yaml                      # run locally
 ```
 
 Cross-compile for deployment target (ARM64 Linux):
@@ -24,13 +27,11 @@ Deploy to remote EC2 via SSM:
 ./deploy/deploy.sh logs     # view recent logs
 ```
 
-Set `INSTANCE_ID` in `deploy/deploy.sh` before first deploy.
-
 ## Architecture
 
-Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI or Kiro) as long-lived subprocesses. Communication uses a pluggable Protocol interface: `ClaudeProtocol` (stream-json NDJSON over stdin/stdout) or `ACPProtocol` (JSON-RPC 2.0 Agent Client Protocol). The entire agent loop (tools, context, reasoning) is delegated to the CLI — Naozhi is just the routing layer.
+Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI or Kiro) as long-lived subprocesses. Communication uses a pluggable Protocol interface: `ClaudeProtocol` (stream-json NDJSON over stdin/stdout) or `ACPProtocol` (JSON-RPC 2.0 Agent Client Protocol). The entire agent loop (tools, context, reasoning) is delegated to the CLI -- Naozhi is just the routing layer.
 
-**Request flow**: IM platform → message handler → async goroutine → session router → CLI stdin → read stdout until turn complete → platform reply API.
+**Request flow**: IM platform -> message handler -> async goroutine -> session router -> CLI stdin -> read stdout until turn complete -> platform reply API.
 
 **Key constraint**: Feishu requires 200 response within 3s. The webhook handler returns 200 immediately and processes asynchronously via `go handler(context.Background(), msg)`.
 
@@ -38,22 +39,29 @@ Naozhi is an IM gateway that wraps AI CLI agents (Claude CLI or Kiro) as long-li
 
 ```
 cmd/naozhi/main.go
-  → config      (YAML loading, env var expansion, agent config validation)
-  → cli         (Protocol interface + spawn/manage CLI processes with watchdog)
-  → session     (map session keys to processes, concurrency control, persistence)
-  → platform    (Platform interface + feishu/slack/discord implementations)
-  → server      (HTTP routing, message handler, agent routing, reply logic)
+  -> config       YAML loading, env var expansion, validation
+  -> cli          Protocol interface + spawn/manage CLI processes with watchdog
+  -> session      Session router, concurrency control, TTL, persistence
+  -> platform     Platform interface + feishu/slack/discord/weixin implementations
+  -> server       HTTP server, message handler, dashboard, WebSocket hub, REST API
+  -> cron         Scheduled task execution (robfig/cron)
+  -> project      Project discovery, chat binding, planner routing
+  -> connector    Upstream reverse-connect client (NAT traversal)
+  -> discovery    Scan ~/.claude/sessions for external Claude CLI processes
+  -> routing      Command prefix parsing (shared by server + cron)
+  -> reverse      WebSocket protocol types for multi-node communication
+  -> pathutil     Path expansion utilities
 ```
 
 ### CLI Process Lifecycle
 
 Each CLI process is long-lived (stdin/stdout stay open across turns). The Wrapper selects a Protocol based on `cli.backend` config:
-- `claude` (default): `ClaudeProtocol` — stream-json, session ID from init event
-- `kiro`: `ACPProtocol` — JSON-RPC 2.0, session ID from `session/new` response
+- `claude` (default): `ClaudeProtocol` -- stream-json, session ID from init event
+- `kiro`: `ACPProtocol` -- JSON-RPC 2.0, session ID from `session/new` response
 
 Protocol.Init() runs after spawn but before readLoop, handling any handshake (no-op for Claude, initialize + session/new for ACP). Session ID is captured during Init or from the first Send.
 
-Process states: `Spawning → Ready ↔ Running → Dead`. Dead processes with a SessionID can be resumed via `--resume` (Claude) or `session/load` (ACP).
+Process states: `Spawning -> Ready <-> Running -> Dead`. Dead processes with a SessionID can be resumed via `--resume` (Claude) or `session/load` (ACP).
 
 **Watchdog**: During Running state, two timers enforce limits:
 - `no_output_timeout` (default 2min): Reset on any event; if triggered, kill process
@@ -72,65 +80,107 @@ type Protocol interface {
 }
 ```
 
-- `ClaudeProtocol`: stream-json NDJSON, hook filtering, `--setting-sources ""` isolation
-- `ACPProtocol`: JSON-RPC 2.0, auto-grants `session/request_permission`, accumulates `agent_message_chunk` text
-
 ### Platform Adapter Pattern
 
-Platforms implement `Platform` interface and register their own webhook routes via `RegisterRoutes(mux, handler)`. The platform calls `handler(ctx, msg)` when a message arrives — the server never parses platform-specific formats.
+Platforms implement `Platform` interface and register their own webhook routes via `RegisterRoutes(mux, handler)`. The platform calls `handler(ctx, msg)` when a message arrives -- the server never parses platform-specific formats.
 
-Platforms needing background goroutines implement `RunnablePlatform` with `Start()/Stop()`:
+Platforms needing background goroutines implement `RunnablePlatform` with `Start()/Stop()`. Platforms that cannot send interim messages (e.g. WeChat iLink's single-use reply tokens) implement `SupportsInterimMessages() bool` returning false.
 
 | Platform | Transport | Interface |
 |----------|-----------|-----------|
 | Feishu   | WebSocket (default) or HTTP webhook | `RunnablePlatform` |
 | Slack    | Socket Mode (WebSocket) | `RunnablePlatform` |
 | Discord  | WebSocket gateway | `RunnablePlatform` |
+| WeChat   | iLink Bot HTTP long-poll | `RunnablePlatform` |
 
 ### Session Management & Agent Routing
 
-Session key format: `{platform}:{chatType}:{userId}:{agentId}` (e.g., `feishu:direct:alice:code-reviewer`).
+Session key format: `{platform}:{chatType}:{chatID}:{agentId}` (e.g., `feishu:direct:alice:code-reviewer`).
+Project planner sessions use: `project:{name}:planner` (exempt from TTL and max_procs).
 
-Each session is independent:
-- Owns one long-lived claude process
-- Maintains separate context and session ID
-- Uses per-session model/args from agent config
+Each session is independent: owns one long-lived CLI process, maintains separate context and session ID, uses per-session model/args from agent config.
 
-Different commands route to different agents:
-- `/review xxx` → `code-reviewer` agent (sonnet, custom system prompt)
-- `/research xxx` → `researcher` agent (opus, custom system prompt)
-- Plain messages → `general` agent (default)
-- `/new` resets general; `/new review` resets code-reviewer
+Command routing: `/review xxx` -> `code-reviewer` agent, `/research xxx` -> `researcher` agent, plain messages -> `general` agent (or planner if chat is project-bound). `/new` resets general; `/new review` resets code-reviewer. `/cd <path>` changes working directory for all sessions in a chat. `/project <name>` binds a chat to a project.
 
-On startup, validate all `agent_commands` entries reference existing agents in config.
+**Session guard**: Only one message is processed per session at a time (`sessionGuard` with `sync.Map`). Duplicate messages are rejected; busy sessions reply "please wait" with 3s rate-limiting.
+
+### Multi-Node Architecture
+
+Naozhi supports aggregating sessions from multiple machines into a single dashboard:
+
+- **Primary node** (`nodes` config): Polls remote nodes via HTTP REST every 10s, caches results (`nodeSessions`, `nodeProjects`, `nodeDiscovered`). Never blocks dashboard API on unreachable nodes.
+- **Reverse-connect** (`upstream` config): Nodes behind NAT dial into the primary via WebSocket (`/ws-node`). The `connector` package handles reconnection with exponential backoff (1s -> 30s). The `ReverseNodeServer` validates tokens with constant-time comparison.
+- **Protocol** (`reverse.ReverseMsg`): JSON over WebSocket -- `register/registered`, `request/response` (fetch_sessions, fetch_projects, send), `subscribe/event` (real-time streaming), `ping/pong`.
+
+### Project Management
+
+When `projects.root` is configured, the `project.Manager` scans subdirectories containing `CLAUDE.md`. Each project stores config in `.naozhi/project.yaml` (planner model, prompt, chat bindings).
+
+Chat binding (`/project <name>`) routes plain messages to a planner session (`project:{name}:planner`) with the project directory as workspace. Agent commands still create per-chat sessions but use the project path. Planner sessions are exempt from TTL eviction and max_procs capacity.
+
+The project list is rescanned every 60s. Orphaned planner sessions for removed projects are cleaned up automatically.
+
+### Dashboard & WebSocket
+
+The dashboard is an embedded single-page HTML (`server/static/dashboard.html`) served at `/dashboard`. Real-time updates use a WebSocket hub (`/ws`) with:
+
+- **Client messages**: `auth`, `subscribe` (with optional `after` timestamp), `unsubscribe`, `send`, `interrupt`
+- **Server messages**: `auth_ok`, `subscribed`, `history`, `event`, `session_state`, `sessions_update`, `send_ack`, `interrupt_ack`
+- Remote node events are relayed transparently -- subscribe with `node` field to stream from a remote session.
+
+REST API endpoints: `/api/sessions`, `/api/discovered`, `/api/discovered/takeover`, `/api/projects`, `/api/projects/config`, `/api/sessions/send`, `/api/sessions/events`.
+
+### Session Discovery & Takeover
+
+The `discovery` package scans `~/.claude/sessions/*.json` to find external (non-naozhi-managed) Claude CLI processes. It cross-references PIDs, upgrades stale session IDs from JSONL mtimes, and extracts summaries from `sessions-index.json`. The dashboard can "takeover" a discovered process: kill the original PID (verified via `/proc/PID/stat` start time to prevent PID reuse attacks), then `--resume` under naozhi management.
 
 ### Session Persistence
 
-Sessions are persisted to `~/.naozhi/sessions.json` at startup and shutdown:
-- Each entry stores `key` and `session_id`
-- On restart, dead sessions are loaded
+Sessions are persisted to `~/.naozhi/sessions.json` at shutdown:
+- Each entry stores `key`, `session_id`, `workspace`, `total_cost`
+- On restart, dead sessions are loaded and history is async-loaded from Claude's JSONL files
 - Next message to a dead session resumes via `--resume`
 - Captures session_id under sendMu to avoid Send() data races
 
 ### Graceful Shutdown
 
-On SIGTERM:
-1. Stop accepting webhooks
-2. Wait for running sessions to complete (timeout 30s)
-3. Save session store
-4. Close all processes (via stdin close)
+On SIGTERM/SIGINT:
+1. Cancel context (stops connector, cleanup loop, node cache loop, project scan loop)
+2. Stop cron scheduler
+3. Wait for running sessions to complete (timeout 30s via shutdownCond)
+4. Save session store
+5. Close all processes concurrently (via stdin close)
+6. Shutdown WebSocket hub and platform connections
 
 ## Config
 
-`config.yaml` supports `${ENV_VAR}` expansion. Includes:
-- **cli**: Backend (`claude`|`kiro`), path, model, extra args
-- **session**: Concurrency (max_procs), idle timeout (ttl), watchdog timers (no_output_timeout, total_timeout), persistence path
-- **agents**: Map of agent_id → (model, extra args). Each agent spawns with custom system prompt via `--append-system-prompt`
-- **agent_commands**: Map of command → agent_id for routing (e.g., `/review` → `code-reviewer`)
-- **platforms**: Feishu (app credentials, connection_mode, encrypt_key), Slack (bot_token, app_token for Socket Mode), Discord (bot_token)
+`config.yaml` supports `${ENV_VAR}` expansion. Key sections:
 
-Feishu credentials come from environment or config. v2 signature verification uses SHA-256 hash of `timestamp + nonce + encrypt_key + body`.
+- **server.addr**: Listen address (default `:8080`)
+- **cli**: `backend` (`claude`|`kiro`), `path`, `model`, `args`
+- **session**: `max_procs`, `ttl`, `cwd` (working directory), `store_path`, `watchdog.no_output_timeout`, `watchdog.total_timeout`
+- **agents**: Map of agent_id -> {model, args}. Each agent spawns with custom system prompt via `--append-system-prompt`
+- **agent_commands**: Map of command -> agent_id for routing (e.g., `review: code-reviewer`)
+- **platforms**: `feishu` (app credentials, connection_mode), `slack` (bot_token, app_token), `discord` (bot_token), `weixin` (token, base_url)
+- **cron**: `store_path`, `max_jobs`, `execution_timeout`
+- **projects**: `root` (scan directory), `planner_defaults.model`, `planner_defaults.prompt`
+- **workspace**: `id`, `name` (local node identity, defaults to hostname)
+- **nodes**: Map of node_id -> {url, token, display_name} (poll remote nodes via HTTP)
+- **reverse_nodes**: Map of node_id -> {token, display_name} (accept incoming reverse connections)
+- **upstream**: `url` (ws://), `node_id`, `token`, `display_name` (connect to primary as reverse node)
+- **log**: `level` (debug/info/warn/error)
+
+Config field `session.workspace` is a deprecated alias for `session.cwd`. Both `nodes` and `workspaces` are accepted (workspaces is preferred name; nodes takes precedence if both present).
+
+## Concurrency Patterns
+
+- **Router.mu** protects the sessions map. Released during `Spawn()` (may block on ACP handshake) with TOCTOU guard on re-acquire. `shutdownCond` is conditioned on `mu` for Shutdown wait.
+- **ManagedSession.sendMu** serializes Send() calls and protects session_id capture.
+- **sessionGuard** (`sync.Map`) prevents goroutine accumulation -- one message per session at a time.
+- **Hub.mu** protects WebSocket client set and subscriptions. `nodesMu` (shared with Server) protects the nodes map.
+- Node cache is a separate `nodeCacheMu` to avoid blocking dashboard API.
+- Process Close() is always called outside router lock to prevent deadlock.
 
 ## Deployment
 
-Production: CloudFront → ALB (SG: CloudFront-only) → EC2 t4g.small :8180 → systemd. Bedrock auth via IAM role (no AKSK). The EC2 needs access to the `bedrock-runtime` VPC endpoint (check SG on the endpoint).
+Production: CloudFront -> ALB (SG: CloudFront-only) -> EC2 t4g.small :8180 -> systemd. Bedrock auth via IAM role (no AKSK). The EC2 needs access to the `bedrock-runtime` VPC endpoint (check SG on the endpoint).

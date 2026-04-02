@@ -27,14 +27,26 @@ type UpstreamConfig struct {
 // Connector dials a primary naozhi and serves it as a reverse-connected node.
 // Run on machines behind NAT that cannot be reached by the primary directly.
 type Connector struct {
-	cfg     *UpstreamConfig
-	router  *session.Router
-	projMgr *project.Manager // may be nil
+	cfg          *UpstreamConfig
+	router       *session.Router
+	projMgr      *project.Manager // may be nil
+	discoverFunc func() (json.RawMessage, error)
+	previewFunc  func(sessionID string) (json.RawMessage, error)
 }
 
 // New creates a Connector. projMgr may be nil if projects are not configured.
 func New(cfg *UpstreamConfig, router *session.Router, projMgr *project.Manager) *Connector {
 	return &Connector{cfg: cfg, router: router, projMgr: projMgr}
+}
+
+// SetDiscoverFunc sets a callback that returns discovered sessions as JSON.
+func (c *Connector) SetDiscoverFunc(fn func() (json.RawMessage, error)) {
+	c.discoverFunc = fn
+}
+
+// SetPreviewFunc sets a callback that returns conversation history for a discovered session.
+func (c *Connector) SetPreviewFunc(fn func(sessionID string) (json.RawMessage, error)) {
+	c.previewFunc = fn
 }
 
 // Run connects to the primary and serves requests. Reconnects on disconnect.
@@ -194,7 +206,21 @@ func (c *Connector) handleRequest(ctx context.Context, req reverse.ReverseMsg) (
 		return marshalResult(c.projMgr.All())
 
 	case "fetch_discovered":
-		// Discovered process scanning not available in connector context
+		if c.discoverFunc != nil {
+			return c.discoverFunc()
+		}
+		return marshalResult([]any{})
+
+	case "fetch_discovered_preview":
+		var p struct {
+			SessionID string `json:"session_id"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("fetch_discovered_preview params: %w", err)
+		}
+		if c.previewFunc != nil {
+			return c.previewFunc(p.SessionID)
+		}
 		return marshalResult([]any{})
 
 	case "fetch_events":

@@ -1660,7 +1660,8 @@ function discoveredInlineHtml(s) {
   const state = s.state || 'ready';
   const ri = state === 'running' ? '<span class="running-indicator"></span>' : '';
   const prompt = s.last_prompt || s.summary || '';
-  return '<div class="session-card cli-card" data-pid="' + s.pid + '" data-session-id="' + esc(s.session_id) + '" data-cwd="' + esc(cwd) + '" data-pst="' + pst + '" onclick="handleDiscoveredClick(this)">' +
+  const node = s.node || '';
+  return '<div class="session-card cli-card" data-pid="' + s.pid + '" data-session-id="' + esc(s.session_id) + '" data-cwd="' + esc(cwd) + '" data-pst="' + pst + '" data-node="' + esc(node) + '" onclick="handleDiscoveredClick(this)">' +
     '<div class="platform">cli</div>' +
     (prompt ? '<div class="session-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' : '') +
     '<div class="meta">' +
@@ -1672,10 +1673,10 @@ function discoveredInlineHtml(s) {
 }
 
 function handleDiscoveredClick(el) {
-  previewDiscovered(el.dataset.sessionId, el.dataset.cwd, Number(el.dataset.pid), Number(el.dataset.pst));
+  previewDiscovered(el.dataset.sessionId, el.dataset.cwd, Number(el.dataset.pid), Number(el.dataset.pst), el.dataset.node || '');
 }
 
-async function previewDiscovered(sessionId, cwd, pid, procStartTime) {
+async function previewDiscovered(sessionId, cwd, pid, procStartTime, node) {
   stopPreviewPolling();
   // Deselect any managed session
   selectedKey = null;
@@ -1707,7 +1708,8 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime) {
     '</div>';
 
   try {
-    const r = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId));
+    const nodeParam = node ? '&node=' + encodeURIComponent(node) : '';
+    const r = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId) + nodeParam);
     if (!r.ok) { showToast('preview failed'); return; }
     const events = await r.json();
     const el = document.getElementById('events-scroll');
@@ -1723,7 +1725,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime) {
     const capturedSid = sessionId;
     previewTimer = setInterval(async () => {
       try {
-        const r2 = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(capturedSid));
+        const r2 = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(capturedSid) + nodeParam);
         if (!r2.ok) return;
         const all = await r2.json();
         if (all.length <= previewEventCount) return;

@@ -256,8 +256,8 @@ func Load(path string) (*Config, error) {
 		if cfg.Upstream.URL == "" {
 			return nil, fmt.Errorf("upstream.url is required")
 		}
-		if !strings.HasPrefix(cfg.Upstream.URL, "wss://") {
-			return nil, fmt.Errorf("upstream.url must use wss:// scheme for secure token transmission")
+		if !strings.HasPrefix(cfg.Upstream.URL, "wss://") && !strings.HasPrefix(cfg.Upstream.URL, "ws://") {
+			return nil, fmt.Errorf("upstream.url must use ws:// or wss:// scheme")
 		}
 		if cfg.Upstream.NodeID == "" {
 			return nil, fmt.Errorf("upstream.node_id is required")

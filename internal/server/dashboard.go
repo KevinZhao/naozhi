@@ -597,7 +597,35 @@ func (s *Server) handleAPIDiscoveredPreview(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	sessionID := r.URL.Query().Get("session_id")
-	if sessionID == "" || s.claudeDir == "" || !validSessionID.MatchString(sessionID) {
+	nodeID := r.URL.Query().Get("node")
+	if sessionID == "" || !validSessionID.MatchString(sessionID) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode([]any{})
+		return
+	}
+
+	// Remote node
+	if nodeID != "" {
+		s.nodesMu.RLock()
+		nc := s.nodes[nodeID]
+		s.nodesMu.RUnlock()
+		if nc != nil {
+			entries, err := nc.FetchDiscoveredPreview(r.Context(), sessionID)
+			if err != nil {
+				slog.Warn("remote discovered preview", "node", nodeID, "err", err)
+				entries = nil
+			}
+			if entries == nil {
+				entries = []cli.EventEntry{}
+			}
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(entries)
+			return
+		}
+	}
+
+	// Local
+	if s.claudeDir == "" {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode([]any{})
 		return

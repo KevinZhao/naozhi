@@ -181,6 +181,26 @@ func (n *NodeClient) FetchDiscovered(ctx context.Context) ([]map[string]any, err
 	return result, nil
 }
 
+// FetchDiscoveredPreview fetches conversation history for a discovered session from the remote node.
+func (n *NodeClient) FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]cli.EventEntry, error) {
+	resp, err := n.doRequest(ctx, http.MethodGet, "/api/discovered/preview?session_id="+sessionID, nil)
+	if err != nil {
+		return nil, fmt.Errorf("fetch discovered preview from %s: %w", n.ID, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		io.Copy(io.Discard, resp.Body)
+		return nil, fmt.Errorf("fetch discovered preview from %s: status %d", n.ID, resp.StatusCode)
+	}
+
+	var result []cli.EventEntry
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, fmt.Errorf("decode discovered preview from %s: %w", n.ID, err)
+	}
+	return result, nil
+}
+
 // ProxyTakeover forwards a takeover request to the remote node.
 func (n *NodeClient) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStartTime uint64) error {
 	payload := map[string]any{"pid": pid, "session_id": sessionID, "cwd": cwd, "proc_start_time": procStartTime}

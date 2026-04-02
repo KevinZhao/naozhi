@@ -17,6 +17,7 @@ type NodeConn interface {
 	FetchSessions(ctx context.Context) ([]map[string]any, error)
 	FetchProjects(ctx context.Context) ([]map[string]any, error)
 	FetchDiscovered(ctx context.Context) ([]map[string]any, error)
+	FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]cli.EventEntry, error)
 	FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error)
 	Send(ctx context.Context, key, text string) error
 

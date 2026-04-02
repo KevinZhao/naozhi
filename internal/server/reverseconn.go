@@ -159,6 +159,15 @@ func (c *ReverseNodeConn) FetchDiscovered(ctx context.Context) ([]map[string]any
 	return result, json.Unmarshal(raw, &result)
 }
 
+func (c *ReverseNodeConn) FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]cli.EventEntry, error) {
+	raw, err := c.rpc(ctx, "fetch_discovered_preview", map[string]string{"session_id": sessionID})
+	if err != nil {
+		return nil, err
+	}
+	var result []cli.EventEntry
+	return result, json.Unmarshal(raw, &result)
+}
+
 func (c *ReverseNodeConn) FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error) {
 	raw, err := c.rpc(ctx, "fetch_events", map[string]any{"key": key, "after": after})
 	if err != nil {

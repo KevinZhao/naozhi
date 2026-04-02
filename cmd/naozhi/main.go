@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/connector"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/pathutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	discordplatform "github.com/naozhi/naozhi/internal/platform/discord"
@@ -232,6 +234,39 @@ func main() {
 			DisplayName: cfg.Upstream.DisplayName,
 		}
 		conn := connector.New(connCfg, router, projectMgr)
+		if claudeDir != "" {
+			conn.SetDiscoverFunc(func() (json.RawMessage, error) {
+				excludePIDs := router.ManagedPIDs()
+				sessions, err := discovery.Scan(claudeDir, excludePIDs)
+				if err != nil {
+					return json.Marshal([]any{})
+				}
+				if sessions == nil {
+					sessions = []discovery.DiscoveredSession{}
+				}
+				if projectMgr != nil && len(sessions) > 0 {
+					cwds := make([]string, len(sessions))
+					for i, d := range sessions {
+						cwds[i] = d.CWD
+					}
+					cwdMap := projectMgr.ResolveWorkspaces(cwds)
+					for i := range sessions {
+						sessions[i].Project = cwdMap[sessions[i].CWD]
+					}
+				}
+				return json.Marshal(sessions)
+			})
+			conn.SetPreviewFunc(func(sessionID string) (json.RawMessage, error) {
+				entries, err := discovery.LoadHistory(claudeDir, sessionID)
+				if err != nil {
+					return json.Marshal([]cli.EventEntry{})
+				}
+				if entries == nil {
+					entries = []cli.EventEntry{}
+				}
+				return json.Marshal(entries)
+			})
+		}
 		go conn.Run(ctx)
 		slog.Info("upstream connector starting", "url", cfg.Upstream.URL, "node_id", cfg.Upstream.NodeID)
 	}
