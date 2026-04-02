@@ -34,26 +34,26 @@ const (
 
 // Server is the HTTP entry point for Naozhi.
 type Server struct {
-	addr           string
-	mux            *http.ServeMux
-	platforms      map[string]platform.Platform
-	router         *session.Router
-	dedup          *platform.Dedup
-	sessionGuard   *sessionGuard
-	startedAt      time.Time
-	agents         map[string]session.AgentOpts
-	agentCommands  map[string]string
-	scheduler      *cron.Scheduler
-	backendTag     string // e.g., "cc" or "kiro", appended to replies
-	dashboardToken string // optional bearer token for dashboard API
-	hub                *Hub   // WebSocket hub
-	nodes              map[string]NodeConn
-	reverseNodeServer  *ReverseNodeServer
-	nodesMu        sync.RWMutex
-	claudeDir      string // path to ~/.claude for session discovery
-	projectMgr     *project.Manager
-	workspaceID    string // local workspace identity
-	workspaceName  string
+	addr              string
+	mux               *http.ServeMux
+	platforms         map[string]platform.Platform
+	router            *session.Router
+	dedup             *platform.Dedup
+	sessionGuard      *sessionGuard
+	startedAt         time.Time
+	agents            map[string]session.AgentOpts
+	agentCommands     map[string]string
+	scheduler         *cron.Scheduler
+	backendTag        string // e.g., "cc" or "kiro", appended to replies
+	dashboardToken    string // optional bearer token for dashboard API
+	hub               *Hub   // WebSocket hub
+	nodes             map[string]NodeConn
+	reverseNodeServer *ReverseNodeServer
+	nodesMu           sync.RWMutex
+	claudeDir         string // path to ~/.claude for session discovery
+	projectMgr        *project.Manager
+	workspaceID       string // local workspace identity
+	workspaceName     string
 
 	// Watchdog configuration stored for user-facing timeout error messages.
 	noOutputTimeout time.Duration
@@ -751,7 +751,6 @@ func (s *Server) killAndCleanupClaude(pid int, procStartTime uint64, cwd, sessio
 	// Force-kill only when we can still confirm it is the same process.
 	if procStartTime != 0 && verifyProcIdentity(pid, procStartTime) {
 		_ = syscall.Kill(pid, syscall.SIGKILL)
-		time.Sleep(200 * time.Millisecond)
 	}
 	// Remove stale session metadata file (prevents reappearing in discovery scans).
 	if s.claudeDir != "" {
@@ -759,7 +758,7 @@ func (s *Server) killAndCleanupClaude(pid int, procStartTime uint64, cwd, sessio
 	}
 	// Remove session lock dir so --resume can reacquire it.
 	// Claude CLI creates /tmp/claude-{UID}/{encoded-cwd}/{sessionID}/ on start.
-	if cwd != "" && sessionID != "" {
+	if cwd != "" && sessionID != "" && !strings.ContainsAny(sessionID, "/\\") {
 		encodedCWD := strings.ReplaceAll(cwd, "/", "-")
 		lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID)
 		_ = os.RemoveAll(lockDir)

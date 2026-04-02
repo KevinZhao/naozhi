@@ -141,6 +141,9 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 		return conn.WriteJSON(v)
 	}
 
+	// Limit concurrent request handling to avoid unbounded goroutine growth.
+	reqSem := make(chan struct{}, 16)
+
 	// connCtx is cancelled when this connection drops, ensuring stream
 	// goroutines exit promptly without blocking reconnect.
 	connCtx, connCancel := context.WithCancel(ctx)
@@ -164,6 +167,12 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				select {
+				case reqSem <- struct{}{}:
+					defer func() { <-reqSem }()
+				case <-ctx.Done():
+					return
+				}
 				result, err := c.handleRequest(ctx, req)
 				resp := reverse.ReverseMsg{Type: "response", ReqID: req.ReqID}
 				if err != nil {
@@ -318,7 +327,7 @@ func (c *Connector) handleRequest(ctx context.Context, req reverse.ReverseMsg) (
 				staleFile := filepath.Join(claudeDir, "sessions", fmt.Sprintf("%d.json", pid))
 				os.Remove(staleFile) //nolint
 			}
-			if reqCWD != "" && sessionID != "" {
+			if reqCWD != "" && sessionID != "" && !strings.ContainsAny(sessionID, "/\\") {
 				encodedCWD := strings.ReplaceAll(reqCWD, "/", "-")
 				lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID)
 				os.RemoveAll(lockDir) //nolint

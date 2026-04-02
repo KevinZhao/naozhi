@@ -69,7 +69,7 @@ workspaces:
 # Each entry is node_id: {token, display_name}. Token must match upstream.token on the remote.
 reverse_nodes:
   pc:
-    token: "cdf413552fadce22f6c7e413c83f444dd58c2a89a2664700d311226442f478c7"
+    token: "${PC_REVERSE_TOKEN}"
     display_name: "PC (10.200.0.10)"
 
 # Upstream: this node dials a primary naozhi instance (reverse-connect mode).
