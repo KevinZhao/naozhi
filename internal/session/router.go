@@ -588,26 +588,25 @@ func (r *Router) Cleanup() {
 
 	// Prune orphaned sessions: nil process, no session ID, past TTL
 	var pruned int
-	now2 := time.Now()
 	for key, s := range r.sessions {
 		if s.Exempt {
 			continue // planner sessions are never pruned
 		}
-		if s.process == nil && s.getSessionID() == "" && now2.Sub(s.GetLastActive()) > r.ttl {
+		if s.process == nil && s.getSessionID() == "" && now.Sub(s.GetLastActive()) > r.ttl {
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
 			continue
 		}
 		// Prune dead sessions with no resumable session ID
-		if s.process != nil && !s.process.Alive() && s.getSessionID() == "" && now2.Sub(s.GetLastActive()) > r.ttl {
+		if s.process != nil && !s.process.Alive() && s.getSessionID() == "" && now.Sub(s.GetLastActive()) > r.ttl {
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
 			continue
 		}
 		// Prune old dead sessions even with session ID (prevents unbounded growth)
-		if s.process != nil && !s.process.Alive() && now2.Sub(s.GetLastActive()) > 7*r.ttl {
+		if s.process != nil && !s.process.Alive() && now.Sub(s.GetLastActive()) > 7*r.ttl {
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
@@ -735,9 +734,9 @@ func (r *Router) ListSessions() []SessionSnapshot {
 	}
 	r.mu.Unlock()
 
-	snapshots := make([]SessionSnapshot, 0, len(refs))
-	for _, s := range refs {
-		snapshots = append(snapshots, s.Snapshot())
+	snapshots := make([]SessionSnapshot, len(refs))
+	for i, s := range refs {
+		snapshots[i] = s.Snapshot()
 	}
 	return snapshots
 }
@@ -774,6 +773,21 @@ func (r *Router) ManagedPIDs() map[int]bool {
 		}
 	}
 	return pids
+}
+
+// ManagedSessionIDs returns the Claude session IDs of all managed sessions.
+// Used by discovery.Scan to prevent CLI session upgrade from picking up
+// JSONL files written by naozhi-managed sessions in the same workspace.
+func (r *Router) ManagedSessionIDs() map[string]bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids := make(map[string]bool)
+	for _, s := range r.sessions {
+		if id := s.getSessionID(); id != "" {
+			ids[id] = true
+		}
+	}
+	return ids
 }
 
 // Takeover creates a managed session to replace an external Claude CLI session.

@@ -249,7 +249,7 @@ func (n *NodeClient) NodeID() string      { return n.ID }
 func (n *NodeClient) DisplayName() string { return n.displayName }
 func (n *NodeClient) Status() string      { return "ok" }
 
-func (n *NodeClient) Subscribe(c *wsClient, key string, after int64) {
+func (n *NodeClient) Subscribe(c wsEventSink, key string, after int64) {
 	n.relayMu.Lock()
 	if n.relay == nil {
 		n.relay = newWSRelay(n)
@@ -259,7 +259,7 @@ func (n *NodeClient) Subscribe(c *wsClient, key string, after int64) {
 	relay.Subscribe(c, key, after)
 }
 
-func (n *NodeClient) Unsubscribe(c *wsClient, key string) {
+func (n *NodeClient) Unsubscribe(c wsEventSink, key string) {
 	n.relayMu.Lock()
 	relay := n.relay
 	n.relayMu.Unlock()
@@ -268,7 +268,7 @@ func (n *NodeClient) Unsubscribe(c *wsClient, key string) {
 	}
 }
 
-func (n *NodeClient) RemoveClient(c *wsClient) {
+func (n *NodeClient) RemoveClient(c wsEventSink) {
 	n.relayMu.Lock()
 	relay := n.relay
 	n.relayMu.Unlock()

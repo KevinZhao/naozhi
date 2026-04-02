@@ -6,11 +6,17 @@ import (
 )
 
 // ClaudeProtocol implements Protocol for Claude CLI's stream-json format.
-type ClaudeProtocol struct{}
+type ClaudeProtocol struct {
+	// SettingsFile is passed to --settings <file>. When non-empty, standard setting
+	// sources are disabled (--setting-sources "") and this file is loaded instead.
+	// Use writeClaudeSettingsOverride() to generate a filtered copy of user settings
+	// that strips hooks calling back into naozhi.
+	SettingsFile string
+}
 
 func (p *ClaudeProtocol) Name() string { return "stream-json" }
 
-func (p *ClaudeProtocol) Clone() Protocol { return &ClaudeProtocol{} }
+func (p *ClaudeProtocol) Clone() Protocol { return &ClaudeProtocol{SettingsFile: p.SettingsFile} }
 
 func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	args := []string{
@@ -18,8 +24,11 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--verbose",
-		"--setting-sources", "",
+		"--setting-sources", "", // disable standard settings to avoid hook loops
 		"--dangerously-skip-permissions",
+	}
+	if p.SettingsFile != "" {
+		args = append(args, "--settings", p.SettingsFile)
 	}
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)

@@ -131,7 +131,7 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string, 
 		eventLog:        NewEventLog(0),
 	}
 
-	p.scanner.Buffer(make([]byte, 0, 64*1024), maxScannerBufBytes)
+	p.scanner.Buffer(make([]byte, 64*1024), maxScannerBufBytes)
 
 	return p, nil
 }
@@ -148,9 +148,10 @@ func (p *Process) startReadLoop() {
 func (p *Process) readLoop() {
 	// close(p.done) must run before close(p.eventCh) so that Alive() returns
 	// false by the time any consumer of eventCh (e.g. Send) can observe the
-	// channel closing. Defers run LIFO, so declare done first.
+	// channel closing. Defers run LIFO: eventCh registered first runs last.
 	defer close(p.eventCh)
 	defer close(p.done)
+	defer p.eventLog.CloseSubscribers()
 
 	for p.scanner.Scan() {
 		line := p.scanner.Bytes()
@@ -589,7 +590,7 @@ func (p *Process) EventEntriesSince(afterMS int64) []EventEntry {
 }
 
 // TurnAgents returns the sub-agent types spawned in the current turn.
-func (p *Process) TurnAgents() []string {
+func (p *Process) TurnAgents() []SubagentInfo {
 	return p.eventLog.TurnAgents()
 }
 

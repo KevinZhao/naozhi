@@ -7,6 +7,13 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
+// wsEventSink can receive JSON event messages pushed from a remote session.
+// Using an interface here avoids tying NodeConn implementations to the concrete
+// *wsClient type.
+type wsEventSink interface {
+	sendJSON(v interface{})
+}
+
 // NodeConn is the unified interface for both direct (NodeClient, HTTP) and
 // reverse-connected (ReverseNodeConn, WS) remote nodes.
 type NodeConn interface {
@@ -25,9 +32,9 @@ type NodeConn interface {
 	ProxyRestartPlanner(ctx context.Context, projectName string) error
 	ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error
 
-	Subscribe(c *wsClient, key string, after int64)
-	Unsubscribe(c *wsClient, key string)
-	RemoveClient(c *wsClient)
+	Subscribe(c wsEventSink, key string, after int64)
+	Unsubscribe(c wsEventSink, key string)
+	RemoveClient(c wsEventSink)
 
 	Close()
 }

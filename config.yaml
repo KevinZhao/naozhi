@@ -7,7 +7,6 @@ workspace:
 
 cli:
   path: "~/.local/bin/claude"
-  model: "sonnet"
   args:
     - "--dangerously-skip-permissions"
 
@@ -59,18 +58,12 @@ projects:
   planner_defaults:
     model: "sonnet"
 
-workspaces:
-  macbook:
-    url: "http://192.168.1.101:8180"
-    token: ""
-    display_name: "MacBook Pro"
-
 # Reverse-connect nodes: remote machines dial in to this primary (NAT traversal).
 # Each entry is node_id: {token, display_name}. Token must match upstream.token on the remote.
 reverse_nodes:
   pc:
     token: "${PC_REVERSE_TOKEN}"
-    display_name: "PC (10.200.0.10)"
+    display_name: "Amazon MBP 16"
 
 # Upstream: this node dials a primary naozhi instance (reverse-connect mode).
 # Use when this machine is behind NAT and cannot be reached by the primary directly.

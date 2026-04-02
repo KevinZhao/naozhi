@@ -113,7 +113,7 @@ func (p *Project) SaveConfig() error {
 // saveConfigToPath atomically writes a ProjectConfig to the given path.
 func saveConfigToPath(path string, cfg ProjectConfig) error {
 	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0755); err != nil {
+	if err := os.MkdirAll(dir, 0700); err != nil {
 		return fmt.Errorf("create config dir: %w", err)
 	}
 
@@ -123,7 +123,7 @@ func saveConfigToPath(path string, cfg ProjectConfig) error {
 	}
 
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0644); err != nil {
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return fmt.Errorf("write project config: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {

@@ -49,7 +49,7 @@ func (p *TestProcess) InjectHistory(entries []cli.EventEntry) {
 		p.EventLog.Append(e)
 	}
 }
-func (p *TestProcess) TurnAgents() []string { return p.EventLog.TurnAgents() }
+func (p *TestProcess) TurnAgents() []cli.SubagentInfo { return p.EventLog.TurnAgents() }
 
 // InjectSession inserts a session with the given TestProcess into the router.
 // For use in tests that need sessions without spawning real CLI processes.

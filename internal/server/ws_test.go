@@ -21,7 +21,7 @@ func newTestHub(token string) (*Hub, *session.Router) {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := newSessionGuard()
 	var nodesMu sync.RWMutex
-	hub := NewHub(router, nil, nil, token, guard, nil, &nodesMu)
+	hub := NewHub(router, nil, nil, token, guard, nil, &nodesMu, nil)
 	return hub, router
 }
 
@@ -29,7 +29,7 @@ func newTestHubWithAgents(token string, agents map[string]session.AgentOpts) (*H
 	router := session.NewRouter(session.RouterConfig{})
 	guard := newSessionGuard()
 	var nodesMu sync.RWMutex
-	hub := NewHub(router, agents, nil, token, guard, nil, &nodesMu)
+	hub := NewHub(router, agents, nil, token, guard, nil, &nodesMu, nil)
 	return hub, router
 }
 

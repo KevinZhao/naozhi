@@ -7,7 +7,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	robfigcron "github.com/robfig/cron/v3"
 
@@ -312,7 +311,7 @@ func (s *Scheduler) execute(j *Job) {
 	// Use a fresh context for replies — the execution ctx may be near deadline.
 	replyCtx, replyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer replyCancel()
-	chunks := splitReply(replyText, maxLen)
+	chunks := platform.SplitText(replyText, maxLen)
 	for _, chunk := range chunks {
 		platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
 			ChatID: j.ChatID,
@@ -357,32 +356,4 @@ func (s *Scheduler) saveSnapshot(snapshot map[string]*Job) {
 	if err := saveJobs(s.storePath, snapshot); err != nil {
 		slog.Error("save cron store", "err", err)
 	}
-}
-
-// splitReply splits text into chunks of at most maxRunes runes.
-func splitReply(text string, maxRunes int) []string {
-	if utf8.RuneCountInString(text) <= maxRunes {
-		return []string{text}
-	}
-	var chunks []string
-	for text != "" {
-		// Advance up to maxRunes runes to find the byte boundary.
-		end, count := 0, 0
-		for count < maxRunes && end < len(text) {
-			_, size := utf8.DecodeRuneInString(text[end:])
-			end += size
-			count++
-		}
-		if end == len(text) {
-			// Remaining text fits within maxRunes — last chunk.
-			chunks = append(chunks, text)
-			break
-		}
-		if idx := strings.LastIndex(text[:end], "\n"); idx > end/2 {
-			end = idx + 1
-		}
-		chunks = append(chunks, text[:end])
-		text = text[end:]
-	}
-	return chunks
 }

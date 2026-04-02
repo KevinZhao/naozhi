@@ -60,14 +60,20 @@ func (m *mockPlatform) allReplies() []platform.OutgoingMessage {
 func newTestServer(p *mockPlatform) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
-	return New(":0", router, platforms, nil, nil, nil, "claude")
+	return New(":0", router, platforms, nil, nil, nil, "claude", ServerOptions{})
 }
 
 func newTestServerWithScheduler(p *mockPlatform) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
 	sched := cron.NewScheduler(cron.SchedulerConfig{})
-	return New(":0", router, platforms, nil, nil, sched, "claude")
+	return New(":0", router, platforms, nil, nil, sched, "claude", ServerOptions{})
+}
+
+func newTestServerWithToken(p *mockPlatform, token string) *Server {
+	router := session.NewRouter(session.RouterConfig{})
+	platforms := map[string]platform.Platform{"test": p}
+	return New(":0", router, platforms, nil, nil, nil, "claude", ServerOptions{DashboardToken: token})
 }
 
 // ─── handleHealth ─────────────────────────────────────────────────────────────
@@ -211,7 +217,7 @@ func TestBuildMessageHandler_NewResetsNamedAgent(t *testing.T) {
 	platforms := map[string]platform.Platform{"test": p}
 	agentCommands := map[string]string{"review": "code-reviewer"}
 	agents := map[string]session.AgentOpts{"code-reviewer": {}}
-	srv := New(":0", router, platforms, agents, agentCommands, nil, "claude")
+	srv := New(":0", router, platforms, agents, agentCommands, nil, "claude", ServerOptions{})
 	handler := srv.buildMessageHandler()
 
 	handler(context.Background(), platform.IncomingMessage{
@@ -471,9 +477,9 @@ func TestSplitText(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			chunks := splitText(tt.text, tt.maxLen)
+			chunks := platform.SplitText(tt.text, tt.maxLen)
 			if len(chunks) != tt.want {
-				t.Errorf("splitText(%q, %d) = %d chunks, want %d: %v",
+				t.Errorf("platform.SplitText(%q, %d) = %d chunks, want %d: %v",
 					tt.text, tt.maxLen, len(chunks), tt.want, chunks)
 			}
 			joined := ""
@@ -489,7 +495,7 @@ func TestSplitText(t *testing.T) {
 
 func TestSplitTextLong(t *testing.T) {
 	// 10 chars, maxLen=3 -> 4 chunks
-	chunks := splitText("0123456789", 3)
+	chunks := platform.SplitText("0123456789", 3)
 	if len(chunks) != 4 {
 		t.Fatalf("got %d chunks, want 4: %v", len(chunks), chunks)
 	}
@@ -503,7 +509,7 @@ func TestSplitTextLong(t *testing.T) {
 func TestSplitTextPreferNewline(t *testing.T) {
 	// "aaa\nbbb" with maxLen=5 should split at the newline
 	text := "aaa\nbbb"
-	chunks := splitText(text, 5)
+	chunks := platform.SplitText(text, 5)
 	if len(chunks) != 2 {
 		t.Fatalf("got %d chunks, want 2: %v", len(chunks), chunks)
 	}
@@ -519,7 +525,7 @@ func TestSplitTextNewlineInSecondHalf(t *testing.T) {
 	// "hello\nworld" (11 chars), maxLen=8 — newline at idx 5 > maxLen/2=4
 	// should split at the newline rather than at index 8
 	text := "hello\nworld"
-	chunks := splitText(text, 8)
+	chunks := platform.SplitText(text, 8)
 	joined := strings.Join(chunks, "")
 	if joined != text {
 		t.Errorf("joined = %q, want %q", joined, text)
@@ -531,7 +537,7 @@ func TestSplitTextNewlineInSecondHalf(t *testing.T) {
 
 func TestSplitTextMultipleLines(t *testing.T) {
 	text := "line1\nline2\nline3\nline4"
-	chunks := splitText(text, 12)
+	chunks := platform.SplitText(text, 12)
 	joined := strings.Join(chunks, "")
 	if joined != text {
 		t.Errorf("joined = %q, want %q", joined, text)
@@ -546,7 +552,7 @@ func TestSplitTextMultipleLines(t *testing.T) {
 func TestSplitTextNoNewline(t *testing.T) {
 	// No newlines — must split on byte boundary
 	text := "abcdefghijklmno" // 15 chars
-	chunks := splitText(text, 5)
+	chunks := platform.SplitText(text, 5)
 	joined := strings.Join(chunks, "")
 	if joined != text {
 		t.Errorf("joined = %q, want %q", joined, text)
@@ -562,7 +568,7 @@ func TestSplitTextNoNewline(t *testing.T) {
 }
 
 func TestSplitTextSingleChar(t *testing.T) {
-	chunks := splitText("x", 1)
+	chunks := platform.SplitText("x", 1)
 	if len(chunks) != 1 || chunks[0] != "x" {
 		t.Errorf("single char: got %v, want [x]", chunks)
 	}

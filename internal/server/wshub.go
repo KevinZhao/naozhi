@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -34,33 +35,35 @@ var wsUpgrader = websocket.Upgrader{
 
 // Hub manages WebSocket client connections and event subscriptions.
 type Hub struct {
-	mu        sync.Mutex
-	clients   map[*wsClient]struct{}
-	router    *session.Router
-	agents    map[string]session.AgentOpts
-	agentCmds map[string]string
-	dashToken string
-	guard     *sessionGuard
-	nodes     map[string]NodeConn
-	nodesMu   *sync.RWMutex   // shared with Server.nodesMu — all nodes map access must use this
-	ctx       context.Context // cancelled on Shutdown to stop in-flight sends
-	cancel    context.CancelFunc
+	mu         sync.Mutex
+	clients    map[*wsClient]struct{}
+	router     *session.Router
+	agents     map[string]session.AgentOpts
+	agentCmds  map[string]string
+	dashToken  string
+	guard      *sessionGuard
+	nodes      map[string]NodeConn
+	nodesMu    *sync.RWMutex   // shared with Server.nodesMu — all nodes map access must use this
+	projectMgr *project.Manager
+	ctx        context.Context // cancelled on Shutdown to stop in-flight sends
+	cancel     context.CancelFunc
 }
 
 // NewHub creates a new WebSocket hub.
-func NewHub(router *session.Router, agents map[string]session.AgentOpts, agentCmds map[string]string, dashToken string, guard *sessionGuard, nodes map[string]NodeConn, nodesMu *sync.RWMutex) *Hub {
+func NewHub(router *session.Router, agents map[string]session.AgentOpts, agentCmds map[string]string, dashToken string, guard *sessionGuard, nodes map[string]NodeConn, nodesMu *sync.RWMutex, projectMgr *project.Manager) *Hub {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Hub{
 		clients:   make(map[*wsClient]struct{}),
 		router:    router,
 		agents:    agents,
 		agentCmds: agentCmds,
-		dashToken: dashToken,
-		guard:     guard,
-		nodes:     nodes,
-		nodesMu:   nodesMu,
-		ctx:       ctx,
-		cancel:    cancel,
+		dashToken:  dashToken,
+		guard:      guard,
+		nodes:      nodes,
+		nodesMu:    nodesMu,
+		projectMgr: projectMgr,
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 }
 
@@ -254,6 +257,24 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 		}
 
 		opts := h.agents[agentID]
+		if project.IsPlannerKey(key) {
+			opts.Exempt = true
+			if h.projectMgr != nil {
+				pParts := strings.SplitN(key, ":", 3)
+				if len(pParts) == 3 {
+					if p := h.projectMgr.Get(pParts[1]); p != nil {
+						opts.Workspace = p.Path
+						if m := h.projectMgr.EffectivePlannerModel(p); m != "" {
+							opts.Model = m
+						}
+						if prompt := h.projectMgr.EffectivePlannerPrompt(p); prompt != "" {
+							opts.ExtraArgs = append(opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)],
+								"--append-system-prompt", prompt)
+						}
+					}
+				}
+			}
+		}
 		sess, _, err := h.router.GetOrCreate(ctx, key, opts)
 		if err != nil {
 			slog.Error("ws send: get session", "key", key, "err", err)

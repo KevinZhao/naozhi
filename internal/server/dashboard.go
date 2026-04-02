@@ -10,7 +10,6 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -32,7 +31,7 @@ var dashboardHTML embed.FS
 var manifestJSON embed.FS
 
 func (s *Server) registerDashboard() {
-	s.hub = NewHub(s.router, s.agents, s.agentCommands, s.dashboardToken, s.sessionGuard, s.nodes, &s.nodesMu)
+	s.hub = NewHub(s.router, s.agents, s.agentCommands, s.dashboardToken, s.sessionGuard, s.nodes, &s.nodesMu, s.projectMgr)
 
 	// Push session list changes to WS clients
 	s.router.SetOnChange(func() { s.hub.BroadcastSessionsUpdate() })
@@ -77,6 +76,8 @@ func (s *Server) checkBearerAuth(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
+	// No Bearer auth here: browser GET has no Authorization header yet.
+	// JS in the page handles auth for API calls; the HTML shell is public.
 	data, err := dashboardHTML.ReadFile("static/dashboard.html")
 	if err != nil {
 		http.Error(w, "dashboard not found", http.StatusNotFound)
@@ -373,6 +374,7 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
+		r.Body = http.MaxBytesReader(w, r.Body, 55<<20) // 5 files × 10MB + form overhead
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
 			http.Error(w, "bad multipart form", http.StatusBadRequest)
 			return
@@ -411,6 +413,7 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 			images = append(images, cli.ImageData{Data: data, MimeType: mime})
 		}
 	} else {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB limit
 		var req struct {
 			Key       string `json:"key"`
 			Text      string `json:"text"`
@@ -558,7 +561,7 @@ func (s *Server) handleAPIDiscovered(w http.ResponseWriter, r *http.Request) {
 	}
 
 	excludePIDs := s.router.ManagedPIDs()
-	sessions, err := discovery.Scan(s.claudeDir, excludePIDs)
+	sessions, err := discovery.Scan(s.claudeDir, excludePIDs, s.router.ManagedSessionIDs())
 	if err != nil {
 		slog.Warn("discovery scan", "err", err)
 		sessions = nil
@@ -718,7 +721,7 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 	// C2 fix: verify PID is in the discovered list before killing
 	if s.claudeDir != "" {
 		excludePIDs := s.router.ManagedPIDs()
-		discovered, _ := discovery.Scan(s.claudeDir, excludePIDs)
+		discovered, _ := discovery.Scan(s.claudeDir, excludePIDs, nil)
 		pidFound := false
 		for _, d := range discovered {
 			if d.PID == req.PID && d.SessionID == req.SessionID {
@@ -742,7 +745,11 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 
 	// Kill the original process.
 	// Verify PID identity before sending signal (TOCTOU guard).
-	if req.ProcStartTime != 0 && !verifyProcIdentity(req.PID, req.ProcStartTime) {
+	if req.ProcStartTime == 0 {
+		http.Error(w, "proc_start_time is required", http.StatusBadRequest)
+		return
+	}
+	if !verifyProcIdentity(req.PID, req.ProcStartTime) {
 		http.Error(w, "process identity changed (PID reused)", http.StatusConflict)
 		return
 	}
@@ -759,31 +766,8 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 	agentOpts := s.agents["general"]
 
 	go func() {
-		// Wait for process to exit (up to 5 seconds).
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			if err := syscall.Kill(pid, 0); err != nil {
-				break // process exited
-			}
-			time.Sleep(200 * time.Millisecond)
-		}
-		// Force kill if still alive. Re-verify PID identity to avoid SIGKILLing an
-		// unrelated process that reused the PID during the wait window.
-		// Skip if procStartTime was not supplied (0) — safer to leave it alone.
-		if procStartTime != 0 && verifyProcIdentity(pid, procStartTime) {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
-		}
-
-		// Remove stale session metadata file (always — keyed by the original PID).
-		if s.claudeDir != "" {
-			_ = os.Remove(filepath.Join(s.claudeDir, "sessions", fmt.Sprintf("%d.json", pid)))
-		}
-		// Remove session lock dir so --resume can reacquire it.
-		if reqCWD != "" && sessionID != "" {
-			encodedCWD := strings.ReplaceAll(reqCWD, "/", "-")
-			lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID)
-			_ = os.RemoveAll(lockDir)
-		}
+		// Wait, SIGKILL, and remove stale session files.
+		s.waitAndCleanupClaude(pid, procStartTime, reqCWD, sessionID)
 
 		// Takeover via router — use Background context so the spawned process
 		// outlives the HTTP request.

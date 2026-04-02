@@ -32,20 +32,34 @@ func TestExpandEnvVars(t *testing.T) {
 
 func TestParseTTL(t *testing.T) {
 	tests := []struct {
-		ttl      string
+		yaml     string
 		expected time.Duration
+		wantErr  bool
 	}{
-		{"30m", 30 * time.Minute},
-		{"1h", time.Hour},
-		{"", 30 * time.Minute},
-		{"invalid", 30 * time.Minute},
+		{`session: {ttl: "30m"}`, 30 * time.Minute, false},
+		{`session: {ttl: "1h"}`, time.Hour, false},
+		{`{}`, 30 * time.Minute, false},    // empty → default
+		{`session: {ttl: "bad"}`, 0, true}, // invalid → error
+		{`session: {ttl: "-5m"}`, 0, true}, // non-positive → error
 	}
 
 	for _, tt := range tests {
-		cfg := &Config{Session: SessionConfig{TTL: tt.ttl}}
+		tmpFile := t.TempDir() + "/config.yaml"
+		os.WriteFile(tmpFile, []byte(tt.yaml), 0644)
+		cfg, err := Load(tmpFile)
+		if tt.wantErr {
+			if err == nil {
+				t.Errorf("Load(%q) expected error, got nil", tt.yaml)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("Load(%q) unexpected error: %v", tt.yaml, err)
+			continue
+		}
 		got := cfg.ParseTTL()
 		if got != tt.expected {
-			t.Errorf("ParseTTL(%q) = %v, want %v", tt.ttl, got, tt.expected)
+			t.Errorf("ParseTTL() = %v, want %v (yaml: %q)", got, tt.expected, tt.yaml)
 		}
 	}
 }
@@ -53,43 +67,48 @@ func TestParseTTL(t *testing.T) {
 func TestParseWatchdog(t *testing.T) {
 	tests := []struct {
 		name           string
-		noOutput       string
-		total          string
+		yaml           string
 		expectNoOutput time.Duration
 		expectTotal    time.Duration
+		wantErr        bool
 	}{
 		{
 			name:           "configured values",
-			noOutput:       "120s",
-			total:          "300s",
+			yaml:           `session: {watchdog: {no_output_timeout: "120s", total_timeout: "300s"}}`,
 			expectNoOutput: 120 * time.Second,
 			expectTotal:    300 * time.Second,
 		},
 		{
 			name:           "defaults when empty",
-			noOutput:       "",
-			total:          "",
+			yaml:           `{}`,
 			expectNoOutput: 2 * time.Minute,
 			expectTotal:    5 * time.Minute,
 		},
 		{
-			name:           "defaults when invalid",
-			noOutput:       "bad",
-			total:          "bad",
-			expectNoOutput: 2 * time.Minute,
-			expectTotal:    5 * time.Minute,
+			name:    "error on invalid no_output_timeout",
+			yaml:    `session: {watchdog: {no_output_timeout: "bad"}}`,
+			wantErr: true,
+		},
+		{
+			name:    "error on invalid total_timeout",
+			yaml:    `session: {watchdog: {total_timeout: "bad"}}`,
+			wantErr: true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := &Config{
-				Session: SessionConfig{
-					Watchdog: WatchdogConfig{
-						NoOutputTimeout: tt.noOutput,
-						TotalTimeout:    tt.total,
-					},
-				},
+			tmpFile := t.TempDir() + "/config.yaml"
+			os.WriteFile(tmpFile, []byte(tt.yaml), 0644)
+			cfg, err := Load(tmpFile)
+			if tt.wantErr {
+				if err == nil {
+					t.Errorf("Load(%q) expected error, got nil", tt.yaml)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() unexpected error: %v", err)
 			}
 			gotNoOutput, gotTotal := cfg.ParseWatchdog()
 			if gotNoOutput != tt.expectNoOutput {
@@ -113,8 +132,8 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.Server.Addr != ":8080" {
 		t.Errorf("default addr = %q, want %q", cfg.Server.Addr, ":8080")
 	}
-	if cfg.CLI.Model != "sonnet" {
-		t.Errorf("default model = %q, want %q", cfg.CLI.Model, "sonnet")
+	if cfg.CLI.Model != "" {
+		t.Errorf("default model = %q, want empty", cfg.CLI.Model)
 	}
 	if cfg.Session.MaxProcs != 3 {
 		t.Errorf("default max_procs = %d, want 3", cfg.Session.MaxProcs)

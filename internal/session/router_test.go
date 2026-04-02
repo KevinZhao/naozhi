@@ -104,7 +104,7 @@ func (f *fakeProcess) ProtocolName() string             { return "test" }
 func (f *fakeProcess) Interrupt()                       {}
 func (f *fakeProcess) PID() int                         { return 0 }
 func (f *fakeProcess) InjectHistory(_ []cli.EventEntry) {}
-func (f *fakeProcess) TurnAgents() []string             { return nil }
+func (f *fakeProcess) TurnAgents() []cli.SubagentInfo             { return nil }
 func (f *fakeProcess) SubscribeEvents() (<-chan struct{}, func()) {
 	ch := make(chan struct{})
 	return ch, func() {}

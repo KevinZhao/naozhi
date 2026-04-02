@@ -96,8 +96,7 @@ func TestHandleAPISend_InvalidJSON(t *testing.T) {
 }
 
 func TestHandleAPISend_UnauthorizedNoToken(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-	srv.SetDashboardToken("secret")
+	srv := newTestServerWithToken(&mockPlatform{}, "secret")
 
 	body := `{"key":"p:t:u:general","text":"hi"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
@@ -112,8 +111,7 @@ func TestHandleAPISend_UnauthorizedNoToken(t *testing.T) {
 }
 
 func TestHandleAPISend_UnauthorizedWrongToken(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-	srv.SetDashboardToken("secret")
+	srv := newTestServerWithToken(&mockPlatform{}, "secret")
 
 	body := `{"key":"p:t:u:general","text":"hi"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
@@ -129,8 +127,7 @@ func TestHandleAPISend_UnauthorizedWrongToken(t *testing.T) {
 }
 
 func TestHandleAPISend_AcceptedWithValidToken(t *testing.T) {
-	srv := newTestServer(&mockPlatform{})
-	srv.SetDashboardToken("secret")
+	srv := newTestServerWithToken(&mockPlatform{}, "secret")
 
 	body := `{"key":"p:t:u:general","text":"hi"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
@@ -223,7 +220,7 @@ func TestHandleAPISessions_StatsIncludeAgentsAndWorkspace(t *testing.T) {
 		MaxProcs:  5,
 		Workspace: "/test/workspace",
 	})
-	srv := New(":0", router, nil, agents, nil, nil, "claude")
+	srv := New(":0", router, nil, agents, nil, nil, "claude", ServerOptions{})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
@@ -280,7 +277,7 @@ func TestHandleAPISend_WorkspaceOverride(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{
 		Workspace: "/default/workspace",
 	})
-	srv := New(":0", router, nil, nil, nil, nil, "claude")
+	srv := New(":0", router, nil, nil, nil, nil, "claude", ServerOptions{})
 
 	key := "dashboard:direct:test-session:general"
 	body := `{"key":"` + key + `","text":"hi","workspace":"` + tmpDir + `"}`
@@ -306,7 +303,7 @@ func TestHandleAPISend_WorkspaceInvalidDir(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{
 		Workspace: "/default/workspace",
 	})
-	srv := New(":0", router, nil, nil, nil, nil, "claude")
+	srv := New(":0", router, nil, nil, nil, nil, "claude", ServerOptions{})
 
 	key := "dashboard:direct:test-session:general"
 	body := `{"key":"` + key + `","text":"hi","workspace":"/nonexistent/path/xyz"}`
@@ -353,9 +350,8 @@ func TestHandleAPISessions_NodeAggregation(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.SetNodes(map[string]NodeConn{
-		"macbook": NewNodeClient("macbook", remote.URL, "", "MacBook Pro"),
-	})
+	srv.nodes["macbook"] = NewNodeClient("macbook", remote.URL, "", "MacBook Pro")
+	srv.knownNodes["macbook"] = "MacBook Pro"
 
 	// Populate the cache synchronously
 	srv.refreshNodeCache()

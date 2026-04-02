@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -31,6 +32,160 @@ import (
 )
 
 var version = "dev"
+
+// applyClaudeEnvSettings reads ~/.claude/settings.json and applies any env section
+// to the current process so spawned CC child processes inherit them via os.Environ().
+// Only sets vars not already present (shell-set vars take precedence).
+func applyClaudeEnvSettings() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return
+	}
+	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
+	if err != nil {
+		return
+	}
+	var s struct {
+		Env map[string]string `json:"env"`
+	}
+	if json.Unmarshal(data, &s) != nil || len(s.Env) == 0 {
+		return
+	}
+	for k, v := range s.Env {
+		if _, exists := os.LookupEnv(k); !exists {
+			os.Setenv(k, v) //nolint:errcheck
+		}
+	}
+}
+
+// writeClaudeSettingsOverride generates ~/.naozhi/claude-settings.json by copying
+// ~/.claude/settings.json verbatim, but filtering out only the hook entries that
+// would call back into naozhi (causing infinite loops). Safe hooks such as
+// formatters and linters are preserved as-is.
+// Returns the file path, or empty string on failure.
+func writeClaudeSettingsOverride(serverAddr string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+
+	var settings map[string]json.RawMessage
+	if data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json")); err == nil {
+		_ = json.Unmarshal(data, &settings)
+	}
+	if settings == nil {
+		settings = make(map[string]json.RawMessage)
+	}
+
+	port := addrPort(serverAddr)
+	if hooksRaw, ok := settings["hooks"]; ok {
+		settings["hooks"] = filterHooks(hooksRaw, port)
+	}
+
+	out, err := json.Marshal(settings)
+	if err != nil {
+		return ""
+	}
+	dir := filepath.Join(home, ".naozhi")
+	if err := os.MkdirAll(dir, 0700); err != nil {
+		return ""
+	}
+	path := filepath.Join(dir, "claude-settings.json")
+	if err := os.WriteFile(path, out, 0600); err != nil {
+		return ""
+	}
+	return path
+}
+
+// addrPort extracts the port number string from a listen address like ":8180" or "0.0.0.0:8180".
+func addrPort(addr string) string {
+	if i := strings.LastIndex(addr, ":"); i >= 0 {
+		return addr[i+1:]
+	}
+	return addr
+}
+
+// filterHooks returns hooksRaw with any individual hook entries that would call back
+// into naozhi removed. It works at the entry level: a group loses only its dangerous
+// entries; if all entries in a group are removed the whole group is dropped.
+// If parsing fails, returns an empty hooks object to be safe.
+func filterHooks(hooksRaw json.RawMessage, serverPort string) json.RawMessage {
+	// hooks shape: map[eventName] → []{ "matcher":..., "hooks": []{ "type":..., "command":... } }
+	var byEvent map[string][]map[string]json.RawMessage
+	if err := json.Unmarshal(hooksRaw, &byEvent); err != nil {
+		empty, _ := json.Marshal(map[string]any{})
+		return empty
+	}
+
+	changed := false
+	for eventName, groups := range byEvent {
+		var keptGroups []map[string]json.RawMessage
+		for _, group := range groups {
+			entriesRaw, ok := group["hooks"]
+			if !ok {
+				keptGroups = append(keptGroups, group)
+				continue
+			}
+			var entries []map[string]json.RawMessage
+			if err := json.Unmarshal(entriesRaw, &entries); err != nil {
+				keptGroups = append(keptGroups, group)
+				continue
+			}
+			var safeEntries []map[string]json.RawMessage
+			for _, e := range entries {
+				var cmd string
+				if raw, ok := e["command"]; ok {
+					_ = json.Unmarshal(raw, &cmd)
+				}
+				if isNaozhiCallbackHook(cmd, serverPort) {
+					changed = true
+					slog.Info("dropping hook to prevent naozhi callback loop", "event", eventName, "command", cmd)
+				} else {
+					safeEntries = append(safeEntries, e)
+				}
+			}
+			if len(safeEntries) == 0 {
+				changed = true
+				continue // drop group entirely
+			}
+			if len(safeEntries) != len(entries) {
+				changed = true
+				newRaw, _ := json.Marshal(safeEntries)
+				group["hooks"] = newRaw
+			}
+			keptGroups = append(keptGroups, group)
+		}
+		byEvent[eventName] = keptGroups
+	}
+
+	if !changed {
+		return hooksRaw
+	}
+	out, _ := json.Marshal(byEvent)
+	return out
+}
+
+// isNaozhiCallbackHook reports whether a hook command appears to call back into
+// naozhi's HTTP server (which would cause an infinite loop).
+// It matches: any mention of "naozhi", or an HTTP call to localhost/127.0.0.1 on
+// naozhi's listen port.
+func isNaozhiCallbackHook(cmd, port string) bool {
+	if cmd == "" {
+		return false
+	}
+	lower := strings.ToLower(cmd)
+	if strings.Contains(lower, "naozhi") {
+		return true
+	}
+	if port != "" {
+		for _, host := range []string{"localhost", "127.0.0.1", "0.0.0.0"} {
+			if strings.Contains(lower, host+":"+port) {
+				return true
+			}
+		}
+	}
+	return false
+}
 
 func main() {
 	// Subcommands (before flag.Parse)
@@ -67,12 +222,14 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
 
 	// CLI Protocol + Wrapper
+	applyClaudeEnvSettings()
+	settingsFile := writeClaudeSettingsOverride(cfg.Server.Addr)
 	var proto cli.Protocol
 	switch cfg.CLI.Backend {
 	case "kiro":
 		proto = &cli.ACPProtocol{}
 	default:
-		proto = &cli.ClaudeProtocol{}
+		proto = &cli.ClaudeProtocol{SettingsFile: settingsFile}
 	}
 	wrapper := cli.NewWrapper(cfg.CLI.Path, proto)
 
@@ -196,11 +353,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Server
-	srv := server.New(cfg.Server.Addr, router, platforms, agents, cfg.AgentCommands, scheduler, cfg.CLI.Backend)
-	srv.SetWorkspaceIdentity(cfg.Workspace.ID, cfg.Workspace.Name)
-	srv.SetWatchdogTimeouts(noOutputTimeout, totalTimeout)
-
 	// Project Manager (optional, enabled when projects.root is configured)
 	var projectMgr *project.Manager
 	if cfg.Projects.Root != "" {
@@ -218,26 +370,37 @@ func main() {
 			os.Exit(1)
 		}
 		projectMgr = mgr
-		srv.SetProjectManager(mgr)
 		slog.Info("projects enabled", "root", root, "count", len(mgr.All()))
 	}
 
 	// Configure remote nodes for multi-node aggregation
+	var nodes map[string]server.NodeConn
 	if len(cfg.Nodes) > 0 {
-		nodes := make(map[string]server.NodeConn, len(cfg.Nodes))
+		nodes = make(map[string]server.NodeConn, len(cfg.Nodes))
 		for id, nc := range cfg.Nodes {
 			nodes[id] = server.NewNodeClient(id, nc.URL, nc.Token, nc.DisplayName)
 		}
-		srv.SetNodes(nodes)
 		slog.Info("multi-node configured", "nodes", len(nodes))
 	}
 
 	// Configure reverse-connecting nodes (NAT traversal)
+	var rns *server.ReverseNodeServer
 	if len(cfg.ReverseNodes) > 0 {
-		rns := server.NewReverseNodeServer(cfg.ReverseNodes)
-		srv.SetReverseNodeServer(rns)
+		rns = server.NewReverseNodeServer(cfg.ReverseNodes)
 		slog.Info("reverse node auth configured", "nodes", len(cfg.ReverseNodes))
 	}
+
+	// Server
+	srv := server.New(cfg.Server.Addr, router, platforms, agents, cfg.AgentCommands, scheduler, cfg.CLI.Backend, server.ServerOptions{
+		WorkspaceID:       cfg.Workspace.ID,
+		WorkspaceName:     cfg.Workspace.Name,
+		AllowedRoot:       workspace,
+		NoOutputTimeout:   noOutputTimeout,
+		TotalTimeout:      totalTimeout,
+		ProjectManager:    projectMgr,
+		Nodes:             nodes,
+		ReverseNodeServer: rns,
+	})
 
 	// Start upstream connector (this node connects to a primary)
 	if cfg.Upstream != nil {
@@ -251,7 +414,7 @@ func main() {
 		if claudeDir != "" {
 			conn.SetDiscoverFunc(func() (json.RawMessage, error) {
 				excludePIDs := router.ManagedPIDs()
-				sessions, err := discovery.Scan(claudeDir, excludePIDs)
+				sessions, err := discovery.Scan(claudeDir, excludePIDs, nil)
 				if err != nil {
 					return json.Marshal([]any{})
 				}

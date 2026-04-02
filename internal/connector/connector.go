@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -155,6 +156,14 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
+	// Clean up all event log subscriptions when connection drops.
+	defer func() {
+		for key, cancel := range activeSubs {
+			cancel()
+			delete(activeSubs, key)
+		}
+	}()
+
 	for {
 		var msg reverse.ReverseMsg
 		if err := conn.ReadJSON(&msg); err != nil {
@@ -294,11 +303,11 @@ func (c *Connector) handleRequest(ctx context.Context, req reverse.ReverseMsg) (
 		if p.PID <= 0 || p.SessionID == "" {
 			return nil, fmt.Errorf("pid and session_id are required")
 		}
-		if p.ProcStartTime != 0 {
-			actual, err := discovery.ProcStartTime(p.PID)
-			if err != nil || actual != p.ProcStartTime {
-				return nil, fmt.Errorf("process identity mismatch")
-			}
+		if p.ProcStartTime == 0 {
+			return nil, fmt.Errorf("proc_start_time is required")
+		}
+		if actual, err := discovery.ProcStartTime(p.PID); err != nil || actual != p.ProcStartTime {
+			return nil, fmt.Errorf("process identity mismatch")
 		}
 		if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil {
 			return nil, fmt.Errorf("kill process %d: %w", p.PID, err)
@@ -327,7 +336,7 @@ func (c *Connector) handleRequest(ctx context.Context, req reverse.ReverseMsg) (
 				staleFile := filepath.Join(claudeDir, "sessions", fmt.Sprintf("%d.json", pid))
 				os.Remove(staleFile) //nolint
 			}
-			if reqCWD != "" && sessionID != "" && !strings.ContainsAny(sessionID, "/\\") {
+			if reqCWD != "" && sessionID != "" && isValidSessionID(sessionID) {
 				encodedCWD := strings.ReplaceAll(reqCWD, "/", "-")
 				lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID)
 				os.RemoveAll(lockDir) //nolint
@@ -428,4 +437,10 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 
 func marshalResult(v any) (json.RawMessage, error) {
 	return json.Marshal(v)
+}
+
+var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+func isValidSessionID(s string) bool {
+	return uuidRe.MatchString(s)
 }

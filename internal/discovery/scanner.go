@@ -57,7 +57,9 @@ type scanCandidate struct {
 
 // Scan reads ~/.claude/sessions/*.json and returns live Claude CLI processes
 // that are not managed by naozhi (excluded via excludePIDs).
-func Scan(claudeDir string, excludePIDs map[int]bool) ([]DiscoveredSession, error) {
+// excludeSessionIDs prevents the session-ID upgrade heuristic from assigning
+// a JSONL file that belongs to a naozhi-managed session to a CLI process.
+func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool) ([]DiscoveredSession, error) {
 	sessDir := filepath.Join(claudeDir, "sessions")
 	entries, err := os.ReadDir(sessDir)
 	if err != nil {
@@ -138,8 +140,14 @@ func Scan(claudeDir string, excludePIDs map[int]bool) ([]DiscoveredSession, erro
 			continue
 		}
 
-		// Build set of "claimed" session IDs (original assignments)
+		// Build set of "claimed" session IDs (original assignments).
+		// Pre-claim managed naozhi session IDs so they are never assigned to
+		// a CLI process — the same workspace can have both a CLI and a managed
+		// session writing JSONL files to the same project directory.
 		claimed := map[string]bool{}
+		for id := range excludeSessionIDs {
+			claimed[id] = true
+		}
 		for _, idx := range g.indices {
 			claimed[candidates[idx].sf.SessionID] = true
 		}

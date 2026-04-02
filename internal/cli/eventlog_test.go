@@ -248,13 +248,13 @@ func TestEventLog_BackgroundAgents(t *testing.T) {
 	l.Append(EventEntry{Time: 2000, Type: "result", Summary: "done"})
 
 	agents := l.TurnAgents()
-	if len(agents) != 1 || agents[0] != "team1" {
+	if len(agents) != 1 || agents[0].Name != "team1" {
 		t.Errorf("after result TurnAgents = %v, want [team1]", agents)
 	}
 
 	l.Append(EventEntry{Time: 3000, Type: "user", Summary: "next"})
 	agents = l.TurnAgents()
-	if len(agents) != 1 || agents[0] != "team1" {
+	if len(agents) != 1 || agents[0].Name != "team1" {
 		t.Errorf("after user TurnAgents = %v, want [team1]", agents)
 	}
 
@@ -268,7 +268,7 @@ func TestEventLog_BackgroundAgents(t *testing.T) {
 	// Result resets foreground but keeps background.
 	l.Append(EventEntry{Time: 5000, Type: "result", Summary: "done"})
 	agents = l.TurnAgents()
-	if len(agents) != 1 || agents[0] != "team1" {
+	if len(agents) != 1 || agents[0].Name != "team1" {
 		t.Errorf("after second result TurnAgents = %v, want [team1]", agents)
 	}
 }
@@ -289,8 +289,8 @@ func TestEventLog_TurnAgents(t *testing.T) {
 	if len(agents) != 2 {
 		t.Fatalf("TurnAgents len = %d, want 2", len(agents))
 	}
-	if agents[0] != "Explore" || agents[1] != "go-reviewer" {
-		t.Errorf("TurnAgents = %v, want [Explore go-reviewer]", agents)
+	if agents[0].Name != "Explore" || agents[1].Name != "go-reviewer" {
+		t.Errorf("TurnAgents names = %v, want [Explore go-reviewer]", agents)
 	}
 
 	// Result event resets the turn.
@@ -302,7 +302,7 @@ func TestEventLog_TurnAgents(t *testing.T) {
 	// New turn with one agent.
 	l.Append(EventEntry{Time: 4000, Type: "agent", Subagent: "planner"})
 	agents = l.TurnAgents()
-	if len(agents) != 1 || agents[0] != "planner" {
+	if len(agents) != 1 || agents[0].Name != "planner" {
 		t.Errorf("new turn TurnAgents = %v, want [planner]", agents)
 	}
 
@@ -318,7 +318,7 @@ func TestEventLog_TurnAgents_EmptySubagent(t *testing.T) {
 	l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: ""})
 
 	agents := l.TurnAgents()
-	if len(agents) != 1 || agents[0] != "agent" {
+	if len(agents) != 1 || agents[0].Name != "agent" {
 		t.Errorf("TurnAgents = %v, want [agent]", agents)
 	}
 }
@@ -328,10 +328,10 @@ func TestEventLog_TurnAgents_IsCopy(t *testing.T) {
 	l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
 
 	agents := l.TurnAgents()
-	agents[0] = "modified"
+	agents[0].Name = "modified"
 
 	original := l.TurnAgents()
-	if original[0] != "Explore" {
+	if original[0].Name != "Explore" {
 		t.Error("TurnAgents should return a copy")
 	}
 }

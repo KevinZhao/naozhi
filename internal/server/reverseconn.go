@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"sync"
 	"sync/atomic"
@@ -34,7 +35,7 @@ type ReverseNodeConn struct {
 	reqSeq    atomic.Int64
 
 	subMu sync.Mutex
-	subs  map[string][]*wsClient // session key → local browser clients
+	subs  map[string][]wsEventSink // session key → local browser clients
 
 	statusMu sync.RWMutex
 	status   string // "ok" | "connecting" | "error"
@@ -50,7 +51,7 @@ func newReverseNodeConn(id, displayName string, conn *websocket.Conn) *ReverseNo
 		displayName: displayName,
 		conn:        conn,
 		pending:     make(map[string]chan reverseResult),
-		subs:        make(map[string][]*wsClient),
+		subs:        make(map[string][]wsEventSink),
 		status:      "ok",
 		done:        make(chan struct{}),
 	}
@@ -199,7 +200,7 @@ func (c *ReverseNodeConn) ProxyUpdateConfig(ctx context.Context, projectName str
 	return err
 }
 
-func (c *ReverseNodeConn) Subscribe(cl *wsClient, key string, after int64) {
+func (c *ReverseNodeConn) Subscribe(cl wsEventSink, key string, after int64) {
 	c.subMu.Lock()
 	alreadySub := len(c.subs[key]) > 0
 	c.subs[key] = append(c.subs[key], cl)
@@ -225,7 +226,7 @@ func (c *ReverseNodeConn) Subscribe(cl *wsClient, key string, after int64) {
 	}
 }
 
-func (c *ReverseNodeConn) Unsubscribe(cl *wsClient, key string) {
+func (c *ReverseNodeConn) Unsubscribe(cl wsEventSink, key string) {
 	c.subMu.Lock()
 	clients := c.subs[key]
 	for i, existing := range clients {
@@ -246,7 +247,7 @@ func (c *ReverseNodeConn) Unsubscribe(cl *wsClient, key string) {
 	cl.sendJSON(wsServerMsg{Type: "unsubscribed", Key: key, Node: c.id})
 }
 
-func (c *ReverseNodeConn) RemoveClient(cl *wsClient) {
+func (c *ReverseNodeConn) RemoveClient(cl wsEventSink) {
 	c.subMu.Lock()
 	var emptyKeys []string
 	for key, clients := range c.subs {
@@ -274,6 +275,7 @@ func (c *ReverseNodeConn) readLoop() {
 	for {
 		var msg reverse.ReverseMsg
 		if err := c.conn.ReadJSON(&msg); err != nil {
+			slog.Debug("reverse node disconnected", "node", c.id, "err", err)
 			return
 		}
 
@@ -295,7 +297,7 @@ func (c *ReverseNodeConn) readLoop() {
 
 		case "event":
 			c.subMu.Lock()
-			clients := make([]*wsClient, len(c.subs[msg.Key]))
+			clients := make([]wsEventSink, len(c.subs[msg.Key]))
 			copy(clients, c.subs[msg.Key])
 			c.subMu.Unlock()
 			out := wsServerMsg{Type: "event", Key: msg.Key, Event: msg.Event, Node: c.id}
@@ -305,7 +307,7 @@ func (c *ReverseNodeConn) readLoop() {
 
 		case "session_state":
 			c.subMu.Lock()
-			clients := make([]*wsClient, len(c.subs[msg.Key]))
+			clients := make([]wsEventSink, len(c.subs[msg.Key]))
 			copy(clients, c.subs[msg.Key])
 			c.subMu.Unlock()
 			out := wsServerMsg{Type: "session_state", Key: msg.Key, State: msg.State, Node: c.id}
@@ -316,7 +318,7 @@ func (c *ReverseNodeConn) readLoop() {
 		case "subscribed":
 			// Remote confirmed subscription; notify all waiting clients.
 			c.subMu.Lock()
-			clients := make([]*wsClient, len(c.subs[msg.Key]))
+			clients := make([]wsEventSink, len(c.subs[msg.Key]))
 			copy(clients, c.subs[msg.Key])
 			c.subMu.Unlock()
 			out := wsServerMsg{Type: "subscribed", Key: msg.Key, Node: c.id}
@@ -327,7 +329,7 @@ func (c *ReverseNodeConn) readLoop() {
 		case "subscribe_error":
 			// Remote could not find the session
 			c.subMu.Lock()
-			clients := make([]*wsClient, len(c.subs[msg.Key]))
+			clients := make([]wsEventSink, len(c.subs[msg.Key]))
 			copy(clients, c.subs[msg.Key])
 			delete(c.subs, msg.Key)
 			c.subMu.Unlock()

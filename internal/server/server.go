@@ -16,7 +16,6 @@ import (
 	"sync/atomic"
 	"syscall"
 	"time"
-	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
@@ -54,6 +53,7 @@ type Server struct {
 	projectMgr        *project.Manager
 	workspaceID       string // local workspace identity
 	workspaceName     string
+	allowedRoot       string // /cd is restricted to paths under this directory
 
 	// Watchdog configuration stored for user-facing timeout error messages.
 	noOutputTimeout time.Duration
@@ -110,7 +110,21 @@ func (g *sessionGuard) Release(key string) {
 }
 
 // New creates a new Server.
-func New(addr string, router *session.Router, platforms map[string]platform.Platform, agents map[string]session.AgentOpts, agentCommands map[string]string, scheduler *cron.Scheduler, backend string) *Server {
+// ServerOptions holds optional configuration for a Server.
+// All fields have zero-value defaults (empty string, nil, zero duration = disabled/unset).
+type ServerOptions struct {
+	WorkspaceID       string
+	WorkspaceName     string
+	AllowedRoot       string // restricts /cd to paths under this root
+	NoOutputTimeout   time.Duration
+	TotalTimeout      time.Duration
+	DashboardToken    string // optional bearer token for dashboard API
+	ProjectManager    *project.Manager
+	Nodes             map[string]NodeConn
+	ReverseNodeServer *ReverseNodeServer
+}
+
+func New(addr string, router *session.Router, platforms map[string]platform.Platform, agents map[string]session.AgentOpts, agentCommands map[string]string, scheduler *cron.Scheduler, backend string, opts ServerOptions) *Server {
 	tag := "cc"
 	if backend == "kiro" {
 		tag = "kiro"
@@ -119,87 +133,73 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 	if home, err := os.UserHomeDir(); err == nil {
 		claudeDir = filepath.Join(home, ".claude")
 	}
-	return &Server{
-		addr:          addr,
-		mux:           http.NewServeMux(),
-		platforms:     platforms,
-		router:        router,
-		dedup:         platform.NewDedup(defaultDedupCapacity),
-		sessionGuard:  newSessionGuard(),
-		startedAt:     time.Now(),
-		agents:        agents,
-		agentCommands: agentCommands,
-		scheduler:     scheduler,
-		backendTag:    tag,
-		claudeDir:     claudeDir,
-		nodes:         make(map[string]NodeConn),
-		knownNodes:    make(map[string]string),
-		nodeStatus:    make(map[string]string),
+
+	nodes := opts.Nodes
+	if nodes == nil {
+		nodes = make(map[string]NodeConn)
 	}
-}
-
-// SetWorkspaceIdentity sets the local workspace ID and display name.
-func (s *Server) SetWorkspaceIdentity(id, name string) {
-	s.workspaceID = id
-	s.workspaceName = name
-}
-
-// SetProjectManager sets the project manager for project-based routing.
-func (s *Server) SetProjectManager(mgr *project.Manager) {
-	s.projectMgr = mgr
-}
-
-// SetDashboardToken sets the optional bearer token required for dashboard send API.
-func (s *Server) SetDashboardToken(token string) {
-	s.dashboardToken = token
-}
-
-// SetWatchdogTimeouts stores the configured watchdog durations so they can be
-// shown in user-facing timeout error messages and exposed via /health.
-func (s *Server) SetWatchdogTimeouts(noOutput, total time.Duration) {
-	s.noOutputTimeout = noOutput
-	s.totalTimeout = total
-}
-
-// SetNodes configures remote node clients for multi-node aggregation.
-func (s *Server) SetNodes(nodes map[string]NodeConn) {
-	s.nodes = nodes
+	knownNodes := make(map[string]string)
 	for id, nc := range nodes {
-		s.knownNodes[id] = nc.DisplayName()
+		knownNodes[id] = nc.DisplayName()
 	}
-}
 
-// SetReverseNodeServer wires up a ReverseNodeServer so reverse-connecting nodes
-// are dynamically registered/deregistered in Server.nodes.
-func (s *Server) SetReverseNodeServer(rns *ReverseNodeServer) {
-	s.reverseNodeServer = rns
-	for id, displayName := range rns.AllNodes() {
-		s.knownNodes[id] = displayName
+	s := &Server{
+		addr:            addr,
+		mux:             http.NewServeMux(),
+		platforms:       platforms,
+		router:          router,
+		dedup:           platform.NewDedup(defaultDedupCapacity),
+		sessionGuard:    newSessionGuard(),
+		startedAt:       time.Now(),
+		agents:          agents,
+		agentCommands:   agentCommands,
+		scheduler:       scheduler,
+		backendTag:      tag,
+		claudeDir:       claudeDir,
+		workspaceID:     opts.WorkspaceID,
+		workspaceName:   opts.WorkspaceName,
+		allowedRoot:     opts.AllowedRoot,
+		noOutputTimeout: opts.NoOutputTimeout,
+		totalTimeout:    opts.TotalTimeout,
+		dashboardToken:  opts.DashboardToken,
+		projectMgr:      opts.ProjectManager,
+		nodes:           nodes,
+		knownNodes:      knownNodes,
+		nodeStatus:      make(map[string]string),
 	}
-	rns.onRegister = func(id string, rc *ReverseNodeConn) {
-		s.nodesMu.Lock()
-		s.nodes[id] = rc
-		s.nodesMu.Unlock()
-		go s.refreshNodeCacheFor(id)
-		if s.hub != nil {
-			s.hub.BroadcastSessionsUpdate()
+
+	if opts.ReverseNodeServer != nil {
+		s.reverseNodeServer = opts.ReverseNodeServer
+		for id, displayName := range opts.ReverseNodeServer.AllNodes() {
+			s.knownNodes[id] = displayName
+		}
+		opts.ReverseNodeServer.onRegister = func(id string, rc *ReverseNodeConn) {
+			s.nodesMu.Lock()
+			s.nodes[id] = rc
+			s.nodesMu.Unlock()
+			go s.refreshNodeCacheFor(id)
+			if s.hub != nil {
+				s.hub.BroadcastSessionsUpdate()
+			}
+		}
+		opts.ReverseNodeServer.onDeregister = func(id string) {
+			s.nodesMu.Lock()
+			delete(s.nodes, id)
+			s.nodesMu.Unlock()
+			s.nodeCacheMu.Lock()
+			delete(s.nodeSessions, id)
+			delete(s.nodeProjects, id)
+			delete(s.nodeDiscovered, id)
+			s.nodeStatus[id] = "error"
+			s.nodeCacheMu.Unlock()
+			if s.hub != nil {
+				s.hub.PurgeNodeSubscriptions(id)
+				s.hub.BroadcastSessionsUpdate()
+			}
 		}
 	}
-	rns.onDeregister = func(id string) {
-		s.nodesMu.Lock()
-		delete(s.nodes, id)
-		s.nodesMu.Unlock()
-		s.nodeCacheMu.Lock()
-		delete(s.nodeSessions, id)
-		delete(s.nodeProjects, id)
-		delete(s.nodeDiscovered, id)
-		s.nodeStatus[id] = "error"
-		s.nodeCacheMu.Unlock()
-		if s.hub != nil {
-			s.hub.PurgeNodeSubscriptions(id)
-			s.hub.BroadcastSessionsUpdate()
-		}
-	}
+
+	return s
 }
 
 // Start registers routes and begins serving.
@@ -617,7 +617,7 @@ func (s *Server) sendSplitReply(ctx context.Context, p platform.Platform, chatID
 		maxLen = 4000
 	}
 
-	chunks := splitText(text, maxLen)
+	chunks := platform.SplitText(text, maxLen)
 	total := len(chunks)
 	for i, chunk := range chunks {
 		if total > 1 {
@@ -627,34 +627,6 @@ func (s *Server) sendSplitReply(ctx context.Context, p platform.Platform, chatID
 			slog.Error("reply chunk failed after retries", "chat", chatID, "chunk", i+1, "err", err)
 		}
 	}
-}
-
-func splitText(text string, maxRunes int) []string {
-	if utf8.RuneCountInString(text) <= maxRunes {
-		return []string{text}
-	}
-	var chunks []string
-	for text != "" {
-		// Advance up to maxRunes runes to find the byte boundary.
-		end, count := 0, 0
-		for count < maxRunes && end < len(text) {
-			_, size := utf8.DecodeRuneInString(text[end:])
-			end += size
-			count++
-		}
-		if end == len(text) {
-			// Remaining text fits within maxRunes — last chunk.
-			chunks = append(chunks, text)
-			break
-		}
-		// Prefer splitting at a newline in the second half
-		if idx := strings.LastIndex(text[:end], "\n"); idx > end/2 {
-			end = idx + 1
-		}
-		chunks = append(chunks, text[:end])
-		text = text[end:]
-	}
-	return chunks
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -730,17 +702,10 @@ func systemInfo() map[string]any {
 	return sysInfoVal
 }
 
-// killAndCleanupClaude terminates an external Claude CLI process and removes its
-// stale session/lock files so the session can be cleanly resumed with --resume.
-// Sequence: SIGTERM → wait up to 5 s → SIGKILL (only if PID identity still matches).
-func (s *Server) killAndCleanupClaude(pid int, procStartTime uint64, cwd, sessionID string) error {
-	// TOCTOU guard: reject if the PID was recycled since the discovery scan.
-	if procStartTime != 0 && !verifyProcIdentity(pid, procStartTime) {
-		return fmt.Errorf("process identity changed (PID reused): pid=%d", pid)
-	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
-		return fmt.Errorf("sigterm pid %d: %w", pid, err)
-	}
+// waitAndCleanupClaude waits for pid to exit (up to 5 s), sends SIGKILL if still
+// alive (only when PID identity still matches), then removes stale session files.
+// Must be called after SIGTERM has already been sent.
+func (s *Server) waitAndCleanupClaude(pid int, procStartTime uint64, cwd, sessionID string) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(pid, 0); err != nil {
@@ -763,6 +728,20 @@ func (s *Server) killAndCleanupClaude(pid int, procStartTime uint64, cwd, sessio
 		lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID)
 		_ = os.RemoveAll(lockDir)
 	}
+}
+
+// killAndCleanupClaude terminates an external Claude CLI process and removes its
+// stale session/lock files so the session can be cleanly resumed with --resume.
+// Sequence: SIGTERM → wait up to 5 s → SIGKILL (only if PID identity still matches).
+func (s *Server) killAndCleanupClaude(pid int, procStartTime uint64, cwd, sessionID string) error {
+	// TOCTOU guard: reject if the PID was recycled since the discovery scan.
+	if procStartTime != 0 && !verifyProcIdentity(pid, procStartTime) {
+		return fmt.Errorf("process identity changed (PID reused): pid=%d", pid)
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("sigterm pid %d: %w", pid, err)
+	}
+	s.waitAndCleanupClaude(pid, procStartTime, cwd, sessionID)
 	return nil
 }
 
@@ -785,7 +764,7 @@ func (s *Server) tryAutoTakeover(ctx context.Context, chatKey, key string, opts 
 	if workspace == "" {
 		return false
 	}
-	discovered, err := discovery.Scan(s.claudeDir, s.router.ManagedPIDs())
+	discovered, err := discovery.Scan(s.claudeDir, s.router.ManagedPIDs(), s.router.ManagedSessionIDs())
 	if err != nil || len(discovered) == 0 {
 		return false
 	}
@@ -1234,6 +1213,12 @@ func (s *Server) handleCdCommand(ctx context.Context, msg platform.IncomingMessa
 	info, err := os.Stat(absPath)
 	if err != nil || !info.IsDir() {
 		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "目录不存在: " + absPath})
+		return
+	}
+
+	// Enforce path whitelist
+	if s.allowedRoot != "" && absPath != s.allowedRoot && !strings.HasPrefix(absPath, s.allowedRoot+string(filepath.Separator)) {
+		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "不允许访问该路径，只能在 " + s.allowedRoot + " 下操作"})
 		return
 	}
 

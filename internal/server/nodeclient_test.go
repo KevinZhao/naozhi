@@ -269,9 +269,8 @@ func TestHandleAPISessions_WithRemoteNodes(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.SetNodes(map[string]NodeConn{
-		"macbook": NewNodeClient("macbook", remote.URL, "", "MacBook"),
-	})
+	srv.nodes["macbook"] = NewNodeClient("macbook", remote.URL, "", "MacBook")
+	srv.knownNodes["macbook"] = "MacBook"
 	// Pre-populate cache
 	srv.refreshNodeCache()
 
@@ -318,9 +317,8 @@ func TestHandleAPISessions_RemoteNodeError(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.SetNodes(map[string]NodeConn{
-		"bad-node": NewNodeClient("bad-node", remote.URL, "", "Bad"),
-	})
+	srv.nodes["bad-node"] = NewNodeClient("bad-node", remote.URL, "", "Bad")
+	srv.knownNodes["bad-node"] = "Bad"
 	// Pre-populate cache
 	srv.refreshNodeCache()
 
@@ -497,7 +495,7 @@ func TestHub_RemoteSend(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := newSessionGuard()
 	var nodesMu sync.RWMutex
-	hub := NewHub(router, nil, nil, "", guard, nodes, &nodesMu)
+	hub := NewHub(router, nil, nil, "", guard, nodes, &nodesMu, nil)
 	defer hub.Shutdown()
 
 	client := newTestWSClient()

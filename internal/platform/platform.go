@@ -4,7 +4,9 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // MessageHandler is the callback invoked when a platform receives a message.
@@ -63,6 +65,35 @@ type RunnablePlatform interface {
 	Platform
 	Start(handler MessageHandler) error
 	Stop() error
+}
+
+// SplitText splits text into chunks of at most maxRunes runes, preferring
+// newline boundaries in the second half of each chunk when possible.
+func SplitText(text string, maxRunes int) []string {
+	if utf8.RuneCountInString(text) <= maxRunes {
+		return []string{text}
+	}
+	var chunks []string
+	for text != "" {
+		// Advance up to maxRunes runes to find the byte boundary.
+		end, count := 0, 0
+		for count < maxRunes && end < len(text) {
+			_, size := utf8.DecodeRuneInString(text[end:])
+			end += size
+			count++
+		}
+		if end == len(text) {
+			chunks = append(chunks, text)
+			break
+		}
+		// Prefer splitting at a newline in the second half.
+		if idx := strings.LastIndex(text[:end], "\n"); idx > end/2 {
+			end = idx + 1
+		}
+		chunks = append(chunks, text[:end])
+		text = text[end:]
+	}
+	return chunks
 }
 
 // ReplyWithRetry calls p.Reply up to maxAttempts times with exponential backoff

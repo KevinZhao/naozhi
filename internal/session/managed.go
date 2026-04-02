@@ -29,7 +29,7 @@ type processIface interface {
 	SubscribeEvents() (<-chan struct{}, func())
 	PID() int
 	InjectHistory(entries []cli.EventEntry)
-	TurnAgents() []string
+	TurnAgents() []cli.SubagentInfo
 }
 
 // ManagedSession wraps a claude CLI process with session metadata.
@@ -216,7 +216,7 @@ type SessionSnapshot struct {
 	LastActivity string   `json:"last_activity,omitempty"` // most recent tool/thinking status
 	Project      string   `json:"project,omitempty"`       // project name (filled by server)
 	IsPlanner    bool     `json:"is_planner,omitempty"`    // true for project planner sessions
-	Subagents    []string `json:"subagents,omitempty"`     // active sub-agent types in current turn
+	Subagents    []cli.SubagentInfo `json:"subagents,omitempty"`     // active sub-agent types in current turn
 }
 
 // Snapshot returns a point-in-time view of this session.
@@ -318,13 +318,18 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 		s.process.InjectHistory(entries)
 	}
 	// Update cached snapshot values from injected history (only if not yet set by Send).
+	// Scan from the end to find the last user/tool_use entries efficiently.
 	var prompt, activity string
-	for _, e := range entries {
-		switch e.Type {
-		case "user":
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		if prompt == "" && e.Type == "user" {
 			prompt = e.Summary
-		case "tool_use", "thinking":
+		}
+		if activity == "" && (e.Type == "tool_use" || e.Type == "thinking") {
 			activity = e.Summary
+		}
+		if prompt != "" && activity != "" {
+			break
 		}
 	}
 	if prompt != "" && s.lastPrompt.Load() == nil {

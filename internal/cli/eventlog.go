@@ -11,14 +11,21 @@ const defaultEventLogSize = 500
 
 // EventEntry is a simplified event record for the dashboard.
 type EventEntry struct {
-	Time       int64   `json:"time"`                  // unix ms
-	Type       string  `json:"type"`                  // init, thinking, tool_use, text, result, system
-	Summary    string  `json:"summary,omitempty"`     // brief description
-	Cost       float64 `json:"cost,omitempty"`        // cumulative cost (result events only)
-	Detail     string  `json:"detail,omitempty"`      // fuller content for terminal view
-	Tool       string  `json:"tool,omitempty"`        // tool name for tool_use events
-	Subagent   string  `json:"subagent,omitempty"`    // subagent_type / name / team_name for Agent tool calls
+	Time       int64   `json:"time"`                 // unix ms
+	Type       string  `json:"type"`                 // init, thinking, tool_use, text, result, system
+	Summary    string  `json:"summary,omitempty"`    // brief description
+	Cost       float64 `json:"cost,omitempty"`       // cumulative cost (result events only)
+	Detail     string  `json:"detail,omitempty"`     // fuller content for terminal view
+	Tool       string  `json:"tool,omitempty"`       // tool name for tool_use events
+	Subagent   string  `json:"subagent,omitempty"`   // subagent_type / name / team_name for Agent tool calls
 	Background bool    `json:"background,omitempty"` // true for run_in_background team agents
+}
+
+// SubagentInfo holds display information about an active sub-agent in the current turn.
+type SubagentInfo struct {
+	Name       string `json:"name"`
+	Activity   string `json:"activity,omitempty"`   // task description from agent event
+	Background bool   `json:"background,omitempty"` // true for run_in_background agents
 }
 
 type subscriber struct {
@@ -40,8 +47,8 @@ type EventLog struct {
 	lastActivitySummary atomic.Value // string: most recent "tool_use"/"thinking" entry summary
 
 	// Per-turn sub-agent tracking: reset on "result"/"user" events.
-	turnAgents []string // foreground agents in current turn; protected by mu
-	bgAgents   []string // background (run_in_background) agents; persist for session lifetime; protected by mu
+	turnAgents []SubagentInfo // foreground agents in current turn; protected by mu
+	bgAgents   []SubagentInfo // background (run_in_background) agents; persist for session lifetime; protected by mu
 
 	subMu       sync.Mutex
 	subscribers []*subscriber
@@ -75,10 +82,11 @@ func (l *EventLog) Append(e EventEntry) {
 		if label == "" {
 			label = "agent"
 		}
+		info := SubagentInfo{Name: label, Activity: e.Summary, Background: e.Background}
 		if e.Background {
-			l.bgAgents = append(l.bgAgents, label)
+			l.bgAgents = append(l.bgAgents, info)
 		} else {
-			l.turnAgents = append(l.turnAgents, label)
+			l.turnAgents = append(l.turnAgents, info)
 		}
 	case "result", "user":
 		l.turnAgents = l.turnAgents[:0]
@@ -125,6 +133,20 @@ func (l *EventLog) Subscribe() (<-chan struct{}, func()) {
 		sub.closeOnce.Do(func() { close(sub.ch) })
 	}
 	return sub.ch, unsub
+}
+
+// CloseSubscribers closes all subscriber channels and clears the subscriber list.
+// Called when the process dies so that eventPushLoop goroutines can exit.
+func (l *EventLog) CloseSubscribers() {
+	if l == nil {
+		return
+	}
+	l.subMu.Lock()
+	defer l.subMu.Unlock()
+	for _, sub := range l.subscribers {
+		sub.closeOnce.Do(func() { close(sub.ch) })
+	}
+	l.subscribers = nil
 }
 
 // Entries returns a copy of all entries in chronological order.
@@ -177,14 +199,14 @@ func (l *EventLog) LastActivitySummary() string {
 // TurnAgents returns a copy of all currently active agents: foreground agents spawned
 // in the current turn plus background agents that persist across turns.
 // Returns nil when no agents are active.
-func (l *EventLog) TurnAgents() []string {
+func (l *EventLog) TurnAgents() []SubagentInfo {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	total := len(l.turnAgents) + len(l.bgAgents)
 	if total == 0 {
 		return nil
 	}
-	out := make([]string, total)
+	out := make([]SubagentInfo, total)
 	copy(out, l.turnAgents)
 	copy(out[len(l.turnAgents):], l.bgAgents)
 	return out

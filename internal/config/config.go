@@ -28,6 +28,12 @@ type Config struct {
 	Cron          CronConfig                  `yaml:"cron"`
 	Log           LogConfig                   `yaml:"log"`
 	Projects      ProjectsConfig              `yaml:"projects"`
+
+	// Cached parsed durations (populated once in Load, avoids repeated ParseDuration)
+	cachedTTL             time.Duration `yaml:"-"`
+	cachedNoOutputTimeout time.Duration `yaml:"-"`
+	cachedTotalTimeout    time.Duration `yaml:"-"`
+	cachedExecTimeout     time.Duration `yaml:"-"`
 }
 
 // WorkspaceConfig identifies this naozhi instance.
@@ -160,9 +166,6 @@ func Load(path string) (*Config, error) {
 	if cfg.Server.Addr == "" {
 		cfg.Server.Addr = ":8080"
 	}
-	if cfg.CLI.Model == "" {
-		cfg.CLI.Model = "sonnet"
-	}
 	if cfg.Session.MaxProcs <= 0 {
 		cfg.Session.MaxProcs = 3
 	}
@@ -204,21 +207,19 @@ func Load(path string) (*Config, error) {
 		cfg.Workspace.Name = cfg.Workspace.ID
 	}
 
-	// Validate duration fields
-	if cfg.Session.TTL != "" {
-		if _, err := time.ParseDuration(cfg.Session.TTL); err != nil {
-			return nil, fmt.Errorf("invalid session.ttl %q: %w", cfg.Session.TTL, err)
-		}
+	// Parse and cache durations (validates and caches in one step)
+	var durErr error
+	if cfg.cachedTTL, durErr = parseDurationRequired(cfg.Session.TTL, "session.ttl", 30*time.Minute); durErr != nil {
+		return nil, durErr
 	}
-	if cfg.Session.Watchdog.NoOutputTimeout != "" {
-		if _, err := time.ParseDuration(cfg.Session.Watchdog.NoOutputTimeout); err != nil {
-			return nil, fmt.Errorf("invalid session.watchdog.no_output_timeout %q: %w", cfg.Session.Watchdog.NoOutputTimeout, err)
-		}
+	if cfg.cachedNoOutputTimeout, durErr = parseDurationRequired(cfg.Session.Watchdog.NoOutputTimeout, "session.watchdog.no_output_timeout", 2*time.Minute); durErr != nil {
+		return nil, durErr
 	}
-	if cfg.Session.Watchdog.TotalTimeout != "" {
-		if _, err := time.ParseDuration(cfg.Session.Watchdog.TotalTimeout); err != nil {
-			return nil, fmt.Errorf("invalid session.watchdog.total_timeout %q: %w", cfg.Session.Watchdog.TotalTimeout, err)
-		}
+	if cfg.cachedTotalTimeout, durErr = parseDurationRequired(cfg.Session.Watchdog.TotalTimeout, "session.watchdog.total_timeout", 5*time.Minute); durErr != nil {
+		return nil, durErr
+	}
+	if cfg.cachedExecTimeout, durErr = parseDurationRequired(cfg.Cron.ExecutionTimeout, "cron.execution_timeout", 5*time.Minute); durErr != nil {
+		return nil, durErr
 	}
 
 	// Warn if config values contain unexpanded env var placeholders
@@ -284,55 +285,43 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
-// ParseTTL parses the TTL string into a time.Duration.
+// parseDurationRequired parses s as a positive duration.
+// Returns fallback if s is empty, or an error if s is non-empty but invalid or non-positive.
+func parseDurationRequired(s, name string, fallback time.Duration) (time.Duration, error) {
+	if s == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", name, s, err)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("invalid %s %q: must be positive", name, s)
+	}
+	return d, nil
+}
+
+// ParseTTL returns the TTL duration (cached after Load).
 func (c *Config) ParseTTL() time.Duration {
-	d, err := time.ParseDuration(c.Session.TTL)
-	if err != nil {
-		return 30 * time.Minute
-	}
-	return d
+	return c.cachedTTL
 }
 
-// ParseWatchdog returns the watchdog timeout durations.
+// ParseWatchdog returns the watchdog timeout durations (cached after Load).
 func (c *Config) ParseWatchdog() (noOutputTimeout, totalTimeout time.Duration) {
-	if c.Session.Watchdog.NoOutputTimeout != "" {
-		var err error
-		noOutputTimeout, err = time.ParseDuration(c.Session.Watchdog.NoOutputTimeout)
-		if err != nil {
-			slog.Warn("invalid watchdog.no_output_timeout, using default", "value", c.Session.Watchdog.NoOutputTimeout, "err", err)
-		}
-	}
-	if noOutputTimeout <= 0 {
-		noOutputTimeout = 2 * time.Minute
-	}
-	if c.Session.Watchdog.TotalTimeout != "" {
-		var err error
-		totalTimeout, err = time.ParseDuration(c.Session.Watchdog.TotalTimeout)
-		if err != nil {
-			slog.Warn("invalid watchdog.total_timeout, using default", "value", c.Session.Watchdog.TotalTimeout, "err", err)
-		}
-	}
-	if totalTimeout <= 0 {
-		totalTimeout = 5 * time.Minute
-	}
-	return
+	return c.cachedNoOutputTimeout, c.cachedTotalTimeout
 }
 
-// ParseExecutionTimeout returns the cron execution timeout duration.
+// ParseExecutionTimeout returns the cron execution timeout duration (cached after Load).
 func (c *Config) ParseExecutionTimeout() time.Duration {
-	if c.Cron.ExecutionTimeout == "" {
-		return 5 * time.Minute
-	}
-	d, err := time.ParseDuration(c.Cron.ExecutionTimeout)
-	if err != nil {
-		return 5 * time.Minute
-	}
-	return d
+	return c.cachedExecTimeout
 }
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)
 
 func expandEnvVars(s string) string {
+	if !strings.Contains(s, "${") {
+		return s
+	}
 	return envVarRe.ReplaceAllStringFunc(s, func(match string) string {
 		key := strings.TrimSuffix(strings.TrimPrefix(match, "${"), "}")
 		if val, ok := os.LookupEnv(key); ok {

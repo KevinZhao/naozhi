@@ -19,7 +19,7 @@ type wsRelay struct {
 	mu        sync.Mutex
 	writeMu   sync.Mutex // serializes writes to the WS connection
 	conn      *websocket.Conn
-	subs      map[string][]*wsClient // remote session key -> local clients
+	subs      map[string][]wsEventSink // remote session key -> local clients
 	lastEvent map[string]int64       // key -> last event unix ms (for reconnect)
 	done      chan struct{}
 	closed    bool
@@ -28,7 +28,7 @@ type wsRelay struct {
 func newWSRelay(node *NodeClient) *wsRelay {
 	return &wsRelay{
 		node:      node,
-		subs:      make(map[string][]*wsClient),
+		subs:      make(map[string][]wsEventSink),
 		lastEvent: make(map[string]int64),
 		done:      make(chan struct{}),
 	}
@@ -36,7 +36,7 @@ func newWSRelay(node *NodeClient) *wsRelay {
 
 // Subscribe subscribes a local client to a remote session key.
 // Connects to the remote node on first call.
-func (r *wsRelay) Subscribe(c *wsClient, key string, after int64) {
+func (r *wsRelay) Subscribe(c wsEventSink, key string, after int64) {
 	if err := r.ensureConnected(); err != nil {
 		c.sendJSON(wsServerMsg{Type: "error", Key: key, Node: r.node.ID, Error: "relay connect: " + err.Error()})
 		return
@@ -58,7 +58,7 @@ func (r *wsRelay) Subscribe(c *wsClient, key string, after int64) {
 }
 
 // Unsubscribe removes a local client from a remote session key.
-func (r *wsRelay) Unsubscribe(c *wsClient, key string) {
+func (r *wsRelay) Unsubscribe(c wsEventSink, key string) {
 	r.mu.Lock()
 	clients := r.subs[key]
 	for i, cl := range clients {
@@ -80,7 +80,7 @@ func (r *wsRelay) Unsubscribe(c *wsClient, key string) {
 }
 
 // RemoveClient removes a client from all subscriptions (called on disconnect).
-func (r *wsRelay) RemoveClient(c *wsClient) {
+func (r *wsRelay) RemoveClient(c wsEventSink) {
 	r.mu.Lock()
 	var emptyKeys []string
 	for key, clients := range r.subs {
@@ -113,7 +113,7 @@ func (r *wsRelay) Close() {
 	close(r.done)
 	conn := r.conn
 	r.conn = nil
-	r.subs = make(map[string][]*wsClient)
+	r.subs = make(map[string][]wsEventSink)
 	r.mu.Unlock()
 
 	if conn != nil {
@@ -221,7 +221,7 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 		msg.Node = r.node.ID
 
 		r.mu.Lock()
-		clients := make([]*wsClient, len(r.subs[msg.Key]))
+		clients := make([]wsEventSink, len(r.subs[msg.Key]))
 		copy(clients, r.subs[msg.Key])
 		// Track last event time for reconnect resubscribe
 		if msg.Type == "event" && msg.Event != nil && msg.Event.Time > r.lastEvent[msg.Key] {
@@ -276,7 +276,7 @@ func (r *wsRelay) reconnect() {
 	}
 }
 
-func (r *wsRelay) sendHistoryToClient(c *wsClient, key string, after int64) {
+func (r *wsRelay) sendHistoryToClient(c wsEventSink, key string, after int64) {
 	c.sendJSON(wsServerMsg{Type: "subscribed", Key: key, Node: r.node.ID})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)

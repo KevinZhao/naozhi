@@ -75,7 +75,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 .pulse{animation:pulse 2s ease-in-out infinite}
-.running-indicator{display:inline-block;width:6px;height:6px;border-radius:50%;background:#3fb950;margin-right:4px;animation:pulse 2s ease-in-out infinite}
 
 /* Message input area */
 .input-area{border-top:1px solid #30363d;padding:12px 20px;flex-shrink:0;background:#0d1117}
@@ -124,12 +123,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 /* Toast variants */
 .toast.warning{background:#9e6a03}
 .toast.success{background:#238636}
-
-/* Session state indicator in main header */
-.state-indicator{display:none;width:8px;height:8px;border-radius:50%;margin-right:4px;vertical-align:middle}
-.state-indicator.running,.state-indicator.dead{display:inline-block}
-.state-indicator.running{background:#3fb950;animation:pulse 2s ease-in-out infinite}
-.state-indicator.dead{background:#da3633}
 
 .node-badge{display:inline-block;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:.3px;color:#fff;vertical-align:middle;margin-right:4px}
 .node-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin:0 1px 0 6px;vertical-align:middle}
@@ -184,6 +177,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .md-h1{font-size:16px}.md-h2{font-size:15px}.md-h3{font-size:14px}
 .md-ul{margin:4px 0 4px 16px;padding:0;list-style:disc}
 .md-ul li{margin:2px 0;line-height:1.5}
+.md-ol{margin:4px 0 4px 16px;padding:0;list-style:decimal}
+.md-ol li{margin:2px 0;line-height:1.5}
 .md-link{color:#58a6ff;text-decoration:none}
 .md-link:hover{text-decoration:underline}
 .md-table{width:100%;border-collapse:collapse;margin:6px 0;font-size:14px}
@@ -196,6 +191,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .ts-subagent{display:inline-block;background:#1f2937;color:#a5d6ff;padding:0 5px;border-radius:4px;font-size:11px;font-weight:600;margin-left:2px}
 .sa-badge{display:inline-flex;align-items:center;gap:3px;background:#1a2332;border:1px solid #1f6feb44;color:#58a6ff;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:600;margin-left:4px;white-space:nowrap}
 .sa-badge .sa-icon{font-size:12px}
+.sa-list{border-top:1px solid #21262d;margin-top:6px;padding-top:2px}
+.sa-row{display:flex;align-items:center;gap:5px;padding:3px 8px 3px 20px;font-size:11px;color:#8b949e;cursor:pointer;border-left:2px solid transparent;transition:background .1s}
+.sa-row:hover{background:#161b22;color:#c9d1d9}
+.sa-running-dot{width:5px;height:5px;border-radius:50%;background:#3fb950;flex-shrink:0;animation:pulse 2s ease-in-out infinite}
+.sa-bg-badge{background:#2a1f00;color:#d29922;border-radius:3px;padding:0 3px;font-size:9px;letter-spacing:.3px;flex-shrink:0}
+.sa-name{color:#a5d6ff;font-weight:600;white-space:nowrap;flex-shrink:0}
+.sa-activity{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#6e7681;flex:1;min-width:0}
 
 /* Discovered sessions */
 .discovered-section{border-bottom:1px solid #30363d;padding:8px 0}
@@ -375,7 +377,7 @@ async function fetchSessions() {
             key: key,
             state: 'new',
             platform: parts[0] || 'dashboard',
-            agent: parts[3] || 'general',
+            agent: 'general',
             workspace: sessionWorkspaces[key],
             last_active: 0,
             node: 'local',
@@ -573,13 +575,12 @@ function sessionCardHtml(s) {
   const isPlanner = s.is_planner;
   const cls = (isActive ? 'session-card active' : 'session-card') + (isDead ? ' dead-card' : '') + (isPlanner ? ' planner-card' : '');
   const ago = s.last_active ? timeAgo(s.last_active) : sessionTimeHint(s.key);
-  const ri = s.state === 'running' ? '<span class="running-indicator"></span>' : '';
   const pi = isPlanner ? '<span class="planner-indicator"></span>' : '';
   const deathTag = s.death_reason ? ' <span class="death-tag">' + esc(s.death_reason.replace(/_/g,' ')) + '</span>' : '';
   const ws = s.workspace ? shortPath(s.workspace) : '';
   const prompt = s.last_prompt || '';
   const activity = s.last_activity || '';
-  const agentLabel = isPlanner ? 'planner' : (s.agent || 'general');
+  const agentLabel = isPlanner ? 'planner' : (s.platform === 'dashboard' ? 'general' : (s.agent || 'general'));
   const showPlatform = isPlanner ? 'project' : (s.platform || '');
   const platformLabel = showPlatform.toLowerCase() === 'local' && !isMultiNode() ? '' : showPlatform;
   const nodeBadge = isMultiNode() && sNode !== 'local'
@@ -588,15 +589,26 @@ function sessionCardHtml(s) {
   const saBadge = s.subagents && s.subagents.length > 0
     ? '<span class="sa-badge"><span class="sa-icon">\u{1f916}</span>\u00d7' + s.subagents.length + '</span>'
     : '';
+  const saRows = s.subagents && s.subagents.length > 0
+    ? '<div class="sa-list">' + s.subagents.map(sa =>
+        '<div class="sa-row" onclick="event.stopPropagation();selectSession(\'' + esc(s.key) + '\',\'' + esc(sNode) + '\')" title="' + esc(sa.activity || sa.name) + '">' +
+        '<span class="sa-running-dot"></span>' +
+        (sa.background ? '<span class="sa-bg-badge">bg</span>' : '') +
+        '<span class="sa-name">' + esc(sa.name) + '</span>' +
+        (sa.activity ? '<span class="sa-activity">' + esc(sa.activity) + '</span>' : '') +
+        '</div>'
+      ).join('') + '</div>'
+    : '';
   return '<div class="' + cls + '" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="selectSession(this.dataset.key,this.dataset.node)">' +
     '<button class="btn-dismiss" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove">&times;</button>' +
     '<div class="platform">' + esc(platformLabel) + '</div>' +
-    (agentLabel !== 'general' ? '<div class="agent">' + pi + ri + esc(agentLabel) + '</div>' : '') +
+    (agentLabel !== 'general' ? '<div class="agent">' + pi + esc(agentLabel) + '</div>' : '') +
     (prompt ? '<div class="session-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' : '') +
     (activity ? '<div class="session-activity" title="' + esc(activity) + '">' + esc(activity) + '</div>' : '') +
-    '<div class="meta"><span class="badge ' + s.state + '">' + s.state + '</span>' + deathTag +
+    '<div class="meta">' + '<span class="badge ' + s.state + '">' + s.state + '</span>' + deathTag +
     saBadge + nodeBadge + '<span>' + ago + '</span>' +
     '</div>' +
+    saRows +
     '</div>';
 }
 
@@ -685,7 +697,6 @@ function renderMainShell() {
       '<div class="main-header-content">' +
       '<h2>' + esc(displayName) + '</h2>' +
       '<div class="detail">' +
-        '<span class="state-indicator ' + (s.state||'') + '"></span>' +
         '<span class="badge ' + (s.state||'') + '">' + (s.state||'?') + '</span>' +
         deathInfo +
         nodeDisplay +
@@ -710,6 +721,7 @@ function renderMainShell() {
   ia.addEventListener('dragover', e => { e.preventDefault(); ia.style.borderColor='#58a6ff'; });
   ia.addEventListener('dragleave', () => { ia.style.borderColor=''; });
   ia.addEventListener('drop', e => { e.preventDefault(); ia.style.borderColor=''; handleFiles(e.dataTransfer.files); });
+  // Dead/suspended sessions with a session_id can be resumed by sending a new message
   // Double-tap events feed → focus input (mobile)
   let lastTapMs = 0;
   document.getElementById('events-scroll').addEventListener('touchend', e => {
@@ -904,7 +916,9 @@ function interruptSession() {
   if (!sd || sd.state !== 'running') return;
   if (wsm.isConnected()) {
     wsm.send({ type: 'interrupt', key: selectedKey, id: 'int' + Date.now() });
-    showToast('interrupt sent');
+    showToastVariant('interrupt sent', 'warning');
+  } else {
+    showToastVariant('interrupt requires WebSocket', 'warning');
   }
 }
 
@@ -946,7 +960,7 @@ function showAuthModal() {
   overlay.innerHTML =
     '<div class="modal">' +
       '<h3>Dashboard API Token</h3>' +
-      '<input id="token-input" type="password" placeholder="enter dashboard token...">' +
+      '<input id="token-input" type="password" placeholder="enter dashboard token..." onkeydown="if(event.key===\'Enter\'){saveToken()}">' +
       '<div class="modal-btns">' +
         '<button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
         '<button class="primary" onclick="saveToken()">save</button>' +
@@ -1042,12 +1056,12 @@ function createSessionInProject(projectPath, projectName) {
 function showToast(msg) {
   const el = document.getElementById('toast');
   el.textContent = msg;
-  el.classList.add('show');
-  setTimeout(() => el.classList.remove('show'), 3000);
+  el.className = 'toast show';
+  setTimeout(() => { el.className = 'toast'; }, 3000);
 }
 
 function copyText(text) {
-  navigator.clipboard.writeText(text).then(() => showToast('copied'));
+  navigator.clipboard.writeText(text).then(() => showToastVariant('copied', 'success'));
 }
 
 function copyCodeBlock(btn) {
@@ -1132,30 +1146,32 @@ function renderMd(s) {
     // Process line by line for block elements
     const lines = part.split('\n');
     let html = '';
-    let inList = false;
+    let inList = '';
     for (let i = 0; i < lines.length; i++) {
       let line = lines[i];
       // Headings
       const hm = line.match(/^(#{1,4})\s+(.+)$/);
       if (hm) {
-        if (inList) { html += '</ul>'; inList = false; }
+        if (inList) { html += '</' + inList + '>'; inList = ''; }
         const level = hm[1].length;
         html += '<strong class="md-h' + level + '">' + inlineMd(hm[2]) + '</strong>\n';
         continue;
       }
       // Unordered list
       if (/^\s*[-*]\s+/.test(line)) {
-        if (!inList) { html += '<ul class="md-ul">'; inList = true; }
+        if (inList === 'ol') { html += '</ol>'; inList = ''; }
+        if (!inList) { html += '<ul class="md-ul">'; inList = 'ul'; }
         html += '<li>' + inlineMd(line.replace(/^\s*[-*]\s+/, '')) + '</li>';
         continue;
       }
       // Ordered list
       if (/^\s*\d+\.\s+/.test(line)) {
-        if (!inList) { html += '<ul class="md-ul">'; inList = true; }
+        if (inList === 'ul') { html += '</ul>'; inList = ''; }
+        if (!inList) { html += '<ol class="md-ol">'; inList = 'ol'; }
         html += '<li>' + inlineMd(line.replace(/^\s*\d+\.\s+/, '')) + '</li>';
         continue;
       }
-      if (inList) { html += '</ul>'; inList = false; }
+      if (inList) { html += '</' + inList + '>'; inList = ''; }
       if (line === '') {
         html += '<div class="md-blank"></div>';
         continue;
@@ -1168,7 +1184,7 @@ function renderMd(s) {
       }
       html += inlineMd(line) + '<br>';
     }
-    if (inList) html += '</ul>';
+    if (inList) html += '</' + inList + '>';
     return html;
   }).join('');
 }
@@ -1531,8 +1547,8 @@ function updateMainState(state, reason) {
   if (!header) return;
   const badge = header.querySelector('.badge');
   if (badge) { badge.className = 'badge ' + state; badge.textContent = state; }
-  const indicator = header.querySelector('.state-indicator');
-  if (indicator) { indicator.className = 'state-indicator ' + state; }
+  const ia = document.getElementById('input-area');
+  if (ia) ia.classList.toggle('disabled', false);
   if (reason) {
     let dt = header.querySelector('.death-tag');
     if (!dt) {
@@ -1585,7 +1601,6 @@ function discoveredInlineHtml(s) {
   const ago = timeAgo(s.last_active || s.started_at);
   const pst = s.proc_start_time || 0;
   const state = s.state || 'ready';
-  const ri = state === 'running' ? '<span class="running-indicator"></span>' : '';
   const prompt = s.last_prompt || s.summary || '';
   const node = s.node || '';
   return '<div class="session-card cli-card" data-pid="' + s.pid + '" data-session-id="' + esc(s.session_id) + '" data-cwd="' + esc(cwd) + '" data-pst="' + pst + '" data-node="' + esc(node) + '" onclick="handleDiscoveredClick(this)">' +
@@ -1593,7 +1608,6 @@ function discoveredInlineHtml(s) {
     (prompt ? '<div class="session-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' : '') +
     '<div class="meta">' +
       '<span class="badge ' + state + '">' + state + '</span>' +
-      '<span>PID ' + s.pid + '</span>' +
       '<span>' + ago + '</span>' +
     '</div>' +
   '</div>';
@@ -1625,7 +1639,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node) {
       '<button class="btn-mobile-back" onclick="mobileBack()" title="back">&#8592;</button>' +
       '<div class="main-header-content">' +
         '<h2>' + esc(base) + ' <span class="badge" style="background:#9e6a03;color:#fff">external</span></h2>' +
-        '<div class="detail"><span>PID ' + pid + '</span></div>' +
+        '<div class="detail"></div>' +
         '<div class="workspace-path" data-copy="' + esc(cwd) + '" onclick="copyText(this.dataset.copy)" title="click to copy">' + esc(cwd) + '</div>' +
       '</div>' +
     '</div>' +
@@ -1636,7 +1650,10 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node) {
 
   try {
     const nodeParam = node ? '&node=' + encodeURIComponent(node) : '';
-    const r = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId) + nodeParam);
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId) + nodeParam, { headers });
     if (!r.ok) { showToast('preview failed'); return; }
     const events = await r.json();
     const el = document.getElementById('events-scroll');
@@ -1652,7 +1669,10 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node) {
     const capturedSid = sessionId;
     previewTimer = setInterval(async () => {
       try {
-        const r2 = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(capturedSid) + nodeParam);
+        const headers2 = {};
+        const t2 = getToken();
+        if (t2) headers2['Authorization'] = 'Bearer ' + t2;
+        const r2 = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(capturedSid) + nodeParam, { headers: headers2 });
         if (!r2.ok) return;
         const all = await r2.json();
         if (all.length <= previewEventCount) return;
@@ -1676,11 +1696,10 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node) {
 }
 
 function handleTakeoverClick(el) {
-  takeover(Number(el.dataset.pid), el.dataset.sessionId, el.dataset.cwd, Number(el.dataset.pst));
+  takeover(el, Number(el.dataset.pid), el.dataset.sessionId, el.dataset.cwd, Number(el.dataset.pst));
 }
 
-async function takeover(pid, sessionId, cwd, procStartTime, node) {
-  const btn = event.target;
+async function takeover(btn, pid, sessionId, cwd, procStartTime, node) {
   btn.classList.add('taking');
   btn.textContent = 'taking over...';
   try {

@@ -9,13 +9,14 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // ACPProtocol implements Protocol for the Agent Client Protocol (JSON-RPC 2.0).
 type ACPProtocol struct {
 	mu        sync.Mutex
-	nextID    int
+	nextID    atomic.Int32
 	sessionID string
 	// textBuf accumulates assistant_message_chunk text during a turn
 	textBuf strings.Builder
@@ -241,11 +242,7 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 }
 
 func (p *ACPProtocol) allocID() int {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	id := p.nextID
-	p.nextID++
-	return id
+	return int(p.nextID.Add(1) - 1)
 }
 
 func (p *ACPProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) error {
