@@ -132,8 +132,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .state-indicator.dead{background:#da3633}
 
 .node-badge{display:inline-block;padding:1px 5px;border-radius:4px;font-size:10px;font-weight:600;letter-spacing:.3px;color:#fff;vertical-align:middle;margin-right:4px}
-.node-status{font-size:13px;color:#8b949e;margin-top:6px;line-height:1.8}
-.node-status .node-name{margin-right:2px}
 .node-dot{display:inline-block;width:6px;height:6px;border-radius:50%;margin:0 1px 0 6px;vertical-align:middle}
 .node-dot:first-child{margin-left:0}
 .node-dot.ok{background:#3fb950}
@@ -148,6 +146,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .ng-name{flex:1;color:#e6edf3}
 .ng-count{color:#8b949e;font-weight:400;font-size:11px}
 .ng-running{color:#3fb950;font-weight:400;font-size:11px}
+.ng-sys{color:#6e7681;font-weight:400;font-size:10px;margin-left:auto;padding-right:4px;white-space:nowrap}
 .new-session-btn{display:block;width:calc(100% - 32px);margin:8px 16px;padding:8px;border:1px dashed #30363d;border-radius:8px;background:transparent;color:#8b949e;font-size:14px;cursor:pointer;text-align:center;transition:all .15s}
 .new-session-btn:hover{border-color:#58a6ff;color:#58a6ff;background:#161b22}
 .ng-new-btn{background:none;border:none;color:#484f58;font-size:14px;cursor:pointer;padding:2px 6px;margin-left:4px;border-radius:4px;line-height:1;transition:all .15s;flex-shrink:0}
@@ -172,12 +171,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .session-card.cli-card{border-left-color:#4a3000}
 .session-card.cli-card.active{border-left-color:#d29922}
 
-/* Workspace info bar */
-.ws-info-bar{padding:8px 16px;border-bottom:1px solid #30363d;background:#161b22;display:flex;align-items:center;gap:8px}
-.ws-info-bar .ws-dot-lg{width:8px;height:8px;border-radius:50%;background:#3fb950;flex-shrink:0}
-.ws-info-bar .ws-name{font-size:13px;color:#f0f6fc;font-weight:600}
-.ws-info-bar .ws-sys{font-size:11px;color:#8b949e;margin-left:auto;white-space:nowrap}
-
 /* Markdown rendering */
 .md-pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 12px;margin:6px 0;overflow-x:auto;font-size:13px;line-height:1.5}
 .md-pre code{color:#e6edf3;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;white-space:pre}
@@ -201,6 +194,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .mermaid-wrap{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px;margin:6px 0;overflow-x:auto;text-align:center}
 .mermaid-wrap svg{max-width:100%;height:auto}
 .ts-subagent{display:inline-block;background:#1f2937;color:#a5d6ff;padding:0 5px;border-radius:4px;font-size:11px;font-weight:600;margin-left:2px}
+.sa-badge{display:inline-flex;align-items:center;gap:3px;background:#1a2332;border:1px solid #1f6feb44;color:#58a6ff;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:600;margin-left:4px;white-space:nowrap}
+.sa-badge .sa-icon{font-size:12px}
 
 /* Discovered sessions */
 .discovered-section{border-bottom:1px solid #30363d;padding:8px 0}
@@ -268,11 +263,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
       <div class="ws-badge" id="ws-status"><span class="ws-dot gray"></span>WS Off</div>
       <button class="new-session-btn" onclick="createNewSession()">+ new session</button>
     </div>
-    <div class="ws-info-bar" id="ws-info-bar" style="display:none">
-      <span class="ws-dot-lg"></span>
-      <span class="ws-name" id="ws-info-name"></span>
-      <span class="ws-sys" id="ws-info-sys"></span>
-    </div>
     <div class="discovered-section" id="discovered-section" style="display:none">
       <div class="discovered-header">
         <span>Discovered Processes</span>
@@ -308,6 +298,7 @@ let sessionCounter = 0;
 let availableAgents = ['general'];
 let defaultWorkspace = '';
 let projectsData = []; // [{name, path, node}] from API
+let localWsInfo = { name: '', sys: '' };
 const sessionWorkspaces = {};
 
 function getToken() { return localStorage.getItem('naozhi_dashboard_token') || ''; }
@@ -405,22 +396,15 @@ function renderSidebar(data) {
   document.getElementById('stats').textContent =
     st.total + ' sessions \u00b7 ' + st.running + ' running \u00b7 ' + st.ready + '/' + (st.max_procs || '?') + ' slots \u00b7 ' + st.uptime;
 
-  // Update workspace info bar
-  const wsBar = document.getElementById('ws-info-bar');
+  // Update workspace info for node-group header
   const wsName = st.workspace_name || st.workspace_id || '';
-  if (wsName) {
-    wsBar.style.display = '';
-    document.getElementById('ws-info-name').textContent = wsName;
-    const sys = st.system;
-    if (sys) {
-      let memStr = sys.memory_mb > 0 ? (sys.memory_mb >= 1024 ? (sys.memory_mb / 1024).toFixed(1) + 'G' : sys.memory_mb + 'M') : '';
-      document.getElementById('ws-info-sys').textContent =
-        sys.os + '/' + sys.arch + ' \u00b7 ' + sys.cpus + 'C' + (memStr ? '/' + memStr : '');
-    }
+  let sysStr = '';
+  const sys = st.system;
+  if (sys) {
+    let memStr = sys.memory_mb > 0 ? (sys.memory_mb >= 1024 ? (sys.memory_mb / 1024).toFixed(1) + 'G' : sys.memory_mb + 'M') : '';
+    sysStr = sys.os + '/' + sys.arch + ' \u00b7 ' + sys.cpus + 'C' + (memStr ? '/' + memStr : '');
   }
-
-  const nodeEl = document.getElementById('node-status');
-  if (nodeEl) nodeEl.remove();
+  localWsInfo = { name: wsName, sys: sysStr };
 
   const list = document.getElementById('session-list');
   const sessions = data.sessions || [];
@@ -431,24 +415,7 @@ function renderSidebar(data) {
     return d !== 0 ? d : b.last_active - a.last_active;
   });
 
-  if (sessions.length === 0 && discoveredItems.length === 0 && Object.keys(sessionWorkspaces).length === 0 && projectsData.length === 0) {
-    list.innerHTML = '<div class="no-sessions">no sessions</div>';
-    return;
-  }
-
-  const hasProjects = projectsData.length > 0;
-  const multiWs = isMultiNode();
-  const hasRemoteSessions = multiWs && sessions.some(s => s.node && s.node !== 'local');
-
-  if (hasRemoteSessions && hasProjects) {
-    list.innerHTML = renderThreeLevel(sessions, discoveredItems);
-  } else if (hasProjects) {
-    list.innerHTML = renderTwoLevel(sessions, discoveredItems);
-  } else if (!multiWs) {
-    list.innerHTML = sessions.map(sessionCardHtml).join('');
-  } else {
-    list.innerHTML = renderNodeGroups(sessions);
-  }
+  list.innerHTML = renderUnified(sessions, discoveredItems);
 }
 
 // Match a workspace path to a project from projectsData (longest prefix wins)
@@ -520,16 +487,70 @@ function renderProjectGroupHtml(pname, grp, collapsed) {
     '</details>';
 }
 
-// Single workspace: project → session
-function renderTwoLevel(sessions, discovered) {
-  const { projectGroups, unmatched } = buildProjectGroups(sessions, discovered);
+// Unified workspace-first renderer: workspace → [project →] session
+function renderUnified(sessions, discovered) {
+  const nodeItems = {};
+  sessions.forEach(s => {
+    const n = s.node || 'local';
+    if (!nodeItems[n]) nodeItems[n] = { sessions: [], discovered: [] };
+    nodeItems[n].sessions.push(s);
+  });
+  discovered.forEach(d => {
+    const n = d.node || 'local';
+    if (!nodeItems[n]) nodeItems[n] = { sessions: [], discovered: [] };
+    nodeItems[n].discovered.push(d);
+  });
+
+  const allRemote = [...new Set([
+    ...Object.keys(nodeItems).filter(n => n !== 'local'),
+    ...Object.keys(nodesData).filter(n => n !== 'local'),
+  ])].sort();
+  const nodeIds = ['local', ...allRemote];
   const collapsed = getCollapsedNodes();
-  let html = Object.keys(projectGroups).sort()
-    .map(pname => renderProjectGroupHtml(pname, projectGroups[pname], collapsed)).join('');
-  if (unmatched.managed.length > 0 || unmatched.discovered.length > 0) {
-    html += renderUnmatchedHtml(unmatched, collapsed);
-  }
-  return html;
+
+  return nodeIds.map(nid => {
+    const ni = nodeItems[nid] || { sessions: [], discovered: [] };
+    const nd = nodesData[nid] || {};
+    const dotCls = nd.status === 'ok' || nid === 'local' ? 'ok' : 'error';
+    const displayName = nid === 'local'
+      ? (localWsInfo.name || 'Local')
+      : (nd.display_name || nid);
+    const nodeProjects = projectsData.filter(p => (p.node || 'local') === nid);
+    const totalCount = ni.sessions.length + ni.discovered.length;
+    const running = ni.sessions.filter(s => s.state === 'running' || s.state === 'spawning').length;
+    const countHtml = running > 0
+      ? '<span class="ng-running">' + running + ' running</span>'
+      : '<span class="ng-count" title="' + totalCount + ' sessions">' + totalCount + '</span>';
+    const sysHint = nid === 'local' && localWsInfo.sys
+      ? '<span class="ng-sys">' + esc(localWsInfo.sys) + '</span>'
+      : '';
+
+    let innerHtml;
+    if (nodeProjects.length === 0) {
+      innerHtml = ni.sessions.map(sessionCardHtml).join('') +
+                  ni.discovered.map(discoveredInlineHtml).join('');
+    } else {
+      const { projectGroups, unmatched } = buildProjectGroups(ni.sessions, ni.discovered, nodeProjects);
+      innerHtml = Object.keys(projectGroups).sort()
+        .map(pname => renderProjectGroupHtml(pname, projectGroups[pname], collapsed)).join('');
+      if (unmatched.managed.length > 0 || unmatched.discovered.length > 0) {
+        innerHtml += renderUnmatchedHtml(unmatched, collapsed);
+      }
+    }
+
+    if (!innerHtml) innerHtml = '<div class="no-sessions" style="padding:6px 16px">no sessions</div>';
+
+    return '<details class="node-group"' + (collapsed.has(nid) ? '' : ' open') +
+      ' data-node="' + esc(nid) + '" ontoggle="saveNodeToggle(this)">' +
+      '<summary class="node-group-header">' +
+      '<span class="ng-arrow">&#9658;</span>' +
+      '<span class="node-dot ' + dotCls + '"></span>' +
+      '<span class="ng-name">' + esc(displayName) + '</span>' +
+      sysHint +
+      countHtml + '</summary>' +
+      innerHtml +
+      '</details>';
+  }).join('');
 }
 
 function renderUnmatchedHtml(grp, collapsed) {
@@ -543,99 +564,6 @@ function renderUnmatchedHtml(grp, collapsed) {
     grp.managed.map(sessionCardHtml).join('') +
     grp.discovered.map(discoveredInlineHtml).join('') +
     '</details>';
-}
-
-// Multi-workspace: workspace → project → session
-function renderThreeLevel(sessions, discovered) {
-  // Group everything by node first
-  const nodeItems = {};  // nodeID -> { sessions: [], discovered: [] }
-  sessions.forEach(s => {
-    const n = s.node || 'local';
-    if (!nodeItems[n]) nodeItems[n] = { sessions: [], discovered: [] };
-    nodeItems[n].sessions.push(s);
-  });
-  discovered.forEach(d => {
-    const n = d.node || 'local';
-    if (!nodeItems[n]) nodeItems[n] = { sessions: [], discovered: [] };
-    nodeItems[n].discovered.push(d);
-  });
-
-  const nodeIds = ['local', ...Object.keys(nodeItems).filter(n => n !== 'local').sort()];
-  const collapsed = getCollapsedNodes();
-
-  let html = nodeIds.map(nid => {
-    const ni = nodeItems[nid] || { sessions: [], discovered: [] };
-    const nd = nodesData[nid] || {};
-    const dotCls = nd.status === 'ok' || nid === 'local' ? 'ok' : 'error';
-    const displayName = nid === 'local'
-      ? (document.getElementById('ws-info-name').textContent || 'Local')
-      : (nd.display_name || nid);
-    const nodeProjects = projectsData.filter(p => (p.node || 'local') === nid);
-    const { projectGroups, unmatched } = buildProjectGroups(ni.sessions, ni.discovered, nodeProjects);
-    const totalCount = ni.sessions.length + ni.discovered.length;
-
-    let innerHtml = Object.keys(projectGroups).sort()
-      .map(pname => renderProjectGroupHtml(pname, projectGroups[pname], collapsed)).join('');
-    if (unmatched.managed.length > 0 || unmatched.discovered.length > 0) {
-      innerHtml += renderUnmatchedHtml(unmatched, collapsed);
-    }
-
-    return '<details class="node-group"' + (collapsed.has(nid) ? '' : ' open') +
-      ' data-node="' + esc(nid) + '" ontoggle="saveNodeToggle(this)">' +
-      '<summary class="node-group-header">' +
-      '<span class="ng-arrow">&#9658;</span>' +
-      '<span class="node-dot ' + dotCls + '"></span>' +
-      '<span class="ng-name">' + esc(displayName) + '</span>' +
-      '<span class="ng-count" title="' + totalCount + ' sessions">' + totalCount + '</span></summary>' +
-      innerHtml +
-      '</details>';
-  }).join('');
-  return html;
-}
-
-// Ensures the currently selected session card is visible even if it falls outside
-// all node groups (e.g. a pending session whose node isn't in the sessions list).
-function renderSelectedOrphanCard(sessions) {
-  if (!selectedKey) return '';
-  const inList = sessions.some(s => s.key === selectedKey && (s.node || 'local') === (selectedNode || 'local'));
-  if (inList) return '';
-  const s = sessionsData[sid(selectedKey, selectedNode || 'local')];
-  if (!s) return '';
-  return sessionCardHtml(s);
-}
-
-// Legacy node-only groups (no projects configured)
-function renderNodeGroups(sessions) {
-  const groups = {};
-  sessions.forEach(s => {
-    const n = s.node || 'local';
-    if (!groups[n]) groups[n] = [];
-    groups[n].push(s);
-  });
-  if (!groups['local']) groups['local'] = [];
-  const nodeIds = ['local', ...Object.keys(groups).filter(n => n !== 'local')];
-  const collapsed = getCollapsedNodes();
-  return nodeIds.map(nid => {
-    const nd = nodesData[nid] || {};
-    const dotCls = nd.status === 'ok' || nid === 'local' ? 'ok' : 'error';
-    const displayName = nid === 'local'
-      ? (document.getElementById('ws-info-name').textContent || 'Local')
-      : (nd.display_name || nid);
-    const grp = groups[nid];
-    const running = grp.filter(s => s.state === 'running' || s.state === 'spawning').length;
-    const countHtml = running > 0
-      ? '<span class="ng-running">' + running + ' running</span>'
-      : '<span class="ng-count" title="' + grp.length + ' sessions">' + grp.length + '</span>';
-    return '<details class="node-group"' + (collapsed.has(nid) ? '' : ' open') +
-      ' data-node="' + esc(nid) + '" ontoggle="saveNodeToggle(this)">' +
-      '<summary class="node-group-header">' +
-      '<span class="ng-arrow">&#9658;</span>' +
-      '<span class="node-dot ' + dotCls + '"></span>' +
-      '<span class="ng-name">' + esc(displayName) + '</span>' +
-      countHtml + '</summary>' +
-      grp.map(sessionCardHtml).join('') +
-      '</details>';
-  }).join('');
 }
 
 function sessionCardHtml(s) {
@@ -657,6 +585,9 @@ function sessionCardHtml(s) {
   const nodeBadge = isMultiNode() && sNode !== 'local'
     ? '<span class="node-badge" style="background:' + nodeColor(sNode) + '">' + esc(sNode) + '</span>'
     : '';
+  const saBadge = s.subagents && s.subagents.length > 0
+    ? '<span class="sa-badge"><span class="sa-icon">\u{1f916}</span>\u00d7' + s.subagents.length + '</span>'
+    : '';
   return '<div class="' + cls + '" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="selectSession(this.dataset.key,this.dataset.node)">' +
     '<button class="btn-dismiss" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove">&times;</button>' +
     '<div class="platform">' + esc(platformLabel) + '</div>' +
@@ -664,7 +595,7 @@ function sessionCardHtml(s) {
     (prompt ? '<div class="session-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' : '') +
     (activity ? '<div class="session-activity" title="' + esc(activity) + '">' + esc(activity) + '</div>' : '') +
     '<div class="meta"><span class="badge ' + s.state + '">' + s.state + '</span>' + deathTag +
-    nodeBadge + '<span>' + ago + '</span>' +
+    saBadge + nodeBadge + '<span>' + ago + '</span>' +
     '</div>' +
     '</div>';
 }
@@ -1647,10 +1578,6 @@ async function scanDiscovered() {
   } catch (e) {
     showToast('scan error: ' + e.message);
   }
-}
-
-function renderDiscovered(sessions) {
-  // Legacy renderer — no longer used, discovered items merged into sidebar
 }
 
 function discoveredInlineHtml(s) {
