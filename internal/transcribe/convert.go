@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
-	"syscall"
 )
 
 // ErrFFmpegNotFound is returned when ffmpeg is not installed.
@@ -28,7 +27,7 @@ func ConvertToOgg(ctx context.Context, data []byte) ([]byte, error) {
 		"-f", "ogg", // OGG container
 		"pipe:1", // write to stdout
 	)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGTERM}
+	setSysProcAttr(cmd)
 	cmd.Stdin = bytes.NewReader(data)
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
