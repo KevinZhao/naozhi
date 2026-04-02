@@ -27,6 +27,7 @@ import (
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/server"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/transcribe"
 )
 
 var version = "dev"
@@ -112,6 +113,19 @@ func main() {
 	// Register platforms
 	platforms := make(map[string]platform.Platform)
 	if cfg.Platforms.Feishu != nil {
+		// Initialize transcriber if configured
+		var stt transcribe.Service
+		if cfg.Transcribe != nil && cfg.Transcribe.Enabled {
+			stt, err = transcribe.New(ctx, transcribe.Config{
+				Region:       cfg.Transcribe.Region,
+				LanguageCode: cfg.Transcribe.Language,
+			})
+			if err != nil {
+				slog.Error("init transcriber", "err", err)
+				os.Exit(1)
+			}
+			slog.Info("transcribe enabled", "region", cfg.Transcribe.Region, "language", cfg.Transcribe.Language)
+		}
 		f := feishu.New(feishu.Config{
 			AppID:             cfg.Platforms.Feishu.AppID,
 			AppSecret:         cfg.Platforms.Feishu.AppSecret,
@@ -119,7 +133,7 @@ func main() {
 			VerificationToken: cfg.Platforms.Feishu.VerificationToken,
 			EncryptKey:        cfg.Platforms.Feishu.EncryptKey,
 			MaxReplyLen:       cfg.Platforms.Feishu.MaxReplyLength,
-		})
+		}, stt)
 		platforms["feishu"] = f
 	}
 	if cfg.Platforms.Slack != nil {

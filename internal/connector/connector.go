@@ -5,10 +5,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/reverse"
 	"github.com/naozhi/naozhi/internal/session"
@@ -30,13 +35,18 @@ type Connector struct {
 	cfg          *UpstreamConfig
 	router       *session.Router
 	projMgr      *project.Manager // may be nil
+	claudeDir    string
 	discoverFunc func() (json.RawMessage, error)
 	previewFunc  func(sessionID string) (json.RawMessage, error)
 }
 
 // New creates a Connector. projMgr may be nil if projects are not configured.
 func New(cfg *UpstreamConfig, router *session.Router, projMgr *project.Manager) *Connector {
-	return &Connector{cfg: cfg, router: router, projMgr: projMgr}
+	claudeDir := ""
+	if home, err := os.UserHomeDir(); err == nil {
+		claudeDir = filepath.Join(home, ".claude")
+	}
+	return &Connector{cfg: cfg, router: router, projMgr: projMgr, claudeDir: claudeDir}
 }
 
 // SetDiscoverFunc sets a callback that returns discovered sessions as JSON.
@@ -54,12 +64,17 @@ func (c *Connector) SetPreviewFunc(fn func(sessionID string) (json.RawMessage, e
 func (c *Connector) Run(ctx context.Context) {
 	backoff := time.Second
 	for {
-		err := c.runOnce(ctx)
+		connected, err := c.runOnce(ctx)
 		if ctx.Err() != nil {
 			return
 		}
 		if err != nil {
 			slog.Warn("connector disconnected", "url", c.cfg.URL, "err", err)
+		}
+		// Reset backoff after a successful session so reconnect after
+		// sleep/restart is fast (1s) rather than up to 30s.
+		if connected {
+			backoff = time.Second
 		}
 		timer := time.NewTimer(backoff)
 		select {
@@ -72,11 +87,11 @@ func (c *Connector) Run(ctx context.Context) {
 	}
 }
 
-func (c *Connector) runOnce(ctx context.Context) error {
+func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
-	conn, _, err := dialer.DialContext(ctx, c.cfg.URL, nil)
-	if err != nil {
-		return fmt.Errorf("dial: %w", err)
+	conn, _, dialErr := dialer.DialContext(ctx, c.cfg.URL, nil)
+	if dialErr != nil {
+		return false, fmt.Errorf("dial: %w", dialErr)
 	}
 	defer conn.Close()
 
@@ -99,22 +114,22 @@ func (c *Connector) runOnce(ctx context.Context) error {
 		DisplayName: c.cfg.DisplayName,
 	}
 	if err := conn.WriteJSON(reg); err != nil {
-		return fmt.Errorf("register write: %w", err)
+		return false, fmt.Errorf("register write: %w", err)
 	}
 
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	var ack reverse.ReverseMsg
 	if err := conn.ReadJSON(&ack); err != nil {
-		return fmt.Errorf("register ack read: %w", err)
+		return false, fmt.Errorf("register ack read: %w", err)
 	}
 	conn.SetReadDeadline(time.Time{})
 
 	if ack.Type != "registered" {
-		return fmt.Errorf("register failed: %s", ack.Error)
+		return false, fmt.Errorf("register failed: %s", ack.Error)
 	}
 	slog.Info("connected to primary", "url", c.cfg.URL, "node_id", c.cfg.NodeID)
 
-	return c.handleConn(ctx, conn)
+	return true, c.handleConn(ctx, conn)
 }
 
 func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error {
@@ -256,6 +271,114 @@ func (c *Connector) handleRequest(ctx context.Context, req reverse.ReverseMsg) (
 			}
 		}()
 		return marshalResult(map[string]string{"status": "accepted"})
+
+	case "takeover":
+		var p struct {
+			PID           int    `json:"pid"`
+			SessionID     string `json:"session_id"`
+			CWD           string `json:"cwd"`
+			ProcStartTime uint64 `json:"proc_start_time"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("takeover params: %w", err)
+		}
+		if p.PID <= 0 || p.SessionID == "" {
+			return nil, fmt.Errorf("pid and session_id are required")
+		}
+		if p.ProcStartTime != 0 {
+			actual, err := discovery.ProcStartTime(p.PID)
+			if err != nil || actual != p.ProcStartTime {
+				return nil, fmt.Errorf("process identity mismatch")
+			}
+		}
+		if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil {
+			return nil, fmt.Errorf("kill process %d: %w", p.PID, err)
+		}
+		cwd := p.CWD
+		if cwd == "" {
+			cwd = "unknown"
+		}
+		cwdKey := strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
+		key := "local:takeover:" + cwdKey + ":general"
+		pid, sessionID, procStartTime, reqCWD, claudeDir := p.PID, p.SessionID, p.ProcStartTime, p.CWD, c.claudeDir
+		go func() {
+			deadline := time.Now().Add(5 * time.Second)
+			for time.Now().Before(deadline) {
+				if err := syscall.Kill(pid, 0); err != nil {
+					break
+				}
+				time.Sleep(200 * time.Millisecond)
+			}
+			if procStartTime != 0 {
+				if actual, err := discovery.ProcStartTime(pid); err == nil && actual == procStartTime {
+					syscall.Kill(pid, syscall.SIGKILL) //nolint
+				}
+			}
+			if claudeDir != "" {
+				staleFile := filepath.Join(claudeDir, "sessions", fmt.Sprintf("%d.json", pid))
+				os.Remove(staleFile) //nolint
+			}
+			if reqCWD != "" && sessionID != "" {
+				encodedCWD := strings.ReplaceAll(reqCWD, "/", "-")
+				lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID)
+				os.RemoveAll(lockDir) //nolint
+			}
+			if _, err := c.router.Takeover(context.Background(), key, sessionID, cwd, session.AgentOpts{}); err != nil {
+				slog.Debug("connector takeover failed", "key", key, "err", err)
+			}
+		}()
+		return marshalResult(map[string]string{"status": "accepted", "key": key})
+
+	case "restart_planner":
+		var p struct {
+			ProjectName string `json:"project_name"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("restart_planner params: %w", err)
+		}
+		if c.projMgr == nil {
+			return nil, fmt.Errorf("projects not configured")
+		}
+		proj := c.projMgr.Get(p.ProjectName)
+		if proj == nil {
+			return nil, fmt.Errorf("project not found: %s", p.ProjectName)
+		}
+		plannerKey := proj.PlannerSessionKey()
+		c.router.Reset(plannerKey)
+		opts := session.AgentOpts{
+			Model:     c.projMgr.EffectivePlannerModel(proj),
+			Workspace: proj.Path,
+			Exempt:    true,
+		}
+		if prompt := c.projMgr.EffectivePlannerPrompt(proj); prompt != "" {
+			opts.ExtraArgs = []string{"--append-system-prompt", prompt}
+		}
+		go func() {
+			if _, _, err := c.router.GetOrCreate(context.Background(), plannerKey, opts); err != nil {
+				slog.Error("connector planner restart failed", "project", p.ProjectName, "err", err)
+			}
+		}()
+		return marshalResult(map[string]string{"status": "restarting"})
+
+	case "update_config":
+		var p struct {
+			ProjectName string          `json:"project_name"`
+			Config      json.RawMessage `json:"config"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("update_config params: %w", err)
+		}
+		if c.projMgr == nil {
+			return nil, fmt.Errorf("projects not configured")
+		}
+		var cfg project.ProjectConfig
+		if err := json.Unmarshal(p.Config, &cfg); err != nil {
+			return nil, fmt.Errorf("invalid config: %w", err)
+		}
+		if err := c.projMgr.UpdateConfig(p.ProjectName, cfg); err != nil {
+			return nil, fmt.Errorf("update config: %w", err)
+		}
+		return marshalResult(map[string]string{"status": "ok"})
 
 	default:
 		return nil, fmt.Errorf("unknown method: %s", req.Method)

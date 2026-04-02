@@ -24,6 +24,7 @@ type Config struct {
 	ReverseNodes  map[string]ReverseNodeEntry `yaml:"reverse_nodes"`
 	Upstream      *UpstreamConfig             `yaml:"upstream"`
 	Workspace     WorkspaceConfig             `yaml:"workspace"` // local workspace identity
+	Transcribe    *TranscribeConfig           `yaml:"transcribe"`
 	Cron          CronConfig                  `yaml:"cron"`
 	Log           LogConfig                   `yaml:"log"`
 	Projects      ProjectsConfig              `yaml:"projects"`
@@ -131,6 +132,13 @@ type WeixinConfig struct {
 	Token          string `yaml:"token"`
 	BaseURL        string `yaml:"base_url"`
 	MaxReplyLength int    `yaml:"max_reply_length"`
+}
+
+type TranscribeConfig struct {
+	Enabled  bool   `yaml:"enabled"`
+	Provider string `yaml:"provider"` // "aws" (default)
+	Region   string `yaml:"region"`
+	Language string `yaml:"language"` // BCP-47, default: zh-CN
 }
 
 // Load reads and parses a YAML config file.
@@ -264,6 +272,12 @@ func Load(path string) (*Config, error) {
 		}
 		if cfg.Upstream.Token == "" {
 			return nil, fmt.Errorf("upstream.token is required")
+		}
+	}
+
+	for id, entry := range cfg.ReverseNodes {
+		if entry.Token == "" {
+			return nil, fmt.Errorf("reverse_nodes %q: token is required", id)
 		}
 	}
 

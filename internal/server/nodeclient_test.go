@@ -269,9 +269,9 @@ func TestHandleAPISessions_WithRemoteNodes(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes = map[string]NodeConn{
+	srv.SetNodes(map[string]NodeConn{
 		"macbook": NewNodeClient("macbook", remote.URL, "", "MacBook"),
-	}
+	})
 	// Pre-populate cache
 	srv.refreshNodeCache()
 
@@ -318,9 +318,9 @@ func TestHandleAPISessions_RemoteNodeError(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes = map[string]NodeConn{
+	srv.SetNodes(map[string]NodeConn{
 		"bad-node": NewNodeClient("bad-node", remote.URL, "", "Bad"),
-	}
+	})
 	// Pre-populate cache
 	srv.refreshNodeCache()
 

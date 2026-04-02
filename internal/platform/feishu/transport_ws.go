@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"strings"
+	"time"
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
@@ -13,6 +14,14 @@ import (
 
 	"github.com/naozhi/naozhi/internal/platform"
 )
+
+// parsedEvent holds the result of parsing a Feishu SDK event.
+type parsedEvent struct {
+	Msg       platform.IncomingMessage
+	MessageID string
+	MediaType string // "" | "image" | "audio"
+	MediaKey  string // imageKey or fileKey
+}
 
 func (f *Feishu) startWebSocket() error {
 	ctx, cancel := context.WithCancel(context.Background())
@@ -24,27 +33,39 @@ func (f *Feishu) startWebSocket() error {
 	eventHandler := dispatcher.NewEventDispatcher(
 		f.cfg.VerificationToken, f.cfg.EncryptKey,
 	).OnP2MessageReceiveV1(func(_ context.Context, event *larkim.P2MessageReceiveV1) error {
-		msg, messageID, imageKey, ok := parseSDKEvent(event)
+		pe, ok := parseSDKEvent(event)
 		if !ok {
 			return nil
 		}
-		if imageKey != "" {
+
+		switch pe.MediaType {
+		case "image":
 			f.wg.Add(1)
 			go func() {
 				defer f.wg.Done()
-				data, mime, err := f.DownloadImage(ctx, messageID, imageKey)
+				msg := pe.Msg
+				data, mime, err := f.DownloadImage(ctx, pe.MessageID, pe.MediaKey)
 				if err != nil {
-					slog.Error("feishu ws download image failed", "err", err, "key", imageKey)
+					slog.Error("feishu ws download image failed", "err", err, "key", pe.MediaKey)
 					return
 				}
 				msg.Images = []platform.Image{{Data: data, MimeType: mime}}
 				handler(ctx, msg)
 			}()
-		} else {
+
+		case "audio":
 			f.wg.Add(1)
 			go func() {
 				defer f.wg.Done()
-				handler(ctx, msg)
+				msg := pe.Msg
+				f.handleAudio(ctx, handler, msg, pe.MessageID, pe.MediaKey)
+			}()
+
+		default:
+			f.wg.Add(1)
+			go func() {
+				defer f.wg.Done()
+				handler(ctx, pe.Msg)
 			}()
 		}
 		return nil
@@ -67,25 +88,58 @@ func (f *Feishu) startWebSocket() error {
 	return nil
 }
 
-// parseSDKEvent converts a Feishu SDK event to platform.IncomingMessage.
-// Returns the message, message_id, an image_key (non-empty for image messages), and whether parsing succeeded.
-func parseSDKEvent(event *larkim.P2MessageReceiveV1) (platform.IncomingMessage, string, string, bool) {
+// handleAudio downloads and transcribes audio, then calls handler with the text.
+// Errors are replied directly to the user, not sent through Claude.
+func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandler, msg platform.IncomingMessage, messageID, fileKey string) {
+	if f.transcriber == nil {
+		slog.Info("feishu audio ignored, transcriber not configured", "user", msg.UserID)
+		return
+	}
+
+	data, mime, err := f.DownloadAudio(ctx, messageID, fileKey)
+	if err != nil {
+		slog.Error("feishu download audio failed", "err", err, "key", fileKey)
+		f.replyError(ctx, msg.ChatID, "[语音消息下载失败，请重试]")
+		return
+	}
+
+	transcribeCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	text, err := f.transcriber.Transcribe(transcribeCtx, data, mime)
+	if err != nil {
+		slog.Error("feishu transcribe failed", "err", err, "mime", mime, "size", len(data))
+		f.replyError(ctx, msg.ChatID, "[语音消息转写失败，请发送文字消息]")
+		return
+	}
+
+	if text == "" {
+		slog.Debug("feishu transcribe returned empty text", "user", msg.UserID, "size", len(data))
+		return
+	}
+
+	msg.Text = text
+	handler(ctx, msg)
+}
+
+// parseSDKEvent converts a Feishu SDK event to a parsedEvent.
+func parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, bool) {
 	if event == nil || event.Event == nil || event.Event.Message == nil {
-		return platform.IncomingMessage{}, "", "", false
+		return parsedEvent{}, false
 	}
 
 	msg := event.Event.Message
 	if msg.MessageType == nil {
-		return platform.IncomingMessage{}, "", "", false
+		return parsedEvent{}, false
 	}
 
 	msgType := *msg.MessageType
-	if msgType != "text" && msgType != "image" {
-		return platform.IncomingMessage{}, "", "", false
+	if msgType != "text" && msgType != "image" && msgType != "audio" {
+		return parsedEvent{}, false
 	}
 
 	if msg.Content == nil {
-		return platform.IncomingMessage{}, "", "", false
+		return parsedEvent{}, false
 	}
 
 	chatType := "direct"
@@ -130,7 +184,7 @@ func parseSDKEvent(event *larkim.P2MessageReceiveV1) (platform.IncomingMessage, 
 			Text string `json:"text"`
 		}
 		if err := json.Unmarshal([]byte(*msg.Content), &content); err != nil {
-			return platform.IncomingMessage{}, "", "", false
+			return parsedEvent{}, false
 		}
 		text := content.Text
 		for _, m := range msg.Mentions {
@@ -140,21 +194,30 @@ func parseSDKEvent(event *larkim.P2MessageReceiveV1) (platform.IncomingMessage, 
 		}
 		text = strings.TrimSpace(text)
 		if text == "" {
-			return platform.IncomingMessage{}, "", "", false
+			return parsedEvent{}, false
 		}
 		result.Text = text
-		return result, "", "", true
+		return parsedEvent{Msg: result}, true
 
 	case "image":
 		var content struct {
 			ImageKey string `json:"image_key"`
 		}
 		if err := json.Unmarshal([]byte(*msg.Content), &content); err != nil || content.ImageKey == "" {
-			return platform.IncomingMessage{}, "", "", false
+			return parsedEvent{}, false
 		}
-		return result, messageID, content.ImageKey, true
+		return parsedEvent{Msg: result, MessageID: messageID, MediaType: "image", MediaKey: content.ImageKey}, true
+
+	case "audio":
+		var content struct {
+			FileKey string `json:"file_key"`
+		}
+		if err := json.Unmarshal([]byte(*msg.Content), &content); err != nil || content.FileKey == "" {
+			return parsedEvent{}, false
+		}
+		return parsedEvent{Msg: result, MessageID: messageID, MediaType: "audio", MediaKey: content.FileKey}, true
 
 	default:
-		return platform.IncomingMessage{}, "", "", false
+		return parsedEvent{}, false
 	}
 }

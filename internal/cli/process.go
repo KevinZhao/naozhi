@@ -364,6 +364,7 @@ func (p *Process) Close() {
 	select {
 	case <-p.done:
 	case <-timer.C:
+		slog.Warn("process close timeout, force killing", "pid", p.PID())
 		p.Kill()
 		return
 	}
@@ -404,9 +405,11 @@ func (p *Process) logEvent(ev Event) {
 				entry.Tool = block.Name
 				entry.Detail = formatToolDetail(block)
 				if block.Name == "Agent" {
+					inp := parseAgentInput(block.Input)
 					entry.Type = "agent"
-					entry.Subagent = extractSubagentType(block.Input)
-					entry.Summary = extractAgentDescription(block.Input)
+					entry.Subagent = inp.label()
+					entry.Summary = TruncateRunes(inp.Description, 120)
+					entry.Background = inp.RunInBackground
 				}
 			case "text":
 				entry.Type = "text"
@@ -434,32 +437,34 @@ func (p *Process) logEvent(ev Event) {
 	p.eventLog.Append(entry)
 }
 
-// extractAgentDescription extracts the description field from an Agent tool input.
-func extractAgentDescription(input json.RawMessage) string {
-	if len(input) == 0 {
-		return ""
-	}
-	var inp struct {
-		Description string `json:"description"`
-	}
-	if err := json.Unmarshal(input, &inp); err == nil {
-		return TruncateRunes(inp.Description, 120)
-	}
-	return ""
+// agentInput holds the parsed fields from an Agent tool call input.
+type agentInput struct {
+	SubagentType    string `json:"subagent_type"`
+	Name            string `json:"name"`
+	TeamName        string `json:"team_name"`
+	Description     string `json:"description"`
+	RunInBackground bool   `json:"run_in_background"`
 }
 
-// extractSubagentType extracts the subagent_type field from an Agent tool input.
-func extractSubagentType(input json.RawMessage) string {
+// parseAgentInput parses Agent tool input JSON. Returns zero-valued struct on error.
+func parseAgentInput(input json.RawMessage) agentInput {
 	if len(input) == 0 {
-		return ""
+		return agentInput{}
 	}
-	var inp struct {
-		SubagentType string `json:"subagent_type"`
+	var inp agentInput
+	json.Unmarshal(input, &inp) //nolint:errcheck // zero-valued fields are safe defaults
+	return inp
+}
+
+// label returns the best display label for an Agent call: subagent_type > name > team_name > "".
+func (a agentInput) label() string {
+	if a.SubagentType != "" {
+		return a.SubagentType
 	}
-	if err := json.Unmarshal(input, &inp); err == nil {
-		return inp.SubagentType
+	if a.Name != "" {
+		return a.Name
 	}
-	return ""
+	return a.TeamName
 }
 
 // formatToolDetail returns a human-readable detail string for tool_use events.
@@ -581,6 +586,11 @@ func (p *Process) EventEntries() []EventEntry {
 // EventEntriesSince returns event log entries after the given unix ms timestamp.
 func (p *Process) EventEntriesSince(afterMS int64) []EventEntry {
 	return p.eventLog.EntriesSince(afterMS)
+}
+
+// TurnAgents returns the sub-agent types spawned in the current turn.
+func (p *Process) TurnAgents() []string {
+	return p.eventLog.TurnAgents()
 }
 
 // SubscribeEvents returns a notification channel and unsubscribe function for the event log.

@@ -11,13 +11,14 @@ const defaultEventLogSize = 500
 
 // EventEntry is a simplified event record for the dashboard.
 type EventEntry struct {
-	Time     int64   `json:"time"`               // unix ms
-	Type     string  `json:"type"`               // init, thinking, tool_use, text, result, system
-	Summary  string  `json:"summary,omitempty"`  // brief description
-	Cost     float64 `json:"cost,omitempty"`     // cumulative cost (result events only)
-	Detail   string  `json:"detail,omitempty"`   // fuller content for terminal view
-	Tool     string  `json:"tool,omitempty"`     // tool name for tool_use events
-	Subagent string  `json:"subagent,omitempty"` // subagent_type for Agent tool calls
+	Time       int64   `json:"time"`                  // unix ms
+	Type       string  `json:"type"`                  // init, thinking, tool_use, text, result, system
+	Summary    string  `json:"summary,omitempty"`     // brief description
+	Cost       float64 `json:"cost,omitempty"`        // cumulative cost (result events only)
+	Detail     string  `json:"detail,omitempty"`      // fuller content for terminal view
+	Tool       string  `json:"tool,omitempty"`        // tool name for tool_use events
+	Subagent   string  `json:"subagent,omitempty"`    // subagent_type / name / team_name for Agent tool calls
+	Background bool    `json:"background,omitempty"` // true for run_in_background team agents
 }
 
 type subscriber struct {
@@ -37,6 +38,10 @@ type EventLog struct {
 	// without copying all entries.
 	lastPromptSummary   atomic.Value // string: most recent "user" entry summary
 	lastActivitySummary atomic.Value // string: most recent "tool_use"/"thinking" entry summary
+
+	// Per-turn sub-agent tracking: reset on "result"/"user" events.
+	turnAgents []string // foreground agents in current turn; protected by mu
+	bgAgents   []string // background (run_in_background) agents; persist for session lifetime; protected by mu
 
 	subMu       sync.Mutex
 	subscribers []*subscriber
@@ -62,6 +67,24 @@ func (l *EventLog) Append(e EventEntry) {
 	if l.count < l.maxSize {
 		l.count++
 	}
+
+	// Track sub-agents per turn.
+	switch e.Type {
+	case "agent":
+		label := e.Subagent
+		if label == "" {
+			label = "agent"
+		}
+		if e.Background {
+			l.bgAgents = append(l.bgAgents, label)
+		} else {
+			l.turnAgents = append(l.turnAgents, label)
+		}
+	case "result", "user":
+		l.turnAgents = l.turnAgents[:0]
+		// bgAgents intentionally not reset: background agents outlive individual turns
+	}
+
 	l.mu.Unlock()
 
 	// Update cached summaries (atomic, no lock needed).
@@ -149,6 +172,22 @@ func (l *EventLog) LastActivitySummary() string {
 		return v.(string)
 	}
 	return ""
+}
+
+// TurnAgents returns a copy of all currently active agents: foreground agents spawned
+// in the current turn plus background agents that persist across turns.
+// Returns nil when no agents are active.
+func (l *EventLog) TurnAgents() []string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	total := len(l.turnAgents) + len(l.bgAgents)
+	if total == 0 {
+		return nil
+	}
+	out := make([]string, total)
+	copy(out, l.turnAgents)
+	copy(out[len(l.turnAgents):], l.bgAgents)
+	return out
 }
 
 // TruncateRunes truncates s to at most maxRunes runes, appending "..." if truncated.

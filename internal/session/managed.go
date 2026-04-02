@@ -29,6 +29,7 @@ type processIface interface {
 	SubscribeEvents() (<-chan struct{}, func())
 	PID() int
 	InjectHistory(entries []cli.EventEntry)
+	TurnAgents() []string
 }
 
 // ManagedSession wraps a claude CLI process with session metadata.
@@ -198,23 +199,24 @@ func SessionKey(platform, chatType, id, agentID string) string {
 
 // SessionSnapshot is a point-in-time view of a session for the dashboard API.
 type SessionSnapshot struct {
-	Key          string  `json:"key"`
-	Platform     string  `json:"platform"`
-	Agent        string  `json:"agent"`
-	SessionID    string  `json:"session_id"`
-	State        string  `json:"state"`
-	Protocol     string  `json:"protocol"`
-	LastActive   int64   `json:"last_active"` // unix ms
-	TotalCost    float64 `json:"total_cost"`
-	Workspace    string  `json:"workspace,omitempty"`
-	DeathReason  string  `json:"death_reason,omitempty"`
-	ChatType     string  `json:"chat_type,omitempty"`
-	ChatID       string  `json:"chat_id,omitempty"`
-	Node         string  `json:"node,omitempty"`
-	LastPrompt   string  `json:"last_prompt,omitempty"`   // most recent user message
-	LastActivity string  `json:"last_activity,omitempty"` // most recent tool/thinking status
-	Project      string  `json:"project,omitempty"`       // project name (filled by server)
-	IsPlanner    bool    `json:"is_planner,omitempty"`    // true for project planner sessions
+	Key          string   `json:"key"`
+	Platform     string   `json:"platform"`
+	Agent        string   `json:"agent"`
+	SessionID    string   `json:"session_id"`
+	State        string   `json:"state"`
+	Protocol     string   `json:"protocol"`
+	LastActive   int64    `json:"last_active"` // unix ms
+	TotalCost    float64  `json:"total_cost"`
+	Workspace    string   `json:"workspace,omitempty"`
+	DeathReason  string   `json:"death_reason,omitempty"`
+	ChatType     string   `json:"chat_type,omitempty"`
+	ChatID       string   `json:"chat_id,omitempty"`
+	Node         string   `json:"node,omitempty"`
+	LastPrompt   string   `json:"last_prompt,omitempty"`   // most recent user message
+	LastActivity string   `json:"last_activity,omitempty"` // most recent tool/thinking status
+	Project      string   `json:"project,omitempty"`       // project name (filled by server)
+	IsPlanner    bool     `json:"is_planner,omitempty"`    // true for project planner sessions
+	Subagents    []string `json:"subagents,omitempty"`     // active sub-agent types in current turn
 }
 
 // Snapshot returns a point-in-time view of this session.
@@ -245,6 +247,7 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		snap.State = s.process.GetState().String()
 		snap.Protocol = s.process.ProtocolName()
 		snap.TotalCost = s.process.TotalCost()
+		snap.Subagents = s.process.TurnAgents()
 	}
 
 	// Read cached values instead of copying the full event log.

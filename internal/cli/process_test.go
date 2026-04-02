@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"sync"
 	"testing"
@@ -364,6 +365,58 @@ func TestProcess_StateTransitions(t *testing.T) {
 	if final != StateDead {
 		t.Errorf("final state = %v after EOF, want StateDead", final)
 	}
+}
+
+func TestParseAgentInput(t *testing.T) {
+	t.Run("label priority", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			input string
+			want  string
+		}{
+			{"subagent_type wins", `{"subagent_type":"Explore","name":"my-agent","team_name":"team1"}`, "Explore"},
+			{"name fallback", `{"name":"my-agent","team_name":"team1"}`, "my-agent"},
+			{"team_name fallback", `{"team_name":"team1","description":"do stuff"}`, "team1"},
+			{"all empty", `{"description":"do stuff"}`, ""},
+			{"empty input", ``, ""},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := parseAgentInput(json.RawMessage(tc.input)).label()
+				if got != tc.want {
+					t.Errorf("label() = %q, want %q", got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("run_in_background", func(t *testing.T) {
+		cases := []struct {
+			name  string
+			input string
+			want  bool
+		}{
+			{"true", `{"run_in_background":true,"team_name":"t1"}`, true},
+			{"false explicit", `{"run_in_background":false}`, false},
+			{"absent", `{"team_name":"t1"}`, false},
+			{"empty input", ``, false},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				got := parseAgentInput(json.RawMessage(tc.input)).RunInBackground
+				if got != tc.want {
+					t.Errorf("RunInBackground = %v, want %v", got, tc.want)
+				}
+			})
+		}
+	})
+
+	t.Run("description", func(t *testing.T) {
+		inp := parseAgentInput(json.RawMessage(`{"description":"do the thing","team_name":"t1"}`))
+		if inp.Description != "do the thing" {
+			t.Errorf("Description = %q, want %q", inp.Description, "do the thing")
+		}
+	})
 }
 
 // eventTypes is a test helper that extracts Type fields for diagnostic messages.

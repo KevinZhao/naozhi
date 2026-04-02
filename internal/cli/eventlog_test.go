@@ -239,3 +239,99 @@ func TestEventLog_DetailAndToolFields(t *testing.T) {
 		t.Errorf("Detail = %q, want Read: /path/to/file", entries[0].Detail)
 	}
 }
+
+func TestEventLog_BackgroundAgents(t *testing.T) {
+	l := NewEventLog(100)
+
+	// Background agent is NOT cleared by result or user events.
+	l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: "team1", Background: true})
+	l.Append(EventEntry{Time: 2000, Type: "result", Summary: "done"})
+
+	agents := l.TurnAgents()
+	if len(agents) != 1 || agents[0] != "team1" {
+		t.Errorf("after result TurnAgents = %v, want [team1]", agents)
+	}
+
+	l.Append(EventEntry{Time: 3000, Type: "user", Summary: "next"})
+	agents = l.TurnAgents()
+	if len(agents) != 1 || agents[0] != "team1" {
+		t.Errorf("after user TurnAgents = %v, want [team1]", agents)
+	}
+
+	// Foreground agents in the same session are still handled normally.
+	l.Append(EventEntry{Time: 4000, Type: "agent", Subagent: "Explore"})
+	agents = l.TurnAgents()
+	if len(agents) != 2 {
+		t.Fatalf("TurnAgents len = %d, want 2 (background+foreground)", len(agents))
+	}
+
+	// Result resets foreground but keeps background.
+	l.Append(EventEntry{Time: 5000, Type: "result", Summary: "done"})
+	agents = l.TurnAgents()
+	if len(agents) != 1 || agents[0] != "team1" {
+		t.Errorf("after second result TurnAgents = %v, want [team1]", agents)
+	}
+}
+
+func TestEventLog_TurnAgents(t *testing.T) {
+	l := NewEventLog(100)
+
+	// Initially empty.
+	if agents := l.TurnAgents(); agents != nil {
+		t.Errorf("initial TurnAgents = %v, want nil", agents)
+	}
+
+	// Spawn two agents in a turn.
+	l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
+	l.Append(EventEntry{Time: 2000, Type: "agent", Subagent: "go-reviewer"})
+
+	agents := l.TurnAgents()
+	if len(agents) != 2 {
+		t.Fatalf("TurnAgents len = %d, want 2", len(agents))
+	}
+	if agents[0] != "Explore" || agents[1] != "go-reviewer" {
+		t.Errorf("TurnAgents = %v, want [Explore go-reviewer]", agents)
+	}
+
+	// Result event resets the turn.
+	l.Append(EventEntry{Time: 3000, Type: "result", Summary: "done"})
+	if agents := l.TurnAgents(); agents != nil {
+		t.Errorf("after result TurnAgents = %v, want nil", agents)
+	}
+
+	// New turn with one agent.
+	l.Append(EventEntry{Time: 4000, Type: "agent", Subagent: "planner"})
+	agents = l.TurnAgents()
+	if len(agents) != 1 || agents[0] != "planner" {
+		t.Errorf("new turn TurnAgents = %v, want [planner]", agents)
+	}
+
+	// User event also resets.
+	l.Append(EventEntry{Time: 5000, Type: "user", Summary: "hello"})
+	if agents := l.TurnAgents(); agents != nil {
+		t.Errorf("after user TurnAgents = %v, want nil", agents)
+	}
+}
+
+func TestEventLog_TurnAgents_EmptySubagent(t *testing.T) {
+	l := NewEventLog(100)
+	l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: ""})
+
+	agents := l.TurnAgents()
+	if len(agents) != 1 || agents[0] != "agent" {
+		t.Errorf("TurnAgents = %v, want [agent]", agents)
+	}
+}
+
+func TestEventLog_TurnAgents_IsCopy(t *testing.T) {
+	l := NewEventLog(100)
+	l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
+
+	agents := l.TurnAgents()
+	agents[0] = "modified"
+
+	original := l.TurnAgents()
+	if original[0] != "Explore" {
+		t.Error("TurnAgents should return a copy")
+	}
+}

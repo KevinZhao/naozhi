@@ -56,35 +56,35 @@ func TestVerifySignature(t *testing.T) {
 // --- Mode selection tests ---
 
 func TestNewDefaultMode(t *testing.T) {
-	f := New(Config{AppID: "id", AppSecret: "secret"})
+	f := New(Config{AppID: "id", AppSecret: "secret"}, nil)
 	if f.Mode() != "websocket" {
 		t.Errorf("default mode = %q, want websocket", f.Mode())
 	}
 }
 
 func TestNewWebhookMode(t *testing.T) {
-	f := New(Config{AppID: "id", AppSecret: "secret", ConnectionMode: "webhook"})
+	f := New(Config{AppID: "id", AppSecret: "secret", ConnectionMode: "webhook"}, nil)
 	if f.Mode() != "webhook" {
 		t.Errorf("mode = %q, want webhook", f.Mode())
 	}
 }
 
 func TestNewExplicitWSMode(t *testing.T) {
-	f := New(Config{AppID: "id", AppSecret: "secret", ConnectionMode: "websocket"})
+	f := New(Config{AppID: "id", AppSecret: "secret", ConnectionMode: "websocket"}, nil)
 	if f.Mode() != "websocket" {
 		t.Errorf("mode = %q, want websocket", f.Mode())
 	}
 }
 
 func TestDefaultMaxReplyLen(t *testing.T) {
-	f := New(Config{AppID: "id"})
+	f := New(Config{AppID: "id"}, nil)
 	if f.MaxReplyLength() != 4000 {
 		t.Errorf("MaxReplyLength() = %d, want 4000", f.MaxReplyLength())
 	}
 }
 
 func TestCustomMaxReplyLen(t *testing.T) {
-	f := New(Config{AppID: "id", MaxReplyLen: 2000})
+	f := New(Config{AppID: "id", MaxReplyLen: 2000}, nil)
 	if f.MaxReplyLength() != 2000 {
 		t.Errorf("MaxReplyLength() = %d, want 2000", f.MaxReplyLength())
 	}
@@ -96,7 +96,7 @@ var _ platform.RunnablePlatform = (*Feishu)(nil)
 // --- Start/Stop lifecycle tests ---
 
 func TestStartAlreadyStarted(t *testing.T) {
-	f := New(Config{AppID: "id", ConnectionMode: "webhook"})
+	f := New(Config{AppID: "id", ConnectionMode: "webhook"}, nil)
 	noop := func(context.Context, platform.IncomingMessage) {}
 	if err := f.Start(noop); err != nil {
 		t.Fatalf("first Start() error = %v", err)
@@ -107,14 +107,14 @@ func TestStartAlreadyStarted(t *testing.T) {
 }
 
 func TestStopNoop(t *testing.T) {
-	f := New(Config{AppID: "id", ConnectionMode: "webhook"})
+	f := New(Config{AppID: "id", ConnectionMode: "webhook"}, nil)
 	if err := f.Stop(); err != nil {
 		t.Errorf("Stop() error = %v, want nil", err)
 	}
 }
 
 func TestStopCancelsDone(t *testing.T) {
-	f := New(Config{AppID: "id", ConnectionMode: "webhook"})
+	f := New(Config{AppID: "id", ConnectionMode: "webhook"}, nil)
 	// Simulate a started WS by manually setting cancel/done
 	ctx, cancel := context.WithCancel(context.Background())
 	f.cancel = cancel
@@ -158,32 +158,32 @@ func TestParseSDKEvent_TextMessage(t *testing.T) {
 		},
 	}
 
-	msg, _, imageKey, ok := parseSDKEvent(event)
+	pe, ok := parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
-	if imageKey != "" {
-		t.Errorf("imageKey = %q, want empty for text message", imageKey)
+	if pe.MediaKey != "" {
+		t.Errorf("MediaKey = %q, want empty for text message", pe.MediaKey)
 	}
-	if msg.Platform != "feishu" {
-		t.Errorf("Platform = %q, want feishu", msg.Platform)
+	if pe.Msg.Platform != "feishu" {
+		t.Errorf("Platform = %q, want feishu", pe.Msg.Platform)
 	}
-	if msg.EventID != "ev_123" {
-		t.Errorf("EventID = %q, want ev_123", msg.EventID)
+	if pe.Msg.EventID != "ev_123" {
+		t.Errorf("EventID = %q, want ev_123", pe.Msg.EventID)
 	}
-	if msg.UserID != "ou_user1" {
-		t.Errorf("UserID = %q, want ou_user1", msg.UserID)
+	if pe.Msg.UserID != "ou_user1" {
+		t.Errorf("UserID = %q, want ou_user1", pe.Msg.UserID)
 	}
-	if msg.ChatID != "oc_chat1" {
-		t.Errorf("ChatID = %q, want oc_chat1", msg.ChatID)
+	if pe.Msg.ChatID != "oc_chat1" {
+		t.Errorf("ChatID = %q, want oc_chat1", pe.Msg.ChatID)
 	}
-	if msg.ChatType != "group" {
-		t.Errorf("ChatType = %q, want group", msg.ChatType)
+	if pe.Msg.ChatType != "group" {
+		t.Errorf("ChatType = %q, want group", pe.Msg.ChatType)
 	}
-	if msg.Text != "hello world" {
-		t.Errorf("Text = %q, want 'hello world'", msg.Text)
+	if pe.Msg.Text != "hello world" {
+		t.Errorf("Text = %q, want 'hello world'", pe.Msg.Text)
 	}
-	if msg.MentionMe {
+	if pe.Msg.MentionMe {
 		t.Error("MentionMe should be false")
 	}
 }
@@ -206,12 +206,12 @@ func TestParseSDKEvent_DirectMessage(t *testing.T) {
 		},
 	}
 
-	msg, _, _, ok := parseSDKEvent(event)
+	pe, ok := parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
-	if msg.ChatType != "direct" {
-		t.Errorf("ChatType = %q, want direct", msg.ChatType)
+	if pe.Msg.ChatType != "direct" {
+		t.Errorf("ChatType = %q, want direct", pe.Msg.ChatType)
 	}
 }
 
@@ -236,14 +236,14 @@ func TestParseSDKEvent_WithMentions(t *testing.T) {
 		},
 	}
 
-	msg, _, _, ok := parseSDKEvent(event)
+	pe, ok := parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
-	if msg.Text != "do something" {
-		t.Errorf("Text = %q, want 'do something'", msg.Text)
+	if pe.Msg.Text != "do something" {
+		t.Errorf("Text = %q, want 'do something'", pe.Msg.Text)
 	}
-	if !msg.MentionMe {
+	if !pe.Msg.MentionMe {
 		t.Error("MentionMe should be true")
 	}
 }
@@ -261,15 +261,15 @@ func TestParseSDKEvent_ImageMessage(t *testing.T) {
 			},
 		},
 	}
-	msg, _, imageKey, ok := parseSDKEvent(event)
+	pe, ok := parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true for image message")
 	}
-	if imageKey != "img_v3_xxx" {
-		t.Errorf("imageKey = %q, want img_v3_xxx", imageKey)
+	if pe.MediaKey != "img_v3_xxx" {
+		t.Errorf("MediaKey = %q, want img_v3_xxx", pe.MediaKey)
 	}
-	if msg.Text != "" {
-		t.Errorf("Text = %q, want empty for image message", msg.Text)
+	if pe.Msg.Text != "" {
+		t.Errorf("Text = %q, want empty for image message", pe.Msg.Text)
 	}
 }
 
@@ -286,7 +286,7 @@ func TestParseSDKEvent_ImageMessage_EmptyKey(t *testing.T) {
 			},
 		},
 	}
-	_, _, _, ok := parseSDKEvent(event)
+	_, ok := parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for image message with empty image_key")
 	}
@@ -302,7 +302,7 @@ func TestParseSDKEvent_UnsupportedType(t *testing.T) {
 			},
 		},
 	}
-	_, _, _, ok := parseSDKEvent(event)
+	_, ok := parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for unsupported message type")
 	}
@@ -321,7 +321,7 @@ func TestParseSDKEvent_EmptyText(t *testing.T) {
 			},
 		},
 	}
-	_, _, _, ok := parseSDKEvent(event)
+	_, ok := parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for empty text")
 	}
@@ -344,14 +344,14 @@ func TestParseSDKEvent_MentionOnlyText(t *testing.T) {
 			},
 		},
 	}
-	_, _, _, ok := parseSDKEvent(event)
+	_, ok := parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for mention-only text")
 	}
 }
 
 func TestParseSDKEvent_NilEvent(t *testing.T) {
-	_, _, _, ok := parseSDKEvent(nil)
+	_, ok := parseSDKEvent(nil)
 	if ok {
 		t.Error("expected ok=false for nil event")
 	}
@@ -361,9 +361,57 @@ func TestParseSDKEvent_NilMessage(t *testing.T) {
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{},
 	}
-	_, _, _, ok := parseSDKEvent(event)
+	_, ok := parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for nil message")
+	}
+}
+
+func TestParseSDKEvent_AudioMessage(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")},
+			},
+			Message: &larkim.EventMessage{
+				MessageType: strPtr("audio"),
+				MessageId:   strPtr("msg_audio_1"),
+				ChatId:      strPtr("oc_chat1"),
+				Content:     strPtr(`{"file_key":"file_v3_audio_xxx"}`),
+			},
+		},
+	}
+	pe, ok := parseSDKEvent(event)
+	if !ok {
+		t.Fatal("expected ok=true for audio message")
+	}
+	if pe.MediaType != "audio" {
+		t.Errorf("MediaType = %q, want audio", pe.MediaType)
+	}
+	if pe.MediaKey != "file_v3_audio_xxx" {
+		t.Errorf("MediaKey = %q, want file_v3_audio_xxx", pe.MediaKey)
+	}
+	if pe.MessageID != "msg_audio_1" {
+		t.Errorf("MessageID = %q, want msg_audio_1", pe.MessageID)
+	}
+}
+
+func TestParseSDKEvent_AudioMessage_EmptyKey(t *testing.T) {
+	event := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId: &larkim.UserId{OpenId: strPtr("ou_user1")},
+			},
+			Message: &larkim.EventMessage{
+				MessageType: strPtr("audio"),
+				ChatId:      strPtr("oc_chat1"),
+				Content:     strPtr(`{"file_key":""}`),
+			},
+		},
+	}
+	_, ok := parseSDKEvent(event)
+	if ok {
+		t.Error("expected ok=false for audio message with empty file_key")
 	}
 }
 
@@ -371,7 +419,7 @@ func TestParseSDKEvent_NilMessage(t *testing.T) {
 
 func makeWebhookFeishu(cfg Config) *Feishu {
 	cfg.ConnectionMode = "webhook"
-	return New(cfg)
+	return New(cfg, nil)
 }
 
 func buildV2MessageBody(eventID, chatID, chatType, text string) []byte {

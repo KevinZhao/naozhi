@@ -51,6 +51,9 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
 	s.mux.HandleFunc("GET /manifest.json", s.handleManifest)
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
+	if s.reverseNodeServer != nil {
+		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
+	}
 }
 
 // isAuthenticated checks auth without writing an error response. Used by
@@ -170,29 +173,31 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 	stats["agents"] = agentIDs
 
 	// Include project list for dashboard sidebar rendering
+	var projectList []map[string]string
 	if s.projectMgr != nil {
 		projects := s.projectMgr.All()
-		projectList := make([]map[string]string, 0, len(projects))
 		for _, p := range projects {
 			projectList = append(projectList, map[string]string{"name": p.Name, "path": p.Path, "node": "local"})
 		}
-		// Merge remote projects for multi-node
-		s.nodesMu.RLock()
-		hasNodes := len(s.nodes) > 0
-		s.nodesMu.RUnlock()
-		if hasNodes {
-			cachedProjects := s.getCachedNodeProjects()
-			for _, items := range cachedProjects {
-				for _, item := range items {
-					name, _ := item["name"].(string)
-					path, _ := item["path"].(string)
-					node, _ := item["node"].(string)
-					if name != "" {
-						projectList = append(projectList, map[string]string{"name": name, "path": path, "node": node})
-					}
+	}
+	// Merge remote projects (always, even without a local project manager)
+	s.nodesMu.RLock()
+	hasNodes := len(s.nodes) > 0
+	s.nodesMu.RUnlock()
+	if hasNodes {
+		cachedProjects := s.getCachedNodeProjects()
+		for _, items := range cachedProjects {
+			for _, item := range items {
+				name, _ := item["name"].(string)
+				path, _ := item["path"].(string)
+				node, _ := item["node"].(string)
+				if name != "" {
+					projectList = append(projectList, map[string]string{"name": name, "path": path, "node": node})
 				}
 			}
 		}
+	}
+	if len(projectList) > 0 {
 		stats["projects"] = projectList
 	}
 
@@ -204,8 +209,8 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 	}
 	s.nodesMu.RUnlock()
 
-	// No remote nodes: use existing response format
-	if len(nodesSnapshot) == 0 {
+	// No configured nodes at all: use simple single-node response format
+	if len(s.knownNodes) == 0 {
 		resp := map[string]any{
 			"sessions": snapshots,
 			"stats":    stats,
@@ -224,15 +229,19 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		allSessions = append(allSessions, snapshots[i])
 	}
 
+	localName := s.workspaceName
+	if localName == "" {
+		localName = "Local"
+	}
 	nodeStatus := map[string]any{
-		"local": map[string]any{"display_name": "Local", "status": "ok"},
+		"local": map[string]any{"display_name": localName, "status": "ok"},
 	}
 
 	cachedSessions, cachedStatus := s.getCachedNodeSessions()
 	for id, nc := range nodesSnapshot {
 		status := cachedStatus[id]
 		if status == "" {
-			status = "unknown"
+			status = "ok"
 		}
 		nodeStatus[id] = map[string]any{
 			"display_name": nc.DisplayName(),
@@ -240,6 +249,16 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, rs := range cachedSessions[id] {
 			allSessions = append(allSessions, rs)
+		}
+	}
+
+	// Always include all configured nodes, even when currently disconnected.
+	for id, displayName := range s.knownNodes {
+		if _, connected := nodeStatus[id]; !connected {
+			nodeStatus[id] = map[string]any{
+				"display_name": displayName,
+				"status":       "offline",
+			}
 		}
 	}
 
@@ -737,7 +756,6 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 	sessionID := req.SessionID
 	reqCWD := req.CWD
 	procStartTime := req.ProcStartTime
-	claudeDir := s.claudeDir
 	agentOpts := s.agents["general"]
 
 	go func() {
@@ -749,22 +767,18 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 			}
 			time.Sleep(200 * time.Millisecond)
 		}
-		// Force kill if still alive — only when we can verify PID identity,
-		// to avoid killing an unrelated process that reused the PID during
-		// the wait window. If procStartTime was not supplied (0), skip SIGKILL.
+		// Force kill if still alive. Re-verify PID identity to avoid SIGKILLing an
+		// unrelated process that reused the PID during the wait window.
+		// Skip if procStartTime was not supplied (0) — safer to leave it alone.
 		if procStartTime != 0 && verifyProcIdentity(pid, procStartTime) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
 
-		// Remove stale session file so it won't reappear in discovery scans.
-		if claudeDir != "" {
-			staleFile := filepath.Join(claudeDir, "sessions", fmt.Sprintf("%d.json", pid))
-			_ = os.Remove(staleFile)
+		// Remove stale session metadata file (always — keyed by the original PID).
+		if s.claudeDir != "" {
+			_ = os.Remove(filepath.Join(s.claudeDir, "sessions", fmt.Sprintf("%d.json", pid)))
 		}
-
-		// Remove session lock dir from /tmp so --resume can reacquire the session.
-		// Claude CLI creates /tmp/claude-{UID}/{encoded-cwd}/{sessionID}/ and doesn't
-		// clean up after SIGKILL.
+		// Remove session lock dir so --resume can reacquire it.
 		if reqCWD != "" && sessionID != "" {
 			encodedCWD := strings.ReplaceAll(reqCWD, "/", "-")
 			lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID)
@@ -787,7 +801,6 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 		}
 
 		slog.Info("session takeover", "key", key, "session_id", sessionID, "pid", pid, "cwd", cwd)
-		// Note: spawnSession already loads JSONL history when resumeID is set.
 		s.hub.BroadcastSessionsUpdate()
 	}()
 

@@ -112,9 +112,9 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			return
 		}
 
-		// Only handle text and image messages
+		// Only handle text, image, and audio messages
 		msgType := event.Message.MessageType
-		if msgType != "text" && msgType != "image" {
+		if msgType != "text" && msgType != "image" && msgType != "audio" {
 			return
 		}
 
@@ -171,13 +171,28 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			f.wg.Add(1)
 			go func() {
 				defer f.wg.Done()
+				imgMsg := msg
 				data, mime, err := f.DownloadImage(context.Background(), event.Message.MessageID, content.ImageKey)
 				if err != nil {
 					slog.Error("feishu download image failed", "err", err, "key", content.ImageKey)
 					return
 				}
-				msg.Images = []platform.Image{{Data: data, MimeType: mime}}
-				handler(context.Background(), msg)
+				imgMsg.Images = []platform.Image{{Data: data, MimeType: mime}}
+				handler(context.Background(), imgMsg)
+			}()
+
+		case "audio":
+			var content struct {
+				FileKey string `json:"file_key"`
+			}
+			if err := json.Unmarshal([]byte(event.Message.Content), &content); err != nil || content.FileKey == "" {
+				return
+			}
+			f.wg.Add(1)
+			go func() {
+				defer f.wg.Done()
+				audioMsg := msg
+				f.handleAudio(context.Background(), handler, audioMsg, event.Message.MessageID, content.FileKey)
 			}()
 		}
 	})

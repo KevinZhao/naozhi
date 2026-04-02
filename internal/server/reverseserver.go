@@ -118,3 +118,15 @@ func (s *ReverseNodeServer) Get(id string) *ReverseNodeConn {
 	defer s.mu.RUnlock()
 	return s.conns[id]
 }
+
+// AllNodes returns all configured node IDs mapped to their display names.
+// Includes disconnected nodes.
+func (s *ReverseNodeServer) AllNodes() map[string]string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	result := make(map[string]string, len(s.names))
+	for id, name := range s.names {
+		result[id] = name
+	}
+	return result
+}

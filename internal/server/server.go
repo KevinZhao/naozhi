@@ -14,11 +14,13 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/routing"
@@ -44,8 +46,9 @@ type Server struct {
 	scheduler      *cron.Scheduler
 	backendTag     string // e.g., "cc" or "kiro", appended to replies
 	dashboardToken string // optional bearer token for dashboard API
-	hub            *Hub   // WebSocket hub
-	nodes          map[string]NodeConn
+	hub                *Hub   // WebSocket hub
+	nodes              map[string]NodeConn
+	reverseNodeServer  *ReverseNodeServer
 	nodesMu        sync.RWMutex
 	claudeDir      string // path to ~/.claude for session discovery
 	projectMgr     *project.Manager
@@ -66,6 +69,10 @@ type Server struct {
 	nodeProjects   map[string][]map[string]any // nodeID -> cached projects
 	nodeDiscovered map[string][]map[string]any // nodeID -> cached discovered
 	nodeStatus     map[string]string           // nodeID -> "ok" | "error"
+
+	// knownNodes holds all configured node IDs → display names, including
+	// reverse nodes that may currently be disconnected. Never mutated after startup.
+	knownNodes map[string]string
 }
 
 // sessionGuard prevents multiple concurrent messages to the same session.
@@ -126,6 +133,8 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		backendTag:    tag,
 		claudeDir:     claudeDir,
 		nodes:         make(map[string]NodeConn),
+		knownNodes:    make(map[string]string),
+		nodeStatus:    make(map[string]string),
 	}
 }
 
@@ -155,11 +164,18 @@ func (s *Server) SetWatchdogTimeouts(noOutput, total time.Duration) {
 // SetNodes configures remote node clients for multi-node aggregation.
 func (s *Server) SetNodes(nodes map[string]NodeConn) {
 	s.nodes = nodes
+	for id, nc := range nodes {
+		s.knownNodes[id] = nc.DisplayName()
+	}
 }
 
 // SetReverseNodeServer wires up a ReverseNodeServer so reverse-connecting nodes
 // are dynamically registered/deregistered in Server.nodes.
 func (s *Server) SetReverseNodeServer(rns *ReverseNodeServer) {
+	s.reverseNodeServer = rns
+	for id, displayName := range rns.AllNodes() {
+		s.knownNodes[id] = displayName
+	}
 	rns.onRegister = func(id string, rc *ReverseNodeConn) {
 		s.nodesMu.Lock()
 		s.nodes[id] = rc
@@ -437,6 +453,10 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		}
 		defer s.sessionGuard.Release(key)
 
+		// H2: Transparently adopt an external Claude session if one exists for
+		// this workspace. Only fires when no managed session exists yet.
+		autoResumed := s.tryAutoTakeover(ctx, session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID), key, opts)
+
 		sess, sessStatus, err := s.router.GetOrCreate(ctx, key, opts)
 		if err != nil {
 			log.Error("get session", "err", err)
@@ -462,8 +482,10 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 			return
 		}
 
-		// Notify user when previous session context was lost
-		if sessStatus == session.SessionNew && platform.SupportsInterimMessages(p) {
+		// Notify user: auto-resumed from external session, or fresh context lost
+		if autoResumed && platform.SupportsInterimMessages(p) {
+			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "已恢复上次会话。"})
+		} else if sessStatus == session.SessionNew && platform.SupportsInterimMessages(p) {
 			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "新会话已创建（之前的上下文已失效）。"})
 		}
 
@@ -706,6 +728,93 @@ func systemInfo() map[string]any {
 		}
 	})
 	return sysInfoVal
+}
+
+// killAndCleanupClaude terminates an external Claude CLI process and removes its
+// stale session/lock files so the session can be cleanly resumed with --resume.
+// Sequence: SIGTERM → wait up to 5 s → SIGKILL (only if PID identity still matches).
+func (s *Server) killAndCleanupClaude(pid int, procStartTime uint64, cwd, sessionID string) error {
+	// TOCTOU guard: reject if the PID was recycled since the discovery scan.
+	if procStartTime != 0 && !verifyProcIdentity(pid, procStartTime) {
+		return fmt.Errorf("process identity changed (PID reused): pid=%d", pid)
+	}
+	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return fmt.Errorf("sigterm pid %d: %w", pid, err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); err != nil {
+			break // process exited
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	// Force-kill only when we can still confirm it is the same process.
+	if procStartTime != 0 && verifyProcIdentity(pid, procStartTime) {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+		time.Sleep(200 * time.Millisecond)
+	}
+	// Remove stale session metadata file (prevents reappearing in discovery scans).
+	if s.claudeDir != "" {
+		_ = os.Remove(filepath.Join(s.claudeDir, "sessions", fmt.Sprintf("%d.json", pid)))
+	}
+	// Remove session lock dir so --resume can reacquire it.
+	// Claude CLI creates /tmp/claude-{UID}/{encoded-cwd}/{sessionID}/ on start.
+	if cwd != "" && sessionID != "" {
+		encodedCWD := strings.ReplaceAll(cwd, "/", "-")
+		lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID)
+		_ = os.RemoveAll(lockDir)
+	}
+	return nil
+}
+
+// tryAutoTakeover looks for an external Claude CLI session whose CWD matches the
+// chat's effective workspace and transparently adopts it under naozhi management.
+// Must be called inside the sessionGuard critical section (after TryAcquire).
+// Returns true when a session was successfully taken over.
+func (s *Server) tryAutoTakeover(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool {
+	if s.claudeDir == "" {
+		return false
+	}
+	// Skip when a managed session already exists for this key.
+	if s.router.GetSession(key) != nil {
+		return false
+	}
+	workspace := opts.Workspace
+	if workspace == "" {
+		workspace = s.router.GetWorkspace(chatKey)
+	}
+	if workspace == "" {
+		return false
+	}
+	discovered, err := discovery.Scan(s.claudeDir, s.router.ManagedPIDs())
+	if err != nil || len(discovered) == 0 {
+		return false
+	}
+	// Find the most recently active session whose CWD matches the workspace.
+	var best *discovery.DiscoveredSession
+	for i := range discovered {
+		ds := &discovered[i]
+		if ds.CWD == workspace {
+			if best == nil || ds.LastActive > best.LastActive {
+				best = ds
+			}
+		}
+	}
+	if best == nil {
+		return false
+	}
+	if err := s.killAndCleanupClaude(best.PID, best.ProcStartTime, best.CWD, best.SessionID); err != nil {
+		slog.Warn("auto-takeover: kill failed", "key", key, "pid", best.PID, "err", err)
+		return false
+	}
+	takeoverOpts := opts
+	takeoverOpts.Workspace = best.CWD
+	if _, err := s.router.Takeover(ctx, key, best.SessionID, best.CWD, takeoverOpts); err != nil {
+		slog.Warn("auto-takeover: resume failed", "key", key, "session_id", best.SessionID, "err", err)
+		return false
+	}
+	slog.Info("auto-takeover completed", "key", key, "pid", best.PID, "session_id", best.SessionID, "workspace", best.CWD)
+	return true
 }
 
 // startNodeCacheLoop periodically fetches remote node sessions in the background

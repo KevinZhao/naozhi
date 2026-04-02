@@ -48,6 +48,12 @@ platforms:
 log:
   level: "info"
 
+transcribe:
+  enabled: true
+  provider: "aws"
+  region: "us-west-2"
+  language: "zh-CN"
+
 projects:
   root: "/home/ec2-user/workspace"
   planner_defaults:
@@ -58,3 +64,18 @@ workspaces:
     url: "http://192.168.1.101:8180"
     token: ""
     display_name: "MacBook Pro"
+
+# Reverse-connect nodes: remote machines dial in to this primary (NAT traversal).
+# Each entry is node_id: {token, display_name}. Token must match upstream.token on the remote.
+reverse_nodes:
+  pc:
+    token: "cdf413552fadce22f6c7e413c83f444dd58c2a89a2664700d311226442f478c7"
+    display_name: "PC (10.200.0.10)"
+
+# Upstream: this node dials a primary naozhi instance (reverse-connect mode).
+# Use when this machine is behind NAT and cannot be reached by the primary directly.
+#upstream:
+#  url: "wss://primary.example.com/ws-node"
+#  node_id: "macbook"
+#  token: "your-secret-token"
+#  display_name: "MacBook Pro"

@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/transcribe"
 	"golang.org/x/sync/singleflight"
 )
 
@@ -41,6 +42,8 @@ type Feishu struct {
 	tokenMu     sync.RWMutex
 	tokenGroup  singleflight.Group
 
+	transcriber transcribe.Service // nil when STT not configured
+
 	// WebSocket lifecycle
 	handler platform.MessageHandler
 	cancel  context.CancelFunc
@@ -50,8 +53,8 @@ type Feishu struct {
 	started bool
 }
 
-// New creates a Feishu platform adapter.
-func New(cfg Config) *Feishu {
+// New creates a Feishu platform adapter. transcriber may be nil to disable voice.
+func New(cfg Config, transcriber transcribe.Service) *Feishu {
 	if cfg.MaxReplyLen <= 0 {
 		cfg.MaxReplyLen = 4000
 	}
@@ -59,7 +62,7 @@ func New(cfg Config) *Feishu {
 	if mode == "" {
 		mode = "websocket"
 	}
-	return &Feishu{cfg: cfg, mode: mode, baseURL: "https://open.feishu.cn"}
+	return &Feishu{cfg: cfg, mode: mode, baseURL: "https://open.feishu.cn", transcriber: transcriber}
 }
 
 func (f *Feishu) Name() string { return "feishu" }
@@ -311,13 +314,23 @@ func (f *Feishu) sendImage(ctx context.Context, chatID string, img platform.Imag
 
 // DownloadImage downloads an image from a message via Feishu API.
 func (f *Feishu) DownloadImage(ctx context.Context, messageID, fileKey string) ([]byte, string, error) {
+	return f.downloadResource(ctx, messageID, fileKey, "image", 10*1024*1024, "image/png")
+}
+
+// DownloadAudio downloads an audio file from a message via Feishu API.
+func (f *Feishu) DownloadAudio(ctx context.Context, messageID, fileKey string) ([]byte, string, error) {
+	return f.downloadResource(ctx, messageID, fileKey, "audio", 20*1024*1024, "audio/ogg")
+}
+
+// downloadResource downloads a message resource (image/audio) from the Feishu API.
+func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resType string, maxBytes int64, defaultMIME string) ([]byte, string, error) {
 	token, err := f.getAccessToken(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("get access token: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET",
-		f.baseURL+"/open-apis/im/v1/messages/"+messageID+"/resources/"+fileKey+"?type=image", nil)
+		f.baseURL+"/open-apis/im/v1/messages/"+messageID+"/resources/"+fileKey+"?type="+resType, nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("create request: %w", err)
 	}
@@ -325,29 +338,35 @@ func (f *Feishu) DownloadImage(ctx context.Context, messageID, fileKey string) (
 
 	resp, err := feishuHTTPClient.Do(req)
 	if err != nil {
-		return nil, "", fmt.Errorf("download image: %w", err)
+		return nil, "", fmt.Errorf("download %s: %w", resType, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, "", fmt.Errorf("download image: status %d, body: %s", resp.StatusCode, body)
+		return nil, "", fmt.Errorf("download %s: status %d, body: %s", resType, resp.StatusCode, body)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, 10*1024*1024)) // 10MB max
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
 	if err != nil {
-		return nil, "", fmt.Errorf("read image body: %w", err)
+		return nil, "", fmt.Errorf("read %s body: %w", resType, err)
 	}
 
 	contentType := resp.Header.Get("Content-Type")
-	// Strip MIME parameters (e.g., "image/png; name=file.png" → "image/png")
 	if i := strings.IndexByte(contentType, ';'); i >= 0 {
 		contentType = strings.TrimSpace(contentType[:i])
 	}
 	if contentType == "" || contentType == "application/octet-stream" {
-		contentType = "image/png"
+		contentType = defaultMIME
 	}
 	return data, contentType, nil
+}
+
+// replyError sends an error message directly to the user, bypassing Claude.
+func (f *Feishu) replyError(ctx context.Context, chatID, text string) {
+	if _, err := f.Reply(ctx, platform.OutgoingMessage{ChatID: chatID, Text: text}); err != nil {
+		slog.Warn("feishu reply error failed", "err", err, "text", text)
+	}
 }
 
 // uploadImage uploads image data to Feishu and returns the image_key.
