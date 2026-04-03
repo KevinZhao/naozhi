@@ -87,7 +87,8 @@ func (s *Server) tryAutoTakeover(ctx context.Context, chatKey, key string, opts 
 	if workspace == "" {
 		return false
 	}
-	discovered, err := discovery.Scan(s.claudeDir, s.router.ManagedPIDs(), s.router.ManagedSessionIDs(), s.router.ManagedCWDs())
+	pids, sids, cwds := s.router.ManagedExcludeSets()
+	discovered, err := discovery.Scan(s.claudeDir, pids, sids, cwds)
 	if err != nil || len(discovered) == 0 {
 		return false
 	}

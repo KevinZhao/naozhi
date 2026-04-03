@@ -37,6 +37,7 @@ type Connector struct {
 	router       *session.Router
 	projMgr      *project.Manager // may be nil
 	claudeDir    string
+	hostname     string
 	discoverFunc func() (json.RawMessage, error)
 	previewFunc  func(sessionID string) (json.RawMessage, error)
 }
@@ -47,7 +48,8 @@ func New(cfg *UpstreamConfig, router *session.Router, projMgr *project.Manager) 
 	if home, err := os.UserHomeDir(); err == nil {
 		claudeDir = filepath.Join(home, ".claude")
 	}
-	return &Connector{cfg: cfg, router: router, projMgr: projMgr, claudeDir: claudeDir}
+	hostname, _ := os.Hostname()
+	return &Connector{cfg: cfg, router: router, projMgr: projMgr, claudeDir: claudeDir, hostname: hostname}
 }
 
 // SetDiscoverFunc sets a callback that returns discovered sessions as JSON.
@@ -113,6 +115,7 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 		NodeID:      c.cfg.NodeID,
 		Token:       c.cfg.Token,
 		DisplayName: c.cfg.DisplayName,
+		Hostname:    c.hostname,
 	}
 	if err := conn.WriteJSON(reg); err != nil {
 		return false, fmt.Errorf("register write: %w", err)
@@ -182,7 +185,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 				case <-ctx.Done():
 					return
 				}
-				result, err := c.handleRequest(ctx, req)
+				result, err := c.handleRequest(connCtx, req)
 				resp := reverse.ReverseMsg{Type: "response", ReqID: req.ReqID}
 				if err != nil {
 					resp.Error = err.Error()
@@ -362,7 +365,6 @@ func (c *Connector) handleRequest(ctx context.Context, req reverse.ReverseMsg) (
 			return nil, fmt.Errorf("project not found: %s", p.ProjectName)
 		}
 		plannerKey := proj.PlannerSessionKey()
-		c.router.Reset(plannerKey)
 		opts := session.AgentOpts{
 			Model:     c.projMgr.EffectivePlannerModel(proj),
 			Workspace: proj.Path,
@@ -372,7 +374,7 @@ func (c *Connector) handleRequest(ctx context.Context, req reverse.ReverseMsg) (
 			opts.ExtraArgs = []string{"--append-system-prompt", prompt}
 		}
 		go func() {
-			if _, _, err := c.router.GetOrCreate(context.Background(), plannerKey, opts); err != nil {
+			if _, err := c.router.ResetAndRecreate(context.Background(), plannerKey, opts); err != nil {
 				slog.Error("connector planner restart failed", "project", p.ProjectName, "err", err)
 			}
 		}()

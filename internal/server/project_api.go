@@ -194,11 +194,8 @@ func (s *Server) handleAPIProjectPlannerRestart(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// Reset (kill) the current planner
+	// Reset and spawn a new planner atomically with current config
 	plannerKey := p.PlannerSessionKey()
-	s.router.Reset(plannerKey)
-
-	// Spawn a new planner with current config
 	opts := session.AgentOpts{
 		Model:     s.projectMgr.EffectivePlannerModel(p),
 		Workspace: p.Path,
@@ -213,7 +210,7 @@ func (s *Server) handleAPIProjectPlannerRestart(w http.ResponseWriter, r *http.R
 		if s.hub != nil {
 			ctx = s.hub.ctx
 		}
-		if _, _, err := s.router.GetOrCreate(ctx, plannerKey, opts); err != nil {
+		if _, err := s.router.ResetAndRecreate(ctx, plannerKey, opts); err != nil {
 			slog.Error("planner restart failed", "project", name, "err", err)
 		} else {
 			slog.Info("planner restarted", "project", name)

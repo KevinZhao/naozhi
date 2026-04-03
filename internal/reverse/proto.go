@@ -13,6 +13,7 @@ type ReverseMsg struct {
 	NodeID      string          `json:"node_id,omitempty"`
 	Token       string          `json:"token,omitempty"`
 	DisplayName string          `json:"display_name,omitempty"`
+	Hostname    string          `json:"hostname,omitempty"`
 	ReqID       string          `json:"req_id,omitempty"`
 	Method      string          `json:"method,omitempty"`
 	Params      json.RawMessage `json:"params,omitempty"`

@@ -66,11 +66,12 @@ type Process struct {
 	State     ProcessState
 	mu        sync.Mutex
 
-	eventCh  chan Event
-	done     chan struct{}
-	killCh   chan struct{} // closed by Kill() to unblock readLoop's channel send
-	killOnce sync.Once
-	waitOnce sync.Once // ensures cmd.Wait() is called exactly once
+	eventCh    chan Event
+	done       chan struct{}
+	stderrDone chan struct{} // closed when stderr goroutine exits
+	killCh     chan struct{} // closed by Kill() to unblock readLoop's channel send
+	killOnce   sync.Once
+	waitOnce   sync.Once // ensures cmd.Wait() is called exactly once
 
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
@@ -110,7 +111,9 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string, 
 		return nil, fmt.Errorf("start cli: %w", err)
 	}
 
+	stderrDone := make(chan struct{})
 	go func() {
+		defer close(stderrDone)
 		scanner := bufio.NewScanner(stderrPipe)
 		for scanner.Scan() {
 			slog.Debug("cli stderr", "line", scanner.Text())
@@ -125,6 +128,7 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string, 
 		State:           StateSpawning,
 		eventCh:         make(chan Event, 64),
 		done:            make(chan struct{}),
+		stderrDone:      stderrDone,
 		killCh:          make(chan struct{}),
 		noOutputTimeout: noOutputTimeout,
 		totalTimeout:    totalTimeout,
@@ -368,6 +372,10 @@ func (p *Process) Close() {
 		slog.Warn("process close timeout, force killing", "pid", p.PID())
 		p.Kill()
 		return
+	}
+	// Wait for stderr goroutine to exit
+	if p.stderrDone != nil {
+		<-p.stderrDone
 	}
 	// Reap the child process to avoid zombies
 	p.waitOnce.Do(func() { p.cmd.Wait() })

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -494,9 +495,20 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 	// Set workspace override for new dashboard sessions
 	if workspace != "" {
 		if info, err := os.Stat(workspace); err == nil && info.IsDir() {
+			// Enforce same allowedRoot check as /cd command
+			wsPath := filepath.Clean(workspace)
+			if resolved, err := filepath.EvalSymlinks(wsPath); err == nil {
+				wsPath = resolved
+			}
+			if s.allowedRoot != "" && wsPath != s.allowedRoot && !strings.HasPrefix(wsPath, s.allowedRoot+string(filepath.Separator)) {
+				w.Header().Set("Content-Type", "application/json")
+				w.WriteHeader(http.StatusForbidden)
+				json.NewEncoder(w).Encode(map[string]string{"error": "workspace outside allowed root"})
+				return
+			}
 			if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
 				chatKey := key[:idx]
-				s.router.SetWorkspace(chatKey, workspace)
+				s.router.SetWorkspace(chatKey, wsPath)
 			}
 		}
 	}
@@ -569,40 +581,14 @@ func (s *Server) handleAPIDiscovered(w http.ResponseWriter, r *http.Request) {
 	if !s.checkBearerAuth(w, r) {
 		return
 	}
-	if s.claudeDir == "" {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]any{})
-		return
-	}
 
-	excludePIDs := s.router.ManagedPIDs()
-	sessions, err := discovery.Scan(s.claudeDir, excludePIDs, s.router.ManagedSessionIDs(), s.router.ManagedCWDs())
-	if err != nil {
-		slog.Warn("discovery scan", "err", err)
-		sessions = nil
-	}
-	if sessions == nil {
-		sessions = []discovery.DiscoveredSession{}
-	}
-
-	// Resolve CWD → project name
-	if s.projectMgr != nil && len(sessions) > 0 {
-		cwds := make([]string, len(sessions))
-		for i, d := range sessions {
-			cwds[i] = d.CWD
-		}
-		cwdMap := s.projectMgr.ResolveWorkspaces(cwds)
-		for i := range sessions {
-			sessions[i].Project = cwdMap[sessions[i].CWD]
-		}
-	}
+	sessions := s.discoveryCache.snapshot()
 
 	// Merge remote discovered sessions
 	s.nodesMu.RLock()
 	hasDiscoveredNodes := len(s.nodes) > 0
 	s.nodesMu.RUnlock()
 	if hasDiscoveredNodes {
-		// Tag local sessions with node="local"
 		for i := range sessions {
 			sessions[i].Node = "local"
 		}
@@ -725,8 +711,8 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 
 	// C2 fix: verify PID is in the discovered list before killing
 	if s.claudeDir != "" {
-		excludePIDs := s.router.ManagedPIDs()
-		discovered, _ := discovery.Scan(s.claudeDir, excludePIDs, nil, nil)
+		excludePIDs, excludeSIDs, excludeCWDs := s.router.ManagedExcludeSets()
+		discovered, _ := discovery.Scan(s.claudeDir, excludePIDs, excludeSIDs, excludeCWDs)
 		pidFound := false
 		for _, d := range discovered {
 			if d.PID == req.PID && d.SessionID == req.SessionID {

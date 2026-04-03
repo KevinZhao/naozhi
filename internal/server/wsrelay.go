@@ -20,7 +20,7 @@ type wsRelay struct {
 	writeMu   sync.Mutex // serializes writes to the WS connection
 	conn      *websocket.Conn
 	subs      map[string][]wsEventSink // remote session key -> local clients
-	lastEvent map[string]int64       // key -> last event unix ms (for reconnect)
+	lastEvent map[string]int64         // key -> last event unix ms (for reconnect)
 	done      chan struct{}
 	closed    bool
 }
@@ -229,8 +229,13 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 		}
 		r.mu.Unlock()
 
+		// Marshal once, send pre-encoded bytes to all subscribers
+		tagged, err := json.Marshal(msg)
+		if err != nil {
+			continue
+		}
 		for _, c := range clients {
-			c.sendJSON(msg)
+			c.sendRaw(tagged)
 		}
 	}
 }
@@ -293,16 +298,17 @@ func (r *wsRelay) sendHistoryToClient(c wsEventSink, key string, after int64) {
 }
 
 func (r *wsRelay) writeJSON(v any) {
+	r.writeMu.Lock()
+	defer r.writeMu.Unlock()
 	r.mu.Lock()
 	conn := r.conn
+	closed := r.closed
 	r.mu.Unlock()
-	if conn == nil {
+	if conn == nil || closed {
 		return
 	}
-	r.writeMu.Lock()
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := conn.WriteJSON(v); err != nil {
 		slog.Warn("relay write failed", "node", r.node.ID, "err", err)
 	}
-	r.writeMu.Unlock()
 }

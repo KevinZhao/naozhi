@@ -385,6 +385,7 @@ func (s *Scheduler) execute(j *Job) {
 
 	agentID, cleanText := routing.ResolveAgent(j.Prompt, s.agentCommands)
 	opts := s.agents[agentID]
+	opts.Exempt = true // cron sessions must not count toward maxProcs or evict user sessions
 	key := "cron:" + j.ID
 
 	sess, _, err := s.router.GetOrCreate(ctx, key, opts)

@@ -220,7 +220,13 @@ func main() {
 	case "error":
 		level = slog.LevelError
 	}
-	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+	var handler slog.Handler
+	if cfg.Log.Format == "text" {
+		handler = slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+	} else {
+		handler = slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})
+	}
+	slog.SetDefault(slog.New(handler))
 
 	// CLI Protocol + Wrapper
 	applyClaudeEnvSettings()
@@ -417,6 +423,7 @@ func main() {
 		AllowedRoot:       workspace,
 		NoOutputTimeout:   noOutputTimeout,
 		TotalTimeout:      totalTimeout,
+		DashboardToken:    cfg.Server.DashboardToken,
 		ProjectManager:    projectMgr,
 		Nodes:             nodes,
 		ReverseNodeServer: rns,
@@ -434,8 +441,8 @@ func main() {
 		conn := connector.New(connCfg, router, projectMgr)
 		if claudeDir != "" {
 			conn.SetDiscoverFunc(func() (json.RawMessage, error) {
-				excludePIDs := router.ManagedPIDs()
-				sessions, err := discovery.Scan(claudeDir, excludePIDs, nil, nil)
+				pids, sids, cwds := router.ManagedExcludeSets()
+				sessions, err := discovery.Scan(claudeDir, pids, sids, cwds)
 				if err != nil {
 					return json.Marshal([]any{})
 				}
@@ -493,9 +500,19 @@ func main() {
 		"platforms", len(platforms),
 	)
 
-	if err := srv.Start(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
-		slog.Error("server error", "err", err)
-		os.Exit(1)
+	serverErr := make(chan error, 1)
+	go func() {
+		serverErr <- srv.Start(ctx)
+	}()
+
+	select {
+	case err := <-serverErr:
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("server error", "err", err)
+			os.Exit(1)
+		}
+	case <-shutdownDone:
 	}
+	// Wait for both server and shutdown to complete
 	<-shutdownDone
 }

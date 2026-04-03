@@ -304,8 +304,12 @@ func (c *ReverseNodeConn) readLoop() {
 			copy(clients, c.subs[msg.Key])
 			c.subMu.Unlock()
 			out := wsServerMsg{Type: "event", Key: msg.Key, Event: msg.Event, Node: c.id}
+			data, err := json.Marshal(out)
+			if err != nil {
+				continue
+			}
 			for _, cl := range clients {
-				cl.sendJSON(out)
+				cl.sendRaw(data)
 			}
 
 		case "session_state":
@@ -314,8 +318,12 @@ func (c *ReverseNodeConn) readLoop() {
 			copy(clients, c.subs[msg.Key])
 			c.subMu.Unlock()
 			out := wsServerMsg{Type: "session_state", Key: msg.Key, State: msg.State, Node: c.id}
+			data, err := json.Marshal(out)
+			if err != nil {
+				continue
+			}
 			for _, cl := range clients {
-				cl.sendJSON(out)
+				cl.sendRaw(data)
 			}
 
 		case "subscribed":
@@ -325,8 +333,12 @@ func (c *ReverseNodeConn) readLoop() {
 			copy(clients, c.subs[msg.Key])
 			c.subMu.Unlock()
 			out := wsServerMsg{Type: "subscribed", Key: msg.Key, Node: c.id}
+			data, err := json.Marshal(out)
+			if err != nil {
+				continue
+			}
 			for _, cl := range clients {
-				cl.sendJSON(out)
+				cl.sendRaw(data)
 			}
 
 		case "subscribe_error":
@@ -337,8 +349,12 @@ func (c *ReverseNodeConn) readLoop() {
 			delete(c.subs, msg.Key)
 			c.subMu.Unlock()
 			out := wsServerMsg{Type: "error", Key: msg.Key, Node: c.id, Error: msg.Error}
+			data, err := json.Marshal(out)
+			if err != nil {
+				continue
+			}
 			for _, cl := range clients {
-				cl.sendJSON(out)
+				cl.sendRaw(data)
 			}
 		}
 	}

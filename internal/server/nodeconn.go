@@ -12,6 +12,7 @@ import (
 // *wsClient type.
 type wsEventSink interface {
 	sendJSON(v interface{})
+	sendRaw(data []byte)
 }
 
 // NodeConn is the unified interface for both direct (NodeClient, HTTP) and

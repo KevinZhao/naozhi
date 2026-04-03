@@ -72,7 +72,8 @@ type AgentConfig struct {
 }
 
 type ServerConfig struct {
-	Addr string `yaml:"addr"`
+	Addr           string `yaml:"addr"`
+	DashboardToken string `yaml:"dashboard_token,omitempty"`
 }
 
 type CLIConfig struct {
@@ -119,8 +120,9 @@ type CronConfig struct {
 }
 
 type LogConfig struct {
-	Level string `yaml:"level"`
-	File  string `yaml:"file"`
+	Level  string `yaml:"level"`
+	Format string `yaml:"format"` // "json" (default) | "text"
+	File   string `yaml:"file"`
 }
 
 type SlackConfig struct {
@@ -188,11 +190,15 @@ func Load(path string) (*Config, error) {
 		cfg.Session.CWD = cfg.Session.Workspace
 	}
 
-	// Merge workspaces → nodes (workspaces is the preferred name)
+	// Merge workspaces → nodes (workspaces is the preferred name; nodes is deprecated)
 	if len(cfg.Workspaces) > 0 && len(cfg.Nodes) == 0 {
 		cfg.Nodes = cfg.Workspaces
+	} else if len(cfg.Nodes) > 0 && len(cfg.Workspaces) == 0 {
+		slog.Warn("'nodes' config key is deprecated, please rename to 'workspaces'")
+		cfg.Workspaces = cfg.Nodes
 	} else if len(cfg.Workspaces) > 0 && len(cfg.Nodes) > 0 {
-		slog.Warn("both 'nodes' and 'workspaces' configured; using 'nodes', ignoring 'workspaces'")
+		slog.Warn("both 'nodes' and 'workspaces' configured; using 'workspaces', ignoring 'nodes'")
+		cfg.Nodes = cfg.Workspaces
 	}
 
 	// Workspace identity defaults

@@ -241,6 +241,7 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 	}
 	r.mu.Unlock()
 
+	closedCount := len(toClose)
 	for _, proc := range toClose {
 		proc.Close()
 	}
@@ -248,9 +249,14 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 		r.shutdownCond.Broadcast()
 	}
 
-	r.mu.Lock()
-	r.countActive()
-	r.mu.Unlock()
+	if closedCount > 0 {
+		r.mu.Lock()
+		r.activeCount -= closedCount
+		if r.activeCount < 0 {
+			r.activeCount = 0
+		}
+		r.mu.Unlock()
+	}
 	r.notifyChange()
 }
 
@@ -304,13 +310,13 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, opts AgentOpts) (*ManagedSession, error) {
 	// Exempt sessions (planners) bypass maxProcs capacity check
 	if !opts.Exempt {
+		// Recount to correct drift from undetected process deaths (watchdog, crash)
 		r.countActive()
 		if r.activeCount+r.pendingSpawns >= r.maxProcs {
 			if !r.evictOldest() {
 				r.mu.Unlock()
 				return nil, fmt.Errorf("max concurrent processes reached (%d), all busy", r.maxProcs)
 			}
-			r.countActive()
 			if r.activeCount+r.pendingSpawns >= r.maxProcs {
 				r.mu.Unlock()
 				return nil, fmt.Errorf("max concurrent processes reached (%d), all busy", r.maxProcs)
@@ -488,7 +494,12 @@ func (r *Router) evictOldest() bool {
 		r.shutdownCond.Broadcast()
 	}
 	r.mu.Lock()
-	r.countActive()
+	if !oldest.Exempt {
+		r.activeCount--
+		if r.activeCount < 0 {
+			r.activeCount = 0
+		}
+	}
 	return true
 }
 
@@ -502,6 +513,7 @@ func (r *Router) Reset(key string) {
 		return
 	}
 
+	wasActive := !s.Exempt && s.process != nil && s.process.Alive()
 	proc := s.process
 	r.indexDel(key)
 	delete(r.sessions, key)
@@ -514,14 +526,56 @@ func (r *Router) Reset(key string) {
 		r.shutdownCond.Broadcast()
 	}
 
-	r.mu.Lock()
-	r.countActive()
-	r.mu.Unlock()
+	if wasActive {
+		r.mu.Lock()
+		r.activeCount--
+		if r.activeCount < 0 {
+			r.activeCount = 0
+		}
+		r.mu.Unlock()
+	}
 	slog.Info("session reset", "key", key)
 	r.notifyChange()
 }
 
-// Remove removes a session from the router without killing its process.
+// ResetAndRecreate atomically resets a session and spawns a new one for the same key.
+// This avoids the race window between Reset and GetOrCreate where a concurrent
+// message could create a session with wrong opts.
+func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, error) {
+	r.mu.Lock()
+
+	// Delete old session if present
+	if s, ok := r.sessions[key]; ok {
+		wasActive := !s.Exempt && s.process != nil && s.process.Alive()
+		proc := s.process
+		r.indexDel(key)
+		delete(r.sessions, key)
+
+		if proc != nil && proc.Alive() {
+			r.mu.Unlock()
+			proc.Close()
+			r.mu.Lock()
+			if wasActive {
+				r.activeCount--
+				if r.activeCount < 0 {
+					r.activeCount = 0
+				}
+			}
+		}
+	}
+
+	// Spawn new session while still holding mu (spawnSession handles unlock/relock)
+	s, err := r.spawnSession(ctx, key, "", opts)
+	if err != nil {
+		// spawnSession already unlocked mu on error
+		return nil, err
+	}
+	// spawnSession already unlocked mu on success
+	r.notifyChange()
+	return s, nil
+}
+
+// Remove removes a session from the router and kills its process.
 // Used by the dashboard to hide sessions from the list.
 func (r *Router) Remove(key string) bool {
 	r.mu.Lock()
@@ -531,6 +585,7 @@ func (r *Router) Remove(key string) bool {
 		return false
 	}
 
+	wasActive := !s.Exempt && s.process != nil && s.process.Alive()
 	// Kill process if alive
 	proc := s.process
 	r.indexDel(key)
@@ -544,9 +599,14 @@ func (r *Router) Remove(key string) bool {
 		r.shutdownCond.Broadcast()
 	}
 
-	r.mu.Lock()
-	r.countActive()
-	r.mu.Unlock()
+	if wasActive {
+		r.mu.Lock()
+		r.activeCount--
+		if r.activeCount < 0 {
+			r.activeCount = 0
+		}
+		r.mu.Unlock()
+	}
 	slog.Info("session removed", "key", key)
 	r.notifyChange()
 	return true
@@ -576,15 +636,20 @@ func (r *Router) Cleanup() {
 	}
 	r.mu.Unlock()
 
+	closedCount := 0
 	for _, e := range expired {
 		e.proc.Close()
+		closedCount++
 	}
 	if r.shutdownCond != nil {
 		r.shutdownCond.Broadcast()
 	}
 
 	r.mu.Lock()
-	r.countActive()
+	r.activeCount -= closedCount
+	if r.activeCount < 0 {
+		r.activeCount = 0
+	}
 
 	// Prune orphaned sessions: nil process, no session ID, past TTL
 	var pruned int
@@ -637,13 +702,13 @@ func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 
 // Shutdown gracefully closes all sessions, waiting for running ones to complete.
 func (r *Router) Shutdown() {
-	// Deadline goroutine: broadcast to unblock Wait() when timeout expires
-	go func() {
-		time.Sleep(shutdownTimeout)
+	// Deadline timer: broadcast to unblock Wait() when timeout expires
+	timer := time.AfterFunc(shutdownTimeout, func() {
 		if r.shutdownCond != nil {
 			r.shutdownCond.Broadcast()
 		}
-	}()
+	})
+	defer timer.Stop()
 
 	r.mu.Lock()
 
@@ -758,6 +823,30 @@ func (r *Router) InterruptSession(key string) bool {
 		return false
 	}
 	return s.Interrupt()
+}
+
+// ManagedExcludeSets returns PIDs, session IDs, and CWDs of all managed sessions
+// in a single lock acquisition. Used by discovery.Scan to avoid three separate mutex grabs.
+func (r *Router) ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]bool, cwds map[string]bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	pids = make(map[int]bool)
+	sessionIDs = make(map[string]bool)
+	cwds = make(map[string]bool)
+	for _, s := range r.sessions {
+		if id := s.getSessionID(); id != "" {
+			sessionIDs[id] = true
+		}
+		if s.process != nil && s.process.Alive() {
+			if pid := s.process.PID(); pid > 0 {
+				pids[pid] = true
+			}
+			if s.workspace != "" {
+				cwds[s.workspace] = true
+			}
+		}
+	}
+	return
 }
 
 // ManagedPIDs returns the OS PIDs of all alive managed processes.

@@ -141,6 +141,9 @@ func injectSession(r *Router, key string, proc processIface) *ManagedSession {
 	}
 	s.touchLastActive()
 	r.sessions[key] = s
+	if !s.Exempt && proc != nil && proc.Alive() {
+		r.activeCount++
+	}
 	return s
 }
 

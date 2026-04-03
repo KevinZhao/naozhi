@@ -10,7 +10,7 @@ import (
 )
 
 const (
-	wsMaxMessageSize = 8192
+	wsMaxMessageSize = 262144 // 256KB — code review payloads can exceed 8KB
 	wsWriteWait      = 10 * time.Second
 	wsPongWait       = 60 * time.Second
 	wsPingPeriod     = (wsPongWait * 9) / 10

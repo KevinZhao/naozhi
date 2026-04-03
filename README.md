@@ -133,8 +133,9 @@ cli:
 session:
   max_procs: 3                           # 最大并发 CLI 进程
   ttl: "30m"                             # 空闲回收超时
-  no_output_timeout: "2m"                # 无输出 watchdog
-  total_timeout: "5m"                    # 单轮总超时 watchdog
+  watchdog:
+    no_output_timeout: "2m"              # 无输出 watchdog
+    total_timeout: "5m"                  # 单轮总超时 watchdog
   store_path: "~/.naozhi/sessions.json"  # session 持久化路径
 
 agents:

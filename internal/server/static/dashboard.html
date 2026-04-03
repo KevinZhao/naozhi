@@ -99,6 +99,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 /* Toast */
 .toast{position:fixed;bottom:20px;right:20px;background:#da3633;color:#fff;padding:8px 16px;border-radius:8px;font-size:14px;z-index:100;opacity:0;pointer-events:none;transition:opacity .3s}
 .toast.show{opacity:1;pointer-events:auto}
+.toast.success{background:#238636}
 
 /* Auth modal */
 .modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:200}
@@ -1250,7 +1251,7 @@ function saveToken() {
   const input = document.getElementById('token-input');
   if (input && input.value) {
     setToken(input.value.trim());
-    showToast('token saved, retry your message');
+    showToast('token saved, retry your message', 'success');
     wsm.disconnect();
     wsm.connect();
   }
@@ -1260,7 +1261,7 @@ function saveToken() {
 function createNewSession() {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  const ws = defaultWorkspace || '/home/ec2-user/workspace';
+  const ws = defaultWorkspace || '';
   overlay.innerHTML =
     '<div class="modal">' +
       '<h3>New Session</h3>' +
@@ -1330,24 +1331,41 @@ function createSessionInProject(projectPath, projectName, nodeId) {
 
 // --- Utilities ---
 
-function showToast(msg) {
+function showToast(msg, type) {
   const el = document.getElementById('toast');
   el.textContent = msg;
-  el.className = 'toast show';
+  el.className = 'toast show' + (type === 'success' ? ' success' : '');
   setTimeout(() => { el.className = 'toast'; }, 3000);
 }
 
+function fallbackCopy(text) {
+  const ta = document.createElement('textarea');
+  ta.value = text;
+  ta.style.cssText = 'position:fixed;left:-9999px';
+  document.body.appendChild(ta);
+  ta.select();
+  document.execCommand('copy');
+  document.body.removeChild(ta);
+}
+
 function copyText(text) {
-  navigator.clipboard.writeText(text).then(() => showToastVariant('copied', 'success'));
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(text).then(() => showToastVariant('copied', 'success')).catch(() => { fallbackCopy(text); showToastVariant('copied', 'success'); });
+  } else {
+    fallbackCopy(text);
+    showToastVariant('copied', 'success');
+  }
 }
 
 function copyCodeBlock(btn) {
-  const code = btn.closest('.md-code-wrap').querySelector('code');
-  navigator.clipboard.writeText(code.textContent).then(() => {
-    btn.textContent = 'copied!';
-    btn.classList.add('copied');
-    setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500);
-  });
+  const code = btn.closest('.md-code-wrap').querySelector('code').textContent;
+  const done = () => { btn.textContent = 'copied!'; btn.classList.add('copied'); setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500); };
+  if (navigator.clipboard) {
+    navigator.clipboard.writeText(code).then(done).catch(() => { fallbackCopy(code); done(); });
+  } else {
+    fallbackCopy(code);
+    done();
+  }
 }
 
 function shortPath(p) {
@@ -1511,8 +1529,11 @@ function nodeColor(id) {
 }
 
 function getCollapsedNodes() {
-  try { return new Set(JSON.parse(localStorage.getItem('naozhi_collapsed_nodes') || '[]')); }
-  catch(_) { return new Set(); }
+  try {
+    const raw = localStorage.getItem('naozhi_collapsed_nodes');
+    if (raw === null) return new Set(['_more_projects']);
+    return new Set(JSON.parse(raw));
+  } catch(_) { return new Set(['_more_projects']); }
 }
 
 function saveNodeToggle(el) {
@@ -1760,6 +1781,13 @@ const wsm = {
           }
         }, 1500);
       }
+      // For sessions we're already subscribed to: re-subscribe to ensure the
+      // event push loop is connected to the current process. Covers cases where
+      // the process was restarted but session_state didn't trigger re-subscribe
+      // (e.g., ready → running transition).
+      if (ackKey === selectedKey && wsm.subscribedKey === ackKey && !wsm._pendingSubscribeKey) {
+        wsm.subscribe(ackKey, selectedNode);
+      }
     } else if (msg.status === 'error') {
       showToastVariant('send error: ' + (msg.error || 'unknown'), 'error');
     }
@@ -1768,6 +1796,7 @@ const wsm = {
   onSessionState(msg) {
     const msgNode = msg.node || 'local';
     const sKey = sid(msg.key, msgNode);
+    const prevState = sessionsData[sKey] ? sessionsData[sKey].state : null;
     if (sessionsData[sKey]) {
       sessionsData[sKey].state = msg.state;
       if (msg.reason) sessionsData[sKey].death_reason = msg.reason;
@@ -1782,6 +1811,14 @@ const wsm = {
       card.classList.toggle('dead-card', msg.state === 'dead' || msg.state === 'suspended');
     }
     if (msg.key === selectedKey && msgNode === selectedNode) updateMainState(msg.state, msg.reason);
+    // Process restarted (dead/suspended → running): re-subscribe to pick up the
+    // new process's event log. The old eventPushLoop exited when the old process
+    // closed its subscriber channels, so the subscription is stale.
+    if (msg.key === selectedKey && msgNode === selectedNode &&
+        msg.state === 'running' && (prevState === 'dead' || prevState === 'suspended') &&
+        wsm.subscribedKey === msg.key) {
+      wsm.subscribe(msg.key, selectedNode);
+    }
     // Session became suspended: re-render sidebar to move it to history
     if (msg.state === 'suspended') { lastSessionsJSON = ''; fetchSessions(); }
   },

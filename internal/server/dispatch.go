@@ -92,7 +92,7 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		// /clear is a Claude Code built-in that doesn't work in stream-json mode,
 		// so we alias it to /new for equivalent behavior.
 		if trimmed == "/new" || strings.HasPrefix(trimmed, "/new ") ||
-			trimmed == "/clear" {
+			trimmed == "/clear" || strings.HasPrefix(trimmed, "/clear ") {
 			agentToReset := ""
 			if parts := strings.SplitN(trimmed, " ", 2); len(parts) > 1 {
 				agentToReset = parts[1]
@@ -129,18 +129,29 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 				if id, ok := s.agentCommands[agentToReset]; ok {
 					agentID = id
 				} else {
-					if p := s.platforms[msg.Platform]; p != nil {
-						errMsg := "未知的 agent: " + agentToReset
-						if len(s.agentCommands) > 0 {
-							var names []string
-							for cmd := range s.agentCommands {
-								names = append(names, cmd)
-							}
-							errMsg += "\n可用: " + strings.Join(names, ", ")
+					// Try reverse lookup: user may pass agent ID directly (e.g. /new code-reviewer)
+					found := false
+					for _, id := range s.agentCommands {
+						if id == agentToReset {
+							agentID = id
+							found = true
+							break
 						}
-						p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg})
 					}
-					return
+					if !found {
+						if p := s.platforms[msg.Platform]; p != nil {
+							errMsg := "未知的 agent: " + agentToReset
+							if len(s.agentCommands) > 0 {
+								var names []string
+								for cmd := range s.agentCommands {
+									names = append(names, cmd)
+								}
+								errMsg += "\n可用: " + strings.Join(names, ", ")
+							}
+							p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg})
+						}
+						return
+					}
 				}
 			}
 			key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
@@ -165,6 +176,18 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 				}
 			}
 			return
+		}
+
+		// Warn about unrecognized slash commands (likely typos)
+		// Skip paths like /home/user/... (contain slash after the leading one)
+		if agentID == "general" && strings.HasPrefix(cleanText, "/") {
+			cmd := strings.SplitN(cleanText, " ", 2)[0]
+			if !strings.Contains(cmd[1:], "/") {
+				if p := s.platforms[msg.Platform]; p != nil {
+					p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "未知命令: " + cmd + "\n输入 /help 查看可用命令，或直接发送消息。"})
+				}
+				return
+			}
 		}
 
 		// Determine session key and opts: project-bound chat routes to planner
@@ -302,7 +325,21 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 
 		log.Info("message received", "agent", agentID, "text_len", len(cleanText), "images", len(images))
 
+		if s.hub != nil {
+			s.hub.broadcastState(key, "running", "")
+		}
+
 		result, err := sess.Send(ctx, cleanText, images, onEvent)
+
+		// Broadcast state to dashboard after Send completes
+		if s.hub != nil {
+			if rs := s.router.GetSession(key); rs != nil {
+				snap := rs.Snapshot()
+				s.hub.broadcastState(key, snap.State, snap.DeathReason)
+			}
+			s.hub.BroadcastSessionsUpdate()
+		}
+
 		if err != nil {
 			log.Error("send to claude", "err", err)
 			var errMsg string
@@ -613,6 +650,11 @@ func (s *Server) handleCdCommand(ctx context.Context, msg platform.IncomingMessa
 	if err != nil || !info.IsDir() {
 		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "目录不存在: " + absPath})
 		return
+	}
+
+	// Resolve symlinks before allowedRoot check to prevent symlink bypass
+	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
+		absPath = resolved
 	}
 
 	// Enforce path whitelist

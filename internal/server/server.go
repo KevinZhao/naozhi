@@ -48,6 +48,7 @@ type Server struct {
 	allowedRoot       string // /cd is restricted to paths under this directory
 	transcriber       transcribe.Service
 	nodeCache         *NodeCacheManager // background-cached remote node data
+	discoveryCache    *discoveryCache   // background-cached local discovery results
 
 	// Watchdog configuration stored for user-facing timeout error messages.
 	noOutputTimeout time.Duration
@@ -94,6 +95,9 @@ func (g *sessionGuard) ShouldSendWait(key string) bool {
 
 func (g *sessionGuard) Release(key string) {
 	g.active.Delete(key)
+	g.waitMu.Lock()
+	delete(g.lastWait, key)
+	g.waitMu.Unlock()
 }
 
 // New creates a new Server.
@@ -173,6 +177,8 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		},
 	)
 
+	s.discoveryCache = newDiscoveryCache(claudeDir, s.router.ManagedExcludeSets, opts.ProjectManager)
+
 	if opts.ReverseNodeServer != nil {
 		s.reverseNodeServer = opts.ReverseNodeServer
 		for id, displayName := range opts.ReverseNodeServer.AllNodes() {
@@ -223,6 +229,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.mux.HandleFunc("GET /health", s.handleHealth)
 	s.registerDashboard()
 	s.nodeCache.StartLoop(ctx)
+	s.discoveryCache.startLoop(ctx)
 	s.startProjectScanLoop(ctx)
 	slog.Info("server starting", "addr", s.addr)
 

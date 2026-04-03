@@ -47,6 +47,9 @@ type Hub struct {
 	projectMgr *project.Manager
 	ctx        context.Context // cancelled on Shutdown to stop in-flight sends
 	cancel     context.CancelFunc
+
+	debounceMu    sync.Mutex
+	debounceTimer *time.Timer
 }
 
 // NewHub creates a new WebSocket hub.
@@ -365,8 +368,24 @@ func (h *Hub) broadcastState(key, state, reason string) {
 	}
 }
 
-// BroadcastSessionsUpdate notifies all connected WS clients that the session list changed.
+// BroadcastSessionsUpdate debounces notifications: resets a 200ms timer on each
+// call; the actual broadcast fires only when no further calls arrive within the window.
 func (h *Hub) BroadcastSessionsUpdate() {
+	h.debounceMu.Lock()
+	defer h.debounceMu.Unlock()
+	if h.debounceTimer != nil {
+		h.debounceTimer.Reset(200 * time.Millisecond)
+		return
+	}
+	h.debounceTimer = time.AfterFunc(200*time.Millisecond, func() {
+		h.debounceMu.Lock()
+		h.debounceTimer = nil
+		h.debounceMu.Unlock()
+		h.doBroadcastSessionsUpdate()
+	})
+}
+
+func (h *Hub) doBroadcastSessionsUpdate() {
 	data, err := json.Marshal(wsServerMsg{Type: "sessions_update"})
 	if err != nil {
 		return
@@ -401,6 +420,14 @@ func (h *Hub) BroadcastCronResult(jobID, _, _ string) {
 // Shutdown closes all WebSocket client connections and relays.
 func (h *Hub) Shutdown() {
 	h.cancel() // cancel in-flight send goroutines
+
+	// Stop debounce timer
+	h.debounceMu.Lock()
+	if h.debounceTimer != nil {
+		h.debounceTimer.Stop()
+		h.debounceTimer = nil
+	}
+	h.debounceMu.Unlock()
 
 	// Close node connections under nodesMu
 	h.nodesMu.RLock()

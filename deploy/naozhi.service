@@ -1,9 +1,11 @@
 [Unit]
 Description=Naozhi - Claude Code IM Gateway
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
+# TODO: Change User, WorkingDirectory, and ExecStart paths to match your deployment
 User=ec2-user
 WorkingDirectory=/home/ec2-user/naozhi
 ExecStart=/home/ec2-user/naozhi/bin/naozhi --config /home/ec2-user/naozhi/config.yaml
