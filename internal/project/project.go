@@ -10,10 +10,10 @@ import (
 
 // Project represents a workspace folder discovered under projects_root.
 type Project struct {
-	Name       string        // directory name (unique ID)
-	Path       string        // absolute filesystem path
-	PathPrefix string        // Path + "/" — precomputed for ResolveWorkspaces prefix matching
-	Config     ProjectConfig // loaded from .naozhi/project.yaml
+	Name       string        `json:"name"`                  // directory name (unique ID)
+	Path       string        `json:"path"`                  // absolute filesystem path
+	PathPrefix string        `json:"path_prefix,omitempty"` // Path + "/" — precomputed for ResolveWorkspaces prefix matching
+	Config     ProjectConfig `json:"config"`                // loaded from .naozhi/project.yaml
 }
 
 // ProjectConfig is persisted to .naozhi/project.yaml inside each project directory.

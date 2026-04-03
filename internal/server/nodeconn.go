@@ -19,6 +19,7 @@ type wsEventSink interface {
 type NodeConn interface {
 	NodeID() string
 	DisplayName() string
+	RemoteAddr() string
 	Status() string // "ok" | "error" | "connecting"
 
 	FetchSessions(ctx context.Context) ([]map[string]any, error)

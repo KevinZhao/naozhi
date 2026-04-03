@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -267,22 +268,61 @@ func main() {
 	// Start cleanup loop
 	router.StartCleanupLoop(ctx, cfg.ParseTTL()/2)
 
-	// Register platforms
-	platforms := make(map[string]platform.Platform)
-	if cfg.Platforms.Feishu != nil {
-		// Initialize transcriber if configured
-		var stt transcribe.Service
-		if cfg.Transcribe != nil && cfg.Transcribe.Enabled {
-			stt, err = transcribe.New(ctx, transcribe.Config{
+	// Parallel init: transcriber and project scan can overlap
+	var (
+		stt        transcribe.Service
+		sttErr     error
+		projectMgr *project.Manager
+		projErr    error
+		initWg     sync.WaitGroup
+	)
+	if cfg.Transcribe != nil && cfg.Transcribe.Enabled {
+		initWg.Add(1)
+		go func() {
+			defer initWg.Done()
+			stt, sttErr = transcribe.New(ctx, transcribe.Config{
 				Region:       cfg.Transcribe.Region,
 				LanguageCode: cfg.Transcribe.Language,
 			})
-			if err != nil {
-				slog.Error("init transcriber", "err", err)
-				os.Exit(1)
+			if sttErr == nil {
+				slog.Info("transcribe enabled", "region", cfg.Transcribe.Region, "language", cfg.Transcribe.Language)
 			}
-			slog.Info("transcribe enabled", "region", cfg.Transcribe.Region, "language", cfg.Transcribe.Language)
-		}
+		}()
+	}
+	if cfg.Projects.Root != "" {
+		initWg.Add(1)
+		go func() {
+			defer initWg.Done()
+			root := pathutil.ExpandHome(cfg.Projects.Root)
+			mgr, err := project.NewManager(root, project.PlannerDefaults{
+				Model:  cfg.Projects.PlannerDefaults.Model,
+				Prompt: cfg.Projects.PlannerDefaults.Prompt,
+			})
+			if err != nil {
+				projErr = fmt.Errorf("init project manager: %w", err)
+				return
+			}
+			if err := mgr.Scan(); err != nil {
+				projErr = fmt.Errorf("scan projects: %w", err)
+				return
+			}
+			projectMgr = mgr
+			slog.Info("projects enabled", "root", root, "count", len(mgr.All()))
+		}()
+	}
+	initWg.Wait()
+	if sttErr != nil {
+		slog.Error("init transcriber", "err", sttErr)
+		os.Exit(1)
+	}
+	if projErr != nil {
+		slog.Error("init failed", "err", projErr)
+		os.Exit(1)
+	}
+
+	// Register platforms
+	platforms := make(map[string]platform.Platform)
+	if cfg.Platforms.Feishu != nil {
 		f := feishu.New(feishu.Config{
 			AppID:             cfg.Platforms.Feishu.AppID,
 			AppSecret:         cfg.Platforms.Feishu.AppSecret,
@@ -353,26 +393,6 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Project Manager (optional, enabled when projects.root is configured)
-	var projectMgr *project.Manager
-	if cfg.Projects.Root != "" {
-		root := pathutil.ExpandHome(cfg.Projects.Root)
-		mgr, err := project.NewManager(root, project.PlannerDefaults{
-			Model:  cfg.Projects.PlannerDefaults.Model,
-			Prompt: cfg.Projects.PlannerDefaults.Prompt,
-		})
-		if err != nil {
-			slog.Error("init project manager", "err", err)
-			os.Exit(1)
-		}
-		if err := mgr.Scan(); err != nil {
-			slog.Error("scan projects", "err", err)
-			os.Exit(1)
-		}
-		projectMgr = mgr
-		slog.Info("projects enabled", "root", root, "count", len(mgr.All()))
-	}
-
 	// Configure remote nodes for multi-node aggregation
 	var nodes map[string]server.NodeConn
 	if len(cfg.Nodes) > 0 {
@@ -400,6 +420,7 @@ func main() {
 		ProjectManager:    projectMgr,
 		Nodes:             nodes,
 		ReverseNodeServer: rns,
+		Transcriber:       stt,
 	})
 
 	// Start upstream connector (this node connects to a primary)
@@ -414,7 +435,7 @@ func main() {
 		if claudeDir != "" {
 			conn.SetDiscoverFunc(func() (json.RawMessage, error) {
 				excludePIDs := router.ManagedPIDs()
-				sessions, err := discovery.Scan(claudeDir, excludePIDs, nil)
+				sessions, err := discovery.Scan(claudeDir, excludePIDs, nil, nil)
 				if err != nil {
 					return json.Marshal([]any{})
 				}

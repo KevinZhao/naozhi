@@ -551,6 +551,13 @@ func (p *Process) GetState() ProcessState {
 	return p.State
 }
 
+// GetSessionID returns the session ID in a thread-safe manner.
+func (p *Process) GetSessionID() string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.SessionID
+}
+
 // TotalCost returns the cumulative cost.
 func (p *Process) TotalCost() float64 {
 	p.mu.Lock()

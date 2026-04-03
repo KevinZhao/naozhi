@@ -43,7 +43,7 @@ type Hub struct {
 	dashToken  string
 	guard      *sessionGuard
 	nodes      map[string]NodeConn
-	nodesMu    *sync.RWMutex   // shared with Server.nodesMu — all nodes map access must use this
+	nodesMu    *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
 	projectMgr *project.Manager
 	ctx        context.Context // cancelled on Shutdown to stop in-flight sends
 	cancel     context.CancelFunc
@@ -53,10 +53,10 @@ type Hub struct {
 func NewHub(router *session.Router, agents map[string]session.AgentOpts, agentCmds map[string]string, dashToken string, guard *sessionGuard, nodes map[string]NodeConn, nodesMu *sync.RWMutex, projectMgr *project.Manager) *Hub {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Hub{
-		clients:   make(map[*wsClient]struct{}),
-		router:    router,
-		agents:    agents,
-		agentCmds: agentCmds,
+		clients:    make(map[*wsClient]struct{}),
+		router:     router,
+		agents:     agents,
+		agentCmds:  agentCmds,
 		dashToken:  dashToken,
 		guard:      guard,
 		nodes:      nodes,
@@ -278,6 +278,7 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 		sess, _, err := h.router.GetOrCreate(ctx, key, opts)
 		if err != nil {
 			slog.Error("ws send: get session", "key", key, "err", err)
+			c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: key, Error: err.Error()})
 			return
 		}
 
@@ -367,6 +368,24 @@ func (h *Hub) broadcastState(key, state, reason string) {
 // BroadcastSessionsUpdate notifies all connected WS clients that the session list changed.
 func (h *Hub) BroadcastSessionsUpdate() {
 	data, err := json.Marshal(wsServerMsg{Type: "sessions_update"})
+	if err != nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		if c.authenticated.Load() {
+			c.sendRaw(data)
+		}
+	}
+}
+
+// BroadcastCronResult notifies all connected WS clients that a cron job completed.
+func (h *Hub) BroadcastCronResult(jobID, _, _ string) {
+	data, err := json.Marshal(map[string]string{
+		"type":   "cron_result",
+		"job_id": jobID,
+	})
 	if err != nil {
 		return
 	}

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -36,6 +37,13 @@ func (s *Server) registerDashboard() {
 	// Push session list changes to WS clients
 	s.router.SetOnChange(func() { s.hub.BroadcastSessionsUpdate() })
 
+	// Push cron execution results to WS clients
+	if s.scheduler != nil {
+		s.scheduler.SetOnExecute(func(jobID, result, errMsg string) {
+			s.hub.BroadcastCronResult(jobID, result, errMsg)
+		})
+	}
+
 	s.mux.HandleFunc("GET /api/sessions", s.handleAPISessions)
 	s.mux.HandleFunc("GET /api/sessions/events", s.handleAPISessionEvents)
 	s.mux.HandleFunc("POST /api/sessions/send", s.handleAPISend)
@@ -47,6 +55,12 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /api/projects/config", s.handleAPIProjectConfigGet)
 	s.mux.HandleFunc("PUT /api/projects/config", s.handleAPIProjectConfigPut)
 	s.mux.HandleFunc("POST /api/projects/planner/restart", s.handleAPIProjectPlannerRestart)
+	s.mux.HandleFunc("POST /api/transcribe", s.handleAPITranscribe)
+	s.mux.HandleFunc("GET /api/cron", s.handleAPICronList)
+	s.mux.HandleFunc("POST /api/cron", s.handleAPICronCreate)
+	s.mux.HandleFunc("DELETE /api/cron", s.handleAPICronDelete)
+	s.mux.HandleFunc("POST /api/cron/pause", s.handleAPICronPause)
+	s.mux.HandleFunc("POST /api/cron/resume", s.handleAPICronResume)
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
 	s.mux.HandleFunc("GET /manifest.json", s.handleManifest)
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
@@ -186,11 +200,11 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 	hasNodes := len(s.nodes) > 0
 	s.nodesMu.RUnlock()
 	if hasNodes {
-		cachedProjects := s.getCachedNodeProjects()
+		cachedProjects := s.nodeCache.Projects()
 		for _, items := range cachedProjects {
 			for _, item := range items {
-				name, _ := item["name"].(string)
-				path, _ := item["path"].(string)
+				name := strOrFallback(item, "name", "Name")
+				path := strOrFallback(item, "path", "Path")
 				node, _ := item["node"].(string)
 				if name != "" {
 					projectList = append(projectList, map[string]string{"name": name, "path": path, "node": node})
@@ -238,7 +252,7 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		"local": map[string]any{"display_name": localName, "status": "ok"},
 	}
 
-	cachedSessions, cachedStatus := s.getCachedNodeSessions()
+	cachedSessions, cachedStatus := s.nodeCache.Sessions()
 	for id, nc := range nodesSnapshot {
 		status := cachedStatus[id]
 		if status == "" {
@@ -247,6 +261,7 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		nodeStatus[id] = map[string]any{
 			"display_name": nc.DisplayName(),
 			"status":       status,
+			"remote_addr":  nc.RemoteAddr(),
 		}
 		for _, rs := range cachedSessions[id] {
 			allSessions = append(allSessions, rs)
@@ -561,7 +576,7 @@ func (s *Server) handleAPIDiscovered(w http.ResponseWriter, r *http.Request) {
 	}
 
 	excludePIDs := s.router.ManagedPIDs()
-	sessions, err := discovery.Scan(s.claudeDir, excludePIDs, s.router.ManagedSessionIDs())
+	sessions, err := discovery.Scan(s.claudeDir, excludePIDs, s.router.ManagedSessionIDs(), s.router.ManagedCWDs())
 	if err != nil {
 		slog.Warn("discovery scan", "err", err)
 		sessions = nil
@@ -591,7 +606,7 @@ func (s *Server) handleAPIDiscovered(w http.ResponseWriter, r *http.Request) {
 		for i := range sessions {
 			sessions[i].Node = "local"
 		}
-		cachedDiscovered := s.getCachedNodeDiscovered()
+		cachedDiscovered := s.nodeCache.Discovered()
 		allDiscovered := make([]any, 0, len(sessions))
 		for _, d := range sessions {
 			allDiscovered = append(allDiscovered, d)
@@ -666,16 +681,6 @@ func (s *Server) handleAPIDiscoveredPreview(w http.ResponseWriter, r *http.Reque
 	json.NewEncoder(w).Encode(entries)
 }
 
-// verifyProcIdentity checks that the process at pid still has the expected
-// start time, guarding against PID reuse between scan and signal.
-func verifyProcIdentity(pid int, expectedStartTime uint64) bool {
-	actual, err := discovery.ProcStartTime(pid)
-	if err != nil {
-		return false
-	}
-	return actual == expectedStartTime
-}
-
 func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 	if !s.checkBearerAuth(w, r) {
 		return
@@ -721,7 +726,7 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 	// C2 fix: verify PID is in the discovered list before killing
 	if s.claudeDir != "" {
 		excludePIDs := s.router.ManagedPIDs()
-		discovered, _ := discovery.Scan(s.claudeDir, excludePIDs, nil)
+		discovered, _ := discovery.Scan(s.claudeDir, excludePIDs, nil, nil)
 		pidFound := false
 		for _, d := range discovered {
 			if d.PID == req.PID && d.SessionID == req.SessionID {
@@ -791,4 +796,255 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "key": key})
+}
+
+// strOrFallback extracts a string from a map, trying the primary key first then the fallback.
+// Used to handle remote nodes that may send Go-default JSON keys (e.g. "Name") instead of
+// tagged lowercase keys (e.g. "name").
+func strOrFallback(m map[string]any, key, fallback string) string {
+	if v, ok := m[key].(string); ok && v != "" {
+		return v
+	}
+	v, _ := m[fallback].(string)
+	return v
+}
+
+// handleAPITranscribe accepts an audio file upload and returns transcribed text.
+// POST /api/transcribe  (multipart/form-data, field "audio")
+func (s *Server) handleAPITranscribe(w http.ResponseWriter, r *http.Request) {
+	if !s.checkBearerAuth(w, r) {
+		return
+	}
+	if s.transcriber == nil {
+		http.Error(w, "transcription not configured", http.StatusNotImplemented)
+		return
+	}
+
+	const maxAudioSize = 10 << 20 // 10 MB
+	r.Body = http.MaxBytesReader(w, r.Body, maxAudioSize+4096)
+	if err := r.ParseMultipartForm(maxAudioSize); err != nil {
+		http.Error(w, "invalid multipart form", http.StatusBadRequest)
+		return
+	}
+	defer r.MultipartForm.RemoveAll()
+
+	files := r.MultipartForm.File["audio"]
+	if len(files) == 0 {
+		http.Error(w, "missing audio field", http.StatusBadRequest)
+		return
+	}
+	fh := files[0]
+
+	f, err := fh.Open()
+	if err != nil {
+		http.Error(w, "failed to read audio", http.StatusInternalServerError)
+		return
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(f)
+	if err != nil {
+		http.Error(w, "failed to read audio", http.StatusInternalServerError)
+		return
+	}
+
+	mimeType := fh.Header.Get("Content-Type")
+	text, err := s.transcriber.Transcribe(r.Context(), data, mimeType)
+	if err != nil {
+		slog.Warn("transcribe failed", "err", err, "mime", mimeType, "size", len(data))
+		http.Error(w, "transcription failed", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"text": text})
+}
+
+// ─── Cron API handlers ──────────────────────────────────────────────────────
+
+// GET /api/cron — list all cron jobs (unscoped, admin view).
+func (s *Server) handleAPICronList(w http.ResponseWriter, r *http.Request) {
+	if !s.checkBearerAuth(w, r) {
+		return
+	}
+	if s.scheduler == nil {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]any{"jobs": []any{}})
+		return
+	}
+
+	jobs := s.scheduler.ListAllJobs()
+	type cronJobView struct {
+		ID             string `json:"id"`
+		Schedule       string `json:"schedule"`
+		Prompt         string `json:"prompt"`
+		Platform       string `json:"platform"`
+		ChatID         string `json:"chat_id"`
+		CreatedBy      string `json:"created_by,omitempty"`
+		CreatedAt      int64  `json:"created_at"`
+		Paused         bool   `json:"paused"`
+		NotifyPlatform string `json:"notify_platform,omitempty"`
+		NotifyChatID   string `json:"notify_chat_id,omitempty"`
+		LastResult     string `json:"last_result,omitempty"`
+		LastRunAt      int64  `json:"last_run_at,omitempty"`
+		LastError      string `json:"last_error,omitempty"`
+		NextRun        int64  `json:"next_run,omitempty"`
+	}
+	views := make([]cronJobView, 0, len(jobs))
+	for _, j := range jobs {
+		v := cronJobView{
+			ID:             j.ID,
+			Schedule:       j.Schedule,
+			Prompt:         j.Prompt,
+			Platform:       j.Platform,
+			ChatID:         j.ChatID,
+			CreatedBy:      j.CreatedBy,
+			CreatedAt:      j.CreatedAt.UnixMilli(),
+			Paused:         j.Paused,
+			NotifyPlatform: j.NotifyPlatform,
+			NotifyChatID:   j.NotifyChatID,
+			LastResult:     j.LastResult,
+			LastError:      j.LastError,
+		}
+		if !j.LastRunAt.IsZero() {
+			v.LastRunAt = j.LastRunAt.UnixMilli()
+		}
+		if next := s.scheduler.NextRunByID(j.ID); !next.IsZero() {
+			v.NextRun = next.UnixMilli()
+		}
+		views = append(views, v)
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"jobs": views})
+}
+
+// POST /api/cron — create a new cron job from dashboard.
+func (s *Server) handleAPICronCreate(w http.ResponseWriter, r *http.Request) {
+	if !s.checkBearerAuth(w, r) {
+		return
+	}
+	if s.scheduler == nil {
+		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		return
+	}
+
+	var req struct {
+		Schedule       string `json:"schedule"`
+		Prompt         string `json:"prompt"`
+		NotifyPlatform string `json:"notify_platform,omitempty"`
+		NotifyChatID   string `json:"notify_chat_id,omitempty"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64 KB
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if req.Schedule == "" || req.Prompt == "" {
+		http.Error(w, "schedule and prompt are required", http.StatusBadRequest)
+		return
+	}
+
+	job := &cron.Job{
+		Schedule:       req.Schedule,
+		Prompt:         req.Prompt,
+		Platform:       "dashboard",
+		ChatID:         "global",
+		CreatedBy:      "dashboard",
+		NotifyPlatform: req.NotifyPlatform,
+		NotifyChatID:   req.NotifyChatID,
+	}
+	if err := s.scheduler.AddJob(job); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	slog.Info("cron job created via dashboard", "id", job.ID, "schedule", job.Schedule)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"id": job.ID})
+}
+
+// DELETE /api/cron?id=xxx — delete a cron job by exact ID.
+func (s *Server) handleAPICronDelete(w http.ResponseWriter, r *http.Request) {
+	if !s.checkBearerAuth(w, r) {
+		return
+	}
+	if s.scheduler == nil {
+		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		return
+	}
+
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+
+	j, err := s.scheduler.DeleteJobByID(id)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+
+	slog.Info("cron job deleted via dashboard", "id", j.ID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// POST /api/cron/pause — pause a cron job by exact ID.
+func (s *Server) handleAPICronPause(w http.ResponseWriter, r *http.Request) {
+	if !s.checkBearerAuth(w, r) {
+		return
+	}
+	if s.scheduler == nil {
+		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		return
+	}
+
+	var req struct {
+		ID string `json:"id"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KB
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+
+	if _, err := s.scheduler.PauseJobByID(req.ID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	slog.Info("cron job paused via dashboard", "id", req.ID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// POST /api/cron/resume — resume a paused cron job by exact ID.
+func (s *Server) handleAPICronResume(w http.ResponseWriter, r *http.Request) {
+	if !s.checkBearerAuth(w, r) {
+		return
+	}
+	if s.scheduler == nil {
+		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		return
+	}
+
+	var req struct {
+		ID string `json:"id"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KB
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+
+	if _, err := s.scheduler.ResumeJobByID(req.ID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	slog.Info("cron job resumed via dashboard", "id", req.ID)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }

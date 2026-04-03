@@ -20,12 +20,7 @@ Cross-compile for deployment target (ARM64 Linux):
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/naozhi ./cmd/naozhi/
 ```
 
-Deploy to remote EC2 via SSM:
-```bash
-./deploy/deploy.sh deploy   # build + upload to S3 + install on EC2
-./deploy/deploy.sh status   # check service status
-./deploy/deploy.sh logs     # view recent logs
-```
+Deploy: see `deploy/naozhi.service` for systemd unit. Manual deploy via SSM + S3.
 
 ## Architecture
 
@@ -51,6 +46,7 @@ cmd/naozhi/main.go
   -> routing      Command prefix parsing (shared by server + cron)
   -> reverse      WebSocket protocol types for multi-node communication
   -> pathutil     Path expansion utilities
+  -> transcribe   Voice message transcription (Amazon Transcribe Streaming)
 ```
 
 ### CLI Process Lifecycle
@@ -72,9 +68,10 @@ Process states: `Spawning -> Ready <-> Running -> Dead`. Dead processes with a S
 ```go
 type Protocol interface {
     Name() string
+    Clone() Protocol
     BuildArgs(opts SpawnOptions) []string
     Init(rw *JSONRW, resumeID string) (sessionID string, err error)
-    WriteMessage(w io.Writer, text string) error
+    WriteMessage(w io.Writer, text string, images []ImageData) error
     ReadEvent(line []byte) (ev Event, done bool, err error)
     HandleEvent(w io.Writer, ev Event) (handled bool)
 }
@@ -124,11 +121,11 @@ The project list is rescanned every 60s. Orphaned planner sessions for removed p
 
 The dashboard is an embedded single-page HTML (`server/static/dashboard.html`) served at `/dashboard`. Real-time updates use a WebSocket hub (`/ws`) with:
 
-- **Client messages**: `auth`, `subscribe` (with optional `after` timestamp), `unsubscribe`, `send`, `interrupt`
-- **Server messages**: `auth_ok`, `subscribed`, `history`, `event`, `session_state`, `sessions_update`, `send_ack`, `interrupt_ack`
+- **Client messages**: `auth`, `subscribe` (with optional `after` timestamp), `unsubscribe`, `send`, `interrupt`, `ping`
+- **Server messages**: `auth_ok`, `auth_fail`, `subscribed`, `unsubscribed`, `history`, `event`, `send_ack`, `pong`, `error`
 - Remote node events are relayed transparently -- subscribe with `node` field to stream from a remote session.
 
-REST API endpoints: `/api/sessions`, `/api/discovered`, `/api/discovered/takeover`, `/api/projects`, `/api/projects/config`, `/api/sessions/send`, `/api/sessions/events`.
+REST API endpoints: `/api/sessions` (GET/DELETE), `/api/sessions/events`, `/api/sessions/send`, `/api/discovered`, `/api/discovered/preview`, `/api/discovered/takeover`, `/api/projects`, `/api/projects/config` (GET/PUT), `/api/projects/planner/restart`, `/api/transcribe`, `/api/cron` (GET/POST/DELETE), `/api/cron/pause`, `/api/cron/resume`. WebSocket: `/ws` (dashboard), `/ws-node` (reverse-connect nodes).
 
 ### Session Discovery & Takeover
 
@@ -168,6 +165,7 @@ On SIGTERM/SIGINT:
 - **nodes**: Map of node_id -> {url, token, display_name} (poll remote nodes via HTTP)
 - **reverse_nodes**: Map of node_id -> {token, display_name} (accept incoming reverse connections)
 - **upstream**: `url` (ws://), `node_id`, `token`, `display_name` (connect to primary as reverse node)
+- **transcribe**: `enabled`, `provider` (`aws`), `region`, `language` (voice message STT)
 - **log**: `level` (debug/info/warn/error)
 
 Config field `session.workspace` is a deprecated alias for `session.cwd`. Both `nodes` and `workspaces` are accepted (workspaces is preferred name; nodes takes precedence if both present).

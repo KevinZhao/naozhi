@@ -248,6 +248,7 @@ func (n *NodeClient) ProxyUpdateConfig(ctx context.Context, projectName string, 
 func (n *NodeClient) NodeID() string      { return n.ID }
 func (n *NodeClient) DisplayName() string { return n.displayName }
 func (n *NodeClient) Status() string      { return "ok" }
+func (n *NodeClient) RemoteAddr() string  { return n.URL }
 
 func (n *NodeClient) Subscribe(c wsEventSink, key string, after int64) {
 	n.relayMu.Lock()

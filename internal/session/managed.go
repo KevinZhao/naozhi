@@ -12,6 +12,8 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
+const maxPersistedHistory = 500
+
 // processIface abstracts the CLI process lifecycle methods used by the router
 // and session layer. *cli.Process satisfies this interface.
 type processIface interface {
@@ -21,6 +23,7 @@ type processIface interface {
 	Interrupt()
 	Send(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
 	// Dashboard introspection
+	GetSessionID() string
 	GetState() cli.ProcessState
 	TotalCost() float64
 	EventEntries() []cli.EventEntry
@@ -199,23 +202,23 @@ func SessionKey(platform, chatType, id, agentID string) string {
 
 // SessionSnapshot is a point-in-time view of a session for the dashboard API.
 type SessionSnapshot struct {
-	Key          string   `json:"key"`
-	Platform     string   `json:"platform"`
-	Agent        string   `json:"agent"`
-	SessionID    string   `json:"session_id"`
-	State        string   `json:"state"`
-	Protocol     string   `json:"protocol"`
-	LastActive   int64    `json:"last_active"` // unix ms
-	TotalCost    float64  `json:"total_cost"`
-	Workspace    string   `json:"workspace,omitempty"`
-	DeathReason  string   `json:"death_reason,omitempty"`
-	ChatType     string   `json:"chat_type,omitempty"`
-	ChatID       string   `json:"chat_id,omitempty"`
-	Node         string   `json:"node,omitempty"`
-	LastPrompt   string   `json:"last_prompt,omitempty"`   // most recent user message
-	LastActivity string   `json:"last_activity,omitempty"` // most recent tool/thinking status
-	Project      string   `json:"project,omitempty"`       // project name (filled by server)
-	IsPlanner    bool     `json:"is_planner,omitempty"`    // true for project planner sessions
+	Key          string             `json:"key"`
+	Platform     string             `json:"platform"`
+	Agent        string             `json:"agent"`
+	SessionID    string             `json:"session_id"`
+	State        string             `json:"state"`
+	Protocol     string             `json:"protocol"`
+	LastActive   int64              `json:"last_active"` // unix ms
+	TotalCost    float64            `json:"total_cost"`
+	Workspace    string             `json:"workspace,omitempty"`
+	DeathReason  string             `json:"death_reason,omitempty"`
+	ChatType     string             `json:"chat_type,omitempty"`
+	ChatID       string             `json:"chat_id,omitempty"`
+	Node         string             `json:"node,omitempty"`
+	LastPrompt   string             `json:"last_prompt,omitempty"`   // most recent user message
+	LastActivity string             `json:"last_activity,omitempty"` // most recent tool/thinking status
+	Project      string             `json:"project,omitempty"`       // project name (filled by server)
+	IsPlanner    bool               `json:"is_planner,omitempty"`    // true for project planner sessions
 	Subagents    []cli.SubagentInfo `json:"subagents,omitempty"`     // active sub-agent types in current turn
 }
 
@@ -314,6 +317,11 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 	s.persistedHistory = append(s.persistedHistory, entries...)
+	if len(s.persistedHistory) > maxPersistedHistory {
+		trimmed := make([]cli.EventEntry, maxPersistedHistory)
+		copy(trimmed, s.persistedHistory[len(s.persistedHistory)-maxPersistedHistory:])
+		s.persistedHistory = trimmed
+	}
 	if s.process != nil {
 		s.process.InjectHistory(entries)
 	}

@@ -35,6 +35,7 @@ func (p *TestProcess) Send(ctx context.Context, text string, images []cli.ImageD
 	return &cli.SendResult{Text: "mock response"}, nil
 }
 
+func (p *TestProcess) GetSessionID() string           { return "" }
 func (p *TestProcess) GetState() cli.ProcessState     { return p.StateVal }
 func (p *TestProcess) TotalCost() float64             { return 0 }
 func (p *TestProcess) EventEntries() []cli.EventEntry { return p.EventLog.Entries() }

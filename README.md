@@ -126,7 +126,7 @@ server:
 cli:
   backend: claude                        # "claude" | "kiro"
   path: "~/.local/bin/claude"
-  model: "sonnet"                        # sonnet / opus / haiku
+  model: "sonnet"                        # Claude CLI model flag (sonnet/opus/haiku)
   args:
     - "--dangerously-skip-permissions"
 
@@ -193,10 +193,20 @@ naozhi --config ~/.naozhi/config.yaml  # 启动
 #### 部署步骤
 
 ```bash
-# 1. 设置 deploy/deploy.sh 中的 INSTANCE_ID
-vim deploy/deploy.sh  # 填入目标 EC2 Instance ID
+# 1. 交叉编译
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/naozhi ./cmd/naozhi/
 
-# 2. 在目标机器上创建环境变量文件（仅首次）
+# 2. 上传二进制到 EC2（通过 S3 或 scp）
+aws s3 cp bin/naozhi s3://your-bucket/naozhi
+# 在 EC2 上:
+aws s3 cp s3://your-bucket/naozhi /usr/local/bin/naozhi && chmod +x /usr/local/bin/naozhi
+
+# 3. 安装 systemd service（仅首次）
+sudo cp deploy/naozhi.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable naozhi
+
+# 4. 在目标机器上创建环境变量文件（仅首次）
 #    通过 SSM 登录目标机器：
 aws ssm start-session --target <INSTANCE_ID>
 #    创建凭据文件：
@@ -209,12 +219,12 @@ WEIXIN_BOT_TOKEN=your_weixin_bot_token
 EOF
 chmod 600 ~/.naozhi/env
 
-# 3. 一键部署（本机执行：交叉编译 + S3 上传 + EC2 安装 + 重启服务）
-./deploy/deploy.sh deploy
+# 3. 重启服务
+sudo systemctl restart naozhi
 
 # 4. 查看状态 / 日志
-./deploy/deploy.sh status
-./deploy/deploy.sh logs
+sudo systemctl status naozhi
+journalctl -u naozhi -f
 ```
 
 #### systemd 服务
@@ -271,8 +281,13 @@ internal/
   server/                     HTTP server + 消息处理 + Agent 路由
   cron/                       定时任务调度器
   routing/                    命令解析 (共享)
+  reverse/                    多节点 WebSocket 协议类型
+  connector/                  反向连接客户端 (NAT 穿越)
+  project/                    项目发现 + 规划器路由
+  discovery/                  外部 Claude 进程扫描 + 接管
+  transcribe/                 语音消息转写 (Amazon Transcribe)
   pathutil/                   路径工具 (共享)
-deploy/                       systemd + 部署脚本
+deploy/                       systemd service unit
 ```
 
 ## 设计文档

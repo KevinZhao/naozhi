@@ -27,8 +27,14 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 
 	entries := make([]storeEntry, 0, len(sessions))
 	for _, s := range sessions {
-		// Use getSessionID to avoid data race with concurrent Send
-		if sid := s.getSessionID(); sid != "" {
+		// Use getSessionID to avoid data race with concurrent Send.
+		// Fallback to process's SessionID which is set earlier (on system/init),
+		// before Send() completes and propagates it to ManagedSession.
+		sid := s.getSessionID()
+		if sid == "" && s.process != nil {
+			sid = s.process.GetSessionID()
+		}
+		if sid != "" {
 			var cost float64
 			if s.process != nil {
 				cost = s.process.TotalCost()

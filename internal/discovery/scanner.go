@@ -20,7 +20,10 @@ import (
 
 // runningThreshold is the JSONL mtime recency window used to classify a
 // discovered process as "running" (actively writing) vs "ready" (idle).
-const runningThreshold = 5 * time.Second
+// Set to 30s to avoid status flapping: Claude CLI may write JSONL during
+// idle housekeeping (compaction, MCP events, session index updates), so a
+// narrow window (e.g. 5s) causes ready->running oscillation on every scan.
+const runningThreshold = 30 * time.Second
 
 // DiscoveredSession represents a Claude CLI process found on the system.
 type DiscoveredSession struct {
@@ -59,7 +62,9 @@ type scanCandidate struct {
 // that are not managed by naozhi (excluded via excludePIDs).
 // excludeSessionIDs prevents the session-ID upgrade heuristic from assigning
 // a JSONL file that belongs to a naozhi-managed session to a CLI process.
-func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool) ([]DiscoveredSession, error) {
+// managedCWDs is the set of working directories that have active managed sessions;
+// session ID upgrade is skipped entirely for these CWDs to prevent cross-contamination.
+func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
 	sessDir := filepath.Join(claudeDir, "sessions")
 	entries, err := os.ReadDir(sessDir)
 	if err != nil {
@@ -132,6 +137,13 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 		// can swap session IDs between scans, causing takeover to target the
 		// wrong process.
 		if len(g.indices) > 1 {
+			continue
+		}
+
+		// Skip upgrade when a managed naozhi session is using the same CWD.
+		// Any recent JSONL in this directory likely belongs to the managed
+		// session, not the CLI process.
+		if managedCWDs[cwd] {
 			continue
 		}
 

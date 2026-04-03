@@ -20,6 +20,16 @@ type Job struct {
 	CreatedAt time.Time `json:"created_at"`
 	Paused    bool      `json:"paused"`
 
+	// Optional notification target for dashboard-created jobs.
+	// When set, execution results are also sent to this IM channel.
+	NotifyPlatform string `json:"notify_platform,omitempty"`
+	NotifyChatID   string `json:"notify_chat_id,omitempty"`
+
+	// Last execution result, persisted across restarts.
+	LastResult string    `json:"last_result,omitempty"`
+	LastRunAt  time.Time `json:"last_run_at,omitempty"`
+	LastError  string    `json:"last_error,omitempty"`
+
 	entryID robfigcron.EntryID // runtime only, not persisted
 }
 

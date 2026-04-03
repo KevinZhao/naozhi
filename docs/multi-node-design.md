@@ -1,8 +1,17 @@
 # Multi-Node Design
 
-One primary naozhi aggregates sessions from remote naozhi instances over HTTP/WS.
+One primary naozhi aggregates sessions from remote naozhi instances. Two transport modes are supported:
 
-## Concept
+- **Direct Mode**: Primary polls remote nodes via HTTP/WS (requires network reachability).
+- **Reverse Mode**: Remote nodes dial the primary over a persistent WebSocket (works behind NAT).
+
+Both modes coexist and implement the same `NodeConn` interface. The rest of the server is transport-agnostic.
+
+---
+
+## Direct Mode (HTTP Polling)
+
+### Architecture
 
 ```
 Remote Node A (macbook)          Primary Node (EC2)
@@ -13,9 +22,9 @@ claude CLI                       claude CLI
   +--------------------------------+   Browser / Feishu
 ```
 
-Prerequisite: primary can reach remote nodes via HTTP (WG, Tailscale, LAN, SSH tunnel, public IP — user's choice).
+Prerequisite: primary can reach remote nodes via HTTP (WG, Tailscale, LAN, SSH tunnel, public IP).
 
-## Config
+### Config
 
 ```yaml
 # Primary node config.yaml
@@ -32,21 +41,17 @@ nodes:
 
 Remote nodes run stock naozhi with `dashboard_token` set. No code changes needed on remote side.
 
-## API Changes
+### API Changes
 
 All changes are additive. Existing API works unchanged when `nodes` is not configured.
 
-### GET /api/sessions
-
-Primary fetches from all remote nodes in parallel, merges with local sessions.
-
-Response adds `node` field to each snapshot:
+**GET /api/sessions** -- Primary fetches from all remote nodes in parallel, merges with local sessions. Response adds `node` field:
 
 ```json
 {
   "sessions": [
-    {"key": "feishu:direct:alice:general", "state": "running", "node": "local", ...},
-    {"key": "feishu:direct:bob:general", "state": "ready", "node": "macbook", ...}
+    {"key": "feishu:direct:alice:general", "state": "running", "node": "local"},
+    {"key": "feishu:direct:bob:general", "state": "ready", "node": "macbook"}
   ],
   "nodes": {
     "local": {"display_name": "EC2 Tokyo", "status": "ok"},
@@ -55,44 +60,24 @@ Response adds `node` field to each snapshot:
 }
 ```
 
-If a remote node is unreachable, its status is `"error"` and its sessions are omitted (no blocking).
+If a remote node is unreachable, its status is `"error"` and its sessions are omitted.
 
-### GET /api/sessions/events?key=...&node=macbook
+**GET /api/sessions/events?key=...&node=macbook** -- If `node` is empty or `local`, uses local router. Otherwise proxies to `GET {node.url}/api/sessions/events?key=...`.
 
-If `node` is empty or `local`, use local router (existing behavior).
-If `node` is a remote name, proxy to `GET {node.url}/api/sessions/events?key=...`.
+**POST /api/sessions/send** -- Body adds optional `node` field. If remote, proxies to remote node with bearer token auth.
 
-### POST /api/sessions/send
-
-Body adds optional `node` field:
-
-```json
-{"key": "feishu:direct:bob:general", "text": "hello", "node": "macbook"}
-```
-
-If `node` is remote, proxy to `POST {node.url}/api/sessions/send` with bearer token auth.
-
-### WS subscribe
+**WS subscribe/send** -- Include `node` field to route to remote sessions:
 
 ```json
 {"type": "subscribe", "key": "...", "node": "macbook"}
-```
-
-Hub maintains one relay WS connection per remote node (lazy, on first subscribe). Events from remote node are relayed to all local browser clients subscribed to that session.
-
-### WS send
-
-```json
 {"type": "send", "key": "...", "text": "hello", "node": "macbook", "id": "r1"}
 ```
 
-Proxied via HTTP POST to remote node (simpler than WS-to-WS forwarding for sends).
-
-## Architecture
+Hub maintains one relay WS connection per remote node (lazy, on first subscribe). Sends are proxied via HTTP POST.
 
 ### NodeClient
 
-HTTP + WS client for one remote node.
+HTTP + WS client for one remote node:
 
 ```go
 type NodeClient struct {
@@ -101,198 +86,324 @@ type NodeClient struct {
     Token       string
     DisplayName string
     httpClient  *http.Client
+    relayMu     sync.Mutex
+    relay       *wsRelay  // lazy-created on first Subscribe
 }
-
-func (n *NodeClient) FetchSessions(ctx context.Context) ([]session.SessionSnapshot, error)
-func (n *NodeClient) FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error)
-func (n *NodeClient) Send(ctx context.Context, key, text string) error
-func (n *NodeClient) Health(ctx context.Context) error
 ```
 
 ### WS Relay
 
-Per-node relay that maintains a persistent WS connection to the remote node.
+Per-node relay maintaining a persistent WS connection to the remote:
 
 ```go
 type wsRelay struct {
-    node       *NodeClient
-    mu         sync.Mutex
-    conn       *websocket.Conn
-    subs       map[string][]*wsClient  // remote key -> local clients
-    done       chan struct{}
-}
-
-func (r *wsRelay) Subscribe(client *wsClient, key string, after int64)
-func (r *wsRelay) Unsubscribe(client *wsClient, key string)
-func (r *wsRelay) Close()
-```
-
-Lifecycle:
-1. First subscribe to a remote session creates the relay and opens WS
-2. Relay authenticates with remote node's token
-3. Relay subscribes on behalf of local clients
-4. Events from remote are fanned out to local clients
-5. Last unsubscribe from a key sends unsubscribe to remote
-6. Relay reconnects on disconnect (exponential backoff)
-
-### Hub Changes
-
-```go
-type Hub struct {
-    ...existing fields...
-    nodes   map[string]*NodeClient  // node ID -> client
-    relays  map[string]*wsRelay     // node ID -> WS relay (lazy)
+    node *NodeClient
+    mu   sync.Mutex
+    conn *websocket.Conn
+    subs map[string][]*wsClient  // remote key -> local clients
+    done chan struct{}
 }
 ```
 
-`handleSubscribe`: if `msg.Node != "" && msg.Node != "local"`, delegate to relay.
-`handleSend`: if `msg.Node` is remote, proxy via NodeClient.Send().
+Lifecycle: first subscribe creates relay and opens WS, authenticates, subscribes on behalf of local clients, fans out events, reconnects on disconnect with exponential backoff.
 
-### Dashboard Changes
+### Dashboard & Frontend
 
 - `handleAPISessions`: parallel fetch from all nodes (5s timeout per node), merge.
-- `handleAPISessionEvents`: route by `node` param.
-- `handleAPISend`: route by `node` field.
+- `handleAPISessionEvents` / `handleAPISend`: route by `node` param/field.
+- Session cards show node badge; node status in sidebar header (green/red).
+- `isMultiNode()`, `renderNodeGroups()`, `renderThreeLevel()` in dashboard.html.
+- All Phase 3 frontend bugs fixed.
 
-### Frontend Changes
+---
 
-- Session cards show `[macbook]` node badge.
-- Node status in sidebar header (green/red per node).
-- Subscribe/send include `node` field.
-- Node filter dropdown (optional, v2).
+## Reverse Mode (WebSocket)
 
-## File Change Map
+### Problem
 
-| File | Change | ~Lines |
-|------|--------|--------|
-| `internal/config/config.go` | Add `NodeConfig` struct, `Nodes` field | +30 |
-| `internal/server/nodeclient.go` | **New**: HTTP client for remote nodes | +150 |
-| `internal/server/nodeclient_test.go` | **New**: Tests with httptest mock | +200 |
-| `internal/server/wsrelay.go` | **New**: WS relay for remote event streaming | +200 |
-| `internal/server/wsrelay_test.go` | **New**: Relay tests | +150 |
-| `internal/server/dashboard.go` | Aggregation + routing by node | +80 |
-| `internal/server/wshub.go` | Add nodes/relays, route subscribe/send | +40 |
-| `internal/server/wshandler.go` | Add `Node` field to wsClientMsg/wsServerMsg | +4 |
-| `internal/server/server.go` | Pass nodes config to Hub | +10 |
-| `internal/session/managed.go` | Add `Node` to SessionSnapshot | +2 |
-| `dashboard.html` | Node badges, node in subscribe/send | +60 |
-| **Total** | | **~930** |
+Direct mode requires the primary to reach remote nodes via HTTP/WS. Remote nodes behind NAT (home office, laptop, company intranet) are unreachable from a public EC2.
+
+### Solution
+
+Invert the connection direction. Remote nodes dial the primary over a persistent WebSocket on startup. All communication flows through this single outbound connection.
+
+```
+Before (pull):
+  Primary (EC2) ──HTTP GET /api/sessions──► Remote (MacBook, NAT ✗)
+
+After (reverse):
+  Remote (MacBook) ──WS /ws-node──────► Primary (EC2)
+  (remote only needs outbound TCP — works from any NAT)
+```
+
+### Architecture
+
+```
+Remote (MacBook, NAT)                Primary (EC2, public)
+─────────────────────                ─────────────────────
+Connector                            ReverseNodeServer (/ws-node)
+  │                                    │
+  ├─ dial wss://ec2:8180/ws-node ──►   ├─ accept, validate token
+  ├─ send register{id, token}  ──────► ├─ create ReverseNodeConn
+  ◄─ registered ──────────────────────┤
+  │                                    │
+  │   ◄──── request{fetch_sessions} ──┤  (background cache, 10s)
+  ├── response{sessions:[...]} ──────► │
+  │                                    │
+  │   ◄──── subscribe{key=x} ─────────┤  (browser subscribes)
+  ├── event{key=x, ...} ─────────────► │  (pushed on event)
+```
+
+### Message Protocol
+
+A single WebSocket at `GET /ws-node` carries two independent flows:
+
+**RPC (request -> response):**
+
+```
+Primary → Remote: {"type":"request","req_id":"r1","method":"fetch_sessions"}
+Remote → Primary: {"type":"response","req_id":"r1","result":[...]}
+Remote → Primary: {"type":"response","req_id":"r1","error":"..."}
+```
+
+Methods: `fetch_sessions`, `fetch_projects`, `fetch_discovered`, `fetch_discovered_preview`,
+`fetch_events`, `send`, `takeover`, `restart_planner`, `update_config`.
+
+**Event push (subscribe -> stream):**
+
+```
+Primary → Remote: {"type":"subscribe","key":"feishu:d:alice:g","after":0}
+Remote → Primary: {"type":"subscribed","key":"..."}
+Remote → Primary: {"type":"subscribe_error","key":"...","error":"..."}
+Remote → Primary: {"type":"event","key":"...","event":{...}}
+Remote → Primary: {"type":"session_state","key":"...","state":"ready"}
+Primary → Remote: {"type":"unsubscribe","key":"..."}
+```
+
+Subscribe failures are explicit: if the session does not exist on the remote, it responds with
+`subscribe_error`. Primary handles this and notifies subscribed browser clients.
+
+**Control:**
+
+```
+Remote → Primary: {"type":"register","node_id":"macbook","token":"...","display_name":"MacBook Pro"}
+Primary → Remote: {"type":"registered"} | {"type":"register_fail","error":"..."}
+Remote → Primary: {"type":"sessions_changed"}
+Remote ↔ Primary: {"type":"ping"} / {"type":"pong"}
+```
+
+**Go types (`internal/reverse/proto.go`):**
+
+```go
+type ReverseMsg struct {
+    Type        string          `json:"type"`
+    NodeID      string          `json:"node_id,omitempty"`
+    Token       string          `json:"token,omitempty"`
+    DisplayName string          `json:"display_name,omitempty"`
+    ReqID       string          `json:"req_id,omitempty"`
+    Method      string          `json:"method,omitempty"`
+    Params      json.RawMessage `json:"params,omitempty"`
+    Result      json.RawMessage `json:"result,omitempty"`
+    Error       string          `json:"error,omitempty"`
+    Key         string          `json:"key,omitempty"`
+    After       int64           `json:"after,omitempty"`
+    Event       *cli.EventEntry `json:"event,omitempty"`
+    State       string          `json:"state,omitempty"`
+}
+```
+
+---
+
+## NodeConn Interface
+
+The central abstraction that unifies both transport modes. `NodeClient` (direct HTTP) and
+`ReverseNodeConn` (reverse WS) both implement it.
+
+```go
+// internal/server/nodeconn.go
+
+type NodeConn interface {
+    NodeID() string
+    DisplayName() string
+    RemoteAddr() string
+    Status() string
+    FetchSessions(ctx context.Context) ([]map[string]any, error)
+    FetchProjects(ctx context.Context) ([]map[string]any, error)
+    FetchDiscovered(ctx context.Context) ([]map[string]any, error)
+    FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]cli.EventEntry, error)
+    FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error)
+    Send(ctx context.Context, key, text string) error
+    ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) error
+    ProxyRestartPlanner(ctx context.Context, projectName string) error
+    ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error
+    Subscribe(c wsEventSink, key string, after int64)
+    Unsubscribe(c wsEventSink, key string)
+    RemoveClient(c wsEventSink)
+    Close()
+}
+```
+
+---
+
+### ReverseNodeConn (Primary Side)
+
+Represents one registered reverse connection. Created by ReverseNodeServer when a remote connects.
+
+```go
+type ReverseNodeConn struct {
+    id          string
+    displayName string
+    writeMu     sync.Mutex
+    conn        *websocket.Conn
+    pendingMu   sync.Mutex
+    pending     map[string]chan reverseResult  // req_id -> waiting caller
+    subMu       sync.Mutex
+    subs        map[string][]*wsClient        // key -> local browser clients
+    statusMu    sync.RWMutex
+    status      string  // "ok" | "connecting" | "error"
+    done        chan struct{}
+}
+```
+
+RPC calls use a pending map with correlation IDs. `readLoop` dispatches responses to waiting
+callers and fans out events/session_state to subscribed browser clients. Context cancellation
+cleans up pending entries to prevent goroutine leaks.
+
+Subscribe uses a lock to prevent check-then-act races: two concurrent subscribes for the same
+new key send only one subscribe message to the remote.
+
+### ReverseNodeServer (Primary Side)
+
+Accepts `/ws-node` connections, validates token with constant-time comparison, creates
+`ReverseNodeConn`.
+
+Security: returns generic `"auth failed"` regardless of whether the node_id exists (prevents
+enumeration). Per-IP rate limiting on the upgrade endpoint.
+
+On register: replaces stale connections, triggers immediate cache refresh, notifies Hub.
+On deregister: purges cached data, sets status to `"error"`, broadcasts sessions update.
+
+### Connector (Remote Side)
+
+`internal/connector` package. Runs when `upstream` is configured.
+
+```go
+type Connector struct {
+    cfg     config.UpstreamConfig
+    router  *session.Router
+    projMgr *project.Manager
+    scanner *discovery.Scanner
+}
+```
+
+`Run(ctx)` maintains a persistent connection with exponential backoff (1s -> 30s).
+`handleConn` dispatches incoming messages:
+
+- `request`: dispatches to `handleRequest` (fetch_sessions, fetch_projects, send, takeover, etc.)
+- `subscribe`: starts `streamEvents` goroutine with WaitGroup tracking
+- `unsubscribe`: cancels subscription
+- `ping`: responds with pong
+
+### Reverse Mode Config
+
+**Primary (`reverse_nodes`):**
+
+```yaml
+reverse_nodes:
+  macbook:
+    token: "macbook-secret-xxx"
+    display_name: "MacBook Pro"
+  home-desktop:
+    token: "desktop-secret-xxx"
+    display_name: "Home Desktop"
+```
+
+`reverse_nodes` entries have no `url` -- primary waits for them to dial in.
+
+**Remote (`upstream`):**
+
+```yaml
+upstream:
+  url: "wss://ec2.example.com:8180/ws-node"
+  node_id: "macbook"                          # must match reverse_nodes key
+  token: "macbook-secret-xxx"                 # must match reverse_nodes[macbook].token
+  display_name: "MacBook Pro"
+```
+
+### Server / Hub Wiring
+
+- `Server.nodes` changed from `map[string]*NodeClient` to `map[string]NodeConn`.
+- `SetReverseNodeServer` registers onRegister/onDeregister callbacks.
+- `refreshNodeCacheFor(id)` fetches and caches data for a single node immediately on connect.
+- Hub removed the separate `relays` map; calls `NodeConn.Subscribe/Unsubscribe/RemoveClient` directly.
+- On node disconnect, `PurgeNodeSubscriptions` notifies subscribed browser clients.
+
+---
 
 ## Implementation Phases
 
-### Phase 1: Config + NodeClient + API Aggregation
-- Parse `nodes` from config
-- NodeClient HTTP methods (FetchSessions, FetchEvents, Send, Health)
-- handleAPISessions: parallel fetch + merge
-- handleAPISessionEvents: route by node
-- handleAPISend: route by node
-- Tests: mock remote node with httptest
+### Direct Mode
 
-### Phase 2: WS Relay
-- wsRelay struct with persistent connection
-- Hub integration: route subscribe/send by node
-- Relay reconnection on disconnect
-- Tests: relay subscribe, event forwarding, disconnect/reconnect
+1. **Config + NodeClient + API Aggregation**: Parse `nodes`, NodeClient HTTP methods, parallel fetch + merge in handleAPISessions, route by node in events/send endpoints.
+2. **WS Relay**: wsRelay with persistent connection, Hub integration, reconnection.
+3. **Frontend**: Node badges, status display, subscribe/send with node field.
 
-### Phase 3: Frontend
-- Session cards with node badge
-- Node status display
-- Subscribe/send with node field
-- WS message routing for remote sessions
+### Reverse Mode
 
-## Phase 3: Frontend — Detail
+1. **NodeConn Abstraction** (no behavior change): Define interface, move wsRelay from Hub into NodeClient, change Hub/Server to use `map[string]NodeConn`.
+2. **ReverseNodeConn + ReverseNodeServer** (primary side): ReverseMsg proto, RPC multiplexing, event subscription, /ws-node handler, token validation.
+3. **Connector** (remote side): dial, register, handle requests, stream events, reconnect.
+4. **Proactive Push** (optional): Remote sends `sessions_changed`, primary refreshes cache immediately, dashboard updates in ~100ms instead of 10s.
 
-### What's Done
+---
 
-`dashboard.html` already implements the core multi-node UI:
+## File Change Map
 
-| Feature | Where |
-|---------|-------|
-| `isMultiNode()` helper | JS line ~1191 |
-| `nodesData` populated from `GET /api/sessions` `.nodes` field | `fetchSessions()` |
-| `renderNodeGroups()` — node → session with status dot | sidebar |
-| `renderThreeLevel()` — node → project → session (when both flags true) | sidebar |
-| `selectedNode` tracked alongside `selectedKey` throughout | `selectSession()` |
-| WS subscribe/unsubscribe include `node` field | `wsm.subscribe()` |
-| WS send includes `node` field | `wsm.send()` |
-| HTTP events `?node=` routing | `fetchEvents()` |
-| HTTP send `body.node` routing | `sendMessage()` |
-| Node info in main detail header | `renderMainShell()` |
-| `.node-badge`, `.node-dot`, `.node-group` CSS | stylesheet |
-
-### Known Bugs ~~(must fix before shipping)~~ — All Fixed
-
-**Bug 1 — `renderSelectedOrphanCard` undefined** — **FIXED** (2026-03-31)
-
-函数已定义在 dashboard.html:598。
-
-**Bug 2 — local node dot always red in `renderNodeGroups()`** — **FIXED** (2026-03-31)
-
-dashboard.html:569 和 620 均已添加 `|| nid === 'local'` 检查。
-
-### Remaining Work
-
-| Item | Status |
+| File | Change |
 |------|--------|
-| ~~Fix `renderSelectedOrphanCard` (Bug 1)~~ | Done |
-| ~~Fix local node red dot in `renderNodeGroups` (Bug 2)~~ | Done |
-| Node badge on individual session cards (`.node-badge` CSS unused) | Nice-to-have |
-| Node filter dropdown | v2, optional |
+| `internal/config/config.go` | NodeConfig, ReverseNodes, UpstreamConfig |
+| `internal/reverse/proto.go` | ReverseMsg type (shared by server + connector) |
+| `internal/server/nodeconn.go` | NodeConn interface |
+| `internal/server/nodeclient.go` | HTTP client, Subscribe/Unsubscribe/RemoveClient/Close |
+| `internal/server/nodeclient_test.go` | Tests with httptest mock |
+| `internal/server/wsrelay.go` | WS relay for remote event streaming |
+| `internal/server/wsrelay_test.go` | Relay tests |
+| `internal/server/reverseconn.go` | ReverseNodeConn (primary-side RPC + event push) |
+| `internal/server/reverseconn_test.go` | RPC + event push tests |
+| `internal/server/reverseserver.go` | ReverseNodeServer, /ws-node handler, rate limit |
+| `internal/connector/connector.go` | Remote-side Connector |
+| `internal/connector/connector_test.go` | Connector request handling tests |
+| `internal/server/dashboard.go` | Aggregation + routing by node |
+| `internal/server/wshub.go` | NodeConn, remove relays, PurgeNodeSubscriptions |
+| `internal/server/server.go` | NodeConn, ReverseNodeServer wiring, refreshNodeCacheFor |
+| `cmd/naozhi/main.go` | Build ReverseNodeServer; start Connector |
+| `dashboard.html` | Node badges, node in subscribe/send |
 
-The node badge is only strictly needed when sessions from different nodes appear in the same
-flat list (e.g. unmatched group in two-level view). In three-level view the group header
-provides context. Low priority.
+---
 
 ## Verification
 
-### Existing Test Coverage
+### Unit Tests
 
-**Phase 1 (NodeClient + API aggregation):**
-`nodeclient_test.go` — FetchSessions, FetchEvents, Send, Health, FetchProjects, FetchDiscovered,
-ProxyTakeover, ProxyRestartPlanner, ProxyUpdateConfig (httptest mock).
+**Direct Mode:**
+- `nodeclient_test.go`: FetchSessions, FetchEvents, Send, Health, FetchProjects, FetchDiscovered, ProxyTakeover, ProxyRestartPlanner, ProxyUpdateConfig.
+- `wsrelay_test.go`: ConnectAndSubscribe, EventForwarding, MultipleClients, Unsubscribe, Close, Reconnect, AuthFailed, RemoveClient, Hub_RemoteSubscribe.
 
-**Phase 2 (WS Relay + Hub):**
-`wsrelay_test.go` — ConnectAndSubscribe, EventForwarding, MultipleClients, Unsubscribe, Close,
-Reconnect (3s), AuthFailed, RemoveClient, Hub_RemoteSubscribe, Hub_RemoteSubscribe_UnknownNode,
-Hub_RemoteUnsubscribe_NoRelay.
+**Reverse Mode:**
+- `reverseconn_test.go`: RPC, ConcurrentRPC, RPCTimeout, Subscribe, EventPush, ReconnectResubs.
+- `connector_test.go`: Register, RegisterBadToken, FetchSessions, Send, Subscribe, Reconnect.
 
-### Missing Unit Tests
+### Integration Test (Two Processes, One Machine)
 
-Add to `dashboard_test.go`:
-
-```go
-// TestHandleAPISessions_NodeAggregation: mock remote node serving /api/sessions,
-// call refreshNodeCache(), then GET /api/sessions — verify merged sessions carry node="remote".
-func TestHandleAPISessions_NodeAggregation(t *testing.T) { ... }
-
-// TestHandleAPISessionEvents_RemoteNode: GET /api/sessions/events?key=x&node=remote
-// should proxy to NodeClient.FetchEvents, not local router.
-func TestHandleAPISessionEvents_RemoteNode(t *testing.T) { ... }
-
-// TestHandleAPISend_RemoteNode: POST /api/sessions/send {"key":"x","node":"remote","text":"hi"}
-// should call NodeClient.Send, not local router.
-func TestHandleAPISend_RemoteNode(t *testing.T) { ... }
-```
-
-### Integration Test — Two Processes, One Machine
-
-No second machine needed. Run two naozhi instances on different ports.
-
-**Config files:**
+**Direct mode configs:**
 
 ```yaml
-# config-node-b.yaml  (the "remote")
+# config-node-b.yaml (remote)
 server:
   addr: ":8181"
 dashboard_token: "test-secret"
-cli:
-  path: "~/.local/bin/claude"
-session:
-  max_procs: 1
-```
 
-```yaml
-# config-node-a.yaml  (the primary / dashboard viewer)
+# config-node-a.yaml (primary)
 server:
   addr: ":8180"
 nodes:
@@ -305,59 +416,66 @@ workspace:
   name: "Node A"
 ```
 
-**Verification script:**
+**Reverse mode configs:**
 
-```bash
-# 1. Start both nodes
-./naozhi --config config-node-b.yaml &; NODE_B=$!
-./naozhi --config config-node-a.yaml &; NODE_A=$!
-sleep 2
+```yaml
+# config-remote.yaml
+upstream:
+  url: "ws://localhost:8180/ws-node"
+  node_id: "laptop"
+  token: "test-secret"
+  display_name: "Laptop (local test)"
 
-# 2. Node A's /api/sessions must include nodes map with node-b
-curl -s http://localhost:8180/api/sessions | jq '.nodes'
-# expect: {"local":{...},"node-b":{"status":"ok","display_name":"Node B (local)"}}
-
-# 3. Create a session on Node B directly
-curl -s -X POST http://localhost:8181/api/sessions/send \
-  -H "Authorization: Bearer test-secret" \
-  -H "Content-Type: application/json" \
-  -d '{"key":"dashboard:d:tester:general","text":"echo hello"}'
-
-# 4. After cache refresh (~10s), Node A must aggregate it
-curl -s http://localhost:8180/api/sessions | jq '.sessions[] | {key,node}'
-# expect: ...{"key":"dashboard:d:tester:general","node":"node-b"}
-
-# 5. Node A can fetch its events
-curl -s "http://localhost:8180/api/sessions/events?key=dashboard:d:tester:general&node=node-b"
-
-# 6. Node A can send to it
-curl -s -X POST http://localhost:8180/api/sessions/send \
-  -H "Content-Type: application/json" \
-  -d '{"key":"dashboard:d:tester:general","text":"hello from A","node":"node-b"}'
-
-# Cleanup
-kill $NODE_A $NODE_B
+# config-primary.yaml
+reverse_nodes:
+  laptop:
+    token: "test-secret"
+    display_name: "Laptop"
 ```
 
-**Dashboard UI checklist (manual, with both nodes running):**
+**Verification steps** (apply to both modes):
 
-- [ ] Sidebar shows two groups: "Node A" and "Node B (local)" with green dots
-- [ ] Node B group is red when node-b is stopped
-- [ ] Clicking a Node B session subscribes via WS relay (events appear live)
-- [ ] Sending a message from Node A dashboard reaches Node B's CLI
-- [ ] Reconnect: kill and restart node-b → relay reconnects, events resume
-- [ ] Takeover button on Node B discovered processes calls `ProxyTakeover`
+```bash
+# Start both nodes
+./naozhi --config config-primary.yaml &
+./naozhi --config config-remote.yaml &
+sleep 2
 
-### What to Do When a Test Fails
+# Verify remote appears in nodes
+curl -s http://localhost:8180/api/sessions | jq '.nodes'
+
+# Verify remote sessions in aggregated list
+curl -s http://localhost:8180/api/sessions | jq '.sessions[].node'
+
+# Send from primary to remote session
+curl -s -X POST http://localhost:8180/api/sessions/send \
+  -H "Content-Type: application/json" \
+  -d '{"key":"dashboard:d:test:general","text":"hello","node":"<node-id>"}'
+```
+
+### Dashboard UI Checklist
+
+- Remote node appears in sidebar with green dot
+- Red dot on disconnect
+- Clicking remote session subscribes and streams events live
+- Sending from dashboard routes to remote CLI
+- Reconnect after remote/primary restart
+
+### Troubleshooting
 
 | Symptom | Likely cause |
 |---------|-------------|
-| Sidebar empty in multi-node+project view | `renderSelectedOrphanCard` ReferenceError (Bug 1) |
-| Local node shows red dot | `renderNodeGroups` missing `|| nid === 'local'` (Bug 2) |
-| Remote sessions missing from `/api/sessions` | `refreshNodeCache` not called or 5s timeout too short |
-| WS events not arriving from remote | WS relay not connecting — check token, URL scheme (ws:// vs wss://) |
-| Send to remote returns 500 | `ProxyUpdateConfig` / `NodeClient.Send` HTTP error — check remote token |
+| Remote sessions missing from `/api/sessions` | Cache not refreshed or timeout too short |
+| WS events not arriving from remote | Relay/reverse WS not connecting -- check token, URL scheme |
+| Send to remote returns 500 | HTTP error -- check remote token |
+| Local node shows red dot | Missing `nid === 'local'` check in renderNodeGroups |
 
-## Protocol Compatibility
+---
 
-Remote nodes run **unmodified** naozhi. The multi-node feature is purely a primary-side concern. Any naozhi instance with a dashboard_token can be a remote node.
+## Compatibility
+
+- **Direct nodes** (`workspaces`/`nodes` config) work unchanged via NodeClient.
+- Both modes coexist: one node in `workspaces` (direct), another in `reverse_nodes` (reverse).
+- Remote nodes run unmodified naozhi. Multi-node is purely a primary-side concern.
+- Any naozhi instance with a `dashboard_token` can serve as a direct-mode remote node.
+- Remote nodes on NAT use `upstream` config -- no other changes needed.

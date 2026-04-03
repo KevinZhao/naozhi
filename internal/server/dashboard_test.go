@@ -354,7 +354,7 @@ func TestHandleAPISessions_NodeAggregation(t *testing.T) {
 	srv.knownNodes["macbook"] = "MacBook Pro"
 
 	// Populate the cache synchronously
-	srv.refreshNodeCache()
+	srv.nodeCache.RefreshAll()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()

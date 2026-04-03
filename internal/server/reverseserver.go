@@ -75,7 +75,7 @@ func (s *ReverseNodeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		displayName = msg.NodeID
 	}
 
-	rc := newReverseNodeConn(msg.NodeID, displayName, conn)
+	rc := newReverseNodeConn(msg.NodeID, displayName, r.RemoteAddr, conn)
 	if err := conn.WriteJSON(reverse.ReverseMsg{Type: "registered"}); err != nil {
 		rc.Close()
 		return

@@ -1,5 +1,7 @@
 # 语音消息转写设计
 
+> **状态**: 已实现。代码位于 `internal/transcribe/`。
+
 ## 背景
 
 飞书用户可以发送语音消息（`message_type: "audio"`）。当前 naozhi 在 transport 层直接过滤掉所有非 `text`/`image` 消息类型，语音消息被静默丢弃。
@@ -438,6 +440,8 @@ github.com/aws/aws-sdk-go-v2/service/transcribestreaming  v1.x
 ---
 
 ## 实现步骤
+
+> 以下为原始预估，实际已全部实现。代码位于 `internal/transcribe/`、`internal/platform/feishu/`、`cmd/naozhi/main.go`。
 
 1. **`internal/transcribe/transcribe.go`** — `Service` 接口 + AWS 实现（~100 行）
 2. **`internal/transcribe/convert.go`** — ffmpeg 格式转换（~40 行）

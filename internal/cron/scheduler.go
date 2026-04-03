@@ -26,6 +26,10 @@ type SchedulerConfig struct {
 	ExecTimeout   time.Duration
 }
 
+// OnExecuteFunc is called after a cron job finishes execution.
+// It receives the job ID, result text (or empty), and error message (or empty).
+type OnExecuteFunc func(jobID, result, errMsg string)
+
 // Scheduler manages cron jobs and executes them on schedule.
 type Scheduler struct {
 	cron          *robfigcron.Cron
@@ -40,6 +44,14 @@ type Scheduler struct {
 	execTimeout   time.Duration
 	stopCtx       context.Context
 	stopCancel    context.CancelFunc
+	onExecute     OnExecuteFunc
+}
+
+// SetOnExecute registers a callback invoked after each cron job execution.
+func (s *Scheduler) SetOnExecute(fn OnExecuteFunc) {
+	s.mu.Lock()
+	s.onExecute = fn
+	s.mu.Unlock()
 }
 
 // NewScheduler creates a scheduler. Call Start() to begin.
@@ -160,6 +172,95 @@ func (s *Scheduler) ListJobs(plat, chatID string) []*Job {
 	return result
 }
 
+// ListAllJobs returns all jobs regardless of platform/chat scope.
+// Returns value copies safe to read outside the lock.
+func (s *Scheduler) ListAllJobs() []Job {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	result := make([]Job, 0, len(s.jobs))
+	for _, j := range s.jobs {
+		result = append(result, *j)
+	}
+	return result
+}
+
+// DeleteJobByID removes a job by exact ID (unscoped, for dashboard use).
+func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
+	s.mu.Lock()
+
+	j, ok := s.jobs[id]
+	if !ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("no job found with id %q", id)
+	}
+
+	if j.entryID != 0 {
+		s.cron.Remove(j.entryID)
+	}
+	if s.router != nil {
+		s.router.Reset("cron:" + j.ID)
+	}
+	delete(s.jobs, j.ID)
+	snap := s.snapshotJobs()
+	s.mu.Unlock()
+
+	s.saveSnapshot(snap)
+	return j, nil
+}
+
+// PauseJobByID pauses a job by exact ID (unscoped, for dashboard use).
+func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
+	s.mu.Lock()
+
+	j, ok := s.jobs[id]
+	if !ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("no job found with id %q", id)
+	}
+	if j.Paused {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("job %s already paused", j.ID)
+	}
+
+	if j.entryID != 0 {
+		s.cron.Remove(j.entryID)
+		j.entryID = 0
+	}
+	j.Paused = true
+	snap := s.snapshotJobs()
+	s.mu.Unlock()
+
+	s.saveSnapshot(snap)
+	return j, nil
+}
+
+// ResumeJobByID resumes a paused job by exact ID (unscoped, for dashboard use).
+func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
+	s.mu.Lock()
+
+	j, ok := s.jobs[id]
+	if !ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("no job found with id %q", id)
+	}
+	if !j.Paused {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("job %s is not paused", j.ID)
+	}
+
+	if err := s.registerJob(j); err != nil {
+		s.mu.Unlock()
+		return nil, err
+	}
+	j.Paused = false
+	snap := s.snapshotJobs()
+	s.mu.Unlock()
+
+	s.saveSnapshot(snap)
+	return j, nil
+}
+
 // DeleteJob removes a job by ID prefix (scoped to the given chat).
 func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 	s.mu.Lock()
@@ -248,6 +349,20 @@ func (s *Scheduler) NextRun(j *Job) time.Time {
 	return entry.Next
 }
 
+// NextRunByID returns the next scheduled run time for a job by ID.
+func (s *Scheduler) NextRunByID(id string) time.Time {
+	s.mu.Lock()
+	j, ok := s.jobs[id]
+	if !ok || j.entryID == 0 {
+		s.mu.Unlock()
+		return time.Time{}
+	}
+	entryID := j.entryID
+	s.mu.Unlock()
+	entry := s.cron.Entry(entryID)
+	return entry.Next
+}
+
 // registerJob registers a job with the robfig/cron scheduler.
 func (s *Scheduler) registerJob(j *Job) error {
 	entryID, err := s.cron.AddFunc(j.Schedule, func() {
@@ -265,12 +380,6 @@ func (s *Scheduler) execute(j *Job) {
 	log := slog.With("cron_id", j.ID, "platform", j.Platform, "chat", j.ChatID)
 	log.Info("cron job executing", "prompt_len", len(j.Prompt))
 
-	p := s.platforms[j.Platform]
-	if p == nil {
-		log.Error("platform not found for cron job")
-		return
-	}
-
 	ctx, cancel := context.WithTimeout(s.stopCtx, s.execTimeout)
 	defer cancel()
 
@@ -278,43 +387,90 @@ func (s *Scheduler) execute(j *Job) {
 	opts := s.agents[agentID]
 	key := "cron:" + j.ID
 
-	// errReplyCtx: short-lived context for sending error notifications.
-	errReplyCtx, errReplyCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer errReplyCancel()
-
 	sess, _, err := s.router.GetOrCreate(ctx, key, opts)
 	if err != nil {
 		log.Error("cron session error", "err", err)
-		platform.ReplyWithRetry(errReplyCtx, p, platform.OutgoingMessage{
-			ChatID: j.ChatID,
-			Text:   fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", j.ID),
-		}, 3)
+		s.recordResult(j, "", "session error: "+err.Error())
+		s.notifyIM(j, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", j.ID))
 		return
 	}
 
 	result, err := sess.Send(ctx, cleanText, nil, nil)
 	if err != nil {
 		log.Error("cron send error", "err", err)
-		platform.ReplyWithRetry(errReplyCtx, p, platform.OutgoingMessage{
-			ChatID: j.ChatID,
-			Text:   fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", j.ID),
-		}, 3)
+		s.recordResult(j, "", "send error: "+err.Error())
+		s.notifyIM(j, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", j.ID))
 		return
 	}
 
 	log.Info("cron job completed", "result_len", len(result.Text))
+	s.recordResult(j, result.Text, "")
+
+	// Send result to the job's own IM channel (for IM-created jobs)
 	replyText := fmt.Sprintf("[Cron %s] %s", j.ID, result.Text)
+	s.notifyIM(j, replyText)
+
+	// Send to optional notify target (for dashboard-created jobs that want IM push)
+	if j.NotifyPlatform != "" && j.NotifyChatID != "" &&
+		(j.NotifyPlatform != j.Platform || j.NotifyChatID != j.ChatID) {
+		s.notifyTarget(j.NotifyPlatform, j.NotifyChatID, replyText)
+	}
+}
+
+// recordResult persists the last execution result on the job and invokes the onExecute callback.
+func (s *Scheduler) recordResult(j *Job, result, errMsg string) {
+	s.mu.Lock()
+	j.LastRunAt = time.Now()
+	j.LastResult = result
+	j.LastError = errMsg
+	snap := s.snapshotJobs()
+	fn := s.onExecute
+	s.mu.Unlock()
+
+	s.saveSnapshot(snap)
+	if fn != nil {
+		fn(j.ID, result, errMsg)
+	}
+}
+
+// notifyIM sends a message to the job's own platform/chat. Skips if platform is nil (e.g. dashboard jobs).
+func (s *Scheduler) notifyIM(j *Job, text string) {
+	p := s.platforms[j.Platform]
+	if p == nil {
+		return
+	}
+	replyCtx, replyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer replyCancel()
 	maxLen := p.MaxReplyLength()
 	if maxLen <= 0 {
 		maxLen = 4000
 	}
-	// Use a fresh context for replies — the execution ctx may be near deadline.
-	replyCtx, replyCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer replyCancel()
-	chunks := platform.SplitText(replyText, maxLen)
+	chunks := platform.SplitText(text, maxLen)
 	for _, chunk := range chunks {
 		platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
 			ChatID: j.ChatID,
+			Text:   chunk,
+		}, 3)
+	}
+}
+
+// notifyTarget sends a message to an arbitrary platform/chat (notify target).
+func (s *Scheduler) notifyTarget(plat, chatID, text string) {
+	p := s.platforms[plat]
+	if p == nil {
+		slog.Warn("cron notify: platform not found", "platform", plat)
+		return
+	}
+	replyCtx, replyCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer replyCancel()
+	maxLen := p.MaxReplyLength()
+	if maxLen <= 0 {
+		maxLen = 4000
+	}
+	chunks := platform.SplitText(text, maxLen)
+	for _, chunk := range chunks {
+		platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
+			ChatID: chatID,
 			Text:   chunk,
 		}, 3)
 	}
@@ -342,11 +498,14 @@ func (s *Scheduler) findByPrefix(idPrefix, plat, chatID string) (*Job, error) {
 	}
 }
 
-// snapshotJobs returns a shallow copy of the jobs map, safe to use outside the lock.
+// snapshotJobs returns a deep copy of the jobs map, safe to use outside the lock.
+// Each Job is value-copied so the caller can read fields without holding mu.
 func (s *Scheduler) snapshotJobs() map[string]*Job {
 	snap := make(map[string]*Job, len(s.jobs))
 	for k, v := range s.jobs {
-		snap[k] = v
+		jCopy := *v
+		jCopy.entryID = 0 // runtime-only, not persisted
+		snap[k] = &jCopy
 	}
 	return snap
 }

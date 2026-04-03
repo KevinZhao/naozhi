@@ -26,6 +26,7 @@ type reverseResult struct {
 type ReverseNodeConn struct {
 	id          string
 	displayName string
+	remoteAddr  string
 
 	writeMu sync.Mutex
 	conn    *websocket.Conn
@@ -45,10 +46,11 @@ type ReverseNodeConn struct {
 	closeMu sync.Mutex
 }
 
-func newReverseNodeConn(id, displayName string, conn *websocket.Conn) *ReverseNodeConn {
+func newReverseNodeConn(id, displayName, remoteAddr string, conn *websocket.Conn) *ReverseNodeConn {
 	return &ReverseNodeConn{
 		id:          id,
 		displayName: displayName,
+		remoteAddr:  remoteAddr,
 		conn:        conn,
 		pending:     make(map[string]chan reverseResult),
 		subs:        make(map[string][]wsEventSink),
@@ -59,6 +61,7 @@ func newReverseNodeConn(id, displayName string, conn *websocket.Conn) *ReverseNo
 
 func (c *ReverseNodeConn) NodeID() string      { return c.id }
 func (c *ReverseNodeConn) DisplayName() string { return c.displayName }
+func (c *ReverseNodeConn) RemoteAddr() string  { return c.remoteAddr }
 
 func (c *ReverseNodeConn) Status() string {
 	c.statusMu.RLock()

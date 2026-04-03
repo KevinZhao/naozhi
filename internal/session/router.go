@@ -790,6 +790,21 @@ func (r *Router) ManagedSessionIDs() map[string]bool {
 	return ids
 }
 
+// ManagedCWDs returns the working directories of all managed sessions that
+// have an alive process. Used by discovery.Scan to skip session ID upgrade
+// for CWDs where naozhi is actively managing a session.
+func (r *Router) ManagedCWDs() map[string]bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cwds := make(map[string]bool)
+	for _, s := range r.sessions {
+		if s.workspace != "" && s.process != nil && s.process.Alive() {
+			cwds[s.workspace] = true
+		}
+	}
+	return cwds
+}
+
 // Takeover creates a managed session to replace an external Claude CLI session.
 // It uses --resume to preserve the conversation context, and loads JSONL history
 // for dashboard display. The caller must ensure the original process has been

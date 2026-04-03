@@ -51,7 +51,7 @@ func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 			r["node"] = "local"
 			allProjects = append(allProjects, r)
 		}
-		cachedProjects := s.getCachedNodeProjects()
+		cachedProjects := s.nodeCache.Projects()
 		for _, items := range cachedProjects {
 			for _, item := range items {
 				allProjects = append(allProjects, item)

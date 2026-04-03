@@ -28,7 +28,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .session-card .agent{font-size:16px;color:#f0f6fc;margin:2px 0;font-weight:500}
 .session-card.dead-card .agent{text-decoration:line-through;color:#8b949e}
 .session-card .meta{font-size:13px;color:#8b949e;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-.session-card .workspace-hint{font-size:12px;color:#6e7681;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .session-card .session-prompt{font-size:13px;color:#a5d6ff;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .session-card .session-activity{font-size:12px;color:#8b949e;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-style:italic}
 .session-card .btn-dismiss{position:absolute;top:4px;right:6px;background:none;border:none;color:#484f58;font-size:17px;cursor:pointer;padding:0 4px;line-height:1;opacity:0;transition:opacity .15s}
@@ -50,8 +49,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .main-header h2{font-size:17px;color:#f0f6fc;font-weight:600;word-break:break-all}
 .main-header .detail{font-size:14px;color:#8b949e;margin-top:4px;display:flex;gap:12px;flex-wrap:wrap}
 .main-header .detail span{white-space:nowrap}
-.main-header .workspace-path{font-size:13px;color:#58a6ff;margin-top:4px;cursor:pointer;word-break:break-all}
-.main-header .workspace-path:hover{text-decoration:underline}
+.main-header .header-prompt{font-size:13px;color:#8b949e;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
 .events{flex:1;overflow-y:auto;padding:8px 0;scrollbar-width:thin;scrollbar-color:#30363d transparent}
 .event{display:flex;gap:10px;padding:5px 20px;transition:background .1s}
@@ -92,6 +90,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .btn-icon.sending{opacity:.5;pointer-events:none}
 .btn-send{background:#238636;border-color:#238636;color:#fff}
 .btn-send:hover{background:#2ea043}
+.btn-stop{background:#da3633;border-color:#da3633;color:#fff;font-size:14px}
+.btn-stop:hover{background:#f85149}
+.btn-mic{font-size:16px}
+.btn-mic.recording{background:#da3633;border-color:#da3633;color:#fff;animation:pulse 1.5s ease-in-out infinite}
+.btn-mic.transcribing{opacity:.5;pointer-events:none}
 
 /* Toast */
 .toast{position:fixed;bottom:20px;right:20px;background:#da3633;color:#fff;padding:8px 16px;border-radius:8px;font-size:14px;z-index:100;opacity:0;pointer-events:none;transition:opacity .3s}
@@ -142,6 +145,31 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .ng-sys{color:#6e7681;font-weight:400;font-size:10px;margin-left:auto;padding-right:4px;white-space:nowrap}
 .new-session-btn{display:block;width:calc(100% - 32px);margin:8px 16px;padding:8px;border:1px dashed #30363d;border-radius:8px;background:transparent;color:#8b949e;font-size:14px;cursor:pointer;text-align:center;transition:all .15s}
 .new-session-btn:hover{border-color:#58a6ff;color:#58a6ff;background:#161b22}
+.sidebar-actions{display:flex;gap:8px;margin-top:8px}
+.sidebar-actions .new-session-btn{width:auto;margin:0;flex:1}
+/* History popover */
+.ng-history-btn{background:none;border:none;color:#7a5c00;font-size:11px;cursor:pointer;padding:1px 5px;margin-left:2px;border-radius:4px;line-height:1;transition:all .15s;flex-shrink:0;display:inline-flex;align-items:center;gap:3px}
+.ng-history-btn:hover{color:#d29922;background:#1a1500}
+.ng-history-btn svg{width:12px;height:12px;fill:currentColor}
+.ng-history-btn .history-badge{display:inline-block;background:#3d2e00;color:#d29922;padding:0 5px;border-radius:8px;font-size:10px;font-weight:600;min-width:14px;text-align:center;line-height:16px}
+.history-popover{position:absolute;top:100%;left:0;z-index:100;min-width:280px;max-width:360px;max-height:320px;overflow-y:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:0;animation:pop-in .15s ease}
+@keyframes pop-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
+.history-popover-header{padding:8px 12px;font-size:11px;color:#8b949e;border-bottom:1px solid #21262d;font-weight:600;text-transform:uppercase;letter-spacing:.3px;background:#0d1117;border-radius:8px 8px 0 0}
+.history-popover-item{padding:8px 12px;cursor:pointer;transition:background .1s;border-bottom:1px solid #21262d}
+.history-popover-item:last-child{border-bottom:none}
+.history-popover-item:hover{background:#1c2129}
+.history-popover-item .hp-prompt{font-size:13px;color:#c9d1d9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.history-popover-item .hp-meta{font-size:11px;color:#6e7681;margin-top:3px;display:flex;align-items:center;gap:6px}
+.history-popover-item .hp-meta .hp-agent-tag{color:#7a5c00;font-weight:500}
+.history-popover-item .hp-meta .hp-dot{color:#30363d}
+.history-popover-empty{padding:16px;text-align:center;color:#6e7681;font-size:12px}
+/* More projects group */
+.more-projects-group{border-top:1px solid #21262d;margin-top:4px}
+.more-projects-group>summary.node-group-header{background:transparent;border-top-color:#21262d;border-bottom:none;color:#6e7681;font-size:11px;padding:6px 16px}
+.more-projects-group>summary.node-group-header:hover{background:#0d1117;color:#8b949e}
+.more-projects-group .ng-arrow{color:#484f58;font-size:10px}
+.more-projects-group .ng-name{color:#6e7681}
+.more-projects-group .ng-count{color:#484f58}
 .ng-new-btn{background:none;border:none;color:#484f58;font-size:14px;cursor:pointer;padding:2px 6px;margin-left:4px;border-radius:4px;line-height:1;transition:all .15s;flex-shrink:0}
 .ng-new-btn:hover{color:#58a6ff;background:#161b22}
 
@@ -155,6 +183,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .project-group>summary.node-group-header .ng-new-btn{color:#7a5c00}
 .project-group>summary.node-group-header .ng-new-btn:hover{color:#d4a017;background:#2a1f00}
 .node-group .project-group>summary.node-group-header{padding-left:28px}
+.node-group .project-group>.session-card{padding-left:28px}
+.node-group .project-group>.session-card.cli-card{padding-left:28px}
 .planner-indicator{display:inline-block;width:8px;height:8px;border-radius:50%;background:#a371f7;margin-right:4px}
 .session-card.planner-card{border-left-color:#a371f7}
 .session-card.planner-card .agent{color:#a371f7}
@@ -253,6 +283,40 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
   .modal::before{content:'';display:block;width:36px;height:4px;background:#484f58;border-radius:2px;margin:0 auto 16px}
 }
 @keyframes sheet-in{from{transform:translateY(100%)}to{transform:translateY(0)}}
+
+/* ===== Cron tab ===== */
+.sidebar-tabs{display:flex;gap:0;margin-top:8px;border:1px solid #30363d;border-radius:8px;overflow:hidden}
+.sidebar-tabs button{flex:1;padding:5px 0;background:transparent;border:none;color:#8b949e;font-size:13px;cursor:pointer;transition:all .15s;font-weight:500}
+.sidebar-tabs button.active{background:#21262d;color:#f0f6fc}
+.sidebar-tabs button:hover:not(.active){background:#161b22;color:#c9d1d9}
+.cron-list{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#30363d transparent}
+.cron-card{padding:10px 16px;border-bottom:1px solid #21262d;cursor:pointer;transition:background .15s;position:relative}
+.cron-card:hover{background:#161b22}
+.cron-card.active{background:#1f2937;border-left:3px solid #58a6ff}
+.cron-card .cron-prompt{font-size:14px;color:#f0f6fc;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cron-card .cron-schedule{font-size:12px;color:#a5d6ff;margin-top:2px}
+.cron-card .cron-meta{font-size:12px;color:#8b949e;margin-top:4px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.cron-card .cron-result-preview{font-size:11px;color:#7ee787;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cron-card .cron-error-preview{font-size:11px;color:#da3633;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cron-actions{display:flex;gap:6px;margin-top:6px}
+.cron-actions button{padding:3px 10px;border-radius:4px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:11px;transition:all .15s}
+.cron-actions button:hover{background:#30363d;color:#f0f6fc}
+.cron-actions button.danger{border-color:#da3633;color:#da3633}
+.cron-actions button.danger:hover{background:#da3633;color:#fff}
+.cron-add-form{padding:12px 16px;border-bottom:1px solid #30363d;background:#161b22}
+.cron-add-form input,.cron-add-form textarea{width:100%;padding:6px 10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;outline:none;font-family:inherit;margin-bottom:8px}
+.cron-add-form input:focus,.cron-add-form textarea:focus{border-color:#58a6ff}
+.cron-add-form textarea{resize:vertical;min-height:48px}
+.cron-add-form label{font-size:11px;color:#8b949e;display:block;margin-bottom:3px}
+.cron-add-form .form-row{display:flex;gap:8px;align-items:flex-end}
+.cron-add-form .form-row button{padding:6px 16px;border-radius:6px;border:1px solid #238636;background:#238636;color:#fff;cursor:pointer;font-size:13px;white-space:nowrap}
+.cron-add-form .form-row button:hover{background:#2ea043}
+.cron-detail{padding:16px 20px;overflow-y:auto;flex:1}
+.cron-detail h3{font-size:16px;color:#f0f6fc;margin-bottom:12px}
+.cron-detail .cd-field{margin-bottom:10px}
+.cron-detail .cd-label{font-size:11px;color:#8b949e;text-transform:uppercase;letter-spacing:.3px}
+.cron-detail .cd-value{font-size:14px;color:#c9d1d9;margin-top:2px;word-break:break-word}
+.cron-detail .cd-result{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px;font-size:13px;color:#c9d1d9;max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;margin-top:4px}
 </style>
 <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js" integrity="sha384-tI0sDqjGJcqrQ8e/XKiQGS+ee11v5knTNWx2goxMBxe4DO9U0uKlfxJtYB9ILZ4j" crossorigin="anonymous"></script>
 </head>
@@ -263,7 +327,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
       <h1>naozhi dashboard</h1>
       <div class="stats" id="stats">connecting...</div>
       <div class="ws-badge" id="ws-status"><span class="ws-dot gray"></span>WS Off</div>
-      <button class="new-session-btn" onclick="createNewSession()">+ new session</button>
+      <div class="sidebar-actions">
+        <button class="new-session-btn" onclick="createNewSession()">+ new session</button>
+      </div>
+      <div class="sidebar-tabs">
+        <button class="active" onclick="switchTab('sessions')">Sessions</button>
+        <button onclick="switchTab('cron')">Cron</button>
+      </div>
     </div>
     <div class="discovered-section" id="discovered-section" style="display:none">
       <div class="discovered-header">
@@ -274,6 +344,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
     <div class="session-list" id="session-list">
       <div class="no-sessions">loading...</div>
     </div>
+    <div class="cron-list" id="cron-list" style="display:none"></div>
   </div>
   <div class="main" id="main">
     <div class="empty-state">select a session to view events and send messages</div>
@@ -286,6 +357,7 @@ let eventTimer = null;
 let lastEventTime = 0;
 let lastCompositionEnd = 0;
 let sessionsData = {};
+let allSessionsCache = [];
 let pendingFiles = [];
 let sending = false;
 let selectedNode = 'local';
@@ -299,9 +371,11 @@ let previewEventCount = 0;
 let sessionCounter = 0;
 let availableAgents = ['general'];
 let defaultWorkspace = '';
+const clockSvg = '<svg viewBox="0 0 16 16"><path d="M8 0a8 8 0 110 16A8 8 0 018 0zm0 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM8 3a.75.75 0 01.75.75v3.69l2.28 2.28a.75.75 0 01-1.06 1.06l-2.5-2.5A.75.75 0 017.25 8V3.75A.75.75 0 018 3z"/></svg>';
 let projectsData = []; // [{name, path, node}] from API
 let localWsInfo = { name: '', sys: '' };
 const sessionWorkspaces = {};
+const sessionNodes = {};
 
 function getToken() { return localStorage.getItem('naozhi_dashboard_token') || ''; }
 function setToken(t) { localStorage.setItem('naozhi_dashboard_token', t); }
@@ -313,13 +387,16 @@ function loadPendingSessions() {
     if (!raw) return;
     const entries = JSON.parse(raw);
     for (const e of entries) {
-      if (e.key && !sessionWorkspaces[e.key]) sessionWorkspaces[e.key] = e.workspace || '';
+      if (e.key && !sessionWorkspaces[e.key]) {
+        sessionWorkspaces[e.key] = e.workspace || '';
+        if (e.node) sessionNodes[e.key] = e.node;
+      }
     }
   } catch (_) {}
 }
 
 function savePendingSessions() {
-  const entries = Object.entries(sessionWorkspaces).map(([key, ws]) => ({ key, workspace: ws }));
+  const entries = Object.entries(sessionWorkspaces).map(([key, ws]) => ({ key, workspace: ws, node: sessionNodes[key] || '' }));
   if (entries.length > 0) {
     localStorage.setItem('naozhi_pending_sessions', JSON.stringify(entries));
   } else {
@@ -329,6 +406,7 @@ function savePendingSessions() {
 
 function removePendingSession(key) {
   delete sessionWorkspaces[key];
+  delete sessionNodes[key];
   savePendingSessions();
 }
 
@@ -361,6 +439,7 @@ async function fetchSessions() {
     for (const key of Object.keys(sessionWorkspaces)) {
       if (backendKeys.has(key)) {
         delete sessionWorkspaces[key];
+        delete sessionNodes[key];
         pendingChanged = true;
       }
     }
@@ -380,7 +459,7 @@ async function fetchSessions() {
             agent: 'general',
             workspace: sessionWorkspaces[key],
             last_active: 0,
-            node: 'local',
+            node: sessionNodes[key] || 'local',
             project: matchProject(sessionWorkspaces[key]),
           });
         }
@@ -396,7 +475,7 @@ async function fetchSessions() {
 function renderSidebar(data) {
   const st = data.stats;
   document.getElementById('stats').textContent =
-    st.total + ' sessions \u00b7 ' + st.running + ' running \u00b7 ' + st.ready + '/' + (st.max_procs || '?') + ' slots \u00b7 ' + st.uptime;
+    st.total + ' sessions \u00b7 ' + st.active + ' active \u00b7 ' + st.uptime;
 
   // Update workspace info for node-group header
   const wsName = st.workspace_name || st.workspace_id || '';
@@ -404,7 +483,8 @@ function renderSidebar(data) {
   const sys = st.system;
   if (sys) {
     let memStr = sys.memory_mb > 0 ? (sys.memory_mb >= 1024 ? (sys.memory_mb / 1024).toFixed(1) + 'G' : sys.memory_mb + 'M') : '';
-    sysStr = sys.os + '/' + sys.arch + ' \u00b7 ' + sys.cpus + 'C' + (memStr ? '/' + memStr : '');
+    const ipStr = sys.ips && sys.ips.length > 0 ? sys.ips.join(', ') : '';
+    sysStr = sys.os + '/' + sys.arch + ' \u00b7 ' + sys.cpus + 'C' + (memStr ? '/' + memStr : '') + (ipStr ? ' \u00b7 ' + ipStr : '');
   }
   localWsInfo = { name: wsName, sys: sysStr };
 
@@ -416,6 +496,7 @@ function renderSidebar(data) {
     const d = (order[a.state]||5) - (order[b.state]||5);
     return d !== 0 ? d : b.last_active - a.last_active;
   });
+  allSessionsCache = sessions;
 
   list.innerHTML = renderUnified(sessions, discoveredItems);
 }
@@ -463,18 +544,19 @@ function buildProjectGroups(sessions, discovered, projects) {
   return { projectGroups, unmatched };
 }
 
-function renderProjectGroupHtml(pname, grp, collapsed) {
-  grp.managed.sort((a, b) => {
+function renderProjectGroupHtml(pname, grp, collapsed, nodeId) {
+  const activeSessions = grp.managed.filter(s => s.state !== 'suspended');
+  const suspendedSessions = grp.managed.filter(s => s.state === 'suspended');
+  activeSessions.sort((a, b) => {
     if (a.is_planner && !b.is_planner) return -1;
     if (!a.is_planner && b.is_planner) return 1;
     return 0;
   });
-  const totalCount = grp.managed.length + grp.discovered.length;
-  const running = grp.managed.filter(s => s.state === 'running' || s.state === 'spawning').length
-    + grp.discovered.filter(d => d.state === 'running').length;
-  const countHtml = running > 0
-    ? '<span class="ng-running">' + running + ' running</span>'
-    : '<span class="ng-count" title="' + totalCount + ' sessions">' + totalCount + '</span>';
+  const activeCount = activeSessions.length + grp.discovered.length;
+  const countHtml = activeCount > 0 ? '<span class="ng-count" title="' + activeCount + ' sessions">' + activeCount + '</span>' : '';
+  const historyBtnHtml = suspendedSessions.length > 0
+    ? '<button class="ng-history-btn" data-project="' + esc(pname) + '" onclick="event.stopPropagation();event.preventDefault();toggleHistoryPopover(this,this.dataset.project)" title="history">' + clockSvg + '<span class="history-badge">' + suspendedSessions.length + '</span></button>'
+    : '';
   const path = grp.path || '';
   return '<details class="node-group project-group"' + (collapsed.has('proj:'+pname) ? '' : ' open') +
     ' data-node="proj:' + esc(pname) + '" ontoggle="saveNodeToggle(this)">' +
@@ -482,9 +564,10 @@ function renderProjectGroupHtml(pname, grp, collapsed) {
     '<span class="ng-arrow">&#9658;</span>' +
     '<span class="ng-name">' + esc(pname) + '</span>' +
     countHtml +
-    '<button class="ng-new-btn" data-path="' + esc(path) + '" data-project="' + esc(pname) + '" onclick="event.stopPropagation();event.preventDefault();createSessionInProject(this.dataset.path,this.dataset.project)" title="new session">+</button>' +
+    historyBtnHtml +
+    '<button class="ng-new-btn" data-path="' + esc(path) + '" data-project="' + esc(pname) + '" data-node="' + esc(nodeId || 'local') + '" onclick="event.stopPropagation();event.preventDefault();createSessionInProject(this.dataset.path,this.dataset.project,this.dataset.node)" title="new session">+</button>' +
     '</summary>' +
-    grp.managed.map(sessionCardHtml).join('') +
+    activeSessions.map(sessionCardHtml).join('') +
     grp.discovered.map(discoveredInlineHtml).join('') +
     '</details>';
 }
@@ -518,25 +601,47 @@ function renderUnified(sessions, discovered) {
       ? (localWsInfo.name || 'Local')
       : (nd.display_name || nid);
     const nodeProjects = projectsData.filter(p => (p.node || 'local') === nid);
-    const totalCount = ni.sessions.length + ni.discovered.length;
-    const running = ni.sessions.filter(s => s.state === 'running' || s.state === 'spawning').length;
-    const countHtml = running > 0
-      ? '<span class="ng-running">' + running + ' running</span>'
-      : '<span class="ng-count" title="' + totalCount + ' sessions">' + totalCount + '</span>';
-    const sysHint = nid === 'local' && localWsInfo.sys
-      ? '<span class="ng-sys">' + esc(localWsInfo.sys) + '</span>'
-      : '';
+    const totalCount = ni.sessions.filter(s => s.state !== 'suspended').length + ni.discovered.length;
+    const countHtml = '<span class="ng-count" title="' + totalCount + ' sessions">' + totalCount + '</span>';
+    let sysHint = '';
+    if (nid === 'local' && localWsInfo.sys) {
+      sysHint = '<span class="ng-sys">' + esc(localWsInfo.sys) + '</span>';
+    } else if (nid !== 'local' && nd.remote_addr) {
+      sysHint = '<span class="ng-sys">' + esc(nd.remote_addr) + '</span>';
+    }
 
     let innerHtml;
     if (nodeProjects.length === 0) {
-      innerHtml = ni.sessions.map(sessionCardHtml).join('') +
+      const activeSessions = ni.sessions.filter(s => s.state !== 'suspended');
+      innerHtml = activeSessions.map(sessionCardHtml).join('') +
                   ni.discovered.map(discoveredInlineHtml).join('');
     } else {
       const { projectGroups, unmatched } = buildProjectGroups(ni.sessions, ni.discovered, nodeProjects);
-      innerHtml = Object.keys(projectGroups).sort()
-        .map(pname => renderProjectGroupHtml(pname, projectGroups[pname], collapsed)).join('');
+      // Split into active projects (have non-suspended sessions or discovered) and empty
+      const activeProjects = [];
+      const emptyProjects = [];
+      Object.keys(projectGroups).sort().forEach(pname => {
+        const grp = projectGroups[pname];
+        const hasActive = grp.managed.some(s => s.state !== 'suspended') || grp.discovered.length > 0;
+        if (hasActive) activeProjects.push(pname);
+        else emptyProjects.push(pname);
+      });
+      innerHtml = activeProjects
+        .map(pname => renderProjectGroupHtml(pname, projectGroups[pname], collapsed, nid)).join('');
       if (unmatched.managed.length > 0 || unmatched.discovered.length > 0) {
         innerHtml += renderUnmatchedHtml(unmatched, collapsed);
+      }
+      // "More projects" collapsible group for projects without active sessions
+      if (emptyProjects.length > 0) {
+        const moreInner = emptyProjects
+          .map(pname => renderProjectGroupHtml(pname, projectGroups[pname], collapsed, nid)).join('');
+        innerHtml += '<details class="node-group more-projects-group"' + (collapsed.has('_more_projects') ? '' : ' open') +
+          ' data-node="_more_projects" ontoggle="saveNodeToggle(this)">' +
+          '<summary class="node-group-header">' +
+          '<span class="ng-arrow">&#9658;</span>' +
+          '<span class="ng-name">More projects</span>' +
+          '<span class="ng-count">' + emptyProjects.length + '</span></summary>' +
+          moreInner + '</details>';
       }
     }
 
@@ -556,16 +661,89 @@ function renderUnified(sessions, discovered) {
 }
 
 function renderUnmatchedHtml(grp, collapsed) {
-  const total = grp.managed.length + grp.discovered.length;
+  const active = grp.managed.filter(s => s.state !== 'suspended');
+  const suspended = grp.managed.filter(s => s.state === 'suspended');
+  const total = active.length + grp.discovered.length;
+  const historyBtnHtml = suspended.length > 0
+    ? '<button class="ng-history-btn" data-project="_other" onclick="event.stopPropagation();event.preventDefault();toggleHistoryPopover(this,this.dataset.project)" title="history">' + clockSvg + '<span class="history-badge">' + suspended.length + '</span></button>'
+    : '';
   return '<details class="node-group project-group"' + (collapsed.has('_other') ? '' : ' open') +
     ' data-node="_other" ontoggle="saveNodeToggle(this)">' +
     '<summary class="node-group-header">' +
     '<span class="ng-arrow">&#9658;</span>' +
     '<span class="ng-name">\u5176\u4ed6</span>' +
-    '<span class="ng-count" title="' + total + ' sessions">' + total + '</span></summary>' +
-    grp.managed.map(sessionCardHtml).join('') +
+    '<span class="ng-count" title="' + total + ' sessions">' + total + '</span>' +
+    historyBtnHtml + '</summary>' +
+    active.map(sessionCardHtml).join('') +
     grp.discovered.map(discoveredInlineHtml).join('') +
     '</details>';
+}
+
+// --- History Popover ---
+
+let activePopover = null;
+
+function closeHistoryPopover() {
+  if (activePopover) { activePopover.remove(); activePopover = null; }
+}
+
+document.addEventListener('click', function(e) {
+  if (activePopover && !activePopover.contains(e.target) && !e.target.closest('.ng-history-btn')) {
+    closeHistoryPopover();
+  }
+});
+
+function toggleHistoryPopover(btn, projectName) {
+  if (activePopover && activePopover.dataset.project === projectName) {
+    closeHistoryPopover();
+    return;
+  }
+  closeHistoryPopover();
+
+  const suspended = allSessionsCache.filter(s => {
+    if (s.state !== 'suspended') return false;
+    if (projectName === '_other') return !s.project;
+    return s.project === projectName;
+  });
+  suspended.sort((a, b) => b.last_active - a.last_active);
+
+  let itemsHtml;
+  if (suspended.length === 0) {
+    itemsHtml = '<div class="history-popover-empty">no history</div>';
+  } else {
+    itemsHtml = suspended.map(s => {
+      const sNode = s.node || 'local';
+      const ago = s.last_active ? timeAgo(s.last_active) : '';
+      const agentLabel = s.is_planner ? 'planner' : (s.platform === 'dashboard' ? 'general' : (s.agent || 'general'));
+      const prompt = s.last_prompt || '';
+      return '<div class="history-popover-item" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="selectSession(this.dataset.key,this.dataset.node);closeHistoryPopover()">' +
+        (prompt ? '<div class="hp-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' : '<div class="hp-prompt" style="color:#6e7681">(no prompt)</div>') +
+        '<div class="hp-meta"><span class="hp-agent-tag">' + esc(agentLabel) + '</span>' + (ago ? '<span class="hp-dot">\u00b7</span><span>' + ago + '</span>' : '') + '</div>' +
+        '</div>';
+    }).join('');
+  }
+
+  const popover = document.createElement('div');
+  popover.className = 'history-popover';
+  popover.dataset.project = projectName;
+  popover.innerHTML = '<div class="history-popover-header">' + esc(projectName === '_other' ? '\u5176\u4ed6' : projectName) + ' \u00b7 history</div>' + itemsHtml;
+  activePopover = popover;
+
+  // Position relative to button
+  const btnRect = btn.getBoundingClientRect();
+  const sidebar = document.querySelector('.sidebar');
+  const sidebarRect = sidebar.getBoundingClientRect();
+  popover.style.position = 'fixed';
+  popover.style.left = Math.max(sidebarRect.left + 8, btnRect.left - 100) + 'px';
+  popover.style.top = (btnRect.bottom + 4) + 'px';
+  popover.style.maxHeight = Math.min(320, window.innerHeight - btnRect.bottom - 16) + 'px';
+  document.body.appendChild(popover);
+
+  // Adjust if overflowing right edge
+  const popRect = popover.getBoundingClientRect();
+  if (popRect.right > window.innerWidth - 8) {
+    popover.style.left = (window.innerWidth - popRect.width - 8) + 'px';
+  }
 }
 
 function sessionCardHtml(s) {
@@ -679,9 +857,9 @@ async function dismissSession(key, node) {
 function renderMainShell() {
   const main = document.getElementById('main');
   const s = sessionsData[sid(selectedKey, selectedNode)] || {};
-  const ws = s.workspace || '';
   const deathInfo = s.death_reason ? '<span class="death-tag">' + esc(s.death_reason.replace(/_/g,' ')) + '</span>' : '';
   const chatInfo = (s.chat_type && s.chat_id) ? esc(s.chat_type) + ':' + esc(s.chat_id).substring(0,12) : '';
+  const prompt = s.last_prompt || '';
   const nodeDisplay = isMultiNode() && selectedNode && selectedNode !== 'local' ? (function() {
     const nd = nodesData[selectedNode];
     const label = nd && nd.display_name ? esc(selectedNode) + ' (' + esc(nd.display_name) + ')' : esc(selectedNode);
@@ -702,7 +880,7 @@ function renderMainShell() {
         nodeDisplay +
         (chatInfo ? '<span>' + chatInfo + '</span>' : '') +
       '</div>' +
-      (ws ? '<div class="workspace-path" data-copy="' + esc(ws) + '" onclick="copyText(this.dataset.copy)" title="click to copy">' + esc(ws) + '</div>' : '') +
+      (prompt ? '<div class="header-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' : '') +
       '</div>' +
     '</div>' +
     '<div class="events" id="events-scroll"></div>' +
@@ -710,6 +888,7 @@ function renderMainShell() {
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
         '<button class="btn-icon" onclick="openFilePicker()" title="upload image">&#x1f4ce;</button>' +
+        '<button class="btn-icon btn-mic" id="btn-mic" onclick="toggleRecording()" title="voice input">&#x1f3a4;</button>' +
         '<textarea id="msg-input" rows="1" placeholder="send a message..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()" oninput="autoGrow(this)"></textarea>' +
         '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="send">&#x27a4;</button>' +
       '</div>' +
@@ -721,6 +900,7 @@ function renderMainShell() {
   ia.addEventListener('dragover', e => { e.preventDefault(); ia.style.borderColor='#58a6ff'; });
   ia.addEventListener('dragleave', () => { ia.style.borderColor=''; });
   ia.addEventListener('drop', e => { e.preventDefault(); ia.style.borderColor=''; handleFiles(e.dataTransfer.files); });
+  updateSendButton(s.state || '');
   // Dead/suspended sessions with a session_id can be resumed by sending a new message
   // Double-tap events feed → focus input (mobile)
   let lastTapMs = 0;
@@ -836,6 +1016,7 @@ async function sendMessage() {
     if (sessionWorkspaces[selectedKey]) {
       sendMsg.workspace = sessionWorkspaces[selectedKey];
       delete sessionWorkspaces[selectedKey];
+      delete sessionNodes[selectedKey];
     }
     wsm.send(sendMsg);
     sending = false;
@@ -858,6 +1039,7 @@ async function sendMessage() {
       if (sessionWorkspaces[selectedKey]) {
         fd.append('workspace', sessionWorkspaces[selectedKey]);
         delete sessionWorkspaces[selectedKey];
+        delete sessionNodes[selectedKey];
       }
       pendingFiles.forEach(f => fd.append('files', f));
       body = fd;
@@ -868,6 +1050,7 @@ async function sendMessage() {
       if (sessionWorkspaces[selectedKey]) {
         payload.workspace = sessionWorkspaces[selectedKey];
         delete sessionWorkspaces[selectedKey];
+        delete sessionNodes[selectedKey];
       }
       body = JSON.stringify(payload);
     }
@@ -922,6 +1105,22 @@ function interruptSession() {
   }
 }
 
+function updateSendButton(state) {
+  const btn = document.getElementById('btn-send');
+  if (!btn) return;
+  if (state === 'running') {
+    btn.className = 'btn-icon btn-stop';
+    btn.setAttribute('onclick', 'interruptSession()');
+    btn.title = 'stop';
+    btn.innerHTML = '&#x25A0;';
+  } else {
+    btn.className = 'btn-icon btn-send';
+    btn.setAttribute('onclick', 'sendMessage()');
+    btn.title = 'send';
+    btn.innerHTML = '&#x27a4;';
+  }
+}
+
 // --- File handling ---
 
 function openFilePicker() { document.getElementById('file-input').click(); }
@@ -950,6 +1149,83 @@ function renderFilePreviews() {
     const url = URL.createObjectURL(f);
     return '<div class="file-thumb"><img src="' + url + '"><button class="remove" onclick="removeFile(' + i + ')">\u00d7</button></div>';
   }).join('');
+}
+
+// --- Voice recording ---
+
+let mediaRecorder = null;
+let audioChunks = [];
+let isUnloading = false;
+window.addEventListener('pagehide', () => {
+  isUnloading = true;
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+});
+
+let pendingMic = false;
+
+function toggleRecording() {
+  if (pendingMic) return;
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop();
+    return;
+  }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+    showToast('browser does not support audio recording');
+    return;
+  }
+  pendingMic = true;
+  navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    pendingMic = false;
+    audioChunks = [];
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus'
+      : MediaRecorder.isTypeSupported('audio/ogg;codecs=opus') ? 'audio/ogg;codecs=opus'
+      : '';
+    mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      stream.getTracks().forEach(t => t.stop());
+      if (isUnloading) return;
+      const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+      audioChunks = [];
+      transcribeAudio(blob);
+    };
+    mediaRecorder.start();
+    const btn = document.getElementById('btn-mic');
+    if (btn) { btn.classList.add('recording'); btn.title = 'stop recording'; }
+  }).catch(err => {
+    pendingMic = false;
+    showToast('microphone access denied');
+    console.warn('getUserMedia error:', err);
+  });
+}
+
+function transcribeAudio(blob) {
+  const btn = document.getElementById('btn-mic');
+  if (btn) { btn.classList.remove('recording'); btn.classList.add('transcribing'); btn.title = 'transcribing...'; }
+  const fd = new FormData();
+  fd.append('audio', blob, 'recording.' + (blob.type.includes('webm') ? 'webm' : blob.type.includes('ogg') ? 'ogg' : 'mp4'));
+  const headers = {};
+  const token = getToken();
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  fetch('/api/transcribe', {
+    method: 'POST',
+    headers: headers,
+    body: fd
+  }).then(r => {
+    if (!r.ok) return r.text().then(t => { throw new Error(t); });
+    return r.json();
+  }).then(data => {
+    const input = document.getElementById('msg-input');
+    if (input && data.text) {
+      input.value = input.value ? input.value + ' ' + data.text : data.text;
+      autoGrow(input);
+      input.focus();
+    }
+  }).catch(err => {
+    showToast('transcription failed: ' + err.message);
+  }).finally(() => {
+    if (btn) { btn.classList.remove('transcribing'); btn.title = 'voice input'; }
+  });
 }
 
 // --- Auth modal ---
@@ -1028,7 +1304,7 @@ function doCreateSession() {
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
 }
 
-function createSessionInProject(projectPath, projectName) {
+function createSessionInProject(projectPath, projectName, nodeId) {
   sessionCounter++;
   const now = new Date();
   const ts = now.toISOString().slice(0,10) + '-' +
@@ -1036,12 +1312,13 @@ function createSessionInProject(projectPath, projectName) {
   const key = 'dashboard:direct:' + ts + ':' + projectName;
 
   sessionWorkspaces[key] = projectPath;
+  if (nodeId && nodeId !== 'local') sessionNodes[key] = nodeId;
   savePendingSessions();
 
   stopPreviewPolling();
   wsm.unsubscribe();
   selectedKey = key;
-  selectedNode = 'local';
+  selectedNode = nodeId || 'local';
   lastEventTime = 0;
   mobileEnterChat();
   document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
@@ -1084,13 +1361,15 @@ function shortPath(p) {
   return p.length > 40 ? '...' + p.substring(p.length - 37) : p;
 }
 
-function timeAgo(ms) {
+function timeAgo(ms, future) {
   if (!ms) return '\u2014';
-  const d = Date.now() - ms;
-  if (d < 60000) return Math.floor(d/1000) + 's ago';
-  if (d < 3600000) return Math.floor(d/60000) + 'm ago';
-  if (d < 86400000) return Math.floor(d/3600000) + 'h ago';
-  return Math.floor(d/86400000) + 'd ago';
+  const d = future ? ms - Date.now() : Date.now() - ms;
+  if (d < 0) return future ? 'now' : 'just now';
+  const suffix = future ? '' : ' ago';
+  if (d < 60000) return Math.floor(d/1000) + 's' + suffix;
+  if (d < 3600000) return Math.floor(d/60000) + 'm' + suffix;
+  if (d < 86400000) return Math.floor(d/3600000) + 'h' + suffix;
+  return Math.floor(d/86400000) + 'd' + suffix;
 }
 
 function sessionTimeHint(key) {
@@ -1358,6 +1637,9 @@ const wsm = {
           }
         });
         break;
+      case 'cron_result':
+        if (currentTab === 'cron') fetchCronJobs();
+        break;
       case 'pong':
         break;
     }
@@ -1500,6 +1782,8 @@ const wsm = {
       card.classList.toggle('dead-card', msg.state === 'dead' || msg.state === 'suspended');
     }
     if (msg.key === selectedKey && msgNode === selectedNode) updateMainState(msg.state, msg.reason);
+    // Session became suspended: re-render sidebar to move it to history
+    if (msg.state === 'suspended') { lastSessionsJSON = ''; fetchSessions(); }
   },
 
   setState(s) {
@@ -1549,6 +1833,7 @@ function updateMainState(state, reason) {
   if (badge) { badge.className = 'badge ' + state; badge.textContent = state; }
   const ia = document.getElementById('input-area');
   if (ia) ia.classList.toggle('disabled', false);
+  updateSendButton(state);
   if (reason) {
     let dt = header.querySelector('.death-tag');
     if (!dt) {
@@ -1817,6 +2102,221 @@ function initSwipeDelete() {
       setTimeout(() => { c.style.transition = ''; }, 200);
     }
   }, {passive:true});
+}
+
+/* ===== Cron Tab ===== */
+
+let cronJobs = [];
+let selectedCronJob = null;
+let currentTab = 'sessions';
+let cronPollTimer = null;
+
+function switchTab(tab) {
+  currentTab = tab;
+  document.querySelectorAll('.sidebar-tabs button').forEach((btn, i) => {
+    btn.classList.toggle('active', (i === 0 && tab === 'sessions') || (i === 1 && tab === 'cron'));
+  });
+  const sessionList = document.getElementById('session-list');
+  const discoveredSection = document.getElementById('discovered-section');
+  const cronList = document.getElementById('cron-list');
+  const actionsBtn = document.querySelector('.sidebar-actions');
+
+  if (tab === 'sessions') {
+    sessionList.style.display = '';
+    if (discoveredItems.length > 0) discoveredSection.style.display = '';
+    cronList.style.display = 'none';
+    if (actionsBtn) actionsBtn.style.display = '';
+    if (cronPollTimer) { clearInterval(cronPollTimer); cronPollTimer = null; }
+  } else {
+    sessionList.style.display = 'none';
+    discoveredSection.style.display = 'none';
+    cronList.style.display = '';
+    if (actionsBtn) actionsBtn.style.display = 'none';
+    fetchCronJobs();
+    if (!cronPollTimer) cronPollTimer = setInterval(fetchCronJobs, 10000);
+  }
+}
+
+async function fetchCronJobs() {
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/cron', { headers });
+    if (!r.ok) return;
+    const data = await r.json();
+    cronJobs = data.jobs || [];
+    renderCronList();
+  } catch (e) { console.error('fetch cron:', e); }
+}
+
+function renderCronList() {
+  const el = document.getElementById('cron-list');
+  if (!el) return;
+
+  let html = '<div class="cron-add-form">' +
+    '<label>Schedule</label>' +
+    '<input id="cron-schedule" placeholder="@every 30m 或 0 9 * * 1-5">' +
+    '<label>Prompt</label>' +
+    '<textarea id="cron-prompt" rows="2" placeholder="要执行的任务..."></textarea>' +
+    '<label>通知 IM (可选, 格式: platform:chat_id)</label>' +
+    '<input id="cron-notify" placeholder="feishu:oc_xxxx">' +
+    '<div class="form-row"><button onclick="addCronJob()">+ 添加</button></div>' +
+    '</div>';
+
+  if (cronJobs.length === 0) {
+    html += '<div class="no-sessions" style="padding:20px 16px">无定时任务</div>';
+  } else {
+    cronJobs.sort((a, b) => b.created_at - a.created_at);
+    html += cronJobs.map(cronCardHtml).join('');
+  }
+  el.innerHTML = html;
+}
+
+function cronCardHtml(j) {
+  const isActive = selectedCronJob === j.id;
+  const status = j.paused ? '<span class="badge suspended">paused</span>' : '<span class="badge running">active</span>';
+  const source = j.platform === 'dashboard' ? 'dashboard' : j.platform + ':' + (j.chat_id || '').substring(0, 8);
+  const nextStr = j.next_run ? timeAgo(j.next_run, true) : '';
+  const lastRunStr = j.last_run_at ? timeAgo(j.last_run_at) : '';
+  const resultPreview = j.last_error
+    ? '<div class="cron-error-preview" title="' + esc(j.last_error) + '">\u2716 ' + esc(j.last_error) + '</div>'
+    : (j.last_result ? '<div class="cron-result-preview" title="' + esc(j.last_result) + '">\u2714 ' + esc(j.last_result.substring(0, 100)) + '</div>' : '');
+
+  return '<div class="cron-card' + (isActive ? ' active' : '') + '" data-id="' + esc(j.id) + '" onclick="selectCronJob(this.dataset.id)">' +
+    '<div class="cron-prompt">' + esc(j.prompt) + '</div>' +
+    '<div class="cron-schedule">' + esc(j.schedule) + '</div>' +
+    '<div class="cron-meta">' + status +
+      '<span>' + esc(source) + '</span>' +
+      (lastRunStr ? '<span>ran ' + lastRunStr + '</span>' : '') +
+      (nextStr ? '<span>next ' + nextStr + '</span>' : '') +
+    '</div>' +
+    resultPreview +
+    '<div class="cron-actions">' +
+      (j.paused
+        ? '<button data-id="' + esc(j.id) + '" onclick="event.stopPropagation();cronResume(this.dataset.id)">resume</button>'
+        : '<button data-id="' + esc(j.id) + '" onclick="event.stopPropagation();cronPause(this.dataset.id)">pause</button>') +
+      '<button class="danger" data-id="' + esc(j.id) + '" onclick="event.stopPropagation();cronDelete(this.dataset.id)">delete</button>' +
+    '</div>' +
+    '</div>';
+}
+
+function selectCronJob(id) {
+  selectedCronJob = (selectedCronJob === id) ? null : id;
+  document.querySelectorAll('.cron-card').forEach(el => {
+    el.classList.toggle('active', el.dataset.id === selectedCronJob);
+  });
+  if (selectedCronJob) {
+    const j = cronJobs.find(x => x.id === selectedCronJob);
+    if (j) renderCronDetail(j);
+  } else {
+    document.getElementById('main').innerHTML = '<div class="empty-state">select a cron job to view details</div>';
+  }
+}
+
+function renderCronDetail(j) {
+  const main = document.getElementById('main');
+  const status = j.paused ? 'paused' : 'active';
+  const source = j.platform === 'dashboard' ? 'dashboard' : j.platform + ':' + (j.chat_id || '');
+  const nextStr = j.next_run ? new Date(j.next_run).toLocaleString() : 'N/A';
+  const lastRunStr = j.last_run_at ? new Date(j.last_run_at).toLocaleString() : 'never';
+  const notify = j.notify_platform ? j.notify_platform + ':' + (j.notify_chat_id || '') : 'none';
+
+  let resultHtml = '';
+  if (j.last_error) {
+    resultHtml = '<div class="cd-field"><div class="cd-label">Last Error</div><div class="cd-result" style="border-color:#da3633;color:#da3633">' + esc(j.last_error) + '</div></div>';
+  }
+  if (j.last_result) {
+    resultHtml += '<div class="cd-field"><div class="cd-label">Last Result</div><div class="cd-result">' + esc(j.last_result) + '</div></div>';
+  }
+
+  main.innerHTML =
+    '<div class="main-header">' +
+      '<button class="btn-mobile-back" onclick="mobileBack()" title="back">&#8592;</button>' +
+      '<div class="main-header-content">' +
+      '<h2>Cron: ' + esc(j.id) + '</h2>' +
+      '<div class="detail"><span class="badge ' + (j.paused ? 'suspended' : 'running') + '">' + status + '</span><span>' + esc(source) + '</span></div>' +
+      '</div>' +
+    '</div>' +
+    '<div class="cron-detail">' +
+      '<div class="cd-field"><div class="cd-label">Schedule</div><div class="cd-value">' + esc(j.schedule) + '</div></div>' +
+      '<div class="cd-field"><div class="cd-label">Prompt</div><div class="cd-value">' + esc(j.prompt) + '</div></div>' +
+      '<div class="cd-field"><div class="cd-label">Notify</div><div class="cd-value">' + esc(notify) + '</div></div>' +
+      '<div class="cd-field"><div class="cd-label">Next Run</div><div class="cd-value">' + esc(nextStr) + '</div></div>' +
+      '<div class="cd-field"><div class="cd-label">Last Run</div><div class="cd-value">' + esc(lastRunStr) + '</div></div>' +
+      resultHtml +
+    '</div>';
+}
+
+async function addCronJob() {
+  const schedule = document.getElementById('cron-schedule')?.value.trim();
+  const prompt = document.getElementById('cron-prompt')?.value.trim();
+  const notifyRaw = document.getElementById('cron-notify')?.value.trim();
+  if (!schedule || !prompt) { showToast('schedule and prompt are required'); return; }
+
+  const body = { schedule, prompt };
+  if (notifyRaw) {
+    const parts = notifyRaw.split(':');
+    if (parts.length >= 2) {
+      body.notify_platform = parts[0];
+      body.notify_chat_id = parts.slice(1).join(':');
+    } else {
+      showToast('notify format: platform:chat_id'); return;
+    }
+  }
+
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/cron', { method: 'POST', headers, body: JSON.stringify(body) });
+    if (!r.ok) {
+      const text = await r.text().catch(() => r.status);
+      showToast('create failed: ' + text);
+      return;
+    }
+    const data = await r.json();
+    showToast('Job ' + data.id + ' created', 'success');
+    fetchCronJobs();
+  } catch (e) { showToast('error: ' + e.message); }
+}
+
+async function cronPause(id) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/cron/pause', { method: 'POST', headers, body: JSON.stringify({ id }) });
+    if (!r.ok) { showToast('pause failed'); return; }
+    fetchCronJobs();
+  } catch (e) { showToast('error: ' + e.message); }
+}
+
+async function cronResume(id) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/cron/resume', { method: 'POST', headers, body: JSON.stringify({ id }) });
+    if (!r.ok) { showToast('resume failed'); return; }
+    fetchCronJobs();
+  } catch (e) { showToast('error: ' + e.message); }
+}
+
+async function cronDelete(id) {
+  if (!confirm('Delete cron job ' + id + '?')) return;
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/cron?id=' + encodeURIComponent(id), { method: 'DELETE', headers });
+    if (!r.ok) { showToast('delete failed'); return; }
+    if (selectedCronJob === id) {
+      selectedCronJob = null;
+      document.getElementById('main').innerHTML = '<div class="empty-state">select a cron job to view details</div>';
+    }
+    fetchCronJobs();
+  } catch (e) { showToast('error: ' + e.message); }
 }
 
 /* ===== Initialization ===== */
