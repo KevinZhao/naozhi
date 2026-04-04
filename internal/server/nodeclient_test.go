@@ -167,7 +167,7 @@ func TestNodeClient_Send(t *testing.T) {
 	defer ts.Close()
 
 	nc := NewNodeClient("test", ts.URL, "my-token", "Test")
-	err := nc.Send(context.Background(), "test:d:u:general", "hello world")
+	err := nc.Send(context.Background(), "test:d:u:general", "hello world", "")
 	if err != nil {
 		t.Fatalf("Send: %v", err)
 	}
@@ -185,55 +185,9 @@ func TestNodeClient_Send(t *testing.T) {
 func TestNodeClient_Send_Unreachable(t *testing.T) {
 	nc := NewNodeClient("test", "http://127.0.0.1:1", "", "Test")
 	nc.httpClient.Timeout = 1 * time.Second
-	err := nc.Send(context.Background(), "key", "text")
+	err := nc.Send(context.Background(), "key", "text", "")
 	if err == nil {
 		t.Fatal("expected error for unreachable server")
-	}
-}
-
-func TestNodeClient_Health(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/health" {
-			http.Error(w, "not found", 404)
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
-	}))
-	defer ts.Close()
-
-	nc := NewNodeClient("test", ts.URL, "", "Test")
-	err := nc.Health(context.Background())
-	if err != nil {
-		t.Fatalf("Health: %v", err)
-	}
-}
-
-func TestNodeClient_Health_Error(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	}))
-	defer ts.Close()
-
-	nc := NewNodeClient("test", ts.URL, "", "Test")
-	err := nc.Health(context.Background())
-	if err == nil {
-		t.Fatal("expected error for unhealthy server")
-	}
-}
-
-func TestNodeClient_Health_BadStatus(t *testing.T) {
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		json.NewEncoder(w).Encode(map[string]string{"status": "degraded"})
-	}))
-	defer ts.Close()
-
-	nc := NewNodeClient("test", ts.URL, "", "Test")
-	err := nc.Health(context.Background())
-	if err == nil {
-		t.Fatal("expected error for non-ok status")
-	}
-	if !strings.Contains(err.Error(), "degraded") {
-		t.Errorf("error should mention status, got: %v", err)
 	}
 }
 

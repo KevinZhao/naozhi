@@ -211,6 +211,7 @@ func (r *Router) GetWorkspace(chatKey string) string {
 func (r *Router) ResetChat(chatKeyPrefix string) {
 	r.mu.Lock()
 	var toClose []processIface
+	var closedActive int
 	if r.sessionsByChat != nil {
 		// O(k) path via index (k = agents per chat, typically 1-3).
 		for _, key := range r.sessionsByChat[chatKeyPrefix] {
@@ -220,6 +221,9 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 			}
 			if s.process != nil && s.process.Alive() {
 				toClose = append(toClose, s.process)
+				if !s.Exempt {
+					closedActive++
+				}
 			}
 			delete(r.sessions, key)
 		}
@@ -232,6 +236,9 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 				toDelete = append(toDelete, key)
 				if s.process != nil && s.process.Alive() {
 					toClose = append(toClose, s.process)
+					if !s.Exempt {
+						closedActive++
+					}
 				}
 			}
 		}
@@ -239,9 +246,12 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 			delete(r.sessions, key)
 		}
 	}
+	r.activeCount -= closedActive
+	if r.activeCount < 0 {
+		r.activeCount = 0
+	}
 	r.mu.Unlock()
 
-	closedCount := len(toClose)
 	for _, proc := range toClose {
 		proc.Close()
 	}
@@ -249,14 +259,6 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 		r.shutdownCond.Broadcast()
 	}
 
-	if closedCount > 0 {
-		r.mu.Lock()
-		r.activeCount -= closedCount
-		if r.activeCount < 0 {
-			r.activeCount = 0
-		}
-		r.mu.Unlock()
-	}
 	r.notifyChange()
 }
 
@@ -273,7 +275,7 @@ type SessionStatus int
 
 const (
 	SessionExisting SessionStatus = iota // reused a live session
-	SessionResumed                       // resumed a dead session
+	SessionResumed                       // resumed a suspended session
 	SessionNew                           // created a brand new session
 )
 
@@ -288,7 +290,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 			r.mu.Unlock()
 			return s, SessionExisting, nil
 		}
-		slog.Info("session process dead, resuming", "key", key, "session_id", s.getSessionID())
+		slog.Info("session process exited, resuming", "key", key, "session_id", s.getSessionID())
 		s, err := r.spawnSession(ctx, key, s.getSessionID(), opts)
 		if err != nil {
 			return nil, 0, err
@@ -310,7 +312,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, opts AgentOpts) (*ManagedSession, error) {
 	// Exempt sessions (planners) bypass maxProcs capacity check
 	if !opts.Exempt {
-		// Recount to correct drift from undetected process deaths (watchdog, crash)
+		// Recount to correct drift from undetected process exits (OOM, SIGKILL)
 		r.countActive()
 		if r.activeCount+r.pendingSpawns >= r.maxProcs {
 			if !r.evictOldest() {
@@ -486,7 +488,7 @@ func (r *Router) evictOldest() bool {
 	slog.Info("evicting oldest session", "key", oldest.Key, "idle", time.Since(oldest.GetLastActive()))
 	oldest.deathReason.Store("evicted")
 	// Keep oldest.process non-nil so concurrent holders don't get nil-panic.
-	// After Close(), Alive() returns false — countActive() will stop counting it.
+	// After Close(), Alive() returns false; count was already decremented above.
 	proc := oldest.process
 	r.mu.Unlock()
 	proc.Close()
@@ -545,7 +547,9 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 	r.mu.Lock()
 
 	// Delete old session if present
+	hadOld := false
 	if s, ok := r.sessions[key]; ok {
+		hadOld = true
 		wasActive := !s.Exempt && s.process != nil && s.process.Alive()
 		proc := s.process
 		r.indexDel(key)
@@ -554,12 +558,15 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		if proc != nil && proc.Alive() {
 			r.mu.Unlock()
 			proc.Close()
+			if r.shutdownCond != nil {
+				r.shutdownCond.Broadcast()
+			}
 			r.mu.Lock()
-			if wasActive {
-				r.activeCount--
-				if r.activeCount < 0 {
-					r.activeCount = 0
-				}
+		}
+		if wasActive {
+			r.activeCount--
+			if r.activeCount < 0 {
+				r.activeCount = 0
 			}
 		}
 	}
@@ -568,10 +575,12 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 	s, err := r.spawnSession(ctx, key, "", opts)
 	if err != nil {
 		// spawnSession already unlocked mu on error
+		if hadOld {
+			r.notifyChange()
+		}
 		return nil, err
 	}
-	// spawnSession already unlocked mu on success
-	r.notifyChange()
+	// spawnSession already called notifyChange on success
 	return s, nil
 }
 
@@ -663,14 +672,14 @@ func (r *Router) Cleanup() {
 			pruned++
 			continue
 		}
-		// Prune dead sessions with no resumable session ID
+		// Prune exited sessions with no resumable session ID
 		if s.process != nil && !s.process.Alive() && s.getSessionID() == "" && now.Sub(s.GetLastActive()) > r.ttl {
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
 			continue
 		}
-		// Prune old dead sessions even with session ID (prevents unbounded growth)
+		// Prune old exited sessions even with session ID (prevents unbounded growth)
 		if s.process != nil && !s.process.Alive() && now.Sub(s.GetLastActive()) > 7*r.ttl {
 			r.indexDel(key)
 			delete(r.sessions, key)
@@ -780,7 +789,7 @@ func (r *Router) MaxProcs() int {
 
 // Stats returns current session statistics.
 // active = sessions with a live process (ready or running, excluding exempt);
-// total = all sessions in the map including dead and suspended ones.
+// total = all sessions in the map including suspended ones.
 func (r *Router) Stats() (active, total int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -849,51 +858,6 @@ func (r *Router) ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]
 	return
 }
 
-// ManagedPIDs returns the OS PIDs of all alive managed processes.
-func (r *Router) ManagedPIDs() map[int]bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	pids := make(map[int]bool)
-	for _, s := range r.sessions {
-		if s.process != nil && s.process.Alive() {
-			if pid := s.process.PID(); pid > 0 {
-				pids[pid] = true
-			}
-		}
-	}
-	return pids
-}
-
-// ManagedSessionIDs returns the Claude session IDs of all managed sessions.
-// Used by discovery.Scan to prevent CLI session upgrade from picking up
-// JSONL files written by naozhi-managed sessions in the same workspace.
-func (r *Router) ManagedSessionIDs() map[string]bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	ids := make(map[string]bool)
-	for _, s := range r.sessions {
-		if id := s.getSessionID(); id != "" {
-			ids[id] = true
-		}
-	}
-	return ids
-}
-
-// ManagedCWDs returns the working directories of all managed sessions that
-// have an alive process. Used by discovery.Scan to skip session ID upgrade
-// for CWDs where naozhi is actively managing a session.
-func (r *Router) ManagedCWDs() map[string]bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	cwds := make(map[string]bool)
-	for _, s := range r.sessions {
-		if s.workspace != "" && s.process != nil && s.process.Alive() {
-			cwds[s.workspace] = true
-		}
-	}
-	return cwds
-}
-
 // Takeover creates a managed session to replace an external Claude CLI session.
 // It uses --resume to preserve the conversation context, and loads JSONL history
 // for dashboard display. The caller must ensure the original process has been
@@ -918,7 +882,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 				r.mu.Unlock()
 				return nil, fmt.Errorf("concurrent session created for key %s during takeover", key)
 			}
-			// Implicit else: concurrent goroutine replaced the session with a dead
+			// Implicit else: concurrent goroutine replaced the session with an exited
 			// one. Leave r.sessions[key] as-is — spawnSession below will overwrite
 			// it and call indexAdd, keeping the index consistent. No indexDel here
 			// because we are not removing from r.sessions.

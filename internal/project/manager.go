@@ -47,11 +47,6 @@ func NewManager(root string, defaults PlannerDefaults) (*Manager, error) {
 	}, nil
 }
 
-// Root returns the projects root directory.
-func (m *Manager) Root() string {
-	return m.root
-}
-
 // Scan discovers all subdirectories under root and loads their project configs.
 func (m *Manager) Scan() error {
 	entries, err := os.ReadDir(m.root)
@@ -161,30 +156,6 @@ func (m *Manager) BindChat(projectName, platform, chatType, chatID string) error
 	}
 
 	p.Config.ChatBindings = append(p.Config.ChatBindings, binding)
-	m.rebuildBindingIndex()
-	cfgSnap := snapshotConfig(p)
-	path := p.configPath()
-	m.mu.Unlock()
-
-	return saveConfigToPath(path, cfgSnap)
-}
-
-// UnbindChat removes a chat binding from a project and persists the change.
-func (m *Manager) UnbindChat(projectName, platform, chatType, chatID string) error {
-	m.mu.Lock()
-	p, ok := m.projects[projectName]
-	if !ok {
-		m.mu.Unlock()
-		return fmt.Errorf("%w: %s", ErrNotFound, projectName)
-	}
-
-	filtered := p.Config.ChatBindings[:0]
-	for _, b := range p.Config.ChatBindings {
-		if !(b.Platform == platform && b.ChatID == chatID && b.ChatType == chatType) {
-			filtered = append(filtered, b)
-		}
-	}
-	p.Config.ChatBindings = filtered
 	m.rebuildBindingIndex()
 	cfgSnap := snapshotConfig(p)
 	path := p.configPath()

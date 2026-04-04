@@ -60,17 +60,7 @@ func (r *wsRelay) Subscribe(c wsEventSink, key string, after int64) {
 // Unsubscribe removes a local client from a remote session key.
 func (r *wsRelay) Unsubscribe(c wsEventSink, key string) {
 	r.mu.Lock()
-	clients := r.subs[key]
-	for i, cl := range clients {
-		if cl == c {
-			r.subs[key] = append(clients[:i], clients[i+1:]...)
-			break
-		}
-	}
-	empty := len(r.subs[key]) == 0
-	if empty {
-		delete(r.subs, key)
-	}
+	empty := removeSub(r.subs, key, c)
 	r.mu.Unlock()
 
 	if empty {
@@ -82,19 +72,7 @@ func (r *wsRelay) Unsubscribe(c wsEventSink, key string) {
 // RemoveClient removes a client from all subscriptions (called on disconnect).
 func (r *wsRelay) RemoveClient(c wsEventSink) {
 	r.mu.Lock()
-	var emptyKeys []string
-	for key, clients := range r.subs {
-		for i, cl := range clients {
-			if cl == c {
-				r.subs[key] = append(clients[:i], clients[i+1:]...)
-				break
-			}
-		}
-		if len(r.subs[key]) == 0 {
-			delete(r.subs, key)
-			emptyKeys = append(emptyKeys, key)
-		}
-	}
+	emptyKeys := removeSubAll(r.subs, c)
 	r.mu.Unlock()
 
 	for _, key := range emptyKeys {

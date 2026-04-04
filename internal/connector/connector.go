@@ -7,33 +7,23 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/reverse"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// UpstreamConfig holds the connection details for dialling a primary naozhi instance.
-// Mirror this into internal/config/config.go as config.UpstreamConfig when wiring up
-// the full application.
-type UpstreamConfig struct {
-	URL         string `yaml:"url"`
-	NodeID      string `yaml:"node_id"`
-	Token       string `yaml:"token"`
-	DisplayName string `yaml:"display_name"`
-}
-
 // Connector dials a primary naozhi and serves it as a reverse-connected node.
 // Run on machines behind NAT that cannot be reached by the primary directly.
 type Connector struct {
-	cfg          *UpstreamConfig
+	cfg          *config.UpstreamConfig
 	router       *session.Router
 	projMgr      *project.Manager // may be nil
 	claudeDir    string
@@ -43,7 +33,7 @@ type Connector struct {
 }
 
 // New creates a Connector. projMgr may be nil if projects are not configured.
-func New(cfg *UpstreamConfig, router *session.Router, projMgr *project.Manager) *Connector {
+func New(cfg *config.UpstreamConfig, router *session.Router, projMgr *project.Manager) *Connector {
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
 		claudeDir = filepath.Join(home, ".claude")
@@ -275,13 +265,25 @@ func (c *Connector) handleRequest(ctx context.Context, req reverse.ReverseMsg) (
 
 	case "send":
 		var p struct {
-			Key  string `json:"key"`
-			Text string `json:"text"`
+			Key       string `json:"key"`
+			Text      string `json:"text"`
+			Workspace string `json:"workspace"`
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("send params: %w", err)
 		}
-		sess, _, err := c.router.GetOrCreate(ctx, p.Key, session.AgentOpts{})
+		opts := session.AgentOpts{}
+		if p.Workspace != "" {
+			// Sanitize workspace path to prevent directory traversal.
+			// Primary has already validated against allowedRoot, but we
+			// still clean the path to avoid ".." injection.
+			ws := filepath.Clean(p.Workspace)
+			if !filepath.IsAbs(ws) {
+				return nil, fmt.Errorf("workspace must be absolute path")
+			}
+			opts.Workspace = ws
+		}
+		sess, _, err := c.router.GetOrCreate(ctx, p.Key, opts)
 		if err != nil {
 			return nil, fmt.Errorf("get session: %w", err)
 		}
@@ -323,27 +325,7 @@ func (c *Connector) handleRequest(ctx context.Context, req reverse.ReverseMsg) (
 		key := "local:takeover:" + cwdKey + ":general"
 		pid, sessionID, procStartTime, reqCWD, claudeDir := p.PID, p.SessionID, p.ProcStartTime, p.CWD, c.claudeDir
 		go func() {
-			deadline := time.Now().Add(5 * time.Second)
-			for time.Now().Before(deadline) {
-				if err := syscall.Kill(pid, 0); err != nil {
-					break
-				}
-				time.Sleep(200 * time.Millisecond)
-			}
-			if procStartTime != 0 {
-				if actual, err := discovery.ProcStartTime(pid); err == nil && actual == procStartTime {
-					syscall.Kill(pid, syscall.SIGKILL) //nolint
-				}
-			}
-			if claudeDir != "" {
-				staleFile := filepath.Join(claudeDir, "sessions", fmt.Sprintf("%d.json", pid))
-				os.Remove(staleFile) //nolint
-			}
-			if reqCWD != "" && sessionID != "" && isValidSessionID(sessionID) {
-				encodedCWD := strings.ReplaceAll(reqCWD, "/", "-")
-				lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID)
-				os.RemoveAll(lockDir) //nolint
-			}
+			discovery.WaitAndCleanup(pid, procStartTime, claudeDir, reqCWD, sessionID)
 			if _, err := c.router.Takeover(context.Background(), key, sessionID, cwd, session.AgentOpts{}); err != nil {
 				slog.Debug("connector takeover failed", "key", key, "err", err)
 			}
@@ -373,12 +355,10 @@ func (c *Connector) handleRequest(ctx context.Context, req reverse.ReverseMsg) (
 		if prompt := c.projMgr.EffectivePlannerPrompt(proj); prompt != "" {
 			opts.ExtraArgs = []string{"--append-system-prompt", prompt}
 		}
-		go func() {
-			if _, err := c.router.ResetAndRecreate(context.Background(), plannerKey, opts); err != nil {
-				slog.Error("connector planner restart failed", "project", p.ProjectName, "err", err)
-			}
-		}()
-		return marshalResult(map[string]string{"status": "restarting"})
+		if _, err := c.router.ResetAndRecreate(ctx, plannerKey, opts); err != nil {
+			return nil, fmt.Errorf("restart planner: %w", err)
+		}
+		return marshalResult(map[string]string{"status": "restarted"})
 
 	case "update_config":
 		var p struct {
@@ -439,10 +419,4 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 
 func marshalResult(v any) (json.RawMessage, error) {
 	return json.Marshal(v)
-}
-
-var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-
-func isValidSessionID(s string) bool {
-	return uuidRe.MatchString(s)
 }

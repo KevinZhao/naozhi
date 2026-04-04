@@ -228,7 +228,6 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 	if trimmed == "/clear" || trimmed == "/new" {
 		h.router.Reset(key)
 		c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "accepted", Key: key})
-		h.broadcastState(key, "dead", "user_reset")
 		h.BroadcastSessionsUpdate()
 		return
 	}
@@ -253,31 +252,7 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 		defer h.guard.Release(key)
 
 		ctx := h.ctx
-		parts := strings.SplitN(key, ":", 4)
-		agentID := "general"
-		if len(parts) == 4 {
-			agentID = parts[3]
-		}
-
-		opts := h.agents[agentID]
-		if project.IsPlannerKey(key) {
-			opts.Exempt = true
-			if h.projectMgr != nil {
-				pParts := strings.SplitN(key, ":", 3)
-				if len(pParts) == 3 {
-					if p := h.projectMgr.Get(pParts[1]); p != nil {
-						opts.Workspace = p.Path
-						if m := h.projectMgr.EffectivePlannerModel(p); m != "" {
-							opts.Model = m
-						}
-						if prompt := h.projectMgr.EffectivePlannerPrompt(p); prompt != "" {
-							opts.ExtraArgs = append(opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)],
-								"--append-system-prompt", prompt)
-						}
-					}
-				}
-			}
-		}
+		opts := buildSessionOpts(key, h.agents, h.projectMgr)
 		sess, _, err := h.router.GetOrCreate(ctx, key, opts)
 		if err != nil {
 			slog.Error("ws send: get session", "key", key, "err", err)
@@ -295,15 +270,14 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 			slog.Error("ws send: send", "key", key, "err", err)
 		}
 
-		// Notify subscribers: ready (or dead if process died)
+		// Notify subscribers: ready (or suspended if process died)
 		sess2 := h.router.GetSession(key)
 		if sess2 != nil {
 			snap := sess2.Snapshot()
 			h.broadcastState(key, snap.State, snap.DeathReason)
-		} else {
-			// Session was removed (e.g. concurrent Reset) while we were running.
-			h.broadcastState(key, "dead", "user_reset")
 		}
+		// If session was removed (e.g. concurrent Reset), sessions_update
+		// will cause the frontend to drop it from the sidebar.
 		h.BroadcastSessionsUpdate()
 	}()
 }
@@ -500,15 +474,11 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg wsClientMsg) {
 	go func() {
 		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
 		defer cancel()
-		if err := nc.Send(ctx, msg.Key, msg.Text); err != nil {
+		if err := nc.Send(ctx, msg.Key, msg.Text, msg.Workspace); err != nil {
 			slog.Error("remote ws send failed", "node", nodeID, "key", msg.Key, "err", err)
 		}
+		h.BroadcastSessionsUpdate()
 	}()
-}
-
-// NotifyNodeChange broadcasts a sessions_update so clients refresh after a node connects/disconnects.
-func (h *Hub) NotifyNodeChange() {
-	h.BroadcastSessionsUpdate()
 }
 
 // PurgeNodeSubscriptions notifies all browser clients that a node disconnected,

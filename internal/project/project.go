@@ -105,11 +105,6 @@ func loadConfig(projectPath string) (ProjectConfig, error) {
 	return cfg, nil
 }
 
-// SaveConfig writes the project config to .naozhi/project.yaml.
-func (p *Project) SaveConfig() error {
-	return saveConfigToPath(p.configPath(), p.Config)
-}
-
 // saveConfigToPath atomically writes a ProjectConfig to the given path.
 func saveConfigToPath(path string, cfg ProjectConfig) error {
 	dir := filepath.Dir(path)

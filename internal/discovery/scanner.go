@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -439,4 +440,37 @@ func ProcStartTime(pid int) (uint64, error) {
 		return 0, fmt.Errorf("/proc/%d/stat: too few fields", pid)
 	}
 	return strconv.ParseUint(fields[startTimeIdx], 10, 64)
+}
+
+var sessionIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// IsValidSessionID checks whether s is a valid UUID-format session ID.
+func IsValidSessionID(s string) bool {
+	return sessionIDRe.MatchString(s)
+}
+
+// WaitAndCleanup waits for pid to exit (up to 5 s), sends SIGKILL if still alive
+// and PID identity matches, then removes stale session metadata and lock files.
+// Must be called after SIGTERM has already been sent.
+func WaitAndCleanup(pid int, procStartTime uint64, claudeDir, cwd, sessionID string) {
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); err != nil {
+			break
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	if procStartTime != 0 {
+		if actual, err := ProcStartTime(pid); err == nil && actual == procStartTime {
+			_ = syscall.Kill(pid, syscall.SIGKILL)
+		}
+	}
+	if claudeDir != "" {
+		_ = os.Remove(filepath.Join(claudeDir, "sessions", fmt.Sprintf("%d.json", pid)))
+	}
+	if cwd != "" && sessionID != "" && IsValidSessionID(sessionID) {
+		encodedCWD := strings.ReplaceAll(cwd, "/", "-")
+		lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID)
+		_ = os.RemoveAll(lockDir)
+	}
 }

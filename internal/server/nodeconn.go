@@ -28,7 +28,7 @@ type NodeConn interface {
 	FetchDiscovered(ctx context.Context) ([]map[string]any, error)
 	FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]cli.EventEntry, error)
 	FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error)
-	Send(ctx context.Context, key, text string) error
+	Send(ctx context.Context, key, text, workspace string) error
 
 	ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) error
 	ProxyRestartPlanner(ctx context.Context, projectName string) error
@@ -39,4 +39,40 @@ type NodeConn interface {
 	RemoveClient(c wsEventSink)
 
 	Close()
+}
+
+// removeSub removes c from subs[key]. Returns true if the key has no subscribers left.
+// Caller must hold the lock protecting subs.
+func removeSub(subs map[string][]wsEventSink, key string, c wsEventSink) bool {
+	clients := subs[key]
+	for i, cl := range clients {
+		if cl == c {
+			subs[key] = append(clients[:i], clients[i+1:]...)
+			break
+		}
+	}
+	if len(subs[key]) == 0 {
+		delete(subs, key)
+		return true
+	}
+	return false
+}
+
+// removeSubAll removes c from all keys. Returns keys that became empty.
+// Caller must hold the lock protecting subs.
+func removeSubAll(subs map[string][]wsEventSink, c wsEventSink) []string {
+	var emptyKeys []string
+	for key, clients := range subs {
+		for i, cl := range clients {
+			if cl == c {
+				subs[key] = append(clients[:i], clients[i+1:]...)
+				break
+			}
+		}
+		if len(subs[key]) == 0 {
+			delete(subs, key)
+			emptyKeys = append(emptyKeys, key)
+		}
+	}
+	return emptyKeys
 }

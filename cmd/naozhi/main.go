@@ -432,13 +432,7 @@ func main() {
 
 	// Start upstream connector (this node connects to a primary)
 	if cfg.Upstream != nil {
-		connCfg := &connector.UpstreamConfig{
-			URL:         cfg.Upstream.URL,
-			NodeID:      cfg.Upstream.NodeID,
-			Token:       cfg.Upstream.Token,
-			DisplayName: cfg.Upstream.DisplayName,
-		}
-		conn := connector.New(connCfg, router, projectMgr)
+		conn := connector.New(cfg.Upstream, router, projectMgr)
 		if claudeDir != "" {
 			conn.SetDiscoverFunc(func() (json.RawMessage, error) {
 				pids, sids, cwds := router.ManagedExcludeSets()

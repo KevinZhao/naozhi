@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -107,11 +108,8 @@ func (s *Server) handleAPIProjectConfigPut(w http.ResponseWriter, r *http.Reques
 	// Remote node proxy
 	node := r.URL.Query().Get("node")
 	if node != "" && node != "local" {
-		s.nodesMu.RLock()
-		nc, ok := s.nodes[node]
-		s.nodesMu.RUnlock()
+		nc, ok := s.lookupNode(w, node)
 		if !ok {
-			http.Error(w, "unknown node", http.StatusBadRequest)
 			return
 		}
 		body, err := io.ReadAll(r.Body)
@@ -166,11 +164,8 @@ func (s *Server) handleAPIProjectPlannerRestart(w http.ResponseWriter, r *http.R
 	// Remote node proxy
 	node := r.URL.Query().Get("node")
 	if node != "" && node != "local" {
-		s.nodesMu.RLock()
-		nc, ok := s.nodes[node]
-		s.nodesMu.RUnlock()
+		nc, ok := s.lookupNode(w, node)
 		if !ok {
-			http.Error(w, "unknown node", http.StatusBadRequest)
 			return
 		}
 		if err := nc.ProxyRestartPlanner(r.Context(), name); err != nil {
@@ -205,18 +200,19 @@ func (s *Server) handleAPIProjectPlannerRestart(w http.ResponseWriter, r *http.R
 		opts.ExtraArgs = []string{"--append-system-prompt", prompt}
 	}
 
-	go func() {
-		ctx := context.Background()
-		if s.hub != nil {
-			ctx = s.hub.ctx
-		}
-		if _, err := s.router.ResetAndRecreate(ctx, plannerKey, opts); err != nil {
-			slog.Error("planner restart failed", "project", name, "err", err)
-		} else {
-			slog.Info("planner restarted", "project", name)
-		}
-	}()
+	ctx := context.Background()
+	if s.hub != nil {
+		ctx = s.hub.ctx
+	}
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if _, err := s.router.ResetAndRecreate(ctx, plannerKey, opts); err != nil {
+		slog.Error("planner restart failed", "project", name, "err", err)
+		http.Error(w, "restart failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	slog.Info("planner restarted", "project", name)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "restarting"})
+	json.NewEncoder(w).Encode(map[string]string{"status": "restarted"})
 }

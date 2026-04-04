@@ -11,7 +11,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -23,8 +22,6 @@ import (
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
-
-var validSessionID = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
 //go:embed static/dashboard.html
 var dashboardHTML embed.FS
@@ -155,7 +152,7 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 	var running, ready int
 	for _, snap := range snapshots {
 		switch snap.State {
-		case "running", "spawning":
+		case "running":
 			running++
 		case "ready":
 			ready++
@@ -303,11 +300,8 @@ func (s *Server) handleAPISessionEvents(w http.ResponseWriter, r *http.Request) 
 	// Remote node proxy
 	node := r.URL.Query().Get("node")
 	if node != "" && node != "local" {
-		s.nodesMu.RLock()
-		nc, ok := s.nodes[node]
-		s.nodesMu.RUnlock()
+		nc, ok := s.lookupNode(w, node)
 		if !ok {
-			http.Error(w, "unknown node", http.StatusBadRequest)
 			return
 		}
 		var after int64
@@ -460,7 +454,6 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 	if trimmed == "/clear" || trimmed == "/new" {
 		s.router.Reset(key)
 		if s.hub != nil {
-			s.hub.broadcastState(key, "dead", "user_reset")
 			s.hub.BroadcastSessionsUpdate()
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -470,17 +463,14 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 
 	// Remote node proxy
 	if node != "" && node != "local" {
-		s.nodesMu.RLock()
-		nc, ok := s.nodes[node]
-		s.nodesMu.RUnlock()
+		nc, ok := s.lookupNode(w, node)
 		if !ok {
-			http.Error(w, "unknown node", http.StatusBadRequest)
 			return
 		}
-		capturedKey, capturedText := key, text
+		capturedKey, capturedText, capturedWorkspace := key, text, workspace
 		go func() {
 			ctx := context.Background()
-			if err := nc.Send(ctx, capturedKey, capturedText); err != nil {
+			if err := nc.Send(ctx, capturedKey, capturedText, capturedWorkspace); err != nil {
 				slog.Error("remote send", "node", node, "key", capturedKey, "err", err)
 			}
 		}()
@@ -534,31 +524,7 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 			ctx = context.Background()
 		}
 
-		parts := strings.SplitN(key, ":", 4)
-		agentID := "general"
-		if len(parts) == 4 {
-			agentID = parts[3]
-		}
-
-		opts := s.agents[agentID]
-		if project.IsPlannerKey(key) {
-			opts.Exempt = true
-			if s.projectMgr != nil {
-				pParts := strings.SplitN(key, ":", 3)
-				if len(pParts) == 3 {
-					if p := s.projectMgr.Get(pParts[1]); p != nil {
-						opts.Workspace = p.Path
-						if m := s.projectMgr.EffectivePlannerModel(p); m != "" {
-							opts.Model = m
-						}
-						if prompt := s.projectMgr.EffectivePlannerPrompt(p); prompt != "" {
-							opts.ExtraArgs = append(opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)],
-								"--append-system-prompt", prompt)
-						}
-					}
-				}
-			}
-		}
+		opts := buildSessionOpts(key, s.agents, s.projectMgr)
 		sess, _, err := s.router.GetOrCreate(ctx, key, opts)
 		if err != nil {
 			slog.Error("dashboard send: get session", "key", key, "err", err)
@@ -621,7 +587,7 @@ func (s *Server) handleAPIDiscoveredPreview(w http.ResponseWriter, r *http.Reque
 	}
 	sessionID := r.URL.Query().Get("session_id")
 	nodeID := r.URL.Query().Get("node")
-	if sessionID == "" || !validSessionID.MatchString(sessionID) {
+	if sessionID == "" || !discovery.IsValidSessionID(sessionID) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode([]any{})
 		return
@@ -684,18 +650,15 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
 	}
-	if req.PID <= 0 || req.SessionID == "" || !validSessionID.MatchString(req.SessionID) {
+	if req.PID <= 0 || req.SessionID == "" || !discovery.IsValidSessionID(req.SessionID) {
 		http.Error(w, "pid and session_id are required", http.StatusBadRequest)
 		return
 	}
 
 	// Remote node proxy
 	if req.Node != "" && req.Node != "local" {
-		s.nodesMu.RLock()
-		nc, ok := s.nodes[req.Node]
-		s.nodesMu.RUnlock()
+		nc, ok := s.lookupNode(w, req.Node)
 		if !ok {
-			http.Error(w, "unknown node", http.StatusBadRequest)
 			return
 		}
 		if err := nc.ProxyTakeover(r.Context(), req.PID, req.SessionID, req.CWD, req.ProcStartTime); err != nil {
@@ -758,7 +721,7 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 
 	go func() {
 		// Wait, SIGKILL, and remove stale session files.
-		s.waitAndCleanupClaude(pid, procStartTime, reqCWD, sessionID)
+		discovery.WaitAndCleanup(pid, procStartTime, s.claudeDir, reqCWD, sessionID)
 
 		// Takeover via router — use Background context so the spawned process
 		// outlives the HTTP request.
@@ -769,7 +732,6 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			slog.Error("session takeover failed", "key", key, "session_id", sessionID, "pid", pid, "err", err)
 			if s.hub != nil {
-				s.hub.broadcastState(key, "dead", "takeover_failed")
 				s.hub.BroadcastSessionsUpdate()
 			}
 			return
@@ -1033,4 +995,34 @@ func (s *Server) handleAPICronResume(w http.ResponseWriter, r *http.Request) {
 	slog.Info("cron job resumed via dashboard", "id", req.ID)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// buildSessionOpts resolves agent config and planner overrides for a session key.
+func buildSessionOpts(key string, agents map[string]session.AgentOpts, projectMgr *project.Manager) session.AgentOpts {
+	parts := strings.SplitN(key, ":", 4)
+	agentID := "general"
+	if len(parts) == 4 {
+		agentID = parts[3]
+	}
+
+	opts := agents[agentID]
+	if project.IsPlannerKey(key) {
+		opts.Exempt = true
+		if projectMgr != nil {
+			pParts := strings.SplitN(key, ":", 3)
+			if len(pParts) == 3 {
+				if p := projectMgr.Get(pParts[1]); p != nil {
+					opts.Workspace = p.Path
+					if m := projectMgr.EffectivePlannerModel(p); m != "" {
+						opts.Model = m
+					}
+					if prompt := projectMgr.EffectivePlannerPrompt(p); prompt != "" {
+						opts.ExtraArgs = append(opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)],
+							"--append-system-prompt", prompt)
+					}
+				}
+			}
+		}
+	}
+	return opts
 }

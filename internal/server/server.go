@@ -205,6 +205,18 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 	return s
 }
 
+// lookupNode returns the NodeConn for a remote node, writing a 400 error if not found.
+func (s *Server) lookupNode(w http.ResponseWriter, nodeID string) (NodeConn, bool) {
+	s.nodesMu.RLock()
+	nc, ok := s.nodes[nodeID]
+	s.nodesMu.RUnlock()
+	if !ok {
+		http.Error(w, "unknown node", http.StatusBadRequest)
+		return nil, false
+	}
+	return nc, true
+}
+
 // Start registers routes and begins serving.
 func (s *Server) Start(ctx context.Context) error {
 	handler := s.buildMessageHandler()

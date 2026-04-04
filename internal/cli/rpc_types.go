@@ -66,12 +66,3 @@ type ACPTextContent struct {
 type ACPSessionNewResult struct {
 	SessionID string `json:"sessionId"`
 }
-
-// ACPPermissionRequest represents session/request_permission params.
-type ACPPermissionRequest struct {
-	SessionID string `json:"sessionId"`
-	Options   []struct {
-		OptionID string `json:"optionId"`
-		Kind     string `json:"kind"`
-	} `json:"options"`
-}

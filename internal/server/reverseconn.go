@@ -181,8 +181,12 @@ func (c *ReverseNodeConn) FetchEvents(ctx context.Context, key string, after int
 	return result, json.Unmarshal(raw, &result)
 }
 
-func (c *ReverseNodeConn) Send(ctx context.Context, key, text string) error {
-	_, err := c.rpc(ctx, "send", map[string]string{"key": key, "text": text})
+func (c *ReverseNodeConn) Send(ctx context.Context, key, text, workspace string) error {
+	params := map[string]string{"key": key, "text": text}
+	if workspace != "" {
+		params["workspace"] = workspace
+	}
+	_, err := c.rpc(ctx, "send", params)
 	return err
 }
 
@@ -231,17 +235,7 @@ func (c *ReverseNodeConn) Subscribe(cl wsEventSink, key string, after int64) {
 
 func (c *ReverseNodeConn) Unsubscribe(cl wsEventSink, key string) {
 	c.subMu.Lock()
-	clients := c.subs[key]
-	for i, existing := range clients {
-		if existing == cl {
-			c.subs[key] = append(clients[:i], clients[i+1:]...)
-			break
-		}
-	}
-	empty := len(c.subs[key]) == 0
-	if empty {
-		delete(c.subs, key)
-	}
+	empty := removeSub(c.subs, key, cl)
 	c.subMu.Unlock()
 
 	if empty {
@@ -252,19 +246,7 @@ func (c *ReverseNodeConn) Unsubscribe(cl wsEventSink, key string) {
 
 func (c *ReverseNodeConn) RemoveClient(cl wsEventSink) {
 	c.subMu.Lock()
-	var emptyKeys []string
-	for key, clients := range c.subs {
-		for i, existing := range clients {
-			if existing == cl {
-				c.subs[key] = append(clients[:i], clients[i+1:]...)
-				break
-			}
-		}
-		if len(c.subs[key]) == 0 {
-			delete(c.subs, key)
-			emptyKeys = append(emptyKeys, key)
-		}
-	}
+	emptyKeys := removeSubAll(c.subs, cl)
 	c.subMu.Unlock()
 
 	for _, key := range emptyKeys {

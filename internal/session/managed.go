@@ -241,11 +241,7 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 
 	if s.process == nil {
 		snap.TotalCost = s.totalCost
-		if snap.SessionID != "" {
-			snap.State = "suspended"
-		} else {
-			snap.State = "dead"
-		}
+		snap.State = "suspended"
 	} else {
 		snap.State = s.process.GetState().String()
 		snap.Protocol = s.process.ProtocolName()

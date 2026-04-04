@@ -5,11 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"os"
-	"path/filepath"
-	"strings"
 	"syscall"
-	"time"
 
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/session"
@@ -25,34 +21,6 @@ func verifyProcIdentity(pid int, expectedStartTime uint64) bool {
 	return actual == expectedStartTime
 }
 
-// waitAndCleanupClaude waits for pid to exit (up to 5 s), sends SIGKILL if still
-// alive (only when PID identity still matches), then removes stale session files.
-// Must be called after SIGTERM has already been sent.
-func (s *Server) waitAndCleanupClaude(pid int, procStartTime uint64, cwd, sessionID string) {
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); err != nil {
-			break // process exited
-		}
-		time.Sleep(200 * time.Millisecond)
-	}
-	// Force-kill only when we can still confirm it is the same process.
-	if procStartTime != 0 && verifyProcIdentity(pid, procStartTime) {
-		_ = syscall.Kill(pid, syscall.SIGKILL)
-	}
-	// Remove stale session metadata file (prevents reappearing in discovery scans).
-	if s.claudeDir != "" {
-		_ = os.Remove(filepath.Join(s.claudeDir, "sessions", fmt.Sprintf("%d.json", pid)))
-	}
-	// Remove session lock dir so --resume can reacquire it.
-	// Claude CLI creates /tmp/claude-{UID}/{encoded-cwd}/{sessionID}/ on start.
-	if cwd != "" && sessionID != "" && !strings.ContainsAny(sessionID, "/\\") {
-		encodedCWD := strings.ReplaceAll(cwd, "/", "-")
-		lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID)
-		_ = os.RemoveAll(lockDir)
-	}
-}
-
 // killAndCleanupClaude terminates an external Claude CLI process and removes its
 // stale session/lock files so the session can be cleanly resumed with --resume.
 // Sequence: SIGTERM → wait up to 5 s → SIGKILL (only if PID identity still matches).
@@ -64,7 +32,7 @@ func (s *Server) killAndCleanupClaude(pid int, procStartTime uint64, cwd, sessio
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("sigterm pid %d: %w", pid, err)
 	}
-	s.waitAndCleanupClaude(pid, procStartTime, cwd, sessionID)
+	discovery.WaitAndCleanup(pid, procStartTime, s.claudeDir, cwd, sessionID)
 	return nil
 }
 

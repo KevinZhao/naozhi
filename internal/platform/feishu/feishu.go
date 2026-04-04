@@ -78,8 +78,6 @@ func (f *Feishu) MaxReplyLength() int { return f.cfg.MaxReplyLen }
 
 func (f *Feishu) SupportsInterimMessages() bool { return true }
 
-func (f *Feishu) Mode() string { return f.mode }
-
 // RegisterRoutes registers webhook routes (only in webhook mode).
 func (f *Feishu) RegisterRoutes(mux *http.ServeMux, handler platform.MessageHandler) {
 	if f.mode == "webhook" {

@@ -53,29 +53,6 @@ func TestVerifySignature(t *testing.T) {
 	}
 }
 
-// --- Mode selection tests ---
-
-func TestNewDefaultMode(t *testing.T) {
-	f := New(Config{AppID: "id", AppSecret: "secret"}, nil)
-	if f.Mode() != "websocket" {
-		t.Errorf("default mode = %q, want websocket", f.Mode())
-	}
-}
-
-func TestNewWebhookMode(t *testing.T) {
-	f := New(Config{AppID: "id", AppSecret: "secret", ConnectionMode: "webhook"}, nil)
-	if f.Mode() != "webhook" {
-		t.Errorf("mode = %q, want webhook", f.Mode())
-	}
-}
-
-func TestNewExplicitWSMode(t *testing.T) {
-	f := New(Config{AppID: "id", AppSecret: "secret", ConnectionMode: "websocket"}, nil)
-	if f.Mode() != "websocket" {
-		t.Errorf("mode = %q, want websocket", f.Mode())
-	}
-}
-
 func TestDefaultMaxReplyLen(t *testing.T) {
 	f := New(Config{AppID: "id"}, nil)
 	if f.MaxReplyLength() != 4000 {

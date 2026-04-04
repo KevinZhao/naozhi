@@ -101,8 +101,11 @@ func (n *NodeClient) FetchEvents(ctx context.Context, key string, after int64) (
 }
 
 // Send sends a message to a session on the remote node via POST /api/sessions/send.
-func (n *NodeClient) Send(ctx context.Context, key, text string) error {
+func (n *NodeClient) Send(ctx context.Context, key, text, workspace string) error {
 	payload := map[string]string{"key": key, "text": text}
+	if workspace != "" {
+		payload["workspace"] = workspace
+	}
 	data, _ := json.Marshal(payload)
 	resp, err := n.doRequest(ctx, http.MethodPost, "/api/sessions/send", bytes.NewReader(data))
 	if err != nil {
@@ -113,30 +116,6 @@ func (n *NodeClient) Send(ctx context.Context, key, text string) error {
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		io.Copy(io.Discard, resp.Body)
 		return fmt.Errorf("send to %s: status %d", n.ID, resp.StatusCode)
-	}
-	return nil
-}
-
-// Health checks the remote node's health via GET /health.
-func (n *NodeClient) Health(ctx context.Context) error {
-	resp, err := n.doRequest(ctx, http.MethodGet, "/health", nil)
-	if err != nil {
-		return fmt.Errorf("health check %s: %w", n.ID, err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("health check %s: status %d", n.ID, resp.StatusCode)
-	}
-
-	var result struct {
-		Status string `json:"status"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return fmt.Errorf("health check %s: decode: %w", n.ID, err)
-	}
-	if result.Status != "ok" {
-		return fmt.Errorf("health check %s: status is %q", n.ID, result.Status)
 	}
 	return nil
 }

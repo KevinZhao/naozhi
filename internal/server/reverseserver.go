@@ -116,13 +116,6 @@ func (s *ReverseNodeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// ServeHTTP returns; rc.readLoop keeps the WS alive on its own goroutine.
 }
 
-// Get returns the active connection for a node, or nil.
-func (s *ReverseNodeServer) Get(id string) *ReverseNodeConn {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.conns[id]
-}
-
 // AllNodes returns all configured node IDs mapped to their display names.
 // Includes disconnected nodes.
 func (s *ReverseNodeServer) AllNodes() map[string]string {

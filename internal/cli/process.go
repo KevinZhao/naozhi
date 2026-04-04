@@ -43,13 +43,13 @@ var processCloseTimeout = 5 * time.Second
 func (s ProcessState) String() string {
 	switch s {
 	case StateSpawning:
-		return "spawning"
+		return "running" // spawning is transient; visible as running
 	case StateReady:
 		return "ready"
 	case StateRunning:
 		return "running"
 	case StateDead:
-		return "dead"
+		return "suspended" // process exited; session may be resumable
 	default:
 		return "unknown"
 	}
@@ -279,7 +279,6 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 			if ev.Type == "system" && ev.SubType == "init" {
 				if p.SessionID == "" {
 					p.SessionID = ev.SessionID
-					slog.Info("session initialized", "session_id", ev.SessionID)
 					p.logEvent(ev)
 				}
 				continue
@@ -390,7 +389,7 @@ func (p *Process) logEvent(ev Event) {
 		entry.Type = "system"
 		entry.Summary = ev.SubType
 		if ev.SubType == "init" {
-			entry.Summary = "Session initialized"
+			return
 		}
 		// Skip noisy system events that add no value in the dashboard
 		switch ev.SubType {
