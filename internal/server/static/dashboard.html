@@ -9,10 +9,12 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black">
 <meta name="theme-color" content="#0d1117">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css" integrity="sha384-zh0CIslj+VczCZtlzBcjt5ppRcsAmDnRem7ESsYwWwg3m/OaJ2l4x7YBZl9Kxxib" crossorigin="anonymous">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
+html,body{overflow-x:hidden;max-width:100vw}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;background:#0d1117;color:#c9d1d9;font-size:20px}
-.container{display:flex;height:100vh}
+.container{display:flex;height:100vh;overflow:hidden}
 
 .sidebar{width:320px;min-width:320px;border-right:1px solid #30363d;display:flex;flex-direction:column}
 .sidebar-header{padding:16px;border-bottom:1px solid #30363d}
@@ -41,18 +43,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .badge.new{background:#1f6feb;color:#fff;border:1px dashed #58a6ff}
 .death-tag{font-size:11px;color:#8b949e;background:#21262d;padding:1px 4px;border-radius:4px}
 
-.main{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
 .main-header{padding:12px 20px;border-bottom:1px solid #30363d;flex-shrink:0}
-.main-header h2{font-size:17px;color:#f0f6fc;font-weight:600;word-break:break-all}
+.main-header h2{font-size:17px;color:#f0f6fc;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .main-header .detail{font-size:14px;color:#8b949e;margin-top:4px;display:flex;gap:12px;flex-wrap:wrap}
 .main-header .detail span{white-space:nowrap}
 .main-header .header-prompt{font-size:13px;color:#8b949e;margin-top:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 
-.events{flex:1;overflow-y:auto;padding:8px 0;scrollbar-width:thin;scrollbar-color:#30363d transparent}
-.event{display:flex;gap:10px;padding:5px 20px;transition:background .1s}
+.events{flex:1;overflow-y:auto;overflow-x:hidden;padding:8px 0;scrollbar-width:thin;scrollbar-color:#30363d transparent;min-width:0}
+.event{display:flex;gap:10px;padding:5px 20px;transition:background .1s;max-width:100%}
 .event:hover{background:#161b22}
 .event-icon{width:18px;text-align:center;font-size:15px;padding-top:1px}
-.event-content{flex:1;font-size:15px;line-height:1.5;word-break:break-word;white-space:pre-wrap}
+.event-content{flex:1;font-size:15px;line-height:1.5;word-break:break-word;white-space:pre-wrap;overflow-wrap:anywhere;min-width:0}
 .event.text .event-content,.event.result .event-content{white-space:normal}
 .md-blank{display:block;height:0.35em}
 .event.thinking .event-content{color:#a5d6ff;font-style:italic}
@@ -108,8 +110,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .modal .modal-btns button{padding:6px 16px;border-radius:6px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:14px}
 .modal .modal-btns button.primary{background:#238636;border-color:#238636;color:#fff}
 
-/* WS connection status */
-.ws-badge{display:inline-flex;align-items:center;gap:4px;font-size:12px;padding:2px 8px;border-radius:10px;background:#21262d;margin-top:6px}
+/* WS connection status — inline dot in stats row */
+.ws-badge{display:inline-flex;align-items:center;gap:3px;font-size:12px;margin-left:6px;vertical-align:middle}
+.ws-badge .ws-label{display:none;color:#da3633}
+.ws-badge.disconnected .ws-label{display:inline}
 .ws-dot{width:6px;height:6px;border-radius:50%;display:inline-block;flex-shrink:0}
 .ws-dot.green{background:#3fb950}
 .ws-dot.yellow{background:#d29922;animation:pulse 1.5s ease-in-out infinite}
@@ -191,9 +195,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .session-card.cli-card.active{border-left-color:#d29922}
 
 /* Markdown rendering */
-.md-pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 12px;margin:6px 0;overflow-x:auto;font-size:13px;line-height:1.5}
+.md-pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 12px;margin:6px 0;overflow-x:auto;font-size:13px;line-height:1.5;max-width:100%}
 .md-pre code{color:#e6edf3;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;white-space:pre}
-.md-code-wrap{position:relative}
+.md-code-wrap{position:relative;max-width:100%}
 .md-copy-btn{position:absolute;top:6px;right:6px;background:#21262d;border:1px solid #30363d;border-radius:4px;color:#8b949e;font-size:11px;padding:2px 8px;cursor:pointer;opacity:0;transition:opacity .15s,color .15s,border-color .15s;line-height:1.6}
 .md-code-wrap:hover .md-copy-btn{opacity:1}
 .md-copy-btn:hover{background:#30363d;color:#c9d1d9}
@@ -207,13 +211,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .md-ol li{margin:2px 0;line-height:1.5}
 .md-link{color:#58a6ff;text-decoration:none}
 .md-link:hover{text-decoration:underline}
-.md-table{width:100%;border-collapse:collapse;margin:6px 0;font-size:14px}
+.md-table-wrap{overflow-x:auto;max-width:100%;margin:6px 0}
+.md-table{width:100%;border-collapse:collapse;font-size:14px}
 .md-table th,.md-table td{border:1px solid #30363d;padding:5px 10px;text-align:left}
 .md-table th{background:#161b22;color:#f0f6fc;font-weight:600;font-size:13px}
 .md-table td{color:#c9d1d9}
 .md-table tr:hover td{background:rgba(88,166,255,.04)}
-.mermaid-wrap{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px;margin:6px 0;overflow-x:auto;text-align:center}
+.mermaid-wrap{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px;margin:6px 0;overflow-x:auto;text-align:center;max-width:100%}
 .mermaid-wrap svg{max-width:100%;height:auto}
+.md-math-display{margin:8px 0;overflow-x:auto;text-align:center;max-width:100%}
+.md-math-display .katex-display{margin:0.5em 0}
+.katex{font-size:1.1em}
+.katex-html{overflow-wrap:break-word}
 .ts-subagent{display:inline-block;background:#1f2937;color:#a5d6ff;padding:0 5px;border-radius:4px;font-size:11px;font-weight:600;margin-left:2px}
 .sa-badge{display:inline-flex;align-items:center;gap:3px;background:#1a2332;border:1px solid #1f6feb44;color:#58a6ff;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:600;margin-left:4px;white-space:nowrap}
 .sa-badge .sa-icon{font-size:12px}
@@ -270,7 +279,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
   /* Remove tap flash on interactive elements */
   .session-card,.btn-icon,.btn-send,.new-session-btn{-webkit-tap-highlight-color:transparent}
   .sidebar-header{display:flex;flex-wrap:wrap;align-items:center}
-  .ws-badge{margin-top:0;margin-left:auto}
   .session-list{overflow-x:hidden}
   .session-card[data-key]{touch-action:pan-y}
   .session-card.swiping{transition:none!important;user-select:none}
@@ -321,7 +329,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
     <div class="sidebar-header">
       <h1>naozhi dashboard</h1>
       <div class="stats" id="stats">connecting...</div>
-      <div class="ws-badge" id="ws-status"><span class="ws-dot gray"></span>WS Off</div>
       <div class="sidebar-actions">
         <button class="new-session-btn" onclick="createNewSession()">+ new session</button>
       </div>
@@ -469,8 +476,14 @@ async function fetchSessions() {
 
 function renderSidebar(data) {
   const st = data.stats;
-  document.getElementById('stats').textContent =
-    st.total + ' sessions \u00b7 ' + st.active + ' active \u00b7 ' + st.uptime;
+  const statsEl = document.getElementById('stats');
+  statsEl.textContent = st.total + ' sessions \u00b7 ' + st.active + ' active \u00b7 ' + st.uptime + ' ';
+  const badge = document.createElement('span');
+  badge.className = 'ws-badge';
+  badge.id = 'ws-status';
+  badge.innerHTML = '<span class="ws-dot gray"></span><span class="ws-label"></span>';
+  statsEl.appendChild(badge);
+  renderWsStatus();
 
   // Update workspace info for node-group header
   const wsName = st.workspace_name || st.workspace_id || '';
@@ -891,7 +904,11 @@ function renderMainShell() {
 
   const keyParts = (selectedKey || '').split(':');
   const agentIsGeneric = !s.agent || s.agent === 'general';
-  const displayName = (agentIsGeneric ? '' : s.agent) || s.last_prompt || keyParts[keyParts.length - 1] || selectedKey || '';
+  // Primary title: user's latest prompt. Fallback to agent name or key tail.
+  const displayName = s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyParts[keyParts.length - 1] || selectedKey || '';
+  // Only show chat info for non-dashboard platforms (feishu, slack, etc.)
+  const platform = s.platform || keyParts[0] || '';
+  const showChatInfo = platform !== 'dashboard' && platform !== 'local' && chatInfo;
 
   main.innerHTML =
     '<div class="main-header">' +
@@ -899,12 +916,11 @@ function renderMainShell() {
       '<div class="main-header-content">' +
       '<h2>' + esc(displayName) + '</h2>' +
       '<div class="detail">' +
-        '<span class="badge ' + (s.state||'') + '">' + (s.state||'?') + '</span>' +
+        (s.state ? '<span class="badge ' + s.state + '">' + s.state + '</span>' : '') +
         deathInfo +
         nodeDisplay +
-        (chatInfo ? '<span>' + chatInfo + '</span>' : '') +
+        (showChatInfo ? '<span>' + chatInfo + '</span>' : '') +
       '</div>' +
-      (prompt ? '<div class="header-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' : '') +
       '</div>' +
     '</div>' +
     '<div class="events" id="events-scroll"></div>' +
@@ -968,6 +984,7 @@ function renderEvents(events) {
   el.innerHTML = display.map(eventHtml).filter(Boolean).join('') || '<div class="empty-state">no events yet</div>';
   el.scrollTop = el.scrollHeight;
   runMermaid();
+  runKatex();
 }
 
 function appendEvents(events) {
@@ -982,6 +999,7 @@ function appendEvents(events) {
   });
   if (wasBottom) el.scrollTop = el.scrollHeight;
   runMermaid();
+  runKatex();
 }
 
 function eventHtml(e) {
@@ -995,7 +1013,7 @@ function eventHtml(e) {
   let content = '';
   if (e.type === 'system') {
     content = esc(e.summary || e.type);
-  } else if (e.type === 'text' || e.type === 'result') {
+  } else if (e.type === 'text' || e.type === 'result' || e.type === 'user') {
     content = renderMd(e.detail || e.summary || e.type);
   } else if (e.type === 'agent') {
     const badge = e.subagent ? '<span class="ts-subagent">' + esc(e.subagent) + '</span> ' : '';
@@ -1470,11 +1488,59 @@ function runMermaid() {
 let mermaidCounter = 0;
 const mermaidPending = {};
 
+let katexLoading = false;
+let katexReady = false;
+let katexCounter = 0;
+const katexPending = {};
+
+function loadKatex() {
+  if (katexReady || katexLoading) return;
+  katexLoading = true;
+  const s = document.createElement('script');
+  s.src = 'https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js';
+  s.integrity = 'sha384-Rma6DA2IPUwhNxmrB/7S3Tno0YY7sFu9WSYMCuulLhIqYSGZ2gKCJWIqhBWqMQfh';
+  s.crossOrigin = 'anonymous';
+  s.onload = () => {
+    katexReady = true;
+    katexLoading = false;
+    runKatex();
+  };
+  s.onerror = (e) => { katexLoading = false; console.error('[KaTeX] failed to load:', e); };
+  document.head.appendChild(s);
+}
+
+function runKatex() {
+  if (Object.keys(katexPending).length === 0) return;
+  if (!katexReady) { loadKatex(); return; }
+  Object.entries(katexPending).forEach(([id, info]) => {
+    const el = document.getElementById(id);
+    if (!el) { delete katexPending[id]; return; }
+    try {
+      katex.render(info.tex, el, { displayMode: info.display, throwOnError: false });
+    } catch(_) {
+      el.textContent = (info.display ? '$$' : '$') + info.tex + (info.display ? '$$' : '$');
+    }
+    delete katexPending[id];
+  });
+}
+
+function renderKatex(tex, displayMode) {
+  if (katexReady) {
+    try { return katex.renderToString(tex, { displayMode: displayMode, throwOnError: false }); }
+    catch(_) { return esc(tex); }
+  }
+  const id = 'ktx-' + (++katexCounter);
+  katexPending[id] = { tex: tex, display: displayMode };
+  loadKatex();
+  return '<span id="' + id + '" class="katex-pending">' + esc(tex) + '</span>';
+}
+
 /* Lightweight Markdown renderer for text/result events */
+
 function renderMd(s) {
   if (!s) return '';
-  // Split by fenced code blocks first to avoid processing inside them
-  const parts = s.split(/(```[\s\S]*?```)/g);
+  // Split by fenced code blocks and display math blocks
+  const parts = s.split(/(```[\s\S]*?```|\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\])/g);
   return parts.map(part => {
     if (part.startsWith('```')) {
       const m = part.match(/^```(\w*)\n?([\s\S]*?)```$/);
@@ -1487,6 +1553,12 @@ function renderMd(s) {
       }
       const langAttr = lang ? ' data-lang="' + esc(lang) + '"' : '';
       return '<div class="md-code-wrap"><pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre><button class="md-copy-btn" onclick="copyCodeBlock(this)">copy</button></div>';
+    }
+    if (part.startsWith('$$') && part.endsWith('$$')) {
+      return '<div class="md-math-display">' + renderKatex(part.slice(2, -2).trim(), true) + '</div>';
+    }
+    if (part.startsWith('\\[') && part.endsWith('\\]')) {
+      return '<div class="md-math-display">' + renderKatex(part.slice(2, -2).trim(), true) + '</div>';
     }
     // Process line by line for block elements
     const lines = part.split('\n');
@@ -1534,8 +1606,20 @@ function renderMd(s) {
   }).join('');
 }
 
-/* Inline markdown: bold, italic, code, links */
+/* Inline markdown: bold, italic, code, links, math */
 function inlineMd(s) {
+  // Extract inline math before HTML escaping. Use \x00 delimiters to avoid collisions with user content.
+  const mathTokens = [];
+  s = s.replace(/\$([^\$\n]+?)\$/g, function(_, tex) {
+    const idx = mathTokens.length;
+    mathTokens.push(renderKatex(tex, false));
+    return '\x00KTX' + idx + '\x00';
+  });
+  s = s.replace(/\\\((.+?)\\\)/g, function(_, tex) {
+    const idx = mathTokens.length;
+    mathTokens.push(renderKatex(tex, false));
+    return '\x00KTX' + idx + '\x00';
+  });
   s = esc(s);
   s = s.replace(/`([^`]+)`/g, '<code class="md-code">$1</code>');
   s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
@@ -1546,6 +1630,10 @@ function inlineMd(s) {
     }
     return text;
   });
+  // Restore math tokens after escaping
+  if (mathTokens.length > 0) {
+    s = s.replace(/\x00KTX(\d+)\x00/g, function(_, idx) { return mathTokens[+idx]; });
+  }
   return s;
 }
 
@@ -1555,7 +1643,7 @@ function renderTable(lines) {
   const cells = l => l.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
   let h = '<table class="md-table"><thead><tr>' + cells(lines[0]).map(c => '<th>' + inlineMd(c) + '</th>').join('') + '</tr></thead><tbody>';
   for (let i = 2; i < lines.length; i++) h += '<tr>' + cells(lines[i]).map(c => '<td>' + inlineMd(c) + '</td>').join('') + '</tr>';
-  return h + '</tbody></table>';
+  return '<div class="md-table-wrap">' + h + '</tbody></table></div>';
 }
 
 function processEventsForDisplay(events) {
@@ -1781,11 +1869,13 @@ const wsm = {
       el.innerHTML = display.map(eventHtml).filter(Boolean).join('') || '<div class="empty-state">no events yet</div>';
       el.scrollTop = el.scrollHeight;
       runMermaid();
+  runKatex();
     } else {
       const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
       display.forEach(e => { const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h); });
       if (wasBottom) el.scrollTop = el.scrollHeight;
       runMermaid();
+  runKatex();
     }
 
     if (events.length > 0) {
@@ -1799,6 +1889,14 @@ const wsm = {
     const ev = msg.event;
     if (!ev) return;
     if (ev.time > this.lastEventTimeWs) this.lastEventTimeWs = ev.time;
+    // Update header title when a new user message arrives
+    if (ev.type === 'user') {
+      const text = ev.detail || ev.summary || '';
+      if (text) {
+        const h2 = document.querySelector('.main-header h2');
+        if (h2) h2.textContent = text;
+      }
+    }
     if (ev.type === 'tool_use' || ev.type === 'result') return;
     const html = eventHtml(ev);
     if (!html) return;
@@ -1810,6 +1908,7 @@ const wsm = {
     el.insertAdjacentHTML('beforeend', html);
     if (wasBottom) el.scrollTop = el.scrollHeight;
     runMermaid();
+  runKatex();
   },
 
   onSendAck(msg) {
@@ -1899,14 +1998,15 @@ function renderWsStatus() {
   const el = document.getElementById('ws-status');
   if (!el) return;
   const map = {
-    off: ['gray', 'WS Off'],
-    connecting: ['yellow', 'Connecting...'],
-    authenticating: ['yellow', 'Authenticating...'],
-    connected: ['green', 'WS Connected'],
-    disconnected: ['red', 'Reconnecting...']
+    off: ['gray', ''],
+    connecting: ['yellow', ''],
+    authenticating: ['yellow', ''],
+    connected: ['green', ''],
+    disconnected: ['red', 'reconnecting']
   };
-  const [color, label] = map[wsm.state] || ['gray', wsm.state];
-  el.innerHTML = '<span class="ws-dot ' + color + '"></span>' + label;
+  const [color, label] = map[wsm.state] || ['gray', ''];
+  el.className = 'ws-badge' + (wsm.state === 'disconnected' ? ' disconnected' : '');
+  el.innerHTML = '<span class="ws-dot ' + color + '"></span><span class="ws-label">' + label + '</span>';
 }
 
 function updateMainState(state, reason) {

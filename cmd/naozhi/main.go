@@ -195,6 +195,12 @@ func main() {
 		case "setup":
 			runSetup(os.Args[2:])
 			return
+		case "install":
+			runInstall(os.Args[2:])
+			return
+		case "uninstall":
+			runUninstall(os.Args[2:])
+			return
 		case "version", "--version":
 			fmt.Println(version)
 			return
