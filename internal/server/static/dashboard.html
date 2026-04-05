@@ -370,6 +370,7 @@ let discoveredPollTimer = null;
 let discoveredItems = []; // discovered sessions, merged into sidebar
 let previewTimer = null;
 let previewEventCount = 0;
+let pendingDiscovered = null; // {pid, sessionId, cwd, procStartTime, node} when previewing a discovered session
 let sessionCounter = 0;
 let availableAgents = ['general'];
 let defaultWorkspace = '';
@@ -828,6 +829,7 @@ function sessionCardHtml(s) {
 
 function selectSession(key, node) {
   node = node || 'local';
+  pendingDiscovered = null;
   const prevKey = selectedKey;
   const prevNode = selectedNode;
   selectedKey = key;
@@ -1040,7 +1042,82 @@ function autoGrow(el) {
 }
 
 async function sendMessage() {
-  if (sending || !selectedKey) return;
+  if (sending) return;
+
+  // Auto-takeover: if viewing a discovered session, takeover first then send
+  if (pendingDiscovered && !selectedKey) {
+    const input = document.getElementById('msg-input');
+    const text = (input ? input.value.trim() : '');
+    if (!text) return;
+    sending = true;
+    const btn = document.getElementById('btn-send');
+    if (btn) btn.classList.add('sending');
+    if (input) input.placeholder = 'taking over session...';
+    if (input) input.disabled = true;
+    const pd = pendingDiscovered;
+    try {
+      const headers = {'Content-Type': 'application/json'};
+      const token = getToken();
+      if (token) headers['Authorization'] = 'Bearer ' + token;
+      const r = await fetch('/api/discovered/takeover', {
+        method: 'POST', headers,
+        body: JSON.stringify({pid: pd.pid, session_id: pd.sessionId, cwd: pd.cwd, proc_start_time: pd.procStartTime || 0, node: pd.node || ''})
+      });
+      if (!r.ok) {
+        const errText = await r.text();
+        showToast('takeover failed: ' + errText);
+        if (input) { input.placeholder = 'send a message to take over...'; input.disabled = false; }
+        sending = false;
+        if (btn) btn.classList.remove('sending');
+        return;
+      }
+      const data = await r.json();
+      if (!data.key) {
+        showToast('takeover failed: no session key returned');
+        if (input) { input.placeholder = 'send a message to take over...'; input.disabled = false; }
+        sending = false;
+        if (btn) btn.classList.remove('sending');
+        return;
+      }
+      // Remove the discovered card from sidebar
+      const card = document.querySelector('.cli-card[data-pid="' + pd.pid + '"]');
+      if (card) card.remove();
+      pendingDiscovered = null;
+      // Poll until the session appears in managed sessions (up to 10s)
+      const takenKey = data.key;
+      const takenNode = pd.node || 'local';
+      let ready = false;
+      for (let i = 0; i < 20; i++) {
+        await new Promise(resolve => setTimeout(resolve, 500));
+        lastSessionsJSON = '';
+        await fetchSessions();
+        if (sessionsData[sid(takenKey, takenNode)]) { ready = true; break; }
+      }
+      if (!ready) {
+        showToast('takeover timed out — session not ready');
+        if (input) { input.placeholder = 'send a message...'; input.disabled = false; }
+        sending = false;
+        if (btn) btn.classList.remove('sending');
+        return;
+      }
+      // Session is ready — switch to it and send the message
+      sending = false;
+      selectSession(takenKey, takenNode);
+      // Restore the message text and send
+      const newInput = document.getElementById('msg-input');
+      if (newInput) newInput.value = text;
+      await sendMessage();
+      return;
+    } catch (e) {
+      showToast('takeover error: ' + e.message);
+      if (input) { input.placeholder = 'send a message to take over...'; input.disabled = false; }
+      sending = false;
+      if (btn) btn.classList.remove('sending');
+      return;
+    }
+  }
+
+  if (!selectedKey) return;
   const input = document.getElementById('msg-input');
   const text = (input ? input.value.trim() : '');
   if (!text && pendingFiles.length === 0) return;
@@ -2112,9 +2189,14 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node) {
       '</div>' +
     '</div>' +
     '<div class="events" id="events-scroll"><div class="empty-state">loading...</div></div>' +
-    '<div class="input-area" style="padding:8px 20px;text-align:center">' +
-      '<button class="btn-takeover" style="width:100%;padding:10px;font-size:14px" data-pid="' + pid + '" data-session-id="' + esc(sessionId) + '" data-cwd="' + esc(cwd) + '" data-pst="' + (procStartTime||0) + '" data-node="' + esc(node||'') + '" onclick="handleTakeoverClick(this)">Takeover this session</button>' +
+    '<div class="input-area" id="input-area">' +
+      '<div class="file-preview" id="file-preview"></div>' +
+      '<div class="input-row">' +
+        '<textarea id="msg-input" rows="1" placeholder="send a message to take over..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()" oninput="autoGrow(this)"></textarea>' +
+        '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="send">&#x27a4;</button>' +
+      '</div>' +
     '</div>';
+  pendingDiscovered = {pid: pid, sessionId: sessionId, cwd: cwd, procStartTime: procStartTime, node: node};
 
   try {
     const nodeParam = node ? '&node=' + encodeURIComponent(node) : '';
