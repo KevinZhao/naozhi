@@ -86,6 +86,10 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.dashToken == "" {
 		c.authenticated.Store(true)
+	} else if cookie, err := r.Cookie(authCookieName); err == nil {
+		if subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(h.dashToken)) == 1 {
+			c.authenticated.Store(true)
+		}
 	}
 	h.register(c)
 	go c.writePump()

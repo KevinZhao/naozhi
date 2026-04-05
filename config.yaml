@@ -1,5 +1,6 @@
 server:
   addr: ":8180"
+  dashboard_token: "${NAOZHI_DASHBOARD_TOKEN}"
 
 workspace:
   id: "ec2-dev"
