@@ -354,7 +354,9 @@ func (p *Process) Kill() {
 		close(p.killCh)
 		p.stdin.Close()
 		if p.cmd.Process != nil {
-			p.cmd.Process.Kill()
+			// Kill the entire process group (created via Setpgid) to avoid
+			// orphaned child processes (e.g., Bash tools, subagents).
+			syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
 		}
 	})
 	p.waitOnce.Do(func() { p.cmd.Wait() })

@@ -90,7 +90,7 @@ func (l *EventLog) Append(e EventEntry) {
 		}
 	case "result", "user":
 		l.turnAgents = l.turnAgents[:0]
-		// bgAgents intentionally not reset: background agents outlive individual turns
+		l.bgAgents = l.bgAgents[:0]
 	}
 
 	l.mu.Unlock()

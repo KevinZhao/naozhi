@@ -25,11 +25,15 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		resp["workspace_id"] = s.workspaceID
 		resp["workspace_name"] = s.workspaceName
 		resp["system"] = systemInfo()
+		resp["goroutines"] = runtime.NumGoroutine()
 		resp["watchdog"] = map[string]any{
 			"no_output_kills":   s.watchdogNoOutputKills.Load(),
 			"total_kills":       s.watchdogTotalKills.Load(),
 			"no_output_timeout": s.noOutputTimeout.String(),
 			"total_timeout":     s.totalTimeout.String(),
+		}
+		if s.hub != nil {
+			resp["ws_dropped"] = s.hub.DroppedMessages()
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")

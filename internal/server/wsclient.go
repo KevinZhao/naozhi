@@ -25,6 +25,7 @@ type wsClient struct {
 	subscriptions map[string]func() // key -> unsubscribe function
 	done          chan struct{}
 	doneOnce      sync.Once
+	dropped       atomic.Int64 // messages dropped due to full send buffer
 }
 
 func (c *wsClient) closeDone() {
@@ -47,6 +48,7 @@ func (c *wsClient) sendRaw(data []byte) {
 	default:
 		// Drop message if client buffer is full to prevent deadlocking
 		// the hub mutex when broadcasting to slow clients.
+		c.dropped.Add(1)
 	}
 }
 

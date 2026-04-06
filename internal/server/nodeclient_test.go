@@ -449,7 +449,7 @@ func TestHub_RemoteSend(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	guard := newSessionGuard()
 	var nodesMu sync.RWMutex
-	hub := NewHub(router, nil, nil, "", guard, nodes, &nodesMu, nil)
+	hub := NewHub(router, nil, nil, "", guard, nodes, &nodesMu, nil, "")
 	defer hub.Shutdown()
 
 	client := newTestWSClient()

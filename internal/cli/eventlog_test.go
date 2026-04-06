@@ -243,33 +243,37 @@ func TestEventLog_DetailAndToolFields(t *testing.T) {
 func TestEventLog_BackgroundAgents(t *testing.T) {
 	l := NewEventLog(100)
 
-	// Background agent is NOT cleared by result or user events.
+	// Background agent IS cleared by result or user events (same as foreground).
 	l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: "team1", Background: true})
-	l.Append(EventEntry{Time: 2000, Type: "result", Summary: "done"})
 
 	agents := l.TurnAgents()
-	if len(agents) != 1 || agents[0].Name != "team1" {
-		t.Errorf("after result TurnAgents = %v, want [team1]", agents)
+	if len(agents) != 1 || agents[0].Name != "team1" || !agents[0].Background {
+		t.Errorf("before result TurnAgents = %v, want [team1 (bg)]", agents)
 	}
 
-	l.Append(EventEntry{Time: 3000, Type: "user", Summary: "next"})
-	agents = l.TurnAgents()
-	if len(agents) != 1 || agents[0].Name != "team1" {
-		t.Errorf("after user TurnAgents = %v, want [team1]", agents)
+	l.Append(EventEntry{Time: 2000, Type: "result", Summary: "done"})
+	if agents := l.TurnAgents(); agents != nil {
+		t.Errorf("after result TurnAgents = %v, want nil", agents)
 	}
 
-	// Foreground agents in the same session are still handled normally.
-	l.Append(EventEntry{Time: 4000, Type: "agent", Subagent: "Explore"})
+	// Background agent added again, cleared by user event.
+	l.Append(EventEntry{Time: 3000, Type: "agent", Subagent: "team1", Background: true})
+	l.Append(EventEntry{Time: 4000, Type: "user", Summary: "next"})
+	if agents := l.TurnAgents(); agents != nil {
+		t.Errorf("after user TurnAgents = %v, want nil", agents)
+	}
+
+	// Foreground + background coexist in the same turn, both cleared on result.
+	l.Append(EventEntry{Time: 5000, Type: "agent", Subagent: "team1", Background: true})
+	l.Append(EventEntry{Time: 6000, Type: "agent", Subagent: "Explore"})
 	agents = l.TurnAgents()
 	if len(agents) != 2 {
-		t.Fatalf("TurnAgents len = %d, want 2 (background+foreground)", len(agents))
+		t.Fatalf("TurnAgents len = %d, want 2 (foreground+background)", len(agents))
 	}
 
-	// Result resets foreground but keeps background.
-	l.Append(EventEntry{Time: 5000, Type: "result", Summary: "done"})
-	agents = l.TurnAgents()
-	if len(agents) != 1 || agents[0].Name != "team1" {
-		t.Errorf("after second result TurnAgents = %v, want [team1]", agents)
+	l.Append(EventEntry{Time: 7000, Type: "result", Summary: "done"})
+	if agents := l.TurnAgents(); agents != nil {
+		t.Errorf("after second result TurnAgents = %v, want nil", agents)
 	}
 }
 

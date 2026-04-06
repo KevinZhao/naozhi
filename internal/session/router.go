@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -13,6 +14,9 @@ import (
 )
 
 const shutdownTimeout = 30 * time.Second
+
+// ErrMaxProcs is returned when all process slots are occupied.
+var ErrMaxProcs = errors.New("max concurrent processes reached")
 
 // Router manages session key -> ManagedSession mapping.
 type Router struct {
@@ -185,6 +189,16 @@ func (r *Router) notifyChange() {
 	}
 }
 
+// NotifyIdle wakes the Shutdown wait loop so it can re-check running sessions.
+// Call this after a message send completes (session transitions from running to ready).
+func (r *Router) NotifyIdle() {
+	if r.shutdownCond != nil {
+		r.shutdownCond.L.Lock()
+		r.shutdownCond.Broadcast()
+		r.shutdownCond.L.Unlock()
+	}
+}
+
 // ChatKey builds a chat-level key (without agent suffix) for workspace overrides.
 func ChatKey(platform, chatType, chatID string) string {
 	return platform + ":" + chatType + ":" + chatID
@@ -317,11 +331,11 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		if r.activeCount+r.pendingSpawns >= r.maxProcs {
 			if !r.evictOldest() {
 				r.mu.Unlock()
-				return nil, fmt.Errorf("max concurrent processes reached (%d), all busy", r.maxProcs)
+				return nil, fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
 			}
 			if r.activeCount+r.pendingSpawns >= r.maxProcs {
 				r.mu.Unlock()
-				return nil, fmt.Errorf("max concurrent processes reached (%d), all busy", r.maxProcs)
+				return nil, fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
 			}
 		}
 	}
@@ -686,7 +700,20 @@ func (r *Router) Cleanup() {
 			pruned++
 		}
 	}
+
+	// Snapshot sessions for periodic save (while still holding the lock).
+	sessionsCopy := make(map[string]*ManagedSession, len(r.sessions))
+	for k, v := range r.sessions {
+		sessionsCopy[k] = v
+	}
+	storePath := r.storePath
+
 	r.mu.Unlock()
+
+	// Periodic save outside lock to reduce crash-recovery data loss.
+	if err := saveStore(storePath, sessionsCopy); err != nil {
+		slog.Warn("periodic session save failed", "err", err)
+	}
 
 	if len(expired) > 0 || pruned > 0 {
 		r.notifyChange()

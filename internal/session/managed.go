@@ -155,6 +155,10 @@ func (s *ManagedSession) Interrupt() bool {
 		return false
 	}
 
+	// Cancel the in-flight Send context so it returns promptly.
+	if cancel := s.sendCancel.Load(); cancel != nil {
+		(*cancel)()
+	}
 	proc.Interrupt()
 	return true
 }

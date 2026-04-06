@@ -229,6 +229,7 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 			return
 		}
 		defer s.sessionGuard.Release(key)
+		defer s.router.NotifyIdle() // wake Shutdown wait loop
 
 		// H2: Transparently adopt an external Claude session if one exists for
 		// this workspace. Only fires when no managed session exists yet.
@@ -238,12 +239,11 @@ func (s *Server) buildMessageHandler() platform.MessageHandler {
 		if err != nil {
 			log.Error("get session", "err", err)
 			if p := s.platforms[msg.Platform]; p != nil {
-				errStr := err.Error()
 				var errMsg string
 				switch {
-				case strings.Contains(errStr, "max concurrent"):
+				case errors.Is(err, session.ErrMaxProcs):
 					errMsg = "当前处理已满，请稍后重试。"
-				case strings.Contains(errStr, "context canceled"):
+				case errors.Is(err, context.Canceled):
 					errMsg = "系统正在重启，请稍后重试。"
 				default:
 					errMsg = "会话创建失败，请发送 /new 重置后重试。"

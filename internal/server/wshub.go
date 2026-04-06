@@ -35,38 +35,40 @@ var wsUpgrader = websocket.Upgrader{
 
 // Hub manages WebSocket client connections and event subscriptions.
 type Hub struct {
-	mu         sync.Mutex
-	clients    map[*wsClient]struct{}
-	router     *session.Router
-	agents     map[string]session.AgentOpts
-	agentCmds  map[string]string
-	dashToken  string
-	guard      *sessionGuard
-	nodes      map[string]NodeConn
-	nodesMu    *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
-	projectMgr *project.Manager
-	ctx        context.Context // cancelled on Shutdown to stop in-flight sends
-	cancel     context.CancelFunc
+	mu          sync.Mutex
+	clients     map[*wsClient]struct{}
+	router      *session.Router
+	agents      map[string]session.AgentOpts
+	agentCmds   map[string]string
+	dashToken   string
+	guard       *sessionGuard
+	nodes       map[string]NodeConn
+	nodesMu     *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
+	projectMgr  *project.Manager
+	allowedRoot string          // workspace paths must be under this root (empty = unrestricted)
+	ctx         context.Context // cancelled on Shutdown to stop in-flight sends
+	cancel      context.CancelFunc
 
 	debounceMu    sync.Mutex
 	debounceTimer *time.Timer
 }
 
 // NewHub creates a new WebSocket hub.
-func NewHub(router *session.Router, agents map[string]session.AgentOpts, agentCmds map[string]string, dashToken string, guard *sessionGuard, nodes map[string]NodeConn, nodesMu *sync.RWMutex, projectMgr *project.Manager) *Hub {
+func NewHub(router *session.Router, agents map[string]session.AgentOpts, agentCmds map[string]string, dashToken string, guard *sessionGuard, nodes map[string]NodeConn, nodesMu *sync.RWMutex, projectMgr *project.Manager, allowedRoot string) *Hub {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Hub{
-		clients:    make(map[*wsClient]struct{}),
-		router:     router,
-		agents:     agents,
-		agentCmds:  agentCmds,
-		dashToken:  dashToken,
-		guard:      guard,
-		nodes:      nodes,
-		nodesMu:    nodesMu,
-		projectMgr: projectMgr,
-		ctx:        ctx,
-		cancel:     cancel,
+		clients:     make(map[*wsClient]struct{}),
+		router:      router,
+		agents:      agents,
+		agentCmds:   agentCmds,
+		dashToken:   dashToken,
+		guard:       guard,
+		nodes:       nodes,
+		nodesMu:     nodesMu,
+		projectMgr:  projectMgr,
+		allowedRoot: allowedRoot,
+		ctx:         ctx,
+		cancel:      cancel,
 	}
 }
 
@@ -238,9 +240,14 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 
 	// Set workspace override for new dashboard sessions
 	if msg.Workspace != "" {
+		wsPath, err := validateWorkspace(msg.Workspace, h.allowedRoot)
+		if err != nil {
+			c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: err.Error()})
+			return
+		}
 		if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
 			chatKey := key[:idx]
-			h.router.SetWorkspace(chatKey, msg.Workspace)
+			h.router.SetWorkspace(chatKey, wsPath)
 		}
 	}
 
@@ -254,6 +261,7 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 	capturedText := msg.Text
 	go func() {
 		defer h.guard.Release(key)
+		defer h.router.NotifyIdle() // wake Shutdown wait loop
 
 		ctx := h.ctx
 		opts := buildSessionOpts(key, h.agents, h.projectMgr)
@@ -393,6 +401,17 @@ func (h *Hub) BroadcastCronResult(jobID, _, _ string) {
 			c.sendRaw(data)
 		}
 	}
+}
+
+// DroppedMessages returns the total number of messages dropped across all clients.
+func (h *Hub) DroppedMessages() int64 {
+	var total int64
+	h.mu.Lock()
+	for c := range h.clients {
+		total += c.dropped.Load()
+	}
+	h.mu.Unlock()
+	return total
 }
 
 // Shutdown closes all WebSocket client connections and relays.

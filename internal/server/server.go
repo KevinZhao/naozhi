@@ -7,9 +7,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"golang.org/x/time/rate"
 
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -35,9 +38,10 @@ type Server struct {
 	agents            map[string]session.AgentOpts
 	agentCommands     map[string]string
 	scheduler         *cron.Scheduler
-	backendTag        string // e.g., "cc" or "kiro", appended to replies
-	dashboardToken    string // optional bearer token for dashboard API
-	hub               *Hub   // WebSocket hub
+	backendTag        string        // e.g., "cc" or "kiro", appended to replies
+	dashboardToken    string        // optional bearer token for dashboard API
+	loginLimiter      *rate.Limiter // rate-limits login attempts
+	hub               *Hub          // WebSocket hub
 	nodes             map[string]NodeConn
 	reverseNodeServer *ReverseNodeServer
 	nodesMu           sync.RWMutex
@@ -100,6 +104,24 @@ func (g *sessionGuard) Release(key string) {
 	g.waitMu.Unlock()
 }
 
+// validateWorkspace checks that workspace is an existing directory within allowedRoot.
+// Returns the cleaned, symlink-resolved path or an error.
+func validateWorkspace(workspace, allowedRoot string) (string, error) {
+	info, err := os.Stat(workspace)
+	if err != nil || !info.IsDir() {
+		return "", fmt.Errorf("workspace is not a valid directory")
+	}
+	wsPath := filepath.Clean(workspace)
+	if resolved, err := filepath.EvalSymlinks(wsPath); err == nil {
+		wsPath = resolved
+	}
+	if allowedRoot != "" && wsPath != allowedRoot &&
+		!strings.HasPrefix(wsPath, allowedRoot+string(filepath.Separator)) {
+		return "", fmt.Errorf("workspace outside allowed root")
+	}
+	return wsPath, nil
+}
+
 // New creates a new Server.
 // ServerOptions holds optional configuration for a Server.
 // All fields have zero-value defaults (empty string, nil, zero duration = disabled/unset).
@@ -154,6 +176,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		noOutputTimeout: opts.NoOutputTimeout,
 		totalTimeout:    opts.TotalTimeout,
 		dashboardToken:  opts.DashboardToken,
+		loginLimiter:    rate.NewLimiter(rate.Every(12*time.Second), 5), // 5 attempts per minute
 		projectMgr:      opts.ProjectManager,
 		transcriber:     opts.Transcriber,
 		nodes:           nodes,

@@ -313,15 +313,16 @@ func TestHandleAPISend_WorkspaceInvalidDir(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.handleAPISend(w, req)
 
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("status = %d, want 202", w.Code)
+	// Invalid workspace should be rejected with 403
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", w.Code)
 	}
 
-	// Verify workspace was NOT set (invalid path ignored)
+	// Verify workspace was NOT set
 	chatKey := "dashboard:direct:test-session"
 	ws := router.GetWorkspace(chatKey)
 	if ws != "/default/workspace" {
-		t.Errorf("workspace = %q, want /default/workspace (invalid path should be ignored)", ws)
+		t.Errorf("workspace = %q, want /default/workspace (invalid path should be rejected)", ws)
 	}
 }
 

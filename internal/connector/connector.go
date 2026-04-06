@@ -290,7 +290,7 @@ func (c *Connector) handleRequest(ctx context.Context, req reverse.ReverseMsg) (
 		// Send is async: primary subscribed before sending, events arrive via streamEvents
 		go func() {
 			if _, err := sess.Send(ctx, p.Text, nil, nil); err != nil {
-				slog.Debug("connector send failed", "key", p.Key, "err", err)
+				slog.Warn("connector send failed", "key", p.Key, "err", err)
 			}
 		}()
 		return marshalResult(map[string]string{"status": "accepted"})
@@ -326,7 +326,10 @@ func (c *Connector) handleRequest(ctx context.Context, req reverse.ReverseMsg) (
 		pid, sessionID, procStartTime, reqCWD, claudeDir := p.PID, p.SessionID, p.ProcStartTime, p.CWD, c.claudeDir
 		go func() {
 			discovery.WaitAndCleanup(pid, procStartTime, claudeDir, reqCWD, sessionID)
-			if _, err := c.router.Takeover(context.Background(), key, sessionID, cwd, session.AgentOpts{}); err != nil {
+			if ctx.Err() != nil {
+				return // connector shutting down
+			}
+			if _, err := c.router.Takeover(ctx, key, sessionID, cwd, session.AgentOpts{}); err != nil {
 				slog.Debug("connector takeover failed", "key", key, "err", err)
 			}
 		}()

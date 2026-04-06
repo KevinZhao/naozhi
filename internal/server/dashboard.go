@@ -9,8 +9,6 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -32,7 +30,7 @@ var manifestJSON embed.FS
 const authCookieName = "naozhi_auth"
 
 func (s *Server) registerDashboard() {
-	s.hub = NewHub(s.router, s.agents, s.agentCommands, s.dashboardToken, s.sessionGuard, s.nodes, &s.nodesMu, s.projectMgr)
+	s.hub = NewHub(s.router, s.agents, s.agentCommands, s.dashboardToken, s.sessionGuard, s.nodes, &s.nodesMu, s.projectMgr, s.allowedRoot)
 
 	// Push session list changes to WS clients
 	s.router.SetOnChange(func() { s.hub.BroadcastSessionsUpdate() })
@@ -126,6 +124,13 @@ func (s *Server) serveLoginPage(w http.ResponseWriter) {
 }
 
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+	if !s.loginLimiter.Allow() {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error":"too many attempts, try again later"}`))
+		return
+	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
 	var req struct {
 		Token string `json:"token"`
@@ -146,6 +151,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
+		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
 		MaxAge:   86400 * 30, // 30 days
 	})
 	w.Header().Set("Content-Type", "application/json")
@@ -544,22 +550,16 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 
 	// Set workspace override for new dashboard sessions
 	if workspace != "" {
-		if info, err := os.Stat(workspace); err == nil && info.IsDir() {
-			// Enforce same allowedRoot check as /cd command
-			wsPath := filepath.Clean(workspace)
-			if resolved, err := filepath.EvalSymlinks(wsPath); err == nil {
-				wsPath = resolved
-			}
-			if s.allowedRoot != "" && wsPath != s.allowedRoot && !strings.HasPrefix(wsPath, s.allowedRoot+string(filepath.Separator)) {
-				w.Header().Set("Content-Type", "application/json")
-				w.WriteHeader(http.StatusForbidden)
-				json.NewEncoder(w).Encode(map[string]string{"error": "workspace outside allowed root"})
-				return
-			}
-			if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
-				chatKey := key[:idx]
-				s.router.SetWorkspace(chatKey, wsPath)
-			}
+		wsPath, err := validateWorkspace(workspace, s.allowedRoot)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+			return
+		}
+		if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
+			chatKey := key[:idx]
+			s.router.SetWorkspace(chatKey, wsPath)
 		}
 	}
 
@@ -576,6 +576,7 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 	capturedImages := images
 	go func() {
 		defer s.sessionGuard.Release(key)
+		defer s.router.NotifyIdle() // wake Shutdown wait loop
 
 		var ctx context.Context
 		if s.hub != nil {
@@ -1117,7 +1118,7 @@ async function login(){
   document.getElementById('err').textContent='';
   try{
     var res=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:t})});
-    if(res.ok){window.location.href='/dashboard'}
+    if(res.ok){localStorage.setItem('naozhi_dashboard_token',t);window.location.href='/dashboard'}
     else{document.getElementById('err').textContent='invalid token'}
   }catch(e){document.getElementById('err').textContent='network error'}
 }
