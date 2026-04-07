@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -146,9 +147,11 @@ func (s *Scheduler) AddJob(j *Job) error {
 	}
 	j.CreatedAt = time.Now()
 
-	if err := s.registerJob(j); err != nil {
-		s.mu.Unlock()
-		return err
+	if !j.Paused {
+		if err := s.registerJob(j); err != nil {
+			s.mu.Unlock()
+			return err
+		}
 	}
 	s.jobs[j.ID] = j
 	snap := s.snapshotJobs()
@@ -259,6 +262,50 @@ func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 
 	s.saveSnapshot(snap)
 	return j, nil
+}
+
+// SetJobPrompt updates a job's prompt. If the job was paused with an empty
+// prompt (created from dashboard), it also unpauses and registers the schedule.
+func (s *Scheduler) SetJobPrompt(id, prompt string) error {
+	if prompt == "" {
+		return fmt.Errorf("prompt must not be empty")
+	}
+
+	s.mu.Lock()
+
+	j, ok := s.jobs[id]
+	if !ok {
+		s.mu.Unlock()
+		return fmt.Errorf("no job found with id %q", id)
+	}
+	if j.Prompt != "" {
+		s.mu.Unlock()
+		return nil // already has a prompt, no-op
+	}
+
+	j.Prompt = prompt
+	if j.Paused {
+		if err := s.registerJob(j); err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		j.Paused = false
+	}
+	snap := s.snapshotJobs()
+	s.mu.Unlock()
+
+	s.saveSnapshot(snap)
+	slog.Info("cron job prompt set", "id", id, "prompt_len", len(prompt))
+	return nil
+}
+
+// PreviewSchedule validates a schedule expression and returns the next run time.
+func PreviewSchedule(schedule string) (time.Time, error) {
+	sched, err := cronParser.Parse(schedule)
+	if err != nil {
+		return time.Time{}, err
+	}
+	return sched.Next(time.Now()), nil
 }
 
 // DeleteJob removes a job by ID prefix (scoped to the given chat).
@@ -386,6 +433,9 @@ func (s *Scheduler) execute(j *Job) {
 	agentID, cleanText := routing.ResolveAgent(j.Prompt, s.agentCommands)
 	opts := s.agents[agentID]
 	opts.Exempt = true // cron sessions must not count toward maxProcs or evict user sessions
+	if j.WorkDir != "" {
+		opts.Workspace = filepath.Clean(j.WorkDir)
+	}
 	key := "cron:" + j.ID
 
 	sess, _, err := s.router.GetOrCreate(ctx, key, opts)
@@ -396,6 +446,7 @@ func (s *Scheduler) execute(j *Job) {
 		return
 	}
 
+	// Direct Send without sendWithBroadcast — cron jobs notify via onExecute callback instead.
 	result, err := sess.Send(ctx, cleanText, nil, nil)
 	if err != nil {
 		log.Error("cron send error", "err", err)
@@ -448,10 +499,12 @@ func (s *Scheduler) notifyIM(j *Job, text string) {
 	}
 	chunks := platform.SplitText(text, maxLen)
 	for _, chunk := range chunks {
-		platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
+		if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
 			ChatID: j.ChatID,
 			Text:   chunk,
-		}, 3)
+		}, 3); err != nil {
+			slog.Warn("cron notify failed", "cron_id", j.ID, "chat", j.ChatID, "err", err)
+		}
 	}
 }
 
@@ -470,10 +523,12 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	}
 	chunks := platform.SplitText(text, maxLen)
 	for _, chunk := range chunks {
-		platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
+		if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
 			ChatID: chatID,
 			Text:   chunk,
-		}, 3)
+		}, 3); err != nil {
+			slog.Warn("cron notify target failed", "platform", plat, "chat", chatID, "err", err)
+		}
 	}
 }
 

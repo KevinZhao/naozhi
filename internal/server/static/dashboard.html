@@ -2,7 +2,7 @@
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, interactive-widget=resizes-content">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
 <title>naozhi dashboard</title>
 <link rel="manifest" href="/manifest.json">
 <meta name="mobile-web-app-capable" content="yes">
@@ -12,25 +12,33 @@
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css" integrity="sha384-zh0CIslj+VczCZtlzBcjt5ppRcsAmDnRem7ESsYwWwg3m/OaJ2l4x7YBZl9Kxxib" crossorigin="anonymous">
 <style>
 *{margin:0;padding:0;box-sizing:border-box}
-html,body{overflow-x:hidden;max-width:100%;overscroll-behavior-x:none}
+html,body{overflow:hidden;height:100%;width:100%;overscroll-behavior:none;padding:0}
 body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;background:#0d1117;color:#c9d1d9;font-size:20px}
-.container{display:flex;height:100vh;overflow:hidden}
+.container{display:flex;height:100%;height:100dvh;overflow:hidden;width:100%}
 
-.sidebar{width:320px;min-width:320px;border-right:1px solid #30363d;display:flex;flex-direction:column}
+.sidebar{width:360px;min-width:200px;max-width:60vw;border-right:none;display:flex;flex-direction:column}
+.resizer{width:4px;cursor:col-resize;background:#30363d;flex-shrink:0;transition:background .15s}
+.resizer:hover,.resizer.dragging{background:#58a6ff}
 .sidebar-header{padding:16px;border-bottom:1px solid #30363d}
 .sidebar-header .header-row{display:flex;align-items:center;justify-content:space-between}
 .sidebar-header h1{font-size:19px;color:#f0f6fc;font-weight:600}
 .session-list{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#30363d transparent}
 
-.session-card{position:relative;padding:10px 16px;border-bottom:1px solid #21262d;cursor:pointer;transition:background .15s;border-left:3px solid transparent}
+.sidebar-status{padding:6px 16px;border-top:1px solid #30363d;font-size:12px;color:#8b949e;flex-shrink:0;max-height:40%;overflow-y:auto}
+.sidebar-status .status-row{display:flex;align-items:center;gap:8px;padding:4px 0}
+.sidebar-status .status-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.sidebar-status .status-dot.ok,.sidebar-status .status-dot.connected{background:#3fb950}
+.sidebar-status .status-dot.connecting,.sidebar-status .status-dot.authenticating{background:#d29922;animation:pulse 1.5s ease-in-out infinite}
+.sidebar-status .status-dot.disconnected,.sidebar-status .status-dot.error{background:#da3633}
+.sidebar-status .status-dot.offline,.sidebar-status .status-dot.off{background:#484f58}
+.sidebar-status .status-info{flex:1;min-width:0;overflow:hidden}
+.sidebar-status .status-ws{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sidebar-status .status-sys{color:#6e7681;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+
+.session-card{position:relative;padding:12px 16px;border-bottom:1px solid #21262d;cursor:pointer;transition:background .15s;border-left:3px solid transparent}
 .session-card:hover{background:#161b22}
 .session-card.active{background:#1f2937;border-left-color:#58a6ff}
 .session-card.dead-card{opacity:.6}
-.session-card .platform{font-size:13px;color:#8b949e;text-transform:uppercase;letter-spacing:.5px}
-.session-card .agent{font-size:16px;color:#f0f6fc;margin:2px 0;font-weight:500}
-.session-card.dead-card .agent{text-decoration:line-through;color:#8b949e}
-.session-card .meta{font-size:13px;color:#8b949e;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-.session-card .session-prompt{font-size:13px;color:#a5d6ff;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .session-card .btn-dismiss{position:absolute;top:4px;right:6px;background:none;border:none;color:#484f58;font-size:17px;cursor:pointer;padding:0 4px;line-height:1;opacity:0;transition:opacity .15s}
 .session-card:hover .btn-dismiss{opacity:1}
 .session-card .btn-dismiss:hover{color:#da3633}
@@ -43,16 +51,17 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .death-tag{font-size:11px;color:#8b949e;background:#21262d;padding:1px 4px;border-radius:4px}
 
 .main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
-.main-header{padding:12px 20px;border-bottom:1px solid #30363d;flex-shrink:0}
-.main-header h2{font-size:17px;color:#f0f6fc;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.main-header .detail{font-size:14px;color:#8b949e;margin-top:4px;display:flex;gap:12px;flex-wrap:wrap}
+.main-header{padding:8px 20px;border-bottom:1px solid #30363d;flex-shrink:0;display:flex;align-items:center;gap:8px}
+.main-header-content{flex:1;min-width:0;display:flex;align-items:center;gap:10px}
+.main-header h2{font-size:16px;color:#f0f6fc;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:1;min-width:0}
+.main-header .detail{font-size:13px;color:#8b949e;display:flex;gap:8px;flex-shrink:0;align-items:center}
 .main-header .detail span{white-space:nowrap}
 
 .events{flex:1;overflow-y:auto;overflow-x:hidden;padding:8px 0;scrollbar-width:thin;scrollbar-color:#30363d transparent;min-width:0}
 .event{display:flex;gap:10px;padding:5px 20px;transition:background .1s;max-width:100%}
 .event:hover{background:#161b22}
 .event-icon{width:18px;text-align:center;font-size:15px;padding-top:1px}
-.event-content{flex:1;font-size:15px;line-height:1.5;word-break:break-word;white-space:pre-wrap;overflow-wrap:anywhere;min-width:0;overflow:hidden}
+.event-content{flex:1;font-size:15px;line-height:1.5;word-break:break-word;white-space:pre-wrap;overflow-wrap:anywhere;min-width:0}
 .event.text .event-content,.event.result .event-content{white-space:normal}
 .md-blank{display:block;height:0.35em}
 .event.thinking .event-content{color:#a5d6ff;font-style:italic}
@@ -74,28 +83,67 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .input-area{border-top:1px solid #30363d;padding:12px 20px;flex-shrink:0;background:#0d1117}
 .input-area.disabled{opacity:.5;pointer-events:none}
 .file-preview{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
-.file-thumb{position:relative;width:48px;height:48px;border-radius:6px;overflow:hidden;border:1px solid #30363d}
+.file-thumb{position:relative;width:60px;height:60px;border-radius:6px;overflow:hidden;border:1px solid #30363d}
 .file-thumb img{width:100%;height:100%;object-fit:cover}
 .file-thumb .remove{position:absolute;top:-4px;right:-4px;width:16px;height:16px;background:#da3633;color:#fff;border:none;border-radius:50%;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1}
+.event-images{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
+.event-images img{max-width:200px;max-height:160px;border-radius:6px;border:1px solid #30363d}
 .input-row{display:flex;gap:8px;align-items:flex-end}
-.input-row textarea{flex:1;background:#161b22;border:1px solid #30363d;border-radius:8px;color:#c9d1d9;padding:8px 12px;font-family:inherit;font-size:15px;resize:none;min-height:38px;max-height:120px;outline:none;line-height:1.4}
-.input-row textarea:focus{border-color:#58a6ff}
-.input-row textarea::placeholder{color:#484f58}
+.input-row #msg-input{flex:1;background:#161b22;border:1px solid #30363d;border-radius:8px;color:#c9d1d9;padding:8px 12px;font-family:inherit;font-size:16px;min-height:38px;max-height:120px;outline:none;line-height:1.4;overflow-y:auto;white-space:pre-wrap;word-break:break-word;-webkit-user-select:text;user-select:text}
+.input-row #msg-input:focus{border-color:#58a6ff}
+.input-row #msg-input:empty::before{content:attr(data-placeholder);color:#484f58;pointer-events:none}
 .btn-icon{width:36px;height:36px;border:1px solid #30363d;border-radius:8px;background:#161b22;color:#8b949e;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:17px;transition:all .15s}
 .btn-icon:hover{background:#1f2937;color:#c9d1d9;border-color:#484f58}
 .btn-icon.sending{opacity:.5;pointer-events:none}
 .btn-send{background:#238636;border-color:#238636;color:#fff}
 .btn-send:hover{background:#2ea043}
-.btn-stop{background:#da3633;border-color:#da3633;color:#fff;font-size:14px}
-.btn-stop:hover{background:#f85149}
-.btn-mic{font-size:16px}
+.btn-stop{background:#da3633;border-color:#da3633;color:#fff;display:none}
+.btn-stop:hover{background:#b62324}
+.btn-mic{font-size:16px;position:relative}
 .btn-mic.recording{background:#da3633;border-color:#da3633;color:#fff;animation:pulse 1.5s ease-in-out infinite}
+.rec-badge{position:absolute;top:-6px;right:-6px;background:#da3633;color:#fff;font-size:10px;min-width:18px;height:18px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-family:monospace;pointer-events:none}
 .btn-mic.transcribing{opacity:.5;pointer-events:none}
+
+/* Voice input mode (WeChat-style hold-to-talk) */
+.btn-hold-talk{display:none;flex:1;background:#21262d;border:1px solid #30363d;border-radius:8px;color:#8b949e;font-size:15px;padding:8px 12px;min-height:38px;cursor:pointer;user-select:none;-webkit-user-select:none;touch-action:none;text-align:center;transition:all .15s;font-family:inherit}
+.btn-hold-talk.active{background:#238636;border-color:#238636;color:#fff}
+.input-area.voice-mode .btn-hold-talk{display:block}
+.input-area.voice-mode #msg-input{display:none}
+.input-area.voice-mode .btn-send{display:none}
+.input-area.voice-mode .file-preview{display:none}
+.input-area.voice-mode .btn-mic{background:#21262d;border-color:#58a6ff;color:#58a6ff}
+
+/* Voice recording overlay */
+.voice-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.75);z-index:300;display:flex;flex-direction:column;align-items:center;justify-content:center;opacity:0;pointer-events:none;transition:opacity .2s}
+.voice-overlay.show{opacity:1;pointer-events:auto}
+.vo-card{background:#1c2128;border:1px solid #30363d;border-radius:16px;padding:32px 40px;display:flex;flex-direction:column;align-items:center;gap:16px;min-width:200px;transition:border-color .2s}
+.vo-timer{font-size:48px;color:#f0f6fc;font-weight:300;font-family:'SF Mono',ui-monospace,monospace;letter-spacing:2px}
+.vo-wave{display:flex;align-items:center;justify-content:center;gap:3px;height:40px}
+.vo-wave span{display:block;width:4px;background:#3fb950;border-radius:2px;transition:background .2s;animation:wave-bar .8s ease-in-out infinite}
+.vo-wave span:nth-child(1){animation-delay:0s;height:12px}
+.vo-wave span:nth-child(2){animation-delay:.1s;height:20px}
+.vo-wave span:nth-child(3){animation-delay:.2s;height:28px}
+.vo-wave span:nth-child(4){animation-delay:.3s;height:24px}
+.vo-wave span:nth-child(5){animation-delay:.15s;height:16px}
+.vo-wave span:nth-child(6){animation-delay:.25s;height:32px}
+.vo-wave span:nth-child(7){animation-delay:.35s;height:20px}
+@keyframes wave-bar{0%,100%{transform:scaleY(1)}50%{transform:scaleY(2.5)}}
+.vo-hint{font-size:14px;color:#8b949e;transition:all .2s}
+.voice-overlay.cancel .vo-wave span{background:#da3633}
+.voice-overlay.cancel .vo-hint{color:#da3633;font-weight:600}
+.voice-overlay.cancel .vo-card{border-color:#da3633}
+.voice-overlay.transcribing .vo-wave span{animation:none;height:4px;background:#58a6ff}
+.voice-overlay.transcribing .vo-hint{color:#58a6ff}
+
 .input-hints{font-size:11px;color:#484f58;margin-top:4px;text-align:right;user-select:none}
-.running-banner{display:flex;align-items:center;justify-content:space-between;padding:6px 12px;background:#1a2332;border-bottom:1px solid #1f6feb44;font-size:13px;color:#58a6ff}
-.running-banner .running-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#58a6ff;margin-right:6px;animation:pulse 1.5s ease-in-out infinite}
-.running-banner button{padding:3px 12px;border-radius:4px;border:1px solid #da3633;background:transparent;color:#da3633;cursor:pointer;font-size:12px;font-weight:600;transition:all .15s}
-.running-banner button:hover{background:#da3633;color:#fff}
+.running-banner{background:#1a2332;border-bottom:1px solid #1f6feb44;font-size:13px;color:#58a6ff;flex-shrink:0}
+.rb-tool-row{display:flex;align-items:center;padding:6px 12px;gap:8px}
+.rb-tool-row .running-status{flex:1;min-width:0;display:flex;align-items:center;gap:4px;overflow:hidden}
+.rb-tool-row .running-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#58a6ff;flex-shrink:0;animation:pulse 1.5s ease-in-out infinite}
+#tool-activity{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tool-count{color:#8b949e;margin-left:6px;font-size:12px}
+.rb-agents{max-height:80px;overflow-y:auto}
+.rb-agent-row{display:flex;align-items:center;gap:5px;padding:2px 12px 2px 24px;font-size:11px;color:#8b949e;border-top:1px solid #21262d44}
 
 /* Toast */
 .toast{position:fixed;bottom:20px;right:20px;background:#da3633;color:#fff;padding:8px 16px;border-radius:8px;font-size:14px;z-index:100;opacity:0;pointer-events:none;transition:opacity .3s}
@@ -110,6 +158,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .modal .modal-btns{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
 .modal .modal-btns button{padding:6px 16px;border-radius:6px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:14px}
 .modal .modal-btns button.primary{background:#238636;border-color:#238636;color:#fff}
+/* New session project picker */
+.proj-pick{list-style:none;margin:0;padding:0}
+.proj-pick li{padding:10px 12px;border:1px solid #30363d;border-radius:8px;margin-bottom:6px;cursor:pointer;transition:all .15s}
+.proj-pick li:hover{background:#1c2129;border-color:#484f58}
+.proj-pick li:active{background:#21262d}
+.proj-pick .pp-name{font-size:14px;color:#f0f6fc;font-weight:500}
+.proj-pick .pp-path{font-size:11px;color:#6e7681;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.proj-pick .pp-custom{color:#8b949e;font-size:13px;display:flex;align-items:center;gap:6px}
+.proj-pick .pp-custom-icon{font-size:15px}
 
 /* Toast variants */
 .toast.warning{background:#9e6a03}
@@ -121,22 +178,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .node-dot.ok{background:#3fb950}
 .node-dot.error{background:#da3633}
 .node-info{color:#8b949e;font-size:13px}
-.node-group{border-bottom:none}
-.node-group summary.node-group-header{display:flex;align-items:center;gap:6px;padding:8px 16px;cursor:pointer;color:#c9d1d9;font-size:12px;font-weight:600;letter-spacing:.4px;text-transform:uppercase;list-style:none;user-select:none;background:#161b22;border-top:1px solid #30363d;border-bottom:1px solid #21262d;position:sticky;top:0;z-index:1}
-.node-group summary.node-group-header::-webkit-details-marker{display:none}
-.node-group summary.node-group-header:hover{background:#1c2129;color:#f0f6fc}
-.ng-arrow{font-size:11px;color:#8b949e;transition:transform .15s;display:inline-block}
-.node-group[open] .ng-arrow{transform:rotate(90deg)}
-.ng-name{flex:1;color:#e6edf3}
-.ng-count{color:#8b949e;font-weight:400;font-size:11px}
-.ng-running{color:#3fb950;font-weight:400;font-size:11px}
-.ng-sys{color:#6e7681;font-weight:400;font-size:10px;margin-left:auto;padding-right:4px;white-space:nowrap}
-.new-session-btn{padding:5px 12px;border:1px dashed #30363d;border-radius:8px;background:transparent;color:#8b949e;font-size:13px;cursor:pointer;text-align:center;transition:all .15s;white-space:nowrap}
-.new-session-btn:hover{border-color:#58a6ff;color:#58a6ff;background:#161b22}
-.ng-history-btn{background:none;border:none;color:#7a5c00;font-size:11px;cursor:pointer;padding:1px 5px;margin-left:2px;border-radius:4px;line-height:1;transition:all .15s;flex-shrink:0;display:inline-flex;align-items:center;gap:3px}
-.ng-history-btn:hover{color:#d29922;background:#1a1500}
-.ng-history-btn svg{width:12px;height:12px;fill:currentColor}
-.ng-history-btn .history-badge{display:inline-block;background:#3d2e00;color:#d29922;padding:0 5px;border-radius:8px;font-size:10px;font-weight:600;min-width:14px;text-align:center;line-height:16px}
+
 .history-popover{position:absolute;top:100%;left:0;z-index:100;min-width:280px;max-width:360px;max-height:320px;overflow-y:auto;background:#161b22;border:1px solid #30363d;border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:0;animation:pop-in .15s ease}
 @keyframes pop-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
 .history-popover-header{padding:8px 12px;font-size:11px;color:#8b949e;border-bottom:1px solid #21262d;font-weight:600;text-transform:uppercase;letter-spacing:.3px;background:#0d1117;border-radius:8px 8px 0 0}
@@ -148,37 +190,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .history-popover-item .hp-dismiss:hover{color:#f85149;background:#3d0e0e}
 .history-popover-item .hp-prompt{font-size:13px;color:#c9d1d9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .history-popover-item .hp-meta{font-size:11px;color:#6e7681;margin-top:3px;display:flex;align-items:center;gap:6px}
-.history-popover-item .hp-meta .hp-agent-tag{color:#7a5c00;font-weight:500}
+.history-popover-item .hp-meta .hp-project{color:#d4a017;font-weight:500}
+.history-popover-item .hp-meta .hp-tool{color:#a5d6ff}
 .history-popover-item .hp-meta .hp-dot{color:#30363d}
 .history-popover-empty{padding:16px;text-align:center;color:#6e7681;font-size:12px}
-/* More projects group */
-.more-projects-group{border-top:1px solid #21262d;margin-top:4px}
-.more-projects-group>summary.node-group-header{background:transparent;border-top-color:#21262d;border-bottom:none;color:#6e7681;font-size:11px;padding:6px 16px}
-.more-projects-group>summary.node-group-header:hover{background:#0d1117;color:#8b949e}
-.more-projects-group .ng-arrow{color:#484f58;font-size:10px}
-.more-projects-group .ng-name{color:#6e7681}
-.more-projects-group .ng-count{color:#484f58}
-.ng-new-btn{background:none;border:none;color:#484f58;font-size:14px;cursor:pointer;padding:2px 6px;margin-left:4px;border-radius:4px;line-height:1;transition:all .15s;flex-shrink:0}
-.ng-new-btn:hover{color:#58a6ff;background:#161b22}
 
-/* Project group styles — golden color scheme */
-.project-group>summary.node-group-header{background:#1a1500;border-top-color:#3d2e00;border-bottom-color:#2a1f00;color:#b8860b}
-.project-group>summary.node-group-header:hover{background:#221c00;color:#d4a017}
-.project-group>summary.node-group-header .ng-arrow{color:#7a5c00}
-.project-group>summary.node-group-header .ng-name{color:#d4a017}
-.project-group>summary.node-group-header .ng-count{color:#7a5c00}
-.project-group>summary.node-group-header .ng-running{color:#d4a017}
-.project-group>summary.node-group-header .ng-new-btn{color:#7a5c00}
-.project-group>summary.node-group-header .ng-new-btn:hover{color:#d4a017;background:#2a1f00}
-.node-group .project-group>summary.node-group-header{padding-left:28px}
-.node-group .project-group>.session-card{padding-left:28px}
-.node-group .project-group>.session-card.cli-card{padding-left:28px}
-.planner-indicator{display:inline-block;width:8px;height:8px;border-radius:50%;background:#a371f7;margin-right:4px}
-.session-card.planner-card{border-left-color:#a371f7}
-.session-card.planner-card .agent{color:#a371f7}
-/* CLI (discovered) sessions in folder groups */
-.session-card.cli-card{border-left-color:#4a3000}
-.session-card.cli-card.active{border-left-color:#d29922}
 .workspace-path{font-size:12px;color:#6e7681;margin-top:4px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:'SF Mono',SFMono-Regular,Consolas,monospace}
 .workspace-path:hover{color:#8b949e;text-decoration:underline}
 
@@ -212,35 +228,56 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .katex{font-size:1.1em}
 .katex-html{overflow-wrap:break-word}
 .ts-subagent{display:inline-block;background:#1f2937;color:#a5d6ff;padding:0 5px;border-radius:4px;font-size:11px;font-weight:600;margin-left:2px}
-.sa-badge{display:inline-flex;align-items:center;gap:3px;background:#1a2332;border:1px solid #1f6feb44;color:#58a6ff;padding:1px 6px;border-radius:4px;font-size:11px;font-weight:600;margin-left:4px;white-space:nowrap}
-.sa-badge .sa-icon{font-size:12px}
-.sa-list{border-top:1px solid #21262d;margin-top:6px;padding-top:2px}
-.sa-row{display:flex;align-items:center;gap:5px;padding:3px 8px 3px 20px;font-size:11px;color:#8b949e;cursor:pointer;border-left:2px solid transparent;transition:background .1s}
-.sa-row:hover{background:#161b22;color:#c9d1d9}
-.sa-running-dot{width:5px;height:5px;border-radius:50%;background:#3fb950;flex-shrink:0;animation:pulse 2s ease-in-out infinite}
-.sa-bg-badge{background:#2a1f00;color:#d29922;border-radius:3px;padding:0 3px;font-size:9px;letter-spacing:.3px;flex-shrink:0}
-.sa-name{color:#a5d6ff;font-weight:600;white-space:nowrap;flex-shrink:0}
-.sa-activity{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#6e7681;flex:1;min-width:0}
 
+
+
+/* Header buttons */
+.hdr-btns{display:flex;gap:4px;align-items:center}
+.hdr-btn{background:none;border:1px solid #30363d;border-radius:6px;color:#8b949e;cursor:pointer;padding:0;position:relative;transition:all .15s;line-height:1;white-space:nowrap;width:32px;height:32px;display:flex;align-items:center;justify-content:center}
+.hdr-btn:hover{background:#21262d;color:#c9d1d9;border-color:#484f58}
+.hdr-btn svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.hdr-badge{position:absolute;top:-5px;right:-5px;background:#da3633;color:#fff;font-size:9px;min-width:15px;height:15px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:700;line-height:1}
+/* Section header */
+.section-header{padding:6px 16px;font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.4px;background:#161b22;border-top:1px solid #30363d;border-bottom:1px solid #21262d;position:sticky;top:0;z-index:1}
+/* Session card v2 (two-line flat, WeChat-style) */
+.session-card .sc-header{display:flex;align-items:baseline;gap:8px}
+.session-card .sc-prompt{font-size:15px;color:#e6edf3;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.session-card.new-card{border-left-style:dashed;border-left-color:#58a6ff}
+.session-card.resumable-card{border-left-style:dashed;border-left-color:#8b949e}
+.dot-resumable{background:transparent;border:1px dashed #8b949e;width:7px;height:7px}
+.session-card .sc-meta{font-size:12px;color:#8b949e;display:flex;align-items:center;gap:4px;margin-top:3px;overflow:hidden;white-space:nowrap}
+.sc-dot{display:inline-block;width:6px;height:6px;border-radius:50%;flex-shrink:0}
+.dot-running{background:#3fb950}
+.dot-ready{background:#1f6feb}
+.dot-new{background:#1f6feb;border:1px dashed #58a6ff;width:5px;height:5px}
+.sc-sep{color:#30363d}
+.sc-cli{color:#a5d6ff}
+.sc-ver{color:#6e7681;font-size:11px}
+.sc-time{flex-shrink:0;font-size:12px;color:#8b949e}
+.sc-node{display:inline-block;padding:0 4px;border-radius:3px;font-size:10px;font-weight:600;color:#fff;margin-left:2px}
+/* History bottom sheet (mobile) */
+.history-sheet{position:fixed;bottom:0;left:0;right:0;z-index:200;background:#161b22;border-top:1px solid #30363d;border-radius:16px 16px 0 0;max-height:60vh;overflow-y:auto;animation:sheet-in .25s ease;padding-bottom:max(8px,env(safe-area-inset-bottom))}
+.sheet-handle{width:36px;height:4px;background:#484f58;border-radius:2px;margin:8px auto}
 
 /* ===== Mobile (≤768px) ===== */
 .btn-mobile-back{display:none}
 @media(max-width:768px){
   /* Container: block so each panel stacks */
-  .container{display:block;height:100vh;overflow:hidden}
+  .container{display:block;height:100%;overflow:hidden}
   /* Sidebar: full-screen drawer, hidden off-left by default */
-  .sidebar{position:fixed;inset:0;width:100%;min-width:0;z-index:10;background:#0d1117;transform:translateX(-100%);transition:transform .25s ease;border-right:none;overflow-y:auto}
+  .sidebar{position:fixed;inset:0;width:100%!important;min-width:0;max-width:none;z-index:10;background:#0d1117;transform:translateX(-100%);transition:transform .25s ease;border-right:none;overflow:hidden}
   body.mobile-list-view .sidebar{transform:translateX(0)}
+  .resizer{display:none}
   /* Main: full-screen flex column, sits behind sidebar */
-  .main{position:fixed;inset:0;display:flex;flex-direction:column;z-index:5;overflow:hidden}
+  .main{position:fixed;top:0;left:0;right:0;bottom:0;width:100%;display:flex;flex-direction:column;z-index:5;overflow:hidden}
   /* Back button: hidden on desktop, shown on mobile */
   .btn-mobile-back{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:36px;height:36px;background:none;border:none;color:#8b949e;font-size:20px;cursor:pointer;padding:0;border-radius:6px;-webkit-tap-highlight-color:transparent}
   .btn-mobile-back:active{color:#c9d1d9}
-  /* Main header: flex row so back button sits left of content */
-  .main-header{display:flex;align-items:flex-start;gap:0;padding:10px 12px}
-  .main-header-content{flex:1;min-width:0}
-  /* Input area: safe area bottom padding */
-  .input-area{flex-shrink:0;padding-left:12px;padding-right:12px;padding-bottom:max(12px,env(safe-area-inset-bottom))}
+  /* Main header: single-line flex, safe area top+sides */
+  .main-header{gap:0;padding:max(8px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) 8px max(12px,env(safe-area-inset-left));overflow:hidden}
+  .main-header-content{flex:1;min-width:0;display:flex;align-items:center;gap:8px;overflow:hidden}
+  /* Input area: safe area bottom+sides padding */
+  .input-area{flex-shrink:0;padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right));padding-bottom:max(12px,env(safe-area-inset-bottom))}
   /* Dismiss button always visible on touch screens */
   .session-card .btn-dismiss{opacity:.6}
   /* Modal never wider than screen */
@@ -248,11 +285,28 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
   /* Toast at top so keyboard doesn't cover it */
   .toast{bottom:auto;top:max(16px,env(safe-area-inset-top));right:16px;left:16px;text-align:center}
   /* Remove tap flash on interactive elements */
-  .session-card,.btn-icon,.btn-send,.new-session-btn{-webkit-tap-highlight-color:transparent}
-  .sidebar-header{display:flex;flex-wrap:wrap;align-items:center}
+  .session-card,.btn-icon,.btn-send{-webkit-tap-highlight-color:transparent}
+  .sidebar-header{display:flex;flex-wrap:wrap;align-items:center;padding-top:max(16px,env(safe-area-inset-top));padding-left:max(16px,env(safe-area-inset-left));padding-right:max(16px,env(safe-area-inset-right))}
+  .sidebar-header .header-row{width:100%}
   .input-hints{display:none}
-  .session-list{overflow-x:hidden}
-  .event{padding:5px 12px}
+  /* Voice mode: larger hold button on mobile */
+  .btn-hold-talk{font-size:16px;min-height:42px}
+  .vo-card{padding:24px 32px}
+  .vo-timer{font-size:40px}
+  .session-list{overflow-x:hidden;overflow-y:auto}
+  .sidebar-status{padding-bottom:max(10px,env(safe-area-inset-bottom));padding-left:max(16px,env(safe-area-inset-left))}
+  /* Compact session cards on mobile */
+  .session-card{padding:10px max(12px,env(safe-area-inset-right)) 10px max(12px,env(safe-area-inset-left));border-left-width:2px}
+  .session-card .sc-meta{font-size:11px;gap:3px}
+  .session-card .sc-prompt{font-size:14px}
+  .section-header{padding:5px 12px;font-size:10px}
+  /* Compact "no sessions" on mobile */
+  .no-sessions{padding:4px 16px!important;font-size:12px}
+  .event{padding:5px max(12px,env(safe-area-inset-right)) 5px max(12px,env(safe-area-inset-left))}
+  /* Cron detail: reduce padding to match mobile layout */
+  .cron-detail{padding:12px}
+  /* History popover: constrain to viewport */
+  .history-popover{min-width:0;max-width:calc(100vw - 32px);left:auto;right:0}
   .session-card[data-key]{touch-action:pan-y}
   .session-card.swiping{transition:none!important;user-select:none}
   .modal-overlay{align-items:flex-end}
@@ -262,32 +316,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 @keyframes sheet-in{from{transform:translateY(100%)}to{transform:translateY(0)}}
 
 /* ===== Cron tab ===== */
-.sidebar-tabs{display:flex;gap:0;margin-top:8px;border:1px solid #30363d;border-radius:8px;overflow:hidden}
-.sidebar-tabs button{flex:1;padding:5px 0;background:transparent;border:none;color:#8b949e;font-size:13px;cursor:pointer;transition:all .15s;font-weight:500}
-.sidebar-tabs button.active{background:#21262d;color:#f0f6fc}
-.sidebar-tabs button:hover:not(.active){background:#161b22;color:#c9d1d9}
-.cron-list{flex:1;overflow-y:auto;scrollbar-width:thin;scrollbar-color:#30363d transparent}
-.cron-card{padding:10px 16px;border-bottom:1px solid #21262d;cursor:pointer;transition:background .15s;position:relative}
-.cron-card:hover{background:#161b22}
-.cron-card.active{background:#1f2937;border-left:3px solid #58a6ff}
-.cron-card .cron-prompt{font-size:14px;color:#f0f6fc;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cron-card .cron-schedule{font-size:12px;color:#a5d6ff;margin-top:2px}
-.cron-card .cron-meta{font-size:12px;color:#8b949e;margin-top:4px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
-.cron-card .cron-result-preview{font-size:11px;color:#7ee787;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cron-card .cron-error-preview{font-size:11px;color:#da3633;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.cron-actions{display:flex;gap:6px;margin-top:6px}
-.cron-actions button{padding:3px 10px;border-radius:4px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:11px;transition:all .15s}
-.cron-actions button:hover{background:#30363d;color:#f0f6fc}
-.cron-actions button.danger{border-color:#da3633;color:#da3633}
-.cron-actions button.danger:hover{background:#da3633;color:#fff}
-.cron-add-form{padding:12px 16px;border-bottom:1px solid #30363d;background:#161b22}
-.cron-add-form input,.cron-add-form textarea{width:100%;padding:6px 10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;outline:none;font-family:inherit;margin-bottom:8px}
-.cron-add-form input:focus,.cron-add-form textarea:focus{border-color:#58a6ff}
-.cron-add-form textarea{resize:vertical;min-height:48px}
-.cron-add-form label{font-size:11px;color:#8b949e;display:block;margin-bottom:3px}
-.cron-add-form .form-row{display:flex;gap:8px;align-items:flex-end}
-.cron-add-form .form-row button{padding:6px 16px;border-radius:6px;border:1px solid #238636;background:#238636;color:#fff;cursor:pointer;font-size:13px;white-space:nowrap}
-.cron-add-form .form-row button:hover{background:#2ea043}
 .cron-detail{padding:16px 20px;overflow-y:auto;flex:1}
 .cron-detail h3{font-size:16px;color:#f0f6fc;margin-bottom:12px}
 .cron-detail .cd-field{margin-bottom:10px}
@@ -295,6 +323,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .cron-detail .cd-value{font-size:14px;color:#c9d1d9;margin-top:2px;word-break:break-word}
 .cron-detail .cd-result{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px;font-size:13px;color:#c9d1d9;max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;margin-top:4px}
 </style>
+<script>if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});</script>
 </head>
 <body>
 <div class="container">
@@ -302,23 +331,38 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
     <div class="sidebar-header">
       <div class="header-row">
         <h1>Dashboard</h1>
-        <button class="new-session-btn" onclick="createNewSession()" style="width:auto;margin:0;padding:5px 12px">+ new</button>
-      </div>
-      <div class="sidebar-tabs">
-        <button class="active" onclick="switchTab('sessions')">Sessions</button>
-        <button onclick="switchTab('cron')">Cron</button>
+        <div class="hdr-btns">
+          <button class="hdr-btn" id="btn-history" onclick="toggleHistory()" title="History"><svg viewBox="0 0 24 24"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="hdr-badge" id="history-badge" style="display:none"></span></button>
+          <button class="hdr-btn" onclick="createNewSession()" title="New Session"><svg viewBox="0 0 24 24"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
+          <button class="hdr-btn" id="btn-cron" onclick="openCronPanel()" title="Cron Jobs"><svg viewBox="0 0 24 24"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 1.5"/><path d="M5 3L2 6"/><path d="M22 6l-3-3"/><path d="M6.38 18.7L4 21"/><path d="M17.64 18.67L20 21"/></svg><span class="hdr-badge" id="cron-badge" style="display:none"></span></button>
+        </div>
       </div>
     </div>
     <div class="session-list" id="session-list">
       <div class="no-sessions">loading...</div>
     </div>
-    <div class="cron-list" id="cron-list" style="display:none"></div>
+    <div class="sidebar-status" id="sidebar-status">
+      <div class="status-row">
+        <span class="status-dot off"></span>
+        <div class="status-info">
+          <div class="status-ws">connecting...</div>
+        </div>
+      </div>
+    </div>
   </div>
+  <div class="resizer" id="resizer"></div>
   <div class="main" id="main">
     <div class="empty-state" style="flex-direction:column;gap:8px"><span style="font-size:28px;opacity:.4">&gt;_</span><span>select a session or create a new one</span></div>
   </div>
 </div>
 <div class="toast" id="toast"></div>
+<div class="voice-overlay" id="voice-overlay">
+  <div class="vo-card">
+    <div class="vo-timer" id="vo-timer">0s</div>
+    <div class="vo-wave"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>
+    <div class="vo-hint" id="vo-hint"></div>
+  </div>
+</div>
 <script>
 let selectedKey = null;
 let eventTimer = null;
@@ -331,6 +375,8 @@ let sending = false;
 let selectedNode = 'local';
 let nodesData = {};
 let lastSessionsJSON = '';
+let lastNodesJSON = '';
+let lastRecentJSON = '';
 let sessionPollTimer = null;
 let discoveredPollTimer = null;
 let discoveredItems = []; // discovered sessions, merged into sidebar
@@ -340,43 +386,20 @@ let pendingDiscovered = null; // {pid, sessionId, cwd, procStartTime, node} when
 let sessionCounter = 0;
 let availableAgents = ['general'];
 let defaultWorkspace = '';
-const clockSvg = '<svg viewBox="0 0 16 16"><path d="M8 0a8 8 0 110 16A8 8 0 018 0zm0 1.5a6.5 6.5 0 100 13 6.5 6.5 0 000-13zM8 3a.75.75 0 01.75.75v3.69l2.28 2.28a.75.75 0 01-1.06 1.06l-2.5-2.5A.75.75 0 017.25 8V3.75A.75.75 0 018 3z"/></svg>';
 let projectsData = []; // [{name, path, node}] from API
 let localWsInfo = { name: '', sys: '' };
 const sessionWorkspaces = {};
 const sessionNodes = {};
+const sessionResumeIDs = {}; // key → session_id for recent session resume
+let recentSessionsData = []; // from API recent_sessions
 
-function getToken() { return localStorage.getItem('naozhi_dashboard_token') || ''; }
-function setToken(t) { localStorage.setItem('naozhi_dashboard_token', t); }
-
-// Pending dashboard sessions — persisted in localStorage so they survive refresh/restart
-function loadPendingSessions() {
-  try {
-    const raw = localStorage.getItem('naozhi_pending_sessions');
-    if (!raw) return;
-    const entries = JSON.parse(raw);
-    for (const e of entries) {
-      if (e.key && !sessionWorkspaces[e.key]) {
-        sessionWorkspaces[e.key] = e.workspace || '';
-        if (e.node) sessionNodes[e.key] = e.node;
-      }
-    }
-  } catch (_) {}
-}
-
-function savePendingSessions() {
-  const entries = Object.entries(sessionWorkspaces).map(([key, ws]) => ({ key, workspace: ws, node: sessionNodes[key] || '' }));
-  if (entries.length > 0) {
-    localStorage.setItem('naozhi_pending_sessions', JSON.stringify(entries));
-  } else {
-    localStorage.removeItem('naozhi_pending_sessions');
-  }
-}
+function getToken() { return ''; }
+function setToken(t) { /* token stored in HttpOnly cookie only */ }
 
 function removePendingSession(key) {
   delete sessionWorkspaces[key];
   delete sessionNodes[key];
-  savePendingSessions();
+  delete sessionResumeIDs[key];
 }
 
 async function fetchSessions() {
@@ -385,15 +408,24 @@ async function fetchSessions() {
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch('/api/sessions', { headers });
+    if (r.status === 401 || r.status === 403) {
+      if (!document.querySelector('.modal-overlay')) showAuthModal();
+      return;
+    }
     if (!r.ok) return;
     const data = await r.json();
-    const json = JSON.stringify(data);
-    if (json === lastSessionsJSON) return;
-    lastSessionsJSON = json;
+    const sessionsHash = JSON.stringify(data.sessions);
+    const nodesHash = JSON.stringify(data.nodes || {});
+    const recentHash = JSON.stringify(data.recent_sessions || []);
+    if (sessionsHash === lastSessionsJSON && nodesHash === lastNodesJSON && recentHash === lastRecentJSON) return;
+    lastSessionsJSON = sessionsHash;
+    lastNodesJSON = nodesHash;
+    lastRecentJSON = recentHash;
     if (data.nodes) nodesData = data.nodes;
     if (data.stats.agents) availableAgents = data.stats.agents;
     if (data.stats.default_workspace) defaultWorkspace = data.stats.default_workspace;
     if (data.stats.projects) projectsData = data.stats.projects;
+    recentSessionsData = data.recent_sessions || [];
 
     // Track which keys the backend knows about
     const backendKeys = new Set();
@@ -404,15 +436,13 @@ async function fetchSessions() {
     });
 
     // Remove pending sessions that now exist in backend
-    let pendingChanged = false;
     for (const key of Object.keys(sessionWorkspaces)) {
       if (backendKeys.has(key)) {
         delete sessionWorkspaces[key];
         delete sessionNodes[key];
-        pendingChanged = true;
+        delete sessionResumeIDs[key];
       }
     }
-    if (pendingChanged) savePendingSessions();
 
     // Merge pending dashboard sessions into data for sidebar rendering
     const pendingKeys = Object.keys(sessionWorkspaces);
@@ -443,28 +473,113 @@ async function fetchSessions() {
 
 function renderSidebar(data) {
   const st = data.stats;
-  // Update workspace info for node-group header
-  const wsName = st.workspace_name || st.workspace_id || '';
-  let sysStr = '';
-  const sys = st.system;
-  if (sys) {
+  localWsInfo = { name: st.workspace_name || st.workspace_id || '', sys: '' };
+  if (st.system) {
+    const sys = st.system;
     let memStr = sys.memory_mb > 0 ? (sys.memory_mb >= 1024 ? (sys.memory_mb / 1024).toFixed(1) + 'G' : sys.memory_mb + 'M') : '';
     const ipStr = sys.ips && sys.ips.length > 0 ? sys.ips.join(', ') : '';
-    sysStr = sys.os + '/' + sys.arch + ' \u00b7 ' + sys.cpus + 'C' + (memStr ? '/' + memStr : '') + (ipStr ? ' \u00b7 ' + ipStr : '');
+    localWsInfo.sys = sys.os + '/' + sys.arch + ' \u00b7 ' + sys.cpus + 'C' + (memStr ? '/' + memStr : '') + (ipStr ? ' \u00b7 ' + ipStr : '');
   }
-  localWsInfo = { name: wsName, sys: sysStr };
+  updateStatusBar();
+  if (st.agents) availableAgents = st.agents;
+  if (st.default_workspace) defaultWorkspace = st.default_workspace;
+  if (st.projects) projectsData = st.projects;
 
   const list = document.getElementById('session-list');
-  const sessions = data.sessions || [];
+  const scrollTop = list.scrollTop;
 
-  const order = {running:0, ready:1, new:2, suspended:3};
-  sessions.sort((a, b) => {
-    const d = (order[a.state]||5) - (order[b.state]||5);
-    return d !== 0 ? d : b.last_active - a.last_active;
+  // Merge discovered into sessions — tag them as source=terminal
+  const allItems = (data.sessions || []).map(s => {
+    if (!s.source) s.source = 'managed';
+    return s;
   });
-  allSessionsCache = sessions;
+  discoveredItems.forEach(d => {
+    allItems.push({
+      key: '_discovered:' + d.pid,
+      state: d.state || 'ready',
+      cli_name: d.cli_name || 'cli',
+      last_active: d.last_active || d.started_at,
+      last_prompt: d.last_prompt || d.summary || '',
+      workspace: d.cwd,
+      project: d.project || matchProject(d.cwd),
+      node: d.node || 'local',
+      source: 'terminal',
+      _discovered: d,
+    });
+  });
 
-  list.innerHTML = renderUnified(sessions, discoveredItems);
+  // Merge recent filesystem sessions as resumable items
+  // Skip sessions already being resumed (pending key exists in sessionResumeIDs)
+  const activeResumeIDs = new Set(Object.values(sessionResumeIDs));
+  recentSessionsData.forEach(r => {
+    if (activeResumeIDs.has(r.session_id)) return;
+    allItems.push({
+      key: '_recent:' + r.session_id,
+      state: 'resumable',
+      cli_name: '',
+      last_active: r.last_active || 0,
+      last_prompt: r.last_prompt || r.summary || '',
+      workspace: r.workspace || '',
+      project: r.project || matchProject(r.workspace),
+      node: 'local',
+      source: 'recent',
+      _recent: r,
+    });
+  });
+
+  // Filter: active list = non-suspended; history = suspended
+  const active = allItems.filter(s => s.state !== 'suspended');
+  const suspended = allItems.filter(s => s.state === 'suspended');
+  allSessionsCache = allItems;
+
+  // Sort: running > ready > new > resumable, then by last_active desc
+  const order = {running: 0, ready: 1, new: 2, resumable: 3};
+  active.sort((a, b) => {
+    const d = (order[a.state] ?? 9) - (order[b.state] ?? 9);
+    return d !== 0 ? d : (b.last_active || 0) - (a.last_active || 0);
+  });
+
+  // Always group by project when any session has a project
+  const projects = new Set(active.map(s => s.project).filter(Boolean));
+
+  let html;
+  if (projects.size > 0) {
+    // Group by project, sort groups by most recent session
+    const groups = {};
+    const ungrouped = [];
+    active.forEach(s => {
+      const p = s.project || '';
+      if (p) {
+        if (!groups[p]) groups[p] = [];
+        groups[p].push(s);
+      } else {
+        ungrouped.push(s);
+      }
+    });
+    const sortedProjects = Object.keys(groups).sort((a, b) => {
+      return (groups[b][0].last_active || 0) - (groups[a][0].last_active || 0);
+    });
+    html = '';
+    sortedProjects.forEach(p => {
+      html += '<div class="section-header">' + esc(p) + '</div>';
+      html += groups[p].map(sessionCardHtml).join('');
+    });
+    // Ungrouped at the bottom (no header)
+    html += ungrouped.map(sessionCardHtml).join('');
+  } else {
+    html = active.map(sessionCardHtml).join('');
+  }
+
+  if (!html) html = '<div class="no-sessions">no sessions</div>';
+  list.innerHTML = html;
+  list.scrollTop = scrollTop;
+
+  // Update history badge
+  const hBadge = document.getElementById('history-badge');
+  if (hBadge) {
+    hBadge.textContent = suspended.length > 0 ? suspended.length : '';
+    hBadge.style.display = suspended.length > 0 ? '' : 'none';
+  }
 }
 
 // Match a workspace path to a project from projectsData (longest prefix wins)
@@ -479,170 +594,6 @@ function matchProject(workspace) {
     }
   }
   return best;
-}
-
-// Build project groups driven by a projects list. Unmatched sessions go to _unmatched.
-function buildProjectGroups(sessions, discovered, projects) {
-  projects = projects || projectsData;
-  const projectGroups = {};
-  for (const p of projects) {
-    if (!projectGroups[p.name]) projectGroups[p.name] = { managed: [], discovered: [], path: p.path };
-  }
-
-  const unmatched = { managed: [], discovered: [], path: '' };
-
-  sessions.forEach(s => {
-    if (s.project && projectGroups[s.project]) {
-      projectGroups[s.project].managed.push(s);
-    } else {
-      unmatched.managed.push(s);
-    }
-  });
-
-  discovered.forEach(d => {
-    if (d.project && projectGroups[d.project]) {
-      projectGroups[d.project].discovered.push(d);
-    } else {
-      unmatched.discovered.push(d);
-    }
-  });
-
-  return { projectGroups, unmatched };
-}
-
-function renderProjectGroupHtml(pname, grp, collapsed, nodeId) {
-  const activeSessions = grp.managed.filter(s => s.state !== 'suspended');
-  const suspendedSessions = grp.managed.filter(s => s.state === 'suspended');
-  activeSessions.sort((a, b) => {
-    if (a.is_planner && !b.is_planner) return -1;
-    if (!a.is_planner && b.is_planner) return 1;
-    return 0;
-  });
-  const activeCount = activeSessions.length + grp.discovered.length;
-  const countHtml = activeCount > 0 ? '<span class="ng-count" title="' + activeCount + ' sessions">' + activeCount + '</span>' : '';
-  const historyBtnHtml = suspendedSessions.length > 0
-    ? '<button class="ng-history-btn" data-project="' + esc(pname) + '" onclick="event.stopPropagation();event.preventDefault();toggleHistoryPopover(this,this.dataset.project)" title="history">' + clockSvg + '<span class="history-badge">' + suspendedSessions.length + '</span></button>'
-    : '';
-  const path = grp.path || '';
-  return '<details class="node-group project-group"' + (collapsed.has('proj:'+pname) ? '' : ' open') +
-    ' data-node="proj:' + esc(pname) + '" ontoggle="saveNodeToggle(this)">' +
-    '<summary class="node-group-header">' +
-    '<span class="ng-arrow">&#9658;</span>' +
-    '<span class="ng-name">' + esc(pname) + '</span>' +
-    countHtml +
-    historyBtnHtml +
-    '<button class="ng-new-btn" data-path="' + esc(path) + '" data-project="' + esc(pname) + '" data-node="' + esc(nodeId || 'local') + '" onclick="event.stopPropagation();event.preventDefault();createSessionInProject(this.dataset.path,this.dataset.project,this.dataset.node)" title="new session">+</button>' +
-    '</summary>' +
-    activeSessions.map(sessionCardHtml).join('') +
-    grp.discovered.map(discoveredInlineHtml).join('') +
-    '</details>';
-}
-
-// Unified workspace-first renderer: workspace → [project →] session
-function renderUnified(sessions, discovered) {
-  const nodeItems = {};
-  sessions.forEach(s => {
-    const n = s.node || 'local';
-    if (!nodeItems[n]) nodeItems[n] = { sessions: [], discovered: [] };
-    nodeItems[n].sessions.push(s);
-  });
-  discovered.forEach(d => {
-    const n = d.node || 'local';
-    if (!nodeItems[n]) nodeItems[n] = { sessions: [], discovered: [] };
-    nodeItems[n].discovered.push(d);
-  });
-
-  const allRemote = [...new Set([
-    ...Object.keys(nodeItems).filter(n => n !== 'local'),
-    ...Object.keys(nodesData).filter(n => n !== 'local'),
-  ])].sort();
-  const nodeIds = ['local', ...allRemote];
-  const collapsed = getCollapsedNodes();
-
-  return nodeIds.map(nid => {
-    const ni = nodeItems[nid] || { sessions: [], discovered: [] };
-    const nd = nodesData[nid] || {};
-    const dotCls = nd.status === 'ok' || nid === 'local' ? 'ok' : 'error';
-    const displayName = nid === 'local'
-      ? (localWsInfo.name || 'Local')
-      : (nd.display_name || nid);
-    const nodeProjects = projectsData.filter(p => (p.node || 'local') === nid);
-    const totalCount = ni.sessions.filter(s => s.state !== 'suspended').length + ni.discovered.length;
-    const countHtml = '<span class="ng-count" title="' + totalCount + ' sessions">' + totalCount + '</span>';
-    let sysHint = '';
-    if (nid === 'local' && localWsInfo.sys) {
-      sysHint = '<span class="ng-sys">' + esc(localWsInfo.sys) + '</span>';
-    } else if (nid !== 'local' && nd.remote_addr) {
-      sysHint = '<span class="ng-sys">' + esc(nd.remote_addr) + '</span>';
-    }
-
-    let innerHtml;
-    if (nodeProjects.length === 0) {
-      const activeSessions = ni.sessions.filter(s => s.state !== 'suspended');
-      innerHtml = activeSessions.map(sessionCardHtml).join('') +
-                  ni.discovered.map(discoveredInlineHtml).join('');
-    } else {
-      const { projectGroups, unmatched } = buildProjectGroups(ni.sessions, ni.discovered, nodeProjects);
-      // Split into active projects (have non-suspended sessions or discovered) and empty
-      const activeProjects = [];
-      const emptyProjects = [];
-      Object.keys(projectGroups).sort().forEach(pname => {
-        const grp = projectGroups[pname];
-        const hasActive = grp.managed.some(s => s.state !== 'suspended') || grp.discovered.length > 0;
-        if (hasActive) activeProjects.push(pname);
-        else emptyProjects.push(pname);
-      });
-      innerHtml = activeProjects
-        .map(pname => renderProjectGroupHtml(pname, projectGroups[pname], collapsed, nid)).join('');
-      if (unmatched.managed.length > 0 || unmatched.discovered.length > 0) {
-        innerHtml += renderUnmatchedHtml(unmatched, collapsed);
-      }
-      // "More projects" collapsible group for projects without active sessions
-      if (emptyProjects.length > 0) {
-        const moreInner = emptyProjects
-          .map(pname => renderProjectGroupHtml(pname, projectGroups[pname], collapsed, nid)).join('');
-        innerHtml += '<details class="node-group more-projects-group"' + (collapsed.has('_more_projects') ? '' : ' open') +
-          ' data-node="_more_projects" ontoggle="saveNodeToggle(this)">' +
-          '<summary class="node-group-header">' +
-          '<span class="ng-arrow">&#9658;</span>' +
-          '<span class="ng-name">More projects</span>' +
-          '<span class="ng-count">' + emptyProjects.length + '</span></summary>' +
-          moreInner + '</details>';
-      }
-    }
-
-    if (!innerHtml) innerHtml = '<div class="no-sessions" style="padding:6px 16px">no sessions</div>';
-
-    return '<details class="node-group"' + (collapsed.has(nid) ? '' : ' open') +
-      ' data-node="' + esc(nid) + '" ontoggle="saveNodeToggle(this)">' +
-      '<summary class="node-group-header">' +
-      '<span class="ng-arrow">&#9658;</span>' +
-      '<span class="node-dot ' + dotCls + '"></span>' +
-      '<span class="ng-name">' + esc(displayName) + '</span>' +
-      sysHint +
-      countHtml + '</summary>' +
-      innerHtml +
-      '</details>';
-  }).join('');
-}
-
-function renderUnmatchedHtml(grp, collapsed) {
-  const active = grp.managed.filter(s => s.state !== 'suspended');
-  const suspended = grp.managed.filter(s => s.state === 'suspended');
-  const total = active.length + grp.discovered.length;
-  const historyBtnHtml = suspended.length > 0
-    ? '<button class="ng-history-btn" data-project="_other" onclick="event.stopPropagation();event.preventDefault();toggleHistoryPopover(this,this.dataset.project)" title="history">' + clockSvg + '<span class="history-badge">' + suspended.length + '</span></button>'
-    : '';
-  return '<details class="node-group project-group"' + (collapsed.has('_other') ? '' : ' open') +
-    ' data-node="_other" ontoggle="saveNodeToggle(this)">' +
-    '<summary class="node-group-header">' +
-    '<span class="ng-arrow">&#9658;</span>' +
-    '<span class="ng-name">\u5176\u4ed6</span>' +
-    '<span class="ng-count" title="' + total + ' sessions">' + total + '</span>' +
-    historyBtnHtml + '</summary>' +
-    active.map(sessionCardHtml).join('') +
-    grp.discovered.map(discoveredInlineHtml).join('') +
-    '</details>';
 }
 
 // --- History Popover ---
@@ -683,24 +634,15 @@ async function dismissHistoryItem(btn) {
 }
 
 document.addEventListener('click', function(e) {
-  if (activePopover && !activePopover.contains(e.target) && !e.target.closest('.ng-history-btn')) {
+  if (activePopover && !activePopover.contains(e.target) && !e.target.closest('#btn-history')) {
     closeHistoryPopover();
   }
 });
 
-function toggleHistoryPopover(btn, projectName) {
-  if (activePopover && activePopover.dataset.project === projectName) {
-    closeHistoryPopover();
-    return;
-  }
-  closeHistoryPopover();
-
-  const suspended = allSessionsCache.filter(s => {
-    if (s.state !== 'suspended') return false;
-    if (projectName === '_other') return !s.project;
-    return s.project === projectName;
-  });
-  suspended.sort((a, b) => b.last_active - a.last_active);
+function toggleHistory() {
+  if (activePopover) { closeHistoryPopover(); return; }
+  const suspended = allSessionsCache.filter(s => s.state === 'suspended');
+  suspended.sort((a, b) => (b.last_active || 0) - (a.last_active || 0));
 
   let itemsHtml;
   if (suspended.length === 0) {
@@ -709,90 +651,190 @@ function toggleHistoryPopover(btn, projectName) {
     itemsHtml = suspended.map(s => {
       const sNode = s.node || 'local';
       const ago = s.last_active ? timeAgo(s.last_active) : '';
-      const agentLabel = s.is_planner ? 'planner' : (s.platform === 'dashboard' ? 'general' : (s.agent || 'general'));
+      const toolName = s.cli_name || s.protocol || 'cli';
+      const project = s.project || '';
       const prompt = s.last_prompt || '';
       return '<div class="history-popover-item" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="selectSession(this.dataset.key,this.dataset.node);closeHistoryPopover()">' +
         '<button class="hp-dismiss" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="event.stopPropagation();dismissHistoryItem(this)" title="delete">&times;</button>' +
         (prompt ? '<div class="hp-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' : '<div class="hp-prompt" style="color:#6e7681">(no prompt)</div>') +
-        '<div class="hp-meta"><span class="hp-agent-tag">' + esc(agentLabel) + '</span>' + (ago ? '<span class="hp-dot">\u00b7</span><span>' + ago + '</span>' : '') + '</div>' +
+        '<div class="hp-meta">' +
+          (project ? '<span class="hp-project">' + esc(project) + '</span><span class="hp-dot">&middot;</span>' : '') +
+          '<span class="hp-tool">' + esc(toolName) + '</span>' +
+          (ago ? '<span class="hp-dot">&middot;</span><span>' + ago + '</span>' : '') +
+        '</div>' +
         '</div>';
     }).join('');
   }
 
   const popover = document.createElement('div');
-  popover.className = 'history-popover';
-  popover.dataset.project = projectName;
-  popover.innerHTML = '<div class="history-popover-header">' + esc(projectName === '_other' ? '\u5176\u4ed6' : projectName) + ' \u00b7 history</div>' + itemsHtml;
-  activePopover = popover;
-
-  // Position relative to button
-  const btnRect = btn.getBoundingClientRect();
-  const sidebar = document.querySelector('.sidebar');
-  const sidebarRect = sidebar.getBoundingClientRect();
-  popover.style.position = 'fixed';
-  popover.style.left = Math.max(sidebarRect.left + 8, btnRect.left - 100) + 'px';
-  const spaceBelow = window.innerHeight - btnRect.bottom - 16;
-  const spaceAbove = btnRect.top - 16;
-  if (spaceBelow >= 160 || spaceBelow >= spaceAbove) {
-    popover.style.top = (btnRect.bottom + 4) + 'px';
-    popover.style.maxHeight = Math.min(320, spaceBelow) + 'px';
-  } else {
-    popover.style.bottom = (window.innerHeight - btnRect.top + 4) + 'px';
-    popover.style.maxHeight = Math.min(320, spaceAbove) + 'px';
+  popover.className = isMobile() ? 'history-sheet' : 'history-popover';
+  popover.innerHTML = '<div class="history-popover-header">History</div>' + itemsHtml;
+  if (isMobile()) {
+    popover.innerHTML = '<div class="sheet-handle"></div>' + popover.innerHTML;
   }
+  activePopover = popover;
   document.body.appendChild(popover);
 
-  // Adjust if overflowing right edge
-  const popRect = popover.getBoundingClientRect();
-  if (popRect.right > window.innerWidth - 8) {
-    popover.style.left = (window.innerWidth - popRect.width - 8) + 'px';
+  if (!isMobile()) {
+    const btn = document.getElementById('btn-history');
+    const rect = btn.getBoundingClientRect();
+    popover.style.position = 'fixed';
+    popover.style.top = (rect.bottom + 4) + 'px';
+    popover.style.right = (window.innerWidth - rect.right) + 'px';
+    popover.style.maxHeight = Math.min(400, window.innerHeight - rect.bottom - 16) + 'px';
   }
+}
+
+function majorMinor(ver) {
+  const parts = ver.split('.');
+  return parts.length >= 2 ? parts[0] + '.' + parts[1] : ver;
 }
 
 function sessionCardHtml(s) {
   const sNode = s.node || 'local';
-  const isDead = s.state === 'suspended';
   const isActive = selectedKey === s.key && selectedNode === sNode;
-  const isPlanner = s.is_planner;
-  const cls = (isActive ? 'session-card active' : 'session-card') + (isDead ? ' dead-card' : '') + (isPlanner ? ' planner-card' : '');
-  const ago = s.last_active ? timeAgo(s.last_active) : sessionTimeHint(s.key);
-  const pi = isPlanner ? '<span class="planner-indicator"></span>' : '';
-  const deathTag = s.death_reason ? ' <span class="death-tag">' + esc(s.death_reason.replace(/_/g,' ')) + '</span>' : '';
-  const ws = s.workspace ? shortPath(s.workspace) : '';
-  const prompt = s.last_prompt || '';
-  const agentLabel = isPlanner ? 'planner' : (s.platform === 'dashboard' ? 'general' : (s.agent || 'general'));
-  const showPlatform = isPlanner ? 'project' : (s.platform || '');
-  const platformLabel = showPlatform.toLowerCase() === 'local' && !isMultiNode() ? '' : showPlatform;
+  const isNew = s.state === 'new';
+  const isResumable = s.state === 'resumable';
+  const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '') + (isResumable ? ' resumable-card' : '');
+
+  // Line 1: prompt
+  const prompt = s.summary || s.last_prompt || (isNew ? '(new session)' : '(no prompt)');
+
+  // Line 2: status dot + meta
+  const dotCls = s.state === 'running' ? 'dot-running' : (s.state === 'ready' ? 'dot-ready' : (s.state === 'resumable' ? 'dot-resumable' : 'dot-new'));
+  const ago = s.last_active ? timeAgo(s.last_active) : '';
   const nodeBadge = isMultiNode() && sNode !== 'local'
-    ? '<span class="node-badge" style="background:' + nodeColor(sNode) + '">' + esc(sNode) + '</span>'
-    : '';
-  const saBadge = s.subagents && s.subagents.length > 0
-    ? '<span class="sa-badge"><span class="sa-icon">\u{1f916}</span>\u00d7' + s.subagents.length + '</span>'
-    : '';
-  const saRows = s.subagents && s.subagents.length > 0
-    ? '<div class="sa-list">' + s.subagents.map(sa =>
-        '<div class="sa-row" onclick="event.stopPropagation();selectSession(\'' + esc(s.key) + '\',\'' + esc(sNode) + '\')" title="' + esc(sa.activity || sa.name) + '">' +
-        '<span class="sa-running-dot"></span>' +
-        (sa.background ? '<span class="sa-bg-badge">bg</span>' : '') +
-        '<span class="sa-name">' + esc(sa.name) + '</span>' +
-        (sa.activity ? '<span class="sa-activity">' + esc(sa.activity) + '</span>' : '') +
-        '</div>'
-      ).join('') + '</div>'
-    : '';
+    ? '<span class="sc-node" style="background:' + nodeColor(sNode) + '">' + esc(sNode) + '</span>' : '';
+
+  // Recent cards: show "resumable" label, no cli info, no dismiss button
+  const dismissBtn = isResumable ? '' :
+    '<button class="btn-dismiss" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove">&times;</button>';
+
+  let metaHtml;
+  if (isResumable) {
+    metaHtml = '<span class="sc-dot ' + dotCls + '"></span><span>resumable</span>';
+  } else {
+    const cliName = s.cli_name || 'cli';
+    const cliVer = s.cli_version ? ' ' + s.cli_version : '';
+    metaHtml = '<span class="sc-dot ' + dotCls + '"></span>' +
+      '<span>' + esc(s.state) + '</span>' +
+      '<span class="sc-sep">&middot;</span>' +
+      '<span class="sc-cli">' + esc(cliName) + '<span class="sc-ver">' + esc(cliVer) + '</span></span>' +
+      nodeBadge;
+  }
+
   return '<div class="' + cls + '" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="selectSession(this.dataset.key,this.dataset.node)">' +
-    '<button class="btn-dismiss" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove">&times;</button>' +
-    (platformLabel ? '<div class="platform">' + esc(platformLabel) + '</div>' : '') +
-    (agentLabel !== 'general' ? '<div class="agent">' + pi + esc(agentLabel) + '</div>' : '') +
-    (prompt ? '<div class="session-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' : '') +
-    '<div class="meta">' + '<span class="badge ' + s.state + '">' + s.state + '</span>' + deathTag +
-    saBadge + nodeBadge + '<span>' + ago + '</span>' +
+    dismissBtn +
+    '<div class="sc-header">' +
+      '<div class="sc-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' +
+      (ago ? '<span class="sc-time">' + ago + '</span>' : '') +
     '</div>' +
-    saRows +
-    '</div>';
+    '<div class="sc-meta">' + metaHtml + '</div>' +
+  '</div>';
+}
+
+function resumeRecentById(sessionId, workspace) {
+  // Guard: if already resuming this session, just select the existing pending key
+  for (const [k, sid] of Object.entries(sessionResumeIDs)) {
+    if (sid === sessionId) { selectSession(k, 'local'); return; }
+  }
+
+  workspace = workspace || defaultWorkspace;
+
+  // Create a new dashboard session key that will resume this session
+  const ts = Date.now();
+  const key = 'dashboard:direct:r' + ts + ':general';
+  sessionWorkspaces[key] = workspace;
+  sessionNodes[key] = 'local';
+  sessionResumeIDs[key] = sessionId;
+
+  // Don't remove from recentSessionsData yet — wait until it appears as managed
+  // Force re-render sidebar
+  lastSessionsJSON = '';
+  fetchSessions();
+
+  // Select the new session and load its history preview
+  selectSession(key, 'local');
+  previewRecentSession(key, sessionId);
+}
+
+async function previewRecentSession(expectedKey, sessionId) {
+  try {
+    const headers = {};
+    const token = getToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const r = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId), { headers });
+    if (!r.ok) return;
+    if (selectedKey !== expectedKey) return; // user navigated away
+    const entries = await r.json();
+    if (!entries || entries.length === 0) return;
+    renderEvents(entries);
+  } catch (e) {
+    console.error('previewRecentSession:', e);
+  }
+}
+
+const STATUS_LABELS = { off: 'offline', connecting: 'connecting...', authenticating: 'authenticating...', connected: 'connected', disconnected: 'reconnecting...' };
+const REMOTE_LABELS = { ok: 'connected', error: 'error', offline: 'offline', unreachable: 'unreachable' };
+const VALID_DOT_CLASSES = { ok: 'ok', error: 'error', offline: 'offline', connecting: 'connecting', off: 'off', connected: 'connected', disconnected: 'disconnected', authenticating: 'authenticating' };
+
+function updateStatusBar() {
+  const container = document.getElementById('sidebar-status');
+  if (!container) return;
+  const wsUp = wsm.state === WS_STATES.CONNECTED;
+
+  // Local node row (always first)
+  const localName = localWsInfo.name || 'workspace';
+  const localLabel = localName + ' \u00b7 ' + (STATUS_LABELS[wsm.state] || wsm.state);
+  const localSys = localWsInfo.sys || '';
+
+  let html = '<div class="status-row">' +
+    '<span class="status-dot ' + (VALID_DOT_CLASSES[wsm.state] || 'off') + '"></span>' +
+    '<div class="status-info">' +
+      '<div class="status-ws">' + esc(localLabel) + '</div>' +
+      (localSys ? '<div class="status-sys">' + esc(localSys) + '</div>' : '') +
+    '</div></div>';
+
+  // Remote node rows (from last known nodesData)
+  const nodeIds = Object.keys(nodesData).filter(id => id !== 'local').sort();
+  for (const id of nodeIds) {
+    const nd = nodesData[id];
+    const name = (nd.display_name || id);
+    // When local WS is down, remote status is unknown — show as unreachable
+    const status = wsUp ? (nd.status || 'offline') : 'unreachable';
+    const dotCls = VALID_DOT_CLASSES[status] || 'offline';
+    const label = REMOTE_LABELS[status] || status;
+    const addr = nd.remote_addr || '';
+
+    html += '<div class="status-row">' +
+      '<span class="status-dot ' + dotCls + '"></span>' +
+      '<div class="status-info">' +
+        '<div class="status-ws">' + esc(name) + ' \u00b7 ' + esc(label) + '</div>' +
+        (addr ? '<div class="status-sys">' + esc(addr) + '</div>' : '') +
+      '</div></div>';
+  }
+
+  container.innerHTML = html;
 }
 
 function selectSession(key, node) {
   node = node || 'local';
+  // Recent session card click → trigger resume flow
+  if (key.startsWith('_recent:')) {
+    const sessionId = key.substring('_recent:'.length);
+    const item = allSessionsCache.find(x => x.key === key);
+    resumeRecentById(sessionId, item ? item.workspace : '');
+    return;
+  }
+  // Discovered session card click → trigger preview flow
+  if (key.startsWith('_discovered:')) {
+    const pid = parseInt(key.split(':')[1]);
+    const d = discoveredItems.find(x => x.pid === pid);
+    if (d) {
+      previewDiscovered(d.session_id, d.cwd, d.pid, d.proc_start_time || 0, d.node || '');
+      return;
+    }
+  }
   pendingDiscovered = null;
   const prevKey = selectedKey;
   const prevNode = selectedNode;
@@ -871,7 +913,7 @@ function renderMainShell() {
   const keyParts = (selectedKey || '').split(':');
   const agentIsGeneric = !s.agent || s.agent === 'general';
   // Primary title: user's latest prompt. Fallback to agent name or key tail.
-  const displayName = s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyParts[keyParts.length - 1] || selectedKey || '';
+  const displayName = s.summary || s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyParts[keyParts.length - 1] || selectedKey || '';
   // Only show chat info for non-dashboard platforms (feishu, slack, etc.)
   const platform = s.platform || keyParts[0] || '';
   const showChatInfo = platform !== 'dashboard' && platform !== 'local' && chatInfo;
@@ -890,16 +932,23 @@ function renderMainShell() {
       '</div>' +
     '</div>' +
     '<div class="events" id="events-scroll"></div>' +
-    '<div class="running-banner" id="running-banner" style="display:none"><span><span class="running-dot"></span>Claude is working...</span><button onclick="interruptSession()">Stop</button></div>' +
-    '<div class="input-area" id="input-area">' +
+    '<div class="running-banner" id="running-banner" style="display:none">' +
+      '<div class="rb-tool-row">' +
+        '<span class="running-status"><span class="running-dot"></span><span id="tool-activity">Working...</span><span class="tool-count" id="tool-count"></span></span>' +
+      '</div>' +
+      '<div class="rb-agents" id="rb-agents"></div>' +
+    '</div>' +
+    '<div class="input-area' + (voiceInputMode ? ' voice-mode' : '') + '" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
         '<button class="btn-icon" onclick="openFilePicker()" title="upload image">&#x1f4ce;</button>' +
-        '<button class="btn-icon btn-mic" id="btn-mic" onclick="toggleRecording()" title="voice input">&#x1f3a4;</button>' +
-        '<textarea id="msg-input" rows="1" placeholder="send a message..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()" oninput="autoGrow(this)"></textarea>' +
+        '<button class="btn-icon btn-mic" id="btn-mic" onclick="toggleInputMode()" title="' + (voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '">' + (voiceInputMode ? '&#x2328;' : '&#x1f3a4;') + '</button>' +
+        '<div id="msg-input" contenteditable="true" role="textbox" data-placeholder="send a message..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
+        '<button class="btn-hold-talk" id="btn-hold-talk">\u6309\u4f4f\u8bf4\u8bdd</button>' +
         '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="send">&#x27a4;</button>' +
+        '<button class="btn-icon btn-stop" id="btn-stop" onclick="interruptSession()" title="stop">&#x25A0;</button>' +
       '</div>' +
-      '<div class="input-hints">Enter send &middot; Shift+Enter newline &middot; Esc stop</div>' +
+      '<div class="input-hints">Enter send &middot; Shift+Enter newline &middot; Esc interrupt</div>' +
       '<input type="file" id="file-input" accept="image/*" multiple style="display:none" onchange="handleFiles(this.files)">' +
     '</div>';
 
@@ -908,6 +957,14 @@ function renderMainShell() {
   ia.addEventListener('dragover', e => { e.preventDefault(); ia.style.borderColor='#58a6ff'; });
   ia.addEventListener('dragleave', () => { ia.style.borderColor=''; });
   ia.addEventListener('drop', e => { e.preventDefault(); ia.style.borderColor=''; handleFiles(e.dataTransfer.files); });
+
+  // Voice hold-to-talk: only touchstart on button; move/end on document (see voiceTouchStart)
+  const holdBtn = document.getElementById('btn-hold-talk');
+  if (holdBtn) {
+    holdBtn.addEventListener('touchstart', voiceTouchStart, {passive: false});
+    holdBtn.addEventListener('mousedown', voiceMouseDown);
+  }
+
   updateSendButton(s.state || '');
   // Suspended sessions can be resumed by sending a new message
   // Double-tap events feed → focus input (mobile)
@@ -962,7 +1019,7 @@ function appendEvents(events) {
   if (empty) empty.remove();
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   events.forEach(e => {
-    if (e.type === 'tool_use' || e.type === 'result') return;
+    if (e.type === 'tool_use' || e.type === 'result' || e.type === 'agent') return;
     const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h);
   });
   if (wasBottom) el.scrollTop = el.scrollHeight;
@@ -971,28 +1028,36 @@ function appendEvents(events) {
 }
 
 function eventHtml(e) {
-  if (e.type === 'tool_use' || e.type === 'result' || e.type === 'thinking') return '';
+  if (e.type === 'tool_use' || e.type === 'result' || e.type === 'thinking' || e.type === 'agent') return '';
   // Filter out Claude Code system XML injected as user messages
   const raw = e.detail || e.summary || '';
   if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return '';
-  const icons = {init:'~',system:'\u2699',user:'\u{1f464}',agent:'\u26a1'};
+  const icons = {init:'~',system:'\u2699',user:'\u{1f464}'};
   const icon = icons[e.type] || '';
 
   let content = '';
   if (e.type === 'system') {
     content = esc(e.summary || e.type);
-  } else if (e.type === 'text' || e.type === 'result' || e.type === 'user') {
-    content = renderMd(e.detail || e.summary || e.type);
-  } else if (e.type === 'agent') {
-    const badge = e.subagent ? '<span class="ts-subagent">' + esc(e.subagent) + '</span> ' : '';
-    content = badge + esc(e.summary || '');
+  } else if (e.type === 'text' || e.type === 'user') {
+    let raw = e.detail || e.summary || e.type;
+    // Strip redundant "[+N image(s)]" suffix when thumbnails are present
+    if (e.images && e.images.length > 0) raw = raw.replace(/ \[\+\d+ image\(s\)\]$/, '');
+    content = renderMd(raw);
   } else {
     content = esc(e.detail || e.summary || e.type);
   }
 
+  // Render image thumbnails for user messages
+  let imgHtml = '';
+  if (e.images && e.images.length > 0) {
+    imgHtml = '<div class="event-images">' + e.images.map(src =>
+      '<img src="' + esc(src) + '" loading="lazy">'
+    ).join('') + '</div>';
+  }
+
   return '<div class="event ' + esc(e.type||'') + '">' +
     '<span class="event-icon">' + icon + '</span>' +
-    '<div class="event-content">' + content + '</div></div>';
+    '<div class="event-content">' + content + imgHtml + '</div></div>';
 }
 
 // --- Send message ---
@@ -1002,10 +1067,10 @@ function handleKey(e) {
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && Date.now() - lastCompositionEnd > 30) { e.preventDefault(); sendMessage(); }
 }
 
-function autoGrow(el) {
-  el.style.height = 'auto';
-  el.style.height = Math.min(el.scrollHeight, 120) + 'px';
-}
+function autoGrow(el) {} // no-op: contenteditable auto-sizes
+function getMsgValue(el) { return (el ? el.innerText : '').trim(); }
+function setMsgValue(el, v) { if (el) el.innerText = v; }
+function clearMsg(el) { if (el) el.textContent = ''; }
 
 async function sendMessage() {
   if (sending) return;
@@ -1013,13 +1078,13 @@ async function sendMessage() {
   // Auto-takeover: if viewing a discovered session, takeover first then send
   if (pendingDiscovered && !selectedKey) {
     const input = document.getElementById('msg-input');
-    const text = (input ? input.value.trim() : '');
+    const text = getMsgValue(input);
     if (!text) return;
     sending = true;
     const btn = document.getElementById('btn-send');
     if (btn) btn.classList.add('sending');
-    if (input) input.placeholder = 'taking over session...';
-    if (input) input.disabled = true;
+    if (input) input.dataset.placeholder = 'taking over session...';
+    if (input) input.contentEditable = 'false';
     const pd = pendingDiscovered;
     try {
       const headers = {'Content-Type': 'application/json'};
@@ -1032,7 +1097,7 @@ async function sendMessage() {
       if (!r.ok) {
         const errText = await r.text();
         showToast('takeover failed: ' + errText);
-        if (input) { input.placeholder = 'send a message to take over...'; input.disabled = false; }
+        if (input) { input.dataset.placeholder = 'send a message to take over...'; input.contentEditable = 'true'; }
         sending = false;
         if (btn) btn.classList.remove('sending');
         return;
@@ -1040,13 +1105,13 @@ async function sendMessage() {
       const data = await r.json();
       if (!data.key) {
         showToast('takeover failed: no session key returned');
-        if (input) { input.placeholder = 'send a message to take over...'; input.disabled = false; }
+        if (input) { input.dataset.placeholder = 'send a message to take over...'; input.contentEditable = 'true'; }
         sending = false;
         if (btn) btn.classList.remove('sending');
         return;
       }
       // Remove the discovered card from sidebar
-      const card = document.querySelector('.cli-card[data-pid="' + pd.pid + '"]');
+      const card = document.querySelector('.session-card[data-key="_discovered:' + pd.pid + '"]');
       if (card) card.remove();
       pendingDiscovered = null;
       // Poll until the session appears in managed sessions (up to 10s)
@@ -1061,7 +1126,7 @@ async function sendMessage() {
       }
       if (!ready) {
         showToast('takeover timed out — session not ready');
-        if (input) { input.placeholder = 'send a message...'; input.disabled = false; }
+        if (input) { input.dataset.placeholder = 'send a message...'; input.contentEditable = 'true'; }
         sending = false;
         if (btn) btn.classList.remove('sending');
         return;
@@ -1071,12 +1136,12 @@ async function sendMessage() {
       selectSession(takenKey, takenNode);
       // Restore the message text and send
       const newInput = document.getElementById('msg-input');
-      if (newInput) newInput.value = text;
+      if (newInput) setMsgValue(newInput, text);
       await sendMessage();
       return;
     } catch (e) {
       showToast('takeover error: ' + e.message);
-      if (input) { input.placeholder = 'send a message to take over...'; input.disabled = false; }
+      if (input) { input.dataset.placeholder = 'send a message to take over...'; input.contentEditable = 'true'; }
       sending = false;
       if (btn) btn.classList.remove('sending');
       return;
@@ -1085,7 +1150,7 @@ async function sendMessage() {
 
   if (!selectedKey) return;
   const input = document.getElementById('msg-input');
-  const text = (input ? input.value.trim() : '');
+  const text = getMsgValue(input);
   if (!text && pendingFiles.length === 0) return;
 
   sending = true;
@@ -1102,8 +1167,12 @@ async function sendMessage() {
       delete sessionWorkspaces[selectedKey];
       delete sessionNodes[selectedKey];
     }
+    if (sessionResumeIDs[selectedKey]) {
+      sendMsg.resume_id = sessionResumeIDs[selectedKey];
+      delete sessionResumeIDs[selectedKey];
+    }
     wsm.send(sendMsg);
-    if (input) { input.value = ''; input.style.height = 'auto'; }
+    if (input) clearMsg(input);
     sending = false;
     if (btn) btn.classList.remove('sending');
     return;
@@ -1126,6 +1195,10 @@ async function sendMessage() {
         delete sessionWorkspaces[selectedKey];
         delete sessionNodes[selectedKey];
       }
+      if (sessionResumeIDs[selectedKey]) {
+        fd.append('resume_id', sessionResumeIDs[selectedKey]);
+        delete sessionResumeIDs[selectedKey];
+      }
       pendingFiles.forEach(f => fd.append('files', f));
       body = fd;
     } else {
@@ -1137,30 +1210,34 @@ async function sendMessage() {
         delete sessionWorkspaces[selectedKey];
         delete sessionNodes[selectedKey];
       }
+      if (sessionResumeIDs[selectedKey]) {
+        payload.resume_id = sessionResumeIDs[selectedKey];
+        delete sessionResumeIDs[selectedKey];
+      }
       body = JSON.stringify(payload);
     }
 
     const r = await fetch('/api/sessions/send', {method:'POST', headers, body});
 
     if (r.status === 401 || r.status === 403) {
-      if (input) input.value = text;
+      if (input) setMsgValue(input, text);
       showAuthModal();
       return;
     }
     if (r.status === 429) {
-      if (input) input.value = text;
+      if (input) setMsgValue(input, text);
       showToast('message queue full, please wait');
       return;
     }
     if (!r.ok) {
-      if (input) input.value = text;
+      if (input) setMsgValue(input, text);
       const d = await r.json().catch(() => ({}));
       showToast(d.error || 'send failed: ' + r.status);
       return;
     }
 
     // Clear input only after confirmed success
-    if (input) { input.value = ''; input.style.height = 'auto'; }
+    if (input) clearMsg(input);
     pendingFiles = [];
     renderFilePreviews();
 
@@ -1184,6 +1261,64 @@ async function sendMessage() {
   }
 }
 
+// --- Running banner: tool activity + agent tracking ---
+
+let turnState = { toolCount: 0, currentTool: null, agents: [], isThinking: false };
+
+function resetTurnState() {
+  turnState = { toolCount: 0, currentTool: null, agents: [], isThinking: false };
+  refreshBanner();
+}
+
+const toolVerbs = {
+  Read: 'Reading', Edit: 'Editing', Write: 'Writing', Bash: 'Running',
+  Grep: 'Searching', Glob: 'Finding files', Agent: 'Agent',
+  Notebook: 'Editing notebook', WebFetch: 'Fetching'
+};
+
+function toolVerb(tool, summary) {
+  const verb = toolVerbs[tool] || ('Using ' + tool);
+  if (!summary || summary === tool) return verb + '...';
+  return verb + ' ' + summary;
+}
+
+function refreshBanner() {
+  const actEl = document.getElementById('tool-activity');
+  const countEl = document.getElementById('tool-count');
+  const agEl = document.getElementById('rb-agents');
+  if (actEl) {
+    if (turnState.currentTool) {
+      actEl.textContent = toolVerb(turnState.currentTool.tool, turnState.currentTool.summary);
+    } else if (turnState.isThinking) {
+      actEl.textContent = 'Thinking...';
+    } else {
+      actEl.textContent = 'Working...';
+    }
+  }
+  if (countEl) {
+    countEl.textContent = turnState.toolCount > 0 ? '\u00b7 ' + turnState.toolCount + ' tools' : '';
+  }
+  if (agEl) {
+    agEl.innerHTML = turnState.agents.map(a =>
+      '<div class="rb-agent-row">' +
+        '<span class="sa-running-dot"></span>' +
+        (a.background ? '<span class="sa-bg-badge">bg</span>' : '') +
+        '<span class="sa-name">' + esc(a.name) + '</span>' +
+        (a.activity ? '<span class="sa-activity">' + esc(a.activity) + '</span>' : '') +
+      '</div>'
+    ).join('');
+  }
+}
+
+function initAgentsFromSession() {
+  const sd = sessionsData[sid(selectedKey, selectedNode || 'local')];
+  if (sd && sd.subagents && sd.subagents.length > 0) {
+    turnState.agents = sd.subagents.map(sa => ({
+      name: sa.name, activity: sa.activity || '', background: !!sa.background
+    }));
+  }
+}
+
 function interruptSession() {
   if (!selectedKey) return;
   const sd = sessionsData[sid(selectedKey, selectedNode || 'local')];
@@ -1196,23 +1331,30 @@ function interruptSession() {
   }
 }
 
+function scrollEventsToBottom() {
+  const el = document.getElementById('events-scroll');
+  if (el) el.scrollTop = el.scrollHeight;
+}
+
 function updateSendButton(state) {
-  const btn = document.getElementById('btn-send');
-  if (!btn) return;
   const banner = document.getElementById('running-banner');
+  const sendBtn = document.getElementById('btn-send');
+  const stopBtn = document.getElementById('btn-stop');
+  const inVoiceMode = document.getElementById('input-area')?.classList.contains('voice-mode');
   if (state === 'running') {
-    btn.className = 'btn-icon btn-stop';
-    btn.setAttribute('onclick', 'interruptSession()');
-    btn.title = 'stop';
-    btn.innerHTML = '&#x25A0;';
     if (banner) banner.style.display = '';
+    if (sendBtn) sendBtn.style.display = 'none';
+    if (stopBtn) stopBtn.style.display = 'flex';
+    initAgentsFromSession();
+    refreshBanner();
   } else {
-    btn.className = 'btn-icon btn-send';
-    btn.setAttribute('onclick', 'sendMessage()');
-    btn.title = 'send';
-    btn.innerHTML = '&#x27a4;';
     if (banner) banner.style.display = 'none';
+    if (sendBtn) sendBtn.style.display = inVoiceMode ? 'none' : 'flex';
+    if (stopBtn) stopBtn.style.display = 'none';
+    resetTurnState();
   }
+  // Banner show/hide changes .events height — keep latest message visible
+  scrollEventsToBottom();
 }
 
 // --- File handling ---
@@ -1223,9 +1365,12 @@ function handleFiles(fileList) {
   for (const f of fileList) {
     if (!f.type.startsWith('image/')) continue;
     if (f.size > 10 * 1024 * 1024) { showToast('file too large (max 10MB)'); continue; }
-    if (pendingFiles.length >= 5) { showToast('max 5 files'); break; }
+    if (pendingFiles.length >= 10) { showToast('max 10 files'); break; }
     pendingFiles.push(f);
   }
+  // Reset input so the same file can be re-selected
+  const fi = document.getElementById('file-input');
+  if (fi) fi.value = '';
   renderFilePreviews();
 }
 
@@ -1245,57 +1390,259 @@ function renderFilePreviews() {
   }).join('');
 }
 
-// --- Voice recording ---
+// --- Voice recording (WeChat-style hold-to-talk) ---
 
 let mediaRecorder = null;
 let audioChunks = [];
 let isUnloading = false;
+let voiceRecTimer = null;
+let voiceRecStart = 0;
+const MAX_REC_SECS = 30;
+let pendingMic = false;
+let voiceInputMode = false;
+let voiceTouchStartY = 0;
+let voiceCancelled = false;
+let voiceActive = false; // true while hold gesture is in progress
+let persistentMicStream = null; // keep mic stream alive to avoid repeated permission prompts
+
 window.addEventListener('pagehide', () => {
   isUnloading = true;
+  voiceActive = false;
+  cleanupVoiceTouchListeners();
   if (mediaRecorder && mediaRecorder.state !== 'inactive') mediaRecorder.stop();
+  if (persistentMicStream) { persistentMicStream.getTracks().forEach(t => t.stop()); persistentMicStream = null; }
 });
 
-let pendingMic = false;
-
-function toggleRecording() {
-  if (pendingMic) return;
-  if (mediaRecorder && mediaRecorder.state === 'recording') {
-    mediaRecorder.stop();
-    return;
+function acquireMicStream() {
+  if (persistentMicStream && persistentMicStream.getAudioTracks().some(t => t.readyState === 'live')) {
+    return Promise.resolve(persistentMicStream);
   }
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-    showToast('browser does not support audio recording');
-    return;
+    return Promise.reject(new Error('not supported'));
   }
-  pendingMic = true;
-  navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
-    pendingMic = false;
-    audioChunks = [];
-    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus'
-      : MediaRecorder.isTypeSupported('audio/ogg;codecs=opus') ? 'audio/ogg;codecs=opus'
-      : '';
-    mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
-    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
-    mediaRecorder.onstop = () => {
-      stream.getTracks().forEach(t => t.stop());
-      if (isUnloading) return;
-      const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
-      audioChunks = [];
-      transcribeAudio(blob);
-    };
-    mediaRecorder.start();
-    const btn = document.getElementById('btn-mic');
-    if (btn) { btn.classList.add('recording'); btn.title = 'stop recording'; }
-  }).catch(err => {
-    pendingMic = false;
-    showToast('microphone access denied');
-    console.warn('getUserMedia error:', err);
+  return navigator.mediaDevices.getUserMedia({ audio: true }).then(stream => {
+    persistentMicStream = stream;
+    return stream;
   });
 }
 
-function transcribeAudio(blob) {
+function releaseMicStream() {
+  if (persistentMicStream) {
+    persistentMicStream.getTracks().forEach(t => t.stop());
+    persistentMicStream = null;
+  }
+}
+
+function toggleInputMode() {
+  if (pendingMic) return;
+  voiceInputMode = !voiceInputMode;
+  const ia = document.getElementById('input-area');
+  if (ia) ia.classList.toggle('voice-mode', voiceInputMode);
   const btn = document.getElementById('btn-mic');
-  if (btn) { btn.classList.remove('recording'); btn.classList.add('transcribing'); btn.title = 'transcribing...'; }
+  if (btn) {
+    btn.innerHTML = voiceInputMode ? '&#x2328;' : '&#x1f3a4;';
+    btn.title = voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3';
+  }
+  if (voiceInputMode) {
+    // Pre-acquire mic permission so hold-to-talk won't prompt again
+    acquireMicStream().catch(() => {});
+  } else {
+    releaseMicStream();
+  }
+  // Sync send/stop button visibility after mode toggle
+  const sd = sessionsData[sid(selectedKey, selectedNode || 'local')];
+  updateSendButton(sd ? sd.state || '' : '');
+}
+
+// --- Touch handlers for hold-to-talk ---
+// touchmove/touchend registered on document (not button) so the overlay cannot block them.
+
+function voiceTouchStart(e) {
+  e.preventDefault();
+  voiceTouchStartY = e.touches[0].clientY;
+  voiceCancelled = false;
+  voiceActive = true;
+  document.addEventListener('touchmove', voiceTouchMove, {passive: false});
+  document.addEventListener('touchend', voiceTouchEnd, {passive: false});
+  document.addEventListener('touchcancel', voiceTouchCancel, {passive: false});
+  startVoiceRecording();
+}
+
+function voiceTouchMove(e) {
+  if (!voiceActive) return;
+  e.preventDefault();
+  const touch = e.touches[0];
+  if (!touch) return;
+  const dy = voiceTouchStartY - touch.clientY;
+  const overlay = document.getElementById('voice-overlay');
+  const hint = document.getElementById('vo-hint');
+  if (dy > 80) {
+    voiceCancelled = true;
+    if (overlay) overlay.classList.add('cancel');
+    if (hint) hint.textContent = '\u677e\u5f00\u53d6\u6d88';
+  } else {
+    voiceCancelled = false;
+    if (overlay) overlay.classList.remove('cancel');
+    if (hint) hint.textContent = '\u677e\u5f00\u53d1\u9001 \u00b7 \u4e0a\u6ed1\u53d6\u6d88';
+  }
+}
+
+function voiceTouchEnd(e) {
+  if (!voiceActive) return;
+  e.preventDefault();
+  voiceActive = false;
+  cleanupVoiceTouchListeners();
+  stopVoiceRecording(!voiceCancelled);
+}
+
+function voiceTouchCancel() {
+  voiceActive = false;
+  cleanupVoiceTouchListeners();
+  stopVoiceRecording(false);
+}
+
+function cleanupVoiceTouchListeners() {
+  document.removeEventListener('touchmove', voiceTouchMove);
+  document.removeEventListener('touchend', voiceTouchEnd);
+  document.removeEventListener('touchcancel', voiceTouchCancel);
+}
+
+function voiceMouseDown(e) {
+  e.preventDefault();
+  voiceCancelled = false;
+  voiceActive = true;
+  startVoiceRecording();
+  const startY = e.clientY;
+  const onMove = (me) => {
+    const dy = startY - me.clientY;
+    const overlay = document.getElementById('voice-overlay');
+    const hint = document.getElementById('vo-hint');
+    if (dy > 80) {
+      voiceCancelled = true;
+      if (overlay) overlay.classList.add('cancel');
+      if (hint) hint.textContent = '\u677e\u5f00\u53d6\u6d88';
+    } else {
+      voiceCancelled = false;
+      if (overlay) overlay.classList.remove('cancel');
+      if (hint) hint.textContent = '\u677e\u5f00\u53d1\u9001 \u00b7 \u4e0a\u6ed1\u53d6\u6d88';
+    }
+  };
+  const onUp = () => {
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    voiceActive = false;
+    stopVoiceRecording(!voiceCancelled);
+  };
+  document.addEventListener('mousemove', onMove);
+  document.addEventListener('mouseup', onUp);
+}
+
+function startVoiceRecording() {
+  if (pendingMic) return;
+  pendingMic = true;
+  const holdBtn = document.getElementById('btn-hold-talk');
+  if (holdBtn) holdBtn.classList.add('active');
+
+  acquireMicStream().then(stream => {
+    pendingMic = false;
+    // If finger was released during async acquireMicStream, abort immediately
+    if (!voiceActive) {
+      if (holdBtn) holdBtn.classList.remove('active');
+      return;
+    }
+    audioChunks = [];
+    const mimeType = MediaRecorder.isTypeSupported('audio/webm;codecs=opus') ? 'audio/webm;codecs=opus'
+      : MediaRecorder.isTypeSupported('audio/ogg;codecs=opus') ? 'audio/ogg;codecs=opus' : '';
+    mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    mediaRecorder.ondataavailable = e => { if (e.data.size > 0) audioChunks.push(e.data); };
+    mediaRecorder.onstop = () => {
+      clearInterval(voiceRecTimer);
+      // Do NOT stop persistent stream tracks — keep them alive for next recording
+      if (holdBtn) holdBtn.classList.remove('active');
+      if (isUnloading) return;
+
+      if (voiceCancelled) {
+        hideVoiceOverlay();
+        showToast('\u5df2\u53d6\u6d88');
+        audioChunks = [];
+        return;
+      }
+
+      const blob = new Blob(audioChunks, { type: mediaRecorder.mimeType });
+      audioChunks = [];
+      if (blob.size < 1000) {
+        hideVoiceOverlay();
+        showToast('\u5f55\u97f3\u592a\u77ed');
+        return;
+      }
+      // Show transcribing state on overlay
+      const overlay = document.getElementById('voice-overlay');
+      if (overlay) overlay.classList.add('transcribing');
+      const hint = document.getElementById('vo-hint');
+      if (hint) hint.textContent = '\u6b63\u5728\u8bc6\u522b...';
+      transcribeAudio(blob, true);
+    };
+    mediaRecorder.start();
+    voiceRecStart = Date.now();
+    voiceRecTimer = setInterval(updateVoiceTimer, 200);
+    updateVoiceTimer();
+    // Show overlay
+    const overlay = document.getElementById('voice-overlay');
+    if (overlay) { overlay.classList.remove('cancel', 'transcribing'); overlay.classList.add('show'); }
+    const hint = document.getElementById('vo-hint');
+    if (hint) hint.textContent = '\u677e\u5f00\u53d1\u9001 \u00b7 \u4e0a\u6ed1\u53d6\u6d88';
+  }).catch(err => {
+    pendingMic = false;
+    voiceActive = false;
+    cleanupVoiceTouchListeners();
+    if (holdBtn) holdBtn.classList.remove('active');
+    showToast(err.message === 'not supported' ? '\u6d4f\u89c8\u5668\u4e0d\u652f\u6301\u5f55\u97f3' : '\u9ea6\u514b\u98ce\u6743\u9650\u88ab\u62d2\u7edd');
+    console.warn('mic error:', err);
+  });
+}
+
+function stopVoiceRecording(shouldSend) {
+  if (!shouldSend) voiceCancelled = true;
+  const holdBtn = document.getElementById('btn-hold-talk');
+  if (holdBtn) holdBtn.classList.remove('active');
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    mediaRecorder.stop(); // triggers onstop handler
+  } else {
+    hideVoiceOverlay();
+  }
+}
+
+function hideVoiceOverlay() {
+  const overlay = document.getElementById('voice-overlay');
+  if (overlay) overlay.classList.remove('show', 'cancel', 'transcribing');
+}
+
+// Tap overlay to cancel (escape hatch for stuck states)
+document.getElementById('voice-overlay')?.addEventListener('click', function(e) {
+  // Normal flow: touchend/mouseup already stopped recording before click fires.
+  // This only triggers when genuinely stuck (recording active or overlay visible).
+  if (mediaRecorder && mediaRecorder.state === 'recording') {
+    voiceActive = false;
+    cleanupVoiceTouchListeners();
+    stopVoiceRecording(false);
+  } else if (this.classList.contains('show')) {
+    // Stuck in transcribing state or overlay didn't dismiss
+    hideVoiceOverlay();
+  }
+});
+
+function updateVoiceTimer() {
+  const el = document.getElementById('vo-timer');
+  if (!el) return;
+  const secs = Math.floor((Date.now() - voiceRecStart) / 1000);
+  el.textContent = secs + 's';
+  if (secs >= MAX_REC_SECS) {
+    stopVoiceRecording(true);
+    showToast('\u5df2\u8fbe\u6700\u957f' + MAX_REC_SECS + '\u79d2');
+  }
+}
+
+function transcribeAudio(blob, autoSend) {
   const fd = new FormData();
   fd.append('audio', blob, 'recording.' + (blob.type.includes('webm') ? 'webm' : blob.type.includes('ogg') ? 'ogg' : 'mp4'));
   const headers = {};
@@ -1304,21 +1651,29 @@ function transcribeAudio(blob) {
   fetch('/api/transcribe', {
     method: 'POST',
     headers: headers,
+    credentials: 'same-origin',
     body: fd
   }).then(r => {
-    if (!r.ok) return r.text().then(t => { throw new Error(t); });
+    if (!r.ok) return r.text().then(t => { throw new Error('HTTP ' + r.status + ': ' + t); });
     return r.json();
   }).then(data => {
+    hideVoiceOverlay();
     const input = document.getElementById('msg-input');
     if (input && data.text) {
-      input.value = input.value ? input.value + ' ' + data.text : data.text;
-      autoGrow(input);
-      input.focus();
+      const cur = getMsgValue(input);
+      setMsgValue(input, autoSend ? data.text : (cur ? cur + ' ' + data.text : data.text));
+      if (autoSend) {
+        sendMessage();
+      } else {
+        input.focus();
+        showToast('\u8f6c\u5199: ' + data.text.substring(0, 50) + (data.text.length > 50 ? '...' : ''), 'success', 5000);
+      }
+    } else {
+      showToast('\u672a\u68c0\u6d4b\u5230\u8bed\u97f3', '', 5000);
     }
   }).catch(err => {
-    showToast('transcription failed: ' + err.message);
-  }).finally(() => {
-    if (btn) { btn.classList.remove('transcribing'); btn.title = 'voice input'; }
+    hideVoiceOverlay();
+    showToast('\u8f6c\u5199\u5931\u8d25: ' + err.message, '', 5000);
   });
 }
 
@@ -1340,73 +1695,89 @@ function showAuthModal() {
   setTimeout(() => document.getElementById('token-input').focus(), 100);
 }
 
-function saveToken() {
+async function saveToken() {
   const input = document.getElementById('token-input');
-  if (input && input.value) {
-    setToken(input.value.trim());
-    showToast('token saved, retry your message', 'success');
-    wsm.disconnect();
-    wsm.connect();
+  const t = input && input.value.trim();
+  if (!t) return;
+  try {
+    const r = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({token: t})
+    });
+    if (r.ok) {
+      const overlay = document.querySelector('.modal-overlay');
+      if (overlay) overlay.remove();
+      wsm.disconnect();
+      wsm.connect();
+      fetchSessions();
+    } else {
+      document.getElementById('token-input').value = '';
+      document.getElementById('token-input').placeholder = 'invalid token — try again';
+    }
+  } catch(e) {
+    showToast('network error', 'error');
   }
-  document.querySelector('.modal-overlay').remove();
 }
 
 function createNewSession() {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   const ws = defaultWorkspace || '';
-  const projOpts = projectsData.length > 0
-    ? projectsData.map(p => '<option value="' + esc(p.path) + '"' + (p.path === ws ? ' selected' : '') + '>' + esc(p.name) + '</option>').join('')
-    : '';
-  overlay.innerHTML =
-    '<div class="modal">' +
-      '<h3>New Session</h3>' +
-      (projOpts ?
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px">Project</label>' +
-        '<select id="new-project" style="width:100%;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;outline:none" onchange="document.getElementById(\'new-workspace\').value=this.value"><option value="">custom...</option>' + projOpts + '</select>' +
-      '</div>' : '') +
-      '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px">Workspace</label>' +
-        '<input id="new-workspace" style="width:100%;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:13px;outline:none" placeholder="' + esc(ws) + '" value="' + esc(ws) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
-      '</div>' +
-      '<div class="modal-btns">' +
-        '<button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
-        '<button class="primary" onclick="doCreateSession()">create</button>' +
-      '</div>' +
-    '</div>';
+
+  if (projectsData.length > 0) {
+    // Project picker: tappable list
+    const items = projectsData.map(p =>
+      '<li onclick="doCreateInProject(\'' + escJs(p.path) + '\',\'' + escJs(p.name) + '\',\'' + escJs(p.node || 'local') + '\')">' +
+        '<div class="pp-name">' + esc(p.name) + '</div>' +
+        '<div class="pp-path">' + esc(shortPath(p.path)) + '</div>' +
+      '</li>'
+    ).join('');
+    overlay.innerHTML =
+      '<div class="modal">' +
+        '<h3>New Session</h3>' +
+        '<ul class="proj-pick">' + items +
+          '<li id="pp-custom-toggle" onclick="toggleCustomWorkspace()">' +
+            '<div class="pp-custom"><span class="pp-custom-icon">+</span> Custom workspace</div>' +
+          '</li>' +
+        '</ul>' +
+        '<div id="pp-custom-form" style="display:none;margin-top:8px">' +
+          '<input id="new-workspace" placeholder="' + esc(ws) + '" value="" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
+          '<div class="modal-btns"><button class="primary" onclick="doCreateSession()">create</button></div>' +
+        '</div>' +
+        '<div class="modal-btns"><button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button></div>' +
+      '</div>';
+  } else {
+    // No projects: simple workspace input
+    overlay.innerHTML =
+      '<div class="modal">' +
+        '<h3>New Session</h3>' +
+        '<div style="margin-bottom:12px">' +
+          '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px">Workspace</label>' +
+          '<input id="new-workspace" placeholder="' + esc(ws) + '" value="' + esc(ws) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
+        '</div>' +
+        '<div class="modal-btns">' +
+          '<button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
+          '<button class="primary" onclick="doCreateSession()">create</button>' +
+        '</div>' +
+      '</div>';
+  }
   document.body.appendChild(overlay);
-  setTimeout(() => document.getElementById('new-workspace').focus(), 100);
+  if (!projectsData.length) setTimeout(() => document.getElementById('new-workspace').focus(), 100);
 }
 
-function doCreateSession() {
-  const workspace = document.getElementById('new-workspace').value.trim();
-  const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'session') : 'session';
+function toggleCustomWorkspace() {
+  const form = document.getElementById('pp-custom-form');
+  const toggle = document.getElementById('pp-custom-toggle');
+  if (form.style.display === 'none') {
+    form.style.display = '';
+    toggle.style.display = 'none';
+    setTimeout(() => document.getElementById('new-workspace').focus(), 50);
+  }
+}
+
+function doCreateInProject(projectPath, projectName, nodeId) {
   document.querySelector('.modal-overlay').remove();
-
-  sessionCounter++;
-  const now = new Date();
-  const ts = now.toISOString().slice(0,10) + '-' +
-    now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
-  const key = 'dashboard:direct:' + ts + ':' + folderName;
-
-  if (workspace) sessionWorkspaces[key] = workspace;
-  savePendingSessions();
-
-  stopPreviewPolling();
-  wsm.unsubscribe();
-  selectedKey = key;
-  selectedNode = 'local';
-  lastEventTime = 0;
-  mobileEnterChat();
-  document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
-  renderMainShell();
-  lastSessionsJSON = '';
-  fetchSessions();
-  setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
-}
-
-function createSessionInProject(projectPath, projectName, nodeId) {
   sessionCounter++;
   const now = new Date();
   const ts = now.toISOString().slice(0,10) + '-' +
@@ -1415,7 +1786,6 @@ function createSessionInProject(projectPath, projectName, nodeId) {
 
   sessionWorkspaces[key] = projectPath;
   if (nodeId && nodeId !== 'local') sessionNodes[key] = nodeId;
-  savePendingSessions();
 
   stopPreviewPolling();
   wsm.unsubscribe();
@@ -1430,13 +1800,41 @@ function createSessionInProject(projectPath, projectName, nodeId) {
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
 }
 
+function doCreateSession() {
+  const workspace = document.getElementById('new-workspace').value.trim();
+  const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'session') : 'session';
+  document.querySelector('.modal-overlay').remove();
+
+  sessionCounter++;
+  const now = new Date();
+  const ts = now.toISOString().slice(0,10) + '-' +
+    now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
+  const key = 'dashboard:direct:' + ts + ':' + folderName;
+
+  if (workspace) sessionWorkspaces[key] = workspace;
+
+  stopPreviewPolling();
+  wsm.unsubscribe();
+  selectedKey = key;
+  selectedNode = 'local';
+  lastEventTime = 0;
+  mobileEnterChat();
+  document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
+  renderMainShell();
+  lastSessionsJSON = '';
+  fetchSessions();
+  setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
+}
+
+
 // --- Utilities ---
 
-function showToast(msg, type) {
+function showToast(msg, type, duration) {
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.className = 'toast show' + (type ? ' ' + type : '');
-  setTimeout(() => { el.className = 'toast'; }, 3000);
+  clearTimeout(el._tid);
+  el._tid = setTimeout(() => { el.className = 'toast'; }, duration || 3000);
 }
 
 function fallbackCopy(text) {
@@ -1503,6 +1901,10 @@ function esc(s) {
   if (!s) return '';
   _escEl.textContent = s;
   return _escEl.innerHTML;
+}
+function escJs(s) {
+  if (!s) return '';
+  return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/\n/g,'\\n').replace(/\r/g,'\\r');
 }
 
 let mermaidLoading = false;
@@ -1643,11 +2045,24 @@ function renderMd(s) {
         html += '<li>' + inlineMd(line.replace(/^\s*\d+\.\s+/, '')) + '</li>';
         continue;
       }
-      if (inList) { html += '</' + inList + '>'; inList = ''; }
       if (line === '') {
+        if (inList) {
+          // Look ahead: if next non-blank line continues the list, keep it open
+          let peek = i + 1;
+          while (peek < lines.length && lines[peek] === '') peek++;
+          if (peek < lines.length) {
+            let nl = lines[peek];
+            if ((inList === 'ol' && /^\s*\d+\.\s+/.test(nl)) ||
+                (inList === 'ul' && /^\s*[-*]\s+/.test(nl))) {
+              continue;
+            }
+          }
+          html += '</' + inList + '>'; inList = '';
+        }
         html += '<div class="md-blank"></div>';
         continue;
       }
+      if (inList) { html += '</' + inList + '>'; inList = ''; }
       if (/^\|.+\|$/.test(line.trim())) {
         let tbl = [line];
         while (i + 1 < lines.length && /^\|.+\|$/.test(lines[i + 1].trim())) { tbl.push(lines[++i]); }
@@ -1702,7 +2117,7 @@ function renderTable(lines) {
 }
 
 function processEventsForDisplay(events) {
-  return events.filter(e => e.type !== 'tool_use' && e.type !== 'result');
+  return events.filter(e => e.type !== 'tool_use' && e.type !== 'result' && e.type !== 'agent');
 }
 
 function sid(key, node) { return key + '\t' + (node || 'local'); }
@@ -1717,22 +2132,6 @@ function nodeColor(id) {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
   return NODE_BADGE_COLORS[h % NODE_BADGE_COLORS.length];
-}
-
-function getCollapsedNodes() {
-  try {
-    const raw = localStorage.getItem('naozhi_collapsed_nodes');
-    if (raw === null) return new Set(['_more_projects']);
-    return new Set(JSON.parse(raw));
-  } catch(_) { return new Set(['_more_projects']); }
-}
-
-function saveNodeToggle(el) {
-  const nid = el.dataset.node;
-  if (!nid) return;
-  const collapsed = getCollapsedNodes();
-  if (el.open) collapsed.delete(nid); else collapsed.add(nid);
-  localStorage.setItem('naozhi_collapsed_nodes', JSON.stringify([...collapsed]));
 }
 
 /* ===== WebSocket Connection Manager ===== */
@@ -1850,7 +2249,7 @@ const wsm = {
         });
         break;
       case 'cron_result':
-        if (currentTab === 'cron') fetchCronJobs();
+        fetchCronJobs();
         break;
       case 'pong':
         break;
@@ -1937,6 +2336,67 @@ const wsm = {
       const last = events[events.length - 1];
       if (last.time > this.lastEventTimeWs) this.lastEventTimeWs = last.time;
     }
+    // Build turnState from events
+    if (isInitial) {
+      // Full rebuild: scan backward to find the last turn boundary
+      resetTurnState();
+      let turnStart = events.length;
+      for (let i = events.length - 1; i >= 0; i--) {
+        if (events[i].type === 'user' || events[i].type === 'result') { turnStart = i + 1; break; }
+        if (i === 0) turnStart = 0;
+      }
+      for (let i = turnStart; i < events.length; i++) {
+        const ev = events[i];
+        if (ev.type === 'tool_use') {
+          turnState.toolCount++;
+          turnState.currentTool = { tool: ev.tool || ev.summary, summary: ev.detail ? ev.detail.split('\n')[0].substring(0, 60) : '' };
+          turnState.isThinking = false;
+        } else if (ev.type === 'agent') {
+          turnState.toolCount++;
+          turnState.currentTool = null;
+          turnState.agents.push({ name: ev.subagent || 'agent', activity: ev.summary || '', background: !!ev.background });
+          turnState.isThinking = false;
+        } else if (ev.type === 'thinking') {
+          turnState.isThinking = true;
+          turnState.currentTool = null;
+        } else if (ev.type === 'text') {
+          turnState.isThinking = false;
+          turnState.currentTool = null;
+        }
+      }
+    } else {
+      // Incremental: accumulate additively, reset only on turn boundaries
+      for (let i = 0; i < events.length; i++) {
+        const ev = events[i];
+        if (ev.type === 'user') {
+          resetTurnState();
+          const text = ev.detail || ev.summary || '';
+          if (text) {
+            const h2 = document.querySelector('.main-header h2');
+            if (h2) h2.textContent = text;
+          }
+          continue;
+        }
+        if (ev.type === 'result') { resetTurnState(); continue; }
+        if (ev.type === 'tool_use') {
+          turnState.toolCount++;
+          turnState.currentTool = { tool: ev.tool || ev.summary, summary: ev.detail ? ev.detail.split('\n')[0].substring(0, 60) : '' };
+          turnState.isThinking = false;
+        } else if (ev.type === 'agent') {
+          turnState.toolCount++;
+          turnState.currentTool = null;
+          turnState.agents.push({ name: ev.subagent || 'agent', activity: ev.summary || '', background: !!ev.background });
+          turnState.isThinking = false;
+        } else if (ev.type === 'thinking') {
+          turnState.isThinking = true;
+          turnState.currentTool = null;
+        } else if (ev.type === 'text') {
+          turnState.isThinking = false;
+          turnState.currentTool = null;
+        }
+      }
+    }
+    refreshBanner();
   },
 
   onEvent(msg) {
@@ -1951,8 +2411,30 @@ const wsm = {
         const h2 = document.querySelector('.main-header h2');
         if (h2) h2.textContent = text;
       }
+      resetTurnState();
     }
-    if (ev.type === 'tool_use' || ev.type === 'result') return;
+    // Update running banner with tool/agent/thinking activity
+    if (ev.type === 'tool_use') {
+      turnState.toolCount++;
+      turnState.currentTool = { tool: ev.tool || ev.summary, summary: ev.detail ? ev.detail.split('\n')[0].substring(0, 60) : '' };
+      turnState.isThinking = false;
+      refreshBanner();
+    } else if (ev.type === 'agent') {
+      turnState.toolCount++;
+      turnState.currentTool = null;
+      turnState.agents.push({ name: ev.subagent || 'agent', activity: ev.summary || '', background: !!ev.background });
+      turnState.isThinking = false;
+      refreshBanner();
+    } else if (ev.type === 'thinking') {
+      turnState.isThinking = true;
+      turnState.currentTool = null;
+      refreshBanner();
+    } else if (ev.type === 'text') {
+      turnState.isThinking = false;
+      turnState.currentTool = null;
+      refreshBanner();
+    }
+    if (ev.type === 'tool_use' || ev.type === 'result' || ev.type === 'agent') return;
     const html = eventHtml(ev);
     if (!html) return;
     const el = document.getElementById('events-scroll');
@@ -2025,12 +2507,15 @@ const wsm = {
 
   setState(s) {
     this.state = s;
+    updateStatusBar();
     if (s === WS_STATES.CONNECTED) {
       // WS connected: stop session polling, rely on push
       if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
       // Reduce discovered scan frequency
       if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
       discoveredPollTimer = setInterval(scanDiscovered, 30000);
+      // Pull fresh node/session state immediately to clear stale data
+      fetchSessions();
     } else if (s === WS_STATES.DISCONNECTED) {
       // WS lost: start fallback polling
       if (!sessionPollTimer) sessionPollTimer = setInterval(fetchSessions, 5000);
@@ -2069,9 +2554,11 @@ function updateMainState(state, reason) {
 
 function flashSendBtn() {
   const btn = document.getElementById('btn-send');
-  if (!btn) return;
-  btn.style.boxShadow = '0 0 8px #3fb950';
-  setTimeout(() => { btn.style.boxShadow = ''; }, 600);
+  const stop = document.getElementById('btn-stop');
+  const target = (btn && btn.style.display !== 'none') ? btn : stop;
+  if (!target) return;
+  target.style.boxShadow = '0 0 8px #3fb950';
+  setTimeout(() => { target.style.boxShadow = ''; }, 600);
 }
 
 function stopPreviewPolling() {
@@ -2096,23 +2583,6 @@ async function scanDiscovered() {
   }
 }
 
-function discoveredInlineHtml(s) {
-  const cwd = s.cwd || 'unknown';
-  const ago = timeAgo(s.last_active || s.started_at);
-  const pst = s.proc_start_time || 0;
-  const state = s.state || 'ready';
-  const prompt = s.last_prompt || s.summary || '';
-  const node = s.node || '';
-  return '<div class="session-card cli-card" data-pid="' + s.pid + '" data-session-id="' + esc(s.session_id) + '" data-cwd="' + esc(cwd) + '" data-pst="' + pst + '" data-node="' + esc(node) + '" onclick="handleDiscoveredClick(this)">' +
-    '<div class="platform">cli</div>' +
-    (prompt ? '<div class="session-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' : '') +
-    '<div class="meta">' +
-      '<span class="badge ' + state + '">' + state + '</span>' +
-      '<span>' + ago + '</span>' +
-    '</div>' +
-  '</div>';
-}
-
 function handleDiscoveredClick(el) {
   previewDiscovered(el.dataset.sessionId, el.dataset.cwd, Number(el.dataset.pid), Number(el.dataset.pst), el.dataset.node || '');
 }
@@ -2128,8 +2598,8 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node) {
   mobileEnterChat();
 
   // Highlight the discovered card
-  document.querySelectorAll('.cli-card').forEach(el => el.classList.remove('active'));
-  const card = document.querySelector('.cli-card[data-pid="' + pid + '"]');
+  document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
+  const card = document.querySelector('.session-card[data-key="_discovered:' + pid + '"]');
   if (card) card.classList.add('active');
 
   const base = cwd.split('/').pop() || cwd;
@@ -2138,16 +2608,17 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node) {
     '<div class="main-header">' +
       '<button class="btn-mobile-back" onclick="mobileBack()" title="back">&#8592;</button>' +
       '<div class="main-header-content">' +
-        '<h2>' + esc(base) + ' <span class="badge" style="background:#9e6a03;color:#fff">external</span></h2>' +
-        '<div class="detail"></div>' +
-        '<div class="workspace-path" data-copy="' + esc(cwd) + '" onclick="copyText(this.dataset.copy)" title="click to copy">' + esc(cwd) + '</div>' +
+        '<h2>' + esc(base) + '</h2>' +
+        '<div class="detail">' +
+          '<span class="badge" style="background:#9e6a03;color:#fff">external</span>' +
+        '</div>' +
       '</div>' +
     '</div>' +
     '<div class="events" id="events-scroll"><div class="empty-state">loading...</div></div>' +
     '<div class="input-area" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
-        '<textarea id="msg-input" rows="1" placeholder="send a message to take over..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()" oninput="autoGrow(this)"></textarea>' +
+        '<div id="msg-input" contenteditable="true" role="textbox" data-placeholder="send a message to take over..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
         '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="send">&#x27a4;</button>' +
       '</div>' +
     '</div>';
@@ -2189,7 +2660,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node) {
         if (empty) empty.remove();
         const wasBottom = el2.scrollTop + el2.clientHeight >= el2.scrollHeight - 30;
         fresh.forEach(e => {
-          if (e.type === 'tool_use' || e.type === 'result') return;
+          if (e.type === 'tool_use' || e.type === 'result' || e.type === 'agent') return;
           const h = eventHtml(e); if (h) el2.insertAdjacentHTML('beforeend', h);
         });
         if (wasBottom) el2.scrollTop = el2.scrollHeight;
@@ -2225,7 +2696,7 @@ async function takeover(btn, pid, sessionId, cwd, procStartTime, node) {
     const data = await r.json();
     showToast('session taken over', 'success');
     // Immediately remove the discovered card from DOM
-    const card = document.querySelector('.cli-card[data-pid="' + pid + '"]');
+    const card = document.querySelector('.session-card[data-key="_discovered:' + pid + '"]');
     if (card) card.remove();
     // Force refresh (clear cache so renderSidebar runs)
     lastSessionsJSON = '';
@@ -2324,34 +2795,306 @@ function initSwipeDelete() {
   }, {passive:true});
 }
 
+function initSwipeBack() {
+  const main = document.getElementById('main');
+  if (!main) return;
+  let startX = 0, startY = 0, tracking = false, swiping = false;
+  main.addEventListener('touchstart', e => {
+    if (!isMobile() || e.touches.length !== 1) return;
+    startX = e.touches[0].clientX; startY = e.touches[0].clientY;
+    tracking = false; swiping = false;
+    // Only trigger from left edge (within 40px)
+    if (startX > 40) return;
+    tracking = true;
+  }, {passive:true});
+  main.addEventListener('touchmove', e => {
+    if (!tracking) return;
+    const dx = e.touches[0].clientX - startX;
+    const dy = e.touches[0].clientY - startY;
+    if (!swiping) {
+      if (Math.abs(dx) < 8 && Math.abs(dy) < 8) return;
+      if (Math.abs(dy) > Math.abs(dx)) { tracking = false; return; }
+      if (dx < 0) { tracking = false; return; }
+      swiping = true;
+    }
+    const progress = Math.min(dx / window.innerWidth, 1);
+    main.style.transform = 'translateX(' + dx + 'px)';
+    main.style.opacity = String(1 - progress * 0.3);
+  }, {passive:true});
+  main.addEventListener('touchend', e => {
+    if (!tracking || !swiping) { tracking = false; swiping = false; return; }
+    const dx = e.changedTouches[0].clientX - startX;
+    tracking = false; swiping = false;
+    if (dx > window.innerWidth * 0.3) {
+      main.style.transition = 'transform .2s ease, opacity .2s ease';
+      main.style.transform = 'translateX(100%)';
+      main.style.opacity = '0';
+      setTimeout(() => {
+        main.style.transition = ''; main.style.transform = ''; main.style.opacity = '';
+        mobileBack();
+      }, 200);
+    } else {
+      main.style.transition = 'transform .2s ease, opacity .2s ease';
+      main.style.transform = ''; main.style.opacity = '';
+      setTimeout(() => { main.style.transition = ''; }, 200);
+    }
+  }, {passive:true});
+}
+
 /* ===== Cron Tab ===== */
 
 let cronJobs = [];
-let selectedCronJob = null;
-let currentTab = 'sessions';
-let cronPollTimer = null;
 
-function switchTab(tab) {
-  currentTab = tab;
-  document.querySelectorAll('.sidebar-tabs button').forEach((btn, i) => {
-    btn.classList.toggle('active', (i === 0 && tab === 'sessions') || (i === 1 && tab === 'cron'));
-  });
-  const sessionList = document.getElementById('session-list');
-  const cronList = document.getElementById('cron-list');
-  const newBtn = document.querySelector('.header-row .new-session-btn');
+function createNewCronJob() {
+  const presets = [
+    { label: 'Every 30 min', value: '@every 30m' },
+    { label: 'Every hour', value: '@every 1h' },
+    { label: 'Daily 9:00', value: '0 9 * * *' },
+    { label: 'Weekdays 9:00', value: '0 9 * * 1-5' },
+    { label: 'Every Monday 9:00', value: '0 9 * * 1' },
+  ];
+  let selectedSchedule = '';
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  let scheduleHtml =
+    '<ul class="proj-pick" id="cron-schedule-list">' +
+    presets.map(p =>
+      '<li data-value="' + esc(p.value) + '" onclick="cronSelectSchedule(this, \'' + escJs(p.value) + '\')">' +
+        '<div class="pp-name">' + esc(p.label) + '</div>' +
+        '<div class="pp-path">' + esc(p.value) + '</div>' +
+      '</li>'
+    ).join('') +
+    '<li id="cron-custom-toggle" onclick="toggleCronCustom()">' +
+      '<div class="pp-custom"><span class="pp-custom-icon">&#9881;</span> Custom expression</div>' +
+    '</li>' +
+    '</ul>' +
+    '<div id="cron-custom-form" style="display:none;margin-top:8px">' +
+      '<input id="cron-schedule" placeholder="@every 30m or 0 9 * * 1-5">' +
+      '<div id="cron-preview-hint" style="font-size:11px;color:#8b949e;margin-top:4px;min-height:16px"></div>' +
+    '</div>';
 
-  if (tab === 'sessions') {
-    sessionList.style.display = '';
-    cronList.style.display = 'none';
-    if (newBtn) newBtn.style.display = '';
-    if (cronPollTimer) { clearInterval(cronPollTimer); cronPollTimer = null; }
-  } else {
-    sessionList.style.display = 'none';
-    cronList.style.display = '';
-    if (newBtn) newBtn.style.display = 'none';
-    fetchCronJobs();
-    if (!cronPollTimer) cronPollTimer = setInterval(fetchCronJobs, 10000);
+  // Workspace picker
+  let wsHtml = '<div style="margin-top:12px"><div style="font-size:12px;color:#8b949e;margin-bottom:6px">Workspace (optional)</div>';
+  if (projectsData.length > 0) {
+    wsHtml += '<ul class="proj-pick" id="cron-ws-list">' +
+      projectsData.map(p =>
+        '<li data-path="' + esc(p.path) + '" onclick="cronSelectWorkspace(this, \'' + escJs(p.path) + '\')">' +
+          '<div class="pp-name">' + esc(p.name) + '</div>' +
+          '<div class="pp-path">' + esc(shortPath(p.path)) + '</div>' +
+        '</li>'
+      ).join('') +
+      '<li id="cron-ws-custom-toggle" onclick="toggleCronWsCustom()">' +
+        '<div class="pp-custom"><span class="pp-custom-icon">+</span> Custom path</div>' +
+      '</li>' +
+      '</ul>';
   }
+  wsHtml += '<div id="cron-ws-custom-form" style="' + (projectsData.length > 0 ? 'display:none;' : '') + 'margin-top:4px">' +
+    '<input id="cron-workdir" placeholder="' + esc(defaultWorkspace || '/home/user/project') + '">' +
+    '</div></div>';
+
+  overlay.innerHTML =
+    '<div class="modal">' +
+      '<h3>New Cron Job</h3>' +
+      '<div style="font-size:12px;color:#8b949e;margin-bottom:6px">Schedule</div>' +
+      scheduleHtml + wsHtml +
+      '<div class="modal-btns" style="margin-top:12px"><button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button><button class="primary" onclick="doCreateCronJob()">create</button></div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  overlay.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') overlay.remove();
+  });
+  overlay._cronSchedule = '';
+  overlay._cronWorkDir = '';
+}
+
+function cronSelectSchedule(el, value) {
+  const overlay = el.closest('.modal-overlay');
+  overlay._cronSchedule = value;
+  document.querySelectorAll('#cron-schedule-list li').forEach(li => li.style.background = '');
+  el.style.background = '#1f6feb33';
+  // Hide custom form and clear its value when preset selected
+  const customForm = document.getElementById('cron-custom-form');
+  if (customForm) customForm.style.display = 'none';
+  const customInput = document.getElementById('cron-schedule');
+  if (customInput) customInput.value = '';
+  const toggle = document.getElementById('cron-custom-toggle');
+  if (toggle) toggle.style.display = '';
+}
+
+function cronSelectWorkspace(el, path) {
+  const overlay = el.closest('.modal-overlay');
+  overlay._cronWorkDir = path;
+  document.querySelectorAll('#cron-ws-list li').forEach(li => li.style.background = '');
+  el.style.background = '#1f6feb33';
+  const customForm = document.getElementById('cron-ws-custom-form');
+  if (customForm) customForm.style.display = 'none';
+  const toggle = document.getElementById('cron-ws-custom-toggle');
+  if (toggle) toggle.style.display = '';
+}
+
+function toggleCronWsCustom() {
+  const form = document.getElementById('cron-ws-custom-form');
+  const toggle = document.getElementById('cron-ws-custom-toggle');
+  if (form.style.display === 'none') {
+    form.style.display = '';
+    if (toggle) toggle.style.display = 'none';
+    // Clear project selection
+    const overlay = form.closest('.modal-overlay');
+    if (overlay) overlay._cronWorkDir = '';
+    document.querySelectorAll('#cron-ws-list li').forEach(li => li.style.background = '');
+    document.getElementById('cron-workdir').focus();
+  } else {
+    form.style.display = 'none';
+    if (toggle) toggle.style.display = '';
+  }
+}
+
+function toggleCronCustom() {
+  const form = document.getElementById('cron-custom-form');
+  const toggle = document.getElementById('cron-custom-toggle');
+  if (form.style.display === 'none') {
+    form.style.display = '';
+    toggle.style.display = 'none';
+    // Clear preset selection
+    const overlay = form.closest('.modal-overlay');
+    if (overlay) overlay._cronSchedule = '';
+    document.querySelectorAll('#cron-schedule-list li').forEach(li => li.style.background = '');
+    const input = document.getElementById('cron-schedule');
+    input.focus();
+    if (!input._cronPreviewBound) {
+      let previewTimer;
+      input.addEventListener('input', function() {
+        clearTimeout(previewTimer);
+        previewTimer = setTimeout(() => previewCronSchedule(input.value.trim()), 300);
+      });
+      input._cronPreviewBound = true;
+    }
+  } else {
+    form.style.display = 'none';
+    toggle.style.display = '';
+  }
+}
+
+async function previewCronSchedule(schedule) {
+  const hint = document.getElementById('cron-preview-hint');
+  if (!hint) return;
+  if (!schedule) { hint.textContent = ''; return; }
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/cron/preview?schedule=' + encodeURIComponent(schedule), { headers });
+    const data = await r.json();
+    if (data.valid) {
+      hint.style.color = '#7ee787';
+      hint.textContent = 'next run: ' + timeAgo(data.next_run, true);
+    } else {
+      hint.style.color = '#da3633';
+      hint.textContent = data.error || 'invalid schedule';
+    }
+  } catch (e) {
+    hint.style.color = '#da3633';
+    hint.textContent = 'preview error';
+  }
+}
+
+async function doCreateCronJob() {
+  const overlay = document.querySelector('.modal-overlay');
+  if (!overlay) return;
+  // Resolve schedule: preset selection or custom input
+  let schedule = overlay._cronSchedule || '';
+  const customInput = document.getElementById('cron-schedule');
+  if (customInput && customInput.value.trim()) schedule = customInput.value.trim();
+  if (!schedule) { showToast('schedule is required', 'warning'); return; }
+  // Resolve work_dir: project selection or custom input
+  let workDir = overlay._cronWorkDir || '';
+  const wdInput = document.getElementById('cron-workdir');
+  if (wdInput && wdInput.value.trim()) workDir = wdInput.value.trim();
+  try {
+    const headers = {'Content-Type': 'application/json'};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const body = {schedule};
+    if (workDir) body.work_dir = workDir;
+    const r = await fetch('/api/cron', {method: 'POST', headers, body: JSON.stringify(body)});
+    if (!r.ok) { showToast('create failed: ' + await r.text()); return; }
+    const data = await r.json();
+    if (overlay) overlay.remove();
+    showToast('cron job created', 'success');
+    fetchCronJobs();
+    if (data.id) {
+      const key = 'cron:' + data.id;
+      sessionWorkspaces[key] = workDir || defaultWorkspace || '/tmp';
+      lastSessionsJSON = '';
+      await fetchSessions();
+      selectSession(key, 'local');
+    }
+  } catch (e) { showToast('error: ' + e.message); }
+}
+
+function openCronPanel() {
+  selectedKey = null; selectedNode = null;
+  if (wsm.subscribedKey) wsm.unsubscribe();
+  if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
+  document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
+  mobileEnterChat();
+  fetchCronJobs().then(() => renderCronPanel());
+}
+
+function renderCronPanel() {
+  const main = document.getElementById('main');
+  let html = '<div class="cron-detail">' +
+    '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">' +
+      '<h3 style="margin:0">Cron Jobs</h3>' +
+      '<button onclick="createNewCronJob()" style="padding:5px 14px;border-radius:6px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:4px"><svg width="14" height="14" viewBox="0 0 24 24" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> New</button>' +
+    '</div>';
+  if (cronJobs.length === 0) {
+    html += '<div style="text-align:center;padding:40px 20px">' +
+      '<div style="font-size:36px;opacity:.3;margin-bottom:12px">&#9201;</div>' +
+      '<div style="color:#8b949e;margin-bottom:16px">No cron jobs yet</div>' +
+      '<button onclick="createNewCronJob()" style="padding:8px 20px;border-radius:6px;border:1px solid #1f6feb;background:#1f6feb22;color:#58a6ff;cursor:pointer;font-size:13px">Create your first cron job</button>' +
+    '</div>';
+  } else {
+    cronJobs.sort((a, b) => b.created_at - a.created_at);
+    html += cronJobs.map(j => {
+      const status = j.paused ? '<span class="badge suspended">paused</span>' : '<span class="badge running">active</span>';
+      const nextStr = j.next_run ? timeAgo(j.next_run, true) : '';
+      const lastStr = j.last_run_at ? timeAgo(j.last_run_at) : '';
+      const wdStr = j.work_dir ? '<span style="color:#a5d6ff" title="' + esc(j.work_dir) + '">' + esc(shortPath(j.work_dir)) + '</span>' : '';
+      const result = j.last_error
+        ? '<div style="color:#da3633;font-size:12px;margin-top:4px">\u2716 ' + esc(j.last_error) + '</div>'
+        : (j.last_result ? '<div style="color:#7ee787;font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">\u2714 ' + esc(j.last_result.substring(0, 150)) + '</div>' : '');
+      return '<div style="padding:12px;border:1px solid #30363d;border-radius:8px;margin-bottom:8px;background:#161b22;cursor:pointer" onclick="openCronSession(\'' + esc(j.id) + '\')">' +
+        '<div style="font-size:14px;color:#f0f6fc;font-weight:500">' + (j.prompt ? esc(j.prompt) : '<span style="color:#6e7681">(no prompt — click to set)</span>') + '</div>' +
+        '<div style="font-size:12px;color:#a5d6ff;margin-top:4px">' + esc(j.schedule) + '</div>' +
+        '<div style="font-size:12px;color:#8b949e;margin-top:4px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
+        status +
+        wdStr +
+        (lastStr ? '<span>ran ' + lastStr + '</span>' : '') +
+        (nextStr ? '<span>next ' + nextStr + '</span>' : '') +
+        '</div>' +
+        result +
+        '<div style="display:flex;gap:6px;margin-top:8px" onclick="event.stopPropagation()">' +
+        (j.paused
+          ? '<button onclick="cronResume(\'' + esc(j.id) + '\')" style="padding:3px 10px;border-radius:4px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:11px">resume</button>'
+          : '<button onclick="cronPause(\'' + esc(j.id) + '\')" style="padding:3px 10px;border-radius:4px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:11px">pause</button>') +
+        '<button onclick="cronDelete(\'' + esc(j.id) + '\')" style="padding:3px 10px;border-radius:4px;border:1px solid #da3633;color:#da3633;background:transparent;cursor:pointer;font-size:11px">delete</button>' +
+        '</div></div>';
+    }).join('');
+  }
+  html += '</div>';
+  main.innerHTML = html;
+}
+
+function openCronSession(cronId) {
+  const key = 'cron:' + cronId;
+  // Ensure the session appears in the sidebar (may be pending if never sent)
+  if (!sessionsData[sid(key, 'local')] && !sessionWorkspaces[key]) {
+    sessionWorkspaces[key] = defaultWorkspace || '/tmp';
+    lastSessionsJSON = '';
+    fetchSessions();
+  }
+  selectSession(key, 'local');
 }
 
 async function fetchCronJobs() {
@@ -2363,139 +3106,9 @@ async function fetchCronJobs() {
     if (!r.ok) return;
     const data = await r.json();
     cronJobs = data.jobs || [];
-    renderCronList();
+    const cronBadge = document.getElementById('cron-badge');
+    if (cronBadge) { cronBadge.textContent = cronJobs.length; cronBadge.style.display = cronJobs.length > 0 ? '' : 'none'; }
   } catch (e) { console.error('fetch cron:', e); }
-}
-
-function renderCronList() {
-  const el = document.getElementById('cron-list');
-  if (!el) return;
-
-  let html = '<div class="cron-add-form">' +
-    '<label>Schedule</label>' +
-    '<input id="cron-schedule" placeholder="@every 30m or 0 9 * * 1-5">' +
-    '<label>Prompt</label>' +
-    '<textarea id="cron-prompt" rows="2" placeholder="task to execute..."></textarea>' +
-    '<label>Notify IM (optional, format: platform:chat_id)</label>' +
-    '<input id="cron-notify" placeholder="feishu:oc_xxxx">' +
-    '<div class="form-row"><button onclick="addCronJob()">+ Add</button></div>' +
-    '</div>';
-
-  if (cronJobs.length === 0) {
-    html += '<div class="no-sessions" style="padding:20px 16px">no cron jobs</div>';
-  } else {
-    cronJobs.sort((a, b) => b.created_at - a.created_at);
-    html += cronJobs.map(cronCardHtml).join('');
-  }
-  el.innerHTML = html;
-}
-
-function cronCardHtml(j) {
-  const isActive = selectedCronJob === j.id;
-  const status = j.paused ? '<span class="badge suspended">paused</span>' : '<span class="badge running">active</span>';
-  const source = j.platform === 'dashboard' ? 'dashboard' : j.platform + ':' + (j.chat_id || '').substring(0, 8);
-  const nextStr = j.next_run ? timeAgo(j.next_run, true) : '';
-  const lastRunStr = j.last_run_at ? timeAgo(j.last_run_at) : '';
-  const resultPreview = j.last_error
-    ? '<div class="cron-error-preview" title="' + esc(j.last_error) + '">\u2716 ' + esc(j.last_error) + '</div>'
-    : (j.last_result ? '<div class="cron-result-preview" title="' + esc(j.last_result) + '">\u2714 ' + esc(j.last_result.substring(0, 100)) + '</div>' : '');
-
-  return '<div class="cron-card' + (isActive ? ' active' : '') + '" data-id="' + esc(j.id) + '" onclick="selectCronJob(this.dataset.id)">' +
-    '<div class="cron-prompt">' + esc(j.prompt) + '</div>' +
-    '<div class="cron-schedule">' + esc(j.schedule) + '</div>' +
-    '<div class="cron-meta">' + status +
-      '<span>' + esc(source) + '</span>' +
-      (lastRunStr ? '<span>ran ' + lastRunStr + '</span>' : '') +
-      (nextStr ? '<span>next ' + nextStr + '</span>' : '') +
-    '</div>' +
-    resultPreview +
-    '<div class="cron-actions">' +
-      (j.paused
-        ? '<button data-id="' + esc(j.id) + '" onclick="event.stopPropagation();cronResume(this.dataset.id)">resume</button>'
-        : '<button data-id="' + esc(j.id) + '" onclick="event.stopPropagation();cronPause(this.dataset.id)">pause</button>') +
-      '<button class="danger" data-id="' + esc(j.id) + '" onclick="event.stopPropagation();cronDelete(this.dataset.id)">delete</button>' +
-    '</div>' +
-    '</div>';
-}
-
-function selectCronJob(id) {
-  selectedCronJob = (selectedCronJob === id) ? null : id;
-  document.querySelectorAll('.cron-card').forEach(el => {
-    el.classList.toggle('active', el.dataset.id === selectedCronJob);
-  });
-  if (selectedCronJob) {
-    const j = cronJobs.find(x => x.id === selectedCronJob);
-    if (j) renderCronDetail(j);
-  } else {
-    document.getElementById('main').innerHTML = '<div class="empty-state">select a cron job to view details</div>';
-  }
-}
-
-function renderCronDetail(j) {
-  const main = document.getElementById('main');
-  const status = j.paused ? 'paused' : 'active';
-  const source = j.platform === 'dashboard' ? 'dashboard' : j.platform + ':' + (j.chat_id || '');
-  const nextStr = j.next_run ? new Date(j.next_run).toLocaleString() : 'N/A';
-  const lastRunStr = j.last_run_at ? new Date(j.last_run_at).toLocaleString() : 'never';
-  const notify = j.notify_platform ? j.notify_platform + ':' + (j.notify_chat_id || '') : 'none';
-
-  let resultHtml = '';
-  if (j.last_error) {
-    resultHtml = '<div class="cd-field"><div class="cd-label">Last Error</div><div class="cd-result" style="border-color:#da3633;color:#da3633">' + esc(j.last_error) + '</div></div>';
-  }
-  if (j.last_result) {
-    resultHtml += '<div class="cd-field"><div class="cd-label">Last Result</div><div class="cd-result">' + esc(j.last_result) + '</div></div>';
-  }
-
-  main.innerHTML =
-    '<div class="main-header">' +
-      '<button class="btn-mobile-back" onclick="mobileBack()" title="back">&#8592;</button>' +
-      '<div class="main-header-content">' +
-      '<h2>Cron: ' + esc(j.id) + '</h2>' +
-      '<div class="detail"><span class="badge ' + (j.paused ? 'suspended' : 'running') + '">' + status + '</span><span>' + esc(source) + '</span></div>' +
-      '</div>' +
-    '</div>' +
-    '<div class="cron-detail">' +
-      '<div class="cd-field"><div class="cd-label">Schedule</div><div class="cd-value">' + esc(j.schedule) + '</div></div>' +
-      '<div class="cd-field"><div class="cd-label">Prompt</div><div class="cd-value">' + esc(j.prompt) + '</div></div>' +
-      '<div class="cd-field"><div class="cd-label">Notify</div><div class="cd-value">' + esc(notify) + '</div></div>' +
-      '<div class="cd-field"><div class="cd-label">Next Run</div><div class="cd-value">' + esc(nextStr) + '</div></div>' +
-      '<div class="cd-field"><div class="cd-label">Last Run</div><div class="cd-value">' + esc(lastRunStr) + '</div></div>' +
-      resultHtml +
-    '</div>';
-}
-
-async function addCronJob() {
-  const schedule = document.getElementById('cron-schedule')?.value.trim();
-  const prompt = document.getElementById('cron-prompt')?.value.trim();
-  const notifyRaw = document.getElementById('cron-notify')?.value.trim();
-  if (!schedule || !prompt) { showToast('schedule and prompt are required'); return; }
-
-  const body = { schedule, prompt };
-  if (notifyRaw) {
-    const parts = notifyRaw.split(':');
-    if (parts.length >= 2) {
-      body.notify_platform = parts[0];
-      body.notify_chat_id = parts.slice(1).join(':');
-    } else {
-      showToast('notify format: platform:chat_id'); return;
-    }
-  }
-
-  try {
-    const headers = { 'Content-Type': 'application/json' };
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch('/api/cron', { method: 'POST', headers, body: JSON.stringify(body) });
-    if (!r.ok) {
-      const text = await r.text().catch(() => r.status);
-      showToast('create failed: ' + text);
-      return;
-    }
-    const data = await r.json();
-    showToast('Job ' + data.id + ' created', 'success');
-    fetchCronJobs();
-  } catch (e) { showToast('error: ' + e.message); }
 }
 
 async function cronPause(id) {
@@ -2505,7 +3118,7 @@ async function cronPause(id) {
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch('/api/cron/pause', { method: 'POST', headers, body: JSON.stringify({ id }) });
     if (!r.ok) { showToast('pause failed'); return; }
-    fetchCronJobs();
+    fetchCronJobs().then(() => renderCronPanel());
   } catch (e) { showToast('error: ' + e.message); }
 }
 
@@ -2516,7 +3129,7 @@ async function cronResume(id) {
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch('/api/cron/resume', { method: 'POST', headers, body: JSON.stringify({ id }) });
     if (!r.ok) { showToast('resume failed'); return; }
-    fetchCronJobs();
+    fetchCronJobs().then(() => renderCronPanel());
   } catch (e) { showToast('error: ' + e.message); }
 }
 
@@ -2528,24 +3141,58 @@ async function cronDelete(id) {
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch('/api/cron?id=' + encodeURIComponent(id), { method: 'DELETE', headers });
     if (!r.ok) { showToast('delete failed'); return; }
-    if (selectedCronJob === id) {
-      selectedCronJob = null;
-      document.getElementById('main').innerHTML = '<div class="empty-state">select a cron job to view details</div>';
-    }
-    fetchCronJobs();
+    fetchCronJobs().then(() => renderCronPanel());
   } catch (e) { showToast('error: ' + e.message); }
 }
 
+/* ===== Sidebar resizer (desktop only) ===== */
+(function(){
+  const resizer = document.getElementById('resizer');
+  const sidebar = document.querySelector('.sidebar');
+  const LS_KEY = 'naozhi_sidebar_w';
+  const saved = parseFloat(localStorage.getItem(LS_KEY));
+  if (saved >= 200) sidebar.style.width = saved + 'px';
+
+  let startX, startW;
+  resizer.addEventListener('mousedown', function(e) {
+    e.preventDefault();
+    startX = e.clientX;
+    startW = sidebar.getBoundingClientRect().width;
+    resizer.classList.add('dragging');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove);
+    document.addEventListener('mouseup', onUp);
+  });
+  function onMove(e) {
+    const w = Math.min(Math.max(startW + e.clientX - startX, 200), window.innerWidth * 0.6);
+    sidebar.style.width = w + 'px';
+  }
+  function onUp() {
+    resizer.classList.remove('dragging');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    document.removeEventListener('mousemove', onMove);
+    document.removeEventListener('mouseup', onUp);
+    localStorage.setItem(LS_KEY, Math.round(sidebar.getBoundingClientRect().width));
+  }
+  resizer.addEventListener('dblclick', function() {
+    sidebar.style.width = '360px';
+    localStorage.removeItem(LS_KEY);
+  });
+})();
+
 /* ===== Initialization ===== */
 
-loadPendingSessions();
 fetchSessions();
 sessionPollTimer = setInterval(fetchSessions, 5000);
 scanDiscovered();
-discoveredPollTimer = setInterval(scanDiscovered, 5000);
+discoveredPollTimer = setInterval(scanDiscovered, 30000);
+fetchCronJobs(); // load initial cron state for badge
 wsm.connect();
 initMobile();
 initSwipeDelete();
+initSwipeBack();
 </script>
 </body>
 </html>

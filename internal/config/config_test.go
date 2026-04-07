@@ -148,7 +148,7 @@ func TestLoadNodeConfig(t *testing.T) {
 	os.WriteFile(tmpFile, []byte(`
 nodes:
   macbook:
-    url: "http://10.0.0.2:8180"
+    url: "https://10.0.0.2:8180"
     token: "secret"
     display_name: "MacBook Pro"
 `), 0644)
@@ -161,7 +161,7 @@ nodes:
 		t.Fatalf("expected 1 node, got %d", len(cfg.Nodes))
 	}
 	n := cfg.Nodes["macbook"]
-	if n.URL != "http://10.0.0.2:8180" {
+	if n.URL != "https://10.0.0.2:8180" {
 		t.Errorf("url = %q", n.URL)
 	}
 	if n.Token != "secret" {
@@ -169,6 +169,21 @@ nodes:
 	}
 	if n.DisplayName != "MacBook Pro" {
 		t.Errorf("display_name = %q", n.DisplayName)
+	}
+}
+
+func TestLoadNodeConfig_HTTPWithToken(t *testing.T) {
+	tmpFile := t.TempDir() + "/config.yaml"
+	os.WriteFile(tmpFile, []byte(`
+nodes:
+  bad:
+    url: "http://10.0.0.2:8180"
+    token: "secret"
+`), 0644)
+
+	_, err := Load(tmpFile)
+	if err == nil {
+		t.Fatal("expected error for HTTP with bearer token")
 	}
 }
 

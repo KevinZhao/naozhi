@@ -45,7 +45,10 @@ type Router struct {
 	// pendingSpawns tracks Spawn() calls in progress (lock released during spawn)
 	pendingSpawns int
 
-	storePath       string
+	storePath  string
+	storeDirty bool   // true when sessions changed since last save
+	storeGen   uint64 // incremented on each mutation, used to detect concurrent writes
+
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
 
@@ -145,30 +148,77 @@ func NewRouter(cfg RouterConfig) *Router {
 				Exempt:    strings.HasPrefix(key, "project:"),
 			}
 			s.setSessionID(entry.SessionID)
+			if entry.LastActive != 0 {
+				s.lastActive.Store(entry.LastActive)
+			}
 			r.sessions[key] = s
 			r.indexAdd(key)
 		}
-		// Async-load JSONL history for suspended sessions so the dashboard
-		// shows conversation history without waiting for the next message.
-		if r.claudeDir != "" {
-			for _, s := range r.sessions {
-				s := s
-				go func() {
-					sid := s.getSessionID()
-					if sid == "" {
-						return
-					}
-					entries, err := discovery.LoadHistory(r.claudeDir, sid, s.workspace)
-					if err != nil || len(entries) == 0 {
-						return
-					}
-					s.InjectHistory(entries)
-					slog.Info("loaded suspended session history on startup", "key", s.Key, "entries", len(entries))
-					r.notifyChange()
-				}()
+	}
+
+	// Discover recent sessions from filesystem and register as resumable.
+	// This gives the dashboard immediate access to past conversations.
+	if r.claudeDir != "" {
+		excludeIDs := make(map[string]bool, len(r.sessions))
+		for _, s := range r.sessions {
+			if id := s.getSessionID(); id != "" {
+				excludeIDs[id] = true
 			}
 		}
+		for _, rs := range discovery.RecentSessions(r.claudeDir, 10, excludeIDs) {
+			if rs.SessionID == "" || len(rs.SessionID) < 8 {
+				continue
+			}
+			cwdKey := rs.SessionID[:8]
+			if rs.Workspace != "" {
+				cwdKey = strings.ReplaceAll(strings.TrimPrefix(rs.Workspace, "/"), "/", "-")
+			}
+			key := "local:history:" + sanitizeKeyComponent(cwdKey) + ":general"
+			if _, exists := r.sessions[key]; exists {
+				slog.Debug("skipping discovered session: key already registered",
+					"key", key, "session_id", rs.SessionID)
+				continue
+			}
+			s := &ManagedSession{
+				Key:       key,
+				workspace: rs.Workspace,
+			}
+			s.setSessionID(rs.SessionID)
+			if rs.LastActive != 0 {
+				s.lastActive.Store(rs.LastActive * 1_000_000) // ms → ns
+			} else {
+				s.lastActive.Store(time.Now().UnixNano())
+			}
+			r.sessions[key] = s
+			r.indexAdd(key)
+		}
+		r.storeDirty = true
+		r.storeGen++
 	}
+
+	// Async-load JSONL history for all suspended sessions so the dashboard
+	// shows conversation history without waiting for the next message.
+	if r.claudeDir != "" {
+		sem := make(chan struct{}, 10) // limit concurrent disk I/O
+		for _, s := range r.sessions {
+			s := s
+			if s.getSessionID() == "" {
+				continue
+			}
+			go func() {
+				sem <- struct{}{}
+				defer func() { <-sem }()
+				entries, err := discovery.LoadHistory(r.claudeDir, s.getSessionID(), s.workspace)
+				if err != nil || len(entries) == 0 {
+					return
+				}
+				s.InjectHistory(entries)
+				slog.Info("loaded session history on startup", "key", s.Key, "entries", len(entries))
+				r.notifyChange()
+			}()
+		}
+	}
+
 	return r
 }
 
@@ -264,6 +314,8 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 	if r.activeCount < 0 {
 		r.activeCount = 0
 	}
+	r.storeDirty = true
+	r.storeGen++
 	r.mu.Unlock()
 
 	for _, proc := range toClose {
@@ -324,7 +376,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 // Caller must hold r.mu. Releases r.mu during Spawn() to avoid blocking other
 // goroutines during potentially slow protocol init (e.g., ACP handshake).
 func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, opts AgentOpts) (*ManagedSession, error) {
-	// Exempt sessions (planners) bypass maxProcs capacity check
+	// Exempt sessions (planners) bypass maxProcs capacity check but have their own limit
 	if !opts.Exempt {
 		// Recount to correct drift from undetected process exits (OOM, SIGKILL)
 		r.countActive()
@@ -337,6 +389,19 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 				r.mu.Unlock()
 				return nil, fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
 			}
+		}
+	} else {
+		// Guard against unbounded exempt session growth (e.g., many projects)
+		const maxExempt = 20
+		exemptCount := 0
+		for _, s := range r.sessions {
+			if s.Exempt && s.process != nil && s.process.Alive() {
+				exemptCount++
+			}
+		}
+		if exemptCount >= maxExempt {
+			r.mu.Unlock()
+			return nil, fmt.Errorf("max exempt sessions reached (%d)", maxExempt)
 		}
 	}
 
@@ -434,6 +499,8 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		Key:              key,
 		process:          proc,
 		workspace:        workspace,
+		cliName:          r.wrapper.CLIName,
+		cliVersion:       r.wrapper.CLIVersion,
 		sendMu:           sync.Mutex{},
 		persistedHistory: oldHistory,
 		Exempt:           opts.Exempt,
@@ -449,6 +516,8 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		r.activeCount++
 	}
 
+	r.storeDirty = true
+	r.storeGen++
 	slog.Info("session spawned", "key", key, "active", r.activeCount, "exempt", opts.Exempt)
 	r.mu.Unlock()
 
@@ -510,12 +579,7 @@ func (r *Router) evictOldest() bool {
 		r.shutdownCond.Broadcast()
 	}
 	r.mu.Lock()
-	if !oldest.Exempt {
-		r.activeCount--
-		if r.activeCount < 0 {
-			r.activeCount = 0
-		}
-	}
+	r.countActive() // recount instead of manual decrement to avoid double-count races
 	return true
 }
 
@@ -533,6 +597,8 @@ func (r *Router) Reset(key string) {
 	proc := s.process
 	r.indexDel(key)
 	delete(r.sessions, key)
+	r.storeDirty = true
+	r.storeGen++
 	r.mu.Unlock()
 
 	if proc != nil && proc.Alive() {
@@ -568,6 +634,8 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		proc := s.process
 		r.indexDel(key)
 		delete(r.sessions, key)
+		r.storeDirty = true
+		r.storeGen++
 
 		if proc != nil && proc.Alive() {
 			r.mu.Unlock()
@@ -613,6 +681,8 @@ func (r *Router) Remove(key string) bool {
 	proc := s.process
 	r.indexDel(key)
 	delete(r.sessions, key)
+	r.storeDirty = true
+	r.storeGen++
 	r.mu.Unlock()
 
 	if proc != nil && proc.Alive() {
@@ -669,10 +739,9 @@ func (r *Router) Cleanup() {
 	}
 
 	r.mu.Lock()
-	r.activeCount -= closedCount
-	if r.activeCount < 0 {
-		r.activeCount = 0
-	}
+	// Recount instead of manual decrement — Close() may have raced with
+	// evictOldest, Reset, or Shutdown closing the same processes.
+	r.countActive()
 
 	// Prune orphaned sessions: nil process, no session ID, past TTL
 	var pruned int
@@ -686,6 +755,16 @@ func (r *Router) Cleanup() {
 			pruned++
 			continue
 		}
+		// Prune resume stubs: nil process with session ID, past 7*TTL.
+		// 7x multiplier gives suspended sessions ~3.5 hours at default 30m TTL,
+		// matching a typical work session. Balances timely cleanup against
+		// preserving sessions the user may still want to --resume.
+		if s.process == nil && s.getSessionID() != "" && now.Sub(s.GetLastActive()) > 7*r.ttl {
+			r.indexDel(key)
+			delete(r.sessions, key)
+			pruned++
+			continue
+		}
 		// Prune exited sessions with no resumable session ID
 		if s.process != nil && !s.process.Alive() && s.getSessionID() == "" && now.Sub(s.GetLastActive()) > r.ttl {
 			r.indexDel(key)
@@ -693,7 +772,8 @@ func (r *Router) Cleanup() {
 			pruned++
 			continue
 		}
-		// Prune old exited sessions even with session ID (prevents unbounded growth)
+		// Prune old exited sessions even with session ID (prevents unbounded growth).
+		// Same 7x TTL window as suspended sessions above.
 		if s.process != nil && !s.process.Alive() && now.Sub(s.GetLastActive()) > 7*r.ttl {
 			r.indexDel(key)
 			delete(r.sessions, key)
@@ -702,17 +782,35 @@ func (r *Router) Cleanup() {
 	}
 
 	// Snapshot sessions for periodic save (while still holding the lock).
-	sessionsCopy := make(map[string]*ManagedSession, len(r.sessions))
-	for k, v := range r.sessions {
-		sessionsCopy[k] = v
+	// Skip save if nothing changed since last Cleanup cycle.
+	if closedCount > 0 || pruned > 0 {
+		r.storeDirty = true
+		r.storeGen++
 	}
+	var sessionsCopy map[string]*ManagedSession
 	storePath := r.storePath
+	snapshotGen := r.storeGen
+	if r.storeDirty {
+		sessionsCopy = make(map[string]*ManagedSession, len(r.sessions))
+		for k, v := range r.sessions {
+			sessionsCopy[k] = v
+		}
+	}
 
 	r.mu.Unlock()
 
 	// Periodic save outside lock to reduce crash-recovery data loss.
-	if err := saveStore(storePath, sessionsCopy); err != nil {
-		slog.Warn("periodic session save failed", "err", err)
+	if sessionsCopy != nil {
+		if err := saveStore(storePath, sessionsCopy); err != nil {
+			slog.Warn("periodic session save failed", "err", err)
+		} else {
+			// Only clear dirty flag if no concurrent mutation occurred since snapshot.
+			r.mu.Lock()
+			if r.storeGen == snapshotGen {
+				r.storeDirty = false
+			}
+			r.mu.Unlock()
+		}
 	}
 
 	if len(expired) > 0 || pruned > 0 {
@@ -814,6 +912,14 @@ func (r *Router) MaxProcs() int {
 	return r.maxProcs
 }
 
+// CLIPath returns the CLI binary path for health checks.
+func (r *Router) CLIPath() string {
+	if r.wrapper == nil {
+		return ""
+	}
+	return r.wrapper.CLIPath
+}
+
 // Stats returns current session statistics.
 // active = sessions with a live process (ready or running, excluding exempt);
 // total = all sessions in the map including suspended ones.
@@ -861,6 +967,43 @@ func (r *Router) InterruptSession(key string) bool {
 	return s.Interrupt()
 }
 
+// ManagedSessionIDs returns the set of session IDs tracked by the router.
+// Used to exclude managed sessions from recent-session filesystem scans.
+func (r *Router) ManagedSessionIDs() map[string]bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids := make(map[string]bool, len(r.sessions))
+	for _, s := range r.sessions {
+		if id := s.getSessionID(); id != "" {
+			ids[id] = true
+		}
+	}
+	return ids
+}
+
+// RegisterForResume creates a suspended session entry so that the next
+// GetOrCreate call for this key will resume the given session ID.
+func (r *Router) RegisterForResume(key, sessionID, workspace string) {
+	r.mu.Lock()
+	if _, exists := r.sessions[key]; exists {
+		r.mu.Unlock()
+		return // already exists
+	}
+	s := &ManagedSession{
+		Key:       key,
+		workspace: workspace,
+	}
+	s.setSessionID(sessionID)
+	s.lastActive.Store(time.Now().UnixNano())
+	r.sessions[key] = s
+	r.indexAdd(key)
+	r.storeDirty = true
+	r.storeGen++
+	r.mu.Unlock()
+
+	r.notifyChange()
+}
+
 // ManagedExcludeSets returns PIDs, session IDs, and CWDs of all managed sessions
 // in a single lock acquisition. Used by discovery.Scan to avoid three separate mutex grabs.
 func (r *Router) ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]bool, cwds map[string]bool) {
@@ -903,6 +1046,8 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			if cur, ok := r.sessions[key]; ok && cur == oldSession {
 				r.indexDel(key)
 				delete(r.sessions, key)
+				r.storeDirty = true
+				r.storeGen++
 			} else if cur != nil && cur.process != nil && cur.process.Alive() {
 				// Concurrent GetOrCreate created a new session during Close();
 				// abort takeover rather than silently returning wrong session.
@@ -916,6 +1061,8 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 		} else {
 			r.indexDel(key)
 			delete(r.sessions, key)
+			r.storeDirty = true
+			r.storeGen++
 		}
 		r.countActive()
 	}

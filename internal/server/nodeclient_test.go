@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -35,7 +36,7 @@ func TestNodeClient_FetchSessions(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	nc := NewNodeClient("test", ts.URL, "test-token", "Test Node")
+	nc := node.NewHTTPClient("test", ts.URL, "test-token", "Test Node")
 	sessions, err := nc.FetchSessions(context.Background())
 	if err != nil {
 		t.Fatalf("FetchSessions: %v", err)
@@ -56,7 +57,7 @@ func TestNodeClient_FetchSessions_NoAuth(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	nc := NewNodeClient("test", ts.URL, "", "Test")
+	nc := node.NewHTTPClient("test", ts.URL, "", "Test")
 	_, err := nc.FetchSessions(context.Background())
 	if err != nil {
 		t.Fatalf("FetchSessions: %v", err)
@@ -72,7 +73,7 @@ func TestNodeClient_FetchSessions_AuthFailure(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	nc := NewNodeClient("test", ts.URL, "wrong-token", "Test")
+	nc := node.NewHTTPClient("test", ts.URL, "wrong-token", "Test")
 	_, err := nc.FetchSessions(context.Background())
 	if err == nil {
 		t.Fatal("expected error for auth failure")
@@ -85,7 +86,7 @@ func TestNodeClient_FetchSessions_MalformedResponse(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	nc := NewNodeClient("test", ts.URL, "", "Test")
+	nc := node.NewHTTPClient("test", ts.URL, "", "Test")
 	_, err := nc.FetchSessions(context.Background())
 	if err == nil {
 		t.Fatal("expected error for malformed response")
@@ -115,7 +116,7 @@ func TestNodeClient_FetchEvents(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	nc := NewNodeClient("test", ts.URL, "", "Test")
+	nc := node.NewHTTPClient("test", ts.URL, "", "Test")
 	entries, err := nc.FetchEvents(context.Background(), "test:d:u:general", 1500)
 	if err != nil {
 		t.Fatalf("FetchEvents: %v", err)
@@ -136,7 +137,7 @@ func TestNodeClient_FetchEvents_NoAfter(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	nc := NewNodeClient("test", ts.URL, "", "Test")
+	nc := node.NewHTTPClient("test", ts.URL, "", "Test")
 	_, err := nc.FetchEvents(context.Background(), "key", 0)
 	if err != nil {
 		t.Fatalf("FetchEvents: %v", err)
@@ -166,7 +167,7 @@ func TestNodeClient_Send(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	nc := NewNodeClient("test", ts.URL, "my-token", "Test")
+	nc := node.NewHTTPClient("test", ts.URL, "my-token", "Test")
 	err := nc.Send(context.Background(), "test:d:u:general", "hello world", "")
 	if err != nil {
 		t.Fatalf("Send: %v", err)
@@ -183,8 +184,7 @@ func TestNodeClient_Send(t *testing.T) {
 }
 
 func TestNodeClient_Send_Unreachable(t *testing.T) {
-	nc := NewNodeClient("test", "http://127.0.0.1:1", "", "Test")
-	nc.httpClient.Timeout = 1 * time.Second
+	nc := node.NewHTTPClient("test", "http://127.0.0.1:1", "", "Test")
 	err := nc.Send(context.Background(), "key", "text", "")
 	if err == nil {
 		t.Fatal("expected error for unreachable server")
@@ -223,7 +223,7 @@ func TestHandleAPISessions_WithRemoteNodes(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes["macbook"] = NewNodeClient("macbook", remote.URL, "", "MacBook")
+	srv.nodes["macbook"] = node.NewHTTPClient("macbook", remote.URL, "", "MacBook")
 	srv.knownNodes["macbook"] = "MacBook"
 	// Pre-populate cache
 	srv.nodeCache.RefreshAll()
@@ -271,7 +271,7 @@ func TestHandleAPISessions_RemoteNodeError(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes["bad-node"] = NewNodeClient("bad-node", remote.URL, "", "Bad")
+	srv.nodes["bad-node"] = node.NewHTTPClient("bad-node", remote.URL, "", "Bad")
 	srv.knownNodes["bad-node"] = "Bad"
 	// Pre-populate cache
 	srv.nodeCache.RefreshAll()
@@ -307,8 +307,8 @@ func TestHandleAPISessionEvents_RemoteNode(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes = map[string]NodeConn{
-		"macbook": NewNodeClient("macbook", remote.URL, "", "MacBook"),
+	srv.nodes = map[string]node.Conn{
+		"macbook": node.NewHTTPClient("macbook", remote.URL, "", "MacBook"),
 	}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/events?key=test:d:u:general&node=macbook", nil)
@@ -360,8 +360,8 @@ func TestHandleAPISend_RemoteNode(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes = map[string]NodeConn{
-		"macbook": NewNodeClient("macbook", remote.URL, "", "MacBook"),
+	srv.nodes = map[string]node.Conn{
+		"macbook": node.NewHTTPClient("macbook", remote.URL, "", "MacBook"),
 	}
 
 	body := `{"key":"test:d:u:general","text":"hello","node":"macbook"}`
@@ -391,7 +391,7 @@ func TestHandleAPISend_RemoteNode(t *testing.T) {
 
 func TestHandleAPISend_UnknownNode(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes = map[string]NodeConn{}
+	srv.nodes = map[string]node.Conn{}
 
 	body := `{"key":"test:d:u:general","text":"hello","node":"unknown"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
@@ -443,17 +443,17 @@ func TestHub_RemoteSend(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	nodes := map[string]NodeConn{
-		"remote": NewNodeClient("remote", ts.URL, "", "Remote"),
+	nodes := map[string]node.Conn{
+		"remote": node.NewHTTPClient("remote", ts.URL, "", "Remote"),
 	}
 	router := session.NewRouter(session.RouterConfig{})
-	guard := newSessionGuard()
+	guard := session.NewGuard()
 	var nodesMu sync.RWMutex
-	hub := NewHub(router, nil, nil, "", guard, nodes, &nodesMu, nil, "")
+	hub := NewHub(HubOptions{Router: router, Guard: guard, Nodes: nodes, NodesMu: &nodesMu})
 	defer hub.Shutdown()
 
 	client := newTestWSClient()
-	hub.handleSend(client, wsClientMsg{
+	hub.handleSend(client, node.ClientMsg{
 		Type: "send",
 		Key:  "test:d:u:general",
 		Text: "hello",
@@ -485,7 +485,7 @@ func TestHub_RemoteSend_UnknownNode(t *testing.T) {
 	hub, _ := newTestHub("")
 	client := newTestWSClient()
 
-	hub.handleSend(client, wsClientMsg{
+	hub.handleSend(client, node.ClientMsg{
 		Type: "send",
 		Key:  "test:d:u:general",
 		Text: "hello",
@@ -514,17 +514,17 @@ func newTestWSClient() *wsClient {
 	return c
 }
 
-func readClientMsg(t *testing.T, c *wsClient, timeout time.Duration) wsServerMsg {
+func readClientMsg(t *testing.T, c *wsClient, timeout time.Duration) node.ServerMsg {
 	t.Helper()
 	select {
 	case data := <-c.send:
-		var msg wsServerMsg
+		var msg node.ServerMsg
 		if err := json.Unmarshal(data, &msg); err != nil {
 			t.Fatalf("unmarshal: %v", err)
 		}
 		return msg
 	case <-time.After(timeout):
 		t.Fatal("timeout reading client message")
-		return wsServerMsg{}
+		return node.ServerMsg{}
 	}
 }

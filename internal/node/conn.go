@@ -1,4 +1,4 @@
-package server
+package node
 
 import (
 	"context"
@@ -7,17 +7,16 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
-// wsEventSink can receive JSON event messages pushed from a remote session.
-// Using an interface here avoids tying NodeConn implementations to the concrete
-// *wsClient type.
-type wsEventSink interface {
-	sendJSON(v interface{})
-	sendRaw(data []byte)
+// EventSink can receive JSON event messages pushed from a remote session.
+// Implemented by server-side wsClient to receive events from nodes.
+type EventSink interface {
+	SendJSON(v interface{})
+	SendRaw(data []byte)
 }
 
-// NodeConn is the unified interface for both direct (NodeClient, HTTP) and
-// reverse-connected (ReverseNodeConn, WS) remote nodes.
-type NodeConn interface {
+// Conn is the unified interface for both direct (HTTPClient, HTTP) and
+// reverse-connected (ReverseConn, WS) remote nodes.
+type Conn interface {
 	NodeID() string
 	DisplayName() string
 	RemoteAddr() string
@@ -34,16 +33,16 @@ type NodeConn interface {
 	ProxyRestartPlanner(ctx context.Context, projectName string) error
 	ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error
 
-	Subscribe(c wsEventSink, key string, after int64)
-	Unsubscribe(c wsEventSink, key string)
-	RemoveClient(c wsEventSink)
+	Subscribe(c EventSink, key string, after int64)
+	Unsubscribe(c EventSink, key string)
+	RemoveClient(c EventSink)
 
 	Close()
 }
 
 // removeSub removes c from subs[key]. Returns true if the key has no subscribers left.
 // Caller must hold the lock protecting subs.
-func removeSub(subs map[string][]wsEventSink, key string, c wsEventSink) bool {
+func removeSub(subs map[string][]EventSink, key string, c EventSink) bool {
 	clients := subs[key]
 	for i, cl := range clients {
 		if cl == c {
@@ -60,7 +59,7 @@ func removeSub(subs map[string][]wsEventSink, key string, c wsEventSink) bool {
 
 // removeSubAll removes c from all keys. Returns keys that became empty.
 // Caller must hold the lock protecting subs.
-func removeSubAll(subs map[string][]wsEventSink, c wsEventSink) []string {
+func removeSubAll(subs map[string][]EventSink, c EventSink) []string {
 	var emptyKeys []string
 	for key, clients := range subs {
 		for i, cl := range clients {

@@ -19,7 +19,7 @@ func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.projectMgr == nil {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode([]any{})
+		writeJSON(w, []any{})
 		return
 	}
 
@@ -123,7 +123,7 @@ func (s *Server) handleAPIProjectConfigPut(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+		writeJSON(w, map[string]string{"status": "ok"})
 		return
 	}
 
@@ -148,7 +148,7 @@ func (s *Server) handleAPIProjectConfigPut(w http.ResponseWriter, r *http.Reques
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handleAPIProjectPlannerRestart(w http.ResponseWriter, r *http.Request) {
@@ -174,7 +174,7 @@ func (s *Server) handleAPIProjectPlannerRestart(w http.ResponseWriter, r *http.R
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]string{"status": "restarting"})
+		writeJSON(w, map[string]string{"status": "restarting"})
 		return
 	}
 
@@ -214,5 +214,5 @@ func (s *Server) handleAPIProjectPlannerRestart(w http.ResponseWriter, r *http.R
 	slog.Info("planner restarted", "project", name)
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "restarted"})
+	writeJSON(w, map[string]string{"status": "restarted"})
 }

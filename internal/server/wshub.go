@@ -13,6 +13,9 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -27,7 +30,16 @@ var wsUpgrader = websocket.Upgrader{
 		if err != nil {
 			return false
 		}
-		return u.Host == r.Host
+		// Behind CloudFront/ALB, r.Host is the ALB hostname while Origin
+		// carries the real domain. Check X-Forwarded-Host first.
+		// NOTE: In direct-access scenarios (no reverse proxy), a client can
+		// forge X-Forwarded-Host to bypass origin checks. This is mitigated
+		// by the auth layer (cookie or auth message required).
+		host := r.Host
+		if fwd := r.Header.Get("X-Forwarded-Host"); fwd != "" {
+			host = strings.SplitN(fwd, ",", 2)[0] // take first entry only
+		}
+		return u.Host == host
 	},
 	ReadBufferSize:  8192,
 	WriteBufferSize: 8192,
@@ -41,10 +53,12 @@ type Hub struct {
 	agents      map[string]session.AgentOpts
 	agentCmds   map[string]string
 	dashToken   string
-	guard       *sessionGuard
-	nodes       map[string]NodeConn
+	cookieMAC   string // HMAC-derived cookie value (different from dashToken)
+	guard       *session.Guard
+	nodes       map[string]node.Conn
 	nodesMu     *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
 	projectMgr  *project.Manager
+	scheduler   *cron.Scheduler // optional, for cron prompt auto-save
 	allowedRoot string          // workspace paths must be under this root (empty = unrestricted)
 	ctx         context.Context // cancelled on Shutdown to stop in-flight sends
 	cancel      context.CancelFunc
@@ -53,24 +67,42 @@ type Hub struct {
 	debounceTimer *time.Timer
 }
 
+// HubOptions holds configuration for a Hub.
+type HubOptions struct {
+	Router      *session.Router
+	Agents      map[string]session.AgentOpts
+	AgentCmds   map[string]string
+	DashToken   string
+	CookieMAC   string
+	Guard       *session.Guard
+	Nodes       map[string]node.Conn
+	NodesMu     *sync.RWMutex
+	ProjectMgr  *project.Manager
+	AllowedRoot string
+}
+
 // NewHub creates a new WebSocket hub.
-func NewHub(router *session.Router, agents map[string]session.AgentOpts, agentCmds map[string]string, dashToken string, guard *sessionGuard, nodes map[string]NodeConn, nodesMu *sync.RWMutex, projectMgr *project.Manager, allowedRoot string) *Hub {
+func NewHub(opts HubOptions) *Hub {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Hub{
 		clients:     make(map[*wsClient]struct{}),
-		router:      router,
-		agents:      agents,
-		agentCmds:   agentCmds,
-		dashToken:   dashToken,
-		guard:       guard,
-		nodes:       nodes,
-		nodesMu:     nodesMu,
-		projectMgr:  projectMgr,
-		allowedRoot: allowedRoot,
+		router:      opts.Router,
+		agents:      opts.Agents,
+		agentCmds:   opts.AgentCmds,
+		dashToken:   opts.DashToken,
+		cookieMAC:   opts.CookieMAC,
+		guard:       opts.Guard,
+		nodes:       opts.Nodes,
+		nodesMu:     opts.NodesMu,
+		projectMgr:  opts.ProjectMgr,
+		allowedRoot: opts.AllowedRoot,
 		ctx:         ctx,
 		cancel:      cancel,
 	}
 }
+
+// SetScheduler sets the cron scheduler for auto-saving prompts on first send.
+func (h *Hub) SetScheduler(s *cron.Scheduler) { h.scheduler = s }
 
 // HandleUpgrade upgrades an HTTP connection to WebSocket.
 func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
@@ -79,6 +111,7 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("ws upgrade failed", "err", err)
 		return
 	}
+	conn.SetReadLimit(512 * 1024) // 512 KB max message size
 	c := &wsClient{
 		conn:          conn,
 		send:          make(chan []byte, 256),
@@ -89,7 +122,7 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	if h.dashToken == "" {
 		c.authenticated.Store(true)
 	} else if cookie, err := r.Cookie(authCookieName); err == nil {
-		if subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(h.dashToken)) == 1 {
+		if h.cookieMAC != "" && subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(h.cookieMAC)) == 1 {
 			c.authenticated.Store(true)
 		}
 	}
@@ -117,7 +150,7 @@ func (h *Hub) unregister(c *wsClient) {
 
 	// Snapshot nodes under nodesMu to avoid data race
 	h.nodesMu.RLock()
-	nodes := make([]NodeConn, 0, len(h.nodes))
+	nodes := make([]node.Conn, 0, len(h.nodes))
 	for _, conn := range h.nodes {
 		nodes = append(nodes, conn)
 	}
@@ -128,19 +161,22 @@ func (h *Hub) unregister(c *wsClient) {
 	}
 }
 
-func (h *Hub) handleAuth(c *wsClient, msg wsClientMsg) {
+func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 	if h.dashToken == "" || subtle.ConstantTimeCompare([]byte(msg.Token), []byte(h.dashToken)) == 1 {
 		c.authenticated.Store(true)
-		c.sendJSON(wsServerMsg{Type: "auth_ok"})
+		c.SendJSON(node.ServerMsg{Type: "auth_ok"})
+	} else if c.authenticated.Load() {
+		// Already pre-authenticated via cookie during upgrade — accept.
+		c.SendJSON(node.ServerMsg{Type: "auth_ok"})
 	} else {
-		c.sendJSON(wsServerMsg{Type: "auth_fail", Error: "invalid token"})
+		c.SendJSON(node.ServerMsg{Type: "auth_fail", Error: "invalid token"})
 	}
 }
 
-func (h *Hub) handleSubscribe(c *wsClient, msg wsClientMsg) {
+func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	key := msg.Key
 	if key == "" {
-		c.sendJSON(wsServerMsg{Type: "error", Error: "key is required"})
+		c.SendJSON(node.ServerMsg{Type: "error", Error: "key is required"})
 		return
 	}
 
@@ -160,7 +196,7 @@ func (h *Hub) handleSubscribe(c *wsClient, msg wsClientMsg) {
 
 	sess := h.router.GetSession(key)
 	if sess == nil {
-		c.sendJSON(wsServerMsg{Type: "error", Key: key, Error: "session not found"})
+		c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "session not found"})
 		return
 	}
 
@@ -183,18 +219,18 @@ func (h *Hub) handleSubscribe(c *wsClient, msg wsClientMsg) {
 		entries = sess.EventEntriesSince(msg.After)
 	}
 
-	c.sendJSON(wsServerMsg{Type: "subscribed", Key: key, State: snap.State})
+	c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State})
 
 	var lastTime int64
 	if len(entries) > 0 {
-		c.sendJSON(wsServerMsg{Type: "history", Key: key, Events: entries})
+		c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries})
 		lastTime = entries[len(entries)-1].Time
 	}
 
 	go h.eventPushLoop(c, key, notify, sess, lastTime)
 }
 
-func (h *Hub) handleUnsubscribe(c *wsClient, msg wsClientMsg) {
+func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 	key := msg.Key
 
 	// Remote node delegation
@@ -209,10 +245,10 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg wsClientMsg) {
 		delete(c.subscriptions, key)
 	}
 	h.mu.Unlock()
-	c.sendJSON(wsServerMsg{Type: "unsubscribed", Key: key})
+	c.SendJSON(node.ServerMsg{Type: "unsubscribed", Key: key})
 }
 
-func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
+func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	// Remote node delegation
 	if msg.Node != "" && msg.Node != "local" {
 		h.handleRemoteSend(c, msg)
@@ -221,11 +257,11 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 
 	key := msg.Key
 	if key == "" {
-		c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "key is required"})
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "key is required"})
 		return
 	}
 	if msg.Text == "" {
-		c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "text is required"})
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "text is required"})
 		return
 	}
 
@@ -233,33 +269,57 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 	trimmed := strings.TrimSpace(msg.Text)
 	if trimmed == "/clear" || trimmed == "/new" {
 		h.router.Reset(key)
-		c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "accepted", Key: key})
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "accepted", Key: key})
 		h.BroadcastSessionsUpdate()
 		return
 	}
 
 	// Set workspace override for new dashboard sessions
+	var validatedWorkspace string
 	if msg.Workspace != "" {
 		wsPath, err := validateWorkspace(msg.Workspace, h.allowedRoot)
 		if err != nil {
-			c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: err.Error()})
+			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: err.Error()})
 			return
 		}
+		validatedWorkspace = wsPath
 		if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
 			chatKey := key[:idx]
 			h.router.SetWorkspace(chatKey, wsPath)
 		}
 	}
 
-	if !h.guard.TryAcquire(key) {
-		c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "busy", Key: key})
-		return
+	// Register for resume: pre-create a suspended entry so GetOrCreate
+	// will --resume the specified session ID on the first message.
+	if msg.ResumeID != "" && discovery.IsValidSessionID(msg.ResumeID) {
+		ws := validatedWorkspace
+		if ws == "" {
+			ws = h.router.DefaultWorkspace()
+		}
+		h.router.RegisterForResume(key, msg.ResumeID, ws)
 	}
 
-	c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "accepted", Key: key})
+	acquired := h.guard.TryAcquire(key)
+	needInterrupt := !acquired
+
+	if needInterrupt {
+		// Session is running — interrupt; the goroutine below will wait for the guard
+		h.router.InterruptSession(key)
+		slog.Info("ws send: interrupted running session for new message", "key", key)
+	}
+
+	c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "accepted", Key: key})
 
 	capturedText := msg.Text
 	go func() {
+		if needInterrupt {
+			// Wait for the interrupted turn to release the guard
+			if !h.guard.AcquireTimeout(key, 5*time.Second) {
+				slog.Error("ws send: interrupt timed out", "key", key)
+				c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: key, Error: "session busy, interrupt timed out"})
+				return
+			}
+		}
 		defer h.guard.Release(key)
 		defer h.router.NotifyIdle() // wake Shutdown wait loop
 
@@ -268,45 +328,33 @@ func (h *Hub) handleSend(c *wsClient, msg wsClientMsg) {
 		sess, _, err := h.router.GetOrCreate(ctx, key, opts)
 		if err != nil {
 			slog.Error("ws send: get session", "key", key, "err", err)
-			c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: key, Error: err.Error()})
+			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: key, Error: err.Error()})
 			return
 		}
 
-		// Notify AFTER session exists so clients can auto-subscribe.
-		// For new sessions, spawnSession already called BroadcastSessionsUpdate
-		// via notifyChange; for existing sessions we need this explicit call.
-		h.broadcastState(key, "running", "")
-		h.BroadcastSessionsUpdate()
-
-		if _, err := sess.Send(ctx, capturedText, nil, nil); err != nil {
+		if _, err := h.sendWithBroadcast(ctx, key, sess, capturedText, nil, nil); err != nil {
 			slog.Error("ws send: send", "key", key, "err", err)
+		} else if h.scheduler != nil && strings.HasPrefix(key, "cron:") {
+			if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, "cron:"), capturedText); err != nil {
+				slog.Warn("ws send: set cron prompt", "key", key, "err", err)
+			}
 		}
-
-		// Notify subscribers: ready (or suspended if process died)
-		sess2 := h.router.GetSession(key)
-		if sess2 != nil {
-			snap := sess2.Snapshot()
-			h.broadcastState(key, snap.State, snap.DeathReason)
-		}
-		// If session was removed (e.g. concurrent Reset), sessions_update
-		// will cause the frontend to drop it from the sidebar.
-		h.BroadcastSessionsUpdate()
 	}()
 }
 
-func (h *Hub) handleInterrupt(c *wsClient, msg wsClientMsg) {
+func (h *Hub) handleInterrupt(c *wsClient, msg node.ClientMsg) {
 	key := msg.Key
 	if key == "" {
-		c.sendJSON(wsServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Error: "key is required"})
+		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Error: "key is required"})
 		return
 	}
 
 	ok := h.router.InterruptSession(key)
 	if ok {
 		slog.Info("session interrupted via dashboard", "key", key)
-		c.sendJSON(wsServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "ok", Key: key})
+		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "ok", Key: key})
 	} else {
-		c.sendJSON(wsServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "not_running", Key: key})
+		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "not_running", Key: key})
 	}
 }
 
@@ -318,21 +366,22 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, notify <-chan struct{}, ses
 				return
 			}
 			entries := sess.EventEntriesSince(lastTime)
-			for i := range entries {
-				select {
-				case <-c.done:
-					return
-				default:
-				}
-				data, err := json.Marshal(wsServerMsg{Type: "event", Key: key, Event: &entries[i]})
-				if err != nil {
-					continue
-				}
-				c.sendRaw(data)
-				if entries[i].Time > lastTime {
-					lastTime = entries[i].Time
-				}
+			if len(entries) == 0 {
+				continue
 			}
+			select {
+			case <-c.done:
+				return
+			default:
+			}
+			// Batch events into a single "history" message to reduce
+			// per-event JSON marshaling and WebSocket frame overhead.
+			data, err := json.Marshal(node.ServerMsg{Type: "history", Key: key, Events: entries})
+			if err != nil {
+				continue
+			}
+			c.SendRaw(data)
+			lastTime = entries[len(entries)-1].Time
 		case <-c.done:
 			return
 		}
@@ -341,7 +390,7 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, notify <-chan struct{}, ses
 
 // broadcastState sends a session_state message to all clients subscribed to the given key.
 func (h *Hub) broadcastState(key, state, reason string) {
-	data, err := json.Marshal(wsServerMsg{Type: "session_state", Key: key, State: state, Reason: reason})
+	data, err := json.Marshal(node.ServerMsg{Type: "session_state", Key: key, State: state, Reason: reason})
 	if err != nil {
 		return
 	}
@@ -349,7 +398,7 @@ func (h *Hub) broadcastState(key, state, reason string) {
 	defer h.mu.Unlock()
 	for c := range h.clients {
 		if _, ok := c.subscriptions[key]; ok {
-			c.sendRaw(data)
+			c.SendRaw(data)
 		}
 	}
 }
@@ -372,7 +421,7 @@ func (h *Hub) BroadcastSessionsUpdate() {
 }
 
 func (h *Hub) doBroadcastSessionsUpdate() {
-	data, err := json.Marshal(wsServerMsg{Type: "sessions_update"})
+	data, err := json.Marshal(node.ServerMsg{Type: "sessions_update"})
 	if err != nil {
 		return
 	}
@@ -380,17 +429,24 @@ func (h *Hub) doBroadcastSessionsUpdate() {
 	defer h.mu.Unlock()
 	for c := range h.clients {
 		if c.authenticated.Load() {
-			c.sendRaw(data)
+			c.SendRaw(data)
 		}
 	}
 }
 
 // BroadcastCronResult notifies all connected WS clients that a cron job completed.
-func (h *Hub) BroadcastCronResult(jobID, _, _ string) {
-	data, err := json.Marshal(map[string]string{
+func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
+	payload := map[string]string{
 		"type":   "cron_result",
 		"job_id": jobID,
-	})
+	}
+	if result != "" {
+		payload["result"] = result
+	}
+	if errMsg != "" {
+		payload["error"] = errMsg
+	}
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return
 	}
@@ -398,7 +454,7 @@ func (h *Hub) BroadcastCronResult(jobID, _, _ string) {
 	defer h.mu.Unlock()
 	for c := range h.clients {
 		if c.authenticated.Load() {
-			c.sendRaw(data)
+			c.SendRaw(data)
 		}
 	}
 }
@@ -428,7 +484,7 @@ func (h *Hub) Shutdown() {
 
 	// Close node connections under nodesMu
 	h.nodesMu.RLock()
-	nodeConns := make([]NodeConn, 0, len(h.nodes))
+	nodeConns := make([]node.Conn, 0, len(h.nodes))
 	for _, conn := range h.nodes {
 		nodeConns = append(nodeConns, conn)
 	}
@@ -459,46 +515,48 @@ func (h *Hub) Shutdown() {
 
 // ─── Remote node handlers ────────────────────────────────────────────────────
 
-func (h *Hub) handleRemoteSubscribe(c *wsClient, msg wsClientMsg) {
+func (h *Hub) handleRemoteSubscribe(c *wsClient, msg node.ClientMsg) {
 	h.nodesMu.RLock()
 	conn, ok := h.nodes[msg.Node]
 	h.nodesMu.RUnlock()
 	if !ok {
-		c.sendJSON(wsServerMsg{Type: "error", Key: msg.Key, Error: "unknown node: " + msg.Node})
+		c.SendJSON(node.ServerMsg{Type: "error", Key: msg.Key, Error: "unknown node: " + msg.Node})
 		return
 	}
 	conn.Subscribe(c, msg.Key, msg.After)
 }
 
-func (h *Hub) handleRemoteUnsubscribe(c *wsClient, msg wsClientMsg) {
+func (h *Hub) handleRemoteUnsubscribe(c *wsClient, msg node.ClientMsg) {
 	h.nodesMu.RLock()
 	conn, ok := h.nodes[msg.Node]
 	h.nodesMu.RUnlock()
 	if !ok {
-		c.sendJSON(wsServerMsg{Type: "unsubscribed", Key: msg.Key, Node: msg.Node})
+		c.SendJSON(node.ServerMsg{Type: "unsubscribed", Key: msg.Key, Node: msg.Node})
 		return
 	}
 	conn.Unsubscribe(c, msg.Key)
 }
 
-func (h *Hub) handleRemoteSend(c *wsClient, msg wsClientMsg) {
+func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 	nodeID := msg.Node
 	h.nodesMu.RLock()
 	nc, ok := h.nodes[nodeID]
 	h.nodesMu.RUnlock()
 
 	if !ok {
-		c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "unknown node: " + nodeID})
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "unknown node: " + nodeID})
 		return
 	}
 
-	c.sendJSON(wsServerMsg{Type: "send_ack", ID: msg.ID, Status: "accepted", Key: msg.Key, Node: nodeID})
+	c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "accepted", Key: msg.Key, Node: nodeID})
 
 	go func() {
 		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
 		defer cancel()
+		capturedID, capturedKey := msg.ID, msg.Key
 		if err := nc.Send(ctx, msg.Key, msg.Text, msg.Workspace); err != nil {
 			slog.Error("remote ws send failed", "node", nodeID, "key", msg.Key, "err", err)
+			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: "remote send failed: " + err.Error()})
 		}
 		h.BroadcastSessionsUpdate()
 	}()
@@ -507,7 +565,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg wsClientMsg) {
 // PurgeNodeSubscriptions notifies all browser clients that a node disconnected,
 // so they can deselect stale sessions.
 func (h *Hub) PurgeNodeSubscriptions(nodeID string) {
-	data, err := json.Marshal(wsServerMsg{Type: "error", Node: nodeID, Error: "node disconnected"})
+	data, err := json.Marshal(node.ServerMsg{Type: "error", Node: nodeID, Error: "node disconnected"})
 	if err != nil {
 		return
 	}
@@ -515,7 +573,7 @@ func (h *Hub) PurgeNodeSubscriptions(nodeID string) {
 	defer h.mu.Unlock()
 	for c := range h.clients {
 		if c.authenticated.Load() {
-			c.sendRaw(data)
+			c.SendRaw(data)
 		}
 	}
 }

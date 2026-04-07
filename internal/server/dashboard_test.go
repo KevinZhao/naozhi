@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -167,7 +168,7 @@ func TestHandleAPISend_AcceptedNoAuth(t *testing.T) {
 	}
 }
 
-func TestHandleAPISend_ConflictWhenBusy(t *testing.T) {
+func TestHandleAPISend_InterruptWhenBusy(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	key := "p:t:u:general"
 
@@ -182,15 +183,17 @@ func TestHandleAPISend_ConflictWhenBusy(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.handleAPISend(w, req)
 
-	if w.Code != http.StatusConflict {
-		t.Errorf("status = %d, want 409", w.Code)
+	// With interrupt-on-busy, the API accepts immediately and interrupts
+	// the running session; the goroutine will timeout waiting for the guard.
+	if w.Code != http.StatusAccepted {
+		t.Errorf("status = %d, want 202", w.Code)
 	}
 	var resp map[string]string
 	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if resp["error"] != "session busy" {
-		t.Errorf("error = %q, want 'session busy'", resp["error"])
+	if resp["status"] != "accepted" {
+		t.Errorf("status = %q, want 'accepted'", resp["status"])
 	}
 }
 
@@ -351,7 +354,7 @@ func TestHandleAPISessions_NodeAggregation(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes["macbook"] = NewNodeClient("macbook", remote.URL, "", "MacBook Pro")
+	srv.nodes["macbook"] = node.NewHTTPClient("macbook", remote.URL, "", "MacBook Pro")
 	srv.knownNodes["macbook"] = "MacBook Pro"
 
 	// Populate the cache synchronously

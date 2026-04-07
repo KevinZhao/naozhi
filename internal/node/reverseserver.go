@@ -1,4 +1,4 @@
-package server
+package node
 
 import (
 	"crypto/subtle"
@@ -7,41 +7,46 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gorilla/websocket"
 	"github.com/naozhi/naozhi/internal/config"
-	"github.com/naozhi/naozhi/internal/reverse"
 )
 
-// ReverseNodeServer accepts /ws-node connections from remote naozhi nodes.
-// Remote nodes dial in (reverse connect) to traverse NAT.
-type ReverseNodeServer struct {
-	mu    sync.RWMutex
-	auth  map[string]string           // node_id → expected token
-	names map[string]string           // node_id → configured display_name
-	conns map[string]*ReverseNodeConn // node_id → active connection
-
-	onRegister   func(id string, conn *ReverseNodeConn)
-	onDeregister func(id string)
+// reverseUpgrader is the WebSocket upgrader for reverse node connections.
+var reverseUpgrader = websocket.Upgrader{
+	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-// NewReverseNodeServer creates a server that accepts /ws-node connections.
+// ReverseServer accepts /ws-node connections from remote naozhi nodes.
+// Remote nodes dial in (reverse connect) to traverse NAT.
+type ReverseServer struct {
+	mu    sync.RWMutex
+	auth  map[string]string       // node_id → expected token
+	names map[string]string       // node_id → configured display_name
+	conns map[string]*ReverseConn // node_id → active connection
+
+	OnRegister   func(id string, conn *ReverseConn)
+	OnDeregister func(id string)
+}
+
+// NewReverseServer creates a server that accepts /ws-node connections.
 // auth is the reverse_nodes config from config.yaml.
-func NewReverseNodeServer(auth map[string]config.ReverseNodeEntry) *ReverseNodeServer {
+func NewReverseServer(auth map[string]config.ReverseNodeEntry) *ReverseServer {
 	tokens := make(map[string]string, len(auth))
 	names := make(map[string]string, len(auth))
 	for id, e := range auth {
 		tokens[id] = e.Token
 		names[id] = e.DisplayName
 	}
-	return &ReverseNodeServer{
+	return &ReverseServer{
 		auth:  tokens,
 		names: names,
-		conns: make(map[string]*ReverseNodeConn),
+		conns: make(map[string]*ReverseConn),
 	}
 }
 
 // ServeHTTP handles the /ws-node WebSocket endpoint.
-func (s *ReverseNodeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	conn, err := wsUpgrader.Upgrade(w, r, nil)
+func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	conn, err := reverseUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Debug("ws-node upgrade failed", "err", err)
 		return
@@ -49,7 +54,7 @@ func (s *ReverseNodeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Read register message with timeout
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	var msg reverse.ReverseMsg
+	var msg ReverseMsg
 	if err := conn.ReadJSON(&msg); err != nil || msg.Type != "register" {
 		conn.Close()
 		return
@@ -61,7 +66,7 @@ func (s *ReverseNodeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	expected, ok := s.auth[msg.NodeID]
 	if !ok || expected == "" || subtle.ConstantTimeCompare([]byte(expected), []byte(msg.Token)) != 1 {
 		slog.Warn("reverse node auth failed", "ip", r.RemoteAddr, "node_id", msg.NodeID)
-		conn.WriteJSON(reverse.ReverseMsg{Type: "register_fail", Error: "auth failed"}) //nolint
+		conn.WriteJSON(ReverseMsg{Type: "register_fail", Error: "auth failed"}) //nolint
 		conn.Close()
 		return
 	}
@@ -79,8 +84,8 @@ func (s *ReverseNodeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if remoteLabel == "" {
 		remoteLabel = r.RemoteAddr
 	}
-	rc := newReverseNodeConn(msg.NodeID, displayName, remoteLabel, conn)
-	if err := conn.WriteJSON(reverse.ReverseMsg{Type: "registered"}); err != nil {
+	rc := newReverseConn(msg.NodeID, displayName, remoteLabel, conn)
+	if err := conn.WriteJSON(ReverseMsg{Type: "registered"}); err != nil {
 		rc.Close()
 		return
 	}
@@ -94,8 +99,8 @@ func (s *ReverseNodeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("reverse node registered", "node_id", msg.NodeID, "ip", r.RemoteAddr)
 
-	if s.onRegister != nil {
-		s.onRegister(msg.NodeID, rc)
+	if s.OnRegister != nil {
+		s.OnRegister(msg.NodeID, rc)
 	}
 
 	go rc.readLoop()
@@ -109,8 +114,8 @@ func (s *ReverseNodeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		s.mu.Unlock()
 		slog.Info("reverse node disconnected", "node_id", msg.NodeID)
-		if s.onDeregister != nil {
-			s.onDeregister(msg.NodeID)
+		if s.OnDeregister != nil {
+			s.OnDeregister(msg.NodeID)
 		}
 	}()
 	// ServeHTTP returns; rc.readLoop keeps the WS alive on its own goroutine.
@@ -118,7 +123,7 @@ func (s *ReverseNodeServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 // AllNodes returns all configured node IDs mapped to their display names.
 // Includes disconnected nodes.
-func (s *ReverseNodeServer) AllNodes() map[string]string {
+func (s *ReverseServer) AllNodes() map[string]string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	result := make(map[string]string, len(s.names))

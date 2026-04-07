@@ -1,4 +1,4 @@
-package server
+package node
 
 import (
 	"context"
@@ -7,32 +7,35 @@ import (
 	"time"
 )
 
-// NodeCacheManager periodically fetches and caches remote node data
+// CacheManager periodically fetches and caches remote node data
 // so dashboard API calls never block on unreachable nodes.
-type NodeCacheManager struct {
+type CacheManager struct {
 	mu         sync.RWMutex
 	sessions   map[string][]map[string]any // nodeID → cached sessions
 	projects   map[string][]map[string]any // nodeID → cached projects
 	discovered map[string][]map[string]any // nodeID → cached discovered
 	status     map[string]string           // nodeID → "ok" | "error"
 
-	getNodes func() map[string]NodeConn // returns snapshot of active nodes under lock
-	onChange func()                     // called after cache update (e.g. BroadcastSessionsUpdate)
+	getNodes func() map[string]Conn // returns snapshot of active nodes under lock
+	onChange func()                 // called after cache update (e.g. BroadcastSessionsUpdate)
 }
 
-// NewNodeCacheManager creates a cache manager.
+// NewCacheManager creates a cache manager.
 // getNodes returns a snapshot of active nodes (caller handles locking).
 // onChange is called after cache updates to notify UI clients.
-func NewNodeCacheManager(getNodes func() map[string]NodeConn, onChange func()) *NodeCacheManager {
-	return &NodeCacheManager{
-		status:   make(map[string]string),
-		getNodes: getNodes,
-		onChange: onChange,
+func NewCacheManager(getNodes func() map[string]Conn, onChange func()) *CacheManager {
+	return &CacheManager{
+		sessions:   make(map[string][]map[string]any),
+		projects:   make(map[string][]map[string]any),
+		discovered: make(map[string][]map[string]any),
+		status:     make(map[string]string),
+		getNodes:   getNodes,
+		onChange:   onChange,
 	}
 }
 
 // StartLoop begins periodic cache refresh every 10 seconds.
-func (m *NodeCacheManager) StartLoop(ctx context.Context) {
+func (m *CacheManager) StartLoop(ctx context.Context) {
 	// Eager first fetch in background (no-op if no nodes yet)
 	go m.RefreshAll()
 	go func() {
@@ -50,7 +53,7 @@ func (m *NodeCacheManager) StartLoop(ctx context.Context) {
 }
 
 // RefreshAll fetches and caches data from all active nodes in parallel.
-func (m *NodeCacheManager) RefreshAll() {
+func (m *CacheManager) RefreshAll() {
 	nodesCopy := m.getNodes()
 
 	type result struct {
@@ -62,7 +65,7 @@ func (m *NodeCacheManager) RefreshAll() {
 	}
 	ch := make(chan result, len(nodesCopy))
 	for id, nc := range nodesCopy {
-		go func(id string, nc NodeConn) {
+		go func(id string, nc Conn) {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 			var wg sync.WaitGroup
@@ -120,7 +123,7 @@ func (m *NodeCacheManager) RefreshAll() {
 
 // RefreshFor fetches and caches data for a single node immediately.
 // Called on reverse-node connect and on sessions_changed push.
-func (m *NodeCacheManager) RefreshFor(id string) {
+func (m *CacheManager) RefreshFor(id string) {
 	nodes := m.getNodes()
 	nc, ok := nodes[id]
 	if !ok {
@@ -132,11 +135,17 @@ func (m *NodeCacheManager) RefreshFor(id string) {
 
 	var wg sync.WaitGroup
 	var sessions, projects, discovered []map[string]any
+	var sessErr error
 	wg.Add(3)
-	go func() { defer wg.Done(); sessions, _ = nc.FetchSessions(ctx) }()
+	go func() { defer wg.Done(); sessions, sessErr = nc.FetchSessions(ctx) }()
 	go func() { defer wg.Done(); projects, _ = nc.FetchProjects(ctx) }()
 	go func() { defer wg.Done(); discovered, _ = nc.FetchDiscovered(ctx) }()
 	wg.Wait()
+
+	status := "ok"
+	if sessErr != nil {
+		status = "error"
+	}
 
 	for _, rs := range sessions {
 		rs["node"] = id
@@ -149,16 +158,10 @@ func (m *NodeCacheManager) RefreshFor(id string) {
 	}
 
 	m.mu.Lock()
-	if m.sessions == nil {
-		m.sessions = make(map[string][]map[string]any)
-		m.projects = make(map[string][]map[string]any)
-		m.discovered = make(map[string][]map[string]any)
-		m.status = make(map[string]string)
-	}
 	m.sessions[id] = sessions
 	m.projects[id] = projects
 	m.discovered[id] = discovered
-	m.status[id] = "ok"
+	m.status[id] = status
 	m.mu.Unlock()
 
 	if m.onChange != nil {
@@ -168,7 +171,7 @@ func (m *NodeCacheManager) RefreshFor(id string) {
 
 // PurgeNode removes all cached data for a node and marks it as error.
 // Called when a reverse-connected node disconnects.
-func (m *NodeCacheManager) PurgeNode(id string) {
+func (m *CacheManager) PurgeNode(id string) {
 	m.mu.Lock()
 	delete(m.sessions, id)
 	delete(m.projects, id)
@@ -179,7 +182,7 @@ func (m *NodeCacheManager) PurgeNode(id string) {
 
 // Sessions returns a snapshot of cached sessions and node status maps.
 // Returns shallow copies so callers can iterate without holding the lock.
-func (m *NodeCacheManager) Sessions() (map[string][]map[string]any, map[string]string) {
+func (m *CacheManager) Sessions() (map[string][]map[string]any, map[string]string) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	sessions := make(map[string][]map[string]any, len(m.sessions))
@@ -194,7 +197,7 @@ func (m *NodeCacheManager) Sessions() (map[string][]map[string]any, map[string]s
 }
 
 // Projects returns a snapshot of cached projects per node.
-func (m *NodeCacheManager) Projects() map[string][]map[string]any {
+func (m *CacheManager) Projects() map[string][]map[string]any {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	cp := make(map[string][]map[string]any, len(m.projects))
@@ -205,7 +208,7 @@ func (m *NodeCacheManager) Projects() map[string][]map[string]any {
 }
 
 // Discovered returns a snapshot of cached discovered sessions per node.
-func (m *NodeCacheManager) Discovered() map[string][]map[string]any {
+func (m *CacheManager) Discovered() map[string][]map[string]any {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	cp := make(map[string][]map[string]any, len(m.discovered))

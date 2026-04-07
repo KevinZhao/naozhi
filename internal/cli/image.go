@@ -1,4 +1,4 @@
-package server
+package cli
 
 import (
 	"os"
@@ -16,9 +16,9 @@ var safeImageDirs = []string{"/tmp/"}
 // imagePathRe matches absolute file paths ending in common image extensions.
 var imagePathRe = regexp.MustCompile(`(/\S+\.(?:png|jpg|jpeg|gif|webp|bmp))`)
 
-// extractImagePaths finds local image file paths in text that actually exist on disk.
+// ExtractImagePaths finds local image file paths in text that actually exist on disk.
 // Only paths under safe directories (e.g., /tmp) are returned.
-func extractImagePaths(text string) []string {
+func ExtractImagePaths(text string) []string {
 	matches := imagePathRe.FindAllString(text, 10) // cap at 10 images
 	var valid []string
 	seen := make(map[string]bool)
@@ -58,8 +58,8 @@ func isUnderSafeDir(path string) bool {
 	return false
 }
 
-// mimeFromPath returns a MIME type based on file extension.
-func mimeFromPath(path string) string {
+// MimeFromPath returns a MIME type based on file extension.
+func MimeFromPath(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".png":
 		return "image/png"

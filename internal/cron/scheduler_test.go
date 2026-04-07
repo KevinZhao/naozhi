@@ -11,8 +11,8 @@ import (
 
 func TestGenerateID(t *testing.T) {
 	id := generateID()
-	if len(id) != 8 {
-		t.Errorf("expected 8 char ID, got %d: %q", len(id), id)
+	if len(id) != 16 {
+		t.Errorf("expected 16 char ID, got %d: %q", len(id), id)
 	}
 	// Should be unique
 	id2 := generateID()

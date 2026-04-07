@@ -36,6 +36,7 @@ type DiscoveredSession struct {
 	State         string `json:"state"`                 // "running" or "ready"
 	Kind          string `json:"kind"`                  // "interactive" etc.
 	Entrypoint    string `json:"entrypoint"`            // "cli" etc.
+	CLIName       string `json:"cli_name,omitempty"`    // "claude-code", "kiro" (detected from process cmdline)
 	Summary       string `json:"summary,omitempty"`     // Claude-generated session name from sessions-index
 	LastPrompt    string `json:"last_prompt,omitempty"` // most recent user message
 	ProcStartTime uint64 `json:"proc_start_time"`       // /proc/PID/stat field 22, used to verify PID identity
@@ -185,36 +186,12 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 		}
 	}
 
-	// Cache parsed sessions-index.json per project directory to avoid
-	// re-reading the same file for every session sharing a CWD.
-	indexCache := make(map[string]*sessionsIndex)
-	cachedLookupSummary := func(cwd, sessionID string) string {
-		indexPath := filepath.Join(claudeDir, "projects", projDirName(cwd), "sessions-index.json")
-		idx, ok := indexCache[indexPath]
-		if !ok {
-			data, err := os.ReadFile(indexPath)
-			if err != nil {
-				indexCache[indexPath] = nil
-				return ""
-			}
-			var parsed sessionsIndex
-			if err := json.Unmarshal(data, &parsed); err != nil {
-				indexCache[indexPath] = nil
-				return ""
-			}
-			idx = &parsed
-			indexCache[indexPath] = idx
-		}
-		if idx == nil {
-			return ""
-		}
-		for _, e := range idx.Entries {
-			if e.SessionID == sessionID {
-				return e.Summary
-			}
-		}
-		return ""
+	// Batch-lookup summaries from sessions-index.json for all candidates.
+	candidateWorkspaces := make(map[string]string, len(candidates))
+	for i := range candidates {
+		candidateWorkspaces[candidates[i].sf.SessionID] = candidates[i].sf.CWD
 	}
+	summaryMap := LookupSummaries(claudeDir, candidateWorkspaces)
 
 	nowMs := time.Now().UnixMilli()
 	var result []DiscoveredSession
@@ -234,7 +211,8 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 			State:         state,
 			Kind:          c.sf.Kind,
 			Entrypoint:    c.sf.Entrypoint,
-			Summary:       cachedLookupSummary(c.sf.CWD, c.sf.SessionID),
+			CLIName:       detectCLIName(c.sf.PID),
+			Summary:       summaryMap[c.sf.SessionID],
 			LastPrompt:    extractLastPrompt(claudeDir, c.sf.CWD, c.sf.SessionID),
 			ProcStartTime: pst,
 		})
@@ -443,6 +421,69 @@ func ProcStartTime(pid int) (uint64, error) {
 }
 
 var sessionIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// detectCLIName reads /proc/PID/cmdline to determine which CLI binary is running.
+// Returns "claude-code", "kiro", or "cli" as fallback.
+func detectCLIName(pid int) string {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
+	if err != nil {
+		return "cli"
+	}
+	// cmdline is NUL-separated; first field is the binary path.
+	if i := bytes.IndexByte(data, 0); i >= 0 {
+		data = data[:i]
+	}
+	bin := filepath.Base(string(data))
+	switch {
+	case strings.Contains(bin, "kiro"):
+		return "kiro"
+	case strings.Contains(bin, "claude"):
+		return "claude-code"
+	default:
+		return "cli"
+	}
+}
+
+// LookupSummaries looks up Claude-generated summaries for the given sessions.
+// The sessions map is sessionID → workspace (CWD path).
+// Returns a map of sessionID → summary.
+func LookupSummaries(claudeDir string, sessions map[string]string) map[string]string {
+	if claudeDir == "" || len(sessions) == 0 {
+		return nil
+	}
+
+	// Group session IDs by project directory to read each index file once.
+	byProjDir := make(map[string][]string) // indexPath → []sessionID
+	for sid, workspace := range sessions {
+		if workspace == "" {
+			continue
+		}
+		indexPath := filepath.Join(claudeDir, "projects", projDirName(workspace), "sessions-index.json")
+		byProjDir[indexPath] = append(byProjDir[indexPath], sid)
+	}
+
+	result := make(map[string]string, len(sessions))
+	for indexPath, sids := range byProjDir {
+		data, err := os.ReadFile(indexPath)
+		if err != nil {
+			continue
+		}
+		var idx sessionsIndex
+		if err := json.Unmarshal(data, &idx); err != nil {
+			continue
+		}
+		wanted := make(map[string]bool, len(sids))
+		for _, sid := range sids {
+			wanted[sid] = true
+		}
+		for _, e := range idx.Entries {
+			if wanted[e.SessionID] && e.Summary != "" {
+				result[e.SessionID] = e.Summary
+			}
+		}
+	}
+	return result
+}
 
 // IsValidSessionID checks whether s is a valid UUID-format session ID.
 func IsValidSessionID(s string) bool {

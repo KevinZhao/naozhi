@@ -50,6 +50,22 @@ claude -p \
   --dangerously-skip-permissions
 ```
 
+> **安全须知: `--dangerously-skip-permissions`**
+>
+> 此标志授予 Claude CLI 完全的文件系统和命令执行权限，无交互确认。这是网关场景的必要条件
+> （IM 消息无法触发权限弹窗），但意味着：
+>
+> - IM 用户输入的任何消息都会被 Claude 以服务器用户权限执行
+> - Prompt injection 攻击可能导致数据泄露或系统损坏
+> - `session.cwd` / `allowedRoot` 只限制 `/cd` 命令，不限制 Claude 进程本身的文件访问
+>
+> **缓解措施：**
+> 1. 生产环境必须设置 `server.dashboard_token`
+> 2. 使用低权限用户运行 naozhi（非 root）
+> 3. 通过 `session.cwd` 限制默认工作目录
+> 4. 考虑在容器或 VM 中运行以隔离文件系统
+> 5. 配置飞书等平台的机器人可见范围，限制可发送消息的用户
+
 **hooks 隔离** (已验证):
 
 死循环根因：**插件的 Stop hooks**（claude-mem 的 summarize + ECC 的 4 个 Stop hooks）在 stream-json 模式下被注入为 user message，触发模型回复循环。
@@ -180,11 +196,9 @@ claude CLI 子进程的状态机：
   --resume 恢复    |   Dead     |
          |         +-----+------+
          |               |
-         +---------+     | 无 session_id
+         +---------+     | 无 session_id → 从 router 中清除
                          v
-                   +-----+------+
-                   |  Discarded |
-                   +------------+
+                      (丢弃)
 
 空闲超时 (Ready 状态超过 TTL, 默认 30min):
   Ready ---> 关闭 stdin ---> 进程退出 ---> Dead (保留 session_id, 下次 --resume 恢复)
@@ -194,8 +208,7 @@ claude CLI 子进程的状态机：
 - **Spawning**: 进程启动中，等待 init 事件。超时 10s 未收到 init 则 kill
 - **Ready**: 进程空闲，可接受新消息
 - **Running**: 正在处理消息，等待 result。启用 Watchdog: 无输出超时 120s（配置默认值）+ 总超时 300s（配置默认值）。任何一个超时触发即杀死进程
-- **Dead**: 进程已退出，保留 session_id 供 resume
-- **Discarded**: 无法恢复，丢弃
+- **Dead**: 进程已退出。有 session_id 的保留供 resume；无 session_id 的在 Cleanup 时清除
 
 Watchdog 机制：
 - `no_output_timeout`（默认 2min）：若连续无输出事件，杀死进程

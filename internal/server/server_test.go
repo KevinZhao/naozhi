@@ -9,7 +9,9 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/routing"
 	"github.com/naozhi/naozhi/internal/session"
@@ -74,6 +76,32 @@ func newTestServerWithToken(p *mockPlatform, token string) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
 	return New(":0", router, platforms, nil, nil, nil, "claude", ServerOptions{DashboardToken: token})
+}
+
+func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
+	return &dispatch.Dispatcher{
+		Router:        srv.router,
+		Platforms:     srv.platforms,
+		Agents:        srv.agents,
+		AgentCommands: srv.agentCommands,
+		Scheduler:     srv.scheduler,
+		ProjectMgr:    srv.projectMgr,
+		Guard:         srv.sessionGuard,
+		Dedup:         srv.dedup,
+		AllowedRoot:   srv.allowedRoot,
+		ClaudeDir:     srv.claudeDir,
+		BackendTag:    srv.backendTag,
+		SendFn: func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error) {
+			return sess.Send(ctx, text, images, onEvent)
+		},
+		TakeoverFn: func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool {
+			return false
+		},
+		NoOutputTimeout:       srv.noOutputTimeout,
+		TotalTimeout:          srv.totalTimeout,
+		WatchdogNoOutputKills: &srv.watchdogNoOutputKills,
+		WatchdogTotalKills:    &srv.watchdogTotalKills,
+	}
 }
 
 // ─── handleHealth ─────────────────────────────────────────────────────────────
@@ -142,7 +170,7 @@ func TestHandleHealth_SessionsField(t *testing.T) {
 func TestBuildMessageHandler_DedupDuplicateEventID(t *testing.T) {
 	p := &mockPlatform{}
 	srv := newTestServerWithScheduler(p)
-	handler := srv.buildMessageHandler()
+	handler := newTestDispatcher(srv).BuildHandler()
 
 	msg := platform.IncomingMessage{
 		Platform: "test",
@@ -167,7 +195,7 @@ func TestBuildMessageHandler_DedupDuplicateEventID(t *testing.T) {
 func TestBuildMessageHandler_DedupEmptyEventIDNotFiltered(t *testing.T) {
 	p := &mockPlatform{}
 	srv := newTestServerWithScheduler(p)
-	handler := srv.buildMessageHandler()
+	handler := newTestDispatcher(srv).BuildHandler()
 
 	// empty EventID is never recorded by dedup
 	msg := platform.IncomingMessage{
@@ -189,7 +217,7 @@ func TestBuildMessageHandler_DedupEmptyEventIDNotFiltered(t *testing.T) {
 func TestBuildMessageHandler_NewResetsGeneral(t *testing.T) {
 	p := &mockPlatform{}
 	srv := newTestServer(p)
-	handler := srv.buildMessageHandler()
+	handler := newTestDispatcher(srv).BuildHandler()
 
 	handler(context.Background(), platform.IncomingMessage{
 		Platform: "test",
@@ -218,7 +246,7 @@ func TestBuildMessageHandler_NewResetsNamedAgent(t *testing.T) {
 	agentCommands := map[string]string{"review": "code-reviewer"}
 	agents := map[string]session.AgentOpts{"code-reviewer": {}}
 	srv := New(":0", router, platforms, agents, agentCommands, nil, "claude", ServerOptions{})
-	handler := srv.buildMessageHandler()
+	handler := newTestDispatcher(srv).BuildHandler()
 
 	handler(context.Background(), platform.IncomingMessage{
 		Platform: "test",
@@ -239,7 +267,7 @@ func TestBuildMessageHandler_NewResetsNamedAgent(t *testing.T) {
 func TestBuildMessageHandler_NewUnknownAgentRepliesError(t *testing.T) {
 	p := &mockPlatform{}
 	srv := newTestServer(p)
-	handler := srv.buildMessageHandler()
+	handler := newTestDispatcher(srv).BuildHandler()
 
 	handler(context.Background(), platform.IncomingMessage{
 		Platform: "test",
@@ -262,7 +290,7 @@ func TestBuildMessageHandler_NewUnknownAgentRepliesError(t *testing.T) {
 func TestBuildMessageHandler_CronNilSchedulerSilent(t *testing.T) {
 	p := &mockPlatform{}
 	srv := newTestServer(p) // scheduler is nil
-	handler := srv.buildMessageHandler()
+	handler := newTestDispatcher(srv).BuildHandler()
 
 	handler(context.Background(), platform.IncomingMessage{
 		Platform: "test",
@@ -279,7 +307,7 @@ func TestBuildMessageHandler_CronNilSchedulerSilent(t *testing.T) {
 func TestBuildMessageHandler_CronNoSubcommandShowsUsage(t *testing.T) {
 	p := &mockPlatform{}
 	srv := newTestServerWithScheduler(p)
-	handler := srv.buildMessageHandler()
+	handler := newTestDispatcher(srv).BuildHandler()
 
 	handler(context.Background(), platform.IncomingMessage{
 		Platform: "test",
@@ -300,7 +328,7 @@ func TestBuildMessageHandler_CronNoSubcommandShowsUsage(t *testing.T) {
 func TestBuildMessageHandler_CronListEmpty(t *testing.T) {
 	p := &mockPlatform{}
 	srv := newTestServerWithScheduler(p)
-	handler := srv.buildMessageHandler()
+	handler := newTestDispatcher(srv).BuildHandler()
 
 	handler(context.Background(), platform.IncomingMessage{
 		Platform: "test",
@@ -321,7 +349,7 @@ func TestBuildMessageHandler_CronListEmpty(t *testing.T) {
 func TestBuildMessageHandler_CronAddInvalidSchedule(t *testing.T) {
 	p := &mockPlatform{}
 	srv := newTestServerWithScheduler(p)
-	handler := srv.buildMessageHandler()
+	handler := newTestDispatcher(srv).BuildHandler()
 
 	handler(context.Background(), platform.IncomingMessage{
 		Platform: "test",
@@ -342,7 +370,7 @@ func TestBuildMessageHandler_CronAddInvalidSchedule(t *testing.T) {
 func TestBuildMessageHandler_CronAddMissingPrompt(t *testing.T) {
 	p := &mockPlatform{}
 	srv := newTestServerWithScheduler(p)
-	handler := srv.buildMessageHandler()
+	handler := newTestDispatcher(srv).BuildHandler()
 
 	handler(context.Background(), platform.IncomingMessage{
 		Platform: "test",
@@ -363,7 +391,7 @@ func TestBuildMessageHandler_CronAddMissingPrompt(t *testing.T) {
 func TestBuildMessageHandler_CronDelMissingID(t *testing.T) {
 	p := &mockPlatform{}
 	srv := newTestServerWithScheduler(p)
-	handler := srv.buildMessageHandler()
+	handler := newTestDispatcher(srv).BuildHandler()
 
 	handler(context.Background(), platform.IncomingMessage{
 		Platform: "test",
@@ -387,7 +415,7 @@ func TestSendSplitReply_ShortMessageSingleReply(t *testing.T) {
 	p := &mockPlatform{maxLen: 100}
 	srv := newTestServer(p)
 
-	srv.sendSplitReply(context.Background(), p, "chat1", "hello world")
+	newTestDispatcher(srv).SendSplitReply(context.Background(), p, "chat1", "hello world")
 
 	if p.replyCount() != 1 {
 		t.Fatalf("expected 1 reply, got %d", p.replyCount())
@@ -402,7 +430,7 @@ func TestSendSplitReply_LongMessageSplitsCorrectly(t *testing.T) {
 	srv := newTestServer(p)
 
 	text := strings.Repeat("a", 35)
-	srv.sendSplitReply(context.Background(), p, "chat1", text)
+	newTestDispatcher(srv).SendSplitReply(context.Background(), p, "chat1", text)
 
 	if p.replyCount() < 2 {
 		t.Fatalf("expected >= 2 replies for 35-char text with maxLen=10, got %d", p.replyCount())
@@ -428,7 +456,7 @@ func TestSendSplitReply_ZeroMaxLenDefaultsTo4000(t *testing.T) {
 	p := &mockPlatform{maxLen: 0} // triggers default 4000
 	srv := newTestServer(p)
 
-	srv.sendSplitReply(context.Background(), p, "chat1", "short")
+	newTestDispatcher(srv).SendSplitReply(context.Background(), p, "chat1", "short")
 
 	if p.replyCount() != 1 {
 		t.Errorf("expected 1 reply with 4000 default maxLen, got %d", p.replyCount())
@@ -439,7 +467,7 @@ func TestSendSplitReply_ExactlyMaxLen(t *testing.T) {
 	p := &mockPlatform{maxLen: 5}
 	srv := newTestServer(p)
 
-	srv.sendSplitReply(context.Background(), p, "chat1", "hello")
+	newTestDispatcher(srv).SendSplitReply(context.Background(), p, "chat1", "hello")
 
 	if p.replyCount() != 1 {
 		t.Errorf("expected 1 reply for text exactly at maxLen, got %d", p.replyCount())
@@ -450,7 +478,7 @@ func TestSendSplitReply_ChatIDForwarded(t *testing.T) {
 	p := &mockPlatform{maxLen: 100}
 	srv := newTestServer(p)
 
-	srv.sendSplitReply(context.Background(), p, "room-xyz", "some text")
+	newTestDispatcher(srv).SendSplitReply(context.Background(), p, "room-xyz", "some text")
 
 	for _, r := range p.allReplies() {
 		if r.ChatID != "room-xyz" {
@@ -592,7 +620,7 @@ func TestParseCronAdd(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.args, func(t *testing.T) {
-			schedule, prompt, err := parseCronAdd(tt.args)
+			schedule, prompt, err := dispatch.ParseCronAdd(tt.args)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("parseCronAdd(%q): err=%v, wantErr=%v", tt.args, err, tt.wantErr)
 				return

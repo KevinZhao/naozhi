@@ -1,4 +1,4 @@
-package server
+package node
 
 import (
 	"bytes"
@@ -15,8 +15,8 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
-// NodeClient is an HTTP client for a remote naozhi instance.
-type NodeClient struct {
+// HTTPClient is an HTTP client for a remote naozhi instance.
+type HTTPClient struct {
 	ID          string
 	URL         string // e.g. "http://10.0.0.2:8180"
 	Token       string // dashboard bearer token
@@ -27,9 +27,9 @@ type NodeClient struct {
 	relay   *wsRelay
 }
 
-// NewNodeClient creates a NodeClient with a 10s timeout.
-func NewNodeClient(id, url, token, displayName string) *NodeClient {
-	return &NodeClient{
+// NewHTTPClient creates an HTTPClient with a 10s timeout.
+func NewHTTPClient(id, url, token, displayName string) *HTTPClient {
+	return &HTTPClient{
 		ID:          id,
 		URL:         url,
 		Token:       token,
@@ -40,7 +40,7 @@ func NewNodeClient(id, url, token, displayName string) *NodeClient {
 	}
 }
 
-func (n *NodeClient) doRequest(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
+func (n *HTTPClient) doRequest(ctx context.Context, method, path string, body io.Reader) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, n.URL+path, body)
 	if err != nil {
 		return nil, err
@@ -55,7 +55,7 @@ func (n *NodeClient) doRequest(ctx context.Context, method, path string, body io
 }
 
 // FetchSessions fetches sessions from the remote node via GET /api/sessions.
-func (n *NodeClient) FetchSessions(ctx context.Context) ([]map[string]any, error) {
+func (n *HTTPClient) FetchSessions(ctx context.Context) ([]map[string]any, error) {
 	resp, err := n.doRequest(ctx, http.MethodGet, "/api/sessions", nil)
 	if err != nil {
 		return nil, fmt.Errorf("fetch sessions from %s: %w", n.ID, err)
@@ -77,7 +77,7 @@ func (n *NodeClient) FetchSessions(ctx context.Context) ([]map[string]any, error
 }
 
 // FetchEvents fetches event entries from the remote node via GET /api/sessions/events.
-func (n *NodeClient) FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error) {
+func (n *HTTPClient) FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error) {
 	path := "/api/sessions/events?key=" + url.QueryEscape(key)
 	if after > 0 {
 		path += "&after=" + strconv.FormatInt(after, 10)
@@ -101,7 +101,7 @@ func (n *NodeClient) FetchEvents(ctx context.Context, key string, after int64) (
 }
 
 // Send sends a message to a session on the remote node via POST /api/sessions/send.
-func (n *NodeClient) Send(ctx context.Context, key, text, workspace string) error {
+func (n *HTTPClient) Send(ctx context.Context, key, text, workspace string) error {
 	payload := map[string]string{"key": key, "text": text}
 	if workspace != "" {
 		payload["workspace"] = workspace
@@ -121,7 +121,7 @@ func (n *NodeClient) Send(ctx context.Context, key, text, workspace string) erro
 }
 
 // FetchProjects fetches projects from the remote node via GET /api/projects.
-func (n *NodeClient) FetchProjects(ctx context.Context) ([]map[string]any, error) {
+func (n *HTTPClient) FetchProjects(ctx context.Context) ([]map[string]any, error) {
 	resp, err := n.doRequest(ctx, http.MethodGet, "/api/projects", nil)
 	if err != nil {
 		return nil, fmt.Errorf("fetch projects from %s: %w", n.ID, err)
@@ -141,7 +141,7 @@ func (n *NodeClient) FetchProjects(ctx context.Context) ([]map[string]any, error
 }
 
 // FetchDiscovered fetches discovered sessions from the remote node via GET /api/discovered.
-func (n *NodeClient) FetchDiscovered(ctx context.Context) ([]map[string]any, error) {
+func (n *HTTPClient) FetchDiscovered(ctx context.Context) ([]map[string]any, error) {
 	resp, err := n.doRequest(ctx, http.MethodGet, "/api/discovered", nil)
 	if err != nil {
 		return nil, fmt.Errorf("fetch discovered from %s: %w", n.ID, err)
@@ -161,8 +161,8 @@ func (n *NodeClient) FetchDiscovered(ctx context.Context) ([]map[string]any, err
 }
 
 // FetchDiscoveredPreview fetches conversation history for a discovered session from the remote node.
-func (n *NodeClient) FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]cli.EventEntry, error) {
-	resp, err := n.doRequest(ctx, http.MethodGet, "/api/discovered/preview?session_id="+sessionID, nil)
+func (n *HTTPClient) FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]cli.EventEntry, error) {
+	resp, err := n.doRequest(ctx, http.MethodGet, "/api/discovered/preview?session_id="+url.QueryEscape(sessionID), nil)
 	if err != nil {
 		return nil, fmt.Errorf("fetch discovered preview from %s: %w", n.ID, err)
 	}
@@ -181,7 +181,7 @@ func (n *NodeClient) FetchDiscoveredPreview(ctx context.Context, sessionID strin
 }
 
 // ProxyTakeover forwards a takeover request to the remote node.
-func (n *NodeClient) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStartTime uint64) error {
+func (n *HTTPClient) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStartTime uint64) error {
 	payload := map[string]any{"pid": pid, "session_id": sessionID, "cwd": cwd, "proc_start_time": procStartTime}
 	data, _ := json.Marshal(payload)
 	resp, err := n.doRequest(ctx, http.MethodPost, "/api/discovered/takeover", bytes.NewReader(data))
@@ -197,7 +197,7 @@ func (n *NodeClient) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd 
 }
 
 // ProxyRestartPlanner forwards a planner restart request to the remote node.
-func (n *NodeClient) ProxyRestartPlanner(ctx context.Context, projectName string) error {
+func (n *HTTPClient) ProxyRestartPlanner(ctx context.Context, projectName string) error {
 	resp, err := n.doRequest(ctx, http.MethodPost, "/api/projects/planner/restart?name="+url.QueryEscape(projectName), nil)
 	if err != nil {
 		return fmt.Errorf("proxy restart planner to %s: %w", n.ID, err)
@@ -211,7 +211,7 @@ func (n *NodeClient) ProxyRestartPlanner(ctx context.Context, projectName string
 }
 
 // ProxyUpdateConfig forwards a project config update to the remote node.
-func (n *NodeClient) ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error {
+func (n *HTTPClient) ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error {
 	resp, err := n.doRequest(ctx, http.MethodPut, "/api/projects/config?name="+url.QueryEscape(projectName), bytes.NewReader(cfg))
 	if err != nil {
 		return fmt.Errorf("proxy update config to %s: %w", n.ID, err)
@@ -224,12 +224,12 @@ func (n *NodeClient) ProxyUpdateConfig(ctx context.Context, projectName string, 
 	return nil
 }
 
-func (n *NodeClient) NodeID() string      { return n.ID }
-func (n *NodeClient) DisplayName() string { return n.displayName }
-func (n *NodeClient) Status() string      { return "ok" }
-func (n *NodeClient) RemoteAddr() string  { return n.URL }
+func (n *HTTPClient) NodeID() string      { return n.ID }
+func (n *HTTPClient) DisplayName() string { return n.displayName }
+func (n *HTTPClient) Status() string      { return "ok" }
+func (n *HTTPClient) RemoteAddr() string  { return n.URL }
 
-func (n *NodeClient) Subscribe(c wsEventSink, key string, after int64) {
+func (n *HTTPClient) Subscribe(c EventSink, key string, after int64) {
 	n.relayMu.Lock()
 	if n.relay == nil {
 		n.relay = newWSRelay(n)
@@ -239,7 +239,7 @@ func (n *NodeClient) Subscribe(c wsEventSink, key string, after int64) {
 	relay.Subscribe(c, key, after)
 }
 
-func (n *NodeClient) Unsubscribe(c wsEventSink, key string) {
+func (n *HTTPClient) Unsubscribe(c EventSink, key string) {
 	n.relayMu.Lock()
 	relay := n.relay
 	n.relayMu.Unlock()
@@ -248,7 +248,7 @@ func (n *NodeClient) Unsubscribe(c wsEventSink, key string) {
 	}
 }
 
-func (n *NodeClient) RemoveClient(c wsEventSink) {
+func (n *HTTPClient) RemoveClient(c EventSink) {
 	n.relayMu.Lock()
 	relay := n.relay
 	n.relayMu.Unlock()
@@ -257,7 +257,7 @@ func (n *NodeClient) RemoveClient(c wsEventSink) {
 	}
 }
 
-func (n *NodeClient) Close() {
+func (n *HTTPClient) Close() {
 	n.relayMu.Lock()
 	relay := n.relay
 	n.relay = nil

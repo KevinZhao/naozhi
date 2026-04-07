@@ -64,6 +64,8 @@ type ManagedSession struct {
 	sendMu      sync.Mutex // serializes messages to the same session
 	sendCancel  atomic.Pointer[context.CancelFunc]
 	workspace   string       // effective cwd at spawn time
+	cliName     string       // "claude-code", "kiro" — set at creation from Wrapper
+	cliVersion  string       // semver from --version — set at creation from Wrapper
 	deathReason atomic.Value // string: why process died, empty if alive
 	totalCost   float64      // cached cost when process is nil
 
@@ -196,12 +198,25 @@ func (s *ManagedSession) parseKeyParts() {
 	})
 }
 
+// maxKeyComponent is the maximum length of a single session key component.
+const maxKeyComponent = 128
+
+// sanitizeKeyComponent truncates and strips colons from a session key component
+// to prevent key confusion and unbounded map key growth.
+func sanitizeKeyComponent(s string) string {
+	s = strings.ReplaceAll(s, ":", "_")
+	if len(s) > maxKeyComponent {
+		s = s[:maxKeyComponent]
+	}
+	return s
+}
+
 // SessionKey builds a session key from components.
 func SessionKey(platform, chatType, id, agentID string) string {
 	if agentID == "" {
 		agentID = "general"
 	}
-	return platform + ":" + chatType + ":" + id + ":" + agentID
+	return sanitizeKeyComponent(platform) + ":" + sanitizeKeyComponent(chatType) + ":" + sanitizeKeyComponent(id) + ":" + sanitizeKeyComponent(agentID)
 }
 
 // SessionSnapshot is a point-in-time view of a session for the dashboard API.
@@ -212,7 +227,9 @@ type SessionSnapshot struct {
 	SessionID    string             `json:"session_id"`
 	State        string             `json:"state"`
 	Protocol     string             `json:"protocol"`
-	LastActive   int64              `json:"last_active"` // unix ms
+	CLIName      string             `json:"cli_name,omitempty"`    // "claude-code", "kiro"
+	CLIVersion   string             `json:"cli_version,omitempty"` // e.g. "2.1.92"
+	LastActive   int64              `json:"last_active"`           // unix ms
 	TotalCost    float64            `json:"total_cost"`
 	Workspace    string             `json:"workspace,omitempty"`
 	DeathReason  string             `json:"death_reason,omitempty"`
@@ -221,6 +238,7 @@ type SessionSnapshot struct {
 	Node         string             `json:"node,omitempty"`
 	LastPrompt   string             `json:"last_prompt,omitempty"`   // most recent user message
 	LastActivity string             `json:"last_activity,omitempty"` // most recent tool/thinking status
+	Summary      string             `json:"summary,omitempty"`       // Claude-generated session title
 	Project      string             `json:"project,omitempty"`       // project name (filled by server)
 	IsPlanner    bool               `json:"is_planner,omitempty"`    // true for project planner sessions
 	Subagents    []cli.SubagentInfo `json:"subagents,omitempty"`     // active sub-agent types in current turn
@@ -238,6 +256,8 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		SessionID:  s.getSessionID(),
 		LastActive: s.GetLastActive().UnixMilli(),
 		Workspace:  s.workspace,
+		CLIName:    s.cliName,
+		CLIVersion: s.cliVersion,
 	}
 	if dr, ok := s.deathReason.Load().(string); ok {
 		snap.DeathReason = dr

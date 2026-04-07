@@ -126,7 +126,7 @@ func (f *fakeProcess) setRunning(v bool) {
 func newTestRouter(maxProcs int) *Router {
 	return &Router{
 		sessions: make(map[string]*ManagedSession),
-		wrapper:  cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}),
+		wrapper:  cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
 		maxProcs: maxProcs,
 		ttl:      30 * time.Minute,
 	}
@@ -388,8 +388,10 @@ func TestCleanupSkipsNilProcess(t *testing.T) {
 		maxProcs: 3,
 		ttl:      1 * time.Minute,
 	}
-	r.sessions["key1"] = &ManagedSession{Key: "key1"}
-	r.sessions["key1"].setSessionID("sess-1")
+	s := &ManagedSession{Key: "key1"}
+	s.setSessionID("sess-1")
+	s.lastActive.Store(time.Now().UnixNano()) // recent → within 7*TTL window
+	r.sessions["key1"] = s
 
 	r.Cleanup() // must not panic
 
@@ -524,7 +526,7 @@ func TestGetOrCreate_NilProcessSession_AttemptSpawn(t *testing.T) {
 func TestGetOrCreate_AgentOptsOverride(t *testing.T) {
 	r := &Router{
 		sessions:  make(map[string]*ManagedSession),
-		wrapper:   cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}),
+		wrapper:   cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
 		maxProcs:  3,
 		ttl:       30 * time.Minute,
 		model:     "default-model",

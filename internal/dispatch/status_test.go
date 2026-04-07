@@ -1,4 +1,4 @@
-package server
+package dispatch
 
 import (
 	"encoding/json"

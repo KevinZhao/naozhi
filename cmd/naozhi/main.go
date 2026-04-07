@@ -17,10 +17,9 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/config"
-	"github.com/naozhi/naozhi/internal/connector"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
-	"github.com/naozhi/naozhi/internal/pathutil"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
 	discordplatform "github.com/naozhi/naozhi/internal/platform/discord"
 	"github.com/naozhi/naozhi/internal/platform/feishu"
@@ -30,6 +29,7 @@ import (
 	"github.com/naozhi/naozhi/internal/server"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/transcribe"
+	"github.com/naozhi/naozhi/internal/upstream"
 )
 
 var version = "dev"
@@ -244,12 +244,12 @@ func main() {
 	default:
 		proto = &cli.ClaudeProtocol{SettingsFile: settingsFile}
 	}
-	wrapper := cli.NewWrapper(cfg.CLI.Path, proto)
+	wrapper := cli.NewWrapper(cfg.CLI.Path, proto, cfg.CLI.Backend)
 
 	// Parse watchdog and store path
 	noOutputTimeout, totalTimeout := cfg.ParseWatchdog()
-	storePath := pathutil.ExpandHome(cfg.Session.StorePath)
-	workspace := pathutil.ExpandHome(cfg.Session.CWD)
+	storePath := config.ExpandHome(cfg.Session.StorePath)
+	workspace := config.ExpandHome(cfg.Session.CWD)
 	if err := os.MkdirAll(workspace, 0700); err != nil {
 		slog.Error("create workspace dir", "path", workspace, "err", err)
 		os.Exit(1)
@@ -297,7 +297,11 @@ func main() {
 				LanguageCode: cfg.Transcribe.Language,
 			})
 			if sttErr == nil {
-				slog.Info("transcribe enabled", "region", cfg.Transcribe.Region, "language", cfg.Transcribe.Language)
+				if strings.Contains(cfg.Transcribe.Language, ",") {
+					slog.Info("transcribe enabled", "region", cfg.Transcribe.Region, "mode", "multi-language", "languages", cfg.Transcribe.Language)
+				} else {
+					slog.Info("transcribe enabled", "region", cfg.Transcribe.Region, "language", cfg.Transcribe.Language)
+				}
 			}
 		}()
 	}
@@ -305,7 +309,7 @@ func main() {
 		initWg.Add(1)
 		go func() {
 			defer initWg.Done()
-			root := pathutil.ExpandHome(cfg.Projects.Root)
+			root := config.ExpandHome(cfg.Projects.Root)
 			mgr, err := project.NewManager(root, project.PlannerDefaults{
 				Model:  cfg.Projects.PlannerDefaults.Model,
 				Prompt: cfg.Projects.PlannerDefaults.Prompt,
@@ -396,7 +400,7 @@ func main() {
 		Platforms:     platforms,
 		Agents:        agents,
 		AgentCommands: cfg.AgentCommands,
-		StorePath:     pathutil.ExpandHome(cfg.Cron.StorePath),
+		StorePath:     config.ExpandHome(cfg.Cron.StorePath),
 		MaxJobs:       cfg.Cron.MaxJobs,
 		ExecTimeout:   cfg.ParseExecutionTimeout(),
 	})
@@ -406,19 +410,19 @@ func main() {
 	}
 
 	// Configure remote nodes for multi-node aggregation
-	var nodes map[string]server.NodeConn
+	var nodes map[string]node.Conn
 	if len(cfg.Nodes) > 0 {
-		nodes = make(map[string]server.NodeConn, len(cfg.Nodes))
+		nodes = make(map[string]node.Conn, len(cfg.Nodes))
 		for id, nc := range cfg.Nodes {
-			nodes[id] = server.NewNodeClient(id, nc.URL, nc.Token, nc.DisplayName)
+			nodes[id] = node.NewHTTPClient(id, nc.URL, nc.Token, nc.DisplayName)
 		}
 		slog.Info("multi-node configured", "nodes", len(nodes))
 	}
 
 	// Configure reverse-connecting nodes (NAT traversal)
-	var rns *server.ReverseNodeServer
+	var rns *node.ReverseServer
 	if len(cfg.ReverseNodes) > 0 {
-		rns = server.NewReverseNodeServer(cfg.ReverseNodes)
+		rns = node.NewReverseServer(cfg.ReverseNodes)
 		slog.Info("reverse node auth configured", "nodes", len(cfg.ReverseNodes))
 	}
 
@@ -438,7 +442,7 @@ func main() {
 
 	// Start upstream connector (this node connects to a primary)
 	if cfg.Upstream != nil {
-		conn := connector.New(cfg.Upstream, router, projectMgr)
+		conn := upstream.New(cfg.Upstream, router, projectMgr)
 		if claudeDir != "" {
 			conn.SetDiscoverFunc(func() (json.RawMessage, error) {
 				pids, sids, cwds := router.ManagedExcludeSets()
@@ -499,6 +503,10 @@ func main() {
 		"max_procs", cfg.Session.MaxProcs,
 		"platforms", len(platforms),
 	)
+
+	if cfg.Server.DashboardToken == "" {
+		slog.Warn("dashboard_token is not set — dashboard and WebSocket API are accessible without authentication. Set server.dashboard_token in config.yaml for production use.")
+	}
 
 	serverErr := make(chan error, 1)
 	go func() {

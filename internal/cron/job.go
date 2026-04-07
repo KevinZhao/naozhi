@@ -20,6 +20,9 @@ type Job struct {
 	CreatedAt time.Time `json:"created_at"`
 	Paused    bool      `json:"paused"`
 
+	// Optional working directory override for the CLI process.
+	WorkDir string `json:"work_dir,omitempty"`
+
 	// Optional notification target for dashboard-created jobs.
 	// When set, execution results are also sent to this IM channel.
 	NotifyPlatform string `json:"notify_platform,omitempty"`
@@ -33,16 +36,22 @@ type Job struct {
 	entryID robfigcron.EntryID // runtime only, not persisted
 }
 
-// generateID returns an 8-char hex string.
+// generateID returns a 16-char hex string (8 bytes of entropy).
 func generateID() string {
-	b := make([]byte, 4)
-	_, _ = rand.Read(b)
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand unavailable: " + err.Error())
+	}
 	return fmt.Sprintf("%x", b)
 }
 
+// cronParser is the shared parser for all schedule validation and preview.
+var cronParser = robfigcron.NewParser(
+	robfigcron.Minute | robfigcron.Hour | robfigcron.Dom | robfigcron.Month | robfigcron.Dow | robfigcron.Descriptor,
+)
+
 // validateSchedule checks if the cron expression is valid.
 func validateSchedule(schedule string) error {
-	parser := robfigcron.NewParser(robfigcron.Minute | robfigcron.Hour | robfigcron.Dom | robfigcron.Month | robfigcron.Dow | robfigcron.Descriptor)
-	_, err := parser.Parse(schedule)
+	_, err := cronParser.Parse(schedule)
 	return err
 }

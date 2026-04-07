@@ -7,6 +7,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/naozhi/naozhi/internal/node"
 )
 
 const (
@@ -32,16 +34,16 @@ func (c *wsClient) closeDone() {
 	c.doneOnce.Do(func() { close(c.done) })
 }
 
-func (c *wsClient) sendJSON(v interface{}) {
+func (c *wsClient) SendJSON(v interface{}) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return
 	}
-	c.sendRaw(data)
+	c.SendRaw(data)
 }
 
-// sendRaw sends pre-marshalled bytes to the client's send channel (non-blocking).
-func (c *wsClient) sendRaw(data []byte) {
+// SendRaw sends pre-marshalled bytes to the client's send channel (non-blocking).
+func (c *wsClient) SendRaw(data []byte) {
 	select {
 	case c.send <- data:
 	case <-c.done:
@@ -76,7 +78,7 @@ func (c *wsClient) readPump() {
 			return
 		}
 
-		var msg wsClientMsg
+		var msg node.ClientMsg
 		if err := json.Unmarshal(data, &msg); err != nil {
 			continue
 		}
@@ -89,7 +91,7 @@ func (c *wsClient) readPump() {
 			}
 		case "subscribe":
 			if !c.authenticated.Load() {
-				c.sendJSON(wsServerMsg{Type: "error", Error: "not authenticated"})
+				c.SendJSON(node.ServerMsg{Type: "error", Error: "not authenticated"})
 				continue
 			}
 			c.hub.handleSubscribe(c, msg)
@@ -100,18 +102,18 @@ func (c *wsClient) readPump() {
 			c.hub.handleUnsubscribe(c, msg)
 		case "send":
 			if !c.authenticated.Load() {
-				c.sendJSON(wsServerMsg{Type: "error", Error: "not authenticated"})
+				c.SendJSON(node.ServerMsg{Type: "error", Error: "not authenticated"})
 				continue
 			}
 			c.hub.handleSend(c, msg)
 		case "interrupt":
 			if !c.authenticated.Load() {
-				c.sendJSON(wsServerMsg{Type: "error", Error: "not authenticated"})
+				c.SendJSON(node.ServerMsg{Type: "error", Error: "not authenticated"})
 				continue
 			}
 			c.hub.handleInterrupt(c, msg)
 		case "ping":
-			c.sendJSON(wsServerMsg{Type: "pong"})
+			c.SendJSON(node.ServerMsg{Type: "pong"})
 		}
 	}
 }

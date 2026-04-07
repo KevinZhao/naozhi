@@ -7,9 +7,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/pathutil"
+	"github.com/naozhi/naozhi/internal/config"
 )
 
 // SpawnOptions configures how a CLI process is spawned.
@@ -24,18 +25,61 @@ type SpawnOptions struct {
 
 // Wrapper manages spawning CLI processes.
 type Wrapper struct {
-	CLIPath  string
-	Protocol Protocol
+	CLIPath    string
+	CLIName    string // display name: "claude-code", "kiro"
+	CLIVersion string // semver from --version, e.g. "2.1.92"
+	Protocol   Protocol
 }
 
 // NewWrapper creates a Wrapper with the given CLI path and protocol.
 // If path is empty, auto-detects from known install locations and PATH.
-func NewWrapper(cliPath string, proto Protocol) *Wrapper {
+func NewWrapper(cliPath string, proto Protocol, backend string) *Wrapper {
 	if cliPath == "" {
-		cliPath = detectCLI(proto.Name())
+		cliPath = detectCLI(backend)
 	}
-	cliPath = pathutil.ExpandHome(cliPath)
-	return &Wrapper{CLIPath: cliPath, Protocol: proto}
+	cliPath = config.ExpandHome(cliPath)
+	w := &Wrapper{
+		CLIPath:  cliPath,
+		CLIName:  backendDisplayName(backend),
+		Protocol: proto,
+	}
+	w.CLIVersion = detectVersion(cliPath)
+	return w
+}
+
+// backendDisplayName maps a backend config value to its user-facing name.
+func backendDisplayName(backend string) string {
+	switch backend {
+	case "kiro":
+		return "kiro"
+	case "", "claude":
+		return "claude-code"
+	default:
+		return backend
+	}
+}
+
+// detectVersion runs "<cli> --version" and parses the version string.
+func detectVersion(cliPath string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, cliPath, "--version").Output()
+	if err != nil {
+		return ""
+	}
+	// Output is typically "2.1.92 (Claude Code)\n" or just "2.1.92\n"
+	s := strings.TrimSpace(string(out))
+	if i := strings.IndexByte(s, ' '); i > 0 {
+		s = s[:i]
+	}
+	// Sanity check: must look like a version (digits and dots), cap length
+	if len(s) > 32 {
+		s = s[:32]
+	}
+	if len(s) > 0 && s[0] >= '0' && s[0] <= '9' {
+		return s
+	}
+	return ""
 }
 
 // detectCLI finds the CLI binary by checking known install paths then PATH.

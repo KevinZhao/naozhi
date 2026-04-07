@@ -2,6 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/hmac"
+	"crypto/rand"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -12,9 +16,13 @@ import (
 	"sync/atomic"
 	"time"
 
+	"golang.org/x/sync/singleflight"
 	"golang.org/x/time/rate"
 
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -33,17 +41,18 @@ type Server struct {
 	platforms         map[string]platform.Platform
 	router            *session.Router
 	dedup             *platform.Dedup
-	sessionGuard      *sessionGuard
+	sessionGuard      *session.Guard
 	startedAt         time.Time
 	agents            map[string]session.AgentOpts
 	agentCommands     map[string]string
 	scheduler         *cron.Scheduler
 	backendTag        string        // e.g., "cc" or "kiro", appended to replies
 	dashboardToken    string        // optional bearer token for dashboard API
+	cookieSecret      []byte        // random HMAC key for cookie values (regenerated on restart)
 	loginLimiter      *rate.Limiter // rate-limits login attempts
 	hub               *Hub          // WebSocket hub
-	nodes             map[string]NodeConn
-	reverseNodeServer *ReverseNodeServer
+	nodes             map[string]node.Conn
+	reverseNodeServer *node.ReverseServer
 	nodesMu           sync.RWMutex
 	claudeDir         string // path to ~/.claude for session discovery
 	projectMgr        *project.Manager
@@ -51,8 +60,14 @@ type Server struct {
 	workspaceName     string
 	allowedRoot       string // /cd is restricted to paths under this directory
 	transcriber       transcribe.Service
-	nodeCache         *NodeCacheManager // background-cached remote node data
-	discoveryCache    *discoveryCache   // background-cached local discovery results
+	nodeCache         *node.CacheManager // background-cached remote node data
+	discoveryCache    *discoveryCache    // background-cached local discovery results
+
+	// Recent sessions cache (30s TTL to avoid repeated filesystem scans).
+	recentCache     []discovery.RecentSession
+	recentCacheTime time.Time
+	recentCacheMu   sync.Mutex
+	recentFlight    singleflight.Group
 
 	// Watchdog configuration stored for user-facing timeout error messages.
 	noOutputTimeout time.Duration
@@ -65,43 +80,6 @@ type Server struct {
 	// knownNodes holds all configured node IDs → display names, including
 	// reverse nodes that may currently be disconnected. Never mutated after startup.
 	knownNodes map[string]string
-}
-
-// sessionGuard prevents multiple concurrent messages to the same session.
-type sessionGuard struct {
-	active   sync.Map             // string → struct{}: sessions currently processing a message
-	waitMu   sync.Mutex           // guards lastWait
-	lastWait map[string]time.Time // tracks last "please wait" reply per key
-}
-
-func newSessionGuard() *sessionGuard {
-	return &sessionGuard{
-		lastWait: make(map[string]time.Time),
-	}
-}
-
-func (g *sessionGuard) TryAcquire(key string) bool {
-	_, loaded := g.active.LoadOrStore(key, struct{}{})
-	return !loaded
-}
-
-// ShouldSendWait returns true if enough time has passed since the last
-// "please wait" reply for this key (avoids spamming the user).
-func (g *sessionGuard) ShouldSendWait(key string) bool {
-	g.waitMu.Lock()
-	defer g.waitMu.Unlock()
-	if time.Since(g.lastWait[key]) < 3*time.Second {
-		return false
-	}
-	g.lastWait[key] = time.Now()
-	return true
-}
-
-func (g *sessionGuard) Release(key string) {
-	g.active.Delete(key)
-	g.waitMu.Lock()
-	delete(g.lastWait, key)
-	g.waitMu.Unlock()
 }
 
 // validateWorkspace checks that workspace is an existing directory within allowedRoot.
@@ -122,6 +100,24 @@ func validateWorkspace(workspace, allowedRoot string) (string, error) {
 	return wsPath, nil
 }
 
+// generateCookieSecret returns 32 random bytes for HMAC-signing auth cookies.
+func generateCookieSecret() []byte {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic("crypto/rand unavailable: " + err.Error())
+	}
+	return b
+}
+
+// cookieMAC returns an HMAC-SHA256 of the dashboard token, used as the cookie
+// value instead of the raw token. This way a leaked cookie cannot be reused as
+// a Bearer token. The HMAC key is random per process, so cookies invalidate on restart.
+func (s *Server) cookieMAC() string {
+	mac := hmac.New(sha256.New, s.cookieSecret)
+	mac.Write([]byte(s.dashboardToken))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 // New creates a new Server.
 // ServerOptions holds optional configuration for a Server.
 // All fields have zero-value defaults (empty string, nil, zero duration = disabled/unset).
@@ -133,8 +129,8 @@ type ServerOptions struct {
 	TotalTimeout      time.Duration
 	DashboardToken    string // optional bearer token for dashboard API
 	ProjectManager    *project.Manager
-	Nodes             map[string]NodeConn
-	ReverseNodeServer *ReverseNodeServer
+	Nodes             map[string]node.Conn
+	ReverseNodeServer *node.ReverseServer
 	Transcriber       transcribe.Service
 }
 
@@ -150,7 +146,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 
 	nodes := opts.Nodes
 	if nodes == nil {
-		nodes = make(map[string]NodeConn)
+		nodes = make(map[string]node.Conn)
 	}
 	knownNodes := make(map[string]string)
 	for id, nc := range nodes {
@@ -163,7 +159,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		platforms:       platforms,
 		router:          router,
 		dedup:           platform.NewDedup(defaultDedupCapacity),
-		sessionGuard:    newSessionGuard(),
+		sessionGuard:    session.NewGuard(),
 		startedAt:       time.Now(),
 		agents:          agents,
 		agentCommands:   agentCommands,
@@ -176,6 +172,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		noOutputTimeout: opts.NoOutputTimeout,
 		totalTimeout:    opts.TotalTimeout,
 		dashboardToken:  opts.DashboardToken,
+		cookieSecret:    generateCookieSecret(),
 		loginLimiter:    rate.NewLimiter(rate.Every(12*time.Second), 5), // 5 attempts per minute
 		projectMgr:      opts.ProjectManager,
 		transcriber:     opts.Transcriber,
@@ -183,11 +180,11 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		knownNodes:      knownNodes,
 	}
 
-	s.nodeCache = NewNodeCacheManager(
-		func() map[string]NodeConn {
+	s.nodeCache = node.NewCacheManager(
+		func() map[string]node.Conn {
 			s.nodesMu.RLock()
 			defer s.nodesMu.RUnlock()
-			cp := make(map[string]NodeConn, len(s.nodes))
+			cp := make(map[string]node.Conn, len(s.nodes))
 			for k, v := range s.nodes {
 				cp[k] = v
 			}
@@ -207,13 +204,13 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		for id, displayName := range opts.ReverseNodeServer.AllNodes() {
 			s.knownNodes[id] = displayName
 		}
-		opts.ReverseNodeServer.onRegister = func(id string, rc *ReverseNodeConn) {
+		opts.ReverseNodeServer.OnRegister = func(id string, rc *node.ReverseConn) {
 			s.nodesMu.Lock()
 			s.nodes[id] = rc
 			s.nodesMu.Unlock()
 			go s.nodeCache.RefreshFor(id) // RefreshFor calls onChange → BroadcastSessionsUpdate
 		}
-		opts.ReverseNodeServer.onDeregister = func(id string) {
+		opts.ReverseNodeServer.OnDeregister = func(id string) {
 			s.nodesMu.Lock()
 			delete(s.nodes, id)
 			s.nodesMu.Unlock()
@@ -228,8 +225,8 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 	return s
 }
 
-// lookupNode returns the NodeConn for a remote node, writing a 400 error if not found.
-func (s *Server) lookupNode(w http.ResponseWriter, nodeID string) (NodeConn, bool) {
+// lookupNode returns the node.Conn for a remote node, writing a 400 error if not found.
+func (s *Server) lookupNode(w http.ResponseWriter, nodeID string) (node.Conn, bool) {
 	s.nodesMu.RLock()
 	nc, ok := s.nodes[nodeID]
 	s.nodesMu.RUnlock()
@@ -242,7 +239,26 @@ func (s *Server) lookupNode(w http.ResponseWriter, nodeID string) (NodeConn, boo
 
 // Start registers routes and begins serving.
 func (s *Server) Start(ctx context.Context) error {
-	handler := s.buildMessageHandler()
+	d := &dispatch.Dispatcher{
+		Router:                s.router,
+		Platforms:             s.platforms,
+		Agents:                s.agents,
+		AgentCommands:         s.agentCommands,
+		Scheduler:             s.scheduler,
+		ProjectMgr:            s.projectMgr,
+		Guard:                 s.sessionGuard,
+		Dedup:                 s.dedup,
+		AllowedRoot:           s.allowedRoot,
+		ClaudeDir:             s.claudeDir,
+		BackendTag:            s.backendTag,
+		SendFn:                s.sendWithBroadcast,
+		TakeoverFn:            s.tryAutoTakeover,
+		NoOutputTimeout:       s.noOutputTimeout,
+		TotalTimeout:          s.totalTimeout,
+		WatchdogNoOutputKills: &s.watchdogNoOutputKills,
+		WatchdogTotalKills:    &s.watchdogTotalKills,
+	}
+	handler := d.BuildHandler()
 
 	var startedPlatforms []platform.RunnablePlatform
 	for _, p := range s.platforms {

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -571,4 +572,17 @@ func verifySignature(timestamp, nonce, encryptKey string, body []byte, signature
 	h := sha256.Sum256([]byte(content))
 	computed := fmt.Sprintf("%x", h)
 	return subtle.ConstantTimeCompare([]byte(computed), []byte(signature)) == 1
+}
+
+// verifyTimestamp checks that the request timestamp is within 5 minutes of now.
+func verifyTimestamp(timestamp string) bool {
+	ts, err := strconv.ParseInt(timestamp, 10, 64)
+	if err != nil {
+		return false
+	}
+	diff := time.Now().Unix() - ts
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= 300 // 5 minutes
 }

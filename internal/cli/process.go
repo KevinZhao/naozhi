@@ -28,7 +28,7 @@ const (
 const (
 	DefaultNoOutputTimeout = 2 * time.Minute
 	DefaultTotalTimeout    = 5 * time.Minute
-	maxScannerBufBytes     = 1024 * 1024
+	maxScannerBufBytes     = 10 * 1024 * 1024
 )
 
 // Sentinel errors for watchdog timeouts.
@@ -103,6 +103,7 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string, 
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
 		stdin.Close()
+		stdout.Close()
 		return nil, fmt.Errorf("stderr pipe: %w", err)
 	}
 
@@ -235,6 +236,24 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 	}
 	if len(images) > 0 {
 		userEntry.Summary += fmt.Sprintf(" [+%d image(s)]", len(images))
+		thumbs := make([]string, len(images))
+		var wg sync.WaitGroup
+		for i, img := range images {
+			wg.Add(1)
+			go func(i int, data []byte) {
+				defer wg.Done()
+				thumbs[i] = MakeThumbnail(data, 200)
+			}(i, img.Data)
+		}
+		wg.Wait()
+		// Filter empty strings (unsupported formats)
+		filtered := thumbs[:0]
+		for _, t := range thumbs {
+			if t != "" {
+				filtered = append(filtered, t)
+			}
+		}
+		userEntry.Images = filtered
 	}
 	p.eventLog.Append(userEntry)
 
@@ -277,8 +296,13 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 
 			// Capture session ID from first init event; skip logging subsequent inits
 			if ev.Type == "system" && ev.SubType == "init" {
-				if p.SessionID == "" {
+				p.mu.Lock()
+				firstInit := p.SessionID == ""
+				if firstInit {
 					p.SessionID = ev.SessionID
+				}
+				p.mu.Unlock()
+				if firstInit {
 					p.logEvent(ev)
 				}
 				continue
@@ -298,9 +322,11 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 
 			// Result means this turn is done
 			if ev.Type == "result" {
+				p.mu.Lock()
 				if p.SessionID == "" {
 					p.SessionID = ev.SessionID
 				}
+				p.mu.Unlock()
 				return &SendResult{
 					Text:      ev.Result,
 					SessionID: ev.SessionID,
@@ -340,7 +366,7 @@ func (p *Process) IsRunning() bool {
 // Uses negative PID to signal the entire process group (created via Setpgid).
 // The process stays alive and can accept new messages after the interrupt.
 func (p *Process) Interrupt() {
-	if p.cmd.Process != nil {
+	if p.cmd.Process != nil && p.cmd.Process.Pid > 0 {
 		if err := syscall.Kill(-p.cmd.Process.Pid, syscall.SIGINT); err != nil {
 			slog.Warn("interrupt signal failed", "pid", p.cmd.Process.Pid, "err", err)
 		}
@@ -353,12 +379,16 @@ func (p *Process) Kill() {
 	p.killOnce.Do(func() {
 		close(p.killCh)
 		p.stdin.Close()
-		if p.cmd.Process != nil {
+		if p.cmd.Process != nil && p.cmd.Process.Pid > 0 {
 			// Kill the entire process group (created via Setpgid) to avoid
 			// orphaned child processes (e.g., Bash tools, subagents).
 			syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
 		}
 	})
+	// Wait for stderr goroutine to exit (pipe closes after SIGKILL).
+	if p.stderrDone != nil {
+		<-p.stderrDone
+	}
 	p.waitOnce.Do(func() { p.cmd.Wait() })
 }
 

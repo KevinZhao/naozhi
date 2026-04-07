@@ -1,4 +1,4 @@
-package server
+package node
 
 import (
 	"context"
@@ -15,20 +15,21 @@ import (
 // wsRelay maintains a persistent WS connection to a remote node
 // and forwards events to local browser clients.
 type wsRelay struct {
-	node      *NodeClient
+	node      *HTTPClient
 	mu        sync.Mutex
 	writeMu   sync.Mutex // serializes writes to the WS connection
 	conn      *websocket.Conn
-	subs      map[string][]wsEventSink // remote session key -> local clients
-	lastEvent map[string]int64         // key -> last event unix ms (for reconnect)
+	connReady chan struct{}          // non-nil while a dial is in progress; closed when done
+	subs      map[string][]EventSink // remote session key -> local clients
+	lastEvent map[string]int64       // key -> last event unix ms (for reconnect)
 	done      chan struct{}
 	closed    bool
 }
 
-func newWSRelay(node *NodeClient) *wsRelay {
+func newWSRelay(node *HTTPClient) *wsRelay {
 	return &wsRelay{
 		node:      node,
-		subs:      make(map[string][]wsEventSink),
+		subs:      make(map[string][]EventSink),
 		lastEvent: make(map[string]int64),
 		done:      make(chan struct{}),
 	}
@@ -36,9 +37,9 @@ func newWSRelay(node *NodeClient) *wsRelay {
 
 // Subscribe subscribes a local client to a remote session key.
 // Connects to the remote node on first call.
-func (r *wsRelay) Subscribe(c wsEventSink, key string, after int64) {
+func (r *wsRelay) Subscribe(c EventSink, key string, after int64) {
 	if err := r.ensureConnected(); err != nil {
-		c.sendJSON(wsServerMsg{Type: "error", Key: key, Node: r.node.ID, Error: "relay connect: " + err.Error()})
+		c.SendJSON(ServerMsg{Type: "error", Key: key, Node: r.node.ID, Error: "relay connect: " + err.Error()})
 		return
 	}
 
@@ -54,29 +55,29 @@ func (r *wsRelay) Subscribe(c wsEventSink, key string, after int64) {
 	}
 
 	// First subscriber for this key: subscribe on the remote WS
-	r.writeJSON(wsClientMsg{Type: "subscribe", Key: key, After: after})
+	r.writeJSON(ClientMsg{Type: "subscribe", Key: key, After: after})
 }
 
 // Unsubscribe removes a local client from a remote session key.
-func (r *wsRelay) Unsubscribe(c wsEventSink, key string) {
+func (r *wsRelay) Unsubscribe(c EventSink, key string) {
 	r.mu.Lock()
 	empty := removeSub(r.subs, key, c)
 	r.mu.Unlock()
 
 	if empty {
-		r.writeJSON(wsClientMsg{Type: "unsubscribe", Key: key})
+		r.writeJSON(ClientMsg{Type: "unsubscribe", Key: key})
 	}
-	c.sendJSON(wsServerMsg{Type: "unsubscribed", Key: key, Node: r.node.ID})
+	c.SendJSON(ServerMsg{Type: "unsubscribed", Key: key, Node: r.node.ID})
 }
 
 // RemoveClient removes a client from all subscriptions (called on disconnect).
-func (r *wsRelay) RemoveClient(c wsEventSink) {
+func (r *wsRelay) RemoveClient(c EventSink) {
 	r.mu.Lock()
 	emptyKeys := removeSubAll(r.subs, c)
 	r.mu.Unlock()
 
 	for _, key := range emptyKeys {
-		r.writeJSON(wsClientMsg{Type: "unsubscribe", Key: key})
+		r.writeJSON(ClientMsg{Type: "unsubscribe", Key: key})
 	}
 }
 
@@ -91,7 +92,7 @@ func (r *wsRelay) Close() {
 	close(r.done)
 	conn := r.conn
 	r.conn = nil
-	r.subs = make(map[string][]wsEventSink)
+	r.subs = make(map[string][]EventSink)
 	r.mu.Unlock()
 
 	if conn != nil {
@@ -109,8 +110,30 @@ func (r *wsRelay) ensureConnected() error {
 		r.mu.Unlock()
 		return nil
 	}
+	if r.connReady != nil {
+		// Another goroutine is connecting; wait for it to finish.
+		ch := r.connReady
+		r.mu.Unlock()
+		<-ch
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		if r.conn != nil {
+			return nil
+		}
+		return fmt.Errorf("connection attempt failed")
+	}
+	// We are the dialer.
+	r.connReady = make(chan struct{})
 	r.mu.Unlock()
-	return r.connect()
+
+	err := r.connect()
+
+	r.mu.Lock()
+	close(r.connReady)
+	r.connReady = nil
+	r.mu.Unlock()
+
+	return err
 }
 
 func (r *wsRelay) connect() error {
@@ -125,11 +148,11 @@ func (r *wsRelay) connect() error {
 	}
 
 	// Authenticate
-	if err := conn.WriteJSON(wsClientMsg{Type: "auth", Token: r.node.Token}); err != nil {
+	if err := conn.WriteJSON(ClientMsg{Type: "auth", Token: r.node.Token}); err != nil {
 		conn.Close()
 		return fmt.Errorf("auth write %s: %w", r.node.ID, err)
 	}
-	var resp wsServerMsg
+	var resp ServerMsg
 	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	if err := conn.ReadJSON(&resp); err != nil {
 		conn.Close()
@@ -190,7 +213,7 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 			return
 		}
 
-		var msg wsServerMsg
+		var msg ServerMsg
 		if err := json.Unmarshal(data, &msg); err != nil {
 			continue
 		}
@@ -199,7 +222,7 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 		msg.Node = r.node.ID
 
 		r.mu.Lock()
-		clients := make([]wsEventSink, len(r.subs[msg.Key]))
+		clients := make([]EventSink, len(r.subs[msg.Key]))
 		copy(clients, r.subs[msg.Key])
 		// Track last event time for reconnect resubscribe
 		if msg.Type == "event" && msg.Event != nil && msg.Event.Time > r.lastEvent[msg.Key] {
@@ -213,7 +236,7 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 			continue
 		}
 		for _, c := range clients {
-			c.sendRaw(tagged)
+			c.SendRaw(tagged)
 		}
 	}
 }
@@ -252,15 +275,15 @@ func (r *wsRelay) reconnect() {
 		r.mu.Unlock()
 
 		for _, e := range resubscribes {
-			r.writeJSON(wsClientMsg{Type: "subscribe", Key: e.key, After: e.after})
+			r.writeJSON(ClientMsg{Type: "subscribe", Key: e.key, After: e.after})
 		}
 		slog.Info("relay reconnected", "node", r.node.ID, "keys", len(resubscribes))
 		return
 	}
 }
 
-func (r *wsRelay) sendHistoryToClient(c wsEventSink, key string, after int64) {
-	c.sendJSON(wsServerMsg{Type: "subscribed", Key: key, Node: r.node.ID})
+func (r *wsRelay) sendHistoryToClient(c EventSink, key string, after int64) {
+	c.SendJSON(ServerMsg{Type: "subscribed", Key: key, Node: r.node.ID})
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -271,7 +294,7 @@ func (r *wsRelay) sendHistoryToClient(c wsEventSink, key string, after int64) {
 		return
 	}
 	if len(entries) > 0 {
-		c.sendJSON(wsServerMsg{Type: "history", Key: key, Node: r.node.ID, Events: entries})
+		c.SendJSON(ServerMsg{Type: "history", Key: key, Node: r.node.ID, Events: entries})
 	}
 }
 

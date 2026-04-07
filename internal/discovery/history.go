@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -93,6 +94,7 @@ func parseJSONL(path string) ([]cli.EventEntry, error) {
 		}
 		var hl historyLine
 		if err := json.Unmarshal(line, &hl); err != nil {
+			slog.Debug("skip malformed history line", "path", path, "err", err)
 			continue
 		}
 
@@ -134,7 +136,7 @@ func parseJSONL(path string) ([]cli.EventEntry, error) {
 						Time:    ts,
 						Type:    "text",
 						Summary: cli.TruncateRunes(b.Text, 120),
-						Detail:  cli.TruncateRunes(b.Text, 2000),
+						Detail:  cli.TruncateRunes(b.Text, 16000),
 					})
 				case "tool_use":
 					summary := cli.FormatToolInput(b.Name, b.Input)

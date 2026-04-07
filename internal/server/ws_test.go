@@ -1,6 +1,9 @@
 package server
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -12,24 +15,37 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
+// testCookieSecret is a fixed HMAC key for deterministic test cookie values.
+var testCookieSecret = []byte("test-cookie-secret-key-for-hmac!")
+
+func testCookieMAC(token string) string {
+	if token == "" {
+		return ""
+	}
+	mac := hmac.New(sha256.New, testCookieSecret)
+	mac.Write([]byte(token))
+	return hex.EncodeToString(mac.Sum(nil))
+}
+
 func newTestHub(token string) (*Hub, *session.Router) {
 	router := session.NewRouter(session.RouterConfig{})
-	guard := newSessionGuard()
+	guard := session.NewGuard()
 	var nodesMu sync.RWMutex
-	hub := NewHub(router, nil, nil, token, guard, nil, &nodesMu, nil, "")
+	hub := NewHub(HubOptions{Router: router, DashToken: token, CookieMAC: testCookieMAC(token), Guard: guard, NodesMu: &nodesMu})
 	return hub, router
 }
 
 func newTestHubWithAgents(token string, agents map[string]session.AgentOpts) (*Hub, *session.Router) {
 	router := session.NewRouter(session.RouterConfig{})
-	guard := newSessionGuard()
+	guard := session.NewGuard()
 	var nodesMu sync.RWMutex
-	hub := NewHub(router, agents, nil, token, guard, nil, &nodesMu, nil, "")
+	hub := NewHub(HubOptions{Router: router, Agents: agents, DashToken: token, CookieMAC: testCookieMAC(token), Guard: guard, NodesMu: &nodesMu})
 	return hub, router
 }
 
@@ -55,16 +71,16 @@ func dialWS(t *testing.T, url string) *websocket.Conn {
 	return conn
 }
 
-func wsWrite(t *testing.T, conn *websocket.Conn, msg wsClientMsg) {
+func wsWrite(t *testing.T, conn *websocket.Conn, msg node.ClientMsg) {
 	t.Helper()
 	if err := conn.WriteJSON(msg); err != nil {
 		t.Fatalf("ws write: %v", err)
 	}
 }
 
-func wsRead(t *testing.T, conn *websocket.Conn) wsServerMsg {
+func wsRead(t *testing.T, conn *websocket.Conn) node.ServerMsg {
 	t.Helper()
-	var resp wsServerMsg
+	var resp node.ServerMsg
 	if err := conn.ReadJSON(&resp); err != nil {
 		t.Fatalf("ws read: %v", err)
 	}
@@ -81,7 +97,7 @@ func TestWS_AuthOK(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
-	wsWrite(t, conn, wsClientMsg{Type: "auth", Token: "secret"})
+	wsWrite(t, conn, node.ClientMsg{Type: "auth", Token: "secret"})
 	resp := wsRead(t, conn)
 
 	if resp.Type != "auth_ok" {
@@ -97,7 +113,7 @@ func TestWS_AuthFail(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
-	wsWrite(t, conn, wsClientMsg{Type: "auth", Token: "wrong"})
+	wsWrite(t, conn, node.ClientMsg{Type: "auth", Token: "wrong"})
 	resp := wsRead(t, conn)
 
 	if resp.Type != "auth_fail" {
@@ -105,6 +121,30 @@ func TestWS_AuthFail(t *testing.T) {
 	}
 	if resp.Error == "" {
 		t.Error("expected non-empty error message on auth_fail")
+	}
+}
+
+func TestWS_AuthCookiePreAuth(t *testing.T) {
+	hub, _ := newTestHub("secret")
+	url, cleanup := startWSServer(t, hub)
+	defer cleanup()
+
+	// Dial with valid HMAC cookie — simulates iOS where localStorage is empty but cookie persists
+	header := http.Header{}
+	header.Set("Cookie", authCookieName+"="+testCookieMAC("secret"))
+	conn, _, err := websocket.DefaultDialer.Dial(url, header)
+	if err != nil {
+		t.Fatalf("ws dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+
+	// Send auth with empty token — should still succeed via cookie pre-auth
+	wsWrite(t, conn, node.ClientMsg{Type: "auth", Token: ""})
+	resp := wsRead(t, conn)
+
+	if resp.Type != "auth_ok" {
+		t.Errorf("type = %q, want auth_ok (cookie pre-auth should accept)", resp.Type)
 	}
 }
 
@@ -117,7 +157,7 @@ func TestWS_AuthNotRequired(t *testing.T) {
 	defer conn.Close()
 
 	// Should be able to use commands without auth
-	wsWrite(t, conn, wsClientMsg{Type: "ping"})
+	wsWrite(t, conn, node.ClientMsg{Type: "ping"})
 	resp := wsRead(t, conn)
 
 	if resp.Type != "pong" {
@@ -134,7 +174,7 @@ func TestWS_UnauthenticatedCommandRejected(t *testing.T) {
 	defer conn.Close()
 
 	// Try subscribe without auth
-	wsWrite(t, conn, wsClientMsg{Type: "subscribe", Key: "test:d:u:general"})
+	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 	resp := wsRead(t, conn)
 
 	if resp.Type != "error" {
@@ -155,7 +195,7 @@ func TestWS_Ping(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
-	wsWrite(t, conn, wsClientMsg{Type: "ping"})
+	wsWrite(t, conn, node.ClientMsg{Type: "ping"})
 	resp := wsRead(t, conn)
 
 	if resp.Type != "pong" {
@@ -173,7 +213,7 @@ func TestWS_SubscribeSessionNotFound(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
-	wsWrite(t, conn, wsClientMsg{Type: "subscribe", Key: "nonexistent:d:u:general"})
+	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "nonexistent:d:u:general"})
 	resp := wsRead(t, conn)
 
 	if resp.Type != "error" {
@@ -192,7 +232,7 @@ func TestWS_SubscribeMissingKey(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
-	wsWrite(t, conn, wsClientMsg{Type: "subscribe"})
+	wsWrite(t, conn, node.ClientMsg{Type: "subscribe"})
 	resp := wsRead(t, conn)
 
 	if resp.Type != "error" {
@@ -213,7 +253,7 @@ func TestWS_SubscribeAndHistory(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
-	wsWrite(t, conn, wsClientMsg{Type: "subscribe", Key: "test:d:u:general"})
+	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 
 	// First message: subscribed
 	resp := wsRead(t, conn)
@@ -254,7 +294,7 @@ func TestWS_SubscribeWithAfter(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
-	wsWrite(t, conn, wsClientMsg{Type: "subscribe", Key: "test:d:u:general", After: 1500})
+	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general", After: 1500})
 
 	// subscribed
 	resp := wsRead(t, conn)
@@ -285,7 +325,7 @@ func TestWS_EventPush(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
-	wsWrite(t, conn, wsClientMsg{Type: "subscribe", Key: "test:d:u:general"})
+	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 
 	// Read subscribed (no history since log is empty)
 	resp := wsRead(t, conn)
@@ -296,19 +336,19 @@ func TestWS_EventPush(t *testing.T) {
 	// Now append an event
 	proc.EventLog.Append(cli.EventEntry{Time: time.Now().UnixMilli(), Type: "thinking", Summary: "reasoning"})
 
-	// Should receive the push
+	// Should receive the push (batched as history)
 	resp = wsRead(t, conn)
-	if resp.Type != "event" {
-		t.Fatalf("type = %q, want event", resp.Type)
+	if resp.Type != "history" {
+		t.Fatalf("type = %q, want history", resp.Type)
 	}
 	if resp.Key != "test:d:u:general" {
 		t.Errorf("key = %q, want test:d:u:general", resp.Key)
 	}
-	if resp.Event == nil {
-		t.Fatal("event should not be nil")
+	if len(resp.Events) != 1 {
+		t.Fatalf("events = %d, want 1", len(resp.Events))
 	}
-	if resp.Event.Type != "thinking" {
-		t.Errorf("event.Type = %q, want thinking", resp.Event.Type)
+	if resp.Events[0].Type != "thinking" {
+		t.Errorf("event.Type = %q, want thinking", resp.Events[0].Type)
 	}
 }
 
@@ -323,7 +363,7 @@ func TestWS_EventPushMultiple(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
-	wsWrite(t, conn, wsClientMsg{Type: "subscribe", Key: "test:d:u:general"})
+	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 	_ = wsRead(t, conn) // subscribed
 
 	// Append multiple events
@@ -331,12 +371,12 @@ func TestWS_EventPushMultiple(t *testing.T) {
 	proc.EventLog.Append(cli.EventEntry{Time: now, Type: "thinking", Summary: "step1"})
 	proc.EventLog.Append(cli.EventEntry{Time: now + 1, Type: "tool_use", Summary: "Read", Tool: "Read"})
 
-	// Should receive both events
-	var received []wsServerMsg
-	for i := 0; i < 2; i++ {
+	// Should receive both events (possibly in one or two history batches)
+	var received []cli.EventEntry
+	for len(received) < 2 {
 		resp := wsRead(t, conn)
-		if resp.Type == "event" {
-			received = append(received, resp)
+		if resp.Type == "history" {
+			received = append(received, resp.Events...)
 		}
 	}
 
@@ -358,10 +398,10 @@ func TestWS_Unsubscribe(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
-	wsWrite(t, conn, wsClientMsg{Type: "subscribe", Key: "test:d:u:general"})
+	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 	_ = wsRead(t, conn) // subscribed
 
-	wsWrite(t, conn, wsClientMsg{Type: "unsubscribe", Key: "test:d:u:general"})
+	wsWrite(t, conn, node.ClientMsg{Type: "unsubscribe", Key: "test:d:u:general"})
 	resp := wsRead(t, conn)
 
 	if resp.Type != "unsubscribed" {
@@ -385,7 +425,7 @@ func TestWS_SendAccepted(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
-	wsWrite(t, conn, wsClientMsg{Type: "send", Key: "test:d:u:general", Text: "hello", ID: "req-1"})
+	wsWrite(t, conn, node.ClientMsg{Type: "send", Key: "test:d:u:general", Text: "hello", ID: "req-1"})
 	resp := wsRead(t, conn)
 
 	if resp.Type != "send_ack" {
@@ -406,7 +446,7 @@ func TestWS_SendBusy(t *testing.T) {
 	hub, _ := newTestHub("")
 	key := "test:d:u:general"
 
-	// Pre-acquire the guard
+	// Pre-acquire the guard — new message will interrupt and wait
 	hub.guard.TryAcquire(key)
 	defer hub.guard.Release(key)
 
@@ -416,14 +456,16 @@ func TestWS_SendBusy(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
-	wsWrite(t, conn, wsClientMsg{Type: "send", Key: key, Text: "hello", ID: "req-2"})
+	wsWrite(t, conn, node.ClientMsg{Type: "send", Key: key, Text: "hello", ID: "req-2"})
 	resp := wsRead(t, conn)
 
 	if resp.Type != "send_ack" {
 		t.Fatalf("type = %q, want send_ack", resp.Type)
 	}
-	if resp.Status != "busy" {
-		t.Errorf("status = %q, want busy", resp.Status)
+	// With interrupt-on-busy, the immediate ack is "accepted";
+	// the goroutine will eventually timeout waiting for the guard.
+	if resp.Status != "accepted" {
+		t.Errorf("status = %q, want accepted", resp.Status)
 	}
 	if resp.ID != "req-2" {
 		t.Errorf("id = %q, want req-2", resp.ID)
@@ -438,7 +480,7 @@ func TestWS_SendMissingKey(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
-	wsWrite(t, conn, wsClientMsg{Type: "send", Text: "hello"})
+	wsWrite(t, conn, node.ClientMsg{Type: "send", Text: "hello"})
 	resp := wsRead(t, conn)
 
 	if resp.Type != "send_ack" {
@@ -457,7 +499,7 @@ func TestWS_SendMissingText(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
-	wsWrite(t, conn, wsClientMsg{Type: "send", Key: "test:d:u:general"})
+	wsWrite(t, conn, node.ClientMsg{Type: "send", Key: "test:d:u:general"})
 	resp := wsRead(t, conn)
 
 	if resp.Type != "send_ack" {
@@ -480,7 +522,7 @@ func TestWS_ClientDisconnectCleanup(t *testing.T) {
 
 	conn := dialWS(t, url)
 
-	wsWrite(t, conn, wsClientMsg{Type: "subscribe", Key: "test:d:u:general"})
+	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 	_ = wsRead(t, conn) // subscribed
 
 	// Close connection
@@ -515,10 +557,10 @@ func TestWS_MultipleClientsReceiveEvents(t *testing.T) {
 	defer conn2.Close()
 
 	// Both subscribe
-	wsWrite(t, conn1, wsClientMsg{Type: "subscribe", Key: "test:d:u:general"})
+	wsWrite(t, conn1, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 	_ = wsRead(t, conn1) // subscribed
 
-	wsWrite(t, conn2, wsClientMsg{Type: "subscribe", Key: "test:d:u:general"})
+	wsWrite(t, conn2, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 	_ = wsRead(t, conn2) // subscribed
 
 	// Append event
@@ -530,16 +572,16 @@ func TestWS_MultipleClientsReceiveEvents(t *testing.T) {
 
 	check := func(conn *websocket.Conn, label string) {
 		defer wg.Done()
-		var resp wsServerMsg
+		var resp node.ServerMsg
 		if err := conn.ReadJSON(&resp); err != nil {
 			t.Errorf("%s: read error: %v", label, err)
 			return
 		}
-		if resp.Type != "event" {
-			t.Errorf("%s: type = %q, want event", label, resp.Type)
+		if resp.Type != "history" {
+			t.Errorf("%s: type = %q, want history", label, resp.Type)
 		}
-		if resp.Event == nil || resp.Event.Summary != "shared event" {
-			t.Errorf("%s: unexpected event: %+v", label, resp.Event)
+		if len(resp.Events) == 0 || resp.Events[0].Summary != "shared event" {
+			t.Errorf("%s: unexpected events: %+v", label, resp.Events)
 		}
 	}
 
@@ -557,7 +599,7 @@ func TestWS_HubShutdown(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
-	wsWrite(t, conn, wsClientMsg{Type: "ping"})
+	wsWrite(t, conn, node.ClientMsg{Type: "ping"})
 	_ = wsRead(t, conn) // pong
 
 	hub.Shutdown()
@@ -586,14 +628,14 @@ func TestWS_FullFlow(t *testing.T) {
 	defer conn.Close()
 
 	// 1. Auth
-	wsWrite(t, conn, wsClientMsg{Type: "auth", Token: "tok"})
+	wsWrite(t, conn, node.ClientMsg{Type: "auth", Token: "tok"})
 	resp := wsRead(t, conn)
 	if resp.Type != "auth_ok" {
 		t.Fatalf("auth: type = %q, want auth_ok", resp.Type)
 	}
 
 	// 2. Subscribe
-	wsWrite(t, conn, wsClientMsg{Type: "subscribe", Key: "test:d:u:general"})
+	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general"})
 	resp = wsRead(t, conn) // subscribed
 	if resp.Type != "subscribed" {
 		t.Fatalf("subscribe: type = %q, want subscribed", resp.Type)
@@ -606,28 +648,28 @@ func TestWS_FullFlow(t *testing.T) {
 		t.Fatalf("history events = %d, want 1", len(resp.Events))
 	}
 
-	// 3. Event push
+	// 3. Event push (batched as history)
 	proc.EventLog.Append(cli.EventEntry{Time: time.Now().UnixMilli(), Type: "thinking", Summary: "reasoning..."})
 	resp = wsRead(t, conn)
-	if resp.Type != "event" {
-		t.Fatalf("push: type = %q, want event", resp.Type)
+	if resp.Type != "history" {
+		t.Fatalf("push: type = %q, want history", resp.Type)
 	}
-	if resp.Event.Type != "thinking" {
-		t.Errorf("push event.Type = %q, want thinking", resp.Event.Type)
+	if len(resp.Events) != 1 || resp.Events[0].Type != "thinking" {
+		t.Errorf("push events: %+v", resp.Events)
 	}
 
 	// 4. Unsubscribe
-	wsWrite(t, conn, wsClientMsg{Type: "unsubscribe", Key: "test:d:u:general"})
+	wsWrite(t, conn, node.ClientMsg{Type: "unsubscribe", Key: "test:d:u:general"})
 	resp = wsRead(t, conn)
 	if resp.Type != "unsubscribed" {
 		t.Errorf("unsub: type = %q, want unsubscribed", resp.Type)
 	}
 }
 
-// ─── wsServerMsg JSON roundtrip ──────────────────────────────────────────────
+// ─── node.ServerMsg JSON roundtrip ──────────────────────────────────────────────
 
 func TestWsServerMsg_JSONRoundtrip(t *testing.T) {
-	msg := wsServerMsg{
+	msg := node.ServerMsg{
 		Type:  "event",
 		Key:   "test:d:u:general",
 		Event: &cli.EventEntry{Time: 1000, Type: "text", Summary: "hello", Detail: "hello world", Tool: ""},
@@ -636,7 +678,7 @@ func TestWsServerMsg_JSONRoundtrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var parsed wsServerMsg
+	var parsed node.ServerMsg
 	if err := json.Unmarshal(data, &parsed); err != nil {
 		t.Fatal(err)
 	}

@@ -45,8 +45,9 @@ func TestResolveEncoding(t *testing.T) {
 		{"audio/ogg", "audio/ogg", types.MediaEncodingOggOpus, 48000},
 		{"ogg with codec param", "audio/ogg; codecs=opus", types.MediaEncodingOggOpus, 48000},
 		{"audio/flac", "audio/flac", types.MediaEncodingFlac, 16000},
-		{"unknown falls back to ogg_opus", "audio/wav", types.MediaEncodingOggOpus, 48000},
-		{"empty string falls back", "", types.MediaEncodingOggOpus, 48000},
+		{"audio/pcm", "audio/pcm", types.MediaEncodingPcm, 16000},
+		{"unknown falls back to pcm", "audio/wav", types.MediaEncodingPcm, 16000},
+		{"empty string falls back", "", types.MediaEncodingPcm, 16000},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -68,6 +69,7 @@ func TestIsSupportedByStreaming(t *testing.T) {
 	}{
 		{"audio/ogg", true},
 		{"audio/flac", true},
+		{"audio/pcm", true},
 		{"audio/amr", false},
 		{"audio/mp4", false},
 		{"audio/wav", false},
@@ -103,7 +105,7 @@ func TestStreamTranscribe_StartError(t *testing.T) {
 	wantErr := errors.New("service unavailable")
 	svc := newWithClient(&mockTranscribeAPI{err: wantErr}, Config{})
 
-	_, err := svc.streamTranscribe(context.Background(), []byte("fake-audio"), "audio/ogg")
+	_, err := svc.streamFromBuffer(context.Background(), []byte("fake-audio"), "audio/ogg")
 	if err == nil {
 		t.Fatal("expected error, got nil")
 	}
@@ -121,5 +123,75 @@ func TestNewWithClient_DefaultLanguageCode(t *testing.T) {
 	svc2 := newWithClient(&mockTranscribeAPI{}, Config{LanguageCode: "en-US"})
 	if svc2.cfg.LanguageCode != "en-US" {
 		t.Errorf("LanguageCode = %q, want %q", svc2.cfg.LanguageCode, "en-US")
+	}
+}
+
+func TestIsMultiLang(t *testing.T) {
+	tests := []struct {
+		name string
+		lang string
+		want bool
+	}{
+		{"single language", "zh-CN", false},
+		{"two languages", "zh-CN,en-US", true},
+		{"three languages", "zh-CN,en-US,ja-JP", true},
+		{"default", "", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{LanguageCode: tt.lang}
+			if cfg.LanguageCode == "" {
+				cfg.LanguageCode = "zh-CN"
+			}
+			svc := newWithClient(&mockTranscribeAPI{}, cfg)
+			if got := svc.isMultiLang(); got != tt.want {
+				t.Errorf("isMultiLang() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildInput_SingleLanguage(t *testing.T) {
+	svc := newWithClient(&mockTranscribeAPI{}, Config{LanguageCode: "zh-CN"})
+	input := svc.buildInput(types.MediaEncodingPcm, 16000)
+
+	if input.LanguageCode != "zh-CN" {
+		t.Errorf("LanguageCode = %q, want %q", input.LanguageCode, "zh-CN")
+	}
+	if input.IdentifyMultipleLanguages {
+		t.Error("IdentifyMultipleLanguages should be false for single language")
+	}
+	if input.LanguageOptions != nil {
+		t.Error("LanguageOptions should be nil for single language")
+	}
+}
+
+func TestBuildInput_MultiLanguage(t *testing.T) {
+	svc := newWithClient(&mockTranscribeAPI{}, Config{LanguageCode: "zh-CN,en-US"})
+	input := svc.buildInput(types.MediaEncodingOggOpus, 48000)
+
+	if !input.IdentifyMultipleLanguages {
+		t.Error("IdentifyMultipleLanguages should be true")
+	}
+	if input.LanguageOptions == nil || *input.LanguageOptions != "zh-CN,en-US" {
+		t.Errorf("LanguageOptions = %v, want %q", input.LanguageOptions, "zh-CN,en-US")
+	}
+	if input.PreferredLanguage != "zh-CN" {
+		t.Errorf("PreferredLanguage = %q, want %q", input.PreferredLanguage, "zh-CN")
+	}
+	if input.LanguageCode != "" {
+		t.Errorf("LanguageCode should be empty for multi-lang, got %q", input.LanguageCode)
+	}
+}
+
+func TestBuildInput_MultiLanguage_Spaces(t *testing.T) {
+	svc := newWithClient(&mockTranscribeAPI{}, Config{LanguageCode: "zh-CN, en-US , ja-JP"})
+	input := svc.buildInput(types.MediaEncodingPcm, 16000)
+
+	if *input.LanguageOptions != "zh-CN,en-US,ja-JP" {
+		t.Errorf("LanguageOptions not normalized: got %q", *input.LanguageOptions)
+	}
+	if input.PreferredLanguage != "zh-CN" {
+		t.Errorf("PreferredLanguage = %q, want %q", input.PreferredLanguage, "zh-CN")
 	}
 }

@@ -48,7 +48,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			if envelope.Header != nil && envelope.Header.Token != "" {
 				token = envelope.Header.Token
 			}
-			if subtle.ConstantTimeCompare([]byte(token), []byte(f.cfg.VerificationToken)) != 1 {
+			if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(f.cfg.VerificationToken)) != 1 {
 				slog.Warn("feishu token mismatch")
 				w.WriteHeader(http.StatusUnauthorized)
 				return
@@ -60,6 +60,11 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			timestamp := r.Header.Get("X-Lark-Request-Timestamp")
 			nonce := r.Header.Get("X-Lark-Request-Nonce")
 			sig := r.Header.Get("X-Lark-Signature")
+			if !verifyTimestamp(timestamp) {
+				slog.Warn("feishu request timestamp too old or invalid", "timestamp", timestamp)
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
 			if !verifySignature(timestamp, nonce, f.cfg.EncryptKey, body, sig) {
 				slog.Warn("feishu signature verification failed")
 				w.WriteHeader(http.StatusUnauthorized)

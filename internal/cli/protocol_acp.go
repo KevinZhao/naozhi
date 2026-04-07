@@ -266,6 +266,7 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 		err error
 	}
 	ch := make(chan readResult, 1)
+	done := make(chan struct{})
 	go func() {
 		for {
 			line, eof, err := rw.R.ReadLine()
@@ -288,7 +289,13 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 				ch <- readResult{&msg, nil}
 				return
 			}
-			// Skip notifications during init
+			// Check if caller gave up (timeout). The goroutine will be fully
+			// freed when the process pipe closes; this just avoids useless work.
+			select {
+			case <-done:
+				return
+			default:
+			}
 		}
 	}()
 
@@ -296,8 +303,10 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 	defer timer.Stop()
 	select {
 	case r := <-ch:
+		close(done)
 		return r.msg, r.err
 	case <-timer.C:
+		close(done)
 		return nil, fmt.Errorf("timeout waiting for ACP response (id=%d)", expectedID)
 	}
 }

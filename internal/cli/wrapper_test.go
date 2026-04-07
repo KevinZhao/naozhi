@@ -83,14 +83,17 @@ func TestDetectCLI_FindsExistingBinary(t *testing.T) {
 }
 
 func TestNewWrapper_ExplicitPathTakesPrecedence(t *testing.T) {
-	w := NewWrapper("/custom/path/claude", &ClaudeProtocol{})
+	w := NewWrapper("/custom/path/claude", &ClaudeProtocol{}, "claude")
 	if w.CLIPath != "/custom/path/claude" {
 		t.Errorf("explicit path should be used, got %q", w.CLIPath)
+	}
+	if w.CLIName != "claude-code" {
+		t.Errorf("CLIName = %q, want claude-code", w.CLIName)
 	}
 }
 
 func TestNewWrapper_EmptyPathAutoDetects(t *testing.T) {
-	w := NewWrapper("", &ClaudeProtocol{})
+	w := NewWrapper("", &ClaudeProtocol{}, "claude")
 	if w.CLIPath == "" {
 		t.Error("auto-detect should produce a non-empty path")
 	}

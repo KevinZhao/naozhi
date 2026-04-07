@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
 
@@ -523,7 +524,7 @@ func TestWebhook_ValidSignature(t *testing.T) {
 	})
 
 	body := buildV2MessageBody("ev_sig", "oc_chat1", "p2p", "signed msg")
-	timestamp := "12345"
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
 	nonce := "nonce123"
 	sigContent := timestamp + nonce + encryptKey + string(body)
 	h := sha256.Sum256([]byte(sigContent))

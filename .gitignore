@@ -15,6 +15,7 @@ node_modules/
 package-lock.json
 
 # Test & debug artifacts
+test-results/
 coverage.out
 *.prof
 *.test

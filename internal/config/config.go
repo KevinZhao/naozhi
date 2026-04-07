@@ -233,20 +233,37 @@ func Load(path string) (*Config, error) {
 		if containsEnvPlaceholder(cfg.Platforms.Feishu.AppID) || containsEnvPlaceholder(cfg.Platforms.Feishu.AppSecret) {
 			return nil, fmt.Errorf("feishu app_id or app_secret contains unexpanded ${VAR} — check environment variables")
 		}
+		if cfg.Platforms.Feishu.AppID == "" || cfg.Platforms.Feishu.AppSecret == "" {
+			return nil, fmt.Errorf("feishu app_id and app_secret are required")
+		}
+		// Webhook mode requires at least one auth mechanism to prevent unauthenticated access
+		if cfg.Platforms.Feishu.ConnectionMode == "webhook" &&
+			cfg.Platforms.Feishu.VerificationToken == "" && cfg.Platforms.Feishu.EncryptKey == "" {
+			return nil, fmt.Errorf("feishu webhook mode requires at least one of verification_token or encrypt_key to be set")
+		}
 	}
 	if cfg.Platforms.Slack != nil {
 		if containsEnvPlaceholder(cfg.Platforms.Slack.BotToken) {
 			return nil, fmt.Errorf("slack bot_token contains unexpanded ${VAR} — check environment variables")
+		}
+		if cfg.Platforms.Slack.BotToken == "" {
+			return nil, fmt.Errorf("slack bot_token is required")
 		}
 	}
 	if cfg.Platforms.Discord != nil {
 		if containsEnvPlaceholder(cfg.Platforms.Discord.BotToken) {
 			return nil, fmt.Errorf("discord bot_token contains unexpanded ${VAR} — check environment variables")
 		}
+		if cfg.Platforms.Discord.BotToken == "" {
+			return nil, fmt.Errorf("discord bot_token is required")
+		}
 	}
 	if cfg.Platforms.Weixin != nil {
 		if containsEnvPlaceholder(cfg.Platforms.Weixin.Token) {
 			return nil, fmt.Errorf("weixin token contains unexpanded ${VAR} — check environment variables")
+		}
+		if cfg.Platforms.Weixin.Token == "" {
+			return nil, fmt.Errorf("weixin token is required")
 		}
 	}
 
@@ -264,6 +281,9 @@ func Load(path string) (*Config, error) {
 		}
 		if u.Scheme != "http" && u.Scheme != "https" {
 			return nil, fmt.Errorf("node %q: url must be http or https", id)
+		}
+		if u.Scheme == "http" && nc.Token != "" {
+			return nil, fmt.Errorf("node %q: refusing to send bearer token over plaintext HTTP — use HTTPS", id)
 		}
 	}
 
@@ -285,6 +305,9 @@ func Load(path string) (*Config, error) {
 	for id, entry := range cfg.ReverseNodes {
 		if entry.Token == "" {
 			return nil, fmt.Errorf("reverse_nodes %q: token is required", id)
+		}
+		if containsEnvPlaceholder(entry.Token) {
+			return nil, fmt.Errorf("reverse_nodes %q: token contains unexpanded ${VAR} — check environment variables", id)
 		}
 	}
 

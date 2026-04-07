@@ -51,8 +51,8 @@ log:
 transcribe:
   enabled: true
   provider: "aws"
-  region: "us-west-2"
-  language: "zh-CN"
+  region: "ap-northeast-1"
+  language: "zh-CN,en-US"
 
 projects:
   root: "/home/ec2-user/workspace"

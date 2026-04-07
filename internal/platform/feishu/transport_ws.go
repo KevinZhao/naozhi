@@ -30,6 +30,10 @@ func (f *Feishu) startWebSocket() error {
 
 	handler := f.handler
 
+	// Limit concurrent message handlers to avoid unbounded goroutine growth
+	// when Feishu delivers bursts of messages (e.g., group chat floods).
+	msgSem := make(chan struct{}, 20)
+
 	eventHandler := dispatcher.NewEventDispatcher(
 		f.cfg.VerificationToken, f.cfg.EncryptKey,
 	).OnP2MessageReceiveV1(func(_ context.Context, event *larkim.P2MessageReceiveV1) error {
@@ -40,9 +44,16 @@ func (f *Feishu) startWebSocket() error {
 
 		switch pe.MediaType {
 		case "image":
+			select {
+			case msgSem <- struct{}{}:
+			default:
+				slog.Warn("feishu ws: handler semaphore full, dropping image message")
+				return nil
+			}
 			f.wg.Add(1)
 			go func() {
 				defer f.wg.Done()
+				defer func() { <-msgSem }()
 				msg := pe.Msg
 				data, mime, err := f.DownloadImage(ctx, pe.MessageID, pe.MediaKey)
 				if err != nil {
@@ -54,17 +65,31 @@ func (f *Feishu) startWebSocket() error {
 			}()
 
 		case "audio":
+			select {
+			case msgSem <- struct{}{}:
+			default:
+				slog.Warn("feishu ws: handler semaphore full, dropping audio message")
+				return nil
+			}
 			f.wg.Add(1)
 			go func() {
 				defer f.wg.Done()
+				defer func() { <-msgSem }()
 				msg := pe.Msg
 				f.handleAudio(ctx, handler, msg, pe.MessageID, pe.MediaKey)
 			}()
 
 		default:
+			select {
+			case msgSem <- struct{}{}:
+			default:
+				slog.Warn("feishu ws: handler semaphore full, dropping message")
+				return nil
+			}
 			f.wg.Add(1)
 			go func() {
 				defer f.wg.Done()
+				defer func() { <-msgSem }()
 				handler(ctx, pe.Msg)
 			}()
 		}

@@ -32,7 +32,11 @@ func saveJobs(path string, jobs map[string]*Job) error {
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		os.Remove(tmp)
+		return err
+	}
+	return nil
 }
 
 func loadJobs(path string) map[string]*Job {

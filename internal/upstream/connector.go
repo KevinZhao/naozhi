@@ -1,4 +1,4 @@
-package connector
+package upstream
 
 import (
 	"context"
@@ -15,21 +15,22 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/reverse"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
 // Connector dials a primary naozhi and serves it as a reverse-connected node.
 // Run on machines behind NAT that cannot be reached by the primary directly.
 type Connector struct {
-	cfg          *config.UpstreamConfig
-	router       *session.Router
-	projMgr      *project.Manager // may be nil
-	claudeDir    string
-	hostname     string
-	discoverFunc func() (json.RawMessage, error)
-	previewFunc  func(sessionID string) (json.RawMessage, error)
+	cfg              *config.UpstreamConfig
+	router           *session.Router
+	projMgr          *project.Manager // may be nil
+	claudeDir        string
+	hostname         string
+	defaultWorkspace string // used as allowedRoot for incoming workspace overrides
+	discoverFunc     func() (json.RawMessage, error)
+	previewFunc      func(sessionID string) (json.RawMessage, error)
 }
 
 // New creates a Connector. projMgr may be nil if projects are not configured.
@@ -39,7 +40,14 @@ func New(cfg *config.UpstreamConfig, router *session.Router, projMgr *project.Ma
 		claudeDir = filepath.Join(home, ".claude")
 	}
 	hostname, _ := os.Hostname()
-	return &Connector{cfg: cfg, router: router, projMgr: projMgr, claudeDir: claudeDir, hostname: hostname}
+	return &Connector{
+		cfg:              cfg,
+		router:           router,
+		projMgr:          projMgr,
+		claudeDir:        claudeDir,
+		hostname:         hostname,
+		defaultWorkspace: router.DefaultWorkspace(),
+	}
 }
 
 // SetDiscoverFunc sets a callback that returns discovered sessions as JSON.
@@ -100,7 +108,7 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	}()
 
 	// Register
-	reg := reverse.ReverseMsg{
+	reg := node.ReverseMsg{
 		Type:        "register",
 		NodeID:      c.cfg.NodeID,
 		Token:       c.cfg.Token,
@@ -112,7 +120,7 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	}
 
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
-	var ack reverse.ReverseMsg
+	var ack node.ReverseMsg
 	if err := conn.ReadJSON(&ack); err != nil {
 		return false, fmt.Errorf("register ack read: %w", err)
 	}
@@ -122,6 +130,15 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("register failed: %s", ack.Error)
 	}
 	slog.Info("connected to primary", "url", c.cfg.URL, "node_id", c.cfg.NodeID)
+
+	// Enable WebSocket-level ping/pong for dead connection detection.
+	// ReadDeadline resets on any pong response from the primary.
+	const wsReadTimeout = 90 * time.Second
+	conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+		return nil
+	})
 
 	return true, c.handleConn(ctx, conn)
 }
@@ -149,6 +166,28 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	var wg sync.WaitGroup
 	defer wg.Wait()
 
+	// Periodically send WebSocket-level pings so pongHandler resets the read deadline.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				writeMu.Lock()
+				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+				err := conn.WriteMessage(websocket.PingMessage, nil)
+				writeMu.Unlock()
+				if err != nil {
+					return
+				}
+			case <-connCtx.Done():
+				return
+			}
+		}
+	}()
+
 	// Clean up all event log subscriptions when connection drops.
 	defer func() {
 		for key, cancel := range activeSubs {
@@ -158,7 +197,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	}()
 
 	for {
-		var msg reverse.ReverseMsg
+		var msg node.ReverseMsg
 		if err := conn.ReadJSON(&msg); err != nil {
 			return err
 		}
@@ -176,7 +215,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 					return
 				}
 				result, err := c.handleRequest(connCtx, req)
-				resp := reverse.ReverseMsg{Type: "response", ReqID: req.ReqID}
+				resp := node.ReverseMsg{Type: "response", ReqID: req.ReqID}
 				if err != nil {
 					resp.Error = err.Error()
 				} else {
@@ -194,12 +233,16 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 			}
 			sess := c.router.GetSession(key)
 			if sess == nil {
-				writeJSON(reverse.ReverseMsg{Type: "subscribe_error", Key: key, Error: "session not found"}) //nolint
+				if err := writeJSON(node.ReverseMsg{Type: "subscribe_error", Key: key, Error: "session not found"}); err != nil {
+					slog.Debug("connector write subscribe_error", "key", key, "err", err)
+				}
 				break
 			}
 			notify, cancel := sess.SubscribeEvents()
 			activeSubs[key] = cancel
-			writeJSON(reverse.ReverseMsg{Type: "subscribed", Key: key}) //nolint
+			if err := writeJSON(node.ReverseMsg{Type: "subscribed", Key: key}); err != nil {
+				slog.Debug("connector write subscribed", "key", key, "err", err)
+			}
 			wg.Add(1)
 			go func(k string, n <-chan struct{}) {
 				defer wg.Done()
@@ -212,15 +255,19 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 				cancel()
 				delete(activeSubs, key)
 			}
-			writeJSON(reverse.ReverseMsg{Type: "unsubscribed", Key: key}) //nolint
+			if err := writeJSON(node.ReverseMsg{Type: "unsubscribed", Key: key}); err != nil {
+				slog.Debug("connector write unsubscribed", "key", key, "err", err)
+			}
 
 		case "ping":
-			writeJSON(reverse.ReverseMsg{Type: "pong"}) //nolint
+			if err := writeJSON(node.ReverseMsg{Type: "pong"}); err != nil {
+				slog.Debug("connector write pong", "err", err)
+			}
 		}
 	}
 }
 
-func (c *Connector) handleRequest(ctx context.Context, req reverse.ReverseMsg) (json.RawMessage, error) {
+func (c *Connector) handleRequest(ctx context.Context, req node.ReverseMsg) (json.RawMessage, error) {
 	switch req.Method {
 	case "fetch_sessions":
 		return marshalResult(c.router.ListSessions())
@@ -275,11 +322,13 @@ func (c *Connector) handleRequest(ctx context.Context, req reverse.ReverseMsg) (
 		opts := session.AgentOpts{}
 		if p.Workspace != "" {
 			// Sanitize workspace path to prevent directory traversal.
-			// Primary has already validated against allowedRoot, but we
-			// still clean the path to avoid ".." injection.
 			ws := filepath.Clean(p.Workspace)
 			if !filepath.IsAbs(ws) {
 				return nil, fmt.Errorf("workspace must be absolute path")
+			}
+			if c.defaultWorkspace != "" && ws != c.defaultWorkspace &&
+				!strings.HasPrefix(ws, c.defaultWorkspace+string(filepath.Separator)) {
+				return nil, fmt.Errorf("workspace %q outside allowed root %q", ws, c.defaultWorkspace)
 			}
 			opts.Workspace = ws
 		}
@@ -311,8 +360,12 @@ func (c *Connector) handleRequest(ctx context.Context, req reverse.ReverseMsg) (
 		if p.ProcStartTime == 0 {
 			return nil, fmt.Errorf("proc_start_time is required")
 		}
-		if actual, err := discovery.ProcStartTime(p.PID); err != nil || actual != p.ProcStartTime {
-			return nil, fmt.Errorf("process identity mismatch")
+		actual, err := discovery.ProcStartTime(p.PID)
+		if err != nil {
+			return nil, fmt.Errorf("cannot verify process identity for pid %d: %w", p.PID, err)
+		}
+		if actual != p.ProcStartTime {
+			return nil, fmt.Errorf("process identity mismatch (pid %d may have been reused)", p.PID)
 		}
 		if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil {
 			return nil, fmt.Errorf("kill process %d: %w", p.PID, err)
@@ -398,12 +451,18 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 		select {
 		case _, ok := <-notify:
 			if !ok {
+				// Session was reset/replaced; the notify channel is closed.
+				// The caller will re-subscribe if needed.
 				return
+			}
+			// Re-fetch session in case it was replaced (e.g. via /new).
+			if cur := c.router.GetSession(key); cur != nil {
+				sess = cur
 			}
 			entries := sess.EventEntriesSince(lastTime)
 			for i := range entries {
 				ev := entries[i]
-				msg := reverse.ReverseMsg{Type: "event", Key: key, Event: &ev}
+				msg := node.ReverseMsg{Type: "event", Key: key, Event: &ev}
 				if err := writeJSON(msg); err != nil {
 					return
 				}
@@ -413,7 +472,9 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 			}
 			// Also push session_state when session state changes
 			snap := sess.Snapshot()
-			writeJSON(reverse.ReverseMsg{Type: "session_state", Key: key, State: snap.State}) //nolint
+			if err := writeJSON(node.ReverseMsg{Type: "session_state", Key: key, State: snap.State}); err != nil {
+				slog.Debug("connector write session_state", "key", key, "err", err)
+			}
 		case <-ctx.Done():
 			return
 		}

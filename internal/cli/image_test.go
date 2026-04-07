@@ -1,4 +1,4 @@
-package server
+package cli
 
 import (
 	"os"
@@ -14,7 +14,7 @@ func TestExtractImagePaths(t *testing.T) {
 	os.WriteFile(jpgPath, []byte("fake-jpg"), 0644)
 
 	text := "Check " + pngPath + " and also " + jpgPath + " please"
-	paths := extractImagePaths(text)
+	paths := ExtractImagePaths(text)
 
 	if len(paths) != 2 {
 		t.Fatalf("len(paths) = %d, want 2: %v", len(paths), paths)
@@ -35,16 +35,16 @@ func TestExtractImagePaths_NoMatches(t *testing.T) {
 		"",
 	}
 	for _, text := range texts {
-		paths := extractImagePaths(text)
+		paths := ExtractImagePaths(text)
 		if len(paths) != 0 {
-			t.Errorf("extractImagePaths(%q) = %v, want empty", text, paths)
+			t.Errorf("ExtractImagePaths(%q) = %v, want empty", text, paths)
 		}
 	}
 }
 
 func TestExtractImagePaths_NonExistent(t *testing.T) {
 	text := "look at /tmp/does-not-exist-abc123.png and /nonexistent/photo.jpg"
-	paths := extractImagePaths(text)
+	paths := ExtractImagePaths(text)
 	if len(paths) != 0 {
 		t.Errorf("non-existent paths should be filtered, got %v", paths)
 	}
@@ -56,7 +56,7 @@ func TestExtractImagePaths_Dedup(t *testing.T) {
 	os.WriteFile(pngPath, []byte("data"), 0644)
 
 	text := pngPath + " and again " + pngPath
-	paths := extractImagePaths(text)
+	paths := ExtractImagePaths(text)
 	if len(paths) != 1 {
 		t.Errorf("duplicate paths should be deduped, got %v", paths)
 	}
@@ -72,7 +72,7 @@ func TestExtractImagePaths_AllExtensions(t *testing.T) {
 		text += p + " "
 	}
 
-	paths := extractImagePaths(text)
+	paths := ExtractImagePaths(text)
 	if len(paths) != len(exts) {
 		t.Errorf("len(paths) = %d, want %d: %v", len(paths), len(exts), paths)
 	}
@@ -85,7 +85,7 @@ func TestExtractImagePaths_TrailingPunctuation(t *testing.T) {
 
 	// Path followed by punctuation that should be stripped
 	text := "See " + pngPath + "."
-	paths := extractImagePaths(text)
+	paths := ExtractImagePaths(text)
 	if len(paths) != 1 {
 		t.Fatalf("len(paths) = %d, want 1", len(paths))
 	}
@@ -112,9 +112,9 @@ func TestMimeFromPath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
-			got := mimeFromPath(tt.path)
+			got := MimeFromPath(tt.path)
 			if got != tt.want {
-				t.Errorf("mimeFromPath(%q) = %q, want %q", tt.path, got, tt.want)
+				t.Errorf("MimeFromPath(%q) = %q, want %q", tt.path, got, tt.want)
 			}
 		})
 	}

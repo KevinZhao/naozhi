@@ -1,4 +1,4 @@
-package server
+package dispatch
 
 import (
 	"bytes"
@@ -133,6 +133,7 @@ func firstLine(s string) string {
 // statusAccumulator tracks accumulated status lines for IM display.
 const maxStatusLines = 8
 
+// appendStatusLine adds a status line, collapsing consecutive thinking lines.
 func appendStatusLine(lines []string, line string) []string {
 	// Collapse consecutive thinking lines (replace last thinking with new one)
 	if strings.HasPrefix(line, "💭") && len(lines) > 0 && strings.HasPrefix(lines[len(lines)-1], "💭") {

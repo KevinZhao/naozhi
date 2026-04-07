@@ -1,4 +1,4 @@
-package server
+package node
 
 import (
 	"context"
@@ -13,7 +13,6 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/reverse"
 )
 
 type reverseResult struct {
@@ -21,9 +20,9 @@ type reverseResult struct {
 	err    error
 }
 
-// ReverseNodeConn is the primary-side representation of a reverse-connected node.
-// It implements NodeConn by forwarding calls over the reverse WebSocket connection.
-type ReverseNodeConn struct {
+// ReverseConn is the primary-side representation of a reverse-connected node.
+// It implements Conn by forwarding calls over the reverse WebSocket connection.
+type ReverseConn struct {
 	id          string
 	displayName string
 	remoteAddr  string
@@ -36,7 +35,7 @@ type ReverseNodeConn struct {
 	reqSeq    atomic.Int64
 
 	subMu sync.Mutex
-	subs  map[string][]wsEventSink // session key → local browser clients
+	subs  map[string][]EventSink // session key → local browser clients
 
 	statusMu sync.RWMutex
 	status   string // "ok" | "connecting" | "error"
@@ -46,30 +45,30 @@ type ReverseNodeConn struct {
 	closeMu sync.Mutex
 }
 
-func newReverseNodeConn(id, displayName, remoteAddr string, conn *websocket.Conn) *ReverseNodeConn {
-	return &ReverseNodeConn{
+func newReverseConn(id, displayName, remoteAddr string, conn *websocket.Conn) *ReverseConn {
+	return &ReverseConn{
 		id:          id,
 		displayName: displayName,
 		remoteAddr:  remoteAddr,
 		conn:        conn,
 		pending:     make(map[string]chan reverseResult),
-		subs:        make(map[string][]wsEventSink),
+		subs:        make(map[string][]EventSink),
 		status:      "ok",
 		done:        make(chan struct{}),
 	}
 }
 
-func (c *ReverseNodeConn) NodeID() string      { return c.id }
-func (c *ReverseNodeConn) DisplayName() string { return c.displayName }
-func (c *ReverseNodeConn) RemoteAddr() string  { return c.remoteAddr }
+func (c *ReverseConn) NodeID() string      { return c.id }
+func (c *ReverseConn) DisplayName() string { return c.displayName }
+func (c *ReverseConn) RemoteAddr() string  { return c.remoteAddr }
 
-func (c *ReverseNodeConn) Status() string {
+func (c *ReverseConn) Status() string {
 	c.statusMu.RLock()
 	defer c.statusMu.RUnlock()
 	return c.status
 }
 
-func (c *ReverseNodeConn) Close() {
+func (c *ReverseConn) Close() {
 	c.closeMu.Lock()
 	if c.closed {
 		c.closeMu.Unlock()
@@ -83,7 +82,7 @@ func (c *ReverseNodeConn) Close() {
 	conn.Close()
 }
 
-func (c *ReverseNodeConn) writeJSON(v any) error {
+func (c *ReverseConn) writeJSON(v any) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
 	c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
@@ -91,7 +90,7 @@ func (c *ReverseNodeConn) writeJSON(v any) error {
 }
 
 // rpc sends a request to the remote node and waits for the response.
-func (c *ReverseNodeConn) rpc(ctx context.Context, method string, params any) (json.RawMessage, error) {
+func (c *ReverseConn) rpc(ctx context.Context, method string, params any) (json.RawMessage, error) {
 	reqID := strconv.FormatInt(c.reqSeq.Add(1), 10)
 	ch := make(chan reverseResult, 1)
 
@@ -99,7 +98,7 @@ func (c *ReverseNodeConn) rpc(ctx context.Context, method string, params any) (j
 	c.pending[reqID] = ch
 	c.pendingMu.Unlock()
 
-	if err := c.writeJSON(reverse.ReverseMsg{
+	if err := c.writeJSON(ReverseMsg{
 		Type:   "request",
 		ReqID:  reqID,
 		Method: method,
@@ -136,7 +135,7 @@ func marshalParams(v any) json.RawMessage {
 	return b
 }
 
-func (c *ReverseNodeConn) FetchSessions(ctx context.Context) ([]map[string]any, error) {
+func (c *ReverseConn) FetchSessions(ctx context.Context) ([]map[string]any, error) {
 	raw, err := c.rpc(ctx, "fetch_sessions", nil)
 	if err != nil {
 		return nil, err
@@ -145,7 +144,7 @@ func (c *ReverseNodeConn) FetchSessions(ctx context.Context) ([]map[string]any, 
 	return result, json.Unmarshal(raw, &result)
 }
 
-func (c *ReverseNodeConn) FetchProjects(ctx context.Context) ([]map[string]any, error) {
+func (c *ReverseConn) FetchProjects(ctx context.Context) ([]map[string]any, error) {
 	raw, err := c.rpc(ctx, "fetch_projects", nil)
 	if err != nil {
 		return nil, err
@@ -154,7 +153,7 @@ func (c *ReverseNodeConn) FetchProjects(ctx context.Context) ([]map[string]any, 
 	return result, json.Unmarshal(raw, &result)
 }
 
-func (c *ReverseNodeConn) FetchDiscovered(ctx context.Context) ([]map[string]any, error) {
+func (c *ReverseConn) FetchDiscovered(ctx context.Context) ([]map[string]any, error) {
 	raw, err := c.rpc(ctx, "fetch_discovered", nil)
 	if err != nil {
 		return nil, err
@@ -163,7 +162,7 @@ func (c *ReverseNodeConn) FetchDiscovered(ctx context.Context) ([]map[string]any
 	return result, json.Unmarshal(raw, &result)
 }
 
-func (c *ReverseNodeConn) FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]cli.EventEntry, error) {
+func (c *ReverseConn) FetchDiscoveredPreview(ctx context.Context, sessionID string) ([]cli.EventEntry, error) {
 	raw, err := c.rpc(ctx, "fetch_discovered_preview", map[string]string{"session_id": sessionID})
 	if err != nil {
 		return nil, err
@@ -172,7 +171,7 @@ func (c *ReverseNodeConn) FetchDiscoveredPreview(ctx context.Context, sessionID 
 	return result, json.Unmarshal(raw, &result)
 }
 
-func (c *ReverseNodeConn) FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error) {
+func (c *ReverseConn) FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error) {
 	raw, err := c.rpc(ctx, "fetch_events", map[string]any{"key": key, "after": after})
 	if err != nil {
 		return nil, err
@@ -181,7 +180,7 @@ func (c *ReverseNodeConn) FetchEvents(ctx context.Context, key string, after int
 	return result, json.Unmarshal(raw, &result)
 }
 
-func (c *ReverseNodeConn) Send(ctx context.Context, key, text, workspace string) error {
+func (c *ReverseConn) Send(ctx context.Context, key, text, workspace string) error {
 	params := map[string]string{"key": key, "text": text}
 	if workspace != "" {
 		params["workspace"] = workspace
@@ -190,31 +189,31 @@ func (c *ReverseNodeConn) Send(ctx context.Context, key, text, workspace string)
 	return err
 }
 
-func (c *ReverseNodeConn) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) error {
+func (c *ReverseConn) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) error {
 	_, err := c.rpc(ctx, "takeover", map[string]any{
 		"pid": pid, "session_id": sessionID, "cwd": cwd, "proc_start_time": procStart,
 	})
 	return err
 }
 
-func (c *ReverseNodeConn) ProxyRestartPlanner(ctx context.Context, projectName string) error {
+func (c *ReverseConn) ProxyRestartPlanner(ctx context.Context, projectName string) error {
 	_, err := c.rpc(ctx, "restart_planner", map[string]string{"project_name": projectName})
 	return err
 }
 
-func (c *ReverseNodeConn) ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error {
+func (c *ReverseConn) ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error {
 	_, err := c.rpc(ctx, "update_config", map[string]any{"project_name": projectName, "config": cfg})
 	return err
 }
 
-func (c *ReverseNodeConn) Subscribe(cl wsEventSink, key string, after int64) {
+func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 	c.subMu.Lock()
 	alreadySub := len(c.subs[key]) > 0
 	c.subs[key] = append(c.subs[key], cl)
 	if !alreadySub {
 		c.subMu.Unlock()
 		// First subscriber: tell remote to start pushing events
-		c.writeJSON(reverse.ReverseMsg{Type: "subscribe", Key: key, After: after}) //nolint
+		c.writeJSON(ReverseMsg{Type: "subscribe", Key: key, After: after}) //nolint
 	} else {
 		c.subMu.Unlock()
 		// Additional subscriber: send history via RPC (non-blocking)
@@ -225,40 +224,40 @@ func (c *ReverseNodeConn) Subscribe(cl wsEventSink, key string, after int64) {
 			if err != nil {
 				return
 			}
-			cl.sendJSON(wsServerMsg{Type: "subscribed", Key: key, Node: c.id})
+			cl.SendJSON(ServerMsg{Type: "subscribed", Key: key, Node: c.id})
 			if len(entries) > 0 {
-				cl.sendJSON(wsServerMsg{Type: "history", Key: key, Node: c.id, Events: entries})
+				cl.SendJSON(ServerMsg{Type: "history", Key: key, Node: c.id, Events: entries})
 			}
 		}()
 	}
 }
 
-func (c *ReverseNodeConn) Unsubscribe(cl wsEventSink, key string) {
+func (c *ReverseConn) Unsubscribe(cl EventSink, key string) {
 	c.subMu.Lock()
 	empty := removeSub(c.subs, key, cl)
 	c.subMu.Unlock()
 
 	if empty {
-		c.writeJSON(reverse.ReverseMsg{Type: "unsubscribe", Key: key}) //nolint
+		c.writeJSON(ReverseMsg{Type: "unsubscribe", Key: key}) //nolint
 	}
-	cl.sendJSON(wsServerMsg{Type: "unsubscribed", Key: key, Node: c.id})
+	cl.SendJSON(ServerMsg{Type: "unsubscribed", Key: key, Node: c.id})
 }
 
-func (c *ReverseNodeConn) RemoveClient(cl wsEventSink) {
+func (c *ReverseConn) RemoveClient(cl EventSink) {
 	c.subMu.Lock()
 	emptyKeys := removeSubAll(c.subs, cl)
 	c.subMu.Unlock()
 
 	for _, key := range emptyKeys {
-		c.writeJSON(reverse.ReverseMsg{Type: "unsubscribe", Key: key}) //nolint
+		c.writeJSON(ReverseMsg{Type: "unsubscribe", Key: key}) //nolint
 	}
 }
 
-func (c *ReverseNodeConn) readLoop() {
+func (c *ReverseConn) readLoop() {
 	defer c.markDisconnected()
 
 	for {
-		var msg reverse.ReverseMsg
+		var msg ReverseMsg
 		if err := c.conn.ReadJSON(&msg); err != nil {
 			slog.Debug("reverse node disconnected", "node", c.id, "err", err)
 			return
@@ -275,74 +274,74 @@ func (c *ReverseNodeConn) readLoop() {
 			if ok {
 				var err error
 				if msg.Error != "" {
-					err = fmt.Errorf("%s", msg.Error)
+					err = fmt.Errorf("node %s: %s", c.id, msg.Error)
 				}
 				ch <- reverseResult{msg.Result, err}
 			}
 
 		case "event":
 			c.subMu.Lock()
-			clients := make([]wsEventSink, len(c.subs[msg.Key]))
+			clients := make([]EventSink, len(c.subs[msg.Key]))
 			copy(clients, c.subs[msg.Key])
 			c.subMu.Unlock()
-			out := wsServerMsg{Type: "event", Key: msg.Key, Event: msg.Event, Node: c.id}
+			out := ServerMsg{Type: "event", Key: msg.Key, Event: msg.Event, Node: c.id}
 			data, err := json.Marshal(out)
 			if err != nil {
 				continue
 			}
 			for _, cl := range clients {
-				cl.sendRaw(data)
+				cl.SendRaw(data)
 			}
 
 		case "session_state":
 			c.subMu.Lock()
-			clients := make([]wsEventSink, len(c.subs[msg.Key]))
+			clients := make([]EventSink, len(c.subs[msg.Key]))
 			copy(clients, c.subs[msg.Key])
 			c.subMu.Unlock()
-			out := wsServerMsg{Type: "session_state", Key: msg.Key, State: msg.State, Node: c.id}
+			out := ServerMsg{Type: "session_state", Key: msg.Key, State: msg.State, Node: c.id}
 			data, err := json.Marshal(out)
 			if err != nil {
 				continue
 			}
 			for _, cl := range clients {
-				cl.sendRaw(data)
+				cl.SendRaw(data)
 			}
 
 		case "subscribed":
 			// Remote confirmed subscription; notify all waiting clients.
 			c.subMu.Lock()
-			clients := make([]wsEventSink, len(c.subs[msg.Key]))
+			clients := make([]EventSink, len(c.subs[msg.Key]))
 			copy(clients, c.subs[msg.Key])
 			c.subMu.Unlock()
-			out := wsServerMsg{Type: "subscribed", Key: msg.Key, Node: c.id}
+			out := ServerMsg{Type: "subscribed", Key: msg.Key, Node: c.id}
 			data, err := json.Marshal(out)
 			if err != nil {
 				continue
 			}
 			for _, cl := range clients {
-				cl.sendRaw(data)
+				cl.SendRaw(data)
 			}
 
 		case "subscribe_error":
 			// Remote could not find the session
 			c.subMu.Lock()
-			clients := make([]wsEventSink, len(c.subs[msg.Key]))
+			clients := make([]EventSink, len(c.subs[msg.Key]))
 			copy(clients, c.subs[msg.Key])
 			delete(c.subs, msg.Key)
 			c.subMu.Unlock()
-			out := wsServerMsg{Type: "error", Key: msg.Key, Node: c.id, Error: msg.Error}
+			out := ServerMsg{Type: "error", Key: msg.Key, Node: c.id, Error: msg.Error}
 			data, err := json.Marshal(out)
 			if err != nil {
 				continue
 			}
 			for _, cl := range clients {
-				cl.sendRaw(data)
+				cl.SendRaw(data)
 			}
 		}
 	}
 }
 
-func (c *ReverseNodeConn) markDisconnected() {
+func (c *ReverseConn) markDisconnected() {
 	c.statusMu.Lock()
 	c.status = "error"
 	c.statusMu.Unlock()

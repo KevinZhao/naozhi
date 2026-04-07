@@ -9,10 +9,11 @@ import (
 )
 
 type storeEntry struct {
-	Key       string  `json:"key"`
-	SessionID string  `json:"session_id"`
-	TotalCost float64 `json:"total_cost,omitempty"`
-	Workspace string  `json:"workspace,omitempty"`
+	Key        string  `json:"key"`
+	SessionID  string  `json:"session_id"`
+	TotalCost  float64 `json:"total_cost,omitempty"`
+	Workspace  string  `json:"workspace,omitempty"`
+	LastActive int64   `json:"last_active,omitempty"` // unix nano
 }
 
 func saveStore(path string, sessions map[string]*ManagedSession) error {
@@ -42,10 +43,11 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 				cost = s.totalCost
 			}
 			entries = append(entries, storeEntry{
-				Key:       s.Key,
-				SessionID: sid,
-				TotalCost: cost,
-				Workspace: s.workspace,
+				Key:        s.Key,
+				SessionID:  sid,
+				TotalCost:  cost,
+				Workspace:  s.workspace,
+				LastActive: s.lastActive.Load(),
 			})
 		}
 	}

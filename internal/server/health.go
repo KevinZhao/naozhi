@@ -35,6 +35,35 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		if s.hub != nil {
 			resp["ws_dropped"] = s.hub.DroppedMessages()
 		}
+
+		// Check CLI binary availability
+		cliOK := true
+		if _, err := os.Stat(s.router.CLIPath()); err != nil {
+			cliOK = false
+		}
+		resp["cli_available"] = cliOK
+
+		// Node connection status
+		if len(s.knownNodes) > 0 {
+			nodeStatus := make(map[string]string, len(s.knownNodes))
+			s.nodesMu.RLock()
+			for id := range s.knownNodes {
+				if nc, ok := s.nodes[id]; ok {
+					nodeStatus[id] = nc.Status()
+				} else {
+					nodeStatus[id] = "disconnected"
+				}
+			}
+			s.nodesMu.RUnlock()
+			resp["nodes"] = nodeStatus
+		}
+
+		// Platform status
+		platStatus := make(map[string]string, len(s.platforms))
+		for name := range s.platforms {
+			platStatus[name] = "registered"
+		}
+		resp["platforms"] = platStatus
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
