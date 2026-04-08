@@ -57,12 +57,18 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 
 		// Timestamp verification — enforce even without EncryptKey to prevent
 		// replay attacks in VerificationToken-only webhook mode.
-		if timestamp := r.Header.Get("X-Lark-Request-Timestamp"); timestamp != "" {
-			if !verifyTimestamp(timestamp) {
-				slog.Warn("feishu request timestamp too old or invalid", "timestamp", timestamp)
+		if ts := r.Header.Get("X-Lark-Request-Timestamp"); ts == "" {
+			// When relying on VerificationToken only, the timestamp header is our
+			// sole replay defence — reject requests that omit it entirely.
+			if f.cfg.EncryptKey == "" && f.cfg.VerificationToken != "" {
+				slog.Warn("feishu request missing timestamp header")
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
+		} else if !verifyTimestamp(ts) {
+			slog.Warn("feishu request timestamp too old or invalid", "timestamp", ts)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
 		}
 
 		// Signature verification (v2 events with encrypt_key)

@@ -24,12 +24,14 @@ import (
 // Avoids re-reading up to 512KB per discovered session on every 10s scan cycle.
 var promptCache struct {
 	sync.Mutex
-	entries map[string]promptCacheEntry
+	entries    map[string]promptCacheEntry
+	generation uint64
 }
 
 type promptCacheEntry struct {
 	mtime  int64
 	prompt string
+	gen    uint64
 }
 
 func init() {
@@ -39,16 +41,46 @@ func init() {
 // summaryCache caches LookupSummaries index file reads.
 var summaryCache struct {
 	sync.Mutex
-	entries map[string]summaryCacheEntry
+	entries    map[string]summaryCacheEntry
+	generation uint64
 }
 
 type summaryCacheEntry struct {
 	mtime int64
 	index sessionsIndex
+	gen   uint64
 }
 
 func init() {
 	summaryCache.entries = make(map[string]summaryCacheEntry)
+}
+
+// evictPromptCache deletes entries that are more than one generation old.
+// Eviction only runs when the cache exceeds 500 entries.
+// Must be called with promptCache.Lock() held.
+func evictPromptCache() {
+	if len(promptCache.entries) <= 500 {
+		return
+	}
+	for k, v := range promptCache.entries {
+		if v.gen+1 < promptCache.generation {
+			delete(promptCache.entries, k)
+		}
+	}
+}
+
+// evictSummaryCache deletes entries that are more than one generation old.
+// Eviction only runs when the cache exceeds 500 entries.
+// Must be called with summaryCache.Lock() held.
+func evictSummaryCache() {
+	if len(summaryCache.entries) <= 500 {
+		return
+	}
+	for k, v := range summaryCache.entries {
+		if v.gen+1 < summaryCache.generation {
+			delete(summaryCache.entries, k)
+		}
+	}
 }
 
 // runningThreshold is the JSONL mtime recency window used to classify a
@@ -107,6 +139,16 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 		}
 		return nil, err
 	}
+
+	// Advance cache generations once per scan so the eviction logic can
+	// identify entries that have not been touched in the last two scan cycles.
+	promptCache.Lock()
+	promptCache.generation++
+	promptCache.Unlock()
+
+	summaryCache.Lock()
+	summaryCache.generation++
+	summaryCache.Unlock()
 
 	// First pass: collect alive sessions with their original session IDs.
 	var candidates []scanCandidate
@@ -348,6 +390,8 @@ func extractLastPrompt(claudeDir, cwd, sessionID string) string {
 
 	promptCache.Lock()
 	if cached, ok := promptCache.entries[path]; ok && cached.mtime == mtime {
+		cached.gen = promptCache.generation
+		promptCache.entries[path] = cached
 		promptCache.Unlock()
 		return cached.prompt
 	}
@@ -356,7 +400,8 @@ func extractLastPrompt(claudeDir, cwd, sessionID string) string {
 	result := extractLastPromptUncached(path, fi.Size())
 
 	promptCache.Lock()
-	promptCache.entries[path] = promptCacheEntry{mtime: mtime, prompt: result}
+	promptCache.entries[path] = promptCacheEntry{mtime: mtime, prompt: result, gen: promptCache.generation}
+	evictPromptCache()
 	promptCache.Unlock()
 	return result
 }
@@ -525,6 +570,8 @@ func LookupSummaries(claudeDir string, sessions map[string]string) map[string]st
 		summaryCache.Lock()
 		cached, ok := summaryCache.entries[indexPath]
 		if ok && cached.mtime == mtime {
+			cached.gen = summaryCache.generation
+			summaryCache.entries[indexPath] = cached
 			summaryCache.Unlock()
 			wanted := make(map[string]bool, len(sids))
 			for _, sid := range sids {
@@ -549,7 +596,8 @@ func LookupSummaries(claudeDir string, sessions map[string]string) map[string]st
 		}
 
 		summaryCache.Lock()
-		summaryCache.entries[indexPath] = summaryCacheEntry{mtime: mtime, index: idx}
+		summaryCache.entries[indexPath] = summaryCacheEntry{mtime: mtime, index: idx, gen: summaryCache.generation}
+		evictSummaryCache()
 		summaryCache.Unlock()
 
 		wanted := make(map[string]bool, len(sids))

@@ -378,7 +378,7 @@ func (p *Process) Interrupt() {
 func (p *Process) Kill() {
 	p.killOnce.Do(func() {
 		close(p.killCh)
-		p.stdin.Close()
+		_ = p.stdin.Close()
 		if p.cmd.Process != nil && p.cmd.Process.Pid > 0 {
 			// Kill the entire process group (created via Setpgid) to avoid
 			// orphaned child processes (e.g., Bash tools, subagents).

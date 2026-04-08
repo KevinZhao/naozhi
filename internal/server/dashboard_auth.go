@@ -133,7 +133,7 @@ button:hover{background:#3a8eef}button:active{background:#2a7edf}
 <div class="login">
 <h1>naozhi</h1>
 <p>enter token to continue</p>
-<form id="login-form" action="/dashboard" method="GET" autocomplete="on">
+<form id="login-form" action="/dashboard" method="POST" autocomplete="on">
 <input type="text" name="username" autocomplete="username" value="naozhi" tabindex="-1" aria-hidden="true">
 <input type="password" name="token" id="token" autocomplete="current-password" placeholder="dashboard token" autofocus>
 <button type="submit">login</button>

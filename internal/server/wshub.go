@@ -13,6 +13,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
@@ -214,9 +215,11 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 
 	snap := sess.Snapshot()
 
-	entries := sess.EventEntries()
+	var entries []cli.EventEntry
 	if msg.After > 0 {
 		entries = sess.EventEntriesSince(msg.After)
+	} else {
+		entries = sess.EventEntries()
 	}
 
 	c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State})

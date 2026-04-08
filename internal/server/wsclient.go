@@ -24,6 +24,7 @@ type wsClient struct {
 	send          chan []byte
 	hub           *Hub
 	authenticated atomic.Bool
+	authAttempts  atomic.Int32
 	subscriptions map[string]func() // key -> unsubscribe function
 	done          chan struct{}
 	doneOnce      sync.Once
@@ -85,6 +86,9 @@ func (c *wsClient) readPump() {
 
 		switch msg.Type {
 		case "auth":
+			if c.authAttempts.Add(1) > 3 {
+				return // closes connection via defer
+			}
 			c.hub.handleAuth(c, msg)
 			if c.authenticated.Load() {
 				c.conn.SetReadDeadline(time.Now().Add(wsPongWait))

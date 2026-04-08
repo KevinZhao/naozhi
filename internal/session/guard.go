@@ -67,19 +67,21 @@ func (g *Guard) AcquireTimeout(ctx context.Context, key string, timeout time.Dur
 		closeDone()
 		g.cond.Broadcast() // unblock Wait
 	})
+	localDone := make(chan struct{})
+	defer close(localDone)
 	// Also broadcast on context cancellation to unblock Wait promptly.
 	go func() {
 		select {
 		case <-ctx.Done():
 			g.cond.Broadcast()
-		case <-done:
+		case <-localDone:
 		}
 	}()
 	g.cond.L.Lock()
 	defer func() {
 		g.cond.L.Unlock()
 		timer.Stop()
-		closeDone() // ensure ctx-watching goroutine exits on success path
+		closeDone()
 	}()
 	for {
 		if g.TryAcquire(key) {

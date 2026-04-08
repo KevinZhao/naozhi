@@ -732,9 +732,9 @@ function toggleHistory() {
         ? 'selectSession(this.dataset.key,this.dataset.node);closeHistoryPopover()'
         : 'resumeRecentSession(this.dataset.sid);closeHistoryPopover()';
       return dayHeader +
-        '<div class="history-popover-item" data-key="' + esc(s.key) + '" data-node="' + esc(s.node) + '" data-sid="' + esc(s.session_id) + '" onclick="' + onclick + '">' +
-        (isManaged ? '<button class="hp-dismiss" data-key="' + esc(s.key) + '" data-node="' + esc(s.node) + '" onclick="event.stopPropagation();dismissHistoryItem(this)" title="delete">&times;</button>' : '') +
-        (s.prompt ? '<div class="hp-prompt" title="' + esc(s.prompt) + '">' + esc(s.prompt) + '</div>' : '<div class="hp-prompt" style="color:#6e7681">(no prompt)</div>') +
+        '<div class="history-popover-item" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(s.node) + '" data-sid="' + escAttr(s.session_id) + '" onclick="' + onclick + '">' +
+        (isManaged ? '<button class="hp-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(s.node) + '" onclick="event.stopPropagation();dismissHistoryItem(this)" title="delete">&times;</button>' : '') +
+        (s.prompt ? '<div class="hp-prompt" title="' + escAttr(s.prompt) + '">' + esc(s.prompt) + '</div>' : '<div class="hp-prompt" style="color:#6e7681">(no prompt)</div>') +
         '<div class="hp-meta">' +
           (s.project ? '<span class="hp-project">' + esc(s.project) + '</span><span class="hp-dot">&middot;</span>' : '') +
           (s.tool ? '<span class="hp-tool">' + esc(s.tool) + '</span><span class="hp-dot">&middot;</span>' : '') +
@@ -796,7 +796,7 @@ function sessionCardHtml(s) {
 
   // Recent cards: show "resumable" label, no cli info, no dismiss button
   const dismissBtn = isResumable ? '' :
-    '<button class="btn-dismiss" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove">&times;</button>';
+    '<button class="btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove">&times;</button>';
 
   let metaHtml;
   if (isResumable) {
@@ -811,11 +811,11 @@ function sessionCardHtml(s) {
       nodeBadge;
   }
 
-  return '<div class="' + cls + '" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="selectSession(this.dataset.key,this.dataset.node)">' +
+  return '<div class="' + cls + '" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="selectSession(this.dataset.key,this.dataset.node)">' +
     dismissBtn +
     '<div class="sc-header">' +
       icon +
-      '<div class="sc-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' +
+      '<div class="sc-prompt" title="' + escAttr(prompt) + '">' + esc(prompt) + '</div>' +
       (ago ? '<span class="sc-time">' + ago + '</span>' : '') +
     '</div>' +
     '<div class="sc-meta">' + metaHtml + '</div>' +
@@ -1266,11 +1266,14 @@ async function sendMessage() {
       sendMsg.resume_id = sessionResumeIDs[selectedKey];
       delete sessionResumeIDs[selectedKey];
     }
-    wsm.send(sendMsg);
-    if (input) clearMsg(input);
-    sending = false;
-    if (btn) btn.classList.remove('sending');
-    return;
+    if (!wsm.send(sendMsg)) {
+      // WS send failed, fall through to HTTP path below
+    } else {
+      if (input) clearMsg(input);
+      sending = false;
+      if (btn) btn.classList.remove('sending');
+      return;
+    }
   }
 
   // HTTP POST fallback
@@ -2003,6 +2006,7 @@ function esc(s) {
   _escEl.textContent = s;
   return _escEl.innerHTML;
 }
+function escAttr(s) { return esc(s).replace(/"/g, '&quot;'); }
 function escJs(s) {
   if (!s) return '';
   return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/\n/g,'\\n').replace(/\r/g,'\\r');
@@ -2034,7 +2038,7 @@ function runMermaid() {
   let hasNew = false;
   Object.entries(mermaidPending).forEach(([id, code]) => {
     const el = document.getElementById(id);
-    if (!el) return;
+    if (!el) { delete mermaidPending[id]; return; }
     el.textContent = code;
     el.className = 'mermaid';
     delete mermaidPending[id];
@@ -2109,7 +2113,7 @@ function renderMd(s) {
         mermaidPending[id] = code;
         return '<div class="mermaid-wrap"><pre id="' + id + '" class="mermaid-pending"></pre></div>';
       }
-      const langAttr = lang ? ' data-lang="' + esc(lang) + '"' : '';
+      const langAttr = lang ? ' data-lang="' + escAttr(lang) + '"' : '';
       return '<div class="md-code-wrap"><pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre><button class="md-copy-btn" onclick="copyCodeBlock(this)">copy</button></div>';
     }
     if (part.startsWith('$$') && part.endsWith('$$')) {
@@ -2960,7 +2964,7 @@ function createNewCronJob() {
   let scheduleHtml =
     '<ul class="proj-pick" id="cron-schedule-list">' +
     presets.map(p =>
-      '<li data-value="' + esc(p.value) + '" onclick="cronSelectSchedule(this, \'' + escJs(p.value) + '\')">' +
+      '<li data-value="' + escAttr(p.value) + '" onclick="cronSelectSchedule(this, \'' + escJs(p.value) + '\')">' +
         '<div class="pp-name">' + esc(p.label) + '</div>' +
         '<div class="pp-path">' + esc(p.value) + '</div>' +
       '</li>'
@@ -2979,7 +2983,7 @@ function createNewCronJob() {
   if (projectsData.length > 0) {
     wsHtml += '<ul class="proj-pick" id="cron-ws-list">' +
       projectsData.map(p =>
-        '<li data-path="' + esc(p.path) + '" onclick="cronSelectWorkspace(this, \'' + escJs(p.path) + '\')">' +
+        '<li data-path="' + escAttr(p.path) + '" onclick="cronSelectWorkspace(this, \'' + escJs(p.path) + '\')">' +
           '<div class="pp-name">' + esc(p.name) + '</div>' +
           '<div class="pp-path">' + esc(shortPath(p.path)) + '</div>' +
         '</li>'
@@ -3161,7 +3165,7 @@ function renderCronPanel() {
       const status = j.paused ? '<span class="badge suspended">paused</span>' : '<span class="badge running">active</span>';
       const nextStr = j.next_run ? timeAgo(j.next_run, true) : '';
       const lastStr = j.last_run_at ? timeAgo(j.last_run_at) : '';
-      const wdStr = j.work_dir ? '<span style="color:#a5d6ff" title="' + esc(j.work_dir) + '">' + esc(shortPath(j.work_dir)) + '</span>' : '';
+      const wdStr = j.work_dir ? '<span style="color:#a5d6ff" title="' + escAttr(j.work_dir) + '">' + esc(shortPath(j.work_dir)) + '</span>' : '';
       const result = j.last_error
         ? '<div style="color:#da3633;font-size:12px;margin-top:4px">\u2716 ' + esc(j.last_error) + '</div>'
         : (j.last_result ? '<div style="color:#7ee787;font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">\u2714 ' + esc(j.last_result.substring(0, 150)) + '</div>' : '');
