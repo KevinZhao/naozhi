@@ -210,14 +210,35 @@ func resolveWorkspaceWithIndex(projDir, dirName string) (string, *sessionsIndex)
 }
 
 // recentFromParsedIndex extracts sessions from an already-parsed sessions index.
+// Uses a single ReadDir to collect file info, then O(1) map lookups per entry
+// instead of individual os.Stat calls.
 func recentFromParsedIndex(idx *sessionsIndex, projDir, workspace string, exclude map[string]bool) []RecentSession {
+	// Build a map of .jsonl file mtimes from a single directory listing.
+	dirEntries, err := os.ReadDir(projDir)
+	if err != nil {
+		return nil
+	}
+	jsonlMtimes := make(map[string]int64, len(dirEntries))
+	for _, de := range dirEntries {
+		name := de.Name()
+		if de.IsDir() || !strings.HasSuffix(name, ".jsonl") {
+			continue
+		}
+		info, err := de.Info()
+		if err != nil || info.Size() == 0 {
+			continue
+		}
+		sid := strings.TrimSuffix(name, ".jsonl")
+		jsonlMtimes[sid] = info.ModTime().UnixMilli()
+	}
+
 	var out []RecentSession
 	for _, entry := range idx.Entries {
 		if entry.SessionID == "" || exclude[entry.SessionID] {
 			continue
 		}
-		info, err := os.Stat(filepath.Join(projDir, entry.SessionID+".jsonl"))
-		if err != nil {
+		mtime, ok := jsonlMtimes[entry.SessionID]
+		if !ok {
 			continue
 		}
 		prompt := entry.FirstPrompt
@@ -228,7 +249,7 @@ func recentFromParsedIndex(idx *sessionsIndex, projDir, workspace string, exclud
 			SessionID:  entry.SessionID,
 			Summary:    entry.Summary,
 			LastPrompt: cli.TruncateRunes(prompt, 120),
-			LastActive: info.ModTime().UnixMilli(),
+			LastActive: mtime,
 			Workspace:  workspace,
 		})
 	}
@@ -287,30 +308,3 @@ func tryResolveParts(parts []string, base string) string {
 // ---------------------------------------------------------------------------
 // Naozhi-managed session detection
 // ---------------------------------------------------------------------------
-
-// isNaozhiManaged checks if a JSONL file belongs to a naozhi-managed session
-// by reading its first line for a "queue-operation" type marker. Naozhi writes
-// this envelope as the first line of every session it manages, which is distinct
-// from user-initiated Claude Code sessions (whose first line is typically
-// "file-history-snapshot", "permission-mode", or "user").
-func isNaozhiManaged(jsonlPath string) bool {
-	f, err := os.Open(jsonlPath)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 4*1024), 16*1024)
-	if !scanner.Scan() {
-		return false
-	}
-	line := scanner.Bytes()
-	// Fast pre-filter before JSON parse.
-	if !bytes.Contains(line, []byte(`"queue-operation"`)) {
-		return false
-	}
-	var envelope struct {
-		Type string `json:"type"`
-	}
-	return json.Unmarshal(line, &envelope) == nil && envelope.Type == "queue-operation"
-}

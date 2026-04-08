@@ -242,6 +242,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .section-header{padding:6px 16px;font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.4px;background:#161b22;border-top:1px solid #30363d;border-bottom:1px solid #21262d;position:sticky;top:0;z-index:1}
 /* Session card v2 (two-line flat, WeChat-style) */
 .session-card .sc-header{display:flex;align-items:baseline;gap:8px}
+.sc-cli-icon{width:14px;height:14px;flex-shrink:0;position:relative;top:2px}
 .session-card .sc-prompt{font-size:15px;color:#e6edf3;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .session-card.new-card{border-left-style:dashed;border-left-color:#58a6ff}
 .session-card.resumable-card{border-left-style:dashed;border-left-color:#8b949e}
@@ -376,6 +377,7 @@ let sending = false;
 let selectedNode = 'local';
 let nodesData = {};
 let lastSessionsJSON = '';
+let lastVersion = 0;
 let lastNodesJSON = '';
 let lastRecentJSON = '';
 let lastHistoryJSON = '';
@@ -395,6 +397,7 @@ const sessionNodes = {};
 const sessionResumeIDs = {}; // key → session_id for recent session resume
 let recentSessionsData = []; // from API recent_sessions (< 24h)
 let historySessionsData = []; // from API history_sessions (1-7d)
+let sidebarOverflow = []; // resumable items beyond per-project limit, shown in history popover
 
 function getToken() { return ''; }
 function setToken(t) { /* token stored in HttpOnly cookie only */ }
@@ -417,12 +420,15 @@ async function fetchSessions() {
     }
     if (!r.ok) return;
     const data = await r.json();
-    const sessionsHash = JSON.stringify(data.sessions);
+    // Use server-side version counter for efficient change detection.
+    // Falls back to JSON comparison for nodes/recent/history which lack a version.
+    const version = (data.stats && data.stats.version) || 0;
     const nodesHash = JSON.stringify(data.nodes || {});
     const recentHash = JSON.stringify(data.recent_sessions || []);
     const historyHash = JSON.stringify(data.history_sessions || []);
-    if (sessionsHash === lastSessionsJSON && nodesHash === lastNodesJSON && recentHash === lastRecentJSON && historyHash === lastHistoryJSON) return;
-    lastSessionsJSON = sessionsHash;
+    if (version === lastVersion && version > 0 && nodesHash === lastNodesJSON && recentHash === lastRecentJSON && historyHash === lastHistoryJSON) return;
+    lastVersion = version;
+    lastSessionsJSON = 'v' + version; // keep non-empty so force-refresh via '' still works
     lastNodesJSON = nodesHash;
     lastRecentJSON = recentHash;
     lastHistoryJSON = historyHash;
@@ -456,14 +462,27 @@ async function fetchSessions() {
       if (!data.sessions) data.sessions = [];
       for (const key of pendingKeys) {
         if (!backendKeys.has(key)) {
+          // For resume-pending sessions, carry over original prompt/time
+          // so the card looks unchanged instead of showing an empty "new" card.
+          const resumeId = sessionResumeIDs[key];
+          let origPrompt = '', origActive = 0;
+          if (resumeId) {
+            const orig = [...(recentSessionsData || []), ...(historySessionsData || [])]
+              .find(r => r.session_id === resumeId);
+            if (orig) {
+              origPrompt = orig.last_prompt || orig.summary || '';
+              origActive = orig.last_active || 0;
+            }
+          }
           const parts = key.split(':');
           data.sessions.push({
             key: key,
-            state: 'new',
+            state: resumeId ? 'resumable' : 'new',
             platform: parts[0] || 'dashboard',
             agent: 'general',
             workspace: sessionWorkspaces[key],
-            last_active: 0,
+            last_active: origActive,
+            last_prompt: origPrompt,
             node: sessionNodes[key] || 'local',
             project: matchProject(sessionWorkspaces[key]),
           });
@@ -565,13 +584,24 @@ function renderSidebar(data) {
     const sortedProjects = Object.keys(groups).sort((a, b) => {
       return (groups[b][0].last_active || 0) - (groups[a][0].last_active || 0);
     });
+    const MAX_RESUMABLE = 5;
+    sidebarOverflow = [];
     html = '';
     sortedProjects.forEach(p => {
+      const items = groups[p];
+      // Active sessions (running/ready/new) always show; cap only resumable
+      const pinned = items.filter(s => s.state !== 'resumable');
+      const resumable = items.filter(s => s.state === 'resumable');
+      const shownResumable = resumable.slice(0, MAX_RESUMABLE);
+      resumable.slice(MAX_RESUMABLE).forEach(s => sidebarOverflow.push(s));
       html += '<div class="section-header">' + esc(p) + '</div>';
-      html += groups[p].map(sessionCardHtml).join('');
+      html += [...pinned, ...shownResumable].map(sessionCardHtml).join('');
     });
-    // Ungrouped at the bottom (no header)
-    html += ungrouped.map(sessionCardHtml).join('');
+    // Ungrouped at the bottom (no header), also capped
+    const pinnedUngrouped = ungrouped.filter(s => s.state !== 'resumable');
+    const resumableUngrouped = ungrouped.filter(s => s.state === 'resumable');
+    resumableUngrouped.slice(MAX_RESUMABLE).forEach(s => sidebarOverflow.push(s));
+    html += [...pinnedUngrouped, ...resumableUngrouped.slice(0, MAX_RESUMABLE)].map(sessionCardHtml).join('');
   } else {
     html = active.map(sessionCardHtml).join('');
   }
@@ -583,7 +613,7 @@ function renderSidebar(data) {
   // Update history badge (suspended managed + filesystem history)
   const hBadge = document.getElementById('history-badge');
   if (hBadge) {
-    const historyCount = suspended.length + historySessionsData.length;
+    const historyCount = suspended.length + historySessionsData.length + sidebarOverflow.length;
     hBadge.textContent = historyCount > 0 ? historyCount : '';
     hBadge.style.display = historyCount > 0 ? '' : 'none';
   }
@@ -649,20 +679,30 @@ document.addEventListener('click', function(e) {
 function toggleHistory() {
   if (activePopover) { closeHistoryPopover(); return; }
 
-  // Merge suspended managed sessions + filesystem history sessions.
+  // Merge suspended managed sessions + sidebar overflow + filesystem history sessions.
   const suspended = allSessionsCache.filter(s => s.state === 'suspended').map(s => ({
     key: s.key, node: s.node || 'local', source: 'managed',
     session_id: s.session_id || '', last_active: s.last_active || 0,
     prompt: s.last_prompt || '', project: s.project || '', tool: s.cli_name || s.protocol || 'cli',
+  }));
+  const overflowMapped = sidebarOverflow.map(s => ({
+    key: s.key, node: s.node || 'local', source: s.source || 'recent',
+    session_id: s.session_id || (s._recent ? s._recent.session_id : '') || '', last_active: s.last_active || 0,
+    prompt: s.last_prompt || '', project: s.project || '', tool: s.cli_name || '',
   }));
   const fsHistory = historySessionsData.map(r => ({
     key: '_history:' + r.session_id, node: 'local', source: 'recent',
     session_id: r.session_id, last_active: r.last_active || 0,
     prompt: r.last_prompt || r.summary || '', project: r.project || matchProject(r.workspace), tool: '',
   }));
-  // Deduplicate by session_id (managed takes priority).
+  // Deduplicate by session_id (managed/overflow take priority over filesystem).
   const seenIDs = new Set(suspended.map(s => s.session_id).filter(Boolean));
   const merged = [...suspended];
+  for (const s of overflowMapped) {
+    if (s.session_id && seenIDs.has(s.session_id)) continue;
+    seenIDs.add(s.session_id);
+    merged.push(s);
+  }
   for (const h of fsHistory) {
     if (h.session_id && seenIDs.has(h.session_id)) continue;
     seenIDs.add(h.session_id);
@@ -728,6 +768,12 @@ function majorMinor(ver) {
   return parts.length >= 2 ? parts[0] + '.' + parts[1] : ver;
 }
 
+function cliIcon(name) {
+  if (name === 'kiro') return '<svg class="sc-cli-icon" viewBox="0 0 16 16" fill="none"><path d="M8 1L14 5.5V10.5L8 15L2 10.5V5.5L8 1Z" fill="#f97316" opacity="0.85"/><path d="M6 5.5V10.5M6 8H9.5L6 5.5M6 8L9.5 10.5" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  // Default: Claude Code robot
+  return '<svg class="sc-cli-icon" viewBox="0 0 16 16" fill="none"><rect x="2" y="5" width="12" height="9" rx="2" fill="#d4a574" opacity="0.85"/><circle cx="5.5" cy="9" r="1.2" fill="#1a1a1a"/><circle cx="10.5" cy="9" r="1.2" fill="#1a1a1a"/><rect x="6" y="11.5" width="4" height="1" rx="0.5" fill="#1a1a1a"/><line x1="8" y1="2" x2="8" y2="5" stroke="#d4a574" stroke-width="1.2" stroke-linecap="round"/><circle cx="8" cy="1.5" r="1.2" fill="#d4a574" opacity="0.85"/></svg>';
+}
+
 function sessionCardHtml(s) {
   const sNode = s.node || 'local';
   const isActive = selectedKey === s.key && selectedNode === sNode;
@@ -737,6 +783,10 @@ function sessionCardHtml(s) {
 
   // Line 1: prompt
   const prompt = s.summary || s.last_prompt || (isNew ? '(new session)' : '(no prompt)');
+
+  // CLI icon: use cli_name for managed/discovered, default to claude-code for resumable
+  const cliNameForIcon = s.cli_name || (isResumable ? 'claude-code' : 'cli');
+  const icon = cliIcon(cliNameForIcon);
 
   // Line 2: status dot + meta
   const dotCls = s.state === 'running' ? 'dot-running' : (s.state === 'ready' ? 'dot-ready' : (s.state === 'resumable' ? 'dot-resumable' : 'dot-new'));
@@ -764,6 +814,7 @@ function sessionCardHtml(s) {
   return '<div class="' + cls + '" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="selectSession(this.dataset.key,this.dataset.node)">' +
     dismissBtn +
     '<div class="sc-header">' +
+      icon +
       '<div class="sc-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' +
       (ago ? '<span class="sc-time">' + ago + '</span>' : '') +
     '</div>' +
@@ -1770,27 +1821,33 @@ function createNewSession() {
   const ws = defaultWorkspace || '';
 
   if (projectsData.length > 0) {
-    // Project picker: tappable list
-    const items = projectsData.map(p =>
-      '<li onclick="doCreateInProject(\'' + escJs(p.path) + '\',\'' + escJs(p.name) + '\',\'' + escJs(p.node || 'local') + '\')">' +
-        '<div class="pp-name">' + esc(p.name) + '</div>' +
-        '<div class="pp-path">' + esc(shortPath(p.path)) + '</div>' +
-      '</li>'
-    ).join('');
+    // Project picker: build DOM elements to avoid onclick attribute injection (XSS).
+    const ul = document.createElement('ul');
+    ul.className = 'proj-pick';
+    projectsData.forEach(p => {
+      const li = document.createElement('li');
+      li.addEventListener('click', () => doCreateInProject(p.path, p.name, p.node || 'local'));
+      li.innerHTML = '<div class="pp-name">' + esc(p.name) + '</div>' +
+        '<div class="pp-path">' + esc(shortPath(p.path)) + '</div>';
+      ul.appendChild(li);
+    });
+    const customLi = document.createElement('li');
+    customLi.id = 'pp-custom-toggle';
+    customLi.addEventListener('click', toggleCustomWorkspace);
+    customLi.innerHTML = '<div class="pp-custom"><span class="pp-custom-icon">+</span> Custom workspace</div>';
+    ul.appendChild(customLi);
     overlay.innerHTML =
       '<div class="modal">' +
         '<h3>New Session</h3>' +
-        '<ul class="proj-pick">' + items +
-          '<li id="pp-custom-toggle" onclick="toggleCustomWorkspace()">' +
-            '<div class="pp-custom"><span class="pp-custom-icon">+</span> Custom workspace</div>' +
-          '</li>' +
-        '</ul>' +
+        '<div id="pp-list-container"></div>' +
         '<div id="pp-custom-form" style="display:none;margin-top:8px">' +
           '<input id="new-workspace" placeholder="' + esc(ws) + '" value="" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
           '<div class="modal-btns"><button class="primary" onclick="doCreateSession()">create</button></div>' +
         '</div>' +
         '<div class="modal-btns"><button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button></div>' +
       '</div>';
+    document.body.appendChild(overlay);
+    document.getElementById('pp-list-container').appendChild(ul);
   } else {
     // No projects: simple workspace input
     overlay.innerHTML =
@@ -1806,7 +1863,7 @@ function createNewSession() {
         '</div>' +
       '</div>';
   }
-  document.body.appendChild(overlay);
+  if (!overlay.parentNode) document.body.appendChild(overlay);
   if (!projectsData.length) setTimeout(() => document.getElementById('new-workspace').focus(), 100);
 }
 

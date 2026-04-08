@@ -163,22 +163,34 @@ func (l *EventLog) Entries() []EventEntry {
 }
 
 // EntriesSince returns entries after the given unix ms timestamp, in chronological order.
+// Scans backward from the newest entry for O(k) performance in the common case
+// (k = entries since afterMS, typically 1-5 during streaming).
 func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	start := (l.head - l.count + l.maxSize) % l.maxSize
-	for i := 0; i < l.count; i++ {
-		idx := (start + i) % l.maxSize
-		if l.entries[idx].Time > afterMS {
-			remaining := l.count - i
-			out := make([]EventEntry, remaining)
-			for j := 0; j < remaining; j++ {
-				out[j] = l.entries[(idx+j)%l.maxSize]
-			}
-			return out
-		}
+	if l.count == 0 {
+		return nil
 	}
-	return nil
+	// Scan backward from newest to find the boundary.
+	// newest is at (head-1+maxSize)%maxSize.
+	matchCount := 0
+	for i := l.count - 1; i >= 0; i-- {
+		idx := (l.head - l.count + i + l.maxSize) % l.maxSize
+		if l.entries[idx].Time <= afterMS {
+			break
+		}
+		matchCount++
+	}
+	if matchCount == 0 {
+		return nil
+	}
+	out := make([]EventEntry, matchCount)
+	startIdx := l.count - matchCount
+	start := (l.head - l.count + l.maxSize) % l.maxSize
+	for i := 0; i < matchCount; i++ {
+		out[i] = l.entries[(start+startIdx+i)%l.maxSize]
+	}
+	return out
 }
 
 // LastPromptSummary returns the summary of the most recent "user" entry.

@@ -181,7 +181,7 @@ func (m *Manager) UnbindAllChat(platform, chatType, chatID string) error {
 
 	filtered := p.Config.ChatBindings[:0]
 	for _, b := range p.Config.ChatBindings {
-		if !(b.Platform == platform && b.ChatID == chatID && b.ChatType == chatType) {
+		if b.Platform != platform || b.ChatID != chatID || b.ChatType != chatType {
 			filtered = append(filtered, b)
 		}
 	}

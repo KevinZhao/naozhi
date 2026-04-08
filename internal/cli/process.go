@@ -97,18 +97,18 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string, 
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		stdin.Close()
+		_ = stdin.Close()
 		return nil, fmt.Errorf("stdout pipe: %w", err)
 	}
 	stderrPipe, err := cmd.StderrPipe()
 	if err != nil {
-		stdin.Close()
-		stdout.Close()
+		_ = stdin.Close()
+		_ = stdout.Close()
 		return nil, fmt.Errorf("stderr pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		stdin.Close()
+		_ = stdin.Close()
 		return nil, fmt.Errorf("start cli: %w", err)
 	}
 
@@ -382,19 +382,21 @@ func (p *Process) Kill() {
 		if p.cmd.Process != nil && p.cmd.Process.Pid > 0 {
 			// Kill the entire process group (created via Setpgid) to avoid
 			// orphaned child processes (e.g., Bash tools, subagents).
-			syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL)
+			if err := syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+				slog.Warn("kill process group failed", "pid", p.cmd.Process.Pid, "err", err)
+			}
 		}
 	})
 	// Wait for stderr goroutine to exit (pipe closes after SIGKILL).
 	if p.stderrDone != nil {
 		<-p.stderrDone
 	}
-	p.waitOnce.Do(func() { p.cmd.Wait() })
+	p.waitOnce.Do(func() { _ = p.cmd.Wait() })
 }
 
 // Close gracefully shuts down by closing stdin.
 func (p *Process) Close() {
-	p.stdin.Close()
+	_ = p.stdin.Close()
 	timer := time.NewTimer(processCloseTimeout)
 	defer timer.Stop()
 	select {
@@ -409,7 +411,7 @@ func (p *Process) Close() {
 		<-p.stderrDone
 	}
 	// Reap the child process to avoid zombies
-	p.waitOnce.Do(func() { p.cmd.Wait() })
+	p.waitOnce.Do(func() { _ = p.cmd.Wait() })
 }
 
 // logEvent converts an Event to an EventEntry and appends it to the event log.

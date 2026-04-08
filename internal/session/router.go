@@ -13,6 +13,8 @@ import (
 	"github.com/naozhi/naozhi/internal/discovery"
 )
 
+// shutdownTimeout is the maximum time to wait for running sessions during shutdown.
+// NOTE: server.shutdownTimeout is defined independently with the same value for HTTP shutdown.
 const shutdownTimeout = 30 * time.Second
 
 // ErrMaxProcs is returned when all process slots are occupied.
@@ -60,6 +62,9 @@ type Router struct {
 	totalTimeout    time.Duration
 
 	onChange func() // called (outside lock) when session list changes
+
+	// historyWg tracks startup history-loading goroutines so Shutdown waits for them.
+	historyWg sync.WaitGroup
 }
 
 // chatKeyFor strips the last ":agentID" segment from a session key to get the chat key.
@@ -227,7 +232,9 @@ func NewRouter(cfg RouterConfig) *Router {
 			if s.getSessionID() == "" {
 				continue
 			}
+			r.historyWg.Add(1)
 			go func() {
+				defer r.historyWg.Done()
 				sem <- struct{}{}
 				defer func() { <-sem }()
 
@@ -428,12 +435,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	} else {
 		// Guard against unbounded exempt session growth (e.g., many projects)
 		const maxExempt = 20
-		exemptCount := 0
-		for _, s := range r.sessions {
-			if s.Exempt && s.process != nil && s.process.Alive() {
-				exemptCount++
-			}
-		}
+		exemptCount := r.countExempt()
 		if exemptCount >= maxExempt {
 			r.mu.Unlock()
 			return nil, fmt.Errorf("max exempt sessions reached (%d)", maxExempt)
@@ -613,6 +615,18 @@ func (r *Router) countActive() {
 		}
 	}
 	r.activeCount = count
+}
+
+// countExempt returns the number of alive exempt (planner) sessions.
+// Caller must hold r.mu.
+func (r *Router) countExempt() int {
+	count := 0
+	for _, s := range r.sessions {
+		if s.Exempt && s.process != nil && s.process.Alive() {
+			count++
+		}
+	}
+	return count
 }
 
 // evictOldest closes the oldest idle (non-Running) session to free a slot.
@@ -922,6 +936,8 @@ func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 
 // Shutdown gracefully closes all sessions, waiting for running ones to complete.
 func (r *Router) Shutdown() {
+	// Wait for startup history-loading goroutines to finish first.
+	r.historyWg.Wait()
 	// Deadline timer: broadcast to unblock Wait() when timeout expires
 	timer := time.AfterFunc(shutdownTimeout, func() {
 		if r.shutdownCond != nil {
@@ -1000,6 +1016,14 @@ func (r *Router) DefaultWorkspace() string {
 	return r.workspace
 }
 
+// Version returns a monotonic counter incremented on every session mutation.
+// Used by the dashboard for efficient change detection without full JSON comparison.
+func (r *Router) Version() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.storeGen
+}
+
 // MaxProcs returns the maximum number of concurrent CLI processes.
 func (r *Router) MaxProcs() int {
 	return r.maxProcs
@@ -1019,7 +1043,6 @@ func (r *Router) CLIPath() string {
 func (r *Router) Stats() (active, total int) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.countActive() // keeps activeCount up-to-date for capacity management
 	return r.activeCount, len(r.sessions)
 }
 
@@ -1068,6 +1091,28 @@ func (r *Router) ActiveSessionIDs() map[string]bool {
 	defer r.mu.Unlock()
 	ids := make(map[string]bool, len(r.sessions)*3)
 	for _, s := range r.sessions {
+		if id := s.getSessionID(); id != "" {
+			ids[id] = true
+		}
+		for _, id := range s.prevSessionIDs {
+			ids[id] = true
+		}
+	}
+	return ids
+}
+
+// DiscoveryExcludeIDs returns session IDs to exclude from filesystem discovery.
+// Only sessions with a running process are excluded to prevent duplicates.
+// Suspended sessions (no process) are allowed through so their underlying
+// session files appear as resumable items in the dashboard sidebar.
+func (r *Router) DiscoveryExcludeIDs() map[string]bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids := make(map[string]bool, len(r.sessions))
+	for _, s := range r.sessions {
+		if s.process == nil {
+			continue
+		}
 		if id := s.getSessionID(); id != "" {
 			ids[id] = true
 		}

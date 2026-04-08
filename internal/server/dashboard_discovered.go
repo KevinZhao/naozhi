@@ -165,6 +165,13 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 	if cwd == "" {
 		cwd = "unknown"
 	}
+	// Validate CWD against allowedRoot to prevent sessions running in arbitrary directories.
+	if cwd != "unknown" && s.allowedRoot != "" {
+		if _, err := validateWorkspace(cwd, s.allowedRoot); err != nil {
+			http.Error(w, "cwd outside allowed root", http.StatusBadRequest)
+			return
+		}
+	}
 	cwdKey := strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
 	key := "local:takeover:" + cwdKey + ":general"
 

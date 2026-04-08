@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"sync"
 	"time"
 )
@@ -52,21 +53,33 @@ func (g *Guard) Release(key string) {
 	g.cond.L.Unlock()
 }
 
-// AcquireTimeout tries to acquire the guard, waiting for Release notification or timeout.
-func (g *Guard) AcquireTimeout(key string, timeout time.Duration) bool {
+// AcquireTimeout tries to acquire the guard, waiting for Release notification,
+// context cancellation, or timeout — whichever comes first.
+func (g *Guard) AcquireTimeout(ctx context.Context, key string, timeout time.Duration) bool {
 	if g.TryAcquire(key) {
 		return true
 	}
 	deadline := time.Now().Add(timeout)
+	var closeOnce sync.Once
 	done := make(chan struct{})
+	closeDone := func() { closeOnce.Do(func() { close(done) }) }
 	timer := time.AfterFunc(timeout, func() {
-		close(done)
+		closeDone()
 		g.cond.Broadcast() // unblock Wait
 	})
+	// Also broadcast on context cancellation to unblock Wait promptly.
+	go func() {
+		select {
+		case <-ctx.Done():
+			g.cond.Broadcast()
+		case <-done:
+		}
+	}()
 	g.cond.L.Lock()
 	defer func() {
 		g.cond.L.Unlock()
 		timer.Stop()
+		closeDone() // ensure ctx-watching goroutine exits on success path
 	}()
 	for {
 		if g.TryAcquire(key) {
@@ -74,6 +87,8 @@ func (g *Guard) AcquireTimeout(key string, timeout time.Duration) bool {
 		}
 		select {
 		case <-done:
+			return false
+		case <-ctx.Done():
 			return false
 		default:
 		}

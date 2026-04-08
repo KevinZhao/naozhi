@@ -54,7 +54,7 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 		}
 	}
 
-	data, err := json.MarshalIndent(entries, "", "  ")
+	data, err := json.Marshal(entries)
 	if err != nil {
 		return err
 	}

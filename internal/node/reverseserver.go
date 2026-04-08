@@ -12,6 +12,8 @@ import (
 )
 
 // reverseUpgrader is the WebSocket upgrader for reverse node connections.
+// CheckOrigin always returns true because auth is enforced via per-node
+// bearer token in the first WebSocket message, not via CORS.
 var reverseUpgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }

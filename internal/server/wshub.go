@@ -314,7 +314,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	go func() {
 		if needInterrupt {
 			// Wait for the interrupted turn to release the guard
-			if !h.guard.AcquireTimeout(key, 5*time.Second) {
+			if !h.guard.AcquireTimeout(h.ctx, key, 5*time.Second) {
 				slog.Error("ws send: interrupt timed out", "key", key)
 				c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: key, Error: "session busy, interrupt timed out"})
 				return

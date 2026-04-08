@@ -182,7 +182,7 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 	}
 	go func() {
 		if needInterrupt {
-			if !s.sessionGuard.AcquireTimeout(key, 5*time.Second) {
+			if !s.sessionGuard.AcquireTimeout(sendCtx, key, 5*time.Second) {
 				slog.Error("http send: interrupt timed out", "key", key)
 				return
 			}

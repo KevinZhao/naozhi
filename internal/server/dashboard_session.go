@@ -20,6 +20,19 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 	}
 	snapshots := s.router.ListSessions()
 
+	// Filter out suspended sessions from the API response.
+	// They appear as resumable filesystem sessions via recent_sessions instead.
+	// Only sessions with a running process are kept in the managed list.
+	n := 0
+	for _, snap := range snapshots {
+		if snap.State == "suspended" {
+			continue
+		}
+		snapshots[n] = snap
+		n++
+	}
+	snapshots = snapshots[:n]
+
 	// Fill project field from ProjectManager
 	if s.projectMgr != nil {
 		// Collect unique workspace paths for batch resolution (single lock acquisition)
@@ -77,6 +90,7 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		"running":           running,
 		"ready":             ready,
 		"total":             total,
+		"version":           s.router.Version(),
 		"uptime":            time.Since(s.startedAt).Round(time.Second).String(),
 		"backend":           s.backendTag,
 		"max_procs":         s.router.MaxProcs(),
@@ -326,7 +340,7 @@ func (s *Server) recentAndHistorySessions() (recent, history []discovery.RecentS
 	}
 
 	v, _, _ := s.recentFlight.Do("recent", func() (any, error) {
-		excludeIDs := s.router.ActiveSessionIDs()
+		excludeIDs := s.router.DiscoveryExcludeIDs()
 		all := discovery.RecentSessions(s.claudeDir, 0, 7*24*time.Hour, excludeIDs)
 
 		// Resolve project names in batch.

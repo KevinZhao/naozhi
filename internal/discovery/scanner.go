@@ -13,11 +13,43 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 )
+
+// promptCache caches extractLastPrompt results keyed by (path, mtime).
+// Avoids re-reading up to 512KB per discovered session on every 10s scan cycle.
+var promptCache struct {
+	sync.Mutex
+	entries map[string]promptCacheEntry
+}
+
+type promptCacheEntry struct {
+	mtime  int64
+	prompt string
+}
+
+func init() {
+	promptCache.entries = make(map[string]promptCacheEntry)
+}
+
+// summaryCache caches LookupSummaries index file reads.
+var summaryCache struct {
+	sync.Mutex
+	entries map[string]summaryCacheEntry
+}
+
+type summaryCacheEntry struct {
+	mtime int64
+	index sessionsIndex
+}
+
+func init() {
+	summaryCache.entries = make(map[string]summaryCacheEntry)
+}
 
 // runningThreshold is the JSONL mtime recency window used to classify a
 // discovered process as "running" (actively writing) vs "ready" (idle).
@@ -302,13 +334,35 @@ type sessionsIndexEntry struct {
 }
 
 // extractLastPrompt reads the JSONL file backwards to find the last user message.
-// Only reads up to 512KB from the tail to keep Scan fast.
+// Results are cached by (path, mtime) to avoid re-reading 512KB every scan cycle.
 func extractLastPrompt(claudeDir, cwd, sessionID string) string {
 	path := findJSONLPath(claudeDir, cwd, sessionID)
 	if path == "" {
 		return ""
 	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return ""
+	}
+	mtime := fi.ModTime().UnixNano()
 
+	promptCache.Lock()
+	if cached, ok := promptCache.entries[path]; ok && cached.mtime == mtime {
+		promptCache.Unlock()
+		return cached.prompt
+	}
+	promptCache.Unlock()
+
+	result := extractLastPromptUncached(path, fi.Size())
+
+	promptCache.Lock()
+	promptCache.entries[path] = promptCacheEntry{mtime: mtime, prompt: result}
+	promptCache.Unlock()
+	return result
+}
+
+// extractLastPromptUncached does the actual 512KB tail read and JSON scanning.
+func extractLastPromptUncached(path string, fileSize int64) string {
 	f, err := os.Open(path)
 	if err != nil {
 		return ""
@@ -317,11 +371,7 @@ func extractLastPrompt(claudeDir, cwd, sessionID string) string {
 
 	// Read up to the last 512KB of the file
 	const tailSize = 512 * 1024
-	fi, err := f.Stat()
-	if err != nil {
-		return ""
-	}
-	offset := fi.Size() - tailSize
+	offset := fileSize - tailSize
 	if offset < 0 {
 		offset = 0
 	}
@@ -465,6 +515,30 @@ func LookupSummaries(claudeDir string, sessions map[string]string) map[string]st
 
 	result := make(map[string]string, len(sessions))
 	for indexPath, sids := range byProjDir {
+		// Check mtime cache to avoid re-reading unchanged index files.
+		fi, err := os.Stat(indexPath)
+		if err != nil {
+			continue
+		}
+		mtime := fi.ModTime().UnixNano()
+
+		summaryCache.Lock()
+		cached, ok := summaryCache.entries[indexPath]
+		if ok && cached.mtime == mtime {
+			summaryCache.Unlock()
+			wanted := make(map[string]bool, len(sids))
+			for _, sid := range sids {
+				wanted[sid] = true
+			}
+			for _, e := range cached.index.Entries {
+				if wanted[e.SessionID] && e.Summary != "" {
+					result[e.SessionID] = e.Summary
+				}
+			}
+			continue
+		}
+		summaryCache.Unlock()
+
 		data, err := os.ReadFile(indexPath)
 		if err != nil {
 			continue
@@ -473,6 +547,11 @@ func LookupSummaries(claudeDir string, sessions map[string]string) map[string]st
 		if err := json.Unmarshal(data, &idx); err != nil {
 			continue
 		}
+
+		summaryCache.Lock()
+		summaryCache.entries[indexPath] = summaryCacheEntry{mtime: mtime, index: idx}
+		summaryCache.Unlock()
+
 		wanted := make(map[string]bool, len(sids))
 		for _, sid := range sids {
 			wanted[sid] = true

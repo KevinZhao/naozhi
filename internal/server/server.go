@@ -29,6 +29,8 @@ import (
 	"github.com/naozhi/naozhi/internal/transcribe"
 )
 
+// shutdownTimeout is the maximum time to wait for HTTP server shutdown.
+// NOTE: session.shutdownTimeout is defined independently with the same value for session shutdown.
 const (
 	defaultDedupCapacity = 10000
 	shutdownTimeout      = 30 * time.Second
@@ -46,11 +48,12 @@ type Server struct {
 	agents            map[string]session.AgentOpts
 	agentCommands     map[string]string
 	scheduler         *cron.Scheduler
-	backendTag        string        // e.g., "cc" or "kiro", appended to replies
-	dashboardToken    string        // optional bearer token for dashboard API
-	cookieSecret      []byte        // random HMAC key for cookie values (regenerated on restart)
-	loginLimiter      *rate.Limiter // rate-limits login attempts
-	hub               *Hub          // WebSocket hub
+	backendTag        string       // e.g., "cc" or "kiro", appended to replies
+	dashboardToken    string       // optional bearer token for dashboard API
+	cookieSecret      []byte       // random HMAC key for cookie values (regenerated on restart)
+	loginLimiters     sync.Map     // IP string → *rate.Limiter (per-IP rate limiting)
+	loginLimiterCount atomic.Int64 // approximate entry count for eviction trigger
+	hub               *Hub         // WebSocket hub
 	nodes             map[string]node.Conn
 	reverseNodeServer *node.ReverseServer
 	nodesMu           sync.RWMutex
@@ -109,6 +112,28 @@ func generateCookieSecret() []byte {
 		panic("crypto/rand unavailable: " + err.Error())
 	}
 	return b
+}
+
+// loginLimiterFor returns a per-IP rate limiter (5 attempts per minute).
+// Lazily created and stored in a sync.Map to avoid global lockout DoS.
+// Evicts all entries when the map exceeds maxLoginLimiters to bound memory
+// under spoofed-IP attacks; legitimate IPs simply get a fresh bucket.
+const maxLoginLimiters = 10000
+
+func (s *Server) loginLimiterFor(ip string) *rate.Limiter {
+	if v, ok := s.loginLimiters.Load(ip); ok {
+		return v.(*rate.Limiter)
+	}
+	limiter := rate.NewLimiter(rate.Every(12*time.Second), 5)
+	actual, _ := s.loginLimiters.LoadOrStore(ip, limiter)
+	if s.loginLimiterCount.Add(1) > maxLoginLimiters {
+		s.loginLimiters.Range(func(k, _ any) bool {
+			s.loginLimiters.Delete(k)
+			return true
+		})
+		s.loginLimiterCount.Store(0)
+	}
+	return actual.(*rate.Limiter)
 }
 
 // cookieMAC returns an HMAC-SHA256 of the dashboard token, used as the cookie
@@ -175,7 +200,6 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		totalTimeout:    opts.TotalTimeout,
 		dashboardToken:  opts.DashboardToken,
 		cookieSecret:    generateCookieSecret(),
-		loginLimiter:    rate.NewLimiter(rate.Every(12*time.Second), 5), // 5 attempts per minute
 		projectMgr:      opts.ProjectManager,
 		transcriber:     opts.Transcriber,
 		nodes:           nodes,

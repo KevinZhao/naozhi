@@ -160,8 +160,11 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	connCtx, connCancel := context.WithCancel(ctx)
 	defer connCancel()
 
-	// activeSubs tracks local session subscriptions initiated by primary
+	// activeSubs tracks local session subscriptions initiated by primary.
+	// subExited receives keys when streamEvents goroutines exit (channel closed),
+	// so the main loop can remove stale entries and allow re-subscription.
 	activeSubs := map[string]func(){} // key → cancel func
+	subExited := make(chan string, 16)
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -197,6 +200,18 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	}()
 
 	for {
+		// Drain stale subscription entries from exited streamEvents goroutines
+		// so re-subscribe messages for the same key are accepted.
+	drainLoop:
+		for {
+			select {
+			case key := <-subExited:
+				delete(activeSubs, key)
+			default:
+				break drainLoop
+			}
+		}
+
 		var msg node.ReverseMsg
 		if err := conn.ReadJSON(&msg); err != nil {
 			return err
@@ -214,7 +229,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 				case <-ctx.Done():
 					return
 				}
-				result, err := c.handleRequest(connCtx, req)
+				result, err := c.handleRequest(ctx, connCtx, req)
 				resp := node.ReverseMsg{Type: "response", ReqID: req.ReqID}
 				if err != nil {
 					resp.Error = err.Error()
@@ -247,6 +262,11 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 			go func(k string, n <-chan struct{}) {
 				defer wg.Done()
 				c.streamEvents(connCtx, writeJSON, k, n)
+				// Signal that this subscription exited (session replaced/reset).
+				select {
+				case subExited <- k:
+				default:
+				}
 			}(key, notify)
 
 		case "unsubscribe":
@@ -267,7 +287,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	}
 }
 
-func (c *Connector) handleRequest(ctx context.Context, req node.ReverseMsg) (json.RawMessage, error) {
+func (c *Connector) handleRequest(appCtx, ctx context.Context, req node.ReverseMsg) (json.RawMessage, error) {
 	switch req.Method {
 	case "fetch_sessions":
 		return marshalResult(c.router.ListSessions())
@@ -336,9 +356,11 @@ func (c *Connector) handleRequest(ctx context.Context, req node.ReverseMsg) (jso
 		if err != nil {
 			return nil, fmt.Errorf("get session: %w", err)
 		}
-		// Send is async: primary subscribed before sending, events arrive via streamEvents
+		// Send is async: primary subscribed before sending, events arrive via streamEvents.
+		// Use the application-level appCtx (not connCtx) so a relay connection drop
+		// does not kill the in-progress Claude process via context cancellation.
 		go func() {
-			if _, err := sess.Send(ctx, p.Text, nil, nil); err != nil {
+			if _, err := sess.Send(appCtx, p.Text, nil, nil); err != nil {
 				slog.Warn("connector send failed", "key", p.Key, "err", err)
 			}
 		}()

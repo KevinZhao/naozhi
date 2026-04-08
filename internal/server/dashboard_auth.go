@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 )
@@ -47,7 +48,13 @@ func (s *Server) serveLoginPage(w http.ResponseWriter) {
 }
 
 func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
-	if !s.loginLimiter.Allow() {
+	// Per-IP rate limiting to prevent single-attacker global lockout.
+	// Uses RemoteAddr only — X-Forwarded-For is attacker-controlled and trivially spoofed.
+	ip := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
+	if !s.loginLimiterFor(ip).Allow() {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", "60")
 		w.WriteHeader(http.StatusTooManyRequests)
