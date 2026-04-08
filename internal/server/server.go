@@ -151,6 +151,10 @@ func (s *Server) loginLimiterFor(ip string) *rate.Limiter {
 	}
 
 	limiter := rate.NewLimiter(rate.Every(12*time.Second), 5)
+	// Hard cap: if eviction didn't free space, return an unsaved limiter.
+	if len(s.loginLimiters.entries) >= maxLoginLimiters {
+		return limiter
+	}
 	s.loginLimiters.entries[ip] = &limiterEntry{
 		limiter:  limiter,
 		lastSeen: time.Now(),

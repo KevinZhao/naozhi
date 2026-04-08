@@ -376,7 +376,6 @@ let pendingFiles = [];
 let sending = false;
 let selectedNode = 'local';
 let nodesData = {};
-let lastSessionsJSON = '';
 let lastVersion = 0;
 let lastNodesJSON = '';
 let lastRecentJSON = '';
@@ -428,7 +427,6 @@ async function fetchSessions() {
     const historyHash = JSON.stringify(data.history_sessions || []);
     if (version === lastVersion && version > 0 && nodesHash === lastNodesJSON && recentHash === lastRecentJSON && historyHash === lastHistoryJSON) return;
     lastVersion = version;
-    lastSessionsJSON = 'v' + version; // keep non-empty so force-refresh via '' still works
     lastNodesJSON = nodesHash;
     lastRecentJSON = recentHash;
     lastHistoryJSON = historyHash;
@@ -1146,7 +1144,7 @@ function eventHtml(e) {
   let imgHtml = '';
   if (e.images && e.images.length > 0) {
     imgHtml = '<div class="event-images">' + e.images.map(src =>
-      '<img src="' + esc(src) + '" loading="lazy">'
+      '<img src="' + escAttr(src) + '" loading="lazy">'
     ).join('') + '</div>';
   }
 
@@ -1266,14 +1264,13 @@ async function sendMessage() {
       sendMsg.resume_id = sessionResumeIDs[selectedKey];
       delete sessionResumeIDs[selectedKey];
     }
-    if (!wsm.send(sendMsg)) {
-      // WS send failed, fall through to HTTP path below
-    } else {
+    if (wsm.send(sendMsg)) {
       if (input) clearMsg(input);
       sending = false;
       if (btn) btn.classList.remove('sending');
       return;
     }
+    // WS send failed, fall through to HTTP path below
   }
 
   // HTTP POST fallback
@@ -1844,7 +1841,7 @@ function createNewSession() {
         '<h3>New Session</h3>' +
         '<div id="pp-list-container"></div>' +
         '<div id="pp-custom-form" style="display:none;margin-top:8px">' +
-          '<input id="new-workspace" placeholder="' + esc(ws) + '" value="" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
+          '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
           '<div class="modal-btns"><button class="primary" onclick="doCreateSession()">create</button></div>' +
         '</div>' +
         '<div class="modal-btns"><button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button></div>' +
@@ -1858,7 +1855,7 @@ function createNewSession() {
         '<h3>New Session</h3>' +
         '<div style="margin-bottom:12px">' +
           '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px">Workspace</label>' +
-          '<input id="new-workspace" placeholder="' + esc(ws) + '" value="' + esc(ws) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
+          '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(ws) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
         '</div>' +
         '<div class="modal-btns">' +
           '<button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
@@ -2994,7 +2991,7 @@ function createNewCronJob() {
       '</ul>';
   }
   wsHtml += '<div id="cron-ws-custom-form" style="' + (projectsData.length > 0 ? 'display:none;' : '') + 'margin-top:4px">' +
-    '<input id="cron-workdir" placeholder="' + esc(defaultWorkspace || '/home/user/project') + '">' +
+    '<input id="cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '">' +
     '</div></div>';
 
   overlay.innerHTML =
