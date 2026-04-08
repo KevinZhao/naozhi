@@ -75,3 +75,28 @@ func TestLoadStoreInvalidJSON(t *testing.T) {
 		t.Errorf("loadStore(bad json) = %v, want nil", restored)
 	}
 }
+
+func TestSaveAndLoadPrevSessionIDs(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	s := newSessionWithID("test:key", "sess-3")
+	s.prevSessionIDs = []string{"sess-1", "sess-2"}
+
+	sessions := map[string]*ManagedSession{"test:key": s}
+	if err := saveStore(path, sessions); err != nil {
+		t.Fatalf("saveStore() error: %v", err)
+	}
+
+	restored := loadStore(path)
+	if restored == nil {
+		t.Fatal("loadStore() returned nil")
+	}
+	entry := restored["test:key"]
+	if entry == nil {
+		t.Fatal("entry not found")
+	}
+	if len(entry.PrevSessionIDs) != 2 || entry.PrevSessionIDs[0] != "sess-1" || entry.PrevSessionIDs[1] != "sess-2" {
+		t.Errorf("PrevSessionIDs = %v, want [sess-1 sess-2]", entry.PrevSessionIDs)
+	}
+}

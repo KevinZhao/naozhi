@@ -312,7 +312,7 @@ func (s *Server) recentSessions() []discovery.RecentSession {
 
 	// singleflight: only one goroutine scans the filesystem at a time.
 	v, _, _ := s.recentFlight.Do("recent", func() (any, error) {
-		excludeIDs := s.router.ManagedSessionIDs()
+		excludeIDs := s.router.ActiveSessionIDs()
 		recent := discovery.RecentSessions(s.claudeDir, 10, excludeIDs)
 		if s.projectMgr != nil && len(recent) > 0 {
 			var workspaces []string

@@ -43,6 +43,10 @@ type ManagedSession struct {
 	// Written once during first successful Send, read by Snapshot lock-free.
 	sessionID atomic.Value // stores string
 
+	// onSessionID is called when a session ID is first captured from Send().
+	// Set by the Router to track known IDs for history exclusion.
+	onSessionID func(string)
+
 	// lastActive stores time.UnixNano atomically to avoid data races
 	// between Send() (under sendMu) and Cleanup/evictOldest (under r.mu).
 	lastActive atomic.Int64
@@ -72,6 +76,10 @@ type ManagedSession struct {
 	// persistedHistory stores event entries that survive process restarts.
 	// Populated by InjectHistory and carried over when the process is replaced.
 	persistedHistory []cli.EventEntry
+
+	// prevSessionIDs tracks all previous session IDs for this key (oldest → newest).
+	// Used on startup to load the full conversation chain from JSONL files.
+	prevSessionIDs []string
 
 	// Exempt marks this session as exempt from TTL cleanup, eviction, and activeCount.
 	// Used for planner sessions that should persist indefinitely.
@@ -142,6 +150,9 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	// Capture session ID from first successful send
 	if s.getSessionID() == "" && result.SessionID != "" {
 		s.setSessionID(result.SessionID)
+		if s.onSessionID != nil {
+			s.onSessionID(result.SessionID)
+		}
 	}
 	return result, nil
 }

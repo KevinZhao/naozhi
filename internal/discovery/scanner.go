@@ -291,7 +291,8 @@ func jsonlMtime(claudeDir, cwd, sessionID string, startedAt int64) int64 {
 
 // sessionsIndex mirrors the sessions-index.json schema.
 type sessionsIndex struct {
-	Entries []sessionsIndexEntry `json:"entries"`
+	OriginalPath string               `json:"originalPath"`
+	Entries      []sessionsIndexEntry `json:"entries"`
 }
 
 type sessionsIndexEntry struct {

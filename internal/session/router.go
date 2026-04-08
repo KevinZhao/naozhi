@@ -49,6 +49,13 @@ type Router struct {
 	storeDirty bool   // true when sessions changed since last save
 	storeGen   uint64 // incremented on each mutation, used to detect concurrent writes
 
+	// knownIDs tracks ALL session IDs ever used by naozhi, including
+	// sessions that have been removed/reset/evicted. Used by the
+	// discovered-session scanner to match CLI processes to naozhi keys,
+	// and as a secondary filter for filesystem-based recent sessions.
+	knownIDs      map[string]bool
+	knownIDsDirty bool
+
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
 
@@ -133,19 +140,26 @@ func NewRouter(cfg RouterConfig) *Router {
 		claudeDir:          cfg.ClaudeDir,
 		workspaceOverrides: make(map[string]string),
 		storePath:          cfg.StorePath,
+		knownIDs:           make(map[string]bool),
 		noOutputTimeout:    cfg.NoOutputTimeout,
 		totalTimeout:       cfg.TotalTimeout,
 	}
 	r.shutdownCond = sync.NewCond(&r.mu)
 
+	// Load historical session IDs (all IDs ever used by naozhi)
+	if loaded := loadKnownIDs(r.storePath); loaded != nil {
+		r.knownIDs = loaded
+	}
+
 	// Restore sessions from store
 	if restored := loadStore(r.storePath); restored != nil {
 		for key, entry := range restored {
 			s := &ManagedSession{
-				Key:       key,
-				workspace: entry.Workspace,
-				totalCost: entry.TotalCost,
-				Exempt:    strings.HasPrefix(key, "project:"),
+				Key:            key,
+				workspace:      entry.Workspace,
+				totalCost:      entry.TotalCost,
+				prevSessionIDs: entry.PrevSessionIDs,
+				Exempt:         strings.HasPrefix(key, "project:"),
 			}
 			s.setSessionID(entry.SessionID)
 			if entry.LastActive != 0 {
@@ -153,15 +167,21 @@ func NewRouter(cfg RouterConfig) *Router {
 			}
 			r.sessions[key] = s
 			r.indexAdd(key)
+			r.trackSessionID(entry.SessionID)
 		}
 	}
 
 	// Discover recent sessions from filesystem and register as resumable.
 	// This gives the dashboard immediate access to past conversations.
+	// Only exclude session IDs that are currently managed (active in store + their chains),
+	// so that pruned historical naozhi sessions can reappear as recent sessions.
 	if r.claudeDir != "" {
-		excludeIDs := make(map[string]bool, len(r.sessions))
+		excludeIDs := make(map[string]bool, len(r.sessions)*3)
 		for _, s := range r.sessions {
 			if id := s.getSessionID(); id != "" {
+				excludeIDs[id] = true
+			}
+			for _, id := range s.prevSessionIDs {
 				excludeIDs[id] = true
 			}
 		}
@@ -198,6 +218,8 @@ func NewRouter(cfg RouterConfig) *Router {
 
 	// Async-load JSONL history for all suspended sessions so the dashboard
 	// shows conversation history without waiting for the next message.
+	// Loads the full session chain (prev → current) to restore history
+	// that accumulated across multiple CLI session IDs.
 	if r.claudeDir != "" {
 		sem := make(chan struct{}, 10) // limit concurrent disk I/O
 		for _, s := range r.sessions {
@@ -208,12 +230,25 @@ func NewRouter(cfg RouterConfig) *Router {
 			go func() {
 				sem <- struct{}{}
 				defer func() { <-sem }()
-				entries, err := discovery.LoadHistory(r.claudeDir, s.getSessionID(), s.workspace)
-				if err != nil || len(entries) == 0 {
+
+				// Build ordered list of all session IDs: prev chain + current
+				ids := make([]string, 0, len(s.prevSessionIDs)+1)
+				ids = append(ids, s.prevSessionIDs...)
+				ids = append(ids, s.getSessionID())
+
+				var allEntries []cli.EventEntry
+				for _, id := range ids {
+					entries, err := discovery.LoadHistory(r.claudeDir, id, s.workspace)
+					if err != nil || len(entries) == 0 {
+						continue
+					}
+					allEntries = append(allEntries, entries...)
+				}
+				if len(allEntries) == 0 {
 					return
 				}
-				s.InjectHistory(entries)
-				slog.Info("loaded session history on startup", "key", s.Key, "entries", len(entries))
+				s.InjectHistory(allEntries)
+				slog.Info("loaded session history on startup", "key", s.Key, "entries", len(allEntries), "chain", len(ids))
 				r.notifyChange()
 			}()
 		}
@@ -473,6 +508,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	r.mu.Unlock()
 
 	var oldHistory []cli.EventEntry
+	var prevIDs []string
 	if old != nil {
 		old.sendMu.Lock()
 		if old.process != nil && !old.process.Alive() {
@@ -485,6 +521,18 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 			copy(oldHistory, old.persistedHistory)
 		}
 		old.sendMu.Unlock()
+
+		// Build session chain: inherit old chain and append old session ID,
+		// but only when the old ID differs from resumeID (i.e. a truly new
+		// CLI session is replacing the old one, not just resuming the same one).
+		if oldID := old.getSessionID(); oldID != "" && oldID != resumeID {
+			prevIDs = make([]string, len(old.prevSessionIDs), len(old.prevSessionIDs)+1)
+			copy(prevIDs, old.prevSessionIDs)
+			prevIDs = append(prevIDs, oldID)
+		} else if len(old.prevSessionIDs) > 0 {
+			prevIDs = make([]string, len(old.prevSessionIDs))
+			copy(prevIDs, old.prevSessionIDs)
+		}
 	}
 
 	r.mu.Lock()
@@ -503,12 +551,19 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		cliVersion:       r.wrapper.CLIVersion,
 		sendMu:           sync.Mutex{},
 		persistedHistory: oldHistory,
+		prevSessionIDs:   prevIDs,
 		Exempt:           opts.Exempt,
+		onSessionID: func(id string) {
+			r.mu.Lock()
+			r.trackSessionID(id)
+			r.mu.Unlock()
+		},
 	}
 	if len(oldHistory) > 0 {
 		proc.InjectHistory(oldHistory)
 	}
 	s.setSessionID(resumeID)
+	r.trackSessionID(resumeID)
 	s.touchLastActive()
 	r.sessions[key] = s
 	r.indexAdd(key)
@@ -523,10 +578,21 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 
 	// Load conversation history from Claude's local JSONL when resuming.
 	// This restores dashboard event display after service restarts.
+	// Load the full chain (prev IDs + resume ID) to recover history
+	// that accumulated across multiple CLI session IDs.
 	if resumeID != "" && r.claudeDir != "" && len(oldHistory) == 0 {
-		if entries, err := discovery.LoadHistory(r.claudeDir, resumeID, workspace); err == nil && len(entries) > 0 {
-			s.InjectHistory(entries)
-			slog.Info("loaded session history on resume", "key", key, "entries", len(entries))
+		ids := make([]string, 0, len(prevIDs)+1)
+		ids = append(ids, prevIDs...)
+		ids = append(ids, resumeID)
+		var allEntries []cli.EventEntry
+		for _, id := range ids {
+			if entries, err := discovery.LoadHistory(r.claudeDir, id, workspace); err == nil && len(entries) > 0 {
+				allEntries = append(allEntries, entries...)
+			}
+		}
+		if len(allEntries) > 0 {
+			s.InjectHistory(allEntries)
+			slog.Info("loaded session history on resume", "key", key, "entries", len(allEntries), "chain", len(ids))
 		}
 	}
 
@@ -788,12 +854,19 @@ func (r *Router) Cleanup() {
 		r.storeGen++
 	}
 	var sessionsCopy map[string]*ManagedSession
+	var knownIDsCopy map[string]bool
 	storePath := r.storePath
 	snapshotGen := r.storeGen
 	if r.storeDirty {
 		sessionsCopy = make(map[string]*ManagedSession, len(r.sessions))
 		for k, v := range r.sessions {
 			sessionsCopy[k] = v
+		}
+	}
+	if r.knownIDsDirty {
+		knownIDsCopy = make(map[string]bool, len(r.knownIDs))
+		for id := range r.knownIDs {
+			knownIDsCopy[id] = true
 		}
 	}
 
@@ -808,6 +881,19 @@ func (r *Router) Cleanup() {
 			r.mu.Lock()
 			if r.storeGen == snapshotGen {
 				r.storeDirty = false
+			}
+			r.mu.Unlock()
+		}
+	}
+	if knownIDsCopy != nil {
+		if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
+			slog.Warn("periodic known IDs save failed", "err", err)
+		} else {
+			// Only clear dirty flag if no concurrent trackSessionID added new IDs.
+			// knownIDs is append-only, so length comparison is sufficient.
+			r.mu.Lock()
+			if len(r.knownIDs) == len(knownIDsCopy) {
+				r.knownIDsDirty = false
 			}
 			r.mu.Unlock()
 		}
@@ -875,6 +961,10 @@ func (r *Router) Shutdown() {
 		sessionsCopy[k] = v
 	}
 	storePath := r.storePath
+	knownIDsCopy := make(map[string]bool, len(r.knownIDs))
+	for id := range r.knownIDs {
+		knownIDsCopy[id] = true
+	}
 
 	// Collect processes to close, then release lock to close concurrently
 	var procs []processIface
@@ -889,6 +979,9 @@ func (r *Router) Shutdown() {
 	// Save session state outside lock (avoids JSON marshal + file I/O under mutex)
 	if err := saveStore(storePath, sessionsCopy); err != nil {
 		slog.Error("save session store on shutdown", "err", err)
+	}
+	if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
+		slog.Error("save known session IDs on shutdown", "err", err)
 	}
 
 	var wg sync.WaitGroup
@@ -967,18 +1060,35 @@ func (r *Router) InterruptSession(key string) bool {
 	return s.Interrupt()
 }
 
-// ManagedSessionIDs returns the set of session IDs tracked by the router.
-// Used to exclude managed sessions from recent-session filesystem scans.
-func (r *Router) ManagedSessionIDs() map[string]bool {
+// ActiveSessionIDs returns the set of session IDs currently managed by the router,
+// including their full session chains. Pruned historical sessions are NOT included,
+// allowing them to reappear as resumable recent sessions in the dashboard.
+func (r *Router) ActiveSessionIDs() map[string]bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	ids := make(map[string]bool, len(r.sessions))
+	ids := make(map[string]bool, len(r.sessions)*3)
 	for _, s := range r.sessions {
 		if id := s.getSessionID(); id != "" {
 			ids[id] = true
 		}
+		for _, id := range s.prevSessionIDs {
+			ids[id] = true
+		}
 	}
 	return ids
+}
+
+// trackSessionID adds a session ID to the persistent known-IDs set.
+// Caller must hold r.mu OR call before any concurrent access (e.g. NewRouter init).
+func (r *Router) trackSessionID(id string) {
+	if id == "" {
+		return
+	}
+	if r.knownIDs[id] {
+		return
+	}
+	r.knownIDs[id] = true
+	r.knownIDsDirty = true
 }
 
 // RegisterForResume creates a suspended session entry so that the next
@@ -994,6 +1104,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace string) {
 		workspace: workspace,
 	}
 	s.setSessionID(sessionID)
+	r.trackSessionID(sessionID)
 	s.lastActive.Store(time.Now().UnixNano())
 	r.sessions[key] = s
 	r.indexAdd(key)
