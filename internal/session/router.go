@@ -185,7 +185,7 @@ func NewRouter(cfg RouterConfig) *Router {
 				excludeIDs[id] = true
 			}
 		}
-		for _, rs := range discovery.RecentSessions(r.claudeDir, 10, excludeIDs) {
+		for _, rs := range discovery.RecentSessions(r.claudeDir, 10, 7*24*time.Hour, excludeIDs) {
 			if rs.SessionID == "" || len(rs.SessionID) < 8 {
 				continue
 			}

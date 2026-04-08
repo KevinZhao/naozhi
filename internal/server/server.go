@@ -63,8 +63,10 @@ type Server struct {
 	nodeCache         *node.CacheManager // background-cached remote node data
 	discoveryCache    *discoveryCache    // background-cached local discovery results
 
-	// Recent sessions cache (30s TTL to avoid repeated filesystem scans).
+	// Recent/history sessions cache (30s TTL to avoid repeated filesystem scans).
+	// recent = last 24h, history = 1-7 days.
 	recentCache     []discovery.RecentSession
+	historyCache    []discovery.RecentSession
 	recentCacheTime time.Time
 	recentCacheMu   sync.Mutex
 	recentFlight    singleflight.Group

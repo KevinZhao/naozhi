@@ -141,8 +141,12 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 			"sessions": snapshots,
 			"stats":    stats,
 		}
-		if recent := s.recentSessions(); len(recent) > 0 {
+		recent, history := s.recentAndHistorySessions()
+		if len(recent) > 0 {
 			resp["recent_sessions"] = recent
+		}
+		if len(history) > 0 {
+			resp["history_sessions"] = history
 		}
 		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -197,8 +201,12 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		"stats":    stats,
 		"nodes":    nodeStatus,
 	}
-	if recent := s.recentSessions(); len(recent) > 0 {
+	recent, history := s.recentAndHistorySessions()
+	if len(recent) > 0 {
 		resp["recent_sessions"] = recent
+	}
+	if len(history) > 0 {
+		resp["history_sessions"] = history
 	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(resp); err != nil {
@@ -293,48 +301,68 @@ func (s *Server) handleAPISessionDelete(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
-// recentSessions returns the 10 most recent filesystem sessions, excluding
-// sessions already managed by the router. Results are cached for 30 seconds
-// to avoid repeated filesystem scans on every poll cycle.
-func (s *Server) recentSessions() []discovery.RecentSession {
+// recentAndHistorySessions returns filesystem sessions split into two groups:
+//   - recent: last 24 hours (for resumable sidebar)
+//   - history: 1-7 days (for history popover)
+//
+// Results are cached for 30 seconds to avoid repeated filesystem scans.
+func (s *Server) recentAndHistorySessions() (recent, history []discovery.RecentSession) {
 	if s.claudeDir == "" {
-		return nil
+		return nil, nil
 	}
 
 	const cacheTTL = 30 * time.Second
 	s.recentCacheMu.Lock()
 	if time.Since(s.recentCacheTime) < cacheTTL {
-		cached := s.recentCache
+		r, h := s.recentCache, s.historyCache
 		s.recentCacheMu.Unlock()
-		return cached
+		return r, h
 	}
 	s.recentCacheMu.Unlock()
 
-	// singleflight: only one goroutine scans the filesystem at a time.
+	type result struct {
+		recent  []discovery.RecentSession
+		history []discovery.RecentSession
+	}
+
 	v, _, _ := s.recentFlight.Do("recent", func() (any, error) {
 		excludeIDs := s.router.ActiveSessionIDs()
-		recent := discovery.RecentSessions(s.claudeDir, 10, excludeIDs)
-		if s.projectMgr != nil && len(recent) > 0 {
+		all := discovery.RecentSessions(s.claudeDir, 0, 7*24*time.Hour, excludeIDs)
+
+		// Resolve project names in batch.
+		if s.projectMgr != nil && len(all) > 0 {
 			var workspaces []string
-			for _, r := range recent {
+			for _, r := range all {
 				workspaces = append(workspaces, r.Workspace)
 			}
 			wsMap := s.projectMgr.ResolveWorkspaces(workspaces)
-			for i := range recent {
-				recent[i].Project = wsMap[recent[i].Workspace]
+			for i := range all {
+				all[i].Project = wsMap[all[i].Workspace]
+			}
+		}
+
+		// Split by time: < 24h → recent, 1-7d → history.
+		cutoff := time.Now().Add(-24 * time.Hour).UnixMilli()
+		var rec, hist []discovery.RecentSession
+		for _, rs := range all {
+			if rs.LastActive >= cutoff {
+				rec = append(rec, rs)
+			} else {
+				hist = append(hist, rs)
 			}
 		}
 
 		s.recentCacheMu.Lock()
-		s.recentCache = recent
+		s.recentCache = rec
+		s.historyCache = hist
 		s.recentCacheTime = time.Now()
 		s.recentCacheMu.Unlock()
 
-		return recent, nil
+		return result{recent: rec, history: hist}, nil
 	})
 
-	if result, ok := v.([]discovery.RecentSession); ok {
-		return result
+	if res, ok := v.(result); ok {
+		return res.recent, res.history
 	}
-	return nil
+	return nil, nil
 }

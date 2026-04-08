@@ -193,6 +193,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .history-popover-item .hp-meta .hp-project{color:#d4a017;font-weight:500}
 .history-popover-item .hp-meta .hp-tool{color:#a5d6ff}
 .history-popover-item .hp-meta .hp-dot{color:#30363d}
+.hp-day-header{padding:6px 12px 4px;font-size:10px;color:#8b949e;font-weight:600;text-transform:uppercase;letter-spacing:.3px;background:#0d1117;border-bottom:1px solid #21262d;position:sticky;top:0}
 .history-popover-empty{padding:16px;text-align:center;color:#6e7681;font-size:12px}
 
 .workspace-path{font-size:12px;color:#6e7681;margin-top:4px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:'SF Mono',SFMono-Regular,Consolas,monospace}
@@ -377,6 +378,7 @@ let nodesData = {};
 let lastSessionsJSON = '';
 let lastNodesJSON = '';
 let lastRecentJSON = '';
+let lastHistoryJSON = '';
 let sessionPollTimer = null;
 let discoveredPollTimer = null;
 let discoveredItems = []; // discovered sessions, merged into sidebar
@@ -391,7 +393,8 @@ let localWsInfo = { name: '', sys: '' };
 const sessionWorkspaces = {};
 const sessionNodes = {};
 const sessionResumeIDs = {}; // key → session_id for recent session resume
-let recentSessionsData = []; // from API recent_sessions
+let recentSessionsData = []; // from API recent_sessions (< 24h)
+let historySessionsData = []; // from API history_sessions (1-7d)
 
 function getToken() { return ''; }
 function setToken(t) { /* token stored in HttpOnly cookie only */ }
@@ -417,15 +420,18 @@ async function fetchSessions() {
     const sessionsHash = JSON.stringify(data.sessions);
     const nodesHash = JSON.stringify(data.nodes || {});
     const recentHash = JSON.stringify(data.recent_sessions || []);
-    if (sessionsHash === lastSessionsJSON && nodesHash === lastNodesJSON && recentHash === lastRecentJSON) return;
+    const historyHash = JSON.stringify(data.history_sessions || []);
+    if (sessionsHash === lastSessionsJSON && nodesHash === lastNodesJSON && recentHash === lastRecentJSON && historyHash === lastHistoryJSON) return;
     lastSessionsJSON = sessionsHash;
     lastNodesJSON = nodesHash;
     lastRecentJSON = recentHash;
+    lastHistoryJSON = historyHash;
     if (data.nodes) nodesData = data.nodes;
     if (data.stats.agents) availableAgents = data.stats.agents;
     if (data.stats.default_workspace) defaultWorkspace = data.stats.default_workspace;
     if (data.stats.projects) projectsData = data.stats.projects;
     recentSessionsData = data.recent_sessions || [];
+    historySessionsData = data.history_sessions || [];
 
     // Track which keys the backend knows about
     const backendKeys = new Set();
@@ -574,11 +580,12 @@ function renderSidebar(data) {
   list.innerHTML = html;
   list.scrollTop = scrollTop;
 
-  // Update history badge
+  // Update history badge (suspended managed + filesystem history)
   const hBadge = document.getElementById('history-badge');
   if (hBadge) {
-    hBadge.textContent = suspended.length > 0 ? suspended.length : '';
-    hBadge.style.display = suspended.length > 0 ? '' : 'none';
+    const historyCount = suspended.length + historySessionsData.length;
+    hBadge.textContent = historyCount > 0 ? historyCount : '';
+    hBadge.style.display = historyCount > 0 ? '' : 'none';
   }
 }
 
@@ -641,26 +648,57 @@ document.addEventListener('click', function(e) {
 
 function toggleHistory() {
   if (activePopover) { closeHistoryPopover(); return; }
-  const suspended = allSessionsCache.filter(s => s.state === 'suspended');
-  suspended.sort((a, b) => (b.last_active || 0) - (a.last_active || 0));
+
+  // Merge suspended managed sessions + filesystem history sessions.
+  const suspended = allSessionsCache.filter(s => s.state === 'suspended').map(s => ({
+    key: s.key, node: s.node || 'local', source: 'managed',
+    session_id: s.session_id || '', last_active: s.last_active || 0,
+    prompt: s.last_prompt || '', project: s.project || '', tool: s.cli_name || s.protocol || 'cli',
+  }));
+  const fsHistory = historySessionsData.map(r => ({
+    key: '_history:' + r.session_id, node: 'local', source: 'recent',
+    session_id: r.session_id, last_active: r.last_active || 0,
+    prompt: r.last_prompt || r.summary || '', project: r.project || matchProject(r.workspace), tool: '',
+  }));
+  // Deduplicate by session_id (managed takes priority).
+  const seenIDs = new Set(suspended.map(s => s.session_id).filter(Boolean));
+  const merged = [...suspended];
+  for (const h of fsHistory) {
+    if (h.session_id && seenIDs.has(h.session_id)) continue;
+    seenIDs.add(h.session_id);
+    merged.push(h);
+  }
+  merged.sort((a, b) => b.last_active - a.last_active);
 
   let itemsHtml;
-  if (suspended.length === 0) {
+  if (merged.length === 0) {
     itemsHtml = '<div class="history-popover-empty">no history</div>';
   } else {
-    itemsHtml = suspended.map(s => {
-      const sNode = s.node || 'local';
+    // Group by day.
+    let currentDay = '';
+    itemsHtml = merged.map(s => {
+      let dayHeader = '';
+      if (s.last_active) {
+        const d = new Date(s.last_active);
+        const dayStr = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', weekday: 'short' });
+        if (dayStr !== currentDay) {
+          currentDay = dayStr;
+          dayHeader = '<div class="hp-day-header">' + esc(dayStr) + '</div>';
+        }
+      }
       const ago = s.last_active ? timeAgo(s.last_active) : '';
-      const toolName = s.cli_name || s.protocol || 'cli';
-      const project = s.project || '';
-      const prompt = s.last_prompt || '';
-      return '<div class="history-popover-item" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="selectSession(this.dataset.key,this.dataset.node);closeHistoryPopover()">' +
-        '<button class="hp-dismiss" data-key="' + esc(s.key) + '" data-node="' + esc(sNode) + '" onclick="event.stopPropagation();dismissHistoryItem(this)" title="delete">&times;</button>' +
-        (prompt ? '<div class="hp-prompt" title="' + esc(prompt) + '">' + esc(prompt) + '</div>' : '<div class="hp-prompt" style="color:#6e7681">(no prompt)</div>') +
+      const isManaged = s.source === 'managed';
+      const onclick = isManaged
+        ? 'selectSession(this.dataset.key,this.dataset.node);closeHistoryPopover()'
+        : 'resumeRecentSession(this.dataset.sid);closeHistoryPopover()';
+      return dayHeader +
+        '<div class="history-popover-item" data-key="' + esc(s.key) + '" data-node="' + esc(s.node) + '" data-sid="' + esc(s.session_id) + '" onclick="' + onclick + '">' +
+        (isManaged ? '<button class="hp-dismiss" data-key="' + esc(s.key) + '" data-node="' + esc(s.node) + '" onclick="event.stopPropagation();dismissHistoryItem(this)" title="delete">&times;</button>' : '') +
+        (s.prompt ? '<div class="hp-prompt" title="' + esc(s.prompt) + '">' + esc(s.prompt) + '</div>' : '<div class="hp-prompt" style="color:#6e7681">(no prompt)</div>') +
         '<div class="hp-meta">' +
-          (project ? '<span class="hp-project">' + esc(project) + '</span><span class="hp-dot">&middot;</span>' : '') +
-          '<span class="hp-tool">' + esc(toolName) + '</span>' +
-          (ago ? '<span class="hp-dot">&middot;</span><span>' + ago + '</span>' : '') +
+          (s.project ? '<span class="hp-project">' + esc(s.project) + '</span><span class="hp-dot">&middot;</span>' : '') +
+          (s.tool ? '<span class="hp-tool">' + esc(s.tool) + '</span><span class="hp-dot">&middot;</span>' : '') +
+          (ago ? '<span>' + ago + '</span>' : '') +
         '</div>' +
         '</div>';
     }).join('');
@@ -668,7 +706,7 @@ function toggleHistory() {
 
   const popover = document.createElement('div');
   popover.className = isMobile() ? 'history-sheet' : 'history-popover';
-  popover.innerHTML = '<div class="history-popover-header">History</div>' + itemsHtml;
+  popover.innerHTML = '<div class="history-popover-header">History (' + merged.length + ')</div>' + itemsHtml;
   if (isMobile()) {
     popover.innerHTML = '<div class="sheet-handle"></div>' + popover.innerHTML;
   }
@@ -681,7 +719,7 @@ function toggleHistory() {
     popover.style.position = 'fixed';
     popover.style.top = (rect.bottom + 4) + 'px';
     popover.style.right = (window.innerWidth - rect.right) + 'px';
-    popover.style.maxHeight = Math.min(400, window.innerHeight - rect.bottom - 16) + 'px';
+    popover.style.maxHeight = Math.min(500, window.innerHeight - rect.bottom - 16) + 'px';
   }
 }
 
@@ -731,6 +769,12 @@ function sessionCardHtml(s) {
     '</div>' +
     '<div class="sc-meta">' + metaHtml + '</div>' +
   '</div>';
+}
+
+function resumeRecentSession(sessionId) {
+  const all = [...recentSessionsData, ...historySessionsData];
+  const found = all.find(r => r.session_id === sessionId);
+  resumeRecentById(sessionId, found ? found.workspace : '');
 }
 
 function resumeRecentById(sessionId, workspace) {

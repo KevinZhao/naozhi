@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 )
@@ -22,18 +23,19 @@ type RecentSession struct {
 	Project    string `json:"project,omitempty"` // filled by server
 }
 
-// RecentSessions scans ~/.claude/projects/* for recent user-initiated sessions,
-// returning the top `limit` by modification time.
+// RecentSessions scans ~/.claude/projects/* for recent sessions,
+// returning up to `limit` sessions modified within `maxAge`.
+// If limit <= 0, all sessions within the time window are returned.
 //
-// Three layers of filtering ensure only user-initiated sessions are returned:
+// Two layers of filtering:
 //  1. Directory-level: skip encoded hidden paths ("--" pattern from "/." in original path),
 //     which belong to automated tools like claude-mem observer.
 //  2. Workspace resolution: skip directories that can't be mapped back to a real
 //     directory on disk (session can't be resumed without the correct CWD).
-//  3. Session-level: skip naozhi-managed sessions (JSONL starts with "queue-operation")
-//     and sessions in excludeSessionIDs.
-func RecentSessions(claudeDir string, limit int, excludeSessionIDs map[string]bool) []RecentSession {
-	if claudeDir == "" || limit <= 0 {
+//
+// Sessions in excludeSessionIDs are always skipped.
+func RecentSessions(claudeDir string, limit int, maxAge time.Duration, excludeSessionIDs map[string]bool) []RecentSession {
+	if claudeDir == "" {
 		return nil
 	}
 	projectsDir := filepath.Join(claudeDir, "projects")
@@ -42,9 +44,10 @@ func RecentSessions(claudeDir string, limit int, excludeSessionIDs map[string]bo
 		return nil
 	}
 
+	cutoff := time.Now().Add(-maxAge).UnixMilli()
+
 	var all []RecentSession
-	// jsonlPaths maps sessionID → JSONL file path for ALL sessions,
-	// used for both naozhi-managed detection and deferred prompt extraction.
+	// jsonlPaths maps sessionID → JSONL file path for deferred prompt extraction.
 	jsonlPaths := make(map[string]string)
 
 	for _, e := range entries {
@@ -54,9 +57,6 @@ func RecentSessions(claudeDir string, limit int, excludeSessionIDs map[string]bo
 		dirName := e.Name()
 
 		// Layer 1: skip encoded hidden paths.
-		// Claude Code encodes both "/" and "." as "-", so "/.foo/" produces "--foo-".
-		// These directories belong to automated tools (e.g., claude-mem observer),
-		// not user projects.
 		if strings.Contains(dirName, "--") {
 			continue
 		}
@@ -65,7 +65,6 @@ func RecentSessions(claudeDir string, limit int, excludeSessionIDs map[string]bo
 		workspace, idx := resolveWorkspaceWithIndex(projDir, dirName)
 
 		// Layer 2: skip unresolvable workspaces.
-		// --resume requires the correct CWD to find the session JSONL.
 		if workspace == "" {
 			continue
 		}
@@ -74,6 +73,9 @@ func RecentSessions(claudeDir string, limit int, excludeSessionIDs map[string]bo
 		if idx != nil {
 			if sessions := recentFromParsedIndex(idx, projDir, workspace, excludeSessionIDs); len(sessions) > 0 {
 				for _, rs := range sessions {
+					if rs.LastActive < cutoff {
+						continue
+					}
 					jsonlPaths[rs.SessionID] = filepath.Join(projDir, rs.SessionID+".jsonl")
 					all = append(all, rs)
 				}
@@ -83,6 +85,9 @@ func RecentSessions(claudeDir string, limit int, excludeSessionIDs map[string]bo
 
 		// Fallback: collect metadata only (no file reads for prompt yet)
 		for _, rs := range recentFromJSONLFiles(projDir, workspace, excludeSessionIDs) {
+			if rs.LastActive < cutoff {
+				continue
+			}
 			jsonlPaths[rs.SessionID] = filepath.Join(projDir, rs.SessionID+".jsonl")
 			all = append(all, rs)
 		}
@@ -93,18 +98,13 @@ func RecentSessions(claudeDir string, limit int, excludeSessionIDs map[string]bo
 		return all[i].LastActive > all[j].LastActive
 	})
 
-	// Layer 3: iterate sorted candidates, skip naozhi-managed sessions,
-	// collect top-N. Prompt extraction is deferred to this stage so we only
-	// read JSONL files for sessions that pass all filters.
+	// Deferred prompt extraction: only read JSONL for sessions that will be returned.
 	var result []RecentSession
 	for i := range all {
-		if len(result) >= limit {
+		if limit > 0 && len(result) >= limit {
 			break
 		}
 		path := jsonlPaths[all[i].SessionID]
-		if path != "" && isNaozhiManaged(path) {
-			continue
-		}
 		if all[i].LastPrompt == "" && all[i].Summary == "" && path != "" {
 			all[i].LastPrompt = extractFirstPrompt(path)
 		}
