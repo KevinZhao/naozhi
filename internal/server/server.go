@@ -48,12 +48,11 @@ type Server struct {
 	agents            map[string]session.AgentOpts
 	agentCommands     map[string]string
 	scheduler         *cron.Scheduler
-	backendTag        string       // e.g., "cc" or "kiro", appended to replies
-	dashboardToken    string       // optional bearer token for dashboard API
-	cookieSecret      []byte       // random HMAC key for cookie values (regenerated on restart)
-	loginLimiters     sync.Map     // IP string → *rate.Limiter (per-IP rate limiting)
-	loginLimiterCount atomic.Int64 // approximate entry count for eviction trigger
-	hub               *Hub         // WebSocket hub
+	backendTag        string            // e.g., "cc" or "kiro", appended to replies
+	dashboardToken    string            // optional bearer token for dashboard API
+	cookieSecret      []byte            // random HMAC key for cookie values (regenerated on restart)
+	loginLimiters     loginLimiterStore // per-IP rate limiters, bounded with TTL eviction
+	hub               *Hub              // WebSocket hub
 	nodes             map[string]node.Conn
 	reverseNodeServer *node.ReverseServer
 	nodesMu           sync.RWMutex
@@ -114,26 +113,49 @@ func generateCookieSecret() []byte {
 	return b
 }
 
+// limiterEntry wraps a rate limiter with a last-seen timestamp for TTL eviction.
+type limiterEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+// loginLimiterStore is a bounded, TTL-evicting store for per-IP rate limiters.
+// A mutex-protected map is used in place of sync.Map for precise size control.
+type loginLimiterStore struct {
+	mu      sync.Mutex
+	entries map[string]*limiterEntry
+}
+
 // loginLimiterFor returns a per-IP rate limiter (5 attempts per minute).
-// Lazily created and stored in a sync.Map to avoid global lockout DoS.
-// Evicts all entries when the map exceeds maxLoginLimiters to bound memory
-// under spoofed-IP attacks; legitimate IPs simply get a fresh bucket.
+// When the map is at capacity, entries not seen in the last 10 minutes are
+// evicted before inserting a new one; legitimate IPs keep their limiter state.
 const maxLoginLimiters = 10000
 
 func (s *Server) loginLimiterFor(ip string) *rate.Limiter {
-	if v, ok := s.loginLimiters.Load(ip); ok {
-		return v.(*rate.Limiter)
+	s.loginLimiters.mu.Lock()
+	defer s.loginLimiters.mu.Unlock()
+
+	if e, ok := s.loginLimiters.entries[ip]; ok {
+		e.lastSeen = time.Now()
+		return e.limiter
 	}
+
+	// Evict stale entries before inserting a new one when the map is full.
+	if len(s.loginLimiters.entries) >= maxLoginLimiters {
+		cutoff := time.Now().Add(-10 * time.Minute)
+		for k, e := range s.loginLimiters.entries {
+			if e.lastSeen.Before(cutoff) {
+				delete(s.loginLimiters.entries, k)
+			}
+		}
+	}
+
 	limiter := rate.NewLimiter(rate.Every(12*time.Second), 5)
-	actual, _ := s.loginLimiters.LoadOrStore(ip, limiter)
-	if s.loginLimiterCount.Add(1) > maxLoginLimiters {
-		s.loginLimiters.Range(func(k, _ any) bool {
-			s.loginLimiters.Delete(k)
-			return true
-		})
-		s.loginLimiterCount.Store(0)
+	s.loginLimiters.entries[ip] = &limiterEntry{
+		limiter:  limiter,
+		lastSeen: time.Now(),
 	}
-	return actual.(*rate.Limiter)
+	return limiter
 }
 
 // cookieMAC returns an HMAC-SHA256 of the dashboard token, used as the cookie
@@ -200,6 +222,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		totalTimeout:    opts.TotalTimeout,
 		dashboardToken:  opts.DashboardToken,
 		cookieSecret:    generateCookieSecret(),
+		loginLimiters:   loginLimiterStore{entries: make(map[string]*limiterEntry)},
 		projectMgr:      opts.ProjectManager,
 		transcriber:     opts.Transcriber,
 		nodes:           nodes,

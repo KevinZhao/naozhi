@@ -401,10 +401,10 @@ func (c *Connector) handleRequest(appCtx, ctx context.Context, req node.ReverseM
 		pid, sessionID, procStartTime, reqCWD, claudeDir := p.PID, p.SessionID, p.ProcStartTime, p.CWD, c.claudeDir
 		go func() {
 			discovery.WaitAndCleanup(pid, procStartTime, claudeDir, reqCWD, sessionID)
-			if ctx.Err() != nil {
+			if appCtx.Err() != nil {
 				return // connector shutting down
 			}
-			if _, err := c.router.Takeover(ctx, key, sessionID, cwd, session.AgentOpts{}); err != nil {
+			if _, err := c.router.Takeover(appCtx, key, sessionID, cwd, session.AgentOpts{}); err != nil {
 				slog.Debug("connector takeover failed", "key", key, "err", err)
 			}
 		}()

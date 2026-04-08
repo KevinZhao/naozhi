@@ -109,9 +109,9 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 func (f *Feishu) Stop() error {
 	if f.cancel != nil {
 		f.cancel()
-		f.wg.Wait() // wait for in-flight message handlers to finish
 		<-f.done
 	}
+	f.wg.Wait() // always wait for in-flight message handlers to finish
 	return nil
 }
 

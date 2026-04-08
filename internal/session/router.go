@@ -819,12 +819,10 @@ func (r *Router) Cleanup() {
 	}
 
 	r.mu.Lock()
-	// Recount instead of manual decrement — Close() may have raced with
-	// evictOldest, Reset, or Shutdown closing the same processes.
-	r.countActive()
-
-	// Prune orphaned sessions: nil process, no session ID, past TTL
+	// Prune orphaned sessions: nil process, no session ID, past TTL.
+	// Maintain a running newActive counter so we avoid a separate countActive() O(n) pass.
 	var pruned int
+	var newActive int
 	for key, s := range r.sessions {
 		if s.Exempt {
 			continue // planner sessions are never pruned
@@ -858,8 +856,14 @@ func (r *Router) Cleanup() {
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
+			continue
+		}
+		// Session survived all prune conditions; count it if its process is alive.
+		if s.process != nil && s.process.Alive() {
+			newActive++
 		}
 	}
+	r.activeCount = newActive
 
 	// Snapshot sessions for periodic save (while still holding the lock).
 	// Skip save if nothing changed since last Cleanup cycle.
