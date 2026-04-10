@@ -7,17 +7,17 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/discovery"
 )
 
-func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
+// SendHandler serves the HTTP send API, delegating to Hub for local sends.
+type SendHandler struct {
+	nodeAccess NodeAccessor
+	hub        *Hub
+}
 
+func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	var key, text, node, workspace, resumeID string
 	var images []cli.ImageData
 
@@ -97,29 +97,17 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Handle /clear and /new — CLI built-in doesn't work in stream-json
-	trimmed := strings.TrimSpace(text)
-	if trimmed == "/clear" || trimmed == "/new" {
-		s.router.Reset(key)
-		if s.hub != nil {
-			s.hub.BroadcastSessionsUpdate()
-		}
-		w.Header().Set("Content-Type", "application/json")
-		writeJSON(w, map[string]string{"key": key, "status": "reset"})
-		return
-	}
-
 	// Remote node proxy
 	if node != "" && node != "local" {
-		nc, ok := s.lookupNode(w, node)
+		nc, ok := h.nodeAccess.LookupNode(w, node)
 		if !ok {
 			return
 		}
 		capturedKey, capturedText, capturedWorkspace := key, text, workspace
 		go func() {
 			var ctx context.Context
-			if s.hub != nil {
-				ctx = s.hub.ctx
+			if h.hub != nil {
+				ctx = h.hub.ctx
 			} else {
 				ctx = context.Background()
 			}
@@ -129,84 +117,26 @@ func (s *Server) handleAPISend(w http.ResponseWriter, r *http.Request) {
 		}()
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
-		if err := json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "key": key}); err != nil {
-			slog.Error("encode accepted response", "err", err)
-		}
+		writeJSON(w, map[string]string{"status": "accepted", "key": key})
 		return
 	}
 
-	// Set workspace override for new dashboard sessions
-	var validatedWorkspace string
-	if workspace != "" {
-		wsPath, err := validateWorkspace(workspace, s.allowedRoot)
-		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			writeJSON(w, map[string]string{"error": err.Error()})
-			return
-		}
-		validatedWorkspace = wsPath
-		if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
-			chatKey := key[:idx]
-			s.router.SetWorkspace(chatKey, wsPath)
-		}
+	reset, err := h.hub.sessionSend(sendParams{
+		Key: key, Text: text, Images: images,
+		Workspace: workspace, ResumeID: resumeID,
+	}, nil)
+	if err != nil {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusForbidden)
+		writeJSON(w, map[string]string{"error": err.Error()})
+		return
 	}
-
-	// Register for resume: pre-create a suspended entry so GetOrCreate
-	// will --resume the specified session ID on the first message.
-	if resumeID != "" && discovery.IsValidSessionID(resumeID) {
-		ws := validatedWorkspace
-		if ws == "" {
-			ws = s.router.DefaultWorkspace()
-		}
-		s.router.RegisterForResume(key, resumeID, ws)
+	if reset {
+		w.Header().Set("Content-Type", "application/json")
+		writeJSON(w, map[string]string{"key": key, "status": "reset"})
+		return
 	}
-
-	acquired := s.sessionGuard.TryAcquire(key)
-	needInterrupt := !acquired
-
-	if needInterrupt {
-		// Session is running — interrupt; the goroutine below will wait for the guard
-		s.router.InterruptSession(key)
-		slog.Info("http send: interrupted running session for new message", "key", key)
-	}
-
-	capturedText := text
-	capturedImages := images
-	// Use hub context (if available) so in-flight sends are cancelled on shutdown.
-	var sendCtx context.Context
-	if s.hub != nil {
-		sendCtx = s.hub.ctx
-	} else {
-		sendCtx = context.Background()
-	}
-	go func() {
-		if needInterrupt {
-			if !s.sessionGuard.AcquireTimeout(sendCtx, key, 5*time.Second) {
-				slog.Error("http send: interrupt timed out", "key", key)
-				return
-			}
-		}
-		defer s.sessionGuard.Release(key)
-		defer s.router.NotifyIdle() // wake Shutdown wait loop
-
-		opts := buildSessionOpts(key, s.agents, s.projectMgr)
-		sess, _, err := s.router.GetOrCreate(sendCtx, key, opts)
-		if err != nil {
-			slog.Error("dashboard send: get session", "key", key, "err", err)
-			return
-		}
-
-		if _, err := s.sendWithBroadcast(sendCtx, key, sess, capturedText, capturedImages, nil); err != nil {
-			slog.Error("dashboard send: send", "key", key, "err", err)
-		} else {
-			s.trySaveCronPrompt(key, capturedText)
-		}
-	}()
-
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
-	if err := json.NewEncoder(w).Encode(map[string]string{"status": "accepted", "key": key}); err != nil {
-		slog.Error("encode accepted response", "err", err)
-	}
+	writeJSON(w, map[string]string{"status": "accepted", "key": key})
 }

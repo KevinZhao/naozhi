@@ -30,6 +30,7 @@ func saveJobs(path string, jobs map[string]*Job) error {
 	// Atomic write: write to temp file, then rename
 	tmp := path + ".tmp"
 	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		_ = os.Remove(tmp)
 		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {

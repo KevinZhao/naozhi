@@ -107,9 +107,14 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 
 // Stop implements RunnablePlatform. Stops WebSocket connection.
 func (f *Feishu) Stop() error {
-	if f.cancel != nil {
-		f.cancel()
-		<-f.done
+	f.startMu.Lock()
+	cancel := f.cancel
+	done := f.done
+	f.startMu.Unlock()
+
+	if cancel != nil {
+		cancel()
+		<-done
 	}
 	f.wg.Wait() // always wait for in-flight message handlers to finish
 	return nil
@@ -405,7 +410,9 @@ func (f *Feishu) uploadImage(ctx context.Context, data []byte, mimeType string) 
 	if _, err := part.Write(data); err != nil {
 		return "", fmt.Errorf("write image data: %w", err)
 	}
-	w.Close()
+	if err := w.Close(); err != nil {
+		return "", fmt.Errorf("close multipart writer: %w", err)
+	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST",
 		f.baseURL+"/open-apis/im/v1/images", &buf)

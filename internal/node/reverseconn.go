@@ -256,12 +256,29 @@ func (c *ReverseConn) RemoveClient(cl EventSink) {
 func (c *ReverseConn) readLoop() {
 	defer c.markDisconnected()
 
+	// The connector sends WebSocket pings every 30s (upstream/connector.go).
+	// Set a 90s read deadline so we detect silent disconnections (NAT timeout,
+	// crash without clean close) rather than blocking forever on ReadJSON.
+	const reverseReadTimeout = 90 * time.Second
+	c.conn.SetReadDeadline(time.Now().Add(reverseReadTimeout))
+	c.conn.SetPongHandler(func(string) error {
+		c.conn.SetReadDeadline(time.Now().Add(reverseReadTimeout))
+		return nil
+	})
+	c.conn.SetPingHandler(func(appData string) error {
+		c.conn.SetReadDeadline(time.Now().Add(reverseReadTimeout))
+		return c.conn.WriteControl(
+			websocket.PongMessage, []byte(appData), time.Now().Add(time.Second),
+		)
+	})
+
 	for {
 		var msg ReverseMsg
 		if err := c.conn.ReadJSON(&msg); err != nil {
 			slog.Debug("reverse node disconnected", "node", c.id, "err", err)
 			return
 		}
+		c.conn.SetReadDeadline(time.Now().Add(reverseReadTimeout))
 
 		switch msg.Type {
 		case "response":

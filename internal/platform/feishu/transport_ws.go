@@ -25,8 +25,11 @@ type parsedEvent struct {
 
 func (f *Feishu) startWebSocket() error {
 	ctx, cancel := context.WithCancel(context.Background())
+
+	f.startMu.Lock()
 	f.cancel = cancel
 	f.done = make(chan struct{})
+	f.startMu.Unlock()
 
 	handler := f.handler
 

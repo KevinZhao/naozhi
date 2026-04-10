@@ -35,7 +35,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .sidebar-status .status-ws{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sidebar-status .status-sys{color:#6e7681;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
 
-.session-card{position:relative;padding:12px 16px;border-bottom:1px solid #21262d;cursor:pointer;transition:background .15s;border-left:3px solid transparent}
+.session-card{position:relative;display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid #21262d;cursor:pointer;transition:background .15s;border-left:3px solid transparent}
 .session-card:hover{background:#161b22}
 .session-card.active{background:#1f2937;border-left-color:#58a6ff}
 .session-card.dead-card{opacity:.6}
@@ -58,12 +58,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .main-header .detail span{white-space:nowrap}
 
 .events{flex:1;overflow-y:auto;overflow-x:hidden;padding:8px 0;scrollbar-width:thin;scrollbar-color:#30363d transparent;min-width:0}
-.event{display:flex;gap:10px;padding:5px 20px;transition:background .1s;max-width:100%}
+.event{display:flex;gap:10px;padding:8px 20px;transition:background .1s;max-width:100%}
 .event:hover{background:#161b22}
 .event-icon{width:18px;text-align:center;font-size:15px;padding-top:1px}
-.event-content{flex:1;font-size:15px;line-height:1.5;word-break:break-word;white-space:pre-wrap;overflow-wrap:anywhere;min-width:0}
-.event.text .event-content,.event.result .event-content{white-space:normal}
-.md-blank{display:block;height:0.35em}
+.event-content{flex:1;font-size:15px;line-height:1.6;word-break:break-word;white-space:pre-wrap;overflow-wrap:anywhere;min-width:0;max-width:720px}
+.event.text .event-content,.event.user .event-content{white-space:normal}
+.md-blank{display:block;height:0.75em}
 .event.thinking .event-content{color:#a5d6ff;font-style:italic}
 .event.result .event-content{color:#7ee787}
 .event.system .event-content{color:#8b949e;font-size:14px}
@@ -87,7 +87,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .file-thumb img{width:100%;height:100%;object-fit:cover}
 .file-thumb .remove{position:absolute;top:-4px;right:-4px;width:16px;height:16px;background:#da3633;color:#fff;border:none;border-radius:50%;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1}
 .event-images{display:flex;gap:6px;flex-wrap:wrap;margin-top:6px}
-.event-images img{max-width:200px;max-height:160px;border-radius:6px;border:1px solid #30363d}
+.event-images img{max-width:200px;max-height:160px;border-radius:6px;border:1px solid #30363d;cursor:pointer;transition:opacity .15s}
+.event-images img:hover{opacity:.85}
+.lightbox-overlay{display:none;position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.85);align-items:center;justify-content:center;cursor:zoom-out}
+.lightbox-overlay.active{display:flex}
+.lightbox-overlay img{max-width:92vw;max-height:92vh;border-radius:8px;box-shadow:0 4px 24px rgba(0,0,0,.6)}
 .input-row{display:flex;gap:8px;align-items:flex-end}
 .input-row #msg-input{flex:1;background:#161b22;border:1px solid #30363d;border-radius:8px;color:#c9d1d9;padding:8px 12px;font-family:inherit;font-size:16px;min-height:38px;max-height:120px;outline:none;line-height:1.4;overflow-y:auto;white-space:pre-wrap;word-break:break-word;-webkit-user-select:text;user-select:text}
 .input-row #msg-input:focus{border-color:#58a6ff}
@@ -185,9 +189,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .history-popover-item{padding:8px 12px;cursor:pointer;transition:background .1s;border-bottom:1px solid #21262d;position:relative}
 .history-popover-item:last-child{border-bottom:none}
 .history-popover-item:hover{background:#1c2129}
-.history-popover-item .hp-dismiss{position:absolute;top:6px;right:6px;background:none;border:none;color:#6e7681;font-size:14px;cursor:pointer;padding:0 4px;border-radius:4px;line-height:1;opacity:0;transition:all .15s}
-.history-popover-item:hover .hp-dismiss{opacity:1}
-.history-popover-item .hp-dismiss:hover{color:#f85149;background:#3d0e0e}
 .history-popover-item .hp-prompt{font-size:13px;color:#c9d1d9;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .history-popover-item .hp-meta{font-size:11px;color:#6e7681;margin-top:3px;display:flex;align-items:center;gap:6px}
 .history-popover-item .hp-meta .hp-project{color:#d4a017;font-weight:500}
@@ -200,7 +201,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .workspace-path:hover{color:#8b949e;text-decoration:underline}
 
 /* Markdown rendering */
-.md-pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 12px;margin:6px 0;overflow-x:auto;font-size:13px;line-height:1.5;max-width:100%}
+.md-pre{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:10px 12px;margin:8px 0;overflow-x:auto;font-size:13px;line-height:1.6;max-width:100%}
 .md-pre code{color:#e6edf3;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace;white-space:pre}
 .md-code-wrap{position:relative;max-width:100%}
 .md-copy-btn{position:absolute;top:6px;right:6px;background:#21262d;border:1px solid #30363d;border-radius:4px;color:#8b949e;font-size:11px;padding:2px 8px;cursor:pointer;opacity:0;transition:opacity .15s,color .15s,border-color .15s;line-height:1.6}
@@ -210,19 +211,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .md-code{background:#30363d;color:#e6edf3;padding:1px 5px;border-radius:4px;font-size:13px;font-family:'SF Mono',SFMono-Regular,Consolas,'Liberation Mono',Menlo,monospace}
 .md-h1,.md-h2,.md-h3,.md-h4{display:block;color:#f0f6fc;margin:8px 0 4px}
 .md-h1{font-size:16px}.md-h2{font-size:15px}.md-h3{font-size:14px}
-.md-ul{margin:4px 0 4px 16px;padding:0;list-style:disc}
-.md-ul li{margin:2px 0;line-height:1.5}
-.md-ol{margin:4px 0 4px 16px;padding:0;list-style:decimal}
-.md-ol li{margin:2px 0;line-height:1.5}
+.md-ul{margin:6px 0 6px 16px;padding:0;list-style:disc}
+.md-ul li{margin:2px 0;line-height:1.6}
+.md-ol{margin:6px 0 6px 16px;padding:0;list-style:decimal}
+.md-ol li{margin:2px 0;line-height:1.6}
 .md-link{color:#58a6ff;text-decoration:none}
 .md-link:hover{text-decoration:underline}
-.md-table-wrap{overflow-x:auto;max-width:100%;margin:6px 0}
+.md-table-wrap{overflow-x:auto;max-width:100%;margin:8px 0}
 .md-table{width:100%;border-collapse:collapse;font-size:14px}
 .md-table th,.md-table td{border:1px solid #30363d;padding:5px 10px;text-align:left}
 .md-table th{background:#161b22;color:#f0f6fc;font-weight:600;font-size:13px}
 .md-table td{color:#c9d1d9}
 .md-table tr:hover td{background:rgba(88,166,255,.04)}
-.mermaid-wrap{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px;margin:6px 0;overflow-x:auto;text-align:center;max-width:100%}
+.mermaid-wrap{background:#161b22;border:1px solid #30363d;border-radius:6px;padding:12px;margin:8px 0;overflow-x:auto;text-align:center;max-width:100%}
 .mermaid-wrap svg{max-width:100%;height:auto}
 .md-math-display{margin:8px 0;overflow-x:auto;text-align:center;max-width:100%}
 .md-math-display .katex-display{margin:0.5em 0}
@@ -240,21 +241,20 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .hdr-badge{position:absolute;top:-5px;right:-5px;background:#da3633;color:#fff;font-size:9px;min-width:15px;height:15px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:700;line-height:1}
 /* Section header */
 .section-header{padding:6px 16px;font-size:11px;font-weight:600;color:#8b949e;text-transform:uppercase;letter-spacing:.4px;background:#161b22;border-top:1px solid #30363d;border-bottom:1px solid #21262d;position:sticky;top:0;z-index:1}
-/* Session card v2 (two-line flat, WeChat-style) */
+/* Session card v2 (two-line flat, IM-style) */
+.sc-cli-icon{width:36px;height:36px;flex-shrink:0;border-radius:8px}
+.sc-body{flex:1;min-width:0}
 .session-card .sc-header{display:flex;align-items:baseline;gap:8px}
-.sc-cli-icon{width:14px;height:14px;flex-shrink:0;position:relative;top:2px}
 .session-card .sc-prompt{font-size:15px;color:#e6edf3;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .session-card.new-card{border-left-style:dashed;border-left-color:#58a6ff}
-.session-card.resumable-card{border-left-style:dashed;border-left-color:#8b949e}
-.dot-resumable{background:transparent;border:1px dashed #8b949e;width:7px;height:7px}
+.session-card.suspended-card{border-left-style:dashed;border-left-color:#9e6a03;opacity:.7}
+.session-card.active.suspended-card,.session-card.active.dead-card{opacity:1}
+.dot-suspended{background:#9e6a03}
 .session-card .sc-meta{font-size:12px;color:#8b949e;display:flex;align-items:center;gap:4px;margin-top:3px;overflow:hidden;white-space:nowrap}
 .sc-dot{display:inline-block;width:6px;height:6px;border-radius:50%;flex-shrink:0}
 .dot-running{background:#3fb950}
 .dot-ready{background:#1f6feb}
 .dot-new{background:#1f6feb;border:1px dashed #58a6ff;width:5px;height:5px}
-.sc-sep{color:#30363d}
-.sc-cli{color:#a5d6ff}
-.sc-ver{color:#6e7681;font-size:11px}
 .sc-time{flex-shrink:0;font-size:12px;color:#8b949e}
 .sc-node{display:inline-block;padding:0 4px;border-radius:3px;font-size:10px;font-weight:600;color:#fff;margin-left:2px}
 /* History bottom sheet (mobile) */
@@ -298,9 +298,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
   .session-list{overflow-x:hidden;overflow-y:auto}
   .sidebar-status{padding-bottom:max(10px,env(safe-area-inset-bottom));padding-left:max(16px,env(safe-area-inset-left))}
   /* Compact session cards on mobile */
-  .session-card{padding:10px max(12px,env(safe-area-inset-right)) 10px max(12px,env(safe-area-inset-left));border-left-width:2px}
+  .session-card{padding:10px max(12px,env(safe-area-inset-right)) 10px max(12px,env(safe-area-inset-left));border-left-width:2px;gap:10px}
   .session-card .sc-meta{font-size:11px;gap:3px}
   .session-card .sc-prompt{font-size:14px}
+  .sc-cli-icon{width:32px;height:32px;border-radius:6px}
   .section-header{padding:5px 12px;font-size:10px}
   /* Compact "no sessions" on mobile */
   .no-sessions{padding:4px 16px!important;font-size:12px}
@@ -369,6 +370,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 let selectedKey = null;
 let eventTimer = null;
 let lastEventTime = 0;
+let lastRenderedEventTime = 0;
 let lastCompositionEnd = 0;
 let sessionsData = {};
 let allSessionsCache = [];
@@ -378,7 +380,6 @@ let selectedNode = 'local';
 let nodesData = {};
 let lastVersion = 0;
 let lastNodesJSON = '';
-let lastRecentJSON = '';
 let lastHistoryJSON = '';
 let sessionPollTimer = null;
 let discoveredPollTimer = null;
@@ -393,10 +394,7 @@ let projectsData = []; // [{name, path, node}] from API
 let localWsInfo = { name: '', sys: '' };
 const sessionWorkspaces = {};
 const sessionNodes = {};
-const sessionResumeIDs = {}; // key → session_id for recent session resume
-let recentSessionsData = []; // from API recent_sessions (< 24h)
-let historySessionsData = []; // from API history_sessions (1-7d)
-let sidebarOverflow = []; // resumable items beyond per-project limit, shown in history popover
+let historySessionsData = []; // from API history_sessions (all filesystem sessions)
 
 function getToken() { return ''; }
 function setToken(t) { /* token stored in HttpOnly cookie only */ }
@@ -404,7 +402,6 @@ function setToken(t) { /* token stored in HttpOnly cookie only */ }
 function removePendingSession(key) {
   delete sessionWorkspaces[key];
   delete sessionNodes[key];
-  delete sessionResumeIDs[key];
 }
 
 async function fetchSessions() {
@@ -420,21 +417,18 @@ async function fetchSessions() {
     if (!r.ok) return;
     const data = await r.json();
     // Use server-side version counter for efficient change detection.
-    // Falls back to JSON comparison for nodes/recent/history which lack a version.
+    // Falls back to JSON comparison for nodes/history which lack a version.
     const version = (data.stats && data.stats.version) || 0;
     const nodesHash = JSON.stringify(data.nodes || {});
-    const recentHash = JSON.stringify(data.recent_sessions || []);
     const historyHash = JSON.stringify(data.history_sessions || []);
-    if (version === lastVersion && version > 0 && nodesHash === lastNodesJSON && recentHash === lastRecentJSON && historyHash === lastHistoryJSON) return;
+    if (version === lastVersion && version > 0 && nodesHash === lastNodesJSON && historyHash === lastHistoryJSON) return;
     lastVersion = version;
     lastNodesJSON = nodesHash;
-    lastRecentJSON = recentHash;
     lastHistoryJSON = historyHash;
     if (data.nodes) nodesData = data.nodes;
     if (data.stats.agents) availableAgents = data.stats.agents;
     if (data.stats.default_workspace) defaultWorkspace = data.stats.default_workspace;
     if (data.stats.projects) projectsData = data.stats.projects;
-    recentSessionsData = data.recent_sessions || [];
     historySessionsData = data.history_sessions || [];
 
     // Track which keys the backend knows about
@@ -450,7 +444,6 @@ async function fetchSessions() {
       if (backendKeys.has(key)) {
         delete sessionWorkspaces[key];
         delete sessionNodes[key];
-        delete sessionResumeIDs[key];
       }
     }
 
@@ -460,27 +453,15 @@ async function fetchSessions() {
       if (!data.sessions) data.sessions = [];
       for (const key of pendingKeys) {
         if (!backendKeys.has(key)) {
-          // For resume-pending sessions, carry over original prompt/time
-          // so the card looks unchanged instead of showing an empty "new" card.
-          const resumeId = sessionResumeIDs[key];
-          let origPrompt = '', origActive = 0;
-          if (resumeId) {
-            const orig = [...(recentSessionsData || []), ...(historySessionsData || [])]
-              .find(r => r.session_id === resumeId);
-            if (orig) {
-              origPrompt = orig.last_prompt || orig.summary || '';
-              origActive = orig.last_active || 0;
-            }
-          }
           const parts = key.split(':');
           data.sessions.push({
             key: key,
-            state: resumeId ? 'resumable' : 'new',
+            state: 'new',
             platform: parts[0] || 'dashboard',
             agent: 'general',
             workspace: sessionWorkspaces[key],
-            last_active: origActive,
-            last_prompt: origPrompt,
+            last_active: 0,
+            last_prompt: '',
             node: sessionNodes[key] || 'local',
             project: matchProject(sessionWorkspaces[key]),
           });
@@ -531,46 +512,26 @@ function renderSidebar(data) {
     });
   });
 
-  // Merge recent filesystem sessions as resumable items
-  // Skip sessions already being resumed (pending key exists in sessionResumeIDs)
-  const activeResumeIDs = new Set(Object.values(sessionResumeIDs));
-  recentSessionsData.forEach(r => {
-    if (activeResumeIDs.has(r.session_id)) return;
-    allItems.push({
-      key: '_recent:' + r.session_id,
-      state: 'resumable',
-      cli_name: '',
-      last_active: r.last_active || 0,
-      last_prompt: r.last_prompt || r.summary || '',
-      workspace: r.workspace || '',
-      project: r.project || matchProject(r.workspace),
-      node: 'local',
-      source: 'recent',
-      _recent: r,
-    });
-  });
-
-  // Filter: active list = non-suspended; history = suspended
-  const active = allItems.filter(s => s.state !== 'suspended');
-  const suspended = allItems.filter(s => s.state === 'suspended');
+  // Workspace sidebar: managed + discovered only (no filesystem recent sessions).
+  // Suspended sessions stay in the workspace (with distinct styling).
   allSessionsCache = allItems;
 
-  // Sort: running > ready > new > resumable, then by last_active desc
-  const order = {running: 0, ready: 1, new: 2, resumable: 3};
-  active.sort((a, b) => {
+  // Sort: running > ready > new > suspended, then by last_active desc
+  const order = {running: 0, ready: 1, new: 2, suspended: 3};
+  allItems.sort((a, b) => {
     const d = (order[a.state] ?? 9) - (order[b.state] ?? 9);
     return d !== 0 ? d : (b.last_active || 0) - (a.last_active || 0);
   });
 
   // Always group by project when any session has a project
-  const projects = new Set(active.map(s => s.project).filter(Boolean));
+  const projects = new Set(allItems.map(s => s.project).filter(Boolean));
 
   let html;
   if (projects.size > 0) {
     // Group by project, sort groups by most recent session
     const groups = {};
     const ungrouped = [];
-    active.forEach(s => {
+    allItems.forEach(s => {
       const p = s.project || '';
       if (p) {
         if (!groups[p]) groups[p] = [];
@@ -582,36 +543,25 @@ function renderSidebar(data) {
     const sortedProjects = Object.keys(groups).sort((a, b) => {
       return (groups[b][0].last_active || 0) - (groups[a][0].last_active || 0);
     });
-    const MAX_RESUMABLE = 5;
-    sidebarOverflow = [];
     html = '';
     sortedProjects.forEach(p => {
-      const items = groups[p];
-      // Active sessions (running/ready/new) always show; cap only resumable
-      const pinned = items.filter(s => s.state !== 'resumable');
-      const resumable = items.filter(s => s.state === 'resumable');
-      const shownResumable = resumable.slice(0, MAX_RESUMABLE);
-      resumable.slice(MAX_RESUMABLE).forEach(s => sidebarOverflow.push(s));
       html += '<div class="section-header">' + esc(p) + '</div>';
-      html += [...pinned, ...shownResumable].map(sessionCardHtml).join('');
+      html += groups[p].map(sessionCardHtml).join('');
     });
-    // Ungrouped at the bottom (no header), also capped
-    const pinnedUngrouped = ungrouped.filter(s => s.state !== 'resumable');
-    const resumableUngrouped = ungrouped.filter(s => s.state === 'resumable');
-    resumableUngrouped.slice(MAX_RESUMABLE).forEach(s => sidebarOverflow.push(s));
-    html += [...pinnedUngrouped, ...resumableUngrouped.slice(0, MAX_RESUMABLE)].map(sessionCardHtml).join('');
+    html += ungrouped.map(sessionCardHtml).join('');
   } else {
-    html = active.map(sessionCardHtml).join('');
+    html = allItems.map(sessionCardHtml).join('');
   }
 
   if (!html) html = '<div class="no-sessions">no sessions</div>';
   list.innerHTML = html;
   list.scrollTop = scrollTop;
 
-  // Update history badge (suspended managed + filesystem history)
+  // Update history badge (filesystem history sessions, deduplicated against workspace)
   const hBadge = document.getElementById('history-badge');
   if (hBadge) {
-    const historyCount = suspended.length + historySessionsData.length + sidebarOverflow.length;
+    const workspaceIDs = new Set(allSessionsCache.filter(s => s.session_id).map(s => s.session_id));
+    const historyCount = historySessionsData.filter(r => !workspaceIDs.has(r.session_id)).length;
     hBadge.textContent = historyCount > 0 ? historyCount : '';
     hBadge.style.display = historyCount > 0 ? '' : 'none';
   }
@@ -639,35 +589,6 @@ function closeHistoryPopover() {
   if (activePopover) { activePopover.remove(); activePopover = null; }
 }
 
-async function dismissHistoryItem(btn) {
-  const key = btn.dataset.key;
-  const node = btn.dataset.node || 'local';
-  const item = btn.closest('.history-popover-item');
-  try {
-    const headers = {'Content-Type': 'application/json'};
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
-    const r = await fetch('/api/sessions', {method: 'DELETE', headers, body: JSON.stringify({key: key})});
-    if (!r.ok && r.status !== 404) { showToast('delete failed'); return; }
-    delete sessionsData[sid(key, node)];
-    if (selectedKey === key) {
-      selectedKey = null;
-      if (wsm.subscribedKey === key) wsm.unsubscribe();
-      document.getElementById('main').innerHTML = '<div class="empty-state">select a session</div>';
-    }
-    if (item) item.remove();
-    // If popover is now empty, show placeholder
-    if (activePopover && !activePopover.querySelector('.history-popover-item')) {
-      const body = activePopover.querySelector('.history-popover-empty');
-      if (!body) {
-        activePopover.insertAdjacentHTML('beforeend', '<div class="history-popover-empty">no history</div>');
-      }
-    }
-    lastVersion = 0;
-    fetchSessions();
-  } catch (e) { showToast('delete error: ' + e.message); }
-}
-
 document.addEventListener('click', function(e) {
   if (activePopover && !activePopover.contains(e.target) && !e.target.closest('#btn-history')) {
     closeHistoryPopover();
@@ -677,35 +598,18 @@ document.addEventListener('click', function(e) {
 function toggleHistory() {
   if (activePopover) { closeHistoryPopover(); return; }
 
-  // Merge suspended managed sessions + sidebar overflow + filesystem history sessions.
-  const suspended = allSessionsCache.filter(s => s.state === 'suspended').map(s => ({
-    key: s.key, node: s.node || 'local', source: 'managed',
-    session_id: s.session_id || '', last_active: s.last_active || 0,
-    prompt: s.last_prompt || '', project: s.project || '', tool: s.cli_name || s.protocol || 'cli',
-  }));
-  const overflowMapped = sidebarOverflow.map(s => ({
-    key: s.key, node: s.node || 'local', source: s.source || 'recent',
-    session_id: s.session_id || (s._recent ? s._recent.session_id : '') || '', last_active: s.last_active || 0,
-    prompt: s.last_prompt || '', project: s.project || '', tool: s.cli_name || '',
-  }));
-  const fsHistory = historySessionsData.map(r => ({
-    key: '_history:' + r.session_id, node: 'local', source: 'recent',
-    session_id: r.session_id, last_active: r.last_active || 0,
-    prompt: r.last_prompt || r.summary || '', project: r.project || matchProject(r.workspace), tool: '',
-  }));
-  // Deduplicate by session_id (managed/overflow take priority over filesystem).
-  const seenIDs = new Set(suspended.map(s => s.session_id).filter(Boolean));
-  const merged = [...suspended];
-  for (const s of overflowMapped) {
-    if (s.session_id && seenIDs.has(s.session_id)) continue;
-    seenIDs.add(s.session_id);
-    merged.push(s);
-  }
-  for (const h of fsHistory) {
-    if (h.session_id && seenIDs.has(h.session_id)) continue;
-    seenIDs.add(h.session_id);
-    merged.push(h);
-  }
+  // Show all filesystem history sessions, deduplicated against workspace.
+  const workspaceIDs = new Set(
+    allSessionsCache.filter(s => s.session_id).map(s => s.session_id)
+  );
+  const merged = historySessionsData
+    .filter(r => !workspaceIDs.has(r.session_id))
+    .map(r => ({
+      key: '_history:' + r.session_id, node: 'local', source: 'recent',
+      session_id: r.session_id, last_active: r.last_active || 0,
+      prompt: r.last_prompt || r.summary || '',
+      project: r.project || matchProject(r.workspace), tool: '',
+    }));
   merged.sort((a, b) => b.last_active - a.last_active);
 
   let itemsHtml;
@@ -725,17 +629,12 @@ function toggleHistory() {
         }
       }
       const ago = s.last_active ? timeAgo(s.last_active) : '';
-      const isManaged = s.source === 'managed';
-      const onclick = isManaged
-        ? 'selectSession(this.dataset.key,this.dataset.node);closeHistoryPopover()'
-        : 'resumeRecentSession(this.dataset.sid);closeHistoryPopover()';
+      const onclick = 'resumeRecentSession(this.dataset.sid);closeHistoryPopover()';
       return dayHeader +
-        '<div class="history-popover-item" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(s.node) + '" data-sid="' + escAttr(s.session_id) + '" onclick="' + onclick + '">' +
-        (isManaged ? '<button class="hp-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(s.node) + '" onclick="event.stopPropagation();dismissHistoryItem(this)" title="delete">&times;</button>' : '') +
+        '<div class="history-popover-item" data-sid="' + escAttr(s.session_id) + '" onclick="' + onclick + '">' +
         (s.prompt ? '<div class="hp-prompt" title="' + escAttr(s.prompt) + '">' + esc(s.prompt) + '</div>' : '<div class="hp-prompt" style="color:#6e7681">(no prompt)</div>') +
         '<div class="hp-meta">' +
           (s.project ? '<span class="hp-project">' + esc(s.project) + '</span><span class="hp-dot">&middot;</span>' : '') +
-          (s.tool ? '<span class="hp-tool">' + esc(s.tool) + '</span><span class="hp-dot">&middot;</span>' : '') +
           (ago ? '<span>' + ago + '</span>' : '') +
         '</div>' +
         '</div>';
@@ -776,79 +675,72 @@ function sessionCardHtml(s) {
   const sNode = s.node || 'local';
   const isActive = selectedKey === s.key && selectedNode === sNode;
   const isNew = s.state === 'new';
-  const isResumable = s.state === 'resumable';
-  const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '') + (isResumable ? ' resumable-card' : '');
+  const isSuspended = s.state === 'suspended';
+  const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '') +
+    (isSuspended ? ' suspended-card' : '');
 
   // Line 1: prompt
   const prompt = s.summary || s.last_prompt || (isNew ? '(new session)' : '(no prompt)');
-
-  // CLI icon: use cli_name for managed/discovered, default to claude-code for resumable
-  const cliNameForIcon = s.cli_name || (isResumable ? 'claude-code' : 'cli');
-  const icon = cliIcon(cliNameForIcon);
+  const icon = cliIcon(s.cli_name || 'cli');
 
   // Line 2: status dot + meta
-  const dotCls = s.state === 'running' ? 'dot-running' : (s.state === 'ready' ? 'dot-ready' : (s.state === 'resumable' ? 'dot-resumable' : 'dot-new'));
+  const dotCls = s.state === 'running' ? 'dot-running' : (s.state === 'ready' ? 'dot-ready' : (s.state === 'suspended' ? 'dot-suspended' : 'dot-new'));
   const ago = s.last_active ? timeAgo(s.last_active) : '';
   const nodeBadge = isMultiNode() && sNode !== 'local'
     ? '<span class="sc-node" style="background:' + nodeColor(sNode) + '">' + esc(sNode) + '</span>' : '';
 
-  // Recent cards: show "resumable" label, no cli info, no dismiss button
-  const dismissBtn = isResumable ? '' :
-    '<button class="btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove">&times;</button>';
+  const dismissBtn = '<button class="btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove">&times;</button>';
 
-  let metaHtml;
-  if (isResumable) {
-    metaHtml = '<span class="sc-dot ' + dotCls + '"></span><span>resumable</span>';
-  } else {
-    const cliName = s.cli_name || 'cli';
-    const cliVer = s.cli_version ? ' ' + s.cli_version : '';
-    metaHtml = '<span class="sc-dot ' + dotCls + '"></span>' +
-      '<span>' + esc(s.state) + '</span>' +
-      '<span class="sc-sep">&middot;</span>' +
-      '<span class="sc-cli">' + esc(cliName) + '<span class="sc-ver">' + esc(cliVer) + '</span></span>' +
-      nodeBadge;
-  }
+  const metaHtml = '<span class="sc-dot ' + dotCls + '"></span>' +
+    '<span>' + esc(s.state) + '</span>' +
+    nodeBadge;
 
   return '<div class="' + cls + '" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="selectSession(this.dataset.key,this.dataset.node)">' +
     dismissBtn +
-    '<div class="sc-header">' +
-      icon +
-      '<div class="sc-prompt" title="' + escAttr(prompt) + '">' + esc(prompt) + '</div>' +
-      (ago ? '<span class="sc-time">' + ago + '</span>' : '') +
+    icon +
+    '<div class="sc-body">' +
+      '<div class="sc-header">' +
+        '<div class="sc-prompt" title="' + escAttr(prompt) + '">' + esc(prompt) + '</div>' +
+        (ago ? '<span class="sc-time">' + ago + '</span>' : '') +
+      '</div>' +
+      '<div class="sc-meta">' + metaHtml + '</div>' +
     '</div>' +
-    '<div class="sc-meta">' + metaHtml + '</div>' +
   '</div>';
 }
 
 function resumeRecentSession(sessionId) {
-  const all = [...recentSessionsData, ...historySessionsData];
-  const found = all.find(r => r.session_id === sessionId);
+  const found = historySessionsData.find(r => r.session_id === sessionId);
   resumeRecentById(sessionId, found ? found.workspace : '');
 }
 
-function resumeRecentById(sessionId, workspace) {
-  // Guard: if already resuming this session, just select the existing pending key
-  for (const [k, sid] of Object.entries(sessionResumeIDs)) {
-    if (sid === sessionId) { selectSession(k, 'local'); return; }
+async function resumeRecentById(sessionId, workspace) {
+  // Guard: if already resuming this session, find the managed key and select it
+  for (const s of allSessionsCache) {
+    if (s.session_id === sessionId) { selectSession(s.key, s.node || 'local'); return; }
   }
 
-  workspace = workspace || defaultWorkspace;
+  try {
+    const headers = {'Content-Type': 'application/json'};
+    const token = getToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const r = await fetch('/api/sessions/resume', {
+      method: 'POST', headers,
+      body: JSON.stringify({session_id: sessionId, workspace: workspace || ''})
+    });
+    if (!r.ok) { showToast('resume failed'); return; }
+    const data = await r.json();
+    const key = data.key;
+    if (!key) return;
 
-  // Create a new dashboard session key that will resume this session
-  const ts = Date.now();
-  const key = 'dashboard:direct:r' + ts + ':general';
-  sessionWorkspaces[key] = workspace;
-  sessionNodes[key] = 'local';
-  sessionResumeIDs[key] = sessionId;
+    // Force sidebar refresh to pick up the new suspended entry
+    lastVersion = 0;
+    await fetchSessions();
 
-  // Don't remove from recentSessionsData yet — wait until it appears as managed
-  // Force re-render sidebar
-  lastVersion = 0;
-  fetchSessions();
-
-  // Select the new session and load its history preview
-  selectSession(key, 'local');
-  previewRecentSession(key, sessionId);
+    selectSession(key, 'local');
+    previewRecentSession(key, sessionId);
+  } catch (e) {
+    showToast('resume error: ' + e.message);
+  }
 }
 
 async function previewRecentSession(expectedKey, sessionId) {
@@ -867,7 +759,7 @@ async function previewRecentSession(expectedKey, sessionId) {
   }
 }
 
-const STATUS_LABELS = { off: 'offline', connecting: 'connecting...', authenticating: 'authenticating...', connected: 'connected', disconnected: 'reconnecting...' };
+const STATUS_LABELS = { off: 'offline', connecting: 'connecting...', authenticating: 'authenticating...', connected: 'connected', disconnected: 'polling', disconnected_retry: 'reconnecting...' };
 const REMOTE_LABELS = { ok: 'connected', error: 'error', offline: 'offline', unreachable: 'unreachable' };
 const VALID_DOT_CLASSES = { ok: 'ok', error: 'error', offline: 'offline', connecting: 'connecting', off: 'off', connected: 'connected', disconnected: 'disconnected', authenticating: 'authenticating' };
 
@@ -878,11 +770,14 @@ function updateStatusBar() {
 
   // Local node row (always first)
   const localName = localWsInfo.name || 'workspace';
-  const localLabel = localName + ' \u00b7 ' + (STATUS_LABELS[wsm.state] || wsm.state);
+  // Distinguish short reconnect vs stable polling mode
+  const statusKey = (wsm.state === WS_STATES.DISCONNECTED && wsm.backoff > 8000) ? 'disconnected' : (wsm.state === WS_STATES.DISCONNECTED ? 'disconnected_retry' : wsm.state);
+  const localLabel = localName + ' \u00b7 ' + (STATUS_LABELS[statusKey] || wsm.state);
+  const dotKey = statusKey === 'disconnected' ? 'connecting' : wsm.state; // polling = yellow dot
   const localSys = localWsInfo.sys || '';
 
   let html = '<div class="status-row">' +
-    '<span class="status-dot ' + (VALID_DOT_CLASSES[wsm.state] || 'off') + '"></span>' +
+    '<span class="status-dot ' + (VALID_DOT_CLASSES[dotKey] || 'off') + '"></span>' +
     '<div class="status-info">' +
       '<div class="status-ws">' + esc(localLabel) + '</div>' +
       (localSys ? '<div class="status-sys">' + esc(localSys) + '</div>' : '') +
@@ -913,12 +808,6 @@ function updateStatusBar() {
 function selectSession(key, node) {
   node = node || 'local';
   // Recent session card click → trigger resume flow
-  if (key.startsWith('_recent:')) {
-    const sessionId = key.substring('_recent:'.length);
-    const item = allSessionsCache.find(x => x.key === key);
-    resumeRecentById(sessionId, item ? item.workspace : '');
-    return;
-  }
   // Discovered session card click → trigger preview flow
   if (key.startsWith('_discovered:')) {
     const pid = parseInt(key.split(':')[1]);
@@ -934,6 +823,7 @@ function selectSession(key, node) {
   selectedKey = key;
   selectedNode = node;
   lastEventTime = 0;
+  lastRenderedEventTime = 0;
   mobileEnterChat();
   stopPreviewPolling();
   document.querySelectorAll('.session-card').forEach(el => {
@@ -1101,6 +991,11 @@ function renderEvents(events) {
   const display = processEventsForDisplay(events);
   el.innerHTML = display.map(eventHtml).filter(Boolean).join('') || '<div class="empty-state">no events yet</div>';
   el.scrollTop = el.scrollHeight;
+  // Track the latest rendered event time for deduplication
+  if (events.length > 0) {
+    const last = events[events.length - 1];
+    if (last.time) lastRenderedEventTime = last.time;
+  }
   runMermaid();
   runKatex();
 }
@@ -1113,7 +1008,10 @@ function appendEvents(events) {
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   events.forEach(e => {
     if (e.type === 'tool_use' || e.type === 'result' || e.type === 'agent') return;
+    // Deduplicate: skip events at or before the last rendered time
+    if (e.time && e.time <= lastRenderedEventTime) return;
     const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h);
+    if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
   });
   if (wasBottom) el.scrollTop = el.scrollHeight;
   runMermaid();
@@ -1144,7 +1042,7 @@ function eventHtml(e) {
   let imgHtml = '';
   if (e.images && e.images.length > 0) {
     imgHtml = '<div class="event-images">' + e.images.map(src =>
-      '<img src="' + escAttr(src) + '" loading="lazy">'
+      '<img src="' + escAttr(src) + '" loading="lazy" onclick="openLightbox(this.src)">'
     ).join('') + '</div>';
   }
 
@@ -1260,10 +1158,6 @@ async function sendMessage() {
       delete sessionWorkspaces[selectedKey];
       delete sessionNodes[selectedKey];
     }
-    if (sessionResumeIDs[selectedKey]) {
-      sendMsg.resume_id = sessionResumeIDs[selectedKey];
-      delete sessionResumeIDs[selectedKey];
-    }
     if (wsm.send(sendMsg)) {
       if (input) clearMsg(input);
       sending = false;
@@ -1290,10 +1184,6 @@ async function sendMessage() {
         delete sessionWorkspaces[selectedKey];
         delete sessionNodes[selectedKey];
       }
-      if (sessionResumeIDs[selectedKey]) {
-        fd.append('resume_id', sessionResumeIDs[selectedKey]);
-        delete sessionResumeIDs[selectedKey];
-      }
       pendingFiles.forEach(f => fd.append('files', f));
       body = fd;
     } else {
@@ -1304,10 +1194,6 @@ async function sendMessage() {
         payload.workspace = sessionWorkspaces[selectedKey];
         delete sessionWorkspaces[selectedKey];
         delete sessionNodes[selectedKey];
-      }
-      if (sessionResumeIDs[selectedKey]) {
-        payload.resume_id = sessionResumeIDs[selectedKey];
-        delete sessionResumeIDs[selectedKey];
       }
       body = JSON.stringify(payload);
     }
@@ -2424,11 +2310,18 @@ const wsm = {
     if (isInitial) {
       el.innerHTML = display.map(eventHtml).filter(Boolean).join('') || '<div class="empty-state">no events yet</div>';
       el.scrollTop = el.scrollHeight;
+      // Reset dedup tracker on full render
+      if (events.length > 0) { const last = events[events.length - 1]; if (last.time) lastRenderedEventTime = last.time; }
       runMermaid();
   runKatex();
     } else {
       const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
-      display.forEach(e => { const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h); });
+      display.forEach(e => {
+        // Deduplicate: skip events at or before the last rendered time
+        if (e.time && e.time <= lastRenderedEventTime) return;
+        const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h);
+        if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
+      });
       if (wasBottom) el.scrollTop = el.scrollHeight;
       runMermaid();
   runKatex();
@@ -2603,7 +2496,7 @@ const wsm = {
         wsm.subscribedKey === msg.key) {
       wsm.subscribe(msg.key, selectedNode);
     }
-    // Session became suspended: re-render sidebar to move it to history
+    // Session became suspended: re-render sidebar to update visual state
     if (msg.state === 'suspended') { lastVersion = 0; fetchSessions(); }
   },
 
@@ -2997,6 +2890,10 @@ function createNewCronJob() {
   overlay.innerHTML =
     '<div class="modal">' +
       '<h3>New Cron Job</h3>' +
+      '<div style="margin-bottom:12px">' +
+        '<div style="font-size:12px;color:#8b949e;margin-bottom:6px">Prompt</div>' +
+        '<textarea id="cron-prompt" placeholder="what should this job do?" style="width:100%;min-height:60px;max-height:120px;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;font-family:inherit;resize:vertical;outline:none"></textarea>' +
+      '</div>' +
       '<div style="font-size:12px;color:#8b949e;margin-bottom:6px">Schedule</div>' +
       scheduleHtml + wsHtml +
       '<div class="modal-btns" style="margin-top:12px"><button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button><button class="primary" onclick="doCreateCronJob()">create</button></div>' +
@@ -3108,6 +3005,9 @@ async function doCreateCronJob() {
   const customInput = document.getElementById('cron-schedule');
   if (customInput && customInput.value.trim()) schedule = customInput.value.trim();
   if (!schedule) { showToast('schedule is required', 'warning'); return; }
+  // Resolve prompt
+  const promptInput = document.getElementById('cron-prompt');
+  const prompt = promptInput ? promptInput.value.trim() : '';
   // Resolve work_dir: project selection or custom input
   let workDir = overlay._cronWorkDir || '';
   const wdInput = document.getElementById('cron-workdir');
@@ -3117,6 +3017,7 @@ async function doCreateCronJob() {
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const body = {schedule};
+    if (prompt) body.prompt = prompt;
     if (workDir) body.work_dir = workDir;
     const r = await fetch('/api/cron', {method: 'POST', headers, body: JSON.stringify(body)});
     if (!r.ok) { showToast('create failed: ' + await r.text()); return; }
@@ -3166,7 +3067,7 @@ function renderCronPanel() {
       const result = j.last_error
         ? '<div style="color:#da3633;font-size:12px;margin-top:4px">\u2716 ' + esc(j.last_error) + '</div>'
         : (j.last_result ? '<div style="color:#7ee787;font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">\u2714 ' + esc(j.last_result.substring(0, 150)) + '</div>' : '');
-      return '<div style="padding:12px;border:1px solid #30363d;border-radius:8px;margin-bottom:8px;background:#161b22;cursor:pointer" onclick="openCronSession(\'' + esc(j.id) + '\')">' +
+      return '<div style="padding:12px;border:1px solid #30363d;border-radius:8px;margin-bottom:8px;background:#161b22;cursor:pointer" onclick="openCronSession(\'' + escJs(j.id) + '\')">' +
         '<div style="font-size:14px;color:#f0f6fc;font-weight:500">' + (j.prompt ? esc(j.prompt) : '<span style="color:#6e7681">(no prompt — click to set)</span>') + '</div>' +
         '<div style="font-size:12px;color:#a5d6ff;margin-top:4px">' + esc(j.schedule) + '</div>' +
         '<div style="font-size:12px;color:#8b949e;margin-top:4px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
@@ -3178,9 +3079,9 @@ function renderCronPanel() {
         result +
         '<div style="display:flex;gap:6px;margin-top:8px" onclick="event.stopPropagation()">' +
         (j.paused
-          ? '<button onclick="cronResume(\'' + esc(j.id) + '\')" style="padding:3px 10px;border-radius:4px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:11px">resume</button>'
-          : '<button onclick="cronPause(\'' + esc(j.id) + '\')" style="padding:3px 10px;border-radius:4px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:11px">pause</button>') +
-        '<button onclick="cronDelete(\'' + esc(j.id) + '\')" style="padding:3px 10px;border-radius:4px;border:1px solid #da3633;color:#da3633;background:transparent;cursor:pointer;font-size:11px">delete</button>' +
+          ? '<button onclick="cronResume(\'' + escJs(j.id) + '\')" style="padding:3px 10px;border-radius:4px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:11px">resume</button>'
+          : '<button onclick="cronPause(\'' + escJs(j.id) + '\')" style="padding:3px 10px;border-radius:4px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:11px">pause</button>') +
+        '<button onclick="cronDelete(\'' + escJs(j.id) + '\')" style="padding:3px 10px;border-radius:4px;border:1px solid #da3633;color:#da3633;background:transparent;cursor:pointer;font-size:11px">delete</button>' +
         '</div></div>';
     }).join('');
   }
@@ -3295,6 +3196,16 @@ wsm.connect();
 initMobile();
 initSwipeDelete();
 initSwipeBack();
+(function(){
+  const ov=document.createElement('div');ov.className='lightbox-overlay';
+  ov.setAttribute('role','dialog');ov.setAttribute('aria-modal','true');ov.setAttribute('aria-label','Image preview');
+  ov.innerHTML='<img alt="">';document.body.appendChild(ov);
+  function close(){ov.classList.remove('active')}
+  ov.addEventListener('click',close);
+  ov.querySelector('img').addEventListener('click',function(e){e.stopPropagation()});
+  window.openLightbox=function(src){ov.querySelector('img').src=src;ov.classList.add('active')};
+  document.addEventListener('keydown',function(e){if(e.key==='Escape'&&ov.classList.contains('active'))close()});
+})();
 </script>
 </body>
 </html>

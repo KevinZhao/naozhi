@@ -19,7 +19,7 @@ func TestHandleAPISessionEvents_MissingKey(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/events", nil)
 	w := httptest.NewRecorder()
-	srv.handleAPISessionEvents(w, req)
+	srv.sessionH.handleEvents(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
@@ -34,7 +34,7 @@ func TestHandleAPISessionEvents_SessionNotFound(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/events?key=no-such-key", nil)
 	w := httptest.NewRecorder()
-	srv.handleAPISessionEvents(w, req)
+	srv.sessionH.handleEvents(w, req)
 
 	if w.Code != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", w.Code)
@@ -54,7 +54,7 @@ func TestHandleAPISend_MissingKeyJSON(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleAPISend(w, req)
+	srv.sendH.handleSend(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
@@ -72,7 +72,7 @@ func TestHandleAPISend_MissingTextAndFiles(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleAPISend(w, req)
+	srv.sendH.handleSend(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
@@ -89,7 +89,7 @@ func TestHandleAPISend_InvalidJSON(t *testing.T) {
 		strings.NewReader("{bad json"))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleAPISend(w, req)
+	srv.sendH.handleSend(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
@@ -104,7 +104,7 @@ func TestHandleAPISend_UnauthorizedNoToken(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleAPISend(w, req)
+	srv.mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", w.Code)
@@ -120,7 +120,7 @@ func TestHandleAPISend_UnauthorizedWrongToken(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer wrong")
 	w := httptest.NewRecorder()
-	srv.handleAPISend(w, req)
+	srv.mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", w.Code)
@@ -136,7 +136,7 @@ func TestHandleAPISend_AcceptedWithValidToken(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
-	srv.handleAPISend(w, req)
+	srv.mux.ServeHTTP(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Errorf("status = %d, want 202", w.Code)
@@ -161,7 +161,7 @@ func TestHandleAPISend_AcceptedNoAuth(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleAPISend(w, req)
+	srv.sendH.handleSend(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Errorf("status = %d, want 202", w.Code)
@@ -181,7 +181,7 @@ func TestHandleAPISend_InterruptWhenBusy(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleAPISend(w, req)
+	srv.sendH.handleSend(w, req)
 
 	// With interrupt-on-busy, the API accepts immediately and interrupts
 	// the running session; the goroutine will timeout waiting for the guard.
@@ -204,7 +204,7 @@ func TestHandleAPISend_ResponseIsJSON(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send", body)
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleAPISend(w, req)
+	srv.sendH.handleSend(w, req)
 
 	ct := w.Header().Get("Content-Type")
 	if !strings.HasPrefix(ct, "application/json") {
@@ -224,10 +224,11 @@ func TestHandleAPISessions_StatsIncludeAgentsAndWorkspace(t *testing.T) {
 		Workspace: "/test/workspace",
 	})
 	srv := New(":0", router, nil, agents, nil, nil, "claude", ServerOptions{})
+	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.handleAPISessions(w, req)
+	srv.sessionH.handleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -281,6 +282,7 @@ func TestHandleAPISend_WorkspaceOverride(t *testing.T) {
 		Workspace: "/default/workspace",
 	})
 	srv := New(":0", router, nil, nil, nil, nil, "claude", ServerOptions{})
+	srv.registerDashboard()
 
 	key := "dashboard:direct:test-session:general"
 	body := `{"key":"` + key + `","text":"hi","workspace":"` + tmpDir + `"}`
@@ -288,7 +290,7 @@ func TestHandleAPISend_WorkspaceOverride(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleAPISend(w, req)
+	srv.sendH.handleSend(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", w.Code)
@@ -307,6 +309,7 @@ func TestHandleAPISend_WorkspaceInvalidDir(t *testing.T) {
 		Workspace: "/default/workspace",
 	})
 	srv := New(":0", router, nil, nil, nil, nil, "claude", ServerOptions{})
+	srv.registerDashboard()
 
 	key := "dashboard:direct:test-session:general"
 	body := `{"key":"` + key + `","text":"hi","workspace":"/nonexistent/path/xyz"}`
@@ -314,7 +317,7 @@ func TestHandleAPISend_WorkspaceInvalidDir(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleAPISend(w, req)
+	srv.sendH.handleSend(w, req)
 
 	// Invalid workspace should be rejected with 403
 	if w.Code != http.StatusForbidden {
@@ -362,7 +365,7 @@ func TestHandleAPISessions_NodeAggregation(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.handleAPISessions(w, req)
+	srv.sessionH.handleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)

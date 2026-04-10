@@ -2,10 +2,7 @@ package server
 
 import (
 	"context"
-	"crypto/hmac"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -16,11 +13,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"golang.org/x/sync/singleflight"
-	"golang.org/x/time/rate"
-
 	"github.com/naozhi/naozhi/internal/cron"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -29,12 +22,7 @@ import (
 	"github.com/naozhi/naozhi/internal/transcribe"
 )
 
-// shutdownTimeout is the maximum time to wait for HTTP server shutdown.
-// NOTE: session.shutdownTimeout is defined independently with the same value for session shutdown.
-const (
-	defaultDedupCapacity = 10000
-	shutdownTimeout      = 30 * time.Second
-)
+const defaultDedupCapacity = 10000
 
 // Server is the HTTP entry point for Naozhi.
 type Server struct {
@@ -48,38 +36,37 @@ type Server struct {
 	agents            map[string]session.AgentOpts
 	agentCommands     map[string]string
 	scheduler         *cron.Scheduler
-	backendTag        string            // e.g., "cc" or "kiro", appended to replies
-	dashboardToken    string            // optional bearer token for dashboard API
-	cookieSecret      []byte            // random HMAC key for cookie values (regenerated on restart)
-	loginLimiters     loginLimiterStore // per-IP rate limiters, bounded with TTL eviction
-	hub               *Hub              // WebSocket hub
+	backendTag        string // e.g., "cc" or "kiro", appended to replies
+	dashboardToken    string // optional bearer token for dashboard API
+	hub               *Hub   // WebSocket hub
 	nodes             map[string]node.Conn
 	reverseNodeServer *node.ReverseServer
 	nodesMu           sync.RWMutex
 	claudeDir         string // path to ~/.claude for session discovery
 	projectMgr        *project.Manager
-	workspaceID       string // local workspace identity
 	workspaceName     string
-	allowedRoot       string // /cd is restricted to paths under this directory
-	transcriber       transcribe.Service
+	allowedRoot       string             // /cd is restricted to paths under this directory (used by Hub)
 	nodeCache         *node.CacheManager // background-cached remote node data
 	discoveryCache    *discoveryCache    // background-cached local discovery results
 
-	// Recent/history sessions cache (30s TTL to avoid repeated filesystem scans).
-	// recent = last 24h, history = 1-7 days.
-	recentCache     []discovery.RecentSession
-	historyCache    []discovery.RecentSession
-	recentCacheTime time.Time
-	recentCacheMu   sync.Mutex
-	recentFlight    singleflight.Group
+	// Extracted handler groups
+	auth        *AuthHandlers
+	cronH       *CronHandlers
+	transcribeH *TranscribeHandler
+	nodeAccess  *nodeAccessor
+	discoveryH  *DiscoveryHandlers
+	projectH    *ProjectHandlers
+	sessionH    *SessionHandlers
+	healthH     *HealthHandler
+	sendH       *SendHandler
+
+	// Watchdog kill counters — incremented atomically, exposed via /health and /api/sessions.
+	watchdogNoOutputKills atomic.Int64
+	watchdogTotalKills    atomic.Int64
 
 	// Watchdog configuration stored for user-facing timeout error messages.
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
-
-	// Watchdog kill counters — incremented atomically, exposed via /health.
-	watchdogNoOutputKills atomic.Int64
-	watchdogTotalKills    atomic.Int64
 
 	// knownNodes holds all configured node IDs → display names, including
 	// reverse nodes that may currently be disconnected. Never mutated after startup.
@@ -111,64 +98,6 @@ func generateCookieSecret() []byte {
 		panic("crypto/rand unavailable: " + err.Error())
 	}
 	return b
-}
-
-// limiterEntry wraps a rate limiter with a last-seen timestamp for TTL eviction.
-type limiterEntry struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
-}
-
-// loginLimiterStore is a bounded, TTL-evicting store for per-IP rate limiters.
-// A mutex-protected map is used in place of sync.Map for precise size control.
-type loginLimiterStore struct {
-	mu      sync.Mutex
-	entries map[string]*limiterEntry
-}
-
-// loginLimiterFor returns a per-IP rate limiter (5 attempts per minute).
-// When the map is at capacity, entries not seen in the last 10 minutes are
-// evicted before inserting a new one; legitimate IPs keep their limiter state.
-const maxLoginLimiters = 10000
-
-func (s *Server) loginLimiterFor(ip string) *rate.Limiter {
-	s.loginLimiters.mu.Lock()
-	defer s.loginLimiters.mu.Unlock()
-
-	if e, ok := s.loginLimiters.entries[ip]; ok {
-		e.lastSeen = time.Now()
-		return e.limiter
-	}
-
-	// Evict stale entries before inserting a new one when the map is full.
-	if len(s.loginLimiters.entries) >= maxLoginLimiters {
-		cutoff := time.Now().Add(-10 * time.Minute)
-		for k, e := range s.loginLimiters.entries {
-			if e.lastSeen.Before(cutoff) {
-				delete(s.loginLimiters.entries, k)
-			}
-		}
-	}
-
-	limiter := rate.NewLimiter(rate.Every(12*time.Second), 5)
-	// Hard cap: if eviction didn't free space, return an unsaved limiter.
-	if len(s.loginLimiters.entries) >= maxLoginLimiters {
-		return limiter
-	}
-	s.loginLimiters.entries[ip] = &limiterEntry{
-		limiter:  limiter,
-		lastSeen: time.Now(),
-	}
-	return limiter
-}
-
-// cookieMAC returns an HMAC-SHA256 of the dashboard token, used as the cookie
-// value instead of the raw token. This way a leaked cookie cannot be reused as
-// a Bearer token. The HMAC key is random per process, so cookies invalidate on restart.
-func (s *Server) cookieMAC() string {
-	mac := hmac.New(sha256.New, s.cookieSecret)
-	mac.Write([]byte(s.dashboardToken))
-	return hex.EncodeToString(mac.Sum(nil))
 }
 
 // New creates a new Server.
@@ -206,6 +135,8 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		knownNodes[id] = nc.DisplayName()
 	}
 
+	cookieSecret := generateCookieSecret()
+
 	s := &Server{
 		addr:            addr,
 		mux:             http.NewServeMux(),
@@ -219,29 +150,35 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		scheduler:       scheduler,
 		backendTag:      tag,
 		claudeDir:       claudeDir,
-		workspaceID:     opts.WorkspaceID,
 		workspaceName:   opts.WorkspaceName,
 		allowedRoot:     opts.AllowedRoot,
 		noOutputTimeout: opts.NoOutputTimeout,
 		totalTimeout:    opts.TotalTimeout,
 		dashboardToken:  opts.DashboardToken,
-		cookieSecret:    generateCookieSecret(),
-		loginLimiters:   loginLimiterStore{entries: make(map[string]*limiterEntry)},
 		projectMgr:      opts.ProjectManager,
-		transcriber:     opts.Transcriber,
 		nodes:           nodes,
 		knownNodes:      knownNodes,
+
+		// Extracted handler groups
+		auth: &AuthHandlers{
+			dashboardToken: opts.DashboardToken,
+			cookieSecret:   cookieSecret,
+			loginLimiters:  loginLimiterStore{entries: make(map[string]*limiterEntry)},
+		},
+		cronH: &CronHandlers{
+			scheduler:   scheduler,
+			allowedRoot: opts.AllowedRoot,
+		},
+		transcribeH: &TranscribeHandler{
+			transcriber: opts.Transcriber,
+		},
 	}
+
+	s.nodeAccess = newNodeAccessor(&s.nodesMu, s.nodes, s.knownNodes)
 
 	s.nodeCache = node.NewCacheManager(
 		func() map[string]node.Conn {
-			s.nodesMu.RLock()
-			defer s.nodesMu.RUnlock()
-			cp := make(map[string]node.Conn, len(s.nodes))
-			for k, v := range s.nodes {
-				cp[k] = v
-			}
-			return cp
+			return s.nodeAccess.NodesSnapshot()
 		},
 		func() {
 			if s.hub != nil {
@@ -251,6 +188,73 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 	)
 
 	s.discoveryCache = newDiscoveryCache(claudeDir, s.router.ManagedExcludeSets, opts.ProjectManager)
+
+	// Wire extracted handler groups that depend on nodeAccess/nodeCache
+	s.discoveryH = &DiscoveryHandlers{
+		discoveryCache: s.discoveryCache,
+		nodeAccess:     s.nodeAccess,
+		nodeCache:      s.nodeCache,
+		claudeDir:      claudeDir,
+		router:         router,
+		allowedRoot:    opts.AllowedRoot,
+		defaultAgent:   agents["general"],
+		broadcast: func() {
+			if s.hub != nil {
+				s.hub.BroadcastSessionsUpdate()
+			}
+		},
+	}
+	s.projectH = &ProjectHandlers{
+		projectMgr: opts.ProjectManager,
+		router:     router,
+		nodeAccess: s.nodeAccess,
+		nodeCache:  s.nodeCache,
+		ctxFunc: func() context.Context {
+			if s.hub != nil {
+				return s.hub.ctx
+			}
+			return context.Background()
+		},
+	}
+	s.sessionH = &SessionHandlers{
+		router:        router,
+		projectMgr:    opts.ProjectManager,
+		claudeDir:     claudeDir,
+		allowedRoot:   opts.AllowedRoot,
+		agents:        agents,
+		nodeAccess:    s.nodeAccess,
+		nodeCache:     s.nodeCache,
+		startedAt:     s.startedAt,
+		backendTag:    tag,
+		workspaceID:   opts.WorkspaceID,
+		workspaceName: opts.WorkspaceName,
+		watchdogNoOut: &s.watchdogNoOutputKills,
+		watchdogTotal: &s.watchdogTotalKills,
+	}
+	platNames := make(map[string]struct{}, len(platforms))
+	for name := range platforms {
+		platNames[name] = struct{}{}
+	}
+	s.healthH = &HealthHandler{
+		router:          router,
+		auth:            s.auth,
+		startedAt:       s.startedAt,
+		workspaceID:     opts.WorkspaceID,
+		workspaceName:   opts.WorkspaceName,
+		noOutputTimeout: opts.NoOutputTimeout,
+		totalTimeout:    opts.TotalTimeout,
+		watchdogNoOut:   &s.watchdogNoOutputKills,
+		watchdogTotal:   &s.watchdogTotalKills,
+		nodeAccess:      s.nodeAccess,
+		platforms:       platNames,
+		hubDropped: func() int64 {
+			if s.hub == nil {
+				return 0
+			}
+			return s.hub.DroppedMessages()
+		},
+	}
+	// sendH is wired after registerDashboard creates hub
 
 	if opts.ReverseNodeServer != nil {
 		s.reverseNodeServer = opts.ReverseNodeServer
@@ -276,18 +280,6 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 	}
 
 	return s
-}
-
-// lookupNode returns the node.Conn for a remote node, writing a 400 error if not found.
-func (s *Server) lookupNode(w http.ResponseWriter, nodeID string) (node.Conn, bool) {
-	s.nodesMu.RLock()
-	nc, ok := s.nodes[nodeID]
-	s.nodesMu.RUnlock()
-	if !ok {
-		http.Error(w, "unknown node", http.StatusBadRequest)
-		return nil, false
-	}
-	return nc, true
 }
 
 // Start registers routes and begins serving.
@@ -330,7 +322,7 @@ func (s *Server) Start(ctx context.Context) error {
 		}
 	}
 
-	s.mux.HandleFunc("GET /health", s.handleHealth)
+	s.mux.HandleFunc("GET /health", s.healthH.handleHealth)
 	s.registerDashboard()
 	s.nodeCache.StartLoop(ctx)
 	s.discoveryCache.startLoop(ctx)
@@ -362,7 +354,7 @@ func (s *Server) Start(ctx context.Context) error {
 			}
 		}
 
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), session.ShutdownTimeout)
 		defer cancel()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			slog.Error("server shutdown error", "err", err)

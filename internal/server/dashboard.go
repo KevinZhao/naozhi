@@ -32,18 +32,22 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 func (s *Server) registerDashboard() {
 	s.hub = NewHub(HubOptions{
-		Router:      s.router,
-		Agents:      s.agents,
-		AgentCmds:   s.agentCommands,
-		DashToken:   s.dashboardToken,
-		CookieMAC:   s.cookieMAC(),
-		Guard:       s.sessionGuard,
-		Nodes:       s.nodes,
-		NodesMu:     &s.nodesMu,
-		ProjectMgr:  s.projectMgr,
-		AllowedRoot: s.allowedRoot,
+		Router:        s.router,
+		Agents:        s.agents,
+		AgentCmds:     s.agentCommands,
+		DashToken:     s.dashboardToken,
+		CookieMAC:     s.auth.cookieMAC(),
+		Guard:         s.sessionGuard,
+		Nodes:         s.nodes,
+		NodesMu:       &s.nodesMu,
+		ProjectMgr:    s.projectMgr,
+		AllowedRoot:   s.allowedRoot,
+		WSAuthLimiter: s.auth.loginLimiterFor,
 	})
 	s.hub.SetScheduler(s.scheduler)
+
+	// Wire sendH now that hub exists
+	s.sendH = &SendHandler{nodeAccess: s.nodeAccess, hub: s.hub}
 
 	// Push session list changes to WS clients
 	s.router.SetOnChange(func() { s.hub.BroadcastSessionsUpdate() })
@@ -55,26 +59,31 @@ func (s *Server) registerDashboard() {
 		})
 	}
 
-	s.mux.HandleFunc("GET /api/sessions", s.handleAPISessions)
-	s.mux.HandleFunc("GET /api/sessions/events", s.handleAPISessionEvents)
-	s.mux.HandleFunc("POST /api/sessions/send", s.handleAPISend)
-	s.mux.HandleFunc("DELETE /api/sessions", s.handleAPISessionDelete)
-	s.mux.HandleFunc("GET /api/discovered", s.handleAPIDiscovered)
-	s.mux.HandleFunc("GET /api/discovered/preview", s.handleAPIDiscoveredPreview)
-	s.mux.HandleFunc("POST /api/discovered/takeover", s.handleAPITakeover)
-	s.mux.HandleFunc("GET /api/projects", s.handleAPIProjects)
-	s.mux.HandleFunc("GET /api/projects/config", s.handleAPIProjectConfigGet)
-	s.mux.HandleFunc("PUT /api/projects/config", s.handleAPIProjectConfigPut)
-	s.mux.HandleFunc("POST /api/projects/planner/restart", s.handleAPIProjectPlannerRestart)
-	s.mux.HandleFunc("POST /api/transcribe", s.handleAPITranscribe)
-	s.mux.HandleFunc("GET /api/cron", s.handleAPICronList)
-	s.mux.HandleFunc("POST /api/cron", s.handleAPICronCreate)
-	s.mux.HandleFunc("DELETE /api/cron", s.handleAPICronDelete)
-	s.mux.HandleFunc("POST /api/cron/pause", s.handleAPICronPause)
-	s.mux.HandleFunc("POST /api/cron/resume", s.handleAPICronResume)
-	s.mux.HandleFunc("GET /api/cron/preview", s.handleAPICronPreview)
-	s.mux.HandleFunc("POST /api/auth/login", s.handleAuthLogin)
-	s.mux.HandleFunc("POST /api/auth/logout", s.handleAuthLogout)
+	// Authenticated API routes
+	auth := s.auth.requireAuth
+	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.handleList))
+	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.handleEvents))
+	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
+	s.mux.HandleFunc("DELETE /api/sessions", auth(s.sessionH.handleDelete))
+	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.handleResume))
+	s.mux.HandleFunc("GET /api/discovered", auth(s.discoveryH.handleList))
+	s.mux.HandleFunc("GET /api/discovered/preview", auth(s.discoveryH.handlePreview))
+	s.mux.HandleFunc("POST /api/discovered/takeover", auth(s.discoveryH.handleTakeover))
+	s.mux.HandleFunc("GET /api/projects", auth(s.projectH.handleList))
+	s.mux.HandleFunc("GET /api/projects/config", auth(s.projectH.handleConfigGet))
+	s.mux.HandleFunc("PUT /api/projects/config", auth(s.projectH.handleConfigPut))
+	s.mux.HandleFunc("POST /api/projects/planner/restart", auth(s.projectH.handlePlannerRestart))
+	s.mux.HandleFunc("POST /api/transcribe", auth(s.transcribeH.handleTranscribe))
+	s.mux.HandleFunc("GET /api/cron", auth(s.cronH.handleList))
+	s.mux.HandleFunc("POST /api/cron", auth(s.cronH.handleCreate))
+	s.mux.HandleFunc("DELETE /api/cron", auth(s.cronH.handleDelete))
+	s.mux.HandleFunc("POST /api/cron/pause", auth(s.cronH.handlePause))
+	s.mux.HandleFunc("POST /api/cron/resume", auth(s.cronH.handleResume))
+	s.mux.HandleFunc("GET /api/cron/preview", auth(s.cronH.handlePreview))
+	s.mux.HandleFunc("POST /api/auth/logout", auth(s.auth.handleLogout))
+
+	// Unauthenticated routes (login, static assets, WebSocket with own auth)
+	s.mux.HandleFunc("POST /api/auth/login", s.auth.handleLogin)
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
 	s.mux.HandleFunc("GET /manifest.json", s.handleManifest)
 	s.mux.HandleFunc("GET /sw.js", s.handleSW)
@@ -85,8 +94,8 @@ func (s *Server) registerDashboard() {
 }
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
-	if s.dashboardToken != "" && !s.isAuthenticated(r) {
-		s.serveLoginPage(w)
+	if s.dashboardToken != "" && !s.auth.isAuthenticated(r) {
+		s.auth.serveLoginPage(w)
 		return
 	}
 	data, err := dashboardHTML.ReadFile("static/dashboard.html")

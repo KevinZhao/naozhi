@@ -5,15 +5,19 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/transcribe"
 )
 
-// handleAPITranscribe accepts an audio file upload and returns transcribed text.
+// TranscribeHandler handles the audio transcription API endpoint.
+type TranscribeHandler struct {
+	transcriber transcribe.Service
+}
+
+// handleTranscribe accepts an audio file upload and returns transcribed text.
 // POST /api/transcribe  (multipart/form-data, field "audio")
-func (s *Server) handleAPITranscribe(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
-	if s.transcriber == nil {
+func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Request) {
+	if h.transcriber == nil {
 		http.Error(w, "transcription not configured", http.StatusNotImplemented)
 		return
 	}
@@ -61,7 +65,7 @@ func (s *Server) handleAPITranscribe(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "file content is not audio", http.StatusBadRequest)
 		return
 	}
-	text, err := s.transcriber.Transcribe(r.Context(), data, mimeType)
+	text, err := h.transcriber.Transcribe(r.Context(), data, mimeType)
 	if err != nil {
 		slog.Warn("transcribe failed", "err", err, "mime", mimeType, "size", len(data))
 		http.Error(w, "transcription failed", http.StatusInternalServerError)

@@ -13,9 +13,10 @@ import (
 	"github.com/naozhi/naozhi/internal/discovery"
 )
 
-// shutdownTimeout is the maximum time to wait for running sessions during shutdown.
-// NOTE: server.shutdownTimeout is defined independently with the same value for HTTP shutdown.
-const shutdownTimeout = 30 * time.Second
+// ShutdownTimeout is the maximum time to wait for graceful shutdown
+// of running sessions (Router) and HTTP connections (Server).
+// Exported so both session and server packages use a single value.
+const ShutdownTimeout = 30 * time.Second
 
 // ErrMaxProcs is returned when all process slots are occupied.
 var ErrMaxProcs = errors.New("max concurrent processes reached")
@@ -551,7 +552,6 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		workspace:        workspace,
 		cliName:          r.wrapper.CLIName,
 		cliVersion:       r.wrapper.CLIVersion,
-		sendMu:           sync.Mutex{},
 		persistedHistory: oldHistory,
 		prevSessionIDs:   prevIDs,
 		Exempt:           opts.Exempt,
@@ -651,7 +651,7 @@ func (r *Router) evictOldest() bool {
 	slog.Info("evicting oldest session", "key", oldest.Key, "idle", time.Since(oldest.GetLastActive()))
 	oldest.deathReason.Store("evicted")
 	// Keep oldest.process non-nil so concurrent holders don't get nil-panic.
-	// After Close(), Alive() returns false; count was already decremented above.
+	// After Close(), Alive() returns false; countActive() below recounts correctly.
 	proc := oldest.process
 	r.mu.Unlock()
 	proc.Close()
@@ -677,6 +677,12 @@ func (r *Router) Reset(key string) {
 	proc := s.process
 	r.indexDel(key)
 	delete(r.sessions, key)
+	if wasActive {
+		r.activeCount--
+		if r.activeCount < 0 {
+			r.activeCount = 0
+		}
+	}
 	r.storeDirty = true
 	r.storeGen++
 	r.mu.Unlock()
@@ -688,14 +694,6 @@ func (r *Router) Reset(key string) {
 		r.shutdownCond.Broadcast()
 	}
 
-	if wasActive {
-		r.mu.Lock()
-		r.activeCount--
-		if r.activeCount < 0 {
-			r.activeCount = 0
-		}
-		r.mu.Unlock()
-	}
 	slog.Info("session reset", "key", key)
 	r.notifyChange()
 }
@@ -714,6 +712,12 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		proc := s.process
 		r.indexDel(key)
 		delete(r.sessions, key)
+		if wasActive {
+			r.activeCount--
+			if r.activeCount < 0 {
+				r.activeCount = 0
+			}
+		}
 		r.storeDirty = true
 		r.storeGen++
 
@@ -724,12 +728,6 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 				r.shutdownCond.Broadcast()
 			}
 			r.mu.Lock()
-		}
-		if wasActive {
-			r.activeCount--
-			if r.activeCount < 0 {
-				r.activeCount = 0
-			}
 		}
 	}
 
@@ -761,6 +759,12 @@ func (r *Router) Remove(key string) bool {
 	proc := s.process
 	r.indexDel(key)
 	delete(r.sessions, key)
+	if wasActive {
+		r.activeCount--
+		if r.activeCount < 0 {
+			r.activeCount = 0
+		}
+	}
 	r.storeDirty = true
 	r.storeGen++
 	r.mu.Unlock()
@@ -772,14 +776,6 @@ func (r *Router) Remove(key string) bool {
 		r.shutdownCond.Broadcast()
 	}
 
-	if wasActive {
-		r.mu.Lock()
-		r.activeCount--
-		if r.activeCount < 0 {
-			r.activeCount = 0
-		}
-		r.mu.Unlock()
-	}
 	slog.Info("session removed", "key", key)
 	r.notifyChange()
 	return true
@@ -940,10 +936,21 @@ func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 
 // Shutdown gracefully closes all sessions, waiting for running ones to complete.
 func (r *Router) Shutdown() {
-	// Wait for startup history-loading goroutines to finish first.
-	r.historyWg.Wait()
+	// Wait for startup history-loading goroutines to finish first,
+	// but don't block forever if filesystem I/O is hung (e.g. NFS).
+	historyDone := make(chan struct{})
+	go func() {
+		// Goroutine intentionally left running on timeout; cleaned up on process exit.
+		r.historyWg.Wait()
+		close(historyDone)
+	}()
+	select {
+	case <-historyDone:
+	case <-time.After(15 * time.Second):
+		slog.Warn("shutdown: history loading timed out after 15s, proceeding")
+	}
 	// Deadline timer: broadcast to unblock Wait() when timeout expires
-	timer := time.AfterFunc(shutdownTimeout, func() {
+	timer := time.AfterFunc(ShutdownTimeout, func() {
 		if r.shutdownCond != nil {
 			r.shutdownCond.Broadcast()
 		}
@@ -952,8 +959,8 @@ func (r *Router) Shutdown() {
 
 	r.mu.Lock()
 
-	// Wait for running sessions to complete (up to shutdownTimeout)
-	deadline := time.Now().Add(shutdownTimeout)
+	// Wait for running sessions to complete (up to ShutdownTimeout)
+	deadline := time.Now().Add(ShutdownTimeout)
 	for {
 		running := false
 		for _, s := range r.sessions {
@@ -1108,7 +1115,7 @@ func (r *Router) ActiveSessionIDs() map[string]bool {
 // DiscoveryExcludeIDs returns session IDs to exclude from filesystem discovery.
 // Only sessions with a running process are excluded to prevent duplicates.
 // Suspended sessions (no process) are allowed through so their underlying
-// session files appear as resumable items in the dashboard sidebar.
+// session files appear in the history popover (deduplicated against the workspace).
 func (r *Router) DiscoveryExcludeIDs() map[string]bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -1142,11 +1149,20 @@ func (r *Router) trackSessionID(id string) {
 
 // RegisterForResume creates a suspended session entry so that the next
 // GetOrCreate call for this key will resume the given session ID.
-func (r *Router) RegisterForResume(key, sessionID, workspace string) {
+// If another session already targets the same sessionID, the existing key
+// is returned (deduplication) and no new entry is created.
+func (r *Router) RegisterForResume(key, sessionID, workspace string) (effectiveKey string) {
 	r.mu.Lock()
 	if _, exists := r.sessions[key]; exists {
 		r.mu.Unlock()
-		return // already exists
+		return key // already exists with this exact key
+	}
+	// Deduplicate: if another session already targets this sessionID, reuse it.
+	for k, s := range r.sessions {
+		if s.getSessionID() == sessionID {
+			r.mu.Unlock()
+			return k
+		}
 	}
 	s := &ManagedSession{
 		Key:       key,
@@ -1162,6 +1178,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace string) {
 	r.mu.Unlock()
 
 	r.notifyChange()
+	return key
 }
 
 // ManagedExcludeSets returns PIDs, session IDs, and CWDs of all managed sessions

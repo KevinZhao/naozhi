@@ -105,6 +105,8 @@ ExecStart="%s" --config "%s"
 WorkingDirectory=%s
 Restart=always
 RestartSec=5
+StartLimitInterval=60s
+StartLimitBurst=5
 User=%s
 Environment=HOME=%s
 

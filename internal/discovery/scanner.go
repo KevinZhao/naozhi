@@ -267,6 +267,22 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 	}
 	summaryMap := LookupSummaries(claudeDir, candidateWorkspaces)
 
+	// Batch-extract last prompts in parallel (up to 4 concurrent I/O operations)
+	// to avoid serial 512KB reads per discovered session.
+	prompts := make([]string, len(candidates))
+	var promptWg sync.WaitGroup
+	promptSem := make(chan struct{}, 4)
+	for i := range candidates {
+		promptWg.Add(1)
+		go func(idx int) {
+			defer promptWg.Done()
+			promptSem <- struct{}{}
+			defer func() { <-promptSem }()
+			prompts[idx] = extractLastPrompt(claudeDir, candidates[idx].sf.CWD, candidates[idx].sf.SessionID)
+		}(i)
+	}
+	promptWg.Wait()
+
 	nowMs := time.Now().UnixMilli()
 	var result []DiscoveredSession
 	for i := range candidates {
@@ -287,7 +303,7 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 			Entrypoint:    c.sf.Entrypoint,
 			CLIName:       detectCLIName(c.sf.PID),
 			Summary:       summaryMap[c.sf.SessionID],
-			LastPrompt:    extractLastPrompt(claudeDir, c.sf.CWD, c.sf.SessionID),
+			LastPrompt:    prompts[i],
 			ProcStartTime: pst,
 		})
 	}

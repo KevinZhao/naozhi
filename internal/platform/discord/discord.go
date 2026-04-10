@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -253,8 +254,21 @@ func isImageContentType(ct string) bool {
 
 var discordHTTPClient = &http.Client{Timeout: 15 * time.Second}
 
-func downloadURL(url string) ([]byte, string, error) {
-	resp, err := discordHTTPClient.Get(url)
+// discordCDNHosts is the set of trusted Discord CDN domains for attachment downloads.
+var discordCDNHosts = map[string]bool{
+	"cdn.discordapp.com":   true,
+	"media.discordapp.net": true,
+}
+
+func downloadURL(rawURL string) ([]byte, string, error) {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid attachment URL: %w", err)
+	}
+	if !discordCDNHosts[u.Hostname()] {
+		return nil, "", fmt.Errorf("attachment URL host not in whitelist: %s", u.Hostname())
+	}
+	resp, err := discordHTTPClient.Get(rawURL)
 	if err != nil {
 		return nil, "", err
 	}

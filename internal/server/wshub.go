@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -12,10 +13,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/time/rate"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
-	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -64,41 +65,47 @@ type Hub struct {
 	ctx         context.Context // cancelled on Shutdown to stop in-flight sends
 	cancel      context.CancelFunc
 
+	// Per-IP rate limiter for WebSocket auth attempts — prevents token brute-force
+	// via repeated connect/auth/disconnect cycles that bypass HTTP login rate limits.
+	wsAuthLimiter func(ip string) *rate.Limiter
+
 	debounceMu    sync.Mutex
 	debounceTimer *time.Timer
 }
 
 // HubOptions holds configuration for a Hub.
 type HubOptions struct {
-	Router      *session.Router
-	Agents      map[string]session.AgentOpts
-	AgentCmds   map[string]string
-	DashToken   string
-	CookieMAC   string
-	Guard       *session.Guard
-	Nodes       map[string]node.Conn
-	NodesMu     *sync.RWMutex
-	ProjectMgr  *project.Manager
-	AllowedRoot string
+	Router        *session.Router
+	Agents        map[string]session.AgentOpts
+	AgentCmds     map[string]string
+	DashToken     string
+	CookieMAC     string
+	Guard         *session.Guard
+	Nodes         map[string]node.Conn
+	NodesMu       *sync.RWMutex
+	ProjectMgr    *project.Manager
+	AllowedRoot   string
+	WSAuthLimiter func(ip string) *rate.Limiter
 }
 
 // NewHub creates a new WebSocket hub.
 func NewHub(opts HubOptions) *Hub {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Hub{
-		clients:     make(map[*wsClient]struct{}),
-		router:      opts.Router,
-		agents:      opts.Agents,
-		agentCmds:   opts.AgentCmds,
-		dashToken:   opts.DashToken,
-		cookieMAC:   opts.CookieMAC,
-		guard:       opts.Guard,
-		nodes:       opts.Nodes,
-		nodesMu:     opts.NodesMu,
-		projectMgr:  opts.ProjectMgr,
-		allowedRoot: opts.AllowedRoot,
-		ctx:         ctx,
-		cancel:      cancel,
+		clients:       make(map[*wsClient]struct{}),
+		router:        opts.Router,
+		agents:        opts.Agents,
+		agentCmds:     opts.AgentCmds,
+		dashToken:     opts.DashToken,
+		cookieMAC:     opts.CookieMAC,
+		guard:         opts.Guard,
+		nodes:         opts.Nodes,
+		nodesMu:       opts.NodesMu,
+		projectMgr:    opts.ProjectMgr,
+		allowedRoot:   opts.AllowedRoot,
+		wsAuthLimiter: opts.WSAuthLimiter,
+		ctx:           ctx,
+		cancel:        cancel,
 	}
 }
 
@@ -113,10 +120,15 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.SetReadLimit(512 * 1024) // 512 KB max message size
+	ip := r.RemoteAddr
+	if host, _, err := net.SplitHostPort(ip); err == nil {
+		ip = host
+	}
 	c := &wsClient{
 		conn:          conn,
 		send:          make(chan []byte, 256),
 		hub:           h,
+		remoteIP:      ip,
 		subscriptions: make(map[string]func()),
 		done:          make(chan struct{}),
 	}
@@ -163,6 +175,11 @@ func (h *Hub) unregister(c *wsClient) {
 }
 
 func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
+	// Per-IP rate limit to prevent brute-force via rapid connect/auth/disconnect cycles.
+	if h.wsAuthLimiter != nil && !h.wsAuthLimiter(c.remoteIP).Allow() {
+		c.SendJSON(node.ServerMsg{Type: "auth_fail", Error: "too many attempts"})
+		return
+	}
 	if h.dashToken == "" || subtle.ConstantTimeCompare([]byte(msg.Token), []byte(h.dashToken)) == 1 {
 		c.authenticated.Store(true)
 		c.SendJSON(node.ServerMsg{Type: "auth_ok"})
@@ -268,81 +285,20 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 
-	// Handle /clear from dashboard — CLI built-in doesn't work in stream-json
-	trimmed := strings.TrimSpace(msg.Text)
-	if trimmed == "/clear" || trimmed == "/new" {
-		h.router.Reset(key)
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "accepted", Key: key})
-		h.BroadcastSessionsUpdate()
+	capturedID, capturedKey := msg.ID, key
+	_, err := h.sessionSend(sendParams{
+		Key:       key,
+		Text:      msg.Text,
+		Workspace: msg.Workspace,
+		ResumeID:  msg.ResumeID,
+	}, func(errMsg string) {
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Error: errMsg})
+	})
+	if err != nil {
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: err.Error()})
 		return
 	}
-
-	// Set workspace override for new dashboard sessions
-	var validatedWorkspace string
-	if msg.Workspace != "" {
-		wsPath, err := validateWorkspace(msg.Workspace, h.allowedRoot)
-		if err != nil {
-			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: err.Error()})
-			return
-		}
-		validatedWorkspace = wsPath
-		if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
-			chatKey := key[:idx]
-			h.router.SetWorkspace(chatKey, wsPath)
-		}
-	}
-
-	// Register for resume: pre-create a suspended entry so GetOrCreate
-	// will --resume the specified session ID on the first message.
-	if msg.ResumeID != "" && discovery.IsValidSessionID(msg.ResumeID) {
-		ws := validatedWorkspace
-		if ws == "" {
-			ws = h.router.DefaultWorkspace()
-		}
-		h.router.RegisterForResume(key, msg.ResumeID, ws)
-	}
-
-	acquired := h.guard.TryAcquire(key)
-	needInterrupt := !acquired
-
-	if needInterrupt {
-		// Session is running — interrupt; the goroutine below will wait for the guard
-		h.router.InterruptSession(key)
-		slog.Info("ws send: interrupted running session for new message", "key", key)
-	}
-
 	c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "accepted", Key: key})
-
-	capturedText := msg.Text
-	go func() {
-		if needInterrupt {
-			// Wait for the interrupted turn to release the guard
-			if !h.guard.AcquireTimeout(h.ctx, key, 5*time.Second) {
-				slog.Error("ws send: interrupt timed out", "key", key)
-				c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: key, Error: "session busy, interrupt timed out"})
-				return
-			}
-		}
-		defer h.guard.Release(key)
-		defer h.router.NotifyIdle() // wake Shutdown wait loop
-
-		ctx := h.ctx
-		opts := buildSessionOpts(key, h.agents, h.projectMgr)
-		sess, _, err := h.router.GetOrCreate(ctx, key, opts)
-		if err != nil {
-			slog.Error("ws send: get session", "key", key, "err", err)
-			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: key, Error: err.Error()})
-			return
-		}
-
-		if _, err := h.sendWithBroadcast(ctx, key, sess, capturedText, nil, nil); err != nil {
-			slog.Error("ws send: send", "key", key, "err", err)
-		} else if h.scheduler != nil && strings.HasPrefix(key, "cron:") {
-			if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, "cron:"), capturedText); err != nil {
-				slog.Warn("ws send: set cron prompt", "key", key, "err", err)
-			}
-		}
-	}()
 }
 
 func (h *Hub) handleInterrupt(c *wsClient, msg node.ClientMsg) {

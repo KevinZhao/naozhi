@@ -13,8 +13,10 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -71,15 +73,97 @@ func (s *Server) sendWithBroadcast(
 	return sess.Send(ctx, text, images, onEvent)
 }
 
-// trySaveCronPrompt checks if key is a cron session (cron:{id}) and, if the
-// corresponding cron job has no prompt yet, saves text as the prompt and
-// unpauses the job. Called after the first successful dashboard send.
-func (s *Server) trySaveCronPrompt(key, text string) {
-	if s.scheduler == nil || !strings.HasPrefix(key, "cron:") {
-		return
+// sendParams holds parsed input for a session send request.
+// Both HTTP and WebSocket callers construct this after their own input parsing.
+type sendParams struct {
+	Key       string
+	Text      string
+	Images    []cli.ImageData
+	Workspace string
+	ResumeID  string
+}
+
+// sessionSend validates and dispatches a send request.
+// Returns (true, nil) if the request was a /clear or /new reset.
+// Returns (false, err) if validation failed (workspace forbidden, etc.).
+// Returns (false, nil) if accepted — a background goroutine handles the send.
+//
+// onAsyncError is called from the goroutine if GetOrCreate or guard timeout
+// fails; it may be nil (HTTP path has no back-channel after 202).
+func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, error) {
+	key := p.Key
+
+	// Handle /clear and /new — CLI built-in doesn't work in stream-json
+	trimmed := strings.TrimSpace(p.Text)
+	if trimmed == "/clear" || trimmed == "/new" {
+		h.router.Reset(key)
+		h.BroadcastSessionsUpdate()
+		return true, nil
 	}
-	cronID := strings.TrimPrefix(key, "cron:")
-	if err := s.scheduler.SetJobPrompt(cronID, text); err != nil {
-		slog.Warn("set cron prompt", "key", key, "err", err)
+
+	// Workspace validation
+	var validatedWorkspace string
+	if p.Workspace != "" {
+		wsPath, err := validateWorkspace(p.Workspace, h.allowedRoot)
+		if err != nil {
+			return false, err
+		}
+		validatedWorkspace = wsPath
+		if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
+			h.router.SetWorkspace(key[:idx], wsPath)
+		}
 	}
+
+	// Resume registration
+	if p.ResumeID != "" && discovery.IsValidSessionID(p.ResumeID) {
+		ws := validatedWorkspace
+		if ws == "" {
+			ws = h.router.DefaultWorkspace()
+		}
+		h.router.RegisterForResume(key, p.ResumeID, ws)
+	}
+
+	// Guard acquire/interrupt
+	acquired := h.guard.TryAcquire(key)
+	needInterrupt := !acquired
+	if needInterrupt {
+		h.router.InterruptSession(key)
+		slog.Info("send: interrupted running session", "key", key)
+	}
+
+	// Background send
+	text, images := p.Text, p.Images
+	go func() {
+		if needInterrupt {
+			if !h.guard.AcquireTimeout(h.ctx, key, 5*time.Second) {
+				slog.Error("send: interrupt timed out", "key", key)
+				if onAsyncError != nil {
+					onAsyncError("session busy, interrupt timed out")
+				}
+				return
+			}
+		}
+		defer h.guard.Release(key)
+		defer h.router.NotifyIdle()
+
+		opts := buildSessionOpts(key, h.agents, h.projectMgr)
+		sess, _, err := h.router.GetOrCreate(h.ctx, key, opts)
+		if err != nil {
+			slog.Error("send: get session", "key", key, "err", err)
+			if onAsyncError != nil {
+				onAsyncError(err.Error())
+			}
+			return
+		}
+
+		if _, err := h.sendWithBroadcast(h.ctx, key, sess, text, images, nil); err != nil {
+			slog.Error("send: send", "key", key, "err", err)
+		} else if h.scheduler != nil && strings.HasPrefix(key, "cron:") {
+			if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, "cron:"), text); err != nil {
+				slog.Warn("send: set cron prompt", "key", key, "err", err)
+			}
+		}
+	}()
+
+	return false, nil
 }

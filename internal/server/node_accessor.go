@@ -1,0 +1,69 @@
+package server
+
+import (
+	"net/http"
+	"sync"
+
+	"github.com/naozhi/naozhi/internal/node"
+)
+
+// NodeAccessor abstracts thread-safe access to the nodes map,
+// decoupling handler groups from the raw nodesMu/nodes/knownNodes fields.
+type NodeAccessor interface {
+	HasNodes() bool
+	NodesSnapshot() map[string]node.Conn
+	GetNode(id string) (node.Conn, bool)
+	// LookupNode returns the node or writes an HTTP 400 error.
+	LookupNode(w http.ResponseWriter, id string) (node.Conn, bool)
+	KnownNodes() map[string]string // id → displayName, includes disconnected
+}
+
+// nodeAccessor implements NodeAccessor using Server's shared mutex and maps.
+type nodeAccessor struct {
+	mu         *sync.RWMutex
+	nodes      map[string]node.Conn
+	knownNodes map[string]string
+}
+
+func newNodeAccessor(mu *sync.RWMutex, nodes map[string]node.Conn, knownNodes map[string]string) *nodeAccessor {
+	return &nodeAccessor{mu: mu, nodes: nodes, knownNodes: knownNodes}
+}
+
+func (a *nodeAccessor) HasNodes() bool {
+	a.mu.RLock()
+	n := len(a.nodes)
+	a.mu.RUnlock()
+	return n > 0
+}
+
+func (a *nodeAccessor) NodesSnapshot() map[string]node.Conn {
+	a.mu.RLock()
+	cp := make(map[string]node.Conn, len(a.nodes))
+	for k, v := range a.nodes {
+		cp[k] = v
+	}
+	a.mu.RUnlock()
+	return cp
+}
+
+func (a *nodeAccessor) GetNode(id string) (node.Conn, bool) {
+	a.mu.RLock()
+	nc, ok := a.nodes[id]
+	a.mu.RUnlock()
+	return nc, ok
+}
+
+func (a *nodeAccessor) LookupNode(w http.ResponseWriter, id string) (node.Conn, bool) {
+	nc, ok := a.GetNode(id)
+	if !ok {
+		http.Error(w, "unknown node", http.StatusBadRequest)
+		return nil, false
+	}
+	return nc, true
+}
+
+// KnownNodes returns all configured node IDs and display names, including disconnected nodes.
+// The returned map is immutable after Server construction — safe to read without locking.
+func (a *nodeAccessor) KnownNodes() map[string]string {
+	return a.knownNodes
+}

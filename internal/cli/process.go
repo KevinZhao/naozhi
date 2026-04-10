@@ -116,6 +116,7 @@ func newProcess(ctx context.Context, cliPath string, args []string, cwd string, 
 	go func() {
 		defer close(stderrDone)
 		scanner := bufio.NewScanner(stderrPipe)
+		scanner.Buffer(make([]byte, 4*1024), 64*1024)
 		for scanner.Scan() {
 			slog.Debug("cli stderr", "line", scanner.Text())
 		}
@@ -286,12 +287,7 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 				return nil, fmt.Errorf("process exited during send")
 			}
 
-			if !noOutputTimer.Stop() {
-				select {
-				case <-noOutputTimer.C:
-				default:
-				}
-			}
+			noOutputTimer.Stop()
 			noOutputTimer.Reset(noOutputDur)
 
 			// Capture session ID from first init event; skip logging subsequent inits
@@ -366,8 +362,11 @@ func (p *Process) IsRunning() bool {
 // Uses negative PID to signal the entire process group (created via Setpgid).
 // The process stays alive and can accept new messages after the interrupt.
 func (p *Process) Interrupt() {
+	if !p.Alive() {
+		return
+	}
 	if p.cmd.Process != nil && p.cmd.Process.Pid > 0 {
-		if err := syscall.Kill(-p.cmd.Process.Pid, syscall.SIGINT); err != nil {
+		if err := syscall.Kill(-p.cmd.Process.Pid, syscall.SIGINT); err != nil && !errors.Is(err, syscall.ESRCH) {
 			slog.Warn("interrupt signal failed", "pid", p.cmd.Process.Pid, "err", err)
 		}
 	}
@@ -389,7 +388,11 @@ func (p *Process) Kill() {
 	})
 	// Wait for stderr goroutine to exit (pipe closes after SIGKILL).
 	if p.stderrDone != nil {
-		<-p.stderrDone
+		select {
+		case <-p.stderrDone:
+		case <-time.After(3 * time.Second):
+			slog.Warn("stderr goroutine did not exit after kill", "pid", p.PID())
+		}
 	}
 	p.waitOnce.Do(func() { _ = p.cmd.Wait() })
 }
@@ -622,9 +625,7 @@ func (p *Process) PID() int {
 // InjectHistory pre-populates the event log with historical entries.
 // Must be called before any Send() to avoid interleaving with live events.
 func (p *Process) InjectHistory(entries []EventEntry) {
-	for _, e := range entries {
-		p.eventLog.Append(e)
-	}
+	p.eventLog.AppendBatch(entries)
 }
 
 // EventEntries returns a copy of all event log entries.

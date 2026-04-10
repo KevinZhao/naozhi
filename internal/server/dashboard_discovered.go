@@ -11,25 +11,32 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-func (s *Server) handleAPIDiscovered(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
+// DiscoveryHandlers groups the discovered-session and takeover API endpoints.
+type DiscoveryHandlers struct {
+	discoveryCache *discoveryCache
+	nodeAccess     NodeAccessor
+	nodeCache      *node.CacheManager
+	claudeDir      string
+	router         *session.Router
+	allowedRoot    string
+	defaultAgent   session.AgentOpts // agents["general"]
+	broadcast      func()            // hub.BroadcastSessionsUpdate
+}
 
-	sessions := s.discoveryCache.snapshot()
+// GET /api/discovered — list discovered external CLI sessions.
+func (h *DiscoveryHandlers) handleList(w http.ResponseWriter, r *http.Request) {
+	sessions := h.discoveryCache.snapshot()
 
 	// Merge remote discovered sessions
-	s.nodesMu.RLock()
-	hasDiscoveredNodes := len(s.nodes) > 0
-	s.nodesMu.RUnlock()
-	if hasDiscoveredNodes {
+	if h.nodeAccess.HasNodes() {
 		for i := range sessions {
 			sessions[i].Node = "local"
 		}
-		cachedDiscovered := s.nodeCache.Discovered()
+		cachedDiscovered := h.nodeCache.Discovered()
 		allDiscovered := make([]any, 0, len(sessions))
 		for _, d := range sessions {
 			allDiscovered = append(allDiscovered, d)
@@ -52,10 +59,8 @@ func (s *Server) handleAPIDiscovered(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleAPIDiscoveredPreview(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
+// GET /api/discovered/preview — preview a discovered session's history.
+func (h *DiscoveryHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 	sessionID := r.URL.Query().Get("session_id")
 	nodeID := r.URL.Query().Get("node")
 	if sessionID == "" || !discovery.IsValidSessionID(sessionID) {
@@ -66,9 +71,7 @@ func (s *Server) handleAPIDiscoveredPreview(w http.ResponseWriter, r *http.Reque
 
 	// Remote node
 	if nodeID != "" {
-		s.nodesMu.RLock()
-		nc := s.nodes[nodeID]
-		s.nodesMu.RUnlock()
+		nc, _ := h.nodeAccess.GetNode(nodeID)
 		if nc != nil {
 			entries, err := nc.FetchDiscoveredPreview(r.Context(), sessionID)
 			if err != nil {
@@ -85,13 +88,13 @@ func (s *Server) handleAPIDiscoveredPreview(w http.ResponseWriter, r *http.Reque
 	}
 
 	// Local
-	if s.claudeDir == "" {
+	if h.claudeDir == "" {
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, []any{})
 		return
 	}
 
-	entries, err := discovery.LoadHistory(s.claudeDir, sessionID)
+	entries, err := discovery.LoadHistory(h.claudeDir, sessionID)
 	if err != nil {
 		slog.Warn("preview load history", "session_id", sessionID, "err", err)
 		entries = nil
@@ -104,11 +107,8 @@ func (s *Server) handleAPIDiscoveredPreview(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, entries)
 }
 
-func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
-
+// POST /api/discovered/takeover — kill an external CLI process and resume its session.
+func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		PID           int    `json:"pid"`
 		SessionID     string `json:"session_id"`
@@ -128,7 +128,7 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 
 	// Remote node proxy
 	if req.Node != "" && req.Node != "local" {
-		nc, ok := s.lookupNode(w, req.Node)
+		nc, ok := h.nodeAccess.LookupNode(w, req.Node)
 		if !ok {
 			return
 		}
@@ -144,9 +144,9 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// C2 fix: verify PID is in the discovered list before killing
-	if s.claudeDir != "" {
-		excludePIDs, excludeSIDs, excludeCWDs := s.router.ManagedExcludeSets()
-		discovered, _ := discovery.Scan(s.claudeDir, excludePIDs, excludeSIDs, excludeCWDs)
+	if h.claudeDir != "" {
+		excludePIDs, excludeSIDs, excludeCWDs := h.router.ManagedExcludeSets()
+		discovered, _ := discovery.Scan(h.claudeDir, excludePIDs, excludeSIDs, excludeCWDs)
 		pidFound := false
 		for _, d := range discovered {
 			if d.PID == req.PID && d.SessionID == req.SessionID {
@@ -166,8 +166,8 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 		cwd = "unknown"
 	}
 	// Validate CWD against allowedRoot to prevent sessions running in arbitrary directories.
-	if cwd != "unknown" && s.allowedRoot != "" {
-		if _, err := validateWorkspace(cwd, s.allowedRoot); err != nil {
+	if cwd != "unknown" && h.allowedRoot != "" {
+		if _, err := validateWorkspace(cwd, h.allowedRoot); err != nil {
 			http.Error(w, "cwd outside allowed root", http.StatusBadRequest)
 			return
 		}
@@ -195,29 +195,33 @@ func (s *Server) handleAPITakeover(w http.ResponseWriter, r *http.Request) {
 	sessionID := req.SessionID
 	reqCWD := req.CWD
 	procStartTime := req.ProcStartTime
-	agentOpts := s.agents["general"]
+	agentOpts := h.defaultAgent
+
+	broadcast := h.broadcast
+	claudeDir := h.claudeDir
+	router := h.router
 
 	go func() {
 		// Wait, SIGKILL, and remove stale session files.
-		discovery.WaitAndCleanup(pid, procStartTime, s.claudeDir, reqCWD, sessionID)
+		discovery.WaitAndCleanup(pid, procStartTime, claudeDir, reqCWD, sessionID)
 
 		// Takeover via router — use Background context so the spawned process
 		// outlives the HTTP request.
-		_, err := s.router.Takeover(context.Background(), key, sessionID, cwd, session.AgentOpts{
+		_, err := router.Takeover(context.Background(), key, sessionID, cwd, session.AgentOpts{
 			Model:     agentOpts.Model,
 			ExtraArgs: agentOpts.ExtraArgs,
 		})
 		if err != nil {
 			slog.Error("session takeover failed", "key", key, "session_id", sessionID, "pid", pid, "err", err)
-			if s.hub != nil {
-				s.hub.BroadcastSessionsUpdate()
+			if broadcast != nil {
+				broadcast()
 			}
 			return
 		}
 
 		slog.Info("session takeover", "key", key, "session_id", sessionID, "pid", pid, "cwd", cwd)
-		if s.hub != nil {
-			s.hub.BroadcastSessionsUpdate()
+		if broadcast != nil {
+			broadcast()
 		}
 	}()
 

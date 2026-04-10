@@ -23,6 +23,7 @@ type wsClient struct {
 	conn          *websocket.Conn
 	send          chan []byte
 	hub           *Hub
+	remoteIP      string // for rate limiting
 	authenticated atomic.Bool
 	authAttempts  atomic.Int32
 	subscriptions map[string]func() // key -> unsubscribe function

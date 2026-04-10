@@ -10,57 +10,74 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/session"
 )
 
-func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
-	active, total := s.router.Stats()
+// HealthHandler serves the /health endpoint with system status information.
+type HealthHandler struct {
+	router          *session.Router
+	auth            *AuthHandlers
+	startedAt       time.Time
+	workspaceID     string
+	workspaceName   string
+	noOutputTimeout time.Duration
+	totalTimeout    time.Duration
+	watchdogNoOut   *atomic.Int64
+	watchdogTotal   *atomic.Int64
+	nodeAccess      NodeAccessor
+	platforms       map[string]struct{} // platform names (read-only after init)
+	hubDropped      func() int64        // hub.DroppedMessages
+}
+
+func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
+	active, total := h.router.Stats()
 	resp := map[string]interface{}{
 		"status":   "ok",
-		"uptime":   time.Since(s.startedAt).Round(time.Second).String(),
+		"uptime":   time.Since(h.startedAt).Round(time.Second).String(),
 		"sessions": map[string]int{"active": active, "total": total},
 	}
 	// Extended system info only for authenticated requests
-	if s.isAuthenticated(r) {
-		resp["workspace_id"] = s.workspaceID
-		resp["workspace_name"] = s.workspaceName
+	if h.auth.isAuthenticated(r) {
+		resp["workspace_id"] = h.workspaceID
+		resp["workspace_name"] = h.workspaceName
 		resp["system"] = systemInfo()
 		resp["goroutines"] = runtime.NumGoroutine()
 		resp["watchdog"] = map[string]any{
-			"no_output_kills":   s.watchdogNoOutputKills.Load(),
-			"total_kills":       s.watchdogTotalKills.Load(),
-			"no_output_timeout": s.noOutputTimeout.String(),
-			"total_timeout":     s.totalTimeout.String(),
+			"no_output_kills":   h.watchdogNoOut.Load(),
+			"total_kills":       h.watchdogTotal.Load(),
+			"no_output_timeout": h.noOutputTimeout.String(),
+			"total_timeout":     h.totalTimeout.String(),
 		}
-		if s.hub != nil {
-			resp["ws_dropped"] = s.hub.DroppedMessages()
+		if h.hubDropped != nil {
+			resp["ws_dropped"] = h.hubDropped()
 		}
 
 		// Check CLI binary availability
 		cliOK := true
-		if _, err := os.Stat(s.router.CLIPath()); err != nil {
+		if _, err := os.Stat(h.router.CLIPath()); err != nil {
 			cliOK = false
 		}
 		resp["cli_available"] = cliOK
 
 		// Node connection status
-		if len(s.knownNodes) > 0 {
-			nodeStatus := make(map[string]string, len(s.knownNodes))
-			s.nodesMu.RLock()
-			for id := range s.knownNodes {
-				if nc, ok := s.nodes[id]; ok {
+		if kn := h.nodeAccess.KnownNodes(); len(kn) > 0 {
+			nodeStatus := make(map[string]string, len(kn))
+			for id := range kn {
+				if nc, ok := h.nodeAccess.GetNode(id); ok {
 					nodeStatus[id] = nc.Status()
 				} else {
 					nodeStatus[id] = "disconnected"
 				}
 			}
-			s.nodesMu.RUnlock()
 			resp["nodes"] = nodeStatus
 		}
 
 		// Platform status
-		platStatus := make(map[string]string, len(s.platforms))
-		for name := range s.platforms {
+		platStatus := make(map[string]string, len(h.platforms))
+		for name := range h.platforms {
 			platStatus[name] = "registered"
 		}
 		resp["platforms"] = platStatus

@@ -8,18 +8,21 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 )
 
+// CronHandlers groups the cron job management API endpoints.
+type CronHandlers struct {
+	scheduler   *cron.Scheduler
+	allowedRoot string
+}
+
 // GET /api/cron — list all cron jobs (unscoped, admin view).
-func (s *Server) handleAPICronList(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
-	if s.scheduler == nil {
+func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
+	if h.scheduler == nil {
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, map[string]any{"jobs": []any{}})
 		return
 	}
 
-	jobs := s.scheduler.ListAllJobs()
+	jobs := h.scheduler.ListAllJobs()
 	type cronJobView struct {
 		ID             string `json:"id"`
 		Schedule       string `json:"schedule"`
@@ -57,7 +60,7 @@ func (s *Server) handleAPICronList(w http.ResponseWriter, r *http.Request) {
 		if !j.LastRunAt.IsZero() {
 			v.LastRunAt = j.LastRunAt.UnixMilli()
 		}
-		if next := s.scheduler.NextRunByID(j.ID); !next.IsZero() {
+		if next := h.scheduler.NextRunByID(j.ID); !next.IsZero() {
 			v.NextRun = next.UnixMilli()
 		}
 		views = append(views, v)
@@ -68,11 +71,8 @@ func (s *Server) handleAPICronList(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/cron — create a new cron job from dashboard.
-func (s *Server) handleAPICronCreate(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
-	if s.scheduler == nil {
+func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
+	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
 	}
@@ -96,7 +96,7 @@ func (s *Server) handleAPICronCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Validate work_dir if provided: must be under allowedRoot.
 	if req.WorkDir != "" {
-		validated, err := validateWorkspace(req.WorkDir, s.allowedRoot)
+		validated, err := validateWorkspace(req.WorkDir, h.allowedRoot)
 		if err != nil {
 			http.Error(w, "work_dir: "+err.Error(), http.StatusBadRequest)
 			return
@@ -115,7 +115,7 @@ func (s *Server) handleAPICronCreate(w http.ResponseWriter, r *http.Request) {
 		NotifyChatID:   req.NotifyChatID,
 		Paused:         req.Prompt == "", // auto-pause when no prompt
 	}
-	if err := s.scheduler.AddJob(job); err != nil {
+	if err := h.scheduler.AddJob(job); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -126,11 +126,8 @@ func (s *Server) handleAPICronCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // DELETE /api/cron?id=xxx — delete a cron job by exact ID.
-func (s *Server) handleAPICronDelete(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
-	if s.scheduler == nil {
+func (h *CronHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
+	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
 	}
@@ -141,7 +138,7 @@ func (s *Server) handleAPICronDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	j, err := s.scheduler.DeleteJobByID(id)
+	j, err := h.scheduler.DeleteJobByID(id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
@@ -153,11 +150,8 @@ func (s *Server) handleAPICronDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/cron/pause — pause a cron job by exact ID.
-func (s *Server) handleAPICronPause(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
-	if s.scheduler == nil {
+func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
+	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
 	}
@@ -171,7 +165,7 @@ func (s *Server) handleAPICronPause(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.scheduler.PauseJobByID(req.ID); err != nil {
+	if _, err := h.scheduler.PauseJobByID(req.ID); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -182,11 +176,8 @@ func (s *Server) handleAPICronPause(w http.ResponseWriter, r *http.Request) {
 }
 
 // POST /api/cron/resume — resume a paused cron job by exact ID.
-func (s *Server) handleAPICronResume(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
-	if s.scheduler == nil {
+func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
+	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
 	}
@@ -200,7 +191,7 @@ func (s *Server) handleAPICronResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := s.scheduler.ResumeJobByID(req.ID); err != nil {
+	if _, err := h.scheduler.ResumeJobByID(req.ID); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -211,10 +202,7 @@ func (s *Server) handleAPICronResume(w http.ResponseWriter, r *http.Request) {
 }
 
 // GET /api/cron/preview?schedule=... — validate schedule and return next run time.
-func (s *Server) handleAPICronPreview(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
+func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 	schedule := r.URL.Query().Get("schedule")
 	if schedule == "" {
 		http.Error(w, "schedule is required", http.StatusBadRequest)

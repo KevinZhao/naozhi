@@ -62,20 +62,26 @@ func (m *mockPlatform) allReplies() []platform.OutgoingMessage {
 func newTestServer(p *mockPlatform) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
-	return New(":0", router, platforms, nil, nil, nil, "claude", ServerOptions{})
+	s := New(":0", router, platforms, nil, nil, nil, "claude", ServerOptions{})
+	s.registerDashboard()
+	return s
 }
 
 func newTestServerWithScheduler(p *mockPlatform) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
 	sched := cron.NewScheduler(cron.SchedulerConfig{})
-	return New(":0", router, platforms, nil, nil, sched, "claude", ServerOptions{})
+	s := New(":0", router, platforms, nil, nil, sched, "claude", ServerOptions{})
+	s.registerDashboard()
+	return s
 }
 
 func newTestServerWithToken(p *mockPlatform, token string) *Server {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": p}
-	return New(":0", router, platforms, nil, nil, nil, "claude", ServerOptions{DashboardToken: token})
+	s := New(":0", router, platforms, nil, nil, nil, "claude", ServerOptions{DashboardToken: token})
+	s.registerDashboard()
+	return s
 }
 
 func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
@@ -111,7 +117,7 @@ func TestHandleHealth_ReturnsJSONContentType(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
-	srv.handleHealth(w, req)
+	srv.healthH.handleHealth(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -127,7 +133,7 @@ func TestHandleHealth_StatusOkAndUptime(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
-	srv.handleHealth(w, req)
+	srv.healthH.handleHealth(w, req)
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {
@@ -147,7 +153,7 @@ func TestHandleHealth_SessionsField(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
 	w := httptest.NewRecorder()
-	srv.handleHealth(w, req)
+	srv.healthH.handleHealth(w, req)
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(w.Body).Decode(&result); err != nil {

@@ -9,26 +9,34 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
-	if s.projectMgr == nil {
+// ProjectHandlers groups the project management API endpoints.
+type ProjectHandlers struct {
+	projectMgr *project.Manager
+	router     *session.Router
+	nodeAccess NodeAccessor
+	nodeCache  *node.CacheManager
+	ctxFunc    func() context.Context // returns hub.ctx or Background
+}
+
+// GET /api/projects — list all projects (local + remote).
+func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
+	if h.projectMgr == nil {
 		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, []any{})
 		return
 	}
 
-	projects := s.projectMgr.All()
+	projects := h.projectMgr.All()
 	result := make([]map[string]any, 0, len(projects))
 	for _, p := range projects {
 		plannerKey := p.PlannerSessionKey()
 		plannerState := "none"
-		if sess := s.router.GetSession(plannerKey); sess != nil {
+		if sess := h.router.GetSession(plannerKey); sess != nil {
 			snap := sess.Snapshot()
 			plannerState = snap.State
 		}
@@ -37,22 +45,19 @@ func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 			"name":          p.Name,
 			"path":          p.Path,
 			"planner_state": plannerState,
-			"planner_model": s.projectMgr.EffectivePlannerModel(p),
+			"planner_model": h.projectMgr.EffectivePlannerModel(p),
 			"config":        p.Config,
 		})
 	}
 
 	// Merge remote projects
-	s.nodesMu.RLock()
-	hasNodes := len(s.nodes) > 0
-	s.nodesMu.RUnlock()
-	if hasNodes {
+	if h.nodeAccess.HasNodes() {
 		allProjects := make([]any, 0, len(result))
 		for _, r := range result {
 			r["node"] = "local"
 			allProjects = append(allProjects, r)
 		}
-		cachedProjects := s.nodeCache.Projects()
+		cachedProjects := h.nodeCache.Projects()
 		for _, items := range cachedProjects {
 			for _, item := range items {
 				allProjects = append(allProjects, item)
@@ -71,17 +76,15 @@ func (s *Server) handleAPIProjects(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleAPIProjectConfigGet(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
+// GET /api/projects/config?name=...
+func (h *ProjectHandlers) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
-	if name == "" || s.projectMgr == nil {
+	if name == "" || h.projectMgr == nil {
 		http.Error(w, "name is required", http.StatusBadRequest)
 		return
 	}
 
-	p := s.projectMgr.Get(name)
+	p := h.projectMgr.Get(name)
 	if p == nil {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
@@ -93,10 +96,8 @@ func (s *Server) handleAPIProjectConfigGet(w http.ResponseWriter, r *http.Reques
 	}
 }
 
-func (s *Server) handleAPIProjectConfigPut(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
+// PUT /api/projects/config?name=...
+func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if name == "" {
 		http.Error(w, "name is required", http.StatusBadRequest)
@@ -106,9 +107,9 @@ func (s *Server) handleAPIProjectConfigPut(w http.ResponseWriter, r *http.Reques
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 
 	// Remote node proxy
-	node := r.URL.Query().Get("node")
-	if node != "" && node != "local" {
-		nc, ok := s.lookupNode(w, node)
+	nodeID := r.URL.Query().Get("node")
+	if nodeID != "" && nodeID != "local" {
+		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
 		if !ok {
 			return
 		}
@@ -118,7 +119,7 @@ func (s *Server) handleAPIProjectConfigPut(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		if err := nc.ProxyUpdateConfig(r.Context(), name, body); err != nil {
-			slog.Warn("proxy update config failed", "node", node, "err", err)
+			slog.Warn("proxy update config failed", "node", nodeID, "err", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
@@ -127,7 +128,7 @@ func (s *Server) handleAPIProjectConfigPut(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if s.projectMgr == nil {
+	if h.projectMgr == nil {
 		http.Error(w, "projects not configured", http.StatusBadRequest)
 		return
 	}
@@ -138,7 +139,7 @@ func (s *Server) handleAPIProjectConfigPut(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	if err := s.projectMgr.UpdateConfig(name, cfg); err != nil {
+	if err := h.projectMgr.UpdateConfig(name, cfg); err != nil {
 		if errors.Is(err, project.ErrNotFound) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 		} else {
@@ -151,10 +152,8 @@ func (s *Server) handleAPIProjectConfigPut(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
-func (s *Server) handleAPIProjectPlannerRestart(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
+// POST /api/projects/planner/restart?name=...
+func (h *ProjectHandlers) handlePlannerRestart(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
 	if name == "" {
 		http.Error(w, "name is required", http.StatusBadRequest)
@@ -162,14 +161,14 @@ func (s *Server) handleAPIProjectPlannerRestart(w http.ResponseWriter, r *http.R
 	}
 
 	// Remote node proxy
-	node := r.URL.Query().Get("node")
-	if node != "" && node != "local" {
-		nc, ok := s.lookupNode(w, node)
+	nodeID := r.URL.Query().Get("node")
+	if nodeID != "" && nodeID != "local" {
+		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
 		if !ok {
 			return
 		}
 		if err := nc.ProxyRestartPlanner(r.Context(), name); err != nil {
-			slog.Warn("proxy restart planner failed", "node", node, "err", err)
+			slog.Warn("proxy restart planner failed", "node", nodeID, "err", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
@@ -178,12 +177,12 @@ func (s *Server) handleAPIProjectPlannerRestart(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	if s.projectMgr == nil {
+	if h.projectMgr == nil {
 		http.Error(w, "projects not configured", http.StatusBadRequest)
 		return
 	}
 
-	p := s.projectMgr.Get(name)
+	p := h.projectMgr.Get(name)
 	if p == nil {
 		http.Error(w, "project not found", http.StatusNotFound)
 		return
@@ -192,21 +191,17 @@ func (s *Server) handleAPIProjectPlannerRestart(w http.ResponseWriter, r *http.R
 	// Reset and spawn a new planner atomically with current config
 	plannerKey := p.PlannerSessionKey()
 	opts := session.AgentOpts{
-		Model:     s.projectMgr.EffectivePlannerModel(p),
+		Model:     h.projectMgr.EffectivePlannerModel(p),
 		Workspace: p.Path,
 		Exempt:    true,
 	}
-	if prompt := s.projectMgr.EffectivePlannerPrompt(p); prompt != "" {
+	if prompt := h.projectMgr.EffectivePlannerPrompt(p); prompt != "" {
 		opts.ExtraArgs = []string{"--append-system-prompt", prompt}
 	}
 
-	ctx := context.Background()
-	if s.hub != nil {
-		ctx = s.hub.ctx
-	}
-	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(h.ctxFunc(), 30*time.Second)
 	defer cancel()
-	if _, err := s.router.ResetAndRecreate(ctx, plannerKey, opts); err != nil {
+	if _, err := h.router.ResetAndRecreate(ctx, plannerKey, opts); err != nil {
 		slog.Error("planner restart failed", "project", name, "err", err)
 		http.Error(w, "restart failed: "+err.Error(), http.StatusInternalServerError)
 		return

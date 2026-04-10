@@ -1,44 +1,114 @@
 package server
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
+	"time"
+
+	"golang.org/x/time/rate"
 )
+
+// AuthHandlers provides authentication middleware and login/logout endpoints.
+type AuthHandlers struct {
+	dashboardToken string
+	cookieSecret   []byte
+	loginLimiters  loginLimiterStore
+}
+
+// limiterEntry wraps a rate limiter with a last-seen timestamp for TTL eviction.
+type limiterEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+// loginLimiterStore is a bounded, TTL-evicting store for per-IP rate limiters.
+// A mutex-protected map is used in place of sync.Map for precise size control.
+type loginLimiterStore struct {
+	mu      sync.Mutex
+	entries map[string]*limiterEntry
+}
+
+const maxLoginLimiters = 10000
+
+// loginLimiterFor returns a per-IP rate limiter (5 attempts per minute).
+// When the map is at capacity, entries not seen in the last 10 minutes are
+// evicted before inserting a new one; legitimate IPs keep their limiter state.
+func (a *AuthHandlers) loginLimiterFor(ip string) *rate.Limiter {
+	a.loginLimiters.mu.Lock()
+	defer a.loginLimiters.mu.Unlock()
+
+	if e, ok := a.loginLimiters.entries[ip]; ok {
+		e.lastSeen = time.Now()
+		return e.limiter
+	}
+
+	// Evict stale entries before inserting a new one when the map is full.
+	if len(a.loginLimiters.entries) >= maxLoginLimiters {
+		cutoff := time.Now().Add(-10 * time.Minute)
+		for k, e := range a.loginLimiters.entries {
+			if e.lastSeen.Before(cutoff) {
+				delete(a.loginLimiters.entries, k)
+			}
+		}
+	}
+
+	limiter := rate.NewLimiter(rate.Every(12*time.Second), 5)
+	// Hard cap: if eviction didn't free space, return an unsaved limiter.
+	if len(a.loginLimiters.entries) >= maxLoginLimiters {
+		return limiter
+	}
+	a.loginLimiters.entries[ip] = &limiterEntry{limiter: limiter, lastSeen: time.Now()}
+	return limiter
+}
+
+// cookieMAC returns an HMAC-derived value used as the auth cookie value.
+// This prevents the raw dashboard token from appearing in cookies.
+func (a *AuthHandlers) cookieMAC() string {
+	mac := hmac.New(sha256.New, a.cookieSecret)
+	mac.Write([]byte(a.dashboardToken))
+	return hex.EncodeToString(mac.Sum(nil))
+}
 
 // isAuthenticated checks auth without writing an error response. Used by
 // endpoints that serve partial data to unauthenticated callers (e.g. /health).
-func (s *Server) isAuthenticated(r *http.Request) bool {
-	if s.dashboardToken == "" {
+func (a *AuthHandlers) isAuthenticated(r *http.Request) bool {
+	if a.dashboardToken == "" {
 		return true
 	}
 	// Bearer header
 	auth := r.Header.Get("Authorization")
 	token := strings.TrimPrefix(auth, "Bearer ")
-	if strings.HasPrefix(auth, "Bearer ") && subtle.ConstantTimeCompare([]byte(token), []byte(s.dashboardToken)) == 1 {
+	if strings.HasPrefix(auth, "Bearer ") && subtle.ConstantTimeCompare([]byte(token), []byte(a.dashboardToken)) == 1 {
 		return true
 	}
 	// Cookie fallback — value is HMAC-derived, not the raw token
 	if c, err := r.Cookie(authCookieName); err == nil {
-		expected := s.cookieMAC()
+		expected := a.cookieMAC()
 		return subtle.ConstantTimeCompare([]byte(c.Value), []byte(expected)) == 1
 	}
 	return false
 }
 
-// checkBearerAuth validates the dashboard API token. Returns true if authorized.
-func (s *Server) checkBearerAuth(w http.ResponseWriter, r *http.Request) bool {
-	if s.isAuthenticated(r) {
-		return true
+// requireAuth is an HTTP middleware that rejects unauthenticated requests.
+func (a *AuthHandlers) requireAuth(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !a.isAuthenticated(r) {
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		next(w, r)
 	}
-	http.Error(w, "unauthorized", http.StatusUnauthorized)
-	return false
 }
 
-func (s *Server) serveLoginPage(w http.ResponseWriter) {
+func (a *AuthHandlers) serveLoginPage(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -47,14 +117,14 @@ func (s *Server) serveLoginPage(w http.ResponseWriter) {
 	}
 }
 
-func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
+func (a *AuthHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Per-IP rate limiting to prevent single-attacker global lockout.
 	// Uses RemoteAddr only — X-Forwarded-For is attacker-controlled and trivially spoofed.
 	ip := r.RemoteAddr
 	if host, _, err := net.SplitHostPort(ip); err == nil {
 		ip = host
 	}
-	if !s.loginLimiterFor(ip).Allow() {
+	if !a.loginLimiterFor(ip).Allow() {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", "60")
 		w.WriteHeader(http.StatusTooManyRequests)
@@ -71,7 +141,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
-	if s.dashboardToken == "" || subtle.ConstantTimeCompare([]byte(req.Token), []byte(s.dashboardToken)) != 1 {
+	if a.dashboardToken == "" || subtle.ConstantTimeCompare([]byte(req.Token), []byte(a.dashboardToken)) != 1 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		if _, err := w.Write([]byte(`{"error":"invalid token"}`)); err != nil {
@@ -81,7 +151,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     authCookieName,
-		Value:    s.cookieMAC(), // HMAC-derived, not raw token
+		Value:    a.cookieMAC(), // HMAC-derived, not raw token
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
@@ -94,10 +164,7 @@ func (s *Server) handleAuthLogin(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleAuthLogout(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
+func (a *AuthHandlers) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     authCookieName,
 		Value:    "",

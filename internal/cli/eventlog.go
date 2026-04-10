@@ -114,6 +114,35 @@ func (l *EventLog) Append(e EventEntry) {
 	l.subMu.Unlock()
 }
 
+// AppendBatch adds multiple entries to the log, holding the lock once and
+// notifying subscribers once. Used by InjectHistory to avoid per-entry overhead.
+func (l *EventLog) AppendBatch(entries []EventEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	l.mu.Lock()
+	for _, e := range entries {
+		if e.Time == 0 {
+			e.Time = time.Now().UnixMilli()
+		}
+		l.entries[l.head] = e
+		l.head = (l.head + 1) % l.maxSize
+		if l.count < l.maxSize {
+			l.count++
+		}
+	}
+	l.mu.Unlock()
+
+	l.subMu.Lock()
+	for _, sub := range l.subscribers {
+		select {
+		case sub.ch <- struct{}{}:
+		default:
+		}
+	}
+	l.subMu.Unlock()
+}
+
 // Subscribe returns a notification channel and an unsubscribe function.
 // The channel receives a signal (non-blocking) whenever Append is called.
 func (l *EventLog) Subscribe() (<-chan struct{}, func()) {

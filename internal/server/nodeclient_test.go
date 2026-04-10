@@ -198,7 +198,7 @@ func TestHandleAPISessions_NoNodes(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.handleAPISessions(w, req)
+	srv.sessionH.handleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -230,7 +230,7 @@ func TestHandleAPISessions_WithRemoteNodes(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.handleAPISessions(w, req)
+	srv.sessionH.handleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -278,7 +278,7 @@ func TestHandleAPISessions_RemoteNodeError(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions", nil)
 	w := httptest.NewRecorder()
-	srv.handleAPISessions(w, req)
+	srv.sessionH.handleList(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (should not fail entire request)", w.Code)
@@ -307,13 +307,11 @@ func TestHandleAPISessionEvents_RemoteNode(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes = map[string]node.Conn{
-		"macbook": node.NewHTTPClient("macbook", remote.URL, "", "MacBook"),
-	}
+	srv.nodes["macbook"] = node.NewHTTPClient("macbook", remote.URL, "", "MacBook")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/events?key=test:d:u:general&node=macbook", nil)
 	w := httptest.NewRecorder()
-	srv.handleAPISessionEvents(w, req)
+	srv.sessionH.handleEvents(w, req)
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
@@ -334,7 +332,7 @@ func TestHandleAPISessionEvents_UnknownNode(t *testing.T) {
 
 	req := httptest.NewRequest(http.MethodGet, "/api/sessions/events?key=test:d:u:general&node=unknown", nil)
 	w := httptest.NewRecorder()
-	srv.handleAPISessionEvents(w, req)
+	srv.sessionH.handleEvents(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
@@ -360,16 +358,14 @@ func TestHandleAPISend_RemoteNode(t *testing.T) {
 	defer remote.Close()
 
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes = map[string]node.Conn{
-		"macbook": node.NewHTTPClient("macbook", remote.URL, "", "MacBook"),
-	}
+	srv.nodes["macbook"] = node.NewHTTPClient("macbook", remote.URL, "", "MacBook")
 
 	body := `{"key":"test:d:u:general","text":"hello","node":"macbook"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleAPISend(w, req)
+	srv.sendH.handleSend(w, req)
 
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want 202", w.Code)
@@ -391,14 +387,13 @@ func TestHandleAPISend_RemoteNode(t *testing.T) {
 
 func TestHandleAPISend_UnknownNode(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
-	srv.nodes = map[string]node.Conn{}
 
 	body := `{"key":"test:d:u:general","text":"hello","node":"unknown"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleAPISend(w, req)
+	srv.sendH.handleSend(w, req)
 
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
@@ -413,7 +408,7 @@ func TestHandleAPISend_LocalNodeExplicit(t *testing.T) {
 		strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
-	srv.handleAPISend(w, req)
+	srv.sendH.handleSend(w, req)
 
 	// Should use local path and return 202 (accepted)
 	if w.Code != http.StatusAccepted {

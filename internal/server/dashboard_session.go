@@ -1,31 +1,60 @@
 package server
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
+
+	"golang.org/x/sync/singleflight"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/session"
 )
 
-func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
-	snapshots := s.router.ListSessions()
+// SessionHandlers groups the session list, events, delete, and resume API endpoints.
+type SessionHandlers struct {
+	router      *session.Router
+	projectMgr  *project.Manager
+	claudeDir   string
+	allowedRoot string
+	agents      map[string]session.AgentOpts
+	nodeAccess  NodeAccessor
+	nodeCache   *node.CacheManager
 
-	// Filter out suspended sessions from the API response.
-	// They appear as resumable filesystem sessions via recent_sessions instead.
-	// Only sessions with a running process are kept in the managed list.
+	// Static status fields (immutable after construction)
+	startedAt     time.Time
+	backendTag    string
+	workspaceID   string
+	workspaceName string
+	watchdogNoOut *atomic.Int64
+	watchdogTotal *atomic.Int64
+
+	// History cache (30s TTL)
+	historyCache     []discovery.RecentSession
+	historyCacheTime time.Time
+	historyCacheMu   sync.Mutex
+	historyFlight    singleflight.Group
+}
+
+// GET /api/sessions
+func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
+	snapshots := h.router.ListSessions()
+
+	// Keep suspended sessions in the workspace sidebar for up to 24 hours.
+	cutoff24h := time.Now().Add(-24 * time.Hour).UnixMilli()
 	n := 0
 	for _, snap := range snapshots {
-		if snap.State == "suspended" {
+		if snap.State == "suspended" && snap.LastActive < cutoff24h {
 			continue
 		}
 		snapshots[n] = snap
@@ -34,15 +63,14 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 	snapshots = snapshots[:n]
 
 	// Fill project field from ProjectManager
-	if s.projectMgr != nil {
-		// Collect unique workspace paths for batch resolution (single lock acquisition)
+	if h.projectMgr != nil {
 		var workspaces []string
 		for i := range snapshots {
 			if !project.IsPlannerKey(snapshots[i].Key) && snapshots[i].Workspace != "" {
 				workspaces = append(workspaces, snapshots[i].Workspace)
 			}
 		}
-		wsMap := s.projectMgr.ResolveWorkspaces(workspaces)
+		wsMap := h.projectMgr.ResolveWorkspaces(workspaces)
 
 		for i := range snapshots {
 			if project.IsPlannerKey(snapshots[i].Key) {
@@ -58,14 +86,14 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Fill summary from sessions-index.json for managed sessions
-	if s.claudeDir != "" {
+	if h.claudeDir != "" {
 		sessionWorkspaces := make(map[string]string, len(snapshots))
 		for _, snap := range snapshots {
 			if snap.SessionID != "" && snap.Workspace != "" {
 				sessionWorkspaces[snap.SessionID] = snap.Workspace
 			}
 		}
-		summaryMap := discovery.LookupSummaries(s.claudeDir, sessionWorkspaces)
+		summaryMap := discovery.LookupSummaries(h.claudeDir, sessionWorkspaces)
 		for i := range snapshots {
 			if summary := summaryMap[snapshots[i].SessionID]; summary != "" {
 				snapshots[i].Summary = summary
@@ -73,7 +101,7 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	active, total := s.router.Stats()
+	active, total := h.router.Stats()
 
 	var running, ready int
 	for _, snap := range snapshots {
@@ -90,49 +118,46 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		"running":           running,
 		"ready":             ready,
 		"total":             total,
-		"version":           s.router.Version(),
-		"uptime":            time.Since(s.startedAt).Round(time.Second).String(),
-		"backend":           s.backendTag,
-		"max_procs":         s.router.MaxProcs(),
-		"default_workspace": s.router.DefaultWorkspace(),
-		"workspace_id":      s.workspaceID,
-		"workspace_name":    s.workspaceName,
+		"version":           h.router.Version(),
+		"uptime":            time.Since(h.startedAt).Round(time.Second).String(),
+		"backend":           h.backendTag,
+		"max_procs":         h.router.MaxProcs(),
+		"default_workspace": h.router.DefaultWorkspace(),
+		"workspace_id":      h.workspaceID,
+		"workspace_name":    h.workspaceName,
 		"system":            systemInfo(),
 		"watchdog": map[string]any{
-			"no_output_kills": s.watchdogNoOutputKills.Load(),
-			"total_kills":     s.watchdogTotalKills.Load(),
+			"no_output_kills": h.watchdogNoOut.Load(),
+			"total_kills":     h.watchdogTotal.Load(),
 		},
 	}
 
 	// Include available agent IDs for dashboard session creation
-	agentIDs := make([]string, 0, len(s.agents)+1)
+	agentIDs := make([]string, 0, len(h.agents)+1)
 	agentIDs = append(agentIDs, "general")
-	for id := range s.agents {
+	for id := range h.agents {
 		agentIDs = append(agentIDs, id)
 	}
 	stats["agents"] = agentIDs
 
 	// Include project list for dashboard sidebar rendering
 	var projectList []map[string]string
-	if s.projectMgr != nil {
-		projects := s.projectMgr.All()
+	if h.projectMgr != nil {
+		projects := h.projectMgr.All()
 		for _, p := range projects {
 			projectList = append(projectList, map[string]string{"name": p.Name, "path": p.Path, "node": "local"})
 		}
 	}
 	// Merge remote projects (always, even without a local project manager)
-	s.nodesMu.RLock()
-	hasNodes := len(s.nodes) > 0
-	s.nodesMu.RUnlock()
-	if hasNodes {
-		cachedProjects := s.nodeCache.Projects()
+	if h.nodeAccess.HasNodes() {
+		cachedProjects := h.nodeCache.Projects()
 		for _, items := range cachedProjects {
 			for _, item := range items {
 				name := strOrFallback(item, "name", "Name")
 				path := strOrFallback(item, "path", "Path")
-				node, _ := item["node"].(string)
+				nd, _ := item["node"].(string)
 				if name != "" {
-					projectList = append(projectList, map[string]string{"name": name, "path": path, "node": node})
+					projectList = append(projectList, map[string]string{"name": name, "path": path, "node": nd})
 				}
 			}
 		}
@@ -142,23 +167,15 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Take a snapshot of nodes under lock for thread-safe access
-	s.nodesMu.RLock()
-	nodesSnapshot := make(map[string]node.Conn, len(s.nodes))
-	for k, v := range s.nodes {
-		nodesSnapshot[k] = v
-	}
-	s.nodesMu.RUnlock()
+	nodesSnapshot := h.nodeAccess.NodesSnapshot()
 
 	// No configured nodes at all: use simple single-node response format
-	if len(s.knownNodes) == 0 {
+	if len(h.nodeAccess.KnownNodes()) == 0 {
 		resp := map[string]any{
 			"sessions": snapshots,
 			"stats":    stats,
 		}
-		recent, history := s.recentAndHistorySessions()
-		if len(recent) > 0 {
-			resp["recent_sessions"] = recent
-		}
+		history := h.historySessions()
 		if len(history) > 0 {
 			resp["history_sessions"] = history
 		}
@@ -176,7 +193,7 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		allSessions = append(allSessions, snapshots[i])
 	}
 
-	localName := s.workspaceName
+	localName := h.workspaceName
 	if localName == "" {
 		localName = "Local"
 	}
@@ -184,7 +201,7 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		"local": map[string]any{"display_name": localName, "status": "ok"},
 	}
 
-	cachedSessions, cachedStatus := s.nodeCache.Sessions()
+	cachedSessions, cachedStatus := h.nodeCache.Sessions()
 	for id, nc := range nodesSnapshot {
 		status := cachedStatus[id]
 		if status == "" {
@@ -201,7 +218,7 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Always include all configured nodes, even when currently disconnected.
-	for id, displayName := range s.knownNodes {
+	for id, displayName := range h.nodeAccess.KnownNodes() {
 		if _, connected := nodeStatus[id]; !connected {
 			nodeStatus[id] = map[string]any{
 				"display_name": displayName,
@@ -215,10 +232,7 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 		"stats":    stats,
 		"nodes":    nodeStatus,
 	}
-	recent, history := s.recentAndHistorySessions()
-	if len(recent) > 0 {
-		resp["recent_sessions"] = recent
-	}
+	history := h.historySessions()
 	if len(history) > 0 {
 		resp["history_sessions"] = history
 	}
@@ -228,10 +242,8 @@ func (s *Server) handleAPISessions(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (s *Server) handleAPISessionEvents(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
+// GET /api/sessions/events
+func (h *SessionHandlers) handleEvents(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
 	if key == "" {
 		http.Error(w, "missing key parameter", http.StatusBadRequest)
@@ -239,9 +251,9 @@ func (s *Server) handleAPISessionEvents(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Remote node proxy
-	node := r.URL.Query().Get("node")
-	if node != "" && node != "local" {
-		nc, ok := s.lookupNode(w, node)
+	nodeID := r.URL.Query().Get("node")
+	if nodeID != "" && nodeID != "local" {
+		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
 		if !ok {
 			return
 		}
@@ -256,7 +268,7 @@ func (s *Server) handleAPISessionEvents(w http.ResponseWriter, r *http.Request) 
 		}
 		entries, err := nc.FetchEvents(r.Context(), key, after)
 		if err != nil {
-			slog.Warn("remote fetch events failed", "node", node, "key", key, "err", err)
+			slog.Warn("remote fetch events failed", "node", nodeID, "key", key, "err", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
@@ -268,7 +280,7 @@ func (s *Server) handleAPISessionEvents(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Local
-	sess := s.router.GetSession(key)
+	sess := h.router.GetSession(key)
 	if sess == nil {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
@@ -292,11 +304,8 @@ func (s *Server) handleAPISessionEvents(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-func (s *Server) handleAPISessionDelete(w http.ResponseWriter, r *http.Request) {
-	if !s.checkBearerAuth(w, r) {
-		return
-	}
-
+// DELETE /api/sessions
+func (h *SessionHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Key string `json:"key"`
 	}
@@ -306,7 +315,7 @@ func (s *Server) handleAPISessionDelete(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	if !s.router.Remove(req.Key) {
+	if !h.router.Remove(req.Key) {
 		http.Error(w, "session not found", http.StatusNotFound)
 		return
 	}
@@ -315,68 +324,91 @@ func (s *Server) handleAPISessionDelete(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
-// recentAndHistorySessions returns filesystem sessions split into two groups:
-//   - recent: last 24 hours (for resumable sidebar)
-//   - history: 1-7 days (for history popover)
-//
-// Results are cached for 30 seconds to avoid repeated filesystem scans.
-func (s *Server) recentAndHistorySessions() (recent, history []discovery.RecentSession) {
-	if s.claudeDir == "" {
-		return nil, nil
+// POST /api/sessions/resume
+func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		SessionID string `json:"session_id"`
+		Workspace string `json:"workspace"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+		return
+	}
+	if !discovery.IsValidSessionID(req.SessionID) {
+		http.Error(w, "invalid session_id", http.StatusBadRequest)
+		return
+	}
+
+	workspace := req.Workspace
+	if workspace != "" {
+		wsPath, err := validateWorkspace(workspace, h.allowedRoot)
+		if err != nil {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusForbidden)
+			writeJSON(w, map[string]string{"error": err.Error()})
+			return
+		}
+		workspace = wsPath
+	}
+	if workspace == "" {
+		workspace = h.router.DefaultWorkspace()
+	}
+
+	var rb [8]byte
+	if _, err := rand.Read(rb[:]); err != nil {
+		http.Error(w, "internal error", http.StatusInternalServerError)
+		return
+	}
+	key := "dashboard:direct:r" + hex.EncodeToString(rb[:]) + ":general"
+	effectiveKey := h.router.RegisterForResume(key, req.SessionID, workspace)
+
+	w.Header().Set("Content-Type", "application/json")
+	writeJSON(w, map[string]string{"status": "ok", "key": effectiveKey})
+}
+
+// historySessions returns all filesystem sessions from the last 7 days.
+// Results are cached for 30 seconds.
+func (h *SessionHandlers) historySessions() []discovery.RecentSession {
+	if h.claudeDir == "" {
+		return nil
 	}
 
 	const cacheTTL = 30 * time.Second
-	s.recentCacheMu.Lock()
-	if time.Since(s.recentCacheTime) < cacheTTL {
-		r, h := s.recentCache, s.historyCache
-		s.recentCacheMu.Unlock()
-		return r, h
+	h.historyCacheMu.Lock()
+	if time.Since(h.historyCacheTime) < cacheTTL {
+		cached := h.historyCache
+		h.historyCacheMu.Unlock()
+		return cached
 	}
-	s.recentCacheMu.Unlock()
+	h.historyCacheMu.Unlock()
 
-	type result struct {
-		recent  []discovery.RecentSession
-		history []discovery.RecentSession
-	}
-
-	v, _, _ := s.recentFlight.Do("recent", func() (any, error) {
-		excludeIDs := s.router.DiscoveryExcludeIDs()
-		all := discovery.RecentSessions(s.claudeDir, 0, 7*24*time.Hour, excludeIDs)
+	v, _, _ := h.historyFlight.Do("history", func() (any, error) {
+		excludeIDs := h.router.DiscoveryExcludeIDs()
+		all := discovery.RecentSessions(h.claudeDir, 0, 7*24*time.Hour, excludeIDs)
 
 		// Resolve project names in batch.
-		if s.projectMgr != nil && len(all) > 0 {
+		if h.projectMgr != nil && len(all) > 0 {
 			var workspaces []string
-			for _, r := range all {
-				workspaces = append(workspaces, r.Workspace)
+			for _, rs := range all {
+				workspaces = append(workspaces, rs.Workspace)
 			}
-			wsMap := s.projectMgr.ResolveWorkspaces(workspaces)
+			wsMap := h.projectMgr.ResolveWorkspaces(workspaces)
 			for i := range all {
 				all[i].Project = wsMap[all[i].Workspace]
 			}
 		}
 
-		// Split by time: < 24h → recent, 1-7d → history.
-		cutoff := time.Now().Add(-24 * time.Hour).UnixMilli()
-		var rec, hist []discovery.RecentSession
-		for _, rs := range all {
-			if rs.LastActive >= cutoff {
-				rec = append(rec, rs)
-			} else {
-				hist = append(hist, rs)
-			}
-		}
+		h.historyCacheMu.Lock()
+		h.historyCache = all
+		h.historyCacheTime = time.Now()
+		h.historyCacheMu.Unlock()
 
-		s.recentCacheMu.Lock()
-		s.recentCache = rec
-		s.historyCache = hist
-		s.recentCacheTime = time.Now()
-		s.recentCacheMu.Unlock()
-
-		return result{recent: rec, history: hist}, nil
+		return all, nil
 	})
 
-	if res, ok := v.(result); ok {
-		return res.recent, res.history
+	if res, ok := v.([]discovery.RecentSession); ok {
+		return res
 	}
-	return nil, nil
+	return nil
 }
