@@ -277,11 +277,14 @@ func resolveWorkspaceByParts(dirName string) string {
 	if len(parts) == 0 {
 		return ""
 	}
-	return tryResolveParts(parts, "/")
+	statCount := 0
+	return tryResolveParts(parts, "/", &statCount)
 }
 
 // tryResolveParts recursively resolves path parts against the filesystem.
-func tryResolveParts(parts []string, base string) string {
+// statCount tracks total os.Stat calls to prevent exponential blowup on
+// paths with many hyphens (e.g. 20+ segments → 2^19 worst case without limit).
+func tryResolveParts(parts []string, base string, statCount *int) string {
 	if len(parts) == 0 {
 		if info, err := os.Stat(base); err == nil && info.IsDir() {
 			return base
@@ -289,16 +292,20 @@ func tryResolveParts(parts []string, base string) string {
 		return ""
 	}
 	for i := 1; i <= len(parts); i++ {
+		if *statCount > 200 {
+			return ""
+		}
 		segment := strings.Join(parts[:i], "-")
 		if segment == "" || segment == "." || segment == ".." {
 			continue
 		}
 		candidate := filepath.Join(base, segment)
+		*statCount++
 		info, err := os.Stat(candidate)
 		if err != nil || !info.IsDir() {
 			continue
 		}
-		if result := tryResolveParts(parts[i:], candidate); result != "" {
+		if result := tryResolveParts(parts[i:], candidate, statCount); result != "" {
 			return result
 		}
 	}

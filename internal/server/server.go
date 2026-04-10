@@ -336,6 +336,7 @@ func (s *Server) Start(ctx context.Context) error {
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
+	shutdownComplete := make(chan struct{})
 	go func() {
 		<-ctx.Done()
 		slog.Info("shutting down server")
@@ -359,9 +360,20 @@ func (s *Server) Start(ctx context.Context) error {
 		if err := srv.Shutdown(shutdownCtx); err != nil {
 			slog.Error("server shutdown error", "err", err)
 		}
+		close(shutdownComplete)
 	}()
 
-	return srv.ListenAndServe()
+	err := srv.ListenAndServe()
+	// Wait for the shutdown goroutine to finish draining connections.
+	// Only block if shutdown was initiated (ctx cancelled); if ListenAndServe
+	// failed for another reason (e.g. port conflict), the goroutine is still
+	// waiting on ctx.Done and shutdownComplete will never close.
+	select {
+	case <-shutdownComplete:
+	case <-ctx.Done():
+		<-shutdownComplete
+	}
+	return err
 }
 
 // startProjectScanLoop periodically rescans the projects root for CLAUDE.md changes

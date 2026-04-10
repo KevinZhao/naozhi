@@ -57,23 +57,33 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .main-header .detail{font-size:13px;color:#8b949e;display:flex;gap:8px;flex-shrink:0;align-items:center}
 .main-header .detail span{white-space:nowrap}
 
-.events{flex:1;overflow-y:auto;overflow-x:hidden;padding:8px 0;scrollbar-width:thin;scrollbar-color:#30363d transparent;min-width:0}
-.event{display:flex;gap:10px;padding:8px 20px;transition:background .1s;max-width:100%}
-.event:hover{background:#161b22}
-.event-icon{width:18px;text-align:center;font-size:15px;padding-top:1px}
-.event-content{flex:1;font-size:15px;line-height:1.6;word-break:break-word;white-space:pre-wrap;overflow-wrap:anywhere;min-width:0;max-width:720px}
-.event.text .event-content,.event.user .event-content{white-space:normal}
+.events{flex:1;overflow-y:auto;overflow-x:hidden;padding:16px 0;scrollbar-width:thin;scrollbar-color:#30363d transparent;min-width:0}
+.event{display:flex;gap:10px;padding:6px 24px;max-width:760px;margin-left:auto;margin-right:auto;width:100%;box-sizing:border-box}
+.event-icon{width:26px;height:26px;flex-shrink:0;display:flex;align-items:center;justify-content:center;border-radius:50%;font-size:14px}
+.event-content{flex:1;font-size:15px;line-height:1.6;word-break:break-word;overflow-wrap:anywhere;min-width:0;white-space:normal}
 .md-blank{display:block;height:0.75em}
+/* User messages: right-aligned bubble */
+.event.user{flex-direction:row-reverse}
+.event.user .event-icon{background:rgba(88,166,255,.15);color:#58a6ff;font-size:13px}
+.event.user .event-content{flex:0 1 auto;max-width:80%;color:#e6edf3;background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.2);padding:10px 14px;border-radius:18px 18px 4px 18px}
+/* AI text: left-aligned, clean markdown */
+.event.text .event-icon{background:rgba(163,118,255,.15);color:#a376ff;font-size:13px}
+.event.text .event-content{color:#c9d1d9;max-width:720px}
+/* System/init: centered label */
+.event.system,.event.init{justify-content:center;padding-top:12px;padding-bottom:12px}
+.event.system .event-icon,.event.init .event-icon{display:none}
+.event.system .event-content,.event.init .event-content{flex:none;color:#6e7681;font-size:12px;text-align:center}
+/* Hidden types (kept for safety) */
 .event.thinking .event-content{color:#a5d6ff;font-style:italic}
-.event.result .event-content{color:#7ee787}
-.event.system .event-content{color:#8b949e;font-size:14px}
-.event.text .event-content{color:#c9d1d9}
-.event.user .event-content{color:#58a6ff;font-weight:500}
-.event.user{background:rgba(88,166,255,.05)}
 .event.result{margin:2px 0}
-.event.result .event-content{background:rgba(126,231,135,.05);padding:4px 8px;border-radius:4px;border-left:2px solid #3fb950}
+.event.result .event-content{color:#7ee787;background:rgba(126,231,135,.05);padding:4px 8px;border-radius:4px;border-left:2px solid #3fb950}
 .event.agent .event-content{color:#a5d6ff}
 .event.agent{background:rgba(56,139,253,.05);border-left:2px solid #388bfd}
+/* Turn separation */
+.event.text+.event.user{margin-top:24px}
+.event.user+.event.text{margin-top:8px}
+.event.system+.event.user,.event.system+.event.text,.event.init+.event.user,.event.init+.event.text{margin-top:8px}
+.event.user+.event.user,.event.text+.event.text{margin-top:2px}
 .empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:#6e7681;font-size:15px}
 .no-sessions{padding:40px 16px;text-align:center;color:#484f58;font-size:14px}
 
@@ -394,6 +404,7 @@ let projectsData = []; // [{name, path, node}] from API
 let localWsInfo = { name: '', sys: '' };
 const sessionWorkspaces = {};
 const sessionNodes = {};
+const sessionDrafts = {}; // key -> draft text, preserved across session switches
 let historySessionsData = []; // from API history_sessions (all filesystem sessions)
 
 function getToken() { return ''; }
@@ -809,6 +820,13 @@ function selectSession(key, node) {
   node = node || 'local';
   // Recent session card click → trigger resume flow
   // Discovered session card click → trigger preview flow
+  // Save draft for current session before switching
+  if (selectedKey) {
+    const inp = document.getElementById('msg-input');
+    const draft = getMsgValue(inp);
+    if (draft) sessionDrafts[selectedKey] = draft;
+    else delete sessionDrafts[selectedKey];
+  }
   if (key.startsWith('_discovered:')) {
     const pid = parseInt(key.split(':')[1]);
     const d = discoveredItems.find(x => x.pid === pid);
@@ -830,6 +848,11 @@ function selectSession(key, node) {
     el.classList.toggle('active', el.dataset.key === key && (el.dataset.node || 'local') === node);
   });
   renderMainShell();
+  // Restore draft for the target session
+  const draftInput = document.getElementById('msg-input');
+  if (draftInput && sessionDrafts[key]) {
+    setMsgValue(draftInput, sessionDrafts[key]);
+  }
 
   const changed = prevKey !== key || prevNode !== node;
   if (wsm.isConnected()) {
@@ -846,6 +869,7 @@ function selectSession(key, node) {
 
 async function dismissSession(key, node) {
   node = node || 'local';
+  delete sessionDrafts[key];
 
   // If it's a pending (never-sent) session, just remove from localStorage
   if (sessionWorkspaces[key] !== undefined) {
@@ -1160,6 +1184,7 @@ async function sendMessage() {
     }
     if (wsm.send(sendMsg)) {
       if (input) clearMsg(input);
+      delete sessionDrafts[selectedKey];
       sending = false;
       if (btn) btn.classList.remove('sending');
       return;
@@ -1219,6 +1244,7 @@ async function sendMessage() {
 
     // Clear input only after confirmed success
     if (input) clearMsg(input);
+    delete sessionDrafts[selectedKey];
     pendingFiles = [];
     renderFilePreviews();
 

@@ -114,7 +114,12 @@ func (f *Feishu) Stop() error {
 
 	if cancel != nil {
 		cancel()
-		<-done
+		// SDK's Start() may block indefinitely (select{}); don't wait forever.
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			slog.Warn("feishu websocket stop timed out")
+		}
 	}
 	f.wg.Wait() // always wait for in-flight message handlers to finish
 	return nil

@@ -6,8 +6,8 @@ const path = require('path');
 
 // Minimal mock server: serves dashboard.html + stubs all API calls
 function startMockServer() {
-  const htmlPath = path.join(__dirname, 'internal/server/static/dashboard.html');
-  const manifestPath = path.join(__dirname, 'internal/server/static/manifest.json');
+  const htmlPath = path.join(__dirname, '..', '..', 'internal/server/static/dashboard.html');
+  const manifestPath = path.join(__dirname, '..', '..', 'internal/server/static/manifest.json');
   const html = fs.readFileSync(htmlPath, 'utf8');
   const manifest = fs.readFileSync(manifestPath, 'utf8');
 
@@ -226,7 +226,7 @@ test.describe('Mobile dashboard', () => {
     await page.waitForLoadState('networkidle');
 
     // Open new session modal
-    await page.click('.new-session-btn');
+    await page.click('.hdr-btn[title="New Session"]');
     await page.waitForSelector('.modal');
 
     const modalWidth = await page.$eval('.modal', el => el.getBoundingClientRect().width);
