@@ -315,7 +315,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
   .section-header{padding:5px 12px;font-size:10px}
   /* Compact "no sessions" on mobile */
   .no-sessions{padding:4px 16px!important;font-size:12px}
-  .event{padding:5px max(12px,env(safe-area-inset-right)) 5px max(12px,env(safe-area-inset-left))}
+  .event{padding:4px max(12px,env(safe-area-inset-right)) 4px max(12px,env(safe-area-inset-left));max-width:100%}
+  .event.user .event-content{max-width:85%}
+  .event.text+.event.user{margin-top:16px}
   /* Cron detail: reduce padding to match mobile layout */
   .cron-detail{padding:12px}
   /* History popover: constrain to viewport */
@@ -1047,7 +1049,7 @@ function eventHtml(e) {
   // Filter out Claude Code system XML injected as user messages
   const raw = e.detail || e.summary || '';
   if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return '';
-  const icons = {init:'~',system:'\u2699',user:'\u{1f464}'};
+  const icons = {init:'\u2699',system:'\u2699',user:'\u{1f464}',text:'\u2726'};
   const icon = icons[e.type] || '';
 
   let content = '';
