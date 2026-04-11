@@ -136,6 +136,16 @@ func (a *AuthHandlers) clientIP(r *http.Request) string {
 	return ip
 }
 
+// isSecure returns true if the connection is over TLS.
+// When trustedProxy is enabled, also trusts the X-Forwarded-Proto header
+// (set by ALB/CloudFront). Without trustedProxy, only trusts r.TLS.
+func (a *AuthHandlers) isSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	return a.trustedProxy && r.Header.Get("X-Forwarded-Proto") == "https"
+}
+
 func (a *AuthHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ip := a.clientIP(r)
 	if !a.loginLimiterFor(ip).Allow() {
@@ -169,7 +179,7 @@ func (a *AuthHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+		Secure:   a.isSecure(r),
 		MaxAge:   86400 * 30, // 30 days
 	})
 	w.Header().Set("Content-Type", "application/json")
@@ -185,7 +195,7 @@ func (a *AuthHandlers) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
-		Secure:   r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https",
+		Secure:   a.isSecure(r),
 		MaxAge:   -1,
 	})
 	w.Header().Set("Content-Type", "application/json")

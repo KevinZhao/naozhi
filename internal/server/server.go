@@ -387,7 +387,7 @@ func (s *Server) startProjectScanLoop(ctx context.Context) {
 		return
 	}
 	go func() {
-		ticker := time.NewTicker(60 * time.Second)
+		ticker := time.NewTicker(session.ProjectScanInterval)
 		defer ticker.Stop()
 		for {
 			select {

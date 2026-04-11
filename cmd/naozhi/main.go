@@ -143,7 +143,11 @@ func filterHooks(hooksRaw json.RawMessage, serverPort string) json.RawMessage {
 				}
 				if isNaozhiCallbackHook(cmd, serverPort) {
 					changed = true
-					slog.Info("dropping hook to prevent naozhi callback loop", "event", eventName, "command", cmd)
+					logCmd := cmd
+					if len(logCmd) > 80 {
+						logCmd = logCmd[:80] + "..."
+					}
+					slog.Info("dropping hook to prevent naozhi callback loop", "event", eventName, "command", logCmd)
 				} else {
 					safeEntries = append(safeEntries, e)
 				}
@@ -535,6 +539,9 @@ func main() {
 
 	if cfg.Server.DashboardToken == "" {
 		slog.Warn("dashboard_token is not set — dashboard and WebSocket API are accessible without authentication. Set server.dashboard_token in config.yaml for production use.")
+	} else if len(cfg.Server.DashboardToken) < 16 {
+		slog.Error("dashboard_token is too short — use at least 16 random characters for production security")
+		os.Exit(1)
 	}
 
 	serverErr := make(chan error, 1)

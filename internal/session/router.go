@@ -23,6 +23,25 @@ const ShutdownTimeout = 30 * time.Second
 // ErrMaxProcs is returned when all process slots are occupied.
 var ErrMaxProcs = errors.New("max concurrent processes reached")
 
+const (
+	// maxExemptSessions caps the number of alive exempt (planner) sessions
+	// to prevent unbounded growth when many projects are configured.
+	maxExemptSessions = 20
+
+	// suspendedTTLMultiplier controls how long suspended/exited sessions
+	// are kept before pruning. Multiplied by the router TTL, so at the
+	// default 30m TTL this gives ~3.5 hours — a typical work session.
+	suspendedTTLMultiplier = 7
+
+	// historyLoadConcurrency limits parallel disk I/O goroutines during
+	// startup session history loading.
+	historyLoadConcurrency = 10
+
+	// ProjectScanInterval is how often the project root is rescanned
+	// for CLAUDE.md changes. Exported for use by server package.
+	ProjectScanInterval = 60 * time.Second
+)
+
 // Router manages session key -> ManagedSession mapping.
 //
 // Lock ordering: r.mu (write) -> s.sendMu. Never acquire in reverse.
@@ -232,7 +251,7 @@ func NewRouter(cfg RouterConfig) *Router {
 	// Loads the full session chain (prev → current) to restore history
 	// that accumulated across multiple CLI session IDs.
 	if r.claudeDir != "" {
-		sem := make(chan struct{}, 10) // limit concurrent disk I/O
+		sem := make(chan struct{}, historyLoadConcurrency) // limit concurrent disk I/O
 		for _, s := range r.sessions {
 			s := s
 			if s.getSessionID() == "" {
@@ -574,7 +593,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		}
 	} else {
 		// Guard against unbounded exempt session growth (e.g., many projects)
-		const maxExempt = 20
+		const maxExempt = maxExemptSessions
 		exemptCount := r.countExempt()
 		if exemptCount >= maxExempt {
 			r.mu.Unlock()
@@ -973,7 +992,7 @@ func (r *Router) Cleanup() {
 		// 7x multiplier gives suspended sessions ~3.5 hours at default 30m TTL,
 		// matching a typical work session. Balances timely cleanup against
 		// preserving sessions the user may still want to --resume.
-		if s.process == nil && s.getSessionID() != "" && now.Sub(s.GetLastActive()) > 7*r.ttl {
+		if s.process == nil && s.getSessionID() != "" && now.Sub(s.GetLastActive()) > suspendedTTLMultiplier*r.ttl {
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
@@ -988,7 +1007,7 @@ func (r *Router) Cleanup() {
 		}
 		// Prune old exited sessions even with session ID (prevents unbounded growth).
 		// Same 7x TTL window as suspended sessions above.
-		if s.process != nil && !s.process.Alive() && now.Sub(s.GetLastActive()) > 7*r.ttl {
+		if s.process != nil && !s.process.Alive() && now.Sub(s.GetLastActive()) > suspendedTTLMultiplier*r.ttl {
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
