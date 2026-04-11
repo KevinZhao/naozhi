@@ -240,6 +240,7 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 	s.handlerWg.Add(1)
 	go func() {
 		defer s.handlerWg.Done()
+		defer platform.RecoverHandler("slack")
 		s.handler(s.ctx, msg)
 	}()
 }

@@ -120,7 +120,7 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, error)
 		if ws == "" {
 			ws = h.router.DefaultWorkspace()
 		}
-		h.router.RegisterForResume(key, p.ResumeID, ws)
+		h.router.RegisterForResume(key, p.ResumeID, ws, "")
 	}
 
 	// Guard acquire/interrupt

@@ -174,6 +174,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			f.wg.Add(1)
 			go func() {
 				defer f.wg.Done()
+				defer platform.RecoverHandler("feishu text")
 				handler(context.Background(), msg)
 			}()
 
@@ -187,6 +188,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			f.wg.Add(1)
 			go func() {
 				defer f.wg.Done()
+				defer platform.RecoverHandler("feishu image")
 				imgMsg := msg
 				data, mime, err := f.DownloadImage(context.Background(), event.Message.MessageID, content.ImageKey)
 				if err != nil {
@@ -207,6 +209,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			f.wg.Add(1)
 			go func() {
 				defer f.wg.Done()
+				defer platform.RecoverHandler("feishu audio")
 				audioMsg := msg
 				f.handleAudio(context.Background(), handler, audioMsg, event.Message.MessageID, content.FileKey)
 			}()

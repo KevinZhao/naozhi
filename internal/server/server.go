@@ -81,9 +81,11 @@ func validateWorkspace(workspace, allowedRoot string) (string, error) {
 		return "", fmt.Errorf("workspace is not a valid directory")
 	}
 	wsPath := filepath.Clean(workspace)
-	if resolved, err := filepath.EvalSymlinks(wsPath); err == nil {
-		wsPath = resolved
+	resolved, err := filepath.EvalSymlinks(wsPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve workspace path: %w", err)
 	}
+	wsPath = resolved
 	if allowedRoot != "" && wsPath != allowedRoot &&
 		!strings.HasPrefix(wsPath, allowedRoot+string(filepath.Separator)) {
 		return "", fmt.Errorf("workspace outside allowed root")

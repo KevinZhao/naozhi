@@ -86,6 +86,22 @@ type ManagedSession struct {
 	Exempt bool
 }
 
+// ReattachProcess safely injects a reconnected shim process into this session.
+// Called by Router.reconnectShims after naozhi restart.
+func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+
+	s.process = proc
+	s.setSessionID(sessionID)
+	s.deathReason.Store("")
+	s.lastActive.Store(time.Now().UnixNano())
+
+	if s.onSessionID != nil && sessionID != "" {
+		s.onSessionID(sessionID)
+	}
+}
+
 // GetLastActive returns the last active time.
 func (s *ManagedSession) GetLastActive() time.Time {
 	return time.Unix(0, s.lastActive.Load())

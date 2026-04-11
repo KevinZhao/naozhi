@@ -327,8 +327,9 @@ func (h *SessionHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 // POST /api/sessions/resume
 func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		SessionID string `json:"session_id"`
-		Workspace string `json:"workspace"`
+		SessionID  string `json:"session_id"`
+		Workspace  string `json:"workspace"`
+		LastPrompt string `json:"last_prompt"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
@@ -361,7 +362,7 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key := "dashboard:direct:r" + hex.EncodeToString(rb[:]) + ":general"
-	effectiveKey := h.router.RegisterForResume(key, req.SessionID, workspace)
+	effectiveKey := h.router.RegisterForResume(key, req.SessionID, workspace, req.LastPrompt)
 
 	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]string{"status": "ok", "key": effectiveKey})

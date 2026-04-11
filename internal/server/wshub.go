@@ -322,7 +322,21 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, notify <-chan struct{}, ses
 		select {
 		case _, ok := <-notify:
 			if !ok {
-				return
+				// Process died or was replaced (e.g., service restart reconnect).
+				// Try to re-subscribe to the new process's EventLog.
+				if !h.resubscribeEvents(c, key, sess, &notify) {
+					return
+				}
+				// Catch up on events we missed during the transition.
+				entries := sess.EventEntriesSince(lastTime)
+				if len(entries) > 0 {
+					data, err := json.Marshal(node.ServerMsg{Type: "history", Key: key, Events: entries})
+					if err == nil {
+						c.SendRaw(data)
+					}
+					lastTime = entries[len(entries)-1].Time
+				}
+				continue
 			}
 			entries := sess.EventEntriesSince(lastTime)
 			if len(entries) == 0 {
@@ -345,6 +359,53 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, notify <-chan struct{}, ses
 			return
 		}
 	}
+}
+
+// resubscribeEvents waits for a new process to be attached to the session and
+// re-subscribes to its EventLog. Returns false if the client disconnects or
+// the wait times out (60s).
+func (h *Hub) resubscribeEvents(c *wsClient, key string, sess *session.ManagedSession, notify *<-chan struct{}) bool {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for range 60 {
+		select {
+		case <-c.done:
+			return false
+		case <-ticker.C:
+		}
+
+		newNotify, unsub := sess.SubscribeEvents()
+		// Check if the channel is immediately closed (process still nil).
+		select {
+		case _, ok := <-newNotify:
+			if !ok {
+				// Process still nil — keep waiting.
+				continue
+			}
+			// Process is back and has events.
+		default:
+			// Channel is alive (not closed) — process is back.
+		}
+
+		// Update the subscription registration for this client.
+		h.mu.Lock()
+		if c.subscriptions == nil {
+			// Client was removed during Shutdown.
+			h.mu.Unlock()
+			unsub()
+			return false
+		}
+		if oldUnsub, exists := c.subscriptions[key]; exists {
+			oldUnsub()
+		}
+		c.subscriptions[key] = unsub
+		h.mu.Unlock()
+
+		*notify = newNotify
+		return true
+	}
+	return false
 }
 
 // broadcastState sends a session_state message to all clients subscribed to the given key.

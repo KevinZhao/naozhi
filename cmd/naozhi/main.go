@@ -11,9 +11,11 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/config"
@@ -28,6 +30,7 @@ import (
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/server"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/shim"
 	"github.com/naozhi/naozhi/internal/transcribe"
 	"github.com/naozhi/naozhi/internal/upstream"
 )
@@ -204,6 +207,9 @@ func main() {
 		case "version", "--version":
 			fmt.Println(version)
 			return
+		case "shim":
+			runShim(os.Args[2:])
+			return
 		}
 	}
 
@@ -246,6 +252,18 @@ func main() {
 	}
 	wrapper := cli.NewWrapper(cfg.CLI.Path, proto, cfg.CLI.Backend)
 
+	// Initialize ShimManager
+	shimMgr := shim.NewManager(shim.ManagerConfig{
+		StateDir:        config.ExpandHome(cfg.Session.Shim.StateDir),
+		CLIPath:         wrapper.CLIPath,
+		IdleTimeout:     parseDurationOrDefault(cfg.Session.Shim.IdleTimeout, 4*time.Hour),
+		WatchdogTimeout: parseDurationOrDefault(cfg.Session.Shim.WatchdogTimeout, 30*time.Minute),
+		BufferSize:      cfg.Session.Shim.BufferSize,
+		MaxBufBytes:     parseBytesOrDefault(cfg.Session.Shim.MaxBufferBytes, 50*1024*1024),
+		MaxShims:        cfg.Session.Shim.MaxShims,
+	})
+	wrapper.ShimManager = shimMgr
+
 	// Parse watchdog and store path
 	noOutputTimeout, totalTimeout := cfg.ParseWatchdog()
 	storePath := config.ExpandHome(cfg.Session.StorePath)
@@ -272,6 +290,9 @@ func main() {
 		TotalTimeout:    totalTimeout,
 		ClaudeDir:       claudeDir,
 	})
+
+	// Reconnect to surviving shim processes from previous naozhi run
+	router.ReconnectShims()
 
 	// Context with cancellation for graceful shutdown
 	ctx, cancel := context.WithCancel(context.Background())
@@ -523,4 +544,47 @@ func main() {
 	}
 	// Wait for both server and shutdown to complete
 	<-shutdownDone
+}
+
+// parseDurationOrDefault parses a duration string, returning def on empty or error.
+func parseDurationOrDefault(s string, def time.Duration) time.Duration {
+	if s == "" {
+		return def
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return def
+	}
+	return d
+}
+
+// parseBytesOrDefault parses a human-readable byte size string (e.g. "50MB", "1GB").
+// Returns def on empty or unrecognized format.
+func parseBytesOrDefault(s string, def int64) int64 {
+	if s == "" {
+		return def
+	}
+	s = strings.TrimSpace(s)
+	s = strings.ToUpper(s)
+
+	multiplier := int64(1)
+	switch {
+	case strings.HasSuffix(s, "GB"):
+		multiplier = 1024 * 1024 * 1024
+		s = strings.TrimSuffix(s, "GB")
+	case strings.HasSuffix(s, "MB"):
+		multiplier = 1024 * 1024
+		s = strings.TrimSuffix(s, "MB")
+	case strings.HasSuffix(s, "KB"):
+		multiplier = 1024
+		s = strings.TrimSuffix(s, "KB")
+	case strings.HasSuffix(s, "B"):
+		s = strings.TrimSuffix(s, "B")
+	}
+
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil {
+		return def
+	}
+	return n * multiplier
 }

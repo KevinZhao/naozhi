@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -265,6 +267,115 @@ func NewRouter(cfg RouterConfig) *Router {
 	return r
 }
 
+// ReconnectShims discovers surviving shim processes and reconnects sessions.
+// Called after NewRouter to restore sessions that were active before naozhi restart.
+func (r *Router) ReconnectShims() {
+	if r.wrapper == nil || r.wrapper.ShimManager == nil {
+		return
+	}
+
+	states, err := r.wrapper.ShimManager.Discover()
+	if err != nil {
+		slog.Warn("shim discovery failed", "err", err)
+		return
+	}
+	slog.Info("shim discovery complete", "found", len(states))
+
+	reconnected := 0
+	for _, state := range states {
+		r.mu.Lock()
+		sess, ok := r.sessions[state.Key]
+		var hasLiveProcess bool
+		if ok && sess.process != nil && sess.process.Alive() {
+			hasLiveProcess = true
+		}
+		r.mu.Unlock()
+
+		if !ok {
+			slog.Info("orphan shim found, shutting down", "key", state.Key)
+			// Connect briefly to send shutdown
+			if handle, err := r.wrapper.ShimManager.Reconnect(context.Background(), state.Key, 0); err == nil {
+				handle.Shutdown()
+			} else {
+				syscall.Kill(state.ShimPID, syscall.SIGUSR2) //nolint:errcheck
+			}
+			continue
+		}
+
+		// Skip if session already has a live process
+		if hasLiveProcess {
+			continue
+		}
+
+		// CLI args drift check: if config changed (model, args), shut down old shim
+		// and let the next message create a new session with updated config.
+		currentArgs := r.wrapper.Protocol.BuildArgs(cli.SpawnOptions{
+			Model:     r.model,
+			ExtraArgs: r.extraArgs,
+		})
+		if len(state.CLIArgs) > 0 && !slices.Equal(state.CLIArgs, currentArgs) {
+			slog.Info("shim config drifted, shutting down old shim",
+				"key", state.Key,
+				"old_args_len", len(state.CLIArgs),
+				"new_args_len", len(currentArgs))
+			if handle, err := r.wrapper.ShimManager.Reconnect(context.Background(), state.Key, 0); err == nil {
+				handle.Shutdown()
+			}
+			continue
+		}
+
+		// Reconnect
+		lastSeq := int64(0) // full replay on restart
+		proc, replays, err := r.wrapper.SpawnReconnect(
+			context.Background(), state.Key, lastSeq, r.wrapper.Protocol,
+		)
+		if err != nil {
+			slog.Warn("shim reconnect failed", "key", state.Key, "err", err)
+			continue
+		}
+
+		// Inject replay events into eventLog (not via eventCh — avoids deadlock)
+		for _, replay := range replays {
+			if replay.Type == "replay" {
+				ev, _, err := r.wrapper.Protocol.ReadEvent([]byte(replay.Line))
+				if err != nil || ev.Type == "" {
+					continue
+				}
+				proc.InjectHistory([]cli.EventEntry{{
+					Time:    time.Now().UnixMilli(),
+					Type:    ev.Type,
+					Summary: cli.TruncateRunes(ev.Result, 200),
+				}})
+			}
+		}
+
+		// Inject persisted JSONL history
+		if len(sess.persistedHistory) > 0 {
+			proc.InjectHistory(sess.persistedHistory)
+		}
+
+		sess.ReattachProcess(proc, state.SessionID)
+
+		r.mu.Lock()
+		if !sess.Exempt {
+			r.activeCount++
+		}
+		r.storeGen++
+		r.mu.Unlock()
+
+		reconnected++
+		slog.Info("session reconnected via shim",
+			"key", state.Key,
+			"session_id", state.SessionID,
+			"replayed", len(replays))
+	}
+
+	if reconnected > 0 {
+		r.notifyChange()
+		slog.Info("shim reconnect complete", "count", reconnected)
+	}
+}
+
 // SetOnChange registers a callback invoked when the session list changes.
 func (r *Router) SetOnChange(fn func()) {
 	r.mu.Lock()
@@ -474,6 +585,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	}
 
 	spawnOpts := cli.SpawnOptions{
+		Key:             key,
 		Model:           model,
 		ResumeID:        resumeID,
 		ExtraArgs:       args,
@@ -1011,12 +1123,18 @@ func (r *Router) Shutdown() {
 		slog.Error("save known session IDs on shutdown", "err", err)
 	}
 
+	// Detach shim processes (keep them alive for reconnect after restart)
+	// instead of Close (which would kill the CLI).
 	var wg sync.WaitGroup
 	for _, proc := range procs {
 		wg.Add(1)
 		go func(p processIface) {
 			defer wg.Done()
-			p.Close()
+			if dp, ok := p.(interface{ Detach() }); ok {
+				dp.Detach()
+			} else {
+				p.Close()
+			}
 		}(proc)
 	}
 	wg.Wait()
@@ -1151,7 +1269,7 @@ func (r *Router) trackSessionID(id string) {
 // GetOrCreate call for this key will resume the given session ID.
 // If another session already targets the same sessionID, the existing key
 // is returned (deduplication) and no new entry is created.
-func (r *Router) RegisterForResume(key, sessionID, workspace string) (effectiveKey string) {
+func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string) (effectiveKey string) {
 	r.mu.Lock()
 	if _, exists := r.sessions[key]; exists {
 		r.mu.Unlock()
@@ -1169,6 +1287,9 @@ func (r *Router) RegisterForResume(key, sessionID, workspace string) (effectiveK
 		workspace: workspace,
 	}
 	s.setSessionID(sessionID)
+	if lastPrompt != "" {
+		s.lastPrompt.Store(lastPrompt)
+	}
 	r.trackSessionID(sessionID)
 	s.lastActive.Store(time.Now().UnixNano())
 	r.sessions[key] = s

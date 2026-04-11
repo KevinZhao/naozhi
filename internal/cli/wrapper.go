@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -11,10 +12,12 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/shim"
 )
 
 // SpawnOptions configures how a CLI process is spawned.
 type SpawnOptions struct {
+	Key             string // session key (used for shim naming)
 	Model           string
 	ResumeID        string   // session ID to resume (empty = new session)
 	ExtraArgs       []string // additional CLI args
@@ -23,12 +26,13 @@ type SpawnOptions struct {
 	TotalTimeout    time.Duration // kill process if total turn exceeds this
 }
 
-// Wrapper manages spawning CLI processes.
+// Wrapper manages spawning CLI processes via shim.
 type Wrapper struct {
-	CLIPath    string
-	CLIName    string // display name: "claude-code", "kiro"
-	CLIVersion string // semver from --version, e.g. "2.1.92"
-	Protocol   Protocol
+	CLIPath     string
+	CLIName     string // display name: "claude-code", "kiro"
+	CLIVersion  string // semver from --version, e.g. "2.1.92"
+	Protocol    Protocol
+	ShimManager *shim.Manager
 }
 
 // NewWrapper creates a Wrapper with the given CLI path and protocol.
@@ -67,12 +71,10 @@ func detectVersion(cliPath string) string {
 	if err != nil {
 		return ""
 	}
-	// Output is typically "2.1.92 (Claude Code)\n" or just "2.1.92\n"
 	s := strings.TrimSpace(string(out))
 	if i := strings.IndexByte(s, ' '); i > 0 {
 		s = s[:i]
 	}
-	// Sanity check: must look like a version (digits and dots), cap length
 	if len(s) > 32 {
 		s = s[:32]
 	}
@@ -95,12 +97,10 @@ func detectCLI(backend string) string {
 		}
 	}
 
-	// Fallback: check PATH
 	if p, err := exec.LookPath(name); err == nil {
 		return p
 	}
 
-	// Last resort: bare name, let exec resolve at spawn time
 	return name
 }
 
@@ -117,20 +117,15 @@ func candidatePaths(name string) []string {
 	}
 
 	var paths []string
-
-	// Native installer (all platforms)
 	paths = append(paths, filepath.Join(home, ".local", "bin", name+ext))
 
 	switch runtime.GOOS {
 	case "darwin":
-		// Homebrew Apple Silicon
 		paths = append(paths, filepath.Join("/opt/homebrew/bin", name))
-		// Homebrew Intel
 		paths = append(paths, filepath.Join("/usr/local/bin", name))
 	case "linux":
 		paths = append(paths, filepath.Join("/usr/local/bin", name))
 	case "windows":
-		// npm global (Windows)
 		if appdata := os.Getenv("APPDATA"); appdata != "" {
 			paths = append(paths, filepath.Join(appdata, "npm", name+".cmd"))
 		}
@@ -139,25 +134,48 @@ func candidatePaths(name string) []string {
 	return paths
 }
 
-// Spawn starts a new long-lived CLI process.
+// Spawn starts a new CLI process via shim and returns a connected Process.
 func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error) {
+	if w.ShimManager == nil {
+		return nil, fmt.Errorf("ShimManager not configured")
+	}
+
 	proto := w.Protocol.Clone()
-	args := proto.BuildArgs(opts)
+	cliArgs := proto.BuildArgs(opts)
 
 	cwd := opts.WorkingDir
 	if cwd == "" {
 		cwd = os.TempDir()
 	}
 
-	proc, err := newProcess(ctx, w.CLIPath, args, cwd, opts.NoOutputTimeout, opts.TotalTimeout, proto)
+	// Start shim → connect → auth → get hello
+	handle, err := w.ShimManager.StartShim(ctx, opts.Key, cliArgs, cwd)
 	if err != nil {
-		return nil, fmt.Errorf("spawn agent: %w", err)
+		return nil, fmt.Errorf("start shim: %w", err)
 	}
 
-	// Run protocol-specific initialization handshake before starting readLoop
+	// Drain replay messages (for fresh shim this is empty)
+	_, err = handle.DrainReplay()
+	if err != nil {
+		handle.Close()
+		return nil, fmt.Errorf("drain replay: %w", err)
+	}
+
+	cliPID := 0
+	if handle.Hello.CLIPID > 0 {
+		cliPID = handle.Hello.CLIPID
+	}
+
+	proc := newShimProcess(
+		handle.Conn, handle.Reader, handle.Writer,
+		proto, cliPID,
+		opts.NoOutputTimeout, opts.TotalTimeout,
+	)
+
+	// Protocol init handshake (stream-json: no-op; ACP: initialize + session/new)
 	rw := &JSONRW{
-		W: proc.stdin,
-		R: &bufioLineReader{scanner: proc.scanner},
+		W: proc.shimStdinWriter(),
+		R: &shimLineReader{proc: proc},
 	}
 	sessionID, err := proto.Init(rw, opts.ResumeID)
 	if err != nil {
@@ -168,6 +186,77 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 		proc.SessionID = sessionID
 	}
 
+	// If shim already captured session_id from init event during startup
+	if handle.Hello.SessionID != "" && proc.SessionID == "" {
+		proc.SessionID = handle.Hello.SessionID
+	}
+
 	proc.startReadLoop()
 	return proc, nil
+}
+
+// SpawnReconnect creates a Process by reconnecting to an existing shim.
+// Used after naozhi restart to resume an active session.
+func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64, proto Protocol) (*Process, []shim.ServerMsg, error) {
+	if w.ShimManager == nil {
+		return nil, nil, fmt.Errorf("ShimManager not configured")
+	}
+
+	handle, err := w.ShimManager.Reconnect(ctx, key, lastSeq)
+	if err != nil {
+		return nil, nil, fmt.Errorf("reconnect shim: %w", err)
+	}
+
+	// Drain replay
+	replays, err := handle.DrainReplay()
+	if err != nil {
+		handle.Close()
+		return nil, nil, fmt.Errorf("drain replay: %w", err)
+	}
+
+	cliPID := 0
+	if handle.Hello.CLIPID > 0 {
+		cliPID = handle.Hello.CLIPID
+	}
+
+	proc := newShimProcess(
+		handle.Conn, handle.Reader, handle.Writer,
+		proto.Clone(), cliPID,
+		0, 0, // timeouts will be set by router
+	)
+
+	if handle.Hello.SessionID != "" {
+		proc.SessionID = handle.Hello.SessionID
+	}
+
+	proc.startReadLoop()
+	return proc, replays, nil
+}
+
+// shimLineReader adapts Process shim connection to the LineReader interface.
+// Used during protocol Init handshake before readLoop starts.
+type shimLineReader struct {
+	proc *Process
+}
+
+func (r *shimLineReader) ReadLine() ([]byte, bool, error) {
+	// During Init, we need to read lines that come through the shim stdout wrapper.
+	// The shim sends {"type":"stdout","line":"..."} — we need to unwrap.
+	for {
+		rawLine, err := r.proc.shimR.ReadBytes('\n')
+		if err != nil {
+			return nil, true, err
+		}
+		var msg shimMsg
+		if json.Unmarshal(rawLine, &msg) != nil {
+			continue
+		}
+		if msg.Type == "stdout" {
+			return []byte(msg.Line), false, nil
+		}
+		if msg.Type == "cli_exited" {
+			return nil, true, fmt.Errorf("CLI exited during init")
+		}
+		// Skip other message types (stderr, pong, etc.) during init
+	}
 }

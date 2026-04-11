@@ -1,0 +1,519 @@
+package shim
+
+import (
+	"bufio"
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
+	"sync"
+	"syscall"
+	"time"
+)
+
+// Manager manages shim process lifecycle: starting, discovering, and reconnecting.
+type Manager struct {
+	stateDir        string
+	cliPath         string
+	idleTimeout     time.Duration
+	watchdogTimeout time.Duration
+	bufferSize      int
+	maxBufBytes     int64
+	maxShims        int
+	naozhiBin       string // path to naozhi binary for spawning shim subprocess
+
+	mu           sync.Mutex
+	shims        map[string]*ShimHandle // key → active shim handle
+	pendingShims int                    // spawn in progress, not yet in shims map
+}
+
+// ShimHandle represents a running shim that naozhi is connected to.
+type ShimHandle struct {
+	Conn       net.Conn
+	Reader     *bufio.Reader
+	Writer     *bufio.Writer
+	WriteMu    sync.Mutex
+	Token      []byte
+	State      State
+	Hello      ServerMsg
+	ClientDone chan struct{} // closed when this handle is invalidated
+	closeOnce  sync.Once
+}
+
+// ManagerConfig holds configuration for the shim manager.
+type ManagerConfig struct {
+	StateDir        string
+	CLIPath         string
+	IdleTimeout     time.Duration
+	WatchdogTimeout time.Duration
+	BufferSize      int
+	MaxBufBytes     int64
+	MaxShims        int
+}
+
+// NewManager creates a shim manager.
+func NewManager(cfg ManagerConfig) *Manager {
+	if cfg.StateDir == "" {
+		home, _ := os.UserHomeDir()
+		cfg.StateDir = filepath.Join(home, ".naozhi", "shims")
+	}
+	if cfg.MaxShims <= 0 {
+		cfg.MaxShims = 50
+	}
+	if cfg.BufferSize <= 0 {
+		cfg.BufferSize = 10000
+	}
+	if cfg.MaxBufBytes <= 0 {
+		cfg.MaxBufBytes = 50 * 1024 * 1024
+	}
+	if cfg.IdleTimeout <= 0 {
+		cfg.IdleTimeout = 4 * time.Hour
+	}
+	if cfg.WatchdogTimeout <= 0 {
+		cfg.WatchdogTimeout = 30 * time.Minute
+	}
+
+	// Find our own binary path for spawning shim subprocesses
+	naozhiBin, _ := os.Executable()
+
+	os.MkdirAll(cfg.StateDir, 0700) //nolint:errcheck
+
+	return &Manager{
+		stateDir:        cfg.StateDir,
+		cliPath:         cfg.CLIPath,
+		idleTimeout:     cfg.IdleTimeout,
+		watchdogTimeout: cfg.WatchdogTimeout,
+		bufferSize:      cfg.BufferSize,
+		maxBufBytes:     cfg.MaxBufBytes,
+		maxShims:        cfg.MaxShims,
+		naozhiBin:       naozhiBin,
+		shims:           make(map[string]*ShimHandle),
+	}
+}
+
+// StartShim spawns a new shim process for the given session key, connects to it,
+// and returns a ShimHandle with the authenticated connection.
+func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, cwd string) (*ShimHandle, error) {
+	// Reserve a slot atomically to prevent TOCTOU race with concurrent callers
+	m.mu.Lock()
+	if len(m.shims)+m.pendingShims >= m.maxShims {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("max shims reached (%d)", m.maxShims)
+	}
+	m.pendingShims++
+	m.mu.Unlock()
+
+	// Release the reserved slot on any failure path
+	slotReleased := false
+	defer func() {
+		if !slotReleased {
+			m.mu.Lock()
+			m.pendingShims--
+			m.mu.Unlock()
+		}
+	}()
+
+	keyHash := KeyHash(key)
+	socketPath := SocketPath(keyHash)
+	stateFile := StateFilePath(m.stateDir, keyHash)
+
+	// Build shim subprocess args
+	args := []string{"shim", "run",
+		"--key", key,
+		"--socket", socketPath,
+		"--state-file", stateFile,
+		"--buffer-size", fmt.Sprintf("%d", m.bufferSize),
+		"--max-buffer-bytes", fmt.Sprintf("%d", m.maxBufBytes),
+		"--idle-timeout", m.idleTimeout.String(),
+		"--watchdog-timeout", m.watchdogTimeout.String(),
+		"--cli-path", m.cliPath,
+		"--cwd", cwd,
+	}
+	for _, a := range cliArgs {
+		args = append(args, "--cli-arg", a)
+	}
+
+	// Use exec.Command (not CommandContext): shim must outlive naozhi.
+	// Context is only used for the startup handshake timeout below.
+	cmd := exec.Command(m.naozhiBin, args...)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	cmd.Env = os.Environ()
+
+	// Capture stdout for the ready message
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, fmt.Errorf("shim stdout pipe: %w", err)
+	}
+
+	if err := cmd.Start(); err != nil {
+		return nil, fmt.Errorf("start shim: %w", err)
+	}
+
+	// Read ready message (with timeout)
+	readyCh := make(chan struct {
+		token string
+		err   error
+	}, 1)
+	go func() {
+		scanner := bufio.NewScanner(stdout)
+		if scanner.Scan() {
+			var ready struct {
+				Status string `json:"status"`
+				PID    int    `json:"pid"`
+				Token  string `json:"token"`
+			}
+			if err := json.Unmarshal(scanner.Bytes(), &ready); err != nil {
+				readyCh <- struct {
+					token string
+					err   error
+				}{"", fmt.Errorf("parse ready: %w", err)}
+				return
+			}
+			if ready.Status != "ready" {
+				readyCh <- struct {
+					token string
+					err   error
+				}{"", fmt.Errorf("unexpected status: %s", ready.Status)}
+				return
+			}
+			readyCh <- struct {
+				token string
+				err   error
+			}{ready.Token, nil}
+		} else {
+			readyCh <- struct {
+				token string
+				err   error
+			}{"", fmt.Errorf("shim exited before ready")}
+		}
+	}()
+
+	var tokenB64 string
+	select {
+	case result := <-readyCh:
+		if result.err != nil {
+			cmd.Process.Kill() //nolint:errcheck
+			return nil, result.err
+		}
+		tokenB64 = result.token
+	case <-time.After(30 * time.Second):
+		cmd.Process.Kill() //nolint:errcheck
+		return nil, fmt.Errorf("shim ready timeout")
+	case <-ctx.Done():
+		cmd.Process.Kill() //nolint:errcheck
+		return nil, ctx.Err()
+	}
+
+	tokenRaw, err := base64.StdEncoding.DecodeString(tokenB64)
+	if err != nil {
+		return nil, fmt.Errorf("decode shim token: %w", err)
+	}
+
+	// Connect to shim socket
+	handle, err := m.connect(socketPath, tokenRaw, 0)
+	if err != nil {
+		cmd.Process.Kill() //nolint:errcheck
+		return nil, fmt.Errorf("connect to new shim: %w", err)
+	}
+
+	m.mu.Lock()
+	m.shims[key] = handle
+	m.pendingShims-- // slot fulfilled: transfer from pending to active
+	slotReleased = true
+	m.mu.Unlock()
+
+	return handle, nil
+}
+
+// Reconnect connects to an existing shim identified by its state file.
+// lastSeq is the last received sequence number for replay positioning.
+func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*ShimHandle, error) {
+	keyHash := KeyHash(key)
+	stateFile := StateFilePath(m.stateDir, keyHash)
+
+	state, err := ReadStateFile(stateFile)
+	if err != nil {
+		return nil, fmt.Errorf("read state file: %w", err)
+	}
+
+	// Validate shim is alive
+	if err := syscall.Kill(state.ShimPID, 0); err != nil {
+		RemoveStateFile(stateFile)
+		return nil, fmt.Errorf("shim PID %d not alive: %w", state.ShimPID, err)
+	}
+
+	// Validate shim binary identity via /proc/pid/exe (Linux only)
+	if exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", state.ShimPID)); err == nil {
+		if exePath != m.naozhiBin {
+			syscall.Kill(state.ShimPID, syscall.SIGUSR2) //nolint:errcheck
+			RemoveStateFile(stateFile)
+			return nil, fmt.Errorf("shim PID %d binary mismatch: got %s, want %s", state.ShimPID, exePath, m.naozhiBin)
+		}
+	} else {
+		slog.Warn("binary identity check skipped", "pid", state.ShimPID, "err", err)
+	}
+
+	// Validate socket path matches expected path exactly (prevents path injection)
+	expectedSocket := SocketPath(keyHash)
+	if state.Socket != expectedSocket {
+		return nil, fmt.Errorf("socket path mismatch: got %s, expected %s", state.Socket, expectedSocket)
+	}
+
+	tokenRaw, err := base64.StdEncoding.DecodeString(state.AuthToken)
+	if err != nil {
+		return nil, fmt.Errorf("decode token: %w", err)
+	}
+
+	handle, err := m.connect(state.Socket, tokenRaw, lastSeq)
+	if err != nil {
+		return nil, err
+	}
+	handle.State = state
+
+	m.mu.Lock()
+	m.shims[key] = handle
+	m.mu.Unlock()
+
+	return handle, nil
+}
+
+// connect establishes an authenticated connection to a shim socket.
+func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*ShimHandle, error) {
+	conn, err := net.DialTimeout("unix", socketPath, 10*time.Second)
+	if err != nil {
+		return nil, fmt.Errorf("dial shim: %w", err)
+	}
+
+	reader := bufio.NewReaderSize(conn, 16*1024*1024) // 16MB initial buffer (shim is trusted; spawned by us)
+	writer := bufio.NewWriter(conn)
+
+	// Send attach with token
+	attach := ClientMsg{
+		Type:  "attach",
+		Token: base64.StdEncoding.EncodeToString(token),
+		Seq:   lastSeq,
+	}
+	data, _ := json.Marshal(attach)
+	conn.SetWriteDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
+	writer.Write(data)                                      //nolint:errcheck
+	writer.Write([]byte{'\n'})                              //nolint:errcheck
+	if err := writer.Flush(); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("write attach: %w", err)
+	}
+	conn.SetWriteDeadline(time.Time{}) //nolint:errcheck
+
+	// Read hello or auth_failed
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
+	helloLine, err := reader.ReadBytes('\n')
+	if err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("read hello: %w", err)
+	}
+	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
+
+	var hello ServerMsg
+	if err := json.Unmarshal(helloLine, &hello); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("parse hello: %w", err)
+	}
+	if hello.Type == "auth_failed" {
+		conn.Close()
+		return nil, fmt.Errorf("shim auth failed: %s", hello.Msg)
+	}
+	if hello.Type != "hello" {
+		conn.Close()
+		return nil, fmt.Errorf("unexpected message type: %s", hello.Type)
+	}
+
+	return &ShimHandle{
+		Conn:       conn,
+		Reader:     reader,
+		Writer:     writer,
+		Token:      token,
+		Hello:      hello,
+		ClientDone: make(chan struct{}),
+	}, nil
+}
+
+// Discover scans the state directory for existing shim state files.
+// Returns states for shims whose PIDs are still alive.
+func (m *Manager) Discover() ([]State, error) {
+	entries, err := os.ReadDir(m.stateDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	var states []State
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(m.stateDir, e.Name())
+		state, err := ReadStateFile(path)
+		if err != nil {
+			slog.Warn("removing corrupt state file", "path", path, "err", err)
+			RemoveStateFile(path)
+			continue
+		}
+		// Check if shim is alive
+		if err := syscall.Kill(state.ShimPID, 0); err != nil {
+			slog.Info("removing stale shim state file", "path", path, "pid", state.ShimPID, "err", err)
+			RemoveStateFile(path)
+			continue
+		}
+		// Validate binary identity to detect PID reuse
+		if exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", state.ShimPID)); err == nil {
+			if exePath != m.naozhiBin {
+				slog.Info("removing stale shim state file (binary mismatch)", "path", path, "pid", state.ShimPID)
+				RemoveStateFile(path)
+				continue
+			}
+		}
+		slog.Info("discovered live shim", "key", state.Key, "pid", state.ShimPID)
+		states = append(states, state)
+	}
+	return states, nil
+}
+
+// SendShimMsg sends a ClientMsg over the handle's connection.
+func (h *ShimHandle) SendMsg(msg ClientMsg) error {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	h.WriteMu.Lock()
+	defer h.WriteMu.Unlock()
+	h.Writer.Write(data)         //nolint:errcheck
+	h.Writer.Write([]byte{'\n'}) //nolint:errcheck
+	return h.Writer.Flush()
+}
+
+// ReadMsg reads the next ServerMsg from the handle's connection.
+func (h *ShimHandle) ReadMsg() (ServerMsg, error) {
+	line, err := h.Reader.ReadBytes('\n')
+	if err != nil {
+		return ServerMsg{}, err
+	}
+	var msg ServerMsg
+	if err := json.Unmarshal(line, &msg); err != nil {
+		return ServerMsg{}, fmt.Errorf("parse server msg: %w", err)
+	}
+	return msg, nil
+}
+
+// DrainReplay reads and returns all replay messages until replay_done.
+// Must be called immediately after connect, before starting the live read loop.
+func (h *ShimHandle) DrainReplay() ([]ServerMsg, error) {
+	var replays []ServerMsg
+	for {
+		msg, err := h.ReadMsg()
+		if err != nil {
+			return replays, fmt.Errorf("drain replay: %w", err)
+		}
+		switch msg.Type {
+		case "replay":
+			replays = append(replays, msg)
+		case "replay_done":
+			return replays, nil
+		case "cli_exited":
+			// CLI already exited before we connected
+			replays = append(replays, msg)
+			return replays, nil
+		default:
+			slog.Debug("unexpected message during replay", "type", msg.Type)
+		}
+	}
+}
+
+// Close closes the shim connection and signals done.
+func (h *ShimHandle) Close() {
+	h.closeOnce.Do(func() { close(h.ClientDone) })
+	h.Conn.Close()
+}
+
+// Detach sends a detach message and closes the connection.
+func (h *ShimHandle) Detach() {
+	h.SendMsg(ClientMsg{Type: "detach"}) //nolint:errcheck
+	h.Close()
+}
+
+// Shutdown sends a shutdown message and closes the connection.
+func (h *ShimHandle) Shutdown() {
+	h.SendMsg(ClientMsg{Type: "shutdown"}) //nolint:errcheck
+	h.Close()
+}
+
+// StopAll sends shutdown to all known shims.
+func (m *Manager) StopAll(ctx context.Context) {
+	m.mu.Lock()
+	handles := make(map[string]*ShimHandle, len(m.shims))
+	for k, v := range m.shims {
+		handles[k] = v
+	}
+	m.mu.Unlock()
+
+	for key, h := range handles {
+		slog.Info("shutting down shim", "key", key)
+		h.Shutdown()
+	}
+}
+
+// DetachAll sends detach to all known shims (used during graceful shutdown).
+func (m *Manager) DetachAll() {
+	m.mu.Lock()
+	handles := make(map[string]*ShimHandle, len(m.shims))
+	for k, v := range m.shims {
+		handles[k] = v
+	}
+	m.mu.Unlock()
+
+	for _, h := range handles {
+		h.Detach()
+	}
+}
+
+// Remove removes a shim handle from the manager's tracking.
+func (m *Manager) Remove(key string) {
+	m.mu.Lock()
+	delete(m.shims, key)
+	m.mu.Unlock()
+}
+
+// CLIPath returns the configured CLI binary path.
+func (m *Manager) CLIPath() string {
+	return m.cliPath
+}
+
+// checkPeerUID verifies the connecting peer has the same UID via SO_PEERCRED.
+func checkPeerUID(conn net.Conn) bool {
+	uc, ok := conn.(*net.UnixConn)
+	if !ok {
+		return false
+	}
+	raw, err := uc.SyscallConn()
+	if err != nil {
+		return false
+	}
+	var cred *syscall.Ucred
+	var credErr error
+	raw.Control(func(fd uintptr) { //nolint:errcheck
+		cred, credErr = syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+	})
+	if credErr != nil || cred == nil {
+		return false
+	}
+	return cred.Uid == uint32(os.Getuid())
+}
+
+// VerifyPeerUID is exported for use by the shim server's accept handler.
+var VerifyPeerUID = checkPeerUID

@@ -19,6 +19,8 @@ session:
     no_output_timeout: "1800s"
     total_timeout: "14400s"
   store_path: "~/.naozhi/sessions.json"
+  shim:
+    idle_timeout: "8h"
 
 agents:
   code-reviewer:

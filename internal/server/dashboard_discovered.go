@@ -190,6 +190,11 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
+	// Immediately remove the killed PID from the discovery cache so the
+	// frontend's fetchSessions() call (triggered right after the 202 response)
+	// won't see the stale entry and re-render the old card in the sidebar.
+	h.discoveryCache.evictPID(req.PID)
+
 	// Capture locals for the background goroutine.
 	pid := req.PID
 	sessionID := req.SessionID

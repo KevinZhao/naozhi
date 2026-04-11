@@ -232,6 +232,7 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 	d.handlerWg.Add(1)
 	go func() {
 		defer d.handlerWg.Done()
+		defer platform.RecoverHandler("discord")
 		for _, p := range pending {
 			data, mime, err := downloadURL(p.url)
 			if err != nil {

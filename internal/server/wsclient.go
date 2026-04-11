@@ -2,6 +2,8 @@ package server
 
 import (
 	"encoding/json"
+	"log/slog"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -58,6 +60,10 @@ func (c *wsClient) SendRaw(data []byte) {
 
 func (c *wsClient) readPump() {
 	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic in ws readPump (recovered)",
+				"remote", c.remoteIP, "panic", r, "stack", string(debug.Stack()))
+		}
 		c.closeDone()
 		c.hub.unregister(c)
 		c.conn.Close()

@@ -310,6 +310,7 @@ func (r *wsRelay) writeJSON(v any) {
 	}
 	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := conn.WriteJSON(v); err != nil {
-		slog.Warn("relay write failed", "node", r.node.ID, "err", err)
+		slog.Warn("relay write failed, closing connection for reconnect", "node", r.node.ID, "err", err)
+		conn.Close() // triggers readLoop exit → automatic reconnect
 	}
 }

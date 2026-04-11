@@ -199,6 +199,7 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 			w.handlerWg.Add(1)
 			go func() {
 				defer w.handlerWg.Done()
+				defer platform.RecoverHandler("weixin")
 				w.handler(ctx, incoming)
 			}()
 		}

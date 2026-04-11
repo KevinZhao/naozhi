@@ -57,6 +57,7 @@ func (f *Feishu) startWebSocket() error {
 			go func() {
 				defer f.wg.Done()
 				defer func() { <-msgSem }()
+				defer platform.RecoverHandler("feishu ws image")
 				msg := pe.Msg
 				data, mime, err := f.DownloadImage(ctx, pe.MessageID, pe.MediaKey)
 				if err != nil {
@@ -78,6 +79,7 @@ func (f *Feishu) startWebSocket() error {
 			go func() {
 				defer f.wg.Done()
 				defer func() { <-msgSem }()
+				defer platform.RecoverHandler("feishu ws audio")
 				msg := pe.Msg
 				f.handleAudio(ctx, handler, msg, pe.MessageID, pe.MediaKey)
 			}()
@@ -93,6 +95,7 @@ func (f *Feishu) startWebSocket() error {
 			go func() {
 				defer f.wg.Done()
 				defer func() { <-msgSem }()
+				defer platform.RecoverHandler("feishu ws text")
 				handler(ctx, pe.Msg)
 			}()
 		}

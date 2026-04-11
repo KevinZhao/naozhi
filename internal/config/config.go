@@ -90,6 +90,16 @@ type SessionConfig struct {
 	StorePath string         `yaml:"store_path"`
 	CWD       string         `yaml:"cwd"`       // default working directory for CLI processes
 	Workspace string         `yaml:"workspace"` // deprecated alias for cwd (backward compat)
+	Shim      ShimConfig     `yaml:"shim"`
+}
+
+type ShimConfig struct {
+	BufferSize      int    `yaml:"buffer_size"`         // ring buffer max lines (default: 10000)
+	MaxBufferBytes  string `yaml:"max_buffer_bytes"`    // ring buffer max bytes (default: "50MB")
+	IdleTimeout     string `yaml:"idle_timeout"`        // shim exits after no connection (default: "4h")
+	WatchdogTimeout string `yaml:"disconnect_watchdog"` // disconnect no-output timeout (default: "30m")
+	MaxShims        int    `yaml:"max_shims"`           // max concurrent shims (default: 6)
+	StateDir        string `yaml:"state_dir"`           // shim state directory (default: ~/.naozhi/shims)
 }
 
 type WatchdogConfig struct {
