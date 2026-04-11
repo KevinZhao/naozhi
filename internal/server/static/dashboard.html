@@ -52,10 +52,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 
 .main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0}
 .main-header{padding:8px 20px;border-bottom:1px solid #30363d;flex-shrink:0;display:flex;align-items:center;gap:8px}
-.main-header-content{flex:1;min-width:0;display:flex;align-items:center;gap:10px}
-.main-header h2{font-size:16px;color:#f0f6fc;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;flex-shrink:1;min-width:0}
-.main-header .detail{font-size:13px;color:#8b949e;display:flex;gap:8px;flex-shrink:0;align-items:center}
-.main-header .detail span{white-space:nowrap}
+.main-header-content{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.main-header h2{font-size:16px;color:#f0f6fc;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.main-header .detail{font-size:12px;color:#6e7681;display:flex;justify-content:space-between;align-items:center;gap:8px}
+.main-header .detail-left,.main-header .detail-right{display:flex;align-items:center;gap:6px;white-space:nowrap}
+.main-header .detail-cost{color:#8b949e;font-variant-numeric:tabular-nums}
+.main-header .detail-cost.has-cost{color:#e6edf3}
+.main-header .detail-cost.high-cost{color:#d29922}
 
 .events{flex:1;overflow-y:auto;overflow-x:hidden;padding:16px 0;scrollbar-width:thin;scrollbar-color:#30363d transparent;min-width:0}
 .event{display:flex;gap:10px;padding:6px 24px;max-width:760px;margin-left:auto;margin-right:auto;width:100%;box-sizing:border-box}
@@ -155,9 +158,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .rb-tool-row .running-status{flex:1;min-width:0;display:flex;align-items:center;gap:4px;overflow:hidden}
 .rb-tool-row .running-dot{display:inline-block;width:6px;height:6px;border-radius:50%;background:#58a6ff;flex-shrink:0;animation:pulse 1.5s ease-in-out infinite}
 #tool-activity{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.tool-count{color:#8b949e;margin-left:6px;font-size:12px}
-.rb-agents{max-height:80px;overflow-y:auto}
-.rb-agent-row{display:flex;align-items:center;gap:5px;padding:2px 12px 2px 24px;font-size:11px;color:#8b949e;border-top:1px solid #21262d44}
+.rb-elapsed{color:#8b949e;font-size:12px;flex-shrink:0;font-variant-numeric:tabular-nums}
+.rb-thinking-summary{padding:0 12px 4px 22px;font-size:11px;color:#8b949e;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rb-agents{max-height:120px;overflow-y:auto}
+.rb-agent-row{display:flex;align-items:center;gap:5px;padding:3px 12px 3px 22px;font-size:11px;color:#8b949e}
+.rb-agent-row .sa-dot{display:inline-block;width:5px;height:5px;border-radius:50%;background:#58a6ff;flex-shrink:0;animation:pulse 1.5s ease-in-out infinite}
+.rb-agent-row.done .sa-dot{background:#3fb950;animation:none}
+.rb-agent-row .sa-bg{color:#d29922;margin-right:2px;font-size:10px}
+.rb-agent-row .sa-name{color:#c9d1d9;font-weight:500}
+.rb-agent-row .sa-detail{color:#6e7681;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rb-agent-row .sa-stat{color:#6e7681;flex-shrink:0}
+.rb-agent-row.done .sa-name{color:#6e7681}
+.rb-agent-row.done .sa-detail{color:#484f58}
+.rb-team-header{padding:3px 12px 1px 22px;font-size:11px;color:#d29922;display:flex;align-items:center;gap:4px}
+.rb-team-header .team-icon{font-size:10px}
+.rb-team-header .team-count{color:#6e7681;font-size:10px}
+.rb-stats{padding:2px 12px 4px 22px;font-size:11px;color:#6e7681;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
 /* Toast */
 .toast{position:fixed;bottom:20px;right:20px;background:#da3633;color:#fff;padding:8px 16px;border-radius:8px;font-size:14px;z-index:100;opacity:0;pointer-events:none;transition:opacity .3s}
@@ -287,7 +303,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
   .btn-mobile-back:active{color:#c9d1d9}
   /* Main header: single-line flex, safe area top+sides */
   .main-header{gap:0;padding:max(8px,env(safe-area-inset-top)) max(12px,env(safe-area-inset-right)) 8px max(12px,env(safe-area-inset-left));overflow:hidden}
-  .main-header-content{flex:1;min-width:0;display:flex;align-items:center;gap:8px;overflow:hidden}
+  .main-header-content{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;overflow:hidden}
   /* Input area: safe area bottom+sides padding */
   .input-area{flex-shrink:0;padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right));padding-bottom:max(12px,env(safe-area-inset-bottom))}
   /* Dismiss button always visible on touch screens */
@@ -723,10 +739,10 @@ function sessionCardHtml(s) {
 
 function resumeRecentSession(sessionId) {
   const found = historySessionsData.find(r => r.session_id === sessionId);
-  resumeRecentById(sessionId, found ? found.workspace : '');
+  resumeRecentById(sessionId, found ? found.workspace : '', found ? (found.last_prompt || found.summary || '') : '');
 }
 
-async function resumeRecentById(sessionId, workspace) {
+async function resumeRecentById(sessionId, workspace, lastPrompt) {
   // Guard: if already resuming this session, find the managed key and select it
   for (const s of allSessionsCache) {
     if (s.session_id === sessionId) { selectSession(s.key, s.node || 'local'); return; }
@@ -738,7 +754,7 @@ async function resumeRecentById(sessionId, workspace) {
     if (token) headers['Authorization'] = 'Bearer ' + token;
     const r = await fetch('/api/sessions/resume', {
       method: 'POST', headers,
-      body: JSON.stringify({session_id: sessionId, workspace: workspace || ''})
+      body: JSON.stringify({session_id: sessionId, workspace: workspace || '', last_prompt: lastPrompt || ''})
     });
     if (!r.ok) { showToast('resume failed'); return; }
     const data = await r.json();
@@ -820,6 +836,7 @@ function updateStatusBar() {
 
 function selectSession(key, node) {
   node = node || 'local';
+  resetTurnState();
   // Recent session card click → trigger resume flow
   // Discovered session card click → trigger preview flow
   // Save draft for current session before switching
@@ -910,22 +927,18 @@ async function dismissSession(key, node) {
 function renderMainShell() {
   const main = document.getElementById('main');
   const s = sessionsData[sid(selectedKey, selectedNode)] || {};
-  const deathInfo = s.death_reason ? '<span class="death-tag">' + esc(s.death_reason.replace(/_/g,' ')) + '</span>' : '';
-  const chatInfo = (s.chat_type && s.chat_id) ? esc(s.chat_type) + ':' + esc(s.chat_id).substring(0,12) : '';
-  const prompt = s.last_prompt || '';
-  const nodeDisplay = isMultiNode() && selectedNode && selectedNode !== 'local' ? (function() {
-    const nd = nodesData[selectedNode];
-    const label = nd && nd.display_name ? esc(selectedNode) + ' (' + esc(nd.display_name) + ')' : esc(selectedNode);
-    return '<span class="node-info">' + label + '</span>';
-  })() : '';
 
   const keyParts = (selectedKey || '').split(':');
   const agentIsGeneric = !s.agent || s.agent === 'general';
   // Primary title: user's latest prompt. Fallback to agent name or key tail.
   const displayName = s.summary || s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyParts[keyParts.length - 1] || selectedKey || '';
-  // Only show chat info for non-dashboard platforms (feishu, slack, etc.)
-  const platform = s.platform || keyParts[0] || '';
-  const showChatInfo = platform !== 'dashboard' && platform !== 'local' && chatInfo;
+
+  // Detail line: left = CLI name + version, right = cost (hidden for kiro)
+  const cliLabel = s.cli_name ? esc(s.cli_name) + (s.cli_version ? ' v' + esc(s.cli_version) : '') : '';
+  const showCost = s.cli_name !== 'kiro';
+  const cost = s.total_cost || 0;
+  const costText = '$' + (cost < 0.01 && cost > 0 ? cost.toFixed(4) : cost.toFixed(2));
+  const costClass = 'detail-cost' + (cost >= 1 ? ' high-cost' : cost > 0 ? ' has-cost' : '');
 
   main.innerHTML =
     '<div class="main-header">' +
@@ -933,19 +946,20 @@ function renderMainShell() {
       '<div class="main-header-content">' +
       '<h2>' + esc(displayName) + '</h2>' +
       '<div class="detail">' +
-        (s.state ? '<span class="badge ' + s.state + '">' + s.state + '</span>' : '') +
-        deathInfo +
-        nodeDisplay +
-        (showChatInfo ? '<span>' + chatInfo + '</span>' : '') +
+        '<span class="detail-left">' + cliLabel + '</span>' +
+        (showCost ? '<span class="' + costClass + '" id="header-cost">' + costText + '</span>' : '') +
       '</div>' +
       '</div>' +
     '</div>' +
     '<div class="events" id="events-scroll"></div>' +
     '<div class="running-banner" id="running-banner" style="display:none">' +
       '<div class="rb-tool-row">' +
-        '<span class="running-status"><span class="running-dot"></span><span id="tool-activity">Working...</span><span class="tool-count" id="tool-count"></span></span>' +
+        '<span class="running-status"><span class="running-dot"></span><span id="tool-activity">Working...</span></span>' +
+        '<span class="rb-elapsed" id="rb-elapsed"></span>' +
       '</div>' +
+      '<div class="rb-thinking-summary" id="rb-thinking-summary" style="display:none"></div>' +
       '<div class="rb-agents" id="rb-agents"></div>' +
+      '<div class="rb-stats" id="rb-stats" style="display:none"></div>' +
     '</div>' +
     '<div class="input-area' + (voiceInputMode ? ' voice-mode' : '') + '" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
@@ -1033,7 +1047,7 @@ function appendEvents(events) {
   if (empty) empty.remove();
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   events.forEach(e => {
-    if (e.type === 'tool_use' || e.type === 'result' || e.type === 'agent') return;
+    if (e.type === 'tool_use' || e.type === 'result' || e.type === 'agent' || e.type === 'task_start' || e.type === 'task_progress' || e.type === 'task_done') return;
     // Deduplicate: skip events at or before the last rendered time
     if (e.time && e.time <= lastRenderedEventTime) return;
     const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h);
@@ -1045,7 +1059,7 @@ function appendEvents(events) {
 }
 
 function eventHtml(e) {
-  if (e.type === 'tool_use' || e.type === 'result' || e.type === 'thinking' || e.type === 'agent') return '';
+  if (e.type === 'tool_use' || e.type === 'result' || e.type === 'thinking' || e.type === 'agent' || e.type === 'task_start' || e.type === 'task_progress' || e.type === 'task_done') return '';
   // Filter out Claude Code system XML injected as user messages
   const raw = e.detail || e.summary || '';
   if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return '';
@@ -1272,11 +1286,46 @@ async function sendMessage() {
 
 // --- Running banner: tool activity + agent tracking ---
 
-let turnState = { toolCount: 0, currentTool: null, agents: [], isThinking: false };
+let turnState = {
+  toolCount: 0, currentTool: null, agents: [], isThinking: false,
+  thinkingSummary: '', toolCounts: {}, toolOrder: [], turnStartTime: 0, isWriting: false,
+  timerId: null
+};
 
 function resetTurnState() {
-  turnState = { toolCount: 0, currentTool: null, agents: [], isThinking: false };
+  if (turnState.timerId) clearInterval(turnState.timerId);
+  turnState = {
+    toolCount: 0, currentTool: null, agents: [], isThinking: false,
+    thinkingSummary: '', toolCounts: {}, toolOrder: [], turnStartTime: 0, isWriting: false,
+    timerId: null
+  };
   refreshBanner();
+}
+
+function startTurnTimer() {
+  if (turnState.turnStartTime) return;
+  turnState.turnStartTime = Date.now();
+  turnState.timerId = setInterval(function() {
+    const el = document.getElementById('rb-elapsed');
+    if (!el || !turnState.turnStartTime) return;
+    const s = Math.floor((Date.now() - turnState.turnStartTime) / 1000);
+    el.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+  }, 1000);
+}
+
+function trackTool(name) {
+  if (!name) return;
+  if (!turnState.toolCounts[name]) {
+    turnState.toolCounts[name] = 0;
+    turnState.toolOrder.push(name);
+  }
+  turnState.toolCounts[name]++;
+}
+
+function fmtDuration(ms) {
+  if (ms < 1000) return ms + 'ms';
+  var s = ms / 1000;
+  return s < 60 ? s.toFixed(1) + 's' : Math.floor(s / 60) + 'm' + Math.floor(s % 60) + 's';
 }
 
 const toolVerbs = {
@@ -1293,38 +1342,202 @@ function toolVerb(tool, summary) {
 
 function refreshBanner() {
   const actEl = document.getElementById('tool-activity');
-  const countEl = document.getElementById('tool-count');
+  const thinkEl = document.getElementById('rb-thinking-summary');
   const agEl = document.getElementById('rb-agents');
+  const statsEl = document.getElementById('rb-stats');
+
+  // Line 1: current activity
   if (actEl) {
     if (turnState.currentTool) {
       actEl.textContent = toolVerb(turnState.currentTool.tool, turnState.currentTool.summary);
     } else if (turnState.isThinking) {
       actEl.textContent = 'Thinking...';
+    } else if (turnState.isWriting) {
+      actEl.textContent = 'Writing...';
     } else {
       actEl.textContent = 'Working...';
     }
   }
-  if (countEl) {
-    countEl.textContent = turnState.toolCount > 0 ? '\u00b7 ' + turnState.toolCount + ' tools' : '';
+
+  // Thinking summary line (only during thinking)
+  if (thinkEl) {
+    if (turnState.isThinking && turnState.thinkingSummary) {
+      thinkEl.textContent = turnState.thinkingSummary;
+      thinkEl.style.display = '';
+    } else {
+      thinkEl.style.display = 'none';
+    }
   }
+
+  // Agent rows
   if (agEl) {
-    agEl.innerHTML = turnState.agents.map(a =>
-      '<div class="rb-agent-row">' +
-        '<span class="sa-running-dot"></span>' +
-        (a.background ? '<span class="sa-bg-badge">bg</span>' : '') +
-        '<span class="sa-name">' + esc(a.name) + '</span>' +
-        (a.activity ? '<span class="sa-activity">' + esc(a.activity) + '</span>' : '') +
-      '</div>'
-    ).join('');
+    agEl.innerHTML = renderAgentRows();
   }
+
+  // Stats line (hidden when agents are shown)
+  if (statsEl) {
+    var hasAgents = turnState.agents.length > 0;
+    if (!hasAgents && turnState.toolOrder.length > 0) {
+      statsEl.textContent = turnState.toolOrder.map(function(t) {
+        return t + ' \u00d7' + turnState.toolCounts[t];
+      }).join(' \u00b7 ');
+      statsEl.style.display = '';
+    } else {
+      statsEl.style.display = 'none';
+    }
+  }
+}
+
+function renderAgentRows() {
+  var agents = turnState.agents;
+  if (agents.length === 0) return '';
+
+  // Separate solo subagents from team members
+  var solos = [];
+  var teams = {}; // teamName -> [agent, ...]
+  for (var i = 0; i < agents.length; i++) {
+    var a = agents[i];
+    if (a.teamName) {
+      if (!teams[a.teamName]) teams[a.teamName] = [];
+      teams[a.teamName].push(a);
+    } else {
+      solos.push(a);
+    }
+  }
+
+  var html = '';
+  // Solo subagents
+  for (var j = 0; j < solos.length; j++) {
+    html += agentRowHtml(solos[j]);
+  }
+  // Team groups
+  var teamNames = Object.keys(teams);
+  for (var k = 0; k < teamNames.length; k++) {
+    var tn = teamNames[k];
+    var members = teams[tn];
+    html += '<div class="rb-team-header"><span class="team-icon">\u25c6</span>' + esc(tn) + '<span class="team-count">' + members.length + ' agents</span></div>';
+    for (var m = 0; m < members.length; m++) {
+      html += agentRowHtml(members[m]);
+    }
+  }
+  return html;
+}
+
+function agentRowHtml(a) {
+  var isDone = a.status === 'completed' || a.status === 'error';
+  var cls = 'rb-agent-row' + (isDone ? ' done' : '');
+  var label = a.name || a.description || 'agent';
+  var parts = '<div class="' + cls + '"><span class="sa-dot"></span>';
+  if (a.background) parts += '<span class="sa-bg">[bg]</span>';
+  parts += '<span class="sa-name">' + esc(label) + '</span>';
+  // Detail: lastTool or description
+  var detail = '';
+  if (a.lastTool) detail = a.lastTool;
+  else if (a.description && a.name) detail = a.description;
+  if (detail) parts += '<span class="sa-detail">\u00b7 ' + esc(detail) + '</span>';
+  // Stats
+  var stat = '';
+  if (a.toolUses > 0) stat += a.toolUses + ' calls';
+  if (a.durationMs > 0) stat += (stat ? ' \u00b7 ' : '') + fmtDuration(a.durationMs);
+  if (isDone) stat += (stat ? ' \u00b7 ' : '') + '\u2713';
+  if (stat) parts += '<span class="sa-stat">\u00b7 ' + stat + '</span>';
+  parts += '</div>';
+  return parts;
+}
+
+function findAgentByToolUseId(tuid) {
+  for (var i = 0; i < turnState.agents.length; i++) {
+    if (turnState.agents[i].toolUseId === tuid) return turnState.agents[i];
+  }
+  return null;
+}
+
+function findAgentByTaskId(tid) {
+  for (var i = 0; i < turnState.agents.length; i++) {
+    if (turnState.agents[i].taskId === tid) return turnState.agents[i];
+  }
+  return null;
 }
 
 function initAgentsFromSession() {
   const sd = sessionsData[sid(selectedKey, selectedNode || 'local')];
   if (sd && sd.subagents && sd.subagents.length > 0) {
-    turnState.agents = sd.subagents.map(sa => ({
-      name: sa.name, activity: sa.activity || '', background: !!sa.background
-    }));
+    turnState.agents = sd.subagents.map(function(sa) {
+      return {
+        toolUseId: '', taskId: '', name: sa.name, teamName: '',
+        description: sa.activity || '', background: !!sa.background,
+        lastTool: '', toolUses: 0, totalTokens: 0, durationMs: 0, status: 'running'
+      };
+    });
+  }
+}
+
+function applyEventToTurnState(ev) {
+  startTurnTimer();
+  switch (ev.type) {
+    case 'tool_use':
+      turnState.toolCount++;
+      trackTool(ev.tool || ev.summary);
+      turnState.currentTool = { tool: ev.tool || ev.summary, summary: ev.detail ? ev.detail.split('\n')[0].substring(0, 60) : '' };
+      turnState.isThinking = false;
+      turnState.isWriting = false;
+      turnState.thinkingSummary = '';
+      break;
+    case 'agent':
+      turnState.toolCount++;
+      trackTool('Agent');
+      turnState.currentTool = null;
+      turnState.isThinking = false;
+      turnState.isWriting = false;
+      turnState.thinkingSummary = '';
+      turnState.agents.push({
+        toolUseId: ev.tool_use_id || '', taskId: '',
+        name: ev.subagent || '', teamName: ev.team_name || '',
+        description: ev.summary || '', background: !!ev.background,
+        lastTool: '', toolUses: 0, totalTokens: 0, durationMs: 0, status: 'spawned'
+      });
+      break;
+    case 'task_start':
+      var a1 = findAgentByToolUseId(ev.tool_use_id);
+      if (a1) {
+        a1.taskId = ev.task_id;
+        a1.status = 'running';
+      }
+      break;
+    case 'task_progress':
+      var a2 = findAgentByTaskId(ev.task_id) || findAgentByToolUseId(ev.tool_use_id);
+      if (a2) {
+        if (!a2.taskId) a2.taskId = ev.task_id;
+        a2.status = 'running';
+        if (ev.summary) a2.description = ev.summary;
+        if (ev.last_tool) a2.lastTool = ev.last_tool;
+        if (ev.tool_uses) a2.toolUses = ev.tool_uses;
+        if (ev.tokens) a2.totalTokens = ev.tokens;
+        if (ev.duration_ms) a2.durationMs = ev.duration_ms;
+      }
+      break;
+    case 'task_done':
+      var a3 = findAgentByTaskId(ev.task_id) || findAgentByToolUseId(ev.tool_use_id);
+      if (a3) {
+        if (!a3.taskId) a3.taskId = ev.task_id;
+        a3.status = ev.status || 'completed';
+        if (ev.tool_uses) a3.toolUses = ev.tool_uses;
+        if (ev.tokens) a3.totalTokens = ev.tokens;
+        if (ev.duration_ms) a3.durationMs = ev.duration_ms;
+      }
+      break;
+    case 'thinking':
+      turnState.isThinking = true;
+      turnState.isWriting = false;
+      turnState.currentTool = null;
+      turnState.thinkingSummary = ev.summary || '';
+      break;
+    case 'text':
+      turnState.isThinking = false;
+      turnState.isWriting = true;
+      turnState.currentTool = null;
+      turnState.thinkingSummary = '';
+      break;
   }
 }
 
@@ -2133,7 +2346,7 @@ function renderTable(lines) {
 }
 
 function processEventsForDisplay(events) {
-  return events.filter(e => e.type !== 'tool_use' && e.type !== 'result' && e.type !== 'agent');
+  return events.filter(e => e.type !== 'tool_use' && e.type !== 'result' && e.type !== 'agent' && e.type !== 'task_start' && e.type !== 'task_progress' && e.type !== 'task_done');
 }
 
 function sid(key, node) { return key + '\t' + (node || 'local'); }
@@ -2368,24 +2581,18 @@ const wsm = {
         if (events[i].type === 'user' || events[i].type === 'result') { turnStart = i + 1; break; }
         if (i === 0) turnStart = 0;
       }
+      // Anchor timer to the actual turn start time, not Date.now()
+      if (turnStart < events.length && events[turnStart].time) {
+        turnState.turnStartTime = events[turnStart].time;
+        turnState.timerId = setInterval(function() {
+          var el = document.getElementById('rb-elapsed');
+          if (!el || !turnState.turnStartTime) return;
+          var s = Math.floor((Date.now() - turnState.turnStartTime) / 1000);
+          el.textContent = Math.floor(s / 60) + ':' + String(s % 60).padStart(2, '0');
+        }, 1000);
+      }
       for (let i = turnStart; i < events.length; i++) {
-        const ev = events[i];
-        if (ev.type === 'tool_use') {
-          turnState.toolCount++;
-          turnState.currentTool = { tool: ev.tool || ev.summary, summary: ev.detail ? ev.detail.split('\n')[0].substring(0, 60) : '' };
-          turnState.isThinking = false;
-        } else if (ev.type === 'agent') {
-          turnState.toolCount++;
-          turnState.currentTool = null;
-          turnState.agents.push({ name: ev.subagent || 'agent', activity: ev.summary || '', background: !!ev.background });
-          turnState.isThinking = false;
-        } else if (ev.type === 'thinking') {
-          turnState.isThinking = true;
-          turnState.currentTool = null;
-        } else if (ev.type === 'text') {
-          turnState.isThinking = false;
-          turnState.currentTool = null;
-        }
+        applyEventToTurnState(events[i]);
       }
     } else {
       // Incremental: accumulate additively, reset only on turn boundaries
@@ -2400,26 +2607,18 @@ const wsm = {
           }
           continue;
         }
-        if (ev.type === 'result') { resetTurnState(); continue; }
-        if (ev.type === 'tool_use') {
-          turnState.toolCount++;
-          turnState.currentTool = { tool: ev.tool || ev.summary, summary: ev.detail ? ev.detail.split('\n')[0].substring(0, 60) : '' };
-          turnState.isThinking = false;
-        } else if (ev.type === 'agent') {
-          turnState.toolCount++;
-          turnState.currentTool = null;
-          turnState.agents.push({ name: ev.subagent || 'agent', activity: ev.summary || '', background: !!ev.background });
-          turnState.isThinking = false;
-        } else if (ev.type === 'thinking') {
-          turnState.isThinking = true;
-          turnState.currentTool = null;
-        } else if (ev.type === 'text') {
-          turnState.isThinking = false;
-          turnState.currentTool = null;
+        if (ev.type === 'result') {
+          if (ev.cost) {
+            const sKey = sid(selectedKey, selectedNode);
+            if (sessionsData[sKey]) sessionsData[sKey].total_cost = ev.cost;
+          }
+          resetTurnState(); continue;
         }
+        applyEventToTurnState(ev);
       }
     }
     refreshBanner();
+    updateHeaderCost();
   },
 
   onEvent(msg) {
@@ -2427,7 +2626,7 @@ const wsm = {
     const ev = msg.event;
     if (!ev) return;
     if (ev.time > this.lastEventTimeWs) this.lastEventTimeWs = ev.time;
-    // Update header title when a new user message arrives
+    // Turn boundaries: reset state, don't feed into applyEventToTurnState
     if (ev.type === 'user') {
       const text = ev.detail || ev.summary || '';
       if (text) {
@@ -2435,29 +2634,18 @@ const wsm = {
         if (h2) h2.textContent = text;
       }
       resetTurnState();
-    }
-    // Update running banner with tool/agent/thinking activity
-    if (ev.type === 'tool_use') {
-      turnState.toolCount++;
-      turnState.currentTool = { tool: ev.tool || ev.summary, summary: ev.detail ? ev.detail.split('\n')[0].substring(0, 60) : '' };
-      turnState.isThinking = false;
-      refreshBanner();
-    } else if (ev.type === 'agent') {
-      turnState.toolCount++;
-      turnState.currentTool = null;
-      turnState.agents.push({ name: ev.subagent || 'agent', activity: ev.summary || '', background: !!ev.background });
-      turnState.isThinking = false;
-      refreshBanner();
-    } else if (ev.type === 'thinking') {
-      turnState.isThinking = true;
-      turnState.currentTool = null;
-      refreshBanner();
-    } else if (ev.type === 'text') {
-      turnState.isThinking = false;
-      turnState.currentTool = null;
+    } else if (ev.type === 'result') {
+      if (ev.cost) {
+        const sKey = sid(selectedKey, selectedNode);
+        if (sessionsData[sKey]) sessionsData[sKey].total_cost = ev.cost;
+        updateHeaderCost();
+      }
+      resetTurnState();
+    } else {
+      applyEventToTurnState(ev);
       refreshBanner();
     }
-    if (ev.type === 'tool_use' || ev.type === 'result' || ev.type === 'agent') return;
+    if (ev.type === 'tool_use' || ev.type === 'result' || ev.type === 'agent' || ev.type === 'task_start' || ev.type === 'task_progress' || ev.type === 'task_done') return;
     const html = eventHtml(ev);
     if (!html) return;
     const el = document.getElementById('events-scroll');
@@ -2557,22 +2745,18 @@ const wsm = {
 /* ===== WS Helper Functions ===== */
 
 function updateMainState(state, reason) {
-  const header = document.querySelector('.main-header');
-  if (!header) return;
-  const badge = header.querySelector('.badge');
-  if (badge) { badge.className = 'badge ' + state; badge.textContent = state; }
   const ia = document.getElementById('input-area');
   if (ia) ia.classList.toggle('disabled', false);
   updateSendButton(state);
-  if (reason) {
-    let dt = header.querySelector('.death-tag');
-    if (!dt) {
-      dt = document.createElement('span');
-      dt.className = 'death-tag';
-      if (badge) badge.insertAdjacentElement('afterend', dt);
-    }
-    dt.textContent = reason.replace(/_/g, ' ');
-  }
+}
+
+function updateHeaderCost() {
+  const s = sessionsData[sid(selectedKey, selectedNode)] || {};
+  const el = document.getElementById('header-cost');
+  if (!el) return;
+  const cost = s.total_cost || 0;
+  el.textContent = '$' + (cost < 0.01 && cost > 0 ? cost.toFixed(4) : cost.toFixed(2));
+  el.className = 'detail-cost' + (cost >= 1 ? ' high-cost' : cost > 0 ? ' has-cost' : '');
 }
 
 function flashSendBtn() {
@@ -2683,7 +2867,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node) {
         if (empty) empty.remove();
         const wasBottom = el2.scrollTop + el2.clientHeight >= el2.scrollHeight - 30;
         fresh.forEach(e => {
-          if (e.type === 'tool_use' || e.type === 'result' || e.type === 'agent') return;
+          if (e.type === 'tool_use' || e.type === 'result' || e.type === 'agent' || e.type === 'task_start' || e.type === 'task_progress' || e.type === 'task_done') return;
           const h = eventHtml(e); if (h) el2.insertAdjacentHTML('beforeend', h);
         });
         if (wasBottom) el2.scrollTop = el2.scrollHeight;

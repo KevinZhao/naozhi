@@ -14,8 +14,24 @@ type Event struct {
 	CostUSD   float64           `json:"total_cost_usd,omitempty"`
 	Message   *AssistantMessage `json:"message,omitempty"`
 
+	// Agent task fields (system/task_started, task_progress, task_notification).
+	TaskID       string     `json:"task_id,omitempty"`
+	ToolUseID    string     `json:"tool_use_id,omitempty"`
+	Description  string     `json:"description,omitempty"`
+	TaskType     string     `json:"task_type,omitempty"`
+	Status       string     `json:"status,omitempty"`
+	LastToolName string     `json:"last_tool_name,omitempty"`
+	Usage        *TaskUsage `json:"usage,omitempty"`
+
 	// RPCRequestID is set for ACP permission_request events that need a response.
 	RPCRequestID int `json:"-"`
+}
+
+// TaskUsage holds resource consumption stats from agent task events.
+type TaskUsage struct {
+	TotalTokens int `json:"total_tokens"`
+	ToolUses    int `json:"tool_uses"`
+	DurationMS  int `json:"duration_ms"`
 }
 
 type AssistantMessage struct {
@@ -25,6 +41,7 @@ type AssistantMessage struct {
 
 type ContentBlock struct {
 	Type  string          `json:"type"`
+	ID    string          `json:"id,omitempty"` // tool_use id (for agent→task linking)
 	Text  string          `json:"text,omitempty"`
 	Name  string          `json:"name,omitempty"`  // tool_use name
 	Input json.RawMessage `json:"input,omitempty"` // tool_use input

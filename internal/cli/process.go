@@ -2,16 +2,17 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"os/exec"
+	"net"
 	"strings"
 	"sync"
-	"syscall"
+	"sync/atomic"
 	"time"
 )
 
@@ -55,156 +56,268 @@ func (s ProcessState) String() string {
 	}
 }
 
-// Process manages a long-lived CLI subprocess.
+// shimMsg is a minimal struct for parsing shim protocol messages in readLoop.
+type shimMsg struct {
+	Type   string `json:"type"`
+	Seq    int64  `json:"seq,omitempty"`
+	Line   string `json:"line,omitempty"`
+	Code   *int   `json:"code,omitempty"`
+	Signal string `json:"signal,omitempty"`
+}
+
+// Process manages a CLI subprocess via a shim connection.
 type Process struct {
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	scanner  *bufio.Scanner
-	protocol Protocol
+	shimConn    net.Conn
+	shimR       *bufio.Reader
+	shimW       *bufio.Writer
+	shimWMu     sync.Mutex
+	stdinWriter *shimWriter // cached shimStdinWriter instance
+	protocol    Protocol
+	cliPID      int // CLI PID reported by shim hello
 
 	SessionID string
 	State     ProcessState
 	mu        sync.Mutex
 
-	eventCh    chan Event
-	done       chan struct{}
-	stderrDone chan struct{} // closed when stderr goroutine exits
-	killCh     chan struct{} // closed by Kill() to unblock readLoop's channel send
-	killOnce   sync.Once
-	waitOnce   sync.Once // ensures cmd.Wait() is called exactly once
+	eventCh  chan Event
+	done     chan struct{}
+	killCh   chan struct{} // closed by Kill() to unblock readLoop
+	killOnce sync.Once
 
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
 
 	eventLog  *EventLog
 	totalCost float64
+	lastSeq   atomic.Int64  // last received shim seq, for reconnect
+	pongRecv  chan struct{} // signaled by readLoop on pong receipt
 }
 
-// newProcess starts a CLI process with the given args.
-func newProcess(ctx context.Context, cliPath string, args []string, cwd string, noOutputTimeout, totalTimeout time.Duration, proto Protocol) (*Process, error) {
-	slog.Info("spawning cli process", "cli", cliPath, "protocol", proto.Name())
-	slog.Debug("cli process details", "args", args, "cwd", cwd)
-
-	cmd := exec.CommandContext(ctx, cliPath, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	if cwd != "" {
-		cmd.Dir = cwd
-	}
-
-	stdin, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, fmt.Errorf("stdin pipe: %w", err)
-	}
-	stdout, err := cmd.StdoutPipe()
-	if err != nil {
-		_ = stdin.Close()
-		return nil, fmt.Errorf("stdout pipe: %w", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
-		return nil, fmt.Errorf("stderr pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
-		return nil, fmt.Errorf("start cli: %w", err)
-	}
-
-	stderrDone := make(chan struct{})
-	go func() {
-		defer close(stderrDone)
-		scanner := bufio.NewScanner(stderrPipe)
-		scanner.Buffer(make([]byte, 4*1024), 64*1024)
-		for scanner.Scan() {
-			slog.Debug("cli stderr", "line", scanner.Text())
-		}
-	}()
-
-	p := &Process{
-		cmd:             cmd,
-		stdin:           stdin,
-		scanner:         bufio.NewScanner(stdout),
+// newShimProcess creates a Process connected to a shim.
+// The caller must call startReadLoop() after protocol Init.
+func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
+	proto Protocol, cliPID int, noOutputTimeout, totalTimeout time.Duration) *Process {
+	return &Process{
+		shimConn:        conn,
+		shimR:           reader,
+		shimW:           writer,
 		protocol:        proto,
+		cliPID:          cliPID,
 		State:           StateSpawning,
 		eventCh:         make(chan Event, 64),
 		done:            make(chan struct{}),
-		stderrDone:      stderrDone,
 		killCh:          make(chan struct{}),
 		noOutputTimeout: noOutputTimeout,
 		totalTimeout:    totalTimeout,
 		eventLog:        NewEventLog(0),
+		pongRecv:        make(chan struct{}, 1),
 	}
-
-	p.scanner.Buffer(make([]byte, 64*1024), maxScannerBufBytes)
-
-	return p, nil
 }
 
-// startReadLoop begins the stdout reader goroutine. Called after protocol Init.
+// shimStdinWriter returns an io.Writer that sends data to CLI stdin via the shim.
+// Returns the same instance each call to preserve any buffered partial lines.
+func (p *Process) shimStdinWriter() io.Writer {
+	if p.stdinWriter == nil {
+		p.stdinWriter = &shimWriter{p: p}
+	}
+	return p.stdinWriter
+}
+
+// shimWriter wraps shim protocol write commands as an io.Writer.
+// Thread-safe: readLoop (HandleEvent) and Send (WriteMessage) may call concurrently.
+type shimWriter struct {
+	p   *Process
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (w *shimWriter) Write(data []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	w.buf.Write(data)
+	// Protocol.WriteMessage writes complete NDJSON lines ending with \n.
+	// Buffer until we see a newline, then send each complete line as a shim write command.
+	for {
+		line, err := w.buf.ReadBytes('\n')
+		if err != nil {
+			// No newline yet — put the partial data back
+			w.buf.Write(line)
+			break
+		}
+		trimmed := bytes.TrimRight(line, "\n")
+		if err := w.p.shimSend(shimClientMsg{Type: "write", Line: string(trimmed)}); err != nil {
+			return len(data), err
+		}
+	}
+	return len(data), nil
+}
+
+// shimClientMsg is the outgoing message format to the shim.
+type shimClientMsg struct {
+	Type  string `json:"type"`
+	Line  string `json:"line,omitempty"`
+	Token string `json:"token,omitempty"`
+	Seq   int64  `json:"last_seq,omitempty"`
+}
+
+func (p *Process) shimSend(msg shimClientMsg) error {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	p.shimWMu.Lock()
+	defer p.shimWMu.Unlock()
+	if _, err := p.shimW.Write(append(data, '\n')); err != nil {
+		return err
+	}
+	return p.shimW.Flush()
+}
+
+// startReadLoop begins the shim message reader goroutine and heartbeat.
 func (p *Process) startReadLoop() {
 	p.mu.Lock()
 	p.State = StateReady
 	p.mu.Unlock()
 	go p.readLoop()
+	go p.heartbeatLoop()
 }
 
-// readLoop reads stdout NDJSON lines and sends parsed events to eventCh.
+// readLoop reads NDJSON messages from the shim socket and dispatches events.
 func (p *Process) readLoop() {
-	// close(p.done) must run before close(p.eventCh) so that Alive() returns
-	// false by the time any consumer of eventCh (e.g. Send) can observe the
-	// channel closing. Defers run LIFO: eventCh registered first runs last.
 	defer close(p.eventCh)
 	defer close(p.done)
 	defer p.eventLog.CloseSubscribers()
 
-	for p.scanner.Scan() {
-		line := p.scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		ev, _, err := p.protocol.ReadEvent(line)
+	for {
+		line, err := p.shimR.ReadBytes('\n')
 		if err != nil {
-			slog.Debug("readLoop: skip unparseable event", "err", err)
+			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+				slog.Info("readLoop: shim connection closed")
+			} else {
+				slog.Warn("readLoop: shim read error", "err", err)
+			}
+			break
+		}
+
+		var msg shimMsg
+		if err := json.Unmarshal(bytes.TrimSpace(line), &msg); err != nil {
+			slog.Debug("readLoop: skip unparseable shim message", "err", err)
 			continue
 		}
-		if ev.Type == "" {
-			continue
-		}
-		// Let protocol handle internal events (e.g., ACP permission auto-grant)
-		if p.protocol.HandleEvent(p.stdin, ev) {
-			continue
-		}
-		// Use select to avoid blocking forever if Kill() is called while eventCh is full
-		select {
-		case p.eventCh <- ev:
-		case <-p.killCh:
+
+		switch msg.Type {
+		case "stdout":
+			p.lastSeq.Store(msg.Seq)
+			ev, _, err := p.protocol.ReadEvent([]byte(msg.Line))
+			if err != nil {
+				slog.Debug("readLoop: skip unparseable event", "err", err)
+				continue
+			}
+			if ev.Type == "" {
+				continue
+			}
+			if p.protocol.HandleEvent(p.shimStdinWriter(), ev) {
+				continue
+			}
+
+			// Always log to EventLog so dashboard subscribers see events
+			// even when no Send() is active (e.g., after service restart
+			// reconnects to a shim that's mid-turn).
+			p.logEvent(ev)
+
+			select {
+			case <-p.killCh:
+				p.mu.Lock()
+				p.State = StateDead
+				p.mu.Unlock()
+				return
+			default:
+			}
+
+			// Deliver to Send() for result detection and callback delivery.
+			// Non-blocking: if buffer is full (no active Send), the event
+			// is already safely in EventLog for dashboard visibility.
+			select {
+			case p.eventCh <- ev:
+			default:
+			}
+
+		case "stderr":
+			slog.Debug("cli stderr", "line", msg.Line)
+
+		case "cli_exited":
+			code := 0
+			if msg.Code != nil {
+				code = *msg.Code
+			}
+			slog.Info("CLI exited via shim", "code", code)
 			p.mu.Lock()
 			p.State = StateDead
 			p.mu.Unlock()
 			return
-		}
-	}
-	if err := p.scanner.Err(); err != nil {
-		slog.Warn("readLoop: scanner error", "err", err)
-	} else {
-		slog.Info("readLoop: stdout EOF, process exiting")
-	}
 
-	// Reap the child process to collect exit status.
-	// waitOnce must be called before reading ProcessState to establish
-	// a happens-before relationship (ProcessState is written by Wait).
-	if p.cmd != nil {
-		p.waitOnce.Do(func() { _ = p.cmd.Wait() })
-	}
-	if p.cmd != nil && p.cmd.ProcessState != nil {
-		slog.Info("readLoop: process exit", "exit_code", p.cmd.ProcessState.ExitCode(), "pid", p.cmd.Process.Pid)
+		case "pong":
+			// Signal heartbeat loop that shim is responsive
+			select {
+			case p.pongRecv <- struct{}{}:
+			default:
+			}
+
+		case "error":
+			slog.Warn("shim error", "msg", msg.Line)
+		}
 	}
 
 	p.mu.Lock()
 	p.State = StateDead
 	p.mu.Unlock()
+}
+
+// heartbeatLoop sends periodic ping messages to the shim and kills the process
+// if 3 consecutive pongs are missed (shim unresponsive or connection broken).
+func (p *Process) heartbeatLoop() {
+	const (
+		interval  = 30 * time.Second
+		maxMisses = 3
+	)
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	misses := 0
+	for {
+		select {
+		case <-ticker.C:
+			if err := p.shimSend(shimClientMsg{Type: "ping"}); err != nil {
+				slog.Debug("heartbeat ping failed", "err", err)
+				p.Kill()
+				return
+			}
+
+			// Wait for pong within half the interval
+			pongTimer := time.NewTimer(interval / 2)
+			select {
+			case <-p.pongRecv:
+				pongTimer.Stop()
+				misses = 0
+			case <-pongTimer.C:
+				misses++
+				slog.Debug("heartbeat pong missed", "misses", misses)
+				if misses >= maxMisses {
+					slog.Warn("heartbeat: shim unresponsive, killing process", "misses", misses)
+					p.Kill()
+					return
+				}
+			case <-p.done:
+				pongTimer.Stop()
+				return
+			}
+
+		case <-p.done:
+			return
+		}
+	}
 }
 
 // EventCallback is called for each intermediate event during Send.
@@ -247,7 +360,6 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 			}(i, img.Data)
 		}
 		wg.Wait()
-		// Filter empty strings (unsupported formats)
 		filtered := thumbs[:0]
 		for _, t := range thumbs {
 			if t != "" {
@@ -258,7 +370,19 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 	}
 	p.eventLog.Append(userEntry)
 
-	if err := p.protocol.WriteMessage(p.stdin, text, images); err != nil {
+	// Drain stale events from a previous turn that completed while no Send()
+	// was active (e.g., CLI was mid-turn when service restarted and reconnected
+	// to shim). These events are already logged to EventLog by readLoop.
+	for {
+		select {
+		case <-p.eventCh:
+		default:
+			goto drained
+		}
+	}
+drained:
+
+	if err := p.protocol.WriteMessage(p.shimStdinWriter(), text, images); err != nil {
 		return nil, fmt.Errorf("write message: %w", err)
 	}
 
@@ -278,8 +402,6 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 	for {
 		select {
 		case <-ctx.Done():
-			// Stop the process: readLoop will close eventCh once it exits,
-			// preventing stale events from being seen by a future Send() call.
 			p.Kill()
 			return nil, ctx.Err()
 		case ev, ok := <-p.eventCh:
@@ -290,21 +412,18 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 			noOutputTimer.Stop()
 			noOutputTimer.Reset(noOutputDur)
 
-			// Capture session ID from first init event; skip logging subsequent inits
+			// Capture session ID from first init event.
+			// logEvent (called by readLoop) already skips init events.
 			if ev.Type == "system" && ev.SubType == "init" {
 				p.mu.Lock()
-				firstInit := p.SessionID == ""
-				if firstInit {
+				if p.SessionID == "" {
 					p.SessionID = ev.SessionID
 				}
 				p.mu.Unlock()
-				if firstInit {
-					p.logEvent(ev)
-				}
 				continue
 			}
 
-			p.logEvent(ev)
+			// Event is already logged to EventLog by readLoop.
 
 			// Deliver intermediate events via callback
 			if onEvent != nil && ev.Type == "assistant" && ev.Message != nil {
@@ -358,63 +477,47 @@ func (p *Process) IsRunning() bool {
 	return p.State == StateRunning
 }
 
-// Interrupt sends SIGINT to the CLI process group to cancel the current turn.
-// Uses negative PID to signal the entire process group (created via Setpgid).
-// The process stays alive and can accept new messages after the interrupt.
+// Interrupt sends SIGINT to the CLI process via shim.
 func (p *Process) Interrupt() {
 	if !p.Alive() {
 		return
 	}
-	if p.cmd.Process != nil && p.cmd.Process.Pid > 0 {
-		if err := syscall.Kill(-p.cmd.Process.Pid, syscall.SIGINT); err != nil && !errors.Is(err, syscall.ESRCH) {
-			slog.Warn("interrupt signal failed", "pid", p.cmd.Process.Pid, "err", err)
-		}
+	if err := p.shimSend(shimClientMsg{Type: "interrupt"}); err != nil {
+		slog.Warn("interrupt failed", "err", err)
 	}
 }
 
-// Kill forcefully terminates the process.
-// Safe to call concurrently — all operations are guarded by Once.
+// Kill forcefully terminates the CLI process via shim.
 func (p *Process) Kill() {
 	p.killOnce.Do(func() {
 		close(p.killCh)
-		_ = p.stdin.Close()
-		if p.cmd.Process != nil && p.cmd.Process.Pid > 0 {
-			// Kill the entire process group (created via Setpgid) to avoid
-			// orphaned child processes (e.g., Bash tools, subagents).
-			if err := syscall.Kill(-p.cmd.Process.Pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
-				slog.Warn("kill process group failed", "pid", p.cmd.Process.Pid, "err", err)
-			}
-		}
+		// Best-effort: send kill command with a short deadline to avoid blocking.
+		// If the write fails (conn already broken), the shim's disconnect watchdog
+		// will eventually kill the CLI.
+		p.shimConn.SetWriteDeadline(time.Now().Add(time.Second)) //nolint:errcheck
+		_ = p.shimSend(shimClientMsg{Type: "kill"})
+		p.shimConn.Close()
 	})
-	// Wait for stderr goroutine to exit (pipe closes after SIGKILL).
-	if p.stderrDone != nil {
-		select {
-		case <-p.stderrDone:
-		case <-time.After(3 * time.Second):
-			slog.Warn("stderr goroutine did not exit after kill", "pid", p.PID())
-		}
-	}
-	p.waitOnce.Do(func() { _ = p.cmd.Wait() })
 }
 
-// Close gracefully shuts down by closing stdin.
+// Close gracefully shuts down by closing CLI stdin via shim.
 func (p *Process) Close() {
-	_ = p.stdin.Close()
+	_ = p.shimSend(shimClientMsg{Type: "close_stdin"})
 	timer := time.NewTimer(processCloseTimeout)
 	defer timer.Stop()
 	select {
 	case <-p.done:
 	case <-timer.C:
-		slog.Warn("process close timeout, force killing", "pid", p.PID())
+		slog.Warn("process close timeout, force killing", "pid", p.cliPID)
 		p.Kill()
-		return
 	}
-	// Wait for stderr goroutine to exit
-	if p.stderrDone != nil {
-		<-p.stderrDone
-	}
-	// Reap the child process to avoid zombies
-	p.waitOnce.Do(func() { _ = p.cmd.Wait() })
+}
+
+// Detach disconnects from the shim without stopping the CLI.
+// Used during naozhi graceful shutdown to keep shim alive.
+func (p *Process) Detach() {
+	_ = p.shimSend(shimClientMsg{Type: "detach"})
+	p.shimConn.Close()
 }
 
 // logEvent converts an Event to an EventEntry and appends it to the event log.
@@ -428,10 +531,41 @@ func (p *Process) logEvent(ev Event) {
 		if ev.SubType == "init" {
 			return
 		}
-		// Skip noisy system events that add no value in the dashboard
 		switch ev.SubType {
-		case "task_progress", "task_started", "task_notification",
-			"stop_hook_summary", "turn_duration", "hook_started", "hook_response":
+		case "task_started":
+			entry.Type = "task_start"
+			entry.TaskID = ev.TaskID
+			entry.ToolUseID = ev.ToolUseID
+			if ev.Description != "" {
+				entry.Summary = TruncateRunes(ev.Description, 120)
+			}
+		case "task_progress":
+			entry.Type = "task_progress"
+			entry.TaskID = ev.TaskID
+			entry.ToolUseID = ev.ToolUseID
+			if ev.Description != "" {
+				entry.Summary = TruncateRunes(ev.Description, 120)
+			}
+			entry.LastTool = ev.LastToolName
+			if ev.Usage != nil {
+				entry.ToolUses = ev.Usage.ToolUses
+				entry.Tokens = ev.Usage.TotalTokens
+				entry.DurationMS = ev.Usage.DurationMS
+			}
+		case "task_notification":
+			entry.Type = "task_done"
+			entry.TaskID = ev.TaskID
+			entry.ToolUseID = ev.ToolUseID
+			if ev.Description != "" {
+				entry.Summary = TruncateRunes(ev.Description, 120)
+			}
+			entry.Status = ev.Status
+			if ev.Usage != nil {
+				entry.ToolUses = ev.Usage.ToolUses
+				entry.Tokens = ev.Usage.TotalTokens
+				entry.DurationMS = ev.Usage.DurationMS
+			}
+		case "stop_hook_summary", "turn_duration", "hook_started", "hook_response":
 			return
 		}
 	case "assistant":
@@ -452,9 +586,14 @@ func (p *Process) logEvent(ev Event) {
 				if block.Name == "Agent" {
 					inp := parseAgentInput(block.Input)
 					entry.Type = "agent"
-					entry.Subagent = inp.label()
+					entry.Subagent = inp.SubagentType
+					if entry.Subagent == "" {
+						entry.Subagent = inp.Name
+					}
+					entry.TeamName = inp.TeamName
 					entry.Summary = TruncateRunes(inp.Description, 120)
 					entry.Background = inp.RunInBackground
+					entry.ToolUseID = block.ID
 				}
 			case "text":
 				entry.Type = "text"
@@ -491,17 +630,15 @@ type agentInput struct {
 	RunInBackground bool   `json:"run_in_background"`
 }
 
-// parseAgentInput parses Agent tool input JSON. Returns zero-valued struct on error.
 func parseAgentInput(input json.RawMessage) agentInput {
 	if len(input) == 0 {
 		return agentInput{}
 	}
 	var inp agentInput
-	json.Unmarshal(input, &inp) //nolint:errcheck // zero-valued fields are safe defaults
+	json.Unmarshal(input, &inp) //nolint:errcheck
 	return inp
 }
 
-// label returns the best display label for an Agent call: subagent_type > name > team_name > "".
 func (a agentInput) label() string {
 	if a.SubagentType != "" {
 		return a.SubagentType
@@ -512,7 +649,6 @@ func (a agentInput) label() string {
 	return a.TeamName
 }
 
-// formatToolDetail returns a human-readable detail string for tool_use events.
 func formatToolDetail(block ContentBlock) string {
 	if len(block.Input) == 0 {
 		return block.Name
@@ -520,7 +656,6 @@ func formatToolDetail(block ContentBlock) string {
 	return FormatToolInput(block.Name, block.Input)
 }
 
-// getStr extracts a string value for the given key from a JSON object map.
 func getStr(m map[string]json.RawMessage, key string) string {
 	raw, ok := m[key]
 	if !ok || len(raw) == 0 {
@@ -533,7 +668,6 @@ func getStr(m map[string]json.RawMessage, key string) string {
 	return ""
 }
 
-// shortPath abbreviates a file path by replacing the home directory with ~.
 func shortPath(p string) string {
 	const homePrefix = "/home/"
 	if i := strings.Index(p, homePrefix); i >= 0 {
@@ -549,7 +683,6 @@ func shortPath(p string) string {
 }
 
 // FormatToolInput extracts a human-readable summary from a tool's JSON input.
-// Shared by live event logging and JSONL history loading.
 func FormatToolInput(toolName string, input json.RawMessage) string {
 	var inp map[string]json.RawMessage
 	if json.Unmarshal(input, &inp) != nil {
@@ -614,16 +747,12 @@ func (p *Process) ProtocolName() string {
 	return p.protocol.Name()
 }
 
-// PID returns the OS process ID.
+// PID returns the CLI process ID (as reported by shim).
 func (p *Process) PID() int {
-	if p.cmd != nil && p.cmd.Process != nil {
-		return p.cmd.Process.Pid
-	}
-	return 0
+	return p.cliPID
 }
 
 // InjectHistory pre-populates the event log with historical entries.
-// Must be called before any Send() to avoid interleaving with live events.
 func (p *Process) InjectHistory(entries []EventEntry) {
 	p.eventLog.AppendBatch(entries)
 }
@@ -643,7 +772,10 @@ func (p *Process) TurnAgents() []SubagentInfo {
 	return p.eventLog.TurnAgents()
 }
 
-// SubscribeEvents returns a notification channel and unsubscribe function for the event log.
+// SubscribeEvents returns a notification channel and unsubscribe function.
 func (p *Process) SubscribeEvents() (<-chan struct{}, func()) {
 	return p.eventLog.Subscribe()
 }
+
+// LastSeq returns the last received shim sequence number (for reconnect).
+func (p *Process) LastSeq() int64 { return p.lastSeq.Load() }

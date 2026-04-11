@@ -11,15 +11,23 @@ const defaultEventLogSize = 500
 
 // EventEntry is a simplified event record for the dashboard.
 type EventEntry struct {
-	Time       int64    `json:"time"`                 // unix ms
-	Type       string   `json:"type"`                 // init, thinking, tool_use, text, result, system
-	Summary    string   `json:"summary,omitempty"`    // brief description
-	Cost       float64  `json:"cost,omitempty"`       // cumulative cost (result events only)
-	Detail     string   `json:"detail,omitempty"`     // fuller content for terminal view
-	Tool       string   `json:"tool,omitempty"`       // tool name for tool_use events
-	Subagent   string   `json:"subagent,omitempty"`   // subagent_type / name / team_name for Agent tool calls
-	Background bool     `json:"background,omitempty"` // true for run_in_background team agents
-	Images     []string `json:"images,omitempty"`     // thumbnail data URIs for user image uploads
+	Time       int64    `json:"time"`                  // unix ms
+	Type       string   `json:"type"`                  // init, thinking, tool_use, text, result, system, agent, task_start, task_progress, task_done
+	Summary    string   `json:"summary,omitempty"`     // brief description
+	Cost       float64  `json:"cost,omitempty"`        // cumulative cost (result events only)
+	Detail     string   `json:"detail,omitempty"`      // fuller content for terminal view
+	Tool       string   `json:"tool,omitempty"`        // tool name for tool_use events
+	Subagent   string   `json:"subagent,omitempty"`    // subagent_type or name (empty for team-only agents)
+	TeamName   string   `json:"team_name,omitempty"`   // team grouping key for agent team members
+	Background bool     `json:"background,omitempty"`  // true for run_in_background team agents
+	Images     []string `json:"images,omitempty"`      // thumbnail data URIs for user image uploads
+	TaskID     string   `json:"task_id,omitempty"`     // agent task correlation ID
+	ToolUseID  string   `json:"tool_use_id,omitempty"` // links Agent tool_use → task_started
+	LastTool   string   `json:"last_tool,omitempty"`   // most recent tool in agent task
+	ToolUses   int      `json:"tool_uses,omitempty"`   // tool call count in agent task
+	Tokens     int      `json:"tokens,omitempty"`      // total tokens consumed by agent task
+	DurationMS int      `json:"duration_ms,omitempty"` // elapsed ms for agent task
+	Status     string   `json:"status,omitempty"`      // agent task status (completed, error, etc.)
 }
 
 // SubagentInfo holds display information about an active sub-agent in the current turn.
@@ -49,7 +57,7 @@ type EventLog struct {
 
 	// Per-turn sub-agent tracking: reset on "result"/"user" events.
 	turnAgents []SubagentInfo // foreground agents in current turn; protected by mu
-	bgAgents   []SubagentInfo // background (run_in_background) agents; persist for session lifetime; protected by mu
+	bgAgents   []SubagentInfo // background (run_in_background) agents; cleared on turn boundaries like turnAgents; protected by mu
 
 	subMu       sync.Mutex
 	subscribers []*subscriber
@@ -81,6 +89,9 @@ func (l *EventLog) Append(e EventEntry) {
 	case "agent":
 		label := e.Subagent
 		if label == "" {
+			label = e.TeamName
+		}
+		if label == "" {
 			label = "agent"
 		}
 		info := SubagentInfo{Name: label, Activity: e.Summary, Background: e.Background}
@@ -100,7 +111,7 @@ func (l *EventLog) Append(e EventEntry) {
 	switch e.Type {
 	case "user":
 		l.lastPromptSummary.Store(e.Summary)
-	case "tool_use", "thinking", "agent":
+	case "tool_use", "thinking", "agent", "task_start", "task_progress":
 		l.lastActivitySummary.Store(e.Summary)
 	}
 
@@ -238,8 +249,8 @@ func (l *EventLog) LastActivitySummary() string {
 	return ""
 }
 
-// TurnAgents returns a copy of all currently active agents: foreground agents spawned
-// in the current turn plus background agents that persist across turns.
+// TurnAgents returns a copy of all currently active agents (foreground + background)
+// in the current turn. Both are cleared on turn boundaries (result/user events).
 // Returns nil when no agents are active.
 func (l *EventLog) TurnAgents() []SubagentInfo {
 	l.mu.RLock()
