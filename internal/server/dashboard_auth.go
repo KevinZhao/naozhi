@@ -21,6 +21,7 @@ type AuthHandlers struct {
 	dashboardToken string
 	cookieSecret   []byte
 	loginLimiters  loginLimiterStore
+	trustedProxy   bool // trust X-Forwarded-For for client IP extraction
 }
 
 // limiterEntry wraps a rate limiter with a last-seen timestamp for TTL eviction.
@@ -117,13 +118,26 @@ func (a *AuthHandlers) serveLoginPage(w http.ResponseWriter) {
 	}
 }
 
-func (a *AuthHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
-	// Per-IP rate limiting to prevent single-attacker global lockout.
-	// Uses RemoteAddr only — X-Forwarded-For is attacker-controlled and trivially spoofed.
+// clientIP extracts the client IP from the request.
+// When trustedProxy is enabled (behind ALB/CloudFront), reads the first entry
+// from X-Forwarded-For. Otherwise falls back to RemoteAddr.
+func (a *AuthHandlers) clientIP(r *http.Request) string {
 	ip := r.RemoteAddr
 	if host, _, err := net.SplitHostPort(ip); err == nil {
 		ip = host
 	}
+	if a.trustedProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if first, _, _ := strings.Cut(xff, ","); first != "" {
+				ip = strings.TrimSpace(first)
+			}
+		}
+	}
+	return ip
+}
+
+func (a *AuthHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
+	ip := a.clientIP(r)
 	if !a.loginLimiterFor(ip).Allow() {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", "60")

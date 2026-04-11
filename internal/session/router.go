@@ -24,9 +24,12 @@ const ShutdownTimeout = 30 * time.Second
 var ErrMaxProcs = errors.New("max concurrent processes reached")
 
 // Router manages session key -> ManagedSession mapping.
+//
+// Lock ordering: r.mu (write) -> s.sendMu. Never acquire in reverse.
+// Read-only operations (ListSessions, GetSession, Stats, Version) use RLock.
 type Router struct {
-	mu           sync.Mutex
-	shutdownCond *sync.Cond // signaled when process state changes; conditioned on mu
+	mu           sync.RWMutex
+	shutdownCond *sync.Cond // signaled when process state changes; conditioned on mu (write lock)
 	sessions     map[string]*ManagedSession
 	// sessionsByChat is a secondary index: chat key → session keys.
 	// Enables O(k) ResetChat instead of O(n) full scan (k = agents per chat, typically 1-3).
@@ -309,14 +312,16 @@ func (r *Router) ReconnectShims() {
 
 		// CLI args drift check: if config changed (model, args), shut down old shim
 		// and let the next message create a new session with updated config.
+		// Strip --resume <id> from stored args since it's session-specific, not config.
+		storedBase := stripResumeArgs(state.CLIArgs)
 		currentArgs := r.wrapper.Protocol.BuildArgs(cli.SpawnOptions{
 			Model:     r.model,
 			ExtraArgs: r.extraArgs,
 		})
-		if len(state.CLIArgs) > 0 && !slices.Equal(state.CLIArgs, currentArgs) {
+		if len(storedBase) > 0 && !slices.Equal(storedBase, currentArgs) {
 			slog.Info("shim config drifted, shutting down old shim",
 				"key", state.Key,
-				"old_args_len", len(state.CLIArgs),
+				"old_args_len", len(storedBase),
 				"new_args_len", len(currentArgs))
 			if handle, err := r.wrapper.ShimManager.Reconnect(context.Background(), state.Key, 0); err == nil {
 				handle.Shutdown()
@@ -334,25 +339,48 @@ func (r *Router) ReconnectShims() {
 			continue
 		}
 
-		// Inject replay events into eventLog (not via eventCh — avoids deadlock)
+		// Inject replay events into eventLog (not via eventCh — avoids deadlock).
+		// Use EventEntryFromEvent for proper Summary extraction across all event types.
 		for _, replay := range replays {
 			if replay.Type == "replay" {
 				ev, _, err := r.wrapper.Protocol.ReadEvent([]byte(replay.Line))
 				if err != nil || ev.Type == "" {
 					continue
 				}
-				proc.InjectHistory([]cli.EventEntry{{
-					Time:    time.Now().UnixMilli(),
-					Type:    ev.Type,
-					Summary: cli.TruncateRunes(ev.Result, 200),
-				}})
+				if entry, ok := cli.EventEntryFromEvent(ev); ok {
+					proc.InjectHistory([]cli.EventEntry{entry})
+				}
 			}
 		}
 
-		// Inject persisted JSONL history
-		if len(sess.persistedHistory) > 0 {
-			proc.InjectHistory(sess.persistedHistory)
+		// Inject persisted JSONL history from PREVIOUS sessions only.
+		// The current session's events are already covered by the replay above.
+		// Injecting both would cause duplicate messages in the dashboard.
+		if len(sess.prevSessionIDs) > 0 && r.claudeDir != "" {
+			var prevEntries []cli.EventEntry
+			for _, id := range sess.prevSessionIDs {
+				entries, err := discovery.LoadHistory(r.claudeDir, id, sess.workspace)
+				if err != nil || len(entries) == 0 {
+					continue
+				}
+				prevEntries = append(prevEntries, entries...)
+			}
+			if len(prevEntries) > 0 {
+				proc.InjectHistory(prevEntries)
+			}
 		}
+
+		// TOCTOU guard: re-check under lock that the session hasn't been replaced
+		// by a concurrent spawnSession while we were reconnecting (lock was released).
+		r.mu.Lock()
+		currentSess := r.sessions[state.Key]
+		if currentSess != sess || (currentSess != nil && currentSess.process != nil && currentSess.process.Alive()) {
+			r.mu.Unlock()
+			proc.Close()
+			slog.Info("shim reconnect aborted: session replaced concurrently", "key", state.Key)
+			continue
+		}
+		r.mu.Unlock()
 
 		sess.ReattachProcess(proc, state.SessionID)
 
@@ -385,9 +413,9 @@ func (r *Router) SetOnChange(fn func()) {
 
 // notifyChange calls the onChange callback if set. Must be called outside r.mu.
 func (r *Router) notifyChange() {
-	r.mu.Lock()
+	r.mu.RLock()
 	fn := r.onChange
-	r.mu.Unlock()
+	r.mu.RUnlock()
 	if fn != nil {
 		fn()
 	}
@@ -417,8 +445,8 @@ func (r *Router) SetWorkspace(chatKey, path string) {
 
 // GetWorkspace returns the effective workspace for a chat key.
 func (r *Router) GetWorkspace(chatKey string) string {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	if ws, ok := r.workspaceOverrides[chatKey]; ok {
 		return ws
 	}
@@ -1046,6 +1074,25 @@ func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 	}()
 }
 
+// StartShimReconcileLoop periodically checks for suspended sessions that have
+// live shim processes and reconnects them. This covers edge cases where the
+// connection to a shim drops during normal operation (e.g. temporary I/O error)
+// but the shim and CLI process are still alive.
+func (r *Router) StartShimReconcileLoop(ctx context.Context, interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				r.ReconnectShims()
+			}
+		}
+	}()
+}
+
 // Shutdown gracefully closes all sessions, waiting for running ones to complete.
 func (r *Router) Shutdown() {
 	// Wait for startup history-loading goroutines to finish first,
@@ -1145,11 +1192,25 @@ func (r *Router) DefaultWorkspace() string {
 	return r.workspace
 }
 
+// stripResumeArgs removes --resume <value> from CLI args.
+// Used by drift check: --resume is session-specific, not a config change.
+func stripResumeArgs(args []string) []string {
+	out := make([]string, 0, len(args))
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--resume" && i+1 < len(args) {
+			i++ // skip --resume and its value
+			continue
+		}
+		out = append(out, args[i])
+	}
+	return out
+}
+
 // Version returns a monotonic counter incremented on every session mutation.
 // Used by the dashboard for efficient change detection without full JSON comparison.
 func (r *Router) Version() uint64 {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.storeGen
 }
 
@@ -1170,8 +1231,8 @@ func (r *Router) CLIPath() string {
 // active = sessions with a live process (ready or running, excluding exempt);
 // total = all sessions in the map including suspended ones.
 func (r *Router) Stats() (active, total int) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.activeCount, len(r.sessions)
 }
 
@@ -1179,12 +1240,12 @@ func (r *Router) Stats() (active, total int) {
 // Collects references under r.mu, then releases before snapshotting
 // to avoid blocking the router while getSessionID() waits on sendMu.
 func (r *Router) ListSessions() []SessionSnapshot {
-	r.mu.Lock()
+	r.mu.RLock()
 	refs := make([]*ManagedSession, 0, len(r.sessions))
 	for _, s := range r.sessions {
 		refs = append(refs, s)
 	}
-	r.mu.Unlock()
+	r.mu.RUnlock()
 
 	snapshots := make([]SessionSnapshot, len(refs))
 	for i, s := range refs {
@@ -1195,17 +1256,17 @@ func (r *Router) ListSessions() []SessionSnapshot {
 
 // GetSession returns the session for the given key, or nil.
 func (r *Router) GetSession(key string) *ManagedSession {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	return r.sessions[key]
 }
 
 // InterruptSession sends SIGINT to the CLI process for the given session key.
 // Returns true if the session was found and interrupted.
 func (r *Router) InterruptSession(key string) bool {
-	r.mu.Lock()
+	r.mu.RLock()
 	s := r.sessions[key]
-	r.mu.Unlock()
+	r.mu.RUnlock()
 	if s == nil {
 		return false
 	}
@@ -1216,8 +1277,8 @@ func (r *Router) InterruptSession(key string) bool {
 // including their full session chains. Pruned historical sessions are NOT included,
 // allowing them to reappear as resumable recent sessions in the dashboard.
 func (r *Router) ActiveSessionIDs() map[string]bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	ids := make(map[string]bool, len(r.sessions)*3)
 	for _, s := range r.sessions {
 		if id := s.getSessionID(); id != "" {
@@ -1235,8 +1296,8 @@ func (r *Router) ActiveSessionIDs() map[string]bool {
 // Suspended sessions (no process) are allowed through so their underlying
 // session files appear in the history popover (deduplicated against the workspace).
 func (r *Router) DiscoveryExcludeIDs() map[string]bool {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	ids := make(map[string]bool, len(r.sessions))
 	for _, s := range r.sessions {
 		if s.process == nil {
@@ -1252,14 +1313,31 @@ func (r *Router) DiscoveryExcludeIDs() map[string]bool {
 	return ids
 }
 
+// maxKnownIDs caps the persistent known-IDs set to prevent unbounded growth.
+// UUID session IDs are 36 bytes; at 10K entries this is ~360KB in memory.
+const maxKnownIDs = 10000
+
 // trackSessionID adds a session ID to the persistent known-IDs set.
 // Caller must hold r.mu OR call before any concurrent access (e.g. NewRouter init).
+// When the set exceeds maxKnownIDs, older entries are evicted (random eviction
+// is acceptable since this set is only used for heuristic dedup in discovery).
 func (r *Router) trackSessionID(id string) {
 	if id == "" {
 		return
 	}
 	if r.knownIDs[id] {
 		return
+	}
+	// Evict random entries when at capacity (go map iteration is random).
+	if len(r.knownIDs) >= maxKnownIDs {
+		toEvict := len(r.knownIDs) - maxKnownIDs + 1
+		for k := range r.knownIDs {
+			delete(r.knownIDs, k)
+			toEvict--
+			if toEvict <= 0 {
+				break
+			}
+		}
 	}
 	r.knownIDs[id] = true
 	r.knownIDsDirty = true
@@ -1305,8 +1383,8 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 // ManagedExcludeSets returns PIDs, session IDs, and CWDs of all managed sessions
 // in a single lock acquisition. Used by discovery.Scan to avoid three separate mutex grabs.
 func (r *Router) ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]bool, cwds map[string]bool) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
 	pids = make(map[int]bool)
 	sessionIDs = make(map[string]bool)
 	cwds = make(map[string]bool)

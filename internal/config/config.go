@@ -74,6 +74,7 @@ type AgentConfig struct {
 type ServerConfig struct {
 	Addr           string `yaml:"addr"`
 	DashboardToken string `yaml:"dashboard_token,omitempty"`
+	TrustedProxy   bool   `yaml:"trusted_proxy,omitempty"` // trust X-Forwarded-For for client IP (enable behind ALB/CloudFront)
 }
 
 type CLIConfig struct {

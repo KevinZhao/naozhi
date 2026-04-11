@@ -57,6 +57,7 @@ type Feishu struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
 	wg      sync.WaitGroup // tracks in-flight message handler goroutines
+	hookSem chan struct{}  // limits concurrent webhook handler goroutines
 	startMu sync.Mutex
 	started bool
 }
@@ -70,7 +71,7 @@ func New(cfg Config, transcriber transcribe.Service) *Feishu {
 	if mode == "" {
 		mode = "websocket"
 	}
-	return &Feishu{cfg: cfg, mode: mode, baseURL: "https://open.feishu.cn", transcriber: transcriber}
+	return &Feishu{cfg: cfg, mode: mode, baseURL: "https://open.feishu.cn", transcriber: transcriber, hookSem: make(chan struct{}, 20)}
 }
 
 func (f *Feishu) Name() string { return "feishu" }
@@ -533,7 +534,7 @@ func (f *Feishu) getAccessToken(ctx context.Context) (string, error) {
 			return nil, fmt.Errorf("marshal token request: %w", err)
 		}
 
-		refreshCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 		defer cancel()
 
 		req, err := http.NewRequestWithContext(refreshCtx, "POST",

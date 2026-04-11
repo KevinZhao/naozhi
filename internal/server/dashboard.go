@@ -42,6 +42,7 @@ func (s *Server) registerDashboard() {
 		NodesMu:       &s.nodesMu,
 		ProjectMgr:    s.projectMgr,
 		AllowedRoot:   s.allowedRoot,
+		TrustedProxy:  s.auth.trustedProxy,
 		WSAuthLimiter: s.auth.loginLimiterFor,
 	})
 	s.hub.SetScheduler(s.scheduler)

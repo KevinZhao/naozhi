@@ -230,7 +230,36 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	}
 
 	proc.startReadLoop()
+
+	// Detect mid-turn: if the last replayed event is not a turn-complete marker,
+	// the CLI is actively processing and state should be Running (not Ready).
+	if isMidTurn(replays, proto) {
+		proc.mu.Lock()
+		proc.State = StateRunning
+		proc.mu.Unlock()
+	}
+
 	return proc, replays, nil
+}
+
+// isMidTurn checks replay events to determine if the CLI was mid-turn at
+// reconnection time. Returns true if the last meaningful event is not a
+// turn-complete result.
+func isMidTurn(replays []shim.ServerMsg, proto Protocol) bool {
+	lastType := ""
+	for i := len(replays) - 1; i >= 0; i-- {
+		if replays[i].Type != "replay" {
+			continue
+		}
+		ev, _, err := proto.ReadEvent([]byte(replays[i].Line))
+		if err != nil || ev.Type == "" {
+			continue
+		}
+		lastType = ev.Type
+		break
+	}
+	// "result" marks turn complete; anything else means mid-turn
+	return lastType != "" && lastType != "result"
 }
 
 // shimLineReader adapts Process shim connection to the LineReader interface.

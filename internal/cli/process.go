@@ -97,7 +97,7 @@ type Process struct {
 // The caller must call startReadLoop() after protocol Init.
 func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 	proto Protocol, cliPID int, noOutputTimeout, totalTimeout time.Duration) *Process {
-	return &Process{
+	p := &Process{
 		shimConn:        conn,
 		shimR:           reader,
 		shimW:           writer,
@@ -112,14 +112,15 @@ func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 		eventLog:        NewEventLog(0),
 		pongRecv:        make(chan struct{}, 1),
 	}
+	p.stdinWriter = &shimWriter{p: p}
+	return p
 }
 
 // shimStdinWriter returns an io.Writer that sends data to CLI stdin via the shim.
 // Returns the same instance each call to preserve any buffered partial lines.
+// Always non-nil: initialized in newShimProcess to avoid lazy-init data races
+// when readLoop and Send call this concurrently on the SpawnReconnect path.
 func (p *Process) shimStdinWriter() io.Writer {
-	if p.stdinWriter == nil {
-		p.stdinWriter = &shimWriter{p: p}
-	}
 	return p.stdinWriter
 }
 
@@ -402,7 +403,11 @@ drained:
 	for {
 		select {
 		case <-ctx.Done():
-			p.Kill()
+			// Context cancelled (shutdown or user interrupt).
+			// Don't Kill the CLI — during graceful shutdown, router.Shutdown
+			// calls Detach() to keep the shim alive for zero-downtime restart.
+			// The readLoop will detect the disconnection and close eventCh,
+			// causing the next iteration to hit the !ok branch and return.
 			return nil, ctx.Err()
 		case ev, ok := <-p.eventCh:
 			if !ok {
@@ -520,8 +525,10 @@ func (p *Process) Detach() {
 	p.shimConn.Close()
 }
 
-// logEvent converts an Event to an EventEntry and appends it to the event log.
-func (p *Process) logEvent(ev Event) {
+// EventEntryFromEvent converts an Event to an EventEntry without appending it.
+// Used by both logEvent (real-time) and ReconnectShims (replay injection).
+// Returns (entry, ok). ok is false if the event should be skipped.
+func EventEntryFromEvent(ev Event) (EventEntry, bool) {
 	entry := EventEntry{Time: time.Now().UnixMilli()}
 
 	switch ev.Type {
@@ -529,7 +536,7 @@ func (p *Process) logEvent(ev Event) {
 		entry.Type = "system"
 		entry.Summary = ev.SubType
 		if ev.SubType == "init" {
-			return
+			return entry, false
 		}
 		switch ev.SubType {
 		case "task_started":
@@ -566,11 +573,11 @@ func (p *Process) logEvent(ev Event) {
 				entry.DurationMS = ev.Usage.DurationMS
 			}
 		case "stop_hook_summary", "turn_duration", "hook_started", "hook_response":
-			return
+			return entry, false
 		}
 	case "assistant":
 		if ev.Message == nil {
-			return
+			return entry, false
 		}
 		for _, block := range ev.Message.Content {
 			switch block.Type {
@@ -602,20 +609,32 @@ func (p *Process) logEvent(ev Event) {
 			default:
 				continue
 			}
-			p.eventLog.Append(entry)
-			return
+			return entry, true
 		}
-		return
+		return entry, false
 	case "result":
 		entry.Type = "result"
 		entry.Summary = TruncateRunes(ev.Result, 200)
 		entry.Detail = TruncateRunes(ev.Result, 16000)
 		entry.Cost = ev.CostUSD
+	default:
+		return entry, false
+	}
+
+	return entry, true
+}
+
+// logEvent converts an Event to an EventEntry and appends it to the event log.
+func (p *Process) logEvent(ev Event) {
+	entry, ok := EventEntryFromEvent(ev)
+	if !ok {
+		return
+	}
+	// Update process-level cost tracking for result events.
+	if ev.Type == "result" {
 		p.mu.Lock()
 		p.totalCost = ev.CostUSD
 		p.mu.Unlock()
-	default:
-		return
 	}
 
 	p.eventLog.Append(entry)

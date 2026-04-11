@@ -271,6 +271,16 @@ type SessionSnapshot struct {
 	Subagents    []cli.SubagentInfo `json:"subagents,omitempty"`     // active sub-agent types in current turn
 }
 
+// getProcess returns the current process reference safely.
+// Must be used by all code paths that read s.process outside sendMu,
+// since ReattachProcess writes s.process under sendMu.
+func (s *ManagedSession) getProcess() processIface {
+	s.sendMu.Lock()
+	proc := s.process
+	s.sendMu.Unlock()
+	return proc
+}
+
 // Snapshot returns a point-in-time view of this session.
 func (s *ManagedSession) Snapshot() SessionSnapshot {
 	s.parseKeyParts()
@@ -290,14 +300,15 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		snap.DeathReason = dr
 	}
 
-	if s.process == nil {
+	proc := s.getProcess()
+	if proc == nil {
 		snap.TotalCost = s.totalCost
 		snap.State = "suspended"
 	} else {
-		snap.State = s.process.GetState().String()
-		snap.Protocol = s.process.ProtocolName()
-		snap.TotalCost = s.process.TotalCost()
-		snap.Subagents = s.process.TurnAgents()
+		snap.State = proc.GetState().String()
+		snap.Protocol = proc.ProtocolName()
+		snap.TotalCost = proc.TotalCost()
+		snap.Subagents = proc.TurnAgents()
 	}
 
 	// Read cached values instead of copying the full event log.
@@ -314,8 +325,9 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 // EventEntries returns the event log entries for this session.
 // Returns persisted history when the process is nil or dead.
 func (s *ManagedSession) EventEntries() []cli.EventEntry {
-	if s.process != nil {
-		return s.process.EventEntries()
+	proc := s.getProcess()
+	if proc != nil {
+		return proc.EventEntries()
 	}
 	s.sendMu.Lock()
 	out := make([]cli.EventEntry, len(s.persistedHistory))
@@ -326,8 +338,9 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 
 // EventEntriesSince returns the event log entries after the given unix ms timestamp.
 func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
-	if s.process != nil {
-		return s.process.EventEntriesSince(afterMS)
+	proc := s.getProcess()
+	if proc != nil {
+		return proc.EventEntriesSince(afterMS)
 	}
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
@@ -343,13 +356,8 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 
 // SubscribeEvents subscribes to event log notifications for this session.
 // If the session has no process, returns a closed channel and a no-op unsubscribe.
-//
-// NOTE: This intentionally does NOT acquire sendMu. The process field is set
-// once during spawnSession (under the router lock) before any Send() call,
-// so reading it here is safe. Acquiring sendMu would block until an in-flight
-// Send() completes, preventing real-time event streaming to dashboard subscribers.
 func (s *ManagedSession) SubscribeEvents() (<-chan struct{}, func()) {
-	proc := s.process
+	proc := s.getProcess()
 	if proc == nil {
 		ch := make(chan struct{})
 		close(ch)

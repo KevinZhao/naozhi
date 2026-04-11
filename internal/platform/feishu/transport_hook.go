@@ -171,9 +171,17 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				return
 			}
 			msg.Text = text
+			// Limit concurrent webhook handlers to avoid unbounded goroutine growth.
+			select {
+			case f.hookSem <- struct{}{}:
+			default:
+				slog.Warn("feishu webhook: handler semaphore full, dropping text message")
+				return
+			}
 			f.wg.Add(1)
 			go func() {
 				defer f.wg.Done()
+				defer func() { <-f.hookSem }()
 				defer platform.RecoverHandler("feishu text")
 				handler(context.Background(), msg)
 			}()
@@ -185,9 +193,16 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			if err := json.Unmarshal([]byte(event.Message.Content), &content); err != nil || content.ImageKey == "" {
 				return
 			}
+			select {
+			case f.hookSem <- struct{}{}:
+			default:
+				slog.Warn("feishu webhook: handler semaphore full, dropping image message")
+				return
+			}
 			f.wg.Add(1)
 			go func() {
 				defer f.wg.Done()
+				defer func() { <-f.hookSem }()
 				defer platform.RecoverHandler("feishu image")
 				imgMsg := msg
 				data, mime, err := f.DownloadImage(context.Background(), event.Message.MessageID, content.ImageKey)
@@ -206,9 +221,16 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			if err := json.Unmarshal([]byte(event.Message.Content), &content); err != nil || content.FileKey == "" {
 				return
 			}
+			select {
+			case f.hookSem <- struct{}{}:
+			default:
+				slog.Warn("feishu webhook: handler semaphore full, dropping audio message")
+				return
+			}
 			f.wg.Add(1)
 			go func() {
 				defer f.wg.Done()
+				defer func() { <-f.hookSem }()
 				defer platform.RecoverHandler("feishu audio")
 				audioMsg := msg
 				f.handleAudio(context.Background(), handler, audioMsg, event.Message.MessageID, content.FileKey)

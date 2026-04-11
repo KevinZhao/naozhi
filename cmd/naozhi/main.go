@@ -182,10 +182,14 @@ func isNaozhiCallbackHook(cmd, port string) bool {
 		return true
 	}
 	if port != "" {
-		for _, host := range []string{"localhost", "127.0.0.1", "0.0.0.0"} {
+		for _, host := range []string{"localhost", "127.0.0.1", "0.0.0.0", "[::1]", "::1"} {
 			if strings.Contains(lower, host+":"+port) {
 				return true
 			}
+		}
+		// Match any 127.x.x.x address (entire 127/8 loopback block)
+		if strings.Contains(lower, "127.") && strings.Contains(lower, ":"+port) {
+			return true
 		}
 	}
 	return false
@@ -300,6 +304,9 @@ func main() {
 
 	// Start cleanup loop
 	router.StartCleanupLoop(ctx, cfg.ParseTTL()/2)
+
+	// Periodically reconcile shim liveness (reconnect dropped connections)
+	router.StartShimReconcileLoop(ctx, 30*time.Second)
 
 	// Parallel init: transcriber and project scan can overlap
 	var (
@@ -455,6 +462,7 @@ func main() {
 		NoOutputTimeout:   noOutputTimeout,
 		TotalTimeout:      totalTimeout,
 		DashboardToken:    cfg.Server.DashboardToken,
+		TrustedProxy:      cfg.Server.TrustedProxy,
 		ProjectManager:    projectMgr,
 		Nodes:             nodes,
 		ReverseNodeServer: rns,

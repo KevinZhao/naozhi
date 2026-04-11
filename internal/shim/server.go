@@ -38,14 +38,38 @@ type Config struct {
 	CWD             string
 }
 
+// shimLogFile keeps the log file open for the shim's lifetime (prevents GC).
+var shimLogFile *os.File
+
 // Run is the main entry point for the shim process.
 func Run(cfg Config) error {
+	// Redirect slog to a persistent log file so shim logs survive parent restart.
+	logPath := filepath.Join(filepath.Dir(cfg.StateFile), fmt.Sprintf("shim-%d.log", os.Getpid()))
+	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
+		shimLogFile = f
+		slog.SetDefault(slog.New(slog.NewTextHandler(shimLogFile, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		os.Stderr = shimLogFile
+	}
+	slog.Info("shim starting", "pid", os.Getpid(), "key", cfg.Key)
+	defer func() {
+		if r := recover(); r != nil {
+			if shimLogFile != nil {
+				fmt.Fprintf(shimLogFile, "PANIC: %v\n", r)
+			}
+		}
+		if shimLogFile != nil {
+			fmt.Fprintf(shimLogFile, "Run() returning at %s\n", time.Now().Format(time.RFC3339))
+		}
+		slog.Info("shim exiting")
+	}()
+
 	// Signal handling
 	signal.Ignore(syscall.SIGHUP, syscall.SIGPIPE)
 
 	// Start CLI subprocess
 	cli, err := startCLI(cfg.CLIPath, cfg.CLIArgs, cfg.CWD)
 	if err != nil {
+		slog.Error("failed to start CLI", "err", err)
 		return fmt.Errorf("start CLI: %w", err)
 	}
 
@@ -196,18 +220,20 @@ func Run(cfg Config) error {
 
 		case <-cli.exited:
 			slog.Info("CLI exited", "code", cli.exitCode)
-			// Don't broadcastCLIExited here — connected handleClient detects
-			// cli.exited in its own select and sends cli_exited to avoid double delivery.
 			s.saveStateCLIDead()
 			select {
 			case conn := <-acceptCh:
 				go s.handleClient(conn, idleTimeout)
 				select {
 				case <-s.done:
+					slog.Info("exiting: done after cli exit + reconnect")
 				case <-time.After(60 * time.Second):
+					slog.Info("exiting: 60s timeout after cli exit + reconnect")
 				}
 			case <-s.done:
+				slog.Info("exiting: done after cli exit")
 			case <-time.After(60 * time.Second):
+				slog.Info("exiting: 60s timeout after cli exit")
 			}
 			return nil
 
@@ -219,6 +245,7 @@ func Run(cfg Config) error {
 				slog.Info("idle timeout, shutting down")
 				cli.closeStdin()
 				cli.waitOrKill(5 * time.Second)
+				slog.Info("exiting: idle timeout")
 				return nil
 			}
 
@@ -230,10 +257,14 @@ func Run(cfg Config) error {
 				go s.handleClient(conn, idleTimeout)
 				select {
 				case <-s.done:
+					slog.Info("exiting: done after watchdog + reconnect")
 				case <-time.After(60 * time.Second):
+					slog.Info("exiting: 60s timeout after watchdog + reconnect")
 				}
 			case <-s.done:
+				slog.Info("exiting: done after watchdog")
 			case <-time.After(60 * time.Second):
+				slog.Info("exiting: 60s timeout after watchdog")
 			}
 			return nil
 
@@ -241,6 +272,7 @@ func Run(cfg Config) error {
 			slog.Info("shutdown initiated")
 			cli.closeStdin()
 			cli.waitOrKill(5 * time.Second)
+			slog.Info("exiting: shutdown done")
 			return nil
 		}
 	}
@@ -525,8 +557,15 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	// NOW become the active client (after replay complete, no duplication window)
 	writeCh, clientDone := s.setClient(conn)
 
-	// Stop disconnect watchdog
+	// Stop disconnect watchdog and cancel SIGTERM grace timer (if active).
+	// A new client connecting means the shim is needed — don't shut down.
 	s.watchdog.Stop()
+	s.mu.Lock()
+	if s.graceTimer != nil {
+		s.graceTimer.Stop()
+		s.graceTimer = nil
+	}
+	s.mu.Unlock()
 
 	// Writer goroutine: drains writeCh to the socket, exits on clientDone
 	writerDone := make(chan struct{})
@@ -706,7 +745,7 @@ type cliProc struct {
 
 func startCLI(cliPath string, args []string, cwd string) (*cliProc, error) {
 	cmd := exec.Command(cliPath, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	if cwd != "" {
 		cmd.Dir = cwd
 	}

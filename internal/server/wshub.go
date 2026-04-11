@@ -69,6 +69,8 @@ type Hub struct {
 	// via repeated connect/auth/disconnect cycles that bypass HTTP login rate limits.
 	wsAuthLimiter func(ip string) *rate.Limiter
 
+	trustedProxy bool // trust X-Forwarded-For for client IP extraction
+
 	debounceMu    sync.Mutex
 	debounceTimer *time.Timer
 }
@@ -85,6 +87,7 @@ type HubOptions struct {
 	NodesMu       *sync.RWMutex
 	ProjectMgr    *project.Manager
 	AllowedRoot   string
+	TrustedProxy  bool
 	WSAuthLimiter func(ip string) *rate.Limiter
 }
 
@@ -103,6 +106,7 @@ func NewHub(opts HubOptions) *Hub {
 		nodesMu:       opts.NodesMu,
 		projectMgr:    opts.ProjectMgr,
 		allowedRoot:   opts.AllowedRoot,
+		trustedProxy:  opts.TrustedProxy,
 		wsAuthLimiter: opts.WSAuthLimiter,
 		ctx:           ctx,
 		cancel:        cancel,
@@ -114,6 +118,16 @@ func (h *Hub) SetScheduler(s *cron.Scheduler) { h.scheduler = s }
 
 // HandleUpgrade upgrades an HTTP connection to WebSocket.
 func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
+	// Reject upgrades when too many connections are open (prevent resource exhaustion
+	// from unauthenticated connections allocating goroutines + channel buffers).
+	h.mu.Lock()
+	count := len(h.clients)
+	h.mu.Unlock()
+	if count >= 500 {
+		http.Error(w, "too many WebSocket connections", http.StatusServiceUnavailable)
+		return
+	}
+
 	conn, err := wsUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Debug("ws upgrade failed", "err", err)
@@ -123,6 +137,13 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	ip := r.RemoteAddr
 	if host, _, err := net.SplitHostPort(ip); err == nil {
 		ip = host
+	}
+	if h.trustedProxy {
+		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			if first, _, _ := strings.Cut(xff, ","); first != "" {
+				ip = strings.TrimSpace(first)
+			}
+		}
 	}
 	c := &wsClient{
 		conn:          conn,
@@ -324,9 +345,13 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, notify <-chan struct{}, ses
 			if !ok {
 				// Process died or was replaced (e.g., service restart reconnect).
 				// Try to re-subscribe to the new process's EventLog.
-				if !h.resubscribeEvents(c, key, sess, &notify) {
+				// Look up the current session from the router — spawnSession may
+				// have replaced the ManagedSession object entirely.
+				ok, newSess := h.resubscribeEvents(c, key, &notify)
+				if !ok {
 					return
 				}
+				sess = newSess
 				// Catch up on events we missed during the transition.
 				entries := sess.EventEntriesSince(lastTime)
 				if len(entries) > 0 {
@@ -362,25 +387,33 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, notify <-chan struct{}, ses
 }
 
 // resubscribeEvents waits for a new process to be attached to the session and
-// re-subscribes to its EventLog. Returns false if the client disconnects or
-// the wait times out (60s).
-func (h *Hub) resubscribeEvents(c *wsClient, key string, sess *session.ManagedSession, notify *<-chan struct{}) bool {
+// re-subscribes to its EventLog. Returns (ok, currentSession). ok is false if
+// the client disconnects or the wait times out (60s).
+func (h *Hub) resubscribeEvents(c *wsClient, key string, notify *<-chan struct{}) (bool, *session.ManagedSession) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 
 	for range 60 {
 		select {
 		case <-c.done:
-			return false
+			return false, nil
 		case <-ticker.C:
 		}
 
-		newNotify, unsub := sess.SubscribeEvents()
+		// Re-check the router for the current session — spawnSession may have
+		// created a new ManagedSession, replacing the old one in the map.
+		currentSess := h.router.GetSession(key)
+		if currentSess == nil {
+			continue
+		}
+
+		newNotify, unsub := currentSess.SubscribeEvents()
 		// Check if the channel is immediately closed (process still nil).
 		select {
 		case _, ok := <-newNotify:
 			if !ok {
-				// Process still nil — keep waiting.
+				// Process still nil — clean up subscriber slot and keep waiting.
+				unsub()
 				continue
 			}
 			// Process is back and has events.
@@ -394,7 +427,7 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, sess *session.ManagedSe
 			// Client was removed during Shutdown.
 			h.mu.Unlock()
 			unsub()
-			return false
+			return false, nil
 		}
 		if oldUnsub, exists := c.subscriptions[key]; exists {
 			oldUnsub()
@@ -403,9 +436,9 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, sess *session.ManagedSe
 		h.mu.Unlock()
 
 		*notify = newNotify
-		return true
+		return true, currentSess
 	}
-	return false
+	return false, nil
 }
 
 // broadcastState sends a session_state message to all clients subscribed to the given key.

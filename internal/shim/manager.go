@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -145,6 +146,10 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	cmd.Env = os.Environ()
 
+	// Remove stale socket from a previous shim that didn't clean up
+	// (e.g., killed during post-CLI-exit wait period).
+	os.Remove(socketPath) //nolint:errcheck
+
 	// Capture stdout for the ready message
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
@@ -222,6 +227,10 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 		return nil, fmt.Errorf("connect to new shim: %w", err)
 	}
 
+	// Move shim (and CLI) to an independent systemd scope so they survive
+	// service restarts. Must happen after connect so we have the CLI PID from hello.
+	moveToShimsCgroup(cmd.Process.Pid, handle.Hello.CLIPID)
+
 	m.mu.Lock()
 	m.shims[key] = handle
 	m.pendingShims-- // slot fulfilled: transfer from pending to active
@@ -248,9 +257,11 @@ func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*Sh
 		return nil, fmt.Errorf("shim PID %d not alive: %w", state.ShimPID, err)
 	}
 
-	// Validate shim binary identity via /proc/pid/exe (Linux only)
+	// Validate shim binary identity via /proc/pid/exe (Linux only).
+	// After a rebuild, the old binary shows "(deleted)" suffix — strip it.
 	if exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", state.ShimPID)); err == nil {
-		if exePath != m.naozhiBin {
+		cleanPath := strings.TrimSuffix(exePath, " (deleted)")
+		if cleanPath != m.naozhiBin {
 			syscall.Kill(state.ShimPID, syscall.SIGUSR2) //nolint:errcheck
 			RemoveStateFile(stateFile)
 			return nil, fmt.Errorf("shim PID %d binary mismatch: got %s, want %s", state.ShimPID, exePath, m.naozhiBin)
@@ -371,10 +382,14 @@ func (m *Manager) Discover() ([]State, error) {
 			RemoveStateFile(path)
 			continue
 		}
-		// Validate binary identity to detect PID reuse
+		// Validate binary identity to detect PID reuse.
+		// After a rebuild, Linux marks the old binary as "(deleted)" in /proc/pid/exe
+		// (e.g. "/path/to/naozhi (deleted)"). Strip the suffix so that upgraded shims
+		// are still recognized as ours.
 		if exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", state.ShimPID)); err == nil {
-			if exePath != m.naozhiBin {
-				slog.Info("removing stale shim state file (binary mismatch)", "path", path, "pid", state.ShimPID)
+			cleanPath := strings.TrimSuffix(exePath, " (deleted)")
+			if cleanPath != m.naozhiBin {
+				slog.Info("removing stale shim state file (binary mismatch)", "path", path, "pid", state.ShimPID, "exe", exePath)
 				RemoveStateFile(path)
 				continue
 			}
@@ -480,6 +495,63 @@ func (m *Manager) DetachAll() {
 	for _, h := range handles {
 		h.Detach()
 	}
+}
+
+// moveToShimsCgroup moves shim and CLI processes to an independent systemd
+// scope so they survive service restarts. Uses busctl to call StartTransientUnit
+// directly with KillMode=none, making the processes invisible to the
+// naozhi.service lifecycle. Falls back to direct cgroup move if
+// busctl is not available.
+func moveToShimsCgroup(shimPID, cliPID int) {
+	scopeName := fmt.Sprintf("naozhi-shim-%d.scope", shimPID)
+
+	// Build PID list for the scope
+	pids := []string{strconv.Itoa(shimPID)}
+	if cliPID > 0 {
+		pids = append(pids, strconv.Itoa(cliPID))
+	}
+
+	// Use busctl to create a transient scope adopting the shim PIDs.
+	// This registers them as an independent systemd unit.
+	pidArgs := strings.Join(pids, " ")
+	busctlScript := fmt.Sprintf(
+		`busctl call org.freedesktop.systemd1 /org/freedesktop/systemd1 `+
+			`org.freedesktop.systemd1.Manager StartTransientUnit `+
+			`'ssa(sv)a(sa(sv))' '%s' 'fail' 2 `+
+			`'PIDs' 'au' %d %s `+
+			`'KillMode' 's' 'none' 0`,
+		scopeName, len(pids), pidArgs,
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sudo", "-n", "sh", "-c", busctlScript)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		slog.Warn("moveToShimsCgroup: systemd scope failed, trying direct cgroup — zero-downtime restart may not survive service restart",
+			"pid", shimPID, "err", err, "output", string(out))
+		moveToShimsCgroupDirect(shimPID)
+		if cliPID > 0 {
+			moveToShimsCgroupDirect(cliPID)
+		}
+		return
+	}
+	slog.Info("moved shim to independent systemd scope", "scope", scopeName, "pids", pids)
+}
+
+// moveToShimsCgroupDirect is the fallback: move a process to a root-level
+// cgroup directly. Less reliable than systemd scope (systemd may still
+// clean it up during restart).
+func moveToShimsCgroupDirect(pid int) {
+	const procsFile = "/sys/fs/cgroup/naozhi-shims/cgroup.procs"
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "sudo", "-n", "sh", "-c",
+		fmt.Sprintf("echo %d > %s", pid, procsFile))
+	if err := cmd.Run(); err != nil {
+		slog.Warn("moveToShimsCgroupDirect: failed — shim may not survive service restart", "pid", pid, "err", err)
+		return
+	}
+	slog.Info("moved shim to independent cgroup (direct)", "pid", pid)
 }
 
 // Remove removes a shim handle from the manager's tracking.

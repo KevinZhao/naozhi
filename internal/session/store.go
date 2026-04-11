@@ -59,10 +59,22 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 		return err
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
 		_ = os.Remove(tmp)
 		return err
 	}
+	// Fsync before rename to prevent data loss on power failure.
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return err
+	}
+	f.Close()
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return err

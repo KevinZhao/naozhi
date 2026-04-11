@@ -112,6 +112,7 @@ type ServerOptions struct {
 	NoOutputTimeout   time.Duration
 	TotalTimeout      time.Duration
 	DashboardToken    string // optional bearer token for dashboard API
+	TrustedProxy      bool   // trust X-Forwarded-For for client IP
 	ProjectManager    *project.Manager
 	Nodes             map[string]node.Conn
 	ReverseNodeServer *node.ReverseServer
@@ -166,6 +167,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 			dashboardToken: opts.DashboardToken,
 			cookieSecret:   cookieSecret,
 			loginLimiters:  loginLimiterStore{entries: make(map[string]*limiterEntry)},
+			trustedProxy:   opts.TrustedProxy,
 		},
 		cronH: &CronHandlers{
 			scheduler:   scheduler,

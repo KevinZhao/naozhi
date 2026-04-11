@@ -12,6 +12,12 @@ ExecStart=/home/ec2-user/naozhi/bin/naozhi --config /home/ec2-user/naozhi/config
 Restart=always
 RestartSec=5
 
+# Shim process survival: only kill main process on stop, never SIGKILL the cgroup.
+# Shims are moved to /sys/fs/cgroup/naozhi-shims/ and must survive service restarts.
+KillMode=process
+SendSIGKILL=no
+TimeoutStopSec=5
+
 # Runtime environment
 Environment=HOME=/home/ec2-user
 Environment=PATH=/home/ec2-user/.local/bin:/home/ec2-user/.nvm/versions/node/v22.22.1/bin:/usr/local/bin:/usr/bin:/bin
