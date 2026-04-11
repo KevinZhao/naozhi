@@ -213,6 +213,9 @@ func TestWS_SubscribeSessionNotFound(t *testing.T) {
 	conn := dialWS(t, url)
 	defer conn.Close()
 
+	// Server-side waitAndSubscribe polls for up to 5s before returning
+	// "session not found", so extend the read deadline beyond that.
+	conn.SetReadDeadline(time.Now().Add(8 * time.Second))
 	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "nonexistent:d:u:general"})
 	resp := wsRead(t, conn)
 

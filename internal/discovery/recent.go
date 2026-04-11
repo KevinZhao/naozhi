@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -113,32 +114,81 @@ func RecentSessions(claudeDir string, limit int, maxAge time.Duration, excludeSe
 	return result
 }
 
-// recentFromJSONLFiles scans a project directory for .jsonl files and collects
-// session metadata (ID, mtime, workspace). Prompt extraction is deferred to the
-// caller to avoid reading files that won't make the top-N cut.
-func recentFromJSONLFiles(projDir, workspace string, exclude map[string]bool) []RecentSession {
+// ---------------------------------------------------------------------------
+// Directory scan cache
+// ---------------------------------------------------------------------------
+
+// jsonlFileInfo holds cached metadata for a single .jsonl file.
+type jsonlFileInfo struct {
+	sessionID string
+	mtime     int64 // unix ms
+}
+
+// dirFilesCacheEntry stores cached file metadata for a project directory.
+type dirFilesCacheEntry struct {
+	dirMtime int64 // directory mtime in UnixNano (changes on file add/remove)
+	files    []jsonlFileInfo
+}
+
+// dirFilesCache caches per-directory .jsonl file metadata. Cache entries are
+// invalidated when the directory mtime changes (i.e. files are added or removed).
+// Individual file mtime changes (content appended) do NOT invalidate the cache,
+// which is acceptable for the 7-day history sidebar.
+var dirFilesCache sync.Map // projDir → *dirFilesCacheEntry
+
+// cachedJSONLFileInfo returns .jsonl file metadata for a project directory,
+// using a cache validated by the directory's own mtime.
+func cachedJSONLFileInfo(projDir string) []jsonlFileInfo {
+	dirInfo, err := os.Stat(projDir)
+	if err != nil {
+		return nil
+	}
+	dirMtime := dirInfo.ModTime().UnixNano()
+
+	if v, ok := dirFilesCache.Load(projDir); ok {
+		if entry := v.(*dirFilesCacheEntry); entry.dirMtime == dirMtime {
+			return entry.files
+		}
+	}
+
+	// Cache miss or stale — full scan.
 	dirEntries, err := os.ReadDir(projDir)
 	if err != nil {
 		return nil
 	}
-
-	var out []RecentSession
+	var files []jsonlFileInfo
 	for _, de := range dirEntries {
 		name := de.Name()
 		if de.IsDir() || !strings.HasSuffix(name, ".jsonl") {
-			continue
-		}
-		sessionID := strings.TrimSuffix(name, ".jsonl")
-		if !IsValidSessionID(sessionID) || exclude[sessionID] {
 			continue
 		}
 		info, err := de.Info()
 		if err != nil || info.Size() == 0 {
 			continue
 		}
+		files = append(files, jsonlFileInfo{
+			sessionID: strings.TrimSuffix(name, ".jsonl"),
+			mtime:     info.ModTime().UnixMilli(),
+		})
+	}
+
+	dirFilesCache.Store(projDir, &dirFilesCacheEntry{dirMtime: dirMtime, files: files})
+	return files
+}
+
+// recentFromJSONLFiles scans a project directory for .jsonl files and collects
+// session metadata (ID, mtime, workspace). Prompt extraction is deferred to the
+// caller to avoid reading files that won't make the top-N cut.
+func recentFromJSONLFiles(projDir, workspace string, exclude map[string]bool) []RecentSession {
+	files := cachedJSONLFileInfo(projDir)
+	var out []RecentSession
+	for _, f := range files {
+		if !IsValidSessionID(f.sessionID) || exclude[f.sessionID] {
+			continue
+		}
 		out = append(out, RecentSession{
-			SessionID:  sessionID,
-			LastActive: info.ModTime().UnixMilli(),
+			SessionID:  f.sessionID,
+			LastActive: f.mtime,
 			Workspace:  workspace,
 		})
 	}
@@ -210,26 +260,12 @@ func resolveWorkspaceWithIndex(projDir, dirName string) (string, *sessionsIndex)
 }
 
 // recentFromParsedIndex extracts sessions from an already-parsed sessions index.
-// Uses a single ReadDir to collect file info, then O(1) map lookups per entry
-// instead of individual os.Stat calls.
+// Uses cached file metadata and O(1) map lookups per index entry.
 func recentFromParsedIndex(idx *sessionsIndex, projDir, workspace string, exclude map[string]bool) []RecentSession {
-	// Build a map of .jsonl file mtimes from a single directory listing.
-	dirEntries, err := os.ReadDir(projDir)
-	if err != nil {
-		return nil
-	}
-	jsonlMtimes := make(map[string]int64, len(dirEntries))
-	for _, de := range dirEntries {
-		name := de.Name()
-		if de.IsDir() || !strings.HasSuffix(name, ".jsonl") {
-			continue
-		}
-		info, err := de.Info()
-		if err != nil || info.Size() == 0 {
-			continue
-		}
-		sid := strings.TrimSuffix(name, ".jsonl")
-		jsonlMtimes[sid] = info.ModTime().UnixMilli()
+	files := cachedJSONLFileInfo(projDir)
+	jsonlMtimes := make(map[string]int64, len(files))
+	for _, f := range files {
+		jsonlMtimes[f.sessionID] = f.mtime
 	}
 
 	var out []RecentSession
@@ -269,7 +305,14 @@ func recentFromParsedIndex(idx *sessionsIndex, projDir, workspace string, exclud
 // level, it tries consuming 1, 2, 3, ... consecutive parts as a single directory
 // name, verifying each candidate with os.Stat. Invalid branches are pruned
 // immediately, keeping the total stat calls manageable (~10-20 for typical paths).
+// dfsPathCache permanently caches the result of resolveWorkspaceByParts.
+// Encoded directory names never change, so the mapping is stable.
+var dfsPathCache sync.Map // encoded dirName → resolved workspace path
+
 func resolveWorkspaceByParts(dirName string) string {
+	if v, ok := dfsPathCache.Load(dirName); ok {
+		return v.(string)
+	}
 	if dirName == "" || dirName[0] != '-' {
 		return ""
 	}
@@ -278,7 +321,9 @@ func resolveWorkspaceByParts(dirName string) string {
 		return ""
 	}
 	statCount := 0
-	return tryResolveParts(parts, "/", &statCount)
+	result := tryResolveParts(parts, "/", &statCount)
+	dfsPathCache.Store(dirName, result)
+	return result
 }
 
 // tryResolveParts recursively resolves path parts against the filesystem.

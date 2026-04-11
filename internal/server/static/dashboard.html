@@ -504,6 +504,23 @@ async function fetchSessions() {
   }
 }
 
+// Debounced variant: coalesces multiple calls within 300ms into a single fetch.
+// Returns a Promise that resolves after the actual fetch completes.
+let _fetchDbTimer = null;
+let _fetchDbResolvers = [];
+function debouncedFetchSessions() {
+  return new Promise(resolve => {
+    _fetchDbResolvers.push(resolve);
+    if (_fetchDbTimer) clearTimeout(_fetchDbTimer);
+    _fetchDbTimer = setTimeout(() => {
+      _fetchDbTimer = null;
+      const resolvers = _fetchDbResolvers;
+      _fetchDbResolvers = [];
+      fetchSessions().then(() => resolvers.forEach(r => r()));
+    }, 300);
+  });
+}
+
 function renderSidebar(data) {
   const st = data.stats;
   localWsInfo = { name: st.workspace_name || st.workspace_id || '', sys: '' };
@@ -899,7 +916,7 @@ async function dismissSession(key, node) {
       document.getElementById('main').innerHTML = '<div class="empty-state">select a session</div>';
     }
     lastVersion = 0;
-    fetchSessions();
+    debouncedFetchSessions();
     return;
   }
 
@@ -920,7 +937,7 @@ async function dismissSession(key, node) {
       document.getElementById('main').innerHTML = '<div class="empty-state">select a session</div>';
     }
     lastVersion = 0;
-    fetchSessions();
+    debouncedFetchSessions();
   } catch (e) { showToast('remove error: ' + e.message); }
 }
 
@@ -1199,6 +1216,18 @@ async function sendMessage() {
       delete sessionNodes[selectedKey];
     }
     if (wsm.send(sendMsg)) {
+      // Optimistic render: show user message immediately without waiting
+      // for the CLI to echo it back as a "user" event.
+      const el = document.getElementById('events-scroll');
+      if (el && text) {
+        const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+        const html = eventHtml({type: 'user', detail: text, time: Date.now()});
+        if (html) {
+          el.insertAdjacentHTML('beforeend', html);
+          el.lastElementChild.classList.add('optimistic-msg');
+          if (wasBottom) el.scrollTop = el.scrollHeight;
+        }
+      }
       if (input) clearMsg(input);
       delete sessionDrafts[selectedKey];
       sending = false;
@@ -2045,7 +2074,7 @@ function doCreateInProject(projectPath, projectName, nodeId) {
   document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
   renderMainShell();
   lastVersion = 0;
-  fetchSessions();
+  debouncedFetchSessions();
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
 }
 
@@ -2071,7 +2100,7 @@ function doCreateSession() {
   document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
   renderMainShell();
   lastVersion = 0;
-  fetchSessions();
+  debouncedFetchSessions();
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
 }
 
@@ -2491,7 +2520,7 @@ const wsm = {
         this.onSessionState(msg);
         break;
       case 'sessions_update':
-        fetchSessions().then(() => {
+        debouncedFetchSessions().then(() => {
           // Auto-subscribe to newly created session (only if no active or pending subscription)
           if (selectedKey && !wsm.subscribedKey && !wsm._pendingSubscribeKey && sessionsData[sid(selectedKey, selectedNode)]) {
             wsm.subscribe(selectedKey, selectedNode);
@@ -2570,6 +2599,7 @@ const wsm = {
     const display = processEventsForDisplay(events);
 
     if (isInitial) {
+      // Full render replaces everything — remove any optimistic messages
       el.innerHTML = display.map(eventHtml).filter(Boolean).join('') || '<div class="empty-state">no events yet</div>';
       el.scrollTop = el.scrollHeight;
       // Reset dedup tracker on full render
@@ -2581,6 +2611,11 @@ const wsm = {
       display.forEach(e => {
         // Deduplicate: skip events at or before the last rendered time
         if (e.time && e.time <= lastRenderedEventTime) return;
+        // When the real "user" event arrives, remove the optimistic version
+        if (e.type === 'user') {
+          const opt = el.querySelector('.optimistic-msg');
+          if (opt) opt.remove();
+        }
         const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h);
         if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
       });
@@ -2673,6 +2708,11 @@ const wsm = {
     if (!el) return;
     const empty = el.querySelector('.empty-state');
     if (empty) empty.remove();
+    // When the real "user" event arrives, remove the optimistic version
+    if (ev.type === 'user') {
+      const opt = el.querySelector('.optimistic-msg');
+      if (opt) opt.remove();
+    }
     const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
     el.insertAdjacentHTML('beforeend', html);
     if (wasBottom) el.scrollTop = el.scrollHeight;
@@ -2683,16 +2723,13 @@ const wsm = {
   onSendAck(msg) {
     if (msg.status === 'accepted') {
       flashSendBtn();
-      // For new sessions: backend needs time to spawn the process before
-      // the session appears in the API. Retry subscribe after a short delay.
+      // For new sessions: subscribe immediately. The server-side
+      // handleSubscribe will wait (up to 5s) for the session to appear
+      // if it's still spawning — no client-side delay needed.
       const ackKey = msg.key || selectedKey;
       if (ackKey && !wsm.subscribedKey && !wsm._pendingSubscribeKey) {
-        setTimeout(() => {
-          if (selectedKey === ackKey && !wsm.subscribedKey && !wsm._pendingSubscribeKey) {
-            wsm.lastEventTimeWs = 0;
-            wsm.subscribe(ackKey, selectedNode);
-          }
-        }, 1500);
+        wsm.lastEventTimeWs = 0;
+        wsm.subscribe(ackKey, selectedNode);
       }
       // Re-subscribe is NOT needed here for already-subscribed sessions.
       // The existing eventPushLoop is still connected to the process's event
@@ -2704,6 +2741,9 @@ const wsm = {
       // handles re-subscription exclusively.
     } else if (msg.status === 'error') {
       showToast('send error: ' + (msg.error || 'unknown'), 'error');
+      // Remove optimistic message on send failure
+      const opt = document.querySelector('.optimistic-msg');
+      if (opt) opt.remove();
     }
   },
 
@@ -2734,7 +2774,7 @@ const wsm = {
       wsm.subscribe(msg.key, selectedNode);
     }
     // Session became suspended: re-render sidebar to update visual state
-    if (msg.state === 'suspended') { lastVersion = 0; fetchSessions(); }
+    if (msg.state === 'suspended') { lastVersion = 0; debouncedFetchSessions(); }
   },
 
   setState(s) {
@@ -2747,7 +2787,7 @@ const wsm = {
       if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
       discoveredPollTimer = setInterval(scanDiscovered, 30000);
       // Pull fresh node/session state immediately to clear stale data
-      fetchSessions();
+      debouncedFetchSessions();
     } else if (s === WS_STATES.DISCONNECTED) {
       // WS lost: start fallback polling
       if (!sessionPollTimer) sessionPollTimer = setInterval(fetchSessions, 5000);
@@ -2805,7 +2845,7 @@ async function scanDiscovered() {
     discoveredItems = (await r.json()) || [];
     // Trigger sidebar re-render to merge discovered into project groups
     lastVersion = 0;
-    fetchSessions();
+    debouncedFetchSessions();
   } catch (e) {
     showToast('scan error: ' + e.message);
   }
@@ -3328,7 +3368,7 @@ function openCronSession(cronId) {
   if (!sessionsData[sid(key, 'local')] && !sessionWorkspaces[key]) {
     sessionWorkspaces[key] = defaultWorkspace || '/tmp';
     lastVersion = 0;
-    fetchSessions();
+    debouncedFetchSessions();
   }
   selectSession(key, 'local');
 }

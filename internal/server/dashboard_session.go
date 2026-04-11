@@ -375,7 +375,7 @@ func (h *SessionHandlers) historySessions() []discovery.RecentSession {
 		return nil
 	}
 
-	const cacheTTL = 30 * time.Second
+	const cacheTTL = 120 * time.Second
 	h.historyCacheMu.Lock()
 	if time.Since(h.historyCacheTime) < cacheTTL {
 		cached := h.historyCache

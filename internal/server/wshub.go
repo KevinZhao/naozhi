@@ -147,7 +147,7 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	c := &wsClient{
 		conn:          conn,
-		send:          make(chan []byte, 256),
+		send:          make(chan []byte, 1024),
 		hub:           h,
 		remoteIP:      ip,
 		subscriptions: make(map[string]func()),
@@ -234,11 +234,41 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	h.mu.Unlock()
 
 	sess := h.router.GetSession(key)
-	if sess == nil {
-		c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "session not found"})
+	if sess != nil {
+		h.completeSubscribe(c, key, msg, sess)
 		return
 	}
 
+	// Session may be spawning in a background goroutine (e.g. after a send).
+	// Wait asynchronously instead of failing immediately — avoids the need
+	// for an arbitrary client-side delay.
+	go h.waitAndSubscribe(c, key, msg)
+}
+
+// waitAndSubscribe polls for a session to appear (100ms interval, 5s max).
+// Runs in its own goroutine so the client's readPump is not blocked.
+func (h *Hub) waitAndSubscribe(c *wsClient, key string, msg node.ClientMsg) {
+	ticker := time.NewTicker(100 * time.Millisecond)
+	defer ticker.Stop()
+	timeout := time.After(5 * time.Second)
+	for {
+		select {
+		case <-ticker.C:
+			if sess := h.router.GetSession(key); sess != nil {
+				h.completeSubscribe(c, key, msg, sess)
+				return
+			}
+		case <-timeout:
+			c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "session not found"})
+			return
+		case <-c.done:
+			return
+		}
+	}
+}
+
+// completeSubscribe finishes a subscription once a valid session is available.
+func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, sess *session.ManagedSession) {
 	notify, unsub := sess.SubscribeEvents()
 
 	h.mu.Lock()
@@ -462,10 +492,10 @@ func (h *Hub) BroadcastSessionsUpdate() {
 	h.debounceMu.Lock()
 	defer h.debounceMu.Unlock()
 	if h.debounceTimer != nil {
-		h.debounceTimer.Reset(200 * time.Millisecond)
+		h.debounceTimer.Reset(50 * time.Millisecond)
 		return
 	}
-	h.debounceTimer = time.AfterFunc(200*time.Millisecond, func() {
+	h.debounceTimer = time.AfterFunc(50*time.Millisecond, func() {
 		h.debounceMu.Lock()
 		h.debounceTimer = nil
 		h.debounceMu.Unlock()

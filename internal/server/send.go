@@ -135,7 +135,7 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, error)
 	text, images := p.Text, p.Images
 	go func() {
 		if needInterrupt {
-			if !h.guard.AcquireTimeout(h.ctx, key, 5*time.Second) {
+			if !h.guard.AcquireTimeout(h.ctx, key, 2*time.Second) {
 				slog.Error("send: interrupt timed out", "key", key)
 				if onAsyncError != nil {
 					onAsyncError("session busy, interrupt timed out")
