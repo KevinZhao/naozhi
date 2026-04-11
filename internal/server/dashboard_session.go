@@ -385,31 +385,48 @@ func (h *SessionHandlers) historySessions() []discovery.RecentSession {
 	h.historyCacheMu.Unlock()
 
 	v, _, _ := h.historyFlight.Do("history", func() (any, error) {
-		excludeIDs := h.router.DiscoveryExcludeIDs()
-		all := discovery.RecentSessions(h.claudeDir, 0, 7*24*time.Hour, excludeIDs)
-
-		// Resolve project names in batch.
-		if h.projectMgr != nil && len(all) > 0 {
-			var workspaces []string
-			for _, rs := range all {
-				workspaces = append(workspaces, rs.Workspace)
-			}
-			wsMap := h.projectMgr.ResolveWorkspaces(workspaces)
-			for i := range all {
-				all[i].Project = wsMap[all[i].Workspace]
-			}
-		}
-
-		h.historyCacheMu.Lock()
-		h.historyCache = all
-		h.historyCacheTime = time.Now()
-		h.historyCacheMu.Unlock()
-
-		return all, nil
+		return h.loadHistorySessions(), nil
 	})
 
 	if res, ok := v.([]discovery.RecentSession); ok {
 		return res
 	}
 	return nil
+}
+
+// WarmHistoryCache pre-populates the history sessions cache in the background
+// so that the first dashboard load does not block on a full filesystem scan.
+func (h *SessionHandlers) WarmHistoryCache() {
+	if h.claudeDir == "" {
+		return
+	}
+	go func() {
+		h.historyFlight.Do("history", func() (any, error) {
+			return h.loadHistorySessions(), nil
+		})
+	}()
+}
+
+func (h *SessionHandlers) loadHistorySessions() []discovery.RecentSession {
+	excludeIDs := h.router.DiscoveryExcludeIDs()
+	all := discovery.RecentSessions(h.claudeDir, 0, 7*24*time.Hour, excludeIDs)
+
+	// Resolve project names in batch.
+	if h.projectMgr != nil && len(all) > 0 {
+		var workspaces []string
+		for _, rs := range all {
+			workspaces = append(workspaces, rs.Workspace)
+		}
+		wsMap := h.projectMgr.ResolveWorkspaces(workspaces)
+		for i := range all {
+			all[i].Project = wsMap[all[i].Workspace]
+		}
+	}
+
+	h.historyCacheMu.Lock()
+	h.historyCache = all
+	h.historyCacheTime = time.Now()
+	h.historyCacheMu.Unlock()
+
+	return all
 }

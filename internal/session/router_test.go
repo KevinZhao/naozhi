@@ -88,6 +88,17 @@ func (f *fakeProcess) EventEntries() []cli.EventEntry {
 	copy(cp, f.entries)
 	return cp
 }
+func (f *fakeProcess) EventLastN(n int) []cli.EventEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	entries := f.entries
+	if n > 0 && n < len(entries) {
+		entries = entries[len(entries)-n:]
+	}
+	cp := make([]cli.EventEntry, len(entries))
+	copy(cp, entries)
+	return cp
+}
 func (f *fakeProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	f.mu.Lock()
 	defer f.mu.Unlock()

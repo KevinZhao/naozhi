@@ -781,6 +781,11 @@ func (p *Process) EventEntries() []EventEntry {
 	return p.eventLog.Entries()
 }
 
+// EventLastN returns the most recent n event log entries.
+func (p *Process) EventLastN(n int) []EventEntry {
+	return p.eventLog.LastN(n)
+}
+
 // EventEntriesSince returns event log entries after the given unix ms timestamp.
 func (p *Process) EventEntriesSince(afterMS int64) []EventEntry {
 	return p.eventLog.EntriesSince(afterMS)

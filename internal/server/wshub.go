@@ -287,7 +287,9 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	if msg.After > 0 {
 		entries = sess.EventEntriesSince(msg.After)
 	} else {
-		entries = sess.EventEntries()
+		// Limit initial history to the most recent 100 events to keep
+		// JSON serialization and client-side rendering fast.
+		entries = sess.EventLastN(100)
 	}
 
 	c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State})

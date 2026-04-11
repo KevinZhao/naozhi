@@ -235,6 +235,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		watchdogNoOut: &s.watchdogNoOutputKills,
 		watchdogTotal: &s.watchdogTotalKills,
 	}
+	s.sessionH.WarmHistoryCache()
 	platNames := make(map[string]struct{}, len(platforms))
 	for name := range platforms {
 		platNames[name] = struct{}{}

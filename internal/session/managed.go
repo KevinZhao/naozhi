@@ -27,6 +27,7 @@ type processIface interface {
 	GetState() cli.ProcessState
 	TotalCost() float64
 	EventEntries() []cli.EventEntry
+	EventLastN(n int) []cli.EventEntry
 	EventEntriesSince(afterMS int64) []cli.EventEntry
 	ProtocolName() string
 	SubscribeEvents() (<-chan struct{}, func())
@@ -333,6 +334,25 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 	out := make([]cli.EventEntry, len(s.persistedHistory))
 	copy(out, s.persistedHistory)
 	s.sendMu.Unlock()
+	return out
+}
+
+// EventLastN returns the most recent n event entries.
+func (s *ManagedSession) EventLastN(n int) []cli.EventEntry {
+	proc := s.getProcess()
+	if proc != nil {
+		return proc.EventLastN(n)
+	}
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	if n <= 0 || n >= len(s.persistedHistory) {
+		out := make([]cli.EventEntry, len(s.persistedHistory))
+		copy(out, s.persistedHistory)
+		return out
+	}
+	start := len(s.persistedHistory) - n
+	out := make([]cli.EventEntry, n)
+	copy(out, s.persistedHistory[start:])
 	return out
 }
 

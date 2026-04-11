@@ -202,6 +202,23 @@ func (l *EventLog) Entries() []EventEntry {
 	return out
 }
 
+// LastN returns the most recent n entries in chronological order.
+// If n <= 0 or n >= count, all entries are returned.
+func (l *EventLog) LastN(n int) []EventEntry {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	count := l.count
+	if n > 0 && n < count {
+		count = n
+	}
+	out := make([]EventEntry, count)
+	start := (l.head - count + l.maxSize) % l.maxSize
+	for i := 0; i < count; i++ {
+		out[i] = l.entries[(start+i)%l.maxSize]
+	}
+	return out
+}
+
 // EntriesSince returns entries after the given unix ms timestamp, in chronological order.
 // Scans backward from the newest entry for O(k) performance in the common case
 // (k = entries since afterMS, typically 1-5 during streaming).
