@@ -132,6 +132,20 @@ func (dc *discoveryCache) tryShortCircuit() bool {
 			return false // a process died, do full scan
 		}
 	}
+
+	// Session list is stable (no new/removed processes), but dynamic fields
+	// (lastActive, state, summary, lastPrompt) may have changed because the
+	// CLI keeps writing to JSONL files.  Do a lightweight refresh that only
+	// stats files and hits the mtime-based caches.
+	if len(cached) > 0 {
+		updated := make([]discovery.DiscoveredSession, len(cached))
+		copy(updated, cached)
+		discovery.RefreshDynamic(dc.claudeDir, updated)
+		dc.mu.Lock()
+		dc.sessions = updated
+		dc.mu.Unlock()
+	}
+
 	return true
 }
 

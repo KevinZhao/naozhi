@@ -594,7 +594,10 @@ function renderSidebar(data) {
       html += '<div class="section-header">' + esc(p) + '</div>';
       html += groups[p].map(sessionCardHtml).join('');
     });
-    html += ungrouped.map(sessionCardHtml).join('');
+    if (ungrouped.length > 0) {
+      html += '<div class="section-header">Other</div>';
+      html += ungrouped.map(sessionCardHtml).join('');
+    }
   } else {
     html = allItems.map(sessionCardHtml).join('');
   }
@@ -1416,21 +1419,23 @@ function refreshBanner() {
     }
   }
 
-  // Auto-show/hide banner based on active content. When state is "running",
-  // updateSendButton already forces display=''. For "ready" sessions (e.g.
-  // after zero-downtime restart with background agents), show the banner if
-  // there's active tool/thinking/agent activity; hide it when turn resets.
+  // Auto-show/hide banner based on session state and active content.
+  // When state is "running", updateSendButton already forces display=''.
+  // When state is "ready"/"suspended", only keep the banner visible if
+  // there are genuinely active background agents (zero-downtime restart).
+  // Late-arriving history batches with stale tool events must NOT re-show
+  // the banner after the session has finished.
   const banner = document.getElementById('running-banner');
   if (banner) {
     const hasContent = turnState.currentTool || turnState.isThinking || turnState.isWriting || turnState.agents.length > 0 || turnState.toolOrder.length > 0;
-    if (hasContent && banner.style.display === 'none') {
+    const sKey = sid(selectedKey, selectedNode);
+    const sess = sessionsData[sKey];
+    const isRunning = sess && sess.state === 'running';
+    const hasActiveAgents = turnState.agents.some(function(a) { return a.status !== 'completed' && a.status !== 'error'; });
+    if (hasContent && (isRunning || hasActiveAgents) && banner.style.display === 'none') {
       banner.style.display = '';
-    } else if (!hasContent && banner.style.display !== 'none') {
-      const sKey = sid(selectedKey, selectedNode);
-      const sess = sessionsData[sKey];
-      if (!sess || sess.state !== 'running') {
-        banner.style.display = 'none';
-      }
+    } else if (banner.style.display !== 'none' && !isRunning && !hasActiveAgents) {
+      banner.style.display = 'none';
     }
   }
 }
@@ -1617,10 +1622,9 @@ function updateSendButton(state) {
     initAgentsFromSession();
     refreshBanner();
   } else {
-    // Don't force-hide the banner — refreshBanner will show/hide it based on
-    // whether there's active content (background agents, tools). This ensures
-    // the banner stays visible after zero-downtime restart when background
-    // agents are still running but the session state is "ready".
+    // resetTurnState → refreshBanner will hide the banner since the session
+    // is no longer "running". If background agents are still active (e.g.
+    // zero-downtime restart), refreshBanner keeps the banner visible.
     if (sendBtn) sendBtn.style.display = inVoiceMode ? 'none' : 'flex';
     if (stopBtn) stopBtn.style.display = 'none';
     resetTurnState();

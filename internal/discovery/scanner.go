@@ -423,6 +423,8 @@ func extractLastPrompt(claudeDir, cwd, sessionID string) string {
 }
 
 // extractLastPromptUncached does the actual 512KB tail read and JSON scanning.
+// If the tail window contains only tool_result user messages (no text prompts),
+// it falls back to scanning from the beginning of the file.
 func extractLastPromptUncached(path string, fileSize int64) string {
 	f, err := os.Open(path)
 	if err != nil {
@@ -442,6 +444,23 @@ func extractLastPromptUncached(path string, fileSize int64) string {
 		}
 	}
 
+	lastPrompt := scanUserPrompt(f)
+
+	// If the tail scan found no text prompt and we skipped earlier content,
+	// re-scan from the beginning. This handles sessions where the only user
+	// text prompt is near the start and the tail is all tool_result messages.
+	if lastPrompt == "" && offset > 0 {
+		if _, err := f.Seek(0, io.SeekStart); err == nil {
+			lastPrompt = scanUserPrompt(f)
+		}
+	}
+
+	return cli.TruncateRunes(lastPrompt, 120)
+}
+
+// scanUserPrompt scans lines from the current file position and returns
+// the last user message that contains actual text (not tool_result).
+func scanUserPrompt(f *os.File) string {
 	var lastPrompt string
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 16*1024), 256*1024)
@@ -467,8 +486,7 @@ func extractLastPromptUncached(path string, fileSize int64) string {
 			lastPrompt = text
 		}
 	}
-
-	return cli.TruncateRunes(lastPrompt, 120)
+	return lastPrompt
 }
 
 // extractUserText extracts the text content from a user message.
@@ -627,6 +645,73 @@ func LookupSummaries(claudeDir string, sessions map[string]string) map[string]st
 		}
 	}
 	return result
+}
+
+// RefreshDynamic updates the mutable fields (LastActive, State, Summary,
+// LastPrompt) of already-discovered sessions in place.  It uses the same
+// caches as Scan, so repeated calls for unchanged JSONL/index files are cheap
+// (os.Stat + cache hit).  Returns true if any field changed.
+func RefreshDynamic(claudeDir string, sessions []DiscoveredSession) bool {
+	if claudeDir == "" || len(sessions) == 0 {
+		return false
+	}
+
+	// Advance cache generations (same as Scan) so entries stay fresh.
+	promptCache.Lock()
+	promptCache.generation++
+	promptCache.Unlock()
+	summaryCache.Lock()
+	summaryCache.generation++
+	summaryCache.Unlock()
+
+	// Batch-lookup summaries.
+	workspaces := make(map[string]string, len(sessions))
+	for i := range sessions {
+		workspaces[sessions[i].SessionID] = sessions[i].CWD
+	}
+	summaryMap := LookupSummaries(claudeDir, workspaces)
+
+	// Batch-extract last prompts in parallel.
+	prompts := make([]string, len(sessions))
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 4)
+	for i := range sessions {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			sem <- struct{}{}
+			defer func() { <-sem }()
+			prompts[idx] = extractLastPrompt(claudeDir, sessions[idx].CWD, sessions[idx].SessionID)
+		}(i)
+	}
+	wg.Wait()
+
+	changed := false
+	nowMs := time.Now().UnixMilli()
+	for i := range sessions {
+		s := &sessions[i]
+		if la := jsonlMtime(claudeDir, s.CWD, s.SessionID, s.StartedAt); la != s.LastActive {
+			s.LastActive = la
+			changed = true
+		}
+		newState := "ready"
+		if s.LastActive > nowMs-int64(runningThreshold/time.Millisecond) {
+			newState = "running"
+		}
+		if newState != s.State {
+			s.State = newState
+			changed = true
+		}
+		if sum := summaryMap[s.SessionID]; sum != "" && sum != s.Summary {
+			s.Summary = sum
+			changed = true
+		}
+		if prompts[i] != s.LastPrompt {
+			s.LastPrompt = prompts[i]
+			changed = true
+		}
+	}
+	return changed
 }
 
 // IsValidSessionID checks whether s is a valid UUID-format session ID.
