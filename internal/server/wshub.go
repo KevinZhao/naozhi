@@ -24,7 +24,7 @@ import (
 
 // Hub manages WebSocket client connections and event subscriptions.
 type Hub struct {
-	mu          sync.Mutex
+	mu          sync.RWMutex
 	clients     map[*wsClient]struct{}
 	router      *session.Router
 	agents      map[string]session.AgentOpts
@@ -66,6 +66,9 @@ type HubOptions struct {
 	TrustedProxy  bool
 	WSAuthLimiter func(ip string) *rate.Limiter
 }
+
+// Pre-marshaled static messages to avoid repeated JSON serialization.
+var sessionsUpdateMsg, _ = json.Marshal(node.ServerMsg{Type: "sessions_update"})
 
 // NewHub creates a new WebSocket hub.
 func NewHub(opts HubOptions) *Hub {
@@ -118,9 +121,9 @@ func (h *Hub) SetScheduler(s *cron.Scheduler) { h.scheduler = s }
 func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// Reject upgrades when too many connections are open (prevent resource exhaustion
 	// from unauthenticated connections allocating goroutines + channel buffers).
-	h.mu.Lock()
+	h.mu.RLock()
 	count := len(h.clients)
-	h.mu.Unlock()
+	h.mu.RUnlock()
 	if count >= 500 {
 		http.Error(w, "too many WebSocket connections", http.StatusServiceUnavailable)
 		return
@@ -456,14 +459,14 @@ func (h *Hub) broadcastState(key, state, reason string) {
 	}
 	// Snapshot subscribed clients under lock, then release before sending
 	// to avoid blocking register/unregister/subscribe during broadcast.
-	h.mu.Lock()
+	h.mu.RLock()
 	targets := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
 		if _, ok := c.subscriptions[key]; ok {
 			targets = append(targets, c)
 		}
 	}
-	h.mu.Unlock()
+	h.mu.RUnlock()
 
 	for _, c := range targets {
 		c.SendRaw(data)
@@ -478,14 +481,14 @@ func (h *Hub) BroadcastSessionReady(key string) {
 	if err != nil {
 		return
 	}
-	h.mu.Lock()
+	h.mu.RLock()
 	targets := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
 		if c.authenticated.Load() {
 			targets = append(targets, c)
 		}
 	}
-	h.mu.Unlock()
+	h.mu.RUnlock()
 
 	for _, c := range targets {
 		c.SendRaw(data)
@@ -510,18 +513,15 @@ func (h *Hub) BroadcastSessionsUpdate() {
 }
 
 func (h *Hub) doBroadcastSessionsUpdate() {
-	data, err := json.Marshal(node.ServerMsg{Type: "sessions_update"})
-	if err != nil {
-		return
-	}
-	h.mu.Lock()
+	data := sessionsUpdateMsg
+	h.mu.RLock()
 	targets := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
 		if c.authenticated.Load() {
 			targets = append(targets, c)
 		}
 	}
-	h.mu.Unlock()
+	h.mu.RUnlock()
 
 	for _, c := range targets {
 		c.SendRaw(data)
@@ -544,14 +544,14 @@ func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
 	if err != nil {
 		return
 	}
-	h.mu.Lock()
+	h.mu.RLock()
 	targets := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
 		if c.authenticated.Load() {
 			targets = append(targets, c)
 		}
 	}
-	h.mu.Unlock()
+	h.mu.RUnlock()
 
 	for _, c := range targets {
 		c.SendRaw(data)
@@ -561,11 +561,11 @@ func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
 // DroppedMessages returns the total number of messages dropped across all clients.
 func (h *Hub) DroppedMessages() int64 {
 	var total int64
-	h.mu.Lock()
+	h.mu.RLock()
 	for c := range h.clients {
 		total += c.dropped.Load()
 	}
-	h.mu.Unlock()
+	h.mu.RUnlock()
 	return total
 }
 
@@ -668,14 +668,14 @@ func (h *Hub) PurgeNodeSubscriptions(nodeID string) {
 	if err != nil {
 		return
 	}
-	h.mu.Lock()
+	h.mu.RLock()
 	targets := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
 		if c.authenticated.Load() {
 			targets = append(targets, c)
 		}
 	}
-	h.mu.Unlock()
+	h.mu.RUnlock()
 
 	for _, c := range targets {
 		c.SendRaw(data)

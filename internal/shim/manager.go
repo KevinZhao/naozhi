@@ -410,8 +410,8 @@ func (h *ShimHandle) SendMsg(msg ClientMsg) error {
 	}
 	h.WriteMu.Lock()
 	defer h.WriteMu.Unlock()
-	h.Writer.Write(data)         //nolint:errcheck
-	h.Writer.Write([]byte{'\n'}) //nolint:errcheck
+	h.Writer.Write(data)     //nolint:errcheck
+	h.Writer.WriteByte('\n') //nolint:errcheck
 	return h.Writer.Flush()
 }
 
@@ -470,7 +470,7 @@ func (h *ShimHandle) Shutdown() {
 	h.Close()
 }
 
-// StopAll sends shutdown to all known shims.
+// StopAll sends shutdown to all known shims concurrently.
 func (m *Manager) StopAll(ctx context.Context) {
 	m.mu.Lock()
 	handles := make(map[string]*ShimHandle, len(m.shims))
@@ -479,13 +479,19 @@ func (m *Manager) StopAll(ctx context.Context) {
 	}
 	m.mu.Unlock()
 
+	var wg sync.WaitGroup
 	for key, h := range handles {
-		slog.Info("shutting down shim", "key", key)
-		h.Shutdown()
+		wg.Add(1)
+		go func(k string, h *ShimHandle) {
+			defer wg.Done()
+			slog.Info("shutting down shim", "key", k)
+			h.Shutdown()
+		}(key, h)
 	}
+	wg.Wait()
 }
 
-// DetachAll sends detach to all known shims (used during graceful shutdown).
+// DetachAll sends detach to all known shims concurrently (used during graceful shutdown).
 func (m *Manager) DetachAll() {
 	m.mu.Lock()
 	handles := make(map[string]*ShimHandle, len(m.shims))
@@ -494,9 +500,15 @@ func (m *Manager) DetachAll() {
 	}
 	m.mu.Unlock()
 
+	var wg sync.WaitGroup
 	for _, h := range handles {
-		h.Detach()
+		wg.Add(1)
+		go func(h *ShimHandle) {
+			defer wg.Done()
+			h.Detach()
+		}(h)
 	}
+	wg.Wait()
 }
 
 // moveToShimsCgroup moves shim and CLI processes to an independent systemd

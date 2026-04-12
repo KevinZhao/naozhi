@@ -170,7 +170,10 @@ func (p *Process) shimSend(msg shimClientMsg) error {
 	}
 	p.shimWMu.Lock()
 	defer p.shimWMu.Unlock()
-	if _, err := p.shimW.Write(append(data, '\n')); err != nil {
+	if _, err := p.shimW.Write(data); err != nil {
+		return err
+	}
+	if err := p.shimW.WriteByte('\n'); err != nil {
 		return err
 	}
 	return p.shimW.Flush()
@@ -292,6 +295,9 @@ func (p *Process) heartbeatLoop() {
 	defer ticker.Stop()
 
 	misses := 0
+	pongTimer := time.NewTimer(interval / 2)
+	pongTimer.Stop()
+	defer pongTimer.Stop()
 	for {
 		select {
 		case <-ticker.C:
@@ -302,7 +308,7 @@ func (p *Process) heartbeatLoop() {
 			}
 
 			// Wait for pong within half the interval
-			pongTimer := time.NewTimer(interval / 2)
+			pongTimer.Reset(interval / 2)
 			select {
 			case <-p.pongRecv:
 				pongTimer.Stop()

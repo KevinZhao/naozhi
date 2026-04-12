@@ -47,6 +47,7 @@ const (
 // Lock ordering: s.sendMu -> r.mu. The onSessionID callback acquires r.mu
 // while sendMu is held (Send → onSessionID → trackSessionID). Code that
 // holds r.mu (write) must NEVER acquire sendMu — release r.mu first.
+// s.historyMu protects persistedHistory independently; never held with sendMu or r.mu.
 // Read-only operations (ListSessions, GetSession, Stats, Version) use RLock.
 type Router struct {
 	mu           sync.RWMutex
@@ -693,14 +694,14 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		return existing, nil
 	}
 
-	// Get old session reference, then release r.mu to copy history under sendMu only
+	// Get old session reference, then release r.mu to copy history under historyMu only
 	old := r.sessions[key]
 	r.mu.Unlock()
 
 	var oldHistory []cli.EventEntry
 	var prevIDs []string
 	if old != nil {
-		old.sendMu.Lock()
+		old.historyMu.RLock()
 		if p := old.loadProcess(); p != nil && !p.Alive() {
 			// Dead process: EventEntries() includes both injected history and live events
 			// logged during the last run. Use this instead of persistedHistory, which only
@@ -710,7 +711,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 			oldHistory = make([]cli.EventEntry, len(old.persistedHistory))
 			copy(oldHistory, old.persistedHistory)
 		}
-		old.sendMu.Unlock()
+		old.historyMu.RUnlock()
 
 		// Build session chain: inherit old chain and append old session ID,
 		// but only when the old ID differs from resumeID (i.e. a truly new

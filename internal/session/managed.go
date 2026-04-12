@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -71,6 +72,7 @@ type ManagedSession struct {
 
 	process     atomic.Pointer[processBox] // stores *processBox; use loadProcess/storeProcess
 	sendMu      sync.Mutex                 // serializes messages to the same session
+	historyMu   sync.RWMutex               // protects persistedHistory reads/writes (independent of sendMu)
 	sendCancel  atomic.Pointer[context.CancelFunc]
 	workspace   string       // effective cwd at spawn time
 	cliName     string       // "claude-code", "kiro" — set at creation from Wrapper
@@ -360,10 +362,10 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 	if proc != nil {
 		return proc.EventEntries()
 	}
-	s.sendMu.Lock()
+	s.historyMu.RLock()
 	out := make([]cli.EventEntry, len(s.persistedHistory))
 	copy(out, s.persistedHistory)
-	s.sendMu.Unlock()
+	s.historyMu.RUnlock()
 	return out
 }
 
@@ -373,8 +375,8 @@ func (s *ManagedSession) EventLastN(n int) []cli.EventEntry {
 	if proc != nil {
 		return proc.EventLastN(n)
 	}
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
+	s.historyMu.RLock()
+	defer s.historyMu.RUnlock()
 	if n <= 0 || n >= len(s.persistedHistory) {
 		out := make([]cli.EventEntry, len(s.persistedHistory))
 		copy(out, s.persistedHistory)
@@ -392,14 +394,15 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	if proc != nil {
 		return proc.EventEntriesSince(afterMS)
 	}
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
-	for i, e := range s.persistedHistory {
-		if e.Time > afterMS {
-			out := make([]cli.EventEntry, len(s.persistedHistory)-i)
-			copy(out, s.persistedHistory[i:])
-			return out
-		}
+	s.historyMu.RLock()
+	defer s.historyMu.RUnlock()
+	i := sort.Search(len(s.persistedHistory), func(i int) bool {
+		return s.persistedHistory[i].Time > afterMS
+	})
+	if i < len(s.persistedHistory) {
+		out := make([]cli.EventEntry, len(s.persistedHistory)-i)
+		copy(out, s.persistedHistory[i:])
+		return out
 	}
 	return nil
 }
@@ -419,13 +422,11 @@ func (s *ManagedSession) SubscribeEvents() (<-chan struct{}, func()) {
 // InjectHistory pre-populates the event log with historical entries.
 // Entries are saved to persistedHistory so they survive process restarts.
 func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
-	s.sendMu.Lock()
-	defer s.sendMu.Unlock()
+	s.historyMu.Lock()
+	defer s.historyMu.Unlock()
 	s.persistedHistory = append(s.persistedHistory, entries...)
 	if len(s.persistedHistory) > maxPersistedHistory {
-		trimmed := make([]cli.EventEntry, maxPersistedHistory)
-		copy(trimmed, s.persistedHistory[len(s.persistedHistory)-maxPersistedHistory:])
-		s.persistedHistory = trimmed
+		s.persistedHistory = s.persistedHistory[len(s.persistedHistory)-maxPersistedHistory:]
 	}
 	if p := s.loadProcess(); p != nil {
 		p.InjectHistory(entries)
