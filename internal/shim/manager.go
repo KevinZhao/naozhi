@@ -146,7 +146,7 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 	// Context is only used for the startup handshake timeout below.
 	cmd := exec.Command(m.naozhiBin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Env = os.Environ()
+	cmd.Env = filterShimEnv(os.Environ())
 
 	// Remove stale socket from a previous shim that didn't clean up
 	// (e.g., killed during post-CLI-exit wait period).
@@ -594,3 +594,48 @@ func checkPeerUID(conn net.Conn) bool {
 
 // VerifyPeerUID is exported for use by the shim server's accept handler.
 var VerifyPeerUID = checkPeerUID
+
+// shimEnvAllowedPrefixes lists environment variable prefixes passed to shim/CLI
+// subprocesses. Variables not matching any prefix are filtered out to reduce
+// the risk of leaking unrelated secrets (database passwords, third-party tokens)
+// to the Claude CLI process which has Bash tool access.
+var shimEnvAllowedPrefixes = []string{
+	// System essentials
+	"HOME=", "USER=", "LOGNAME=", "PATH=", "SHELL=",
+	"TERM=", "TMPDIR=", "TMP=", "TEMP=",
+	"LANG=", "LC_", "TZ=",
+	"XDG_",
+
+	// Claude CLI / Anthropic
+	"ANTHROPIC_", "CLAUDE_",
+
+	// AWS (Bedrock auth)
+	"AWS_",
+
+	// Git (SSH, config)
+	"SSH_AUTH_SOCK=", "GIT_",
+
+	// Common dev toolchains the CLI's Bash tool may invoke
+	"GOPATH=", "GOROOT=", "GOBIN=",
+	"CARGO_HOME=", "RUSTUP_HOME=",
+	"NVM_DIR=", "NODE_", "NPM_",
+	"PYTHON", "VIRTUAL_ENV=", "CONDA_",
+	"JAVA_HOME=",
+}
+
+// filterShimEnv returns a copy of environ keeping only variables whose key
+// matches one of the allowed prefixes. This is defense-in-depth: the CLI
+// with --skip-permissions can still run `env` via Bash, but at least secrets
+// not needed by the CLI are not exposed by default.
+func filterShimEnv(environ []string) []string {
+	filtered := make([]string, 0, len(environ)/2)
+	for _, kv := range environ {
+		for _, prefix := range shimEnvAllowedPrefixes {
+			if strings.HasPrefix(kv, prefix) {
+				filtered = append(filtered, kv)
+				break
+			}
+		}
+	}
+	return filtered
+}

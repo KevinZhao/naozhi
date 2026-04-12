@@ -167,10 +167,11 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 
-	// Warn if config file is readable by group or others (contains secrets).
+	// Reject config file if readable by group or others (contains secrets).
 	if fi, statErr := os.Stat(path); statErr == nil {
 		if fi.Mode()&0o044 != 0 {
-			slog.Warn("config file is group/world-readable; restrict to 0600", "path", path)
+			return nil, fmt.Errorf("config file %s is group/world-readable (mode %04o); restrict with: chmod 0600 %s",
+				path, fi.Mode().Perm(), path)
 		}
 	}
 

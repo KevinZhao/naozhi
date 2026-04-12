@@ -149,23 +149,21 @@ func (m *CacheManager) RefreshFor(id string) {
 
 	var wg sync.WaitGroup
 	var sessions, projects, discovered []map[string]any
-	var sessErr error
+	var sessErr, projErr, discErr error
 	wg.Add(3)
 	go func() { defer wg.Done(); sessions, sessErr = nc.FetchSessions(ctx) }()
 	go func() {
 		defer wg.Done()
-		var err error
-		projects, err = nc.FetchProjects(ctx)
-		if err != nil {
-			slog.Debug("node cache: FetchProjects failed", "node", id, "err", err)
+		projects, projErr = nc.FetchProjects(ctx)
+		if projErr != nil {
+			slog.Debug("node cache: FetchProjects failed", "node", id, "err", projErr)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		var err error
-		discovered, err = nc.FetchDiscovered(ctx)
-		if err != nil {
-			slog.Debug("node cache: FetchDiscovered failed", "node", id, "err", err)
+		discovered, discErr = nc.FetchDiscovered(ctx)
+		if discErr != nil {
+			slog.Debug("node cache: FetchDiscovered failed", "node", id, "err", discErr)
 		}
 	}()
 	wg.Wait()
@@ -175,20 +173,27 @@ func (m *CacheManager) RefreshFor(id string) {
 		status = "error"
 	}
 
-	for _, rs := range sessions {
-		rs["node"] = id
-	}
-	for _, rp := range projects {
-		rp["node"] = id
-	}
-	for _, rd := range discovered {
-		rd["node"] = id
-	}
-
+	// Only update successfully-fetched data; preserve existing cache on
+	// transient errors (matching RefreshAll's continue-on-error behavior).
 	m.mu.Lock()
-	m.sessions[id] = sessions
-	m.projects[id] = projects
-	m.discovered[id] = discovered
+	if sessErr == nil {
+		for _, rs := range sessions {
+			rs["node"] = id
+		}
+		m.sessions[id] = sessions
+	}
+	if projErr == nil {
+		for _, rp := range projects {
+			rp["node"] = id
+		}
+		m.projects[id] = projects
+	}
+	if discErr == nil {
+		for _, rd := range discovered {
+			rd["node"] = id
+		}
+		m.discovered[id] = discovered
+	}
 	m.status[id] = status
 	m.mu.Unlock()
 

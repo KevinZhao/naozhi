@@ -44,7 +44,9 @@ const (
 
 // Router manages session key -> ManagedSession mapping.
 //
-// Lock ordering: r.mu (write) -> s.sendMu. Never acquire in reverse.
+// Lock ordering: s.sendMu -> r.mu. The onSessionID callback acquires r.mu
+// while sendMu is held (Send → onSessionID → trackSessionID). Code that
+// holds r.mu (write) must NEVER acquire sendMu — release r.mu first.
 // Read-only operations (ListSessions, GetSession, Stats, Version) use RLock.
 type Router struct {
 	mu           sync.RWMutex
@@ -82,6 +84,11 @@ type Router struct {
 	// and as a secondary filter for filesystem-based recent sessions.
 	knownIDs      map[string]bool
 	knownIDsDirty bool
+
+	// sessionIDToKey is a reverse index from session ID to session key.
+	// Used by RegisterForResume for O(1) deduplication instead of O(n) scan.
+	// Maintained under r.mu by setSessionIDIndex/clearSessionIDIndex.
+	sessionIDToKey map[string]string
 
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
@@ -171,6 +178,7 @@ func NewRouter(cfg RouterConfig) *Router {
 		workspaceOverrides: make(map[string]string),
 		storePath:          cfg.StorePath,
 		knownIDs:           make(map[string]bool),
+		sessionIDToKey:     make(map[string]string),
 		noOutputTimeout:    cfg.NoOutputTimeout,
 		totalTimeout:       cfg.TotalTimeout,
 	}
@@ -198,6 +206,9 @@ func NewRouter(cfg RouterConfig) *Router {
 			r.sessions[key] = s
 			r.indexAdd(key)
 			r.trackSessionID(entry.SessionID)
+			if entry.SessionID != "" {
+				r.sessionIDToKey[entry.SessionID] = key
+			}
 		}
 	}
 
@@ -403,7 +414,17 @@ func (r *Router) ReconnectShims() {
 
 		sess.ReattachProcess(proc, state.SessionID)
 
+		// Third TOCTOU guard: verify session is still in the map after ReattachProcess.
+		// A concurrent GetOrCreate → spawnSession could have replaced r.sessions[key]
+		// while we were reconnecting (lock was released for ReattachProcess).
+		// If replaced, the orphaned process must be closed to prevent leaking a shim connection.
 		r.mu.Lock()
+		if r.sessions[state.Key] != sess {
+			r.mu.Unlock()
+			proc.Close()
+			slog.Info("shim reconnect aborted: session replaced during reattach", "key", state.Key)
+			continue
+		}
 		if !sess.Exempt {
 			r.activeCount++
 		}
@@ -442,11 +463,10 @@ func (r *Router) notifyChange() {
 
 // NotifyIdle wakes the Shutdown wait loop so it can re-check running sessions.
 // Call this after a message send completes (session transitions from running to ready).
+// Broadcast does not require the associated lock to be held.
 func (r *Router) NotifyIdle() {
 	if r.shutdownCond != nil {
-		r.shutdownCond.L.Lock()
 		r.shutdownCond.Broadcast()
-		r.shutdownCond.L.Unlock()
 	}
 }
 
@@ -490,6 +510,9 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 					closedActive++
 				}
 			}
+			if id := s.getSessionID(); id != "" {
+				delete(r.sessionIDToKey, id)
+			}
 			delete(r.sessions, key)
 		}
 		delete(r.sessionsByChat, chatKeyPrefix)
@@ -508,6 +531,11 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 			}
 		}
 		for _, key := range toDelete {
+			if s := r.sessions[key]; s != nil {
+				if id := s.getSessionID(); id != "" {
+					delete(r.sessionIDToKey, id)
+				}
+			}
 			delete(r.sessions, key)
 		}
 	}
@@ -716,6 +744,9 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		onSessionID: func(id string) {
 			r.mu.Lock()
 			r.trackSessionID(id)
+			if id != "" {
+				r.sessionIDToKey[id] = key
+			}
 			r.mu.Unlock()
 		},
 	}
@@ -725,6 +756,9 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	}
 	s.setSessionID(resumeID)
 	r.trackSessionID(resumeID)
+	if resumeID != "" {
+		r.sessionIDToKey[resumeID] = key
+	}
 	s.touchLastActive()
 	r.sessions[key] = s
 	r.indexAdd(key)
@@ -834,6 +868,9 @@ func (r *Router) Reset(key string) {
 
 	proc := s.loadProcess()
 	wasActive := !s.Exempt && proc != nil && proc.Alive()
+	if id := s.getSessionID(); id != "" {
+		delete(r.sessionIDToKey, id)
+	}
 	r.indexDel(key)
 	delete(r.sessions, key)
 	if wasActive {
@@ -869,6 +906,9 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		hadOld = true
 		proc := s.loadProcess()
 		wasActive := !s.Exempt && proc != nil && proc.Alive()
+		if id := s.getSessionID(); id != "" {
+			delete(r.sessionIDToKey, id)
+		}
 		r.indexDel(key)
 		delete(r.sessions, key)
 		if wasActive {
@@ -916,6 +956,9 @@ func (r *Router) Remove(key string) bool {
 	// Kill process if alive
 	proc := s.loadProcess()
 	wasActive := !s.Exempt && proc != nil && proc.Alive()
+	if id := s.getSessionID(); id != "" {
+		delete(r.sessionIDToKey, id)
+	}
 	r.indexDel(key)
 	delete(r.sessions, key)
 	if wasActive {
@@ -982,7 +1025,8 @@ func (r *Router) Cleanup() {
 		if s.Exempt {
 			continue // planner sessions are never pruned
 		}
-		if s.loadProcess() == nil && s.getSessionID() == "" && now.Sub(s.GetLastActive()) > r.ttl {
+		sid := s.getSessionID()
+		if s.loadProcess() == nil && sid == "" && now.Sub(s.GetLastActive()) > r.ttl {
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
@@ -992,14 +1036,15 @@ func (r *Router) Cleanup() {
 		// 7x multiplier gives suspended sessions ~3.5 hours at default 30m TTL,
 		// matching a typical work session. Balances timely cleanup against
 		// preserving sessions the user may still want to --resume.
-		if s.loadProcess() == nil && s.getSessionID() != "" && now.Sub(s.GetLastActive()) > suspendedTTLMultiplier*r.ttl {
+		if s.loadProcess() == nil && sid != "" && now.Sub(s.GetLastActive()) > suspendedTTLMultiplier*r.ttl {
+			delete(r.sessionIDToKey, sid)
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
 			continue
 		}
 		// Prune exited sessions with no resumable session ID
-		if p := s.loadProcess(); p != nil && !p.Alive() && s.getSessionID() == "" && now.Sub(s.GetLastActive()) > r.ttl {
+		if p := s.loadProcess(); p != nil && !p.Alive() && sid == "" && now.Sub(s.GetLastActive()) > r.ttl {
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
@@ -1008,6 +1053,9 @@ func (r *Router) Cleanup() {
 		// Prune old exited sessions even with session ID (prevents unbounded growth).
 		// Same 7x TTL window as suspended sessions above.
 		if p := s.loadProcess(); p != nil && !p.Alive() && now.Sub(s.GetLastActive()) > suspendedTTLMultiplier*r.ttl {
+			if sid != "" {
+				delete(r.sessionIDToKey, sid)
+			}
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
@@ -1406,11 +1454,13 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 		return key // already exists with this exact key
 	}
 	// Deduplicate: if another session already targets this sessionID, reuse it.
-	for k, s := range r.sessions {
-		if s.getSessionID() == sessionID {
+	if existingKey, ok := r.sessionIDToKey[sessionID]; ok {
+		if _, exists := r.sessions[existingKey]; exists {
 			r.mu.Unlock()
-			return k
+			return existingKey
 		}
+		// Stale index entry; clean up and continue.
+		delete(r.sessionIDToKey, sessionID)
 	}
 	s := &ManagedSession{
 		Key:       key,
@@ -1421,6 +1471,9 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 		s.lastPrompt.Store(lastPrompt)
 	}
 	r.trackSessionID(sessionID)
+	if sessionID != "" {
+		r.sessionIDToKey[sessionID] = key
+	}
 	s.lastActive.Store(time.Now().UnixNano())
 	r.sessions[key] = s
 	r.indexAdd(key)
@@ -1472,6 +1525,9 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			r.mu.Lock()
 			// Only delete if no concurrent goroutine replaced this session
 			if cur, ok := r.sessions[key]; ok && cur == oldSession {
+				if id := cur.getSessionID(); id != "" {
+					delete(r.sessionIDToKey, id)
+				}
 				r.indexDel(key)
 				delete(r.sessions, key)
 				r.storeDirty = true
@@ -1487,6 +1543,9 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			// it and call indexAdd, keeping the index consistent. No indexDel here
 			// because we are not removing from r.sessions.
 		} else {
+			if id := s.getSessionID(); id != "" {
+				delete(r.sessionIDToKey, id)
+			}
 			r.indexDel(key)
 			delete(r.sessions, key)
 			r.storeDirty = true

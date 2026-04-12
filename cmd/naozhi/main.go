@@ -466,6 +466,7 @@ func main() {
 		WorkspaceID:       cfg.Workspace.ID,
 		WorkspaceName:     cfg.Workspace.Name,
 		AllowedRoot:       workspace,
+		StateDir:          filepath.Dir(storePath),
 		NoOutputTimeout:   noOutputTimeout,
 		TotalTimeout:      totalTimeout,
 		DashboardToken:    cfg.Server.DashboardToken,

@@ -86,6 +86,7 @@ type Process struct {
 
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
+	interrupted     atomic.Bool // set by Interrupt(), cleared by next Send()
 
 	eventLog  *EventLog
 	totalCost float64
@@ -199,6 +200,10 @@ func (p *Process) readLoop() {
 				slog.Warn("readLoop: shim read error", "err", err)
 			}
 			break
+		}
+		if len(line) > maxScannerBufBytes {
+			slog.Warn("readLoop: oversized shim message, skipping", "size", len(line))
+			continue
 		}
 
 		var msg shimMsg
@@ -390,14 +395,13 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 	// Drain stale events from a previous turn that completed while no Send()
 	// was active (e.g., CLI was mid-turn when service restarted and reconnected
 	// to shim). These events are already logged to EventLog by readLoop.
-	for {
-		select {
-		case <-p.eventCh:
-		default:
-			goto drained
-		}
+	//
+	// When the previous turn was interrupted (SIGINT), the CLI may still be
+	// producing the interrupted result. Wait briefly for it so it doesn't
+	// pollute this turn's event stream.
+	if err := p.drainStaleEvents(ctx); err != nil {
+		return nil, err
 	}
-drained:
 
 	// Record turn start time so we can check EventLog as fallback if eventCh
 	// drops events (non-blocking send when buffer is full).
@@ -441,7 +445,12 @@ drained:
 				return nil, fmt.Errorf("process exited during send")
 			}
 
-			noOutputTimer.Stop()
+			if !noOutputTimer.Stop() {
+				select {
+				case <-noOutputTimer.C:
+				default:
+				}
+			}
 			noOutputTimer.Reset(noOutputDur)
 
 			// Capture session ID from first init event.
@@ -522,8 +531,50 @@ func (p *Process) Interrupt() {
 	if !p.Alive() {
 		return
 	}
+	p.interrupted.Store(true)
 	if err := p.shimSend(shimClientMsg{Type: "interrupt"}); err != nil {
 		slog.Warn("interrupt failed", "err", err)
+	}
+}
+
+// drainStaleEvents clears residual events from previous turns.
+// When the previous turn was interrupted (SIGINT), waits briefly for the
+// interrupted result event so it doesn't pollute the next turn.
+func (p *Process) drainStaleEvents(ctx context.Context) error {
+	if p.interrupted.Swap(false) {
+		// Only wait for the interrupted result if the CLI was actively
+		// processing a turn. An idle process (State != Running) won't
+		// produce a result event, so the settle timer would always expire
+		// causing an unnecessary 500ms delay.
+		if p.IsRunning() {
+			slog.Debug("send: draining interrupted turn result")
+			settle := time.NewTimer(500 * time.Millisecond)
+			defer settle.Stop()
+			for {
+				select {
+				case ev, ok := <-p.eventCh:
+					if !ok || ev.Type == "result" {
+						goto drain
+					}
+				case <-settle.C:
+					slog.Debug("send: settle timeout, no stale result")
+					goto drain
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+			}
+		} else {
+			slog.Debug("send: interrupted but idle, skipping settle wait")
+		}
+	}
+drain:
+	// Non-blocking drain of any remaining buffered events.
+	for {
+		select {
+		case <-p.eventCh:
+		default:
+			return nil
+		}
 	}
 }
 

@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -347,7 +348,7 @@ func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resTy
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET",
-		f.baseURL+"/open-apis/im/v1/messages/"+messageID+"/resources/"+fileKey+"?type="+resType, nil)
+		f.baseURL+"/open-apis/im/v1/messages/"+url.PathEscape(messageID)+"/resources/"+url.PathEscape(fileKey)+"?type="+url.QueryEscape(resType), nil)
 	if err != nil {
 		return nil, "", fmt.Errorf("create request: %w", err)
 	}

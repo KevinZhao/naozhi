@@ -53,6 +53,12 @@ type Dispatcher struct {
 // BuildHandler returns a platform.MessageHandler wired to this Dispatcher.
 func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 	return func(ctx context.Context, msg platform.IncomingMessage) {
+		// Dedup check at the top prevents duplicate processing from platform
+		// retries (e.g., Feishu webhook timeout → re-delivery with same event_id).
+		// Note: if guard fails below, the eventID is still consumed. This means
+		// a platform retry during guard contention won't be re-processed. In
+		// practice this is benign — the handler responds fast enough that
+		// platforms don't retry, and the user is told to resend.
 		if d.Dedup.Seen(msg.EventID) {
 			return
 		}
@@ -272,9 +278,9 @@ type imEventTracker struct {
 	chatID        string
 	statusLines   []string
 	thinkingMsgID string
-	lastEdit      time.Time
 	msgIDReady    chan struct{}
 	sent          sync.Once
+	editCh        chan string // buffered(1), coalescing; editLoop drains and rate-limits
 }
 
 func newIMEventTracker(ctx context.Context, p platform.Platform, chatID string) *imEventTracker {
@@ -283,11 +289,14 @@ func newIMEventTracker(ctx context.Context, p platform.Platform, chatID string) 
 		p:          p,
 		chatID:     chatID,
 		msgIDReady: make(chan struct{}),
+		editCh:     make(chan string, 1),
 	}
 	if !platform.SupportsInterimMessages(p) {
 		t.sent.Do(func() {
 			close(t.msgIDReady)
 		})
+	} else {
+		go t.editLoop()
 	}
 	return t
 }
@@ -306,7 +315,6 @@ func (t *imEventTracker) onEvent(ev cli.Event) {
 	text := strings.Join(t.statusLines, "\n")
 
 	t.sent.Do(func() {
-		t.lastEdit = time.Now()
 		snapshot := text
 		go func() {
 			defer close(t.msgIDReady)
@@ -317,14 +325,62 @@ func (t *imEventTracker) onEvent(ev cli.Event) {
 		}()
 	})
 
+	// Non-blocking: queue the latest text for async editing.
+	// The channel holds at most 1 pending edit; new text replaces stale.
+	select {
+	case t.editCh <- text:
+	default:
+		select {
+		case <-t.editCh:
+		default:
+		}
+		select {
+		case t.editCh <- text:
+		default:
+		}
+	}
+}
+
+// editLoop runs in a goroutine and rate-limits EditMessage calls to 1/s.
+// This keeps onEvent non-blocking so Process.Send can drain eventCh at full speed.
+func (t *imEventTracker) editLoop() {
+	// Wait for thinkingMsgID before processing any edits.
 	select {
 	case <-t.msgIDReady:
-		if t.thinkingMsgID != "" && time.Since(t.lastEdit) >= 1*time.Second {
-			if err := t.p.EditMessage(t.ctx, t.thinkingMsgID, text); err == nil {
-				t.lastEdit = time.Now()
+	case <-t.ctx.Done():
+		return
+	}
+
+	for {
+		select {
+		case text := <-t.editCh:
+			// Drain to latest (multiple onEvent calls may have queued during rate-limit wait)
+			text = drainLatest(t.editCh, text)
+			if t.thinkingMsgID != "" {
+				t.p.EditMessage(t.ctx, t.thinkingMsgID, text)
 			}
+			// Rate limit: wait 1s before next edit
+			select {
+			case <-time.After(time.Second):
+			case <-t.ctx.Done():
+				return
+			}
+		case <-t.ctx.Done():
+			return
 		}
-	default:
+	}
+}
+
+// drainLatest returns the most recent value from ch, or fallback if ch is empty.
+func drainLatest(ch chan string, fallback string) string {
+	latest := fallback
+	for {
+		select {
+		case v := <-ch:
+			latest = v
+		default:
+			return latest
+		}
 	}
 }
 

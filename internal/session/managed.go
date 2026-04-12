@@ -8,6 +8,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
 )
@@ -200,23 +201,30 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 // Interrupt sends SIGINT to the CLI process and cancels the current Send context.
 // This is the equivalent of pressing Escape in Claude Code.
 //
-// Context cancellation happens BEFORE acquiring sendMu so that an in-flight
-// Send() can return via <-ctx.Done() and release the lock. Without this,
-// Interrupt() would deadlock when Send() holds sendMu waiting for events.
+// proc.Interrupt() is called BEFORE cancel() to ensure the interrupted flag is
+// set before a new Send() can start. proc.Interrupt() only acquires shimWMu
+// (not sendMu), so there is no deadlock risk. The subsequent cancel() unblocks
+// any in-flight Send() waiting on ctx.Done(), allowing it to release sendMu.
+//
+// If cancel() were called first, a new Send could race in before proc.Interrupt()
+// sets the interrupted flag, causing drainStaleEvents to miss stale events from
+// the interrupted turn — the old result would then be returned as the new turn's
+// response.
 func (s *ManagedSession) Interrupt() bool {
-	// Cancel the in-flight Send context first (lock-free). This unblocks
-	// Send() which holds sendMu, allowing us to proceed below.
-	if cancel := s.sendCancel.Load(); cancel != nil {
-		(*cancel)()
-	}
-
-	// loadProcess is atomic — no lock needed.
 	proc := s.loadProcess()
 	if proc == nil || !proc.Alive() {
+		// Still cancel in case Send is blocked on ctx.Done().
+		if cancel := s.sendCancel.Load(); cancel != nil {
+			(*cancel)()
+		}
 		return false
 	}
 
 	proc.Interrupt()
+
+	if cancel := s.sendCancel.Load(); cancel != nil {
+		(*cancel)()
+	}
 	return true
 }
 
@@ -260,8 +268,9 @@ const maxKeyComponent = 128
 // to prevent key confusion and unbounded map key growth.
 func sanitizeKeyComponent(s string) string {
 	s = strings.ReplaceAll(s, ":", "_")
-	if len(s) > maxKeyComponent {
-		s = s[:maxKeyComponent]
+	if utf8.RuneCountInString(s) > maxKeyComponent {
+		runes := []rune(s)
+		s = string(runes[:maxKeyComponent])
 	}
 	return s
 }

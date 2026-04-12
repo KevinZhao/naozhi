@@ -148,6 +148,7 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		send:          make(chan []byte, 1024),
 		hub:           h,
 		remoteIP:      ip,
+		sendLimiter:   rate.NewLimiter(rate.Every(time.Second), 5), // 5 sends/s burst, 1/s sustained
 		subscriptions: make(map[string]func()),
 		done:          make(chan struct{}),
 	}

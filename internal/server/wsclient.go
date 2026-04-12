@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/time/rate"
 
 	"github.com/naozhi/naozhi/internal/node"
 )
@@ -28,6 +29,7 @@ type wsClient struct {
 	remoteIP      string // for rate limiting
 	authenticated atomic.Bool
 	authAttempts  atomic.Int32
+	sendLimiter   *rate.Limiter     // per-connection rate limit on "send" messages
 	subscriptions map[string]func() // key -> unsubscribe function
 	done          chan struct{}
 	doneOnce      sync.Once
@@ -72,7 +74,9 @@ func (c *wsClient) readPump() {
 	c.conn.SetReadLimit(wsMaxMessageSize)
 	c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
 	c.conn.SetPongHandler(func(string) error {
-		c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
+		if c.authenticated.Load() {
+			c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
+		}
 		return nil
 	})
 
@@ -114,6 +118,10 @@ func (c *wsClient) readPump() {
 		case "send":
 			if !c.authenticated.Load() {
 				c.SendJSON(node.ServerMsg{Type: "error", Error: "not authenticated"})
+				continue
+			}
+			if !c.sendLimiter.Allow() {
+				c.SendJSON(node.ServerMsg{Type: "error", Error: "rate limited"})
 				continue
 			}
 			c.hub.handleSend(c, msg)

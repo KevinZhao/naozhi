@@ -93,8 +93,25 @@ func validateWorkspace(workspace, allowedRoot string) (string, error) {
 	return wsPath, nil
 }
 
-// generateCookieSecret returns 32 random bytes for HMAC-signing auth cookies.
-func generateCookieSecret() []byte {
+// loadOrCreateCookieSecret reads a 32-byte secret from stateDir/cookie_secret,
+// creating it with crypto/rand if absent. Falls back to a fresh ephemeral secret
+// if the file cannot be read or written (e.g. no stateDir configured).
+func loadOrCreateCookieSecret(stateDir string) []byte {
+	if stateDir != "" {
+		path := filepath.Join(stateDir, "cookie_secret")
+		if data, err := os.ReadFile(path); err == nil && len(data) == 32 {
+			return data
+		}
+		b := make([]byte, 32)
+		if _, err := rand.Read(b); err != nil {
+			panic("crypto/rand unavailable: " + err.Error())
+		}
+		if err := os.MkdirAll(stateDir, 0700); err == nil {
+			_ = os.WriteFile(path, b, 0600)
+		}
+		return b
+	}
+	// No stateDir: ephemeral secret (sessions lost on restart)
 	b := make([]byte, 32)
 	if _, err := rand.Read(b); err != nil {
 		panic("crypto/rand unavailable: " + err.Error())
@@ -109,6 +126,7 @@ type ServerOptions struct {
 	WorkspaceID       string
 	WorkspaceName     string
 	AllowedRoot       string // restricts /cd to paths under this root
+	StateDir          string // directory for persistent state (cookie_secret, etc.)
 	NoOutputTimeout   time.Duration
 	TotalTimeout      time.Duration
 	DashboardToken    string // optional bearer token for dashboard API
@@ -138,7 +156,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		knownNodes[id] = nc.DisplayName()
 	}
 
-	cookieSecret := generateCookieSecret()
+	cookieSecret := loadOrCreateCookieSecret(opts.StateDir)
 
 	s := &Server{
 		addr:            addr,

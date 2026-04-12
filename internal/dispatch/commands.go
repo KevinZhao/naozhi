@@ -363,9 +363,12 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		return
 	}
 
-	if resolved, err := filepath.EvalSymlinks(absPath); err == nil {
-		absPath = resolved
+	resolved, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "无法解析路径"})
+		return
 	}
+	absPath = resolved
 
 	if d.AllowedRoot != "" && absPath != d.AllowedRoot && !strings.HasPrefix(absPath, d.AllowedRoot+string(filepath.Separator)) {
 		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "不允许访问该路径"})

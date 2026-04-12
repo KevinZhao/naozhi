@@ -45,7 +45,7 @@ func TestParseTTL(t *testing.T) {
 
 	for _, tt := range tests {
 		tmpFile := t.TempDir() + "/config.yaml"
-		os.WriteFile(tmpFile, []byte(tt.yaml), 0644)
+		os.WriteFile(tmpFile, []byte(tt.yaml), 0600)
 		cfg, err := Load(tmpFile)
 		if tt.wantErr {
 			if err == nil {
@@ -99,7 +99,7 @@ func TestParseWatchdog(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tmpFile := t.TempDir() + "/config.yaml"
-			os.WriteFile(tmpFile, []byte(tt.yaml), 0644)
+			os.WriteFile(tmpFile, []byte(tt.yaml), 0600)
 			cfg, err := Load(tmpFile)
 			if tt.wantErr {
 				if err == nil {
@@ -123,7 +123,7 @@ func TestParseWatchdog(t *testing.T) {
 
 func TestLoadDefaults(t *testing.T) {
 	tmpFile := t.TempDir() + "/config.yaml"
-	os.WriteFile(tmpFile, []byte("{}"), 0644)
+	os.WriteFile(tmpFile, []byte("{}"), 0600)
 
 	cfg, err := Load(tmpFile)
 	if err != nil {
@@ -151,7 +151,7 @@ nodes:
     url: "https://10.0.0.2:8180"
     token: "secret"
     display_name: "MacBook Pro"
-`), 0644)
+`), 0600)
 
 	cfg, err := Load(tmpFile)
 	if err != nil {
@@ -179,7 +179,7 @@ nodes:
   bad:
     url: "http://10.0.0.2:8180"
     token: "secret"
-`), 0644)
+`), 0600)
 
 	_, err := Load(tmpFile)
 	if err == nil {
@@ -193,7 +193,7 @@ func TestLoadNodeConfig_TrailingSlash(t *testing.T) {
 nodes:
   bad:
     url: "http://10.0.0.2:8180/"
-`), 0644)
+`), 0600)
 
 	_, err := Load(tmpFile)
 	if err == nil {
@@ -207,7 +207,7 @@ func TestLoadNodeConfig_InvalidScheme(t *testing.T) {
 nodes:
   bad:
     url: "ftp://10.0.0.2:8180"
-`), 0644)
+`), 0600)
 
 	_, err := Load(tmpFile)
 	if err == nil {
@@ -221,7 +221,7 @@ func TestLoadNodeConfig_MissingURL(t *testing.T) {
 nodes:
   bad:
     token: "secret"
-`), 0644)
+`), 0600)
 
 	_, err := Load(tmpFile)
 	if err == nil {

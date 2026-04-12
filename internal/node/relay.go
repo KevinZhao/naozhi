@@ -12,6 +12,11 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+const (
+	relayReadTimeout  = 90 * time.Second
+	relayPingInterval = 30 * time.Second
+)
+
 // wsRelay maintains a persistent WS connection to a remote node
 // and forwards events to local browser clients.
 type wsRelay struct {
@@ -164,6 +169,14 @@ func (r *wsRelay) connect() error {
 	}
 	conn.SetReadDeadline(time.Time{})
 
+	// Detect silent disconnections (NAT timeout, crash without FIN/RST)
+	// via read deadline + pong handler, matching reverseconn.go pattern.
+	conn.SetReadDeadline(time.Now().Add(relayReadTimeout))
+	conn.SetPongHandler(func(string) error {
+		conn.SetReadDeadline(time.Now().Add(relayReadTimeout))
+		return nil
+	})
+
 	r.mu.Lock()
 	if r.conn != nil {
 		// Another goroutine already connected
@@ -174,6 +187,7 @@ func (r *wsRelay) connect() error {
 	r.conn = conn
 	r.mu.Unlock()
 
+	go r.pingLoop(conn)
 	go r.readLoop(conn)
 	return nil
 }
@@ -212,6 +226,7 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 		if err != nil {
 			return
 		}
+		conn.SetReadDeadline(time.Now().Add(relayReadTimeout))
 
 		var msg ServerMsg
 		if err := json.Unmarshal(data, &msg); err != nil {
@@ -237,6 +252,29 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 		}
 		for _, c := range clients {
 			c.SendRaw(tagged)
+		}
+	}
+}
+
+// pingLoop sends periodic WebSocket pings to detect silent disconnections.
+// WriteControl is safe to call concurrently with other write methods.
+func (r *wsRelay) pingLoop(conn *websocket.Conn) {
+	ticker := time.NewTicker(relayPingInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-r.done:
+			return
+		case <-ticker.C:
+			r.mu.Lock()
+			active := r.conn == conn
+			r.mu.Unlock()
+			if !active {
+				return
+			}
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(time.Second)); err != nil {
+				return
+			}
 		}
 	}
 }
