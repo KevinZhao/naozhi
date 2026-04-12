@@ -146,6 +146,9 @@ func setupGetQRCode(ctx context.Context) (*setupQRResp, error) {
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("QR code API returned HTTP %d", resp.StatusCode)
+	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
@@ -205,6 +208,9 @@ func setupCheckStatus(ctx context.Context, qrcode string) (*setupStatusResp, err
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("status check API returned HTTP %d", resp.StatusCode)
+	}
 
 	data, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
 	if err != nil {
@@ -263,7 +269,9 @@ func updateWeixinToken(data []byte, token string) ([]byte, error) {
 	if err := enc.Encode(&doc); err != nil {
 		return nil, err
 	}
-	enc.Close()
+	if err := enc.Close(); err != nil {
+		return nil, err
+	}
 	return buf.Bytes(), nil
 }
 

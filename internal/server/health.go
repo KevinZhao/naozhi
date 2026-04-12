@@ -33,14 +33,14 @@ type HealthHandler struct {
 }
 
 func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
-	active, total := h.router.Stats()
 	resp := map[string]interface{}{
-		"status":   "ok",
-		"uptime":   time.Since(h.startedAt).Round(time.Second).String(),
-		"sessions": map[string]int{"active": active, "total": total},
+		"status": "ok",
+		"uptime": time.Since(h.startedAt).Round(time.Second).String(),
 	}
 	// Extended system info only for authenticated requests
 	if h.auth.isAuthenticated(r) {
+		active, total := h.router.Stats()
+		resp["sessions"] = map[string]int{"active": active, "total": total}
 		resp["workspace_id"] = h.workspaceID
 		resp["workspace_name"] = h.workspaceName
 		resp["system"] = systemInfo()

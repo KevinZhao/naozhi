@@ -22,27 +22,9 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
+// wsUpgrader is used by tests that don't need origin checks.
 var wsUpgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool {
-		origin := r.Header.Get("Origin")
-		if origin == "" {
-			return true // same-origin requests omit Origin
-		}
-		u, err := url.Parse(origin)
-		if err != nil {
-			return false
-		}
-		// Behind CloudFront/ALB, r.Host is the ALB hostname while Origin
-		// carries the real domain. Check X-Forwarded-Host first.
-		// NOTE: In direct-access scenarios (no reverse proxy), a client can
-		// forge X-Forwarded-Host to bypass origin checks. This is mitigated
-		// by the auth layer (cookie or auth message required).
-		host := r.Host
-		if fwd := r.Header.Get("X-Forwarded-Host"); fwd != "" {
-			host = strings.SplitN(fwd, ",", 2)[0] // take first entry only
-		}
-		return u.Host == host
-	},
+	CheckOrigin:     func(r *http.Request) bool { return true },
 	ReadBufferSize:  8192,
 	WriteBufferSize: 8192,
 }
@@ -70,6 +52,7 @@ type Hub struct {
 	wsAuthLimiter func(ip string) *rate.Limiter
 
 	trustedProxy bool // trust X-Forwarded-For for client IP extraction
+	upgrader     websocket.Upgrader
 
 	debounceMu    sync.Mutex
 	debounceTimer *time.Timer
@@ -94,7 +77,7 @@ type HubOptions struct {
 // NewHub creates a new WebSocket hub.
 func NewHub(opts HubOptions) *Hub {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Hub{
+	h := &Hub{
 		clients:       make(map[*wsClient]struct{}),
 		router:        opts.Router,
 		agents:        opts.Agents,
@@ -111,6 +94,28 @@ func NewHub(opts HubOptions) *Hub {
 		ctx:           ctx,
 		cancel:        cancel,
 	}
+	h.upgrader = websocket.Upgrader{
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true // same-origin requests omit Origin
+			}
+			u, err := url.Parse(origin)
+			if err != nil {
+				return false
+			}
+			host := r.Host
+			if h.trustedProxy {
+				if fwd := r.Header.Get("X-Forwarded-Host"); fwd != "" {
+					host = strings.SplitN(fwd, ",", 2)[0]
+				}
+			}
+			return u.Host == host
+		},
+		ReadBufferSize:  8192,
+		WriteBufferSize: 8192,
+	}
+	return h
 }
 
 // SetScheduler sets the cron scheduler for auto-saving prompts on first send.
@@ -128,7 +133,7 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := wsUpgrader.Upgrade(w, r, nil)
+	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Debug("ws upgrade failed", "err", err)
 		return
@@ -239,36 +244,15 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 
-	// Session may be spawning in a background goroutine (e.g. after a send).
-	// Wait asynchronously instead of failing immediately — avoids the need
-	// for an arbitrary client-side delay.
-	go h.waitAndSubscribe(c, key, msg)
-}
-
-// waitAndSubscribe polls for a session to appear (100ms interval, 5s max).
-// Runs in its own goroutine so the client's readPump is not blocked.
-func (h *Hub) waitAndSubscribe(c *wsClient, key string, msg node.ClientMsg) {
-	ticker := time.NewTicker(100 * time.Millisecond)
-	defer ticker.Stop()
-	timeout := time.After(5 * time.Second)
-	for {
-		select {
-		case <-ticker.C:
-			if sess := h.router.GetSession(key); sess != nil {
-				h.completeSubscribe(c, key, msg, sess)
-				return
-			}
-		case <-timeout:
-			c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "session not found"})
-			return
-		case <-c.done:
-			return
-		}
-	}
+	c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "session not found"})
 }
 
 // completeSubscribe finishes a subscription once a valid session is available.
 func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, sess *session.ManagedSession) {
+	if !sess.HasProcess() {
+		slog.Debug("completeSubscribe: no process", "key", key)
+		return
+	}
 	notify, unsub := sess.SubscribeEvents()
 
 	h.mu.Lock()
@@ -292,6 +276,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		entries = sess.EventLastN(100)
 	}
 
+	slog.Debug("completeSubscribe: sending history", "key", key, "entries", len(entries), "state", snap.State)
 	c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State})
 
 	var lastTime int64
@@ -375,10 +360,6 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, notify <-chan struct{}, ses
 		select {
 		case _, ok := <-notify:
 			if !ok {
-				// Process died or was replaced (e.g., service restart reconnect).
-				// Try to re-subscribe to the new process's EventLog.
-				// Look up the current session from the router — spawnSession may
-				// have replaced the ManagedSession object entirely.
 				ok, newSess := h.resubscribeEvents(c, key, &notify)
 				if !ok {
 					return
@@ -488,7 +469,24 @@ func (h *Hub) broadcastState(key, state, reason string) {
 	}
 }
 
-// BroadcastSessionsUpdate debounces notifications: resets a 200ms timer on each
+// BroadcastSessionReady sends a session_state "running" to ALL authenticated clients
+// so they can auto-subscribe. Unlike broadcastState, this is not limited to already-
+// subscribed clients — needed for new sessions where nobody is subscribed yet.
+func (h *Hub) BroadcastSessionReady(key string) {
+	data, err := json.Marshal(node.ServerMsg{Type: "session_state", Key: key, State: "running"})
+	if err != nil {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for c := range h.clients {
+		if c.authenticated.Load() {
+			c.SendRaw(data)
+		}
+	}
+}
+
+// BroadcastSessionsUpdate debounces notifications: resets a 50ms timer on each
 // call; the actual broadcast fires only when no further calls arrive within the window.
 func (h *Hub) BroadcastSessionsUpdate() {
 	h.debounceMu.Lock()

@@ -287,7 +287,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	}
 }
 
-func (c *Connector) handleRequest(appCtx, ctx context.Context, req node.ReverseMsg) (json.RawMessage, error) {
+func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.ReverseMsg) (json.RawMessage, error) {
 	switch req.Method {
 	case "fetch_sessions":
 		return marshalResult(c.router.ListSessions())
@@ -352,7 +352,7 @@ func (c *Connector) handleRequest(appCtx, ctx context.Context, req node.ReverseM
 			}
 			opts.Workspace = ws
 		}
-		sess, _, err := c.router.GetOrCreate(ctx, p.Key, opts)
+		sess, _, err := c.router.GetOrCreate(connCtx, p.Key, opts)
 		if err != nil {
 			return nil, fmt.Errorf("get session: %w", err)
 		}
@@ -397,6 +397,10 @@ func (c *Connector) handleRequest(appCtx, ctx context.Context, req node.ReverseM
 			cwd = "unknown"
 		}
 		cwdKey := strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
+		cwdKey = strings.ReplaceAll(cwdKey, ":", "_")
+		if len(cwdKey) > 128 {
+			cwdKey = cwdKey[:128]
+		}
 		key := "local:takeover:" + cwdKey + ":general"
 		pid, sessionID, procStartTime, reqCWD, claudeDir := p.PID, p.SessionID, p.ProcStartTime, p.CWD, c.claudeDir
 		go func() {
@@ -433,7 +437,7 @@ func (c *Connector) handleRequest(appCtx, ctx context.Context, req node.ReverseM
 		if prompt := c.projMgr.EffectivePlannerPrompt(proj); prompt != "" {
 			opts.ExtraArgs = []string{"--append-system-prompt", prompt}
 		}
-		if _, err := c.router.ResetAndRecreate(ctx, plannerKey, opts); err != nil {
+		if _, err := c.router.ResetAndRecreate(connCtx, plannerKey, opts); err != nil {
 			return nil, fmt.Errorf("restart planner: %w", err)
 		}
 		return marshalResult(map[string]string{"status": "restarted"})

@@ -33,10 +33,11 @@ func (h *Hub) sendWithBroadcast(
 	images []cli.ImageData,
 	onEvent cli.EventCallback,
 ) (*cli.SendResult, error) {
-	// Notify dashboard that this session is now running so clients can
-	// auto-subscribe. BroadcastSessionsUpdate is debounced (200ms) so
-	// the session list refreshes once the turn completes.
-	h.broadcastState(key, "running", "")
+	// Notify ALL dashboard clients that this session is running so they can
+	// auto-subscribe. Uses BroadcastSessionReady (sends to all authenticated
+	// clients) instead of broadcastState (only subscribed clients), because
+	// for new sessions nobody is subscribed yet.
+	h.BroadcastSessionReady(key)
 	h.BroadcastSessionsUpdate()
 
 	result, err := sess.Send(ctx, text, images, onEvent)
@@ -134,6 +135,7 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, error)
 	// Background send
 	text, images := p.Text, p.Images
 	go func() {
+		sendStart := time.Now()
 		if needInterrupt {
 			if !h.guard.AcquireTimeout(h.ctx, key, 2*time.Second) {
 				slog.Error("send: interrupt timed out", "key", key)
@@ -147,13 +149,16 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, error)
 		defer h.router.NotifyIdle()
 
 		opts := buildSessionOpts(key, h.agents, h.projectMgr)
-		sess, _, err := h.router.GetOrCreate(h.ctx, key, opts)
+		sess, status, err := h.router.GetOrCreate(h.ctx, key, opts)
 		if err != nil {
 			slog.Error("send: get session", "key", key, "err", err)
 			if onAsyncError != nil {
 				onAsyncError(err.Error())
 			}
 			return
+		}
+		if status != session.SessionExisting {
+			slog.Info("send: session spawned", "key", key, "status", status, "elapsed", time.Since(sendStart).Round(time.Millisecond))
 		}
 
 		if _, err := h.sendWithBroadcast(h.ctx, key, sess, text, images, nil); err != nil {
@@ -163,6 +168,7 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, error)
 				slog.Warn("send: set cron prompt", "key", key, "err", err)
 			}
 		}
+		slog.Info("send: turn complete", "key", key, "elapsed", time.Since(sendStart).Round(time.Millisecond))
 	}()
 
 	return false, nil

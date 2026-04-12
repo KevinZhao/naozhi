@@ -33,13 +33,15 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 		// Fallback to process's SessionID which is set earlier (on system/init),
 		// before Send() completes and propagates it to ManagedSession.
 		sid := s.getSessionID()
-		if sid == "" && s.process != nil {
-			sid = s.process.GetSessionID()
+		if sid == "" {
+			if p := s.loadProcess(); p != nil {
+				sid = p.GetSessionID()
+			}
 		}
 		if sid != "" {
 			var cost float64
-			if s.process != nil {
-				cost = s.process.TotalCost()
+			if p := s.loadProcess(); p != nil {
+				cost = p.TotalCost()
 			} else {
 				cost = s.totalCost
 			}
@@ -165,9 +167,21 @@ func saveKnownIDs(storePath string, ids map[string]bool) error {
 		return fmt.Errorf("marshal known IDs: %w", err)
 	}
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
 		return fmt.Errorf("write known IDs %s: %w", tmp, err)
 	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("write known IDs %s: %w", tmp, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return fmt.Errorf("sync known IDs %s: %w", tmp, err)
+	}
+	f.Close()
 	if err := os.Rename(tmp, path); err != nil {
 		os.Remove(tmp)
 		return fmt.Errorf("rename known IDs to %s: %w", path, err)

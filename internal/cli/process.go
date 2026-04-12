@@ -148,7 +148,7 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 		}
 		trimmed := bytes.TrimRight(line, "\n")
 		if err := w.p.shimSend(shimClientMsg{Type: "write", Line: string(trimmed)}); err != nil {
-			return len(data), err
+			return 0, err
 		}
 	}
 	return len(data), nil
@@ -654,7 +654,9 @@ func parseAgentInput(input json.RawMessage) agentInput {
 		return agentInput{}
 	}
 	var inp agentInput
-	json.Unmarshal(input, &inp) //nolint:errcheck
+	if err := json.Unmarshal(input, &inp); err != nil {
+		slog.Debug("parseAgentInput: unmarshal failed", "err", err)
+	}
 	return inp
 }
 

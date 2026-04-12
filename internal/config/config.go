@@ -244,6 +244,12 @@ func Load(path string) (*Config, error) {
 		if containsEnvPlaceholder(cfg.Platforms.Feishu.AppID) || containsEnvPlaceholder(cfg.Platforms.Feishu.AppSecret) {
 			return nil, fmt.Errorf("feishu app_id or app_secret contains unexpanded ${VAR} — check environment variables")
 		}
+		if containsEnvPlaceholder(cfg.Platforms.Feishu.VerificationToken) {
+			return nil, fmt.Errorf("feishu verification_token contains unexpanded ${VAR} — check environment variables")
+		}
+		if containsEnvPlaceholder(cfg.Platforms.Feishu.EncryptKey) {
+			return nil, fmt.Errorf("feishu encrypt_key contains unexpanded ${VAR} — check environment variables")
+		}
 		if cfg.Platforms.Feishu.AppID == "" || cfg.Platforms.Feishu.AppSecret == "" {
 			return nil, fmt.Errorf("feishu app_id and app_secret are required")
 		}

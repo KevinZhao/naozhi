@@ -519,11 +519,16 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		sig := <-sigCh
+		defer close(shutdownDone)
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("panic during shutdown", "panic", r)
+			}
+		}()
 		slog.Info("received signal", "signal", sig)
 		cancel()
 		scheduler.Stop()
 		router.Shutdown()
-		close(shutdownDone)
 	}()
 
 	slog.Info("naozhi starting",

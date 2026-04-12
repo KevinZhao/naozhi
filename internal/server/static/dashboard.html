@@ -2723,11 +2723,13 @@ const wsm = {
   onSendAck(msg) {
     if (msg.status === 'accepted') {
       flashSendBtn();
-      // For new sessions: subscribe immediately. The server-side
-      // handleSubscribe will wait (up to 5s) for the session to appear
-      // if it's still spawning — no client-side delay needed.
+      // Subscribe to the session we just sent to, unless we're already
+      // subscribed or a subscribe is already pending for this exact key.
+      // The old check (!subscribedKey && !_pendingSubscribeKey) failed when
+      // the user was previously viewing a different session — subscribedKey
+      // was set to the old key, blocking the subscribe for the new one.
       const ackKey = msg.key || selectedKey;
-      if (ackKey && !wsm.subscribedKey && !wsm._pendingSubscribeKey) {
+      if (ackKey && wsm.subscribedKey !== ackKey && wsm._pendingSubscribeKey !== ackKey) {
         wsm.lastEventTimeWs = 0;
         wsm.subscribe(ackKey, selectedNode);
       }
@@ -2771,6 +2773,14 @@ const wsm = {
     if (msg.key === selectedKey && msgNode === selectedNode &&
         (msg.state === 'running' || msg.state === 'ready') && prevState === 'suspended' &&
         wsm.subscribedKey === msg.key) {
+      wsm.subscribe(msg.key, selectedNode);
+    }
+    // New session became running: subscribe immediately if we're viewing it
+    // but not yet subscribed (covers the new-session send flow).
+    if (msg.key === selectedKey && msgNode === selectedNode &&
+        msg.state === 'running' && wsm.subscribedKey !== msg.key &&
+        wsm._pendingSubscribeKey !== msg.key) {
+      wsm.lastEventTimeWs = 0;
       wsm.subscribe(msg.key, selectedNode);
     }
     // Session became suspended: re-render sidebar to update visual state

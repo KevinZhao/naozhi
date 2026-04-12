@@ -36,6 +36,9 @@ type processIface interface {
 	TurnAgents() []cli.SubagentInfo
 }
 
+// processBox wraps processIface for use with atomic.Pointer (which requires a concrete type).
+type processBox struct{ p processIface }
+
 // ManagedSession wraps a claude CLI process with session metadata.
 type ManagedSession struct {
 	Key string
@@ -65,8 +68,8 @@ type ManagedSession struct {
 	keyChatID   string
 	keyAgentID  string
 
-	process     processIface
-	sendMu      sync.Mutex // serializes messages to the same session
+	process     atomic.Pointer[processBox] // stores *processBox; use loadProcess/storeProcess
+	sendMu      sync.Mutex                 // serializes messages to the same session
 	sendCancel  atomic.Pointer[context.CancelFunc]
 	workspace   string       // effective cwd at spawn time
 	cliName     string       // "claude-code", "kiro" — set at creation from Wrapper
@@ -87,13 +90,33 @@ type ManagedSession struct {
 	Exempt bool
 }
 
+func (s *ManagedSession) loadProcess() processIface {
+	if box := s.process.Load(); box != nil {
+		return box.p
+	}
+	return nil
+}
+
+func (s *ManagedSession) storeProcess(p processIface) {
+	if p == nil {
+		s.process.Store(nil)
+	} else {
+		s.process.Store(&processBox{p: p})
+	}
+}
+
+func (s *ManagedSession) isAlive() bool {
+	p := s.loadProcess()
+	return p != nil && p.Alive()
+}
+
 // ReattachProcess safely injects a reconnected shim process into this session.
 // Called by Router.reconnectShims after naozhi restart.
 func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
-	s.process = proc
+	s.storeProcess(proc)
 	s.setSessionID(sessionID)
 	s.deathReason.Store("")
 	s.lastActive.Store(time.Now().UnixNano())
@@ -154,7 +177,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 		}
 	}
 
-	result, err := s.process.Send(ctx, text, images, wrappedOnEvent)
+	result, err := s.loadProcess().Send(ctx, text, images, wrappedOnEvent)
 	if err != nil {
 		if errors.Is(err, cli.ErrNoOutputTimeout) {
 			s.deathReason.Store("no_output_timeout")
@@ -178,7 +201,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 // This is the equivalent of pressing Escape in Claude Code.
 func (s *ManagedSession) Interrupt() bool {
 	s.sendMu.Lock()
-	proc := s.process
+	proc := s.loadProcess()
 	s.sendMu.Unlock()
 
 	if proc == nil || !proc.IsRunning() {
@@ -272,14 +295,8 @@ type SessionSnapshot struct {
 	Subagents    []cli.SubagentInfo `json:"subagents,omitempty"`     // active sub-agent types in current turn
 }
 
-// getProcess returns the current process reference safely.
-// Must be used by all code paths that read s.process outside sendMu,
-// since ReattachProcess writes s.process under sendMu.
-func (s *ManagedSession) getProcess() processIface {
-	s.sendMu.Lock()
-	proc := s.process
-	s.sendMu.Unlock()
-	return proc
+func (s *ManagedSession) HasProcess() bool {
+	return s.loadProcess() != nil
 }
 
 // Snapshot returns a point-in-time view of this session.
@@ -301,7 +318,7 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		snap.DeathReason = dr
 	}
 
-	proc := s.getProcess()
+	proc := s.loadProcess()
 	if proc == nil {
 		snap.TotalCost = s.totalCost
 		snap.State = "suspended"
@@ -326,7 +343,7 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 // EventEntries returns the event log entries for this session.
 // Returns persisted history when the process is nil or dead.
 func (s *ManagedSession) EventEntries() []cli.EventEntry {
-	proc := s.getProcess()
+	proc := s.loadProcess()
 	if proc != nil {
 		return proc.EventEntries()
 	}
@@ -339,7 +356,7 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 
 // EventLastN returns the most recent n event entries.
 func (s *ManagedSession) EventLastN(n int) []cli.EventEntry {
-	proc := s.getProcess()
+	proc := s.loadProcess()
 	if proc != nil {
 		return proc.EventLastN(n)
 	}
@@ -358,7 +375,7 @@ func (s *ManagedSession) EventLastN(n int) []cli.EventEntry {
 
 // EventEntriesSince returns the event log entries after the given unix ms timestamp.
 func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
-	proc := s.getProcess()
+	proc := s.loadProcess()
 	if proc != nil {
 		return proc.EventEntriesSince(afterMS)
 	}
@@ -377,7 +394,7 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 // SubscribeEvents subscribes to event log notifications for this session.
 // If the session has no process, returns a closed channel and a no-op unsubscribe.
 func (s *ManagedSession) SubscribeEvents() (<-chan struct{}, func()) {
-	proc := s.getProcess()
+	proc := s.loadProcess()
 	if proc == nil {
 		ch := make(chan struct{})
 		close(ch)
@@ -397,8 +414,8 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 		copy(trimmed, s.persistedHistory[len(s.persistedHistory)-maxPersistedHistory:])
 		s.persistedHistory = trimmed
 	}
-	if s.process != nil {
-		s.process.InjectHistory(entries)
+	if p := s.loadProcess(); p != nil {
+		p.InjectHistory(entries)
 	}
 	// Update cached snapshot values from injected history (only if not yet set by Send).
 	// Scan from the end to find the last user/tool_use entries efficiently.

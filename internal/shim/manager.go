@@ -83,7 +83,9 @@ func NewManager(cfg ManagerConfig) *Manager {
 	// Find our own binary path for spawning shim subprocesses
 	naozhiBin, _ := os.Executable()
 
-	os.MkdirAll(cfg.StateDir, 0700) //nolint:errcheck
+	if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
+		slog.Warn("failed to create shim state directory", "dir", cfg.StateDir, "err", err)
+	}
 
 	return &Manager{
 		stateDir:        cfg.StateDir,
@@ -301,7 +303,7 @@ func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*Shim
 		return nil, fmt.Errorf("dial shim: %w", err)
 	}
 
-	reader := bufio.NewReaderSize(conn, 16*1024*1024) // 16MB initial buffer (shim is trusted; spawned by us)
+	reader := bufio.NewReaderSize(conn, 256*1024) // 256KB buffer (bufio grows as needed for large lines)
 	writer := bufio.NewWriter(conn)
 
 	// Send attach with token
@@ -513,19 +515,21 @@ func moveToShimsCgroup(shimPID, cliPID int) {
 
 	// Use busctl to create a transient scope adopting the shim PIDs.
 	// This registers them as an independent systemd unit.
-	pidArgs := strings.Join(pids, " ")
-	busctlScript := fmt.Sprintf(
-		`busctl call org.freedesktop.systemd1 /org/freedesktop/systemd1 `+
-			`org.freedesktop.systemd1.Manager StartTransientUnit `+
-			`'ssa(sv)a(sa(sv))' '%s' 'fail' 2 `+
-			`'PIDs' 'au' %d %s `+
-			`'KillMode' 's' 'none' 0`,
-		scopeName, len(pids), pidArgs,
-	)
+	args := []string{"-n", "busctl", "call",
+		"org.freedesktop.systemd1",
+		"/org/freedesktop/systemd1",
+		"org.freedesktop.systemd1.Manager",
+		"StartTransientUnit",
+		"ssa(sv)a(sa(sv))",
+		scopeName, "fail", "2",
+		"PIDs", "au", strconv.Itoa(len(pids)),
+	}
+	args = append(args, pids...)
+	args = append(args, "KillMode", "s", "none", "0")
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sudo", "-n", "sh", "-c", busctlScript)
+	cmd := exec.CommandContext(ctx, "sudo", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		slog.Warn("moveToShimsCgroup: systemd scope failed, trying direct cgroup — zero-downtime restart may not survive service restart",
 			"pid", shimPID, "err", err, "output", string(out))
@@ -545,8 +549,9 @@ func moveToShimsCgroupDirect(pid int) {
 	const procsFile = "/sys/fs/cgroup/naozhi-shims/cgroup.procs"
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sudo", "-n", "sh", "-c",
-		fmt.Sprintf("echo %d > %s", pid, procsFile))
+	cmd := exec.CommandContext(ctx, "sudo", "-n", "tee", procsFile)
+	cmd.Stdin = strings.NewReader(strconv.Itoa(pid) + "\n")
+	cmd.Stdout = nil // tee copies to stdout; inherit parent (journal) is fine
 	if err := cmd.Run(); err != nil {
 		slog.Warn("moveToShimsCgroupDirect: failed — shim may not survive service restart", "pid", pid, "err", err)
 		return

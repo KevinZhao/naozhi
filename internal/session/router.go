@@ -308,7 +308,7 @@ func (r *Router) ReconnectShims() {
 		r.mu.Lock()
 		sess, ok := r.sessions[state.Key]
 		var hasLiveProcess bool
-		if ok && sess.process != nil && sess.process.Alive() {
+		if ok && sess.isAlive() {
 			hasLiveProcess = true
 		}
 		r.mu.Unlock()
@@ -393,7 +393,7 @@ func (r *Router) ReconnectShims() {
 		// by a concurrent spawnSession while we were reconnecting (lock was released).
 		r.mu.Lock()
 		currentSess := r.sessions[state.Key]
-		if currentSess != sess || (currentSess != nil && currentSess.process != nil && currentSess.process.Alive()) {
+		if currentSess != sess || (currentSess != nil && currentSess.isAlive()) {
 			r.mu.Unlock()
 			proc.Close()
 			slog.Info("shim reconnect aborted: session replaced concurrently", "key", state.Key)
@@ -484,8 +484,8 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 			if s == nil {
 				continue
 			}
-			if s.process != nil && s.process.Alive() {
-				toClose = append(toClose, s.process)
+			if p := s.loadProcess(); p != nil && p.Alive() {
+				toClose = append(toClose, p)
 				if !s.Exempt {
 					closedActive++
 				}
@@ -499,8 +499,8 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 		for key, s := range r.sessions {
 			if len(key) > len(chatKeyPrefix) && key[:len(chatKeyPrefix)+1] == chatKeyPrefix+":" {
 				toDelete = append(toDelete, key)
-				if s.process != nil && s.process.Alive() {
-					toClose = append(toClose, s.process)
+				if p := s.loadProcess(); p != nil && p.Alive() {
+					toClose = append(toClose, p)
 					if !s.Exempt {
 						closedActive++
 					}
@@ -552,7 +552,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	r.mu.Lock()
 
 	if s, ok := r.sessions[key]; ok {
-		if s.process != nil && s.process.Alive() {
+		if s.isAlive() {
 			s.touchLastActive()
 			r.mu.Unlock()
 			return s, SessionExisting, nil
@@ -659,7 +659,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	}
 
 	// TOCTOU guard: another goroutine may have spawned this key while we were unlocked
-	if existing, ok := r.sessions[key]; ok && existing.process != nil && existing.process.Alive() {
+	if existing, ok := r.sessions[key]; ok && existing.isAlive() {
 		r.mu.Unlock()
 		proc.Close() // discard the redundant process
 		return existing, nil
@@ -673,11 +673,11 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	var prevIDs []string
 	if old != nil {
 		old.sendMu.Lock()
-		if old.process != nil && !old.process.Alive() {
+		if p := old.loadProcess(); p != nil && !p.Alive() {
 			// Dead process: EventEntries() includes both injected history and live events
 			// logged during the last run. Use this instead of persistedHistory, which only
 			// holds the JSONL-loaded snapshot and misses events accumulated since that load.
-			oldHistory = old.process.EventEntries()
+			oldHistory = p.EventEntries()
 		} else if len(old.persistedHistory) > 0 {
 			oldHistory = make([]cli.EventEntry, len(old.persistedHistory))
 			copy(oldHistory, old.persistedHistory)
@@ -699,7 +699,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 
 	r.mu.Lock()
 	// Re-check TOCTOU after re-acquiring lock (another goroutine may have spawned)
-	if existing, ok := r.sessions[key]; ok && existing.process != nil && existing.process.Alive() {
+	if existing, ok := r.sessions[key]; ok && existing.isAlive() {
 		r.mu.Unlock()
 		proc.Close()
 		return existing, nil
@@ -707,7 +707,6 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 
 	s := &ManagedSession{
 		Key:              key,
-		process:          proc,
 		workspace:        workspace,
 		cliName:          r.wrapper.CLIName,
 		cliVersion:       r.wrapper.CLIVersion,
@@ -720,6 +719,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 			r.mu.Unlock()
 		},
 	}
+	s.storeProcess(proc)
 	if len(oldHistory) > 0 {
 		proc.InjectHistory(oldHistory)
 	}
@@ -769,7 +769,7 @@ func (r *Router) countActive() {
 		if s.Exempt {
 			continue
 		}
-		if s.process != nil && s.process.Alive() {
+		if s.isAlive() {
 			count++
 		}
 	}
@@ -781,7 +781,7 @@ func (r *Router) countActive() {
 func (r *Router) countExempt() int {
 	count := 0
 	for _, s := range r.sessions {
-		if s.Exempt && s.process != nil && s.process.Alive() {
+		if s.Exempt && s.isAlive() {
 			count++
 		}
 	}
@@ -797,7 +797,7 @@ func (r *Router) evictOldest() bool {
 		if s.Exempt {
 			continue // planner sessions are never evicted
 		}
-		if s.process == nil || !s.process.Alive() || s.process.IsRunning() {
+		if !s.isAlive() || s.loadProcess().IsRunning() {
 			continue
 		}
 		if oldest == nil || s.GetLastActive().Before(oldest.GetLastActive()) {
@@ -811,7 +811,7 @@ func (r *Router) evictOldest() bool {
 	oldest.deathReason.Store("evicted")
 	// Keep oldest.process non-nil so concurrent holders don't get nil-panic.
 	// After Close(), Alive() returns false; countActive() below recounts correctly.
-	proc := oldest.process
+	proc := oldest.loadProcess()
 	r.mu.Unlock()
 	proc.Close()
 	if r.shutdownCond != nil {
@@ -832,8 +832,8 @@ func (r *Router) Reset(key string) {
 		return
 	}
 
-	wasActive := !s.Exempt && s.process != nil && s.process.Alive()
-	proc := s.process
+	proc := s.loadProcess()
+	wasActive := !s.Exempt && proc != nil && proc.Alive()
 	r.indexDel(key)
 	delete(r.sessions, key)
 	if wasActive {
@@ -867,8 +867,8 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 	hadOld := false
 	if s, ok := r.sessions[key]; ok {
 		hadOld = true
-		wasActive := !s.Exempt && s.process != nil && s.process.Alive()
-		proc := s.process
+		proc := s.loadProcess()
+		wasActive := !s.Exempt && proc != nil && proc.Alive()
 		r.indexDel(key)
 		delete(r.sessions, key)
 		if wasActive {
@@ -913,9 +913,9 @@ func (r *Router) Remove(key string) bool {
 		return false
 	}
 
-	wasActive := !s.Exempt && s.process != nil && s.process.Alive()
 	// Kill process if alive
-	proc := s.process
+	proc := s.loadProcess()
+	wasActive := !s.Exempt && proc != nil && proc.Alive()
 	r.indexDel(key)
 	delete(r.sessions, key)
 	if wasActive {
@@ -956,10 +956,10 @@ func (r *Router) Cleanup() {
 		if s.Exempt {
 			continue // planner sessions are never expired by TTL
 		}
-		if s.process != nil && s.process.Alive() && !s.process.IsRunning() && now.Sub(s.GetLastActive()) > r.ttl {
+		if s.isAlive() && !s.loadProcess().IsRunning() && now.Sub(s.GetLastActive()) > r.ttl {
 			slog.Info("session expired", "key", key, "idle", now.Sub(s.GetLastActive()))
 			s.deathReason.Store("idle_timeout")
-			expired = append(expired, expiredEntry{key, s.process})
+			expired = append(expired, expiredEntry{key, s.loadProcess()})
 		}
 	}
 	r.mu.Unlock()
@@ -982,7 +982,7 @@ func (r *Router) Cleanup() {
 		if s.Exempt {
 			continue // planner sessions are never pruned
 		}
-		if s.process == nil && s.getSessionID() == "" && now.Sub(s.GetLastActive()) > r.ttl {
+		if s.loadProcess() == nil && s.getSessionID() == "" && now.Sub(s.GetLastActive()) > r.ttl {
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
@@ -992,14 +992,14 @@ func (r *Router) Cleanup() {
 		// 7x multiplier gives suspended sessions ~3.5 hours at default 30m TTL,
 		// matching a typical work session. Balances timely cleanup against
 		// preserving sessions the user may still want to --resume.
-		if s.process == nil && s.getSessionID() != "" && now.Sub(s.GetLastActive()) > suspendedTTLMultiplier*r.ttl {
+		if s.loadProcess() == nil && s.getSessionID() != "" && now.Sub(s.GetLastActive()) > suspendedTTLMultiplier*r.ttl {
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
 			continue
 		}
 		// Prune exited sessions with no resumable session ID
-		if s.process != nil && !s.process.Alive() && s.getSessionID() == "" && now.Sub(s.GetLastActive()) > r.ttl {
+		if p := s.loadProcess(); p != nil && !p.Alive() && s.getSessionID() == "" && now.Sub(s.GetLastActive()) > r.ttl {
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
@@ -1007,14 +1007,14 @@ func (r *Router) Cleanup() {
 		}
 		// Prune old exited sessions even with session ID (prevents unbounded growth).
 		// Same 7x TTL window as suspended sessions above.
-		if s.process != nil && !s.process.Alive() && now.Sub(s.GetLastActive()) > suspendedTTLMultiplier*r.ttl {
+		if p := s.loadProcess(); p != nil && !p.Alive() && now.Sub(s.GetLastActive()) > suspendedTTLMultiplier*r.ttl {
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
 			continue
 		}
 		// Session survived all prune conditions; count it if its process is alive.
-		if s.process != nil && s.process.Alive() {
+		if s.isAlive() {
 			newActive++
 		}
 	}
@@ -1142,7 +1142,7 @@ func (r *Router) Shutdown() {
 	for {
 		running := false
 		for _, s := range r.sessions {
-			if s.process != nil && s.process.IsRunning() {
+			if p := s.loadProcess(); p != nil && p.IsRunning() {
 				running = true
 				break
 			}
@@ -1174,9 +1174,9 @@ func (r *Router) Shutdown() {
 	// Collect processes to close, then release lock to close concurrently
 	var procs []processIface
 	for key, s := range r.sessions {
-		if s.process != nil && s.process.Alive() {
+		if p := s.loadProcess(); p != nil && p.Alive() {
 			slog.Info("shutting down session", "key", key)
-			procs = append(procs, s.process)
+			procs = append(procs, p)
 		}
 	}
 	r.mu.Unlock()
@@ -1319,7 +1319,7 @@ func (r *Router) DiscoveryExcludeIDs() map[string]bool {
 	defer r.mu.RUnlock()
 	ids := make(map[string]bool, len(r.sessions))
 	for _, s := range r.sessions {
-		if s.process == nil {
+		if s.loadProcess() == nil {
 			continue
 		}
 		if id := s.getSessionID(); id != "" {
@@ -1411,8 +1411,8 @@ func (r *Router) ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]
 		if id := s.getSessionID(); id != "" {
 			sessionIDs[id] = true
 		}
-		if s.process != nil && s.process.Alive() {
-			if pid := s.process.PID(); pid > 0 {
+		if p := s.loadProcess(); p != nil && p.Alive() {
+			if pid := p.PID(); pid > 0 {
 				pids[pid] = true
 			}
 			if s.workspace != "" {
@@ -1431,9 +1431,9 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 	r.mu.Lock()
 	// If key already exists (e.g. re-takeover same CWD), close the old process
 	if s, ok := r.sessions[key]; ok {
-		if s.process != nil && s.process.Alive() {
+		if p := s.loadProcess(); p != nil && p.Alive() {
 			oldSession := s
-			proc := s.process
+			proc := p
 			r.mu.Unlock()
 			proc.Close()
 			r.mu.Lock()
@@ -1443,7 +1443,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 				delete(r.sessions, key)
 				r.storeDirty = true
 				r.storeGen++
-			} else if cur != nil && cur.process != nil && cur.process.Alive() {
+			} else if cur != nil && cur.isAlive() {
 				// Concurrent GetOrCreate created a new session during Close();
 				// abort takeover rather than silently returning wrong session.
 				r.mu.Unlock()

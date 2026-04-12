@@ -113,6 +113,7 @@ func (a *AuthHandlers) serveLoginPage(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "same-origin")
 	if _, err := w.Write([]byte(loginPageHTML)); err != nil {
 		slog.Debug("serve login page", "err", err)
 	}

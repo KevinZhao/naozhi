@@ -59,9 +59,9 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := &ManagedSession{
-		Key:     key,
-		process: proc,
+		Key: key,
 	}
+	s.storeProcess(proc)
 	s.touchLastActive()
 	r.sessions[key] = s
 	r.activeCount++

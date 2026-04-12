@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bufio"
 	"io"
 )
 
@@ -53,19 +52,4 @@ type LineReader interface {
 func (rw *JSONRW) WriteLine(data []byte) error {
 	_, err := rw.W.Write(append(data, '\n'))
 	return err
-}
-
-// bufioLineReader wraps a bufio.Scanner as a LineReader.
-type bufioLineReader struct {
-	scanner *bufio.Scanner
-}
-
-func (r *bufioLineReader) ReadLine() ([]byte, bool, error) {
-	if r.scanner.Scan() {
-		return r.scanner.Bytes(), false, nil
-	}
-	if err := r.scanner.Err(); err != nil {
-		return nil, true, err
-	}
-	return nil, true, io.EOF
 }

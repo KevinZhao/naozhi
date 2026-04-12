@@ -1,6 +1,7 @@
 server:
   addr: ":8180"
   dashboard_token: "${NAOZHI_DASHBOARD_TOKEN}"
+  trusted_proxy: true
 
 workspace:
   id: "ec2-dev"

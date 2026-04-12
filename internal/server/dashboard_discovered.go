@@ -173,6 +173,9 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	cwdKey := strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
+	if len(cwdKey) > 128 {
+		cwdKey = cwdKey[:128]
+	}
 	key := "local:takeover:" + cwdKey + ":general"
 
 	// Kill the original process.

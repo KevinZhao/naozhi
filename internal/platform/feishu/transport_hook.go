@@ -22,7 +22,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			return
 		}
 
-		slog.Debug("feishu webhook received", "body_len", len(body), "body", string(body[:min(len(body), 500)]))
+		slog.Debug("feishu webhook received", "body_len", len(body))
 
 		// Parse the outer envelope
 		var envelope struct {

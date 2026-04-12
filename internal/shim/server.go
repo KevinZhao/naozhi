@@ -154,6 +154,9 @@ func Run(cfg Config) error {
 			hasClient := s.clientConn != nil
 			if !hasClient {
 				slog.Info("SIGTERM received, starting 30s grace period")
+				// Stop() returns false if the timer already fired, meaning the old callback
+				// may still be running. This is safe because initiateShutdown is guarded
+				// by doneOnce, so duplicate calls are no-ops.
 				if s.graceTimer != nil {
 					s.graceTimer.Stop()
 				}
@@ -388,18 +391,16 @@ func (s *shimServer) enqueueWrite(data []byte) {
 // readStdout reads CLI stdout and pushes lines to the ring buffer + client.
 func (s *shimServer) readStdout() {
 	for s.cli.stdout.Scan() {
-		line := s.cli.stdout.Bytes()
-		lineCopy := make([]byte, len(line))
-		copy(lineCopy, line)
+		line := s.cli.stdout.Bytes() // valid until next Scan()
 
-		seq := s.buffer.Push(lineCopy)
+		seq := s.buffer.Push(line) // Push makes its own copy
 		s.watchdog.Reset()
 
 		// Extract session_id from init/result events
-		s.tryExtractSessionID(lineCopy)
+		s.tryExtractSessionID(line)
 
 		// Build message and enqueue (non-blocking, no lock during Flush)
-		msg := ServerMsg{Type: "stdout", Seq: seq, Line: string(lineCopy)}
+		msg := ServerMsg{Type: "stdout", Seq: seq, Line: string(line)}
 		if data, err := msg.MarshalLine(); err == nil {
 			s.enqueueWrite(append(data, '\n'))
 		}
@@ -435,7 +436,7 @@ func (s *shimServer) tryExtractSessionID(line []byte) {
 // readStderr reads CLI stderr and forwards to client.
 func (s *shimServer) readStderr() {
 	scanner := bufio.NewScanner(s.cli.stderrR)
-	scanner.Buffer(make([]byte, 4*1024), 64*1024)
+	scanner.Buffer(make([]byte, 4*1024), 10*1024*1024)
 	for scanner.Scan() {
 		line := scanner.Text()
 		slog.Debug("cli stderr", "line", line)
@@ -444,15 +445,6 @@ func (s *shimServer) readStderr() {
 		if data, err := msg.MarshalLine(); err == nil {
 			s.enqueueWrite(append(data, '\n'))
 		}
-	}
-}
-
-// broadcastCLIExited sends cli_exited to the connected client.
-func (s *shimServer) broadcastCLIExited() {
-	code := s.cli.exitCode
-	msg := ServerMsg{Type: "cli_exited", Code: IntPtr(code)}
-	if data, err := msg.MarshalLine(); err == nil {
-		s.enqueueWrite(append(data, '\n'))
 	}
 }
 
@@ -698,7 +690,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 				// Closed channel fires immediately — ignore to avoid double delivery.
 				return
 			}
-			// Send cli_exited (only from here — broadcastCLIExited is for unconnected state)
+			// Send cli_exited to the connected client.
 			code := s.cli.exitCode
 			resp := ServerMsg{Type: "cli_exited", Code: IntPtr(code)}
 			if data, err := resp.MarshalLine(); err == nil {

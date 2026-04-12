@@ -147,9 +147,9 @@ func newTestRouter(maxProcs int) *Router {
 // Must be called before any concurrent operations on the router.
 func injectSession(r *Router, key string, proc processIface) *ManagedSession {
 	s := &ManagedSession{
-		Key:     key,
-		process: proc,
+		Key: key,
 	}
+	s.storeProcess(proc)
 	s.touchLastActive()
 	r.sessions[key] = s
 	if !s.Exempt && proc != nil && proc.Alive() {
@@ -508,7 +508,7 @@ func TestGetOrCreate_NewSession_SpawnError(t *testing.T) {
 func TestGetOrCreate_DeadSession_AttemptResume(t *testing.T) {
 	r := newTestRouter(3)
 	s := newSessionWithID("feishu:direct:user1:general", "old-sess-id")
-	s.process = newDeadProc()
+	s.storeProcess(newDeadProc())
 	r.sessions["feishu:direct:user1:general"] = s
 
 	_, _, err := r.GetOrCreate(context.Background(), "feishu:direct:user1:general", AgentOpts{})
@@ -626,7 +626,8 @@ func TestEvictOldestEmptyRouter(t *testing.T) {
 func TestEvictOldestReturnsTrue(t *testing.T) {
 	r := &Router{sessions: make(map[string]*ManagedSession), maxProcs: 1}
 	proc := newIdleProc()
-	s := &ManagedSession{Key: "key1", process: proc}
+	s := &ManagedSession{Key: "key1"}
+	s.storeProcess(proc)
 	s.touchLastActive()
 	r.sessions["key1"] = s
 
@@ -645,7 +646,8 @@ func TestEvictOldestReturnsTrue(t *testing.T) {
 func TestEvictOldestSkipsRunning(t *testing.T) {
 	r := &Router{sessions: make(map[string]*ManagedSession)}
 	proc := newRunningProc()
-	s := &ManagedSession{Key: "key1", process: proc}
+	s := &ManagedSession{Key: "key1"}
+	s.storeProcess(proc)
 	s.touchLastActive()
 	r.sessions["key1"] = s
 
@@ -664,7 +666,8 @@ func TestEvictOldestSkipsRunning(t *testing.T) {
 func TestEvictOldestSkipsDead(t *testing.T) {
 	r := &Router{sessions: make(map[string]*ManagedSession)}
 	proc := newDeadProc()
-	s := &ManagedSession{Key: "key1", process: proc}
+	s := &ManagedSession{Key: "key1"}
+	s.storeProcess(proc)
 	s.touchLastActive()
 	r.sessions["key1"] = s
 
@@ -683,10 +686,12 @@ func TestEvictOldestPicksOldest(t *testing.T) {
 	oldProc := newIdleProc()
 	recentProc := newIdleProc()
 
-	oldSession := &ManagedSession{Key: "old-key", process: oldProc}
+	oldSession := &ManagedSession{Key: "old-key"}
+	oldSession.storeProcess(oldProc)
 	oldSession.lastActive.Store(time.Now().Add(-2 * time.Hour).UnixNano())
 
-	recentSession := &ManagedSession{Key: "recent-key", process: recentProc}
+	recentSession := &ManagedSession{Key: "recent-key"}
+	recentSession.storeProcess(recentProc)
 	recentSession.lastActive.Store(time.Now().Add(-1 * time.Minute).UnixNano())
 
 	r.sessions["old-key"] = oldSession
@@ -973,8 +978,8 @@ func TestStartCleanupLoop_StopsOnContextCancel(t *testing.T) {
 func captureHistoryFrom(s *ManagedSession) []cli.EventEntry {
 	var captured []cli.EventEntry
 	s.sendMu.Lock()
-	if s.process != nil && !s.process.Alive() {
-		captured = s.process.EventEntries()
+	if p := s.loadProcess(); p != nil && !p.Alive() {
+		captured = p.EventEntries()
 	} else if len(s.persistedHistory) > 0 {
 		captured = make([]cli.EventEntry, len(s.persistedHistory))
 		copy(captured, s.persistedHistory)
@@ -1002,9 +1007,9 @@ func TestHistoryCapture_DeadProcessUsesEventEntries(t *testing.T) {
 	proc := newDeadProcWithEntries(liveEntries)
 	s := &ManagedSession{
 		Key:              "test-key",
-		process:          proc,
 		persistedHistory: stalePersisted,
 	}
+	s.storeProcess(proc)
 
 	captured := captureHistoryFrom(s)
 
@@ -1027,9 +1032,9 @@ func TestHistoryCapture_NilProcessFallsBackToPersistedHistory(t *testing.T) {
 
 	s := &ManagedSession{
 		Key:              "test-key",
-		process:          nil,
 		persistedHistory: persisted,
 	}
+	// process is nil by default (zero value of atomic.Pointer)
 
 	captured := captureHistoryFrom(s)
 
@@ -1046,9 +1051,9 @@ func TestHistoryCapture_NilProcessFallsBackToPersistedHistory(t *testing.T) {
 // triggering the JSONL-load path in spawnSession.
 func TestHistoryCapture_EmptyFallsBackToJSONL(t *testing.T) {
 	s := &ManagedSession{
-		Key:     "test-key",
-		process: nil,
+		Key: "test-key",
 	}
+	// process is nil by default (zero value of atomic.Pointer)
 
 	if captured := captureHistoryFrom(s); len(captured) != 0 {
 		t.Errorf("captured %d entries, want 0 (JSONL fallback should be triggered)", len(captured))
