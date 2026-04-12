@@ -544,9 +544,11 @@ func main() {
 
 	if cfg.Server.DashboardToken == "" {
 		slog.Warn("dashboard_token is not set — dashboard and WebSocket API are accessible without authentication. Set server.dashboard_token in config.yaml for production use.")
-	} else if len(cfg.Server.DashboardToken) < 16 {
-		slog.Error("dashboard_token is too short — use at least 16 random characters for production security")
+	} else if len(cfg.Server.DashboardToken) < 8 {
+		slog.Error("dashboard_token is too short — use at least 8 characters")
 		os.Exit(1)
+	} else if len(cfg.Server.DashboardToken) < 16 {
+		slog.Warn("dashboard_token is short — consider using 16+ random characters for stronger security")
 	}
 
 	serverErr := make(chan error, 1)
