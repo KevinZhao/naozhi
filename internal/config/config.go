@@ -302,6 +302,9 @@ func Load(path string) (*Config, error) {
 		if u.Scheme == "http" && nc.Token != "" {
 			return nil, fmt.Errorf("node %q: refusing to send bearer token over plaintext HTTP — use HTTPS", id)
 		}
+		if u.Scheme == "http" && nc.Token == "" {
+			slog.Warn("node uses plaintext HTTP without authentication — session data is exposed to network attackers", "node", id)
+		}
 	}
 
 	if cfg.Upstream != nil {

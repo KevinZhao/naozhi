@@ -359,7 +359,7 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 
 	info, err := os.Stat(absPath)
 	if err != nil || !info.IsDir() {
-		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "目录不存在: " + absPath})
+		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "目录不存在或无权限"})
 		return
 	}
 
@@ -368,7 +368,7 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 	}
 
 	if d.AllowedRoot != "" && absPath != d.AllowedRoot && !strings.HasPrefix(absPath, d.AllowedRoot+string(filepath.Separator)) {
-		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "不允许访问该路径，只能在 " + d.AllowedRoot + " 下操作"})
+		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "不允许访问该路径"})
 		return
 	}
 

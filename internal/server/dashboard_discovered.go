@@ -3,7 +3,6 @@ package server
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -146,7 +145,12 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 	// C2 fix: verify PID is in the discovered list before killing
 	if h.claudeDir != "" {
 		excludePIDs, excludeSIDs, excludeCWDs := h.router.ManagedExcludeSets()
-		discovered, _ := discovery.Scan(h.claudeDir, excludePIDs, excludeSIDs, excludeCWDs)
+		discovered, err := discovery.Scan(h.claudeDir, excludePIDs, excludeSIDs, excludeCWDs)
+		if err != nil {
+			slog.Error("discovery scan failed during takeover", "err", err)
+			http.Error(w, "discovery scan failed", http.StatusInternalServerError)
+			return
+		}
 		pidFound := false
 		for _, d := range discovered {
 			if d.PID == req.PID && d.SessionID == req.SessionID {
@@ -189,7 +193,8 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if err := syscall.Kill(req.PID, syscall.SIGTERM); err != nil {
-		http.Error(w, fmt.Sprintf("kill process %d: %v", req.PID, err), http.StatusBadRequest)
+		slog.Error("failed to terminate process", "pid", req.PID, "err", err)
+		http.Error(w, "failed to terminate process", http.StatusBadRequest)
 		return
 	}
 

@@ -1077,20 +1077,53 @@ func (r *Router) Cleanup() {
 	}
 }
 
-// StartCleanupLoop runs Cleanup periodically.
+// StartCleanupLoop runs Cleanup periodically and saves dirty session state
+// on a shorter interval to reduce data loss on crash.
 func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
+		cleanupTicker := time.NewTicker(interval)
+		defer cleanupTicker.Stop()
+		// Save dirty state every 30s to reduce crash-recovery data loss
+		// from ~TTL/2 (~15min) to ~30s.
+		saveTicker := time.NewTicker(30 * time.Second)
+		defer saveTicker.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
+			case <-cleanupTicker.C:
 				r.Cleanup()
+			case <-saveTicker.C:
+				r.saveIfDirty()
 			}
 		}
 	}()
+}
+
+// saveIfDirty saves the session store if any mutations have occurred since the last save.
+func (r *Router) saveIfDirty() {
+	r.mu.Lock()
+	if !r.storeDirty {
+		r.mu.Unlock()
+		return
+	}
+	sessionsCopy := make(map[string]*ManagedSession, len(r.sessions))
+	for k, v := range r.sessions {
+		sessionsCopy[k] = v
+	}
+	storePath := r.storePath
+	snapshotGen := r.storeGen
+	r.mu.Unlock()
+
+	if err := saveStore(storePath, sessionsCopy); err != nil {
+		slog.Warn("periodic session save failed", "err", err)
+		return
+	}
+	r.mu.Lock()
+	if r.storeGen == snapshotGen {
+		r.storeDirty = false
+	}
+	r.mu.Unlock()
 }
 
 // StartShimReconcileLoop periodically checks for suspended sessions that have

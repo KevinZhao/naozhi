@@ -403,10 +403,10 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, notify <-chan struct{}, ses
 // re-subscribes to its EventLog. Returns (ok, currentSession). ok is false if
 // the client disconnects or the wait times out (60s).
 func (h *Hub) resubscribeEvents(c *wsClient, key string, notify *<-chan struct{}) (bool, *session.ManagedSession) {
-	ticker := time.NewTicker(time.Second)
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
-	for range 60 {
+	for range 12 {
 		select {
 		case <-c.done:
 			return false, nil
@@ -460,12 +460,19 @@ func (h *Hub) broadcastState(key, state, reason string) {
 	if err != nil {
 		return
 	}
+	// Snapshot subscribed clients under lock, then release before sending
+	// to avoid blocking register/unregister/subscribe during broadcast.
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	targets := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
 		if _, ok := c.subscriptions[key]; ok {
-			c.SendRaw(data)
+			targets = append(targets, c)
 		}
+	}
+	h.mu.Unlock()
+
+	for _, c := range targets {
+		c.SendRaw(data)
 	}
 }
 
@@ -478,11 +485,16 @@ func (h *Hub) BroadcastSessionReady(key string) {
 		return
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	targets := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
 		if c.authenticated.Load() {
-			c.SendRaw(data)
+			targets = append(targets, c)
 		}
+	}
+	h.mu.Unlock()
+
+	for _, c := range targets {
+		c.SendRaw(data)
 	}
 }
 
@@ -509,11 +521,16 @@ func (h *Hub) doBroadcastSessionsUpdate() {
 		return
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	targets := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
 		if c.authenticated.Load() {
-			c.SendRaw(data)
+			targets = append(targets, c)
 		}
+	}
+	h.mu.Unlock()
+
+	for _, c := range targets {
+		c.SendRaw(data)
 	}
 }
 
@@ -534,11 +551,16 @@ func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
 		return
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	targets := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
 		if c.authenticated.Load() {
-			c.SendRaw(data)
+			targets = append(targets, c)
 		}
+	}
+	h.mu.Unlock()
+
+	for _, c := range targets {
+		c.SendRaw(data)
 	}
 }
 
@@ -653,10 +675,15 @@ func (h *Hub) PurgeNodeSubscriptions(nodeID string) {
 		return
 	}
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	targets := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
 		if c.authenticated.Load() {
-			c.SendRaw(data)
+			targets = append(targets, c)
 		}
+	}
+	h.mu.Unlock()
+
+	for _, c := range targets {
+		c.SendRaw(data)
 	}
 }

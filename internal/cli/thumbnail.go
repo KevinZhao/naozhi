@@ -10,9 +10,30 @@ import (
 	_ "image/png"
 )
 
+// maxThumbnailPixels is the maximum source image pixel count allowed for
+// thumbnail generation. Larger images are skipped to prevent OOM from the
+// full RGBA decode (e.g., 4096x4096 = 64 MB RGBA).
+const maxThumbnailPixels = 4096 * 4096
+
+// thumbSem limits concurrent image decode operations to cap aggregate memory.
+var thumbSem = make(chan struct{}, 4)
+
 // MakeThumbnail generates a small JPEG data URI from raw image bytes.
-// Returns empty string if the image cannot be decoded.
+// Returns empty string if the image cannot be decoded or is too large.
 func MakeThumbnail(data []byte, maxDim int) string {
+	// Pre-check dimensions without full decode to prevent OOM on large images.
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return ""
+	}
+	if int64(cfg.Width)*int64(cfg.Height) > maxThumbnailPixels {
+		return ""
+	}
+
+	// Limit concurrent decodes to cap aggregate memory usage.
+	thumbSem <- struct{}{}
+	defer func() { <-thumbSem }()
+
 	src, _, err := image.Decode(bytes.NewReader(data))
 	if err != nil {
 		return ""

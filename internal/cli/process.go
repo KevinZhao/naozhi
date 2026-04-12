@@ -104,7 +104,7 @@ func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 		protocol:        proto,
 		cliPID:          cliPID,
 		State:           StateSpawning,
-		eventCh:         make(chan Event, 64),
+		eventCh:         make(chan Event, 1024),
 		done:            make(chan struct{}),
 		killCh:          make(chan struct{}),
 		noOutputTimeout: noOutputTimeout,
@@ -321,6 +321,22 @@ func (p *Process) heartbeatLoop() {
 	}
 }
 
+// findResultSince checks EventLog for a result entry logged after afterMS.
+// Used as fallback when eventCh may have dropped events due to full buffer.
+func (p *Process) findResultSince(afterMS int64) *SendResult {
+	entries := p.eventLog.EntriesSince(afterMS)
+	for i := len(entries) - 1; i >= 0; i-- {
+		if entries[i].Type == "result" {
+			return &SendResult{
+				Text:      entries[i].Detail,
+				SessionID: p.GetSessionID(),
+				CostUSD:   entries[i].Cost,
+			}
+		}
+	}
+	return nil
+}
+
 // EventCallback is called for each intermediate event during Send.
 type EventCallback func(ev Event)
 
@@ -382,6 +398,10 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 		}
 	}
 drained:
+
+	// Record turn start time so we can check EventLog as fallback if eventCh
+	// drops events (non-blocking send when buffer is full).
+	turnStartMS := time.Now().UnixMilli()
 
 	if err := p.protocol.WriteMessage(p.shimStdinWriter(), text, images); err != nil {
 		return nil, fmt.Errorf("write message: %w", err)
@@ -454,10 +474,18 @@ drained:
 				}, nil
 			}
 		case <-noOutputTimer.C:
+			// Before reporting timeout, check if result was logged to EventLog
+			// but missed by eventCh (non-blocking send dropped it).
+			if sr := p.findResultSince(turnStartMS); sr != nil {
+				return sr, nil
+			}
 			slog.Error("watchdog: no output timeout", "timeout", noOutputDur)
 			p.Kill()
 			return nil, fmt.Errorf("%w (%s)", ErrNoOutputTimeout, noOutputDur)
 		case <-totalTimer.C:
+			if sr := p.findResultSince(turnStartMS); sr != nil {
+				return sr, nil
+			}
 			slog.Error("watchdog: total timeout", "timeout", totalDur)
 			p.Kill()
 			return nil, fmt.Errorf("%w (%s)", ErrTotalTimeout, totalDur)

@@ -29,8 +29,6 @@ var defaultConfigTemplate = `server:
 cli:
   path: "claude"
   model: "sonnet"
-  args:
-    - "--dangerously-skip-permissions"
 
 session:
   max_procs: 3

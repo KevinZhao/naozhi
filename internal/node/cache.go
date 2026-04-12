@@ -75,8 +75,22 @@ func (m *CacheManager) RefreshAll() {
 			var sessErr error
 			wg.Add(3)
 			go func() { defer wg.Done(); sessions, sessErr = nc.FetchSessions(ctx) }()
-			go func() { defer wg.Done(); projects, _ = nc.FetchProjects(ctx) }()
-			go func() { defer wg.Done(); discovered, _ = nc.FetchDiscovered(ctx) }()
+			go func() {
+				defer wg.Done()
+				var err error
+				projects, err = nc.FetchProjects(ctx)
+				if err != nil {
+					slog.Debug("node cache: FetchProjects failed", "node", id, "err", err)
+				}
+			}()
+			go func() {
+				defer wg.Done()
+				var err error
+				discovered, err = nc.FetchDiscovered(ctx)
+				if err != nil {
+					slog.Debug("node cache: FetchDiscovered failed", "node", id, "err", err)
+				}
+			}()
 			wg.Wait()
 			ch <- result{id, sessions, projects, discovered, sessErr}
 		}(id, nc)
@@ -138,8 +152,22 @@ func (m *CacheManager) RefreshFor(id string) {
 	var sessErr error
 	wg.Add(3)
 	go func() { defer wg.Done(); sessions, sessErr = nc.FetchSessions(ctx) }()
-	go func() { defer wg.Done(); projects, _ = nc.FetchProjects(ctx) }()
-	go func() { defer wg.Done(); discovered, _ = nc.FetchDiscovered(ctx) }()
+	go func() {
+		defer wg.Done()
+		var err error
+		projects, err = nc.FetchProjects(ctx)
+		if err != nil {
+			slog.Debug("node cache: FetchProjects failed", "node", id, "err", err)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		var err error
+		discovered, err = nc.FetchDiscovered(ctx)
+		if err != nil {
+			slog.Debug("node cache: FetchDiscovered failed", "node", id, "err", err)
+		}
+	}()
 	wg.Wait()
 
 	status := "ok"

@@ -36,6 +36,11 @@ func NewHTTPClient(id, url, token, displayName string) *HTTPClient {
 		displayName: displayName,
 		httpClient: &http.Client{
 			Timeout: 10 * time.Second,
+			Transport: &http.Transport{
+				MaxIdleConns:        30,
+				MaxIdleConnsPerHost: 6,
+				IdleConnTimeout:     90 * time.Second,
+			},
 		},
 	}
 }
