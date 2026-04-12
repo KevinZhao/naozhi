@@ -113,6 +113,11 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := nc.Send(ctx, capturedKey, capturedText, capturedWorkspace); err != nil {
 				slog.Error("remote send", "node", node, "key", capturedKey, "err", err)
+			} else {
+				nc.RefreshSubscription(capturedKey)
+			}
+			if h.hub != nil {
+				h.hub.BroadcastSessionsUpdate()
 			}
 		}()
 		w.Header().Set("Content-Type", "application/json")

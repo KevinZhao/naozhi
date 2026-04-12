@@ -42,7 +42,7 @@ func (h *Hub) sendWithBroadcast(
 
 	result, err := sess.Send(ctx, text, images, onEvent)
 
-	// Broadcast final state (ready or suspended) after Send completes.
+	// Broadcast final state after Send completes.
 	if rs := h.router.GetSession(key); rs != nil {
 		snap := rs.Snapshot()
 		h.broadcastState(key, snap.State, snap.DeathReason)

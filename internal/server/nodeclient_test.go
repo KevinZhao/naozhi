@@ -504,6 +504,7 @@ func newTestWSClient() *wsClient {
 		send:          make(chan []byte, 256),
 		done:          make(chan struct{}),
 		subscriptions: make(map[string]func()),
+		subGen:        make(map[string]uint64),
 	}
 	c.authenticated.Store(true)
 	return c

@@ -161,6 +161,10 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("start shim: %w", err)
 	}
+	// Reap the shim process asynchronously to prevent zombie accumulation.
+	// The shim is designed to outlive naozhi (Setsid: true), but when it exits
+	// on its own (idle timeout, CLI exit), cmd.Wait() collects its status.
+	go cmd.Wait() //nolint:errcheck
 
 	// Read ready message (with timeout)
 	readyCh := make(chan struct {
@@ -168,18 +172,27 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 		err   error
 	}, 1)
 	go func() {
+		defer stdout.Close()
 		scanner := bufio.NewScanner(stdout)
 		if scanner.Scan() {
 			var ready struct {
 				Status string `json:"status"`
 				PID    int    `json:"pid"`
 				Token  string `json:"token"`
+				Error  string `json:"error"`
 			}
 			if err := json.Unmarshal(scanner.Bytes(), &ready); err != nil {
 				readyCh <- struct {
 					token string
 					err   error
 				}{"", fmt.Errorf("parse ready: %w", err)}
+				return
+			}
+			if ready.Status == "error" {
+				readyCh <- struct {
+					token string
+					err   error
+				}{"", fmt.Errorf("shim startup failed: %s", ready.Error)}
 				return
 			}
 			if ready.Status != "ready" {

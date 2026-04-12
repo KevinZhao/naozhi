@@ -42,7 +42,7 @@ function defaultSessions() {
       },
       {
         key: 'dashboard:direct:2026-01-01-120002-3:myproject',
-        state: 'suspended',
+        state: 'ready',
         platform: 'dashboard',
         agent: 'general',
         cli_name: 'claude',

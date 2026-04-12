@@ -61,6 +61,13 @@ func (f *fakeProcess) Close() {
 	})
 }
 
+func (f *fakeProcess) Kill() {
+	f.mu.Lock()
+	f.isAlive = false
+	f.isRunning = false
+	f.mu.Unlock()
+}
+
 func (f *fakeProcess) Send(_ context.Context, _ string, _ []cli.ImageData, _ cli.EventCallback) (*cli.SendResult, error) {
 	return &cli.SendResult{Text: "fake"}, nil
 }
@@ -384,7 +391,10 @@ func TestCleanupSkipsRunningSession(t *testing.T) {
 	}
 	proc := newRunningProc()
 	s := injectSession(r, "key1", proc)
-	s.lastActive.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	// Exceeds 1min TTL but stays well below the stuck-running threshold
+	// (2 × DefaultTotalTimeout = 10min) so the session is eligible for idle
+	// expiry but protected by the IsRunning() guard.
+	s.lastActive.Store(time.Now().Add(-2 * time.Minute).UnixNano())
 
 	r.Cleanup()
 

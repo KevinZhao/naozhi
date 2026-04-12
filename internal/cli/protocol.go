@@ -30,7 +30,7 @@ type Protocol interface {
 	// ReadEvent parses a single NDJSON line from stdout into a unified Event.
 	// Returns the event, whether this event completes the current turn, and any error.
 	// Events that should be silently skipped return a zero Event with done=false, err=nil.
-	ReadEvent(line []byte) (ev Event, done bool, err error)
+	ReadEvent(line string) (ev Event, done bool, err error)
 
 	// HandleEvent allows the protocol to react to events (e.g., auto-grant permissions).
 	// Returns true if the event was handled internally and should not be forwarded.

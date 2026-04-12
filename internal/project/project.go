@@ -122,7 +122,7 @@ func saveConfigToPath(path string, cfg ProjectConfig) error {
 		return fmt.Errorf("write project config: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp) // M4: clean up on rename failure
+		_ = os.Remove(tmp) // clean up on rename failure
 		return fmt.Errorf("rename project config: %w", err)
 	}
 	return nil

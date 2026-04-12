@@ -23,7 +23,7 @@ func saveJobs(path string, jobs map[string]*Job) error {
 		entries = append(entries, j)
 	}
 
-	data, err := json.MarshalIndent(entries, "", "  ")
+	data, err := json.Marshal(entries)
 	if err != nil {
 		return err
 	}
@@ -45,7 +45,7 @@ func saveJobs(path string, jobs map[string]*Job) error {
 	}
 	f.Close()
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return err
 	}
 	return nil

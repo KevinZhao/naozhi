@@ -128,9 +128,9 @@ func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData)
 	return err
 }
 
-func (p *ACPProtocol) ReadEvent(line []byte) (Event, bool, error) {
+func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 	var msg RPCMessage
-	if err := json.Unmarshal(line, &msg); err != nil {
+	if err := json.Unmarshal([]byte(line), &msg); err != nil {
 		return Event{}, false, err
 	}
 

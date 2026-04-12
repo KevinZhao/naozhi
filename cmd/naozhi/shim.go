@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -75,6 +76,10 @@ func runShimRun(args []string) {
 
 	if err := shim.Run(cfg); err != nil {
 		slog.Error("shim exited with error", "err", err)
+		// Write error to stdout so the parent manager can read the actual
+		// failure reason instead of the generic "shim exited before ready".
+		errJSON, _ := json.Marshal(err.Error())
+		fmt.Fprintf(os.Stdout, `{"status":"error","error":%s}`+"\n", errJSON)
 		os.Exit(1)
 	}
 }

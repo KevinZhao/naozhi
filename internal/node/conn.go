@@ -29,12 +29,13 @@ type Conn interface {
 	FetchEvents(ctx context.Context, key string, after int64) ([]cli.EventEntry, error)
 	Send(ctx context.Context, key, text, workspace string) error
 
-	ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) error
+	ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) (string, error)
 	ProxyRestartPlanner(ctx context.Context, projectName string) error
 	ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error
 
 	Subscribe(c EventSink, key string, after int64)
 	Unsubscribe(c EventSink, key string)
+	RefreshSubscription(key string)
 	RemoveClient(c EventSink)
 
 	Close()

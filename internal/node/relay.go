@@ -67,6 +67,9 @@ func (r *wsRelay) Subscribe(c EventSink, key string, after int64) {
 func (r *wsRelay) Unsubscribe(c EventSink, key string) {
 	r.mu.Lock()
 	empty := removeSub(r.subs, key, c)
+	if empty {
+		delete(r.lastEvent, key)
+	}
 	r.mu.Unlock()
 
 	if empty {
@@ -79,6 +82,9 @@ func (r *wsRelay) Unsubscribe(c EventSink, key string) {
 func (r *wsRelay) RemoveClient(c EventSink) {
 	r.mu.Lock()
 	emptyKeys := removeSubAll(r.subs, c)
+	for _, key := range emptyKeys {
+		delete(r.lastEvent, key)
+	}
 	r.mu.Unlock()
 
 	for _, key := range emptyKeys {
@@ -98,6 +104,7 @@ func (r *wsRelay) Close() {
 	conn := r.conn
 	r.conn = nil
 	r.subs = make(map[string][]EventSink)
+	r.lastEvent = make(map[string]int64)
 	r.mu.Unlock()
 
 	if conn != nil {

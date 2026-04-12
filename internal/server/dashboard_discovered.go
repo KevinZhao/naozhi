@@ -68,22 +68,25 @@ func (h *DiscoveryHandlers) handlePreview(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Remote node
-	if nodeID != "" {
-		nc, _ := h.nodeAccess.GetNode(nodeID)
-		if nc != nil {
-			entries, err := nc.FetchDiscoveredPreview(r.Context(), sessionID)
-			if err != nil {
-				slog.Warn("remote discovered preview", "node", nodeID, "err", err)
-				entries = nil
-			}
-			if entries == nil {
-				entries = []cli.EventEntry{}
-			}
-			w.Header().Set("Content-Type", "application/json")
-			writeJSON(w, entries)
+	// Remote node — only fall through to local when nodeID is empty or "local".
+	if nodeID != "" && nodeID != "local" {
+		nc, ok := h.nodeAccess.GetNode(nodeID)
+		if !ok {
+			slog.Warn("remote discovered preview: node not connected", "node", nodeID)
+			http.Error(w, "node not connected", http.StatusBadGateway)
 			return
 		}
+		entries, err := nc.FetchDiscoveredPreview(r.Context(), sessionID)
+		if err != nil {
+			slog.Warn("remote discovered preview", "node", nodeID, "err", err)
+			entries = nil
+		}
+		if entries == nil {
+			entries = []cli.EventEntry{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		writeJSON(w, entries)
+		return
 	}
 
 	// Local
@@ -131,14 +134,15 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 		if !ok {
 			return
 		}
-		if err := nc.ProxyTakeover(r.Context(), req.PID, req.SessionID, req.CWD, req.ProcStartTime); err != nil {
+		remoteKey, err := nc.ProxyTakeover(r.Context(), req.PID, req.SessionID, req.CWD, req.ProcStartTime)
+		if err != nil {
 			slog.Warn("proxy takeover failed", "node", req.Node, "err", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusAccepted)
-		writeJSON(w, map[string]string{"status": "accepted"})
+		writeJSON(w, map[string]string{"status": "accepted", "key": remoteKey, "node": req.Node})
 		return
 	}
 

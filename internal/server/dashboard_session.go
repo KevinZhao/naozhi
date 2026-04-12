@@ -50,11 +50,11 @@ type SessionHandlers struct {
 func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	snapshots := h.router.ListSessions()
 
-	// Keep suspended sessions in the workspace sidebar for up to 24 hours.
+	// Keep dead sessions in the workspace sidebar for up to 24 hours.
 	cutoff24h := time.Now().Add(-24 * time.Hour).UnixMilli()
 	n := 0
 	for _, snap := range snapshots {
-		if snap.State == "suspended" && snap.LastActive < cutoff24h {
+		if snap.DeathReason != "" && snap.LastActive < cutoff24h {
 			continue
 		}
 		snapshots[n] = snap
@@ -366,6 +366,27 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]string{"status": "ok", "key": effectiveKey})
+}
+
+// POST /api/sessions/interrupt
+func (h *SessionHandlers) handleInterrupt(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Key string `json:"key"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
+		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+
+	ok := h.router.InterruptSession(req.Key)
+	w.Header().Set("Content-Type", "application/json")
+	if ok {
+		slog.Info("session interrupted via HTTP", "key", req.Key)
+		writeJSON(w, map[string]string{"status": "ok"})
+	} else {
+		writeJSON(w, map[string]string{"status": "not_running"})
+	}
 }
 
 // historySessions returns all filesystem sessions from the last 7 days.

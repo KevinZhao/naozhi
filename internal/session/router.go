@@ -364,6 +364,7 @@ func (r *Router) ReconnectShims() {
 		lastSeq := int64(0) // full replay on restart
 		proc, replays, err := r.wrapper.SpawnReconnect(
 			context.Background(), state.Key, lastSeq, r.wrapper.Protocol,
+			r.noOutputTimeout, r.totalTimeout,
 		)
 		if err != nil {
 			slog.Warn("shim reconnect failed", "key", state.Key, "err", err)
@@ -374,7 +375,7 @@ func (r *Router) ReconnectShims() {
 		// Use EventEntryFromEvent for proper Summary extraction across all event types.
 		for _, replay := range replays {
 			if replay.Type == "replay" {
-				ev, _, err := r.wrapper.Protocol.ReadEvent([]byte(replay.Line))
+				ev, _, err := r.wrapper.Protocol.ReadEvent(replay.Line)
 				if err != nil || ev.Type == "" {
 					continue
 				}
@@ -985,7 +986,7 @@ func (r *Router) Remove(key string) bool {
 }
 
 // Cleanup closes sessions idle beyond TTL.
-// Releases r.mu during Close() to avoid blocking message processing.
+// Releases r.mu during Close()/Kill() to avoid blocking message processing.
 func (r *Router) Cleanup() {
 	r.mu.Lock()
 
@@ -994,21 +995,67 @@ func (r *Router) Cleanup() {
 		proc processIface
 	}
 	var expired []expiredEntry
+	var stuckKill []expiredEntry // stuck running or PID-dead — force kill
 
 	now := time.Now()
 	for key, s := range r.sessions {
 		if s.Exempt {
 			continue // planner sessions are never expired by TTL
 		}
-		if s.isAlive() && !s.loadProcess().IsRunning() && now.Sub(s.GetLastActive()) > r.ttl {
+		proc := s.loadProcess()
+		if proc == nil {
+			continue
+		}
+		alive := proc.Alive()
+
+		// ── Stuck running detection ─────────────────────────────────
+
+		// If a session has been in StateRunning longer than 2× the
+		// process total-timeout, the Send() watchdog failed to fire.
+		// Force-kill to reclaim the slot.
+		if alive && proc.IsRunning() {
+			totalTimeout := r.totalTimeout
+			if totalTimeout <= 0 {
+				totalTimeout = cli.DefaultTotalTimeout
+			}
+			stuckThreshold := 2 * totalTimeout
+			if age := now.Sub(s.GetLastActive()); age > stuckThreshold {
+				slog.Warn("stuck running session detected, force killing",
+					"key", key, "running_for", age, "threshold", stuckThreshold)
+				s.deathReason.Store("stuck_running")
+				stuckKill = append(stuckKill, expiredEntry{key, proc})
+				continue
+			}
+		}
+
+		// ── PID liveness check ──────────────────────────────────────
+		// The shim connection may appear alive (readLoop not yet EOF)
+		// while the underlying CLI process has already exited.
+		// Verify via kill(pid, 0) and force-kill the stale shim.
+		if alive && !proc.IsRunning() {
+			if pid := proc.PID(); pid > 0 && !pidAlive(pid) {
+				slog.Warn("CLI process gone but session still alive, force killing",
+					"key", key, "pid", pid)
+				s.deathReason.Store("pid_gone")
+				stuckKill = append(stuckKill, expiredEntry{key, proc})
+				continue
+			}
+		}
+
+		// ── Normal idle TTL expiry ──────────────────────────────────
+		if alive && !proc.IsRunning() && now.Sub(s.GetLastActive()) > r.ttl {
 			slog.Info("session expired", "key", key, "idle", now.Sub(s.GetLastActive()))
 			s.deathReason.Store("idle_timeout")
-			expired = append(expired, expiredEntry{key, s.loadProcess()})
+			expired = append(expired, expiredEntry{key, proc})
 		}
 	}
 	r.mu.Unlock()
 
 	closedCount := 0
+	for _, e := range stuckKill {
+		e.proc.Kill()
+		closedCount++
+	}
 	for _, e := range expired {
 		e.proc.Close()
 		closedCount++
@@ -1121,9 +1168,16 @@ func (r *Router) Cleanup() {
 		}
 	}
 
-	if len(expired) > 0 || pruned > 0 {
+	if len(expired) > 0 || len(stuckKill) > 0 || pruned > 0 {
 		r.notifyChange()
 	}
+}
+
+// pidAlive checks whether a process with the given PID still exists.
+// Returns true if the process is alive (or owned by another user — EPERM).
+func pidAlive(pid int) bool {
+	err := syscall.Kill(pid, 0)
+	return err == nil || err == syscall.EPERM
 }
 
 // StartCleanupLoop runs Cleanup periodically and saves dirty session state

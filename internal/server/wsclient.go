@@ -31,6 +31,7 @@ type wsClient struct {
 	authAttempts  atomic.Int32
 	sendLimiter   *rate.Limiter     // per-connection rate limit on "send" messages
 	subscriptions map[string]func() // key -> unsubscribe function
+	subGen        map[string]uint64 // key -> subscription generation (detects resubscribe race)
 	done          chan struct{}
 	doneOnce      sync.Once
 	dropped       atomic.Int64 // messages dropped due to full send buffer

@@ -22,6 +22,7 @@ type processIface interface {
 	Alive() bool
 	IsRunning() bool
 	Close()
+	Kill()
 	Interrupt()
 	Send(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
 	// Dashboard introspection
@@ -336,7 +337,7 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 	proc := s.loadProcess()
 	if proc == nil {
 		snap.TotalCost = s.totalCost
-		snap.State = "suspended"
+		snap.State = "ready"
 	} else {
 		snap.State = proc.GetState().String()
 		snap.Protocol = proc.ProtocolName()

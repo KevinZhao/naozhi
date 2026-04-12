@@ -78,7 +78,7 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 	}
 	f.Close()
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return err
 	}
 	return nil
@@ -173,17 +173,17 @@ func saveKnownIDs(storePath string, ids map[string]bool) error {
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write known IDs %s: %w", tmp, err)
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return fmt.Errorf("sync known IDs %s: %w", tmp, err)
 	}
 	f.Close()
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return fmt.Errorf("rename known IDs to %s: %w", path, err)
 	}
 	return nil

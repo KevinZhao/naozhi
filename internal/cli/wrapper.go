@@ -197,7 +197,7 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 
 // SpawnReconnect creates a Process by reconnecting to an existing shim.
 // Used after naozhi restart to resume an active session.
-func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64, proto Protocol) (*Process, []shim.ServerMsg, error) {
+func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64, proto Protocol, noOutputTimeout, totalTimeout time.Duration) (*Process, []shim.ServerMsg, error) {
 	if w.ShimManager == nil {
 		return nil, nil, fmt.Errorf("ShimManager not configured")
 	}
@@ -222,7 +222,7 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	proc := newShimProcess(
 		handle.Conn, handle.Reader, handle.Writer,
 		proto.Clone(), cliPID,
-		0, 0, // timeouts will be set by router
+		noOutputTimeout, totalTimeout,
 	)
 
 	if handle.Hello.SessionID != "" {
@@ -251,7 +251,7 @@ func isMidTurn(replays []shim.ServerMsg, proto Protocol) bool {
 		if replays[i].Type != "replay" {
 			continue
 		}
-		ev, _, err := proto.ReadEvent([]byte(replays[i].Line))
+		ev, _, err := proto.ReadEvent(replays[i].Line)
 		if err != nil || ev.Type == "" {
 			continue
 		}

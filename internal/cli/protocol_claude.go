@@ -55,9 +55,9 @@ func (p *ClaudeProtocol) WriteMessage(w io.Writer, text string, images []ImageDa
 	return err
 }
 
-func (p *ClaudeProtocol) ReadEvent(line []byte) (Event, bool, error) {
+func (p *ClaudeProtocol) ReadEvent(line string) (Event, bool, error) {
 	var ev Event
-	if err := json.Unmarshal(line, &ev); err != nil {
+	if err := json.Unmarshal([]byte(line), &ev); err != nil {
 		return Event{}, false, err
 	}
 	// Skip hook events

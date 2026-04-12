@@ -50,7 +50,7 @@ func (s ProcessState) String() string {
 	case StateRunning:
 		return "running"
 	case StateDead:
-		return "suspended" // process exited; session may be resumable
+		return "ready" // process exited; session may be resumable
 	default:
 		return "unknown"
 	}
@@ -218,7 +218,7 @@ func (p *Process) readLoop() {
 		switch msg.Type {
 		case "stdout":
 			p.lastSeq.Store(msg.Seq)
-			ev, _, err := p.protocol.ReadEvent([]byte(msg.Line))
+			ev, _, err := p.protocol.ReadEvent(msg.Line)
 			if err != nil {
 				slog.Debug("readLoop: skip unparseable event", "err", err)
 				continue
@@ -311,7 +311,12 @@ func (p *Process) heartbeatLoop() {
 			pongTimer.Reset(interval / 2)
 			select {
 			case <-p.pongRecv:
-				pongTimer.Stop()
+				if !pongTimer.Stop() {
+					select {
+					case <-pongTimer.C:
+					default:
+					}
+				}
 				misses = 0
 			case <-pongTimer.C:
 				misses++
@@ -863,6 +868,14 @@ func (p *Process) ProtocolName() string {
 // PID returns the CLI process ID (as reported by shim).
 func (p *Process) PID() int {
 	return p.cliPID
+}
+
+// GetTotalTimeout returns the configured total timeout for a single turn.
+func (p *Process) GetTotalTimeout() time.Duration {
+	if p.totalTimeout > 0 {
+		return p.totalTimeout
+	}
+	return DefaultTotalTimeout
 }
 
 // InjectHistory pre-populates the event log with historical entries.

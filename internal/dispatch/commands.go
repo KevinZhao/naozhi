@@ -101,17 +101,23 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 			if agentToReset == "" {
 				d.Router.Reset(proj.PlannerSessionKey())
 				if p := d.Platforms[msg.Platform]; p != nil {
-					p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "项目 " + proj.Name + " 的 planner 已重置。"})
+					if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "项目 " + proj.Name + " 的 planner 已重置。"}); err != nil {
+						log.Warn("reply failed", "err", err)
+					}
 				}
 			} else {
 				if id, ok := d.AgentCommands[agentToReset]; ok {
 					key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, id)
 					d.Router.Reset(key)
 					if p := d.Platforms[msg.Platform]; p != nil {
-						p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "会话已重置 (" + id + ")。"})
+						if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "会话已重置 (" + id + ")。"}); err != nil {
+							log.Warn("reply failed", "err", err)
+						}
 					}
 				} else if p := d.Platforms[msg.Platform]; p != nil {
-					p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "未知的 agent: " + agentToReset})
+					if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "未知的 agent: " + agentToReset}); err != nil {
+						log.Warn("reply failed", "err", err)
+					}
 				}
 			}
 			return
@@ -141,7 +147,9 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 						}
 						errMsg += "\n可用: " + strings.Join(names, ", ")
 					}
-					p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg})
+					if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}); err != nil {
+						log.Warn("reply failed", "err", err)
+					}
 				}
 				return
 			}
@@ -154,7 +162,9 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 		if agentID != "general" {
 			label = " (" + agentID + ")"
 		}
-		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "对话已重置" + label + "。"})
+		if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "对话已重置" + label + "。"}); err != nil {
+			log.Warn("reply failed", "err", err)
+		}
 	}
 	log.Info("session reset by user", "agent", agentID)
 }
@@ -166,7 +176,9 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 		return
 	}
 	reply := func(text string) {
-		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: text})
+		if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: text}); err != nil {
+			log.Warn("reply failed", "err", err)
+		}
 	}
 
 	parts := strings.SplitN(trimmed, " ", 3)
@@ -278,7 +290,9 @@ func (d *Dispatcher) handleProjectCommand(ctx context.Context, msg platform.Inco
 	}
 
 	if d.ProjectMgr == nil {
-		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "项目功能未启用（未配置 projects.root）。"})
+		if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "项目功能未启用（未配置 projects.root）。"}); err != nil {
+			log.Warn("reply failed", "err", err)
+		}
 		return
 	}
 
@@ -288,42 +302,60 @@ func (d *Dispatcher) handleProjectCommand(ctx context.Context, msg platform.Inco
 	case "":
 		proj := d.ProjectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID)
 		if proj == nil {
-			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "当前未绑定项目。\n用法: /project <项目名> 绑定"})
+			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "当前未绑定项目。\n用法: /project <项目名> 绑定"}); err != nil {
+				log.Warn("reply failed", "err", err)
+			}
 		} else {
-			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: fmt.Sprintf("当前绑定: %s (%s)", proj.Name, proj.Path)})
+			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: fmt.Sprintf("当前绑定: %s (%s)", proj.Name, proj.Path)}); err != nil {
+				log.Warn("reply failed", "err", err)
+			}
 		}
 
 	case "off":
 		if err := d.ProjectMgr.UnbindAllChat(msg.Platform, msg.ChatType, msg.ChatID); err != nil {
-			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "解绑失败: " + err.Error()})
+			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "解绑失败: " + err.Error()}); err != nil {
+				log.Warn("reply failed", "err", err)
+			}
 			return
 		}
-		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "已解绑项目，恢复默认路由。"})
+		if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "已解绑项目，恢复默认路由。"}); err != nil {
+			log.Warn("reply failed", "err", err)
+		}
 		log.Info("project unbound", "chat", msg.ChatID)
 
 	case "list":
 		projects := d.ProjectMgr.All()
 		if len(projects) == 0 {
-			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "无可用项目。"})
+			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "无可用项目。"}); err != nil {
+				log.Warn("reply failed", "err", err)
+			}
 			return
 		}
 		var lines []string
 		for _, proj := range projects {
 			lines = append(lines, fmt.Sprintf("  %s — %s", proj.Name, proj.Path))
 		}
-		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "可用项目:\n" + strings.Join(lines, "\n")})
+		if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "可用项目:\n" + strings.Join(lines, "\n")}); err != nil {
+			log.Warn("reply failed", "err", err)
+		}
 
 	default:
 		proj := d.ProjectMgr.Get(arg)
 		if proj == nil {
-			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "项目不存在: " + arg + "\n使用 /project list 查看可用项目。"})
+			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "项目不存在: " + arg + "\n使用 /project list 查看可用项目。"}); err != nil {
+				log.Warn("reply failed", "err", err)
+			}
 			return
 		}
 		if err := d.ProjectMgr.BindChat(proj.Name, msg.Platform, msg.ChatType, msg.ChatID); err != nil {
-			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "绑定失败: " + err.Error()})
+			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "绑定失败: " + err.Error()}); err != nil {
+				log.Warn("reply failed", "err", err)
+			}
 			return
 		}
-		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: fmt.Sprintf("已绑定项目: %s\n后续消息将路由到该项目的 planner。", proj.Name)})
+		if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: fmt.Sprintf("已绑定项目: %s\n后续消息将路由到该项目的 planner。", proj.Name)}); err != nil {
+			log.Warn("reply failed", "err", err)
+		}
 		log.Info("project bound", "project", proj.Name, "chat", msg.ChatID)
 	}
 }
@@ -337,7 +369,9 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 
 	path := strings.TrimSpace(strings.TrimPrefix(trimmed, "/cd"))
 	if path == "" {
-		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "用法: /cd <目录路径>\n例: /cd /home/ubuntu/my-project"})
+		if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "用法: /cd <目录路径>\n例: /cd /home/ubuntu/my-project"}); err != nil {
+			log.Warn("reply failed", "err", err)
+		}
 		return
 	}
 
@@ -359,19 +393,25 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 
 	info, err := os.Stat(absPath)
 	if err != nil || !info.IsDir() {
-		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "目录不存在或无权限"})
+		if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "目录不存在或无权限"}); err != nil {
+			log.Warn("reply failed", "err", err)
+		}
 		return
 	}
 
 	resolved, err := filepath.EvalSymlinks(absPath)
 	if err != nil {
-		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "无法解析路径"})
+		if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "无法解析路径"}); err != nil {
+			log.Warn("reply failed", "err", err)
+		}
 		return
 	}
 	absPath = resolved
 
 	if d.AllowedRoot != "" && absPath != d.AllowedRoot && !strings.HasPrefix(absPath, d.AllowedRoot+string(filepath.Separator)) {
-		p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "不允许访问该路径"})
+		if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "不允许访问该路径"}); err != nil {
+			log.Warn("reply failed", "err", err)
+		}
 		return
 	}
 
@@ -379,7 +419,9 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 	d.Router.SetWorkspace(chatKey, absPath)
 	d.Router.ResetChat(chatKey)
 
-	p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "工作目录已切换到: " + absPath + "\n所有会话已重置，新消息将在此目录下执行。"})
+	if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "工作目录已切换到: " + absPath + "\n所有会话已重置，新消息将在此目录下执行。"}); err != nil {
+		log.Warn("reply failed", "err", err)
+	}
 	log.Info("workspace changed", "chat_key", chatKey, "path", absPath)
 }
 

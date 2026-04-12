@@ -141,8 +141,9 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.trustedProxy {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if first, _, _ := strings.Cut(xff, ","); first != "" {
-				ip = strings.TrimSpace(first)
+			parts := strings.Split(xff, ",")
+			if last := strings.TrimSpace(parts[len(parts)-1]); last != "" {
+				ip = last
 			}
 		}
 	}
@@ -153,6 +154,7 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		remoteIP:      ip,
 		sendLimiter:   rate.NewLimiter(rate.Every(time.Second), 5), // 5 sends/s burst, 1/s sustained
 		subscriptions: make(map[string]func()),
+		subGen:        make(map[string]uint64),
 		done:          make(chan struct{}),
 	}
 	if h.dashToken == "" {
@@ -247,7 +249,24 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 // completeSubscribe finishes a subscription once a valid session is available.
 func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, sess *session.ManagedSession) {
 	if !sess.HasProcess() {
-		slog.Debug("completeSubscribe: no process", "key", key)
+		// No process yet (suspended/resuming). Send persisted history so the
+		// client can display old messages, and reply with "subscribed" so the
+		// client's _pendingSubscribeKey is properly cleared. Without this
+		// response the client gets stuck and never re-subscribes when the
+		// process becomes available.
+		snap := sess.Snapshot()
+		c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State})
+
+		var entries []cli.EventEntry
+		if msg.After > 0 {
+			entries = sess.EventEntriesSince(msg.After)
+		} else {
+			entries = sess.EventLastN(100)
+		}
+		if len(entries) > 0 {
+			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries})
+		}
+		slog.Debug("completeSubscribe: no process, sent persisted history", "key", key, "entries", len(entries))
 		return
 	}
 	notify, unsub := sess.SubscribeEvents()
@@ -260,6 +279,8 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		return
 	}
 	c.subscriptions[key] = unsub
+	c.subGen[key]++
+	gen := c.subGen[key]
 	h.mu.Unlock()
 
 	snap := sess.Snapshot()
@@ -282,7 +303,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		lastTime = entries[len(entries)-1].Time
 	}
 
-	go h.eventPushLoop(c, key, notify, sess, lastTime)
+	go h.eventPushLoop(c, key, gen, notify, sess, lastTime)
 }
 
 func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
@@ -352,12 +373,12 @@ func (h *Hub) handleInterrupt(c *wsClient, msg node.ClientMsg) {
 	}
 }
 
-func (h *Hub) eventPushLoop(c *wsClient, key string, notify <-chan struct{}, sess *session.ManagedSession, lastTime int64) {
+func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan struct{}, sess *session.ManagedSession, lastTime int64) {
 	for {
 		select {
 		case _, ok := <-notify:
 			if !ok {
-				ok, newSess := h.resubscribeEvents(c, key, &notify)
+				ok, newSess := h.resubscribeEvents(c, key, gen, &notify)
 				if !ok {
 					return
 				}
@@ -398,8 +419,9 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, notify <-chan struct{}, ses
 
 // resubscribeEvents waits for a new process to be attached to the session and
 // re-subscribes to its EventLog. Returns (ok, currentSession). ok is false if
-// the client disconnects or the wait times out (60s).
-func (h *Hub) resubscribeEvents(c *wsClient, key string, notify *<-chan struct{}) (bool, *session.ManagedSession) {
+// the client disconnects, the wait times out (60s), or a newer subscription
+// has taken over this key (generation mismatch).
+func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-chan struct{}) (bool, *session.ManagedSession) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 
@@ -408,6 +430,14 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, notify *<-chan struct{}
 		case <-c.done:
 			return false, nil
 		case <-ticker.C:
+		}
+
+		// Check if a newer subscription (from handleSubscribe) has taken over.
+		h.mu.RLock()
+		currentGen := c.subGen[key]
+		h.mu.RUnlock()
+		if currentGen != gen {
+			return false, nil
 		}
 
 		// Re-check the router for the current session — spawnSession may have
@@ -439,6 +469,12 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, notify *<-chan struct{}
 			unsub()
 			return false, nil
 		}
+		// Final generation check under write lock to prevent TOCTOU.
+		if c.subGen[key] != gen {
+			h.mu.Unlock()
+			unsub()
+			return false, nil
+		}
 		if oldUnsub, exists := c.subscriptions[key]; exists {
 			oldUnsub()
 		}
@@ -451,18 +487,19 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, notify *<-chan struct{}
 	return false, nil
 }
 
-// broadcastState sends a session_state message to all clients subscribed to the given key.
+// broadcastState sends a session_state message to ALL authenticated clients.
+// This mirrors BroadcastSessionReady: the "running" start is sent to everyone,
+// so the final state must also reach everyone — otherwise clients not subscribed
+// to this session would see a stale "running" dot in the sidebar forever.
 func (h *Hub) broadcastState(key, state, reason string) {
 	data, err := json.Marshal(node.ServerMsg{Type: "session_state", Key: key, State: state, Reason: reason})
 	if err != nil {
 		return
 	}
-	// Snapshot subscribed clients under lock, then release before sending
-	// to avoid blocking register/unregister/subscribe during broadcast.
 	h.mu.RLock()
 	targets := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
-		if _, ok := c.subscriptions[key]; ok {
+		if c.authenticated.Load() {
 			targets = append(targets, c)
 		}
 	}
@@ -647,15 +684,23 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 
-	c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "accepted", Key: msg.Key, Node: nodeID})
-
+	// send_ack is deferred until nc.Send returns, so the remote session
+	// is guaranteed to exist when the browser receives the ack and triggers
+	// a subscribe. Sending the ack eagerly (before the RPC) caused a race
+	// where the subscribe arrived at the remote before session creation.
 	go func() {
 		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
 		defer cancel()
 		capturedID, capturedKey := msg.ID, msg.Key
-		if err := nc.Send(ctx, msg.Key, msg.Text, msg.Workspace); err != nil {
-			slog.Error("remote ws send failed", "node", nodeID, "key", msg.Key, "err", err)
+		if err := nc.Send(ctx, capturedKey, msg.Text, msg.Workspace); err != nil {
+			slog.Error("remote ws send failed", "node", nodeID, "key", capturedKey, "err", err)
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: "remote send failed: " + err.Error()})
+		} else {
+			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "accepted", Key: capturedKey, Node: nodeID})
+			// Refresh the remote subscription so the connector re-creates
+			// its streamEvents goroutine if the previous one exited (e.g.
+			// process died between the last subscribe and this send).
+			nc.RefreshSubscription(capturedKey)
 		}
 		h.BroadcastSessionsUpdate()
 	}()

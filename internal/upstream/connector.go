@@ -163,8 +163,15 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	// activeSubs tracks local session subscriptions initiated by primary.
 	// subExited receives keys when streamEvents goroutines exit (channel closed),
 	// so the main loop can remove stale entries and allow re-subscription.
+	// A generation counter prevents late subExited notifications from deleting
+	// a freshly re-created subscription for the same key.
+	type subExitNote struct {
+		key string
+		gen uint64
+	}
 	activeSubs := map[string]func(){} // key → cancel func
-	subExited := make(chan string, 16)
+	subGen := map[string]uint64{}     // key → generation counter
+	subExited := make(chan subExitNote, 16)
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -205,8 +212,10 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	drainLoop:
 		for {
 			select {
-			case key := <-subExited:
-				delete(activeSubs, key)
+			case note := <-subExited:
+				if subGen[note.key] == note.gen {
+					delete(activeSubs, note.key)
+				}
 			default:
 				break drainLoop
 			}
@@ -243,8 +252,12 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 
 		case "subscribe":
 			key := msg.Key
-			if _, already := activeSubs[key]; already {
-				break
+			// Cancel stale subscription if the previous streamEvents goroutine
+			// exited (e.g. process died). This allows the hub to re-subscribe
+			// after a remote send so events flow for the new process.
+			if cancel, already := activeSubs[key]; already {
+				cancel()
+				delete(activeSubs, key)
 			}
 			sess := c.router.GetSession(key)
 			if sess == nil {
@@ -255,19 +268,21 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 			}
 			notify, cancel := sess.SubscribeEvents()
 			activeSubs[key] = cancel
+			subGen[key]++
+			myGen := subGen[key]
 			if err := writeJSON(node.ReverseMsg{Type: "subscribed", Key: key}); err != nil {
 				slog.Debug("connector write subscribed", "key", key, "err", err)
 			}
 			wg.Add(1)
-			go func(k string, n <-chan struct{}) {
+			go func(k string, n <-chan struct{}, g uint64) {
 				defer wg.Done()
 				c.streamEvents(connCtx, writeJSON, k, n)
 				// Signal that this subscription exited (session replaced/reset).
 				select {
-				case subExited <- k:
+				case subExited <- subExitNote{k, g}:
 				default:
 				}
-			}(key, notify)
+			}(key, notify, myGen)
 
 		case "unsubscribe":
 			key := msg.Key
@@ -473,12 +488,20 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 		return
 	}
 	var lastTime int64
+	var lastState string
 	for {
 		select {
 		case _, ok := <-notify:
 			if !ok {
 				// Session was reset/replaced; the notify channel is closed.
-				// The caller will re-subscribe if needed.
+				// Send final state so the hub knows the process died and can
+				// trigger a re-subscribe when the next send arrives.
+				if s := c.router.GetSession(key); s != nil {
+					snap := s.Snapshot()
+					if err := writeJSON(node.ReverseMsg{Type: "session_state", Key: key, State: snap.State, Reason: snap.DeathReason}); err != nil {
+						slog.Debug("connector write final session_state", "key", key, "err", err)
+					}
+				}
 				return
 			}
 			// Re-fetch session in case it was replaced (e.g. via /new).
@@ -486,20 +509,23 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 				sess = cur
 			}
 			entries := sess.EventEntriesSince(lastTime)
-			for i := range entries {
-				ev := entries[i]
-				msg := node.ReverseMsg{Type: "event", Key: key, Event: &ev}
-				if err := writeJSON(msg); err != nil {
+			if len(entries) > 0 {
+				if err := writeJSON(node.ReverseMsg{Type: "events", Key: key, Events: entries}); err != nil {
 					return
 				}
-				if ev.Time > lastTime {
-					lastTime = ev.Time
+				for i := range entries {
+					if entries[i].Time > lastTime {
+						lastTime = entries[i].Time
+					}
 				}
 			}
-			// Also push session_state when session state changes
+			// Only push session_state when it actually changes
 			snap := sess.Snapshot()
-			if err := writeJSON(node.ReverseMsg{Type: "session_state", Key: key, State: snap.State}); err != nil {
-				slog.Debug("connector write session_state", "key", key, "err", err)
+			if snap.State != lastState {
+				lastState = snap.State
+				if err := writeJSON(node.ReverseMsg{Type: "session_state", Key: key, State: snap.State, Reason: snap.DeathReason}); err != nil {
+					slog.Debug("connector write session_state", "key", key, "err", err)
+				}
 			}
 		case <-ctx.Done():
 			return

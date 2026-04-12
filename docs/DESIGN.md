@@ -747,8 +747,8 @@ Claude Code session (claude --channels plugin:feishu)
 
 **待验证**:
 - [x] Channels 是否支持 Bedrock 认证 → **不支持**，见下方实测
-- [ ] 长时间运行的稳定性
-- [ ] 多用户并发时的 session 隔离（channel 只推进一个 session）
+- [x] 长时间运行的稳定性 → N/A，方案 A 已淘汰（Bedrock 不可用）
+- [x] 多用户并发时的 session 隔离 → N/A，方案 A 已淘汰
 
 **Bedrock 认证实测** (2026-03-20, v2.1.80, auth=bedrock):
 
@@ -821,9 +821,9 @@ async def handle_feishu_message(user_id, text):
 
 **待验证**:
 - [x] resume 模式下的冷启动延迟实测 → 见下方
-- [ ] 并发多 session 的资源消耗
-- [ ] hooks 在 SDK 模式下是否正常工作
-- [ ] Bedrock 认证在 SDK 中的表现
+- [x] 并发多 session 的资源消耗 → N/A，方案 B 已淘汰（延迟 4-5 倍）
+- [x] hooks 在 SDK 模式下是否正常工作 → N/A，方案 B 已淘汰
+- [x] Bedrock 认证在 SDK 中的表现 → N/A，方案 B 已淘汰
 
 **延迟实测** (2026-03-20, SDK v0.2.80 vs stream-json, model=sonnet, allowedTools=[], 同一台机器):
 
@@ -1743,4 +1743,25 @@ Planner 在 shutdown 时与普通 session 一致：等待 running 完成 → 保
 | 7.4 | 多节点聚合 | 远程 node 的 session 如有 workspace 在本机 projects_root 下，可归属到 project（尽力归属，不强制） |
 | 7.5 | Cron 任务在 project 下执行 | Cron job 配置了 workspace 在项目路径下，其 session 归属到对应 project |
 | 7.6 | Session 持久化含 planner | `sessions.json` 中含 `project:naozhi:planner` 条目，重启后正确恢复 exempt 标记 |
+
+---
+
+## 扩展设计文档
+
+以下功能已实现，完整设计文档独立保存：
+
+| 功能 | 设计文档 | 状态 |
+|------|---------|------|
+| 多节点聚合 (Direct + Reverse) | [multi-node-design.md](multi-node-design.md) | 已实现 |
+| Shim 进程 (零中断热重启) | [shim-design.md](shim-design.md) | 已实现 |
+| server 包拆分 | [server-split-design.md](server-split-design.md) | Phase 1-2 已完成 |
+| 语音消息转写 | [voice-transcription.md](voice-transcription.md) | 已实现 |
+| 部署策略 | [deployment-strategy.md](deployment-strategy.md) | 部分实现 |
+
+未实现的设计提案：
+
+| 功能 | 设计文档 | 状态 |
+|------|---------|------|
+| 消息队列策略 | [rfc/message-queue.md](rfc/message-queue.md) | RFC，待实现 |
+| 自学习系统 | [rfc/learning-system.md](rfc/learning-system.md) | RFC，待实现 |
 | 7.7 | `/project` 解绑后 `/cd` 恢复 | 先 `/project off` 再 `/cd /tmp`：正常工作，无报错 |

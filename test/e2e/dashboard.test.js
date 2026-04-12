@@ -45,21 +45,21 @@ test.describe('Sidebar & session list', () => {
     const readyCard = page.locator('.session-card', { hasText: 'hello world' });
     await expect(readyCard.locator('.sc-dot')).toHaveClass(/dot-ready/);
 
-    // Suspended session has dot-suspended
-    const suspendedCard = page.locator('.session-card', { hasText: 'fix the bug' });
-    await expect(suspendedCard.locator('.sc-dot')).toHaveClass(/dot-suspended/);
+    // Previously-suspended session now shows as ready
+    const resumableCard = page.locator('.session-card', { hasText: 'fix the bug' });
+    await expect(resumableCard.locator('.sc-dot')).toHaveClass(/dot-ready/);
 
     await ctx.close();
   });
 
-  test('session cards sorted: running > ready > suspended', async ({ browser }) => {
+  test('session cards sorted: running > ready', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
     await page.waitForSelector('.session-card');
 
     // In "otherproject" group there's only the running one.
-    // In "myproject" group: ready should come before suspended.
+    // In "myproject" group: both sessions show as ready.
     const myprojectCards = await page.$$eval(
       '.section-header',
       (headers) => {
@@ -75,9 +75,9 @@ test.describe('Sidebar & session list', () => {
         return cards;
       }
     );
-    // First card should be ready, second suspended
+    // Both cards should show ready
     expect(myprojectCards[0]).toContain('ready');
-    expect(myprojectCards[1]).toContain('suspended');
+    expect(myprojectCards[1]).toContain('ready');
 
     await ctx.close();
   });
@@ -90,7 +90,7 @@ test.describe('Sidebar & session list', () => {
 
     // Meta should contain the state text
     const metaText = await page.$eval('.session-card .sc-meta', el => el.textContent);
-    expect(metaText).toMatch(/ready|running|suspended/);
+    expect(metaText).toMatch(/ready|running/);
 
     await ctx.close();
   });

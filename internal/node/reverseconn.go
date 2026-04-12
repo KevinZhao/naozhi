@@ -189,11 +189,20 @@ func (c *ReverseConn) Send(ctx context.Context, key, text, workspace string) err
 	return err
 }
 
-func (c *ReverseConn) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) error {
-	_, err := c.rpc(ctx, "takeover", map[string]any{
+func (c *ReverseConn) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) (string, error) {
+	raw, err := c.rpc(ctx, "takeover", map[string]any{
 		"pid": pid, "session_id": sessionID, "cwd": cwd, "proc_start_time": procStart,
 	})
-	return err
+	if err != nil {
+		return "", err
+	}
+	var resp struct {
+		Key string `json:"key"`
+	}
+	if len(raw) > 0 {
+		json.Unmarshal(raw, &resp) //nolint:errcheck
+	}
+	return resp.Key, nil
 }
 
 func (c *ReverseConn) ProxyRestartPlanner(ctx context.Context, projectName string) error {
@@ -229,6 +238,22 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 				cl.SendJSON(ServerMsg{Type: "history", Key: key, Node: c.id, Events: entries})
 			}
 		}()
+	}
+}
+
+// RefreshSubscription forces the remote to re-create the streamEvents
+// goroutine for key, even if a subscription already exists. This is
+// needed after a remote send because the previous process (and its
+// streamEvents) may have died since the last subscribe.
+//
+// Best-effort: a concurrent Unsubscribe between the check and the write
+// may send a redundant subscribe, but the remote handles it gracefully.
+func (c *ReverseConn) RefreshSubscription(key string) {
+	c.subMu.Lock()
+	hasSubs := len(c.subs[key]) > 0
+	c.subMu.Unlock()
+	if hasSubs {
+		c.writeJSON(ReverseMsg{Type: "subscribe", Key: key}) //nolint
 	}
 }
 
@@ -310,12 +335,26 @@ func (c *ReverseConn) readLoop() {
 				cl.SendRaw(data)
 			}
 
+		case "events":
+			c.subMu.Lock()
+			clients := make([]EventSink, len(c.subs[msg.Key]))
+			copy(clients, c.subs[msg.Key])
+			c.subMu.Unlock()
+			out := ServerMsg{Type: "history", Key: msg.Key, Events: msg.Events, Node: c.id}
+			data, err := json.Marshal(out)
+			if err != nil {
+				continue
+			}
+			for _, cl := range clients {
+				cl.SendRaw(data)
+			}
+
 		case "session_state":
 			c.subMu.Lock()
 			clients := make([]EventSink, len(c.subs[msg.Key]))
 			copy(clients, c.subs[msg.Key])
 			c.subMu.Unlock()
-			out := ServerMsg{Type: "session_state", Key: msg.Key, State: msg.State, Node: c.id}
+			out := ServerMsg{Type: "session_state", Key: msg.Key, State: msg.State, Reason: msg.Reason, Node: c.id}
 			data, err := json.Marshal(out)
 			if err != nil {
 				continue

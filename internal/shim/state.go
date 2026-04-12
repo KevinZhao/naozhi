@@ -51,15 +51,15 @@ func WriteStateFile(path string, state State) error {
 	tmp := f.Name()
 	if _, err := f.Write(data); err != nil {
 		f.Close()
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return fmt.Errorf("write temp state: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return fmt.Errorf("close temp state: %w", err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		os.Remove(tmp)
+		_ = os.Remove(tmp)
 		return fmt.Errorf("rename state: %w", err)
 	}
 	return nil
@@ -83,7 +83,7 @@ func ReadStateFile(path string) (State, error) {
 
 // RemoveStateFile removes the state file and ignores not-found errors.
 func RemoveStateFile(path string) {
-	os.Remove(path)
+	_ = os.Remove(path)
 }
 
 // GenerateToken creates a cryptographically random token for shim authentication.

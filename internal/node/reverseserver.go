@@ -53,6 +53,7 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("ws-node upgrade failed", "err", err)
 		return
 	}
+	conn.SetReadLimit(16 << 20) // 16 MB — node RPC payloads can include full session responses
 
 	// Read register message with timeout
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))

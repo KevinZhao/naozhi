@@ -76,7 +76,9 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		if cleanText == "" && len(msg.Images) == 0 {
 			if agentID != "general" {
 				if p := d.Platforms[msg.Platform]; p != nil {
-					p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "请在指令后输入内容。"})
+					if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "请在指令后输入内容。"}); err != nil {
+						log.Warn("reply failed", "err", err)
+					}
 				}
 			}
 			return
@@ -88,7 +90,9 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 			cmd := strings.SplitN(cleanText, " ", 2)[0]
 			if !strings.Contains(cmd[1:], "/") {
 				if p := d.Platforms[msg.Platform]; p != nil {
-					p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "未知命令: " + cmd + "\n输入 /help 查看可用命令，或直接发送消息。"})
+					if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "未知命令: " + cmd + "\n输入 /help 查看可用命令，或直接发送消息。"}); err != nil {
+						log.Warn("reply failed", "err", err)
+					}
 				}
 				return
 			}
@@ -124,7 +128,9 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		if !d.Guard.TryAcquire(key) {
 			if p := d.Platforms[msg.Platform]; p != nil {
 				if d.Guard.ShouldSendWait(key) {
-					p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "正在处理上一条消息，请稍候..."})
+					if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "正在处理上一条消息，请稍候..."}); err != nil {
+						log.Warn("reply failed", "err", err)
+					}
 				}
 			}
 			return
@@ -149,7 +155,9 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 				default:
 					errMsg = "会话创建失败，请发送 /new 重置后重试。"
 				}
-				p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg})
+				if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}); err != nil {
+					log.Warn("reply failed", "err", err)
+				}
 			}
 			return
 		}
@@ -162,9 +170,13 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 
 		// Notify user: auto-resumed from external session, or fresh context lost
 		if autoResumed && platform.SupportsInterimMessages(p) {
-			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "已恢复上次会话。"})
+			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "已恢复上次会话。"}); err != nil {
+				log.Warn("reply failed", "err", err)
+			}
 		} else if sessStatus == session.SessionNew && platform.SupportsInterimMessages(p) {
-			p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "新会话已创建（之前的上下文已失效）。"})
+			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "新会话已创建（之前的上下文已失效）。"}); err != nil {
+				log.Warn("reply failed", "err", err)
+			}
 		}
 
 		// Build IM event tracker for streaming status updates

@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -529,53 +528,11 @@ func findJSONLPath(claudeDir, cwd, sessionID string) string {
 	return ""
 }
 
-// ProcStartTime reads the start time (field 22) from /proc/{pid}/stat.
-// This value uniquely identifies a process instance even after PID reuse.
-// Field 2 (comm) may contain spaces/parentheses, so we locate the last ')' first.
-func ProcStartTime(pid int) (uint64, error) {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
-	if err != nil {
-		return 0, err
-	}
-	// Find the end of the comm field (last ')') to avoid parsing issues
-	// with process names that contain spaces or parentheses.
-	idx := bytes.LastIndexByte(data, ')')
-	if idx < 0 || idx+2 >= len(data) {
-		return 0, fmt.Errorf("malformed /proc/%d/stat", pid)
-	}
-	// Fields after comm start at index 3 (1-based). We need field 22 (starttime),
-	// which is field index 22-3 = 19 in the remaining space-separated fields.
-	fields := strings.Fields(string(data[idx+2:]))
-	const startTimeIdx = 19 // 0-based index in fields after ')'
-	if len(fields) <= startTimeIdx {
-		return 0, fmt.Errorf("/proc/%d/stat: too few fields", pid)
-	}
-	return strconv.ParseUint(fields[startTimeIdx], 10, 64)
-}
+// ProcStartTime and detectCLIName are in platform-specific files:
+//   proc_linux.go  — reads /proc/PID/stat and /proc/PID/cmdline
+//   proc_darwin.go — uses sysctl and ps(1)
 
 var sessionIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-
-// detectCLIName reads /proc/PID/cmdline to determine which CLI binary is running.
-// Returns "claude-code", "kiro", or "cli" as fallback.
-func detectCLIName(pid int) string {
-	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
-	if err != nil {
-		return "cli"
-	}
-	// cmdline is NUL-separated; first field is the binary path.
-	if i := bytes.IndexByte(data, 0); i >= 0 {
-		data = data[:i]
-	}
-	bin := filepath.Base(string(data))
-	switch {
-	case strings.Contains(bin, "kiro"):
-		return "kiro"
-	case strings.Contains(bin, "claude"):
-		return "claude-code"
-	default:
-		return "cli"
-	}
-}
 
 // LookupSummaries looks up Claude-generated summaries for the given sessions.
 // The sessions map is sessionID → workspace (CWD path).
@@ -727,11 +684,15 @@ func IsValidSessionID(s string) bool {
 // Must be called after SIGTERM has already been sent.
 func WaitAndCleanup(pid int, procStartTime uint64, claudeDir, cwd, sessionID string) {
 	deadline := time.Now().Add(5 * time.Second)
+	wait := 50 * time.Millisecond
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(pid, 0); err != nil {
 			break
 		}
-		time.Sleep(200 * time.Millisecond)
+		time.Sleep(wait)
+		if wait < 500*time.Millisecond {
+			wait *= 2
+		}
 	}
 	if procStartTime != 0 {
 		if actual, err := ProcStartTime(pid); err == nil && actual == procStartTime {

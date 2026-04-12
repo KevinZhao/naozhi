@@ -65,7 +65,10 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	}
 	stopCtx, stopCancel := context.WithCancel(context.Background())
 	return &Scheduler{
-		cron:          robfigcron.New(robfigcron.WithChain(robfigcron.SkipIfStillRunning(robfigcron.DefaultLogger))),
+		cron: robfigcron.New(robfigcron.WithChain(
+			robfigcron.Recover(robfigcron.DefaultLogger),
+			robfigcron.SkipIfStillRunning(robfigcron.DefaultLogger),
+		)),
 		jobs:          make(map[string]*Job),
 		router:        cfg.Router,
 		platforms:     cfg.Platforms,
@@ -471,6 +474,10 @@ func (s *Scheduler) execute(j *Job) {
 
 // recordResult persists the last execution result on the job and invokes the onExecute callback.
 func (s *Scheduler) recordResult(j *Job, result, errMsg string) {
+	const maxStoredResult = 4 * 1024
+	if len(result) > maxStoredResult {
+		result = result[:maxStoredResult] + "…[truncated]"
+	}
 	s.mu.Lock()
 	j.LastRunAt = time.Now()
 	j.LastResult = result

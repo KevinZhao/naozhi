@@ -265,7 +265,7 @@ func (f *Feishu) postMessage(ctx context.Context, token string, reqBody []byte) 
 		} `json:"data"`
 		Msg string `json:"msg"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 	if result.Code != 0 {
@@ -321,7 +321,7 @@ func (f *Feishu) sendImage(ctx context.Context, chatID string, img platform.Imag
 		} `json:"data"`
 		Msg string `json:"msg"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 	if result.Code != 0 {
@@ -442,7 +442,7 @@ func (f *Feishu) uploadImage(ctx context.Context, data []byte, mimeType string) 
 		} `json:"data"`
 		Msg string `json:"msg"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
 		return "", fmt.Errorf("decode upload response: %w", err)
 	}
 	if result.Code != 0 {
@@ -495,7 +495,7 @@ func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) err
 		Code int    `json:"code"`
 		Msg  string `json:"msg"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
 		return fmt.Errorf("decode edit response: %w", err)
 	}
 	if result.Code != 0 {
@@ -557,7 +557,7 @@ func (f *Feishu) getAccessToken(ctx context.Context) (string, error) {
 			TenantAccessToken string `json:"tenant_access_token"`
 			Expire            int    `json:"expire"`
 		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
 			return nil, fmt.Errorf("decode token response: %w", err)
 		}
 		if result.Code != 0 {

@@ -61,7 +61,7 @@ func TestClaudeProtocol_WriteMessage(t *testing.T) {
 
 func TestClaudeProtocol_ReadEvent_Result(t *testing.T) {
 	p := &ClaudeProtocol{}
-	line := []byte(`{"type":"result","result":"done","session_id":"s1","total_cost_usd":0.05}`)
+	line := `{"type":"result","result":"done","session_id":"s1","total_cost_usd":0.05}`
 	ev, done, err := p.ReadEvent(line)
 	if err != nil {
 		t.Fatal(err)
@@ -76,7 +76,7 @@ func TestClaudeProtocol_ReadEvent_Result(t *testing.T) {
 
 func TestClaudeProtocol_ReadEvent_Assistant(t *testing.T) {
 	p := &ClaudeProtocol{}
-	line := []byte(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}`)
+	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}`
 	ev, done, err := p.ReadEvent(line)
 	if err != nil {
 		t.Fatal(err)
@@ -92,7 +92,7 @@ func TestClaudeProtocol_ReadEvent_Assistant(t *testing.T) {
 func TestClaudeProtocol_ReadEvent_SkipsHooks(t *testing.T) {
 	p := &ClaudeProtocol{}
 	for _, sub := range []string{"hook_started", "hook_response"} {
-		line := []byte(`{"type":"system","subtype":"` + sub + `"}`)
+		line := `{"type":"system","subtype":"` + sub + `"}`
 		ev, done, err := p.ReadEvent(line)
 		if err != nil {
 			t.Fatal(err)
@@ -108,7 +108,7 @@ func TestClaudeProtocol_ReadEvent_SkipsHooks(t *testing.T) {
 
 func TestClaudeProtocol_ReadEvent_SystemInit(t *testing.T) {
 	p := &ClaudeProtocol{}
-	line := []byte(`{"type":"system","subtype":"init","session_id":"sess_abc"}`)
+	line := `{"type":"system","subtype":"init","session_id":"sess_abc"}`
 	ev, done, err := p.ReadEvent(line)
 	if err != nil {
 		t.Fatal(err)
@@ -176,7 +176,7 @@ func TestACPProtocol_WriteMessage(t *testing.T) {
 
 func TestACPProtocol_ReadEvent_SessionUpdate_TextChunk(t *testing.T) {
 	p := &ACPProtocol{}
-	line := []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello "}}}}`)
+	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello "}}}}`
 	ev, done, err := p.ReadEvent(line)
 	if err != nil {
 		t.Fatal(err)
@@ -196,7 +196,7 @@ func TestACPProtocol_ReadEvent_SessionUpdate_TextChunk(t *testing.T) {
 	}
 
 	// Second chunk
-	line2 := []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"world"}}}}`)
+	line2 := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"world"}}}}`
 	if _, _, err := p.ReadEvent(line2); err != nil {
 		t.Fatal(err)
 	}
@@ -210,7 +210,7 @@ func TestACPProtocol_ReadEvent_SessionUpdate_TextChunk(t *testing.T) {
 
 func TestACPProtocol_ReadEvent_ToolCall(t *testing.T) {
 	p := &ACPProtocol{}
-	line := []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"Reading file","status":"pending"}}}`)
+	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"Reading file","status":"pending"}}}`
 	ev, done, err := p.ReadEvent(line)
 	if err != nil {
 		t.Fatal(err)
@@ -229,7 +229,7 @@ func TestACPProtocol_ReadEvent_Response_TurnComplete(t *testing.T) {
 	p.textBuf.WriteString("final answer")
 	p.mu.Unlock()
 
-	line := []byte(`{"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}}`)
+	line := `{"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}}`
 	ev, done, err := p.ReadEvent(line)
 	if err != nil {
 		t.Fatal(err)
@@ -254,7 +254,7 @@ func TestACPProtocol_ReadEvent_Response_TurnComplete(t *testing.T) {
 
 func TestACPProtocol_ReadEvent_PermissionRequest(t *testing.T) {
 	p := &ACPProtocol{}
-	line := []byte(`{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"s1","options":[{"optionId":"allow-once","kind":"allow_once"}]}}`)
+	line := `{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"s1","options":[{"optionId":"allow-once","kind":"allow_once"}]}}`
 	ev, done, err := p.ReadEvent(line)
 	if err != nil {
 		t.Fatal(err)
@@ -329,7 +329,7 @@ func TestACPProtocol_ReadEvent_ErrorResponse(t *testing.T) {
 	p.textBuf.WriteString("partial text")
 	p.mu.Unlock()
 
-	line := []byte(`{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"model overloaded"}}`)
+	line := `{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"model overloaded"}}`
 	_, done, err := p.ReadEvent(line)
 	if done {
 		t.Error("error response should not be done=true")
@@ -429,7 +429,7 @@ func TestProcessStateString(t *testing.T) {
 		{StateSpawning, "running"},
 		{StateReady, "ready"},
 		{StateRunning, "running"},
-		{StateDead, "suspended"},
+		{StateDead, "ready"},
 		{ProcessState(99), "unknown"},
 	}
 

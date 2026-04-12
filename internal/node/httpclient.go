@@ -186,19 +186,23 @@ func (n *HTTPClient) FetchDiscoveredPreview(ctx context.Context, sessionID strin
 }
 
 // ProxyTakeover forwards a takeover request to the remote node.
-func (n *HTTPClient) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStartTime uint64) error {
+func (n *HTTPClient) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStartTime uint64) (string, error) {
 	payload := map[string]any{"pid": pid, "session_id": sessionID, "cwd": cwd, "proc_start_time": procStartTime}
 	data, _ := json.Marshal(payload)
 	resp, err := n.doRequest(ctx, http.MethodPost, "/api/discovered/takeover", bytes.NewReader(data))
 	if err != nil {
-		return fmt.Errorf("proxy takeover to %s: %w", n.ID, err)
+		return "", fmt.Errorf("proxy takeover to %s: %w", n.ID, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
-		return fmt.Errorf("proxy takeover to %s: status %d: %s", n.ID, resp.StatusCode, string(body))
+		return "", fmt.Errorf("proxy takeover to %s: status %d: %s", n.ID, resp.StatusCode, string(body))
 	}
-	return nil
+	var result struct {
+		Key string `json:"key"`
+	}
+	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
+	return result.Key, nil
 }
 
 // ProxyRestartPlanner forwards a planner restart request to the remote node.
@@ -252,6 +256,10 @@ func (n *HTTPClient) Unsubscribe(c EventSink, key string) {
 		relay.Unsubscribe(c, key)
 	}
 }
+
+// RefreshSubscription is a no-op for HTTP nodes. The wsRelay polls events
+// via HTTP, so there is no persistent subscription to refresh.
+func (n *HTTPClient) RefreshSubscription(key string) {}
 
 func (n *HTTPClient) RemoveClient(c EventSink) {
 	n.relayMu.Lock()
