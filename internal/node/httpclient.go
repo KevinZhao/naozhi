@@ -68,14 +68,14 @@ func (n *HTTPClient) FetchSessions(ctx context.Context) ([]map[string]any, error
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 		return nil, fmt.Errorf("fetch sessions from %s: status %d", n.ID, resp.StatusCode)
 	}
 
 	var result struct {
 		Sessions []map[string]any `json:"sessions"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode sessions from %s: %w", n.ID, err)
 	}
 	return result.Sessions, nil
@@ -94,12 +94,12 @@ func (n *HTTPClient) FetchEvents(ctx context.Context, key string, after int64) (
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 		return nil, fmt.Errorf("fetch events from %s: status %d", n.ID, resp.StatusCode)
 	}
 
 	var entries []cli.EventEntry
-	if err := json.NewDecoder(resp.Body).Decode(&entries); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&entries); err != nil {
 		return nil, fmt.Errorf("decode events from %s: %w", n.ID, err)
 	}
 	return entries, nil
@@ -119,7 +119,7 @@ func (n *HTTPClient) Send(ctx context.Context, key, text, workspace string) erro
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		io.Copy(io.Discard, resp.Body)
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 		return fmt.Errorf("send to %s: status %d", n.ID, resp.StatusCode)
 	}
 	return nil
@@ -134,12 +134,12 @@ func (n *HTTPClient) FetchProjects(ctx context.Context) ([]map[string]any, error
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 		return nil, fmt.Errorf("fetch projects from %s: status %d", n.ID, resp.StatusCode)
 	}
 
 	var result []map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode projects from %s: %w", n.ID, err)
 	}
 	return result, nil
@@ -154,12 +154,12 @@ func (n *HTTPClient) FetchDiscovered(ctx context.Context) ([]map[string]any, err
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 		return nil, fmt.Errorf("fetch discovered from %s: status %d", n.ID, resp.StatusCode)
 	}
 
 	var result []map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode discovered from %s: %w", n.ID, err)
 	}
 	return result, nil
@@ -174,12 +174,12 @@ func (n *HTTPClient) FetchDiscoveredPreview(ctx context.Context, sessionID strin
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		io.Copy(io.Discard, resp.Body)
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
 		return nil, fmt.Errorf("fetch discovered preview from %s: status %d", n.ID, resp.StatusCode)
 	}
 
 	var result []cli.EventEntry
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 8<<20)).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decode discovered preview from %s: %w", n.ID, err)
 	}
 	return result, nil
@@ -195,7 +195,7 @@ func (n *HTTPClient) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusAccepted {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 		return fmt.Errorf("proxy takeover to %s: status %d: %s", n.ID, resp.StatusCode, string(body))
 	}
 	return nil
@@ -209,7 +209,7 @@ func (n *HTTPClient) ProxyRestartPlanner(ctx context.Context, projectName string
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 		return fmt.Errorf("proxy restart planner to %s: status %d: %s", n.ID, resp.StatusCode, string(body))
 	}
 	return nil
@@ -223,7 +223,7 @@ func (n *HTTPClient) ProxyUpdateConfig(ctx context.Context, projectName string, 
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
 		return fmt.Errorf("proxy update config to %s: status %d: %s", n.ID, resp.StatusCode, string(body))
 	}
 	return nil

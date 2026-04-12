@@ -9,8 +9,8 @@ workspace:
 
 cli:
   path: "~/.local/bin/claude"
-  args:
-    - "--dangerously-skip-permissions"
+  # --dangerously-skip-permissions is always applied by protocol_claude.go; no need to repeat here.
+  args: []
 
 session:
   max_procs: 20

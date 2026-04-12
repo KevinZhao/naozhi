@@ -30,7 +30,7 @@ func serviceUser() (user, home string) {
 	if su := os.Getenv("SUDO_USER"); su != "" {
 		// Validate username format to prevent injection into systemd unit files.
 		for _, c := range su {
-			if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
+			if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_' || c == '-') {
 				fatalf("SUDO_USER contains invalid characters: %q", su)
 			}
 		}

@@ -22,13 +22,6 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// wsUpgrader is used by tests that don't need origin checks.
-var wsUpgrader = websocket.Upgrader{
-	CheckOrigin:     func(r *http.Request) bool { return true },
-	ReadBufferSize:  8192,
-	WriteBufferSize: 8192,
-}
-
 // Hub manages WebSocket client connections and event subscriptions.
 type Hub struct {
 	mu          sync.Mutex

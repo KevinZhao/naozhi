@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -317,7 +318,9 @@ func processAlive(pid int) bool {
 		return false
 	}
 	// Signal 0 tests existence without actually sending a signal.
-	return proc.Signal(syscall.Signal(0)) == nil
+	// EPERM means the process exists but is owned by a different user.
+	err = proc.Signal(syscall.Signal(0))
+	return err == nil || errors.Is(err, syscall.EPERM)
 }
 
 type jsonlEntry struct {

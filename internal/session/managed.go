@@ -199,19 +199,23 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 
 // Interrupt sends SIGINT to the CLI process and cancels the current Send context.
 // This is the equivalent of pressing Escape in Claude Code.
+//
+// Context cancellation happens BEFORE acquiring sendMu so that an in-flight
+// Send() can return via <-ctx.Done() and release the lock. Without this,
+// Interrupt() would deadlock when Send() holds sendMu waiting for events.
 func (s *ManagedSession) Interrupt() bool {
-	s.sendMu.Lock()
-	proc := s.loadProcess()
-	s.sendMu.Unlock()
-
-	if proc == nil || !proc.IsRunning() {
-		return false
-	}
-
-	// Cancel the in-flight Send context so it returns promptly.
+	// Cancel the in-flight Send context first (lock-free). This unblocks
+	// Send() which holds sendMu, allowing us to proceed below.
 	if cancel := s.sendCancel.Load(); cancel != nil {
 		(*cancel)()
 	}
+
+	// loadProcess is atomic — no lock needed.
+	proc := s.loadProcess()
+	if proc == nil || !proc.Alive() {
+		return false
+	}
+
 	proc.Interrupt()
 	return true
 }

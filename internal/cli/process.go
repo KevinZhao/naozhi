@@ -104,7 +104,7 @@ func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 		protocol:        proto,
 		cliPID:          cliPID,
 		State:           StateSpawning,
-		eventCh:         make(chan Event, 1024),
+		eventCh:         make(chan Event, 256),
 		done:            make(chan struct{}),
 		killCh:          make(chan struct{}),
 		noOutputTimeout: noOutputTimeout,
@@ -431,6 +431,13 @@ drained:
 			return nil, ctx.Err()
 		case ev, ok := <-p.eventCh:
 			if !ok {
+				// eventCh closed — process exited. Check EventLog for a result
+				// that readLoop already logged but wasn't delivered via eventCh
+				// (e.g., non-blocking send dropped it, or it arrived just before
+				// the channel closed).
+				if sr := p.findResultSince(turnStartMS); sr != nil {
+					return sr, nil
+				}
 				return nil, fmt.Errorf("process exited during send")
 			}
 

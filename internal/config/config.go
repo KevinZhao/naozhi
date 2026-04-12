@@ -167,6 +167,13 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("read config: %w", err)
 	}
 
+	// Warn if config file is readable by group or others (contains secrets).
+	if fi, statErr := os.Stat(path); statErr == nil {
+		if fi.Mode()&0o044 != 0 {
+			slog.Warn("config file is group/world-readable; restrict to 0600", "path", path)
+		}
+	}
+
 	// Expand ${VAR} environment variables
 	expanded := expandEnvVars(string(data))
 

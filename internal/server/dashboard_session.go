@@ -409,7 +409,7 @@ func (h *SessionHandlers) WarmHistoryCache() {
 
 func (h *SessionHandlers) loadHistorySessions() []discovery.RecentSession {
 	excludeIDs := h.router.DiscoveryExcludeIDs()
-	all := discovery.RecentSessions(h.claudeDir, 0, 7*24*time.Hour, excludeIDs)
+	all := discovery.RecentSessions(h.claudeDir, 200, 7*24*time.Hour, excludeIDs)
 
 	// Resolve project names in batch.
 	if h.projectMgr != nil && len(all) > 0 {

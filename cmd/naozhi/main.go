@@ -158,7 +158,10 @@ func filterHooks(hooksRaw json.RawMessage, serverPort string) json.RawMessage {
 			}
 			if len(safeEntries) != len(entries) {
 				changed = true
-				newRaw, _ := json.Marshal(safeEntries)
+				newRaw, err := json.Marshal(safeEntries)
+				if err != nil {
+					continue // skip corrupted group
+				}
 				group["hooks"] = newRaw
 			}
 			keptGroups = append(keptGroups, group)

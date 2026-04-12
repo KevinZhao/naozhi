@@ -206,6 +206,6 @@ func (c *apiClient) sendMessage(ctx context.Context, to, text, contextToken stri
 	if resp.Ret != 0 {
 		return fmt.Errorf("sendMessage failed: ret=%d errcode=%d errmsg=%s", resp.Ret, resp.ErrCode, resp.ErrMsg)
 	}
-	slog.Debug("weixin sendMessage", "to", to, "resp", string(data))
+	slog.Debug("weixin sendMessage ok")
 	return nil
 }
