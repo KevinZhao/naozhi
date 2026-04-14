@@ -2,15 +2,14 @@ package server
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 )
 
@@ -28,13 +27,19 @@ type discoveryCache struct {
 	// When it hasn't changed and all cached PIDs are still alive,
 	// we skip the expensive full Scan() call.
 	lastDirMtime time.Time
+
+	// evictedPIDs tracks PIDs removed by evictPID with their eviction time.
+	// refresh() filters these out for a grace period so a full scan during
+	// the WaitAndCleanup window doesn't re-add a session being taken over.
+	evictedPIDs map[int]time.Time
 }
 
 func newDiscoveryCache(claudeDir string, getExclude func() (map[int]bool, map[string]bool, map[string]bool), projectMgr *project.Manager) *discoveryCache {
 	return &discoveryCache{
-		claudeDir:  claudeDir,
-		getExclude: getExclude,
-		projectMgr: projectMgr,
+		claudeDir:   claudeDir,
+		getExclude:  getExclude,
+		projectMgr:  projectMgr,
+		evictedPIDs: make(map[int]time.Time),
 	}
 }
 
@@ -87,7 +92,7 @@ func (dc *discoveryCache) refresh() {
 		sessions = []discovery.DiscoveredSession{}
 	}
 
-	// Resolve CWD -> project name
+	// Resolve CWD -> project name (outside lock — no shared state)
 	if dc.projectMgr != nil && len(sessions) > 0 {
 		cwdList := make([]string, len(sessions))
 		for i, d := range sessions {
@@ -99,7 +104,24 @@ func (dc *discoveryCache) refresh() {
 		}
 	}
 
+	// Filter out recently-evicted PIDs and store the final result.
+	now := time.Now()
+	const evictGrace = 60 * time.Second
 	dc.mu.Lock()
+	for pid, evictedAt := range dc.evictedPIDs {
+		if now.Sub(evictedAt) > evictGrace {
+			delete(dc.evictedPIDs, pid)
+		}
+	}
+	if len(dc.evictedPIDs) > 0 {
+		filtered := sessions[:0:0]
+		for _, s := range sessions {
+			if _, evicted := dc.evictedPIDs[s.PID]; !evicted {
+				filtered = append(filtered, s)
+			}
+		}
+		sessions = filtered
+	}
 	dc.sessions = sessions
 	dc.lastDirMtime = newDirMtime
 	dc.mu.Unlock()
@@ -128,7 +150,7 @@ func (dc *discoveryCache) tryShortCircuit() bool {
 
 	// Dir unchanged — verify all cached PIDs are still alive.
 	for _, s := range cached {
-		if s.PID > 0 && !pidAlive(s.PID) {
+		if s.PID > 0 && !osutil.PidAlive(s.PID) {
 			return false // a process died, do full scan
 		}
 	}
@@ -149,20 +171,12 @@ func (dc *discoveryCache) tryShortCircuit() bool {
 	return true
 }
 
-// pidAlive checks whether a process exists via kill(pid, 0).
-// Returns true for EPERM (process alive but owned by another user).
-func pidAlive(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil || errors.Is(err, syscall.EPERM)
-}
-
 // evictPID removes a specific PID from the cached snapshot immediately.
 // Called after session takeover so the killed process doesn't reappear
 // in the sidebar while the 10-second discovery cache is still stale.
+// The PID is also added to evictedPIDs so that refresh() won't re-add
+// it during the WaitAndCleanup window when the process/session file
+// may still exist on disk.
 func (dc *discoveryCache) evictPID(pid int) {
 	dc.mu.Lock()
 	defer dc.mu.Unlock()
@@ -173,6 +187,7 @@ func (dc *discoveryCache) evictPID(pid int) {
 		}
 	}
 	dc.sessions = filtered
+	dc.evictedPIDs[pid] = time.Now()
 }
 
 // snapshot returns a copy of the cached discovered sessions.

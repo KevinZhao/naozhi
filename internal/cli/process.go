@@ -87,11 +87,19 @@ type Process struct {
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
 	interrupted     atomic.Bool // set by Interrupt(), cleared by next Send()
+	interruptedRun  atomic.Bool // true when Interrupt() was called while State==Running
 
 	eventLog  *EventLog
 	totalCost float64
 	lastSeq   atomic.Int64  // last received shim seq, for reconnect
 	pongRecv  chan struct{} // signaled by readLoop on pong receipt
+
+	// onTurnDone is called by readLoop when a result event transitions the
+	// process from Running to Ready without an active Send(). This allows
+	// the session layer to broadcast state changes (e.g., after shim reconnect
+	// where isMidTurn set StateRunning but the CLI finished before Send was called).
+	// Protected by mu — use SetOnTurnDone to assign.
+	onTurnDone func()
 }
 
 // newShimProcess creates a Process connected to a shim.
@@ -234,6 +242,23 @@ func (p *Process) readLoop() {
 			// even when no Send() is active (e.g., after service restart
 			// reconnects to a shim that's mid-turn).
 			p.logEvent(ev)
+
+			// If a result event arrives while no Send() is active (e.g.,
+			// after shim reconnect set state to Running via isMidTurn but
+			// the CLI finished before anyone called Send), transition
+			// back to Ready so the dashboard doesn't show a stale "running".
+			if ev.Type == "result" {
+				p.mu.Lock()
+				wasRunning := p.State == StateRunning
+				if wasRunning {
+					p.State = StateReady
+				}
+				cb := p.onTurnDone
+				p.mu.Unlock()
+				if wasRunning && cb != nil {
+					cb()
+				}
+			}
 
 			select {
 			case <-p.killCh:
@@ -542,7 +567,15 @@ func (p *Process) Interrupt() {
 	if !p.Alive() {
 		return
 	}
+	// Capture running state before setting interrupted — avoids TOCTOU where
+	// a concurrent drainStaleEvents reads interrupted=true but interruptedRun=false.
+	p.mu.Lock()
+	wasRunning := p.State == StateRunning
+	p.mu.Unlock()
 	p.interrupted.Store(true)
+	if wasRunning {
+		p.interruptedRun.Store(true)
+	}
 	if err := p.shimSend(shimClientMsg{Type: "interrupt"}); err != nil {
 		slog.Warn("interrupt failed", "err", err)
 	}
@@ -554,10 +587,10 @@ func (p *Process) Interrupt() {
 func (p *Process) drainStaleEvents(ctx context.Context) error {
 	if p.interrupted.Swap(false) {
 		// Only wait for the interrupted result if the CLI was actively
-		// processing a turn. An idle process (State != Running) won't
-		// produce a result event, so the settle timer would always expire
-		// causing an unnecessary 500ms delay.
-		if p.IsRunning() {
+		// processing a turn when Interrupt() was called. An idle process
+		// won't produce a result event, so the settle timer would always
+		// expire causing an unnecessary 500ms delay.
+		if p.interruptedRun.Swap(false) {
 			slog.Debug("send: draining interrupted turn result")
 			settle := time.NewTimer(500 * time.Millisecond)
 			defer settle.Stop()
@@ -846,6 +879,15 @@ func (p *Process) GetState() ProcessState {
 	return p.State
 }
 
+// SetOnTurnDone sets the callback invoked by readLoop when a result event
+// transitions the process from Running to Ready without an active Send().
+// Thread-safe: may be called while readLoop is running.
+func (p *Process) SetOnTurnDone(fn func()) {
+	p.mu.Lock()
+	p.onTurnDone = fn
+	p.mu.Unlock()
+}
+
 // GetSessionID returns the session ID in a thread-safe manner.
 func (p *Process) GetSessionID() string {
 	p.mu.Lock()
@@ -896,6 +938,11 @@ func (p *Process) EventLastN(n int) []EventEntry {
 // EventEntriesSince returns event log entries after the given unix ms timestamp.
 func (p *Process) EventEntriesSince(afterMS int64) []EventEntry {
 	return p.eventLog.EntriesSince(afterMS)
+}
+
+// LastEntryOfType returns the most recent event entry with the given type.
+func (p *Process) LastEntryOfType(typ string) EventEntry {
+	return p.eventLog.LastEntryOfType(typ)
 }
 
 // TurnAgents returns the sub-agent types spawned in the current turn.

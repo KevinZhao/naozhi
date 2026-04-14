@@ -258,6 +258,20 @@ func (l *EventLog) LastPromptSummary() string {
 	return ""
 }
 
+// LastEntryOfType scans backward through the ring buffer and returns the most
+// recent entry with the given type. Returns a zero EventEntry if none found.
+func (l *EventLog) LastEntryOfType(typ string) EventEntry {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	for i := l.count - 1; i >= 0; i-- {
+		idx := (l.head - l.count + i + l.maxSize) % l.maxSize
+		if l.entries[idx].Type == typ {
+			return l.entries[idx]
+		}
+	}
+	return EventEntry{}
+}
+
 // LastActivitySummary returns the summary of the most recent "tool_use" or "thinking" entry.
 func (l *EventLog) LastActivitySummary() string {
 	if v := l.lastActivitySummary.Load(); v != nil {

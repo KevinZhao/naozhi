@@ -44,6 +44,9 @@ func (p *TestProcess) EventLastN(n int) []cli.EventEntry { return p.EventLog.Las
 func (p *TestProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	return p.EventLog.EntriesSince(afterMS)
 }
+func (p *TestProcess) LastEntryOfType(typ string) cli.EventEntry {
+	return p.EventLog.LastEntryOfType(typ)
+}
 func (p *TestProcess) ProtocolName() string                       { return "test" }
 func (p *TestProcess) SubscribeEvents() (<-chan struct{}, func()) { return p.EventLog.Subscribe() }
 func (p *TestProcess) PID() int                                   { return 0 }

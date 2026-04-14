@@ -181,10 +181,11 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	cwdKey := strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
+	cwdKey = strings.ReplaceAll(cwdKey, ":", "_")
 	if len(cwdKey) > 128 {
 		cwdKey = cwdKey[:128]
 	}
-	key := "local:takeover:" + cwdKey + ":general"
+	key := session.TakeoverKey(cwdKey)
 
 	// Kill the original process.
 	// Verify PID identity before sending signal (TOCTOU guard).

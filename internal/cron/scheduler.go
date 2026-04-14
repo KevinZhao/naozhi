@@ -413,6 +413,29 @@ func (s *Scheduler) NextRunByID(id string) time.Time {
 	return entry.Next
 }
 
+// TriggerNow manually executes a job by ID in a new goroutine (for debugging/dashboard).
+// Returns an error if the job is not found, paused, or has no prompt.
+func (s *Scheduler) TriggerNow(id string) error {
+	s.mu.Lock()
+	j, ok := s.jobs[id]
+	if !ok {
+		s.mu.Unlock()
+		return fmt.Errorf("no job found with id %q", id)
+	}
+	if j.Paused {
+		s.mu.Unlock()
+		return fmt.Errorf("job %s is paused", id)
+	}
+	if j.Prompt == "" {
+		s.mu.Unlock()
+		return fmt.Errorf("job %s has no prompt", id)
+	}
+	s.mu.Unlock()
+
+	go s.execute(j)
+	return nil
+}
+
 // registerJob registers a job with the robfig/cron scheduler.
 func (s *Scheduler) registerJob(j *Job) error {
 	entryID, err := s.cron.AddFunc(j.Schedule, func() {

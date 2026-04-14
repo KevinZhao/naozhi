@@ -32,6 +32,7 @@ type processIface interface {
 	EventEntries() []cli.EventEntry
 	EventLastN(n int) []cli.EventEntry
 	EventEntriesSince(afterMS int64) []cli.EventEntry
+	LastEntryOfType(typ string) cli.EventEntry
 	ProtocolName() string
 	SubscribeEvents() (<-chan struct{}, func())
 	PID() int
@@ -286,6 +287,11 @@ func SessionKey(platform, chatType, id, agentID string) string {
 	return sanitizeKeyComponent(platform) + ":" + sanitizeKeyComponent(chatType) + ":" + sanitizeKeyComponent(id) + ":" + sanitizeKeyComponent(agentID)
 }
 
+// TakeoverKey builds a session key for a takeover from a discovered process CWD.
+func TakeoverKey(cwdKey string) string {
+	return "local:takeover:" + cwdKey + ":general"
+}
+
 // SessionSnapshot is a point-in-time view of a session for the dashboard API.
 type SessionSnapshot struct {
 	Key          string             `json:"key"`
@@ -406,6 +412,23 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 		return out
 	}
 	return nil
+}
+
+// LastUserEntry returns the most recent "user" event entry from the process
+// EventLog or persisted history. Returns a zero EventEntry if none found.
+func (s *ManagedSession) LastUserEntry() cli.EventEntry {
+	proc := s.loadProcess()
+	if proc != nil {
+		return proc.LastEntryOfType("user")
+	}
+	s.historyMu.RLock()
+	defer s.historyMu.RUnlock()
+	for i := len(s.persistedHistory) - 1; i >= 0; i-- {
+		if s.persistedHistory[i].Type == "user" {
+			return s.persistedHistory[i]
+		}
+	}
+	return cli.EventEntry{}
 }
 
 // SubscribeEvents subscribes to event log notifications for this session.

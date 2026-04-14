@@ -33,6 +33,7 @@ cli:
 session:
   max_procs: 3
   ttl: "30m"
+  prune_ttl: "72h"
   store_path: "~/.naozhi/sessions.json"
 
 platforms:

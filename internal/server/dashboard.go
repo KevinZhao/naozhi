@@ -81,6 +81,7 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("DELETE /api/cron", auth(s.cronH.handleDelete))
 	s.mux.HandleFunc("POST /api/cron/pause", auth(s.cronH.handlePause))
 	s.mux.HandleFunc("POST /api/cron/resume", auth(s.cronH.handleResume))
+	s.mux.HandleFunc("POST /api/cron/trigger", auth(s.cronH.handleTrigger))
 	s.mux.HandleFunc("GET /api/cron/preview", auth(s.cronH.handlePreview))
 	s.mux.HandleFunc("POST /api/auth/logout", auth(s.auth.handleLogout))
 

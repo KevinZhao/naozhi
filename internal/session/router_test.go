@@ -118,6 +118,16 @@ func (f *fakeProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	}
 	return nil
 }
+func (f *fakeProcess) LastEntryOfType(typ string) cli.EventEntry {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := len(f.entries) - 1; i >= 0; i-- {
+		if f.entries[i].Type == typ {
+			return f.entries[i]
+		}
+	}
+	return cli.EventEntry{}
+}
 func (f *fakeProcess) ProtocolName() string             { return "test" }
 func (f *fakeProcess) GetSessionID() string             { return "" }
 func (f *fakeProcess) Interrupt()                       {}
@@ -147,6 +157,7 @@ func newTestRouter(maxProcs int) *Router {
 		wrapper:  cli.NewWrapper("/nonexistent/cli-binary", &cli.ClaudeProtocol{}, "claude"),
 		maxProcs: maxProcs,
 		ttl:      30 * time.Minute,
+		pruneTTL: 72 * time.Hour,
 	}
 }
 
@@ -183,6 +194,9 @@ func TestNewRouterDefaults(t *testing.T) {
 	}
 	if r.ttl != 30*time.Minute {
 		t.Errorf("ttl = %v, want 30m", r.ttl)
+	}
+	if r.pruneTTL != 72*time.Hour {
+		t.Errorf("pruneTTL = %v, want 72h", r.pruneTTL)
 	}
 }
 
@@ -354,6 +368,7 @@ func TestCleanupNoExpiredSessions(t *testing.T) {
 		sessions: make(map[string]*ManagedSession),
 		maxProcs: 3,
 		ttl:      1 * time.Hour,
+		pruneTTL: 72 * time.Hour,
 	}
 	proc := newIdleProc()
 	s := injectSession(r, "key1", proc)
@@ -371,6 +386,7 @@ func TestCleanupExpiredSession(t *testing.T) {
 		sessions: make(map[string]*ManagedSession),
 		maxProcs: 3,
 		ttl:      1 * time.Minute,
+		pruneTTL: 72 * time.Hour,
 	}
 	proc := newIdleProc()
 	s := injectSession(r, "key1", proc)
@@ -388,6 +404,7 @@ func TestCleanupSkipsRunningSession(t *testing.T) {
 		sessions: make(map[string]*ManagedSession),
 		maxProcs: 3,
 		ttl:      1 * time.Minute,
+		pruneTTL: 72 * time.Hour,
 	}
 	proc := newRunningProc()
 	s := injectSession(r, "key1", proc)
@@ -408,10 +425,11 @@ func TestCleanupSkipsNilProcess(t *testing.T) {
 		sessions: make(map[string]*ManagedSession),
 		maxProcs: 3,
 		ttl:      1 * time.Minute,
+		pruneTTL: 1 * time.Hour,
 	}
 	s := &ManagedSession{Key: "key1"}
 	s.setSessionID("sess-1")
-	s.lastActive.Store(time.Now().UnixNano()) // recent → within 7*TTL window
+	s.lastActive.Store(time.Now().UnixNano()) // recent → within pruneTTL window
 	r.sessions["key1"] = s
 
 	r.Cleanup() // must not panic
@@ -427,13 +445,14 @@ func TestCleanupSkipsDeadProcess(t *testing.T) {
 		sessions: make(map[string]*ManagedSession),
 		maxProcs: 3,
 		ttl:      1 * time.Minute,
+		pruneTTL: 1 * time.Hour,
 	}
 	proc := newDeadProc()
 	s := injectSession(r, "key1", proc)
 	s.lastActive.Store(time.Now().Add(-5 * time.Minute).UnixNano())
 	s.setSessionID("resumable-sess") // has session ID → kept for resumption
 
-	r.Cleanup() // dead process with session ID — kept within 7*TTL
+	r.Cleanup() // dead process with session ID — kept within pruneTTL
 
 	_, total := r.Stats()
 	if total != 1 {
@@ -446,6 +465,7 @@ func TestCleanupMultipleSessions(t *testing.T) {
 		sessions: make(map[string]*ManagedSession),
 		maxProcs: 5,
 		ttl:      1 * time.Minute,
+		pruneTTL: 1 * time.Hour,
 	}
 	expiredProc := newIdleProc()
 	freshProc := newIdleProc()
@@ -922,6 +942,7 @@ func TestConcurrentCleanup_Race(t *testing.T) {
 		sessions: make(map[string]*ManagedSession),
 		maxProcs: 5,
 		ttl:      1 * time.Millisecond, // very short so sessions expire quickly
+		pruneTTL: 1 * time.Millisecond,
 	}
 	for i := 0; i < 5; i++ {
 		s := injectSession(r, fmt.Sprintf("key%d", i), newIdleProc())
@@ -948,6 +969,7 @@ func TestStartCleanupLoop_TriggersCleanup(t *testing.T) {
 		sessions: make(map[string]*ManagedSession),
 		maxProcs: 3,
 		ttl:      1 * time.Millisecond,
+		pruneTTL: 1 * time.Millisecond,
 	}
 	proc := newIdleProc()
 	s := injectSession(r, "key1", proc)

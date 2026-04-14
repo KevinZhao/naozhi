@@ -31,6 +31,7 @@ type Config struct {
 
 	// Cached parsed durations (populated once in Load, avoids repeated ParseDuration)
 	cachedTTL             time.Duration `yaml:"-"`
+	cachedPruneTTL        time.Duration `yaml:"-"`
 	cachedNoOutputTimeout time.Duration `yaml:"-"`
 	cachedTotalTimeout    time.Duration `yaml:"-"`
 	cachedExecTimeout     time.Duration `yaml:"-"`
@@ -87,6 +88,7 @@ type CLIConfig struct {
 type SessionConfig struct {
 	MaxProcs  int            `yaml:"max_procs"`
 	TTL       string         `yaml:"ttl"`
+	PruneTTL  string         `yaml:"prune_ttl"` // how long dead/suspended sessions stay in the list before removal
 	Watchdog  WatchdogConfig `yaml:"watchdog"`
 	StorePath string         `yaml:"store_path"`
 	CWD       string         `yaml:"cwd"`       // default working directory for CLI processes
@@ -193,6 +195,9 @@ func Load(path string) (*Config, error) {
 	if cfg.Session.TTL == "" {
 		cfg.Session.TTL = "30m"
 	}
+	if cfg.Session.PruneTTL == "" {
+		cfg.Session.PruneTTL = "72h"
+	}
 	if cfg.Log.Level == "" {
 		cfg.Log.Level = "info"
 	}
@@ -235,6 +240,9 @@ func Load(path string) (*Config, error) {
 	// Parse and cache durations (validates and caches in one step)
 	var durErr error
 	if cfg.cachedTTL, durErr = parseDurationRequired(cfg.Session.TTL, "session.ttl", 30*time.Minute); durErr != nil {
+		return nil, durErr
+	}
+	if cfg.cachedPruneTTL, durErr = parseDurationRequired(cfg.Session.PruneTTL, "session.prune_ttl", 72*time.Hour); durErr != nil {
 		return nil, durErr
 	}
 	if cfg.cachedNoOutputTimeout, durErr = parseDurationRequired(cfg.Session.Watchdog.NoOutputTimeout, "session.watchdog.no_output_timeout", 2*time.Minute); durErr != nil {
@@ -361,6 +369,11 @@ func parseDurationRequired(s, name string, fallback time.Duration) (time.Duratio
 // ParseTTL returns the TTL duration (cached after Load).
 func (c *Config) ParseTTL() time.Duration {
 	return c.cachedTTL
+}
+
+// ParsePruneTTL returns the prune TTL duration (cached after Load).
+func (c *Config) ParsePruneTTL() time.Duration {
+	return c.cachedPruneTTL
 }
 
 // ParseWatchdog returns the watchdog timeout durations (cached after Load).

@@ -13,6 +13,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // ShutdownTimeout is the maximum time to wait for graceful shutdown
@@ -27,11 +28,6 @@ const (
 	// maxExemptSessions caps the number of alive exempt (planner) sessions
 	// to prevent unbounded growth when many projects are configured.
 	maxExemptSessions = 20
-
-	// suspendedTTLMultiplier controls how long suspended/exited sessions
-	// are kept before pruning. Multiplied by the router TTL, so at the
-	// default 30m TTL this gives ~3.5 hours — a typical work session.
-	suspendedTTLMultiplier = 7
 
 	// historyLoadConcurrency limits parallel disk I/O goroutines during
 	// startup session history loading.
@@ -60,6 +56,7 @@ type Router struct {
 	wrapper        *cli.Wrapper
 	maxProcs       int
 	ttl            time.Duration
+	pruneTTL       time.Duration
 	model          string
 	extraArgs      []string
 	workspace      string // default cwd for CLI processes
@@ -108,6 +105,22 @@ func chatKeyFor(key string) string {
 	return key
 }
 
+// cliNameDefault returns the CLI display name from the wrapper, or empty if no wrapper.
+func (r *Router) cliNameDefault() string {
+	if r.wrapper != nil {
+		return r.wrapper.CLIName
+	}
+	return ""
+}
+
+// cliVersionDefault returns the CLI version from the wrapper, or empty if no wrapper.
+func (r *Router) cliVersionDefault() string {
+	if r.wrapper != nil {
+		return r.wrapper.CLIVersion
+	}
+	return ""
+}
+
 // indexAdd adds key to the chat→sessions index. No-op when index is nil.
 // Must be called under r.mu.
 func (r *Router) indexAdd(key string) {
@@ -149,6 +162,7 @@ type RouterConfig struct {
 	Wrapper         *cli.Wrapper
 	MaxProcs        int
 	TTL             time.Duration
+	PruneTTL        time.Duration
 	Model           string
 	ExtraArgs       []string
 	Workspace       string
@@ -166,12 +180,16 @@ func NewRouter(cfg RouterConfig) *Router {
 	if cfg.TTL <= 0 {
 		cfg.TTL = 30 * time.Minute
 	}
+	if cfg.PruneTTL <= 0 {
+		cfg.PruneTTL = 72 * time.Hour
+	}
 	r := &Router{
 		sessions:           make(map[string]*ManagedSession),
 		sessionsByChat:     make(map[string][]string),
 		wrapper:            cfg.Wrapper,
 		maxProcs:           cfg.MaxProcs,
 		ttl:                cfg.TTL,
+		pruneTTL:           cfg.PruneTTL,
 		model:              cfg.Model,
 		extraArgs:          cfg.ExtraArgs,
 		workspace:          cfg.Workspace,
@@ -199,6 +217,8 @@ func NewRouter(cfg RouterConfig) *Router {
 				totalCost:      entry.TotalCost,
 				prevSessionIDs: entry.PrevSessionIDs,
 				Exempt:         strings.HasPrefix(key, "project:"),
+				cliName:        r.cliNameDefault(),
+				cliVersion:     r.cliVersionDefault(),
 			}
 			s.setSessionID(entry.SessionID)
 			if entry.LastActive != 0 {
@@ -242,8 +262,10 @@ func NewRouter(cfg RouterConfig) *Router {
 				continue
 			}
 			s := &ManagedSession{
-				Key:       key,
-				workspace: rs.Workspace,
+				Key:        key,
+				workspace:  rs.Workspace,
+				cliName:    r.cliNameDefault(),
+				cliVersion: r.cliVersionDefault(),
 			}
 			s.setSessionID(rs.SessionID)
 			if rs.LastActive != 0 {
@@ -403,7 +425,10 @@ func (r *Router) ReconnectShims() {
 		}
 
 		// TOCTOU guard: re-check under lock that the session hasn't been replaced
-		// by a concurrent spawnSession while we were reconnecting (lock was released).
+		// by a concurrent spawnSession while we were replaying history (lock was
+		// released). Then atomically attach the process under the same lock hold
+		// to eliminate the race window where a concurrent GetOrCreate could see
+		// isAlive()==false between check and ReattachProcess.
 		r.mu.Lock()
 		currentSess := r.sessions[state.Key]
 		if currentSess != sess || (currentSess != nil && currentSess.isAlive()) {
@@ -412,21 +437,10 @@ func (r *Router) ReconnectShims() {
 			slog.Info("shim reconnect aborted: session replaced concurrently", "key", state.Key)
 			continue
 		}
-		r.mu.Unlock()
-
+		// All three operations are non-blocking (atomic store + func pointer):
+		// safe to hold r.mu throughout.
+		proc.SetOnTurnDone(func() { r.notifyChange() })
 		sess.ReattachProcess(proc, state.SessionID)
-
-		// Third TOCTOU guard: verify session is still in the map after ReattachProcess.
-		// A concurrent GetOrCreate → spawnSession could have replaced r.sessions[key]
-		// while we were reconnecting (lock was released for ReattachProcess).
-		// If replaced, the orphaned process must be closed to prevent leaking a shim connection.
-		r.mu.Lock()
-		if r.sessions[state.Key] != sess {
-			r.mu.Unlock()
-			proc.Close()
-			slog.Info("shim reconnect aborted: session replaced during reattach", "key", state.Key)
-			continue
-		}
 		if !sess.Exempt {
 			r.activeCount++
 		}
@@ -545,6 +559,7 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 	if r.activeCount < 0 {
 		r.activeCount = 0
 	}
+	delete(r.workspaceOverrides, chatKeyPrefix)
 	r.storeDirty = true
 	r.storeGen++
 	r.mu.Unlock()
@@ -671,7 +686,9 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		TotalTimeout:    r.totalTimeout,
 	}
 
-	// Release lock during Spawn (may block on ACP Init handshake)
+	// ── Lock release 1: Spawn may block (ACP Init handshake, process startup).
+	// We release r.mu to avoid holding it during I/O. pendingSpawns prevents
+	// a concurrent Cleanup from pruning slots we're about to fill.
 	r.pendingSpawns++
 	r.mu.Unlock()
 	if r.wrapper == nil {
@@ -688,14 +705,19 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		return nil, fmt.Errorf("spawn process: %w", err)
 	}
 
-	// TOCTOU guard: another goroutine may have spawned this key while we were unlocked
+	// ── TOCTOU guard 1: Defends against concurrent spawnSession for the same key.
+	// While we were unlocked for Spawn(), another goroutine may have completed
+	// spawnSession and installed a live session. If so, discard our process.
 	if existing, ok := r.sessions[key]; ok && existing.isAlive() {
 		r.mu.Unlock()
 		proc.Close() // discard the redundant process
 		return existing, nil
 	}
 
-	// Get old session reference, then release r.mu to copy history under historyMu only
+	// ── Lock release 2: Copy old session history under historyMu only (not r.mu).
+	// Holding both r.mu and historyMu would violate lock ordering (historyMu is
+	// acquired independently by event injection). The old reference is safe to
+	// read because sessions are never mutated after creation, only replaced.
 	old := r.sessions[key]
 	r.mu.Unlock()
 
@@ -728,7 +750,9 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	}
 
 	r.mu.Lock()
-	// Re-check TOCTOU after re-acquiring lock (another goroutine may have spawned)
+	// ── TOCTOU guard 2: Defends against concurrent spawnSession during history copy.
+	// While we held historyMu (not r.mu), another goroutine may have completed
+	// spawnSession for this key. Same check as guard 1, different unlock window.
 	if existing, ok := r.sessions[key]; ok && existing.isAlive() {
 		r.mu.Unlock()
 		proc.Close()
@@ -1033,7 +1057,7 @@ func (r *Router) Cleanup() {
 		// while the underlying CLI process has already exited.
 		// Verify via kill(pid, 0) and force-kill the stale shim.
 		if alive && !proc.IsRunning() {
-			if pid := proc.PID(); pid > 0 && !pidAlive(pid) {
+			if pid := proc.PID(); pid > 0 && !osutil.PidAlive(pid) {
 				slog.Warn("CLI process gone but session still alive, force killing",
 					"key", key, "pid", pid)
 				s.deathReason.Store("pid_gone")
@@ -1065,7 +1089,7 @@ func (r *Router) Cleanup() {
 	}
 
 	r.mu.Lock()
-	// Prune orphaned sessions: nil process, no session ID, past TTL.
+	// Prune orphaned sessions: nil process, no session ID, past prune TTL.
 	// Maintain a running newActive counter so we avoid a separate countActive() O(n) pass.
 	var pruned int
 	var newActive int
@@ -1074,17 +1098,14 @@ func (r *Router) Cleanup() {
 			continue // planner sessions are never pruned
 		}
 		sid := s.getSessionID()
-		if s.loadProcess() == nil && sid == "" && now.Sub(s.GetLastActive()) > r.ttl {
+		if s.loadProcess() == nil && sid == "" && now.Sub(s.GetLastActive()) > r.pruneTTL {
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
 			continue
 		}
-		// Prune resume stubs: nil process with session ID, past 7*TTL.
-		// 7x multiplier gives suspended sessions ~3.5 hours at default 30m TTL,
-		// matching a typical work session. Balances timely cleanup against
-		// preserving sessions the user may still want to --resume.
-		if s.loadProcess() == nil && sid != "" && now.Sub(s.GetLastActive()) > suspendedTTLMultiplier*r.ttl {
+		// Prune resume stubs: nil process with session ID, past prune TTL.
+		if s.loadProcess() == nil && sid != "" && now.Sub(s.GetLastActive()) > r.pruneTTL {
 			delete(r.sessionIDToKey, sid)
 			r.indexDel(key)
 			delete(r.sessions, key)
@@ -1092,15 +1113,14 @@ func (r *Router) Cleanup() {
 			continue
 		}
 		// Prune exited sessions with no resumable session ID
-		if p := s.loadProcess(); p != nil && !p.Alive() && sid == "" && now.Sub(s.GetLastActive()) > r.ttl {
+		if p := s.loadProcess(); p != nil && !p.Alive() && sid == "" && now.Sub(s.GetLastActive()) > r.pruneTTL {
 			r.indexDel(key)
 			delete(r.sessions, key)
 			pruned++
 			continue
 		}
 		// Prune old exited sessions even with session ID (prevents unbounded growth).
-		// Same 7x TTL window as suspended sessions above.
-		if p := s.loadProcess(); p != nil && !p.Alive() && now.Sub(s.GetLastActive()) > suspendedTTLMultiplier*r.ttl {
+		if p := s.loadProcess(); p != nil && !p.Alive() && now.Sub(s.GetLastActive()) > r.pruneTTL {
 			if sid != "" {
 				delete(r.sessionIDToKey, sid)
 			}
@@ -1171,13 +1191,6 @@ func (r *Router) Cleanup() {
 	if len(expired) > 0 || len(stuckKill) > 0 || pruned > 0 {
 		r.notifyChange()
 	}
-}
-
-// pidAlive checks whether a process with the given PID still exists.
-// Returns true if the process is alive (or owned by another user — EPERM).
-func pidAlive(pid int) bool {
-	err := syscall.Kill(pid, 0)
-	return err == nil || err == syscall.EPERM
 }
 
 // StartCleanupLoop runs Cleanup periodically and saves dirty session state
@@ -1518,8 +1531,10 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 		delete(r.sessionIDToKey, sessionID)
 	}
 	s := &ManagedSession{
-		Key:       key,
-		workspace: workspace,
+		Key:        key,
+		workspace:  workspace,
+		cliName:    r.cliNameDefault(),
+		cliVersion: r.cliVersionDefault(),
 	}
 	s.setSessionID(sessionID)
 	if lastPrompt != "" {

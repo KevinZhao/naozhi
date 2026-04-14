@@ -293,6 +293,7 @@ func main() {
 		Wrapper:         wrapper,
 		MaxProcs:        cfg.Session.MaxProcs,
 		TTL:             cfg.ParseTTL(),
+		PruneTTL:        cfg.ParsePruneTTL(),
 		Model:           cfg.CLI.Model,
 		ExtraArgs:       cfg.CLI.Args,
 		Workspace:       workspace,

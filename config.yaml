@@ -15,6 +15,7 @@ cli:
 session:
   max_procs: 20
   ttl: "30m"
+  prune_ttl: "72h"
   cwd: "/home/ec2-user/workspace"
   watchdog:
     no_output_timeout: "1800s"

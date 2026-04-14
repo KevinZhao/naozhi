@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 
 	"github.com/naozhi/naozhi/internal/cron"
 )
@@ -199,6 +200,40 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	slog.Info("cron job resumed via dashboard", "id", req.ID)
 	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// POST /api/cron/trigger — manually trigger a cron job execution (for debugging).
+func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
+	if h.scheduler == nil {
+		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		return
+	}
+
+	var req struct {
+		ID string `json:"id"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid request body", http.StatusBadRequest)
+		return
+	}
+	if req.ID == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.scheduler.TriggerNow(req.ID); err != nil {
+		if strings.Contains(err.Error(), "no job found") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+		return
+	}
+
+	slog.Info("cron job triggered manually", "id", req.ID)
+	w.Header().Set("Content-Type", "application/json")
+	writeJSON(w, map[string]string{"status": "triggered"})
 }
 
 // GET /api/cron/preview?schedule=... — validate schedule and return next run time.

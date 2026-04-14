@@ -50,8 +50,22 @@ var cronParser = robfigcron.NewParser(
 	robfigcron.Minute | robfigcron.Hour | robfigcron.Dom | robfigcron.Month | robfigcron.Dow | robfigcron.Descriptor,
 )
 
-// validateSchedule checks if the cron expression is valid.
+// minCronInterval is the minimum allowed interval between cron runs.
+// Prevents resource exhaustion from overly frequent schedules like "@every 1s".
+const minCronInterval = 5 * time.Minute
+
+// validateSchedule checks if the cron expression is valid and respects the minimum interval.
 func validateSchedule(schedule string) error {
-	_, err := cronParser.Parse(schedule)
-	return err
+	sched, err := cronParser.Parse(schedule)
+	if err != nil {
+		return err
+	}
+	// Check that the interval between the first two runs is at least minCronInterval.
+	now := time.Now()
+	first := sched.Next(now)
+	second := sched.Next(first)
+	if interval := second.Sub(first); interval > 0 && interval < minCronInterval {
+		return fmt.Errorf("interval %v is too short, minimum is %v", interval, minCronInterval)
+	}
+	return nil
 }

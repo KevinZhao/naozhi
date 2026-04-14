@@ -2,7 +2,7 @@
 <html lang="zh">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content">
 <title>naozhi dashboard</title>
 <link rel="manifest" href="/manifest.json">
 <meta name="mobile-web-app-capable" content="yes">
@@ -290,7 +290,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .dot-new{background:#1f6feb;border:1px dashed #58a6ff;width:5px;height:5px}
 .sc-time{flex-shrink:0;font-size:12px;color:#8b949e}
 .sc-node{display:inline-block;padding:0 4px;border-radius:3px;font-size:10px;font-weight:600;color:#fff;margin-left:2px}
-.sc-type-tag{display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;color:#fff;letter-spacing:.2px;flex-shrink:0;margin-left:auto}
+.sc-type-tag{display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;color:#8b949e;background:#21262d;letter-spacing:.2px;flex-shrink:0;margin-left:auto}
 /* History bottom sheet (mobile) */
 .history-sheet{position:fixed;bottom:0;left:0;right:0;z-index:200;background:#161b22;border-top:1px solid #30363d;border-radius:16px 16px 0 0;max-height:60vh;overflow-y:auto;animation:sheet-in .25s ease;padding-bottom:max(8px,env(safe-area-inset-bottom))}
 .sheet-handle{width:36px;height:4px;background:#484f58;border-radius:2px;margin:8px auto}
@@ -508,6 +508,18 @@ async function fetchSessions() {
     }
 
     renderSidebar(data);
+
+    // Reconcile main area state: if the selected session's state changed
+    // (e.g. session_state WS message was missed during reconnect), propagate
+    // the server-side truth to the banner and send/stop buttons.
+    // Only reconcile when WS is not connected — when connected, WS pushes
+    // are authoritative and overwriting them with a stale REST snapshot
+    // would cause UI flicker.
+    if (selectedKey && wsm.state !== WS_STATES.CONNECTED) {
+      const sKey = sid(selectedKey, selectedNode);
+      const sd = sessionsData[sKey];
+      if (sd) updateMainState(sd.state, sd.death_reason);
+    }
   } catch (e) {
     console.error('fetchSessions:', e);
   }
@@ -743,12 +755,12 @@ function majorMinor(ver) {
 }
 
 function sessionTypeTag(cliName, entrypoint) {
-  var label, bg;
-  if (cliName === 'kiro') { label = 'Kiro'; bg = '#92400e'; }
-  else if (entrypoint === 'claude-vscode') { label = 'VS Code'; bg = '#1e40af'; }
-  else if (cliName === 'claude-code') { label = 'CC CLI'; bg = '#6e3a1f'; }
-  else { label = 'CLI'; bg = '#484f58'; }
-  return '<span class="sc-type-tag" style="background:' + bg + '">' + label + '</span>';
+  var label;
+  if (cliName === 'kiro') { label = 'Kiro CLI'; }
+  else if (entrypoint === 'claude-vscode') { label = 'Claude VS Extension'; }
+  else if (cliName === 'claude-code') { label = 'Claude CLI'; }
+  else { label = 'CLI'; }
+  return '<span class="sc-type-tag">' + label + '</span>';
 }
 
 function cliIcon(name) {
@@ -1008,7 +1020,7 @@ function renderMainShell() {
       '</div>' +
       '</div>' +
     '</div>' +
-    '<div class="events" id="events-scroll"></div>' +
+    '<div class="events" id="events-scroll">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">loading events\u2026</div>' : '') + '</div>' +
     '<div class="nav-pill" id="nav-pill">' +
       '<button onclick="navMsg(\'prev\')" id="nav-prev" title="previous user message (Alt+\u2191)">&#x25B2;</button>' +
       '<span class="nav-counter" id="nav-counter" onclick="navShowList()" title="click to list all"></span>' +
@@ -1091,7 +1103,8 @@ function renderEvents(events) {
   const el = document.getElementById('events-scroll');
   if (!el) return;
   const display = processEventsForDisplay(events);
-  el.innerHTML = display.map(eventHtml).filter(Boolean).join('') || '<div class="empty-state">no events yet</div>';
+  const html = display.map(eventHtml).filter(Boolean).join('');
+  el.innerHTML = html || (events.length === 0 ? '<div class="empty-state">no events yet</div>' : '');
   el.scrollTop = el.scrollHeight;
   // Track the latest rendered event time for deduplication
   if (events.length > 0) {
@@ -1209,6 +1222,8 @@ async function sendMessage() {
         if (btn) btn.classList.remove('sending');
         return;
       }
+      // Remove from discoveredItems so renderSidebar won't re-create the card
+      discoveredItems = discoveredItems.filter(d => d.pid !== pd.pid);
       // Remove the discovered card from sidebar
       const card = document.querySelector('.session-card[data-key="_discovered:' + pd.pid + '"]');
       if (card) card.remove();
@@ -1870,9 +1885,18 @@ function updateSendButton(state) {
     if (sendBtn) sendBtn.style.display = inVoiceMode ? 'none' : 'flex';
     if (stopBtn) stopBtn.style.display = 'none';
     resetTurnState();
+    // Replace stale loading indicator if session stopped before events arrived.
+    const evEl2 = document.getElementById('events-scroll');
+    const loadingEl = evEl2 && evEl2.querySelector('.loading-indicator');
+    if (loadingEl) loadingEl.innerHTML = 'no events yet';
   }
-  // Banner show/hide changes .events height — keep latest message visible
-  scrollEventsToBottom();
+  // Banner show/hide changes .events height — keep latest message visible.
+  // Only auto-scroll if the user is already near the bottom; otherwise
+  // respect their scroll position (e.g. reading history).
+  const evEl = document.getElementById('events-scroll');
+  if (evEl && evEl.scrollTop + evEl.clientHeight >= evEl.scrollHeight - 50) {
+    evEl.scrollTop = evEl.scrollHeight;
+  }
 }
 
 // --- File handling ---
@@ -2742,11 +2766,22 @@ const wsm = {
         this.conn.close();
         break;
       case 'subscribed':
-        // Server confirmed subscription
+        // Server confirmed subscription — apply authoritative state
         this.subscribedKey = this._pendingSubscribeKey || msg.key;
         this.subscribedNode = this._pendingSubscribeNode || 'local';
         this._pendingSubscribeKey = null;
         this._pendingSubscribeNode = null;
+        // Track whether the server started an eventPushLoop for this subscription.
+        // "suspended" means the session had no process — no live events will arrive
+        // until the process starts, at which point onSessionState triggers re-subscribe.
+        this._subscriptionSuspended = (msg.reason === 'suspended');
+        if (msg.state && msg.key === selectedKey && this.subscribedNode === selectedNode) {
+          const subSKey = sid(msg.key, this.subscribedNode);
+          if (sessionsData[subSKey]) {
+            sessionsData[subSKey].state = msg.state;
+            updateMainState(msg.state, msg.reason);
+          }
+        }
         break;
       case 'error':
         // Subscribe failed (e.g. session not found yet) — reset pending
@@ -2852,7 +2887,20 @@ const wsm = {
 
     if (isInitial) {
       // Full render replaces everything — remove any optimistic messages
-      el.innerHTML = display.map(eventHtml).filter(Boolean).join('') || '<div class="empty-state">no events yet</div>';
+      const html = display.map(eventHtml).filter(Boolean).join('');
+      // Only show "no events yet" when the server returned zero events and the session
+      // is idle. For running sessions, show "loading events..." since eventPushLoop will
+      // deliver events shortly (fixes blank-then-"no events yet" flash on click).
+      if (html) {
+        el.innerHTML = html;
+      } else if (events.length === 0) {
+        const sd = sessionsData[sid(selectedKey, selectedNode)];
+        el.innerHTML = (sd && sd.state === 'running')
+          ? '<div class="empty-state loading-indicator">loading events\u2026</div>'
+          : '<div class="empty-state">no events yet</div>';
+      } else {
+        el.innerHTML = '';
+      }
       el.scrollTop = el.scrollHeight;
       // Reset dedup tracker on full render
       if (events.length > 0) { const last = events[events.length - 1]; if (last.time) lastRenderedEventTime = last.time; }
@@ -2861,6 +2909,9 @@ const wsm = {
       navRebuild();
     } else {
       const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+      // Remove stale "no events yet" before processing incremental events
+      const emptyEl = el.querySelector('.empty-state');
+      if (emptyEl) emptyEl.remove();
       display.forEach(e => {
         // Deduplicate: skip events at or before the last rendered time
         if (e.time && e.time <= lastRenderedEventTime) return;
@@ -2869,7 +2920,10 @@ const wsm = {
           const opt = el.querySelector('.optimistic-msg');
           if (opt) opt.remove();
         }
-        const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h);
+        const h = eventHtml(e);
+        if (h) {
+          el.insertAdjacentHTML('beforeend', h);
+        }
         if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
       });
       if (wasBottom) el.scrollTop = el.scrollHeight;
@@ -2924,7 +2978,16 @@ const wsm = {
             const sKey = sid(selectedKey, selectedNode);
             if (sessionsData[sKey]) sessionsData[sKey].total_cost = ev.cost;
           }
-          resetTurnState(); continue;
+          // Optimistic: result means the turn is done. Update state to "ready"
+          // immediately so the banner hides without waiting for session_state WS msg.
+          const rsKey = sid(selectedKey, selectedNode);
+          if (sessionsData[rsKey] && sessionsData[rsKey].state === 'running') {
+            sessionsData[rsKey].state = 'ready';
+            updateSendButton('ready');
+          } else {
+            resetTurnState();
+          }
+          continue;
         }
         applyEventToTurnState(ev);
       }
@@ -2952,7 +3015,14 @@ const wsm = {
         if (sessionsData[sKey]) sessionsData[sKey].total_cost = ev.cost;
         updateHeaderCost();
       }
-      resetTurnState();
+      // Optimistic: result means the turn is done.
+      const reKey = sid(selectedKey, selectedNode);
+      if (sessionsData[reKey] && sessionsData[reKey].state === 'running') {
+        sessionsData[reKey].state = 'ready';
+        updateSendButton('ready');
+      } else {
+        resetTurnState();
+      }
     } else {
       applyEventToTurnState(ev);
       refreshBanner();
@@ -3013,7 +3083,8 @@ const wsm = {
     const msgNode = msg.node || 'local';
     const sKey = sid(msg.key, msgNode);
     const prev = sessionsData[sKey] || {};
-    const wasDead = prev.death_reason && prev.state !== 'running';
+    const prevState = prev.state;   // capture before mutation
+    const wasDead = prev.death_reason && prevState !== 'running';
     if (sessionsData[sKey]) {
       sessionsData[sKey].state = msg.state;
       if (msg.reason) {
@@ -3046,24 +3117,23 @@ const wsm = {
       }
     }
     if (msg.key === selectedKey && msgNode === selectedNode) updateMainState(msg.state, msg.reason);
-    // Process restarted or reconnected after restart: re-subscribe to pick up
-    // the new process's event log. Detect via death_reason clearing (was dead, now alive).
-    if (msg.key === selectedKey && msgNode === selectedNode &&
-        (msg.state === 'running' || msg.state === 'ready') && wasDead && !msg.reason &&
-        wsm.subscribedKey === msg.key) {
-      wsm.subscribe(msg.key, selectedNode);
-    }
-    // New session became running: re-subscribe to pick up live event stream.
-    // This covers: (1) new-session send flow where process didn't exist yet,
-    // (2) recovery from a prior subscribe that returned only persisted history
-    // (no eventPushLoop) because process was nil at subscribe time.
-    // _pendingSubscribeKey is not checked here — a stale pending state from
-    // a no-process subscribe must not block re-subscription when the process
-    // is now available.
-    if (msg.key === selectedKey && msgNode === selectedNode &&
-        msg.state === 'running' && wsm.subscribedKey !== msg.key) {
-      wsm.lastEventTimeWs = 0;
-      wsm.subscribe(msg.key, selectedNode);
+    // Re-subscribe when session transitions to "running" and we need a live event stream.
+    // Covers: (1) not subscribed yet (new session, subscribedKey mismatch)
+    //         (2) subscribed but process was dead → revived
+    //         (3) subscribed without eventPushLoop (no-process subscribe → process available)
+    //            — detected by the "suspended" reason the server sends for no-process subscribes.
+    // Case 3 must NOT fire on normal ready→running transitions for already-subscribed
+    // sessions — that would cause full re-render and wipe the optimistic user message.
+    if (msg.key === selectedKey && msgNode === selectedNode && msg.state === 'running') {
+      const needSub = (
+        (wsm.subscribedKey !== msg.key && wsm._pendingSubscribeKey !== msg.key) || // case 1: not subscribed and no pending subscribe
+        (wasDead && !msg.reason) ||                                   // case 2
+        (wsm.subscribedKey === msg.key && wsm._subscriptionSuspended) // case 3
+      );
+      if (needSub) {
+        wsm.lastEventTimeWs = 0;
+        wsm.subscribe(msg.key, selectedNode);
+      }
     }
     // State changed: force next fetchSessions to re-render sidebar.
     // storeGen doesn't increment on process state transitions (only session
@@ -3173,7 +3243,6 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
       '<div class="main-header-content">' +
         '<h2>' + esc(base) + '</h2>' +
         '<div class="detail">' +
-          '<span class="badge" style="background:#9e6a03;color:#fff">external</span>' +
           sessionTypeTag(cliName || 'cli', entrypoint || '') +
         '</div>' +
       '</div>' +
@@ -3274,6 +3343,8 @@ async function takeover(btn, pid, sessionId, cwd, procStartTime, node) {
     }
     const data = await r.json();
     showToast('session taken over', 'success');
+    // Remove from discoveredItems so renderSidebar won't re-create the card
+    discoveredItems = discoveredItems.filter(d => d.pid !== pid);
     // Immediately remove the discovered card from DOM
     const card = document.querySelector('.session-card[data-key="_discovered:' + pid + '"]');
     if (card) card.remove();

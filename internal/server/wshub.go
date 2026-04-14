@@ -67,6 +67,12 @@ type HubOptions struct {
 	WSAuthLimiter func(ip string) *rate.Limiter
 }
 
+// initialHistoryLimit caps the number of recent events sent on subscribe.
+// Large enough to usually include the "user" event that started the current turn
+// (each tool call generates ~3 events: thinking + tool_use + result),
+// but small enough to keep JSON serialization fast.
+const initialHistoryLimit = 200
+
 // Pre-marshaled static messages to avoid repeated JSON serialization.
 var sessionsUpdateMsg, _ = json.Marshal(node.ServerMsg{Type: "sessions_update"})
 
@@ -255,13 +261,13 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		// response the client gets stuck and never re-subscribes when the
 		// process becomes available.
 		snap := sess.Snapshot()
-		c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State})
+		c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State, Reason: "suspended"})
 
 		var entries []cli.EventEntry
 		if msg.After > 0 {
 			entries = sess.EventEntriesSince(msg.After)
 		} else {
-			entries = sess.EventLastN(100)
+			entries = sess.EventLastN(initialHistoryLimit)
 		}
 		if len(entries) > 0 {
 			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries})
@@ -289,9 +295,26 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	if msg.After > 0 {
 		entries = sess.EventEntriesSince(msg.After)
 	} else {
-		// Limit initial history to the most recent 100 events to keep
-		// JSON serialization and client-side rendering fast.
-		entries = sess.EventLastN(100)
+		entries = sess.EventLastN(initialHistoryLimit)
+
+		// Ensure the most recent "user" event is included so the client always
+		// has conversation context. During long tool-heavy turns the last N
+		// entries may consist entirely of thinking/tool_use/result events,
+		// causing the dashboard to show a blank event list.
+		if len(entries) > 0 {
+			hasUser := false
+			for _, e := range entries {
+				if e.Type == "user" {
+					hasUser = true
+					break
+				}
+			}
+			if !hasUser {
+				if ue := sess.LastUserEntry(); ue.Type != "" {
+					entries = append([]cli.EventEntry{ue}, entries...)
+				}
+			}
+		}
 	}
 
 	slog.Debug("completeSubscribe: sending history", "key", key, "entries", len(entries), "state", snap.State)
@@ -301,6 +324,12 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	if len(entries) > 0 {
 		c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries})
 		lastTime = entries[len(entries)-1].Time
+	} else if snap.State == "running" {
+		// Always send an (empty) history for running sessions so the client's
+		// _initialSubscribe flag is consumed. Without this, the client shows a
+		// blank events area until eventPushLoop delivers the first batch, which
+		// can be a noticeable delay if the process just started.
+		c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: []cli.EventEntry{}})
 	}
 
 	go h.eventPushLoop(c, key, gen, notify, sess, lastTime)
@@ -487,15 +516,8 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 	return false, nil
 }
 
-// broadcastState sends a session_state message to ALL authenticated clients.
-// This mirrors BroadcastSessionReady: the "running" start is sent to everyone,
-// so the final state must also reach everyone — otherwise clients not subscribed
-// to this session would see a stale "running" dot in the sidebar forever.
-func (h *Hub) broadcastState(key, state, reason string) {
-	data, err := json.Marshal(node.ServerMsg{Type: "session_state", Key: key, State: state, Reason: reason})
-	if err != nil {
-		return
-	}
+// broadcastToAuthenticated sends raw data to all authenticated WebSocket clients.
+func (h *Hub) broadcastToAuthenticated(data []byte) {
 	h.mu.RLock()
 	targets := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
@@ -510,6 +532,18 @@ func (h *Hub) broadcastState(key, state, reason string) {
 	}
 }
 
+// broadcastState sends a session_state message to ALL authenticated clients.
+// This mirrors BroadcastSessionReady: the "running" start is sent to everyone,
+// so the final state must also reach everyone — otherwise clients not subscribed
+// to this session would see a stale "running" dot in the sidebar forever.
+func (h *Hub) broadcastState(key, state, reason string) {
+	data, err := json.Marshal(node.ServerMsg{Type: "session_state", Key: key, State: state, Reason: reason})
+	if err != nil {
+		return
+	}
+	h.broadcastToAuthenticated(data)
+}
+
 // BroadcastSessionReady sends a session_state "running" to ALL authenticated clients
 // so they can auto-subscribe. Unlike broadcastState, this is not limited to already-
 // subscribed clients — needed for new sessions where nobody is subscribed yet.
@@ -518,18 +552,7 @@ func (h *Hub) BroadcastSessionReady(key string) {
 	if err != nil {
 		return
 	}
-	h.mu.RLock()
-	targets := make([]*wsClient, 0, len(h.clients))
-	for c := range h.clients {
-		if c.authenticated.Load() {
-			targets = append(targets, c)
-		}
-	}
-	h.mu.RUnlock()
-
-	for _, c := range targets {
-		c.SendRaw(data)
-	}
+	h.broadcastToAuthenticated(data)
 }
 
 // BroadcastSessionsUpdate debounces notifications: resets a 50ms timer on each
@@ -551,18 +574,7 @@ func (h *Hub) BroadcastSessionsUpdate() {
 
 func (h *Hub) doBroadcastSessionsUpdate() {
 	data := sessionsUpdateMsg
-	h.mu.RLock()
-	targets := make([]*wsClient, 0, len(h.clients))
-	for c := range h.clients {
-		if c.authenticated.Load() {
-			targets = append(targets, c)
-		}
-	}
-	h.mu.RUnlock()
-
-	for _, c := range targets {
-		c.SendRaw(data)
-	}
+	h.broadcastToAuthenticated(data)
 }
 
 // BroadcastCronResult notifies all connected WS clients that a cron job completed.
@@ -581,18 +593,7 @@ func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
 	if err != nil {
 		return
 	}
-	h.mu.RLock()
-	targets := make([]*wsClient, 0, len(h.clients))
-	for c := range h.clients {
-		if c.authenticated.Load() {
-			targets = append(targets, c)
-		}
-	}
-	h.mu.RUnlock()
-
-	for _, c := range targets {
-		c.SendRaw(data)
-	}
+	h.broadcastToAuthenticated(data)
 }
 
 // DroppedMessages returns the total number of messages dropped across all clients.
@@ -713,16 +714,5 @@ func (h *Hub) PurgeNodeSubscriptions(nodeID string) {
 	if err != nil {
 		return
 	}
-	h.mu.RLock()
-	targets := make([]*wsClient, 0, len(h.clients))
-	for c := range h.clients {
-		if c.authenticated.Load() {
-			targets = append(targets, c)
-		}
-	}
-	h.mu.RUnlock()
-
-	for _, c := range targets {
-		c.SendRaw(data)
-	}
+	h.broadcastToAuthenticated(data)
 }
