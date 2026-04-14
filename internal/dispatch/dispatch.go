@@ -205,14 +205,19 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 			default:
 				errMsg = "处理失败，请发送 /new 重置后重试。"
 			}
-			platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, 3)
+			if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, 3); err != nil {
+				log.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
+			}
 			return
 		}
 
 		log.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD)
 
 		// Append backend tag to reply
-		replyText := result.Text + "\n\n— " + d.BackendTag
+		replyText := result.Text
+		if d.BackendTag != "" {
+			replyText += "\n\n— " + d.BackendTag
+		}
 		var outImages []platform.Image
 		for _, path := range cli.ExtractImagePaths(replyText) {
 			data, err := os.ReadFile(path)
@@ -369,7 +374,9 @@ func (t *imEventTracker) editLoop() {
 			// Drain to latest (multiple onEvent calls may have queued during rate-limit wait)
 			text = drainLatest(t.editCh, text)
 			if t.thinkingMsgID != "" {
-				t.p.EditMessage(t.ctx, t.thinkingMsgID, text)
+				if err := t.p.EditMessage(t.ctx, t.thinkingMsgID, text); err != nil {
+					slog.Debug("status edit failed", "msg_id", t.thinkingMsgID, "err", err)
+				}
 			}
 			// Rate limit: wait 1s before next edit
 			select {

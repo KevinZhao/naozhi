@@ -356,8 +356,11 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		}
 		opts := session.AgentOpts{}
 		if p.Workspace != "" {
-			// Sanitize workspace path to prevent directory traversal.
-			ws := filepath.Clean(p.Workspace)
+			// Sanitize workspace path to prevent directory traversal via symlinks.
+			ws, err := filepath.EvalSymlinks(filepath.Clean(p.Workspace))
+			if err != nil {
+				return nil, fmt.Errorf("workspace path invalid: %w", err)
+			}
 			if !filepath.IsAbs(ws) {
 				return nil, fmt.Errorf("workspace must be absolute path")
 			}
@@ -416,7 +419,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if len(cwdKey) > 128 {
 			cwdKey = cwdKey[:128]
 		}
-		key := "local:takeover:" + cwdKey + ":general"
+		key := session.TakeoverKey(cwdKey)
 		pid, sessionID, procStartTime, reqCWD, claudeDir := p.PID, p.SessionID, p.ProcStartTime, p.CWD, c.claudeDir
 		go func() {
 			discovery.WaitAndCleanup(pid, procStartTime, claudeDir, reqCWD, sessionID)

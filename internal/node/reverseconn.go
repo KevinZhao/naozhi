@@ -200,7 +200,9 @@ func (c *ReverseConn) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd
 		Key string `json:"key"`
 	}
 	if len(raw) > 0 {
-		json.Unmarshal(raw, &resp) //nolint:errcheck
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return "", fmt.Errorf("takeover response: %w", err)
+		}
 	}
 	return resp.Key, nil
 }
@@ -219,12 +221,9 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 	c.subMu.Lock()
 	alreadySub := len(c.subs[key]) > 0
 	c.subs[key] = append(c.subs[key], cl)
-	if !alreadySub {
-		c.subMu.Unlock()
-		// First subscriber: tell remote to start pushing events
-		c.writeJSON(ReverseMsg{Type: "subscribe", Key: key, After: after}) //nolint
-	} else {
-		c.subMu.Unlock()
+	c.subMu.Unlock()
+
+	if alreadySub {
 		// Additional subscriber: send history via RPC (non-blocking)
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -238,6 +237,16 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 				cl.SendJSON(ServerMsg{Type: "history", Key: key, Node: c.id, Events: entries})
 			}
 		}()
+	} else {
+		// First subscriber: tell remote to start pushing events.
+		// Subscriber was already added above so readLoop can deliver events
+		// arriving immediately after the write. On failure, roll back.
+		if err := c.writeJSON(ReverseMsg{Type: "subscribe", Key: key, After: after}); err != nil {
+			slog.Warn("reverse subscribe write failed", "node", c.id, "key", key, "err", err)
+			c.subMu.Lock()
+			removeSub(c.subs, key, cl)
+			c.subMu.Unlock()
+		}
 	}
 }
 
