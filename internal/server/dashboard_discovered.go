@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -146,17 +148,12 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// C2 fix: verify PID is in the discovered list before killing
+	// Verify PID is in the discovered list before killing.
+	// Use cache snapshot — fresh Scan() filters out dead processes.
 	if h.claudeDir != "" {
-		excludePIDs, excludeSIDs, excludeCWDs := h.router.ManagedExcludeSets()
-		discovered, err := discovery.Scan(h.claudeDir, excludePIDs, excludeSIDs, excludeCWDs)
-		if err != nil {
-			slog.Error("discovery scan failed during takeover", "err", err)
-			http.Error(w, "discovery scan failed", http.StatusInternalServerError)
-			return
-		}
+		cached := h.discoveryCache.snapshot()
 		pidFound := false
-		for _, d := range discovered {
+		for _, d := range cached {
 			if d.PID == req.PID && d.SessionID == req.SessionID {
 				pidFound = true
 				break
@@ -193,14 +190,19 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "proc_start_time is required", http.StatusBadRequest)
 		return
 	}
-	if !verifyProcIdentity(req.PID, req.ProcStartTime) {
-		http.Error(w, "process identity changed (PID reused)", http.StatusConflict)
-		return
-	}
-	if err := syscall.Kill(req.PID, syscall.SIGTERM); err != nil {
-		slog.Error("failed to terminate process", "pid", req.PID, "err", err)
-		http.Error(w, "failed to terminate process", http.StatusBadRequest)
-		return
+	alive := osutil.PidAlive(req.PID)
+	if alive {
+		if !verifyProcIdentity(req.PID, req.ProcStartTime) {
+			http.Error(w, "process identity changed (PID reused)", http.StatusConflict)
+			return
+		}
+		if err := syscall.Kill(req.PID, syscall.SIGTERM); err != nil {
+			if !errors.Is(err, syscall.ESRCH) {
+				slog.Error("failed to terminate process", "pid", req.PID, "err", err)
+				http.Error(w, "failed to terminate process", http.StatusInternalServerError)
+				return
+			}
+		}
 	}
 
 	// Immediately remove the killed PID from the discovery cache so the
@@ -221,7 +223,7 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 
 	go func() {
 		// Wait, SIGKILL, and remove stale session files.
-		discovery.WaitAndCleanup(pid, procStartTime, claudeDir, reqCWD, sessionID)
+		discovery.WaitAndCleanup(context.Background(), pid, procStartTime, claudeDir, reqCWD, sessionID)
 
 		// Takeover via router — use Background context so the spawned process
 		// outlives the HTTP request.
@@ -246,4 +248,111 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	writeJSON(w, map[string]string{"status": "accepted", "key": key})
+}
+
+// POST /api/discovered/close — kill an external CLI process without resuming its session.
+func (h *DiscoveryHandlers) handleClose(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PID           int    `json:"pid"`
+		SessionID     string `json:"session_id"`
+		CWD           string `json:"cwd"`
+		ProcStartTime uint64 `json:"proc_start_time"`
+		Node          string `json:"node"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid JSON", http.StatusBadRequest)
+		return
+	}
+	if req.PID <= 0 {
+		http.Error(w, "pid is required", http.StatusBadRequest)
+		return
+	}
+
+	// Remote node proxy
+	if req.Node != "" && req.Node != "local" {
+		nc, ok := h.nodeAccess.LookupNode(w, req.Node)
+		if !ok {
+			return
+		}
+		if err := nc.ProxyCloseDiscovered(r.Context(), req.PID, req.SessionID, req.CWD, req.ProcStartTime); err != nil {
+			slog.Warn("proxy close discovered failed", "node", req.Node, "err", err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		writeJSON(w, map[string]string{"status": "ok"})
+		return
+	}
+
+	// Verify PID is in the discovered list before killing.
+	// Use the cache snapshot instead of a fresh Scan(), because Scan()
+	// filters out dead processes — if the process was already killed
+	// externally the fresh scan won't find it, but we still need to
+	// clean up the stale entry.
+	if h.claudeDir == "" {
+		http.Error(w, "discovery not available", http.StatusServiceUnavailable)
+		return
+	}
+	cached := h.discoveryCache.snapshot()
+	var found *discovery.DiscoveredSession
+	for i := range cached {
+		if cached[i].PID == req.PID {
+			found = &cached[i]
+			break
+		}
+	}
+	if found == nil {
+		http.Error(w, "pid not found in discovered sessions", http.StatusBadRequest)
+		return
+	}
+	// Use the cached SessionID/CWD for cleanup so a caller cannot
+	// supply a crafted value to delete arbitrary session files.
+	sessionID := found.SessionID
+	cwd := found.CWD
+
+	if req.ProcStartTime == 0 {
+		http.Error(w, "proc_start_time is required", http.StatusBadRequest)
+		return
+	}
+
+	// If the process is already dead, skip identity check and signal —
+	// just do cleanup.  Otherwise verify PID identity and send SIGTERM.
+	alive := osutil.PidAlive(req.PID)
+	if alive {
+		if !verifyProcIdentity(req.PID, req.ProcStartTime) {
+			http.Error(w, "process identity changed (PID reused)", http.StatusConflict)
+			return
+		}
+		if err := syscall.Kill(req.PID, syscall.SIGTERM); err != nil {
+			// ESRCH = process disappeared between alive check and kill — treat as success.
+			if !errors.Is(err, syscall.ESRCH) {
+				slog.Error("failed to terminate process", "pid", req.PID, "err", err)
+				http.Error(w, "failed to terminate process", http.StatusInternalServerError)
+				return
+			}
+		}
+	} else {
+		slog.Info("discovered session already dead, cleaning up", "pid", req.PID)
+	}
+
+	// Evict from cache immediately so the frontend won't see the stale entry.
+	h.discoveryCache.evictPID(req.PID)
+
+	// Background cleanup: wait for exit, SIGKILL if stuck, remove stale files.
+	pid := req.PID
+	procStartTime := req.ProcStartTime
+	claudeDir := h.claudeDir
+	broadcast := h.broadcast
+
+	go func() {
+		discovery.WaitAndCleanup(context.Background(), pid, procStartTime, claudeDir, cwd, sessionID)
+		slog.Info("discovered session closed", "pid", pid, "session_id", sessionID)
+		if broadcast != nil {
+			broadcast()
+		}
+	}()
+
+	w.Header().Set("Content-Type", "application/json")
+	writeJSON(w, map[string]string{"status": "ok"})
 }
