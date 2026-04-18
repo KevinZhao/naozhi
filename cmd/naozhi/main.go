@@ -22,6 +22,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	discordplatform "github.com/naozhi/naozhi/internal/platform/discord"
 	"github.com/naozhi/naozhi/internal/platform/feishu"
@@ -470,12 +471,19 @@ func main() {
 		StateDir:          filepath.Dir(storePath),
 		NoOutputTimeout:   noOutputTimeout,
 		TotalTimeout:      totalTimeout,
+		QueueMaxDepth:     cfg.QueueMaxDepth(),
+		QueueCollectDelay: cfg.ParseCollectDelay(),
 		DashboardToken:    cfg.Server.DashboardToken,
 		TrustedProxy:      cfg.Server.TrustedProxy,
 		ProjectManager:    projectMgr,
 		Nodes:             nodes,
 		ReverseNodeServer: rns,
 		Transcriber:       stt,
+		OnReady: func() {
+			if err := osutil.SdNotify("READY=1"); err != nil {
+				slog.Warn("sd_notify READY failed", "err", err)
+			}
+		},
 	})
 
 	// Start upstream connector (this node connects to a primary)
@@ -531,6 +539,9 @@ func main() {
 			}
 		}()
 		slog.Info("received signal", "signal", sig)
+		if err := osutil.SdNotify("STOPPING=1"); err != nil {
+			slog.Warn("sd_notify STOPPING failed", "err", err)
+		}
 		cancel()
 		scheduler.Stop()
 		router.Shutdown()
@@ -561,16 +572,38 @@ func main() {
 		serverErr <- srv.Start(ctx)
 	}()
 
+	// Systemd watchdog: periodically signal liveness so WatchdogSec can detect hangs.
+	// Always send WATCHDOG=1 unconditionally — its purpose is OS-level liveness.
+	// The HealthCheck (TryRLock) result is logged as a diagnostic signal only;
+	// it must not suppress the heartbeat since normal write-lock activity
+	// (cleanup, spawn) would cause false negatives.
+	go func() {
+		ticker := time.NewTicker(30 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if !router.HealthCheck() {
+					slog.Warn("router mutex contended at watchdog tick")
+				}
+				_ = osutil.SdNotify("WATCHDOG=1")
+			}
+		}
+	}()
+
 	select {
 	case err := <-serverErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server error", "err", err)
 			os.Exit(1)
 		}
+		<-shutdownDone
 	case <-shutdownDone:
+		// Wait for HTTP server to finish draining in-flight requests
+		<-serverErr
 	}
-	// Wait for both server and shutdown to complete
-	<-shutdownDone
 }
 
 // parseDurationOrDefault parses a duration string, returning def on empty or error.

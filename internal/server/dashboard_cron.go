@@ -18,7 +18,6 @@ type CronHandlers struct {
 // GET /api/cron — list all cron jobs (unscoped, admin view).
 func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	if h.scheduler == nil {
-		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, map[string]any{"jobs": []any{}})
 		return
 	}
@@ -67,7 +66,6 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		views = append(views, v)
 	}
 
-	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]any{"jobs": views})
 }
 
@@ -122,7 +120,6 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job created via dashboard", "id", job.ID, "schedule", job.Schedule)
-	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]any{"id": job.ID})
 }
 
@@ -146,7 +143,6 @@ func (h *CronHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job deleted via dashboard", "id", j.ID)
-	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
@@ -172,7 +168,6 @@ func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job paused via dashboard", "id", req.ID)
-	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
@@ -198,7 +193,6 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job resumed via dashboard", "id", req.ID)
-	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
@@ -232,7 +226,6 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job triggered manually", "id", req.ID)
-	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]string{"status": "triggered"})
 }
 
@@ -246,11 +239,9 @@ func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 
 	next, err := cron.PreviewSchedule(schedule)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, map[string]any{"valid": false, "error": err.Error()})
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]any{"valid": true, "next_run": next.UnixMilli()})
 }

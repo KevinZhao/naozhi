@@ -26,7 +26,7 @@ func MakeThumbnail(data []byte, maxDim int) string {
 	if err != nil {
 		return ""
 	}
-	if int64(cfg.Width)*int64(cfg.Height) > maxThumbnailPixels {
+	if int64(cfg.Width)*int64(cfg.Height) >= maxThumbnailPixels {
 		return ""
 	}
 
@@ -62,7 +62,7 @@ func MakeThumbnail(data []byte, maxDim int) string {
 	// No resize needed
 	if dw == sw && dh == sh {
 		var buf bytes.Buffer
-		if err := jpeg.Encode(&buf, src, &jpeg.Options{Quality: 60}); err != nil {
+		if err := jpeg.Encode(&buf, src, &jpeg.Options{Quality: 70}); err != nil {
 			return ""
 		}
 		return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())
@@ -81,7 +81,7 @@ func MakeThumbnail(data []byte, maxDim int) string {
 	}
 
 	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 60}); err != nil {
+	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 70}); err != nil {
 		return ""
 	}
 	return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())

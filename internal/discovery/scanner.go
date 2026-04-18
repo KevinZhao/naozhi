@@ -3,6 +3,8 @@ package discovery
 import (
 	"bufio"
 	"bytes"
+	"cmp"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"syscall"
@@ -287,7 +289,11 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 	var result []DiscoveredSession
 	for i := range candidates {
 		c := &candidates[i]
-		pst, _ := ProcStartTime(c.sf.PID)
+		pst, err := ProcStartTime(c.sf.PID)
+		if err != nil {
+			slog.Debug("discovery: skip candidate, cannot read proc start time", "pid", c.sf.PID, "err", err)
+			continue
+		}
 		state := "ready"
 		if c.lastActive > nowMs-int64(runningThreshold/time.Millisecond) {
 			state = "running"
@@ -351,16 +357,16 @@ func listJSONLsByMtime(claudeDir, cwd string) []jsonlEntry {
 		})
 	}
 
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].mtime > result[j].mtime // newest first
+	slices.SortFunc(result, func(a, b jsonlEntry) int {
+		return cmp.Compare(b.mtime, a.mtime) // newest first
 	})
 	return result
 }
 
 // sortByLastActive sorts candidate indices by lastActive ascending (most stale first).
 func sortByLastActive(indices []int, candidates []scanCandidate) {
-	sort.Slice(indices, func(i, j int) bool {
-		return candidates[indices[i]].lastActive < candidates[indices[j]].lastActive
+	slices.SortFunc(indices, func(a, b int) int {
+		return cmp.Compare(candidates[a].lastActive, candidates[b].lastActive)
 	})
 }
 
@@ -406,22 +412,34 @@ func extractLastPrompt(claudeDir, cwd, sessionID string) string {
 	}
 	mtime := fi.ModTime().UnixNano()
 
-	promptCache.Lock()
-	if cached, ok := promptCache.entries[path]; ok && cached.mtime == mtime {
-		cached.gen = promptCache.generation
-		promptCache.entries[path] = cached
-		promptCache.Unlock()
-		return cached.prompt
+	if cached, ok := getCachedPrompt(path, mtime); ok {
+		return cached
 	}
-	promptCache.Unlock()
 
 	result := extractLastPromptUncached(path, fi.Size())
 
+	setCachedPrompt(path, mtime, result)
+	return result
+}
+
+// getCachedPrompt checks the prompt cache under a deferred lock.
+func getCachedPrompt(path string, mtime int64) (string, bool) {
 	promptCache.Lock()
+	defer promptCache.Unlock()
+	if cached, ok := promptCache.entries[path]; ok && cached.mtime == mtime {
+		cached.gen = promptCache.generation
+		promptCache.entries[path] = cached
+		return cached.prompt, true
+	}
+	return "", false
+}
+
+// setCachedPrompt writes a prompt cache entry under a deferred lock.
+func setCachedPrompt(path string, mtime int64, result string) {
+	promptCache.Lock()
+	defer promptCache.Unlock()
 	promptCache.entries[path] = promptCacheEntry{mtime: mtime, prompt: result, gen: promptCache.generation}
 	evictPromptCache()
-	promptCache.Unlock()
-	return result
 }
 
 // extractLastPromptUncached does the actual 512KB tail read and JSON scanning.
@@ -561,50 +579,52 @@ func LookupSummaries(claudeDir string, sessions map[string]string) map[string]st
 		}
 		mtime := fi.ModTime().UnixNano()
 
-		summaryCache.Lock()
-		cached, ok := summaryCache.entries[indexPath]
-		if ok && cached.mtime == mtime {
-			cached.gen = summaryCache.generation
-			summaryCache.entries[indexPath] = cached
-			summaryCache.Unlock()
-			wanted := make(map[string]bool, len(sids))
-			for _, sid := range sids {
-				wanted[sid] = true
-			}
-			for _, e := range cached.index.Entries {
-				if wanted[e.SessionID] && e.Summary != "" {
-					result[e.SessionID] = e.Summary
-				}
-			}
-			continue
-		}
-		summaryCache.Unlock()
-
-		data, err := os.ReadFile(indexPath)
-		if err != nil {
-			continue
-		}
 		var idx sessionsIndex
-		if err := json.Unmarshal(data, &idx); err != nil {
-			continue
+		if cachedIdx, ok := getCachedSummary(indexPath, mtime); ok {
+			idx = cachedIdx
+		} else {
+			data, err := os.ReadFile(indexPath)
+			if err != nil {
+				continue
+			}
+			if err := json.Unmarshal(data, &idx); err != nil {
+				continue
+			}
+			setCachedSummary(indexPath, mtime, idx)
 		}
 
-		summaryCache.Lock()
-		summaryCache.entries[indexPath] = summaryCacheEntry{mtime: mtime, index: idx, gen: summaryCache.generation}
-		evictSummaryCache()
-		summaryCache.Unlock()
-
-		wanted := make(map[string]bool, len(sids))
-		for _, sid := range sids {
-			wanted[sid] = true
-		}
+		// sids is typically small (1-5); linear scan beats map allocation.
 		for _, e := range idx.Entries {
-			if wanted[e.SessionID] && e.Summary != "" {
+			if e.Summary == "" {
+				continue
+			}
+			if slices.Contains(sids, e.SessionID) {
 				result[e.SessionID] = e.Summary
 			}
 		}
 	}
 	return result
+}
+
+// getCachedSummary checks the summary cache under a deferred lock.
+func getCachedSummary(indexPath string, mtime int64) (sessionsIndex, bool) {
+	summaryCache.Lock()
+	defer summaryCache.Unlock()
+	cached, ok := summaryCache.entries[indexPath]
+	if ok && cached.mtime == mtime {
+		cached.gen = summaryCache.generation
+		summaryCache.entries[indexPath] = cached
+		return cached.index, true
+	}
+	return sessionsIndex{}, false
+}
+
+// setCachedSummary writes a summary cache entry under a deferred lock.
+func setCachedSummary(indexPath string, mtime int64, idx sessionsIndex) {
+	summaryCache.Lock()
+	defer summaryCache.Unlock()
+	summaryCache.entries[indexPath] = summaryCacheEntry{mtime: mtime, index: idx, gen: summaryCache.generation}
+	evictSummaryCache()
 }
 
 // RefreshDynamic updates the mutable fields (LastActive, State, Summary,
@@ -679,22 +699,12 @@ func IsValidSessionID(s string) bool {
 	return sessionIDRe.MatchString(s)
 }
 
-// WaitAndCleanup waits for pid to exit (up to 5 s), sends SIGKILL if still alive
-// and PID identity matches, then removes stale session metadata and lock files.
-// Must be called after SIGTERM has already been sent.
-func WaitAndCleanup(pid int, procStartTime uint64, claudeDir, cwd, sessionID string) {
-	deadline := time.Now().Add(5 * time.Second)
-	wait := 50 * time.Millisecond
-	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); err != nil {
-			break
-		}
-		time.Sleep(wait)
-		if wait < 500*time.Millisecond {
-			wait *= 2
-		}
-	}
-	if procStartTime != 0 {
+// WaitAndCleanup waits for pid to exit (up to 5 s or until ctx is cancelled),
+// sends SIGKILL if still alive and PID identity matches, then removes stale
+// session metadata and lock files. Must be called after SIGTERM has already been sent.
+func WaitAndCleanup(ctx context.Context, pid int, procStartTime uint64, claudeDir, cwd, sessionID string) {
+	ctxCancelled := waitForExit(ctx, pid)
+	if !ctxCancelled && procStartTime != 0 {
 		if actual, err := ProcStartTime(pid); err == nil && actual == procStartTime {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 		}
@@ -707,4 +717,27 @@ func WaitAndCleanup(pid int, procStartTime uint64, claudeDir, cwd, sessionID str
 		lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID)
 		_ = os.RemoveAll(lockDir)
 	}
+}
+
+// waitForExit polls until the process exits or ctx is cancelled.
+// Returns true if ctx was cancelled before the process exited.
+func waitForExit(ctx context.Context, pid int) bool {
+	deadline := time.Now().Add(5 * time.Second)
+	wait := 50 * time.Millisecond
+	for time.Now().Before(deadline) {
+		if err := syscall.Kill(pid, 0); err != nil {
+			return false
+		}
+		t := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			t.Stop()
+			return true
+		case <-t.C:
+		}
+		if wait < 500*time.Millisecond {
+			wait *= 2
+		}
+	}
+	return false
 }

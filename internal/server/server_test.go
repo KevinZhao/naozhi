@@ -85,7 +85,7 @@ func newTestServerWithToken(p *mockPlatform, token string) *Server {
 }
 
 func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
-	return &dispatch.Dispatcher{
+	return dispatch.NewDispatcher(dispatch.DispatcherConfig{
 		Router:        srv.router,
 		Platforms:     srv.platforms,
 		Agents:        srv.agents,
@@ -96,7 +96,7 @@ func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
 		Dedup:         srv.dedup,
 		AllowedRoot:   srv.allowedRoot,
 		ClaudeDir:     srv.claudeDir,
-		BackendTag:    srv.backendTag,
+		ReplyFooter:   srv.backendTag,
 		SendFn: func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error) {
 			return sess.Send(ctx, text, images, onEvent)
 		},
@@ -107,7 +107,7 @@ func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
 		TotalTimeout:          srv.totalTimeout,
 		WatchdogNoOutputKills: &srv.watchdogNoOutputKills,
 		WatchdogTotalKills:    &srv.watchdogTotalKills,
-	}
+	})
 }
 
 // ─── handleHealth ─────────────────────────────────────────────────────────────

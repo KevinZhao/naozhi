@@ -6,7 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
+	"path/filepath"
 	"syscall"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -18,6 +18,7 @@ import (
 
 // DiscoveryHandlers groups the discovered-session and takeover API endpoints.
 type DiscoveryHandlers struct {
+	appCtx         context.Context // server lifecycle context, used for background cleanup
 	discoveryCache *discoveryCache
 	nodeAccess     NodeAccessor
 	nodeCache      *node.CacheManager
@@ -47,17 +48,11 @@ func (h *DiscoveryHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 				allDiscovered = append(allDiscovered, item)
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(allDiscovered); err != nil {
-			slog.Error("encode discovered response", "err", err)
-		}
+		writeJSON(w, allDiscovered)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(sessions); err != nil {
-		slog.Error("encode discovered response", "err", err)
-	}
+	writeJSON(w, sessions)
 }
 
 // GET /api/discovered/preview — preview a discovered session's history.
@@ -65,7 +60,6 @@ func (h *DiscoveryHandlers) handlePreview(w http.ResponseWriter, r *http.Request
 	sessionID := r.URL.Query().Get("session_id")
 	nodeID := r.URL.Query().Get("node")
 	if sessionID == "" || !discovery.IsValidSessionID(sessionID) {
-		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, []any{})
 		return
 	}
@@ -86,14 +80,12 @@ func (h *DiscoveryHandlers) handlePreview(w http.ResponseWriter, r *http.Request
 		if entries == nil {
 			entries = []cli.EventEntry{}
 		}
-		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, entries)
 		return
 	}
 
 	// Local
 	if h.claudeDir == "" {
-		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, []any{})
 		return
 	}
@@ -107,7 +99,6 @@ func (h *DiscoveryHandlers) handlePreview(w http.ResponseWriter, r *http.Request
 		entries = []cli.EventEntry{}
 	}
 
-	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, entries)
 }
 
@@ -142,9 +133,7 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		writeJSON(w, map[string]string{"status": "accepted", "key": remoteKey, "node": req.Node})
+		writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": remoteKey, "node": req.Node})
 		return
 	}
 
@@ -171,17 +160,20 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 		cwd = "unknown"
 	}
 	// Validate CWD against allowedRoot to prevent sessions running in arbitrary directories.
-	if cwd != "unknown" && h.allowedRoot != "" {
-		if _, err := validateWorkspace(cwd, h.allowedRoot); err != nil {
-			http.Error(w, "cwd outside allowed root", http.StatusBadRequest)
+	if cwd != "unknown" {
+		cwd = filepath.Clean(cwd)
+		if !filepath.IsAbs(cwd) {
+			http.Error(w, "cwd must be absolute path", http.StatusBadRequest)
 			return
 		}
+		if h.allowedRoot != "" {
+			if _, err := validateWorkspace(cwd, h.allowedRoot); err != nil {
+				http.Error(w, "cwd outside allowed root", http.StatusBadRequest)
+				return
+			}
+		}
 	}
-	cwdKey := strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
-	cwdKey = strings.ReplaceAll(cwdKey, ":", "_")
-	if len(cwdKey) > 128 {
-		cwdKey = cwdKey[:128]
-	}
+	cwdKey := session.SanitizeCWDKey(cwd)
 	key := session.TakeoverKey(cwdKey)
 
 	// Kill the original process.
@@ -223,11 +215,11 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 
 	go func() {
 		// Wait, SIGKILL, and remove stale session files.
-		discovery.WaitAndCleanup(context.Background(), pid, procStartTime, claudeDir, reqCWD, sessionID)
+		discovery.WaitAndCleanup(h.appCtx, pid, procStartTime, claudeDir, reqCWD, sessionID)
 
 		// Takeover via router — use Background context so the spawned process
 		// outlives the HTTP request.
-		_, err := router.Takeover(context.Background(), key, sessionID, cwd, session.AgentOpts{
+		_, err := router.Takeover(h.appCtx, key, sessionID, cwd, session.AgentOpts{
 			Model:     agentOpts.Model,
 			ExtraArgs: agentOpts.ExtraArgs,
 		})
@@ -245,9 +237,7 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 		}
 	}()
 
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	writeJSON(w, map[string]string{"status": "accepted", "key": key})
+	writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": key})
 }
 
 // POST /api/discovered/close — kill an external CLI process without resuming its session.
@@ -280,7 +270,6 @@ func (h *DiscoveryHandlers) handleClose(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, map[string]string{"status": "ok"})
 		return
 	}
@@ -346,13 +335,12 @@ func (h *DiscoveryHandlers) handleClose(w http.ResponseWriter, r *http.Request) 
 	broadcast := h.broadcast
 
 	go func() {
-		discovery.WaitAndCleanup(context.Background(), pid, procStartTime, claudeDir, cwd, sessionID)
+		discovery.WaitAndCleanup(h.appCtx, pid, procStartTime, claudeDir, cwd, sessionID)
 		slog.Info("discovered session closed", "pid", pid, "session_id", sessionID)
 		if broadcast != nil {
 			broadcast()
 		}
 	}()
 
-	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]string{"status": "ok"})
 }

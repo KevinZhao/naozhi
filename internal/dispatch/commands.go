@@ -18,7 +18,7 @@ import (
 func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) bool {
 	switch {
 	case trimmed == "/cron" || strings.HasPrefix(trimmed, "/cron "):
-		if d.Scheduler != nil {
+		if d.scheduler != nil {
 			d.handleCronCommand(ctx, msg, trimmed, log)
 		}
 		return true
@@ -28,9 +28,9 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 		return true
 
 	case strings.HasPrefix(trimmed, "/cd "):
-		if d.ProjectMgr != nil {
-			if proj := d.ProjectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
-				if p := d.Platforms[msg.Platform]; p != nil {
+		if d.projectMgr != nil {
+			if proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
+				if p := d.platforms[msg.Platform]; p != nil {
 					if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: fmt.Sprintf("当前已绑定项目 %s，工作目录固定为项目路径。如需切换，请先 /project off 解绑。", proj.Name)}); err != nil {
 						slog.Warn("reply failed", "platform", msg.Platform, "chat", msg.ChatID, "err", err)
 					}
@@ -43,8 +43,8 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 
 	case trimmed == "/pwd":
 		chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
-		ws := d.Router.GetWorkspace(chatKey)
-		if p := d.Platforms[msg.Platform]; p != nil {
+		ws := d.router.GetWorkspace(chatKey)
+		if p := d.platforms[msg.Platform]; p != nil {
 			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "当前工作目录: " + ws}); err != nil {
 				slog.Warn("reply failed", "platform", msg.Platform, "chat", msg.ChatID, "err", err)
 			}
@@ -66,7 +66,7 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 }
 
 func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.IncomingMessage) {
-	p := d.Platforms[msg.Platform]
+	p := d.platforms[msg.Platform]
 	if p == nil {
 		return
 	}
@@ -78,9 +78,9 @@ func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.Incomin
 		"  /pwd — 显示当前工作目录\n" +
 		"  /project [name|off|list] — 项目绑定\n" +
 		"  /cron <add|list|del|pause|resume> — 定时任务"
-	if len(d.AgentCommands) > 0 {
+	if len(d.agentCommands) > 0 {
 		help += "\n\n可用 Agent:"
-		for cmd, agentID := range d.AgentCommands {
+		for cmd, agentID := range d.agentCommands {
 			help += "\n  /" + cmd + " → " + agentID
 		}
 	}
@@ -96,25 +96,28 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 	}
 
 	// In project-bound mode: /new resets planner, /new {agent} resets that agent
-	if d.ProjectMgr != nil {
-		if proj := d.ProjectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
+	if d.projectMgr != nil {
+		if proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
 			if agentToReset == "" {
-				d.Router.Reset(proj.PlannerSessionKey())
-				if p := d.Platforms[msg.Platform]; p != nil {
+				plannerKey := proj.PlannerSessionKey()
+				d.router.Reset(plannerKey)
+				d.discardQueue(plannerKey)
+				if p := d.platforms[msg.Platform]; p != nil {
 					if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "项目 " + proj.Name + " 的 planner 已重置。"}); err != nil {
 						log.Warn("reply failed", "err", err)
 					}
 				}
 			} else {
-				if id, ok := d.AgentCommands[agentToReset]; ok {
+				if id, ok := d.agentCommands[agentToReset]; ok {
 					key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, id)
-					d.Router.Reset(key)
-					if p := d.Platforms[msg.Platform]; p != nil {
+					d.router.Reset(key)
+					d.discardQueue(key)
+					if p := d.platforms[msg.Platform]; p != nil {
 						if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "会话已重置 (" + id + ")。"}); err != nil {
 							log.Warn("reply failed", "err", err)
 						}
 					}
-				} else if p := d.Platforms[msg.Platform]; p != nil {
+				} else if p := d.platforms[msg.Platform]; p != nil {
 					if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "未知的 agent: " + agentToReset}); err != nil {
 						log.Warn("reply failed", "err", err)
 					}
@@ -126,11 +129,11 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 
 	agentID := "general"
 	if agentToReset != "" {
-		if id, ok := d.AgentCommands[agentToReset]; ok {
+		if id, ok := d.agentCommands[agentToReset]; ok {
 			agentID = id
 		} else {
 			found := false
-			for _, id := range d.AgentCommands {
+			for _, id := range d.agentCommands {
 				if id == agentToReset {
 					agentID = id
 					found = true
@@ -138,11 +141,11 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 				}
 			}
 			if !found {
-				if p := d.Platforms[msg.Platform]; p != nil {
+				if p := d.platforms[msg.Platform]; p != nil {
 					errMsg := "未知的 agent: " + agentToReset
-					if len(d.AgentCommands) > 0 {
+					if len(d.agentCommands) > 0 {
 						var names []string
-						for cmd := range d.AgentCommands {
+						for cmd := range d.agentCommands {
 							names = append(names, cmd)
 						}
 						errMsg += "\n可用: " + strings.Join(names, ", ")
@@ -156,8 +159,9 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 		}
 	}
 	key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
-	d.Router.Reset(key)
-	if p := d.Platforms[msg.Platform]; p != nil {
+	d.router.Reset(key)
+	d.discardQueue(key)
+	if p := d.platforms[msg.Platform]; p != nil {
 		label := ""
 		if agentID != "general" {
 			label = " (" + agentID + ")"
@@ -171,7 +175,7 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 
 // handleCronCommand dispatches /cron subcommands (add, list, del, pause, resume).
 func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) {
-	p := d.Platforms[msg.Platform]
+	p := d.platforms[msg.Platform]
 	if p == nil {
 		return
 	}
@@ -206,16 +210,16 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 			ChatType:  msg.ChatType,
 			CreatedBy: msg.UserID,
 		}
-		if err := d.Scheduler.AddJob(job); err != nil {
+		if err := d.scheduler.AddJob(job); err != nil {
 			reply("创建失败: " + err.Error())
 			return
 		}
-		next := d.Scheduler.NextRun(job)
+		next := d.scheduler.NextRun(job)
 		reply(fmt.Sprintf("Job %s 已创建。Schedule: %s, Next: %s", job.ID, job.Schedule, next.Format("01/02 15:04")))
 		log.Info("cron job created", "id", job.ID, "schedule", job.Schedule)
 
 	case "list":
-		jobs := d.Scheduler.ListJobs(msg.Platform, msg.ChatID)
+		jobs := d.scheduler.ListJobs(msg.Platform, msg.ChatID)
 		if len(jobs) == 0 {
 			reply("当前聊天没有定时任务。")
 			return
@@ -236,7 +240,7 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 			reply("用法: /cron del <id>")
 			return
 		}
-		j, err := d.Scheduler.DeleteJob(parts[2], msg.Platform, msg.ChatID)
+		j, err := d.scheduler.DeleteJob(parts[2], msg.Platform, msg.ChatID)
 		if err != nil {
 			reply("删除失败: " + err.Error())
 			return
@@ -249,7 +253,7 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 			reply("用法: /cron pause <id>")
 			return
 		}
-		j, err := d.Scheduler.PauseJob(parts[2], msg.Platform, msg.ChatID)
+		j, err := d.scheduler.PauseJob(parts[2], msg.Platform, msg.ChatID)
 		if err != nil {
 			reply("暂停失败: " + err.Error())
 			return
@@ -262,12 +266,12 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 			reply("用法: /cron resume <id>")
 			return
 		}
-		j, err := d.Scheduler.ResumeJob(parts[2], msg.Platform, msg.ChatID)
+		j, err := d.scheduler.ResumeJob(parts[2], msg.Platform, msg.ChatID)
 		if err != nil {
 			reply("恢复失败: " + err.Error())
 			return
 		}
-		next := d.Scheduler.NextRun(j)
+		next := d.scheduler.NextRun(j)
 		reply(fmt.Sprintf("Job %s 已恢复。Next: %s", j.ID, next.Format("01/02 15:04")))
 		log.Info("cron job resumed", "id", j.ID)
 
@@ -284,12 +288,12 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 
 // handleProjectCommand handles /project [name|off|list] commands.
 func (d *Dispatcher) handleProjectCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) {
-	p := d.Platforms[msg.Platform]
+	p := d.platforms[msg.Platform]
 	if p == nil {
 		return
 	}
 
-	if d.ProjectMgr == nil {
+	if d.projectMgr == nil {
 		if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "项目功能未启用（未配置 projects.root）。"}); err != nil {
 			log.Warn("reply failed", "err", err)
 		}
@@ -300,7 +304,7 @@ func (d *Dispatcher) handleProjectCommand(ctx context.Context, msg platform.Inco
 
 	switch arg {
 	case "":
-		proj := d.ProjectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID)
+		proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID)
 		if proj == nil {
 			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "当前未绑定项目。\n用法: /project <项目名> 绑定"}); err != nil {
 				log.Warn("reply failed", "err", err)
@@ -312,7 +316,7 @@ func (d *Dispatcher) handleProjectCommand(ctx context.Context, msg platform.Inco
 		}
 
 	case "off":
-		if err := d.ProjectMgr.UnbindAllChat(msg.Platform, msg.ChatType, msg.ChatID); err != nil {
+		if err := d.projectMgr.UnbindAllChat(msg.Platform, msg.ChatType, msg.ChatID); err != nil {
 			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "解绑失败: " + err.Error()}); err != nil {
 				log.Warn("reply failed", "err", err)
 			}
@@ -324,7 +328,7 @@ func (d *Dispatcher) handleProjectCommand(ctx context.Context, msg platform.Inco
 		log.Info("project unbound", "chat", msg.ChatID)
 
 	case "list":
-		projects := d.ProjectMgr.All()
+		projects := d.projectMgr.All()
 		if len(projects) == 0 {
 			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "无可用项目。"}); err != nil {
 				log.Warn("reply failed", "err", err)
@@ -340,14 +344,14 @@ func (d *Dispatcher) handleProjectCommand(ctx context.Context, msg platform.Inco
 		}
 
 	default:
-		proj := d.ProjectMgr.Get(arg)
+		proj := d.projectMgr.Get(arg)
 		if proj == nil {
 			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "项目不存在: " + arg + "\n使用 /project list 查看可用项目。"}); err != nil {
 				log.Warn("reply failed", "err", err)
 			}
 			return
 		}
-		if err := d.ProjectMgr.BindChat(proj.Name, msg.Platform, msg.ChatType, msg.ChatID); err != nil {
+		if err := d.projectMgr.BindChat(proj.Name, msg.Platform, msg.ChatType, msg.ChatID); err != nil {
 			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "绑定失败: " + err.Error()}); err != nil {
 				log.Warn("reply failed", "err", err)
 			}
@@ -362,7 +366,7 @@ func (d *Dispatcher) handleProjectCommand(ctx context.Context, msg platform.Inco
 
 // handleCdCommand changes the working directory for all sessions in a chat.
 func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) {
-	p := d.Platforms[msg.Platform]
+	p := d.platforms[msg.Platform]
 	if p == nil {
 		return
 	}
@@ -387,7 +391,7 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		absPath = filepath.Clean(path)
 	} else {
 		chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
-		currentWS := d.Router.GetWorkspace(chatKey)
+		currentWS := d.router.GetWorkspace(chatKey)
 		absPath = filepath.Join(currentWS, path)
 	}
 
@@ -408,7 +412,7 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 	}
 	absPath = resolved
 
-	if d.AllowedRoot != "" && absPath != d.AllowedRoot && !strings.HasPrefix(absPath, d.AllowedRoot+string(filepath.Separator)) {
+	if d.allowedRoot != "" && absPath != d.allowedRoot && !strings.HasPrefix(absPath, d.allowedRoot+string(filepath.Separator)) {
 		if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "不允许访问该路径"}); err != nil {
 			log.Warn("reply failed", "err", err)
 		}
@@ -416,8 +420,8 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 	}
 
 	chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
-	d.Router.SetWorkspace(chatKey, absPath)
-	d.Router.ResetChat(chatKey)
+	d.router.SetWorkspace(chatKey, absPath)
+	d.router.ResetChat(chatKey)
 
 	if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "工作目录已切换到: " + absPath + "\n所有会话已重置，新消息将在此目录下执行。"}); err != nil {
 		log.Warn("reply failed", "err", err)

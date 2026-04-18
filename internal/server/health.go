@@ -1,8 +1,6 @@
 package server
 
 import (
-	"encoding/json"
-	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -82,10 +80,7 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		resp["platforms"] = platStatus
 	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		slog.Error("encode health response", "err", err)
-	}
+	writeJSON(w, resp)
 }
 
 // systemInfo returns compact system fingerprint for the workspace info bar.

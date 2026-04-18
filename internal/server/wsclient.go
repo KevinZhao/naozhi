@@ -23,18 +23,19 @@ const (
 )
 
 type wsClient struct {
-	conn          *websocket.Conn
-	send          chan []byte
-	hub           *Hub
-	remoteIP      string // for rate limiting
-	authenticated atomic.Bool
-	authAttempts  atomic.Int32
-	sendLimiter   *rate.Limiter     // per-connection rate limit on "send" messages
-	subscriptions map[string]func() // key -> unsubscribe function
-	subGen        map[string]uint64 // key -> subscription generation (detects resubscribe race)
-	done          chan struct{}
-	doneOnce      sync.Once
-	dropped       atomic.Int64 // messages dropped due to full send buffer
+	conn             *websocket.Conn
+	send             chan []byte
+	hub              *Hub
+	remoteIP         string // for rate limiting
+	authenticated    atomic.Bool
+	authAttempts     atomic.Int32
+	sendLimiter      *rate.Limiter     // per-connection rate limit on "send" messages
+	interruptLimiter *rate.Limiter     // per-connection rate limit on "interrupt" messages (separate from send)
+	subscriptions    map[string]func() // key -> unsubscribe function
+	subGen           map[string]uint64 // key -> subscription generation (detects resubscribe race)
+	done             chan struct{}
+	doneOnce         sync.Once
+	dropped          atomic.Int64 // messages dropped due to full send buffer
 }
 
 func (c *wsClient) closeDone() {
@@ -129,6 +130,10 @@ func (c *wsClient) readPump() {
 		case "interrupt":
 			if !c.authenticated.Load() {
 				c.SendJSON(node.ServerMsg{Type: "error", Error: "not authenticated"})
+				continue
+			}
+			if !c.interruptLimiter.Allow() {
+				c.SendJSON(node.ServerMsg{Type: "error", Error: "rate limited"})
 				continue
 			}
 			c.hub.handleInterrupt(c, msg)

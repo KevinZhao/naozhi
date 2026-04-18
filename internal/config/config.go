@@ -35,6 +35,7 @@ type Config struct {
 	cachedNoOutputTimeout time.Duration `yaml:"-"`
 	cachedTotalTimeout    time.Duration `yaml:"-"`
 	cachedExecTimeout     time.Duration `yaml:"-"`
+	cachedCollectDelay    time.Duration `yaml:"-"`
 }
 
 // WorkspaceConfig identifies this naozhi instance.
@@ -57,6 +58,7 @@ type NodeConfig struct {
 	URL         string `yaml:"url"`
 	Token       string `yaml:"token"`
 	DisplayName string `yaml:"display_name"`
+	Insecure    bool   `yaml:"insecure"` // allow plaintext HTTP without authentication
 }
 
 // UpstreamConfig configures this node to connect as a reverse node to a primary.
@@ -90,10 +92,24 @@ type SessionConfig struct {
 	TTL       string         `yaml:"ttl"`
 	PruneTTL  string         `yaml:"prune_ttl"` // how long dead/suspended sessions stay in the list before removal
 	Watchdog  WatchdogConfig `yaml:"watchdog"`
+	Queue     QueueConfig    `yaml:"queue"`
 	StorePath string         `yaml:"store_path"`
 	CWD       string         `yaml:"cwd"`       // default working directory for CLI processes
 	Workspace string         `yaml:"workspace"` // deprecated alias for cwd (backward compat)
 	Shim      ShimConfig     `yaml:"shim"`
+}
+
+// QueueConfig controls IM message queuing when a session is busy.
+type QueueConfig struct {
+	// MaxDepth is the maximum number of messages to queue per session.
+	// nil (omitted) = use default (20).
+	// 0 = disable queuing (drop + "please wait", backward-compatible).
+	// Negative values are treated as 0.
+	MaxDepth *int `yaml:"max_depth"`
+	// CollectDelay is the time to wait after the current turn completes
+	// before draining queued messages. Allows capturing fast follow-up
+	// messages into the same batch. Default: "500ms".
+	CollectDelay string `yaml:"collect_delay"`
 }
 
 type ShimConfig struct {
@@ -185,7 +201,18 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
 
-	// Apply defaults
+	applyDefaults(&cfg)
+	if err := parseDurations(&cfg); err != nil {
+		return nil, err
+	}
+	if err := validateConfig(&cfg); err != nil {
+		return nil, err
+	}
+
+	return &cfg, nil
+}
+
+func applyDefaults(cfg *Config) {
 	if cfg.Server.Addr == "" {
 		cfg.Server.Addr = ":8080"
 	}
@@ -204,7 +231,13 @@ func Load(path string) (*Config, error) {
 	if cfg.Session.Workspace == "" {
 		cfg.Session.Workspace = "~/.naozhi/workspace"
 	}
-	// cwd takes precedence over deprecated workspace field
+	if cfg.Session.Queue.MaxDepth == nil {
+		defaultDepth := 20
+		cfg.Session.Queue.MaxDepth = &defaultDepth
+	}
+	if cfg.Session.Queue.CollectDelay == "" {
+		cfg.Session.Queue.CollectDelay = "500ms"
+	}
 	if cfg.Session.CWD != "" {
 		if cfg.Session.Workspace != "" && cfg.Session.Workspace != cfg.Session.CWD {
 			slog.Warn("both 'session.cwd' and deprecated 'session.workspace' configured; using 'cwd'")
@@ -214,7 +247,6 @@ func Load(path string) (*Config, error) {
 		cfg.Session.CWD = cfg.Session.Workspace
 	}
 
-	// Merge workspaces → nodes (workspaces is the preferred name; nodes is deprecated)
 	if len(cfg.Workspaces) > 0 && len(cfg.Nodes) == 0 {
 		cfg.Nodes = cfg.Workspaces
 	} else if len(cfg.Nodes) > 0 && len(cfg.Workspaces) == 0 {
@@ -225,7 +257,6 @@ func Load(path string) (*Config, error) {
 		cfg.Nodes = cfg.Workspaces
 	}
 
-	// Workspace identity defaults
 	if cfg.Workspace.ID == "" {
 		if h, err := os.Hostname(); err == nil {
 			cfg.Workspace.ID = h
@@ -236,118 +267,133 @@ func Load(path string) (*Config, error) {
 	if cfg.Workspace.Name == "" {
 		cfg.Workspace.Name = cfg.Workspace.ID
 	}
+}
 
-	// Parse and cache durations (validates and caches in one step)
-	var durErr error
-	if cfg.cachedTTL, durErr = parseDurationRequired(cfg.Session.TTL, "session.ttl", 30*time.Minute); durErr != nil {
-		return nil, durErr
+func parseDurations(cfg *Config) error {
+	var err error
+	if cfg.cachedTTL, err = parseDurationRequired(cfg.Session.TTL, "session.ttl", 30*time.Minute); err != nil {
+		return err
 	}
-	if cfg.cachedPruneTTL, durErr = parseDurationRequired(cfg.Session.PruneTTL, "session.prune_ttl", 72*time.Hour); durErr != nil {
-		return nil, durErr
+	if cfg.cachedPruneTTL, err = parseDurationRequired(cfg.Session.PruneTTL, "session.prune_ttl", 72*time.Hour); err != nil {
+		return err
 	}
-	if cfg.cachedNoOutputTimeout, durErr = parseDurationRequired(cfg.Session.Watchdog.NoOutputTimeout, "session.watchdog.no_output_timeout", 2*time.Minute); durErr != nil {
-		return nil, durErr
+	if cfg.cachedNoOutputTimeout, err = parseDurationRequired(cfg.Session.Watchdog.NoOutputTimeout, "session.watchdog.no_output_timeout", 2*time.Minute); err != nil {
+		return err
 	}
-	if cfg.cachedTotalTimeout, durErr = parseDurationRequired(cfg.Session.Watchdog.TotalTimeout, "session.watchdog.total_timeout", 5*time.Minute); durErr != nil {
-		return nil, durErr
+	if cfg.cachedTotalTimeout, err = parseDurationRequired(cfg.Session.Watchdog.TotalTimeout, "session.watchdog.total_timeout", 5*time.Minute); err != nil {
+		return err
 	}
-	if cfg.cachedExecTimeout, durErr = parseDurationRequired(cfg.Cron.ExecutionTimeout, "cron.execution_timeout", 5*time.Minute); durErr != nil {
-		return nil, durErr
+	if cfg.cachedExecTimeout, err = parseDurationRequired(cfg.Cron.ExecutionTimeout, "cron.execution_timeout", 5*time.Minute); err != nil {
+		return err
 	}
+	if cfg.cachedCollectDelay, err = parseDurationRequired(cfg.Session.Queue.CollectDelay, "session.queue.collect_delay", 500*time.Millisecond); err != nil {
+		return err
+	}
+	return nil
+}
 
-	// Warn if config values contain unexpanded env var placeholders
+func validateConfig(cfg *Config) error {
 	if cfg.Platforms.Feishu != nil {
 		if containsEnvPlaceholder(cfg.Platforms.Feishu.AppID) || containsEnvPlaceholder(cfg.Platforms.Feishu.AppSecret) {
-			return nil, fmt.Errorf("feishu app_id or app_secret contains unexpanded ${VAR} — check environment variables")
+			return fmt.Errorf("feishu app_id or app_secret contains unexpanded ${VAR} — check environment variables")
 		}
 		if containsEnvPlaceholder(cfg.Platforms.Feishu.VerificationToken) {
-			return nil, fmt.Errorf("feishu verification_token contains unexpanded ${VAR} — check environment variables")
+			return fmt.Errorf("feishu verification_token contains unexpanded ${VAR} — check environment variables")
 		}
 		if containsEnvPlaceholder(cfg.Platforms.Feishu.EncryptKey) {
-			return nil, fmt.Errorf("feishu encrypt_key contains unexpanded ${VAR} — check environment variables")
+			return fmt.Errorf("feishu encrypt_key contains unexpanded ${VAR} — check environment variables")
 		}
 		if cfg.Platforms.Feishu.AppID == "" || cfg.Platforms.Feishu.AppSecret == "" {
-			return nil, fmt.Errorf("feishu app_id and app_secret are required")
+			return fmt.Errorf("feishu app_id and app_secret are required")
 		}
-		// Webhook mode requires at least one auth mechanism to prevent unauthenticated access
 		if cfg.Platforms.Feishu.ConnectionMode == "webhook" &&
 			cfg.Platforms.Feishu.VerificationToken == "" && cfg.Platforms.Feishu.EncryptKey == "" {
-			return nil, fmt.Errorf("feishu webhook mode requires at least one of verification_token or encrypt_key to be set")
+			return fmt.Errorf("feishu webhook mode requires at least one of verification_token or encrypt_key to be set")
 		}
 	}
 	if cfg.Platforms.Slack != nil {
 		if containsEnvPlaceholder(cfg.Platforms.Slack.BotToken) {
-			return nil, fmt.Errorf("slack bot_token contains unexpanded ${VAR} — check environment variables")
+			return fmt.Errorf("slack bot_token contains unexpanded ${VAR} — check environment variables")
 		}
 		if cfg.Platforms.Slack.BotToken == "" {
-			return nil, fmt.Errorf("slack bot_token is required")
+			return fmt.Errorf("slack bot_token is required")
 		}
 	}
 	if cfg.Platforms.Discord != nil {
 		if containsEnvPlaceholder(cfg.Platforms.Discord.BotToken) {
-			return nil, fmt.Errorf("discord bot_token contains unexpanded ${VAR} — check environment variables")
+			return fmt.Errorf("discord bot_token contains unexpanded ${VAR} — check environment variables")
 		}
 		if cfg.Platforms.Discord.BotToken == "" {
-			return nil, fmt.Errorf("discord bot_token is required")
+			return fmt.Errorf("discord bot_token is required")
 		}
 	}
 	if cfg.Platforms.Weixin != nil {
 		if containsEnvPlaceholder(cfg.Platforms.Weixin.Token) {
-			return nil, fmt.Errorf("weixin token contains unexpanded ${VAR} — check environment variables")
+			return fmt.Errorf("weixin token contains unexpanded ${VAR} — check environment variables")
 		}
 		if cfg.Platforms.Weixin.Token == "" {
-			return nil, fmt.Errorf("weixin token is required")
+			return fmt.Errorf("weixin token is required")
 		}
 	}
 
-	// Validate node configs
 	for id, nc := range cfg.Nodes {
 		if nc.URL == "" {
-			return nil, fmt.Errorf("node %q: url is required", id)
+			return fmt.Errorf("node %q: url is required", id)
 		}
 		if strings.HasSuffix(nc.URL, "/") {
-			return nil, fmt.Errorf("node %q: url must not have trailing slash", id)
+			return fmt.Errorf("node %q: url must not have trailing slash", id)
 		}
 		u, err := url.Parse(nc.URL)
 		if err != nil {
-			return nil, fmt.Errorf("node %q: invalid url: %w", id, err)
+			return fmt.Errorf("node %q: invalid url: %w", id, err)
 		}
 		if u.Scheme != "http" && u.Scheme != "https" {
-			return nil, fmt.Errorf("node %q: url must be http or https", id)
+			return fmt.Errorf("node %q: url must be http or https", id)
 		}
 		if u.Scheme == "http" && nc.Token != "" {
-			return nil, fmt.Errorf("node %q: refusing to send bearer token over plaintext HTTP — use HTTPS", id)
+			return fmt.Errorf("node %q: refusing to send bearer token over plaintext HTTP — use HTTPS", id)
 		}
 		if u.Scheme == "http" && nc.Token == "" {
+			if !nc.Insecure {
+				return fmt.Errorf("node %q: plaintext HTTP without authentication is unsafe — set insecure: true to allow", id)
+			}
 			slog.Warn("node uses plaintext HTTP without authentication — session data is exposed to network attackers", "node", id)
 		}
 	}
 
 	if cfg.Upstream != nil {
 		if cfg.Upstream.URL == "" {
-			return nil, fmt.Errorf("upstream.url is required")
+			return fmt.Errorf("upstream.url is required")
 		}
 		if !strings.HasPrefix(cfg.Upstream.URL, "wss://") && !strings.HasPrefix(cfg.Upstream.URL, "ws://") {
-			return nil, fmt.Errorf("upstream.url must use ws:// or wss:// scheme")
+			return fmt.Errorf("upstream.url must use ws:// or wss:// scheme")
+		}
+		if strings.HasPrefix(cfg.Upstream.URL, "ws://") {
+			return fmt.Errorf("upstream.url must use wss:// — refusing to send bearer token over plaintext ws://")
 		}
 		if cfg.Upstream.NodeID == "" {
-			return nil, fmt.Errorf("upstream.node_id is required")
+			return fmt.Errorf("upstream.node_id is required")
 		}
 		if cfg.Upstream.Token == "" {
-			return nil, fmt.Errorf("upstream.token is required")
+			return fmt.Errorf("upstream.token is required")
 		}
 	}
 
 	for id, entry := range cfg.ReverseNodes {
 		if entry.Token == "" {
-			return nil, fmt.Errorf("reverse_nodes %q: token is required", id)
+			return fmt.Errorf("reverse_nodes %q: token is required", id)
 		}
 		if containsEnvPlaceholder(entry.Token) {
-			return nil, fmt.Errorf("reverse_nodes %q: token contains unexpanded ${VAR} — check environment variables", id)
+			return fmt.Errorf("reverse_nodes %q: token contains unexpanded ${VAR} — check environment variables", id)
 		}
 	}
 
-	return &cfg, nil
+	if cfg.Server.DashboardToken == "" {
+		slog.Warn("SECURITY: dashboard_token is empty — all dashboard API endpoints are accessible without authentication",
+			"hint", "set NAOZHI_DASHBOARD_TOKEN or dashboard_token in config")
+	}
+
+	return nil
 }
 
 // parseDurationRequired parses s as a positive duration.
@@ -384,6 +430,19 @@ func (c *Config) ParseWatchdog() (noOutputTimeout, totalTimeout time.Duration) {
 // ParseExecutionTimeout returns the cron execution timeout duration (cached after Load).
 func (c *Config) ParseExecutionTimeout() time.Duration {
 	return c.cachedExecTimeout
+}
+
+// ParseCollectDelay returns the queue collect delay (cached after Load).
+func (c *Config) ParseCollectDelay() time.Duration {
+	return c.cachedCollectDelay
+}
+
+// QueueMaxDepth returns the resolved queue max depth.
+func (c *Config) QueueMaxDepth() int {
+	if c.Session.Queue.MaxDepth == nil {
+		return 20
+	}
+	return *c.Session.Queue.MaxDepth
 }
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -33,6 +32,7 @@ type processIface interface {
 	EventLastN(n int) []cli.EventEntry
 	EventEntriesSince(afterMS int64) []cli.EventEntry
 	LastEntryOfType(typ string) cli.EventEntry
+	LastActivitySummary() string
 	ProtocolName() string
 	SubscribeEvents() (<-chan struct{}, func())
 	PID() int
@@ -45,7 +45,7 @@ type processBox struct{ p processIface }
 
 // ManagedSession wraps a claude CLI process with session metadata.
 type ManagedSession struct {
-	Key string
+	key string
 
 	// sessionID stores the CLI session ID atomically.
 	// Written once during first successful Send, read by Snapshot lock-free.
@@ -90,10 +90,16 @@ type ManagedSession struct {
 	// Used on startup to load the full conversation chain from JSONL files.
 	prevSessionIDs []string
 
-	// Exempt marks this session as exempt from TTL cleanup, eviction, and activeCount.
+	// exempt marks this session as exempt from TTL cleanup, eviction, and activeCount.
 	// Used for planner sessions that should persist indefinitely.
-	Exempt bool
+	exempt bool
 }
+
+// SessionKey returns the immutable session key.
+func (s *ManagedSession) SessionKey() string { return s.key }
+
+// IsExempt returns whether this session is exempt from TTL and eviction.
+func (s *ManagedSession) IsExempt() bool { return s.exempt }
 
 func (s *ManagedSession) loadProcess() processIface {
 	if box := s.process.Load(); box != nil {
@@ -131,6 +137,28 @@ func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
 	}
 }
 
+// ReattachProcessNoCallback is like ReattachProcess but skips the onSessionID
+// callback. Used when the caller already holds router.mu and will track the
+// session ID directly (avoids deadlock since onSessionID acquires router.mu).
+//
+// Does NOT acquire sendMu: all operations here are atomic stores, and the
+// caller already holds router.mu (write). Acquiring sendMu here would violate
+// the documented lock ordering (sendMu → router.mu) and risk ABBA deadlock
+// with Send() which holds sendMu then calls onSessionID → router.mu.
+//
+// SAFETY CONSTRAINT: this function must only be called when Send() cannot be
+// in flight for this session (e.g., during ReconnectShims at startup, or while
+// the session's process is known-dead). If Send() were concurrently executing,
+// the deathReason.Store("") here could silently erase a diagnostic death reason
+// that Send() just set. The lack of sendMu makes this a logical race on the
+// deathReason value, even though each individual Store is atomic.
+func (s *ManagedSession) ReattachProcessNoCallback(proc processIface, sessionID string) {
+	s.storeProcess(proc)
+	s.setSessionID(sessionID)
+	s.deathReason.Store("")
+	s.lastActive.Store(time.Now().UnixNano())
+}
+
 // GetLastActive returns the last active time.
 func (s *ManagedSession) GetLastActive() time.Time {
 	return time.Unix(0, s.lastActive.Load())
@@ -163,26 +191,17 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	}
 	s.lastPrompt.Store(prompt)
 
-	// Wrap onEvent to track last tool_use/thinking for Snapshot.
-	wrappedOnEvent := func(ev cli.Event) {
-		if ev.Type == "assistant" && ev.Message != nil {
-			for _, block := range ev.Message.Content {
-				if block.Type == "thinking" {
-					s.lastActivity.Store(cli.TruncateRunes(block.Text, 120))
-					break
-				}
-				if block.Type == "tool_use" {
-					s.lastActivity.Store(block.Name)
-					break
-				}
-			}
-		}
-		if onEvent != nil {
-			onEvent(ev)
-		}
+	proc := s.loadProcess()
+	if proc == nil {
+		return nil, fmt.Errorf("session %s has no active process", s.key)
 	}
 
-	result, err := s.loadProcess().Send(ctx, text, images, wrappedOnEvent)
+	// lastActivity tracking is handled lock-free by EventLog.Append via its
+	// cached lastActivitySummary; Snapshot() reads that value when the process
+	// is alive. Passing onEvent directly (no wrapper closure) avoids a per-Send
+	// heap allocation on the nil-callback path (cron/connector) and one less
+	// indirect call per event on the Send path.
+	result, err := proc.Send(ctx, text, images, onEvent)
 	if err != nil {
 		if errors.Is(err, cli.ErrNoOutputTimeout) {
 			s.deathReason.Store("no_output_timeout")
@@ -249,7 +268,7 @@ func (s *ManagedSession) setSessionID(id string) {
 // parseKeyParts lazily parses the immutable session key into cached components.
 func (s *ManagedSession) parseKeyParts() {
 	s.keyOnce.Do(func() {
-		parts := strings.SplitN(s.Key, ":", 4)
+		parts := strings.SplitN(s.key, ":", 4)
 		if len(parts) >= 1 {
 			s.keyPlatform = parts[0]
 		}
@@ -270,13 +289,38 @@ const maxKeyComponent = 128
 
 // sanitizeKeyComponent truncates and strips colons from a session key component
 // to prevent key confusion and unbounded map key growth.
+//
+// Fast path: most session-key components are short ASCII without colons
+// (platform IDs, agent names, chat IDs). Avoid ReplaceAll+RuneCount allocations
+// in that common case.
 func sanitizeKeyComponent(s string) string {
+	if len(s) <= maxKeyComponent {
+		ok := true
+		for i := 0; i < len(s); i++ {
+			c := s[i]
+			if c == ':' || c >= 0x80 {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return s
+		}
+	}
 	s = strings.ReplaceAll(s, ":", "_")
 	if utf8.RuneCountInString(s) > maxKeyComponent {
 		runes := []rune(s)
 		s = string(runes[:maxKeyComponent])
 	}
 	return s
+}
+
+// SanitizeCWDKey converts a filesystem path to a safe session-key component
+// by stripping the leading slash, replacing path separators and colons,
+// and truncating to maxKeyComponent.
+func SanitizeCWDKey(cwd string) string {
+	s := strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
+	return sanitizeKeyComponent(s)
 }
 
 // SessionKey builds a session key from components.
@@ -325,7 +369,7 @@ func (s *ManagedSession) HasProcess() bool {
 func (s *ManagedSession) Snapshot() SessionSnapshot {
 	s.parseKeyParts()
 	snap := SessionSnapshot{
-		Key:        s.Key,
+		Key:        s.key,
 		Platform:   s.keyPlatform,
 		ChatType:   s.keyChatType,
 		ChatID:     s.keyChatID,
@@ -349,14 +393,20 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		snap.Protocol = proc.ProtocolName()
 		snap.TotalCost = proc.TotalCost()
 		snap.Subagents = proc.TurnAgents()
+		// Prefer the EventLog-maintained summary (updated lock-free on every
+		// event) so we don't need a wrapper closure around Send just to track
+		// lastActivity.
+		snap.LastActivity = proc.LastActivitySummary()
 	}
 
 	// Read cached values instead of copying the full event log.
 	if v := s.lastPrompt.Load(); v != nil {
 		snap.LastPrompt = v.(string)
 	}
-	if v := s.lastActivity.Load(); v != nil {
-		snap.LastActivity = v.(string)
+	if snap.LastActivity == "" {
+		if v := s.lastActivity.Load(); v != nil {
+			snap.LastActivity = v.(string)
+		}
 	}
 
 	return snap
@@ -403,32 +453,19 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	}
 	s.historyMu.RLock()
 	defer s.historyMu.RUnlock()
-	i := sort.Search(len(s.persistedHistory), func(i int) bool {
-		return s.persistedHistory[i].Time > afterMS
-	})
-	if i < len(s.persistedHistory) {
-		out := make([]cli.EventEntry, len(s.persistedHistory)-i)
-		copy(out, s.persistedHistory[i:])
+	// Linear scan from the end to find the boundary. persistedHistory may not be
+	// strictly sorted by Time (multiple InjectHistory calls can interleave sessions),
+	// so binary search (sort.Search) would be incorrect.
+	start := len(s.persistedHistory)
+	for start > 0 && s.persistedHistory[start-1].Time > afterMS {
+		start--
+	}
+	if start < len(s.persistedHistory) {
+		out := make([]cli.EventEntry, len(s.persistedHistory)-start)
+		copy(out, s.persistedHistory[start:])
 		return out
 	}
 	return nil
-}
-
-// LastUserEntry returns the most recent "user" event entry from the process
-// EventLog or persisted history. Returns a zero EventEntry if none found.
-func (s *ManagedSession) LastUserEntry() cli.EventEntry {
-	proc := s.loadProcess()
-	if proc != nil {
-		return proc.LastEntryOfType("user")
-	}
-	s.historyMu.RLock()
-	defer s.historyMu.RUnlock()
-	for i := len(s.persistedHistory) - 1; i >= 0; i-- {
-		if s.persistedHistory[i].Type == "user" {
-			return s.persistedHistory[i]
-		}
-	}
-	return cli.EventEntry{}
 }
 
 // SubscribeEvents subscribes to event log notifications for this session.
@@ -448,6 +485,9 @@ func (s *ManagedSession) SubscribeEvents() (<-chan struct{}, func()) {
 func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	s.historyMu.Lock()
 	defer s.historyMu.Unlock()
+	if len(entries) >= maxPersistedHistory {
+		entries = entries[len(entries)-maxPersistedHistory:]
+	}
 	s.persistedHistory = append(s.persistedHistory, entries...)
 	if len(s.persistedHistory) > maxPersistedHistory {
 		s.persistedHistory = s.persistedHistory[len(s.persistedHistory)-maxPersistedHistory:]
@@ -457,6 +497,39 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	}
 	// Update cached snapshot values from injected history (only if not yet set by Send).
 	// Scan from the end to find the last user/tool_use entries efficiently.
+	var prompt, activity string
+	for i := len(entries) - 1; i >= 0; i-- {
+		e := entries[i]
+		if prompt == "" && e.Type == "user" {
+			prompt = e.Summary
+		}
+		if activity == "" && (e.Type == "tool_use" || e.Type == "thinking") {
+			activity = e.Summary
+		}
+		if prompt != "" && activity != "" {
+			break
+		}
+	}
+	if prompt != "" && s.lastPrompt.Load() == nil {
+		s.lastPrompt.Store(prompt)
+	}
+	if activity != "" && s.lastActivity.Load() == nil {
+		s.lastActivity.Store(activity)
+	}
+}
+
+// extractLastPromptFromProcess scans the attached process's event log to populate
+// lastPrompt and lastActivity when they haven't been set yet (e.g. after shim reconnect
+// where events were injected directly into the process, bypassing InjectHistory).
+func (s *ManagedSession) extractLastPromptFromProcess() {
+	if s.lastPrompt.Load() != nil && s.lastActivity.Load() != nil {
+		return
+	}
+	p := s.loadProcess()
+	if p == nil {
+		return
+	}
+	entries := p.EventEntries()
 	var prompt, activity string
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]

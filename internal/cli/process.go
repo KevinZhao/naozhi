@@ -145,9 +145,21 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 
+	// Fast path: buffer is empty and data is a single complete line ending in '\n'.
+	// This is the normal path from Protocol.WriteMessage.
+	// The embedded-newline guard ensures multi-line data falls through to the
+	// slow path which splits on '\n' correctly.
+	if w.buf.Len() == 0 && len(data) > 0 && data[len(data)-1] == '\n' &&
+		bytes.IndexByte(data[:len(data)-1], '\n') == -1 {
+		trimmed := string(data[:len(data)-1])
+		if err := w.p.shimSend(shimClientMsg{Type: "write", Line: trimmed}); err != nil {
+			return 0, err
+		}
+		return len(data), nil
+	}
+
+	// Slow path: fragmented writes, use buffer.
 	w.buf.Write(data)
-	// Protocol.WriteMessage writes complete NDJSON lines ending with \n.
-	// Buffer until we see a newline, then send each complete line as a shim write command.
 	for {
 		line, err := w.buf.ReadBytes('\n')
 		if err != nil {
@@ -155,8 +167,8 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 			w.buf.Write(line)
 			break
 		}
-		trimmed := bytes.TrimRight(line, "\n")
-		if err := w.p.shimSend(shimClientMsg{Type: "write", Line: string(trimmed)}); err != nil {
+		trimmed := string(line[:len(line)-1])
+		if err := w.p.shimSend(shimClientMsg{Type: "write", Line: trimmed}); err != nil {
 			return 0, err
 		}
 	}
@@ -171,17 +183,26 @@ type shimClientMsg struct {
 	Seq   int64  `json:"last_seq,omitempty"`
 }
 
+// shimSendBufPool reuses bytes.Buffer instances for marshaling outgoing shim
+// messages. Saves ~one alloc per Send/ping/interrupt on the hot path.
+var shimSendBufPool = sync.Pool{
+	New: func() any { return new(bytes.Buffer) },
+}
+
 func (p *Process) shimSend(msg shimClientMsg) error {
-	data, err := json.Marshal(msg)
-	if err != nil {
+	buf := shimSendBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer shimSendBufPool.Put(buf)
+
+	// json.Encoder writes directly into the pooled buffer and appends '\n'.
+	enc := json.NewEncoder(buf)
+	if err := enc.Encode(msg); err != nil {
 		return err
 	}
+
 	p.shimWMu.Lock()
 	defer p.shimWMu.Unlock()
-	if _, err := p.shimW.Write(data); err != nil {
-		return err
-	}
-	if err := p.shimW.WriteByte('\n'); err != nil {
+	if _, err := p.shimW.Write(buf.Bytes()); err != nil {
 		return err
 	}
 	return p.shimW.Flush()
@@ -409,15 +430,19 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 	if len(images) > 0 {
 		userEntry.Summary += fmt.Sprintf(" [+%d image(s)]", len(images))
 		thumbs := make([]string, len(images))
-		var wg sync.WaitGroup
-		for i, img := range images {
-			wg.Add(1)
-			go func(i int, data []byte) {
-				defer wg.Done()
-				thumbs[i] = MakeThumbnail(data, 200)
-			}(i, img.Data)
+		if len(images) == 1 {
+			thumbs[0] = MakeThumbnail(images[0].Data, 600)
+		} else {
+			var wg sync.WaitGroup
+			for i, img := range images {
+				wg.Add(1)
+				go func(i int, data []byte) {
+					defer wg.Done()
+					thumbs[i] = MakeThumbnail(data, 600)
+				}(i, img.Data)
+			}
+			wg.Wait()
 		}
-		wg.Wait()
 		filtered := thumbs[:0]
 		for _, t := range thumbs {
 			if t != "" {
@@ -455,10 +480,21 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 	if totalDur <= 0 {
 		totalDur = DefaultTotalTimeout
 	}
-	noOutputTimer := time.NewTimer(noOutputDur)
-	defer noOutputTimer.Stop()
-	totalTimer := time.NewTimer(totalDur)
-	defer totalTimer.Stop()
+
+	// Watchdog via a single periodic ticker instead of per-event timer
+	// Stop/drain/Reset (three timer-heap ops per event). The ticker interval
+	// caps timeout precision, but timeouts are minutes so this is acceptable.
+	checkInterval := noOutputDur / 4
+	if checkInterval < time.Second {
+		checkInterval = time.Second
+	}
+	if checkInterval > 30*time.Second {
+		checkInterval = 30 * time.Second
+	}
+	turnStart := time.Now()
+	lastOutput := turnStart
+	ticker := time.NewTicker(checkInterval)
+	defer ticker.Stop()
 
 	for {
 		select {
@@ -481,13 +517,7 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 				return nil, fmt.Errorf("process exited during send")
 			}
 
-			if !noOutputTimer.Stop() {
-				select {
-				case <-noOutputTimer.C:
-				default:
-				}
-			}
-			noOutputTimer.Reset(noOutputDur)
+			lastOutput = time.Now()
 
 			// Capture session ID from first init event.
 			// logEvent (called by readLoop) already skips init events.
@@ -525,22 +555,24 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 					CostUSD:   ev.CostUSD,
 				}, nil
 			}
-		case <-noOutputTimer.C:
-			// Before reporting timeout, check if result was logged to EventLog
-			// but missed by eventCh (non-blocking send dropped it).
-			if sr := p.findResultSince(turnStartMS); sr != nil {
-				return sr, nil
+		case <-ticker.C:
+			now := time.Now()
+			if now.Sub(lastOutput) >= noOutputDur {
+				if sr := p.findResultSince(turnStartMS); sr != nil {
+					return sr, nil
+				}
+				slog.Error("watchdog: no output timeout", "timeout", noOutputDur)
+				p.Kill()
+				return nil, fmt.Errorf("%w (%s)", ErrNoOutputTimeout, noOutputDur)
 			}
-			slog.Error("watchdog: no output timeout", "timeout", noOutputDur)
-			p.Kill()
-			return nil, fmt.Errorf("%w (%s)", ErrNoOutputTimeout, noOutputDur)
-		case <-totalTimer.C:
-			if sr := p.findResultSince(turnStartMS); sr != nil {
-				return sr, nil
+			if now.Sub(turnStart) >= totalDur {
+				if sr := p.findResultSince(turnStartMS); sr != nil {
+					return sr, nil
+				}
+				slog.Error("watchdog: total timeout", "timeout", totalDur)
+				p.Kill()
+				return nil, fmt.Errorf("%w (%s)", ErrTotalTimeout, totalDur)
 			}
-			slog.Error("watchdog: total timeout", "timeout", totalDur)
-			p.Kill()
-			return nil, fmt.Errorf("%w (%s)", ErrTotalTimeout, totalDur)
 		}
 	}
 }
@@ -676,7 +708,7 @@ func EventEntryFromEvent(ev Event) (EventEntry, bool) {
 			if ev.Description != "" {
 				entry.Summary = TruncateRunes(ev.Description, 120)
 			}
-		case "task_progress":
+		case "task_progress", "task_updated":
 			entry.Type = "task_progress"
 			entry.TaskID = ev.TaskID
 			entry.ToolUseID = ev.ToolUseID
@@ -834,42 +866,72 @@ func shortPath(p string) string {
 }
 
 // FormatToolInput extracts a human-readable summary from a tool's JSON input.
+// Uses per-tool struct parsing to avoid map allocation on the hot path.
 func FormatToolInput(toolName string, input json.RawMessage) string {
-	var inp map[string]json.RawMessage
-	if json.Unmarshal(input, &inp) != nil {
-		return toolName + ": " + TruncateRunes(string(input), 300)
+	if len(input) == 0 {
+		return toolName
 	}
 
 	switch toolName {
-	case "Read":
-		return toolName + " " + shortPath(getStr(inp, "file_path"))
-	case "Write":
-		return toolName + " " + shortPath(getStr(inp, "file_path"))
-	case "Edit":
-		return toolName + " " + shortPath(getStr(inp, "file_path"))
+	case "Read", "Write", "Edit":
+		var s struct {
+			FilePath string `json:"file_path"`
+		}
+		if json.Unmarshal(input, &s) == nil && s.FilePath != "" {
+			return toolName + " " + shortPath(s.FilePath)
+		}
 	case "Glob":
-		return toolName + " " + getStr(inp, "pattern")
+		var s struct {
+			Pattern string `json:"pattern"`
+		}
+		if json.Unmarshal(input, &s) == nil && s.Pattern != "" {
+			return toolName + " " + s.Pattern
+		}
 	case "Grep":
-		s := toolName + " " + getStr(inp, "pattern")
-		if path := getStr(inp, "path"); path != "" {
-			s += " in " + shortPath(path)
+		var s struct {
+			Pattern string `json:"pattern"`
+			Path    string `json:"path"`
 		}
-		return s
+		if json.Unmarshal(input, &s) == nil && s.Pattern != "" {
+			result := toolName + " " + s.Pattern
+			if s.Path != "" {
+				result += " in " + shortPath(s.Path)
+			}
+			return result
+		}
 	case "Bash":
-		if desc := getStr(inp, "description"); desc != "" {
-			return toolName + " " + desc
+		var s struct {
+			Description string `json:"description"`
+			Command     string `json:"command"`
 		}
-		return toolName + " " + TruncateRunes(getStr(inp, "command"), 80)
-	case "Agent":
-		return toolName + " " + TruncateRunes(getStr(inp, "description"), 60)
-	default:
-		for _, key := range []string{"description", "file_path", "path", "command", "pattern", "prompt"} {
-			if v := getStr(inp, key); v != "" {
-				return toolName + " " + TruncateRunes(v, 80)
+		if json.Unmarshal(input, &s) == nil {
+			if s.Description != "" {
+				return toolName + " " + s.Description
+			}
+			if s.Command != "" {
+				return toolName + " " + TruncateRunes(s.Command, 80)
 			}
 		}
-		return toolName + ": " + TruncateRunes(string(input), 300)
+	case "Agent":
+		var s struct {
+			Description string `json:"description"`
+		}
+		if json.Unmarshal(input, &s) == nil && s.Description != "" {
+			return toolName + " " + TruncateRunes(s.Description, 60)
+		}
+	default:
+		// Fallback: try common keys with a map (rare path for unknown tools)
+		var inp map[string]json.RawMessage
+		if json.Unmarshal(input, &inp) == nil {
+			for _, key := range []string{"description", "file_path", "path", "command", "pattern", "prompt"} {
+				if v := getStr(inp, key); v != "" {
+					return toolName + " " + TruncateRunes(v, 80)
+				}
+			}
+		}
 	}
+
+	return toolName + ": " + TruncateRunes(string(input), 300)
 }
 
 // GetState returns the current process state.
@@ -948,6 +1010,12 @@ func (p *Process) LastEntryOfType(typ string) EventEntry {
 // TurnAgents returns the sub-agent types spawned in the current turn.
 func (p *Process) TurnAgents() []SubagentInfo {
 	return p.eventLog.TurnAgents()
+}
+
+// LastActivitySummary returns the summary of the most recent tool_use/thinking
+// entry, as maintained atomically by EventLog.Append.
+func (p *Process) LastActivitySummary() string {
+	return p.eventLog.LastActivitySummary()
 }
 
 // SubscribeEvents returns a notification channel and unsubscribe function.

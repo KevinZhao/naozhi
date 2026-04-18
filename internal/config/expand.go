@@ -1,17 +1,9 @@
 package config
 
-import (
-	"os"
-	"path/filepath"
-	"strings"
-)
+import "github.com/naozhi/naozhi/internal/osutil"
 
 // ExpandHome replaces a leading ~/ with the user's home directory.
+// Deprecated: use osutil.ExpandHome directly.
 func ExpandHome(path string) string {
-	if strings.HasPrefix(path, "~/") {
-		if home, err := os.UserHomeDir(); err == nil {
-			return filepath.Join(home, path[2:])
-		}
-	}
-	return path
+	return osutil.ExpandHome(path)
 }

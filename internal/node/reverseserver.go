@@ -3,12 +3,14 @@ package node
 import (
 	"crypto/subtle"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/naozhi/naozhi/internal/config"
+	"golang.org/x/time/rate"
 )
 
 // reverseUpgrader is the WebSocket upgrader for reverse node connections.
@@ -26,8 +28,42 @@ type ReverseServer struct {
 	names map[string]string       // node_id → configured display_name
 	conns map[string]*ReverseConn // node_id → active connection
 
+	// wsLimiters is an internal per-IP rate limiter store for /ws-node connections.
+	// Separate from the dashboard login limiter to prevent cross-endpoint interference.
+	wsLimiters   map[string]*wsNodeLimiterEntry
+	wsLimitersMu sync.Mutex
+
 	OnRegister   func(id string, conn *ReverseConn)
 	OnDeregister func(id string)
+}
+
+type wsNodeLimiterEntry struct {
+	limiter  *rate.Limiter
+	lastSeen time.Time
+}
+
+// wsNodeLimiterFor returns a per-IP rate limiter for ws-node connections.
+// Higher burst (10) than login (5) since machine-to-machine reconnects are bursty.
+func (s *ReverseServer) wsNodeLimiterFor(ip string) *rate.Limiter {
+	s.wsLimitersMu.Lock()
+	defer s.wsLimitersMu.Unlock()
+
+	if e, ok := s.wsLimiters[ip]; ok {
+		e.lastSeen = time.Now()
+		return e.limiter
+	}
+	// Evict stale entries when at capacity (1000 IPs)
+	if len(s.wsLimiters) >= 1000 {
+		cutoff := time.Now().Add(-10 * time.Minute)
+		for k, e := range s.wsLimiters {
+			if e.lastSeen.Before(cutoff) {
+				delete(s.wsLimiters, k)
+			}
+		}
+	}
+	l := rate.NewLimiter(rate.Every(5*time.Second), 10) // 10 burst, 1 per 5s sustained
+	s.wsLimiters[ip] = &wsNodeLimiterEntry{limiter: l, lastSeen: time.Now()}
+	return l
 }
 
 // NewReverseServer creates a server that accepts /ws-node connections.
@@ -40,14 +76,22 @@ func NewReverseServer(auth map[string]config.ReverseNodeEntry) *ReverseServer {
 		names[id] = e.DisplayName
 	}
 	return &ReverseServer{
-		auth:  tokens,
-		names: names,
-		conns: make(map[string]*ReverseConn),
+		auth:       tokens,
+		names:      names,
+		conns:      make(map[string]*ReverseConn),
+		wsLimiters: make(map[string]*wsNodeLimiterEntry),
 	}
 }
 
 // ServeHTTP handles the /ws-node WebSocket endpoint.
 func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Per-IP rate limit to prevent token brute-force via rapid connect cycles.
+	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
+	if ip != "" && !s.wsNodeLimiterFor(ip).Allow() {
+		http.Error(w, "too many requests", http.StatusTooManyRequests)
+		return
+	}
+
 	conn, err := reverseUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		slog.Debug("ws-node upgrade failed", "err", err)

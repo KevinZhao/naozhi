@@ -127,37 +127,20 @@ func parseJSONL(path string) ([]cli.EventEntry, error) {
 				continue
 			}
 			for _, b := range blocks {
-				switch b.Type {
-				case "text":
-					if strings.TrimSpace(b.Text) == "" {
-						continue
-					}
-					entries = append(entries, cli.EventEntry{
-						Time:    ts,
-						Type:    "text",
-						Summary: cli.TruncateRunes(b.Text, 120),
-						Detail:  cli.TruncateRunes(b.Text, 16000),
-					})
-				case "tool_use":
-					summary := cli.FormatToolInput(b.Name, b.Input)
-					entries = append(entries, cli.EventEntry{
-						Time:    ts,
-						Type:    "tool_use",
-						Summary: summary,
-						Tool:    b.Name,
-						Detail:  summary,
-					})
-				case "thinking":
-					if strings.TrimSpace(b.Text) == "" {
-						continue
-					}
-					entries = append(entries, cli.EventEntry{
-						Time:    ts,
-						Type:    "thinking",
-						Summary: cli.TruncateRunes(b.Text, 120),
-						Detail:  cli.TruncateRunes(b.Text, 500),
-					})
+				// Only parse text blocks for history display.
+				// tool_use and thinking are always filtered out by the
+				// dashboard (eventHtml / processEventsForDisplay) and
+				// would waste slots in the 500-entry persistedHistory
+				// budget, pushing visible user/text entries out.
+				if b.Type != "text" || strings.TrimSpace(b.Text) == "" {
+					continue
 				}
+				entries = append(entries, cli.EventEntry{
+					Time:    ts,
+					Type:    "text",
+					Summary: cli.TruncateRunes(b.Text, 120),
+					Detail:  cli.TruncateRunes(b.Text, 16000),
+				})
 			}
 		}
 	}

@@ -53,6 +53,10 @@ type Feishu struct {
 
 	transcriber transcribe.Service // nil when STT not configured
 
+	// Lifecycle context: cancelled on Stop(), used by webhook goroutines.
+	stopCtx    context.Context
+	stopCancel context.CancelFunc
+
 	// WebSocket lifecycle
 	handler platform.MessageHandler
 	cancel  context.CancelFunc
@@ -72,7 +76,8 @@ func New(cfg Config, transcriber transcribe.Service) *Feishu {
 	if mode == "" {
 		mode = "websocket"
 	}
-	return &Feishu{cfg: cfg, mode: mode, baseURL: "https://open.feishu.cn", transcriber: transcriber, hookSem: make(chan struct{}, 20)}
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Feishu{cfg: cfg, mode: mode, baseURL: "https://open.feishu.cn", transcriber: transcriber, hookSem: make(chan struct{}, 20), stopCtx: ctx, stopCancel: cancel}
 }
 
 func (f *Feishu) Name() string { return "feishu" }
@@ -113,6 +118,9 @@ func (f *Feishu) Stop() error {
 	cancel := f.cancel
 	done := f.done
 	f.startMu.Unlock()
+
+	// Cancel lifecycle context so webhook goroutines respond to shutdown.
+	f.stopCancel()
 
 	if cancel != nil {
 		cancel()
@@ -350,15 +358,7 @@ func (f *Feishu) uploadImage(ctx context.Context, data []byte, mimeType string) 
 	}
 
 	// Derive filename extension from MIME type
-	filename := "image.png"
-	switch mimeType {
-	case "image/jpeg":
-		filename = "image.jpg"
-	case "image/gif":
-		filename = "image.gif"
-	case "image/webp":
-		filename = "image.webp"
-	}
+	filename := "image" + platform.ImageExt(mimeType)
 
 	var buf bytes.Buffer
 	w := multipart.NewWriter(&buf)

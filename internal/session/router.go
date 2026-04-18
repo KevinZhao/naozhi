@@ -72,9 +72,11 @@ type Router struct {
 	// pendingSpawns tracks Spawn() calls in progress (lock released during spawn)
 	pendingSpawns int
 
-	storePath  string
-	storeDirty bool   // true when sessions changed since last save
-	storeGen   uint64 // incremented on each mutation, used to detect concurrent writes
+	storePath        string
+	storeDirty       bool   // true when sessions changed since last save
+	storeGen         uint64 // incremented on each mutation, used to detect concurrent writes
+	wsOverridesDirty bool   // true when workspace overrides changed since last save
+	wsOverridesGen   uint64 // incremented on each ws-override mutation, mirrors storeGen pattern
 
 	// knownIDs tracks ALL session IDs ever used by naozhi, including
 	// sessions that have been removed/reset/evicted. Used by the
@@ -208,15 +210,22 @@ func NewRouter(cfg RouterConfig) *Router {
 		r.knownIDs = loaded
 	}
 
+	// Load persisted workspace overrides (/cd settings)
+	if loaded := loadWorkspaceOverrides(r.storePath); loaded != nil {
+		for k, v := range loaded {
+			r.workspaceOverrides[k] = v
+		}
+	}
+
 	// Restore sessions from store
 	if restored := loadStore(r.storePath); restored != nil {
 		for key, entry := range restored {
 			s := &ManagedSession{
-				Key:            key,
+				key:            key,
 				workspace:      entry.Workspace,
 				totalCost:      entry.TotalCost,
 				prevSessionIDs: entry.PrevSessionIDs,
-				Exempt:         strings.HasPrefix(key, "project:"),
+				exempt:         strings.HasPrefix(key, "project:"),
 				cliName:        r.cliNameDefault(),
 				cliVersion:     r.cliVersionDefault(),
 			}
@@ -253,16 +262,16 @@ func NewRouter(cfg RouterConfig) *Router {
 			}
 			cwdKey := rs.SessionID[:8]
 			if rs.Workspace != "" {
-				cwdKey = strings.ReplaceAll(strings.TrimPrefix(rs.Workspace, "/"), "/", "-")
+				cwdKey = SanitizeCWDKey(rs.Workspace)
 			}
-			key := "local:history:" + sanitizeKeyComponent(cwdKey) + ":general"
+			key := "local:history:" + cwdKey + ":general"
 			if _, exists := r.sessions[key]; exists {
 				slog.Debug("skipping discovered session: key already registered",
 					"key", key, "session_id", rs.SessionID)
 				continue
 			}
 			s := &ManagedSession{
-				Key:        key,
+				key:        key,
 				workspace:  rs.Workspace,
 				cliName:    r.cliNameDefault(),
 				cliVersion: r.cliVersionDefault(),
@@ -284,11 +293,19 @@ func NewRouter(cfg RouterConfig) *Router {
 	// shows conversation history without waiting for the next message.
 	// Loads the full session chain (prev → current) to restore history
 	// that accumulated across multiple CLI session IDs.
+	//
+	// Skip sessions that will be handled by ReconnectShims (has a surviving
+	// shim process). ReconnectShims injects both replay events and JSONL
+	// history, so loading here would cause duplicates in the EventLog.
 	if r.claudeDir != "" {
+		shimKeys := r.shimManagedKeys()
 		sem := make(chan struct{}, historyLoadConcurrency) // limit concurrent disk I/O
 		for _, s := range r.sessions {
 			s := s
 			if s.getSessionID() == "" {
+				continue
+			}
+			if shimKeys[s.key] {
 				continue
 			}
 			r.historyWg.Add(1)
@@ -314,13 +331,31 @@ func NewRouter(cfg RouterConfig) *Router {
 					return
 				}
 				s.InjectHistory(allEntries)
-				slog.Info("loaded session history on startup", "key", s.Key, "entries", len(allEntries), "chain", len(ids))
+				slog.Info("loaded session history on startup", "key", s.key, "entries", len(allEntries), "chain", len(ids))
 				r.notifyChange()
 			}()
 		}
 	}
 
 	return r
+}
+
+// shimManagedKeys returns the set of session keys that have a surviving shim
+// process. Called by NewRouter to skip async JSONL loading for sessions that
+// will be fully restored by ReconnectShims (replay + JSONL user entries).
+func (r *Router) shimManagedKeys() map[string]bool {
+	if r.wrapper == nil || r.wrapper.ShimManager == nil {
+		return nil
+	}
+	states, err := r.wrapper.ShimManager.Discover()
+	if err != nil || len(states) == 0 {
+		return nil
+	}
+	keys := make(map[string]bool, len(states))
+	for _, s := range states {
+		keys[s.Key] = true
+	}
+	return keys
 }
 
 // ReconnectShims discovers surviving shim processes and reconnects sessions.
@@ -395,6 +430,8 @@ func (r *Router) ReconnectShims() {
 
 		// Inject replay events into eventLog (not via eventCh — avoids deadlock).
 		// Use EventEntryFromEvent for proper Summary extraction across all event types.
+		// Batch all entries into a single InjectHistory call to avoid O(N) lock ops.
+		var replayEntries []cli.EventEntry
 		for _, replay := range replays {
 			if replay.Type == "replay" {
 				ev, _, err := r.wrapper.Protocol.ReadEvent(replay.Line)
@@ -402,25 +439,40 @@ func (r *Router) ReconnectShims() {
 					continue
 				}
 				if entry, ok := cli.EventEntryFromEvent(ev); ok {
-					proc.InjectHistory([]cli.EventEntry{entry})
+					replayEntries = append(replayEntries, entry)
 				}
 			}
 		}
+		if len(replayEntries) > 0 {
+			proc.InjectHistory(replayEntries)
+		}
 
-		// Inject persisted JSONL history from PREVIOUS sessions only.
-		// The current session's events are already covered by the replay above.
-		// Injecting both would cause duplicate messages in the dashboard.
-		if len(sess.prevSessionIDs) > 0 && r.claudeDir != "" {
-			var prevEntries []cli.EventEntry
+		// Inject persisted JSONL history to restore dashboard conversation view.
+		// Previous sessions: load all event types (replay doesn't cover them).
+		// Current session: load user entries only — the replay buffer captures
+		// CLI stdout (assistant/system/result) but NOT user input written via
+		// stdin, so user messages must be recovered from the JSONL.
+		if r.claudeDir != "" {
+			var histEntries []cli.EventEntry
 			for _, id := range sess.prevSessionIDs {
 				entries, err := discovery.LoadHistory(r.claudeDir, id, sess.workspace)
 				if err != nil || len(entries) == 0 {
 					continue
 				}
-				prevEntries = append(prevEntries, entries...)
+				histEntries = append(histEntries, entries...)
 			}
-			if len(prevEntries) > 0 {
-				proc.InjectHistory(prevEntries)
+			if state.SessionID != "" {
+				entries, err := discovery.LoadHistory(r.claudeDir, state.SessionID, sess.workspace)
+				if err == nil {
+					for i := range entries {
+						if entries[i].Type == "user" {
+							histEntries = append(histEntries, entries[i])
+						}
+					}
+				}
+			}
+			if len(histEntries) > 0 {
+				proc.InjectHistory(histEntries)
 			}
 		}
 
@@ -437,15 +489,24 @@ func (r *Router) ReconnectShims() {
 			slog.Info("shim reconnect aborted: session replaced concurrently", "key", state.Key)
 			continue
 		}
-		// All three operations are non-blocking (atomic store + func pointer):
-		// safe to hold r.mu throughout.
+		// ReattachProcess calls onSessionID which tries to r.mu.Lock(),
+		// but we already hold the lock here. Do the tracking directly
+		// to avoid deadlock (sync.RWMutex is not reentrant).
 		proc.SetOnTurnDone(func() { r.notifyChange() })
-		sess.ReattachProcess(proc, state.SessionID)
-		if !sess.Exempt {
+		sess.ReattachProcessNoCallback(proc, state.SessionID)
+		if state.SessionID != "" {
+			r.trackSessionID(state.SessionID)
+			r.sessionIDToKey[state.SessionID] = state.Key
+		}
+		if !sess.exempt {
 			r.activeCount++
 		}
 		r.storeGen++
 		r.mu.Unlock()
+
+		// Extract lastPrompt/lastActivity from replay + JSONL entries so the
+		// sidebar shows a meaningful label instead of "(no prompt)".
+		sess.extractLastPromptFromProcess()
 
 		reconnected++
 		slog.Info("session reconnected via shim",
@@ -496,6 +557,8 @@ func (r *Router) SetWorkspace(chatKey, path string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.workspaceOverrides[chatKey] = path
+	r.wsOverridesDirty = true
+	r.wsOverridesGen++
 }
 
 // GetWorkspace returns the effective workspace for a chat key.
@@ -522,7 +585,7 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 			}
 			if p := s.loadProcess(); p != nil && p.Alive() {
 				toClose = append(toClose, p)
-				if !s.Exempt {
+				if !s.exempt {
 					closedActive++
 				}
 			}
@@ -540,7 +603,7 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 				toDelete = append(toDelete, key)
 				if p := s.loadProcess(); p != nil && p.Alive() {
 					toClose = append(toClose, p)
-					if !s.Exempt {
+					if !s.exempt {
 						closedActive++
 					}
 				}
@@ -605,7 +668,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 		slog.Info("session process exited, resuming", "key", key, "session_id", s.getSessionID())
 		s, err := r.spawnSession(ctx, key, s.getSessionID(), opts)
 		if err != nil {
-			return nil, 0, err
+			return nil, 0, fmt.Errorf("session %s: %w", key, err)
 		}
 		return s, SessionResumed, nil
 	}
@@ -613,7 +676,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	slog.Info("creating new session", "key", key)
 	s, err := r.spawnSession(ctx, key, "", opts)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, fmt.Errorf("session %s: %w", key, err)
 	}
 	return s, SessionNew, nil
 }
@@ -624,8 +687,13 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, opts AgentOpts) (*ManagedSession, error) {
 	// Exempt sessions (planners) bypass maxProcs capacity check but have their own limit
 	if !opts.Exempt {
-		// Recount to correct drift from undetected process exits (OOM, SIGKILL)
-		r.countActive()
+		// Fast path: the incremental activeCount is accurate under normal operation
+		// (Reset/Remove/evictOldest/Cleanup maintain it). Avoid the O(n) countActive
+		// scan on every spawn. Only recount when we appear to be at capacity, to
+		// detect drift from undetected process exits (OOM, SIGKILL) before refusing.
+		if r.activeCount+r.pendingSpawns >= r.maxProcs {
+			r.countActive()
+		}
 		if r.activeCount+r.pendingSpawns >= r.maxProcs {
 			if !r.evictOldest() {
 				r.mu.Unlock()
@@ -667,8 +735,8 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 			workspaceOverridden = true
 		}
 	}
-	// When resuming after restart, workspaceOverrides is empty (not persisted across restarts).
-	// Fall back to the old session's stored workspace so --resume finds the session in the
+	// When resuming after restart and no workspace override exists, fall back to
+	// the old session's stored workspace so --resume finds the session in the
 	// correct project directory (Claude stores sessions under ~/.claude/projects/<sha256(cwd)>/).
 	if !workspaceOverridden && resumeID != "" {
 		if old := r.sessions[key]; old != nil && old.workspace != "" {
@@ -760,13 +828,13 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	}
 
 	s := &ManagedSession{
-		Key:              key,
+		key:              key,
 		workspace:        workspace,
 		cliName:          r.wrapper.CLIName,
 		cliVersion:       r.wrapper.CLIVersion,
 		persistedHistory: oldHistory,
 		prevSessionIDs:   prevIDs,
-		Exempt:           opts.Exempt,
+		exempt:           opts.Exempt,
 		onSessionID: func(id string) {
 			r.mu.Lock()
 			r.trackSessionID(id)
@@ -826,7 +894,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 func (r *Router) countActive() {
 	count := 0
 	for _, s := range r.sessions {
-		if s.Exempt {
+		if s.exempt {
 			continue
 		}
 		if s.isAlive() {
@@ -841,7 +909,7 @@ func (r *Router) countActive() {
 func (r *Router) countExempt() int {
 	count := 0
 	for _, s := range r.sessions {
-		if s.Exempt && s.isAlive() {
+		if s.exempt && s.isAlive() {
 			count++
 		}
 	}
@@ -854,7 +922,7 @@ func (r *Router) countExempt() int {
 func (r *Router) evictOldest() bool {
 	var oldest *ManagedSession
 	for _, s := range r.sessions {
-		if s.Exempt {
+		if s.exempt {
 			continue // planner sessions are never evicted
 		}
 		if !s.isAlive() || s.loadProcess().IsRunning() {
@@ -867,7 +935,7 @@ func (r *Router) evictOldest() bool {
 	if oldest == nil {
 		return false
 	}
-	slog.Info("evicting oldest session", "key", oldest.Key, "idle", time.Since(oldest.GetLastActive()))
+	slog.Info("evicting oldest session", "key", oldest.key, "idle", time.Since(oldest.GetLastActive()))
 	oldest.deathReason.Store("evicted")
 	// Keep oldest.process non-nil so concurrent holders don't get nil-panic.
 	// After Close(), Alive() returns false; countActive() below recounts correctly.
@@ -893,7 +961,7 @@ func (r *Router) Reset(key string) {
 	}
 
 	proc := s.loadProcess()
-	wasActive := !s.Exempt && proc != nil && proc.Alive()
+	wasActive := !s.exempt && proc != nil && proc.Alive()
 	if id := s.getSessionID(); id != "" {
 		delete(r.sessionIDToKey, id)
 	}
@@ -931,7 +999,7 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 	if s, ok := r.sessions[key]; ok {
 		hadOld = true
 		proc := s.loadProcess()
-		wasActive := !s.Exempt && proc != nil && proc.Alive()
+		wasActive := !s.exempt && proc != nil && proc.Alive()
 		if id := s.getSessionID(); id != "" {
 			delete(r.sessionIDToKey, id)
 		}
@@ -981,7 +1049,7 @@ func (r *Router) Remove(key string) bool {
 
 	// Kill process if alive
 	proc := s.loadProcess()
-	wasActive := !s.Exempt && proc != nil && proc.Alive()
+	wasActive := !s.exempt && proc != nil && proc.Alive()
 	if id := s.getSessionID(); id != "" {
 		delete(r.sessionIDToKey, id)
 	}
@@ -1010,70 +1078,82 @@ func (r *Router) Remove(key string) bool {
 }
 
 // Cleanup closes sessions idle beyond TTL.
-// Releases r.mu during Close()/Kill() to avoid blocking message processing.
+// First pass runs under RLock so PID syscalls / process.Alive checks don't
+// block message processing (which needs write lock via GetOrCreate).
+// Mutations (prune, activeCount recount) still require the write lock.
 func (r *Router) Cleanup() {
-	r.mu.Lock()
-
 	type expiredEntry struct {
+		s    *ManagedSession
 		key  string
 		proc processIface
 	}
-	var expired []expiredEntry
-	var stuckKill []expiredEntry // stuck running or PID-dead — force kill
 
-	now := time.Now()
+	// ── Pass 1: snapshot candidate sessions under RLock ────────────
+	r.mu.RLock()
+	type cand struct {
+		key        string
+		s          *ManagedSession
+		proc       processIface
+		lastActive time.Time
+	}
+	candidates := make([]cand, 0, len(r.sessions))
 	for key, s := range r.sessions {
-		if s.Exempt {
+		if s.exempt {
 			continue // planner sessions are never expired by TTL
 		}
 		proc := s.loadProcess()
 		if proc == nil {
 			continue
 		}
-		alive := proc.Alive()
+		candidates = append(candidates, cand{key, s, proc, s.GetLastActive()})
+	}
+	ttl := r.ttl
+	totalTimeout := r.totalTimeout
+	r.mu.RUnlock()
 
-		// ── Stuck running detection ─────────────────────────────────
+	if totalTimeout <= 0 {
+		totalTimeout = cli.DefaultTotalTimeout
+	}
+	stuckThreshold := 2 * totalTimeout
 
-		// If a session has been in StateRunning longer than 2× the
-		// process total-timeout, the Send() watchdog failed to fire.
-		// Force-kill to reclaim the slot.
-		if alive && proc.IsRunning() {
-			totalTimeout := r.totalTimeout
-			if totalTimeout <= 0 {
-				totalTimeout = cli.DefaultTotalTimeout
-			}
-			stuckThreshold := 2 * totalTimeout
-			if age := now.Sub(s.GetLastActive()); age > stuckThreshold {
+	// ── Pass 2: classify outside the lock (may perform PID syscalls) ─
+	var expired []expiredEntry
+	var stuckKill []expiredEntry
+	now := time.Now()
+	for _, c := range candidates {
+		alive := c.proc.Alive()
+		if !alive {
+			continue
+		}
+		running := c.proc.IsRunning()
+
+		// Stuck running: watchdog failed, reclaim slot.
+		if running {
+			if age := now.Sub(c.lastActive); age > stuckThreshold {
 				slog.Warn("stuck running session detected, force killing",
-					"key", key, "running_for", age, "threshold", stuckThreshold)
-				s.deathReason.Store("stuck_running")
-				stuckKill = append(stuckKill, expiredEntry{key, proc})
-				continue
+					"key", c.key, "running_for", age, "threshold", stuckThreshold)
+				c.s.deathReason.Store("stuck_running")
+				stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc})
 			}
+			continue
 		}
 
-		// ── PID liveness check ──────────────────────────────────────
-		// The shim connection may appear alive (readLoop not yet EOF)
-		// while the underlying CLI process has already exited.
-		// Verify via kill(pid, 0) and force-kill the stale shim.
-		if alive && !proc.IsRunning() {
-			if pid := proc.PID(); pid > 0 && !osutil.PidAlive(pid) {
-				slog.Warn("CLI process gone but session still alive, force killing",
-					"key", key, "pid", pid)
-				s.deathReason.Store("pid_gone")
-				stuckKill = append(stuckKill, expiredEntry{key, proc})
-				continue
-			}
+		// PID liveness: shim alive but CLI PID is gone.
+		if pid := c.proc.PID(); pid > 0 && !osutil.PidAlive(pid) {
+			slog.Warn("CLI process gone but session still alive, force killing",
+				"key", c.key, "pid", pid)
+			c.s.deathReason.Store("pid_gone")
+			stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc})
+			continue
 		}
 
-		// ── Normal idle TTL expiry ──────────────────────────────────
-		if alive && !proc.IsRunning() && now.Sub(s.GetLastActive()) > r.ttl {
-			slog.Info("session expired", "key", key, "idle", now.Sub(s.GetLastActive()))
-			s.deathReason.Store("idle_timeout")
-			expired = append(expired, expiredEntry{key, proc})
+		// Normal idle TTL expiry.
+		if now.Sub(c.lastActive) > ttl {
+			slog.Info("session expired", "key", c.key, "idle", now.Sub(c.lastActive))
+			c.s.deathReason.Store("idle_timeout")
+			expired = append(expired, expiredEntry{c.s, c.key, c.proc})
 		}
 	}
-	r.mu.Unlock()
 
 	closedCount := 0
 	for _, e := range stuckKill {
@@ -1094,33 +1174,11 @@ func (r *Router) Cleanup() {
 	var pruned int
 	var newActive int
 	for key, s := range r.sessions {
-		if s.Exempt {
+		if s.exempt {
 			continue // planner sessions are never pruned
 		}
-		sid := s.getSessionID()
-		if s.loadProcess() == nil && sid == "" && now.Sub(s.GetLastActive()) > r.pruneTTL {
-			r.indexDel(key)
-			delete(r.sessions, key)
-			pruned++
-			continue
-		}
-		// Prune resume stubs: nil process with session ID, past prune TTL.
-		if s.loadProcess() == nil && sid != "" && now.Sub(s.GetLastActive()) > r.pruneTTL {
-			delete(r.sessionIDToKey, sid)
-			r.indexDel(key)
-			delete(r.sessions, key)
-			pruned++
-			continue
-		}
-		// Prune exited sessions with no resumable session ID
-		if p := s.loadProcess(); p != nil && !p.Alive() && sid == "" && now.Sub(s.GetLastActive()) > r.pruneTTL {
-			r.indexDel(key)
-			delete(r.sessions, key)
-			pruned++
-			continue
-		}
-		// Prune old exited sessions even with session ID (prevents unbounded growth).
-		if p := s.loadProcess(); p != nil && !p.Alive() && now.Sub(s.GetLastActive()) > r.pruneTTL {
+		if r.shouldPrune(s, now) {
+			sid := s.getSessionID()
 			if sid != "" {
 				delete(r.sessionIDToKey, sid)
 			}
@@ -1129,7 +1187,6 @@ func (r *Router) Cleanup() {
 			pruned++
 			continue
 		}
-		// Session survived all prune conditions; count it if its process is alive.
 		if s.isAlive() {
 			newActive++
 		}
@@ -1144,12 +1201,20 @@ func (r *Router) Cleanup() {
 	}
 	var sessionsCopy map[string]*ManagedSession
 	var knownIDsCopy map[string]bool
+	var wsOverridesCopy map[string]string
 	storePath := r.storePath
 	snapshotGen := r.storeGen
+	snapshotWsGen := r.wsOverridesGen
 	if r.storeDirty {
 		sessionsCopy = make(map[string]*ManagedSession, len(r.sessions))
 		for k, v := range r.sessions {
 			sessionsCopy[k] = v
+		}
+	}
+	if r.wsOverridesDirty {
+		wsOverridesCopy = make(map[string]string, len(r.workspaceOverrides))
+		for k, v := range r.workspaceOverrides {
+			wsOverridesCopy[k] = v
 		}
 	}
 	if r.knownIDsDirty {
@@ -1174,6 +1239,18 @@ func (r *Router) Cleanup() {
 			r.mu.Unlock()
 		}
 	}
+	if wsOverridesCopy != nil {
+		if err := saveWorkspaceOverrides(storePath, wsOverridesCopy); err != nil {
+			slog.Warn("periodic workspace overrides save failed", "err", err)
+		} else {
+			// Only clear dirty flag if no concurrent SetWorkspace occurred since snapshot.
+			r.mu.Lock()
+			if r.wsOverridesGen == snapshotWsGen {
+				r.wsOverridesDirty = false
+			}
+			r.mu.Unlock()
+		}
+	}
 	if knownIDsCopy != nil {
 		if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
 			slog.Warn("periodic known IDs save failed", "err", err)
@@ -1191,6 +1268,19 @@ func (r *Router) Cleanup() {
 	if len(expired) > 0 || len(stuckKill) > 0 || pruned > 0 {
 		r.notifyChange()
 	}
+}
+
+// shouldPrune returns true if a non-exempt session should be removed from the map.
+// Covers: nil-process stubs, dead processes past pruneTTL. Caller must hold r.mu.
+func (r *Router) shouldPrune(s *ManagedSession, now time.Time) bool {
+	if now.Sub(s.GetLastActive()) <= r.pruneTTL {
+		return false
+	}
+	proc := s.loadProcess()
+	if proc == nil {
+		return true // nil-process stub (with or without session ID)
+	}
+	return !proc.Alive() // exited process past pruneTTL
 }
 
 // StartCleanupLoop runs Cleanup periodically and saves dirty session state
@@ -1219,27 +1309,52 @@ func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 // saveIfDirty saves the session store if any mutations have occurred since the last save.
 func (r *Router) saveIfDirty() {
 	r.mu.Lock()
-	if !r.storeDirty {
+	if !r.storeDirty && !r.wsOverridesDirty {
 		r.mu.Unlock()
 		return
 	}
-	sessionsCopy := make(map[string]*ManagedSession, len(r.sessions))
-	for k, v := range r.sessions {
-		sessionsCopy[k] = v
+	var sessionsCopy map[string]*ManagedSession
+	if r.storeDirty {
+		sessionsCopy = make(map[string]*ManagedSession, len(r.sessions))
+		for k, v := range r.sessions {
+			sessionsCopy[k] = v
+		}
+	}
+	var wsOverridesCopy map[string]string
+	if r.wsOverridesDirty {
+		wsOverridesCopy = make(map[string]string, len(r.workspaceOverrides))
+		for k, v := range r.workspaceOverrides {
+			wsOverridesCopy[k] = v
+		}
 	}
 	storePath := r.storePath
 	snapshotGen := r.storeGen
+	snapshotWsGen := r.wsOverridesGen
 	r.mu.Unlock()
 
-	if err := saveStore(storePath, sessionsCopy); err != nil {
-		slog.Warn("periodic session save failed", "err", err)
-		return
+	if sessionsCopy != nil {
+		if err := saveStore(storePath, sessionsCopy); err != nil {
+			slog.Warn("periodic session save failed", "err", err)
+			return
+		}
+		r.mu.Lock()
+		if r.storeGen == snapshotGen {
+			r.storeDirty = false
+		}
+		r.mu.Unlock()
 	}
-	r.mu.Lock()
-	if r.storeGen == snapshotGen {
-		r.storeDirty = false
+	if wsOverridesCopy != nil {
+		if err := saveWorkspaceOverrides(storePath, wsOverridesCopy); err != nil {
+			slog.Warn("periodic workspace overrides save failed", "err", err)
+		} else {
+			// Only clear dirty flag if no concurrent SetWorkspace occurred since snapshot.
+			r.mu.Lock()
+			if r.wsOverridesGen == snapshotWsGen {
+				r.wsOverridesDirty = false
+			}
+			r.mu.Unlock()
+		}
 	}
-	r.mu.Unlock()
 }
 
 // StartShimReconcileLoop periodically checks for suspended sessions that have
@@ -1319,6 +1434,10 @@ func (r *Router) Shutdown() {
 	for id := range r.knownIDs {
 		knownIDsCopy[id] = true
 	}
+	wsOverrides := make(map[string]string, len(r.workspaceOverrides))
+	for k, v := range r.workspaceOverrides {
+		wsOverrides[k] = v
+	}
 
 	// Collect processes to close, then release lock to close concurrently
 	var procs []processIface
@@ -1336,6 +1455,9 @@ func (r *Router) Shutdown() {
 	}
 	if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
 		slog.Error("save known session IDs on shutdown", "err", err)
+	}
+	if err := saveWorkspaceOverrides(storePath, wsOverrides); err != nil {
+		slog.Error("save workspace overrides on shutdown", "err", err)
 	}
 
 	// Detach shim processes (keep them alive for reconnect after restart)
@@ -1402,6 +1524,17 @@ func (r *Router) Stats() (active, total int) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.activeCount, len(r.sessions)
+}
+
+// HealthCheck performs a lightweight liveness check by testing that the
+// router's RWMutex is not permanently held (deadlock detection).
+// Returns true if the lock can be acquired, false if it appears stuck.
+func (r *Router) HealthCheck() bool {
+	if !r.mu.TryRLock() {
+		return false
+	}
+	r.mu.RUnlock()
+	return true
 }
 
 // ListSessions returns a snapshot of all sessions for the dashboard.
@@ -1531,7 +1664,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 		delete(r.sessionIDToKey, sessionID)
 	}
 	s := &ManagedSession{
-		Key:        key,
+		key:        key,
 		workspace:  workspace,
 		cliName:    r.cliNameDefault(),
 		cliVersion: r.cliVersionDefault(),

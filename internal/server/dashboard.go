@@ -6,6 +6,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
+
+	"golang.org/x/time/rate"
 
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -20,11 +23,28 @@ var manifestJSON embed.FS
 //go:embed static/sw.js
 var swJS embed.FS
 
+//go:embed static/dashboard.js
+var dashboardJS embed.FS
+
 const authCookieName = "naozhi_auth"
 
-// writeJSON encodes v as JSON to w. Logs errors at debug level since HTTP write
-// failures are common after client disconnects, but JSON marshal failures indicate bugs.
+// writeJSON sets the Content-Type header and encodes v as JSON to w.
+// Logs errors at debug level since HTTP write failures are common after
+// client disconnects, but JSON marshal failures indicate bugs.
+// For non-200 status codes, use writeJSONStatus instead.
 func writeJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Debug("write json response", "err", err)
+	}
+}
+
+// writeJSONStatus is like writeJSON but writes a non-200 HTTP status code.
+// Content-Type must be set before WriteHeader, so this helper ensures
+// the correct ordering: Set header → WriteHeader → Encode body.
+func writeJSONStatus(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
 	if err := json.NewEncoder(w).Encode(v); err != nil {
 		slog.Debug("write json response", "err", err)
 	}
@@ -48,7 +68,14 @@ func (s *Server) registerDashboard() {
 	s.hub.SetScheduler(s.scheduler)
 
 	// Wire sendH now that hub exists
-	s.sendH = &SendHandler{nodeAccess: s.nodeAccess, hub: s.hub}
+	uploads := newUploadStore()
+	uploads.StartCleanup(s.hub.ctx)
+	s.sendH = &SendHandler{
+		nodeAccess:    s.nodeAccess,
+		hub:           s.hub,
+		uploadStore:   uploads,
+		uploadLimiter: newIPLimiter(rate.Every(6*time.Second), 10), // 10 uploads/min per IP
+	}
 
 	// Push session list changes to WS clients
 	s.router.SetOnChange(func() { s.hub.BroadcastSessionsUpdate() })
@@ -65,12 +92,14 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.handleList))
 	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.handleEvents))
 	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
+	s.mux.HandleFunc("POST /api/sessions/upload", auth(s.sendH.handleUpload))
 	s.mux.HandleFunc("DELETE /api/sessions", auth(s.sessionH.handleDelete))
 	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.handleResume))
 	s.mux.HandleFunc("POST /api/sessions/interrupt", auth(s.sessionH.handleInterrupt))
 	s.mux.HandleFunc("GET /api/discovered", auth(s.discoveryH.handleList))
 	s.mux.HandleFunc("GET /api/discovered/preview", auth(s.discoveryH.handlePreview))
 	s.mux.HandleFunc("POST /api/discovered/takeover", auth(s.discoveryH.handleTakeover))
+	s.mux.HandleFunc("POST /api/discovered/close", auth(s.discoveryH.handleClose))
 	s.mux.HandleFunc("GET /api/projects", auth(s.projectH.handleList))
 	s.mux.HandleFunc("GET /api/projects/config", auth(s.projectH.handleConfigGet))
 	s.mux.HandleFunc("PUT /api/projects/config", auth(s.projectH.handleConfigPut))
@@ -90,6 +119,7 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /dashboard", s.handleDashboard)
 	s.mux.HandleFunc("GET /manifest.json", s.handleManifest)
 	s.mux.HandleFunc("GET /sw.js", s.handleSW)
+	s.mux.HandleFunc("GET /static/dashboard.js", s.handleDashboardJS)
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
 	if s.reverseNodeServer != nil {
 		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
@@ -108,9 +138,8 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	// TODO: 'unsafe-inline' in script-src weakens XSS protection. Moving inline
-	// JS to static/dashboard.js would allow removing it (nonce or 'self' only).
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' wss: ws:; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:")
+	w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
@@ -146,6 +175,19 @@ func (s *Server) handleSW(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleDashboardJS(w http.ResponseWriter, r *http.Request) {
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if _, err := w.Write(data); err != nil {
+		slog.Debug("dashboard js write", "err", err)
+	}
+}
+
 // strOrFallback extracts a string from a map, trying the primary key first then the fallback.
 // Used to handle remote nodes that may send Go-default JSON keys (e.g. "Name") instead of
 // tagged lowercase keys (e.g. "name").
@@ -167,7 +209,7 @@ func buildSessionOpts(key string, agents map[string]session.AgentOpts, projectMg
 
 	opts := agents[agentID]
 	if project.IsPlannerKey(key) {
-		opts.Exempt = true
+		opts.Exempt = true // planner sessions are always exempt, regardless of project config
 		if projectMgr != nil {
 			pParts := strings.SplitN(key, ":", 3)
 			if len(pParts) == 3 {

@@ -13,7 +13,7 @@ func TestSaveAndLoadStore(t *testing.T) {
 	sessions := map[string]*ManagedSession{
 		"feishu:direct:alice:general": newSessionWithID("feishu:direct:alice:general", "sess-111"),
 		"feishu:group:xxx:general":    newSessionWithID("feishu:group:xxx:general", "sess-222"),
-		"feishu:direct:bob:general":   {Key: "feishu:direct:bob:general"}, // empty session ID should be skipped
+		"feishu:direct:bob:general":   {key: "feishu:direct:bob:general"}, // empty session ID should be skipped
 	}
 
 	if err := saveStore(path, sessions); err != nil {

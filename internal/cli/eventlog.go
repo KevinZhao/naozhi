@@ -12,7 +12,7 @@ const defaultEventLogSize = 500
 // EventEntry is a simplified event record for the dashboard.
 type EventEntry struct {
 	Time       int64    `json:"time"`                  // unix ms
-	Type       string   `json:"type"`                  // init, thinking, tool_use, text, result, system, agent, task_start, task_progress, task_done
+	Type       string   `json:"type"`                  // init, thinking, tool_use, text, result, system, agent, task_start, task_progress (also maps task_updated), task_done
 	Summary    string   `json:"summary,omitempty"`     // brief description
 	Cost       float64  `json:"cost,omitempty"`        // cumulative cost (result events only)
 	Detail     string   `json:"detail,omitempty"`      // fuller content for terminal view

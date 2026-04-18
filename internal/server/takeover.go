@@ -24,7 +24,7 @@ func verifyProcIdentity(pid int, expectedStartTime uint64) bool {
 // killAndCleanupClaude terminates an external Claude CLI process and removes its
 // stale session/lock files so the session can be cleanly resumed with --resume.
 // Sequence: SIGTERM → wait up to 5 s → SIGKILL (only if PID identity still matches).
-func (s *Server) killAndCleanupClaude(pid int, procStartTime uint64, cwd, sessionID string) error {
+func (s *Server) killAndCleanupClaude(ctx context.Context, pid int, procStartTime uint64, cwd, sessionID string) error {
 	// TOCTOU guard: reject if the PID was recycled since the discovery scan.
 	if procStartTime != 0 && !verifyProcIdentity(pid, procStartTime) {
 		return fmt.Errorf("process identity changed (PID reused): pid=%d", pid)
@@ -32,7 +32,7 @@ func (s *Server) killAndCleanupClaude(pid int, procStartTime uint64, cwd, sessio
 	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("sigterm pid %d: %w", pid, err)
 	}
-	discovery.WaitAndCleanup(pid, procStartTime, s.claudeDir, cwd, sessionID)
+	discovery.WaitAndCleanup(ctx, pid, procStartTime, s.claudeDir, cwd, sessionID)
 	return nil
 }
 
@@ -73,7 +73,7 @@ func (s *Server) tryAutoTakeover(ctx context.Context, chatKey, key string, opts 
 	if best == nil {
 		return false
 	}
-	if err := s.killAndCleanupClaude(best.PID, best.ProcStartTime, best.CWD, best.SessionID); err != nil {
+	if err := s.killAndCleanupClaude(ctx, best.PID, best.ProcStartTime, best.CWD, best.SessionID); err != nil {
 		slog.Warn("auto-takeover: kill failed", "key", key, "pid", best.PID, "err", err)
 		return false
 	}

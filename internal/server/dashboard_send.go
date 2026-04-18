@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"mime/multipart"
 	"net/http"
 	"strings"
 
@@ -13,13 +15,72 @@ import (
 
 // SendHandler serves the HTTP send API, delegating to Hub for local sends.
 type SendHandler struct {
-	nodeAccess NodeAccessor
-	hub        *Hub
+	nodeAccess    NodeAccessor
+	hub           *Hub
+	uploadStore   *uploadStore
+	uploadLimiter *ipLimiter // per-IP upload rate limiter (10/min)
+}
+
+// parseImageFile reads and validates a single multipart file as an image.
+func parseImageFile(fh *multipart.FileHeader) (cli.ImageData, error) {
+	if fh.Size > 10<<20 {
+		return cli.ImageData{}, fmt.Errorf("file too large (max 10MB)")
+	}
+	f, err := fh.Open()
+	if err != nil {
+		return cli.ImageData{}, fmt.Errorf("open file: %w", err)
+	}
+	defer f.Close()
+	data, err := io.ReadAll(f)
+	if err != nil {
+		return cli.ImageData{}, fmt.Errorf("read file: %w", err)
+	}
+	mime := fh.Header.Get("Content-Type")
+	if !strings.HasPrefix(mime, "image/") {
+		return cli.ImageData{}, fmt.Errorf("only image/* files are accepted")
+	}
+	detected := http.DetectContentType(data)
+	if !strings.HasPrefix(detected, "image/") {
+		return cli.ImageData{}, fmt.Errorf("file content does not match an image format")
+	}
+	return cli.ImageData{Data: data, MimeType: detected}, nil
+}
+
+// handleUpload accepts a single image file and stores it for later reference by file_ids.
+// POST /api/sessions/upload  (multipart/form-data, field "file")
+// Response: {"id": "<hex>"}
+func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
+	if h.uploadLimiter != nil && !h.uploadLimiter.Allow(r.RemoteAddr) {
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "upload rate limit exceeded"})
+		return
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 11<<20) // 10MB + form overhead
+	if err := r.ParseMultipartForm(10 << 20); err != nil {
+		http.Error(w, "bad multipart form", http.StatusBadRequest)
+		return
+	}
+	files := r.MultipartForm.File["file"]
+	if len(files) != 1 {
+		http.Error(w, "exactly one file required", http.StatusBadRequest)
+		return
+	}
+	img, err := parseImageFile(files[0])
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	id, err := h.uploadStore.Put(img)
+	if err != nil {
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "too many pending uploads"})
+		return
+	}
+	writeJSON(w, map[string]string{"id": id})
 }
 
 func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	var key, text, node, workspace, resumeID string
 	var images []cli.ImageData
+	var fileIDs []string
 
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
@@ -33,49 +94,30 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		node = r.FormValue("node")
 		workspace = r.FormValue("workspace")
 		resumeID = r.FormValue("resume_id")
+		fileIDs = r.MultipartForm.Value["file_ids"]
 
 		files := r.MultipartForm.File["files"]
-		if len(files) > 10 {
+		if len(files)+len(fileIDs) > 10 {
 			http.Error(w, "too many files (max 10)", http.StatusBadRequest)
 			return
 		}
 		for _, fh := range files {
-			if fh.Size > 10<<20 {
-				http.Error(w, "file too large (max 10MB)", http.StatusBadRequest)
-				return
-			}
-			f, err := fh.Open()
+			img, err := parseImageFile(fh)
 			if err != nil {
-				http.Error(w, "open file: "+err.Error(), http.StatusBadRequest)
+				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			data, readErr := io.ReadAll(f)
-			f.Close()
-			if readErr != nil {
-				http.Error(w, "read file: "+readErr.Error(), http.StatusBadRequest)
-				return
-			}
-			mime := fh.Header.Get("Content-Type")
-			if !strings.HasPrefix(mime, "image/") {
-				http.Error(w, "only image/* files are accepted", http.StatusBadRequest)
-				return
-			}
-			// Verify MIME type with magic-byte detection to prevent spoofed Content-Type
-			detected := http.DetectContentType(data)
-			if !strings.HasPrefix(detected, "image/") {
-				http.Error(w, "file content does not match an image format", http.StatusBadRequest)
-				return
-			}
-			images = append(images, cli.ImageData{Data: data, MimeType: mime})
+			images = append(images, img)
 		}
 	} else {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB limit
 		var req struct {
-			Key       string `json:"key"`
-			Text      string `json:"text"`
-			Node      string `json:"node"`
-			Workspace string `json:"workspace"`
-			ResumeID  string `json:"resume_id"`
+			Key       string   `json:"key"`
+			Text      string   `json:"text"`
+			Node      string   `json:"node"`
+			Workspace string   `json:"workspace"`
+			ResumeID  string   `json:"resume_id"`
+			FileIDs   []string `json:"file_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -86,6 +128,17 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		node = req.Node
 		workspace = req.Workspace
 		resumeID = req.ResumeID
+		fileIDs = req.FileIDs
+	}
+
+	// Resolve pre-uploaded file IDs
+	for _, fid := range fileIDs {
+		img := h.uploadStore.Take(fid)
+		if img == nil {
+			http.Error(w, "file_id not found or expired: "+fid, http.StatusBadRequest)
+			return
+		}
+		images = append(images, *img)
 	}
 
 	if key == "" {
@@ -99,6 +152,10 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	// Remote node proxy
 	if node != "" && node != "local" {
+		if len(images) > 0 {
+			http.Error(w, "files not supported for remote nodes", http.StatusBadRequest)
+			return
+		}
 		nc, ok := h.nodeAccess.LookupNode(w, node)
 		if !ok {
 			return
@@ -120,9 +177,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 				h.hub.BroadcastSessionsUpdate()
 			}
 		}()
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		writeJSON(w, map[string]string{"status": "accepted", "key": key})
+		writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": key})
 		return
 	}
 
@@ -131,17 +186,12 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		Workspace: workspace, ResumeID: resumeID,
 	}, nil)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusForbidden)
-		writeJSON(w, map[string]string{"error": err.Error()})
+		writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		return
 	}
 	if reset {
-		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, map[string]string{"key": key, "status": "reset"})
 		return
 	}
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusAccepted)
-	writeJSON(w, map[string]string{"status": "accepted", "key": key})
+	writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": key})
 }

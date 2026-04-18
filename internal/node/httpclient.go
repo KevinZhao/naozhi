@@ -111,7 +111,10 @@ func (n *HTTPClient) Send(ctx context.Context, key, text, workspace string) erro
 	if workspace != "" {
 		payload["workspace"] = workspace
 	}
-	data, _ := json.Marshal(payload)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal send payload: %w", err)
+	}
 	resp, err := n.doRequest(ctx, http.MethodPost, "/api/sessions/send", bytes.NewReader(data))
 	if err != nil {
 		return fmt.Errorf("send to %s: %w", n.ID, err)
@@ -188,7 +191,10 @@ func (n *HTTPClient) FetchDiscoveredPreview(ctx context.Context, sessionID strin
 // ProxyTakeover forwards a takeover request to the remote node.
 func (n *HTTPClient) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd string, procStartTime uint64) (string, error) {
 	payload := map[string]any{"pid": pid, "session_id": sessionID, "cwd": cwd, "proc_start_time": procStartTime}
-	data, _ := json.Marshal(payload)
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("marshal takeover payload: %w", err)
+	}
 	resp, err := n.doRequest(ctx, http.MethodPost, "/api/discovered/takeover", bytes.NewReader(data))
 	if err != nil {
 		return "", fmt.Errorf("proxy takeover to %s: %w", n.ID, err)
@@ -201,8 +207,29 @@ func (n *HTTPClient) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd 
 	var result struct {
 		Key string `json:"key"`
 	}
-	json.NewDecoder(resp.Body).Decode(&result) //nolint:errcheck
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&result); err != nil {
+		return "", fmt.Errorf("proxy takeover to %s: decode response: %w", n.ID, err)
+	}
 	return result.Key, nil
+}
+
+// ProxyCloseDiscovered forwards a close-discovered request to the remote node.
+func (n *HTTPClient) ProxyCloseDiscovered(ctx context.Context, pid int, sessionID, cwd string, procStartTime uint64) error {
+	payload := map[string]any{"pid": pid, "session_id": sessionID, "cwd": cwd, "proc_start_time": procStartTime}
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal close discovered payload: %w", err)
+	}
+	resp, err := n.doRequest(ctx, http.MethodPost, "/api/discovered/close", bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("proxy close discovered to %s: %w", n.ID, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		return fmt.Errorf("proxy close discovered to %s: status %d: %s", n.ID, resp.StatusCode, string(body))
+	}
+	return nil
 }
 
 // ProxyRestartPlanner forwards a planner restart request to the remote node.

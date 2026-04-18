@@ -94,6 +94,11 @@ func (c *ReverseConn) rpc(ctx context.Context, method string, params any) (json.
 	reqID := strconv.FormatInt(c.reqSeq.Add(1), 10)
 	ch := make(chan reverseResult, 1)
 
+	marshaledParams, err := marshalParams(params)
+	if err != nil {
+		return nil, err
+	}
+
 	c.pendingMu.Lock()
 	c.pending[reqID] = ch
 	c.pendingMu.Unlock()
@@ -102,7 +107,7 @@ func (c *ReverseConn) rpc(ctx context.Context, method string, params any) (json.
 		Type:   "request",
 		ReqID:  reqID,
 		Method: method,
-		Params: marshalParams(params),
+		Params: marshaledParams,
 	}); err != nil {
 		c.pendingMu.Lock()
 		delete(c.pending, reqID)
@@ -127,12 +132,15 @@ func (c *ReverseConn) rpc(ctx context.Context, method string, params any) (json.
 	}
 }
 
-func marshalParams(v any) json.RawMessage {
+func marshalParams(v any) (json.RawMessage, error) {
 	if v == nil {
-		return nil
+		return nil, nil
 	}
-	b, _ := json.Marshal(v)
-	return b
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("marshalParams: %w", err)
+	}
+	return b, nil
 }
 
 func (c *ReverseConn) FetchSessions(ctx context.Context) ([]map[string]any, error) {
@@ -205,6 +213,13 @@ func (c *ReverseConn) ProxyTakeover(ctx context.Context, pid int, sessionID, cwd
 		}
 	}
 	return resp.Key, nil
+}
+
+func (c *ReverseConn) ProxyCloseDiscovered(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) error {
+	_, err := c.rpc(ctx, "close_discovered", map[string]any{
+		"pid": pid, "session_id": sessionID, "cwd": cwd, "proc_start_time": procStart,
+	})
+	return err
 }
 
 func (c *ReverseConn) ProxyRestartPlanner(ctx context.Context, projectName string) error {
@@ -287,7 +302,32 @@ func (c *ReverseConn) RemoveClient(cl EventSink) {
 	}
 }
 
+// broadcastToSubs snapshots subscribers for key, marshals out, and sends to all.
+// If deleteKey is true, the key is removed from the subscription map.
+func (c *ReverseConn) broadcastToSubs(key string, out ServerMsg, deleteKey bool) {
+	c.subMu.Lock()
+	clients := make([]EventSink, len(c.subs[key]))
+	copy(clients, c.subs[key])
+	if deleteKey {
+		delete(c.subs, key)
+	}
+	c.subMu.Unlock()
+
+	data, err := json.Marshal(out)
+	if err != nil {
+		return
+	}
+	for _, cl := range clients {
+		cl.SendRaw(data)
+	}
+}
+
 func (c *ReverseConn) readLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("panic in reverse readLoop", "node", c.id, "panic", r)
+		}
+	}()
 	defer c.markDisconnected()
 
 	// The connector sends WebSocket pings every 30s (upstream/connector.go).
@@ -331,77 +371,19 @@ func (c *ReverseConn) readLoop() {
 			}
 
 		case "event":
-			c.subMu.Lock()
-			clients := make([]EventSink, len(c.subs[msg.Key]))
-			copy(clients, c.subs[msg.Key])
-			c.subMu.Unlock()
-			out := ServerMsg{Type: "event", Key: msg.Key, Event: msg.Event, Node: c.id}
-			data, err := json.Marshal(out)
-			if err != nil {
-				continue
-			}
-			for _, cl := range clients {
-				cl.SendRaw(data)
-			}
+			c.broadcastToSubs(msg.Key, ServerMsg{Type: "event", Key: msg.Key, Event: msg.Event, Node: c.id}, false)
 
 		case "events":
-			c.subMu.Lock()
-			clients := make([]EventSink, len(c.subs[msg.Key]))
-			copy(clients, c.subs[msg.Key])
-			c.subMu.Unlock()
-			out := ServerMsg{Type: "history", Key: msg.Key, Events: msg.Events, Node: c.id}
-			data, err := json.Marshal(out)
-			if err != nil {
-				continue
-			}
-			for _, cl := range clients {
-				cl.SendRaw(data)
-			}
+			c.broadcastToSubs(msg.Key, ServerMsg{Type: "history", Key: msg.Key, Events: msg.Events, Node: c.id}, false)
 
 		case "session_state":
-			c.subMu.Lock()
-			clients := make([]EventSink, len(c.subs[msg.Key]))
-			copy(clients, c.subs[msg.Key])
-			c.subMu.Unlock()
-			out := ServerMsg{Type: "session_state", Key: msg.Key, State: msg.State, Reason: msg.Reason, Node: c.id}
-			data, err := json.Marshal(out)
-			if err != nil {
-				continue
-			}
-			for _, cl := range clients {
-				cl.SendRaw(data)
-			}
+			c.broadcastToSubs(msg.Key, ServerMsg{Type: "session_state", Key: msg.Key, State: msg.State, Reason: msg.Reason, Node: c.id}, false)
 
 		case "subscribed":
-			// Remote confirmed subscription; notify all waiting clients.
-			c.subMu.Lock()
-			clients := make([]EventSink, len(c.subs[msg.Key]))
-			copy(clients, c.subs[msg.Key])
-			c.subMu.Unlock()
-			out := ServerMsg{Type: "subscribed", Key: msg.Key, Node: c.id}
-			data, err := json.Marshal(out)
-			if err != nil {
-				continue
-			}
-			for _, cl := range clients {
-				cl.SendRaw(data)
-			}
+			c.broadcastToSubs(msg.Key, ServerMsg{Type: "subscribed", Key: msg.Key, Node: c.id}, false)
 
 		case "subscribe_error":
-			// Remote could not find the session
-			c.subMu.Lock()
-			clients := make([]EventSink, len(c.subs[msg.Key]))
-			copy(clients, c.subs[msg.Key])
-			delete(c.subs, msg.Key)
-			c.subMu.Unlock()
-			out := ServerMsg{Type: "error", Key: msg.Key, Node: c.id, Error: msg.Error}
-			data, err := json.Marshal(out)
-			if err != nil {
-				continue
-			}
-			for _, cl := range clients {
-				cl.SendRaw(data)
-			}
+			c.broadcastToSubs(msg.Key, ServerMsg{Type: "error", Key: msg.Key, Node: c.id, Error: msg.Error}, true)
 		}
 	}
 }

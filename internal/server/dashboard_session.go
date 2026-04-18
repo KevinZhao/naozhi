@@ -179,10 +179,7 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		if len(history) > 0 {
 			resp["history_sessions"] = history
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(resp); err != nil {
-			slog.Error("encode sessions response", "err", err)
-		}
+		writeJSON(w, resp)
 		return
 	}
 
@@ -236,10 +233,7 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	if len(history) > 0 {
 		resp["history_sessions"] = history
 	}
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(resp); err != nil {
-		slog.Error("encode sessions response", "err", err)
-	}
+	writeJSON(w, resp)
 }
 
 // GET /api/sessions/events
@@ -272,10 +266,7 @@ func (h *SessionHandlers) handleEvents(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(entries); err != nil {
-			slog.Error("encode remote events response", "err", err)
-		}
+		writeJSON(w, entries)
 		return
 	}
 
@@ -298,10 +289,7 @@ func (h *SessionHandlers) handleEvents(w http.ResponseWriter, r *http.Request) {
 		entries = sess.EventEntries()
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(entries); err != nil {
-		slog.Error("encode events response", "err", err)
-	}
+	writeJSON(w, entries)
 }
 
 // DELETE /api/sessions
@@ -320,7 +308,6 @@ func (h *SessionHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
@@ -345,9 +332,7 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	if workspace != "" {
 		wsPath, err := validateWorkspace(workspace, h.allowedRoot)
 		if err != nil {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusForbidden)
-			writeJSON(w, map[string]string{"error": err.Error()})
+			writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 			return
 		}
 		workspace = wsPath
@@ -364,7 +349,6 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	key := "dashboard:direct:r" + hex.EncodeToString(rb[:]) + ":general"
 	effectiveKey := h.router.RegisterForResume(key, req.SessionID, workspace, req.LastPrompt)
 
-	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]string{"status": "ok", "key": effectiveKey})
 }
 
@@ -380,7 +364,6 @@ func (h *SessionHandlers) handleInterrupt(w http.ResponseWriter, r *http.Request
 	}
 
 	ok := h.router.InterruptSession(req.Key)
-	w.Header().Set("Content-Type", "application/json")
 	if ok {
 		slog.Info("session interrupted via HTTP", "key", req.Key)
 		writeJSON(w, map[string]string{"status": "ok"})

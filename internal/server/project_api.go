@@ -26,7 +26,6 @@ type ProjectHandlers struct {
 // GET /api/projects — list all projects (local + remote).
 func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	if h.projectMgr == nil {
-		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, []any{})
 		return
 	}
@@ -63,17 +62,11 @@ func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 				allProjects = append(allProjects, item)
 			}
 		}
-		w.Header().Set("Content-Type", "application/json")
-		if err := json.NewEncoder(w).Encode(allProjects); err != nil {
-			slog.Error("encode projects response", "err", err)
-		}
+		writeJSON(w, allProjects)
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(result); err != nil {
-		slog.Error("encode projects response", "err", err)
-	}
+	writeJSON(w, result)
 }
 
 // GET /api/projects/config?name=...
@@ -90,10 +83,7 @@ func (h *ProjectHandlers) handleConfigGet(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(p.Config); err != nil {
-		slog.Error("encode project config", "err", err)
-	}
+	writeJSON(w, p.Config)
 }
 
 // PUT /api/projects/config?name=...
@@ -123,7 +113,6 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, map[string]string{"status": "ok"})
 		return
 	}
@@ -141,14 +130,14 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 
 	if err := h.projectMgr.UpdateConfig(name, cfg); err != nil {
 		if errors.Is(err, project.ErrNotFound) {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			http.Error(w, "project not found", http.StatusNotFound)
 		} else {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			slog.Error("update project config failed", "project", name, "err", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
 		}
 		return
 	}
 
-	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]string{"status": "ok"})
 }
 
@@ -172,7 +161,6 @@ func (h *ProjectHandlers) handlePlannerRestart(w http.ResponseWriter, r *http.Re
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
-		w.Header().Set("Content-Type", "application/json")
 		writeJSON(w, map[string]string{"status": "restarting"})
 		return
 	}
@@ -203,11 +191,10 @@ func (h *ProjectHandlers) handlePlannerRestart(w http.ResponseWriter, r *http.Re
 	defer cancel()
 	if _, err := h.router.ResetAndRecreate(ctx, plannerKey, opts); err != nil {
 		slog.Error("planner restart failed", "project", name, "err", err)
-		http.Error(w, "restart failed: "+err.Error(), http.StatusInternalServerError)
+		http.Error(w, "restart failed", http.StatusInternalServerError)
 		return
 	}
 	slog.Info("planner restarted", "project", name)
 
-	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]string{"status": "restarted"})
 }

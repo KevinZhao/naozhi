@@ -3,8 +3,10 @@ package server
 import (
 	"context"
 	"crypto/rand"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -20,6 +22,7 @@ import (
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/transcribe"
+	"golang.org/x/time/rate"
 )
 
 const defaultDedupCapacity = 10000
@@ -32,6 +35,7 @@ type Server struct {
 	router            *session.Router
 	dedup             *platform.Dedup
 	sessionGuard      *session.Guard
+	msgQueue          *dispatch.MessageQueue
 	startedAt         time.Time
 	agents            map[string]session.AgentOpts
 	agentCommands     map[string]string
@@ -67,6 +71,8 @@ type Server struct {
 	// Watchdog configuration stored for user-facing timeout error messages.
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
+
+	onReady func() // called after listener is bound
 
 	// knownNodes holds all configured node IDs → display names, including
 	// reverse nodes that may currently be disconnected. Never mutated after startup.
@@ -129,12 +135,15 @@ type ServerOptions struct {
 	StateDir          string // directory for persistent state (cookie_secret, etc.)
 	NoOutputTimeout   time.Duration
 	TotalTimeout      time.Duration
+	QueueMaxDepth     int
+	QueueCollectDelay time.Duration
 	DashboardToken    string // optional bearer token for dashboard API
 	TrustedProxy      bool   // trust X-Forwarded-For for client IP
 	ProjectManager    *project.Manager
 	Nodes             map[string]node.Conn
 	ReverseNodeServer *node.ReverseServer
 	Transcriber       transcribe.Service
+	OnReady           func() // called after the listener is bound and serving
 }
 
 func New(addr string, router *session.Router, platforms map[string]platform.Platform, agents map[string]session.AgentOpts, agentCommands map[string]string, scheduler *cron.Scheduler, backend string, opts ServerOptions) *Server {
@@ -165,6 +174,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		router:          router,
 		dedup:           platform.NewDedup(defaultDedupCapacity),
 		sessionGuard:    session.NewGuard(),
+		msgQueue:        dispatch.NewMessageQueue(opts.QueueMaxDepth, opts.QueueCollectDelay),
 		startedAt:       time.Now(),
 		agents:          agents,
 		agentCommands:   agentCommands,
@@ -176,6 +186,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		noOutputTimeout: opts.NoOutputTimeout,
 		totalTimeout:    opts.TotalTimeout,
 		dashboardToken:  opts.DashboardToken,
+		onReady:         opts.OnReady,
 		projectMgr:      opts.ProjectManager,
 		nodes:           nodes,
 		knownNodes:      knownNodes,
@@ -192,7 +203,8 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 			allowedRoot: opts.AllowedRoot,
 		},
 		transcribeH: &TranscribeHandler{
-			transcriber: opts.Transcriber,
+			transcriber:       opts.Transcriber,
+			transcribeLimiter: newIPLimiter(rate.Every(12*time.Second), 5), // 5 transcriptions/min per IP
 		},
 	}
 
@@ -307,7 +319,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 
 // Start registers routes and begins serving.
 func (s *Server) Start(ctx context.Context) error {
-	d := &dispatch.Dispatcher{
+	d := dispatch.NewDispatcher(dispatch.DispatcherConfig{
 		Router:                s.router,
 		Platforms:             s.platforms,
 		Agents:                s.agents,
@@ -315,17 +327,18 @@ func (s *Server) Start(ctx context.Context) error {
 		Scheduler:             s.scheduler,
 		ProjectMgr:            s.projectMgr,
 		Guard:                 s.sessionGuard,
+		Queue:                 s.msgQueue,
 		Dedup:                 s.dedup,
 		AllowedRoot:           s.allowedRoot,
 		ClaudeDir:             s.claudeDir,
-		BackendTag:            s.backendTag,
+		ReplyFooter:           s.backendTag,
 		SendFn:                s.sendWithBroadcast,
 		TakeoverFn:            s.tryAutoTakeover,
 		NoOutputTimeout:       s.noOutputTimeout,
 		TotalTimeout:          s.totalTimeout,
 		WatchdogNoOutputKills: &s.watchdogNoOutputKills,
 		WatchdogTotalKills:    &s.watchdogTotalKills,
-	}
+	})
 	handler := d.BuildHandler()
 
 	var startedPlatforms []platform.RunnablePlatform
@@ -346,19 +359,30 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	s.mux.HandleFunc("GET /health", s.healthH.handleHealth)
+	s.discoveryH.appCtx = ctx
 	s.registerDashboard()
 	s.nodeCache.StartLoop(ctx)
 	s.discoveryCache.startLoop(ctx)
 	s.startProjectScanLoop(ctx)
 	slog.Info("server starting", "addr", s.addr)
 
+	ln, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return fmt.Errorf("listen %s: %w", s.addr, err)
+	}
+
 	srv := &http.Server{
-		Addr:         s.addr,
 		Handler:      s.mux,
 		ReadTimeout:  15 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
+
+	// Notify caller that the listener is bound and ready to accept connections.
+	if s.onReady != nil {
+		s.onReady()
+	}
+
 	shutdownComplete := make(chan struct{})
 	go func() {
 		<-ctx.Done()
@@ -386,11 +410,14 @@ func (s *Server) Start(ctx context.Context) error {
 		close(shutdownComplete)
 	}()
 
-	err := srv.ListenAndServe()
-	// Wait for the shutdown goroutine to finish draining connections.
-	// Only block if shutdown was initiated (ctx cancelled); if ListenAndServe
-	// failed for another reason (e.g. port conflict), the goroutine is still
+	err = srv.Serve(ln)
+	// If ListenAndServe failed for a non-shutdown reason (e.g. port conflict),
+	// return immediately instead of blocking — the shutdown goroutine is still
 	// waiting on ctx.Done and shutdownComplete will never close.
+	if err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	// Wait for the shutdown goroutine to finish draining connections.
 	select {
 	case <-shutdownComplete:
 	case <-ctx.Done():

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 type storeEntry struct {
@@ -46,7 +47,7 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 				cost = s.totalCost
 			}
 			entries = append(entries, storeEntry{
-				Key:            s.Key,
+				Key:            s.key,
 				SessionID:      sid,
 				PrevSessionIDs: s.prevSessionIDs,
 				TotalCost:      cost,
@@ -98,7 +99,16 @@ func loadStore(path string) map[string]*storeEntry {
 
 	var entries []storeEntry
 	if err := json.Unmarshal(data, &entries); err != nil {
-		slog.Warn("parse session store failed", "err", err)
+		// Preserve the corrupt file for forensic analysis so the next save
+		// does not silently overwrite it.
+		corruptPath := path + ".corrupt." + time.Now().Format("20060102-150405")
+		if renameErr := os.Rename(path, corruptPath); renameErr != nil {
+			slog.Warn("parse session store failed; could not rename corrupt file",
+				"err", err, "rename_err", renameErr, "path", path)
+		} else {
+			slog.Warn("parse session store failed; corrupt file preserved",
+				"err", err, "corrupt_path", corruptPath)
+		}
 		return nil
 	}
 
@@ -185,6 +195,79 @@ func saveKnownIDs(storePath string, ids map[string]bool) error {
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename known IDs to %s: %w", path, err)
+	}
+	return nil
+}
+
+// workspaceOverridesPath returns the path to the workspace overrides file,
+// derived from the store path (e.g. sessions.json → workspace-overrides.json).
+func workspaceOverridesPath(storePath string) string {
+	if storePath == "" {
+		return ""
+	}
+	return filepath.Join(filepath.Dir(storePath), "workspace-overrides.json")
+}
+
+// loadWorkspaceOverrides reads persisted per-chat workspace overrides.
+func loadWorkspaceOverrides(storePath string) map[string]string {
+	path := workspaceOverridesPath(storePath)
+	if path == "" {
+		return nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			slog.Warn("load workspace overrides failed", "err", err)
+		}
+		return nil
+	}
+	var m map[string]string
+	if err := json.Unmarshal(data, &m); err != nil {
+		slog.Warn("parse workspace overrides failed", "err", err)
+		return nil
+	}
+	if len(m) > 0 {
+		slog.Info("loaded workspace overrides", "count", len(m))
+	}
+	return m
+}
+
+// saveWorkspaceOverrides persists per-chat workspace overrides.
+// Uses write-tmp → fsync → rename for crash-safe atomicity.
+func saveWorkspaceOverrides(storePath string, overrides map[string]string) error {
+	path := workspaceOverridesPath(storePath)
+	if path == "" {
+		return nil
+	}
+	if len(overrides) == 0 {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			slog.Warn("remove empty workspace overrides file", "path", path, "err", err)
+		}
+		return nil
+	}
+	data, err := json.Marshal(overrides)
+	if err != nil {
+		return fmt.Errorf("marshal workspace overrides: %w", err)
+	}
+	tmp := path + ".tmp"
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
+		return fmt.Errorf("write workspace overrides %s: %w", tmp, err)
+	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write workspace overrides %s: %w", tmp, err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("sync workspace overrides %s: %w", tmp, err)
+	}
+	f.Close()
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("rename workspace overrides to %s: %w", path, err)
 	}
 	return nil
 }

@@ -65,6 +65,15 @@ func TestGenerateSystemdUnit(t *testing.T) {
 	if !strings.Contains(unit, "Environment=HOME=/home/app") {
 		t.Error("HOME environment missing")
 	}
+	if !strings.Contains(unit, "Type=notify") {
+		t.Error("expected Type=notify for sd_notify support")
+	}
+	if !strings.Contains(unit, "WatchdogSec=120") {
+		t.Error("expected WatchdogSec=120 for hung-process detection")
+	}
+	if !strings.Contains(unit, "NotifyAccess=main") {
+		t.Error("expected NotifyAccess=main")
+	}
 }
 
 func TestGenerateSystemdUnitQuotesSpaces(t *testing.T) {

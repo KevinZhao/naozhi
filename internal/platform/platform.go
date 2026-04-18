@@ -106,6 +106,21 @@ func SplitText(text string, maxRunes int) []string {
 	return chunks
 }
 
+// ImageExt returns a file extension (with leading dot) for the given MIME type.
+// Falls back to ".png" for unrecognized types.
+func ImageExt(mimeType string) string {
+	switch mimeType {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ".png"
+	}
+}
+
 // ReplyWithRetry calls p.Reply up to maxAttempts times with exponential backoff
 // starting at 500 ms, doubling each retry up to 4 s. It returns on the first
 // success. If all attempts fail the last error is returned.

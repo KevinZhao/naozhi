@@ -3,11 +3,13 @@ package cron
 import (
 	"context"
 	"fmt"
+	"log"
 	"log/slog"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	robfigcron "github.com/robfig/cron/v3"
 
@@ -34,7 +36,7 @@ type OnExecuteFunc func(jobID, result, errMsg string)
 // Scheduler manages cron jobs and executes them on schedule.
 type Scheduler struct {
 	cron          *robfigcron.Cron
-	mu            sync.Mutex
+	mu            sync.RWMutex
 	jobs          map[string]*Job
 	router        *session.Router
 	platforms     map[string]platform.Platform
@@ -64,10 +66,11 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		cfg.ExecTimeout = 5 * time.Minute
 	}
 	stopCtx, stopCancel := context.WithCancel(context.Background())
+	cronLogger := robfigcron.PrintfLogger(log.New(slogWriter{}, "cron: ", 0))
 	return &Scheduler{
 		cron: robfigcron.New(robfigcron.WithChain(
-			robfigcron.Recover(robfigcron.DefaultLogger),
-			robfigcron.SkipIfStillRunning(robfigcron.DefaultLogger),
+			robfigcron.Recover(cronLogger),
+			robfigcron.SkipIfStillRunning(cronLogger),
 		)),
 		jobs:          make(map[string]*Job),
 		router:        cfg.Router,
@@ -165,14 +168,14 @@ func (s *Scheduler) AddJob(j *Job) error {
 }
 
 // ListJobs returns jobs for a specific chat.
-func (s *Scheduler) ListJobs(plat, chatID string) []*Job {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Scheduler) ListJobs(plat, chatID string) []Job {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
-	var result []*Job
+	var result []Job
 	for _, j := range s.jobs {
 		if j.Platform == plat && j.ChatID == chatID {
-			result = append(result, j)
+			result = append(result, *j)
 		}
 	}
 	return result
@@ -181,8 +184,8 @@ func (s *Scheduler) ListJobs(plat, chatID string) []*Job {
 // ListAllJobs returns all jobs regardless of platform/chat scope.
 // Returns value copies safe to read outside the lock.
 func (s *Scheduler) ListAllJobs() []Job {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 
 	result := make([]Job, 0, len(s.jobs))
 	for _, j := range s.jobs {
@@ -389,9 +392,9 @@ func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
 
 // NextRun returns the next scheduled run time for a job.
 func (s *Scheduler) NextRun(j *Job) time.Time {
-	s.mu.Lock()
+	s.mu.RLock()
 	entryID := j.entryID
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	if entryID == 0 {
 		return time.Time{}
 	}
@@ -401,14 +404,14 @@ func (s *Scheduler) NextRun(j *Job) time.Time {
 
 // NextRunByID returns the next scheduled run time for a job by ID.
 func (s *Scheduler) NextRunByID(id string) time.Time {
-	s.mu.Lock()
+	s.mu.RLock()
 	j, ok := s.jobs[id]
 	if !ok || j.entryID == 0 {
-		s.mu.Unlock()
+		s.mu.RUnlock()
 		return time.Time{}
 	}
 	entryID := j.entryID
-	s.mu.Unlock()
+	s.mu.RUnlock()
 	entry := s.cron.Entry(entryID)
 	return entry.Next
 }
@@ -430,9 +433,24 @@ func (s *Scheduler) TriggerNow(id string) error {
 		s.mu.Unlock()
 		return fmt.Errorf("job %s has no prompt", id)
 	}
+	entryID := j.entryID
 	s.mu.Unlock()
 
-	go s.execute(j)
+	if entryID != 0 {
+		// Run through the cron chain (SkipIfStillRunning + Recover) to prevent
+		// double-execution when TriggerNow overlaps with a scheduled tick.
+		// Guard: a concurrent DeleteJob may remove the entry between our Unlock
+		// and this lookup, causing Entry() to return a zero-value with nil WrappedJob.
+		entry := s.cron.Entry(entryID)
+		if entry.WrappedJob != nil {
+			go entry.WrappedJob.Run()
+		} else {
+			// Entry was concurrently deleted — skip execution.
+			slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "id", id, "entry_id", entryID)
+		}
+	} else {
+		go s.execute(j)
+	}
 	return nil
 }
 
@@ -450,25 +468,36 @@ func (s *Scheduler) registerJob(j *Job) error {
 
 // execute runs a cron job: send prompt to session, post result to chat.
 func (s *Scheduler) execute(j *Job) {
-	log := slog.With("cron_id", j.ID, "platform", j.Platform, "chat", j.ChatID)
-	log.Info("cron job executing", "prompt_len", len(j.Prompt))
+	// Snapshot mutable fields under lock to avoid data race with SetJobPrompt.
+	s.mu.Lock()
+	prompt := j.Prompt
+	workDir := j.WorkDir
+	jobID := j.ID
+	platName := j.Platform
+	chatID := j.ChatID
+	notifyPlat := j.NotifyPlatform
+	notifyChat := j.NotifyChatID
+	s.mu.Unlock()
+
+	log := slog.With("cron_id", jobID, "platform", platName, "chat", chatID)
+	log.Info("cron job executing", "prompt_len", len(prompt))
 
 	ctx, cancel := context.WithTimeout(s.stopCtx, s.execTimeout)
 	defer cancel()
 
-	agentID, cleanText := routing.ResolveAgent(j.Prompt, s.agentCommands)
+	agentID, cleanText := routing.ResolveAgent(prompt, s.agentCommands)
 	opts := s.agents[agentID]
 	opts.Exempt = true // cron sessions must not count toward maxProcs or evict user sessions
-	if j.WorkDir != "" {
-		opts.Workspace = filepath.Clean(j.WorkDir)
+	if workDir != "" {
+		opts.Workspace = filepath.Clean(workDir)
 	}
-	key := "cron:" + j.ID
+	key := "cron:" + jobID
 
 	sess, _, err := s.router.GetOrCreate(ctx, key, opts)
 	if err != nil {
 		log.Error("cron session error", "err", err)
 		s.recordResult(j, "", "session error: "+err.Error())
-		s.notifyIM(j, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", j.ID))
+		s.notifyIM(j, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", jobID))
 		return
 	}
 
@@ -477,7 +506,7 @@ func (s *Scheduler) execute(j *Job) {
 	if err != nil {
 		log.Error("cron send error", "err", err)
 		s.recordResult(j, "", "send error: "+err.Error())
-		s.notifyIM(j, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", j.ID))
+		s.notifyIM(j, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", jobID))
 		return
 	}
 
@@ -485,21 +514,21 @@ func (s *Scheduler) execute(j *Job) {
 	s.recordResult(j, result.Text, "")
 
 	// Send result to the job's own IM channel (for IM-created jobs)
-	replyText := fmt.Sprintf("[Cron %s] %s", j.ID, result.Text)
+	replyText := fmt.Sprintf("[Cron %s] %s", jobID, result.Text)
 	s.notifyIM(j, replyText)
 
 	// Send to optional notify target (for dashboard-created jobs that want IM push)
-	if j.NotifyPlatform != "" && j.NotifyChatID != "" &&
-		(j.NotifyPlatform != j.Platform || j.NotifyChatID != j.ChatID) {
-		s.notifyTarget(j.NotifyPlatform, j.NotifyChatID, replyText)
+	if notifyPlat != "" && notifyChat != "" &&
+		(notifyPlat != platName || notifyChat != chatID) {
+		s.notifyTarget(notifyPlat, notifyChat, replyText)
 	}
 }
 
 // recordResult persists the last execution result on the job and invokes the onExecute callback.
 func (s *Scheduler) recordResult(j *Job, result, errMsg string) {
-	const maxStoredResult = 4 * 1024
-	if len(result) > maxStoredResult {
-		result = result[:maxStoredResult] + "…[truncated]"
+	const maxStoredRunes = 4 * 1024
+	if utf8.RuneCountInString(result) > maxStoredRunes {
+		result = string([]rune(result)[:maxStoredRunes]) + "…[truncated]"
 	}
 	s.mu.Lock()
 	j.LastRunAt = time.Now()
@@ -601,4 +630,14 @@ func (s *Scheduler) saveSnapshot(snapshot map[string]*Job) {
 	if err := saveJobs(s.storePath, snapshot); err != nil {
 		slog.Error("save cron store", "err", err)
 	}
+}
+
+// slogWriter adapts slog to io.Writer so robfig/cron's PrintfLogger can route
+// through the project's structured logger instead of standard log.
+type slogWriter struct{}
+
+func (slogWriter) Write(p []byte) (int, error) {
+	msg := strings.TrimRight(string(p), "\n")
+	slog.Warn(msg)
+	return len(p), nil
 }

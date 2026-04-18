@@ -1,6 +1,7 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -21,6 +22,7 @@ const (
 // and forwards events to local browser clients.
 type wsRelay struct {
 	node      *HTTPClient
+	nodeField []byte // pre-computed `"node":"<id>",` bytes for raw injection
 	mu        sync.Mutex
 	writeMu   sync.Mutex // serializes writes to the WS connection
 	conn      *websocket.Conn
@@ -32,8 +34,12 @@ type wsRelay struct {
 }
 
 func newWSRelay(node *HTTPClient) *wsRelay {
+	// Pre-compute the JSON field injection bytes once per relay.
+	nodeJSON, _ := json.Marshal(node.ID)
+	nodeField := []byte(`"node":` + string(nodeJSON) + `,`)
 	return &wsRelay{
 		node:      node,
+		nodeField: nodeField,
 		subs:      make(map[string][]EventSink),
 		lastEvent: make(map[string]int64),
 		done:      make(chan struct{}),
@@ -235,32 +241,64 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 		}
 		conn.SetReadDeadline(time.Now().Add(relayReadTimeout))
 
-		var msg ServerMsg
-		if err := json.Unmarshal(data, &msg); err != nil {
+		// Parse only the key and type for routing + lastEvent tracking.
+		// Avoid full unmarshal+remarshal by injecting the node field into raw bytes.
+		var header struct {
+			Type  string `json:"type"`
+			Key   string `json:"key"`
+			Event struct {
+				Time int64 `json:"time"`
+			} `json:"event"`
+		}
+		if json.Unmarshal(data, &header) != nil {
 			continue
 		}
 
-		// Tag with source node
-		msg.Node = r.node.ID
-
-		r.mu.Lock()
-		clients := make([]EventSink, len(r.subs[msg.Key]))
-		copy(clients, r.subs[msg.Key])
 		// Track last event time for reconnect resubscribe
-		if msg.Type == "event" && msg.Event != nil && msg.Event.Time > r.lastEvent[msg.Key] {
-			r.lastEvent[msg.Key] = msg.Event.Time
+		r.mu.Lock()
+		clients := make([]EventSink, len(r.subs[header.Key]))
+		copy(clients, r.subs[header.Key])
+		if header.Type == "event" && header.Event.Time > r.lastEvent[header.Key] {
+			r.lastEvent[header.Key] = header.Event.Time
 		}
 		r.mu.Unlock()
 
-		// Marshal once, send pre-encoded bytes to all subscribers
-		tagged, err := json.Marshal(msg)
-		if err != nil {
-			continue
-		}
+		// Inject "node" field into raw JSON without full decode/encode.
+		tagged := injectNodeField(data, r.nodeField)
 		for _, c := range clients {
 			c.SendRaw(tagged)
 		}
 	}
+}
+
+// injectNodeField inserts a pre-computed "node":"id", field into raw JSON bytes
+// without full decode/encode. JSON objects always start with '{'.
+// If the message already contains a "node" key, it is returned as-is to prevent
+// duplicate-key ambiguity across JSON parsers.
+func injectNodeField(data, nodeField []byte) []byte {
+	if len(data) == 0 || data[0] != '{' {
+		return data
+	}
+	// Skip injection if the remote message already has a "node" key.
+	// Match `"node":` (with colon) to avoid false positives where "node" appears
+	// only as a value inside another field.
+	if bytes.Contains(data, []byte(`"node":`)) {
+		return data
+	}
+	// Guard: empty object "{}" — nodeField ends with ',' which would produce
+	// invalid JSON like {"node":"id",}. Strip the trailing comma instead.
+	if len(data) == 2 {
+		result := make([]byte, 0, 1+len(nodeField)-1+1)
+		result = append(result, '{')
+		result = append(result, nodeField[:len(nodeField)-1]...) // strip trailing ','
+		result = append(result, '}')
+		return result
+	}
+	result := make([]byte, 0, len(data)+len(nodeField))
+	result = append(result, '{')
+	result = append(result, nodeField...)
+	result = append(result, data[1:]...)
+	return result
 }
 
 // pingLoop sends periodic WebSocket pings to detect silent disconnections.
@@ -343,6 +381,8 @@ func (r *wsRelay) sendHistoryToClient(c EventSink, key string, after int64) {
 	}
 }
 
+// writeJSON sends a JSON message via the relay websocket.
+// Lock ordering: writeMu → mu (never hold mu then acquire writeMu).
 func (r *wsRelay) writeJSON(v any) {
 	r.writeMu.Lock()
 	defer r.writeMu.Unlock()

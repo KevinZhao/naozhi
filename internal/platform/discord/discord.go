@@ -127,15 +127,7 @@ func (d *Discord) Reply(ctx context.Context, msg platform.OutgoingMessage) (stri
 	if len(msg.Images) > 0 {
 		var files []*discordgo.File
 		for i, img := range msg.Images {
-			ext := ".png"
-			switch img.MimeType {
-			case "image/jpeg":
-				ext = ".jpg"
-			case "image/gif":
-				ext = ".gif"
-			case "image/webp":
-				ext = ".webp"
-			}
+			ext := platform.ImageExt(img.MimeType)
 			files = append(files, &discordgo.File{
 				Name:        fmt.Sprintf("image_%d%s", i, ext),
 				ContentType: img.MimeType,

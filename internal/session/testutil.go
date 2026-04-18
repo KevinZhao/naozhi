@@ -47,6 +47,7 @@ func (p *TestProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
 func (p *TestProcess) LastEntryOfType(typ string) cli.EventEntry {
 	return p.EventLog.LastEntryOfType(typ)
 }
+func (p *TestProcess) LastActivitySummary() string                { return p.EventLog.LastActivitySummary() }
 func (p *TestProcess) ProtocolName() string                       { return "test" }
 func (p *TestProcess) SubscribeEvents() (<-chan struct{}, func()) { return p.EventLog.Subscribe() }
 func (p *TestProcess) PID() int                                   { return 0 }
@@ -63,7 +64,7 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	s := &ManagedSession{
-		Key: key,
+		key: key,
 	}
 	s.storeProcess(proc)
 	s.touchLastActive()

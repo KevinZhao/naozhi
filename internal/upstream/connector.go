@@ -3,6 +3,7 @@ package upstream
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -134,11 +135,11 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	// Enable WebSocket-level ping/pong for dead connection detection.
 	// ReadDeadline resets on any pong response from the primary.
 	const wsReadTimeout = 90 * time.Second
-	conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
 	conn.SetPongHandler(func(string) error {
 		conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
 		return nil
 	})
+	conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
 
 	return true, c.handleConn(ctx, conn)
 }
@@ -171,7 +172,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	}
 	activeSubs := map[string]func(){} // key → cancel func
 	subGen := map[string]uint64{}     // key → generation counter
-	subExited := make(chan subExitNote, 16)
+	subExited := make(chan subExitNote, 64)
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -375,11 +376,13 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			return nil, fmt.Errorf("get session: %w", err)
 		}
 		// Send is async: primary subscribed before sending, events arrive via streamEvents.
-		// Use the application-level appCtx (not connCtx) so a relay connection drop
-		// does not kill the in-progress Claude process via context cancellation.
+		// Use connCtx so a relay disconnect cancels in-flight sends, preventing
+		// goroutine accumulation across reconnect cycles.
 		go func() {
-			if _, err := sess.Send(appCtx, p.Text, nil, nil); err != nil {
-				slog.Warn("connector send failed", "key", p.Key, "err", err)
+			if _, err := sess.Send(connCtx, p.Text, nil, nil); err != nil {
+				if connCtx.Err() == nil {
+					slog.Warn("connector send failed", "key", p.Key, "err", err)
+				}
 			}
 		}()
 		return marshalResult(map[string]string{"status": "accepted"})
@@ -397,6 +400,9 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if p.PID <= 0 || p.SessionID == "" {
 			return nil, fmt.Errorf("pid and session_id are required")
 		}
+		if !discovery.IsValidSessionID(p.SessionID) {
+			return nil, fmt.Errorf("invalid session_id format")
+		}
 		if p.ProcStartTime == 0 {
 			return nil, fmt.Errorf("proc_start_time is required")
 		}
@@ -408,21 +414,34 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			return nil, fmt.Errorf("process identity mismatch (pid %d may have been reused)", p.PID)
 		}
 		if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil {
-			return nil, fmt.Errorf("kill process %d: %w", p.PID, err)
+			if !errors.Is(err, syscall.ESRCH) {
+				return nil, fmt.Errorf("kill process %d: %w", p.PID, err)
+			}
 		}
 		cwd := p.CWD
 		if cwd == "" {
 			cwd = "unknown"
 		}
-		cwdKey := strings.ReplaceAll(strings.TrimPrefix(cwd, "/"), "/", "-")
-		cwdKey = strings.ReplaceAll(cwdKey, ":", "_")
-		if len(cwdKey) > 128 {
-			cwdKey = cwdKey[:128]
+		// Validate CWD against workspace root (same check as "send" RPC).
+		if cwd != "unknown" && c.defaultWorkspace != "" {
+			cleanCWD, err := filepath.EvalSymlinks(filepath.Clean(cwd))
+			if err != nil {
+				return nil, fmt.Errorf("takeover cwd path invalid: %w", err)
+			}
+			if !filepath.IsAbs(cleanCWD) {
+				return nil, fmt.Errorf("takeover cwd must be absolute path")
+			}
+			if cleanCWD != c.defaultWorkspace &&
+				!strings.HasPrefix(cleanCWD, c.defaultWorkspace+string(filepath.Separator)) {
+				return nil, fmt.Errorf("takeover cwd %q outside allowed root %q", cleanCWD, c.defaultWorkspace)
+			}
+			cwd = cleanCWD
 		}
+		cwdKey := session.SanitizeCWDKey(cwd)
 		key := session.TakeoverKey(cwdKey)
 		pid, sessionID, procStartTime, reqCWD, claudeDir := p.PID, p.SessionID, p.ProcStartTime, p.CWD, c.claudeDir
 		go func() {
-			discovery.WaitAndCleanup(pid, procStartTime, claudeDir, reqCWD, sessionID)
+			discovery.WaitAndCleanup(appCtx, pid, procStartTime, claudeDir, reqCWD, sessionID)
 			if appCtx.Err() != nil {
 				return // connector shutting down
 			}
@@ -431,6 +450,43 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			}
 		}()
 		return marshalResult(map[string]string{"status": "accepted", "key": key})
+
+	case "close_discovered":
+		var p struct {
+			PID           int    `json:"pid"`
+			SessionID     string `json:"session_id"`
+			CWD           string `json:"cwd"`
+			ProcStartTime uint64 `json:"proc_start_time"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("close_discovered params: %w", err)
+		}
+		if p.PID <= 0 {
+			return nil, fmt.Errorf("pid is required")
+		}
+		if p.ProcStartTime == 0 {
+			return nil, fmt.Errorf("proc_start_time is required")
+		}
+		if p.SessionID != "" && !discovery.IsValidSessionID(p.SessionID) {
+			return nil, fmt.Errorf("invalid session_id format")
+		}
+		actual, err := discovery.ProcStartTime(p.PID)
+		if err != nil {
+			return nil, fmt.Errorf("cannot verify process identity for pid %d: %w", p.PID, err)
+		}
+		if actual != p.ProcStartTime {
+			return nil, fmt.Errorf("process identity mismatch (pid %d may have been reused)", p.PID)
+		}
+		if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil {
+			if !errors.Is(err, syscall.ESRCH) {
+				return nil, fmt.Errorf("kill process %d: %w", p.PID, err)
+			}
+		}
+		pid, sessionID, procStartTime, cwd, claudeDir := p.PID, p.SessionID, p.ProcStartTime, p.CWD, c.claudeDir
+		go func() {
+			discovery.WaitAndCleanup(appCtx, pid, procStartTime, claudeDir, cwd, sessionID)
+		}()
+		return marshalResult(map[string]string{"status": "ok"})
 
 	case "restart_planner":
 		var p struct {
@@ -516,11 +572,8 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 				if err := writeJSON(node.ReverseMsg{Type: "events", Key: key, Events: entries}); err != nil {
 					return
 				}
-				for i := range entries {
-					if entries[i].Time > lastTime {
-						lastTime = entries[i].Time
-					}
-				}
+				// entries are chronological; last entry has the highest timestamp
+				lastTime = entries[len(entries)-1].Time
 			}
 			// Only push session_state when it actually changes
 			snap := sess.Snapshot()

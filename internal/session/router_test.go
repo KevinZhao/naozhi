@@ -128,6 +128,7 @@ func (f *fakeProcess) LastEntryOfType(typ string) cli.EventEntry {
 	}
 	return cli.EventEntry{}
 }
+func (f *fakeProcess) LastActivitySummary() string      { return "" }
 func (f *fakeProcess) ProtocolName() string             { return "test" }
 func (f *fakeProcess) GetSessionID() string             { return "" }
 func (f *fakeProcess) Interrupt()                       {}
@@ -165,12 +166,12 @@ func newTestRouter(maxProcs int) *Router {
 // Must be called before any concurrent operations on the router.
 func injectSession(r *Router, key string, proc processIface) *ManagedSession {
 	s := &ManagedSession{
-		Key: key,
+		key: key,
 	}
 	s.storeProcess(proc)
 	s.touchLastActive()
 	r.sessions[key] = s
-	if !s.Exempt && proc != nil && proc.Alive() {
+	if !s.IsExempt() && proc != nil && proc.Alive() {
 		r.activeCount++
 	}
 	return s
@@ -178,7 +179,7 @@ func injectSession(r *Router, key string, proc processIface) *ManagedSession {
 
 // newSessionWithID creates a ManagedSession with the given key and session ID.
 func newSessionWithID(key, sessID string) *ManagedSession {
-	s := &ManagedSession{Key: key}
+	s := &ManagedSession{key: key}
 	s.setSessionID(sessID)
 	return s
 }
@@ -320,7 +321,7 @@ func TestResetNonExistentKey(t *testing.T) {
 
 func TestResetNilProcessSession(t *testing.T) {
 	r := newTestRouter(3)
-	r.sessions["key1"] = &ManagedSession{Key: "key1"}
+	r.sessions["key1"] = &ManagedSession{key: "key1"}
 	r.sessions["key1"].setSessionID("sess-1")
 
 	r.Reset("key1")
@@ -427,7 +428,7 @@ func TestCleanupSkipsNilProcess(t *testing.T) {
 		ttl:      1 * time.Minute,
 		pruneTTL: 1 * time.Hour,
 	}
-	s := &ManagedSession{Key: "key1"}
+	s := &ManagedSession{key: "key1"}
 	s.setSessionID("sess-1")
 	s.lastActive.Store(time.Now().UnixNano()) // recent → within pruneTTL window
 	r.sessions["key1"] = s
@@ -656,7 +657,7 @@ func TestEvictOldestEmptyRouter(t *testing.T) {
 func TestEvictOldestReturnsTrue(t *testing.T) {
 	r := &Router{sessions: make(map[string]*ManagedSession), maxProcs: 1}
 	proc := newIdleProc()
-	s := &ManagedSession{Key: "key1"}
+	s := &ManagedSession{key: "key1"}
 	s.storeProcess(proc)
 	s.touchLastActive()
 	r.sessions["key1"] = s
@@ -676,7 +677,7 @@ func TestEvictOldestReturnsTrue(t *testing.T) {
 func TestEvictOldestSkipsRunning(t *testing.T) {
 	r := &Router{sessions: make(map[string]*ManagedSession)}
 	proc := newRunningProc()
-	s := &ManagedSession{Key: "key1"}
+	s := &ManagedSession{key: "key1"}
 	s.storeProcess(proc)
 	s.touchLastActive()
 	r.sessions["key1"] = s
@@ -696,7 +697,7 @@ func TestEvictOldestSkipsRunning(t *testing.T) {
 func TestEvictOldestSkipsDead(t *testing.T) {
 	r := &Router{sessions: make(map[string]*ManagedSession)}
 	proc := newDeadProc()
-	s := &ManagedSession{Key: "key1"}
+	s := &ManagedSession{key: "key1"}
 	s.storeProcess(proc)
 	s.touchLastActive()
 	r.sessions["key1"] = s
@@ -716,11 +717,11 @@ func TestEvictOldestPicksOldest(t *testing.T) {
 	oldProc := newIdleProc()
 	recentProc := newIdleProc()
 
-	oldSession := &ManagedSession{Key: "old-key"}
+	oldSession := &ManagedSession{key: "old-key"}
 	oldSession.storeProcess(oldProc)
 	oldSession.lastActive.Store(time.Now().Add(-2 * time.Hour).UnixNano())
 
-	recentSession := &ManagedSession{Key: "recent-key"}
+	recentSession := &ManagedSession{key: "recent-key"}
 	recentSession.storeProcess(recentProc)
 	recentSession.lastActive.Store(time.Now().Add(-1 * time.Minute).UnixNano())
 
@@ -1038,7 +1039,7 @@ func TestHistoryCapture_DeadProcessUsesEventEntries(t *testing.T) {
 
 	proc := newDeadProcWithEntries(liveEntries)
 	s := &ManagedSession{
-		Key:              "test-key",
+		key:              "test-key",
 		persistedHistory: stalePersisted,
 	}
 	s.storeProcess(proc)
@@ -1063,7 +1064,7 @@ func TestHistoryCapture_NilProcessFallsBackToPersistedHistory(t *testing.T) {
 	}
 
 	s := &ManagedSession{
-		Key:              "test-key",
+		key:              "test-key",
 		persistedHistory: persisted,
 	}
 	// process is nil by default (zero value of atomic.Pointer)
@@ -1083,7 +1084,7 @@ func TestHistoryCapture_NilProcessFallsBackToPersistedHistory(t *testing.T) {
 // triggering the JSONL-load path in spawnSession.
 func TestHistoryCapture_EmptyFallsBackToJSONL(t *testing.T) {
 	s := &ManagedSession{
-		Key: "test-key",
+		key: "test-key",
 	}
 	// process is nil by default (zero value of atomic.Pointer)
 

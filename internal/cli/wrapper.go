@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -41,7 +41,7 @@ func NewWrapper(cliPath string, proto Protocol, backend string) *Wrapper {
 	if cliPath == "" {
 		cliPath = detectCLI(backend)
 	}
-	cliPath = config.ExpandHome(cliPath)
+	cliPath = osutil.ExpandHome(cliPath)
 	w := &Wrapper{
 		CLIPath:  cliPath,
 		CLIName:  backendDisplayName(backend),

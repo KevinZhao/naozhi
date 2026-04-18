@@ -106,7 +106,9 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+Type=notify
+NotifyAccess=main
+WatchdogSec=120
 ExecStart="%s" --config "%s"
 WorkingDirectory=%s
 Restart=always

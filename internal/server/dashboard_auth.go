@@ -111,6 +111,8 @@ func (a *AuthHandlers) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 
 func (a *AuthHandlers) serveLoginPage(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'")
+	w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
@@ -183,12 +185,9 @@ func (a *AuthHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 		HttpOnly: true,
 		SameSite: http.SameSiteStrictMode,
 		Secure:   a.isSecure(r),
-		MaxAge:   86400 * 30, // 30 days
+		MaxAge:   86400, // 1 day
 	})
-	w.Header().Set("Content-Type", "application/json")
-	if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
-		slog.Debug("write login response", "err", err)
-	}
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 func (a *AuthHandlers) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -201,10 +200,7 @@ func (a *AuthHandlers) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Secure:   a.isSecure(r),
 		MaxAge:   -1,
 	})
-	w.Header().Set("Content-Type", "application/json")
-	if _, err := w.Write([]byte(`{"status":"ok"}`)); err != nil {
-		slog.Debug("write logout response", "err", err)
-	}
+	writeJSON(w, map[string]string{"status": "ok"})
 }
 
 const loginPageHTML = `<!DOCTYPE html>

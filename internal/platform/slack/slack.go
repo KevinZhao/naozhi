@@ -122,13 +122,7 @@ func (s *Slack) Stop() error {
 func (s *Slack) Reply(ctx context.Context, msg platform.OutgoingMessage) (string, error) {
 	// Upload images as file attachments
 	for _, img := range msg.Images {
-		ext := ".png"
-		switch img.MimeType {
-		case "image/jpeg":
-			ext = ".jpg"
-		case "image/gif":
-			ext = ".gif"
-		}
+		ext := platform.ImageExt(img.MimeType)
 		_, err := s.api.UploadFileContext(ctx, slack.UploadFileParameters{
 			Channel:  msg.ChatID,
 			Filename: "image" + ext,

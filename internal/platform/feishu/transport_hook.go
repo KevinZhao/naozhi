@@ -1,7 +1,6 @@
 package feishu
 
 import (
-	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"io"
@@ -55,12 +54,11 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			}
 		}
 
-		// Timestamp verification — enforce even without EncryptKey to prevent
-		// replay attacks in VerificationToken-only webhook mode.
+		// Timestamp verification — enforce for any authenticated webhook mode
+		// to prevent replay attacks. Both EncryptKey and VerificationToken modes
+		// benefit from timestamp freshness checks as a defense-in-depth measure.
 		if ts := r.Header.Get("X-Lark-Request-Timestamp"); ts == "" {
-			// When relying on VerificationToken only, the timestamp header is our
-			// sole replay defence — reject requests that omit it entirely.
-			if f.cfg.EncryptKey == "" && f.cfg.VerificationToken != "" {
+			if f.cfg.EncryptKey != "" || f.cfg.VerificationToken != "" {
 				slog.Warn("feishu request missing timestamp header")
 				w.WriteHeader(http.StatusUnauthorized)
 				return
@@ -183,7 +181,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				defer f.wg.Done()
 				defer func() { <-f.hookSem }()
 				defer platform.RecoverHandler("feishu text")
-				handler(context.Background(), msg)
+				handler(f.stopCtx, msg)
 			}()
 
 		case "image":
@@ -205,13 +203,13 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				defer func() { <-f.hookSem }()
 				defer platform.RecoverHandler("feishu image")
 				imgMsg := msg
-				data, mime, err := f.DownloadImage(context.Background(), event.Message.MessageID, content.ImageKey)
+				data, mime, err := f.DownloadImage(f.stopCtx, event.Message.MessageID, content.ImageKey)
 				if err != nil {
 					slog.Error("feishu download image failed", "err", err, "key", content.ImageKey)
 					return
 				}
 				imgMsg.Images = []platform.Image{{Data: data, MimeType: mime}}
-				handler(context.Background(), imgMsg)
+				handler(f.stopCtx, imgMsg)
 			}()
 
 		case "audio":
@@ -233,7 +231,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				defer func() { <-f.hookSem }()
 				defer platform.RecoverHandler("feishu audio")
 				audioMsg := msg
-				f.handleAudio(context.Background(), handler, audioMsg, event.Message.MessageID, content.FileKey)
+				f.handleAudio(f.stopCtx, handler, audioMsg, event.Message.MessageID, content.FileKey)
 			}()
 		}
 	})

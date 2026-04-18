@@ -67,14 +67,16 @@ type HubOptions struct {
 	WSAuthLimiter func(ip string) *rate.Limiter
 }
 
-// initialHistoryLimit caps the number of recent events sent on subscribe.
-// Large enough to usually include the "user" event that started the current turn
-// (each tool call generates ~3 events: thinking + tool_use + result),
-// but small enough to keep JSON serialization fast.
-const initialHistoryLimit = 200
-
 // Pre-marshaled static messages to avoid repeated JSON serialization.
-var sessionsUpdateMsg, _ = json.Marshal(node.ServerMsg{Type: "sessions_update"})
+var sessionsUpdateMsg []byte
+
+func init() {
+	var err error
+	sessionsUpdateMsg, err = json.Marshal(node.ServerMsg{Type: "sessions_update"})
+	if err != nil {
+		panic("sessionsUpdateMsg: " + err.Error())
+	}
+}
 
 // NewHub creates a new WebSocket hub.
 func NewHub(opts HubOptions) *Hub {
@@ -154,14 +156,15 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	c := &wsClient{
-		conn:          conn,
-		send:          make(chan []byte, 1024),
-		hub:           h,
-		remoteIP:      ip,
-		sendLimiter:   rate.NewLimiter(rate.Every(time.Second), 5), // 5 sends/s burst, 1/s sustained
-		subscriptions: make(map[string]func()),
-		subGen:        make(map[string]uint64),
-		done:          make(chan struct{}),
+		conn:             conn,
+		send:             make(chan []byte, 1024),
+		hub:              h,
+		remoteIP:         ip,
+		sendLimiter:      rate.NewLimiter(rate.Every(time.Second), 5), // 5 sends/s burst, 1/s sustained
+		interruptLimiter: rate.NewLimiter(rate.Every(200*time.Millisecond), 3),
+		subscriptions:    make(map[string]func()),
+		subGen:           make(map[string]uint64),
+		done:             make(chan struct{}),
 	}
 	if h.dashToken == "" {
 		c.authenticated.Store(true)
@@ -235,8 +238,14 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 
-	// Unsubscribe from previous subscription under lock
+	// Per-connection subscription cap to prevent goroutine accumulation.
 	h.mu.Lock()
+	if _, alreadySub := c.subscriptions[key]; !alreadySub && len(c.subscriptions) >= 50 {
+		h.mu.Unlock()
+		c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "too many subscriptions"})
+		return
+	}
+	// Unsubscribe from previous subscription
 	if unsub, ok := c.subscriptions[key]; ok {
 		unsub()
 		delete(c.subscriptions, key)
@@ -267,7 +276,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		if msg.After > 0 {
 			entries = sess.EventEntriesSince(msg.After)
 		} else {
-			entries = sess.EventLastN(initialHistoryLimit)
+			entries = sess.EventLastN(0)
 		}
 		if len(entries) > 0 {
 			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries})
@@ -295,26 +304,7 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	if msg.After > 0 {
 		entries = sess.EventEntriesSince(msg.After)
 	} else {
-		entries = sess.EventLastN(initialHistoryLimit)
-
-		// Ensure the most recent "user" event is included so the client always
-		// has conversation context. During long tool-heavy turns the last N
-		// entries may consist entirely of thinking/tool_use/result events,
-		// causing the dashboard to show a blank event list.
-		if len(entries) > 0 {
-			hasUser := false
-			for _, e := range entries {
-				if e.Type == "user" {
-					hasUser = true
-					break
-				}
-			}
-			if !hasUser {
-				if ue := sess.LastUserEntry(); ue.Type != "" {
-					entries = append([]cli.EventEntry{ue}, entries...)
-				}
-			}
-		}
+		entries = sess.EventLastN(0)
 	}
 
 	slog.Debug("completeSubscribe: sending history", "key", key, "entries", len(entries), "state", snap.State)
@@ -513,22 +503,32 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 		*notify = newNotify
 		return true, currentSess
 	}
+	// Timed out waiting for new process — notify client so the dashboard
+	// can surface a "subscription expired" indicator instead of silently
+	// showing stale state. Clean up the dead subscription slot so it doesn't
+	// count toward the per-connection cap.
+	h.mu.Lock()
+	if c.subscriptions != nil {
+		if oldUnsub, exists := c.subscriptions[key]; exists {
+			oldUnsub()
+			delete(c.subscriptions, key)
+		}
+	}
+	h.mu.Unlock()
+	c.SendJSON(node.ServerMsg{Type: "session_state", Key: key, State: "ready", Reason: "subscription_timeout"})
 	return false, nil
 }
 
 // broadcastToAuthenticated sends raw data to all authenticated WebSocket clients.
+// SendRaw is non-blocking (drops on full buffer), so we can safely iterate while
+// holding RLock — no snapshot slice allocation per broadcast.
 func (h *Hub) broadcastToAuthenticated(data []byte) {
 	h.mu.RLock()
-	targets := make([]*wsClient, 0, len(h.clients))
+	defer h.mu.RUnlock()
 	for c := range h.clients {
 		if c.authenticated.Load() {
-			targets = append(targets, c)
+			c.SendRaw(data)
 		}
-	}
-	h.mu.RUnlock()
-
-	for _, c := range targets {
-		c.SendRaw(data)
 	}
 }
 
@@ -579,17 +579,18 @@ func (h *Hub) doBroadcastSessionsUpdate() {
 
 // BroadcastCronResult notifies all connected WS clients that a cron job completed.
 func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
-	payload := map[string]string{
-		"type":   "cron_result",
-		"job_id": jobID,
+	msg := struct {
+		Type   string `json:"type"`
+		JobID  string `json:"job_id"`
+		Result string `json:"result,omitempty"`
+		Error  string `json:"error,omitempty"`
+	}{
+		Type:   "cron_result",
+		JobID:  jobID,
+		Result: result,
+		Error:  errMsg,
 	}
-	if result != "" {
-		payload["result"] = result
-	}
-	if errMsg != "" {
-		payload["error"] = errMsg
-	}
-	data, err := json.Marshal(payload)
+	data, err := json.Marshal(msg)
 	if err != nil {
 		return
 	}

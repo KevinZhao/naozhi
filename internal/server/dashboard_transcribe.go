@@ -11,12 +11,17 @@ import (
 
 // TranscribeHandler handles the audio transcription API endpoint.
 type TranscribeHandler struct {
-	transcriber transcribe.Service
+	transcriber       transcribe.Service
+	transcribeLimiter *ipLimiter // per-IP transcribe rate limiter (5/min)
 }
 
 // handleTranscribe accepts an audio file upload and returns transcribed text.
 // POST /api/transcribe  (multipart/form-data, field "audio")
 func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Request) {
+	if h.transcribeLimiter != nil && !h.transcribeLimiter.Allow(r.RemoteAddr) {
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "transcribe rate limit exceeded"})
+		return
+	}
 	if h.transcriber == nil {
 		http.Error(w, "transcription not configured", http.StatusNotImplemented)
 		return
@@ -74,6 +79,5 @@ func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Requ
 
 	slog.Info("transcribe ok", "text_len", len(text), "mime", mimeType, "size", len(data))
 
-	w.Header().Set("Content-Type", "application/json")
 	writeJSON(w, map[string]string{"text": text})
 }

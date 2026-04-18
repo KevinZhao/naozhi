@@ -20,6 +20,8 @@ import (
 )
 
 // SessionGuard prevents multiple concurrent messages to the same session.
+// Used by the Dashboard/WebSocket path (server/send.go) which retains
+// interrupt-on-busy behavior. The IM path uses MessageQueue instead.
 type SessionGuard interface {
 	TryAcquire(key string) bool
 	ShouldSendWait(key string) bool
@@ -29,6 +31,30 @@ type SessionGuard interface {
 // Dispatcher holds the dependencies needed to dispatch incoming IM messages
 // to the session router, handle slash commands, and stream results back.
 type Dispatcher struct {
+	router        *session.Router
+	platforms     map[string]platform.Platform
+	agents        map[string]session.AgentOpts
+	agentCommands map[string]string
+	scheduler     *cron.Scheduler
+	projectMgr    *project.Manager
+	guard         SessionGuard // used by Dashboard/WS path
+	queue         *MessageQueue
+	dedup         *platform.Dedup
+	allowedRoot   string
+	claudeDir     string
+	replyFooter   string
+
+	noOutputTimeout       time.Duration
+	totalTimeout          time.Duration
+	watchdogNoOutputKills *atomic.Int64
+	watchdogTotalKills    *atomic.Int64
+
+	sendFn     func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+	takeoverFn func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
+}
+
+// DispatcherConfig holds all dependencies for constructing a Dispatcher.
+type DispatcherConfig struct {
 	Router        *session.Router
 	Platforms     map[string]platform.Platform
 	Agents        map[string]session.AgentOpts
@@ -36,10 +62,11 @@ type Dispatcher struct {
 	Scheduler     *cron.Scheduler
 	ProjectMgr    *project.Manager
 	Guard         SessionGuard
+	Queue         *MessageQueue
 	Dedup         *platform.Dedup
 	AllowedRoot   string
 	ClaudeDir     string
-	BackendTag    string
+	ReplyFooter   string
 
 	NoOutputTimeout       time.Duration
 	TotalTimeout          time.Duration
@@ -48,6 +75,30 @@ type Dispatcher struct {
 
 	SendFn     func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
 	TakeoverFn func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
+}
+
+// NewDispatcher creates a Dispatcher from the given config.
+func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
+	return &Dispatcher{
+		router:                cfg.Router,
+		platforms:             cfg.Platforms,
+		agents:                cfg.Agents,
+		agentCommands:         cfg.AgentCommands,
+		scheduler:             cfg.Scheduler,
+		projectMgr:            cfg.ProjectMgr,
+		guard:                 cfg.Guard,
+		queue:                 cfg.Queue,
+		dedup:                 cfg.Dedup,
+		allowedRoot:           cfg.AllowedRoot,
+		claudeDir:             cfg.ClaudeDir,
+		replyFooter:           cfg.ReplyFooter,
+		noOutputTimeout:       cfg.NoOutputTimeout,
+		totalTimeout:          cfg.TotalTimeout,
+		watchdogNoOutputKills: cfg.WatchdogNoOutputKills,
+		watchdogTotalKills:    cfg.WatchdogTotalKills,
+		sendFn:                cfg.SendFn,
+		takeoverFn:            cfg.TakeoverFn,
+	}
 }
 
 // BuildHandler returns a platform.MessageHandler wired to this Dispatcher.
@@ -59,7 +110,7 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		// a platform retry during guard contention won't be re-processed. In
 		// practice this is benign — the handler responds fast enough that
 		// platforms don't retry, and the user is told to resend.
-		if d.Dedup.Seen(msg.EventID) {
+		if d.dedup.Seen(msg.EventID) {
 			return
 		}
 
@@ -72,10 +123,10 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		}
 
 		// Resolve agent from command prefix (e.g. "/review code" -> agent=code-reviewer, text="code")
-		agentID, cleanText := routing.ResolveAgent(trimmed, d.AgentCommands)
+		agentID, cleanText := routing.ResolveAgent(trimmed, d.agentCommands)
 		if cleanText == "" && len(msg.Images) == 0 {
 			if agentID != "general" {
-				if p := d.Platforms[msg.Platform]; p != nil {
+				if p := d.platforms[msg.Platform]; p != nil {
 					if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "请在指令后输入内容。"}); err != nil {
 						log.Warn("reply failed", "err", err)
 					}
@@ -89,7 +140,7 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		if agentID == "general" && strings.HasPrefix(cleanText, "/") {
 			cmd := strings.SplitN(cleanText, " ", 2)[0]
 			if !strings.Contains(cmd[1:], "/") {
-				if p := d.Platforms[msg.Platform]; p != nil {
+				if p := d.platforms[msg.Platform]; p != nil {
 					if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "未知命令: " + cmd + "\n输入 /help 查看可用命令，或直接发送消息。"}); err != nil {
 						log.Warn("reply failed", "err", err)
 					}
@@ -100,18 +151,18 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 
 		// Determine session key and opts: project-bound chat routes to planner
 		var key string
-		opts := d.Agents[agentID] // zero value = use router defaults
+		opts := d.agents[agentID] // zero value = use router defaults
 
-		if d.ProjectMgr != nil {
-			if proj := d.ProjectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
+		if d.projectMgr != nil {
+			if proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
 				if agentID == "general" {
 					key = proj.PlannerSessionKey()
 					opts.Exempt = true
 					opts.Workspace = proj.Path
-					if m := d.ProjectMgr.EffectivePlannerModel(proj); m != "" {
+					if m := d.projectMgr.EffectivePlannerModel(proj); m != "" {
 						opts.Model = m
 					}
-					if p := d.ProjectMgr.EffectivePlannerPrompt(proj); p != "" {
+					if p := d.projectMgr.EffectivePlannerPrompt(proj); p != "" {
 						opts.ExtraArgs = append(opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)], "--append-system-prompt", p)
 					}
 				} else {
@@ -124,10 +175,51 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 			key = session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
 		}
 
-		// H1: Prevent goroutine accumulation — only one message per session at a time
-		if !d.Guard.TryAcquire(key) {
-			if p := d.Platforms[msg.Platform]; p != nil {
-				if d.Guard.ShouldSendWait(key) {
+		// Convert platform images to CLI image data
+		var images []cli.ImageData
+		for _, img := range msg.Images {
+			images = append(images, cli.ImageData{Data: img.Data, MimeType: img.MimeType})
+		}
+
+		// Enqueue message. If queue is nil or disabled, fall back to Guard.
+		if d.queue != nil {
+			qm := QueuedMsg{
+				Text:      cleanText,
+				Images:    images,
+				EnqueueAt: time.Now(),
+			}
+			isOwner, enqueued, gen := d.queue.Enqueue(key, qm)
+			if !isOwner {
+				if enqueued {
+					if d.queue.ShouldNotify(key) {
+						if p := d.platforms[msg.Platform]; p != nil {
+							if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "消息已收到，待当前回复完成后一并处理。"}); err != nil {
+								log.Warn("reply failed", "err", err)
+							}
+						}
+					}
+				} else {
+					// Queue disabled (maxDepth<=0) — degrade to old drop behavior.
+					if p := d.platforms[msg.Platform]; p != nil {
+						if d.queue.ShouldNotify(key) {
+							if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "正在处理上一条消息，请稍候..."}); err != nil {
+								log.Warn("reply failed", "err", err)
+							}
+						}
+					}
+				}
+				return
+			}
+			// I am the owner — enter the process-and-drain loop.
+			log.Info("message received", "agent", agentID, "text_len", len(cleanText), "images", len(images))
+			d.ownerLoop(ctx, key, gen, qm, agentID, opts, msg, log)
+			return
+		}
+
+		// Fallback: Guard-based path (no queue configured).
+		if !d.guard.TryAcquire(key) {
+			if p := d.platforms[msg.Platform]; p != nil {
+				if d.guard.ShouldSendWait(key) {
 					if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "正在处理上一条消息，请稍候..."}); err != nil {
 						log.Warn("reply failed", "err", err)
 					}
@@ -135,122 +227,186 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 			}
 			return
 		}
-		defer d.Guard.Release(key)
-		defer d.Router.NotifyIdle()
+		defer d.guard.Release(key)
+		defer d.router.NotifyIdle()
 
-		// H2: Transparently adopt an external Claude session if one exists for
-		// this workspace. Only fires when no managed session exists yet.
-		autoResumed := d.TakeoverFn(ctx, session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID), key, opts)
+		log.Info("message received", "agent", agentID, "text_len", len(cleanText), "images", len(images))
+		d.sendAndReply(ctx, key, cleanText, images, agentID, opts, msg, log, true)
+	}
+}
 
-		sess, sessStatus, err := d.Router.GetOrCreate(ctx, key, opts)
-		if err != nil {
-			log.Error("get session", "err", err)
-			if p := d.Platforms[msg.Platform]; p != nil {
-				var errMsg string
-				switch {
-				case errors.Is(err, session.ErrMaxProcs):
-					errMsg = "当前处理已满，请稍后重试。"
-				case errors.Is(err, context.Canceled):
-					errMsg = "系统正在重启，请稍后重试。"
-				default:
-					errMsg = "会话创建失败，请发送 /new 重置后重试。"
-				}
-				if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}); err != nil {
-					log.Warn("reply failed", "err", err)
-				}
+// discardQueue is a nil-safe helper to clear queued messages for a key.
+func (d *Dispatcher) discardQueue(key string) {
+	if d.queue != nil {
+		d.queue.Discard(key)
+	}
+}
+
+// ownerLoop processes the first message directly, then drains and coalesces
+// any queued messages until the queue is empty. The owner goroutine is the
+// platform handler goroutine that first acquired ownership via Enqueue.
+//
+// gen is the generation cookie from Enqueue. If Discard bumps the generation
+// (e.g., user sends /new), DoneOrDrain returns nil and ownerLoop exits,
+// preventing two goroutines from owning the same key.
+//
+// Panic-safe: a deferred recover releases ownership so a panic in SendFn
+// doesn't leave the queue permanently locked.
+func (d *Dispatcher) ownerLoop(
+	ctx context.Context,
+	key string,
+	gen uint64,
+	first QueuedMsg,
+	agentID string,
+	opts session.AgentOpts,
+	msg platform.IncomingMessage,
+	log *slog.Logger,
+) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("ownerLoop panic", "key", key, "panic", r)
+			d.queue.Discard(key)
+		}
+	}()
+	defer d.router.NotifyIdle()
+
+	// Process first message.
+	d.sendAndReply(ctx, key, first.Text, first.Images, agentID, opts, msg, log, true)
+
+	// Drain loop: after each turn, wait collectDelay then drain.
+	collectTimer := time.NewTimer(d.queue.CollectDelay())
+	defer collectTimer.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			d.queue.Discard(key)
+			return
+		case <-collectTimer.C:
+		}
+
+		queued := d.queue.DoneOrDrain(key, gen)
+		if queued == nil {
+			return // Queue empty or generation mismatch — stop.
+		}
+
+		text, images := CoalesceMessages(queued)
+		log.Info("processing queued messages", "count", len(queued), "merged_len", len(text))
+		d.sendAndReply(ctx, key, text, images, agentID, opts, msg, log, false)
+		collectTimer.Reset(d.queue.CollectDelay())
+	}
+}
+
+// sendAndReply performs one turn: GetOrCreate session, send message, deliver reply.
+// isFirst indicates whether this is the first message (triggers takeover/session-new
+// notifications); queued follow-ups skip these.
+func (d *Dispatcher) sendAndReply(
+	ctx context.Context,
+	key, text string,
+	images []cli.ImageData,
+	agentID string,
+	opts session.AgentOpts,
+	msg platform.IncomingMessage,
+	log *slog.Logger,
+	isFirst bool,
+) {
+	// Takeover check only on first message for a key.
+	if isFirst {
+		d.takeoverFn(ctx, session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID), key, opts)
+	}
+
+	sess, sessStatus, err := d.router.GetOrCreate(ctx, key, opts)
+	if err != nil {
+		log.Error("get session", "err", err)
+		if p := d.platforms[msg.Platform]; p != nil {
+			var errMsg string
+			switch {
+			case errors.Is(err, session.ErrMaxProcs):
+				errMsg = "当前处理已满，请稍后重试。"
+			case errors.Is(err, context.Canceled):
+				errMsg = "系统正在重启，请稍后重试。"
+			default:
+				errMsg = "会话创建失败，请发送 /new 重置后重试。"
 			}
-			return
-		}
-
-		p := d.Platforms[msg.Platform]
-		if p == nil {
-			log.Error("unknown platform")
-			return
-		}
-
-		// Notify user: auto-resumed from external session, or fresh context lost
-		if autoResumed && platform.SupportsInterimMessages(p) {
-			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "已恢复上次会话。"}); err != nil {
+			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}); err != nil {
 				log.Warn("reply failed", "err", err)
 			}
-		} else if sessStatus == session.SessionNew && platform.SupportsInterimMessages(p) {
+		}
+		return
+	}
+
+	p := d.platforms[msg.Platform]
+	if p == nil {
+		log.Error("unknown platform")
+		return
+	}
+
+	// Session lifecycle notifications only on first message.
+	if isFirst {
+		if sessStatus == session.SessionNew && platform.SupportsInterimMessages(p) {
 			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "新会话已创建（之前的上下文已失效）。"}); err != nil {
 				log.Warn("reply failed", "err", err)
 			}
 		}
+	}
 
-		// Build IM event tracker for streaming status updates
-		tracker := newIMEventTracker(ctx, p, msg.ChatID)
+	tracker := newIMEventTracker(ctx, p, msg.ChatID)
+	defer tracker.stop()
 
-		// Convert platform images to CLI image data
-		var images []cli.ImageData
-		for _, img := range msg.Images {
-			images = append(images, cli.ImageData{Data: img.Data, MimeType: img.MimeType})
+	result, err := d.sendFn(ctx, key, sess, text, images, tracker.onEvent)
+	if err != nil {
+		log.Error("send to claude", "err", err)
+		var errMsg string
+		switch {
+		case errors.Is(err, cli.ErrNoOutputTimeout):
+			d.watchdogNoOutputKills.Add(1)
+			errMsg = fmt.Sprintf("⏱️ 处理超时（%s 无输出），请简化任务后重试。", formatChineseDuration(d.noOutputTimeout))
+		case errors.Is(err, cli.ErrTotalTimeout):
+			d.watchdogTotalKills.Add(1)
+			errMsg = fmt.Sprintf("⏱️ 处理超时（总耗时超过 %s），请拆分为更小的任务。", formatChineseDuration(d.totalTimeout))
+		default:
+			errMsg = "处理失败，请发送 /new 重置后重试。"
 		}
+		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, 3); err != nil {
+			log.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
+		}
+		return
+	}
 
-		log.Info("message received", "agent", agentID, "text_len", len(cleanText), "images", len(images))
+	log.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD)
 
-		result, err := d.SendFn(ctx, key, sess, cleanText, images, tracker.onEvent)
-
+	replyText := result.Text
+	if d.replyFooter != "" {
+		replyText += "\n\n— " + d.replyFooter
+	}
+	var outImages []platform.Image
+	for _, path := range cli.ExtractImagePaths(replyText) {
+		data, err := os.ReadFile(path)
 		if err != nil {
-			log.Error("send to claude", "err", err)
-			var errMsg string
-			switch {
-			case errors.Is(err, cli.ErrNoOutputTimeout):
-				d.WatchdogNoOutputKills.Add(1)
-				errMsg = fmt.Sprintf("⏱️ 处理超时（%s 无输出），请简化任务后重试。", formatChineseDuration(d.NoOutputTimeout))
-			case errors.Is(err, cli.ErrTotalTimeout):
-				d.WatchdogTotalKills.Add(1)
-				errMsg = fmt.Sprintf("⏱️ 处理超时（总耗时超过 %s），请拆分为更小的任务。", formatChineseDuration(d.TotalTimeout))
-			default:
-				errMsg = "处理失败，请发送 /new 重置后重试。"
-			}
-			if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, 3); err != nil {
-				log.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
-			}
-			return
+			continue
 		}
+		outImages = append(outImages, platform.Image{Data: data, MimeType: cli.MimeFromPath(path)})
+		replyText = strings.ReplaceAll(replyText, path, "[图片]")
+	}
 
-		log.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD)
+	tracker.waitReady(ctx)
 
-		// Append backend tag to reply
-		replyText := result.Text
-		if d.BackendTag != "" {
-			replyText += "\n\n— " + d.BackendTag
-		}
-		var outImages []platform.Image
-		for _, path := range cli.ExtractImagePaths(replyText) {
-			data, err := os.ReadFile(path)
-			if err != nil {
-				continue
-			}
-			outImages = append(outImages, platform.Image{Data: data, MimeType: cli.MimeFromPath(path)})
-			replyText = strings.ReplaceAll(replyText, path, "[图片]")
-		}
-
-		// Wait for status message to be sent before reading thinkingMsgID.
-		tracker.waitReady()
-
-		// Edit status to final result, or send new message
-		if replyText != "" {
-			if tracker.thinkingMsgID != "" {
-				if err := p.EditMessage(ctx, tracker.thinkingMsgID, replyText); err != nil {
-					slog.Warn("edit message failed, sending new", "err", err)
-					d.SendSplitReply(ctx, p, msg.ChatID, replyText)
-				}
-			} else {
+	if replyText != "" {
+		if tracker.thinkingMsgID != "" {
+			if err := p.EditMessage(ctx, tracker.thinkingMsgID, replyText); err != nil {
+				slog.Warn("edit message failed, sending new", "err", err)
 				d.SendSplitReply(ctx, p, msg.ChatID, replyText)
 			}
+		} else {
+			d.SendSplitReply(ctx, p, msg.ChatID, replyText)
 		}
+	}
 
-		// Send extracted images
-		for _, img := range outImages {
-			if _, err := p.Reply(ctx, platform.OutgoingMessage{
-				ChatID: msg.ChatID,
-				Images: []platform.Image{img},
-			}); err != nil {
-				slog.Warn("send image failed", "err", err)
-			}
+	for _, img := range outImages {
+		if _, err := p.Reply(ctx, platform.OutgoingMessage{
+			ChatID: msg.ChatID,
+			Images: []platform.Image{img},
+		}); err != nil {
+			slog.Warn("send image failed", "err", err)
 		}
 	}
 }
@@ -288,25 +444,34 @@ func formatChineseDuration(d time.Duration) string {
 	return fmt.Sprintf("%d 秒", int(d.Seconds()))
 }
 
-// imEventTracker manages IM status message streaming (thinking -> tool_use -> result).
-type imEventTracker struct {
+// replyTracker manages IM status message streaming (thinking -> tool_use -> result).
+//
+// statusLines is read+mutated under linesMu by onEvent (called serially by the
+// CLI event loop) and read by editLoop. Joining to a single string is deferred
+// to the read path so we don't waste allocations on events that are coalesced
+// away by the 1-per-second rate limit.
+type replyTracker struct {
 	ctx           context.Context
 	p             platform.Platform
 	chatID        string
-	statusLines   []string
 	thinkingMsgID string
 	msgIDReady    chan struct{}
 	sent          sync.Once
-	editCh        chan string // buffered(1), coalescing; editLoop drains and rate-limits
+	editCh        chan struct{} // buffered(1), signals editLoop to redraw
+	done          chan struct{} // closed when the owning turn completes; exits editLoop
+	linesMu       sync.Mutex    // guards statusLines
+	statusLines   []string      // pre-allocated capped ring; joined lazily
 }
 
-func newIMEventTracker(ctx context.Context, p platform.Platform, chatID string) *imEventTracker {
-	t := &imEventTracker{
-		ctx:        ctx,
-		p:          p,
-		chatID:     chatID,
-		msgIDReady: make(chan struct{}),
-		editCh:     make(chan string, 1),
+func newIMEventTracker(ctx context.Context, p platform.Platform, chatID string) *replyTracker {
+	t := &replyTracker{
+		ctx:         ctx,
+		p:           p,
+		chatID:      chatID,
+		statusLines: make([]string, 0, maxStatusLines),
+		msgIDReady:  make(chan struct{}),
+		editCh:      make(chan struct{}, 1),
+		done:        make(chan struct{}),
 	}
 	if !platform.SupportsInterimMessages(p) {
 		t.sent.Do(func() {
@@ -318,7 +483,16 @@ func newIMEventTracker(ctx context.Context, p platform.Platform, chatID string) 
 	return t
 }
 
-func (t *imEventTracker) onEvent(ev cli.Event) {
+// stop signals the editLoop goroutine to exit. Safe to call multiple times.
+func (t *replyTracker) stop() {
+	select {
+	case <-t.done:
+	default:
+		close(t.done)
+	}
+}
+
+func (t *replyTracker) onEvent(ev cli.Event) {
 	if !platform.SupportsInterimMessages(t.p) {
 		return
 	}
@@ -328,11 +502,14 @@ func (t *imEventTracker) onEvent(ev cli.Event) {
 		line = "💭 思考中..."
 	}
 
+	t.linesMu.Lock()
 	t.statusLines = appendStatusLine(t.statusLines, line)
-	text := strings.Join(t.statusLines, "\n")
+	t.linesMu.Unlock()
 
+	// First event fires the initial Reply. Render only here; subsequent events
+	// defer rendering to editLoop's rate-limited drain.
 	t.sent.Do(func() {
-		snapshot := text
+		snapshot := t.renderStatus()
 		go func() {
 			defer close(t.msgIDReady)
 			id, err := t.p.Reply(t.ctx, platform.OutgoingMessage{ChatID: t.chatID, Text: snapshot})
@@ -342,72 +519,74 @@ func (t *imEventTracker) onEvent(ev cli.Event) {
 		}()
 	})
 
-	// Non-blocking: queue the latest text for async editing.
-	// The channel holds at most 1 pending edit; new text replaces stale.
+	// Signal editLoop non-blockingly that new status is available.
 	select {
-	case t.editCh <- text:
+	case t.editCh <- struct{}{}:
 	default:
-		select {
-		case <-t.editCh:
-		default:
-		}
-		select {
-		case t.editCh <- text:
-		default:
-		}
 	}
+}
+
+// renderStatus joins statusLines into a single display string. Called once per
+// rate-limited edit (and once for the initial Reply) — not per event.
+func (t *replyTracker) renderStatus() string {
+	t.linesMu.Lock()
+	defer t.linesMu.Unlock()
+	if len(t.statusLines) == 0 {
+		return ""
+	}
+	return strings.Join(t.statusLines, "\n")
 }
 
 // editLoop runs in a goroutine and rate-limits EditMessage calls to 1/s.
 // This keeps onEvent non-blocking so Process.Send can drain eventCh at full speed.
-func (t *imEventTracker) editLoop() {
-	// Wait for thinkingMsgID before processing any edits.
+// Exits when t.done is closed (turn completed) or ctx is cancelled.
+func (t *replyTracker) editLoop() {
 	select {
 	case <-t.msgIDReady:
+	case <-t.done:
+		return
 	case <-t.ctx.Done():
 		return
 	}
 
+	rateTimer := time.NewTimer(0)
+	if !rateTimer.Stop() {
+		<-rateTimer.C
+	}
+	defer rateTimer.Stop()
+
 	for {
 		select {
-		case text := <-t.editCh:
-			// Drain to latest (multiple onEvent calls may have queued during rate-limit wait)
-			text = drainLatest(t.editCh, text)
-			if t.thinkingMsgID != "" {
+		case <-t.editCh:
+			// Render lazily — only once per rate-limited edit rather than per event.
+			text := t.renderStatus()
+			if t.thinkingMsgID != "" && text != "" {
 				if err := t.p.EditMessage(t.ctx, t.thinkingMsgID, text); err != nil {
 					slog.Debug("status edit failed", "msg_id", t.thinkingMsgID, "err", err)
 				}
 			}
-			// Rate limit: wait 1s before next edit
+			rateTimer.Reset(time.Second)
 			select {
-			case <-time.After(time.Second):
+			case <-rateTimer.C:
+			case <-t.done:
+				return
 			case <-t.ctx.Done():
 				return
 			}
+		case <-t.done:
+			return
 		case <-t.ctx.Done():
 			return
 		}
 	}
 }
 
-// drainLatest returns the most recent value from ch, or fallback if ch is empty.
-func drainLatest(ch chan string, fallback string) string {
-	latest := fallback
-	for {
-		select {
-		case v := <-ch:
-			latest = v
-		default:
-			return latest
-		}
-	}
-}
-
-func (t *imEventTracker) waitReady() {
-	// Ensure the channel is closed even if onEvent was never called
-	// (e.g. Claude returned a result with no streaming assistant events).
+func (t *replyTracker) waitReady(ctx context.Context) {
 	t.sent.Do(func() {
 		close(t.msgIDReady)
 	})
-	<-t.msgIDReady
+	select {
+	case <-t.msgIDReady:
+	case <-ctx.Done():
+	}
 }
