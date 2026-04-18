@@ -45,11 +45,11 @@ type ServerMsg struct {
 
 const ProtocolVersion = 1
 
-// BoolPtr returns a pointer to b. Useful for ServerMsg fields that need explicit false.
-func BoolPtr(b bool) *bool { return &b }
+// boolPtr returns a pointer to b. Useful for ServerMsg fields that need explicit false.
+func boolPtr(b bool) *bool { return &b }
 
-// IntPtr returns a pointer to i. Useful for ServerMsg fields that need explicit 0.
-func IntPtr(i int) *int { return &i }
+// intPtr returns a pointer to i. Useful for ServerMsg fields that need explicit 0.
+func intPtr(i int) *int { return &i }
 
 // MarshalLine marshals a ServerMsg as a single NDJSON line (no trailing newline).
 func (m *ServerMsg) MarshalLine() ([]byte, error) {

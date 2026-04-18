@@ -525,7 +525,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 		Type:            "hello",
 		ShimPID:         os.Getpid(),
 		CLIPID:          s.cli.pid(),
-		CLIAlive:        BoolPtr(cliAlive),
+		CLIAlive:        boolPtr(cliAlive),
 		SessionID:       sessionID,
 		BufferSeqStart:  seqStart,
 		BufferSeqEnd:    seqEnd,
@@ -543,7 +543,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	// to avoid sending cli_exited twice (closed channel is always selectable).
 	cliWasAlive := cliAlive
 	if !cliAlive {
-		writeMsg(conn, ServerMsg{Type: "cli_exited", Code: IntPtr(s.cli.exitCode)})
+		writeMsg(conn, ServerMsg{Type: "cli_exited", Code: intPtr(s.cli.exitCode)})
 	}
 
 	// NOW become the active client (after replay complete, no duplication window)
@@ -669,7 +669,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 			case "ping":
 				resp := ServerMsg{
 					Type:     "pong",
-					CLIAlive: BoolPtr(s.cli.alive()),
+					CLIAlive: boolPtr(s.cli.alive()),
 					Buffered: s.buffer.Count(),
 				}
 				if data, err := resp.MarshalLine(); err == nil {
@@ -692,7 +692,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 			}
 			// Send cli_exited to the connected client.
 			code := s.cli.exitCode
-			resp := ServerMsg{Type: "cli_exited", Code: IntPtr(code)}
+			resp := ServerMsg{Type: "cli_exited", Code: intPtr(code)}
 			if data, err := resp.MarshalLine(); err == nil {
 				s.enqueueWrite(append(data, '\n'))
 			}

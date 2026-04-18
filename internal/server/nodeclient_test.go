@@ -24,7 +24,7 @@ func TestNodeClient_FetchSessions(t *testing.T) {
 			return
 		}
 		if r.Header.Get("Authorization") != "Bearer test-token" {
-			http.Error(w, "unauthorized", 401)
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
 		json.NewEncoder(w).Encode(map[string]any{
@@ -69,7 +69,7 @@ func TestNodeClient_FetchSessions_NoAuth(t *testing.T) {
 
 func TestNodeClient_FetchSessions_AuthFailure(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Error(w, "unauthorized", 401)
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
 	}))
 	defer ts.Close()
 

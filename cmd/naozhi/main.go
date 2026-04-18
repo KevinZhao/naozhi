@@ -266,7 +266,7 @@ func main() {
 
 	// Initialize ShimManager
 	shimMgr := shim.NewManager(shim.ManagerConfig{
-		StateDir:        config.ExpandHome(cfg.Session.Shim.StateDir),
+		StateDir:        osutil.ExpandHome(cfg.Session.Shim.StateDir),
 		CLIPath:         wrapper.CLIPath,
 		IdleTimeout:     parseDurationOrDefault(cfg.Session.Shim.IdleTimeout, 4*time.Hour),
 		WatchdogTimeout: parseDurationOrDefault(cfg.Session.Shim.WatchdogTimeout, 30*time.Minute),
@@ -278,8 +278,8 @@ func main() {
 
 	// Parse watchdog and store path
 	noOutputTimeout, totalTimeout := cfg.ParseWatchdog()
-	storePath := config.ExpandHome(cfg.Session.StorePath)
-	workspace := config.ExpandHome(cfg.Session.CWD)
+	storePath := osutil.ExpandHome(cfg.Session.StorePath)
+	workspace := osutil.ExpandHome(cfg.Session.CWD)
 	if err := os.MkdirAll(workspace, 0700); err != nil {
 		slog.Error("create workspace dir", "path", workspace, "err", err)
 		os.Exit(1)
@@ -346,7 +346,7 @@ func main() {
 		initWg.Add(1)
 		go func() {
 			defer initWg.Done()
-			root := config.ExpandHome(cfg.Projects.Root)
+			root := osutil.ExpandHome(cfg.Projects.Root)
 			mgr, err := project.NewManager(root, project.PlannerDefaults{
 				Model:  cfg.Projects.PlannerDefaults.Model,
 				Prompt: cfg.Projects.PlannerDefaults.Prompt,
@@ -437,7 +437,7 @@ func main() {
 		Platforms:     platforms,
 		Agents:        agents,
 		AgentCommands: cfg.AgentCommands,
-		StorePath:     config.ExpandHome(cfg.Cron.StorePath),
+		StorePath:     osutil.ExpandHome(cfg.Cron.StorePath),
 		MaxJobs:       cfg.Cron.MaxJobs,
 		ExecTimeout:   cfg.ParseExecutionTimeout(),
 	})

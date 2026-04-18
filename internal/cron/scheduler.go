@@ -14,7 +14,6 @@ import (
 	robfigcron "github.com/robfig/cron/v3"
 
 	"github.com/naozhi/naozhi/internal/platform"
-	"github.com/naozhi/naozhi/internal/routing"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -485,7 +484,7 @@ func (s *Scheduler) execute(j *Job) {
 	ctx, cancel := context.WithTimeout(s.stopCtx, s.execTimeout)
 	defer cancel()
 
-	agentID, cleanText := routing.ResolveAgent(prompt, s.agentCommands)
+	agentID, cleanText := session.ResolveAgent(prompt, s.agentCommands)
 	opts := s.agents[agentID]
 	opts.Exempt = true // cron sessions must not count toward maxProcs or evict user sessions
 	if workDir != "" {

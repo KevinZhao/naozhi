@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/routing"
+	"github.com/naozhi/naozhi/internal/session"
 )
 
 func TestGenerateID(t *testing.T) {
@@ -133,7 +133,7 @@ func TestResolveAgent(t *testing.T) {
 		{"/unknown stuff", "general", "/unknown stuff"},
 	}
 	for _, tt := range tests {
-		agent, text := routing.ResolveAgent(tt.text, cmds)
+		agent, text := session.ResolveAgent(tt.text, cmds)
 		if agent != tt.wantAgent || text != tt.wantText {
 			t.Errorf("ResolveAgent(%q): got (%q, %q), want (%q, %q)", tt.text, agent, text, tt.wantAgent, tt.wantText)
 		}

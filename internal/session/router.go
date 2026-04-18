@@ -428,48 +428,36 @@ func (r *Router) ReconnectShims() {
 			continue
 		}
 
-		// Inject replay events into eventLog (not via eventCh — avoids deadlock).
-		// Use EventEntryFromEvent for proper Summary extraction across all event types.
-		// Batch all entries into a single InjectHistory call to avoid O(N) lock ops.
-		var replayEntries []cli.EventEntry
-		for _, replay := range replays {
-			if replay.Type == "replay" {
-				ev, _, err := r.wrapper.Protocol.ReadEvent(replay.Line)
-				if err != nil || ev.Type == "" {
-					continue
-				}
-				if entry, ok := cli.EventEntryFromEvent(ev); ok {
-					replayEntries = append(replayEntries, entry)
-				}
-			}
-		}
-		if len(replayEntries) > 0 {
-			proc.InjectHistory(replayEntries)
-		}
-
-		// Inject persisted JSONL history to restore dashboard conversation view.
-		// Previous sessions: load all event types (replay doesn't cover them).
-		// Current session: load user entries only — the replay buffer captures
-		// CLI stdout (assistant/system/result) but NOT user input written via
-		// stdin, so user messages must be recovered from the JSONL.
+		// Restore dashboard history from JSONL only.
+		//
+		// Replay events are intentionally NOT injected into persistedHistory:
+		// they originate from the shim stdout ring buffer, which has no native
+		// per-event timestamp, so EventEntryFromEvent stamps them all with
+		// time.Now() at reconnect moment — this breaks chronological ordering
+		// against user entries loaded from JSONL (which carry real ts).
+		//
+		// Replay is still useful for runtime state (isMidTurn detection inside
+		// SpawnReconnect, and any live bytes readLoop picks up post-reconnect).
+		// For long-term history, JSONL is authoritative — it records both
+		// user input (stdin) and assistant output with accurate timestamps.
+		//
+		// Tradeoff: if naozhi restarts within seconds of the last turn, the
+		// current session's JSONL may not yet be flushed to disk; assistant
+		// entries for that turn are transiently absent from the dashboard
+		// until the next live event repopulates them. Self-healing.
 		if r.claudeDir != "" {
+			ids := make([]string, 0, len(sess.prevSessionIDs)+1)
+			ids = append(ids, sess.prevSessionIDs...)
+			if state.SessionID != "" {
+				ids = append(ids, state.SessionID)
+			}
 			var histEntries []cli.EventEntry
-			for _, id := range sess.prevSessionIDs {
+			for _, id := range ids {
 				entries, err := discovery.LoadHistory(r.claudeDir, id, sess.workspace)
 				if err != nil || len(entries) == 0 {
 					continue
 				}
 				histEntries = append(histEntries, entries...)
-			}
-			if state.SessionID != "" {
-				entries, err := discovery.LoadHistory(r.claudeDir, state.SessionID, sess.workspace)
-				if err == nil {
-					for i := range entries {
-						if entries[i].Type == "user" {
-							histEntries = append(histEntries, entries[i])
-						}
-					}
-				}
 			}
 			if len(histEntries) > 0 {
 				proc.InjectHistory(histEntries)

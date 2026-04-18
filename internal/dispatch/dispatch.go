@@ -15,7 +15,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
-	"github.com/naozhi/naozhi/internal/routing"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -123,14 +122,10 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		}
 
 		// Resolve agent from command prefix (e.g. "/review code" -> agent=code-reviewer, text="code")
-		agentID, cleanText := routing.ResolveAgent(trimmed, d.agentCommands)
+		agentID, cleanText := session.ResolveAgent(trimmed, d.agentCommands)
 		if cleanText == "" && len(msg.Images) == 0 {
 			if agentID != "general" {
-				if p := d.platforms[msg.Platform]; p != nil {
-					if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "请在指令后输入内容。"}); err != nil {
-						log.Warn("reply failed", "err", err)
-					}
-				}
+				d.replyText(ctx, msg, "请在指令后输入内容。", log)
 			}
 			return
 		}
@@ -140,11 +135,7 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		if agentID == "general" && strings.HasPrefix(cleanText, "/") {
 			cmd := strings.SplitN(cleanText, " ", 2)[0]
 			if !strings.Contains(cmd[1:], "/") {
-				if p := d.platforms[msg.Platform]; p != nil {
-					if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "未知命令: " + cmd + "\n输入 /help 查看可用命令，或直接发送消息。"}); err != nil {
-						log.Warn("reply failed", "err", err)
-					}
-				}
+				d.replyText(ctx, msg, "未知命令: "+cmd+"\n输入 /help 查看可用命令，或直接发送消息。", log)
 				return
 			}
 		}
@@ -192,20 +183,12 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 			if !isOwner {
 				if enqueued {
 					if d.queue.ShouldNotify(key) {
-						if p := d.platforms[msg.Platform]; p != nil {
-							if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "消息已收到，待当前回复完成后一并处理。"}); err != nil {
-								log.Warn("reply failed", "err", err)
-							}
-						}
+						d.replyText(ctx, msg, "消息已收到，待当前回复完成后一并处理。", log)
 					}
 				} else {
 					// Queue disabled (maxDepth<=0) — degrade to old drop behavior.
-					if p := d.platforms[msg.Platform]; p != nil {
-						if d.queue.ShouldNotify(key) {
-							if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "正在处理上一条消息，请稍候..."}); err != nil {
-								log.Warn("reply failed", "err", err)
-							}
-						}
+					if d.queue.ShouldNotify(key) {
+						d.replyText(ctx, msg, "正在处理上一条消息，请稍候...", log)
 					}
 				}
 				return
@@ -218,12 +201,8 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 
 		// Fallback: Guard-based path (no queue configured).
 		if !d.guard.TryAcquire(key) {
-			if p := d.platforms[msg.Platform]; p != nil {
-				if d.guard.ShouldSendWait(key) {
-					if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "正在处理上一条消息，请稍候..."}); err != nil {
-						log.Warn("reply failed", "err", err)
-					}
-				}
+			if d.guard.ShouldSendWait(key) {
+				d.replyText(ctx, msg, "正在处理上一条消息，请稍候...", log)
 			}
 			return
 		}
@@ -317,20 +296,16 @@ func (d *Dispatcher) sendAndReply(
 	sess, sessStatus, err := d.router.GetOrCreate(ctx, key, opts)
 	if err != nil {
 		log.Error("get session", "err", err)
-		if p := d.platforms[msg.Platform]; p != nil {
-			var errMsg string
-			switch {
-			case errors.Is(err, session.ErrMaxProcs):
-				errMsg = "当前处理已满，请稍后重试。"
-			case errors.Is(err, context.Canceled):
-				errMsg = "系统正在重启，请稍后重试。"
-			default:
-				errMsg = "会话创建失败，请发送 /new 重置后重试。"
-			}
-			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}); err != nil {
-				log.Warn("reply failed", "err", err)
-			}
+		var errMsg string
+		switch {
+		case errors.Is(err, session.ErrMaxProcs):
+			errMsg = "当前处理已满，请稍后重试。"
+		case errors.Is(err, context.Canceled):
+			errMsg = "系统正在重启，请稍后重试。"
+		default:
+			errMsg = "会话创建失败，请发送 /new 重置后重试。"
 		}
+		d.replyText(ctx, msg, errMsg, log)
 		return
 	}
 
@@ -343,9 +318,7 @@ func (d *Dispatcher) sendAndReply(
 	// Session lifecycle notifications only on first message.
 	if isFirst {
 		if sessStatus == session.SessionNew && platform.SupportsInterimMessages(p) {
-			if _, err := p.Reply(ctx, platform.OutgoingMessage{ChatID: msg.ChatID, Text: "新会话已创建（之前的上下文已失效）。"}); err != nil {
-				log.Warn("reply failed", "err", err)
-			}
+			d.replyText(ctx, msg, "新会话已创建（之前的上下文已失效）。", log)
 		}
 	}
 

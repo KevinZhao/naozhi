@@ -286,11 +286,11 @@ func TestAPIClient_GetUpdates(t *testing.T) {
 			return
 		}
 		if r.Header.Get("AuthorizationType") != "ilink_bot_token" {
-			http.Error(w, "bad auth type", 401)
+			http.Error(w, "bad auth type", http.StatusUnauthorized)
 			return
 		}
 		if r.Header.Get("Authorization") != "Bearer test-token" {
-			http.Error(w, "bad auth", 401)
+			http.Error(w, "bad auth", http.StatusUnauthorized)
 			return
 		}
 		json.NewEncoder(w).Encode(getUpdatesResp{

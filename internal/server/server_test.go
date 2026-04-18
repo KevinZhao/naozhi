@@ -13,7 +13,6 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/platform"
-	"github.com/naozhi/naozhi/internal/routing"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -664,7 +663,7 @@ func TestResolveAgent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.text, func(t *testing.T) {
-			agent, text := routing.ResolveAgent(tt.text, cmds)
+			agent, text := session.ResolveAgent(tt.text, cmds)
 			if agent != tt.wantAgent {
 				t.Errorf("ResolveAgent(%q).agent = %q, want %q", tt.text, agent, tt.wantAgent)
 			}
