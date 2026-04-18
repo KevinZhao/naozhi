@@ -145,26 +145,34 @@ func Run(cfg Config) error {
 	go s.readStdout()
 	go s.readStderr()
 
-	// SIGTERM: 30s grace period
+	// SIGTERM/SIGINT: always start a 30s grace period regardless of whether a
+	// client is currently connected. Previously the grace timer was skipped when
+	// clientConn != nil, causing `systemctl stop naozhi-shim-*` to be silently
+	// ignored until systemd sent SIGKILL. Now we always arm the timer; the only
+	// way to cancel it is a fresh client Attach (setClient clears graceTimer),
+	// so a re-attached naozhi cancels shutdown. A plain Detach (clearClient)
+	// does NOT cancel — if no new attach arrives within 30s, the shim exits,
+	// which is the intended systemctl-stop behavior.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		for range sigCh {
 			s.mu.Lock()
 			hasClient := s.clientConn != nil
-			if !hasClient {
+			if hasClient {
+				slog.Info("SIGTERM received with active client, starting 30s grace period (waiting for detach)")
+			} else {
 				slog.Info("SIGTERM received, starting 30s grace period")
-				// Stop() returns false if the timer already fired, meaning the old callback
-				// may still be running. This is safe because initiateShutdown is guarded
-				// by doneOnce, so duplicate calls are no-ops.
-				if s.graceTimer != nil {
-					s.graceTimer.Stop()
-				}
-				s.graceTimer = time.AfterFunc(30*time.Second, func() {
-					slog.Info("grace period expired, shutting down")
-					s.initiateShutdown()
-				})
 			}
+			// Stop() on a fired timer is safe: initiateShutdown is guarded by
+			// doneOnce so duplicate calls are no-ops.
+			if s.graceTimer != nil {
+				s.graceTimer.Stop()
+			}
+			s.graceTimer = time.AfterFunc(30*time.Second, func() {
+				slog.Info("grace period expired, shutting down")
+				s.initiateShutdown()
+			})
 			s.mu.Unlock()
 		}
 	}()
@@ -224,18 +232,22 @@ func Run(cfg Config) error {
 		case <-cli.exited:
 			slog.Info("CLI exited", "code", cli.exitCode)
 			s.saveStateCLIDead()
+			exitTimer := time.NewTimer(60 * time.Second)
+			defer exitTimer.Stop()
 			select {
 			case conn := <-acceptCh:
 				go s.handleClient(conn, idleTimeout)
+				reconnectTimer := time.NewTimer(60 * time.Second)
+				defer reconnectTimer.Stop()
 				select {
 				case <-s.done:
 					slog.Info("exiting: done after cli exit + reconnect")
-				case <-time.After(60 * time.Second):
+				case <-reconnectTimer.C:
 					slog.Info("exiting: 60s timeout after cli exit + reconnect")
 				}
 			case <-s.done:
 				slog.Info("exiting: done after cli exit")
-			case <-time.After(60 * time.Second):
+			case <-exitTimer.C:
 				slog.Info("exiting: 60s timeout after cli exit")
 			}
 			return nil
@@ -255,18 +267,22 @@ func Run(cfg Config) error {
 		case <-s.watchdog.Fired():
 			slog.Warn("watchdog fired, CLI killed")
 			s.saveStateCLIDead()
+			wdTimer := time.NewTimer(60 * time.Second)
+			defer wdTimer.Stop()
 			select {
 			case conn := <-acceptCh:
 				go s.handleClient(conn, idleTimeout)
+				wdReconnectTimer := time.NewTimer(60 * time.Second)
+				defer wdReconnectTimer.Stop()
 				select {
 				case <-s.done:
 					slog.Info("exiting: done after watchdog + reconnect")
-				case <-time.After(60 * time.Second):
+				case <-wdReconnectTimer.C:
 					slog.Info("exiting: 60s timeout after watchdog + reconnect")
 				}
 			case <-s.done:
 				slog.Info("exiting: done after watchdog")
-			case <-time.After(60 * time.Second):
+			case <-wdTimer.C:
 				slog.Info("exiting: 60s timeout after watchdog")
 			}
 			return nil

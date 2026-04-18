@@ -26,6 +26,10 @@ type SchedulerConfig struct {
 	StorePath     string
 	MaxJobs       int
 	ExecTimeout   time.Duration
+	// ParentCtx, if set, is used as the parent for the scheduler's internal stop context.
+	// When it is cancelled (e.g. during application shutdown) all running cron jobs are
+	// interrupted promptly.
+	ParentCtx context.Context
 }
 
 // OnExecuteFunc is called after a cron job finishes execution.
@@ -64,7 +68,11 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	if cfg.ExecTimeout <= 0 {
 		cfg.ExecTimeout = 5 * time.Minute
 	}
-	stopCtx, stopCancel := context.WithCancel(context.Background())
+	parent := cfg.ParentCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	stopCtx, stopCancel := context.WithCancel(parent)
 	cronLogger := robfigcron.PrintfLogger(log.New(slogWriter{}, "cron: ", 0))
 	return &Scheduler{
 		cron: robfigcron.New(robfigcron.WithChain(
@@ -549,6 +557,9 @@ func (s *Scheduler) notifyIM(j *Job, text string) {
 	if p == nil {
 		return
 	}
+	// Use Background parent: during shutdown stopCtx is cancelled first, then
+	// cron.Stop() waits for in-flight jobs — those must still be able to deliver
+	// their IM replies within the 30s bound rather than fail instantly.
 	replyCtx, replyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer replyCancel()
 	maxLen := p.MaxReplyLength()
@@ -573,6 +584,8 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		slog.Warn("cron notify: platform not found", "platform", plat)
 		return
 	}
+	// Use Background parent (see notifyIM for rationale): in-flight jobs during
+	// shutdown must still deliver replies within 30s, not fail immediately.
 	replyCtx, replyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer replyCancel()
 	maxLen := p.MaxReplyLength()

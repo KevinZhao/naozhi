@@ -16,9 +16,10 @@ type QueuedMsg struct {
 
 // sessionQueue tracks per-session busy state and queued messages.
 type sessionQueue struct {
-	busy bool
-	gen  uint64 // incremented on Discard to invalidate stale owners
-	msgs []QueuedMsg
+	busy         bool
+	gen          uint64 // incremented on Discard to invalidate stale owners
+	msgs         []QueuedMsg
+	lastNotifyNs int64 // unix nanoseconds of last ShouldNotify call (replaces lastNotify map)
 }
 
 // MessageQueue replaces SessionGuard with per-session message queuing.
@@ -32,9 +33,6 @@ type MessageQueue struct {
 	queues       map[string]*sessionQueue
 	maxDepth     int
 	collectDelay time.Duration
-
-	// Rate-limit "enqueued" notifications (same semantics as Guard.ShouldSendWait).
-	lastNotify map[string]time.Time
 }
 
 // NewMessageQueue creates a MessageQueue.
@@ -44,7 +42,6 @@ func NewMessageQueue(maxDepth int, collectDelay time.Duration) *MessageQueue {
 		queues:       make(map[string]*sessionQueue),
 		maxDepth:     maxDepth,
 		collectDelay: collectDelay,
-		lastNotify:   make(map[string]time.Time),
 	}
 }
 
@@ -120,9 +117,7 @@ func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 
 	if len(sq.msgs) == 0 {
 		// Release ownership.
-		sq.busy = false
 		delete(q.queues, key)
-		delete(q.lastNotify, key)
 		return nil
 	}
 
@@ -142,8 +137,8 @@ func (q *MessageQueue) Discard(key string) {
 		sq.gen++
 		sq.msgs = nil
 		sq.busy = false
+		sq.lastNotifyNs = 0
 	}
-	delete(q.lastNotify, key)
 }
 
 // Depth returns the number of queued messages for key (excludes the active one).
@@ -165,12 +160,15 @@ func (q *MessageQueue) CollectDelay() time.Duration {
 // enqueue notification for key. Prevents spamming users with "message received"
 // confirmations when they send many messages in quick succession.
 func (q *MessageQueue) ShouldNotify(key string) bool {
+	const cooldown = int64(3 * time.Second)
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	if time.Since(q.lastNotify[key]) < 3*time.Second {
+	sq := q.getOrCreate(key)
+	now := time.Now().UnixNano()
+	if now-sq.lastNotifyNs < cooldown {
 		return false
 	}
-	q.lastNotify[key] = time.Now()
+	sq.lastNotifyNs = now
 	return true
 }
 
@@ -206,5 +204,4 @@ func (q *MessageQueue) Release(key string) {
 			delete(q.queues, key)
 		}
 	}
-	delete(q.lastNotify, key)
 }

@@ -1,6 +1,7 @@
 package shim
 
 import (
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -131,6 +132,52 @@ func TestWatchdog_StopPrevents(t *testing.T) {
 		t.Fatal("watchdog fired after Stop()")
 	case <-time.After(150 * time.Millisecond):
 		// good
+	}
+}
+
+
+// TestWatchdog_ResetStaleCallbackNoOp verifies the generation-counter fix:
+// a callback that was already scheduled at the time of Reset must not fire.
+// We use a very short timeout and call Reset just before expiry, then confirm
+// the watchdog eventually fires exactly once (the fresh generation), not twice.
+func TestWatchdog_ResetStaleCallbackNoOp(t *testing.T) {
+	var fireCount atomic.Int32
+	w := NewWatchdog(30*time.Millisecond, func() {
+		fireCount.Add(1)
+	})
+	w.Start()
+
+	// Reset just before the first timer would fire; this invalidates the first
+	// callback (generation 0 → 1) and schedules a new one.
+	time.Sleep(20 * time.Millisecond)
+	w.Reset()
+
+	// Wait long enough for both the stale and the fresh callback to have run.
+	time.Sleep(100 * time.Millisecond)
+
+	if got := fireCount.Load(); got != 1 {
+		t.Errorf("expected watchdog to fire exactly once, got %d", got)
+	}
+}
+
+// TestWatchdog_StopInvalidatesCallback verifies that Stop increments the
+// generation so a racing callback that fires after Stop is a no-op.
+func TestWatchdog_StopInvalidatesCallback(t *testing.T) {
+	var fireCount atomic.Int32
+	w := NewWatchdog(20*time.Millisecond, func() {
+		fireCount.Add(1)
+	})
+	w.Start()
+
+	// Stop just before the timer fires.
+	time.Sleep(10 * time.Millisecond)
+	w.Stop()
+
+	// Allow time for any in-flight AfterFunc callback to execute.
+	time.Sleep(50 * time.Millisecond)
+
+	if got := fireCount.Load(); got != 0 {
+		t.Errorf("expected watchdog not to fire after Stop, got %d fires", got)
 	}
 }
 

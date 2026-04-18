@@ -254,20 +254,18 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 			continue
 		}
 
-		// Track last event time for reconnect resubscribe
+		// Track last event time for reconnect resubscribe.
+		// SendRaw is a non-blocking channel send; calling it under the lock is safe
+		// and avoids a per-event snapshot slice allocation.
+		tagged := injectNodeField(data, r.nodeField)
 		r.mu.Lock()
-		clients := make([]EventSink, len(r.subs[header.Key]))
-		copy(clients, r.subs[header.Key])
 		if header.Type == "event" && header.Event.Time > r.lastEvent[header.Key] {
 			r.lastEvent[header.Key] = header.Event.Time
 		}
-		r.mu.Unlock()
-
-		// Inject "node" field into raw JSON without full decode/encode.
-		tagged := injectNodeField(data, r.nodeField)
-		for _, c := range clients {
+		for _, c := range r.subs[header.Key] {
 			c.SendRaw(tagged)
 		}
+		r.mu.Unlock()
 	}
 }
 
@@ -282,7 +280,11 @@ func injectNodeField(data, nodeField []byte) []byte {
 	// Skip injection if the remote message already has a "node" key.
 	// Match `"node":` (with colon) to avoid false positives where "node" appears
 	// only as a value inside another field.
-	if bytes.Contains(data, []byte(`"node":`)) {
+	window := data
+	if len(window) > 256 {
+		window = window[:256]
+	}
+	if bytes.Contains(window, []byte(`"node":`)) {
 		return data
 	}
 	// Guard: empty object "{}" — nodeField ends with ',' which would produce

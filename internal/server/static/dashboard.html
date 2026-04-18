@@ -210,15 +210,25 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .modal .modal-btns{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
 .modal .modal-btns button{padding:6px 16px;border-radius:6px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:14px}
 .modal .modal-btns button.primary{background:#238636;border-color:#238636;color:#fff}
-/* New session project picker */
-.proj-pick{list-style:none;margin:0;padding:0}
-.proj-pick li{padding:10px 12px;border:1px solid #30363d;border-radius:8px;margin-bottom:6px;cursor:pointer;transition:all .15s}
-.proj-pick li:hover{background:#1c2129;border-color:#484f58}
-.proj-pick li:active{background:#21262d}
-.proj-pick .pp-name{font-size:14px;color:#f0f6fc;font-weight:500}
-.proj-pick .pp-path{font-size:11px;color:#6e7681;margin-top:2px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.proj-pick .pp-custom{color:#8b949e;font-size:13px;display:flex;align-items:center;gap:6px}
-.proj-pick .pp-custom-icon{font-size:15px}
+/* New session command palette */
+.cmd-palette-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);display:flex;align-items:flex-start;justify-content:center;z-index:200;padding-top:12vh}
+.cmd-palette{background:#161b22;border:1px solid #30363d;border-radius:12px;width:min(560px,92vw);max-height:72vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 16px 48px rgba(0,0,0,.5)}
+.cmd-palette-header{padding:14px 16px;border-bottom:1px solid #21262d;flex-shrink:0}
+.cmd-palette-header input{width:100%;padding:8px 10px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;outline:none}
+.cmd-palette-header input:focus{border-color:#58a6ff}
+.cmd-palette-list{flex:1;overflow-y:auto;padding:6px;min-height:0}
+.cmd-palette-item{padding:8px 10px;border-radius:6px;cursor:pointer;display:flex;align-items:center;gap:10px;transition:background .1s}
+.cmd-palette-item:hover{background:#1c2129}
+.cmd-palette-item.active{background:#1f6feb33;box-shadow:inset 2px 0 0 #58a6ff}
+.cmd-palette-item .cp-main{flex:1;min-width:0}
+.cmd-palette-item .cp-name{font-size:13px;color:#f0f6fc;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cmd-palette-item .cp-path{font-size:11px;color:#6e7681;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,monospace}
+.cmd-palette-item .cp-node{font-size:10px;padding:1px 5px;border-radius:3px;color:#fff;flex-shrink:0}
+.cmd-palette-item .cp-icon{color:#8b949e;font-size:14px;flex-shrink:0;width:16px;text-align:center}
+.cmd-palette-item mark{background:transparent;color:#79c0ff;font-weight:600}
+.cmd-palette-empty{padding:24px 16px;text-align:center;color:#6e7681;font-size:13px}
+.cmd-palette-footer{padding:8px 14px;border-top:1px solid #21262d;font-size:11px;color:#6e7681;display:flex;gap:14px;flex-wrap:wrap;flex-shrink:0;background:#0d1117}
+.cmd-palette-footer kbd{background:#21262d;border:1px solid #30363d;border-radius:3px;padding:0 4px;font-size:10px;color:#8b949e;font-family:inherit}
 
 /* Toast variants */
 .toast.warning{background:#9e6a03}

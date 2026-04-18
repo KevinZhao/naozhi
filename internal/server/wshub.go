@@ -5,7 +5,6 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -143,18 +142,7 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	conn.SetReadLimit(512 * 1024) // 512 KB max message size
-	ip := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(ip); err == nil {
-		ip = host
-	}
-	if h.trustedProxy {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
-			if last := strings.TrimSpace(parts[len(parts)-1]); last != "" {
-				ip = last
-			}
-		}
-	}
+	ip := clientIP(r, h.trustedProxy)
 	c := &wsClient{
 		conn:             conn,
 		send:             make(chan []byte, 1024),

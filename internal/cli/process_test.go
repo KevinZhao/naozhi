@@ -26,7 +26,6 @@ func shimTestPair(proto Protocol) (*Process, *shimTestServer) {
 
 	srv := &shimTestServer{
 		conn:   serverConn,
-		reader: bufio.NewReader(serverConn),
 		writer: bufio.NewWriter(serverConn),
 		seq:    0,
 	}
@@ -37,7 +36,6 @@ func shimTestPair(proto Protocol) (*Process, *shimTestServer) {
 // shimTestServer simulates the shim side of the connection for tests.
 type shimTestServer struct {
 	conn   net.Conn
-	reader *bufio.Reader
 	writer *bufio.Writer
 	seq    int64
 	mu     sync.Mutex
@@ -71,17 +69,6 @@ func (s *shimTestServer) SendCLIExited(code int) {
 	s.writer.Write(data)         //nolint:errcheck
 	s.writer.Write([]byte{'\n'}) //nolint:errcheck
 	s.writer.Flush()             //nolint:errcheck
-}
-
-// ReadClientMsg reads the next message sent by the Process to the shim.
-func (s *shimTestServer) ReadClientMsg() (shimClientMsg, error) {
-	line, err := s.reader.ReadBytes('\n')
-	if err != nil {
-		return shimClientMsg{}, err
-	}
-	var msg shimClientMsg
-	err = json.Unmarshal(line, &msg)
-	return msg, err
 }
 
 // Close closes the server side of the connection.

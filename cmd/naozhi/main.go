@@ -440,6 +440,7 @@ func main() {
 		StorePath:     osutil.ExpandHome(cfg.Cron.StorePath),
 		MaxJobs:       cfg.Cron.MaxJobs,
 		ExecTimeout:   cfg.ParseExecutionTimeout(),
+		ParentCtx:     ctx,
 	})
 	if err := scheduler.Start(); err != nil {
 		slog.Error("start cron scheduler", "err", err)
@@ -543,6 +544,9 @@ func main() {
 			slog.Warn("sd_notify STOPPING failed", "err", err)
 		}
 		cancel()
+		// Scheduler must stop fully before router.Shutdown: in-flight cron
+		// jobs still call into router (GetOrCreate/Send), so tearing the
+		// router down in parallel would race against those calls.
 		scheduler.Stop()
 		router.Shutdown()
 	}()

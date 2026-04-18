@@ -14,10 +14,13 @@ import (
 )
 
 // reverseUpgrader is the WebSocket upgrader for reverse node connections.
-// CheckOrigin always returns true because auth is enforced via per-node
-// bearer token in the first WebSocket message, not via CORS.
+// m2m connection: bearer token in the first WS message is the primary auth.
+// As a defence-in-depth measure, reject any request that carries an Origin
+// header — browsers always send Origin, machine-to-machine clients do not.
 var reverseUpgrader = websocket.Upgrader{
-	CheckOrigin: func(r *http.Request) bool { return true },
+	CheckOrigin: func(r *http.Request) bool {
+		return r.Header.Get("Origin") == ""
+	},
 }
 
 // ReverseServer accepts /ws-node connections from remote naozhi nodes.

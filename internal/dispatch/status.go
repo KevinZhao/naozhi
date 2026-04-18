@@ -1,7 +1,6 @@
 package dispatch
 
 import (
-	"bytes"
 	"encoding/json"
 	"path/filepath"
 	"strings"
@@ -31,76 +30,69 @@ func formatEventLine(ev cli.Event) string {
 	return ""
 }
 
+// Per-tool input structs — zero-alloc alternative to generic map decoding.
+type readInput struct {
+	FilePath string `json:"file_path"`
+}
+type editInput struct {
+	FilePath string `json:"file_path"`
+}
+type writeInput struct {
+	FilePath string `json:"file_path"`
+}
+type bashInput struct {
+	Command string `json:"command"`
+}
+type grepInput struct {
+	Pattern string `json:"pattern"`
+}
+type globInput struct {
+	Pattern string `json:"pattern"`
+}
+type agentInput struct {
+	Description string `json:"description"`
+}
+
 func formatToolUse(name string, input json.RawMessage) string {
 	switch name {
 	case "Read":
-		if p := extractParam(input, "file_path"); p != "" {
-			return "📖 " + shortenPath(p)
+		var s readInput
+		if json.Unmarshal(input, &s) == nil && s.FilePath != "" {
+			return "📖 " + shortenPath(s.FilePath)
 		}
 	case "Edit":
-		if p := extractParam(input, "file_path"); p != "" {
-			return "✏️ " + shortenPath(p)
+		var s editInput
+		if json.Unmarshal(input, &s) == nil && s.FilePath != "" {
+			return "✏️ " + shortenPath(s.FilePath)
 		}
 	case "Write":
-		if p := extractParam(input, "file_path"); p != "" {
-			return "📝 " + shortenPath(p)
+		var s writeInput
+		if json.Unmarshal(input, &s) == nil && s.FilePath != "" {
+			return "📝 " + shortenPath(s.FilePath)
 		}
 	case "Bash":
-		if cmd := extractParam(input, "command"); cmd != "" {
-			return "⚡ " + cli.TruncateRunes(cmd, 50)
+		var s bashInput
+		if json.Unmarshal(input, &s) == nil && s.Command != "" {
+			return "⚡ " + cli.TruncateRunes(s.Command, 50)
 		}
 	case "Grep":
-		if pat := extractParam(input, "pattern"); pat != "" {
-			return "🔍 grep " + cli.TruncateRunes(pat, 40)
+		var s grepInput
+		if json.Unmarshal(input, &s) == nil && s.Pattern != "" {
+			return "🔍 grep " + cli.TruncateRunes(s.Pattern, 40)
 		}
 	case "Glob":
-		if pat := extractParam(input, "pattern"); pat != "" {
-			return "🔍 " + cli.TruncateRunes(pat, 40)
+		var s globInput
+		if json.Unmarshal(input, &s) == nil && s.Pattern != "" {
+			return "🔍 " + cli.TruncateRunes(s.Pattern, 40)
 		}
 	case "Agent":
-		if desc := extractParam(input, "description"); desc != "" {
-			return "🤖 " + desc
+		var s agentInput
+		if json.Unmarshal(input, &s) == nil && s.Description != "" {
+			return "🤖 " + s.Description
 		}
 	}
 	// Fallback: ACP tool_call titles or unknown tools
 	return "🔧 " + name
-}
-
-func extractParam(input json.RawMessage, key string) string {
-	if len(input) == 0 {
-		return ""
-	}
-	dec := json.NewDecoder(bytes.NewReader(input))
-	t, err := dec.Token()
-	if err != nil {
-		return ""
-	}
-	if delim, ok := t.(json.Delim); !ok || delim != '{' {
-		return ""
-	}
-	for dec.More() {
-		t, err = dec.Token()
-		if err != nil {
-			return ""
-		}
-		k, ok := t.(string)
-		if !ok {
-			return ""
-		}
-		if k == key {
-			var s string
-			if dec.Decode(&s) == nil {
-				return s
-			}
-			return ""
-		}
-		// Skip value we don't need
-		var skip json.RawMessage
-		if err := dec.Decode(&skip); err != nil {
-			return ""
-		}
-	}
-	return ""
 }
 
 // shortenPath returns dir/base for readability.

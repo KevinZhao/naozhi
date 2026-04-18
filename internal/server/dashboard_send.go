@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,6 +20,33 @@ type SendHandler struct {
 	hub           *Hub
 	uploadStore   *uploadStore
 	uploadLimiter *ipLimiter // per-IP upload rate limiter (10/min)
+	trustedProxy  bool       // whether to trust X-Forwarded-For for client IP
+}
+
+// uploadOwner derives a stable owner key from the request's auth cookie.
+// Using the raw cookie value (which is already HMAC-derived, not the raw token)
+// ties each upload to the authenticated session without exposing the token.
+// All dashboard sessions share the same cookie value, so this prevents
+// cross-user theft rather than per-browser-tab isolation.
+func uploadOwner(r *http.Request, trustedProxy bool) string {
+	if c, err := r.Cookie(authCookieName); err == nil && c.Value != "" {
+		// Cookie value is already an HMAC hex string — use first 16 bytes as owner key.
+		if len(c.Value) >= 16 {
+			return c.Value[:16]
+		}
+		return c.Value
+	}
+	// Bearer token path: hash the Authorization header value for the owner key.
+	auth := r.Header.Get("Authorization")
+	if strings.HasPrefix(auth, "Bearer ") {
+		token := strings.TrimPrefix(auth, "Bearer ")
+		if len(token) >= 16 {
+			return hex.EncodeToString([]byte(token[:8]))
+		}
+		return hex.EncodeToString([]byte(token))
+	}
+	// Unauthenticated (no-token mode): use real client IP as owner.
+	return clientIP(r, trustedProxy)
 }
 
 // parseImageFile reads and validates a single multipart file as an image.
@@ -50,7 +78,7 @@ func parseImageFile(fh *multipart.FileHeader) (cli.ImageData, error) {
 // POST /api/sessions/upload  (multipart/form-data, field "file")
 // Response: {"id": "<hex>"}
 func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
-	if h.uploadLimiter != nil && !h.uploadLimiter.Allow(r.RemoteAddr) {
+	if h.uploadLimiter != nil && !h.uploadLimiter.AllowRequest(r) {
 		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "upload rate limit exceeded"})
 		return
 	}
@@ -69,7 +97,8 @@ func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	id, err := h.uploadStore.Put(img)
+	owner := uploadOwner(r, h.trustedProxy)
+	id, err := h.uploadStore.Put(owner, img)
 	if err != nil {
 		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "too many pending uploads"})
 		return
@@ -131,11 +160,12 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		fileIDs = req.FileIDs
 	}
 
-	// Resolve pre-uploaded file IDs
+	// Resolve pre-uploaded file IDs — ownership-checked to prevent cross-user theft.
+	owner := uploadOwner(r, h.trustedProxy)
 	for _, fid := range fileIDs {
-		img := h.uploadStore.Take(fid)
+		img := h.uploadStore.Take(fid, owner)
 		if img == nil {
-			http.Error(w, "file_id not found or expired: "+fid, http.StatusBadRequest)
+			http.Error(w, "file not found or expired: "+fid, http.StatusBadRequest)
 			return
 		}
 		images = append(images, *img)

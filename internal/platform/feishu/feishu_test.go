@@ -667,3 +667,95 @@ func TestWebhook_ValidMessage(t *testing.T) {
 		t.Errorf("userID = %q, want ou_sender", received.UserID)
 	}
 }
+
+// --- Nonce replay protection tests ---
+
+// buildSignedRequest creates a signed POST request to /webhook/feishu with
+// the given timestamp and nonce, computing the HMAC over body.
+func buildSignedRequest(t *testing.T, body []byte, timestamp, nonce, encryptKey string) *http.Request {
+	t.Helper()
+	sigContent := timestamp + nonce + encryptKey + string(body)
+	h := sha256.Sum256([]byte(sigContent))
+	sig := fmt.Sprintf("%x", h)
+	req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(string(body)))
+	req.Header.Set("X-Lark-Request-Timestamp", timestamp)
+	req.Header.Set("X-Lark-Request-Nonce", nonce)
+	req.Header.Set("X-Lark-Signature", sig)
+	return req
+}
+
+func TestWebhook_NonceReplay_Rejected(t *testing.T) {
+	const encryptKey = "replay_test_key"
+	f := makeWebhookFeishu(Config{
+		AppID: "id", AppSecret: "secret",
+		VerificationToken: "test_token",
+		EncryptKey:        encryptKey,
+	})
+	mux := http.NewServeMux()
+	callCount := 0
+	done := make(chan struct{}, 1)
+	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {
+		callCount++
+		done <- struct{}{}
+	})
+
+	body := buildV2MessageBody("ev_replay", "oc_chat1", "p2p", "replay me")
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	nonce := "unique-nonce-abc"
+
+	// First request: must succeed.
+	req1 := buildSignedRequest(t, body, timestamp, nonce, encryptKey)
+	w1 := httptest.NewRecorder()
+	mux.ServeHTTP(w1, req1)
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first request status = %d, want 200", w1.Code)
+	}
+	<-done
+
+	// Second request with identical ts+nonce: must be rejected as replay.
+	req2 := buildSignedRequest(t, body, timestamp, nonce, encryptKey)
+	w2 := httptest.NewRecorder()
+	mux.ServeHTTP(w2, req2)
+	if w2.Code != http.StatusUnauthorized {
+		t.Errorf("replay request status = %d, want 401", w2.Code)
+	}
+	if callCount != 1 {
+		t.Errorf("handler call count = %d, want 1 (replay must not reach handler)", callCount)
+	}
+}
+
+func TestWebhook_DifferentNonce_Allowed(t *testing.T) {
+	const encryptKey = "replay_test_key2"
+	f := makeWebhookFeishu(Config{
+		AppID: "id", AppSecret: "secret",
+		VerificationToken: "test_token",
+		EncryptKey:        encryptKey,
+	})
+	mux := http.NewServeMux()
+	callCount := 0
+	var mu sync.Mutex
+	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {
+		mu.Lock()
+		callCount++
+		mu.Unlock()
+	})
+
+	body := buildV2MessageBody("ev_diff", "oc_chat1", "p2p", "legit msg")
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+
+	for i, nonce := range []string{"nonce-1", "nonce-2"} {
+		req := buildSignedRequest(t, body, timestamp, nonce, encryptKey)
+		w := httptest.NewRecorder()
+		mux.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Errorf("request %d status = %d, want 200", i+1, w.Code)
+		}
+	}
+	// Give goroutines a moment to run
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	defer mu.Unlock()
+	if callCount != 2 {
+		t.Errorf("handler call count = %d, want 2 (different nonces must both pass)", callCount)
+	}
+}

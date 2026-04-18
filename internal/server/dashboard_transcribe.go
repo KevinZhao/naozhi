@@ -9,21 +9,38 @@ import (
 	"github.com/naozhi/naozhi/internal/transcribe"
 )
 
+// transcribeSemCap is the maximum number of concurrent ffmpeg transcriptions.
+// Exceeded requests receive 503 immediately to prevent CPU/memory DoS.
+const transcribeSemCap = 3
+
 // TranscribeHandler handles the audio transcription API endpoint.
 type TranscribeHandler struct {
 	transcriber       transcribe.Service
-	transcribeLimiter *ipLimiter // per-IP transcribe rate limiter (5/min)
+	transcribeLimiter *ipLimiter  // per-IP transcribe rate limiter (5/min)
+	sem               chan struct{} // concurrency limiter (capacity transcribeSemCap)
 }
 
 // handleTranscribe accepts an audio file upload and returns transcribed text.
 // POST /api/transcribe  (multipart/form-data, field "audio")
 func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Request) {
-	if h.transcribeLimiter != nil && !h.transcribeLimiter.Allow(r.RemoteAddr) {
+	if h.transcribeLimiter != nil && !h.transcribeLimiter.AllowRequest(r) {
 		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "transcribe rate limit exceeded"})
 		return
 	}
 	if h.transcriber == nil {
 		http.Error(w, "transcription not configured", http.StatusNotImplemented)
+		return
+	}
+
+	// Acquire concurrency slot; reject immediately if all slots are busy.
+	select {
+	case h.sem <- struct{}{}:
+		defer func() { <-h.sem }()
+	case <-r.Context().Done():
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcribe busy"})
+		return
+	default:
+		writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "transcribe busy"})
 		return
 	}
 

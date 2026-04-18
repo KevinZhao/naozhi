@@ -62,9 +62,12 @@ type Feishu struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
 	wg      sync.WaitGroup // tracks in-flight message handler goroutines
-	hookSem chan struct{}  // limits concurrent webhook handler goroutines
-	startMu sync.Mutex
-	started bool
+	hookSem    chan struct{}  // limits concurrent webhook handler goroutines
+	startMu    sync.Mutex
+	started    bool
+
+	// Replay protection: stores "ts:nonce" -> expiry unix timestamp.
+	seenNonces sync.Map
 }
 
 // New creates a Feishu platform adapter. transcriber may be nil to disable voice.
@@ -77,7 +80,32 @@ func New(cfg Config, transcriber transcribe.Service) *Feishu {
 		mode = "websocket"
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Feishu{cfg: cfg, mode: mode, baseURL: "https://open.feishu.cn", transcriber: transcriber, hookSem: make(chan struct{}, 20), stopCtx: ctx, stopCancel: cancel}
+	f := &Feishu{cfg: cfg, mode: mode, baseURL: "https://open.feishu.cn", transcriber: transcriber, hookSem: make(chan struct{}, 20), stopCtx: ctx, stopCancel: cancel}
+	go f.cleanupNonces(ctx)
+	return f
+}
+
+// cleanupNonces periodically removes expired entries from seenNonces.
+// Runs until ctx is cancelled (i.e. until Stop() is called).
+const nonceTTL = 10 * time.Minute
+
+func (f *Feishu) cleanupNonces(ctx context.Context) {
+	ticker := time.NewTicker(5 * time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now().Unix()
+			f.seenNonces.Range(func(k, v any) bool {
+				if v.(int64) < now {
+					f.seenNonces.Delete(k)
+				}
+				return true
+			})
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (f *Feishu) Name() string { return "feishu" }

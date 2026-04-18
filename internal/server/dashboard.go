@@ -74,7 +74,8 @@ func (s *Server) registerDashboard() {
 		nodeAccess:    s.nodeAccess,
 		hub:           s.hub,
 		uploadStore:   uploads,
-		uploadLimiter: newIPLimiter(rate.Every(6*time.Second), 10), // 10 uploads/min per IP
+		uploadLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, s.auth.trustedProxy), // 10 uploads/min per IP
+		trustedProxy:  s.auth.trustedProxy,
 	}
 
 	// Push session list changes to WS clients

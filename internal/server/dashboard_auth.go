@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
-	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -122,23 +121,9 @@ func (a *AuthHandlers) serveLoginPage(w http.ResponseWriter) {
 }
 
 // clientIP extracts the client IP from the request.
-// When trustedProxy is enabled (behind ALB/CloudFront), reads the last entry
-// from X-Forwarded-For (the one appended by the trusted proxy, which cannot
-// be spoofed by the client). Otherwise falls back to RemoteAddr.
+// Delegates to the package-level clientIP helper which handles trustedProxy.
 func (a *AuthHandlers) clientIP(r *http.Request) string {
-	ip := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(ip); err == nil {
-		ip = host
-	}
-	if a.trustedProxy {
-		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			parts := strings.Split(xff, ",")
-			if last := strings.TrimSpace(parts[len(parts)-1]); last != "" {
-				ip = last
-			}
-		}
-	}
-	return ip
+	return clientIP(r, a.trustedProxy)
 }
 
 // isSecure returns true if the connection is over TLS.

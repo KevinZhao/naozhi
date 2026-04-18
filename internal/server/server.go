@@ -105,8 +105,12 @@ func validateWorkspace(workspace, allowedRoot string) (string, error) {
 func loadOrCreateCookieSecret(stateDir string) []byte {
 	if stateDir != "" {
 		path := filepath.Join(stateDir, "cookie_secret")
-		if data, err := os.ReadFile(path); err == nil && len(data) == 32 {
-			return data
+		if fi, err := os.Stat(path); err == nil {
+			if fi.Mode().Perm() != 0600 {
+				slog.Warn("cookie_secret has unsafe permissions, regenerating", "path", path, "mode", fi.Mode().Perm())
+			} else if data, err := os.ReadFile(path); err == nil && len(data) == 32 {
+				return data
+			}
 		}
 		b := make([]byte, 32)
 		if _, err := rand.Read(b); err != nil {
@@ -204,7 +208,8 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		},
 		transcribeH: &TranscribeHandler{
 			transcriber:       opts.Transcriber,
-			transcribeLimiter: newIPLimiter(rate.Every(12*time.Second), 5), // 5 transcriptions/min per IP
+			transcribeLimiter: newIPLimiterWithProxy(rate.Every(12*time.Second), 5, opts.TrustedProxy), // 5 transcriptions/min per IP
+			sem:               make(chan struct{}, transcribeSemCap),
 		},
 	}
 

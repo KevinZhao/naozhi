@@ -1919,40 +1919,11 @@ async function saveToken() {
 }
 
 function createNewSession() {
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
   const ws = defaultWorkspace || '';
 
-  if (projectsData.length > 0) {
-    // Project picker: build DOM elements to avoid onclick attribute injection (XSS).
-    const ul = document.createElement('ul');
-    ul.className = 'proj-pick';
-    projectsData.forEach(p => {
-      const li = document.createElement('li');
-      li.addEventListener('click', () => doCreateInProject(p.path, p.name, p.node || 'local'));
-      li.innerHTML = '<div class="pp-name">' + esc(p.name) + '</div>' +
-        '<div class="pp-path">' + esc(shortPath(p.path)) + '</div>';
-      ul.appendChild(li);
-    });
-    const customLi = document.createElement('li');
-    customLi.id = 'pp-custom-toggle';
-    customLi.addEventListener('click', toggleCustomWorkspace);
-    customLi.innerHTML = '<div class="pp-custom"><span class="pp-custom-icon">+</span> Custom workspace</div>';
-    ul.appendChild(customLi);
-    overlay.innerHTML =
-      '<div class="modal">' +
-        '<h3>New Session</h3>' +
-        '<div id="pp-list-container"></div>' +
-        '<div id="pp-custom-form" style="display:none;margin-top:8px">' +
-          '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
-          '<div class="modal-btns"><button class="primary" onclick="doCreateSession()">create</button></div>' +
-        '</div>' +
-        '<div class="modal-btns"><button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button></div>' +
-      '</div>';
-    document.body.appendChild(overlay);
-    document.getElementById('pp-list-container').appendChild(ul);
-  } else {
-    // No projects: simple workspace input
+  if (!projectsData.length) {
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay';
     overlay.innerHTML =
       '<div class="modal">' +
         '<h3>New Session</h3>' +
@@ -1965,23 +1936,240 @@ function createNewSession() {
           '<button class="primary" onclick="doCreateSession()">create</button>' +
         '</div>' +
       '</div>';
+    document.body.appendChild(overlay);
+    setTimeout(() => document.getElementById('new-workspace').focus(), 100);
+    return;
   }
-  if (!overlay.parentNode) document.body.appendChild(overlay);
-  if (!projectsData.length) setTimeout(() => document.getElementById('new-workspace').focus(), 100);
+
+  openProjectPalette();
 }
 
-function toggleCustomWorkspace() {
-  const form = document.getElementById('pp-custom-form');
-  const toggle = document.getElementById('pp-custom-toggle');
-  if (form.style.display === 'none') {
-    form.style.display = '';
-    toggle.style.display = 'none';
-    setTimeout(() => document.getElementById('new-workspace').focus(), 50);
+function openProjectPalette() {
+  const overlay = document.createElement('div');
+  overlay.className = 'cmd-palette-overlay';
+  overlay.innerHTML =
+    '<div class="cmd-palette" role="dialog" aria-label="New session">' +
+      '<div class="cmd-palette-header">' +
+        '<input id="cp-input" type="text" autocomplete="off" spellcheck="false" placeholder="Search projects or type a path…">' +
+      '</div>' +
+      '<div id="cp-list" class="cmd-palette-list" role="listbox"></div>' +
+      '<div class="cmd-palette-footer">' +
+        '<span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>' +
+        '<span><kbd>Enter</kbd> open</span>' +
+        '<span><kbd>Esc</kbd> close</span>' +
+      '</div>' +
+    '</div>';
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay) overlay.remove();
+  });
+  document.body.appendChild(overlay);
+
+  const state = {overlay, items: [], activeIdx: 0};
+  const input = document.getElementById('cp-input');
+  input.addEventListener('input', () => renderPaletteList(state, input.value));
+  input.addEventListener('keydown', e => handlePaletteKey(e, state, input));
+  renderPaletteList(state, '');
+  setTimeout(() => input.focus(), 50);
+}
+
+function fuzzyMatch(query, text) {
+  if (!query) return {score: 0, ranges: []};
+  const t = text.toLowerCase();
+  const q = query.toLowerCase();
+  // Prefer contiguous substring match first.
+  const idx = t.indexOf(q);
+  if (idx >= 0) return {score: 1000 - idx, ranges: [[idx, idx + q.length]]};
+  // Fallback: subsequence match (all chars in order).
+  let ti = 0, qi = 0;
+  const ranges = [];
+  while (ti < t.length && qi < q.length) {
+    if (t[ti] === q[qi]) {
+      if (ranges.length && ranges[ranges.length - 1][1] === ti) {
+        ranges[ranges.length - 1][1] = ti + 1;
+      } else {
+        ranges.push([ti, ti + 1]);
+      }
+      qi++;
+    }
+    ti++;
   }
+  if (qi < q.length) return null;
+  return {score: 100 - ranges.length, ranges};
+}
+
+function highlight(text, ranges) {
+  if (!ranges || !ranges.length) return esc(text);
+  let out = '';
+  let cursor = 0;
+  for (const [s, e] of ranges) {
+    out += esc(text.substring(cursor, s)) + '<mark>' + esc(text.substring(s, e)) + '</mark>';
+    cursor = e;
+  }
+  out += esc(text.substring(cursor));
+  return out;
+}
+
+function renderPaletteList(state, query) {
+  const list = document.getElementById('cp-list');
+  if (!list) return;
+  const q = query.trim();
+  const scored = [];
+  projectsData.forEach(p => {
+    if (!q) {
+      scored.push({project: p, nameRanges: [], pathRanges: [], score: 0});
+      return;
+    }
+    const nameM = fuzzyMatch(q, p.name);
+    const pathM = fuzzyMatch(q, p.path);
+    if (!nameM && !pathM) return;
+    const score = Math.max(nameM ? nameM.score + 500 : 0, pathM ? pathM.score : 0);
+    scored.push({
+      project: p,
+      nameRanges: nameM ? nameM.ranges : [],
+      pathRanges: pathM ? pathM.ranges : [],
+      score,
+    });
+  });
+  if (q) scored.sort((a, b) => b.score - a.score);
+
+  const items = scored.map(s => ({type: 'project', data: s}));
+  items.push({type: 'custom', query: q});
+  state.items = items;
+  state.activeIdx = 0;
+
+  if (!scored.length && q) {
+    list.innerHTML = '<div class="cmd-palette-empty">No projects match "' + esc(q) + '"</div>';
+    // Still render custom row below.
+    const customEl = buildCustomRow(q, 0);
+    list.appendChild(customEl);
+    state.items = [{type: 'custom', query: q}];
+    updateActiveRow(state);
+    return;
+  }
+
+  list.innerHTML = '';
+  items.forEach((it, i) => {
+    if (it.type === 'project') {
+      list.appendChild(buildProjectRow(it.data, i));
+    } else {
+      list.appendChild(buildCustomRow(it.query, i));
+    }
+  });
+  updateActiveRow(state);
+}
+
+function buildProjectRow(s, idx) {
+  const p = s.project;
+  const el = document.createElement('div');
+  el.className = 'cmd-palette-item';
+  el.dataset.idx = String(idx);
+  const nodeId = p.node || 'local';
+  const nodeBadge = nodeId !== 'local'
+    ? '<span class="cp-node" style="background:' + nodeColor(nodeId) + '">' + esc(nodeId) + '</span>'
+    : '';
+  el.innerHTML =
+    '<span class="cp-icon">▸</span>' +
+    '<div class="cp-main">' +
+      '<div class="cp-name">' + highlight(p.name, s.nameRanges) + '</div>' +
+      '<div class="cp-path">' + highlight(shortPath(p.path), s.pathRanges) + '</div>' +
+    '</div>' + nodeBadge;
+  el.addEventListener('click', () => pickPaletteProject(p));
+  el.addEventListener('mouseenter', () => setActiveIdx(idx));
+  return el;
+}
+
+function buildCustomRow(query, idx) {
+  const el = document.createElement('div');
+  el.className = 'cmd-palette-item';
+  el.dataset.idx = String(idx);
+  const looksLikePath = query && (query.startsWith('/') || query.startsWith('~'));
+  const label = looksLikePath
+    ? 'Open custom workspace: <span style="color:#79c0ff">' + esc(query) + '</span>'
+    : 'Open custom workspace…';
+  el.innerHTML =
+    '<span class="cp-icon">+</span>' +
+    '<div class="cp-main"><div class="cp-name" style="color:#8b949e">' + label + '</div></div>';
+  el.addEventListener('click', () => pickPaletteCustom(query));
+  el.addEventListener('mouseenter', () => setActiveIdx(idx));
+  return el;
+}
+
+function setActiveIdx(idx) {
+  const overlay = document.querySelector('.cmd-palette-overlay');
+  if (!overlay) return;
+  overlay.querySelectorAll('.cmd-palette-item').forEach(el => {
+    el.classList.toggle('active', Number(el.dataset.idx) === idx);
+  });
+}
+
+function updateActiveRow(state) {
+  setActiveIdx(state.activeIdx);
+  const overlay = document.querySelector('.cmd-palette-overlay');
+  if (!overlay) return;
+  const active = overlay.querySelector('.cmd-palette-item.active');
+  if (active && active.scrollIntoView) active.scrollIntoView({block: 'nearest'});
+}
+
+function handlePaletteKey(e, state, input) {
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    state.overlay.remove();
+    return;
+  }
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    state.activeIdx = Math.min(state.activeIdx + 1, state.items.length - 1);
+    updateActiveRow(state);
+    return;
+  }
+  if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    state.activeIdx = Math.max(state.activeIdx - 1, 0);
+    updateActiveRow(state);
+    return;
+  }
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    const item = state.items[state.activeIdx];
+    if (!item) return;
+    if (item.type === 'project') pickPaletteProject(item.data.project);
+    else pickPaletteCustom(input.value.trim());
+  }
+}
+
+function pickPaletteProject(p) {
+  doCreateInProject(p.path, p.name, p.node || 'local');
+}
+
+function pickPaletteCustom(initialValue) {
+  const overlay = document.querySelector('.cmd-palette-overlay');
+  if (overlay) overlay.remove();
+  const ws = defaultWorkspace || '';
+  const prefill = initialValue && (initialValue.startsWith('/') || initialValue.startsWith('~')) ? initialValue : '';
+  const modal = document.createElement('div');
+  modal.className = 'modal-overlay';
+  modal.innerHTML =
+    '<div class="modal">' +
+      '<h3>Custom Workspace</h3>' +
+      '<div style="margin-bottom:12px">' +
+        '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px">Workspace path</label>' +
+        '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(prefill) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
+      '</div>' +
+      '<div class="modal-btns">' +
+        '<button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
+        '<button class="primary" onclick="doCreateSession()">create</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(modal);
+  setTimeout(() => {
+    const el = document.getElementById('new-workspace');
+    if (el) { el.focus(); el.select(); }
+  }, 50);
 }
 
 function doCreateInProject(projectPath, projectName, nodeId) {
-  document.querySelector('.modal-overlay').remove();
+  const overlay = document.querySelector('.modal-overlay, .cmd-palette-overlay');
+  if (overlay) overlay.remove();
   sessionCounter++;
   const now = new Date();
   const ts = now.toISOString().slice(0,10) + '-' +

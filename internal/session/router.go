@@ -1323,13 +1323,13 @@ func (r *Router) saveIfDirty() {
 	if sessionsCopy != nil {
 		if err := saveStore(storePath, sessionsCopy); err != nil {
 			slog.Warn("periodic session save failed", "err", err)
-			return
+		} else {
+			r.mu.Lock()
+			if r.storeGen == snapshotGen {
+				r.storeDirty = false
+			}
+			r.mu.Unlock()
 		}
-		r.mu.Lock()
-		if r.storeGen == snapshotGen {
-			r.storeDirty = false
-		}
-		r.mu.Unlock()
 	}
 	if wsOverridesCopy != nil {
 		if err := saveWorkspaceOverrides(storePath, wsOverridesCopy); err != nil {

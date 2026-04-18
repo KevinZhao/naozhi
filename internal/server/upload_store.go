@@ -19,6 +19,7 @@ const (
 
 type uploadEntry struct {
 	Image   cli.ImageData
+	Owner   string
 	Created time.Time
 }
 
@@ -35,9 +36,9 @@ func newUploadStore() *uploadStore {
 
 var errUploadStoreFull = errors.New("upload store full")
 
-// Put stores an image and returns a random hex ID.
+// Put stores an image owned by owner and returns a random hex ID.
 // Returns errUploadStoreFull when the store is at capacity.
-func (s *uploadStore) Put(img cli.ImageData) (string, error) {
+func (s *uploadStore) Put(owner string, img cli.ImageData) (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
 		panic("crypto/rand unavailable: " + err.Error())
@@ -49,12 +50,15 @@ func (s *uploadStore) Put(img cli.ImageData) (string, error) {
 	if len(s.entries) >= maxUploadEntries {
 		return "", errUploadStoreFull
 	}
-	s.entries[id] = &uploadEntry{Image: img, Created: time.Now()}
+	s.entries[id] = &uploadEntry{Image: img, Owner: owner, Created: time.Now()}
 	return id, nil
 }
 
-// Take retrieves and removes an image by ID. Returns nil if not found or expired.
-func (s *uploadStore) Take(id string) *cli.ImageData {
+// Take retrieves and removes an image by ID, verifying ownership.
+// Returns nil if not found, expired, or owner does not match — callers
+// receive the same "not found" response regardless of the failure reason
+// to avoid leaking the existence of another user's upload.
+func (s *uploadStore) Take(id, owner string) *cli.ImageData {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.entries[id]
@@ -63,6 +67,9 @@ func (s *uploadStore) Take(id string) *cli.ImageData {
 	}
 	if time.Since(e.Created) > uploadTTL {
 		delete(s.entries, id)
+		return nil
+	}
+	if e.Owner != owner {
 		return nil
 	}
 	delete(s.entries, id)

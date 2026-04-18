@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
 )
@@ -76,6 +77,26 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			sig := r.Header.Get("X-Lark-Signature")
 			if !verifySignature(timestamp, nonce, f.cfg.EncryptKey, body, sig) {
 				slog.Warn("feishu signature verification failed")
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+		}
+
+		// Nonce dedup: prevent replay attacks within the nonce TTL window.
+		// Applies whenever both ts and nonce headers are present.
+		if ts := r.Header.Get("X-Lark-Request-Timestamp"); ts != "" {
+			nonce := r.Header.Get("X-Lark-Request-Nonce")
+			if nonce != "" {
+				key := ts + ":" + nonce
+				expiry := time.Now().Add(nonceTTL).Unix()
+				if _, loaded := f.seenNonces.LoadOrStore(key, expiry); loaded {
+					slog.Warn("feishu webhook replay detected", "nonce", nonce)
+					w.WriteHeader(http.StatusUnauthorized)
+					return
+				}
+			} else if f.cfg.EncryptKey != "" {
+				// EncryptKey mode must always supply a nonce; missing nonce is suspicious.
+				slog.Warn("feishu webhook missing nonce header in encrypt_key mode")
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
