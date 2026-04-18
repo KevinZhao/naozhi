@@ -452,6 +452,10 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		return marshalResult(map[string]string{"status": "accepted", "key": key})
 
 	case "close_discovered":
+		// Proxied from primary's handleClose — no discovered-cache check here:
+		// the primary already verified PID ∈ discovered before forwarding, and
+		// the RPC caller is an authenticated node. ProcStartTime still guards
+		// against PID reuse between primary's check and this kill.
 		var p struct {
 			PID           int    `json:"pid"`
 			SessionID     string `json:"session_id"`

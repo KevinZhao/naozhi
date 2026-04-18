@@ -90,7 +90,7 @@ func (h *DiscoveryHandlers) handlePreview(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	entries, err := discovery.LoadHistory(h.claudeDir, sessionID)
+	entries, err := discovery.LoadHistory(h.claudeDir, sessionID, "")
 	if err != nil {
 		slog.Warn("preview load history", "session_id", sessionID, "err", err)
 		entries = nil

@@ -512,7 +512,7 @@ func main() {
 				return json.Marshal(sessions)
 			})
 			conn.SetPreviewFunc(func(sessionID string) (json.RawMessage, error) {
-				entries, err := discovery.LoadHistory(claudeDir, sessionID)
+				entries, err := discovery.LoadHistory(claudeDir, sessionID, "")
 				if err != nil {
 					return json.Marshal([]cli.EventEntry{})
 				}

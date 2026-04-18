@@ -399,4 +399,10 @@ func (c *ReverseConn) markDisconnected() {
 		close(c.done)
 	}
 	c.closeMu.Unlock()
+
+	// Drop EventSink references so disconnected browser clients don't keep
+	// sinks live for the hub's 90s subscription TTL.
+	c.subMu.Lock()
+	clear(c.subs)
+	c.subMu.Unlock()
 }

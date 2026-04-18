@@ -240,7 +240,7 @@ func (p *Process) readLoop() {
 
 		var msg shimMsg
 		if err := json.Unmarshal(bytes.TrimSpace(line), &msg); err != nil {
-			slog.Debug("readLoop: skip unparseable shim message", "err", err)
+			slog.Warn("readLoop: skip unparseable shim message", "err", err, "size", len(line))
 			continue
 		}
 
@@ -249,7 +249,7 @@ func (p *Process) readLoop() {
 			p.lastSeq.Store(msg.Seq)
 			ev, _, err := p.protocol.ReadEvent(msg.Line)
 			if err != nil {
-				slog.Debug("readLoop: skip unparseable event", "err", err)
+				slog.Warn("readLoop: skip unparseable event", "err", err, "seq", msg.Seq)
 				continue
 			}
 			if ev.Type == "" {

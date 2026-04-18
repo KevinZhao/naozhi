@@ -34,12 +34,12 @@ type historyBlock struct {
 
 // LoadHistory finds and parses the JSONL for sessionID under claudeDir/projects/,
 // returning EventEntries for user and assistant messages.
-// If cwd is provided, the JSONL is located directly via the CWD-based path (O(1)).
-// Otherwise falls back to scanning all project directories.
-func LoadHistory(claudeDir, sessionID string, cwd ...string) ([]cli.EventEntry, error) {
+// If cwd is non-empty, the JSONL is located directly via the CWD-based path (O(1));
+// an empty cwd falls back to scanning all project directories.
+func LoadHistory(claudeDir, sessionID, cwd string) ([]cli.EventEntry, error) {
 	var path string
-	if len(cwd) > 0 && cwd[0] != "" {
-		candidate := filepath.Join(claudeDir, "projects", projDirName(cwd[0]), sessionID+".jsonl")
+	if cwd != "" {
+		candidate := filepath.Join(claudeDir, "projects", projDirName(cwd), sessionID+".jsonl")
 		if _, err := os.Stat(candidate); err == nil {
 			path = candidate
 		}
