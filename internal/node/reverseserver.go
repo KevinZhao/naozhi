@@ -3,13 +3,14 @@ package node
 import (
 	"crypto/subtle"
 	"log/slog"
-	"net"
 	"net/http"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/naozhi/naozhi/internal/config"
+	"github.com/naozhi/naozhi/internal/netutil"
+	"github.com/naozhi/naozhi/internal/ratelimit"
 	"golang.org/x/time/rate"
 )
 
@@ -31,47 +32,25 @@ type ReverseServer struct {
 	names map[string]string       // node_id → configured display_name
 	conns map[string]*ReverseConn // node_id → active connection
 
-	// wsLimiters is an internal per-IP rate limiter store for /ws-node connections.
+	// wsLimiter is an internal per-IP rate limiter store for /ws-node connections.
 	// Separate from the dashboard login limiter to prevent cross-endpoint interference.
-	wsLimiters   map[string]*wsNodeLimiterEntry
-	wsLimitersMu sync.Mutex
+	// Higher burst (10) than login (5) since machine-to-machine reconnects are bursty.
+	wsLimiter *ratelimit.Limiter
+
+	// trustedProxy enables X-Forwarded-For last-hop IP extraction for rate limiting.
+	// When true (ALB/CloudFront in front), per-IP limits apply to the real client,
+	// not the proxy's single IP.
+	trustedProxy bool
 
 	OnRegister   func(id string, conn *ReverseConn)
 	OnDeregister func(id string)
 }
 
-type wsNodeLimiterEntry struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
-}
-
-// wsNodeLimiterFor returns a per-IP rate limiter for ws-node connections.
-// Higher burst (10) than login (5) since machine-to-machine reconnects are bursty.
-func (s *ReverseServer) wsNodeLimiterFor(ip string) *rate.Limiter {
-	s.wsLimitersMu.Lock()
-	defer s.wsLimitersMu.Unlock()
-
-	if e, ok := s.wsLimiters[ip]; ok {
-		e.lastSeen = time.Now()
-		return e.limiter
-	}
-	// Evict stale entries when at capacity (1000 IPs)
-	if len(s.wsLimiters) >= 1000 {
-		cutoff := time.Now().Add(-10 * time.Minute)
-		for k, e := range s.wsLimiters {
-			if e.lastSeen.Before(cutoff) {
-				delete(s.wsLimiters, k)
-			}
-		}
-	}
-	l := rate.NewLimiter(rate.Every(5*time.Second), 10) // 10 burst, 1 per 5s sustained
-	s.wsLimiters[ip] = &wsNodeLimiterEntry{limiter: l, lastSeen: time.Now()}
-	return l
-}
-
 // NewReverseServer creates a server that accepts /ws-node connections.
 // auth is the reverse_nodes config from config.yaml.
-func NewReverseServer(auth map[string]config.ReverseNodeEntry) *ReverseServer {
+// trustedProxy enables X-Forwarded-For last-hop IP extraction so per-IP
+// rate limiting works correctly when deployed behind ALB/CloudFront.
+func NewReverseServer(auth map[string]config.ReverseNodeEntry, trustedProxy bool) *ReverseServer {
 	tokens := make(map[string]string, len(auth))
 	names := make(map[string]string, len(auth))
 	for id, e := range auth {
@@ -79,18 +58,30 @@ func NewReverseServer(auth map[string]config.ReverseNodeEntry) *ReverseServer {
 		names[id] = e.DisplayName
 	}
 	return &ReverseServer{
-		auth:       tokens,
-		names:      names,
-		conns:      make(map[string]*ReverseConn),
-		wsLimiters: make(map[string]*wsNodeLimiterEntry),
+		auth:  tokens,
+		names: names,
+		conns: make(map[string]*ReverseConn),
+		wsLimiter: ratelimit.New(ratelimit.Config{
+			Rate:  rate.Every(5 * time.Second), // 1 per 5s sustained
+			Burst: 10,                          // 10 burst
+		}),
+		trustedProxy: trustedProxy,
 	}
 }
 
 // ServeHTTP handles the /ws-node WebSocket endpoint.
 func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Per-IP rate limit to prevent token brute-force via rapid connect cycles.
-	ip, _, _ := net.SplitHostPort(r.RemoteAddr)
-	if ip != "" && !s.wsNodeLimiterFor(ip).Allow() {
+	// Uses trusted-proxy-aware client IP so ALB-fronted deployments limit the
+	// real caller, not the single ALB IP.
+	ip := netutil.ClientIP(r, s.trustedProxy)
+	// Fallback to a shared bucket if IP resolution failed so ratelimit's
+	// empty-key hard-reject doesn't 429 a legitimate client forever.
+	limitKey := ip
+	if limitKey == "" {
+		limitKey = "_unknown_"
+	}
+	if !s.wsLimiter.Allow(limitKey) {
 		http.Error(w, "too many requests", http.StatusTooManyRequests)
 		return
 	}
@@ -115,7 +106,7 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Generic error to avoid node_id enumeration.
 	expected, ok := s.auth[msg.NodeID]
 	if !ok || expected == "" || subtle.ConstantTimeCompare([]byte(expected), []byte(msg.Token)) != 1 {
-		slog.Warn("reverse node auth failed", "ip", r.RemoteAddr, "node_id", msg.NodeID)
+		slog.Warn("reverse node auth failed", "ip", ip, "node_id", msg.NodeID)
 		conn.WriteJSON(ReverseMsg{Type: "register_fail", Error: "auth failed"}) //nolint
 		conn.Close()
 		return
@@ -124,7 +115,10 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Auth succeeded — raise limit for RPC payloads (session responses, event batches).
 	conn.SetReadLimit(16 << 20) // 16 MB
 
-	// Use configured display name; fall back to what remote sent
+	// Use configured display name; fall back to what remote sent.
+	// Cap remote-supplied strings so a compromised worker cannot bloat the
+	// dashboard /api/sessions payload (defense-in-depth after token auth).
+	const maxLabel = 256
 	displayName := s.names[msg.NodeID]
 	if displayName == "" {
 		displayName = msg.DisplayName
@@ -132,10 +126,16 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if displayName == "" {
 		displayName = msg.NodeID
 	}
+	if len(displayName) > maxLabel {
+		displayName = displayName[:maxLabel]
+	}
 
 	remoteLabel := msg.Hostname
 	if remoteLabel == "" {
 		remoteLabel = r.RemoteAddr
+	}
+	if len(remoteLabel) > maxLabel {
+		remoteLabel = remoteLabel[:maxLabel]
 	}
 	rc := newReverseConn(msg.NodeID, displayName, remoteLabel, conn)
 	if err := conn.WriteJSON(ReverseMsg{Type: "registered"}); err != nil {
@@ -150,7 +150,7 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	s.conns[msg.NodeID] = rc
 	s.mu.Unlock()
 
-	slog.Info("reverse node registered", "node_id", msg.NodeID, "ip", r.RemoteAddr)
+	slog.Info("reverse node registered", "node_id", msg.NodeID, "ip", ip)
 
 	if s.OnRegister != nil {
 		s.OnRegister(msg.NodeID, rc)

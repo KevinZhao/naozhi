@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -70,12 +71,9 @@ func (p *Project) snapshotLight() *Project {
 }
 
 // IsPlannerKey returns true if the session key is a project planner key.
+// Format: "project:{name}:planner".
 func IsPlannerKey(key string) bool {
-	// Format: "project:{name}:planner"
-	if len(key) < len("project::planner") {
-		return false
-	}
-	return key[:8] == "project:" && key[len(key)-8:] == ":planner"
+	return strings.HasPrefix(key, "project:") && strings.HasSuffix(key, ":planner") && len(key) > len("project::planner")
 }
 
 const configDir = ".naozhi"
@@ -106,6 +104,8 @@ func loadConfig(projectPath string) (ProjectConfig, error) {
 }
 
 // saveConfigToPath atomically writes a ProjectConfig to the given path.
+// Uses write-tmp → fsync → rename so a crash mid-write cannot truncate
+// the on-disk config and lose ChatBindings.
 func saveConfigToPath(path string, cfg ProjectConfig) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -118,11 +118,26 @@ func saveConfigToPath(path string, cfg ProjectConfig) error {
 	}
 
 	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0600); err != nil {
+	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
+	if err != nil {
 		return fmt.Errorf("write project config: %w", err)
 	}
+	if _, err := f.Write(data); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("write project config: %w", err)
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("sync project config: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close project config: %w", err)
+	}
 	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp) // clean up on rename failure
+		_ = os.Remove(tmp)
 		return fmt.Errorf("rename project config: %w", err)
 	}
 	return nil

@@ -180,17 +180,18 @@ type TranscribeConfig struct {
 
 // Load reads and parses a YAML config file.
 func Load(path string) (*Config, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("read config: %w", err)
-	}
-
-	// Reject config file if readable by group or others (contains secrets).
+	// Reject config file if readable by group or others BEFORE reading its
+	// contents into memory — the file may contain secrets (app_secret, tokens).
 	if fi, statErr := os.Stat(path); statErr == nil {
 		if fi.Mode()&0o044 != 0 {
 			return nil, fmt.Errorf("config file %s is group/world-readable (mode %04o); restrict with: chmod 0600 %s",
 				path, fi.Mode().Perm(), path)
 		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read config: %w", err)
 	}
 
 	// Expand ${VAR} environment variables
@@ -438,11 +439,17 @@ func (c *Config) ParseCollectDelay() time.Duration {
 }
 
 // QueueMaxDepth returns the resolved queue max depth.
+// Negative values are clamped to 0 (disables queuing, degrades to drop+wait)
+// so a typo in config can't produce a negative cap that breaks Enqueue's
+// `len(msgs) >= maxDepth` guard.
 func (c *Config) QueueMaxDepth() int {
 	if c.Session.Queue.MaxDepth == nil {
 		return 20
 	}
-	return *c.Session.Queue.MaxDepth
+	if d := *c.Session.Queue.MaxDepth; d > 0 {
+		return d
+	}
+	return 0
 }
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)

@@ -36,13 +36,14 @@ type wsClient struct {
 	done             chan struct{}
 	doneOnce         sync.Once
 	dropped          atomic.Int64 // messages dropped due to full send buffer
+	uploadOwner      string       // upload-store owner key derived from auth cookie (or IP in no-token mode)
 }
 
 func (c *wsClient) closeDone() {
 	c.doneOnce.Do(func() { close(c.done) })
 }
 
-func (c *wsClient) SendJSON(v interface{}) {
+func (c *wsClient) SendJSON(v any) {
 	data, err := json.Marshal(v)
 	if err != nil {
 		return

@@ -9,9 +9,9 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/ratelimit"
 	"golang.org/x/time/rate"
 )
 
@@ -19,54 +19,35 @@ import (
 type AuthHandlers struct {
 	dashboardToken string
 	cookieSecret   []byte
-	loginLimiters  loginLimiterStore
-	trustedProxy   bool // trust X-Forwarded-For for client IP extraction
-}
-
-// limiterEntry wraps a rate limiter with a last-seen timestamp for TTL eviction.
-type limiterEntry struct {
-	limiter  *rate.Limiter
-	lastSeen time.Time
-}
-
-// loginLimiterStore is a bounded, TTL-evicting store for per-IP rate limiters.
-// A mutex-protected map is used in place of sync.Map for precise size control.
-type loginLimiterStore struct {
-	mu      sync.Mutex
-	entries map[string]*limiterEntry
+	// loginLimiter is an O(1) LRU-backed per-IP limiter. At 10k attacking IPs
+	// the previous two-pass O(n) scan was done under a single mutex and could
+	// block legitimate logins; the ratelimit package does insertion, LRU
+	// eviction and TTL reset in constant time.
+	loginLimiter *ratelimit.Limiter
+	trustedProxy bool // trust X-Forwarded-For for client IP extraction
 }
 
 const maxLoginLimiters = 10000
 
-// loginLimiterFor returns a per-IP rate limiter (5 attempts per minute).
-// When the map is at capacity, entries not seen in the last 10 minutes are
-// evicted before inserting a new one; legitimate IPs keep their limiter state.
-func (a *AuthHandlers) loginLimiterFor(ip string) *rate.Limiter {
-	a.loginLimiters.mu.Lock()
-	defer a.loginLimiters.mu.Unlock()
+// newLoginLimiter returns the shared per-IP login rate limiter used by both
+// the HTTP /api/auth/login endpoint and WebSocket auth.
+func newLoginLimiter() *ratelimit.Limiter {
+	return ratelimit.New(ratelimit.Config{
+		Rate:    rate.Every(12 * time.Second), // 5 attempts per minute
+		Burst:   5,
+		MaxKeys: maxLoginLimiters,
+		TTL:     10 * time.Minute,
+	})
+}
 
-	if e, ok := a.loginLimiters.entries[ip]; ok {
-		e.lastSeen = time.Now()
-		return e.limiter
+// loginAllow reports whether the given IP is allowed one more login attempt.
+// Empty IPs share a single bucket so back-pressure is preserved when client
+// IP resolution fails.
+func (a *AuthHandlers) loginAllow(ip string) bool {
+	if ip == "" {
+		ip = unknownIPKey
 	}
-
-	// Evict stale entries before inserting a new one when the map is full.
-	if len(a.loginLimiters.entries) >= maxLoginLimiters {
-		cutoff := time.Now().Add(-10 * time.Minute)
-		for k, e := range a.loginLimiters.entries {
-			if e.lastSeen.Before(cutoff) {
-				delete(a.loginLimiters.entries, k)
-			}
-		}
-	}
-
-	limiter := rate.NewLimiter(rate.Every(12*time.Second), 5)
-	// Hard cap: if eviction didn't free space, return an unsaved limiter.
-	if len(a.loginLimiters.entries) >= maxLoginLimiters {
-		return limiter
-	}
-	a.loginLimiters.entries[ip] = &limiterEntry{limiter: limiter, lastSeen: time.Now()}
-	return limiter
+	return a.loginLimiter.Allow(ip)
 }
 
 // cookieMAC returns an HMAC-derived value used as the auth cookie value.
@@ -138,7 +119,7 @@ func (a *AuthHandlers) isSecure(r *http.Request) bool {
 
 func (a *AuthHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ip := a.clientIP(r)
-	if !a.loginLimiterFor(ip).Allow() {
+	if !a.loginAllow(ip) {
 		w.Header().Set("Content-Type", "application/json")
 		w.Header().Set("Retry-After", "60")
 		w.WriteHeader(http.StatusTooManyRequests)

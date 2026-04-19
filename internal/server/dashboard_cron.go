@@ -2,9 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
-	"strings"
 
 	"github.com/naozhi/naozhi/internal/cron"
 )
@@ -138,7 +138,11 @@ func (h *CronHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	j, err := h.scheduler.DeleteJobByID(id)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusNotFound)
+		if errors.Is(err, cron.ErrJobNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
 		return
 	}
 
@@ -163,7 +167,11 @@ func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := h.scheduler.PauseJobByID(req.ID); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		if errors.Is(err, cron.ErrJobNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
 		return
 	}
 
@@ -188,7 +196,11 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := h.scheduler.ResumeJobByID(req.ID); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		if errors.Is(err, cron.ErrJobNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
 		return
 	}
 
@@ -217,7 +229,7 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.scheduler.TriggerNow(req.ID); err != nil {
-		if strings.Contains(err.Error(), "no job found") {
+		if errors.Is(err, cron.ErrJobNotFound) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 		} else {
 			http.Error(w, err.Error(), http.StatusBadRequest)

@@ -252,10 +252,7 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 
 // LastPromptSummary returns the summary of the most recent "user" entry.
 func (l *EventLog) LastPromptSummary() string {
-	if v := l.lastPromptSummary.Load(); v != nil {
-		return v.(string)
-	}
-	return ""
+	return loadAtomicString(&l.lastPromptSummary)
 }
 
 // LastEntryOfType scans backward through the ring buffer and returns the most
@@ -274,8 +271,17 @@ func (l *EventLog) LastEntryOfType(typ string) EventEntry {
 
 // LastActivitySummary returns the summary of the most recent "tool_use" or "thinking" entry.
 func (l *EventLog) LastActivitySummary() string {
-	if v := l.lastActivitySummary.Load(); v != nil {
-		return v.(string)
+	return loadAtomicString(&l.lastActivitySummary)
+}
+
+// loadAtomicString returns the stored string or "" on nil/wrong type, guarding
+// callers from a panic if the Value is accidentally stored with a non-string
+// type in a future refactor.
+func loadAtomicString(v *atomic.Value) string {
+	if raw := v.Load(); raw != nil {
+		if s, ok := raw.(string); ok {
+			return s
+		}
 	}
 	return ""
 }

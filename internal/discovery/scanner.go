@@ -593,12 +593,18 @@ func LookupSummaries(claudeDir string, sessions map[string]string) map[string]st
 			setCachedSummary(indexPath, mtime, idx)
 		}
 
-		// sids is typically small (1-5); linear scan beats map allocation.
+		// Build a lookup set once per project: large project directories may
+		// have 100s of entries and multi-concurrent sids, so O(entries×sids)
+		// scaling hurts. Map build + O(1) membership is faster once sids > ~3.
+		sidSet := make(map[string]struct{}, len(sids))
+		for _, s := range sids {
+			sidSet[s] = struct{}{}
+		}
 		for _, e := range idx.Entries {
 			if e.Summary == "" {
 				continue
 			}
-			if slices.Contains(sids, e.SessionID) {
+			if _, ok := sidSet[e.SessionID]; ok {
 				result[e.SessionID] = e.Summary
 			}
 		}
@@ -631,18 +637,16 @@ func setCachedSummary(indexPath string, mtime int64, idx sessionsIndex) {
 // LastPrompt) of already-discovered sessions in place.  It uses the same
 // caches as Scan, so repeated calls for unchanged JSONL/index files are cheap
 // (os.Stat + cache hit).  Returns true if any field changed.
+//
+// RefreshDynamic deliberately does NOT advance promptCache/summaryCache
+// generations — Scan is the sole authority for aging. Advancing here would
+// double-tick gen when Scan and RefreshDynamic run in the same cycle,
+// halving the effective cache lifetime (entries evicted after 1 cycle
+// instead of 2) and triggering repeated JSONL parses.
 func RefreshDynamic(claudeDir string, sessions []DiscoveredSession) bool {
 	if claudeDir == "" || len(sessions) == 0 {
 		return false
 	}
-
-	// Advance cache generations (same as Scan) so entries stay fresh.
-	promptCache.Lock()
-	promptCache.generation++
-	promptCache.Unlock()
-	summaryCache.Lock()
-	summaryCache.generation++
-	summaryCache.Unlock()
 
 	// Batch-lookup summaries.
 	workspaces := make(map[string]string, len(sessions))

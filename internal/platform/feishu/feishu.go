@@ -62,9 +62,12 @@ type Feishu struct {
 	cancel  context.CancelFunc
 	done    chan struct{}
 	wg      sync.WaitGroup // tracks in-flight message handler goroutines
-	hookSem    chan struct{}  // limits concurrent webhook handler goroutines
-	startMu    sync.Mutex
-	started    bool
+	hookSem chan struct{}  // limits concurrent webhook handler goroutines
+	startMu sync.Mutex
+	started bool
+
+	// cleanupWg tracks the cleanupNonces goroutine so Stop() can wait it out.
+	cleanupWg sync.WaitGroup
 
 	// Replay protection: stores "ts:nonce" -> expiry unix timestamp.
 	seenNonces sync.Map
@@ -81,13 +84,21 @@ func New(cfg Config, transcriber transcribe.Service) *Feishu {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	f := &Feishu{cfg: cfg, mode: mode, baseURL: "https://open.feishu.cn", transcriber: transcriber, hookSem: make(chan struct{}, 20), stopCtx: ctx, stopCancel: cancel}
-	go f.cleanupNonces(ctx)
+	f.cleanupWg.Add(1)
+	go func() {
+		defer f.cleanupWg.Done()
+		f.cleanupNonces(ctx)
+	}()
 	return f
 }
 
 // cleanupNonces periodically removes expired entries from seenNonces.
 // Runs until ctx is cancelled (i.e. until Stop() is called).
-const nonceTTL = 10 * time.Minute
+//
+// Aligned with verifyTimestamp's 5-minute freshness window: a request older
+// than 5 min is rejected by timestamp verification, so holding nonces beyond
+// that window just bloats the map without any replay-defense value.
+const nonceTTL = 5 * time.Minute
 
 func (f *Feishu) cleanupNonces(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
@@ -97,7 +108,11 @@ func (f *Feishu) cleanupNonces(ctx context.Context) {
 		case <-ticker.C:
 			now := time.Now().Unix()
 			f.seenNonces.Range(func(k, v any) bool {
-				if v.(int64) < now {
+				// Defensive type assertion: sync.Map has no compile-time type
+				// safety, so guard against accidental cross-type Store from a
+				// future refactor. Drop malformed entries so the map recovers.
+				ts, ok := v.(int64)
+				if !ok || ts < now {
 					f.seenNonces.Delete(k)
 				}
 				return true
@@ -136,6 +151,12 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 		slog.Info("feishu using websocket mode (no public IP needed)")
 		return f.startWebSocket()
 	}
+	// Webhook mode exposes a public HTTP endpoint. Refuse to start if neither
+	// VerificationToken nor EncryptKey is configured — without either, any
+	// caller on the open internet can inject forged events.
+	if f.cfg.VerificationToken == "" && f.cfg.EncryptKey == "" {
+		return fmt.Errorf("feishu webhook mode requires verification_token or encrypt_key to be configured")
+	}
 	slog.Info("feishu using webhook mode")
 	return nil
 }
@@ -159,7 +180,8 @@ func (f *Feishu) Stop() error {
 			slog.Warn("feishu websocket stop timed out")
 		}
 	}
-	f.wg.Wait() // always wait for in-flight message handlers to finish
+	f.wg.Wait()        // always wait for in-flight message handlers to finish
+	f.cleanupWg.Wait() // wait for cleanupNonces goroutine to exit
 	return nil
 }
 
@@ -483,7 +505,13 @@ func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) err
 
 // getAccessToken returns a valid tenant access token, refreshing if needed.
 // Uses singleflight to merge concurrent refresh requests.
-func (f *Feishu) getAccessToken(ctx context.Context) (string, error) {
+//
+// The caller's ctx is intentionally ignored for the refresh request: when
+// many request goroutines collide on an expired token, singleflight merges
+// them into one HTTP call; honouring any single caller's cancellation would
+// abort the shared refresh and fail every merged caller. Instead we bound
+// the refresh with f.stopCtx + 10s so Stop() still aborts it promptly.
+func (f *Feishu) getAccessToken(_ context.Context) (string, error) {
 	// Fast path: RLock to check cached token
 	f.tokenMu.RLock()
 	if f.accessToken != "" && time.Now().Before(f.tokenExpiry) {
@@ -512,7 +540,13 @@ func (f *Feishu) getAccessToken(ctx context.Context) (string, error) {
 			return nil, fmt.Errorf("marshal token request: %w", err)
 		}
 
-		refreshCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		// Derive the refresh context from the long-lived stopCtx rather than
+		// the caller's ctx so one caller's cancellation does not torpedo the
+		// singleflight-merged refresh for all concurrent callers. Stop() still
+		// aborts by cancelling stopCtx. singleflight shares the returned
+		// (v, err) value with late callers — they never see refreshCtx — so
+		// the `defer cancel()` here only bounds the in-flight HTTP request.
+		refreshCtx, cancel := context.WithTimeout(f.stopCtx, 10*time.Second)
 		defer cancel()
 
 		req, err := http.NewRequestWithContext(refreshCtx, "POST",
@@ -551,7 +585,15 @@ func (f *Feishu) getAccessToken(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return v.(string), nil
+	// Defensive type assertion: singleflight.Do returns `any` and the callback
+	// path already returns a string, but guard against accidental refactor
+	// regression (e.g., returning a struct wrapper) rather than panicking
+	// on hot auth path.
+	token, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("unexpected token type %T", v)
+	}
+	return token, nil
 }
 
 // verifySignature verifies the request signature (for encrypt_key mode).

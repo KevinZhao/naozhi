@@ -80,7 +80,11 @@ type ManagedSession struct {
 	cliName     string       // "claude-code", "kiro" — set at creation from Wrapper
 	cliVersion  string       // semver from --version — set at creation from Wrapper
 	deathReason atomic.Value // string: why process died, empty if alive
-	totalCost   float64      // cached cost when process is nil
+	// totalCost is written exactly once during NewRouter() when restoring
+	// from store, and read only when loadProcess() returns nil (which only
+	// happens for sessions restored from disk that have not yet been re-spawned).
+	// Since it is effectively immutable after construction, no sync is needed.
+	totalCost float64
 
 	// persistedHistory stores event entries that survive process restarts.
 	// Populated by InjectHistory and carried over when the process is replaced.
@@ -510,19 +514,31 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 			break
 		}
 	}
-	if prompt != "" && s.lastPrompt.Load() == nil {
+	if prompt != "" && loadStringOrEmpty(&s.lastPrompt) == "" {
 		s.lastPrompt.Store(prompt)
 	}
-	if activity != "" && s.lastActivity.Load() == nil {
+	if activity != "" && loadStringOrEmpty(&s.lastActivity) == "" {
 		s.lastActivity.Store(activity)
 	}
+}
+
+// loadStringOrEmpty returns the stored string or "" if never stored / stored as "".
+// Avoids the pitfall where `atomic.Value.Load() == nil` misreports "already set"
+// after an empty string was stored.
+func loadStringOrEmpty(v *atomic.Value) string {
+	if x := v.Load(); x != nil {
+		if s, ok := x.(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // extractLastPromptFromProcess scans the attached process's event log to populate
 // lastPrompt and lastActivity when they haven't been set yet (e.g. after shim reconnect
 // where events were injected directly into the process, bypassing InjectHistory).
 func (s *ManagedSession) extractLastPromptFromProcess() {
-	if s.lastPrompt.Load() != nil && s.lastActivity.Load() != nil {
+	if loadStringOrEmpty(&s.lastPrompt) != "" && loadStringOrEmpty(&s.lastActivity) != "" {
 		return
 	}
 	p := s.loadProcess()
@@ -543,10 +559,10 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 			break
 		}
 	}
-	if prompt != "" && s.lastPrompt.Load() == nil {
+	if prompt != "" && loadStringOrEmpty(&s.lastPrompt) == "" {
 		s.lastPrompt.Store(prompt)
 	}
-	if activity != "" && s.lastActivity.Load() == nil {
+	if activity != "" && loadStringOrEmpty(&s.lastActivity) == "" {
 		s.lastActivity.Store(activity)
 	}
 }

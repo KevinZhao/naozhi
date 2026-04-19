@@ -3,10 +3,11 @@ package discovery
 import (
 	"bufio"
 	"bytes"
+	"cmp"
 	"encoding/json"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -94,9 +95,9 @@ func RecentSessions(claudeDir string, limit int, maxAge time.Duration, excludeSe
 		}
 	}
 
-	// Sort by last_active desc (most recent first)
-	sort.Slice(all, func(i, j int) bool {
-		return all[i].LastActive > all[j].LastActive
+	// Sort by last_active desc (most recent first).
+	slices.SortFunc(all, func(a, b RecentSession) int {
+		return cmp.Compare(b.LastActive, a.LastActive)
 	})
 
 	// Deferred prompt extraction: only read JSONL for sessions that will be returned.

@@ -155,8 +155,19 @@ func (r *wsRelay) ensureConnected() error {
 }
 
 func (r *wsRelay) connect() error {
-	wsURL := strings.Replace(r.node.URL, "http://", "ws://", 1)
-	wsURL = strings.Replace(wsURL, "https://", "wss://", 1)
+	// Use CutPrefix to avoid mid-URL mismatches: a host like
+	// "example.com/path-with-http://" would otherwise be mangled. Order
+	// matters — CutPrefix("https://") must come first since "http://" is
+	// also a prefix of "https://".
+	var wsURL string
+	switch {
+	case strings.HasPrefix(r.node.URL, "https://"):
+		wsURL = "wss://" + strings.TrimPrefix(r.node.URL, "https://")
+	case strings.HasPrefix(r.node.URL, "http://"):
+		wsURL = "ws://" + strings.TrimPrefix(r.node.URL, "http://")
+	default:
+		return fmt.Errorf("relay %s: unsupported URL scheme: %s", r.node.ID, r.node.URL)
+	}
 	wsURL += "/ws"
 
 	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
@@ -191,8 +202,9 @@ func (r *wsRelay) connect() error {
 	})
 
 	r.mu.Lock()
-	if r.conn != nil {
-		// Another goroutine already connected
+	if r.conn != nil || r.closed {
+		// Another goroutine already connected, or Close() ran during our dial.
+		// Either way, drop this conn rather than store it and spawn goroutines.
 		r.mu.Unlock()
 		conn.Close()
 		return nil

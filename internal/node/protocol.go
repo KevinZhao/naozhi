@@ -22,15 +22,16 @@ type ServerMsg struct {
 
 // ClientMsg is a message sent from the WebSocket client.
 type ClientMsg struct {
-	Type      string `json:"type"`                // auth, subscribe, unsubscribe, send, interrupt, ping
-	Token     string `json:"token,omitempty"`     // auth token
-	Key       string `json:"key,omitempty"`       // session key
-	Text      string `json:"text,omitempty"`      // message text (send)
-	ID        string `json:"id,omitempty"`        // client-generated correlation ID
-	After     int64  `json:"after,omitempty"`     // unix ms timestamp for subscribe history
-	Node      string `json:"node,omitempty"`      // target node (empty = local)
-	Workspace string `json:"workspace,omitempty"` // workspace override for new sessions
-	ResumeID  string `json:"resume_id,omitempty"` // session ID to resume (recent sessions)
+	Type      string   `json:"type"`                // auth, subscribe, unsubscribe, send, interrupt, ping
+	Token     string   `json:"token,omitempty"`     // auth token
+	Key       string   `json:"key,omitempty"`       // session key
+	Text      string   `json:"text,omitempty"`      // message text (send)
+	ID        string   `json:"id,omitempty"`        // client-generated correlation ID
+	After     int64    `json:"after,omitempty"`     // unix ms timestamp for subscribe history
+	Node      string   `json:"node,omitempty"`      // target node (empty = local)
+	Workspace string   `json:"workspace,omitempty"` // workspace override for new sessions
+	ResumeID  string   `json:"resume_id,omitempty"` // session ID to resume (recent sessions)
+	FileIDs   []string `json:"file_ids,omitempty"`  // pre-uploaded image IDs from /api/sessions/upload
 }
 
 // ReverseMsg is the framing message for the reverse-connect WebSocket protocol.

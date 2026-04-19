@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"container/list"
 	"sync"
 	"time"
 
@@ -33,15 +34,40 @@ type MessageQueue struct {
 	queues       map[string]*sessionQueue
 	maxDepth     int
 	collectDelay time.Duration
+
+	// dropNotifyTimes is a bounded per-key cooldown map for notifies that
+	// happen when no sessionQueue exists (the drop path with maxDepth<=0
+	// or the window between Discard and a new owner). Keeping per-key state
+	// avoids cross-user interference where one chat's notify silences
+	// another's; the map is capped to dropNotifyMaxKeys via LRU eviction.
+	//
+	// Implementation: a classic list+map LRU. List front holds the most
+	// recent insertion/update; back holds the least recent. This yields O(1)
+	// insert, refresh, and evict — critical since ShouldNotify runs under
+	// mu on the IM hot path.
+	dropNotifyLRU   *list.List               // element.Value = *dropNotifyEntry
+	dropNotifyIndex map[string]*list.Element // key → list element
 }
+
+// dropNotifyEntry is a single LRU entry: key + last notify nanos.
+type dropNotifyEntry struct {
+	key string
+	ts  int64
+}
+
+// dropNotifyMaxKeys bounds dropNotifyTimes; oldest entry is evicted on insert
+// when at capacity. 1024 covers realistic IM concurrency with minimal memory.
+const dropNotifyMaxKeys = 1024
 
 // NewMessageQueue creates a MessageQueue.
 // maxDepth <= 0 disables queuing (degrades to drop+wait, same as old Guard).
 func NewMessageQueue(maxDepth int, collectDelay time.Duration) *MessageQueue {
 	return &MessageQueue{
-		queues:       make(map[string]*sessionQueue),
-		maxDepth:     maxDepth,
-		collectDelay: collectDelay,
+		queues:          make(map[string]*sessionQueue),
+		maxDepth:        maxDepth,
+		collectDelay:    collectDelay,
+		dropNotifyLRU:   list.New(),
+		dropNotifyIndex: make(map[string]*list.Element),
 	}
 }
 
@@ -79,9 +105,14 @@ func (q *MessageQueue) Enqueue(key string, msg QueuedMsg) (isOwner, enqueued boo
 		return false, false, 0
 	}
 
-	// Evict oldest if at capacity.
+	// Evict oldest if at capacity. Shift in place rather than `sq.msgs[1:]`
+	// so the underlying array stays bounded at cap=maxDepth instead of
+	// drifting forward indefinitely; also zeroes the evicted slot so
+	// any held image data can be GC'd.
 	if len(sq.msgs) >= q.maxDepth {
-		sq.msgs = sq.msgs[1:]
+		copy(sq.msgs, sq.msgs[1:])
+		sq.msgs[len(sq.msgs)-1] = QueuedMsg{}
+		sq.msgs = sq.msgs[:len(sq.msgs)-1]
 	}
 	sq.msgs = append(sq.msgs, msg)
 	return false, true, 0
@@ -159,16 +190,43 @@ func (q *MessageQueue) CollectDelay() time.Duration {
 // ShouldNotify returns true if enough time (3s) has passed since the last
 // enqueue notification for key. Prevents spamming users with "message received"
 // confirmations when they send many messages in quick succession.
+//
+// Must not leak map entries: the drop-path cooldown uses a bounded list+map
+// LRU so chat A's notify does not silence chat B's without unbounded growth
+// on the maxDepth<=0 code path. All operations here are O(1).
 func (q *MessageQueue) ShouldNotify(key string) bool {
 	const cooldown = int64(3 * time.Second)
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	sq := q.getOrCreate(key)
 	now := time.Now().UnixNano()
-	if now-sq.lastNotifyNs < cooldown {
-		return false
+	if sq, ok := q.queues[key]; ok {
+		if now-sq.lastNotifyNs < cooldown {
+			return false
+		}
+		sq.lastNotifyNs = now
+		return true
 	}
-	sq.lastNotifyNs = now
+	// No queue entry — per-key cooldown via bounded LRU.
+	if elem, ok := q.dropNotifyIndex[key]; ok {
+		entry := elem.Value.(*dropNotifyEntry)
+		if now-entry.ts < cooldown {
+			return false
+		}
+		entry.ts = now
+		// Refresh LRU ordering — most-recently used to front.
+		q.dropNotifyLRU.MoveToFront(elem)
+		return true
+	}
+	// Insert new entry; evict the LRU tail if at capacity.
+	if q.dropNotifyLRU.Len() >= dropNotifyMaxKeys {
+		if oldest := q.dropNotifyLRU.Back(); oldest != nil {
+			entry := oldest.Value.(*dropNotifyEntry)
+			delete(q.dropNotifyIndex, entry.key)
+			q.dropNotifyLRU.Remove(oldest)
+		}
+	}
+	elem := q.dropNotifyLRU.PushFront(&dropNotifyEntry{key: key, ts: now})
+	q.dropNotifyIndex[key] = elem
 	return true
 }
 

@@ -2,6 +2,7 @@ package cron
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -16,6 +17,10 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 )
+
+// ErrJobNotFound is returned by lookup/mutation APIs when no cron job matches.
+// Callers should use errors.Is(err, cron.ErrJobNotFound) instead of string matching.
+var ErrJobNotFound = errors.New("cron: job not found")
 
 // SchedulerConfig holds configuration for the cron scheduler.
 type SchedulerConfig struct {
@@ -51,6 +56,12 @@ type Scheduler struct {
 	stopCtx       context.Context
 	stopCancel    context.CancelFunc
 	onExecute     OnExecuteFunc
+
+	// triggerWG tracks goroutines spawned by TriggerNow so Stop() can wait
+	// for them to finish. The scheduled entries are already drained by
+	// s.cron.Stop(), but manual TriggerNow fires a goroutine outside the
+	// cron scheduler's purview.
+	triggerWG sync.WaitGroup
 }
 
 // SetOnExecute registers a callback invoked after each cron job execution.
@@ -60,10 +71,19 @@ func (s *Scheduler) SetOnExecute(fn OnExecuteFunc) {
 	s.mu.Unlock()
 }
 
+// maxJobsHardCap caps user-configurable MaxJobs to prevent accidental
+// overload. 500 jobs ≈ 500 tick timers; well within robfig/cron's tested
+// scale, but higher values tend to indicate a config mistake.
+const maxJobsHardCap = 500
+
 // NewScheduler creates a scheduler. Call Start() to begin.
 func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	if cfg.MaxJobs <= 0 {
 		cfg.MaxJobs = 50
+	}
+	if cfg.MaxJobs > maxJobsHardCap {
+		slog.Warn("cron max_jobs exceeds hard cap, clamping", "requested", cfg.MaxJobs, "cap", maxJobsHardCap)
+		cfg.MaxJobs = maxJobsHardCap
 	}
 	if cfg.ExecTimeout <= 0 {
 		cfg.ExecTimeout = 5 * time.Minute
@@ -95,10 +115,12 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 // Start loads persisted jobs and starts the cron scheduler.
 func (s *Scheduler) Start() error {
 	s.mu.Lock()
+	var restoredJobs []*Job
 	if restored := loadJobs(s.storePath); restored != nil {
 		for _, j := range restored {
 			if j.Paused {
 				s.jobs[j.ID] = j
+				restoredJobs = append(restoredJobs, j)
 				continue
 			}
 			if err := s.registerJob(j); err != nil {
@@ -106,19 +128,37 @@ func (s *Scheduler) Start() error {
 				continue
 			}
 			s.jobs[j.ID] = j
+			restoredJobs = append(restoredJobs, j)
 		}
 	}
 	s.mu.Unlock()
+	// Register dashboard stub sessions after releasing the lock; the router's
+	// notifyChange callback must not re-enter scheduler state.
+	for _, j := range restoredJobs {
+		s.registerStub(j)
+	}
 	s.cron.Start()
 	slog.Info("cron scheduler started", "jobs", len(s.jobs))
 	return nil
 }
 
-// Stop halts the scheduler and saves state.
+// registerStub creates (or refreshes) a router session entry for the job so it
+// appears in the dashboard workspace list. Safe to call without a router (tests).
+func (s *Scheduler) registerStub(j *Job) {
+	if s.router == nil {
+		return
+	}
+	s.router.RegisterCronStub("cron:"+j.ID, j.WorkDir, j.Prompt)
+}
+
+// Stop halts the scheduler and saves state. It waits for both scheduled jobs
+// (drained by s.cron.Stop) and any TriggerNow-spawned goroutines before
+// returning, so callers can safely tear down the router afterwards.
 func (s *Scheduler) Stop() {
 	s.stopCancel()
 	ctx := s.cron.Stop()
 	<-ctx.Done()
+	s.triggerWG.Wait()
 	s.mu.Lock()
 	snap := s.snapshotJobs()
 	s.mu.Unlock()
@@ -171,6 +211,7 @@ func (s *Scheduler) AddJob(j *Job) error {
 	s.mu.Unlock()
 
 	s.saveSnapshot(snap)
+	s.registerStub(j)
 	return nil
 }
 
@@ -208,7 +249,7 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	j, ok := s.jobs[id]
 	if !ok {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("no job found with id %q", id)
+		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 	}
 
 	if j.entryID != 0 {
@@ -232,7 +273,7 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 	j, ok := s.jobs[id]
 	if !ok {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("no job found with id %q", id)
+		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 	}
 	if j.Paused {
 		s.mu.Unlock()
@@ -258,7 +299,7 @@ func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 	j, ok := s.jobs[id]
 	if !ok {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("no job found with id %q", id)
+		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 	}
 	if !j.Paused {
 		s.mu.Unlock()
@@ -289,7 +330,7 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	j, ok := s.jobs[id]
 	if !ok {
 		s.mu.Unlock()
-		return fmt.Errorf("no job found with id %q", id)
+		return fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 	}
 	if j.Prompt != "" {
 		s.mu.Unlock()
@@ -430,7 +471,7 @@ func (s *Scheduler) TriggerNow(id string) error {
 	j, ok := s.jobs[id]
 	if !ok {
 		s.mu.Unlock()
-		return fmt.Errorf("no job found with id %q", id)
+		return fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 	}
 	if j.Paused {
 		s.mu.Unlock()
@@ -450,13 +491,21 @@ func (s *Scheduler) TriggerNow(id string) error {
 		// and this lookup, causing Entry() to return a zero-value with nil WrappedJob.
 		entry := s.cron.Entry(entryID)
 		if entry.WrappedJob != nil {
-			go entry.WrappedJob.Run()
+			s.triggerWG.Add(1)
+			go func() {
+				defer s.triggerWG.Done()
+				entry.WrappedJob.Run()
+			}()
 		} else {
 			// Entry was concurrently deleted — skip execution.
 			slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "id", id, "entry_id", entryID)
 		}
 	} else {
-		go s.execute(j)
+		s.triggerWG.Add(1)
+		go func() {
+			defer s.triggerWG.Done()
+			s.execute(j)
+		}()
 	}
 	return nil
 }
@@ -531,11 +580,29 @@ func (s *Scheduler) execute(j *Job) {
 	}
 }
 
+// runeByteOffset returns the byte offset that contains maxRunes runes.
+// truncated is true iff s has more than maxRunes runes.
+// Zero allocations, unlike `[]rune(s)[:n]`.
+func runeByteOffset(s string, maxRunes int) (int, bool) {
+	i, count := 0, 0
+	for i < len(s) {
+		if count == maxRunes {
+			return i, true
+		}
+		_, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		count++
+	}
+	return i, false
+}
+
 // recordResult persists the last execution result on the job and invokes the onExecute callback.
 func (s *Scheduler) recordResult(j *Job, result, errMsg string) {
 	const maxStoredRunes = 4 * 1024
-	if utf8.RuneCountInString(result) > maxStoredRunes {
-		result = string([]rune(result)[:maxStoredRunes]) + "…[truncated]"
+	// Byte-level rune decode: avoids the two O(n) rune-slice allocations that
+	// `string([]rune(result)[:maxStoredRunes])` performs on a 4KB-result path.
+	if byteOffset, truncated := runeByteOffset(result, maxStoredRunes); truncated {
+		result = result[:byteOffset] + "…[truncated]"
 	}
 	s.mu.Lock()
 	j.LastRunAt = time.Now()
@@ -613,7 +680,7 @@ func (s *Scheduler) findByPrefix(idPrefix, plat, chatID string) (*Job, error) {
 	}
 	switch len(matches) {
 	case 0:
-		return nil, fmt.Errorf("no job found with prefix %q", idPrefix)
+		return nil, fmt.Errorf("%w: prefix %q", ErrJobNotFound, idPrefix)
 	case 1:
 		return matches[0], nil
 	default:

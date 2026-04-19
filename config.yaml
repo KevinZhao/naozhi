@@ -39,7 +39,7 @@ agent_commands:
 cron:
   store_path: "~/.naozhi/cron_jobs.json"
   max_jobs: 50
-  execution_timeout: "300s"
+  execution_timeout: "3600s"
 
 platforms:
   feishu:

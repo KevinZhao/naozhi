@@ -12,11 +12,13 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"strings"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -84,22 +86,39 @@ type sendParams struct {
 	ResumeID  string
 }
 
+// sendAckStatus describes the immediate ack status for a queued send.
+//   - "accepted": caller became the owner; message is processing now.
+//   - "queued":   session was busy; message is queued behind the active turn.
+type sendAckStatus string
+
+const (
+	sendAckAccepted sendAckStatus = "accepted"
+	sendAckQueued   sendAckStatus = "queued"
+)
+
 // sessionSend validates and dispatches a send request.
-// Returns (true, nil) if the request was a /clear or /new reset.
-// Returns (false, err) if validation failed (workspace forbidden, etc.).
-// Returns (false, nil) if accepted — a background goroutine handles the send.
+// Returns (true, "", nil) if the request was a /clear or /new reset.
+// Returns (false, "", err) if validation failed (workspace forbidden, etc.).
+// Returns (false, "accepted", nil) when we owned the send turn.
+// Returns (false, "queued",   nil) when the session was busy and the message
+// was enqueued behind the active turn — a background drain loop will process it
+// after the current turn completes, coalescing with any other queued messages.
 //
-// onAsyncError is called from the goroutine if GetOrCreate or guard timeout
-// fails; it may be nil (HTTP path has no back-channel after 202).
-func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, error) {
+// onAsyncError is called from the owner goroutine if GetOrCreate fails; it may
+// be nil (HTTP path has no back-channel after ack).
+func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAckStatus, error) {
 	key := p.Key
 
-	// Handle /clear and /new — CLI built-in doesn't work in stream-json
+	// Handle /clear and /new — CLI built-in doesn't work in stream-json.
+	// Also clear any pending queue so stale follow-ups don't hit the fresh session.
 	trimmed := strings.TrimSpace(p.Text)
 	if trimmed == "/clear" || trimmed == "/new" {
+		if h.queue != nil {
+			h.queue.Discard(key)
+		}
 		h.router.Reset(key)
 		h.BroadcastSessionsUpdate()
-		return true, nil
+		return true, "", nil
 	}
 
 	// Workspace validation
@@ -107,7 +126,7 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, error)
 	if p.Workspace != "" {
 		wsPath, err := validateWorkspace(p.Workspace, h.allowedRoot)
 		if err != nil {
-			return false, err
+			return false, "", err
 		}
 		validatedWorkspace = wsPath
 		if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
@@ -124,7 +143,113 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, error)
 		h.router.RegisterForResume(key, p.ResumeID, ws, "")
 	}
 
-	// Guard acquire/interrupt
+	// Fallback to legacy guard path when no queue is configured (tests, headless).
+	if h.queue == nil {
+		return h.sessionSendLegacy(p, onAsyncError)
+	}
+
+	qm := dispatch.QueuedMsg{
+		Text:      p.Text,
+		Images:    p.Images,
+		EnqueueAt: time.Now(),
+	}
+	isOwner, _, gen := h.queue.Enqueue(key, qm)
+	if !isOwner {
+		// Busy — message is queued (or dropped if MaxDepth disabled queuing, which
+		// for the dashboard we treat as queued anyway since the owner will eventually
+		// drain). The owner's ownerLoop will pick it up on its next drain tick.
+		slog.Info("send: message queued (session busy)", "key", key)
+		return false, sendAckQueued, nil
+	}
+
+	// I'm the owner — spawn the drain loop.
+	h.sendWG.Add(1)
+	go h.ownerLoop(key, gen, qm, onAsyncError)
+	return false, sendAckAccepted, nil
+}
+
+// ownerLoop processes the first send turn and then drains any messages that
+// arrived while the turn was running, coalescing them into a single follow-up
+// turn. Mirrors dispatch.Dispatcher.ownerLoop but integrates with the hub's
+// broadcast + session routing.
+//
+// gen is the queue generation at enqueue time. If Discard (e.g., /new) bumps
+// it mid-flight, DoneOrDrain returns nil and this loop exits cleanly.
+func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyncError func(string)) {
+	defer h.sendWG.Done()
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
+			if h.queue != nil {
+				h.queue.Discard(key)
+			}
+		}
+	}()
+	defer h.router.NotifyIdle()
+
+	h.runTurn(key, first.Text, first.Images, onAsyncError)
+
+	// Drain loop: after each turn, wait collectDelay then drain.
+	collectTimer := time.NewTimer(h.queue.CollectDelay())
+	defer collectTimer.Stop()
+	for {
+		select {
+		case <-h.ctx.Done():
+			// Discard clears msgs and resets busy=false + bumps gen so a
+			// fresh owner can be spawned by the next Enqueue after restart;
+			// without this, the key would remain "busy" forever and queued
+			// messages would never be processed.
+			h.queue.Discard(key)
+			return
+		case <-collectTimer.C:
+		}
+
+		queued := h.queue.DoneOrDrain(key, gen)
+		if queued == nil {
+			return // empty or generation mismatch — stop.
+		}
+
+		text, images := dispatch.CoalesceMessages(queued)
+		slog.Info("send: processing queued messages", "key", key, "count", len(queued), "merged_len", len(text))
+		// onAsyncError only applies to the first turn (one ack per request);
+		// subsequent coalesced turns log failures without a back-channel.
+		h.runTurn(key, text, images, nil)
+		collectTimer.Reset(h.queue.CollectDelay())
+	}
+}
+
+// runTurn executes one send turn: GetOrCreate + sendWithBroadcast.
+func (h *Hub) runTurn(key, text string, images []cli.ImageData, onAsyncError func(string)) {
+	sendStart := time.Now()
+	opts := buildSessionOpts(key, h.agents, h.projectMgr)
+	sess, status, err := h.router.GetOrCreate(h.ctx, key, opts)
+	if err != nil {
+		slog.Error("send: get session", "key", key, "err", err)
+		if onAsyncError != nil {
+			onAsyncError(err.Error())
+		}
+		return
+	}
+	if status != session.SessionExisting {
+		slog.Info("send: session spawned", "key", key, "status", status, "elapsed", time.Since(sendStart).Round(time.Millisecond))
+	}
+
+	if _, err := h.sendWithBroadcast(h.ctx, key, sess, text, images, nil); err != nil {
+		slog.Error("send: send", "key", key, "err", err)
+	} else if h.scheduler != nil && strings.HasPrefix(key, "cron:") {
+		if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, "cron:"), text); err != nil {
+			slog.Warn("send: set cron prompt", "key", key, "err", err)
+		}
+	}
+	slog.Info("send: turn complete", "key", key, "elapsed", time.Since(sendStart).Round(time.Millisecond))
+}
+
+// sessionSendLegacy keeps the pre-queue guard/interrupt behavior for code paths
+// that don't wire a MessageQueue (primarily tests). Production always configures
+// a queue via Server.New.
+func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError func(string)) (bool, sendAckStatus, error) {
+	key := p.Key
+
 	acquired := h.guard.TryAcquire(key)
 	needInterrupt := !acquired
 	if needInterrupt {
@@ -132,10 +257,10 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, error)
 		slog.Info("send: interrupted running session", "key", key)
 	}
 
-	// Background send
 	text, images := p.Text, p.Images
+	h.sendWG.Add(1)
 	go func() {
-		sendStart := time.Now()
+		defer h.sendWG.Done()
 		if needInterrupt {
 			if !h.guard.AcquireTimeout(h.ctx, key, 2*time.Second) {
 				slog.Error("send: interrupt timed out", "key", key)
@@ -147,29 +272,8 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, error)
 		}
 		defer h.guard.Release(key)
 		defer h.router.NotifyIdle()
-
-		opts := buildSessionOpts(key, h.agents, h.projectMgr)
-		sess, status, err := h.router.GetOrCreate(h.ctx, key, opts)
-		if err != nil {
-			slog.Error("send: get session", "key", key, "err", err)
-			if onAsyncError != nil {
-				onAsyncError(err.Error())
-			}
-			return
-		}
-		if status != session.SessionExisting {
-			slog.Info("send: session spawned", "key", key, "status", status, "elapsed", time.Since(sendStart).Round(time.Millisecond))
-		}
-
-		if _, err := h.sendWithBroadcast(h.ctx, key, sess, text, images, nil); err != nil {
-			slog.Error("send: send", "key", key, "err", err)
-		} else if h.scheduler != nil && strings.HasPrefix(key, "cron:") {
-			if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, "cron:"), text); err != nil {
-				slog.Warn("send: set cron prompt", "key", key, "err", err)
-			}
-		}
-		slog.Info("send: turn complete", "key", key, "elapsed", time.Since(sendStart).Round(time.Millisecond))
+		h.runTurn(key, text, images, onAsyncError)
 	}()
 
-	return false, nil
+	return false, sendAckAccepted, nil
 }

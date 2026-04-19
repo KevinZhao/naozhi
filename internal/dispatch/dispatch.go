@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -243,7 +244,7 @@ func (d *Dispatcher) ownerLoop(
 ) {
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("ownerLoop panic", "key", key, "panic", r)
+			slog.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
 			d.queue.Discard(key)
 		}
 	}()

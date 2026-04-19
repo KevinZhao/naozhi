@@ -1,12 +1,13 @@
 package project
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -116,8 +117,8 @@ func (m *Manager) All() []*Project {
 	for _, p := range m.projects {
 		result = append(result, p.snapshot())
 	}
-	sort.Slice(result, func(i, j int) bool {
-		return result[i].Name < result[j].Name
+	slices.SortFunc(result, func(a, b *Project) int {
+		return cmp.Compare(a.Name, b.Name)
 	})
 	return result
 }

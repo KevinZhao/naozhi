@@ -25,28 +25,31 @@ func saveJobs(path string, jobs map[string]*Job) error {
 
 	data, err := json.Marshal(entries)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal cron store: %w", err)
 	}
 	// Atomic write: write to temp file, fsync, then rename
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
-		return err
+		return fmt.Errorf("open cron store %s: %w", tmp, err)
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
 		_ = os.Remove(tmp)
-		return err
+		return fmt.Errorf("write cron store %s: %w", tmp, err)
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
 		_ = os.Remove(tmp)
-		return err
+		return fmt.Errorf("sync cron store %s: %w", tmp, err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close cron store %s: %w", tmp, err)
+	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
-		return err
+		return fmt.Errorf("rename cron store to %s: %w", path, err)
 	}
 	return nil
 }

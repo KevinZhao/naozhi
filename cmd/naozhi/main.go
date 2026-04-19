@@ -96,7 +96,10 @@ func writeClaudeSettingsOverride(serverAddr string) string {
 		return ""
 	}
 	path := filepath.Join(dir, "claude-settings.json")
-	if err := os.WriteFile(path, out, 0600); err != nil {
+	// Atomic write: claude reads this file on startup; a truncated write
+	// could cause it to launch with empty config and disable hook filtering,
+	// risking feedback loops.
+	if err := writeFileAtomic(path, out, 0600); err != nil {
 		return ""
 	}
 	return path
@@ -460,7 +463,7 @@ func main() {
 	// Configure reverse-connecting nodes (NAT traversal)
 	var rns *node.ReverseServer
 	if len(cfg.ReverseNodes) > 0 {
-		rns = node.NewReverseServer(cfg.ReverseNodes)
+		rns = node.NewReverseServer(cfg.ReverseNodes, cfg.Server.TrustedProxy)
 		slog.Info("reverse node auth configured", "nodes", len(cfg.ReverseNodes))
 	}
 

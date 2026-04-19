@@ -16,6 +16,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -31,17 +32,24 @@ type Hub struct {
 	dashToken   string
 	cookieMAC   string // HMAC-derived cookie value (different from dashToken)
 	guard       *session.Guard
+	queue       *dispatch.MessageQueue // per-key FIFO queue for dashboard sends
 	nodes       map[string]node.Conn
 	nodesMu     *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
 	projectMgr  *project.Manager
 	scheduler   *cron.Scheduler // optional, for cron prompt auto-save
+	uploadStore *uploadStore    // optional, for resolving WS-sent file_ids
 	allowedRoot string          // workspace paths must be under this root (empty = unrestricted)
 	ctx         context.Context // cancelled on Shutdown to stop in-flight sends
 	cancel      context.CancelFunc
+	// sendWG tracks background send goroutines (ownerLoop, sessionSendLegacy)
+	// so Shutdown can wait for them to exit before returning. Without this,
+	// goroutines may read router/session after Shutdown tears them down.
+	sendWG sync.WaitGroup
 
 	// Per-IP rate limiter for WebSocket auth attempts — prevents token brute-force
 	// via repeated connect/auth/disconnect cycles that bypass HTTP login rate limits.
-	wsAuthLimiter func(ip string) *rate.Limiter
+	// Returns true when the IP is allowed; false signals rate-limit hit.
+	wsAuthLimiter func(ip string) bool
 
 	trustedProxy bool // trust X-Forwarded-For for client IP extraction
 	upgrader     websocket.Upgrader
@@ -58,12 +66,13 @@ type HubOptions struct {
 	DashToken     string
 	CookieMAC     string
 	Guard         *session.Guard
+	Queue         *dispatch.MessageQueue
 	Nodes         map[string]node.Conn
 	NodesMu       *sync.RWMutex
 	ProjectMgr    *project.Manager
 	AllowedRoot   string
 	TrustedProxy  bool
-	WSAuthLimiter func(ip string) *rate.Limiter
+	WSAuthLimiter func(ip string) bool
 }
 
 // Pre-marshaled static messages to avoid repeated JSON serialization.
@@ -88,6 +97,7 @@ func NewHub(opts HubOptions) *Hub {
 		dashToken:     opts.DashToken,
 		cookieMAC:     opts.CookieMAC,
 		guard:         opts.Guard,
+		queue:         opts.Queue,
 		nodes:         opts.Nodes,
 		nodesMu:       opts.NodesMu,
 		projectMgr:    opts.ProjectMgr,
@@ -107,6 +117,11 @@ func NewHub(opts HubOptions) *Hub {
 			if err != nil {
 				return false
 			}
+			// When behind a trusted proxy (e.g. CloudFront), the upstream Host
+			// is rewritten to the origin hostname, so r.Host no longer matches
+			// the browser-visible Origin. Fall back to X-Forwarded-Host, which
+			// the trusted proxy controls — trusted_proxy=true is the operator's
+			// explicit statement that this header can be trusted.
 			host := r.Host
 			if h.trustedProxy {
 				if fwd := r.Header.Get("X-Forwarded-Host"); fwd != "" {
@@ -124,8 +139,24 @@ func NewHub(opts HubOptions) *Hub {
 // SetScheduler sets the cron scheduler for auto-saving prompts on first send.
 func (h *Hub) SetScheduler(s *cron.Scheduler) { h.scheduler = s }
 
+// SetUploadStore wires the upload store used by WS sends to resolve file_ids
+// that were pre-uploaded via POST /api/sessions/upload.
+func (h *Hub) SetUploadStore(s *uploadStore) { h.uploadStore = s }
+
 // HandleUpgrade upgrades an HTTP connection to WebSocket.
 func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
+	// Per-IP rate limit at the upgrade boundary so a single IP cannot burn
+	// through the 500 global connection budget via rapid connect/disconnect
+	// cycles. Reuses the same login limiter wiring (5 attempts/min burst).
+	if h.wsAuthLimiter != nil {
+		// loginAllow maps "" to a shared unknown-IP bucket, so do not skip
+		// the check on empty IP — that would let malformed RemoteAddr bypass
+		// the per-IP budget entirely.
+		if !h.wsAuthLimiter(clientIP(r, h.trustedProxy)) {
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
+	}
 	// Reject upgrades when too many connections are open (prevent resource exhaustion
 	// from unauthenticated connections allocating goroutines + channel buffers).
 	h.mu.RLock()
@@ -141,7 +172,10 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		slog.Debug("ws upgrade failed", "err", err)
 		return
 	}
-	conn.SetReadLimit(512 * 1024) // 512 KB max message size
+	// Read-limit is owned by readPump (wsMaxMessageSize). Previous code also
+	// set it here with a different value (512 KB), which masked the real cap
+	// since readPump re-applies 256 KB on first iteration — remove the
+	// redundant setter to keep a single source of truth.
 	ip := clientIP(r, h.trustedProxy)
 	c := &wsClient{
 		conn:             conn,
@@ -156,9 +190,13 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	if h.dashToken == "" {
 		c.authenticated.Store(true)
+		c.uploadOwner = ip // unauthenticated: owner = client IP (matches uploadOwner fallback)
 	} else if cookie, err := r.Cookie(authCookieName); err == nil {
 		if h.cookieMAC != "" && subtle.ConstantTimeCompare([]byte(cookie.Value), []byte(h.cookieMAC)) == 1 {
 			c.authenticated.Store(true)
+			// Must use the same derivation as HTTP uploadOwner so files
+			// uploaded on one transport can be claimed on the other.
+			c.uploadOwner = ownerKeyFromCookie(cookie.Value)
 		}
 	}
 	h.register(c)
@@ -198,7 +236,7 @@ func (h *Hub) unregister(c *wsClient) {
 
 func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 	// Per-IP rate limit to prevent brute-force via rapid connect/auth/disconnect cycles.
-	if h.wsAuthLimiter != nil && !h.wsAuthLimiter(c.remoteIP).Allow() {
+	if h.wsAuthLimiter != nil && !h.wsAuthLimiter(c.remoteIP) {
 		c.SendJSON(node.ServerMsg{Type: "auth_fail", Error: "too many attempts"})
 		return
 	}
@@ -343,15 +381,37 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "key is required"})
 		return
 	}
-	if msg.Text == "" {
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "text is required"})
+	if msg.Text == "" && len(msg.FileIDs) == 0 {
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "text or files required"})
+		return
+	}
+	if len(msg.FileIDs) > 10 {
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "too many files (max 10)"})
 		return
 	}
 
+	// Resolve pre-uploaded file IDs — ownership-checked to prevent cross-user theft.
+	var images []cli.ImageData
+	if len(msg.FileIDs) > 0 {
+		if h.uploadStore == nil {
+			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "uploads not configured"})
+			return
+		}
+		for _, fid := range msg.FileIDs {
+			img := h.uploadStore.Take(fid, c.uploadOwner)
+			if img == nil {
+				c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "file not found or expired: " + fid})
+				return
+			}
+			images = append(images, *img)
+		}
+	}
+
 	capturedID, capturedKey := msg.ID, key
-	_, err := h.sessionSend(sendParams{
+	reset, status, err := h.sessionSend(sendParams{
 		Key:       key,
 		Text:      msg.Text,
+		Images:    images,
 		Workspace: msg.Workspace,
 		ResumeID:  msg.ResumeID,
 	}, func(errMsg string) {
@@ -361,7 +421,14 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: err.Error()})
 		return
 	}
-	c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "accepted", Key: key})
+	if reset {
+		// /clear or /new — HTTP path reports "reset"; keep the WS path in sync so
+		// clients can uniformly distinguish reset from accepted/queued turns
+		// instead of seeing an empty Status string.
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "reset", Key: key})
+		return
+	}
+	c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: string(status), Key: key})
 }
 
 func (h *Hub) handleInterrupt(c *wsClient, msg node.ClientMsg) {
@@ -435,6 +502,8 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 	for range 12 {
 		select {
 		case <-c.done:
+			return false, nil
+		case <-h.ctx.Done():
 			return false, nil
 		case <-ticker.C:
 		}
@@ -600,6 +669,10 @@ func (h *Hub) DroppedMessages() int64 {
 func (h *Hub) Shutdown() {
 	h.cancel() // cancel in-flight send goroutines
 
+	// Wait for background send goroutines (ownerLoop, sessionSendLegacy)
+	// to exit before we tear down routers/connections they may still touch.
+	h.sendWG.Wait()
+
 	// Stop debounce timer
 	h.debounceMu.Lock()
 	if h.debounceTimer != nil {
@@ -678,7 +751,12 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 	// is guaranteed to exist when the browser receives the ack and triggers
 	// a subscribe. Sending the ack eagerly (before the RPC) caused a race
 	// where the subscribe arrived at the remote before session creation.
+	//
+	// Track via sendWG so Shutdown waits for in-flight RPC+broadcast to
+	// finish before tearing down node connections and client maps.
+	h.sendWG.Add(1)
 	go func() {
+		defer h.sendWG.Done()
 		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
 		defer cancel()
 		capturedID, capturedKey := msg.ID, msg.Key

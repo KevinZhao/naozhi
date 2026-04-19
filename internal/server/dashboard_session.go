@@ -121,6 +121,8 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		"version":           h.router.Version(),
 		"uptime":            time.Since(h.startedAt).Round(time.Second).String(),
 		"backend":           h.backendTag,
+		"cli_name":          h.router.CLIName(),
+		"cli_version":       h.router.CLIVersion(),
 		"max_procs":         h.router.MaxProcs(),
 		"default_workspace": h.router.DefaultWorkspace(),
 		"workspace_id":      h.workspaceID,

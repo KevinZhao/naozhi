@@ -59,28 +59,31 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 
 	data, err := json.Marshal(entries)
 	if err != nil {
-		return err
+		return fmt.Errorf("marshal session store: %w", err)
 	}
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
-		return err
+		return fmt.Errorf("open session store %s: %w", tmp, err)
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
 		_ = os.Remove(tmp)
-		return err
+		return fmt.Errorf("write session store %s: %w", tmp, err)
 	}
 	// Fsync before rename to prevent data loss on power failure.
 	if err := f.Sync(); err != nil {
 		f.Close()
 		_ = os.Remove(tmp)
-		return err
+		return fmt.Errorf("sync session store %s: %w", tmp, err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close session store %s: %w", tmp, err)
+	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
-		return err
+		return fmt.Errorf("rename session store to %s: %w", path, err)
 	}
 	return nil
 }
@@ -191,7 +194,10 @@ func saveKnownIDs(storePath string, ids map[string]bool) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("sync known IDs %s: %w", tmp, err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close known IDs %s: %w", tmp, err)
+	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename known IDs to %s: %w", path, err)
@@ -264,7 +270,10 @@ func saveWorkspaceOverrides(storePath string, overrides map[string]string) error
 		_ = os.Remove(tmp)
 		return fmt.Errorf("sync workspace overrides %s: %w", tmp, err)
 	}
-	f.Close()
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("close workspace overrides %s: %w", tmp, err)
+	}
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename workspace overrides to %s: %w", path, err)

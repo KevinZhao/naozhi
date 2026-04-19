@@ -441,9 +441,20 @@ func (h *ShimHandle) ReadMsg() (ServerMsg, error) {
 	return msg, nil
 }
 
+// drainReplayTimeout caps the total time we wait for a shim to finish replaying
+// buffered messages. A wedged shim must not block ReconnectShims (which is
+// serial across all persisted sessions) — without this cap, one unresponsive
+// shim could stall the entire naozhi startup.
+const drainReplayTimeout = 20 * time.Second
+
 // DrainReplay reads and returns all replay messages until replay_done.
 // Must be called immediately after connect, before starting the live read loop.
+// Applies a total deadline to the conn so a wedged shim cannot block forever;
+// the deadline is cleared before returning on success.
 func (h *ShimHandle) DrainReplay() ([]ServerMsg, error) {
+	_ = h.Conn.SetReadDeadline(time.Now().Add(drainReplayTimeout))
+	defer func() { _ = h.Conn.SetReadDeadline(time.Time{}) }()
+
 	var replays []ServerMsg
 	for {
 		msg, err := h.ReadMsg()

@@ -74,13 +74,23 @@ var _ platform.RunnablePlatform = (*Feishu)(nil)
 // --- Start/Stop lifecycle tests ---
 
 func TestStartAlreadyStarted(t *testing.T) {
-	f := New(Config{AppID: "id", ConnectionMode: "webhook"}, nil)
+	// Webhook mode requires verification_token or encrypt_key — supply one
+	// so Start() reaches the idempotency guard we're exercising here.
+	f := New(Config{AppID: "id", ConnectionMode: "webhook", VerificationToken: "test-token"}, nil)
 	noop := func(context.Context, platform.IncomingMessage) {}
 	if err := f.Start(noop); err != nil {
 		t.Fatalf("first Start() error = %v", err)
 	}
 	if err := f.Start(noop); err == nil {
 		t.Error("second Start() should return error")
+	}
+}
+
+func TestStartWebhookRejectsMissingAuth(t *testing.T) {
+	f := New(Config{AppID: "id", ConnectionMode: "webhook"}, nil)
+	noop := func(context.Context, platform.IncomingMessage) {}
+	if err := f.Start(noop); err == nil {
+		t.Fatal("Start() should refuse webhook mode without token or encrypt_key")
 	}
 }
 

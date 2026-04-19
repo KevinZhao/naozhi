@@ -199,7 +199,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		auth: &AuthHandlers{
 			dashboardToken: opts.DashboardToken,
 			cookieSecret:   cookieSecret,
-			loginLimiters:  loginLimiterStore{entries: make(map[string]*limiterEntry)},
+			loginLimiter:   newLoginLimiter(),
 			trustedProxy:   opts.TrustedProxy,
 		},
 		cronH: &CronHandlers{
@@ -377,10 +377,11 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	srv := &http.Server{
-		Handler:      s.mux,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 60 * time.Second,
-		IdleTimeout:  120 * time.Second,
+		Handler:           s.mux,
+		ReadHeaderTimeout: 5 * time.Second, // Slowloris defense
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	// Notify caller that the listener is bound and ready to accept connections.

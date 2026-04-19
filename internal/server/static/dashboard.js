@@ -26,6 +26,8 @@ let sessionCounter = 0;
 let availableAgents = ['general'];
 let defaultWorkspace = '';
 let projectsData = []; // [{name, path, node}] from API
+let defaultCLIName = '';
+let defaultCLIVersion = '';
 let localWsInfo = { name: '', sys: '' };
 const sessionWorkspaces = {};
 const sessionNodes = {};
@@ -65,6 +67,8 @@ async function fetchSessions() {
     if (data.stats.agents) availableAgents = data.stats.agents;
     if (data.stats.default_workspace) defaultWorkspace = data.stats.default_workspace;
     if (data.stats.projects) projectsData = data.stats.projects;
+    if (data.stats.cli_name) defaultCLIName = data.stats.cli_name;
+    if (data.stats.cli_version) defaultCLIVersion = data.stats.cli_version;
     historySessionsData = data.history_sessions || [];
 
     // Track which keys the backend knows about
@@ -118,6 +122,7 @@ async function fetchSessions() {
       const sd = sessionsData[sKey];
       if (sd) updateMainState(sd.state, sd.death_reason);
     }
+    if (selectedKey) updateHeaderCLI();
   } catch (e) {
     console.error('fetchSessions:', e);
   }
@@ -383,7 +388,7 @@ function sessionCardHtml(s) {
   const nodeBadge = isMultiNode() && sNode !== 'local'
     ? '<span class="sc-node" style="background:' + nodeColor(sNode) + '">' + esc(sNode) + '</span>' : '';
 
-  const dismissBtn = '<button class="btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove">&times;</button>';
+  const dismissBtn = '<button type="button" class="btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove" aria-label="Remove session">&times;</button>';
 
   const typeTag = s.source === 'terminal' ? sessionTypeTag(s.cli_name, s.entrypoint) : '';
   const agentCount = s.subagents ? s.subagents.length : 0;
@@ -394,7 +399,7 @@ function sessionCardHtml(s) {
     typeTag +
     agentBadge;
 
-  return '<div class="' + cls + '" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="selectSession(this.dataset.key,this.dataset.node)">' +
+  return '<div class="' + cls + '" role="listitem" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" tabindex="0" aria-label="' + escAttr(prompt + ' · ' + s.state) + '" onclick="selectSession(this.dataset.key,this.dataset.node)" onkeydown="sessionCardKey(event)">' +
     dismissBtn +
     icon +
     '<div class="sc-body">' +
@@ -405,6 +410,15 @@ function sessionCardHtml(s) {
       '<div class="sc-meta">' + metaHtml + '</div>' +
     '</div>' +
   '</div>';
+}
+
+// Keyboard activation for role=listitem session cards.
+function sessionCardKey(e) {
+  if (e.key !== 'Enter' && e.key !== ' ') return;
+  if (e.target.closest('.btn-dismiss')) return;
+  e.preventDefault();
+  const card = e.currentTarget;
+  selectSession(card.dataset.key, card.dataset.node || 'local');
 }
 
 function resumeRecentSession(sessionId) {
@@ -458,7 +472,7 @@ async function previewRecentSession(expectedKey, sessionId) {
   }
 }
 
-const STATUS_LABELS = { off: 'offline', connecting: 'connecting...', authenticating: 'authenticating...', connected: 'connected', disconnected: 'polling', disconnected_retry: 'reconnecting...' };
+const STATUS_LABELS = { off: 'offline', connecting: 'connecting...', authenticating: 'authenticating...', connected: 'connected', disconnected: 'HTTP fallback', disconnected_retry: 'reconnecting...' };
 const REMOTE_LABELS = { ok: 'connected', error: 'error', offline: 'offline', unreachable: 'unreachable' };
 const VALID_DOT_CLASSES = { ok: 'ok', error: 'error', offline: 'offline', connecting: 'connecting', off: 'off', connected: 'connected', disconnected: 'disconnected', authenticating: 'authenticating' };
 
@@ -472,7 +486,7 @@ function updateStatusBar() {
   // Distinguish short reconnect vs stable polling mode
   const statusKey = (wsm.state === WS_STATES.DISCONNECTED && wsm.backoff > 8000) ? 'disconnected' : (wsm.state === WS_STATES.DISCONNECTED ? 'disconnected_retry' : wsm.state);
   const localLabel = localName + ' \u00b7 ' + (STATUS_LABELS[statusKey] || wsm.state);
-  const dotKey = statusKey === 'disconnected' ? 'connecting' : wsm.state; // polling = yellow dot
+  const dotKey = statusKey === 'disconnected' ? 'connecting' : wsm.state; // HTTP fallback = yellow dot
   const localSys = localWsInfo.sys || '';
 
   let html = '<div class="status-row">' +
@@ -487,8 +501,11 @@ function updateStatusBar() {
   for (const id of nodeIds) {
     const nd = nodesData[id];
     const name = (nd.display_name || id);
-    // When local WS is down, remote status is unknown — show as unreachable
-    const status = wsUp ? (nd.status || 'offline') : 'unreachable';
+    // Remote status comes from the server's last node health snapshot (via
+    // /api/sessions polling or WS push), so it stays meaningful even while
+    // the local WS briefly reconnects. Only flip to "unreachable" when we
+    // have no recent snapshot at all.
+    const status = nd.status || (wsUp ? 'offline' : 'unreachable');
     const dotCls = VALID_DOT_CLASSES[status] || 'offline';
     const label = REMOTE_LABELS[status] || status;
     const addr = nd.remote_addr || '';
@@ -636,8 +653,10 @@ function renderMainShell() {
   const displayName = s.summary || s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyParts[keyParts.length - 1] || selectedKey || '';
 
   // Detail line: left = CLI name + version, right = cost (hidden for kiro)
-  const cliLabel = s.cli_name ? esc(s.cli_name) + (s.cli_version ? ' v' + esc(s.cli_version) : '') : '';
-  const showCost = s.cli_name !== 'kiro';
+  const effCLIName = s.cli_name || defaultCLIName;
+  const effCLIVersion = s.cli_version || defaultCLIVersion;
+  const cliLabel = effCLIName ? esc(effCLIName) + (effCLIVersion ? ' v' + esc(effCLIVersion) : '') : '';
+  const showCost = effCLIName !== 'kiro';
   const cost = s.total_cost || 0;
   const costText = '$' + (cost < 0.01 && cost > 0 ? cost.toFixed(4) : cost.toFixed(2));
   const costClass = 'detail-cost' + (cost >= 1 ? ' high-cost' : cost > 0 ? ' has-cost' : '');
@@ -653,15 +672,15 @@ function renderMainShell() {
       '</div>' +
       '</div>' +
     '</div>' +
-    '<div class="events" id="events-scroll">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">loading events\u2026</div>' : '') + '</div>' +
+    '<div class="events" id="events-scroll" role="log" aria-live="polite" aria-relevant="additions">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">loading events\u2026</div>' : '') + '</div>' +
     '<div class="nav-pill" id="nav-pill">' +
       '<button onclick="navMsg(\'prev\')" id="nav-prev" title="previous user message (Alt+\u2191)">&#x25B2;</button>' +
       '<span class="nav-counter" id="nav-counter" onclick="navShowList()" title="click to list all"></span>' +
       '<button onclick="navMsg(\'next\')" id="nav-next" title="next user message (Alt+\u2193)">&#x25BC;</button>' +
     '</div>' +
-    '<div class="running-banner" id="running-banner" style="display:none">' +
+    '<div class="running-banner" id="running-banner" style="display:none" role="status" aria-live="polite">' +
       '<div class="rb-tool-row">' +
-        '<span class="running-status"><span class="running-dot"></span><span id="tool-activity">Working...</span></span>' +
+        '<span class="running-status"><span class="running-dot" aria-hidden="true"></span><span id="tool-activity">Working...</span></span>' +
         '<span class="rb-elapsed" id="rb-elapsed"></span>' +
       '</div>' +
       '<div class="rb-thinking-summary" id="rb-thinking-summary" style="display:none"></div>' +
@@ -756,7 +775,7 @@ function appendEvents(events) {
   if (empty) empty.remove();
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   events.forEach(e => {
-    if (e.type === 'tool_use' || e.type === 'result' || e.type === 'agent' || e.type === 'task_start' || e.type === 'task_progress' || e.type === 'task_done') return;
+    if (isInternalEvent(e)) return;
     // Deduplicate: skip events at or before the last rendered time
     if (e.time && e.time <= lastRenderedEventTime) return;
     const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h);
@@ -772,8 +791,14 @@ function appendEvents(events) {
   navUpdatePill();
 }
 
+// Event types that are tracked in the running banner but never rendered
+// as a chat bubble in the events stream. Kept as a single source of truth
+// so appendEvents / onHistory / preview-poll stay in sync.
+const INTERNAL_EVENT_TYPES = new Set(['tool_use','result','agent','task_start','task_progress','task_done']);
+function isInternalEvent(e) { return e && INTERNAL_EVENT_TYPES.has(e.type); }
+
 function eventHtml(e) {
-  if (e.type === 'tool_use' || e.type === 'result' || e.type === 'thinking' || e.type === 'agent' || e.type === 'task_start' || e.type === 'task_progress' || e.type === 'task_done') return '';
+  if (isInternalEvent(e) || e.type === 'thinking') return '';
   // Filter out Claude Code system XML injected as user messages
   const raw = e.detail || e.summary || '';
   if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return '';
@@ -814,8 +839,25 @@ function eventHtml(e) {
 
 // --- Send message ---
 
+// Esc in the input: first press arms, second press (within 600ms) actually
+// interrupts the running turn. Prevents thumb-on-Esc misfires.
+let _lastEscAt = 0;
 function handleKey(e) {
-  if (e.key === 'Escape') { e.preventDefault(); interruptSession(); return; }
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    const sd = sessionsData[sid(selectedKey, selectedNode || 'local')];
+    const running = sd && sd.state === 'running';
+    if (!running) { _lastEscAt = 0; return; }
+    const now = Date.now();
+    if (now - _lastEscAt < 600) {
+      _lastEscAt = 0;
+      interruptSession();
+    } else {
+      _lastEscAt = now;
+      showToast('press Esc again to interrupt', 'warning', 1000);
+    }
+    return;
+  }
   if (e.key === 'Enter' && !e.shiftKey && !e.isComposing && Date.now() - lastCompositionEnd > 30) { e.preventDefault(); sendMessage(); }
 }
 
@@ -907,14 +949,29 @@ async function sendMessage() {
   const text = getMsgValue(input);
   if (!text && pendingFiles.length === 0) return;
 
+  // Block send while any attachment is still uploading or errored —
+  // we only reference file_ids on the server, so partial uploads would
+  // silently drop images. User can retry or remove the bad one.
+  if (pendingFiles.some(f => f.status === 'uploading')) {
+    showToast('images still uploading...');
+    return;
+  }
+  const failed = pendingFiles.filter(f => f.status === 'error');
+  if (failed.length > 0) {
+    showToast('upload failed: ' + (failed[0].error || 'unknown') + ' (remove or retry)');
+    return;
+  }
+  const fileIDs = pendingFiles.map(f => f.id).filter(Boolean);
+
   sending = true;
   const btn = document.getElementById('btn-send');
   if (btn) btn.classList.add('sending');
 
-  // WS path: send via WebSocket when connected and no files
-  if (wsm.isConnected() && pendingFiles.length === 0) {
+  // WS path: always preferred now — uploads already on server, only file_ids travel.
+  if (wsm.isConnected()) {
     const id = 'r' + (++wsm.sendCounter);
     const sendMsg = { type: 'send', key: selectedKey, text: text, id: id };
+    if (fileIDs.length > 0) sendMsg.file_ids = fileIDs;
     if (selectedNode && selectedNode !== 'local') sendMsg.node = selectedNode;
     if (sessionWorkspaces[selectedKey]) {
       sendMsg.workspace = sessionWorkspaces[selectedKey];
@@ -938,6 +995,7 @@ async function sendMessage() {
       }
       if (input) clearMsg(input);
       delete sessionDrafts[selectedKey];
+      clearPendingFiles();
       sending = false;
       if (btn) btn.classList.remove('sending');
       return;
@@ -945,38 +1003,22 @@ async function sendMessage() {
     // WS send failed, fall through to HTTP path below
   }
 
-  // HTTP POST fallback
+  // HTTP POST fallback — JSON only; files already on server.
   try {
-    const headers = {};
+    const headers = { 'Content-Type': 'application/json' };
     const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
 
-    let body;
-    if (pendingFiles.length > 0) {
-      const fd = new FormData();
-      fd.append('key', selectedKey);
-      if (selectedNode && selectedNode !== 'local') fd.append('node', selectedNode);
-      if (text) fd.append('text', text);
-      if (sessionWorkspaces[selectedKey]) {
-        fd.append('workspace', sessionWorkspaces[selectedKey]);
-        delete sessionWorkspaces[selectedKey];
-        delete sessionNodes[selectedKey];
-      }
-      pendingFiles.forEach(f => fd.append('files', f));
-      body = fd;
-    } else {
-      headers['Content-Type'] = 'application/json';
-      const payload = {key: selectedKey, text: text};
-      if (selectedNode && selectedNode !== 'local') payload.node = selectedNode;
-      if (sessionWorkspaces[selectedKey]) {
-        payload.workspace = sessionWorkspaces[selectedKey];
-        delete sessionWorkspaces[selectedKey];
-        delete sessionNodes[selectedKey];
-      }
-      body = JSON.stringify(payload);
+    const payload = { key: selectedKey, text: text };
+    if (fileIDs.length > 0) payload.file_ids = fileIDs;
+    if (selectedNode && selectedNode !== 'local') payload.node = selectedNode;
+    if (sessionWorkspaces[selectedKey]) {
+      payload.workspace = sessionWorkspaces[selectedKey];
+      delete sessionWorkspaces[selectedKey];
+      delete sessionNodes[selectedKey];
     }
 
-    const r = await fetch('/api/sessions/send', {method:'POST', headers, body});
+    const r = await fetch('/api/sessions/send', {method:'POST', headers, body: JSON.stringify(payload)});
 
     if (r.status === 401 || r.status === 403) {
       if (input) setMsgValue(input, text);
@@ -990,16 +1032,19 @@ async function sendMessage() {
     }
     if (!r.ok) {
       if (input) setMsgValue(input, text);
-      const d = await r.json().catch(() => ({}));
-      showToast(d.error || 'send failed: ' + r.status);
+      // Some error paths still write text/plain; fall back to text() so we
+      // always surface the real message instead of a generic "send failed".
+      const raw = await r.text().catch(() => '');
+      let msg = 'send failed: ' + r.status;
+      try { const j = JSON.parse(raw); if (j && j.error) msg = j.error; } catch (_) { if (raw) msg = raw; }
+      showToast(msg);
       return;
     }
 
     // Clear input only after confirmed success
     if (input) clearMsg(input);
     delete sessionDrafts[selectedKey];
-    pendingFiles = [];
-    renderFilePreviews();
+    clearPendingFiles();
 
     // Speed up polling when WS not connected
     if (!wsm.isConnected()) {
@@ -1019,6 +1064,12 @@ async function sendMessage() {
     sending = false;
     if (btn) btn.classList.remove('sending');
   }
+}
+
+function clearPendingFiles() {
+  pendingFiles.forEach(f => { if (f.blobUrl) URL.revokeObjectURL(f.blobUrl); });
+  pendingFiles = [];
+  renderFilePreviews();
 }
 
 // --- Running banner: tool activity + agent tracking ---
@@ -1467,10 +1518,30 @@ function navShowList() {
   attachNavScroll();
 })();
 
-// Keyboard shortcut: Alt+Up/Down
+// Keyboard shortcut: Alt+Up/Down for message nav, Alt+N for new session.
+// Cmd/Ctrl+N is left alone so the browser's "new window" still works.
 document.addEventListener('keydown', function(e) {
   if (e.altKey && e.key === 'ArrowUp') { e.preventDefault(); navMsg('prev'); }
   if (e.altKey && e.key === 'ArrowDown') { e.preventDefault(); navMsg('next'); }
+  if (e.altKey && (e.key === 'n' || e.key === 'N')) {
+    const tag = (e.target.tagName || '').toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+    e.preventDefault();
+    createNewSession();
+  }
+});
+
+// Global Esc: close open popovers (history / nav list) when no modal/input has focus.
+document.addEventListener('keydown', function(e) {
+  if (e.key !== 'Escape') return;
+  // Overlays with their own Esc trapFocus handling take precedence.
+  if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
+  const tag = (e.target.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+  let closed = false;
+  if (activePopover) { closeHistoryPopover(); closed = true; }
+  if (document.getElementById('nav-list-popover')) { navDismissPopover(); closed = true; }
+  if (closed) e.preventDefault();
 });
 
 // Keyboard shortcut: Cmd/Ctrl+1..9 — switch to Nth session in current project group
@@ -1556,35 +1627,130 @@ function updateSendButton(state) {
 }
 
 // --- File handling ---
+//
+// Each selected image is pre-uploaded via POST /api/sessions/upload as soon
+// as it's picked. pendingFiles holds {file, blobUrl, id, status, error}:
+//   status: 'uploading' | 'ready' | 'error' — 'ready' means a valid server-side
+//   file id is in `id` and can be referenced later via file_ids on send.
+// This decouples image transfer from /send, avoids the 105 MB multipart body
+// and 15s ReadTimeout, and lets one bad file fail without blocking the rest.
 
 function openFilePicker() { document.getElementById('file-input').click(); }
 
-function handleFiles(fileList) {
-  for (const f of fileList) {
-    if (!f.type.startsWith('image/')) continue;
-    if (f.size > 10 * 1024 * 1024) { showToast('file too large (max 10MB)'); continue; }
-    if (pendingFiles.length >= 10) { showToast('max 10 files'); break; }
-    pendingFiles.push(f);
+// Downscale any image to JPEG with max edge 2048 and quality 0.85.
+// Rationale: the CLI writes user messages as one NDJSON line to the shim,
+// which is capped at 16 MB per line; two 10 MB photos base64-encoded alone
+// blow past that and silently break the pipe. 2048 is also the knee where
+// Anthropic's vision models stop benefiting from extra resolution, so we
+// lose nothing by shrinking. HEIC is also handled here — createImageBitmap
+// decodes it on Safari 17+ and we re-encode to JPEG.
+// Falls back to the original file if decoding fails so the server's
+// content-type check still produces a real error message.
+async function normalizeImage(file) {
+  const MAX_EDGE = 2048;
+  try {
+    const bmp = await createImageBitmap(file);
+    const { width: sw, height: sh } = bmp;
+    let dw = sw, dh = sh;
+    const m = Math.max(sw, sh);
+    if (m > MAX_EDGE) {
+      const scale = MAX_EDGE / m;
+      dw = Math.max(1, Math.round(sw * scale));
+      dh = Math.max(1, Math.round(sh * scale));
+    }
+    const canvas = document.createElement('canvas');
+    canvas.width = dw;
+    canvas.height = dh;
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(bmp, 0, 0, dw, dh);
+    bmp.close();
+    const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.85));
+    if (!blob) return file;
+    return new File([blob], (file.name || 'image').replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' });
+  } catch (_) {
+    return file;
   }
-  // Reset input so the same file can be re-selected
+}
+
+function handleFiles(fileList) {
+  const toUpload = [];
+  // Relax the source-file ceiling to 40 MB: iPhone HEIC/JPEG straight from
+  // Photos is often ~6–12 MB, and browsers deliver HEIC as-is. We downscale
+  // before upload, so the 10 MB server ceiling applies to the re-encoded JPEG.
+  for (const raw of fileList) {
+    if (!raw.type.startsWith('image/')) continue;
+    if (raw.size > 40 * 1024 * 1024) { showToast('file too large (max 40MB)'); continue; }
+    if (pendingFiles.length >= 10) { showToast('max 10 files'); break; }
+    const entry = {
+      file: raw,
+      blobUrl: URL.createObjectURL(raw),
+      id: '',
+      status: 'uploading',
+      error: '',
+    };
+    pendingFiles.push(entry);
+    toUpload.push(entry);
+  }
   const fi = document.getElementById('file-input');
   if (fi) fi.value = '';
   renderFilePreviews();
+  toUpload.forEach(uploadEntry);
+}
+
+async function uploadEntry(entry) {
+  entry.status = 'uploading';
+  entry.error = '';
+  renderFilePreviews();
+  try {
+    const file = await normalizeImage(entry.file);
+    const fd = new FormData();
+    fd.append('file', file);
+    const headers = {};
+    const token = getToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const r = await fetch('/api/sessions/upload', { method: 'POST', headers, body: fd });
+    if (r.status === 401 || r.status === 403) { showAuthModal(); throw new Error('unauthorized'); }
+    if (!r.ok) {
+      const txt = await r.text().catch(() => '');
+      let msg = 'upload failed: ' + r.status;
+      try { const j = JSON.parse(txt); if (j && j.error) msg = j.error; } catch (_) { if (txt) msg = txt; }
+      throw new Error(msg);
+    }
+    const j = await r.json();
+    if (!j.id) throw new Error('no id in response');
+    entry.id = j.id;
+    entry.status = 'ready';
+  } catch (e) {
+    entry.status = 'error';
+    entry.error = e.message || 'upload failed';
+  }
+  renderFilePreviews();
+}
+
+function retryUpload(idx) {
+  const entry = pendingFiles[idx];
+  if (entry && entry.status === 'error') uploadEntry(entry);
 }
 
 function removeFile(idx) {
-  pendingFiles.splice(idx, 1);
+  const [removed] = pendingFiles.splice(idx, 1);
+  if (removed && removed.blobUrl) URL.revokeObjectURL(removed.blobUrl);
   renderFilePreviews();
 }
 
 function renderFilePreviews() {
   const el = document.getElementById('file-preview');
   if (!el) return;
-  // Revoke old blob URLs to prevent memory leaks
-  el.querySelectorAll('img[src^="blob:"]').forEach(img => URL.revokeObjectURL(img.src));
-  el.innerHTML = pendingFiles.map((f, i) => {
-    const url = URL.createObjectURL(f);
-    return '<div class="file-thumb"><img src="' + url + '"><button class="remove" onclick="removeFile(' + i + ')">\u00d7</button></div>';
+  el.innerHTML = pendingFiles.map((entry, i) => {
+    const overlay =
+      entry.status === 'uploading' ? '<div class="upload-status uploading"></div>' :
+      entry.status === 'error' ? '<div class="upload-status error" title="' + escAttr(entry.error || 'upload failed') + '" onclick="retryUpload(' + i + ')">\u21bb</div>' :
+      '';
+    return '<div class="file-thumb ' + entry.status + '">' +
+      '<img src="' + entry.blobUrl + '">' +
+      overlay +
+      '<button class="remove" onclick="removeFile(' + i + ')">\u00d7</button>' +
+      '</div>';
   }).join('');
 }
 
@@ -1881,15 +2047,16 @@ function showAuthModal() {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   overlay.innerHTML =
-    '<div class="modal">' +
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="Dashboard API token">' +
       '<h3>Dashboard API Token</h3>' +
       '<input id="token-input" type="password" placeholder="enter dashboard token..." onkeydown="if(event.key===\'Enter\'){saveToken()}">' +
       '<div class="modal-btns">' +
-        '<button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
-        '<button class="primary" onclick="saveToken()">save</button>' +
+        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
+        '<button type="button" class="primary" onclick="saveToken()">save</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
+  trapFocus(overlay);
   setTimeout(() => document.getElementById('token-input').focus(), 100);
 }
 
@@ -1925,18 +2092,19 @@ function createNewSession() {
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
     overlay.innerHTML =
-      '<div class="modal">' +
+      '<div class="modal" role="dialog" aria-modal="true" aria-label="New session">' +
         '<h3>New Session</h3>' +
         '<div style="margin-bottom:12px">' +
-          '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px">Workspace</label>' +
+          '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-workspace">Workspace</label>' +
           '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(ws) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
         '</div>' +
         '<div class="modal-btns">' +
-          '<button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
-          '<button class="primary" onclick="doCreateSession()">create</button>' +
+          '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
+          '<button type="button" class="primary" onclick="doCreateSession()">create</button>' +
         '</div>' +
       '</div>';
     document.body.appendChild(overlay);
+    trapFocus(overlay);
     setTimeout(() => document.getElementById('new-workspace').focus(), 100);
     return;
   }
@@ -1963,6 +2131,7 @@ function openProjectPalette() {
     if (e.target === overlay) overlay.remove();
   });
   document.body.appendChild(overlay);
+  trapFocus(overlay);
 
   const state = {overlay, items: [], activeIdx: 0};
   const input = document.getElementById('cp-input');
@@ -2149,18 +2318,19 @@ function pickPaletteCustom(initialValue) {
   const modal = document.createElement('div');
   modal.className = 'modal-overlay';
   modal.innerHTML =
-    '<div class="modal">' +
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="Custom workspace">' +
       '<h3>Custom Workspace</h3>' +
       '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px">Workspace path</label>' +
+        '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-workspace">Workspace path</label>' +
         '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(prefill) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
       '</div>' +
       '<div class="modal-btns">' +
-        '<button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
-        '<button class="primary" onclick="doCreateSession()">create</button>' +
+        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
+        '<button type="button" class="primary" onclick="doCreateSession()">create</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(modal);
+  trapFocus(modal);
   setTimeout(() => {
     const el = document.getElementById('new-workspace');
     if (el) { el.focus(); el.select(); }
@@ -2250,26 +2420,33 @@ function copyText(text) {
   }
 }
 
-function copyCodeBlock(btn) {
-  const code = btn.closest('.md-code-wrap').querySelector('code').textContent;
-  const done = () => { btn.textContent = 'copied!'; btn.classList.add('copied'); setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500); };
-  if (navigator.clipboard) {
-    navigator.clipboard.writeText(code).then(done).catch(() => { fallbackCopy(code); done(); });
-  } else {
-    fallbackCopy(code);
-    done();
-  }
+// Flash a button to "copied!" state for ~1.5s then revert.
+function flashCopyButton(btn) {
+  btn.textContent = 'copied!';
+  btn.classList.add('copied');
+  setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500);
 }
 
-function copyEventContent(btn) {
-  const text = btn.dataset.raw || btn.closest('.event').querySelector('.event-content').textContent;
-  const done = () => { btn.textContent = 'copied!'; btn.classList.add('copied'); setTimeout(() => { btn.textContent = 'copy'; btn.classList.remove('copied'); }, 1500); };
+// Shared clipboard helper for in-line buttons — uses navigator.clipboard with
+// an execCommand fallback for non-HTTPS / older browsers.
+function copyWithFeedback(btn, text) {
+  const done = () => flashCopyButton(btn);
   if (navigator.clipboard) {
     navigator.clipboard.writeText(text).then(done).catch(() => { fallbackCopy(text); done(); });
   } else {
     fallbackCopy(text);
     done();
   }
+}
+
+function copyCodeBlock(btn) {
+  const code = btn.closest('.md-code-wrap').querySelector('code').textContent;
+  copyWithFeedback(btn, code);
+}
+
+function copyEventContent(btn) {
+  const text = btn.dataset.raw || btn.closest('.event').querySelector('.event-content').textContent;
+  copyWithFeedback(btn, text);
 }
 
 function shortPath(p) {
@@ -2301,16 +2478,60 @@ function sessionTimeHint(key) {
   return '\u2014';
 }
 
+/* Focus trap: confine Tab within an overlay, restore focus on dismissal.
+   Called after an overlay is appended to the DOM. Returns nothing — the
+   overlay's MutationObserver tears down listeners when it's removed. */
+function trapFocus(overlay) {
+  if (!overlay || overlay._trapped) return;
+  overlay._trapped = true;
+  const prevActive = document.activeElement;
+  const FOCUSABLE = 'button, [href], input:not([disabled]), select, textarea, [tabindex]:not([tabindex="-1"]), [contenteditable="true"]';
+  const onKey = (e) => {
+    if (e.key === 'Escape') {
+      // Let inner handlers pre-empt; otherwise dismiss the overlay.
+      if (!e.defaultPrevented) { overlay.remove(); }
+      return;
+    }
+    if (e.key !== 'Tab') return;
+    const nodes = [...overlay.querySelectorAll(FOCUSABLE)].filter(el => !el.disabled && el.offsetParent !== null);
+    if (nodes.length === 0) { e.preventDefault(); return; }
+    const first = nodes[0], last = nodes[nodes.length - 1];
+    if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+    else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+  };
+  overlay.addEventListener('keydown', onKey);
+  const obs = new MutationObserver(() => {
+    if (!document.body.contains(overlay)) {
+      overlay.removeEventListener('keydown', onKey);
+      obs.disconnect();
+      if (prevActive && prevActive.focus) { try { prevActive.focus(); } catch(_) {} }
+    }
+  });
+  obs.observe(document.body, { childList: true, subtree: false });
+}
+
 const _escEl = document.createElement('div');
 function esc(s) {
   if (!s) return '';
   _escEl.textContent = s;
   return _escEl.innerHTML;
 }
-function escAttr(s) { return esc(s).replace(/"/g, '&quot;'); }
+// Escape for HTML attribute context. We don't know whether the caller used
+// single- or double-quoted attributes, so we escape both to be safe.
+function escAttr(s) {
+  return esc(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
 function escJs(s) {
   if (!s) return '';
-  return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/\n/g,'\\n').replace(/\r/g,'\\r');
+  return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/</g,'\\u003c').replace(/>/g,'\\u003e');
+}
+// URL schemes that are safe to embed in <a href>. Anything else (including
+// javascript:, data:, vbscript:, file:, about:) gets rewritten to '#'.
+function safeUrl(u) {
+  if (!u) return '#';
+  const trimmed = String(u).trim();
+  if (/^(https?:|mailto:|\/|#|\?)/i.test(trimmed)) return trimmed;
+  return '#';
 }
 
 let mermaidLoading = false;
@@ -2359,6 +2580,16 @@ const katexPending = {};
 function loadKatex() {
   if (katexReady || katexLoading) return;
   katexLoading = true;
+  // Inject stylesheet on demand (moved out of <head> to unblock first paint).
+  if (!document.querySelector('link[data-nz-katex]')) {
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = 'https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.css';
+    link.integrity = 'sha384-zh0CIslj+VczCZtlzBcjt5ppRcsAmDnRem7ESsYwWwg3m/OaJ2l4x7YBZl9Kxxib';
+    link.crossOrigin = 'anonymous';
+    link.setAttribute('data-nz-katex', '1');
+    document.head.appendChild(link);
+  }
   const s = document.createElement('script');
   s.src = 'https://cdn.jsdelivr.net/npm/katex@0.16.21/dist/katex.min.js';
   s.integrity = 'sha384-Rma6DA2IPUwhNxmrB/7S3Tno0YY7sFu9WSYMCuulLhIqYSGZ2gKCJWIqhBWqMQfh';
@@ -2368,7 +2599,7 @@ function loadKatex() {
     katexLoading = false;
     runKatex();
   };
-  s.onerror = (e) => { katexLoading = false; console.error('[KaTeX] failed to load:', e); };
+  s.onerror = () => { katexLoading = false; };
   document.head.appendChild(s);
 }
 
@@ -2398,10 +2629,34 @@ function renderKatex(tex, displayMode) {
   return '<span id="' + id + '" class="katex-pending">' + esc(tex) + '</span>';
 }
 
-/* Lightweight Markdown renderer for text/result events */
+/* Lightweight Markdown renderer for text/result events.
+   Plain messages (no fenced code, math, or mermaid) are memoized since event
+   renders run repeatedly — every WS push triggers a full-list re-render for
+   the initial history, plus nav rebuilds, plus preview polls. */
+const _mdCache = new Map();
+const _MD_CACHE_MAX = 500;
 
 function renderMd(s) {
   if (!s) return '';
+  // Only cache when the input has no constructs that mint unique DOM ids
+  // (mermaid-N / ktx-N), otherwise cached HTML would collide across messages.
+  const cacheable = s.length < 20000 && !/```|\$|\\\[|\\\(/.test(s);
+  if (cacheable) {
+    const hit = _mdCache.get(s);
+    if (hit !== undefined) return hit;
+  }
+  const out = renderMdUncached(s);
+  if (cacheable) {
+    if (_mdCache.size >= _MD_CACHE_MAX) {
+      const firstKey = _mdCache.keys().next().value;
+      _mdCache.delete(firstKey);
+    }
+    _mdCache.set(s, out);
+  }
+  return out;
+}
+
+function renderMdUncached(s) {
   // Split by fenced code blocks and display math blocks
   const parts = s.split(/(```[\s\S]*?```|\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\])/g);
   return parts.map(part => {
@@ -2501,16 +2756,15 @@ function inlineMd(s) {
   s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
   s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
   s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, text, url) {
-    if (/^https?:\/\//i.test(url) || /^mailto:/i.test(url)) {
-      return '<a href="' + url.replace(/"/g, '&quot;').replace(/'/g, '&#39;') + '" class="md-link" target="_blank" rel="noopener noreferrer">' + text + '</a>';
-    }
-    return text;
+    const safe = safeUrl(url);
+    if (safe === '#') return text;
+    return '<a href="' + escAttr(safe) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + text + '</a>';
   });
   // Auto-link bare URLs not already inside an <a> tag
   s = s.replace(/(^|[^"'>])(https?:\/\/[^\s<)}\]]+)/g, function(_, prefix, url) {
     var clean = url.replace(/[.,;:!?)]+$/, '');
     var trail = url.slice(clean.length);
-    return prefix + '<a href="' + clean.replace(/"/g, '&quot;') + '" class="md-link" target="_blank" rel="noopener noreferrer">' + clean + '</a>' + trail;
+    return prefix + '<a href="' + escAttr(clean) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + clean + '</a>' + trail;
   });
   // Restore math tokens after escaping
   if (mathTokens.length > 0) {
@@ -2529,7 +2783,7 @@ function renderTable(lines) {
 }
 
 function processEventsForDisplay(events) {
-  return events.filter(e => e.type !== 'tool_use' && e.type !== 'result' && e.type !== 'agent' && e.type !== 'task_start' && e.type !== 'task_progress' && e.type !== 'task_done');
+  return events.filter(e => !isInternalEvent(e));
 }
 
 function sid(key, node) { return key + '\t' + (node || 'local'); }
@@ -2888,7 +3142,7 @@ const wsm = {
       applyEventToTurnState(ev);
       refreshBanner();
     }
-    if (ev.type === 'tool_use' || ev.type === 'result' || ev.type === 'agent' || ev.type === 'task_start' || ev.type === 'task_progress' || ev.type === 'task_done') return;
+    if (isInternalEvent(ev)) return;
     const html = eventHtml(ev);
     if (!html) return;
     const el = document.getElementById('events-scroll');
@@ -2912,8 +3166,13 @@ const wsm = {
   },
 
   onSendAck(msg) {
-    if (msg.status === 'accepted') {
+    // "accepted" = owner of a new turn, "queued" = appended to an active turn.
+    // Both are success cases; the dashboard should behave the same way.
+    if (msg.status === 'accepted' || msg.status === 'queued') {
       flashSendBtn();
+      if (msg.status === 'queued') {
+        showToast('消息已排队，待当前回复完成后处理');
+      }
       // Subscribe to the session we just sent to, unless we're already
       // subscribed or a subscribe is already pending for this exact key.
       // The old check (!subscribedKey && !_pendingSubscribeKey) failed when
@@ -3046,6 +3305,16 @@ function updateHeaderCost() {
   el.className = 'detail-cost' + (cost >= 1 ? ' high-cost' : cost > 0 ? ' has-cost' : '');
 }
 
+function updateHeaderCLI() {
+  const s = sessionsData[sid(selectedKey, selectedNode)] || {};
+  const el = document.querySelector('.main-header .detail-left');
+  if (!el) return;
+  const name = s.cli_name || defaultCLIName;
+  const version = s.cli_version || defaultCLIVersion;
+  const label = name ? esc(name) + (version ? ' v' + esc(version) : '') : '';
+  if (el.innerHTML !== label) el.innerHTML = label;
+}
+
 function flashSendBtn() {
   const btn = document.getElementById('btn-send');
   const stop = document.getElementById('btn-stop');
@@ -3167,7 +3436,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
         if (empty) empty.remove();
         const wasBottom = el2.scrollTop + el2.clientHeight >= el2.scrollHeight - 30;
         fresh.forEach(e => {
-          if (e.type === 'tool_use' || e.type === 'result' || e.type === 'agent' || e.type === 'task_start' || e.type === 'task_progress' || e.type === 'task_done') return;
+          if (isInternalEvent(e)) return;
           const h = eventHtml(e); if (h) el2.insertAdjacentHTML('beforeend', h);
         });
         if (wasBottom) el2.scrollTop = el2.scrollHeight;
@@ -3275,6 +3544,13 @@ function initViewportTracking() {
     raf = 0;
     root.style.setProperty('--vv-top', vv.offsetTop + 'px');
     root.style.setProperty('--vv-height', vv.height + 'px');
+    // Soft keyboard detection: visualViewport shrinks by >150px when the
+    // on-screen keyboard opens on iOS / Android. Toggle body.kbd-open so
+    // CSS can collapse space-hogging elements (running banner / nav pill)
+    // and keep the input within thumb reach.
+    const layoutH = window.innerHeight || vv.height;
+    const kbdOpen = layoutH - vv.height > 150;
+    document.body.classList.toggle('kbd-open', kbdOpen);
   };
   const schedule = () => { if (!raf) raf = requestAnimationFrame(apply); };
   vv.addEventListener('resize', schedule);
@@ -3383,57 +3659,61 @@ function createNewCronJob() {
     { label: 'Weekdays 9:00', value: '0 9 * * 1-5' },
     { label: 'Every Monday 9:00', value: '0 9 * * 1' },
   ];
-  let selectedSchedule = '';
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   let scheduleHtml =
-    '<ul class="proj-pick" id="cron-schedule-list">' +
+    '<ul class="proj-pick" id="cron-schedule-list" role="listbox" aria-label="Schedule presets">' +
     presets.map(p =>
-      '<li data-value="' + escAttr(p.value) + '" onclick="cronSelectSchedule(this, \'' + escJs(p.value) + '\')">' +
+      '<li role="option" data-value="' + escAttr(p.value) + '" onclick="cronSelectSchedule(this, \'' + escJs(p.value) + '\')">' +
         '<div class="pp-name">' + esc(p.label) + '</div>' +
         '<div class="pp-path">' + esc(p.value) + '</div>' +
       '</li>'
     ).join('') +
-    '<li id="cron-custom-toggle" onclick="toggleCronCustom()">' +
+    '<li id="cron-custom-toggle" role="option" onclick="toggleCronCustom()">' +
       '<div class="pp-custom"><span class="pp-custom-icon">&#9881;</span> Custom expression</div>' +
     '</li>' +
     '</ul>' +
     '<div id="cron-custom-form" style="display:none;margin-top:8px">' +
-      '<input id="cron-schedule" placeholder="@every 30m or 0 9 * * 1-5">' +
-      '<div id="cron-preview-hint" style="font-size:11px;color:#8b949e;margin-top:4px;min-height:16px"></div>' +
+      '<input id="cron-schedule" placeholder="@every 30m or 0 9 * * 1-5" aria-label="Custom cron expression">' +
+      '<div id="cron-preview-hint" class="cron-preview-hint"></div>' +
     '</div>';
 
-  // Workspace picker
-  let wsHtml = '<div style="margin-top:12px"><div style="font-size:12px;color:#8b949e;margin-bottom:6px">Workspace (optional)</div>';
+  let wsHtml = '<div style="margin-top:12px"><div class="modal-section-label">Workspace (optional)</div>';
   if (projectsData.length > 0) {
-    wsHtml += '<ul class="proj-pick" id="cron-ws-list">' +
+    wsHtml += '<ul class="proj-pick" id="cron-ws-list" role="listbox" aria-label="Workspace">' +
       projectsData.map(p =>
-        '<li data-path="' + escAttr(p.path) + '" onclick="cronSelectWorkspace(this, \'' + escJs(p.path) + '\')">' +
+        '<li role="option" data-path="' + escAttr(p.path) + '" onclick="cronSelectWorkspace(this, \'' + escJs(p.path) + '\')">' +
           '<div class="pp-name">' + esc(p.name) + '</div>' +
           '<div class="pp-path">' + esc(shortPath(p.path)) + '</div>' +
         '</li>'
       ).join('') +
-      '<li id="cron-ws-custom-toggle" onclick="toggleCronWsCustom()">' +
+      '<li id="cron-ws-custom-toggle" role="option" onclick="toggleCronWsCustom()">' +
         '<div class="pp-custom"><span class="pp-custom-icon">+</span> Custom path</div>' +
       '</li>' +
       '</ul>';
   }
   wsHtml += '<div id="cron-ws-custom-form" style="' + (projectsData.length > 0 ? 'display:none;' : '') + 'margin-top:4px">' +
-    '<input id="cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '">' +
+    '<input id="cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" aria-label="Workspace path">' +
     '</div></div>';
 
   overlay.innerHTML =
-    '<div class="modal">' +
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="New cron job">' +
       '<h3>New Cron Job</h3>' +
-      '<div style="margin-bottom:12px">' +
-        '<div style="font-size:12px;color:#8b949e;margin-bottom:6px">Prompt</div>' +
-        '<textarea id="cron-prompt" placeholder="what should this job do?" style="width:100%;min-height:60px;max-height:120px;padding:8px 12px;background:#0d1117;border:1px solid #30363d;border-radius:6px;color:#c9d1d9;font-size:14px;font-family:inherit;resize:vertical;outline:none"></textarea>' +
+      '<div class="modal-body">' +
+        '<div style="margin-bottom:12px">' +
+          '<div class="modal-section-label">Prompt</div>' +
+          '<textarea id="cron-prompt" placeholder="what should this job do?" style="min-height:72px;max-height:160px" aria-label="Prompt"></textarea>' +
+        '</div>' +
+        '<div class="modal-section-label">Schedule</div>' +
+        scheduleHtml + wsHtml +
       '</div>' +
-      '<div style="font-size:12px;color:#8b949e;margin-bottom:6px">Schedule</div>' +
-      scheduleHtml + wsHtml +
-      '<div class="modal-btns" style="margin-top:12px"><button onclick="this.closest(\'.modal-overlay\').remove()">cancel</button><button class="primary" onclick="doCreateCronJob()">create</button></div>' +
+      '<div class="modal-btns">' +
+        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
+        '<button type="button" class="primary" onclick="doCreateCronJob()">create</button>' +
+      '</div>' +
     '</div>';
   document.body.appendChild(overlay);
+  trapFocus(overlay);
   overlay.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') overlay.remove();
   });
@@ -3444,13 +3724,19 @@ function createNewCronJob() {
 function cronSelectSchedule(el, value) {
   const overlay = el.closest('.modal-overlay');
   overlay._cronSchedule = value;
-  document.querySelectorAll('#cron-schedule-list li').forEach(li => li.style.background = '');
-  el.style.background = '#1f6feb33';
-  // Hide custom form and clear its value when preset selected
+  document.querySelectorAll('#cron-schedule-list li').forEach(li => {
+    li.classList.remove('selected');
+    li.setAttribute('aria-selected', 'false');
+  });
+  el.classList.add('selected');
+  el.setAttribute('aria-selected', 'true');
+  // Hide custom form and clear its state when preset selected
   const customForm = document.getElementById('cron-custom-form');
   if (customForm) customForm.style.display = 'none';
   const customInput = document.getElementById('cron-schedule');
   if (customInput) customInput.value = '';
+  const hint = document.getElementById('cron-preview-hint');
+  if (hint) { hint.textContent = ''; hint.className = 'cron-preview-hint'; }
   const toggle = document.getElementById('cron-custom-toggle');
   if (toggle) toggle.style.display = '';
 }
@@ -3458,8 +3744,12 @@ function cronSelectSchedule(el, value) {
 function cronSelectWorkspace(el, path) {
   const overlay = el.closest('.modal-overlay');
   overlay._cronWorkDir = path;
-  document.querySelectorAll('#cron-ws-list li').forEach(li => li.style.background = '');
-  el.style.background = '#1f6feb33';
+  document.querySelectorAll('#cron-ws-list li').forEach(li => {
+    li.classList.remove('selected');
+    li.setAttribute('aria-selected', 'false');
+  });
+  el.classList.add('selected');
+  el.setAttribute('aria-selected', 'true');
   const customForm = document.getElementById('cron-ws-custom-form');
   if (customForm) customForm.style.display = 'none';
   const toggle = document.getElementById('cron-ws-custom-toggle');
@@ -3475,7 +3765,10 @@ function toggleCronWsCustom() {
     // Clear project selection
     const overlay = form.closest('.modal-overlay');
     if (overlay) overlay._cronWorkDir = '';
-    document.querySelectorAll('#cron-ws-list li').forEach(li => li.style.background = '');
+    document.querySelectorAll('#cron-ws-list li').forEach(li => {
+      li.classList.remove('selected');
+      li.setAttribute('aria-selected', 'false');
+    });
     document.getElementById('cron-workdir').focus();
   } else {
     form.style.display = 'none';
@@ -3492,7 +3785,10 @@ function toggleCronCustom() {
     // Clear preset selection
     const overlay = form.closest('.modal-overlay');
     if (overlay) overlay._cronSchedule = '';
-    document.querySelectorAll('#cron-schedule-list li').forEach(li => li.style.background = '');
+    document.querySelectorAll('#cron-schedule-list li').forEach(li => {
+      li.classList.remove('selected');
+      li.setAttribute('aria-selected', 'false');
+    });
     const input = document.getElementById('cron-schedule');
     input.focus();
     if (!input._cronPreviewBound) {
@@ -3512,7 +3808,7 @@ function toggleCronCustom() {
 async function previewCronSchedule(schedule) {
   const hint = document.getElementById('cron-preview-hint');
   if (!hint) return;
-  if (!schedule) { hint.textContent = ''; return; }
+  if (!schedule) { hint.textContent = ''; hint.className = 'cron-preview-hint'; return; }
   try {
     const headers = {};
     const t = getToken();
@@ -3520,14 +3816,14 @@ async function previewCronSchedule(schedule) {
     const r = await fetch('/api/cron/preview?schedule=' + encodeURIComponent(schedule), { headers });
     const data = await r.json();
     if (data.valid) {
-      hint.style.color = '#7ee787';
+      hint.className = 'cron-preview-hint ok';
       hint.textContent = 'next run: ' + timeAgo(data.next_run, true);
     } else {
-      hint.style.color = '#da3633';
+      hint.className = 'cron-preview-hint err';
       hint.textContent = data.error || 'invalid schedule';
     }
   } catch (e) {
-    hint.style.color = '#da3633';
+    hint.className = 'cron-preview-hint err';
     hint.textContent = 'preview error';
   }
 }
@@ -3581,46 +3877,62 @@ function openCronPanel() {
 
 function renderCronPanel() {
   const main = document.getElementById('main');
-  let html = '<div class="cron-detail">' +
-    '<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">' +
-      '<h3 style="margin:0">Cron Jobs</h3>' +
-      '<button onclick="createNewCronJob()" style="padding:5px 14px;border-radius:6px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:4px"><svg width="14" height="14" viewBox="0 0 24 24" stroke="currentColor" fill="none" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg> New</button>' +
-    '</div>';
+  let html =
+    '<div class="main-header">' +
+      '<button class="btn-mobile-back" onclick="mobileBack()" title="back" aria-label="Back to sidebar">&#8592;</button>' +
+      '<div class="main-header-content"><h2>Cron Jobs</h2></div>' +
+    '</div>' +
+    '<div class="cron-detail">' +
+      '<div class="cron-detail-body">' +
+        '<div class="cron-list-head">' +
+          '<h3>Cron Jobs</h3>' +
+          '<button type="button" class="cron-new-btn" onclick="createNewCronJob()" aria-label="Create new cron job">' +
+            '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>' +
+            ' New' +
+          '</button>' +
+        '</div>';
   if (cronJobs.length === 0) {
-    html += '<div style="text-align:center;padding:40px 20px">' +
-      '<div style="font-size:36px;opacity:.3;margin-bottom:12px">&#9201;</div>' +
-      '<div style="color:#8b949e;margin-bottom:16px">No cron jobs yet</div>' +
-      '<button onclick="createNewCronJob()" style="padding:8px 20px;border-radius:6px;border:1px solid #1f6feb;background:#1f6feb22;color:#58a6ff;cursor:pointer;font-size:13px">Create your first cron job</button>' +
-    '</div>';
+    html +=
+      '<div class="cron-empty">' +
+        '<div class="cron-empty-icon" aria-hidden="true">&#9201;</div>' +
+        '<div class="cron-empty-hint">No cron jobs yet</div>' +
+        '<button type="button" class="cron-empty-cta" onclick="createNewCronJob()">Create your first cron job</button>' +
+      '</div>';
   } else {
-    cronJobs.sort((a, b) => b.created_at - a.created_at);
-    html += cronJobs.map(j => {
+    const sorted = [...cronJobs].sort((a, b) => b.created_at - a.created_at);
+    html += sorted.map(j => {
       const status = j.paused ? '<span class="badge paused">paused</span>' : '<span class="badge running">active</span>';
       const nextStr = j.next_run ? timeAgo(j.next_run, true) : '';
       const lastStr = j.last_run_at ? timeAgo(j.last_run_at) : '';
-      const wdStr = j.work_dir ? '<span style="color:#a5d6ff" title="' + escAttr(j.work_dir) + '">' + esc(shortPath(j.work_dir)) + '</span>' : '';
-      const result = j.last_error
-        ? '<div style="color:#da3633;font-size:12px;margin-top:4px">\u2716 ' + esc(j.last_error) + '</div>'
-        : (j.last_result ? '<div style="color:#7ee787;font-size:12px;margin-top:4px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">\u2714 ' + esc(j.last_result.substring(0, 150)) + '</div>' : '');
-      return '<div style="padding:12px;border:1px solid #30363d;border-radius:8px;margin-bottom:8px;background:#161b22;cursor:pointer" onclick="openCronSession(\'' + escJs(j.id) + '\')">' +
-        '<div style="font-size:14px;color:#f0f6fc;font-weight:500">' + (j.prompt ? esc(j.prompt) : '<span style="color:#6e7681">(no prompt — click to set)</span>') + '</div>' +
-        '<div style="font-size:12px;color:#a5d6ff;margin-top:4px">' + esc(j.schedule) + '</div>' +
-        '<div style="font-size:12px;color:#8b949e;margin-top:4px;display:flex;gap:8px;align-items:center;flex-wrap:wrap">' +
-        status +
-        wdStr +
-        (lastStr ? '<span>ran ' + lastStr + '</span>' : '') +
-        (nextStr ? '<span>next ' + nextStr + '</span>' : '') +
+      const wdStr = j.work_dir ? '<span class="cc-ws" title="' + escAttr(j.work_dir) + '">' + esc(shortPath(j.work_dir)) + '</span>' : '';
+      let result = '';
+      if (j.last_error) {
+        result = '<div class="cc-result err"><span class="cc-icon">\u2716</span><span class="cc-text">' + esc(j.last_error) + '</span></div>';
+      } else if (j.last_result) {
+        result = '<div class="cc-result ok"><span class="cc-icon">\u2714</span><span class="cc-text">' + esc(j.last_result) + '</span></div>';
+      }
+      const promptBlock = j.prompt
+        ? '<div class="cc-prompt">' + esc(j.prompt) + '</div>'
+        : '<div class="cc-prompt placeholder">(no prompt — tap to set)</div>';
+      const toggleBtn = j.paused
+        ? '<button type="button" class="cc-btn" onclick="cronResume(\'' + escJs(j.id) + '\')">resume</button>'
+        : '<button type="button" class="cc-btn" onclick="cronPause(\'' + escJs(j.id) + '\')">pause</button>';
+      return '<div class="cron-card" role="button" tabindex="0" onclick="openCronSession(\'' + escJs(j.id) + '\')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronSession(\'' + escJs(j.id) + '\')}">' +
+        promptBlock +
+        '<div class="cc-schedule">' + esc(j.schedule) + '</div>' +
+        '<div class="cc-meta">' + status + wdStr +
+          (lastStr ? '<span>ran ' + lastStr + '</span>' : '') +
+          (nextStr ? '<span>next ' + nextStr + '</span>' : '') +
         '</div>' +
         result +
-        '<div style="display:flex;gap:6px;margin-top:8px" onclick="event.stopPropagation()">' +
-        (j.paused
-          ? '<button onclick="cronResume(\'' + escJs(j.id) + '\')" style="padding:3px 10px;border-radius:4px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:11px">resume</button>'
-          : '<button onclick="cronPause(\'' + escJs(j.id) + '\')" style="padding:3px 10px;border-radius:4px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;cursor:pointer;font-size:11px">pause</button>') +
-        '<button onclick="cronDelete(\'' + escJs(j.id) + '\')" style="padding:3px 10px;border-radius:4px;border:1px solid #da3633;color:#da3633;background:transparent;cursor:pointer;font-size:11px">delete</button>' +
-        '</div></div>';
+        '<div class="cc-actions" onclick="event.stopPropagation()">' +
+          toggleBtn +
+          '<button type="button" class="cc-btn danger" onclick="cronDelete(\'' + escJs(j.id) + '\')">delete</button>' +
+        '</div>' +
+      '</div>';
     }).join('');
   }
-  html += '</div>';
+  html += '</div></div>';
   main.innerHTML = html;
 }
 
@@ -3645,7 +3957,13 @@ async function fetchCronJobs() {
     const data = await r.json();
     cronJobs = data.jobs || [];
     const cronBadge = document.getElementById('cron-badge');
-    if (cronBadge) { cronBadge.textContent = cronJobs.length; cronBadge.style.display = cronJobs.length > 0 ? '' : 'none'; }
+    if (cronBadge) {
+      // Badge surfaces jobs needing attention (paused or last run errored),
+      // not the raw total — avoids a persistent red dot on healthy setups.
+      const attention = cronJobs.filter(j => j.paused || j.last_error).length;
+      cronBadge.textContent = attention;
+      cronBadge.style.display = attention > 0 ? '' : 'none';
+    }
   } catch (e) { console.error('fetch cron:', e); }
 }
 

@@ -10,7 +10,7 @@ import (
 // EventSink can receive JSON event messages pushed from a remote session.
 // Implemented by server-side wsClient to receive events from nodes.
 type EventSink interface {
-	SendJSON(v interface{})
+	SendJSON(v any)
 	SendRaw(data []byte)
 }
 

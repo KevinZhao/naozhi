@@ -115,6 +115,9 @@ func (r *Router) cliNameDefault() string {
 	return ""
 }
 
+// CLIName exposes the wrapper's CLI display name for status endpoints.
+func (r *Router) CLIName() string { return r.cliNameDefault() }
+
 // cliVersionDefault returns the CLI version from the wrapper, or empty if no wrapper.
 func (r *Router) cliVersionDefault() string {
 	if r.wrapper != nil {
@@ -122,6 +125,9 @@ func (r *Router) cliVersionDefault() string {
 	}
 	return ""
 }
+
+// CLIVersion exposes the wrapper's detected CLI version for status endpoints.
+func (r *Router) CLIVersion() string { return r.cliVersionDefault() }
 
 // indexAdd adds key to the chat→sessions index. No-op when index is nil.
 // Must be called under r.mu.
@@ -225,7 +231,7 @@ func NewRouter(cfg RouterConfig) *Router {
 				workspace:      entry.Workspace,
 				totalCost:      entry.TotalCost,
 				prevSessionIDs: entry.PrevSessionIDs,
-				exempt:         strings.HasPrefix(key, "project:"),
+				exempt:         strings.HasPrefix(key, "project:") || strings.HasPrefix(key, "cron:"),
 				cliName:        r.cliNameDefault(),
 				cliVersion:     r.cliVersionDefault(),
 			}
@@ -833,6 +839,11 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		},
 	}
 	s.storeProcess(proc)
+	// Matches the reconnect path (ReconnectShims): notify the dashboard when
+	// a turn completes out-of-band (e.g. result arrives via readLoop without
+	// an active Send capturing it). SetOnTurnDone is mu-guarded inside Process,
+	// so calling it after storeProcess is safe.
+	proc.SetOnTurnDone(func() { r.notifyChange() })
 	if len(oldHistory) > 0 {
 		proc.InjectHistory(oldHistory)
 	}
@@ -1374,9 +1385,11 @@ func (r *Router) Shutdown() {
 		r.historyWg.Wait()
 		close(historyDone)
 	}()
+	historyTimer := time.NewTimer(15 * time.Second)
 	select {
 	case <-historyDone:
-	case <-time.After(15 * time.Second):
+		historyTimer.Stop()
+	case <-historyTimer.C:
 		slog.Warn("shutdown: history loading timed out after 15s, proceeding")
 	}
 	// Deadline timer: broadcast to unblock Wait() when timeout expires
@@ -1674,6 +1687,50 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 
 	r.notifyChange()
 	return key
+}
+
+// RegisterCronStub creates a suspended exempt session for a cron job so the
+// job appears in the dashboard workspace list before its first execution.
+// Key format is "cron:<jobID>". If an entry already exists, workspace and
+// lastPrompt are refreshed in place (to reflect edits via dashboard).
+// The stub has no process and no session ID; the first GetOrCreate call
+// (at cron execute time) will spawn a real CLI process and reuse this entry.
+func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
+	r.mu.Lock()
+	if existing, ok := r.sessions[key]; ok {
+		// Refresh workspace/prompt on existing stub; don't touch live process.
+		if existing.loadProcess() == nil {
+			if workspace != "" {
+				existing.workspace = workspace
+			}
+			if lastPrompt != "" {
+				existing.lastPrompt.Store(lastPrompt)
+			}
+			r.storeDirty = true
+			r.storeGen++
+		}
+		r.mu.Unlock()
+		r.notifyChange()
+		return
+	}
+	s := &ManagedSession{
+		key:        key,
+		workspace:  workspace,
+		exempt:     true,
+		cliName:    r.cliNameDefault(),
+		cliVersion: r.cliVersionDefault(),
+	}
+	if lastPrompt != "" {
+		s.lastPrompt.Store(lastPrompt)
+	}
+	s.lastActive.Store(time.Now().UnixNano())
+	r.sessions[key] = s
+	r.indexAdd(key)
+	r.storeDirty = true
+	r.storeGen++
+	r.mu.Unlock()
+
+	r.notifyChange()
 }
 
 // ManagedExcludeSets returns PIDs, session IDs, and CWDs of all managed sessions

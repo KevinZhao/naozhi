@@ -28,10 +28,27 @@ type Weixin struct {
 	started   bool
 	cancel    context.CancelFunc
 	handlerWg sync.WaitGroup // tracks in-flight message handler goroutines
+	cleanupWg sync.WaitGroup // tracks the token cleanup goroutine
 
 	// contextTokens caches the latest context_token per user for reply.
-	contextTokens sync.Map // map[userID]string
+	// Value is *tokenEntry (token + last-updated unix seconds) so we can
+	// drop entries whose tokens have gone stale — otherwise users who
+	// message once and never return accumulate forever.
+	contextTokens sync.Map // map[userID]*tokenEntry
 }
+
+type tokenEntry struct {
+	token     string
+	updatedNs int64 // time.Now().UnixNano() at Store
+}
+
+// tokenTTL is the idle time after which a cached context_token is evicted.
+// iLink tokens are short-lived anyway; aggressive eviction is safe because
+// the next inbound message refreshes it.
+const tokenTTL = 24 * time.Hour
+
+// cleanupInterval controls how often the background goroutine scans.
+const tokenCleanupInterval = 1 * time.Hour
 
 // New creates a WeChat platform adapter.
 func New(cfg Config) *Weixin {
@@ -71,6 +88,12 @@ func (w *Weixin) Start(handler platform.MessageHandler) error {
 
 	go w.pollLoop(ctx)
 
+	w.cleanupWg.Add(1)
+	go func() {
+		defer w.cleanupWg.Done()
+		w.cleanupTokensLoop(ctx)
+	}()
+
 	slog.Info("weixin platform started", "base_url", w.cfg.BaseURL)
 	return nil
 }
@@ -81,13 +104,39 @@ func (w *Weixin) Stop() error {
 		w.cancel()
 	}
 	w.handlerWg.Wait()
+	w.cleanupWg.Wait()
 	return nil
+}
+
+// cleanupTokensLoop evicts context_token entries idle for longer than tokenTTL.
+// Prevents unbounded growth under high user churn.
+func (w *Weixin) cleanupTokensLoop(ctx context.Context) {
+	ticker := time.NewTicker(tokenCleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			cutoff := time.Now().Add(-tokenTTL).UnixNano()
+			w.contextTokens.Range(func(k, v any) bool {
+				if e, ok := v.(*tokenEntry); ok && e.updatedNs < cutoff {
+					w.contextTokens.Delete(k)
+				}
+				return true
+			})
+		}
+	}
 }
 
 // Reply sends a text message to a WeChat user.
 func (w *Weixin) Reply(ctx context.Context, msg platform.OutgoingMessage) (string, error) {
 	ct, _ := w.contextTokens.Load(msg.ChatID)
-	contextToken, _ := ct.(string)
+	entry, _ := ct.(*tokenEntry)
+	var contextToken string
+	if entry != nil {
+		contextToken = entry.token
+	}
 	if contextToken == "" {
 		return "", fmt.Errorf("weixin: no context_token for user %s (no inbound message yet)", msg.ChatID)
 	}
@@ -173,6 +222,11 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 
 			text := extractText(msg)
 			if text == "" {
+				// No text item: iLink sent an image/audio/other attachment we
+				// don't currently forward. Debug-level so bursts of media from
+				// one user don't flood operator logs; still queryable when
+				// troubleshooting "why didn't my message go through".
+				slog.Debug("weixin non-text message ignored", "from", msg.FromUserID, "msg_id", msg.MessageID, "items", len(msg.ItemList))
 				continue
 			}
 
@@ -183,7 +237,10 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 
 			// Cache context_token for reply
 			if msg.ContextToken != "" {
-				w.contextTokens.Store(from, msg.ContextToken)
+				w.contextTokens.Store(from, &tokenEntry{
+					token:     msg.ContextToken,
+					updatedNs: time.Now().UnixNano(),
+				})
 			}
 
 			incoming := platform.IncomingMessage{

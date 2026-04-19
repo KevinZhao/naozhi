@@ -27,8 +27,9 @@ func CoalesceMessages(msgs []QueuedMsg) (string, []cli.ImageData) {
 
 	var allImages []cli.ImageData
 	for _, m := range msgs {
-		ts := m.EnqueueAt.Format("15:04")
-		b.WriteString(fmt.Sprintf("\n[%s] %s\n", ts, m.Text))
+		// Direct Fprintf into the builder — avoids the intermediate string
+		// that fmt.Sprintf would allocate on every queued message.
+		fmt.Fprintf(&b, "\n[%s] %s\n", m.EnqueueAt.Format("15:04"), m.Text)
 		allImages = append(allImages, m.Images...)
 	}
 

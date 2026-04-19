@@ -30,7 +30,19 @@ const (
 	DefaultNoOutputTimeout = 2 * time.Minute
 	DefaultTotalTimeout    = 5 * time.Minute
 	maxScannerBufBytes     = 10 * 1024 * 1024
+
+	// maxStdinLineBytes is the largest single NDJSON line we will forward to
+	// the shim. The shim enforces 16 MB per line; we leave headroom for the
+	// shim-protocol JSON envelope added in shimClientMsg. Exceeding this
+	// value used to produce a silent "connection reset by peer" from the
+	// shim — now we fail fast with a clear error so the dashboard can surface it.
+	maxStdinLineBytes = 12 * 1024 * 1024
 )
+
+// ErrMessageTooLarge is returned when a user message (after JSON encoding)
+// would exceed the shim's per-line limit. Callers should shrink the payload
+// (e.g., downscale images) before retrying.
+var ErrMessageTooLarge = errors.New("message too large for stream-json line")
 
 // Sentinel errors for watchdog timeouts.
 var (
@@ -151,6 +163,9 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 	// slow path which splits on '\n' correctly.
 	if w.buf.Len() == 0 && len(data) > 0 && data[len(data)-1] == '\n' &&
 		bytes.IndexByte(data[:len(data)-1], '\n') == -1 {
+		if len(data)-1 > maxStdinLineBytes {
+			return 0, fmt.Errorf("%w: %d bytes > %d", ErrMessageTooLarge, len(data)-1, maxStdinLineBytes)
+		}
 		trimmed := string(data[:len(data)-1])
 		if err := w.p.shimSend(shimClientMsg{Type: "write", Line: trimmed}); err != nil {
 			return 0, err
@@ -166,6 +181,14 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 			// No newline yet — put the partial data back
 			w.buf.Write(line)
 			break
+		}
+		// ReadBytes guarantees len(line) >= 1 when err == nil (line ends in '\n'),
+		// but stay defensive: a zero-length line would panic on the slice below.
+		if len(line) == 0 {
+			continue
+		}
+		if len(line)-1 > maxStdinLineBytes {
+			return 0, fmt.Errorf("%w: %d bytes > %d", ErrMessageTooLarge, len(line)-1, maxStdinLineBytes)
 		}
 		trimmed := string(line[:len(line)-1])
 		if err := w.p.shimSend(shimClientMsg{Type: "write", Line: trimmed}); err != nil {

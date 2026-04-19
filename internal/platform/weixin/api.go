@@ -41,11 +41,24 @@ func newAPIClient(baseURL, token string) *apiClient {
 		baseURL = defaultBaseURL
 	}
 	baseURL = strings.TrimRight(baseURL, "/")
+	// Explicit Transport with idle-conn bounds: the default http.Transport
+	// only keeps 2 idle conns per host, which is fine for bursty traffic but
+	// without tuning we also inherit unlimited MaxIdleConns globally and a
+	// 90s IdleConnTimeout. Long-poll reconnects happen every ~35s so without
+	// keep-alive the client would open a fresh TCP+TLS handshake on every
+	// poll. Pinning a small per-host pool keeps reuse predictable.
+	transport := &http.Transport{
+		MaxIdleConns:        10,
+		MaxIdleConnsPerHost: 4,
+		IdleConnTimeout:     90 * time.Second,
+		TLSHandshakeTimeout: 10 * time.Second,
+	}
 	return &apiClient{
 		baseURL: baseURL,
 		token:   token,
 		httpClient: &http.Client{
-			Timeout: defaultLongPollTimeout + 10*time.Second, // covers long-poll (35s) + margin
+			Transport: transport,
+			Timeout:   defaultLongPollTimeout + 10*time.Second, // covers long-poll (35s) + margin
 		},
 	}
 }

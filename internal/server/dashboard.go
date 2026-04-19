@@ -58,23 +58,26 @@ func (s *Server) registerDashboard() {
 		DashToken:     s.dashboardToken,
 		CookieMAC:     s.auth.cookieMAC(),
 		Guard:         s.sessionGuard,
+		Queue:         s.msgQueue,
 		Nodes:         s.nodes,
 		NodesMu:       &s.nodesMu,
 		ProjectMgr:    s.projectMgr,
 		AllowedRoot:   s.allowedRoot,
 		TrustedProxy:  s.auth.trustedProxy,
-		WSAuthLimiter: s.auth.loginLimiterFor,
+		WSAuthLimiter: s.auth.loginAllow,
 	})
 	s.hub.SetScheduler(s.scheduler)
 
 	// Wire sendH now that hub exists
 	uploads := newUploadStore()
 	uploads.StartCleanup(s.hub.ctx)
+	s.hub.SetUploadStore(uploads)
 	s.sendH = &SendHandler{
 		nodeAccess:    s.nodeAccess,
 		hub:           s.hub,
 		uploadStore:   uploads,
 		uploadLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, s.auth.trustedProxy), // 10 uploads/min per IP
+		sendLimiter:   newIPLimiterWithProxy(rate.Every(2*time.Second), 30, s.auth.trustedProxy), // 30 sends/min per IP (burst 30)
 		trustedProxy:  s.auth.trustedProxy,
 	}
 
@@ -139,7 +142,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' wss: ws:; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:")
+	// connect-src includes both ws: and wss:. ws: is required for local HTTP
+	// development (browsers reject ws:// under a CSP that only lists wss:) while
+	// wss: covers production TLS deployments. The browser automatically picks
+	// the matching scheme based on page origin, so listing both does not widen
+	// the attack surface for TLS users.
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:")
 	w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -156,6 +164,7 @@ func (s *Server) handleManifest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/manifest+json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "max-age=3600")
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("manifest write", "err", err)
@@ -169,6 +178,7 @@ func (s *Server) handleSW(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Service-Worker-Allowed", "/")
 	if _, err := w.Write(data); err != nil {
@@ -183,6 +193,7 @@ func (s *Server) handleDashboardJS(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("dashboard js write", "err", err)

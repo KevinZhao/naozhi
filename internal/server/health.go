@@ -31,7 +31,7 @@ type HealthHandler struct {
 }
 
 func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]interface{}{
+	resp := map[string]any{
 		"status": "ok",
 		"uptime": time.Since(h.startedAt).Round(time.Second).String(),
 	}

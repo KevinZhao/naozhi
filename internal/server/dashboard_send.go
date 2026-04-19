@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -20,30 +21,37 @@ type SendHandler struct {
 	hub           *Hub
 	uploadStore   *uploadStore
 	uploadLimiter *ipLimiter // per-IP upload rate limiter (10/min)
+	sendLimiter   *ipLimiter // per-IP send rate limiter (30/min)
 	trustedProxy  bool       // whether to trust X-Forwarded-For for client IP
 }
 
-// uploadOwner derives a stable owner key from the request's auth cookie.
-// Using the raw cookie value (which is already HMAC-derived, not the raw token)
-// ties each upload to the authenticated session without exposing the token.
-// All dashboard sessions share the same cookie value, so this prevents
-// cross-user theft rather than per-browser-tab isolation.
+// ownerKeyFromCookie returns a stable owner key derived from an HMAC
+// auth-cookie value. The cookie is itself an HMAC hex string so hashing it
+// ensures the owner key does not leak raw MAC material (the old code used a
+// raw 16-char cookie prefix which exposed half of the MAC).
+func ownerKeyFromCookie(cookieValue string) string {
+	if cookieValue == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(cookieValue))
+	return hex.EncodeToString(sum[:8])
+}
+
+// uploadOwner derives a stable owner key from the request's auth cookie,
+// Bearer token, or (as a fallback) client IP. Cookie and Bearer paths both
+// end up as hex-encoded SHA-256 prefixes so HTTP and WebSocket owner keys
+// are comparable when both sides hold the same cookie.
 func uploadOwner(r *http.Request, trustedProxy bool) string {
 	if c, err := r.Cookie(authCookieName); err == nil && c.Value != "" {
-		// Cookie value is already an HMAC hex string — use first 16 bytes as owner key.
-		if len(c.Value) >= 16 {
-			return c.Value[:16]
-		}
-		return c.Value
+		return ownerKeyFromCookie(c.Value)
 	}
-	// Bearer token path: hash the Authorization header value for the owner key.
 	auth := r.Header.Get("Authorization")
 	if strings.HasPrefix(auth, "Bearer ") {
 		token := strings.TrimPrefix(auth, "Bearer ")
-		if len(token) >= 16 {
-			return hex.EncodeToString([]byte(token[:8]))
+		if token != "" {
+			sum := sha256.Sum256([]byte(token))
+			return hex.EncodeToString(sum[:8])
 		}
-		return hex.EncodeToString([]byte(token))
 	}
 	// Unauthenticated (no-token mode): use real client IP as owner.
 	return clientIP(r, trustedProxy)
@@ -84,17 +92,17 @@ func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 11<<20) // 10MB + form overhead
 	if err := r.ParseMultipartForm(10 << 20); err != nil {
-		http.Error(w, "bad multipart form", http.StatusBadRequest)
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "bad multipart form: " + err.Error()})
 		return
 	}
 	files := r.MultipartForm.File["file"]
 	if len(files) != 1 {
-		http.Error(w, "exactly one file required", http.StatusBadRequest)
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "exactly one file required"})
 		return
 	}
 	img, err := parseImageFile(files[0])
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	owner := uploadOwner(r, h.trustedProxy)
@@ -107,6 +115,11 @@ func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
+	if h.sendLimiter != nil && !h.sendLimiter.AllowRequest(r) {
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "send rate limit exceeded"})
+		return
+	}
+
 	var key, text, node, workspace, resumeID string
 	var images []cli.ImageData
 	var fileIDs []string
@@ -115,7 +128,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(ct, "multipart/form-data") {
 		r.Body = http.MaxBytesReader(w, r.Body, 105<<20) // 10 files × 10MB + form overhead
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			http.Error(w, "bad multipart form", http.StatusBadRequest)
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "bad multipart form: " + err.Error()})
 			return
 		}
 		key = r.FormValue("key")
@@ -127,13 +140,13 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 
 		files := r.MultipartForm.File["files"]
 		if len(files)+len(fileIDs) > 10 {
-			http.Error(w, "too many files (max 10)", http.StatusBadRequest)
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "too many files (max 10)"})
 			return
 		}
 		for _, fh := range files {
 			img, err := parseImageFile(fh)
 			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 				return
 			}
 			images = append(images, img)
@@ -149,7 +162,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			FileIDs   []string `json:"file_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			http.Error(w, "invalid JSON", http.StatusBadRequest)
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
 			return
 		}
 		key = req.Key
@@ -160,30 +173,35 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		fileIDs = req.FileIDs
 	}
 
+	if len(fileIDs) > 10 {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "too many files (max 10)"})
+		return
+	}
+
 	// Resolve pre-uploaded file IDs — ownership-checked to prevent cross-user theft.
 	owner := uploadOwner(r, h.trustedProxy)
 	for _, fid := range fileIDs {
 		img := h.uploadStore.Take(fid, owner)
 		if img == nil {
-			http.Error(w, "file not found or expired: "+fid, http.StatusBadRequest)
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "file not found or expired: " + fid})
 			return
 		}
 		images = append(images, *img)
 	}
 
 	if key == "" {
-		http.Error(w, "key is required", http.StatusBadRequest)
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "key is required"})
 		return
 	}
 	if text == "" && len(images) == 0 {
-		http.Error(w, "text or files required", http.StatusBadRequest)
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "text or files required"})
 		return
 	}
 
 	// Remote node proxy
 	if node != "" && node != "local" {
 		if len(images) > 0 {
-			http.Error(w, "files not supported for remote nodes", http.StatusBadRequest)
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "files not supported for remote nodes"})
 			return
 		}
 		nc, ok := h.nodeAccess.LookupNode(w, node)
@@ -211,7 +229,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	reset, err := h.hub.sessionSend(sendParams{
+	reset, status, err := h.hub.sessionSend(sendParams{
 		Key: key, Text: text, Images: images,
 		Workspace: workspace, ResumeID: resumeID,
 	}, nil)
@@ -223,5 +241,5 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]string{"key": key, "status": "reset"})
 		return
 	}
-	writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": "accepted", "key": key})
+	writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": string(status), "key": key})
 }
