@@ -344,6 +344,12 @@ func (s *Server) Start(ctx context.Context) error {
 		WatchdogNoOutputKills: &s.watchdogNoOutputKills,
 		WatchdogTotalKills:    &s.watchdogTotalKills,
 	})
+	// Expose dispatcher counters via /health. The handler is constructed
+	// earlier in New() without a dispatcher reference, so we wire the
+	// closure here once the dispatcher exists.
+	if s.healthH != nil {
+		s.healthH.dispatcherMetrics = d.Metrics
+	}
 	handler := d.BuildHandler()
 
 	var startedPlatforms []platform.RunnablePlatform
@@ -369,6 +375,21 @@ func (s *Server) Start(ctx context.Context) error {
 	s.nodeCache.StartLoop(ctx)
 	s.discoveryCache.startLoop(ctx)
 	s.startProjectScanLoop(ctx)
+	// Warn if we're serving a token-protected dashboard over plaintext with no
+	// trusted proxy in front — Bearer tokens and auth cookies would traverse
+	// the wire in the clear, subject to passive sniffing on shared networks.
+	// `trustedProxy=true` is the operator's explicit statement that TLS
+	// termination happens upstream (ALB/CloudFront), in which case this
+	// listener binding to plaintext loopback is fine.
+	if s.dashboardToken != "" && !s.auth.trustedProxy && isPlaintextPublicAddr(s.addr) {
+		slog.Warn(
+			"dashboard token served over plaintext HTTP with no trusted proxy: "+
+				"bearer tokens and session cookies may be sniffed. "+
+				"Terminate TLS upstream and set server.trusted_proxy=true, "+
+				"or bind to 127.0.0.1 for local-only access.",
+			"addr", s.addr,
+		)
+	}
 	slog.Info("server starting", "addr", s.addr)
 
 	ln, err := net.Listen("tcp", s.addr)
@@ -430,6 +451,29 @@ func (s *Server) Start(ctx context.Context) error {
 		<-shutdownComplete
 	}
 	return err
+}
+
+// isPlaintextPublicAddr reports whether addr is a non-loopback TCP listen
+// address that would expose Bearer tokens and auth cookies over cleartext
+// HTTP. Loopback (127.0.0.1 / ::1 / localhost) is considered safe because
+// the traffic never leaves the host. Addresses we cannot parse are treated
+// as public so the warning errs on the side of visibility.
+func isPlaintextPublicAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		// ":8080" form — no host, bound to all interfaces, public by default.
+		return true
+	}
+	switch host {
+	case "", "0.0.0.0", "::", "[::]":
+		return true
+	case "localhost", "127.0.0.1", "::1", "[::1]":
+		return false
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return false
+	}
+	return true
 }
 
 // startProjectScanLoop periodically rescans the projects root for CLAUDE.md changes

@@ -755,7 +755,7 @@ function renderEvents(events) {
   const el = document.getElementById('events-scroll');
   if (!el) return;
   const display = processEventsForDisplay(events);
-  const html = display.map(eventHtml).filter(Boolean).join('');
+  const html = renderEventsWithDividers(display, 0);
   el.innerHTML = html || (events.length === 0 ? '<div class="empty-state">no events yet</div>' : '');
   el.scrollTop = el.scrollHeight;
   // Track the latest rendered event time for deduplication
@@ -774,11 +774,18 @@ function appendEvents(events) {
   const empty = el.querySelector('.empty-state');
   if (empty) empty.remove();
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+  let prevT = lastDividerTime(el);
   events.forEach(e => {
     if (isInternalEvent(e)) return;
     // Deduplicate: skip events at or before the last rendered time
     if (e.time && e.time <= lastRenderedEventTime) return;
-    const h = eventHtml(e); if (h) el.insertAdjacentHTML('beforeend', h);
+    const h = eventHtml(e); if (!h) return;
+    const t = e.time || 0;
+    if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)) {
+      el.insertAdjacentHTML('beforeend', timeDividerHtml(t));
+    }
+    el.insertAdjacentHTML('beforeend', h);
+    if (t) prevT = t;
     if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
   });
   if (wasBottom) el.scrollTop = el.scrollHeight;
@@ -832,9 +839,47 @@ function eventHtml(e) {
     ? '<button class="event-copy-btn" data-raw="' + escAttr(rawText) + '" onclick="copyEventContent(this)">copy</button>'
     : '';
 
-  return '<div class="event ' + esc(e.type||'') + '">' +
+  const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';
+  return '<div class="event ' + esc(e.type||'') + '"' + timeAttr + '>' +
     '<span class="event-icon">' + icon + '</span>' +
     '<div class="event-content">' + content + imgHtml + copyBtn + '</div></div>';
+}
+
+// Walk a list of events and produce an HTML string with time dividers inserted
+// whenever the gap between adjacent VISIBLE (non-null) bubbles exceeds
+// EVENT_DIVIDER_GAP_MS. `prevTime` seeds the comparison against whatever is
+// already rendered in the DOM (0 = always emit a leading divider for the first
+// visible event).
+function renderEventsWithDividers(events, prevTime) {
+  let out = '';
+  let lastTime = prevTime || 0;
+  for (const e of events) {
+    const h = eventHtml(e);
+    if (!h) continue;
+    const t = e.time || 0;
+    if (t && (lastTime === 0 || t - lastTime >= EVENT_DIVIDER_GAP_MS)) {
+      out += timeDividerHtml(t);
+    }
+    out += h;
+    if (t) lastTime = t;
+  }
+  return out;
+}
+
+// Read the data-time of the last event-time-divider in the scroll container so
+// incremental appenders can decide whether a new divider is needed.
+function lastDividerTime(el) {
+  if (!el) return 0;
+  // Walk the last few children back to find the most recent divider or bubble.
+  const kids = el.children;
+  for (let i = kids.length - 1; i >= 0; i--) {
+    const c = kids[i];
+    if (c.classList && (c.classList.contains('event') || c.classList.contains('event-time-divider'))) {
+      const t = Number(c.getAttribute('data-time') || 0);
+      if (t) return t;
+    }
+  }
+  return 0;
 }
 
 // --- Send message ---
@@ -984,8 +1029,13 @@ async function sendMessage() {
       const el = document.getElementById('events-scroll');
       if (el && text) {
         const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
-        const html = eventHtml({type: 'user', detail: text, time: Date.now()});
+        const now = Date.now();
+        const html = eventHtml({type: 'user', detail: text, time: now});
         if (html) {
+          const prevT = lastDividerTime(el);
+          if (prevT === 0 || now - prevT >= EVENT_DIVIDER_GAP_MS) {
+            el.insertAdjacentHTML('beforeend', timeDividerHtml(now));
+          }
           el.insertAdjacentHTML('beforeend', html);
           el.lastElementChild.classList.add('optimistic-msg');
           if (wasBottom) el.scrollTop = el.scrollHeight;
@@ -2510,6 +2560,49 @@ function trapFocus(overlay) {
   obs.observe(document.body, { childList: true, subtree: false });
 }
 
+// Time-divider threshold: insert a visual gap label when the interval between
+// adjacent rendered events exceeds this many ms. 5 minutes matches iMessage-ish
+// chat grouping — tight enough to separate turns, loose enough to not spam.
+const EVENT_DIVIDER_GAP_MS = 5 * 60 * 1000;
+
+// formatTimeShort returns a chat-style label for a divider: today -> HH:MM,
+// yesterday -> "昨天 HH:MM", within a week -> "周三 HH:MM", older -> "M-D HH:MM",
+// different year -> "YYYY-M-D HH:MM".
+function formatTimeShort(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  const now = new Date();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  const hm = hh + ':' + mm;
+  const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+  if (sameDay) return hm;
+  const yesterday = new Date(now); yesterday.setDate(now.getDate() - 1);
+  const isYesterday = d.getFullYear() === yesterday.getFullYear() && d.getMonth() === yesterday.getMonth() && d.getDate() === yesterday.getDate();
+  if (isYesterday) return '昨天 ' + hm;
+  const diffDays = Math.floor((now - d) / 86400000);
+  if (diffDays < 7 && diffDays >= 0) {
+    const wk = ['周日','周一','周二','周三','周四','周五','周六'][d.getDay()];
+    return wk + ' ' + hm;
+  }
+  const md = (d.getMonth() + 1) + '-' + d.getDate();
+  if (d.getFullYear() !== now.getFullYear()) return d.getFullYear() + '-' + md + ' ' + hm;
+  return md + ' ' + hm;
+}
+
+// formatTimeFull is a locale-ish absolute timestamp used in the event tooltip.
+function formatTimeFull(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  const pad = n => String(n).padStart(2, '0');
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' +
+    pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+}
+
+function timeDividerHtml(ms) {
+  return '<div class="event-time-divider" data-time="' + (ms || 0) + '">' + esc(formatTimeShort(ms)) + '</div>';
+}
+
 const _escEl = document.createElement('div');
 function esc(s) {
   if (!s) return '';
@@ -3002,7 +3095,7 @@ const wsm = {
 
     if (isInitial) {
       // Full render replaces everything — remove any optimistic messages
-      const html = display.map(eventHtml).filter(Boolean).join('');
+      const html = renderEventsWithDividers(display, 0);
       // Only show "no events yet" when the server returned zero events and the session
       // is idle. For running sessions, show "loading events..." since eventPushLoop will
       // deliver events shortly (fixes blank-then-"no events yet" flash on click).
@@ -3027,6 +3120,7 @@ const wsm = {
       // Remove stale "no events yet" before processing incremental events
       const emptyEl = el.querySelector('.empty-state');
       if (emptyEl) emptyEl.remove();
+      let prevT = lastDividerTime(el);
       display.forEach(e => {
         // Deduplicate: skip events at or before the last rendered time
         if (e.time && e.time <= lastRenderedEventTime) return;
@@ -3037,7 +3131,12 @@ const wsm = {
         }
         const h = eventHtml(e);
         if (h) {
+          const t = e.time || 0;
+          if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)) {
+            el.insertAdjacentHTML('beforeend', timeDividerHtml(t));
+          }
           el.insertAdjacentHTML('beforeend', h);
+          if (t) prevT = t;
         }
         if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
       });
@@ -3155,6 +3254,11 @@ const wsm = {
       if (opt) opt.remove();
     }
     const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+    const prevT = lastDividerTime(el);
+    const evT = ev.time || 0;
+    if (evT && (prevT === 0 || evT - prevT >= EVENT_DIVIDER_GAP_MS)) {
+      el.insertAdjacentHTML('beforeend', timeDividerHtml(evT));
+    }
     el.insertAdjacentHTML('beforeend', html);
     if (wasBottom) el.scrollTop = el.scrollHeight;
     runMermaid();
@@ -3413,7 +3517,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     if (events.length === 0) {
       el.innerHTML = '<div class="empty-state">no conversation history</div>';
     } else {
-      el.innerHTML = display.map(eventHtml).filter(Boolean).join('');
+      el.innerHTML = renderEventsWithDividers(display, 0);
       el.scrollTop = el.scrollHeight;
     }
     navRebuild();
@@ -3435,9 +3539,16 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
         const empty = el2.querySelector('.empty-state');
         if (empty) empty.remove();
         const wasBottom = el2.scrollTop + el2.clientHeight >= el2.scrollHeight - 30;
+        let prevT2 = lastDividerTime(el2);
         fresh.forEach(e => {
           if (isInternalEvent(e)) return;
-          const h = eventHtml(e); if (h) el2.insertAdjacentHTML('beforeend', h);
+          const h = eventHtml(e); if (!h) return;
+          const t = e.time || 0;
+          if (t && (prevT2 === 0 || t - prevT2 >= EVENT_DIVIDER_GAP_MS)) {
+            el2.insertAdjacentHTML('beforeend', timeDividerHtml(t));
+          }
+          el2.insertAdjacentHTML('beforeend', h);
+          if (t) prevT2 = t;
         });
         if (wasBottom) el2.scrollTop = el2.scrollHeight;
         navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
@@ -3650,6 +3761,14 @@ function initSwipeBack() {
 /* ===== Cron Tab ===== */
 
 let cronJobs = [];
+// Timezone the backend uses to evaluate cron schedules. Surfaced in the
+// modal and job list so users aren't guessing whether "0 9 * * *" means
+// 9am local or 9am UTC.
+let cronTimezoneLabel = '';
+// Configured default IM target for cron completion notifications, or null
+// when the server has no default configured. Used to render helpful copy
+// alongside the notify toggle in create/edit modals.
+let cronNotifyDefault = null;
 
 function createNewCronJob() {
   const presets = [
@@ -3696,6 +3815,8 @@ function createNewCronJob() {
     '<input id="cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" aria-label="Workspace path">' +
     '</div></div>';
 
+  const notifyHtml = buildCronNotifySection('', false);
+
   overlay.innerHTML =
     '<div class="modal" role="dialog" aria-modal="true" aria-label="New cron job">' +
       '<h3>New Cron Job</h3>' +
@@ -3705,7 +3826,7 @@ function createNewCronJob() {
           '<textarea id="cron-prompt" placeholder="what should this job do?" style="min-height:72px;max-height:160px" aria-label="Prompt"></textarea>' +
         '</div>' +
         '<div class="modal-section-label">Schedule</div>' +
-        scheduleHtml + wsHtml +
+        scheduleHtml + wsHtml + notifyHtml +
       '</div>' +
       '<div class="modal-btns">' +
         '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
@@ -3719,6 +3840,77 @@ function createNewCronJob() {
   });
   overlay._cronSchedule = '';
   overlay._cronWorkDir = '';
+}
+
+// buildCronNotifySection renders the "IM 通知" section used in both the
+// create and edit modals. Initial values prefill the toggle + optional
+// per-job target inputs.
+function buildCronNotifySection(currentNotify, hasOverride, overridePlat, overrideChat) {
+  // Display hint depends on whether the server has a default target.
+  // With a default: "发送到 Feishu (oc_xxx)". Without: warn that user must
+  // provide a per-job target or configure cron.notify_default.
+  let defaultHint;
+  if (cronNotifyDefault && cronNotifyDefault.platform && cronNotifyDefault.chat_id) {
+    defaultHint = '将发送到 <b>' + esc(cronNotifyDefault.platform) + '</b> (' + esc(cronNotifyDefault.chat_id) + ')';
+  } else {
+    defaultHint = '未配置默认通知目标。在 config.yaml 的 <code>cron.notify_default</code> 中配置，或在下方填写自定义目标。';
+  }
+  // currentNotify: 'on' / 'off' / '' (legacy — leave unset)
+  const onChecked = currentNotify === 'on' ? 'checked' : '';
+  const offChecked = currentNotify === 'off' ? 'checked' : '';
+  const showOverride = hasOverride ? '' : 'display:none;';
+  return '<div class="cron-notify-section" style="margin-top:12px">' +
+      '<div class="modal-section-label">完成后发送 IM 通知</div>' +
+      '<label class="cron-notify-opt"><input type="radio" name="cron-notify" value="on" ' + onChecked + ' onchange="cronNotifyToggle(this)"> 开启</label>' +
+      '<label class="cron-notify-opt"><input type="radio" name="cron-notify" value="off" ' + offChecked + ' onchange="cronNotifyToggle(this)"> 关闭</label>' +
+      '<div class="cron-tz-hint" id="cron-notify-default-hint">' + defaultHint + '</div>' +
+      '<div style="margin-top:8px">' +
+        '<label class="cron-notify-override-toggle" style="font-size:12px;cursor:pointer"><input type="checkbox" id="cron-notify-override" ' + (hasOverride ? 'checked' : '') + ' onchange="cronNotifyOverrideToggle(this)"> 自定义此任务的通知目标</label>' +
+      '</div>' +
+      '<div id="cron-notify-override-form" style="' + showOverride + 'margin-top:6px;display:flex;gap:6px">' +
+        '<input id="cron-notify-platform" placeholder="feishu" value="' + escAttr(overridePlat || '') + '" aria-label="Platform" style="flex:0 0 100px">' +
+        '<input id="cron-notify-chat-id" placeholder="chat_id" value="' + escAttr(overrideChat || '') + '" aria-label="Chat ID" style="flex:1">' +
+      '</div>' +
+    '</div>';
+}
+
+function cronNotifyToggle(el) {
+  // no-op — radios are read by collectCronNotifyValues. Kept for future
+  // inline validation (e.g. gray out override form when "关闭" selected).
+  const overrideForm = document.getElementById('cron-notify-override-form');
+  const overrideToggle = document.getElementById('cron-notify-override');
+  if (!overrideForm || !overrideToggle) return;
+  if (el.value === 'off') {
+    overrideForm.style.display = 'none';
+    overrideToggle.disabled = true;
+    overrideToggle.checked = false;
+  } else {
+    overrideToggle.disabled = false;
+  }
+}
+
+function cronNotifyOverrideToggle(cb) {
+  const form = document.getElementById('cron-notify-override-form');
+  if (form) form.style.display = cb.checked ? 'flex' : 'none';
+}
+
+// collectCronNotifyValues reads the modal's notify fields and returns an
+// object ready to merge into the POST/PATCH body. Returns null fields so
+// the caller can distinguish "user didn't touch it" from "user set it".
+function collectCronNotifyValues() {
+  const selected = document.querySelector('input[name="cron-notify"]:checked');
+  const out = { notify: null, notify_platform: null, notify_chat_id: null };
+  if (selected) {
+    out.notify = selected.value === 'on';
+  }
+  const override = document.getElementById('cron-notify-override');
+  if (override && override.checked) {
+    const platInput = document.getElementById('cron-notify-platform');
+    const chatInput = document.getElementById('cron-notify-chat-id');
+    out.notify_platform = platInput ? platInput.value.trim() : '';
+    out.notify_chat_id = chatInput ? chatInput.value.trim() : '';
+  }
+  return out;
 }
 
 function cronSelectSchedule(el, value) {
@@ -3817,7 +4009,8 @@ async function previewCronSchedule(schedule) {
     const data = await r.json();
     if (data.valid) {
       hint.className = 'cron-preview-hint ok';
-      hint.textContent = 'next run: ' + timeAgo(data.next_run, true);
+      const tz = data.timezone_label || data.timezone;
+      hint.textContent = 'next run: ' + timeAgo(data.next_run, true) + (tz ? ' (' + tz + ')' : '');
     } else {
       hint.className = 'cron-preview-hint err';
       hint.textContent = data.error || 'invalid schedule';
@@ -3850,6 +4043,10 @@ async function doCreateCronJob() {
     const body = {schedule};
     if (prompt) body.prompt = prompt;
     if (workDir) body.work_dir = workDir;
+    const notifyVals = collectCronNotifyValues();
+    if (notifyVals.notify !== null) body.notify = notifyVals.notify;
+    if (notifyVals.notify_platform !== null) body.notify_platform = notifyVals.notify_platform;
+    if (notifyVals.notify_chat_id !== null) body.notify_chat_id = notifyVals.notify_chat_id;
     const r = await fetch('/api/cron', {method: 'POST', headers, body: JSON.stringify(body)});
     if (!r.ok) { showToast('create failed: ' + await r.text()); return; }
     const data = await r.json();
@@ -3877,6 +4074,9 @@ function openCronPanel() {
 
 function renderCronPanel() {
   const main = document.getElementById('main');
+  const tzBanner = cronTimezoneLabel
+    ? '<div class="cron-tz-banner" title="Schedules are evaluated in this timezone">timezone: ' + esc(cronTimezoneLabel) + '</div>'
+    : '';
   let html =
     '<div class="main-header">' +
       '<button class="btn-mobile-back" onclick="mobileBack()" title="back" aria-label="Back to sidebar">&#8592;</button>' +
@@ -3890,7 +4090,8 @@ function renderCronPanel() {
             '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>' +
             ' New' +
           '</button>' +
-        '</div>';
+        '</div>' +
+        tzBanner;
   if (cronJobs.length === 0) {
     html +=
       '<div class="cron-empty">' +
@@ -3905,6 +4106,16 @@ function renderCronPanel() {
       const nextStr = j.next_run ? timeAgo(j.next_run, true) : '';
       const lastStr = j.last_run_at ? timeAgo(j.last_run_at) : '';
       const wdStr = j.work_dir ? '<span class="cc-ws" title="' + escAttr(j.work_dir) + '">' + esc(shortPath(j.work_dir)) + '</span>' : '';
+      // Notify badge: explicit on/off only; legacy-default jobs show nothing.
+      let notifyStr = '';
+      if (j.notify === true) {
+        const tgt = (j.notify_platform && j.notify_chat_id)
+          ? j.notify_platform + ':' + j.notify_chat_id
+          : (cronNotifyDefault ? cronNotifyDefault.platform + ':' + cronNotifyDefault.chat_id : 'default');
+        notifyStr = '<span class="cc-notify on" title="IM 通知 → ' + escAttr(tgt) + '">&#128276; notify</span>';
+      } else if (j.notify === false) {
+        notifyStr = '<span class="cc-notify off" title="IM 通知已关闭">&#128277; silent</span>';
+      }
       let result = '';
       if (j.last_error) {
         result = '<div class="cc-result err"><span class="cc-icon">\u2716</span><span class="cc-text">' + esc(j.last_error) + '</span></div>';
@@ -3920,12 +4131,13 @@ function renderCronPanel() {
       return '<div class="cron-card" role="button" tabindex="0" onclick="openCronSession(\'' + escJs(j.id) + '\')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronSession(\'' + escJs(j.id) + '\')}">' +
         promptBlock +
         '<div class="cc-schedule">' + esc(j.schedule) + '</div>' +
-        '<div class="cc-meta">' + status + wdStr +
+        '<div class="cc-meta">' + status + wdStr + notifyStr +
           (lastStr ? '<span>ran ' + lastStr + '</span>' : '') +
           (nextStr ? '<span>next ' + nextStr + '</span>' : '') +
         '</div>' +
         result +
         '<div class="cc-actions" onclick="event.stopPropagation()">' +
+          '<button type="button" class="cc-btn" onclick="editCronJob(\'' + escJs(j.id) + '\')">edit</button>' +
           toggleBtn +
           '<button type="button" class="cc-btn danger" onclick="cronDelete(\'' + escJs(j.id) + '\')">delete</button>' +
         '</div>' +
@@ -3956,6 +4168,8 @@ async function fetchCronJobs() {
     if (!r.ok) return;
     const data = await r.json();
     cronJobs = data.jobs || [];
+    cronTimezoneLabel = data.timezone_label || data.timezone || '';
+    cronNotifyDefault = data.notify_default || null;
     const cronBadge = document.getElementById('cron-badge');
     if (cronBadge) {
       // Badge surfaces jobs needing attention (paused or last run errored),
@@ -3999,6 +4213,159 @@ async function cronDelete(id) {
     if (!r.ok) { showToast('delete failed'); return; }
     fetchCronJobs().then(() => renderCronPanel());
   } catch (e) { showToast('error: ' + e.message); }
+}
+
+// Edit an existing cron job. Opens a modal pre-populated with the current
+// schedule, prompt, and work_dir. Each field is independently editable;
+// only changed fields are sent in the PATCH body.
+function editCronJob(id) {
+  const job = cronJobs.find(j => j.id === id);
+  if (!job) { showToast('job not found'); return; }
+
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  const tzHint = cronTimezoneLabel
+    ? '<div class="cron-tz-hint">schedules evaluated in ' + esc(cronTimezoneLabel) + '</div>'
+    : '';
+  // Pre-select the radio based on job.notify tri-state.
+  const notifyInitial = job.notify === true ? 'on' : (job.notify === false ? 'off' : '');
+  const hasOverride = !!(job.notify_platform && job.notify_chat_id);
+  const notifyHtml = buildCronNotifySection(notifyInitial, hasOverride, job.notify_platform, job.notify_chat_id);
+  overlay.innerHTML =
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="Edit cron job">' +
+      '<h3>Edit Cron Job</h3>' +
+      '<div class="modal-body">' +
+        '<div style="margin-bottom:12px">' +
+          '<div class="modal-section-label">Prompt</div>' +
+          '<textarea id="edit-cron-prompt" style="min-height:72px;max-height:240px" aria-label="Prompt"></textarea>' +
+        '</div>' +
+        '<div style="margin-bottom:12px">' +
+          '<div class="modal-section-label">Schedule</div>' +
+          '<input id="edit-cron-schedule" placeholder="@every 30m or 0 9 * * 1-5" aria-label="Schedule">' +
+          '<div id="edit-cron-preview-hint" class="cron-preview-hint"></div>' +
+          tzHint +
+        '</div>' +
+        '<div>' +
+          '<div class="modal-section-label">Workspace (optional)</div>' +
+          '<input id="edit-cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" aria-label="Workspace path">' +
+          '<div class="cron-tz-hint">leave empty to use the default workspace</div>' +
+        '</div>' +
+        notifyHtml +
+      '</div>' +
+      '<div class="modal-btns">' +
+        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
+        '<button type="button" class="primary" onclick="doEditCronJob(\'' + escJs(id) + '\')">save</button>' +
+      '</div>' +
+    '</div>';
+  document.body.appendChild(overlay);
+  trapFocus(overlay);
+
+  // Pre-populate; textarea/input .value assigns raw text safely.
+  document.getElementById('edit-cron-prompt').value = job.prompt || '';
+  document.getElementById('edit-cron-schedule').value = job.schedule || '';
+  document.getElementById('edit-cron-workdir').value = job.work_dir || '';
+
+  overlay.addEventListener('keydown', function(e) {
+    if (e.key === 'Escape') overlay.remove();
+  });
+
+  // Live preview for schedule edits — reuses the backend preview endpoint
+  // so the user sees the next run before saving.
+  const schedInput = document.getElementById('edit-cron-schedule');
+  let previewTimer;
+  const doPreview = () => {
+    const val = schedInput.value.trim();
+    const hint = document.getElementById('edit-cron-preview-hint');
+    if (!hint) return;
+    if (!val) { hint.textContent = ''; hint.className = 'cron-preview-hint'; return; }
+    fetch('/api/cron/preview?schedule=' + encodeURIComponent(val), { headers: authHeaders() })
+      .then(r => r.json())
+      .then(data => {
+        if (data.valid) {
+          hint.className = 'cron-preview-hint ok';
+          hint.textContent = 'next run: ' + timeAgo(data.next_run, true);
+        } else {
+          hint.className = 'cron-preview-hint err';
+          hint.textContent = data.error || 'invalid schedule';
+        }
+      })
+      .catch(() => {
+        hint.className = 'cron-preview-hint err';
+        hint.textContent = 'preview error';
+      });
+  };
+  schedInput.addEventListener('input', () => {
+    clearTimeout(previewTimer);
+    previewTimer = setTimeout(doPreview, 300);
+  });
+}
+
+function authHeaders() {
+  const headers = {};
+  const t = getToken();
+  if (t) headers['Authorization'] = 'Bearer ' + t;
+  return headers;
+}
+
+async function doEditCronJob(id) {
+  const overlay = document.querySelector('.modal-overlay');
+  if (!overlay) return;
+  const job = cronJobs.find(j => j.id === id);
+  if (!job) { showToast('job not found'); return; }
+
+  const newPrompt = document.getElementById('edit-cron-prompt').value;
+  const newSchedule = document.getElementById('edit-cron-schedule').value.trim();
+  const newWorkDir = document.getElementById('edit-cron-workdir').value.trim();
+
+  // Only send fields that actually changed so the server keeps fields the
+  // user didn't touch (and the audit log stays meaningful).
+  const body = {};
+  if (newPrompt !== (job.prompt || '')) body.prompt = newPrompt;
+  if (newSchedule !== job.schedule) body.schedule = newSchedule;
+  if (newWorkDir !== (job.work_dir || '')) body.work_dir = newWorkDir;
+
+  // Notify toggle — compare against the job's existing tri-state.
+  const notifyVals = collectCronNotifyValues();
+  const originalNotify = (job.notify === true || job.notify === false) ? job.notify : null;
+  if (notifyVals.notify !== null && notifyVals.notify !== originalNotify) {
+    body.notify = notifyVals.notify;
+  }
+  // Per-job target override: any change (including clearing) is a PATCH.
+  const origPlat = job.notify_platform || '';
+  const origChat = job.notify_chat_id || '';
+  if (notifyVals.notify_platform !== null && notifyVals.notify_platform !== origPlat) {
+    body.notify_platform = notifyVals.notify_platform;
+  }
+  if (notifyVals.notify_chat_id !== null && notifyVals.notify_chat_id !== origChat) {
+    body.notify_chat_id = notifyVals.notify_chat_id;
+  }
+  // If user unchecked the override, explicitly clear both fields (server
+  // accepts "" to mean "clear").
+  const overrideCheckbox = document.getElementById('cron-notify-override');
+  if (overrideCheckbox && !overrideCheckbox.checked && (origPlat || origChat)) {
+    body.notify_platform = '';
+    body.notify_chat_id = '';
+  }
+
+  if (Object.keys(body).length === 0) { overlay.remove(); return; }
+  if (body.schedule === '') { showToast('schedule must not be empty', 'warning'); return; }
+
+  try {
+    const headers = Object.assign({ 'Content-Type': 'application/json' }, authHeaders());
+    const r = await fetch('/api/cron?id=' + encodeURIComponent(id), {
+      method: 'PATCH', headers, body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const raw = await r.text().catch(() => '');
+      showToast('save failed: ' + (raw || r.status));
+      return;
+    }
+    overlay.remove();
+    showToast('cron job updated', 'success');
+    fetchCronJobs().then(() => renderCronPanel());
+  } catch (e) {
+    showToast('error: ' + e.message);
+  }
 }
 
 /* ===== Sidebar resizer (desktop only) ===== */

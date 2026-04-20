@@ -292,11 +292,15 @@ func injectNodeField(data, nodeField []byte) []byte {
 	// Skip injection if the remote message already has a "node" key.
 	// Match `"node":` (with colon) to avoid false positives where "node" appears
 	// only as a value inside another field.
-	window := data
-	if len(window) > 256 {
-		window = window[:256]
-	}
-	if bytes.Contains(window, []byte(`"node":`)) {
+	//
+	// Window size: scans the whole payload. A short peek-window (previously
+	// 256B) could miss the "node" key when it's encoded after a long session
+	// key or large event body, causing double-injection → duplicate-key JSON
+	// whose resolution is parser-defined (often last-wins, clobbering the
+	// real node ID). A Contains scan on a ~KB to multi-KB slice is O(n) but
+	// runs once per inbound message; the bytes package uses SIMD-friendly
+	// search, so the cost is negligible versus the correctness gain.
+	if bytes.Contains(data, []byte(`"node":`)) {
 		return data
 	}
 	// Guard: empty object "{}" — nodeField ends with ',' which would produce
@@ -382,8 +386,18 @@ func (r *wsRelay) reconnect() {
 func (r *wsRelay) sendHistoryToClient(c EventSink, key string, after int64) {
 	c.SendJSON(ServerMsg{Type: "subscribed", Key: key, Node: r.node.ID})
 
+	// Tie the 5s budget to the relay lifecycle so a Close() during fetch
+	// aborts the HTTP call immediately instead of letting the goroutine
+	// run for up to 5s and then send to a half-closed EventSink.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+	go func() {
+		select {
+		case <-r.done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
 
 	entries, err := r.node.FetchEvents(ctx, key, after)
 	if err != nil {

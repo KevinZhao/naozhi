@@ -40,6 +40,15 @@ cron:
   store_path: "~/.naozhi/cron_jobs.json"
   max_jobs: 50
   execution_timeout: "3600s"
+  # IANA timezone for interpreting cron expressions (e.g. "0 9 * * *" = 9am in this zone).
+  # Empty / "Local" uses the system local time (respects $TZ). Examples: "Asia/Shanghai", "UTC".
+  timezone: "Asia/Shanghai"
+  # Fallback IM target for jobs that opt into completion notifications via the
+  # dashboard toggle but don't specify a per-job target. Both fields required.
+  # Leave empty to disable the default (per-job targets still work).
+  notify_default:
+    platform: ""   # e.g. "feishu"
+    chat_id: ""    # e.g. "oc_xxxxxxxxxxxx"
 
 platforms:
   feishu:

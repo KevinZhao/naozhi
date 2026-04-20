@@ -271,7 +271,7 @@ Agent 命令通过 `agent_commands` 配置映射，可自定义。
 server:
   addr: ":8180"
   dashboard_token: "${DASHBOARD_TOKEN}"   # Dashboard 访问密码 (可选)
-  allowed_root: "/home/user/projects"     # 限制 /cd 可访问的路径
+  trusted_proxy: false                    # ALB/CloudFront 终止 TLS 时设为 true
 
 cli:
   backend: claude                         # "claude" | "kiro"
@@ -281,6 +281,7 @@ cli:
     - "--dangerously-skip-permissions"
 
 session:
+  cwd: "/home/user/projects"              # CLI 默认工作目录，亦作 /cd 的允许根路径
   max_procs: 3                            # 最大并发 CLI 进程
   ttl: "30m"                              # 空闲回收超时
   watchdog:
@@ -306,7 +307,7 @@ cron:
 
 transcribe:                               # 语音转文字 (Amazon Transcribe)
   region: "us-east-1"
-  languages: "zh-CN,en-US,ja-JP"         # 多语言自动检测
+  language: "zh-CN"                       # BCP-47 单语言代码，默认 zh-CN
 
 projects:
   root: "/home/user/projects"             # 项目扫描根目录

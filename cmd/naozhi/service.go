@@ -67,7 +67,7 @@ func runInstall(args []string) {
 		fatalf("resolve config path: %v", err)
 	}
 	if _, err := os.Stat(absConfig); os.IsNotExist(err) {
-		fatalf("config not found: %s\nRun 'naozhi init' first to generate config.", absConfig)
+		fatalf("config not found: %s\nRun 'naozhi setup' first to generate config.", absConfig)
 	}
 
 	binary, err := os.Executable()

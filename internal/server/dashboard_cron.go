@@ -3,8 +3,10 @@ package server
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cron"
 )
@@ -39,6 +41,9 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		LastRunAt      int64  `json:"last_run_at,omitempty"`
 		LastError      string `json:"last_error,omitempty"`
 		NextRun        int64  `json:"next_run,omitempty"`
+		// Notify is a pointer so the view preserves the tri-state (nil vs
+		// explicit true/false). nil renders as "legacy default" on the client.
+		Notify *bool `json:"notify,omitempty"`
 	}
 	views := make([]cronJobView, 0, len(jobs))
 	for _, j := range jobs {
@@ -56,6 +61,7 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			NotifyChatID:   j.NotifyChatID,
 			LastResult:     j.LastResult,
 			LastError:      j.LastError,
+			Notify:         j.Notify,
 		}
 		if !j.LastRunAt.IsZero() {
 			v.LastRunAt = j.LastRunAt.UnixMilli()
@@ -66,7 +72,27 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		views = append(views, v)
 	}
 
-	writeJSON(w, map[string]any{"jobs": views})
+	loc := h.scheduler.Location()
+	name, offset := time.Now().In(loc).Zone()
+	tzLabel := fmt.Sprintf("%s (UTC%+03d:%02d)", loc.String(), offset/3600, (offset%3600)/60)
+
+	resp := map[string]any{
+		"jobs":           views,
+		"timezone":       loc.String(),
+		"timezone_label": tzLabel,
+		"timezone_abbr":  name,
+	}
+	if def := h.scheduler.NotifyDefault(); def.IsSet() {
+		// Expose the configured default so the UI can render helpful copy
+		// like "notifications go to feishu (oc_xxx)" instead of just a
+		// blank toggle. chat_id is already considered semi-public (appears
+		// in message metadata) so surfacing it here is not a leak.
+		resp["notify_default"] = map[string]string{
+			"platform": def.Platform,
+			"chat_id":  def.ChatID,
+		}
+	}
+	writeJSON(w, resp)
 }
 
 // POST /api/cron — create a new cron job from dashboard.
@@ -82,6 +108,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		WorkDir        string `json:"work_dir,omitempty"`
 		NotifyPlatform string `json:"notify_platform,omitempty"`
 		NotifyChatID   string `json:"notify_chat_id,omitempty"`
+		Notify         *bool  `json:"notify,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64 KB
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -103,6 +130,17 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		req.WorkDir = validated
 	}
 
+	// Guard: notify=true without any target (neither per-job override nor
+	// scheduler default) would silently swallow notifications. Reject it
+	// at the edge so users see the problem immediately.
+	if req.Notify != nil && *req.Notify {
+		perJobSet := req.NotifyPlatform != "" && req.NotifyChatID != ""
+		if !perJobSet && !h.scheduler.NotifyDefault().IsSet() {
+			http.Error(w, "notify=true but no target configured: set cron.notify_default in config or provide notify_platform/notify_chat_id", http.StatusBadRequest)
+			return
+		}
+	}
+
 	job := &cron.Job{
 		Schedule:       req.Schedule,
 		Prompt:         req.Prompt,
@@ -112,6 +150,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		WorkDir:        req.WorkDir,
 		NotifyPlatform: req.NotifyPlatform,
 		NotifyChatID:   req.NotifyChatID,
+		Notify:         req.Notify,
 		Paused:         req.Prompt == "", // auto-pause when no prompt
 	}
 	if err := h.scheduler.AddJob(job); err != nil {
@@ -249,11 +288,112 @@ func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	next, err := cron.PreviewSchedule(schedule)
+	var (
+		next    time.Time
+		err     error
+		tzName  = "UTC"
+		tzLabel = ""
+	)
+	if h.scheduler != nil {
+		next, err = h.scheduler.PreviewSchedule(schedule)
+		loc := h.scheduler.Location()
+		tzName = loc.String()
+		if n, offset := time.Now().In(loc).Zone(); n != "" {
+			tzLabel = fmt.Sprintf("%s (UTC%+03d:%02d)", tzName, offset/3600, (offset%3600)/60)
+		}
+	} else {
+		next, err = cron.PreviewSchedule(schedule)
+	}
 	if err != nil {
 		writeJSON(w, map[string]any{"valid": false, "error": err.Error()})
 		return
 	}
 
-	writeJSON(w, map[string]any{"valid": true, "next_run": next.UnixMilli()})
+	resp := map[string]any{
+		"valid":    true,
+		"next_run": next.UnixMilli(),
+		"timezone": tzName,
+	}
+	if tzLabel != "" {
+		resp["timezone_label"] = tzLabel
+	}
+	writeJSON(w, resp)
+}
+
+// PATCH /api/cron?id=xxx — edit schedule / prompt / work_dir on an existing job.
+func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
+	if h.scheduler == nil {
+		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		return
+	}
+
+	id := r.URL.Query().Get("id")
+	if id == "" {
+		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+
+	// Use pointers so the caller can distinguish "leave as-is" from "clear".
+	// Sending "work_dir": "" explicitly clears the override; omitting the key
+	// leaves the existing value alone.
+	var req struct {
+		Schedule       *string `json:"schedule,omitempty"`
+		Prompt         *string `json:"prompt,omitempty"`
+		WorkDir        *string `json:"work_dir,omitempty"`
+		Notify         *bool   `json:"notify,omitempty"`
+		NotifyPlatform *string `json:"notify_platform,omitempty"`
+		NotifyChatID   *string `json:"notify_chat_id,omitempty"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if req.Schedule == nil && req.Prompt == nil && req.WorkDir == nil &&
+		req.Notify == nil && req.NotifyPlatform == nil && req.NotifyChatID == nil {
+		http.Error(w, "at least one field must be provided", http.StatusBadRequest)
+		return
+	}
+
+	// Re-validate workspace against allowedRoot; a cleared WorkDir is
+	// accepted as-is and will fall back to the router default.
+	if req.WorkDir != nil && *req.WorkDir != "" {
+		validated, err := validateWorkspace(*req.WorkDir, h.allowedRoot)
+		if err != nil {
+			http.Error(w, "work_dir: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		req.WorkDir = &validated
+	}
+
+	// Guard: notify=true with no effective target would silently drop
+	// notifications. Mirror the handleCreate check.
+	if req.Notify != nil && *req.Notify {
+		perJobSet := req.NotifyPlatform != nil && *req.NotifyPlatform != "" &&
+			req.NotifyChatID != nil && *req.NotifyChatID != ""
+		if !perJobSet && !h.scheduler.NotifyDefault().IsSet() {
+			http.Error(w, "notify=true but no target configured: set cron.notify_default in config or provide notify_platform/notify_chat_id", http.StatusBadRequest)
+			return
+		}
+	}
+
+	j, err := h.scheduler.UpdateJob(id, cron.JobUpdate{
+		Schedule:       req.Schedule,
+		Prompt:         req.Prompt,
+		WorkDir:        req.WorkDir,
+		Notify:         req.Notify,
+		NotifyPlatform: req.NotifyPlatform,
+		NotifyChatID:   req.NotifyChatID,
+	})
+	if err != nil {
+		if errors.Is(err, cron.ErrJobNotFound) {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+		}
+		return
+	}
+
+	slog.Info("cron job updated via dashboard", "id", j.ID)
+	writeJSON(w, map[string]any{"status": "ok", "id": j.ID})
 }

@@ -243,9 +243,17 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 				})
 			}
 
+			// When the upstream response omits message_id the zero value "0"
+			// is not a real ID — every zero-id message would collide on the
+			// first dedup call and then pass through, so leave EventID empty
+			// and let Dedup.Seen's empty-string guard treat it as unknown.
+			eventID := ""
+			if msg.MessageID != 0 {
+				eventID = fmt.Sprintf("%d", msg.MessageID)
+			}
 			incoming := platform.IncomingMessage{
 				Platform:  "weixin",
-				EventID:   fmt.Sprintf("%d", msg.MessageID),
+				EventID:   eventID,
 				UserID:    from,
 				ChatID:    from, // direct chat, reply to the sender
 				ChatType:  "direct",

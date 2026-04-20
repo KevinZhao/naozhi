@@ -92,7 +92,10 @@ func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 11<<20) // 10MB + form overhead
 	if err := r.ParseMultipartForm(10 << 20); err != nil {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "bad multipart form: " + err.Error()})
+		// Don't echo stdlib internals (boundary details, file-system paths)
+		// back to the client; log internally for operator triage.
+		slog.Warn("upload: multipart parse failed", "err", err)
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "bad multipart form"})
 		return
 	}
 	files := r.MultipartForm.File["file"]
@@ -128,7 +131,8 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(ct, "multipart/form-data") {
 		r.Body = http.MaxBytesReader(w, r.Body, 105<<20) // 10 files × 10MB + form overhead
 		if err := r.ParseMultipartForm(32 << 20); err != nil {
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "bad multipart form: " + err.Error()})
+			slog.Warn("send: multipart parse failed", "err", err)
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "bad multipart form"})
 			return
 		}
 		key = r.FormValue("key")

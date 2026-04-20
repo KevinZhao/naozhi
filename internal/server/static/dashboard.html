@@ -114,6 +114,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .event.user+.event.text{margin-top:8px}
 .event.system+.event.user,.event.system+.event.text,.event.init+.event.user,.event.init+.event.text{margin-top:8px}
 .event.user+.event.user,.event.text+.event.text{margin-top:2px}
+.event-time-divider{text-align:center;color:var(--nz-text-dim);font-size:11px;margin:16px 0 6px;opacity:.55;user-select:none;letter-spacing:.02em}
 .empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:var(--nz-text-dim);font-size:15px}
 .no-sessions{padding:40px 16px;text-align:center;color:var(--nz-text-faint);font-size:14px}
 
@@ -476,6 +477,14 @@ body.kbd-open .input-hints{display:none}
 .cron-preview-hint{font-size:11px;color:var(--nz-text-mute);margin-top:4px;min-height:16px}
 .cron-preview-hint.ok{color:var(--nz-green)}
 .cron-preview-hint.err{color:var(--nz-red)}
+.cron-tz-banner{font-size:11px;color:var(--nz-text-mute);margin:8px 0 12px;padding:6px 10px;border-radius:4px;background:rgba(255,255,255,.04);border:1px solid var(--nz-border)}
+.cron-tz-hint{font-size:11px;color:var(--nz-text-mute);margin-top:4px}
+.cron-notify-section{padding:10px;border-radius:4px;background:rgba(255,255,255,.03);border:1px solid var(--nz-border)}
+.cron-notify-opt{display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:13px;cursor:pointer}
+.cron-notify-opt input{margin-right:2px}
+.cc-notify{font-size:11px;padding:1px 6px;border-radius:3px}
+.cc-notify.on{background:rgba(46,160,67,.15);color:var(--nz-green)}
+.cc-notify.off{background:rgba(139,148,158,.15);color:var(--nz-text-mute)}
 
 /* Mobile polish for Cron cards + modal */
 @media(max-width:768px){

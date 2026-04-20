@@ -37,16 +37,19 @@ cmd/naozhi/main.go
   -> config       YAML loading, env var expansion, validation
   -> cli          Protocol interface + spawn/manage CLI processes with watchdog
   -> session      Session router, concurrency control, TTL, persistence
+  -> dispatch     Message handler + slash commands + per-session queue
   -> platform     Platform interface + feishu/slack/discord/weixin implementations
-  -> server       HTTP server, message handler, dashboard, WebSocket hub, REST API
+  -> server       HTTP server, dashboard, WebSocket hub, REST API
   -> cron         Scheduled task execution (robfig/cron)
   -> project      Project discovery, chat binding, planner routing
-  -> connector    Upstream reverse-connect client (NAT traversal)
+  -> node         WebSocket protocol types + HTTP/reverse node clients
+  -> upstream     Reverse-connect client (NAT traversal; dials primary naozhi)
   -> discovery    Scan ~/.claude/sessions for external Claude CLI processes
-  -> routing      Command prefix parsing (shared by server + cron)
-  -> reverse      WebSocket protocol types for multi-node communication
-  -> pathutil     Path expansion utilities
+  -> shim         Zero-downtime restart: sidecar process that outlives naozhi
   -> transcribe   Voice message transcription (Amazon Transcribe Streaming)
+  -> netutil      Client-IP extraction with trusted-proxy handling
+  -> osutil       Home/path expansion, process helpers, sd_notify
+  -> ratelimit    Per-key LRU rate limiter (used by login/WS/upload)
 ```
 
 ### CLI Process Lifecycle

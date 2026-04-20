@@ -111,6 +111,7 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("POST /api/transcribe", auth(s.transcribeH.handleTranscribe))
 	s.mux.HandleFunc("GET /api/cron", auth(s.cronH.handleList))
 	s.mux.HandleFunc("POST /api/cron", auth(s.cronH.handleCreate))
+	s.mux.HandleFunc("PATCH /api/cron", auth(s.cronH.handleUpdate))
 	s.mux.HandleFunc("DELETE /api/cron", auth(s.cronH.handleDelete))
 	s.mux.HandleFunc("POST /api/cron/pause", auth(s.cronH.handlePause))
 	s.mux.HandleFunc("POST /api/cron/resume", auth(s.cronH.handleResume))

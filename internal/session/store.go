@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"time"
 )
 
@@ -46,10 +47,18 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 			} else {
 				cost = s.totalCost
 			}
+			// Clone PrevSessionIDs so the persistence path does not share
+			// the backing array with live session mutations (spawnSession
+			// reassigns s.prevSessionIDs but callers could in theory hold
+			// the original slice; clone is cheap and forward-safe).
+			var prevIDs []string
+			if len(s.prevSessionIDs) > 0 {
+				prevIDs = slices.Clone(s.prevSessionIDs)
+			}
 			entries = append(entries, storeEntry{
 				Key:            s.key,
 				SessionID:      sid,
-				PrevSessionIDs: s.prevSessionIDs,
+				PrevSessionIDs: prevIDs,
 				TotalCost:      cost,
 				Workspace:      s.workspace,
 				LastActive:     s.lastActive.Load(),

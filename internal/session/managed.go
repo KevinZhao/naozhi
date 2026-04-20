@@ -13,7 +13,15 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
-const maxPersistedHistory = 500
+const (
+	maxPersistedHistory = 500
+
+	// maxPrevSessionIDs caps the session chain length so long-lived chats
+	// don't grow storeEntry.PrevSessionIDs without bound (each "/new" or
+	// workspace switch appends one). 32 retains enough chain for multi-day
+	// context recovery while keeping sessions.json size bounded.
+	maxPrevSessionIDs = 32
+)
 
 // processIface abstracts the CLI process lifecycle methods used by the router
 // and session layer. *cli.Process satisfies this interface.
@@ -90,8 +98,11 @@ type ManagedSession struct {
 	// Populated by InjectHistory and carried over when the process is replaced.
 	persistedHistory []cli.EventEntry
 
-	// prevSessionIDs tracks all previous session IDs for this key (oldest → newest).
+	// prevSessionIDs tracks previous session IDs for this key (oldest → newest).
 	// Used on startup to load the full conversation chain from JSONL files.
+	// Capped at maxPrevSessionIDs to bound long-lived session memory and
+	// sessions.json size. Overflow drops oldest entries; history still loads
+	// from the retained tail which carries the most recent context.
 	prevSessionIDs []string
 
 	// exempt marks this session as exempt from TTL cleanup, eviction, and activeCount.

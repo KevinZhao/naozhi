@@ -22,10 +22,14 @@ func ProcStartTime(pid int) (uint64, error) {
 	if s == "" {
 		return 0, fmt.Errorf("ps returned empty lstart for pid %d", pid)
 	}
-	t, err := time.Parse("Mon Jan  2 15:04:05 2006", s)
+	// ps(1) on Darwin prints lstart in the local timezone without a zone
+	// suffix; Parse (no location) would interpret the wallclock as UTC and
+	// shift start-time identity by the UTC offset (e.g. +8h in Shanghai),
+	// breaking stale-shim detection after TZ-sensitive restarts.
+	t, err := time.ParseInLocation("Mon Jan  2 15:04:05 2006", s, time.Local)
 	if err != nil {
 		// Fallback: try single-digit day format "Mon Jan 2 15:04:05 2006"
-		t, err = time.Parse("Mon Jan 2 15:04:05 2006", s)
+		t, err = time.ParseInLocation("Mon Jan 2 15:04:05 2006", s, time.Local)
 		if err != nil {
 			return 0, fmt.Errorf("parse lstart %q for pid %d: %w", s, pid, err)
 		}

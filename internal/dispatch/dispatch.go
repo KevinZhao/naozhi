@@ -49,8 +49,20 @@ type Dispatcher struct {
 	watchdogNoOutputKills *atomic.Int64
 	watchdogTotalKills    *atomic.Int64
 
+	// Operational counters exposed via /health for triaging. Incremented
+	// atomically and never reset (monotonic since process start).
+	messageCount    atomic.Int64 // all non-slash-command IM messages accepted
+	replyErrorCount atomic.Int64 // errors returned by sendFn (includes timeouts)
+	sendFailCount   atomic.Int64 // user-visible reply failures (platform send errors)
+
 	sendFn     func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
 	takeoverFn func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
+}
+
+// Metrics returns a snapshot of operational counters for /health.
+// Values are monotonic since process start.
+func (d *Dispatcher) Metrics() (messageCount, replyErrorCount, sendFailCount int64) {
+	return d.messageCount.Load(), d.replyErrorCount.Load(), d.sendFailCount.Load()
 }
 
 // DispatcherConfig holds all dependencies for constructing a Dispatcher.
@@ -140,6 +152,10 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 				return
 			}
 		}
+
+		// Count accepted messages (post-dedup, post-command-filter). Does not
+		// include slash commands, ignored non-text items, or dedup hits.
+		d.messageCount.Add(1)
 
 		// Determine session key and opts: project-bound chat routes to planner
 		var key string
@@ -296,7 +312,14 @@ func (d *Dispatcher) sendAndReply(
 
 	sess, sessStatus, err := d.router.GetOrCreate(ctx, key, opts)
 	if err != nil {
-		log.Error("get session", "err", err)
+		// Shutdown-path cancellation is expected noise, not an alarm;
+		// downgrade to Info so ops dashboards don't light up on every
+		// restart. Unexpected failures stay at Error.
+		if errors.Is(err, context.Canceled) {
+			log.Info("get session cancelled during shutdown", "err", err)
+		} else {
+			log.Error("get session", "err", err)
+		}
 		var errMsg string
 		switch {
 		case errors.Is(err, session.ErrMaxProcs):
@@ -328,6 +351,7 @@ func (d *Dispatcher) sendAndReply(
 
 	result, err := d.sendFn(ctx, key, sess, text, images, tracker.onEvent)
 	if err != nil {
+		d.replyErrorCount.Add(1)
 		log.Error("send to claude", "err", err)
 		var errMsg string
 		switch {
@@ -341,6 +365,7 @@ func (d *Dispatcher) sendAndReply(
 			errMsg = "处理失败，请发送 /new 重置后重试。"
 		}
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, 3); err != nil {
+			d.sendFailCount.Add(1)
 			log.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
 		}
 		return
@@ -399,6 +424,7 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 			chunk += fmt.Sprintf("\n— [%d/%d]", i+1, total)
 		}
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: chunk}, 3); err != nil {
+			d.sendFailCount.Add(1)
 			slog.Error("reply chunk failed after retries", "chat", chatID, "chunk", i+1, "err", err)
 		}
 	}

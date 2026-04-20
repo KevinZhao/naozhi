@@ -28,6 +28,9 @@ type HealthHandler struct {
 	nodeAccess      NodeAccessor
 	platforms       map[string]struct{} // platform names (read-only after init)
 	hubDropped      func() int64        // hub.DroppedMessages
+	// dispatcherMetrics returns (message_count, reply_error_count, send_fail_count).
+	// Injected after Start() wires the Dispatcher; nil-safe.
+	dispatcherMetrics func() (int64, int64, int64)
 }
 
 func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -51,6 +54,14 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		}
 		if h.hubDropped != nil {
 			resp["ws_dropped"] = h.hubDropped()
+		}
+		if h.dispatcherMetrics != nil {
+			msgs, replyErrs, sendFails := h.dispatcherMetrics()
+			resp["dispatch"] = map[string]int64{
+				"message_count":     msgs,
+				"reply_error_count": replyErrs,
+				"send_fail_count":   sendFails,
+			}
 		}
 
 		// Check CLI binary availability

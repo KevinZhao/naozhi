@@ -95,6 +95,10 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	if dialErr != nil {
 		return false, fmt.Errorf("dial: %w", dialErr)
 	}
+	// Bound inbound frame size so a malicious or buggy primary cannot
+	// exhaust memory with a single huge message. 16 MB matches the primary
+	// side's ReverseConn limit (reverseserver.go).
+	conn.SetReadLimit(16 << 20)
 	defer conn.Close()
 
 	// Close the WebSocket when ctx is cancelled to unblock ReadJSON in handleConn.

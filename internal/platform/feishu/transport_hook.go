@@ -83,7 +83,10 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		}
 
 		// Nonce dedup: prevent replay attacks within the nonce TTL window.
-		// Applies whenever both ts and nonce headers are present.
+		// Any authenticated webhook mode (EncryptKey or VerificationToken)
+		// requires a nonce — a stolen webhook otherwise replays freely inside
+		// the 5min timestamp window. url_verification challenges also reach
+		// here but are exempt below.
 		if ts := r.Header.Get("X-Lark-Request-Timestamp"); ts != "" {
 			nonce := r.Header.Get("X-Lark-Request-Nonce")
 			if nonce != "" {
@@ -94,9 +97,12 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 					w.WriteHeader(http.StatusUnauthorized)
 					return
 				}
-			} else if f.cfg.EncryptKey != "" {
-				// EncryptKey mode must always supply a nonce; missing nonce is suspicious.
-				slog.Warn("feishu webhook missing nonce header in encrypt_key mode")
+			} else if (f.cfg.EncryptKey != "" || f.cfg.VerificationToken != "") && envelope.Type != "url_verification" {
+				// Authenticated modes must always supply a nonce; missing
+				// nonce leaves the request replayable within the 5min
+				// timestamp window. url_verification is Feishu's handshake
+				// flow and does not carry a nonce.
+				slog.Warn("feishu webhook missing nonce header")
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
@@ -153,10 +159,20 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			return
 		}
 
-		// Build base incoming message
+		// Build base incoming message. v2 events carry Header.EventID; v1
+		// events do not, so fabricate one from timestamp+nonce when both are
+		// present (enforced above for authenticated modes). Without an ID
+		// Dedup.Seen is a no-op and rapid retries would leak through.
 		eventID := ""
 		if envelope.Header != nil {
 			eventID = envelope.Header.EventID
+		}
+		if eventID == "" {
+			ts := r.Header.Get("X-Lark-Request-Timestamp")
+			nonce := r.Header.Get("X-Lark-Request-Nonce")
+			if ts != "" && nonce != "" {
+				eventID = "v1:" + ts + ":" + nonce
+			}
 		}
 
 		chatType := "direct"

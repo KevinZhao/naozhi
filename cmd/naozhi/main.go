@@ -435,6 +435,15 @@ func main() {
 	}
 
 	// Cron Scheduler
+	cronLoc := cfg.ParseCronTimezone()
+	slog.Info("cron timezone", "location", cronLoc.String())
+	notifyDefault := cron.NotifyTarget{
+		Platform: cfg.Cron.NotifyDefault.Platform,
+		ChatID:   cfg.Cron.NotifyDefault.ChatID,
+	}
+	if notifyDefault.IsSet() {
+		slog.Info("cron notify default configured", "platform", notifyDefault.Platform, "chat_id", notifyDefault.ChatID)
+	}
 	scheduler := cron.NewScheduler(cron.SchedulerConfig{
 		Router:        router,
 		Platforms:     platforms,
@@ -443,6 +452,8 @@ func main() {
 		StorePath:     osutil.ExpandHome(cfg.Cron.StorePath),
 		MaxJobs:       cfg.Cron.MaxJobs,
 		ExecTimeout:   cfg.ParseExecutionTimeout(),
+		Location:      cronLoc,
+		NotifyDefault: notifyDefault,
 		ParentCtx:     ctx,
 	})
 	if err := scheduler.Start(); err != nil {

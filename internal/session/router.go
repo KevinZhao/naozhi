@@ -36,6 +36,12 @@ const (
 	// ProjectScanInterval is how often the project root is rescanned
 	// for CLAUDE.md changes. Exported for use by server package.
 	ProjectScanInterval = 60 * time.Second
+
+	// shimReconnectTimeout bounds individual shim reconnect/spawn RPCs at
+	// NewRouter time. A hung socket handshake cannot stall startup past
+	// this budget — on timeout the iteration moves on (SIGUSR2 fallback
+	// for orphan shims, skip for drifted shims, log+continue for spawn).
+	shimReconnectTimeout = 15 * time.Second
 )
 
 // Router manages session key -> ManagedSession mapping.
@@ -82,7 +88,12 @@ type Router struct {
 	// sessions that have been removed/reset/evicted. Used by the
 	// discovered-session scanner to match CLI processes to naozhi keys,
 	// and as a secondary filter for filesystem-based recent sessions.
-	knownIDs      map[string]bool
+	knownIDs map[string]bool
+	// knownIDsOrder preserves insertion order so overflow eviction drops the
+	// oldest (FIFO) rather than picking randomly via map iteration — random
+	// eviction could drop a still-active session ID, causing discovery to
+	// misclassify its CLI process as an external (non-naozhi) session.
+	knownIDsOrder []string
 	knownIDsDirty bool
 
 	// sessionIDToKey is a reverse index from session ID to session key.
@@ -211,9 +222,17 @@ func NewRouter(cfg RouterConfig) *Router {
 	}
 	r.shutdownCond = sync.NewCond(&r.mu)
 
-	// Load historical session IDs (all IDs ever used by naozhi)
+	// Load historical session IDs (all IDs ever used by naozhi).
+	// Insertion order is lost on reload (persistence writes as an unordered
+	// list); seed the order slice from the map so FIFO eviction resumes.
+	// On the first overflow post-restart the eviction order is arbitrary,
+	// but subsequent eviction is FIFO again.
 	if loaded := loadKnownIDs(r.storePath); loaded != nil {
 		r.knownIDs = loaded
+		r.knownIDsOrder = make([]string, 0, len(loaded))
+		for id := range loaded {
+			r.knownIDsOrder = append(r.knownIDsOrder, id)
+		}
 	}
 
 	// Load persisted workspace overrides (/cd settings)
@@ -390,8 +409,13 @@ func (r *Router) ReconnectShims() {
 
 		if !ok {
 			slog.Info("orphan shim found, shutting down", "key", state.Key)
-			// Connect briefly to send shutdown
-			if handle, err := r.wrapper.ShimManager.Reconnect(context.Background(), state.Key, 0); err == nil {
+			// Connect briefly to send shutdown. Bound the reconnect so a
+			// hung shim socket cannot stall NewRouter startup — we fall
+			// through to SIGUSR2 if the timeout fires.
+			rctx, rcancel := context.WithTimeout(context.Background(), shimReconnectTimeout)
+			handle, err := r.wrapper.ShimManager.Reconnect(rctx, state.Key, 0)
+			rcancel()
+			if err == nil {
 				handle.Shutdown()
 			} else {
 				syscall.Kill(state.ShimPID, syscall.SIGUSR2) //nolint:errcheck
@@ -417,18 +441,24 @@ func (r *Router) ReconnectShims() {
 				"key", state.Key,
 				"old_args_len", len(storedBase),
 				"new_args_len", len(currentArgs))
-			if handle, err := r.wrapper.ShimManager.Reconnect(context.Background(), state.Key, 0); err == nil {
+			rctx, rcancel := context.WithTimeout(context.Background(), shimReconnectTimeout)
+			handle, err := r.wrapper.ShimManager.Reconnect(rctx, state.Key, 0)
+			rcancel()
+			if err == nil {
 				handle.Shutdown()
 			}
 			continue
 		}
 
-		// Reconnect
+		// Reconnect. Timeout-bounded so a stuck shim handshake cannot stall
+		// NewRouter indefinitely; on timeout we log and keep iterating.
 		lastSeq := int64(0) // full replay on restart
+		spawnCtx, spawnCancel := context.WithTimeout(context.Background(), shimReconnectTimeout)
 		proc, replays, err := r.wrapper.SpawnReconnect(
-			context.Background(), state.Key, lastSeq, r.wrapper.Protocol,
+			spawnCtx, state.Key, lastSeq, r.wrapper.Protocol,
 			r.noOutputTimeout, r.totalTimeout,
 		)
+		spawnCancel()
 		if err != nil {
 			slog.Warn("shim reconnect failed", "key", state.Key, "err", err)
 			continue
@@ -808,6 +838,12 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		} else if len(old.prevSessionIDs) > 0 {
 			prevIDs = make([]string, len(old.prevSessionIDs))
 			copy(prevIDs, old.prevSessionIDs)
+		}
+		// Cap the chain to bound sessions.json size and JSONL load time on
+		// long-lived chats; oldest entries are the cheapest to drop because
+		// the retained tail carries the most recent conversational context.
+		if len(prevIDs) > maxPrevSessionIDs {
+			prevIDs = prevIDs[len(prevIDs)-maxPrevSessionIDs:]
 		}
 	}
 
@@ -1621,8 +1657,12 @@ const maxKnownIDs = 10000
 
 // trackSessionID adds a session ID to the persistent known-IDs set.
 // Caller must hold r.mu OR call before any concurrent access (e.g. NewRouter init).
-// When the set exceeds maxKnownIDs, older entries are evicted (random eviction
-// is acceptable since this set is only used for heuristic dedup in discovery).
+//
+// Eviction policy: FIFO by insertion order. Previous implementation relied on
+// Go's random map iteration which could drop a still-active session ID, and
+// the discovery scanner would then misclassify its live CLI process as an
+// unknown external session. Maintaining an order slice alongside the map
+// costs ~80KB at 10K entries — acceptable for the correctness win.
 func (r *Router) trackSessionID(id string) {
 	if id == "" {
 		return
@@ -1630,18 +1670,15 @@ func (r *Router) trackSessionID(id string) {
 	if r.knownIDs[id] {
 		return
 	}
-	// Evict random entries when at capacity (go map iteration is random).
 	if len(r.knownIDs) >= maxKnownIDs {
-		toEvict := len(r.knownIDs) - maxKnownIDs + 1
-		for k := range r.knownIDs {
-			delete(r.knownIDs, k)
-			toEvict--
-			if toEvict <= 0 {
-				break
-			}
-		}
+		// Drop the oldest entry; r.knownIDsOrder invariant is that it holds
+		// exactly the keys of r.knownIDs in insertion order.
+		oldest := r.knownIDsOrder[0]
+		delete(r.knownIDs, oldest)
+		r.knownIDsOrder = r.knownIDsOrder[1:]
 	}
 	r.knownIDs[id] = true
+	r.knownIDsOrder = append(r.knownIDsOrder, id)
 	r.knownIDsDirty = true
 }
 

@@ -31,11 +31,28 @@ type SchedulerConfig struct {
 	StorePath     string
 	MaxJobs       int
 	ExecTimeout   time.Duration
+	// Location is the timezone in which schedule expressions are evaluated.
+	// nil defaults to time.Local so cron expressions match wall-clock time
+	// on the host (respects $TZ / /etc/localtime).
+	Location *time.Location
+	// NotifyDefault provides a fallback IM target for jobs that opt into
+	// notifications (Job.Notify == true) but have no per-job target set.
+	// Empty Platform or ChatID disables the default.
+	NotifyDefault NotifyTarget
 	// ParentCtx, if set, is used as the parent for the scheduler's internal stop context.
 	// When it is cancelled (e.g. during application shutdown) all running cron jobs are
 	// interrupted promptly.
 	ParentCtx context.Context
 }
+
+// NotifyTarget identifies an IM channel for cron completion notifications.
+type NotifyTarget struct {
+	Platform string
+	ChatID   string
+}
+
+// IsSet reports whether both fields are populated.
+func (n NotifyTarget) IsSet() bool { return n.Platform != "" && n.ChatID != "" }
 
 // OnExecuteFunc is called after a cron job finishes execution.
 // It receives the job ID, result text (or empty), and error message (or empty).
@@ -53,9 +70,21 @@ type Scheduler struct {
 	storePath     string
 	maxJobs       int
 	execTimeout   time.Duration
-	stopCtx       context.Context
-	stopCancel    context.CancelFunc
-	onExecute     OnExecuteFunc
+	// location is the timezone used to interpret schedule expressions and to
+	// compute preview/next-run times exposed via the dashboard.
+	location *time.Location
+	// notifyDefault is the fallback IM target used when a job has Notify=true
+	// but no per-job target; zero value means no default (then notifications
+	// only flow when per-job NotifyPlatform/NotifyChatID are set).
+	notifyDefault NotifyTarget
+	// stopCtx is the scheduler's lifecycle context. Storing context in a
+	// struct is usually an anti-pattern, but here execute() is invoked via
+	// a callback from robfig/cron whose signature has no ctx parameter, so
+	// the scheduler itself owns the root context so Stop() can cancel in-
+	// flight executions. Callers outside execute() take ctx as an argument.
+	stopCtx    context.Context
+	stopCancel context.CancelFunc
+	onExecute  OnExecuteFunc
 
 	// triggerWG tracks goroutines spawned by TriggerNow so Stop() can wait
 	// for them to finish. The scheduled entries are already drained by
@@ -94,11 +123,18 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	}
 	stopCtx, stopCancel := context.WithCancel(parent)
 	cronLogger := robfigcron.PrintfLogger(log.New(slogWriter{}, "cron: ", 0))
+	loc := cfg.Location
+	if loc == nil {
+		loc = time.Local
+	}
 	return &Scheduler{
-		cron: robfigcron.New(robfigcron.WithChain(
-			robfigcron.Recover(cronLogger),
-			robfigcron.SkipIfStillRunning(cronLogger),
-		)),
+		cron: robfigcron.New(
+			robfigcron.WithLocation(loc),
+			robfigcron.WithChain(
+				robfigcron.Recover(cronLogger),
+				robfigcron.SkipIfStillRunning(cronLogger),
+			),
+		),
 		jobs:          make(map[string]*Job),
 		router:        cfg.Router,
 		platforms:     cfg.Platforms,
@@ -107,10 +143,16 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		storePath:     cfg.StorePath,
 		maxJobs:       cfg.MaxJobs,
 		execTimeout:   cfg.ExecTimeout,
+		location:      loc,
+		notifyDefault: cfg.NotifyDefault,
 		stopCtx:       stopCtx,
 		stopCancel:    stopCancel,
 	}
 }
+
+// NotifyDefault returns the configured fallback IM target so the dashboard can
+// show users where a "notify on completion" toggle will deliver messages.
+func (s *Scheduler) NotifyDefault() NotifyTarget { return s.notifyDefault }
 
 // Start loads persisted jobs and starts the cron scheduler.
 func (s *Scheduler) Start() error {
@@ -318,6 +360,97 @@ func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 	return j, nil
 }
 
+// JobUpdate captures fields a dashboard user may edit on an existing cron
+// job. Only non-nil pointers are applied, so callers can update a single
+// field without resending the rest.
+type JobUpdate struct {
+	Schedule *string
+	Prompt   *string
+	WorkDir  *string
+	// Notify sets Job.Notify when non-nil. nil leaves the field unchanged;
+	// pointer-to-true/false writes the explicit tri-state. There's no API
+	// to reset back to legacy-default (nil) once a value is set — callers
+	// typically toggle between true and false instead.
+	Notify *bool
+	// NotifyPlatform / NotifyChatID behave like Prompt / WorkDir: nil keeps
+	// the existing value, a pointer to "" clears it.
+	NotifyPlatform *string
+	NotifyChatID   *string
+}
+
+// UpdateJob applies a partial edit to an existing cron job. Schedule changes
+// are validated and re-registered atomically (the old robfig entry is
+// removed before the new one is installed) so a failed reschedule leaves
+// the previous behavior intact. Prompt/WorkDir changes flow through to the
+// router stub so the dashboard sidebar reflects the edit immediately.
+func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
+	// Validate schedule first (no lock needed) so we fail fast on bad input.
+	if upd.Schedule != nil {
+		if *upd.Schedule == "" {
+			return nil, fmt.Errorf("schedule must not be empty")
+		}
+		if err := validateSchedule(*upd.Schedule); err != nil {
+			return nil, fmt.Errorf("invalid schedule %q: %w", *upd.Schedule, err)
+		}
+	}
+
+	s.mu.Lock()
+	j, ok := s.jobs[id]
+	if !ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
+	}
+
+	if upd.Prompt != nil {
+		j.Prompt = *upd.Prompt
+	}
+	if upd.WorkDir != nil {
+		j.WorkDir = *upd.WorkDir
+	}
+	if upd.Notify != nil {
+		v := *upd.Notify
+		j.Notify = &v
+	}
+	if upd.NotifyPlatform != nil {
+		j.NotifyPlatform = *upd.NotifyPlatform
+	}
+	if upd.NotifyChatID != nil {
+		j.NotifyChatID = *upd.NotifyChatID
+	}
+
+	if upd.Schedule != nil && *upd.Schedule != j.Schedule {
+		j.Schedule = *upd.Schedule
+		// Re-register with the new schedule unless paused (paused jobs have
+		// no live entry; ResumeJob will register with the new schedule).
+		if !j.Paused {
+			if j.entryID != 0 {
+				s.cron.Remove(j.entryID)
+				j.entryID = 0
+			}
+			if err := s.registerJob(j); err != nil {
+				s.mu.Unlock()
+				return nil, fmt.Errorf("re-register cron: %w", err)
+			}
+		}
+	}
+
+	snap := s.snapshotJobs()
+	// Value-copy while still under lock so the caller sees a stable result
+	// even if another goroutine mutates the job right after we unlock.
+	result := *j
+	s.mu.Unlock()
+
+	s.saveSnapshot(snap)
+	// Pass the snapshotted value (via result) to registerStub so a concurrent
+	// SetJobPrompt cannot tear the Prompt/WorkDir pointers we read.
+	s.registerStub(&result)
+	slog.Info("cron job updated", "id", id,
+		"schedule_changed", upd.Schedule != nil,
+		"prompt_changed", upd.Prompt != nil,
+		"workdir_changed", upd.WorkDir != nil)
+	return &result, nil
+}
+
 // SetJobPrompt updates a job's prompt. If the job was paused with an empty
 // prompt (created from dashboard), it also unpauses and registers the schedule.
 func (s *Scheduler) SetJobPrompt(id, prompt string) error {
@@ -353,13 +486,39 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	return nil
 }
 
-// PreviewSchedule validates a schedule expression and returns the next run time.
+// PreviewSchedule validates a schedule expression and returns the next run time
+// in UTC. Callers that need the scheduler's configured timezone should use
+// Scheduler.PreviewSchedule instead.
 func PreviewSchedule(schedule string) (time.Time, error) {
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {
 		return time.Time{}, err
 	}
 	return sched.Next(time.Now()), nil
+}
+
+// PreviewSchedule computes the next run time using the scheduler's configured
+// timezone, which matches how the live scheduler evaluates cron expressions.
+func (s *Scheduler) PreviewSchedule(schedule string) (time.Time, error) {
+	sched, err := cronParser.Parse(schedule)
+	if err != nil {
+		return time.Time{}, err
+	}
+	loc := s.location
+	if loc == nil {
+		loc = time.Local
+	}
+	return sched.Next(time.Now().In(loc)), nil
+}
+
+// Location returns the timezone the scheduler uses to evaluate cron
+// expressions, so the dashboard can surface it alongside preview/next-run
+// timestamps.
+func (s *Scheduler) Location() *time.Location {
+	if s.location == nil {
+		return time.Local
+	}
+	return s.location
 }
 
 // DeleteJob removes a job by ID prefix (scoped to the given chat).
@@ -533,7 +692,17 @@ func (s *Scheduler) execute(j *Job) {
 	chatID := j.ChatID
 	notifyPlat := j.NotifyPlatform
 	notifyChat := j.NotifyChatID
+	var notifyOpt *bool
+	if j.Notify != nil {
+		v := *j.Notify
+		notifyOpt = &v
+	}
 	s.mu.Unlock()
+
+	// Resolve the effective notification target for this run. Returns empty
+	// struct when no delivery should happen, so both success and failure
+	// paths below can call notify*() unconditionally-guarded by IsSet().
+	notifyTo := s.resolveNotifyTarget(platName, chatID, notifyPlat, notifyChat, notifyOpt)
 
 	log := slog.With("cron_id", jobID, "platform", platName, "chat", chatID)
 	log.Info("cron job executing", "prompt_len", len(prompt))
@@ -551,33 +720,82 @@ func (s *Scheduler) execute(j *Job) {
 
 	sess, _, err := s.router.GetOrCreate(ctx, key, opts)
 	if err != nil {
-		log.Error("cron session error", "err", err)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			log.Info("cron session cancelled", "err", err)
+		} else {
+			log.Error("cron session error", "err", err)
+		}
 		s.recordResult(j, "", "session error: "+err.Error())
-		s.notifyIM(j, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", jobID))
+		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", jobID))
 		return
 	}
 
 	// Direct Send without sendWithBroadcast — cron jobs notify via onExecute callback instead.
 	result, err := sess.Send(ctx, cleanText, nil, nil)
 	if err != nil {
-		log.Error("cron send error", "err", err)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			log.Info("cron send cancelled", "err", err)
+		} else {
+			log.Error("cron send error", "err", err)
+		}
 		s.recordResult(j, "", "send error: "+err.Error())
-		s.notifyIM(j, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", jobID))
+		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", jobID))
 		return
 	}
 
 	log.Info("cron job completed", "result_len", len(result.Text))
 	s.recordResult(j, result.Text, "")
 
-	// Send result to the job's own IM channel (for IM-created jobs)
 	replyText := fmt.Sprintf("[Cron %s] %s", jobID, result.Text)
-	s.notifyIM(j, replyText)
+	s.deliverNotice(notifyTo, replyText)
+}
 
-	// Send to optional notify target (for dashboard-created jobs that want IM push)
-	if notifyPlat != "" && notifyChat != "" &&
-		(notifyPlat != platName || notifyChat != chatID) {
-		s.notifyTarget(notifyPlat, notifyChat, replyText)
+// resolveNotifyTarget picks the IM destination for this execution's
+// completion notice. Priority:
+//  1. Per-job NotifyPlatform/NotifyChatID (always honored when both set).
+//  2. notify==true + scheduler default target.
+//  3. notify==false disables delivery even for IM-created jobs.
+//  4. notify==nil (unset) preserves legacy behavior: IM-created jobs reply
+//     to their own source chat; dashboard-created jobs stay silent.
+func (s *Scheduler) resolveNotifyTarget(platName, chatID, notifyPlat, notifyChat string, notify *bool) NotifyTarget {
+	// Explicit disable wins over everything.
+	if notify != nil && !*notify {
+		return NotifyTarget{}
 	}
+
+	// Per-job override always wins when fully specified.
+	if notifyPlat != "" && notifyChat != "" {
+		return NotifyTarget{Platform: notifyPlat, ChatID: notifyChat}
+	}
+
+	// Explicit enable: fall back to scheduler default.
+	if notify != nil && *notify {
+		if s.notifyDefault.IsSet() {
+			return s.notifyDefault
+		}
+		// Enabled but no target anywhere — log once per run so users notice
+		// misconfiguration instead of silently dropping notifications.
+		slog.Warn("cron notify enabled but no target configured",
+			"hint", "set cron.notify_default.platform + chat_id, or provide per-job notify_platform + notify_chat_id")
+		return NotifyTarget{}
+	}
+
+	// Legacy default (notify==nil): IM-created jobs reply to their source chat.
+	// Platform "dashboard" has no registered platform object so this naturally
+	// no-ops for dashboard jobs that predate the toggle.
+	if platName != "" && chatID != "" {
+		return NotifyTarget{Platform: platName, ChatID: chatID}
+	}
+	return NotifyTarget{}
+}
+
+// deliverNotice sends a result/error message to the resolved target.
+// No-op when target is unset or the platform is not registered.
+func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
+	if !target.IsSet() {
+		return
+	}
+	s.notifyTarget(target.Platform, target.ChatID, text)
 }
 
 // runeByteOffset returns the byte offset that contains maxRunes runes.
@@ -618,32 +836,6 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg string) {
 	}
 }
 
-// notifyIM sends a message to the job's own platform/chat. Skips if platform is nil (e.g. dashboard jobs).
-func (s *Scheduler) notifyIM(j *Job, text string) {
-	p := s.platforms[j.Platform]
-	if p == nil {
-		return
-	}
-	// Use Background parent: during shutdown stopCtx is cancelled first, then
-	// cron.Stop() waits for in-flight jobs — those must still be able to deliver
-	// their IM replies within the 30s bound rather than fail instantly.
-	replyCtx, replyCancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer replyCancel()
-	maxLen := p.MaxReplyLength()
-	if maxLen <= 0 {
-		maxLen = 4000
-	}
-	chunks := platform.SplitText(text, maxLen)
-	for _, chunk := range chunks {
-		if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
-			ChatID: j.ChatID,
-			Text:   chunk,
-		}, 3); err != nil {
-			slog.Warn("cron notify failed", "cron_id", j.ID, "chat", j.ChatID, "err", err)
-		}
-	}
-}
-
 // notifyTarget sends a message to an arbitrary platform/chat (notify target).
 func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	p := s.platforms[plat]
@@ -651,8 +843,9 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		slog.Warn("cron notify: platform not found", "platform", plat)
 		return
 	}
-	// Use Background parent (see notifyIM for rationale): in-flight jobs during
-	// shutdown must still deliver replies within 30s, not fail immediately.
+	// Use Background parent: during shutdown stopCtx is cancelled first, then
+	// cron.Stop() waits for in-flight jobs — those must still be able to deliver
+	// their IM replies within the 30s bound rather than fail instantly.
 	replyCtx, replyCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer replyCancel()
 	maxLen := p.MaxReplyLength()

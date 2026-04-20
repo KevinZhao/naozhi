@@ -28,6 +28,15 @@ type Job struct {
 	NotifyPlatform string `json:"notify_platform,omitempty"`
 	NotifyChatID   string `json:"notify_chat_id,omitempty"`
 
+	// Notify controls whether execution results are pushed to an IM channel
+	// after each run. Tri-state pointer so old jobs (nil) preserve legacy
+	// behavior: IM-created jobs reply to their source chat; dashboard-created
+	// jobs honor per-job NotifyPlatform/NotifyChatID if set.
+	// Explicit true/false lets dashboard users toggle delivery using the
+	// scheduler's notify_default target (or per-job override) without touching
+	// platform/chat fields.
+	Notify *bool `json:"notify,omitempty"`
+
 	// Last execution result, persisted across restarts.
 	LastResult string    `json:"last_result,omitempty"`
 	LastRunAt  time.Time `json:"last_run_at,omitempty"`

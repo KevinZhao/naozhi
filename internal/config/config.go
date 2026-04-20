@@ -146,6 +146,21 @@ type CronConfig struct {
 	StorePath        string `yaml:"store_path"`
 	MaxJobs          int    `yaml:"max_jobs"`
 	ExecutionTimeout string `yaml:"execution_timeout"`
+	// Timezone is the IANA name (e.g. "Asia/Shanghai") used to interpret cron
+	// schedule expressions. Empty or "Local" uses the machine's local time
+	// (respects $TZ). "UTC" forces UTC. Default: Local.
+	Timezone string `yaml:"timezone"`
+	// NotifyDefault is the fallback IM target used when a job has Notify=true
+	// but no per-job NotifyPlatform / NotifyChatID. Empty fields disable the
+	// default, in which case only per-job targets deliver notifications.
+	NotifyDefault CronNotifyTarget `yaml:"notify_default,omitempty"`
+}
+
+// CronNotifyTarget identifies an IM channel used as the fallback delivery
+// target for cron job completion notifications.
+type CronNotifyTarget struct {
+	Platform string `yaml:"platform"` // "feishu" / "slack" / "discord" / "weixin"
+	ChatID   string `yaml:"chat_id"`
 }
 
 type LogConfig struct {
@@ -431,6 +446,22 @@ func (c *Config) ParseWatchdog() (noOutputTimeout, totalTimeout time.Duration) {
 // ParseExecutionTimeout returns the cron execution timeout duration (cached after Load).
 func (c *Config) ParseExecutionTimeout() time.Duration {
 	return c.cachedExecTimeout
+}
+
+// ParseCronTimezone returns the *time.Location used for cron schedule evaluation.
+// Empty or "Local" returns time.Local (respects $TZ or the system tz).
+// An invalid zone falls back to time.Local with a warning.
+func (c *Config) ParseCronTimezone() *time.Location {
+	name := strings.TrimSpace(c.Cron.Timezone)
+	if name == "" || strings.EqualFold(name, "Local") {
+		return time.Local
+	}
+	loc, err := time.LoadLocation(name)
+	if err != nil {
+		slog.Warn("invalid cron.timezone, falling back to Local", "value", name, "err", err)
+		return time.Local
+	}
+	return loc
 }
 
 // ParseCollectDelay returns the queue collect delay (cached after Load).
