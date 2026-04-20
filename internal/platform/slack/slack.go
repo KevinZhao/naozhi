@@ -166,6 +166,73 @@ func (s *Slack) EditMessage(ctx context.Context, msgID string, text string) erro
 	return nil
 }
 
+// reactionEmojiName maps platform-agnostic ReactionType to a Slack emoji name.
+// Empty return means unsupported → caller should skip.
+func reactionEmojiName(r platform.ReactionType) string {
+	switch r {
+	case platform.ReactionQueued:
+		return "eyes"
+	}
+	return ""
+}
+
+// parseMsgRef splits our composite "channel:ts" messageID into a slack.ItemRef.
+func parseMsgRef(msgID string) (slack.ItemRef, error) {
+	parts := strings.SplitN(msgID, ":", 2)
+	if len(parts) != 2 {
+		return slack.ItemRef{}, fmt.Errorf("invalid slack msgID format: %q", msgID)
+	}
+	return slack.ItemRef{Channel: parts[0], Timestamp: parts[1]}, nil
+}
+
+// AddReaction implements platform.Reactor by calling reactions.add on the
+// message identified by "channel:ts". Slack surfaces "already_reacted" as
+// an error; treat it as success so retries are idempotent.
+func (s *Slack) AddReaction(ctx context.Context, messageID string, r platform.ReactionType) error {
+	if messageID == "" {
+		return fmt.Errorf("slack AddReaction: empty messageID")
+	}
+	name := reactionEmojiName(r)
+	if name == "" {
+		return fmt.Errorf("slack AddReaction: unsupported reaction %q", r)
+	}
+	ref, err := parseMsgRef(messageID)
+	if err != nil {
+		return err
+	}
+	if err := s.api.AddReactionContext(ctx, name, ref); err != nil {
+		if strings.Contains(err.Error(), "already_reacted") {
+			return nil
+		}
+		return fmt.Errorf("slack add reaction: %w", err)
+	}
+	return nil
+}
+
+// RemoveReaction implements platform.Reactor. "no_reaction" (not present)
+// is treated as success so callers don't need to track whether a prior Add
+// actually landed.
+func (s *Slack) RemoveReaction(ctx context.Context, messageID string, r platform.ReactionType) error {
+	if messageID == "" {
+		return nil
+	}
+	name := reactionEmojiName(r)
+	if name == "" {
+		return nil
+	}
+	ref, err := parseMsgRef(messageID)
+	if err != nil {
+		return err
+	}
+	if err := s.api.RemoveReactionContext(ctx, name, ref); err != nil {
+		if strings.Contains(err.Error(), "no_reaction") {
+			return nil
+		}
+		return fmt.Errorf("slack remove reaction: %w", err)
+	}
+	return nil
+}
+
 func (s *Slack) eventLoop(ctx context.Context, client *socketmode.Client) {
 	for {
 		select {
@@ -216,14 +283,19 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 		return
 	}
 
+	// Slack ChannelType values: "im" (1:1 DM), "mpim" (multi-party DM),
+	// "channel" (public), "group" (private channel). Multi-party DMs must
+	// map to "group" so each mpim gets its own session key; otherwise every
+	// participant of every mpim collapses into a single "direct" bucket.
 	chatType := "direct"
-	if ev.ChannelType == "channel" || ev.ChannelType == "group" {
+	if ev.ChannelType == "channel" || ev.ChannelType == "group" || ev.ChannelType == "mpim" {
 		chatType = "group"
 	}
 
 	msg := platform.IncomingMessage{
 		Platform:  "slack",
 		EventID:   ev.TimeStamp,
+		MessageID: ev.Channel + ":" + ev.TimeStamp,
 		UserID:    ev.User,
 		ChatID:    ev.Channel,
 		ChatType:  chatType,

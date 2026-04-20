@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"crypto/subtle"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,6 +29,9 @@ var feishuHTTPClient = &http.Client{
 		MaxIdleConns:        20,
 		MaxIdleConnsPerHost: 10,
 		IdleConnTimeout:     90 * time.Second,
+		// open.feishu.cn supports TLS 1.2+; pin the floor so a future Go
+		// toolchain regression can't silently accept legacy protocols.
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	},
 }
 
@@ -71,6 +75,12 @@ type Feishu struct {
 
 	// Replay protection: stores "ts:nonce" -> expiry unix timestamp.
 	seenNonces sync.Map
+
+	// reactionIDs caches (messageID + emoji_type) -> reaction_id returned by
+	// the create-reaction API, so RemoveReaction can later target the correct
+	// reaction. Feishu's delete endpoint requires the reaction_id (there's no
+	// "delete by emoji type" form). Entries are deleted on successful removal.
+	reactionIDs sync.Map
 }
 
 // New creates a Feishu platform adapter. transcriber may be nil to disable voice.
@@ -218,13 +228,23 @@ func (f *Feishu) sendText(ctx context.Context, chatID, text string) (string, err
 	return f.sendCard(ctx, chatID, text)
 }
 
-// buildMarkdownCardJSON marshals a Feishu interactive card with a single markdown element.
+// buildMarkdownCardJSON marshals a Feishu interactive card (schema 2.0) with
+// a single markdown element.
+//
+// Schema 2.0 is required for full GitHub-flavored markdown rendering —
+// headings (#/##/###), fenced code blocks, tables, and blockquotes. The
+// legacy 1.0 shape (bare "elements" array) only supports a restricted subset
+// (bold/italic/links/lists) so Claude-style output rendered as plain text.
+// See: open.feishu.cn/document/feishu-cards/quick-start
 func buildMarkdownCardJSON(text string) ([]byte, error) {
-	card := map[string]interface{}{
-		"elements": []interface{}{
-			map[string]interface{}{
-				"tag":     "markdown",
-				"content": text,
+	card := map[string]any{
+		"schema": "2.0",
+		"body": map[string]any{
+			"elements": []any{
+				map[string]any{
+					"tag":     "markdown",
+					"content": text,
+				},
 			},
 		},
 	}
@@ -242,7 +262,7 @@ func (f *Feishu) sendCard(ctx context.Context, chatID, text string) (string, err
 	if err != nil {
 		return "", fmt.Errorf("marshal card: %w", err)
 	}
-	reqBody, err := json.Marshal(map[string]interface{}{
+	reqBody, err := json.Marshal(map[string]any{
 		"receive_id": chatID,
 		"msg_type":   "interactive",
 		"content":    string(cardJSON),
@@ -303,7 +323,7 @@ func (f *Feishu) sendImage(ctx context.Context, chatID string, img platform.Imag
 	if err != nil {
 		return "", fmt.Errorf("marshal content: %w", err)
 	}
-	reqBody, err := json.Marshal(map[string]interface{}{
+	reqBody, err := json.Marshal(map[string]any{
 		"receive_id": chatID,
 		"msg_type":   "image",
 		"content":    string(content),
@@ -618,4 +638,132 @@ func verifyTimestamp(timestamp string) bool {
 		diff = -diff
 	}
 	return diff <= 300 // 5 minutes
+}
+
+// reactionEmojiType maps platform-agnostic ReactionType to Feishu emoji_type.
+// Feishu's reaction API uses string emoji_types (see OpenAPI docs). Unknown
+// types return "" so callers can skip.
+func reactionEmojiType(r platform.ReactionType) string {
+	switch r {
+	case platform.ReactionQueued:
+		// HOURGLASS hints "waiting" without implying success or failure.
+		return "HOURGLASS"
+	}
+	return ""
+}
+
+// reactionCacheKey builds the (msgID, emojiType) composite key for reactionIDs.
+func reactionCacheKey(messageID, emojiType string) string {
+	return messageID + "|" + emojiType
+}
+
+// AddReaction implements platform.Reactor. Creates a reaction on messageID
+// via POST /open-apis/im/v1/messages/:msg_id/reactions and caches the
+// returned reaction_id so RemoveReaction can later delete by id.
+//
+// Returns nil on HTTP success. Server-side "already reacted" errors are
+// treated as success (the reaction_id is still returned by Feishu). All
+// other API errors are wrapped.
+func (f *Feishu) AddReaction(ctx context.Context, messageID string, r platform.ReactionType) error {
+	if messageID == "" {
+		return fmt.Errorf("feishu AddReaction: empty messageID")
+	}
+	emojiType := reactionEmojiType(r)
+	if emojiType == "" {
+		return fmt.Errorf("feishu AddReaction: unsupported reaction %q", r)
+	}
+	token, err := f.getAccessToken(ctx)
+	if err != nil {
+		return fmt.Errorf("get access token: %w", err)
+	}
+	reqBody, err := json.Marshal(map[string]any{
+		"reaction_type": map[string]string{"emoji_type": emojiType},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal reaction request: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		f.baseURL+"/open-apis/im/v1/messages/"+url.PathEscape(messageID)+"/reactions",
+		bytes.NewReader(reqBody))
+	if err != nil {
+		return fmt.Errorf("create reaction request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := feishuHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("post reaction: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Code int `json:"code"`
+		Data struct {
+			ReactionID string `json:"reaction_id"`
+		} `json:"data"`
+		Msg string `json:"msg"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+		return fmt.Errorf("decode reaction response: %w", err)
+	}
+	if result.Code != 0 {
+		return fmt.Errorf("feishu reaction api: code=%d msg=%s", result.Code, result.Msg)
+	}
+	if result.Data.ReactionID != "" {
+		f.reactionIDs.Store(reactionCacheKey(messageID, emojiType), result.Data.ReactionID)
+	}
+	return nil
+}
+
+// RemoveReaction implements platform.Reactor. Deletes a previously added
+// reaction by consulting the cached reaction_id. If no id is cached (e.g.,
+// process restart between Add and Remove), returns nil silently — the
+// reaction will linger but that is acceptable for best-effort UX feedback.
+func (f *Feishu) RemoveReaction(ctx context.Context, messageID string, r platform.ReactionType) error {
+	if messageID == "" {
+		return nil
+	}
+	emojiType := reactionEmojiType(r)
+	if emojiType == "" {
+		return nil
+	}
+	cacheKey := reactionCacheKey(messageID, emojiType)
+	v, ok := f.reactionIDs.LoadAndDelete(cacheKey)
+	if !ok {
+		return nil
+	}
+	reactionID, _ := v.(string)
+	if reactionID == "" {
+		return nil
+	}
+	token, err := f.getAccessToken(ctx)
+	if err != nil {
+		return fmt.Errorf("get access token: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "DELETE",
+		f.baseURL+"/open-apis/im/v1/messages/"+url.PathEscape(messageID)+"/reactions/"+url.PathEscape(reactionID),
+		nil)
+	if err != nil {
+		return fmt.Errorf("create delete reaction request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := feishuHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("delete reaction: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+		return fmt.Errorf("decode delete reaction response: %w", err)
+	}
+	if result.Code != 0 {
+		return fmt.Errorf("feishu delete reaction api: code=%d msg=%s", result.Code, result.Msg)
+	}
+	return nil
 }

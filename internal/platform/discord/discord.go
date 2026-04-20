@@ -3,6 +3,7 @@ package discord
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -164,6 +165,69 @@ func (d *Discord) EditMessage(ctx context.Context, msgID string, text string) er
 	return nil
 }
 
+// reactionEmoji maps platform-agnostic ReactionType to a Discord unicode
+// emoji. Discord's reaction API accepts raw unicode strings directly — no
+// aliasing needed. Empty return means unsupported.
+func reactionEmoji(r platform.ReactionType) string {
+	switch r {
+	case platform.ReactionQueued:
+		return "\u23F3" // ⏳ hourglass
+	}
+	return ""
+}
+
+// AddReaction implements platform.Reactor. messageID is our composite
+// "channel:msg" format. We use the bot's own identity (@me) to add on behalf
+// of the bot account.
+func (d *Discord) AddReaction(ctx context.Context, messageID string, r platform.ReactionType) error {
+	if messageID == "" {
+		return fmt.Errorf("discord AddReaction: empty messageID")
+	}
+	emoji := reactionEmoji(r)
+	if emoji == "" {
+		return fmt.Errorf("discord AddReaction: unsupported reaction %q", r)
+	}
+	parts := strings.SplitN(messageID, ":", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid discord msgID format: %q", messageID)
+	}
+	if err := d.session.MessageReactionAdd(parts[0], parts[1], emoji, discordgo.WithContext(ctx)); err != nil {
+		// AddReaction is idempotent from the platform's perspective; swallow
+		// discord's "unknown emoji" / "already reacted" variants so dispatch
+		// does not fall back to a text notice on a queue-drain retry. This
+		// mirrors slack.go which already swallows "already_reacted".
+		var restErr *discordgo.RESTError
+		if errors.As(err, &restErr) && restErr.Message != nil {
+			switch restErr.Message.Code {
+			case discordgo.ErrCodeUnknownEmoji, discordgo.ErrCodeReactionBlocked:
+				return nil
+			}
+		}
+		return fmt.Errorf("discord add reaction: %w", err)
+	}
+	return nil
+}
+
+// RemoveReaction implements platform.Reactor. Passes "@me" as the userID
+// so only the bot's own reaction is cleared (Discord REST convention).
+func (d *Discord) RemoveReaction(ctx context.Context, messageID string, r platform.ReactionType) error {
+	if messageID == "" {
+		return nil
+	}
+	emoji := reactionEmoji(r)
+	if emoji == "" {
+		return nil
+	}
+	parts := strings.SplitN(messageID, ":", 2)
+	if len(parts) != 2 {
+		return fmt.Errorf("invalid discord msgID format: %q", messageID)
+	}
+	if err := d.session.MessageReactionRemove(parts[0], parts[1], emoji, "@me", discordgo.WithContext(ctx)); err != nil {
+		return fmt.Errorf("discord remove reaction: %w", err)
+	}
+	return nil
+}
+
 func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCreate) {
 	if m.Author == nil {
 		return
@@ -213,6 +277,7 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 	msg := platform.IncomingMessage{
 		Platform:  "discord",
 		EventID:   m.ID,
+		MessageID: m.ChannelID + ":" + m.ID,
 		UserID:    m.Author.ID,
 		ChatID:    m.ChannelID,
 		ChatType:  chatType,

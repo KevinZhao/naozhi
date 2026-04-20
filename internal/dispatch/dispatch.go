@@ -194,13 +194,21 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 			qm := QueuedMsg{
 				Text:      cleanText,
 				Images:    images,
+				MessageID: msg.MessageID,
 				EnqueueAt: time.Now(),
 			}
 			isOwner, enqueued, gen := d.queue.Enqueue(key, qm)
 			if !isOwner {
 				if enqueued {
-					if d.queue.ShouldNotify(key) {
-						d.replyText(ctx, msg, "消息已收到，待当前回复完成后一并处理。", log)
+					// Prefer an in-place reaction on the user's own message
+					// (non-intrusive) over a new bot chat bubble. Fall back to
+					// the text notice if the platform isn't Reactor-capable,
+					// has no inbound MessageID, or the reaction call fails —
+					// ShouldNotify still rate-limits the fallback.
+					if !d.ackQueuedWithReaction(ctx, msg, log) {
+						if d.queue.ShouldNotify(key) {
+							d.replyText(ctx, msg, "消息已收到，待当前回复完成后一并处理。", log)
+						}
 					}
 				} else {
 					// Queue disabled (maxDepth<=0) — degrade to old drop behavior.
@@ -288,6 +296,10 @@ func (d *Dispatcher) ownerLoop(
 		text, images := CoalesceMessages(queued)
 		log.Info("processing queued messages", "count", len(queued), "merged_len", len(text))
 		d.sendAndReply(ctx, key, text, images, agentID, opts, msg, log, false)
+		// Drained queued messages were acknowledged with a queue reaction
+		// when they arrived; clear those reactions now that their content
+		// was processed. Best-effort — errors only log.
+		d.clearQueuedReactions(ctx, msg.Platform, queued, log)
 		collectTimer.Reset(d.queue.CollectDelay())
 	}
 }

@@ -10,8 +10,13 @@ import (
 
 // QueuedMsg holds a single message waiting to be processed.
 type QueuedMsg struct {
-	Text      string
-	Images    []cli.ImageData
+	Text   string
+	Images []cli.ImageData
+	// MessageID is the platform-native inbound message ID (optional).
+	// Dispatch uses it to add/remove a reaction on the user's original
+	// message as a non-intrusive "queued" acknowledgement. Empty when the
+	// platform doesn't report an ID or isn't Reactor-capable.
+	MessageID string
 	EnqueueAt time.Time
 }
 
@@ -161,6 +166,12 @@ func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 // Discard clears all queued messages and releases ownership for key.
 // Bumps the generation so stale ownerLoops stop on their next DoneOrDrain.
 // Used when the user sends /new or /stop.
+//
+// The generation bump MUST persist in the map so a concurrent Enqueue that
+// becomes the new owner picks up gen+1 rather than starting from gen=0 and
+// colliding with the stale owner's check. We therefore keep the entry
+// around; panic-recovery callers do not leave orphaned entries in practice
+// because a subsequent Enqueue reuses this same sessionQueue.
 func (q *MessageQueue) Discard(key string) {
 	q.mu.Lock()
 	defer q.mu.Unlock()

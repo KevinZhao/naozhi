@@ -183,6 +183,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		msg := platform.IncomingMessage{
 			Platform:  "feishu",
 			EventID:   eventID,
+			MessageID: event.Message.MessageID,
 			UserID:    event.Sender.SenderID.OpenID,
 			ChatID:    event.Message.ChatID,
 			ChatType:  chatType,

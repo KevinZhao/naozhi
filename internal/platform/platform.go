@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"log/slog"
+	"math/rand/v2"
 	"net/http"
 	"runtime/debug"
 	"strings"
@@ -21,8 +22,13 @@ type Image struct {
 
 // IncomingMessage is the platform-agnostic inbound message.
 type IncomingMessage struct {
-	Platform  string
-	EventID   string
+	Platform string
+	EventID  string
+	// MessageID is the platform-native message identifier (e.g., Feishu
+	// message_id, Slack ts, Discord message ID). Optional: platforms that
+	// can't report it leave it empty. Used by Reactor-capable platforms so
+	// dispatch can react back on the user's original message.
+	MessageID string
 	UserID    string
 	ChatID    string
 	ChatType  string // "direct" | "group"
@@ -59,6 +65,35 @@ func SupportsInterimMessages(p Platform) bool {
 		return i.SupportsInterimMessages()
 	}
 	return false // default: not supported (opt-in)
+}
+
+// ReactionType is a platform-agnostic reaction key. Adapters map each type
+// to a platform-specific emoji / reaction string.
+type ReactionType string
+
+const (
+	// ReactionQueued signals "message received, waiting in queue". Placed on
+	// the user's incoming message when it gets enqueued, removed after the
+	// turn that consumes it completes.
+	ReactionQueued ReactionType = "queued"
+)
+
+// Reactor is an optional capability: platforms that can add/remove reactions
+// on inbound messages implement it. Enables non-intrusive queue feedback —
+// a reaction on the user's own message instead of a separate bot reply.
+//
+// Implementations should be idempotent-tolerant: AddReaction on an existing
+// reaction or RemoveReaction on an absent one should return nil, since
+// dispatch treats reaction ops as best-effort.
+type Reactor interface {
+	AddReaction(ctx context.Context, messageID string, reaction ReactionType) error
+	RemoveReaction(ctx context.Context, messageID string, reaction ReactionType) error
+}
+
+// AsReactor returns p as a Reactor if it implements the interface.
+func AsReactor(p Platform) (Reactor, bool) {
+	r, ok := p.(Reactor)
+	return r, ok
 }
 
 // RunnablePlatform extends Platform for platforms needing background goroutines.
@@ -124,12 +159,18 @@ func ImageExt(mimeType string) string {
 // ReplyWithRetry calls p.Reply up to maxAttempts times with exponential backoff
 // starting at 500 ms, doubling each retry up to 4 s. It returns on the first
 // success. If all attempts fail the last error is returned.
+//
+// Each backoff is scaled by a ±25% jitter so that many chats failing in the
+// same tick do not retry on synchronised wall-clock boundaries — the common
+// thundering-herd scenario when a shared upstream (e.g. Feishu open API)
+// briefly 5xxs.
 func ReplyWithRetry(ctx context.Context, p Platform, msg OutgoingMessage, maxAttempts int) (string, error) {
 	backoff := 500 * time.Millisecond
 	var lastErr error
 	for i := 0; i < maxAttempts; i++ {
 		if i > 0 {
-			timer := time.NewTimer(backoff)
+			wait := jitterBackoff(backoff)
+			timer := time.NewTimer(wait)
 			select {
 			case <-ctx.Done():
 				timer.Stop()
@@ -149,4 +190,17 @@ func ReplyWithRetry(ctx context.Context, p Platform, msg OutgoingMessage, maxAtt
 	}
 	slog.Error("platform reply failed after all attempts", "platform", p.Name(), "chat", msg.ChatID, "attempts", maxAttempts, "err", lastErr)
 	return "", lastErr
+}
+
+// jitterBackoff returns d scaled by a random factor in [0.75, 1.25). Exposed
+// at package scope so other reconnect loops (relay, upstream connector) can
+// share the same shape. math/rand/v2 uses a per-goroutine source so
+// concurrent callers do not contend on a global lock.
+func jitterBackoff(d time.Duration) time.Duration {
+	if d <= 0 {
+		return d
+	}
+	// Float64 returns [0,1); remap to [0.75, 1.25).
+	factor := 0.75 + rand.Float64()*0.5
+	return time.Duration(float64(d) * factor)
 }

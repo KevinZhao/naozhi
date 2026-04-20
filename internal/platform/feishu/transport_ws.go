@@ -203,6 +203,7 @@ func parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, bool) {
 	result := platform.IncomingMessage{
 		Platform:  "feishu",
 		EventID:   eventID,
+		MessageID: messageID,
 		UserID:    userID,
 		ChatID:    chatID,
 		ChatType:  chatType,
