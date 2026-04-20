@@ -25,7 +25,7 @@ import (
 // promptCache caches extractLastPrompt results keyed by (path, mtime).
 // Avoids re-reading up to 512KB per discovered session on every 10s scan cycle.
 var promptCache struct {
-	sync.Mutex
+	sync.RWMutex
 	entries    map[string]promptCacheEntry
 	generation uint64
 }
@@ -42,7 +42,7 @@ func init() {
 
 // summaryCache caches LookupSummaries index file reads.
 var summaryCache struct {
-	sync.Mutex
+	sync.RWMutex
 	entries    map[string]summaryCacheEntry
 	generation uint64
 }
@@ -422,16 +422,25 @@ func extractLastPrompt(claudeDir, cwd, sessionID string) string {
 	return result
 }
 
-// getCachedPrompt checks the prompt cache under a deferred lock.
+// getCachedPrompt checks the prompt cache. Reads use RLock; only the gen
+// refresh on a hit upgrades to the write lock (cheap in-place update).
 func getCachedPrompt(path string, mtime int64) (string, bool) {
-	promptCache.Lock()
-	defer promptCache.Unlock()
-	if cached, ok := promptCache.entries[path]; ok && cached.mtime == mtime {
-		cached.gen = promptCache.generation
-		promptCache.entries[path] = cached
-		return cached.prompt, true
+	promptCache.RLock()
+	cached, ok := promptCache.entries[path]
+	gen := promptCache.generation
+	promptCache.RUnlock()
+	if !ok || cached.mtime != mtime {
+		return "", false
 	}
-	return "", false
+	if cached.gen != gen {
+		promptCache.Lock()
+		if e, ok2 := promptCache.entries[path]; ok2 && e.mtime == mtime {
+			e.gen = promptCache.generation
+			promptCache.entries[path] = e
+		}
+		promptCache.Unlock()
+	}
+	return cached.prompt, true
 }
 
 // setCachedPrompt writes a prompt cache entry under a deferred lock.
@@ -612,17 +621,25 @@ func LookupSummaries(claudeDir string, sessions map[string]string) map[string]st
 	return result
 }
 
-// getCachedSummary checks the summary cache under a deferred lock.
+// getCachedSummary checks the summary cache. Reads use RLock; only the gen
+// refresh on a hit upgrades to the write lock (cheap in-place update).
 func getCachedSummary(indexPath string, mtime int64) (sessionsIndex, bool) {
-	summaryCache.Lock()
-	defer summaryCache.Unlock()
+	summaryCache.RLock()
 	cached, ok := summaryCache.entries[indexPath]
-	if ok && cached.mtime == mtime {
-		cached.gen = summaryCache.generation
-		summaryCache.entries[indexPath] = cached
-		return cached.index, true
+	gen := summaryCache.generation
+	summaryCache.RUnlock()
+	if !ok || cached.mtime != mtime {
+		return sessionsIndex{}, false
 	}
-	return sessionsIndex{}, false
+	if cached.gen != gen {
+		summaryCache.Lock()
+		if e, ok2 := summaryCache.entries[indexPath]; ok2 && e.mtime == mtime {
+			e.gen = summaryCache.generation
+			summaryCache.entries[indexPath] = e
+		}
+		summaryCache.Unlock()
+	}
+	return cached.index, true
 }
 
 // setCachedSummary writes a summary cache entry under a deferred lock.

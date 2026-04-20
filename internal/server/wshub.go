@@ -56,6 +56,7 @@ type Hub struct {
 
 	debounceMu    sync.Mutex
 	debounceTimer *time.Timer
+	debounceFirst time.Time // first trigger in the current debounce window
 }
 
 // HubOptions holds configuration for a Hub.
@@ -125,7 +126,10 @@ func NewHub(opts HubOptions) *Hub {
 			host := r.Host
 			if h.trustedProxy {
 				if fwd := r.Header.Get("X-Forwarded-Host"); fwd != "" {
-					host = strings.SplitN(fwd, ",", 2)[0]
+					// RFC 7239 permits whitespace around commas; trim so a
+					// proxy emitting "host.example , other.example" still
+					// matches r.Host on the comparison below.
+					host = strings.TrimSpace(strings.SplitN(fwd, ",", 2)[0])
 				}
 			}
 			return u.Host == host
@@ -169,7 +173,14 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
-		slog.Debug("ws upgrade failed", "err", err)
+		// Capture origin + remote IP so operators can diagnose
+		// CheckOrigin rejections or attribute floods to a specific client
+		// without digging through raw request logs.
+		slog.Debug("ws upgrade failed",
+			"err", err,
+			"remote", clientIP(r, h.trustedProxy),
+			"origin", r.Header.Get("Origin"),
+			"host", r.Host)
 		return
 	}
 	// Read-limit is owned by readPump (wsMaxMessageSize). Previous code also
@@ -178,8 +189,11 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// redundant setter to keep a single source of truth.
 	ip := clientIP(r, h.trustedProxy)
 	c := &wsClient{
-		conn:             conn,
-		send:             make(chan []byte, 1024),
+		conn: conn,
+		// 256 is sized for brief latency spikes; slow consumers drop rather
+		// than balloon memory (per-message cap is wsMaxMessageSize = 256KB,
+		// so 256 × 256KB = 64MB worst-case per client, vs 256MB at 1024).
+		send:             make(chan []byte, 256),
 		hub:              h,
 		remoteIP:         ip,
 		sendLimiter:      rate.NewLimiter(rate.Every(time.Second), 5), // 5 sends/s burst, 1/s sustained
@@ -240,11 +254,15 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "auth_fail", Error: "too many attempts"})
 		return
 	}
+	// Short-circuit when the connection is already authenticated via cookie —
+	// do not touch msg.Token or run the ConstantTimeCompare so the
+	// cookie-authed and token-authed paths are cleanly separated.
+	if c.authenticated.Load() {
+		c.SendJSON(node.ServerMsg{Type: "auth_ok"})
+		return
+	}
 	if h.dashToken == "" || subtle.ConstantTimeCompare([]byte(msg.Token), []byte(h.dashToken)) == 1 {
 		c.authenticated.Store(true)
-		c.SendJSON(node.ServerMsg{Type: "auth_ok"})
-	} else if c.authenticated.Load() {
-		// Already pre-authenticated via cookie during upgrade — accept.
 		c.SendJSON(node.ServerMsg{Type: "auth_ok"})
 	} else {
 		c.SendJSON(node.ServerMsg{Type: "auth_fail", Error: "invalid token"})
@@ -613,15 +631,27 @@ func (h *Hub) BroadcastSessionReady(key string) {
 }
 
 // BroadcastSessionsUpdate debounces notifications: resets a 50ms timer on each
-// call; the actual broadcast fires only when no further calls arrive within the window.
+// call; the actual broadcast fires only when no further calls arrive within the
+// window. A 500ms hard cap on the total debounce window guarantees the update
+// eventually fires even under sustained bursts, so clients never miss a refresh.
 func (h *Hub) BroadcastSessionsUpdate() {
+	const (
+		debounceInterval = 50 * time.Millisecond
+		maxDebounceDelay = 500 * time.Millisecond
+	)
 	h.debounceMu.Lock()
 	defer h.debounceMu.Unlock()
+	now := time.Now()
 	if h.debounceTimer != nil {
-		h.debounceTimer.Reset(50 * time.Millisecond)
+		if now.Sub(h.debounceFirst) >= maxDebounceDelay {
+			// Hard cap reached — let the pending timer fire without resetting.
+			return
+		}
+		h.debounceTimer.Reset(debounceInterval)
 		return
 	}
-	h.debounceTimer = time.AfterFunc(50*time.Millisecond, func() {
+	h.debounceFirst = now
+	h.debounceTimer = time.AfterFunc(debounceInterval, func() {
 		h.debounceMu.Lock()
 		h.debounceTimer = nil
 		h.debounceMu.Unlock()

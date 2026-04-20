@@ -60,7 +60,7 @@ type EventLog struct {
 	bgAgents   []SubagentInfo // background (run_in_background) agents; cleared on turn boundaries like turnAgents; protected by mu
 
 	subMu       sync.Mutex
-	subscribers []*subscriber
+	subscribers map[*subscriber]struct{}
 }
 
 // NewEventLog creates an event log with the given max size.
@@ -115,14 +115,7 @@ func (l *EventLog) Append(e EventEntry) {
 		l.lastActivitySummary.Store(e.Summary)
 	}
 
-	l.subMu.Lock()
-	for _, sub := range l.subscribers {
-		select {
-		case sub.ch <- struct{}{}:
-		default:
-		}
-	}
-	l.subMu.Unlock()
+	l.notifySubscribers()
 }
 
 // AppendBatch adds multiple entries to the log, holding the lock once and
@@ -144,8 +137,13 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 	}
 	l.mu.Unlock()
 
+	l.notifySubscribers()
+}
+
+// notifySubscribers wakes all subscriber channels non-blockingly.
+func (l *EventLog) notifySubscribers() {
 	l.subMu.Lock()
-	for _, sub := range l.subscribers {
+	for sub := range l.subscribers {
 		select {
 		case sub.ch <- struct{}{}:
 		default:
@@ -159,18 +157,16 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 func (l *EventLog) Subscribe() (<-chan struct{}, func()) {
 	sub := &subscriber{ch: make(chan struct{}, 1)}
 	l.subMu.Lock()
-	l.subscribers = append(l.subscribers, sub)
+	if l.subscribers == nil {
+		l.subscribers = make(map[*subscriber]struct{})
+	}
+	l.subscribers[sub] = struct{}{}
 	l.subMu.Unlock()
 
 	unsub := func() {
 		l.subMu.Lock()
-		defer l.subMu.Unlock()
-		for i, s := range l.subscribers {
-			if s == sub {
-				l.subscribers = append(l.subscribers[:i], l.subscribers[i+1:]...)
-				break
-			}
-		}
+		delete(l.subscribers, sub)
+		l.subMu.Unlock()
 		sub.closeOnce.Do(func() { close(sub.ch) })
 	}
 	return sub.ch, unsub
@@ -184,7 +180,7 @@ func (l *EventLog) CloseSubscribers() {
 	}
 	l.subMu.Lock()
 	defer l.subMu.Unlock()
-	for _, sub := range l.subscribers {
+	for sub := range l.subscribers {
 		sub.closeOnce.Do(func() { close(sub.ch) })
 	}
 	l.subscribers = nil

@@ -44,6 +44,12 @@ type SessionHandlers struct {
 	historyCacheTime time.Time
 	historyCacheMu   sync.Mutex
 	historyFlight    singleflight.Group
+
+	// Summary cache (30s TTL) — avoids re-running discovery.LookupSummaries
+	// (N os.Stat + package-level lock) on every GET /api/sessions poll.
+	summaryCache     map[string]string
+	summaryCacheTime time.Time
+	summaryCacheMu   sync.Mutex
 }
 
 // GET /api/sessions
@@ -87,13 +93,7 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 
 	// Fill summary from sessions-index.json for managed sessions
 	if h.claudeDir != "" {
-		sessionWorkspaces := make(map[string]string, len(snapshots))
-		for _, snap := range snapshots {
-			if snap.SessionID != "" && snap.Workspace != "" {
-				sessionWorkspaces[snap.SessionID] = snap.Workspace
-			}
-		}
-		summaryMap := discovery.LookupSummaries(h.claudeDir, sessionWorkspaces)
+		summaryMap := h.lookupSummariesCached(snapshots)
 		for i := range snapshots {
 			if summary := summaryMap[snapshots[i].SessionID]; summary != "" {
 				snapshots[i].Summary = summary
@@ -345,6 +345,10 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 
 	var rb [8]byte
 	if _, err := rand.Read(rb[:]); err != nil {
+		// crypto/rand failures are pathologically rare (kernel entropy
+		// pool gone, exhausted FDs), but without a log operators cannot
+		// distinguish "resume failed" from other 500s.
+		slog.Error("resume register: generate key failed", "err", err)
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
@@ -411,6 +415,37 @@ func (h *SessionHandlers) WarmHistoryCache() {
 			return h.loadHistorySessions(), nil
 		})
 	}()
+}
+
+// lookupSummariesCached returns sessionID→summary with a 30s TTL cache.
+// The cache key set (sessionID subset) may vary between calls; we store the
+// full lookup result and serve cached entries that overlap with the current
+// snapshot request. On miss or expiry, re-run discovery.LookupSummaries and
+// merge the fresh result into the cache.
+func (h *SessionHandlers) lookupSummariesCached(snapshots []session.SessionSnapshot) map[string]string {
+	const summaryTTL = 30 * time.Second
+
+	h.summaryCacheMu.Lock()
+	if h.summaryCache != nil && time.Since(h.summaryCacheTime) < summaryTTL {
+		cached := h.summaryCache
+		h.summaryCacheMu.Unlock()
+		return cached
+	}
+	h.summaryCacheMu.Unlock()
+
+	sessionWorkspaces := make(map[string]string, len(snapshots))
+	for _, snap := range snapshots {
+		if snap.SessionID != "" && snap.Workspace != "" {
+			sessionWorkspaces[snap.SessionID] = snap.Workspace
+		}
+	}
+	fresh := discovery.LookupSummaries(h.claudeDir, sessionWorkspaces)
+
+	h.summaryCacheMu.Lock()
+	h.summaryCache = fresh
+	h.summaryCacheTime = time.Now()
+	h.summaryCacheMu.Unlock()
+	return fresh
 }
 
 func (h *SessionHandlers) loadHistorySessions() []discovery.RecentSession {

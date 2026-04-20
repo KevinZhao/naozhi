@@ -93,8 +93,9 @@ type Router struct {
 	// oldest (FIFO) rather than picking randomly via map iteration — random
 	// eviction could drop a still-active session ID, causing discovery to
 	// misclassify its CLI process as an external (non-naozhi) session.
-	knownIDsOrder []string
-	knownIDsDirty bool
+	knownIDsOrder   []string
+	knownIDsDirty   bool
+	knownIDsSavedAt time.Time // last successful saveKnownIDs; throttles fsync to 5min
 
 	// sessionIDToKey is a reverse index from session ID to session key.
 	// Used by RegisterForResume for O(1) deduplication instead of O(n) scan.
@@ -646,7 +647,14 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 	if r.activeCount < 0 {
 		r.activeCount = 0
 	}
-	delete(r.workspaceOverrides, chatKeyPrefix)
+	if _, existed := r.workspaceOverrides[chatKeyPrefix]; existed {
+		delete(r.workspaceOverrides, chatKeyPrefix)
+		// Without wsOverridesDirty, the delete is only written back when some
+		// other code path bumps the flag; a crash before that would reload
+		// the override on restart and silently undo the user's reset.
+		r.wsOverridesDirty = true
+		r.wsOverridesGen++
+	}
 	r.storeDirty = true
 	r.storeGen++
 	r.mu.Unlock()
@@ -1252,7 +1260,11 @@ func (r *Router) Cleanup() {
 			wsOverridesCopy[k] = v
 		}
 	}
-	if r.knownIDsDirty {
+	// knownIDs is append-only and relatively stable. Throttle its fsync to
+	// once per 5 minutes to reduce disk I/O — a crash losing up to 5 minutes
+	// of session-ID tracking only costs one discovery rescan cycle.
+	const knownIDsSaveInterval = 5 * time.Minute
+	if r.knownIDsDirty && now.Sub(r.knownIDsSavedAt) >= knownIDsSaveInterval {
 		knownIDsCopy = make(map[string]bool, len(r.knownIDs))
 		for id := range r.knownIDs {
 			knownIDsCopy[id] = true
@@ -1293,6 +1305,7 @@ func (r *Router) Cleanup() {
 			// Only clear dirty flag if no concurrent trackSessionID added new IDs.
 			// knownIDs is append-only, so length comparison is sufficient.
 			r.mu.Lock()
+			r.knownIDsSavedAt = time.Now()
 			if len(r.knownIDs) == len(knownIDsCopy) {
 				r.knownIDsDirty = false
 			}
@@ -1672,10 +1685,19 @@ func (r *Router) trackSessionID(id string) {
 	}
 	if len(r.knownIDs) >= maxKnownIDs {
 		// Drop the oldest entry; r.knownIDsOrder invariant is that it holds
-		// exactly the keys of r.knownIDs in insertion order.
+		// exactly the keys of r.knownIDs in insertion order. Shift in-place
+		// rather than reslicing: `knownIDsOrder[1:]` keeps the backing array
+		// pinned from the original data pointer, so after many evictions the
+		// slice header drifts rightward and the leading, now-unused portion
+		// of the array can't be reused — eventually forcing re-allocation.
+		// The copy + clear tail approach keeps the header stable and lets the
+		// allocator reuse the same buffer indefinitely.
 		oldest := r.knownIDsOrder[0]
 		delete(r.knownIDs, oldest)
-		r.knownIDsOrder = r.knownIDsOrder[1:]
+		n := len(r.knownIDsOrder)
+		copy(r.knownIDsOrder, r.knownIDsOrder[1:])
+		r.knownIDsOrder[n-1] = ""
+		r.knownIDsOrder = r.knownIDsOrder[:n-1]
 	}
 	r.knownIDs[id] = true
 	r.knownIDsOrder = append(r.knownIDsOrder, id)
@@ -1838,9 +1860,15 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 		}
 		r.countActive()
 	}
-	// Set workspace override for the chat key prefix
+	// Set workspace override for the chat key prefix. Must bump the dirty
+	// flag so the override is persisted; otherwise a crash before another
+	// flushing path fires would lose the takeover's chosen workspace.
 	if chatKey := chatKeyFor(key); chatKey != key {
-		r.workspaceOverrides[chatKey] = workspace
+		if prev, ok := r.workspaceOverrides[chatKey]; !ok || prev != workspace {
+			r.workspaceOverrides[chatKey] = workspace
+			r.wsOverridesDirty = true
+			r.wsOverridesGen++
+		}
 	}
 	s, err := r.spawnSession(ctx, key, sessionID, opts)
 	if err != nil {
