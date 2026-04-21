@@ -35,6 +35,42 @@ var feishuHTTPClient = &http.Client{
 	},
 }
 
+// APIError is the typed error returned by Feishu Open API calls (token
+// fetch, send message, upload image). Callers can use errors.As to inspect
+// Code and decide retry policy via IsPermanent — rate-limit / 5xx codes
+// should be retried, invalid-credential codes should not.
+type APIError struct {
+	Code int
+	Msg  string
+	Op   string // "send", "token", "upload", etc. — for diagnostic context
+}
+
+func (e *APIError) Error() string {
+	if e.Msg != "" {
+		return fmt.Sprintf("feishu %s: code=%d msg=%s", e.Op, e.Code, e.Msg)
+	}
+	return fmt.Sprintf("feishu %s: code=%d", e.Op, e.Code)
+}
+
+// IsPermanent reports whether the error indicates a non-transient condition
+// (app credentials invalid, app disabled by vendor) where retrying with the
+// same request will never succeed. Used by reconnect loops to break out
+// instead of hammering the API forever.
+//
+// Code references: open.feishu.cn/document/server-docs/getting-started/server-error-codes
+//   - 99991663: invalid app_secret
+//   - 99991664: app disabled
+//   - 99991668: app not authorized
+//   - 1061045: bot not in chat (permanent for that chat)
+//   - 230001: invalid receive_id
+func (e *APIError) IsPermanent() bool {
+	switch e.Code {
+	case 99991663, 99991664, 99991668, 1061045, 230001:
+		return true
+	}
+	return false
+}
+
 // Config holds Feishu app credentials.
 type Config struct {
 	AppID             string `yaml:"app_id"`
@@ -316,7 +352,7 @@ func (f *Feishu) postMessage(ctx context.Context, token string, reqBody []byte) 
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 	if result.Code != 0 {
-		return "", fmt.Errorf("feishu api error: code=%d msg=%s", result.Code, result.Msg)
+		return "", &APIError{Code: result.Code, Msg: result.Msg, Op: "send"}
 	}
 
 	return result.Data.MessageID, nil
@@ -606,7 +642,7 @@ func (f *Feishu) getAccessToken(_ context.Context) (string, error) {
 			return nil, fmt.Errorf("decode token response: %w", err)
 		}
 		if result.Code != 0 {
-			return nil, fmt.Errorf("get token error: code=%d", result.Code)
+			return nil, &APIError{Code: result.Code, Op: "token"}
 		}
 
 		f.tokenMu.Lock()

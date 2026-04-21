@@ -243,7 +243,7 @@ func (h *Hub) runTurn(key, text string, images []cli.ImageData, onAsyncError fun
 	if status != session.SessionExisting {
 		// Spawn is an infrequent event (once per session lifecycle), so keep
 		// it at Info for operator visibility. Other per-turn events are Debug.
-		slog.Info("send: session spawned", "key", key, "status", status, "elapsed", time.Since(sendStart).Round(time.Millisecond))
+		slog.Info("send: session spawned", "key", key, "status", status, "elapsed_ms", time.Since(sendStart).Milliseconds())
 	}
 
 	if _, err := h.sendWithBroadcast(h.ctx, key, sess, text, images, nil); err != nil {
@@ -253,7 +253,7 @@ func (h *Hub) runTurn(key, text string, images []cli.ImageData, onAsyncError fun
 			slog.Warn("send: set cron prompt", "key", key, "err", err)
 		}
 	}
-	slog.Debug("send: turn complete", "key", key, "elapsed", time.Since(sendStart).Round(time.Millisecond))
+	slog.Debug("send: turn complete", "key", key, "elapsed_ms", time.Since(sendStart).Milliseconds())
 }
 
 // sessionSendLegacy keeps the pre-queue guard/interrupt behavior for code paths

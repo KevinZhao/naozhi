@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"math/rand/v2"
 	"net/http"
@@ -156,6 +157,32 @@ func ImageExt(mimeType string) string {
 	}
 }
 
+// PermanentError is implemented by platform-specific errors that should
+// bypass retry loops (invalid credentials, chat removed, etc.). Callers
+// that want retry behaviour still wrap/compose; loops that respect this
+// interface break out early instead of exhausting backoff budget.
+type PermanentError interface {
+	error
+	IsPermanent() bool
+}
+
+// IsPermanent walks the error chain and reports whether any wrapped error
+// signals a permanent condition. Returns false for nil.
+func IsPermanent(err error) bool {
+	var pe PermanentError
+	for err != nil {
+		if errors.As(err, &pe) && pe.IsPermanent() {
+			return true
+		}
+		unwrapped := errors.Unwrap(err)
+		if unwrapped == err || unwrapped == nil {
+			return false
+		}
+		err = unwrapped
+	}
+	return false
+}
+
 // ReplyWithRetry calls p.Reply up to maxAttempts times with exponential backoff
 // starting at 500 ms, doubling each retry up to 4 s. It returns on the first
 // success. If all attempts fail the last error is returned.
@@ -164,6 +191,10 @@ func ImageExt(mimeType string) string {
 // same tick do not retry on synchronised wall-clock boundaries — the common
 // thundering-herd scenario when a shared upstream (e.g. Feishu open API)
 // briefly 5xxs.
+//
+// A PermanentError short-circuits the loop — retrying an "app disabled" or
+// "bot not in chat" error just burns time and amplifies load during an
+// outage without changing the outcome.
 func ReplyWithRetry(ctx context.Context, p Platform, msg OutgoingMessage, maxAttempts int) (string, error) {
 	backoff := 500 * time.Millisecond
 	var lastErr error
@@ -187,6 +218,11 @@ func ReplyWithRetry(ctx context.Context, p Platform, msg OutgoingMessage, maxAtt
 		}
 		lastErr = err
 		slog.Warn("platform reply attempt failed", "platform", p.Name(), "chat", msg.ChatID, "attempt", i+1, "err", err)
+		if IsPermanent(err) {
+			slog.Error("platform reply permanent failure; aborting retries",
+				"platform", p.Name(), "chat", msg.ChatID, "attempt", i+1, "err", err)
+			return "", err
+		}
 	}
 	slog.Error("platform reply failed after all attempts", "platform", p.Name(), "chat", msg.ChatID, "attempts", maxAttempts, "err", lastErr)
 	return "", lastErr
