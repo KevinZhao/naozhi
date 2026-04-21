@@ -37,6 +37,14 @@ type Job struct {
 	// platform/chat fields.
 	Notify *bool `json:"notify,omitempty"`
 
+	// FreshContext, when true, resets the cron session before each run so the
+	// CLI starts from a clean slate instead of inheriting the conversation
+	// history from previous executions. Default (false) preserves the existing
+	// behavior — session is long-lived and each run appends a new turn to the
+	// accumulated context. Fresh mode keeps per-run latency bounded when the
+	// job repeatedly does independent work (reviews, status scans, etc.).
+	FreshContext bool `json:"fresh_context,omitempty"`
+
 	// Last execution result, persisted across restarts. LastRunAt has no
 	// omitempty: encoding/json does not drop zero-value time.Time structs,
 	// so the tag was a lint-only hint that falsely implied zero-value

@@ -14,6 +14,7 @@ import (
 
 	robfigcron "github.com/robfig/cron/v3"
 
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -219,7 +220,7 @@ func (s *Scheduler) Stop() {
 	snap := s.snapshotJobs()
 	s.mu.Unlock()
 	if err := saveJobs(s.storePath, snap); err != nil {
-		slog.Error("save cron store on shutdown", "err", err)
+		slog.Error("save cron store on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
 }
 
@@ -415,6 +416,9 @@ type JobUpdate struct {
 	// the existing value, a pointer to "" clears it.
 	NotifyPlatform *string
 	NotifyChatID   *string
+	// FreshContext toggles whether each run resets the session before
+	// executing. nil leaves existing behavior unchanged.
+	FreshContext *bool
 }
 
 // UpdateJob applies a partial edit to an existing cron job. Schedule changes
@@ -456,6 +460,9 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	if upd.NotifyChatID != nil {
 		j.NotifyChatID = *upd.NotifyChatID
 	}
+	if upd.FreshContext != nil {
+		j.FreshContext = *upd.FreshContext
+	}
 
 	if upd.Schedule != nil && *upd.Schedule != j.Schedule {
 		j.Schedule = *upd.Schedule
@@ -486,7 +493,8 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	slog.Info("cron job updated", "id", id,
 		"schedule_changed", upd.Schedule != nil,
 		"prompt_changed", upd.Prompt != nil,
-		"workdir_changed", upd.WorkDir != nil)
+		"workdir_changed", upd.WorkDir != nil,
+		"fresh_context_changed", upd.FreshContext != nil)
 	return &result, nil
 }
 
@@ -768,6 +776,7 @@ func (s *Scheduler) execute(j *Job) {
 	chatID := j.ChatID
 	notifyPlat := j.NotifyPlatform
 	notifyChat := j.NotifyChatID
+	fresh := j.FreshContext
 	var notifyOpt *bool
 	if j.Notify != nil {
 		v := *j.Notify
@@ -794,6 +803,16 @@ func (s *Scheduler) execute(j *Job) {
 		opts.Workspace = filepath.Clean(workDir)
 	}
 	key := "cron:" + jobID
+
+	// Fresh mode: drop any existing session (and its process + history) so
+	// GetOrCreate spawns a brand-new CLI. Reset is a no-op when no session
+	// exists yet, so first-run behavior is identical to persistent mode.
+	// The router's RegisterCronStub call in registerStub() will rebuild the
+	// dashboard sidebar stub entry after execute returns.
+	if fresh {
+		s.router.Reset(key)
+		log.Info("cron fresh context: session reset before run")
+	}
 
 	sess, _, err := s.router.GetOrCreate(ctx, key, opts)
 	if err != nil {

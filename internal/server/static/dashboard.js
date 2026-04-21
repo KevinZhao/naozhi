@@ -4200,6 +4200,7 @@ function createNewCronJob() {
   const scheduleHtml = buildScheduleSection({ mode: 'interval', n: 1, unit: 'h' }, '');
   const wsHtml = buildWorkspaceHtml();
   const notifyHtml = buildCronNotifySection('', false);
+  const contextHtml = buildCronContextSection(false);
 
   overlay.innerHTML =
     '<div class="modal" role="dialog" aria-modal="true" aria-label="New cron job">' +
@@ -4209,7 +4210,7 @@ function createNewCronJob() {
           '<div class="modal-section-label">Prompt</div>' +
           '<textarea id="cron-prompt" placeholder="what should this job do?" style="min-height:72px;max-height:160px" aria-label="Prompt"></textarea>' +
         '</div>' +
-        scheduleHtml + wsHtml + notifyHtml +
+        scheduleHtml + wsHtml + notifyHtml + contextHtml +
       '</div>' +
       '<div class="modal-btns">' +
         '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
@@ -4224,6 +4225,28 @@ function createNewCronJob() {
   overlay._cronSchedule = '';
   overlay._cronWorkDir = '';
   freqUpdate();
+}
+
+// buildCronContextSection renders the "上下文" toggle: persistent (reuse
+// session + history) vs fresh (reset before each run). Used in create/edit
+// modals. initialFresh is a bool; default is false (persistent).
+function buildCronContextSection(initialFresh) {
+  const persistentChecked = !initialFresh ? 'checked' : '';
+  const freshChecked = initialFresh ? 'checked' : '';
+  return '<div class="cron-notify-section" style="margin-top:12px">' +
+      '<div class="modal-section-label">上下文</div>' +
+      '<label class="cron-notify-opt"><input type="radio" name="cron-context" value="persistent" ' + persistentChecked + '> 继承（复用会话，保留历史）</label>' +
+      '<label class="cron-notify-opt"><input type="radio" name="cron-context" value="fresh" ' + freshChecked + '> 每次全新（重置会话）</label>' +
+      '<div class="cron-tz-hint">持续运行的任务选"继承"，独立重复的任务选"全新"</div>' +
+    '</div>';
+}
+
+// collectCronContextValue returns the selected fresh_context flag, or null
+// when the user didn't interact with the radios (e.g. section not rendered).
+function collectCronContextValue() {
+  const sel = document.querySelector('input[name="cron-context"]:checked');
+  if (!sel) return null;
+  return sel.value === 'fresh';
 }
 
 // buildCronNotifySection renders the "IM 通知" section used in both the
@@ -4359,6 +4382,8 @@ async function doCreateCronJob() {
     if (notifyVals.notify !== null) body.notify = notifyVals.notify;
     if (notifyVals.notify_platform !== null) body.notify_platform = notifyVals.notify_platform;
     if (notifyVals.notify_chat_id !== null) body.notify_chat_id = notifyVals.notify_chat_id;
+    const freshCtx = collectCronContextValue();
+    if (freshCtx === true) body.fresh_context = true;
     const r = await fetch('/api/cron', {method: 'POST', headers, body: JSON.stringify(body)});
     if (!r.ok) { showToast('create failed: ' + await r.text()); return; }
     const data = await r.json();
@@ -4428,6 +4453,9 @@ function renderCronPanel() {
       } else if (j.notify === false) {
         notifyStr = '<span class="cc-notify off" title="IM 通知已关闭">&#128277; silent</span>';
       }
+      const freshStr = j.fresh_context
+        ? '<span class="cc-notify on" title="每次运行前重置会话">&#128260; fresh</span>'
+        : '';
       let result = '';
       if (j.last_error) {
         result = '<div class="cc-result err"><span class="cc-icon">\u2716</span><span class="cc-text">' + esc(j.last_error) + '</span></div>';
@@ -4450,7 +4478,7 @@ function renderCronPanel() {
         promptBlock +
         '<div class="cc-human">' + esc(human) + '</div>' +
         (showRaw ? '<div class="cc-expr">' + esc(j.schedule) + '</div>' : '') +
-        '<div class="cc-meta">' + status + wdStr + notifyStr +
+        '<div class="cc-meta">' + status + wdStr + notifyStr + freshStr +
           (lastStr ? '<span>ran ' + lastStr + '</span>' : '') +
           (nextStr ? '<span>next ' + nextStr + '</span>' : '') +
         '</div>' +
@@ -4548,6 +4576,7 @@ function editCronJob(id) {
   const notifyInitial = job.notify === true ? 'on' : (job.notify === false ? 'off' : '');
   const hasOverride = !!(job.notify_platform && job.notify_chat_id);
   const notifyHtml = buildCronNotifySection(notifyInitial, hasOverride, job.notify_platform, job.notify_chat_id);
+  const contextHtml = buildCronContextSection(!!job.fresh_context);
 
   // Round-trip attempt: if the saved expression matches a picker shape we
   // restore the picker; otherwise open the advanced disclosure with the raw
@@ -4570,7 +4599,7 @@ function editCronJob(id) {
           '<input id="edit-cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" aria-label="Workspace path">' +
           '<div class="cron-tz-hint">留空则使用默认 workspace</div>' +
         '</div>' +
-        notifyHtml +
+        notifyHtml + contextHtml +
       '</div>' +
       '<div class="modal-btns">' +
         '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
@@ -4642,6 +4671,12 @@ async function doEditCronJob(id) {
   if (overrideCheckbox && !overrideCheckbox.checked && (origPlat || origChat)) {
     body.notify_platform = '';
     body.notify_chat_id = '';
+  }
+
+  // fresh_context toggle
+  const freshCtx = collectCronContextValue();
+  if (freshCtx !== null && freshCtx !== !!job.fresh_context) {
+    body.fresh_context = freshCtx;
   }
 
   if (Object.keys(body).length === 0) { overlay.remove(); return; }

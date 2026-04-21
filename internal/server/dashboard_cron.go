@@ -44,7 +44,8 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		NextRun        int64  `json:"next_run,omitempty"`
 		// Notify is a pointer so the view preserves the tri-state (nil vs
 		// explicit true/false). nil renders as "legacy default" on the client.
-		Notify *bool `json:"notify,omitempty"`
+		Notify       *bool `json:"notify,omitempty"`
+		FreshContext bool  `json:"fresh_context,omitempty"`
 	}
 	views := make([]cronJobView, 0, len(jobs))
 	for _, entry := range jobs {
@@ -64,6 +65,7 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			LastResult:     j.LastResult,
 			LastError:      j.LastError,
 			Notify:         j.Notify,
+			FreshContext:   j.FreshContext,
 		}
 		if !j.LastRunAt.IsZero() {
 			v.LastRunAt = j.LastRunAt.UnixMilli()
@@ -111,6 +113,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		NotifyPlatform string `json:"notify_platform,omitempty"`
 		NotifyChatID   string `json:"notify_chat_id,omitempty"`
 		Notify         *bool  `json:"notify,omitempty"`
+		FreshContext   bool   `json:"fresh_context,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64 KB
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -155,6 +158,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		NotifyPlatform: req.NotifyPlatform,
 		NotifyChatID:   req.NotifyChatID,
 		Notify:         req.Notify,
+		FreshContext:   req.FreshContext,
 		Paused:         req.Prompt == "", // auto-pause when no prompt
 	}
 	if err := h.scheduler.AddJob(job); err != nil {
@@ -389,6 +393,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		Notify         *bool   `json:"notify,omitempty"`
 		NotifyPlatform *string `json:"notify_platform,omitempty"`
 		NotifyChatID   *string `json:"notify_chat_id,omitempty"`
+		FreshContext   *bool   `json:"fresh_context,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -396,7 +401,8 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if req.Schedule == nil && req.Prompt == nil && req.WorkDir == nil &&
-		req.Notify == nil && req.NotifyPlatform == nil && req.NotifyChatID == nil {
+		req.Notify == nil && req.NotifyPlatform == nil && req.NotifyChatID == nil &&
+		req.FreshContext == nil {
 		http.Error(w, "at least one field must be provided", http.StatusBadRequest)
 		return
 	}
@@ -431,6 +437,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		Notify:         req.Notify,
 		NotifyPlatform: req.NotifyPlatform,
 		NotifyChatID:   req.NotifyChatID,
+		FreshContext:   req.FreshContext,
 	})
 	if err != nil {
 		if errors.Is(err, cron.ErrJobNotFound) {
