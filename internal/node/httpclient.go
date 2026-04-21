@@ -264,6 +264,25 @@ func (n *HTTPClient) ProxyUpdateConfig(ctx context.Context, projectName string, 
 	return nil
 }
 
+// ProxySetFavorite forwards a project favorite toggle to the remote node.
+func (n *HTTPClient) ProxySetFavorite(ctx context.Context, projectName string, favorite bool) error {
+	favStr := "false"
+	if favorite {
+		favStr = "true"
+	}
+	path := "/api/projects/favorite?name=" + url.QueryEscape(projectName) + "&favorite=" + favStr
+	resp, err := n.doRequest(ctx, http.MethodPost, path, nil)
+	if err != nil {
+		return fmt.Errorf("proxy set favorite to %s: %w", n.ID, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		return fmt.Errorf("proxy set favorite to %s: status %d: %s", n.ID, resp.StatusCode, string(body))
+	}
+	return nil
+}
+
 func (n *HTTPClient) NodeID() string      { return n.ID }
 func (n *HTTPClient) DisplayName() string { return n.displayName }
 func (n *HTTPClient) Status() string      { return "ok" }

@@ -143,11 +143,18 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	stats["agents"] = agentIDs
 
 	// Include project list for dashboard sidebar rendering
-	var projectList []map[string]string
+	var projectList []map[string]any
 	if h.projectMgr != nil {
 		projects := h.projectMgr.All()
 		for _, p := range projects {
-			projectList = append(projectList, map[string]string{"name": p.Name, "path": p.Path, "node": "local"})
+			projectList = append(projectList, map[string]any{
+				"name":           p.Name,
+				"path":           p.Path,
+				"node":           "local",
+				"favorite":       p.Config.Favorite,
+				"git_remote_url": p.GitRemoteURL,
+				"github":         p.IsGitHub,
+			})
 		}
 	}
 	// Merge remote projects (always, even without a local project manager)
@@ -158,9 +165,20 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 				name := strOrFallback(item, "name", "Name")
 				path := strOrFallback(item, "path", "Path")
 				nd, _ := item["node"].(string)
-				if name != "" {
-					projectList = append(projectList, map[string]string{"name": name, "path": path, "node": nd})
+				if name == "" {
+					continue
 				}
+				entry := map[string]any{"name": name, "path": path, "node": nd}
+				if v, ok := item["favorite"].(bool); ok {
+					entry["favorite"] = v
+				}
+				if v, ok := item["git_remote_url"].(string); ok && v != "" {
+					entry["git_remote_url"] = v
+				}
+				if v, ok := item["github"].(bool); ok {
+					entry["github"] = v
+				}
+				projectList = append(projectList, entry)
 			}
 		}
 	}

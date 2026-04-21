@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -112,7 +113,13 @@ func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 	owner := uploadOwner(r, h.trustedProxy)
 	id, err := h.uploadStore.Put(owner, img)
 	if err != nil {
-		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "too many pending uploads"})
+		// Distinguish per-owner quota from global exhaustion so the client
+		// can show "你上传的文件过多" vs a generic "服务繁忙" prompt.
+		msg := "too many pending uploads"
+		if errors.Is(err, errUploadPerOwner) {
+			msg = "upload quota exceeded for this user"
+		}
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": msg})
 		return
 	}
 	writeJSON(w, map[string]string{"id": id})

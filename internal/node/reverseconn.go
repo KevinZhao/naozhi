@@ -232,6 +232,11 @@ func (c *ReverseConn) ProxyUpdateConfig(ctx context.Context, projectName string,
 	return err
 }
 
+func (c *ReverseConn) ProxySetFavorite(ctx context.Context, projectName string, favorite bool) error {
+	_, err := c.rpc(ctx, "set_favorite", map[string]any{"project_name": projectName, "favorite": favorite})
+	return err
+}
+
 func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 	c.subMu.Lock()
 	alreadySub := len(c.subs[key]) > 0

@@ -569,6 +569,22 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		}
 		return marshalResult(map[string]string{"status": "ok"})
 
+	case "set_favorite":
+		var p struct {
+			ProjectName string `json:"project_name"`
+			Favorite    bool   `json:"favorite"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("set_favorite params: %w", err)
+		}
+		if c.projMgr == nil {
+			return nil, fmt.Errorf("projects not configured")
+		}
+		if err := c.projMgr.SetFavorite(p.ProjectName, p.Favorite); err != nil {
+			return nil, fmt.Errorf("set favorite: %w", err)
+		}
+		return marshalResult(map[string]any{"status": "ok", "favorite": p.Favorite})
+
 	default:
 		return nil, fmt.Errorf("unknown method: %s", req.Method)
 	}

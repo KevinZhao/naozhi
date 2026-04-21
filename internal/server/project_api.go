@@ -42,11 +42,14 @@ func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 
 		result = append(result, map[string]any{
-			"name":          p.Name,
-			"path":          p.Path,
-			"planner_state": plannerState,
-			"planner_model": h.projectMgr.EffectivePlannerModel(p),
-			"config":        p.Config,
+			"name":           p.Name,
+			"path":           p.Path,
+			"planner_state":  plannerState,
+			"planner_model":  h.projectMgr.EffectivePlannerModel(p),
+			"config":         p.Config,
+			"favorite":       p.Config.Favorite,
+			"git_remote_url": p.GitRemoteURL,
+			"github":         p.IsGitHub,
 		})
 	}
 
@@ -163,6 +166,52 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// POST /api/projects/favorite?name=...&favorite=true|false
+func (h *ProjectHandlers) handleFavoriteToggle(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	favStr := r.URL.Query().Get("favorite")
+	if favStr != "true" && favStr != "false" {
+		http.Error(w, "favorite must be true or false", http.StatusBadRequest)
+		return
+	}
+	favorite := favStr == "true"
+
+	// Remote node proxy
+	nodeID := r.URL.Query().Get("node")
+	if nodeID != "" && nodeID != "local" {
+		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
+		if !ok {
+			return
+		}
+		if err := nc.ProxySetFavorite(r.Context(), name, favorite); err != nil {
+			slog.Warn("proxy set favorite failed", "node", nodeID, "err", err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, map[string]any{"status": "ok", "favorite": favorite})
+		return
+	}
+
+	if h.projectMgr == nil {
+		http.Error(w, "projects not configured", http.StatusBadRequest)
+		return
+	}
+	if err := h.projectMgr.SetFavorite(name, favorite); err != nil {
+		if errors.Is(err, project.ErrNotFound) {
+			http.Error(w, "project not found", http.StatusNotFound)
+		} else {
+			slog.Error("set favorite failed", "project", name, "err", err)
+			http.Error(w, "internal server error", http.StatusInternalServerError)
+		}
+		return
+	}
+	writeJSON(w, map[string]any{"status": "ok", "favorite": favorite})
 }
 
 // POST /api/projects/planner/restart?name=...

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -24,7 +25,13 @@ import (
 
 // Hub manages WebSocket client connections and event subscriptions.
 type Hub struct {
-	mu          sync.RWMutex
+	mu sync.RWMutex
+	// connCount mirrors len(h.clients) for the unauthenticated connection
+	// cap. Accessed via atomic CAS so the 500-connection gate is checked
+	// and reserved in a single step, closing the TOCTOU window where a
+	// burst of simultaneous upgrades all observed `count < 500` under a
+	// plain RLock and then landed past the cap.
+	connCount   atomic.Int64
 	clients     map[*wsClient]struct{}
 	router      *session.Router
 	agents      map[string]session.AgentOpts
@@ -163,13 +170,22 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	}
 	// Reject upgrades when too many connections are open (prevent resource exhaustion
 	// from unauthenticated connections allocating goroutines + channel buffers).
-	h.mu.RLock()
-	count := len(h.clients)
-	h.mu.RUnlock()
-	if count >= 500 {
+	// Reserve the slot atomically: the previous RLock/check/unlock sequence was a
+	// TOCTOU window where a concurrent burst could all observe count < cap and
+	// all complete the upgrade. CAS on connCount collapses the gate into one step.
+	const maxWSConns = 500
+	if n := h.connCount.Add(1); n > maxWSConns {
+		h.connCount.Add(-1)
 		http.Error(w, "too many WebSocket connections", http.StatusServiceUnavailable)
 		return
 	}
+	// Release the reserved slot on any pre-register failure path.
+	slotReleased := false
+	defer func() {
+		if !slotReleased {
+			h.connCount.Add(-1)
+		}
+	}()
 
 	conn, err := h.upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -214,6 +230,11 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	h.register(c)
+	// Ownership of the connCount slot transfers to register/unregister:
+	// mark the slot as released here so the defer on the upgrade path
+	// doesn't double-decrement. unregister() will Add(-1) when this
+	// client eventually disconnects.
+	slotReleased = true
 	go c.writePump()
 	go c.readPump()
 }
@@ -226,14 +247,22 @@ func (h *Hub) register(c *wsClient) {
 
 func (h *Hub) unregister(c *wsClient) {
 	h.mu.Lock()
+	removed := false
 	if _, ok := h.clients[c]; ok {
 		delete(h.clients, c)
 		for _, unsub := range c.subscriptions {
 			unsub()
 		}
 		c.subscriptions = nil
+		removed = true
 	}
 	h.mu.Unlock()
+	if removed {
+		// Release the connCount slot reserved at upgrade time. Guarded on
+		// `removed` so a double-unregister (stale close path) cannot leak
+		// the counter into negative territory.
+		h.connCount.Add(-1)
+	}
 
 	// Snapshot nodes under nodesMu to avoid data race
 	h.nodesMu.RLock()
@@ -595,15 +624,22 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 }
 
 // broadcastToAuthenticated sends raw data to all authenticated WebSocket clients.
-// SendRaw is non-blocking (drops on full buffer), so we can safely iterate while
-// holding RLock — no snapshot slice allocation per broadcast.
+// Takes a pointer snapshot under RLock and releases the lock before the per-
+// client channel sends. SendRaw itself is non-blocking, but with hundreds of
+// clients a loop under RLock still serialises `register`/`unregister` behind
+// every broadcast; snapshotting is a single allocation per broadcast in
+// exchange for removing that contention amplifier.
 func (h *Hub) broadcastToAuthenticated(data []byte) {
 	h.mu.RLock()
-	defer h.mu.RUnlock()
+	snap := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
 		if c.authenticated.Load() {
-			c.SendRaw(data)
+			snap = append(snap, c)
 		}
+	}
+	h.mu.RUnlock()
+	for _, c := range snap {
+		c.SendRaw(data)
 	}
 }
 

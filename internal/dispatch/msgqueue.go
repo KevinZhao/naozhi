@@ -2,6 +2,7 @@ package dispatch
 
 import (
 	"container/list"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -115,6 +116,12 @@ func (q *MessageQueue) Enqueue(key string, msg QueuedMsg) (isOwner, enqueued boo
 	// drifting forward indefinitely; also zeroes the evicted slot so
 	// any held image data can be GC'd.
 	if len(sq.msgs) >= q.maxDepth {
+		// Queue-full eviction is silent data loss: the user that sent the
+		// evicted message gets no feedback. Log at Warn so operators can
+		// observe backpressure (single chat overwhelmed, or CLI hung).
+		// Chat key is included so the line correlates with session logs.
+		slog.Warn("msgqueue: dropping oldest message (queue full)",
+			"key", key, "depth", len(sq.msgs), "max_depth", q.maxDepth)
 		copy(sq.msgs, sq.msgs[1:])
 		sq.msgs[len(sq.msgs)-1] = QueuedMsg{}
 		sq.msgs = sq.msgs[:len(sq.msgs)-1]

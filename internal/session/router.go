@@ -1470,15 +1470,18 @@ func (r *Router) Shutdown() {
 	}
 	r.mu.Unlock()
 
-	// Save session state outside lock (avoids JSON marshal + file I/O under mutex)
+	// Save session state outside lock (avoids JSON marshal + file I/O under mutex).
+	// disk_full is surfaced as a distinct structured field so monitoring can
+	// page on ENOSPC separately from transient write failures; shutdown loses
+	// all un-persisted state silently otherwise.
 	if err := saveStore(storePath, sessionsCopy); err != nil {
-		slog.Error("save session store on shutdown", "err", err)
+		slog.Error("save session store on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
 	if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
-		slog.Error("save known session IDs on shutdown", "err", err)
+		slog.Error("save known session IDs on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
 	if err := saveWorkspaceOverrides(storePath, wsOverrides); err != nil {
-		slog.Error("save workspace overrides on shutdown", "err", err)
+		slog.Error("save workspace overrides on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
 
 	// Detach shim processes (keep them alive for reconnect after restart)

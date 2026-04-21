@@ -16,10 +16,15 @@ type Project struct {
 	Path       string        `json:"path"`                  // absolute filesystem path
 	PathPrefix string        `json:"path_prefix,omitempty"` // Path + "/" — precomputed for ResolveWorkspaces prefix matching
 	Config     ProjectConfig `json:"config"`                // loaded from .naozhi/project.yaml
+
+	// Runtime-derived fields (not persisted, refreshed on Scan).
+	GitRemoteURL string `json:"git_remote_url,omitempty"`
+	IsGitHub     bool   `json:"is_github,omitempty"`
 }
 
 // ProjectConfig is persisted to .naozhi/project.yaml inside each project directory.
 type ProjectConfig struct {
+	Favorite   bool   `yaml:"favorite,omitempty" json:"favorite,omitempty"`
 	GitSync    bool   `yaml:"git_sync,omitempty" json:"git_sync"`
 	GitRemote  string `yaml:"git_remote,omitempty" json:"git_remote,omitempty"`
 	MemoryFile string `yaml:"memory_file,omitempty" json:"memory_file,omitempty"`

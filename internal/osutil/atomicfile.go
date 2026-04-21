@@ -1,10 +1,20 @@
 package osutil
 
 import (
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
+	"syscall"
 )
+
+// IsDiskFull reports whether err is a "no space left on device" error
+// (ENOSPC) from any level of the error chain. Callers can emit a
+// distinct structured log field so monitoring can page on disk-full
+// separately from transient write failures.
+func IsDiskFull(err error) bool {
+	return errors.Is(err, syscall.ENOSPC)
+}
 
 // WriteFileAtomic writes data to path via the standard write-tmp → fsync →
 // close → rename pattern used across the naozhi stores. It replaces repeated

@@ -79,11 +79,14 @@ func (m *Manager) Scan() error {
 			continue
 		}
 
+		remote, isGH := DetectGitHubRemote(absPath)
 		projects[name] = &Project{
-			Name:       name,
-			Path:       absPath,
-			PathPrefix: absPath + "/",
-			Config:     cfg,
+			Name:         name,
+			Path:         absPath,
+			PathPrefix:   absPath + "/",
+			Config:       cfg,
+			GitRemoteURL: remote,
+			IsGitHub:     isGH,
 		}
 	}
 
@@ -188,6 +191,27 @@ func (m *Manager) UnbindAllChat(platform, chatType, chatID string) error {
 	}
 	p.Config.ChatBindings = filtered
 	m.rebuildBindingIndex()
+	cfgSnap := snapshotConfig(p)
+	path := p.configPath()
+	m.mu.Unlock()
+
+	return saveConfigToPath(path, cfgSnap)
+}
+
+// SetFavorite toggles a project's Favorite flag and persists it atomically.
+// Only touches Favorite — other config fields are preserved.
+func (m *Manager) SetFavorite(name string, favorite bool) error {
+	m.mu.Lock()
+	p, ok := m.projects[name]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrNotFound, name)
+	}
+	if p.Config.Favorite == favorite {
+		m.mu.Unlock()
+		return nil
+	}
+	p.Config.Favorite = favorite
 	cfgSnap := snapshotConfig(p)
 	path := p.configPath()
 	m.mu.Unlock()

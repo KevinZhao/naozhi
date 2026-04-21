@@ -33,6 +33,7 @@ type Conn interface {
 	ProxyCloseDiscovered(ctx context.Context, pid int, sessionID, cwd string, procStart uint64) error
 	ProxyRestartPlanner(ctx context.Context, projectName string) error
 	ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error
+	ProxySetFavorite(ctx context.Context, projectName string, favorite bool) error
 
 	Subscribe(c EventSink, key string, after int64)
 	Unsubscribe(c EventSink, key string)

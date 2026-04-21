@@ -58,10 +58,11 @@ func (s *stubConn) ProxyRestartPlanner(_ context.Context, _ string) error { retu
 func (s *stubConn) ProxyUpdateConfig(_ context.Context, _ string, _ json.RawMessage) error {
 	return nil
 }
-func (s *stubConn) Subscribe(_ EventSink, _ string, _ int64) {}
-func (s *stubConn) Unsubscribe(_ EventSink, _ string)        {}
-func (s *stubConn) RefreshSubscription(_ string)             {}
-func (s *stubConn) RemoveClient(_ EventSink)                 {}
+func (s *stubConn) ProxySetFavorite(_ context.Context, _ string, _ bool) error { return nil }
+func (s *stubConn) Subscribe(_ EventSink, _ string, _ int64)                   {}
+func (s *stubConn) Unsubscribe(_ EventSink, _ string)                          {}
+func (s *stubConn) RefreshSubscription(_ string)                               {}
+func (s *stubConn) RemoveClient(_ EventSink)                                   {}
 
 // ---- NewCacheManager ----
 
