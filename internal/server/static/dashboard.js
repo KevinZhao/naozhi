@@ -50,9 +50,12 @@ async function fetchSessions() {
     const r = await fetch('/api/sessions', { headers });
     if (r.status === 401 || r.status === 403) {
       if (!document.querySelector('.modal-overlay')) showAuthModal();
-      return;
+      // Explicit falsy return lets maybeShowOnboarding know auth is still
+      // unresolved and skip its overlay, avoiding stacking onboarding on
+      // top of the auth modal.
+      return false;
     }
-    if (!r.ok) return;
+    if (!r.ok) return false;
     const data = await r.json();
     // Use server-side version counter for efficient change detection.
     // Falls back to JSON comparison for nodes/history which lack a version.
@@ -123,8 +126,10 @@ async function fetchSessions() {
       if (sd) updateMainState(sd.state, sd.death_reason);
     }
     if (selectedKey) updateHeaderCLI();
+    return true;
   } catch (e) {
     console.error('fetchSessions:', e);
+    return false;
   }
 }
 
@@ -2013,9 +2018,34 @@ function startVoiceRecording() {
     voiceActive = false;
     cleanupVoiceTouchListeners();
     if (holdBtn) holdBtn.classList.remove('active');
-    showToast(err.message === 'not supported' ? '\u6d4f\u89c8\u5668\u4e0d\u652f\u6301\u5f55\u97f3' : '\u9ea6\u514b\u98ce\u6743\u9650\u88ab\u62d2\u7edd');
+    hideVoiceOverlay();
+    showToast(describeMicError(err), 'error', 5000);
     console.warn('mic error:', err);
   });
+}
+
+// describeMicError converts a MediaDevices/getUserMedia error into a concrete,
+// user-actionable Chinese message. Previously we collapsed all failures to
+// "权限被拒绝", which masked genuine browser-unsupported, no-device, or
+// hardware-busy cases that need different recovery steps.
+function describeMicError(err) {
+  if (!err) return '\u9ea6\u514b\u98ce\u8c03\u7528\u5931\u8d25';
+  if (err.message === 'not supported' || err.name === 'NotSupportedError') {
+    return '\u6d4f\u89c8\u5668\u4e0d\u652f\u6301\u5f55\u97f3\uff0c\u8bf7\u6539\u7528 Chrome/Firefox/Safari \u6700\u65b0\u7248';
+  }
+  if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
+    return '\u9ea6\u514b\u98ce\u6743\u9650\u88ab\u62d2\u7edd\uff0c\u8bf7\u5728\u6d4f\u89c8\u5668\u5730\u5740\u680f\u7684\u9501\u5934\u56fe\u6807\u4e2d\u5141\u8bb8';
+  }
+  if (err.name === 'NotFoundError' || err.name === 'OverconstrainedError') {
+    return '\u672a\u68c0\u6d4b\u5230\u53ef\u7528\u9ea6\u514b\u98ce\uff0c\u8bf7\u68c0\u67e5\u786c\u4ef6\u8fde\u63a5';
+  }
+  if (err.name === 'NotReadableError') {
+    return '\u9ea6\u514b\u98ce\u88ab\u5176\u4ed6\u7a0b\u5e8f\u5360\u7528\uff0c\u8bf7\u5173\u95ed\u5176\u4ed6\u5f55\u97f3\u5e94\u7528\u540e\u91cd\u8bd5';
+  }
+  if (err.name === 'AbortError') {
+    return '\u5f55\u97f3\u88ab\u7ec8\u6b62\uff0c\u8bf7\u91cd\u65b0\u5c1d\u8bd5';
+  }
+  return '\u9ea6\u514b\u98ce\u8c03\u7528\u5931\u8d25\uff1a' + (err.message || err.name || 'unknown');
 }
 
 function stopVoiceRecording(shouldSend) {
@@ -2065,13 +2095,19 @@ function transcribeAudio(blob, autoSend) {
   const headers = {};
   const token = getToken();
   if (token) headers['Authorization'] = 'Bearer ' + token;
+  // Tag fetch-level failures so .catch can distinguish network from server.
   fetch('/api/transcribe', {
     method: 'POST',
     headers: headers,
     credentials: 'same-origin',
     body: fd
   }).then(r => {
-    if (!r.ok) return r.text().then(t => { throw new Error('HTTP ' + r.status + ': ' + t); });
+    if (!r.ok) return r.text().then(t => {
+      const e = new Error(t || ('HTTP ' + r.status));
+      e.status = r.status;
+      e.body = t;
+      throw e;
+    });
     return r.json();
   }).then(data => {
     hideVoiceOverlay();
@@ -2086,12 +2122,47 @@ function transcribeAudio(blob, autoSend) {
         showToast('\u8f6c\u5199: ' + data.text.substring(0, 50) + (data.text.length > 50 ? '...' : ''), 'success', 5000);
       }
     } else {
-      showToast('\u672a\u68c0\u6d4b\u5230\u8bed\u97f3', '', 5000);
+      // Empty transcription — compute recorded duration so the user knows
+      // whether the issue is "no speech detected" vs "too quiet" vs "silence".
+      const secs = Math.max(0, Math.round((Date.now() - voiceRecStart) / 1000));
+      const hint = secs < 2
+        ? '\u672a\u68c0\u6d4b\u5230\u8bed\u97f3\uff08\u5f55\u97f3\u592a\u77ed\uff0c\u8bf7\u6309\u4f4f\u8bf4\u8bdd\u81f3\u5c11 2 \u79d2\uff09'
+        : '\u672a\u68c0\u6d4b\u5230\u8bed\u97f3\uff08' + secs + 's\uff09\uff0c\u8bf7\u9760\u8fd1\u9ea6\u514b\u98ce\u540e\u91cd\u8bd5';
+      showToast(hint, 'warning', 5000);
     }
   }).catch(err => {
     hideVoiceOverlay();
-    showToast('\u8f6c\u5199\u5931\u8d25: ' + err.message, '', 5000);
+    showToast(describeTranscribeError(err), 'error', 5000);
   });
+}
+
+// describeTranscribeError turns a fetch/HTTP failure into a user-friendly
+// message keyed off HTTP status — previously the raw server body was shown,
+// which surfaced internal strings like "transcribe rate limit exceeded".
+function describeTranscribeError(err) {
+  if (!err) return '\u8f6c\u5199\u5931\u8d25';
+  // fetch() rejects with TypeError on network failure; server errors have a status.
+  if (!err.status) {
+    return '\u7f51\u7edc\u8fde\u63a5\u5f02\u5e38\uff0c\u8bf7\u68c0\u67e5\u7f51\u7edc\u540e\u91cd\u8bd5';
+  }
+  switch (err.status) {
+    case 401:
+    case 403:
+      return '\u672a\u767b\u5f55\u6216\u4f1a\u8bdd\u5df2\u8fc7\u671f\uff0c\u8bf7\u91cd\u65b0\u767b\u5f55\u540e\u91cd\u8bd5';
+    case 413:
+      return '\u5f55\u97f3\u6587\u4ef6\u8fc7\u5927\uff0c\u8bf7\u7f29\u77ed\u540e\u91cd\u8bd5';
+    case 415:
+      return '\u4e0d\u652f\u6301\u7684\u97f3\u9891\u683c\u5f0f\uff0c\u8bf7\u66f4\u6362\u6d4f\u89c8\u5668\u91cd\u8bd5';
+    case 429:
+      return '\u8f6c\u5199\u8bf7\u6c42\u8fc7\u4e8e\u9891\u7e41\uff0c\u8bf7\u7a0d\u5019\u4e00\u5206\u949f\u540e\u91cd\u8bd5';
+    case 500:
+    case 502:
+    case 503:
+    case 504:
+      return '\u8f6c\u5199\u670d\u52a1\u6682\u4e0d\u53ef\u7528\uff08HTTP ' + err.status + '\uff09\uff0c\u8bf7\u7a0d\u540e\u91cd\u8bd5';
+    default:
+      return '\u8f6c\u5199\u5931\u8d25\uff08HTTP ' + err.status + '\uff09';
+  }
 }
 
 // --- Auth modal ---
@@ -4737,9 +4808,76 @@ async function doEditCronJob(id) {
   });
 })();
 
+/* ===== Onboarding ===== */
+
+// Show a one-time intro for first-time visitors. Dismissal is sticky per
+// browser profile (localStorage). Suppressed when auth is unresolved, when
+// the user already has sessions/projects, or on mobile viewports where the
+// sidebar is a modal-style drawer and the intro would stack awkwardly.
+const ONBOARDING_LS_KEY = 'nz-onboarding-dismissed';
+
+function maybeShowOnboarding(authResolved) {
+  // fetchSessions returns falsy when a 401/403 triggered the auth modal.
+  // Suppress onboarding in that case — otherwise the onboarding overlay
+  // would stack on top of the auth modal on first visit.
+  if (authResolved === false) return;
+  try {
+    if (localStorage.getItem(ONBOARDING_LS_KEY)) return;
+  } catch (_) { return; }
+  if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
+  // Suppress on narrow viewports — the sidebar drawer UX differs enough that
+  // the "pick one from the sidebar" guidance is misleading.
+  if (window.innerWidth && window.innerWidth < 768) return;
+  const hasSessions = (Object.keys(sessionsData || {}).length > 0) ||
+    (Object.keys(sessionWorkspaces || {}).length > 0);
+  const hasProjects = (projectsData && projectsData.length > 0);
+  if (hasSessions || hasProjects) {
+    try { localStorage.setItem(ONBOARDING_LS_KEY, '1'); } catch (_) {}
+    return;
+  }
+  showOnboarding();
+}
+
+function dismissOnboarding() {
+  try { localStorage.setItem(ONBOARDING_LS_KEY, '1'); } catch (_) {}
+  const ov = document.querySelector('.modal-overlay.onboarding-overlay');
+  if (ov) ov.remove();
+}
+
+function showOnboarding() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay onboarding-overlay';
+  overlay.innerHTML =
+    '<div class="modal onboarding" role="dialog" aria-modal="true" aria-label="Welcome to Naozhi">' +
+      '<h3>欢迎使用 脑汁 Dashboard</h3>' +
+      '<div class="ob-sub">几秒钟了解核心用法</div>' +
+      '<ul>' +
+        '<li><span class="ob-icon">+</span><div><b>新建会话</b> — 点击左上角 <b>+</b> 或 <b>New session</b>，选择工作目录即可开始对话</div></li>' +
+        '<li><span class="ob-icon">⌘</span><div><b>快捷键</b> — <b>Cmd/Ctrl+1..9</b> 切换会话，<b>Alt+↑/↓</b> 跳转消息，<b>Esc</b> 关闭弹窗</div></li>' +
+        '<li><span class="ob-icon">⏱</span><div><b>定时任务</b> — 侧边栏 Cron 图标，可按自然语言频率设置定期执行</div></li>' +
+        '<li><span class="ob-icon">IM</span><div><b>IM 渠道</b> — 同一会话可在飞书等平台接入，发送 <b>/help</b> 查看命令</div></li>' +
+      '</ul>' +
+      '<div class="modal-btns">' +
+        '<button type="button" onclick="dismissOnboarding()">稍后再说</button>' +
+        '<button type="button" class="primary" onclick="dismissOnboarding();createNewSession()">立即创建会话</button>' +
+      '</div>' +
+    '</div>';
+  overlay.addEventListener('click', function(e) {
+    if (e.target === overlay) dismissOnboarding();
+  });
+  // Dismissal is also persisted when Esc is pressed inside trapFocus — the
+  // trap's teardown removes the overlay, and the next maybeShowOnboarding
+  // call checks localStorage first. Eagerly set the key here so an Esc
+  // removal does not leave the flag unwritten (the MutationObserver that
+  // did this before duplicated the observer installed by trapFocus).
+  try { localStorage.setItem(ONBOARDING_LS_KEY, '1'); } catch (_) {}
+  document.body.appendChild(overlay);
+  trapFocus(overlay);
+}
+
 /* ===== Initialization ===== */
 
-fetchSessions();
+fetchSessions().then(maybeShowOnboarding);
 sessionPollTimer = setInterval(fetchSessions, 5000);
 scanDiscovered();
 discoveredPollTimer = setInterval(scanDiscovered, 30000);

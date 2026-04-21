@@ -385,7 +385,7 @@ func (d *Dispatcher) sendAndReply(
 
 	log.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD)
 
-	replyText := result.Text
+	replyText := localizeAPIError(result.Text)
 	if d.replyFooter != "" {
 		replyText += "\n\n— " + d.replyFooter
 	}
