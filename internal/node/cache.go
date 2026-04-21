@@ -18,6 +18,13 @@ type CacheManager struct {
 
 	getNodes func() map[string]Conn // returns snapshot of active nodes under lock
 	onChange func()                 // called after cache update (e.g. BroadcastSessionsUpdate)
+
+	// baseCtx is the parent context for per-refresh RPC timeouts so a
+	// graceful shutdown cancels in-flight FetchSessions/FetchProjects/
+	// FetchDiscovered calls instead of letting them run for another 5s
+	// past app teardown. Set once by StartLoop; RefreshAll/RefreshFor
+	// derive child timeouts from it.
+	baseCtx context.Context
 }
 
 // NewCacheManager creates a cache manager.
@@ -36,6 +43,10 @@ func NewCacheManager(getNodes func() map[string]Conn, onChange func()) *CacheMan
 
 // StartLoop begins periodic cache refresh every 10 seconds.
 func (m *CacheManager) StartLoop(ctx context.Context) {
+	m.mu.Lock()
+	m.baseCtx = ctx
+	m.mu.Unlock()
+
 	// Eager first fetch in background (no-op if no nodes yet)
 	go m.RefreshAll()
 	go func() {
@@ -52,6 +63,20 @@ func (m *CacheManager) StartLoop(ctx context.Context) {
 	}()
 }
 
+// refreshCtx returns a per-RPC timeout derived from the app lifecycle context
+// when StartLoop has been called, or from Background otherwise (bootstrap /
+// tests). Graceful shutdown therefore cancels in-flight fetches rather than
+// letting them run for another 5s after app teardown.
+func (m *CacheManager) refreshCtx(timeout time.Duration) (context.Context, context.CancelFunc) {
+	m.mu.RLock()
+	parent := m.baseCtx
+	m.mu.RUnlock()
+	if parent == nil {
+		parent = context.Background()
+	}
+	return context.WithTimeout(parent, timeout)
+}
+
 // RefreshAll fetches and caches data from all active nodes in parallel.
 func (m *CacheManager) RefreshAll() {
 	nodesCopy := m.getNodes()
@@ -66,7 +91,7 @@ func (m *CacheManager) RefreshAll() {
 	ch := make(chan result, len(nodesCopy))
 	for id, nc := range nodesCopy {
 		go func(id string, nc Conn) {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := m.refreshCtx(5 * time.Second)
 			defer cancel()
 			var wg sync.WaitGroup
 			var sessions []map[string]any
@@ -144,7 +169,7 @@ func (m *CacheManager) RefreshFor(id string) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := m.refreshCtx(5 * time.Second)
 	defer cancel()
 
 	var wg sync.WaitGroup

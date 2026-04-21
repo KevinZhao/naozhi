@@ -195,7 +195,7 @@ func TestHandleRequest_FetchSessions(t *testing.T) {
 		Type:   "request",
 		Method: "fetch_sessions",
 	}
-	result, err := c.handleRequest(context.Background(), context.Background(), req)
+	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err != nil {
 		t.Fatalf("fetch_sessions = %v", err)
 	}
@@ -213,7 +213,7 @@ func TestHandleRequest_FetchProjects_NilMgr(t *testing.T) {
 	c := New(cfg, makeRouter(), nil) // projMgr = nil
 
 	req := node.ReverseMsg{Method: "fetch_projects"}
-	result, err := c.handleRequest(context.Background(), context.Background(), req)
+	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err != nil {
 		t.Fatalf("fetch_projects nil mgr = %v", err)
 	}
@@ -231,7 +231,7 @@ func TestHandleRequest_FetchDiscovered_NoFunc(t *testing.T) {
 	c := New(cfg, makeRouter(), nil)
 
 	req := node.ReverseMsg{Method: "fetch_discovered"}
-	result, err := c.handleRequest(context.Background(), context.Background(), req)
+	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err != nil {
 		t.Fatalf("fetch_discovered no func = %v", err)
 	}
@@ -250,7 +250,7 @@ func TestHandleRequest_FetchDiscovered_WithFunc(t *testing.T) {
 	})
 
 	req := node.ReverseMsg{Method: "fetch_discovered"}
-	result, err := c.handleRequest(context.Background(), context.Background(), req)
+	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err != nil {
 		t.Fatalf("fetch_discovered with func = %v", err)
 	}
@@ -266,7 +266,7 @@ func TestHandleRequest_FetchDiscoveredPreview_BadParams(t *testing.T) {
 	c := New(cfg, makeRouter(), nil)
 
 	req := node.ReverseMsg{Method: "fetch_discovered_preview", Params: json.RawMessage(`not-json`)}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for bad params, got nil")
 	}
@@ -281,7 +281,7 @@ func TestHandleRequest_FetchDiscoveredPreview_WithFunc(t *testing.T) {
 
 	params, _ := json.Marshal(map[string]string{"session_id": "sess-xyz"})
 	req := node.ReverseMsg{Method: "fetch_discovered_preview", Params: params}
-	result, err := c.handleRequest(context.Background(), context.Background(), req)
+	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err != nil {
 		t.Fatalf("fetch_discovered_preview = %v", err)
 	}
@@ -297,7 +297,7 @@ func TestHandleRequest_FetchEvents_BadParams(t *testing.T) {
 	c := New(cfg, makeRouter(), nil)
 
 	req := node.ReverseMsg{Method: "fetch_events", Params: json.RawMessage(`not-json`)}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for bad params, got nil")
 	}
@@ -309,7 +309,7 @@ func TestHandleRequest_FetchEvents_SessionNotFound(t *testing.T) {
 
 	params, _ := json.Marshal(map[string]interface{}{"key": "no:such:key", "after": 0})
 	req := node.ReverseMsg{Method: "fetch_events", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for missing session, got nil")
 	}
@@ -322,7 +322,7 @@ func TestHandleRequest_Send_BadParams(t *testing.T) {
 	c := New(cfg, makeRouter(), nil)
 
 	req := node.ReverseMsg{Method: "send", Params: json.RawMessage(`not-json`)}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for bad params, got nil")
 	}
@@ -335,7 +335,7 @@ func TestHandleRequest_UnknownMethod(t *testing.T) {
 	c := New(cfg, makeRouter(), nil)
 
 	req := node.ReverseMsg{Method: "totally_unknown"}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for unknown method, got nil")
 	}
@@ -352,7 +352,7 @@ func TestHandleRequest_RestartPlanner_NilMgr(t *testing.T) {
 
 	params, _ := json.Marshal(map[string]string{"project_name": "myproj"})
 	req := node.ReverseMsg{Method: "restart_planner", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for restart_planner with nil projMgr, got nil")
 	}
@@ -363,7 +363,7 @@ func TestHandleRequest_RestartPlanner_BadParams(t *testing.T) {
 	c := New(cfg, makeRouter(), nil)
 
 	req := node.ReverseMsg{Method: "restart_planner", Params: json.RawMessage(`not-json`)}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for bad params, got nil")
 	}
@@ -380,7 +380,7 @@ func TestHandleRequest_UpdateConfig_NilMgr(t *testing.T) {
 		"config":       map[string]bool{"git_sync": true},
 	})
 	req := node.ReverseMsg{Method: "update_config", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for update_config with nil projMgr, got nil")
 	}
@@ -391,7 +391,7 @@ func TestHandleRequest_UpdateConfig_BadParams(t *testing.T) {
 	c := New(cfg, makeRouter(), nil)
 
 	req := node.ReverseMsg{Method: "update_config", Params: json.RawMessage(`not-json`)}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for bad params, got nil")
 	}
@@ -404,7 +404,7 @@ func TestHandleRequest_Takeover_BadParams(t *testing.T) {
 	c := New(cfg, makeRouter(), nil)
 
 	req := node.ReverseMsg{Method: "takeover", Params: json.RawMessage(`not-json`)}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for bad params, got nil")
 	}
@@ -416,7 +416,7 @@ func TestHandleRequest_Takeover_MissingPID(t *testing.T) {
 
 	params, _ := json.Marshal(map[string]interface{}{"pid": 0, "session_id": "sess-abc"})
 	req := node.ReverseMsg{Method: "takeover", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for pid=0, got nil")
 	}
@@ -427,7 +427,7 @@ func TestHandleRequest_CloseDiscovered_BadParams(t *testing.T) {
 	c := New(cfg, makeRouter(), nil)
 
 	req := node.ReverseMsg{Method: "close_discovered", Params: json.RawMessage(`not-json`)}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for bad params, got nil")
 	}
@@ -439,7 +439,7 @@ func TestHandleRequest_CloseDiscovered_MissingPID(t *testing.T) {
 
 	params, _ := json.Marshal(map[string]interface{}{"pid": 0})
 	req := node.ReverseMsg{Method: "close_discovered", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for pid=0, got nil")
 	}
@@ -451,7 +451,7 @@ func TestHandleRequest_CloseDiscovered_MissingProcStartTime(t *testing.T) {
 
 	params, _ := json.Marshal(map[string]interface{}{"pid": 12345, "proc_start_time": 0})
 	req := node.ReverseMsg{Method: "close_discovered", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for proc_start_time=0, got nil")
 	}
@@ -763,7 +763,7 @@ func TestHandleRequest_UpdateConfig_WithMgr(t *testing.T) {
 		"config":       cfgJSON,
 	})
 	req := node.ReverseMsg{Method: "update_config", Params: params}
-	result, err := c.handleRequest(context.Background(), context.Background(), req)
+	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err != nil {
 		t.Fatalf("update_config with real mgr = %v", err)
 	}
@@ -787,7 +787,7 @@ func TestHandleRequest_UpdateConfig_ProjectNotFound(t *testing.T) {
 		"config":       map[string]bool{"git_sync": false},
 	})
 	req := node.ReverseMsg{Method: "update_config", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for non-existent project, got nil")
 	}
@@ -805,7 +805,7 @@ func TestHandleRequest_RestartPlanner_ProjectNotFound(t *testing.T) {
 
 	params, _ := json.Marshal(map[string]string{"project_name": "ghost"})
 	req := node.ReverseMsg{Method: "restart_planner", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for non-existent project, got nil")
 	}
@@ -826,7 +826,7 @@ func TestHandleRequest_FetchProjects_WithMgr(t *testing.T) {
 	c := New(cfg, makeRouter(), mgr)
 
 	req := node.ReverseMsg{Method: "fetch_projects"}
-	result, err := c.handleRequest(context.Background(), context.Background(), req)
+	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err != nil {
 		t.Fatalf("fetch_projects with mgr = %v", err)
 	}
@@ -850,7 +850,7 @@ func TestHandleRequest_Takeover_InvalidSessionID(t *testing.T) {
 		"proc_start_time": uint64(1),
 	})
 	req := node.ReverseMsg{Method: "takeover", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for invalid session_id format, got nil")
 	}
@@ -866,7 +866,7 @@ func TestHandleRequest_Takeover_MissingProcStartTime(t *testing.T) {
 		"proc_start_time": uint64(0),
 	})
 	req := node.ReverseMsg{Method: "takeover", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for proc_start_time=0, got nil")
 	}
@@ -884,7 +884,7 @@ func TestHandleRequest_CloseDiscovered_InvalidSessionID(t *testing.T) {
 		"proc_start_time": uint64(1),
 	})
 	req := node.ReverseMsg{Method: "close_discovered", Params: params}
-	_, err := c.handleRequest(context.Background(), context.Background(), req)
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err == nil {
 		t.Error("expected error for invalid session_id, got nil")
 	}
@@ -952,7 +952,7 @@ func TestHandleRequest_FetchEvents_ExistingSession(t *testing.T) {
 		"after": int64(0),
 	})
 	req := node.ReverseMsg{Method: "fetch_events", Params: params}
-	result, err := c.handleRequest(context.Background(), context.Background(), req)
+	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err != nil {
 		t.Fatalf("fetch_events existing session = %v", err)
 	}

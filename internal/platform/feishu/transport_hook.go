@@ -196,6 +196,10 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				Text string `json:"text"`
 			}
 			if err := json.Unmarshal([]byte(event.Message.Content), &content); err != nil {
+				// Without this log, Feishu schema drift silently drops every
+				// message and operators see no reply with no trace.
+				slog.Debug("feishu webhook: text content unmarshal failed",
+					"err", err, "msg_id", event.Message.MessageID)
 				return
 			}
 			text := content.Text
@@ -227,6 +231,10 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				ImageKey string `json:"image_key"`
 			}
 			if err := json.Unmarshal([]byte(event.Message.Content), &content); err != nil || content.ImageKey == "" {
+				if err != nil {
+					slog.Debug("feishu webhook: image content unmarshal failed",
+						"err", err, "msg_id", event.Message.MessageID)
+				}
 				return
 			}
 			select {
@@ -255,6 +263,10 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				FileKey string `json:"file_key"`
 			}
 			if err := json.Unmarshal([]byte(event.Message.Content), &content); err != nil || content.FileKey == "" {
+				if err != nil {
+					slog.Debug("feishu webhook: audio content unmarshal failed",
+						"err", err, "msg_id", event.Message.MessageID)
+				}
 				return
 			}
 			select {

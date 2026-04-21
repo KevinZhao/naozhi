@@ -24,6 +24,19 @@ const ShutdownTimeout = 30 * time.Second
 // ErrMaxProcs is returned when all process slots are occupied.
 var ErrMaxProcs = errors.New("max concurrent processes reached")
 
+// ErrMaxExemptSessions is returned when the global cap on exempt (planner/
+// cron) sessions is hit. Distinct from ErrMaxProcs so callers can apply
+// different retry policies: exempt exhaustion means "too many projects
+// configured" and is roughly permanent until an exempt session exits;
+// ErrMaxProcs means "user sessions full" and clears faster.
+var ErrMaxExemptSessions = errors.New("max exempt sessions reached")
+
+// ErrNoCLIWrapper is returned when spawnSession is called but the router
+// was constructed without a CLI wrapper (misconfiguration). This is
+// permanent until the operator fixes config and restarts; retry loops
+// should stop on this sentinel.
+var ErrNoCLIWrapper = errors.New("no CLI wrapper configured")
+
 const (
 	// maxExemptSessions caps the number of alive exempt (planner) sessions
 	// to prevent unbounded growth when many projects are configured.
@@ -268,52 +281,10 @@ func NewRouter(cfg RouterConfig) *Router {
 		}
 	}
 
-	// Discover recent sessions from filesystem and register as resumable.
-	// This gives the dashboard immediate access to past conversations.
-	// Only exclude session IDs that are currently managed (active in store + their chains),
-	// so that pruned historical naozhi sessions can reappear as recent sessions.
-	if r.claudeDir != "" {
-		excludeIDs := make(map[string]bool, len(r.sessions)*3)
-		for _, s := range r.sessions {
-			if id := s.getSessionID(); id != "" {
-				excludeIDs[id] = true
-			}
-			for _, id := range s.prevSessionIDs {
-				excludeIDs[id] = true
-			}
-		}
-		for _, rs := range discovery.RecentSessions(r.claudeDir, 10, 7*24*time.Hour, excludeIDs) {
-			if rs.SessionID == "" || len(rs.SessionID) < 8 {
-				continue
-			}
-			cwdKey := rs.SessionID[:8]
-			if rs.Workspace != "" {
-				cwdKey = SanitizeCWDKey(rs.Workspace)
-			}
-			key := "local:history:" + cwdKey + ":general"
-			if _, exists := r.sessions[key]; exists {
-				slog.Debug("skipping discovered session: key already registered",
-					"key", key, "session_id", rs.SessionID)
-				continue
-			}
-			s := &ManagedSession{
-				key:        key,
-				workspace:  rs.Workspace,
-				cliName:    r.cliNameDefault(),
-				cliVersion: r.cliVersionDefault(),
-			}
-			s.setSessionID(rs.SessionID)
-			if rs.LastActive != 0 {
-				s.lastActive.Store(rs.LastActive * 1_000_000) // ms → ns
-			} else {
-				s.lastActive.Store(time.Now().UnixNano())
-			}
-			r.sessions[key] = s
-			r.indexAdd(key)
-		}
-		r.storeDirty = true
-		r.storeGen++
-	}
+	// Sidebar is driven purely by sessions.json (and live IM / dashboard
+	// activity). Filesystem-discovered sessions are surfaced via the separate
+	// "history" panel so that Remove is a durable delete — the user must
+	// explicitly resume an entry before it re-enters the sidebar.
 
 	// Async-load JSONL history for all suspended sessions so the dashboard
 	// shows conversation history without waiting for the next message.
@@ -742,7 +713,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		exemptCount := r.countExempt()
 		if exemptCount >= maxExempt {
 			r.mu.Unlock()
-			return nil, fmt.Errorf("max exempt sessions reached (%d)", maxExempt)
+			return nil, fmt.Errorf("%w (%d)", ErrMaxExemptSessions, maxExempt)
 		}
 	}
 
@@ -795,7 +766,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		r.mu.Lock()
 		r.pendingSpawns--
 		r.mu.Unlock()
-		return nil, fmt.Errorf("spawn process: no CLI wrapper configured")
+		return nil, fmt.Errorf("spawn process: %w", ErrNoCLIWrapper)
 	}
 	proc, err := r.wrapper.Spawn(ctx, spawnOpts)
 	r.mu.Lock()

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cron"
@@ -24,7 +25,7 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jobs := h.scheduler.ListAllJobs()
+	jobs := h.scheduler.ListAllJobsWithNextRun()
 	type cronJobView struct {
 		ID             string `json:"id"`
 		Schedule       string `json:"schedule"`
@@ -46,7 +47,8 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		Notify *bool `json:"notify,omitempty"`
 	}
 	views := make([]cronJobView, 0, len(jobs))
-	for _, j := range jobs {
+	for _, entry := range jobs {
+		j := entry.Job
 		v := cronJobView{
 			ID:             j.ID,
 			Schedule:       j.Schedule,
@@ -66,15 +68,15 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		if !j.LastRunAt.IsZero() {
 			v.LastRunAt = j.LastRunAt.UnixMilli()
 		}
-		if next := h.scheduler.NextRunByID(j.ID); !next.IsZero() {
-			v.NextRun = next.UnixMilli()
+		if !entry.NextRun.IsZero() {
+			v.NextRun = entry.NextRun.UnixMilli()
 		}
 		views = append(views, v)
 	}
 
 	loc := h.scheduler.Location()
 	name, offset := time.Now().In(loc).Zone()
-	tzLabel := fmt.Sprintf("%s (UTC%+03d:%02d)", loc.String(), offset/3600, (offset%3600)/60)
+	tzLabel := formatTZOffset(loc.String(), offset)
 
 	resp := map[string]any{
 		"jobs":           views,
@@ -120,11 +122,13 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Validate work_dir if provided: must be under allowedRoot.
+	// Validate work_dir if provided: must be under allowedRoot. Matches the
+	// 403 Forbidden used by /api/sessions/send so clients see a uniform
+	// status code for boundary violations rather than ambiguous 400s.
 	if req.WorkDir != "" {
 		validated, err := validateWorkspace(req.WorkDir, h.allowedRoot)
 		if err != nil {
-			http.Error(w, "work_dir: "+err.Error(), http.StatusBadRequest)
+			http.Error(w, "work_dir: "+err.Error(), http.StatusForbidden)
 			return
 		}
 		req.WorkDir = validated
@@ -206,9 +210,12 @@ func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := h.scheduler.PauseJobByID(req.ID); err != nil {
-		if errors.Is(err, cron.ErrJobNotFound) {
+		switch {
+		case errors.Is(err, cron.ErrJobNotFound):
 			http.Error(w, err.Error(), http.StatusNotFound)
-		} else {
+		case errors.Is(err, cron.ErrJobAlreadyPaused):
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		}
 		return
@@ -235,9 +242,12 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if _, err := h.scheduler.ResumeJobByID(req.ID); err != nil {
-		if errors.Is(err, cron.ErrJobNotFound) {
+		switch {
+		case errors.Is(err, cron.ErrJobNotFound):
 			http.Error(w, err.Error(), http.StatusNotFound)
-		} else {
+		case errors.Is(err, cron.ErrJobNotPaused):
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		}
 		return
@@ -268,9 +278,12 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.scheduler.TriggerNow(req.ID); err != nil {
-		if errors.Is(err, cron.ErrJobNotFound) {
+		switch {
+		case errors.Is(err, cron.ErrJobNotFound):
 			http.Error(w, err.Error(), http.StatusNotFound)
-		} else {
+		case errors.Is(err, cron.ErrJobPaused):
+			http.Error(w, err.Error(), http.StatusConflict)
+		default:
 			http.Error(w, err.Error(), http.StatusBadRequest)
 		}
 		return
@@ -280,7 +293,9 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]string{"status": "triggered"})
 }
 
-// GET /api/cron/preview?schedule=... — validate schedule and return next run time.
+// GET /api/cron/preview?schedule=...&count=N — validate schedule and return
+// the next N run times. count defaults to 1 and is clamped to [1, 10] so the
+// UI can show a multi-run preview without giving callers an unbounded knob.
 func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 	schedule := r.URL.Query().Get("schedule")
 	if schedule == "" {
@@ -288,21 +303,45 @@ func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	count := 1
+	if raw := r.URL.Query().Get("count"); raw != "" {
+		// Reject obviously huge inputs before Atoi so an attacker cannot force
+		// us to decode a multi-kilobyte digit string.
+		if len(raw) > 3 {
+			http.Error(w, "count must be a positive integer", http.StatusBadRequest)
+			return
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			http.Error(w, "count must be a positive integer", http.StatusBadRequest)
+			return
+		}
+		if n > 10 {
+			n = 10
+		}
+		count = n
+	}
+
 	var (
-		next    time.Time
+		runs    []time.Time
 		err     error
 		tzName  = "UTC"
 		tzLabel = ""
 	)
 	if h.scheduler != nil {
-		next, err = h.scheduler.PreviewSchedule(schedule)
+		runs, err = h.scheduler.PreviewScheduleN(schedule, count)
 		loc := h.scheduler.Location()
 		tzName = loc.String()
 		if n, offset := time.Now().In(loc).Zone(); n != "" {
-			tzLabel = fmt.Sprintf("%s (UTC%+03d:%02d)", tzName, offset/3600, (offset%3600)/60)
+			tzLabel = formatTZOffset(tzName, offset)
 		}
 	} else {
+		// Fallback for tests/bootstrap where scheduler isn't wired: compute in UTC.
+		var next time.Time
 		next, err = cron.PreviewSchedule(schedule)
+		if err == nil {
+			runs = []time.Time{next}
+		}
 	}
 	if err != nil {
 		writeJSON(w, map[string]any{"valid": false, "error": err.Error()})
@@ -311,11 +350,18 @@ func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 
 	resp := map[string]any{
 		"valid":    true,
-		"next_run": next.UnixMilli(),
 		"timezone": tzName,
 	}
 	if tzLabel != "" {
 		resp["timezone_label"] = tzLabel
+	}
+	if len(runs) > 0 {
+		resp["next_run"] = runs[0].UnixMilli()
+		nextRuns := make([]int64, len(runs))
+		for i, t := range runs {
+			nextRuns[i] = t.UnixMilli()
+		}
+		resp["next_runs"] = nextRuns
 	}
 	writeJSON(w, resp)
 }
@@ -356,11 +402,12 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Re-validate workspace against allowedRoot; a cleared WorkDir is
-	// accepted as-is and will fall back to the router default.
+	// accepted as-is and will fall back to the router default. 403 matches
+	// handleCreate and the send handler for boundary violations.
 	if req.WorkDir != nil && *req.WorkDir != "" {
 		validated, err := validateWorkspace(*req.WorkDir, h.allowedRoot)
 		if err != nil {
-			http.Error(w, "work_dir: "+err.Error(), http.StatusBadRequest)
+			http.Error(w, "work_dir: "+err.Error(), http.StatusForbidden)
 			return
 		}
 		req.WorkDir = &validated
@@ -396,4 +443,17 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("cron job updated via dashboard", "id", j.ID)
 	writeJSON(w, map[string]any{"status": "ok", "id": j.ID})
+}
+
+// formatTZOffset renders a timezone label like "Asia/Shanghai (UTC+08:00)" or
+// "America/St_Johns (UTC-03:30)". The integer-division approach would produce
+// "UTC-05:-30" for fractional negative offsets because the sub-hour remainder
+// inherits the sign; abs() the minute component to keep the format well-formed.
+func formatTZOffset(name string, offsetSeconds int) string {
+	hours := offsetSeconds / 3600
+	minutes := (offsetSeconds % 3600) / 60
+	if minutes < 0 {
+		minutes = -minutes
+	}
+	return fmt.Sprintf("%s (UTC%+03d:%02d)", name, hours, minutes)
 }

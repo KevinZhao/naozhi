@@ -37,9 +37,13 @@ type Job struct {
 	// platform/chat fields.
 	Notify *bool `json:"notify,omitempty"`
 
-	// Last execution result, persisted across restarts.
+	// Last execution result, persisted across restarts. LastRunAt has no
+	// omitempty: encoding/json does not drop zero-value time.Time structs,
+	// so the tag was a lint-only hint that falsely implied zero-value
+	// omission. Dashboard code already checks LastRunAt.IsZero() before
+	// formatting, which handles the "never run" case.
 	LastResult string    `json:"last_result,omitempty"`
-	LastRunAt  time.Time `json:"last_run_at,omitempty"`
+	LastRunAt  time.Time `json:"last_run_at"`
 	LastError  string    `json:"last_error,omitempty"`
 
 	entryID robfigcron.EntryID // runtime only, not persisted

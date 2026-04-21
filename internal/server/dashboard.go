@@ -32,9 +32,16 @@ const authCookieName = "naozhi_auth"
 // Logs errors at debug level since HTTP write failures are common after
 // client disconnects, but JSON marshal failures indicate bugs.
 // For non-200 status codes, use writeJSONStatus instead.
+//
+// HTML escaping is disabled so dashboard responses preserve `<`, `>`, `&`
+// literally — every client consumer uses `textContent` or structured
+// rendering, and the default escape just bloats responses and makes raw
+// API output (curl / log dumps) hard to diff.
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(v); err != nil {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
 		slog.Debug("write json response", "err", err)
 	}
 }
@@ -45,7 +52,9 @@ func writeJSON(w http.ResponseWriter, v any) {
 func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	if err := json.NewEncoder(w).Encode(v); err != nil {
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(v); err != nil {
 		slog.Debug("write json response", "err", err)
 	}
 }

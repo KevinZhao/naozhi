@@ -179,7 +179,13 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	}
 	sessionID, err := proto.Init(rw, opts.ResumeID)
 	if err != nil {
+		// proc.Kill() signals the shim to exit but does NOT close the net
+		// connection owned by handle (Process.startReadLoop hasn't run, so
+		// nothing is going to notice the close of killCh). Explicitly close
+		// the handle so the Unix socket fd is freed immediately instead of
+		// waiting for the shim's idle timeout (default 4h).
 		proc.Kill()
+		handle.Close()
 		return nil, fmt.Errorf("protocol init: %w", err)
 	}
 	if sessionID != "" {

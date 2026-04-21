@@ -11,6 +11,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 )
@@ -166,7 +167,8 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			FileIDs   []string `json:"file_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON: " + err.Error()})
+			slog.Debug("dashboard send: invalid JSON", "err", err)
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 			return
 		}
 		key = req.Key
@@ -214,12 +216,19 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		}
 		capturedKey, capturedText, capturedWorkspace := key, text, workspace
 		go func() {
+			// Prefer hub's lifecycle ctx so shutdown cancels in-flight
+			// remote sends. Fallback (test / bootstrap paths where hub is
+			// nil) uses a bounded timeout rather than Background so the
+			// goroutine cannot outlive the handler by more than the RPC.
 			var ctx context.Context
+			var cancel context.CancelFunc
 			if h.hub != nil {
 				ctx = h.hub.ctx
+				cancel = func() {}
 			} else {
-				ctx = context.Background()
+				ctx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 			}
+			defer cancel()
 			if err := nc.Send(ctx, capturedKey, capturedText, capturedWorkspace); err != nil {
 				slog.Error("remote send", "node", node, "key", capturedKey, "err", err)
 			} else {

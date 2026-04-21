@@ -131,6 +131,17 @@ func (w *Weixin) cleanupTokensLoop(ctx context.Context) {
 
 // Reply sends a text message to a WeChat user.
 func (w *Weixin) Reply(ctx context.Context, msg platform.OutgoingMessage) (string, error) {
+	// Guard parity with feishu/slack/discord: an empty text body produces a
+	// no-op reply instead of pushing a blank bubble to the user. Images are
+	// logged but dropped — the iLink Bot API does not accept attachments.
+	if len(msg.Images) > 0 {
+		slog.Warn("weixin: image attachments are not supported; dropping images",
+			"chat", msg.ChatID, "image_count", len(msg.Images))
+	}
+	if msg.Text == "" {
+		return "", nil
+	}
+
 	ct, _ := w.contextTokens.Load(msg.ChatID)
 	entry, _ := ct.(*tokenEntry)
 	var contextToken string

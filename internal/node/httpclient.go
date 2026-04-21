@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -40,6 +41,9 @@ func NewHTTPClient(id, url, token, displayName string) *HTTPClient {
 				MaxIdleConns:        30,
 				MaxIdleConnsPerHost: 6,
 				IdleConnTimeout:     90 * time.Second,
+				// Pin a minimum TLS version so a future Go toolchain change
+				// or GODEBUG override cannot silently accept TLS 1.0/1.1.
+				TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 			},
 		},
 	}

@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -17,6 +19,12 @@ import (
 	"syscall"
 	"time"
 )
+
+// ErrMaxShims is returned by StartShim when the configured shim cap is hit.
+// Distinct from session.ErrMaxProcs so callers can apply different retry
+// policies: max shims means process table is saturated, clears as sessions
+// exit; not a configuration problem.
+var ErrMaxShims = errors.New("max shims reached")
 
 // Manager manages shim process lifecycle: starting, discovering, and reconnecting.
 type Manager struct {
@@ -107,7 +115,7 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 	m.mu.Lock()
 	if len(m.shims)+m.pendingShims >= m.maxShims {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("max shims reached (%d)", m.maxShims)
+		return nil, fmt.Errorf("%w (%d)", ErrMaxShims, m.maxShims)
 	}
 	m.pendingShims++
 	m.mu.Unlock()
@@ -313,7 +321,10 @@ func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*Sh
 func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*ShimHandle, error) {
 	conn, err := net.DialTimeout("unix", socketPath, 10*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("dial shim: %w", err)
+		// Include the socket path so operators can check permissions /
+		// existence directly from the log line instead of reverse-engineering
+		// it from the shim-state key.
+		return nil, fmt.Errorf("dial shim at %s: %w", socketPath, err)
 	}
 
 	reader := bufio.NewReaderSize(conn, 256*1024) // 256KB buffer (bufio grows as needed for large lines)
@@ -335,12 +346,33 @@ func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*Shim
 	}
 	conn.SetWriteDeadline(time.Time{}) //nolint:errcheck
 
-	// Read hello or auth_failed
+	// Read hello or auth_failed. The hello envelope is a few hundred bytes
+	// of JSON; a 64 KB ceiling here prevents a malicious or buggy shim from
+	// forcing us to buffer unbounded bytes before we've even authenticated.
+	// Read byte-by-byte through the existing bufio so subsequent reads
+	// continue to use the same buffered state — we cannot use bufio.ReadBytes
+	// because it has no hard upper bound and would grow the buffer beyond
+	// our 64 KB policy before we could check.
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
-	helloLine, err := reader.ReadBytes('\n')
-	if err != nil {
+	const maxHelloBytes = 64 * 1024
+	// Pre-allocated cap keeps the inner loop O(n) rather than O(n²). A 1 KB
+	// initial cap fits the realistic hello payload and only grows by powers
+	// of two until the 64 KB ceiling — a handful of grows in the worst case.
+	helloLine := make([]byte, 0, 1024)
+	for len(helloLine) < maxHelloBytes {
+		b, err := reader.ReadByte()
+		if err != nil {
+			conn.Close()
+			return nil, fmt.Errorf("read hello: %w", err)
+		}
+		helloLine = append(helloLine, b)
+		if b == '\n' {
+			break
+		}
+	}
+	if len(helloLine) == 0 || helloLine[len(helloLine)-1] != '\n' {
 		conn.Close()
-		return nil, fmt.Errorf("read hello: %w", err)
+		return nil, fmt.Errorf("hello exceeds %d-byte cap without newline", maxHelloBytes)
 	}
 	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
 
@@ -373,7 +405,7 @@ func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*Shim
 func (m *Manager) Discover() ([]State, error) {
 	entries, err := os.ReadDir(m.stateDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
@@ -607,8 +639,9 @@ func (m *Manager) CLIPath() string {
 	return m.cliPath
 }
 
-// checkPeerUID verifies the connecting peer has the same UID via SO_PEERCRED.
-func checkPeerUID(conn net.Conn) bool {
+// VerifyPeerUID verifies the connecting peer has the same UID via SO_PEERCRED.
+// Used by the shim server's accept handler to reject cross-UID connections.
+func VerifyPeerUID(conn net.Conn) bool {
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
 		return false
@@ -627,9 +660,6 @@ func checkPeerUID(conn net.Conn) bool {
 	}
 	return cred.Uid == uint32(os.Getuid())
 }
-
-// VerifyPeerUID is exported for use by the shim server's accept handler.
-var VerifyPeerUID = checkPeerUID
 
 // shimEnvAllowedPrefixes lists environment variable prefixes passed to shim/CLI
 // subprocesses. Variables not matching any prefix are filtered out to reduce

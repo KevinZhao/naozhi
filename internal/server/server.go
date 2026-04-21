@@ -359,9 +359,15 @@ func (s *Server) Start(ctx context.Context) error {
 
 		if rp, ok := p.(platform.RunnablePlatform); ok {
 			if err := rp.Start(handler); err != nil {
-				// Stop already-started platforms to avoid connection leaks
+				// Stop already-started platforms to avoid connection leaks.
+				// Log individual stop failures; a silent rollback could mask
+				// a dangling websocket that holds the process open past the
+				// fatal startup error we're about to return.
 				for _, sp := range startedPlatforms {
-					sp.Stop()
+					if stopErr := sp.Stop(); stopErr != nil {
+						slog.Warn("platform rollback stop failed",
+							"name", sp.Name(), "err", stopErr)
+					}
 				}
 				return fmt.Errorf("start platform %s: %w", p.Name(), err)
 			}
@@ -403,6 +409,11 @@ func (s *Server) Start(ctx context.Context) error {
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      60 * time.Second,
 		IdleTimeout:       120 * time.Second,
+		// Cap header bytes well below the default 1 MB so an unauthenticated
+		// client can't force us to buffer megabyte-sized headers before
+		// ReadHeaderTimeout fires. 64 KB is generous for legitimate cookies
+		// plus a modest number of X-Forwarded-* headers.
+		MaxHeaderBytes: 64 * 1024,
 	}
 
 	// Notify caller that the listener is bound and ready to accept connections.

@@ -1436,6 +1436,32 @@ File:   .naozhi/MEMORY.md   (14.2 KB)
 
 ---
 
+#### Session 侧边栏生命周期
+
+**原则**：侧边栏显式、可控。`Remove` = 用户想"忘掉"这个 session，必须是不可逆的；没跑过的 session 不应自己冒出来。
+
+**数据源**（两个彼此隔离）：
+
+1. **侧边栏** (`/api/sessions` 的 `sessions` 字段) — 只读自 `Router.sessions`，其持久化源是 `sessions.json`。
+2. **历史面板** (`/api/sessions` 的 `history_sessions` 字段) — 实时扫 `~/.claude` 目录，与侧边栏互不干扰。
+
+**进入侧边栏的三条路径**（全部由显式行为触发）：
+
+- IM 消息首次命中 → `Router.GetOrCreate` 写入 `sessions.json`
+- Dashboard 直接发送 → 同上
+- 用户在历史面板点击 resume → `POST /api/sessions/resume` → `RegisterForResume` 注册到 `Router.sessions`
+
+**离开侧边栏**：
+
+- `DELETE /api/sessions` → `Router.Remove`：杀进程、从 map 删除、下次落盘不含此 key。**重启后不回填**。
+- 若用户事后想找回来，仍可从历史面板点 resume（该 session 的 JSONL 仍在磁盘上）。
+
+**明确不做的事**（已拒绝）：
+
+- 启动时扫 `~/.claude` 最近 N 天 session 自动注入侧边栏。旧实现（`session/router.go` backfill 块）已删除。理由：`Remove` 之后重启又自动回来，等于"删不掉"。
+
+---
+
 ### 配置格式变更
 
 ```yaml

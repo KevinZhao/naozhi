@@ -7,11 +7,21 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
 )
+
+// trimUnicodeSpace strips all Unicode whitespace (including full-width
+// ideographic space U+3000, NBSP, zero-width space) from both ends of s.
+// Plain strings.TrimSpace only handles ASCII + \t\n\v\f\r, so CJK users
+// who pressed space on a Chinese IME see their /cd path / /project arg
+// silently fall through to the "unknown command" branch.
+func trimUnicodeSpace(s string) string {
+	return strings.TrimFunc(s, unicode.IsSpace)
+}
 
 // replyText sends a text reply to msg.ChatID via the matching platform, logging
 // but not returning errors. Resolves d.platforms[msg.Platform] internally and
@@ -280,7 +290,7 @@ func (d *Dispatcher) handleProjectCommand(ctx context.Context, msg platform.Inco
 		return
 	}
 
-	arg := strings.TrimSpace(strings.TrimPrefix(trimmed, "/project"))
+	arg := trimUnicodeSpace(strings.TrimPrefix(trimmed, "/project"))
 
 	switch arg {
 	case "":
@@ -332,7 +342,7 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		return
 	}
 
-	path := strings.TrimSpace(strings.TrimPrefix(trimmed, "/cd"))
+	path := trimUnicodeSpace(strings.TrimPrefix(trimmed, "/cd"))
 	if path == "" {
 		d.replyText(ctx, msg, "用法: /cd <目录路径>\n例: /cd /home/ubuntu/my-project", log)
 		return
@@ -380,17 +390,34 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 	log.Info("workspace changed", "chat_key", chatKey, "path", absPath)
 }
 
+// smartQuoteNormalizer maps typographic / CJK quote glyphs to the plain ASCII
+// double-quote so users composing messages on iOS/macOS (which auto-replace
+// ASCII `"` with `“”`) or CJK keyboards (which default to 「」) can still use
+// the /cron add "schedule" prompt syntax without fighting autocorrect.
+var smartQuoteNormalizer = strings.NewReplacer(
+	"\u201c", "\"", // LEFT DOUBLE QUOTATION MARK “
+	"\u201d", "\"", // RIGHT DOUBLE QUOTATION MARK ”
+	"\u300c", "\"", // LEFT CORNER BRACKET 「
+	"\u300d", "\"", // RIGHT CORNER BRACKET 」
+	"\u2018", "\"", // LEFT SINGLE QUOTATION MARK ‘ — treat as doublequote too
+	"\u2019", "\"", // RIGHT SINGLE QUOTATION MARK ’
+)
+
 // ParseCronAdd parses the args of /cron add: "schedule" prompt
 func ParseCronAdd(args string) (schedule, prompt string, err error) {
+	args = smartQuoteNormalizer.Replace(args)
 	if !strings.HasPrefix(args, "\"") {
 		return "", "", fmt.Errorf("schedule must be quoted, e.g. \"@every 30m\"")
 	}
-	end := strings.Index(args[1:], "\"")
-	if end < 0 {
+	// strings.Cut handles the "" closing quote search + tail separation as a
+	// single operation, avoiding manual byte arithmetic that could surprise
+	// on non-ASCII schedule text (e.g. someone embedding Chinese in a desc).
+	rest, tail, ok := strings.Cut(args[1:], "\"")
+	if !ok {
 		return "", "", fmt.Errorf("missing closing quote for schedule")
 	}
-	schedule = args[1 : end+1]
-	prompt = strings.TrimSpace(args[end+2:])
+	schedule = rest
+	prompt = strings.TrimSpace(tail)
 	if prompt == "" {
 		return "", "", fmt.Errorf("prompt cannot be empty")
 	}

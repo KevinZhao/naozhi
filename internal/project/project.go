@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/osutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -117,28 +118,8 @@ func saveConfigToPath(path string, cfg ProjectConfig) error {
 		return fmt.Errorf("marshal project config: %w", err)
 	}
 
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return fmt.Errorf("write project config: %w", err)
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("write project config: %w", err)
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("sync project config: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("close project config: %w", err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename project config: %w", err)
+	if err := osutil.WriteFileAtomic(path, data, 0600); err != nil {
+		return fmt.Errorf("save project config: %w", err)
 	}
 	return nil
 }

@@ -50,6 +50,12 @@ var (
 	ErrTotalTimeout    = errors.New("total timeout")
 )
 
+// ErrProcessExited is returned by Send when the CLI subprocess exits before
+// producing a result. Distinguishable from watchdog timeouts so callers
+// (managed.go, dispatch) can react with "spawn a new process next turn"
+// rather than counting it as a no-output stall.
+var ErrProcessExited = errors.New("process exited during send")
+
 // processCloseTimeout is a var (not const) so tests can override it.
 var processCloseTimeout = 5 * time.Second
 
@@ -188,10 +194,19 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 			continue
 		}
 		if len(line)-1 > maxStdinLineBytes {
+			// The offending line was already consumed from w.buf by ReadBytes
+			// above; discard any trailing partial lines so the next Write()
+			// doesn't concatenate fresh data onto a broken prefix the shim
+			// never received.
+			w.buf.Reset()
 			return 0, fmt.Errorf("%w: %d bytes > %d", ErrMessageTooLarge, len(line)-1, maxStdinLineBytes)
 		}
 		trimmed := string(line[:len(line)-1])
 		if err := w.p.shimSend(shimClientMsg{Type: "write", Line: trimmed}); err != nil {
+			// Same reason as the size-limit branch: the failed line was
+			// already consumed, so leaving the remainder in the buffer would
+			// produce a corrupted stitched message on retry.
+			w.buf.Reset()
 			return 0, err
 		}
 	}
@@ -217,11 +232,15 @@ func (p *Process) shimSend(msg shimClientMsg) error {
 	buf.Reset()
 	defer shimSendBufPool.Put(buf)
 
-	// json.Encoder writes directly into the pooled buffer and appends '\n'.
-	enc := json.NewEncoder(buf)
-	if err := enc.Encode(msg); err != nil {
+	// json.Marshal into the pooled buffer avoids the per-call json.Encoder
+	// allocation. The shim protocol is NDJSON so we append the trailing '\n'
+	// explicitly.
+	data, err := json.Marshal(msg)
+	if err != nil {
 		return err
 	}
+	buf.Write(data)
+	buf.WriteByte('\n')
 
 	p.shimWMu.Lock()
 	defer p.shimWMu.Unlock()
@@ -537,7 +556,7 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 				if sr := p.findResultSince(turnStartMS); sr != nil {
 					return sr, nil
 				}
-				return nil, fmt.Errorf("process exited during send")
+				return nil, ErrProcessExited
 			}
 
 			lastOutput = time.Now()
@@ -625,11 +644,20 @@ func (p *Process) Interrupt() {
 	// Capture running state before setting interrupted — avoids TOCTOU where
 	// a concurrent drainStaleEvents reads interrupted=true but interruptedRun=false.
 	p.mu.Lock()
-	wasRunning := p.State == StateRunning
+	state := p.State
 	p.mu.Unlock()
 	p.interrupted.Store(true)
-	if wasRunning {
+	if state == StateRunning {
 		p.interruptedRun.Store(true)
+	}
+	// While the CLI is still spawning, its REPL hasn't initialised and the
+	// Claude CLI silently drops SIGINT. Sending one anyway wastes a shim
+	// roundtrip and — worse — leaves `interrupted=true` with no result to
+	// drain, costing the next Send a 500ms settle wait. Mark the flag so a
+	// caller that follows up with Send still sees the intent, but skip the
+	// wire send until the process reaches Ready/Running.
+	if state == StateSpawning {
+		return
 	}
 	if err := p.shimSend(shimClientMsg{Type: "interrupt"}); err != nil {
 		slog.Warn("interrupt failed", "err", err)

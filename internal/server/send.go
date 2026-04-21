@@ -94,6 +94,10 @@ type sendAckStatus string
 const (
 	sendAckAccepted sendAckStatus = "accepted"
 	sendAckQueued   sendAckStatus = "queued"
+	// sendAckBusy is returned when the session is busy but the queue is
+	// disabled (MaxDepth<=0) so the message cannot even be buffered. The
+	// client should retry rather than assume the message will arrive.
+	sendAckBusy sendAckStatus = "busy"
 )
 
 // sessionSend validates and dispatches a send request.
@@ -153,12 +157,18 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 		Images:    p.Images,
 		EnqueueAt: time.Now(),
 	}
-	isOwner, _, gen := h.queue.Enqueue(key, qm)
+	isOwner, enqueued, gen := h.queue.Enqueue(key, qm)
 	if !isOwner {
-		// Busy — message is queued (or dropped if MaxDepth disabled queuing, which
-		// for the dashboard we treat as queued anyway since the owner will eventually
-		// drain). The owner's ownerLoop will pick it up on its next drain tick.
-		slog.Info("send: message queued (session busy)", "key", key)
+		if !enqueued {
+			// Queue disabled (MaxDepth<=0) and session is busy — the
+			// message is dropped. Surface this so the client knows to retry
+			// instead of waiting for a drain that never owns this message.
+			slog.Debug("send: message dropped (session busy, queue disabled)", "key", key)
+			return false, sendAckBusy, nil
+		}
+		// Busy — message was accepted into the queue; owner's ownerLoop will
+		// pick it up on its next drain tick.
+		slog.Debug("send: message queued (session busy)", "key", key)
 		return false, sendAckQueued, nil
 	}
 
@@ -210,7 +220,7 @@ func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyn
 		}
 
 		text, images := dispatch.CoalesceMessages(queued)
-		slog.Info("send: processing queued messages", "key", key, "count", len(queued), "merged_len", len(text))
+		slog.Debug("send: processing queued messages", "key", key, "count", len(queued), "merged_len", len(text))
 		// onAsyncError only applies to the first turn (one ack per request);
 		// subsequent coalesced turns log failures without a back-channel.
 		h.runTurn(key, text, images, nil)
@@ -231,6 +241,8 @@ func (h *Hub) runTurn(key, text string, images []cli.ImageData, onAsyncError fun
 		return
 	}
 	if status != session.SessionExisting {
+		// Spawn is an infrequent event (once per session lifecycle), so keep
+		// it at Info for operator visibility. Other per-turn events are Debug.
 		slog.Info("send: session spawned", "key", key, "status", status, "elapsed", time.Since(sendStart).Round(time.Millisecond))
 	}
 
@@ -241,7 +253,7 @@ func (h *Hub) runTurn(key, text string, images []cli.ImageData, onAsyncError fun
 			slog.Warn("send: set cron prompt", "key", key, "err", err)
 		}
 	}
-	slog.Info("send: turn complete", "key", key, "elapsed", time.Since(sendStart).Round(time.Millisecond))
+	slog.Debug("send: turn complete", "key", key, "elapsed", time.Since(sendStart).Round(time.Millisecond))
 }
 
 // sessionSendLegacy keeps the pre-queue guard/interrupt behavior for code paths
@@ -254,7 +266,7 @@ func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError func(string)) (bool, 
 	needInterrupt := !acquired
 	if needInterrupt {
 		h.router.InterruptSession(key)
-		slog.Info("send: interrupted running session", "key", key)
+		slog.Debug("send: interrupted running session", "key", key)
 	}
 
 	text, images := p.Text, p.Images

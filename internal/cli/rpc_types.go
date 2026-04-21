@@ -7,7 +7,7 @@ type RPCRequest struct {
 	JSONRPC string      `json:"jsonrpc"`
 	ID      int         `json:"id"`
 	Method  string      `json:"method"`
-	Params  interface{} `json:"params,omitempty"`
+	Params  any `json:"params,omitempty"`
 }
 
 // RPCMessage is a generic JSON-RPC 2.0 message (request, response, or notification).

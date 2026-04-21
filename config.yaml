@@ -47,8 +47,8 @@ cron:
   # dashboard toggle but don't specify a per-job target. Both fields required.
   # Leave empty to disable the default (per-job targets still work).
   notify_default:
-    platform: ""   # e.g. "feishu"
-    chat_id: ""    # e.g. "oc_xxxxxxxxxxxx"
+    platform: "feishu"
+    chat_id: "oc_9dcbfd8307c7a4c1e111f163aa47fd5d"
 
 platforms:
   feishu:

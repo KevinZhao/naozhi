@@ -22,6 +22,20 @@ import (
 // Callers should use errors.Is(err, cron.ErrJobNotFound) instead of string matching.
 var ErrJobNotFound = errors.New("cron: job not found")
 
+// ErrJobAlreadyPaused is returned by PauseJob when the target job is already
+// paused. Callers (especially HTTP handlers) should map this to 409 Conflict
+// rather than 400, since the request was well-formed but the target state is
+// incompatible.
+var ErrJobAlreadyPaused = errors.New("cron: job already paused")
+
+// ErrJobNotPaused is returned by ResumeJob when the target job is not paused.
+var ErrJobNotPaused = errors.New("cron: job not paused")
+
+// ErrJobPaused is returned by TriggerNow when the target job is paused, so a
+// manual trigger from the dashboard is rejected instead of silently running
+// against the operator's pause intent.
+var ErrJobPaused = errors.New("cron: job is paused")
+
 // SchedulerConfig holds configuration for the cron scheduler.
 type SchedulerConfig struct {
 	Router        *session.Router
@@ -284,6 +298,31 @@ func (s *Scheduler) ListAllJobs() []Job {
 	return result
 }
 
+// JobWithNextRun pairs a Job snapshot with its next scheduled run time so
+// callers rendering lists (dashboard) don't need a second round-trip per job.
+type JobWithNextRun struct {
+	Job     Job
+	NextRun time.Time
+}
+
+// ListAllJobsWithNextRun returns every job plus its next scheduled run, computed
+// inside a single RLock acquisition. This avoids the O(N) lock churn of calling
+// NextRunByID in a loop from the dashboard handler.
+func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	result := make([]JobWithNextRun, 0, len(s.jobs))
+	for _, j := range s.jobs {
+		var next time.Time
+		if j.entryID != 0 {
+			next = s.cron.Entry(j.entryID).Next
+		}
+		result = append(result, JobWithNextRun{Job: *j, NextRun: next})
+	}
+	return result
+}
+
 // DeleteJobByID removes a job by exact ID (unscoped, for dashboard use).
 func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	s.mu.Lock()
@@ -319,7 +358,7 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 	}
 	if j.Paused {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("job %s already paused", j.ID)
+		return nil, fmt.Errorf("%w: id %q", ErrJobAlreadyPaused, j.ID)
 	}
 
 	if j.entryID != 0 {
@@ -345,7 +384,7 @@ func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 	}
 	if !j.Paused {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("job %s is not paused", j.ID)
+		return nil, fmt.Errorf("%w: id %q", ErrJobNotPaused, j.ID)
 	}
 
 	if err := s.registerJob(j); err != nil {
@@ -486,15 +525,20 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 	return nil
 }
 
-// PreviewSchedule validates a schedule expression and returns the next run time
-// in UTC. Callers that need the scheduler's configured timezone should use
-// Scheduler.PreviewSchedule instead.
+// PreviewSchedule validates a schedule expression and returns the next run
+// time in UTC. Used by tests and the dashboard bootstrap path where no live
+// Scheduler is wired; the live path should call Scheduler.PreviewSchedule so
+// the configured timezone is honoured.
 func PreviewSchedule(schedule string) (time.Time, error) {
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {
 		return time.Time{}, err
 	}
-	return sched.Next(time.Now()), nil
+	// Pass UTC explicitly so the returned time.Time has Location=UTC and the
+	// godoc contract matches the implementation. `time.Now()` would inherit
+	// the host TZ, making the return value's location non-deterministic
+	// across machines.
+	return sched.Next(time.Now().UTC()), nil
 }
 
 // PreviewSchedule computes the next run time using the scheduler's configured
@@ -509,6 +553,32 @@ func (s *Scheduler) PreviewSchedule(schedule string) (time.Time, error) {
 		loc = time.Local
 	}
 	return sched.Next(time.Now().In(loc)), nil
+}
+
+// PreviewScheduleN returns the next n run times for a schedule expression, in
+// the scheduler's configured timezone. Used by the dashboard to preview what
+// "接下来会在这些时间运行" looks like before a user commits to a frequency.
+// Callers get a validation error on the first Parse failure; n is clamped to
+// a sane range by the caller.
+func (s *Scheduler) PreviewScheduleN(schedule string, n int) ([]time.Time, error) {
+	sched, err := cronParser.Parse(schedule)
+	if err != nil {
+		return nil, err
+	}
+	if n <= 0 {
+		n = 1
+	}
+	loc := s.location
+	if loc == nil {
+		loc = time.Local
+	}
+	out := make([]time.Time, 0, n)
+	t := time.Now().In(loc)
+	for i := 0; i < n; i++ {
+		t = sched.Next(t)
+		out = append(out, t)
+	}
+	return out, nil
 }
 
 // Location returns the timezone the scheduler uses to evaluate cron
@@ -556,7 +626,7 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 	}
 	if j.Paused {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("job %s already paused", j.ID)
+		return nil, fmt.Errorf("%w: id %q", ErrJobAlreadyPaused, j.ID)
 	}
 
 	if j.entryID != 0 {
@@ -582,7 +652,7 @@ func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
 	}
 	if !j.Paused {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("job %s is not paused", j.ID)
+		return nil, fmt.Errorf("%w: id %q", ErrJobNotPaused, j.ID)
 	}
 
 	if err := s.registerJob(j); err != nil {
@@ -634,13 +704,19 @@ func (s *Scheduler) TriggerNow(id string) error {
 	}
 	if j.Paused {
 		s.mu.Unlock()
-		return fmt.Errorf("job %s is paused", id)
+		return fmt.Errorf("%w: id %q", ErrJobPaused, id)
 	}
 	if j.Prompt == "" {
 		s.mu.Unlock()
 		return fmt.Errorf("job %s has no prompt", id)
 	}
 	entryID := j.entryID
+	// Register the trigger goroutine with triggerWG before releasing s.mu.
+	// This prevents a Stop() on another goroutine from observing triggerWG as
+	// empty and returning before our goroutine starts. We pair Add(1) here
+	// with a Done() in each goroutine body below; if we bail out before
+	// spawning (concurrent delete), we Done() the counter inline.
+	s.triggerWG.Add(1)
 	s.mu.Unlock()
 
 	if entryID != 0 {
@@ -650,17 +726,17 @@ func (s *Scheduler) TriggerNow(id string) error {
 		// and this lookup, causing Entry() to return a zero-value with nil WrappedJob.
 		entry := s.cron.Entry(entryID)
 		if entry.WrappedJob != nil {
-			s.triggerWG.Add(1)
 			go func() {
 				defer s.triggerWG.Done()
 				entry.WrappedJob.Run()
 			}()
 		} else {
-			// Entry was concurrently deleted — skip execution.
+			// Entry was concurrently deleted — skip execution and release
+			// the WaitGroup slot we reserved above.
+			s.triggerWG.Done()
 			slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "id", id, "entry_id", entryID)
 		}
 	} else {
-		s.triggerWG.Add(1)
 		go func() {
 			defer s.triggerWG.Done()
 			s.execute(j)
@@ -706,6 +782,7 @@ func (s *Scheduler) execute(j *Job) {
 
 	log := slog.With("cron_id", jobID, "platform", platName, "chat", chatID)
 	log.Info("cron job executing", "prompt_len", len(prompt))
+	execStart := time.Now()
 
 	ctx, cancel := context.WithTimeout(s.stopCtx, s.execTimeout)
 	defer cancel()
@@ -720,8 +797,17 @@ func (s *Scheduler) execute(j *Job) {
 
 	sess, _, err := s.router.GetOrCreate(ctx, key, opts)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) {
+			// Parent ctx cancelled mid-flight (graceful shutdown or job
+			// deletion overlapping execute). The job will either be re-run
+			// on the next tick or is intentionally gone; either way an IM
+			// notification would be spam and the stored LastError would
+			// falsely blame the job itself.
 			log.Info("cron session cancelled", "err", err)
+			return
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.Info("cron session deadline exceeded", "err", err)
 		} else {
 			log.Error("cron session error", "err", err)
 		}
@@ -733,8 +819,15 @@ func (s *Scheduler) execute(j *Job) {
 	// Direct Send without sendWithBroadcast — cron jobs notify via onExecute callback instead.
 	result, err := sess.Send(ctx, cleanText, nil, nil)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) {
+			// Same rationale as the session-error branch above: suppress
+			// the operator-facing notice so shutdown races don't look like
+			// real failures.
 			log.Info("cron send cancelled", "err", err)
+			return
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			log.Info("cron send deadline exceeded", "err", err)
 		} else {
 			log.Error("cron send error", "err", err)
 		}
@@ -743,7 +836,9 @@ func (s *Scheduler) execute(j *Job) {
 		return
 	}
 
-	log.Info("cron job completed", "result_len", len(result.Text))
+	log.Info("cron job completed",
+		"result_len", len(result.Text),
+		"elapsed_ms", time.Since(execStart).Milliseconds())
 	s.recordResult(j, result.Text, "")
 
 	replyText := fmt.Sprintf("[Cron %s] %s", jobID, result.Text)

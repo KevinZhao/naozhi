@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -22,6 +23,21 @@ const (
 	setupPollInterval = 2 * time.Second
 	setupPollTimeout  = 5 * time.Minute
 )
+
+// setupHTTPClient is a dedicated client for the interactive setup flow so we
+// don't inherit http.DefaultClient's no-timeout / 10-redirect behavior. Any
+// HTTPS redirect from the vendor API is returned unfollowed (ErrUseLastResponse)
+// so a compromised DNS or misconfigured endpoint can't pivot us to a different
+// host while we're sending a QR-code identifier.
+var setupHTTPClient = &http.Client{
+	Timeout: 15 * time.Second,
+	CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+	Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	},
+}
 
 var defaultConfigTemplate = `server:
   addr: ":8180"
@@ -140,7 +156,7 @@ func setupGetQRCode(ctx context.Context) (*setupQRResp, error) {
 	if err != nil {
 		return nil, err
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := setupHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -202,7 +218,7 @@ func setupCheckStatus(ctx context.Context, qrcode string) (*setupStatusResp, err
 	}
 	req.Header.Set("iLink-App-ClientVersion", "1")
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := setupHTTPClient.Do(req)
 	if err != nil {
 		return nil, err
 	}

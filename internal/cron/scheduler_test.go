@@ -281,6 +281,45 @@ func TestSchedulerInvalidSchedule(t *testing.T) {
 	}
 }
 
+func TestPreviewScheduleN(t *testing.T) {
+	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+
+	runs, err := s.PreviewScheduleN("@every 1h", 5)
+	if err != nil {
+		t.Fatalf("PreviewScheduleN: %v", err)
+	}
+	if len(runs) != 5 {
+		t.Fatalf("expected 5 runs, got %d", len(runs))
+	}
+	// Strictly ascending; consecutive gap should match the schedule interval.
+	for i := 1; i < len(runs); i++ {
+		if !runs[i].After(runs[i-1]) {
+			t.Errorf("run %d (%v) not after run %d (%v)", i, runs[i], i-1, runs[i-1])
+		}
+		if gap := runs[i].Sub(runs[i-1]); gap != time.Hour {
+			t.Errorf("run %d gap = %v, want 1h", i, gap)
+		}
+	}
+
+	// n <= 0 should fall back to 1 run without erroring (callers clamp).
+	runs, err = s.PreviewScheduleN("@every 30m", 0)
+	if err != nil {
+		t.Fatalf("PreviewScheduleN zero: %v", err)
+	}
+	if len(runs) != 1 {
+		t.Errorf("expected 1 run for n=0, got %d", len(runs))
+	}
+
+	// Invalid expressions surface the parse error.
+	if _, err := s.PreviewScheduleN("not a cron", 3); err == nil {
+		t.Error("expected parse error for invalid schedule")
+	}
+}
+
 func TestSchedulerPersistence(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")

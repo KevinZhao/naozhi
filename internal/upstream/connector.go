@@ -2,12 +2,14 @@ package upstream
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"syscall"
@@ -78,7 +80,10 @@ func (c *Connector) Run(ctx context.Context) {
 		if connected {
 			backoff = time.Second
 		}
-		timer := time.NewTimer(backoff)
+		// Jitter the sleep so many connectors restarted together (e.g. fleet
+		// SIGHUP) don't hammer the primary on aligned deadlines. backoff
+		// still doubles deterministically; we only scatter wall-time.
+		timer := time.NewTimer(jitterBackoff(backoff))
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -90,7 +95,13 @@ func (c *Connector) Run(ctx context.Context) {
 }
 
 func (c *Connector) runOnce(ctx context.Context) (bool, error) {
-	dialer := websocket.Dialer{HandshakeTimeout: 10 * time.Second}
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 10 * time.Second,
+		// Pin TLS floor so downgraded clients can't be forced onto a weaker
+		// protocol via a compromised network segment. wss:// is already
+		// required by config validation.
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
 	conn, _, dialErr := dialer.DialContext(ctx, c.cfg.URL, nil)
 	if dialErr != nil {
 		return false, fmt.Errorf("dial: %w", dialErr)
@@ -237,13 +248,18 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						slog.Error("connector request panic", "req_id", req.ReqID, "method", req.Method, "panic", r, "stack", string(debug.Stack()))
+					}
+				}()
 				select {
 				case reqSem <- struct{}{}:
 					defer func() { <-reqSem }()
 				case <-ctx.Done():
 					return
 				}
-				result, err := c.handleRequest(ctx, connCtx, req)
+				result, err := c.handleRequest(ctx, connCtx, req, &wg)
 				resp := node.ReverseMsg{Type: "response", ReqID: req.ReqID}
 				if err != nil {
 					resp.Error = err.Error()
@@ -307,7 +323,7 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	}
 }
 
-func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.ReverseMsg) (json.RawMessage, error) {
+func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.ReverseMsg, wg *sync.WaitGroup) (json.RawMessage, error) {
 	switch req.Method {
 	case "fetch_sessions":
 		return marshalResult(c.router.ListSessions())
@@ -381,8 +397,17 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		}
 		// Send is async: primary subscribed before sending, events arrive via streamEvents.
 		// Use connCtx so a relay disconnect cancels in-flight sends, preventing
-		// goroutine accumulation across reconnect cycles.
+		// goroutine accumulation across reconnect cycles. Register with the
+		// handleConn waitgroup so a dropped connection waits for in-flight
+		// sends to return before tearing down subscriptions.
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("connector send panic", "key", p.Key, "panic", r, "stack", string(debug.Stack()))
+				}
+			}()
 			if _, err := sess.Send(connCtx, p.Text, nil, nil); err != nil {
 				if connCtx.Err() == nil {
 					slog.Warn("connector send failed", "key", p.Key, "err", err)

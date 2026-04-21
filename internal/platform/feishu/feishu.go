@@ -248,7 +248,21 @@ func buildMarkdownCardJSON(text string) ([]byte, error) {
 			},
 		},
 	}
-	return json.Marshal(card)
+	// Disable HTML escaping so Claude output containing `<`, `>`, `&`
+	// (common in code blocks, shell redirection, arrow operators) is
+	// preserved verbatim in the Feishu card. Default json.Marshal would
+	// emit `\u003c` / `\u003e` / `\u0026` which renders as literal
+	// escape sequences inside the markdown element.
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(card); err != nil {
+		return nil, err
+	}
+	// json.Encoder appends a trailing '\n'; strip it so the result is a
+	// clean JSON object (the downstream outer Marshal expects a pure
+	// JSON value, not NDJSON).
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 // sendCard sends a Feishu interactive card with markdown content.

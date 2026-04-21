@@ -2,11 +2,23 @@ package cron
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"time"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// maxCronStoreBytes caps the size of cron_jobs.json during Load. A cap of
+// max_jobs=50 jobs with long prompts fits comfortably within 256 KB; 1 MB is
+// ample headroom. A file larger than this is treated as corrupt/tampered and
+// ignored (with the original preserved for forensics).
+const maxCronStoreBytes = 1 * 1024 * 1024
 
 func saveJobs(path string, jobs map[string]*Job) error {
 	if path == "" {
@@ -27,29 +39,8 @@ func saveJobs(path string, jobs map[string]*Job) error {
 	if err != nil {
 		return fmt.Errorf("marshal cron store: %w", err)
 	}
-	// Atomic write: write to temp file, fsync, then rename
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return fmt.Errorf("open cron store %s: %w", tmp, err)
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("write cron store %s: %w", tmp, err)
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("sync cron store %s: %w", tmp, err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("close cron store %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename cron store to %s: %w", path, err)
+	if err := osutil.WriteFileAtomic(path, data, 0600); err != nil {
+		return fmt.Errorf("save cron store: %w", err)
 	}
 	return nil
 }
@@ -58,17 +49,37 @@ func loadJobs(path string) map[string]*Job {
 	if path == "" {
 		return nil
 	}
-	data, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
-		if !os.IsNotExist(err) {
-			slog.Warn("load cron store failed", "err", err)
+		if !errors.Is(err, fs.ErrNotExist) {
+			slog.Warn("load cron store failed", "path", path, "err", err)
 		}
+		return nil
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxCronStoreBytes+1))
+	if err != nil {
+		slog.Warn("read cron store failed", "path", path, "err", err)
+		return nil
+	}
+	if int64(len(data)) > maxCronStoreBytes {
+		slog.Warn("cron store exceeds size cap; refusing to load",
+			"path", path, "cap_bytes", maxCronStoreBytes, "observed_bytes", len(data))
 		return nil
 	}
 
 	var entries []*Job
 	if err := json.Unmarshal(data, &entries); err != nil {
-		slog.Warn("parse cron store failed", "err", err)
+		// Preserve the corrupt file so the next save does not silently
+		// overwrite operator-visible evidence. Mirrors session/store.go.
+		corruptPath := path + ".corrupt." + time.Now().Format("20060102-150405")
+		if renameErr := os.Rename(path, corruptPath); renameErr != nil {
+			slog.Warn("parse cron store failed; could not rename corrupt file",
+				"err", err, "rename_err", renameErr, "path", path)
+		} else {
+			slog.Warn("parse cron store failed; corrupt file preserved",
+				"err", err, "corrupt_path", corruptPath)
+		}
 		return nil
 	}
 

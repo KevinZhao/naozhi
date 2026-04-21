@@ -2,13 +2,49 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"slices"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// maxStoreFileBytes caps how much data we read from any session-store file
+// during Load. sessions.json for 1000 sessions with full PrevSessionIDs stays
+// well under 500 KB; 4 MB gives ample headroom without letting a corrupt or
+// maliciously extended file OOM the process during startup.
+const maxStoreFileBytes = 4 * 1024 * 1024
+
+// readCappedFile reads up to maxStoreFileBytes from path. Returns nil, nil if
+// the file does not exist so callers can treat a missing store as "empty".
+// A file that exceeds the cap is logged and rejected — the caller falls back
+// to an empty store rather than parsing a truncated JSON prefix.
+func readCappedFile(path string, label string) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, maxStoreFileBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxStoreFileBytes {
+		slog.Warn(label+" exceeds size cap; refusing to load",
+			"path", path, "cap_bytes", maxStoreFileBytes, "observed_bytes", len(data))
+		return nil, fmt.Errorf("%s %s exceeds %d-byte cap", label, path, maxStoreFileBytes)
+	}
+	return data, nil
+}
 
 type storeEntry struct {
 	Key            string   `json:"key"`
@@ -70,29 +106,8 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 	if err != nil {
 		return fmt.Errorf("marshal session store: %w", err)
 	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return fmt.Errorf("open session store %s: %w", tmp, err)
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("write session store %s: %w", tmp, err)
-	}
-	// Fsync before rename to prevent data loss on power failure.
-	if err := f.Sync(); err != nil {
-		f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("sync session store %s: %w", tmp, err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("close session store %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename session store to %s: %w", path, err)
+	if err := osutil.WriteFileAtomic(path, data, 0600); err != nil {
+		return fmt.Errorf("save session store: %w", err)
 	}
 	return nil
 }
@@ -101,11 +116,12 @@ func loadStore(path string) map[string]*storeEntry {
 	if path == "" {
 		return nil
 	}
-	data, err := os.ReadFile(path)
+	data, err := readCappedFile(path, "session store")
 	if err != nil {
-		if !os.IsNotExist(err) {
-			slog.Warn("load session store failed", "err", err)
-		}
+		slog.Warn("load session store failed", "path", path, "err", err)
+		return nil
+	}
+	if data == nil {
 		return nil
 	}
 
@@ -149,11 +165,12 @@ func loadKnownIDs(storePath string) map[string]bool {
 	if path == "" {
 		return nil
 	}
-	data, err := os.ReadFile(path)
+	data, err := readCappedFile(path, "known session IDs")
 	if err != nil {
-		if !os.IsNotExist(err) {
-			slog.Warn("load known session IDs failed", "err", err)
-		}
+		slog.Warn("load known session IDs failed", "path", path, "err", err)
+		return nil
+	}
+	if data == nil {
 		return nil
 	}
 	var ids []string
@@ -188,28 +205,8 @@ func saveKnownIDs(storePath string, ids map[string]bool) error {
 	if err != nil {
 		return fmt.Errorf("marshal known IDs: %w", err)
 	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return fmt.Errorf("write known IDs %s: %w", tmp, err)
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("write known IDs %s: %w", tmp, err)
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("sync known IDs %s: %w", tmp, err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("close known IDs %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename known IDs to %s: %w", path, err)
+	if err := osutil.WriteFileAtomic(path, data, 0600); err != nil {
+		return fmt.Errorf("save known IDs: %w", err)
 	}
 	return nil
 }
@@ -229,11 +226,12 @@ func loadWorkspaceOverrides(storePath string) map[string]string {
 	if path == "" {
 		return nil
 	}
-	data, err := os.ReadFile(path)
+	data, err := readCappedFile(path, "workspace overrides")
 	if err != nil {
-		if !os.IsNotExist(err) {
-			slog.Warn("load workspace overrides failed", "err", err)
-		}
+		slog.Warn("load workspace overrides failed", "path", path, "err", err)
+		return nil
+	}
+	if data == nil {
 		return nil
 	}
 	var m map[string]string
@@ -255,7 +253,7 @@ func saveWorkspaceOverrides(storePath string, overrides map[string]string) error
 		return nil
 	}
 	if len(overrides) == 0 {
-		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		if err := os.Remove(path); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			slog.Warn("remove empty workspace overrides file", "path", path, "err", err)
 		}
 		return nil
@@ -264,28 +262,8 @@ func saveWorkspaceOverrides(storePath string, overrides map[string]string) error
 	if err != nil {
 		return fmt.Errorf("marshal workspace overrides: %w", err)
 	}
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
-	if err != nil {
-		return fmt.Errorf("write workspace overrides %s: %w", tmp, err)
-	}
-	if _, err := f.Write(data); err != nil {
-		f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("write workspace overrides %s: %w", tmp, err)
-	}
-	if err := f.Sync(); err != nil {
-		f.Close()
-		_ = os.Remove(tmp)
-		return fmt.Errorf("sync workspace overrides %s: %w", tmp, err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("close workspace overrides %s: %w", tmp, err)
-	}
-	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
-		return fmt.Errorf("rename workspace overrides to %s: %w", path, err)
+	if err := osutil.WriteFileAtomic(path, data, 0600); err != nil {
+		return fmt.Errorf("save workspace overrides: %w", err)
 	}
 	return nil
 }

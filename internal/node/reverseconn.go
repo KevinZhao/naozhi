@@ -239,10 +239,23 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 	c.subMu.Unlock()
 
 	if alreadySub {
-		// Additional subscriber: send history via RPC (non-blocking)
+		// Additional subscriber: send history via RPC (non-blocking).
+		// Anchor the timeout to the connection's done channel so a drop
+		// mid-fetch cancels the RPC instead of running to completion then
+		// writing to a potentially closed EventSink.
 		go func() {
 			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			cancelOnClose := make(chan struct{})
+			go func() {
+				select {
+				case <-c.done:
+					cancel()
+				case <-cancelOnClose:
+				}
+			}()
+			defer close(cancelOnClose)
+
 			entries, err := c.FetchEvents(ctx, key, after)
 			if err != nil {
 				return

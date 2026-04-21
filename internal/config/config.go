@@ -381,6 +381,9 @@ func validateConfig(cfg *Config) error {
 		if cfg.Upstream.URL == "" {
 			return fmt.Errorf("upstream.url is required")
 		}
+		if containsEnvPlaceholder(cfg.Upstream.URL) {
+			return fmt.Errorf("upstream.url contains unexpanded ${VAR} — check environment variables")
+		}
 		if !strings.HasPrefix(cfg.Upstream.URL, "wss://") && !strings.HasPrefix(cfg.Upstream.URL, "ws://") {
 			return fmt.Errorf("upstream.url must use ws:// or wss:// scheme")
 		}
@@ -390,8 +393,14 @@ func validateConfig(cfg *Config) error {
 		if cfg.Upstream.NodeID == "" {
 			return fmt.Errorf("upstream.node_id is required")
 		}
+		if containsEnvPlaceholder(cfg.Upstream.NodeID) {
+			return fmt.Errorf("upstream.node_id contains unexpanded ${VAR} — check environment variables")
+		}
 		if cfg.Upstream.Token == "" {
 			return fmt.Errorf("upstream.token is required")
+		}
+		if containsEnvPlaceholder(cfg.Upstream.Token) {
+			return fmt.Errorf("upstream.token contains unexpanded ${VAR} — check environment variables")
 		}
 	}
 
@@ -407,6 +416,11 @@ func validateConfig(cfg *Config) error {
 	if cfg.Server.DashboardToken == "" {
 		slog.Warn("SECURITY: dashboard_token is empty — all dashboard API endpoints are accessible without authentication",
 			"hint", "set NAOZHI_DASHBOARD_TOKEN or dashboard_token in config")
+	} else if containsEnvPlaceholder(cfg.Server.DashboardToken) {
+		// Refuse to start with a literal "${VAR}" string as the dashboard
+		// credential: the placeholder is readable in the repository, so
+		// anyone who ever sees the config knows the login token.
+		return fmt.Errorf("server.dashboard_token contains unexpanded ${VAR} — check environment variables (refusing to run with a guessable token)")
 	}
 
 	return nil

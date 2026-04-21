@@ -211,7 +211,11 @@ func (q *MessageQueue) ShouldNotify(key string) bool {
 	defer q.mu.Unlock()
 	now := time.Now().UnixNano()
 	if sq, ok := q.queues[key]; ok {
-		if now-sq.lastNotifyNs < cooldown {
+		// Guard against NTP backwards-step: if now < lastNotifyNs the int64
+		// subtraction yields a negative value which is < positive cooldown,
+		// silencing notifications indefinitely. Treat any non-monotonic
+		// jump as "cooldown satisfied" and reset the anchor.
+		if delta := now - sq.lastNotifyNs; delta >= 0 && delta < cooldown {
 			return false
 		}
 		sq.lastNotifyNs = now
@@ -220,7 +224,7 @@ func (q *MessageQueue) ShouldNotify(key string) bool {
 	// No queue entry — per-key cooldown via bounded LRU.
 	if elem, ok := q.dropNotifyIndex[key]; ok {
 		entry := elem.Value.(*dropNotifyEntry)
-		if now-entry.ts < cooldown {
+		if delta := now - entry.ts; delta >= 0 && delta < cooldown {
 			return false
 		}
 		entry.ts = now

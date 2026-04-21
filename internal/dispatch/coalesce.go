@@ -25,7 +25,14 @@ func CoalesceMessages(msgs []QueuedMsg) (string, []cli.ImageData) {
 	var b strings.Builder
 	b.WriteString("[以下是用户在你处理上一条消息期间追加发送的内容]\n")
 
-	var allImages []cli.ImageData
+	// Pre-size allImages so append doesn't repeatedly grow/copy the slice when
+	// several queued messages carry images. Most messages have zero images so
+	// the upfront count scan is cheap.
+	totalImages := 0
+	for _, m := range msgs {
+		totalImages += len(m.Images)
+	}
+	allImages := make([]cli.ImageData, 0, totalImages)
 	for _, m := range msgs {
 		// Direct Fprintf into the builder — avoids the intermediate string
 		// that fmt.Sprintf would allocate on every queued message.

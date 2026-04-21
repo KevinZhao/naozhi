@@ -15,8 +15,11 @@ import (
 
 // ACPProtocol implements Protocol for the Agent Client Protocol (JSON-RPC 2.0).
 type ACPProtocol struct {
-	mu        sync.Mutex
-	nextID    atomic.Int32
+	mu sync.Mutex
+	// nextID is Int64 to avoid sign flip if a very long-running connector
+	// ever surpassed 2^31 RPC calls (it currently won't in practice, but the
+	// wider type costs nothing and removes the overflow footgun).
+	nextID    atomic.Int64
 	sessionID string
 	// textBuf accumulates assistant_message_chunk text during a turn
 	textBuf strings.Builder
@@ -217,7 +220,14 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 	switch update.Update.SessionUpdate {
 	case "agent_message_chunk":
 		var content ACPTextContent
-		if err := json.Unmarshal(update.Update.Content, &content); err == nil && content.Text != "" {
+		if err := json.Unmarshal(update.Update.Content, &content); err != nil {
+			// Log the raw payload so diagnosing an upstream schema drift does
+			// not require reproducing the session; without this the user sees
+			// an empty reply and we have no trail.
+			slog.Warn("acp: agent_message_chunk content unmarshal failed",
+				"err", err,
+				"raw_len", len(update.Update.Content))
+		} else if content.Text != "" {
 			p.mu.Lock()
 			p.textBuf.WriteString(content.Text)
 			p.mu.Unlock()

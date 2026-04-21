@@ -442,7 +442,12 @@ func main() {
 		ChatID:   cfg.Cron.NotifyDefault.ChatID,
 	}
 	if notifyDefault.IsSet() {
-		slog.Info("cron notify default configured", "platform", notifyDefault.Platform, "chat_id", notifyDefault.ChatID)
+		// Log only the platform and a truncated chat_id suffix so log
+		// aggregators don't carry the full group/user identifier. The
+		// dashboard still exposes the full value to authenticated operators.
+		slog.Info("cron notify default configured",
+			"platform", notifyDefault.Platform,
+			"chat_id_suffix", chatIDSuffix(notifyDefault.ChatID))
 	}
 	scheduler := cron.NewScheduler(cron.SchedulerConfig{
 		Router:        router,
@@ -575,6 +580,10 @@ func main() {
 		"max_procs", cfg.Session.MaxProcs,
 		"platforms", len(platforms),
 	)
+	// Surface the configured webhook endpoints so operators can copy the URL
+	// into the IM provider console without having to grep routes. Routes for
+	// WS-only platforms (feishu websocket mode) are intentionally omitted.
+	logWebhookEndpoints(cfg, platforms)
 
 	if cfg.Server.DashboardToken == "" {
 		slog.Warn("dashboard_token is not set — dashboard and WebSocket API are accessible without authentication. Set server.dashboard_token in config.yaml for production use.")
@@ -665,4 +674,43 @@ func parseBytesOrDefault(s string, def int64) int64 {
 		return def
 	}
 	return n * multiplier
+}
+
+// chatIDSuffix returns the last 8 characters of a chat ID for logging,
+// prefixed with "…" so a grep on full IDs does not match. Empty input
+// returns an empty string. Kept local to this file since it is log-only
+// and does not need to round-trip.
+func chatIDSuffix(id string) string {
+	if id == "" {
+		return ""
+	}
+	if len(id) <= 8 {
+		return id
+	}
+	return "…" + id[len(id)-8:]
+}
+
+// logWebhookEndpoints prints a one-line summary of the webhook URLs operators
+// need to paste into the IM vendor console. Platforms that do not expose a
+// webhook route (e.g. feishu websocket mode) are skipped.
+func logWebhookEndpoints(cfg *config.Config, platforms map[string]platform.Platform) {
+	addr := cfg.Server.Addr
+	if strings.HasPrefix(addr, ":") {
+		addr = "0.0.0.0" + addr
+	}
+	for name := range platforms {
+		switch name {
+		case "feishu":
+			if cfg.Platforms.Feishu != nil && cfg.Platforms.Feishu.ConnectionMode == "webhook" {
+				slog.Info("platform webhook endpoint", "platform", name, "path", "/webhook/feishu", "addr", addr)
+			}
+		case "slack":
+			// slack events api + socket mode: route is only exposed when not using socket mode
+			if cfg.Platforms.Slack != nil && cfg.Platforms.Slack.AppToken == "" {
+				slog.Info("platform webhook endpoint", "platform", name, "path", "/webhook/slack", "addr", addr)
+			}
+		case "weixin":
+			slog.Info("platform webhook endpoint", "platform", name, "path", "/webhook/weixin", "addr", addr)
+		}
+	}
 }

@@ -376,7 +376,8 @@ function sessionCardHtml(s) {
   const sNode = s.node || 'local';
   const isActive = selectedKey === s.key && selectedNode === sNode;
   const isNew = s.state === 'new';
-  const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '');
+  const isCron = typeof s.key === 'string' && s.key.indexOf('cron:') === 0;
+  const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '') + (isCron ? ' cron-card' : '');
 
   // Line 1: prompt
   const prompt = s.summary || s.last_prompt || (isNew ? '(new session)' : '(no prompt)');
@@ -390,12 +391,14 @@ function sessionCardHtml(s) {
 
   const dismissBtn = '<button type="button" class="btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove" aria-label="Remove session">&times;</button>';
 
+  const cronBadge = isCron ? '<span class="sc-cron" title="Scheduled cron task">\u23F0 cron</span>' : '';
   const typeTag = s.source === 'terminal' ? sessionTypeTag(s.cli_name, s.entrypoint) : '';
   const agentCount = s.subagents ? s.subagents.length : 0;
   const agentBadge = agentCount > 0 ? '<span class="sc-agents">\u{1F916}\u00D7' + agentCount + '</span>' : '';
   const metaHtml = '<span class="sc-dot ' + dotCls + '"></span>' +
     '<span>' + esc(s.state) + '</span>' +
     nodeBadge +
+    cronBadge +
     typeTag +
     agentBadge;
 
@@ -3295,6 +3298,14 @@ const wsm = {
       // duplicate user messages in the UI.
       // For process restarts (dead → running), onSessionState
       // handles re-subscription exclusively.
+    } else if (msg.status === 'busy') {
+      // Queue is disabled (MaxDepth<=0) and the session is currently
+      // processing another message, so our send was dropped rather than
+      // enqueued. Roll back the optimistic bubble and tell the operator
+      // to retry — otherwise the UI silently eats the message.
+      showToast('会话正忙，消息未送达，请稍后重试', 'error');
+      const opt = document.querySelector('.optimistic-msg');
+      if (opt) opt.remove();
     } else if (msg.status === 'error') {
       showToast('send error: ' + (msg.error || 'unknown'), 'error');
       // Remove optimistic message on send failure
@@ -3770,36 +3781,375 @@ let cronTimezoneLabel = '';
 // alongside the notify toggle in create/edit modals.
 let cronNotifyDefault = null;
 
-function createNewCronJob() {
-  const presets = [
-    { label: 'Every 30 min', value: '@every 30m' },
-    { label: 'Every hour', value: '@every 1h' },
-    { label: 'Daily 9:00', value: '0 9 * * *' },
-    { label: 'Weekdays 9:00', value: '0 9 * * 1-5' },
-    { label: 'Every Monday 9:00', value: '0 9 * * 1' },
-  ];
-  const overlay = document.createElement('div');
-  overlay.className = 'modal-overlay';
-  let scheduleHtml =
-    '<ul class="proj-pick" id="cron-schedule-list" role="listbox" aria-label="Schedule presets">' +
-    presets.map(p =>
-      '<li role="option" data-value="' + escAttr(p.value) + '" onclick="cronSelectSchedule(this, \'' + escJs(p.value) + '\')">' +
-        '<div class="pp-name">' + esc(p.label) + '</div>' +
-        '<div class="pp-path">' + esc(p.value) + '</div>' +
-      '</li>'
-    ).join('') +
-    '<li id="cron-custom-toggle" role="option" onclick="toggleCronCustom()">' +
-      '<div class="pp-custom"><span class="pp-custom-icon">&#9881;</span> Custom expression</div>' +
-    '</li>' +
-    '</ul>' +
-    '<div id="cron-custom-form" style="display:none;margin-top:8px">' +
-      '<input id="cron-schedule" placeholder="@every 30m or 0 9 * * 1-5" aria-label="Custom cron expression">' +
-      '<div id="cron-preview-hint" class="cron-preview-hint"></div>' +
+// Pads an integer to two digits (e.g. 7 -> "07"). Used for HH/MM rendering.
+function pad2(n) { return (n < 10 ? '0' : '') + n; }
+
+// parseCronToFreq inspects a schedule expression and, when it matches one of
+// our canonical frequency shapes, returns a descriptor the frequency picker
+// can restore. Returning null means "we don't recognize this — fall back to
+// the raw expression editor." This is intentionally narrow: we only recognize
+// the exact shapes buildFreqSchedule emits, so round-tripping is lossless.
+function parseCronToFreq(expr) {
+  if (!expr) return null;
+  const s = expr.trim();
+  let m = s.match(/^@every\s+(\d+)(m|h)$/i);
+  if (m) {
+    const n = parseInt(m[1], 10);
+    const unit = m[2].toLowerCase();
+    if (unit === 'm' && n < 5) return null;
+    return { mode: 'interval', n, unit };
+  }
+  const parts = s.split(/\s+/);
+  if (parts.length !== 5) return null;
+  const [mm, hh, dom, mon, dow] = parts;
+  if (!/^\d+$/.test(mm) || !/^\d+$/.test(hh)) return null;
+  const minute = parseInt(mm, 10);
+  const hour = parseInt(hh, 10);
+  if (minute > 59 || hour > 23) return null;
+  if (mon !== '*') return null;
+  const hhmm = pad2(hour) + ':' + pad2(minute);
+  if (dom === '*' && dow === '*') return { mode: 'daily', time: hhmm };
+  if (dow === '*' && /^\d+$/.test(dom)) {
+    const d = parseInt(dom, 10);
+    if (d >= 1 && d <= 31) return { mode: 'monthly', day: d, time: hhmm };
+  }
+  if (dom === '*' && dow !== '*') {
+    const days = parseDowField(dow);
+    if (days) return { mode: 'weekly', dows: days, time: hhmm };
+  }
+  return null;
+}
+
+// parseDowField parses robfig/cron DOW: "1-5", "1,3,5", "0". Sunday is 0
+// (robfig convention). 7 is normalized to 0 defensively; returns null on any
+// malformed input so the caller falls back to raw-expression editing.
+function parseDowField(field) {
+  const result = new Set();
+  for (const part of field.split(',')) {
+    if (/^\d+$/.test(part)) {
+      let n = parseInt(part, 10);
+      if (n === 7) n = 0;
+      if (n < 0 || n > 6) return null;
+      result.add(n);
+      continue;
+    }
+    const m = part.match(/^(\d+)-(\d+)$/);
+    if (!m) return null;
+    let lo = parseInt(m[1], 10), hi = parseInt(m[2], 10);
+    if (lo === 7) lo = 0;
+    if (hi === 7) hi = 0;
+    if (lo > hi || lo < 0 || hi > 6) return null;
+    for (let i = lo; i <= hi; i++) result.add(i);
+  }
+  if (result.size === 0) return null;
+  return [...result].sort((a, b) => a - b);
+}
+
+// buildFreqSchedule assembles a cron expression from a frequency descriptor.
+// Returns {expr, err}. err is a human-readable message when the descriptor
+// is invalid (e.g. interval <5min, no weekday selected).
+function buildFreqSchedule(desc) {
+  if (!desc) return { err: '请选择频率' };
+  if (desc.mode === 'interval') {
+    const n = parseInt(desc.n, 10);
+    if (!Number.isFinite(n) || n < 1) return { err: '间隔必须是正整数' };
+    if (desc.unit === 'm' && n < 5) return { err: '最短间隔为 5 分钟' };
+    if (desc.unit !== 'm' && desc.unit !== 'h') return { err: '单位无效' };
+    return { expr: '@every ' + n + desc.unit };
+  }
+  if (desc.mode === 'daily') {
+    const t = parseHHMM(desc.time);
+    if (!t) return { err: '时间格式无效' };
+    return { expr: t.m + ' ' + t.h + ' * * *' };
+  }
+  if (desc.mode === 'weekly') {
+    if (!desc.dows || desc.dows.length === 0) return { err: '至少选择一个星期几' };
+    const t = parseHHMM(desc.time);
+    if (!t) return { err: '时间格式无效' };
+    return { expr: t.m + ' ' + t.h + ' * * ' + [...desc.dows].sort((a, b) => a - b).join(',') };
+  }
+  if (desc.mode === 'monthly') {
+    const d = parseInt(desc.day, 10);
+    if (!Number.isFinite(d) || d < 1 || d > 31) return { err: '日期必须是 1-31' };
+    const t = parseHHMM(desc.time);
+    if (!t) return { err: '时间格式无效' };
+    return { expr: t.m + ' ' + t.h + ' ' + d + ' * *' };
+  }
+  return { err: '未知频率模式' };
+}
+
+function parseHHMM(s) {
+  if (!s) return null;
+  const m = s.match(/^(\d{1,2}):(\d{1,2})$/);
+  if (!m) return null;
+  const h = parseInt(m[1], 10), mm = parseInt(m[2], 10);
+  if (h < 0 || h > 23 || mm < 0 || mm > 59) return null;
+  return { h, m: mm };
+}
+
+// humanizeCron renders a cron expression as a short natural-language label
+// for the card list. Falls back to the raw expression when it doesn't match
+// a recognized shape.
+function humanizeCron(expr) {
+  const d = parseCronToFreq(expr);
+  if (!d) return expr;
+  if (d.mode === 'interval') {
+    return d.unit === 'h' ? ('每 ' + d.n + ' 小时') : ('每 ' + d.n + ' 分钟');
+  }
+  if (d.mode === 'daily') return '每天 ' + d.time;
+  if (d.mode === 'weekly') {
+    const names = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+    const set = new Set(d.dows);
+    if (d.dows.length === 5 && [1,2,3,4,5].every(x => set.has(x))) return '工作日 ' + d.time;
+    if (d.dows.length === 2 && set.has(0) && set.has(6)) return '周末 ' + d.time;
+    return d.dows.map(i => names[i]).join('、') + ' ' + d.time;
+  }
+  if (d.mode === 'monthly') return '每月 ' + d.day + ' 日 ' + d.time;
+  return expr;
+}
+
+// DOW_LABELS mirrors robfig/cron DOW indexing (0=Sunday). The picker renders
+// Monday-first for CJK convention; indices remain cron-native so generated
+// expressions need no translation.
+const DOW_LABELS = [
+  { i: 1, label: '一' }, { i: 2, label: '二' }, { i: 3, label: '三' },
+  { i: 4, label: '四' }, { i: 5, label: '五' }, { i: 6, label: '六' },
+  { i: 0, label: '日' },
+];
+
+// buildFreqPickerHtml renders the frequency tab UI. initial is an optional
+// descriptor to pre-fill (used by edit modal); when absent we default to
+// "every 1 hour" which matches the most common ask.
+function buildFreqPickerHtml(initial) {
+  const d = initial || { mode: 'interval', n: 1, unit: 'h' };
+  const tab = (mode, label) =>
+    '<button type="button" class="freq-tab' + (d.mode === mode ? ' active' : '') + '" data-mode="' + mode + '" onclick="freqSelectTab(this, \'' + mode + '\')">' + esc(label) + '</button>';
+
+  const iv = d.mode === 'interval' ? d : { n: 1, unit: 'h' };
+  const intervalHtml =
+    '<div class="freq-body" data-mode="interval" style="' + (d.mode === 'interval' ? '' : 'display:none') + '">' +
+      '<div class="freq-row">' +
+        '<span class="freq-label">每隔</span>' +
+        '<input class="freq-num" id="freq-iv-n" type="number" min="1" max="59" value="' + esc(String(iv.n)) + '" oninput="freqUpdate()">' +
+        '<select class="freq-select" id="freq-iv-unit" onchange="freqUpdate()">' +
+          '<option value="m"' + (iv.unit === 'm' ? ' selected' : '') + '>分钟</option>' +
+          '<option value="h"' + (iv.unit === 'h' ? ' selected' : '') + '>小时</option>' +
+        '</select>' +
+      '</div>' +
+      '<div class="freq-preset-row">' +
+        '<button type="button" class="freq-preset" onclick="freqIntervalPreset(5,\'m\')">每 5 分钟</button>' +
+        '<button type="button" class="freq-preset" onclick="freqIntervalPreset(15,\'m\')">每 15 分钟</button>' +
+        '<button type="button" class="freq-preset" onclick="freqIntervalPreset(30,\'m\')">每 30 分钟</button>' +
+        '<button type="button" class="freq-preset" onclick="freqIntervalPreset(1,\'h\')">每小时</button>' +
+        '<button type="button" class="freq-preset" onclick="freqIntervalPreset(6,\'h\')">每 6 小时</button>' +
+      '</div>' +
     '</div>';
 
-  let wsHtml = '<div style="margin-top:12px"><div class="modal-section-label">Workspace (optional)</div>';
+  const da = d.mode === 'daily' ? d : { time: '09:00' };
+  const dailyHtml =
+    '<div class="freq-body" data-mode="daily" style="' + (d.mode === 'daily' ? '' : 'display:none') + '">' +
+      '<div class="freq-row">' +
+        '<span class="freq-label">每天</span>' +
+        '<input class="freq-time" id="freq-daily-time" type="time" value="' + esc(da.time) + '" onchange="freqUpdate()" oninput="freqUpdate()">' +
+      '</div>' +
+      '<div class="freq-preset-row">' +
+        '<button type="button" class="freq-preset" onclick="freqDailyPreset(\'09:00\')">早上 9 点</button>' +
+        '<button type="button" class="freq-preset" onclick="freqDailyPreset(\'12:00\')">中午 12 点</button>' +
+        '<button type="button" class="freq-preset" onclick="freqDailyPreset(\'18:00\')">傍晚 6 点</button>' +
+        '<button type="button" class="freq-preset" onclick="freqDailyPreset(\'22:00\')">晚上 10 点</button>' +
+      '</div>' +
+    '</div>';
+
+  const wk = d.mode === 'weekly' ? d : { dows: [1, 2, 3, 4, 5], time: '09:00' };
+  const selectedDows = new Set(wk.dows || []);
+  const dowBtns = DOW_LABELS.map(x =>
+    '<button type="button" class="freq-dow' + (selectedDows.has(x.i) ? ' on' : '') +
+    '" data-dow="' + x.i + '" onclick="freqToggleDow(this)">' + esc(x.label) + '</button>'
+  ).join('');
+  const weeklyHtml =
+    '<div class="freq-body" data-mode="weekly" style="' + (d.mode === 'weekly' ? '' : 'display:none') + '">' +
+      '<div class="freq-row"><span class="freq-label">星期</span><div class="freq-dows" id="freq-weekly-dows">' + dowBtns + '</div></div>' +
+      '<div class="freq-row">' +
+        '<span class="freq-label">时间</span>' +
+        '<input class="freq-time" id="freq-weekly-time" type="time" value="' + esc(wk.time) + '" onchange="freqUpdate()" oninput="freqUpdate()">' +
+      '</div>' +
+      '<div class="freq-preset-row">' +
+        '<button type="button" class="freq-preset" onclick="freqWeeklyPreset([1,2,3,4,5],\'09:00\')">工作日 9 点</button>' +
+        '<button type="button" class="freq-preset" onclick="freqWeeklyPreset([0,6],\'10:00\')">周末 10 点</button>' +
+        '<button type="button" class="freq-preset" onclick="freqWeeklyPreset([1],\'09:00\')">每周一 9 点</button>' +
+      '</div>' +
+    '</div>';
+
+  const mo = d.mode === 'monthly' ? d : { day: 1, time: '09:00' };
+  let dayOpts = '';
+  for (let i = 1; i <= 31; i++) {
+    dayOpts += '<option value="' + i + '"' + (mo.day === i ? ' selected' : '') + '>' + i + '</option>';
+  }
+  const monthlyHtml =
+    '<div class="freq-body" data-mode="monthly" style="' + (d.mode === 'monthly' ? '' : 'display:none') + '">' +
+      '<div class="freq-row">' +
+        '<span class="freq-label">每月</span>' +
+        '<select class="freq-select" id="freq-monthly-day" onchange="freqUpdate()">' + dayOpts + '</select>' +
+        '<span class="freq-label">日</span>' +
+        '<input class="freq-time" id="freq-monthly-time" type="time" value="' + esc(mo.time) + '" onchange="freqUpdate()" oninput="freqUpdate()">' +
+      '</div>' +
+      '<div class="cron-tz-hint" style="margin-top:6px">如果选择 29、30、31 日，当月没有这一天时会跳过。</div>' +
+    '</div>';
+
+  return '<div class="freq-tabs" role="tablist">' +
+      tab('interval', '间隔') + tab('daily', '每天') + tab('weekly', '每周') + tab('monthly', '每月') +
+    '</div>' +
+    intervalHtml + dailyHtml + weeklyHtml + monthlyHtml;
+}
+
+// freqCurrentDescriptor reads the picker state back into a descriptor object.
+// Returns null when the picker is absent.
+function freqCurrentDescriptor() {
+  const active = document.querySelector('.freq-tabs .freq-tab.active');
+  if (!active) return null;
+  const mode = active.getAttribute('data-mode');
+  if (mode === 'interval') {
+    const n = parseInt(document.getElementById('freq-iv-n').value, 10);
+    const unit = document.getElementById('freq-iv-unit').value;
+    return { mode, n, unit };
+  }
+  if (mode === 'daily') {
+    return { mode, time: document.getElementById('freq-daily-time').value };
+  }
+  if (mode === 'weekly') {
+    const btns = document.querySelectorAll('#freq-weekly-dows .freq-dow.on');
+    const dows = [...btns].map(b => parseInt(b.getAttribute('data-dow'), 10)).sort((a, b) => a - b);
+    return { mode, dows, time: document.getElementById('freq-weekly-time').value };
+  }
+  if (mode === 'monthly') {
+    return {
+      mode,
+      day: parseInt(document.getElementById('freq-monthly-day').value, 10),
+      time: document.getElementById('freq-monthly-time').value,
+    };
+  }
+  return null;
+}
+
+function freqSelectTab(btn, mode) {
+  document.querySelectorAll('.freq-tabs .freq-tab').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  document.querySelectorAll('.freq-body').forEach(el => {
+    el.style.display = el.getAttribute('data-mode') === mode ? '' : 'none';
+  });
+  freqUpdate();
+}
+function freqToggleDow(btn) { btn.classList.toggle('on'); freqUpdate(); }
+function freqIntervalPreset(n, unit) {
+  document.getElementById('freq-iv-n').value = n;
+  document.getElementById('freq-iv-unit').value = unit;
+  freqUpdate();
+}
+function freqDailyPreset(t) {
+  document.getElementById('freq-daily-time').value = t;
+  freqUpdate();
+}
+function freqWeeklyPreset(dows, t) {
+  const set = new Set(dows);
+  document.querySelectorAll('#freq-weekly-dows .freq-dow').forEach(b => {
+    const i = parseInt(b.getAttribute('data-dow'), 10);
+    b.classList.toggle('on', set.has(i));
+  });
+  document.getElementById('freq-weekly-time').value = t;
+  freqUpdate();
+}
+
+// freqUpdate refreshes overlay._cronSchedule and the multi-run preview.
+// Advanced raw-cron input takes priority when non-empty; otherwise the
+// picker's descriptor feeds buildFreqSchedule.
+function freqUpdate() {
+  const overlay = document.querySelector('.modal-overlay');
+  if (!overlay) return;
+  const advanced = document.getElementById('freq-advanced-input');
+  if (advanced && advanced.value.trim()) {
+    overlay._cronSchedule = advanced.value.trim();
+    previewFreqSchedule(overlay._cronSchedule);
+    return;
+  }
+  const desc = freqCurrentDescriptor();
+  const { expr, err } = buildFreqSchedule(desc);
+  if (err) {
+    overlay._cronSchedule = '';
+    renderFreqPreview({ valid: false, error: err });
+    return;
+  }
+  overlay._cronSchedule = expr;
+  previewFreqSchedule(expr);
+}
+
+let _freqPreviewTimer = null;
+function previewFreqSchedule(expr) {
+  clearTimeout(_freqPreviewTimer);
+  _freqPreviewTimer = setTimeout(() => doPreviewFreq(expr), 200);
+}
+async function doPreviewFreq(expr) {
+  if (!expr) { renderFreqPreview({ valid: false, error: '' }); return; }
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/cron/preview?count=5&schedule=' + encodeURIComponent(expr), { headers });
+    const data = await r.json();
+    renderFreqPreview(data);
+  } catch (e) {
+    renderFreqPreview({ valid: false, error: 'preview error' });
+  }
+}
+
+function renderFreqPreview(data) {
+  const box = document.getElementById('freq-preview');
+  if (!box) return;
+  if (!data || !data.valid) {
+    box.className = 'freq-preview err';
+    box.innerHTML = '<div class="freq-preview-title">schedule 无效</div>' +
+      '<div style="color:var(--nz-red)">' + esc(data && data.error || '请完成频率设置') + '</div>';
+    return;
+  }
+  const runs = data.next_runs || (data.next_run ? [data.next_run] : []);
+  box.className = 'freq-preview';
+  let list = '';
+  for (let i = 0; i < runs.length; i++) {
+    const ts = runs[i];
+    const d = new Date(ts);
+    const pretty = d.toLocaleString(undefined, {
+      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
+    });
+    const rel = i === 0 ? timeAgo(ts, true) : '';
+    list += '<li><span>' + esc(pretty) + '</span>' + (rel ? '<span class="fp-rel">' + esc(rel) + '</span>' : '') + '</li>';
+  }
+  const tz = data.timezone_label || data.timezone || cronTimezoneLabel;
+  box.innerHTML =
+    '<div class="freq-preview-title">接下来会在这些时间运行</div>' +
+    '<ul class="freq-preview-list">' + list + '</ul>' +
+    (tz ? '<div class="freq-preview-tz">时区：' + esc(tz) + '</div>' : '');
+}
+
+// Toggle the advanced (raw cron expression) disclosure. Closing clears the
+// advanced input so the picker resumes control.
+function freqToggleAdvanced(btn) {
+  const body = document.getElementById('freq-advanced-body');
+  const open = body.style.display !== 'none';
+  body.style.display = open ? 'none' : '';
+  btn.classList.toggle('open', !open);
+  if (!open) {
+    const input = document.getElementById('freq-advanced-input');
+    if (input) input.focus();
+  } else {
+    const input = document.getElementById('freq-advanced-input');
+    if (input) input.value = '';
+    freqUpdate();
+  }
+}
+
+function buildWorkspaceHtml() {
+  let html = '<div style="margin-top:12px"><div class="modal-section-label">Workspace (optional)</div>';
   if (projectsData.length > 0) {
-    wsHtml += '<ul class="proj-pick" id="cron-ws-list" role="listbox" aria-label="Workspace">' +
+    html += '<ul class="proj-pick" id="cron-ws-list" role="listbox" aria-label="Workspace">' +
       projectsData.map(p =>
         '<li role="option" data-path="' + escAttr(p.path) + '" onclick="cronSelectWorkspace(this, \'' + escJs(p.path) + '\')">' +
           '<div class="pp-name">' + esc(p.name) + '</div>' +
@@ -3811,10 +4161,44 @@ function createNewCronJob() {
       '</li>' +
       '</ul>';
   }
-  wsHtml += '<div id="cron-ws-custom-form" style="' + (projectsData.length > 0 ? 'display:none;' : '') + 'margin-top:4px">' +
+  html += '<div id="cron-ws-custom-form" style="' + (projectsData.length > 0 ? 'display:none;' : '') + 'margin-top:4px">' +
     '<input id="cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" aria-label="Workspace path">' +
     '</div></div>';
+  return html;
+}
 
+// buildScheduleSection renders the frequency picker + advanced disclosure +
+// preview panel used by create and edit modals. initialRawExpr is only set
+// when an existing job's schedule doesn't match any picker shape; we surface
+// it via the advanced input so the user can still edit without losing the
+// original expression.
+function buildScheduleSection(initialDesc, initialRawExpr) {
+  const pickerHtml = buildFreqPickerHtml(initialDesc);
+  const advancedOpen = !!initialRawExpr;
+  const rawValue = initialRawExpr ? escAttr(initialRawExpr) : '';
+  return '<div class="modal-section-label">Schedule</div>' +
+    pickerHtml +
+    '<button type="button" class="freq-advanced-toggle' + (advancedOpen ? ' open' : '') + '" onclick="freqToggleAdvanced(this)">' +
+      '<span class="chev">&#9656;</span>' +
+      '<span>我要写 cron 表达式</span>' +
+    '</button>' +
+    '<div class="freq-advanced-body" id="freq-advanced-body" style="' + (advancedOpen ? '' : 'display:none') + '">' +
+      '<input id="freq-advanced-input" type="text" placeholder="@every 30m or 0 9 * * 1-5" value="' + rawValue + '" oninput="freqUpdate()">' +
+      '<div class="cron-tz-hint" style="margin-top:4px">留空则使用上面的频率选择器；填写后覆盖选择器。</div>' +
+    '</div>' +
+    '<div class="freq-preview" id="freq-preview">' +
+      '<div class="freq-preview-title">接下来会在这些时间运行</div>' +
+      '<div style="color:var(--nz-text-faint)">...</div>' +
+    '</div>';
+}
+
+function createNewCronJob() {
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay';
+  // Default: "每小时" — matches the most common ask and gives users an
+  // immediate, meaningful preview on open.
+  const scheduleHtml = buildScheduleSection({ mode: 'interval', n: 1, unit: 'h' }, '');
+  const wsHtml = buildWorkspaceHtml();
   const notifyHtml = buildCronNotifySection('', false);
 
   overlay.innerHTML =
@@ -3825,7 +4209,6 @@ function createNewCronJob() {
           '<div class="modal-section-label">Prompt</div>' +
           '<textarea id="cron-prompt" placeholder="what should this job do?" style="min-height:72px;max-height:160px" aria-label="Prompt"></textarea>' +
         '</div>' +
-        '<div class="modal-section-label">Schedule</div>' +
         scheduleHtml + wsHtml + notifyHtml +
       '</div>' +
       '<div class="modal-btns">' +
@@ -3840,6 +4223,7 @@ function createNewCronJob() {
   });
   overlay._cronSchedule = '';
   overlay._cronWorkDir = '';
+  freqUpdate();
 }
 
 // buildCronNotifySection renders the "IM 通知" section used in both the
@@ -3913,26 +4297,6 @@ function collectCronNotifyValues() {
   return out;
 }
 
-function cronSelectSchedule(el, value) {
-  const overlay = el.closest('.modal-overlay');
-  overlay._cronSchedule = value;
-  document.querySelectorAll('#cron-schedule-list li').forEach(li => {
-    li.classList.remove('selected');
-    li.setAttribute('aria-selected', 'false');
-  });
-  el.classList.add('selected');
-  el.setAttribute('aria-selected', 'true');
-  // Hide custom form and clear its state when preset selected
-  const customForm = document.getElementById('cron-custom-form');
-  if (customForm) customForm.style.display = 'none';
-  const customInput = document.getElementById('cron-schedule');
-  if (customInput) customInput.value = '';
-  const hint = document.getElementById('cron-preview-hint');
-  if (hint) { hint.textContent = ''; hint.className = 'cron-preview-hint'; }
-  const toggle = document.getElementById('cron-custom-toggle');
-  if (toggle) toggle.style.display = '';
-}
-
 function cronSelectWorkspace(el, path) {
   const overlay = el.closest('.modal-overlay');
   overlay._cronWorkDir = path;
@@ -3968,67 +4332,15 @@ function toggleCronWsCustom() {
   }
 }
 
-function toggleCronCustom() {
-  const form = document.getElementById('cron-custom-form');
-  const toggle = document.getElementById('cron-custom-toggle');
-  if (form.style.display === 'none') {
-    form.style.display = '';
-    toggle.style.display = 'none';
-    // Clear preset selection
-    const overlay = form.closest('.modal-overlay');
-    if (overlay) overlay._cronSchedule = '';
-    document.querySelectorAll('#cron-schedule-list li').forEach(li => {
-      li.classList.remove('selected');
-      li.setAttribute('aria-selected', 'false');
-    });
-    const input = document.getElementById('cron-schedule');
-    input.focus();
-    if (!input._cronPreviewBound) {
-      let previewTimer;
-      input.addEventListener('input', function() {
-        clearTimeout(previewTimer);
-        previewTimer = setTimeout(() => previewCronSchedule(input.value.trim()), 300);
-      });
-      input._cronPreviewBound = true;
-    }
-  } else {
-    form.style.display = 'none';
-    toggle.style.display = '';
-  }
-}
-
-async function previewCronSchedule(schedule) {
-  const hint = document.getElementById('cron-preview-hint');
-  if (!hint) return;
-  if (!schedule) { hint.textContent = ''; hint.className = 'cron-preview-hint'; return; }
-  try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch('/api/cron/preview?schedule=' + encodeURIComponent(schedule), { headers });
-    const data = await r.json();
-    if (data.valid) {
-      hint.className = 'cron-preview-hint ok';
-      const tz = data.timezone_label || data.timezone;
-      hint.textContent = 'next run: ' + timeAgo(data.next_run, true) + (tz ? ' (' + tz + ')' : '');
-    } else {
-      hint.className = 'cron-preview-hint err';
-      hint.textContent = data.error || 'invalid schedule';
-    }
-  } catch (e) {
-    hint.className = 'cron-preview-hint err';
-    hint.textContent = 'preview error';
-  }
-}
-
 async function doCreateCronJob() {
   const overlay = document.querySelector('.modal-overlay');
   if (!overlay) return;
-  // Resolve schedule: preset selection or custom input
-  let schedule = overlay._cronSchedule || '';
-  const customInput = document.getElementById('cron-schedule');
-  if (customInput && customInput.value.trim()) schedule = customInput.value.trim();
-  if (!schedule) { showToast('schedule is required', 'warning'); return; }
+  // Resolve schedule: picker descriptor or raw advanced input. overlay
+  // ._cronSchedule is kept in sync by freqUpdate(), but we re-collect here
+  // so the submit path always sees the latest input.
+  const advanced = document.getElementById('freq-advanced-input');
+  let schedule = (advanced && advanced.value.trim()) || overlay._cronSchedule || '';
+  if (!schedule) { showToast('请设置频率', 'warning'); return; }
   // Resolve prompt
   const promptInput = document.getElementById('cron-prompt');
   const prompt = promptInput ? promptInput.value.trim() : '';
@@ -4128,9 +4440,16 @@ function renderCronPanel() {
       const toggleBtn = j.paused
         ? '<button type="button" class="cc-btn" onclick="cronResume(\'' + escJs(j.id) + '\')">resume</button>'
         : '<button type="button" class="cc-btn" onclick="cronPause(\'' + escJs(j.id) + '\')">pause</button>';
+      // Humanize the schedule for the primary label; surface the raw
+      // expression in smaller, dimmer text for users who recognize cron
+      // syntax. Keeping both avoids losing information and makes the card
+      // self-explanatory regardless of how the job was created.
+      const human = humanizeCron(j.schedule);
+      const showRaw = human !== j.schedule;
       return '<div class="cron-card" role="button" tabindex="0" onclick="openCronSession(\'' + escJs(j.id) + '\')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronSession(\'' + escJs(j.id) + '\')}">' +
         promptBlock +
-        '<div class="cc-schedule">' + esc(j.schedule) + '</div>' +
+        '<div class="cc-human">' + esc(human) + '</div>' +
+        (showRaw ? '<div class="cc-expr">' + esc(j.schedule) + '</div>' : '') +
         '<div class="cc-meta">' + status + wdStr + notifyStr +
           (lastStr ? '<span>ran ' + lastStr + '</span>' : '') +
           (nextStr ? '<span>next ' + nextStr + '</span>' : '') +
@@ -4216,21 +4535,27 @@ async function cronDelete(id) {
 }
 
 // Edit an existing cron job. Opens a modal pre-populated with the current
-// schedule, prompt, and work_dir. Each field is independently editable;
-// only changed fields are sent in the PATCH body.
+// schedule, prompt, and work_dir. The frequency picker tries to restore the
+// job's schedule via parseCronToFreq — when it can't (e.g. user wrote a
+// custom expression by hand), we surface the raw expression in the advanced
+// disclosure so it can still be edited without loss.
 function editCronJob(id) {
   const job = cronJobs.find(j => j.id === id);
   if (!job) { showToast('job not found'); return; }
 
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  const tzHint = cronTimezoneLabel
-    ? '<div class="cron-tz-hint">schedules evaluated in ' + esc(cronTimezoneLabel) + '</div>'
-    : '';
-  // Pre-select the radio based on job.notify tri-state.
   const notifyInitial = job.notify === true ? 'on' : (job.notify === false ? 'off' : '');
   const hasOverride = !!(job.notify_platform && job.notify_chat_id);
   const notifyHtml = buildCronNotifySection(notifyInitial, hasOverride, job.notify_platform, job.notify_chat_id);
+
+  // Round-trip attempt: if the saved expression matches a picker shape we
+  // restore the picker; otherwise open the advanced disclosure with the raw
+  // expression so power users don't lose their handcrafted schedule.
+  const initialDesc = parseCronToFreq(job.schedule);
+  const initialRaw = initialDesc ? '' : (job.schedule || '');
+  const scheduleHtml = buildScheduleSection(initialDesc || { mode: 'interval', n: 1, unit: 'h' }, initialRaw);
+
   overlay.innerHTML =
     '<div class="modal" role="dialog" aria-modal="true" aria-label="Edit cron job">' +
       '<h3>Edit Cron Job</h3>' +
@@ -4239,16 +4564,11 @@ function editCronJob(id) {
           '<div class="modal-section-label">Prompt</div>' +
           '<textarea id="edit-cron-prompt" style="min-height:72px;max-height:240px" aria-label="Prompt"></textarea>' +
         '</div>' +
-        '<div style="margin-bottom:12px">' +
-          '<div class="modal-section-label">Schedule</div>' +
-          '<input id="edit-cron-schedule" placeholder="@every 30m or 0 9 * * 1-5" aria-label="Schedule">' +
-          '<div id="edit-cron-preview-hint" class="cron-preview-hint"></div>' +
-          tzHint +
-        '</div>' +
-        '<div>' +
+        scheduleHtml +
+        '<div style="margin-top:12px">' +
           '<div class="modal-section-label">Workspace (optional)</div>' +
           '<input id="edit-cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" aria-label="Workspace path">' +
-          '<div class="cron-tz-hint">leave empty to use the default workspace</div>' +
+          '<div class="cron-tz-hint">留空则使用默认 workspace</div>' +
         '</div>' +
         notifyHtml +
       '</div>' +
@@ -4262,42 +4582,16 @@ function editCronJob(id) {
 
   // Pre-populate; textarea/input .value assigns raw text safely.
   document.getElementById('edit-cron-prompt').value = job.prompt || '';
-  document.getElementById('edit-cron-schedule').value = job.schedule || '';
   document.getElementById('edit-cron-workdir').value = job.work_dir || '';
 
   overlay.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') overlay.remove();
   });
 
-  // Live preview for schedule edits — reuses the backend preview endpoint
-  // so the user sees the next run before saving.
-  const schedInput = document.getElementById('edit-cron-schedule');
-  let previewTimer;
-  const doPreview = () => {
-    const val = schedInput.value.trim();
-    const hint = document.getElementById('edit-cron-preview-hint');
-    if (!hint) return;
-    if (!val) { hint.textContent = ''; hint.className = 'cron-preview-hint'; return; }
-    fetch('/api/cron/preview?schedule=' + encodeURIComponent(val), { headers: authHeaders() })
-      .then(r => r.json())
-      .then(data => {
-        if (data.valid) {
-          hint.className = 'cron-preview-hint ok';
-          hint.textContent = 'next run: ' + timeAgo(data.next_run, true);
-        } else {
-          hint.className = 'cron-preview-hint err';
-          hint.textContent = data.error || 'invalid schedule';
-        }
-      })
-      .catch(() => {
-        hint.className = 'cron-preview-hint err';
-        hint.textContent = 'preview error';
-      });
-  };
-  schedInput.addEventListener('input', () => {
-    clearTimeout(previewTimer);
-    previewTimer = setTimeout(doPreview, 300);
-  });
+  // Seed overlay._cronSchedule so immediate save (no edits) still sends the
+  // correct schedule, then trigger preview.
+  overlay._cronSchedule = job.schedule || '';
+  freqUpdate();
 }
 
 function authHeaders() {
@@ -4314,7 +4608,10 @@ async function doEditCronJob(id) {
   if (!job) { showToast('job not found'); return; }
 
   const newPrompt = document.getElementById('edit-cron-prompt').value;
-  const newSchedule = document.getElementById('edit-cron-schedule').value.trim();
+  // Advanced raw input wins over picker; if both empty use overlay cache
+  // (seeded to job.schedule on modal open, kept fresh by freqUpdate()).
+  const advanced = document.getElementById('freq-advanced-input');
+  const newSchedule = ((advanced && advanced.value.trim()) || overlay._cronSchedule || '').trim();
   const newWorkDir = document.getElementById('edit-cron-workdir').value.trim();
 
   // Only send fields that actually changed so the server keeps fields the

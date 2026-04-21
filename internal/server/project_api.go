@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -122,9 +123,32 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Cap incoming body size so a single PUT can't pin an arbitrary amount
+	// of memory. Project configs are small (schedule + planner prompt);
+	// 64 KB is well above legitimate payloads.
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var cfg project.ProjectConfig
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		// Fixed error string: echoing err.Error() leaks the decoder's field
+		// names / offsets which help schema enumeration.
+		slog.Debug("project config: decode failed", "err", err, "project", name)
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
+		return
+	}
+
+	// Bound free-form fields that end up as args to exec.Command. An
+	// oversized PlannerPrompt would inflate the command line past ARG_MAX
+	// (Linux ~2 MB) and make Spawn fail with a cryptic E2BIG.
+	const (
+		maxPlannerPromptBytes = 8 * 1024
+		maxPlannerModelBytes  = 256
+	)
+	if len(cfg.PlannerPrompt) > maxPlannerPromptBytes {
+		http.Error(w, fmt.Sprintf("planner_prompt exceeds %d-byte limit", maxPlannerPromptBytes), http.StatusBadRequest)
+		return
+	}
+	if len(cfg.PlannerModel) > maxPlannerModelBytes {
+		http.Error(w, fmt.Sprintf("planner_model exceeds %d-byte limit", maxPlannerModelBytes), http.StatusBadRequest)
 		return
 	}
 

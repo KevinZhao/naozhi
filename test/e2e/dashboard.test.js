@@ -906,7 +906,7 @@ test.describe('Cron panel', () => {
     await ctx.close();
   });
 
-  test('cron creation modal shows schedule presets', async ({ browser }) => {
+  test('cron creation modal shows frequency picker tabs', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
@@ -915,21 +915,20 @@ test.describe('Cron panel', () => {
     await page.click('#btn-cron');
     await page.waitForSelector('.cron-detail');
     await page.click('.cron-detail button');
-    await page.waitForSelector('#cron-schedule-list');
+    await page.waitForSelector('.freq-tabs');
 
-    // Check preset labels
-    const presets = await page.$$eval('#cron-schedule-list li .pp-name', els =>
-      els.map(e => e.textContent)
-    );
-    expect(presets).toContain('Every 30 min');
-    expect(presets).toContain('Every hour');
-    expect(presets).toContain('Daily 9:00');
-    expect(presets).toContain('Weekdays 9:00');
+    // Picker exposes four frequency modes — no cron syntax visible by default.
+    const labels = await page.$$eval('.freq-tabs .freq-tab', els => els.map(e => e.textContent));
+    expect(labels).toEqual(['间隔', '每天', '每周', '每月']);
+
+    // Default tab is "interval" with "每隔 1 小时".
+    const activeMode = await page.$eval('.freq-tabs .freq-tab.active', el => el.getAttribute('data-mode'));
+    expect(activeMode).toBe('interval');
 
     await ctx.close();
   });
 
-  test('selecting schedule preset highlights it', async ({ browser }) => {
+  test('selecting a frequency tab switches the body', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
@@ -938,22 +937,21 @@ test.describe('Cron panel', () => {
     await page.click('#btn-cron');
     await page.waitForSelector('.cron-detail');
     await page.waitForTimeout(300);
-
-    // Click "New" button in cron panel header
     await page.click('.cron-detail button');
-    await page.waitForSelector('#cron-schedule-list');
+    await page.waitForSelector('.freq-tabs');
 
-    // Click "Every hour" preset
-    await page.click('#cron-schedule-list li:nth-child(2)');
-
-    // Should have highlight background
-    const bg = await page.$eval('#cron-schedule-list li:nth-child(2)', el => el.style.background);
-    expect(bg).toBeTruthy();
+    // Switch to "每天" — the daily body should become visible.
+    await page.click('.freq-tabs .freq-tab[data-mode="daily"]');
+    const visibleMode = await page.$eval('.freq-body[data-mode="daily"]', el => getComputedStyle(el).display);
+    expect(visibleMode).not.toBe('none');
+    // Interval body should be hidden.
+    const hiddenMode = await page.$eval('.freq-body[data-mode="interval"]', el => getComputedStyle(el).display);
+    expect(hiddenMode).toBe('none');
 
     await ctx.close();
   });
 
-  test('custom schedule toggle shows input', async ({ browser }) => {
+  test('advanced cron expression disclosure toggles', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
@@ -962,12 +960,15 @@ test.describe('Cron panel', () => {
     await page.click('#btn-cron');
     await page.waitForSelector('.cron-detail');
     await page.click('.cron-detail button');
-    await page.waitForSelector('#cron-custom-toggle');
+    await page.waitForSelector('.freq-advanced-toggle');
 
-    await page.click('#cron-custom-toggle');
+    // Starts hidden.
+    const initiallyHidden = await page.$eval('#freq-advanced-body', el => getComputedStyle(el).display);
+    expect(initiallyHidden).toBe('none');
 
-    const customForm = page.locator('#cron-custom-form');
-    await expect(customForm).toBeVisible();
+    await page.click('.freq-advanced-toggle');
+    const nowVisible = await page.$eval('#freq-advanced-body', el => getComputedStyle(el).display);
+    expect(nowVisible).not.toBe('none');
 
     await ctx.close();
   });

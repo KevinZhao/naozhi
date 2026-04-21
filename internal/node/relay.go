@@ -3,6 +3,7 @@ package node
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -170,7 +171,12 @@ func (r *wsRelay) connect() error {
 	}
 	wsURL += "/ws"
 
-	dialer := websocket.Dialer{HandshakeTimeout: 5 * time.Second}
+	dialer := websocket.Dialer{
+		HandshakeTimeout: 5 * time.Second,
+		// Pin TLS floor to 1.2; node-to-node traffic over wss:// must never
+		// accept legacy protocol versions regardless of Go default drift.
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	}
 	conn, _, err := dialer.Dial(wsURL, nil)
 	if err != nil {
 		return fmt.Errorf("dial %s: %w", r.node.ID, err)
@@ -347,7 +353,11 @@ func (r *wsRelay) reconnect() {
 	maxBackoff := 30 * time.Second
 
 	for {
-		t := time.NewTimer(backoff)
+		// Jitter the sleep so N relays reconnecting to the same primary after
+		// a restart don't all hit the listener at identical offsets. backoff
+		// itself keeps the doubling shape; jitter only scatters the wall-time
+		// a single attempt fires at.
+		t := time.NewTimer(jitterBackoff(backoff))
 		select {
 		case <-r.done:
 			t.Stop()
