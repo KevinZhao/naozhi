@@ -12,7 +12,7 @@ const defaultEventLogSize = 500
 // EventEntry is a simplified event record for the dashboard.
 type EventEntry struct {
 	Time       int64    `json:"time"`                  // unix ms
-	Type       string   `json:"type"`                  // init, thinking, tool_use, text, result, system, agent, task_start, task_progress (also maps task_updated), task_done
+	Type       string   `json:"type"`                  // init, thinking, tool_use, text, result, system, agent, todo, task_start, task_progress (also maps task_updated), task_done
 	Summary    string   `json:"summary,omitempty"`     // brief description
 	Cost       float64  `json:"cost,omitempty"`        // cumulative cost (result events only)
 	Detail     string   `json:"detail,omitempty"`      // fuller content for terminal view
@@ -168,7 +168,7 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 		case "user":
 			lastPrompt = e.Summary
 			sawPrompt = true
-		case "tool_use", "thinking", "agent", "task_start", "task_progress":
+		case "tool_use", "thinking", "agent", "task_start", "task_progress", "todo":
 			lastActivity = e.Summary
 			sawActivity = true
 		}
@@ -301,9 +301,15 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 			break
 		}
 		if rev == nil {
-			// Cap at l.count so a boundary exactly at the oldest entry does
-			// not over-allocate; typical streaming match count is 1-5.
-			rev = make([]EventEntry, 0, l.count-i)
+			// Typical streaming match count is 1-5; cap at a small constant
+			// so sessions with hundreds of buffered entries don't allocate
+			// a giant backing array on every notify. `append` will grow
+			// organically if the match count exceeds this hint.
+			initialCap := l.count - i
+			if initialCap > 16 {
+				initialCap = 16
+			}
+			rev = make([]EventEntry, 0, initialCap)
 		}
 		rev = append(rev, l.entries[idx])
 	}

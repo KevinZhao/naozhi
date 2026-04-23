@@ -162,7 +162,12 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 		}
 	}
 
-	// Resume registration
+	// Resume registration — bound length before regex scan to limit cost
+	// of a hostile multi-MB resume_id (declared but unvalidated elsewhere).
+	// Valid session IDs are UUIDs (36 chars); 64 gives headroom for future formats.
+	if len(p.ResumeID) > 64 {
+		return false, "", fmt.Errorf("invalid resume_id length")
+	}
 	if p.ResumeID != "" && discovery.IsValidSessionID(p.ResumeID) {
 		ws := validatedWorkspace
 		if ws == "" {

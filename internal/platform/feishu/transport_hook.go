@@ -144,8 +144,15 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			}
 		}
 
-		// Challenge verification (after authentication)
+		// Challenge verification (after authentication). Feishu challenges are
+		// short opaque tokens (typically <=32 chars); cap at 1 KiB so a malicious
+		// verified request cannot force us to reflect a multi-MB body back.
 		if envelope.Type == "url_verification" {
+			if len(envelope.Challenge) > 1024 {
+				slog.Warn("feishu challenge too long", "len", len(envelope.Challenge))
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(map[string]string{"challenge": envelope.Challenge}); err != nil {
 				slog.Warn("feishu challenge encode failed", "err", err)

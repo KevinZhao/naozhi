@@ -1084,7 +1084,8 @@ func EventEntriesFromEvent(ev Event) []EventEntry {
 				entry.Summary = block.Name
 				entry.Tool = block.Name
 				entry.Detail = formatToolDetail(block)
-				if block.Name == "Agent" {
+				switch block.Name {
+				case "Agent":
 					inp := parseAgentInput(block.Input)
 					entry.Type = "agent"
 					entry.Subagent = inp.SubagentType
@@ -1095,6 +1096,13 @@ func EventEntriesFromEvent(ev Event) []EventEntry {
 					entry.Summary = TruncateRunes(inp.Description, 120)
 					entry.Background = inp.RunInBackground
 					entry.ToolUseID = block.ID
+				case "TodoWrite":
+					if todos, ok := ParseTodos(block.Input); ok {
+						entry.Type = "todo"
+						entry.Tool = "TodoWrite"
+						entry.Summary = TodosSummary(todos)
+						entry.Detail = TodosDetailJSON(todos)
+					}
 				}
 			case "text":
 				entry.Type = "text"

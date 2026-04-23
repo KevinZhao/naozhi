@@ -158,6 +158,18 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 		http.Error(w, fmt.Sprintf("planner_prompt exceeds %d-byte limit", maxPlannerPromptBytes), http.StatusBadRequest)
 		return
 	}
+	// Reject control characters (null, CR, LF, other <0x20 except tab).
+	// A null byte would silently truncate the argv on Linux's execve, and
+	// log injection via raw \n/\r into NDJSON lines corrupts the shim
+	// protocol (one line = one message). Tab (0x09) is allowed because
+	// prompts sometimes indent examples.
+	for i := 0; i < len(cfg.PlannerPrompt); i++ {
+		c := cfg.PlannerPrompt[i]
+		if c == 0 || (c < 0x20 && c != '\t') || c == 0x7f {
+			http.Error(w, "planner_prompt contains invalid control characters", http.StatusBadRequest)
+			return
+		}
+	}
 	if len(cfg.PlannerModel) > maxPlannerModelBytes {
 		http.Error(w, fmt.Sprintf("planner_model exceeds %d-byte limit", maxPlannerModelBytes), http.StatusBadRequest)
 		return

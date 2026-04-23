@@ -951,15 +951,45 @@ function appendEvents(events) {
 // Event types that are tracked in the running banner but never rendered
 // as a chat bubble in the events stream. Kept as a single source of truth
 // so appendEvents / onHistory / preview-poll stay in sync.
+// NOTE: 'todo' is intentionally NOT in this set — TodoWrite updates are
+// rendered as their own chat bubbles via renderTodoList below.
 const INTERNAL_EVENT_TYPES = new Set(['tool_use','result','agent','task_start','task_progress','task_done']);
 function isInternalEvent(e) { return e && INTERNAL_EVENT_TYPES.has(e.type); }
+
+// renderTodoList parses the JSON todos payload stored on EventEntry.detail and
+// emits a checklist block. Falls back to the summary line when detail is
+// malformed so a parse failure never produces an empty bubble.
+function renderTodoList(detail, summary) {
+  let todos = null;
+  if (detail) {
+    try { todos = JSON.parse(detail); } catch (_) { todos = null; }
+  }
+  if (!Array.isArray(todos) || todos.length === 0) {
+    return esc(summary || '\u{1f4cb}');
+  }
+  const header = esc(summary || '\u{1f4cb} Todos');
+  const items = todos.map(t => {
+    const status = (t && t.status) || 'pending';
+    let mark = '\u2610'; // ☐
+    let cls = 'todo-pending';
+    let text = (t && t.content) || '';
+    if (status === 'completed') { mark = '\u2705'; cls = 'todo-done'; }
+    else if (status === 'in_progress') {
+      mark = '\u25b6';
+      cls = 'todo-active';
+      if (t && t.activeForm) text = t.activeForm;
+    }
+    return '<li class="todo-item ' + cls + '"><span class="todo-mark">' + mark + '</span><span class="todo-text">' + esc(text) + '</span></li>';
+  }).join('');
+  return '<div class="todo-summary">' + header + '</div><ul class="todo-list">' + items + '</ul>';
+}
 
 function eventHtml(e) {
   if (isInternalEvent(e) || e.type === 'thinking') return '';
   // Filter out Claude Code system XML injected as user messages
   const raw = e.detail || e.summary || '';
   if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return '';
-  const icons = {init:'\u2699',system:'\u2699',user:'\u{1f464}',text:'\u2726'};
+  const icons = {init:'\u2699',system:'\u2699',user:'\u{1f464}',text:'\u2726',todo:'\u{1f4cb}'};
   const icon = icons[e.type] || '';
 
   let content = '';
@@ -970,6 +1000,8 @@ function eventHtml(e) {
     // Strip redundant "[+N image(s)]" suffix when thumbnails are present
     if (e.images && e.images.length > 0) raw = raw.replace(/ \[\+\d+ image\(s\)\]$/, '');
     content = renderMd(raw);
+  } else if (e.type === 'todo') {
+    content = renderTodoList(e.detail, e.summary);
   } else {
     content = esc(e.detail || e.summary || e.type);
   }

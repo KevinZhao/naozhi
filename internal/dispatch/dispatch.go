@@ -401,6 +401,12 @@ func (d *Dispatcher) sendAndReply(
 		case errors.Is(err, cli.ErrTotalTimeout):
 			d.watchdogTotalKills.Add(1)
 			errMsg = fmt.Sprintf("⏱️ 处理超时（总耗时超过 %s），请拆分为更小的任务。", formatChineseDuration(d.totalTimeout))
+		case errors.Is(err, cli.ErrProcessExited):
+			// Subprocess died mid-turn. The next user message triggers
+			// GetOrCreate to spawn a fresh process transparently; tell
+			// the user to resend (do NOT claim "already reconnected" —
+			// the reconnect happens on their next message).
+			errMsg = "进程意外退出，请重新发送消息，系统会自动重启会话。"
 		default:
 			errMsg = "处理失败，请发送 /new 重置后重试。"
 		}
@@ -515,6 +521,12 @@ type replyTracker struct {
 	done          chan struct{} // closed when the owning turn completes; exits editLoop
 	linesMu       sync.Mutex    // guards statusLines
 	statusLines   []string      // pre-allocated capped ring; joined lazily
+
+	// todoMu guards lastTodoText so the goroutine spawned by onEvent's
+	// TodoWrite branch de-duplicates identical checklists (common when
+	// Claude Code re-emits the same list after a no-op edit).
+	todoMu       sync.Mutex
+	lastTodoText string
 }
 
 // getThinkingMsgID returns the id or "" if not yet set.
@@ -545,6 +557,29 @@ func newIMEventTracker(ctx context.Context, p platform.Platform, chatID string) 
 	return t
 }
 
+// sendTodoMessage posts the rendered checklist as a standalone Reply. Identical
+// consecutive checklists are suppressed so repeated TodoWrite calls that didn't
+// change anything don't spam the chat. Uses an independent bounded ctx so a
+// hung platform call can't outlive the turn.
+func (t *replyTracker) sendTodoMessage(text string) {
+	if text == "" {
+		return
+	}
+	t.todoMu.Lock()
+	if t.lastTodoText == text {
+		t.todoMu.Unlock()
+		return
+	}
+	t.lastTodoText = text
+	t.todoMu.Unlock()
+
+	rctx, cancel := context.WithTimeout(t.ctx, 15*time.Second)
+	defer cancel()
+	if _, err := t.p.Reply(rctx, platform.OutgoingMessage{ChatID: t.chatID, Text: text}); err != nil {
+		slog.Debug("todo reply failed", "chat_id", t.chatID, "err", err)
+	}
+}
+
 // stop signals the editLoop goroutine to exit. Safe to call multiple times.
 func (t *replyTracker) stop() {
 	select {
@@ -555,6 +590,15 @@ func (t *replyTracker) stop() {
 }
 
 func (t *replyTracker) onEvent(ev cli.Event) {
+	// TodoWrite gets its own chat bubble: send as a standalone Reply so it
+	// isn't overwritten by the next banner edit, and so platforms that don't
+	// support interim edits (Weixin) still surface the checklist — the task
+	// list is terminal output, not a transient "thinking" banner.
+	if text, ok := extractTodoMessage(ev); ok {
+		go t.sendTodoMessage(text)
+		return
+	}
+
 	if !platform.SupportsInterimMessages(t.p) {
 		return
 	}

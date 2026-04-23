@@ -97,7 +97,12 @@ func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Requ
 	// Use the sniffed MIME (not the client-supplied header) as the hint handed
 	// to the transcriber. This prevents a caller from mislabelling content to
 	// coerce ffmpeg dispatch into a format that doesn't match the actual bytes.
+	// Normalize application/ogg → audio/ogg so transcribe's streaming path
+	// can pick up OGG uploads without spawning ffmpeg unnecessarily.
 	mimeType := detected
+	if mimeType == "application/ogg" {
+		mimeType = "audio/ogg"
+	}
 	text, err := h.transcriber.Transcribe(r.Context(), data, mimeType)
 	if err != nil {
 		slog.Warn("transcribe failed", "err", err, "mime", mimeType, "declared", declaredMIME, "size", len(data))

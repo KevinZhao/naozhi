@@ -280,9 +280,13 @@ func (f *Feishu) Stop() error {
 	if cancel != nil {
 		cancel()
 		// SDK's Start() may block indefinitely (select{}); don't wait forever.
+		// Use NewTimer + defer Stop so the fast path (SDK exits cleanly)
+		// doesn't leave a 5s timer goroutine parked until the timeout elapses.
+		timer := time.NewTimer(5 * time.Second)
 		select {
 		case <-done:
-		case <-time.After(5 * time.Second):
+			timer.Stop()
+		case <-timer.C:
 			slog.Warn("feishu websocket stop timed out")
 		}
 	}

@@ -56,6 +56,11 @@ const (
 	// this budget — on timeout the iteration moves on (SIGUSR2 fallback
 	// for orphan shims, skip for drifted shims, log+continue for spawn).
 	shimReconnectTimeout = 15 * time.Second
+
+	// knownIDsSaveInterval throttles knownIDs fsync to limit disk I/O.
+	// A crash losing up to this much session-ID tracking costs one
+	// discovery rescan cycle. Shared between Cleanup and saveIfDirty.
+	knownIDsSaveInterval = 5 * time.Minute
 )
 
 // Router manages session key -> ManagedSession mapping.
@@ -141,15 +146,14 @@ func chatKeyFor(key string) string {
 }
 
 // cliNameDefault returns the CLI display name from the wrapper, or empty if no wrapper.
+// Kept as an internal helper (not inlined into CLIName) because snapshot
+// builders in this file already route through it.
 func (r *Router) cliNameDefault() string {
 	if r.wrapper != nil {
 		return r.wrapper.CLIName
 	}
 	return ""
 }
-
-// CLIName exposes the wrapper's CLI display name for status endpoints.
-func (r *Router) CLIName() string { return r.cliNameDefault() }
 
 // cliVersionDefault returns the CLI version from the wrapper, or empty if no wrapper.
 func (r *Router) cliVersionDefault() string {
@@ -158,6 +162,9 @@ func (r *Router) cliVersionDefault() string {
 	}
 	return ""
 }
+
+// CLIName exposes the wrapper's CLI display name for status endpoints.
+func (r *Router) CLIName() string { return r.cliNameDefault() }
 
 // CLIVersion exposes the wrapper's detected CLI version for status endpoints.
 func (r *Router) CLIVersion() string { return r.cliVersionDefault() }
@@ -741,11 +748,10 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		}
 	} else {
 		// Guard against unbounded exempt session growth (e.g., many projects)
-		const maxExempt = maxExemptSessions
 		exemptCount := r.countExempt()
-		if exemptCount >= maxExempt {
+		if exemptCount >= maxExemptSessions {
 			r.mu.Unlock()
-			return nil, fmt.Errorf("%w (%d)", ErrMaxExemptSessions, maxExempt)
+			return nil, fmt.Errorf("%w (%d)", ErrMaxExemptSessions, maxExemptSessions)
 		}
 	}
 
@@ -1264,14 +1270,18 @@ func (r *Router) Cleanup() {
 		}
 	}
 	// knownIDs is append-only and relatively stable. Throttle its fsync to
-	// once per 5 minutes to reduce disk I/O — a crash losing up to 5 minutes
-	// of session-ID tracking only costs one discovery rescan cycle.
-	const knownIDsSaveInterval = 5 * time.Minute
+	// bound disk I/O (see knownIDsSaveInterval constant). Commit
+	// knownIDsSavedAt optimistically here — still under r.mu — so a
+	// concurrent saveIfDirty tick on the neighboring interval boundary
+	// sees the updated timestamp and skips, preventing two goroutines
+	// from racing into saveKnownIDs → WriteFileAtomic on the same .tmp
+	// path (the "known_ids.json.tmp" torn-write hazard).
 	if r.knownIDsDirty && now.Sub(r.knownIDsSavedAt) >= knownIDsSaveInterval {
 		knownIDsCopy = make(map[string]bool, len(r.knownIDs))
 		for id := range r.knownIDs {
 			knownIDsCopy[id] = true
 		}
+		r.knownIDsSavedAt = now
 	}
 
 	r.mu.Unlock()
@@ -1302,13 +1312,15 @@ func (r *Router) Cleanup() {
 		}
 	}
 	if knownIDsCopy != nil {
+		// knownIDsSavedAt was committed under r.mu above (pre-save) to
+		// gate concurrent saveIfDirty. On success we only clear the dirty
+		// flag; on failure we leave it set so the next tick retries,
+		// accepting one extra interval of delay in exchange for no
+		// torn-write race.
 		if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
 			slog.Warn("periodic known IDs save failed", "err", err)
 		} else {
-			// Only clear dirty flag if no concurrent trackSessionID added new IDs.
-			// knownIDs is append-only, so length comparison is sufficient.
 			r.mu.Lock()
-			r.knownIDsSavedAt = time.Now()
 			if len(r.knownIDs) == len(knownIDsCopy) {
 				r.knownIDsDirty = false
 			}
@@ -1358,9 +1370,12 @@ func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 }
 
 // saveIfDirty saves the session store if any mutations have occurred since the last save.
+// Also persists knownIDs on the same throttle as Cleanup so crashes between
+// Cleanup ticks do not discard newly discovered session IDs.
 func (r *Router) saveIfDirty() {
 	r.mu.Lock()
-	if !r.storeDirty && !r.wsOverridesDirty {
+	knownIDsDue := r.knownIDsDirty && time.Since(r.knownIDsSavedAt) >= knownIDsSaveInterval
+	if !r.storeDirty && !r.wsOverridesDirty && !knownIDsDue {
 		r.mu.Unlock()
 		return
 	}
@@ -1377,6 +1392,17 @@ func (r *Router) saveIfDirty() {
 		for k, v := range r.workspaceOverrides {
 			wsOverridesCopy[k] = v
 		}
+	}
+	var knownIDsCopy map[string]bool
+	if knownIDsDue {
+		knownIDsCopy = make(map[string]bool, len(r.knownIDs))
+		for id := range r.knownIDs {
+			knownIDsCopy[id] = true
+		}
+		// Commit savedAt under r.mu so a concurrent Cleanup tick
+		// re-checking the throttle skips — both paths share the same
+		// .tmp target file and torn writes cannot be recovered.
+		r.knownIDsSavedAt = time.Now()
 	}
 	storePath := r.storePath
 	snapshotGen := r.storeGen
@@ -1402,6 +1428,18 @@ func (r *Router) saveIfDirty() {
 			r.mu.Lock()
 			if r.wsOverridesGen == snapshotWsGen {
 				r.wsOverridesDirty = false
+			}
+			r.mu.Unlock()
+		}
+	}
+	if knownIDsCopy != nil {
+		// savedAt committed pre-save; only toggle dirty on success.
+		if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
+			slog.Warn("periodic known IDs save failed", "err", err)
+		} else {
+			r.mu.Lock()
+			if len(r.knownIDs) == len(knownIDsCopy) {
+				r.knownIDsDirty = false
 			}
 			r.mu.Unlock()
 		}

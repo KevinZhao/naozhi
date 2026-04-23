@@ -835,6 +835,9 @@ func (s *Scheduler) TriggerNow(id string) error {
 		// double-execution when TriggerNow overlaps with a scheduled tick.
 		// Guard: a concurrent DeleteJob may remove the entry between our Unlock
 		// and this lookup, causing Entry() to return a zero-value with nil WrappedJob.
+		// robfig/cron EntryIDs are a monotonically incrementing int and never
+		// reused within a process; this rules out the "stale entryID returns a
+		// different job's entry" hazard.
 		entry := s.cron.Entry(entryID)
 		if entry.WrappedJob != nil {
 			go func() {
@@ -1001,6 +1004,17 @@ func (s *Scheduler) execute(j *Job) {
 			if ok {
 				s.registerStub(&j2)
 			}
+		}
+		// Re-check job existence after Reset: a concurrent DeleteJobByID could
+		// have run between the pre-execute snapshot and Reset, in which case
+		// GetOrCreate below would leak a brand-new CLI process tied to an
+		// orphan "cron:<id>" key until TTL cleanup.
+		s.mu.RLock()
+		_, stillExists := s.jobs[jobID]
+		s.mu.RUnlock()
+		if !stillExists {
+			log.Info("cron job deleted mid-execute, skipping GetOrCreate")
+			return
 		}
 	}
 

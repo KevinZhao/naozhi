@@ -735,8 +735,18 @@ func WaitAndCleanup(ctx context.Context, pid int, procStartTime uint64, claudeDi
 	}
 	if cwd != "" && sessionID != "" && IsValidSessionID(sessionID) {
 		encodedCWD := strings.ReplaceAll(cwd, "/", "-")
-		lockDir := filepath.Join(os.TempDir(), fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID)
-		_ = os.RemoveAll(lockDir)
+		tmpBase := os.TempDir()
+		lockDir := filepath.Clean(filepath.Join(tmpBase, fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID))
+		// Defense-in-depth: use filepath.Rel to verify lockDir stays
+		// strictly beneath os.TempDir(). String-prefix matching is fragile
+		// against sibling names (e.g. /tmp vs /tmp10 where the cleaned
+		// paths happen to share a prefix byte sequence) and against a
+		// lockDir that collapses to tmpBase itself.
+		if rel, err := filepath.Rel(tmpBase, lockDir); err == nil &&
+			rel != "." && rel != ".." &&
+			!strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			_ = os.RemoveAll(lockDir)
+		}
 	}
 }
 

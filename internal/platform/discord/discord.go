@@ -114,9 +114,13 @@ func (d *Discord) Stop() error {
 	}
 	done := make(chan struct{})
 	go func() { d.handlerWg.Wait(); close(done) }()
+	// NewTimer + Stop: fast path (handlers exit cleanly) must not leave a
+	// 30s timer goroutine parked until the timeout elapses.
+	timer := time.NewTimer(30 * time.Second)
 	select {
 	case <-done:
-	case <-time.After(30 * time.Second):
+		timer.Stop()
+	case <-timer.C:
 		slog.Warn("discord: timed out waiting for handler goroutines")
 	}
 	return nil
@@ -310,7 +314,15 @@ func isImageContentType(ct string) bool {
 	return false
 }
 
-var discordHTTPClient = &http.Client{Timeout: 15 * time.Second}
+// discordHTTPClient disables redirects so the CDN host allowlist cannot be
+// bypassed via a 302 to an internal address (SSRF). Discord's CDN serves
+// attachments directly and never requires cross-host redirects.
+var discordHTTPClient = &http.Client{
+	Timeout: 15 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
 
 // discordCDNHosts is the set of trusted Discord CDN domains for attachment downloads.
 var discordCDNHosts = map[string]bool{

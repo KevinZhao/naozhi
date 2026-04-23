@@ -435,6 +435,13 @@ var smartQuoteNormalizer = strings.NewReplacer(
 	"\u2019", "\"", // RIGHT SINGLE QUOTATION MARK ’
 )
 
+// maxCronPromptBytes bounds the prompt body accepted via `/cron add` so a single
+// IM message can't stuff megabytes into cron_jobs.json. The limit mirrors the
+// dashboard planner_prompt cap — anything beyond this is almost certainly a
+// cut-paste mistake, and every cron run replays the full prompt through the
+// CLI stdin, so runaway sizes multiply across invocations.
+const maxCronPromptBytes = 8 * 1024
+
 // ParseCronAdd parses the args of /cron add: "schedule" prompt
 func ParseCronAdd(args string) (schedule, prompt string, err error) {
 	args = smartQuoteNormalizer.Replace(args)
@@ -452,6 +459,9 @@ func ParseCronAdd(args string) (schedule, prompt string, err error) {
 	prompt = strings.TrimSpace(tail)
 	if prompt == "" {
 		return "", "", fmt.Errorf("prompt cannot be empty")
+	}
+	if len(prompt) > maxCronPromptBytes {
+		return "", "", fmt.Errorf("prompt too long (max %d bytes)", maxCronPromptBytes)
 	}
 	return schedule, prompt, nil
 }

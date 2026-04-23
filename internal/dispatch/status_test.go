@@ -128,6 +128,46 @@ func TestAppendStatusLine_MaxLines(t *testing.T) {
 	}
 }
 
+func TestExtractTodoMessage(t *testing.T) {
+	input, _ := json.Marshal(map[string]any{
+		"todos": []map[string]any{
+			{"content": "写测试", "status": "pending"},
+			{"content": "跑测试", "status": "in_progress", "activeForm": "正在跑测试"},
+		},
+	})
+	ev := cli.Event{
+		Type:    "assistant",
+		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "tool_use", Name: "TodoWrite", Input: input}}},
+	}
+	text, ok := extractTodoMessage(ev)
+	if !ok {
+		t.Fatal("expected ok=true")
+	}
+	if !strings.Contains(text, "☐ 写测试") || !strings.Contains(text, "▶ 正在跑测试") {
+		t.Errorf("rendered text missing expected items: %q", text)
+	}
+
+	other := cli.Event{
+		Type:    "assistant",
+		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "tool_use", Name: "Bash", Input: json.RawMessage(`{"command":"ls"}`)}}},
+	}
+	if _, ok := extractTodoMessage(other); ok {
+		t.Error("non-TodoWrite tool should not match")
+	}
+
+	empty := cli.Event{
+		Type:    "assistant",
+		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "tool_use", Name: "TodoWrite", Input: json.RawMessage(`{}`)}}},
+	}
+	if _, ok := extractTodoMessage(empty); ok {
+		t.Error("empty todos should not match")
+	}
+
+	if _, ok := extractTodoMessage(cli.Event{Type: "assistant"}); ok {
+		t.Error("nil message should not match")
+	}
+}
+
 func TestShortenPath(t *testing.T) {
 	tests := []struct {
 		input, want string

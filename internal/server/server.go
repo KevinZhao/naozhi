@@ -310,12 +310,18 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 			return context.Background()
 		},
 	}
+	agentIDs := make([]string, 0, len(agents)+1)
+	agentIDs = append(agentIDs, "general")
+	for id := range agents {
+		agentIDs = append(agentIDs, id)
+	}
 	s.sessionH = &SessionHandlers{
 		router:        router,
 		projectMgr:    opts.ProjectManager,
 		claudeDir:     claudeDir,
 		allowedRoot:   opts.AllowedRoot,
 		agents:        agents,
+		agentIDs:      agentIDs,
 		nodeAccess:    s.nodeAccess,
 		nodeCache:     s.nodeCache,
 		startedAt:     s.startedAt,

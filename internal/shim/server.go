@@ -61,6 +61,12 @@ func Run(cfg Config) error {
 			fmt.Fprintf(shimLogFile, "Run() returning at %s\n", time.Now().Format(time.RFC3339))
 		}
 		slog.Info("shim exiting")
+		// Flush + close the log file so the final "returning"/"exiting"
+		// lines survive sudden power loss or aggressive fs flush delays.
+		if shimLogFile != nil {
+			_ = shimLogFile.Sync()
+			_ = shimLogFile.Close()
+		}
 	}()
 
 	// Signal handling
@@ -648,10 +654,13 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 				}
 				return
 			}
-			// Enforce line size limit (bufio.NewReaderSize only sets buffer, not max line)
+			// Enforce line size limit (bufio.NewReaderSize only sets buffer, not max line).
+			// Disconnect on oversize lines: a misbehaving/malicious client that flood-sends
+			// large lines would otherwise burn CPU in a tight loop while holding the
+			// single-client semaphore slot — better to sever and let them reconnect.
 			if len(line) > maxClientLineBytes {
-				slog.Warn("client line too large, dropping", "size", len(line))
-				continue
+				slog.Warn("client line too large, disconnecting", "size", len(line))
+				return
 			}
 			select {
 			case lineCh <- line:
@@ -722,11 +731,15 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 
 // writeMsg writes a ServerMsg directly to a connection (used during auth/replay
 // before the client becomes the active client with async writes).
+// Enforces a 10s write deadline so a malicious or stalled client cannot pin
+// the single-client semaphore slot indefinitely by refusing to read.
 func writeMsg(conn net.Conn, msg ServerMsg) {
 	data, err := msg.MarshalLine()
 	if err != nil {
 		return
 	}
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
 	conn.Write(append(data, '\n')) //nolint:errcheck
 }
 
@@ -842,9 +855,14 @@ func (c *cliProc) closeStdin() {
 
 func (c *cliProc) waitOrKill(timeout time.Duration) {
 	c.closeStdin()
+	// Use time.NewTimer + defer Stop instead of time.After: the fast-path
+	// (c.exited fires first) would otherwise leave a parked timer goroutine
+	// until the full timeout elapses. Called up to 3 times per shutdown.
+	t := time.NewTimer(timeout)
+	defer t.Stop()
 	select {
 	case <-c.exited:
-	case <-time.After(timeout):
+	case <-t.C:
 		c.kill()
 	}
 }

@@ -30,6 +30,27 @@ func formatEventLine(ev cli.Event) string {
 	return ""
 }
 
+// extractTodoMessage returns the rendered checklist text for a TodoWrite
+// tool_use block, or ("", false) if the event carries no TodoWrite update.
+// Only the first TodoWrite block in the event is honoured — Claude never
+// emits multiple TodoWrite calls in a single assistant message.
+func extractTodoMessage(ev cli.Event) (string, bool) {
+	if ev.Message == nil {
+		return "", false
+	}
+	for _, block := range ev.Message.Content {
+		if block.Type != "tool_use" || block.Name != "TodoWrite" {
+			continue
+		}
+		todos, ok := cli.ParseTodos(block.Input)
+		if !ok {
+			return "", false
+		}
+		return cli.TodosMarkdown(todos), true
+	}
+	return "", false
+}
+
 // Per-tool input structs — zero-alloc alternative to generic map decoding.
 type readInput struct {
 	FilePath string `json:"file_path"`
@@ -52,6 +73,11 @@ type globInput struct {
 type agentInput struct {
 	Description string `json:"description"`
 }
+
+// TodoWrite is intentionally NOT handled here: dispatch.go onEvent sends the
+// checklist as a standalone Reply so it gets its own chat bubble instead of
+// being overwritten by the next banner edit. The status banner falls through
+// to the generic "🔧 TodoWrite" marker below, which is a fine placeholder.
 
 func formatToolUse(name string, input json.RawMessage) string {
 	switch name {
@@ -134,7 +160,11 @@ func appendStatusLine(lines []string, line string) []string {
 		lines = append(lines, line)
 	}
 	if len(lines) > maxStatusLines {
-		lines = lines[len(lines)-maxStatusLines:]
+		// copy-to-front instead of reslicing so the backing array's head isn't
+		// permanently abandoned; a long turn would otherwise leak backing
+		// capacity each time we drop a head entry, forcing eventual realloc.
+		copy(lines, lines[len(lines)-maxStatusLines:])
+		lines = lines[:maxStatusLines]
 	}
 	return lines
 }

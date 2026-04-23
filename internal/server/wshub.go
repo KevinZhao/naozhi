@@ -861,7 +861,7 @@ func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
 		Result: result,
 		Error:  errMsg,
 	}
-	data, err := json.Marshal(msg)
+	data, err := marshalPooled(msg)
 	if err != nil {
 		return
 	}
@@ -1057,7 +1057,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 // PurgeNodeSubscriptions notifies all browser clients that a node disconnected,
 // so they can deselect stale sessions.
 func (h *Hub) PurgeNodeSubscriptions(nodeID string) {
-	data, err := json.Marshal(node.ServerMsg{Type: "error", Node: nodeID, Error: "node disconnected"})
+	data, err := marshalPooled(node.ServerMsg{Type: "error", Node: nodeID, Error: "node disconnected"})
 	if err != nil {
 		return
 	}

@@ -36,6 +36,11 @@ type Manager struct {
 	maxBufBytes     int64
 	maxShims        int
 	naozhiBin       string // path to naozhi binary for spawning shim subprocess
+	// shimEnv is the filtered environment handed to every spawned shim,
+	// computed once at Manager construction. The process env does not change
+	// at runtime, so recomputing filterShimEnv(os.Environ()) on every spawn
+	// would redo the same O(env × prefixes) scan for no benefit.
+	shimEnv []string
 
 	mu           sync.Mutex
 	shims        map[string]*ShimHandle // key → active shim handle
@@ -113,6 +118,7 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 		maxBufBytes:     cfg.MaxBufBytes,
 		maxShims:        cfg.MaxShims,
 		naozhiBin:       naozhiBin,
+		shimEnv:         filterShimEnv(os.Environ()),
 		shims:           make(map[string]*ShimHandle),
 	}, nil
 }
@@ -163,7 +169,7 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 	// Context is only used for the startup handshake timeout below.
 	cmd := exec.Command(m.naozhiBin, args...)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Env = filterShimEnv(os.Environ())
+	cmd.Env = m.shimEnv
 
 	// Remove stale socket from a previous shim that didn't clean up
 	// (e.g., killed during post-CLI-exit wait period).
@@ -477,7 +483,7 @@ func (m *Manager) Discover() ([]State, error) {
 	return states, nil
 }
 
-// SendShimMsg sends a ClientMsg over the handle's connection.
+// SendMsg sends a ClientMsg over the handle's connection.
 func (h *ShimHandle) SendMsg(msg ClientMsg) error {
 	data, err := json.Marshal(msg)
 	if err != nil {
@@ -651,6 +657,11 @@ func moveToShimsCgroup(shimPID, cliPID int) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sudo", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
+		// Truncate busctl's combined stdout+stderr so repeated failures
+		// can't flood the journal with D-Bus diagnostic payloads.
+		if len(out) > 512 {
+			out = append(out[:512:512], []byte("...(truncated)")...)
+		}
 		slog.Warn("moveToShimsCgroup: systemd scope failed, trying direct cgroup — zero-downtime restart may not survive service restart",
 			"pid", shimPID, "err", err, "output", string(out))
 		moveToShimsCgroupDirect(shimPID)

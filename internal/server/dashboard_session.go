@@ -28,8 +28,12 @@ type SessionHandlers struct {
 	claudeDir   string
 	allowedRoot string
 	agents      map[string]session.AgentOpts
-	nodeAccess  NodeAccessor
-	nodeCache   *node.CacheManager
+	// agentIDs is the precomputed list of agent IDs surfaced in /api/sessions.
+	// Built once at construction (agents map is immutable after startup) so the
+	// dashboard poll handler avoids allocating + filling this slice on each hit.
+	agentIDs   []string
+	nodeAccess NodeAccessor
+	nodeCache  *node.CacheManager
 
 	// Static status fields (immutable after construction)
 	startedAt     time.Time
@@ -134,18 +138,18 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	// Include available agent IDs for dashboard session creation
-	agentIDs := make([]string, 0, len(h.agents)+1)
-	agentIDs = append(agentIDs, "general")
-	for id := range h.agents {
-		agentIDs = append(agentIDs, id)
-	}
-	stats["agents"] = agentIDs
+	// Include available agent IDs for dashboard session creation. Cached at
+	// construction (agents map is immutable after startup) to skip the make +
+	// fill on every poll. See SessionHandlers.agentIDs.
+	stats["agents"] = h.agentIDs
 
-	// Include project list for dashboard sidebar rendering
+	// Include project list for dashboard sidebar rendering.
+	// Pre-allocate the outer slice so the append loop doesn't trigger log(N)
+	// growth reallocs on projects-heavy dashboards.
 	var projectList []map[string]any
 	if h.projectMgr != nil {
 		projects := h.projectMgr.All()
+		projectList = make([]map[string]any, 0, len(projects))
 		for _, p := range projects {
 			projectList = append(projectList, map[string]any{
 				"name":           p.Name,
@@ -472,7 +476,7 @@ func (h *SessionHandlers) loadHistorySessions() []discovery.RecentSession {
 
 	// Resolve project names in batch.
 	if h.projectMgr != nil && len(all) > 0 {
-		var workspaces []string
+		workspaces := make([]string, 0, len(all))
 		for _, rs := range all {
 			workspaces = append(workspaces, rs.Workspace)
 		}
