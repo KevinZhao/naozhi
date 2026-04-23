@@ -7,8 +7,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // State represents the persistent state of a running shim, stored as JSON.
@@ -54,6 +57,15 @@ func WriteStateFile(path string, state State) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("write temp state: %w", err)
 	}
+	// Fsync the payload before rename so a crash between data write and
+	// rename cannot surface as a zero-byte file that replaces the previous
+	// good state. This file is written infrequently (at connect/disconnect
+	// lifecycle events) so the fsync cost is negligible.
+	if err := f.Sync(); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return fmt.Errorf("sync temp state: %w", err)
+	}
 	if err := f.Close(); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("close temp state: %w", err)
@@ -62,11 +74,38 @@ func WriteStateFile(path string, state State) error {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename state: %w", err)
 	}
+	// Fsync the parent directory so the rename is durable on XFS and similar
+	// filesystems where a rename's directory entry is not automatically
+	// persisted. Without this, a power cut right after Rename could leave
+	// shim state invisible after reboot — reconnect would fail and live
+	// sessions would appear dead until a manual cleanup.
+	if err := osutil.SyncDir(dir); err != nil {
+		// Soft failure: data is already on disk; the only loss is
+		// durability of the directory entry on crash. Logged so ops can
+		// correlate if a reboot-time shim loss appears.
+		slog.Debug("shim state: fsync dir failed", "dir", dir, "err", err)
+	}
 	return nil
 }
 
 // ReadStateFile reads a shim state from the given path.
+// Refuses to read if the file is group- or world-accessible — the JSON
+// embeds a base64 auth token that grants direct socket attachment, so a
+// drifted permission (e.g., a backup tool that re-permed the directory)
+// would leak authority. Mirrors the cookie_secret protection pattern.
 func ReadStateFile(path string) (State, error) {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return State{}, err
+	}
+	if perm := fi.Mode().Perm(); perm&0o077 != 0 {
+		slog.Warn("shim state file has overly permissive mode — refusing to read",
+			"path", path, "mode", fmt.Sprintf("%#o", perm))
+		// Do not echo the path in the error string — the error surfaces
+		// through Reconnect and can land in HTTP responses; the full path
+		// is already captured in the slog above for operator triage.
+		return State{}, fmt.Errorf("shim state has insecure permissions %#o", perm)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return State{}, err

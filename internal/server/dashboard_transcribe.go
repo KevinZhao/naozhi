@@ -16,7 +16,7 @@ const transcribeSemCap = 3
 // TranscribeHandler handles the audio transcription API endpoint.
 type TranscribeHandler struct {
 	transcriber       transcribe.Service
-	transcribeLimiter *ipLimiter  // per-IP transcribe rate limiter (5/min)
+	transcribeLimiter *ipLimiter    // per-IP transcribe rate limiter (5/min)
 	sem               chan struct{} // concurrency limiter (capacity transcribeSemCap)
 }
 
@@ -72,8 +72,10 @@ func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	mimeType := fh.Header.Get("Content-Type")
-	switch mimeType {
+	// Step 1: allowlist the client-supplied Content-Type so obviously wrong
+	// uploads are rejected cheaply before we run DetectContentType.
+	declaredMIME := fh.Header.Get("Content-Type")
+	switch declaredMIME {
 	case "audio/ogg", "audio/mpeg", "audio/wav", "audio/flac", "audio/mp4",
 		"audio/amr", "audio/webm", "audio/aac", "audio/x-m4a",
 		"video/mp4", "video/webm": // some browsers tag voice memos as video
@@ -81,15 +83,24 @@ func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "unsupported audio format", http.StatusBadRequest)
 		return
 	}
-	// Magic byte validation: reject files whose actual content doesn't match audio/video.
+	// Step 2: magic-byte validation. http.DetectContentType returns
+	// "application/ogg" for legitimate OGG streams (Feishu voice); accept that
+	// too. The transcribe package runs a stricter DetectFormat before dispatch
+	// so ffmpeg never sees content that lacks the right magic.
 	detected := http.DetectContentType(data)
-	if !strings.HasPrefix(detected, "audio/") && !strings.HasPrefix(detected, "video/") && detected != "application/octet-stream" {
+	if !strings.HasPrefix(detected, "audio/") &&
+		!strings.HasPrefix(detected, "video/") &&
+		detected != "application/ogg" {
 		http.Error(w, "file content is not audio", http.StatusBadRequest)
 		return
 	}
+	// Use the sniffed MIME (not the client-supplied header) as the hint handed
+	// to the transcriber. This prevents a caller from mislabelling content to
+	// coerce ffmpeg dispatch into a format that doesn't match the actual bytes.
+	mimeType := detected
 	text, err := h.transcriber.Transcribe(r.Context(), data, mimeType)
 	if err != nil {
-		slog.Warn("transcribe failed", "err", err, "mime", mimeType, "size", len(data))
+		slog.Warn("transcribe failed", "err", err, "mime", mimeType, "declared", declaredMIME, "size", len(data))
 		http.Error(w, "transcription failed", http.StatusInternalServerError)
 		return
 	}

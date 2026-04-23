@@ -12,6 +12,31 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 )
 
+// Bounds for notify target fields set by authenticated dashboard users. The
+// platform must match a known IM provider to avoid silent notification drops
+// (misspelt names used to fall through); chat_id length is capped so a user
+// cannot stuff megabytes into cron_jobs.json via a single API call.
+var validNotifyPlatforms = map[string]struct{}{
+	"":        {}, // empty = fall back to cron.notify_default
+	"feishu":  {},
+	"slack":   {},
+	"discord": {},
+	"weixin":  {},
+}
+
+const maxNotifyChatIDLen = 256
+
+// validateNotifyTarget enforces platform allowlist + chat_id size bound.
+func validateNotifyTarget(platform, chatID string) error {
+	if _, ok := validNotifyPlatforms[platform]; !ok {
+		return fmt.Errorf("invalid notify_platform")
+	}
+	if len(chatID) > maxNotifyChatIDLen {
+		return fmt.Errorf("notify_chat_id too long")
+	}
+	return nil
+}
+
 // CronHandlers groups the cron job management API endpoints.
 type CronHandlers struct {
 	scheduler   *cron.Scheduler
@@ -131,7 +156,11 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 	if req.WorkDir != "" {
 		validated, err := validateWorkspace(req.WorkDir, h.allowedRoot)
 		if err != nil {
-			http.Error(w, "work_dir: "+err.Error(), http.StatusForbidden)
+			// Avoid echoing the raw validation detail (which can reveal the
+			// allowedRoot boundary or path shape); operators can diagnose from
+			// server logs if needed.
+			slog.Debug("cron work_dir validation failed", "err", err)
+			http.Error(w, "invalid work_dir", http.StatusForbidden)
 			return
 		}
 		req.WorkDir = validated
@@ -148,6 +177,11 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if err := validateNotifyTarget(req.NotifyPlatform, req.NotifyChatID); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	job := &cron.Job{
 		Schedule:       req.Schedule,
 		Prompt:         req.Prompt,
@@ -162,7 +196,11 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		Paused:         req.Prompt == "", // auto-pause when no prompt
 	}
 	if err := h.scheduler.AddJob(job); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		// robfig/cron parser errors can mention internal field offsets and
+		// parsed expressions; log the full detail for operator triage but
+		// return a sanitized message to the dashboard client.
+		slog.Warn("cron AddJob rejected", "err", err, "schedule", job.Schedule)
+		http.Error(w, "invalid schedule or job fields", http.StatusBadRequest)
 		return
 	}
 
@@ -186,9 +224,10 @@ func (h *CronHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 	j, err := h.scheduler.DeleteJobByID(id)
 	if err != nil {
 		if errors.Is(err, cron.ErrJobNotFound) {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			http.Error(w, "job not found", http.StatusNotFound)
 		} else {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			slog.Debug("cron delete failed", "err", err)
+			http.Error(w, "delete failed", http.StatusBadRequest)
 		}
 		return
 	}
@@ -216,11 +255,12 @@ func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.scheduler.PauseJobByID(req.ID); err != nil {
 		switch {
 		case errors.Is(err, cron.ErrJobNotFound):
-			http.Error(w, err.Error(), http.StatusNotFound)
+			http.Error(w, "job not found", http.StatusNotFound)
 		case errors.Is(err, cron.ErrJobAlreadyPaused):
-			http.Error(w, err.Error(), http.StatusConflict)
+			http.Error(w, "job already paused", http.StatusConflict)
 		default:
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			slog.Debug("cron pause failed", "err", err)
+			http.Error(w, "pause failed", http.StatusBadRequest)
 		}
 		return
 	}
@@ -248,11 +288,12 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	if _, err := h.scheduler.ResumeJobByID(req.ID); err != nil {
 		switch {
 		case errors.Is(err, cron.ErrJobNotFound):
-			http.Error(w, err.Error(), http.StatusNotFound)
+			http.Error(w, "job not found", http.StatusNotFound)
 		case errors.Is(err, cron.ErrJobNotPaused):
-			http.Error(w, err.Error(), http.StatusConflict)
+			http.Error(w, "job not paused", http.StatusConflict)
 		default:
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			slog.Debug("cron resume failed", "err", err)
+			http.Error(w, "resume failed", http.StatusBadRequest)
 		}
 		return
 	}
@@ -284,11 +325,12 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	if err := h.scheduler.TriggerNow(req.ID); err != nil {
 		switch {
 		case errors.Is(err, cron.ErrJobNotFound):
-			http.Error(w, err.Error(), http.StatusNotFound)
+			http.Error(w, "job not found", http.StatusNotFound)
 		case errors.Is(err, cron.ErrJobPaused):
-			http.Error(w, err.Error(), http.StatusConflict)
+			http.Error(w, "job is paused", http.StatusConflict)
 		default:
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			slog.Debug("cron trigger failed", "err", err)
+			http.Error(w, "trigger failed", http.StatusBadRequest)
 		}
 		return
 	}
@@ -304,6 +346,13 @@ func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 	schedule := r.URL.Query().Get("schedule")
 	if schedule == "" {
 		http.Error(w, "schedule is required", http.StatusBadRequest)
+		return
+	}
+	// Cap schedule length so the cron parser (regex + split) cannot be DoS'd
+	// with a megabyte-scale query parameter. Real cron expressions are far
+	// below this limit; robfig/cron rejects extremely long descriptors anyway.
+	if len(schedule) > 256 {
+		http.Error(w, "schedule too long", http.StatusBadRequest)
 		return
 	}
 
@@ -413,7 +462,11 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.WorkDir != nil && *req.WorkDir != "" {
 		validated, err := validateWorkspace(*req.WorkDir, h.allowedRoot)
 		if err != nil {
-			http.Error(w, "work_dir: "+err.Error(), http.StatusForbidden)
+			// Avoid echoing the raw validation detail (which can reveal the
+			// allowedRoot boundary or path shape); operators can diagnose from
+			// server logs if needed.
+			slog.Debug("cron work_dir validation failed", "err", err)
+			http.Error(w, "invalid work_dir", http.StatusForbidden)
 			return
 		}
 		req.WorkDir = &validated
@@ -426,6 +479,22 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 			req.NotifyChatID != nil && *req.NotifyChatID != ""
 		if !perJobSet && !h.scheduler.NotifyDefault().IsSet() {
 			http.Error(w, "notify=true but no target configured: set cron.notify_default in config or provide notify_platform/notify_chat_id", http.StatusBadRequest)
+			return
+		}
+	}
+
+	// Validate notify target only when the caller is actually changing it.
+	if req.NotifyPlatform != nil || req.NotifyChatID != nil {
+		p := ""
+		if req.NotifyPlatform != nil {
+			p = *req.NotifyPlatform
+		}
+		c := ""
+		if req.NotifyChatID != nil {
+			c = *req.NotifyChatID
+		}
+		if err := validateNotifyTarget(p, c); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
@@ -443,7 +512,10 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, cron.ErrJobNotFound) {
 			http.Error(w, err.Error(), http.StatusNotFound)
 		} else {
-			http.Error(w, err.Error(), http.StatusBadRequest)
+			// Sanitize: the underlying parser error can leak internal field
+			// names and offsets if the new schedule is rejected.
+			slog.Warn("cron UpdateJob rejected", "err", err, "id", id)
+			http.Error(w, "invalid update payload", http.StatusBadRequest)
 		}
 		return
 	}

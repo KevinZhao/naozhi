@@ -214,7 +214,13 @@ func Load(path string) (*Config, error) {
 
 	var cfg Config
 	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
-		return nil, fmt.Errorf("parse config: %w", err)
+		// yaml.v3 echoes the offending line in its error, which after
+		// ${VAR} expansion may contain decrypted secrets (app_secret,
+		// dashboard_token, etc.). Return a generic error to callers but
+		// keep the raw detail in logs, where operators can read it
+		// without the secret leaking into HTTP responses or monitoring.
+		slog.Debug("config yaml parse failed", "err", err)
+		return nil, fmt.Errorf("parse config: yaml syntax error (check naozhi logs for details)")
 	}
 
 	applyDefaults(&cfg)
@@ -282,6 +288,23 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Workspace.Name == "" {
 		cfg.Workspace.Name = cfg.Workspace.ID
+	}
+
+	// Normalize agent_commands keys to lowercase so dispatch can match against
+	// a user-typed "/Review" (CJK mobile IMEs auto-capitalize the first letter
+	// of a line). Conflicting keys ("review" and "Review") keep the last-
+	// written value with a warning.
+	if len(cfg.AgentCommands) > 0 {
+		normalized := make(map[string]string, len(cfg.AgentCommands))
+		for cmd, agentID := range cfg.AgentCommands {
+			lower := strings.ToLower(cmd)
+			if existing, dup := normalized[lower]; dup && existing != agentID {
+				slog.Warn("agent_commands key case conflict after normalize",
+					"command", lower, "previous_agent", existing, "new_agent", agentID)
+			}
+			normalized[lower] = agentID
+		}
+		cfg.AgentCommands = normalized
 	}
 }
 

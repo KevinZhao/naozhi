@@ -65,8 +65,9 @@ function defaultSessions() {
       default_workspace: '/home/user/workspace',
       agents: ['general', 'reviewer', 'researcher'],
       projects: [
-        { name: 'myproject', path: '/home/user/workspace/myproject' },
-        { name: 'otherproject', path: '/home/user/workspace/otherproject' },
+        { name: 'myproject', path: '/home/user/workspace/myproject', favorite: false, github: true, git_remote_url: 'https://github.com/acme/myproject.git' },
+        { name: 'otherproject', path: '/home/user/workspace/otherproject', favorite: false, github: false, git_remote_url: '' },
+        { name: 'pinned-empty', path: '/home/user/workspace/pinned-empty', favorite: true, github: true, git_remote_url: 'git@github.com:acme/pinned.git' },
       ],
       version: 1,
     },
@@ -153,6 +154,7 @@ function startMockServer(overrides = {}) {
   let sendCalls = [];
   let cronCreateCalls = [];
   let loginCalls = [];
+  let favoriteCalls = [];
   let authedCookies = new Set();
 
   const server = http.createServer((req, res) => {
@@ -180,6 +182,22 @@ function startMockServer(overrides = {}) {
     if (pathname === '/manifest.json') {
       res.writeHead(200, { 'Content-Type': 'application/manifest+json' });
       res.end(manifest);
+      return;
+    }
+    if (pathname === '/static/dashboard.js') {
+      try {
+        const js = fs.readFileSync(path.join(STATIC_DIR, 'dashboard.js'));
+        res.writeHead(200, { 'Content-Type': 'application/javascript' });
+        res.end(js);
+      } catch {
+        res.writeHead(404);
+        res.end();
+      }
+      return;
+    }
+    if (pathname === '/sw.js') {
+      res.writeHead(200, { 'Content-Type': 'application/javascript' });
+      res.end('// mock sw');
       return;
     }
 
@@ -349,6 +367,25 @@ function startMockServer(overrides = {}) {
       res.end(JSON.stringify(defaultProjects()));
       return;
     }
+    if (pathname === '/api/projects/favorite' && req.method === 'POST') {
+      if (!checkAuth()) return;
+      const name = url.searchParams.get('name');
+      const fav = url.searchParams.get('favorite') === 'true';
+      favoriteCalls.push({ name, favorite: fav });
+      // Update mock sessions so next poll reflects change.
+      const projects = sessionsData.stats && sessionsData.stats.projects;
+      if (Array.isArray(projects)) {
+        for (const p of projects) {
+          if (p.name === name) p.favorite = fav;
+        }
+        if (typeof sessionsData.stats.version === 'number') {
+          sessionsData.stats.version++;
+        }
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', favorite: fav }));
+      return;
+    }
 
     // Transcribe route
     if (pathname === '/api/transcribe' && req.method === 'POST') {
@@ -380,7 +417,8 @@ function startMockServer(overrides = {}) {
         get sendCalls() { return sendCalls; },
         get cronCreateCalls() { return cronCreateCalls; },
         get loginCalls() { return loginCalls; },
-        resetCalls() { sendCalls = []; cronCreateCalls = []; loginCalls = []; },
+        get favoriteCalls() { return favoriteCalls; },
+        resetCalls() { sendCalls = []; cronCreateCalls = []; loginCalls = []; favoriteCalls = []; },
       });
     });
   });

@@ -327,7 +327,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .hdr-btn svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .hdr-badge{position:absolute;top:-5px;right:-5px;background:var(--nz-red);color:#fff;font-size:9px;min-width:15px;height:15px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:700;line-height:1}
 /* Section header */
-.section-header{padding:6px 16px;font-size:11px;font-weight:600;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;background:var(--nz-bg-1);border-top:1px solid var(--nz-border);border-bottom:1px solid var(--nz-bg-2);position:sticky;top:0;z-index:1}
+.section-header{padding:6px 12px 6px 16px;font-size:11px;font-weight:600;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;background:var(--nz-bg-1);border-top:1px solid var(--nz-border);border-bottom:1px solid var(--nz-bg-2);position:sticky;top:0;z-index:1;display:flex;align-items:center;gap:6px}
+.section-header .sh-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.section-header .sh-btn{background:none;border:none;color:var(--nz-text-faint);cursor:pointer;padding:2px 4px;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;line-height:1;transition:color .15s,background .15s;font-size:13px}
+.section-header .sh-btn:hover{background:var(--nz-bg-2);color:var(--nz-text)}
+.section-header .sh-btn.star-on{color:#e3b341}
+.section-header .sh-btn.star-on:hover{color:#f7c744}
+.section-header .sh-btn.github-on{color:#a5d6ff}
+.section-header .sh-btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+.section-header .sh-btn.star-on svg{fill:currentColor}
+.section-empty{padding:8px 16px;font-size:12px;color:var(--nz-text-dim);display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--nz-bg-2);cursor:pointer;background:transparent;border-top:none;border-left:none;border-right:none;width:100%;text-align:left;font-family:inherit}
+.section-empty:hover{color:var(--nz-text);background:var(--nz-bg-1)}
+.section-empty .se-plus{color:var(--nz-accent);font-weight:600}
 /* Session card v2 (two-line flat, IM-style) */
 .sc-cli-icon{width:36px;height:36px;flex-shrink:0;border-radius:8px}
 .sc-body{flex:1;min-width:0}

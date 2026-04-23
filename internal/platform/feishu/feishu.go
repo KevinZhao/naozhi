@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -16,6 +17,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
@@ -32,6 +34,17 @@ var feishuHTTPClient = &http.Client{
 		// open.feishu.cn supports TLS 1.2+; pin the floor so a future Go
 		// toolchain regression can't silently accept legacy protocols.
 		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
+	},
+	// Block all redirects. The Feishu Open API does not rely on redirects
+	// for any documented flow (token fetch, send, upload, resource
+	// download). Following a redirect would let a compromised upstream
+	// (or DNS attacker mid-handshake before the cached cert is served)
+	// direct the bearer-token-carrying request at an internal address
+	// (IMDS, loopback admin port, etc.) — a classic SSRF-via-redirect.
+	// Returning ErrUseLastResponse makes the client surface the 3xx
+	// response as-is so the caller fails cleanly instead of following.
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
 	},
 }
 
@@ -91,6 +104,14 @@ type Feishu struct {
 	tokenMu     sync.RWMutex
 	tokenGroup  singleflight.Group
 
+	// Token refresh circuit breaker: if the upstream token endpoint returns
+	// an error (e.g. app_secret revoked), subsequent refresh attempts within
+	// tokenFailCooldown are short-circuited to the cached error. Prevents
+	// hammering open.feishu.cn at the per-request rate when every reply path
+	// needs a token. singleflight alone does not cache errors.
+	tokenLastFailAt time.Time
+	tokenLastFailed error
+
 	transcriber transcribe.Service // nil when STT not configured
 
 	// Lifecycle context: cancelled on Stop(), used by webhook goroutines.
@@ -111,6 +132,13 @@ type Feishu struct {
 
 	// Replay protection: stores "ts:nonce" -> expiry unix timestamp.
 	seenNonces sync.Map
+	// seenNoncesCount tracks the approximate size of seenNonces so we can
+	// refuse new inserts past maxSeenNonces without the O(n) scan Range
+	// would require. Incremented on successful LoadOrStore-miss,
+	// decremented by cleanupNonces on expiry. Concurrent Add → eventual
+	// consistency: at worst we accept a few extra entries between the
+	// check and increment, which is bounded and harmless.
+	seenNoncesCount atomic.Int64
 
 	// reactionIDs caches (messageID + emoji_type) -> reaction_id returned by
 	// the create-reaction API, so RemoveReaction can later target the correct
@@ -146,6 +174,18 @@ func New(cfg Config, transcriber transcribe.Service) *Feishu {
 // that window just bloats the map without any replay-defense value.
 const nonceTTL = 5 * time.Minute
 
+// maxSeenNonces caps the replay-protection map so a flood of authenticated
+// requests with unique nonces cannot bloat memory past a predictable ceiling.
+// 50k entries × (~48B key + 24B value) ≈ 3.6 MB, well below a typical
+// heap budget. Legitimate traffic with 5-minute TTL is far below this cap.
+const maxSeenNonces = 50000
+
+// tokenFailCooldown bounds how long a failed tenant-access-token refresh is
+// cached so concurrent callers do not re-hit open.feishu.cn on every reply
+// when credentials are revoked. 5s balances operator-visible recovery time
+// with upstream rate protection.
+const tokenFailCooldown = 5 * time.Second
+
 func (f *Feishu) cleanupNonces(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
@@ -153,6 +193,7 @@ func (f *Feishu) cleanupNonces(ctx context.Context) {
 		select {
 		case <-ticker.C:
 			now := time.Now().Unix()
+			deleted := int64(0)
 			f.seenNonces.Range(func(k, v any) bool {
 				// Defensive type assertion: sync.Map has no compile-time type
 				// safety, so guard against accidental cross-type Store from a
@@ -160,9 +201,20 @@ func (f *Feishu) cleanupNonces(ctx context.Context) {
 				ts, ok := v.(int64)
 				if !ok || ts < now {
 					f.seenNonces.Delete(k)
+					deleted++
 				}
 				return true
 			})
+			if deleted > 0 {
+				// Clamp at zero: every webhook insert MUST pair with Add(1),
+				// but defensive type assertion above can delete entries that
+				// bypassed the counted insert path (future refactor risk). A
+				// negative counter would eventually bump legitimate traffic
+				// against the maxSeenNonces ceiling until restart.
+				if n := f.seenNoncesCount.Add(-deleted); n < 0 {
+					f.seenNoncesCount.Store(0)
+				}
+			}
 		case <-ctx.Done():
 			return
 		}
@@ -202,6 +254,14 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 	// caller on the open internet can inject forged events.
 	if f.cfg.VerificationToken == "" && f.cfg.EncryptKey == "" {
 		return fmt.Errorf("feishu webhook mode requires verification_token or encrypt_key to be configured")
+	}
+	// VerificationToken-only mode relies on a plaintext shared secret in the
+	// request body; if that token ever leaks, events can be forged without
+	// access to the EncryptKey HMAC. Surface a startup warning so operators
+	// know to configure EncryptKey as well. Not fatal — existing v1-only
+	// deployments remain functional.
+	if f.cfg.EncryptKey == "" {
+		slog.Warn("feishu webhook: verification_token-only mode is less secure than encrypt_key HMAC — configure encrypt_key for defence-in-depth")
 	}
 	slog.Info("feishu using webhook mode")
 	return nil
@@ -408,7 +468,9 @@ func (f *Feishu) sendImage(ctx context.Context, chatID string, img platform.Imag
 		return "", fmt.Errorf("decode response: %w", err)
 	}
 	if result.Code != 0 {
-		return "", fmt.Errorf("feishu send image error: code=%d msg=%s", result.Code, result.Msg)
+		// Return typed error so callers can use IsPermanent to short-circuit
+		// retries on e.g. invalid token / permission errors.
+		return "", &APIError{Code: result.Code, Msg: result.Msg, Op: "send_image"}
 	}
 	return result.Data.MessageID, nil
 }
@@ -425,6 +487,12 @@ func (f *Feishu) DownloadAudio(ctx context.Context, messageID, fileKey string) (
 
 // downloadResource downloads a message resource (image/audio) from the Feishu API.
 func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resType string, maxBytes int64, defaultMIME string) ([]byte, string, error) {
+	// Guard against a caller passing math.MaxInt64 (which would overflow
+	// maxBytes+1 below and degrade LimitReader to 0-byte reads). No current
+	// caller does this, but the contract should be self-protecting.
+	if maxBytes <= 0 || maxBytes >= (1<<62) {
+		return nil, "", fmt.Errorf("download %s: invalid maxBytes %d", resType, maxBytes)
+	}
 	token, err := f.getAccessToken(ctx)
 	if err != nil {
 		return nil, "", fmt.Errorf("get access token: %w", err)
@@ -448,9 +516,16 @@ func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resTy
 		return nil, "", fmt.Errorf("download %s: status %d, body: %s", resType, resp.StatusCode, body)
 	}
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes))
+	// Read up to maxBytes+1 so we can distinguish "exactly maxBytes" (legal)
+	// from "exceeds maxBytes" (silently truncated by LimitReader). If we read
+	// exactly maxBytes+1 bytes, the payload was larger than the limit and we
+	// reject it rather than delivering a truncated file to the CLI.
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
 		return nil, "", fmt.Errorf("read %s body: %w", resType, err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, "", fmt.Errorf("download %s: payload exceeds %d-byte limit", resType, maxBytes)
 	}
 
 	contentType := resp.Header.Get("Content-Type")
@@ -460,13 +535,46 @@ func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resTy
 	if contentType == "" || contentType == "application/octet-stream" {
 		contentType = defaultMIME
 	}
+
+	// Content-based verification: the Content-Type header is upstream-
+	// provided and not authoritative (SSRF or compromised proxy could
+	// deliver arbitrary bytes labeled as image/png). http.DetectContentType
+	// sniffs the first 512 bytes; reject anything whose detected family does
+	// not match the expected resource type.
+	//
+	// Feishu voice messages are OGG/Opus. Go's sniffer implements the WHATWG
+	// MIME-Sniffing standard which emits `application/ogg` (not `audio/ogg`)
+	// for OGG containers, and returns `application/octet-stream` for formats
+	// it does not know (e.g. Opus-in-WebM). The accept-list below covers the
+	// OGG case explicitly while still rejecting clearly-wrong families
+	// (image/*, text/*, etc.).
+	if len(data) > 0 {
+		sniffed := http.DetectContentType(data)
+		ok := true
+		switch resType {
+		case "image":
+			ok = strings.HasPrefix(sniffed, "image/")
+		case "audio":
+			ok = strings.HasPrefix(sniffed, "audio/") || sniffed == "application/ogg"
+		}
+		if !ok {
+			return nil, "", fmt.Errorf("download %s: mime mismatch (header=%s sniffed=%s)", resType, contentType, sniffed)
+		}
+	}
 	return data, contentType, nil
 }
 
 // replyError sends an error message directly to the user, bypassing Claude.
-func (f *Feishu) replyError(ctx context.Context, chatID, text string) {
-	if _, err := f.Reply(ctx, platform.OutgoingMessage{ChatID: chatID, Text: text}); err != nil {
-		slog.Warn("feishu reply error failed", "err", err, "text", text)
+// Uses a short-lived context derived from stopCtx rather than the caller's
+// ctx: callers often pass a ctx that may already be cancelled (e.g. the
+// webhook handler's ctx tied to the HTTP request, or a ctx timed out while
+// downloading an image), and we still want the user-facing error notice to
+// land. stopCtx is cancelled only at Feishu.Stop().
+func (f *Feishu) replyError(_ context.Context, chatID, text string) {
+	rctx, cancel := context.WithTimeout(f.stopCtx, 5*time.Second)
+	defer cancel()
+	if _, err := f.Reply(rctx, platform.OutgoingMessage{ChatID: chatID, Text: text}); err != nil {
+		slog.Warn("feishu reply error failed", "err", err)
 	}
 }
 
@@ -521,7 +629,7 @@ func (f *Feishu) uploadImage(ctx context.Context, data []byte, mimeType string) 
 		return "", fmt.Errorf("decode upload response: %w", err)
 	}
 	if result.Code != 0 {
-		return "", fmt.Errorf("feishu upload error: code=%d msg=%s", result.Code, result.Msg)
+		return "", &APIError{Code: result.Code, Msg: result.Msg, Op: "upload_image"}
 	}
 	return result.Data.ImageKey, nil
 }
@@ -545,8 +653,11 @@ func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) err
 		return fmt.Errorf("marshal request body: %w", err)
 	}
 
+	// PathEscape the msgID: like AddReaction/RemoveReaction/downloadResource,
+	// protect against a crafted ID containing "/" or "?" that could redirect
+	// the PATCH to a different Open-API endpoint.
 	req, err := http.NewRequestWithContext(ctx, "PATCH",
-		f.baseURL+"/open-apis/im/v1/messages/"+msgID,
+		f.baseURL+"/open-apis/im/v1/messages/"+url.PathEscape(msgID),
 		bytes.NewReader(reqBody))
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
@@ -582,12 +693,21 @@ func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) err
 // abort the shared refresh and fail every merged caller. Instead we bound
 // the refresh with f.stopCtx + 10s so Stop() still aborts it promptly.
 func (f *Feishu) getAccessToken(_ context.Context) (string, error) {
-	// Fast path: RLock to check cached token
+	// Fast path: single RLock checks both cached-token freshness and the
+	// circuit-breaker. Splitting these into two separate RLock blocks used
+	// to create a window where a concurrent refresh could mutate
+	// tokenLastFailed between the two reads, letting a stale token be
+	// returned or the circuit breaker be bypassed.
 	f.tokenMu.RLock()
 	if f.accessToken != "" && time.Now().Before(f.tokenExpiry) {
 		token := f.accessToken
 		f.tokenMu.RUnlock()
 		return token, nil
+	}
+	if f.tokenLastFailed != nil && time.Since(f.tokenLastFailAt) < tokenFailCooldown {
+		err := f.tokenLastFailed
+		f.tokenMu.RUnlock()
+		return "", err
 	}
 	f.tokenMu.RUnlock()
 
@@ -644,15 +764,38 @@ func (f *Feishu) getAccessToken(_ context.Context) (string, error) {
 		if result.Code != 0 {
 			return nil, &APIError{Code: result.Code, Op: "token"}
 		}
+		// Feishu normally returns Expire≈7200, but edge cases (clock skew,
+		// API misbehaviour) can yield 0 or very small values. Without the
+		// clamp `result.Expire-60` underflows to a negative number, so
+		// `time.Now().Add(...)` produces an already-expired deadline and every
+		// subsequent call would fire a fresh refresh. Treat anything below 60s
+		// as "honour the 30s minimum caching window" to keep singleflight effective.
+		if result.TenantAccessToken == "" {
+			return nil, &APIError{Code: result.Code, Msg: "empty token", Op: "token"}
+		}
+		ttl := time.Duration(result.Expire-60) * time.Second
+		if ttl < 30*time.Second {
+			ttl = 30 * time.Second
+		}
 
 		f.tokenMu.Lock()
 		f.accessToken = result.TenantAccessToken
-		f.tokenExpiry = time.Now().Add(time.Duration(result.Expire-60) * time.Second)
+		f.tokenExpiry = time.Now().Add(ttl)
+		// Clear circuit breaker on success so a transient failure does not
+		// keep blocking future refreshes after recovery.
+		f.tokenLastFailed = nil
+		f.tokenLastFailAt = time.Time{}
 		f.tokenMu.Unlock()
 
 		return result.TenantAccessToken, nil
 	})
 	if err != nil {
+		// Record the failure so subsequent callers within the cooldown
+		// short-circuit without another HTTP round-trip.
+		f.tokenMu.Lock()
+		f.tokenLastFailed = err
+		f.tokenLastFailAt = time.Now()
+		f.tokenMu.Unlock()
 		return "", err
 	}
 	// Defensive type assertion: singleflight.Do returns `any` and the callback
@@ -667,14 +810,27 @@ func (f *Feishu) getAccessToken(_ context.Context) (string, error) {
 }
 
 // verifySignature verifies the request signature (for encrypt_key mode).
+// Uses the incremental hash.Hash interface to avoid copying the body into a
+// concatenated string — webhook bodies can be up to 64 KB, and the old
+// `timestamp + nonce + encryptKey + string(body)` path allocated ~64 KB per
+// request and did it twice (once for the string, once for the []byte cast).
+// Also hex-encodes via encoding/hex to avoid the fmt.Sprintf "%x" parse
+// overhead, and compares as bytes under ConstantTimeCompare without stringy
+// intermediate allocation.
 func verifySignature(timestamp, nonce, encryptKey string, body []byte, signature string) bool {
 	if encryptKey == "" {
 		return true
 	}
-	content := timestamp + nonce + encryptKey + string(body)
-	h := sha256.Sum256([]byte(content))
-	computed := fmt.Sprintf("%x", h)
-	return subtle.ConstantTimeCompare([]byte(computed), []byte(signature)) == 1
+	h := sha256.New()
+	h.Write([]byte(timestamp))
+	h.Write([]byte(nonce))
+	h.Write([]byte(encryptKey))
+	h.Write(body)
+	var sumBuf [sha256.Size]byte
+	sum := h.Sum(sumBuf[:0])
+	var hexBuf [sha256.Size * 2]byte
+	hex.Encode(hexBuf[:], sum)
+	return subtle.ConstantTimeCompare(hexBuf[:], []byte(signature)) == 1
 }
 
 // verifyTimestamp checks that the request timestamp is within 5 minutes of now.

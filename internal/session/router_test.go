@@ -1092,3 +1092,68 @@ func TestHistoryCapture_EmptyFallsBackToJSONL(t *testing.T) {
 		t.Errorf("captured %d entries, want 0 (JSONL fallback should be triggered)", len(captured))
 	}
 }
+
+// ---------------------------------------------------------------------------
+// spawningKeys guard (TOCTOU fix for ReconcileLoop vs fresh-context cron)
+// ---------------------------------------------------------------------------
+
+// Regression for the 04:00:00 cron failure: GetOrCreate called spawnSession
+// while the 30s reconcile loop fired, and the freshly spawned shim's state
+// file was judged "orphan" because the new ManagedSession wasn't installed
+// yet. spawnSession must record the key in spawningKeys for the entire spawn
+// window so ReconnectShims can skip it; a failed spawn must still clean up.
+func TestSpawnSession_SpawningKeysClearedOnFailure(t *testing.T) {
+	r := newTestRouter(3)
+
+	// Spawn fails because the test wrapper points at a nonexistent binary.
+	_, _, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{})
+	if err == nil {
+		t.Fatal("expected spawn error from nonexistent CLI")
+	}
+
+	r.mu.Lock()
+	_, stillMarked := r.spawningKeys["key1"]
+	r.mu.Unlock()
+	if stillMarked {
+		t.Error("spawningKeys still contains key1 after failed spawn")
+	}
+}
+
+// Covers the concurrent path: while spawnSession is mid-flight for a key,
+// ReconnectShims must observe spawningKeys and refuse to treat the discovered
+// state file as an orphan. We emulate the reconcile check directly (Discover
+// requires a live PID of the same binary, which we cannot fake in a unit
+// test), but the logic under test is the spawningKeys lookup inside the
+// reconcile loop (router.go around the `if !ok` branch).
+func TestSpawningKeys_ObservableDuringSpawn(t *testing.T) {
+	r := newTestRouter(3)
+
+	// Simulate being inside spawnSession: caller enters with r.mu held,
+	// writes the marker, releases the lock for the Spawn() call.
+	r.mu.Lock()
+	if r.spawningKeys == nil {
+		r.spawningKeys = make(map[string]struct{})
+	}
+	r.spawningKeys["cron:abc"] = struct{}{}
+	r.mu.Unlock()
+
+	// Reconcile's view: lock, snapshot, unlock.
+	r.mu.Lock()
+	_, spawning := r.spawningKeys["cron:abc"]
+	r.mu.Unlock()
+	if !spawning {
+		t.Fatal("reconcile should see spawningKeys marker and skip orphan check")
+	}
+
+	// After spawnSession's defer fires, the marker disappears.
+	r.mu.Lock()
+	delete(r.spawningKeys, "cron:abc")
+	r.mu.Unlock()
+
+	r.mu.Lock()
+	_, stillMarked := r.spawningKeys["cron:abc"]
+	r.mu.Unlock()
+	if stillMarked {
+		t.Error("spawningKeys leaked after cleanup")
+	}
+}

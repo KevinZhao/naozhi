@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/base64"
 	"encoding/json"
+	"time"
 )
 
 // Event represents a parsed stream-json event from claude CLI stdout.
@@ -25,6 +26,12 @@ type Event struct {
 
 	// RPCRequestID is set for ACP permission_request events that need a response.
 	RPCRequestID int `json:"-"`
+
+	// recvAt is the wall-clock moment readLoop pushed the event to eventCh.
+	// Used by drainStaleEvents to distinguish events belonging to a previous
+	// (possibly interrupted) turn from events produced for the current turn
+	// after drain entered. Not serialized.
+	recvAt time.Time
 }
 
 // TaskUsage holds resource consumption stats from agent task events.

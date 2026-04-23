@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -49,6 +50,16 @@ type SchedulerConfig struct {
 	// Location is the timezone in which schedule expressions are evaluated.
 	// nil defaults to time.Local so cron expressions match wall-clock time
 	// on the host (respects $TZ / /etc/localtime).
+	//
+	// DST caveats (inherited from robfig/cron v3):
+	//   - Spring-forward (hour skipped): a schedule whose expression lands in
+	//     the missing hour fires zero times that day.
+	//   - Fall-back (hour repeated): a schedule whose expression lands in the
+	//     repeated hour may fire twice within the same wall-clock hour. Fast
+	//     jobs that complete before the second trigger are not protected by
+	//     SkipIfStillRunning.
+	// For time-critical periodic work (billing, audit snapshots) prefer a UTC
+	// Location so the schedule is immune to DST transitions.
 	Location *time.Location
 	// NotifyDefault provides a fallback IM target for jobs that opt into
 	// notifications (Job.Notify == true) but have no per-job target set.
@@ -106,6 +117,25 @@ type Scheduler struct {
 	// s.cron.Stop(), but manual TriggerNow fires a goroutine outside the
 	// cron scheduler's purview.
 	triggerWG sync.WaitGroup
+
+	// runningJobs serializes execute(j) calls per job ID so a manual
+	// TriggerNow cannot overlap a scheduled tick for the same job (the cron
+	// chain's SkipIfStillRunning only protects the scheduled path). Entries
+	// are intentionally NOT cleared on job delete — a concurrent execute()
+	// may still hold the atomic.Bool and be about to CAS it back to false;
+	// if a fresh AddJob reused the same ID (low but non-zero given the hex8
+	// generator), creating a new guard entry would split the CAS gate between
+	// two goroutines and permit double execution. The leak is bounded by
+	// maxJobsHardCap so the trade is cheap vs. a correctness gap.
+	runningJobs sync.Map // map[jobID]*atomic.Bool
+
+	// storeMu serialises saveSnapshot writes so concurrent callers do not race
+	// on the same `.tmp` file WriteFileAtomic uses. Without this mutex, a
+	// dashboard UpdateJob racing with a scheduled tick's recordResult would
+	// write to cron_jobs.json.tmp simultaneously, producing a torn file on
+	// whichever rename wins. Held only around the saveJobs call — snapshot
+	// construction stays on s.mu to avoid cross-lock latency.
+	storeMu sync.Mutex
 }
 
 // SetOnExecute registers a callback invoked after each cron job execution.
@@ -172,12 +202,16 @@ func (s *Scheduler) NotifyDefault() NotifyTarget { return s.notifyDefault }
 // Start loads persisted jobs and starts the cron scheduler.
 func (s *Scheduler) Start() error {
 	s.mu.Lock()
-	var restoredJobs []*Job
+	// Snapshot the fields we pass to registerStub under lock so we don't
+	// dereference *Job after releasing s.mu — once cron.Start() fires, any
+	// future UpdateJob could race with a stub read via the map pointer.
+	type stubRow struct{ id, workDir, prompt string }
+	var stubs []stubRow
 	if restored := loadJobs(s.storePath); restored != nil {
 		for _, j := range restored {
 			if j.Paused {
 				s.jobs[j.ID] = j
-				restoredJobs = append(restoredJobs, j)
+				stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt})
 				continue
 			}
 			if err := s.registerJob(j); err != nil {
@@ -185,22 +219,26 @@ func (s *Scheduler) Start() error {
 				continue
 			}
 			s.jobs[j.ID] = j
-			restoredJobs = append(restoredJobs, j)
+			stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt})
 		}
 	}
+	jobCount := len(s.jobs)
 	s.mu.Unlock()
 	// Register dashboard stub sessions after releasing the lock; the router's
-	// notifyChange callback must not re-enter scheduler state.
-	for _, j := range restoredJobs {
-		s.registerStub(j)
+	// notifyChange callback must not re-enter scheduler state. Use snapshotted
+	// values (not the *Job pointer) so a concurrent UpdateJob mutating the map
+	// entry cannot race with our reads.
+	for _, st := range stubs {
+		s.registerStubByValue(st.id, st.workDir, st.prompt)
 	}
 	s.cron.Start()
-	slog.Info("cron scheduler started", "jobs", len(s.jobs))
+	slog.Info("cron scheduler started", "jobs", jobCount)
 	return nil
 }
 
 // registerStub creates (or refreshes) a router session entry for the job so it
 // appears in the dashboard workspace list. Safe to call without a router (tests).
+// Callers must not be holding s.mu — RegisterCronStub re-enters router state.
 func (s *Scheduler) registerStub(j *Job) {
 	if s.router == nil {
 		return
@@ -208,17 +246,63 @@ func (s *Scheduler) registerStub(j *Job) {
 	s.router.RegisterCronStub("cron:"+j.ID, j.WorkDir, j.Prompt)
 }
 
+// registerStubByValue is the pointer-free variant used from Start() where the
+// caller has already snapshotted mutable fields under s.mu.
+func (s *Scheduler) registerStubByValue(id, workDir, prompt string) {
+	if s.router == nil {
+		return
+	}
+	s.router.RegisterCronStub("cron:"+id, workDir, prompt)
+}
+
 // Stop halts the scheduler and saves state. It waits for both scheduled jobs
 // (drained by s.cron.Stop) and any TriggerNow-spawned goroutines before
 // returning, so callers can safely tear down the router afterwards.
+//
+// Shutdown is bounded: a stuck cron job (one whose execute() hangs past ctx
+// cancel, e.g. a broken shim that ignores context) would otherwise pin us
+// for up to execTimeout+ and starve systemd's TimeoutStopSec. The deadline
+// is execTimeout+5s — enough for a cooperative cancel to propagate, short
+// enough that restart never exceeds the systemd budget.
 func (s *Scheduler) Stop() {
 	s.stopCancel()
 	ctx := s.cron.Stop()
-	<-ctx.Done()
-	s.triggerWG.Wait()
+
+	shutdownBudget := s.execTimeout + 5*time.Second
+	timer := time.NewTimer(shutdownBudget)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+	case <-timer.C:
+		slog.Warn("cron scheduler: stop deadline exceeded, proceeding",
+			"budget", shutdownBudget)
+	}
+
+	// Bound triggerWG.Wait separately: while manual TriggerNow respects stopCtx
+	// via execute(), the notify delivery path (deliverNotice → platform Reply)
+	// uses a Background-derived ctx so stopCtx cancellation does not interrupt
+	// an in-flight webhook POST. Without this deadline, a stuck platform HTTP
+	// call could pin Stop() past systemd TimeoutStopSec and cause SIGKILL,
+	// which would lose the final saveJobs() below.
+	triggerDone := make(chan struct{})
+	go func() {
+		s.triggerWG.Wait()
+		close(triggerDone)
+	}()
+	triggerBudget := shutdownBudget
+	trigTimer := time.NewTimer(triggerBudget)
+	defer trigTimer.Stop()
+	select {
+	case <-triggerDone:
+	case <-trigTimer.C:
+		slog.Warn("cron scheduler: triggerWG wait deadline exceeded, proceeding",
+			"budget", triggerBudget)
+	}
 	s.mu.Lock()
 	snap := s.snapshotJobs()
 	s.mu.Unlock()
+	s.storeMu.Lock()
+	defer s.storeMu.Unlock()
 	if err := saveJobs(s.storePath, snap); err != nil {
 		slog.Error("save cron store on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
@@ -306,20 +390,30 @@ type JobWithNextRun struct {
 	NextRun time.Time
 }
 
-// ListAllJobsWithNextRun returns every job plus its next scheduled run, computed
-// inside a single RLock acquisition. This avoids the O(N) lock churn of calling
-// NextRunByID in a loop from the dashboard handler.
+// ListAllJobsWithNextRun returns every job plus its next scheduled run.
+// Lock strategy: snapshot (*Job, entryID) under s.mu.RLock, release s.mu, then
+// call s.cron.Entry() without holding s.mu. Calling cron.Entry inside s.mu
+// would invert the lock order taken by the cron dispatcher path
+// (cron-internal → execute → recordResult → s.mu.Lock), risking a deadlock.
 func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	result := make([]JobWithNextRun, 0, len(s.jobs))
+	type pair struct {
+		job     Job
+		entryID robfigcron.EntryID
+	}
+	pairs := make([]pair, 0, len(s.jobs))
 	for _, j := range s.jobs {
+		pairs = append(pairs, pair{job: *j, entryID: j.entryID})
+	}
+	s.mu.RUnlock()
+
+	result := make([]JobWithNextRun, 0, len(pairs))
+	for _, p := range pairs {
 		var next time.Time
-		if j.entryID != 0 {
-			next = s.cron.Entry(j.entryID).Next
+		if p.entryID != 0 {
+			next = s.cron.Entry(p.entryID).Next
 		}
-		result = append(result, JobWithNextRun{Job: *j, NextRun: next})
+		result = append(result, JobWithNextRun{Job: p.job, NextRun: next})
 	}
 	return result
 }
@@ -341,6 +435,13 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 		s.router.Reset("cron:" + j.ID)
 	}
 	delete(s.jobs, j.ID)
+	// Intentionally do NOT delete from s.runningJobs here: a concurrent
+	// execute() for this job may still hold the atomic.Bool and be about to
+	// CAS it back to false; if a fresh AddJob somehow reused the same ID
+	// (low but non-zero given the hex8 generator), creating a new guard
+	// entry here could split the CAS gate between two goroutines and permit
+	// double execution. Retaining the entry is bounded by maxJobsHardCap
+	// (one *atomic.Bool per historical job) — cheap vs a correctness gap.
 	snap := s.snapshotJobs()
 	s.mu.Unlock()
 
@@ -616,6 +717,8 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 		s.router.Reset("cron:" + j.ID)
 	}
 	delete(s.jobs, j.ID)
+	// Retain the runningJobs entry for the same reason as DeleteJobByID —
+	// a concurrent execute() may still be mid-CAS on this guard.
 	snap := s.snapshotJobs()
 	s.mu.Unlock()
 
@@ -745,18 +848,62 @@ func (s *Scheduler) TriggerNow(id string) error {
 			slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "id", id, "entry_id", entryID)
 		}
 	} else {
+		// Resolve the job by ID inside the goroutine so the freshest pointer
+		// is used (matches the cron-tick path in registerJob). If the job was
+		// concurrently deleted, skip execution — recordResult would then write
+		// to an orphan pointer whose updates are not visible in the snapshot.
+		jobID := j.ID
 		go func() {
 			defer s.triggerWG.Done()
-			s.execute(j)
+			s.mu.RLock()
+			cur, ok := s.jobs[jobID]
+			paused := ok && cur.Paused
+			s.mu.RUnlock()
+			if !ok {
+				slog.Debug("TriggerNow: job deleted before execute, skipping", "id", jobID)
+				return
+			}
+			// Honor a Pause that landed between the TriggerNow snapshot and the
+			// goroutine starting: the operator's "stop now" intent outranks the
+			// in-flight trigger click.
+			if paused {
+				slog.Debug("TriggerNow: job paused concurrently, skipping", "id", jobID)
+				return
+			}
+			s.execute(cur)
 		}()
 	}
 	return nil
 }
 
 // registerJob registers a job with the robfig/cron scheduler.
+//
+// The closure captures the job's ID rather than the *Job pointer: if the
+// job is removed and re-added (UpdateJob path) while the scheduler goroutine
+// holds an old entry, we want the next tick to resolve the currently-registered
+// job rather than fire against a stale pointer whose fields may have diverged
+// from the user's intent.
 func (s *Scheduler) registerJob(j *Job) error {
+	jobID := j.ID
 	entryID, err := s.cron.AddFunc(j.Schedule, func() {
-		s.execute(j)
+		s.mu.RLock()
+		cur, ok := s.jobs[jobID]
+		paused := ok && cur.Paused
+		s.mu.RUnlock()
+		if !ok {
+			slog.Debug("cron: scheduled job no longer registered, skipping", "id", jobID)
+			return
+		}
+		// A Pause that lands between cron-tick dispatch and our re-lock should
+		// be honored; otherwise the user sees a paused job still firing once.
+		// PauseJobByID removes the entry via cron.Remove(), so normally this
+		// tick wouldn't fire — but robfig/cron may already be mid-dispatch when
+		// Remove runs, yielding exactly this race.
+		if paused {
+			slog.Debug("cron: tick fired for job paused concurrently, skipping", "id", jobID)
+			return
+		}
+		s.execute(cur)
 	})
 	if err != nil {
 		return fmt.Errorf("register cron: %w", err)
@@ -765,8 +912,35 @@ func (s *Scheduler) registerJob(j *Job) error {
 	return nil
 }
 
+// jobRunningGuard returns a lazily created *atomic.Bool per job ID used by
+// execute() to prevent concurrent runs of the same job (see execute).
+// Entries are cleared on DeleteJob; occasional leaks for never-deleted jobs
+// are bounded by the scheduler's maxJobs cap.
+func (s *Scheduler) jobRunningGuard(id string) *atomic.Bool {
+	if v, ok := s.runningJobs.Load(id); ok {
+		return v.(*atomic.Bool)
+	}
+	guard := &atomic.Bool{}
+	actual, _ := s.runningJobs.LoadOrStore(id, guard)
+	return actual.(*atomic.Bool)
+}
+
 // execute runs a cron job: send prompt to session, post result to chat.
 func (s *Scheduler) execute(j *Job) {
+	// Guard against concurrent execution of the same job. The cron chain's
+	// SkipIfStillRunning protects the scheduled-tick path, but TriggerNow
+	// that arrives while a tick is in flight bypasses the chain entirely
+	// (it calls execute directly when entryID == 0 or Run() on the entry
+	// which is separately serialized). Using a per-job *atomic.Bool kept
+	// outside Job (to preserve value-copy semantics of Job) provides a
+	// uniform CAS gate.
+	guard := s.jobRunningGuard(j.ID)
+	if !guard.CompareAndSwap(false, true) {
+		slog.Info("cron: job already running, skipping overlap", "cron_id", j.ID)
+		return
+	}
+	defer guard.Store(false)
+
 	// Snapshot mutable fields under lock to avoid data race with SetJobPrompt.
 	s.mu.Lock()
 	prompt := j.Prompt
@@ -807,11 +981,27 @@ func (s *Scheduler) execute(j *Job) {
 	// Fresh mode: drop any existing session (and its process + history) so
 	// GetOrCreate spawns a brand-new CLI. Reset is a no-op when no session
 	// exists yet, so first-run behavior is identical to persistent mode.
-	// The router's RegisterCronStub call in registerStub() will rebuild the
-	// dashboard sidebar stub entry after execute returns.
+	// On error paths (GetOrCreate/Send failure) the sidebar stub is rebuilt
+	// so the cron row does not vanish from the dashboard. On the success
+	// path we skip the stub refresh because the live session carries its
+	// own sidebar entry; re-registering would trigger a spurious broadcast
+	// and briefly revert the row state before the next executeSucceeded.
+	stubRefresh := func() {}
 	if fresh {
 		s.router.Reset(key)
 		log.Info("cron fresh context: session reset before run")
+		stubRefresh = func() {
+			s.mu.RLock()
+			jobCopy, ok := s.jobs[jobID]
+			var j2 Job
+			if ok {
+				j2 = *jobCopy
+			}
+			s.mu.RUnlock()
+			if ok {
+				s.registerStub(&j2)
+			}
+		}
 	}
 
 	sess, _, err := s.router.GetOrCreate(ctx, key, opts)
@@ -823,6 +1013,7 @@ func (s *Scheduler) execute(j *Job) {
 			// notification would be spam and the stored LastError would
 			// falsely blame the job itself.
 			log.Info("cron session cancelled", "err", err)
+			stubRefresh()
 			return
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -832,6 +1023,7 @@ func (s *Scheduler) execute(j *Job) {
 		}
 		s.recordResult(j, "", "session error: "+err.Error())
 		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", jobID))
+		stubRefresh()
 		return
 	}
 
@@ -843,6 +1035,7 @@ func (s *Scheduler) execute(j *Job) {
 			// the operator-facing notice so shutdown races don't look like
 			// real failures.
 			log.Info("cron send cancelled", "err", err)
+			stubRefresh()
 			return
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
@@ -852,6 +1045,7 @@ func (s *Scheduler) execute(j *Job) {
 		}
 		s.recordResult(j, "", "send error: "+err.Error())
 		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", jobID))
+		stubRefresh()
 		return
 	}
 
@@ -937,9 +1131,15 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg string) {
 		result = result[:byteOffset] + "…[truncated]"
 	}
 	s.mu.Lock()
-	j.LastRunAt = time.Now()
-	j.LastResult = result
-	j.LastError = errMsg
+	// If the job was deleted between execute()'s snapshot and recordResult's
+	// write-back, dropping the update prevents writing to an orphan pointer
+	// whose mutations never appear in a snapshot. Caller still gets the
+	// onExecute callback so any downstream notification still fires.
+	if _, ok := s.jobs[j.ID]; ok {
+		j.LastRunAt = time.Now()
+		j.LastResult = result
+		j.LastError = errMsg
+	}
 	snap := s.snapshotJobs()
 	fn := s.onExecute
 	s.mu.Unlock()
@@ -1011,8 +1211,12 @@ func (s *Scheduler) snapshotJobs() map[string]*Job {
 	return snap
 }
 
-// saveSnapshot persists a jobs snapshot to disk. No lock required.
+// saveSnapshot persists a jobs snapshot to disk. Serialised by storeMu so
+// concurrent callers do not race on the `.tmp` file inside WriteFileAtomic;
+// without the mutex, two parallel saves corrupt each other's temp file.
 func (s *Scheduler) saveSnapshot(snapshot map[string]*Job) {
+	s.storeMu.Lock()
+	defer s.storeMu.Unlock()
 	if err := saveJobs(s.storePath, snapshot); err != nil {
 		slog.Error("save cron store", "err", err)
 	}

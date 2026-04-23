@@ -1313,7 +1313,7 @@ func TestNewManager_StateDir_Default(t *testing.T) {
 	// Can't test HOME-based default without modifying HOME, but we can verify
 	// that a non-empty StateDir is used as-is.
 	dir := t.TempDir()
-	m := NewManager(ManagerConfig{StateDir: dir})
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
 	if m.stateDir != dir {
 		t.Errorf("stateDir = %q, want %q", m.stateDir, dir)
 	}

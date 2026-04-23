@@ -51,18 +51,31 @@ type Dispatcher struct {
 
 	// Operational counters exposed via /health for triaging. Incremented
 	// atomically and never reset (monotonic since process start).
-	messageCount    atomic.Int64 // all non-slash-command IM messages accepted
-	replyErrorCount atomic.Int64 // errors returned by sendFn (includes timeouts)
-	sendFailCount   atomic.Int64 // user-visible reply failures (platform send errors)
+	messageCount       atomic.Int64 // all non-slash-command IM messages accepted
+	replyErrorCount    atomic.Int64 // errors returned by sendFn (includes timeouts)
+	sendFailCount      atomic.Int64 // user-visible reply failures (platform send errors)
+	lastReplySuccessNs atomic.Int64 // UnixNano of most recent successful user-visible reply; 0 until first success
 
 	sendFn     func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
 	takeoverFn func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
 }
 
 // Metrics returns a snapshot of operational counters for /health.
-// Values are monotonic since process start.
-func (d *Dispatcher) Metrics() (messageCount, replyErrorCount, sendFailCount int64) {
-	return d.messageCount.Load(), d.replyErrorCount.Load(), d.sendFailCount.Load()
+// Counter values are monotonic since process start. lastReplySuccess is the
+// wall-clock time of the most recent successful user-visible reply; the zero
+// value means "no reply has succeeded yet this process".
+func (d *Dispatcher) Metrics() (messageCount, replyErrorCount, sendFailCount int64, lastReplySuccess time.Time) {
+	ns := d.lastReplySuccessNs.Load()
+	if ns != 0 {
+		lastReplySuccess = time.Unix(0, ns)
+	}
+	return d.messageCount.Load(), d.replyErrorCount.Load(), d.sendFailCount.Load(), lastReplySuccess
+}
+
+// markReplySuccess records the wall-clock instant of the most recent
+// successful reply (non-empty text to the user's chat).
+func (d *Dispatcher) markReplySuccess() {
+	d.lastReplySuccessNs.Store(time.Now().UnixNano())
 }
 
 // DispatcherConfig holds all dependencies for constructing a Dispatcher.
@@ -300,6 +313,16 @@ func (d *Dispatcher) ownerLoop(
 		// when they arrived; clear those reactions now that their content
 		// was processed. Best-effort — errors only log.
 		d.clearQueuedReactions(ctx, msg.Platform, queued, log)
+		// Defensive Stop+drain before Reset: if a future refactor changes the
+		// loop shape so the <-collectTimer.C arm can be skipped (e.g. an
+		// early-continue branch), Reset without drain would let a stale tick
+		// fire immediately on the next iteration.
+		if !collectTimer.Stop() {
+			select {
+			case <-collectTimer.C:
+			default:
+			}
+		}
 		collectTimer.Reset(d.queue.CollectDelay())
 	}
 }
@@ -317,6 +340,11 @@ func (d *Dispatcher) sendAndReply(
 	log *slog.Logger,
 	isFirst bool,
 ) {
+	// Attach session key + agent to the logger so every Info/Warn/Error line
+	// below (including SendSplitReply chunks and tracker events) carries
+	// enough context for an operator to grep a full turn end-to-end.
+	log = log.With("session_key", key, "agent", agentID)
+
 	// Takeover check only on first message for a key.
 	if isFirst {
 		d.takeoverFn(ctx, session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID), key, opts)
@@ -385,6 +413,13 @@ func (d *Dispatcher) sendAndReply(
 
 	log.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD)
 
+	// Record turn success regardless of reply text length. A successful
+	// sendFn with empty result (e.g. a turn that only produces tool calls
+	// or whose text was stripped) still constitutes a healthy end-to-end
+	// roundtrip; gating markReplySuccess on non-empty text previously made
+	// /health's lastReplySuccess go stale on otherwise-healthy sessions.
+	d.markReplySuccess()
+
 	replyText := localizeAPIError(result.Text)
 	if d.replyFooter != "" {
 		replyText += "\n\n— " + d.replyFooter
@@ -402,8 +437,8 @@ func (d *Dispatcher) sendAndReply(
 	tracker.waitReady(ctx)
 
 	if replyText != "" {
-		if tracker.thinkingMsgID != "" {
-			if err := p.EditMessage(ctx, tracker.thinkingMsgID, replyText); err != nil {
+		if msgID := tracker.getThinkingMsgID(); msgID != "" {
+			if err := p.EditMessage(ctx, msgID, replyText); err != nil {
 				slog.Warn("edit message failed, sending new", "err", err)
 				d.SendSplitReply(ctx, p, msg.ChatID, replyText)
 			}
@@ -438,6 +473,8 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: chatID, Text: chunk}, 3); err != nil {
 			d.sendFailCount.Add(1)
 			slog.Error("reply chunk failed after retries", "chat", chatID, "chunk", i+1, "err", err)
+		} else {
+			d.markReplySuccess()
 		}
 	}
 }
@@ -463,16 +500,29 @@ func formatChineseDuration(d time.Duration) string {
 // to the read path so we don't waste allocations on events that are coalesced
 // away by the 1-per-second rate limit.
 type replyTracker struct {
-	ctx           context.Context
-	p             platform.Platform
-	chatID        string
-	thinkingMsgID string
+	ctx    context.Context
+	p      platform.Platform
+	chatID string
+	// thinkingMsgID is written by the Reply goroutine spawned in onEvent and
+	// read by editLoop + by sendAndReply (via waitReady→ctx.Done fallback).
+	// When ctx cancels, waitReady can return before msgIDReady is closed,
+	// so the subsequent read can race the goroutine's write. atomic.Pointer
+	// gives race-detector–clean visibility without extending linesMu's scope.
+	thinkingMsgID atomic.Pointer[string]
 	msgIDReady    chan struct{}
 	sent          sync.Once
 	editCh        chan struct{} // buffered(1), signals editLoop to redraw
 	done          chan struct{} // closed when the owning turn completes; exits editLoop
 	linesMu       sync.Mutex    // guards statusLines
 	statusLines   []string      // pre-allocated capped ring; joined lazily
+}
+
+// getThinkingMsgID returns the id or "" if not yet set.
+func (t *replyTracker) getThinkingMsgID() string {
+	if p := t.thinkingMsgID.Load(); p != nil {
+		return *p
+	}
+	return ""
 }
 
 func newIMEventTracker(ctx context.Context, p platform.Platform, chatID string) *replyTracker {
@@ -524,9 +574,17 @@ func (t *replyTracker) onEvent(ev cli.Event) {
 		snapshot := t.renderStatus()
 		go func() {
 			defer close(t.msgIDReady)
-			id, err := t.p.Reply(t.ctx, platform.OutgoingMessage{ChatID: t.chatID, Text: snapshot})
+			// Independent bounded ctx: a hung platform HTTP call would
+			// otherwise keep this goroutine alive for the full turn timeout
+			// (5min), blocking the editLoop waiter and downstream
+			// shutdown WaitGroups. 15s is well above normal p99 Feishu
+			// reply latency (<2s) and respects the parent ctx for early
+			// cancel.
+			rctx, cancel := context.WithTimeout(t.ctx, 15*time.Second)
+			defer cancel()
+			id, err := t.p.Reply(rctx, platform.OutgoingMessage{ChatID: t.chatID, Text: snapshot})
 			if err == nil {
-				t.thinkingMsgID = id
+				t.thinkingMsgID.Store(&id)
 			}
 		}()
 	})
@@ -546,7 +604,22 @@ func (t *replyTracker) renderStatus() string {
 	if len(t.statusLines) == 0 {
 		return ""
 	}
-	return strings.Join(t.statusLines, "\n")
+	// strings.Join allocates both a growing []byte scratch buffer and the
+	// final string. For the common 3-10 line case a Builder with a capacity
+	// estimate issues a single allocation.
+	total := len(t.statusLines) - 1 // separators
+	for _, l := range t.statusLines {
+		total += len(l)
+	}
+	var b strings.Builder
+	b.Grow(total)
+	for i, l := range t.statusLines {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(l)
+	}
+	return b.String()
 }
 
 // editLoop runs in a goroutine and rate-limits EditMessage calls to 1/s.
@@ -572,9 +645,9 @@ func (t *replyTracker) editLoop() {
 		case <-t.editCh:
 			// Render lazily — only once per rate-limited edit rather than per event.
 			text := t.renderStatus()
-			if t.thinkingMsgID != "" && text != "" {
-				if err := t.p.EditMessage(t.ctx, t.thinkingMsgID, text); err != nil {
-					slog.Debug("status edit failed", "msg_id", t.thinkingMsgID, "err", err)
+			if msgID := t.getThinkingMsgID(); msgID != "" && text != "" {
+				if err := t.p.EditMessage(t.ctx, msgID, text); err != nil {
+					slog.Debug("status edit failed", "msg_id", msgID, "err", err)
 				}
 			}
 			rateTimer.Reset(time.Second)

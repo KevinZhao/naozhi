@@ -98,7 +98,7 @@ func TestConnect_Success(t *testing.T) {
 	token := []byte("test-token-32-bytes-padded!!!!")
 	srv.serveHello(t, token)
 
-	m := NewManager(ManagerConfig{StateDir: t.TempDir()})
+	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
 	handle, err := m.connect(srv.path, token, 0)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -128,7 +128,7 @@ func TestConnect_WrongToken_AuthFailed(t *testing.T) {
 
 	srv.serveHello(t, realToken)
 
-	m := NewManager(ManagerConfig{StateDir: t.TempDir()})
+	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
 	_, err := m.connect(srv.path, wrongToken, 0)
 	if err == nil {
 		t.Fatal("expected error for wrong token, got nil")
@@ -149,7 +149,7 @@ func TestConnect_AuthFailed_Response(t *testing.T) {
 		conn.Write(append(data, '\n')) //nolint:errcheck
 	})
 
-	m := NewManager(ManagerConfig{StateDir: t.TempDir()})
+	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
 	token := []byte("some-32-byte-token-padded!!!!!!!")
 	_, err := m.connect(srv.path, token, 0)
 	if err == nil {
@@ -170,7 +170,7 @@ func TestConnect_UnexpectedMessageType(t *testing.T) {
 		conn.Write(append(data, '\n')) //nolint:errcheck
 	})
 
-	m := NewManager(ManagerConfig{StateDir: t.TempDir()})
+	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
 	token := []byte("some-32-byte-token-padded!!!!!!!")
 	_, err := m.connect(srv.path, token, 0)
 	if err == nil {
@@ -189,7 +189,7 @@ func TestConnect_BadJSON_HelloLine(t *testing.T) {
 		conn.Write([]byte("not json at all\n")) //nolint:errcheck
 	})
 
-	m := NewManager(ManagerConfig{StateDir: t.TempDir()})
+	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
 	token := []byte("some-32-byte-token-padded!!!!!!!")
 	_, err := m.connect(srv.path, token, 0)
 	if err == nil {
@@ -198,7 +198,7 @@ func TestConnect_BadJSON_HelloLine(t *testing.T) {
 }
 
 func TestConnect_DialFailure(t *testing.T) {
-	m := NewManager(ManagerConfig{StateDir: t.TempDir()})
+	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
 	_, err := m.connect("/nonexistent/path/shim.sock", []byte("token"), 0)
 	if err == nil {
 		t.Fatal("expected error for non-existent socket, got nil")
@@ -215,7 +215,7 @@ func TestConnect_ServerClosesBeforeHello(t *testing.T) {
 		conn.Close()
 	})
 
-	m := NewManager(ManagerConfig{StateDir: t.TempDir()})
+	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
 	token := []byte("some-32-byte-token-padded!!!!!!!")
 	_, err := m.connect(srv.path, token, 0)
 	if err == nil {
@@ -227,7 +227,7 @@ func TestConnect_ServerClosesBeforeHello(t *testing.T) {
 
 func TestDiscover_EmptyDir(t *testing.T) {
 	dir := t.TempDir()
-	m := NewManager(ManagerConfig{StateDir: dir})
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
 	states, err := m.Discover()
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
@@ -240,7 +240,7 @@ func TestDiscover_EmptyDir(t *testing.T) {
 func TestDiscover_NonExistentDir(t *testing.T) {
 	dir := t.TempDir()
 	nonExistent := filepath.Join(dir, "does_not_exist")
-	m := NewManager(ManagerConfig{StateDir: nonExistent})
+	m := mustNewManager(t, ManagerConfig{StateDir: nonExistent})
 	states, err := m.Discover()
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
@@ -256,7 +256,7 @@ func TestDiscover_SkipsNonJSONFiles(t *testing.T) {
 	// Create a non-.json file
 	os.WriteFile(filepath.Join(dir, "readme.txt"), []byte("not a state"), 0600) //nolint:errcheck
 
-	m := NewManager(ManagerConfig{StateDir: dir})
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
 	states, err := m.Discover()
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
@@ -273,7 +273,7 @@ func TestDiscover_RemovesCorruptStateFile(t *testing.T) {
 	corruptPath := filepath.Join(dir, "corrupt.json")
 	os.WriteFile(corruptPath, []byte("bad json {{{"), 0600) //nolint:errcheck
 
-	m := NewManager(ManagerConfig{StateDir: dir})
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
 	states, err := m.Discover()
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
@@ -303,7 +303,7 @@ func TestDiscover_RemovesStateWithDeadPID(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	m := NewManager(ManagerConfig{StateDir: dir})
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
 	states, err := m.Discover()
 	if err != nil {
 		t.Fatalf("Discover: %v", err)
@@ -321,7 +321,7 @@ func TestDiscover_RemovesStateWithDeadPID(t *testing.T) {
 
 func TestManager_StopAll_SendsShutdown(t *testing.T) {
 	dir := t.TempDir()
-	m := NewManager(ManagerConfig{StateDir: dir})
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
 
 	const n = 2
 	type pair struct {

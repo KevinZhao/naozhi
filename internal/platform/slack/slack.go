@@ -3,6 +3,7 @@ package slack
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -57,15 +58,26 @@ func (s *Slack) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
 
 // Start implements RunnablePlatform. Launches Socket Mode connection.
 func (s *Slack) Start(handler platform.MessageHandler) error {
+	// Initialize lifecycle state (ctx/cancel/done) under startMu so a
+	// concurrent Stop() that observes `started=true` cannot race a
+	// half-initialized ctx. Stop() also acquires startMu now, making
+	// Start+Stop mutually exclusive at initialization time.
 	s.startMu.Lock()
 	if s.started {
 		s.startMu.Unlock()
 		return fmt.Errorf("slack platform already started")
 	}
 	s.started = true
-	s.startMu.Unlock()
-
+	ctx, cancel := context.WithCancel(context.Background())
+	s.cancel = cancel
+	s.ctx = ctx
+	s.done = make(chan struct{})
+	// Assign handler BEFORE releasing startMu so a racing goroutine that
+	// observes started==true through a future peek path can only see the
+	// fully-initialised Slack value. Leaving it outside the lock used to
+	// give other observers a window where s.handler was still nil.
 	s.handler = handler
+	s.startMu.Unlock()
 
 	// Fetch bot user ID for mention detection
 	authResp, err := s.api.AuthTest()
@@ -75,11 +87,6 @@ func (s *Slack) Start(handler platform.MessageHandler) error {
 		s.botID = authResp.UserID
 		slog.Info("slack bot identity", "user_id", s.botID, "team", authResp.Team)
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	s.cancel = cancel
-	s.ctx = ctx
-	s.done = make(chan struct{})
 
 	client := socketmode.New(s.api)
 
@@ -110,10 +117,19 @@ func (s *Slack) Start(handler platform.MessageHandler) error {
 
 // Stop implements RunnablePlatform.
 func (s *Slack) Stop() error {
-	if s.cancel != nil {
-		s.cancel()
-		<-s.done
+	// Snapshot lifecycle handles under startMu so a pre-Start Stop() or a
+	// racing Start() cannot hand us a nil ctx/cancel. If the platform was
+	// never started, there is nothing to tear down.
+	s.startMu.Lock()
+	cancel := s.cancel
+	done := s.done
+	started := s.started
+	s.startMu.Unlock()
+	if !started || cancel == nil {
+		return nil
 	}
+	cancel()
+	<-done
 	s.handlerWg.Wait()
 	return nil
 }
@@ -201,7 +217,7 @@ func (s *Slack) AddReaction(ctx context.Context, messageID string, r platform.Re
 		return err
 	}
 	if err := s.api.AddReactionContext(ctx, name, ref); err != nil {
-		if strings.Contains(err.Error(), "already_reacted") {
+		if isSlackErrCode(err, "already_reacted") {
 			return nil
 		}
 		return fmt.Errorf("slack add reaction: %w", err)
@@ -225,12 +241,23 @@ func (s *Slack) RemoveReaction(ctx context.Context, messageID string, r platform
 		return err
 	}
 	if err := s.api.RemoveReactionContext(ctx, name, ref); err != nil {
-		if strings.Contains(err.Error(), "no_reaction") {
+		if isSlackErrCode(err, "no_reaction") {
 			return nil
 		}
 		return fmt.Errorf("slack remove reaction: %w", err)
 	}
 	return nil
+}
+
+// isSlackErrCode unwraps Slack's typed error response and returns true if the
+// code matches. Falls back to substring match on the unwrapped message — some
+// slack-go transport errors are plain errors.errorString, not SlackErrorResponse.
+func isSlackErrCode(err error, code string) bool {
+	var resp slack.SlackErrorResponse
+	if errors.As(err, &resp) {
+		return resp.Err == code
+	}
+	return strings.Contains(err.Error(), code)
 }
 
 func (s *Slack) eventLoop(ctx context.Context, client *socketmode.Client) {

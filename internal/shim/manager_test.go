@@ -41,7 +41,7 @@ func writeLine(_ *testing.T, conn net.Conn, msg interface{}) {
 // Returns error instead of calling t.Fatal so it is safe to call from goroutines.
 func readLineMsgConn(conn net.Conn, dst interface{}) error {
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-	defer conn.SetReadDeadline(time.Time{})                //nolint:errcheck
+	defer conn.SetReadDeadline(time.Time{})               //nolint:errcheck
 	line, err := bufio.NewReader(conn).ReadBytes('\n')
 	if err != nil {
 		return err
@@ -56,6 +56,18 @@ func readLineMsg(t *testing.T, conn net.Conn, dst interface{}) {
 	if err := readLineMsgConn(conn, dst); err != nil {
 		t.Fatalf("readLineMsg: %v", err)
 	}
+}
+
+// mustNewManager wraps NewManager + t.Fatal so tests do not have to repeat the
+// error check. NewManager returns an error only when os.Executable() fails,
+// which does not happen on any supported CI platform.
+func mustNewManager(t *testing.T, cfg ManagerConfig) *Manager {
+	t.Helper()
+	m, err := NewManager(cfg)
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	return m
 }
 
 // --- ShimHandle.SendMsg ---
@@ -405,7 +417,7 @@ func TestShimHandle_SendMsg_ConcurrentSafe(t *testing.T) {
 
 func TestNewManager_Defaults(t *testing.T) {
 	dir := t.TempDir()
-	m := NewManager(ManagerConfig{StateDir: dir})
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
 
 	if m.maxShims != 50 {
 		t.Errorf("maxShims = %d, want 50", m.maxShims)
@@ -429,7 +441,7 @@ func TestNewManager_Defaults(t *testing.T) {
 
 func TestNewManager_CustomConfig(t *testing.T) {
 	dir := t.TempDir()
-	m := NewManager(ManagerConfig{
+	m := mustNewManager(t, ManagerConfig{
 		StateDir:        dir,
 		MaxShims:        10,
 		BufferSize:      500,
@@ -457,7 +469,7 @@ func TestNewManager_CustomConfig(t *testing.T) {
 
 func TestManager_Remove(t *testing.T) {
 	dir := t.TempDir()
-	m := NewManager(ManagerConfig{StateDir: dir})
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
 
 	key := "test:key"
 	m.mu.Lock()
@@ -477,13 +489,13 @@ func TestManager_Remove(t *testing.T) {
 
 func TestManager_Remove_NonExistentKey(t *testing.T) {
 	dir := t.TempDir()
-	m := NewManager(ManagerConfig{StateDir: dir})
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
 	m.Remove("nonexistent:key") // must not panic
 }
 
 func TestManager_CLIPath(t *testing.T) {
 	dir := t.TempDir()
-	m := NewManager(ManagerConfig{StateDir: dir, CLIPath: "/usr/bin/claude"})
+	m := mustNewManager(t, ManagerConfig{StateDir: dir, CLIPath: "/usr/bin/claude"})
 	if m.CLIPath() != "/usr/bin/claude" {
 		t.Errorf("CLIPath() = %q, want /usr/bin/claude", m.CLIPath())
 	}
@@ -598,19 +610,19 @@ func TestFilterShimEnv_AllBlocked(t *testing.T) {
 
 func TestManager_DetachAll_Empty(t *testing.T) {
 	dir := t.TempDir()
-	m := NewManager(ManagerConfig{StateDir: dir})
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
 	m.DetachAll() // must not panic
 }
 
 func TestManager_StopAll_Empty(t *testing.T) {
 	dir := t.TempDir()
-	m := NewManager(ManagerConfig{StateDir: dir})
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
 	m.StopAll(t.Context()) // must not panic
 }
 
 func TestManager_DetachAll_SendsDetach(t *testing.T) {
 	dir := t.TempDir()
-	m := NewManager(ManagerConfig{StateDir: dir})
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
 
 	const n = 3
 	type pair struct {

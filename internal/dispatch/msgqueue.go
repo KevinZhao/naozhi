@@ -27,6 +27,7 @@ type sessionQueue struct {
 	gen          uint64 // incremented on Discard to invalidate stale owners
 	msgs         []QueuedMsg
 	lastNotifyNs int64 // unix nanoseconds of last ShouldNotify call (replaces lastNotify map)
+	lastEvictNs  int64 // unix nanoseconds of last eviction Warn log (rate-limit)
 }
 
 // MessageQueue replaces SessionGuard with per-session message queuing.
@@ -64,6 +65,12 @@ type dropNotifyEntry struct {
 // dropNotifyMaxKeys bounds dropNotifyTimes; oldest entry is evicted on insert
 // when at capacity. 1024 covers realistic IM concurrency with minimal memory.
 const dropNotifyMaxKeys = 1024
+
+// evictWarnCooldownNs rate-limits the per-key "queue full" eviction Warn log
+// so a sustained flood does not drown operator signals. 5s is long enough
+// that the first line proves the condition but short enough that a second
+// burst after recovery produces a fresh datum.
+const evictWarnCooldownNs = int64(5 * time.Second)
 
 // NewMessageQueue creates a MessageQueue.
 // maxDepth <= 0 disables queuing (degrades to drop+wait, same as old Guard).
@@ -119,9 +126,20 @@ func (q *MessageQueue) Enqueue(key string, msg QueuedMsg) (isOwner, enqueued boo
 		// Queue-full eviction is silent data loss: the user that sent the
 		// evicted message gets no feedback. Log at Warn so operators can
 		// observe backpressure (single chat overwhelmed, or CLI hung).
-		// Chat key is included so the line correlates with session logs.
-		slog.Warn("msgqueue: dropping oldest message (queue full)",
-			"key", key, "depth", len(sq.msgs), "max_depth", q.maxDepth)
+		// Rate-limit per key to 1/5s so a sustained flood does not drown
+		// the log; a single log line is enough to prove the condition, and
+		// repeated lines add no operator signal once the alert fires.
+		now := time.Now().UnixNano()
+		// delta < 0 means NTP stepped backwards (wall-clock moved into the
+		// past). Without re-anchoring lastEvictNs to `now`, the next check
+		// would again see delta < 0 and log, defeating the rate-limit; we
+		// also need to update the anchor in the fire path below. Mirrors
+		// the pattern in ShouldNotify.
+		if delta := now - sq.lastEvictNs; delta < 0 || delta >= evictWarnCooldownNs {
+			slog.Warn("msgqueue: dropping oldest message (queue full)",
+				"key", key, "depth", len(sq.msgs), "max_depth", q.maxDepth)
+			sq.lastEvictNs = now
+		}
 		copy(sq.msgs, sq.msgs[1:])
 		sq.msgs[len(sq.msgs)-1] = QueuedMsg{}
 		sq.msgs = sq.msgs[:len(sq.msgs)-1]
@@ -159,8 +177,17 @@ func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 	}
 
 	if len(sq.msgs) == 0 {
-		// Release ownership.
+		// Release ownership. Also purge any stale dropNotify LRU entry so
+		// the next notification goes through a consistent cooldown path:
+		// otherwise ShouldNotify would fall from the queue branch (which
+		// uses sq.lastNotifyNs) to the LRU branch (which still has a stale
+		// timestamp from before this session was queued), silencing a
+		// legitimate notification.
 		delete(q.queues, key)
+		if elem, ok := q.dropNotifyIndex[key]; ok {
+			q.dropNotifyLRU.Remove(elem)
+			delete(q.dropNotifyIndex, key)
+		}
 		return nil
 	}
 
@@ -187,6 +214,14 @@ func (q *MessageQueue) Discard(key string) {
 		sq.msgs = nil
 		sq.busy = false
 		sq.lastNotifyNs = 0
+	}
+	// Mirror DoneOrDrain's LRU cleanup: a pre-Discard drop-path cooldown
+	// (chat entered via /new after being idle for >3s) would otherwise keep
+	// its stale timestamp and silence the first legitimate notify after
+	// Discard. Safe to delete even if no entry exists.
+	if elem, ok := q.dropNotifyIndex[key]; ok {
+		q.dropNotifyLRU.Remove(elem)
+		delete(q.dropNotifyIndex, key)
 	}
 }
 

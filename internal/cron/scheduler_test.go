@@ -268,6 +268,35 @@ func TestSchedulerDelete(t *testing.T) {
 	}
 }
 
+// TestJobRunningGuardReentry locks in the R31-REL2 invariant: a second execute
+// for the same job ID while the first is still holding the guard must be
+// short-circuited by the CAS gate, not run concurrently.
+func TestJobRunningGuardReentry(t *testing.T) {
+	t.Parallel()
+	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
+
+	g := s.jobRunningGuard("job-x")
+	if !g.CompareAndSwap(false, true) {
+		t.Fatal("initial CAS should succeed")
+	}
+	if g2 := s.jobRunningGuard("job-x"); g2 != g {
+		t.Fatal("jobRunningGuard should return the same *atomic.Bool for the same id")
+	}
+	if g.CompareAndSwap(false, true) {
+		t.Fatal("re-entrant CAS should fail while guard is held")
+	}
+	g.Store(false)
+	if !g.CompareAndSwap(false, true) {
+		t.Fatal("CAS should succeed after guard released")
+	}
+	g.Store(false)
+
+	s.runningJobs.Delete("job-x")
+	if g3 := s.jobRunningGuard("job-x"); g3 == g {
+		t.Fatal("guard should be freshly allocated after delete")
+	}
+}
+
 func TestSchedulerInvalidSchedule(t *testing.T) {
 	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
 	if err := s.Start(); err != nil {

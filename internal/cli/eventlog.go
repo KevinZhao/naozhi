@@ -61,6 +61,7 @@ type EventLog struct {
 
 	subMu       sync.Mutex
 	subscribers map[*subscriber]struct{}
+	subsClosed  bool // CloseSubscribers has been called; no new subscribers accepted
 }
 
 // NewEventLog creates an event log with the given max size.
@@ -71,20 +72,10 @@ func NewEventLog(maxSize int) *EventLog {
 	return &EventLog{maxSize: maxSize, entries: make([]EventEntry, maxSize)}
 }
 
-// Append adds an entry to the log, overwriting the oldest entry when full.
-// Signals all subscribers non-blockingly after appending.
-func (l *EventLog) Append(e EventEntry) {
-	l.mu.Lock()
-	if e.Time == 0 {
-		e.Time = time.Now().UnixMilli()
-	}
-	l.entries[l.head] = e
-	l.head = (l.head + 1) % l.maxSize
-	if l.count < l.maxSize {
-		l.count++
-	}
-
-	// Track sub-agents per turn.
+// applyEntryStateLocked updates per-turn agent tracking for a single entry.
+// Caller MUST hold l.mu. Summary atomic writes are the caller's responsibility
+// so that AppendBatch can coalesce multiple per-type updates into one Store.
+func (l *EventLog) applyEntryStateLocked(e EventEntry) {
 	switch e.Type {
 	case "agent":
 		label := e.Subagent
@@ -104,10 +95,28 @@ func (l *EventLog) Append(e EventEntry) {
 		l.turnAgents = l.turnAgents[:0]
 		l.bgAgents = l.bgAgents[:0]
 	}
+}
 
-	l.mu.Unlock()
+// Append adds an entry to the log, overwriting the oldest entry when full.
+// Signals all subscribers non-blockingly after appending.
+func (l *EventLog) Append(e EventEntry) {
+	l.mu.Lock()
+	if e.Time == 0 {
+		e.Time = time.Now().UnixMilli()
+	}
+	l.entries[l.head] = e
+	l.head = (l.head + 1) % l.maxSize
+	if l.count < l.maxSize {
+		l.count++
+	}
 
-	// Update cached summaries (atomic, no lock needed).
+	l.applyEntryStateLocked(e)
+
+	// Atomic summary stores are issued *inside* l.mu so that AppendBatch,
+	// which holds l.mu for its full duration, cannot have its later Store
+	// racing with a concurrent live Append's Store — the serialization on
+	// l.mu guarantees last-writer-wins matches entry-order, not
+	// entry-ordering-inverted by lock release scheduling.
 	switch e.Type {
 	case "user":
 		l.lastPromptSummary.Store(e.Summary)
@@ -115,15 +124,28 @@ func (l *EventLog) Append(e EventEntry) {
 		l.lastActivitySummary.Store(e.Summary)
 	}
 
+	l.mu.Unlock()
+
 	l.notifySubscribers()
 }
 
 // AppendBatch adds multiple entries to the log, holding the lock once and
 // notifying subscribers once. Used by InjectHistory to avoid per-entry overhead.
+//
+// Mirrors Append's per-entry sub-agent tracking and summary atomics so the
+// sidebar does not show stale "(no prompt)" placeholders after history
+// injection until a live event arrives. Atomic summary writes happen under
+// l.mu to avoid a race with concurrent Append: if a live event ran Store
+// after our Unlock but before our own Store, our older batch value would
+// clobber it.
 func (l *EventLog) AppendBatch(entries []EventEntry) {
 	if len(entries) == 0 {
 		return
 	}
+	var (
+		lastPrompt, lastActivity string
+		sawPrompt, sawActivity   bool
+	)
 	l.mu.Lock()
 	for _, e := range entries {
 		if e.Time == 0 {
@@ -134,6 +156,29 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 		if l.count < l.maxSize {
 			l.count++
 		}
+
+		l.applyEntryStateLocked(e)
+
+		// Track last-of-kind summaries so a single Store (below, still
+		// under l.mu) captures the tail of the batch. The "saw" flag is
+		// separate from the value so an empty final Summary still
+		// overwrites the atomic — Append stores unconditionally for these
+		// types, and diverging here would leave stale summaries visible.
+		switch e.Type {
+		case "user":
+			lastPrompt = e.Summary
+			sawPrompt = true
+		case "tool_use", "thinking", "agent", "task_start", "task_progress":
+			lastActivity = e.Summary
+			sawActivity = true
+		}
+	}
+
+	if sawPrompt {
+		l.lastPromptSummary.Store(lastPrompt)
+	}
+	if sawActivity {
+		l.lastActivitySummary.Store(lastActivity)
 	}
 	l.mu.Unlock()
 
@@ -141,6 +186,11 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 }
 
 // notifySubscribers wakes all subscriber channels non-blockingly.
+//
+// Holds subMu for the full iteration: CloseSubscribers also takes subMu to
+// close+nil the subscriber channels, so snapshotting outside the lock would
+// allow a send on a closed channel. The non-blocking select keeps the hold
+// time at O(n) of live subscribers (dashboard clients ≤ a few).
 func (l *EventLog) notifySubscribers() {
 	l.subMu.Lock()
 	for sub := range l.subscribers {
@@ -154,9 +204,21 @@ func (l *EventLog) notifySubscribers() {
 
 // Subscribe returns a notification channel and an unsubscribe function.
 // The channel receives a signal (non-blocking) whenever Append is called.
+//
+// If CloseSubscribers has already been called (process is dying), returns a
+// channel that is already closed so the caller's select-on-notify arm fires
+// immediately instead of parking forever. Without this guard, a Subscribe
+// racing with readLoop's deferred CloseSubscribers would lazily rebuild the
+// subscribers map and register a channel that nothing will ever close, so
+// the downstream eventPushLoop would hang on <-notify until Hub shutdown.
 func (l *EventLog) Subscribe() (<-chan struct{}, func()) {
 	sub := &subscriber{ch: make(chan struct{}, 1)}
 	l.subMu.Lock()
+	if l.subsClosed {
+		l.subMu.Unlock()
+		sub.closeOnce.Do(func() { close(sub.ch) })
+		return sub.ch, func() {}
+	}
 	if l.subscribers == nil {
 		l.subscribers = make(map[*subscriber]struct{})
 	}
@@ -174,6 +236,7 @@ func (l *EventLog) Subscribe() (<-chan struct{}, func()) {
 
 // CloseSubscribers closes all subscriber channels and clears the subscriber list.
 // Called when the process dies so that eventPushLoop goroutines can exit.
+// After this returns, subsequent Subscribe calls receive a pre-closed channel.
 func (l *EventLog) CloseSubscribers() {
 	if l == nil {
 		return
@@ -184,6 +247,7 @@ func (l *EventLog) CloseSubscribers() {
 		sub.closeOnce.Do(func() { close(sub.ch) })
 	}
 	l.subscribers = nil
+	l.subsClosed = true
 }
 
 // Entries returns a copy of all entries in chronological order.
@@ -216,34 +280,41 @@ func (l *EventLog) LastN(n int) []EventEntry {
 }
 
 // EntriesSince returns entries after the given unix ms timestamp, in chronological order.
-// Scans backward from the newest entry for O(k) performance in the common case
-// (k = entries since afterMS, typically 1-5 during streaming).
+// Single-pass backward scan collects matches into a reverse buffer; the caller
+// receives them in chronological order. Previous implementation did two passes
+// (count, then copy forward), touching each matched ring slot twice. For the
+// hot streaming path (k = 1-5 new events per notify) the constant savings are
+// small but the code path is simpler and avoids the arithmetic error surface
+// of two separate modular indexing expressions.
 func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	if l.count == 0 {
 		return nil
 	}
-	// Scan backward from newest to find the boundary.
-	// newest is at (head-1+maxSize)%maxSize.
-	matchCount := 0
+	// First pass: collect matches in reverse order. Most calls match 0-5
+	// entries so we allocate lazily only when the first match is found.
+	var rev []EventEntry
 	for i := l.count - 1; i >= 0; i-- {
 		idx := (l.head - l.count + i + l.maxSize) % l.maxSize
 		if l.entries[idx].Time <= afterMS {
 			break
 		}
-		matchCount++
+		if rev == nil {
+			// Cap at l.count so a boundary exactly at the oldest entry does
+			// not over-allocate; typical streaming match count is 1-5.
+			rev = make([]EventEntry, 0, l.count-i)
+		}
+		rev = append(rev, l.entries[idx])
 	}
-	if matchCount == 0 {
+	if len(rev) == 0 {
 		return nil
 	}
-	out := make([]EventEntry, matchCount)
-	startIdx := l.count - matchCount
-	start := (l.head - l.count + l.maxSize) % l.maxSize
-	for i := 0; i < matchCount; i++ {
-		out[i] = l.entries[(start+startIdx+i)%l.maxSize]
+	// Reverse in place — chronological order for the caller.
+	for i, j := 0, len(rev)-1; i < j; i, j = i+1, j-1 {
+		rev[i], rev[j] = rev[j], rev[i]
 	}
-	return out
+	return rev
 }
 
 // LastPromptSummary returns the summary of the most recent "user" entry.

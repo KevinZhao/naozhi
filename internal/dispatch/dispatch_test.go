@@ -277,6 +277,34 @@ func TestDispatchCommand_New_NamedAgent(t *testing.T) {
 	}
 }
 
+func TestNormalizeSlashCommand(t *testing.T) {
+	t.Parallel()
+	cases := []struct{ in, want string }{
+		{"/Help", "/help"},
+		{"/NEW", "/new"},
+		{"/Cd /Path/To/Dir", "/cd /Path/To/Dir"},
+		{"/cron add \"Job Name\"", "/cron add \"Job Name\""},
+		{"hello world", "hello world"}, // non-slash passthrough
+		{"/help", "/help"},             // already lowercase
+	}
+	for _, tc := range cases {
+		if got := normalizeSlashCommand(tc.in); got != tc.want {
+			t.Errorf("normalizeSlashCommand(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestDispatchCommand_CaseInsensitive(t *testing.T) {
+	fp := &fakePlatform{}
+	d := newTestDispatcher(fp, nil)
+	if !d.dispatchCommand(context.Background(), incomingMsg("/Help"), "/Help", slog.Default()) {
+		t.Fatal("expected /Help to be handled case-insensitively")
+	}
+	if !strings.Contains(fp.lastReply(), "/help") {
+		t.Errorf("case-insensitive /Help should return help; got %q", fp.lastReply())
+	}
+}
+
 func TestDispatchCommand_Pwd(t *testing.T) {
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp, nil)
@@ -573,8 +601,8 @@ func TestReplyTracker_Interim_InitialReply(t *testing.T) {
 		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "thinking", Text: "analyzing"}}},
 	})
 	tracker.waitReady(ctx)
-	if tracker.thinkingMsgID != "thinking-1" {
-		t.Errorf("thinkingMsgID = %q, want %q", tracker.thinkingMsgID, "thinking-1")
+	if got := tracker.getThinkingMsgID(); got != "thinking-1" {
+		t.Errorf("thinkingMsgID = %q, want %q", got, "thinking-1")
 	}
 	if fp.replyCount() != 1 {
 		t.Errorf("reply count = %d, want 1", fp.replyCount())

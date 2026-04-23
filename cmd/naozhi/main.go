@@ -38,9 +38,24 @@ import (
 
 var version = "dev"
 
+// claudeEnvAllowedPrefixes restricts which env vars from
+// ~/.claude/settings.json are allowed to leak into the naozhi parent process.
+// Historically every key was injected, which meant arbitrary keys set by a
+// third-party Claude extension would become part of naozhi's attack surface
+// (and downstream shim/CLI env) with no audit. Limit to the prefixes that
+// Claude CLI and its AWS/Anthropic model plumbing actually consume.
+var claudeEnvAllowedPrefixes = []string{
+	"ANTHROPIC_",
+	"CLAUDE_",
+	"AWS_",
+	"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+	"http_proxy", "https_proxy", "no_proxy",
+}
+
 // applyClaudeEnvSettings reads ~/.claude/settings.json and applies any env section
 // to the current process so spawned CC child processes inherit them via os.Environ().
-// Only sets vars not already present (shell-set vars take precedence).
+// Only sets vars not already present (shell-set vars take precedence) and only
+// for keys matching claudeEnvAllowedPrefixes.
 func applyClaudeEnvSettings() {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -57,10 +72,29 @@ func applyClaudeEnvSettings() {
 		return
 	}
 	for k, v := range s.Env {
+		if !matchesAnyPrefix(k, claudeEnvAllowedPrefixes) {
+			continue
+		}
 		if _, exists := os.LookupEnv(k); !exists {
 			os.Setenv(k, v) //nolint:errcheck
 		}
 	}
+}
+
+// matchesAnyPrefix reports whether s starts with any of the given prefixes.
+// Prefixes ending in "_" match a namespace; prefixes without "_" match the
+// full name (e.g. "HTTP_PROXY" matches only the exact env name).
+func matchesAnyPrefix(s string, prefixes []string) bool {
+	for _, p := range prefixes {
+		if strings.HasSuffix(p, "_") {
+			if strings.HasPrefix(s, p) {
+				return true
+			}
+		} else if s == p {
+			return true
+		}
+	}
+	return false
 }
 
 // writeClaudeSettingsOverride generates ~/.naozhi/claude-settings.json by copying
@@ -147,11 +181,7 @@ func filterHooks(hooksRaw json.RawMessage, serverPort string) json.RawMessage {
 				}
 				if isNaozhiCallbackHook(cmd, serverPort) {
 					changed = true
-					logCmd := cmd
-					if len(logCmd) > 80 {
-						logCmd = logCmd[:80] + "..."
-					}
-					slog.Info("dropping hook to prevent naozhi callback loop", "event", eventName, "command", logCmd)
+					slog.Info("dropping hook to prevent naozhi callback loop", "event", eventName, "command", sanitizeLogCmd(cmd))
 				} else {
 					safeEntries = append(safeEntries, e)
 				}
@@ -184,6 +214,22 @@ func filterHooks(hooksRaw json.RawMessage, serverPort string) json.RawMessage {
 // naozhi's HTTP server (which would cause an infinite loop).
 // It matches: any mention of "naozhi", or an HTTP call to localhost/127.0.0.1 on
 // naozhi's listen port.
+// sanitizeLogCmd scrubs control characters from a hook command string so
+// attacker-controlled content in ~/.claude/settings.json cannot inject fake
+// log lines (newlines, ANSI escapes) when log.format is text. Also truncates
+// to 80 chars so the log line stays readable.
+func sanitizeLogCmd(cmd string) string {
+	if len(cmd) > 80 {
+		cmd = cmd[:80] + "..."
+	}
+	return strings.Map(func(r rune) rune {
+		if r < 0x20 || r == 0x7f {
+			return '.'
+		}
+		return r
+	}, cmd)
+}
+
 func isNaozhiCallbackHook(cmd, port string) bool {
 	if cmd == "" {
 		return false
@@ -268,7 +314,7 @@ func main() {
 	wrapper := cli.NewWrapper(cfg.CLI.Path, proto, cfg.CLI.Backend)
 
 	// Initialize ShimManager
-	shimMgr := shim.NewManager(shim.ManagerConfig{
+	shimMgr, err := shim.NewManager(shim.ManagerConfig{
 		StateDir:        osutil.ExpandHome(cfg.Session.Shim.StateDir),
 		CLIPath:         wrapper.CLIPath,
 		IdleTimeout:     parseDurationOrDefault(cfg.Session.Shim.IdleTimeout, 4*time.Hour),
@@ -277,6 +323,10 @@ func main() {
 		MaxBufBytes:     parseBytesOrDefault(cfg.Session.Shim.MaxBufferBytes, 50*1024*1024),
 		MaxShims:        cfg.Session.Shim.MaxShims,
 	})
+	if err != nil {
+		slog.Error("init shim manager", "err", err)
+		os.Exit(1)
+	}
 	wrapper.ShimManager = shimMgr
 
 	// Parse watchdog and store path
@@ -546,28 +596,40 @@ func main() {
 		slog.Info("upstream connector starting", "url", cfg.Upstream.URL, "node_id", cfg.Upstream.NodeID)
 	}
 
-	// Graceful shutdown
+	// Graceful shutdown. runShutdown is idempotent via shutdownOnce so both the
+	// signal path and the spontaneous server-exit path (see select below) run it
+	// exactly once. Without this guard, a srv.Start error exit would skip
+	// scheduler.Stop()/router.Shutdown() and drop the last cron snapshot + leak
+	// shim state; conversely a clean server exit without a signal would
+	// deadlock on <-shutdownDone.
 	shutdownDone := make(chan struct{})
+	var shutdownOnce sync.Once
+	runShutdown := func(reason string) {
+		shutdownOnce.Do(func() {
+			defer close(shutdownDone)
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("panic during shutdown", "panic", r)
+				}
+			}()
+			slog.Info("shutdown starting", "reason", reason)
+			if err := osutil.SdNotify("STOPPING=1"); err != nil {
+				slog.Warn("sd_notify STOPPING failed", "err", err)
+			}
+			cancel()
+			// Scheduler must stop fully before router.Shutdown: in-flight cron
+			// jobs still call into router (GetOrCreate/Send), so tearing the
+			// router down in parallel would race against those calls.
+			scheduler.Stop()
+			router.Shutdown()
+		})
+	}
+
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 	go func() {
 		sig := <-sigCh
-		defer close(shutdownDone)
-		defer func() {
-			if r := recover(); r != nil {
-				slog.Error("panic during shutdown", "panic", r)
-			}
-		}()
-		slog.Info("received signal", "signal", sig)
-		if err := osutil.SdNotify("STOPPING=1"); err != nil {
-			slog.Warn("sd_notify STOPPING failed", "err", err)
-		}
-		cancel()
-		// Scheduler must stop fully before router.Shutdown: in-flight cron
-		// jobs still call into router (GetOrCreate/Send), so tearing the
-		// router down in parallel would race against those calls.
-		scheduler.Stop()
-		router.Shutdown()
+		runShutdown("signal:" + sig.String())
 	}()
 
 	slog.Info("naozhi starting",
@@ -624,8 +686,13 @@ func main() {
 	case err := <-serverErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("server error", "err", err)
+			runShutdown("server-error")
+			<-shutdownDone
 			os.Exit(1)
 		}
+		// Server exited cleanly without a signal (e.g. listener closed by
+		// internal path) — still need to drain scheduler/router before return.
+		runShutdown("server-exit")
 		<-shutdownDone
 	case <-shutdownDone:
 		// Wait for HTTP server to finish draining in-flight requests

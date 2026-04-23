@@ -135,6 +135,52 @@ func TestWatchdog_StopThenStartResumes(t *testing.T) {
 	}
 }
 
+// TestWatchdog_ResetReplacesTimer verifies that Reset stops the previous timer
+// so we do not accumulate idle runtime timers under high-frequency Reset.
+func TestWatchdog_ResetReplacesTimer(t *testing.T) {
+	w := NewWatchdog(50*time.Millisecond, nil)
+	w.Start()
+	t.Cleanup(w.Stop)
+
+	w.mu.Lock()
+	firstTimer := w.timer
+	w.mu.Unlock()
+	if firstTimer == nil {
+		t.Fatal("Start should have allocated a timer")
+	}
+
+	w.Reset()
+
+	w.mu.Lock()
+	secondTimer := w.timer
+	w.mu.Unlock()
+	if secondTimer == nil {
+		t.Fatal("Reset should have allocated a new timer")
+	}
+	if secondTimer == firstTimer {
+		t.Fatal("Reset should have replaced the timer pointer")
+	}
+	// Stopping the original timer after Reset should already be a no-op.
+	if firstTimer.Stop() {
+		t.Error("first timer was still live after Reset — Reset did not Stop it")
+	}
+}
+
+// TestWatchdog_StopClearsTimer verifies that Stop releases the timer pointer
+// so the runtime does not retain a reference to the no-op callback.
+func TestWatchdog_StopClearsTimer(t *testing.T) {
+	w := NewWatchdog(50*time.Millisecond, nil)
+	w.Start()
+	w.Stop()
+
+	w.mu.Lock()
+	tm := w.timer
+	w.mu.Unlock()
+	if tm != nil {
+		t.Error("Stop should have cleared the timer pointer")
+	}
+}
+
 // TestWatchdog_GenerationCounterRaceStress exercises concurrent Reset/Stop
 // calls under the -race detector to catch any data races in the generation counter.
 func TestWatchdog_GenerationCounterRaceStress(t *testing.T) {

@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/time/rate"
@@ -28,6 +30,60 @@ var dashboardJS embed.FS
 
 const authCookieName = "naozhi_auth"
 
+// jsonEncBuf pairs a pooled bytes.Buffer with a json.Encoder bound to it.
+// Reused by writeJSON/writeJSONStatus so hot dashboard poll paths do not
+// allocate one encoder per HTTP response. Mirrors the shimSendBufPool idiom
+// in internal/cli/process.go.
+type jsonEncBuf struct {
+	buf *bytes.Buffer
+	enc *json.Encoder
+}
+
+var jsonEncPool = sync.Pool{
+	New: func() any {
+		buf := new(bytes.Buffer)
+		enc := json.NewEncoder(buf)
+		enc.SetEscapeHTML(false)
+		return &jsonEncBuf{buf: buf, enc: enc}
+	},
+}
+
+// jsonEncBufMaxCap caps the buffer we return to the pool so a one-off large
+// response (e.g. 2MB sessions snapshot) does not permanently pin that capacity.
+const jsonEncBufMaxCap = 256 * 1024
+
+func getJSONEnc() *jsonEncBuf {
+	e := jsonEncPool.Get().(*jsonEncBuf)
+	e.buf.Reset()
+	return e
+}
+
+func putJSONEnc(e *jsonEncBuf) {
+	if e.buf.Cap() > jsonEncBufMaxCap {
+		return
+	}
+	jsonEncPool.Put(e)
+}
+
+// marshalPooled marshals v via the pooled encoder and copies the result into a
+// fresh []byte. Callers who would otherwise call json.Marshal on a hot path
+// (WS event fanout, session_state broadcasts) use this to avoid the per-call
+// encodeState allocation. Returned slice is safe to share/outlive the pool.
+func marshalPooled(v any) ([]byte, error) {
+	e := getJSONEnc()
+	defer putJSONEnc(e)
+	if err := e.enc.Encode(v); err != nil {
+		return nil, err
+	}
+	raw := e.buf.Bytes()
+	if n := len(raw); n > 0 && raw[n-1] == '\n' {
+		raw = raw[:n-1]
+	}
+	out := make([]byte, len(raw))
+	copy(out, raw)
+	return out, nil
+}
+
 // writeJSON sets the Content-Type header and encodes v as JSON to w.
 // Logs errors at debug level since HTTP write failures are common after
 // client disconnects, but JSON marshal failures indicate bugs.
@@ -39,9 +95,17 @@ const authCookieName = "naozhi_auth"
 // API output (curl / log dumps) hard to diff.
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
+	// X-Content-Type-Options: nosniff prevents legacy browsers from MIME-sniffing
+	// JSON responses as HTML/JS. Cheap defence-in-depth against any future path
+	// that accidentally produces HTML-looking content via SetEscapeHTML(false).
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	e := getJSONEnc()
+	defer putJSONEnc(e)
+	if err := e.enc.Encode(v); err != nil {
+		slog.Debug("write json response", "err", err)
+		return
+	}
+	if _, err := w.Write(e.buf.Bytes()); err != nil {
 		slog.Debug("write json response", "err", err)
 	}
 }
@@ -51,10 +115,15 @@ func writeJSON(w http.ResponseWriter, v any) {
 // the correct ordering: Set header → WriteHeader → Encode body.
 func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(status)
-	enc := json.NewEncoder(w)
-	enc.SetEscapeHTML(false)
-	if err := enc.Encode(v); err != nil {
+	e := getJSONEnc()
+	defer putJSONEnc(e)
+	if err := e.enc.Encode(v); err != nil {
+		slog.Debug("write json response", "err", err)
+		return
+	}
+	if _, err := w.Write(e.buf.Bytes()); err != nil {
 		slog.Debug("write json response", "err", err)
 	}
 }

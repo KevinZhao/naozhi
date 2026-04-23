@@ -66,20 +66,33 @@ func parseImageFile(fh *multipart.FileHeader) (cli.ImageData, error) {
 	}
 	f, err := fh.Open()
 	if err != nil {
-		return cli.ImageData{}, fmt.Errorf("open file: %w", err)
+		// Wrapped os.PathError can surface the temp-file path; keep that for
+		// operator logs, return a generic message to the client.
+		slog.Debug("upload: open multipart file failed", "err", err)
+		return cli.ImageData{}, errors.New("failed to read uploaded file")
 	}
 	defer f.Close()
 	data, err := io.ReadAll(f)
 	if err != nil {
-		return cli.ImageData{}, fmt.Errorf("read file: %w", err)
+		slog.Debug("upload: read multipart file failed", "err", err)
+		return cli.ImageData{}, errors.New("failed to read uploaded file")
 	}
 	mime := fh.Header.Get("Content-Type")
 	if !strings.HasPrefix(mime, "image/") {
 		return cli.ImageData{}, fmt.Errorf("only image/* files are accepted")
 	}
 	detected := http.DetectContentType(data)
-	if !strings.HasPrefix(detected, "image/") {
-		return cli.ImageData{}, fmt.Errorf("file content does not match an image format")
+	// Allowlist the raster formats Claude actually accepts. In particular
+	// reject SVG: even though DetectContentType returns text/xml for svg
+	// (so the prefix check below would already block it), we want a
+	// defence-in-depth check against a future sniffer that labels SVG as
+	// image/svg+xml — SVG can embed <script> and is unsafe to forward to
+	// any consumer that renders it.
+	switch detected {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		// ok
+	default:
+		return cli.ImageData{}, fmt.Errorf("unsupported image format (jpeg/png/gif/webp only)")
 	}
 	return cli.ImageData{Data: data, MimeType: detected}, nil
 }
@@ -137,8 +150,12 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
-		r.Body = http.MaxBytesReader(w, r.Body, 105<<20) // 10 files × 10MB + form overhead
-		if err := r.ParseMultipartForm(32 << 20); err != nil {
+		// Inline multipart uploads bypass the uploadStore per-owner quota, so
+		// cap the request body conservatively. Clients uploading more than 5
+		// files per turn should use /api/sessions/upload + file_ids which
+		// enforces maxUploadPerOwner. 5×10MB = 50MB body + form overhead.
+		r.Body = http.MaxBytesReader(w, r.Body, 55<<20)
+		if err := r.ParseMultipartForm(16 << 20); err != nil {
 			slog.Warn("send: multipart parse failed", "err", err)
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "bad multipart form"})
 			return
@@ -151,6 +168,10 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		fileIDs = r.MultipartForm.Value["file_ids"]
 
 		files := r.MultipartForm.File["files"]
+		if len(files) > 5 {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "too many inline files (max 5); use /api/sessions/upload for more"})
+			return
+		}
 		if len(files)+len(fileIDs) > 10 {
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "too many files (max 10)"})
 			return
@@ -192,11 +213,16 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Resolve pre-uploaded file IDs — ownership-checked to prevent cross-user theft.
+	// Do not echo the client-supplied fid in the error response; the id is
+	// user-controlled and echoing it back with SetEscapeHTML(false) would
+	// allow HTML payloads to appear unescaped in any future text/html
+	// degraded path. Log the offending id internally for operator triage.
 	owner := uploadOwner(r, h.trustedProxy)
 	for _, fid := range fileIDs {
 		img := h.uploadStore.Take(fid, owner)
 		if img == nil {
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "file not found or expired: " + fid})
+			slog.Debug("send: file_id not found or expired", "fid", fid)
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "file not found or expired"})
 			return
 		}
 		images = append(images, *img)
@@ -222,7 +248,25 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		capturedKey, capturedText, capturedWorkspace := key, text, workspace
+		// Track via sendWG (when hub is available) so Shutdown waits for the
+		// in-flight RPC before closing node connections — without this the
+		// goroutine could write to a closed nc.conn after sendWG.Wait returned.
+		// Use TrackSend (gated by sendTrackMu) so a late Add cannot escape
+		// Shutdown's Wait — when shuttingDown fires we skip the goroutine
+		// entirely and return 503 so the client can retry after restart.
+		var release func()
+		if h.hub != nil {
+			r, shuttingDown := h.hub.TrackSend()
+			if shuttingDown {
+				writeJSONStatus(w, http.StatusServiceUnavailable, map[string]string{"error": "server shutting down"})
+				return
+			}
+			release = r
+		}
 		go func() {
+			if release != nil {
+				defer release()
+			}
 			// Prefer hub's lifecycle ctx so shutdown cancels in-flight
 			// remote sends. Fallback (test / bootstrap paths where hub is
 			// nil) uses a bounded timeout rather than Background so the

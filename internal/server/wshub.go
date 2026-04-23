@@ -27,10 +27,13 @@ import (
 type Hub struct {
 	mu sync.RWMutex
 	// connCount mirrors len(h.clients) for the unauthenticated connection
-	// cap. Accessed via atomic CAS so the 500-connection gate is checked
-	// and reserved in a single step, closing the TOCTOU window where a
-	// burst of simultaneous upgrades all observed `count < 500` under a
-	// plain RLock and then landed past the cap.
+	// cap. Accessed via atomic Add with a reserve-then-check pattern so
+	// the 500-connection gate is both observed and reserved in a single
+	// step, closing the TOCTOU window where a burst of simultaneous
+	// upgrades all observed `count < 500` under a plain RLock and then
+	// landed past the cap. Over-shoot (Add then decrement) is bounded by
+	// one slot per rejected upgrade and is preferred over a CAS loop
+	// because Add is lock-free on all supported architectures.
 	connCount   atomic.Int64
 	clients     map[*wsClient]struct{}
 	router      *session.Router
@@ -53,6 +56,22 @@ type Hub struct {
 	// goroutines may read router/session after Shutdown tears them down.
 	sendWG sync.WaitGroup
 
+	// sendTrackMu + sendClosed serialise a late Add(1) with Shutdown's
+	// Wait. External code paths (e.g. HTTP handleSend -> remote proxy) do
+	// not live behind clientWG, so they need their own barrier against
+	// Shutdown completing its sendWG.Wait before an Add lands. Call
+	// TrackSend instead of sendWG.Add directly from those paths.
+	sendTrackMu sync.Mutex
+	sendClosed  bool
+
+	// clientWG tracks per-client readPump/writePump/eventPushLoop goroutines
+	// plus the debounce AfterFunc callback. Shutdown blocks on this so no
+	// client-driven goroutine accesses router/nodes/clients maps after they
+	// have been torn down. Tracked separately from sendWG because the
+	// pump lifecycle is owned by the connection (closed via conn.Close)
+	// while sendWG is owned by the send code path (canceled via ctx).
+	clientWG sync.WaitGroup
+
 	// Per-IP rate limiter for WebSocket auth attempts — prevents token brute-force
 	// via repeated connect/auth/disconnect cycles that bypass HTTP login rate limits.
 	// Returns true when the IP is allowed; false signals rate-limit hit.
@@ -64,6 +83,13 @@ type Hub struct {
 	debounceMu    sync.Mutex
 	debounceTimer *time.Timer
 	debounceFirst time.Time // first trigger in the current debounce window
+	// debounceClosed is set under debounceMu during Shutdown so any post-close
+	// BroadcastSessionsUpdate caller does not register a new AfterFunc + Add
+	// into clientWG after Shutdown has already passed its drain point. Without
+	// this, a broadcast arriving between Shutdown's debounceMu release and
+	// its clientWG.Wait could schedule a callback that never gets Waited on,
+	// or worse, add to clientWG after Wait has already returned.
+	debounceClosed bool
 }
 
 // HubOptions holds configuration for a Hub.
@@ -229,14 +255,21 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 			c.uploadOwner = ownerKeyFromCookie(cookie.Value)
 		}
 	}
+	// Arm clientWG BEFORE registering the client, not after. If Shutdown
+	// runs between register() and Add(2), it could snapshot h.clients,
+	// close the conn, observe clientWG count == 0, and return before the
+	// pumps ever increment — leaving them to run past teardown and
+	// use-after-free router/hub state. Add is cheap and always balanced
+	// by the deferred Done() in the pump goroutines below.
+	h.clientWG.Add(2)
 	h.register(c)
 	// Ownership of the connCount slot transfers to register/unregister:
 	// mark the slot as released here so the defer on the upgrade path
 	// doesn't double-decrement. unregister() will Add(-1) when this
 	// client eventually disconnects.
 	slotReleased = true
-	go c.writePump()
-	go c.readPump()
+	go func() { defer h.clientWG.Done(); c.writePump() }()
+	go func() { defer h.clientWG.Done(); c.readPump() }()
 }
 
 func (h *Hub) register(c *wsClient) {
@@ -312,6 +345,13 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	}
 
 	// Per-connection subscription cap to prevent goroutine accumulation.
+	// Reserve the slot atomically under h.mu so two concurrent subscribe
+	// requests at capacity N-1 cannot both pass the check and end up at N+1.
+	// The reservation is a nil-unsub placeholder that completeSubscribe will
+	// overwrite with the real unsub closure; if subscription setup fails
+	// before that, the placeholder would leak — but downstream code always
+	// writes SOME value or sends an error back to the client without
+	// returning early between here and completeSubscribe.
 	h.mu.Lock()
 	if _, alreadySub := c.subscriptions[key]; !alreadySub && len(c.subscriptions) >= 50 {
 		h.mu.Unlock()
@@ -323,6 +363,11 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 		unsub()
 		delete(c.subscriptions, key)
 	}
+	// Reserve the slot: placeholder keeps the map-length accurate for
+	// concurrent cap checks until completeSubscribe replaces it with the
+	// real unsub. If we return via the "session not found" path below, we
+	// clear the reservation before returning.
+	c.subscriptions[key] = func() {}
 	h.mu.Unlock()
 
 	sess := h.router.GetSession(key)
@@ -330,6 +375,14 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 		h.completeSubscribe(c, key, msg, sess)
 		return
 	}
+
+	// Session not found: release the placeholder reservation. Only this
+	// goroutine can have installed the placeholder for this key above, and
+	// since sess was nil the completeSubscribe branch cannot replace it, so
+	// an unconditional delete is safe.
+	h.mu.Lock()
+	delete(c.subscriptions, key)
+	h.mu.Unlock()
 
 	c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "session not found"})
 }
@@ -341,7 +394,12 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		// client can display old messages, and reply with "subscribed" so the
 		// client's _pendingSubscribeKey is properly cleared. Without this
 		// response the client gets stuck and never re-subscribes when the
-		// process becomes available.
+		// process becomes available. Release the reserved slot since there is
+		// no real unsub to install; the client can always resubscribe.
+		h.mu.Lock()
+		delete(c.subscriptions, key)
+		h.mu.Unlock()
+
 		snap := sess.Snapshot()
 		c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State, Reason: "suspended"})
 
@@ -357,11 +415,28 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		slog.Debug("completeSubscribe: no process, sent persisted history", "key", key, "entries", len(entries))
 		return
 	}
+	// Fast-fail if Shutdown already fired: SubscribeEvents would otherwise
+	// register a subscriber on an EventLog whose process is being torn
+	// down, and the unsub callback may never run (h.ctx.Done() in the
+	// push-loop arm is the downstream guard, but avoiding the subscribe
+	// entirely is cleaner).
+	if h.ctx.Err() != nil {
+		h.mu.Lock()
+		delete(c.subscriptions, key)
+		h.mu.Unlock()
+		return
+	}
 	notify, unsub := sess.SubscribeEvents()
 
 	h.mu.Lock()
-	if c.subscriptions == nil {
-		// Client was removed during Shutdown
+	// Re-check ctx under the lock: the earlier fast-fail check was racy
+	// with Shutdown's h.mu-guarded subscription teardown; if Shutdown
+	// acquired h.mu between the fast-fail check and this Lock, clients
+	// subscriptions was niled and the first branch below handles it.
+	// But Shutdown's sequence is cancel() -> h.mu.Lock() -> iterate
+	// subscriptions, so ctx.Err() being set here is a strong signal that
+	// Shutdown is mid-flight; decline to start a new pushLoop.
+	if c.subscriptions == nil || h.ctx.Err() != nil {
 		h.mu.Unlock()
 		unsub()
 		return
@@ -369,6 +444,11 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	c.subscriptions[key] = unsub
 	c.subGen[key]++
 	gen := c.subGen[key]
+	// Add to clientWG BEFORE releasing h.mu. Shutdown walks h.clients under
+	// h.mu to close conns, then calls clientWG.Wait; if we Add(1) after
+	// releasing here, Shutdown's Wait can return before the eventPushLoop
+	// goroutine ever starts, and the goroutine can then touch torn-down state.
+	h.clientWG.Add(1)
 	h.mu.Unlock()
 
 	snap := sess.Snapshot()
@@ -395,7 +475,10 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: []cli.EventEntry{}})
 	}
 
-	go h.eventPushLoop(c, key, gen, notify, sess, lastTime)
+	go func() {
+		defer h.clientWG.Done()
+		h.eventPushLoop(c, key, gen, notify, sess, lastTime)
+	}()
 }
 
 func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
@@ -411,6 +494,13 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 	if unsub, ok := c.subscriptions[key]; ok {
 		unsub()
 		delete(c.subscriptions, key)
+		// Intentionally keep c.subGen[key] intact: a stale eventPushLoop from
+		// this subscription may still be parked in resubscribeEvents' ticker
+		// (up to 60s). Deleting subGen[key] and allowing a new subscribe to
+		// reset the counter to 1 would let the stale goroutine's gen=1 match
+		// the fresh subGen[key]=1 and silently resume. The per-connection
+		// subscription cap already bounds map growth, and the map is freed
+		// wholesale when the wsClient is torn down.
 	}
 	h.mu.Unlock()
 	c.SendJSON(node.ServerMsg{Type: "unsubscribed", Key: key})
@@ -447,7 +537,9 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		for _, fid := range msg.FileIDs {
 			img := h.uploadStore.Take(fid, c.uploadOwner)
 			if img == nil {
-				c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "file not found or expired: " + fid})
+				// Never echo fid (user-controlled) back in the error; log internally.
+				slog.Debug("ws send: file_id not found or expired", "fid", fid)
+				c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "file not found or expired"})
 				return
 			}
 			images = append(images, *img)
@@ -505,9 +597,13 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 				}
 				sess = newSess
 				// Catch up on events we missed during the transition.
+				// resubscribeEvents may consume one pending notification while
+				// probing newNotify (ok=true path) — if we didn't catch-up
+				// unconditionally here, those events would only surface on the
+				// next Append, which in an idle session may be seconds or more.
 				entries := sess.EventEntriesSince(lastTime)
 				if len(entries) > 0 {
-					data, err := json.Marshal(node.ServerMsg{Type: "history", Key: key, Events: entries})
+					data, err := marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
 					if err == nil {
 						c.SendRaw(data)
 					}
@@ -526,13 +622,21 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 			}
 			// Batch events into a single "history" message to reduce
 			// per-event JSON marshaling and WebSocket frame overhead.
-			data, err := json.Marshal(node.ServerMsg{Type: "history", Key: key, Events: entries})
+			data, err := marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
 			if err != nil {
 				continue
 			}
 			c.SendRaw(data)
 			lastTime = entries[len(entries)-1].Time
 		case <-c.done:
+			return
+		case <-h.ctx.Done():
+			// Hub shutdown: exit even if the client hasn't closed and the
+			// subscribed notify channel is stalled. Without this arm, a
+			// notify source that stops firing could park this goroutine
+			// past Shutdown, with no escape until conn.Close propagates
+			// through readPump — which may not happen if the socket is
+			// half-open.
 			return
 		}
 	}
@@ -623,23 +727,46 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 	return false, nil
 }
 
+// broadcastClientSnapPool reuses the []*wsClient backing array across
+// broadcasts so high-frequency session_state / sessions_update traffic does
+// not allocate one slice per broadcast. Entries that grow beyond 256 clients
+// are dropped on Put so the pool never pins a large backing array.
+var broadcastClientSnapPool = sync.Pool{
+	New: func() any {
+		s := make([]*wsClient, 0, 32)
+		return &s
+	},
+}
+
 // broadcastToAuthenticated sends raw data to all authenticated WebSocket clients.
 // Takes a pointer snapshot under RLock and releases the lock before the per-
 // client channel sends. SendRaw itself is non-blocking, but with hundreds of
 // clients a loop under RLock still serialises `register`/`unregister` behind
-// every broadcast; snapshotting is a single allocation per broadcast in
-// exchange for removing that contention amplifier.
+// every broadcast; snapshotting removes that contention amplifier and the
+// backing slice is reused via sync.Pool so steady-state broadcasts are zero-alloc.
 func (h *Hub) broadcastToAuthenticated(data []byte) {
+	snapPtr := broadcastClientSnapPool.Get().(*[]*wsClient)
+	snap := (*snapPtr)[:0]
+
 	h.mu.RLock()
-	snap := make([]*wsClient, 0, len(h.clients))
 	for c := range h.clients {
 		if c.authenticated.Load() {
 			snap = append(snap, c)
 		}
 	}
 	h.mu.RUnlock()
+
 	for _, c := range snap {
 		c.SendRaw(data)
+	}
+	// Drop oversized snapshots so the pool never pins arbitrarily large
+	// backing arrays (e.g. after a one-off broadcast to 5000 clients).
+	if cap(snap) <= 256 {
+		for i := range snap {
+			snap[i] = nil // clear pointers so clients are GC-eligible
+		}
+		*snapPtr = snap[:0]
+		broadcastClientSnapPool.Put(snapPtr)
 	}
 }
 
@@ -648,7 +775,7 @@ func (h *Hub) broadcastToAuthenticated(data []byte) {
 // so the final state must also reach everyone — otherwise clients not subscribed
 // to this session would see a stale "running" dot in the sidebar forever.
 func (h *Hub) broadcastState(key, state, reason string) {
-	data, err := json.Marshal(node.ServerMsg{Type: "session_state", Key: key, State: state, Reason: reason})
+	data, err := marshalPooled(node.ServerMsg{Type: "session_state", Key: key, State: state, Reason: reason})
 	if err != nil {
 		return
 	}
@@ -659,7 +786,7 @@ func (h *Hub) broadcastState(key, state, reason string) {
 // so they can auto-subscribe. Unlike broadcastState, this is not limited to already-
 // subscribed clients — needed for new sessions where nobody is subscribed yet.
 func (h *Hub) BroadcastSessionReady(key string) {
-	data, err := json.Marshal(node.ServerMsg{Type: "session_state", Key: key, State: "running"})
+	data, err := marshalPooled(node.ServerMsg{Type: "session_state", Key: key, State: "running"})
 	if err != nil {
 		return
 	}
@@ -677,17 +804,38 @@ func (h *Hub) BroadcastSessionsUpdate() {
 	)
 	h.debounceMu.Lock()
 	defer h.debounceMu.Unlock()
+	// Shutdown already drained the debounce WG slot; any new scheduling here
+	// would either leak (callback never waited for) or race clientWG.Wait.
+	if h.debounceClosed {
+		return
+	}
 	now := time.Now()
 	if h.debounceTimer != nil {
 		if now.Sub(h.debounceFirst) >= maxDebounceDelay {
 			// Hard cap reached — let the pending timer fire without resetting.
 			return
 		}
-		h.debounceTimer.Reset(debounceInterval)
+		// time.Timer.Reset on a timer whose AfterFunc already fired but whose
+		// callback is still blocked on debounceMu would schedule a SECOND run
+		// without a matching clientWG.Add — breaking the Shutdown Wait and
+		// producing a negative clientWG count. Stop() returns false if the
+		// callback already ran or is scheduled to run; in that case we treat
+		// the in-flight callback as the one that will do the broadcast and
+		// skip rescheduling. The callback clears debounceTimer under
+		// debounceMu, so subsequent calls will start a fresh timer.
+		if h.debounceTimer.Stop() {
+			h.debounceTimer.Reset(debounceInterval)
+		}
 		return
 	}
 	h.debounceFirst = now
+	// Track the AfterFunc callback via clientWG so Shutdown can wait for
+	// any late-firing broadcast to finish touching the clients map. The
+	// callback still runs even after Stop() if it had already fired and
+	// was scheduled, so the tracking guards against a post-Shutdown race.
+	h.clientWG.Add(1)
 	h.debounceTimer = time.AfterFunc(debounceInterval, func() {
+		defer h.clientWG.Done()
 		h.debounceMu.Lock()
 		h.debounceTimer = nil
 		h.debounceMu.Unlock()
@@ -731,34 +879,49 @@ func (h *Hub) DroppedMessages() int64 {
 	return total
 }
 
+// TrackSend reserves a sendWG slot for a background send goroutine and
+// returns a release function plus a shuttingDown flag. When shuttingDown
+// is true the caller MUST abort (do not spawn the goroutine). This closes
+// the window where an HTTP handler could sendWG.Add(1) after Shutdown's
+// sendWG.Wait had already drained.
+func (h *Hub) TrackSend() (release func(), shuttingDown bool) {
+	h.sendTrackMu.Lock()
+	defer h.sendTrackMu.Unlock()
+	if h.sendClosed {
+		return func() {}, true
+	}
+	h.sendWG.Add(1)
+	return h.sendWG.Done, false
+}
+
 // Shutdown closes all WebSocket client connections and relays.
 func (h *Hub) Shutdown() {
 	h.cancel() // cancel in-flight send goroutines
 
-	// Wait for background send goroutines (ownerLoop, sessionSendLegacy)
-	// to exit before we tear down routers/connections they may still touch.
-	h.sendWG.Wait()
-
-	// Stop debounce timer
+	// Stop debounce timer. Any pending AfterFunc callback is tracked via
+	// clientWG, so Wait below will drain callbacks that fired before Stop.
+	// When Stop() returns true the callback was cancelled before running,
+	// so the clientWG slot we reserved for it must be released here —
+	// otherwise clientWG.Wait below would hang forever.
 	h.debounceMu.Lock()
+	// Block any further AfterFunc scheduling first; then drain the pending
+	// timer (if any). Setting the flag before Stop() ensures a concurrent
+	// BroadcastSessionsUpdate that holds debounceMu next cannot wedge a
+	// new WG slot past our upcoming clientWG.Wait.
+	h.debounceClosed = true
 	if h.debounceTimer != nil {
-		h.debounceTimer.Stop()
+		if h.debounceTimer.Stop() {
+			h.clientWG.Done()
+		}
 		h.debounceTimer = nil
 	}
 	h.debounceMu.Unlock()
 
-	// Close node connections under nodesMu
-	h.nodesMu.RLock()
-	nodeConns := make([]node.Conn, 0, len(h.nodes))
-	for _, conn := range h.nodes {
-		nodeConns = append(nodeConns, conn)
-	}
-	h.nodesMu.RUnlock()
-	for _, conn := range nodeConns {
-		conn.Close()
-	}
-
-	// Close client connections
+	// Close client connections first, then wait for their pumps/eventPushLoop
+	// to exit. Closing the underlying conn triggers readPump/writePump to
+	// return, which in turn calls closeDone() so eventPushLoop unblocks.
+	// Without this ordering, closing node/router state before the pumps
+	// exit could cause use-after-close in unregister → RemoveClient.
 	h.mu.Lock()
 	conns := make([]*websocket.Conn, 0, len(h.clients))
 	for c := range h.clients {
@@ -776,6 +939,40 @@ func (h *Hub) Shutdown() {
 	for _, conn := range conns {
 		conn.Close()
 	}
+
+	// Now that conns are closed, pumps will observe the read/write error
+	// and exit their loops; eventPushLoop sees h.ctx.Done() or c.done.
+	// Wait bounds the shutdown on explicit goroutine lifecycle rather than
+	// on the parent context timeout alone.
+	h.clientWG.Wait()
+
+	// Barrier: any TrackSend call that observed h.ctx.Err()==nil and was
+	// about to Add(1) is racing us. Holding sendTrackMu here forces it to
+	// complete either side of this line; once we mark sendClosed, any later
+	// caller declines to Add. This closes the window where an HTTP handler
+	// goroutine could Add(1) after sendWG.Wait has already drained below.
+	h.sendTrackMu.Lock()
+	h.sendClosed = true
+	h.sendTrackMu.Unlock()
+
+	// Wait for background send goroutines (ownerLoop, handleRemoteSend) to
+	// exit AFTER pumps are gone. readPump can call handleRemoteSend on the
+	// way out, which does sendWG.Add(1) — so Waiting before pumps drain
+	// would race with a late Add that escapes the Wait.
+	h.sendWG.Wait()
+
+	// Close node connections under nodesMu after client pumps and send
+	// goroutines have exited, so unregister → RemoveClient and in-flight
+	// RPCs cannot race a closed node.
+	h.nodesMu.RLock()
+	nodeConns := make([]node.Conn, 0, len(h.nodes))
+	for _, conn := range h.nodes {
+		nodeConns = append(nodeConns, conn)
+	}
+	h.nodesMu.RUnlock()
+	for _, conn := range nodeConns {
+		conn.Close()
+	}
 }
 
 // ─── Remote node handlers ────────────────────────────────────────────────────
@@ -785,7 +982,11 @@ func (h *Hub) handleRemoteSubscribe(c *wsClient, msg node.ClientMsg) {
 	conn, ok := h.nodes[msg.Node]
 	h.nodesMu.RUnlock()
 	if !ok {
-		c.SendJSON(node.ServerMsg{Type: "error", Key: msg.Key, Error: "unknown node: " + msg.Node})
+		// Do not echo the client-supplied node ID in the error: a careless
+		// JS consumer rendering the field via innerHTML would turn a crafted
+		// node value into reflected XSS. Log internally for operator triage.
+		slog.Debug("ws subscribe: unknown node", "node", msg.Node)
+		c.SendJSON(node.ServerMsg{Type: "error", Key: msg.Key, Error: "unknown node"})
 		return
 	}
 	conn.Subscribe(c, msg.Key, msg.After)
@@ -809,7 +1010,10 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 	h.nodesMu.RUnlock()
 
 	if !ok {
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "unknown node: " + nodeID})
+		// Same rationale as handleRemoteSubscribe: do not reflect the raw
+		// client-supplied node ID in the error body.
+		slog.Debug("ws send: unknown node", "node", nodeID)
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "unknown node"})
 		return
 	}
 
@@ -819,16 +1023,26 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 	// where the subscribe arrived at the remote before session creation.
 	//
 	// Track via sendWG so Shutdown waits for in-flight RPC+broadcast to
-	// finish before tearing down node connections and client maps.
-	h.sendWG.Add(1)
+	// finish before tearing down node connections and client maps. Go via
+	// TrackSend so a send initiated just as Shutdown fires is refused here
+	// rather than squeezing past the clientWG barrier and then hitting a
+	// closed sendWG window.
+	release, shuttingDown := h.TrackSend()
+	if shuttingDown {
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Node: nodeID, Error: "server shutting down"})
+		return
+	}
 	go func() {
-		defer h.sendWG.Done()
+		defer release()
 		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
 		defer cancel()
 		capturedID, capturedKey := msg.ID, msg.Key
 		if err := nc.Send(ctx, capturedKey, msg.Text, msg.Workspace); err != nil {
 			slog.Error("remote ws send failed", "node", nodeID, "key", capturedKey, "err", err)
-			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: "remote send failed: " + err.Error()})
+			// Do not surface the raw err: transport-level messages can leak
+			// internal host/port/auth details back to authenticated browser
+			// clients. Operators still see the detail in the slog above.
+			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: "remote send failed"})
 		} else {
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "accepted", Key: capturedKey, Node: nodeID})
 			// Refresh the remote subscription so the connector re-creates

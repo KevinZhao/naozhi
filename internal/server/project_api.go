@@ -8,12 +8,19 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
+
+// plannerModelRe restricts the model identifier to safe characters so a
+// crafted value cannot sneak extra CLI flags (e.g. " --dangerously-skip-permissions")
+// into the exec.Command argv for the planner CLI. Whitespace, dashes at the
+// start, and control characters are rejected.
+var plannerModelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/\-]*$`)
 
 // ProjectHandlers groups the project management API endpoints.
 type ProjectHandlers struct {
@@ -98,7 +105,12 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	// Cap incoming body size before either the remote-proxy read or the
+	// local JSON decode. Project configs are small (schedule + planner
+	// prompt); 64 KB is well above legitimate payloads and keeps both
+	// paths consistent so a remote proxy cannot be used to smuggle a
+	// larger body than the local handler would accept.
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 
 	// Remote node proxy
 	nodeID := r.URL.Query().Get("node")
@@ -126,10 +138,6 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Cap incoming body size so a single PUT can't pin an arbitrary amount
-	// of memory. Project configs are small (schedule + planner prompt);
-	// 64 KB is well above legitimate payloads.
-	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
 	var cfg project.ProjectConfig
 	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
 		// Fixed error string: echoing err.Error() leaks the decoder's field
@@ -152,6 +160,15 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 	}
 	if len(cfg.PlannerModel) > maxPlannerModelBytes {
 		http.Error(w, fmt.Sprintf("planner_model exceeds %d-byte limit", maxPlannerModelBytes), http.StatusBadRequest)
+		return
+	}
+	// Reject any model value that isn't a plain identifier. Without this guard
+	// a value like "foo --dangerously-skip-permissions" would be appended to
+	// exec.Command's argv for the planner CLI — exec doesn't parse flags but
+	// the child CLI does, and a user-controllable flag injection extends the
+	// dashboard's blast radius.
+	if cfg.PlannerModel != "" && !plannerModelRe.MatchString(cfg.PlannerModel) {
+		http.Error(w, "planner_model contains invalid characters", http.StatusBadRequest)
 		return
 	}
 

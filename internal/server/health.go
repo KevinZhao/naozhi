@@ -28,9 +28,10 @@ type HealthHandler struct {
 	nodeAccess      NodeAccessor
 	platforms       map[string]struct{} // platform names (read-only after init)
 	hubDropped      func() int64        // hub.DroppedMessages
-	// dispatcherMetrics returns (message_count, reply_error_count, send_fail_count).
-	// Injected after Start() wires the Dispatcher; nil-safe.
-	dispatcherMetrics func() (int64, int64, int64)
+	// dispatcherMetrics returns (message_count, reply_error_count, send_fail_count, last_reply_success).
+	// Injected after Start() wires the Dispatcher; nil-safe. last_reply_success
+	// is zero-valued until the first successful user-visible reply.
+	dispatcherMetrics func() (int64, int64, int64, time.Time)
 }
 
 func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -56,12 +57,17 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 			resp["ws_dropped"] = h.hubDropped()
 		}
 		if h.dispatcherMetrics != nil {
-			msgs, replyErrs, sendFails := h.dispatcherMetrics()
-			resp["dispatch"] = map[string]int64{
+			msgs, replyErrs, sendFails, lastReply := h.dispatcherMetrics()
+			dispatch := map[string]any{
 				"message_count":     msgs,
 				"reply_error_count": replyErrs,
 				"send_fail_count":   sendFails,
 			}
+			if !lastReply.IsZero() {
+				dispatch["last_reply_success_at"] = lastReply.UTC().Format(time.RFC3339)
+				dispatch["last_reply_success_ago"] = time.Since(lastReply).Round(time.Second).String()
+			}
+			resp["dispatch"] = dispatch
 		}
 
 		// Check CLI binary availability
@@ -122,25 +128,26 @@ func systemInfo() map[string]any {
 			"arch":      runtime.GOARCH,
 			"cpus":      runtime.NumCPU(),
 			"memory_mb": memMB,
-			"ips":       localIPs(),
+			"ip_count":  localIPCount(),
 		}
 	})
 	return sysInfoVal
 }
 
-// localIPs returns IPv4 addresses from physical/primary network interfaces,
-// skipping loopback, docker bridges, and veth pairs.
-func localIPs() []string {
+// localIPCount returns how many IPv4 addresses are bound to physical/primary
+// network interfaces, skipping loopback, docker bridges, and veth pairs.
+// The count is exposed to authenticated dashboard users as a liveness signal
+// without revealing concrete LAN addresses that could aid internal reconnaissance.
+func localIPCount() int {
 	ifaces, err := net.Interfaces()
 	if err != nil {
-		return nil
+		return 0
 	}
-	var ips []string
+	count := 0
 	for _, iface := range ifaces {
 		if iface.Flags&net.FlagLoopback != 0 || iface.Flags&net.FlagUp == 0 {
 			continue
 		}
-		// Skip docker/veth/bridge virtual interfaces
 		name := iface.Name
 		if strings.HasPrefix(name, "docker") || strings.HasPrefix(name, "veth") ||
 			strings.HasPrefix(name, "br-") || strings.HasPrefix(name, "virbr") {
@@ -155,8 +162,8 @@ func localIPs() []string {
 			if !ok || ipnet.IP.To4() == nil {
 				continue
 			}
-			ips = append(ips, ipnet.IP.String())
+			count++
 		}
 	}
-	return ips
+	return count
 }

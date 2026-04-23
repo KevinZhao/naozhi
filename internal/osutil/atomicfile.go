@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"syscall"
 )
 
@@ -28,8 +29,12 @@ func IsDiskFull(err error) bool {
 //     file from logs).
 //   - fsync is called before rename so a power cut after rename does not
 //     leave a zero-byte file (ext4 data=ordered would still need this).
-//   - Directory fsync is not performed; see TODO X2 — that is a separate,
-//     FS-dependent decision.
+//   - After rename, the parent directory is fsynced so the new directory
+//     entry is persisted on XFS/tmpfs (ext4 data=ordered usually handles
+//     this automatically, but paying one extra syscall is cheap vs. a
+//     lost store file on crash). Failure to sync the directory is logged
+//     by the caller context via the wrapped error but does not undo the
+//     rename — the data is already on disk.
 //
 // Callers still own mkdir of the parent directory so they can pick an
 // appropriate permission and surface a distinct error (vs a write failure).
@@ -61,6 +66,32 @@ func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
 	if err := os.Rename(tmp, path); err != nil {
 		_ = os.Remove(tmp)
 		return fmt.Errorf("rename %s to %s: %w", tmp, path, err)
+	}
+	if err := SyncDir(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("fsync dir %s: %w", filepath.Dir(path), err)
+	}
+	return nil
+}
+
+// SyncDir fsyncs the given directory so a rename into it is durable on
+// crash. On filesystems where opening a directory for sync is unsupported
+// (e.g. some older FUSE backends), the open error is treated as a soft
+// failure and swallowed — the caller has already written + fsynced the
+// data file; a lost directory entry on crash is acceptable degradation.
+func SyncDir(dir string) error {
+	f, err := os.Open(dir)
+	if err != nil {
+		if errors.Is(err, fs.ErrPermission) || errors.Is(err, syscall.EINVAL) {
+			return nil
+		}
+		return err
+	}
+	defer f.Close()
+	if err := f.Sync(); err != nil {
+		if errors.Is(err, syscall.EINVAL) {
+			return nil
+		}
+		return err
 	}
 	return nil
 }

@@ -44,9 +44,30 @@ func (d *Dispatcher) replyText(ctx context.Context, msg platform.IncomingMessage
 	return true
 }
 
+// normalizeSlashCommand lowercases the leading "/command" token only, leaving
+// arguments untouched. CJK mobile IMEs commonly auto-capitalize the first
+// letter of a line (e.g. "/New foo") which would otherwise fall through to
+// the unknown-command branch. Trailing whitespace is stripped so IMEs that
+// append a space before Enter do not break the bare "/help" equality check.
+func normalizeSlashCommand(trimmed string) string {
+	if !strings.HasPrefix(trimmed, "/") {
+		return trimmed
+	}
+	sp := strings.IndexByte(trimmed, ' ')
+	if sp < 0 {
+		// No ASCII space but the command may still carry trailing unicode
+		// whitespace (e.g. U+3000 IDEOGRAPHIC SPACE from a CJK IME). Without
+		// TrimRight those bare commands would fail the `trimmed == "/help"`
+		// equality check and fall through to the unknown-command branch.
+		return strings.TrimRightFunc(strings.ToLower(trimmed), unicode.IsSpace)
+	}
+	return strings.TrimRightFunc(strings.ToLower(trimmed[:sp])+trimmed[sp:], unicode.IsSpace)
+}
+
 // dispatchCommand handles slash commands (/help, /new, /clear, /cron, /cd, /pwd, /project).
 // Returns true if the message was a command and was handled.
 func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) bool {
+	trimmed = normalizeSlashCommand(trimmed)
 	switch {
 	case trimmed == "/cron" || strings.HasPrefix(trimmed, "/cron "):
 		if d.scheduler != nil {
@@ -109,7 +130,10 @@ func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.Incomin
 func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.IncomingMessage, trimmed string, log *slog.Logger) {
 	agentToReset := ""
 	if parts := strings.SplitN(trimmed, " ", 2); len(parts) > 1 {
-		agentToReset = parts[1]
+		// agentCommands keys are pre-normalized to lowercase in applyDefaults;
+		// match the user-supplied agent name case-insensitively so "/new REVIEW"
+		// still resolves.
+		agentToReset = strings.ToLower(trimUnicodeSpace(parts[1]))
 	}
 
 	// In project-bound mode: /new resets planner, /new {agent} resets that agent
@@ -182,7 +206,9 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 	parts := strings.SplitN(trimmed, " ", 3)
 	sub := ""
 	if len(parts) >= 2 {
-		sub = parts[1]
+		// Sub-commands are case-insensitive to cover IME auto-capitalization
+		// (e.g. "/cron ADD …"). IDs in parts[2] stay case-sensitive.
+		sub = strings.ToLower(parts[1])
 	}
 
 	switch sub {
@@ -291,8 +317,9 @@ func (d *Dispatcher) handleProjectCommand(ctx context.Context, msg platform.Inco
 	}
 
 	arg := trimUnicodeSpace(strings.TrimPrefix(trimmed, "/project"))
-
-	switch arg {
+	// Reserved keywords are case-insensitive; project names remain
+	// case-sensitive (handled by the default branch).
+	switch strings.ToLower(arg) {
 	case "":
 		proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID)
 		if proj == nil {
@@ -364,18 +391,23 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		absPath = filepath.Join(currentWS, path)
 	}
 
+	// Resolve symlinks BEFORE Stat + allowedRoot check so a swap between
+	// Stat and EvalSymlinks cannot hand us different filesystem entries —
+	// same ordering as server.validateWorkspace, closes a TOCTOU window
+	// where a symlink re-target between the two calls would let a user
+	// cd outside allowedRoot.
+	resolved, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		d.replyText(ctx, msg, "目录不存在或无权限", log)
+		return
+	}
+	absPath = resolved
+
 	info, err := os.Stat(absPath)
 	if err != nil || !info.IsDir() {
 		d.replyText(ctx, msg, "目录不存在或无权限", log)
 		return
 	}
-
-	resolved, err := filepath.EvalSymlinks(absPath)
-	if err != nil {
-		d.replyText(ctx, msg, "无法解析路径", log)
-		return
-	}
-	absPath = resolved
 
 	if d.allowedRoot != "" && absPath != d.allowedRoot && !strings.HasPrefix(absPath, d.allowedRoot+string(filepath.Separator)) {
 		d.replyText(ctx, msg, "不允许访问该路径", log)

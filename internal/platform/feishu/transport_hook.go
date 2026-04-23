@@ -16,9 +16,19 @@ import (
 func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHandler) {
 	mux.HandleFunc("POST /webhook/feishu", func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
-		body, err := io.ReadAll(io.LimitReader(r.Body, 64*1024))
+		// Read up to maxBody+1 so we can distinguish "exactly maxBody" (legal)
+		// from "exceeds maxBody" (silently truncated). A truncated body would
+		// deserialize into malformed/empty JSON and drop the event silently;
+		// better to surface 413 so operators can raise the cap if needed.
+		const maxBody = 64 * 1024
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxBody+1))
 		if err != nil {
 			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		if len(body) > maxBody {
+			slog.Warn("feishu webhook body exceeds limit", "limit", maxBody)
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
 			return
 		}
 
@@ -90,19 +100,45 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		if ts := r.Header.Get("X-Lark-Request-Timestamp"); ts != "" {
 			nonce := r.Header.Get("X-Lark-Request-Nonce")
 			if nonce != "" {
+				// Feishu nonces are 16-char random strings in practice. Reject
+				// anything pathologically large so a header-flood with giant
+				// nonces cannot bloat seenNonces (sync.Map retains entries for
+				// nonceTTL = 5min, cleaned up on a timer).
+				if len(nonce) > 128 {
+					slog.Warn("feishu webhook nonce too long", "len", len(nonce))
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				// Global cap: refuse new nonces once the map hits maxSeenNonces
+				// so a flood of unique-nonce requests cannot bloat heap. Legitimate
+				// traffic at a 5-minute TTL stays well below this cap.
+				if f.seenNoncesCount.Load() >= maxSeenNonces {
+					slog.Warn("feishu webhook nonce map at cap, dropping request",
+						"cap", maxSeenNonces)
+					w.WriteHeader(http.StatusTooManyRequests)
+					return
+				}
 				key := ts + ":" + nonce
 				expiry := time.Now().Add(nonceTTL).Unix()
 				if _, loaded := f.seenNonces.LoadOrStore(key, expiry); loaded {
-					slog.Warn("feishu webhook replay detected", "nonce", nonce)
+					// Log only the length and timestamp rather than the raw
+					// nonce header value — attacker-supplied bytes can contain
+					// newlines or JSON metacharacters that distort structured
+					// log output and downstream log-ingest parsers.
+					slog.Warn("feishu webhook replay detected",
+						"nonce_len", len(nonce), "ts", ts)
 					w.WriteHeader(http.StatusUnauthorized)
 					return
 				}
-			} else if (f.cfg.EncryptKey != "" || f.cfg.VerificationToken != "") && envelope.Type != "url_verification" {
+				f.seenNoncesCount.Add(1)
+			} else if f.cfg.EncryptKey != "" || f.cfg.VerificationToken != "" {
 				// Authenticated modes must always supply a nonce; missing
 				// nonce leaves the request replayable within the 5min
-				// timestamp window. url_verification is Feishu's handshake
-				// flow and does not carry a nonce.
-				slog.Warn("feishu webhook missing nonce header")
+				// timestamp window. Feishu v2 sends X-Lark-Request-Nonce on
+				// url_verification handshakes too, so no exemption here —
+				// deployments that somehow receive nonce-less challenges will
+				// need to reconfigure their Feishu app to v2 event schema.
+				slog.Warn("feishu webhook missing nonce header", "type", envelope.Type)
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}

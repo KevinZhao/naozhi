@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"net"
 	"net/http"
@@ -18,6 +19,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -81,22 +83,63 @@ type Server struct {
 
 // validateWorkspace checks that workspace is an existing directory within allowedRoot.
 // Returns the cleaned, symlink-resolved path or an error.
+//
+// Ordering: EvalSymlinks is performed first so the root-prefix check sees the
+// canonical resolved path; only then do we Stat the resolved form. This
+// collapses the TOCTOU window where a symlink swap between an initial Stat
+// and a later EvalSymlinks could cause the two calls to observe different
+// filesystem entries.
+//
+// Errors are deliberately generic — the resolved path and underlying
+// os.PathError are NOT included so a dashboard or IM user cannot enumerate
+// host filesystem layout via crafted workspace queries. Diagnostic detail
+// goes to the caller's slog.
 func validateWorkspace(workspace, allowedRoot string) (string, error) {
-	info, err := os.Stat(workspace)
-	if err != nil || !info.IsDir() {
+	if workspace == "" {
 		return "", fmt.Errorf("workspace is not a valid directory")
 	}
 	wsPath := filepath.Clean(workspace)
 	resolved, err := filepath.EvalSymlinks(wsPath)
 	if err != nil {
-		return "", fmt.Errorf("resolve workspace path: %w", err)
+		// *os.PathError echoes the same path back through err.Error() which
+		// lands in debug logs twice. Reduce to a structural kind so operators
+		// can still distinguish "not exist" from "permission denied" without
+		// a duplicate path column.
+		slog.Debug("validateWorkspace: EvalSymlinks failed",
+			"path", wsPath, "reason", pathErrReason(err))
+		return "", fmt.Errorf("workspace is not a valid directory")
 	}
 	wsPath = resolved
+	info, err := os.Stat(wsPath)
+	if err != nil || !info.IsDir() {
+		reason := "not_a_directory"
+		if err != nil {
+			reason = pathErrReason(err)
+		}
+		slog.Debug("validateWorkspace: Stat failed",
+			"path", wsPath, "reason", reason)
+		return "", fmt.Errorf("workspace is not a valid directory")
+	}
 	if allowedRoot != "" && wsPath != allowedRoot &&
 		!strings.HasPrefix(wsPath, allowedRoot+string(filepath.Separator)) {
-		return "", fmt.Errorf("workspace outside allowed root")
+		return "", fmt.Errorf("workspace not allowed")
 	}
 	return wsPath, nil
+}
+
+// pathErrReason returns a short, path-free tag describing a filesystem error
+// so debug logs do not echo the workspace path twice via *os.PathError.
+func pathErrReason(err error) string {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, fs.ErrNotExist):
+		return "not_exist"
+	case errors.Is(err, fs.ErrPermission):
+		return "permission_denied"
+	default:
+		return "fs_error"
+	}
 }
 
 // loadOrCreateCookieSecret reads a 32-byte secret from stateDir/cookie_secret,
@@ -107,7 +150,12 @@ func loadOrCreateCookieSecret(stateDir string) []byte {
 		path := filepath.Join(stateDir, "cookie_secret")
 		if fi, err := os.Stat(path); err == nil {
 			if fi.Mode().Perm() != 0600 {
-				slog.Warn("cookie_secret has unsafe permissions, regenerating", "path", path, "mode", fi.Mode().Perm())
+				// Log at Error with an explicit reason so monitoring can
+				// distinguish "unsafe perms forced rotation" from first-run
+				// regeneration. All existing browser sessions will be
+				// invalidated — operator should know why.
+				slog.Error("cookie_secret regenerated due to unsafe permissions",
+					"path", path, "mode", fi.Mode().Perm(), "reason", "unsafe_permissions")
 			} else if data, err := os.ReadFile(path); err == nil && len(data) == 32 {
 				return data
 			}
@@ -117,7 +165,14 @@ func loadOrCreateCookieSecret(stateDir string) []byte {
 			panic("crypto/rand unavailable: " + err.Error())
 		}
 		if err := os.MkdirAll(stateDir, 0700); err == nil {
-			_ = os.WriteFile(path, b, 0600)
+			// Write atomically (tmp + rename) so a concurrent reader never
+			// sees a partial secret during rotation. os.WriteFile opens with
+			// O_TRUNC and the crypto/rand bytes land in small chunks — a
+			// parallel open+read could pick up N bytes of zeros if we were
+			// mid-Write. WriteFileAtomic also fsyncs the file + parent dir.
+			if err := osutil.WriteFileAtomic(path, b, 0600); err != nil {
+				slog.Warn("cookie_secret atomic write failed; session secret is ephemeral", "err", err)
+			}
 		}
 		return b
 	}

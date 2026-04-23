@@ -156,8 +156,7 @@ function renderSidebar(data) {
   if (st.system) {
     const sys = st.system;
     let memStr = sys.memory_mb > 0 ? (sys.memory_mb >= 1024 ? (sys.memory_mb / 1024).toFixed(1) + 'G' : sys.memory_mb + 'M') : '';
-    const ipStr = sys.ips && sys.ips.length > 0 ? sys.ips.join(', ') : '';
-    localWsInfo.sys = sys.os + '/' + sys.arch + ' \u00b7 ' + sys.cpus + 'C' + (memStr ? '/' + memStr : '') + (ipStr ? ' \u00b7 ' + ipStr : '');
+    localWsInfo.sys = sys.os + '/' + sys.arch + ' \u00b7 ' + sys.cpus + 'C' + (memStr ? '/' + memStr : '');
   }
   updateStatusBar();
   if (st.agents) availableAgents = st.agents;
@@ -215,35 +214,70 @@ function renderSidebar(data) {
     return bFS - aFS;
   });
 
-  // Always group by project when any session has a project
-  const projects = new Set(allItems.map(s => s.project).filter(Boolean));
+  // Project lookup by (node,name) so we can reach favorite/github flags.
+  const projIndex = {};
+  projectsData.forEach(p => {
+    projIndex[(p.node || 'local') + ':' + p.name] = p;
+  });
 
-  let html;
-  if (projects.size > 0) {
-    // Group by project, sort groups by earliest first-seen in group (stable)
-    const groups = {};
-    const ungrouped = [];
-    allItems.forEach(s => {
-      const p = s.project || '';
-      if (p) {
-        if (!groups[p]) groups[p] = [];
-        groups[p].push(s);
+  // Group sessions by (node,name) so remote + local projects with same name stay separate.
+  const groups = {};
+  const ungrouped = [];
+  allItems.forEach(s => {
+    const pn = s.project || '';
+    if (pn) {
+      const k = (s.node || 'local') + ':' + pn;
+      if (!groups[k]) groups[k] = {name: pn, node: s.node || 'local', items: []};
+      groups[k].items.push(s);
+    } else {
+      ungrouped.push(s);
+    }
+  });
+  // Favorite projects get an empty group so their header is always rendered.
+  projectsData.forEach(p => {
+    if (!p.favorite) return;
+    const k = (p.node || 'local') + ':' + p.name;
+    if (!groups[k]) groups[k] = {name: p.name, node: p.node || 'local', items: []};
+  });
+
+  const groupKeys = Object.keys(groups);
+  let html = '';
+  if (groupKeys.length > 0) {
+    // Pre-compute per-group sort keys once — avoids repeated map lookups
+    // inside the sort comparator (fav flag, max firstSeen, display name).
+    // This keeps comparator at O(1) scalar comparisons rather than
+    // O(M + map-lookup) per call. Also sidesteps the Math.max(...spread)
+    // call-stack limit that would eventually RangeError at huge session
+    // counts.
+    const sortKeys = {};
+    groupKeys.forEach(k => {
+      const g = groups[k];
+      const p = projIndex[k];
+      let m = 0;
+      for (const s of g.items) {
+        const fs = sessionFirstSeen[(s.node || 'local') + ':' + s.key] || 0;
+        if (fs > m) m = fs;
+      }
+      sortKeys[k] = { fav: (p && p.favorite) ? 0 : 1, first: m, name: g.name };
+    });
+    groupKeys.sort((a, b) => {
+      const ka = sortKeys[a], kb = sortKeys[b];
+      if (ka.fav !== kb.fav) return ka.fav - kb.fav;
+      if (ka.first !== kb.first) return kb.first - ka.first;
+      return ka.name.localeCompare(kb.name);
+    });
+    groupKeys.forEach(k => {
+      const g = groups[k];
+      const p = projIndex[k] || {name: g.name, node: g.node, favorite: false};
+      html += sectionHeaderHtml(p);
+      if (g.items.length > 0) {
+        html += g.items.map(sessionCardHtml).join('');
       } else {
-        ungrouped.push(s);
+        html += sectionEmptyHtml(p);
       }
     });
-    const sortedProjects = Object.keys(groups).sort((a, b) => {
-      const aFirst = Math.max(...groups[a].map(s => sessionFirstSeen[(s.node || 'local') + ':' + s.key] || 0));
-      const bFirst = Math.max(...groups[b].map(s => sessionFirstSeen[(s.node || 'local') + ':' + s.key] || 0));
-      return bFirst - aFirst;
-    });
-    html = '';
-    sortedProjects.forEach(p => {
-      html += '<div class="section-header">' + esc(p) + '</div>';
-      html += groups[p].map(sessionCardHtml).join('');
-    });
     if (ungrouped.length > 0) {
-      html += '<div class="section-header">Other</div>';
+      html += '<div class="section-header"><span class="sh-name">Other</span></div>';
       html += ungrouped.map(sessionCardHtml).join('');
     }
   } else {
@@ -252,7 +286,11 @@ function renderSidebar(data) {
 
   if (!html) html = '<div class="no-sessions">no sessions</div>';
   list.innerHTML = html;
-  list.scrollTop = scrollTop;
+  // Restore scroll on the next frame so the browser finishes layout first;
+  // synchronous assignment after innerHTML can visibly jump on slow devices.
+  requestAnimationFrame(() => {
+    list.scrollTop = scrollTop;
+  });
 
   // Update history badge (filesystem history sessions, deduplicated against workspace)
   const hBadge = document.getElementById('history-badge');
@@ -276,6 +314,110 @@ function matchProject(workspace) {
     }
   }
   return best;
+}
+
+// --- Project section header (favorite + github icons) ---
+
+// The star glyph is identical in both states — CSS class `star-on` + `fill:currentColor`
+// controls the visual fill. A single constant avoids the misleading dead ternary
+// that previously implied a per-state SVG difference.
+const STAR_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"/></svg>';
+const GITHUB_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>';
+
+function sectionHeaderHtml(p) {
+  const node = p.node || 'local';
+  const fav = !!p.favorite;
+  const starCls = fav ? 'sh-btn star-on' : 'sh-btn';
+  const starTitle = fav ? 'Unfavorite' : 'Favorite';
+  // No longer pass `data-fav` — the handler derives current state from the
+  // authoritative `projectsData` at click time, avoiding a stale DOM attribute
+  // that could cause a fast second click (before re-render) to send a
+  // redundant or wrong-polarity toggle.
+  const starBtn = '<button type="button" class="' + starCls + '" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" title="' + starTitle + '" aria-label="' + starTitle + ' ' + escAttr(p.name) + '" onclick="event.stopPropagation();toggleFavorite(this.dataset.name,this.dataset.node)">' + STAR_SVG + '</button>';
+
+  let ghBtn = '';
+  if (p.github) {
+    const url = p.git_remote_url || '';
+    ghBtn = '<button type="button" class="sh-btn github-on" data-url="' + escAttr(url) + '" title="GitHub: ' + escAttr(url) + '" aria-label="Show GitHub remote" onclick="event.stopPropagation();showGitRemote(this.dataset.url)">' + GITHUB_SVG + '</button>';
+  }
+
+  return '<div class="section-header" role="group" aria-label="' + escAttr(p.name) + '">' + starBtn +
+    '<span class="sh-name" title="' + escAttr(p.name) + '">' + esc(p.name) + '</span>' +
+    ghBtn +
+    '</div>';
+}
+
+function sectionEmptyHtml(p) {
+  const node = p.node || 'local';
+  return '<button type="button" class="section-empty" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" onclick="event.stopPropagation();newSessionInProject(this.dataset.name,this.dataset.node)">' +
+    '<span class="se-plus">+</span><span>New session in ' + esc(p.name) + '</span>' +
+    '</button>';
+}
+
+// In-flight guard against a double-click race: the star button's DOM state
+// lags behind projectsData until the next fetchSessions re-render. Without
+// this set, a second click inside that window would read a stale DOM hint and
+// potentially fire the same or opposite polarity. Keyed by (node, name).
+const _favInFlight = new Set();
+
+async function toggleFavorite(name, node) {
+  const nodeID = node || 'local';
+  const key = nodeID + ':' + name;
+  if (_favInFlight.has(key)) return; // drop re-entry
+  // Derive current state from the source of truth (projectsData), not the
+  // button's data-fav attribute which may not have been re-rendered yet.
+  const proj = projectsData.find(x => x.name === name && (x.node || 'local') === nodeID);
+  if (!proj) return;
+  const next = !proj.favorite;
+  _favInFlight.add(key);
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const qs = 'name=' + encodeURIComponent(name) + '&favorite=' + (next ? 'true' : 'false') +
+      (node && node !== 'local' ? '&node=' + encodeURIComponent(node) : '');
+    const r = await fetch('/api/projects/favorite?' + qs, { method: 'POST', headers });
+    if (!r.ok) {
+      showToast('favorite update failed', 'error');
+      // Re-render from the server so the star's visual hover/click state
+      // snaps back to the authoritative `projectsData` value; otherwise the
+      // user sees a phantom success.
+      fetchSessions();
+      return;
+    }
+    // Optimistic update then refresh.
+    proj.favorite = next;
+    showToast(next ? 'Pinned ' + name : 'Unpinned ' + name, 'success');
+    fetchSessions();
+  } catch (e) {
+    showToast('network error', 'error');
+    fetchSessions();
+  } finally {
+    _favInFlight.delete(key);
+  }
+}
+
+function showGitRemote(url) {
+  if (!url) return;
+  // Only open http(s)/git URLs; refuse ssh:// or git@host:user/repo remotes
+  // because ssh URLs can include embedded credentials (user:pass@host) that
+  // a toast would leak to anyone peering at the screen, and window.open on
+  // ssh:// does nothing useful in a browser.
+  const safe = /^(https?:\/\/|git:\/\/)/i.test(url);
+  if (safe) {
+    window.open(url, '_blank', 'noopener,noreferrer');
+    return;
+  }
+  // Fallback: surface the URL but truncated to keep credentials embedded in
+  // ssh URLs from being broadcast via the toast surface.
+  const shown = url.length > 80 ? url.slice(0, 77) + '…' : url;
+  showToast('GitHub remote: ' + shown);
+}
+
+function newSessionInProject(name, node) {
+  const p = projectsData.find(x => x.name === name && (x.node || 'local') === (node || 'local'));
+  if (!p) return;
+  doCreateInProject(p.path, p.name, p.node || 'local');
 }
 
 // --- History Popover ---
@@ -942,8 +1084,8 @@ async function sendMessage() {
         body: JSON.stringify({pid: pd.pid, session_id: pd.sessionId, cwd: pd.cwd, proc_start_time: pd.procStartTime || 0, node: pd.node || ''})
       });
       if (!r.ok) {
-        const errText = await r.text();
-        showToast('takeover failed: ' + errText);
+        const errText = (await r.text().catch(() => '')).slice(0, 160);
+        showToast('takeover failed: ' + (errText || r.status));
         if (input) { input.dataset.placeholder = 'send a message to take over...'; input.contentEditable = 'true'; }
         sending = false;
         if (btn) btn.classList.remove('sending');
@@ -4456,7 +4598,11 @@ async function doCreateCronJob() {
     const freshCtx = collectCronContextValue();
     if (freshCtx === true) body.fresh_context = true;
     const r = await fetch('/api/cron', {method: 'POST', headers, body: JSON.stringify(body)});
-    if (!r.ok) { showToast('create failed: ' + await r.text()); return; }
+    if (!r.ok) {
+      const errText = (await r.text().catch(() => '')).slice(0, 160);
+      showToast('create failed: ' + (errText || r.status));
+      return;
+    }
     const data = await r.json();
     if (overlay) overlay.remove();
     showToast('cron job created', 'success');
@@ -4759,7 +4905,7 @@ async function doEditCronJob(id) {
       method: 'PATCH', headers, body: JSON.stringify(body),
     });
     if (!r.ok) {
-      const raw = await r.text().catch(() => '');
+      const raw = (await r.text().catch(() => '')).slice(0, 160);
       showToast('save failed: ' + (raw || r.status));
       return;
     }

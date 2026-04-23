@@ -67,7 +67,11 @@ type ManagerConfig struct {
 }
 
 // NewManager creates a shim manager.
-func NewManager(cfg ManagerConfig) *Manager {
+// Returns an error if the running binary path cannot be resolved: the path is
+// required for Reconnect's identity check (comparing /proc/<shimPID>/exe), and
+// an empty value would cause all reconnects to be rejected as "binary
+// mismatch", silently disabling zero-downtime restart.
+func NewManager(cfg ManagerConfig) (*Manager, error) {
 	if cfg.StateDir == "" {
 		home, _ := os.UserHomeDir()
 		cfg.StateDir = filepath.Join(home, ".naozhi", "shims")
@@ -88,8 +92,13 @@ func NewManager(cfg ManagerConfig) *Manager {
 		cfg.WatchdogTimeout = 30 * time.Minute
 	}
 
-	// Find our own binary path for spawning shim subprocesses
-	naozhiBin, _ := os.Executable()
+	// Find our own binary path for spawning shim subprocesses and for the
+	// reconnect identity check. A missing value would silently break
+	// Reconnect — fail fast so operators see the problem at startup.
+	naozhiBin, err := os.Executable()
+	if err != nil {
+		return nil, fmt.Errorf("resolve naozhi binary path: %w", err)
+	}
 
 	if err := os.MkdirAll(cfg.StateDir, 0700); err != nil {
 		slog.Warn("failed to create shim state directory", "dir", cfg.StateDir, "err", err)
@@ -105,7 +114,7 @@ func NewManager(cfg ManagerConfig) *Manager {
 		maxShims:        cfg.MaxShims,
 		naozhiBin:       naozhiBin,
 		shims:           make(map[string]*ShimHandle),
-	}
+	}, nil
 }
 
 // StartShim spawns a new shim process for the given session key, connects to it,
@@ -222,6 +231,13 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 		}
 	}()
 
+	// Use NewTimer + defer Stop so the goroutine backing time.After does not
+	// park for 30s after a fast-path success or ctx cancellation. Under high
+	// start/restart pressure this previously accumulated up to thousands of
+	// live timer goroutines between GC cycles.
+	readyTimer := time.NewTimer(30 * time.Second)
+	defer readyTimer.Stop()
+
 	var tokenB64 string
 	select {
 	case result := <-readyCh:
@@ -230,7 +246,7 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 			return nil, result.err
 		}
 		tokenB64 = result.token
-	case <-time.After(30 * time.Second):
+	case <-readyTimer.C:
 		cmd.Process.Kill() //nolint:errcheck
 		return nil, fmt.Errorf("shim ready timeout")
 	case <-ctx.Done():
@@ -255,10 +271,18 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 	moveToShimsCgroup(cmd.Process.Pid, handle.Hello.CLIPID)
 
 	m.mu.Lock()
+	// Guard against a concurrent StartShim/Reconnect having already installed
+	// a handle for this key — overwriting without closing leaks the previous
+	// Unix-domain socket fd and bufio buffers. Close the old handle outside
+	// the lock to avoid holding it across network I/O.
+	oldHandle := m.shims[key]
 	m.shims[key] = handle
 	m.pendingShims-- // slot fulfilled: transfer from pending to active
 	slotReleased = true
 	m.mu.Unlock()
+	if oldHandle != nil {
+		oldHandle.Close()
+	}
 
 	return handle, nil
 }
@@ -311,8 +335,14 @@ func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*Sh
 	handle.State = state
 
 	m.mu.Lock()
+	// Same invariant as StartShim: do not silently leak a previously stored
+	// handle if Reconnect races with itself or with StartShim for the same key.
+	oldHandle := m.shims[key]
 	m.shims[key] = handle
 	m.mu.Unlock()
+	if oldHandle != nil {
+		oldHandle.Close()
+	}
 
 	return handle, nil
 }
@@ -460,14 +490,36 @@ func (h *ShimHandle) SendMsg(msg ClientMsg) error {
 	return h.Writer.Flush()
 }
 
+// maxServerLineBytes caps the size of a single server→client line so a
+// runaway or malicious shim cannot exhaust naozhi's heap. bufio.ReadBytes
+// would otherwise grow its internal buffer without bound; we enforce a
+// hard cap aligned with the server-side limit (`maxClientLineBytes`).
+const maxServerLineBytes = 16 * 1024 * 1024
+
 // ReadMsg reads the next ServerMsg from the handle's connection.
 func (h *ShimHandle) ReadMsg() (ServerMsg, error) {
-	line, err := h.Reader.ReadBytes('\n')
-	if err != nil {
-		return ServerMsg{}, err
+	// bufio.Reader.ReadBytes grows unbounded; a malicious/buggy shim that
+	// never emits '\n' could drive OOM. Track running length after each
+	// buffered read and bail once we exceed maxServerLineBytes.
+	var buf []byte
+	for {
+		chunk, err := h.Reader.ReadSlice('\n')
+		if err != nil && err != bufio.ErrBufferFull {
+			// Any partial chunk on a terminal error is abandoned; we cannot
+			// parse a half line and the bufio reader is about to be closed.
+			return ServerMsg{}, err
+		}
+		if len(buf)+len(chunk) > maxServerLineBytes {
+			return ServerMsg{}, fmt.Errorf("server msg exceeds %d bytes", maxServerLineBytes)
+		}
+		buf = append(buf, chunk...)
+		if err == nil {
+			break // terminator found
+		}
+		// ErrBufferFull: keep reading until newline or cap
 	}
 	var msg ServerMsg
-	if err := json.Unmarshal(line, &msg); err != nil {
+	if err := json.Unmarshal(buf, &msg); err != nil {
 		return ServerMsg{}, fmt.Errorf("parse server msg: %w", err)
 	}
 	return msg, nil

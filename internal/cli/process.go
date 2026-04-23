@@ -10,10 +10,12 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 )
 
 // ProcessState represents the lifecycle state of a CLI process.
@@ -221,30 +223,92 @@ type shimClientMsg struct {
 	Seq   int64  `json:"last_seq,omitempty"`
 }
 
-// shimSendBufPool reuses bytes.Buffer instances for marshaling outgoing shim
-// messages. Saves ~one alloc per Send/ping/interrupt on the hot path.
+// shimSendEnc pairs a pooled bytes.Buffer with a json.Encoder bound to it.
+// Both are reused across calls so the hot shimSend path has zero encoder
+// allocations. The Encoder holds a *bytes.Buffer by pointer, so resetting
+// the buffer between uses is safe — the Encoder writes into the same buffer
+// on every call.
+type shimSendEnc struct {
+	buf *bytes.Buffer
+	enc *json.Encoder
+}
+
 var shimSendBufPool = sync.Pool{
-	New: func() any { return new(bytes.Buffer) },
+	New: func() any {
+		buf := new(bytes.Buffer)
+		enc := json.NewEncoder(buf)
+		// Shim wire messages carry user content that may contain '<', '>',
+		// '&' (code blocks, HTML snippets). The default json.Marshal HTML-
+		// escape would deliver `\u003c` style strings to the shim and on to
+		// the Claude CLI stdin, subtly mangling payloads.
+		enc.SetEscapeHTML(false)
+		return &shimSendEnc{buf: buf, enc: enc}
+	},
+}
+
+// encodeShimMsg marshals msg into a fresh pooled buffer with HTML escaping
+// disabled. Caller MUST Put the returned buffer back into shimSendBufPool
+// (typically via defer) after the Write+Flush completes.
+//
+// Encoding outside the write lock keeps shimWMu held only for the length of
+// the actual socket write: large messages (e.g. 400KB thumbnails) otherwise
+// serialize ping/interrupt on the encoder itself.
+func encodeShimMsg(msg shimClientMsg) (*shimSendEnc, error) {
+	se := shimSendBufPool.Get().(*shimSendEnc)
+	se.buf.Reset()
+	// Encoder appends its own trailing '\n' per NDJSON framing, so we must
+	// not add one manually.
+	if err := se.enc.Encode(msg); err != nil {
+		// Do not return this entry to the pool: json.Encoder is not
+		// documented to leave clean state after a failed Encode, and
+		// buf may hold partial bytes. Let GC reclaim it; the pool's New
+		// func will allocate a fresh pair on the next Get.
+		return nil, err
+	}
+	return se, nil
+}
+
+// shimSendBufMaxCap caps the buffer capacity we return to the pool. Large
+// payloads (e.g. 400KB image paste) grow the underlying bytes.Buffer and
+// sync.Pool will not trim it; once a few big messages have passed through,
+// pooled entries would permanently hold large backing arrays. Entries that
+// exceed this cap are dropped so GC reclaims them; the pool's New allocator
+// will produce a fresh small buffer on the next Get.
+const shimSendBufMaxCap = 64 * 1024
+
+func returnShimSendEnc(se *shimSendEnc) {
+	if se.buf.Cap() > shimSendBufMaxCap {
+		return
+	}
+	shimSendBufPool.Put(se)
 }
 
 func (p *Process) shimSend(msg shimClientMsg) error {
-	buf := shimSendBufPool.Get().(*bytes.Buffer)
-	buf.Reset()
-	defer shimSendBufPool.Put(buf)
-
-	// json.Marshal into the pooled buffer avoids the per-call json.Encoder
-	// allocation. The shim protocol is NDJSON so we append the trailing '\n'
-	// explicitly.
-	data, err := json.Marshal(msg)
+	se, err := encodeShimMsg(msg)
 	if err != nil {
 		return err
 	}
-	buf.Write(data)
-	buf.WriteByte('\n')
+	defer returnShimSendEnc(se)
 
 	p.shimWMu.Lock()
 	defer p.shimWMu.Unlock()
-	if _, err := p.shimW.Write(buf.Bytes()); err != nil {
+	if _, err := p.shimW.Write(se.buf.Bytes()); err != nil {
+		return err
+	}
+	return p.shimW.Flush()
+}
+
+// shimSendLocked is the locked variant of shimSend. The caller MUST hold
+// p.shimWMu. Kill() uses this to batch SetWriteDeadline+send+Close under a
+// single lock acquisition to avoid racing a concurrent shimSend.
+func (p *Process) shimSendLocked(msg shimClientMsg) error {
+	se, err := encodeShimMsg(msg)
+	if err != nil {
+		return err
+	}
+	defer returnShimSendEnc(se)
+
+	if _, err := p.shimW.Write(se.buf.Bytes()); err != nil {
 		return err
 	}
 	return p.shimW.Flush()
@@ -261,27 +325,109 @@ func (p *Process) startReadLoop() {
 
 // readLoop reads NDJSON messages from the shim socket and dispatches events.
 func (p *Process) readLoop() {
+	// Panic recover: a malformed shim message or protocol bug must not take
+	// the whole process down silently. We log stack + transition to Dead so
+	// the router can reap this session and the dashboard surfaces the failure
+	// instead of the user seeing a stalled "running" forever.
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("readLoop panic recovered",
+				"panic", r, "stack", string(debug.Stack()))
+			p.mu.Lock()
+			p.State = StateDead
+			p.mu.Unlock()
+		}
+	}()
 	defer close(p.eventCh)
 	defer close(p.done)
 	defer p.eventLog.CloseSubscribers()
 
+	// Reuse the line accumulator across iterations to avoid an allocation
+	// per event. Most stream-json events are well under 4KB; the 4096 cap
+	// matches bufio's default buffer so single-chunk lines rarely grow.
+	// We reset length (not capacity) at the top of each iteration, and
+	// carry any grown capacity forward via lineBuf = line so a single large
+	// event doesn't force every subsequent iteration to re-grow from 4KB.
+	lineBuf := make([]byte, 0, 4096)
 	for {
-		line, err := p.shimR.ReadBytes('\n')
-		if err != nil {
-			if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) {
+		// bufio.ReadBytes grows its internal buffer without bound; a buggy or
+		// hostile shim that emits a multi-GB line without '\n' would OOM
+		// naozhi before the post-read size check below fires. Accumulate via
+		// ReadSlice chunks so we can bail the moment the cap is exceeded.
+		line := lineBuf[:0]
+		var readErr error
+		capExceeded := false
+		for {
+			chunk, err := p.shimR.ReadSlice('\n')
+			if len(chunk) > 0 {
+				if len(line)+len(chunk) > maxScannerBufBytes {
+					capExceeded = true
+					break
+				}
+				line = append(line, chunk...)
+			}
+			if err == nil {
+				break // terminator found
+			}
+			if err == bufio.ErrBufferFull {
+				continue // keep reading until newline or cap
+			}
+			readErr = err
+			break
+		}
+		// Propagate grown capacity so the next iteration starts with the
+		// expanded backing array instead of reverting to the original 4096.
+		// Without this, a single large event forces every subsequent
+		// iteration to re-grow from 4KB through a chain of doublings.
+		lineBuf = line
+		if capExceeded {
+			slog.Warn("readLoop: oversized shim message, skipping", "size", len(line))
+			// Drain the rest of this overlong line so the next iteration
+			// doesn't read the tail as a separate message.
+			for {
+				// bufio.ReadSlice only returns nil when the delimiter was
+				// found; ErrBufferFull means the internal buffer filled with
+				// no '\n'. Any other error terminates the drain.
+				_, err := p.shimR.ReadSlice('\n')
+				if err == nil {
+					break
+				}
+				if err != bufio.ErrBufferFull {
+					readErr = err
+					break
+				}
+			}
+			if readErr != nil {
+				if errors.Is(readErr, io.EOF) || errors.Is(readErr, net.ErrClosed) {
+					slog.Info("readLoop: shim connection closed after oversize drain")
+				} else {
+					slog.Warn("readLoop: shim read error after oversize drain", "err", readErr)
+				}
+				break
+			}
+			continue
+		}
+		if readErr != nil {
+			if errors.Is(readErr, io.EOF) || errors.Is(readErr, net.ErrClosed) {
 				slog.Info("readLoop: shim connection closed")
 			} else {
-				slog.Warn("readLoop: shim read error", "err", err)
+				slog.Warn("readLoop: shim read error", "err", readErr)
 			}
 			break
 		}
-		if len(line) > maxScannerBufBytes {
-			slog.Warn("readLoop: oversized shim message, skipping", "size", len(line))
-			continue
-		}
 
+		// bufio.ReadBytes('\n') returns the delimiter; strip only the tail '\n'
+		// (and optional '\r') instead of bytes.TrimSpace which scans both ends.
+		// json.Unmarshal handles leading whitespace inside the payload.
+		trimmed := line
+		if n := len(trimmed); n > 0 && trimmed[n-1] == '\n' {
+			trimmed = trimmed[:n-1]
+			if n > 1 && trimmed[n-2] == '\r' {
+				trimmed = trimmed[:n-2]
+			}
+		}
 		var msg shimMsg
-		if err := json.Unmarshal(bytes.TrimSpace(line), &msg); err != nil {
+		if err := json.Unmarshal(trimmed, &msg); err != nil {
 			slog.Warn("readLoop: skip unparseable shim message", "err", err, "size", len(line))
 			continue
 		}
@@ -335,13 +481,17 @@ func (p *Process) readLoop() {
 			// Deliver to Send() for result detection and callback delivery.
 			// Non-blocking: if buffer is full (no active Send), the event
 			// is already safely in EventLog for dashboard visibility.
+			// recvAt is set just before handoff so drainStaleEvents can tell
+			// events queued before a new turn started from events produced
+			// for the new turn.
+			ev.recvAt = time.Now()
 			select {
 			case p.eventCh <- ev:
 			default:
 			}
 
 		case "stderr":
-			slog.Debug("cli stderr", "line", msg.Line)
+			slog.Debug("cli stderr", "line", sanitizeStderrLine(msg.Line))
 
 		case "cli_exited":
 			code := 0
@@ -374,6 +524,12 @@ func (p *Process) readLoop() {
 // heartbeatLoop sends periodic ping messages to the shim and kills the process
 // if 3 consecutive pongs are missed (shim unresponsive or connection broken).
 func (p *Process) heartbeatLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("heartbeatLoop panic recovered",
+				"panic", r, "stack", string(debug.Stack()))
+		}
+	}()
 	const (
 		interval  = 30 * time.Second
 		maxMisses = 3
@@ -395,16 +551,15 @@ func (p *Process) heartbeatLoop() {
 				return
 			}
 
-			// Wait for pong within half the interval
+			// Wait for pong within half the interval. Note on drain: Go 1.23+
+			// made Timer.Stop/Reset self-draining at the runtime level, so the
+			// historical `if !Stop() { <-C }` dance is redundant on this
+			// toolchain. We still call Stop() to release the pending tick
+			// immediately rather than waiting for GC.
 			pongTimer.Reset(interval / 2)
 			select {
 			case <-p.pongRecv:
-				if !pongTimer.Stop() {
-					select {
-					case <-pongTimer.C:
-					default:
-					}
-				}
+				pongTimer.Stop()
 				misses = 0
 			case <-pongTimer.C:
 				misses++
@@ -641,21 +796,24 @@ func (p *Process) Interrupt() {
 	if !p.Alive() {
 		return
 	}
-	// Capture running state before setting interrupted — avoids TOCTOU where
-	// a concurrent drainStaleEvents reads interrupted=true but interruptedRun=false.
+	// Set the atomics while holding p.mu so Send()'s State→Running transition
+	// (also under p.mu) serialises with us. Without the lock coverage, a
+	// concurrent Send() could flip State to Running between our unlock and
+	// our atomics Store, leaving interrupted=true with interruptedRun=false —
+	// drainStaleEvents would then skip the settle wait and the interrupted
+	// result event from the in-flight turn would leak into the next turn.
 	p.mu.Lock()
 	state := p.State
-	p.mu.Unlock()
 	p.interrupted.Store(true)
 	if state == StateRunning {
 		p.interruptedRun.Store(true)
 	}
+	p.mu.Unlock()
 	// While the CLI is still spawning, its REPL hasn't initialised and the
-	// Claude CLI silently drops SIGINT. Sending one anyway wastes a shim
-	// roundtrip and — worse — leaves `interrupted=true` with no result to
-	// drain, costing the next Send a 500ms settle wait. Mark the flag so a
-	// caller that follows up with Send still sees the intent, but skip the
-	// wire send until the process reaches Ready/Running.
+	// Claude CLI silently drops SIGINT. Skip the wire send entirely; also
+	// avoid marking interruptedRun so drainStaleEvents will not enter the
+	// settle loop (interrupted=true alone drains without waiting, since
+	// there is no stale result to absorb).
 	if state == StateSpawning {
 		return
 	}
@@ -667,7 +825,14 @@ func (p *Process) Interrupt() {
 // drainStaleEvents clears residual events from previous turns.
 // When the previous turn was interrupted (SIGINT), waits briefly for the
 // interrupted result event so it doesn't pollute the next turn.
+//
+// Only drains events whose arrival predates this call. Using a cutoff
+// timestamp captured at entry avoids a race where readLoop concurrently
+// pushes a fresh event for the *new* turn into eventCh between the caller's
+// Send() and this drain; without the guard, that live event would be
+// swallowed and the Send would fall back to findResultSince.
 func (p *Process) drainStaleEvents(ctx context.Context) error {
+	cutoff := time.Now()
 	if p.interrupted.Swap(false) {
 		// Only wait for the interrupted result if the CLI was actively
 		// processing a turn when Interrupt() was called. An idle process
@@ -683,6 +848,17 @@ func (p *Process) drainStaleEvents(ctx context.Context) error {
 					if !ok || ev.Type == "result" {
 						goto drain
 					}
+					if ev.recvAt.After(cutoff) {
+						// Event produced after we entered drain belongs to the
+						// new turn. Try to put it back (buffered channel may
+						// have room); if the channel is already full we fall
+						// back to findResultSince which reads from EventLog.
+						select {
+						case p.eventCh <- ev:
+						default:
+						}
+						goto drain
+					}
 				case <-settle.C:
 					slog.Debug("send: settle timeout, no stale result")
 					goto drain
@@ -695,13 +871,82 @@ func (p *Process) drainStaleEvents(ctx context.Context) error {
 		}
 	}
 drain:
-	// Non-blocking drain of any remaining buffered events.
+	// Non-blocking drain of any remaining buffered events that predate the
+	// cutoff. Events produced after cutoff are collected and re-enqueued at
+	// the end so the live consumer still observes them. Returning the moment
+	// we hit one post-cutoff event would leave any interleaved pre-cutoff
+	// stragglers in the channel where they would be consumed by the new
+	// turn as if they were current — producing phantom tool_use/assistant
+	// events from the prior turn.
+	//
+	// Allocation is lazy: the common path (no interrupt, empty buffer) never
+	// hits append, so the zero-value nil slice avoids a per-Send heap alloc.
+	var holdback []Event
 	for {
 		select {
-		case <-p.eventCh:
+		case <-ctx.Done():
+			// Re-enqueue anything we have already collected so we do not
+			// drop the fresh-turn events on cancellation. Guard against the
+			// readLoop having closed eventCh concurrently: sending on a
+			// closed channel panics regardless of the `default` arm in a
+			// select, because the send case is always ready-to-run on a
+			// closed channel and select will pick it. EventLog is the
+			// authoritative store for logged events, so dropping holdback
+			// when eventCh is torn down is safe.
+			if isChanAlive(p.done) {
+				for _, ev := range holdback {
+					select {
+					case p.eventCh <- ev:
+					default:
+					}
+				}
+			}
+			return ctx.Err()
+		case ev, ok := <-p.eventCh:
+			if !ok {
+				// Channel closed (process exited). Any post-cutoff events
+				// already in holdback were also logged to EventLog by readLoop
+				// before being pushed to eventCh (see logEvent call above), so
+				// the live Send() can recover a result via findResultSince().
+				// Dropping holdback here is safe because EventLog is authoritative.
+				return nil
+			}
+			if ev.recvAt.After(cutoff) {
+				holdback = append(holdback, ev)
+			}
+			// pre-cutoff events are dropped (drained)
 		default:
+			// Channel empty — push back any collected post-cutoff events.
+			// Same readLoop-closed guard as the ctx.Done arm above.
+			if !isChanAlive(p.done) {
+				return nil
+			}
+			for _, ev := range holdback {
+				select {
+				case p.eventCh <- ev:
+				default:
+					// eventCh is full; fresh events are being dropped here.
+					// findResultSince will recover the result from EventLog but
+					// surface the occurrence so operators can enlarge the
+					// channel if it persists under load.
+					slog.Warn("drainStaleEvents: eventCh full, dropped fresh event",
+						"type", ev.Type, "session", ev.SessionID)
+				}
+			}
 			return nil
 		}
+	}
+}
+
+// isChanAlive reports whether done is still open (readLoop still running, so
+// eventCh remains safe to send on). readLoop defers `close(p.done)` followed
+// by `close(p.eventCh)` in LIFO order — if p.done is open, eventCh is too.
+func isChanAlive(done <-chan struct{}) bool {
+	select {
+	case <-done:
+		return false
+	default:
+		return true
 	}
 }
 
@@ -712,8 +957,16 @@ func (p *Process) Kill() {
 		// Best-effort: send kill command with a short deadline to avoid blocking.
 		// If the write fails (conn already broken), the shim's disconnect watchdog
 		// will eventually kill the CLI.
+		//
+		// Hold shimWMu across SetWriteDeadline + shimSend + Close so we do not
+		// race a concurrent shimSend (heartbeat/ping/write) whose bufio.Writer
+		// is not safe against a concurrent Close()+Flush. shimSend already
+		// takes shimWMu for the write, so we acquire it here and call
+		// shimSendLocked which skips the re-lock.
+		p.shimWMu.Lock()
+		defer p.shimWMu.Unlock()
 		p.shimConn.SetWriteDeadline(time.Now().Add(time.Second)) //nolint:errcheck
-		_ = p.shimSend(shimClientMsg{Type: "kill"})
+		_ = p.shimSendLocked(shimClientMsg{Type: "kill"})
 		p.shimConn.Close()
 	})
 }
@@ -733,23 +986,44 @@ func (p *Process) Close() {
 
 // Detach disconnects from the shim without stopping the CLI.
 // Used during naozhi graceful shutdown to keep shim alive.
+//
+// Applies a short write deadline so Router.Shutdown's wg.Wait() cannot be
+// pinned by a dead/slow socket (TCP write timeout would otherwise stretch to
+// minutes, blocking SIGTERM handling).
 func (p *Process) Detach() {
-	_ = p.shimSend(shimClientMsg{Type: "detach"})
+	p.shimWMu.Lock()
+	p.shimConn.SetWriteDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
+	_ = p.shimSendLocked(shimClientMsg{Type: "detach"})
 	p.shimConn.Close()
+	p.shimWMu.Unlock()
 }
 
-// EventEntryFromEvent converts an Event to an EventEntry without appending it.
-// Used by both logEvent (real-time) and ReconnectShims (replay injection).
-// Returns (entry, ok). ok is false if the event should be skipped.
+// EventEntryFromEvent converts an Event to a single EventEntry.
+// Deprecated for multi-block assistant events — use EventEntriesFromEvent.
+// Kept for callers that only need the first entry (or non-assistant events).
 func EventEntryFromEvent(ev Event) (EventEntry, bool) {
-	entry := EventEntry{Time: time.Now().UnixMilli()}
+	entries := EventEntriesFromEvent(ev)
+	if len(entries) == 0 {
+		return EventEntry{}, false
+	}
+	return entries[0], true
+}
+
+// EventEntriesFromEvent converts an Event to zero or more EventEntry values.
+// Assistant messages can contain multiple content blocks (thinking + tool_use + text);
+// each block that maps to a known type produces its own entry so downstream consumers
+// (EventLog, dashboard) don't silently drop blocks after the first.
+func EventEntriesFromEvent(ev Event) []EventEntry {
+	now := time.Now().UnixMilli()
+	base := EventEntry{Time: now}
 
 	switch ev.Type {
 	case "system":
+		entry := base
 		entry.Type = "system"
 		entry.Summary = ev.SubType
 		if ev.SubType == "init" {
-			return entry, false
+			return nil
 		}
 		switch ev.SubType {
 		case "task_started":
@@ -786,13 +1060,20 @@ func EventEntryFromEvent(ev Event) (EventEntry, bool) {
 				entry.DurationMS = ev.Usage.DurationMS
 			}
 		case "stop_hook_summary", "turn_duration", "hook_started", "hook_response":
-			return entry, false
+			return nil
 		}
+		return []EventEntry{entry}
 	case "assistant":
 		if ev.Message == nil {
-			return entry, false
+			return nil
 		}
+		// Lazy-allocate out: most assistant events carry a single content block
+		// (pure text or a single tool_use). `make([]EventEntry, 0, 1)` would
+		// still force a heap alloc for the backing array; `nil` lets the
+		// first append pay 1 alloc only when we have real blocks to write.
+		var out []EventEntry
 		for _, block := range ev.Message.Content {
+			entry := base
 			switch block.Type {
 			case "thinking":
 				entry.Type = "thinking"
@@ -822,25 +1103,27 @@ func EventEntryFromEvent(ev Event) (EventEntry, bool) {
 			default:
 				continue
 			}
-			return entry, true
+			out = append(out, entry)
 		}
-		return entry, false
+		if len(out) == 0 {
+			return nil
+		}
+		return out
 	case "result":
+		entry := base
 		entry.Type = "result"
 		entry.Summary = TruncateRunes(ev.Result, 200)
 		entry.Detail = TruncateRunes(ev.Result, 16000)
 		entry.Cost = ev.CostUSD
-	default:
-		return entry, false
+		return []EventEntry{entry}
 	}
-
-	return entry, true
+	return nil
 }
 
-// logEvent converts an Event to an EventEntry and appends it to the event log.
+// logEvent converts an Event to one or more EventEntry values and appends them to the event log.
 func (p *Process) logEvent(ev Event) {
-	entry, ok := EventEntryFromEvent(ev)
-	if !ok {
+	entries := EventEntriesFromEvent(ev)
+	if len(entries) == 0 {
 		return
 	}
 	// Update process-level cost tracking for result events.
@@ -849,8 +1132,9 @@ func (p *Process) logEvent(ev Event) {
 		p.totalCost = ev.CostUSD
 		p.mu.Unlock()
 	}
-
-	p.eventLog.Append(entry)
+	for _, entry := range entries {
+		p.eventLog.Append(entry)
+	}
 }
 
 // agentInput holds the parsed fields from an Agent tool call input.
@@ -1076,3 +1360,99 @@ func (p *Process) SubscribeEvents() (<-chan struct{}, func()) {
 
 // LastSeq returns the last received shim sequence number (for reconnect).
 func (p *Process) LastSeq() int64 { return p.lastSeq.Load() }
+
+const maxStderrLogLineBytes = 500
+
+// sanitizeStderrLine removes ANSI escape sequences (SGR color, cursor movement,
+// OSC/DCS) and truncates the stderr line so that terminal-aware log viewers
+// aren't colorized/repositioned by whatever the Claude CLI wrote, and so a
+// runaway stderr cannot fill the journal with a single multi-MB line.
+func sanitizeStderrLine(line string) string {
+	if line == "" {
+		return line
+	}
+	// Fast path: most CLI stderr output is plain log text with neither ANSI
+	// escape sequences nor stray control bytes. Scanning once cheaply and
+	// returning the original string avoids a strings.Builder allocation and
+	// a full-line copy on the common path.
+	clean := true
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		if c == 0x1b || (c < 0x20 && c != '\t') {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		if len(line) > maxStderrLogLineBytes {
+			cut := maxStderrLogLineBytes
+			for cut > 0 && !utf8.RuneStart(line[cut]) {
+				cut--
+			}
+			return line[:cut] + "…(truncated)"
+		}
+		return line
+	}
+	var b strings.Builder
+	b.Grow(len(line))
+	for i := 0; i < len(line); {
+		c := line[i]
+		if c == 0x1b { // ESC
+			// CSI: ESC [ ... final byte in @ .. ~
+			if i+1 < len(line) && line[i+1] == '[' {
+				j := i + 2
+				for j < len(line) && (line[j] < 0x40 || line[j] > 0x7e) {
+					j++
+				}
+				if j < len(line) {
+					j++ // consume final byte
+				}
+				i = j
+				continue
+			}
+			// OSC: ESC ] ... (ST = ESC \ or BEL)
+			if i+1 < len(line) && line[i+1] == ']' {
+				j := i + 2
+				for j < len(line) {
+					if line[j] == 0x07 { // BEL
+						j++
+						break
+					}
+					if line[j] == 0x1b && j+1 < len(line) && line[j+1] == '\\' {
+						j += 2
+						break
+					}
+					j++
+				}
+				i = j
+				continue
+			}
+			// Two-byte ESC sequence.
+			if i+1 < len(line) {
+				i += 2
+			} else {
+				i++
+			}
+			continue
+		}
+		// Drop bare control chars (keep \t).
+		if c < 0x20 && c != '\t' {
+			i++
+			continue
+		}
+		b.WriteByte(c)
+		i++
+	}
+	out := b.String()
+	if len(out) > maxStderrLogLineBytes {
+		// Byte-level truncation would cut CJK/emoji runes mid-sequence and
+		// produce invalid UTF-8 that some slog handlers (JSON) replace with
+		// U+FFFD or reject outright. Walk backwards to the nearest rune start.
+		cut := maxStderrLogLineBytes
+		for cut > 0 && !utf8.RuneStart(out[cut]) {
+			cut--
+		}
+		out = out[:cut] + "…(truncated)"
+	}
+	return out
+}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"slices"
 	"strings"
 	"sync"
@@ -90,6 +91,13 @@ type Router struct {
 
 	// pendingSpawns tracks Spawn() calls in progress (lock released during spawn)
 	pendingSpawns int
+
+	// spawningKeys records keys whose spawnSession is in flight. ReconnectShims
+	// consults this set before declaring a discovered shim "orphan": a shim may
+	// have written its state file after we dropped r.mu for wrapper.Spawn() but
+	// before the new ManagedSession is installed, and without this set a
+	// concurrent reconcile would shut the fresh shim down as an orphan.
+	spawningKeys map[string]struct{}
 
 	storePath        string
 	storeDirty       bool   // true when sessions changed since last save
@@ -231,6 +239,7 @@ func NewRouter(cfg RouterConfig) *Router {
 		storePath:          cfg.StorePath,
 		knownIDs:           make(map[string]bool),
 		sessionIDToKey:     make(map[string]string),
+		spawningKeys:       make(map[string]struct{}),
 		noOutputTimeout:    cfg.NoOutputTimeout,
 		totalTimeout:       cfg.TotalTimeout,
 	}
@@ -377,7 +386,16 @@ func (r *Router) ReconnectShims() {
 		if ok && sess.isAlive() {
 			hasLiveProcess = true
 		}
+		_, spawning := r.spawningKeys[state.Key]
 		r.mu.Unlock()
+
+		// A spawnSession is in flight for this key: the new shim may have
+		// already written its state file while ManagedSession is not yet
+		// installed in r.sessions. Skip this round — the next tick will
+		// find either a live session or a real orphan.
+		if spawning {
+			continue
+		}
 
 		if !ok {
 			slog.Info("orphan shim found, shutting down", "key", state.Key)
@@ -688,6 +706,20 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 // Caller must hold r.mu. Releases r.mu during Spawn() to avoid blocking other
 // goroutines during potentially slow protocol init (e.g., ACP handshake).
 func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, opts AgentOpts) (*ManagedSession, error) {
+	// Mark this key as spawning so ReconnectShims does not mistake the freshly
+	// started shim's state file for an orphan. Every return path below leaves
+	// r.mu unlocked, so the defer reacquires it to delete the marker. Lazy
+	// init tolerates test-only Routers constructed with &Router{...}.
+	if r.spawningKeys == nil {
+		r.spawningKeys = make(map[string]struct{})
+	}
+	r.spawningKeys[key] = struct{}{}
+	defer func() {
+		r.mu.Lock()
+		delete(r.spawningKeys, key)
+		r.mu.Unlock()
+	}()
+
 	// Exempt sessions (planners) bypass maxProcs capacity check but have their own limit
 	if !opts.Exempt {
 		// Fast path: the incremental activeCount is accurate under normal operation
@@ -1473,7 +1505,9 @@ func (r *Router) Shutdown() {
 	// Save session state outside lock (avoids JSON marshal + file I/O under mutex).
 	// disk_full is surfaced as a distinct structured field so monitoring can
 	// page on ENOSPC separately from transient write failures; shutdown loses
-	// all un-persisted state silently otherwise.
+	// all un-persisted state silently otherwise. Each error chain is walked
+	// once — the three save paths are independent, so sharing a single flag
+	// would mis-attribute a disk-full on saveStore to saveKnownIDs.
 	if err := saveStore(storePath, sessionsCopy); err != nil {
 		slog.Error("save session store on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
@@ -1491,6 +1525,17 @@ func (r *Router) Shutdown() {
 		wg.Add(1)
 		go func(p processIface) {
 			defer wg.Done()
+			// Shutdown happens last in the graceful-stop sequence, so a panic
+			// inside Detach/Close (e.g. a nil shim conn from a late race)
+			// would bring down the whole process and skip any remaining
+			// cleanup in main. Swallow so the rest of the goroutines still
+			// finish and naozhi exits cleanly.
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("session shutdown: detach panicked",
+						"panic", r, "stack", string(debug.Stack()))
+				}
+			}()
 			if dp, ok := p.(interface{ Detach() }); ok {
 				dp.Detach()
 			} else {

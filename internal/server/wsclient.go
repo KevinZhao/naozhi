@@ -44,10 +44,28 @@ func (c *wsClient) closeDone() {
 }
 
 func (c *wsClient) SendJSON(v any) {
-	data, err := json.Marshal(v)
-	if err != nil {
+	// Reuse the HTTP writeJSON encoder pool: ws control messages (auth_ok,
+	// subscribed, history, error, pong, send_ack, interrupt_ack) are on the
+	// hot path — 10 active clients produce 40-160 ctrl msg/s — and each
+	// json.Marshal allocates a fresh encodeState + result []byte. SendRaw
+	// buffers the bytes onto the send channel, so we must copy out of the
+	// pooled buffer before returning it.
+	e := getJSONEnc()
+	defer putJSONEnc(e)
+	if err := e.enc.Encode(v); err != nil {
+		slog.Debug("ws SendJSON encode", "err", err)
 		return
 	}
+	// Encoder appends a trailing newline; strip it because WS clients expect
+	// a bare JSON message (matches the json.Marshal output).
+	raw := e.buf.Bytes()
+	if n := len(raw); n > 0 && raw[n-1] == '\n' {
+		raw = raw[:n-1]
+	}
+	// Copy bytes out of the pool buffer — SendRaw hands the slice to the
+	// send channel goroutine which may outlive putJSONEnc.
+	data := make([]byte, len(raw))
+	copy(data, raw)
 	c.SendRaw(data)
 }
 

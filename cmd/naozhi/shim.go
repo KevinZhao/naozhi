@@ -101,7 +101,11 @@ func runShimStop(args []string) {
 		*stateDir = home + "/.naozhi/shims"
 	}
 
-	mgr := shim.NewManager(shim.ManagerConfig{StateDir: *stateDir})
+	mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: *stateDir})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init shim manager: %v\n", err)
+		os.Exit(1)
+	}
 	states, err := mgr.Discover()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "discover shims: %v\n", err)
@@ -146,7 +150,11 @@ func runShimList(args []string) {
 		*stateDir = home + "/.naozhi/shims"
 	}
 
-	mgr := shim.NewManager(shim.ManagerConfig{StateDir: *stateDir})
+	mgr, err := shim.NewManager(shim.ManagerConfig{StateDir: *stateDir})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "init shim manager: %v\n", err)
+		os.Exit(1)
+	}
 	states, err := mgr.Discover()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "discover shims: %v\n", err)

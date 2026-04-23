@@ -987,3 +987,43 @@ var _ = bufio.NewReader
 var _ = bytes.Buffer{}
 var _ io.Writer = nil
 var _ = fmt.Sprintf
+
+func TestSanitizeStderrLine(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"plain", "hello world", "hello world"},
+		{"empty", "", ""},
+		{"sgr color", "\x1b[31mred\x1b[0m text", "red text"},
+		{"cursor move", "abc\x1b[2J\x1b[Hdef", "abcdef"},
+		{"osc bel", "\x1b]0;title\x07payload", "payload"},
+		{"osc st", "\x1b]8;;https://x\x1b\\link", "link"},
+		{"bare ctrl drops", "a\x00b\x07c", "abc"},
+		{"preserves tab", "a\tb", "a\tb"},
+		{"keeps utf8", "你好世界", "你好世界"},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := sanitizeStderrLine(tc.in); got != tc.want {
+				t.Errorf("sanitizeStderrLine(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestSanitizeStderrLine_Truncate(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("x", maxStderrLogLineBytes+200)
+	got := sanitizeStderrLine(long)
+	if !strings.HasSuffix(got, "…(truncated)") {
+		t.Errorf("expected truncation suffix, got suffix %q", got[len(got)-20:])
+	}
+	if !strings.HasPrefix(got, strings.Repeat("x", maxStderrLogLineBytes)) {
+		t.Errorf("expected %d x prefix, got len=%d", maxStderrLogLineBytes, len(got))
+	}
+}

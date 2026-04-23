@@ -110,12 +110,32 @@ const (
 //
 // onAsyncError is called from the owner goroutine if GetOrCreate fails; it may
 // be nil (HTTP path has no back-channel after ack).
+// maxSessionKeyLen caps the client-supplied session key so a long or
+// malformed key cannot bloat router state, log lines, or session-update
+// broadcasts. Realistic keys (platform:chatType:chatID:agentID) stay well
+// under 256 bytes.
+const maxSessionKeyLen = 512
+
 func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAckStatus, error) {
 	key := p.Key
+	if len(key) == 0 || len(key) > maxSessionKeyLen {
+		return false, "", fmt.Errorf("invalid key length")
+	}
+	// Reject control characters and newlines — they propagate into log lines
+	// and session IDs without adding value.
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		if c < 0x20 || c == 0x7f {
+			return false, "", fmt.Errorf("invalid key character")
+		}
+	}
 
 	// Handle /clear and /new — CLI built-in doesn't work in stream-json.
 	// Also clear any pending queue so stale follow-ups don't hit the fresh session.
-	trimmed := strings.TrimSpace(p.Text)
+	// Case-insensitive so CJK mobile IMEs that auto-capitalize the first letter
+	// ("/Clear" / "/New") still reset. Mirrors dispatch.normalizeSlashCommand's
+	// leading-token lowercasing used on the IM path.
+	trimmed := strings.ToLower(strings.TrimSpace(p.Text))
 	if trimmed == "/clear" || trimmed == "/new" {
 		if h.queue != nil {
 			h.queue.Discard(key)
@@ -133,7 +153,11 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 			return false, "", err
 		}
 		validatedWorkspace = wsPath
-		if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
+		// Require a non-empty chat-key prefix before the final ':'. A key of the
+		// form ":agentID" (idx==0) would otherwise persist the empty string as
+		// a workspace override, overriding the default for every subsequent
+		// GetWorkspace("") lookup.
+		if idx := strings.LastIndexByte(key, ':'); idx > 0 {
 			h.router.SetWorkspace(key[:idx], wsPath)
 		}
 	}
@@ -172,9 +196,21 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 		return false, sendAckQueued, nil
 	}
 
-	// I'm the owner — spawn the drain loop.
-	h.sendWG.Add(1)
-	go h.ownerLoop(key, gen, qm, onAsyncError)
+	// I'm the owner — spawn the drain loop. Gate with TrackSend so a send
+	// arriving concurrent with Shutdown is declined cleanly rather than
+	// escaping past sendWG.Wait.
+	release, shuttingDown := h.TrackSend()
+	if shuttingDown {
+		// Drop ownership so a later Enqueue (post-restart) can re-own.
+		// Discard bumps gen and clears the owner flag without re-invoking
+		// ownerLoop. The caller will see sendAckBusy-equivalent behaviour.
+		h.queue.Discard(key)
+		return false, sendAckBusy, nil
+	}
+	go func() {
+		defer release()
+		h.ownerLoop(key, gen, qm, onAsyncError)
+	}()
 	return false, sendAckAccepted, nil
 }
 
@@ -185,8 +221,9 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 //
 // gen is the queue generation at enqueue time. If Discard (e.g., /new) bumps
 // it mid-flight, DoneOrDrain returns nil and this loop exits cleanly.
+// Caller must arrange sendWG accounting via TrackSend — ownerLoop does not
+// touch sendWG directly so it can be launched with a defer-release closure.
 func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyncError func(string)) {
-	defer h.sendWG.Done()
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
@@ -270,9 +307,19 @@ func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError func(string)) (bool, 
 	}
 
 	text, images := p.Text, p.Images
-	h.sendWG.Add(1)
+	release, shuttingDown := h.TrackSend()
+	if shuttingDown {
+		if !needInterrupt {
+			// We successfully acquired the guard above but will not spawn
+			// the drain goroutine — release so a later enqueue (post-restart)
+			// can re-acquire. needInterrupt=true means we never acquired,
+			// only sent an interrupt which the CLI will observe regardless.
+			h.guard.Release(key)
+		}
+		return false, sendAckBusy, nil
+	}
 	go func() {
-		defer h.sendWG.Done()
+		defer release()
 		if needInterrupt {
 			if !h.guard.AcquireTimeout(h.ctx, key, 2*time.Second) {
 				slog.Error("send: interrupt timed out", "key", key)
