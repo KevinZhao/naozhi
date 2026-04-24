@@ -527,6 +527,21 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 		writeJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "mime not supported for inline preview"})
 		return
 	}
+	// text/html is same-origin HTML served from the dashboard. Firefox
+	// ignores the HTTP CSP sandbox directive, and even where it works, a
+	// direct navigation to this URL in a new tab renders the document
+	// with full access to dashboard cookies. Force download mode to
+	// prevent stored-XSS from a workspace file a tool might have written.
+	//
+	// image/svg+xml has the same problem: SVG can embed <script> and runs
+	// with full same-origin privileges on top-level navigation. The CSP
+	// `sandbox` directive only applies to iframe embedding, not to the
+	// tab the user lands on when clicking the preview URL. SVGs must
+	// only reach the browser as attachments.
+	if strings.HasPrefix(mime, "text/html") || mime == "image/svg+xml" {
+		writeJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "inline preview disabled for this type; use download mode"})
+		return
+	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "seek failed"})
 		return
