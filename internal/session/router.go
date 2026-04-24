@@ -135,6 +135,12 @@ type Router struct {
 
 	// historyWg tracks startup history-loading goroutines so Shutdown waits for them.
 	historyWg sync.WaitGroup
+
+	// historyCtx is cancelled on Shutdown so in-flight LoadHistory*Ctx calls
+	// abort promptly instead of blocking the drain on slow filesystems.
+	// Paired with historyCancel (set by NewRouter, called from Shutdown).
+	historyCtx    context.Context
+	historyCancel context.CancelFunc
 }
 
 // chatKeyFor strips the last ":agentID" segment from a session key to get the chat key.
@@ -251,6 +257,11 @@ func NewRouter(cfg RouterConfig) *Router {
 		totalTimeout:       cfg.TotalTimeout,
 	}
 	r.shutdownCond = sync.NewCond(&r.mu)
+	// historyCtx is cancelled by Shutdown so startup history loads and
+	// reconnect-time JSONL parses abort promptly on slow filesystems.
+	// Parent is Background because NewRouter has no caller-supplied ctx;
+	// Shutdown is the sole cancel trigger.
+	r.historyCtx, r.historyCancel = context.WithCancel(context.Background())
 
 	// Load historical session IDs (all IDs ever used by naozhi).
 	// Insertion order is lost on reload (persistence writes as an unordered
@@ -324,22 +335,26 @@ func NewRouter(cfg RouterConfig) *Router {
 			r.historyWg.Add(1)
 			go func() {
 				defer r.historyWg.Done()
-				sem <- struct{}{}
+				select {
+				case sem <- struct{}{}:
+				case <-r.historyCtx.Done():
+					return
+				}
 				defer func() { <-sem }()
 
-				// Build ordered list of all session IDs: prev chain + current
+				// Build ordered list of all session IDs: prev chain + current.
+				// LoadHistoryChainTailCtx walks from newest→oldest and stops
+				// as soon as maxPersistedHistory entries are collected, so a
+				// 32-link chain typically opens only 1-2 JSONL files instead
+				// of all 32 — avoiding gigabytes of wasted disk I/O on
+				// long-lived chats.
 				ids := make([]string, 0, len(s.prevSessionIDs)+1)
 				ids = append(ids, s.prevSessionIDs...)
 				ids = append(ids, s.getSessionID())
 
-				var allEntries []cli.EventEntry
-				for _, id := range ids {
-					entries, err := discovery.LoadHistory(r.claudeDir, id, s.workspace)
-					if err != nil || len(entries) == 0 {
-						continue
-					}
-					allEntries = append(allEntries, entries...)
-				}
+				allEntries := discovery.LoadHistoryChainTailCtx(
+					r.historyCtx, r.claudeDir, ids, s.workspace, maxPersistedHistory,
+				)
 				if len(allEntries) == 0 {
 					return
 				}
@@ -497,14 +512,13 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			if state.SessionID != "" {
 				ids = append(ids, state.SessionID)
 			}
-			var histEntries []cli.EventEntry
-			for _, id := range ids {
-				entries, err := discovery.LoadHistory(r.claudeDir, id, sess.workspace)
-				if err != nil || len(entries) == 0 {
-					continue
-				}
-				histEntries = append(histEntries, entries...)
-			}
+			// Budgeted tail walk caps magnitude of disk I/O regardless of
+			// chain length. r.historyCtx ties into Shutdown so a hung JSONL
+			// read on slow storage cannot extend reconnect past the shim
+			// reconcile window.
+			histEntries := discovery.LoadHistoryChainTailCtx(
+				r.historyCtx, r.claudeDir, ids, sess.workspace, maxPersistedHistory,
+			)
 			if len(histEntries) > 0 {
 				proc.InjectHistory(histEntries)
 			}
@@ -961,12 +975,12 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		ids := make([]string, 0, len(prevIDs)+1)
 		ids = append(ids, prevIDs...)
 		ids = append(ids, resumeID)
-		var allEntries []cli.EventEntry
-		for _, id := range ids {
-			if entries, err := discovery.LoadHistory(r.claudeDir, id, workspace); err == nil && len(entries) > 0 {
-				allEntries = append(allEntries, entries...)
-			}
-		}
+		// Budgeted tail walk: collect at most maxPersistedHistory entries
+		// from the newest ID backward, stopping early. Typical resume opens
+		// just 1-2 JSONL files instead of the entire chain.
+		allEntries := discovery.LoadHistoryChainTailCtx(
+			r.historyCtx, r.claudeDir, ids, workspace, maxPersistedHistory,
+		)
 		if len(allEntries) > 0 {
 			s.InjectHistory(allEntries)
 			slog.Info("loaded session history on resume", "key", key, "entries", len(allEntries), "chain", len(ids))
@@ -1507,20 +1521,32 @@ func (r *Router) StartShimReconcileLoop(ctx context.Context, interval time.Durat
 
 // Shutdown gracefully closes all sessions, waiting for running ones to complete.
 func (r *Router) Shutdown() {
+	// Cancel the history ctx so in-flight LoadHistory*Ctx calls (both startup
+	// preloaders and reconnect-time chain walkers) abort instead of blocking
+	// behind slow filesystem reads. The bounded Wait below provides a hard
+	// deadline on top of cancellation in case a syscall is stuck past the
+	// ctx check point.
+	if r.historyCancel != nil {
+		r.historyCancel()
+	}
+
 	// Wait for startup history-loading goroutines to finish first,
 	// but don't block forever if filesystem I/O is hung (e.g. NFS).
+	// Reduced from 15s to 5s now that cancellation short-circuits the
+	// loaders at the next chunk/line boundary; the remaining budget is
+	// for goroutines mid-syscall.
 	historyDone := make(chan struct{})
 	go func() {
 		// Goroutine intentionally left running on timeout; cleaned up on process exit.
 		r.historyWg.Wait()
 		close(historyDone)
 	}()
-	historyTimer := time.NewTimer(15 * time.Second)
+	historyTimer := time.NewTimer(5 * time.Second)
 	select {
 	case <-historyDone:
 		historyTimer.Stop()
 	case <-historyTimer.C:
-		slog.Warn("shutdown: history loading timed out after 15s, proceeding")
+		slog.Warn("shutdown: history loading timed out after 5s, proceeding")
 	}
 	// Deadline timer: broadcast to unblock Wait() when timeout expires
 	timer := time.AfterFunc(ShutdownTimeout, func() {
