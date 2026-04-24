@@ -892,6 +892,30 @@ func TestEventEntryFromEvent(t *testing.T) {
 	}
 }
 
+// TestEventEntryFromEvent_TodoWriteDetailIsArray locks the on-wire shape of
+// entry.Detail for TodoWrite events. The dashboard's renderTodoList calls
+// JSON.parse and then Array.isArray on this string; it silently falls back
+// to the one-line summary if the parsed value is an object (e.g. the raw
+// `{"todos":[...]}` envelope). Historically this bug surfaced as a bubble
+// showing "1项·▶1" without the checklist body.
+func TestEventEntryFromEvent_TodoWriteDetailIsArray(t *testing.T) {
+	raw := json.RawMessage(`{"todos":[{"content":"改 Lane E 到同样口径","status":"in_progress","activeForm":"正在改 Lane E"}]}`)
+	ev := Event{Type: "assistant", Message: &AssistantMessage{
+		Content: []ContentBlock{{Type: "tool_use", Name: "TodoWrite", Input: raw}},
+	}}
+	entry, ok := EventEntryFromEvent(ev)
+	if !ok || entry.Type != "todo" {
+		t.Fatalf("ok=%v type=%q", ok, entry.Type)
+	}
+	var parsed []TodoItem
+	if err := json.Unmarshal([]byte(entry.Detail), &parsed); err != nil {
+		t.Fatalf("Detail must be a JSON array of TodoItem, got %q: %v", entry.Detail, err)
+	}
+	if len(parsed) != 1 || parsed[0].Status != "in_progress" {
+		t.Fatalf("unexpected parsed todos: %+v", parsed)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // FormatToolInput
 // ---------------------------------------------------------------------------

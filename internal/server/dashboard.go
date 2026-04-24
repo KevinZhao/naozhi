@@ -187,6 +187,8 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("PUT /api/projects/config", auth(s.projectH.handleConfigPut))
 	s.mux.HandleFunc("POST /api/projects/planner/restart", auth(s.projectH.handlePlannerRestart))
 	s.mux.HandleFunc("POST /api/projects/favorite", auth(s.projectH.handleFavoriteToggle))
+	s.mux.HandleFunc("POST /api/projects/files/exists", auth(s.projectH.handleFilesExists))
+	s.mux.HandleFunc("GET /api/projects/file", auth(s.projectH.handleFileGet))
 	s.mux.HandleFunc("POST /api/transcribe", auth(s.transcribeH.handleTranscribe))
 	s.mux.HandleFunc("GET /api/cron", auth(s.cronH.handleList))
 	s.mux.HandleFunc("POST /api/cron", auth(s.cronH.handleCreate))

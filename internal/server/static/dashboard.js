@@ -865,6 +865,11 @@ function renderMainShell() {
   }
 
   updateSendButton(s.state || '');
+  // Attach file-ref observer to the freshly-created events-scroll so any
+  // newly-inserted .event bubble gets auto-scanned for workspace path
+  // references. Safe to call on every renderMainShell: dataset.frObserver
+  // gates re-entry so we don't stack duplicate observers.
+  startFileRefObserver();
   // Double-tap events feed → focus input (mobile)
   let lastTapMs = 0;
   document.getElementById('events-scroll').addEventListener('touchend', e => {
@@ -1651,15 +1656,46 @@ function navRebuild() {
   navUpdatePill();
 }
 
+// Infer which user message is "at" the current scroll position. Returns the
+// index of the last user message whose top edge sits at or above the viewport
+// center; falls back to the first message below when the viewport is above
+// every user message, or -1 when there are none.
+function navCurrentIdxFromScroll() {
+  const scroller = document.getElementById('events-scroll');
+  if (!scroller || navUserEls.length === 0) return -1;
+  const anchor = scroller.getBoundingClientRect().top + scroller.clientHeight * 0.3;
+  let lastAbove = -1;
+  for (let i = 0; i < navUserEls.length; i++) {
+    const top = navUserEls[i].getBoundingClientRect().top;
+    if (top <= anchor) lastAbove = i;
+    else break;
+  }
+  return lastAbove;
+}
+
 function navMsg(dir) {
   if (navUserEls.length === 0) return;
+  // Seed navIdx from scroll position on the first keypress so the arrow
+  // steps relative to the user's current view, not from the list's edge.
+  if (navIdx < 0) navIdx = navCurrentIdxFromScroll();
+  let target;
   if (dir === 'prev') {
-    if (navIdx <= 0) navIdx = navUserEls.length - 1;
-    else navIdx--;
+    // navIdx === -1 means viewport is above every user msg → first prev = last;
+    // otherwise step back, clamped at 0.
+    target = navIdx < 0 ? navUserEls.length - 1 : Math.max(0, navIdx - 1);
   } else {
-    if (navIdx < 0 || navIdx >= navUserEls.length - 1) navIdx = 0;
-    else navIdx++;
+    target = navIdx < 0 ? 0 : Math.min(navUserEls.length - 1, navIdx + 1);
   }
+  if (target === navIdx) {
+    // Already at the edge — flash the current one so the user sees the no-op.
+    const cur = navUserEls[navIdx];
+    if (cur) {
+      cur.classList.add('nav-highlight');
+      setTimeout(() => cur.classList.remove('nav-highlight'), 600);
+    }
+    return;
+  }
+  navIdx = target;
   const el = navUserEls[navIdx];
   if (!el) return;
   el.scrollIntoView({ behavior: 'smooth', block: 'center' });
@@ -1748,13 +1784,24 @@ function navShowList() {
     const el = document.getElementById('events-scroll');
     if (!el || scrollListenerAttached) return;
     scrollListenerAttached = true;
+    // Debounce after scrolling settles: if the tracked nav target is no
+    // longer near the viewport center (i.e. user scrolled manually), drop it
+    // so the next arrow-key press re-seeds from what the user actually sees.
+    let scrollResetTimer = null;
     el.addEventListener('scroll', () => {
-      const atBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 50;
-      if (atBottom && navIdx >= 0) {
-        navIdx = -1;
-        navUpdatePill();
-      }
       navDismissPopover();
+      if (scrollResetTimer) clearTimeout(scrollResetTimer);
+      scrollResetTimer = setTimeout(() => {
+        if (navIdx < 0 || !navUserEls[navIdx]) return;
+        const scrollerRect = el.getBoundingClientRect();
+        const targetRect = navUserEls[navIdx].getBoundingClientRect();
+        const targetCenter = targetRect.top + targetRect.height / 2;
+        const viewportCenter = scrollerRect.top + scrollerRect.height / 2;
+        if (Math.abs(targetCenter - viewportCenter) > scrollerRect.height / 2) {
+          navIdx = -1;
+          navUpdatePill();
+        }
+      }, 300);
     }, { passive: true });
   }
   // Re-attach after renderMainShell rebuilds the DOM
@@ -1765,6 +1812,33 @@ function navShowList() {
   obs.observe(document.getElementById('main') || document.body, { childList: true, subtree: false });
   attachNavScroll();
 })();
+
+// Force plain-text paste into #msg-input so rich formatting from Word/web pages
+// doesn't leak into the contenteditable. Uses execCommand('insertText') to
+// preserve cursor position and undo history; falls back to Range insertion.
+document.addEventListener('paste', function(e) {
+  const t = e.target;
+  if (!t || !t.closest || !t.closest('#msg-input')) return;
+  const cd = e.clipboardData || window.clipboardData;
+  if (!cd) return;
+  const text = cd.getData('text/plain');
+  if (!text) return;
+  e.preventDefault();
+  if (document.queryCommandSupported && document.queryCommandSupported('insertText')) {
+    document.execCommand('insertText', false, text);
+    return;
+  }
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0) return;
+  const range = sel.getRangeAt(0);
+  range.deleteContents();
+  const node = document.createTextNode(text);
+  range.insertNode(node);
+  range.setStartAfter(node);
+  range.setEndAfter(node);
+  sel.removeAllRanges();
+  sel.addRange(range);
+});
 
 // Keyboard shortcut: Alt+Up/Down for message nav, Alt+N for new session.
 // Cmd/Ctrl+N is left alone so the browser's "new window" still works.
@@ -3011,6 +3085,393 @@ function renderMd(s) {
     _mdCache.set(s, out);
   }
   return out;
+}
+
+/* ===== File reference buttons ========================================= */
+/* Scan event bubbles for path-shaped strings (inside <code> or literal),
+ * verify existence against the active project workspace, and append
+ * [preview] [download] buttons inline. Remote-friendly: lazy validation,
+ * batched existence checks, only fetches file content when clicked. */
+
+// Path candidate regex: must contain at least one `/` (filters out bare
+// filenames like "README") and an extension or recognizable directory segment.
+// Optional :line (e.g. src/foo.go:42) or :line-line (foo.go:10-20) suffix.
+// Rejects spaces (breaks on prose) and leading URL schemes.
+const FILE_REF_RE = /^(?:\.\/|\.\.\/)?(?!https?:)[A-Za-z0-9._][A-Za-z0-9._\-]*(?:\/[A-Za-z0-9._\-]+)+(?::\d+(?:-\d+)?)?$/;
+
+// Per-project path validation cache: key = "<project>|<path>" → entry.
+// TTL 60s so mtime changes re-verify eventually without the user needing
+// to refresh; short enough that server-side edits propagate within one
+// round of scrolling back.
+const _filePathCache = new Map();
+const _FILE_PATH_CACHE_MAX = 2000;
+const _FILE_PATH_CACHE_TTL = 60 * 1000;
+
+// Pending batch of path candidates waiting for /api/projects/files/exists.
+let _fileRefPendingBatch = null; // { project, node, paths: Map<string, HTMLElement[]> }
+let _fileRefBatchTimer = null;
+const _FILE_REF_BATCH_DELAY = 120; // ms
+const _FILE_REF_BATCH_MAX = 80; // paths per request (server caps at 100)
+
+// resolveActiveProject infers which project owns the currently selected
+// session, so inline path chips query the right workspace. Falls back to
+// longest-prefix match on the session's workspace dir; returns null if
+// we cannot determine a project.
+function resolveActiveProject() {
+  if (!selectedKey) return null;
+  const sKey = sid(selectedKey, selectedNode);
+  const sd = sessionsData[sKey];
+  if (!sd) return null;
+  const name = sd.project || matchProject(sd.workspace);
+  if (!name) return null;
+  return { name, node: selectedNode || 'local' };
+}
+
+// Split a candidate like "src/foo.go:42" into {path, line}. Line is optional.
+function splitPathLine(cand) {
+  const m = cand.match(/^(.+?):(\d+(?:-\d+)?)$/);
+  if (m) return { path: m[1], line: m[2] };
+  return { path: cand, line: '' };
+}
+
+function _fileRefCacheGet(key) {
+  const hit = _filePathCache.get(key);
+  if (!hit) return null;
+  if (Date.now() - hit.t > _FILE_PATH_CACHE_TTL) {
+    _filePathCache.delete(key);
+    return null;
+  }
+  return hit.v;
+}
+
+function _fileRefCacheSet(key, value) {
+  if (_filePathCache.size >= _FILE_PATH_CACHE_MAX) {
+    const firstKey = _filePathCache.keys().next().value;
+    _filePathCache.delete(firstKey);
+  }
+  _filePathCache.set(key, { v: value, t: Date.now() });
+}
+
+// scanEventForFileRefs walks .event-content <code> descendants of a freshly-
+// inserted event bubble and wraps any path-shaped literals in a .file-ref
+// span with data-* attrs so verification + button injection can run async.
+function scanEventForFileRefs(eventEl) {
+  const proj = resolveActiveProject();
+  if (!proj) return;
+  const codeEls = eventEl.querySelectorAll('.event-content code, .event-content .md-code');
+  codeEls.forEach(code => {
+    if (code.dataset.frScanned === '1') return;
+    code.dataset.frScanned = '1';
+    const text = (code.textContent || '').trim();
+    if (!text || text.length > 512) return; // absurdly long paths skip
+    if (!FILE_REF_RE.test(text)) return;
+    // Skip when nested inside <a> (authored link target).
+    if (code.closest('a')) return;
+    // Skip fenced code blocks (<pre><code>): those are content, not refs.
+    if (code.closest('pre')) return;
+    const { path, line } = splitPathLine(text);
+    const wrap = document.createElement('span');
+    wrap.className = 'file-ref fr-candidate';
+    wrap.dataset.path = path;
+    wrap.dataset.line = line;
+    wrap.dataset.project = proj.name;
+    wrap.dataset.node = proj.node;
+    code.parentNode.insertBefore(wrap, code);
+    wrap.appendChild(code);
+    // Queue for existence check; button DOM is injected once we know the
+    // file exists.
+    queueFileRefCheck(wrap);
+  });
+}
+
+function queueFileRefCheck(wrapEl) {
+  const proj = wrapEl.dataset.project;
+  const node = wrapEl.dataset.node || 'local';
+  const path = wrapEl.dataset.path;
+  const cacheKey = proj + '|' + node + '|' + path;
+  const cached = _fileRefCacheGet(cacheKey);
+  if (cached) {
+    applyFileRefResult(wrapEl, cached);
+    return;
+  }
+  if (!_fileRefPendingBatch || _fileRefPendingBatch.project !== proj || _fileRefPendingBatch.node !== node) {
+    flushFileRefBatch();
+    _fileRefPendingBatch = { project: proj, node, paths: new Map() };
+  }
+  if (!_fileRefPendingBatch.paths.has(path)) _fileRefPendingBatch.paths.set(path, []);
+  _fileRefPendingBatch.paths.get(path).push(wrapEl);
+  // Flush if we hit per-request cap.
+  if (_fileRefPendingBatch.paths.size >= _FILE_REF_BATCH_MAX) {
+    flushFileRefBatch();
+    return;
+  }
+  if (_fileRefBatchTimer) return;
+  _fileRefBatchTimer = setTimeout(flushFileRefBatch, _FILE_REF_BATCH_DELAY);
+}
+
+async function flushFileRefBatch() {
+  if (_fileRefBatchTimer) { clearTimeout(_fileRefBatchTimer); _fileRefBatchTimer = null; }
+  const batch = _fileRefPendingBatch;
+  _fileRefPendingBatch = null;
+  if (!batch || batch.paths.size === 0) return;
+
+  const paths = Array.from(batch.paths.keys());
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/projects/files/exists', {
+      method: 'POST', headers,
+      body: JSON.stringify({ project: batch.project, node: batch.node, paths })
+    });
+    if (!r.ok) return;
+    const data = await r.json();
+    const results = (data && data.results) || {};
+    for (const p of paths) {
+      const entry = results[p] || { exists: false };
+      const cacheKey = batch.project + '|' + batch.node + '|' + p;
+      _fileRefCacheSet(cacheKey, entry);
+      const els = batch.paths.get(p) || [];
+      els.forEach(wrap => applyFileRefResult(wrap, entry));
+    }
+  } catch (_) { /* network failure: leave candidates as-is */ }
+}
+
+function applyFileRefResult(wrapEl, entry) {
+  if (!entry || !entry.exists || entry.is_dir) {
+    wrapEl.classList.remove('fr-candidate');
+    wrapEl.classList.add('fr-missing');
+    return;
+  }
+  if (wrapEl.querySelector('.fr-btn')) return; // already injected
+  wrapEl.classList.remove('fr-candidate');
+  wrapEl.classList.add('fr-verified');
+  wrapEl.dataset.size = entry.size || 0;
+  wrapEl.dataset.mime = entry.mime || '';
+  const preview = document.createElement('button');
+  preview.type = 'button';
+  preview.className = 'fr-btn fr-btn-preview';
+  preview.textContent = 'preview';
+  preview.title = 'Preview ' + wrapEl.dataset.path;
+  preview.addEventListener('click', evt => {
+    evt.preventDefault();
+    evt.stopPropagation();
+    openFilePreview(wrapEl);
+  });
+  const download = document.createElement('button');
+  download.type = 'button';
+  download.className = 'fr-btn fr-btn-download';
+  download.textContent = '\u2193'; // down arrow
+  download.title = 'Download ' + wrapEl.dataset.path;
+  download.addEventListener('click', evt => {
+    evt.preventDefault();
+    evt.stopPropagation();
+    triggerFileDownload(wrapEl);
+  });
+  wrapEl.appendChild(preview);
+  wrapEl.appendChild(download);
+}
+
+function fileApiUrl(project, node, path, mode) {
+  const qs = 'project=' + encodeURIComponent(project) +
+    '&path=' + encodeURIComponent(path) +
+    '&mode=' + encodeURIComponent(mode) +
+    (node && node !== 'local' ? '&node=' + encodeURIComponent(node) : '');
+  return '/api/projects/file?' + qs;
+}
+
+function triggerFileDownload(wrapEl) {
+  const url = fileApiUrl(wrapEl.dataset.project, wrapEl.dataset.node, wrapEl.dataset.path, 'download');
+  // Use a transient anchor so the token-auth cookie is sent with the GET.
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = (wrapEl.dataset.path.split('/').pop() || 'file');
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+async function openFilePreview(wrapEl) {
+  const drawer = document.getElementById('fv-drawer');
+  const body = document.getElementById('fv-body');
+  const title = document.getElementById('fv-title');
+  const meta = document.getElementById('fv-meta');
+  if (!drawer || !body || !title || !meta) return;
+  const project = wrapEl.dataset.project;
+  const node = wrapEl.dataset.node;
+  const path = wrapEl.dataset.path;
+  const line = wrapEl.dataset.line || '';
+  const mime = wrapEl.dataset.mime || '';
+  const size = +wrapEl.dataset.size || 0;
+
+  drawer.classList.remove('hidden');
+  drawer.classList.add('fv-open');
+  drawer.dataset.project = project;
+  drawer.dataset.node = node;
+  drawer.dataset.path = path;
+  title.textContent = path + (line ? ':' + line : '');
+  meta.textContent = (mime ? mime + ' \u00b7 ' : '') + formatFileSize(size);
+  body.innerHTML = '<div class="fv-loading">loading\u2026</div>';
+
+  // Image / PDF: use raw endpoint directly, no JSON round trip.
+  if (mime.startsWith('image/')) {
+    body.innerHTML = '';
+    const img = document.createElement('img');
+    img.src = fileApiUrl(project, node, path, 'raw');
+    img.alt = path;
+    img.loading = 'lazy';
+    body.appendChild(img);
+    return;
+  }
+  if (mime === 'application/pdf') {
+    body.innerHTML = '';
+    const frame = document.createElement('iframe');
+    frame.src = fileApiUrl(project, node, path, 'raw');
+    frame.title = path;
+    body.appendChild(frame);
+    return;
+  }
+
+  // Text / unknown: go through preview endpoint which returns structured JSON.
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch(fileApiUrl(project, node, path, 'preview'), { headers });
+    if (!r.ok) {
+      body.innerHTML = '<div class="fv-error">preview failed (' + r.status + ')</div>';
+      return;
+    }
+    const data = await r.json();
+    if (data.binary) {
+      body.innerHTML = '<div class="fv-binary">Binary file — click <strong>download</strong> to save.<span class="fv-mime">' + esc(data.mime || '') + '</span></div>';
+      return;
+    }
+    const parts = [];
+    if (data.truncated) {
+      parts.push('<div class="fv-truncated">file truncated at ' + formatFileSize(1024 * 1024) + ' (total ' + formatFileSize(data.size || 0) + ') — download for full content</div>');
+    }
+    const lang = inferLang(path, data.mime || '');
+    // Markdown: render via existing renderer; others: raw <pre><code>.
+    if (lang === 'markdown') {
+      parts.push('<div class="fv-md">' + renderMd(data.content || '') + '</div>');
+    } else {
+      parts.push('<pre><code class="fv-code">' + esc(data.content || '') + '</code></pre>');
+    }
+    body.innerHTML = parts.join('');
+    if (line) scrollToPreviewLine(body, parseInt(line, 10));
+  } catch (e) {
+    body.innerHTML = '<div class="fv-error">' + esc(String(e && e.message || e)) + '</div>';
+  }
+}
+
+function scrollToPreviewLine(body, line) {
+  if (!line || line < 1) return;
+  const pre = body.querySelector('pre');
+  if (!pre) return;
+  // Approximate scroll: average line height in our monospace pre is ~18px.
+  // Good enough for remote-dashboard purposes; precise highlighting would
+  // require splitting every line into a <span> and costs too much for
+  // the marginal "scroll near line 42" benefit.
+  pre.parentElement.scrollTop = Math.max(0, (line - 3) * 18);
+}
+
+function formatFileSize(bytes) {
+  if (!bytes || bytes <= 0) return '';
+  if (bytes < 1024) return bytes + ' B';
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' KB';
+  if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
+  return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+}
+
+function inferLang(path, mime) {
+  const ext = (path.split('.').pop() || '').toLowerCase();
+  if (ext === 'md' || ext === 'markdown') return 'markdown';
+  if (mime === 'text/markdown') return 'markdown';
+  return '';
+}
+
+function closeFilePreview() {
+  const drawer = document.getElementById('fv-drawer');
+  if (!drawer) return;
+  drawer.classList.remove('fv-open');
+  drawer.classList.add('hidden');
+  const body = document.getElementById('fv-body');
+  if (body) body.innerHTML = '';
+}
+
+// Wire drawer buttons once on load.
+document.addEventListener('DOMContentLoaded', function () {
+  const close = document.getElementById('fv-btn-close');
+  if (close) close.addEventListener('click', closeFilePreview);
+  const copy = document.getElementById('fv-btn-copy');
+  if (copy) copy.addEventListener('click', () => {
+    const drawer = document.getElementById('fv-drawer');
+    if (!drawer || !drawer.dataset.path) return;
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(drawer.dataset.path).then(
+        () => showToast('path copied', 'success', 1000),
+        () => showToast('copy failed', 'warning', 1000)
+      );
+    }
+  });
+  const download = document.getElementById('fv-btn-download');
+  if (download) download.addEventListener('click', () => {
+    const drawer = document.getElementById('fv-drawer');
+    if (!drawer || !drawer.dataset.path) return;
+    triggerFileDownload({ dataset: drawer.dataset });
+  });
+  // Esc closes drawer (but only when nothing else is handling Esc).
+  document.addEventListener('keydown', evt => {
+    if (evt.key !== 'Escape') return;
+    const drawer = document.getElementById('fv-drawer');
+    if (drawer && !drawer.classList.contains('hidden')) {
+      evt.stopPropagation();
+      closeFilePreview();
+    }
+  }, true);
+});
+
+// Observe #events-scroll so every newly-inserted event bubble gets scanned
+// for file-ref candidates. Using a MutationObserver lets us stay out of the
+// existing render pipelines (eventHtml / WS handlers) — they keep producing
+// the same HTML, we just enhance it post-insertion.
+//
+// renderMainShell rebuilds the #events-scroll DOM on every session switch,
+// so we track the active observer and disconnect it whenever the target
+// element is replaced. Without this, stale observers pile up in memory
+// across rapid session switches (one per switch), and the old observer
+// would silently re-trigger if the DOM node was ever reparented.
+let _fileRefObserver = null;
+let _fileRefObserverTarget = null;
+
+function startFileRefObserver() {
+  const target = document.getElementById('events-scroll');
+  if (!target) return;
+  if (_fileRefObserverTarget === target) return; // already wired to this DOM
+  if (_fileRefObserver) {
+    _fileRefObserver.disconnect();
+    _fileRefObserver = null;
+  }
+  _fileRefObserverTarget = target;
+  const mo = new MutationObserver(mutations => {
+    for (const m of mutations) {
+      m.addedNodes.forEach(node => {
+        if (!(node instanceof HTMLElement)) return;
+        if (node.classList && node.classList.contains('event')) {
+          scanEventForFileRefs(node);
+        } else if (node.querySelectorAll) {
+          node.querySelectorAll('.event').forEach(scanEventForFileRefs);
+        }
+      });
+    }
+  });
+  mo.observe(target, { childList: true, subtree: false });
+  _fileRefObserver = mo;
+  // Initial scan for bubbles rendered synchronously before the observer
+  // attached (e.g. the full-history render on session select).
+  target.querySelectorAll('.event').forEach(scanEventForFileRefs);
 }
 
 function renderMdUncached(s) {

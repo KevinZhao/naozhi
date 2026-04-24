@@ -52,24 +52,64 @@ var claudeEnvAllowedPrefixes = []string{
 	"http_proxy", "https_proxy", "no_proxy",
 }
 
+// readClaudeSettingsRaw reads ~/.claude/settings.json and returns its raw bytes,
+// retrying a few times if JSON parsing fails. The retry handles the race where
+// another process (Claude CLI, a VS Code extension, etc.) is rewriting the file
+// non-atomically: we may observe a truncated view, but 100ms later the writer
+// has finished and we see a complete document.
+//
+// Returns (data, nil) on success. Returns a non-nil error if the file cannot be
+// read, or if every retry yielded invalid JSON — callers must treat the error
+// as "could not determine a trustworthy settings snapshot", NOT as "file is empty".
+func readClaudeSettingsRaw() ([]byte, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("user home: %w", err)
+	}
+	path := filepath.Join(home, ".claude", "settings.json")
+	return readJSONWithRetry(path, 3, 100*time.Millisecond)
+}
+
+// readJSONWithRetry reads path and verifies the content is valid JSON. If the
+// read succeeds but parsing fails, retries up to attempts-1 more times with the
+// given sleep in between. If the file doesn't exist, returns the os.Open error
+// immediately (no retry — missing is a different failure mode than truncated).
+func readJSONWithRetry(path string, attempts int, sleep time.Duration) ([]byte, error) {
+	var lastParseErr error
+	for i := 0; i < attempts; i++ {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		if json.Valid(data) {
+			return data, nil
+		}
+		lastParseErr = fmt.Errorf("invalid JSON (attempt %d/%d, %d bytes)", i+1, attempts, len(data))
+		if i < attempts-1 {
+			time.Sleep(sleep)
+		}
+	}
+	return nil, lastParseErr
+}
+
 // applyClaudeEnvSettings reads ~/.claude/settings.json and applies any env section
 // to the current process so spawned CC child processes inherit them via os.Environ().
 // Only sets vars not already present (shell-set vars take precedence) and only
 // for keys matching claudeEnvAllowedPrefixes.
-func applyClaudeEnvSettings() {
-	home, err := os.UserHomeDir()
+//
+// Returns an error when the settings file cannot be read or parsed so callers
+// can surface the failure. A nil return with zero env applied (e.g. no `env`
+// section or all keys filtered) is NOT treated as an error.
+func applyClaudeEnvSettings() error {
+	data, err := readClaudeSettingsRaw()
 	if err != nil {
-		return
-	}
-	data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json"))
-	if err != nil {
-		return
+		return err
 	}
 	var s struct {
 		Env map[string]string `json:"env"`
 	}
-	if json.Unmarshal(data, &s) != nil || len(s.Env) == 0 {
-		return
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("unmarshal env section: %w", err)
 	}
 	for k, v := range s.Env {
 		if !matchesAnyPrefix(k, claudeEnvAllowedPrefixes) {
@@ -79,6 +119,7 @@ func applyClaudeEnvSettings() {
 			os.Setenv(k, v) //nolint:errcheck
 		}
 	}
+	return nil
 }
 
 // matchesAnyPrefix reports whether s starts with any of the given prefixes.
@@ -101,16 +142,40 @@ func matchesAnyPrefix(s string, prefixes []string) bool {
 // ~/.claude/settings.json verbatim, but filtering out only the hook entries that
 // would call back into naozhi (causing infinite loops). Safe hooks such as
 // formatters and linters are preserved as-is.
-// Returns the file path, or empty string on failure.
+//
+// Returns the file path on success. On transient read/parse failures (common when
+// Claude CLI is concurrently rewriting settings.json), RETAINS any existing
+// ~/.naozhi/claude-settings.json from a prior successful run instead of overwriting
+// it with `{}` — that empty file would strip the `env` block and break Bedrock auth
+// for every spawned CLI process (the whole reason for --setting-sources "").
 func writeClaudeSettingsOverride(serverAddr string) string {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return ""
 	}
+	dir := filepath.Join(home, ".naozhi")
+	path := filepath.Join(dir, "claude-settings.json")
+
+	data, err := readClaudeSettingsRaw()
+	if err != nil {
+		// Read/parse failed. Do NOT overwrite an existing override — the last
+		// known-good copy still lets Claude CLI authenticate. Report via logs so
+		// the operator notices the degraded mode.
+		slog.Warn("read ~/.claude/settings.json failed; keeping previous override", "err", err)
+		if _, statErr := os.Stat(path); statErr == nil {
+			return path
+		}
+		// No prior override exists either. Fall through to writing an empty
+		// object so --settings has *something* to point at; Claude will then
+		// complain loudly ("Not logged in") and the log warn above is the clue.
+		data = []byte("{}")
+	}
 
 	var settings map[string]json.RawMessage
-	if data, err := os.ReadFile(filepath.Join(home, ".claude", "settings.json")); err == nil {
-		_ = json.Unmarshal(data, &settings)
+	if err := json.Unmarshal(data, &settings); err != nil {
+		// data came from readClaudeSettingsRaw which validates JSON, so this
+		// path only fires on the {} fallback or a non-object top level.
+		settings = make(map[string]json.RawMessage)
 	}
 	if settings == nil {
 		settings = make(map[string]json.RawMessage)
@@ -125,11 +190,9 @@ func writeClaudeSettingsOverride(serverAddr string) string {
 	if err != nil {
 		return ""
 	}
-	dir := filepath.Join(home, ".naozhi")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return ""
 	}
-	path := filepath.Join(dir, "claude-settings.json")
 	// Atomic write: claude reads this file on startup; a truncated write
 	// could cause it to launch with empty config and disable hook filtering,
 	// risking feedback loops.
@@ -302,7 +365,12 @@ func main() {
 	slog.SetDefault(slog.New(handler))
 
 	// CLI Protocol + Wrapper
-	applyClaudeEnvSettings()
+	if err := applyClaudeEnvSettings(); err != nil {
+		// Non-fatal: Bedrock / Anthropic env may already be set via systemd
+		// EnvironmentFile or exported by the shell. Warn so operators notice
+		// if the only source was settings.json and that read failed.
+		slog.Warn("apply ~/.claude/settings.json env failed", "err", err)
+	}
 	settingsFile := writeClaudeSettingsOverride(cfg.Server.Addr)
 	var proto cli.Protocol
 	switch cfg.CLI.Backend {

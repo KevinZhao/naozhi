@@ -1107,11 +1107,14 @@ func EventEntriesFromEvent(ev Event) []EventEntry {
 						entry.Type = "todo"
 						entry.Tool = "TodoWrite"
 						entry.Summary = TodosSummary(todos)
-						// block.Input is already valid JSON (we just parsed
-						// it); stash it directly instead of re-marshalling
-						// ParseTodos's decoded struct. Saves an Unmarshal+
-						// Marshal roundtrip per TodoWrite event.
-						entry.Detail = string(block.Input)
+						// Dashboard renderTodoList expects a JSON array of
+						// TodoItem, not the full `{"todos":[...]}` envelope
+						// that block.Input carries. Marshal the decoded slice
+						// so the frontend sees `[{...}, {...}]` and renders
+						// the checklist; otherwise JSON.parse yields an
+						// object, Array.isArray returns false, and the UI
+						// silently falls back to the one-line summary.
+						entry.Detail = TodosDetailJSON(todos)
 					}
 				}
 			case "text":
