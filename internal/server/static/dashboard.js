@@ -31,6 +31,9 @@ let defaultCLIVersion = '';
 let localWsInfo = { name: '', sys: '' };
 const sessionWorkspaces = {};
 const sessionNodes = {};
+const sessionBackends = {}; // per-session CLI backend picked at creation ("claude" / "kiro" / ...)
+let cliBackends = null; // cached /api/cli/backends response: {backends, default, detected}
+let cliBackendsFetchedAt = 0;
 const sessionDrafts = {}; // key -> draft text, preserved across session switches
 let historySessionsData = []; // from API history_sessions (all filesystem sessions)
 
@@ -726,6 +729,12 @@ function selectSession(key, node) {
 async function dismissSession(key, node) {
   node = node || 'local';
   delete sessionDrafts[key];
+  // sessionBackends is normally consumed on first sendMessage. A dismiss
+  // before any send leaves the entry behind; clear it defensively so a
+  // subsequent re-create with the same key (unlikely but possible if the
+  // ms timestamp collides on rapid double-create) doesn't inherit a
+  // stale backend pick.
+  delete sessionBackends[key];
 
   // If it's a pending (never-sent) session, just remove from localStorage
   if (sessionWorkspaces[key] !== undefined) {
@@ -966,8 +975,8 @@ async function loadEarlierEvents() {
 
 // prependEvents injects older events at the top of the scroller while keeping
 // the user's visual position stable (the bubble they're currently reading
-// should not shift). runMermaid/runKatex are already incremental via their
-// pending-dictionary design, so no extra scoping is needed.
+// should not shift). Only runs KaTeX/Mermaid on the freshly-inserted fragment
+// so 500-bubble sessions don't re-scan the entire DOM on each page.
 function prependEvents(events) {
   const el = document.getElementById('events-scroll');
   if (!el || !events || events.length === 0) return;
@@ -988,6 +997,8 @@ function prependEvents(events) {
 
   const frag = document.createElement('div');
   frag.innerHTML = html;
+  // Move children one-by-one to preserve DOM structure; innerHTML replace
+  // would wipe the existing event bubbles.
   while (frag.firstChild) {
     el.insertBefore(frag.firstChild, el.firstChild);
   }
@@ -998,6 +1009,9 @@ function prependEvents(events) {
   // Restore scroll position.
   el.scrollTop = el.scrollHeight - el.clientHeight - prevScrollFromBottom;
 
+  // runMermaid / runKatex only iterate their `pending` dictionaries (new IDs
+  // emitted by the freshly-rendered bubbles above), so they are already
+  // incremental — no DOM scan is needed.
   runMermaid();
   runKatex();
   navRebuild();
@@ -1053,20 +1067,21 @@ function renderEvents(events) {
   const display = processEventsForDisplay(events);
   const html = renderEventsWithDividers(display, 0);
   el.innerHTML = html || (events.length === 0 ? '<div class="empty-state">no events yet</div>' : '');
-  el.scrollTop = el.scrollHeight;
   // Track the latest rendered event time for deduplication
   if (events.length > 0) {
     const last = events[events.length - 1];
     if (last.time) lastRenderedEventTime = last.time;
   }
-  // If the server returned a full page there's probably more history to
-  // browse; surface the "Load earlier" button. Short histories hide it.
+  // If we got a full initial page there's probably more history available;
+  // show the "Load earlier" affordance. Empty state keeps no button.
   if (events.length >= INITIAL_HISTORY_LIMIT) {
     ensureEarlierButton();
   }
   runMermaid();
   runKatex();
   navRebuild();
+  // Bottom-anchor after async layout (button insert, images, mermaid/katex).
+  stickEventsBottom();
 }
 
 function appendEvents(events) {
@@ -1076,6 +1091,10 @@ function appendEvents(events) {
   if (empty) empty.remove();
   const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
   let prevT = lastDividerTime(el);
+  // Force-bottom when a "user" event arrives: either the local operator just
+  // hit send, or a teammate posted through the IM channel — in both cases the
+  // message must be visible, even if the viewport was scrolled up.
+  let sawUser = false;
   events.forEach(e => {
     if (isInternalEvent(e)) return;
     // Deduplicate: skip events at or before the last rendered time
@@ -1088,8 +1107,10 @@ function appendEvents(events) {
     el.insertAdjacentHTML('beforeend', h);
     if (t) prevT = t;
     if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
+    if (e.type === 'user') sawUser = true;
   });
-  if (wasBottom) el.scrollTop = el.scrollHeight;
+  if (sawUser) stickEventsBottom();
+  else if (wasBottom) el.scrollTop = el.scrollHeight;
   runMermaid();
   runKatex();
   // Rebuild nav index but preserve current position
@@ -1372,12 +1393,17 @@ async function sendMessage() {
       delete sessionWorkspaces[selectedKey];
       delete sessionNodes[selectedKey];
     }
+    if (sessionBackends[selectedKey]) {
+      sendMsg.backend = sessionBackends[selectedKey];
+      // Backend is consumed once on session spawn; clear afterward so a
+      // later re-send doesn't try to retrofit onto an existing session.
+      delete sessionBackends[selectedKey];
+    }
     if (wsm.send(sendMsg)) {
       // Optimistic render: show user message immediately without waiting
       // for the CLI to echo it back as a "user" event.
       const el = document.getElementById('events-scroll');
       if (el && text) {
-        const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
         const now = Date.now();
         const html = eventHtml({type: 'user', detail: text, time: now});
         if (html) {
@@ -1387,7 +1413,11 @@ async function sendMessage() {
           }
           el.insertAdjacentHTML('beforeend', html);
           el.lastElementChild.classList.add('optimistic-msg');
-          if (wasBottom) el.scrollTop = el.scrollHeight;
+          // Always force-bottom after a send: the user just posted something
+          // and expects to see it, even if they had scrolled up to browse
+          // earlier history. stickEventsBottom handles async layout changes
+          // from input-area collapse and lazy images.
+          stickEventsBottom();
           navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
           navUpdatePill();
         }
@@ -1415,6 +1445,10 @@ async function sendMessage() {
       payload.workspace = sessionWorkspaces[selectedKey];
       delete sessionWorkspaces[selectedKey];
       delete sessionNodes[selectedKey];
+    }
+    if (sessionBackends[selectedKey]) {
+      payload.backend = sessionBackends[selectedKey];
+      delete sessionBackends[selectedKey];
     }
 
     const r = await fetch('/api/sessions/send', {method:'POST', headers, body: JSON.stringify(payload)});
@@ -1794,6 +1828,28 @@ function interruptSession() {
 function scrollEventsToBottom() {
   const el = document.getElementById('events-scroll');
   if (el) el.scrollTop = el.scrollHeight;
+}
+
+// stickEventsBottom forces the events pane to the last bubble and keeps it there
+// across the async layout tail — lazy-loaded images, mermaid diagrams, katex
+// formulas, and the "load earlier" button that inserts at the top after the
+// initial scrollTop assignment all change scrollHeight after the first paint.
+// Used by session-open flows where losing the bottom anchor would hide the
+// newest messages (the whole point of opening the session).
+function stickEventsBottom() {
+  const el = document.getElementById('events-scroll');
+  if (!el) return;
+  el.scrollTop = el.scrollHeight;
+  requestAnimationFrame(() => {
+    el.scrollTop = el.scrollHeight;
+    requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
+  });
+  el.querySelectorAll('img').forEach(img => {
+    if (img.complete) return;
+    const restick = () => { el.scrollTop = el.scrollHeight; };
+    img.addEventListener('load', restick, { once: true });
+    img.addEventListener('error', restick, { once: true });
+  });
 }
 
 // --- Message navigation ---
@@ -2624,38 +2680,97 @@ async function saveToken() {
   }
 }
 
-function createNewSession() {
-  const ws = defaultWorkspace || '';
-
-  if (!projectsData.length) {
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    overlay.innerHTML =
-      '<div class="modal" role="dialog" aria-modal="true" aria-label="New session">' +
-        '<h3>New Session</h3>' +
-        '<div style="margin-bottom:12px">' +
-          '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-workspace">Workspace</label>' +
-          '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(ws) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
-        '</div>' +
-        '<div class="modal-btns">' +
-          '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
-          '<button type="button" class="primary" onclick="doCreateSession()">create</button>' +
-        '</div>' +
-      '</div>';
-    document.body.appendChild(overlay);
-    trapFocus(overlay);
-    setTimeout(() => document.getElementById('new-workspace').focus(), 100);
-    return;
+// fetchCLIBackends retrieves the enabled CLI backends from the server.
+// Cached for 60 seconds — the set only changes across naozhi restarts.
+// Resolves to null on network/auth failure so the caller can fall back to
+// the no-picker flow (single-backend mode).
+async function fetchCLIBackends() {
+  if (cliBackends && Date.now() - cliBackendsFetchedAt < 60000) {
+    return cliBackends;
   }
-
-  openProjectPalette();
+  try {
+    const r = await fetch('/api/cli/backends', {credentials: 'same-origin'});
+    if (!r.ok) return null;
+    const data = await r.json();
+    cliBackends = data && Array.isArray(data.backends) ? data : null;
+    cliBackendsFetchedAt = Date.now();
+    return cliBackends;
+  } catch (e) {
+    return null;
+  }
 }
 
-function openProjectPalette() {
+// renderBackendPicker returns an HTML fragment for a backend <select>, or
+// an empty string when only one backend is enabled. The selected value is
+// surfaced via document.getElementById('new-backend').value at submit time.
+function renderBackendPicker(backendsData) {
+  if (!backendsData || !Array.isArray(backendsData.backends)) return '';
+  const list = backendsData.backends;
+  if (list.length <= 1) return '';
+  const defaultID = backendsData.default || (list[0] && list[0].id) || '';
+  const options = list.map(b => {
+    const selected = b.id === defaultID ? ' selected' : '';
+    const label = (b.display_name || b.id) + (b.version ? ' ' + b.version : '') + (b.available === false ? ' (unavailable)' : '');
+    const disabled = b.available === false ? ' disabled' : '';
+    return '<option value="' + escAttr(b.id) + '"' + selected + disabled + '>' + esc(label) + '</option>';
+  }).join('');
+  return '<div style="margin-bottom:12px">' +
+    '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-backend">CLI backend</label>' +
+    '<select id="new-backend" style="width:100%;padding:6px 8px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px">' +
+    options +
+    '</select>' +
+    '</div>';
+}
+
+function getSelectedBackend() {
+  const el = document.getElementById('new-backend');
+  return el && el.value ? el.value : '';
+}
+
+function createNewSession() {
+  // Fetch backends upfront so the picker (if any) is ready when the modal
+  // renders. Failure falls back to the single-backend UI — cli.backends
+  // returns {} on older naozhi which fetchCLIBackends maps to null.
+  fetchCLIBackends().then(backendsData => {
+    const ws = defaultWorkspace || '';
+    const backendPicker = renderBackendPicker(backendsData);
+
+    if (!projectsData.length) {
+      const overlay = document.createElement('div');
+      overlay.className = 'modal-overlay';
+      overlay.innerHTML =
+        '<div class="modal" role="dialog" aria-modal="true" aria-label="New session">' +
+          '<h3>New Session</h3>' +
+          backendPicker +
+          '<div style="margin-bottom:12px">' +
+            '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-workspace">Workspace</label>' +
+            '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(ws) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
+          '</div>' +
+          '<div class="modal-btns">' +
+            '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
+            '<button type="button" class="primary" onclick="doCreateSession()">create</button>' +
+          '</div>' +
+        '</div>';
+      document.body.appendChild(overlay);
+      trapFocus(overlay);
+      setTimeout(() => document.getElementById('new-workspace').focus(), 100);
+      return;
+    }
+
+    openProjectPalette(backendsData);
+  });
+}
+
+function openProjectPalette(backendsData) {
+  const backendPicker = renderBackendPicker(backendsData);
+  // Stash the picker HTML on the overlay dataset so the custom-workspace
+  // modal (spawned from a palette row) can surface the same choice. When
+  // only one backend exists, picker is empty and we skip the header slot.
   const overlay = document.createElement('div');
   overlay.className = 'cmd-palette-overlay';
   overlay.innerHTML =
     '<div class="cmd-palette" role="dialog" aria-label="New session">' +
+      (backendPicker ? '<div class="cmd-palette-backend" style="padding:8px 12px 0">' + backendPicker + '</div>' : '') +
       '<div class="cmd-palette-header">' +
         '<input id="cp-input" type="text" autocomplete="off" spellcheck="false" placeholder="Search projects or type a path…">' +
       '</div>' +
@@ -2846,19 +2961,26 @@ function handlePaletteKey(e, state, input) {
 }
 
 function pickPaletteProject(p) {
-  doCreateInProject(p.path, p.name, p.node || 'local');
+  const backend = getSelectedBackend();
+  doCreateInProject(p.path, p.name, p.node || 'local', backend);
 }
 
 function pickPaletteCustom(initialValue) {
+  // Capture the palette's backend choice before we remove the overlay.
+  const preselected = getSelectedBackend();
   const overlay = document.querySelector('.cmd-palette-overlay');
   if (overlay) overlay.remove();
   const ws = defaultWorkspace || '';
   const prefill = initialValue && (initialValue.startsWith('/') || initialValue.startsWith('~')) ? initialValue : '';
+  // Re-render the backend picker inside the modal and pre-select the
+  // palette's choice, so switching to Custom Workspace doesn't drop it.
+  const picker = renderBackendPicker(cliBackends);
   const modal = document.createElement('div');
   modal.className = 'modal-overlay';
   modal.innerHTML =
     '<div class="modal" role="dialog" aria-modal="true" aria-label="Custom workspace">' +
       '<h3>Custom Workspace</h3>' +
+      picker +
       '<div style="margin-bottom:12px">' +
         '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-workspace">Workspace path</label>' +
         '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(prefill) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
@@ -2870,13 +2992,20 @@ function pickPaletteCustom(initialValue) {
     '</div>';
   document.body.appendChild(modal);
   trapFocus(modal);
+  if (preselected) {
+    const sel = document.getElementById('new-backend');
+    if (sel) sel.value = preselected;
+  }
   setTimeout(() => {
     const el = document.getElementById('new-workspace');
     if (el) { el.focus(); el.select(); }
   }, 50);
 }
 
-function doCreateInProject(projectPath, projectName, nodeId) {
+function doCreateInProject(projectPath, projectName, nodeId, backend) {
+  // Read the backend from the still-mounted overlay BEFORE removing it,
+  // so callers that omit the explicit argument still get the user's pick.
+  if (backend === undefined) backend = getSelectedBackend();
   const overlay = document.querySelector('.modal-overlay, .cmd-palette-overlay');
   if (overlay) overlay.remove();
   sessionCounter++;
@@ -2887,6 +3016,7 @@ function doCreateInProject(projectPath, projectName, nodeId) {
 
   sessionWorkspaces[key] = projectPath;
   if (nodeId && nodeId !== 'local') sessionNodes[key] = nodeId;
+  if (backend) sessionBackends[key] = backend;
 
   stopPreviewPolling();
   wsm.unsubscribe();
@@ -2904,6 +3034,7 @@ function doCreateInProject(projectPath, projectName, nodeId) {
 
 function doCreateSession() {
   const workspace = document.getElementById('new-workspace').value.trim();
+  const backend = getSelectedBackend();
   const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'session') : 'session';
   document.querySelector('.modal-overlay').remove();
 
@@ -2914,6 +3045,7 @@ function doCreateSession() {
   const key = 'dashboard:direct:' + ts + ':' + folderName;
 
   if (workspace) sessionWorkspaces[key] = workspace;
+  if (backend) sessionBackends[key] = backend;
 
   stopPreviewPolling();
   wsm.unsubscribe();
@@ -2979,8 +3111,98 @@ function copyWithFeedback(btn, text) {
 }
 
 function copyCodeBlock(btn) {
-  const code = btn.closest('.md-code-wrap').querySelector('code').textContent;
+  // DOM may be re-rendered between render and click (event list ticks every
+  // ~1s). Fall back silently instead of throwing when the wrap is gone.
+  const { code } = _codeBlockInfo(btn);
+  if (!code) return;
   copyWithFeedback(btn, code);
+}
+
+// Map common markdown fence languages to file extensions for download filenames.
+const _codeLangExt = {
+  javascript: 'js', js: 'js', typescript: 'ts', ts: 'ts', jsx: 'jsx', tsx: 'tsx',
+  python: 'py', py: 'py', ruby: 'rb', rb: 'rb', go: 'go', golang: 'go',
+  rust: 'rs', rs: 'rs', java: 'java', kotlin: 'kt', kt: 'kt', swift: 'swift',
+  c: 'c', 'c++': 'cpp', cpp: 'cpp', cxx: 'cpp', cc: 'cpp', h: 'h', hpp: 'hpp',
+  'c#': 'cs', csharp: 'cs', cs: 'cs', php: 'php', perl: 'pl', pl: 'pl',
+  lua: 'lua', scala: 'scala', r: 'r', dart: 'dart',
+  html: 'html', htm: 'html', css: 'css', scss: 'scss', sass: 'sass', less: 'less',
+  json: 'json', yaml: 'yml', yml: 'yml', toml: 'toml', xml: 'xml',
+  markdown: 'md', md: 'md', sql: 'sql', graphql: 'graphql', proto: 'proto',
+  shell: 'sh', bash: 'sh', sh: 'sh', zsh: 'sh', fish: 'fish',
+  ini: 'ini', diff: 'diff', patch: 'patch', vim: 'vim', tex: 'tex', latex: 'tex',
+};
+
+// Languages that render to a bare filename (no "snippet." prefix, no ext
+// separator). Prevents `snippet.Dockerfile` when the intent is `Dockerfile`.
+const _codeLangBareName = {
+  dockerfile: 'Dockerfile', docker: 'Dockerfile',
+  makefile: 'Makefile', make: 'Makefile',
+};
+
+function _codeBlockInfo(btn) {
+  const wrap = btn.closest('.md-code-wrap');
+  const codeEl = wrap && wrap.querySelector('code');
+  const code = codeEl ? codeEl.textContent : '';
+  const lang = (codeEl && codeEl.getAttribute('data-lang') || '').toLowerCase();
+  return { code, lang };
+}
+
+function _codeBlockFilename(lang) {
+  if (_codeLangBareName[lang]) return _codeLangBareName[lang];
+  const ext = _codeLangExt[lang] || (lang || 'txt');
+  // Ext must be a short alnum-ish token; otherwise use .txt to avoid
+  // writing unsafe names like `snippet.<script>`.
+  if (!/^[a-z0-9]{1,12}$/i.test(ext)) return 'snippet.txt';
+  return 'snippet.' + ext;
+}
+
+// Snippet payload for preview drawer. Storing in a module variable instead of
+// drawer.dataset avoids the multi-MB attribute truncation and DOM-serialize cost.
+let _pendingSnippet = null;
+
+function previewCodeBlock(btn) {
+  const { code, lang } = _codeBlockInfo(btn);
+  if (!code) return;
+  const drawer = document.getElementById('fv-drawer');
+  const body = document.getElementById('fv-body');
+  const title = document.getElementById('fv-title');
+  const meta = document.getElementById('fv-meta');
+  if (!drawer || !body || !title || !meta) return;
+  const name = _codeBlockFilename(lang);
+  drawer.classList.remove('hidden');
+  drawer.classList.add('fv-open');
+  // Mark as snippet so the drawer header copy/download buttons fall back to
+  // the inline code instead of trying to fetch a server file.
+  drawer.dataset.project = '';
+  drawer.dataset.node = '';
+  drawer.dataset.path = '';
+  drawer.dataset.snippetMode = '1';
+  drawer.dataset.snippetName = name;
+  _pendingSnippet = code;
+  title.textContent = name;
+  meta.textContent = (lang ? lang + ' · ' : '') + formatFileSize(new Blob([code]).size);
+  // Always render snippets as escaped plain text. The markdown branch
+  // previously piped user-controlled LLM output through renderMd which can
+  // reinsert HTML (math tokens, etc.). The CSP has `unsafe-inline` so HTML
+  // injection in the drawer is a real risk — keep snippets escape-only.
+  body.innerHTML = '<pre><code class="fv-code">' + esc(code) + '</code></pre>';
+}
+
+function downloadCodeBlock(btn) {
+  const { code, lang } = _codeBlockInfo(btn);
+  if (!code) return;
+  const name = _codeBlockFilename(lang);
+  const blob = new Blob([code], { type: 'text/plain;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = name;
+  a.rel = 'noopener';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
 function copyEventContent(btn) {
@@ -3555,6 +3777,9 @@ function closeFilePreview() {
   if (!drawer) return;
   drawer.classList.remove('fv-open');
   drawer.classList.add('hidden');
+  delete drawer.dataset.snippetMode;
+  delete drawer.dataset.snippetName;
+  _pendingSnippet = null;
   const body = document.getElementById('fv-body');
   if (body) body.innerHTML = '';
 }
@@ -3566,10 +3791,14 @@ document.addEventListener('DOMContentLoaded', function () {
   const copy = document.getElementById('fv-btn-copy');
   if (copy) copy.addEventListener('click', () => {
     const drawer = document.getElementById('fv-drawer');
-    if (!drawer || !drawer.dataset.path) return;
+    if (!drawer) return;
+    const isSnippet = drawer.dataset.snippetMode === '1';
+    const text = isSnippet ? _pendingSnippet : drawer.dataset.path;
+    if (!text) return;
+    const label = isSnippet ? 'snippet copied' : 'path copied';
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(drawer.dataset.path).then(
-        () => showToast('path copied', 'success', 1000),
+      navigator.clipboard.writeText(text).then(
+        () => showToast(label, 'success', 1000),
         () => showToast('copy failed', 'warning', 1000)
       );
     }
@@ -3577,7 +3806,22 @@ document.addEventListener('DOMContentLoaded', function () {
   const download = document.getElementById('fv-btn-download');
   if (download) download.addEventListener('click', () => {
     const drawer = document.getElementById('fv-drawer');
-    if (!drawer || !drawer.dataset.path) return;
+    if (!drawer) return;
+    // Snippet mode: download the inline code via a blob URL.
+    if (drawer.dataset.snippetMode === '1' && _pendingSnippet) {
+      const blob = new Blob([_pendingSnippet], { type: 'text/plain;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = drawer.dataset.snippetName || 'snippet.txt';
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      return;
+    }
+    if (!drawer.dataset.path) return;
     triggerFileDownload({ dataset: drawer.dataset });
   });
   // Esc closes drawer (but only when nothing else is handling Esc).
@@ -3646,7 +3890,13 @@ function renderMdUncached(s) {
         return '<div class="mermaid-wrap"><pre id="' + id + '" class="mermaid-pending"></pre></div>';
       }
       const langAttr = lang ? ' data-lang="' + escAttr(lang) + '"' : '';
-      return '<div class="md-code-wrap"><pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre><button class="md-copy-btn" onclick="copyCodeBlock(this)">copy</button></div>';
+      return '<div class="md-code-wrap"><pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre>' +
+        '<div class="md-code-actions">' +
+          '<button class="md-code-btn" onclick="previewCodeBlock(this)">preview</button>' +
+          '<button class="md-code-btn" onclick="downloadCodeBlock(this)">download</button>' +
+          '<button class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)">copy</button>' +
+        '</div>' +
+        '</div>';
     }
     if (part.startsWith('$$') && part.endsWith('$$')) {
       return '<div class="md-math-display">' + renderKatex(part.slice(2, -2).trim(), true) + '</div>';
@@ -3728,11 +3978,24 @@ function inlineMd(s) {
     return '\x00KTX' + idx + '\x00';
   });
   s = esc(s);
-  s = s.replace(/`([^`]+)`/g, '<code class="md-code">$1</code>');
-  s = s.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  s = s.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  // Use function-form replacements to prevent JS's special $-sequences
+  // ($&, $', $`, $n) from expanding inside the replacement string. Those
+  // sequences survive esc() (they aren't HTML entities) and would let an
+  // attacker-controlled LLM snippet splice unescaped characters into the
+  // emitted HTML by embedding `$&` inside a backtick/bold region.
+  s = s.replace(/`([^`]+)`/g, (_, c) => '<code class="md-code">' + c + '</code>');
+  s = s.replace(/\*\*(.+?)\*\*/g, (_, c) => '<strong>' + c + '</strong>');
+  s = s.replace(/\*(.+?)\*/g, (_, c) => '<em>' + c + '</em>');
   s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, text, url) {
     const safe = safeUrl(url);
+    // `text` is the already-esc()'d+partially-transformed capture — it may
+    // legitimately contain <strong>/<em>/<code> spans from prior passes.
+    // When the URL is rejected we still want to render the label, but
+    // returning `text` as-is lets those inline tags survive in the output
+    // stream unattached to an anchor. This is accepted (matches GitHub's
+    // behaviour) because the substituted tags are naozhi-controlled and
+    // cannot contain unescaped attacker content (each bold/italic/code
+    // substitution already used `esc()`'d capture groups).
     if (safe === '#') return text;
     return '<a href="' + escAttr(safe) + '" class="md-link" target="_blank" rel="noopener noreferrer">' + text + '</a>';
   });
@@ -4000,30 +4263,35 @@ const wsm = {
       } else {
         el.innerHTML = '';
       }
-      el.scrollTop = el.scrollHeight;
       // Reset dedup tracker on full render
       if (events.length > 0) { const last = events[events.length - 1]; if (last.time) lastRenderedEventTime = last.time; }
       // Mount "load earlier" affordance when the server returned a full page
-      // (more history likely exists). Short histories skip the button.
+      // (more history likely exists). Skipped for short histories so we don't
+      // surface a useless button.
       if (events.length >= INITIAL_HISTORY_LIMIT) {
         ensureEarlierButton();
       }
       runMermaid();
       runKatex();
       navRebuild();
+      // Bottom-anchor after async layout (button insert, images, mermaid/katex).
+      stickEventsBottom();
     } else {
       const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
       // Remove stale "no events yet" before processing incremental events
       const emptyEl = el.querySelector('.empty-state');
       if (emptyEl) emptyEl.remove();
       let prevT = lastDividerTime(el);
+      // Force-bottom when a "user" event arrives: either the local operator
+      // just hit send, or a teammate posted through the IM channel — in both
+      // cases the message must be visible even if the viewport was scrolled up.
+      let sawUser = false;
       display.forEach(e => {
-        // Deduplicate: skip events at or before the last rendered time
         if (e.time && e.time <= lastRenderedEventTime) return;
-        // When the real "user" event arrives, remove the optimistic version
         if (e.type === 'user') {
           const opt = el.querySelector('.optimistic-msg');
           if (opt) opt.remove();
+          sawUser = true;
         }
         const h = eventHtml(e);
         if (h) {
@@ -4036,7 +4304,8 @@ const wsm = {
         }
         if (e.time && e.time > lastRenderedEventTime) lastRenderedEventTime = e.time;
       });
-      if (wasBottom) el.scrollTop = el.scrollHeight;
+      if (sawUser) stickEventsBottom();
+      else if (wasBottom) el.scrollTop = el.scrollHeight;
       runMermaid();
   runKatex();
       navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
@@ -4145,7 +4414,8 @@ const wsm = {
     const empty = el.querySelector('.empty-state');
     if (empty) empty.remove();
     // When the real "user" event arrives, remove the optimistic version
-    if (ev.type === 'user') {
+    const isUser = ev.type === 'user';
+    if (isUser) {
       const opt = el.querySelector('.optimistic-msg');
       if (opt) opt.remove();
     }
@@ -4156,7 +4426,9 @@ const wsm = {
       el.insertAdjacentHTML('beforeend', timeDividerHtml(evT));
     }
     el.insertAdjacentHTML('beforeend', html);
-    if (wasBottom) el.scrollTop = el.scrollHeight;
+    // User events always force-bottom; AI output only sticks when already at bottom.
+    if (isUser) stickEventsBottom();
+    else if (wasBottom) el.scrollTop = el.scrollHeight;
     runMermaid();
   runKatex();
     if (ev.type === 'user') {
@@ -4422,7 +4694,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
       el.innerHTML = '<div class="empty-state">no conversation history</div>';
     } else {
       el.innerHTML = renderEventsWithDividers(display, 0);
-      el.scrollTop = el.scrollHeight;
+      stickEventsBottom();
     }
     navRebuild();
     previewEventCount = events.length;

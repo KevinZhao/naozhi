@@ -28,6 +28,7 @@ type SpawnOptions struct {
 
 // Wrapper manages spawning CLI processes via shim.
 type Wrapper struct {
+	BackendID   string // "claude" | "kiro" | future backends
 	CLIPath     string
 	CLIName     string // display name: "claude-code", "kiro"
 	CLIVersion  string // semver from --version, e.g. "2.1.92"
@@ -43,9 +44,10 @@ func NewWrapper(cliPath string, proto Protocol, backend string) *Wrapper {
 	}
 	cliPath = osutil.ExpandHome(cliPath)
 	w := &Wrapper{
-		CLIPath:  cliPath,
-		CLIName:  backendDisplayName(backend),
-		Protocol: proto,
+		BackendID: normalizeBackendID(backend),
+		CLIPath:   cliPath,
+		CLIName:   backendDisplayName(backend),
+		Protocol:  proto,
 	}
 	w.CLIVersion = detectVersion(cliPath)
 	return w
@@ -63,11 +65,27 @@ func backendDisplayName(backend string) string {
 	}
 }
 
+// normalizeBackendID collapses empty/legacy aliases to the canonical ID.
+// Empty strings (from legacy configs omitting cli.backend) map to "claude".
+func normalizeBackendID(backend string) string {
+	switch backend {
+	case "", "claude":
+		return "claude"
+	default:
+		return backend
+	}
+}
+
 // detectVersion runs "<cli> --version" and parses the version string.
 func detectVersion(cliPath string) string {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, cliPath, "--version").Output()
+	cmd := exec.CommandContext(ctx, cliPath, "--version")
+	// Anchor the subprocess CWD to "/" so relative binary names (the
+	// detectCLI fallback when PATH lookup fails) cannot accidentally
+	// resolve to a file in naozhi's working directory.
+	cmd.Dir = "/"
+	out, err := cmd.Output()
 	if err != nil {
 		return ""
 	}
@@ -148,8 +166,11 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 		cwd = os.TempDir()
 	}
 
-	// Start shim → connect → auth → get hello
-	handle, err := w.ShimManager.StartShim(ctx, opts.Key, cliArgs, cwd)
+	// Start shim → connect → auth → get hello. Use the wrapper-owned CLI
+	// path + backend ID so multi-backend deployments launch each shim
+	// against the correct binary and record its backend in state for
+	// post-restart reconnect routing.
+	handle, err := w.ShimManager.StartShimWithBackend(ctx, opts.Key, w.CLIPath, w.BackendID, cliArgs, cwd)
 	if err != nil {
 		return nil, fmt.Errorf("start shim: %w", err)
 	}

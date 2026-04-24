@@ -238,6 +238,70 @@ func TestRouterDefaultWorkspaceAndMaxProcs(t *testing.T) {
 	}
 }
 
+func TestRouterBackendIDsAndWrapperFor(t *testing.T) {
+	claudeW := &cli.Wrapper{BackendID: "claude", CLIName: "claude-code"}
+	kiroW := &cli.Wrapper{BackendID: "kiro", CLIName: "kiro"}
+
+	r := NewRouter(RouterConfig{
+		Wrappers:       map[string]*cli.Wrapper{"claude": claudeW, "kiro": kiroW},
+		DefaultBackend: "kiro",
+	})
+
+	ids := r.BackendIDs()
+	if len(ids) != 2 || ids[0] != "kiro" {
+		t.Fatalf("BackendIDs = %v, want default-first [kiro, claude]", ids)
+	}
+	if got := r.DefaultBackend(); got != "kiro" {
+		t.Errorf("DefaultBackend = %q, want kiro", got)
+	}
+
+	// Explicit lookup
+	w, id := r.wrapperFor("claude")
+	if w != claudeW || id != "claude" {
+		t.Errorf("wrapperFor(claude) = %v, %q; want claudeW, claude", w, id)
+	}
+
+	// Empty → default
+	w, id = r.wrapperFor("")
+	if w != kiroW || id != "kiro" {
+		t.Errorf("wrapperFor(\"\") = %v, %q; want kiroW, kiro", w, id)
+	}
+
+	// Unknown → default (silent fallback)
+	w, id = r.wrapperFor("gemini")
+	if w != kiroW || id != "kiro" {
+		t.Errorf("wrapperFor(unknown) = %v, %q; want kiroW, kiro", w, id)
+	}
+}
+
+func TestRouterLegacySingleWrapperMode(t *testing.T) {
+	w := &cli.Wrapper{BackendID: "claude", CLIName: "claude-code"}
+	r := NewRouter(RouterConfig{Wrapper: w})
+
+	ids := r.BackendIDs()
+	if len(ids) != 1 || ids[0] != "claude" {
+		t.Errorf("legacy BackendIDs = %v, want [claude]", ids)
+	}
+	if got := r.DefaultBackend(); got != "claude" {
+		t.Errorf("legacy DefaultBackend = %q, want claude", got)
+	}
+	if got := r.BackendWrapper("claude"); got != w {
+		t.Errorf("legacy BackendWrapper(claude) = %v, want wrapper", got)
+	}
+}
+
+func TestRouterSetGetSessionBackend(t *testing.T) {
+	r := NewRouter(RouterConfig{})
+	r.SetSessionBackend("k1", "kiro")
+	if got := r.GetSessionBackend("k1"); got != "kiro" {
+		t.Errorf("GetSessionBackend = %q, want kiro", got)
+	}
+	r.SetSessionBackend("k1", "") // clears
+	if got := r.GetSessionBackend("k1"); got != "" {
+		t.Errorf("GetSessionBackend after clear = %q, want empty", got)
+	}
+}
+
 func TestNewRouterStoreRestore(t *testing.T) {
 	dir := t.TempDir()
 	storePath := filepath.Join(dir, "sessions.json")

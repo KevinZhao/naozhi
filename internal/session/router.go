@@ -15,6 +15,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/shim"
 )
 
 // ShutdownTimeout is the maximum time to wait for graceful shutdown
@@ -78,18 +79,30 @@ type Router struct {
 	// Enables O(k) ResetChat instead of O(n) full scan (k = agents per chat, typically 1-3).
 	// Nil in test-created routers; all helpers below are nil-safe.
 	sessionsByChat map[string][]string
-	wrapper        *cli.Wrapper
+	wrapper        *cli.Wrapper            // default (legacy single-backend) wrapper
+	wrappers       map[string]*cli.Wrapper // backend ID → wrapper (nil in legacy mode)
+	defaultBackend string                  // backend ID used when AgentOpts.Backend is empty
 	maxProcs       int
 	ttl            time.Duration
 	pruneTTL       time.Duration
 	model          string
 	extraArgs      []string
-	workspace      string // default cwd for CLI processes
-	claudeDir      string // ~/.claude dir for loading session history
+	// backendModels / backendExtraArgs optionally override model and args
+	// per backend ID. Read-only after NewRouter.
+	backendModels    map[string]string
+	backendExtraArgs map[string][]string
+	workspace        string // default cwd for CLI processes
+	claudeDir        string // ~/.claude dir for loading session history
 
 	// workspaceOverrides stores per-chat workspace overrides.
 	// Key format: "platform:chatType:chatID"
 	workspaceOverrides map[string]string
+
+	// backendOverrides stores per-session backend preferences picked by
+	// the dashboard at session-creation time. Keyed by full session key
+	// (including agent suffix) so two sessions on the same chat can run
+	// against different backends.
+	backendOverrides map[string]string
 
 	// activeCount tracks currently alive processes
 	activeCount int
@@ -175,6 +188,93 @@ func (r *Router) CLIName() string { return r.cliNameDefault() }
 // CLIVersion exposes the wrapper's detected CLI version for status endpoints.
 func (r *Router) CLIVersion() string { return r.cliVersionDefault() }
 
+// wrapperFor selects the wrapper for the requested backend ID.
+// Empty backend picks the router default. Returns (wrapper, effectiveID).
+// Callers must treat a nil wrapper as "no backend available" and fail fast.
+func (r *Router) wrapperFor(backend string) (*cli.Wrapper, string) {
+	if len(r.wrappers) == 0 {
+		id := backend
+		if id == "" && r.wrapper != nil {
+			id = r.wrapper.BackendID
+		}
+		return r.wrapper, id
+	}
+	if backend != "" {
+		if w, ok := r.wrappers[backend]; ok {
+			return w, backend
+		}
+	}
+	if r.defaultBackend != "" {
+		if w, ok := r.wrappers[r.defaultBackend]; ok {
+			return w, r.defaultBackend
+		}
+	}
+	// Last-resort fallback: return r.wrapper paired with its own
+	// BackendID (not r.defaultBackend) so callers never see a non-empty
+	// ID paired with a nil wrapper — that combination produced confusing
+	// error messages like `spawn process (backend "claude"): no wrapper`.
+	if r.wrapper != nil {
+		return r.wrapper, r.wrapper.BackendID
+	}
+	return nil, ""
+}
+
+// BackendIDs returns the list of backend IDs the router can spawn against,
+// with the default backend first. Suitable for UI enumeration.
+func (r *Router) BackendIDs() []string {
+	if len(r.wrappers) == 0 {
+		if r.wrapper != nil {
+			id := r.wrapper.BackendID
+			if id == "" {
+				id = "claude"
+			}
+			return []string{id}
+		}
+		return nil
+	}
+	out := make([]string, 0, len(r.wrappers))
+	if r.defaultBackend != "" {
+		if _, ok := r.wrappers[r.defaultBackend]; ok {
+			out = append(out, r.defaultBackend)
+		}
+	}
+	for id := range r.wrappers {
+		if id == r.defaultBackend {
+			continue
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
+// DefaultBackend returns the backend ID used when no explicit backend is
+// requested. May be empty for test-only routers without a wrapper.
+func (r *Router) DefaultBackend() string {
+	if r.defaultBackend != "" {
+		return r.defaultBackend
+	}
+	if r.wrapper != nil {
+		return r.wrapper.BackendID
+	}
+	return ""
+}
+
+// BackendWrapper returns the wrapper registered for the given backend ID,
+// or nil if the router has no matching backend. Intended for callers that
+// need read-only metadata (CLIName, CLIVersion, CLIPath) per backend.
+func (r *Router) BackendWrapper(id string) *cli.Wrapper {
+	if len(r.wrappers) == 0 {
+		if id == "" || r.wrapper == nil || r.wrapper.BackendID == id || (id == "claude" && r.wrapper.BackendID == "") {
+			return r.wrapper
+		}
+		return nil
+	}
+	if id == "" {
+		id = r.defaultBackend
+	}
+	return r.wrappers[id]
+}
+
 // indexAdd adds key to the chat→sessions index. No-op when index is nil.
 // Must be called under r.mu.
 func (r *Router) indexAdd(key string) {
@@ -213,17 +313,30 @@ func (r *Router) indexDel(key string) {
 
 // RouterConfig holds configuration for the session router.
 type RouterConfig struct {
-	Wrapper         *cli.Wrapper
-	MaxProcs        int
-	TTL             time.Duration
-	PruneTTL        time.Duration
-	Model           string
-	ExtraArgs       []string
-	Workspace       string
-	StorePath       string
-	NoOutputTimeout time.Duration
-	TotalTimeout    time.Duration
-	ClaudeDir       string
+	// Wrapper is the legacy single-backend field. If Wrappers is nil/empty
+	// this wrapper is used for every session.
+	Wrapper *cli.Wrapper
+	// Wrappers maps backend ID → wrapper. When set, new sessions are
+	// routed to the wrapper matching AgentOpts.Backend, with DefaultBackend
+	// (or Wrapper) as a fallback.
+	Wrappers map[string]*cli.Wrapper
+	// DefaultBackend names the backend ID used when AgentOpts.Backend is
+	// empty. Ignored when Wrappers is empty.
+	DefaultBackend string
+	MaxProcs       int
+	TTL            time.Duration
+	PruneTTL       time.Duration
+	Model          string
+	ExtraArgs      []string
+	// BackendModels / BackendExtraArgs override Model / ExtraArgs per
+	// backend (e.g. kiro-specific model flags).
+	BackendModels    map[string]string
+	BackendExtraArgs map[string][]string
+	Workspace        string
+	StorePath        string
+	NoOutputTimeout  time.Duration
+	TotalTimeout     time.Duration
+	ClaudeDir        string
 }
 
 // NewRouter creates a session router.
@@ -237,18 +350,53 @@ func NewRouter(cfg RouterConfig) *Router {
 	if cfg.PruneTTL <= 0 {
 		cfg.PruneTTL = 72 * time.Hour
 	}
+
+	// Normalize wrappers. Accept either a Wrappers map or a single Wrapper;
+	// when both are set, Wrappers wins and Wrapper is kept as a compat alias
+	// for code that still reads r.wrapper directly (mostly tests).
+	wrappers := cfg.Wrappers
+	defaultBackend := cfg.DefaultBackend
+	if len(wrappers) == 0 && cfg.Wrapper != nil {
+		id := cfg.Wrapper.BackendID
+		if id == "" {
+			id = "claude"
+		}
+		wrappers = map[string]*cli.Wrapper{id: cfg.Wrapper}
+		if defaultBackend == "" {
+			defaultBackend = id
+		}
+	}
+	defaultWrapper := cfg.Wrapper
+	if defaultWrapper == nil && defaultBackend != "" {
+		defaultWrapper = wrappers[defaultBackend]
+	}
+	if defaultWrapper == nil {
+		for id, w := range wrappers {
+			defaultWrapper = w
+			if defaultBackend == "" {
+				defaultBackend = id
+			}
+			break
+		}
+	}
+
 	r := &Router{
 		sessions:           make(map[string]*ManagedSession),
 		sessionsByChat:     make(map[string][]string),
-		wrapper:            cfg.Wrapper,
+		wrapper:            defaultWrapper,
+		wrappers:           wrappers,
+		defaultBackend:     defaultBackend,
 		maxProcs:           cfg.MaxProcs,
 		ttl:                cfg.TTL,
 		pruneTTL:           cfg.PruneTTL,
 		model:              cfg.Model,
 		extraArgs:          cfg.ExtraArgs,
+		backendModels:      cfg.BackendModels,
+		backendExtraArgs:   cfg.BackendExtraArgs,
 		workspace:          cfg.Workspace,
 		claudeDir:          cfg.ClaudeDir,
 		workspaceOverrides: make(map[string]string),
+		backendOverrides:   make(map[string]string),
 		storePath:          cfg.StorePath,
 		knownIDs:           make(map[string]bool),
 		sessionIDToKey:     make(map[string]string),
@@ -286,15 +434,26 @@ func NewRouter(cfg RouterConfig) *Router {
 	// Restore sessions from store
 	if restored := loadStore(r.storePath); restored != nil {
 		for key, entry := range restored {
+			// Resolve the wrapper that owned this session's backend so the
+			// snapshot carries the correct CLI identity even after a pure
+			// restore (no shim reconnect). Pre-multi-backend entries have
+			// empty Backend and fall back to the router default.
+			restoreWrapper, restoreBackendID := r.wrapperFor(entry.Backend)
+			cliName, cliVersion := r.cliNameDefault(), r.cliVersionDefault()
+			if restoreWrapper != nil {
+				cliName = restoreWrapper.CLIName
+				cliVersion = restoreWrapper.CLIVersion
+			}
 			s := &ManagedSession{
 				key:            key,
 				workspace:      entry.Workspace,
 				totalCost:      entry.TotalCost,
 				prevSessionIDs: entry.PrevSessionIDs,
 				exempt:         strings.HasPrefix(key, "project:") || strings.HasPrefix(key, "cron:"),
-				cliName:        r.cliNameDefault(),
-				cliVersion:     r.cliVersionDefault(),
 			}
+			s.SetBackend(restoreBackendID)
+			s.SetCLIName(cliName)
+			s.SetCLIVersion(cliVersion)
 			s.setSessionID(entry.SessionID)
 			if entry.LastActive != 0 {
 				s.lastActive.Store(entry.LastActive)
@@ -345,9 +504,7 @@ func NewRouter(cfg RouterConfig) *Router {
 				// Build ordered list of all session IDs: prev chain + current.
 				// LoadHistoryChainTailCtx walks from newest→oldest and stops
 				// as soon as maxPersistedHistory entries are collected, so a
-				// 32-link chain typically opens only 1-2 JSONL files instead
-				// of all 32 — avoiding gigabytes of wasted disk I/O on
-				// long-lived chats.
+				// 32-link chain typically opens only 1-2 JSONL files.
 				ids := make([]string, 0, len(s.prevSessionIDs)+1)
 				ids = append(ids, s.prevSessionIDs...)
 				ids = append(ids, s.getSessionID())
@@ -372,18 +529,44 @@ func NewRouter(cfg RouterConfig) *Router {
 // process. Called by NewRouter to skip async JSONL loading for sessions that
 // will be fully restored by ReconnectShims (replay + JSONL user entries).
 func (r *Router) shimManagedKeys() map[string]bool {
-	if r.wrapper == nil || r.wrapper.ShimManager == nil {
+	managers := r.shimManagers()
+	if len(managers) == 0 {
 		return nil
 	}
-	states, err := r.wrapper.ShimManager.Discover()
-	if err != nil || len(states) == 0 {
+	seen := make(map[string]bool)
+	for _, mgr := range managers {
+		states, err := mgr.Discover()
+		if err != nil {
+			continue
+		}
+		for _, s := range states {
+			seen[s.Key] = true
+		}
+	}
+	if len(seen) == 0 {
 		return nil
 	}
-	keys := make(map[string]bool, len(states))
-	for _, s := range states {
-		keys[s.Key] = true
+	return seen
+}
+
+// shimManagers returns the distinct ShimManager instances across wrappers.
+// Shared managers are deduplicated so a combined deployment (all backends
+// reusing the same state dir) only scans once.
+func (r *Router) shimManagers() []*shim.Manager {
+	var out []*shim.Manager
+	seen := make(map[*shim.Manager]bool)
+	add := func(w *cli.Wrapper) {
+		if w == nil || w.ShimManager == nil || seen[w.ShimManager] {
+			return
+		}
+		seen[w.ShimManager] = true
+		out = append(out, w.ShimManager)
 	}
-	return keys
+	for _, w := range r.wrappers {
+		add(w)
+	}
+	add(r.wrapper)
+	return out
 }
 
 // ReconnectShims discovers surviving shim processes and reconnects sessions.
@@ -402,14 +585,28 @@ func (r *Router) ReconnectShimsCtx(ctx context.Context) {
 }
 
 func (r *Router) reconnectShims(parentCtx context.Context) {
-	if r.wrapper == nil || r.wrapper.ShimManager == nil {
+	managers := r.shimManagers()
+	if len(managers) == 0 {
 		return
 	}
 
-	states, err := r.wrapper.ShimManager.Discover()
-	if err != nil {
-		slog.Warn("shim discovery failed", "err", err)
-		return
+	// Aggregate states across all managers and dedupe on key, as each shim
+	// is uniquely identified by the session key regardless of backend.
+	seenKey := make(map[string]bool)
+	var states []shim.State
+	for _, mgr := range managers {
+		ss, err := mgr.Discover()
+		if err != nil {
+			slog.Warn("shim discovery failed", "err", err)
+			continue
+		}
+		for _, s := range ss {
+			if seenKey[s.Key] {
+				continue
+			}
+			seenKey[s.Key] = true
+			states = append(states, s)
+		}
 	}
 	slog.Info("shim discovery complete", "found", len(states))
 
@@ -432,15 +629,29 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			continue
 		}
 
+		// Resolve the wrapper recorded at shim startup so reconnect uses
+		// the matching Protocol and binary. An empty Backend in the state
+		// file predates multi-backend support and falls back to the
+		// router default.
+		recWrapper, recBackendID := r.wrapperFor(state.Backend)
+
 		if !ok {
 			slog.Info("orphan shim found, shutting down", "key", state.Key)
 			// Connect briefly to send shutdown. Bound the reconnect so a
 			// hung shim socket cannot stall NewRouter startup — we fall
 			// through to SIGUSR2 if the timeout fires.
 			rctx, rcancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
-			handle, err := r.wrapper.ShimManager.Reconnect(rctx, state.Key, 0)
+			var (
+				handle  *shim.ShimHandle
+				connErr error
+			)
+			if recWrapper != nil && recWrapper.ShimManager != nil {
+				handle, connErr = recWrapper.ShimManager.Reconnect(rctx, state.Key, 0)
+			} else {
+				connErr = fmt.Errorf("no shim manager for backend %q", state.Backend)
+			}
 			rcancel()
-			if err == nil {
+			if connErr == nil {
 				handle.Shutdown()
 			} else {
 				syscall.Kill(state.ShimPID, syscall.SIGUSR2) //nolint:errcheck
@@ -453,13 +664,27 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			continue
 		}
 
+		if recWrapper == nil {
+			slog.Warn("shim reconnect skipped: no wrapper for backend",
+				"key", state.Key, "backend", state.Backend)
+			continue
+		}
+
 		// CLI args drift check: if config changed (model, args), shut down old shim
 		// and let the next message create a new session with updated config.
 		// Strip --resume <id> from stored args since it's session-specific, not config.
 		storedBase := stripResumeArgs(state.CLIArgs)
-		currentArgs := r.wrapper.Protocol.BuildArgs(cli.SpawnOptions{
-			Model:     r.model,
-			ExtraArgs: r.extraArgs,
+		driftModel := r.model
+		if m, ok := r.backendModels[recBackendID]; ok && m != "" {
+			driftModel = m
+		}
+		driftArgs := r.extraArgs
+		if a, ok := r.backendExtraArgs[recBackendID]; ok && len(a) > 0 {
+			driftArgs = a
+		}
+		currentArgs := recWrapper.Protocol.BuildArgs(cli.SpawnOptions{
+			Model:     driftModel,
+			ExtraArgs: driftArgs,
 		})
 		if len(storedBase) > 0 && !slices.Equal(storedBase, currentArgs) {
 			slog.Info("shim config drifted, shutting down old shim",
@@ -467,7 +692,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				"old_args_len", len(storedBase),
 				"new_args_len", len(currentArgs))
 			rctx, rcancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
-			handle, err := r.wrapper.ShimManager.Reconnect(rctx, state.Key, 0)
+			handle, err := recWrapper.ShimManager.Reconnect(rctx, state.Key, 0)
 			rcancel()
 			if err == nil {
 				handle.Shutdown()
@@ -479,8 +704,8 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// NewRouter indefinitely; on timeout we log and keep iterating.
 		lastSeq := int64(0) // full replay on restart
 		spawnCtx, spawnCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
-		proc, replays, err := r.wrapper.SpawnReconnect(
-			spawnCtx, state.Key, lastSeq, r.wrapper.Protocol,
+		proc, replays, err := recWrapper.SpawnReconnect(
+			spawnCtx, state.Key, lastSeq, recWrapper.Protocol,
 			r.noOutputTimeout, r.totalTimeout,
 		)
 		spawnCancel()
@@ -488,6 +713,13 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			slog.Warn("shim reconnect failed", "key", state.Key, "err", err)
 			continue
 		}
+
+		// Install the turn-done callback before any history/JSONL work
+		// completes so result events arriving during the JSONL-load window
+		// (the readLoop is already running inside SpawnReconnect) do not
+		// fire the nil-callback path and leave the dashboard stuck on a
+		// "running" spinner until the next unrelated broadcast.
+		proc.SetOnTurnDone(func() { r.notifyChange() })
 
 		// Restore dashboard history from JSONL only.
 		//
@@ -512,13 +744,18 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			if state.SessionID != "" {
 				ids = append(ids, state.SessionID)
 			}
-			// Budgeted tail walk caps magnitude of disk I/O regardless of
-			// chain length. r.historyCtx ties into Shutdown so a hung JSONL
-			// read on slow storage cannot extend reconnect past the shim
-			// reconcile window.
+			// Use parentCtx (reconcile loop / startup ctx) rather than
+			// r.historyCtx: historyCtx is cancelled as Shutdown's FIRST
+			// action, so a reconcile tick that fires during the 30s drain
+			// window would see ctx.Canceled and load zero entries, leaving
+			// the reconnected session's dashboard panel empty.
+			// Bounded budget (maxPersistedHistory) and the inner
+			// shimReconnectTimeout still protect against hung storage.
+			histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 			histEntries := discovery.LoadHistoryChainTailCtx(
-				r.historyCtx, r.claudeDir, ids, sess.workspace, maxPersistedHistory,
+				histCtx, r.claudeDir, ids, sess.workspace, maxPersistedHistory,
 			)
+			histCancel()
 			if len(histEntries) > 0 {
 				proc.InjectHistory(histEntries)
 			}
@@ -540,8 +777,23 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// ReattachProcess calls onSessionID which tries to r.mu.Lock(),
 		// but we already hold the lock here. Do the tracking directly
 		// to avoid deadlock (sync.RWMutex is not reentrant).
-		proc.SetOnTurnDone(func() { r.notifyChange() })
+		// (onTurnDone was already bound before the JSONL-load window
+		// to avoid missing early result events.)
 		sess.ReattachProcessNoCallback(proc, state.SessionID)
+		// Record the backend + wrapper-provided CLI identity so the
+		// dashboard snapshot reflects the actual backend post-reconnect,
+		// even for sessions restored from a pre-multi-backend store.
+		// Writes go through atomic.Value so the lock-free Snapshot() in
+		// ListSessions remains race-free.
+		if recBackendID != "" {
+			sess.SetBackend(recBackendID)
+		}
+		if recWrapper.CLIName != "" {
+			sess.SetCLIName(recWrapper.CLIName)
+		}
+		if recWrapper.CLIVersion != "" {
+			sess.SetCLIVersion(recWrapper.CLIVersion)
+		}
 		if state.SessionID != "" {
 			r.trackSessionID(state.SessionID)
 			r.sessionIDToKey[state.SessionID] = state.Key
@@ -617,6 +869,27 @@ func (r *Router) GetWorkspace(chatKey string) string {
 		return ws
 	}
 	return r.workspace
+}
+
+// SetSessionBackend remembers the backend the dashboard picked for a new
+// session keyed by its full session key (including agent suffix). Only
+// applied the next time spawnSession runs — existing live sessions are not
+// migrated. Empty backend clears the override.
+func (r *Router) SetSessionBackend(key, backend string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if backend == "" {
+		delete(r.backendOverrides, key)
+		return
+	}
+	r.backendOverrides[key] = backend
+}
+
+// GetSessionBackend returns the backend override for key, or "" if none.
+func (r *Router) GetSessionBackend(key string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.backendOverrides[key]
 }
 
 // ResetChat resets all sessions belonging to a chat (all agents).
@@ -697,6 +970,7 @@ type AgentOpts struct {
 	Model     string
 	ExtraArgs []string
 	Workspace string // override workspace (empty = use default/chat override)
+	Backend   string // backend ID ("claude" / "kiro" / …); empty = router default
 	Exempt    bool   // exempt from TTL, eviction, and activeCount (planner sessions)
 }
 
@@ -782,13 +1056,40 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		}
 	}
 
-	// Merge agent opts with router defaults
+	// Pick the wrapper for the requested backend. AgentOpts.Backend wins
+	// over the stored per-key override (set by the dashboard when the user
+	// picked a backend during new-session). Unknown IDs fall back silently
+	// to the router default; callers that need strict validation should
+	// pre-check via BackendIDs().
+	//
+	// The override is consumed on first spawn so a later Reset→spawn for
+	// the same key doesn't silently carry the old backend pick. The map
+	// is also wiped in Reset/Remove; deleting here as well guards the
+	// spawn path even when those callers missed cleanup.
+	reqBackend := opts.Backend
+	if reqBackend == "" {
+		reqBackend = r.backendOverrides[key]
+	}
+	delete(r.backendOverrides, key)
+	wrapper, backendID := r.wrapperFor(reqBackend)
+
+	// Merge agent opts with router defaults. Backend-scoped values
+	// (backendModels / backendExtraArgs) take precedence over the global
+	// fallbacks so operators can set a Kiro-specific model without
+	// affecting Claude sessions.
 	model := r.model
+	if bm, ok := r.backendModels[backendID]; ok && bm != "" {
+		model = bm
+	}
 	if opts.Model != "" {
 		model = opts.Model
 	}
-	args := make([]string, len(r.extraArgs))
-	copy(args, r.extraArgs)
+	baseArgs := r.extraArgs
+	if ba, ok := r.backendExtraArgs[backendID]; ok && len(ba) > 0 {
+		baseArgs = ba
+	}
+	args := make([]string, len(baseArgs))
+	copy(args, baseArgs)
 	args = append(args, opts.ExtraArgs...)
 
 	// Determine workspace: opts override > per-chat override > old session workspace > default
@@ -827,13 +1128,13 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// a concurrent Cleanup from pruning slots we're about to fill.
 	r.pendingSpawns++
 	r.mu.Unlock()
-	if r.wrapper == nil {
+	if wrapper == nil {
 		r.mu.Lock()
 		r.pendingSpawns--
 		r.mu.Unlock()
-		return nil, fmt.Errorf("spawn process: %w", ErrNoCLIWrapper)
+		return nil, fmt.Errorf("spawn process (backend %q): %w", backendID, ErrNoCLIWrapper)
 	}
-	proc, err := r.wrapper.Spawn(ctx, spawnOpts)
+	proc, err := wrapper.Spawn(ctx, spawnOpts)
 	r.mu.Lock()
 	r.pendingSpawns--
 	if err != nil {
@@ -926,8 +1227,6 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	s := &ManagedSession{
 		key:              key,
 		workspace:        workspace,
-		cliName:          r.wrapper.CLIName,
-		cliVersion:       r.wrapper.CLIVersion,
 		persistedHistory: oldHistory,
 		prevSessionIDs:   prevIDs,
 		totalCost:        oldTotalCost,
@@ -941,6 +1240,9 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 			r.mu.Unlock()
 		},
 	}
+	s.SetBackend(backendID)
+	s.SetCLIName(wrapper.CLIName)
+	s.SetCLIVersion(wrapper.CLIVersion)
 	s.storeProcess(proc)
 	// Matches the reconnect path (ReconnectShims): notify the dashboard when
 	// a turn completes out-of-band (e.g. result arrives via readLoop without
@@ -975,12 +1277,20 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		ids := make([]string, 0, len(prevIDs)+1)
 		ids = append(ids, prevIDs...)
 		ids = append(ids, resumeID)
-		// Budgeted tail walk: collect at most maxPersistedHistory entries
-		// from the newest ID backward, stopping early. Typical resume opens
-		// just 1-2 JSONL files instead of the entire chain.
+		// Budgeted tail walk: collect the most recent maxPersistedHistory
+		// entries and stop, which typically avoids opening most of a long
+		// prev-id chain.
+		//
+		// Deliberately NOT using r.historyCtx: that context is cancelled
+		// at Shutdown's first step, so a user message arriving during the
+		// 30s drain window would resume with empty dashboard history. A
+		// fresh 15s timeout gives slow storage room to breathe while
+		// still bounding the request path.
+		histCtx, histCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		allEntries := discovery.LoadHistoryChainTailCtx(
-			r.historyCtx, r.claudeDir, ids, workspace, maxPersistedHistory,
+			histCtx, r.claudeDir, ids, workspace, maxPersistedHistory,
 		)
+		histCancel()
 		if len(allEntries) > 0 {
 			s.InjectHistory(allEntries)
 			slog.Info("loaded session history on resume", "key", key, "entries", len(allEntries), "chain", len(ids))
@@ -1069,6 +1379,7 @@ func (r *Router) Reset(key string) {
 	}
 	r.indexDel(key)
 	delete(r.sessions, key)
+	delete(r.backendOverrides, key)
 	if wasActive {
 		r.activeCount--
 		if r.activeCount < 0 {
@@ -1107,6 +1418,9 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		}
 		r.indexDel(key)
 		delete(r.sessions, key)
+		// Note: do NOT delete backendOverrides[key] here — the new opts
+		// may carry its own backend, and spawnSession below consumes and
+		// clears the override atomically.
 		if wasActive {
 			r.activeCount--
 			if r.activeCount < 0 {
@@ -1157,6 +1471,7 @@ func (r *Router) Remove(key string) bool {
 	}
 	r.indexDel(key)
 	delete(r.sessions, key)
+	delete(r.backendOverrides, key)
 	if wasActive {
 		r.activeCount--
 		if r.activeCount < 0 {
@@ -1847,11 +2162,11 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 		delete(r.sessionIDToKey, sessionID)
 	}
 	s := &ManagedSession{
-		key:        key,
-		workspace:  workspace,
-		cliName:    r.cliNameDefault(),
-		cliVersion: r.cliVersionDefault(),
+		key:       key,
+		workspace: workspace,
 	}
+	s.SetCLIName(r.cliNameDefault())
+	s.SetCLIVersion(r.cliVersionDefault())
 	s.setSessionID(sessionID)
 	if lastPrompt != "" {
 		s.lastPrompt.Store(lastPrompt)
@@ -1896,12 +2211,12 @@ func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
 		return
 	}
 	s := &ManagedSession{
-		key:        key,
-		workspace:  workspace,
-		exempt:     true,
-		cliName:    r.cliNameDefault(),
-		cliVersion: r.cliVersionDefault(),
+		key:       key,
+		workspace: workspace,
+		exempt:    true,
 	}
+	s.SetCLIName(r.cliNameDefault())
+	s.SetCLIVersion(r.cliVersionDefault())
 	if lastPrompt != "" {
 		s.lastPrompt.Store(lastPrompt)
 	}

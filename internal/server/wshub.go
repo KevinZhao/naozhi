@@ -564,6 +564,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		Images:    images,
 		Workspace: msg.Workspace,
 		ResumeID:  msg.ResumeID,
+		Backend:   msg.Backend,
 	}, func(errMsg string) {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Error: errMsg})
 	})

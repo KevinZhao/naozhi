@@ -82,10 +82,26 @@ type ServerConfig struct {
 }
 
 type CLIConfig struct {
-	Backend string   `yaml:"backend"` // "claude" (default) | "kiro"
-	Path    string   `yaml:"path"`
-	Model   string   `yaml:"model"`
-	Args    []string `yaml:"args"`
+	// Backend names the primary/default backend ("claude" (default) | "kiro").
+	// When Backends is set, Backend is the one chosen when the dashboard
+	// does not explicitly pick a backend for a new session.
+	Backend string `yaml:"backend"`
+	Path    string `yaml:"path"`
+	// Backends enumerates every backend the server should enable. When
+	// empty, naozhi falls back to the legacy single-backend mode using
+	// only Backend/Path/Model/Args.
+	Backends []CLIBackendConfig `yaml:"backends,omitempty"`
+	Model    string             `yaml:"model"`
+	Args     []string           `yaml:"args"`
+}
+
+// CLIBackendConfig configures one backend in a multi-backend deployment.
+// ID is required; Path/Model/Args fall back to the top-level cli.* values.
+type CLIBackendConfig struct {
+	ID    string   `yaml:"id"`              // "claude" | "kiro"
+	Path  string   `yaml:"path,omitempty"`  // overrides cli.path for this backend
+	Model string   `yaml:"model,omitempty"` // overrides cli.model for this backend
+	Args  []string `yaml:"args,omitempty"`  // overrides cli.args for this backend
 }
 
 type SessionConfig struct {
@@ -505,6 +521,91 @@ func (c *Config) ParseCronTimezone() *time.Location {
 // ParseCollectDelay returns the queue collect delay (cached after Load).
 func (c *Config) ParseCollectDelay() time.Duration {
 	return c.cachedCollectDelay
+}
+
+// EnabledBackends returns the normalized list of backends to enable.
+// When cli.backends is set it wins; otherwise the legacy single cli.backend
+// (defaulting to "claude") is returned. The default backend is always first
+// in the result so callers can treat position 0 as "pick when none chosen".
+// Duplicate IDs collapse to the first occurrence.
+func (c *Config) EnabledBackends() []CLIBackendConfig {
+	// Resolve the default ID consistently with DefaultBackendID: explicit
+	// cli.backend wins, then the first usable entry in cli.backends, then
+	// legacy "claude". Previously this hard-coded "claude" which caused
+	// EnabledBackends()[0].ID to disagree with DefaultBackendID() when
+	// cli.backend was unset and the first configured backend wasn't claude.
+	defaultID := c.CLI.Backend
+	if defaultID == "" {
+		for _, b := range c.CLI.Backends {
+			if b.ID != "" {
+				defaultID = b.ID
+				break
+			}
+		}
+	}
+	if defaultID == "" {
+		defaultID = "claude"
+	}
+
+	if len(c.CLI.Backends) == 0 {
+		return []CLIBackendConfig{{
+			ID:    defaultID,
+			Path:  c.CLI.Path,
+			Model: c.CLI.Model,
+			Args:  c.CLI.Args,
+		}}
+	}
+
+	seen := make(map[string]bool, len(c.CLI.Backends))
+	out := make([]CLIBackendConfig, 0, len(c.CLI.Backends))
+	for _, b := range c.CLI.Backends {
+		if b.ID == "" || seen[b.ID] {
+			continue
+		}
+		seen[b.ID] = true
+		// Per-backend fields fall back to the top-level cli.* values so
+		// operators can keep a single Model/Args and only list IDs.
+		if b.Model == "" {
+			b.Model = c.CLI.Model
+		}
+		if len(b.Args) == 0 {
+			b.Args = c.CLI.Args
+		}
+		out = append(out, b)
+	}
+
+	// All entries had empty IDs: fall back to legacy single-backend so the
+	// server doesn't refuse to start with a confusing "no usable cli backend".
+	if len(out) == 0 {
+		return []CLIBackendConfig{{
+			ID:    defaultID,
+			Path:  c.CLI.Path,
+			Model: c.CLI.Model,
+			Args:  c.CLI.Args,
+		}}
+	}
+
+	// Float the default backend to position 0 so UI defaults stay stable
+	// regardless of YAML ordering.
+	for i, b := range out {
+		if b.ID == defaultID && i > 0 {
+			out[0], out[i] = out[i], out[0]
+			break
+		}
+	}
+	return out
+}
+
+// DefaultBackendID reports the backend ID to use when a request does not
+// specify one.
+func (c *Config) DefaultBackendID() string {
+	if id := c.CLI.Backend; id != "" {
+		return id
+	}
+	if len(c.CLI.Backends) > 0 && c.CLI.Backends[0].ID != "" {
+		return c.CLI.Backends[0].ID
+	}
+	return "claude"
 }
 
 // QueueMaxDepth returns the resolved queue max depth.

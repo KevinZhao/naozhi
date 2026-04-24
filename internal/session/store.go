@@ -52,6 +52,7 @@ type storeEntry struct {
 	PrevSessionIDs []string `json:"prev_session_ids,omitempty"` // oldest → newest
 	TotalCost      float64  `json:"total_cost,omitempty"`
 	Workspace      string   `json:"workspace,omitempty"`
+	Backend        string   `json:"backend,omitempty"`     // "claude" | "kiro" | ...
 	LastActive     int64    `json:"last_active,omitempty"` // unix nano
 }
 
@@ -101,6 +102,7 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 				PrevSessionIDs: prevIDs,
 				TotalCost:      cost,
 				Workspace:      s.workspace,
+				Backend:        s.Backend(),
 				LastActive:     s.lastActive.Load(),
 			})
 		}

@@ -171,6 +171,7 @@ func (s *Server) registerDashboard() {
 
 	// Authenticated API routes
 	auth := s.auth.requireAuth
+	s.mux.HandleFunc("GET /api/cli/backends", auth(s.cliH.handle))
 	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.handleList))
 	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.handleEvents))
 	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))

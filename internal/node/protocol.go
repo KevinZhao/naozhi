@@ -33,6 +33,7 @@ type ClientMsg struct {
 	Node      string   `json:"node,omitempty"`      // target node (empty = local)
 	Workspace string   `json:"workspace,omitempty"` // workspace override for new sessions
 	ResumeID  string   `json:"resume_id,omitempty"` // session ID to resume (recent sessions)
+	Backend   string   `json:"backend,omitempty"`   // backend ID picked by dashboard for new sessions
 	FileIDs   []string `json:"file_ids,omitempty"`  // pre-uploaded image IDs from /api/sessions/upload
 }
 

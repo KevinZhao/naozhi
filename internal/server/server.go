@@ -65,6 +65,7 @@ type Server struct {
 	sessionH    *SessionHandlers
 	healthH     *HealthHandler
 	sendH       *SendHandler
+	cliH        *CLIBackendsHandler
 
 	// Watchdog kill counters — incremented atomically, exposed via /health and /api/sessions.
 	watchdogNoOutputKills atomic.Int64
@@ -232,6 +233,15 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		knownNodes[id] = nc.DisplayName()
 	}
 
+	// allowed_root is the one directory-traversal guard for dashboard /cd,
+	// cron WorkDir, and handleTakeover CWD. Empty means "no restriction",
+	// which is the legitimate single-user default but a real risk in
+	// multi-user deployments. Surface it once at startup so operators can
+	// audit their config rather than discovering the looseness via incident.
+	if opts.AllowedRoot == "" {
+		slog.Warn("server.allowed_root is unset; dashboard /cd, cron WorkDir, and takeover CWD accept any absolute path — set allowed_root in config.yaml to restrict")
+	}
+
 	cookieSecret := loadOrCreateCookieSecret(opts.StateDir)
 
 	s := &Server{
@@ -340,6 +350,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		watchdogTotal: &s.watchdogTotalKills,
 	}
 	s.sessionH.WarmHistoryCache()
+	s.cliH = NewCLIBackendsHandler(router)
 	platNames := make(map[string]struct{}, len(platforms))
 	for name := range platforms {
 		platNames[name] = struct{}{}

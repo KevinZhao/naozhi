@@ -144,18 +144,27 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var key, text, node, workspace, resumeID string
+	var key, text, node, workspace, resumeID, backend string
 	var images []cli.ImageData
 	var fileIDs []string
 
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "multipart/form-data") {
-		// Inline multipart uploads bypass the uploadStore per-owner quota, so
-		// cap the request body conservatively. Clients uploading more than 5
-		// files per turn should use /api/sessions/upload + file_ids which
-		// enforces maxUploadPerOwner. 5×10MB = 50MB body + form overhead.
-		r.Body = http.MaxBytesReader(w, r.Body, 55<<20)
-		if err := r.ParseMultipartForm(16 << 20); err != nil {
+		// Inline multipart uploads bypass the uploadStore per-owner quota;
+		// gate them behind the dedicated uploadLimiter so a burst of
+		// multipart sends can't slip past at the (looser) sendLimiter rate.
+		// Without this, 30 req/min × 5 files × 10 MB = 1.5 GB/min of inline
+		// file bytes would be funneled into CLI stdin.
+		if h.uploadLimiter != nil && !h.uploadLimiter.AllowRequest(r) {
+			writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "upload rate limit exceeded"})
+			return
+		}
+		// Shrink body cap to 22 MB (2× max inline file 10 MB + form overhead)
+		// and drop inline fan-out from 5→2 so authenticated users uploading
+		// many attachments per turn must route through /api/sessions/upload
+		// which enforces maxUploadPerOwner.
+		r.Body = http.MaxBytesReader(w, r.Body, 22<<20)
+		if err := r.ParseMultipartForm(12 << 20); err != nil {
 			slog.Warn("send: multipart parse failed", "err", err)
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "bad multipart form"})
 			return
@@ -165,11 +174,12 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		node = r.FormValue("node")
 		workspace = r.FormValue("workspace")
 		resumeID = r.FormValue("resume_id")
+		backend = r.FormValue("backend")
 		fileIDs = r.MultipartForm.Value["file_ids"]
 
 		files := r.MultipartForm.File["files"]
-		if len(files) > 5 {
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "too many inline files (max 5); use /api/sessions/upload for more"})
+		if len(files) > 2 {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "too many inline files (max 2); use /api/sessions/upload for more"})
 			return
 		}
 		if len(files)+len(fileIDs) > 10 {
@@ -192,6 +202,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			Node      string   `json:"node"`
 			Workspace string   `json:"workspace"`
 			ResumeID  string   `json:"resume_id"`
+			Backend   string   `json:"backend"`
 			FileIDs   []string `json:"file_ids"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -204,6 +215,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		node = req.Node
 		workspace = req.Workspace
 		resumeID = req.ResumeID
+		backend = req.Backend
 		fileIDs = req.FileIDs
 	}
 
@@ -295,7 +307,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	reset, status, err := h.hub.sessionSend(sendParams{
 		Key: key, Text: text, Images: images,
-		Workspace: workspace, ResumeID: resumeID,
+		Workspace: workspace, ResumeID: resumeID, Backend: backend,
 	}, nil)
 	if err != nil {
 		writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": err.Error()})

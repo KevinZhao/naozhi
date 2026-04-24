@@ -228,3 +228,142 @@ nodes:
 		t.Fatal("expected error for missing URL")
 	}
 }
+
+func TestEnabledBackends(t *testing.T) {
+	tests := []struct {
+		name           string
+		cfg            Config
+		wantIDs        []string // expected IDs in order
+		wantDefaultID  string
+		wantFirstModel string // model on out[0]
+	}{
+		{
+			name: "legacy single backend defaults to claude",
+			cfg: Config{CLI: CLIConfig{
+				Model: "sonnet",
+			}},
+			wantIDs:        []string{"claude"},
+			wantDefaultID:  "claude",
+			wantFirstModel: "sonnet",
+		},
+		{
+			name: "legacy single backend kiro",
+			cfg: Config{CLI: CLIConfig{
+				Backend: "kiro",
+				Model:   "sonnet",
+			}},
+			wantIDs:        []string{"kiro"},
+			wantDefaultID:  "kiro",
+			wantFirstModel: "sonnet",
+		},
+		{
+			name: "multi-backend floats default first",
+			cfg: Config{CLI: CLIConfig{
+				Backend: "kiro",
+				Model:   "sonnet",
+				Backends: []CLIBackendConfig{
+					{ID: "claude"},
+					{ID: "kiro", Model: "gpt-5"},
+				},
+			}},
+			wantIDs:        []string{"kiro", "claude"},
+			wantDefaultID:  "kiro",
+			wantFirstModel: "gpt-5", // per-backend model wins
+		},
+		{
+			name: "multi-backend falls back to global model when per-backend empty",
+			cfg: Config{CLI: CLIConfig{
+				Model: "sonnet",
+				Backends: []CLIBackendConfig{
+					{ID: "claude"},
+					{ID: "kiro"},
+				},
+			}},
+			// Default "claude" (empty cli.backend defaults to "claude"),
+			// already first in list.
+			wantIDs:        []string{"claude", "kiro"},
+			wantDefaultID:  "claude",
+			wantFirstModel: "sonnet",
+		},
+		{
+			name: "duplicate IDs collapse",
+			cfg: Config{CLI: CLIConfig{
+				Backends: []CLIBackendConfig{
+					{ID: "claude"},
+					{ID: "claude", Model: "opus"}, // duplicate dropped
+					{ID: "kiro"},
+				},
+			}},
+			wantIDs:       []string{"claude", "kiro"},
+			wantDefaultID: "claude",
+		},
+		{
+			// Regression guard for R54-F4: when cli.backend is unset and
+			// the first cli.backends entry is not "claude", both
+			// EnabledBackends()[0].ID and DefaultBackendID() must agree.
+			name: "empty cli.backend picks first backend entry as default",
+			cfg: Config{CLI: CLIConfig{
+				Backends: []CLIBackendConfig{
+					{ID: "kiro"},
+					{ID: "claude"},
+				},
+			}},
+			wantIDs:       []string{"kiro", "claude"},
+			wantDefaultID: "kiro",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.cfg.EnabledBackends()
+			ids := make([]string, len(got))
+			for i, b := range got {
+				ids[i] = b.ID
+			}
+			if len(ids) != len(tt.wantIDs) {
+				t.Fatalf("ids = %v, want %v", ids, tt.wantIDs)
+			}
+			for i, id := range ids {
+				if id != tt.wantIDs[i] {
+					t.Errorf("ids[%d] = %q, want %q", i, id, tt.wantIDs[i])
+				}
+			}
+			if got := tt.cfg.DefaultBackendID(); got != tt.wantDefaultID {
+				t.Errorf("DefaultBackendID = %q, want %q", got, tt.wantDefaultID)
+			}
+			if tt.wantFirstModel != "" && got[0].Model != tt.wantFirstModel {
+				t.Errorf("out[0].Model = %q, want %q", got[0].Model, tt.wantFirstModel)
+			}
+			// R54-F4 contract: out[0].ID must equal DefaultBackendID(),
+			// otherwise the router default diverges from the UI primary.
+			if gotDef := tt.cfg.DefaultBackendID(); got[0].ID != gotDef {
+				t.Errorf("invariant violated: out[0].ID = %q, DefaultBackendID = %q", got[0].ID, gotDef)
+			}
+		})
+	}
+}
+
+// TestEnabledBackends_AllEmptyIDsFallback covers the operator-error case
+// where cli.backends is set but every entry omits `id:`. Previously the
+// dedup loop would silently drop every entry and return an empty slice,
+// causing main.go to crash with "no usable cli backend configured".
+// R54-F10: fall back to legacy single-backend mode instead.
+func TestEnabledBackends_AllEmptyIDsFallback(t *testing.T) {
+	cfg := Config{CLI: CLIConfig{
+		Path:  "/usr/local/bin/claude",
+		Model: "sonnet",
+		Backends: []CLIBackendConfig{
+			{Path: "/usr/local/bin/claude"}, // ID omitted
+		},
+	}}
+	got := cfg.EnabledBackends()
+	if len(got) != 1 {
+		t.Fatalf("len(got) = %d, want 1 fallback entry", len(got))
+	}
+	if got[0].ID != "claude" {
+		t.Errorf("got[0].ID = %q, want fallback to default %q", got[0].ID, "claude")
+	}
+	if got[0].Path != "/usr/local/bin/claude" {
+		t.Errorf("got[0].Path = %q, want cli.path passthrough", got[0].Path)
+	}
+}

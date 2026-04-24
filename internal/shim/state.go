@@ -24,6 +24,7 @@ type State struct {
 	Key             string   `json:"key"`
 	SessionID       string   `json:"session_id"`
 	Workspace       string   `json:"workspace"`
+	Backend         string   `json:"backend,omitempty"` // "claude" | "kiro" | ...
 	CLIArgs         []string `json:"cli_args"`
 	CLIAlive        bool     `json:"cli_alive"`
 	StartedAt       string   `json:"started_at"`

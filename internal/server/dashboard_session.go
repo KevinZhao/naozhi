@@ -305,11 +305,16 @@ const maxEventsPageLimit = 500
 //   - node      (optional): remote node ID (proxy to that node)
 //   - after     (optional, ms): incremental fetch — entries with Time > after
 //   - before    (optional, ms): pagination fetch — entries with Time < before,
-//     returning up to `limit` in chronological order
-//   - limit     (optional): caps the result count. Clamped at maxEventsPageLimit.
+//     returning up to `limit` newest-first-then-
+//     reversed (chronological) entries
+//   - limit     (optional): caps the result count. Required when `before` is set;
+//     optional with `after` (defaults to uncapped for
+//     backwards compat); when neither `after` nor `before`
+//     is given, limit controls the initial page size
+//     (defaults to returning everything — legacy behaviour)
 //
-// Precedence: `after` wins over `before` (streaming catch-up outranks
-// pagination). No params = full history (legacy behaviour).
+// Precedence: `after` wins over `before` if both are supplied (streaming
+// catch-up outranks pagination). No params = full history (legacy).
 func (h *SessionHandlers) handleEvents(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
 	if key == "" {
@@ -355,9 +360,9 @@ func (h *SessionHandlers) handleEvents(w http.ResponseWriter, r *http.Request) {
 		limit = v
 	}
 
-	// Remote node proxy — forward `after` only (the remote protocol predates
-	// before/limit). Cap the returned slice locally so the dashboard gets a
-	// consistent-size payload even from legacy peers.
+	// Remote node proxy — forward after only (the remote protocol predates
+	// before/limit). If/when FetchEventsPaginated exists, we can extend here
+	// without breaking older peer binaries.
 	nodeID := q.Get("node")
 	if nodeID != "" && nodeID != "local" {
 		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
@@ -370,6 +375,8 @@ func (h *SessionHandlers) handleEvents(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
+		// Apply page cap on the returned entries so the dashboard gets a
+		// consistent-size payload even from legacy peers.
 		if limit > 0 && len(entries) > limit {
 			entries = entries[len(entries)-limit:]
 		}

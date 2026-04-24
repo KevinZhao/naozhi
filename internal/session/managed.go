@@ -81,13 +81,19 @@ type ManagedSession struct {
 	keyChatID   string
 	keyAgentID  string
 
-	process     atomic.Pointer[processBox] // stores *processBox; use loadProcess/storeProcess
-	sendMu      sync.Mutex                 // serializes messages to the same session
-	historyMu   sync.RWMutex               // protects persistedHistory reads/writes (independent of sendMu)
-	sendCancel  atomic.Pointer[context.CancelFunc]
-	workspace   string       // effective cwd at spawn time
-	cliName     string       // "claude-code", "kiro" — set at creation from Wrapper
-	cliVersion  string       // semver from --version — set at creation from Wrapper
+	process    atomic.Pointer[processBox] // stores *processBox; use loadProcess/storeProcess
+	sendMu     sync.Mutex                 // serializes messages to the same session
+	historyMu  sync.RWMutex               // protects persistedHistory reads/writes (independent of sendMu)
+	sendCancel atomic.Pointer[context.CancelFunc]
+	workspace  string // effective cwd at spawn time
+	// backend/cliName/cliVersion are written at spawn time AND later by
+	// reconnectShims under r.mu (write), but read by Snapshot() without
+	// any lock (called via ListSessions which only holds RLock while
+	// collecting refs). Using atomic.Value keeps the read/write race-free
+	// without round-tripping Snapshot through r.mu. Stored type is string.
+	backend     atomic.Value // string: backend ID ("claude" | "kiro"); empty = router default
+	cliName     atomic.Value // string: "claude-code", "kiro" — set at creation from Wrapper
+	cliVersion  atomic.Value // string: semver from --version
 	deathReason atomic.Value // string: why process died, empty if alive
 	// totalCost is the cumulative cost carried over from a previous process
 	// incarnation: written once at construction (either in NewRouter() when
@@ -119,6 +125,36 @@ func (s *ManagedSession) SessionKey() string { return s.key }
 
 // IsExempt returns whether this session is exempt from TTL and eviction.
 func (s *ManagedSession) IsExempt() bool { return s.exempt }
+
+// loadStringAtomic reads a *atomic.Value known to store a string, returning
+// "" when the value has never been written.
+func loadStringAtomic(v *atomic.Value) string {
+	if raw := v.Load(); raw != nil {
+		if s, ok := raw.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+// Backend returns the backend ID ("" when the router default is in effect).
+func (s *ManagedSession) Backend() string { return loadStringAtomic(&s.backend) }
+
+// SetBackend records the backend ID for this session. Called at spawn time
+// and (rarely) by reconnectShims after a naozhi restart.
+func (s *ManagedSession) SetBackend(id string) { s.backend.Store(id) }
+
+// CLIName returns the CLI display name (e.g. "claude-code", "kiro").
+func (s *ManagedSession) CLIName() string { return loadStringAtomic(&s.cliName) }
+
+// SetCLIName records the wrapper-provided CLI display name.
+func (s *ManagedSession) SetCLIName(name string) { s.cliName.Store(name) }
+
+// CLIVersion returns the detected CLI version string.
+func (s *ManagedSession) CLIVersion() string { return loadStringAtomic(&s.cliVersion) }
+
+// SetCLIVersion records the wrapper-provided CLI version.
+func (s *ManagedSession) SetCLIVersion(v string) { s.cliVersion.Store(v) }
 
 func (s *ManagedSession) loadProcess() processIface {
 	if box := s.process.Load(); box != nil {
@@ -363,6 +399,7 @@ type SessionSnapshot struct {
 	SessionID    string             `json:"session_id"`
 	State        string             `json:"state"`
 	Protocol     string             `json:"protocol"`
+	Backend      string             `json:"backend,omitempty"`     // "claude", "kiro", ...
 	CLIName      string             `json:"cli_name,omitempty"`    // "claude-code", "kiro"
 	CLIVersion   string             `json:"cli_version,omitempty"` // e.g. "2.1.92"
 	LastActive   int64              `json:"last_active"`           // unix ms
@@ -396,8 +433,9 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		SessionID:  s.getSessionID(),
 		LastActive: s.GetLastActive().UnixMilli(),
 		Workspace:  s.workspace,
-		CLIName:    s.cliName,
-		CLIVersion: s.cliVersion,
+		Backend:    s.Backend(),
+		CLIName:    s.CLIName(),
+		CLIVersion: s.CLIVersion(),
 	}
 	if dr, ok := s.deathReason.Load().(string); ok {
 		snap.DeathReason = dr
@@ -521,6 +559,9 @@ func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []cli.Eve
 	// beforeMS. persistedHistory is not guaranteed to be sorted (see
 	// EventEntriesSince), so a full linear walk is the conservative choice.
 	out := make([]cli.EventEntry, 0, limit)
+	// Collect newest-to-oldest into a temp and reverse; keeps order stable
+	// when entries share identical Time values (common for a single batch
+	// InjectHistory where timestamps collapse to the same ms).
 	for i := len(s.persistedHistory) - 1; i >= 0 && len(out) < limit; i-- {
 		e := s.persistedHistory[i]
 		if beforeMS > 0 && e.Time >= beforeMS {

@@ -35,6 +35,7 @@ type Config struct {
 	IdleTimeout     time.Duration
 	WatchdogTimeout time.Duration
 	CLIPath         string
+	Backend         string // "claude" | "kiro" | ...; stored for reconnect routing
 	CLIArgs         []string
 	CWD             string
 }
@@ -114,6 +115,7 @@ func Run(cfg Config) error {
 		AuthToken: tokenB64,
 		Key:       cfg.Key,
 		Workspace: cfg.CWD,
+		Backend:   cfg.Backend,
 		CLIArgs:   cfg.CLIArgs,
 		CLIAlive:  true,
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
@@ -309,13 +311,13 @@ func Run(cfg Config) error {
 //
 // Lock ordering: s.mu → buffer.mu (never acquire s.mu while holding buffer.mu).
 type shimServer struct {
-	cli        *cliProc
-	listener   net.Listener
-	buffer     *RingBuffer
-	tokenRaw   []byte
-	stateFile  string
-	watchdog   *Watchdog
-	startedAt  time.Time
+	cli       *cliProc
+	listener  net.Listener
+	buffer    *RingBuffer
+	tokenRaw  []byte
+	stateFile string
+	watchdog  *Watchdog
+	startedAt time.Time
 
 	mu         sync.Mutex
 	state      State

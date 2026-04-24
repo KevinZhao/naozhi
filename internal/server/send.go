@@ -84,6 +84,7 @@ type sendParams struct {
 	Images    []cli.ImageData
 	Workspace string
 	ResumeID  string
+	Backend   string // optional backend ID picked by the dashboard ("" = router default)
 }
 
 // sendAckStatus describes the immediate ack status for a queued send.
@@ -160,6 +161,24 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 		if idx := strings.LastIndexByte(key, ':'); idx > 0 {
 			h.router.SetWorkspace(key[:idx], wsPath)
 		}
+	}
+
+	// Dashboard-picked backend override. Recorded per key so spawnSession
+	// (which runs later inside runTurn, not here) can pick up the choice
+	// when it actually fires up a wrapper. Unknown IDs are clamped to the
+	// router default inside wrapperFor, but we reject obviously hostile
+	// input early so a 4 KB `backend=<payload>` cannot land in logs.
+	if p.Backend != "" {
+		if len(p.Backend) > 32 {
+			return false, "", fmt.Errorf("invalid backend length")
+		}
+		for i := 0; i < len(p.Backend); i++ {
+			c := p.Backend[i]
+			if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+				return false, "", fmt.Errorf("invalid backend character")
+			}
+		}
+		h.router.SetSessionBackend(key, p.Backend)
 	}
 
 	// Resume registration — bound length before regex scan to limit cost

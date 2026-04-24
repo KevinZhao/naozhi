@@ -123,9 +123,22 @@ func NewManager(cfg ManagerConfig) (*Manager, error) {
 	}, nil
 }
 
-// StartShim spawns a new shim process for the given session key, connects to it,
-// and returns a ShimHandle with the authenticated connection.
+// StartShim spawns a new shim process using the manager's default CLI path.
+// Kept as a wrapper around StartShimWithBackend for callers that don't need
+// multi-backend routing.
 func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, cwd string) (*ShimHandle, error) {
+	return m.StartShimWithBackend(ctx, key, m.cliPath, "", cliArgs, cwd)
+}
+
+// StartShimWithBackend spawns a new shim process with an explicit CLI binary
+// and backend identifier. The backend is recorded in the shim state file so
+// naozhi reconnects post-restart can route back to the matching wrapper.
+// Pass cliPath == "" to fall back to the manager's default, and backend ==
+// "" when the caller is a legacy single-backend user.
+func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backend string, cliArgs []string, cwd string) (*ShimHandle, error) {
+	if cliPath == "" {
+		cliPath = m.cliPath
+	}
 	// Reserve a slot atomically to prevent TOCTOU race with concurrent callers
 	m.mu.Lock()
 	if len(m.shims)+m.pendingShims >= m.maxShims {
@@ -158,8 +171,11 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 		"--max-buffer-bytes", fmt.Sprintf("%d", m.maxBufBytes),
 		"--idle-timeout", m.idleTimeout.String(),
 		"--watchdog-timeout", m.watchdogTimeout.String(),
-		"--cli-path", m.cliPath,
+		"--cli-path", cliPath,
 		"--cwd", cwd,
+	}
+	if backend != "" {
+		args = append(args, "--backend", backend)
 	}
 	for _, a := range cliArgs {
 		args = append(args, "--cli-arg", a)
@@ -715,7 +731,6 @@ func (m *Manager) Remove(key string) {
 func (m *Manager) CLIPath() string {
 	return m.cliPath
 }
-
 
 // shimEnvAllowedPrefixes lists environment variable prefixes passed to shim/CLI
 // subprocesses. Variables not matching any prefix are filtered out to reduce

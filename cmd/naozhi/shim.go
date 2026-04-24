@@ -43,6 +43,7 @@ func runShimRun(args []string) {
 	idleTimeout := fs.Duration("idle-timeout", 4*time.Hour, "exit after no connection for this long")
 	watchdogTimeout := fs.Duration("watchdog-timeout", 30*time.Minute, "disconnect no-output timeout")
 	cliPath := fs.String("cli-path", "", "path to CLI binary")
+	backend := fs.String("backend", "", "backend id (claude/kiro); recorded in state file")
 	cwd := fs.String("cwd", "", "working directory for CLI")
 
 	// Collect --cli-arg flags (repeated)
@@ -70,6 +71,7 @@ func runShimRun(args []string) {
 		IdleTimeout:     *idleTimeout,
 		WatchdogTimeout: *watchdogTimeout,
 		CLIPath:         *cliPath,
+		Backend:         *backend,
 		CLIArgs:         []string(cliArgs),
 		CWD:             *cwd,
 	}

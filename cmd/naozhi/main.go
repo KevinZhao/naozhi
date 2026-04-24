@@ -372,19 +372,14 @@ func main() {
 		slog.Warn("apply ~/.claude/settings.json env failed", "err", err)
 	}
 	settingsFile := writeClaudeSettingsOverride(cfg.Server.Addr)
-	var proto cli.Protocol
-	switch cfg.CLI.Backend {
-	case "kiro":
-		proto = &cli.ACPProtocol{}
-	default:
-		proto = &cli.ClaudeProtocol{SettingsFile: settingsFile}
-	}
-	wrapper := cli.NewWrapper(cfg.CLI.Path, proto, cfg.CLI.Backend)
 
-	// Initialize ShimManager
+	backendsCfg := cfg.EnabledBackends()
+	defaultBackend := cfg.DefaultBackendID()
+	// Shared shim manager across all backends — every shim records its own
+	// Backend in state, so reconnect routing is backend-aware without
+	// needing per-backend state directories.
 	shimMgr, err := shim.NewManager(shim.ManagerConfig{
 		StateDir:        osutil.ExpandHome(cfg.Session.Shim.StateDir),
-		CLIPath:         wrapper.CLIPath,
 		IdleTimeout:     parseDurationOrDefault(cfg.Session.Shim.IdleTimeout, 4*time.Hour),
 		WatchdogTimeout: parseDurationOrDefault(cfg.Session.Shim.WatchdogTimeout, 30*time.Minute),
 		BufferSize:      cfg.Session.Shim.BufferSize,
@@ -395,7 +390,43 @@ func main() {
 		slog.Error("init shim manager", "err", err)
 		os.Exit(1)
 	}
-	wrapper.ShimManager = shimMgr
+
+	wrappers := make(map[string]*cli.Wrapper, len(backendsCfg))
+	backendModels := make(map[string]string, len(backendsCfg))
+	backendExtraArgs := make(map[string][]string, len(backendsCfg))
+	var defaultWrapper *cli.Wrapper
+	for _, b := range backendsCfg {
+		var proto cli.Protocol
+		switch b.ID {
+		case "kiro":
+			proto = &cli.ACPProtocol{}
+		case "", "claude":
+			proto = &cli.ClaudeProtocol{SettingsFile: settingsFile}
+		default:
+			slog.Warn("skipping unknown cli.backends entry", "id", b.ID)
+			continue
+		}
+		w := cli.NewWrapper(b.Path, proto, b.ID)
+		w.ShimManager = shimMgr
+		wrappers[w.BackendID] = w
+		if b.Model != "" {
+			backendModels[w.BackendID] = b.Model
+		}
+		if len(b.Args) > 0 {
+			backendExtraArgs[w.BackendID] = b.Args
+		}
+		if defaultWrapper == nil || w.BackendID == defaultBackend {
+			defaultWrapper = w
+		}
+		slog.Info("cli backend enabled",
+			"id", w.BackendID, "name", w.CLIName,
+			"path", w.CLIPath, "version", w.CLIVersion)
+	}
+	if defaultWrapper == nil {
+		slog.Error("no usable cli backend configured")
+		os.Exit(1)
+	}
+	wrapper := defaultWrapper
 
 	// Parse watchdog and store path
 	noOutputTimeout, totalTimeout := cfg.ParseWatchdog()
@@ -412,17 +443,21 @@ func main() {
 		claudeDir = filepath.Join(home, ".claude")
 	}
 	router := session.NewRouter(session.RouterConfig{
-		Wrapper:         wrapper,
-		MaxProcs:        cfg.Session.MaxProcs,
-		TTL:             cfg.ParseTTL(),
-		PruneTTL:        cfg.ParsePruneTTL(),
-		Model:           cfg.CLI.Model,
-		ExtraArgs:       cfg.CLI.Args,
-		Workspace:       workspace,
-		StorePath:       storePath,
-		NoOutputTimeout: noOutputTimeout,
-		TotalTimeout:    totalTimeout,
-		ClaudeDir:       claudeDir,
+		Wrapper:          wrapper,
+		Wrappers:         wrappers,
+		DefaultBackend:   defaultBackend,
+		MaxProcs:         cfg.Session.MaxProcs,
+		TTL:              cfg.ParseTTL(),
+		PruneTTL:         cfg.ParsePruneTTL(),
+		Model:            cfg.CLI.Model,
+		ExtraArgs:        cfg.CLI.Args,
+		BackendModels:    backendModels,
+		BackendExtraArgs: backendExtraArgs,
+		Workspace:        workspace,
+		StorePath:        storePath,
+		NoOutputTimeout:  noOutputTimeout,
+		TotalTimeout:     totalTimeout,
+		ClaudeDir:        claudeDir,
 	})
 
 	// Reconnect to surviving shim processes from previous naozhi run
