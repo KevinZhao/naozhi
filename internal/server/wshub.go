@@ -577,6 +577,12 @@ func (h *Hub) handleInterrupt(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 
+	// Remote node delegation
+	if msg.Node != "" && msg.Node != "local" {
+		h.handleRemoteInterrupt(c, msg)
+		return
+	}
+
 	ok := h.router.InterruptSession(key)
 	if ok {
 		slog.Info("session interrupted via dashboard", "key", key)
@@ -584,6 +590,43 @@ func (h *Hub) handleInterrupt(c *wsClient, msg node.ClientMsg) {
 	} else {
 		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "not_running", Key: key})
 	}
+}
+
+func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
+	nodeID := msg.Node
+	h.nodesMu.RLock()
+	nc, ok := h.nodes[nodeID]
+	h.nodesMu.RUnlock()
+	if !ok {
+		slog.Debug("ws interrupt: unknown node", "node", nodeID)
+		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "unknown node"})
+		return
+	}
+
+	release, shuttingDown := h.TrackSend()
+	if shuttingDown {
+		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Key: msg.Key, Node: nodeID, Error: "server shutting down"})
+		return
+	}
+	go func() {
+		defer release()
+		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
+		defer cancel()
+		capturedID, capturedKey := msg.ID, msg.Key
+		interrupted, err := nc.ProxyInterruptSession(ctx, capturedKey)
+		if err != nil {
+			slog.Error("remote ws interrupt failed", "node", nodeID, "key", capturedKey, "err", err)
+			c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: "remote interrupt failed"})
+			return
+		}
+		status := "ok"
+		if !interrupted {
+			status = "not_running"
+		} else {
+			slog.Info("remote session interrupted via dashboard", "node", nodeID, "key", capturedKey)
+		}
+		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: capturedID, Status: status, Key: capturedKey, Node: nodeID})
+	}()
 }
 
 func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan struct{}, sess *session.ManagedSession, lastTime int64) {

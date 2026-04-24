@@ -430,6 +430,111 @@ func TestHTTPClient_ProxyUpdateConfig_errorStatus(t *testing.T) {
 	}
 }
 
+// ---- ProxyRemoveSession ----
+
+func TestHTTPClient_ProxyRemoveSession_ok(t *testing.T) {
+	var gotBody map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete || r.URL.Path != "/api/sessions" {
+			http.Error(w, "unexpected", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := newTestHTTPClient(t, srv, "")
+	removed, err := c.ProxyRemoveSession(context.Background(), "feishu:group:abc")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !removed {
+		t.Fatal("expected removed=true on 200")
+	}
+	if gotBody["key"] != "feishu:group:abc" {
+		t.Errorf("expected key in body, got %v", gotBody)
+	}
+}
+
+func TestHTTPClient_ProxyRemoveSession_notFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newTestHTTPClient(t, srv, "")
+	removed, err := c.ProxyRemoveSession(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("expected nil err on 404, got %v", err)
+	}
+	if removed {
+		t.Fatal("expected removed=false on 404")
+	}
+}
+
+func TestHTTPClient_ProxyRemoveSession_errorStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := newTestHTTPClient(t, srv, "")
+	if _, err := c.ProxyRemoveSession(context.Background(), "k"); err == nil {
+		t.Fatal("expected error on 500")
+	}
+}
+
+// ---- ProxyInterruptSession ----
+
+func TestHTTPClient_ProxyInterruptSession_ok(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/sessions/interrupt" {
+			http.Error(w, "unexpected", http.StatusBadRequest)
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	}))
+	defer srv.Close()
+
+	c := newTestHTTPClient(t, srv, "")
+	interrupted, err := c.ProxyInterruptSession(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !interrupted {
+		t.Fatal("expected interrupted=true on status=ok")
+	}
+}
+
+func TestHTTPClient_ProxyInterruptSession_notRunning(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]string{"status": "not_running"})
+	}))
+	defer srv.Close()
+
+	c := newTestHTTPClient(t, srv, "")
+	interrupted, err := c.ProxyInterruptSession(context.Background(), "k")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if interrupted {
+		t.Fatal("expected interrupted=false when remote reports not_running")
+	}
+}
+
+func TestHTTPClient_ProxyInterruptSession_errorStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	c := newTestHTTPClient(t, srv, "")
+	if _, err := c.ProxyInterruptSession(context.Background(), "k"); err == nil {
+		t.Fatal("expected error on 502")
+	}
+}
+
 // ---- Metadata accessors ----
 
 func TestHTTPClient_Accessors(t *testing.T) {

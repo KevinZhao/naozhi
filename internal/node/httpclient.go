@@ -264,6 +264,54 @@ func (n *HTTPClient) ProxyUpdateConfig(ctx context.Context, projectName string, 
 	return nil
 }
 
+// ProxyRemoveSession forwards DELETE /api/sessions to the remote node.
+func (n *HTTPClient) ProxyRemoveSession(ctx context.Context, key string) (bool, error) {
+	data, err := json.Marshal(map[string]string{"key": key})
+	if err != nil {
+		return false, fmt.Errorf("marshal remove session payload: %w", err)
+	}
+	resp, err := n.doRequest(ctx, http.MethodDelete, "/api/sessions", bytes.NewReader(data))
+	if err != nil {
+		return false, fmt.Errorf("proxy remove session to %s: %w", n.ID, err)
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		return true, nil
+	case http.StatusNotFound:
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		return false, nil
+	default:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		return false, fmt.Errorf("proxy remove session to %s: status %d: %s", n.ID, resp.StatusCode, string(body))
+	}
+}
+
+// ProxyInterruptSession forwards POST /api/sessions/interrupt to the remote node.
+func (n *HTTPClient) ProxyInterruptSession(ctx context.Context, key string) (bool, error) {
+	data, err := json.Marshal(map[string]string{"key": key})
+	if err != nil {
+		return false, fmt.Errorf("marshal interrupt payload: %w", err)
+	}
+	resp, err := n.doRequest(ctx, http.MethodPost, "/api/sessions/interrupt", bytes.NewReader(data))
+	if err != nil {
+		return false, fmt.Errorf("proxy interrupt session to %s: %w", n.ID, err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		return false, fmt.Errorf("proxy interrupt session to %s: status %d: %s", n.ID, resp.StatusCode, string(body))
+	}
+	var result struct {
+		Status string `json:"status"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<16)).Decode(&result); err != nil {
+		return false, fmt.Errorf("proxy interrupt session to %s: decode response: %w", n.ID, err)
+	}
+	return result.Status == "ok", nil
+}
+
 // ProxySetFavorite forwards a project favorite toggle to the remote node.
 func (n *HTTPClient) ProxySetFavorite(ctx context.Context, projectName string, favorite bool) error {
 	favStr := "false"

@@ -34,6 +34,14 @@ type Conn interface {
 	ProxyRestartPlanner(ctx context.Context, projectName string) error
 	ProxyUpdateConfig(ctx context.Context, projectName string, cfg json.RawMessage) error
 	ProxySetFavorite(ctx context.Context, projectName string, favorite bool) error
+	// ProxyRemoveSession forwards DELETE /api/sessions to the remote node.
+	// Returns (true, nil) when the session was removed; (false, nil) when the
+	// remote responded 404 (session not found); (false, err) on transport errors.
+	ProxyRemoveSession(ctx context.Context, key string) (bool, error)
+	// ProxyInterruptSession forwards POST /api/sessions/interrupt to the remote node.
+	// Returns (true, nil) when interrupted; (false, nil) when the remote reports
+	// the session is not running; (false, err) on transport errors.
+	ProxyInterruptSession(ctx context.Context, key string) (bool, error)
 
 	Subscribe(c EventSink, key string, after int64)
 	Unsubscribe(c EventSink, key string)

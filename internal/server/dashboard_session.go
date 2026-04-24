@@ -340,11 +340,32 @@ func (h *SessionHandlers) handleEvents(w http.ResponseWriter, r *http.Request) {
 // DELETE /api/sessions
 func (h *SessionHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Key string `json:"key"`
+		Key  string `json:"key"`
+		Node string `json:"node"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
 		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+
+	// Remote node proxy
+	if req.Node != "" && req.Node != "local" {
+		nc, ok := h.nodeAccess.LookupNode(w, req.Node)
+		if !ok {
+			return
+		}
+		removed, err := nc.ProxyRemoveSession(r.Context(), req.Key)
+		if err != nil {
+			slog.Warn("remote remove session failed", "node", req.Node, "key", req.Key, "err", err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		if !removed {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok"})
 		return
 	}
 
@@ -418,11 +439,33 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 // POST /api/sessions/interrupt
 func (h *SessionHandlers) handleInterrupt(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Key string `json:"key"`
+		Key  string `json:"key"`
+		Node string `json:"node"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
 		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+
+	// Remote node proxy
+	if req.Node != "" && req.Node != "local" {
+		nc, ok := h.nodeAccess.LookupNode(w, req.Node)
+		if !ok {
+			return
+		}
+		interrupted, err := nc.ProxyInterruptSession(r.Context(), req.Key)
+		if err != nil {
+			slog.Warn("remote interrupt session failed", "node", req.Node, "key", req.Key, "err", err)
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		if interrupted {
+			slog.Info("remote session interrupted via HTTP", "node", req.Node, "key", req.Key)
+			writeJSON(w, map[string]string{"status": "ok"})
+		} else {
+			writeJSON(w, map[string]string{"status": "not_running"})
+		}
 		return
 	}
 

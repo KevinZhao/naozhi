@@ -237,6 +237,38 @@ func (c *ReverseConn) ProxySetFavorite(ctx context.Context, projectName string, 
 	return err
 }
 
+func (c *ReverseConn) ProxyRemoveSession(ctx context.Context, key string) (bool, error) {
+	raw, err := c.rpc(ctx, "remove_session", map[string]string{"key": key})
+	if err != nil {
+		return false, err
+	}
+	var resp struct {
+		Removed bool `json:"removed"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return false, fmt.Errorf("remove_session response: %w", err)
+		}
+	}
+	return resp.Removed, nil
+}
+
+func (c *ReverseConn) ProxyInterruptSession(ctx context.Context, key string) (bool, error) {
+	raw, err := c.rpc(ctx, "interrupt_session", map[string]string{"key": key})
+	if err != nil {
+		return false, err
+	}
+	var resp struct {
+		Interrupted bool `json:"interrupted"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return false, fmt.Errorf("interrupt_session response: %w", err)
+		}
+	}
+	return resp.Interrupted, nil
+}
+
 func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 	c.subMu.Lock()
 	alreadySub := len(c.subs[key]) > 0

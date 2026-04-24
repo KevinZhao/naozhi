@@ -59,10 +59,16 @@ func (s *stubConn) ProxyUpdateConfig(_ context.Context, _ string, _ json.RawMess
 	return nil
 }
 func (s *stubConn) ProxySetFavorite(_ context.Context, _ string, _ bool) error { return nil }
-func (s *stubConn) Subscribe(_ EventSink, _ string, _ int64)                   {}
-func (s *stubConn) Unsubscribe(_ EventSink, _ string)                          {}
-func (s *stubConn) RefreshSubscription(_ string)                               {}
-func (s *stubConn) RemoveClient(_ EventSink)                                   {}
+func (s *stubConn) ProxyRemoveSession(_ context.Context, _ string) (bool, error) {
+	return true, nil
+}
+func (s *stubConn) ProxyInterruptSession(_ context.Context, _ string) (bool, error) {
+	return true, nil
+}
+func (s *stubConn) Subscribe(_ EventSink, _ string, _ int64) {}
+func (s *stubConn) Unsubscribe(_ EventSink, _ string)        {}
+func (s *stubConn) RefreshSubscription(_ string)             {}
+func (s *stubConn) RemoveClient(_ EventSink)                 {}
 
 // ---- NewCacheManager ----
 

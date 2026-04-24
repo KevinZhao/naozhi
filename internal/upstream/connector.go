@@ -585,6 +585,32 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		}
 		return marshalResult(map[string]string{"status": "ok"})
 
+	case "remove_session":
+		var p struct {
+			Key string `json:"key"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("remove_session params: %w", err)
+		}
+		if p.Key == "" {
+			return nil, errors.New("key is required")
+		}
+		removed := c.router.Remove(p.Key)
+		return marshalResult(map[string]bool{"removed": removed})
+
+	case "interrupt_session":
+		var p struct {
+			Key string `json:"key"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("interrupt_session params: %w", err)
+		}
+		if p.Key == "" {
+			return nil, errors.New("key is required")
+		}
+		interrupted := c.router.InterruptSession(p.Key)
+		return marshalResult(map[string]bool{"interrupted": interrupted})
+
 	case "set_favorite":
 		var p struct {
 			ProjectName string `json:"project_name"`

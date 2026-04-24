@@ -776,7 +776,9 @@ async function dismissSession(key, node) {
     const headers = {'Content-Type': 'application/json'};
     const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
-    const r = await fetch('/api/sessions', {method: 'DELETE', headers, body: JSON.stringify({key: key})});
+    const body = {key: key};
+    if (node && node !== 'local') body.node = node;
+    const r = await fetch('/api/sessions', {method: 'DELETE', headers, body: JSON.stringify(body)});
     if (!r.ok && r.status !== 404) {
       const text = await r.text().catch(() => r.status);
       showToast('remove failed: ' + text);
@@ -1622,18 +1624,23 @@ function interruptSession() {
   if (!selectedKey) return;
   const sd = sessionsData[sid(selectedKey, selectedNode || 'local')];
   if (!sd || sd.state !== 'running') return;
+  const targetNode = selectedNode && selectedNode !== 'local' ? selectedNode : '';
   if (wsm.isConnected()) {
-    wsm.send({ type: 'interrupt', key: selectedKey, id: 'int' + Date.now() });
+    const req = { type: 'interrupt', key: selectedKey, id: 'int' + Date.now() };
+    if (targetNode) req.node = targetNode;
+    wsm.send(req);
     showToast('interrupt sent', 'warning');
   } else {
     // HTTP fallback when WebSocket is disconnected
     const headers = {'Content-Type': 'application/json'};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
+    const body = { key: selectedKey };
+    if (targetNode) body.node = targetNode;
     fetch('/api/sessions/interrupt', {
       method: 'POST',
       headers,
-      body: JSON.stringify({ key: selectedKey })
+      body: JSON.stringify(body)
     }).then(r => r.json()).then(d => {
       showToast(d.status === 'ok' ? 'interrupt sent' : 'session not running', 'warning');
     }).catch(() => showToast('interrupt failed', 'error'));

@@ -540,6 +540,124 @@ func TestReverseConn_ProxyUpdateConfig(t *testing.T) {
 	}
 }
 
+// ---- ProxyRemoveSession ----
+
+func TestReverseConn_ProxyRemoveSession(t *testing.T) {
+	rc, wsConn, cleanup := setupReverseConnPair(t)
+	defer cleanup()
+
+	var gotMethod string
+	go func() {
+		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var req ReverseMsg
+		if err := wsConn.ReadJSON(&req); err != nil {
+			return
+		}
+		gotMethod = req.Method
+		result, _ := json.Marshal(map[string]bool{"removed": true})
+		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	removed, err := rc.ProxyRemoveSession(ctx, "feishu:group:abc")
+	if err != nil {
+		t.Fatalf("ProxyRemoveSession: %v", err)
+	}
+	if !removed {
+		t.Error("expected removed=true")
+	}
+	if gotMethod != "remove_session" {
+		t.Errorf("expected method 'remove_session', got %q", gotMethod)
+	}
+}
+
+func TestReverseConn_ProxyRemoveSession_notFound(t *testing.T) {
+	rc, wsConn, cleanup := setupReverseConnPair(t)
+	defer cleanup()
+
+	go func() {
+		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var req ReverseMsg
+		if err := wsConn.ReadJSON(&req); err != nil {
+			return
+		}
+		result, _ := json.Marshal(map[string]bool{"removed": false})
+		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	removed, err := rc.ProxyRemoveSession(ctx, "k")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if removed {
+		t.Error("expected removed=false")
+	}
+}
+
+// ---- ProxyInterruptSession ----
+
+func TestReverseConn_ProxyInterruptSession(t *testing.T) {
+	rc, wsConn, cleanup := setupReverseConnPair(t)
+	defer cleanup()
+
+	var gotMethod string
+	go func() {
+		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var req ReverseMsg
+		if err := wsConn.ReadJSON(&req); err != nil {
+			return
+		}
+		gotMethod = req.Method
+		result, _ := json.Marshal(map[string]bool{"interrupted": true})
+		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	interrupted, err := rc.ProxyInterruptSession(ctx, "k")
+	if err != nil {
+		t.Fatalf("ProxyInterruptSession: %v", err)
+	}
+	if !interrupted {
+		t.Error("expected interrupted=true")
+	}
+	if gotMethod != "interrupt_session" {
+		t.Errorf("expected method 'interrupt_session', got %q", gotMethod)
+	}
+}
+
+func TestReverseConn_ProxyInterruptSession_notRunning(t *testing.T) {
+	rc, wsConn, cleanup := setupReverseConnPair(t)
+	defer cleanup()
+
+	go func() {
+		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var req ReverseMsg
+		if err := wsConn.ReadJSON(&req); err != nil {
+			return
+		}
+		result, _ := json.Marshal(map[string]bool{"interrupted": false})
+		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	interrupted, err := rc.ProxyInterruptSession(ctx, "k")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if interrupted {
+		t.Error("expected interrupted=false")
+	}
+}
+
 // ---- FetchDiscoveredPreview ----
 
 func TestReverseConn_FetchDiscoveredPreview(t *testing.T) {
