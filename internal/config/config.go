@@ -67,6 +67,7 @@ type UpstreamConfig struct {
 	NodeID      string `yaml:"node_id"`
 	Token       string `yaml:"token"`
 	DisplayName string `yaml:"display_name"`
+	Insecure    bool   `yaml:"insecure"`
 }
 
 type AgentConfig struct {
@@ -410,8 +411,8 @@ func validateConfig(cfg *Config) error {
 		if !strings.HasPrefix(cfg.Upstream.URL, "wss://") && !strings.HasPrefix(cfg.Upstream.URL, "ws://") {
 			return fmt.Errorf("upstream.url must use ws:// or wss:// scheme")
 		}
-		if strings.HasPrefix(cfg.Upstream.URL, "ws://") {
-			return fmt.Errorf("upstream.url must use wss:// — refusing to send bearer token over plaintext ws://")
+		if strings.HasPrefix(cfg.Upstream.URL, "ws://") && !cfg.Upstream.Insecure {
+			return fmt.Errorf("upstream.url must use wss:// — refusing to send bearer token over plaintext ws:// (set insecure: true to allow)")
 		}
 		if cfg.Upstream.NodeID == "" {
 			return fmt.Errorf("upstream.node_id is required")
