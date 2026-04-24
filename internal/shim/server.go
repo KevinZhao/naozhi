@@ -139,6 +139,7 @@ func Run(cfg Config) error {
 		tokenRaw:  tokenRaw,
 		stateFile: cfg.StateFile,
 		state:     state,
+		startedAt: time.Now(),
 		done:      make(chan struct{}),
 	}
 
@@ -308,12 +309,13 @@ func Run(cfg Config) error {
 //
 // Lock ordering: s.mu → buffer.mu (never acquire s.mu while holding buffer.mu).
 type shimServer struct {
-	cli       *cliProc
-	listener  net.Listener
-	buffer    *RingBuffer
-	tokenRaw  []byte
-	stateFile string
-	watchdog  *Watchdog
+	cli        *cliProc
+	listener   net.Listener
+	buffer     *RingBuffer
+	tokenRaw   []byte
+	stateFile  string
+	watchdog   *Watchdog
+	startedAt  time.Time
 
 	mu         sync.Mutex
 	state      State
@@ -581,6 +583,18 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 		writeMsg(conn, ServerMsg{Type: "cli_exited", Code: intPtr(s.cli.exitCode)})
 	}
 
+	// Reject new client if CLI is alive and another client is already connected.
+	// This prevents an unexpected reconnect from kicking out a client that is
+	// actively communicating with the CLI (race during session creation).
+	s.mu.Lock()
+	hasActiveClient := s.clientConn != nil
+	s.mu.Unlock()
+	if hasActiveClient && cliAlive {
+		slog.Warn("rejecting new client: active client exists while CLI alive")
+		writeMsg(conn, ServerMsg{Type: "error", Msg: "another client is connected"})
+		return
+	}
+
 	// NOW become the active client (after replay complete, no duplication window)
 	writeCh, clientDone := s.setClient(conn)
 
@@ -723,6 +737,11 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 					s.enqueueWrite(append(data, '\n'))
 				}
 			case "shutdown":
+				if s.cli.alive() && time.Since(s.startedAt) < 60*time.Second {
+					slog.Warn("ignoring shutdown: CLI alive and shim recently started",
+						"age", time.Since(s.startedAt).Round(time.Millisecond))
+					return
+				}
 				s.cli.closeStdin()
 				s.cli.waitOrKill(5 * time.Second)
 				s.initiateShutdown()
