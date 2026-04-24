@@ -5575,6 +5575,11 @@ function openCronPanel() {
   if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
   document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
   mobileEnterChat();
+  // Paint immediately from the cache primed at page load (line ~5982) so the
+  // click feels instant. If the cache is empty we still render the panel —
+  // renderCronPanel handles the zero-job "empty state" branch. A background
+  // refresh reconciles with the server and re-renders if anything changed.
+  renderCronPanel();
   fetchCronJobs().then(() => renderCronPanel());
 }
 
