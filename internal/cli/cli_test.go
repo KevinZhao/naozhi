@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 )
@@ -125,6 +126,72 @@ func TestClaudeProtocol_HandleEvent(t *testing.T) {
 	p := &ClaudeProtocol{}
 	if p.HandleEvent(nil, Event{Type: "result"}) {
 		t.Error("Claude protocol should never handle events internally")
+	}
+}
+
+func TestClaudeProtocol_WriteInterrupt(t *testing.T) {
+	p := &ClaudeProtocol{}
+	var buf bytes.Buffer
+	if err := p.WriteInterrupt(&buf, "req-42"); err != nil {
+		t.Fatal(err)
+	}
+	// Must be a single NDJSON line (trailing '\n' only, no embedded newlines
+	// in the payload — shim enforces this framing).
+	out := buf.Bytes()
+	if len(out) == 0 || out[len(out)-1] != '\n' {
+		t.Fatalf("output missing trailing newline: %q", out)
+	}
+	if bytes.Count(out, []byte{'\n'}) != 1 {
+		t.Fatalf("output must be a single NDJSON line, got %q", out)
+	}
+	var parsed struct {
+		Type      string `json:"type"`
+		RequestID string `json:"request_id"`
+		Request   struct {
+			Subtype string `json:"subtype"`
+		} `json:"request"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(out), &parsed); err != nil {
+		t.Fatalf("unmarshal: %v (raw=%q)", err, out)
+	}
+	if parsed.Type != "control_request" {
+		t.Errorf("Type = %q, want control_request", parsed.Type)
+	}
+	if parsed.RequestID != "req-42" {
+		t.Errorf("RequestID = %q, want req-42", parsed.RequestID)
+	}
+	if parsed.Request.Subtype != "interrupt" {
+		t.Errorf("Request.Subtype = %q, want interrupt", parsed.Request.Subtype)
+	}
+}
+
+func TestClaudeProtocol_ReadEvent_SkipsControlResponse(t *testing.T) {
+	p := &ClaudeProtocol{}
+	line := `{"type":"control_response","response":{"subtype":"success","request_id":"req-1"}}`
+	ev, done, err := p.ReadEvent(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Error("control_response must not complete a turn")
+	}
+	if ev.Type != "" {
+		t.Errorf("control_response should be skipped, got Type=%q", ev.Type)
+	}
+}
+
+func TestACPProtocol_WriteInterrupt_Unsupported(t *testing.T) {
+	p := &ACPProtocol{}
+	var buf bytes.Buffer
+	err := p.WriteInterrupt(&buf, "req-1")
+	if err == nil {
+		t.Fatal("ACP WriteInterrupt must return an error")
+	}
+	if !errors.Is(err, ErrInterruptUnsupported) {
+		t.Errorf("err = %v, want ErrInterruptUnsupported", err)
+	}
+	if buf.Len() != 0 {
+		t.Errorf("ACP WriteInterrupt must not write anything, got %q", buf.Bytes())
 	}
 }
 

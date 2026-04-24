@@ -205,6 +205,7 @@ type ServerOptions struct {
 	TotalTimeout      time.Duration
 	QueueMaxDepth     int
 	QueueCollectDelay time.Duration
+	QueueMode         string // "collect" (default) or "interrupt"; see dispatch.ParseQueueMode
 	DashboardToken    string // optional bearer token for dashboard API
 	TrustedProxy      bool   // trust X-Forwarded-For for client IP
 	ProjectManager    *project.Manager
@@ -245,13 +246,17 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 	cookieSecret := loadOrCreateCookieSecret(opts.StateDir)
 
 	s := &Server{
-		addr:            addr,
-		mux:             http.NewServeMux(),
-		platforms:       platforms,
-		router:          router,
-		dedup:           platform.NewDedup(defaultDedupCapacity),
-		sessionGuard:    session.NewGuard(),
-		msgQueue:        dispatch.NewMessageQueue(opts.QueueMaxDepth, opts.QueueCollectDelay),
+		addr:         addr,
+		mux:          http.NewServeMux(),
+		platforms:    platforms,
+		router:       router,
+		dedup:        platform.NewDedup(defaultDedupCapacity),
+		sessionGuard: session.NewGuard(),
+		msgQueue: dispatch.NewMessageQueueWithMode(
+			opts.QueueMaxDepth,
+			opts.QueueCollectDelay,
+			dispatch.ParseQueueMode(opts.QueueMode),
+		),
 		startedAt:       time.Now(),
 		agents:          agents,
 		agentCommands:   agentCommands,

@@ -1,8 +1,14 @@
 package cli
 
 import (
+	"errors"
 	"io"
 )
+
+// ErrInterruptUnsupported is returned by Protocol.WriteInterrupt for protocols
+// that do not support mid-turn interrupt messages over stdin (e.g. ACP).
+// Callers should fall back to SIGINT-based Interrupt() or to Collect mode.
+var ErrInterruptUnsupported = errors.New("protocol does not support stdin interrupt")
 
 // Protocol abstracts the communication protocol between naozhi and an AI CLI agent.
 // Implementations handle protocol-specific message formats, initialization handshakes,
@@ -26,6 +32,15 @@ type Protocol interface {
 
 	// WriteMessage writes a user message (with optional images) to the agent's stdin.
 	WriteMessage(w io.Writer, text string, images []ImageData) error
+
+	// WriteInterrupt writes an in-band interrupt request to the agent's stdin.
+	// For stream-json, this emits the `control_request` message which the
+	// Claude CLI honours by terminating the active turn (including killing
+	// any in-flight tool invocation) and emitting a normal `result` event.
+	// requestID is an opaque identifier echoed back in the control_response.
+	// Protocols without stdin-level interrupt (e.g. ACP) return
+	// ErrInterruptUnsupported.
+	WriteInterrupt(w io.Writer, requestID string) error
 
 	// ReadEvent parses a single NDJSON line from stdout into a unified Event.
 	// Returns the event, whether this event completes the current turn, and any error.

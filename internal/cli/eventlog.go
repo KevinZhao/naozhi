@@ -121,7 +121,7 @@ func (l *EventLog) Append(e EventEntry) {
 	switch e.Type {
 	case "user":
 		l.lastPromptSummary.Store(e.Summary)
-	case "tool_use", "thinking", "agent", "task_start", "task_progress":
+	case "tool_use", "thinking", "agent", "task_start", "task_progress", "todo":
 		l.lastActivitySummary.Store(e.Summary)
 	}
 
@@ -357,11 +357,24 @@ func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []EventEntry {
 	// Walk backward from newest, skip entries whose Time >= beforeMS, collect
 	// up to `limit` matches into a reverse buffer. Single pass keeps the code
 	// symmetric with EntriesSince.
+	//
+	// Fast path: once we've seen an entry with Time < beforeMS, all earlier
+	// entries in the ring also satisfy Time < beforeMS (entries are stored
+	// in insertion/chronological order and Time is monotonic-ish from Append).
+	// Switch from "skip then match" to "collect greedily" mode to avoid
+	// re-evaluating the Time >= beforeMS condition for the remaining tail.
+	// Before this, EntriesBefore on a 500-entry ring with beforeMS pointing
+	// to the oldest page ran 500 iterations comparing timestamps; now it
+	// runs up to ~`skip`+`limit` iterations.
 	var rev []EventEntry
+	crossed := beforeMS <= 0 // when beforeMS==0 treat as "no upper bound"
 	for i := l.count - 1; i >= 0 && len(rev) < limit; i-- {
 		idx := (l.head - l.count + i + l.maxSize) % l.maxSize
-		if beforeMS > 0 && l.entries[idx].Time >= beforeMS {
-			continue
+		if !crossed {
+			if l.entries[idx].Time >= beforeMS {
+				continue
+			}
+			crossed = true
 		}
 		if rev == nil {
 			initialCap := limit

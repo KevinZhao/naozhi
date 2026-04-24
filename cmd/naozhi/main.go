@@ -647,6 +647,7 @@ func main() {
 		TotalTimeout:      totalTimeout,
 		QueueMaxDepth:     cfg.QueueMaxDepth(),
 		QueueCollectDelay: cfg.ParseCollectDelay(),
+		QueueMode:         cfg.QueueMode(),
 		DashboardToken:    cfg.Server.DashboardToken,
 		TrustedProxy:      cfg.Server.TrustedProxy,
 		ProjectManager:    projectMgr,

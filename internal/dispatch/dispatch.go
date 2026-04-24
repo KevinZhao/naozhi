@@ -213,8 +213,26 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 				MessageID: msg.MessageID,
 				EnqueueAt: time.Now(),
 			}
-			isOwner, enqueued, gen := d.queue.Enqueue(key, qm)
+			isOwner, enqueued, shouldInterrupt, gen := d.queue.Enqueue(key, qm)
 			if !isOwner {
+				// Interrupt mode: the first queued follow-up for the active
+				// turn fires a control_request to the CLI so the in-flight
+				// turn aborts within ~300ms. The ongoing owner loop's Send()
+				// will observe the CLI's natural result event, return, then
+				// drain this queued message as the next prompt. Best-effort:
+				// if the session is unknown or the protocol doesn't support
+				// in-band interrupt we silently fall back to Collect
+				// semantics (the queued message is still processed, just
+				// after the turn completes naturally).
+				if shouldInterrupt {
+					if ok := d.router.InterruptSessionViaControl(key); !ok {
+						log.Debug("interrupt mode: session not found or protocol unsupported, falling back to collect",
+							"session_key", key)
+					} else {
+						log.Info("interrupt mode: aborted active turn to process follow-up",
+							"session_key", key)
+					}
+				}
 				if enqueued {
 					// Prefer an in-place reaction on the user's own message
 					// (non-intrusive) over a new bot chat bubble. Fall back to

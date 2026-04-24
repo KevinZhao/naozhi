@@ -23,11 +23,12 @@ func NewTestProcess() *TestProcess {
 	}
 }
 
-func (p *TestProcess) Alive() bool     { return p.AliveVal }
-func (p *TestProcess) IsRunning() bool { return p.StateVal == cli.StateRunning }
-func (p *TestProcess) Close()          { p.AliveVal = false; p.StateVal = cli.StateDead }
-func (p *TestProcess) Kill()           { p.AliveVal = false; p.StateVal = cli.StateDead }
-func (p *TestProcess) Interrupt()      {}
+func (p *TestProcess) Alive() bool                { return p.AliveVal }
+func (p *TestProcess) IsRunning() bool            { return p.StateVal == cli.StateRunning }
+func (p *TestProcess) Close()                     { p.AliveVal = false; p.StateVal = cli.StateDead }
+func (p *TestProcess) Kill()                      { p.AliveVal = false; p.StateVal = cli.StateDead }
+func (p *TestProcess) Interrupt()                 {}
+func (p *TestProcess) InterruptViaControl() error { return nil }
 
 func (p *TestProcess) Send(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error) {
 	if p.SendFunc != nil {

@@ -127,6 +127,14 @@ type QueueConfig struct {
 	// before draining queued messages. Allows capturing fast follow-up
 	// messages into the same batch. Default: "500ms".
 	CollectDelay string `yaml:"collect_delay"`
+	// Mode selects how new messages arriving during an active turn are
+	// handled. "collect" (default, backward-compatible) waits for the turn
+	// to finish naturally. "interrupt" sends an in-band control_request to
+	// the CLI so the active turn aborts promptly; the queued follow-ups are
+	// then coalesced and sent as the next prompt on the same live process.
+	// Only "stream-json" protocol sessions honour "interrupt"; other
+	// protocols (ACP) silently fall back to "collect".
+	Mode string `yaml:"mode"`
 }
 
 type ShimConfig struct {
@@ -276,6 +284,9 @@ func applyDefaults(cfg *Config) {
 	}
 	if cfg.Session.Queue.CollectDelay == "" {
 		cfg.Session.Queue.CollectDelay = "500ms"
+	}
+	if cfg.Session.Queue.Mode == "" {
+		cfg.Session.Queue.Mode = "collect"
 	}
 	if cfg.Session.CWD != "" {
 		if cfg.Session.Workspace != "" && cfg.Session.Workspace != cfg.Session.CWD {
@@ -620,6 +631,14 @@ func (c *Config) QueueMaxDepth() int {
 		return d
 	}
 	return 0
+}
+
+// QueueMode returns the raw queue mode string from config ("collect" or
+// "interrupt"). Callers normalise via dispatch.ParseQueueMode so empty/unknown
+// values fall back to the safe default (collect). Keeping this as a string at
+// the config boundary avoids an import cycle (config → dispatch).
+func (c *Config) QueueMode() string {
+	return c.Session.Queue.Mode
 }
 
 var envVarRe = regexp.MustCompile(`\$\{([^}]+)\}`)

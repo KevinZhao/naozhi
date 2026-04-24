@@ -131,6 +131,13 @@ func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData)
 	return err
 }
 
+// WriteInterrupt is not supported for ACP. ACP defines session/cancel as an
+// RPC method; wiring it in would require turn-scoped request IDs that the
+// current wrapper doesn't track. Callers must fall back to Interrupt() (SIGINT).
+func (p *ACPProtocol) WriteInterrupt(_ io.Writer, _ string) error {
+	return ErrInterruptUnsupported
+}
+
 func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 	var msg RPCMessage
 	if err := json.Unmarshal([]byte(line), &msg); err != nil {

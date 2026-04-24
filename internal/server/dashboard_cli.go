@@ -25,11 +25,15 @@ type CLIBackendsHandler struct {
 func NewCLIBackendsHandler(router *session.Router) *CLIBackendsHandler {
 	detected := cli.DetectBackends()
 	cli.SortBackendsAvailableFirst(detected)
-	// Redact Path: revealing installed-binary paths to any authenticated
-	// dashboard user leaks host filesystem layout and aids post-XSS
-	// privilege escalation. The dashboard UI only needs ID/availability.
+	// Redact Path and Version: revealing installed-binary paths to any
+	// authenticated dashboard user leaks host filesystem layout, and CLI
+	// versions of backends NOT enabled in naozhi config fingerprint
+	// host software for secondary exploitation (known CVE targeting).
+	// The dashboard UI for `detected` only needs id+available to render
+	// "installed but unconfigured" — version adds no user-facing value.
 	for i := range detected {
 		detected[i].Path = ""
+		detected[i].Version = ""
 	}
 	return &CLIBackendsHandler{router: router, detected: detected}
 }

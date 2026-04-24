@@ -205,8 +205,18 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 		Images:    p.Images,
 		EnqueueAt: time.Now(),
 	}
-	isOwner, enqueued, gen := h.queue.Enqueue(key, qm)
+	isOwner, enqueued, shouldInterrupt, gen := h.queue.Enqueue(key, qm)
 	if !isOwner {
+		if shouldInterrupt {
+			// Interrupt mode: abort the in-flight turn so the queued
+			// follow-up can be processed promptly. See dispatch.go for the
+			// full rationale; this mirrors the IM path.
+			if ok := h.router.InterruptSessionViaControl(key); !ok {
+				slog.Debug("send: interrupt unavailable, falling back to collect", "key", key)
+			} else {
+				slog.Debug("send: aborted active turn to process follow-up", "key", key)
+			}
+		}
 		if !enqueued {
 			// Queue disabled (MaxDepth<=0) and session is busy — the
 			// message is dropped. Surface this so the client knows to retry

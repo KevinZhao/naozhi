@@ -2,6 +2,7 @@ package cli
 
 import (
 	"os"
+	"os/exec"
 	"sort"
 )
 
@@ -38,10 +39,21 @@ func DetectBackends() []BackendInfo {
 		// Short-circuit via os.Stat for obviously-absent binaries so an
 		// operator with only claude installed doesn't wait for the kiro
 		// probe to time out at every naozhi restart.
+		//
+		// os.Stat does not search $PATH — when detectCLI returns a bare
+		// binary name (installed system-wide but not at a well-known
+		// absolute path), Stat fails with ENOENT and the backend is
+		// falsely marked unavailable. Fall back to exec.LookPath, which
+		// walks $PATH, to distinguish "not installed anywhere" from
+		// "installed via $PATH only".
 		if _, statErr := os.Stat(info.Path); statErr != nil {
-			info.Available = false
-			out = append(out, info)
-			continue
+			resolved, lookErr := exec.LookPath(info.Path)
+			if lookErr != nil {
+				info.Available = false
+				out = append(out, info)
+				continue
+			}
+			info.Path = resolved
 		}
 		info.Version = detectVersion(info.Path)
 		info.Available = info.Version != ""

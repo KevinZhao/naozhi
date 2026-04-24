@@ -159,6 +159,7 @@ func (f *fakeProcess) LastActivitySummary() string      { return "" }
 func (f *fakeProcess) ProtocolName() string             { return "test" }
 func (f *fakeProcess) GetSessionID() string             { return "" }
 func (f *fakeProcess) Interrupt()                       {}
+func (f *fakeProcess) InterruptViaControl() error       { return nil }
 func (f *fakeProcess) PID() int                         { return 0 }
 func (f *fakeProcess) InjectHistory(_ []cli.EventEntry) {}
 func (f *fakeProcess) TurnAgents() []cli.SubagentInfo   { return nil }

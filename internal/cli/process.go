@@ -828,6 +828,56 @@ func (p *Process) Interrupt() {
 	}
 }
 
+// interruptRequestIDSeq generates monotonic request ids for control_request
+// interrupt messages. The CLI only uses request_id to echo back in the
+// corresponding control_response; it does not need to be globally unique,
+// but uniqueness per-process keeps dashboard traces readable.
+var interruptRequestIDSeq atomic.Int64
+
+// InterruptViaControl requests the CLI to abort the active turn by writing an
+// in-band control_request to stdin (stream-json protocol only). Verified
+// behaviour on CLI 2.1.119: within ~300ms the CLI kills any in-flight tool
+// invocation (bash processes receive SIGKILL), emits a `result` event with
+// stop_reason=tool_use (or end_turn for pure-generation turns), and the
+// session remains usable for the next user message on the same process.
+//
+// Unlike Interrupt(), this path:
+//   - Does not send SIGINT to the CLI (no signal handler dependency).
+//   - Does not cross the shim's interrupt command (uses plain `write`).
+//   - Is officially supported by the Claude CLI stream-json protocol.
+//
+// Returns ErrInterruptUnsupported when the protocol (e.g. ACP) has no
+// stdin-level interrupt primitive; callers should fall back to Interrupt().
+func (p *Process) InterruptViaControl() error {
+	if !p.Alive() {
+		return nil
+	}
+	// Same atomic coverage as Interrupt(): flag drainStaleEvents so the
+	// interrupted turn's trailing result is absorbed before the next Send().
+	p.mu.Lock()
+	state := p.State
+	if state == StateRunning {
+		p.interrupted.Store(true)
+		p.interruptedRun.Store(true)
+	}
+	p.mu.Unlock()
+	// No turn in flight → nothing to interrupt. Don't write the
+	// control_request, since the CLI would buffer it until the next turn
+	// begins and then produce a spurious control_response for a turn the
+	// caller never intended to cancel.
+	if state != StateRunning {
+		return nil
+	}
+	reqID := fmt.Sprintf("naozhi-int-%d", interruptRequestIDSeq.Add(1))
+	if err := p.protocol.WriteInterrupt(p.shimStdinWriter(), reqID); err != nil {
+		// Best-effort: the interrupted/interruptedRun flags are already set.
+		// If the CLI never produces the interrupt result, drainStaleEvents
+		// falls back to its 500ms settle timeout on the next Send().
+		return fmt.Errorf("write interrupt control_request: %w", err)
+	}
+	return nil
+}
+
 // drainStaleEvents clears residual events from previous turns.
 // When the previous turn was interrupted (SIGINT), waits briefly for the
 // interrupted result event so it doesn't pollute the next turn.

@@ -31,6 +31,10 @@ type processIface interface {
 	Close()
 	Kill()
 	Interrupt()
+	// InterruptViaControl asks the CLI to abort the active turn via an
+	// in-band stream-json control_request (no SIGINT, no process kill).
+	// Returns cli.ErrInterruptUnsupported for protocols without this primitive.
+	InterruptViaControl() error
 	Send(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
 	// Dashboard introspection
 	GetSessionID() string
@@ -302,6 +306,36 @@ func (s *ManagedSession) Interrupt() bool {
 
 	if cancel := s.sendCancel.Load(); cancel != nil {
 		(*cancel)()
+	}
+	return true
+}
+
+// InterruptViaControl asks the CLI to abort the active turn by writing an
+// in-band control_request to stdin. Unlike Interrupt, this does NOT cancel
+// the Send() context — the in-flight Send will see the CLI's interrupted
+// result event arrive naturally and return normally, so the owner loop can
+// proceed to drain and send the coalesced follow-up messages on the same
+// live process.
+//
+// Returns false if the session has no live process; callers may fall back
+// to Interrupt() (SIGINT) if the protocol does not support control_request
+// (cli.ErrInterruptUnsupported is returned from proc.InterruptViaControl).
+func (s *ManagedSession) InterruptViaControl() bool {
+	proc := s.loadProcess()
+	if proc == nil || !proc.Alive() {
+		return false
+	}
+	if err := proc.InterruptViaControl(); err != nil {
+		if errors.Is(err, cli.ErrInterruptUnsupported) {
+			// Caller decides whether to fall back; do not escalate to SIGINT
+			// silently because that would couple two different semantics.
+			return false
+		}
+		// Transport error (socket gone, etc) — best effort; report failure
+		// so the caller can retry or log. The drainStaleEvents hooks were
+		// already set inside InterruptViaControl under the atomic-covered
+		// path, so a subsequent Send() will still attempt the settle wait.
+		return false
 	}
 	return true
 }

@@ -426,14 +426,21 @@ func (s *shimServer) readStdout() {
 	for s.cli.stdout.Scan() {
 		line := s.cli.stdout.Bytes() // valid until next Scan()
 
-		seq := s.buffer.Push(line) // Push makes its own copy
+		// `line` is reused by bufio on the next Scan(), so we must convert to
+		// string (immutable, GC-owned copy) before doing anything that could
+		// outlive this iteration. Doing it first also means ServerMsg and
+		// RingBuffer share the same backing copy via string→[]byte reuse
+		// isn't safe, but we at least avoid running string(line) twice
+		// (once implicitly inside Push's append-copy and once here).
+		lineStr := string(line)
+		seq := s.buffer.Push(line) // Push makes its own copy for replay storage
 		s.watchdog.Reset()
 
 		// Extract session_id from init/result events
 		s.tryExtractSessionID(line)
 
 		// Build message and enqueue (non-blocking, no lock during Flush)
-		msg := ServerMsg{Type: "stdout", Seq: seq, Line: string(line)}
+		msg := ServerMsg{Type: "stdout", Seq: seq, Line: lineStr}
 		if data, err := msg.MarshalLine(); err == nil {
 			s.enqueueWrite(append(data, '\n'))
 		}

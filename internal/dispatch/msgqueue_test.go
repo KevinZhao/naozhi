@@ -8,7 +8,7 @@ import (
 
 func TestEnqueue_FirstMessageBecomesOwner(t *testing.T) {
 	q := NewMessageQueue(10, 500*time.Millisecond)
-	isOwner, enqueued, gen := q.Enqueue("k1", QueuedMsg{Text: "hello"})
+	isOwner, enqueued, _, gen := q.Enqueue("k1", QueuedMsg{Text: "hello"})
 	if !isOwner {
 		t.Fatal("first message should become owner")
 	}
@@ -22,7 +22,7 @@ func TestEnqueue_SubsequentMessagesEnqueued(t *testing.T) {
 	q := NewMessageQueue(10, 500*time.Millisecond)
 	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
 
-	isOwner, enqueued, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
+	isOwner, enqueued, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
 	if isOwner {
 		t.Fatal("second message should not become owner")
 	}
@@ -39,7 +39,7 @@ func TestEnqueue_MaxDepthZero_Drops(t *testing.T) {
 	q := NewMessageQueue(0, 0)
 	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
 
-	isOwner, enqueued, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
+	isOwner, enqueued, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
 	if isOwner || enqueued {
 		t.Fatalf("maxDepth=0 should drop: isOwner=%v, enqueued=%v", isOwner, enqueued)
 	}
@@ -47,7 +47,7 @@ func TestEnqueue_MaxDepthZero_Drops(t *testing.T) {
 
 func TestEnqueue_EvictsOldest(t *testing.T) {
 	q := NewMessageQueue(2, 0)
-	_, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
+	_, _, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
 
 	q.Enqueue("k1", QueuedMsg{Text: "B"})
 	q.Enqueue("k1", QueuedMsg{Text: "C"})
@@ -64,7 +64,7 @@ func TestEnqueue_EvictsOldest(t *testing.T) {
 
 func TestDoneOrDrain_EmptyReleasesOwnership(t *testing.T) {
 	q := NewMessageQueue(10, 0)
-	_, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
+	_, _, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
 
 	msgs := q.DoneOrDrain("k1", gen)
 	if msgs != nil {
@@ -72,7 +72,7 @@ func TestDoneOrDrain_EmptyReleasesOwnership(t *testing.T) {
 	}
 
 	// Ownership released — next enqueue should become owner.
-	isOwner, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
+	isOwner, _, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
 	if !isOwner {
 		t.Fatal("should become owner after release")
 	}
@@ -80,7 +80,7 @@ func TestDoneOrDrain_EmptyReleasesOwnership(t *testing.T) {
 
 func TestDoneOrDrain_NonEmptyKeepsOwnership(t *testing.T) {
 	q := NewMessageQueue(10, 0)
-	_, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
+	_, _, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
 	q.Enqueue("k1", QueuedMsg{Text: "B"})
 	q.Enqueue("k1", QueuedMsg{Text: "C"})
 
@@ -90,7 +90,7 @@ func TestDoneOrDrain_NonEmptyKeepsOwnership(t *testing.T) {
 	}
 
 	// Ownership still held — new enqueue should not become owner.
-	isOwner, enqueued, _ := q.Enqueue("k1", QueuedMsg{Text: "D"})
+	isOwner, enqueued, _, _ := q.Enqueue("k1", QueuedMsg{Text: "D"})
 	if isOwner {
 		t.Fatal("should not become owner while still held")
 	}
@@ -111,7 +111,7 @@ func TestDiscard_ClearsQueueAndReleasesOwnership(t *testing.T) {
 	}
 
 	// Next enqueue becomes owner.
-	isOwner, _, _ := q.Enqueue("k1", QueuedMsg{Text: "C"})
+	isOwner, _, _, _ := q.Enqueue("k1", QueuedMsg{Text: "C"})
 	if !isOwner {
 		t.Fatal("should become owner after discard")
 	}
@@ -119,14 +119,14 @@ func TestDiscard_ClearsQueueAndReleasesOwnership(t *testing.T) {
 
 func TestDiscard_InvalidatesStaleOwner(t *testing.T) {
 	q := NewMessageQueue(10, 0)
-	_, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A"}) // gen=0
+	_, _, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A"}) // gen=0
 	q.Enqueue("k1", QueuedMsg{Text: "B"})
 
 	// Simulate /new: discard bumps generation.
 	q.Discard("k1")
 
 	// New owner starts with new generation.
-	_, _, gen2 := q.Enqueue("k1", QueuedMsg{Text: "C"})
+	_, _, _, gen2 := q.Enqueue("k1", QueuedMsg{Text: "C"})
 	q.Enqueue("k1", QueuedMsg{Text: "D"})
 
 	// Stale owner tries DoneOrDrain with old gen — should get nil.
@@ -158,12 +158,12 @@ func TestIsolation_DifferentKeys(t *testing.T) {
 	q.Enqueue("k1", QueuedMsg{Text: "A"}) // k1 owner
 	q.Enqueue("k2", QueuedMsg{Text: "B"}) // k2 owner — independent
 
-	isOwner, _, _ := q.Enqueue("k1", QueuedMsg{Text: "C"})
+	isOwner, _, _, _ := q.Enqueue("k1", QueuedMsg{Text: "C"})
 	if isOwner {
 		t.Fatal("k1 is busy, should not become owner")
 	}
 
-	isOwner, _, _ = q.Enqueue("k2", QueuedMsg{Text: "D"})
+	isOwner, _, _, _ = q.Enqueue("k2", QueuedMsg{Text: "D"})
 	if isOwner {
 		t.Fatal("k2 is busy, should not become owner")
 	}
@@ -188,7 +188,7 @@ func TestSessionGuardCompat_TryAcquireRelease(t *testing.T) {
 
 func TestLastNotify_CleanedOnDrain(t *testing.T) {
 	q := NewMessageQueue(10, 0)
-	_, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A"})
+	_, _, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A"})
 
 	// Trigger a notify entry.
 	q.ShouldNotify("k1")
@@ -211,6 +211,86 @@ func TestLastNotify_CleanedOnDiscard(t *testing.T) {
 
 	if !q.ShouldNotify("k1") {
 		t.Fatal("lastNotify should be cleaned after Discard")
+	}
+}
+
+func TestParseQueueMode(t *testing.T) {
+	cases := []struct {
+		in   string
+		want QueueMode
+	}{
+		{"", ModeCollect},
+		{"collect", ModeCollect},
+		{"COLLECT", ModeCollect},
+		{"interrupt", ModeInterrupt},
+		{"  Interrupt ", ModeInterrupt},
+		{"unknown", ModeCollect},
+	}
+	for _, c := range cases {
+		if got := ParseQueueMode(c.in); got != c.want {
+			t.Errorf("ParseQueueMode(%q) = %v, want %v", c.in, got, c.want)
+		}
+	}
+}
+
+func TestEnqueue_CollectMode_NoInterruptSignal(t *testing.T) {
+	q := NewMessageQueueWithMode(10, 0, ModeCollect)
+	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
+
+	_, enqueued, shouldInterrupt, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
+	if !enqueued {
+		t.Fatal("B should be enqueued")
+	}
+	if shouldInterrupt {
+		t.Fatal("Collect mode must never set shouldInterrupt")
+	}
+}
+
+func TestEnqueue_InterruptMode_FirstFollowupSetsSignal(t *testing.T) {
+	q := NewMessageQueueWithMode(10, 0, ModeInterrupt)
+	_, _, shouldInterruptOwner, gen := q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
+	if shouldInterruptOwner {
+		t.Fatal("owner path must not request interrupt (nothing to interrupt yet)")
+	}
+
+	_, enqueued, shouldInterrupt, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
+	if !enqueued {
+		t.Fatal("B should be enqueued")
+	}
+	if !shouldInterrupt {
+		t.Fatal("first follow-up in Interrupt mode must set shouldInterrupt")
+	}
+
+	// Second queued message on the same running turn must NOT re-signal.
+	_, _, shouldInterrupt2, _ := q.Enqueue("k1", QueuedMsg{Text: "C"})
+	if shouldInterrupt2 {
+		t.Fatal("second follow-up must not re-trigger interrupt")
+	}
+
+	// After owner drains the queued batch, the turn's interrupt state must
+	// reset so the NEXT turn's first follow-up can interrupt again.
+	drained := q.DoneOrDrain("k1", gen)
+	if len(drained) != 2 {
+		t.Fatalf("drained = %d, want 2", len(drained))
+	}
+	// Simulate next turn completing: owner still holds ownership, a new
+	// follow-up arrives during the next in-flight turn.
+	_, _, shouldInterrupt3, _ := q.Enqueue("k1", QueuedMsg{Text: "D"})
+	if !shouldInterrupt3 {
+		t.Fatal("after drain, next turn's first follow-up must interrupt again")
+	}
+}
+
+func TestEnqueue_InterruptMode_QueueDisabledNoSignal(t *testing.T) {
+	q := NewMessageQueueWithMode(0, 0, ModeInterrupt)
+	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
+
+	_, enqueued, shouldInterrupt, _ := q.Enqueue("k1", QueuedMsg{Text: "B"})
+	if enqueued {
+		t.Fatal("disabled queue must drop")
+	}
+	if shouldInterrupt {
+		t.Fatal("dropped message must not emit interrupt signal (nothing to deliver after abort)")
 	}
 }
 

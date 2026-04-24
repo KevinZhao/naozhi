@@ -1,6 +1,8 @@
 package cron
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -71,21 +73,28 @@ func loadJobs(path string) (map[string]*Job, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("open cron store %s: %w", path, err)
+		// Drop path from wrapped error; keep full path in log for operator.
+		slog.Warn("open cron store failed", "path", path, "err", err)
+		return nil, fmt.Errorf("open cron store: %w", err)
 	}
 	defer f.Close()
 	data, err := io.ReadAll(io.LimitReader(f, maxCronStoreBytes+1))
 	if err != nil {
-		return nil, fmt.Errorf("read cron store %s: %w", path, err)
+		slog.Warn("read cron store failed", "path", path, "err", err)
+		return nil, fmt.Errorf("read cron store: %w", err)
 	}
 	if int64(len(data)) > maxCronStoreBytes {
 		// We read cap+1 via the LimitReader, so we can only report "at least"
 		// the true size. Leave the original in place so operators can
 		// inspect and recover; returning an error forces Scheduler.Start
 		// to abort rather than overwrite the file with an empty array on
-		// the next save.
-		return nil, fmt.Errorf("cron store %s exceeds size cap (at least %d bytes, cap=%d bytes); refusing to load — inspect the file or move it aside before restarting",
-			path, len(data), maxCronStoreBytes)
+		// the next save. Strip the absolute path from the user-facing
+		// error — it may propagate to upstream/dashboard and leak host
+		// filesystem layout. Full path goes to the warn log for operators.
+		slog.Warn("cron store exceeds size cap",
+			"path", path, "size", len(data), "cap", maxCronStoreBytes)
+		return nil, fmt.Errorf("cron store exceeds size cap (at least %d bytes, cap=%d bytes); refusing to load — inspect the file or move it aside before restarting",
+			len(data), maxCronStoreBytes)
 	}
 
 	var entries []*Job
@@ -94,13 +103,18 @@ func loadJobs(path string) (map[string]*Job, error) {
 		// overwrite operator-visible evidence. Mirrors session/store.go.
 		// If the rename itself fails we return an error (the original file
 		// is still on disk and an empty save would destroy it).
-		corruptPath := path + ".corrupt." + time.Now().Format("20060102-150405")
+		// Append a cryptographic nonce to the rename target so two naozhi
+		// instances mis-configured to share the same data dir don't pick
+		// the same corruptPath at the same second and silently overwrite
+		// each other's evidence file — rename collision would leave one
+		// instance starting with empty in-memory state.
+		corruptPath := path + ".corrupt." + time.Now().UTC().Format("20060102-150405") + "." + randomNonce()
 		if renameErr := os.Rename(path, corruptPath); renameErr != nil {
-			return nil, fmt.Errorf("parse cron store %s failed (%v); could not rename to %s: %w",
-				path, err, corruptPath, renameErr)
+			return nil, fmt.Errorf("parse cron store failed (%v); could not rename: %w",
+				err, renameErr)
 		}
 		slog.Warn("parse cron store failed; corrupt file preserved",
-			"err", err, "corrupt_path", corruptPath)
+			"err", err, "path", path, "corrupt_path", corruptPath)
 		return nil, nil
 	}
 
@@ -112,4 +126,15 @@ func loadJobs(path string) (map[string]*Job, error) {
 	}
 	slog.Info("loaded cron store", "count", len(m), "path", path)
 	return m, nil
+}
+
+// randomNonce returns a short hex-encoded random string for distinguishing
+// otherwise-identical timestamped paths. Falls back to a time-derived
+// suffix if crypto/rand is unavailable (never expected on Linux).
+func randomNonce() string {
+	var rb [4]byte
+	if _, err := rand.Read(rb[:]); err != nil {
+		return fmt.Sprintf("%08x", time.Now().UnixNano()&0xFFFFFFFF)
+	}
+	return hex.EncodeToString(rb[:])
 }

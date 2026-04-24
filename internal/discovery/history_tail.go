@@ -154,24 +154,27 @@ func parseTail(ctx context.Context, f *os.File, size int64, limit int) ([]cli.Ev
 			carry = nil
 		}
 
-		// Split on '\n'. Lines are processed newest → oldest (reverse order
-		// within the chunk) so we can stop early when the limit is reached.
-		lines := bytes.Split(chunk, []byte{'\n'})
-
-		// If we haven't yet reached the file head, the first element of
-		// `lines` is the fragment of the line that begins in an earlier
-		// chunk. Keep it as the carry instead of parsing.
-		var startIdx int
-		if offset > 0 {
-			carry = append(carry, lines[0]...)
-			startIdx = 1
-		}
-
-		for i := len(lines) - 1; i >= startIdx; i-- {
+		// Walk backward through chunk via LastIndexByte('\n'), avoiding the
+		// O(lines) slice allocation that bytes.Split would produce (each
+		// 256KB chunk holds 100-1000 lines; Split pre-allocates the full
+		// [][]byte header array even when we early-exit after the first
+		// few matches). Line bounds inside `chunk` are [lineStart, end).
+		end := len(chunk)
+		for end > 0 {
 			if err := ctx.Err(); err != nil {
 				return nil, err
 			}
-			line := lines[i]
+			nl := bytes.LastIndexByte(chunk[:end], '\n')
+			lineStart := nl + 1 // 0 when no newline left in remaining prefix
+			// If we haven't reached the file head yet, the prefix before the
+			// first '\n' is a partial line whose head lives in an older
+			// chunk — stash it as carry and stop walking this chunk.
+			if nl < 0 && offset > 0 {
+				carry = append(carry, chunk[:end]...)
+				break
+			}
+			line := chunk[lineStart:end]
+			end = nl // on next iter, walk backward past this newline
 			if len(bytes.TrimSpace(line)) == 0 {
 				continue
 			}

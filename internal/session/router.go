@@ -134,6 +134,7 @@ type Router struct {
 	// misclassify its CLI process as an external (non-naozhi) session.
 	knownIDsOrder   []string
 	knownIDsDirty   bool
+	knownIDsGen     uint64    // incremented on each knownIDs mutation (add/evict)
 	knownIDsSavedAt time.Time // last successful saveKnownIDs; throttles fsync to 5min
 
 	// sessionIDToKey is a reverse index from session ID to session key.
@@ -871,6 +872,16 @@ func (r *Router) GetWorkspace(chatKey string) string {
 	return r.workspace
 }
 
+// maxBackendOverrides caps the per-key backend override map so an
+// authenticated dashboard user cannot exhaust memory by POSTing unique keys.
+// backendOverrides entries are cleared on first spawnSession / Reset /
+// Remove / ResetChat for the key; abandoned picks (key chosen then never
+// spawned) would otherwise accumulate indefinitely — the 30/min send-limiter
+// bounds burst rate but not cumulative growth. Pick a limit that comfortably
+// exceeds realistic outstanding picks (a single operator seldom has >100
+// unresolved picks) while making the DoS surface trivially bounded.
+const maxBackendOverrides = 1024
+
 // SetSessionBackend remembers the backend the dashboard picked for a new
 // session keyed by its full session key (including agent suffix). Only
 // applied the next time spawnSession runs — existing live sessions are not
@@ -880,6 +891,14 @@ func (r *Router) SetSessionBackend(key, backend string) {
 	defer r.mu.Unlock()
 	if backend == "" {
 		delete(r.backendOverrides, key)
+		return
+	}
+	// Allow existing keys to be updated without bumping against the cap
+	// (operator changing their mind mid-flow) — only reject when inserting
+	// a brand-new key after the limit is hit.
+	if _, existing := r.backendOverrides[key]; !existing && len(r.backendOverrides) >= maxBackendOverrides {
+		slog.Warn("backendOverrides at capacity; dropping override",
+			"key", key, "cap", maxBackendOverrides)
 		return
 	}
 	r.backendOverrides[key] = backend
@@ -914,6 +933,12 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 				delete(r.sessionIDToKey, id)
 			}
 			delete(r.sessions, key)
+			// Drop any per-session backend pick queued via SetSessionBackend.
+			// Without this, an abandoned dashboard "choose backend" pick for a
+			// key that is then reset leaks an entry into backendOverrides that
+			// is only cleared by a later spawnSession for the same key, which
+			// may never happen.
+			delete(r.backendOverrides, key)
 		}
 		delete(r.sessionsByChat, chatKeyPrefix)
 	} else {
@@ -937,6 +962,7 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 				}
 			}
 			delete(r.sessions, key)
+			delete(r.backendOverrides, key)
 		}
 	}
 	r.activeCount -= closedActive
@@ -1067,10 +1093,15 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// is also wiped in Reset/Remove; deleting here as well guards the
 	// spawn path even when those callers missed cleanup.
 	reqBackend := opts.Backend
-	if reqBackend == "" {
-		reqBackend = r.backendOverrides[key]
+	// Skip map ops entirely when no overrides are registered — the common
+	// single-backend case. The `delete` is a no-op but still hashes the
+	// key, so gating reduces the per-spawn hot path to a single len() call.
+	if len(r.backendOverrides) > 0 {
+		if reqBackend == "" {
+			reqBackend = r.backendOverrides[key]
+		}
+		delete(r.backendOverrides, key)
 	}
-	delete(r.backendOverrides, key)
 	wrapper, backendID := r.wrapperFor(reqBackend)
 
 	// Merge agent opts with router defaults. Backend-scoped values
@@ -1642,11 +1673,13 @@ func (r *Router) Cleanup() {
 	// underlying tmp file is unique per WriteFileAtomic call via
 	// os.CreateTemp, so this throttle is an I/O budget gate, not a
 	// file-level race guard.)
+	var snapshotKnownIDsGen uint64
 	if r.knownIDsDirty && now.Sub(r.knownIDsSavedAt) >= knownIDsSaveInterval {
 		knownIDsCopy = make(map[string]bool, len(r.knownIDs))
 		for id := range r.knownIDs {
 			knownIDsCopy[id] = true
 		}
+		snapshotKnownIDsGen = r.knownIDsGen
 		r.knownIDsSavedAt = now
 	}
 
@@ -1686,8 +1719,13 @@ func (r *Router) Cleanup() {
 		if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
 			slog.Warn("periodic known IDs save failed", "err", err)
 		} else {
+			// Generation counter matches the (sessions | ws-overrides) pattern:
+			// if a concurrent trackSessionID fired between snapshot and re-lock,
+			// the gen will differ and we leave the dirty flag set so the next
+			// tick retries. len()-equality alone is insufficient because an
+			// add + evict pair produces identical lengths with different content.
 			r.mu.Lock()
-			if len(r.knownIDs) == len(knownIDsCopy) {
+			if r.knownIDsGen == snapshotKnownIDsGen {
 				r.knownIDsDirty = false
 			}
 			r.mu.Unlock()
@@ -1760,11 +1798,13 @@ func (r *Router) saveIfDirty() {
 		}
 	}
 	var knownIDsCopy map[string]bool
+	var snapshotKnownIDsGen uint64
 	if knownIDsDue {
 		knownIDsCopy = make(map[string]bool, len(r.knownIDs))
 		for id := range r.knownIDs {
 			knownIDsCopy[id] = true
 		}
+		snapshotKnownIDsGen = r.knownIDsGen
 		// Commit savedAt under r.mu so a concurrent Cleanup tick
 		// re-checking the throttle skips — both paths share the same
 		// .tmp target file and torn writes cannot be recovered.
@@ -1803,8 +1843,10 @@ func (r *Router) saveIfDirty() {
 		if err := saveKnownIDs(storePath, knownIDsCopy); err != nil {
 			slog.Warn("periodic known IDs save failed", "err", err)
 		} else {
+			// Match the storeGen/wsOverridesGen pattern: only clear dirty if
+			// no concurrent trackSessionID fired since the snapshot.
 			r.mu.Lock()
-			if len(r.knownIDs) == len(knownIDsCopy) {
+			if r.knownIDsGen == snapshotKnownIDsGen {
 				r.knownIDsDirty = false
 			}
 			r.mu.Unlock()
@@ -2062,6 +2104,23 @@ func (r *Router) InterruptSession(key string) bool {
 	return s.Interrupt()
 }
 
+// InterruptSessionViaControl requests the CLI to abort the active turn via the
+// stream-json control_request protocol (no SIGINT, no process kill). Unlike
+// InterruptSession, the in-flight Send() observes the CLI's natural result
+// event and returns normally, so ownership of the session stays with the
+// current dispatch owner loop which can then process queued follow-up messages
+// on the same live CLI. Returns false when the session is unknown, has no
+// live process, or the protocol does not support in-band interrupts.
+func (r *Router) InterruptSessionViaControl(key string) bool {
+	r.mu.RLock()
+	s := r.sessions[key]
+	r.mu.RUnlock()
+	if s == nil {
+		return false
+	}
+	return s.InterruptViaControl()
+}
+
 // ActiveSessionIDs returns the set of session IDs currently managed by the router,
 // including their full session chains. Pruned historical sessions are NOT included,
 // allowing them to reappear as resumable recent sessions in the dashboard.
@@ -2139,6 +2198,7 @@ func (r *Router) trackSessionID(id string) {
 	}
 	r.knownIDs[id] = true
 	r.knownIDsOrder = append(r.knownIDsOrder, id)
+	r.knownIDsGen++
 	r.knownIDsDirty = true
 }
 

@@ -653,7 +653,7 @@ func TestReplyTracker_WaitReady_CtxCancel(t *testing.T) {
 func TestOwnerLoop_GenMismatch(t *testing.T) {
 	q := NewMessageQueue(5, 10*time.Millisecond)
 	key := session.SessionKey("fake", "direct", "chat1", "general")
-	_, _, gen := q.Enqueue(key, QueuedMsg{Text: "first", EnqueueAt: time.Now()})
+	_, _, _, gen := q.Enqueue(key, QueuedMsg{Text: "first", EnqueueAt: time.Now()})
 	q.Enqueue(key, QueuedMsg{Text: "second", EnqueueAt: time.Now()})
 	q.Discard(key)
 	// Old gen → nil → stale owner stops

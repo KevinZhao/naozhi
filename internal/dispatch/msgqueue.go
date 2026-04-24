@@ -3,6 +3,7 @@ package dispatch
 import (
 	"container/list"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
 
@@ -21,6 +22,35 @@ type QueuedMsg struct {
 	EnqueueAt time.Time
 }
 
+// QueueMode selects how new messages that arrive while a session is busy are
+// handled.
+type QueueMode int
+
+const (
+	// ModeCollect queues the new messages and waits for the active turn to
+	// finish naturally; after a short settle delay the queued messages are
+	// coalesced into a single follow-up prompt. Lowest cost, highest latency.
+	ModeCollect QueueMode = iota
+	// ModeInterrupt queues the new messages AND asks the dispatcher to send
+	// an in-band control_request to the CLI so the active turn aborts
+	// immediately. The queued messages are then coalesced and sent as the
+	// next prompt on the same live process. Fastest user-facing pivot, but
+	// burns the tokens already spent on the aborted turn.
+	ModeInterrupt
+)
+
+// ParseQueueMode accepts "collect" or "interrupt" (case-insensitive) and
+// returns the corresponding QueueMode. Empty / unknown strings map to
+// ModeCollect so callers can feed raw YAML values without defensive checks.
+func ParseQueueMode(s string) QueueMode {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "interrupt":
+		return ModeInterrupt
+	default:
+		return ModeCollect
+	}
+}
+
 // sessionQueue tracks per-session busy state and queued messages.
 type sessionQueue struct {
 	busy         bool
@@ -28,6 +58,13 @@ type sessionQueue struct {
 	msgs         []QueuedMsg
 	lastNotifyNs int64 // unix nanoseconds of last ShouldNotify call (replaces lastNotify map)
 	lastEvictNs  int64 // unix nanoseconds of last eviction Warn log (rate-limit)
+
+	// interruptRequested is true once an interrupt has been triggered for the
+	// currently running turn. Cleared by DoneOrDrain when ownership is
+	// consumed for the next turn. Prevents multiple follow-up messages on the
+	// same turn each firing a separate control_request (redundant and noisy
+	// in CLI stderr) while still allowing a fresh interrupt on the next turn.
+	interruptRequested bool
 }
 
 // MessageQueue replaces SessionGuard with per-session message queuing.
@@ -41,6 +78,7 @@ type MessageQueue struct {
 	queues       map[string]*sessionQueue
 	maxDepth     int
 	collectDelay time.Duration
+	mode         QueueMode
 
 	// dropNotifyTimes is a bounded per-key cooldown map for notifies that
 	// happen when no sessionQueue exists (the drop path with maxDepth<=0
@@ -72,16 +110,28 @@ const dropNotifyMaxKeys = 1024
 // burst after recovery produces a fresh datum.
 const evictWarnCooldownNs = int64(5 * time.Second)
 
-// NewMessageQueue creates a MessageQueue.
+// NewMessageQueue creates a MessageQueue in Collect mode.
 // maxDepth <= 0 disables queuing (degrades to drop+wait, same as old Guard).
 func NewMessageQueue(maxDepth int, collectDelay time.Duration) *MessageQueue {
+	return NewMessageQueueWithMode(maxDepth, collectDelay, ModeCollect)
+}
+
+// NewMessageQueueWithMode creates a MessageQueue with an explicit queue mode.
+// See QueueMode for the semantic difference between Collect and Interrupt.
+func NewMessageQueueWithMode(maxDepth int, collectDelay time.Duration, mode QueueMode) *MessageQueue {
 	return &MessageQueue{
 		queues:          make(map[string]*sessionQueue),
 		maxDepth:        maxDepth,
 		collectDelay:    collectDelay,
+		mode:            mode,
 		dropNotifyLRU:   list.New(),
 		dropNotifyIndex: make(map[string]*list.Element),
 	}
+}
+
+// Mode returns the configured queue mode.
+func (q *MessageQueue) Mode() QueueMode {
+	return q.mode
 }
 
 // getOrCreate returns the sessionQueue for key, creating one if needed.
@@ -101,21 +151,24 @@ func (q *MessageQueue) getOrCreate(key string) *sessionQueue {
 //   - isOwner=true:  caller becomes the owner goroutine, should process the
 //     message directly (queue was idle). gen is the generation cookie.
 //   - isOwner=false, enqueued=true: message was appended to the queue.
+//     shouldInterrupt=true when mode is ModeInterrupt and this is the first
+//     follow-up for the currently running turn — the caller should trigger
+//     an in-band CLI interrupt so the active turn aborts promptly.
 //   - isOwner=false, enqueued=false: queue is disabled (maxDepth<=0).
 //     Caller should reply "please wait".
-func (q *MessageQueue) Enqueue(key string, msg QueuedMsg) (isOwner, enqueued bool, gen uint64) {
+func (q *MessageQueue) Enqueue(key string, msg QueuedMsg) (isOwner, enqueued, shouldInterrupt bool, gen uint64) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 
 	sq := q.getOrCreate(key)
 	if !sq.busy {
 		sq.busy = true
-		return true, false, sq.gen
+		return true, false, false, sq.gen
 	}
 
 	// maxDepth<=0: degrade to drop (backward-compatible with old Guard behavior).
 	if q.maxDepth <= 0 {
-		return false, false, 0
+		return false, false, false, 0
 	}
 
 	// Evict oldest if at capacity. Shift in place rather than `sq.msgs[1:]`
@@ -145,7 +198,15 @@ func (q *MessageQueue) Enqueue(key string, msg QueuedMsg) (isOwner, enqueued boo
 		sq.msgs = sq.msgs[:len(sq.msgs)-1]
 	}
 	sq.msgs = append(sq.msgs, msg)
-	return false, true, 0
+	// In Interrupt mode the first queued follow-up for the active turn flips
+	// interruptRequested. Subsequent queued messages for the same turn skip
+	// the interrupt — the first control_request already cancels the turn,
+	// and the CLI would ignore a second one mid-abort.
+	if q.mode == ModeInterrupt && !sq.interruptRequested {
+		sq.interruptRequested = true
+		return false, true, true, 0
+	}
+	return false, true, false, 0
 }
 
 // DoneOrDrain is called by the owner goroutine after processing a message.
@@ -191,9 +252,13 @@ func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 		return nil
 	}
 
-	// Drain all; keep ownership.
+	// Drain all; keep ownership. Clearing interruptRequested here is crucial:
+	// once the owner takes the drained batch, the NEXT in-flight turn is a
+	// fresh target for a future interrupt, so subsequent queued messages
+	// during that new turn must be able to trigger another control_request.
 	msgs := sq.msgs
 	sq.msgs = nil
+	sq.interruptRequested = false
 	return msgs
 }
 
@@ -214,6 +279,7 @@ func (q *MessageQueue) Discard(key string) {
 		sq.msgs = nil
 		sq.busy = false
 		sq.lastNotifyNs = 0
+		sq.interruptRequested = false
 	}
 	// Mirror DoneOrDrain's LRU cleanup: a pre-Discard drop-path cooldown
 	// (chat entered via /new after being idle for >3s) would otherwise keep
