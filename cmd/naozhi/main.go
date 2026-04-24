@@ -509,6 +509,7 @@ func main() {
 		ExecTimeout:   cfg.ParseExecutionTimeout(),
 		Location:      cronLoc,
 		NotifyDefault: notifyDefault,
+		AllowedRoot:   workspace,
 		ParentCtx:     ctx,
 	})
 	if err := scheduler.Start(); err != nil {

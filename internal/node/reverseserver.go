@@ -138,10 +138,16 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		remoteLabel = remoteLabel[:maxLabel]
 	}
 	rc := newReverseConn(msg.NodeID, displayName, remoteLabel, conn)
+	// Bound the register response write so a slow-read attacker can't
+	// park this goroutine indefinitely at the TCP window. newReverseConn
+	// applies 10s per write thereafter; this pre-handoff write needs the
+	// same protection.
+	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	if err := conn.WriteJSON(ReverseMsg{Type: "registered"}); err != nil {
 		rc.Close()
 		return
 	}
+	_ = conn.SetWriteDeadline(time.Time{})
 
 	s.mu.Lock()
 	if old, exists := s.conns[msg.NodeID]; exists {

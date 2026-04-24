@@ -354,6 +354,17 @@ func downloadURL(rawURL string) ([]byte, string, error) {
 	if ct == "" {
 		ct = "image/png"
 	}
+	// Content-based verification: the Content-Type header is upstream-
+	// provided. A compromised CDN (or cache poisoning) could deliver
+	// arbitrary bytes labeled as image/png. http.DetectContentType sniffs
+	// the first 512 bytes against the WHATWG MIME-Sniffing standard; reject
+	// when the sniffed family is clearly not an image.
+	if len(data) > 0 {
+		sniffed := http.DetectContentType(data)
+		if !strings.HasPrefix(sniffed, "image/") {
+			return nil, "", fmt.Errorf("download: mime mismatch (header=%s sniffed=%s)", ct, sniffed)
+		}
+	}
 	return data, ct, nil
 }
 

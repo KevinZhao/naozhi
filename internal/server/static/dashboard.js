@@ -965,23 +965,40 @@ function renderTodoList(detail, summary) {
     try { todos = JSON.parse(detail); } catch (_) { todos = null; }
   }
   if (!Array.isArray(todos) || todos.length === 0) {
-    return esc(summary || '\u{1f4cb}');
+    return esc(summary || 'Todos');
   }
-  const header = esc(summary || '\u{1f4cb} Todos');
+  let done = 0, active = 0, pending = 0;
   const items = todos.map(t => {
     const status = (t && t.status) || 'pending';
-    let mark = '\u2610'; // ☐
     let cls = 'todo-pending';
+    let mark = '\u25cb'; // ○ pending
     let text = (t && t.content) || '';
-    if (status === 'completed') { mark = '\u2705'; cls = 'todo-done'; }
-    else if (status === 'in_progress') {
-      mark = '\u25b6';
+    if (status === 'completed') {
+      cls = 'todo-done';
+      mark = '\u2714'; // ✔
+      done++;
+    } else if (status === 'in_progress') {
       cls = 'todo-active';
+      mark = '\u25b8'; // ▸
       if (t && t.activeForm) text = t.activeForm;
+      active++;
+    } else {
+      pending++;
     }
     return '<li class="todo-item ' + cls + '"><span class="todo-mark">' + mark + '</span><span class="todo-text">' + esc(text) + '</span></li>';
   }).join('');
-  return '<div class="todo-summary">' + header + '</div><ul class="todo-list">' + items + '</ul>';
+  const total = todos.length;
+  const counts =
+    '<span class="todo-count">' + total + ' 项</span>' +
+    (done > 0 ? '<span class="todo-count done">' + done + ' 完成</span>' : '') +
+    (active > 0 ? '<span class="todo-count active">' + active + ' 进行中</span>' : '') +
+    (pending > 0 ? '<span class="todo-count">' + pending + ' 待办</span>' : '');
+  const header =
+    '<div class="todo-header">' +
+      '<span class="todo-title">任务清单</span>' +
+      '<span class="todo-counts">' + counts + '</span>' +
+    '</div>';
+  return header + '<ul class="todo-list">' + items + '</ul>';
 }
 
 function eventHtml(e) {
@@ -989,17 +1006,18 @@ function eventHtml(e) {
   // Filter out Claude Code system XML injected as user messages
   const raw = e.detail || e.summary || '';
   if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return '';
-  const icons = {init:'\u2699',system:'\u2699',user:'\u{1f464}',text:'\u2726',todo:'\u{1f4cb}'};
+  const icons = {init:'\u2699',system:'\u2699',user:'\u{1f464}',text:'\u2726',todo:'\u2630'};
   const icon = icons[e.type] || '';
+
+  // Strip redundant "[+N image(s)]" suffix when thumbnails are present
+  let cleanRaw = e.detail || e.summary || '';
+  if (e.images && e.images.length > 0) cleanRaw = cleanRaw.replace(/ \[\+\d+ image\(s\)\]$/, '');
 
   let content = '';
   if (e.type === 'system') {
     content = esc(e.summary || e.type);
   } else if (e.type === 'text' || e.type === 'user') {
-    let raw = e.detail || e.summary || e.type;
-    // Strip redundant "[+N image(s)]" suffix when thumbnails are present
-    if (e.images && e.images.length > 0) raw = raw.replace(/ \[\+\d+ image\(s\)\]$/, '');
-    content = renderMd(raw);
+    content = renderMd(cleanRaw || e.type);
   } else if (e.type === 'todo') {
     content = renderTodoList(e.detail, e.summary);
   } else {
@@ -1014,11 +1032,9 @@ function eventHtml(e) {
     ).join('') + '</div>';
   }
 
-  // Copy button for long AI text messages (>200 chars raw) — inside content, at bottom
-  const rawText = e.detail || e.summary || '';
-  const rawLen = rawText.length;
-  const copyBtn = (e.type === 'text' && rawLen > 200)
-    ? '<button class="event-copy-btn" data-raw="' + escAttr(rawText) + '" onclick="copyEventContent(this)">copy</button>'
+  // Copy button for long text/user messages (>200 chars raw) — inside content, at bottom
+  const copyBtn = ((e.type === 'text' || e.type === 'user') && cleanRaw.length > 200)
+    ? '<button class="event-copy-btn" data-raw="' + escAttr(cleanRaw) + '" onclick="copyEventContent(this)">copy</button>'
     : '';
 
   const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';

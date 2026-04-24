@@ -47,20 +47,25 @@ func TodosDetailJSON(todos []TodoItem) string {
 
 // TodosSummary returns a compact one-line overview suitable for the event
 // summary field, e.g. "📋 5项 · ✅2 ▶1 ☐2".
+// Unknown statuses (e.g. future values Claude Code may emit) are counted
+// separately and surfaced with "?N" so silent miscategorisation doesn't hide
+// state changes from the UI.
 func TodosSummary(todos []TodoItem) string {
-	var done, active, pending int
+	var done, active, pending, unknown int
 	for _, t := range todos {
 		switch t.Status {
 		case "completed":
 			done++
 		case "in_progress":
 			active++
-		default:
+		case "pending", "":
 			pending++
+		default:
+			unknown++
 		}
 	}
 	var b strings.Builder
-	b.Grow(32)
+	b.Grow(40)
 	b.WriteString("📋 ")
 	b.WriteString(strconv.Itoa(len(todos)))
 	b.WriteString("项")
@@ -76,17 +81,32 @@ func TodosSummary(todos []TodoItem) string {
 		b.WriteString(" · ☐")
 		b.WriteString(strconv.Itoa(pending))
 	}
+	if unknown > 0 {
+		b.WriteString(" · ?")
+		b.WriteString(strconv.Itoa(unknown))
+	}
 	return b.String()
 }
 
 // TodosMarkdown renders the list for IM display. Uses the activeForm for
 // in-progress items when available so users see "正在执行X" instead of "X".
+// The capacity estimate uses actual byte lengths (CJK content is 3 bytes per
+// rune) so the initial Builder grow is a single allocation.
 func TodosMarkdown(todos []TodoItem) string {
 	if len(todos) == 0 {
 		return ""
 	}
+	// 16B header + per-line prefix (~6B for "✅ " / "▶ " / "☐ " / "? ")
+	// + each content's actual byte length + 1 separator.
+	est := 16
+	for _, t := range todos {
+		est += 8 + len(t.Content)
+		if t.ActiveForm != "" && t.Status == "in_progress" {
+			est += len(t.ActiveForm)
+		}
+	}
 	var b strings.Builder
-	b.Grow(len(todos) * 40)
+	b.Grow(est)
 	b.WriteString("📋 任务清单\n")
 	for i, t := range todos {
 		if i > 0 {
@@ -103,8 +123,13 @@ func TodosMarkdown(todos []TodoItem) string {
 			} else {
 				b.WriteString(t.Content)
 			}
-		default:
+		case "pending", "":
 			b.WriteString("☐ ")
+			b.WriteString(t.Content)
+		default:
+			// Unknown status — render distinctly so operators notice a new
+			// status value instead of silently conflating it with pending.
+			b.WriteString("? ")
 			b.WriteString(t.Content)
 		}
 	}

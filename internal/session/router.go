@@ -373,7 +373,20 @@ func (r *Router) shimManagedKeys() map[string]bool {
 
 // ReconnectShims discovers surviving shim processes and reconnects sessions.
 // Called after NewRouter to restore sessions that were active before naozhi restart.
+// Accepts a context so reconcile-loop callers can propagate shutdown cancellation
+// into per-shim timeout contexts; pass context.Background() from startup paths
+// where no shutdown signal is available yet.
 func (r *Router) ReconnectShims() {
+	r.reconnectShims(context.Background())
+}
+
+// ReconnectShimsCtx is the context-aware variant used by the reconcile loop so
+// SIGTERM during a 15 s handshake aborts promptly instead of waiting per session.
+func (r *Router) ReconnectShimsCtx(ctx context.Context) {
+	r.reconnectShims(ctx)
+}
+
+func (r *Router) reconnectShims(parentCtx context.Context) {
 	if r.wrapper == nil || r.wrapper.ShimManager == nil {
 		return
 	}
@@ -409,7 +422,7 @@ func (r *Router) ReconnectShims() {
 			// Connect briefly to send shutdown. Bound the reconnect so a
 			// hung shim socket cannot stall NewRouter startup — we fall
 			// through to SIGUSR2 if the timeout fires.
-			rctx, rcancel := context.WithTimeout(context.Background(), shimReconnectTimeout)
+			rctx, rcancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 			handle, err := r.wrapper.ShimManager.Reconnect(rctx, state.Key, 0)
 			rcancel()
 			if err == nil {
@@ -438,7 +451,7 @@ func (r *Router) ReconnectShims() {
 				"key", state.Key,
 				"old_args_len", len(storedBase),
 				"new_args_len", len(currentArgs))
-			rctx, rcancel := context.WithTimeout(context.Background(), shimReconnectTimeout)
+			rctx, rcancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 			handle, err := r.wrapper.ShimManager.Reconnect(rctx, state.Key, 0)
 			rcancel()
 			if err == nil {
@@ -450,7 +463,7 @@ func (r *Router) ReconnectShims() {
 		// Reconnect. Timeout-bounded so a stuck shim handshake cannot stall
 		// NewRouter indefinitely; on timeout we log and keep iterating.
 		lastSeq := int64(0) // full replay on restart
-		spawnCtx, spawnCancel := context.WithTimeout(context.Background(), shimReconnectTimeout)
+		spawnCtx, spawnCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 		proc, replays, err := r.wrapper.SpawnReconnect(
 			spawnCtx, state.Key, lastSeq, r.wrapper.Protocol,
 			r.noOutputTimeout, r.totalTimeout,
@@ -828,6 +841,29 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// acquired independently by event injection). The old reference is safe to
 	// read because sessions are never mutated after creation, only replaced.
 	old := r.sessions[key]
+	// Snapshot fields that are written under r.mu elsewhere (e.g.
+	// RegisterCronStub writes old.workspace under r.mu) before releasing
+	// the lock; reading them after the release races those writers.
+	// Round 49 concurrency finding.
+	var oldPrevIDs []string
+	var oldTotalCost float64
+	if old != nil {
+		if len(old.prevSessionIDs) > 0 {
+			oldPrevIDs = make([]string, len(old.prevSessionIDs))
+			copy(oldPrevIDs, old.prevSessionIDs)
+		}
+		// Preserve the cumulative cost across process replacement so the
+		// dashboard doesn't flash $0.00 between spawn and the first result
+		// event. Prefer the live process's value (freshest) over the
+		// store-restored s.totalCost; fall back to the latter when no
+		// process is attached (restored-from-disk sessions).
+		if p := old.loadProcess(); p != nil {
+			oldTotalCost = p.TotalCost()
+		}
+		if oldTotalCost == 0 {
+			oldTotalCost = old.totalCost
+		}
+	}
 	r.mu.Unlock()
 
 	var oldHistory []cli.EventEntry
@@ -849,12 +885,11 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		// but only when the old ID differs from resumeID (i.e. a truly new
 		// CLI session is replacing the old one, not just resuming the same one).
 		if oldID := old.getSessionID(); oldID != "" && oldID != resumeID {
-			prevIDs = make([]string, len(old.prevSessionIDs), len(old.prevSessionIDs)+1)
-			copy(prevIDs, old.prevSessionIDs)
+			prevIDs = make([]string, len(oldPrevIDs), len(oldPrevIDs)+1)
+			copy(prevIDs, oldPrevIDs)
 			prevIDs = append(prevIDs, oldID)
-		} else if len(old.prevSessionIDs) > 0 {
-			prevIDs = make([]string, len(old.prevSessionIDs))
-			copy(prevIDs, old.prevSessionIDs)
+		} else {
+			prevIDs = oldPrevIDs
 		}
 		// Cap the chain to bound sessions.json size and JSONL load time on
 		// long-lived chats; oldest entries are the cheapest to drop because
@@ -881,6 +916,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		cliVersion:       r.wrapper.CLIVersion,
 		persistedHistory: oldHistory,
 		prevSessionIDs:   prevIDs,
+		totalCost:        oldTotalCost,
 		exempt:           opts.Exempt,
 		onSessionID: func(id string) {
 			r.mu.Lock()
@@ -1273,9 +1309,10 @@ func (r *Router) Cleanup() {
 	// bound disk I/O (see knownIDsSaveInterval constant). Commit
 	// knownIDsSavedAt optimistically here — still under r.mu — so a
 	// concurrent saveIfDirty tick on the neighboring interval boundary
-	// sees the updated timestamp and skips, preventing two goroutines
-	// from racing into saveKnownIDs → WriteFileAtomic on the same .tmp
-	// path (the "known_ids.json.tmp" torn-write hazard).
+	// sees the updated timestamp and skips the redundant work. (The
+	// underlying tmp file is unique per WriteFileAtomic call via
+	// os.CreateTemp, so this throttle is an I/O budget gate, not a
+	// file-level race guard.)
 	if r.knownIDsDirty && now.Sub(r.knownIDsSavedAt) >= knownIDsSaveInterval {
 		knownIDsCopy = make(map[string]bool, len(r.knownIDs))
 		for id := range r.knownIDs {
@@ -1459,7 +1496,10 @@ func (r *Router) StartShimReconcileLoop(ctx context.Context, interval time.Durat
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				r.ReconnectShims()
+				// Thread ctx so SIGTERM during a per-shim 15s handshake
+				// aborts promptly instead of waiting one full timeout per
+				// suspended session.
+				r.ReconnectShimsCtx(ctx)
 			}
 		}
 	}()

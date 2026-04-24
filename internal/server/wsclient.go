@@ -44,28 +44,16 @@ func (c *wsClient) closeDone() {
 }
 
 func (c *wsClient) SendJSON(v any) {
-	// Reuse the HTTP writeJSON encoder pool: ws control messages (auth_ok,
-	// subscribed, history, error, pong, send_ack, interrupt_ack) are on the
-	// hot path — 10 active clients produce 40-160 ctrl msg/s — and each
-	// json.Marshal allocates a fresh encodeState + result []byte. SendRaw
-	// buffers the bytes onto the send channel, so we must copy out of the
-	// pooled buffer before returning it.
-	e := getJSONEnc()
-	defer putJSONEnc(e)
-	if err := e.enc.Encode(v); err != nil {
+	// json.Marshal returns a fresh []byte we can hand directly to SendRaw
+	// (no copy needed; stdlib already pools encodeState internally). The
+	// previous encoder-pool path required a make+copy to isolate the send
+	// channel from the returned pool buffer, making it strictly more
+	// expensive than plain Marshal for this single-producer hot path.
+	data, err := json.Marshal(v)
+	if err != nil {
 		slog.Debug("ws SendJSON encode", "err", err)
 		return
 	}
-	// Encoder appends a trailing newline; strip it because WS clients expect
-	// a bare JSON message (matches the json.Marshal output).
-	raw := e.buf.Bytes()
-	if n := len(raw); n > 0 && raw[n-1] == '\n' {
-		raw = raw[:n-1]
-	}
-	// Copy bytes out of the pool buffer — SendRaw hands the slice to the
-	// send channel goroutine which may outlive putJSONEnc.
-	data := make([]byte, len(raw))
-	copy(data, raw)
 	c.SendRaw(data)
 }
 
@@ -157,6 +145,13 @@ func (c *wsClient) readPump() {
 			}
 			c.hub.handleInterrupt(c, msg)
 		case "ping":
+			// Reuse sendLimiter so authenticated clients can't spin a flood
+			// of pings that each trigger json.Marshal + channel send — the
+			// work is small per message but easy to amplify without a cap.
+			// 5/s burst matches the existing send budget.
+			if c.authenticated.Load() && !c.sendLimiter.Allow() {
+				continue
+			}
 			c.SendJSON(node.ServerMsg{Type: "pong"})
 		}
 	}
@@ -166,6 +161,16 @@ func (c *wsClient) writePump() {
 	ticker := time.NewTicker(wsPingPeriod)
 	defer func() {
 		ticker.Stop()
+		// When writePump exits first (e.g. TCP RST on a ping write while
+		// readPump is still blocked in ReadMessage), we must mark the client
+		// as done so broadcasts stop queueing, and unregister from the hub so
+		// new subscribes can't target this dying conn. Close the underlying
+		// connection last so readPump unblocks and its defer can also run
+		// (closeDone/unregister are idempotent). Without this, the hub kept
+		// a live entry for the zombie until the kernel eventually closed the
+		// socket, inflating broadcast fan-out with dead clients.
+		c.closeDone()
+		c.hub.unregister(c)
 		c.conn.Close()
 	}()
 

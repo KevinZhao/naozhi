@@ -231,7 +231,13 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 			CreatedBy: msg.UserID,
 		}
 		if err := d.scheduler.AddJob(job); err != nil {
-			reply("创建失败: " + err.Error())
+			// AddJob wraps the raw schedule string + robfig/cron parser
+			// internals into the error; echoing that to IM leaks both the
+			// server-normalized form of the attacker's input and parser
+			// token positions. Log the detail for operator triage, reply
+			// with a generic message. Mirrors dashboard_cron handleCreate.
+			log.Warn("cron AddJob rejected", "err", err, "schedule", job.Schedule)
+			reply("创建失败：请检查定时表达式格式")
 			return
 		}
 		next := d.scheduler.NextRun(job)
@@ -260,9 +266,17 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 			reply("用法: /cron del <id>")
 			return
 		}
+		if len(parts[2]) > maxCronIDLen {
+			reply("无效 ID")
+			return
+		}
 		j, err := d.scheduler.DeleteJob(parts[2], msg.Platform, msg.ChatID)
 		if err != nil {
-			reply("删除失败: " + err.Error())
+			// Echoing err.Error() to IM leaks internal scheduler state
+			// (normalized ID form, lock annotations). Dashboard already
+			// sanitises analogous handlers. Log raw, reply generic.
+			log.Warn("cron DeleteJob failed", "err", err, "id_prefix", parts[2])
+			reply("删除失败：请确认 ID 正确")
 			return
 		}
 		reply(fmt.Sprintf("Job %s 已删除。", j.ID))
@@ -273,9 +287,14 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 			reply("用法: /cron pause <id>")
 			return
 		}
+		if len(parts[2]) > maxCronIDLen {
+			reply("无效 ID")
+			return
+		}
 		j, err := d.scheduler.PauseJob(parts[2], msg.Platform, msg.ChatID)
 		if err != nil {
-			reply("暂停失败: " + err.Error())
+			log.Warn("cron PauseJob failed", "err", err, "id_prefix", parts[2])
+			reply("暂停失败：请确认 ID 正确或任务是否已暂停")
 			return
 		}
 		reply(fmt.Sprintf("Job %s 已暂停。", j.ID))
@@ -286,9 +305,14 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 			reply("用法: /cron resume <id>")
 			return
 		}
+		if len(parts[2]) > maxCronIDLen {
+			reply("无效 ID")
+			return
+		}
 		j, err := d.scheduler.ResumeJob(parts[2], msg.Platform, msg.ChatID)
 		if err != nil {
-			reply("恢复失败: " + err.Error())
+			log.Warn("cron ResumeJob failed", "err", err, "id_prefix", parts[2])
+			reply("恢复失败：请确认 ID 正确或任务是否已暂停")
 			return
 		}
 		next := d.scheduler.NextRun(j)
@@ -330,7 +354,8 @@ func (d *Dispatcher) handleProjectCommand(ctx context.Context, msg platform.Inco
 
 	case "off":
 		if err := d.projectMgr.UnbindAllChat(msg.Platform, msg.ChatType, msg.ChatID); err != nil {
-			d.replyText(ctx, msg, "解绑失败: "+err.Error(), log)
+			log.Warn("project unbind failed", "err", err)
+			d.replyText(ctx, msg, "解绑失败，请稍后重试。", log)
 			return
 		}
 		d.replyText(ctx, msg, "已解绑项目，恢复默认路由。", log)
@@ -355,7 +380,8 @@ func (d *Dispatcher) handleProjectCommand(ctx context.Context, msg platform.Inco
 			return
 		}
 		if err := d.projectMgr.BindChat(proj.Name, msg.Platform, msg.ChatType, msg.ChatID); err != nil {
-			d.replyText(ctx, msg, "绑定失败: "+err.Error(), log)
+			log.Warn("project bind failed", "project", proj.Name, "err", err)
+			d.replyText(ctx, msg, "绑定失败，请稍后重试。", log)
 			return
 		}
 		d.replyText(ctx, msg, fmt.Sprintf("已绑定项目: %s\n后续消息将路由到该项目的 planner。", proj.Name), log)
@@ -442,6 +468,17 @@ var smartQuoteNormalizer = strings.NewReplacer(
 // CLI stdin, so runaway sizes multiply across invocations.
 const maxCronPromptBytes = 8 * 1024
 
+// maxCronIDLen bounds the ID accepted from IM `/cron del|pause|resume <id>`
+// commands. Generated IDs are 8-char hex (see scheduler.generateID); 64 bytes
+// leaves slack for future ID schemes while preventing multi-MB inputs from
+// propagating into log/error allocations on the miss path.
+const maxCronIDLen = 64
+
+// maxCronScheduleBytes caps the schedule expression length. robfig/cron
+// expressions are short (e.g. "@every 30m", "0 9 * * *"); anything beyond
+// 256 bytes is almost certainly abuse. Matches the dashboard preview guard.
+const maxCronScheduleBytes = 256
+
 // ParseCronAdd parses the args of /cron add: "schedule" prompt
 func ParseCronAdd(args string) (schedule, prompt string, err error) {
 	args = smartQuoteNormalizer.Replace(args)
@@ -456,12 +493,39 @@ func ParseCronAdd(args string) (schedule, prompt string, err error) {
 		return "", "", fmt.Errorf("missing closing quote for schedule")
 	}
 	schedule = rest
+	// Bound schedule length before handing to the parser: robfig/cron splits
+	// on whitespace and runs regex per field, so a multi-KB schedule would
+	// force measurable parser work even though it's guaranteed to fail. The
+	// dashboard preview handler enforces the same 256-byte cap.
+	if len(schedule) > maxCronScheduleBytes {
+		return "", "", fmt.Errorf("schedule too long (max %d bytes)", maxCronScheduleBytes)
+	}
+	// Control chars in schedule would persist verbatim into cron_jobs.json
+	// and could corrupt NDJSON framing when the job's prompt replays through
+	// shim stdin. Printable + space + tab is sufficient for every valid cron
+	// expression the robfig/cron parser accepts.
+	for i := 0; i < len(schedule); i++ {
+		c := schedule[i]
+		if c == 0 || (c < 0x20 && c != '\t') || c == 0x7f {
+			return "", "", fmt.Errorf("schedule contains invalid control characters")
+		}
+	}
 	prompt = strings.TrimSpace(tail)
 	if prompt == "" {
 		return "", "", fmt.Errorf("prompt cannot be empty")
 	}
 	if len(prompt) > maxCronPromptBytes {
 		return "", "", fmt.Errorf("prompt too long (max %d bytes)", maxCronPromptBytes)
+	}
+	// Reject the same control-character set the dashboard rejects: null bytes
+	// are silently truncated by execve and raw \r/\n into --append-system-prompt
+	// corrupts shim NDJSON framing. Tab is allowed because prompts may indent
+	// examples. Mirrors server.validateCronPrompt (dashboard_cron.go).
+	for i := 0; i < len(prompt); i++ {
+		c := prompt[i]
+		if c == 0 || (c < 0x20 && c != '\t') || c == 0x7f {
+			return "", "", fmt.Errorf("prompt contains invalid control characters")
+		}
 	}
 	return schedule, prompt, nil
 }

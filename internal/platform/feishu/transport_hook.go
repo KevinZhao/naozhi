@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/platform"
 )
@@ -153,6 +154,16 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
+			// Challenge is reflected verbatim into the response body; a
+			// malformed UTF-8 payload would propagate to Feishu's verification
+			// endpoint and could be weaponised if the verification token
+			// leaked. Real Feishu challenges are opaque ASCII/Base64 tokens,
+			// so invalid UTF-8 is always tampering.
+			if !utf8.ValidString(envelope.Challenge) {
+				slog.Warn("feishu challenge not valid utf-8")
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(map[string]string{"challenge": envelope.Challenge}); err != nil {
 				slog.Warn("feishu challenge encode failed", "err", err)
@@ -246,6 +257,17 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				return
 			}
 			text := content.Text
+			// Feishu's own upstream limit on message text is ~4000 bytes
+			// (~1333 CJK chars); anything larger is either a misconfigured
+			// client or attacker-crafted payload. Reject at 8 KiB (2x the
+			// official limit) so we don't ferry multi-KB slog attrs or push
+			// oversized messages into the downstream CLI stdin path.
+			const maxTextBytes = 8 * 1024
+			if len(text) > maxTextBytes {
+				slog.Warn("feishu webhook: text exceeds limit, dropping",
+					"msg_id", event.Message.MessageID, "len", len(text))
+				return
+			}
 			for _, m := range event.Message.Mentions {
 				text = strings.ReplaceAll(text, m.Key, "")
 			}

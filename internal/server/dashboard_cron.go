@@ -26,6 +26,24 @@ var validNotifyPlatforms = map[string]struct{}{
 
 const maxNotifyChatIDLen = 256
 
+// maxCronPromptBytesDashboard mirrors dispatch.maxCronPromptBytes (8 KiB); the
+// duplicate constant avoids a circular import. Each cron tick replays this
+// prompt into the CLI stdin, so large prompts amplify linearly with run count.
+const maxCronPromptBytesDashboard = 8 * 1024
+
+// maxCronIDLenDashboard bounds cron job IDs arriving via URL query parameters.
+// Mirrors dispatch.maxCronIDLen (64); job IDs are 8-byte hex so anything larger
+// is certainly malformed. Prevents multi-MB id query strings from being echoed
+// into slog attrs on the error path.
+const maxCronIDLenDashboard = 64
+
+// maxCronScheduleBytesDashboard mirrors dispatch.maxCronScheduleBytes (256 B).
+// The 64 KB MaxBytesReader body cap is body-level; a single schedule field can
+// still be 63 KB of garbage and reach robfig/cron's regex parser. handlePreview
+// already enforces the same 256-byte cap — apply it consistently to create +
+// update so both paths treat the parser as a trusted-input boundary.
+const maxCronScheduleBytesDashboard = 256
+
 // validateNotifyTarget enforces platform allowlist + chat_id size bound.
 func validateNotifyTarget(platform, chatID string) error {
 	if _, ok := validNotifyPlatforms[platform]; !ok {
@@ -33,6 +51,24 @@ func validateNotifyTarget(platform, chatID string) error {
 	}
 	if len(chatID) > maxNotifyChatIDLen {
 		return fmt.Errorf("notify_chat_id too long")
+	}
+	return nil
+}
+
+// validateCronPrompt rejects prompts larger than the dashboard cap or
+// containing control characters. Matches project_api.handleConfigPut's
+// planner_prompt guard: null bytes are silently truncated by execve, and
+// raw \n/\r into the CLI --append-system-prompt path corrupts shim NDJSON
+// framing. Tab is allowed because prompts may indent examples.
+func validateCronPrompt(prompt string) error {
+	if len(prompt) > maxCronPromptBytesDashboard {
+		return fmt.Errorf("prompt exceeds %d-byte limit", maxCronPromptBytesDashboard)
+	}
+	for i := 0; i < len(prompt); i++ {
+		c := prompt[i]
+		if c == 0 || (c < 0x20 && c != '\t') || c == 0x7f {
+			return fmt.Errorf("prompt contains invalid control characters")
+		}
 	}
 	return nil
 }
@@ -149,6 +185,18 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "schedule is required", http.StatusBadRequest)
 		return
 	}
+	// Cap schedule length before handing to validateSchedule → robfig/cron
+	// parser. MaxBytesReader caps the whole body at 64 KB, but within that
+	// envelope a single 63 KB schedule field would still reach the parser
+	// and force per-field regex work. Mirrors handlePreview (line 381).
+	if len(req.Schedule) > maxCronScheduleBytesDashboard {
+		http.Error(w, "schedule too long", http.StatusBadRequest)
+		return
+	}
+	if err := validateCronPrompt(req.Prompt); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	// Validate work_dir if provided: must be under allowedRoot. Matches the
 	// 403 Forbidden used by /api/sessions/send so clients see a uniform
@@ -218,6 +266,13 @@ func (h *CronHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 	id := r.URL.Query().Get("id")
 	if id == "" {
 		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	// Reject obviously-oversized ids before reaching the scheduler so slog
+	// attrs in the error path aren't dragged up to multi-MB strings.
+	// maxCronIDLen (64) matches the IM-side guard in dispatch/commands.go.
+	if len(id) > maxCronIDLenDashboard {
+		http.Error(w, "id too long", http.StatusBadRequest)
 		return
 	}
 
@@ -397,7 +452,11 @@ func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
-		writeJSON(w, map[string]any{"valid": false, "error": err.Error()})
+		// Don't echo the raw robfig/cron parser error: it leaks field offsets
+		// and internal token names that help an attacker enumerate accepted
+		// grammar. Log the detail for operators instead.
+		slog.Debug("cron preview parse failed", "err", err)
+		writeJSON(w, map[string]any{"valid": false, "error": "invalid schedule expression"})
 		return
 	}
 
@@ -431,6 +490,10 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
+	if len(id) > maxCronIDLenDashboard {
+		http.Error(w, "id too long", http.StatusBadRequest)
+		return
+	}
 
 	// Use pointers so the caller can distinguish "leave as-is" from "clear".
 	// Sending "work_dir": "" explicitly clears the override; omitting the key
@@ -453,6 +516,16 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		req.Notify == nil && req.NotifyPlatform == nil && req.NotifyChatID == nil &&
 		req.FreshContext == nil {
 		http.Error(w, "at least one field must be provided", http.StatusBadRequest)
+		return
+	}
+	if req.Prompt != nil {
+		if err := validateCronPrompt(*req.Prompt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if req.Schedule != nil && len(*req.Schedule) > maxCronScheduleBytesDashboard {
+		http.Error(w, "schedule too long", http.StatusBadRequest)
 		return
 	}
 
@@ -510,7 +583,10 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		if errors.Is(err, cron.ErrJobNotFound) {
-			http.Error(w, err.Error(), http.StatusNotFound)
+			// Fixed string (not err.Error()) to stay consistent with
+			// handleDelete and guard against future ErrJobNotFound variants
+			// that carry a wrapped ID.
+			http.Error(w, "job not found", http.StatusNotFound)
 		} else {
 			// Sanitize: the underlying parser error can leak internal field
 			// names and offsets if the new schedule is rejected.

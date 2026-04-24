@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"time"
 
@@ -15,6 +16,31 @@ import (
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
+
+// redactGitRemoteURL strips embedded userinfo (user:password@) from a git
+// remote URL before exposing it over the dashboard API. `.git/config` often
+// stores credentials like https://user:pat@github.com/org/repo when the user
+// originally cloned with a token; surfacing that verbatim in JSON responses
+// leaks the PAT to any browser session.
+//
+// SCP-style SSH URLs (`git@github.com:org/repo.git`) carry no credentials
+// and parse as relative paths (no Scheme) under url.Parse — they pass through
+// unchanged. Returning "" for those would make the dashboard lose the clone
+// URL for every SSH-cloned project, which is a worse failure mode than the
+// theoretical "userinfo in an unparseable form" edge case.
+func redactGitRemoteURL(raw string) string {
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" {
+		return raw
+	}
+	if u.User != nil {
+		u.User = nil
+	}
+	return u.String()
+}
 
 // plannerModelRe restricts the model identifier to safe characters so a
 // crafted value cannot sneak extra CLI flags (e.g. " --dangerously-skip-permissions")
@@ -55,7 +81,7 @@ func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			"planner_model":  h.projectMgr.EffectivePlannerModel(p),
 			"config":         p.Config,
 			"favorite":       p.Config.Favorite,
-			"git_remote_url": p.GitRemoteURL,
+			"git_remote_url": redactGitRemoteURL(p.GitRemoteURL),
 			"github":         p.IsGitHub,
 		})
 	}

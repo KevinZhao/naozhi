@@ -98,6 +98,14 @@ func validateWorkspace(workspace, allowedRoot string) (string, error) {
 	if workspace == "" {
 		return "", fmt.Errorf("workspace is not a valid directory")
 	}
+	// Explicit absolute-path contract: filepath.Clean preserves relative input
+	// verbatim, and when allowedRoot is absolute the HasPrefix check below
+	// will always fail for a relative workspace — correct today but implicit.
+	// Reject upfront so a future relative allowedRoot cannot silently admit
+	// `../etc/passwd` style traversal.
+	if !filepath.IsAbs(workspace) {
+		return "", fmt.Errorf("workspace is not a valid directory")
+	}
 	wsPath := filepath.Clean(workspace)
 	resolved, err := filepath.EvalSymlinks(wsPath)
 	if err != nil {

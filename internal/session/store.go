@@ -70,16 +70,20 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 		// Use getSessionID to avoid data race with concurrent Send.
 		// Fallback to process's SessionID which is set earlier (on system/init),
 		// before Send() completes and propagates it to ManagedSession.
+		// Snapshot loadProcess() once — calling it twice (once for sid,
+		// again for cost) can observe different processes across a
+		// concurrent spawnSession, where the second call hits a fresh
+		// process whose TotalCost() is 0 and silently clobbers the real
+		// historical cost that should have been persisted.
+		proc := s.loadProcess()
 		sid := s.getSessionID()
-		if sid == "" {
-			if p := s.loadProcess(); p != nil {
-				sid = p.GetSessionID()
-			}
+		if sid == "" && proc != nil {
+			sid = proc.GetSessionID()
 		}
 		if sid != "" {
 			var cost float64
-			if p := s.loadProcess(); p != nil {
-				cost = p.TotalCost()
+			if proc != nil {
+				cost = proc.TotalCost()
 			} else {
 				cost = s.totalCost
 			}

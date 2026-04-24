@@ -22,6 +22,7 @@ type fakeProcess struct {
 	isRunning bool
 	closeOnce sync.Once
 	entries   []cli.EventEntry // returned by EventEntries
+	totalCost float64          // returned by TotalCost
 }
 
 func newIdleProc() *fakeProcess {
@@ -84,7 +85,11 @@ func (f *fakeProcess) GetState() cli.ProcessState {
 	return cli.StateReady
 }
 
-func (f *fakeProcess) TotalCost() float64 { return 0 }
+func (f *fakeProcess) TotalCost() float64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.totalCost
+}
 func (f *fakeProcess) EventEntries() []cli.EventEntry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -246,6 +251,40 @@ func TestNewRouterNoStore(t *testing.T) {
 	_, total := r.Stats()
 	if total != 0 {
 		t.Errorf("total = %d, want 0 when no store", total)
+	}
+}
+
+// TestSnapshotCostFallback exercises the Snapshot cost-fallback path that
+// fixes the "$0.00 flash after resume" bug: when a freshly spawned process
+// is attached but hasn't yet received a result event (proc.TotalCost()==0),
+// Snapshot must surface the historical cost carried by s.totalCost rather
+// than 0.
+func TestSnapshotCostFallback(t *testing.T) {
+	tests := []struct {
+		name     string
+		procCost float64
+		sessCost float64
+		procNil  bool
+		wantCost float64
+	}{
+		{name: "no process uses session cost", procNil: true, sessCost: 1.25, wantCost: 1.25},
+		{name: "fresh process falls back to session cost", procCost: 0, sessCost: 1.25, wantCost: 1.25},
+		{name: "live process cost overrides session cost", procCost: 2.50, sessCost: 1.25, wantCost: 2.50},
+		{name: "both zero stays zero", procCost: 0, sessCost: 0, wantCost: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := &ManagedSession{key: "k", totalCost: tt.sessCost}
+			if !tt.procNil {
+				p := newIdleProc()
+				p.totalCost = tt.procCost
+				s.storeProcess(p)
+			}
+			got := s.Snapshot().TotalCost
+			if got != tt.wantCost {
+				t.Errorf("Snapshot.TotalCost = %v, want %v", got, tt.wantCost)
+			}
+		})
 	}
 }
 

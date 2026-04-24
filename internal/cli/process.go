@@ -502,6 +502,12 @@ func (p *Process) readLoop() {
 			p.mu.Lock()
 			p.State = StateDead
 			p.mu.Unlock()
+			// Close shim conn so heartbeatLoop stops writing pings into a dead
+			// socket and the bufio.Writer's fd is released promptly. Without
+			// this, if the process isn't subsequently Kill/Detach'd (e.g. when
+			// Router.Cleanup evicts it from the map), the fd leaks to GC.
+			// shimConn.Close is idempotent, so a later Kill/Detach is safe.
+			_ = p.shimConn.Close()
 			return
 
 		case "pong":
@@ -1101,7 +1107,11 @@ func EventEntriesFromEvent(ev Event) []EventEntry {
 						entry.Type = "todo"
 						entry.Tool = "TodoWrite"
 						entry.Summary = TodosSummary(todos)
-						entry.Detail = TodosDetailJSON(todos)
+						// block.Input is already valid JSON (we just parsed
+						// it); stash it directly instead of re-marshalling
+						// ParseTodos's decoded struct. Saves an Unmarshal+
+						// Marshal roundtrip per TodoWrite event.
+						entry.Detail = string(block.Input)
 					}
 				}
 			case "text":

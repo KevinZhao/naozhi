@@ -647,16 +647,22 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 // the client disconnects, the wait times out (60s), or a newer subscription
 // has taken over this key (generation mismatch).
 func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-chan struct{}) (bool, *session.ManagedSession) {
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
+	// Timer.Reset reuses a single timer allocation across the 12 iterations
+	// instead of allocating a Ticker and its runtime goroutine; resubscribe
+	// is a cold-ish path but client flap can trigger N simultaneous calls.
+	timer := time.NewTimer(5 * time.Second)
+	defer timer.Stop()
 
-	for range 12 {
+	for i := range 12 {
+		if i > 0 {
+			timer.Reset(5 * time.Second)
+		}
 		select {
 		case <-c.done:
 			return false, nil
 		case <-h.ctx.Done():
 			return false, nil
-		case <-ticker.C:
+		case <-timer.C:
 		}
 
 		// Check if a newer subscription (from handleSubscribe) has taken over.
@@ -848,20 +854,24 @@ func (h *Hub) doBroadcastSessionsUpdate() {
 	h.broadcastToAuthenticated(data)
 }
 
+// cronResultMsg is the WS payload broadcast on cron job completion. Declared
+// as a named type (not an inline anonymous struct) so json/reflect caches the
+// type descriptor once across all calls.
+type cronResultMsg struct {
+	Type   string `json:"type"`
+	JobID  string `json:"job_id"`
+	Result string `json:"result,omitempty"`
+	Error  string `json:"error,omitempty"`
+}
+
 // BroadcastCronResult notifies all connected WS clients that a cron job completed.
 func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
-	msg := struct {
-		Type   string `json:"type"`
-		JobID  string `json:"job_id"`
-		Result string `json:"result,omitempty"`
-		Error  string `json:"error,omitempty"`
-	}{
+	data, err := marshalPooled(cronResultMsg{
 		Type:   "cron_result",
 		JobID:  jobID,
 		Result: result,
 		Error:  errMsg,
-	}
-	data, err := marshalPooled(msg)
+	})
 	if err != nil {
 		return
 	}

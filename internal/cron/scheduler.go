@@ -1,7 +1,9 @@
 package cron
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -69,6 +71,13 @@ type SchedulerConfig struct {
 	// When it is cancelled (e.g. during application shutdown) all running cron jobs are
 	// interrupted promptly.
 	ParentCtx context.Context
+	// AllowedRoot mirrors Server.allowedRoot: the only directory tree under
+	// which cron jobs may execute. Persisted jobs whose WorkDir falls outside
+	// this root are refused at Start() load time — otherwise an attacker who
+	// tampers with cron_jobs.json on disk (or a job persisted before the
+	// operator configured AllowedRoot) could escape the sandbox at replay.
+	// Empty disables the check (back-compat for tests and legacy deployments).
+	AllowedRoot string
 }
 
 // NotifyTarget identifies an IM channel for cron completion notifications.
@@ -103,6 +112,11 @@ type Scheduler struct {
 	// but no per-job target; zero value means no default (then notifications
 	// only flow when per-job NotifyPlatform/NotifyChatID are set).
 	notifyDefault NotifyTarget
+	// allowedRoot restricts job WorkDir to a filesystem subtree. Applied at
+	// Start() load time to catch tampered/legacy store entries, and at
+	// execute() time to catch symlink races that retarget post-creation.
+	// Empty disables enforcement (tests/legacy).
+	allowedRoot string
 	// stopCtx is the scheduler's lifecycle context. Storing context in a
 	// struct is usually an anti-pattern, but here execute() is invoked via
 	// a callback from robfig/cron whose signature has no ctx parameter, so
@@ -129,11 +143,12 @@ type Scheduler struct {
 	// maxJobsHardCap so the trade is cheap vs. a correctness gap.
 	runningJobs sync.Map // map[jobID]*atomic.Bool
 
-	// storeMu serialises saveSnapshot writes so concurrent callers do not race
-	// on the same `.tmp` file WriteFileAtomic uses. Without this mutex, a
-	// dashboard UpdateJob racing with a scheduled tick's recordResult would
-	// write to cron_jobs.json.tmp simultaneously, producing a torn file on
-	// whichever rename wins. Held only around the saveJobs call — snapshot
+	// storeMu serialises saveSnapshot writes so the last-writer-wins order
+	// matches the order snapshots were marshaled under s.mu. WriteFileAtomic
+	// now uses os.CreateTemp so the underlying .tmp file is unique per call
+	// and cannot be corrupted by parallel writers; storeMu remains only as
+	// a logical barrier against reordering (an older snapshot rename-winning
+	// over a newer one). Held only around the saveJobs call — snapshot
 	// construction stays on s.mu to avoid cross-lock latency.
 	storeMu sync.Mutex
 }
@@ -149,6 +164,34 @@ func (s *Scheduler) SetOnExecute(fn OnExecuteFunc) {
 // overload. 500 jobs ≈ 500 tick timers; well within robfig/cron's tested
 // scale, but higher values tend to indicate a config mistake.
 const maxJobsHardCap = 500
+
+// workDirUnderRoot reports whether workDir resolves (after symlink evaluation)
+// to a path at or under allowedRoot. EvalSymlinks is done per-call so the
+// check reflects current filesystem state, which closes the TOCTOU window
+// between creation-time validateWorkspace and execute-time workspace binding.
+// Both arguments must be absolute; relative workDir is rejected.
+func workDirUnderRoot(workDir, allowedRoot string) bool {
+	if workDir == "" || allowedRoot == "" {
+		return true // empty WorkDir uses router default; empty root = disabled
+	}
+	if !filepath.IsAbs(workDir) {
+		return false
+	}
+	resolved, err := filepath.EvalSymlinks(workDir)
+	if err != nil {
+		// Missing directory / permission denied — refuse to execute rather
+		// than silently re-create the sandbox escape.
+		return false
+	}
+	rootResolved, err := filepath.EvalSymlinks(allowedRoot)
+	if err != nil {
+		rootResolved = allowedRoot
+	}
+	if resolved == rootResolved {
+		return true
+	}
+	return strings.HasPrefix(resolved, rootResolved+string(filepath.Separator))
+}
 
 // NewScheduler creates a scheduler. Call Start() to begin.
 func NewScheduler(cfg SchedulerConfig) *Scheduler {
@@ -190,6 +233,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		execTimeout:   cfg.ExecTimeout,
 		location:      loc,
 		notifyDefault: cfg.NotifyDefault,
+		allowedRoot:   cfg.AllowedRoot,
 		stopCtx:       stopCtx,
 		stopCancel:    stopCancel,
 	}
@@ -209,6 +253,15 @@ func (s *Scheduler) Start() error {
 	var stubs []stubRow
 	if restored := loadJobs(s.storePath); restored != nil {
 		for _, j := range restored {
+			// Reject persisted jobs whose WorkDir escapes the configured
+			// sandbox. Replaying an on-disk tampered entry must not grant
+			// filesystem access that validateWorkspace would reject at
+			// creation. When allowedRoot is empty (tests), this is a no-op.
+			if s.allowedRoot != "" && j.WorkDir != "" && !workDirUnderRoot(j.WorkDir, s.allowedRoot) {
+				slog.Warn("cron job work_dir outside allowed_root; skipping",
+					"id", j.ID, "work_dir", j.WorkDir)
+				continue
+			}
 			if j.Paused {
 				s.jobs[j.ID] = j
 				stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt})
@@ -299,11 +352,18 @@ func (s *Scheduler) Stop() {
 			"budget", triggerBudget)
 	}
 	s.mu.Lock()
-	snap := s.snapshotJobs()
+	data, err := s.marshalJobsLocked()
 	s.mu.Unlock()
+	if err != nil {
+		slog.Error("marshal cron store on shutdown", "err", err)
+		return
+	}
 	s.storeMu.Lock()
 	defer s.storeMu.Unlock()
-	if err := saveJobs(s.storePath, snap); err != nil {
+	if s.storePath == "" {
+		return
+	}
+	if err := osutil.WriteFileAtomic(s.storePath, data, 0600); err != nil {
 		slog.Error("save cron store on shutdown", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
 }
@@ -348,10 +408,10 @@ func (s *Scheduler) AddJob(j *Job) error {
 		}
 	}
 	s.jobs[j.ID] = j
-	snap := s.snapshotJobs()
+	save := s.persistJobsLocked()
 	s.mu.Unlock()
 
-	s.saveSnapshot(snap)
+	save()
 	s.registerStub(j)
 	return nil
 }
@@ -442,10 +502,10 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	// entry here could split the CAS gate between two goroutines and permit
 	// double execution. Retaining the entry is bounded by maxJobsHardCap
 	// (one *atomic.Bool per historical job) — cheap vs a correctness gap.
-	snap := s.snapshotJobs()
+	save := s.persistJobsLocked()
 	s.mu.Unlock()
 
-	s.saveSnapshot(snap)
+	save()
 	return j, nil
 }
 
@@ -468,10 +528,10 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 		j.entryID = 0
 	}
 	j.Paused = true
-	snap := s.snapshotJobs()
+	save := s.persistJobsLocked()
 	s.mu.Unlock()
 
-	s.saveSnapshot(snap)
+	save()
 	return j, nil
 }
 
@@ -494,10 +554,10 @@ func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 		return nil, err
 	}
 	j.Paused = false
-	snap := s.snapshotJobs()
+	save := s.persistJobsLocked()
 	s.mu.Unlock()
 
-	s.saveSnapshot(snap)
+	save()
 	return j, nil
 }
 
@@ -581,13 +641,13 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		}
 	}
 
-	snap := s.snapshotJobs()
+	save := s.persistJobsLocked()
 	// Value-copy while still under lock so the caller sees a stable result
 	// even if another goroutine mutates the job right after we unlock.
 	result := *j
 	s.mu.Unlock()
 
-	s.saveSnapshot(snap)
+	save()
 	// Pass the snapshotted value (via result) to registerStub so a concurrent
 	// SetJobPrompt cannot tear the Prompt/WorkDir pointers we read.
 	s.registerStub(&result)
@@ -626,10 +686,10 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 		}
 		j.Paused = false
 	}
-	snap := s.snapshotJobs()
+	save := s.persistJobsLocked()
 	s.mu.Unlock()
 
-	s.saveSnapshot(snap)
+	save()
 	slog.Info("cron job prompt set", "id", id, "prompt_len", len(prompt))
 	return nil
 }
@@ -719,10 +779,10 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 	delete(s.jobs, j.ID)
 	// Retain the runningJobs entry for the same reason as DeleteJobByID —
 	// a concurrent execute() may still be mid-CAS on this guard.
-	snap := s.snapshotJobs()
+	save := s.persistJobsLocked()
 	s.mu.Unlock()
 
-	s.saveSnapshot(snap)
+	save()
 	return j, nil
 }
 
@@ -745,10 +805,10 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 		j.entryID = 0
 	}
 	j.Paused = true
-	snap := s.snapshotJobs()
+	save := s.persistJobsLocked()
 	s.mu.Unlock()
 
-	s.saveSnapshot(snap)
+	save()
 	return j, nil
 }
 
@@ -771,10 +831,10 @@ func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
 		return nil, err
 	}
 	j.Paused = false
-	snap := s.snapshotJobs()
+	save := s.persistJobsLocked()
 	s.mu.Unlock()
 
-	s.saveSnapshot(snap)
+	save()
 	return j, nil
 }
 
@@ -977,6 +1037,16 @@ func (s *Scheduler) execute(j *Job) {
 	opts := s.agents[agentID]
 	opts.Exempt = true // cron sessions must not count toward maxProcs or evict user sessions
 	if workDir != "" {
+		// Re-check allowedRoot at execute time to close the symlink-swap race:
+		// validateWorkspace at creation resolved symlinks once, but the target
+		// could have been retargeted since. workDirUnderRoot re-evaluates
+		// symlinks against the current filesystem state before binding.
+		if s.allowedRoot != "" && !workDirUnderRoot(workDir, s.allowedRoot) {
+			log.Warn("cron job work_dir outside allowed_root; aborting run",
+				"work_dir", workDir)
+			s.recordResult(j, "", "work_dir outside allowed_root")
+			return
+		}
 		opts.Workspace = filepath.Clean(workDir)
 	}
 	key := "cron:" + jobID
@@ -1146,19 +1216,22 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg string) {
 	}
 	s.mu.Lock()
 	// If the job was deleted between execute()'s snapshot and recordResult's
-	// write-back, dropping the update prevents writing to an orphan pointer
-	// whose mutations never appear in a snapshot. Caller still gets the
-	// onExecute callback so any downstream notification still fires.
-	if _, ok := s.jobs[j.ID]; ok {
-		j.LastRunAt = time.Now()
-		j.LastResult = result
-		j.LastError = errMsg
+	// write-back, skip both the persist and the onExecute callback: broadcasting
+	// a "completed" result for an already-deleted job can flash a stale row in
+	// the dashboard (Round 49 HIGH-4) and persists nothing useful since the job
+	// is already gone from s.jobs.
+	if _, ok := s.jobs[j.ID]; !ok {
+		s.mu.Unlock()
+		return
 	}
-	snap := s.snapshotJobs()
+	j.LastRunAt = time.Now()
+	j.LastResult = result
+	j.LastError = errMsg
+	save := s.persistJobsLocked()
 	fn := s.onExecute
 	s.mu.Unlock()
 
-	s.saveSnapshot(snap)
+	save()
 	if fn != nil {
 		fn(j.ID, result, errMsg)
 	}
@@ -1213,26 +1286,47 @@ func (s *Scheduler) findByPrefix(idPrefix, plat, chatID string) (*Job, error) {
 	}
 }
 
-// snapshotJobs returns a deep copy of the jobs map, safe to use outside the lock.
-// Each Job is value-copied so the caller can read fields without holding mu.
-func (s *Scheduler) snapshotJobs() map[string]*Job {
-	snap := make(map[string]*Job, len(s.jobs))
-	for k, v := range s.jobs {
-		jCopy := *v
-		jCopy.entryID = 0 // runtime-only, not persisted
-		snap[k] = &jCopy
+// marshalJobsLocked serialises the current jobs map to JSON while the caller
+// still holds s.mu. Round 47: replaces the map clone on every mutation. Safe
+// because json.Marshal only reads Job fields (no mutation) and the output []byte
+// is independent of s.jobs lifetime, so the caller can drop s.mu immediately.
+// The (*Job).entryID field is unexported and therefore invisible to Marshal,
+// so the runtime-only value never leaks into cron_jobs.json.
+func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
+	entries := make([]*Job, 0, len(s.jobs))
+	for _, j := range s.jobs {
+		entries = append(entries, j)
 	}
-	return snap
+	return json.Marshal(entries)
 }
 
-// saveSnapshot persists a jobs snapshot to disk. Serialised by storeMu so
-// concurrent callers do not race on the `.tmp` file inside WriteFileAtomic;
-// without the mutex, two parallel saves corrupt each other's temp file.
-func (s *Scheduler) saveSnapshot(snapshot map[string]*Job) {
+// persistJobsLocked marshals under the caller's s.mu and writes asynchronously.
+// Callers hold s.mu (write or read), invoke this to produce the byte payload
+// and the save func, unlock, then call the save func. This keeps marshal
+// latency in the critical section (needed for snapshot consistency) but moves
+// disk I/O + storeMu contention outside. Returns a no-op if marshal fails so
+// callers do not need error plumbing — the error is logged internally.
+func (s *Scheduler) persistJobsLocked() func() {
+	data, err := s.marshalJobsLocked()
+	if err != nil {
+		slog.Error("marshal cron store", "err", err)
+		return func() {}
+	}
+	return func() { s.saveMarshaled(data) }
+}
+
+// saveMarshaled persists an already-marshaled jobs payload to disk. Serialised
+// by storeMu so an older snapshot cannot rename-win over a newer one — the
+// .tmp file itself is now unique per call (os.CreateTemp in WriteFileAtomic),
+// so storeMu is a logical ordering barrier rather than file-level protection.
+func (s *Scheduler) saveMarshaled(data []byte) {
 	s.storeMu.Lock()
 	defer s.storeMu.Unlock()
-	if err := saveJobs(s.storePath, snapshot); err != nil {
-		slog.Error("save cron store", "err", err)
+	if s.storePath == "" {
+		return
+	}
+	if err := osutil.WriteFileAtomic(s.storePath, data, 0600); err != nil {
+		slog.Error("save cron store", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
 }
 
@@ -1241,7 +1335,10 @@ func (s *Scheduler) saveSnapshot(snapshot map[string]*Job) {
 type slogWriter struct{}
 
 func (slogWriter) Write(p []byte) (int, error) {
-	msg := strings.TrimRight(string(p), "\n")
+	// Trim on the byte slice first so the single string conversion only
+	// happens on the already-shortened payload — avoids one alloc per cron
+	// log line.
+	msg := string(bytes.TrimRight(p, "\n"))
 	slog.Warn(msg)
 	return len(p), nil
 }

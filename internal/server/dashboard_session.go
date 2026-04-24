@@ -21,6 +21,12 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
+// maxResumeLastPromptBytes caps the last_prompt field on /api/sessions/resume.
+// The body-level MaxBytesReader is 1 MiB; this field-level cap prevents a
+// megabyte-scale string from being persisted on the session and then echoed
+// to every dashboard client on each /api/sessions poll.
+const maxResumeLastPromptBytes = 2 * 1024
+
 // SessionHandlers groups the session list, events, delete, and resume API endpoints.
 type SessionHandlers struct {
 	router      *session.Router
@@ -84,10 +90,17 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 
 		for i := range snapshots {
 			if project.IsPlannerKey(snapshots[i].Key) {
-				parts := strings.SplitN(snapshots[i].Key, ":", 3)
-				if len(parts) == 3 {
-					snapshots[i].Project = parts[1]
-					snapshots[i].IsPlanner = true
+				// Planner keys look like "planner:{name}:{agent}". SplitN
+				// allocates a []string per poll; use IndexByte twice for
+				// zero-alloc extraction of the middle segment.
+				key := snapshots[i].Key
+				const plannerPrefix = "planner:"
+				if len(key) > len(plannerPrefix) {
+					rest := key[len(plannerPrefix):]
+					if j := strings.IndexByte(rest, ':'); j > 0 {
+						snapshots[i].Project = rest[:j]
+						snapshots[i].IsPlanner = true
+					}
 				}
 			} else if name := wsMap[snapshots[i].Workspace]; name != "" {
 				snapshots[i].Project = name
@@ -152,11 +165,15 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		projectList = make([]map[string]any, 0, len(projects))
 		for _, p := range projects {
 			projectList = append(projectList, map[string]any{
-				"name":           p.Name,
-				"path":           p.Path,
-				"node":           "local",
-				"favorite":       p.Config.Favorite,
-				"git_remote_url": p.GitRemoteURL,
+				"name":     p.Name,
+				"path":     p.Path,
+				"node":     "local",
+				"favorite": p.Config.Favorite,
+				// Strip embedded userinfo (PAT) before handing the URL to any
+				// dashboard client. Round 46 redacted /api/projects but missed
+				// this path — /api/sessions is polled every few seconds, so
+				// the leak is actually larger here.
+				"git_remote_url": redactGitRemoteURL(p.GitRemoteURL),
 				"github":         p.IsGitHub,
 			})
 		}
@@ -176,8 +193,12 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 				if v, ok := item["favorite"].(bool); ok {
 					entry["favorite"] = v
 				}
+				// Remote node may be running an older binary that hasn't
+				// redacted the URL yet — always run the redactor on data
+				// forwarded via the node cache so credentials never leak
+				// even if a peer node is behind on patches.
 				if v, ok := item["git_remote_url"].(string); ok && v != "" {
-					entry["git_remote_url"] = v
+					entry["git_remote_url"] = redactGitRemoteURL(v)
 				}
 				if v, ok := item["github"].(bool); ok {
 					entry["github"] = v
@@ -350,6 +371,20 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	if !discovery.IsValidSessionID(req.SessionID) {
 		http.Error(w, "invalid session_id", http.StatusBadRequest)
 		return
+	}
+	// Bound last_prompt so a single resume request can't ship a megabyte-scale
+	// string that is then broadcast on every /api/sessions poll. Control chars
+	// would also inject into structured slog JSONHandler output.
+	if len(req.LastPrompt) > maxResumeLastPromptBytes {
+		http.Error(w, "last_prompt too long", http.StatusBadRequest)
+		return
+	}
+	for i := 0; i < len(req.LastPrompt); i++ {
+		c := req.LastPrompt[i]
+		if c == 0 || (c < 0x20 && c != '\t') || c == 0x7f {
+			http.Error(w, "last_prompt contains invalid control characters", http.StatusBadRequest)
+			return
+		}
 	}
 
 	workspace := req.Workspace

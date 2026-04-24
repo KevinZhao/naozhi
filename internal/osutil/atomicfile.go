@@ -39,36 +39,49 @@ func IsDiskFull(err error) bool {
 // Callers still own mkdir of the parent directory so they can pick an
 // appropriate permission and surface a distinct error (vs a write failure).
 //
-// Concurrency: the temp path is a fixed `path + ".tmp"`, so two concurrent
-// calls with the same destination will race on the temp file. All in-tree
-// callers serialise writes behind a per-store mutex; new callers must do
-// the same or use a distinct destination path.
+// Concurrency: the temp file name is generated via os.CreateTemp using a
+// unique suffix, so two concurrent calls with the same destination cannot
+// race on the temp file. Historic callers that took a per-store mutex may
+// keep it for higher-level reasons (ordering of data written) but are not
+// required to protect the temp file itself.
 func WriteFileAtomic(path string, data []byte, perm fs.FileMode) error {
-	tmp := path + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, perm)
+	dir := filepath.Dir(path)
+	base := filepath.Base(path)
+	// Pattern `.base.*.tmp` keeps temp files alongside the destination
+	// (same filesystem, so rename is atomic) and visually groups them for
+	// operators doing a crash-recovery sweep. The leading dot hides them
+	// from default `ls` output.
+	f, err := os.CreateTemp(dir, "."+base+".*.tmp")
 	if err != nil {
-		return fmt.Errorf("open %s: %w", tmp, err)
+		return fmt.Errorf("create temp in %s: %w", dir, err)
+	}
+	tmp := f.Name()
+	cleanup := func() { _ = os.Remove(tmp) }
+	if err := os.Chmod(tmp, perm); err != nil {
+		f.Close()
+		cleanup()
+		return fmt.Errorf("chmod %s: %w", tmp, err)
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
-		_ = os.Remove(tmp)
+		cleanup()
 		return fmt.Errorf("write %s: %w", tmp, err)
 	}
 	if err := f.Sync(); err != nil {
 		f.Close()
-		_ = os.Remove(tmp)
+		cleanup()
 		return fmt.Errorf("sync %s: %w", tmp, err)
 	}
 	if err := f.Close(); err != nil {
-		_ = os.Remove(tmp)
+		cleanup()
 		return fmt.Errorf("close %s: %w", tmp, err)
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		_ = os.Remove(tmp)
+		cleanup()
 		return fmt.Errorf("rename %s to %s: %w", tmp, path, err)
 	}
-	if err := SyncDir(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("fsync dir %s: %w", filepath.Dir(path), err)
+	if err := SyncDir(dir); err != nil {
+		return fmt.Errorf("fsync dir %s: %w", dir, err)
 	}
 	return nil
 }

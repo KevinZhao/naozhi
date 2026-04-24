@@ -135,12 +135,20 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("register write: %w", err)
 	}
 
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	// SetReadDeadline error means the underlying net.Conn is already torn
+	// down — returning early is correct because ReadJSON below would block
+	// forever without a deadline. The same applies to the clear below and
+	// the pong-path deadlines downstream.
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return false, fmt.Errorf("set register read deadline: %w", err)
+	}
 	var ack node.ReverseMsg
 	if err := conn.ReadJSON(&ack); err != nil {
 		return false, fmt.Errorf("register ack read: %w", err)
 	}
-	conn.SetReadDeadline(time.Time{})
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		return false, fmt.Errorf("clear register read deadline: %w", err)
+	}
 
 	if ack.Type != "registered" {
 		return false, fmt.Errorf("register failed: %s", ack.Error)
@@ -151,10 +159,14 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	// ReadDeadline resets on any pong response from the primary.
 	const wsReadTimeout = 90 * time.Second
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
-		return nil
+		// SetReadDeadline error here means the conn was torn down between
+		// the pong arrival and our refresh; surface it so the outer
+		// ReadJSON loop exits via its error path instead of blocking.
+		return conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
 	})
-	conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+	if err := conn.SetReadDeadline(time.Now().Add(wsReadTimeout)); err != nil {
+		return false, fmt.Errorf("set initial read deadline: %w", err)
+	}
 
 	return true, c.handleConn(ctx, conn)
 }
@@ -206,6 +218,10 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 				err := conn.WriteMessage(websocket.PingMessage, nil)
 				writeMu.Unlock()
 				if err != nil {
+					// Force the outer ReadJSON to unblock immediately so the
+					// connection rebuilds instead of waiting out the 90s
+					// ReadDeadline for TCP to surface the dead peer.
+					_ = conn.Close()
 					return
 				}
 			case <-connCtx.Done():
@@ -612,9 +628,16 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 				}
 				return
 			}
-			// Re-fetch session in case it was replaced (e.g. via /new).
-			if cur := c.router.GetSession(key); cur != nil {
+			// Re-fetch session in case it was replaced (e.g. via /new). A
+			// replaced session has a fresh event log whose wall-clock
+			// timestamps can be earlier than the old lastTime (NTP jumps or
+			// fast /new), causing EntriesSince to drop the new session's
+			// first events. Reset lastTime on pointer change so the first
+			// notify after a swap delivers the full new history.
+			if cur := c.router.GetSession(key); cur != nil && cur != sess {
 				sess = cur
+				lastTime = 0
+				lastState = ""
 			}
 			entries := sess.EventEntriesSince(lastTime)
 			if len(entries) > 0 {

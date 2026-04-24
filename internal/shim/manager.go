@@ -274,7 +274,10 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 
 	// Move shim (and CLI) to an independent systemd scope so they survive
 	// service restarts. Must happen after connect so we have the CLI PID from hello.
-	moveToShimsCgroup(cmd.Process.Pid, handle.Hello.CLIPID)
+	// Thread the caller's ctx so SIGTERM during a spawn storm cancels the
+	// busctl subprocess instead of letting dozens run in parallel for their
+	// full 3 s budget past shutdown.
+	moveToShimsCgroup(ctx, cmd.Process.Pid, handle.Hello.CLIPID)
 
 	m.mu.Lock()
 	// Guard against a concurrent StartShim/Reconnect having already installed
@@ -449,7 +452,18 @@ func (m *Manager) Discover() ([]State, error) {
 
 	var states []State
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if e.IsDir() {
+			continue
+		}
+		// Clean up leftover temp files from a crashed WriteStateFile. The
+		// `.shim-state-*.tmp` naming comes from os.CreateTemp, so these never
+		// carry usable state — a successful write would have renamed them
+		// into place. Leaving them lying around accumulates across restarts.
+		if strings.HasPrefix(e.Name(), ".shim-state-") && strings.HasSuffix(e.Name(), ".tmp") {
+			_ = os.Remove(filepath.Join(m.stateDir, e.Name()))
+			continue
+		}
+		if !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
 		path := filepath.Join(m.stateDir, e.Name())
@@ -630,7 +644,7 @@ func (m *Manager) DetachAll() {
 // directly with KillMode=none, making the processes invisible to the
 // naozhi.service lifecycle. Falls back to direct cgroup move if
 // busctl is not available.
-func moveToShimsCgroup(shimPID, cliPID int) {
+func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int) {
 	scopeName := fmt.Sprintf("naozhi-shim-%d.scope", shimPID)
 
 	// Build PID list for the scope
@@ -653,7 +667,7 @@ func moveToShimsCgroup(shimPID, cliPID int) {
 	args = append(args, pids...)
 	args = append(args, "KillMode", "s", "none", "0")
 
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(parentCtx, 3*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sudo", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
@@ -664,9 +678,9 @@ func moveToShimsCgroup(shimPID, cliPID int) {
 		}
 		slog.Warn("moveToShimsCgroup: systemd scope failed, trying direct cgroup — zero-downtime restart may not survive service restart",
 			"pid", shimPID, "err", err, "output", string(out))
-		moveToShimsCgroupDirect(shimPID)
+		moveToShimsCgroupDirect(parentCtx, shimPID)
 		if cliPID > 0 {
-			moveToShimsCgroupDirect(cliPID)
+			moveToShimsCgroupDirect(parentCtx, cliPID)
 		}
 		return
 	}
@@ -676,9 +690,9 @@ func moveToShimsCgroup(shimPID, cliPID int) {
 // moveToShimsCgroupDirect is the fallback: move a process to a root-level
 // cgroup directly. Less reliable than systemd scope (systemd may still
 // clean it up during restart).
-func moveToShimsCgroupDirect(pid int) {
+func moveToShimsCgroupDirect(parentCtx context.Context, pid int) {
 	const procsFile = "/sys/fs/cgroup/naozhi-shims/cgroup.procs"
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	ctx, cancel := context.WithTimeout(parentCtx, 3*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sudo", "-n", "tee", procsFile)
 	cmd.Stdin = strings.NewReader(strconv.Itoa(pid) + "\n")

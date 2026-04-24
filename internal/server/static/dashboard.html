@@ -109,16 +109,24 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .event.result .event-content{color:#7ee787;background:rgba(126,231,135,.05);padding:4px 8px;border-radius:4px;border-left:2px solid var(--nz-green)}
 .event.agent .event-content{color:#a5d6ff}
 .event.agent{background:rgba(56,139,253,.05);border-left:2px solid #388bfd}
-/* Todo checklist bubble */
-.event.todo .event-icon{background:rgba(255,196,92,.15);color:#ffc45c;font-size:13px}
-.event.todo .event-content{color:var(--nz-text);background:rgba(255,196,92,.06);border:1px solid rgba(255,196,92,.2);border-radius:10px;padding:10px 14px;max-width:clamp(600px,55vw,900px)}
-.todo-summary{font-size:12px;color:var(--nz-text-dim);margin-bottom:6px}
+/* Todo checklist bubble — neutral framing, keeps per-item legibility */
+.event.todo .event-icon{background:rgba(139,148,158,.12);color:var(--nz-text-mute);font-size:12px}
+.event.todo .event-content{color:var(--nz-text);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:8px;padding:10px 14px;max-width:clamp(600px,55vw,900px)}
+.todo-header{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid var(--nz-bg-2)}
+.todo-title{font-size:13px;font-weight:600;color:var(--nz-text-strong);letter-spacing:.02em}
+.todo-counts{display:flex;gap:6px;font-variant-numeric:tabular-nums}
+.todo-count{display:inline-flex;align-items:center;padding:1px 8px;border-radius:10px;background:var(--nz-bg-2);font-size:11px;line-height:1.5;color:var(--nz-text-dim)}
+.todo-count.done{color:var(--nz-green);background:rgba(63,185,80,.08)}
+.todo-count.active{color:var(--nz-accent);background:rgba(88,166,255,.1)}
 .todo-list{list-style:none;margin:0;padding:0}
-.todo-item{display:flex;gap:8px;align-items:flex-start;padding:3px 0;font-size:14px;line-height:1.5}
-.todo-mark{flex-shrink:0;width:18px;text-align:center}
+.todo-item{display:flex;gap:8px;align-items:flex-start;padding:3px 0;font-size:14px;line-height:1.55}
+.todo-mark{flex-shrink:0;width:18px;text-align:center;font-size:13px;line-height:1.55;user-select:none}
+.todo-done .todo-mark{color:var(--nz-green)}
+.todo-active .todo-mark{color:var(--nz-accent)}
+.todo-pending .todo-mark{color:var(--nz-text-faint)}
 .todo-text{flex:1;word-break:break-word}
-.todo-done .todo-text{color:var(--nz-text-dim);text-decoration:line-through}
-.todo-active{color:#ffc45c;font-weight:500}
+.todo-done .todo-text{color:var(--nz-text-mute);text-decoration:line-through;text-decoration-color:var(--nz-text-faint)}
+.todo-active .todo-text{color:var(--nz-text-strong);font-weight:500}
 .todo-pending .todo-text{color:var(--nz-text)}
 /* Turn separation */
 .event.text+.event.user{margin-top:24px}

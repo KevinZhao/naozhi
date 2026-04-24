@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime/debug"
 	"sync"
 	"syscall"
 	"time"
@@ -412,6 +413,12 @@ func (s *shimServer) enqueueWrite(data []byte) {
 
 // readStdout reads CLI stdout and pushes lines to the ring buffer + client.
 func (s *shimServer) readStdout() {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("shim readStdout panic recovered",
+				"panic", r, "stack", string(debug.Stack()))
+		}
+	}()
 	for s.cli.stdout.Scan() {
 		line := s.cli.stdout.Bytes() // valid until next Scan()
 
@@ -457,6 +464,12 @@ func (s *shimServer) tryExtractSessionID(line []byte) {
 
 // readStderr reads CLI stderr and forwards to client.
 func (s *shimServer) readStderr() {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("shim readStderr panic recovered",
+				"panic", r, "stack", string(debug.Stack()))
+		}
+	}()
 	scanner := bufio.NewScanner(s.cli.stderrR)
 	scanner.Buffer(make([]byte, 4*1024), 10*1024*1024)
 	for scanner.Scan() {
@@ -581,16 +594,25 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	}
 	s.mu.Unlock()
 
-	// Writer goroutine: drains writeCh to the socket, exits on clientDone
+	// Writer goroutine: drains writeCh to the socket, exits on clientDone.
+	// A per-flush write deadline bounds slow/stuck reader scenarios so
+	// Flush cannot wedge the goroutine beyond 10s even if the outer
+	// conn.Close() in the defer is delayed.
 	writerDone := make(chan struct{})
 	go func() {
 		defer close(writerDone)
 		w := bufio.NewWriter(conn)
+		flushWithDeadline := func() error {
+			conn.SetWriteDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
+			err := w.Flush()
+			conn.SetWriteDeadline(time.Time{}) //nolint:errcheck
+			return err
+		}
 		for {
 			select {
 			case data, ok := <-writeCh:
 				if !ok {
-					w.Flush() //nolint:errcheck
+					_ = flushWithDeadline()
 					return
 				}
 				if _, err := w.Write(data); err != nil {
@@ -602,7 +624,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 					select {
 					case more, ok := <-writeCh:
 						if !ok {
-							w.Flush() //nolint:errcheck
+							_ = flushWithDeadline()
 							return
 						}
 						w.Write(more) //nolint:errcheck
@@ -610,11 +632,11 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 						flush = false
 					}
 				}
-				if err := w.Flush(); err != nil {
+				if err := flushWithDeadline(); err != nil {
 					return
 				}
 			case <-clientDone:
-				w.Flush() //nolint:errcheck
+				_ = flushWithDeadline()
 				return
 			}
 		}

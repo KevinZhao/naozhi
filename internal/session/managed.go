@@ -88,10 +88,13 @@ type ManagedSession struct {
 	cliName     string       // "claude-code", "kiro" — set at creation from Wrapper
 	cliVersion  string       // semver from --version — set at creation from Wrapper
 	deathReason atomic.Value // string: why process died, empty if alive
-	// totalCost is written exactly once during NewRouter() when restoring
-	// from store, and read only when loadProcess() returns nil (which only
-	// happens for sessions restored from disk that have not yet been re-spawned).
-	// Since it is effectively immutable after construction, no sync is needed.
+	// totalCost is the cumulative cost carried over from a previous process
+	// incarnation: written once at construction (either in NewRouter() when
+	// restoring from store, or in spawnSession() when inheriting from the
+	// replaced session) and read-only thereafter. Snapshot() falls back to
+	// this value when the live process hasn't yet reported a result event —
+	// this avoids the $0.00 flash after resume/reconnect. Per-instance
+	// immutability means no sync is needed.
 	totalCost float64
 
 	// persistedHistory stores event entries that survive process restarts.
@@ -406,7 +409,17 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 	} else {
 		snap.State = proc.GetState().String()
 		snap.Protocol = proc.ProtocolName()
-		snap.TotalCost = proc.TotalCost()
+		// Prefer whichever is larger: a freshly resumed process reports 0
+		// until the first `result` event arrives, but s.totalCost carries
+		// the historical cumulative value restored from sessions.json.
+		// Claude CLI's total_cost_usd under --resume is cumulative, so once
+		// the next result lands, proc.TotalCost() will be >= s.totalCost
+		// and the display won't regress.
+		if pc := proc.TotalCost(); pc > s.totalCost {
+			snap.TotalCost = pc
+		} else {
+			snap.TotalCost = s.totalCost
+		}
 		snap.Subagents = proc.TurnAgents()
 		// Prefer the EventLog-maintained summary (updated lock-free on every
 		// event) so we don't need a wrapper closure around Send just to track
