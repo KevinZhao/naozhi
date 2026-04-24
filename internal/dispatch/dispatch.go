@@ -219,17 +219,30 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 				// turn fires a control_request to the CLI so the in-flight
 				// turn aborts within ~300ms. The ongoing owner loop's Send()
 				// will observe the CLI's natural result event, return, then
-				// drain this queued message as the next prompt. Best-effort:
-				// if the session is unknown or the protocol doesn't support
-				// in-band interrupt we silently fall back to Collect
-				// semantics (the queued message is still processed, just
-				// after the turn completes naturally).
+				// drain this queued message as the next prompt. All non-Sent
+				// outcomes degrade to Collect semantics: the queued message
+				// is still processed once the turn completes naturally.
 				if shouldInterrupt {
-					if ok := d.router.InterruptSessionViaControl(key); !ok {
-						log.Debug("interrupt mode: session not found or protocol unsupported, falling back to collect",
-							"session_key", key)
-					} else {
+					switch outcome := d.router.InterruptSessionViaControl(key); outcome {
+					case session.InterruptSent:
 						log.Info("interrupt mode: aborted active turn to process follow-up",
+							"session_key", key)
+					case session.InterruptNoTurn:
+						// Session is spawning or idle — the turn isn't active yet,
+						// so nothing to interrupt. The follow-up will be drained
+						// by the owner loop after the first turn completes.
+						log.Debug("interrupt mode: session idle or spawning, will process follow-up after current turn",
+							"session_key", key)
+					case session.InterruptNoSession:
+						log.Debug("interrupt mode: session not found, falling back to collect",
+							"session_key", key)
+					case session.InterruptUnsupported:
+						log.Debug("interrupt mode: protocol does not support stdin interrupt, falling back to collect",
+							"session_key", key)
+					case session.InterruptError:
+						// Warn already emitted inside ManagedSession.InterruptViaControl;
+						// keep a paired trace here to anchor the dispatch side.
+						log.Warn("interrupt mode: transport error, falling back to collect",
 							"session_key", key)
 					}
 				}

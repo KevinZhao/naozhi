@@ -244,6 +244,13 @@ func (q *MessageQueue) DoneOrDrain(key string, gen uint64) []QueuedMsg {
 		// uses sq.lastNotifyNs) to the LRU branch (which still has a stale
 		// timestamp from before this session was queued), silencing a
 		// legitimate notification.
+		//
+		// Note: deleting the map entry implicitly drops interruptRequested
+		// (getOrCreate allocates a fresh sessionQueue on the next Enqueue).
+		// We zero the field explicitly anyway so any future refactor that
+		// reuses the *sessionQueue instance cannot silently suppress the
+		// first interrupt of the next turn.
+		sq.interruptRequested = false
 		delete(q.queues, key)
 		if elem, ok := q.dropNotifyIndex[key]; ok {
 			q.dropNotifyLRU.Remove(elem)

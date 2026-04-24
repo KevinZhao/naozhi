@@ -294,6 +294,63 @@ func TestEnqueue_InterruptMode_QueueDisabledNoSignal(t *testing.T) {
 	}
 }
 
+// Regression test for the P1-2 concern: releasing ownership when the queue
+// drains empty must reset interruptRequested so a later Enqueue that re-owns
+// the session (new turn) can again signal shouldInterrupt on its first
+// follow-up. Without the explicit reset in DoneOrDrain, a refactor that
+// reused the *sessionQueue instance instead of going through getOrCreate
+// would silently suppress the interrupt.
+func TestEnqueue_InterruptMode_ReleaseOwnership_ResetsInterruptFlag(t *testing.T) {
+	q := NewMessageQueueWithMode(10, 0, ModeInterrupt)
+
+	// Turn 1: owner + interrupting follow-up.
+	_, _, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A1"})
+	if _, _, shouldInterrupt, _ := q.Enqueue("k1", QueuedMsg{Text: "B1"}); !shouldInterrupt {
+		t.Fatal("turn 1 follow-up must request interrupt")
+	}
+
+	// Owner drains batch (turn 1 completes with queued follow-up → interrupt path).
+	if drained := q.DoneOrDrain("k1", gen); len(drained) != 1 {
+		t.Fatalf("drained turn 1 = %d msgs, want 1", len(drained))
+	}
+	// Owner drains again; queue is now empty → ownership released.
+	if drained := q.DoneOrDrain("k1", gen); drained != nil {
+		t.Fatalf("drained on empty queue should return nil, got %d msgs", len(drained))
+	}
+
+	// Turn 2: new owner arrives (fresh session/chat activity). A follow-up
+	// during turn 2 must again be able to trigger an interrupt, proving the
+	// release path reset interruptRequested.
+	_, _, _, gen2 := q.Enqueue("k1", QueuedMsg{Text: "A2"})
+	if gen2 == gen {
+		// Not strictly required (release path does not bump gen), but document
+		// the assumption: same sessionQueue key, ownership cycled.
+		_ = gen2
+	}
+	if _, _, shouldInterrupt, _ := q.Enqueue("k1", QueuedMsg{Text: "B2"}); !shouldInterrupt {
+		t.Fatal("turn 2 follow-up after ownership release must request interrupt")
+	}
+}
+
+// P1-2 part two: Discard must also reset interruptRequested so /new followed
+// by a fresh turn does not silently suppress the first interrupt.
+func TestEnqueue_InterruptMode_Discard_ResetsInterruptFlag(t *testing.T) {
+	q := NewMessageQueueWithMode(10, 0, ModeInterrupt)
+	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
+	if _, _, shouldInterrupt, _ := q.Enqueue("k1", QueuedMsg{Text: "B"}); !shouldInterrupt {
+		t.Fatal("first follow-up must interrupt")
+	}
+
+	// /new — discard everything.
+	q.Discard("k1")
+
+	// New owner.
+	q.Enqueue("k1", QueuedMsg{Text: "C"})
+	if _, _, shouldInterrupt, _ := q.Enqueue("k1", QueuedMsg{Text: "D"}); !shouldInterrupt {
+		t.Fatal("after Discard, next turn's first follow-up must interrupt")
+	}
+}
+
 // TestConcurrent_EnqueueDrain verifies no races under concurrent access.
 func TestConcurrent_EnqueueDrain(t *testing.T) {
 	q := NewMessageQueue(50, 0)

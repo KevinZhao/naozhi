@@ -210,11 +210,19 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 		if shouldInterrupt {
 			// Interrupt mode: abort the in-flight turn so the queued
 			// follow-up can be processed promptly. See dispatch.go for the
-			// full rationale; this mirrors the IM path.
-			if ok := h.router.InterruptSessionViaControl(key); !ok {
-				slog.Debug("send: interrupt unavailable, falling back to collect", "key", key)
-			} else {
+			// full rationale; this mirrors the IM path. Non-Sent outcomes
+			// degrade silently to Collect (the message is still queued).
+			switch outcome := h.router.InterruptSessionViaControl(key); outcome {
+			case session.InterruptSent:
 				slog.Debug("send: aborted active turn to process follow-up", "key", key)
+			case session.InterruptNoTurn:
+				slog.Debug("send: session idle or spawning, will process follow-up after current turn", "key", key)
+			case session.InterruptNoSession:
+				slog.Debug("send: session not found, falling back to collect", "key", key)
+			case session.InterruptUnsupported:
+				slog.Debug("send: protocol does not support stdin interrupt, falling back to collect", "key", key)
+			case session.InterruptError:
+				slog.Warn("send: transport error during interrupt, falling back to collect", "key", key)
 			}
 		}
 		if !enqueued {

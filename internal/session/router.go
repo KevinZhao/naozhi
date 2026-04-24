@@ -2109,14 +2109,17 @@ func (r *Router) InterruptSession(key string) bool {
 // InterruptSession, the in-flight Send() observes the CLI's natural result
 // event and returns normally, so ownership of the session stays with the
 // current dispatch owner loop which can then process queued follow-up messages
-// on the same live CLI. Returns false when the session is unknown, has no
-// live process, or the protocol does not support in-band interrupts.
-func (r *Router) InterruptSessionViaControl(key string) bool {
+// on the same live CLI.
+//
+// Returns an InterruptOutcome so callers can log accurately (a session that
+// exists but has no active turn yet returns InterruptNoTurn, not
+// InterruptNoSession — logging "aborted turn" in that case would be a lie).
+func (r *Router) InterruptSessionViaControl(key string) InterruptOutcome {
 	r.mu.RLock()
 	s := r.sessions[key]
 	r.mu.RUnlock()
 	if s == nil {
-		return false
+		return InterruptNoSession
 	}
 	return s.InterruptViaControl()
 }

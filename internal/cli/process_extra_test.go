@@ -401,6 +401,141 @@ func TestProcess_Interrupt_AfterDead(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
+// InterruptViaControl
+// ---------------------------------------------------------------------------
+
+// claudeWithFailingInterrupt wraps ClaudeProtocol and forces WriteInterrupt
+// to return a transport-like error so we can exercise the rollback path.
+type claudeWithFailingInterrupt struct {
+	ClaudeProtocol
+	err error
+}
+
+func (p *claudeWithFailingInterrupt) WriteInterrupt(_ io.Writer, _ string) error {
+	return p.err
+}
+
+func (p *claudeWithFailingInterrupt) Clone() Protocol {
+	return &claudeWithFailingInterrupt{err: p.err}
+}
+
+func TestProcess_InterruptViaControl_NoActiveTurn(t *testing.T) {
+	p, srv := shimTestPair(&ClaudeProtocol{})
+	startServerDrain(srv)
+	p.startReadLoop()
+	defer p.Kill()
+
+	// State == Ready: no turn in flight.
+	err := p.InterruptViaControl()
+	if !errors.Is(err, ErrNoActiveTurn) {
+		t.Fatalf("InterruptViaControl on idle = %v, want ErrNoActiveTurn", err)
+	}
+	if p.interrupted.Load() || p.interruptedRun.Load() {
+		t.Error("idle InterruptViaControl must not set settle flags")
+	}
+}
+
+func TestProcess_InterruptViaControl_Running_SetsFlagsAndWrites(t *testing.T) {
+	p, srv := shimTestPair(&ClaudeProtocol{})
+	startServerDrain(srv)
+	p.startReadLoop()
+	defer p.Kill()
+
+	p.mu.Lock()
+	p.State = StateRunning
+	p.mu.Unlock()
+
+	if err := p.InterruptViaControl(); err != nil {
+		t.Fatalf("InterruptViaControl() = %v, want nil", err)
+	}
+	if !p.interrupted.Load() || !p.interruptedRun.Load() {
+		t.Error("successful InterruptViaControl must set interrupted and interruptedRun")
+	}
+}
+
+// Regression test for P0-1: a failed WriteInterrupt must roll the settle
+// flags back so the next Send()'s drainStaleEvents does not burn the 500ms
+// settle budget waiting for a result that will never arrive.
+func TestProcess_InterruptViaControl_WriteFailure_RollsBackFlags(t *testing.T) {
+	wantErr := errors.New("simulated shim write failure")
+	p, srv := shimTestPair(&claudeWithFailingInterrupt{err: wantErr})
+	startServerDrain(srv)
+	p.startReadLoop()
+	defer p.Kill()
+
+	p.mu.Lock()
+	p.State = StateRunning
+	p.mu.Unlock()
+
+	err := p.InterruptViaControl()
+	if err == nil {
+		t.Fatal("expected write failure to surface as error")
+	}
+	if !errors.Is(err, wantErr) {
+		t.Errorf("err = %v, want wrapped %v", err, wantErr)
+	}
+	if p.interrupted.Load() {
+		t.Error("interrupted must be rolled back after write failure")
+	}
+	if p.interruptedRun.Load() {
+		t.Error("interruptedRun must be rolled back after write failure")
+	}
+}
+
+func TestProcess_InterruptViaControl_DeadProcess(t *testing.T) {
+	p, srv := shimTestPair(&ClaudeProtocol{})
+	startServerDrain(srv)
+	go p.readLoop()
+
+	srv.SendCLIExited(0)
+	select {
+	case <-p.done:
+	case <-time.After(time.Second):
+		t.Fatal("process did not die")
+	}
+
+	err := p.InterruptViaControl()
+	if !errors.Is(err, ErrNoActiveTurn) {
+		t.Errorf("dead InterruptViaControl = %v, want ErrNoActiveTurn", err)
+	}
+}
+
+func TestProcess_InterruptViaControl_RequestIDIsPerProcess(t *testing.T) {
+	// P1-4 regression: the seq counter must be per-Process, not package-level.
+	// Two independent processes both issue their first interrupt and should
+	// both land on naozhi-int-1 (not share a global counter).
+	p1, srv1 := shimTestPair(&ClaudeProtocol{})
+	startServerDrain(srv1)
+	p1.startReadLoop()
+	defer p1.Kill()
+
+	p2, srv2 := shimTestPair(&ClaudeProtocol{})
+	startServerDrain(srv2)
+	p2.startReadLoop()
+	defer p2.Kill()
+
+	p1.mu.Lock()
+	p1.State = StateRunning
+	p1.mu.Unlock()
+	p2.mu.Lock()
+	p2.State = StateRunning
+	p2.mu.Unlock()
+
+	if err := p1.InterruptViaControl(); err != nil {
+		t.Fatalf("p1 InterruptViaControl: %v", err)
+	}
+	if err := p2.InterruptViaControl(); err != nil {
+		t.Fatalf("p2 InterruptViaControl: %v", err)
+	}
+	if got := p1.interruptSeq.Load(); got != 1 {
+		t.Errorf("p1.interruptSeq = %d, want 1 (per-process counter)", got)
+	}
+	if got := p2.interruptSeq.Load(); got != 1 {
+		t.Errorf("p2.interruptSeq = %d, want 1 (per-process counter)", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
 // drainStaleEvents
 // ---------------------------------------------------------------------------
 

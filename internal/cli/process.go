@@ -58,6 +58,12 @@ var (
 // rather than counting it as a no-output stall.
 var ErrProcessExited = errors.New("process exited during send")
 
+// ErrNoActiveTurn is returned by InterruptViaControl when the process is not
+// currently running a turn (StateSpawning, StateReady, or StateDead). The
+// caller didn't do anything wrong, but nothing was interrupted; logs should
+// not claim "aborted active turn" in this case.
+var ErrNoActiveTurn = errors.New("no active turn to interrupt")
+
 // processCloseTimeout is a var (not const) so tests can override it.
 var processCloseTimeout = 5 * time.Second
 
@@ -108,6 +114,13 @@ type Process struct {
 	totalTimeout    time.Duration
 	interrupted     atomic.Bool // set by Interrupt(), cleared by next Send()
 	interruptedRun  atomic.Bool // true when Interrupt() was called while State==Running
+
+	// interruptSeq generates monotonic request_id suffixes for control_request
+	// interrupt messages. Per-process so parallel-running tests don't share the
+	// counter and dashboard traces stay readable. The CLI only uses request_id
+	// to echo back in the matching control_response; uniqueness inside one
+	// process connection is sufficient.
+	interruptSeq atomic.Int64
 
 	eventLog  *EventLog
 	totalCost float64
@@ -828,12 +841,6 @@ func (p *Process) Interrupt() {
 	}
 }
 
-// interruptRequestIDSeq generates monotonic request ids for control_request
-// interrupt messages. The CLI only uses request_id to echo back in the
-// corresponding control_response; it does not need to be globally unique,
-// but uniqueness per-process keeps dashboard traces readable.
-var interruptRequestIDSeq atomic.Int64
-
 // InterruptViaControl requests the CLI to abort the active turn by writing an
 // in-band control_request to stdin (stream-json protocol only). Verified
 // behaviour on CLI 2.1.119: within ~300ms the CLI kills any in-flight tool
@@ -846,14 +853,23 @@ var interruptRequestIDSeq atomic.Int64
 //   - Does not cross the shim's interrupt command (uses plain `write`).
 //   - Is officially supported by the Claude CLI stream-json protocol.
 //
-// Returns ErrInterruptUnsupported when the protocol (e.g. ACP) has no
-// stdin-level interrupt primitive; callers should fall back to Interrupt().
+// Return values:
+//   - nil: control_request was written; the next Send() will drain the
+//     interrupted result via the settle loop.
+//   - ErrNoActiveTurn: process is alive but no turn is in flight; nothing
+//     was written, no flags were set. Callers should not log success.
+//   - ErrInterruptUnsupported: protocol (e.g. ACP) has no stdin-level
+//     interrupt primitive; callers should fall back to Interrupt().
+//   - wrapped transport error: the write failed; flags are rolled back so
+//     a subsequent Send() does not burn the settle budget waiting for a
+//     result that will never come.
 func (p *Process) InterruptViaControl() error {
 	if !p.Alive() {
-		return nil
+		return ErrNoActiveTurn
 	}
-	// Same atomic coverage as Interrupt(): flag drainStaleEvents so the
-	// interrupted turn's trailing result is absorbed before the next Send().
+	// Snapshot state and pre-commit the atomics under p.mu so a concurrent
+	// Send() flipping State to Running after our read cannot race us into
+	// "wrote control_request but skipped the settle flags".
 	p.mu.Lock()
 	state := p.State
 	if state == StateRunning {
@@ -861,18 +877,29 @@ func (p *Process) InterruptViaControl() error {
 		p.interruptedRun.Store(true)
 	}
 	p.mu.Unlock()
-	// No turn in flight → nothing to interrupt. Don't write the
-	// control_request, since the CLI would buffer it until the next turn
-	// begins and then produce a spurious control_response for a turn the
-	// caller never intended to cancel.
+	// No turn in flight → nothing to interrupt. Do NOT write the
+	// control_request: the CLI would buffer it for the next turn start and
+	// produce a spurious control_response against a turn the caller never
+	// intended to cancel.
 	if state != StateRunning {
-		return nil
+		return ErrNoActiveTurn
 	}
-	reqID := fmt.Sprintf("naozhi-int-%d", interruptRequestIDSeq.Add(1))
+	reqID := fmt.Sprintf("naozhi-int-%d", p.interruptSeq.Add(1))
 	if err := p.protocol.WriteInterrupt(p.shimStdinWriter(), reqID); err != nil {
-		// Best-effort: the interrupted/interruptedRun flags are already set.
-		// If the CLI never produces the interrupt result, drainStaleEvents
-		// falls back to its 500ms settle timeout on the next Send().
+		// Write failed: no control_request reached the CLI, so there is no
+		// trailing result event to drain. Roll the settle flags back
+		// explicitly; leaving them set would cost every subsequent Send()
+		// a 500ms settle timeout until the process is recycled.
+		//
+		// Safe against a concurrent real Interrupt() that set the flags
+		// between our Store above and this rollback: in that case we'd
+		// momentarily underreport, but Interrupt() also writes via shim
+		// `interrupt` (SIGINT), and if THAT write succeeded its own
+		// semantics apply on the next Send. Mis-clearing here is no worse
+		// than the SIGINT path itself failing — both converge on the same
+		// "no stale result to drain" state.
+		p.interrupted.Store(false)
+		p.interruptedRun.Store(false)
 		return fmt.Errorf("write interrupt control_request: %w", err)
 	}
 	return nil

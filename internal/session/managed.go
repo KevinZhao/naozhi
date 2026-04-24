@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -310,6 +311,28 @@ func (s *ManagedSession) Interrupt() bool {
 	return true
 }
 
+// InterruptOutcome describes what happened on an InterruptViaControl call.
+// Callers use this instead of a bare bool so log messages can reflect the
+// actual state (e.g. don't claim "aborted turn" when nothing was running).
+type InterruptOutcome int
+
+const (
+	// InterruptSent — a control_request reached the CLI; the active turn
+	// will produce a final result shortly and the next Send() will drain it.
+	InterruptSent InterruptOutcome = iota
+	// InterruptNoSession — session does not exist or has no live process.
+	InterruptNoSession
+	// InterruptNoTurn — session is alive but idle; nothing was interrupted.
+	InterruptNoTurn
+	// InterruptUnsupported — protocol does not support stdin-level interrupt
+	// (e.g. ACP). Callers may fall back to Interrupt() for SIGINT semantics.
+	InterruptUnsupported
+	// InterruptError — transport failure (shim socket dead, write broke);
+	// the process-level settle flags have been rolled back. Callers should
+	// log this as an error.
+	InterruptError
+)
+
 // InterruptViaControl asks the CLI to abort the active turn by writing an
 // in-band control_request to stdin. Unlike Interrupt, this does NOT cancel
 // the Send() context — the in-flight Send will see the CLI's interrupted
@@ -317,27 +340,34 @@ func (s *ManagedSession) Interrupt() bool {
 // proceed to drain and send the coalesced follow-up messages on the same
 // live process.
 //
-// Returns false if the session has no live process; callers may fall back
-// to Interrupt() (SIGINT) if the protocol does not support control_request
-// (cli.ErrInterruptUnsupported is returned from proc.InterruptViaControl).
-func (s *ManagedSession) InterruptViaControl() bool {
+// Transport failures are logged at Warn here (rather than silently returned)
+// so operators do not need every caller to plumb their own error log; the
+// outcome return value still lets callers tune their user-facing text.
+func (s *ManagedSession) InterruptViaControl() InterruptOutcome {
 	proc := s.loadProcess()
 	if proc == nil || !proc.Alive() {
-		return false
+		return InterruptNoSession
 	}
-	if err := proc.InterruptViaControl(); err != nil {
-		if errors.Is(err, cli.ErrInterruptUnsupported) {
-			// Caller decides whether to fall back; do not escalate to SIGINT
-			// silently because that would couple two different semantics.
-			return false
-		}
-		// Transport error (socket gone, etc) — best effort; report failure
-		// so the caller can retry or log. The drainStaleEvents hooks were
-		// already set inside InterruptViaControl under the atomic-covered
-		// path, so a subsequent Send() will still attempt the settle wait.
-		return false
+	err := proc.InterruptViaControl()
+	if err == nil {
+		return InterruptSent
 	}
-	return true
+	switch {
+	case errors.Is(err, cli.ErrNoActiveTurn):
+		return InterruptNoTurn
+	case errors.Is(err, cli.ErrInterruptUnsupported):
+		// Caller decides whether to fall back; do not escalate to SIGINT
+		// silently because that would couple two different semantics.
+		return InterruptUnsupported
+	default:
+		// Transport / write error. Process.InterruptViaControl has already
+		// rolled back the settle flags, so the next Send() will not spin
+		// on the 500ms settle timeout. Surface at Warn so the failure mode
+		// is visible even to callers that treat non-Sent as "fall back".
+		slog.Warn("session interrupt via control_request failed",
+			"session_key", s.key, "err", err)
+		return InterruptError
+	}
 }
 
 // getSessionID returns the session ID lock-free via atomic.Value.
