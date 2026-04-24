@@ -245,13 +245,23 @@ func (s *Scheduler) NotifyDefault() NotifyTarget { return s.notifyDefault }
 
 // Start loads persisted jobs and starts the cron scheduler.
 func (s *Scheduler) Start() error {
+	// loadJobs distinguishes three outcomes: (map, nil) normal, (nil, nil)
+	// corrupt-but-rescued, (nil, error) original file still on disk. In the
+	// error case we must refuse to start — otherwise the first subsequent
+	// persist would overwrite the operator's real jobs with `[]`, silently
+	// losing data that is still recoverable from the preserved file.
+	restored, err := loadJobs(s.storePath)
+	if err != nil {
+		return fmt.Errorf("load cron store: %w", err)
+	}
+
 	s.mu.Lock()
 	// Snapshot the fields we pass to registerStub under lock so we don't
 	// dereference *Job after releasing s.mu — once cron.Start() fires, any
 	// future UpdateJob could race with a stub read via the map pointer.
 	type stubRow struct{ id, workDir, prompt string }
 	var stubs []stubRow
-	if restored := loadJobs(s.storePath); restored != nil {
+	if restored != nil {
 		for _, j := range restored {
 			// Reject persisted jobs whose WorkDir escapes the configured
 			// sandbox. Replaying an on-disk tampered entry must not grant

@@ -74,7 +74,10 @@ func TestStoreRoundTrip(t *testing.T) {
 		t.Fatalf("saveJobs: %v", err)
 	}
 
-	loaded := loadJobs(path)
+	loaded, err := loadJobs(path)
+	if err != nil {
+		t.Fatalf("loadJobs: %v", err)
+	}
 	if len(loaded) != 2 {
 		t.Fatalf("expected 2 jobs, got %d", len(loaded))
 	}
@@ -91,16 +94,132 @@ func TestStoreRoundTrip(t *testing.T) {
 }
 
 func TestLoadJobsMissing(t *testing.T) {
-	result := loadJobs("/nonexistent/path.json")
+	result, err := loadJobs("/nonexistent/path.json")
+	if err != nil {
+		t.Fatalf("missing file should not error: %v", err)
+	}
 	if result != nil {
 		t.Error("expected nil for missing file")
 	}
 }
 
 func TestLoadJobsEmpty(t *testing.T) {
-	result := loadJobs("")
+	result, err := loadJobs("")
+	if err != nil {
+		t.Fatalf("empty path should not error: %v", err)
+	}
 	if result != nil {
 		t.Error("expected nil for empty path")
+	}
+}
+
+// TestLoadJobsOversizeRefuses guards the critical data-loss bug: a store file
+// larger than maxCronStoreBytes must fail loadly (returned error) AND leave
+// the original file untouched, so Scheduler.Start can abort and the operator
+// can inspect/recover the real data.
+func TestLoadJobsOversizeRefuses(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cron_jobs.json")
+	// maxCronStoreBytes+1 bytes of valid-looking JSON prefix; contents don't
+	// matter because the size check fires before Unmarshal.
+	payload := make([]byte, maxCronStoreBytes+1)
+	for i := range payload {
+		payload[i] = 'x'
+	}
+	if err := os.WriteFile(path, payload, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	m, err := loadJobs(path)
+	if err == nil {
+		t.Fatal("expected oversize error, got nil")
+	}
+	if m != nil {
+		t.Errorf("expected nil map on oversize, got %d entries", len(m))
+	}
+
+	// File must still be on disk — critically, NOT renamed and NOT truncated.
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		t.Fatalf("original file missing after oversize refusal: %v", statErr)
+	}
+	if info.Size() != int64(len(payload)) {
+		t.Errorf("file mutated after oversize refusal: size=%d want=%d", info.Size(), len(payload))
+	}
+}
+
+// TestLoadJobsCorruptPreserves verifies the parse-failure path: the corrupt
+// file is renamed (not deleted), loadJobs returns (nil, nil) so the scheduler
+// can start fresh without destroying the evidence copy.
+func TestLoadJobsCorruptPreserves(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cron_jobs.json")
+	if err := os.WriteFile(path, []byte("{ this is not valid json"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	m, err := loadJobs(path)
+	if err != nil {
+		t.Fatalf("parse failure should rescue and return (nil, nil), got err=%v", err)
+	}
+	if m != nil {
+		t.Errorf("expected nil map on corrupt file, got %d entries", len(m))
+	}
+
+	// Original file should be renamed away.
+	if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+		t.Errorf("expected original file to be renamed, got stat err=%v", statErr)
+	}
+
+	// A .corrupt.* sibling must exist.
+	entries, readErr := os.ReadDir(dir)
+	if readErr != nil {
+		t.Fatalf("ReadDir: %v", readErr)
+	}
+	foundCorrupt := false
+	for _, e := range entries {
+		if len(e.Name()) > len("cron_jobs.json.corrupt.") &&
+			e.Name()[:len("cron_jobs.json.corrupt.")] == "cron_jobs.json.corrupt." {
+			foundCorrupt = true
+			break
+		}
+	}
+	if !foundCorrupt {
+		t.Error("expected cron_jobs.json.corrupt.* sibling, not found")
+	}
+}
+
+// TestSchedulerStartFailsOnOversize is the end-to-end guarantee: when the
+// store is oversize, Start returns an error so main.go can os.Exit(1) before
+// any code path triggers persistJobsLocked and clobbers the file with `[]`.
+func TestSchedulerStartFailsOnOversize(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cron_jobs.json")
+	payload := make([]byte, maxCronStoreBytes+1)
+	if err := os.WriteFile(path, payload, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	originalSize := int64(len(payload))
+
+	s := NewScheduler(SchedulerConfig{
+		StorePath: path,
+		MaxJobs:   5,
+	})
+	if err := s.Start(); err == nil {
+		// If Start unexpectedly succeeded, stop the cron goroutine before
+		// failing so the test doesn't leak a goroutine into sibling runs.
+		s.Stop()
+		t.Fatal("expected Start to fail on oversize store, got nil")
+	}
+
+	// The file must be untouched after the failed Start: no save path should
+	// have run. Re-check size as a lightweight tamper probe.
+	info, statErr := os.Stat(path)
+	if statErr != nil {
+		t.Fatalf("store file missing after failed Start: %v", statErr)
+	}
+	if info.Size() != originalSize {
+		t.Errorf("store file clobbered after failed Start: size=%d want=%d", info.Size(), originalSize)
 	}
 }
 

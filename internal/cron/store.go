@@ -14,11 +14,15 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
-// maxCronStoreBytes caps the size of cron_jobs.json during Load. A cap of
-// max_jobs=50 jobs with long prompts fits comfortably within 256 KB; 1 MB is
-// ample headroom. A file larger than this is treated as corrupt/tampered and
-// ignored (with the original preserved for forensics).
-const maxCronStoreBytes = 1 * 1024 * 1024
+// maxCronStoreBytes caps the size of cron_jobs.json during Load. The realistic
+// worst case is maxJobsHardCap (500) × per-job payload (~8 KiB prompt + ~4 KiB
+// truncated LastResult + metadata) ≈ 6.5 MiB; 16 MiB leaves headroom for future
+// fields without risking unbounded memory use on a tampered file. When the
+// store exceeds this cap loadJobs returns an error and leaves the file in
+// place — callers (Scheduler.Start) must abort rather than continue with an
+// empty in-memory state that would be persisted back and silently clobber the
+// operator's real jobs.
+const maxCronStoreBytes = 16 * 1024 * 1024
 
 func saveJobs(path string, jobs map[string]*Job) error {
 	if path == "" {
@@ -45,42 +49,59 @@ func saveJobs(path string, jobs map[string]*Job) error {
 	return nil
 }
 
-func loadJobs(path string) map[string]*Job {
+// loadJobs reads and parses the on-disk cron job store. The three possible
+// outcomes are distinguished deliberately:
+//
+//   - (map, nil): normal read, including "file does not exist" (fresh
+//     deployment). Returned map may be nil for the no-file case — callers
+//     treat that identically to empty.
+//   - (nil, nil): parse failed. The corrupt file has already been renamed to
+//     <path>.corrupt.<ts>, so starting from empty state will not destroy
+//     evidence and the next save is safe.
+//   - (nil, error): the original file is still on disk (size cap exceeded,
+//     I/O error, or the corrupt-rename itself failed). Callers MUST abort:
+//     continuing with empty state would cause the next persist to clobber the
+//     operator's real jobs with `[]`, silently losing data.
+func loadJobs(path string) (map[string]*Job, error) {
 	if path == "" {
-		return nil
+		return nil, nil
 	}
 	f, err := os.Open(path)
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			slog.Warn("load cron store failed", "path", path, "err", err)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
 		}
-		return nil
+		return nil, fmt.Errorf("open cron store %s: %w", path, err)
 	}
 	defer f.Close()
 	data, err := io.ReadAll(io.LimitReader(f, maxCronStoreBytes+1))
 	if err != nil {
-		slog.Warn("read cron store failed", "path", path, "err", err)
-		return nil
+		return nil, fmt.Errorf("read cron store %s: %w", path, err)
 	}
 	if int64(len(data)) > maxCronStoreBytes {
-		slog.Warn("cron store exceeds size cap; refusing to load",
-			"path", path, "cap_bytes", maxCronStoreBytes, "observed_bytes", len(data))
-		return nil
+		// We read cap+1 via the LimitReader, so we can only report "at least"
+		// the true size. Leave the original in place so operators can
+		// inspect and recover; returning an error forces Scheduler.Start
+		// to abort rather than overwrite the file with an empty array on
+		// the next save.
+		return nil, fmt.Errorf("cron store %s exceeds size cap (at least %d bytes, cap=%d bytes); refusing to load — inspect the file or move it aside before restarting",
+			path, len(data), maxCronStoreBytes)
 	}
 
 	var entries []*Job
 	if err := json.Unmarshal(data, &entries); err != nil {
 		// Preserve the corrupt file so the next save does not silently
 		// overwrite operator-visible evidence. Mirrors session/store.go.
+		// If the rename itself fails we return an error (the original file
+		// is still on disk and an empty save would destroy it).
 		corruptPath := path + ".corrupt." + time.Now().Format("20060102-150405")
 		if renameErr := os.Rename(path, corruptPath); renameErr != nil {
-			slog.Warn("parse cron store failed; could not rename corrupt file",
-				"err", err, "rename_err", renameErr, "path", path)
-		} else {
-			slog.Warn("parse cron store failed; corrupt file preserved",
-				"err", err, "corrupt_path", corruptPath)
+			return nil, fmt.Errorf("parse cron store %s failed (%v); could not rename to %s: %w",
+				path, err, corruptPath, renameErr)
 		}
-		return nil
+		slog.Warn("parse cron store failed; corrupt file preserved",
+			"err", err, "corrupt_path", corruptPath)
+		return nil, nil
 	}
 
 	m := make(map[string]*Job, len(entries))
@@ -90,5 +111,5 @@ func loadJobs(path string) map[string]*Job {
 		}
 	}
 	slog.Info("loaded cron store", "count", len(m), "path", path)
-	return m
+	return m, nil
 }

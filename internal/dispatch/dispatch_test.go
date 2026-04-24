@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -914,8 +915,13 @@ func TestDispatchCommand_Project_Handled(t *testing.T) {
 
 func makeTestScheduler(t *testing.T) *cron.Scheduler {
 	t.Helper()
+	// StorePath must be a file path, not a directory. Previously the tests
+	// passed t.TempDir() and silently relied on loadJobs logging the
+	// "is a directory" read error and continuing with empty state; now
+	// Scheduler.Start surfaces load failures so point it at an explicit
+	// (non-existent) file inside the temp dir instead.
 	s := cron.NewScheduler(cron.SchedulerConfig{
-		StorePath: t.TempDir(),
+		StorePath: filepath.Join(t.TempDir(), "cron_jobs.json"),
 		MaxJobs:   10,
 	})
 	if err := s.Start(); err != nil {
