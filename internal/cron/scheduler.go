@@ -318,6 +318,47 @@ func (s *Scheduler) registerStubByValue(id, workDir, prompt string) {
 	s.router.RegisterCronStub("cron:"+id, workDir, prompt)
 }
 
+// EnsureStub lazily (re-)registers a dashboard stub session for the given
+// key (format "cron:<jobID>"). Returns true when the matching job still
+// exists and a stub is now registered (either newly created or already
+// present); returns false when the key is malformed, not a cron key, or
+// the job is gone.
+//
+// Rationale: the sidebar "×" button routes through router.Remove and
+// deletes the stub. Cron stubs are meant to be re-bornable — the next
+// scheduled tick rebuilds them via executeJob's GetOrCreate — but between
+// the dismissal and that tick, clicking the task card in the Cron panel
+// would otherwise hit "session not found" because the WS subscribe path
+// has nothing to attach to. This method is the idempotent recovery hook
+// wired into handleSubscribe and /api/sessions/events.
+func (s *Scheduler) EnsureStub(key string) bool {
+	const prefix = "cron:"
+	if !strings.HasPrefix(key, prefix) {
+		return false
+	}
+	id := key[len(prefix):]
+	if id == "" {
+		return false
+	}
+	// Snapshot workDir/prompt under RLock, release before reaching into
+	// router: RegisterCronStub calls notifyChange which fans out to hub
+	// broadcasters, and holding s.mu across that path risks lock-order
+	// inversion with the cron dispatcher (see ListAllJobsWithNextRun).
+	s.mu.RLock()
+	j, ok := s.jobs[id]
+	var workDir, prompt string
+	if ok {
+		workDir = j.WorkDir
+		prompt = j.Prompt
+	}
+	s.mu.RUnlock()
+	if !ok {
+		return false
+	}
+	s.registerStubByValue(id, workDir, prompt)
+	return true
+}
+
 // Stop halts the scheduler and saves state. It waits for both scheduled jobs
 // (drained by s.cron.Stop) and any TriggerNow-spawned goroutines before
 // returning, so callers can safely tear down the router afterwards.

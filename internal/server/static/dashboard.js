@@ -3904,32 +3904,35 @@ function renderMdUncached(s) {
     if (part.startsWith('\\[') && part.endsWith('\\]')) {
       return '<div class="md-math-display">' + renderKatex(part.slice(2, -2).trim(), true) + '</div>';
     }
-    // Process line by line for block elements
-    const lines = part.split('\n');
-    let html = '';
+    // Process line by line for block elements. Accumulate into a chunks array
+    // + single join() at the end rather than `html +=` per line: V8 reallocates
+    // the underlying string on every concat past the small-string threshold,
+    // which is O(n^2) over line count. A 200-line response rendered ~50 times
+    // per history replay was the dominant cost in the text-event path.
+    const chunks = [];
     let inList = '';
     for (let i = 0; i < lines.length; i++) {
       let line = lines[i];
       // Headings
       const hm = line.match(/^(#{1,4})\s+(.+)$/);
       if (hm) {
-        if (inList) { html += '</' + inList + '>'; inList = ''; }
+        if (inList) { chunks.push('</' + inList + '>'); inList = ''; }
         const level = hm[1].length;
-        html += '<strong class="md-h' + level + '">' + inlineMd(hm[2]) + '</strong>\n';
+        chunks.push('<strong class="md-h' + level + '">' + inlineMd(hm[2]) + '</strong>\n');
         continue;
       }
       // Unordered list
       if (/^\s*[-*]\s+/.test(line)) {
-        if (inList === 'ol') { html += '</ol>'; inList = ''; }
-        if (!inList) { html += '<ul class="md-ul">'; inList = 'ul'; }
-        html += '<li>' + inlineMd(line.replace(/^\s*[-*]\s+/, '')) + '</li>';
+        if (inList === 'ol') { chunks.push('</ol>'); inList = ''; }
+        if (!inList) { chunks.push('<ul class="md-ul">'); inList = 'ul'; }
+        chunks.push('<li>' + inlineMd(line.replace(/^\s*[-*]\s+/, '')) + '</li>');
         continue;
       }
       // Ordered list
       if (/^\s*\d+\.\s+/.test(line)) {
-        if (inList === 'ul') { html += '</ul>'; inList = ''; }
-        if (!inList) { html += '<ol class="md-ol">'; inList = 'ol'; }
-        html += '<li>' + inlineMd(line.replace(/^\s*\d+\.\s+/, '')) + '</li>';
+        if (inList === 'ul') { chunks.push('</ul>'); inList = ''; }
+        if (!inList) { chunks.push('<ol class="md-ol">'); inList = 'ol'; }
+        chunks.push('<li>' + inlineMd(line.replace(/^\s*\d+\.\s+/, '')) + '</li>');
         continue;
       }
       if (line === '') {
@@ -3944,39 +3947,46 @@ function renderMdUncached(s) {
               continue;
             }
           }
-          html += '</' + inList + '>'; inList = '';
+          chunks.push('</' + inList + '>'); inList = '';
         }
-        html += '<div class="md-blank"></div>';
+        chunks.push('<div class="md-blank"></div>');
         continue;
       }
-      if (inList) { html += '</' + inList + '>'; inList = ''; }
+      if (inList) { chunks.push('</' + inList + '>'); inList = ''; }
       if (/^\|.+\|$/.test(line.trim())) {
         let tbl = [line];
         while (i + 1 < lines.length && /^\|.+\|$/.test(lines[i + 1].trim())) { tbl.push(lines[++i]); }
-        html += renderTable(tbl);
+        chunks.push(renderTable(tbl));
         continue;
       }
-      html += inlineMd(line) + '<br>';
+      chunks.push(inlineMd(line) + '<br>');
     }
-    if (inList) html += '</' + inList + '>';
-    return html;
+    if (inList) chunks.push('</' + inList + '>');
+    return chunks.join('');
   }).join('');
 }
 
 /* Inline markdown: bold, italic, code, links, math */
 function inlineMd(s) {
-  // Extract inline math before HTML escaping. Use \x00 delimiters to avoid collisions with user content.
+  // Extract inline math before HTML escaping. Use \x00 delimiters to avoid
+  // collisions with user content. Fast path: the overwhelming majority of
+  // lines in tool output / assistant text have no math markers, so we
+  // short-circuit the two regex scans + mathTokens allocation when neither
+  // `$` nor `\(` appears. This is called once per line in renderMdUncached
+  // — on a 200-line response the savings are measurable in V8 profiler.
   const mathTokens = [];
-  s = s.replace(/\$([^\$\n]+?)\$/g, function(_, tex) {
-    const idx = mathTokens.length;
-    mathTokens.push(renderKatex(tex, false));
-    return '\x00KTX' + idx + '\x00';
-  });
-  s = s.replace(/\\\((.+?)\\\)/g, function(_, tex) {
-    const idx = mathTokens.length;
-    mathTokens.push(renderKatex(tex, false));
-    return '\x00KTX' + idx + '\x00';
-  });
+  if (s.indexOf('$') !== -1 || s.indexOf('\\(') !== -1) {
+    s = s.replace(/\$([^\$\n]+?)\$/g, function(_, tex) {
+      const idx = mathTokens.length;
+      mathTokens.push(renderKatex(tex, false));
+      return '\x00KTX' + idx + '\x00';
+    });
+    s = s.replace(/\\\((.+?)\\\)/g, function(_, tex) {
+      const idx = mathTokens.length;
+      mathTokens.push(renderKatex(tex, false));
+      return '\x00KTX' + idx + '\x00';
+    });
+  }
   s = esc(s);
   // Use function-form replacements to prevent JS's special $-sequences
   // ($&, $', $`, $n) from expanding inside the replacement string. Those
@@ -5584,6 +5594,11 @@ function openCronPanel() {
 }
 
 function renderCronPanel() {
+  // Guard against an async race: fetchCronJobs().then(renderCronPanel) fires
+  // after the user may have already clicked a cron card and opened a session.
+  // Re-rendering the cron list would clobber renderMainShell's DOM and make
+  // the chat history "disappear". Only paint when no session is selected.
+  if (selectedKey) return;
   const main = document.getElementById('main');
   const tzBanner = cronTimezoneLabel
     ? '<div class="cron-tz-banner" title="Schedules are evaluated in this timezone">timezone: ' + esc(cronTimezoneLabel) + '</div>'

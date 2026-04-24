@@ -468,6 +468,82 @@ func TestPreviewScheduleN(t *testing.T) {
 	}
 }
 
+// TestEnsureStub exercises the recovery hook used by handleSubscribe when a
+// cron stub was torn down by sidebar "×". The stub must be re-registerable
+// idempotently while the job still exists, and refuse to create a stub once
+// the job is gone.
+func TestEnsureStub(t *testing.T) {
+	router := session.NewRouter(session.RouterConfig{})
+	s := NewScheduler(SchedulerConfig{
+		Router:  router,
+		MaxJobs: 10,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+
+	job := &Job{Schedule: "@hourly", Prompt: "hello", Platform: "p", ChatID: "c", WorkDir: "/tmp"}
+	if err := s.AddJob(job); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	key := "cron:" + job.ID
+
+	// AddJob already registers the stub; simulate sidebar "×" that removed it.
+	if !router.Remove(key) {
+		t.Fatalf("expected router to drop the stub registered by AddJob")
+	}
+	if router.GetSession(key) != nil {
+		t.Fatalf("stub should be gone after Remove")
+	}
+
+	// EnsureStub recovers the stub for a still-registered job.
+	if !s.EnsureStub(key) {
+		t.Fatalf("EnsureStub should return true for an existing job")
+	}
+	sess := router.GetSession(key)
+	if sess == nil {
+		t.Fatalf("EnsureStub should have re-registered the stub")
+	}
+
+	// Second call is idempotent.
+	if !s.EnsureStub(key) {
+		t.Fatalf("EnsureStub should stay true when stub already present")
+	}
+	if router.GetSession(key) != sess {
+		t.Fatalf("EnsureStub must not create a duplicate stub")
+	}
+
+	// Non-cron and malformed keys reject cleanly.
+	if s.EnsureStub("planner:foo:bar") {
+		t.Error("EnsureStub should reject non-cron keys")
+	}
+	if s.EnsureStub("cron:") {
+		t.Error("EnsureStub should reject the empty id")
+	}
+	if s.EnsureStub("cron:nosuchjob") {
+		t.Error("EnsureStub should reject an unknown job id")
+	}
+
+	// Paused jobs still get a stub — the panel must be openable so the user
+	// can resume them.
+	if _, err := s.PauseJobByID(job.ID); err != nil {
+		t.Fatalf("PauseJobByID: %v", err)
+	}
+	router.Remove(key)
+	if !s.EnsureStub(key) {
+		t.Error("EnsureStub should succeed for paused jobs")
+	}
+
+	// After DeleteJobByID, the recovery path must no-op.
+	if _, err := s.DeleteJobByID(job.ID); err != nil {
+		t.Fatalf("DeleteJobByID: %v", err)
+	}
+	if s.EnsureStub(key) {
+		t.Error("EnsureStub should return false after DeleteJobByID")
+	}
+}
+
 func TestSchedulerPersistence(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")

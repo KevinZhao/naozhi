@@ -371,6 +371,12 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	h.mu.Unlock()
 
 	sess := h.router.GetSession(key)
+	if sess == nil && h.scheduler != nil && h.scheduler.EnsureStub(key) {
+		// Cron stubs are torn down by sidebar "×". Rebuild lazily on click
+		// so the user doesn't have to wait for the next scheduled tick to
+		// re-open the panel. EnsureStub is a no-op for non-cron keys.
+		sess = h.router.GetSession(key)
+	}
 	if sess != nil {
 		h.completeSubscribe(c, key, msg, sess)
 		return

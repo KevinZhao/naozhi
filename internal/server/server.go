@@ -336,6 +336,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 	s.sessionH = &SessionHandlers{
 		router:        router,
 		projectMgr:    opts.ProjectManager,
+		scheduler:     scheduler,
 		claudeDir:     claudeDir,
 		allowedRoot:   opts.AllowedRoot,
 		agents:        agents,
