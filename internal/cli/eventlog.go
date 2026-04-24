@@ -61,7 +61,8 @@ type EventLog struct {
 
 	subMu       sync.Mutex
 	subscribers map[*subscriber]struct{}
-	subsClosed  bool // CloseSubscribers has been called; no new subscribers accepted
+	subsClosed  bool         // CloseSubscribers has been called; no new subscribers accepted
+	subCount    atomic.Int32 // mirrors len(subscribers); lets notifySubscribers skip the lock when zero
 }
 
 // NewEventLog creates an event log with the given max size.
@@ -191,7 +192,15 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 // close+nil the subscriber channels, so snapshotting outside the lock would
 // allow a send on a closed channel. The non-blocking select keeps the hold
 // time at O(n) of live subscribers (dashboard clients ≤ a few).
+//
+// Fast path: idle sessions (no dashboard clients) check an atomic counter
+// and skip subMu entirely. Append is invoked per content block on every
+// stream-json event, so shaving one lock per assistant turn matters when
+// N sessions run unattended.
 func (l *EventLog) notifySubscribers() {
+	if l.subCount.Load() == 0 {
+		return
+	}
 	l.subMu.Lock()
 	for sub := range l.subscribers {
 		select {
@@ -223,11 +232,15 @@ func (l *EventLog) Subscribe() (<-chan struct{}, func()) {
 		l.subscribers = make(map[*subscriber]struct{})
 	}
 	l.subscribers[sub] = struct{}{}
+	l.subCount.Store(int32(len(l.subscribers)))
 	l.subMu.Unlock()
 
 	unsub := func() {
 		l.subMu.Lock()
-		delete(l.subscribers, sub)
+		if _, ok := l.subscribers[sub]; ok {
+			delete(l.subscribers, sub)
+			l.subCount.Store(int32(len(l.subscribers)))
+		}
 		l.subMu.Unlock()
 		sub.closeOnce.Do(func() { close(sub.ch) })
 	}
@@ -247,6 +260,7 @@ func (l *EventLog) CloseSubscribers() {
 		sub.closeOnce.Do(func() { close(sub.ch) })
 	}
 	l.subscribers = nil
+	l.subCount.Store(0)
 	l.subsClosed = true
 }
 

@@ -50,6 +50,13 @@ const tokenTTL = 24 * time.Hour
 // cleanupInterval controls how often the background goroutine scans.
 const tokenCleanupInterval = 1 * time.Hour
 
+// maxIncomingTextBytes bounds the per-message text handed to the dispatcher.
+// Mirrors the Feishu 8 KiB cap at transport_hook.go. iLink's 2 MiB response
+// budget covers batch polling, not individual messages; without a per-message
+// cap a single user (or a compromised iLink relay) can push megabyte text
+// through every cron/send path, amplifying stdin bytes on each replay.
+const maxIncomingTextBytes = 8 * 1024
+
 // New creates a WeChat platform adapter.
 func New(cfg Config) *Weixin {
 	if cfg.MaxReplyLen <= 0 {
@@ -238,6 +245,12 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 				// one user don't flood operator logs; still queryable when
 				// troubleshooting "why didn't my message go through".
 				slog.Debug("weixin non-text message ignored", "from", msg.FromUserID, "msg_id", msg.MessageID, "items", len(msg.ItemList))
+				continue
+			}
+			if len(text) > maxIncomingTextBytes {
+				slog.Warn("weixin text exceeds cap, dropping",
+					"from", msg.FromUserID, "msg_id", msg.MessageID,
+					"size", len(text), "cap", maxIncomingTextBytes)
 				continue
 			}
 

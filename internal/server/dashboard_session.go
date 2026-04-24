@@ -27,6 +27,18 @@ import (
 // to every dashboard client on each /api/sessions poll.
 const maxResumeLastPromptBytes = 2 * 1024
 
+// isUnknownRPCMethodErr reports whether a remote-proxy error came from the
+// peer node rejecting the RPC method name. That happens when the peer is
+// running an older naozhi binary that predates remove_session /
+// interrupt_session — surfacing a bespoke 409 lets the dashboard show a
+// precise "upgrade the remote node" toast instead of a generic 502. The
+// match is on error text because the reverse-RPC error is wrapped via
+// fmt.Errorf in multiple layers and carries the literal "unknown method: "
+// prefix from internal/upstream/connector.go's default switch branch.
+func isUnknownRPCMethodErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "unknown method")
+}
+
 // SessionHandlers groups the session list, events, delete, and resume API endpoints.
 type SessionHandlers struct {
 	router      *session.Router
@@ -358,6 +370,15 @@ func (h *SessionHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 		removed, err := nc.ProxyRemoveSession(r.Context(), req.Key)
 		if err != nil {
 			slog.Warn("remote remove session failed", "node", req.Node, "key", req.Key, "err", err)
+			if isUnknownRPCMethodErr(err) {
+				// Peer is running an older binary without remove_session
+				// support; return 409 + explicit body so the dashboard can
+				// show a specific "upgrade needed" message instead of the
+				// generic "remove failed". 409 (Conflict) signals the
+				// request was valid but the peer cannot fulfill it.
+				http.Error(w, "remote node needs upgrade to support this action", http.StatusConflict)
+				return
+			}
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
@@ -457,6 +478,10 @@ func (h *SessionHandlers) handleInterrupt(w http.ResponseWriter, r *http.Request
 		interrupted, err := nc.ProxyInterruptSession(r.Context(), req.Key)
 		if err != nil {
 			slog.Warn("remote interrupt session failed", "node", req.Node, "key", req.Key, "err", err)
+			if isUnknownRPCMethodErr(err) {
+				http.Error(w, "remote node needs upgrade to support this action", http.StatusConflict)
+				return
+			}
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}

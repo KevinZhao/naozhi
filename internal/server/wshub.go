@@ -616,7 +616,13 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 		interrupted, err := nc.ProxyInterruptSession(ctx, capturedKey)
 		if err != nil {
 			slog.Error("remote ws interrupt failed", "node", nodeID, "key", capturedKey, "err", err)
-			c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: "remote interrupt failed"})
+			errMsg := "remote interrupt failed"
+			if isUnknownRPCMethodErr(err) {
+				// Explicit hint so the dashboard toast tells the operator
+				// why the action is rejected instead of burying the cause.
+				errMsg = "remote node needs upgrade to support this action"
+			}
+			c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: capturedID, Status: "error", Key: capturedKey, Node: nodeID, Error: errMsg})
 			return
 		}
 		status := "ok"
@@ -977,6 +983,7 @@ func (h *Hub) Shutdown() {
 	// exit could cause use-after-close in unregister → RemoveClient.
 	h.mu.Lock()
 	conns := make([]*websocket.Conn, 0, len(h.clients))
+	removed := 0
 	for c := range h.clients {
 		for _, unsub := range c.subscriptions {
 			unsub()
@@ -986,8 +993,17 @@ func (h *Hub) Shutdown() {
 			conns = append(conns, c.conn)
 		}
 		delete(h.clients, c)
+		removed++
 	}
 	h.mu.Unlock()
+	// Keep connCount in sync with h.clients. conn.Close() below triggers
+	// readPump/writePump exit → unregister, but unregister's decrement is
+	// guarded on h.clients membership which we just cleared, so without this
+	// Add(-N) connCount stays elevated until process exit. Only matters if
+	// the Hub is reused (tests) but keeps maxWSConns admission accurate.
+	if removed > 0 {
+		h.connCount.Add(int64(-removed))
+	}
 
 	for _, conn := range conns {
 		conn.Close()

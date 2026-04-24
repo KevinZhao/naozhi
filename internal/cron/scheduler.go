@@ -597,6 +597,15 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 			return nil, fmt.Errorf("invalid schedule %q: %w", *upd.Schedule, err)
 		}
 	}
+	// Validate WorkDir against allowedRoot here (lock-free) so dashboard
+	// edits fail fast with a clear error instead of silently persisting a
+	// path that execute() will later refuse at runtime. AddJob's creation
+	// path applies the same check; UpdateJob previously skipped it.
+	if upd.WorkDir != nil && *upd.WorkDir != "" && s.allowedRoot != "" {
+		if !workDirUnderRoot(*upd.WorkDir, s.allowedRoot) {
+			return nil, fmt.Errorf("work_dir outside allowed root")
+		}
+	}
 
 	s.mu.Lock()
 	j, ok := s.jobs[id]

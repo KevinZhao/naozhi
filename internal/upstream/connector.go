@@ -485,7 +485,18 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		cwdKey := session.SanitizeCWDKey(cwd)
 		key := session.TakeoverKey(cwdKey)
 		pid, sessionID, procStartTime, reqCWD, claudeDir := p.PID, p.SessionID, p.ProcStartTime, p.CWD, c.claudeDir
+		// Track with connection wg so reconnect waits for in-flight cleanup rather
+		// than letting goroutines pile up across reconnect cycles. Use appCtx so a
+		// transient connection drop does not abort cleanup already in progress;
+		// appCtx outlives connCtx, but wg keeps accounting honest.
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("connector takeover panic", "key", key, "panic", r, "stack", string(debug.Stack()))
+				}
+			}()
 			discovery.WaitAndCleanup(appCtx, pid, procStartTime, claudeDir, reqCWD, sessionID)
 			if appCtx.Err() != nil {
 				return // connector shutting down
@@ -532,7 +543,18 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			}
 		}
 		pid, sessionID, procStartTime, cwd, claudeDir := p.PID, p.SessionID, p.ProcStartTime, p.CWD, c.claudeDir
+		// Track with connection wg so reconnect waits for this cleanup to finish.
+		wg.Add(1)
 		go func() {
+			defer wg.Done()
+			defer func() {
+				if r := recover(); r != nil {
+					slog.Error("connector close_discovered panic", "pid", pid, "panic", r, "stack", string(debug.Stack()))
+				}
+			}()
+			if appCtx.Err() != nil {
+				return
+			}
 			discovery.WaitAndCleanup(appCtx, pid, procStartTime, claudeDir, cwd, sessionID)
 		}()
 		return marshalResult(map[string]string{"status": "ok"})
