@@ -41,6 +41,12 @@ func NewRingBuffer(maxLines int, maxBytes int64) *RingBuffer {
 // Push appends a line to the buffer, evicting the oldest if necessary.
 // Returns the assigned sequence number.
 func (b *RingBuffer) Push(data []byte) int64 {
+	// Copy data before acquiring the lock so concurrent readers
+	// (LinesSince) don't wait on our allocation. The copy is required for
+	// ownership — the caller's buffer is the bufio.Scanner line slice and
+	// is reused on the next Scan.
+	copied := append([]byte(nil), data...)
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -48,13 +54,13 @@ func (b *RingBuffer) Push(data []byte) int64 {
 	assigned := b.seq
 
 	// Evict oldest to stay within byte limit
-	for b.count > 0 && b.curBytes+int64(len(data)) > b.maxBytes {
+	for b.count > 0 && b.curBytes+int64(len(copied)) > b.maxBytes {
 		b.evictOldest()
 	}
 
 	// Drop oversized lines that exceed maxBytes on their own
-	if b.count == 0 && int64(len(data)) > b.maxBytes {
-		slog.Warn("dropping oversized line from ring buffer", "size", len(data), "max", b.maxBytes)
+	if b.count == 0 && int64(len(copied)) > b.maxBytes {
+		slog.Warn("dropping oversized line from ring buffer", "size", len(copied), "max", b.maxBytes)
 		return assigned
 	}
 
@@ -62,10 +68,6 @@ func (b *RingBuffer) Push(data []byte) int64 {
 	if b.count >= b.maxLines {
 		b.evictOldest()
 	}
-
-	// Copy data to avoid holding references to external buffers
-	copied := make([]byte, len(data))
-	copy(copied, data)
 
 	b.lines[b.head] = bufLine{seq: assigned, data: copied}
 	b.head = (b.head + 1) % b.maxLines
@@ -93,6 +95,15 @@ func (b *RingBuffer) LinesSince(afterSeq int64) []bufLine {
 	defer b.mu.Unlock()
 
 	if b.count == 0 {
+		return nil
+	}
+	// b.seq is the last assigned sequence. A caller already caught up
+	// (afterSeq >= b.seq) cannot possibly have new lines; short-circuit
+	// the O(n) scan so an idle reconnecting client doesn't block every
+	// concurrent Push for the full ring duration just to find zero
+	// matches. Critical on 10k-line ring buffers where the scan is the
+	// dominant mutex hold time.
+	if afterSeq >= b.seq {
 		return nil
 	}
 

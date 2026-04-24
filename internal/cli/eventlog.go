@@ -436,6 +436,14 @@ func (l *EventLog) TurnAgents() []SubagentInfo {
 // TruncateRunes truncates s to at most maxRunes runes, appending "..." if truncated.
 // Uses byte-level rune decoding to avoid allocating a full []rune slice.
 func TruncateRunes(s string, maxRunes int) string {
+	// Fast path for short strings: byte count is an upper bound on rune
+	// count, so len(s) <= maxRunes guarantees no truncation is possible.
+	// Tool names and short summaries ("Read", "Write") go through
+	// TruncateRunes at ~5 events/s per active session; skipping the
+	// utf8 decode loop eliminates a steady CPU baseline.
+	if len(s) <= maxRunes {
+		return s
+	}
 	i, count := 0, 0
 	for i < len(s) {
 		if count == maxRunes {

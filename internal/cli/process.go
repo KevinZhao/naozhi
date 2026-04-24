@@ -1153,9 +1153,11 @@ func (p *Process) logEvent(ev Event) {
 		p.totalCost = ev.CostUSD
 		p.mu.Unlock()
 	}
-	for _, entry := range entries {
-		p.eventLog.Append(entry)
-	}
+	// AppendBatch holds l.mu and notifies subscribers ONCE rather than
+	// once per entry. Multi-block assistant events (thinking + tool_use +
+	// text) would otherwise acquire both locks N times and wake
+	// eventPushLoop spuriously for each block.
+	p.eventLog.AppendBatch(entries)
 }
 
 // agentInput holds the parsed fields from an Agent tool call input.
