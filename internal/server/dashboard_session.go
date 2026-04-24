@@ -293,7 +293,23 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, resp)
 }
 
+// maxEventsPageLimit caps the per-request history slice so a malicious or
+// confused client can't force a full ring-buffer dump via ?limit=10000.
+// 500 matches maxPersistedHistory — the upper bound of anything useful.
+const maxEventsPageLimit = 500
+
 // GET /api/sessions/events
+//
+// Query parameters:
+//   - key       (required): session key
+//   - node      (optional): remote node ID (proxy to that node)
+//   - after     (optional, ms): incremental fetch — entries with Time > after
+//   - before    (optional, ms): pagination fetch — entries with Time < before,
+//     returning up to `limit` in chronological order
+//   - limit     (optional): caps the result count. Clamped at maxEventsPageLimit.
+//
+// Precedence: `after` wins over `before` (streaming catch-up outranks
+// pagination). No params = full history (legacy behaviour).
 func (h *SessionHandlers) handleEvents(w http.ResponseWriter, r *http.Request) {
 	key := r.URL.Query().Get("key")
 	if key == "" {
@@ -301,27 +317,61 @@ func (h *SessionHandlers) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Remote node proxy
-	nodeID := r.URL.Query().Get("node")
+	q := r.URL.Query()
+	afterStr := q.Get("after")
+	beforeStr := q.Get("before")
+	limitStr := q.Get("limit")
+
+	var (
+		after  int64
+		before int64
+		limit  int
+	)
+	if afterStr != "" {
+		v, err := strconv.ParseInt(afterStr, 10, 64)
+		if err != nil {
+			http.Error(w, "invalid after parameter", http.StatusBadRequest)
+			return
+		}
+		after = v
+	}
+	if beforeStr != "" {
+		v, err := strconv.ParseInt(beforeStr, 10, 64)
+		if err != nil {
+			http.Error(w, "invalid before parameter", http.StatusBadRequest)
+			return
+		}
+		before = v
+	}
+	if limitStr != "" {
+		v, err := strconv.Atoi(limitStr)
+		if err != nil || v < 0 {
+			http.Error(w, "invalid limit parameter", http.StatusBadRequest)
+			return
+		}
+		if v > maxEventsPageLimit {
+			v = maxEventsPageLimit
+		}
+		limit = v
+	}
+
+	// Remote node proxy — forward `after` only (the remote protocol predates
+	// before/limit). Cap the returned slice locally so the dashboard gets a
+	// consistent-size payload even from legacy peers.
+	nodeID := q.Get("node")
 	if nodeID != "" && nodeID != "local" {
 		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
 		if !ok {
 			return
-		}
-		var after int64
-		if afterStr := r.URL.Query().Get("after"); afterStr != "" {
-			var parseErr error
-			after, parseErr = strconv.ParseInt(afterStr, 10, 64)
-			if parseErr != nil {
-				http.Error(w, "invalid after parameter", http.StatusBadRequest)
-				return
-			}
 		}
 		entries, err := nc.FetchEvents(r.Context(), key, after)
 		if err != nil {
 			slog.Warn("remote fetch events failed", "node", nodeID, "key", key, "err", err)
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
+		}
+		if limit > 0 && len(entries) > limit {
+			entries = entries[len(entries)-limit:]
 		}
 		writeJSON(w, entries)
 		return
@@ -335,14 +385,21 @@ func (h *SessionHandlers) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var entries []cli.EventEntry
-	if afterStr := r.URL.Query().Get("after"); afterStr != "" {
-		afterMS, err := strconv.ParseInt(afterStr, 10, 64)
-		if err != nil {
-			http.Error(w, "invalid after parameter", http.StatusBadRequest)
-			return
+	switch {
+	case afterStr != "":
+		entries = sess.EventEntriesSince(after)
+		if limit > 0 && len(entries) > limit {
+			// Preserve the newest on a full catch-up so the client doesn't
+			// miss events it just streamed through.
+			entries = entries[len(entries)-limit:]
 		}
-		entries = sess.EventEntriesSince(afterMS)
-	} else {
+	case beforeStr != "" || limit > 0:
+		pageLimit := limit
+		if pageLimit == 0 {
+			pageLimit = maxEventsPageLimit
+		}
+		entries = sess.EventEntriesBefore(before, pageLimit)
+	default:
 		entries = sess.EventEntries()
 	}
 

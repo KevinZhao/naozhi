@@ -404,9 +404,12 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		c.SendJSON(node.ServerMsg{Type: "subscribed", Key: key, State: snap.State, Reason: "suspended"})
 
 		var entries []cli.EventEntry
-		if msg.After > 0 {
+		switch {
+		case msg.After > 0:
 			entries = sess.EventEntriesSince(msg.After)
-		} else {
+		case msg.Limit > 0:
+			entries = sess.EventLastN(msg.Limit)
+		default:
 			entries = sess.EventLastN(0)
 		}
 		if len(entries) > 0 {
@@ -454,9 +457,17 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	snap := sess.Snapshot()
 
 	var entries []cli.EventEntry
-	if msg.After > 0 {
+	switch {
+	case msg.After > 0:
 		entries = sess.EventEntriesSince(msg.After)
-	} else {
+	case msg.Limit > 0:
+		// Initial subscribe asks for the last `limit` events only — this is
+		// the dashboard pagination fast path. Clients walk further back via
+		// HTTP /api/sessions/events?before=.. rather than resubscribing.
+		entries = sess.EventLastN(msg.Limit)
+	default:
+		// Legacy path: send everything the log remembers. Kept so older
+		// clients (and the node-to-node relay) still see full history.
 		entries = sess.EventLastN(0)
 	}
 

@@ -28,6 +28,8 @@ type ClientMsg struct {
 	Text      string   `json:"text,omitempty"`      // message text (send)
 	ID        string   `json:"id,omitempty"`        // client-generated correlation ID
 	After     int64    `json:"after,omitempty"`     // unix ms timestamp for subscribe history
+	Before    int64    `json:"before,omitempty"`    // unix ms timestamp; history page < Before (pagination)
+	Limit     int      `json:"limit,omitempty"`     // max events to return from initial / paginated history
 	Node      string   `json:"node,omitempty"`      // target node (empty = local)
 	Workspace string   `json:"workspace,omitempty"` // workspace override for new sessions
 	ResumeID  string   `json:"resume_id,omitempty"` // session ID to resume (recent sessions)

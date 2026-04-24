@@ -314,6 +314,44 @@ func TestWS_SubscribeWithAfter(t *testing.T) {
 	}
 }
 
+// TestWS_SubscribeWithLimit verifies the dashboard pagination fast path:
+// a fresh subscribe with limit=N only receives the newest N events instead
+// of the full event log.
+func TestWS_SubscribeWithLimit(t *testing.T) {
+	hub, router := newTestHub("")
+	proc := session.NewTestProcess()
+	for i := 1; i <= 5; i++ {
+		proc.EventLog.Append(cli.EventEntry{Time: int64(i * 1000), Type: "text", Summary: "msg"})
+	}
+	router.InjectSession("test:d:u:general", proc)
+
+	url, cleanup := startWSServer(t, hub)
+	defer cleanup()
+
+	conn := dialWS(t, url)
+	defer conn.Close()
+
+	wsWrite(t, conn, node.ClientMsg{Type: "subscribe", Key: "test:d:u:general", Limit: 2})
+
+	resp := wsRead(t, conn)
+	if resp.Type != "subscribed" {
+		t.Fatalf("type = %q, want subscribed", resp.Type)
+	}
+
+	resp = wsRead(t, conn)
+	if resp.Type != "history" {
+		t.Fatalf("type = %q, want history", resp.Type)
+	}
+	if len(resp.Events) != 2 {
+		t.Fatalf("events = %d, want 2 (limit should keep only newest)", len(resp.Events))
+	}
+	// Chronological order: newest two are time=4000 and time=5000.
+	if resp.Events[0].Time != 4000 || resp.Events[1].Time != 5000 {
+		t.Errorf("events times = [%d, %d], want [4000, 5000]",
+			resp.Events[0].Time, resp.Events[1].Time)
+	}
+}
+
 // ─── Event push tests ────────────────────────────────────────────────────────
 
 func TestWS_EventPush(t *testing.T) {

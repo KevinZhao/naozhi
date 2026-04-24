@@ -123,6 +123,28 @@ func (f *fakeProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	}
 	return nil
 }
+func (f *fakeProcess) EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry {
+	if limit <= 0 {
+		return nil
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]cli.EventEntry, 0, limit)
+	for i := len(f.entries) - 1; i >= 0 && len(out) < limit; i-- {
+		e := f.entries[i]
+		if beforeMS > 0 && e.Time >= beforeMS {
+			continue
+		}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
+}
 func (f *fakeProcess) LastEntryOfType(typ string) cli.EventEntry {
 	f.mu.Lock()
 	defer f.mu.Unlock()

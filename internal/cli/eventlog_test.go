@@ -82,6 +82,76 @@ func TestEventLog_EntriesSince_NoMatch(t *testing.T) {
 	}
 }
 
+func TestEventLog_EntriesBefore_Pagination(t *testing.T) {
+	l := NewEventLog(100)
+	l.Append(EventEntry{Time: 1000, Type: "a"})
+	l.Append(EventEntry{Time: 2000, Type: "b"})
+	l.Append(EventEntry{Time: 3000, Type: "c"})
+	l.Append(EventEntry{Time: 4000, Type: "d"})
+
+	// before=3000 → entries with Time < 3000 → {a, b}
+	// limit=10 (generous) → all matches returned.
+	entries := l.EntriesBefore(3000, 10)
+	if len(entries) != 2 {
+		t.Fatalf("len = %d, want 2", len(entries))
+	}
+	if entries[0].Type != "a" || entries[1].Type != "b" {
+		t.Errorf("entries = %+v", entries)
+	}
+}
+
+func TestEventLog_EntriesBefore_LimitHonored(t *testing.T) {
+	l := NewEventLog(100)
+	for i := 0; i < 10; i++ {
+		l.Append(EventEntry{Time: int64((i + 1) * 1000), Type: "x"})
+	}
+
+	// before=11000 (after every entry) + limit=3 → newest 3 entries in
+	// chronological order: times 8000, 9000, 10000.
+	entries := l.EntriesBefore(11000, 3)
+	if len(entries) != 3 {
+		t.Fatalf("len = %d, want 3", len(entries))
+	}
+	if entries[0].Time != 8000 || entries[2].Time != 10000 {
+		t.Errorf("entries times = [%d, %d, %d], want [8000, 9000, 10000]",
+			entries[0].Time, entries[1].Time, entries[2].Time)
+	}
+}
+
+func TestEventLog_EntriesBefore_ZeroLimitReturnsNil(t *testing.T) {
+	l := NewEventLog(100)
+	l.Append(EventEntry{Time: 1000, Type: "x"})
+	if got := l.EntriesBefore(2000, 0); got != nil {
+		t.Errorf("expected nil for limit=0, got %v", got)
+	}
+	if got := l.EntriesBefore(2000, -5); got != nil {
+		t.Errorf("expected nil for negative limit, got %v", got)
+	}
+}
+
+func TestEventLog_EntriesBefore_ZeroBeforeIsUnbounded(t *testing.T) {
+	l := NewEventLog(100)
+	l.Append(EventEntry{Time: 1000, Type: "a"})
+	l.Append(EventEntry{Time: 2000, Type: "b"})
+
+	// before=0 is interpreted as "no upper bound" so it must return the
+	// newest `limit` entries, like LastN.
+	entries := l.EntriesBefore(0, 5)
+	if len(entries) != 2 {
+		t.Fatalf("len = %d, want 2", len(entries))
+	}
+	if entries[0].Type != "a" || entries[1].Type != "b" {
+		t.Errorf("entries = %+v", entries)
+	}
+}
+
+func TestEventLog_EntriesBefore_EmptyLog(t *testing.T) {
+	l := NewEventLog(100)
+	if got := l.EntriesBefore(9999, 10); got != nil {
+		t.Errorf("expected nil from empty log, got %v", got)
+	}
+}
+
 func TestEventLog_Entries_IsCopy(t *testing.T) {
 	l := NewEventLog(10)
 	l.Append(EventEntry{Time: 1000, Type: "a"})

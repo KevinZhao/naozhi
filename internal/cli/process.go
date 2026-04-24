@@ -1358,6 +1358,13 @@ func (p *Process) EventEntriesSince(afterMS int64) []EventEntry {
 	return p.eventLog.EntriesSince(afterMS)
 }
 
+// EventEntriesBefore returns up to `limit` event log entries strictly older
+// than beforeMS, in chronological order. Used by dashboard pagination to
+// load earlier pages of history.
+func (p *Process) EventEntriesBefore(beforeMS int64, limit int) []EventEntry {
+	return p.eventLog.EntriesBefore(beforeMS, limit)
+}
+
 // LastEntryOfType returns the most recent event entry with the given type.
 func (p *Process) LastEntryOfType(typ string) EventEntry {
 	return p.eventLog.LastEntryOfType(typ)

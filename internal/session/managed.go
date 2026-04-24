@@ -39,6 +39,7 @@ type processIface interface {
 	EventEntries() []cli.EventEntry
 	EventLastN(n int) []cli.EventEntry
 	EventEntriesSince(afterMS int64) []cli.EventEntry
+	EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry
 	LastEntryOfType(typ string) cli.EventEntry
 	LastActivitySummary() string
 	ProtocolName() string
@@ -494,6 +495,46 @@ func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 		return out
 	}
 	return nil
+}
+
+// EventEntriesBefore returns up to `limit` entries with Time < beforeMS
+// in chronological order. Drives the dashboard "load earlier" button:
+// caller passes the oldest rendered event's timestamp; server returns the
+// preceding page of up to `limit` entries.
+//
+// beforeMS <= 0 is treated as "no upper bound" — equivalent to the tail
+// of the log, matching EventLastN semantics. limit <= 0 returns nil.
+func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry {
+	if limit <= 0 {
+		return nil
+	}
+	proc := s.loadProcess()
+	if proc != nil {
+		return proc.EventEntriesBefore(beforeMS, limit)
+	}
+	s.historyMu.RLock()
+	defer s.historyMu.RUnlock()
+	if len(s.persistedHistory) == 0 {
+		return nil
+	}
+	// Walk backward collecting up to `limit` entries strictly older than
+	// beforeMS. persistedHistory is not guaranteed to be sorted (see
+	// EventEntriesSince), so a full linear walk is the conservative choice.
+	out := make([]cli.EventEntry, 0, limit)
+	for i := len(s.persistedHistory) - 1; i >= 0 && len(out) < limit; i-- {
+		e := s.persistedHistory[i]
+		if beforeMS > 0 && e.Time >= beforeMS {
+			continue
+		}
+		out = append(out, e)
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
+	return out
 }
 
 // SubscribeEvents subscribes to event log notifications for this session.

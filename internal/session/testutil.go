@@ -44,6 +44,9 @@ func (p *TestProcess) EventLastN(n int) []cli.EventEntry { return p.EventLog.Las
 func (p *TestProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	return p.EventLog.EntriesSince(afterMS)
 }
+func (p *TestProcess) EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry {
+	return p.EventLog.EntriesBefore(beforeMS, limit)
+}
 func (p *TestProcess) LastEntryOfType(typ string) cli.EventEntry {
 	return p.EventLog.LastEntryOfType(typ)
 }

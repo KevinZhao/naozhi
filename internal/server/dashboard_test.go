@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -41,6 +42,147 @@ func TestHandleAPISessionEvents_SessionNotFound(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "session not found") {
 		t.Errorf("body = %q, want 'session not found'", w.Body.String())
+	}
+}
+
+// seedEventSession injects a session with the given entries and returns its key.
+// Extracted so pagination tests can share setup.
+func seedEventSession(t *testing.T, srv *Server, times ...int64) string {
+	t.Helper()
+	key := "test:d:u:general"
+	proc := session.NewTestProcess()
+	for _, ts := range times {
+		proc.EventLog.Append(cli.EventEntry{Time: ts, Type: "text", Summary: "msg"})
+	}
+	srv.router.InjectSession(key, proc)
+	return key
+}
+
+func TestHandleAPISessionEvents_LimitCapsInitialFetch(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	key := seedEventSession(t, srv, 1000, 2000, 3000, 4000, 5000)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/sessions/events?key="+key+"&limit=2", nil)
+	w := httptest.NewRecorder()
+	srv.sessionH.handleEvents(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var entries []cli.EventEntry
+	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("len = %d, want 2", len(entries))
+	}
+	// Newest two in chronological order = times 4000, 5000.
+	if entries[0].Time != 4000 || entries[1].Time != 5000 {
+		t.Errorf("entries times = [%d, %d], want [4000, 5000]",
+			entries[0].Time, entries[1].Time)
+	}
+}
+
+func TestHandleAPISessionEvents_BeforePaginatesBackwards(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	key := seedEventSession(t, srv, 1000, 2000, 3000, 4000, 5000)
+
+	// Page 1: before=3500, limit=10 → Time < 3500 → {1000,2000,3000}.
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/sessions/events?key="+key+"&before=3500&limit=10", nil)
+	w := httptest.NewRecorder()
+	srv.sessionH.handleEvents(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var entries []cli.EventEntry
+	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("len = %d, want 3", len(entries))
+	}
+	if entries[0].Time != 1000 || entries[2].Time != 3000 {
+		t.Errorf("entries times = [%d..%d], want [1000..3000]",
+			entries[0].Time, entries[2].Time)
+	}
+}
+
+func TestHandleAPISessionEvents_BeforeAndLimitPrefersNewest(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	key := seedEventSession(t, srv, 1000, 2000, 3000, 4000, 5000)
+
+	// before=5000 + limit=2 → the two newest entries strictly older than 5000
+	// → {3000, 4000}.
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/sessions/events?key="+key+"&before=5000&limit=2", nil)
+	w := httptest.NewRecorder()
+	srv.sessionH.handleEvents(w, req)
+
+	var entries []cli.EventEntry
+	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("len = %d, want 2", len(entries))
+	}
+	if entries[0].Time != 3000 || entries[1].Time != 4000 {
+		t.Errorf("entries times = [%d, %d], want [3000, 4000]",
+			entries[0].Time, entries[1].Time)
+	}
+}
+
+func TestHandleAPISessionEvents_InvalidBefore(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	seedEventSession(t, srv, 1000)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/sessions/events?key=test:d:u:general&before=not-a-number", nil)
+	w := httptest.NewRecorder()
+	srv.sessionH.handleEvents(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+func TestHandleAPISessionEvents_InvalidLimit(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	seedEventSession(t, srv, 1000)
+
+	for _, v := range []string{"abc", "-1"} {
+		req := httptest.NewRequest(http.MethodGet,
+			"/api/sessions/events?key=test:d:u:general&limit="+v, nil)
+		w := httptest.NewRecorder()
+		srv.sessionH.handleEvents(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Errorf("limit=%q: status = %d, want 400", v, w.Code)
+		}
+	}
+}
+
+func TestHandleAPISessionEvents_LimitClampedAtMax(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	// Seed only 3 events; ensure asking for 10000 doesn't blow up and we
+	// still get all available entries back (limit clamp is server-side).
+	seedEventSession(t, srv, 1000, 2000, 3000)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/sessions/events?key=test:d:u:general&limit=10000", nil)
+	w := httptest.NewRecorder()
+	srv.sessionH.handleEvents(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var entries []cli.EventEntry
+	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Errorf("len = %d, want 3", len(entries))
 	}
 }
 

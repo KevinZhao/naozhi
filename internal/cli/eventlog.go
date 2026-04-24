@@ -337,6 +337,50 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	return rev
 }
 
+// EntriesBefore returns up to `limit` entries whose Time < beforeMS, in
+// chronological order. Drives the dashboard "load earlier" pagination:
+// caller passes the timestamp of the oldest currently-rendered event and
+// gets the preceding page.
+//
+// A beforeMS of 0 is treated as "no upper bound" (equivalent to LastN).
+// A non-positive limit returns nil.
+func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []EventEntry {
+	if limit <= 0 {
+		return nil
+	}
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.count == 0 {
+		return nil
+	}
+
+	// Walk backward from newest, skip entries whose Time >= beforeMS, collect
+	// up to `limit` matches into a reverse buffer. Single pass keeps the code
+	// symmetric with EntriesSince.
+	var rev []EventEntry
+	for i := l.count - 1; i >= 0 && len(rev) < limit; i-- {
+		idx := (l.head - l.count + i + l.maxSize) % l.maxSize
+		if beforeMS > 0 && l.entries[idx].Time >= beforeMS {
+			continue
+		}
+		if rev == nil {
+			initialCap := limit
+			if remaining := i + 1; remaining < initialCap {
+				initialCap = remaining
+			}
+			rev = make([]EventEntry, 0, initialCap)
+		}
+		rev = append(rev, l.entries[idx])
+	}
+	if len(rev) == 0 {
+		return nil
+	}
+	for i, j := 0, len(rev)-1; i < j; i, j = i+1, j-1 {
+		rev[i], rev[j] = rev[j], rev[i]
+	}
+	return rev
+}
+
 // LastPromptSummary returns the summary of the most recent "user" entry.
 func (l *EventLog) LastPromptSummary() string {
 	return loadAtomicString(&l.lastPromptSummary)

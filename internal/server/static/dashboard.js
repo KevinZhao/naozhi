@@ -887,7 +887,13 @@ async function fetchEvents(full) {
   try {
     let url = '/api/sessions/events?key=' + encodeURIComponent(selectedKey);
     if (selectedNode && selectedNode !== 'local') url += '&node=' + encodeURIComponent(selectedNode);
-    if (!full && lastEventTime > 0) url += '&after=' + lastEventTime;
+    if (!full && lastEventTime > 0) {
+      url += '&after=' + lastEventTime;
+    } else if (full) {
+      // Initial fetch mirrors the WS subscribe: last INITIAL_HISTORY_LIMIT
+      // events only. Older pages are loaded on demand by loadEarlierEvents().
+      url += '&limit=' + INITIAL_HISTORY_LIMIT;
+    }
 
     const headers = {};
     const t = getToken();
@@ -908,6 +914,139 @@ async function fetchEvents(full) {
   } catch (e) { console.error('fetch events:', e); }
 }
 
+// loadEarlierEvents fetches up to EARLIER_PAGE_LIMIT events older than the
+// currently-oldest rendered bubble. Prepends the rendered output to the top
+// of the events pane and preserves scroll position so the user's view doesn't
+// jump when new content is injected above.
+//
+// Idempotent: calls bail out while a prior fetch is in flight.
+let _earlierLoading = false;
+async function loadEarlierEvents() {
+  if (_earlierLoading || !selectedKey) return;
+  const el = document.getElementById('events-scroll');
+  if (!el) return;
+
+  // The oldest currently-rendered event timestamp comes from the first
+  // .event child in the scroller. Walk children forward to skip dividers.
+  let oldestTime = 0;
+  for (const c of el.children) {
+    if (c.classList && c.classList.contains('event')) {
+      oldestTime = Number(c.getAttribute('data-time') || 0);
+      break;
+    }
+  }
+  if (!oldestTime) return;
+
+  _earlierLoading = true;
+  updateEarlierButton('loading');
+  try {
+    let url = '/api/sessions/events?key=' + encodeURIComponent(selectedKey) +
+              '&before=' + oldestTime + '&limit=' + EARLIER_PAGE_LIMIT;
+    if (selectedNode && selectedNode !== 'local') url += '&node=' + encodeURIComponent(selectedNode);
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch(url, { headers });
+    if (!r.ok) { updateEarlierButton('error'); return; }
+    const events = await r.json();
+    if (!Array.isArray(events) || events.length === 0) {
+      updateEarlierButton('done');
+      return;
+    }
+    prependEvents(events);
+    // If we got a full page there may be more; otherwise mark done.
+    updateEarlierButton(events.length >= EARLIER_PAGE_LIMIT ? 'ready' : 'done');
+  } catch (e) {
+    console.error('load earlier events:', e);
+    updateEarlierButton('error');
+  } finally {
+    _earlierLoading = false;
+  }
+}
+
+// prependEvents injects older events at the top of the scroller while keeping
+// the user's visual position stable (the bubble they're currently reading
+// should not shift). runMermaid/runKatex are already incremental via their
+// pending-dictionary design, so no extra scoping is needed.
+function prependEvents(events) {
+  const el = document.getElementById('events-scroll');
+  if (!el || !events || events.length === 0) return;
+
+  // Remove "load earlier" button so we can place new events first; it'll be
+  // re-added after.
+  const btn = document.getElementById('earlier-events-btn');
+  if (btn) btn.remove();
+
+  const display = processEventsForDisplay(events);
+  const html = renderEventsWithDividers(display, 0);
+
+  // Preserve visual stability: capture distance-from-bottom before mutation,
+  // then restore after. scrollTop alone breaks because inserted content above
+  // shifts the anchor; bottom-anchored math works even when content height
+  // changes arbitrarily.
+  const prevScrollFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+
+  const frag = document.createElement('div');
+  frag.innerHTML = html;
+  while (frag.firstChild) {
+    el.insertBefore(frag.firstChild, el.firstChild);
+  }
+
+  // Re-insert the button at the top.
+  ensureEarlierButton();
+
+  // Restore scroll position.
+  el.scrollTop = el.scrollHeight - el.clientHeight - prevScrollFromBottom;
+
+  runMermaid();
+  runKatex();
+  navRebuild();
+}
+
+// ensureEarlierButton injects/refreshes the "load earlier" affordance at the
+// top of the scroller. Button state is stored in data-state on the element.
+function ensureEarlierButton() {
+  const el = document.getElementById('events-scroll');
+  if (!el) return;
+  let btn = document.getElementById('earlier-events-btn');
+  if (!btn) {
+    btn = document.createElement('button');
+    btn.id = 'earlier-events-btn';
+    btn.type = 'button';
+    btn.className = 'earlier-events-btn';
+    btn.style.cssText = 'display:block;margin:8px auto;padding:6px 14px;background:#21262d;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;cursor:pointer;font-size:12px';
+    btn.textContent = 'Load earlier';
+    btn.onclick = loadEarlierEvents;
+    el.insertBefore(btn, el.firstChild);
+  } else if (el.firstChild !== btn) {
+    el.insertBefore(btn, el.firstChild);
+  }
+  updateEarlierButton('ready');
+}
+
+function updateEarlierButton(state) {
+  const btn = document.getElementById('earlier-events-btn');
+  if (!btn) return;
+  btn.dataset.state = state;
+  switch (state) {
+    case 'loading':
+      btn.textContent = 'Loading…';
+      btn.disabled = true;
+      break;
+    case 'done':
+      btn.textContent = 'No earlier events';
+      btn.disabled = true;
+      break;
+    case 'error':
+      btn.textContent = 'Failed — retry';
+      btn.disabled = false;
+      break;
+    default:
+      btn.textContent = 'Load earlier';
+      btn.disabled = false;
+  }
+}
+
 function renderEvents(events) {
   const el = document.getElementById('events-scroll');
   if (!el) return;
@@ -919,6 +1058,11 @@ function renderEvents(events) {
   if (events.length > 0) {
     const last = events[events.length - 1];
     if (last.time) lastRenderedEventTime = last.time;
+  }
+  // If the server returned a full page there's probably more history to
+  // browse; surface the "Load earlier" button. Short histories hide it.
+  if (events.length >= INITIAL_HISTORY_LIMIT) {
+    ensureEarlierButton();
   }
   runMermaid();
   runKatex();
@@ -2910,6 +3054,13 @@ function trapFocus(overlay) {
 // chat grouping — tight enough to separate turns, loose enough to not spam.
 const EVENT_DIVIDER_GAP_MS = 5 * 60 * 1000;
 
+// INITIAL_HISTORY_LIMIT caps how many events the server sends on a fresh
+// subscribe / first fetch. Keeps big sessions snappy on first paint; older
+// pages load lazily via the "load earlier" button. Server caps at 500
+// regardless (maxEventsPageLimit) so 100-500 is the effective window.
+const INITIAL_HISTORY_LIMIT = 100;
+const EARLIER_PAGE_LIMIT = 100;
+
 // formatTimeShort returns a chat-style label for a divider: today -> HH:MM,
 // yesterday -> "昨天 HH:MM", within a week -> "周三 HH:MM", older -> "M-D HH:MM",
 // different year -> "YYYY-M-D HH:MM".
@@ -3786,7 +3937,15 @@ const wsm = {
     const msg = { type: 'subscribe', key: key };
     if (node && node !== 'local') msg.node = node;
     this._initialSubscribe = (this.lastEventTimeWs === 0);
-    if (this.lastEventTimeWs > 0) msg.after = this.lastEventTimeWs;
+    if (this.lastEventTimeWs > 0) {
+      msg.after = this.lastEventTimeWs;
+    } else {
+      // Initial subscribe: ask for only the last INITIAL_HISTORY_LIMIT events.
+      // Keeps the first frame fast on large sessions; older events are fetched
+      // on demand via the "load earlier" button that calls GET
+      // /api/sessions/events?before=..&limit=..
+      msg.limit = INITIAL_HISTORY_LIMIT;
+    }
     this.send(msg);
   },
 
@@ -3844,8 +4003,13 @@ const wsm = {
       el.scrollTop = el.scrollHeight;
       // Reset dedup tracker on full render
       if (events.length > 0) { const last = events[events.length - 1]; if (last.time) lastRenderedEventTime = last.time; }
+      // Mount "load earlier" affordance when the server returned a full page
+      // (more history likely exists). Short histories skip the button.
+      if (events.length >= INITIAL_HISTORY_LIMIT) {
+        ensureEarlierButton();
+      }
       runMermaid();
-  runKatex();
+      runKatex();
       navRebuild();
     } else {
       const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
