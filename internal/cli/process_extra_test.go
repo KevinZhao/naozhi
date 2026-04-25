@@ -1027,6 +1027,22 @@ func TestEventEntryFromEvent(t *testing.T) {
 	}
 }
 
+// TestEventEntriesFromEventAt_UsesExternalTime locks R67-PERF-9: the At
+// variant must stamp entries with the caller-supplied millisecond timestamp
+// rather than calling time.Now() internally. readLoop relies on this to
+// share a single wall-clock read between ev.recvAt and EventEntry.Time.
+func TestEventEntriesFromEventAt_UsesExternalTime(t *testing.T) {
+	const fixedMS int64 = 1711111111111
+	ev := Event{Type: "result", Result: "x", CostUSD: 0.0}
+	entries := EventEntriesFromEventAt(ev, fixedMS)
+	if len(entries) != 1 {
+		t.Fatalf("want 1 entry, got %d", len(entries))
+	}
+	if entries[0].Time != fixedMS {
+		t.Errorf("EventEntry.Time = %d, want %d", entries[0].Time, fixedMS)
+	}
+}
+
 // TestEventEntryFromEvent_TodoWriteDetailIsArray locks the on-wire shape of
 // entry.Detail for TodoWrite events. The dashboard's renderTodoList calls
 // JSON.parse and then Array.isArray on this string; it silently falls back

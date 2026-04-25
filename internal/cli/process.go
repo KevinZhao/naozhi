@@ -460,10 +460,17 @@ func (p *Process) readLoop() {
 				continue
 			}
 
+			// Capture one time.Now() shared between ev.recvAt (handed to
+			// drainStaleEvents) and the EventEntry.Time values produced by
+			// logEventAt. Previously the two read wall-clock independently,
+			// which is measurable at 5-50 events/s × N active sessions.
+			// R67-PERF-9.
+			now := time.Now()
+
 			// Always log to EventLog so dashboard subscribers see events
 			// even when no Send() is active (e.g., after service restart
 			// reconnects to a shim that's mid-turn).
-			p.logEvent(ev)
+			p.logEventAt(ev, now.UnixMilli())
 
 			// If a result event arrives while no Send() is active (e.g.,
 			// after shim reconnect set state to Running via isMidTurn but
@@ -497,7 +504,7 @@ func (p *Process) readLoop() {
 			// recvAt is set just before handoff so drainStaleEvents can tell
 			// events queued before a new turn started from events produced
 			// for the new turn.
-			ev.recvAt = time.Now()
+			ev.recvAt = now
 			select {
 			case p.eventCh <- ev:
 			default:
@@ -1102,7 +1109,14 @@ func EventEntryFromEvent(ev Event) (EventEntry, bool) {
 // each block that maps to a known type produces its own entry so downstream consumers
 // (EventLog, dashboard) don't silently drop blocks after the first.
 func EventEntriesFromEvent(ev Event) []EventEntry {
-	now := time.Now().UnixMilli()
+	return EventEntriesFromEventAt(ev, time.Now().UnixMilli())
+}
+
+// EventEntriesFromEventAt is the caller-supplied-now variant used by readLoop
+// to share a single time.Now() call between ev.recvAt assignment and entry
+// timestamping. Public callers still use EventEntriesFromEvent. R67-PERF-9.
+func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
+	now := nowMS
 	base := EventEntry{Time: now}
 
 	switch ev.Type {
@@ -1225,7 +1239,13 @@ func EventEntriesFromEvent(ev Event) []EventEntry {
 
 // logEvent converts an Event to one or more EventEntry values and appends them to the event log.
 func (p *Process) logEvent(ev Event) {
-	entries := EventEntriesFromEvent(ev)
+	p.logEventAt(ev, time.Now().UnixMilli())
+}
+
+// logEventAt is the caller-supplied-now variant used by readLoop to reuse
+// the same time.Now() value that stamps ev.recvAt. R67-PERF-9.
+func (p *Process) logEventAt(ev Event, nowMS int64) {
+	entries := EventEntriesFromEventAt(ev, nowMS)
 	if len(entries) == 0 {
 		return
 	}

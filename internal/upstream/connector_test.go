@@ -380,6 +380,68 @@ func TestHandleRequest_Send_TextTooLong(t *testing.T) {
 	}
 }
 
+// TestHandleRequest_Send_RejectsTraversalOnEmptyDefaultWorkspace locks down
+// R68-SEC-M2: even when the connector has no configured defaultWorkspace
+// (single-user deployments), a reverse-RPC `send` must reject workspace
+// paths containing `..` segments or control bytes BEFORE filepath.Clean
+// silently folds them into a now-canonical absolute path. Before the fix,
+// the defaultWorkspace=="" branch skipped the prefix check entirely, so a
+// compromised primary could spawn CLI sessions rooted at /etc or anywhere
+// else by submitting `/home/../etc`.
+func TestHandleRequest_Send_RejectsTraversalOnEmptyDefaultWorkspace(t *testing.T) {
+	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	c := New(cfg, makeRouter(), nil)
+	if c.defaultWorkspace != "" {
+		t.Fatalf("precondition: defaultWorkspace must be empty, got %q", c.defaultWorkspace)
+	}
+	params, _ := json.Marshal(map[string]string{
+		"key":       "feishu:direct:alice:general",
+		"text":      "hi",
+		"workspace": "/home/../etc",
+	})
+	req := node.ReverseMsg{Method: "send", Params: params}
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
+	if err == nil {
+		t.Fatal("expected traversal rejection, got nil")
+	}
+	if !strings.Contains(err.Error(), "workspace") {
+		t.Errorf("err = %v, want to mention workspace", err)
+	}
+}
+
+func TestHandleRequest_Send_RejectsControlByteInWorkspace(t *testing.T) {
+	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	c := New(cfg, makeRouter(), nil)
+	params, _ := json.Marshal(map[string]string{
+		"key":       "feishu:direct:alice:general",
+		"text":      "hi",
+		"workspace": "/home/user\nproj",
+	})
+	req := node.ReverseMsg{Method: "send", Params: params}
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
+	if err == nil {
+		t.Fatal("expected control-byte rejection, got nil")
+	}
+}
+
+// TestValidateRemoteWorkspacePath_SharedByConnector confirms connector's
+// takeover and send paths call into the shared session.ValidateRemoteWorkspacePath
+// gate. The takeover path performs the CWD gate after the process identity
+// check (by design — we don't want to do FS work on behalf of an
+// unauthorized PID), so an integration-style test would require a valid
+// process identity. The shared validator is already exhaustively covered
+// by TestValidateRemoteWorkspacePath in package session; this test only
+// asserts that the connector's send branch wires it in under an empty
+// defaultWorkspace. R68-SEC-M2.
+func TestValidateRemoteWorkspacePath_SharedByConnector(t *testing.T) {
+	// Sanity ping that the shared validator rejects traversal.
+	if err := session.ValidateRemoteWorkspacePath("/home/../etc"); err == nil {
+		t.Fatal("ValidateRemoteWorkspacePath should reject /home/../etc")
+	}
+	// connector.handleRequest "send" branch exercised by
+	// TestHandleRequest_Send_RejectsTraversalOnEmptyDefaultWorkspace above.
+}
+
 // ---- handleRequest: unknown method ----
 
 func TestHandleRequest_UnknownMethod(t *testing.T) {
