@@ -429,6 +429,13 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		}
 		opts := session.AgentOpts{}
 		if p.Workspace != "" {
+			// Syntactic pre-check before filepath.Clean/EvalSymlinks. Clean
+			// silently folds `/home/../etc` into `/etc`, so a post-Clean
+			// prefix check under an empty defaultWorkspace would let any
+			// absolute path through on single-user deployments. R68-SEC-M2.
+			if err := session.ValidateRemoteWorkspacePath(p.Workspace); err != nil {
+				return nil, fmt.Errorf("workspace path invalid: %w", err)
+			}
 			// Sanitize workspace path to prevent directory traversal via symlinks.
 			ws, err := filepath.EvalSymlinks(filepath.Clean(p.Workspace))
 			if err != nil {
@@ -504,19 +511,27 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			cwd = "unknown"
 		}
 		// Validate CWD against workspace root (same check as "send" RPC).
-		if cwd != "unknown" && c.defaultWorkspace != "" {
-			cleanCWD, err := filepath.EvalSymlinks(filepath.Clean(cwd))
-			if err != nil {
-				return nil, fmt.Errorf("takeover cwd path invalid: %w", err)
+		if cwd != "unknown" {
+			// Syntactic pre-check always — even with empty defaultWorkspace,
+			// `..` traversal / control bytes / non-absolute paths have no
+			// business reaching filepath.Clean. R68-SEC-M2.
+			if err := session.ValidateRemoteWorkspacePath(cwd); err != nil {
+				return nil, fmt.Errorf("takeover cwd invalid: %w", err)
 			}
-			if !filepath.IsAbs(cleanCWD) {
-				return nil, fmt.Errorf("takeover cwd must be absolute path")
+			if c.defaultWorkspace != "" {
+				cleanCWD, err := filepath.EvalSymlinks(filepath.Clean(cwd))
+				if err != nil {
+					return nil, fmt.Errorf("takeover cwd path invalid: %w", err)
+				}
+				if !filepath.IsAbs(cleanCWD) {
+					return nil, fmt.Errorf("takeover cwd must be absolute path")
+				}
+				if cleanCWD != c.defaultWorkspace &&
+					!strings.HasPrefix(cleanCWD, c.defaultWorkspace+string(filepath.Separator)) {
+					return nil, fmt.Errorf("takeover cwd %q outside allowed root %q", cleanCWD, c.defaultWorkspace)
+				}
+				cwd = cleanCWD
 			}
-			if cleanCWD != c.defaultWorkspace &&
-				!strings.HasPrefix(cleanCWD, c.defaultWorkspace+string(filepath.Separator)) {
-				return nil, fmt.Errorf("takeover cwd %q outside allowed root %q", cleanCWD, c.defaultWorkspace)
-			}
-			cwd = cleanCWD
 		}
 		cwdKey := session.SanitizeCWDKey(cwd)
 		key := session.TakeoverKey(cwdKey)

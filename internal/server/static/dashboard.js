@@ -3793,11 +3793,14 @@ async function openFilePreview(wrapEl) {
       parts.push('<div class="fv-truncated">file truncated at ' + formatFileSize(1024 * 1024) + ' (total ' + formatFileSize(data.size || 0) + ') — download for full content</div>');
     }
     const lang = inferLang(path, data.mime || '');
-    // Markdown: render via existing renderer; others: raw <pre><code>.
+    // Markdown: render via existing renderer; others: raw <pre><code> with line gutter.
     if (lang === 'markdown') {
       parts.push('<div class="fv-md">' + renderMd(data.content || '') + '</div>');
     } else {
-      parts.push('<pre><code class="fv-code">' + esc(data.content || '') + '</code></pre>');
+      const raw = data.content || '';
+      const lines = raw.split('\n');
+      const gutter = lines.map((_, i) => String(i + 1)).join('\n');
+      parts.push('<pre class="fv-lined"><span class="fv-gutter" aria-hidden="true">' + gutter + '</span><code class="fv-code">' + esc(raw) + '</code></pre>');
     }
     body.innerHTML = parts.join('');
     if (line) scrollToPreviewLine(body, parseInt(line, 10));

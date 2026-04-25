@@ -2363,12 +2363,18 @@ func (r *Router) InterruptSessionSafe(key string) InterruptOutcome {
 			return InterruptSent
 		}
 		return InterruptNoSession
-	default:
-		// InterruptSent / InterruptNoSession / InterruptNoTurn /
-		// InterruptError — callers handle each outcome verbatim. The HTTP
-		// and WS handlers map {InterruptNoTurn, InterruptError} to
-		// "not_running" so the dashboard re-queries state.
+	case InterruptSent, InterruptNoSession, InterruptNoTurn, InterruptError:
+		// Callers handle each outcome verbatim. The HTTP and WS handlers map
+		// {InterruptNoTurn, InterruptError} to "not_running" so the dashboard
+		// re-queries state.
 		return outcome
+	default:
+		// A new outcome was added to the enum without updating this switch.
+		// Log once and map to InterruptNoSession so the dashboard shows
+		// "not_running" rather than silently passing through an outcome the
+		// HTTP layer doesn't know how to render. R65-GO-L-3.
+		slog.Warn("InterruptSessionSafe: unhandled interrupt outcome", "outcome", int(outcome), "key", key)
+		return InterruptNoSession
 	}
 }
 

@@ -591,7 +591,18 @@ func (m *Manager) Discover() ([]State, error) {
 			slog.Info("removing shim state: socket missing",
 				"path", path, "pid", state.ShimPID,
 				"socket", state.Socket, "err", err)
-			_ = syscall.Kill(state.ShimPID, syscall.SIGTERM)
+			// Re-check the PID before signalling. When the shim exits on
+			// its own during graceful shutdown, it unlinks the socket itself
+			// — the os.Stat above succeeds at detecting the missing socket,
+			// but the process is already gone. Sending SIGTERM to a dead PID
+			// either silently no-ops (race-lost) or terminates an unrelated
+			// PID reusing the number. Probing with Kill(pid, 0) first removes
+			// the noisy "caught SIGTERM during shutdown" log line from the
+			// shim's crash path and the small but real wrong-PID risk.
+			// R65-GO-L-2.
+			if err := syscall.Kill(state.ShimPID, 0); err == nil {
+				_ = syscall.Kill(state.ShimPID, syscall.SIGTERM)
+			}
 			RemoveStateFile(path)
 			continue
 		}

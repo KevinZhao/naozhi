@@ -156,12 +156,16 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	version := h.router.Version()
 	snapshots := h.router.ListSessions()
 
+	// Capture once so downstream cutoff / uptime bucket computations share a
+	// single vDSO call rather than the 2 previously paid per poll. R67-PERF-4.
+	now := time.Now()
+
 	// Keep dead sessions in the workspace sidebar for up to 24 hours. Merge
 	// the filter pass with running/ready accounting so we only walk the
 	// slice once — the dashboard polls this at 1 Hz × N tabs, and a full
 	// re-scan later in handleList was pure bookkeeping for state counts the
 	// filter pass could have computed in-place at zero extra cost.
-	cutoff24h := time.Now().Add(-24 * time.Hour).UnixMilli()
+	cutoff24h := now.Add(-24 * time.Hour).UnixMilli()
 	var running, ready int
 	n := 0
 	for _, snap := range snapshots {
@@ -246,7 +250,7 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	stats["ready"] = ready
 	stats["total"] = total
 	stats["version"] = version
-	stats["uptime"] = h.uptimeString()
+	stats["uptime"] = h.uptimeStringAt(now)
 	stats["watchdog"] = watchdogStats{
 		NoOutputKills: h.watchdogNoOut.Load(),
 		TotalKills:    h.watchdogTotal.Load(),
@@ -802,7 +806,15 @@ type uptimeSnapshot struct {
 // losers drop their locally formatted copy (the formatted string still
 // escapes to the response regardless, so no leak).
 func (h *SessionHandlers) uptimeString() string {
-	d := time.Since(h.startedAt).Round(time.Second)
+	return h.uptimeStringAt(time.Now())
+}
+
+// uptimeStringAt is the caller-supplied-now variant: handleList captures
+// time.Now() once at the top of the request so cutoff24h and uptimeString
+// share a single vDSO call. Other callers (tests, health probes) stay on
+// uptimeString(). R67-PERF-4.
+func (h *SessionHandlers) uptimeStringAt(now time.Time) string {
+	d := now.Sub(h.startedAt).Round(time.Second)
 	bucket := int64(d / time.Second)
 	if cur := h.uptimeCache.Load(); cur != nil && cur.Bucket == bucket {
 		return cur.Str
