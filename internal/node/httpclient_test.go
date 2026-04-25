@@ -535,6 +535,65 @@ func TestHTTPClient_ProxyInterruptSession_errorStatus(t *testing.T) {
 	}
 }
 
+// ---- ProxySetSessionLabel ----
+
+func TestHTTPClient_ProxySetSessionLabel_ok(t *testing.T) {
+	var gotBody map[string]string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPatch || r.URL.Path != "/api/sessions/label" {
+			http.Error(w, "unexpected", http.StatusBadRequest)
+			return
+		}
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "label": gotBody["label"]})
+	}))
+	defer srv.Close()
+
+	c := newTestHTTPClient(t, srv, "")
+	updated, err := c.ProxySetSessionLabel(context.Background(), "feishu:direct:alice:general", "my-label")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !updated {
+		t.Fatal("expected updated=true on 200")
+	}
+	if gotBody["key"] != "feishu:direct:alice:general" {
+		t.Errorf("key in body = %q, want feishu:direct:alice:general", gotBody["key"])
+	}
+	if gotBody["label"] != "my-label" {
+		t.Errorf("label in body = %q, want my-label", gotBody["label"])
+	}
+}
+
+func TestHTTPClient_ProxySetSessionLabel_notFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "not found", http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	c := newTestHTTPClient(t, srv, "")
+	updated, err := c.ProxySetSessionLabel(context.Background(), "k", "x")
+	if err != nil {
+		t.Fatalf("expected nil err on 404, got %v", err)
+	}
+	if updated {
+		t.Fatal("expected updated=false on 404")
+	}
+}
+
+func TestHTTPClient_ProxySetSessionLabel_errorStatus(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := newTestHTTPClient(t, srv, "")
+	if _, err := c.ProxySetSessionLabel(context.Background(), "k", "x"); err == nil {
+		t.Fatal("expected error on 500")
+	}
+}
+
 // ---- Metadata accessors ----
 
 func TestHTTPClient_Accessors(t *testing.T) {

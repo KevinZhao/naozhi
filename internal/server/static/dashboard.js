@@ -529,8 +529,9 @@ function sessionCardHtml(s) {
   const isCron = typeof s.key === 'string' && s.key.indexOf('cron:') === 0;
   const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '') + (isCron ? ' cron-card' : '');
 
-  // Line 1: prompt
-  const prompt = s.summary || s.last_prompt || (isNew ? '(new session)' : '(no prompt)');
+  // Line 1: prompt. user_label (operator-set via rename) wins over any
+  // auto-derived title so the rename is visible immediately across refreshes.
+  const prompt = s.user_label || s.summary || s.last_prompt || (isNew ? '(new session)' : '(no prompt)');
   const icon = cliIcon(s.cli_name || 'cli');
 
   // Line 2: status dot + meta
@@ -804,14 +805,56 @@ async function dismissSession(key, node) {
   } catch (e) { showToast('remove error: ' + e.message); }
 }
 
+// Operator-facing rename flow. Prompts for a new display label; empty input
+// clears any prior label and falls back to the summary/last_prompt display
+// chain. Uses PATCH /api/sessions/label so the mutation round-trips through
+// the server and persists across reloads.
+async function renameSession() {
+  if (!selectedKey) return;
+  const s = sessionsData[sid(selectedKey, selectedNode)] || {};
+  const current = s.user_label || '';
+  const input = window.prompt('重命名会话（留空恢复默认标题，最多 128 字节）', current);
+  if (input === null) return; // user cancelled
+  const next = input.trim();
+  if (next === current) return;
+  try {
+    const headers = {'Content-Type': 'application/json'};
+    const token = getToken();
+    if (token) headers['Authorization'] = 'Bearer ' + token;
+    const body = {key: selectedKey, label: next};
+    if (selectedNode && selectedNode !== 'local') body.node = selectedNode;
+    const r = await fetch('/api/sessions/label', {
+      method: 'PATCH', headers,
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      const text = await r.text().catch(() => '' + r.status);
+      showToast('重命名失败: ' + text);
+      return;
+    }
+    // Patch local cache so the title refreshes before the next poll lands.
+    const cacheKey = sid(selectedKey, selectedNode);
+    if (sessionsData[cacheKey]) {
+      sessionsData[cacheKey].user_label = next;
+    }
+    lastVersion = 0;
+    debouncedFetchSessions();
+    if (typeof renderMainShell === 'function') renderMainShell();
+    showToast(next ? '已重命名' : '已恢复默认标题');
+  } catch (e) {
+    showToast('重命名失败: ' + e.message);
+  }
+}
+
 function renderMainShell() {
   const main = document.getElementById('main');
   const s = sessionsData[sid(selectedKey, selectedNode)] || {};
 
   const keyParts = (selectedKey || '').split(':');
   const agentIsGeneric = !s.agent || s.agent === 'general';
-  // Primary title: user's latest prompt. Fallback to agent name or key tail.
-  const displayName = s.summary || s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyParts[keyParts.length - 1] || selectedKey || '';
+  // Primary title: user_label (operator-set rename) > summary > latest prompt
+  // > agent name > key tail.
+  const displayName = s.user_label || s.summary || s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyParts[keyParts.length - 1] || selectedKey || '';
 
   // Detail line: left = CLI name + version, right = cost (hidden for kiro)
   const effCLIName = s.cli_name || defaultCLIName;
@@ -822,11 +865,19 @@ function renderMainShell() {
   const costText = '$' + (cost < 0.01 && cost > 0 ? cost.toFixed(4) : cost.toFixed(2));
   const costClass = 'detail-cost' + (cost >= 1 ? ' high-cost' : cost > 0 ? ' has-cost' : '');
 
+  // Rename is available only for managed sessions owned by this or a connected
+  // naozhi instance. Discovered (_discovered:*) entries are external processes
+  // with no backend label storage, and we intentionally hide the control there.
+  const canRename = selectedKey && !selectedKey.startsWith('_discovered:');
+  const renameBtn = canRename
+    ? '<button class="btn-rename" onclick="renameSession()" title="重命名会话" aria-label="Rename session">✎</button>'
+    : '';
+
   main.innerHTML =
     '<div class="main-header">' +
       '<button class="btn-mobile-back" onclick="mobileBack()" title="back">&#8592;</button>' +
       '<div class="main-header-content">' +
-      '<h2>' + esc(displayName) + '</h2>' +
+      '<h2>' + esc(displayName) + renameBtn + '</h2>' +
       '<div class="detail">' +
         '<span class="detail-left">' + cliLabel + '</span>' +
         (showCost ? '<span class="' + costClass + '" id="header-cost">' + costText + '</span>' : '') +

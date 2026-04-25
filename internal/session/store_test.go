@@ -32,6 +32,31 @@ func TestSaveAndLoadStore(t *testing.T) {
 	}
 }
 
+func TestSaveAndLoadUserLabel(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	labeled := newSessionWithID("feishu:direct:alice:general", "sess-111")
+	labeled.SetUserLabel("重构会话")
+	unlabeled := newSessionWithID("feishu:group:xxx:general", "sess-222")
+
+	sessions := map[string]*ManagedSession{
+		labeled.key:   labeled,
+		unlabeled.key: unlabeled,
+	}
+	if err := saveStore(path, sessions); err != nil {
+		t.Fatalf("saveStore() error: %v", err)
+	}
+
+	restored := loadStore(path)
+	if got := restored[labeled.key].UserLabel; got != "重构会话" {
+		t.Errorf("labeled UserLabel = %q, want %q", got, "重构会话")
+	}
+	if got := restored[unlabeled.key].UserLabel; got != "" {
+		t.Errorf("unlabeled UserLabel = %q, want empty", got)
+	}
+}
+
 func TestLoadStoreNotExist(t *testing.T) {
 	restored := loadStore("/tmp/does-not-exist-naozhi-test.json")
 	if restored != nil {

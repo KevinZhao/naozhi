@@ -291,6 +291,67 @@ func TestRouterLegacySingleWrapperMode(t *testing.T) {
 	}
 }
 
+func TestRouterSetUserLabel(t *testing.T) {
+	r := NewRouter(RouterConfig{})
+	// Inject a managed session directly so we can exercise the label path
+	// without running a full spawnSession — the contract under test is
+	// atomic.Value round-trip + storeGen/storeDirty bookkeeping.
+	r.mu.Lock()
+	r.sessions["k1"] = &ManagedSession{key: "k1"}
+	r.mu.Unlock()
+
+	before := r.storeGen.Load()
+	if ok := r.SetUserLabel("k1", "我的会话"); !ok {
+		t.Fatalf("SetUserLabel on existing session returned false")
+	}
+	if got := r.GetSession("k1").UserLabel(); got != "我的会话" {
+		t.Errorf("UserLabel = %q, want %q", got, "我的会话")
+	}
+	if gen := r.storeGen.Load(); gen <= before {
+		t.Errorf("storeGen did not advance: before=%d after=%d", before, gen)
+	}
+	if !r.storeDirty {
+		t.Errorf("storeDirty should be true after SetUserLabel")
+	}
+
+	// Clearing the label (empty string) is an explicit feature.
+	if ok := r.SetUserLabel("k1", ""); !ok {
+		t.Fatalf("SetUserLabel clear returned false")
+	}
+	if got := r.GetSession("k1").UserLabel(); got != "" {
+		t.Errorf("UserLabel after clear = %q, want empty", got)
+	}
+
+	// Unknown key returns false and does not bump storeGen.
+	genBefore := r.storeGen.Load()
+	if ok := r.SetUserLabel("missing", "x"); ok {
+		t.Errorf("SetUserLabel on unknown key returned true")
+	}
+	if r.storeGen.Load() != genBefore {
+		t.Errorf("storeGen advanced on unknown-key call")
+	}
+}
+
+func TestRouterStoreRestoreUserLabel(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "sessions.json")
+
+	labeled := newSessionWithID("feishu:direct:alice:general", "sess-111")
+	labeled.SetUserLabel("alpha")
+	if err := saveStore(storePath, map[string]*ManagedSession{labeled.key: labeled}); err != nil {
+		t.Fatalf("saveStore: %v", err)
+	}
+
+	r := NewRouter(RouterConfig{StorePath: storePath})
+	got := r.GetSession(labeled.key)
+	if got == nil {
+		t.Fatalf("session not restored")
+	}
+	if got.UserLabel() != "alpha" {
+		t.Errorf("restored UserLabel = %q, want alpha", got.UserLabel())
+	}
+}
+
 func TestRouterSetGetSessionBackend(t *testing.T) {
 	r := NewRouter(RouterConfig{})
 	r.SetSessionBackend("k1", "kiro")

@@ -658,6 +658,73 @@ func TestReverseConn_ProxyInterruptSession_notRunning(t *testing.T) {
 	}
 }
 
+// ---- ProxySetSessionLabel ----
+
+func TestReverseConn_ProxySetSessionLabel(t *testing.T) {
+	rc, wsConn, cleanup := setupReverseConnPair(t)
+	defer cleanup()
+
+	var gotMethod string
+	var gotParams map[string]string
+	go func() {
+		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var req ReverseMsg
+		if err := wsConn.ReadJSON(&req); err != nil {
+			return
+		}
+		gotMethod = req.Method
+		_ = json.Unmarshal(req.Params, &gotParams)
+		result, _ := json.Marshal(map[string]bool{"updated": true})
+		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	updated, err := rc.ProxySetSessionLabel(ctx, "feishu:direct:alice:general", "my-label")
+	if err != nil {
+		t.Fatalf("ProxySetSessionLabel: %v", err)
+	}
+	if !updated {
+		t.Error("expected updated=true")
+	}
+	if gotMethod != "set_session_label" {
+		t.Errorf("method = %q, want set_session_label", gotMethod)
+	}
+	if gotParams["key"] != "feishu:direct:alice:general" {
+		t.Errorf("params[key] = %q, want feishu:direct:alice:general", gotParams["key"])
+	}
+	if gotParams["label"] != "my-label" {
+		t.Errorf("params[label] = %q, want my-label", gotParams["label"])
+	}
+}
+
+func TestReverseConn_ProxySetSessionLabel_unknownKey(t *testing.T) {
+	rc, wsConn, cleanup := setupReverseConnPair(t)
+	defer cleanup()
+
+	go func() {
+		wsConn.SetReadDeadline(time.Now().Add(3 * time.Second))
+		var req ReverseMsg
+		if err := wsConn.ReadJSON(&req); err != nil {
+			return
+		}
+		result, _ := json.Marshal(map[string]bool{"updated": false})
+		wsConn.WriteJSON(ReverseMsg{Type: "response", ReqID: req.ReqID, Result: result})
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
+
+	updated, err := rc.ProxySetSessionLabel(ctx, "k", "x")
+	if err != nil {
+		t.Fatalf("unexpected err: %v", err)
+	}
+	if updated {
+		t.Error("expected updated=false")
+	}
+}
+
 // ---- FetchDiscoveredPreview ----
 
 func TestReverseConn_FetchDiscoveredPreview(t *testing.T) {

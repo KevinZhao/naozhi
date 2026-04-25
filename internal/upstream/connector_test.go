@@ -147,7 +147,7 @@ func TestRunOnce_AuthFailure(t *testing.T) {
 		defer conn.Close()
 		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 		var reg node.ReverseMsg
-		conn.ReadJSON(&reg) //nolint:errcheck
+		conn.ReadJSON(&reg)                                                          //nolint:errcheck
 		conn.WriteJSON(node.ReverseMsg{Type: "register_fail", Error: "auth failed"}) //nolint:errcheck
 	})
 	defer srv.Close()
@@ -1054,4 +1054,82 @@ func TestHandleConn_WSPingPong(t *testing.T) {
 		t.Error("timeout")
 	}
 	<-done
+}
+
+// ---- handleRequest: set_session_label ----
+
+func TestHandleRequest_SetSessionLabel_Updates(t *testing.T) {
+	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	router := makeRouter()
+	// Seed a session so the dispatch path has something to mutate.
+	proc := session.NewTestProcess()
+	router.InjectSession("feishu:direct:alice:general", proc)
+	c := New(cfg, router, nil)
+
+	req := node.ReverseMsg{
+		Method: "set_session_label",
+		Params: json.RawMessage(`{"key":"feishu:direct:alice:general","label":"标记"}`),
+	}
+	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
+	if err != nil {
+		t.Fatalf("set_session_label: %v", err)
+	}
+	var resp map[string]bool
+	if err := json.Unmarshal(result, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp["updated"] {
+		t.Errorf("updated = false, want true")
+	}
+	if got := router.GetSession("feishu:direct:alice:general").UserLabel(); got != "标记" {
+		t.Errorf("UserLabel = %q, want 标记", got)
+	}
+}
+
+func TestHandleRequest_SetSessionLabel_UnknownKey(t *testing.T) {
+	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	c := New(cfg, makeRouter(), nil)
+
+	req := node.ReverseMsg{
+		Method: "set_session_label",
+		Params: json.RawMessage(`{"key":"nope","label":"x"}`),
+	}
+	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
+	if err != nil {
+		t.Fatalf("set_session_label: %v", err)
+	}
+	var resp map[string]bool
+	if err := json.Unmarshal(result, &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["updated"] {
+		t.Errorf("updated = true for unknown key")
+	}
+}
+
+func TestHandleRequest_SetSessionLabel_MissingKey(t *testing.T) {
+	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	c := New(cfg, makeRouter(), nil)
+
+	req := node.ReverseMsg{
+		Method: "set_session_label",
+		Params: json.RawMessage(`{"label":"x"}`),
+	}
+	if _, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{}); err == nil {
+		t.Errorf("expected error for missing key, got nil")
+	}
+}
+
+func TestHandleRequest_SetSessionLabel_TooLong(t *testing.T) {
+	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	c := New(cfg, makeRouter(), nil)
+
+	label := strings.Repeat("a", 129)
+	req := node.ReverseMsg{
+		Method: "set_session_label",
+		Params: json.RawMessage(`{"key":"k","label":"` + label + `"}`),
+	}
+	if _, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{}); err == nil {
+		t.Errorf("expected error for oversized label, got nil")
+	}
 }

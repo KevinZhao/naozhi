@@ -54,6 +54,7 @@ type storeEntry struct {
 	Workspace      string   `json:"workspace,omitempty"`
 	Backend        string   `json:"backend,omitempty"`     // "claude" | "kiro" | ...
 	LastActive     int64    `json:"last_active,omitempty"` // unix nano
+	UserLabel      string   `json:"user_label,omitempty"`  // operator-set display name override
 }
 
 func saveStore(path string, sessions map[string]*ManagedSession) error {
@@ -104,6 +105,7 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 				Workspace:      s.workspace,
 				Backend:        s.Backend(),
 				LastActive:     s.lastActive.Load(),
+				UserLabel:      s.UserLabel(),
 			})
 		}
 	}

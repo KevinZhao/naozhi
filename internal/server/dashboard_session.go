@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -11,6 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sync/singleflight"
 
@@ -27,6 +29,35 @@ import (
 // megabyte-scale string from being persisted on the session and then echoed
 // to every dashboard client on each /api/sessions poll.
 const maxResumeLastPromptBytes = 2 * 1024
+
+// maxUserLabelBytes caps the operator-set session label. 128 bytes covers any
+// realistic sidebar/header title while keeping sessions.json growth bounded —
+// the label is rebroadcast on every /api/sessions poll, so a megabyte-scale
+// string would multiply dashboard egress N×(tabs).
+const maxUserLabelBytes = 128
+
+// validateUserLabel trims surrounding whitespace, enforces maxUserLabelBytes,
+// rejects invalid UTF-8, and blocks ASCII control characters (except \t) that
+// would otherwise corrupt slog JSONHandler output and dashboard HTML.
+// An empty return value is the caller's signal to clear any prior label.
+func validateUserLabel(s string) (string, error) {
+	s = strings.TrimSpace(s)
+	if len(s) == 0 {
+		return "", nil
+	}
+	if len(s) > maxUserLabelBytes {
+		return "", errors.New("label too long")
+	}
+	if !utf8.ValidString(s) {
+		return "", errors.New("invalid utf-8")
+	}
+	for _, r := range s {
+		if r == 0 || (r < 0x20 && r != '\t') || r == 0x7f {
+			return "", errors.New("control characters not allowed")
+		}
+	}
+	return s, nil
+}
 
 // watchdogStats is the /api/sessions "watchdog" sub-object. Declared as a
 // named struct (not an inline map[string]any) so json/reflect caches the
@@ -535,6 +566,59 @@ func (h *SessionHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, map[string]string{"status": "ok"})
+}
+
+// PATCH /api/sessions/label — update the operator-set display label for a
+// session. Empty label clears any prior value.
+func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Key   string `json:"key"`
+		Node  string `json:"node"`
+		Label string `json:"label"`
+	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
+		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+
+	label, err := validateUserLabel(req.Label)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	// Remote node proxy — forward to the node that owns the session.
+	if req.Node != "" && req.Node != "local" {
+		nc, ok := h.nodeAccess.LookupNode(w, req.Node)
+		if !ok {
+			return
+		}
+		updated, err := nc.ProxySetSessionLabel(r.Context(), req.Key, label)
+		if err != nil {
+			slog.Warn("remote set session label failed", "node", req.Node, "key", req.Key, "err", err)
+			if isUnknownRPCMethodErr(err) {
+				http.Error(w, "remote node needs upgrade to support this action", http.StatusConflict)
+				return
+			}
+			http.Error(w, "upstream error", http.StatusBadGateway)
+			return
+		}
+		if !updated {
+			http.Error(w, "session not found", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, map[string]string{"status": "ok", "label": label})
+		return
+	}
+
+	if !h.router.SetUserLabel(req.Key, label) {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	slog.Info("session label updated", "key", req.Key, "label_len", len(label))
+	writeJSON(w, map[string]string{"status": "ok", "label": label})
 }
 
 // POST /api/sessions/resume

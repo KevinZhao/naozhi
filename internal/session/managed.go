@@ -100,6 +100,11 @@ type ManagedSession struct {
 	cliName     atomic.Value // string: "claude-code", "kiro" — set at creation from Wrapper
 	cliVersion  atomic.Value // string: semver from --version
 	deathReason atomic.Value // string: why process died, empty if alive
+	// userLabel is an operator-set display name that overrides summary/last_prompt
+	// in the dashboard sidebar and header. Empty = unset, fall back to
+	// summary → last_prompt. Lock-free reads from Snapshot() mirror the
+	// backend/cliName/cliVersion pattern. Stored type is string.
+	userLabel atomic.Value
 	// totalCost is the cumulative cost carried over from a previous process
 	// incarnation: written once at construction (either in NewRouter() when
 	// restoring from store, or in spawnSession() when inheriting from the
@@ -160,6 +165,13 @@ func (s *ManagedSession) CLIVersion() string { return loadStringAtomic(&s.cliVer
 
 // SetCLIVersion records the wrapper-provided CLI version.
 func (s *ManagedSession) SetCLIVersion(v string) { s.cliVersion.Store(v) }
+
+// UserLabel returns the operator-set display label ("" when unset).
+func (s *ManagedSession) UserLabel() string { return loadStringAtomic(&s.userLabel) }
+
+// SetUserLabel records an operator-set display label. Callers must have
+// already validated length/charset; the empty string clears any prior label.
+func (s *ManagedSession) SetUserLabel(v string) { s.userLabel.Store(v) }
 
 func (s *ManagedSession) loadProcess() processIface {
 	if box := s.process.Load(); box != nil {
@@ -536,6 +548,7 @@ type SessionSnapshot struct {
 	LastPrompt   string             `json:"last_prompt,omitempty"`   // most recent user message
 	LastActivity string             `json:"last_activity,omitempty"` // most recent tool/thinking status
 	Summary      string             `json:"summary,omitempty"`       // Claude-generated session title
+	UserLabel    string             `json:"user_label,omitempty"`    // operator-set override for sidebar/header title
 	Project      string             `json:"project,omitempty"`       // project name (filled by server)
 	IsPlanner    bool               `json:"is_planner,omitempty"`    // true for project planner sessions
 	Subagents    []cli.SubagentInfo `json:"subagents,omitempty"`     // active sub-agent types in current turn
@@ -560,6 +573,7 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		Backend:    s.Backend(),
 		CLIName:    s.CLIName(),
 		CLIVersion: s.CLIVersion(),
+		UserLabel:  s.UserLabel(),
 	}
 	if dr, ok := s.deathReason.Load().(string); ok {
 		snap.DeathReason = dr

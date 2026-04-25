@@ -65,6 +65,9 @@ func (s *stubConn) ProxyRemoveSession(_ context.Context, _ string) (bool, error)
 func (s *stubConn) ProxyInterruptSession(_ context.Context, _ string) (bool, error) {
 	return true, nil
 }
+func (s *stubConn) ProxySetSessionLabel(_ context.Context, _, _ string) (bool, error) {
+	return true, nil
+}
 func (s *stubConn) Subscribe(_ EventSink, _ string, _ int64) {}
 func (s *stubConn) Unsubscribe(_ EventSink, _ string)        {}
 func (s *stubConn) RefreshSubscription(_ string)             {}

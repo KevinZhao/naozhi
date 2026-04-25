@@ -315,6 +315,22 @@ func (c *ReverseConn) ProxyRemoveSession(ctx context.Context, key string) (bool,
 	return resp.Removed, nil
 }
 
+func (c *ReverseConn) ProxySetSessionLabel(ctx context.Context, key, label string) (bool, error) {
+	raw, err := c.rpc(ctx, "set_session_label", map[string]string{"key": key, "label": label})
+	if err != nil {
+		return false, err
+	}
+	var resp struct {
+		Updated bool `json:"updated"`
+	}
+	if len(raw) > 0 {
+		if err := json.Unmarshal(raw, &resp); err != nil {
+			return false, fmt.Errorf("set_session_label response: %w", err)
+		}
+	}
+	return resp.Updated, nil
+}
+
 func (c *ReverseConn) ProxyInterruptSession(ctx context.Context, key string) (bool, error) {
 	raw, err := c.rpc(ctx, "interrupt_session", map[string]string{"key": key})
 	if err != nil {

@@ -642,6 +642,28 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		interrupted := c.router.InterruptSession(p.Key)
 		return marshalResult(map[string]bool{"interrupted": interrupted})
 
+	case "set_session_label":
+		var p struct {
+			Key   string `json:"key"`
+			Label string `json:"label"`
+		}
+		if err := json.Unmarshal(req.Params, &p); err != nil {
+			return nil, fmt.Errorf("set_session_label params: %w", err)
+		}
+		if p.Key == "" {
+			return nil, errors.New("key is required")
+		}
+		// Length guard (128 bytes) mirrors maxUserLabelBytes in
+		// internal/server/dashboard_session.go. Charset validation already
+		// happens on the dashboard-facing HTTP path; this second check
+		// defends the server-role node against a malicious control-node
+		// sending oversized/invalid labels via the reverse RPC transport.
+		if len(p.Label) > 128 {
+			return nil, errors.New("label too long")
+		}
+		updated := c.router.SetUserLabel(p.Key, p.Label)
+		return marshalResult(map[string]bool{"updated": updated})
+
 	case "set_favorite":
 		var p struct {
 			ProjectName string `json:"project_name"`

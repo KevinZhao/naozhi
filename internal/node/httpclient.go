@@ -288,6 +288,37 @@ func (n *HTTPClient) ProxyRemoveSession(ctx context.Context, key string) (bool, 
 	}
 }
 
+// ProxySetSessionLabel forwards PATCH /api/sessions/label to the remote node.
+// Mirrors ProxyRemoveSession: (true, nil) on 200, (false, nil) on 404, and
+// (false, err) on any other response or transport failure. Older peers that do
+// not register the /api/sessions/label route will respond with 404 at the HTTP
+// layer, indistinguishable from "session not found" — this matches the
+// behavior of the other direct-HTTP proxy methods and is acceptable since the
+// primary "upgrade needed" surface is the reverse-RPC transport where peer
+// capability is known ahead of time.
+func (n *HTTPClient) ProxySetSessionLabel(ctx context.Context, key, label string) (bool, error) {
+	data, err := json.Marshal(map[string]string{"key": key, "label": label})
+	if err != nil {
+		return false, fmt.Errorf("marshal set session label payload: %w", err)
+	}
+	resp, err := n.doRequest(ctx, http.MethodPatch, "/api/sessions/label", bytes.NewReader(data))
+	if err != nil {
+		return false, fmt.Errorf("proxy set session label to %s: %w", n.ID, err)
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		return true, nil
+	case http.StatusNotFound:
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<16))
+		return false, nil
+	default:
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<16))
+		return false, fmt.Errorf("proxy set session label to %s: status %d: %s", n.ID, resp.StatusCode, string(body))
+	}
+}
+
 // ProxyInterruptSession forwards POST /api/sessions/interrupt to the remote node.
 func (n *HTTPClient) ProxyInterruptSession(ctx context.Context, key string) (bool, error) {
 	data, err := json.Marshal(map[string]string{"key": key})

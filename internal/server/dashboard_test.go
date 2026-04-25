@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -597,5 +598,183 @@ func TestHandleAPISessions_NodeAggregation(t *testing.T) {
 	}
 	if !found {
 		t.Error("remote session with node='macbook' not found in aggregated sessions")
+	}
+}
+
+// ─── validateUserLabel ───────────────────────────────────────────────────────
+
+func TestValidateUserLabel(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		want    string
+		wantErr bool
+	}{
+		{"empty passes", "", "", false},
+		{"whitespace-only passes (treated as clear)", "   ", "", false},
+		{"ASCII label", "hello", "hello", false},
+		{"Chinese label", "重构会话", "重构会话", false},
+		{"trims surrounding space", "  hi  ", "hi", false},
+		{"128 bytes exact", strings.Repeat("a", 128), strings.Repeat("a", 128), false},
+		{"129 bytes rejected", strings.Repeat("a", 129), "", true},
+		{"tab allowed", "a\tb", "a\tb", false},
+		{"newline rejected", "a\nb", "", true},
+		{"NUL rejected", "a\x00b", "", true},
+		{"DEL rejected", "a\x7fb", "", true},
+		{"invalid utf-8 rejected", "\xc3\x28", "", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, err := validateUserLabel(c.in)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, c.wantErr)
+			}
+			if !c.wantErr && got != c.want {
+				t.Errorf("got = %q, want = %q", got, c.want)
+			}
+		})
+	}
+}
+
+// ─── handleSetLabel (PATCH /api/sessions/label) ──────────────────────────────
+
+// TestHandleSetLabel_OK verifies the happy path: an existing session accepts
+// a label update and the mutation is visible via Router.GetSession.
+func TestHandleSetLabel_OK(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	key := seedEventSession(t, srv, 1000)
+
+	body := `{"key":"` + key + `","label":"重构会话"}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.sessionH.handleSetLabel(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%q)", w.Code, w.Body.String())
+	}
+	if got := srv.router.GetSession(key).UserLabel(); got != "重构会话" {
+		t.Errorf("router UserLabel = %q, want 重构会话", got)
+	}
+}
+
+// TestHandleSetLabel_EmptyClears verifies that an empty label clears any
+// prior label (the documented "reset to auto-title" gesture).
+func TestHandleSetLabel_EmptyClears(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	key := seedEventSession(t, srv, 1000)
+	srv.router.SetUserLabel(key, "before")
+
+	body := `{"key":"` + key + `","label":""}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.sessionH.handleSetLabel(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if got := srv.router.GetSession(key).UserLabel(); got != "" {
+		t.Errorf("UserLabel = %q, want empty after clear", got)
+	}
+}
+
+// TestHandleSetLabel_TooLong rejects labels above maxUserLabelBytes.
+func TestHandleSetLabel_TooLong(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	key := seedEventSession(t, srv, 1000)
+
+	label := strings.Repeat("a", maxUserLabelBytes+1)
+	body := `{"key":"` + key + `","label":"` + label + `"}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.sessionH.handleSetLabel(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+// TestHandleSetLabel_ControlChar rejects labels carrying ASCII control bytes
+// that would poison slog JSONHandler output and dashboard HTML.
+func TestHandleSetLabel_ControlChar(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	key := seedEventSession(t, srv, 1000)
+
+	// \n in JSON string form
+	body := `{"key":"` + key + `","label":"line1\nline2"}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.sessionH.handleSetLabel(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+// TestHandleSetLabel_NotFound returns 404 for an unknown key.
+func TestHandleSetLabel_NotFound(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+
+	body := `{"key":"no:such:key","label":"x"}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.sessionH.handleSetLabel(w, req)
+
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", w.Code)
+	}
+}
+
+// TestHandleSetLabel_MissingKey rejects requests without a key.
+func TestHandleSetLabel_MissingKey(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+
+	body := `{"label":"x"}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.sessionH.handleSetLabel(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", w.Code)
+	}
+}
+
+// TestHandleSetLabel_RemoteProxy verifies that a node-scoped request is
+// forwarded to the remote's PATCH /api/sessions/label endpoint.
+func TestHandleSetLabel_RemoteProxy(t *testing.T) {
+	var (
+		gotMethod string
+		gotPath   string
+		gotBody   string
+	)
+	remote := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotPath = r.URL.Path
+		buf, _ := io.ReadAll(io.LimitReader(r.Body, 1<<16))
+		gotBody = string(buf)
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]string{"status": "ok", "label": "remote-label"})
+	}))
+	defer remote.Close()
+
+	srv := newTestServer(&mockPlatform{})
+	srv.nodes["macbook"] = node.NewHTTPClient("macbook", remote.URL, "", "MacBook Pro")
+	srv.knownNodes["macbook"] = "MacBook Pro"
+
+	body := `{"key":"feishu:direct:alice:general","node":"macbook","label":"remote-label"}`
+	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.sessionH.handleSetLabel(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%q)", w.Code, w.Body.String())
+	}
+	if gotMethod != http.MethodPatch {
+		t.Errorf("remote method = %q, want PATCH", gotMethod)
+	}
+	if gotPath != "/api/sessions/label" {
+		t.Errorf("remote path = %q, want /api/sessions/label", gotPath)
+	}
+	if !strings.Contains(gotBody, "remote-label") {
+		t.Errorf("remote body = %q, want it to contain 'remote-label'", gotBody)
 	}
 }

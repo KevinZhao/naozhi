@@ -42,6 +42,11 @@ type Conn interface {
 	// Returns (true, nil) when interrupted; (false, nil) when the remote reports
 	// the session is not running; (false, err) on transport errors.
 	ProxyInterruptSession(ctx context.Context, key string) (bool, error)
+	// ProxySetSessionLabel forwards PATCH /api/sessions/label to the remote node.
+	// Returns (true, nil) when the label was updated; (false, nil) when the remote
+	// responded 404 (session not found); (false, err) on transport errors or when
+	// the peer does not implement the RPC yet (older binaries).
+	ProxySetSessionLabel(ctx context.Context, key, label string) (bool, error)
 
 	Subscribe(c EventSink, key string, after int64)
 	Unsubscribe(c EventSink, key string)

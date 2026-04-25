@@ -492,6 +492,9 @@ func NewRouter(cfg RouterConfig) *Router {
 			s.SetBackend(restoreBackendID)
 			s.SetCLIName(cliName)
 			s.SetCLIVersion(cliVersion)
+			if entry.UserLabel != "" {
+				s.SetUserLabel(entry.UserLabel)
+			}
 			s.setSessionID(entry.SessionID)
 			if entry.LastActive != 0 {
 				s.lastActive.Store(entry.LastActive)
@@ -2201,6 +2204,27 @@ func (r *Router) GetSession(key string) *ManagedSession {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	return r.sessions[key]
+}
+
+// SetUserLabel updates the operator-set display label for the given session.
+// Passing an empty label clears any prior value. The caller is responsible for
+// validating label length/charset (see server.validateUserLabel); this method
+// only performs the store + version bump so downstream dashboards see the
+// change on the next /api/sessions poll.
+//
+// Returns false when the session key is unknown (no mutation performed).
+func (r *Router) SetUserLabel(key, label string) bool {
+	r.mu.Lock()
+	s := r.sessions[key]
+	if s == nil {
+		r.mu.Unlock()
+		return false
+	}
+	s.SetUserLabel(label)
+	r.storeDirty = true
+	r.storeGen.Add(1)
+	r.mu.Unlock()
+	return true
 }
 
 // InterruptSession sends SIGINT to the CLI process for the given session key.
