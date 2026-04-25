@@ -51,9 +51,16 @@ func boolPtr(b bool) *bool { return &b }
 // intPtr returns a pointer to i. Useful for ServerMsg fields that need explicit 0.
 func intPtr(i int) *int { return &i }
 
-// MarshalLine marshals a ServerMsg as a single NDJSON line (no trailing newline).
+// MarshalLine marshals a ServerMsg as a single NDJSON line, including a trailing
+// '\n'. Callers can enqueue the returned slice directly without a second append
+// that would otherwise trigger a growslice copy on every CLI stdout line.
+// R65-PERF-L-2.
 func (m *ServerMsg) MarshalLine() ([]byte, error) {
-	return json.Marshal(m)
+	data, err := json.Marshal(m)
+	if err != nil {
+		return nil, err
+	}
+	return append(data, '\n'), nil
 }
 
 // ParseClientMsg parses a single NDJSON line into a ClientMsg.

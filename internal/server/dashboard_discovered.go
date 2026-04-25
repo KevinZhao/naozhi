@@ -66,10 +66,13 @@ func (h *DiscoveryHandlers) handlePreview(w http.ResponseWriter, r *http.Request
 
 	// Remote node — only fall through to local when nodeID is empty or "local".
 	if nodeID != "" && nodeID != "local" {
-		nc, ok := h.nodeAccess.GetNode(nodeID)
+		// LookupNode validates nodeID against the allowlist ([a-zA-Z0-9._-],
+		// 64-byte cap) and writes a 400 on failure, matching every other
+		// remote-proxy handler. GetNode alone would let a log-injection
+		// payload (\n, ANSI escapes) into the "node not connected" warn
+		// attribute, which corrupts slog JSON output. R67-SEC-2.
+		nc, ok := h.nodeAccess.LookupNode(w, nodeID)
 		if !ok {
-			slog.Warn("remote discovered preview: node not connected", "node", nodeID)
-			http.Error(w, "node not connected", http.StatusBadGateway)
 			return
 		}
 		entries, err := nc.FetchDiscoveredPreview(r.Context(), sessionID)
@@ -139,19 +142,27 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 
 	// Verify PID is in the discovered list before killing.
 	// Use cache snapshot — fresh Scan() filters out dead processes.
-	if h.claudeDir != "" {
-		cached := h.discoveryCache.snapshot()
-		pidFound := false
-		for _, d := range cached {
-			if d.PID == req.PID && d.SessionID == req.SessionID {
-				pidFound = true
-				break
-			}
+	//
+	// When claudeDir is empty there is no discovered list to cross-check
+	// against, so an authenticated caller could otherwise submit any
+	// positive pid+proc_start_time and SIGTERM arbitrary processes owned
+	// by the naozhi user. Refuse the operation — matches handleClose's
+	// 503 behaviour when claudeDir is unavailable. R67-SEC-4.
+	if h.claudeDir == "" {
+		http.Error(w, "discovery not available", http.StatusServiceUnavailable)
+		return
+	}
+	cached := h.discoveryCache.snapshot()
+	pidFound := false
+	for _, d := range cached {
+		if d.PID == req.PID && d.SessionID == req.SessionID {
+			pidFound = true
+			break
 		}
-		if !pidFound {
-			http.Error(w, "pid not found in discovered sessions", http.StatusBadRequest)
-			return
-		}
+	}
+	if !pidFound {
+		http.Error(w, "pid not found in discovered sessions", http.StatusBadRequest)
+		return
 	}
 
 	// Compute session key before launching goroutine so we can return it immediately.
@@ -161,11 +172,17 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 	}
 	// Validate CWD against allowedRoot to prevent sessions running in arbitrary directories.
 	if cwd != "unknown" {
-		cwd = filepath.Clean(cwd)
-		if !filepath.IsAbs(cwd) {
-			http.Error(w, "cwd must be absolute path", http.StatusBadRequest)
+		// Reject `..` traversal segments and control bytes BEFORE
+		// filepath.Clean — Clean collapses `/home/../etc` into `/etc`
+		// silently, so a pure post-Clean check would let traversal slip
+		// through as a now-canonical absolute path when allowedRoot is
+		// empty (single-user default). validateRemoteWorkspace encodes
+		// the same rules used on the remote-proxy path. R67-SEC-7.
+		if err := validateRemoteWorkspace(cwd); err != nil {
+			http.Error(w, "invalid cwd", http.StatusBadRequest)
 			return
 		}
+		cwd = filepath.Clean(cwd)
 		if h.allowedRoot != "" {
 			if _, err := validateWorkspace(cwd, h.allowedRoot); err != nil {
 				http.Error(w, "cwd outside allowed root", http.StatusBadRequest)

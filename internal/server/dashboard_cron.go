@@ -306,6 +306,12 @@ func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
+	// Mirror handleDelete's guard so oversized IDs don't drag slog attrs up
+	// to KB-scale strings on failure/success paths. R64-SEC-1.
+	if len(req.ID) > maxCronIDLenDashboard {
+		http.Error(w, "id too long", http.StatusBadRequest)
+		return
+	}
 
 	if _, err := h.scheduler.PauseJobByID(req.ID); err != nil {
 		switch {
@@ -337,6 +343,10 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KB
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
 		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	if len(req.ID) > maxCronIDLenDashboard {
+		http.Error(w, "id too long", http.StatusBadRequest)
 		return
 	}
 
@@ -374,6 +384,10 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.ID == "" {
 		http.Error(w, "id is required", http.StatusBadRequest)
+		return
+	}
+	if len(req.ID) > maxCronIDLenDashboard {
+		http.Error(w, "id too long", http.StatusBadRequest)
 		return
 	}
 

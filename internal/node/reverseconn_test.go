@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gorilla/websocket"
 	"github.com/naozhi/naozhi/internal/cli"
@@ -867,5 +868,136 @@ func TestReverseConn_ReadLoop_subscribeError(t *testing.T) {
 
 	if sink.RawMsgCount() == 0 {
 		t.Error("expected error event delivered to sink")
+	}
+}
+
+// TestReverseConn_EventsCappedOnPush locks down R67-SEC-3: a compromised
+// reverse node that pushes a huge `events` array must not be able to fan
+// that array out unbounded to every subscribed browser client. The cap is
+// maxPushedHistoryEvents (500) and the broadcast should keep the tail so
+// legitimate last-N history replays remain accurate.
+func TestReverseConn_EventsCappedOnPush(t *testing.T) {
+	rc, wsConn, cleanup := setupReverseConnPair(t)
+	defer cleanup()
+
+	sink := &mockSink{id: 1}
+	rc.subMu.Lock()
+	rc.subs["mykey"] = []EventSink{sink}
+	rc.subMu.Unlock()
+
+	// Build 800 events — well above the 500 cap. Each entry carries an
+	// ascending Time so we can verify the tail (last 500) survives.
+	events := make([]cli.EventEntry, 800)
+	for i := range events {
+		events[i] = cli.EventEntry{Time: int64(i + 1), Type: "text"}
+	}
+	wsConn.WriteJSON(ReverseMsg{Type: "events", Key: "mykey", Events: events})
+
+	// Wait for delivery.
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if sink.RawMsgCount() > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	msgs := sink.RawMsgs()
+	if len(msgs) == 0 {
+		t.Fatal("expected history message delivered to subscriber")
+	}
+	var parsed struct {
+		Type   string           `json:"type"`
+		Events []cli.EventEntry `json:"events"`
+	}
+	if err := json.Unmarshal(msgs[0], &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if parsed.Type != "history" {
+		t.Errorf("type = %q, want 'history'", parsed.Type)
+	}
+	if got := len(parsed.Events); got != maxPushedHistoryEvents {
+		t.Errorf("events length = %d, want %d (capped)", got, maxPushedHistoryEvents)
+	}
+	// Verify tail preserved: the last event's Time must be 800 (index 799 + 1).
+	if n := len(parsed.Events); n > 0 {
+		if got := parsed.Events[n-1].Time; got != 800 {
+			t.Errorf("tail event Time = %d, want 800 (tail should be preserved)", got)
+		}
+		if got := parsed.Events[0].Time; got != int64(800-maxPushedHistoryEvents+1) {
+			t.Errorf("head-after-cap Time = %d, want %d", got, 800-maxPushedHistoryEvents+1)
+		}
+	}
+}
+
+// TestReverseConn_EventsUnderCapPassesThrough verifies that normal-sized
+// history replays (<= cap) are not truncated — the cap is defense against
+// abuse, not a legitimate limit.
+func TestReverseConn_EventsUnderCapPassesThrough(t *testing.T) {
+	rc, wsConn, cleanup := setupReverseConnPair(t)
+	defer cleanup()
+
+	sink := &mockSink{id: 1}
+	rc.subMu.Lock()
+	rc.subs["mykey"] = []EventSink{sink}
+	rc.subMu.Unlock()
+
+	events := make([]cli.EventEntry, 100)
+	for i := range events {
+		events[i] = cli.EventEntry{Time: int64(i + 1), Type: "text"}
+	}
+	wsConn.WriteJSON(ReverseMsg{Type: "events", Key: "mykey", Events: events})
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if sink.RawMsgCount() > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	msgs := sink.RawMsgs()
+	if len(msgs) == 0 {
+		t.Fatal("expected history message delivered to subscriber")
+	}
+	var parsed struct {
+		Events []cli.EventEntry `json:"events"`
+	}
+	if err := json.Unmarshal(msgs[0], &parsed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got := len(parsed.Events); got != 100 {
+		t.Errorf("events length = %d, want 100 (no truncation expected)", got)
+	}
+}
+
+// TestTruncateLabelUTF8 verifies R67-SEC-6: byte-level truncation at a
+// multi-byte rune boundary preserves UTF-8 validity by stripping the
+// trailing partial-rune fragment.
+func TestTruncateLabelUTF8(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{"under cap passes unchanged", "hello", 10, "hello"},
+		{"exactly at cap passes unchanged", "hello", 5, "hello"},
+		{"ASCII cleanly cut", "helloworld", 5, "hello"},
+		// 中 = E4 B8 AD (3 bytes). Cutting at byte 4 lands mid-rune: "中" + partial "国" (E5 9B ..).
+		{"multibyte preserved when cap covers complete runes", "中国", 6, "中国"},
+		{"multibyte cut mid-rune drops partial rune", "中国", 4, "中"},
+		{"multibyte cut mid-rune drops to empty when first rune truncated", "中国", 1, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := truncateLabelUTF8(c.in, c.max)
+			if got != c.want {
+				t.Errorf("truncateLabelUTF8(%q, %d) = %q, want %q", c.in, c.max, got, c.want)
+			}
+			if !utf8.ValidString(got) {
+				t.Errorf("result %q contains invalid UTF-8", got)
+			}
+		})
 	}
 }

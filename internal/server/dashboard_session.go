@@ -4,7 +4,6 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -30,34 +29,10 @@ import (
 // to every dashboard client on each /api/sessions poll.
 const maxResumeLastPromptBytes = 2 * 1024
 
-// maxUserLabelBytes caps the operator-set session label. 128 bytes covers any
-// realistic sidebar/header title while keeping sessions.json growth bounded —
-// the label is rebroadcast on every /api/sessions poll, so a megabyte-scale
-// string would multiply dashboard egress N×(tabs).
-const maxUserLabelBytes = 128
-
-// validateUserLabel trims surrounding whitespace, enforces maxUserLabelBytes,
-// rejects invalid UTF-8, and blocks ASCII control characters (except \t) that
-// would otherwise corrupt slog JSONHandler output and dashboard HTML.
-// An empty return value is the caller's signal to clear any prior label.
-func validateUserLabel(s string) (string, error) {
-	s = strings.TrimSpace(s)
-	if len(s) == 0 {
-		return "", nil
-	}
-	if len(s) > maxUserLabelBytes {
-		return "", errors.New("label too long")
-	}
-	if !utf8.ValidString(s) {
-		return "", errors.New("invalid utf-8")
-	}
-	for _, r := range s {
-		if r == 0 || (r < 0x20 && r != '\t') || r == 0x7f {
-			return "", errors.New("control characters not allowed")
-		}
-	}
-	return s, nil
-}
+// Note: user-label validation lives in the session package
+// (session.ValidateUserLabel / session.MaxUserLabelBytes) so the dashboard
+// HTTP path and the reverse-RPC worker (internal/upstream) share one
+// implementation. R64-GO-H3 / L1 / L2 consolidated the rules there.
 
 // watchdogStats is the /api/sessions "watchdog" sub-object. Declared as a
 // named struct (not an inline map[string]any) so json/reflect caches the
@@ -115,6 +90,15 @@ type SessionHandlers struct {
 	watchdogNoOut *atomic.Int64
 	watchdogTotal *atomic.Int64
 
+	// uptimeCache memoises the formatted uptime string at 1-second resolution.
+	// handleList is hit at 1 Hz × N dashboard tabs, and
+	// time.Since(startedAt).Round(time.Second).String() allocates a short
+	// string on every call — roughly (N-1)/N of those allocations sit inside
+	// the same 1-second bucket. Caching the string with its bucket-id (seconds
+	// since start) lets all pollers within the same second reuse one alloc.
+	// Races are benign: concurrent misses re-format the same value. R65-PERF-L-1.
+	uptimeCache atomic.Pointer[uptimeSnapshot]
+
 	// staticStats pre-builds the subset of /api/sessions stats fields that
 	// are immutable after startup (backend, cli_name, workspace_*, system,
 	// agents, watchdog). handleList shallow-copies this map on each poll
@@ -133,6 +117,10 @@ type SessionHandlers struct {
 	historyCacheTime time.Time
 	historyCacheMu   sync.Mutex
 	historyFlight    singleflight.Group
+	// warmHistoryWg tracks the WarmHistoryCache goroutine so callers (server
+	// shutdown) can wait for the background FS scan to finish before tearing
+	// down h.claudeDir-dependent state. R64-GO-M1.
+	warmHistoryWg sync.WaitGroup
 
 	// Summary cache (30s TTL) — avoids re-running discovery.LookupSummaries
 	// (N os.Stat + package-level lock) on every GET /api/sessions poll.
@@ -258,7 +246,7 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	stats["ready"] = ready
 	stats["total"] = total
 	stats["version"] = version
-	stats["uptime"] = time.Since(h.startedAt).Round(time.Second).String()
+	stats["uptime"] = h.uptimeString()
 	stats["watchdog"] = watchdogStats{
 		NoOutputKills: h.watchdogNoOut.Load(),
 		TotalKills:    h.watchdogTotal.Load(),
@@ -322,12 +310,14 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	// Take a snapshot of nodes under lock for thread-safe access
 	nodesSnapshot := h.nodeAccess.NodesSnapshot()
 
-	// No configured nodes at all: use simple single-node response format
+	// No configured nodes at all: use simple single-node response format.
+	// Pre-size resp to 3 so the optional history_sessions insert doesn't
+	// trigger a bucket rehash on fresh-deployment dashboards that always
+	// have JSONL history to show. R64-PERF-10.
 	if len(h.nodeAccess.KnownNodes()) == 0 {
-		resp := map[string]any{
-			"sessions": snapshots,
-			"stats":    stats,
-		}
+		resp := make(map[string]any, 3)
+		resp["sessions"] = snapshots
+		resp["stats"] = stats
 		history := h.historySessions()
 		if len(history) > 0 {
 			resp["history_sessions"] = history
@@ -381,11 +371,14 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	resp := map[string]any{
-		"sessions": allSessions,
-		"stats":    stats,
-		"nodes":    nodeStatus,
-	}
+	// Pre-size for the 3 always-set keys + optional history_sessions to skip
+	// the bucket rehash on the common "repo with JSONL history + nodes
+	// configured" path. Mirrors the single-node path pattern at line ~314.
+	// R65-PERF-L-3.
+	resp := make(map[string]any, 4)
+	resp["sessions"] = allSessions
+	resp["stats"] = stats
+	resp["nodes"] = nodeStatus
 	history := h.historySessions()
 	if len(history) > 0 {
 		resp["history_sessions"] = history
@@ -582,7 +575,7 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	label, err := validateUserLabel(req.Label)
+	label, err := session.ValidateUserLabel(req.Label)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -608,6 +601,10 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 			http.Error(w, "session not found", http.StatusNotFound)
 			return
 		}
+		// Parallel audit entry with the local-path slog.Info below so an
+		// operator grepping journalctl sees every label change regardless of
+		// which node owns the session. R64-GO-M3.
+		slog.Info("session label updated", "node", req.Node, "key", req.Key, "label_len", len(label))
 		writeJSON(w, map[string]string{"status": "ok", "label": label})
 		return
 	}
@@ -617,7 +614,7 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	slog.Info("session label updated", "key", req.Key, "label_len", len(label))
+	slog.Info("session label updated", "node", "local", "key", req.Key, "label_len", len(label))
 	writeJSON(w, map[string]string{"status": "ok", "label": label})
 }
 
@@ -644,9 +641,19 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "last_prompt too long", http.StatusBadRequest)
 		return
 	}
-	for i := 0; i < len(req.LastPrompt); i++ {
-		c := req.LastPrompt[i]
-		if c == 0 || (c < 0x20 && c != '\t') || c == 0x7f {
+	// Rune-level scan: a byte-only gate missed C1 control points (U+0080..
+	// U+009F), which arrive as valid UTF-8 continuation bytes in the 0x80..
+	// 0x9F range and slipped past a `< 0x20` byte check. C1 bytes in
+	// last_prompt are broadcast on every /api/sessions poll and flow into
+	// slog attrs, so they corrupt structured logs and terminal viewers.
+	// `\t` is intentionally still allowed (prompts may contain tab) as
+	// before — slog escapes tab in JSONHandler output. R65-SEC-M-3.
+	if !utf8.ValidString(req.LastPrompt) {
+		http.Error(w, "last_prompt is not valid utf-8", http.StatusBadRequest)
+		return
+	}
+	for _, r := range req.LastPrompt {
+		if r == 0 || (r < 0x20 && r != '\t') || (r >= 0x7F && r <= 0x9F) {
 			http.Error(w, "last_prompt contains invalid control characters", http.StatusBadRequest)
 			return
 		}
@@ -723,11 +730,15 @@ func (h *SessionHandlers) handleInterrupt(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	ok := h.router.InterruptSession(req.Key)
-	if ok {
+	// Prefer control_request over SIGINT — see Router.InterruptSessionSafe
+	// for why raw SIGINT on `-p` mode is destructive.
+	switch h.router.InterruptSessionSafe(req.Key) {
+	case session.InterruptSent:
 		slog.Info("session interrupted via HTTP", "key", req.Key)
 		writeJSON(w, map[string]string{"status": "ok"})
-	} else {
+	case session.InterruptNoSession:
+		writeJSON(w, map[string]string{"status": "not_running"})
+	default:
 		writeJSON(w, map[string]string{"status": "not_running"})
 	}
 }
@@ -749,6 +760,24 @@ func (h *SessionHandlers) historySessions() []discovery.RecentSession {
 	h.historyCacheMu.Unlock()
 
 	v, _, _ := h.historyFlight.Do("history", func() (any, error) {
+		// Re-check under lock — a prior leader could have populated the
+		// cache between our expiry detection and this closure running.
+		// Mirrors the double-check pattern in lookupSummariesCached so
+		// tail callers at a TTL boundary don't each pay an FS scan.
+		// R64-GO-M2.
+		//
+		// Use historyCacheTime.IsZero() (not historyCache != nil) to
+		// determine cache population: an "empty-history" deployment
+		// legitimately stores a nil slice on every load, which was then
+		// misclassified as "not cached" and drove a redundant FS scan
+		// every TTL window. R67-GO-5.
+		h.historyCacheMu.Lock()
+		if !h.historyCacheTime.IsZero() && time.Since(h.historyCacheTime) < cacheTTL {
+			cached := h.historyCache
+			h.historyCacheMu.Unlock()
+			return cached, nil
+		}
+		h.historyCacheMu.Unlock()
 		return h.loadHistorySessions(), nil
 	})
 
@@ -756,6 +785,31 @@ func (h *SessionHandlers) historySessions() []discovery.RecentSession {
 		return res
 	}
 	return nil
+}
+
+// uptimeSnapshot is the value cached by uptimeCache. Bucket is the integer
+// number of seconds since startedAt; Str is the pre-formatted rendering at
+// that resolution. Cached at 1-second resolution because the dashboard polls
+// every second and all pollers within the same bucket observe the same value.
+type uptimeSnapshot struct {
+	Bucket int64
+	Str    string
+}
+
+// uptimeString returns time.Since(startedAt).Round(time.Second).String() with
+// a 1-second resolution memoisation. Concurrent misses may all format the
+// same value; last-writer-wins via unconditional Store is intentional —
+// losers drop their locally formatted copy (the formatted string still
+// escapes to the response regardless, so no leak).
+func (h *SessionHandlers) uptimeString() string {
+	d := time.Since(h.startedAt).Round(time.Second)
+	bucket := int64(d / time.Second)
+	if cur := h.uptimeCache.Load(); cur != nil && cur.Bucket == bucket {
+		return cur.Str
+	}
+	s := d.String()
+	h.uptimeCache.Store(&uptimeSnapshot{Bucket: bucket, Str: s})
+	return s
 }
 
 // initStaticStats pre-builds the immutable subset of /api/sessions stats so
@@ -802,15 +856,29 @@ func (h *SessionHandlers) doInitStaticStats() {
 
 // WarmHistoryCache pre-populates the history sessions cache in the background
 // so that the first dashboard load does not block on a full filesystem scan.
+//
+// The goroutine is tracked by warmHistoryWg so WaitWarmHistory can block
+// server shutdown until the FS scan finishes. Without the tracker the
+// goroutine could outlive the shutdown and write h.historyCache after
+// h.claudeDir-dependent state had been torn down. R64-GO-M1.
 func (h *SessionHandlers) WarmHistoryCache() {
 	if h.claudeDir == "" {
 		return
 	}
+	h.warmHistoryWg.Add(1)
 	go func() {
+		defer h.warmHistoryWg.Done()
 		h.historyFlight.Do("history", func() (any, error) {
 			return h.loadHistorySessions(), nil
 		})
 	}()
+}
+
+// WaitWarmHistory blocks until any in-flight WarmHistoryCache goroutine
+// completes. Call from server shutdown after refusing new requests to
+// guarantee no background loadHistorySessions races with teardown.
+func (h *SessionHandlers) WaitWarmHistory() {
+	h.warmHistoryWg.Wait()
 }
 
 // lookupSummariesCached returns sessionID→summary with a 30s TTL cache.

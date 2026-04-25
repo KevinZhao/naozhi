@@ -154,6 +154,16 @@ func Run(cfg Config) error {
 	// Start stdout/stderr readers
 	go s.readStdout()
 	go s.readStderr()
+	// Socket self-watch: if something outside this process unlinks our socket
+	// file (external cleaner, stray rm -rf, another process's StartShim that
+	// bypassed the dial-first guard), the kernel keeps the AF_UNIX listener fd
+	// alive but no new connection can ever reach it — we become an orphan
+	// consuming a CLI seat and piling up ring-buffer events no one drains.
+	// Poll stat() every 30s; on ENOENT, initiate the same shutdown path as
+	// SIGTERM. This is a defense-in-depth layer behind Manager.Discover's
+	// socket check (F4) and StartShim's dial-first guard (F3); under normal
+	// operation it never fires.
+	go s.watchSocketFile(cfg.SocketPath, 30*time.Second)
 
 	// SIGTERM/SIGINT: always start a 30s grace period regardless of whether a
 	// client is currently connected. Previously the grace timer was skipped when
@@ -334,6 +344,54 @@ func (s *shimServer) initiateShutdown() {
 	s.doneOnce.Do(func() { close(s.done) })
 }
 
+// watchSocketFile polls the socket path and initiates shutdown if the file
+// disappears. See startup comment next to `go s.watchSocketFile(...)` for
+// the motivation — this handles the "zombie shim" failure mode where the
+// listener fd is alive but the filesystem path is gone, making the shim
+// unreachable to any new client.
+//
+// Stat() is used (not Lstat) so a symlink replacement points us at whatever
+// the operator intended; if that target is missing we still fire. interval
+// is parameterised so tests can exercise the trigger without a 30s wait.
+func (s *shimServer) watchSocketFile(socketPath string, interval time.Duration) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("shim watchSocketFile panic recovered",
+				"panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-t.C:
+			if _, err := os.Stat(socketPath); err != nil {
+				// Only self-terminate on confirmed ENOENT — transient errors
+				// like EACCES (SELinux relabel mid-deploy), ESTALE (NFS), or
+				// EINTR would otherwise take down a healthy shim on the next
+				// 30s tick. R65-GO-M-1.
+				if !errors.Is(err, os.ErrNotExist) {
+					slog.Warn("shim socket stat transient error, staying up",
+						"socket", socketPath, "err", err)
+					continue
+				}
+				// Do not retry — if the path is gone, it is gone; recreating
+				// the socket from here would race StartShim's dial-first
+				// guard and reintroduce the clobber bug we just fixed. Just
+				// exit cleanly so naozhi can spawn a fresh shim on the next
+				// message. Grace timer already armed by the SIGTERM handler
+				// when no client attached; initiateShutdown shortcuts that.
+				slog.Warn("shim socket file disappeared, shutting down",
+					"socket", socketPath, "err", err)
+				s.initiateShutdown()
+				return
+			}
+		}
+	}
+}
+
 func (s *shimServer) idleC() <-chan time.Time {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -442,7 +500,7 @@ func (s *shimServer) readStdout() {
 		// Build message and enqueue (non-blocking, no lock during Flush)
 		msg := ServerMsg{Type: "stdout", Seq: seq, Line: lineStr}
 		if data, err := msg.MarshalLine(); err == nil {
-			s.enqueueWrite(append(data, '\n'))
+			s.enqueueWrite(data)
 		}
 	}
 
@@ -452,6 +510,14 @@ func (s *shimServer) readStdout() {
 }
 
 func (s *shimServer) tryExtractSessionID(line []byte) {
+	// Fast gate: fires on every CLI stdout line (5-50/s during active turns).
+	// Only `init` / `result` events carry session_id; the vast majority of
+	// lines are assistant_delta / tool_use and contain neither token. A single
+	// memchr pass via bytes.Contains avoids a full json.Unmarshal + reflection
+	// + ~400B decoder-state alloc on every line. R65-PERF-H-3.
+	if !bytes.Contains(line, []byte(`"session_id"`)) {
+		return
+	}
 	var ev struct {
 		Type      string `json:"type"`
 		SubType   string `json:"subtype"`
@@ -489,7 +555,7 @@ func (s *shimServer) readStderr() {
 
 		msg := ServerMsg{Type: "stderr", Line: line}
 		if data, err := msg.MarshalLine(); err == nil {
-			s.enqueueWrite(append(data, '\n'))
+			s.enqueueWrite(data)
 		}
 	}
 }
@@ -743,7 +809,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 					Buffered: s.buffer.Count(),
 				}
 				if data, err := resp.MarshalLine(); err == nil {
-					s.enqueueWrite(append(data, '\n'))
+					s.enqueueWrite(data)
 				}
 			case "shutdown":
 				if s.cli.alive() && time.Since(s.startedAt) < 60*time.Second {
@@ -769,7 +835,7 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 			code := s.cli.exitCode
 			resp := ServerMsg{Type: "cli_exited", Code: intPtr(code)}
 			if data, err := resp.MarshalLine(); err == nil {
-				s.enqueueWrite(append(data, '\n'))
+				s.enqueueWrite(data)
 			}
 			return
 
@@ -790,7 +856,7 @@ func writeMsg(conn net.Conn, msg ServerMsg) {
 	}
 	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 	defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
-	conn.Write(append(data, '\n')) //nolint:errcheck
+	conn.Write(data) //nolint:errcheck
 }
 
 func socketDir(socketPath string) string {
@@ -925,4 +991,25 @@ func CleanStaleSocket(path string) error {
 		return fmt.Errorf("socket %s is alive, not removing", path)
 	}
 	return os.Remove(path)
+}
+
+// ensureSocketFreeForReuse is the StartShim-side pre-bind check: if someone
+// is actively listening on the target socket, refuse to clobber — removing
+// a live listener's filesystem entry silently turns the peer into a zombie
+// (its listener fd is still held by the kernel, but no new client can dial
+// it). That is exactly the UCCLEP-2026-04-25 regression.
+//
+// 500ms is generous — Unix domain socket connect is microseconds under
+// normal load; anything slower is already diagnostic of a hosed peer and
+// we would rather block StartShim briefly than race into corruption. The
+// split from CleanStaleSocket exists because CleanStaleSocket is also used
+// by the shim-side bind path, where a different error surface is expected
+// (the shim owns the socket and just wants to rm leftovers).
+func ensureSocketFreeForReuse(socketPath string) error {
+	if conn, err := net.DialTimeout("unix", socketPath, 500*time.Millisecond); err == nil {
+		_ = conn.Close()
+		return fmt.Errorf("shim already listening on %s: refusing to clobber", socketPath)
+	}
+	_ = os.Remove(socketPath)
+	return nil
 }

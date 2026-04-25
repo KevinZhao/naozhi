@@ -268,9 +268,9 @@ func TestServerMsg_MarshalLine_TableDriven(t *testing.T) {
 	code := 42
 
 	tests := []struct {
-		name    string
-		msg     ServerMsg
-		checks  []string // substrings that must appear in marshaled output
+		name   string
+		msg    ServerMsg
+		checks []string // substrings that must appear in marshaled output
 	}{
 		{
 			name:   "hello marshals all fields",
@@ -349,5 +349,32 @@ func TestIntPtr(t *testing.T) {
 func TestProtocolVersion_Constant(t *testing.T) {
 	if ProtocolVersion != 1 {
 		t.Errorf("ProtocolVersion = %d, want 1", ProtocolVersion)
+	}
+}
+
+// TestServerMsg_MarshalLine_NewlineTerminated locks down R65-PERF-L-2: the
+// returned slice ends with exactly one '\n', so callers can enqueue it
+// directly without a second append that would trigger a growslice copy on
+// every CLI stdout line.
+func TestServerMsg_MarshalLine_NewlineTerminated(t *testing.T) {
+	msg := ServerMsg{Type: "stdout", Seq: 1, Line: "hello"}
+	data, err := msg.MarshalLine()
+	if err != nil {
+		t.Fatalf("MarshalLine err: %v", err)
+	}
+	if n := len(data); n == 0 || data[n-1] != '\n' {
+		t.Fatalf("expected trailing \\n, got %q", data)
+	}
+	// Exactly one newline — a second caller-side append would have doubled it.
+	if nl := strings.Count(string(data), "\n"); nl != 1 {
+		t.Fatalf("expected exactly one \\n, got %d in %q", nl, data)
+	}
+	// Round-trip still works (ParseServerMsg ignores trailing whitespace).
+	parsed, err := ParseServerMsg(data)
+	if err != nil {
+		t.Fatalf("ParseServerMsg: %v", err)
+	}
+	if parsed.Type != "stdout" || parsed.Seq != 1 || parsed.Line != "hello" {
+		t.Fatalf("roundtrip mismatch: %+v", parsed)
 	}
 }

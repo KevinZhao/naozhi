@@ -188,8 +188,16 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	cmd.Env = m.shimEnv
 
 	// Remove stale socket from a previous shim that didn't clean up
-	// (e.g., killed during post-CLI-exit wait period).
-	os.Remove(socketPath) //nolint:errcheck
+	// (e.g., killed during post-CLI-exit wait period). Before we rm, verify
+	// nothing is actively listening: a live listener means discover/reconcile
+	// missed this shim (racing concurrent paths, or state file got lost).
+	// Destroying a live socket turns the peer shim into a zombie whose
+	// listener fd has no filesystem entry, unreachable until it dies — this
+	// is exactly the regression that caused UCCLEP's "session cannot be
+	// reopened" bug in 2026-04-25. Fail loud instead of corrupting state.
+	if err := ensureSocketFreeForReuse(socketPath); err != nil {
+		return nil, err
+	}
 
 	// Capture stdout for the ready message
 	stdout, err := cmd.StdoutPipe()
@@ -467,6 +475,57 @@ func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*Shim
 	}, nil
 }
 
+// ForceCleanupZombie purges a shim whose reconnect is irrecoverable: removes
+// its state file and best-effort-signals SIGTERM to the process. Used by the
+// router when it gets repeated ENOENT on the socket path — the next Discover
+// tick would handle it via the F4 socket-stat check, but waiting 30s while
+// reconnect spams WARN logs (and, worse, while the owning dashboard tab
+// retries) is a poor UX. Caller passes the stale state it obtained from a
+// failed Reconnect so we identify the exact target; PID 0 or empty key are
+// treated as no-ops.
+//
+// Re-validates the PID's binary identity before signalling. Without this
+// guard we are susceptible to PID reuse: between Reconnect's identity
+// check and this call, the original shim could have exited and a non-shim
+// process inherited the same PID. The same check runs in Discover, so
+// duplicating it here keeps the SIGTERM target honest. A miss (binary
+// mismatch) skips the kill but still cleans the state file.
+func (m *Manager) ForceCleanupZombie(state State) {
+	// Remove the state file BEFORE sending SIGTERM so a concurrent
+	// reconnectShims tick cannot observe the still-present file, see the
+	// PID alive (signal hasn't landed yet), and install a half-initialized
+	// ShimHandle against a dying shim. The in-memory map is also purged
+	// below; Discover reads from the filesystem, not the map. R65-GO-L-1.
+	keyHash := KeyHash(state.Key)
+	RemoveStateFile(StateFilePath(m.stateDir, keyHash))
+	m.mu.Lock()
+	delete(m.shims, state.Key)
+	m.mu.Unlock()
+	if state.ShimPID > 0 && m.isOurShimPID(state.ShimPID) {
+		_ = syscall.Kill(state.ShimPID, syscall.SIGTERM)
+	}
+}
+
+// isOurShimPID returns true when the process at pid is still running AND its
+// /proc/PID/exe points at the naozhi binary we launched from (modulo the
+// "(deleted)" suffix Linux adds after a rebuild). Mirrors the Discover-time
+// binary-identity check so anyone considering signalling a PID learned
+// from a state file runs the same safety gate.
+func (m *Manager) isOurShimPID(pid int) bool {
+	if syscall.Kill(pid, 0) != nil {
+		return false
+	}
+	exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	if err != nil {
+		// On platforms without /proc (not currently supported, but keep
+		// the call safe) we cannot confirm identity. Err on the side of
+		// NOT signalling unknown PIDs — the state-file cleanup alone is
+		// enough to exit the ENOENT loop.
+		return false
+	}
+	return strings.TrimSuffix(exePath, " (deleted)") == m.naozhiBin
+}
+
 // Discover scans the state directory for existing shim state files.
 // Returns states for shims whose PIDs are still alive.
 func (m *Manager) Discover() ([]State, error) {
@@ -518,6 +577,23 @@ func (m *Manager) Discover() ([]State, error) {
 				RemoveStateFile(path)
 				continue
 			}
+		}
+		// PID alive + binary matches, but is the socket still reachable?
+		// "Live shim + missing socket" is the zombie signature: the process
+		// holds a listener fd that kernel never lost, but its filesystem
+		// path is gone (external rm, /run cleaner, XDG_RUNTIME_DIR rotation,
+		// or a pre-fix StartShim that clobbered it). Any naozhi Reconnect
+		// would ENOENT forever, so skip it and let the shim self-terminate
+		// via SIGTERM grace. RemoveStateFile here also purges the stale
+		// on-disk record so restart discovery doesn't re-find the same
+		// zombie.
+		if _, err := os.Stat(state.Socket); err != nil {
+			slog.Info("removing shim state: socket missing",
+				"path", path, "pid", state.ShimPID,
+				"socket", state.Socket, "err", err)
+			_ = syscall.Kill(state.ShimPID, syscall.SIGTERM)
+			RemoveStateFile(path)
+			continue
 		}
 		slog.Info("discovered live shim", "key", state.Key, "pid", state.ShimPID)
 		states = append(states, state)

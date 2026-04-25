@@ -785,3 +785,53 @@ func TestWsServerMsg_JSONRoundtrip(t *testing.T) {
 		t.Errorf("event roundtrip failed: %+v", parsed.Event)
 	}
 }
+
+// TestHandleAuth_WSToken_SetsUploadOwner locks down R67-SEC-1: successful
+// WS token-auth must derive uploadOwner from the provided token so the
+// per-owner upload quota is enforced. Before the fix, c.uploadOwner stayed
+// "" and any WS-token-authed client could bypass maxUploadPerOwner.
+func TestHandleAuth_WSToken_SetsUploadOwner(t *testing.T) {
+	hub, _ := newTestHub("secret")
+	defer hub.Shutdown()
+
+	c := &wsClient{
+		send:          make(chan []byte, 4),
+		done:          make(chan struct{}),
+		subscriptions: make(map[string]func()),
+		subGen:        make(map[string]uint64),
+	}
+	hub.handleAuth(c, node.ClientMsg{Type: "auth", Token: "secret"})
+
+	if !c.authenticated.Load() {
+		t.Fatal("expected authenticated=true after valid token")
+	}
+	if c.uploadOwner == "" {
+		t.Fatal("uploadOwner is empty — per-owner upload quota cannot be enforced (R67-SEC-1)")
+	}
+	// Exactly hex(sha256("secret")[:8]) — 16 hex chars = 8 bytes.
+	if len(c.uploadOwner) != 16 {
+		t.Errorf("uploadOwner length = %d, want 16 (hex of 8-byte prefix)", len(c.uploadOwner))
+	}
+}
+
+// TestHandleAuth_WSToken_OwnerStableAcrossCalls verifies the derivation is
+// deterministic so that files uploaded under the same token from HTTP and
+// WS can cross-claim in the upload store.
+func TestHandleAuth_WSToken_OwnerStableAcrossCalls(t *testing.T) {
+	hub, _ := newTestHub("secret")
+	defer hub.Shutdown()
+
+	derive := func() string {
+		c := &wsClient{
+			send:          make(chan []byte, 4),
+			done:          make(chan struct{}),
+			subscriptions: make(map[string]func()),
+			subGen:        make(map[string]uint64),
+		}
+		hub.handleAuth(c, node.ClientMsg{Type: "auth", Token: "secret"})
+		return c.uploadOwner
+	}
+	if a, b := derive(), derive(); a != b {
+		t.Errorf("uploadOwner not stable: %q vs %q", a, b)
+	}
+}

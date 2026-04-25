@@ -190,17 +190,21 @@ Production: CloudFront -> ALB (SG: CloudFront-only) -> EC2 t4g.small :8180 -> sy
 
 ```
 docs/
-├── DESIGN.md                  # 主设计文档（架构、选型、已实现功能设计）
-├── TODO.md                    # 待办事项（只含 open 项）
-├── multi-node-design.md       # 多节点聚合设计（已实现）
-├── shim-design.md             # Shim 进程设计（已实现）
-├── server-split-design.md     # Server 包拆分设计（Phase 1-2 已完成）
-├── voice-transcription.md     # 语音转写设计（已实现）
-├── deployment-strategy.md     # 部署策略设计（部分实现）
-├── rfc/                       # 未实现的设计提案
-│   ├── message-queue.md       # 消息队列策略
-│   └── learning-system.md     # 自学习系统
-└── guides/                    # 操作手册
-    ├── weixin-test.md         # 微信渠道测试
-    └── shim-testing.md        # Shim 调试指南
+├── TODO.md                       # 待办事项（只含 open 项，本地 gitignored）
+├── design/                       # 架构与已实现功能设计
+│   ├── DESIGN.md                 # 主设计文档（架构、选型、已实现功能设计）
+│   ├── architecture.html         # 架构可视化
+│   ├── multi-node-design.md      # 多节点聚合设计（已实现）
+│   ├── shim-design.md            # Shim 进程设计（已实现）
+│   ├── server-split-design.md    # Server 包拆分设计（Phase 1-2 已完成）
+│   └── voice-transcription.md    # 语音转写设计（已实现）
+├── ops/                          # 部署与运维
+│   ├── deployment-strategy.md    # 部署策略设计（部分实现）
+│   └── naozhi-deploy-skill.md    # 部署 skill playbook
+├── rfc/                          # 未实现的设计提案
+│   ├── message-queue.md          # 消息队列策略
+│   └── learning-system.md        # 自学习系统
+└── guides/                       # 操作手册
+    ├── weixin-test.md            # 微信渠道测试
+    └── shim-testing.md           # Shim 调试指南
 ```

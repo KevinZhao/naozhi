@@ -249,6 +249,19 @@ func (r *Router) wrapperFor(backend string) (*cli.Wrapper, string) {
 	return nil, ""
 }
 
+// managerFor returns the shim.Manager associated with the given backend ID.
+// Empty backend picks the router default via wrapperFor's fallback rules.
+// Used by reconnectShims's ENOENT-cleanup path (F6) to purge zombies
+// without having to thread a manager reference through every call site.
+// Returns nil when no wrapper/manager is configured, so callers must guard.
+func (r *Router) managerFor(backend string) *shim.Manager {
+	w, _ := r.wrapperFor(backend)
+	if w == nil {
+		return nil
+	}
+	return w.ShimManager
+}
+
 // BackendIDs returns the list of backend IDs the router can spawn against,
 // with the default backend first. Suitable for UI enumeration.
 func (r *Router) BackendIDs() []string {
@@ -751,6 +764,25 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		)
 		spawnCancel()
 		if err != nil {
+			// ENOENT on the socket path = zombie shim (live PID, missing
+			// filesystem entry). Discover's F4 check will prune it on the
+			// next 30s tick, but that means 30s of WARN spam AND every
+			// dashboard retry in between also fails. Eagerly clean up so
+			// the next user message spawns a fresh shim instead of hitting
+			// the same dead path. errors.Is(err, syscall.ENOENT) is the
+			// canonical check, but the error wraps through fmt.Errorf("%w")
+			// layers in SpawnReconnect → Reconnect → net.Dial, so we also
+			// match the textual "no such file or directory" suffix as a
+			// belt-and-braces fallback.
+			if errors.Is(err, syscall.ENOENT) ||
+				strings.Contains(err.Error(), "no such file or directory") {
+				slog.Warn("shim reconnect: socket missing, cleaning up zombie",
+					"key", state.Key, "pid", state.ShimPID, "err", err)
+				if mgr := r.managerFor(recBackendID); mgr != nil {
+					mgr.ForceCleanupZombie(state)
+				}
+				continue
+			}
 			slog.Warn("shim reconnect failed", "key", state.Key, "err", err)
 			continue
 		}
@@ -2117,11 +2149,33 @@ func (r *Router) DefaultWorkspace() string {
 
 // stripResumeArgs removes --resume <value> from CLI args.
 // Used by drift check: --resume is session-specific, not a config change.
+//
+// Fast path: return the original slice unchanged if --resume is absent.
+// reconnectShims calls this once per discovered shim during startup; for
+// deployments with many shims where no session was mid-turn the arg is
+// absent and we avoid the O(N) slice alloc + copy. R64-PERF-9.
 func stripResumeArgs(args []string) []string {
+	hasResume := false
+	for _, a := range args {
+		if a == "--resume" {
+			hasResume = true
+			break
+		}
+	}
+	if !hasResume {
+		return args
+	}
 	out := make([]string, 0, len(args))
 	for i := 0; i < len(args); i++ {
-		if args[i] == "--resume" && i+1 < len(args) {
-			i++ // skip --resume and its value
+		if args[i] == "--resume" {
+			// Skip the bare flag. If a value follows, skip that too. A
+			// trailing `--resume` with no value must also be dropped —
+			// otherwise it survives into the drift-check compare and
+			// spuriously shuts down the shim on args equality mismatch.
+			// R65-GO-M-2.
+			if i+1 < len(args) {
+				i++
+			}
 			continue
 		}
 		out = append(out, args[i])
@@ -2207,10 +2261,10 @@ func (r *Router) GetSession(key string) *ManagedSession {
 }
 
 // SetUserLabel updates the operator-set display label for the given session.
-// Passing an empty label clears any prior value. The caller is responsible for
-// validating label length/charset (see server.validateUserLabel); this method
-// only performs the store + version bump so downstream dashboards see the
-// change on the next /api/sessions poll.
+// Passing an empty label clears any prior value. Callers are responsible for
+// validating label length/charset via ValidateUserLabel; this method only
+// performs the store + version bump + onChange broadcast so connected
+// dashboards see the change immediately (not on the next /api/sessions poll).
 //
 // Returns false when the session key is unknown (no mutation performed).
 func (r *Router) SetUserLabel(key, label string) bool {
@@ -2224,11 +2278,22 @@ func (r *Router) SetUserLabel(key, label string) bool {
 	r.storeDirty = true
 	r.storeGen.Add(1)
 	r.mu.Unlock()
+	// Match every other mutator (Reset/Remove/ResetChat/spawnSession...): the
+	// dashboard's onChange WebSocket broadcast needs a kick so the sidebar
+	// refreshes instantly rather than waiting up to one poll interval. R64-GO-H1.
+	r.notifyChange()
 	return true
 }
 
 // InterruptSession sends SIGINT to the CLI process for the given session key.
 // Returns true if the session was found and interrupted.
+//
+// WARNING: SIGINT terminates the whole CLI process on Claude `-p` mode (and
+// any non-REPL CLI), which both kills the live shim conversation and burns a
+// fresh shim slot on the next message. Prefer InterruptSessionSafe for
+// operator-facing actions (dashboard "interrupt" button); this function is
+// kept for callers that truly need process-level signalling (tests, forced
+// teardown) or for the fallback branch inside InterruptSessionSafe itself.
 func (r *Router) InterruptSession(key string) bool {
 	r.mu.RLock()
 	s := r.sessions[key]
@@ -2237,6 +2302,58 @@ func (r *Router) InterruptSession(key string) bool {
 		return false
 	}
 	return s.Interrupt()
+}
+
+// InterruptSessionSafe is the preferred entry point for dashboard/HTTP/WS
+// interrupt requests. It first attempts the in-band stream-json
+// control_request path (InterruptViaControl), which aborts the active turn
+// WITHOUT terminating the CLI subprocess, so the shim, socket, and session
+// ID all survive for the next message. When the CLI protocol does not
+// support control_request (ACP), it falls back to SIGINT via Interrupt();
+// other non-Sent outcomes are returned unchanged.
+//
+// Returns the outcome so callers can surface accurate UI (e.g. "aborted"
+// vs. "nothing was running").
+//
+// Design note — when to fall back to SIGINT:
+//
+//   - InterruptUnsupported (ACP protocol has no stdin-level interrupt): we
+//     have to SIGINT; there is no other mechanism. SIGINT on ACP is also
+//     not known to be destructive (ACP agents don't exit on signal), so
+//     this fallback has a legitimate home.
+//   - InterruptNoTurn (session alive but no active turn): do NOT fall back.
+//     Raw SIGINT on an idle Claude `-p` subprocess terminates it, which
+//     forces a brand-new shim on the next message. A button press on an
+//     idle session should report "nothing was running" (→ `not_running` in
+//     the HTTP layer), not silently close the session.
+//   - InterruptError (transport write failed): do NOT fall back. The
+//     failure almost certainly means the shim socket is broken; SIGINT
+//     would travel the same broken transport and also fail. Surface the
+//     error so F6's reconcile path has a chance to purge the zombie.
+//
+// For the Claude CLI `-p` mode — our primary use case — SIGINT terminates
+// the CLI process entirely (not just the current turn). That cascades into
+// shim sending cli_exited, naozhi's Alive() flipping to false, and the next
+// user message starting a brand-new shim, leaking the previous socket path
+// and sometimes losing resume context. control_request on CLI 2.1.119 has
+// been verified to kill the in-flight tool invocation and emit a result
+// event without killing the process.
+func (r *Router) InterruptSessionSafe(key string) InterruptOutcome {
+	outcome := r.InterruptSessionViaControl(key)
+	switch outcome {
+	case InterruptUnsupported:
+		// Protocol has no stdin interrupt; SIGINT is the only option.
+		if r.InterruptSession(key) {
+			return InterruptSent
+		}
+		return InterruptNoSession
+	default:
+		// InterruptSent / InterruptNoSession / InterruptNoTurn /
+		// InterruptError — callers handle each outcome verbatim. The HTTP
+		// and WS handlers map {InterruptNoTurn, InterruptError} to
+		// "not_running" so the dashboard re-queries state.
+		return outcome
+	}
 }
 
 // InterruptSessionViaControl requests the CLI to abort the active turn via the

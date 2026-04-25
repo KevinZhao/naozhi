@@ -487,7 +487,13 @@ func sanitizeKeyComponent(s string) string {
 		}
 		return r
 	}, s)
-	if utf8.RuneCountInString(s) > maxKeyComponent {
+	// Cheap byte-length gate first: UTF-8 byte length is always ≥ rune count,
+	// so strings with ≤ maxKeyComponent bytes cannot exceed maxKeyComponent
+	// runes. Only pay for RuneCountInString + []rune conversion when byte
+	// length actually exceeds the cap. The common case (sanitize reached
+	// only because of a colon or embedded control byte) skips both allocs.
+	// R64-PERF-8.
+	if len(s) > maxKeyComponent && utf8.RuneCountInString(s) > maxKeyComponent {
 		runes := []rune(s)
 		s = string(runes[:maxKeyComponent])
 	}

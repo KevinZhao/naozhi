@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"net"
 	"os"
+	"os/signal"
 	"path/filepath"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -69,7 +71,7 @@ func (f *fakeShimServer) serveHello(t *testing.T, token []byte) {
 		if err != nil || string(clientToken) != string(token) {
 			hello := ServerMsg{Type: "auth_failed", Msg: "invalid token"}
 			data, _ := hello.MarshalLine()
-			conn.Write(append(data, '\n')) //nolint:errcheck
+			conn.Write(data) //nolint:errcheck
 			return
 		}
 
@@ -82,7 +84,7 @@ func (f *fakeShimServer) serveHello(t *testing.T, token []byte) {
 			ProtocolVersion: ProtocolVersion,
 		}
 		data, _ := hello.MarshalLine()
-		conn.Write(append(data, '\n')) //nolint:errcheck
+		conn.Write(data) //nolint:errcheck
 
 		// Keep alive until closed by client
 		time.Sleep(100 * time.Millisecond)
@@ -146,7 +148,7 @@ func TestConnect_AuthFailed_Response(t *testing.T) {
 		bufio.NewReader(conn).ReadBytes('\n') //nolint:errcheck
 		msg := ServerMsg{Type: "auth_failed", Msg: "bad credentials"}
 		data, _ := msg.MarshalLine()
-		conn.Write(append(data, '\n')) //nolint:errcheck
+		conn.Write(data) //nolint:errcheck
 	})
 
 	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
@@ -164,10 +166,10 @@ func TestConnect_UnexpectedMessageType(t *testing.T) {
 	// Server sends an unexpected message type
 	srv.handleOnce(func(conn net.Conn) {
 		conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-		bufio.NewReader(conn).ReadBytes('\n') //nolint:errcheck
+		bufio.NewReader(conn).ReadBytes('\n')             //nolint:errcheck
 		msg := ServerMsg{Type: "stdout", Line: "oops"}
 		data, _ := msg.MarshalLine()
-		conn.Write(append(data, '\n')) //nolint:errcheck
+		conn.Write(data) //nolint:errcheck
 	})
 
 	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
@@ -185,8 +187,8 @@ func TestConnect_BadJSON_HelloLine(t *testing.T) {
 	// Server sends bad JSON after attach
 	srv.handleOnce(func(conn net.Conn) {
 		conn.SetDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck
-		bufio.NewReader(conn).ReadBytes('\n') //nolint:errcheck
-		conn.Write([]byte("not json at all\n")) //nolint:errcheck
+		bufio.NewReader(conn).ReadBytes('\n')             //nolint:errcheck
+		conn.Write([]byte("not json at all\n"))           //nolint:errcheck
 	})
 
 	m := mustNewManager(t, ManagerConfig{StateDir: t.TempDir()})
@@ -314,6 +316,202 @@ func TestDiscover_RemovesStateWithDeadPID(t *testing.T) {
 	// State file should have been removed
 	if _, statErr := os.Stat(path); statErr == nil {
 		t.Error("stale state file should have been removed")
+	}
+}
+
+// TestDiscover_RemovesStateWithMissingSocket covers F4: a zombie shim
+// (live PID but its AF_UNIX path on disk has been unlinked) must not be
+// returned as "discovered". Otherwise every subsequent Reconnect emits
+// "no such file or directory" forever and the dashboard tab wedges. The
+// Discover path SIGTERMs the process and removes the state file so the
+// next naozhi restart cannot resurrect it.
+func TestDiscover_RemovesStateWithMissingSocket(t *testing.T) {
+	dir := t.TempDir()
+
+	// Use our own PID: it is alive, owned by us (so SIGTERM will target
+	// this test binary if F4 misbehaves — catch-safe because we ignore
+	// that signal's default action in tests by installing a handler
+	// below), and its /proc/self/exe matches the test binary, bypassing
+	// the binary-identity check for the duration of this test.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	state := State{
+		ShimPID:   os.Getpid(),
+		Socket:    filepath.Join(dir, "does-not-exist.sock"),
+		AuthToken: "dA==",
+		Key:       "test:zombie",
+	}
+	path := filepath.Join(dir, KeyHash("test:zombie")+".json")
+	if err := WriteStateFile(path, state); err != nil {
+		t.Fatal(err)
+	}
+
+	// Manager's naozhiBin is set to the test binary path (os.Executable())
+	// by default via mustNewManager → NewManager. That matches /proc/self/exe
+	// so the binary-identity check passes and we hit the socket-stat check.
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
+	states, err := m.Discover()
+	if err != nil {
+		t.Fatalf("Discover: %v", err)
+	}
+	if len(states) != 0 {
+		t.Errorf("expected 0 states (zombie shim), got %d: %+v", len(states), states)
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		t.Error("zombie state file should have been removed")
+	}
+	// Drain the SIGTERM we just sent ourselves before it propagates to the
+	// rest of the test process. 100ms is well within ticker bounds on even
+	// slow CI.
+	select {
+	case <-sigCh:
+	case <-time.After(500 * time.Millisecond):
+		// If we never got it, either F4 didn't signal (old behaviour — a
+		// real regression) or signal delivery is slow on this platform.
+		// The state-file removal assertion above is the primary check;
+		// the SIGTERM is defensive for clean-up of the real process.
+		t.Log("no SIGTERM observed; state-file check already asserted")
+	}
+}
+
+// TestForceCleanupZombie_SkipsNonShimPID guards against PID reuse: if the
+// state file's PID has been inherited by some other (non-naozhi) process
+// between the state write and our cleanup, we MUST NOT signal it. The
+// state file is still purged so the ENOENT loop breaks.
+func TestForceCleanupZombie_SkipsNonShimPID(t *testing.T) {
+	dir := t.TempDir()
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
+	// Force the manager's naozhiBin to a path that definitely doesn't
+	// match our own /proc/self/exe so isOurShimPID returns false.
+	m.naozhiBin = "/nonexistent/not-naozhi-binary"
+
+	key := "test:pid-reuse"
+	statePath := filepath.Join(dir, KeyHash(key)+".json")
+	if err := WriteStateFile(statePath, State{
+		ShimPID: os.Getpid(), // live PID, but "wrong binary"
+		Socket:  filepath.Join(dir, "ghost.sock"),
+		Key:     key,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// We are the target PID. If ForceCleanupZombie signals us despite the
+	// binary mismatch, SIGTERM's default action would terminate the test
+	// binary. Install a handler so the test survives either way and
+	// observes whether the signal arrived.
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM)
+	defer signal.Stop(sigCh)
+
+	m.ForceCleanupZombie(State{
+		ShimPID: os.Getpid(),
+		Key:     key,
+	})
+
+	if _, err := os.Stat(statePath); err == nil {
+		t.Error("state file should have been removed even when PID skipped")
+	}
+	select {
+	case <-sigCh:
+		t.Error("ForceCleanupZombie signalled a PID whose binary did NOT match — would kill unrelated processes")
+	case <-time.After(50 * time.Millisecond):
+		// good: no stray SIGTERM
+	}
+}
+
+// TestForceCleanupZombie covers the helper used by router.reconnectShims
+// ENOENT path (F6). It must: (a) remove the state file, (b) drop any live
+// handle registered under the key, (c) tolerate a zero PID (defensive).
+func TestForceCleanupZombie_RemovesStateAndHandle(t *testing.T) {
+	dir := t.TempDir()
+	m := mustNewManager(t, ManagerConfig{StateDir: dir})
+
+	key := "test:zombie-cleanup"
+	state := State{
+		ShimPID:   0, // skip SIGTERM
+		Socket:    filepath.Join(dir, "ghost.sock"),
+		AuthToken: "dA==",
+		Key:       key,
+	}
+	statePath := filepath.Join(dir, KeyHash(key)+".json")
+	if err := WriteStateFile(statePath, state); err != nil {
+		t.Fatal(err)
+	}
+	// Plant a fake live handle so we can verify it gets dropped.
+	c, s := net.Pipe()
+	defer c.Close()
+	defer s.Close()
+	handle := &ShimHandle{
+		Conn:       c,
+		Reader:     bufio.NewReader(c),
+		Writer:     bufio.NewWriter(c),
+		ClientDone: make(chan struct{}),
+	}
+	m.mu.Lock()
+	m.shims[key] = handle
+	m.mu.Unlock()
+
+	m.ForceCleanupZombie(state)
+
+	if _, err := os.Stat(statePath); err == nil {
+		t.Error("state file should have been removed")
+	}
+	m.mu.Lock()
+	_, stillInMap := m.shims[key]
+	m.mu.Unlock()
+	if stillInMap {
+		t.Error("handle should have been dropped from shims map")
+	}
+}
+
+// TestEnsureSocketFreeForReuse covers F3: StartShim's pre-bind guard must
+// refuse when a live listener exists, and must clean up stale socket files
+// when no one is listening. Getting this wrong is what caused the UCCLEP
+// zombie: a live shim's socket file got rm'd by a concurrent StartShim,
+// kernel kept the listener fd alive, but filesystem path was gone → any
+// naozhi Reconnect would ENOENT forever.
+func TestEnsureSocketFreeForReuse_RefusesLiveListener(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "live.sock")
+	ln, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	err = ensureSocketFreeForReuse(path)
+	if err == nil {
+		t.Fatal("expected error for live listener, got nil")
+	}
+	// The socket file must still exist — we refused to clobber.
+	if _, statErr := os.Stat(path); statErr != nil {
+		t.Errorf("live socket should not have been removed: %v", statErr)
+	}
+}
+
+func TestEnsureSocketFreeForReuse_RemovesStaleFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stale.sock")
+	// Create a regular file (not a real listener) — dial will fail,
+	// so the path can be removed.
+	if err := os.WriteFile(path, []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureSocketFreeForReuse(path); err != nil {
+		t.Fatalf("ensureSocketFreeForReuse(stale): %v", err)
+	}
+	if _, statErr := os.Stat(path); statErr == nil {
+		t.Error("stale file should have been removed")
+	}
+}
+
+func TestEnsureSocketFreeForReuse_NoFileNoError(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "nonexistent.sock")
+	if err := ensureSocketFreeForReuse(path); err != nil {
+		t.Fatalf("ensureSocketFreeForReuse(nonexistent): %v", err)
 	}
 }
 

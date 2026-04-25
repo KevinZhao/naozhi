@@ -2,7 +2,9 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
@@ -341,6 +343,16 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 	}
 	if h.dashToken == "" || subtle.ConstantTimeCompare([]byte(msg.Token), []byte(h.dashToken)) == 1 {
 		c.authenticated.Store(true)
+		// Derive uploadOwner from the provided token so WS token-auth enforces
+		// the same per-owner upload quota as HTTP Bearer auth. Without this,
+		// a WS-token-authed client could bypass maxUploadPerOwner because
+		// uploadOwner stayed "" (empty string matches every "" owner in the
+		// store). Mirrors the derivation in dashboard_send.go uploadOwner().
+		// R67-SEC-1.
+		if c.uploadOwner == "" && msg.Token != "" {
+			sum := sha256.Sum256([]byte(msg.Token))
+			c.uploadOwner = hex.EncodeToString(sum[:8])
+		}
 		c.SendJSON(node.ServerMsg{Type: "auth_ok"})
 	} else {
 		c.SendJSON(node.ServerMsg{Type: "auth_fail", Error: "invalid token"})
@@ -629,11 +641,21 @@ func (h *Hub) handleInterrupt(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 
-	ok := h.router.InterruptSession(key)
-	if ok {
+	// Prefer the non-destructive control_request path so the CLI subprocess
+	// survives. Raw SIGINT via InterruptSession kills Claude `-p` outright,
+	// which tears down the shim and forces a brand-new spawn on the next
+	// message (losing resume context and leaking socket files). See
+	// Router.InterruptSessionSafe for the full design rationale.
+	switch h.router.InterruptSessionSafe(key) {
+	case session.InterruptSent:
 		slog.Info("session interrupted via dashboard", "key", key)
 		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "ok", Key: key})
-	} else {
+	case session.InterruptNoSession:
+		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "not_running", Key: key})
+	default:
+		// control_request returned a non-terminal outcome AND the SIGINT
+		// fallback also failed (e.g. session evicted mid-call). Treat as
+		// not_running so the dashboard re-queries state.
 		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "not_running", Key: key})
 	}
 }

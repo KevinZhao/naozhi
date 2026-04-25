@@ -1782,7 +1782,7 @@ Planner 在 shutdown 时与普通 session 一致：等待 running 完成 → 保
 | Shim 进程 (零中断热重启) | [shim-design.md](shim-design.md) | 已实现 |
 | server 包拆分 | [server-split-design.md](server-split-design.md) | Phase 1-2 已完成 |
 | 语音消息转写 | [voice-transcription.md](voice-transcription.md) | 已实现 |
-| 部署策略 | [deployment-strategy.md](deployment-strategy.md) | 部分实现 |
+| 部署策略 | [../ops/deployment-strategy.md](../ops/deployment-strategy.md) | 部分实现 |
 
 未实现的设计提案：
 

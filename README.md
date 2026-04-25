@@ -418,7 +418,7 @@ deploy/                  systemd service unit
 
 ## 设计文档
 
-完整架构设计见 [DESIGN.md](docs/DESIGN.md)。
+完整架构设计见 [DESIGN.md](docs/design/DESIGN.md)。
 
 ## License
 

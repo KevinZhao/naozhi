@@ -279,14 +279,40 @@ func TestHandleRequest_FetchDiscoveredPreview_WithFunc(t *testing.T) {
 		return json.RawMessage(`[{"session_id":"` + sid + `"}]`), nil
 	})
 
-	params, _ := json.Marshal(map[string]string{"session_id": "sess-xyz"})
+	// Valid UUID format — R65-SEC-M-1 added a boundary check so the input
+	// must satisfy discovery.IsValidSessionID.
+	const validSID = "12345678-1234-1234-1234-123456789abc"
+	params, _ := json.Marshal(map[string]string{"session_id": validSID})
 	req := node.ReverseMsg{Method: "fetch_discovered_preview", Params: params}
 	result, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
 	if err != nil {
 		t.Fatalf("fetch_discovered_preview = %v", err)
 	}
-	if !strings.Contains(string(result), "sess-xyz") {
-		t.Errorf("result = %s, want to contain sess-xyz", result)
+	if !strings.Contains(string(result), validSID) {
+		t.Errorf("result = %s, want to contain %s", result, validSID)
+	}
+}
+
+// TestHandleRequest_FetchDiscoveredPreview_InvalidSessionID verifies the
+// boundary validator rejects path-traversal / non-UUID inputs before calling
+// previewFunc. R65-SEC-M-1.
+func TestHandleRequest_FetchDiscoveredPreview_InvalidSessionID(t *testing.T) {
+	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	c := New(cfg, makeRouter(), nil)
+	var called bool
+	c.SetPreviewFunc(func(sid string) (json.RawMessage, error) {
+		called = true
+		return json.RawMessage(`[]`), nil
+	})
+
+	params, _ := json.Marshal(map[string]string{"session_id": "../../../../etc/passwd"})
+	req := node.ReverseMsg{Method: "fetch_discovered_preview", Params: params}
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
+	if err == nil {
+		t.Fatalf("expected error for path-traversal session_id, got nil")
+	}
+	if called {
+		t.Fatalf("previewFunc was invoked for invalid session_id")
 	}
 }
 

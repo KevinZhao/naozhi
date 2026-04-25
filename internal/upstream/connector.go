@@ -372,6 +372,16 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("fetch_discovered_preview params: %w", err)
 		}
+		// Defense-in-depth: the HTTP dashboard path validates on the
+		// control-node side and `discovery.LoadHistoryChainTailCtx` also
+		// validates internally, but validating here at the RPC boundary
+		// mirrors the `takeover` / `close_discovered` handlers and prevents
+		// a future refactor from removing the internal check and exposing
+		// `{".."}` / path-traversal inputs from a compromised primary.
+		// R65-SEC-M-1.
+		if p.SessionID != "" && !discovery.IsValidSessionID(p.SessionID) {
+			return nil, fmt.Errorf("invalid session_id format")
+		}
 		if c.previewFunc != nil {
 			return c.previewFunc(p.SessionID)
 		}
@@ -384,6 +394,9 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("fetch_events params: %w", err)
+		}
+		if err := session.ValidateSessionKey(p.Key); err != nil {
+			return nil, fmt.Errorf("fetch_events key: %w", err)
 		}
 		sess := c.router.GetSession(p.Key)
 		if sess == nil {
@@ -399,6 +412,9 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		}
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("send params: %w", err)
+		}
+		if err := session.ValidateSessionKey(p.Key); err != nil {
+			return nil, fmt.Errorf("send key: %w", err)
 		}
 		opts := session.AgentOpts{}
 		if p.Workspace != "" {
@@ -623,8 +639,8 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("remove_session params: %w", err)
 		}
-		if p.Key == "" {
-			return nil, errors.New("key is required")
+		if err := session.ValidateSessionKey(p.Key); err != nil {
+			return nil, fmt.Errorf("remove_session key: %w", err)
 		}
 		removed := c.router.Remove(p.Key)
 		return marshalResult(map[string]bool{"removed": removed})
@@ -636,10 +652,16 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("interrupt_session params: %w", err)
 		}
-		if p.Key == "" {
-			return nil, errors.New("key is required")
+		if err := session.ValidateSessionKey(p.Key); err != nil {
+			return nil, fmt.Errorf("interrupt_session key: %w", err)
 		}
-		interrupted := c.router.InterruptSession(p.Key)
+		// Prefer the non-destructive control_request path so the CLI
+		// subprocess survives. Raw SIGINT via InterruptSession kills Claude
+		// `-p` outright, which tears down the shim and forces a brand-new
+		// spawn on the next message (losing resume context and leaking
+		// socket files). Matches the dashboard HTTP / WS handlers. R67-GO-2.
+		outcome := c.router.InterruptSessionSafe(p.Key)
+		interrupted := outcome == session.InterruptSent
 		return marshalResult(map[string]bool{"interrupted": interrupted})
 
 	case "set_session_label":
@@ -650,18 +672,20 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("set_session_label params: %w", err)
 		}
-		if p.Key == "" {
-			return nil, errors.New("key is required")
+		if err := session.ValidateSessionKey(p.Key); err != nil {
+			return nil, fmt.Errorf("set_session_label key: %w", err)
 		}
-		// Length guard (128 bytes) mirrors maxUserLabelBytes in
-		// internal/server/dashboard_session.go. Charset validation already
-		// happens on the dashboard-facing HTTP path; this second check
-		// defends the server-role node against a malicious control-node
-		// sending oversized/invalid labels via the reverse RPC transport.
-		if len(p.Label) > 128 {
-			return nil, errors.New("label too long")
+		// Full validation (length + UTF-8 + C0/C1 control gate) via the
+		// shared validator. The dashboard-facing HTTP path already validates
+		// on the control-node side; this second check defends the
+		// server-role node against a compromised control-node shipping
+		// labels with log-injection or terminal-corruption bytes directly
+		// to the reverse-RPC worker. R64-GO-H3 / L1.
+		label, err := session.ValidateUserLabel(p.Label)
+		if err != nil {
+			return nil, fmt.Errorf("set_session_label label: %w", err)
 		}
-		updated := c.router.SetUserLabel(p.Key, p.Label)
+		updated := c.router.SetUserLabel(p.Key, label)
 		return marshalResult(map[string]bool{"updated": updated})
 
 	case "set_favorite":

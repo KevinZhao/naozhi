@@ -567,6 +567,14 @@ func (s *Server) Start(ctx context.Context) error {
 			s.hub.Shutdown()
 		}
 
+		// Drain any in-flight WarmHistoryCache goroutine before tearing down
+		// the rest of the server. Without this wait the background FS scan
+		// could write h.historyCache after claudeDir-dependent state is gone.
+		// R64-GO-M1.
+		if s.sessionH != nil {
+			s.sessionH.WaitWarmHistory()
+		}
+
 		// Stop RunnablePlatforms (e.g. WebSocket connections)
 		for _, p := range s.platforms {
 			if rp, ok := p.(platform.RunnablePlatform); ok {

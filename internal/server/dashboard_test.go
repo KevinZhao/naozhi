@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/node"
@@ -609,7 +610,11 @@ func TestHandleAPISessions_NodeAggregation(t *testing.T) {
 	}
 }
 
-// ─── validateUserLabel ───────────────────────────────────────────────────────
+// ─── session.ValidateUserLabel ──────────────────────────────────────────────
+// Validation logic lives in the session package (session.ValidateUserLabel)
+// so the dashboard HTTP path and the reverse-RPC worker share one rule set.
+// Tab is rejected (slog.TextHandler uses it as key/value separator) and C1
+// control range is rejected. R64-GO-H2 / L2.
 
 func TestValidateUserLabel(t *testing.T) {
 	cases := []struct {
@@ -625,15 +630,16 @@ func TestValidateUserLabel(t *testing.T) {
 		{"trims surrounding space", "  hi  ", "hi", false},
 		{"128 bytes exact", strings.Repeat("a", 128), strings.Repeat("a", 128), false},
 		{"129 bytes rejected", strings.Repeat("a", 129), "", true},
-		{"tab allowed", "a\tb", "a\tb", false},
+		{"tab rejected", "a\tb", "", true},
 		{"newline rejected", "a\nb", "", true},
 		{"NUL rejected", "a\x00b", "", true},
 		{"DEL rejected", "a\x7fb", "", true},
+		{"C1 control rejected (U+0085)", "a\u0085b", "", true},
 		{"invalid utf-8 rejected", "\xc3\x28", "", true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got, err := validateUserLabel(c.in)
+			got, err := session.ValidateUserLabel(c.in)
 			if (err != nil) != c.wantErr {
 				t.Fatalf("err = %v, wantErr = %v", err, c.wantErr)
 			}
@@ -685,12 +691,12 @@ func TestHandleSetLabel_EmptyClears(t *testing.T) {
 	}
 }
 
-// TestHandleSetLabel_TooLong rejects labels above maxUserLabelBytes.
+// TestHandleSetLabel_TooLong rejects labels above session.MaxUserLabelBytes.
 func TestHandleSetLabel_TooLong(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 	key := seedEventSession(t, srv, 1000)
 
-	label := strings.Repeat("a", maxUserLabelBytes+1)
+	label := strings.Repeat("a", session.MaxUserLabelBytes+1)
 	body := `{"key":"` + key + `","label":"` + label + `"}`
 	req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", strings.NewReader(body))
 	w := httptest.NewRecorder()
@@ -784,5 +790,189 @@ func TestHandleSetLabel_RemoteProxy(t *testing.T) {
 	}
 	if !strings.Contains(gotBody, "remote-label") {
 		t.Errorf("remote body = %q, want it to contain 'remote-label'", gotBody)
+	}
+}
+
+// ─── handleResume last_prompt charset (R65-SEC-M-3) ──────────────────────────
+
+// TestHandleResume_LastPromptC1Rejected verifies that a C1 control codepoint
+// inside last_prompt (arriving as valid UTF-8 continuation bytes 0xC2 0x85 for
+// U+0085 NEL) is rejected. The prior byte-only loop only checked `c < 0x20`,
+// which misses C1: continuation byte 0x85 falls in 0x80..0xBF and survived
+// the check. R65-SEC-M-3 regression.
+func TestHandleResume_LastPromptC1Rejected(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+
+	// Valid UUID + C1 NEL (U+0085) inside last_prompt.
+	body := `{"session_id":"12345678-1234-1234-1234-123456789abc","last_prompt":"hi\u0085there"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/resume", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.sessionH.handleResume(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body=%q)", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "invalid control characters") {
+		t.Errorf("body = %q, want 'invalid control characters' message", w.Body.String())
+	}
+}
+
+// TestHandleResume_LastPromptTabAllowed confirms tab remains acceptable inside
+// last_prompt — slog escapes \t in JSONHandler, and operators sometimes paste
+// tab-delimited snippets. R65-SEC-M-3.
+func TestHandleResume_LastPromptTabAllowed(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+
+	body := `{"session_id":"12345678-1234-1234-1234-123456789abc","last_prompt":"col1\tcol2"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/resume", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.sessionH.handleResume(w, req)
+
+	// Accept any non-400 here (the resume path may go on to 200 or return a
+	// server-specific error depending on router state). The point is that
+	// the charset gate did not reject tab.
+	if w.Code == http.StatusBadRequest && strings.Contains(w.Body.String(), "invalid control characters") {
+		t.Errorf("tab should be allowed, got 400 with charset error: %q", w.Body.String())
+	}
+}
+
+// TestUptimeString_CachesWithinSecondBucket locks down R65-PERF-L-1: two
+// calls within the same second return the same string and share the same
+// underlying snapshot pointer (no re-format).
+func TestUptimeString_CachesWithinSecondBucket(t *testing.T) {
+	// Start 5 seconds ago so rounding lands on a stable integer bucket.
+	h := &SessionHandlers{startedAt: time.Now().Add(-5 * time.Second)}
+
+	first := h.uptimeString()
+	snap1 := h.uptimeCache.Load()
+	if snap1 == nil {
+		t.Fatal("uptimeCache not populated after first call")
+	}
+	second := h.uptimeString()
+	snap2 := h.uptimeCache.Load()
+
+	if first != second {
+		t.Errorf("uptimeString within same bucket returned different values: %q vs %q", first, second)
+	}
+	if snap1 != snap2 {
+		t.Errorf("expected cached snapshot pointer to be reused within the same bucket")
+	}
+	if first == "" {
+		t.Error("expected non-empty uptime string")
+	}
+}
+
+// TestUptimeString_RotatesAcrossBuckets confirms the cache invalidates once
+// the integer-second bucket advances (startedAt pushed backwards simulates
+// the passage of time).
+func TestUptimeString_RotatesAcrossBuckets(t *testing.T) {
+	h := &SessionHandlers{startedAt: time.Now().Add(-1 * time.Second)}
+	first := h.uptimeString()
+	// Shift startedAt back so the bucket id increases by at least one second.
+	h.startedAt = h.startedAt.Add(-2 * time.Second)
+	second := h.uptimeString()
+	if first == second {
+		t.Errorf("expected uptime to advance after bucket rotation, both = %q", first)
+	}
+}
+
+// ─── R67 regressions ─────────────────────────────────────────────────────────
+
+// TestHandlePreview_RejectsInvalidNodeID locks down R67-SEC-2: the preview
+// handler must run `nodeID` through LookupNode (which enforces the
+// [a-zA-Z0-9._-] allowlist) before logging or proxying. Before the fix,
+// `GetNode(nodeID)` passed raw nodeID strings — including newlines and
+// ANSI escapes — into the subsequent slog.Warn attr, breaking log parsing.
+func TestHandlePreview_RejectsInvalidNodeID(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+
+	// Valid session_id shape (length + charset match IsValidSessionID) but
+	// malicious nodeID containing a newline — MUST be rejected at the
+	// LookupNode boundary with 400, not fall through to the slog.Warn path.
+	u := "/api/discovered/preview?session_id=12345678-1234-1234-1234-123456789abc&node=bad%0Anode"
+	req := httptest.NewRequest(http.MethodGet, u, nil)
+	w := httptest.NewRecorder()
+	srv.discoveryH.handlePreview(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 (body=%q)", w.Code, w.Body.String())
+	}
+}
+
+// TestHandleTakeover_RejectsTraversalCWD locks down R67-SEC-7: `..`
+// segments in the takeover CWD must be rejected before filepath.Clean
+// collapses them. Previously, `/home/../etc` silently Clean'd to `/etc`
+// and, when `allowedRoot == ""`, the CLI was spawned in the wrong
+// directory.
+func TestHandleTakeover_RejectsTraversalCWD(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	// Inject a non-empty claudeDir so the R67-SEC-4 "discovery not
+	// available" early return does not fire; we're targeting the CWD
+	// gate specifically. Using t.TempDir() to avoid touching real state.
+	srv.discoveryH.claudeDir = t.TempDir()
+
+	body := `{"pid":99999,"session_id":"12345678-1234-1234-1234-123456789abc","cwd":"/home/../etc","proc_start_time":1234}`
+	req := httptest.NewRequest(http.MethodPost, "/api/discovered/takeover", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.discoveryH.handleTakeover(w, req)
+
+	// Without the fix, this traversal would either pass (allowedRoot empty)
+	// or be rejected much later. The fix returns 400 at the validation gate
+	// before any kill attempt.
+	if w.Code == http.StatusOK || w.Code == http.StatusAccepted {
+		t.Errorf("traversal CWD accepted (status=%d) — validateRemoteWorkspace did not fire", w.Code)
+	}
+}
+
+// TestHandleTakeover_NoClaudeDirRefuses locks down R67-SEC-4: when
+// claudeDir is unavailable there is no discovered list to cross-check
+// against, so any pid+start_time accepts arbitrary SIGTERM targets. The
+// handler must return 503 like handleClose does.
+func TestHandleTakeover_NoClaudeDirRefuses(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	srv.discoveryH.claudeDir = "" // simulate "discovery not available"
+
+	body := `{"pid":1,"session_id":"12345678-1234-1234-1234-123456789abc","cwd":"/tmp","proc_start_time":1}`
+	req := httptest.NewRequest(http.MethodPost, "/api/discovered/takeover", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	srv.discoveryH.handleTakeover(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 (body=%q)", w.Code, w.Body.String())
+	}
+}
+
+// TestHistorySessions_EmptyHistoryCached locks down R67-GO-5: when the
+// underlying FS has no history entries, loadHistorySessions stores a
+// legitimate (nil, now()) cache tuple; the singleflight double-check must
+// treat this as "cached" and NOT re-run the scan on subsequent calls. The
+// prior `historyCache != nil` guard misclassified empty-history results
+// as "not cached" and drove a redundant FS scan per TTL window.
+func TestHistorySessions_EmptyHistoryCached(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	// Empty claudeDir so loadHistorySessions naturally yields nil.
+	srv.sessionH.claudeDir = t.TempDir()
+
+	// First call: miss → loadHistorySessions → stores (nil, now()).
+	_ = srv.sessionH.historySessions()
+
+	// Capture the cache time — the whole point of the fix is that it is
+	// NON-ZERO after a successful load of empty history.
+	srv.sessionH.historyCacheMu.Lock()
+	cacheTimeAfterFirst := srv.sessionH.historyCacheTime
+	srv.sessionH.historyCacheMu.Unlock()
+	if cacheTimeAfterFirst.IsZero() {
+		t.Fatal("historyCacheTime is zero after load — loadHistorySessions did not store the sentinel")
+	}
+
+	// Second immediate call: hit → must NOT update historyCacheTime
+	// because it is still within the 120s TTL window.
+	_ = srv.sessionH.historySessions()
+
+	srv.sessionH.historyCacheMu.Lock()
+	cacheTimeAfterSecond := srv.sessionH.historyCacheTime
+	srv.sessionH.historyCacheMu.Unlock()
+	if !cacheTimeAfterSecond.Equal(cacheTimeAfterFirst) {
+		t.Errorf("empty-history cache was re-loaded — cacheTime changed from %v to %v", cacheTimeAfterFirst, cacheTimeAfterSecond)
 	}
 }

@@ -44,6 +44,16 @@ const maxPendingReverseRPCs = 256
 // any realistic operator-facing message without enabling abuse. R61-SEC-9.
 const maxPushedNodeStringBytes = 512
 
+// maxPushedHistoryEvents caps the length of the `events` array in pushed
+// `events` messages from a reverse node. The reverse WS read limit is 16 MB
+// (reverseserver.go after auth), and `broadcastToSubs` fan-outs to every
+// subscribed browser client with a 256-slot send channel — a compromised
+// node can push a 16 MB events array and amplify it N× across connected
+// tabs, filling every send channel and triggering drops. 500 matches the
+// dashboard's `maxEventsPageLimit` and any local EventLog ring size, so
+// legitimate history replays are never truncated. R67-SEC-3.
+const maxPushedHistoryEvents = 500
+
 // truncateString returns s bounded to max bytes. Trailing UTF-8 partial
 // runes from a byte-level cut are harmless in the browser (rendered as
 // the replacement char) and the cost of a rune-aware cut on every event
@@ -568,7 +578,15 @@ func (c *ReverseConn) readLoop() {
 			c.broadcastToSubs(msg.Key, ServerMsg{Type: "event", Key: msg.Key, Event: msg.Event, Node: c.id}, false)
 
 		case "events":
-			c.broadcastToSubs(msg.Key, ServerMsg{Type: "history", Key: msg.Key, Events: msg.Events, Node: c.id}, false)
+			// Cap fan-out size to prevent a compromised node amplifying a
+			// 16 MB history push N× across subscribed browser tabs. Keep
+			// the tail (most recent) to preserve "last N events" semantics
+			// for legitimate history replays. R67-SEC-3.
+			events := msg.Events
+			if len(events) > maxPushedHistoryEvents {
+				events = events[len(events)-maxPushedHistoryEvents:]
+			}
+			c.broadcastToSubs(msg.Key, ServerMsg{Type: "history", Key: msg.Key, Events: events, Node: c.id}, false)
 
 		case "session_state":
 			// Bound Reason to prevent a compromised node from flooding

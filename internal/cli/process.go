@@ -962,9 +962,14 @@ drain:
 	// turn as if they were current — producing phantom tool_use/assistant
 	// events from the prior turn.
 	//
-	// Allocation is lazy: the common path (no interrupt, empty buffer) never
-	// hits append, so the zero-value nil slice avoids a per-Send heap alloc.
-	var holdback []Event
+	// Backing storage is a stack-allocated [4]Event array — post-cutoff events
+	// during an interrupt are rare (typically 0-1, occasionally 2-3 from
+	// in-flight stream-json blocks). `holdback := holdbackArr[:0]` starts with
+	// cap=4, so the common post-interrupt shape appends without heap allocation;
+	// append promotes to the heap only when >4 post-cutoff events stack up,
+	// which has never been observed in practice. R64-PERF-M7.
+	var holdbackArr [4]Event
+	holdback := holdbackArr[:0]
 	for {
 		select {
 		case <-ctx.Done():

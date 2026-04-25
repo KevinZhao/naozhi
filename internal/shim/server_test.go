@@ -1,11 +1,11 @@
 package shim
 
 import (
-	"fmt"
 	"bufio"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net"
 	"os"
 	"os/exec"
@@ -24,8 +24,8 @@ func TestSocketDir_TableDriven(t *testing.T) {
 	}{
 		{"/tmp/naozhi/shim.sock", "/tmp/naozhi"},
 		{"/var/run/naozhi/shim-abc.sock", "/var/run/naozhi"},
-		{"file.sock", ""},  // dir == "." → ""
-		{"/sock", ""},      // dir == "/" → ""
+		{"file.sock", ""}, // dir == "." → ""
+		{"/sock", ""},     // dir == "/" → ""
 		{"/a/b/c/d.sock", "/a/b/c"},
 	}
 	for _, tc := range tests {
@@ -800,6 +800,71 @@ func TestSaveStateCLIDead_UpdatesStateFile(t *testing.T) {
 	}
 	if loaded.CLIAlive {
 		t.Error("CLIAlive should be false after saveStateCLIDead")
+	}
+}
+
+// --- watchSocketFile (F5) ---
+
+// TestWatchSocketFile_TriggersOnMissingSocket covers the self-heal path: if
+// the socket file disappears from under us, watchSocketFile must close
+// s.done so the main loop shuts the shim down. Catches the
+// "listener fd alive, filesystem path gone" failure mode that UCCLEP hit.
+func TestWatchSocketFile_TriggersOnMissingSocket(t *testing.T) {
+	s := makeShimServerForTest(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "watch.sock")
+	// Create the socket file so the first stat succeeds; deleting later
+	// triggers the watcher.
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.watchSocketFile(path, 10*time.Millisecond)
+		close(done)
+	}()
+	// Let the watcher observe at least one healthy tick before we delete.
+	time.Sleep(30 * time.Millisecond)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-s.done:
+		// good: watcher initiated shutdown
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("watchSocketFile did not shut down after socket removal")
+	}
+	// watchSocketFile goroutine should also exit.
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("watchSocketFile did not return after shutdown")
+	}
+}
+
+// TestWatchSocketFile_ExitsOnDone covers the normal shutdown path: when
+// s.done closes for reasons other than the watcher itself, the goroutine
+// must return cleanly so there is no leaked ticker.
+func TestWatchSocketFile_ExitsOnDone(t *testing.T) {
+	s := makeShimServerForTest(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "still-here.sock")
+	if err := os.WriteFile(path, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		s.watchSocketFile(path, 10*time.Millisecond)
+		close(done)
+	}()
+	// Externally trigger shutdown.
+	s.initiateShutdown()
+	select {
+	case <-done:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("watchSocketFile did not exit on done channel close")
 	}
 }
 

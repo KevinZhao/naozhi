@@ -59,7 +59,13 @@ type EventLog struct {
 	turnAgents []SubagentInfo // foreground agents in current turn; protected by mu
 	bgAgents   []SubagentInfo // background (run_in_background) agents; cleared on turn boundaries like turnAgents; protected by mu
 
-	subMu       sync.Mutex
+	// subMu is an RWMutex because the hot path notifySubscribers only reads
+	// the subscribers map (iterate + non-blocking channel send, which is
+	// goroutine-safe). Subscribe/Unsubscribe/CloseSubscribers mutate the map
+	// and take the write lock. RLock lets many concurrent Appends proceed
+	// against different sessions in parallel without serialising through a
+	// single Mutex. R65-PERF-M-1.
+	subMu       sync.RWMutex
 	subscribers map[*subscriber]struct{}
 	subsClosed  bool         // CloseSubscribers has been called; no new subscribers accepted
 	subCount    atomic.Int32 // mirrors len(subscribers); lets notifySubscribers skip the lock when zero
@@ -188,27 +194,32 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 
 // notifySubscribers wakes all subscriber channels non-blockingly.
 //
-// Holds subMu for the full iteration: CloseSubscribers also takes subMu to
-// close+nil the subscriber channels, so snapshotting outside the lock would
-// allow a send on a closed channel. The non-blocking select keeps the hold
-// time at O(n) of live subscribers (dashboard clients ≤ a few).
+// Holds subMu as a reader for the full iteration: CloseSubscribers takes the
+// write lock and uses sub.closeOnce to ensure each channel is closed exactly
+// once. The send-on-closed-chan race is avoided by the RWMutex rather than
+// by the channel send itself — Go's channel-send-is-goroutine-safe guarantee
+// does NOT extend to sending on a closed channel, which panics. Multiple
+// concurrent notifySubscribers readers are safe to iterate and signal the
+// same channel set because non-blocking sends on an open channel are allowed
+// to race.
 //
 // Fast path: idle sessions (no dashboard clients) check an atomic counter
 // and skip subMu entirely. Append is invoked per content block on every
 // stream-json event, so shaving one lock per assistant turn matters when
-// N sessions run unattended.
+// N sessions run unattended. R65-PERF-M-1 upgraded from Mutex to RWMutex so
+// concurrent notify calls from different sessions no longer serialise.
 func (l *EventLog) notifySubscribers() {
 	if l.subCount.Load() == 0 {
 		return
 	}
-	l.subMu.Lock()
+	l.subMu.RLock()
 	for sub := range l.subscribers {
 		select {
 		case sub.ch <- struct{}{}:
 		default:
 		}
 	}
-	l.subMu.Unlock()
+	l.subMu.RUnlock()
 }
 
 // Subscribe returns a notification channel and an unsubscribe function.
@@ -232,14 +243,18 @@ func (l *EventLog) Subscribe() (<-chan struct{}, func()) {
 		l.subscribers = make(map[*subscriber]struct{})
 	}
 	l.subscribers[sub] = struct{}{}
-	l.subCount.Store(int32(len(l.subscribers)))
+	// Add/sub counter pattern rather than re-deriving from len(map) — avoids
+	// the map-header read on each mutation and makes the reader/writer
+	// asymmetry explicit (Load is on the hot notify path, Add is rare).
+	// R65-PERF-L-4.
+	l.subCount.Add(1)
 	l.subMu.Unlock()
 
 	unsub := func() {
 		l.subMu.Lock()
 		if _, ok := l.subscribers[sub]; ok {
 			delete(l.subscribers, sub)
-			l.subCount.Store(int32(len(l.subscribers)))
+			l.subCount.Add(-1)
 		}
 		l.subMu.Unlock()
 		sub.closeOnce.Do(func() { close(sub.ch) })

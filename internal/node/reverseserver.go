@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"log/slog"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -13,6 +14,19 @@ import (
 	"github.com/naozhi/naozhi/internal/ratelimit"
 	"golang.org/x/time/rate"
 )
+
+// truncateLabelUTF8 truncates s to at most max bytes while preserving UTF-8
+// validity. Raw byte truncation is unsafe when the cut falls mid-rune: the
+// resulting string contains invalid UTF-8 bytes that flow into slog attrs,
+// JSON responses, and dashboard renders. `strings.ToValidUTF8` strips any
+// trailing invalid-byte fragment after a byte-level cut, keeping the rest
+// intact. R67-SEC-6.
+func truncateLabelUTF8(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return strings.ToValidUTF8(s[:max], "")
+}
 
 // reverseUpgrader is the WebSocket upgrader for reverse node connections.
 // m2m connection: bearer token in the first WS message is the primary auth.
@@ -126,17 +140,13 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if displayName == "" {
 		displayName = msg.NodeID
 	}
-	if len(displayName) > maxLabel {
-		displayName = displayName[:maxLabel]
-	}
+	displayName = truncateLabelUTF8(displayName, maxLabel)
 
 	remoteLabel := msg.Hostname
 	if remoteLabel == "" {
 		remoteLabel = r.RemoteAddr
 	}
-	if len(remoteLabel) > maxLabel {
-		remoteLabel = remoteLabel[:maxLabel]
-	}
+	remoteLabel = truncateLabelUTF8(remoteLabel, maxLabel)
 	rc := newReverseConn(msg.NodeID, displayName, remoteLabel, conn)
 	// Bound the register response write so a slow-read attacker can't
 	// park this goroutine indefinitely at the TCP window. newReverseConn

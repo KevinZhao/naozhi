@@ -23,6 +23,15 @@ type fakeProcess struct {
 	closeOnce sync.Once
 	entries   []cli.EventEntry // returned by EventEntries
 	totalCost float64          // returned by TotalCost
+
+	// Interrupt instrumentation (used by TestInterruptSessionSafe_*).
+	// viaControlErr is what InterruptViaControl() returns. interruptCalls is
+	// bumped every time Interrupt() is called. Both writes happen under
+	// mu so the test assertions race-free.
+	viaControlErr     error
+	viaControlCalls   int
+	interruptCalls    int
+	viaControlRunning bool // if true, InterruptViaControl only succeeds when isRunning is true
 }
 
 func newIdleProc() *fakeProcess {
@@ -155,11 +164,28 @@ func (f *fakeProcess) LastEntryOfType(typ string) cli.EventEntry {
 	}
 	return cli.EventEntry{}
 }
-func (f *fakeProcess) LastActivitySummary() string      { return "" }
-func (f *fakeProcess) ProtocolName() string             { return "test" }
-func (f *fakeProcess) GetSessionID() string             { return "" }
-func (f *fakeProcess) Interrupt()                       {}
-func (f *fakeProcess) InterruptViaControl() error       { return nil }
+func (f *fakeProcess) LastActivitySummary() string { return "" }
+func (f *fakeProcess) ProtocolName() string        { return "test" }
+func (f *fakeProcess) GetSessionID() string        { return "" }
+func (f *fakeProcess) Interrupt() {
+	f.mu.Lock()
+	f.interruptCalls++
+	f.mu.Unlock()
+}
+func (f *fakeProcess) InterruptViaControl() error {
+	f.mu.Lock()
+	f.viaControlCalls++
+	// Simulate the real Process.InterruptViaControl semantics: it returns
+	// ErrNoActiveTurn when the CLI is not Running. Callers can toggle
+	// viaControlRunning to force that branch without touching isRunning
+	// (which has other side-effects across the test suite).
+	err := f.viaControlErr
+	if f.viaControlRunning && !f.isRunning {
+		err = cli.ErrNoActiveTurn
+	}
+	f.mu.Unlock()
+	return err
+}
 func (f *fakeProcess) PID() int                         { return 0 }
 func (f *fakeProcess) InjectHistory(_ []cli.EventEntry) {}
 func (f *fakeProcess) TurnAgents() []cli.SubagentInfo   { return nil }
@@ -1431,5 +1457,214 @@ func TestSpawningKeys_ObservableDuringSpawn(t *testing.T) {
 	r.mu.Unlock()
 	if stillMarked {
 		t.Error("spawningKeys leaked after cleanup")
+	}
+}
+
+// TestStripResumeArgs_FastPath verifies the no-resume common case returns
+// the input slice unchanged (same backing array identity), not a copy. The
+// startup drift-check runs this once per discovered shim; when no session
+// was mid-turn, every call previously paid a full slice alloc + copy.
+// R64-PERF-9 regression.
+func TestStripResumeArgs_FastPath(t *testing.T) {
+	args := []string{"--setting-sources", "", "--output-format", "stream-json"}
+	got := stripResumeArgs(args)
+	if len(got) != len(args) {
+		t.Fatalf("len(got)=%d, want %d", len(got), len(args))
+	}
+	// Same backing array: no alloc/copy when --resume is absent.
+	if len(args) > 0 && &got[0] != &args[0] {
+		t.Errorf("fast path should return same backing array when --resume is absent")
+	}
+}
+
+// TestStripResumeArgs_WithResume verifies the stripping behavior is unchanged
+// for args containing --resume <id>.
+func TestStripResumeArgs_WithResume(t *testing.T) {
+	args := []string{"--resume", "abc-123", "--output-format", "stream-json"}
+	got := stripResumeArgs(args)
+	want := []string{"--output-format", "stream-json"}
+	if len(got) != len(want) {
+		t.Fatalf("len(got)=%d, want %d (got=%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("[%d] got=%q, want=%q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestStripResumeArgs_TrailingResume covers the edge case where --resume is
+// the final arg with no value following. Previously the guard
+// `i+1 < len(args)` kept the bare flag in the output, leaking `--resume`
+// into drift-check compares and spuriously shutting down the shim when
+// config hadn't changed. R65-GO-M-2 regression.
+func TestStripResumeArgs_TrailingResume(t *testing.T) {
+	args := []string{"--output-format", "stream-json", "--resume"}
+	got := stripResumeArgs(args)
+	want := []string{"--output-format", "stream-json"}
+	if len(got) != len(want) {
+		t.Fatalf("trailing --resume: len(got)=%d, want %d (got=%v)", len(got), len(want), got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("[%d] got=%q, want=%q", i, got[i], want[i])
+		}
+	}
+}
+
+// TestValidateSessionKey exercises the shared session-key validator used at
+// reverse-RPC / HTTP trust boundaries. R65-SEC-M-2.
+func TestValidateSessionKey(t *testing.T) {
+	cases := []struct {
+		name    string
+		in      string
+		wantErr bool
+	}{
+		{"empty rejected", "", true},
+		{"plain ascii", "feishu:direct:alice:general", false},
+		{"utf8 chinese allowed", "feishu:direct:张三:general", false},
+		{"trailing tab rejected", "a:b:c\t:d", true},
+		{"newline rejected", "a:b:c\n:d", true},
+		{"C1 NEL rejected (U+0085)", "a:b:c\u0085:d", true},
+		{"C1 U+009F rejected", "a:b:c\u009F:d", true},
+		{"DEL rejected", "a:b:c\x7f:d", true},
+		{"zero-width space rejected", "a:b:c\u200B:d", true},
+		{"RLO rejected", "a:b:c\u202E:d", true},
+		{"BOM rejected", "a:b:c\uFEFF:d", true},
+		{"LSEP rejected", "a:b:c\u2028:d", true},
+		{"invalid utf-8 rejected", "a:b:\xc3\x28:d", true},
+		{"oversized rejected", strings.Repeat("a", MaxSessionKeyBytes+1), true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			err := ValidateSessionKey(c.in)
+			if (err != nil) != c.wantErr {
+				t.Fatalf("err = %v, wantErr = %v", err, c.wantErr)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// InterruptSessionSafe (F0) — dashboard-facing entry point
+// ---------------------------------------------------------------------------
+//
+// Rationale recap: raw SIGINT on Claude `-p` mode terminates the whole
+// CLI process (not just the current turn). That cascades into
+// cli_exited → shim socket close → naozhi spawning a brand-new shim on
+// the next message, leaking the old socket path and sometimes losing
+// resume context. InterruptSessionSafe must prefer the in-band
+// control_request path and only fall back to SIGINT when necessary.
+
+func TestInterruptSessionSafe_PrefersControlRequest(t *testing.T) {
+	r := newTestRouter(3)
+	proc := newRunningProc()
+	injectSession(r, "k1", proc)
+
+	outcome := r.InterruptSessionSafe("k1")
+	if outcome != InterruptSent {
+		t.Errorf("outcome = %v, want InterruptSent", outcome)
+	}
+	proc.mu.Lock()
+	viaCtl, sigint := proc.viaControlCalls, proc.interruptCalls
+	proc.mu.Unlock()
+	if viaCtl != 1 {
+		t.Errorf("InterruptViaControl calls = %d, want 1", viaCtl)
+	}
+	if sigint != 0 {
+		t.Errorf("Interrupt (SIGINT) calls = %d, want 0 — control_request succeeded, no fallback expected", sigint)
+	}
+}
+
+func TestInterruptSessionSafe_FallsBackOnUnsupported(t *testing.T) {
+	r := newTestRouter(3)
+	proc := newRunningProc()
+	proc.viaControlErr = cli.ErrInterruptUnsupported // ACP-like protocol
+	injectSession(r, "k1", proc)
+
+	outcome := r.InterruptSessionSafe("k1")
+	if outcome != InterruptSent {
+		t.Errorf("outcome = %v, want InterruptSent (after SIGINT fallback)", outcome)
+	}
+	proc.mu.Lock()
+	viaCtl, sigint := proc.viaControlCalls, proc.interruptCalls
+	proc.mu.Unlock()
+	if viaCtl != 1 {
+		t.Errorf("InterruptViaControl calls = %d, want 1", viaCtl)
+	}
+	if sigint != 1 {
+		t.Errorf("Interrupt (SIGINT) calls = %d, want 1 — unsupported protocol should fall back", sigint)
+	}
+}
+
+func TestInterruptSessionSafe_NoActiveTurnDoesNotFallBack(t *testing.T) {
+	// Idle Claude `-p` session: raw SIGINT terminates the CLI, which is
+	// exactly the regression we are defending against. The button press
+	// should report "nothing was running" instead of silently ending the
+	// session. The HTTP/WS layers both map InterruptNoTurn → "not_running".
+	r := newTestRouter(3)
+	proc := newIdleProc()
+	proc.viaControlRunning = true // returns ErrNoActiveTurn when idle
+	injectSession(r, "k1", proc)
+
+	outcome := r.InterruptSessionSafe("k1")
+	if outcome != InterruptNoTurn {
+		t.Errorf("outcome = %v, want InterruptNoTurn (no fallback — would kill -p CLI)", outcome)
+	}
+	proc.mu.Lock()
+	sigint := proc.interruptCalls
+	proc.mu.Unlock()
+	if sigint != 0 {
+		t.Errorf("Interrupt (SIGINT) calls = %d, want 0 — idle session must not fall back to SIGINT on -p mode", sigint)
+	}
+}
+
+func TestInterruptSessionSafe_TransportErrorDoesNotFallBack(t *testing.T) {
+	// control_request write failed — the shim socket is almost certainly
+	// broken. SIGINT would travel the same broken path and also fail.
+	// Surface the error so F6's reconcile path cleans up the zombie.
+	r := newTestRouter(3)
+	proc := newRunningProc()
+	proc.viaControlErr = cli.ErrMessageTooLarge // any non-sentinel write-ish error
+	injectSession(r, "k1", proc)
+
+	outcome := r.InterruptSessionSafe("k1")
+	if outcome != InterruptError {
+		t.Errorf("outcome = %v, want InterruptError (no fallback on transport failure)", outcome)
+	}
+	proc.mu.Lock()
+	sigint := proc.interruptCalls
+	proc.mu.Unlock()
+	if sigint != 0 {
+		t.Errorf("Interrupt calls = %d, want 0 — transport error must not trigger SIGINT", sigint)
+	}
+}
+
+func TestInterruptSessionSafe_NoSession(t *testing.T) {
+	r := newTestRouter(3)
+	outcome := r.InterruptSessionSafe("missing-key")
+	if outcome != InterruptNoSession {
+		t.Errorf("outcome = %v, want InterruptNoSession", outcome)
+	}
+}
+
+func TestInterruptSessionSafe_DeadProcess(t *testing.T) {
+	r := newTestRouter(3)
+	proc := newDeadProc()
+	injectSession(r, "k1", proc)
+
+	outcome := r.InterruptSessionSafe("k1")
+	// Dead process → InterruptViaControl returns InterruptNoSession (via
+	// ManagedSession.InterruptViaControl's `!proc.Alive()` branch), which
+	// is a terminal outcome — we do NOT fall back because SIGINT on a
+	// dead process is a no-op and just adds log noise.
+	if outcome != InterruptNoSession {
+		t.Errorf("outcome = %v, want InterruptNoSession (no fallback on dead)", outcome)
+	}
+	proc.mu.Lock()
+	sigint := proc.interruptCalls
+	proc.mu.Unlock()
+	if sigint != 0 {
+		t.Errorf("Interrupt calls = %d, want 0 — dead proc should not SIGINT", sigint)
 	}
 }
