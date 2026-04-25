@@ -21,7 +21,7 @@ type fakeShimServer struct {
 
 func newFakeShimServer(t *testing.T) *fakeShimServer {
 	t.Helper()
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	path := filepath.Join(dir, "fake.sock")
 	ln, err := net.Listen("unix", path)
 	if err != nil {

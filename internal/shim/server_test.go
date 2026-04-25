@@ -61,7 +61,7 @@ func TestCleanStaleSocket_RemovesDeadSocket(t *testing.T) {
 }
 
 func TestCleanStaleSocket_LiveSocket_ReturnsError(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	path := filepath.Join(dir, "live.sock")
 
 	// Start a real unix listener
@@ -369,7 +369,7 @@ func TestShimServer_FullHandshake(t *testing.T) {
 		t.Skip("sh not available")
 	}
 
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	socketPath := filepath.Join(dir, "test.sock")
 	stateFile := filepath.Join(dir, "state.json")
 
@@ -514,7 +514,7 @@ func TestShimServer_AuthFailed_BadToken(t *testing.T) {
 		t.Skip("sh not available")
 	}
 
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	socketPath := filepath.Join(dir, "test_auth.sock")
 	stateFile := filepath.Join(dir, "state_auth.json")
 
@@ -622,7 +622,7 @@ func TestShimServer_PingPong(t *testing.T) {
 		t.Skip("sh not available")
 	}
 
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	socketPath := filepath.Join(dir, "ping.sock")
 	stateFile := filepath.Join(dir, "ping_state.json")
 
@@ -843,7 +843,7 @@ type connectedClient struct {
 
 func setupShimServerWithClient(t *testing.T) (s *shimServer, client connectedClient, cleanup func()) {
 	t.Helper()
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	socketPath := filepath.Join(dir, "cmd.sock")
 	stateFile := filepath.Join(dir, "cmd_state.json")
 
@@ -1069,7 +1069,7 @@ func TestHandleClient_CloseStdinCommand(t *testing.T) {
 }
 
 func TestHandleClient_ReplayBufferedLines(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	socketPath := filepath.Join(dir, "replay.sock")
 	stateFile := filepath.Join(dir, "replay_state.json")
 
@@ -1199,7 +1199,7 @@ func TestHandleClient_ReplayBufferedLines(t *testing.T) {
 
 // TestHandleClient_StderrForwarded verifies that CLI stderr is forwarded to the client.
 func TestHandleClient_StderrForwarded(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	socketPath := filepath.Join(dir, "stderr.sock")
 	stateFile := filepath.Join(dir, "stderr_state.json")
 

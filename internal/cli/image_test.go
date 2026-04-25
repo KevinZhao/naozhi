@@ -7,7 +7,7 @@ import (
 )
 
 func TestExtractImagePaths(t *testing.T) {
-	dir := t.TempDir()
+	dir := imageSafeTempDir(t)
 	pngPath := filepath.Join(dir, "photo.png")
 	jpgPath := filepath.Join(dir, "image.jpg")
 	os.WriteFile(pngPath, []byte("fake-png"), 0644)
@@ -51,7 +51,7 @@ func TestExtractImagePaths_NonExistent(t *testing.T) {
 }
 
 func TestExtractImagePaths_Dedup(t *testing.T) {
-	dir := t.TempDir()
+	dir := imageSafeTempDir(t)
 	pngPath := filepath.Join(dir, "dup.png")
 	os.WriteFile(pngPath, []byte("data"), 0644)
 
@@ -63,7 +63,7 @@ func TestExtractImagePaths_Dedup(t *testing.T) {
 }
 
 func TestExtractImagePaths_AllExtensions(t *testing.T) {
-	dir := t.TempDir()
+	dir := imageSafeTempDir(t)
 	exts := []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 	var text string
 	for _, ext := range exts {
@@ -79,7 +79,7 @@ func TestExtractImagePaths_AllExtensions(t *testing.T) {
 }
 
 func TestExtractImagePaths_TrailingPunctuation(t *testing.T) {
-	dir := t.TempDir()
+	dir := imageSafeTempDir(t)
 	pngPath := filepath.Join(dir, "file.png")
 	os.WriteFile(pngPath, []byte("data"), 0644)
 

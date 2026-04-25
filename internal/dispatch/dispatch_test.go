@@ -790,7 +790,14 @@ func TestFormatToolUse(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestHandleCdCommand_AbsPath(t *testing.T) {
-	tmpDir := t.TempDir()
+	// handleCdCommand runs filepath.EvalSymlinks before the allowedRoot
+	// prefix check (commands.go:425). macOS rewrites /var/folders/... to
+	// /private/var/folders/..., so resolve upfront to keep the fixture
+	// platform-neutral.
+	tmpDir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp, nil)
 	d.allowedRoot = tmpDir // restrict to tmpDir

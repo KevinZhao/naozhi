@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -483,11 +484,18 @@ func TestHandleAPISend_WorkspaceOverride(t *testing.T) {
 		t.Fatalf("status = %d, want 202", w.Code)
 	}
 
-	// Verify workspace was set for the chat key
+	// Verify workspace was set for the chat key. validateWorkspace calls
+	// filepath.EvalSymlinks, which on macOS rewrites /var/folders/... to
+	// /private/var/folders/... and /tmp/... to /private/tmp/... — resolve
+	// the expected value the same way so the assertion is platform-neutral.
 	chatKey := "dashboard:direct:test-session"
 	ws := router.GetWorkspace(chatKey)
-	if ws != tmpDir {
-		t.Errorf("workspace = %q, want %q", ws, tmpDir)
+	wantDir, err := filepath.EvalSymlinks(tmpDir)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(%q): %v", tmpDir, err)
+	}
+	if ws != wantDir {
+		t.Errorf("workspace = %q, want %q", ws, wantDir)
 	}
 }
 
