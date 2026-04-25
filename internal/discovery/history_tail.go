@@ -170,6 +170,19 @@ func parseTail(ctx context.Context, f *os.File, size int64, limit int) ([]cli.Ev
 			// first '\n' is a partial line whose head lives in an older
 			// chunk — stash it as carry and stop walking this chunk.
 			if nl < 0 && offset > 0 {
+				// Cap carry growth so a pathologically long single line
+				// (e.g. a corrupt JSONL file with no newlines across MBs
+				// of base64 output) cannot drive this function to O(N)
+				// RAM. When the cap is hit we treat the remaining prefix
+				// as unparseable and reset carry — the line would fail
+				// parseHistoryLine downstream anyway, so dropping it here
+				// is equivalent to discarding at parse time without the
+				// memory blow-up. R58-PERF-F5.
+				const maxCarryBytes = 4 * 1024 * 1024
+				if len(carry)+end > maxCarryBytes {
+					carry = nil
+					break
+				}
 				carry = append(carry, chunk[:end]...)
 				break
 			}

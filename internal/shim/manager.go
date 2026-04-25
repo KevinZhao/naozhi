@@ -314,6 +314,18 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 
 // Reconnect connects to an existing shim identified by its state file.
 // lastSeq is the last received sequence number for replay positioning.
+//
+// Unlike StartShim this path deliberately does not participate in the
+// pendingShims admission counter: Reconnect is driven exclusively by
+// Discover at router startup and by ReconnectShimsCtx during reconcile,
+// both of which already loop sequentially over shims they found on disk.
+// The admission gate protects concurrent StartShim spawners from exceeding
+// maxShims; a batch that reattaches to already-running processes cannot
+// create new shims, so gating it would only manufacture spurious failures
+// on a cold start with more than maxShims persisted state files. The
+// startup ordering is owned by the caller (single goroutine), not the
+// manager, and changing that would require re-auditing the Router's
+// reconnectShims lock order. R40-REL1.
 func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*ShimHandle, error) {
 	keyHash := KeyHash(key)
 	stateFile := StateFilePath(m.stateDir, keyHash)

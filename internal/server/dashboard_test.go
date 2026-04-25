@@ -206,6 +206,50 @@ func TestHandleAPISend_MissingKeyJSON(t *testing.T) {
 	}
 }
 
+// TestHandleAPISend_TextTooLong_JSON asserts the JSON handleSend branch
+// enforces the same per-field text cap as the WS path. Pre-R60, a 1 MB text
+// payload could pass the body-level MaxBytesReader and drive a multi-MB
+// CLI stdin write once CoalesceMessages ran. R60-SEC-2.
+func TestHandleAPISend_TextTooLong_JSON(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	big := strings.Repeat("x", 64*1024+1)
+	body := `{"key":"p:t:u:general","text":"` + big + `"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.sendH.handleSend(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "too long") {
+		t.Errorf("body = %q, want 'too long'", w.Body.String())
+	}
+}
+
+// TestHandleAPISend_RejectControlInKey asserts the HTTP handler refuses keys
+// with C0 control bytes at the boundary — sessionSend also rejects them, but
+// the R60-SEC-8 gate runs BEFORE any slog attr is written, so an attacker
+// cannot fragment log lines through the "workspace validation failed" path
+// using an ANSI-padded key. R60-SEC-8.
+func TestHandleAPISend_RejectControlInKey(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	body := `{"key":"p:t:u\nadmin:general","text":"hi"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
+		strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	srv.sendH.handleSend(w, req)
+
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "invalid key character") {
+		t.Errorf("body = %q, want 'invalid key character'", w.Body.String())
+	}
+}
+
 func TestHandleAPISend_MissingTextAndFiles(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 

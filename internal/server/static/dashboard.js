@@ -3909,6 +3909,7 @@ function renderMdUncached(s) {
     // the underlying string on every concat past the small-string threshold,
     // which is O(n^2) over line count. A 200-line response rendered ~50 times
     // per history replay was the dominant cost in the text-event path.
+    const lines = part.split('\n');
     const chunks = [];
     let inList = '';
     for (let i = 0; i < lines.length; i++) {

@@ -1086,8 +1086,13 @@ func (s *Scheduler) execute(j *Job) {
 	// paths below can call notify*() unconditionally-guarded by IsSet().
 	notifyTo := s.resolveNotifyTarget(platName, chatID, notifyPlat, notifyChat, notifyOpt)
 
-	log := slog.With("cron_id", jobID, "platform", platName, "chat", chatID)
-	log.Info("cron job executing", "prompt_len", len(prompt))
+	// Named `lg` instead of `log` to avoid shadowing the standard `log`
+	// package imported at the top of the file. While no current code inside
+	// execute() calls into the `log` package, the shadow would silently
+	// redirect any future `log.Printf` edit to this local *slog.Logger and
+	// fail to compile (or worse, compile against a shadowed name). R60-GO-M2.
+	lg := slog.With("cron_id", jobID, "platform", platName, "chat", chatID)
+	lg.Info("cron job executing", "prompt_len", len(prompt))
 	execStart := time.Now()
 
 	ctx, cancel := context.WithTimeout(s.stopCtx, s.execTimeout)
@@ -1102,7 +1107,7 @@ func (s *Scheduler) execute(j *Job) {
 		// could have been retargeted since. workDirUnderRoot re-evaluates
 		// symlinks against the current filesystem state before binding.
 		if s.allowedRoot != "" && !workDirUnderRoot(workDir, s.allowedRoot) {
-			log.Warn("cron job work_dir outside allowed_root; aborting run",
+			lg.Warn("cron job work_dir outside allowed_root; aborting run",
 				"work_dir", workDir)
 			s.recordResult(j, "", "work_dir outside allowed_root")
 			return
@@ -1122,7 +1127,7 @@ func (s *Scheduler) execute(j *Job) {
 	stubRefresh := func() {}
 	if fresh {
 		s.router.Reset(key)
-		log.Info("cron fresh context: session reset before run")
+		lg.Info("cron fresh context: session reset before run")
 		stubRefresh = func() {
 			s.mu.RLock()
 			jobCopy, ok := s.jobs[jobID]
@@ -1143,7 +1148,7 @@ func (s *Scheduler) execute(j *Job) {
 		_, stillExists := s.jobs[jobID]
 		s.mu.RUnlock()
 		if !stillExists {
-			log.Info("cron job deleted mid-execute, skipping GetOrCreate")
+			lg.Info("cron job deleted mid-execute, skipping GetOrCreate")
 			return
 		}
 	}
@@ -1156,14 +1161,14 @@ func (s *Scheduler) execute(j *Job) {
 			// on the next tick or is intentionally gone; either way an IM
 			// notification would be spam and the stored LastError would
 			// falsely blame the job itself.
-			log.Info("cron session cancelled", "err", err)
+			lg.Info("cron session cancelled", "err", err)
 			stubRefresh()
 			return
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
-			log.Info("cron session deadline exceeded", "err", err)
+			lg.Info("cron session deadline exceeded", "err", err)
 		} else {
-			log.Error("cron session error", "err", err)
+			lg.Error("cron session error", "err", err)
 		}
 		s.recordResult(j, "", "session error: "+err.Error())
 		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", jobID))
@@ -1178,14 +1183,14 @@ func (s *Scheduler) execute(j *Job) {
 			// Same rationale as the session-error branch above: suppress
 			// the operator-facing notice so shutdown races don't look like
 			// real failures.
-			log.Info("cron send cancelled", "err", err)
+			lg.Info("cron send cancelled", "err", err)
 			stubRefresh()
 			return
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
-			log.Info("cron send deadline exceeded", "err", err)
+			lg.Info("cron send deadline exceeded", "err", err)
 		} else {
-			log.Error("cron send error", "err", err)
+			lg.Error("cron send error", "err", err)
 		}
 		s.recordResult(j, "", "send error: "+err.Error())
 		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", jobID))
@@ -1193,7 +1198,7 @@ func (s *Scheduler) execute(j *Job) {
 		return
 	}
 
-	log.Info("cron job completed",
+	lg.Info("cron job completed",
 		"result_len", len(result.Text),
 		"elapsed_ms", time.Since(execStart).Milliseconds())
 	s.recordResult(j, result.Text, "")
@@ -1274,6 +1279,14 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg string) {
 	if byteOffset, truncated := runeByteOffset(result, maxStoredRunes); truncated {
 		result = result[:byteOffset] + "…[truncated]"
 	}
+	// Redact absolute filesystem paths from errMsg before persisting to
+	// cron_jobs.json and broadcasting to all authenticated dashboard
+	// clients. session.GetOrCreate / session.Send surface workspace-bearing
+	// errors that would otherwise enumerate operator filesystem layout on
+	// disk (at 0600) and in every connected browser's event stream. Keep
+	// the structural prefix ("session error: …" / "send error: …") so the
+	// error class remains obvious. R61-SEC-8.
+	errMsg = redactPathsInCronError(errMsg)
 	s.mu.Lock()
 	// If the job was deleted between execute()'s snapshot and recordResult's
 	// write-back, skip both the persist and the onExecute callback: broadcasting
@@ -1295,6 +1308,79 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg string) {
 	if fn != nil {
 		fn(j.ID, result, errMsg)
 	}
+}
+
+// redactPathsInCronError strips absolute filesystem paths from a cron
+// execution error message before persistence. session.GetOrCreate and
+// session.Send produce errors like "session error: workspace …/repo/x:
+// permission denied" that would otherwise enumerate the operator's
+// filesystem layout to every authenticated dashboard viewer and any
+// cron_jobs.json backup reader. We replace both POSIX and Windows-style
+// absolute paths with a literal "<path>" placeholder; error classification
+// (permission denied, no such file) stays intact because the surrounding
+// tokens aren't paths. R61-SEC-8.
+//
+// The implementation is a token-wise scan rather than a regex to avoid
+// pulling a regex compile onto every cron run: recordResult is invoked on
+// every execution and the regex cost would dominate the redaction budget.
+func redactPathsInCronError(s string) string {
+	if s == "" {
+		return s
+	}
+	const maxErrLen = 2048
+	if len(s) > maxErrLen {
+		s = s[:maxErrLen] + "…"
+	}
+	// Fast path: if the string contains no POSIX slash and no Windows
+	// backslash, there is nothing path-shaped to redact — skip the Builder
+	// allocation and return the input unchanged. recordResult runs on every
+	// cron execution, and common error classes ("dispatcher queue full",
+	// "session error: context deadline exceeded") have no embedded paths.
+	// R62-PERF-3.
+	if strings.IndexByte(s, '/') < 0 && strings.IndexByte(s, '\\') < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	i := 0
+	for i < len(s) {
+		c := s[i]
+		// POSIX absolute path: leading '/' followed by a non-space/non-quote
+		// byte. Drive letter path C:\… also counts.
+		isPosix := c == '/' && i+1 < len(s) && s[i+1] != ' ' && s[i+1] != '\t' && s[i+1] != '\n'
+		isWin := i+2 < len(s) &&
+			((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) &&
+			s[i+1] == ':' && (s[i+2] == '\\' || s[i+2] == '/')
+		if !isPosix && !isWin {
+			b.WriteByte(c)
+			i++
+			continue
+		}
+		// Consume the path until a delimiter that cannot appear in a
+		// typical error-embedded path. Stopping at whitespace is the key
+		// rule: error messages from the Go standard library spell paths
+		// as tokens separated by whitespace ("open /tmp/x: reason"), and
+		// the rare legitimate "path with space" in an error string is
+		// vanishingly unlikely to survive redaction cleanly anyway. A
+		// conservative scan errs on the side of over-redacting.
+		j := i
+		for j < len(s) {
+			cc := s[j]
+			if cc == '\n' || cc == ' ' || cc == '\t' || cc == ',' || cc == ';' ||
+				cc == '\'' || cc == '"' || cc == '`' {
+				break
+			}
+			if cc == ':' && j+1 < len(s) && (s[j+1] == ' ' || s[j+1] == '\n') {
+				// `path: reason` — stop before the ':' so the reason tail
+				// survives redaction.
+				break
+			}
+			j++
+		}
+		b.WriteString("<path>")
+		i = j
+	}
+	return b.String()
 }
 
 // notifyTarget sends a message to an arbitrary platform/chat (notify target).

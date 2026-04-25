@@ -136,6 +136,53 @@ func validateWorkspace(workspace, allowedRoot string) (string, error) {
 	return wsPath, nil
 }
 
+// validateRemoteWorkspace is the primary-side syntactic check applied to a
+// workspace string that will be forwarded to a remote reverse node via the
+// RPC "send" method. The primary cannot Stat the remote filesystem, but it
+// can and should reject obviously unsafe inputs — absolute path shape, no
+// NUL, no control bytes, bounded length, no traversal markers — before
+// relaying. Without this guard, an authenticated dashboard user could
+// submit `../../../etc` as a workspace to a node whose defaultWorkspace is
+// empty and have the remote connector happily bind it. The remote node
+// runs its own EvalSymlinks check, but that check uses the node's own
+// defaults; sharing the primary's allowedRoot across nodes is not always
+// possible (nodes may have different filesystem layouts). R61-SEC-2.
+func validateRemoteWorkspace(workspace string) error {
+	if workspace == "" {
+		// Empty means "use remote's default workspace" — intentional, allowed.
+		return nil
+	}
+	const maxWorkspacePath = 4096
+	if len(workspace) > maxWorkspacePath {
+		return fmt.Errorf("workspace too long")
+	}
+	if strings.ContainsRune(workspace, 0) {
+		return fmt.Errorf("invalid workspace")
+	}
+	for i := 0; i < len(workspace); i++ {
+		c := workspace[i]
+		if c < 0x20 || c == 0x7f {
+			return fmt.Errorf("invalid workspace")
+		}
+	}
+	if !filepath.IsAbs(workspace) {
+		return fmt.Errorf("workspace must be absolute")
+	}
+	// Reject any literal `..` segment in the submitted path. filepath.Clean
+	// collapses `/home/../etc` into `/etc` silently, so checking *after*
+	// Clean would let traversal slip through as a now-canonical absolute
+	// path. The primary cannot reliably Stat the remote FS, so we only
+	// accept paths that are already free of traversal markers at the HTTP
+	// boundary — the remote side's own EvalSymlinks check is the second
+	// line of defense, not the first.
+	for _, seg := range strings.Split(workspace, string(filepath.Separator)) {
+		if seg == ".." {
+			return fmt.Errorf("workspace contains traversal segment")
+		}
+	}
+	return nil
+}
+
 // pathErrReason returns a short, path-free tag describing a filesystem error
 // so debug logs do not echo the workspace path twice via *os.PathError.
 func pathErrReason(err error) string {
@@ -355,6 +402,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		watchdogNoOut: &s.watchdogNoOutputKills,
 		watchdogTotal: &s.watchdogTotalKills,
 	}
+	s.sessionH.initStaticStats()
 	s.sessionH.WarmHistoryCache()
 	s.cliH = NewCLIBackendsHandler(router)
 	platNames := make(map[string]struct{}, len(platforms))
@@ -362,17 +410,19 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		platNames[name] = struct{}{}
 	}
 	s.healthH = &HealthHandler{
-		router:          router,
-		auth:            s.auth,
-		startedAt:       s.startedAt,
-		workspaceID:     opts.WorkspaceID,
-		workspaceName:   opts.WorkspaceName,
-		noOutputTimeout: opts.NoOutputTimeout,
-		totalTimeout:    opts.TotalTimeout,
-		watchdogNoOut:   &s.watchdogNoOutputKills,
-		watchdogTotal:   &s.watchdogTotalKills,
-		nodeAccess:      s.nodeAccess,
-		platforms:       platNames,
+		router:             router,
+		auth:               s.auth,
+		startedAt:          s.startedAt,
+		workspaceID:        opts.WorkspaceID,
+		workspaceName:      opts.WorkspaceName,
+		noOutputTimeout:    opts.NoOutputTimeout,
+		totalTimeout:       opts.TotalTimeout,
+		noOutputTimeoutStr: opts.NoOutputTimeout.String(),
+		totalTimeoutStr:    opts.TotalTimeout.String(),
+		watchdogNoOut:      &s.watchdogNoOutputKills,
+		watchdogTotal:      &s.watchdogTotalKills,
+		nodeAccess:         s.nodeAccess,
+		platforms:          platNames,
 		hubDropped: func() int64 {
 			if s.hub == nil {
 				return 0
@@ -490,7 +540,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	srv := &http.Server{
-		Handler:           s.mux,
+		Handler:           gzipMiddleware(s.mux),
 		ReadHeaderTimeout: 5 * time.Second, // Slowloris defense
 		ReadTimeout:       15 * time.Second,
 		WriteTimeout:      60 * time.Second,

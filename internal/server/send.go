@@ -151,7 +151,20 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 	if p.Workspace != "" {
 		wsPath, err := validateWorkspace(p.Workspace, h.allowedRoot)
 		if err != nil {
-			return false, "", err
+			// Decouple the client-facing message from the internal error
+			// chain so any future edit wrapping an os.PathError with %w in
+			// validateWorkspace cannot leak the resolved filesystem path to
+			// the dashboard user. Full detail stays in the operator log.
+			// R58-SEC-L2.
+			//
+			// Log at Warn, not Debug — validateWorkspace rejects path
+			// traversal, symlink escapes, and out-of-root roots, which are
+			// security-relevant events operators should see without flipping
+			// on verbose logging. The workspace path is already scrubbed
+			// from the HTTP response, so surfacing it in logs doesn't leak
+			// it to the client. R59-GO-M2.
+			slog.Warn("workspace validation failed", "err", err, "workspace", p.Workspace)
+			return false, "", fmt.Errorf("invalid workspace")
 		}
 		validatedWorkspace = wsPath
 		// Require a non-empty chat-key prefix before the final ':'. A key of the

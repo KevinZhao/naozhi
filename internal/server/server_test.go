@@ -109,6 +109,35 @@ func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
 	})
 }
 
+// ─── validateRemoteWorkspace (R61-SEC-2) ─────────────────────────────────────
+
+func TestValidateRemoteWorkspace(t *testing.T) {
+	cases := []struct {
+		name    string
+		input   string
+		wantErr bool
+	}{
+		{"empty allowed (remote default)", "", false},
+		{"absolute simple ok", "/home/user/proj", false},
+		{"relative path rejected", "relative/path", true},
+		{"traversal rejected", "/home/../etc", true},
+		{"embedded traversal rejected", "/home/user/../../etc", true},
+		{"control byte rejected", "/home/user/\nproj", true},
+		{"tab rejected", "/home/user/\tproj", true},
+		{"nul rejected", "/home/user/\x00proj", true},
+		{"oversize rejected", "/" + strings.Repeat("a", 5000), true},
+		{"DEL rejected", "/home/user/\x7fproj", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateRemoteWorkspace(tc.input)
+			if (err != nil) != tc.wantErr {
+				t.Errorf("validateRemoteWorkspace(%q) err=%v wantErr=%v", tc.input, err, tc.wantErr)
+			}
+		})
+	}
+}
+
 // ─── handleHealth ─────────────────────────────────────────────────────────────
 
 func TestHandleHealth_ReturnsJSONContentType(t *testing.T) {

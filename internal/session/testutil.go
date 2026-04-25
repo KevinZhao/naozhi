@@ -73,6 +73,6 @@ func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
 	s.storeProcess(proc)
 	s.touchLastActive()
 	r.sessions[key] = s
-	r.activeCount++
+	r.activeCount.Add(1)
 	return s
 }

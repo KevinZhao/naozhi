@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -104,8 +105,12 @@ type Router struct {
 	// against different backends.
 	backendOverrides map[string]string
 
-	// activeCount tracks currently alive processes
-	activeCount int
+	// activeCount tracks currently alive processes (non-exempt only).
+	// Writes happen under r.mu (write lock); atomic access lets Stats()
+	// read lock-free so the dashboard /api/sessions hot path does not
+	// take a second r.mu RLock right after ListSessions() released one.
+	// R58-PERF-F1.
+	activeCount atomic.Int64
 
 	// pendingSpawns tracks Spawn() calls in progress (lock released during spawn)
 	pendingSpawns int
@@ -117,11 +122,16 @@ type Router struct {
 	// concurrent reconcile would shut the fresh shim down as an orphan.
 	spawningKeys map[string]struct{}
 
-	storePath        string
-	storeDirty       bool   // true when sessions changed since last save
-	storeGen         uint64 // incremented on each mutation, used to detect concurrent writes
-	wsOverridesDirty bool   // true when workspace overrides changed since last save
-	wsOverridesGen   uint64 // incremented on each ws-override mutation, mirrors storeGen pattern
+	storePath  string
+	storeDirty bool // true when sessions changed since last save
+	// storeGen increments on each mutation. Writes happen under r.mu (write
+	// lock) but atomic.Uint64 also lets Version() read lock-free — the
+	// dashboard polls Version() every few seconds from the /api/sessions
+	// hot path, and the previous RLock layered on top of ListSessions'
+	// RLock made each poll take two contended trips through r.mu.
+	storeGen         atomic.Uint64
+	wsOverridesDirty bool          // true when workspace overrides changed since last save
+	wsOverridesGen   atomic.Uint64 // increments on each ws-override mutation, mirrors storeGen pattern
 
 	// knownIDs tracks ALL session IDs ever used by naozhi, including
 	// sessions that have been removed/reset/evicted. Used by the
@@ -145,7 +155,19 @@ type Router struct {
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
 
-	onChange func() // called (outside lock) when session list changes
+	// onChange is stored via atomic.Pointer so notifyChange can load it
+	// lock-free on the stream-event hot path (called after every result
+	// event via Process.SetOnTurnDone). The previous RLock on r.mu added
+	// contention with session-mutation paths for a field that is set once
+	// at startup and never replaced in practice.
+	//
+	// The wrapper struct exists to make the "store a function value through
+	// an atomic pointer" idiom explicit. A bare `atomic.Pointer[func()]` +
+	// `Store(&fn)` works — Go escapes `fn`'s parameter copy to the heap —
+	// but the address-of-a-parameter pattern is easy to break during
+	// future refactors. Wrapping `fn` in a named struct makes the heap
+	// escape obvious and the dereference pattern unambiguous. R59-GO-M3.
+	onChange atomic.Pointer[onChangeHolder]
 
 	// historyWg tracks startup history-loading goroutines so Shutdown waits for them.
 	historyWg sync.WaitGroup
@@ -155,6 +177,13 @@ type Router struct {
 	// Paired with historyCancel (set by NewRouter, called from Shutdown).
 	historyCtx    context.Context
 	historyCancel context.CancelFunc
+
+	// shutdownOnce guards Shutdown against re-entry. Production flow invokes
+	// Shutdown exactly once from the signal handler, but future code paths
+	// (test teardown, hot-restart) might call it again; a double call would
+	// race the broadcast timer, re-close historyCtx via historyCancel (safe
+	// on its own but noisy) and double-detach shim processes. R49-REL-SHUTDOWN-ONCE.
+	shutdownOnce sync.Once
 }
 
 // chatKeyFor strips the last ":agentID" segment from a session key to get the chat key.
@@ -331,6 +360,14 @@ type RouterConfig struct {
 	ExtraArgs      []string
 	// BackendModels / BackendExtraArgs override Model / ExtraArgs per
 	// backend (e.g. kiro-specific model flags).
+	//
+	// BackendExtraArgs semantics: REPLACE, not append. When a backend has
+	// a non-empty entry here, spawnSession uses exactly those args instead
+	// of the router-level ExtraArgs. Per-session AgentOpts.ExtraArgs is
+	// then appended on top. An operator who wants to keep a router-wide
+	// flag like `--setting-sources ""` must re-specify it in every backend
+	// override — additive semantics would otherwise make it impossible to
+	// drop a default flag for a specific backend. R53-ARCH-002.
 	BackendModels    map[string]string
 	BackendExtraArgs map[string][]string
 	Workspace        string
@@ -800,9 +837,16 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			r.sessionIDToKey[state.SessionID] = state.Key
 		}
 		if !sess.exempt {
-			r.activeCount++
+			r.activeCount.Add(1)
 		}
-		r.storeGen++
+		// Mark store dirty so the next Cleanup/saveIfDirty cycle persists
+		// the reconnected session's backend/CLI identity and active flag.
+		// Without this, a naozhi crash within the (up to) 60-second gap
+		// before the next save would lose the shim-reconnect state even
+		// though the shim itself kept the CLI process alive. Every other
+		// storeGen.Add site pairs with storeDirty = true for this reason.
+		r.storeDirty = true
+		r.storeGen.Add(1)
 		r.mu.Unlock()
 
 		// Extract lastPrompt/lastActivity from replay + JSONL entries so the
@@ -822,20 +866,30 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 	}
 }
 
+// onChangeHolder wraps a callback so the atomic pointer Store site is an
+// explicit composite literal rather than `&fn` (address of a parameter copy).
+// Both forms are correct — Go's escape analysis heap-allocates either way —
+// but the wrapper makes the "function-value through atomic pointer" idiom
+// unmistakable to future readers and is harder to break when inlining /
+// renaming the parameter. R59-GO-M3.
+type onChangeHolder struct{ fn func() }
+
 // SetOnChange registers a callback invoked when the session list changes.
+// Replaces any previous callback; nil fn clears the callback.
 func (r *Router) SetOnChange(fn func()) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.onChange = fn
+	if fn == nil {
+		r.onChange.Store(nil)
+		return
+	}
+	r.onChange.Store(&onChangeHolder{fn: fn})
 }
 
-// notifyChange calls the onChange callback if set. Must be called outside r.mu.
+// notifyChange calls the onChange callback if set. Must be called outside
+// r.mu. Lock-free so stream-event callbacks (fired per result event) don't
+// contend r.mu with session mutations.
 func (r *Router) notifyChange() {
-	r.mu.RLock()
-	fn := r.onChange
-	r.mu.RUnlock()
-	if fn != nil {
-		fn()
+	if h := r.onChange.Load(); h != nil {
+		h.fn()
 	}
 }
 
@@ -848,18 +902,38 @@ func (r *Router) NotifyIdle() {
 	}
 }
 
-// ChatKey builds a chat-level key (without agent suffix) for workspace overrides.
+// ChatKey builds a chat-level key (without agent suffix) for workspace
+// overrides. Components are sanitized with the same rule that SessionKey uses
+// so a malicious IM chat ID containing C0/ANSI bytes or Unicode bidi overrides
+// cannot flow through the chat_key attr into slog.TextHandler output and
+// inject fabricated log lines. R58-GO-H1 / R58-SEC-L1.
 func ChatKey(platform, chatType, chatID string) string {
-	return platform + ":" + chatType + ":" + chatID
+	return sanitizeKeyComponent(platform) + ":" + sanitizeKeyComponent(chatType) + ":" + sanitizeKeyComponent(chatID)
 }
 
-// SetWorkspace sets the working directory override for a chat.
+// maxWorkspaceOverrides caps the workspaceOverrides map size. Same rationale
+// as maxBackendOverrides (R55-SEC-001): authenticated callers can POST unique
+// chat keys to /api/sessions/send and each valid call grows the map by one
+// entry with no natural pruning. 1024 comfortably exceeds realistic operator
+// usage (one override per chat, typical deployment < 50 chats).
+const maxWorkspaceOverrides = 1024
+
+// SetWorkspace sets the working directory override for a chat. Bounded by
+// maxWorkspaceOverrides to prevent DoS via unique-chat-key flooding (R58-SEC-H1).
 func (r *Router) SetWorkspace(chatKey, path string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	// Allow existing keys to be updated without bumping against the cap;
+	// only reject brand-new keys once the limit is hit. Mirrors the
+	// SetSessionBackend gating pattern.
+	if _, existing := r.workspaceOverrides[chatKey]; !existing && len(r.workspaceOverrides) >= maxWorkspaceOverrides {
+		slog.Warn("workspaceOverrides at capacity; dropping override",
+			"chat_key", chatKey, "cap", maxWorkspaceOverrides)
+		return
+	}
 	r.workspaceOverrides[chatKey] = path
 	r.wsOverridesDirty = true
-	r.wsOverridesGen++
+	r.wsOverridesGen.Add(1)
 }
 
 // GetWorkspace returns the effective workspace for a chat key.
@@ -965,9 +1039,11 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 			delete(r.backendOverrides, key)
 		}
 	}
-	r.activeCount -= closedActive
-	if r.activeCount < 0 {
-		r.activeCount = 0
+	if closedActive > 0 {
+		newCount := r.activeCount.Add(-int64(closedActive))
+		if newCount < 0 {
+			r.activeCount.Store(0)
+		}
 	}
 	if _, existed := r.workspaceOverrides[chatKeyPrefix]; existed {
 		delete(r.workspaceOverrides, chatKeyPrefix)
@@ -975,10 +1051,10 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 		// other code path bumps the flag; a crash before that would reload
 		// the override on restart and silently undo the user's reset.
 		r.wsOverridesDirty = true
-		r.wsOverridesGen++
+		r.wsOverridesGen.Add(1)
 	}
 	r.storeDirty = true
-	r.storeGen++
+	r.storeGen.Add(1)
 	r.mu.Unlock()
 
 	for _, proc := range toClose {
@@ -1060,15 +1136,21 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		// (Reset/Remove/evictOldest/Cleanup maintain it). Avoid the O(n) countActive
 		// scan on every spawn. Only recount when we appear to be at capacity, to
 		// detect drift from undetected process exits (OOM, SIGKILL) before refusing.
-		if r.activeCount+r.pendingSpawns >= r.maxProcs {
+		// All three checks run under r.mu (write lock); storing the Load into a
+		// local keeps the comparison in int64 (so no 32-bit wrap on exotic cross
+		// builds) and avoids re-issuing the atomic read between the rechecks.
+		// R62-PERF-7 / R62-SEC-4.
+		maxProcs64 := int64(r.maxProcs)
+		pending64 := int64(r.pendingSpawns)
+		if r.activeCount.Load()+pending64 >= maxProcs64 {
 			r.countActive()
 		}
-		if r.activeCount+r.pendingSpawns >= r.maxProcs {
+		if r.activeCount.Load()+pending64 >= maxProcs64 {
 			if !r.evictOldest() {
 				r.mu.Unlock()
 				return nil, fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
 			}
-			if r.activeCount+r.pendingSpawns >= r.maxProcs {
+			if r.activeCount.Load()+pending64 >= maxProcs64 {
 				r.mu.Unlock()
 				return nil, fmt.Errorf("%w (%d), all busy", ErrMaxProcs, r.maxProcs)
 			}
@@ -1292,12 +1374,12 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	r.sessions[key] = s
 	r.indexAdd(key)
 	if !opts.Exempt {
-		r.activeCount++
+		r.activeCount.Add(1)
 	}
 
 	r.storeDirty = true
-	r.storeGen++
-	slog.Info("session spawned", "key", key, "active", r.activeCount, "exempt", opts.Exempt)
+	r.storeGen.Add(1)
+	slog.Info("session spawned", "key", key, "active", r.activeCount.Load(), "exempt", opts.Exempt)
 	r.mu.Unlock()
 
 	// Load conversation history from Claude's local JSONL when resuming.
@@ -1335,7 +1417,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 // countActive recounts alive processes (corrects drift from undetected exits).
 // Exempt sessions are not counted toward max_procs capacity.
 func (r *Router) countActive() {
-	count := 0
+	count := int64(0)
 	for _, s := range r.sessions {
 		if s.exempt {
 			continue
@@ -1344,7 +1426,7 @@ func (r *Router) countActive() {
 			count++
 		}
 	}
-	r.activeCount = count
+	r.activeCount.Store(count)
 }
 
 // countExempt returns the number of alive exempt (planner) sessions.
@@ -1390,6 +1472,15 @@ func (r *Router) evictOldest() bool {
 	}
 	r.mu.Lock()
 	r.countActive() // recount instead of manual decrement to avoid double-count races
+	// Mark store dirty + bump version so the eviction is persisted on the
+	// next save cycle and propagated to the dashboard on the next Version()
+	// poll. Without these two lines, a crash within the (up to) 60-second
+	// save interval re-spawns the evicted session on restart, and dashboards
+	// polling on version diff skip the refresh that would remove the dead
+	// session from the sidebar. Every other mutation site pairs liveness
+	// changes with this pattern. R59-GO-H2.
+	r.storeDirty = true
+	r.storeGen.Add(1)
 	return true
 }
 
@@ -1412,13 +1503,12 @@ func (r *Router) Reset(key string) {
 	delete(r.sessions, key)
 	delete(r.backendOverrides, key)
 	if wasActive {
-		r.activeCount--
-		if r.activeCount < 0 {
-			r.activeCount = 0
+		if r.activeCount.Add(-1) < 0 {
+			r.activeCount.Store(0)
 		}
 	}
 	r.storeDirty = true
-	r.storeGen++
+	r.storeGen.Add(1)
 	r.mu.Unlock()
 
 	if proc != nil && proc.Alive() {
@@ -1453,13 +1543,12 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		// may carry its own backend, and spawnSession below consumes and
 		// clears the override atomically.
 		if wasActive {
-			r.activeCount--
-			if r.activeCount < 0 {
-				r.activeCount = 0
+			if r.activeCount.Add(-1) < 0 {
+				r.activeCount.Store(0)
 			}
 		}
 		r.storeDirty = true
-		r.storeGen++
+		r.storeGen.Add(1)
 
 		if proc != nil && proc.Alive() {
 			r.mu.Unlock()
@@ -1504,13 +1593,12 @@ func (r *Router) Remove(key string) bool {
 	delete(r.sessions, key)
 	delete(r.backendOverrides, key)
 	if wasActive {
-		r.activeCount--
-		if r.activeCount < 0 {
-			r.activeCount = 0
+		if r.activeCount.Add(-1) < 0 {
+			r.activeCount.Store(0)
 		}
 	}
 	r.storeDirty = true
-	r.storeGen++
+	r.storeGen.Add(1)
 	r.mu.Unlock()
 
 	if proc != nil && proc.Alive() {
@@ -1537,6 +1625,13 @@ func (r *Router) Cleanup() {
 	}
 
 	// ── Pass 1: snapshot candidate sessions under RLock ────────────
+	// Single-pass build with a conservative capacity hint (half the map —
+	// planner/exempt and suspended sessions are typically the majority on
+	// idle deployments, so over-allocating to len(r.sessions) wastes cap on
+	// every 5-minute tick). A prior two-loop version pre-counted candidates
+	// to size the slice exactly, but loadProcess() is an atomic read whose
+	// result can change between the two passes, and the doubled map walk
+	// paid O(2n) for no correctness benefit. R59-GO-M1.
 	r.mu.RLock()
 	type cand struct {
 		key        string
@@ -1544,7 +1639,7 @@ func (r *Router) Cleanup() {
 		proc       processIface
 		lastActive time.Time
 	}
-	candidates := make([]cand, 0, len(r.sessions))
+	candidates := make([]cand, 0, len(r.sessions)/2+1)
 	for key, s := range r.sessions {
 		if s.exempt {
 			continue // planner sessions are never expired by TTL
@@ -1620,7 +1715,7 @@ func (r *Router) Cleanup() {
 	// Prune orphaned sessions: nil process, no session ID, past prune TTL.
 	// Maintain a running newActive counter so we avoid a separate countActive() O(n) pass.
 	var pruned int
-	var newActive int
+	var newActive int64
 	for key, s := range r.sessions {
 		if s.exempt {
 			continue // planner sessions are never pruned
@@ -1639,20 +1734,20 @@ func (r *Router) Cleanup() {
 			newActive++
 		}
 	}
-	r.activeCount = newActive
+	r.activeCount.Store(newActive)
 
 	// Snapshot sessions for periodic save (while still holding the lock).
 	// Skip save if nothing changed since last Cleanup cycle.
 	if closedCount > 0 || pruned > 0 {
 		r.storeDirty = true
-		r.storeGen++
+		r.storeGen.Add(1)
 	}
 	var sessionsCopy map[string]*ManagedSession
 	var knownIDsCopy map[string]bool
 	var wsOverridesCopy map[string]string
 	storePath := r.storePath
-	snapshotGen := r.storeGen
-	snapshotWsGen := r.wsOverridesGen
+	snapshotGen := r.storeGen.Load()
+	snapshotWsGen := r.wsOverridesGen.Load()
 	if r.storeDirty {
 		sessionsCopy = make(map[string]*ManagedSession, len(r.sessions))
 		for k, v := range r.sessions {
@@ -1692,7 +1787,7 @@ func (r *Router) Cleanup() {
 		} else {
 			// Only clear dirty flag if no concurrent mutation occurred since snapshot.
 			r.mu.Lock()
-			if r.storeGen == snapshotGen {
+			if r.storeGen.Load() == snapshotGen {
 				r.storeDirty = false
 			}
 			r.mu.Unlock()
@@ -1704,7 +1799,7 @@ func (r *Router) Cleanup() {
 		} else {
 			// Only clear dirty flag if no concurrent SetWorkspace occurred since snapshot.
 			r.mu.Lock()
-			if r.wsOverridesGen == snapshotWsGen {
+			if r.wsOverridesGen.Load() == snapshotWsGen {
 				r.wsOverridesDirty = false
 			}
 			r.mu.Unlock()
@@ -1811,8 +1906,8 @@ func (r *Router) saveIfDirty() {
 		r.knownIDsSavedAt = time.Now()
 	}
 	storePath := r.storePath
-	snapshotGen := r.storeGen
-	snapshotWsGen := r.wsOverridesGen
+	snapshotGen := r.storeGen.Load()
+	snapshotWsGen := r.wsOverridesGen.Load()
 	r.mu.Unlock()
 
 	if sessionsCopy != nil {
@@ -1820,7 +1915,7 @@ func (r *Router) saveIfDirty() {
 			slog.Warn("periodic session save failed", "err", err)
 		} else {
 			r.mu.Lock()
-			if r.storeGen == snapshotGen {
+			if r.storeGen.Load() == snapshotGen {
 				r.storeDirty = false
 			}
 			r.mu.Unlock()
@@ -1832,7 +1927,7 @@ func (r *Router) saveIfDirty() {
 		} else {
 			// Only clear dirty flag if no concurrent SetWorkspace occurred since snapshot.
 			r.mu.Lock()
-			if r.wsOverridesGen == snapshotWsGen {
+			if r.wsOverridesGen.Load() == snapshotWsGen {
 				r.wsOverridesDirty = false
 			}
 			r.mu.Unlock()
@@ -1877,7 +1972,12 @@ func (r *Router) StartShimReconcileLoop(ctx context.Context, interval time.Durat
 }
 
 // Shutdown gracefully closes all sessions, waiting for running ones to complete.
+// Idempotent: subsequent calls return immediately after the first completes.
 func (r *Router) Shutdown() {
+	r.shutdownOnce.Do(r.shutdown)
+}
+
+func (r *Router) shutdown() {
 	// Cancel the history ctx so in-flight LoadHistory*Ctx calls (both startup
 	// preloaders and reconnect-time chain walkers) abort instead of blocking
 	// behind slow filesystem reads. The bounded Wait below provides a hard
@@ -2027,11 +2127,12 @@ func stripResumeArgs(args []string) []string {
 }
 
 // Version returns a monotonic counter incremented on every session mutation.
-// Used by the dashboard for efficient change detection without full JSON comparison.
+// Used by the dashboard for efficient change detection without full JSON
+// comparison. storeGen is atomic so this is lock-free — the dashboard polls
+// Version() from the /api/sessions hot path next to a separate ListSessions
+// RLock, and the previous implementation doubled that lock traffic.
 func (r *Router) Version() uint64 {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.storeGen
+	return r.storeGen.Load()
 }
 
 // MaxProcs returns the maximum number of concurrent CLI processes.
@@ -2050,10 +2151,20 @@ func (r *Router) CLIPath() string {
 // Stats returns current session statistics.
 // active = sessions with a live process (ready or running, excluding exempt);
 // total = all sessions in the map including suspended ones.
+//
+// Both reads happen inside the same RLock epoch so a concurrent spawnSession
+// landing between them cannot publish `active = N+1` against a pre-spawn
+// `total = N`, which would surface as `active > total` on the dashboard.
+// activeCount is still atomic for the lock-free fast path in spawn admission
+// checks; here we trade the lock-free read for observational consistency —
+// the RLock is uncontended with other readers and Load() is wait-free, so
+// the added cost is a pointer-level memory read. R59-GO-H1.
 func (r *Router) Stats() (active, total int) {
 	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.activeCount, len(r.sessions)
+	total = len(r.sessions)
+	active = int(r.activeCount.Load())
+	r.mu.RUnlock()
+	return active, total
 }
 
 // HealthCheck performs a lightweight liveness check by testing that the
@@ -2242,7 +2353,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 	r.sessions[key] = s
 	r.indexAdd(key)
 	r.storeDirty = true
-	r.storeGen++
+	r.storeGen.Add(1)
 	r.mu.Unlock()
 
 	r.notifyChange()
@@ -2267,7 +2378,7 @@ func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
 				existing.lastPrompt.Store(lastPrompt)
 			}
 			r.storeDirty = true
-			r.storeGen++
+			r.storeGen.Add(1)
 		}
 		r.mu.Unlock()
 		r.notifyChange()
@@ -2287,7 +2398,7 @@ func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
 	r.sessions[key] = s
 	r.indexAdd(key)
 	r.storeDirty = true
-	r.storeGen++
+	r.storeGen.Add(1)
 	r.mu.Unlock()
 
 	r.notifyChange()
@@ -2339,7 +2450,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 				r.indexDel(key)
 				delete(r.sessions, key)
 				r.storeDirty = true
-				r.storeGen++
+				r.storeGen.Add(1)
 			} else if cur != nil && cur.isAlive() {
 				// Concurrent GetOrCreate created a new session during Close();
 				// abort takeover rather than silently returning wrong session.
@@ -2357,7 +2468,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			r.indexDel(key)
 			delete(r.sessions, key)
 			r.storeDirty = true
-			r.storeGen++
+			r.storeGen.Add(1)
 		}
 		r.countActive()
 	}
@@ -2368,7 +2479,7 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 		if prev, ok := r.workspaceOverrides[chatKey]; !ok || prev != workspace {
 			r.workspaceOverrides[chatKey] = workspace
 			r.wsOverridesDirty = true
-			r.wsOverridesGen++
+			r.wsOverridesGen.Add(1)
 		}
 	}
 	s, err := r.spawnSession(ctx, key, sessionID, opts)

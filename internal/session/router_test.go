@@ -200,7 +200,7 @@ func injectSession(r *Router, key string, proc processIface) *ManagedSession {
 	s.touchLastActive()
 	r.sessions[key] = s
 	if !s.IsExempt() && proc != nil && proc.Alive() {
-		r.activeCount++
+		r.activeCount.Add(1)
 	}
 	return s
 }
@@ -977,6 +977,32 @@ func TestShutdownWaitsForRunningThenProceeds(t *testing.T) {
 	}
 }
 
+// TestShutdownIdempotent verifies that calling Shutdown a second time is a
+// no-op rather than racing the broadcast timer or re-detaching processes.
+// R49-REL-SHUTDOWN-ONCE.
+func TestShutdownIdempotent(t *testing.T) {
+	r := newTestRouter(3)
+	proc := newIdleProc()
+	injectSession(r, "key1", proc)
+
+	r.Shutdown()
+	if proc.Alive() {
+		t.Fatalf("first Shutdown should close the process")
+	}
+	// Second call must not panic or block even though historyCancel/procs
+	// already ran once; sync.Once swallows the re-entry.
+	done := make(chan struct{})
+	go func() {
+		r.Shutdown()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Shutdown hung")
+	}
+}
+
 // ---------------------------------------------------------------------------
 // countActive
 // ---------------------------------------------------------------------------
@@ -991,8 +1017,8 @@ func TestCountActive_ReflectsAliveProcesses(t *testing.T) {
 	r.countActive()
 	r.mu.Unlock()
 
-	if r.activeCount != 2 {
-		t.Errorf("activeCount = %d, want 2", r.activeCount)
+	if got := r.activeCount.Load(); got != 2 {
+		t.Errorf("activeCount = %d, want 2", got)
 	}
 }
 
@@ -1061,6 +1087,69 @@ func TestConcurrentStats_Race(t *testing.T) {
 			r.Stats()
 		}()
 	}
+	wg.Wait()
+}
+
+// Stats must never return active > total. Pre-R59-GO-H1 the activeCount.Load()
+// ran outside the RLock that sampled len(sessions), so a mutation landing
+// between the two reads could bump active past total and the dashboard
+// would show an impossible "3/2 active". The mutator drives session
+// liveness changes through the lock-holding Reset path so we exercise the
+// real concurrency boundary, not a helper bypass. R59-GO-H1.
+func TestStats_ActiveNeverExceedsTotal(t *testing.T) {
+	r := newTestRouter(10)
+	// Seed 8 live sessions through the write-lock helper.
+	for i := 0; i < 8; i++ {
+		injectSession(r, fmt.Sprintf("key%d", i), newIdleProc())
+	}
+
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+
+	// Mutator: flip session liveness via Reset (which acquires r.mu.Lock)
+	// to create contention with Stats's RLock. We intentionally don't
+	// re-inject: Reset decrements activeCount and total in the same
+	// critical section, so the invariant must hold throughout.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for i := 0; ; i++ {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			key := fmt.Sprintf("key%d", i%8)
+			r.Reset(key)
+			// Re-inject under the write lock so total grows and shrinks
+			// in sync with activeCount.
+			r.mu.Lock()
+			s := &ManagedSession{key: key}
+			s.storeProcess(newIdleProc())
+			s.touchLastActive()
+			r.sessions[key] = s
+			r.activeCount.Add(1)
+			r.mu.Unlock()
+		}
+	}()
+
+	// Observers: assert invariant across many samples.
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 5000; j++ {
+				active, total := r.Stats()
+				if active > total {
+					t.Errorf("active=%d > total=%d", active, total)
+					return
+				}
+			}
+		}()
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	close(stop)
 	wg.Wait()
 }
 

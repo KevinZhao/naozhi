@@ -110,7 +110,16 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	// exhaust memory with a single huge message. 16 MB matches the primary
 	// side's ReverseConn limit (reverseserver.go).
 	conn.SetReadLimit(16 << 20)
-	defer conn.Close()
+
+	// gorilla/websocket's Conn.Close is documented for one concurrent
+	// reader and one concurrent writer but not for concurrent Close calls.
+	// The cancel-watchdog goroutine below calls conn.Close on ctx.Done, and
+	// the deferred close on function exit would race with it. Serialize
+	// both paths through a sync.Once so exactly one Close ever fires.
+	// R60-GO-M5.
+	var closeOnce sync.Once
+	closeConn := func() { closeOnce.Do(func() { _ = conn.Close() }) }
+	defer closeConn()
 
 	// Close the WebSocket when ctx is cancelled to unblock ReadJSON in handleConn.
 	connDone := make(chan struct{})
@@ -118,7 +127,7 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	go func() {
 		select {
 		case <-ctx.Done():
-			conn.Close()
+			closeConn()
 		case <-connDone:
 		}
 	}()

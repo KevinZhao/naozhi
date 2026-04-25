@@ -34,23 +34,31 @@ type Hub struct {
 	// landed past the cap. Over-shoot (Add then decrement) is bounded by
 	// one slot per rejected upgrade and is preferred over a CAS loop
 	// because Add is lock-free on all supported architectures.
-	connCount   atomic.Int64
-	clients     map[*wsClient]struct{}
-	router      *session.Router
-	agents      map[string]session.AgentOpts
-	agentCmds   map[string]string
-	dashToken   string
-	cookieMAC   string // HMAC-derived cookie value (different from dashToken)
-	guard       *session.Guard
-	queue       *dispatch.MessageQueue // per-key FIFO queue for dashboard sends
-	nodes       map[string]node.Conn
-	nodesMu     *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
-	projectMgr  *project.Manager
-	scheduler   *cron.Scheduler // optional, for cron prompt auto-save
-	uploadStore *uploadStore    // optional, for resolving WS-sent file_ids
-	allowedRoot string          // workspace paths must be under this root (empty = unrestricted)
-	ctx         context.Context // cancelled on Shutdown to stop in-flight sends
-	cancel      context.CancelFunc
+	connCount atomic.Int64
+	// droppedTotal counts messages dropped across all clients (send channel
+	// full on SendRaw). DroppedMessages() used to scan the clients map under
+	// RLock summing per-client counters, which contended with register/
+	// unregister on every /health probe. An atomic counter is lock-free on
+	// the hot path and monotonic — acceptable because the existing return
+	// value was already eventually-consistent (per-client loads race with
+	// concurrent SendRaw drops).
+	droppedTotal atomic.Int64
+	clients      map[*wsClient]struct{}
+	router       *session.Router
+	agents       map[string]session.AgentOpts
+	agentCmds    map[string]string
+	dashToken    string
+	cookieMAC    string // HMAC-derived cookie value (different from dashToken)
+	guard        *session.Guard
+	queue        *dispatch.MessageQueue // per-key FIFO queue for dashboard sends
+	nodes        map[string]node.Conn
+	nodesMu      *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
+	projectMgr   *project.Manager
+	scheduler    *cron.Scheduler // optional, for cron prompt auto-save
+	uploadStore  *uploadStore    // optional, for resolving WS-sent file_ids
+	allowedRoot  string          // workspace paths must be under this root (empty = unrestricted)
+	ctx          context.Context // cancelled on Shutdown to stop in-flight sends
+	cancel       context.CancelFunc
 	// sendWG tracks background send goroutines (ownerLoop, sessionSendLegacy)
 	// so Shutdown can wait for them to exit before returning. Without this,
 	// goroutines may read router/session after Shutdown tears them down.
@@ -297,8 +305,16 @@ func (h *Hub) unregister(c *wsClient) {
 		h.connCount.Add(-1)
 	}
 
-	// Snapshot nodes under nodesMu to avoid data race
+	// Snapshot nodes under nodesMu to avoid data race. Single-node deployments
+	// (no remote nodes configured) are the common case, so short-circuit on an
+	// empty map to skip a per-disconnect `[]node.Conn{}` allocation. Mobile
+	// clients that reconnect frequently made this visible in heap profiles.
+	// R46-PERF-UNREGISTER-NODES-ALLOC.
 	h.nodesMu.RLock()
+	if len(h.nodes) == 0 {
+		h.nodesMu.RUnlock()
+		return
+	}
 	nodes := make([]node.Conn, 0, len(h.nodes))
 	for _, conn := range h.nodes {
 		nodes = append(nodes, conn)
@@ -539,6 +555,18 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "text or files required"})
 		return
 	}
+	// Per-field byte cap on the WS path. wsMaxMessageSize already bounds the
+	// whole JSON frame at 256 KB, but without this inner gate an authenticated
+	// client can land repeated 250+ KB payloads into the dispatch queue; when
+	// the queue drains, CoalesceMessages concatenates up to MaxDepth entries
+	// into a single stdin write, amplifying input into a multi-MB CLI prompt.
+	// 64 KB comfortably covers code-review / stack-trace paste workflows and
+	// is ~8x the IM-side incoming text cap, so dashboard legitimate use is
+	// unaffected. R59-SEC-H1.
+	if len(msg.Text) > maxWSSendTextBytes {
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "text too long"})
+		return
+	}
 	if len(msg.FileIDs) > 10 {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "too many files (max 10)"})
 		return
@@ -611,6 +639,10 @@ func (h *Hub) handleInterrupt(c *wsClient, msg node.ClientMsg) {
 }
 
 func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
+	if !isValidNodeID(msg.Node) {
+		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "unknown node"})
+		return
+	}
 	nodeID := msg.Node
 	h.nodesMu.RLock()
 	nc, ok := h.nodes[nodeID]
@@ -832,15 +864,27 @@ func (h *Hub) broadcastToAuthenticated(data []byte) {
 	for _, c := range snap {
 		c.SendRaw(data)
 	}
-	// Drop oversized snapshots so the pool never pins arbitrarily large
-	// backing arrays (e.g. after a one-off broadcast to 5000 clients).
-	if cap(snap) <= 256 {
-		for i := range snap {
-			snap[i] = nil // clear pointers so clients are GC-eligible
-		}
-		*snapPtr = snap[:0]
-		broadcastClientSnapPool.Put(snapPtr)
+	// Clear *wsClient pointers so a disconnected client can be GC'd before
+	// the snap slice is returned to the caller / dropped. Clearing happens
+	// on both paths: for the pool-eligible path it prevents stale pointers
+	// surviving in the pooled backing array until the next Get; for the
+	// oversized path it releases references now instead of waiting for the
+	// long-lived parent goroutine's stack frame to unwind. R59-PERF-L1.
+	for i := range snap {
+		snap[i] = nil
 	}
+	// Oversized snapshots (e.g. after a one-off broadcast to 5000 clients)
+	// would pin an arbitrarily large backing array if returned to the pool.
+	// Drop the slice but still return the pointer header with a fresh small
+	// backing array so the pool slot is not permanently depleted — otherwise
+	// a single "big broadcast" would shrink the pool by one slot until
+	// process exit. R58-PERF-005.
+	if cap(snap) <= 256 {
+		*snapPtr = snap[:0]
+	} else {
+		*snapPtr = make([]*wsClient, 0, 32)
+	}
+	broadcastClientSnapPool.Put(snapPtr)
 }
 
 // broadcastState sends a session_state message to ALL authenticated clients.
@@ -945,15 +989,11 @@ func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
 	h.broadcastToAuthenticated(data)
 }
 
-// DroppedMessages returns the total number of messages dropped across all clients.
+// DroppedMessages returns the total number of messages dropped across all
+// clients since the process started. Lock-free atomic load; see the struct
+// field comment for why this replaced a per-client RLock scan.
 func (h *Hub) DroppedMessages() int64 {
-	var total int64
-	h.mu.RLock()
-	for c := range h.clients {
-		total += c.dropped.Load()
-	}
-	h.mu.RUnlock()
-	return total
+	return h.droppedTotal.Load()
 }
 
 // TrackSend reserves a sendWG slot for a background send goroutine and
@@ -1065,6 +1105,14 @@ func (h *Hub) Shutdown() {
 // ─── Remote node handlers ────────────────────────────────────────────────────
 
 func (h *Hub) handleRemoteSubscribe(c *wsClient, msg node.ClientMsg) {
+	// Reject malformed node IDs BEFORE calling slog to prevent log injection
+	// via ANSI/newline bytes in the attacker-controlled Node field. HTTP
+	// handlers rely on LookupNode for the same guard; the WS paths bypassed
+	// it because the map lookup itself does not validate.
+	if !isValidNodeID(msg.Node) {
+		c.SendJSON(node.ServerMsg{Type: "error", Key: msg.Key, Error: "unknown node"})
+		return
+	}
 	h.nodesMu.RLock()
 	conn, ok := h.nodes[msg.Node]
 	h.nodesMu.RUnlock()
@@ -1080,6 +1128,12 @@ func (h *Hub) handleRemoteSubscribe(c *wsClient, msg node.ClientMsg) {
 }
 
 func (h *Hub) handleRemoteUnsubscribe(c *wsClient, msg node.ClientMsg) {
+	if !isValidNodeID(msg.Node) {
+		// Mirror the success shape so slow clients can drop state even when
+		// the node ID is malformed — behaviour equivalent to "no such node".
+		c.SendJSON(node.ServerMsg{Type: "unsubscribed", Key: msg.Key})
+		return
+	}
 	h.nodesMu.RLock()
 	conn, ok := h.nodes[msg.Node]
 	h.nodesMu.RUnlock()
@@ -1091,6 +1145,29 @@ func (h *Hub) handleRemoteUnsubscribe(c *wsClient, msg node.ClientMsg) {
 }
 
 func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
+	if !isValidNodeID(msg.Node) {
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "unknown node"})
+		return
+	}
+	// Syntactic workspace validation on the primary. Even though the remote
+	// node runs its own EvalSymlinks check, that check uses the remote's
+	// defaults; a node whose defaultWorkspace is unconfigured would pass
+	// any absolute path through. Reject traversal / control-byte / oversize
+	// inputs here so no primary-authenticated dashboard user can have a
+	// remote node bind e.g. `/etc` as a Claude workspace. R61-SEC-2.
+	if err := validateRemoteWorkspace(msg.Workspace); err != nil {
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "invalid workspace"})
+		return
+	}
+	// Enforce the same per-field text cap as handleSend. Without this gate an
+	// authenticated dashboard user who targets a remote node can bypass the
+	// 64 KB local cap and push up to wsMaxMessageSize (256 KB) bytes straight
+	// to nc.Send, amplifying input into the remote shim's 12 MB stdin line
+	// ceiling via coalesce at the remote end. R62-SEC-1.
+	if len(msg.Text) > maxWSSendTextBytes {
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "text too long"})
+		return
+	}
 	nodeID := msg.Node
 	h.nodesMu.RLock()
 	nc, ok := h.nodes[nodeID]

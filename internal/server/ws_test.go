@@ -550,6 +550,62 @@ func TestWS_SendMissingText(t *testing.T) {
 	}
 }
 
+// Remote-node send must enforce the same per-field text cap as the local
+// send path. Without this guard an authenticated dashboard user who
+// targets a remote node can bypass the 64 KB local cap and push up to
+// wsMaxMessageSize (256 KB) bytes into nc.Send, amplifying input into
+// the remote shim's 12 MB stdin line ceiling via coalesce at the remote.
+// R62-SEC-1.
+func TestWS_RemoteSendTextTooLong(t *testing.T) {
+	hub, _ := newTestHub("")
+	url, cleanup := startWSServer(t, hub)
+	defer cleanup()
+
+	conn := dialWS(t, url)
+	defer conn.Close()
+
+	big := strings.Repeat("x", maxWSSendTextBytes+1)
+	// Node name is syntactically valid (isValidNodeID) but not registered
+	// on the hub. The cap check must fire before the unknown-node lookup
+	// so oversized text is rejected even when the target node is missing,
+	// matching the defence-in-depth shape of handleSend.
+	wsWrite(t, conn, node.ClientMsg{Type: "send", Node: "macbook", Key: "test:d:u:general", Text: big})
+	resp := wsRead(t, conn)
+
+	if resp.Type != "send_ack" || resp.Status != "error" {
+		t.Fatalf("resp = %+v, want send_ack/error", resp)
+	}
+	if !strings.Contains(resp.Error, "too long") {
+		t.Errorf("error = %q, want 'too long'", resp.Error)
+	}
+}
+
+// Text oversize is rejected with a clear error instead of silently getting
+// truncated or accepted then coalesced into a multi-MB CLI stdin write. The
+// dispatch queue's coalescing depth is bounded but the per-message cap is
+// what prevents a single send from dominating memory. R59-SEC-H1.
+func TestWS_SendTextTooLong(t *testing.T) {
+	hub, _ := newTestHub("")
+	url, cleanup := startWSServer(t, hub)
+	defer cleanup()
+
+	conn := dialWS(t, url)
+	defer conn.Close()
+
+	// One byte past the cap — enough to prove the boundary without bumping
+	// the ws read limit.
+	big := strings.Repeat("x", maxWSSendTextBytes+1)
+	wsWrite(t, conn, node.ClientMsg{Type: "send", Key: "test:d:u:general", Text: big})
+	resp := wsRead(t, conn)
+
+	if resp.Type != "send_ack" || resp.Status != "error" {
+		t.Fatalf("resp = %+v, want send_ack/error", resp)
+	}
+	if !strings.Contains(resp.Error, "too long") {
+		t.Errorf("error = %q, want 'too long'", resp.Error)
+	}
+}
+
 // ─── Client disconnect cleanup ──────────────────────────────────────────────
 
 func TestWS_ClientDisconnectCleanup(t *testing.T) {

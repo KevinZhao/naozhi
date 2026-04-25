@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 const (
@@ -248,7 +250,7 @@ func setupWriteConfig(path, token string) error {
 
 	// New file: generate from template
 	if _, err := os.Stat(path); os.IsNotExist(err) {
-		return writeFileAtomic(path, []byte(fmt.Sprintf(defaultConfigTemplate, token)), 0600)
+		return osutil.WriteFileAtomic(path, []byte(fmt.Sprintf(defaultConfigTemplate, token)), 0600)
 	}
 
 	// Existing file: update weixin token via yaml.Node (preserves comments)
@@ -261,38 +263,7 @@ func setupWriteConfig(path, token string) error {
 	if err != nil {
 		return err
 	}
-	return writeFileAtomic(path, updated, 0600)
-}
-
-// writeFileAtomic writes data to path via a temp file + rename so an
-// interrupted write (disk full, process killed) cannot leave a truncated
-// config on disk. The temp file lives in the same directory so rename is
-// guaranteed to be a same-filesystem atomic operation.
-func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, ".setup-*")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer os.Remove(tmpName) // no-op on successful rename
-
-	if _, err := tmp.Write(data); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Chmod(perm); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, path)
+	return osutil.WriteFileAtomic(path, updated, 0600)
 }
 
 func updateWeixinToken(data []byte, token string) ([]byte, error) {

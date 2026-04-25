@@ -28,6 +28,27 @@ import (
 // to every dashboard client on each /api/sessions poll.
 const maxResumeLastPromptBytes = 2 * 1024
 
+// watchdogStats is the /api/sessions "watchdog" sub-object. Declared as a
+// named struct (not an inline map[string]any) so json/reflect caches the
+// type descriptor once and the value is stack-allocated per response,
+// eliminating the per-poll 2-key map heap alloc the dashboard hot path
+// used to pay. R58-PERF-F2.
+type watchdogStats struct {
+	NoOutputKills int64 `json:"no_output_kills"`
+	TotalKills    int64 `json:"total_kills"`
+}
+
+// nodeStatusEntry is the per-node element in /api/sessions "nodes".
+// Named struct (vs map[string]any{...}) eliminates N inner-map allocs and
+// interface{} boxing on every 1 Hz dashboard poll. `omitempty` on
+// remote_addr keeps the JSON output identical for offline / "local" rows
+// that don't carry an address. R62-PERF-1.
+type nodeStatusEntry struct {
+	DisplayName string `json:"display_name"`
+	Status      string `json:"status"`
+	RemoteAddr  string `json:"remote_addr,omitempty"`
+}
+
 // isUnknownRPCMethodErr reports whether a remote-proxy error came from the
 // peer node rejecting the RPC method name. That happens when the peer is
 // running an older naozhi binary that predates remove_session /
@@ -63,7 +84,20 @@ type SessionHandlers struct {
 	watchdogNoOut *atomic.Int64
 	watchdogTotal *atomic.Int64
 
-	// History cache (30s TTL)
+	// staticStats pre-builds the subset of /api/sessions stats fields that
+	// are immutable after startup (backend, cli_name, workspace_*, system,
+	// agents, watchdog). handleList shallow-copies this map on each poll
+	// instead of re-building the 12+ key map literal, which avoids per-key
+	// interface{} boxing and nested map allocs on the dashboard hot path.
+	// Initialized once by initStaticStats() after all fields are set.
+	staticStats map[string]any
+	// staticStatsOnce enforces the "initStaticStats called exactly once"
+	// contract structurally. A test double or future refactor that calls
+	// initStaticStats twice would otherwise race with concurrent handleList
+	// readers, who read staticStats without synchronisation. R61-GO-12.
+	staticStatsOnce sync.Once
+
+	// History cache (120s TTL — see cacheTTL in historySessions)
 	historyCache     []discovery.RecentSession
 	historyCacheTime time.Time
 	historyCacheMu   sync.Mutex
@@ -74,18 +108,52 @@ type SessionHandlers struct {
 	summaryCache     map[string]string
 	summaryCacheTime time.Time
 	summaryCacheMu   sync.Mutex
+	// summaryFlight collapses concurrent misses at the 30s TTL boundary into
+	// a single LookupSummaries invocation. Before this, N simultaneous tab
+	// polls that missed the cache each performed a full N×os.Stat scan over
+	// the project's .claude directory — multiplied by slow network filesystems
+	// this could saturate disk IO. Mirrors the historyFlight pattern.
+	// R60-PERF-5.
+	summaryFlight singleflight.Group
 }
 
 // GET /api/sessions
 func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
+	// Read Version() BEFORE ListSessions(). storeGen is atomic, ListSessions
+	// takes an RLock: a mutation landing between List→ and →Version would
+	// otherwise publish data at gen N with version N+1, and the dashboard
+	// would skip the next poll (N+1 already seen) until a later mutation
+	// bumps to N+2 — effectively a "stale sessions" window of up to 1 poll.
+	// Reading version first makes the response's version field an ≤ bound
+	// on the data's freshness, so the dashboard never skips a real change.
+	//
+	// The reverse race is intentional: a mutation landing between Version
+	// and ListSessions produces data at gen N+1 tagged with version N. The
+	// next poll sees version N+1, re-reads, and catches up — at worst one
+	// poll of display lag. The alternate ordering would instead make a
+	// real-change poll look like a duplicate and skip the refresh until a
+	// later unrelated mutation, which operators perceive as "my send didn't
+	// update the UI". version ≤ data is the safer side. R60-GO-M3.
+	version := h.router.Version()
 	snapshots := h.router.ListSessions()
 
-	// Keep dead sessions in the workspace sidebar for up to 24 hours.
+	// Keep dead sessions in the workspace sidebar for up to 24 hours. Merge
+	// the filter pass with running/ready accounting so we only walk the
+	// slice once — the dashboard polls this at 1 Hz × N tabs, and a full
+	// re-scan later in handleList was pure bookkeeping for state counts the
+	// filter pass could have computed in-place at zero extra cost.
 	cutoff24h := time.Now().Add(-24 * time.Hour).UnixMilli()
+	var running, ready int
 	n := 0
 	for _, snap := range snapshots {
 		if snap.DeathReason != "" && snap.LastActive < cutoff24h {
 			continue
+		}
+		switch snap.State {
+		case "running":
+			running++
+		case "ready":
+			ready++
 		}
 		snapshots[n] = snap
 		n++
@@ -94,7 +162,11 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 
 	// Fill project field from ProjectManager
 	if h.projectMgr != nil {
-		var workspaces []string
+		// Pre-size to len(snapshots): the loop accepts at most one entry per
+		// session, so the slice never grows past this bound. Starting at nil
+		// made append log(N) growth-realloc through 0→1→2→4→…→n per poll,
+		// visible in heap profiles on session-heavy dashboards. R60-PERF-4.
+		workspaces := make([]string, 0, len(snapshots))
 		for i := range snapshots {
 			if !project.IsPlannerKey(snapshots[i].Key) && snapshots[i].Workspace != "" {
 				workspaces = append(workspaces, snapshots[i].Workspace)
@@ -134,41 +206,32 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 
 	active, total := h.router.Stats()
 
-	var running, ready int
-	for _, snap := range snapshots {
-		switch snap.State {
-		case "running":
-			running++
-		case "ready":
-			ready++
-		}
+	// Shallow-copy the pre-built staticStats (backend/cli/workspace/system/
+	// agents are immutable after startup) and overlay the six dynamic fields.
+	// Watchdog is a stack-allocated struct (fixed 2-field shape) so we avoid
+	// the per-poll map[string]any alloc the previous inline literal paid.
+	// R58-PERF-F2.
+	//
+	// Defensive nil check: initStaticStats is called from server.New before
+	// requests arrive, but a future refactor (or test double constructing
+	// SessionHandlers by hand) could skip it. Treat nil as an empty map so
+	// the response still carries the dynamic fields rather than panicking on
+	// a missing caller-required `agents`/`system` key. R60-GO-L3.
+	staticLen := len(h.staticStats)
+	stats := make(map[string]any, staticLen+6)
+	for k, v := range h.staticStats {
+		stats[k] = v
 	}
-
-	stats := map[string]any{
-		"active":            active,
-		"running":           running,
-		"ready":             ready,
-		"total":             total,
-		"version":           h.router.Version(),
-		"uptime":            time.Since(h.startedAt).Round(time.Second).String(),
-		"backend":           h.backendTag,
-		"cli_name":          h.router.CLIName(),
-		"cli_version":       h.router.CLIVersion(),
-		"max_procs":         h.router.MaxProcs(),
-		"default_workspace": h.router.DefaultWorkspace(),
-		"workspace_id":      h.workspaceID,
-		"workspace_name":    h.workspaceName,
-		"system":            systemInfo(),
-		"watchdog": map[string]any{
-			"no_output_kills": h.watchdogNoOut.Load(),
-			"total_kills":     h.watchdogTotal.Load(),
-		},
+	stats["active"] = active
+	stats["running"] = running
+	stats["ready"] = ready
+	stats["total"] = total
+	stats["version"] = version
+	stats["uptime"] = time.Since(h.startedAt).Round(time.Second).String()
+	stats["watchdog"] = watchdogStats{
+		NoOutputKills: h.watchdogNoOut.Load(),
+		TotalKills:    h.watchdogTotal.Load(),
 	}
-
-	// Include available agent IDs for dashboard session creation. Cached at
-	// construction (agents map is immutable after startup) to skip the make +
-	// fill on every poll. See SessionHandlers.agentIDs.
-	stats["agents"] = h.agentIDs
 
 	// Include project list for dashboard sidebar rendering.
 	// Pre-allocate the outer slice so the append loop doesn't trigger log(N)
@@ -253,9 +316,13 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	if localName == "" {
 		localName = "Local"
 	}
-	nodeStatus := map[string]any{
-		"local": map[string]any{"display_name": localName, "status": "ok"},
-	}
+	// nodeStatus is a map[string]nodeStatusEntry (named struct, omitempty on
+	// remote_addr) instead of map[string]any{...map[string]any{...}} — the
+	// prior shape paid N inner-map allocs + interface{} boxing per key on
+	// every 1 Hz /api/sessions poll. Marshals identically to the JSON
+	// clients expect. R62-PERF-1.
+	nodeStatus := make(map[string]nodeStatusEntry, 1+len(nodesSnapshot)+len(h.nodeAccess.KnownNodes()))
+	nodeStatus["local"] = nodeStatusEntry{DisplayName: localName, Status: "ok"}
 
 	cachedSessions, cachedStatus := h.nodeCache.Sessions()
 	for id, nc := range nodesSnapshot {
@@ -263,10 +330,10 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		if status == "" {
 			status = "ok"
 		}
-		nodeStatus[id] = map[string]any{
-			"display_name": nc.DisplayName(),
-			"status":       status,
-			"remote_addr":  nc.RemoteAddr(),
+		nodeStatus[id] = nodeStatusEntry{
+			DisplayName: nc.DisplayName(),
+			Status:      status,
+			RemoteAddr:  nc.RemoteAddr(),
 		}
 		for _, rs := range cachedSessions[id] {
 			allSessions = append(allSessions, rs)
@@ -276,9 +343,9 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	// Always include all configured nodes, even when currently disconnected.
 	for id, displayName := range h.nodeAccess.KnownNodes() {
 		if _, connected := nodeStatus[id]; !connected {
-			nodeStatus[id] = map[string]any{
-				"display_name": displayName,
-				"status":       "offline",
+			nodeStatus[id] = nodeStatusEntry{
+				DisplayName: displayName,
+				Status:      "offline",
 			}
 		}
 	}
@@ -505,7 +572,13 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	if workspace != "" {
 		wsPath, err := validateWorkspace(workspace, h.allowedRoot)
 		if err != nil {
-			writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+			// Decouple the client-facing message from the underlying error
+			// chain so a future edit of validateWorkspace wrapping a
+			// *os.PathError (e.g. with %w) cannot leak resolved filesystem
+			// paths to the dashboard user. validateWorkspace already logs
+			// diagnostic detail via slog. R61-SEC-10.
+			slog.Warn("resume workspace validation failed", "err", err, "workspace", workspace)
+			writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": "invalid workspace"})
 			return
 		}
 		workspace = wsPath
@@ -576,7 +649,7 @@ func (h *SessionHandlers) handleInterrupt(w http.ResponseWriter, r *http.Request
 }
 
 // historySessions returns all filesystem sessions from the last 7 days.
-// Results are cached for 30 seconds.
+// Results are cached for 120 seconds (see cacheTTL below).
 func (h *SessionHandlers) historySessions() []discovery.RecentSession {
 	if h.claudeDir == "" {
 		return nil
@@ -601,6 +674,48 @@ func (h *SessionHandlers) historySessions() []discovery.RecentSession {
 	return nil
 }
 
+// initStaticStats pre-builds the immutable subset of /api/sessions stats so
+// handleList only has to overlay active/running/ready/total/version/uptime/
+// watchdog on each poll. Safe to call multiple times: the Once guards against
+// a test double or future refactor re-running the init concurrently with
+// handleList readers. R61-GO-12.
+func (h *SessionHandlers) initStaticStats() {
+	h.staticStatsOnce.Do(h.doInitStaticStats)
+}
+
+func (h *SessionHandlers) doInitStaticStats() {
+	// Deep-copy systemInfo()'s singleton map: handleList shallow-copies
+	// staticStats into a per-response map, so the "system" entry would
+	// otherwise be aliased across every response. A future maintainer adding
+	// a mutable system field (e.g. network counters) would then silently
+	// introduce a data race across the dashboard hot path. Breaking the
+	// alias at initialisation enforces the read-only contract structurally.
+	sysSrc := systemInfo()
+	sysCopy := make(map[string]any, len(sysSrc))
+	for k, v := range sysSrc {
+		sysCopy[k] = v
+	}
+	// Copy agentIDs for consistency with the "system" deep-copy contract.
+	// String elements are immutable so today the shared backing array is
+	// race-free, but baking the copy in at init time prevents a future
+	// maintainer from turning agentIDs into []AgentInfo (mutable struct)
+	// and introducing a cross-goroutine data race on every dashboard poll.
+	// R58-GO-M2.
+	agentsCopy := make([]string, len(h.agentIDs))
+	copy(agentsCopy, h.agentIDs)
+	h.staticStats = map[string]any{
+		"backend":           h.backendTag,
+		"cli_name":          h.router.CLIName(),
+		"cli_version":       h.router.CLIVersion(),
+		"max_procs":         h.router.MaxProcs(),
+		"default_workspace": h.router.DefaultWorkspace(),
+		"workspace_id":      h.workspaceID,
+		"workspace_name":    h.workspaceName,
+		"system":            sysCopy,
+		"agents":            agentsCopy,
+	}
+}
+
 // WarmHistoryCache pre-populates the history sessions cache in the background
 // so that the first dashboard load does not block on a full filesystem scan.
 func (h *SessionHandlers) WarmHistoryCache() {
@@ -619,6 +734,10 @@ func (h *SessionHandlers) WarmHistoryCache() {
 // full lookup result and serve cached entries that overlap with the current
 // snapshot request. On miss or expiry, re-run discovery.LookupSummaries and
 // merge the fresh result into the cache.
+//
+// Concurrent misses at the TTL boundary are collapsed via summaryFlight so
+// N parallel tab polls that all see the cache as expired do not each
+// perform a full N×os.Stat fan-out. R60-PERF-5.
 func (h *SessionHandlers) lookupSummariesCached(snapshots []session.SessionSnapshot) map[string]string {
 	const summaryTTL = 30 * time.Second
 
@@ -630,19 +749,49 @@ func (h *SessionHandlers) lookupSummariesCached(snapshots []session.SessionSnaps
 	}
 	h.summaryCacheMu.Unlock()
 
-	sessionWorkspaces := make(map[string]string, len(snapshots))
-	for _, snap := range snapshots {
-		if snap.SessionID != "" && snap.Workspace != "" {
-			sessionWorkspaces[snap.SessionID] = snap.Workspace
+	// singleflight collapses concurrent callers into one LookupSummaries
+	// run. Followers get the same map the leader computed, so we also
+	// avoid redundant cache-write contention. The "summary" key is a
+	// fixed constant because the leader's result is cached for the
+	// entire ±30s window regardless of which subset drove the miss.
+	//
+	// Build sessionWorkspaces *inside* the flight closure: only the leader
+	// actually consumes it, so followers no longer pay an O(N sessions)
+	// map alloc + copy that is immediately discarded when the flight
+	// routes them to the leader's result. The leader also gets the most
+	// recent router view because snapshots passed in from each follower
+	// may differ slightly; the leader captures whichever caller's
+	// snapshots happened to win the race, which is acceptable for a 30s
+	// cache window. R61-PERF-1.
+	v, _, _ := h.summaryFlight.Do("summary", func() (any, error) {
+		// Re-check under lock — a prior leader could have populated the
+		// cache between our expiry detection and this closure running.
+		h.summaryCacheMu.Lock()
+		if h.summaryCache != nil && time.Since(h.summaryCacheTime) < summaryTTL {
+			cached := h.summaryCache
+			h.summaryCacheMu.Unlock()
+			return cached, nil
 		}
-	}
-	fresh := discovery.LookupSummaries(h.claudeDir, sessionWorkspaces)
+		h.summaryCacheMu.Unlock()
 
-	h.summaryCacheMu.Lock()
-	h.summaryCache = fresh
-	h.summaryCacheTime = time.Now()
-	h.summaryCacheMu.Unlock()
-	return fresh
+		sessionWorkspaces := make(map[string]string, len(snapshots))
+		for _, snap := range snapshots {
+			if snap.SessionID != "" && snap.Workspace != "" {
+				sessionWorkspaces[snap.SessionID] = snap.Workspace
+			}
+		}
+		fresh := discovery.LookupSummaries(h.claudeDir, sessionWorkspaces)
+
+		h.summaryCacheMu.Lock()
+		h.summaryCache = fresh
+		h.summaryCacheTime = time.Now()
+		h.summaryCacheMu.Unlock()
+		return fresh, nil
+	})
+	if m, ok := v.(map[string]string); ok {
+		return m
+	}
+	return nil
 }
 
 func (h *SessionHandlers) loadHistorySessions() []discovery.RecentSession {

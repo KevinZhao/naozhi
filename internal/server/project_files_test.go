@@ -92,6 +92,17 @@ func TestResolveProjectFile_EmptyOrTooLong(t *testing.T) {
 	}
 }
 
+// TestResolveProjectFile_EmptyProjectRejected covers R61-GO-1: on Linux,
+// filepath.EvalSymlinks("") returns (".", nil), so the old order (EvalSymlinks
+// first, then empty-check in the err branch) would silently fall back to the
+// process CWD. The fix checks empty before EvalSymlinks. Without it, a
+// misconfigured caller could expose files relative to the naozhi CWD.
+func TestResolveProjectFile_EmptyProjectRejected(t *testing.T) {
+	if _, err := resolveProjectFile("", "README.md"); err == nil {
+		t.Fatal("empty projectPath must error, not fall back to CWD")
+	}
+}
+
 // ─── detectMime / isTextMime ──────────────────────────────────────────────────
 
 func TestDetectMime_SourceCodeExtensions(t *testing.T) {

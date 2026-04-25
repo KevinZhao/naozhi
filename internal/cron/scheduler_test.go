@@ -567,3 +567,36 @@ func TestSchedulerPersistence(t *testing.T) {
 		t.Errorf("unexpected prompt: %s", jobs[0].Prompt)
 	}
 }
+
+// TestRedactPathsInCronError covers R61-SEC-8: err.Error() from
+// session.GetOrCreate / session.Send may enumerate workspace paths that
+// then land in cron_jobs.json and every dashboard broadcast. Redaction
+// must preserve the structural prefix so operators still see the class
+// of failure.
+func TestRedactPathsInCronError(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"empty", "", ""},
+		{"no path", "session error: context canceled", "session error: context canceled"},
+		{"no path with colon", "err: context deadline exceeded", "err: context deadline exceeded"},
+		{"posix absolute", "workspace /home/ec2-user/proj: permission denied",
+			"workspace <path>: permission denied"},
+		{"two posix paths", "copy /src/a to /dst/b failed",
+			"copy <path> to <path> failed"},
+		{"windows drive path", `open C:\Users\me\x: denied`,
+			"open <path>: denied"},
+		{"trailing newline preserved", "err: /a/b\nnext line", "err: <path>\nnext line"},
+		{"quoted path stops at quote", `failed "/tmp/x"`, `failed "<path>"`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := redactPathsInCronError(tc.input)
+			if got != tc.want {
+				t.Errorf("redactPathsInCronError(%q)\n  got  = %q\n  want = %q", tc.input, got, tc.want)
+			}
+		})
+	}
+}

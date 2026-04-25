@@ -139,7 +139,19 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 			return
 		}
 
-		log := slog.With("platform", msg.Platform, "user", msg.UserID, "chat", msg.ChatID)
+		// Sanitize the IM-originated attrs before they reach slog. Platform,
+		// UserID, and ChatID all flow through adversary-controlled IM webhook
+		// fields; an attacker-chosen chat ID with embedded \n, \t, or ANSI
+		// escape bytes would otherwise fragment log lines and let the
+		// attacker forge entries. session.SanitizeLogAttr mirrors the
+		// session-key component sanitization (strips C0/bidi/zero-width,
+		// replaces colons, bounds length) so the logger's attr view matches
+		// the session-key view in the log. R60-GO-H1.
+		log := slog.With(
+			"platform", session.SanitizeLogAttr(msg.Platform),
+			"user", session.SanitizeLogAttr(msg.UserID),
+			"chat", session.SanitizeLogAttr(msg.ChatID),
+		)
 		trimmed := strings.TrimSpace(msg.Text)
 
 		// Dispatch slash commands (/help, /new, /cron, /cd, /pwd, /project)
@@ -321,6 +333,13 @@ func (d *Dispatcher) ownerLoop(
 	}()
 	defer d.router.NotifyIdle()
 
+	// Enrich the logger once for the whole ownerLoop lifetime. Previously
+	// sendAndReply re-did this `log.With` on every drained turn — a coalesced
+	// burst of 5 follow-ups meant 5 identical handler-chain allocs. Lifting
+	// it here costs exactly one alloc per ownerLoop regardless of drain
+	// depth. R61-PERF-12.
+	log = log.With("session_key", key, "agent", agentID)
+
 	// Process first message.
 	d.sendAndReply(ctx, key, first.Text, first.Images, agentID, opts, msg, log, true)
 
@@ -374,10 +393,10 @@ func (d *Dispatcher) sendAndReply(
 	log *slog.Logger,
 	isFirst bool,
 ) {
-	// Attach session key + agent to the logger so every Info/Warn/Error line
-	// below (including SendSplitReply chunks and tracker events) carries
-	// enough context for an operator to grep a full turn end-to-end.
-	log = log.With("session_key", key, "agent", agentID)
+	// Session-key + agent attrs are attached once in ownerLoop (R61-PERF-12)
+	// so every Info/Warn/Error line below carries enough context for an
+	// operator to grep a full turn end-to-end without paying a per-call
+	// handler-chain alloc.
 
 	// Takeover check only on first message for a key.
 	if isFirst {

@@ -20,6 +20,14 @@ const (
 	wsPongWait       = 60 * time.Second
 	wsPingPeriod     = (wsPongWait * 9) / 10
 	wsAuthTimeout    = 5 * time.Second
+
+	// maxWSSendTextBytes bounds a single "send" msg.Text payload. See
+	// handleSend for the rationale; summary: wsMaxMessageSize bounds the
+	// JSON frame but not the individual text field, and dispatch-queue
+	// coalescing can multiply N queued entries into a single CLI stdin
+	// write. 64 KB is ~8× the IM-side cap and covers code/stack-trace
+	// paste workflows. R59-SEC-H1.
+	maxWSSendTextBytes = 64 * 1024
 )
 
 type wsClient struct {
@@ -64,8 +72,11 @@ func (c *wsClient) SendRaw(data []byte) {
 	case <-c.done:
 	default:
 		// Drop message if client buffer is full to prevent deadlocking
-		// the hub mutex when broadcasting to slow clients.
+		// the hub mutex when broadcasting to slow clients. Both per-client
+		// and hub-wide counters bump so /health can report totals without
+		// scanning the clients map under RLock.
 		c.dropped.Add(1)
+		c.hub.droppedTotal.Add(1)
 	}
 }
 

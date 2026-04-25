@@ -64,11 +64,25 @@ func (d *Dispatcher) clearQueuedReactions(ctx context.Context, platformName stri
 	if !ok {
 		return
 	}
+	// One shared timeout budget for the whole batch instead of
+	// context.WithTimeout per iteration. The old per-message ctx created a
+	// runtime timer + *timerCtx heap alloc and goroutine per queued msg.
+	// Sharing one ctx also means a stalling IM API cannot drag the full
+	// reactionAckTimeout × N — the whole cleanup aborts together, which is
+	// the desired behaviour since the reactions are purely cosmetic.
+	// R60-PERF-6.
+	rctx, cancel := context.WithTimeout(ctx, reactionAckTimeout)
+	defer cancel()
 	for _, m := range queued {
 		if m.MessageID == "" {
 			continue
 		}
-		rctx, cancel := context.WithTimeout(ctx, reactionAckTimeout)
+		if rctx.Err() != nil {
+			// Batch deadline exceeded; further RemoveReaction calls would
+			// fail immediately. Stop iterating so we don't log N identical
+			// timeout warnings.
+			return
+		}
 		if err := reactor.RemoveReaction(rctx, m.MessageID, platform.ReactionQueued); err != nil {
 			if log != nil {
 				log.Debug("remove queued reaction failed", "msg_id", m.MessageID, "err", err)
@@ -76,6 +90,5 @@ func (d *Dispatcher) clearQueuedReactions(ctx context.Context, platformName stri
 				slog.Debug("remove queued reaction failed", "msg_id", m.MessageID, "err", err)
 			}
 		}
-		cancel()
 	}
 }

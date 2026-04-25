@@ -196,7 +196,7 @@ func writeClaudeSettingsOverride(serverAddr string) string {
 	// Atomic write: claude reads this file on startup; a truncated write
 	// could cause it to launch with empty config and disable hook filtering,
 	// risking feedback loops.
-	if err := writeFileAtomic(path, out, 0600); err != nil {
+	if err := osutil.WriteFileAtomic(path, out, 0600); err != nil {
 		return ""
 	}
 	return path

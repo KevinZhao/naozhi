@@ -63,3 +63,57 @@ func TestCoalesceMessages_ImagesConcat(t *testing.T) {
 		t.Fatalf("images len = %d, want 3", len(images))
 	}
 }
+
+// TestCoalesceMessages_TotalBytesCap verifies that the merged prompt stays
+// bounded under maxCoalescedTextBytes even when many queued messages arrive.
+// Pre-fix, N × 64KB queued messages produced N × 64KB merged prompts (up to
+// ~256KB with MaxDepth=4, larger if MaxDepth grew). Now we cap the running
+// size, drop the tail, and emit a truncation marker while preserving all
+// images. R60-GO-M4.
+func TestCoalesceMessages_TotalBytesCap(t *testing.T) {
+	big := strings.Repeat("x", 64*1024)
+	msgs := make([]QueuedMsg, 0, 8)
+	for i := 0; i < 8; i++ {
+		msgs = append(msgs, QueuedMsg{
+			Text:      big,
+			Images:    []cli.ImageData{{Data: []byte("i"), MimeType: "image/png"}},
+			EnqueueAt: time.Date(2026, 4, 16, 14, 0, i, 0, time.UTC),
+		})
+	}
+	text, images := CoalesceMessages(msgs)
+
+	// Each image always flows through regardless of truncation so attached
+	// screenshots are never silently lost.
+	if len(images) != 8 {
+		t.Errorf("images len = %d, want 8 (images must survive truncation)", len(images))
+	}
+	// The merged prompt must not blow past the intended cap plus the short
+	// preamble + truncation marker. Keep a generous margin (2KB) for the
+	// header line and the final trailer; never more than ~260KB total.
+	if len(text) > maxCoalescedTextBytes+2*1024 {
+		t.Errorf("merged text len = %d, exceeds cap %d + margin", len(text), maxCoalescedTextBytes)
+	}
+	// The user must be able to see that content was truncated rather than
+	// silently missing messages.
+	if !strings.Contains(text, "已省略") {
+		t.Errorf("truncation marker missing from output (first 200 chars): %s", text[:200])
+	}
+}
+
+// TestCoalesceMessages_SingleMessageTruncatesOversize covers R61-GO-5:
+// a single oversize message must not bypass the coalesce cap even though
+// ingress paths have their own gates. Defense in depth.
+func TestCoalesceMessages_SingleMessageTruncatesOversize(t *testing.T) {
+	big := strings.Repeat("y", maxCoalescedTextBytes+1024)
+	msgs := []QueuedMsg{{
+		Text:      big,
+		EnqueueAt: time.Date(2026, 4, 25, 10, 0, 0, 0, time.UTC),
+	}}
+	text, _ := CoalesceMessages(msgs)
+	if len(text) > maxCoalescedTextBytes+len("\n[系统] 内容已截断。\n")+4 {
+		t.Errorf("single-message path did not truncate: len=%d, cap=%d", len(text), maxCoalescedTextBytes)
+	}
+	if !strings.Contains(text, "已截断") {
+		t.Error("single-message truncation marker missing")
+	}
+}

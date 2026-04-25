@@ -15,6 +15,47 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
+// maxReverseRPCResponseBytes caps the size of a single reverse-RPC response
+// payload before the primary node json.Unmarshals it. The websocket read
+// limit in reverseserver.go is 16 MiB to accommodate legitimate batch
+// results (full project dumps, large event ranges), but unmarshal targets
+// like []map[string]any allocate one map per nested object and are an easy
+// heap-exhaustion primitive from a compromised node. 2 MiB is ~10x larger
+// than the worst observed legitimate response. R58-SEC-M2.
+const maxReverseRPCResponseBytes = 2 << 20 // 2 MiB
+
+// maxPendingReverseRPCs caps the in-flight reverse-RPC request map size
+// per ReverseConn. Every `rpc()` call inserts one entry into `c.pending`;
+// callers use 10s context timeouts so entries naturally drain, but a
+// hung-but-TCP-alive peer (half-open TCP, compromised node that ACKs the
+// handshake and goes silent) lets polling dashboards (CacheManager.Refresh,
+// /api/sessions fanout) accumulate entries before readLoop eventually
+// detects the dead connection. Capping at 256 keeps the memory bounded
+// while comfortably exceeding realistic concurrent-RPC fan-out (typical
+// dashboard poll drives ≤10 concurrent FetchXxx). R59-SEC-M1.
+const maxPendingReverseRPCs = 256
+
+// maxPushedNodeStringBytes caps the length of free-form string fields that
+// arrive in pushed reverse-node messages (session_state.Reason,
+// subscribe_error.Error). These fields skip the rpc() size gate because
+// they're broadcast directly to every subscribed browser client — an
+// unbounded push from a compromised node can fill each client's 256-slot
+// send channel and trigger drops, degrading dashboard UX. 512 bytes fits
+// any realistic operator-facing message without enabling abuse. R61-SEC-9.
+const maxPushedNodeStringBytes = 512
+
+// truncateString returns s bounded to max bytes. Trailing UTF-8 partial
+// runes from a byte-level cut are harmless in the browser (rendered as
+// the replacement char) and the cost of a rune-aware cut on every event
+// is not worth the fidelity on what is already an adversary-controlled
+// diagnostic string.
+func truncateString(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	return s[:max]
+}
+
 type reverseResult struct {
 	result json.RawMessage
 	err    error
@@ -100,6 +141,13 @@ func (c *ReverseConn) rpc(ctx context.Context, method string, params any) (json.
 	}
 
 	c.pendingMu.Lock()
+	// Guard against pending-map growth when the peer is slow / hung. See
+	// maxPendingReverseRPCs doc for rationale. Fail fast so the caller's
+	// 10s timeout isn't wasted waiting for a response that will never come.
+	if len(c.pending) >= maxPendingReverseRPCs {
+		c.pendingMu.Unlock()
+		return nil, fmt.Errorf("reverse rpc: too many pending requests (%d)", maxPendingReverseRPCs)
+	}
 	c.pending[reqID] = ch
 	c.pendingMu.Unlock()
 
@@ -117,7 +165,21 @@ func (c *ReverseConn) rpc(ctx context.Context, method string, params any) (json.
 
 	select {
 	case res := <-ch:
-		return res.result, res.err
+		if res.err != nil {
+			return nil, res.err
+		}
+		// Gate response size before returning to callers that will
+		// json.Unmarshal into nested map[string]any trees. A compromised
+		// reverse node could otherwise send 16 MB of maximally-nested JSON
+		// (the ws read limit set in reverseserver.go) and force hundreds
+		// of thousands of heap allocations on the primary. 2 MiB comfortably
+		// exceeds realistic FetchSessions/FetchEvents payloads and localizes
+		// the exhaustion-defense at the single RPC choke point rather than
+		// repeating the guard at every FetchXxx caller. R58-SEC-M2.
+		if len(res.result) > maxReverseRPCResponseBytes {
+			return nil, fmt.Errorf("reverse rpc response too large (%d > %d bytes)", len(res.result), maxReverseRPCResponseBytes)
+		}
+		return res.result, nil
 	case <-ctx.Done():
 		// Critical: remove pending to avoid goroutine leak when response arrives late
 		c.pendingMu.Lock()
@@ -311,7 +373,42 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 			c.subMu.Lock()
 			removeSub(c.subs, key, cl)
 			c.subMu.Unlock()
+			return
 		}
+		// Also fetch persisted history synchronously so that ready sessions
+		// (no live process) still deliver the event log. The remote
+		// connector's streamEvents only pushes on EventLog Append, which
+		// never fires for a process-less session — without this fetch the
+		// dashboard would subscribe and never receive any history.
+		//
+		// Run in a goroutine so the hub's readPump is not blocked waiting
+		// for the RPC; the "subscribed" message from the remote arrives via
+		// readLoop and the history message from here can arrive in either
+		// order. Order doesn't matter for the client: onHistory merges by
+		// key/time, and the initial page render is keyed on history arrival
+		// not on subscribed arrival.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			cancelOnClose := make(chan struct{})
+			go func() {
+				select {
+				case <-c.done:
+					cancel()
+				case <-cancelOnClose:
+				}
+			}()
+			defer close(cancelOnClose)
+
+			entries, err := c.FetchEvents(ctx, key, after)
+			if err != nil {
+				slog.Debug("reverse first-subscribe fetch events failed", "node", c.id, "key", key, "err", err)
+				return
+			}
+			if len(entries) > 0 {
+				cl.SendJSON(ServerMsg{Type: "history", Key: key, Node: c.id, Events: entries})
+			}
+		}()
 	}
 }
 
@@ -352,23 +449,54 @@ func (c *ReverseConn) RemoveClient(cl EventSink) {
 	}
 }
 
+// subSnapPool reuses the subscriber-snapshot slice that broadcastToSubs
+// builds on every remote event. The readLoop fires broadcastToSubs for
+// every incoming `event`/`events`/`session_state` message from a remote
+// node — on a running Claude turn that is dozens of events per second.
+// A sync.Pool avoids the per-call make([]EventSink, N) alloc. R61-PERF-3.
+// Mirrors the broadcastClientSnapPool pattern in server/wshub.go.
+var subSnapPool = sync.Pool{
+	New: func() any {
+		s := make([]EventSink, 0, 16)
+		return &s
+	},
+}
+
 // broadcastToSubs snapshots subscribers for key, marshals out, and sends to all.
 // If deleteKey is true, the key is removed from the subscription map.
 func (c *ReverseConn) broadcastToSubs(key string, out ServerMsg, deleteKey bool) {
 	c.subMu.Lock()
-	clients := make([]EventSink, len(c.subs[key]))
-	copy(clients, c.subs[key])
+	subs := c.subs[key]
+	snapPtr := subSnapPool.Get().(*[]EventSink)
+	clients := *snapPtr
+	if cap(clients) < len(subs) {
+		clients = make([]EventSink, len(subs))
+	} else {
+		clients = clients[:len(subs)]
+	}
+	copy(clients, subs)
 	if deleteKey {
 		delete(c.subs, key)
 	}
 	c.subMu.Unlock()
 
 	data, err := json.Marshal(out)
-	if err != nil {
-		return
+	if err == nil {
+		for _, cl := range clients {
+			cl.SendRaw(data)
+		}
 	}
-	for _, cl := range clients {
-		cl.SendRaw(data)
+
+	// Clear pointers so disconnected EventSinks can be GC'd instead of being
+	// pinned in the pooled backing array until the next Get replaces them.
+	for i := range clients {
+		clients[i] = nil
+	}
+	// Drop oversized snapshots so the pool never pins an arbitrarily large
+	// backing array (e.g. after a brief spike to hundreds of subscribers).
+	if cap(clients) <= 256 {
+		*snapPtr = clients[:0]
+		subSnapPool.Put(snapPtr)
 	}
 }
 
@@ -427,13 +555,18 @@ func (c *ReverseConn) readLoop() {
 			c.broadcastToSubs(msg.Key, ServerMsg{Type: "history", Key: msg.Key, Events: msg.Events, Node: c.id}, false)
 
 		case "session_state":
-			c.broadcastToSubs(msg.Key, ServerMsg{Type: "session_state", Key: msg.Key, State: msg.State, Reason: msg.Reason, Node: c.id}, false)
+			// Bound Reason to prevent a compromised node from flooding
+			// subscribed browser clients and forcing send-channel drops.
+			// R61-SEC-9.
+			c.broadcastToSubs(msg.Key, ServerMsg{Type: "session_state", Key: msg.Key, State: msg.State, Reason: truncateString(msg.Reason, maxPushedNodeStringBytes), Node: c.id}, false)
 
 		case "subscribed":
 			c.broadcastToSubs(msg.Key, ServerMsg{Type: "subscribed", Key: msg.Key, Node: c.id}, false)
 
 		case "subscribe_error":
-			c.broadcastToSubs(msg.Key, ServerMsg{Type: "error", Key: msg.Key, Node: c.id, Error: msg.Error}, true)
+			// Same cap as session_state.Reason; msg.Error reaches every
+			// subscribed client on the 'error' type. R61-SEC-9.
+			c.broadcastToSubs(msg.Key, ServerMsg{Type: "error", Key: msg.Key, Node: c.id, Error: truncateString(msg.Error, maxPushedNodeStringBytes)}, true)
 		}
 	}
 }

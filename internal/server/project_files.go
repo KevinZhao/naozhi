@@ -140,7 +140,27 @@ type existsEntry struct {
 // both files and directories; callers post-process via os.Stat if they need
 // to distinguish.
 func resolveProjectFile(projectPath, rel string) (string, error) {
+	// Check empty BEFORE EvalSymlinks: filepath.EvalSymlinks("") returns
+	// (".", nil) on Linux, which would silently bind resolution to the
+	// process CWD and bypass the "project not configured" guard below.
+	// R61-GO-1.
 	if projectPath == "" {
+		return "", errors.New("project not configured")
+	}
+	rootResolved, err := filepath.EvalSymlinks(projectPath)
+	if err != nil {
+		return "", err
+	}
+	return resolveProjectFileWithRoot(rootResolved, rel)
+}
+
+// resolveProjectFileWithRoot is the inner half of resolveProjectFile: it
+// accepts an already-resolved project root so callers iterating over many
+// paths (e.g. handleFilesExists, which does up to 100 stats per request)
+// don't re-EvalSymlinks the same root for every call. Callers who only
+// resolve one path should use resolveProjectFile. R59-PERF-M3.
+func resolveProjectFileWithRoot(rootResolved, rel string) (string, error) {
+	if rootResolved == "" {
 		return "", errors.New("project not configured")
 	}
 	if rel == "" {
@@ -167,14 +187,6 @@ func resolveProjectFile(projectPath, rel string) (string, error) {
 	if cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
 		return "", errors.New("path escapes workspace")
 	}
-	// Resolve projectPath's symlinks once so the prefix comparison below
-	// works against the canonical form. validateWorkspace makes the same
-	// move to close a TOCTOU where a symlink swap between Stat and
-	// EvalSymlinks would cause the two calls to see different files.
-	rootResolved, err := filepath.EvalSymlinks(projectPath)
-	if err != nil {
-		return "", err
-	}
 	full := filepath.Join(rootResolved, cleaned)
 	resolved, err := filepath.EvalSymlinks(full)
 	if err != nil {
@@ -199,6 +211,15 @@ func resolveProjectFile(projectPath, rel string) (string, error) {
 func detectMime(resolved string, head []byte) string {
 	mime := http.DetectContentType(head)
 	ext := strings.ToLower(filepath.Ext(resolved))
+	// SVGs starting with `<?xml ... ?>` sniff as text/xml, which isTextMime
+	// accepts — serveRaw's "image/svg+xml" block would then be bypassed and
+	// the browser would render the SVG as same-origin XML (script execution
+	// on top-level navigation). Pin .svg to image/svg+xml before any generic
+	// sniff result can leak through. Attachment disposition in serveRaw then
+	// forces a download; no inline rendering regardless of underlying bytes.
+	if ext == ".svg" {
+		return "image/svg+xml"
+	}
 	// Base name override for extensionless files like Dockerfile / Makefile.
 	if ext == "" {
 		base := strings.ToLower(filepath.Base(resolved))
@@ -308,6 +329,29 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 	ctx, cancel := context.WithTimeout(r.Context(), fileStatTimeout)
 	defer cancel()
 
+	// Resolve the project root once up front. The previous statRel called
+	// resolveProjectFile per path, which EvalSymlinks'd the same project
+	// root up to maxExistsPaths (100) times on every batch. With the root
+	// pre-resolved, each path costs a single EvalSymlinks on the joined
+	// target. On slow filesystems this was the leading contributor to the
+	// fileStatTimeout budget. R59-PERF-M3.
+	//
+	// Check empty BEFORE EvalSymlinks: EvalSymlinks("") returns (".", nil)
+	// on Linux which would bind path resolution to the process CWD.
+	// R61-GO-1.
+	if p.Path == "" {
+		writeJSON(w, map[string]any{"results": map[string]existsEntry{}})
+		return
+	}
+	rootResolved, err := filepath.EvalSymlinks(p.Path)
+	if err != nil {
+		// Treat an unresolvable project root as "nothing exists" so the
+		// frontend renders plain text fallback. Matching the existing
+		// contract: errors collapse to {exists:false}.
+		writeJSON(w, map[string]any{"results": map[string]existsEntry{}})
+		return
+	}
+
 	results := make(map[string]existsEntry, len(req.Paths))
 	for _, rel := range req.Paths {
 		if err := ctx.Err(); err != nil {
@@ -317,18 +361,20 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 			// text-only fallback.
 			break
 		}
-		results[rel] = statRel(p.Path, rel)
+		results[rel] = statRelWithRoot(rootResolved, rel)
 	}
 
 	writeJSON(w, map[string]any{"results": results})
 }
 
-// statRel stats a single project-relative path and returns the metadata the
-// dashboard needs to decide preview vs download. Errors collapse to
-// {exists:false}; the frontend never sees which validation stage rejected the
-// path, matching the validateWorkspace contract.
-func statRel(projectPath, rel string) existsEntry {
-	resolved, err := resolveProjectFile(projectPath, rel)
+// statRelWithRoot stats a single project-relative path and returns the
+// metadata the dashboard needs to decide preview vs download. Errors
+// collapse to {exists:false}; the frontend never sees which validation
+// stage rejected the path, matching the validateWorkspace contract.
+// Callers must pass an already-resolved project root so batch call sites
+// don't pay N × EvalSymlinks(rootResolved). R59-PERF-M3.
+func statRelWithRoot(rootResolved, rel string) existsEntry {
+	resolved, err := resolveProjectFileWithRoot(rootResolved, rel)
 	if err != nil {
 		return existsEntry{Exists: false}
 	}
@@ -555,6 +601,12 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 	// URL in the SVG (remote <image>, external fonts) is also blocked.
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox; style-src 'unsafe-inline'; img-src 'self' data:")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Cross-Origin-Resource-Policy prevents cross-origin <img>/<iframe>
+	// embedding of workspace previews. Combined with SameSite cookies this
+	// closes the side-channel where an attacker-controlled origin embeds a
+	// preview URL via <img src> and reads onload dimensions / timing while
+	// the user is authenticated. R61-SEC-3.
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 
 	http.ServeContent(w, r, filepath.Base(resolved), info.ModTime(), f)
 }

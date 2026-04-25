@@ -23,15 +23,49 @@ type HealthHandler struct {
 	workspaceName   string
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
-	watchdogNoOut   *atomic.Int64
-	watchdogTotal   *atomic.Int64
-	nodeAccess      NodeAccessor
-	platforms       map[string]struct{} // platform names (read-only after init)
-	hubDropped      func() int64        // hub.DroppedMessages
+	// noOutputTimeoutStr / totalTimeoutStr cache the pre-formatted
+	// duration strings used in the watchdog sub-object. time.Duration.String()
+	// is not trivial (it allocates a short string on every call), and these
+	// timeouts never change after router construction, so we format them
+	// once here. R59-PERF-H2.
+	noOutputTimeoutStr string
+	totalTimeoutStr    string
+	watchdogNoOut      *atomic.Int64
+	watchdogTotal      *atomic.Int64
+	nodeAccess         NodeAccessor
+	platforms          map[string]struct{} // platform names (read-only after init)
+	hubDropped         func() int64        // hub.DroppedMessages
 	// dispatcherMetrics returns (message_count, reply_error_count, send_fail_count, last_reply_success).
 	// Injected after Start() wires the Dispatcher; nil-safe. last_reply_success
 	// is zero-valued until the first successful user-visible reply.
 	dispatcherMetrics func() (int64, int64, int64, time.Time)
+}
+
+// healthWatchdogStats is the /health "watchdog" sub-object. Stack-allocated
+// per response so the dashboard-status-bar polling at 1 Hz doesn't pay a
+// per-request map[string]any alloc for what is a fixed-shape value. Mirrors
+// the R58-PERF-F2 treatment of /api/sessions's watchdog sub-object.
+type healthWatchdogStats struct {
+	NoOutputKills   int64  `json:"no_output_kills"`
+	TotalKills      int64  `json:"total_kills"`
+	NoOutputTimeout string `json:"no_output_timeout"`
+	TotalTimeout    string `json:"total_timeout"`
+}
+
+// healthSessionStats and healthDispatchStats mirror the watchdog treatment —
+// named structs with omitempty so /health does not allocate three
+// map[string]any objects on every authenticated dashboard poll. R62-PERF-2.
+type healthSessionStats struct {
+	Active int `json:"active"`
+	Total  int `json:"total"`
+}
+
+type healthDispatchStats struct {
+	MessageCount        int64  `json:"message_count"`
+	ReplyErrorCount     int64  `json:"reply_error_count"`
+	SendFailCount       int64  `json:"send_fail_count"`
+	LastReplySuccessAt  string `json:"last_reply_success_at,omitempty"`
+	LastReplySuccessAgo string `json:"last_reply_success_ago,omitempty"`
 }
 
 func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -42,30 +76,30 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	// Extended system info only for authenticated requests
 	if h.auth.isAuthenticated(r) {
 		active, total := h.router.Stats()
-		resp["sessions"] = map[string]int{"active": active, "total": total}
+		resp["sessions"] = healthSessionStats{Active: active, Total: total}
 		resp["workspace_id"] = h.workspaceID
 		resp["workspace_name"] = h.workspaceName
 		resp["system"] = systemInfo()
 		resp["goroutines"] = runtime.NumGoroutine()
-		resp["watchdog"] = map[string]any{
-			"no_output_kills":   h.watchdogNoOut.Load(),
-			"total_kills":       h.watchdogTotal.Load(),
-			"no_output_timeout": h.noOutputTimeout.String(),
-			"total_timeout":     h.totalTimeout.String(),
+		resp["watchdog"] = healthWatchdogStats{
+			NoOutputKills:   h.watchdogNoOut.Load(),
+			TotalKills:      h.watchdogTotal.Load(),
+			NoOutputTimeout: h.noOutputTimeoutStr,
+			TotalTimeout:    h.totalTimeoutStr,
 		}
 		if h.hubDropped != nil {
 			resp["ws_dropped"] = h.hubDropped()
 		}
 		if h.dispatcherMetrics != nil {
 			msgs, replyErrs, sendFails, lastReply := h.dispatcherMetrics()
-			dispatch := map[string]any{
-				"message_count":     msgs,
-				"reply_error_count": replyErrs,
-				"send_fail_count":   sendFails,
+			dispatch := healthDispatchStats{
+				MessageCount:    msgs,
+				ReplyErrorCount: replyErrs,
+				SendFailCount:   sendFails,
 			}
 			if !lastReply.IsZero() {
-				dispatch["last_reply_success_at"] = lastReply.UTC().Format(time.RFC3339)
-				dispatch["last_reply_success_ago"] = time.Since(lastReply).Round(time.Second).String()
+				dispatch.LastReplySuccessAt = lastReply.UTC().Format(time.RFC3339)
+				dispatch.LastReplySuccessAgo = time.Since(lastReply).Round(time.Second).String()
 			}
 			resp["dispatch"] = dispatch
 		}
@@ -102,6 +136,13 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 // systemInfo returns compact system fingerprint for the workspace info bar.
 // Cached after first call since values are static for the process lifetime.
+//
+// CONTRACT: the returned map is a process-wide singleton — callers MUST
+// treat it as read-only. initStaticStats() deep-copies the map before
+// handing it to the /api/sessions response path so a future mutable field
+// cannot turn the shallow-copy into a cross-goroutine data race; /health
+// serialises its own copy via json.Marshal without mutation. Do not mutate
+// the returned map from any caller.
 var (
 	sysInfoOnce sync.Once
 	sysInfoVal  map[string]any

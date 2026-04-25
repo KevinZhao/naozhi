@@ -244,6 +244,32 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "key is required"})
 		return
 	}
+	// Pre-validate key length + control characters at the HTTP boundary so
+	// the raw attacker-controlled string cannot flow into slog attrs (e.g.
+	// the "workspace validation failed" Warn at send.go:166) before
+	// sessionSend's own validation rejects it. Mirrors the R60-GO-H1
+	// sanitize-before-log pattern on the IM path. R60-SEC-8.
+	if len(key) > maxSessionKeyLen {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "key too long"})
+		return
+	}
+	for i := 0; i < len(key); i++ {
+		c := key[i]
+		if c < 0x20 || c == 0x7f {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid key character"})
+			return
+		}
+	}
+	// Enforce the same per-field text cap on the HTTP JSON/multipart path as
+	// the WS path enforces (see wshub.go handleSend). Without this, the WS
+	// cap is trivially bypassed by any authenticated client: the 1 MB
+	// MaxBytesReader bounds the whole body, but a single 1 MB text payload
+	// would reach CoalesceMessages and drive a multi-MB CLI stdin write.
+	// The 64 KB inner cap matches maxWSSendTextBytes. R60-SEC-2.
+	if len(text) > maxWSSendTextBytes {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "text too long"})
+		return
+	}
 	if text == "" && len(images) == 0 {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "text or files required"})
 		return
@@ -253,6 +279,14 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	if node != "" && node != "local" {
 		if len(images) > 0 {
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "files not supported for remote nodes"})
+			return
+		}
+		// Syntactic workspace gate — same rationale as the WS path in
+		// handleRemoteSend. The remote node's own EvalSymlinks check may
+		// pass any absolute path when its defaultWorkspace is unconfigured.
+		// R61-SEC-2.
+		if err := validateRemoteWorkspace(workspace); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid workspace"})
 			return
 		}
 		nc, ok := h.nodeAccess.LookupNode(w, node)
