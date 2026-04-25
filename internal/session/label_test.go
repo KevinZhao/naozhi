@@ -78,3 +78,23 @@ func TestSetUserLabel_UnknownKeyNoNotify(t *testing.T) {
 		t.Fatalf("onChange fired %d times for unknown-key SetUserLabel", notified)
 	}
 }
+
+// TestBumpVersion_NotifiesAndIncrements locks in R68-GO-M1: BumpVersion
+// must both (a) advance storeGen so the dashboard's poll-time version gate
+// sees a mutation, and (b) invoke the onChange callback so connected
+// WebSocket clients receive an immediate sessions_update push. Prior to
+// this fix, callers (project favorite toggle) only saw a refresh on the
+// next 5s poll tick despite the bump.
+func TestBumpVersion_NotifiesAndIncrements(t *testing.T) {
+	r := newTestRouter(3)
+	var notified int
+	r.SetOnChange(func() { notified++ })
+	before := r.Version()
+	r.BumpVersion()
+	if after := r.Version(); after <= before {
+		t.Errorf("Version did not advance: before=%d after=%d", before, after)
+	}
+	if notified == 0 {
+		t.Errorf("expected onChange to fire on BumpVersion")
+	}
+}

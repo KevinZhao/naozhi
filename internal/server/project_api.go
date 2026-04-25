@@ -4,12 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/url"
-	"regexp"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/node"
@@ -42,11 +40,31 @@ func redactGitRemoteURL(raw string) string {
 	return u.String()
 }
 
-// plannerModelRe restricts the model identifier to safe characters so a
-// crafted value cannot sneak extra CLI flags (e.g. " --dangerously-skip-permissions")
-// into the exec.Command argv for the planner CLI. Whitespace, dashes at the
-// start, and control characters are rejected.
-var plannerModelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/\-]*$`)
+// maxProjectNameLen bounds the `name` query param on project endpoints.
+// Project names are directory names under projects_root; 128 matches the
+// session-key component cap and is well above any realistic directory.
+const maxProjectNameLen = 128
+
+// validateProjectName rejects oversized or control-character names before
+// they flow into slog attrs. Without this a post-auth caller could emit a
+// 30 KB ANSI-escape-laden name attr on every log line, bloating log
+// storage and (in terminal-rendered log viewers) corrupting output.
+// R68-SEC-M3.
+func validateProjectName(name string) error {
+	if name == "" {
+		return errors.New("name is required")
+	}
+	if len(name) > maxProjectNameLen {
+		return errors.New("name too long")
+	}
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c < 0x20 || c == 0x7f {
+			return errors.New("name contains invalid characters")
+		}
+	}
+	return nil
+}
 
 // ProjectHandlers groups the project management API endpoints.
 type ProjectHandlers struct {
@@ -109,8 +127,12 @@ func (h *ProjectHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 // GET /api/projects/config?name=...
 func (h *ProjectHandlers) handleConfigGet(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
-	if name == "" || h.projectMgr == nil {
-		http.Error(w, "name is required", http.StatusBadRequest)
+	if err := validateProjectName(name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if h.projectMgr == nil {
+		http.Error(w, "projects not configured", http.StatusBadRequest)
 		return
 	}
 
@@ -126,8 +148,8 @@ func (h *ProjectHandlers) handleConfigGet(w http.ResponseWriter, r *http.Request
 // PUT /api/projects/config?name=...
 func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
-	if name == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
+	if err := validateProjectName(name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -173,40 +195,12 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	// Bound free-form fields that end up as args to exec.Command. An
-	// oversized PlannerPrompt would inflate the command line past ARG_MAX
-	// (Linux ~2 MB) and make Spawn fail with a cryptic E2BIG.
-	const (
-		maxPlannerPromptBytes = 8 * 1024
-		maxPlannerModelBytes  = 256
-	)
-	if len(cfg.PlannerPrompt) > maxPlannerPromptBytes {
-		http.Error(w, fmt.Sprintf("planner_prompt exceeds %d-byte limit", maxPlannerPromptBytes), http.StatusBadRequest)
-		return
-	}
-	// Reject control characters (null, CR, LF, other <0x20 except tab).
-	// A null byte would silently truncate the argv on Linux's execve, and
-	// log injection via raw \n/\r into NDJSON lines corrupts the shim
-	// protocol (one line = one message). Tab (0x09) is allowed because
-	// prompts sometimes indent examples.
-	for i := 0; i < len(cfg.PlannerPrompt); i++ {
-		c := cfg.PlannerPrompt[i]
-		if c == 0 || (c < 0x20 && c != '\t') || c == 0x7f {
-			http.Error(w, "planner_prompt contains invalid control characters", http.StatusBadRequest)
-			return
-		}
-	}
-	if len(cfg.PlannerModel) > maxPlannerModelBytes {
-		http.Error(w, fmt.Sprintf("planner_model exceeds %d-byte limit", maxPlannerModelBytes), http.StatusBadRequest)
-		return
-	}
-	// Reject any model value that isn't a plain identifier. Without this guard
-	// a value like "foo --dangerously-skip-permissions" would be appended to
-	// exec.Command's argv for the planner CLI — exec doesn't parse flags but
-	// the child CLI does, and a user-controllable flag injection extends the
-	// dashboard's blast radius.
-	if cfg.PlannerModel != "" && !plannerModelRe.MatchString(cfg.PlannerModel) {
-		http.Error(w, "planner_model contains invalid characters", http.StatusBadRequest)
+	if err := project.ValidateConfig(cfg); err != nil {
+		// Surface the wrapped reason directly — it reports *which* field
+		// was rejected without leaking decoder internals. The same
+		// validator gates the reverse-RPC update_config path in
+		// internal/upstream/connector.go. R68-SEC-H2.
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -226,8 +220,8 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 // POST /api/projects/favorite?name=...&favorite=true|false
 func (h *ProjectHandlers) handleFavoriteToggle(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
-	if name == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
+	if err := validateProjectName(name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	favStr := r.URL.Query().Get("favorite")
@@ -249,6 +243,12 @@ func (h *ProjectHandlers) handleFavoriteToggle(w http.ResponseWriter, r *http.Re
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
+		// Bump local version so the dashboard's version gate doesn't skip the
+		// next /api/sessions poll while the remote's favorite change is still
+		// propagating into our nodeCache.
+		if h.router != nil {
+			h.router.BumpVersion()
+		}
 		writeJSON(w, map[string]any{"status": "ok", "favorite": favorite})
 		return
 	}
@@ -266,14 +266,21 @@ func (h *ProjectHandlers) handleFavoriteToggle(w http.ResponseWriter, r *http.Re
 		}
 		return
 	}
+	// Bump the router's version counter so the dashboard's version-based
+	// change detection in fetchSessions() notices the favorite flip. Without
+	// this, the frontend short-circuits and the star icon only refreshes on
+	// the next real session event.
+	if h.router != nil {
+		h.router.BumpVersion()
+	}
 	writeJSON(w, map[string]any{"status": "ok", "favorite": favorite})
 }
 
 // POST /api/projects/planner/restart?name=...
 func (h *ProjectHandlers) handlePlannerRestart(w http.ResponseWriter, r *http.Request) {
 	name := r.URL.Query().Get("name")
-	if name == "" {
-		http.Error(w, "name is required", http.StatusBadRequest)
+	if err := validateProjectName(name); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 

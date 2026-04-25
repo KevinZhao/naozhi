@@ -2192,6 +2192,22 @@ func (r *Router) Version() uint64 {
 	return r.storeGen.Load()
 }
 
+// BumpVersion forces a version increment + onChange broadcast even when no
+// session mutation occurred. Use this from non-session state changes that
+// the dashboard surfaces through /api/sessions (e.g. project favorite
+// toggle): without the bump, the frontend's poll-time version gate
+// short-circuits the re-render; without the notifyChange, the live
+// WebSocket `sessions_update` push is skipped and the UI only refreshes
+// on the next 5s poll tick.
+//
+// BumpVersion does NOT set storeDirty. It is a UI-refresh signal only and
+// must not be used when session state needs to be persisted to disk.
+// R68-GO-M1 / R68-SEC-L1.
+func (r *Router) BumpVersion() {
+	r.storeGen.Add(1)
+	r.notifyChange()
+}
+
 // MaxProcs returns the maximum number of concurrent CLI processes.
 func (r *Router) MaxProcs() int {
 	return r.maxProcs

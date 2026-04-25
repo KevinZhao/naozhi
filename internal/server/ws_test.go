@@ -552,10 +552,9 @@ func TestWS_SendMissingText(t *testing.T) {
 
 // Remote-node send must enforce the same per-field text cap as the local
 // send path. Without this guard an authenticated dashboard user who
-// targets a remote node can bypass the 64 KB local cap and push up to
-// wsMaxMessageSize (256 KB) bytes into nc.Send, amplifying input into
-// the remote shim's 12 MB stdin line ceiling via coalesce at the remote.
-// R62-SEC-1.
+// targets a remote node can bypass the local cap and push up to
+// wsMaxMessageSize bytes into nc.Send, amplifying input into the remote
+// shim's 12 MB stdin line ceiling via coalesce at the remote. R62-SEC-1.
 func TestWS_RemoteSendTextTooLong(t *testing.T) {
 	hub, _ := newTestHub("")
 	url, cleanup := startWSServer(t, hub)

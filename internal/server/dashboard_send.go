@@ -195,7 +195,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			images = append(images, img)
 		}
 	} else {
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MB limit
+		r.Body = http.MaxBytesReader(w, r.Body, 2<<20) // 2 MB — leaves headroom over the 1 MB text field cap
 		var req struct {
 			Key       string   `json:"key"`
 			Text      string   `json:"text"`
@@ -262,10 +262,10 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	// Enforce the same per-field text cap on the HTTP JSON/multipart path as
 	// the WS path enforces (see wshub.go handleSend). Without this, the WS
-	// cap is trivially bypassed by any authenticated client: the 1 MB
-	// MaxBytesReader bounds the whole body, but a single 1 MB text payload
-	// would reach CoalesceMessages and drive a multi-MB CLI stdin write.
-	// The 64 KB inner cap matches maxWSSendTextBytes. R60-SEC-2.
+	// cap is trivially bypassed by any authenticated client: the body-level
+	// MaxBytesReader bounds the whole body, but a single max-sized text
+	// payload would reach CoalesceMessages and drive a multi-MB CLI stdin
+	// write. Inner cap matches maxWSSendTextBytes. R60-SEC-2.
 	if len(text) > maxWSSendTextBytes {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "text too long"})
 		return

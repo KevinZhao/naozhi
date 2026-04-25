@@ -1415,6 +1415,15 @@ async function sendMessage() {
   const text = getMsgValue(input);
   if (!text && pendingFiles.length === 0) return;
 
+  // Per-field byte cap matches server maxWSSendTextBytes (1 MB). Reject
+  // up-front so oversize pastes don't round-trip and return a silent
+  // send_ack error that the optimistic bubble would have already printed.
+  const byteLen = new Blob([text]).size;
+  if (byteLen > 1024 * 1024) {
+    showToast('消息过长 (' + Math.ceil(byteLen / 1024) + ' KB > 1024 KB 上限)', 'warning');
+    return;
+  }
+
   // Block send while any attachment is still uploading or errored —
   // we only reference file_ids on the server, so partial uploads would
   // silently drop images. User can retry or remove the bad one.

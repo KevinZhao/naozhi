@@ -354,6 +354,32 @@ func TestHandleRequest_Send_BadParams(t *testing.T) {
 	}
 }
 
+// TestHandleRequest_Send_TextTooLong asserts the reverse-RPC trust boundary
+// enforces the same text cap as the primary-side dashboard handler, so a
+// compromised or misconfigured primary cannot push a multi-MB prompt
+// straight into CLI stdin with only the shim's 12 MB line ceiling as a
+// backstop. R68-SEC-H1.
+func TestHandleRequest_Send_TextTooLong(t *testing.T) {
+	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	c := New(cfg, makeRouter(), nil)
+
+	// 5 MB > maxCoalescedTextBytes (4 MB). Valid JSON that would otherwise
+	// pass through to sess.Send on an accepting router.
+	big := strings.Repeat("x", 5*1024*1024)
+	params, _ := json.Marshal(map[string]string{
+		"key":  "feishu:direct:alice:general",
+		"text": big,
+	})
+	req := node.ReverseMsg{Method: "send", Params: params}
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
+	if err == nil {
+		t.Fatalf("expected error for oversize text, got nil")
+	}
+	if !strings.Contains(err.Error(), "too long") {
+		t.Errorf("err = %v, want to contain \"too long\"", err)
+	}
+}
+
 // ---- handleRequest: unknown method ----
 
 func TestHandleRequest_UnknownMethod(t *testing.T) {

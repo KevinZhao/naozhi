@@ -236,15 +236,18 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Read-limit is owned by readPump (wsMaxMessageSize). Previous code also
-	// set it here with a different value (512 KB), which masked the real cap
-	// since readPump re-applies 256 KB on first iteration — remove the
+	// set it here with a different value, which masked the real cap since
+	// readPump re-applies wsMaxMessageSize on first iteration — remove the
 	// redundant setter to keep a single source of truth.
 	ip := clientIP(r, h.trustedProxy)
 	c := &wsClient{
 		conn: conn,
-		// 256 is sized for brief latency spikes; slow consumers drop rather
-		// than balloon memory (per-message cap is wsMaxMessageSize = 256KB,
-		// so 256 × 256KB = 64MB worst-case per client, vs 256MB at 1024).
+		// Buffer holds outbound event frames (CLI output, subscription
+		// updates). 256 is sized for brief latency spikes so slow consumers
+		// drop rather than balloon memory. Outbound "history" batches are
+		// capped at maxHistoryPushEntries in eventPushLoop (≤~50 × ~200 B =
+		// ~10 KB per frame), so 256 slots × ~10 KB = ~2.5 MB worst-case
+		// per-client. R68-PERF-H1.
 		send:             make(chan []byte, 256),
 		hub:              h,
 		remoteIP:         ip,
@@ -568,13 +571,12 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 	// Per-field byte cap on the WS path. wsMaxMessageSize already bounds the
-	// whole JSON frame at 256 KB, but without this inner gate an authenticated
-	// client can land repeated 250+ KB payloads into the dispatch queue; when
-	// the queue drains, CoalesceMessages concatenates up to MaxDepth entries
-	// into a single stdin write, amplifying input into a multi-MB CLI prompt.
-	// 64 KB comfortably covers code-review / stack-trace paste workflows and
-	// is ~8x the IM-side incoming text cap, so dashboard legitimate use is
-	// unaffected. R59-SEC-H1.
+	// whole JSON frame, but without this inner gate an authenticated client
+	// can land repeated max-size payloads into the dispatch queue; when the
+	// queue drains, CoalesceMessages concatenates up to MaxDepth entries into
+	// a single stdin write. maxCoalescedTextBytes backstops the merged total,
+	// and maxStdinLineBytes (12 MB at the shim) is the hard ceiling.
+	// R59-SEC-H1.
 	if len(msg.Text) > maxWSSendTextBytes {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "text too long"})
 		return
@@ -707,6 +709,23 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 	}()
 }
 
+// maxHistoryPushEntries caps a single WS "history" push. EventEntriesSince
+// on an initial catch-up (lastTime=0) or after a notify backlog can return
+// the full ring buffer (maxPersistedHistory=500 entries). At ~200 B per
+// entry JSON-encoded, a 500-entry batch balloons to ~100 KB per push; with
+// 500 active WS connections that is 50 MB of simultaneous marshal work
+// blocking the hub. 50 entries matches the dashboard's paginated
+// /api/sessions/events tail fetch, so older entries are still reachable
+// via the `before=` path. R68-PERF-H1.
+const maxHistoryPushEntries = 50
+
+func capHistoryBatch(entries []cli.EventEntry) []cli.EventEntry {
+	if len(entries) <= maxHistoryPushEntries {
+		return entries
+	}
+	return entries[len(entries)-maxHistoryPushEntries:]
+}
+
 func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan struct{}, sess *session.ManagedSession, lastTime int64) {
 	for {
 		select {
@@ -724,6 +743,7 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 				// next Append, which in an idle session may be seconds or more.
 				entries := sess.EventEntriesSince(lastTime)
 				if len(entries) > 0 {
+					entries = capHistoryBatch(entries)
 					data, err := marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
 					if err == nil {
 						c.SendRaw(data)
@@ -743,6 +763,11 @@ func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan s
 			}
 			// Batch events into a single "history" message to reduce
 			// per-event JSON marshaling and WebSocket frame overhead.
+			// Cap the batch so a slow client that built up a long backlog
+			// doesn't see a single multi-MB push frame that starves the
+			// WS send channel — the dashboard already backfills older
+			// events via /api/sessions/events?before=. R68-PERF-H1.
+			entries = capHistoryBatch(entries)
 			data, err := marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries})
 			if err != nil {
 				continue
@@ -1183,9 +1208,9 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 	}
 	// Enforce the same per-field text cap as handleSend. Without this gate an
 	// authenticated dashboard user who targets a remote node can bypass the
-	// 64 KB local cap and push up to wsMaxMessageSize (256 KB) bytes straight
-	// to nc.Send, amplifying input into the remote shim's 12 MB stdin line
-	// ceiling via coalesce at the remote end. R62-SEC-1.
+	// local cap and push up to wsMaxMessageSize bytes straight to nc.Send,
+	// amplifying input into the remote shim's 12 MB stdin line ceiling via
+	// coalesce at the remote end. R62-SEC-1.
 	if len(msg.Text) > maxWSSendTextBytes {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "text too long"})
 		return

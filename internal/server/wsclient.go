@@ -15,7 +15,15 @@ import (
 )
 
 const (
-	wsMaxMessageSize = 262144 // 256KB — code review payloads can exceed 8KB
+	// wsMaxMessageSize caps the whole JSON frame the reader will accept.
+	// Gorilla WebSocket allocates a buffer up to this size per ReadMessage,
+	// so the worst-case resident memory is connCount × wsMaxMessageSize.
+	// Budget: maxWSSendTextBytes (1 MB text, JSON-escaped worst case ≈
+	// 1 MB × 6 bytes for all-`"`) + 10 × 80-byte file_id hex + small
+	// framing (key, workspace, backend, node, id, type) ≤ ~1.15 MB for
+	// non-pathological payloads. 1.5 MB leaves headroom for JSON escape
+	// expansion without paying 2 MB per connection. R68-GO-H1.
+	wsMaxMessageSize = 1536 * 1024
 	wsWriteWait      = 10 * time.Second
 	wsPongWait       = 60 * time.Second
 	wsPingPeriod     = (wsPongWait * 9) / 10
@@ -25,9 +33,12 @@ const (
 	// handleSend for the rationale; summary: wsMaxMessageSize bounds the
 	// JSON frame but not the individual text field, and dispatch-queue
 	// coalescing can multiply N queued entries into a single CLI stdin
-	// write. 64 KB is ~8× the IM-side cap and covers code/stack-trace
-	// paste workflows. R59-SEC-H1.
-	maxWSSendTextBytes = 64 * 1024
+	// write. 1 MB matches the ~1M-token context window of modern models
+	// (~4 bytes/token UTF-8 lower bound, so 1 MB ≈ 250k tokens of English
+	// or ~330k CJK characters — comfortably under the model budget while
+	// still leaving CLI-stdin headroom with the coalesce/MaxDepth caps.
+	// R59-SEC-H1.
+	maxWSSendTextBytes = 1024 * 1024
 )
 
 type wsClient struct {

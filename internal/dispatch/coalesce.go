@@ -7,16 +7,23 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
-// maxCoalescedTextBytes caps the merged prompt size produced by
-// CoalesceMessages. Per-message ingress caps (maxWSSendTextBytes=64KB on the
-// WS path, the IM-side inbound cap on platform handlers) bound individual
-// queued entries, but a queue with MaxDepth=N can still amplify N × 64KB
-// into a single CLI stdin write. The shim hard-limits at 12MB
-// (maxStdinLineBytes) but that is a much larger budget than legitimate
-// operator use requires. 256KB comfortably fits any realistic follow-up
-// burst (a reviewer pasting 3-4 coalesced stack traces) while keeping CLI
-// stdin reasonably bounded. R60-GO-M4.
-const maxCoalescedTextBytes = 256 * 1024
+// maxCoalescedTextBytes is a *soft* cap on the merged prompt size. The
+// coalesce loop checks `b.Len() >= cap` *before* appending the current
+// message, so the final length can exceed the cap by at most one
+// maxWSSendTextBytes per-message payload (1 MB) plus a small
+// header/trailer constant. Worst-case output: ~5 MB, safely under the
+// shim's 12 MB maxStdinLineBytes ceiling. Per-message ingress caps
+// (maxWSSendTextBytes on WS/HTTP, the IM-side inbound cap on platform
+// handlers) bound individual queued entries; without this cap a queue
+// with MaxDepth=N could amplify N × 1 MB into a single CLI stdin write.
+// R60-GO-M4.
+const maxCoalescedTextBytes = 4 * 1024 * 1024
+
+// MaxCoalescedTextBytes exports the soft cap so cross-trust-boundary
+// RPC handlers (e.g. upstream connector's `send` case) can reject
+// oversized payloads before they reach CoalesceMessages. Returning the
+// internal constant keeps the source of truth single.
+func MaxCoalescedTextBytes() int { return maxCoalescedTextBytes }
 
 // CoalesceMessages merges multiple queued messages into a single prompt.
 //
@@ -47,6 +54,11 @@ func CoalesceMessages(msgs []QueuedMsg) (string, []cli.ImageData) {
 	}
 
 	var b strings.Builder
+	// Pre-grow once: strings.Builder doubles on append and a 4 MB coalesce
+	// burst otherwise climbs 1M→2M→4M→8M with two reallocs (~12 MB
+	// transient). A single Grow targets the known cap and caps peak
+	// transient allocation at ~4 MB. R68-PERF-M6.
+	b.Grow(maxCoalescedTextBytes)
 	b.WriteString("[以下是用户在你处理上一条消息期间追加发送的内容]\n")
 
 	// Let allImages grow via append's exponential policy instead of

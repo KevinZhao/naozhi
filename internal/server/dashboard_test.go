@@ -210,12 +210,12 @@ func TestHandleAPISend_MissingKeyJSON(t *testing.T) {
 }
 
 // TestHandleAPISend_TextTooLong_JSON asserts the JSON handleSend branch
-// enforces the same per-field text cap as the WS path. Pre-R60, a 1 MB text
-// payload could pass the body-level MaxBytesReader and drive a multi-MB
-// CLI stdin write once CoalesceMessages ran. R60-SEC-2.
+// enforces the same per-field text cap as the WS path. Pre-R60, an
+// oversized text payload could pass the body-level MaxBytesReader and
+// drive a multi-MB CLI stdin write once CoalesceMessages ran. R60-SEC-2.
 func TestHandleAPISend_TextTooLong_JSON(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
-	big := strings.Repeat("x", 64*1024+1)
+	big := strings.Repeat("x", maxWSSendTextBytes+1)
 	body := `{"key":"p:t:u:general","text":"` + big + `"}`
 	req := httptest.NewRequest(http.MethodPost, "/api/sessions/send",
 		strings.NewReader(body))

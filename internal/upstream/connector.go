@@ -18,6 +18,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -416,6 +417,16 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := session.ValidateSessionKey(p.Key); err != nil {
 			return nil, fmt.Errorf("send key: %w", err)
 		}
+		// Reject oversized text at the reverse-RPC trust boundary before it
+		// reaches sess.Send → CoalesceMessages. Without this a compromised or
+		// misconfigured primary could push up to ~16 MB (the WS read cap)
+		// straight into CLI stdin, relying only on the shim's 12 MB line
+		// ceiling to reject it. Matches the primary-side dashboard cap
+		// chain (maxWSSendTextBytes=1 MB → coalesce soft cap 4 MB → shim
+		// 12 MB). R68-SEC-H1.
+		if n := len(p.Text); n > dispatch.MaxCoalescedTextBytes() {
+			return nil, fmt.Errorf("send text too long: %d bytes", n)
+		}
 		opts := session.AgentOpts{}
 		if p.Workspace != "" {
 			// Sanitize workspace path to prevent directory traversal via symlinks.
@@ -626,6 +637,13 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		var cfg project.ProjectConfig
 		if err := json.Unmarshal(p.Config, &cfg); err != nil {
 			return nil, fmt.Errorf("invalid config: %w", err)
+		}
+		// Same validation the dashboard HTTP handler enforces: a compromised
+		// or misconfigured primary must not be able to push unbounded prompts,
+		// NUL-truncated argv, or flag-injected model names through the
+		// reverse-RPC trust boundary. R68-SEC-H2.
+		if err := project.ValidateConfig(cfg); err != nil {
+			return nil, err
 		}
 		if err := c.projMgr.UpdateConfig(p.ProjectName, cfg); err != nil {
 			return nil, fmt.Errorf("update config: %w", err)

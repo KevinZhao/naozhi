@@ -66,12 +66,15 @@ func TestCoalesceMessages_ImagesConcat(t *testing.T) {
 
 // TestCoalesceMessages_TotalBytesCap verifies that the merged prompt stays
 // bounded under maxCoalescedTextBytes even when many queued messages arrive.
-// Pre-fix, N × 64KB queued messages produced N × 64KB merged prompts (up to
-// ~256KB with MaxDepth=4, larger if MaxDepth grew). Now we cap the running
-// size, drop the tail, and emit a truncation marker while preserving all
-// images. R60-GO-M4.
+// Pre-fix, N × per-msg queued messages produced N × per-msg merged prompts;
+// now we cap the running size, drop the tail, and emit a truncation marker
+// while preserving all images. Sized to per-message cap so 8 msgs exceed
+// maxCoalescedTextBytes on any reasonable ingress cap. R60-GO-M4.
 func TestCoalesceMessages_TotalBytesCap(t *testing.T) {
-	big := strings.Repeat("x", 64*1024)
+	// Use a message size that, multiplied by 8, safely exceeds the coalesce
+	// cap regardless of future bumps to per-msg ingress caps.
+	per := maxCoalescedTextBytes/4 + 1 // 8 × per > 2 × cap
+	big := strings.Repeat("x", per)
 	msgs := make([]QueuedMsg, 0, 8)
 	for i := 0; i < 8; i++ {
 		msgs = append(msgs, QueuedMsg{
@@ -87,11 +90,13 @@ func TestCoalesceMessages_TotalBytesCap(t *testing.T) {
 	if len(images) != 8 {
 		t.Errorf("images len = %d, want 8 (images must survive truncation)", len(images))
 	}
-	// The merged prompt must not blow past the intended cap plus the short
-	// preamble + truncation marker. Keep a generous margin (2KB) for the
-	// header line and the final trailer; never more than ~260KB total.
-	if len(text) > maxCoalescedTextBytes+2*1024 {
-		t.Errorf("merged text len = %d, exceeds cap %d + margin", len(text), maxCoalescedTextBytes)
+	// Coalesce's cap check fires *before* appending each message, so the
+	// final output can exceed maxCoalescedTextBytes by at most one per-msg
+	// payload (the last message whose header check passed) plus a small
+	// header/trailer constant. 4KB covers the formatting overhead; the
+	// per-msg term is the intentional overshoot documented on the const.
+	if len(text) > maxCoalescedTextBytes+per+4*1024 {
+		t.Errorf("merged text len = %d, exceeds cap %d + per(%d) + 4K margin", len(text), maxCoalescedTextBytes, per)
 	}
 	// The user must be able to see that content was truncated rather than
 	// silently missing messages.
