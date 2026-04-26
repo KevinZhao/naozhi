@@ -115,7 +115,15 @@ type Process struct {
 
 	SessionID string
 	State     ProcessState
-	mu        sync.Mutex
+	// mu protects State / SessionID / onTurnDone / totalCost. Read-only
+	// accessors (GetState / IsRunning / GetSessionID / TotalCost) use RLock
+	// so concurrent ListSessions snapshots across N sessions and M tabs
+	// proceed in parallel instead of serialising through a single Mutex.
+	// Write paths (readLoop state transitions, Send State→Running, Interrupt
+	// snapshot-and-flag) continue to use Lock to preserve the existing
+	// "read State and set interrupted together under one lock" contract.
+	// R70-PERF-L3.
+	mu sync.RWMutex
 
 	eventCh  chan Event
 	done     chan struct{}
@@ -968,8 +976,8 @@ func (p *Process) Alive() bool {
 
 // IsRunning returns true if the process is currently processing a message.
 func (p *Process) IsRunning() bool {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.State == StateRunning
 }
 
@@ -1591,8 +1599,8 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 
 // GetState returns the current process state.
 func (p *Process) GetState() ProcessState {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.State
 }
 
@@ -1607,15 +1615,15 @@ func (p *Process) SetOnTurnDone(fn func()) {
 
 // GetSessionID returns the session ID in a thread-safe manner.
 func (p *Process) GetSessionID() string {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.SessionID
 }
 
 // TotalCost returns the cumulative cost.
 func (p *Process) TotalCost() float64 {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return p.totalCost
 }
 

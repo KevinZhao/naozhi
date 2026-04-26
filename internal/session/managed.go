@@ -751,20 +751,15 @@ func (s *ManagedSession) SubscribeEvents() (<-chan struct{}, func()) {
 // InjectHistory pre-populates the event log with historical entries.
 // Entries are saved to persistedHistory so they survive process restarts.
 func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
-	s.historyMu.Lock()
-	defer s.historyMu.Unlock()
 	if len(entries) >= maxPersistedHistory {
 		entries = entries[len(entries)-maxPersistedHistory:]
 	}
-	s.persistedHistory = append(s.persistedHistory, entries...)
-	if len(s.persistedHistory) > maxPersistedHistory {
-		s.persistedHistory = s.persistedHistory[len(s.persistedHistory)-maxPersistedHistory:]
-	}
-	if p := s.loadProcess(); p != nil {
-		p.InjectHistory(entries)
-	}
-	// Update cached snapshot values from injected history (only if not yet set by Send).
-	// Scan from the end to find the last user/tool_use entries efficiently.
+	// Scan the injected batch for prompt/activity summaries outside the lock:
+	// the scan operates on the caller-supplied slice only (not persistedHistory),
+	// and the only side-effects are atomic.Value Store calls. Keeping it out
+	// of historyMu lets concurrent readers (EventEntries / EventEntriesSince
+	// / EventEntriesBefore) proceed during 500-entry JSONL replays at startup.
+	// R61-PERF-9.
 	var prompt, activity string
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
@@ -778,6 +773,26 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 			break
 		}
 	}
+
+	s.historyMu.Lock()
+	s.persistedHistory = append(s.persistedHistory, entries...)
+	if len(s.persistedHistory) > maxPersistedHistory {
+		s.persistedHistory = s.persistedHistory[len(s.persistedHistory)-maxPersistedHistory:]
+	}
+	proc := s.loadProcess()
+	s.historyMu.Unlock()
+
+	// proc.InjectHistory takes its own eventLog.mu write lock; calling it
+	// after releasing historyMu avoids holding two locks simultaneously and
+	// matches the rest of this file's loadProcess-then-call pattern.
+	if proc != nil {
+		proc.InjectHistory(entries)
+	}
+
+	// Update cached snapshot values only if not yet set by Send. Each Store
+	// is atomic so no lock is needed; the "only set if empty" check is a
+	// benign TOCTOU — a concurrent Send writing the same field races, but
+	// both values are "most recent" views and whichever lands is acceptable.
 	if prompt != "" && loadStringOrEmpty(&s.lastPrompt) == "" {
 		s.lastPrompt.Store(prompt)
 	}

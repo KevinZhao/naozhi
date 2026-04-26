@@ -111,6 +111,13 @@ func writeJSON(w http.ResponseWriter, v any) {
 	// JSON responses as HTML/JS. Cheap defence-in-depth against any future path
 	// that accidentally produces HTML-looking content via SetEscapeHTML(false).
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// Cache-Control: no-store prevents shared proxies / browser back-forward
+	// cache from retaining dashboard JSON responses (last_prompt / PID / cost /
+	// auth cookie ack). Responses are authenticated per-request and carry
+	// time-varying session state, so any intermediary cache is a correctness
+	// hazard — a second user on the same cache would see the first user's
+	// snapshot. R58-PERF-001.
+	w.Header().Set("Cache-Control", "no-store")
 	e := getJSONEnc()
 	defer putJSONEnc(e)
 	if err := e.enc.Encode(v); err != nil {
@@ -136,6 +143,7 @@ var jsonOKBody = []byte("{\"status\":\"ok\"}\n")
 func writeOK(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
 	if _, err := w.Write(jsonOKBody); err != nil {
 		slog.Debug("write json response", "err", err)
 	}
@@ -147,6 +155,7 @@ func writeOK(w http.ResponseWriter) {
 func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(status)
 	e := getJSONEnc()
 	defer putJSONEnc(e)
