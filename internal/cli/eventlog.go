@@ -153,10 +153,18 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 		lastPrompt, lastActivity string
 		sawPrompt, sawActivity   bool
 	)
+	// Capture a single wall-clock read before locking so the N zero-time
+	// entries inside the loop (typical case: InjectHistory's 500-entry
+	// replay on shim reconnect) don't each fire a vDSO call under l.mu.
+	// Correctness: entries with an explicit Time are unaffected; entries
+	// without one are assigned a monotonically-close "now" that is as
+	// semantically correct as the per-entry reads they replace, while
+	// keeping the write-lock hold time bounded. R71-PERF-L2.
+	defaultTime := time.Now().UnixMilli()
 	l.mu.Lock()
 	for _, e := range entries {
 		if e.Time == 0 {
-			e.Time = time.Now().UnixMilli()
+			e.Time = defaultTime
 		}
 		l.entries[l.head] = e
 		l.head = (l.head + 1) % l.maxSize

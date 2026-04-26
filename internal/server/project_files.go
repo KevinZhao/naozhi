@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -284,6 +285,39 @@ func sanitizeDownloadName(p string) string {
 		return "download"
 	}
 	return out
+}
+
+// contentDisposition builds a Content-Disposition header value respecting
+// RFC 6266 / RFC 5987. Filenames that contain non-ASCII codepoints (common
+// for Chinese, Japanese, emoji-in-name, etc.) must be encoded via the
+// `filename*=UTF-8”...` form so intermediaries with a stricter HTTP parser
+// don't mangle or reject the response. Pure-ASCII names keep the simpler
+// quoted form so curl / wget / old browsers continue to display them as-is.
+// R71-SEC-M1.
+func contentDisposition(kind, resolved string) string {
+	name := sanitizeDownloadName(resolved)
+	ascii := true
+	for i := 0; i < len(name); i++ {
+		if name[i] >= 0x80 {
+			ascii = false
+			break
+		}
+	}
+	if ascii {
+		return fmt.Sprintf(`%s; filename="%s"`, kind, name)
+	}
+	// Emit both forms: ASCII fallback (with non-ASCII stripped to '_') for
+	// legacy clients + RFC 5987 UTF-8 form for modern browsers.
+	asciiFallback := make([]byte, 0, len(name))
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		if c >= 0x80 {
+			asciiFallback = append(asciiFallback, '_')
+		} else {
+			asciiFallback = append(asciiFallback, c)
+		}
+	}
+	return fmt.Sprintf(`%s; filename="%s"; filename*=UTF-8''%s`, kind, asciiFallback, url.PathEscape(name))
 }
 
 // POST /api/projects/files/exists
@@ -588,13 +622,24 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 		writeJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "inline preview disabled for this type; use download mode"})
 		return
 	}
+	// PDFs can embed JavaScript that Adobe Reader (as an external plugin)
+	// executes in its own context. The HTTP `Content-Security-Policy: sandbox`
+	// directive is only enforced on iframe-embedded documents, not top-level
+	// navigations; opening /api/projects/file?...mode=raw in a new tab on a
+	// malicious PDF would bypass the sandbox entirely. Route PDFs to the
+	// download path so the browser / OS handler treats them as explicit
+	// attachments. R71-SEC-M2.
+	if mime == "application/pdf" {
+		h.serveDownload(w, r, resolved, info)
+		return
+	}
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "seek failed"})
 		return
 	}
 
 	w.Header().Set("Content-Type", mime)
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`inline; filename="%s"`, sanitizeDownloadName(resolved)))
+	w.Header().Set("Content-Disposition", contentDisposition("inline", resolved))
 	// CSP on raw responses: a malicious SVG could embed <script>; the sandbox
 	// directive blocks script execution and form submission while still
 	// allowing the image to render. default-src 'none' means any referenced
@@ -607,6 +652,11 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 	// preview URL via <img src> and reads onload dimensions / timing while
 	// the user is authenticated. R61-SEC-3.
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	// Raw/download paths serve workspace file content that may be sensitive.
+	// `no-store` prevents both intermediate proxies and the browser cache
+	// from persisting the bytes, closing a cross-user-reuse gap on shared
+	// proxies under no-auth deployments. R71-SEC-L2.
+	w.Header().Set("Cache-Control", "no-store")
 
 	http.ServeContent(w, r, filepath.Base(resolved), info.ModTime(), f)
 }
@@ -620,9 +670,12 @@ func (h *ProjectHandlers) serveDownload(w http.ResponseWriter, r *http.Request, 
 	defer f.Close()
 
 	w.Header().Set("Content-Type", "application/octet-stream")
-	w.Header().Set("Content-Disposition", fmt.Sprintf(`attachment; filename="%s"`, sanitizeDownloadName(resolved)))
+	w.Header().Set("Content-Disposition", contentDisposition("attachment", resolved))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Content-Length", strconv.FormatInt(info.Size(), 10))
+	// Same rationale as serveRaw: workspace file bytes must not sit in
+	// shared proxy caches under no-auth deployments. R71-SEC-L2.
+	w.Header().Set("Cache-Control", "no-store")
 
 	http.ServeContent(w, r, filepath.Base(resolved), info.ModTime(), f)
 }

@@ -161,7 +161,9 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	}
 
 	if ack.Type != "registered" {
-		return false, fmt.Errorf("register failed: %s", ack.Error)
+		// %q so primary-controlled Error string can't inject key=val pairs or
+		// newlines into slog output downstream.
+		return false, fmt.Errorf("register failed: %q", ack.Error)
 	}
 	slog.Info("connected to primary", "url", c.cfg.URL, "node_id", c.cfg.NodeID)
 
@@ -209,7 +211,14 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	}
 	activeSubs := map[string]func(){} // key → cancel func
 	subGen := map[string]uint64{}     // key → generation counter
-	subExited := make(chan subExitNote, 64)
+	// Capacity 256: streamEvents goroutines drop their subExited note
+	// non-blockingly, and the main loop drains between ReadJSON calls. A
+	// 64-slot channel could overflow during hub-wide resets (e.g. Router
+	// Cleanup sweeping >64 sessions at once while ReadJSON is blocked),
+	// leaving stale activeSubs entries. 256 covers realistic burst sizes
+	// for all deployments; the reqSem inflight cap is 16 so a 256-deep
+	// backlog is a generous safety margin. R71-GO-M1.
+	subExited := make(chan subExitNote, 256)
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -325,9 +334,14 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 				defer wg.Done()
 				c.streamEvents(connCtx, writeJSON, k, n)
 				// Signal that this subscription exited (session replaced/reset).
+				// A dropped notification leaves activeSubs[k] populated until
+				// the next explicit subscribe/unsubscribe for the same key
+				// clears it — not a correctness bug (cancel is idempotent),
+				// but observability for capacity tuning. R71-GO-M1.
 				select {
 				case subExited <- subExitNote{k, g}:
 				default:
+					slog.Warn("connector: subExited channel full, activeSubs cleanup delayed", "key", k)
 				}
 			}(key, notify, myGen)
 
@@ -580,6 +594,16 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		}
 		if p.SessionID != "" && !discovery.IsValidSessionID(p.SessionID) {
 			return nil, fmt.Errorf("invalid session_id format")
+		}
+		// CWD flows into discovery.WaitAndCleanup which builds a lockDir path
+		// and os.RemoveAll it (protected by filepath.Rel sandbox, but we still
+		// reject syntactic `..` traversal / control bytes / non-absolute paths
+		// up front to avoid depending on a single defense layer). Parallels the
+		// takeover-side check at line 520. R-close-discovered-cwd-validate.
+		if p.CWD != "" {
+			if err := session.ValidateRemoteWorkspacePath(p.CWD); err != nil {
+				return nil, fmt.Errorf("close_discovered cwd invalid: %w", err)
+			}
 		}
 		actual, err := discovery.ProcStartTime(p.PID)
 		if err != nil {

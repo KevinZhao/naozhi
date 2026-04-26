@@ -110,6 +110,25 @@ func writeJSON(w http.ResponseWriter, v any) {
 	}
 }
 
+// jsonOKBody is the pre-marshaled body for the common `{"status":"ok"}`
+// acknowledgement reply. 20+ dashboard endpoints used to allocate a
+// `map[string]string{"status":"ok"}` + run it through the JSON encoder on every
+// success response; those hot paths now call writeOK which just copies these
+// bytes verbatim (plus a trailing `\n` to match the encoder's NDJSON framing).
+// R64-PERF-M4.
+var jsonOKBody = []byte("{\"status\":\"ok\"}\n")
+
+// writeOK writes the pre-marshaled `{"status":"ok"}` body with the same headers
+// as writeJSON. Use this in preference to writeJSON for fixed ack replies so
+// success paths skip the pooled encoder dance entirely.
+func writeOK(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	if _, err := w.Write(jsonOKBody); err != nil {
+		slog.Debug("write json response", "err", err)
+	}
+}
+
 // writeJSONStatus is like writeJSON but writes a non-200 HTTP status code.
 // Content-Type must be set before WriteHeader, so this helper ensures
 // the correct ordering: Set header → WriteHeader → Encode body.

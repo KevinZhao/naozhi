@@ -75,10 +75,15 @@ type Protocol interface {
     BuildArgs(opts SpawnOptions) []string
     Init(rw *JSONRW, resumeID string) (sessionID string, err error)
     WriteMessage(w io.Writer, text string, images []ImageData) error
-    ReadEvent(line []byte) (ev Event, done bool, err error)
+    ReadEvent(line string) (ev Event, done bool, err error)
     HandleEvent(w io.Writer, ev Event) (handled bool)
 }
 ```
+
+> Note: `ReadEvent` currently takes `string` (one per NDJSON line). R67-PERF-1
+> proposes migrating to `[]byte` to avoid a per-event heap copy on the shim
+> stdout hot path; until that lands, implementors must match the `string`
+> signature or the build will fail.
 
 ### Platform Adapter Pattern
 

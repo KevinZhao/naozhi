@@ -18,18 +18,24 @@ const MaxRemoteWorkspacePath = 4096
 // `/home/../etc` to `/etc`) and any value containing control bytes that
 // would corrupt log attrs or sessions.json storage.
 //
-// Callers:
-//   - dashboard/HTTP layer via server.validateRemoteWorkspace (kept there
-//     for backwards-compat with existing tests).
-//   - upstream.Connector for reverse-RPC `send` / `takeover`, where the
-//     defaultWorkspace prefix check used to be skipped entirely when
-//     defaultWorkspace=="" (single-user deployments). With this gate,
-//     a compromised primary can no longer inject arbitrary absolute paths
-//     like `/etc` into a reverse node's CLI spawn even without an allowedRoot.
-//     R68-SEC-M2.
+// Rejection rules (a path must satisfy ALL of these to pass):
+//   - MUST be absolute (filepath.IsAbs).
+//   - MUST NOT exceed MaxRemoteWorkspacePath (4096) bytes.
+//   - MUST NOT contain a literal `..` path segment (rejected BEFORE
+//     filepath.Clean so `/home/../etc` cannot silently resolve to `/etc`).
+//   - MUST NOT contain any C0 control byte (< 0x20), DEL (0x7f), or NUL.
 //
 // Empty input is treated as "use the caller's default" and passes — callers
 // that require a workspace must check non-empty separately.
+//
+// Callers (add new call sites to this list so the single source of truth
+// for the trust-boundary contract stays visible):
+//   - dashboard/HTTP layer via server.validateRemoteWorkspace (kept there
+//     for backwards-compat with existing tests).
+//   - upstream.Connector for reverse-RPC `send` / `takeover` / `close_discovered`
+//     CWD validation, where the defaultWorkspace prefix check used to be
+//     skipped entirely when defaultWorkspace=="" (single-user deployments).
+//     R68-SEC-M2, R70-SEC-MED, R71-DOC-L1.
 func ValidateRemoteWorkspacePath(workspace string) error {
 	if workspace == "" {
 		return nil

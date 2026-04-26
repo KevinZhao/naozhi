@@ -288,7 +288,7 @@ func (h *CronHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job deleted via dashboard", "id", j.ID)
-	writeJSON(w, map[string]string{"status": "ok"})
+	writeOK(w)
 }
 
 // POST /api/cron/pause — pause a cron job by exact ID.
@@ -327,7 +327,7 @@ func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job paused via dashboard", "id", req.ID)
-	writeJSON(w, map[string]string{"status": "ok"})
+	writeOK(w)
 }
 
 // POST /api/cron/resume — resume a paused cron job by exact ID.
@@ -364,7 +364,7 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 	}
 
 	slog.Info("cron job resumed via dashboard", "id", req.ID)
-	writeJSON(w, map[string]string{"status": "ok"})
+	writeOK(w)
 }
 
 // POST /api/cron/trigger — manually trigger a cron job execution (for debugging).

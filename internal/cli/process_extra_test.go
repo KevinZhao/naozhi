@@ -597,7 +597,9 @@ func TestProcess_DrainStaleEvents_InterruptedRunning_WithResult(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestProcess_Close_WithExit(t *testing.T) {
+	prev := processCloseTimeout
 	processCloseTimeout = 2 * time.Second
+	defer func() { processCloseTimeout = prev }()
 	p, srv := shimTestPair(&ClaudeProtocol{})
 	startServerDrain(srv)
 	p.startReadLoop()
@@ -619,7 +621,9 @@ func TestProcess_Close_WithExit(t *testing.T) {
 }
 
 func TestProcess_Close_Timeout(t *testing.T) {
+	prev := processCloseTimeout
 	processCloseTimeout = 50 * time.Millisecond
+	defer func() { processCloseTimeout = prev }()
 	p, srv := shimTestPair(&ClaudeProtocol{})
 	startServerDrain(srv) // drain so shimSend(shutdown) doesn't block
 	p.startReadLoop()

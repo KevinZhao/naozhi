@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"runtime/debug"
 	"slices"
 	"strings"
@@ -39,6 +41,23 @@ var ErrMaxExemptSessions = errors.New("max exempt sessions reached")
 // permanent until the operator fixes config and restarts; retry loops
 // should stop on this sentinel.
 var ErrNoCLIWrapper = errors.New("no CLI wrapper configured")
+
+// Router defaults applied by NewRouter when the corresponding RouterConfig
+// field is zero. Exported so other packages (tests, config validation, CLI
+// flag defaults) can reference the single source of truth instead of
+// re-typing the literal and drifting out of sync. R70-ARCH-H5.
+const (
+	// DefaultMaxProcs is the concurrent-process cap applied when
+	// RouterConfig.MaxProcs is not set.
+	DefaultMaxProcs = 3
+	// DefaultTTL is the idle-session eviction threshold applied when
+	// RouterConfig.TTL is not set.
+	DefaultTTL = 30 * time.Minute
+	// DefaultPruneTTL is the "keep metadata for long-idle session" threshold
+	// applied when RouterConfig.PruneTTL is not set. Entries older than this
+	// are pruned from the store even when exempt.
+	DefaultPruneTTL = 72 * time.Hour
+)
 
 const (
 	// maxExemptSessions caps the number of alive exempt (planner) sessions
@@ -192,6 +211,60 @@ func chatKeyFor(key string) string {
 		return key[:idx]
 	}
 	return key
+}
+
+// claudeProjectSlug maps a CWD to the directory name Claude CLI uses under
+// ~/.claude/projects/. Mirrors the transformation in internal/discovery
+// (projDirName): every "/" becomes "-", so "/home/user/proj" → "-home-user-proj".
+// Duplicated here rather than imported to keep discovery's internal helpers
+// package-private; the two must stay in sync if Claude's scheme ever changes.
+func claudeProjectSlug(cwd string) string {
+	return strings.ReplaceAll(cwd, "/", "-")
+}
+
+// resolveResumeID returns resumeID if the corresponding jsonl conversation
+// file exists under claudeDir (i.e. Claude CLI's --resume will actually find
+// it), or "" to downgrade the spawn to a fresh session.
+//
+// Motivating failure: a cron job whose work_dir is edited after first run
+// stores its jsonl under the original workspace's slug; subsequent ticks
+// compute the new slug and --resume hits a path that does not exist, so
+// Claude CLI prints "No conversation found with session ID: <id>" to stderr
+// and exits 1 in ~1.7s. Upstream sees cron_job completed with result_len=0
+// and no recorded error. Same failure mode fires when the prior CLI process
+// died before flushing any turn — shim captured the init event's session_id
+// but no jsonl was ever produced, so every subsequent tick keeps generating
+// fresh-but-unsaved ids in a loop.
+//
+// Skipped when claudeDir or workspace are empty (test harness / misconfig):
+// without both we can't build a meaningful path, and preserving legacy
+// behavior keeps unrelated unit tests independent of filesystem layout.
+// On stat errors other than ErrNotExist (permission denied, I/O failure)
+// we also downgrade — a broken claudeDir would otherwise manifest as the
+// same silent exit-1 loop the primary fix targets.
+func resolveResumeID(claudeDir, workspace, key, resumeID string) string {
+	if resumeID == "" || claudeDir == "" || workspace == "" {
+		return resumeID
+	}
+	jsonlPath := filepath.Join(claudeDir, "projects",
+		claudeProjectSlug(workspace), resumeID+".jsonl")
+	if _, err := os.Stat(jsonlPath); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			slog.Warn("resume target missing, starting fresh session",
+				"key", key,
+				"resume_id", resumeID,
+				"workspace", workspace,
+				"expected_path", jsonlPath)
+		} else {
+			slog.Warn("resume target stat failed, starting fresh session",
+				"key", key,
+				"resume_id", resumeID,
+				"expected_path", jsonlPath,
+				"err", err)
+		}
+		return ""
+	}
+	return resumeID
 }
 
 // cliNameDefault returns the CLI display name from the wrapper, or empty if no wrapper.
@@ -393,13 +466,13 @@ type RouterConfig struct {
 // NewRouter creates a session router.
 func NewRouter(cfg RouterConfig) *Router {
 	if cfg.MaxProcs <= 0 {
-		cfg.MaxProcs = 3
+		cfg.MaxProcs = DefaultMaxProcs
 	}
 	if cfg.TTL <= 0 {
-		cfg.TTL = 30 * time.Minute
+		cfg.TTL = DefaultTTL
 	}
 	if cfg.PruneTTL <= 0 {
-		cfg.PruneTTL = 72 * time.Hour
+		cfg.PruneTTL = DefaultPruneTTL
 	}
 
 	// Normalize wrappers. Accept either a Wrappers map or a single Wrapper;
@@ -1261,6 +1334,12 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		}
 	}
 
+	// Guard against "resume target missing": drop resumeID when the jsonl
+	// Claude CLI would try to read does not exist, so the spawn falls
+	// through to a fresh session instead of exit-1'ing on "No conversation
+	// found". See resolveResumeID for rationale and edge-cases.
+	resumeID = resolveResumeID(r.claudeDir, workspace, key, resumeID)
+
 	spawnOpts := cli.SpawnOptions{
 		Key:             key,
 		Model:           model,
@@ -1525,6 +1604,25 @@ func (r *Router) evictOldest() bool {
 	return true
 }
 
+// unregisterSessionLocked removes a session from all routing indexes. Caller
+// must hold r.mu. If keepBackendOverride is true, backendOverrides[key] is
+// preserved so a following spawnSession can consume it atomically (used by
+// ResetAndRecreate / Takeover which reuse the same key). On terminal removal
+// paths (Reset / Remove / Cleanup prune) pass false to prevent override leaks.
+func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBackendOverride bool) {
+	if s == nil {
+		return
+	}
+	if id := s.getSessionID(); id != "" {
+		delete(r.sessionIDToKey, id)
+	}
+	r.indexDel(key)
+	delete(r.sessions, key)
+	if !keepBackendOverride {
+		delete(r.backendOverrides, key)
+	}
+}
+
 // Reset discards the session for the given key (user sent /new).
 func (r *Router) Reset(key string) {
 	r.mu.Lock()
@@ -1537,12 +1635,7 @@ func (r *Router) Reset(key string) {
 
 	proc := s.loadProcess()
 	wasActive := !s.exempt && proc != nil && proc.Alive()
-	if id := s.getSessionID(); id != "" {
-		delete(r.sessionIDToKey, id)
-	}
-	r.indexDel(key)
-	delete(r.sessions, key)
-	delete(r.backendOverrides, key)
+	r.unregisterSessionLocked(key, s, false)
 	if wasActive {
 		if r.activeCount.Add(-1) < 0 {
 			r.activeCount.Store(0)
@@ -1597,14 +1690,9 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		hadOld = true
 		proc := s.loadProcess()
 		wasActive := !s.exempt && proc != nil && proc.Alive()
-		if id := s.getSessionID(); id != "" {
-			delete(r.sessionIDToKey, id)
-		}
-		r.indexDel(key)
-		delete(r.sessions, key)
-		// Note: do NOT delete backendOverrides[key] here — the new opts
-		// may carry its own backend, and spawnSession below consumes and
-		// clears the override atomically.
+		// keepBackendOverride=true: the new opts may carry its own backend,
+		// and spawnSession below consumes and clears the override atomically.
+		r.unregisterSessionLocked(key, s, true)
 		if wasActive {
 			if r.activeCount.Add(-1) < 0 {
 				r.activeCount.Store(0)
@@ -1655,12 +1743,7 @@ func (r *Router) Remove(key string) bool {
 	// Kill process if alive
 	proc := s.loadProcess()
 	wasActive := !s.exempt && proc != nil && proc.Alive()
-	if id := s.getSessionID(); id != "" {
-		delete(r.sessionIDToKey, id)
-	}
-	r.indexDel(key)
-	delete(r.sessions, key)
-	delete(r.backendOverrides, key)
+	r.unregisterSessionLocked(key, s, false)
 	if wasActive {
 		if r.activeCount.Add(-1) < 0 {
 			r.activeCount.Store(0)
@@ -1798,12 +1881,9 @@ func (r *Router) Cleanup() {
 			continue // planner sessions are never pruned
 		}
 		if r.shouldPrune(s, now) {
-			sid := s.getSessionID()
-			if sid != "" {
-				delete(r.sessionIDToKey, sid)
-			}
-			r.indexDel(key)
-			delete(r.sessions, key)
+			// Terminal removal: free the backend override too (previous versions
+			// leaked it; see MED-5 in 2026-04-26 architecture review).
+			r.unregisterSessionLocked(key, s, false)
 			pruned++
 			continue
 		}
@@ -2652,13 +2732,11 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			// see UCCLEP-2026-04-26 design).
 			waitSocketGoneForKey(key, 2*time.Second)
 			r.mu.Lock()
-			// Only delete if no concurrent goroutine replaced this session
+			// Only delete if no concurrent goroutine replaced this session.
+			// keepBackendOverride=true: Takeover re-spawns on the same key
+			// and spawnSession below consumes the override atomically.
 			if cur, ok := r.sessions[key]; ok && cur == oldSession {
-				if id := cur.getSessionID(); id != "" {
-					delete(r.sessionIDToKey, id)
-				}
-				r.indexDel(key)
-				delete(r.sessions, key)
+				r.unregisterSessionLocked(key, cur, true)
 				r.storeDirty = true
 				r.storeGen.Add(1)
 			} else if cur != nil && cur.isAlive() {
@@ -2672,11 +2750,8 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			// it and call indexAdd, keeping the index consistent. No indexDel here
 			// because we are not removing from r.sessions.
 		} else {
-			if id := s.getSessionID(); id != "" {
-				delete(r.sessionIDToKey, id)
-			}
-			r.indexDel(key)
-			delete(r.sessions, key)
+			// Dead session branch: same keepBackendOverride=true rationale.
+			r.unregisterSessionLocked(key, s, true)
 			r.storeDirty = true
 			r.storeGen.Add(1)
 		}

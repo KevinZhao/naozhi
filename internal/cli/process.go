@@ -161,6 +161,37 @@ type Process struct {
 	// LoadDeathReason from router/dashboard). Stored string for atomic.Value
 	// lock-free reads; empty means "alive or never recorded".
 	deathReason atomic.Value
+
+	// log is a pre-bound logger that readLoop/heartbeatLoop use so shim
+	// disconnect and readloop panic entries carry a "session" attribute
+	// without allocating a new slog handler chain on every log call.
+	// Initialised to slog.Default() in newShimProcess (so tests constructing
+	// Process directly keep their historical unattributed output) and
+	// upgraded once by SetSlogKey during Wrapper.Spawn / SpawnReconnect.
+	// Read lock-free via atomic.Pointer — writers are the one-shot
+	// constructor path (no concurrency with readLoop). R70-ARCH-M3.
+	log atomic.Pointer[slog.Logger]
+}
+
+// SetSlogKey records the session key associated with this process so
+// readLoop / heartbeatLoop log entries can be attributed. Called once per
+// lifetime immediately after construction by Wrapper.Spawn/SpawnReconnect
+// before startReadLoop runs, so Store is race-free with the reader goroutines.
+// R70-ARCH-M3.
+func (p *Process) SetSlogKey(key string) {
+	if key == "" {
+		return
+	}
+	p.log.Store(slog.Default().With("session", key))
+}
+
+// slogger returns the pre-bound logger for readLoop/heartbeatLoop log
+// entries. Falls back to slog.Default() if not yet assigned.
+func (p *Process) slogger() *slog.Logger {
+	if l := p.log.Load(); l != nil {
+		return l
+	}
+	return slog.Default()
 }
 
 // Death reason labels. Kept as exported constants so session/router callers
@@ -412,13 +443,22 @@ func (p *Process) startReadLoop() {
 
 // readLoop reads NDJSON messages from the shim socket and dispatches events.
 func (p *Process) readLoop() {
+	log := p.slogger()
+	// LIFO defer order is important: the recover must run *first* so
+	// p.State is set to StateDead before the channels below close. Otherwise
+	// a waiter on <-p.done could read a stale p.State in the window between
+	// done-close and recover running. Defers execute in reverse declaration
+	// order, so the recover block is registered last.
+	defer close(p.eventCh)
+	defer close(p.done)
+	defer p.eventLog.CloseSubscribers()
 	// Panic recover: a malformed shim message or protocol bug must not take
 	// the whole process down silently. We log stack + transition to Dead so
 	// the router can reap this session and the dashboard surfaces the failure
 	// instead of the user seeing a stalled "running" forever.
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("readLoop panic recovered",
+			log.Error("readLoop panic recovered",
 				"panic", r, "stack", string(debug.Stack()))
 			p.setDeathReason(DeathReasonReadLoopPanic)
 			p.mu.Lock()
@@ -430,9 +470,6 @@ func (p *Process) readLoop() {
 			}
 		}
 	}()
-	defer close(p.eventCh)
-	defer close(p.done)
-	defer p.eventLog.CloseSubscribers()
 
 	// Reuse the line accumulator across iterations to avoid an allocation
 	// per event. Most stream-json events are well under 4KB; the 4096 cap
@@ -473,7 +510,7 @@ func (p *Process) readLoop() {
 		// iteration to re-grow from 4KB through a chain of doublings.
 		lineBuf = line
 		if capExceeded {
-			slog.Warn("readLoop: oversized shim message, skipping", "size", len(line))
+			log.Warn("readLoop: oversized shim message, skipping", "size", len(line))
 			// Drain the rest of this overlong line so the next iteration
 			// doesn't read the tail as a separate message.
 			for {
@@ -491,10 +528,10 @@ func (p *Process) readLoop() {
 			}
 			if readErr != nil {
 				if errors.Is(readErr, io.EOF) || errors.Is(readErr, net.ErrClosed) {
-					slog.Info("readLoop: shim connection closed after oversize drain")
+					log.Info("readLoop: shim connection closed after oversize drain")
 					p.setDeathReason(DeathReasonShimEOF)
 				} else {
-					slog.Warn("readLoop: shim read error after oversize drain", "err", readErr)
+					log.Warn("readLoop: shim read error after oversize drain", "err", readErr)
 					p.setDeathReason(DeathReasonShimReadErr)
 				}
 				break
@@ -503,10 +540,10 @@ func (p *Process) readLoop() {
 		}
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) || errors.Is(readErr, net.ErrClosed) {
-				slog.Info("readLoop: shim connection closed")
+				log.Info("readLoop: shim connection closed")
 				p.setDeathReason(DeathReasonShimEOF)
 			} else {
-				slog.Warn("readLoop: shim read error", "err", readErr)
+				log.Warn("readLoop: shim read error", "err", readErr)
 				p.setDeathReason(DeathReasonShimReadErr)
 			}
 			break
@@ -524,7 +561,7 @@ func (p *Process) readLoop() {
 		}
 		var msg shimMsg
 		if err := json.Unmarshal(trimmed, &msg); err != nil {
-			slog.Warn("readLoop: skip unparseable shim message", "err", err, "size", len(line))
+			log.Warn("readLoop: skip unparseable shim message", "err", err, "size", len(line))
 			continue
 		}
 
@@ -533,7 +570,7 @@ func (p *Process) readLoop() {
 			p.lastSeq.Store(msg.Seq)
 			ev, _, err := p.protocol.ReadEvent(msg.Line)
 			if err != nil {
-				slog.Warn("readLoop: skip unparseable event", "err", err, "seq", msg.Seq)
+				log.Warn("readLoop: skip unparseable event", "err", err, "seq", msg.Seq)
 				continue
 			}
 			if ev.Type == "" {
@@ -609,14 +646,14 @@ func (p *Process) readLoop() {
 			}
 
 		case "stderr":
-			slog.Debug("cli stderr", "line", sanitizeStderrLine(msg.Line))
+			log.Debug("cli stderr", "line", sanitizeStderrLine(msg.Line))
 
 		case "cli_exited":
 			code := 0
 			if msg.Code != nil {
 				code = *msg.Code
 			}
-			slog.Info("CLI exited via shim", "code", code)
+			log.Info("CLI exited via shim", "code", code)
 			reason := DeathReasonCLIExited
 			if code != 0 {
 				reason = fmt.Sprintf("%s_code_%d", DeathReasonCLIExited, code)
@@ -647,7 +684,7 @@ func (p *Process) readLoop() {
 			}
 
 		case "error":
-			slog.Warn("shim error", "msg", msg.Line)
+			log.Warn("shim error", "msg", msg.Line)
 		}
 	}
 
@@ -668,9 +705,10 @@ func (p *Process) readLoop() {
 // heartbeatLoop sends periodic ping messages to the shim and kills the process
 // if 3 consecutive pongs are missed (shim unresponsive or connection broken).
 func (p *Process) heartbeatLoop() {
+	log := p.slogger()
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("heartbeatLoop panic recovered",
+			log.Error("heartbeatLoop panic recovered",
 				"panic", r, "stack", string(debug.Stack()))
 		}
 	}()
@@ -690,7 +728,7 @@ func (p *Process) heartbeatLoop() {
 		select {
 		case <-ticker.C:
 			if err := p.shimSend(shimClientMsg{Type: "ping"}); err != nil {
-				slog.Debug("heartbeat ping failed", "err", err)
+				log.Debug("heartbeat ping failed", "err", err)
 				p.Kill()
 				return
 			}
@@ -707,9 +745,9 @@ func (p *Process) heartbeatLoop() {
 				misses = 0
 			case <-pongTimer.C:
 				misses++
-				slog.Debug("heartbeat pong missed", "misses", misses)
+				log.Debug("heartbeat pong missed", "misses", misses)
 				if misses >= maxMisses {
-					slog.Warn("heartbeat: shim unresponsive, killing process", "misses", misses)
+					log.Warn("heartbeat: shim unresponsive, killing process", "misses", misses)
 					p.Kill()
 					return
 				}
@@ -1660,6 +1698,18 @@ func sanitizeStderrLine(line string) string {
 	if line == "" {
 		return line
 	}
+	// Pre-truncate before the ANSI scanner so a pathological single-line
+	// OSC sequence (ESC ] ... no BEL/ST for MBs) doesn't force a full-length
+	// strings.Builder allocation just to be truncated afterward. The shim
+	// caps stdin lines at 12 MB; without this, a crafted line would allocate
+	// the full builder before truncation.
+	if len(line) > maxStderrLogLineBytes {
+		cut := maxStderrLogLineBytes
+		for cut > 0 && !utf8.RuneStart(line[cut]) {
+			cut--
+		}
+		line = line[:cut] + "…(truncated)"
+	}
 	// Fast path: most CLI stderr output is plain log text with neither ANSI
 	// escape sequences nor stray control bytes. Scanning once cheaply and
 	// returning the original string avoids a strings.Builder allocation and
@@ -1673,13 +1723,6 @@ func sanitizeStderrLine(line string) string {
 		}
 	}
 	if clean {
-		if len(line) > maxStderrLogLineBytes {
-			cut := maxStderrLogLineBytes
-			for cut > 0 && !utf8.RuneStart(line[cut]) {
-				cut--
-			}
-			return line[:cut] + "…(truncated)"
-		}
 		return line
 	}
 	var b strings.Builder
@@ -1732,16 +1775,9 @@ func sanitizeStderrLine(line string) string {
 		b.WriteByte(c)
 		i++
 	}
-	out := b.String()
-	if len(out) > maxStderrLogLineBytes {
-		// Byte-level truncation would cut CJK/emoji runes mid-sequence and
-		// produce invalid UTF-8 that some slog handlers (JSON) replace with
-		// U+FFFD or reject outright. Walk backwards to the nearest rune start.
-		cut := maxStderrLogLineBytes
-		for cut > 0 && !utf8.RuneStart(out[cut]) {
-			cut--
-		}
-		out = out[:cut] + "…(truncated)"
-	}
-	return out
+	// The pre-truncation step above already capped the input length; the
+	// sanitizer only removes bytes from that capped input (ANSI escapes +
+	// control chars), so the resulting builder is guaranteed to be no longer
+	// than the pre-truncated input. No post-sanitize truncation needed.
+	return b.String()
 }

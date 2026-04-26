@@ -287,7 +287,7 @@ func (h *DiscoveryHandlers) handleClose(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "upstream error", http.StatusBadGateway)
 			return
 		}
-		writeJSON(w, map[string]string{"status": "ok"})
+		writeOK(w)
 		return
 	}
 
@@ -359,5 +359,5 @@ func (h *DiscoveryHandlers) handleClose(w http.ResponseWriter, r *http.Request) 
 		}
 	}()
 
-	writeJSON(w, map[string]string{"status": "ok"})
+	writeOK(w)
 }

@@ -203,6 +203,45 @@ func TestWS_Ping(t *testing.T) {
 	}
 }
 
+// TestWS_Ping_UnauthenticatedRateLimited verifies R70-SEC-MED / R71-TEST-L1:
+// ping handling must consume the per-connection sendLimiter budget even for
+// unauthenticated connections, so a pre-auth burst cannot amplify into
+// unbounded json.Marshal + channel sends. Limiter is rate 1/s burst 5;
+// sending 20 pings rapidly should produce strictly fewer than 20 pongs.
+func TestWS_Ping_UnauthenticatedRateLimited(t *testing.T) {
+	hub, _ := newTestHub("secret-token") // token gate so connection is unauth
+	url, cleanup := startWSServer(t, hub)
+	defer cleanup()
+
+	conn := dialWS(t, url)
+	defer conn.Close()
+
+	const pings = 20
+	for i := 0; i < pings; i++ {
+		wsWrite(t, conn, node.ClientMsg{Type: "ping"})
+	}
+
+	// Read at most 20 responses with a short deadline per read; silent drops
+	// surface as a read timeout.
+	pongs := 0
+	conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
+	for i := 0; i < pings; i++ {
+		conn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+		_, _, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		pongs++
+	}
+
+	if pongs >= pings {
+		t.Errorf("got %d pongs for %d pings, expected rate-limiter to drop some", pongs, pings)
+	}
+	if pongs == 0 {
+		t.Errorf("got 0 pongs — expected the first burst slots (5) to succeed")
+	}
+}
+
 // ─── Subscribe tests ─────────────────────────────────────────────────────────
 
 func TestWS_SubscribeSessionNotFound(t *testing.T) {

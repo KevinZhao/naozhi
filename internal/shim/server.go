@@ -217,6 +217,25 @@ func Run(cfg Config) error {
 	const maxInflightClients = 16
 	clientSem := make(chan struct{}, maxInflightClients)
 
+	// spawnClient enforces the clientSem admission gate so every handleClient
+	// goroutine (normal accept + post-cli_exited reconnect + post-watchdog
+	// reconnect) pays the same semaphore slot. Previously only the main
+	// accept branch was gated; the two reconnect branches did a raw `go
+	// s.handleClient(...)` which let a post-kill reconnect storm bypass the
+	// 16-slot cap exactly when fd pressure peaks. R71-GO-H1.
+	spawnClient := func(conn net.Conn) {
+		select {
+		case clientSem <- struct{}{}:
+			go func() {
+				defer func() { <-clientSem }()
+				s.handleClient(conn, idleTimeout)
+			}()
+		default:
+			// Pool full → shed load identically to the main accept branch.
+			conn.Close()
+		}
+	}
+
 	acceptCh := make(chan net.Conn, 1)
 	go func() {
 		for {
@@ -239,15 +258,7 @@ func Run(cfg Config) error {
 	for {
 		select {
 		case conn := <-acceptCh:
-			select {
-			case clientSem <- struct{}{}:
-				go func() {
-					defer func() { <-clientSem }()
-					s.handleClient(conn, idleTimeout)
-				}()
-			default:
-				conn.Close() // shed load
-			}
+			spawnClient(conn)
 
 		case <-cli.exited:
 			slog.Info("CLI exited", "code", cli.exitCode)
@@ -256,7 +267,7 @@ func Run(cfg Config) error {
 			defer exitTimer.Stop()
 			select {
 			case conn := <-acceptCh:
-				go s.handleClient(conn, idleTimeout)
+				spawnClient(conn)
 				reconnectTimer := time.NewTimer(60 * time.Second)
 				defer reconnectTimer.Stop()
 				select {
@@ -291,7 +302,7 @@ func Run(cfg Config) error {
 			defer wdTimer.Stop()
 			select {
 			case conn := <-acceptCh:
-				go s.handleClient(conn, idleTimeout)
+				spawnClient(conn)
 				wdReconnectTimer := time.NewTimer(60 * time.Second)
 				defer wdReconnectTimer.Stop()
 				select {

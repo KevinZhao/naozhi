@@ -153,7 +153,7 @@ func (a *AuthHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Secure:   a.isSecure(r),
 		MaxAge:   86400, // 1 day
 	})
-	writeJSON(w, map[string]string{"status": "ok"})
+	writeOK(w)
 }
 
 func (a *AuthHandlers) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -166,7 +166,7 @@ func (a *AuthHandlers) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Secure:   a.isSecure(r),
 		MaxAge:   -1,
 	})
-	writeJSON(w, map[string]string{"status": "ok"})
+	writeOK(w)
 }
 
 const loginPageHTML = `<!DOCTYPE html>

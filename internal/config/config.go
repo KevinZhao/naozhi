@@ -293,7 +293,12 @@ func applyDefaults(cfg *Config) {
 			slog.Warn("both 'session.cwd' and deprecated 'session.workspace' configured; using 'cwd'")
 		}
 		cfg.Session.Workspace = cfg.Session.CWD
-	} else {
+	} else if cfg.Session.Workspace != "" {
+		// Deprecation alias: warn symmetrically with the nodes→workspaces
+		// message below so users who only set `session.workspace` get the
+		// same nudge to migrate, instead of silently depending on the
+		// promotion forever. R71-CONFIG-M1.
+		slog.Warn("'session.workspace' is deprecated, please rename to 'session.cwd'")
 		cfg.Session.CWD = cfg.Session.Workspace
 	}
 

@@ -196,6 +196,7 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 		proto, cliPID, shimPID,
 		opts.NoOutputTimeout, opts.TotalTimeout,
 	)
+	proc.SetSlogKey(opts.Key)
 
 	// Protocol init handshake (stream-json: no-op; ACP: initialize + session/new)
 	rw := &JSONRW{
@@ -259,6 +260,7 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 		proto.Clone(), cliPID, shimPID,
 		noOutputTimeout, totalTimeout,
 	)
+	proc.SetSlogKey(key)
 
 	if handle.Hello.SessionID != "" {
 		proc.SessionID = handle.Hello.SessionID

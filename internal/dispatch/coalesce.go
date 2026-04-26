@@ -54,11 +54,22 @@ func CoalesceMessages(msgs []QueuedMsg) (string, []cli.ImageData) {
 	}
 
 	var b strings.Builder
-	// Pre-grow once: strings.Builder doubles on append and a 4 MB coalesce
-	// burst otherwise climbs 1M→2M→4M→8M with two reallocs (~12 MB
-	// transient). A single Grow targets the known cap and caps peak
-	// transient allocation at ~4 MB. R68-PERF-M6.
-	b.Grow(maxCoalescedTextBytes)
+	// Pre-grow once, sized to the *actual* payload rather than the hard cap.
+	// A 4 MB Grow on a 2-message burst of 100-byte texts would allocate 4 MB
+	// just to write ~300 bytes. Summing actual payload sizes + ~64-byte
+	// per-message framing overhead keeps peak alloc proportional to the
+	// coalesce burst's real size while still capping at maxCoalescedTextBytes
+	// to prevent the exponential-growth pattern (1M→2M→4M→8M with reallocs).
+	// R-coalesce-adaptive-grow (was R68-PERF-M6).
+	const framingOverheadPerMsg = 64 // "[HH:MM] " + "\n" + markers
+	estimate := len("[以下是用户在你处理上一条消息期间追加发送的内容]\n") + 128
+	for _, m := range msgs {
+		estimate += len(m.Text) + framingOverheadPerMsg
+	}
+	if estimate > maxCoalescedTextBytes {
+		estimate = maxCoalescedTextBytes
+	}
+	b.Grow(estimate)
 	b.WriteString("[以下是用户在你处理上一条消息期间追加发送的内容]\n")
 
 	// Let allImages grow via append's exponential policy instead of

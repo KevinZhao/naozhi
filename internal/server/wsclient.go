@@ -167,11 +167,12 @@ func (c *wsClient) readPump() {
 			}
 			c.hub.handleInterrupt(c, msg)
 		case "ping":
-			// Reuse sendLimiter so authenticated clients can't spin a flood
-			// of pings that each trigger json.Marshal + channel send — the
-			// work is small per message but easy to amplify without a cap.
-			// 5/s burst matches the existing send budget.
-			if c.authenticated.Load() && !c.sendLimiter.Allow() {
+			// Reuse sendLimiter so *any* client can't spin a flood of pings
+			// that each trigger json.Marshal + channel send — the work is
+			// small per message but easy to amplify without a cap. Applied
+			// unconditionally so unauthenticated connections also pay the
+			// budget before the wsAuthTimeout evicts them.
+			if !c.sendLimiter.Allow() {
 				continue
 			}
 			c.SendJSON(node.ServerMsg{Type: "pong"})

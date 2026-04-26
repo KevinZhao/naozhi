@@ -255,6 +255,17 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 		}
 	}
 	text = strings.TrimSpace(text)
+	// Match the Feishu/Slack inbound cap: bots posting via the Discord API
+	// can exceed the 2000-char user UX limit, and any oversized prompt would
+	// bypass the HTTP-surface maxWSSendTextBytes guard. The shim's 12 MB
+	// line ceiling and the dispatch queue's 4 MB coalesce cap are final
+	// backstops, not the intended security boundary. R71-SEC-M4.
+	const maxDiscordInboundBytes = 8 * 1024
+	if len(text) > maxDiscordInboundBytes {
+		slog.Warn("discord message exceeds inbound text cap, dropping",
+			"len", len(text), "channel", m.ChannelID)
+		return
+	}
 
 	// Collect image attachment metadata; download happens asynchronously
 	type pendingImage struct {

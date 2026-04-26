@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -246,14 +247,26 @@ func newSessionWithID(key, sessID string) *ManagedSession {
 
 func TestNewRouterDefaults(t *testing.T) {
 	r := NewRouter(RouterConfig{MaxProcs: 0, TTL: 0})
-	if r.maxProcs != 3 {
-		t.Errorf("maxProcs = %d, want 3", r.maxProcs)
+	if r.maxProcs != DefaultMaxProcs {
+		t.Errorf("maxProcs = %d, want DefaultMaxProcs=%d", r.maxProcs, DefaultMaxProcs)
 	}
-	if r.ttl != 30*time.Minute {
-		t.Errorf("ttl = %v, want 30m", r.ttl)
+	if r.ttl != DefaultTTL {
+		t.Errorf("ttl = %v, want DefaultTTL=%v", r.ttl, DefaultTTL)
 	}
-	if r.pruneTTL != 72*time.Hour {
-		t.Errorf("pruneTTL = %v, want 72h", r.pruneTTL)
+	if r.pruneTTL != DefaultPruneTTL {
+		t.Errorf("pruneTTL = %v, want DefaultPruneTTL=%v", r.pruneTTL, DefaultPruneTTL)
+	}
+	// Freeze the exported defaults so an operator who wires these into config
+	// validation / dashboard tooltips never has the values silently drift.
+	// R70-ARCH-H5.
+	if DefaultMaxProcs != 3 {
+		t.Errorf("DefaultMaxProcs = %d, want 3", DefaultMaxProcs)
+	}
+	if DefaultTTL != 30*time.Minute {
+		t.Errorf("DefaultTTL = %v, want 30m", DefaultTTL)
+	}
+	if DefaultPruneTTL != 72*time.Hour {
+		t.Errorf("DefaultPruneTTL = %v, want 72h", DefaultPruneTTL)
 	}
 }
 
@@ -695,6 +708,89 @@ func TestCleanupSkipsDeadProcess(t *testing.T) {
 	_, total := r.Stats()
 	if total != 1 {
 		t.Errorf("dead session with session ID should remain in map after cleanup, total = %d", total)
+	}
+}
+
+// TestCleanup_PrunesBackendOverride verifies R70-ARCH-MED: a nil-process
+// session that ages past pruneTTL is removed from r.sessions AND its entry
+// in r.backendOverrides is freed. A previous version of shouldPrune-branch
+// only touched r.sessions, so a session that was SetSessionBackend'd and
+// then never spawned (e.g. config error at spawn time) would leave a
+// backendOverride live forever. R71-TEST-M1.
+func TestCleanup_PrunesBackendOverride(t *testing.T) {
+	r := &Router{
+		sessions:         make(map[string]*ManagedSession),
+		backendOverrides: map[string]string{},
+		maxProcs:         3,
+		ttl:              1 * time.Minute,
+		pruneTTL:         1 * time.Hour,
+	}
+	// nil-process session past pruneTTL — shouldPrune returns true.
+	s := &ManagedSession{key: "k1"}
+	s.lastActive.Store(time.Now().Add(-2 * time.Hour).UnixNano())
+	r.sessions["k1"] = s
+	r.backendOverrides["k1"] = "kiro"
+	r.backendOverrides["other"] = "claude" // unrelated, must survive
+
+	r.Cleanup()
+
+	if _, ok := r.sessions["k1"]; ok {
+		t.Error("pruned session should be gone from r.sessions")
+	}
+	if _, ok := r.backendOverrides["k1"]; ok {
+		t.Error("pruned session's backendOverride should be freed")
+	}
+	if got := r.backendOverrides["other"]; got != "claude" {
+		t.Errorf("unrelated backendOverride should survive, got %q", got)
+	}
+}
+
+// TestUnregisterSessionLocked_KeepBackendOverride covers the two call-site
+// semantics of the new unregisterSessionLocked helper introduced for the R70
+// teardown-consolidation work:
+//
+//   - keepBackendOverride=true: ResetAndRecreate / Takeover paths respawn on
+//     the same key and need spawnSession to consume the override atomically.
+//   - keepBackendOverride=false: Reset / Remove / Cleanup prune are terminal
+//     removals — the override MUST be freed to prevent leaks when the same
+//     key is later created fresh.
+//
+// R71-TEST-M2.
+func TestUnregisterSessionLocked_KeepBackendOverride(t *testing.T) {
+	cases := []struct {
+		name         string
+		keep         bool
+		wantOverride string // "" means entry must be absent
+	}{
+		{name: "keep=true preserves override", keep: true, wantOverride: "kiro"},
+		{name: "keep=false deletes override", keep: false, wantOverride: ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := &Router{
+				sessions:         make(map[string]*ManagedSession),
+				backendOverrides: map[string]string{"k1": "kiro"},
+			}
+			s := &ManagedSession{key: "k1"}
+			s.setSessionID("sess-1")
+			r.sessions["k1"] = s
+
+			r.mu.Lock()
+			r.unregisterSessionLocked("k1", s, tc.keep)
+			r.mu.Unlock()
+
+			if _, ok := r.sessions["k1"]; ok {
+				t.Error("session must be removed from r.sessions regardless of keepBackendOverride")
+			}
+			got, ok := r.backendOverrides["k1"]
+			if tc.wantOverride == "" {
+				if ok {
+					t.Errorf("backendOverride must be freed, got %q", got)
+				}
+			} else if got != tc.wantOverride {
+				t.Errorf("backendOverride = %q, want %q", got, tc.wantOverride)
+			}
+		})
 	}
 }
 
@@ -1690,5 +1786,72 @@ func TestInterruptSessionSafe_DeadProcess(t *testing.T) {
 	proc.mu.Unlock()
 	if sigint != 0 {
 		t.Errorf("Interrupt calls = %d, want 0 — dead proc should not SIGINT", sigint)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// resolveResumeID — jsonl-existence pre-check
+// ---------------------------------------------------------------------------
+
+func TestClaudeProjectSlug(t *testing.T) {
+	cases := []struct {
+		name string
+		cwd  string
+		want string
+	}{
+		{"root", "/", "-"},
+		{"typical", "/home/user/workspace/proj", "-home-user-workspace-proj"},
+		{"trailing slash preserved", "/home/user/", "-home-user-"},
+		{"nested", "/home/user/workspace/naozhi", "-home-user-workspace-naozhi"},
+		{"empty", "", ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := claudeProjectSlug(tc.cwd); got != tc.want {
+				t.Errorf("claudeProjectSlug(%q) = %q, want %q", tc.cwd, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveResumeID(t *testing.T) {
+	// Scratch claudeDir with a single jsonl under workspace slug "A" only.
+	claudeDir := t.TempDir()
+	workspaceA := "/home/u/wsA"
+	workspaceB := "/home/u/wsB"
+	okID := "sess-ok"
+	missingID := "sess-missing"
+
+	projA := filepath.Join(claudeDir, "projects", claudeProjectSlug(workspaceA))
+	if err := os.MkdirAll(projA, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projA, okID+".jsonl"), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name      string
+		claudeDir string
+		workspace string
+		resumeID  string
+		want      string // "" means downgraded to fresh
+	}{
+		{"empty resumeID unchanged", claudeDir, workspaceA, "", ""},
+		{"empty claudeDir skipped", "", workspaceA, okID, okID},
+		{"empty workspace skipped", claudeDir, "", okID, okID},
+		{"jsonl exists keeps resumeID", claudeDir, workspaceA, okID, okID},
+		{"jsonl missing in same workspace downgrades", claudeDir, workspaceA, missingID, ""},
+		{"jsonl in wrong workspace downgrades (work_dir edit regression)",
+			claudeDir, workspaceB, okID, ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := resolveResumeID(tc.claudeDir, tc.workspace, "cron:test", tc.resumeID)
+			if got != tc.want {
+				t.Errorf("resolveResumeID(cd=%q, ws=%q, id=%q) = %q, want %q",
+					tc.claudeDir, tc.workspace, tc.resumeID, got, tc.want)
+			}
+		})
 	}
 }

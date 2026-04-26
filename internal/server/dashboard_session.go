@@ -553,7 +553,7 @@ func (h *SessionHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "session not found", http.StatusNotFound)
 			return
 		}
-		writeJSON(w, map[string]string{"status": "ok"})
+		writeOK(w)
 		return
 	}
 
@@ -562,7 +562,7 @@ func (h *SessionHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	writeJSON(w, map[string]string{"status": "ok"})
+	writeOK(w)
 }
 
 // PATCH /api/sessions/label — update the operator-set display label for a
@@ -727,7 +727,7 @@ func (h *SessionHandlers) handleInterrupt(w http.ResponseWriter, r *http.Request
 		}
 		if interrupted {
 			slog.Info("remote session interrupted via HTTP", "node", req.Node, "key", req.Key)
-			writeJSON(w, map[string]string{"status": "ok"})
+			writeOK(w)
 		} else {
 			writeJSON(w, map[string]string{"status": "not_running"})
 		}
@@ -739,7 +739,7 @@ func (h *SessionHandlers) handleInterrupt(w http.ResponseWriter, r *http.Request
 	switch h.router.InterruptSessionSafe(req.Key) {
 	case session.InterruptSent:
 		slog.Info("session interrupted via HTTP", "key", req.Key)
-		writeJSON(w, map[string]string{"status": "ok"})
+		writeOK(w)
 	case session.InterruptNoSession:
 		writeJSON(w, map[string]string{"status": "not_running"})
 	default:

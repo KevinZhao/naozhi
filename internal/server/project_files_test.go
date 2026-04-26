@@ -173,6 +173,51 @@ func TestSanitizeDownloadName(t *testing.T) {
 	}
 }
 
+// TestContentDisposition verifies R71-SEC-M1: non-ASCII filenames must be
+// emitted via the RFC 5987 filename* form so proxies / old clients that
+// strictly reject 8-bit chars in quoted filenames still see a usable
+// attachment name, while modern browsers render the UTF-8 original.
+func TestContentDisposition(t *testing.T) {
+	cases := []struct {
+		name       string
+		kind       string
+		resolved   string
+		wantPrefix string
+		wantSubstr string
+	}{
+		{
+			name:       "pure ASCII keeps simple quoted form",
+			kind:       "inline",
+			resolved:   "/tmp/src/foo.go",
+			wantPrefix: `inline; filename="foo.go"`,
+		},
+		{
+			name:       "non-ASCII emits both fallback and RFC5987 form",
+			kind:       "attachment",
+			resolved:   "/tmp/docs/说明.md",
+			wantPrefix: `attachment; filename="______.md"`, // 2 CJK chars × 3 UTF-8 bytes = 6 underscores
+			wantSubstr: "filename*=UTF-8''%E8%AF%B4%E6%98%8E.md",
+		},
+		{
+			name:       "CR/LF and quotes stripped before encoding",
+			kind:       "inline",
+			resolved:   "/tmp/x\r\ny\".log",
+			wantPrefix: `inline; filename="xy_.log"`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := contentDisposition(tc.kind, tc.resolved)
+			if !strings.HasPrefix(got, tc.wantPrefix) {
+				t.Errorf("contentDisposition = %q, want prefix %q", got, tc.wantPrefix)
+			}
+			if tc.wantSubstr != "" && !strings.Contains(got, tc.wantSubstr) {
+				t.Errorf("contentDisposition = %q, want substring %q", got, tc.wantSubstr)
+			}
+		})
+	}
+}
+
 // ─── handleFilesExists ────────────────────────────────────────────────────────
 
 func TestHandleFilesExists_Batch(t *testing.T) {
