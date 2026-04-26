@@ -532,20 +532,12 @@ func (s *Server) Start(ctx context.Context) error {
 			"addr", s.addr,
 		)
 	}
-	// R70-SEC-M1: no-auth mode (dashboardToken=="") falls back to client IP as
-	// the upload owner key. On a shared network segment — office LAN, NAT
-	// gateway, Kubernetes pods behind a single egress IP, mobile carrier NAT —
-	// two users appear with the same IP and can therefore Take() each other's
-	// inline-uploaded files (the same owner key matches). This is a
-	// known-limitation of no-auth deployments; surface it at startup so the
-	// operator sees the caveat in the naozhi journal before an incident does.
-	// `isPlaintextPublicAddr` guards against spamming the warn for the legit
-	// localhost-only personal deployment.
-	if s.dashboardToken == "" && isPlaintextPublicAddr(s.addr) {
-		slog.Warn(
-			"no dashboard_token configured: uploadOwner falls back to client IP. "+
-				"Users sharing a NAT / LAN / egress gateway will see each other's inline uploads. "+
-				"Either set server.dashboard_token or bind to 127.0.0.1 for single-user use.",
+	// No-auth mode on a publicly reachable address is the biggest footgun the
+	// operator can step into — every /api/* endpoint becomes world-reachable.
+	// Decision logic extracted to shouldWarnNoTokenOpen for unit-test coverage;
+	// see R60-SEC-006 / R70-SEC-M1 in the helper's docstring.
+	if shouldWarnNoTokenOpen(s.dashboardToken, s.addr, s.auth.trustedProxy) {
+		slog.Warn(noTokenOpenWarning,
 			"addr", s.addr,
 			"trusted_proxy", s.auth.trustedProxy,
 		)
@@ -624,6 +616,45 @@ func (s *Server) Start(ctx context.Context) error {
 		<-shutdownComplete
 	}
 	return err
+}
+
+// noTokenOpenWarning is the message logged when the API accepts any caller
+// because dashboard_token is unset on a publicly reachable bind. Exposed as
+// a package-level var (not a const literal in the caller) so tests can
+// assert the exact text in journal/log output without re-typing it. The
+// message intentionally enumerates the concrete risks so an operator
+// scrolling a startup log has enough context to act without docs lookup.
+const noTokenOpenWarning = "no dashboard_token configured on a non-loopback bind: " +
+	"the ENTIRE dashboard API is open to any caller. " +
+	"Anyone reaching this port can send messages to sessions, read workspace files under allowed_root, " +
+	"alter cron schedules, and trigger transcription. Also: uploadOwner falls back to client IP, " +
+	"so users sharing a NAT / LAN / egress gateway can see each other's inline uploads. " +
+	"Either set server.dashboard_token, bind to 127.0.0.1 for single-user use, " +
+	"or set server.trusted_proxy=true with an upstream that enforces access control."
+
+// shouldWarnNoTokenOpen reports whether the "no-auth API open to all callers"
+// warning should fire at Server.Start.
+//
+// Decision matrix (dashboardToken == "" means no auth):
+//
+//	token set,  any addr, any proxy          → no warn (operator configured auth)
+//	token "",   loopback, any proxy          → no warn (only accessible on host)
+//	token "",   public,   trustedProxy=true  → no warn (upstream enforces auth)
+//	token "",   public,   trustedProxy=false → WARN (R60-SEC-006 + R70-SEC-M1)
+//
+// Extracted from Server.Start so a unit test can assert the matrix without
+// binding ports or mocking slog. R60-SEC-006.
+func shouldWarnNoTokenOpen(dashboardToken, addr string, trustedProxy bool) bool {
+	if dashboardToken != "" {
+		return false
+	}
+	if !isPlaintextPublicAddr(addr) {
+		return false
+	}
+	if trustedProxy {
+		return false
+	}
+	return true
 }
 
 // isPlaintextPublicAddr reports whether addr is a non-loopback TCP listen
