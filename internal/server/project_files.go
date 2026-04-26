@@ -515,6 +515,14 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
+// servePreview returns the first ~maxPreviewBytes of a workspace file as JSON
+// so the dashboard drawer can render it with syntax highlighting. The `content`
+// field flows through writeJSON with SetEscapeHTML disabled, so the CLIENT
+// MUST assign it via `textContent` or pass it through DOMPurify/a whitelist
+// renderer before `innerHTML`. File contents are user-writable — Claude CLI
+// tools create/edit files arbitrarily — so raw innerHTML would be a stored-XSS
+// sink. dashboard.js currently uses `<pre><code>esc(content)</code></pre>`
+// with esc() HTML-escaping the payload, satisfying this contract. R71-SEC-L1.
 func (h *ProjectHandlers) servePreview(w http.ResponseWriter, resolved string, info os.FileInfo) {
 	size := info.Size()
 	readSize := size

@@ -13,21 +13,29 @@ import (
 )
 
 type Config struct {
-	Server        ServerConfig                `yaml:"server"`
-	CLI           CLIConfig                   `yaml:"cli"`
-	Session       SessionConfig               `yaml:"session"`
-	Platforms     PlatformConfigs             `yaml:"platforms"`
-	Agents        map[string]AgentConfig      `yaml:"agents"`
-	AgentCommands map[string]string           `yaml:"agent_commands"`
-	Nodes         map[string]NodeConfig       `yaml:"nodes"`
-	Workspaces    map[string]NodeConfig       `yaml:"workspaces"` // alias for nodes (preferred name)
-	ReverseNodes  map[string]ReverseNodeEntry `yaml:"reverse_nodes"`
-	Upstream      *UpstreamConfig             `yaml:"upstream"`
-	Workspace     WorkspaceConfig             `yaml:"workspace"` // local workspace identity
-	Transcribe    *TranscribeConfig           `yaml:"transcribe"`
-	Cron          CronConfig                  `yaml:"cron"`
-	Log           LogConfig                   `yaml:"log"`
-	Projects      ProjectsConfig              `yaml:"projects"`
+	Server        ServerConfig           `yaml:"server"`
+	CLI           CLIConfig              `yaml:"cli"`
+	Session       SessionConfig          `yaml:"session"`
+	Platforms     PlatformConfigs        `yaml:"platforms"`
+	Agents        map[string]AgentConfig `yaml:"agents"`
+	AgentCommands map[string]string      `yaml:"agent_commands"`
+	// Nodes and Workspaces are two accepted YAML spellings for the same
+	// concept — the set of remote naozhi instances this node polls. Nodes is
+	// the legacy key; Workspaces is the preferred name. Consumers read from
+	// cfg.Nodes; after Load (or an explicit cfg.Normalize() call) both maps
+	// point to the same entries. Tests that build a Config literal directly
+	// MUST call cfg.Normalize() before handing it to downstream code, or
+	// validateConfig / main.go will silently skip the entries set only on
+	// Workspaces. R71-ARCH-L1.
+	Nodes        map[string]NodeConfig       `yaml:"nodes"`
+	Workspaces   map[string]NodeConfig       `yaml:"workspaces"`
+	ReverseNodes map[string]ReverseNodeEntry `yaml:"reverse_nodes"`
+	Upstream     *UpstreamConfig             `yaml:"upstream"`
+	Workspace    WorkspaceConfig             `yaml:"workspace"` // local workspace identity
+	Transcribe   *TranscribeConfig           `yaml:"transcribe"`
+	Cron         CronConfig                  `yaml:"cron"`
+	Log          LogConfig                   `yaml:"log"`
+	Projects     ProjectsConfig              `yaml:"projects"`
 
 	// Cached parsed durations (populated once in Load, avoids repeated ParseDuration)
 	cachedTTL             time.Duration `yaml:"-"`
@@ -259,6 +267,31 @@ func Load(path string) (*Config, error) {
 	return &cfg, nil
 }
 
+// Normalize reconciles the two-key YAML aliases (Nodes / Workspaces) so every
+// consumer downstream can read from cfg.Nodes without caring which spelling
+// the operator used. Load() calls this automatically; external code paths
+// (tests, programmatic config construction) MUST call it before handing the
+// Config to validateConfig or main.go, otherwise entries set only on
+// Workspaces are silently ignored.
+//
+// Precedence: when both are set, Workspaces wins and Nodes is overwritten.
+// A conflict log is emitted via slog.Warn so an operator who set both by
+// mistake sees the drop. Safe to call repeatedly.
+//
+// R71-ARCH-L1.
+func (cfg *Config) Normalize() {
+	switch {
+	case len(cfg.Workspaces) > 0 && len(cfg.Nodes) == 0:
+		cfg.Nodes = cfg.Workspaces
+	case len(cfg.Nodes) > 0 && len(cfg.Workspaces) == 0:
+		slog.Warn("'nodes' config key is deprecated, please rename to 'workspaces'")
+		cfg.Workspaces = cfg.Nodes
+	case len(cfg.Workspaces) > 0 && len(cfg.Nodes) > 0:
+		slog.Warn("both 'nodes' and 'workspaces' configured; using 'workspaces', ignoring 'nodes'")
+		cfg.Nodes = cfg.Workspaces
+	}
+}
+
 func applyDefaults(cfg *Config) {
 	if cfg.Server.Addr == "" {
 		cfg.Server.Addr = ":8080"
@@ -302,15 +335,7 @@ func applyDefaults(cfg *Config) {
 		cfg.Session.CWD = cfg.Session.Workspace
 	}
 
-	if len(cfg.Workspaces) > 0 && len(cfg.Nodes) == 0 {
-		cfg.Nodes = cfg.Workspaces
-	} else if len(cfg.Nodes) > 0 && len(cfg.Workspaces) == 0 {
-		slog.Warn("'nodes' config key is deprecated, please rename to 'workspaces'")
-		cfg.Workspaces = cfg.Nodes
-	} else if len(cfg.Workspaces) > 0 && len(cfg.Nodes) > 0 {
-		slog.Warn("both 'nodes' and 'workspaces' configured; using 'workspaces', ignoring 'nodes'")
-		cfg.Nodes = cfg.Workspaces
-	}
+	cfg.Normalize()
 
 	if cfg.Workspace.ID == "" {
 		if h, err := os.Hostname(); err == nil {

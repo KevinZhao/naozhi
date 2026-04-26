@@ -532,6 +532,24 @@ func (s *Server) Start(ctx context.Context) error {
 			"addr", s.addr,
 		)
 	}
+	// R70-SEC-M1: no-auth mode (dashboardToken=="") falls back to client IP as
+	// the upload owner key. On a shared network segment — office LAN, NAT
+	// gateway, Kubernetes pods behind a single egress IP, mobile carrier NAT —
+	// two users appear with the same IP and can therefore Take() each other's
+	// inline-uploaded files (the same owner key matches). This is a
+	// known-limitation of no-auth deployments; surface it at startup so the
+	// operator sees the caveat in the naozhi journal before an incident does.
+	// `isPlaintextPublicAddr` guards against spamming the warn for the legit
+	// localhost-only personal deployment.
+	if s.dashboardToken == "" && isPlaintextPublicAddr(s.addr) {
+		slog.Warn(
+			"no dashboard_token configured: uploadOwner falls back to client IP. "+
+				"Users sharing a NAT / LAN / egress gateway will see each other's inline uploads. "+
+				"Either set server.dashboard_token or bind to 127.0.0.1 for single-user use.",
+			"addr", s.addr,
+			"trusted_proxy", s.auth.trustedProxy,
+		)
+	}
 	slog.Info("server starting", "addr", s.addr)
 
 	ln, err := net.Listen("tcp", s.addr)

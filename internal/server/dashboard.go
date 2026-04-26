@@ -93,6 +93,18 @@ func marshalPooled(v any) ([]byte, error) {
 // literally — every client consumer uses `textContent` or structured
 // rendering, and the default escape just bloats responses and makes raw
 // API output (curl / log dumps) hard to diff.
+//
+// CLIENT-SIDE CONTRACT (R71-SEC-L1): because SetEscapeHTML is disabled,
+// any string field in the response that carries content controllable by the
+// CLI / tool output / workspace files (e.g. `content` in servePreview,
+// `last_prompt`, `summary`, `detail`) MUST be rendered through `textContent`
+// in dashboard.js, OR — if rich rendering is required — passed through
+// DOMPurify / a whitelist renderer before any innerHTML assignment. A future
+// consumer that adds `el.innerHTML = resp.content` without DOMPurify would
+// immediately become a stored-XSS vector (file contents are user-writable
+// via `/api/sessions/send` + tool writes). When introducing a new response
+// field destined for innerHTML, route it through a dedicated helper or the
+// CSP `sandbox` iframe path instead of relaxing this rule.
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	// X-Content-Type-Options: nosniff prevents legacy browsers from MIME-sniffing
