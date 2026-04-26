@@ -68,70 +68,109 @@ type healthDispatchStats struct {
 	LastReplySuccessAgo string `json:"last_reply_success_ago,omitempty"`
 }
 
+// healthAuthSection is the authenticated-only subset of /health. Held as a
+// pointer inside healthResp so unauthenticated probes marshal to just
+// {"status":"ok","uptime":"..."}. When non-nil, Go's json package promotes
+// the embedded fields into the top-level object so the wire shape stays
+// identical to the prior `map[string]any` version. R60-PERF-001.
+type healthAuthSection struct {
+	Sessions      healthSessionStats   `json:"sessions"`
+	WorkspaceID   string               `json:"workspace_id"`
+	WorkspaceName string               `json:"workspace_name"`
+	System        map[string]any       `json:"system"`
+	Goroutines    int                  `json:"goroutines"`
+	Watchdog      healthWatchdogStats  `json:"watchdog"`
+	WSDropped     *int64               `json:"ws_dropped,omitempty"`
+	Dispatch      *healthDispatchStats `json:"dispatch,omitempty"`
+	CLIAvailable  bool                 `json:"cli_available"`
+	Nodes         map[string]string    `json:"nodes,omitempty"`
+	Platforms     map[string]string    `json:"platforms"`
+}
+
+// healthResp is the JSON response for /health. Prior code built a
+// map[string]any per probe (14 interface{} box ops on the hot 1 Hz polling
+// path); this named struct is stack-allocated with a lazy pointer for the
+// authenticated sub-section. Marshals byte-identically to the old shape.
+// R60-PERF-001 / R60-PERF-008.
+type healthResp struct {
+	Status string `json:"status"`
+	Uptime string `json:"uptime"`
+	// Anonymous pointer embed: json package promotes non-nil pointer's
+	// fields into the enclosing object, so authenticated probes get the
+	// exact same top-level keys as before while unauthenticated probes
+	// serialize down to just status/uptime.
+	*healthAuthSection
+}
+
 func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
-	resp := map[string]any{
-		"status": "ok",
-		"uptime": time.Since(h.startedAt).Round(time.Second).String(),
+	resp := healthResp{
+		Status: "ok",
+		Uptime: time.Since(h.startedAt).Round(time.Second).String(),
 	}
-	// Extended system info only for authenticated requests
-	if h.auth.isAuthenticated(r) {
-		active, total := h.router.Stats()
-		resp["sessions"] = healthSessionStats{Active: active, Total: total}
-		resp["workspace_id"] = h.workspaceID
-		resp["workspace_name"] = h.workspaceName
-		resp["system"] = systemInfo()
-		resp["goroutines"] = runtime.NumGoroutine()
-		resp["watchdog"] = healthWatchdogStats{
+	if !h.auth.isAuthenticated(r) {
+		writeJSON(w, resp)
+		return
+	}
+
+	active, total := h.router.Stats()
+	auth := &healthAuthSection{
+		Sessions:      healthSessionStats{Active: active, Total: total},
+		WorkspaceID:   h.workspaceID,
+		WorkspaceName: h.workspaceName,
+		System:        systemInfo(),
+		Goroutines:    runtime.NumGoroutine(),
+		Watchdog: healthWatchdogStats{
 			NoOutputKills:   h.watchdogNoOut.Load(),
 			TotalKills:      h.watchdogTotal.Load(),
 			NoOutputTimeout: h.noOutputTimeoutStr,
 			TotalTimeout:    h.totalTimeoutStr,
-		}
-		if h.hubDropped != nil {
-			resp["ws_dropped"] = h.hubDropped()
-		}
-		if h.dispatcherMetrics != nil {
-			msgs, replyErrs, sendFails, lastReply := h.dispatcherMetrics()
-			dispatch := healthDispatchStats{
-				MessageCount:    msgs,
-				ReplyErrorCount: replyErrs,
-				SendFailCount:   sendFails,
-			}
-			if !lastReply.IsZero() {
-				dispatch.LastReplySuccessAt = lastReply.UTC().Format(time.RFC3339)
-				dispatch.LastReplySuccessAgo = time.Since(lastReply).Round(time.Second).String()
-			}
-			resp["dispatch"] = dispatch
-		}
-
-		// Check CLI binary availability
-		cliOK := true
-		if _, err := os.Stat(h.router.CLIPath()); err != nil {
-			cliOK = false
-		}
-		resp["cli_available"] = cliOK
-
-		// Node connection status
-		if kn := h.nodeAccess.KnownNodes(); len(kn) > 0 {
-			nodeStatus := make(map[string]string, len(kn))
-			for id := range kn {
-				if nc, ok := h.nodeAccess.GetNode(id); ok {
-					nodeStatus[id] = nc.Status()
-				} else {
-					nodeStatus[id] = "disconnected"
-				}
-			}
-			resp["nodes"] = nodeStatus
-		}
-
-		// Platform status
-		platStatus := make(map[string]string, len(h.platforms))
-		for name := range h.platforms {
-			platStatus[name] = "registered"
-		}
-		resp["platforms"] = platStatus
+		},
+		CLIAvailable: cliAvailable(h.router.CLIPath()),
 	}
+	if h.hubDropped != nil {
+		n := h.hubDropped()
+		auth.WSDropped = &n
+	}
+	if h.dispatcherMetrics != nil {
+		msgs, replyErrs, sendFails, lastReply := h.dispatcherMetrics()
+		d := &healthDispatchStats{
+			MessageCount:    msgs,
+			ReplyErrorCount: replyErrs,
+			SendFailCount:   sendFails,
+		}
+		if !lastReply.IsZero() {
+			d.LastReplySuccessAt = lastReply.UTC().Format(time.RFC3339)
+			d.LastReplySuccessAgo = time.Since(lastReply).Round(time.Second).String()
+		}
+		auth.Dispatch = d
+	}
+	if kn := h.nodeAccess.KnownNodes(); len(kn) > 0 {
+		nodeStatus := make(map[string]string, len(kn))
+		for id := range kn {
+			if nc, ok := h.nodeAccess.GetNode(id); ok {
+				nodeStatus[id] = nc.Status()
+			} else {
+				nodeStatus[id] = "disconnected"
+			}
+		}
+		auth.Nodes = nodeStatus
+	}
+	platStatus := make(map[string]string, len(h.platforms))
+	for name := range h.platforms {
+		platStatus[name] = "registered"
+	}
+	auth.Platforms = platStatus
+
+	resp.healthAuthSection = auth
 	writeJSON(w, resp)
+}
+
+// cliAvailable reports whether the CLI binary at path is stat-able. Extracted
+// so handleHealth reads linearly without branching on `err != nil` for a single
+// boolean — cleaner when the rest of the handler is struct initialization.
+func cliAvailable(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 // systemInfo returns compact system fingerprint for the workspace info bar.
