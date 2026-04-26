@@ -260,10 +260,14 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 
 	// Detect mid-turn: if the last replayed event is not a turn-complete marker,
 	// the CLI is actively processing and state should be Running (not Ready).
+	// Also arm reconnectedMidTurn so readLoop's stray-result handler will
+	// transition State back to Ready when the CLI finishes without anyone
+	// calling Send() on this reattached process.
 	if isMidTurn(replays, proto) {
 		proc.mu.Lock()
 		proc.State = StateRunning
 		proc.mu.Unlock()
+		proc.reconnectedMidTurn.Store(true)
 	}
 
 	return proc, replays, nil

@@ -40,6 +40,10 @@ type processIface interface {
 	// Dashboard introspection
 	GetSessionID() string
 	GetState() cli.ProcessState
+	// DeathReason returns the process-level reason string recorded when the
+	// shim-backed CLI exited (passive death). Empty while alive or when the
+	// reason has not been classified yet.
+	DeathReason() string
 	TotalCost() float64
 	EventEntries() []cli.EventEntry
 	EventLastN(n int) []cli.EventEntry
@@ -275,10 +279,20 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	// indirect call per event on the Send path.
 	result, err := proc.Send(ctx, text, images, onEvent)
 	if err != nil {
-		if errors.Is(err, cli.ErrNoOutputTimeout) {
+		switch {
+		case errors.Is(err, cli.ErrNoOutputTimeout):
 			s.deathReason.Store("no_output_timeout")
-		} else if errors.Is(err, cli.ErrTotalTimeout) {
+		case errors.Is(err, cli.ErrTotalTimeout):
 			s.deathReason.Store("total_timeout")
+		case errors.Is(err, cli.ErrProcessExited):
+			// Prefer the precise reason recorded by readLoop (e.g.
+			// cli_exited_code_1, shim_eof, readloop_panic) over a generic
+			// "process_exited" so operators can tell a crash from a clean exit.
+			reason := "process_exited"
+			if dr := proc.DeathReason(); dr != "" {
+				reason = dr
+			}
+			s.deathReason.Store(reason)
 		}
 		return nil, err
 	}

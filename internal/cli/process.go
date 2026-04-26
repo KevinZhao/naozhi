@@ -76,7 +76,12 @@ func (s ProcessState) String() string {
 	case StateRunning:
 		return "running"
 	case StateDead:
-		return "ready" // process exited; session may be resumable
+		// Was "ready" historically (session may be resumable), but that masqueraded
+		// crashed processes as idle in the dashboard — operators could not tell a
+		// passive CLI exit / shim EOF / readLoop panic from a genuine idle state.
+		// The dashboard falls back to the "new-card" dot for any unrecognised state
+		// and combines it with `dead_reason` to render a dead-card badge.
+		return "dead"
 	default:
 		return "unknown"
 	}
@@ -133,6 +138,67 @@ type Process struct {
 	// where isMidTurn set StateRunning but the CLI finished before Send was called).
 	// Protected by mu — use SetOnTurnDone to assign.
 	onTurnDone func()
+
+	// reconnectedMidTurn is set by SpawnReconnect when the last replayed event
+	// indicated the CLI was mid-turn at reconnect time. readLoop consults this
+	// flag to decide whether a stray `result` event (no active Send) should
+	// transition State Running→Ready on its own. Outside the reconnect path,
+	// the transition is owned by Send()'s defer and the readLoop must not race
+	// it — see the guard in readLoop. Loaded/stored atomically since it is
+	// cleared on the first such transition without taking p.mu.
+	reconnectedMidTurn atomic.Bool
+
+	// deathReason records why the process exited (passive death) or was killed.
+	// Written exactly once by the code path that transitions State→Dead.
+	// Read by session.ManagedSession.Send on ErrProcessExited (or via
+	// LoadDeathReason from router/dashboard). Stored string for atomic.Value
+	// lock-free reads; empty means "alive or never recorded".
+	deathReason atomic.Value
+}
+
+// Death reason labels. Kept as exported constants so session/router callers
+// can match without relying on stringly-typed literals that drift.
+const (
+	DeathReasonCLIExited     = "cli_exited"
+	DeathReasonShimEOF       = "shim_eof"
+	DeathReasonShimReadErr   = "shim_read_error"
+	DeathReasonReadLoopPanic = "readloop_panic"
+	DeathReasonKilled        = "killed"
+)
+
+// setDeathReason records the death reason if not already set. First writer wins
+// so the root cause is preserved even when readLoop's unwind triggers a second
+// transition (e.g. cli_exited → defer hits the no-reason StateDead fallback).
+//
+// Uses atomic.Value.CompareAndSwap to close the TOCTOU gap between Load and
+// Store that a naive "check-then-store" would leave open. Without CAS, two
+// concurrent death paths (panic defer vs. cli_exited handler) can both observe
+// an empty value on Load and then both Store, letting the slower goroutine
+// overwrite the earlier classification.
+func (p *Process) setDeathReason(reason string) {
+	if reason == "" {
+		return
+	}
+	// First attempt: store only if the value is still the zero interface
+	// (never set). atomic.Value.CompareAndSwap returns true on success, so a
+	// subsequent caller whose Load would have seen "" drops out here.
+	if p.deathReason.CompareAndSwap(nil, reason) {
+		return
+	}
+	// If somebody stored the empty string explicitly (not a path we take
+	// today, but cheap to tolerate), upgrade it to the real reason. Still
+	// uses CAS so we never overwrite a non-empty value.
+	_ = p.deathReason.CompareAndSwap("", reason)
+}
+
+// DeathReason returns the recorded death reason, or "" if alive or unset.
+func (p *Process) DeathReason() string {
+	if cur := p.deathReason.Load(); cur != nil {
+		if s, ok := cur.(string); ok {
+			return s
+		}
+	}
+	return ""
 }
 
 // newShimProcess creates a Process connected to a shim.
@@ -346,9 +412,14 @@ func (p *Process) readLoop() {
 		if r := recover(); r != nil {
 			slog.Error("readLoop panic recovered",
 				"panic", r, "stack", string(debug.Stack()))
+			p.setDeathReason(DeathReasonReadLoopPanic)
 			p.mu.Lock()
 			p.State = StateDead
+			cb := p.onTurnDone
 			p.mu.Unlock()
+			if cb != nil {
+				cb()
+			}
 		}
 	}()
 	defer close(p.eventCh)
@@ -413,8 +484,10 @@ func (p *Process) readLoop() {
 			if readErr != nil {
 				if errors.Is(readErr, io.EOF) || errors.Is(readErr, net.ErrClosed) {
 					slog.Info("readLoop: shim connection closed after oversize drain")
+					p.setDeathReason(DeathReasonShimEOF)
 				} else {
 					slog.Warn("readLoop: shim read error after oversize drain", "err", readErr)
+					p.setDeathReason(DeathReasonShimReadErr)
 				}
 				break
 			}
@@ -423,8 +496,10 @@ func (p *Process) readLoop() {
 		if readErr != nil {
 			if errors.Is(readErr, io.EOF) || errors.Is(readErr, net.ErrClosed) {
 				slog.Info("readLoop: shim connection closed")
+				p.setDeathReason(DeathReasonShimEOF)
 			} else {
 				slog.Warn("readLoop: shim read error", "err", readErr)
+				p.setDeathReason(DeathReasonShimReadErr)
 			}
 			break
 		}
@@ -476,7 +551,17 @@ func (p *Process) readLoop() {
 			// after shim reconnect set state to Running via isMidTurn but
 			// the CLI finished before anyone called Send), transition
 			// back to Ready so the dashboard doesn't show a stale "running".
-			if ev.Type == "result" {
+			//
+			// The transition is gated on reconnectedMidTurn: outside the
+			// reconnect path, State=Running means Send() is actively waiting
+			// for this result and owns the State→Ready transition via its
+			// defer. Racing readLoop into that transition briefly flips the
+			// dashboard to "ready" before Send() returns, and — worse — lets a
+			// concurrent Send() start immediately after Send() unlocks mu but
+			// before its defer runs. The flag is one-shot: consumed on first
+			// stray-result here so a genuine next-turn Send() after reconnect
+			// is not confused with another stray result.
+			if ev.Type == "result" && p.reconnectedMidTurn.CompareAndSwap(true, false) {
 				p.mu.Lock()
 				wasRunning := p.State == StateRunning
 				if wasRunning {
@@ -491,9 +576,14 @@ func (p *Process) readLoop() {
 
 			select {
 			case <-p.killCh:
+				p.setDeathReason(DeathReasonKilled)
 				p.mu.Lock()
 				p.State = StateDead
+				cb := p.onTurnDone
 				p.mu.Unlock()
+				if cb != nil {
+					cb()
+				}
 				return
 			default:
 			}
@@ -519,9 +609,20 @@ func (p *Process) readLoop() {
 				code = *msg.Code
 			}
 			slog.Info("CLI exited via shim", "code", code)
+			reason := DeathReasonCLIExited
+			if code != 0 {
+				reason = fmt.Sprintf("%s_code_%d", DeathReasonCLIExited, code)
+			} else if msg.Signal != "" {
+				reason = fmt.Sprintf("%s_signal_%s", DeathReasonCLIExited, msg.Signal)
+			}
+			p.setDeathReason(reason)
 			p.mu.Lock()
 			p.State = StateDead
+			cb := p.onTurnDone
 			p.mu.Unlock()
+			if cb != nil {
+				cb()
+			}
 			// Close shim conn so heartbeatLoop stops writing pings into a dead
 			// socket and the bufio.Writer's fd is released promptly. Without
 			// this, if the process isn't subsequently Kill/Detach'd (e.g. when
@@ -542,9 +643,18 @@ func (p *Process) readLoop() {
 		}
 	}
 
+	// readLoop fell out of the read loop without hitting cli_exited — the
+	// caller-facing reason was already recorded above when the read error was
+	// classified (shim EOF / read error / drained). If none of those paths
+	// fired, Kill() was what unblocked ReadSlice via shimConn.Close, which
+	// surfaces as net.ErrClosed and is already classified as DeathReasonShimEOF.
 	p.mu.Lock()
 	p.State = StateDead
+	cb := p.onTurnDone
 	p.mu.Unlock()
+	if cb != nil {
+		cb()
+	}
 }
 
 // heartbeatLoop sends periodic ping messages to the shim and kills the process

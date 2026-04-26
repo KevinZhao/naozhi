@@ -8,10 +8,11 @@ import (
 
 // TestProcess is a mock processIface for use in tests outside the session package.
 type TestProcess struct {
-	EventLog *cli.EventLog
-	StateVal cli.ProcessState
-	AliveVal bool
-	SendFunc func(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+	EventLog       *cli.EventLog
+	StateVal       cli.ProcessState
+	AliveVal       bool
+	DeathReasonVal string
+	SendFunc       func(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
 }
 
 // NewTestProcess creates a TestProcess with an event log and ready state.
@@ -39,6 +40,7 @@ func (p *TestProcess) Send(ctx context.Context, text string, images []cli.ImageD
 
 func (p *TestProcess) GetSessionID() string              { return "" }
 func (p *TestProcess) GetState() cli.ProcessState        { return p.StateVal }
+func (p *TestProcess) DeathReason() string               { return p.DeathReasonVal }
 func (p *TestProcess) TotalCost() float64                { return 0 }
 func (p *TestProcess) EventEntries() []cli.EventEntry    { return p.EventLog.Entries() }
 func (p *TestProcess) EventLastN(n int) []cli.EventEntry { return p.EventLog.LastN(n) }

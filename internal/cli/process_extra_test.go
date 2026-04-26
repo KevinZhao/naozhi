@@ -708,10 +708,13 @@ func TestProcess_SetOnTurnDone(t *testing.T) {
 		}
 	})
 
-	// Set state to Running so result event triggers callback
+	// Set state to Running and arm reconnectedMidTurn to simulate the
+	// post-reconnect path where readLoop owns the State→Ready transition.
+	// Outside reconnect, Send() owns the transition (see readLoop guard).
 	p.mu.Lock()
 	p.State = StateRunning
 	p.mu.Unlock()
+	p.reconnectedMidTurn.Store(true)
 
 	srv.SendStdout(`{"type":"result","result":"done","session_id":"s1"}`)
 
@@ -719,6 +722,71 @@ func TestProcess_SetOnTurnDone(t *testing.T) {
 	case <-called:
 	case <-time.After(2 * time.Second):
 		t.Fatal("onTurnDone was not called after result event with StateRunning")
+	}
+}
+
+// TestProcess_ResultDoesNotFlipStateWithoutReconnect verifies the Send-path
+// guarantee: in the non-reconnect scenario, a `result` event must not flip
+// State from Running to Ready in readLoop. Send() owns that transition via
+// its defer; a readLoop-side transition would race Send() and briefly expose
+// "ready" in the dashboard while sendMu is still held.
+func TestProcess_ResultDoesNotFlipStateWithoutReconnect(t *testing.T) {
+	p, srv := shimTestPair(&ClaudeProtocol{})
+	startServerDrain(srv)
+	p.startReadLoop()
+	defer p.Kill()
+
+	cbCalled := make(chan struct{}, 1)
+	p.SetOnTurnDone(func() {
+		select {
+		case cbCalled <- struct{}{}:
+		default:
+		}
+	})
+
+	// Simulate Send() acquiring the turn: Ready → Running, but do NOT arm
+	// reconnectedMidTurn. This is the normal path.
+	p.mu.Lock()
+	p.State = StateRunning
+	p.mu.Unlock()
+
+	srv.SendStdout(`{"type":"result","result":"done","session_id":"s1"}`)
+
+	select {
+	case <-cbCalled:
+		t.Fatal("onTurnDone was called on a non-reconnect result; readLoop must not race Send() for the State transition")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if s := p.GetState(); s != StateRunning {
+		t.Errorf("State = %v after result without reconnect arm, want StateRunning (Send owns the transition)", s)
+	}
+}
+
+// TestProcess_DeathReason_FirstWriterWins exercises setDeathReason under
+// concurrent writers. With the CAS-backed implementation, the first reason
+// to be stored must survive; without it, last-writer-wins would silently
+// reclassify (e.g. readloop_panic overwritten by shim_eof from the unwind).
+func TestProcess_DeathReason_FirstWriterWins(t *testing.T) {
+	p, srv := shimTestPair(&ClaudeProtocol{})
+	defer srv.Close()
+	defer p.Kill()
+
+	p.setDeathReason(DeathReasonReadLoopPanic)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 16; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.setDeathReason(DeathReasonShimEOF)
+			p.setDeathReason(DeathReasonShimReadErr)
+			p.setDeathReason(DeathReasonCLIExited)
+		}()
+	}
+	wg.Wait()
+
+	if got := p.DeathReason(); got != DeathReasonReadLoopPanic {
+		t.Errorf("DeathReason() = %q, want %q (first writer must win)", got, DeathReasonReadLoopPanic)
 	}
 }
 

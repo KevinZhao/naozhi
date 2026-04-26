@@ -527,7 +527,11 @@ function sessionCardHtml(s) {
   const isActive = selectedKey === s.key && selectedNode === sNode;
   const isNew = s.state === 'new';
   const isCron = typeof s.key === 'string' && s.key.indexOf('cron:') === 0;
-  const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '') + (isCron ? ' cron-card' : '');
+  // Mirror the onSessionState dead-card rule: state='dead' OR legacy
+  // (state='ready' + death_reason). Without this, a snapshot render after
+  // reload shows the death reason text but no dimmed card styling.
+  const isDead = s.state === 'dead' || (s.state === 'ready' && !!s.death_reason);
+  const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '') + (isCron ? ' cron-card' : '') + (isDead ? ' dead-card' : '');
 
   // Line 1: prompt. user_label (operator-set via rename) wins over any
   // auto-derived title so the rename is visible immediately across refreshes.
@@ -4575,7 +4579,13 @@ const wsm = {
     if (card) {
       const badge = card.querySelector('.badge');
       if (badge) { badge.className = 'badge ' + msg.state; badge.textContent = msg.state; }
-      card.classList.toggle('dead-card', msg.state === 'ready' && !!sessionsData[sKey]?.death_reason);
+      // Dead-card fires for either:
+      //  - state='dead' (backend now distinguishes exited processes explicitly), or
+      //  - state='ready' + death_reason (older path: process exited but session
+      //    layer marked it idle_timeout/evicted; still render as dead-card so the
+      //    operator sees the reason).
+      const isDead = msg.state === 'dead' || (msg.state === 'ready' && !!sessionsData[sKey]?.death_reason);
+      card.classList.toggle('dead-card', isDead);
       // Update sidebar dot and state text to reflect new state immediately.
       // sessionCardHtml renders .sc-dot with dot-running/dot-ready/dot-new,
       // but onSessionState previously only patched .badge (which doesn't exist

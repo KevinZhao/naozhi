@@ -496,7 +496,7 @@ func TestProcessStateString(t *testing.T) {
 		{StateSpawning, "running"},
 		{StateReady, "ready"},
 		{StateRunning, "running"},
-		{StateDead, "ready"},
+		{StateDead, "dead"},
 		{ProcessState(99), "unknown"},
 	}
 

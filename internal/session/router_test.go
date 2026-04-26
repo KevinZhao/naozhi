@@ -99,6 +99,8 @@ func (f *fakeProcess) TotalCost() float64 {
 	defer f.mu.Unlock()
 	return f.totalCost
 }
+
+func (f *fakeProcess) DeathReason() string { return "" }
 func (f *fakeProcess) EventEntries() []cli.EventEntry {
 	f.mu.Lock()
 	defer f.mu.Unlock()
