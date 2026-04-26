@@ -766,23 +766,27 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			slog.Info("orphan shim found, shutting down", "key", state.Key)
 			// Connect briefly to send shutdown. Bound the reconnect so a
 			// hung shim socket cannot stall NewRouter startup — we fall
-			// through to SIGUSR2 if the timeout fires.
-			rctx, rcancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
-			var (
-				handle  *shim.ShimHandle
-				connErr error
-			)
-			if recWrapper != nil && recWrapper.ShimManager != nil {
-				handle, connErr = recWrapper.ShimManager.Reconnect(rctx, state.Key, 0)
-			} else {
-				connErr = fmt.Errorf("no shim manager for backend %q", state.Backend)
-			}
-			rcancel()
-			if connErr == nil {
-				handle.Shutdown()
-			} else {
-				syscall.Kill(state.ShimPID, syscall.SIGUSR2) //nolint:errcheck
-			}
+			// through to SIGUSR2 if the timeout fires. IIFE + defer so
+			// rcancel always runs even if Reconnect or Shutdown panics
+			// (R32-REL1).
+			func() {
+				rctx, rcancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
+				defer rcancel()
+				var (
+					handle  *shim.ShimHandle
+					connErr error
+				)
+				if recWrapper != nil && recWrapper.ShimManager != nil {
+					handle, connErr = recWrapper.ShimManager.Reconnect(rctx, state.Key, 0)
+				} else {
+					connErr = fmt.Errorf("no shim manager for backend %q", state.Backend)
+				}
+				if connErr == nil {
+					handle.Shutdown()
+				} else {
+					syscall.Kill(state.ShimPID, syscall.SIGUSR2) //nolint:errcheck
+				}
+			}()
 			continue
 		}
 
@@ -818,12 +822,15 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				"key", state.Key,
 				"old_args_len", len(storedBase),
 				"new_args_len", len(currentArgs))
-			rctx, rcancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
-			handle, err := recWrapper.ShimManager.Reconnect(rctx, state.Key, 0)
-			rcancel()
-			if err == nil {
-				handle.Shutdown()
-			}
+			// IIFE + defer ensures rcancel runs even on panic (R32-REL1).
+			func() {
+				rctx, rcancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
+				defer rcancel()
+				handle, err := recWrapper.ShimManager.Reconnect(rctx, state.Key, 0)
+				if err == nil {
+					handle.Shutdown()
+				}
+			}()
 			continue
 		}
 

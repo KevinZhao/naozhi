@@ -79,8 +79,23 @@ func (a *AuthHandlers) isAuthenticated(r *http.Request) bool {
 }
 
 // requireAuth is an HTTP middleware that rejects unauthenticated requests.
+//
+// State-changing methods additionally pass through a same-origin gate
+// (sameOriginOK) so a cross-origin attacker on a sibling subdomain
+// (evil.naozhi-host.example) cannot ride a victim's auth cookie through a
+// hidden `fetch('...', {credentials:'include'})`. Safe methods (GET/HEAD/
+// OPTIONS) skip the gate so bookmarks and preflight still work. The gate
+// allows callers with no Origin / Referer header (curl, server scripts) —
+// those can't carry a browser's session cookies. R31-SEC1 / R26-SEC1.
 func (a *AuthHandlers) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		if !isSafeMethod(r.Method) && !sameOriginOK(r, a.trustedProxy) {
+			slog.Warn("rejecting cross-origin mutating request",
+				"method", r.Method, "path", r.URL.Path,
+				"origin", r.Header.Get("Origin"), "host", r.Host)
+			http.Error(w, "cross-origin request refused", http.StatusForbidden)
+			return
+		}
 		if !a.isAuthenticated(r) {
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -118,6 +133,18 @@ func (a *AuthHandlers) isSecure(r *http.Request) bool {
 }
 
 func (a *AuthHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
+	// handleLogin sits outside requireAuth (it's the endpoint that GRANTS
+	// auth), so apply the same-origin gate manually. A cross-origin login
+	// form post cannot be exploited for CSRF (attacker would need to know
+	// the user's token), but still enforce for consistency and to catch
+	// misconfigured reverse proxies before they send secrets around.
+	// R31-SEC1 / R26-SEC1.
+	if !sameOriginOK(r, a.trustedProxy) {
+		slog.Warn("rejecting cross-origin login attempt",
+			"origin", r.Header.Get("Origin"), "host", r.Host)
+		http.Error(w, "cross-origin request refused", http.StatusForbidden)
+		return
+	}
 	ip := a.clientIP(r)
 	if !a.loginAllow(ip) {
 		w.Header().Set("Content-Type", "application/json")

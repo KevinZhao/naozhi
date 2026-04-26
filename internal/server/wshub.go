@@ -8,8 +8,6 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
-	"net/url"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -152,31 +150,12 @@ func NewHub(opts HubOptions) *Hub {
 		cancel:        cancel,
 	}
 	h.upgrader = websocket.Upgrader{
-		CheckOrigin: func(r *http.Request) bool {
-			origin := r.Header.Get("Origin")
-			if origin == "" {
-				return true // same-origin requests omit Origin
-			}
-			u, err := url.Parse(origin)
-			if err != nil {
-				return false
-			}
-			// When behind a trusted proxy (e.g. CloudFront), the upstream Host
-			// is rewritten to the origin hostname, so r.Host no longer matches
-			// the browser-visible Origin. Fall back to X-Forwarded-Host, which
-			// the trusted proxy controls — trusted_proxy=true is the operator's
-			// explicit statement that this header can be trusted.
-			host := r.Host
-			if h.trustedProxy {
-				if fwd := r.Header.Get("X-Forwarded-Host"); fwd != "" {
-					// RFC 7239 permits whitespace around commas; trim so a
-					// proxy emitting "host.example , other.example" still
-					// matches r.Host on the comparison below.
-					host = strings.TrimSpace(strings.SplitN(fwd, ",", 2)[0])
-				}
-			}
-			return u.Host == host
-		},
+		// Delegate to the shared sameOriginOK helper so WS upgrade and the
+		// HTTP requireAuth CSRF gate stay in lockstep. The helper already
+		// treats empty Origin as permitted (same-origin browsers omit it,
+		// non-browser callers don't carry cookies), honours trustedProxy's
+		// X-Forwarded-Host fallback, and rejects the opaque "null" origin.
+		CheckOrigin:     func(r *http.Request) bool { return sameOriginOK(r, h.trustedProxy) },
 		ReadBufferSize:  8192,
 		WriteBufferSize: 8192,
 	}
