@@ -2527,24 +2527,6 @@ func (r *Router) InterruptSessionViaControl(key string) InterruptOutcome {
 	return s.InterruptViaControl()
 }
 
-// ActiveSessionIDs returns the set of session IDs currently managed by the router,
-// including their full session chains. Pruned historical sessions are NOT included,
-// allowing them to reappear as resumable recent sessions in the dashboard.
-func (r *Router) ActiveSessionIDs() map[string]bool {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	ids := make(map[string]bool, len(r.sessions)*3)
-	for _, s := range r.sessions {
-		if id := s.getSessionID(); id != "" {
-			ids[id] = true
-		}
-		for _, id := range s.prevSessionIDs {
-			ids[id] = true
-		}
-	}
-	return ids
-}
-
 // DiscoveryExcludeIDs returns session IDs to exclude from filesystem discovery.
 // Only sessions with a running process are excluded to prevent duplicates.
 // Suspended sessions (no process) are allowed through so their underlying
