@@ -44,6 +44,55 @@ type watchdogStats struct {
 	TotalKills    int64 `json:"total_kills"`
 }
 
+// sessionStatsStatic holds the subset of /api/sessions.stats fields that are
+// immutable after server startup. Pre-built once by initStaticStats and then
+// embedded (by value) into sessionStats on every poll — the copy is a
+// fixed-size struct on the stack, not a 9-key map clone with per-key
+// interface{} boxing like the previous map[string]any implementation.
+// Embedding keeps the JSON output flat (all fields promoted to top-level of
+// the "stats" object), preserving byte-identical shape with the prior
+// map-based response for dashboard.js and any curl/monitoring consumers.
+//
+// `system` stays a map[string]any to reuse initStaticStats's deep-copy path
+// (the systemInfo() singleton map is process-wide and must not alias into
+// per-response allocations; see initStaticStats comments). Keeping the field
+// typed as a map preserves that contract while still collapsing the rest of
+// the stats object to a struct. R70-PERF-H1 / R68-PERF-H3 / R59-PERF-001 /
+// R51-PERF-005 / R49-PERF-STATS-STRUCT / R43-PERF-P43-1 / R54-PERF-001
+// (all the same underlying hot-path alloc).
+type sessionStatsStatic struct {
+	Backend          string         `json:"backend"`
+	CLIName          string         `json:"cli_name"`
+	CLIVersion       string         `json:"cli_version"`
+	MaxProcs         int            `json:"max_procs"`
+	DefaultWorkspace string         `json:"default_workspace"`
+	WorkspaceID      string         `json:"workspace_id"`
+	WorkspaceName    string         `json:"workspace_name"`
+	System           map[string]any `json:"system"`
+	Agents           []string       `json:"agents"`
+}
+
+// sessionStats is the full "stats" sub-object returned from GET /api/sessions.
+// Prior code built this as a 12+ key map[string]any literal on every poll;
+// this named struct holds the static subset by anonymous embed (JSON fields
+// promote flat) and the dynamic counters + version + uptime + watchdog
+// inline, with `projects` omitempty when the dashboard has no configured
+// projects. Marshals byte-identically to the prior map shape so dashboard.js
+// consumers (stats.agents / stats.default_workspace / stats.projects /
+// stats.cli_name / stats.cli_version / stats.workspace_id / stats.workspace_name
+// / stats.system / stats.version) see the same keys in the same order.
+type sessionStats struct {
+	sessionStatsStatic
+	Active   int                `json:"active"`
+	Running  int                `json:"running"`
+	Ready    int                `json:"ready"`
+	Total    int                `json:"total"`
+	Version  uint64             `json:"version"`
+	Uptime   string             `json:"uptime"`
+	Watchdog watchdogStats      `json:"watchdog"`
+	Projects []projectListEntry `json:"projects,omitempty"`
+}
+
 // nodeStatusEntry is the per-node element in /api/sessions "nodes".
 // Named struct (vs map[string]any{...}) eliminates N inner-map allocs and
 // interface{} boxing on every 1 Hz dashboard poll. `omitempty` on
@@ -119,11 +168,12 @@ type SessionHandlers struct {
 
 	// staticStats pre-builds the subset of /api/sessions stats fields that
 	// are immutable after startup (backend, cli_name, workspace_*, system,
-	// agents, watchdog). handleList shallow-copies this map on each poll
-	// instead of re-building the 12+ key map literal, which avoids per-key
-	// interface{} boxing and nested map allocs on the dashboard hot path.
+	// agents). handleList copies this struct by value on each poll instead
+	// of rebuilding a 9-key map literal — a struct copy is a single
+	// stack-local memmove vs per-key interface{} boxing + map bucket alloc.
 	// Initialized once by initStaticStats() after all fields are set.
-	staticStats map[string]any
+	// Round 79 upgrade from map[string]any → named struct.
+	staticStats sessionStatsStatic
 	// staticStatsOnce enforces the "initStaticStats called exactly once"
 	// contract structurally. A test double or future refactor that calls
 	// initStaticStats twice would otherwise race with concurrent handleList
@@ -247,31 +297,25 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 
 	active, total := h.router.Stats()
 
-	// Shallow-copy the pre-built staticStats (backend/cli/workspace/system/
-	// agents are immutable after startup) and overlay the six dynamic fields.
-	// Watchdog is a stack-allocated struct (fixed 2-field shape) so we avoid
-	// the per-poll map[string]any alloc the previous inline literal paid.
-	// R58-PERF-F2.
-	//
-	// Defensive nil check: initStaticStats is called from server.New before
-	// requests arrive, but a future refactor (or test double constructing
-	// SessionHandlers by hand) could skip it. Treat nil as an empty map so
-	// the response still carries the dynamic fields rather than panicking on
-	// a missing caller-required `agents`/`system` key. R60-GO-L3.
-	staticLen := len(h.staticStats)
-	stats := make(map[string]any, staticLen+6)
-	for k, v := range h.staticStats {
-		stats[k] = v
-	}
-	stats["active"] = active
-	stats["running"] = running
-	stats["ready"] = ready
-	stats["total"] = total
-	stats["version"] = version
-	stats["uptime"] = h.uptimeStringAt(now)
-	stats["watchdog"] = watchdogStats{
-		NoOutputKills: h.watchdogNoOut.Load(),
-		TotalKills:    h.watchdogTotal.Load(),
+	// Build stats as a named struct (sessionStats). The immutable sub-struct
+	// (backend/cli/workspace/system/agents) is copied by value from
+	// h.staticStats — a single stack memmove, zero heap alloc. Dynamic
+	// counters + uptime + watchdog assign directly to struct fields so
+	// there is no per-poll map-literal + interface{} boxing like the prior
+	// map[string]any implementation. R70-PERF-H1 / R68-PERF-H3 / R59-PERF-001 /
+	// R51-PERF-005 / R49-PERF-STATS-STRUCT / R43-PERF-P43-1 / R54-PERF-001.
+	stats := sessionStats{
+		sessionStatsStatic: h.staticStats,
+		Active:             active,
+		Running:            running,
+		Ready:              ready,
+		Total:              total,
+		Version:            version,
+		Uptime:             h.uptimeStringAt(now),
+		Watchdog: watchdogStats{
+			NoOutputKills: h.watchdogNoOut.Load(),
+			TotalKills:    h.watchdogTotal.Load(),
+		},
 	}
 
 	// Include project list for dashboard sidebar rendering.
@@ -328,7 +372,7 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if len(projectList) > 0 {
-		stats["projects"] = projectList
+		stats.Projects = projectList
 	}
 
 	// Take a snapshot of nodes under lock for thread-safe access
@@ -854,10 +898,11 @@ func (h *SessionHandlers) initStaticStats() {
 }
 
 func (h *SessionHandlers) doInitStaticStats() {
-	// Deep-copy systemInfo()'s singleton map: handleList shallow-copies
-	// staticStats into a per-response map, so the "system" entry would
-	// otherwise be aliased across every response. A future maintainer adding
-	// a mutable system field (e.g. network counters) would then silently
+	// Deep-copy systemInfo()'s singleton map: handleList copies the
+	// sessionStatsStatic struct by value on each poll, but the System map
+	// field is a reference type — without the deep copy here every poll
+	// response would alias the singleton. A future maintainer adding a
+	// mutable system field (e.g. network counters) would then silently
 	// introduce a data race across the dashboard hot path. Breaking the
 	// alias at initialisation enforces the read-only contract structurally.
 	sysSrc := systemInfo()
@@ -873,16 +918,16 @@ func (h *SessionHandlers) doInitStaticStats() {
 	// R58-GO-M2.
 	agentsCopy := make([]string, len(h.agentIDs))
 	copy(agentsCopy, h.agentIDs)
-	h.staticStats = map[string]any{
-		"backend":           h.backendTag,
-		"cli_name":          h.router.CLIName(),
-		"cli_version":       h.router.CLIVersion(),
-		"max_procs":         h.router.MaxProcs(),
-		"default_workspace": h.router.DefaultWorkspace(),
-		"workspace_id":      h.workspaceID,
-		"workspace_name":    h.workspaceName,
-		"system":            sysCopy,
-		"agents":            agentsCopy,
+	h.staticStats = sessionStatsStatic{
+		Backend:          h.backendTag,
+		CLIName:          h.router.CLIName(),
+		CLIVersion:       h.router.CLIVersion(),
+		MaxProcs:         h.router.MaxProcs(),
+		DefaultWorkspace: h.router.DefaultWorkspace(),
+		WorkspaceID:      h.workspaceID,
+		WorkspaceName:    h.workspaceName,
+		System:           sysCopy,
+		Agents:           agentsCopy,
 	}
 }
 
