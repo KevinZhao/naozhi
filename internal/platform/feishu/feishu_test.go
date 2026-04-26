@@ -405,8 +405,18 @@ func TestParseSDKEvent_AudioMessage_EmptyKey(t *testing.T) {
 
 // --- Webhook HTTP handler tests ---
 
+// makeWebhookFeishu returns a webhook-mode Feishu. It auto-fills
+// VerificationToken if the caller left both auth fields empty, because the
+// R67-SEC-9 defense gate now refuses zero-credential handler invocations
+// outright — without at least one credential, every subsequent test would
+// hit 503. Existing tests that want to drive the gate from the opposite
+// direction (TestHandleWebhook_RefusesZeroCredential) construct Feishu
+// directly via New() rather than going through this helper.
 func makeWebhookFeishu(cfg Config) *Feishu {
 	cfg.ConnectionMode = "webhook"
+	if cfg.VerificationToken == "" && cfg.EncryptKey == "" {
+		cfg.VerificationToken = "test_token"
+	}
 	return New(cfg, nil)
 }
 
@@ -438,12 +448,15 @@ func buildV2MessageBody(eventID, chatID, chatType, text string) []byte {
 }
 
 func TestWebhook_Challenge(t *testing.T) {
+	// makeWebhookFeishu defaults VerificationToken to "test_token" so the
+	// R67-SEC-9 defense gate passes; the url_verification body carries the
+	// matching token + required timestamp/nonce headers. R67-SEC-9.
 	f := makeWebhookFeishu(Config{AppID: "id", AppSecret: "secret"})
 	mux := http.NewServeMux()
 	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {})
 
-	body := `{"type":"url_verification","challenge":"test_challenge_123"}`
-	req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(body))
+	body := []byte(`{"type":"url_verification","challenge":"test_challenge_123","token":"test_token"}`)
+	req := buildTokenRequest(body)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -472,6 +485,53 @@ func TestWebhook_TokenMismatch(t *testing.T) {
 
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401 (token in body is 'test_token', configured is 'correct_token')", w.Code)
+	}
+}
+
+// TestHandleWebhook_RefusesZeroCredential is the R67-SEC-9 defense-in-depth
+// regression: even if config.validateConfig is bypassed (programmatic
+// constructor / test) and a Feishu is wired up with neither VerificationToken
+// nor EncryptKey, the handler must refuse inbound webhook requests outright
+// with 503 — otherwise the body-parse path below would skip token / signature
+// / nonce checks and process arbitrary payloads.
+func TestHandleWebhook_RefusesZeroCredential(t *testing.T) {
+	// Call New directly (not makeWebhookFeishu) so neither VerificationToken
+	// nor EncryptKey is auto-filled — we need the zero-credential state to
+	// exercise the defense gate.
+	f := New(Config{AppID: "id", AppSecret: "secret", ConnectionMode: "webhook"}, nil)
+	mux := http.NewServeMux()
+	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {})
+
+	body := `{"type":"url_verification","challenge":"c"}`
+	req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 (zero-credential must refuse)", w.Code)
+	}
+}
+
+// TestHandleWebhook_AllowsWhenVerificationTokenSet confirms the zero-credential
+// guard's inverse: once VerificationToken is set the handler enters the
+// normal token-check path (not the 503 defense gate). Paired with the
+// refusal test above so a regression that accidentally widens the guard
+// (e.g. checking AppID instead) is caught at test time. We don't assert
+// 200-OK because timestamp / nonce headers still apply on the main path;
+// the point of this assertion is that the response is NOT 503 — the request
+// reached the authenticated path rather than being refused outright.
+func TestHandleWebhook_AllowsWhenVerificationTokenSet(t *testing.T) {
+	f := makeWebhookFeishu(Config{AppID: "id", AppSecret: "secret", VerificationToken: "tok"})
+	mux := http.NewServeMux()
+	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {})
+
+	body := `{"type":"url_verification","challenge":"c","token":"tok"}`
+	req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(body))
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code == http.StatusServiceUnavailable {
+		t.Errorf("status = 503, defense gate incorrectly triggered when verification_token was set")
 	}
 }
 
@@ -570,8 +630,10 @@ func TestWebhook_NonMessageEvent(t *testing.T) {
 		called = true
 	})
 
-	body := `{"schema":"2.0","header":{"event_id":"ev_1","event_type":"im.chat.create_v1","token":""},"event":{}}`
-	req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(body))
+	// header.token must match the (auto-filled by makeWebhookFeishu)
+	// VerificationToken="test_token" to pass the R67-SEC-9 + token-match gates.
+	body := []byte(`{"schema":"2.0","header":{"event_id":"ev_1","event_type":"im.chat.create_v1","token":"test_token"},"event":{}}`)
+	req := buildTokenRequest(body)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -596,7 +658,9 @@ func TestWebhook_NonTextMessage(t *testing.T) {
 		"header": map[string]interface{}{
 			"event_id":   "ev_1",
 			"event_type": "im.message.receive_v1",
-			"token":      "",
+			// header.token must match makeWebhookFeishu's auto-filled
+			// VerificationToken="test_token" to pass the token gate. R67-SEC-9.
+			"token": "test_token",
 		},
 		"event": map[string]interface{}{
 			"sender": map[string]interface{}{
@@ -610,7 +674,7 @@ func TestWebhook_NonTextMessage(t *testing.T) {
 		},
 	}
 	b, _ := json.Marshal(body)
-	req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(string(b)))
+	req := buildTokenRequest(b)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -649,8 +713,12 @@ func TestWebhook_ValidMessage(t *testing.T) {
 		close(done)
 	})
 
+	// buildV2MessageBody sets header.token="test_token" which matches the
+	// makeWebhookFeishu auto-filled VerificationToken; timestamp + nonce
+	// headers are supplied by buildTokenRequest so the freshness + replay
+	// defenses pass. R67-SEC-9.
 	body := buildV2MessageBody("ev_valid", "oc_chat1", "group", "hello world")
-	req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(string(body)))
+	req := buildTokenRequest(body)
 	w := httptest.NewRecorder()
 	mux.ServeHTTP(w, req)
 
@@ -682,6 +750,23 @@ func TestWebhook_ValidMessage(t *testing.T) {
 
 // buildSignedRequest creates a signed POST request to /webhook/feishu with
 // the given timestamp and nonce, computing the HMAC over body.
+// buildTokenRequest assembles a webhook request for VerificationToken-only
+// mode: adds the timestamp + nonce headers required by the webhook handler's
+// freshness and replay defenses. Signature is NOT set (EncryptKey mode covers
+// that via buildSignedRequest). Each call uses a unique nonce so repeated
+// calls within a single test do not collide with the nonce-dedup cache.
+var tokenNonceCounter int64
+
+func buildTokenRequest(body []byte) *http.Request {
+	tokenNonceCounter++
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	nonce := fmt.Sprintf("tok-nonce-%d-%d", time.Now().UnixNano(), tokenNonceCounter)
+	req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(string(body)))
+	req.Header.Set("X-Lark-Request-Timestamp", timestamp)
+	req.Header.Set("X-Lark-Request-Nonce", nonce)
+	return req
+}
+
 func buildSignedRequest(t *testing.T, body []byte, timestamp, nonce, encryptKey string) *http.Request {
 	t.Helper()
 	sigContent := timestamp + nonce + encryptKey + string(body)

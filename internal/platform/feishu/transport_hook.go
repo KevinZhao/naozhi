@@ -17,6 +17,19 @@ import (
 func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHandler) {
 	mux.HandleFunc("POST /webhook/feishu", func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
+		// Defense-in-depth: refuse zero-credential webhook invocations even if
+		// config.validateConfig has been bypassed (e.g. programmatic constructor
+		// in tests or a future refactor). Without at least one of VerificationToken
+		// or EncryptKey set, the handler below would skip token/signature/nonce
+		// checks and happily process arbitrary events. config.validateConfig
+		// already rejects this combination at startup for webhook mode; this
+		// second gate ensures the invariant holds even if that refusal is
+		// skipped or weakened. R67-SEC-9.
+		if f.cfg.VerificationToken == "" && f.cfg.EncryptKey == "" {
+			slog.Error("feishu webhook refused: no verification_token or encrypt_key configured")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			return
+		}
 		// Read up to maxBody+1 so we can distinguish "exactly maxBody" (legal)
 		// from "exceeds maxBody" (silently truncated). A truncated body would
 		// deserialize into malformed/empty JSON and drop the event silently;

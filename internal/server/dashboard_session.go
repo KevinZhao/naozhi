@@ -55,6 +55,24 @@ type nodeStatusEntry struct {
 	RemoteAddr  string `json:"remote_addr,omitempty"`
 }
 
+// projectListEntry is the per-project element in /api/sessions "stats.projects".
+// Named struct (vs map[string]any{6 keys}) eliminates P inner-map allocs and
+// 6×P interface{} boxing ops per 1 Hz dashboard poll. `omitempty` tags
+// preserve the previous JSON shape: local rows without a git remote, or
+// remote-cached rows that didn't round-trip favorite/github, simply drop
+// those keys instead of emitting false/"". dashboard.js consumes
+// name/path/node/favorite/git_remote_url/github via `p.favorite`, `p.name`,
+// etc. — all six are bool-or-string so struct marshaling is byte-equivalent
+// to the prior map literal. R70-PERF-M1 / R67-PERF-2 (struct variant).
+type projectListEntry struct {
+	Name         string `json:"name"`
+	Path         string `json:"path"`
+	Node         string `json:"node"`
+	Favorite     bool   `json:"favorite,omitempty"`
+	GitRemoteURL string `json:"git_remote_url,omitempty"`
+	GitHub       bool   `json:"github,omitempty"`
+}
+
 // isUnknownRPCMethodErr reports whether a remote-proxy error came from the
 // peer node rejecting the RPC method name. That happens when the peer is
 // running an older naozhi binary that predates remove_session /
@@ -258,23 +276,25 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 
 	// Include project list for dashboard sidebar rendering.
 	// Pre-allocate the outer slice so the append loop doesn't trigger log(N)
-	// growth reallocs on projects-heavy dashboards.
-	var projectList []map[string]any
+	// growth reallocs on projects-heavy dashboards. Entries are projectListEntry
+	// named-struct values (not map[string]any) so the hot 1 Hz poll path skips
+	// the inner-map + interface{} boxing overhead. R70-PERF-M1.
+	var projectList []projectListEntry
 	if h.projectMgr != nil {
 		projects := h.projectMgr.All()
-		projectList = make([]map[string]any, 0, len(projects))
+		projectList = make([]projectListEntry, 0, len(projects))
 		for _, p := range projects {
-			projectList = append(projectList, map[string]any{
-				"name":     p.Name,
-				"path":     p.Path,
-				"node":     "local",
-				"favorite": p.Config.Favorite,
+			projectList = append(projectList, projectListEntry{
+				Name:     p.Name,
+				Path:     p.Path,
+				Node:     "local",
+				Favorite: p.Config.Favorite,
 				// Strip embedded userinfo (PAT) before handing the URL to any
 				// dashboard client. Round 46 redacted /api/projects but missed
 				// this path — /api/sessions is polled every few seconds, so
 				// the leak is actually larger here.
-				"git_remote_url": redactGitRemoteURL(p.GitRemoteURL),
-				"github":         p.IsGitHub,
+				GitRemoteURL: redactGitRemoteURL(p.GitRemoteURL),
+				GitHub:       p.IsGitHub,
 			})
 		}
 	}
@@ -289,19 +309,19 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 				if name == "" {
 					continue
 				}
-				entry := map[string]any{"name": name, "path": path, "node": nd}
+				entry := projectListEntry{Name: name, Path: path, Node: nd}
 				if v, ok := item["favorite"].(bool); ok {
-					entry["favorite"] = v
+					entry.Favorite = v
 				}
 				// Remote node may be running an older binary that hasn't
 				// redacted the URL yet — always run the redactor on data
 				// forwarded via the node cache so credentials never leak
 				// even if a peer node is behind on patches.
 				if v, ok := item["git_remote_url"].(string); ok && v != "" {
-					entry["git_remote_url"] = redactGitRemoteURL(v)
+					entry.GitRemoteURL = redactGitRemoteURL(v)
 				}
 				if v, ok := item["github"].(bool); ok {
-					entry["github"] = v
+					entry.GitHub = v
 				}
 				projectList = append(projectList, entry)
 			}
