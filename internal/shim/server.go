@@ -25,6 +25,21 @@ import (
 // preventing unbounded memory allocation from malformed or malicious input.
 const maxClientLineBytes = 16 * 1024 * 1024 // 16MB
 
+// maxWriteLineBytes caps the inner "line" field of a post-auth "write" frame
+// before it is piped into CLI stdin. The outer frame cap above accommodates
+// an entire NDJSON envelope including 16-MB leeway; but every byte of
+// msg.Line flows through bufio.Scanner on the Claude side, whose default
+// buffer is 10 MB. Matching cap to the naozhi-side producer limit
+// (cli.maxStdinLineBytes = 12 MB) keeps the shim a faithful pass-through
+// while refusing anything that would overflow Claude's scanner and silently
+// kill its stdout. Defense-in-depth against future drift: naozhi's dispatch
+// layer already coalesces user text to a much smaller soft cap, so
+// production paths never approach this limit. R67-SEC-5.
+//
+// Var (not const) so the handleClient oversize-reject test can dial it down
+// without allocating 13 MB — regression coverage without a heavy test.
+var maxWriteLineBytes = 12 * 1024 * 1024 // 12MB
+
 // Config holds shim process configuration passed via CLI flags.
 type Config struct {
 	Key             string
@@ -804,6 +819,17 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 			}
 			switch msg.Type {
 			case "write":
+				// Reject payloads that would overflow Claude's 10 MB bufio.Scanner
+				// buffer and deadlock stdout. naozhi's own dispatch layer caps
+				// coalesced user text well below this ceiling; a hostile or buggy
+				// client reaching this path is treated as a protocol violation
+				// and disconnected so the slot frees for healthy clients.
+				// R67-SEC-5.
+				if len(msg.Line) > maxWriteLineBytes {
+					slog.Warn("client write too large, disconnecting",
+						"size", len(msg.Line), "limit", maxWriteLineBytes)
+					return
+				}
 				if s.cli.alive() {
 					s.cli.stdin.Write([]byte(msg.Line + "\n")) //nolint:errcheck
 				}

@@ -450,6 +450,14 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			if err := session.ValidateRemoteWorkspacePath(p.Workspace); err != nil {
 				return nil, fmt.Errorf("workspace path invalid: %w", err)
 			}
+			// When no allowed root is configured (defaultWorkspace=="") on this
+			// reverse node, we cannot bound the workspace to any prefix. A
+			// compromised/misconfigured primary could otherwise push any
+			// absolute path (e.g. `/etc`) and spawn a CLI session rooted
+			// there. Refuse rather than trust. R68-SEC-M2.
+			if c.defaultWorkspace == "" {
+				return nil, fmt.Errorf("workspace overrides disabled: no allowed root configured on this node")
+			}
 			// Sanitize workspace path to prevent directory traversal via symlinks.
 			ws, err := filepath.EvalSymlinks(filepath.Clean(p.Workspace))
 			if err != nil {
@@ -458,7 +466,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			if !filepath.IsAbs(ws) {
 				return nil, fmt.Errorf("workspace must be absolute path")
 			}
-			if c.defaultWorkspace != "" && ws != c.defaultWorkspace &&
+			if ws != c.defaultWorkspace &&
 				!strings.HasPrefix(ws, c.defaultWorkspace+string(filepath.Separator)) {
 				return nil, fmt.Errorf("workspace %q outside allowed root %q", ws, c.defaultWorkspace)
 			}
@@ -532,20 +540,26 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			if err := session.ValidateRemoteWorkspacePath(cwd); err != nil {
 				return nil, fmt.Errorf("takeover cwd invalid: %w", err)
 			}
-			if c.defaultWorkspace != "" {
-				cleanCWD, err := filepath.EvalSymlinks(filepath.Clean(cwd))
-				if err != nil {
-					return nil, fmt.Errorf("takeover cwd path invalid: %w", err)
-				}
-				if !filepath.IsAbs(cleanCWD) {
-					return nil, fmt.Errorf("takeover cwd must be absolute path")
-				}
-				if cleanCWD != c.defaultWorkspace &&
-					!strings.HasPrefix(cleanCWD, c.defaultWorkspace+string(filepath.Separator)) {
-					return nil, fmt.Errorf("takeover cwd %q outside allowed root %q", cleanCWD, c.defaultWorkspace)
-				}
-				cwd = cleanCWD
+			// When no allowed root is configured on this reverse node, refuse
+			// the cwd override — the takeover would otherwise spawn a CLI
+			// session rooted wherever the primary pointed. Aligns with the
+			// "send" RPC above so both call sites have the same policy.
+			// R68-SEC-M2.
+			if c.defaultWorkspace == "" {
+				return nil, fmt.Errorf("takeover cwd overrides disabled: no allowed root configured on this node")
 			}
+			cleanCWD, err := filepath.EvalSymlinks(filepath.Clean(cwd))
+			if err != nil {
+				return nil, fmt.Errorf("takeover cwd path invalid: %w", err)
+			}
+			if !filepath.IsAbs(cleanCWD) {
+				return nil, fmt.Errorf("takeover cwd must be absolute path")
+			}
+			if cleanCWD != c.defaultWorkspace &&
+				!strings.HasPrefix(cleanCWD, c.defaultWorkspace+string(filepath.Separator)) {
+				return nil, fmt.Errorf("takeover cwd %q outside allowed root %q", cleanCWD, c.defaultWorkspace)
+			}
+			cwd = cleanCWD
 		}
 		cwdKey := session.SanitizeCWDKey(cwd)
 		key := session.TakeoverKey(cwdKey)

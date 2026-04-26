@@ -2,6 +2,7 @@ package shim
 
 import (
 	"bufio"
+	"bytes"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
@@ -1465,5 +1466,43 @@ func TestWriteStateFile_ChmodDir(t *testing.T) {
 	perm := info.Mode().Perm()
 	if perm != 0700 {
 		t.Errorf("subdir perm = %o, want 0700", perm)
+	}
+}
+
+// TestHandleClient_WriteOversize_Disconnects covers R67-SEC-5: a "write" frame
+// whose inner Line exceeds maxWriteLineBytes must disconnect the client
+// rather than hand the payload to Claude's stdin (where bufio.Scanner's 10 MB
+// buffer would ErrTooLong and silently wedge stdout). We lower
+// maxWriteLineBytes for the test so the regression assertion completes
+// quickly; the production constant is 12 MB.
+func TestHandleClient_WriteOversize_Disconnects(t *testing.T) {
+	origLimit := maxWriteLineBytes
+	maxWriteLineBytes = 1024 // 1 KiB for the test
+	defer func() { maxWriteLineBytes = origLimit }()
+
+	_, client, cleanup := setupShimServerWithClient(t)
+	defer cleanup()
+
+	oversize := strings.Repeat("A", maxWriteLineBytes+1)
+	sendClientCmd(t, client, ClientMsg{Type: "write", Line: oversize})
+
+	// handleClient returns on oversize → defer chain closes the connection.
+	// Reading should EOF within a short window. If the cap path was never
+	// taken we'd either echo back stdout (cat) or block.
+	client.conn.SetReadDeadline(time.Now().Add(3 * time.Second)) //nolint:errcheck
+	buf := make([]byte, 4096)
+	for {
+		n, err := client.conn.Read(buf)
+		if err != nil {
+			return // EOF / closed conn — test passes
+		}
+		if n == 0 {
+			return
+		}
+		// If we see stdout echoing the oversize payload, the cap is broken.
+		// Trim scan: just look for uppercase A's which cat would echo.
+		if bytes.IndexByte(buf[:n], 'A') >= 0 {
+			t.Fatalf("shim forwarded oversize payload to CLI (first byte seen)")
+		}
 	}
 }

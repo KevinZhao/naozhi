@@ -424,6 +424,37 @@ func TestHandleRequest_Send_RejectsControlByteInWorkspace(t *testing.T) {
 	}
 }
 
+// TestHandleRequest_Send_EmptyDefaultWorkspace_RejectsOverride verifies the
+// R74/R68-SEC-M2 "fail closed" policy: when the reverse-node Connector has
+// no default workspace configured (router.DefaultWorkspace()==""), ANY
+// workspace override, even a syntactically valid absolute path, must be
+// rejected. Before this fix, `/etc` and similar legitimate-looking paths
+// passed through unchecked — the prefix gate was wrapped in
+// `if c.defaultWorkspace != ""`, so an empty default opened the door to
+// arbitrary CLI-session rooting. R68-SEC-M2.
+func TestHandleRequest_Send_EmptyDefaultWorkspace_RejectsOverride(t *testing.T) {
+	cfg := &config.UpstreamConfig{URL: "wss://x", NodeID: "n", Token: "t"}
+	c := New(cfg, makeRouter(), nil)
+	if c.defaultWorkspace != "" {
+		t.Fatalf("precondition: defaultWorkspace must be empty, got %q", c.defaultWorkspace)
+	}
+	// /etc is syntactically valid (absolute, no `..`, no control bytes) but
+	// must still be rejected because the node has no allowlist to bound it.
+	params, _ := json.Marshal(map[string]string{
+		"key":       "feishu:direct:alice:general",
+		"text":      "hi",
+		"workspace": "/etc",
+	})
+	req := node.ReverseMsg{Method: "send", Params: params}
+	_, err := c.handleRequest(context.Background(), context.Background(), req, &sync.WaitGroup{})
+	if err == nil {
+		t.Fatal("expected rejection of /etc under empty defaultWorkspace, got nil")
+	}
+	if !strings.Contains(err.Error(), "no allowed root") {
+		t.Errorf("err = %v, want 'no allowed root configured' message", err)
+	}
+}
+
 // TestValidateRemoteWorkspacePath_SharedByConnector confirms connector's
 // takeover and send paths call into the shared session.ValidateRemoteWorkspacePath
 // gate. The takeover path performs the CWD gate after the process identity
