@@ -621,7 +621,7 @@ func TestProcess_Close_WithExit(t *testing.T) {
 func TestProcess_Close_Timeout(t *testing.T) {
 	processCloseTimeout = 50 * time.Millisecond
 	p, srv := shimTestPair(&ClaudeProtocol{})
-	startServerDrain(srv) // drain so shimSend(close_stdin) doesn't block
+	startServerDrain(srv) // drain so shimSend(shutdown) doesn't block
 	p.startReadLoop()
 	// Close without server side sending cli_exited → timeout → Kill
 	done := make(chan struct{})
@@ -634,6 +634,58 @@ func TestProcess_Close_Timeout(t *testing.T) {
 	case <-time.After(3 * time.Second):
 		t.Fatal("Close() did not complete after timeout")
 	}
+}
+
+// TestProcess_Close_SendsShutdownNotCloseStdin locks in the semantics change
+// that fixes UCCLEP-2026-04-26: Close must ask the shim to exit (socket
+// unlinked, listener released) rather than just closing CLI stdin (shim
+// still in 30s grace period holding the socket, causing the next StartShim
+// for the same key to fail the dial-first guard).
+func TestProcess_Close_SendsShutdownNotCloseStdin(t *testing.T) {
+	prev := processCloseTimeout
+	processCloseTimeout = 200 * time.Millisecond
+	defer func() { processCloseTimeout = prev }()
+
+	p, srv := shimTestPair(&ClaudeProtocol{})
+	p.startReadLoop()
+
+	// Capture the first msg the client writes. Read one line; Close() also
+	// times out (no CLI exit), but timeout → Kill, which sends "kill" as a
+	// separate message — the first one is what we care about.
+	msgCh := make(chan string, 4)
+	go func() {
+		reader := bufio.NewReader(srv.conn)
+		for {
+			line, err := reader.ReadBytes('\n')
+			if err != nil {
+				close(msgCh)
+				return
+			}
+			var got struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(bytes.TrimSpace(line), &got); err == nil {
+				msgCh <- got.Type
+			}
+		}
+	}()
+
+	done := make(chan struct{})
+	go func() {
+		p.Close()
+		close(done)
+	}()
+
+	select {
+	case first := <-msgCh:
+		if first != "shutdown" {
+			t.Fatalf("Close() sent %q first; want %q", first, "shutdown")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no message captured from shim conn")
+	}
+
+	<-done
 }
 
 // ---------------------------------------------------------------------------

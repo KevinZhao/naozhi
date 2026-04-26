@@ -575,6 +575,28 @@ func TestResetRunningSession(t *testing.T) {
 	}
 }
 
+// TestWaitSocketGoneForKey_EmptyKey — the helper must be a no-op when
+// called with an empty key (unused session). Without this guard Reset
+// would block the caller for 2s for every test that never started a shim.
+func TestWaitSocketGoneForKey_EmptyKey(t *testing.T) {
+	start := time.Now()
+	waitSocketGoneForKey("", 2*time.Second)
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Errorf("waitSocketGoneForKey('') took %v; want ~0", elapsed)
+	}
+}
+
+// TestWaitSocketGoneForKey_NoSocketReturnsFast — for a key whose shim
+// was never spawned, the derived socket path doesn't exist, so the
+// helper should return in a single stat().
+func TestWaitSocketGoneForKey_NoSocketReturnsFast(t *testing.T) {
+	start := time.Now()
+	waitSocketGoneForKey("test:fresh:key-that-never-spawned", 2*time.Second)
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Errorf("waitSocketGoneForKey(missing-socket) took %v; want ~0", elapsed)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Cleanup
 // ---------------------------------------------------------------------------

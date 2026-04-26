@@ -812,8 +812,26 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 					s.enqueueWrite(data)
 				}
 			case "shutdown":
-				if s.cli.alive() && time.Since(s.startedAt) < 60*time.Second {
-					slog.Warn("ignoring shutdown: CLI alive and shim recently started",
+				// Only refuse an "early shutdown" when it comes from a path
+				// with no authenticated client. An authenticated client
+				// (naozhi) issuing shutdown within the 60s window means the
+				// client has made the deliberate choice to tear this shim
+				// down — fresh_context cron, explicit Router.Reset, config
+				// drift handling, etc. Blocking those would keep the shim's
+				// socket listening for 30+ seconds and cause the "refusing
+				// to clobber" regression on fast restart (UCCLEP-2026-04-26).
+				// The 60s window was originally added to protect against
+				// handshake glitches where a half-ready shim receives an
+				// errant shutdown before buffers are primed; that's only
+				// meaningful when no client is actively driving the
+				// lifecycle. We're inside the per-client message loop here,
+				// so clientConn normally equals conn — the defensive check
+				// below stays in case a future refactor drifts that.
+				s.mu.Lock()
+				hasClient := s.clientConn != nil
+				s.mu.Unlock()
+				if !hasClient && s.cli.alive() && time.Since(s.startedAt) < 60*time.Second {
+					slog.Warn("ignoring shutdown: CLI alive, shim recently started, no authed client",
 						"age", time.Since(s.startedAt).Round(time.Millisecond))
 					return
 				}
@@ -1012,4 +1030,40 @@ func ensureSocketFreeForReuse(socketPath string) error {
 	}
 	_ = os.Remove(socketPath)
 	return nil
+}
+
+// WaitSocketGone polls the socket path until it disappears or maxWait
+// elapses. Returns true when the socket is gone; false on timeout.
+//
+// Used by callers that just asked a shim to shut down and intend to spawn
+// a fresh one on the same key — observing socket unlink before StartShim
+// avoids the dial-first guard ("refusing to clobber") and the 30s zombie
+// window described in server.go's shutdown path.
+//
+// The socket file is unlinked in the shim's Run defer chain after its
+// listener closes, so this normally returns in a single 20ms tick once
+// the shim exits. We poll by stat rather than dial because a dial would
+// re-establish connection state with any remaining accept goroutine and
+// muddies the semantics; stat maps directly to "is the filesystem entry
+// still there".
+func WaitSocketGone(socketPath string, maxWait time.Duration) bool {
+	if socketPath == "" {
+		return true
+	}
+	deadline := time.Now().Add(maxWait)
+	// Fast path: already gone.
+	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		return true
+	}
+	t := time.NewTicker(20 * time.Millisecond)
+	defer t.Stop()
+	for {
+		<-t.C
+		if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+	}
 }

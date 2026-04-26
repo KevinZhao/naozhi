@@ -1499,6 +1499,12 @@ func (r *Router) evictOldest() bool {
 	oldest.deathReason.Store("evicted")
 	// Keep oldest.process non-nil so concurrent holders don't get nil-panic.
 	// After Close(), Alive() returns false; countActive() below recounts correctly.
+	//
+	// Eviction does not re-spawn for the same key (it just frees a slot for
+	// the next unrelated GetOrCreate), so we deliberately skip
+	// waitSocketGoneForKey here. If a future caller starts immediately
+	// re-spawning the evicted key, add it — see the UCCLEP-2026-04-26
+	// fix in Reset/ResetAndRecreate/Takeover for the pattern.
 	proc := oldest.loadProcess()
 	r.mu.Unlock()
 	proc.Close()
@@ -1549,12 +1555,34 @@ func (r *Router) Reset(key string) {
 	if proc != nil && proc.Alive() {
 		proc.Close()
 	}
+	// Belt-and-suspenders: Close waits for proc.done which fires on shim
+	// EOF, and in the normal path the shim's Run() defer chain unlinks the
+	// socket before EOF propagates. But proc could be nil/!Alive (shim
+	// still live after CLI crash, or a stale pointer we never wired a
+	// readLoop to). Give the socket a short window to actually disappear
+	// before downstream GetOrCreate attempts a same-key StartShim, which
+	// would otherwise hit the dial-first guard ("refusing to clobber")
+	// described in shim/server.go. Bounded at 2s so a truly stuck shim
+	// falls through and the caller sees the real error instead of hanging.
+	waitSocketGoneForKey(key, 2*time.Second)
 	if r.shutdownCond != nil {
 		r.shutdownCond.Broadcast()
 	}
 
 	slog.Info("session reset", "key", key)
 	r.notifyChange()
+}
+
+// waitSocketGoneForKey bridges router-level session keys to the shim
+// socket path derived from KeyHash, so callers don't need to plumb a
+// shim.Manager reference through every Reset path. Returns quickly if
+// the socket was never created.
+func waitSocketGoneForKey(key string, maxWait time.Duration) {
+	if key == "" {
+		return
+	}
+	socketPath := shim.SocketPath(shim.KeyHash(key))
+	shim.WaitSocketGone(socketPath, maxWait)
 }
 
 // ResetAndRecreate atomically resets a session and spawns a new one for the same key.
@@ -1588,6 +1616,12 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		if proc != nil && proc.Alive() {
 			r.mu.Unlock()
 			proc.Close()
+			// Same rationale as Router.Reset: make sure the shim
+			// socket is gone before spawnSession's StartShim dials
+			// it. Without this, ResetAndRecreate races the 30s
+			// zombie window and fails with "refusing to clobber"
+			// on the immediate re-bind.
+			waitSocketGoneForKey(key, 2*time.Second)
 			if r.shutdownCond != nil {
 				r.shutdownCond.Broadcast()
 			}
@@ -1637,6 +1671,11 @@ func (r *Router) Remove(key string) bool {
 	r.mu.Unlock()
 
 	if proc != nil && proc.Alive() {
+		// Remove is a pure delete, not a re-spawn, so we intentionally do
+		// not call waitSocketGoneForKey. If a caller ever chains Remove
+		// → GetOrCreate for the same key (e.g., a "restart session" UI
+		// button), add the wait there — see Reset/ResetAndRecreate for
+		// the UCCLEP-2026-04-26 pattern.
 		proc.Close()
 	}
 	if r.shutdownCond != nil {
@@ -1738,6 +1777,9 @@ func (r *Router) Cleanup() {
 		e.proc.Kill()
 		closedCount++
 	}
+	// TTL-expired sessions are closed but never re-spawned for the same
+	// key by this function, so waitSocketGoneForKey is unnecessary here.
+	// The next unrelated GetOrCreate will hash to a different socket.
 	for _, e := range expired {
 		e.proc.Close()
 		closedCount++
@@ -2604,6 +2646,11 @@ func (r *Router) Takeover(ctx context.Context, key string, sessionID string, wor
 			proc := p
 			r.mu.Unlock()
 			proc.Close()
+			// Takeover reuses the same key, so the next spawnSession below
+			// will StartShim against the same socket path. Wait for the
+			// shim to release it (same race as Reset / ResetAndRecreate,
+			// see UCCLEP-2026-04-26 design).
+			waitSocketGoneForKey(key, 2*time.Second)
 			r.mu.Lock()
 			// Only delete if no concurrent goroutine replaced this session
 			if cur, ok := r.sessions[key]; ok && cur == oldSession {

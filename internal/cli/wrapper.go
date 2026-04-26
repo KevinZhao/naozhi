@@ -186,10 +186,14 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	if handle.Hello.CLIPID > 0 {
 		cliPID = handle.Hello.CLIPID
 	}
+	shimPID := 0
+	if handle.Hello.ShimPID > 0 {
+		shimPID = handle.Hello.ShimPID
+	}
 
 	proc := newShimProcess(
 		handle.Conn, handle.Reader, handle.Writer,
-		proto, cliPID,
+		proto, cliPID, shimPID,
 		opts.NoOutputTimeout, opts.TotalTimeout,
 	)
 
@@ -245,10 +249,14 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 	if handle.Hello.CLIPID > 0 {
 		cliPID = handle.Hello.CLIPID
 	}
+	shimPID := 0
+	if handle.Hello.ShimPID > 0 {
+		shimPID = handle.Hello.ShimPID
+	}
 
 	proc := newShimProcess(
 		handle.Conn, handle.Reader, handle.Writer,
-		proto.Clone(), cliPID,
+		proto.Clone(), cliPID, shimPID,
 		noOutputTimeout, totalTimeout,
 	)
 

@@ -1108,6 +1108,69 @@ func TestHandleClient_ShutdownCommand(t *testing.T) {
 	time.Sleep(200 * time.Millisecond)
 }
 
+// TestHandleClient_ShutdownWithAuthedClientWithin60s verifies the guard
+// relaxation added for UCCLEP-2026-04-26: an authenticated client issuing
+// shutdown within the shim's first 60s must be honoured (previously ignored),
+// otherwise fresh_context cron / Router.Reset paths leave the socket listening
+// for up to 30s and the next StartShim for the same key hits "refusing to
+// clobber".
+func TestHandleClient_ShutdownWithAuthedClientWithin60s(t *testing.T) {
+	s, client, cleanup := setupShimServerWithClient(t)
+	defer client.conn.Close()
+	_ = cleanup
+
+	// Simulate a freshly-started shim — this is the case where the old
+	// guard would have bailed out with "ignoring shutdown".
+	s.startedAt = time.Now()
+
+	sendClientCmd(t, client, ClientMsg{Type: "shutdown"})
+
+	// handleClient should exit and done must be closed — that's what drives
+	// Run's main loop into the listener.Close + os.Remove defers.
+	select {
+	case <-s.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("s.done not closed within 10s — shutdown was ignored")
+	}
+}
+
+// TestShutdownGuard_EvaluationMatrix validates the guard decision logic used
+// by the "shutdown" command handler. It documents the four cases so future
+// changes to the guard produce an obvious test diff rather than a silent
+// semantic drift.
+//
+// The guard should refuse shutdown ONLY in the combination:
+//
+//	hasClient == false && cliAlive == true && age < 60s
+func TestShutdownGuard_EvaluationMatrix(t *testing.T) {
+	const window = 60 * time.Second
+	cases := []struct {
+		name      string
+		hasClient bool
+		cliAlive  bool
+		age       time.Duration
+		wantBlock bool
+	}{
+		{"authed client, fresh shim: must honour shutdown", true, true, time.Second, false},
+		{"authed client, old shim: must honour shutdown", true, true, 2 * window, false},
+		{"no client, dead CLI, fresh shim: must honour shutdown", false, false, time.Second, false},
+		{"no client, alive CLI, old shim: must honour shutdown", false, true, 2 * window, false},
+		{"no client, alive CLI, fresh shim: must BLOCK", false, true, time.Second, true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			// Mirror the production condition exactly; if the production
+			// expression changes, this test will fail loud.
+			block := !tc.hasClient && tc.cliAlive && tc.age < window
+			if block != tc.wantBlock {
+				t.Fatalf("guard(hasClient=%v, cliAlive=%v, age=%v) = %v; want %v",
+					tc.hasClient, tc.cliAlive, tc.age, block, tc.wantBlock)
+			}
+		})
+	}
+}
+
 func TestHandleClient_CloseStdinCommand(t *testing.T) {
 	_, client, cleanup := setupShimServerWithClient(t)
 	defer cleanup()

@@ -515,6 +515,74 @@ func TestEnsureSocketFreeForReuse_NoFileNoError(t *testing.T) {
 	}
 }
 
+// TestWaitSocketGone_AlreadyMissing is the fast path: no file, returns
+// true without waiting.
+func TestWaitSocketGone_AlreadyMissing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "never-existed.sock")
+	start := time.Now()
+	if !WaitSocketGone(path, 2*time.Second) {
+		t.Fatal("WaitSocketGone returned false for missing path")
+	}
+	if elapsed := time.Since(start); elapsed > 100*time.Millisecond {
+		t.Errorf("WaitSocketGone took %v for missing path; want ~0", elapsed)
+	}
+}
+
+// TestWaitSocketGone_UnlinkedDuringWait is the hot path: file exists at
+// call, gets removed by another goroutine shortly after; WaitSocketGone
+// should notice within one poll interval.
+func TestWaitSocketGone_UnlinkedDuringWait(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "live.sock")
+	if err := os.WriteFile(path, []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		time.Sleep(80 * time.Millisecond)
+		_ = os.Remove(path)
+	}()
+	start := time.Now()
+	if !WaitSocketGone(path, 2*time.Second) {
+		t.Fatal("WaitSocketGone did not observe unlink within 2s")
+	}
+	elapsed := time.Since(start)
+	if elapsed < 50*time.Millisecond {
+		t.Errorf("WaitSocketGone returned before unlink happened: %v", elapsed)
+	}
+	if elapsed > 500*time.Millisecond {
+		t.Errorf("WaitSocketGone took %v; expected ~100ms", elapsed)
+	}
+}
+
+// TestWaitSocketGone_TimeoutWhenStuck verifies the caller's deadline is
+// honoured even if the socket never disappears.
+func TestWaitSocketGone_TimeoutWhenStuck(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "stuck.sock")
+	if err := os.WriteFile(path, []byte{}, 0600); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Remove(path)
+	start := time.Now()
+	if WaitSocketGone(path, 150*time.Millisecond) {
+		t.Fatal("WaitSocketGone returned true despite socket persisting")
+	}
+	elapsed := time.Since(start)
+	if elapsed < 100*time.Millisecond || elapsed > 400*time.Millisecond {
+		t.Errorf("WaitSocketGone timeout = %v; want ~150ms", elapsed)
+	}
+}
+
+// TestWaitSocketGone_EmptyPath returns true immediately; prevents the
+// router's nil-socketPath call path from blocking on a misconfigured
+// dependency chain.
+func TestWaitSocketGone_EmptyPath(t *testing.T) {
+	if !WaitSocketGone("", time.Second) {
+		t.Fatal("WaitSocketGone('') returned false")
+	}
+}
+
 // --- StopAll ---
 
 func TestManager_StopAll_SendsShutdown(t *testing.T) {

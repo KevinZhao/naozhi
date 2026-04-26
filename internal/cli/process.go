@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 	"unicode/utf8"
 )
@@ -64,8 +65,13 @@ var ErrProcessExited = errors.New("process exited during send")
 // not claim "aborted active turn" in this case.
 var ErrNoActiveTurn = errors.New("no active turn to interrupt")
 
-// processCloseTimeout is a var (not const) so tests can override it.
-var processCloseTimeout = 5 * time.Second
+// processCloseTimeout bounds Close() while it waits for the shim to tear
+// down its listener + socket file. The shim-side path is closeStdin +
+// waitOrKill(5s) + listener.Close + os.Remove, so 8s gives comfortable
+// headroom; exceeding it falls through to Kill (which uses SIGUSR2 to
+// force the shim's immediate-shutdown path, see Kill()). Var (not const)
+// so tests can shorten it.
+var processCloseTimeout = 8 * time.Second
 
 func (s ProcessState) String() string {
 	switch s {
@@ -105,6 +111,7 @@ type Process struct {
 	stdinWriter *shimWriter // cached shimStdinWriter instance
 	protocol    Protocol
 	cliPID      int // CLI PID reported by shim hello
+	shimPID     int // shim PID reported by shim hello; used by Kill() for SIGUSR2 fallback
 
 	SessionID string
 	State     ProcessState
@@ -204,13 +211,14 @@ func (p *Process) DeathReason() string {
 // newShimProcess creates a Process connected to a shim.
 // The caller must call startReadLoop() after protocol Init.
 func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
-	proto Protocol, cliPID int, noOutputTimeout, totalTimeout time.Duration) *Process {
+	proto Protocol, cliPID, shimPID int, noOutputTimeout, totalTimeout time.Duration) *Process {
 	p := &Process{
 		shimConn:        conn,
 		shimR:           reader,
 		shimW:           writer,
 		protocol:        proto,
 		cliPID:          cliPID,
+		shimPID:         shimPID,
 		State:           StateSpawning,
 		eventCh:         make(chan Event, 256),
 		done:            make(chan struct{}),
@@ -1156,6 +1164,21 @@ func isChanAlive(done <-chan struct{}) bool {
 }
 
 // Kill forcefully terminates the CLI process via shim.
+//
+// After sending the "kill" message and closing the naozhi-side conn, send
+// SIGUSR2 to the shim process itself so its immediate-shutdown path fires
+// (server.go SIGUSR2 handler → initiateShutdown → Run's <-s.done case →
+// listener.Close + os.Remove(socket)). Without this, a Kill leaves the
+// shim in its 30s disconnect grace period holding the socket alive, and
+// the next StartShim for the same key fails the dial-first guard — the
+// same "refusing to clobber" class of bug Close was rewritten to avoid
+// (UCCLEP-2026-04-26).
+//
+// shimPID may be 0 if the spawn path never observed a hello (tests,
+// legacy); we skip SIGUSR2 in that case. PID reuse is a theoretical
+// concern — we only signal while killOnce.Do is running, which bounds
+// the window to microseconds after the shim is known to have been alive,
+// so the risk is negligible.
 func (p *Process) Kill() {
 	p.killOnce.Do(func() {
 		close(p.killCh)
@@ -1169,16 +1192,40 @@ func (p *Process) Kill() {
 		// takes shimWMu for the write, so we acquire it here and call
 		// shimSendLocked which skips the re-lock.
 		p.shimWMu.Lock()
-		defer p.shimWMu.Unlock()
 		p.shimConn.SetWriteDeadline(time.Now().Add(time.Second)) //nolint:errcheck
 		_ = p.shimSendLocked(shimClientMsg{Type: "kill"})
 		p.shimConn.Close()
+		p.shimWMu.Unlock()
+
+		if p.shimPID > 0 {
+			// SIGUSR2: shim's signal handler flips initiateShutdown immediately
+			// and the main Run loop releases the listener and unlinks the
+			// socket. A failing Signal (shim already exited, PID reused) is
+			// fine — the socket is either already gone or will be reaped by
+			// Discover's F4 stat-check within 30s.
+			if err := syscall.Kill(p.shimPID, syscall.SIGUSR2); err != nil {
+				slog.Debug("kill: SIGUSR2 to shim failed (likely already exited)",
+					"shim_pid", p.shimPID, "err", err)
+			}
+		}
 	})
 }
 
-// Close gracefully shuts down by closing CLI stdin via shim.
+// Close gracefully shuts down the CLI and tears down the shim process.
+//
+// Sends "shutdown" instead of "close_stdin" so the shim's main loop walks
+// its full exit path: closeStdin → waitOrKill(CLI) → listener.Close +
+// os.Remove(socket). After p.done fires (shim EOF hits readLoop) the
+// socket file is gone and any fresh StartShim for the same key will bind
+// cleanly. "close_stdin" only terminated the CLI child and left the shim
+// listening for up to 30s grace, which is the UCCLEP-2026-04-26 root
+// cause for "refusing to clobber" on fast Reset+Recreate (fresh_context
+// cron, explicit Router.Reset, config drift).
+//
+// Callers that want the naozhi-restart-friendly "keep shim alive" semantics
+// must use Detach(), not Close().
 func (p *Process) Close() {
-	_ = p.shimSend(shimClientMsg{Type: "close_stdin"})
+	_ = p.shimSend(shimClientMsg{Type: "shutdown"})
 	timer := time.NewTimer(processCloseTimeout)
 	defer timer.Stop()
 	select {
