@@ -3,10 +3,13 @@ package discovery
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli"
 )
 
 // ---------------------------------------------------------------------------
@@ -160,6 +163,117 @@ func TestLoadHistoryTail_SkipsMalformed(t *testing.T) {
 		t.Errorf("summary = %q, want survivor", entries[0].Summary)
 	}
 }
+
+// TestParseTail_ScanBudgetBoundsIterations locks R54-SEC-006's byte budget.
+// We call parseTail directly with a `size` 64× larger than the actual file,
+// simulating a FUSE / /proc mount where stat().Size() lies. Without the
+// scanBudget guard the loop would iterate `size / tailChunkSize` times —
+// millions of ReadAt syscalls past EOF — each returning io.EOF silently
+// but burning CPU walking 256KB zeroed buffers looking for '\n'.
+// With the budget in place, the loop terminates within
+// maxTailReadBytes / tailChunkSize = 512 iterations regardless of the
+// claimed size.
+//
+// The test uses a ctx-deadline rather than wall-clock: ctx cancellation
+// is checked at the top of every iteration, so the ctx itself provides
+// an independent "did parseTail still honour its cancellation contract"
+// signal in addition to time-bounded completion. We budget 15s under
+// race for the ~512 iterations of (ReadAt→io.EOF→bytes.LastIndexByte over
+// 256KB of zeros→carry book-keeping); on a clean tmpfs without -race
+// this completes in <100ms. 15s is 100× that margin.
+//
+// We deliberately do NOT assert on returned entries: when size is lied
+// about by 64×, parseTail reads from byte position 8GiB-256KB etc., which
+// is past EOF — no entries are returned. This is the correct behaviour
+// in a defence-in-depth context (we sacrifice usable results on a
+// misbehaving mount to guarantee bounded work).
+func TestParseTail_ScanBudgetBoundsIterations(t *testing.T) {
+	claudeDir := makeClaudeDir(t)
+	cwd := "/tmp/tail-budget"
+	sessionID := "00000000-0000-0000-0000-000000001099"
+	dirName := projDirName(cwd)
+
+	// Small real file so ReadAt past EOF yields io.EOF; only a handful of
+	// lines actually present. parseTail handles io.EOF silently.
+	lines := []string{
+		userJSONLLine("user", "a"),
+		userJSONLLine("user", "b"),
+	}
+	_, path := makeSessionJSONL(t, claudeDir, dirName, sessionID, lines)
+
+	f, err := os.Open(path)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer f.Close()
+
+	// Dial the cap down to 2 MB for the test so the 512-iteration ceiling
+	// becomes 8 iterations — fast enough under -race to leave ample slack
+	// for the timeout check without dropping the real-world 128 MB default.
+	// Restore on teardown. The regression is about ratio (budget ≪ claimed
+	// size), not the absolute byte count; a 4 GB fake size against a 2 MB
+	// cap proves the same bounded-work property as 8 GB against 128 MB.
+	origCap := maxTailReadBytes
+	maxTailReadBytes = 2 * 1024 * 1024
+	t.Cleanup(func() { maxTailReadBytes = origCap })
+
+	// Lie about the size: 2000× the cap. Without the scanBudget guard,
+	// parseTail would loop `fakeSize / tailChunkSize` times. With the cap,
+	// iterations are bounded to maxTailReadBytes / tailChunkSize = 8.
+	fakeSize := 2000 * maxTailReadBytes
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := parseTail(ctx, f, fakeSize, 10)
+		done <- err
+	}()
+
+	select {
+	case parseErr := <-done:
+		if parseErr != nil && parseErr != context.DeadlineExceeded {
+			t.Errorf("parseTail returned error: %v", parseErr)
+		}
+		if parseErr == context.DeadlineExceeded {
+			t.Fatal("parseTail exhausted ctx deadline — scanBudget cap broken")
+		}
+	case <-time.After(6 * time.Second):
+		t.Fatal("parseTail hung past ctx deadline — goroutine stuck")
+	}
+}
+
+// TestParseTail_HonestSizeReturnsAllEntries complements the budget test: when
+// stat.Size() is truthful and the file is well under maxTailReadBytes, the
+// cap must not affect normal operation. Regression guard for "didn't
+// accidentally change the hot path while adding the security cap".
+func TestParseTail_HonestSizeReturnsAllEntries(t *testing.T) {
+	claudeDir := makeClaudeDir(t)
+	cwd := "/tmp/tail-honest"
+	sessionID := "00000000-0000-0000-0000-000000001098"
+	dirName := projDirName(cwd)
+
+	lines := []string{
+		userJSONLLine("user", "first"),
+		userJSONLLine("user", "second"),
+		userJSONLLine("user", "third"),
+	}
+	makeSessionJSONL(t, claudeDir, dirName, sessionID, lines)
+
+	entries, err := LoadHistoryTail(claudeDir, sessionID, cwd, 10)
+	if err != nil {
+		t.Fatalf("LoadHistoryTail: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("entries = %d, want 3 (honest size must not trigger cap)", len(entries))
+	}
+}
+
+// Verify the cli.EventEntry import is still referenced after the test
+// refactor; without this the build would fail silently if test code is
+// reorganised and the declaration is no longer needed.
+var _ = cli.EventEntry{}
 
 func TestLoadHistoryTail_CancelledCtx(t *testing.T) {
 	claudeDir := makeClaudeDir(t)

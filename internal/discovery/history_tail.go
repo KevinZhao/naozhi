@@ -19,6 +19,22 @@ import (
 // Most JSONL lines are 200-2000 bytes, so one chunk covers ~100-1000 lines.
 const tailChunkSize = 256 * 1024
 
+// maxTailReadBytes caps how many trailing bytes parseTail will scan.
+// `stat.Size()` returns unbounded values on FUSE / /proc and other special
+// file systems; without a cap a malformed mount reporting size=TB would
+// drive parseTail to spin `size / tailChunkSize` iterations against a file
+// that may only yield a handful of real bytes per ReadAt. The tail-read
+// mode only ever needs the last ~limit JSONL entries (default 500 ×
+// ~4KB/entry = 2MB worst-case for the data we care about), so 128MB of
+// scan budget is already 60× the realistic need and leaves generous room
+// for lines that pad with huge tool-use payloads. Beyond this cap we seek
+// from (size - maxTailReadBytes) and log a warning so the operator sees
+// the truncation. R54-SEC-006 defence-in-depth.
+//
+// Declared var (not const) so the budget-bounds regression test can dial
+// it down without waiting for 512 chunks of io.EOF responses under -race.
+var maxTailReadBytes int64 = 128 * 1024 * 1024
+
 // LoadHistoryTail reads up to `limit` recent user/assistant entries from
 // a session JSONL by seeking from EOF backward and parsing only the tail.
 // Stops as soon as the limit is reached or the file head is hit.
@@ -62,6 +78,16 @@ func LoadHistoryTailCtx(ctx context.Context, claudeDir, sessionID, cwd string, l
 	size := stat.Size()
 	if size == 0 {
 		return nil, nil
+	}
+	// Note the size when it exceeds maxTailReadBytes: parseTail's internal
+	// byte budget (see scanBudget variable) bounds total scan work even when
+	// stat.Size() returns an untrustworthy value (FUSE / /proc / corrupted
+	// mount). We still pass the real size so the reverse-read seeks from
+	// genuine EOF — the budget stops the loop before it can iterate 1TB /
+	// 256KB = 4M times against a misbehaving mount. R54-SEC-006.
+	if size > maxTailReadBytes {
+		slog.Warn("history tail: capping scan window on oversize file",
+			"path", path, "size", size, "cap", maxTailReadBytes)
 	}
 
 	entries, err := parseTail(ctx, f, size, limit)
@@ -124,8 +150,18 @@ func parseTail(ctx context.Context, f *os.File, size int64, limit int) ([]cli.Ev
 		offset  = size
 		buf     = make([]byte, tailChunkSize)
 	)
+	// scanBudget bounds how many trailing bytes the reverse-read will touch.
+	// Normal paths terminate via `len(entries) >= target` long before this
+	// cap, so the budget only matters when stat.Size() lies (FUSE / /proc
+	// files claiming TB+ sizes) or parseHistoryLine rejects every line (file
+	// has no JSONL structure). Without it a misbehaving mount could pin this
+	// function on size / tailChunkSize = ~4M iterations. R54-SEC-006.
+	scanBudget := size
+	if scanBudget > maxTailReadBytes {
+		scanBudget = maxTailReadBytes
+	}
 
-	for offset > 0 && len(entries) < target {
+	for offset > 0 && len(entries) < target && scanBudget > 0 {
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
@@ -135,6 +171,7 @@ func parseTail(ctx context.Context, f *os.File, size int64, limit int) ([]cli.Ev
 			chunkSize = offset
 		}
 		offset -= chunkSize
+		scanBudget -= chunkSize
 
 		readBuf := buf[:chunkSize]
 		if _, err := f.ReadAt(readBuf, offset); err != nil && err != io.EOF {
