@@ -205,6 +205,48 @@ type Router struct {
 	shutdownOnce sync.Once
 }
 
+// spawnerFunc is the signature panicSafeSpawnFn executes; abstracting it lets
+// tests inject a function that panics instead of constructing a real
+// cli.Wrapper (whose Spawn path has no panic-injection seam). Production
+// wraps (*cli.Wrapper).Spawn in a closure at the call site.
+type spawnerFunc func(context.Context, cli.SpawnOptions) (*cli.Process, error)
+
+// panicSafeSpawn invokes wrapper.Spawn inside a deferred recover so a panic
+// from the wrapper (shim exec crash, bogus protocol Init, etc.) cannot leave
+// pendingSpawns stranded in spawnSession. A stranded counter would make the
+// router refuse every subsequent GetOrCreate with ErrMaxProcs until restart.
+// The recovered panic is translated into a regular error so the surrounding
+// control flow runs the standard "spawn process: %w" wrap + early return
+// without special-casing panic. RES1.
+func panicSafeSpawn(
+	ctx context.Context,
+	w *cli.Wrapper,
+	opts cli.SpawnOptions,
+	key, backendID string,
+) (*cli.Process, error) {
+	return panicSafeSpawnFn(ctx, w.Spawn, opts, key, backendID)
+}
+
+// panicSafeSpawnFn is the testable core: tests inject a spawnerFunc that
+// panics to verify the recover path without a real wrapper. Production calls
+// go through panicSafeSpawn above.
+func panicSafeSpawnFn(
+	ctx context.Context,
+	spawn spawnerFunc,
+	opts cli.SpawnOptions,
+	key, backendID string,
+) (proc *cli.Process, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("spawnSession: wrapper.Spawn panicked",
+				"key", key, "backend", backendID, "panic", r,
+				"stack", string(debug.Stack()))
+			err = fmt.Errorf("spawn process: panic: %v", r)
+		}
+	}()
+	return spawn(ctx, opts)
+}
+
 // chatKeyFor strips the last ":agentID" segment from a session key to get the chat key.
 func chatKeyFor(key string) string {
 	if idx := strings.LastIndexByte(key, ':'); idx >= 0 {
@@ -1396,7 +1438,13 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		r.mu.Unlock()
 		return nil, fmt.Errorf("spawn process (backend %q): %w", backendID, ErrNoCLIWrapper)
 	}
-	proc, err := wrapper.Spawn(ctx, spawnOpts)
+	// Panic-safe Spawn: if wrapper.Spawn panics (shim exec failure, protocol
+	// Init crash, etc.) pendingSpawns must still be decremented or this
+	// router permanently refuses new sessions with ErrMaxProcs until the
+	// process restarts. Extracted to panicSafeSpawn so tests can exercise
+	// the recover path directly (wrapper itself has no panic injection
+	// seam). RES1.
+	proc, err := panicSafeSpawn(ctx, wrapper, spawnOpts, key, backendID)
 	r.mu.Lock()
 	r.pendingSpawns--
 	if err != nil {
