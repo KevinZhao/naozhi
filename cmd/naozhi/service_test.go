@@ -74,6 +74,63 @@ func TestGenerateSystemdUnit(t *testing.T) {
 	if !strings.Contains(unit, "NotifyAccess=main") {
 		t.Error("expected NotifyAccess=main")
 	}
+	// Shim-survival settings: naozhi moves shim helpers into a shared
+	// cgroup so they outlive the main service process for zero-downtime
+	// reconnect. The default control-group kill mode would tear them
+	// down on every `systemctl restart`. Test all three directives so a
+	// future refactor that drops any one of them trips.
+	if !strings.Contains(unit, "KillMode=process") {
+		t.Error("expected KillMode=process to preserve shim processes across restart")
+	}
+	if !strings.Contains(unit, "SendSIGKILL=no") {
+		t.Error("expected SendSIGKILL=no so cgroup shims are never force-killed")
+	}
+	if !strings.Contains(unit, "TimeoutStopSec=5") {
+		t.Error("expected TimeoutStopSec=5 for prompt graceful shutdown budget")
+	}
+}
+
+// TestGenerateSystemdUnit_MatchesDeployTemplate verifies the installer-
+// rendered unit stays in lockstep with deploy/naozhi.service on the
+// invariant fields that affect service semantics. Drift between the
+// two templates produced the R-series TODO entry "deploy/naozhi.service
+// 与 `naozhi install` 渲染的 systemd unit 漂移" — if the installer ever
+// emits something the copy-paste deploy file would also need, both
+// change together or this test fails. We compare service-semantics
+// directives, not user-specific paths (User/WorkingDirectory/ExecStart).
+func TestGenerateSystemdUnit_MatchesDeployTemplate(t *testing.T) {
+	unit := generateSystemdUnit("/usr/local/bin/naozhi", "/etc/naozhi/config.yaml", "app", "/var/lib/naozhi")
+
+	// Load the deploy file from the repo so drift is detected at test
+	// time rather than at deploy time. Path is relative to this test
+	// (cmd/naozhi/), go up two to reach the repo root.
+	deployBytes, err := os.ReadFile(filepath.Join("..", "..", "deploy", "naozhi.service"))
+	if err != nil {
+		t.Fatalf("read deploy/naozhi.service: %v", err)
+	}
+	deployUnit := string(deployBytes)
+
+	// Directives that both templates MUST carry identically. Missing in
+	// either path corrupts service semantics: Type=notify is required
+	// by main.go's sd_notify call; KillMode/SendSIGKILL/TimeoutStopSec
+	// protect the cgroup shim processes on restart.
+	sharedDirectives := []string{
+		"Type=notify",
+		"NotifyAccess=main",
+		"WatchdogSec=120",
+		"Restart=always",
+		"KillMode=process",
+		"SendSIGKILL=no",
+		"TimeoutStopSec=5",
+	}
+	for _, d := range sharedDirectives {
+		if !strings.Contains(unit, d) {
+			t.Errorf("rendered unit missing %q", d)
+		}
+		if !strings.Contains(deployUnit, d) {
+			t.Errorf("deploy/naozhi.service missing %q — drift vs generateSystemdUnit", d)
+		}
+	}
 }
 
 func TestGenerateSystemdUnitQuotesSpaces(t *testing.T) {

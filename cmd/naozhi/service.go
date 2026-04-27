@@ -100,6 +100,18 @@ func runUninstall(_ []string) {
 // --- systemd (Linux) ---
 
 func generateSystemdUnit(binary, configPath, user, home string) string {
+	// Type=notify + WatchdogSec=120: main.go uses sd_notify("READY=1")
+	// once the listener is bound and periodically re-pings to keep the
+	// watchdog from firing. Using Type=simple (or omitting WatchdogSec)
+	// produces a tight "sd_notify READY failed" log loop on restart.
+	//
+	// KillMode=process + SendSIGKILL=no + TimeoutStopSec=5: shims are
+	// long-lived helper processes moved into /sys/fs/cgroup/naozhi-shims/
+	// so they persist across naozhi restarts for zero-downtime reconnect.
+	// The default control-group kill mode would SIGKILL every shim on
+	// systemctl stop/restart, losing in-flight CLI sessions. Matching
+	// deploy/naozhi.service so both install paths produce the same
+	// service semantics.
 	return fmt.Sprintf(`[Unit]
 Description=naozhi - Claude Code IM Gateway
 After=network-online.target
@@ -117,6 +129,9 @@ StartLimitInterval=60s
 StartLimitBurst=5
 User=%s
 Environment=HOME=%s
+KillMode=process
+SendSIGKILL=no
+TimeoutStopSec=5
 
 [Install]
 WantedBy=multi-user.target

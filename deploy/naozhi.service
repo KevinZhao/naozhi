@@ -4,13 +4,21 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=simple
+# Type=notify + WatchdogSec: naozhi (main.go) calls sd_notify("READY=1")
+# when the listener is bound and pings periodically for liveness. Using
+# Type=simple here produced an infinite "sd_notify READY failed" log
+# loop and disabled watchdog-driven restart on hang.
+Type=notify
+NotifyAccess=main
+WatchdogSec=120
 # TODO: Change User, WorkingDirectory, and ExecStart paths to match your deployment
 User=ec2-user
 WorkingDirectory=/home/ec2-user/naozhi
 ExecStart=/home/ec2-user/naozhi/bin/naozhi --config /home/ec2-user/naozhi/config.yaml
 Restart=always
 RestartSec=5
+StartLimitInterval=60s
+StartLimitBurst=5
 
 # Shim process survival: only kill main process on stop, never SIGKILL the cgroup.
 # Shims are moved to /sys/fs/cgroup/naozhi-shims/ and must survive service restarts.
