@@ -199,6 +199,20 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 						opts.Model = m
 					}
 					if p := d.projectMgr.EffectivePlannerPrompt(proj); p != "" {
+						// Three-arg slice `[:len:len]` forces append to
+						// allocate a fresh backing array instead of
+						// writing past the caller's slice length —
+						// opts.ExtraArgs starts life as a copy of the
+						// shared d.agents[agentID].ExtraArgs value, and
+						// the underlying array is therefore aliased with
+						// every other caller that read the same map
+						// entry. A plain two-arg append would smash those
+						// neighbours with "--append-system-prompt" the
+						// first time cap>len. Downstream router.go also
+						// does a make+copy before handing args to the
+						// CLI spawn, but we harden here too so a future
+						// refactor that drops the downstream copy cannot
+						// cross-contaminate agent configs. R37-CONCUR1.
 						opts.ExtraArgs = append(opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)], "--append-system-prompt", p)
 					}
 				} else {
