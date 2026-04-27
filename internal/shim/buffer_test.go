@@ -161,13 +161,53 @@ func TestRingBuffer_OversizedLineDrop(t *testing.T) {
 func TestRingBuffer_OversizedLineAfterContent(t *testing.T) {
 	// Oversized line arrives after existing content: evicts all, then drops
 	b := NewRingBuffer(100, 10)
-	b.Push([]byte("abcde")) // seq=1, 5 bytes
+	b.Push([]byte("abcde"))                   // seq=1, 5 bytes
 	seq := b.Push([]byte("ABCDEFGHIJKLMNOP")) // 16 bytes > maxBytes=10
 
 	_ = seq
 	// After evicting seq=1 to make room, 16>10 so it's dropped
 	if b.Count() != 0 {
 		t.Errorf("Count() = %d, want 0 after oversized drop", b.Count())
+	}
+}
+
+// TestRingBuffer_OversizeDropCreatesSeqHole locks R55-CORR-003's protocol
+// contract: a dropped oversize line still consumes its seq slot, so the
+// subsequent successful push gets the next number — there is NO rewind
+// that would make the replacement look like the dropped line never
+// happened. Clients that reconnect and replay via LinesSince(afterSeq)
+// see a gap where the oversize line used to be; the replay protocol
+// delivers whatever lines ARE present whose seq > afterSeq, so the gap
+// is invisible to well-behaved consumers. A future refactor that decides
+// "don't bump seq on drop" to close the hole would silently re-use the
+// seq for the next line, which is worse: two distinct stdout reads
+// collapse into a single replay entry.
+func TestRingBuffer_OversizeDropCreatesSeqHole(t *testing.T) {
+	b := NewRingBuffer(100, 5)
+
+	dropped := b.Push([]byte("123456789")) // 9 bytes > maxBytes=5, dropped
+	if dropped != 1 {
+		t.Fatalf("first push seq = %d, want 1", dropped)
+	}
+	if b.Count() != 0 {
+		t.Fatalf("Count after drop = %d, want 0", b.Count())
+	}
+
+	// Subsequent push must advance past the dropped seq, not reuse it.
+	// Use a small-enough line that fits under maxBytes=5.
+	kept := b.Push([]byte("ok"))
+	if kept != 2 {
+		t.Errorf("next push after drop seq = %d, want 2 (hole preserved)", kept)
+	}
+	if b.Count() != 1 {
+		t.Errorf("Count after drop+keep = %d, want 1", b.Count())
+	}
+
+	// LinesSince(0) returns only the kept line — the dropped seq's slot
+	// yields no entry, so the replay payload is naturally sparse.
+	lines := b.LinesSince(0)
+	if len(lines) != 1 || lines[0].seq != 2 || string(lines[0].data) != "ok" {
+		t.Errorf("LinesSince(0) = %+v, want [{seq:2 data:\"ok\"}]", lines)
 	}
 }
 

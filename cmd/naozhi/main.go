@@ -418,12 +418,36 @@ func main() {
 		if defaultWrapper == nil || w.BackendID == defaultBackend {
 			defaultWrapper = w
 		}
-		slog.Info("cli backend enabled",
-			"id", w.BackendID, "name", w.CLIName,
-			"path", w.CLIPath, "version", w.CLIVersion)
+		// Empty CLIVersion means `--version` failed (binary missing, wrong
+		// path, or crash). The wrapper is still registered so the dashboard
+		// surfaces the configuration intent, but spawn attempts will fail.
+		// Log at Warn so operators notice during startup instead of
+		// discovering the breakage only when the first user message lands.
+		// R55-QUAL-001.
+		if w.CLIVersion == "" {
+			slog.Warn("cli backend version probe failed",
+				"id", w.BackendID, "name", w.CLIName, "path", w.CLIPath,
+				"hint", "binary missing or --version crashed; spawns will fail until resolved")
+		} else {
+			slog.Info("cli backend enabled",
+				"id", w.BackendID, "name", w.CLIName,
+				"path", w.CLIPath, "version", w.CLIVersion)
+		}
 	}
 	if defaultWrapper == nil {
 		slog.Error("no usable cli backend configured")
+		os.Exit(1)
+	}
+	// Exit non-zero when the default backend failed its version probe. A
+	// healthy non-default sibling isn't useful — wrapperFor falls back to
+	// defaultWrapper when no explicit backend is requested, and the per-spawn
+	// error would say "wrapper selected, spawn failed" without surfacing the
+	// root cause. Fail fast so operators can fix the config rather than have
+	// every IM message bounce. R55-QUAL-001.
+	if defaultWrapper.CLIVersion == "" {
+		slog.Error("default cli backend is unavailable",
+			"id", defaultWrapper.BackendID, "path", defaultWrapper.CLIPath,
+			"hint", "fix the binary path in cli.backends or set cli.default to an available backend")
 		os.Exit(1)
 	}
 	wrapper := defaultWrapper

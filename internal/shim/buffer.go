@@ -40,6 +40,17 @@ func NewRingBuffer(maxLines int, maxBytes int64) *RingBuffer {
 
 // Push appends a line to the buffer, evicting the oldest if necessary.
 // Returns the assigned sequence number.
+//
+// Protocol contract: `seq` is advanced on EVERY call, including the
+// oversize-drop branch (a line longer than maxBytes that cannot fit even
+// after evicting everything). Clients see a monotonically increasing seq
+// space with potential holes — the shim<->naozhi replay protocol already
+// tolerates holes because LinesSince returns only the seqs present in
+// the ring, and the caller treats the delta as "delivered slice" rather
+// than "must be contiguous". Rationale: the stdout line that triggered
+// the drop was still observed and counted by the shim's read loop, and
+// surfacing a skipped seq to the reconnecting client is more honest than
+// pretending the read never happened. R55-CORR-003.
 func (b *RingBuffer) Push(data []byte) int64 {
 	// Copy data before acquiring the lock so concurrent readers
 	// (LinesSince) don't wait on our allocation. The copy is required for

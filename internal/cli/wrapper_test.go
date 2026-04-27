@@ -98,3 +98,31 @@ func TestNewWrapper_EmptyPathAutoDetects(t *testing.T) {
 		t.Error("auto-detect should produce a non-empty path")
 	}
 }
+
+// TestNewWrapper_UnavailableBinaryLeavesVersionEmpty locks in the contract
+// main.go relies on for R55-QUAL-001: when the configured binary is
+// missing (or --version crashes), NewWrapper returns a wrapper with
+// CLIVersion=="". main.go surfaces this as a startup Warn (non-default
+// backend) or a fatal Error (default backend). If a future refactor
+// populates CLIVersion with a placeholder or defaults-on-error, that
+// detection path silently breaks — this test is the tripwire.
+func TestNewWrapper_UnavailableBinaryLeavesVersionEmpty(t *testing.T) {
+	// Use an absolute path that cannot exist so detectVersion's exec.Command
+	// fails immediately with ENOENT. We intentionally do not tamper with PATH
+	// or HOME here because NewWrapper runs detectVersion against the given
+	// path without falling back; a non-existent absolute path is the
+	// clearest way to simulate "binary not installed".
+	w := NewWrapper("/definitely/not/a/real/path/claude-xyz", &ClaudeProtocol{}, "claude")
+	if w.CLIVersion != "" {
+		t.Errorf("CLIVersion for missing binary should be empty, got %q", w.CLIVersion)
+	}
+	// BackendID and CLIName must still be populated so the dashboard can
+	// render the configured backend as "unavailable" instead of dropping
+	// it from the list entirely.
+	if w.BackendID != "claude" {
+		t.Errorf("BackendID = %q, want %q", w.BackendID, "claude")
+	}
+	if w.CLIName != "claude-code" {
+		t.Errorf("CLIName = %q, want %q", w.CLIName, "claude-code")
+	}
+}
