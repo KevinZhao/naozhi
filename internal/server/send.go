@@ -281,10 +281,7 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyncError func(string)) {
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
-			if h.queue != nil {
-				h.queue.Discard(key)
-			}
+			h.handleOwnerLoopPanic(key, onAsyncError, r)
 		}
 	}()
 	defer h.router.NotifyIdle()
@@ -317,6 +314,33 @@ func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyn
 		// subsequent coalesced turns log failures without a back-channel.
 		h.runTurn(key, text, images, nil)
 		collectTimer.Reset(h.queue.CollectDelay())
+	}
+}
+
+// handleOwnerLoopPanic is the deferred panic recovery helper for ownerLoop.
+// Split out of the defer so the recover path can be unit-tested directly —
+// constructing a panicking runTurn in tests would require a real router +
+// session, which is out of scope for a targeted recover regression. The
+// helper:
+//
+//  1. Logs the panic with a full stack trace for operator triage.
+//  2. Clears the message queue so a stale owner is not left holding the key.
+//  3. Signals the dashboard client via onAsyncError so the UI can tell the
+//     user the turn was lost. HTTP path passes nil onAsyncError (ack already
+//     shipped), so this is a no-op there. RETRY3.
+//
+// A nested recover around onAsyncError absorbs a cascading panic (e.g., a
+// broken WS writer) so the outer defer always completes.
+func (h *Hub) handleOwnerLoopPanic(key string, onAsyncError func(string), r any) {
+	slog.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
+	if h.queue != nil {
+		h.queue.Discard(key)
+	}
+	if onAsyncError != nil {
+		func() {
+			defer func() { _ = recover() }()
+			onAsyncError("处理异常，请刷新页面或稍后重试。")
+		}()
 	}
 }
 

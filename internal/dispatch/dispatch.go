@@ -341,8 +341,7 @@ func (d *Dispatcher) ownerLoop(
 ) {
 	defer func() {
 		if r := recover(); r != nil {
-			slog.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
-			d.queue.Discard(key)
+			d.handleOwnerLoopPanic(key, msg, r)
 		}
 	}()
 	defer d.router.NotifyIdle()
@@ -392,6 +391,33 @@ func (d *Dispatcher) ownerLoop(
 		}
 		collectTimer.Reset(d.queue.CollectDelay())
 	}
+}
+
+// handleOwnerLoopPanic is the deferred panic recovery helper for ownerLoop.
+// Split out of the defer so the recover path can be unit-tested directly
+// without having to construct a real panicking ownerLoop stack (GetOrCreate
+// short-circuits before sendFn in the test harness). It:
+//
+//  1. Logs the panic with a full stack trace for operator triage.
+//  2. Clears the message queue so a stale owner is not left holding the key.
+//  3. Replies to the user with a "please retry" message so the IM peer is not
+//     left waiting indefinitely for a response the process can no longer
+//     produce. RETRY3.
+//
+// A nested recover around the reply call absorbs a cascading panic (e.g.,
+// platform SDK panicking on a nil chat handle) so the outer defer always
+// completes and the process can drain other owners cleanly.
+func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessage, r any) {
+	slog.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
+	if d.queue != nil {
+		d.queue.Discard(key)
+	}
+	func() {
+		defer func() { _ = recover() }()
+		notifyCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+		d.replyText(notifyCtx, msg, "处理异常，请稍后重试。", nil)
+	}()
 }
 
 // sendAndReply performs one turn: GetOrCreate session, send message, deliver reply.
