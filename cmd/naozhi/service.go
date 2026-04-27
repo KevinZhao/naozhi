@@ -55,6 +55,7 @@ func serviceUser() (user, home string) {
 func runInstall(args []string) {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	configPath := fs.String("config", "", "config file path (default ~/.naozhi/config.yaml)")
+	dryRun := fs.Bool("dry-run", false, "print what would change without writing unit file or invoking systemctl")
 	fs.Parse(args)
 
 	if *configPath == "" {
@@ -78,8 +79,11 @@ func runInstall(args []string) {
 
 	switch runtime.GOOS {
 	case "linux":
-		installSystemd(binary, absConfig)
+		installSystemd(binary, absConfig, *dryRun)
 	case "darwin":
+		if *dryRun {
+			fmt.Println("note: -dry-run is a no-op on darwin (launchd path has no idempotency checks yet)")
+		}
 		installLaunchd(binary, absConfig)
 	default:
 		fatalf("unsupported OS: %s (supported: linux, darwin)", runtime.GOOS)
@@ -138,35 +142,147 @@ WantedBy=multi-user.target
 `, binary, configPath, home, user, home)
 }
 
-func installSystemd(binary, configPath string) {
-	if os.Getuid() != 0 {
+// installSystemdPlan classifies the actions required to converge the host
+// into the desired systemd state. Separated from the effectful wrapper so
+// tests can assert the decision matrix without touching the real /etc or
+// shelling out to systemctl.
+type installSystemdPlan struct {
+	// UnitChanged is true when the rendered unit differs from the one
+	// already on disk (or no unit is on disk yet). Drives whether we
+	// rewrite /etc/systemd/system/naozhi.service and call daemon-reload.
+	UnitChanged bool
+	// ServiceActive mirrors `systemctl is-active naozhi` at plan time.
+	// Decides between `start` (not active) and `restart` (already active
+	// + unit changed) on the final hop.
+	ServiceActive bool
+}
+
+// planInstallSystemd derives the plan from the rendered-vs-existing unit
+// bytes and the current service state. Pure function — no side effects —
+// so it is trivially unit-tested.
+func planInstallSystemd(renderedUnit, existingUnit string, existingUnitErr error, isActive bool) installSystemdPlan {
+	unitChanged := true
+	if existingUnitErr == nil && existingUnit == renderedUnit {
+		unitChanged = false
+	}
+	return installSystemdPlan{
+		UnitChanged:   unitChanged,
+		ServiceActive: isActive,
+	}
+}
+
+// systemctlIsActive reports whether `systemctl is-active <name>` exits 0.
+// Separated so tests can stub it. A non-zero exit (service not running,
+// not installed, or systemctl error) is treated as "not active", which
+// falls back to the safe `start` branch on the caller side.
+var systemctlIsActive = func(name string) bool {
+	cmd := exec.Command("systemctl", "is-active", "--quiet", name)
+	return cmd.Run() == nil
+}
+
+func installSystemd(binary, configPath string, dryRun bool) {
+	if !dryRun && os.Getuid() != 0 {
 		fatalf("systemd install requires root. Run: sudo naozhi install")
 	}
 
 	user, home := serviceUser()
 	unit := generateSystemdUnit(binary, configPath, user, home)
 
-	if err := os.WriteFile(systemdUnitPath, []byte(unit), 0644); err != nil {
-		fatalf("write unit file: %v", err)
-	}
+	existingBytes, existingErr := os.ReadFile(systemdUnitPath)
+	plan := planInstallSystemd(unit, string(existingBytes), existingErr, systemctlIsActive("naozhi"))
 
-	cmds := [][]string{
-		{"systemctl", "daemon-reload"},
-		{"systemctl", "enable", "naozhi"},
-		{"systemctl", "start", "naozhi"},
-	}
-	for _, c := range cmds {
-		if err := run(c[0], c[1:]...); err != nil {
-			fatalf("%s: %v", strings.Join(c, " "), err)
+	if dryRun {
+		fmt.Printf("unit path:       %s\n", systemdUnitPath)
+		fmt.Printf("unit changed:    %t\n", plan.UnitChanged)
+		fmt.Printf("service active:  %t\n", plan.ServiceActive)
+		fmt.Println()
+		fmt.Println("actions that would run:")
+		for _, step := range plan.steps() {
+			fmt.Printf("  - %s\n", step)
 		}
+		return
 	}
 
-	fmt.Println("naozhi installed and started as systemd service.")
+	if plan.UnitChanged {
+		if err := os.WriteFile(systemdUnitPath, []byte(unit), 0644); err != nil {
+			fatalf("write unit file: %v", err)
+		}
+		if err := run("systemctl", "daemon-reload"); err != nil {
+			fatalf("systemctl daemon-reload: %v\n\n%s", err, recoveryHint())
+		}
+	} else {
+		fmt.Println("unit file unchanged; skipping daemon-reload")
+	}
+
+	// `enable` is idempotent on systemd — running it when already enabled
+	// prints "already enabled" to stderr and exits 0. We always call it so
+	// a half-installed prior state (unit on disk but not enabled) self-
+	// heals on the next `naozhi install`.
+	if err := run("systemctl", "enable", "naozhi"); err != nil {
+		fatalf("systemctl enable naozhi: %v\n\n%s", err, recoveryHint())
+	}
+
+	// Pick the final hop based on plan:
+	//   - not active           → start
+	//   - active + unit changed → restart (so systemd re-reads the unit)
+	//   - active + unit same    → no-op ("already running")
+	switch {
+	case !plan.ServiceActive:
+		if err := run("systemctl", "start", "naozhi"); err != nil {
+			fatalf("systemctl start naozhi: %v\n\n%s", err, recoveryHint())
+		}
+		fmt.Println("naozhi installed and started as systemd service.")
+	case plan.UnitChanged:
+		if err := run("systemctl", "restart", "naozhi"); err != nil {
+			fatalf("systemctl restart naozhi: %v\n\n%s", err, recoveryHint())
+		}
+		fmt.Println("naozhi unit updated; service restarted.")
+	default:
+		fmt.Println("naozhi already installed and running; no changes.")
+	}
+
 	fmt.Println()
 	fmt.Println("  Status:   sudo systemctl status naozhi")
 	fmt.Println("  Logs:     sudo journalctl -u naozhi -f")
 	fmt.Println("  Stop:     sudo systemctl stop naozhi")
 	fmt.Println("  Remove:   sudo naozhi uninstall")
+}
+
+// steps renders the human-readable action list used by -dry-run. Order
+// matches the effectful path in installSystemd so operators can grep the
+// same command names.
+func (p installSystemdPlan) steps() []string {
+	var out []string
+	if p.UnitChanged {
+		out = append(out, "write unit file")
+		out = append(out, "systemctl daemon-reload")
+	} else {
+		out = append(out, "skip: unit file unchanged")
+	}
+	out = append(out, "systemctl enable naozhi (idempotent)")
+	switch {
+	case !p.ServiceActive:
+		out = append(out, "systemctl start naozhi")
+	case p.UnitChanged:
+		out = append(out, "systemctl restart naozhi")
+	default:
+		out = append(out, "skip: service active and unit unchanged")
+	}
+	return out
+}
+
+// recoveryHint is the operator-facing checklist printed on any systemctl
+// failure so a half-installed state can be diagnosed without digging
+// through journal logs. Centralised so the three failure branches above
+// stay consistent.
+func recoveryHint() string {
+	return strings.Join([]string{
+		"Recovery steps:",
+		"  1. Inspect journal:   sudo journalctl -u naozhi --since '5 min ago'",
+		"  2. Check unit file:   sudo cat " + systemdUnitPath,
+		"  3. Remove if stuck:   sudo naozhi uninstall",
+		"  4. Re-run install:    sudo naozhi install",
+	}, "\n")
 }
 
 func uninstallSystemd() {

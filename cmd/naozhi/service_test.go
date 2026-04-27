@@ -168,3 +168,127 @@ func TestGenerateLaunchdPlistEscapesXML(t *testing.T) {
 		t.Error("expected escaped & in config path")
 	}
 }
+
+// TestPlanInstallSystemd_DecisionMatrix pins the idempotency contract: the
+// planner output must match the (existing-unit × service-active) matrix
+// below. Any future change to installSystemd that edits the action list
+// should be reflected here or the test flags the drift.
+//
+// The four rows cover the semantically-distinct cases we care about in
+// production:
+//  1. Fresh install       — no unit on disk, nothing running
+//  2. Re-run on healthy    — unit identical, service up → no-op
+//  3. Unit edited          — unit differs, service up → restart
+//  4. Orphan unit          — unit on disk but service never started
+func TestPlanInstallSystemd_DecisionMatrix(t *testing.T) {
+	rendered := "fake-unit-contents-v1"
+	missingErr := os.ErrNotExist
+
+	cases := []struct {
+		name          string
+		existing      string
+		existingErr   error
+		active        bool
+		wantChanged   bool
+		wantActive    bool
+		wantStepCount int
+		wantStep      string // one distinctive step that must appear
+	}{
+		{
+			name:          "fresh install",
+			existing:      "",
+			existingErr:   missingErr,
+			active:        false,
+			wantChanged:   true,
+			wantActive:    false,
+			wantStepCount: 4, // write + daemon-reload + enable + start
+			wantStep:      "systemctl start naozhi",
+		},
+		{
+			name:          "re-run on healthy",
+			existing:      rendered,
+			existingErr:   nil,
+			active:        true,
+			wantChanged:   false,
+			wantActive:    true,
+			wantStepCount: 3, // skip + enable + skip-restart
+			wantStep:      "skip: service active and unit unchanged",
+		},
+		{
+			name:          "unit edited while running",
+			existing:      "fake-unit-contents-v0",
+			existingErr:   nil,
+			active:        true,
+			wantChanged:   true,
+			wantActive:    true,
+			wantStepCount: 4, // write + daemon-reload + enable + restart
+			wantStep:      "systemctl restart naozhi",
+		},
+		{
+			name:          "orphan unit present but stopped",
+			existing:      rendered,
+			existingErr:   nil,
+			active:        false,
+			wantChanged:   false,
+			wantActive:    false,
+			wantStepCount: 3, // skip + enable + start
+			wantStep:      "systemctl start naozhi",
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			plan := planInstallSystemd(rendered, tc.existing, tc.existingErr, tc.active)
+			if plan.UnitChanged != tc.wantChanged {
+				t.Errorf("UnitChanged = %t, want %t", plan.UnitChanged, tc.wantChanged)
+			}
+			if plan.ServiceActive != tc.wantActive {
+				t.Errorf("ServiceActive = %t, want %t", plan.ServiceActive, tc.wantActive)
+			}
+			steps := plan.steps()
+			if len(steps) != tc.wantStepCount {
+				t.Errorf("step count = %d, want %d; steps=%v", len(steps), tc.wantStepCount, steps)
+			}
+			found := false
+			for _, s := range steps {
+				if s == tc.wantStep {
+					found = true
+					break
+				}
+			}
+			if !found {
+				t.Errorf("step %q not in plan; got %v", tc.wantStep, steps)
+			}
+		})
+	}
+}
+
+// TestPlanInstallSystemd_ReadErrorIsTreatedAsChanged verifies the defensive
+// path: if os.ReadFile fails for any reason other than IsNotExist (e.g.
+// EACCES after an operator chmod'd the unit file), we still treat the unit
+// as changed so the installer re-writes a known-good file rather than
+// silently leaving a corrupted one in place.
+func TestPlanInstallSystemd_ReadErrorIsTreatedAsChanged(t *testing.T) {
+	plan := planInstallSystemd("rendered", "partial-or-unreadable", os.ErrPermission, false)
+	if !plan.UnitChanged {
+		t.Error("ReadFile error must yield UnitChanged=true so the installer re-writes")
+	}
+}
+
+// TestRecoveryHint_ListsConcreteSteps locks down the operator-facing
+// recovery copy so a future refactor can't silently drop the instructions.
+// These specific strings are the only signal operators get when systemctl
+// fails under sudo — the hint must stay actionable.
+func TestRecoveryHint_ListsConcreteSteps(t *testing.T) {
+	h := recoveryHint()
+	for _, want := range []string{
+		"Inspect journal",
+		"Check unit file",
+		"naozhi uninstall",
+		"naozhi install",
+	} {
+		if !strings.Contains(h, want) {
+			t.Errorf("recoveryHint missing %q; got:\n%s", want, h)
+		}
+	}
+}

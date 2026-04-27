@@ -40,9 +40,34 @@ var ErrJobNotPaused = errors.New("cron: job not paused")
 // against the operator's pause intent.
 var ErrJobPaused = errors.New("cron: job is paused")
 
+// SessionRouter is the subset of session.Router that the cron Scheduler
+// actually consumes. Declaring it here (consumer-side interface, Go idiom)
+// inverts the historical cron → session dependency: a future Router refactor
+// only has to preserve these three method shapes to stay scheduler-
+// compatible, and tests can inject a fake without pulling the whole router
+// graph. Any new s.router.X() call requires extending this interface, which
+// makes accidental surface-area growth a compile error instead of a silent
+// regression.
+type SessionRouter interface {
+	// RegisterCronStub creates (or refreshes) a suspended exempt session
+	// entry so the cron job shows up in the dashboard sidebar before its
+	// first run. Key is always "cron:<jobID>".
+	RegisterCronStub(key, workspace, lastPrompt string)
+	// Reset discards the session for the given key (used by fresh-mode
+	// cron jobs and by Delete/Rename flows).
+	Reset(key string)
+	// GetOrCreate returns an existing session or spawns a new one at
+	// execute time. The SessionStatus and *ManagedSession escape the
+	// cron package because the scheduler needs to call Send on them.
+	GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
+}
+
 // SchedulerConfig holds configuration for the cron scheduler.
 type SchedulerConfig struct {
-	Router        *session.Router
+	// Router is the session router the scheduler talks to. Accepts the
+	// SessionRouter interface so tests can pass a minimal fake; production
+	// passes a *session.Router which satisfies it transparently.
+	Router        SessionRouter
 	Platforms     map[string]platform.Platform
 	Agents        map[string]session.AgentOpts
 	AgentCommands map[string]string
@@ -98,7 +123,7 @@ type Scheduler struct {
 	cron          *robfigcron.Cron
 	mu            sync.RWMutex
 	jobs          map[string]*Job
-	router        *session.Router
+	router        SessionRouter
 	platforms     map[string]platform.Platform
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
