@@ -192,7 +192,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 /* Inline file reference chips in event bubbles */
 .file-ref{display:inline-flex;align-items:center;gap:4px;vertical-align:baseline}
 .file-ref code{cursor:default}
-.file-ref .fr-btn{display:inline-flex;align-items:center;justify-content:center;height:18px;padding:0 6px;border:1px solid var(--nz-border);border-radius:4px;background:var(--nz-bg-2);color:var(--nz-text-mute);font-size:11px;font-family:inherit;cursor:pointer;line-height:1;transition:all .15s}
+.file-ref .fr-btn{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:1px solid var(--nz-border);border-radius:4px;background:var(--nz-bg-2);color:var(--nz-text-mute);font-size:12px;font-family:inherit;cursor:pointer;line-height:1;transition:all .15s}
 .file-ref .fr-btn:hover{background:var(--nz-bg-1);color:var(--nz-accent);border-color:var(--nz-accent)}
 .file-ref.fr-verified .fr-btn{border-color:rgba(88,166,255,.4)}
 .file-ref.fr-candidate .fr-btn{border-style:dashed;opacity:.7}
@@ -635,6 +635,141 @@ body.kbd-open .input-hints{display:none}
 .modal.onboarding li{display:flex;gap:10px;align-items:flex-start;font-size:13px;color:var(--nz-text);line-height:1.5}
 .modal.onboarding li .ob-icon{flex-shrink:0;width:22px;height:22px;border-radius:6px;background:rgba(31,111,235,.15);color:var(--nz-accent);display:flex;align-items:center;justify-content:center;font-size:13px;margin-top:1px}
 .modal.onboarding li b{color:var(--nz-text-strong);font-weight:600}
+
+/* Keyboard cheatsheet — opened via "?" when no input is focused. Reuses
+   the standard .modal scaffold so trapFocus / Esc / backdrop-dismiss all
+   work without extra code. The ks- prefix namespaces internal classes so
+   a future refactor of .modal defaults won't silently break the layout. */
+.modal.cheatsheet{width:520px;max-width:calc(100vw - 32px)}
+.modal.cheatsheet h3{font-size:16px;margin-bottom:6px}
+.modal.cheatsheet .ks-sub{font-size:12px;color:var(--nz-text-mute);margin-bottom:14px}
+.modal.cheatsheet .ks-grid{display:grid;grid-template-columns:max-content 1fr;row-gap:8px;column-gap:16px;align-items:center}
+.modal.cheatsheet .ks-keys{display:inline-flex;gap:4px;align-items:center;flex-wrap:wrap;justify-self:start}
+.modal.cheatsheet kbd{background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:4px;padding:1px 6px;font-size:12px;color:var(--nz-text);font-family:inherit;min-width:18px;text-align:center}
+.modal.cheatsheet .ks-desc{font-size:13px;color:var(--nz-text);line-height:1.45}
+.modal.cheatsheet .ks-sep{grid-column:1/-1;height:1px;background:var(--nz-bg-2);margin:6px 0}
+.modal.cheatsheet .ks-section{grid-column:1/-1;font-size:11px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-top:2px}
+
+/* Sidebar footer: version + help trigger. Keeps the info at the very
+   bottom, above the safe-area inset on iOS. Pointer-events isolation so
+   the line itself doesn't steal taps meant for scrollable content above. */
+.sidebar-footer{padding:6px 16px;border-top:1px solid var(--nz-border);font-size:11px;color:var(--nz-text-dim);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-shrink:0;min-height:28px}
+.sidebar-footer .sf-version{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums}
+.sidebar-footer .sf-help{background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);cursor:pointer;border-radius:50%;width:20px;height:20px;line-height:1;padding:0;font-size:12px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-family:inherit}
+.sidebar-footer .sf-help:hover{color:var(--nz-text-strong);border-color:var(--nz-accent)}
+@media (pointer: coarse){
+  .sidebar-footer .sf-help{width:32px;height:32px;font-size:14px}
+}
+body.kbd-open .sidebar-footer{display:none}
+
+/* ==========================================================================
+   UX sweep — non-functional polish (2026-04-27)
+   Every rule below is additive: later declarations with equal specificity
+   override earlier ones, so structure/behavior is untouched.
+   ========================================================================== */
+
+/* ---- Track A: touch-target sizing on coarse pointers (mobile + tablet) ---- */
+/* WCAG 2.5.5 Target Size — minimum 44x44 on touch input.
+   Uses (pointer:coarse) so mouse-driven desktops keep their compact sizes. */
+@media (pointer: coarse){
+  .btn-icon,.btn-send,.btn-stop{min-width:44px;min-height:44px}
+  .hdr-btn{min-width:40px;min-height:40px}
+  .section-header .sh-btn{min-width:32px;min-height:32px;padding:6px}
+  .session-card .btn-dismiss{min-width:40px;min-height:40px;padding:6px;font-size:19px;opacity:.75}
+  .btn-mobile-back{min-width:40px;min-height:40px}
+  .section-empty{min-height:44px;padding-top:12px;padding-bottom:12px}
+  .empty-cta-btn{min-height:44px}
+  .fv-btn{min-width:40px;min-height:40px}
+  /* Inline @file reference chips: keep the visual small but grow the tap area. */
+  .file-ref .fr-btn{min-width:32px;min-height:32px;padding:4px 8px}
+  /* "Load earlier" pagination button in event stream. */
+  .earlier-events-btn{min-height:36px}
+}
+
+/* ---- Track B: font-size floors to prevent iOS Safari auto-zoom on focus ---- */
+/* Any editable control needs >=16px computed font-size or Safari zooms in. */
+.login-panel input[type="password"]{font-size:16px}
+@media(max-width:768px){
+  .freq-num,.freq-time,.freq-select{font-size:16px}
+  /* Todo chips / task metadata shouldn't overpower the message body on narrow screens. */
+  .md-task-chip,.todo-chip{font-size:12px;line-height:1.35}
+}
+
+/* ---- Track C: responsive breakpoints for landscape phones & small tablets ---- */
+/* iPhone landscape (844x390) and similar touch devices with limited vertical space
+   should use the same drawer UX as portrait phones. Adds to existing 768px rule,
+   does not override it. */
+@media (max-width: 950px) and (orientation: landscape) and (pointer: coarse){
+  .container{display:block;height:100%;overflow:hidden}
+  .sidebar{position:fixed;inset:0;width:100%!important;min-width:0;max-width:none;z-index:10;background:var(--nz-bg-0);transform:translateX(-100%);transition:transform .25s ease;border-right:none;overflow:hidden}
+  body.mobile-list-view .sidebar{transform:translateX(0)}
+  .resizer{display:none}
+  .main{position:fixed;top:var(--vv-top,0);left:0;right:0;height:var(--vv-height,100dvh);width:100%;display:flex;flex-direction:column;z-index:5;overflow:hidden}
+  .sidebar{top:var(--vv-top,0);height:var(--vv-height,100%);bottom:auto}
+  .btn-mobile-back{display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;width:40px;height:40px;background:none;border:none;color:var(--nz-text-mute);font-size:20px;cursor:pointer;padding:0;border-radius:6px;-webkit-tap-highlight-color:transparent}
+}
+
+/* ---- Track D: semantic badge colors — red only means "needs attention" ---- */
+/* Default header badge becomes neutral; red is opt-in via .is-alert (JS can add
+   the class later when there's an actual failure/unread signal). Pure visual
+   change; badge textContent pipeline in dashboard.js is untouched. */
+:root{
+  --nz-badge-info:#30363d;       /* neutral count */
+  --nz-badge-info-text:#c9d1d9;
+  --nz-badge-warn:#d29922;       /* amber */
+  --nz-badge-danger:#da3633;     /* unchanged red, opt-in */
+}
+.hdr-badge{background:var(--nz-badge-info);color:var(--nz-badge-info-text);border:1px solid var(--nz-border)}
+.hdr-badge.is-alert{background:var(--nz-badge-danger);color:#fff;border-color:transparent}
+.hdr-badge.is-warn{background:var(--nz-badge-warn);color:#1b1b1b;border-color:transparent}
+
+/* ==========================================================================
+   UX sweep vol.2 — high-resolution desktop layout (2026-04-27)
+   Targets QHD (2560x1440), 4K, ultrawide. Leaves <=1440px untouched.
+   All rules are min-width queries that stack progressively; the legacy
+   1200px clamp on .event still applies below 1600px.
+   ========================================================================== */
+
+/* Reading column widens proportionally so wide screens don't feel empty. */
+@media (min-width: 1600px){
+  .event{max-width:min(1320px, 72vw)}
+  .event.text .event-content{max-width:min(1240px, 68vw)}
+  .event.todo .event-content{max-width:min(1000px, 58vw)}
+  .event.user .event-content{max-width:min(80%, 640px)}
+}
+@media (min-width: 2200px){   /* QHD bracket — 2560x1440 lands here */
+  .event{max-width:min(1560px, 62vw)}
+  .event.text .event-content{max-width:min(1460px, 58vw)}
+  .event.todo .event-content{max-width:min(1100px, 50vw)}
+}
+@media (min-width: 3200px){   /* 4K / 5K / ultrawide */
+  .event{max-width:min(1800px, 52vw)}
+  .event.text .event-content{max-width:min(1700px, 48vw)}
+  .event.todo .event-content{max-width:min(1200px, 42vw)}
+}
+
+/* Main-header + composer align to the reading column so the "full-width shell
+   + narrow content" feeling disappears at 2560+. */
+@media (min-width: 1600px){
+  .main-header{max-width:min(1380px, 75vw);margin-left:auto;margin-right:auto;width:100%}
+  .input-area{max-width:min(1380px, 75vw);margin-left:auto;margin-right:auto;width:100%}
+}
+@media (min-width: 2200px){
+  .main-header{max-width:min(1580px, 64vw)}
+  .input-area{max-width:min(1580px, 64vw)}
+}
+@media (min-width: 3200px){
+  .main-header{max-width:min(1820px, 54vw)}
+  .input-area{max-width:min(1820px, 54vw)}
+}
+
+/* Sidebar widens gently so it's not a thin stripe. Inline style set by the
+   .resizer JS uses element.style.width, which has higher specificity than
+   these rules, so users who manually resized keep their choice. */
+@media (min-width: 1920px){ .sidebar{width:400px} }
+@media (min-width: 2560px){ .sidebar{width:420px} }
+@media (min-width: 3200px){ .sidebar{width:460px} }
+
 </style>
 </head>
 <body>
@@ -660,6 +795,10 @@ body.kbd-open .input-hints{display:none}
           <div class="status-ws">connecting...</div>
         </div>
       </div>
+    </div>
+    <div class="sidebar-footer" id="sidebar-footer">
+      <span class="sf-version" id="sf-version" title="naozhi version">naozhi</span>
+      <button type="button" class="sf-help" id="sf-help" title="Keyboard shortcuts (press ?)" aria-label="Keyboard shortcuts" aria-haspopup="dialog" onclick="showCheatsheet()">?</button>
     </div>
   </nav>
   <div class="resizer" id="resizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0"></div>

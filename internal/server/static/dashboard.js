@@ -162,6 +162,7 @@ function renderSidebar(data) {
     localWsInfo.sys = sys.os + '/' + sys.arch + ' \u00b7 ' + sys.cpus + 'C' + (memStr ? '/' + memStr : '');
   }
   updateStatusBar();
+  updateVersionBadge(st.version_tag);
   if (st.agents) availableAgents = st.agents;
   if (st.default_workspace) defaultWorkspace = st.default_workspace;
   if (st.projects) projectsData = st.projects;
@@ -527,19 +528,18 @@ function sessionCardHtml(s) {
   const isActive = selectedKey === s.key && selectedNode === sNode;
   const isNew = s.state === 'new';
   const isCron = typeof s.key === 'string' && s.key.indexOf('cron:') === 0;
-  // Mirror the onSessionState dead-card rule: state='dead' OR legacy
-  // (state='ready' + death_reason). Without this, a snapshot render after
-  // reload shows the death reason text but no dimmed card styling.
-  const isDead = s.state === 'dead' || (s.state === 'ready' && !!s.death_reason);
-  const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '') + (isCron ? ' cron-card' : '') + (isDead ? ' dead-card' : '');
+  const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '') + (isCron ? ' cron-card' : '');
 
   // Line 1: prompt. user_label (operator-set via rename) wins over any
   // auto-derived title so the rename is visible immediately across refreshes.
   const prompt = s.user_label || s.summary || s.last_prompt || (isNew ? '(new session)' : '(no prompt)');
   const icon = cliIcon(s.cli_name || 'cli');
 
-  // Line 2: status dot + meta
-  const dotCls = s.state === 'running' ? 'dot-running' : (s.state === 'ready' ? 'dot-ready' : 'dot-new');
+  // Line 2: status dot + meta. Dead sessions are presented as "ready" to
+  // operators — the underlying state is retained in sessionsData for the
+  // resubscribe logic in onSessionState.
+  const displayState = s.state === 'dead' ? 'ready' : s.state;
+  const dotCls = displayState === 'running' ? 'dot-running' : (displayState === 'ready' ? 'dot-ready' : 'dot-new');
   const ago = s.last_active ? timeAgo(s.last_active) : '';
   const nodeBadge = isMultiNode() && sNode !== 'local'
     ? '<span class="sc-node" style="background:' + nodeColor(sNode) + '">' + esc(sNode) + '</span>' : '';
@@ -551,13 +551,13 @@ function sessionCardHtml(s) {
   const agentCount = s.subagents ? s.subagents.length : 0;
   const agentBadge = agentCount > 0 ? '<span class="sc-agents">\u{1F916}\u00D7' + agentCount + '</span>' : '';
   const metaHtml = '<span class="sc-dot ' + dotCls + '"></span>' +
-    '<span>' + esc(s.state) + '</span>' +
+    '<span>' + esc(displayState) + '</span>' +
     nodeBadge +
     cronBadge +
     typeTag +
     agentBadge;
 
-  return '<div class="' + cls + '" role="listitem" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" tabindex="0" aria-label="' + escAttr(prompt + ' · ' + s.state) + '" onclick="selectSession(this.dataset.key,this.dataset.node)" onkeydown="sessionCardKey(event)">' +
+  return '<div class="' + cls + '" role="listitem" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" tabindex="0" aria-label="' + escAttr(prompt + ' · ' + displayState) + '" onclick="selectSession(this.dataset.key,this.dataset.node)" onkeydown="sessionCardKey(event)">' +
     dismissBtn +
     icon +
     '<div class="sc-body">' +
@@ -678,6 +678,101 @@ function updateStatusBar() {
 
   container.innerHTML = html;
 }
+
+// updateVersionBadge writes the build tag into the sidebar footer. Called
+// on every /api/sessions poll so a hot-reload refresh (e.g. zero-downtime
+// restart) surfaces immediately. An empty tag (server built without
+// -X main.version=…) falls back to the plain product name.
+function updateVersionBadge(tag) {
+  const el = document.getElementById('sf-version');
+  if (!el) return;
+  const clean = typeof tag === 'string' ? tag.trim() : '';
+  if (clean) {
+    el.textContent = 'naozhi ' + clean;
+    el.title = 'naozhi ' + clean;
+  } else {
+    el.textContent = 'naozhi';
+    el.title = 'naozhi (version unknown — build with Makefile for tag)';
+  }
+}
+
+// CHEATSHEET_ENTRIES is the single source of truth for the shortcut modal.
+// Keeping it as an array (instead of raw HTML) lets tests grep for specific
+// rows and lets the render path escape user-visible text consistently.
+// The `keys` arrays are rendered as <kbd> chips joined by "+".
+const CHEATSHEET_ENTRIES = [
+  { section: '会话' },
+  { keys: ['Cmd/Ctrl', '1'], alt: ['Cmd/Ctrl', '9'], desc: '切换到项目组内第 N 个会话' },
+  { keys: ['Cmd/Ctrl', '↑'], alt: ['Cmd/Ctrl', '↓'], desc: '上/下一会话（同项目组内）' },
+  { keys: ['Alt', 'N'], desc: '新建会话' },
+  { section: '消息' },
+  { keys: ['Alt', '↑'], alt: ['Alt', '↓'], desc: '跳到上/下一条消息' },
+  { keys: ['Esc'], desc: '关闭弹窗 / 关闭历史面板' },
+  { section: '帮助' },
+  { keys: ['?'], desc: '打开本快捷键面板' },
+];
+
+// renderCheatsheetHTML returns an HTML string; esc-safe because every
+// piece of user-visible text originates from CHEATSHEET_ENTRIES (static
+// const). kbd chips are literal HTML but the content is whitelisted.
+function renderCheatsheetHTML() {
+  let rows = '';
+  for (const entry of CHEATSHEET_ENTRIES) {
+    if (entry.section) {
+      rows += '<div class="ks-section">' + esc(entry.section) + '</div>';
+      continue;
+    }
+    let keysHTML = entry.keys.map(k => '<kbd>' + esc(k) + '</kbd>').join(' + ');
+    if (entry.alt) {
+      keysHTML += ' / ' + entry.alt.map(k => '<kbd>' + esc(k) + '</kbd>').join(' + ');
+    }
+    rows += '<div class="ks-keys">' + keysHTML + '</div>';
+    rows += '<div class="ks-desc">' + esc(entry.desc) + '</div>';
+  }
+  return rows;
+}
+
+// showCheatsheet opens the shortcut modal. Reuses .modal-overlay + trapFocus
+// so Esc-to-close and focus trapping come for free. Idempotent: a second
+// call while the modal is open is a no-op.
+function showCheatsheet() {
+  if (document.querySelector('.modal-overlay.cheatsheet-overlay')) return;
+  const overlay = document.createElement('div');
+  overlay.className = 'modal-overlay cheatsheet-overlay';
+  overlay.innerHTML =
+    '<div class="modal cheatsheet" role="dialog" aria-modal="true" aria-label="键盘快捷键">' +
+      '<h3>键盘快捷键</h3>' +
+      '<div class="ks-sub">按 <kbd>?</kbd> 可随时打开本面板，<kbd>Esc</kbd> 关闭。</div>' +
+      '<div class="ks-grid">' + renderCheatsheetHTML() + '</div>' +
+      '<div class="modal-btns">' +
+        '<button type="button" class="primary" onclick="dismissCheatsheet()">好的</button>' +
+      '</div>' +
+    '</div>';
+  overlay.addEventListener('click', e => {
+    if (e.target === overlay) dismissCheatsheet();
+  });
+  document.body.appendChild(overlay);
+  trapFocus(overlay);
+}
+
+function dismissCheatsheet() {
+  const ov = document.querySelector('.modal-overlay.cheatsheet-overlay');
+  if (ov) ov.remove();
+}
+
+// Global "?" shortcut: open the cheatsheet when not typing in an input
+// and no other modal is already open. The same Shift+/ also fires "?"
+// on US layouts, so the `key === '?'` check covers both.
+document.addEventListener('keydown', function(e) {
+  if (e.key !== '?') return;
+  const tag = (e.target.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+  // Don't stack cheatsheet on top of another modal — let Esc chain first.
+  if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  e.preventDefault();
+  showCheatsheet();
+});
 
 function selectSession(key, node) {
   node = node || 'local';
@@ -906,12 +1001,12 @@ function renderMainShell() {
     '<div class="input-area' + (voiceInputMode ? ' voice-mode' : '') + '" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
-        '<button class="btn-icon" onclick="openFilePicker()" title="upload image">&#x1f4ce;</button>' +
-        '<button class="btn-icon btn-mic" id="btn-mic" onclick="toggleInputMode()" title="' + (voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '">' + (voiceInputMode ? '&#x2328;' : '&#x1f3a4;') + '</button>' +
-        '<div id="msg-input" contenteditable="true" role="textbox" data-placeholder="send a message..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
-        '<button class="btn-hold-talk" id="btn-hold-talk">\u6309\u4f4f\u8bf4\u8bdd</button>' +
-        '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="send">&#x27a4;</button>' +
-        '<button class="btn-icon btn-stop" id="btn-stop" onclick="interruptSession()" title="stop">&#x25A0;</button>' +
+        '<button class="btn-icon" onclick="openFilePicker()" title="upload image" aria-label="Upload image">&#x1f4ce;</button>' +
+        '<button class="btn-icon btn-mic" id="btn-mic" onclick="toggleInputMode()" title="' + (voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (voiceInputMode ? 'Switch to keyboard input' : 'Switch to voice input') + '">' + (voiceInputMode ? '&#x2328;' : '&#x1f3a4;') + '</button>' +
+        '<div id="msg-input" contenteditable="true" role="textbox" aria-label="Message input" aria-multiline="true" data-placeholder="send a message..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
+        '<button class="btn-hold-talk" id="btn-hold-talk" aria-label="Hold to record voice">\u6309\u4f4f\u8bf4\u8bdd</button>' +
+        '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="send" aria-label="Send message">&#x27a4;</button>' +
+        '<button class="btn-icon btn-stop" id="btn-stop" onclick="interruptSession()" title="stop" aria-label="Stop current turn">&#x25A0;</button>' +
       '</div>' +
       '<div class="input-hints">Enter send &middot; Shift+Enter newline &middot; Esc interrupt</div>' +
       '<input type="file" id="file-input" accept="image/*" multiple style="display:none" onchange="handleFiles(this.files)">' +
@@ -1259,8 +1354,8 @@ function eventHtml(e) {
     ).join('') + '</div>';
   }
 
-  // Copy button for long text/user messages (>200 chars raw) — inside content, at bottom
-  const copyBtn = ((e.type === 'text' || e.type === 'user') && cleanRaw.length > 200)
+  // Copy button for long text/user messages (>500 chars raw) — inside content, at bottom
+  const copyBtn = ((e.type === 'text' || e.type === 'user') && cleanRaw.length > 500)
     ? '<button class="event-copy-btn" data-raw="' + escAttr(cleanRaw) + '" onclick="copyEventContent(this)">copy</button>'
     : '';
 
@@ -3692,10 +3787,14 @@ function applyFileRefResult(wrapEl, entry) {
   wrapEl.classList.add('fr-verified');
   wrapEl.dataset.size = entry.size || 0;
   wrapEl.dataset.mime = entry.mime || '';
+  // Preview and download share the same visual size \u2014 single-glyph icons
+  // with an aria-label for accessibility so assistive tech still announces
+  // "Preview" / "Download" clearly.
   const preview = document.createElement('button');
   preview.type = 'button';
   preview.className = 'fr-btn fr-btn-preview';
-  preview.textContent = 'preview';
+  preview.textContent = '\u2197'; // paired with download '\u2193' for symmetric arrow look
+  preview.setAttribute('aria-label', 'Preview ' + wrapEl.dataset.path);
   preview.title = 'Preview ' + wrapEl.dataset.path;
   preview.addEventListener('click', evt => {
     evt.preventDefault();
@@ -3705,7 +3804,8 @@ function applyFileRefResult(wrapEl, entry) {
   const download = document.createElement('button');
   download.type = 'button';
   download.className = 'fr-btn fr-btn-download';
-  download.textContent = '\u2193'; // down arrow
+  download.textContent = '\u2193'; // \u2193
+  download.setAttribute('aria-label', 'Download ' + wrapEl.dataset.path);
   download.title = 'Download ' + wrapEl.dataset.path;
   download.addEventListener('click', evt => {
     evt.preventDefault();
@@ -3959,9 +4059,7 @@ function renderMdUncached(s) {
       const langAttr = lang ? ' data-lang="' + escAttr(lang) + '"' : '';
       return '<div class="md-code-wrap"><pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre>' +
         '<div class="md-code-actions">' +
-          '<button class="md-code-btn" onclick="previewCodeBlock(this)">preview</button>' +
-          '<button class="md-code-btn" onclick="downloadCodeBlock(this)">download</button>' +
-          '<button class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)">copy</button>' +
+          '<button class="md-code-btn md-copy-btn" onclick="copyCodeBlock(this)" aria-label="Copy code snippet">copy</button>' +
         '</div>' +
         '</div>';
     }
@@ -4577,27 +4675,24 @@ const wsm = {
       if (c.dataset.key === msg.key && (c.dataset.node || 'local') === msgNode) card = c;
     });
     if (card) {
+      // Surface dead sessions as "ready" in the UI — the backend state is
+      // retained on sessionsData so the resubscribe logic below still fires
+      // when a dead→running transition occurs.
+      const displayState = msg.state === 'dead' ? 'ready' : msg.state;
       const badge = card.querySelector('.badge');
-      if (badge) { badge.className = 'badge ' + msg.state; badge.textContent = msg.state; }
-      // Dead-card fires for either:
-      //  - state='dead' (backend now distinguishes exited processes explicitly), or
-      //  - state='ready' + death_reason (older path: process exited but session
-      //    layer marked it idle_timeout/evicted; still render as dead-card so the
-      //    operator sees the reason).
-      const isDead = msg.state === 'dead' || (msg.state === 'ready' && !!sessionsData[sKey]?.death_reason);
-      card.classList.toggle('dead-card', isDead);
+      if (badge) { badge.className = 'badge ' + displayState; badge.textContent = displayState; }
       // Update sidebar dot and state text to reflect new state immediately.
       // sessionCardHtml renders .sc-dot with dot-running/dot-ready/dot-new,
       // but onSessionState previously only patched .badge (which doesn't exist
       // in sidebar cards), leaving the dot stale.
       const dot = card.querySelector('.sc-dot');
       if (dot) {
-        dot.className = 'sc-dot ' + (msg.state === 'running' ? 'dot-running' : (msg.state === 'ready' ? 'dot-ready' : 'dot-new'));
+        dot.className = 'sc-dot ' + (displayState === 'running' ? 'dot-running' : (displayState === 'ready' ? 'dot-ready' : 'dot-new'));
       }
       const meta = card.querySelector('.sc-meta');
       if (meta) {
         const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
-        if (stateSpan && !stateSpan.classList.contains('sc-node')) stateSpan.textContent = msg.state;
+        if (stateSpan && !stateSpan.classList.contains('sc-node')) stateSpan.textContent = displayState;
       }
     }
     if (msg.key === selectedKey && msgNode === selectedNode) updateMainState(msg.state, msg.reason);
