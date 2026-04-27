@@ -831,6 +831,29 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 					handle.Shutdown()
 				}
 			}()
+			// After killing the old shim the session becomes suspended until the
+			// next user message spawns a fresh process. NewRouter's async JSONL
+			// load loop skips this key because shimManagedKeys() already claimed
+			// it, so without an explicit backfill here the dashboard panel stays
+			// blank until the user sends something. Load JSONL directly into
+			// persistedHistory (InjectHistory is proc-nil safe) so the sidebar
+			// shows the last conversation while the session waits for revival.
+			if r.claudeDir != "" && state.SessionID != "" {
+				ids := make([]string, 0, len(sess.prevSessionIDs)+1)
+				ids = append(ids, sess.prevSessionIDs...)
+				ids = append(ids, state.SessionID)
+				histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
+				histEntries := discovery.LoadHistoryChainTailCtx(
+					histCtx, r.claudeDir, ids, sess.workspace, maxPersistedHistory,
+				)
+				histCancel()
+				if len(histEntries) > 0 {
+					sess.InjectHistory(histEntries)
+					sess.extractLastPromptFromProcess()
+					slog.Info("drifted shim: backfilled JSONL history",
+						"key", state.Key, "entries", len(histEntries))
+				}
+			}
 			continue
 		}
 
