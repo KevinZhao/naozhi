@@ -28,16 +28,15 @@ vuln:
 test:
 	go test -race ./...
 
-# Cross-compile all platforms
+# Cross-compile all supported platforms. Windows omitted: internal/shim
+# depends on POSIX-only syscalls (Kill, Setsid) not present on windows/*.
 release: clean
 	@mkdir -p dist
 	@for target in \
 		linux/amd64 linux/arm64 \
-		darwin/amd64 darwin/arm64 \
-		windows/amd64 windows/arm64; do \
+		darwin/amd64 darwin/arm64; do \
 		GOOS=$${target%/*} GOARCH=$${target#*/}; \
-		EXT=""; [ "$$GOOS" = "windows" ] && EXT=".exe"; \
-		OUT="dist/$(BINARY)-$$GOOS-$$GOARCH$$EXT"; \
+		OUT="dist/$(BINARY)-$$GOOS-$$GOARCH"; \
 		echo "Building $$OUT"; \
 		CGO_ENABLED=0 GOOS=$$GOOS GOARCH=$$GOARCH \
 			go build -trimpath -ldflags='$(LDFLAGS)' -o "$$OUT" $(MAIN); \

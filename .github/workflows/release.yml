@@ -26,6 +26,10 @@ jobs:
     needs: check-branch
     runs-on: ubuntu-latest
     strategy:
+      # A single matrix cell failure should not cancel sibling builds.
+      # Without fail-fast: false, any late-breaking build break on one arch
+      # wipes the already-compiled artifacts from the others.
+      fail-fast: false
       matrix:
         include:
           - goos: linux
@@ -36,10 +40,11 @@ jobs:
             goarch: amd64
           - goos: darwin
             goarch: arm64
-          - goos: windows
-            goarch: amd64
-          - goos: windows
-            goarch: arm64
+          # Windows is intentionally not in the release matrix: internal/shim
+          # relies on POSIX-only syscalls (Kill, Setsid) that do not exist in
+          # syscall.SysProcAttr on windows/*, and install.sh already refuses
+          # MINGW/MSYS/CYGWIN targets. Re-adding Windows requires a compat
+          # layer in internal/shim behind build tags (_unix.go / _windows.go).
     steps:
       - uses: actions/checkout@v4
 
@@ -53,9 +58,7 @@ jobs:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
         run: |
-          EXT=""
-          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
-          OUTPUT="naozhi-${GOOS}-${GOARCH}${EXT}"
+          OUTPUT="naozhi-${GOOS}-${GOARCH}"
           go build -trimpath -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o "dist/${OUTPUT}" ./cmd/naozhi/
           cd dist && sha256sum "${OUTPUT}" > "${OUTPUT}.sha256"
 
