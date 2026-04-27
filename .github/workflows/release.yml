@@ -68,6 +68,11 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      # Need the repo for install.sh to ship as a release asset. install.sh
+      # is intentionally static (no per-release substitution); it fetches
+      # checksums.txt from whichever tag it targets at runtime.
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           path: dist/
@@ -76,6 +81,13 @@ jobs:
       - name: Create checksums file
         run: cat dist/*.sha256 > dist/checksums.txt
 
+      - name: Stage install.sh
+        # Copy into dist/ so it is uploaded alongside the binaries. Raw GitHub
+        # (raw.githubusercontent.com/.../master/install.sh) remains the primary
+        # distribution URL; this copy exists so a user who pins a version can
+        # also pin the exact installer that shipped with it.
+        run: cp install.sh dist/
+
       - name: Create Release
         uses: softprops/action-gh-release@v2
         with:
@@ -83,3 +95,4 @@ jobs:
           files: |
             dist/naozhi-*
             dist/checksums.txt
+            dist/install.sh

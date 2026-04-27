@@ -187,7 +187,22 @@ graph RL
 
 ### 安装
 
-从 [GitHub Releases](../../releases) 下载对应平台的预编译二进制，或从源码编译:
+**推荐（macOS / Linux，零依赖）**：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KevinZhao/naozhi/master/install.sh | bash
+```
+
+脚本会按当前 OS/架构从 [GitHub Releases](../../releases) 拉对应二进制、校验 SHA256、装到 `~/.local/bin/naozhi`，全程不用 sudo。支持固定版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/KevinZhao/naozhi/master/install.sh \
+  | NAOZHI_VERSION=v0.0.3 bash
+```
+
+卸载：`curl -fsSL ... /install.sh | bash -s -- --uninstall`
+
+**其它方式**：从 [Releases](../../releases) 手动下载，或源码编译：
 
 ```bash
 go build -o bin/naozhi ./cmd/naozhi/
