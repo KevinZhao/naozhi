@@ -218,8 +218,9 @@ button:hover{background:#3a8eef}button:active{background:#2a7edf}
 <p>enter token to continue</p>
 <form id="login-form" action="/dashboard" method="POST" autocomplete="on">
 <input type="text" name="username" autocomplete="username" value="naozhi" tabindex="-1" aria-hidden="true">
-<input type="password" name="token" id="token" autocomplete="current-password" placeholder="dashboard token" autofocus>
-<button type="submit">login</button>
+<label for="token" style="position:absolute;left:-9999px">dashboard token</label>
+<input type="password" name="token" id="token" autocomplete="current-password" placeholder="dashboard token" aria-label="dashboard token" autofocus>
+<button type="submit" aria-label="Sign in">login</button>
 </form>
 <div class="error" id="err"></div>
 </div>

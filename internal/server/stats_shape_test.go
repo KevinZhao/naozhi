@@ -76,7 +76,8 @@ func TestHandleAPISessions_StatsStructShape(t *testing.T) {
 	for _, k := range required {
 		expected[k] = true
 	}
-	expected["projects"] = true // optional
+	expected["projects"] = true    // optional — omitted when no project manager
+	expected["version_tag"] = true // optional — omitted when -X main.version is not set
 	for k := range stats {
 		if !expected[k] {
 			t.Errorf("unexpected stats.%s — add to dashboard.js contract before shipping", k)

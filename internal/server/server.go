@@ -267,9 +267,71 @@ type ServerOptions struct {
 	// for tests and callers that don't have a shutdown ctx yet.
 	// R55-QUAL-004.
 	StartupCtx context.Context
+	// Version is the build version string (e.g. the `-X main.version=...`
+	// ldflag value). When non-empty it is surfaced as `version` on /health
+	// (both unauthenticated and authenticated) and as `version_tag` inside
+	// /api/sessions stats so the dashboard footer can render "v<tag>" and
+	// curl probes can verify which build is live. Empty value means
+	// "unknown" — /health omits the field, keeping the legacy wire shape.
+	Version string
+
+	// === Core dependencies (previously positional args of New) ===
+	//
+	// These fields were originally positional parameters on New(); they
+	// now live in ServerOptions so a single constructor call can carry
+	// the full config. NewWithOptions consumes them directly. The legacy
+	// New(addr, router, ..., opts) wrapper still accepts positional args
+	// and *overrides* matching fields in opts — a positional arg is
+	// understood as "the caller is asserting this specific value, even
+	// if they happened to leave a stale field in opts".
+	Addr          string
+	Router        *session.Router
+	Platforms     map[string]platform.Platform
+	Agents        map[string]session.AgentOpts
+	AgentCommands map[string]string
+	Scheduler     *cron.Scheduler
+	Backend       string // "claude" | "kiro" | "" (empty → "claude")
 }
 
+// NewWithOptions constructs a Server from a single ServerOptions value.
+// Prefer this constructor for new call sites — it reads like a config
+// literal and tolerates new fields being added without signature churn.
+// The legacy New() wrapper still exists for backward compatibility.
+//
+// Required: opts.Router must be non-nil. opts.Addr must be set for the
+// listener to bind. Other fields tolerate zero values.
+func NewWithOptions(opts ServerOptions) *Server {
+	return buildServer(opts)
+}
+
+// New is the legacy positional-args constructor, retained so existing
+// call sites (especially tests) do not need mechanical updates. It
+// stuffs the positional args into ServerOptions (overriding any matching
+// fields the caller may have also set in opts) and delegates to
+// NewWithOptions. New callers should use NewWithOptions directly.
 func New(addr string, router *session.Router, platforms map[string]platform.Platform, agents map[string]session.AgentOpts, agentCommands map[string]string, scheduler *cron.Scheduler, backend string, opts ServerOptions) *Server {
+	opts.Addr = addr
+	opts.Router = router
+	opts.Platforms = platforms
+	opts.Agents = agents
+	opts.AgentCommands = agentCommands
+	opts.Scheduler = scheduler
+	opts.Backend = backend
+	return NewWithOptions(opts)
+}
+
+// buildServer is the shared construction path used by both New and
+// NewWithOptions. Kept private so the two public entry points are the
+// only way to create a *Server, and their contracts can evolve
+// independently without leaking internal assembly details.
+func buildServer(opts ServerOptions) *Server {
+	addr := opts.Addr
+	router := opts.Router
+	platforms := opts.Platforms
+	agents := opts.Agents
+	agentCommands := opts.AgentCommands
+	scheduler := opts.Scheduler
+	backend := opts.Backend
 	tag := "cc"
 	if backend == "kiro" {
 		tag = "kiro"
@@ -406,6 +468,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		backendTag:    tag,
 		workspaceID:   opts.WorkspaceID,
 		workspaceName: opts.WorkspaceName,
+		versionTag:    opts.Version,
 		watchdogNoOut: &s.watchdogNoOutputKills,
 		watchdogTotal: &s.watchdogTotalKills,
 	}
@@ -430,6 +493,7 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 		startedAt:          s.startedAt,
 		workspaceID:        opts.WorkspaceID,
 		workspaceName:      opts.WorkspaceName,
+		version:            opts.Version,
 		noOutputTimeout:    opts.NoOutputTimeout,
 		totalTimeout:       opts.TotalTimeout,
 		noOutputTimeoutStr: opts.NoOutputTimeout.String(),

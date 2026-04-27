@@ -662,7 +662,14 @@ func main() {
 	}
 
 	// Server
-	srv := server.New(cfg.Server.Addr, router, platforms, agents, cfg.AgentCommands, scheduler, cfg.CLI.Backend, server.ServerOptions{
+	srv := server.NewWithOptions(server.ServerOptions{
+		Addr:              cfg.Server.Addr,
+		Router:            router,
+		Platforms:         platforms,
+		Agents:            agents,
+		AgentCommands:     cfg.AgentCommands,
+		Scheduler:         scheduler,
+		Backend:           cfg.CLI.Backend,
 		WorkspaceID:       cfg.Workspace.ID,
 		WorkspaceName:     cfg.Workspace.Name,
 		AllowedRoot:       workspace,
@@ -679,6 +686,7 @@ func main() {
 		ReverseNodeServer: rns,
 		Transcriber:       stt,
 		StartupCtx:        ctx,
+		Version:           version,
 		OnReady: func() {
 			if err := osutil.SdNotify("READY=1"); err != nil {
 				slog.Warn("sd_notify READY failed", "err", err)

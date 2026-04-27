@@ -16,11 +16,16 @@ import (
 
 // HealthHandler serves the /health endpoint with system status information.
 type HealthHandler struct {
-	router          *session.Router
-	auth            *AuthHandlers
-	startedAt       time.Time
-	workspaceID     string
-	workspaceName   string
+	router        *session.Router
+	auth          *AuthHandlers
+	startedAt     time.Time
+	workspaceID   string
+	workspaceName string
+	// version is the build tag surfaced on /health so external probes can
+	// confirm which binary is running without needing dashboard auth. Empty
+	// means "unknown" — the field is omitted from the response to preserve
+	// the legacy wire shape.
+	version         string
 	noOutputTimeout time.Duration
 	totalTimeout    time.Duration
 	// noOutputTimeoutStr / totalTimeoutStr cache the pre-formatted
@@ -95,6 +100,12 @@ type healthAuthSection struct {
 type healthResp struct {
 	Status string `json:"status"`
 	Uptime string `json:"uptime"`
+	// Version is the build tag (e.g. git describe output injected via
+	// -X main.version=...). Exposed at the top level so unauthenticated
+	// probes (load balancers, uptime monitors) can confirm which binary is
+	// live without needing the dashboard token. Empty → field omitted so
+	// older deployments that never set the ldflag keep the legacy shape.
+	Version string `json:"version,omitempty"`
 	// Anonymous pointer embed: json package promotes non-nil pointer's
 	// fields into the enclosing object, so authenticated probes get the
 	// exact same top-level keys as before while unauthenticated probes
@@ -104,8 +115,9 @@ type healthResp struct {
 
 func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp := healthResp{
-		Status: "ok",
-		Uptime: time.Since(h.startedAt).Round(time.Second).String(),
+		Status:  "ok",
+		Uptime:  time.Since(h.startedAt).Round(time.Second).String(),
+		Version: h.version,
 	}
 	if !h.auth.isAuthenticated(r) {
 		writeJSON(w, resp)

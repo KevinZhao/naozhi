@@ -83,14 +83,21 @@ type sessionStatsStatic struct {
 // / stats.system / stats.version) see the same keys in the same order.
 type sessionStats struct {
 	sessionStatsStatic
-	Active   int                `json:"active"`
-	Running  int                `json:"running"`
-	Ready    int                `json:"ready"`
-	Total    int                `json:"total"`
-	Version  uint64             `json:"version"`
-	Uptime   string             `json:"uptime"`
-	Watchdog watchdogStats      `json:"watchdog"`
-	Projects []projectListEntry `json:"projects,omitempty"`
+	Active  int    `json:"active"`
+	Running int    `json:"running"`
+	Ready   int    `json:"ready"`
+	Total   int    `json:"total"`
+	Version uint64 `json:"version"`
+	// VersionTag is the naozhi build tag (e.g. `git describe` output).
+	// Surfaced separately from the uint64 `version` counter (which tracks
+	// session-store mutations) so dashboard.js can render a footer like
+	// "naozhi v1.2.3-dirty · dark" without conflating with the poll-version
+	// field. Omitempty preserves the legacy wire shape when the ldflag is
+	// unset (e.g. `go run` without -X, or `go build` without Makefile).
+	VersionTag string             `json:"version_tag,omitempty"`
+	Uptime     string             `json:"uptime"`
+	Watchdog   watchdogStats      `json:"watchdog"`
+	Projects   []projectListEntry `json:"projects,omitempty"`
 }
 
 // nodeStatusEntry is the per-node element in /api/sessions "nodes".
@@ -154,6 +161,11 @@ type SessionHandlers struct {
 	backendTag    string
 	workspaceID   string
 	workspaceName string
+	// versionTag is the naozhi build tag piped into sessionStats.VersionTag
+	// on every poll. Immutable after construction. Empty means "unknown"
+	// (e.g. `go run` with no -X main.version ldflag) and is omitted from
+	// the JSON response via omitempty.
+	versionTag    string
 	watchdogNoOut *atomic.Int64
 	watchdogTotal *atomic.Int64
 
@@ -311,6 +323,7 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		Ready:              ready,
 		Total:              total,
 		Version:            version,
+		VersionTag:         h.versionTag,
 		Uptime:             h.uptimeStringAt(now),
 		Watchdog: watchdogStats{
 			NoOutputKills: h.watchdogNoOut.Load(),
