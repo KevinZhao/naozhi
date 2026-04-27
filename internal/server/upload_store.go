@@ -54,6 +54,12 @@ func newUploadStore() *uploadStore {
 var (
 	errUploadStoreFull = errors.New("upload store full")
 	errUploadPerOwner  = errors.New("upload quota exceeded for this user")
+	// errUploadNotFound is returned by TakeAll when any id in the batch is
+	// missing, expired, or owned by someone else. Callers should translate
+	// to a single generic "file not found or expired" client-facing
+	// message — the fid is user-supplied and MUST NOT be echoed back
+	// (see R37-CONCUR4 and dashboard_send.go's existing rationale).
+	errUploadNotFound = errors.New("file not found or expired")
 )
 
 // Put stores an image owned by owner and returns a random hex ID.
@@ -119,6 +125,67 @@ func (s *uploadStore) Take(id, owner string) *cli.ImageData {
 	}
 	s.removeEntryLocked(id, e)
 	return &e.Image
+}
+
+// TakeAll atomically retrieves and removes a batch of images by ID,
+// verifying ownership for each. Semantics:
+//
+//   - If EVERY id resolves (present + unexpired + owned by `owner`), all
+//     entries are removed in a single critical section and the images
+//     are returned in `ids` order. The returned slice is nil when ids
+//     is empty.
+//   - If ANY id fails any check, NOTHING is removed and (nil, err) is
+//     returned. `err` carries the same "not found or expired" semantics
+//     as the single-id path so callers can keep a single client-facing
+//     error message regardless of which specific id broke.
+//
+// This closes R37-CONCUR4: the legacy "Take in a loop" pattern would
+// consume N-1 entries before hitting the broken N-th id, and the
+// already-consumed entries would be silently dropped on the error
+// return — user loses the image data with no recovery hook. With
+// TakeAll the invariant is "all-or-nothing", so a partial-expiry burst
+// surfaces as a single error and the caller can prompt the user to
+// re-upload all images in one shot.
+func (s *uploadStore) TakeAll(ids []string, owner string) ([]cli.ImageData, error) {
+	if len(ids) == 0 {
+		return nil, nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// First pass: validate every id under the single lock so expiry
+	// eviction in the second pass cannot invalidate a peer mid-walk.
+	// Collect entry pointers keyed by position to avoid a second map
+	// lookup when consuming.
+	resolved := make([]*uploadEntry, len(ids))
+	now := time.Now()
+	for i, id := range ids {
+		e, ok := s.entries[id]
+		if !ok {
+			return nil, errUploadNotFound
+		}
+		if now.Sub(e.Created) > uploadTTL {
+			// Expired entries are removed eagerly in this same lock so a
+			// caller that retries with fresh uploads doesn't keep tripping
+			// over the same stale id — but we do NOT touch the other ids'
+			// entries that ARE still valid. This preserves "all-or-nothing"
+			// for the current batch while cleaning house opportunistically.
+			s.removeEntryLocked(id, e)
+			return nil, errUploadNotFound
+		}
+		if e.Owner != owner {
+			return nil, errUploadNotFound
+		}
+		resolved[i] = e
+	}
+
+	// All ids validated — now consume them in the same lock.
+	out := make([]cli.ImageData, len(ids))
+	for i, id := range ids {
+		out[i] = resolved[i].Image
+		s.removeEntryLocked(id, resolved[i])
+	}
+	return out, nil
 }
 
 // StartCleanup runs periodic eviction of expired entries until ctx is cancelled.

@@ -566,22 +566,23 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	}
 
 	// Resolve pre-uploaded file IDs — ownership-checked to prevent cross-user theft.
+	// Atomic TakeAll: partial failure leaves the store untouched so the user
+	// can retry with a fresh upload batch rather than silently losing the
+	// earlier images. R37-CONCUR4.
 	var images []cli.ImageData
 	if len(msg.FileIDs) > 0 {
 		if h.uploadStore == nil {
 			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "uploads not configured"})
 			return
 		}
-		for _, fid := range msg.FileIDs {
-			img := h.uploadStore.Take(fid, c.uploadOwner)
-			if img == nil {
-				// Never echo fid (user-controlled) back in the error; log internally.
-				slog.Debug("ws send: file_id not found or expired", "fid", fid)
-				c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "file not found or expired"})
-				return
-			}
-			images = append(images, *img)
+		taken, err := h.uploadStore.TakeAll(msg.FileIDs, c.uploadOwner)
+		if err != nil {
+			// Never echo fids (user-controlled) back in the error; log internally.
+			slog.Debug("ws send: one or more file_ids not found or expired", "count", len(msg.FileIDs))
+			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "file not found or expired"})
+			return
 		}
+		images = append(images, taken...)
 	}
 
 	capturedID, capturedKey := msg.ID, key

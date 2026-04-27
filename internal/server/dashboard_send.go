@@ -229,15 +229,20 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	// user-controlled and echoing it back with SetEscapeHTML(false) would
 	// allow HTML payloads to appear unescaped in any future text/html
 	// degraded path. Log the offending id internally for operator triage.
+	//
+	// Atomic TakeAll: if any fid is missing, expired, or foreign-owned,
+	// nothing is consumed — the user can retry the whole batch after
+	// re-uploading instead of losing the earlier valid images silently.
+	// R37-CONCUR4.
 	owner := uploadOwner(r, h.trustedProxy)
-	for _, fid := range fileIDs {
-		img := h.uploadStore.Take(fid, owner)
-		if img == nil {
-			slog.Debug("send: file_id not found or expired", "fid", fid)
+	if len(fileIDs) > 0 {
+		taken, err := h.uploadStore.TakeAll(fileIDs, owner)
+		if err != nil {
+			slog.Debug("send: one or more file_ids not found or expired", "count", len(fileIDs))
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "file not found or expired"})
 			return
 		}
-		images = append(images, *img)
+		images = append(images, taken...)
 	}
 
 	if key == "" {
