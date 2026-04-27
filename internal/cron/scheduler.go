@@ -395,49 +395,68 @@ func (s *Scheduler) EnsureStub(key string) bool {
 	return true
 }
 
+// stopBudget is the overall deadline Scheduler.Stop() will spend waiting on
+// cron.Stop + triggerWG before proceeding to save. Shared between both waits
+// (not doubled per wait) so a production deployment with execTimeout=3600s
+// cannot pin restart for ≈2 h — the prior two-budget design had a worst case
+// of 2×(execTimeout+5s). Aligned with session.ShutdownTimeout (30s) so both
+// subsystems agree on the upper bound systemd sees.
+//
+// Package-level var (not const) so tests can shorten it to milliseconds
+// without race-racing a Stop call with real wall-clock timeouts.
+// R49-REL-CRON-STOP-BUDGET.
+var stopBudget = 30 * time.Second
+
 // Stop halts the scheduler and saves state. It waits for both scheduled jobs
 // (drained by s.cron.Stop) and any TriggerNow-spawned goroutines before
 // returning, so callers can safely tear down the router afterwards.
 //
-// Shutdown is bounded: a stuck cron job (one whose execute() hangs past ctx
-// cancel, e.g. a broken shim that ignores context) would otherwise pin us
-// for up to execTimeout+ and starve systemd's TimeoutStopSec. The deadline
-// is execTimeout+5s — enough for a cooperative cancel to propagate, short
-// enough that restart never exceeds the systemd budget.
+// Shutdown is bounded by stopBudget (30s by default). A stuck cron job
+// (execute() hanging past ctx cancel, e.g. a broken shim ignoring context)
+// or a stuck triggerWG (deliverNotice → platform Reply webhook that refuses
+// to honour its own timeout) cannot hold us past this budget. The final
+// saveJobs runs regardless so a stuck drain does not cost the state file.
 func (s *Scheduler) Stop() {
 	s.stopCancel()
-	ctx := s.cron.Stop()
+	cronDoneCtx := s.cron.Stop()
 
-	shutdownBudget := s.execTimeout + 5*time.Second
-	timer := time.NewTimer(shutdownBudget)
-	defer timer.Stop()
+	// Single overall deadline shared across both waits. If cron.Stop drains
+	// fast we have the full budget for triggerWG; if it eats the budget we
+	// skip triggerWG.Wait entirely (the leaked goroutines die when the
+	// process exits moments later). Either way saveJobs runs — losing it
+	// would undo mutations that had already returned 2xx to dashboard/IM.
+	deadline := time.NewTimer(stopBudget)
+	defer deadline.Stop()
+
+	deadlineHit := false
 	select {
-	case <-ctx.Done():
-	case <-timer.C:
-		slog.Warn("cron scheduler: stop deadline exceeded, proceeding",
-			"budget", shutdownBudget)
+	case <-cronDoneCtx.Done():
+	case <-deadline.C:
+		deadlineHit = true
+		slog.Warn("cron scheduler: stop deadline exceeded before cron.Stop drained, proceeding",
+			"budget", stopBudget)
 	}
 
-	// Bound triggerWG.Wait separately: while manual TriggerNow respects stopCtx
-	// via execute(), the notify delivery path (deliverNotice → platform Reply)
-	// uses a Background-derived ctx so stopCtx cancellation does not interrupt
-	// an in-flight webhook POST. Without this deadline, a stuck platform HTTP
-	// call could pin Stop() past systemd TimeoutStopSec and cause SIGKILL,
-	// which would lose the final saveJobs() below.
-	triggerDone := make(chan struct{})
-	go func() {
-		s.triggerWG.Wait()
-		close(triggerDone)
-	}()
-	triggerBudget := shutdownBudget
-	trigTimer := time.NewTimer(triggerBudget)
-	defer trigTimer.Stop()
-	select {
-	case <-triggerDone:
-	case <-trigTimer.C:
-		slog.Warn("cron scheduler: triggerWG wait deadline exceeded, proceeding",
-			"budget", triggerBudget)
+	// Bound triggerWG.Wait with the *remaining* share of the same budget:
+	// while manual TriggerNow respects stopCtx via execute(), the notify
+	// delivery path (deliverNotice → platform Reply) uses a Background-
+	// derived ctx so stopCtx cancellation does not interrupt an in-flight
+	// webhook POST. Without this deadline, a stuck platform HTTP call
+	// could pin Stop() past systemd TimeoutStopSec.
+	if !deadlineHit {
+		triggerDone := make(chan struct{})
+		go func() {
+			s.triggerWG.Wait()
+			close(triggerDone)
+		}()
+		select {
+		case <-triggerDone:
+		case <-deadline.C:
+			slog.Warn("cron scheduler: stop deadline exceeded during triggerWG wait, proceeding",
+				"budget", stopBudget)
+		}
 	}
+
 	s.mu.Lock()
 	data, err := s.marshalJobsLocked()
 	s.mu.Unlock()
