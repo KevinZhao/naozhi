@@ -1193,6 +1193,18 @@ func (s *Scheduler) execute(j *Job) {
 	// and briefly revert the row state before the next executeSucceeded.
 	stubRefresh := func() {}
 	if fresh {
+		// CRON3 guard: Scheduler.Stop() cancels stopCtx as its first act; if a
+		// scheduled tick fired just before Stop() took that edge it is still
+		// inside execute() here. Running Reset + GetOrCreate past this point
+		// would race with Router.Shutdown's session-drain and can leak a brand-
+		// new CLI process tied to an orphan "cron:<id>" key that outlives
+		// naozhi (shim cleanup only covers sessions that were in the map at
+		// Shutdown). Early-exit on ctx cancellation instead — the job will
+		// run again on the next start.
+		if err := s.stopCtx.Err(); err != nil {
+			lg.Info("cron fresh spawn suppressed during shutdown", "err", err)
+			return
+		}
 		s.router.Reset(key)
 		lg.Info("cron fresh context: session reset before run")
 		stubRefresh = func() {
