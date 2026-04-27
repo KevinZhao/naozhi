@@ -193,6 +193,17 @@ graph RL
 go build -o bin/naozhi ./cmd/naozhi/
 ```
 
+### 配置文件
+
+仓库只提交 `config.example.yaml` 模板；部署时复制为 `config.yaml` 并填入你自己的值（`config.yaml` 在 `.gitignore` 中，避免提交环境特定数据）：
+
+```bash
+cp config.example.yaml config.yaml
+# 编辑 config.yaml：填入 workspace 路径、IM 平台凭据、cron notify chat_id 等
+```
+
+凭据推荐通过环境变量注入（模板已用 `${VAR}` 占位），避免写死在文件中。
+
 ### 微信（两步启动）
 
 ```bash

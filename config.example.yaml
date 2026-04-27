@@ -4,19 +4,23 @@ server:
   trusted_proxy: true
 
 workspace:
-  id: "ec2-dev"
-  name: "EC2 Dev"
+  id: "your-node-id"
+  name: "Your Node Name"
 
 cli:
   path: "~/.local/bin/claude"
   # --dangerously-skip-permissions is always applied by protocol_claude.go; no need to repeat here.
+  # Naozhi's dashboard markdown renderer escapes raw HTML as a security
+  # measure (see dashboard.js renderMdUncached + inlineMd), so <details>,
+  # <summary>, <kbd>, <sub>, <sup> etc. render as literal text instead of
+  # collapsible widgets. Instruct the model to stick to pure Markdown.
   args: []
 
 session:
   max_procs: 20
   ttl: "30m"
   prune_ttl: "72h"
-  cwd: "/home/ec2-user/workspace"
+  cwd: "/path/to/your/workspace"
   watchdog:
     no_output_timeout: "1800s"
     total_timeout: "14400s"
@@ -48,7 +52,7 @@ cron:
   # Leave empty to disable the default (per-job targets still work).
   notify_default:
     platform: "feishu"
-    chat_id: "oc_9dcbfd8307c7a4c1e111f163aa47fd5d"
+    chat_id: "${NAOZHI_CRON_NOTIFY_CHAT_ID}"
 
 platforms:
   feishu:
@@ -68,16 +72,16 @@ transcribe:
   language: "zh-CN,en-US"
 
 projects:
-  root: "/home/ec2-user/workspace"
+  root: "/path/to/your/workspace"
   planner_defaults:
     model: "sonnet"
 
 # Reverse-connect nodes: remote machines dial in to this primary (NAT traversal).
 # Each entry is node_id: {token, display_name}. Token must match upstream.token on the remote.
-reverse_nodes:
-  pc:
-    token: "${PC_REVERSE_TOKEN}"
-    display_name: "Amazon MBP 16"
+#reverse_nodes:
+#  pc:
+#    token: "${PC_REVERSE_TOKEN}"
+#    display_name: "Remote PC"
 
 # Upstream: this node dials a primary naozhi instance (reverse-connect mode).
 # Use when this machine is behind NAT and cannot be reached by the primary directly.

@@ -15,6 +15,9 @@ go test -run TestCandidatePaths ./internal/cli/...   # run a single test
 bin/naozhi --config config.yaml                      # run locally
 ```
 
+`config.yaml` is gitignored (environment-specific). Use `config.example.yaml`
+as the template: `cp config.example.yaml config.yaml` then fill in real values.
+
 Cross-compile for deployment target (ARM64 Linux):
 ```bash
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/naozhi ./cmd/naozhi/

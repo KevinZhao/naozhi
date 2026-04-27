@@ -29,6 +29,10 @@ coverage.out
 *.jpeg
 
 # Local config & secrets
+# config.yaml is the deployed runtime config (may contain chat_ids, workspace
+# paths, and other environment-specific values). Use config.example.yaml as the
+# committed template; copy it to config.yaml and fill in real values locally.
+config.yaml
 config-local.yaml
 preview-start.sh
 .mcp.json

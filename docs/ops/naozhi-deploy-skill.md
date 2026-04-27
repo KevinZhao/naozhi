@@ -20,7 +20,7 @@ description: review → build → test → deploy → push 一体化工作流（
 3. Go 二进制入口是 `/usr/local/go/bin/go`（$PATH 里没有 go，必须显式路径或前缀 `PATH=/usr/local/go/bin:$PATH`）。
 4. systemd unit 以 `--config /home/ec2-user/workspace/naozhi/config.yaml` 启动，`Type=notify` + `WatchdogSec=120`。
 5. 分支策略：日常在 `dev` 开发 + 推送；`master` 是 PR 目标分支，不要直接在 master 部署。
-6. `docs/TODO.md`、`.claude/`、`bin/` 均在 `.gitignore` — 不会被 `git add -A` 误提。
+6. `docs/TODO.md`、`.claude/`、`bin/`、`config.yaml` 均在 `.gitignore` — 不会被 `git add -A` 误提。部署机上的 `config.yaml` 需用 `config.example.yaml` 做模板初始化，再填入真实值。
 
 ## 执行步骤
 
