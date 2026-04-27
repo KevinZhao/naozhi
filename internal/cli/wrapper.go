@@ -77,8 +77,20 @@ func normalizeBackendID(backend string) string {
 }
 
 // detectVersion runs "<cli> --version" and parses the version string.
+// Uses a Background-derived 5s timeout — fine for test / single-backend
+// paths. Prefer detectVersionCtx when the caller has a shutdown context
+// (e.g. naozhi startup) so SIGTERM during probe doesn't block for the
+// full timeout.
 func detectVersion(cliPath string) string {
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	return detectVersionCtx(context.Background(), cliPath)
+}
+
+// detectVersionCtx is the context-aware variant of detectVersion.
+// The caller's ctx is chained with a hard 5s subprocess timeout so a
+// slow --version probe can never exceed the shorter of "caller's
+// shutdown signal" and "5 seconds". R55-QUAL-004.
+func detectVersionCtx(parent context.Context, cliPath string) string {
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, cliPath, "--version")
 	// Anchor the subprocess CWD to "/" so relative binary names (the

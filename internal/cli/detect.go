@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"sort"
@@ -28,7 +29,20 @@ var knownBackends = []BackendInfo{
 // returns a list of probe results. Backends whose binary cannot be located
 // are included with Available=false so the dashboard can surface them as
 // unavailable options instead of hiding them.
+//
+// Delegates to DetectBackendsCtx with context.Background(). Prefer
+// DetectBackendsCtx in production startup paths so SIGTERM during probe
+// aborts promptly instead of burning the full 5s×N subprocess timeout.
 func DetectBackends() []BackendInfo {
+	return DetectBackendsCtx(context.Background())
+}
+
+// DetectBackendsCtx is the context-aware variant of DetectBackends. The
+// ctx is forwarded into detectVersionCtx so a caller-side cancellation
+// (e.g. naozhi SIGTERM during startup) aborts the in-flight --version
+// subprocess instead of blocking for the full 5s timeout per backend.
+// R55-QUAL-004.
+func DetectBackendsCtx(ctx context.Context) []BackendInfo {
 	out := make([]BackendInfo, 0, len(knownBackends))
 	for _, b := range knownBackends {
 		info := b
@@ -55,7 +69,7 @@ func DetectBackends() []BackendInfo {
 			}
 			info.Path = resolved
 		}
-		info.Version = detectVersion(info.Path)
+		info.Version = detectVersionCtx(ctx, info.Path)
 		info.Available = info.Version != ""
 		out = append(out, info)
 	}

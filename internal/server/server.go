@@ -260,6 +260,13 @@ type ServerOptions struct {
 	ReverseNodeServer *node.ReverseServer
 	Transcriber       transcribe.Service
 	OnReady           func() // called after the listener is bound and serving
+	// StartupCtx, when set, is threaded into blocking init probes (e.g.
+	// cli.DetectBackends's --version subprocess) so SIGTERM during naozhi
+	// startup aborts them promptly instead of burning the full 5s×N
+	// timeout. Nil is equivalent to context.Background() — safe default
+	// for tests and callers that don't have a shutdown ctx yet.
+	// R55-QUAL-004.
+	StartupCtx context.Context
 }
 
 func New(addr string, router *session.Router, platforms map[string]platform.Platform, agents map[string]session.AgentOpts, agentCommands map[string]string, scheduler *cron.Scheduler, backend string, opts ServerOptions) *Server {
@@ -404,7 +411,15 @@ func New(addr string, router *session.Router, platforms map[string]platform.Plat
 	}
 	s.sessionH.initStaticStats()
 	s.sessionH.WarmHistoryCache()
-	s.cliH = NewCLIBackendsHandler(router)
+	// Thread StartupCtx into the --version probe so SIGTERM during
+	// startup aborts promptly (R55-QUAL-004). Nil ctx falls back to
+	// NewCLIBackendsHandler's Background-derived path via the delegating
+	// public ctor (keeps test/headless callers working).
+	if opts.StartupCtx != nil {
+		s.cliH = NewCLIBackendsHandlerCtx(opts.StartupCtx, router)
+	} else {
+		s.cliH = NewCLIBackendsHandler(router)
+	}
 	platNames := make(map[string]struct{}, len(platforms))
 	for name := range platforms {
 		platNames[name] = struct{}{}

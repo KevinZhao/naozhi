@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"net/http"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -21,9 +22,18 @@ type CLIBackendsHandler struct {
 
 // NewCLIBackendsHandler pre-computes the expensive backend probe so the HTTP
 // handler can respond in O(enabled backends) time without spawning
-// subprocesses on each request.
+// subprocesses on each request. Uses context.Background() for the probe —
+// prefer NewCLIBackendsHandlerCtx when the caller has a shutdown context.
 func NewCLIBackendsHandler(router *session.Router) *CLIBackendsHandler {
-	detected := cli.DetectBackends()
+	return NewCLIBackendsHandlerCtx(context.Background(), router)
+}
+
+// NewCLIBackendsHandlerCtx is the context-aware variant of
+// NewCLIBackendsHandler. The ctx is threaded into DetectBackendsCtx so
+// SIGTERM during startup aborts the --version probe promptly instead of
+// waiting 5s×N. R55-QUAL-004.
+func NewCLIBackendsHandlerCtx(ctx context.Context, router *session.Router) *CLIBackendsHandler {
+	detected := cli.DetectBackendsCtx(ctx)
 	cli.SortBackendsAvailableFirst(detected)
 	// Redact Path and Version: revealing installed-binary paths to any
 	// authenticated dashboard user leaks host filesystem layout, and CLI

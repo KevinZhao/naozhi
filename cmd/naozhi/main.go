@@ -678,6 +678,7 @@ func main() {
 		Nodes:             nodes,
 		ReverseNodeServer: rns,
 		Transcriber:       stt,
+		StartupCtx:        ctx,
 		OnReady: func() {
 			if err := osutil.SdNotify("READY=1"); err != nil {
 				slog.Warn("sd_notify READY failed", "err", err)
