@@ -1219,7 +1219,12 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 		return s, SessionResumed, nil
 	}
 
-	slog.Info("creating new session", "key", key)
+	// Debug (not Info): spawnSession will emit "session spawned" at Info
+	// with the same key + active count moments later; a preceding Info at
+	// the same key would double the per-spawn row in the systemd journal
+	// with no additional signal. Keep Debug for the "brand-new vs resume"
+	// distinction when operators opt into verbose logging.
+	slog.Debug("creating new session", "key", key)
 	s, err := r.spawnSession(ctx, key, "", opts)
 	if err != nil {
 		return nil, 0, fmt.Errorf("session %s: %w", key, err)

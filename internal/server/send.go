@@ -333,9 +333,13 @@ func (h *Hub) runTurn(key, text string, images []cli.ImageData, onAsyncError fun
 		return
 	}
 	if status != session.SessionExisting {
-		// Spawn is an infrequent event (once per session lifecycle), so keep
-		// it at Info for operator visibility. Other per-turn events are Debug.
-		slog.Info("send: session spawned", "key", key, "status", status, "elapsed_ms", time.Since(sendStart).Milliseconds())
+		// Debug (not Info): router.spawnSession emits "session spawned" at
+		// Info with key + active count for every spawn regardless of caller;
+		// surfacing the send-layer spawn row additionally just doubles the
+		// journal entries per spawn. Keep the elapsed_ms detail at Debug
+		// so it is still available when operators opt into verbose logging
+		// (e.g. investigating slow spawn paths).
+		slog.Debug("send: session spawned", "key", key, "status", status, "elapsed_ms", time.Since(sendStart).Milliseconds())
 	}
 
 	if _, err := h.sendWithBroadcast(h.ctx, key, sess, text, images, nil); err != nil {
