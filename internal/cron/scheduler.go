@@ -40,6 +40,17 @@ var ErrJobNotPaused = errors.New("cron: job not paused")
 // against the operator's pause intent.
 var ErrJobPaused = errors.New("cron: job is paused")
 
+// ErrPersistFailed is returned by mutation APIs (AddJob/DeleteJob/Update/
+// Pause/Resume/SetJobPrompt) when the post-mutation JSON serialisation fails.
+// The in-memory state has already been changed and cannot be rolled back —
+// marshal failure is observationally unrecoverable (OOM / type-system bug),
+// so the caller MUST surface this as a 500-class error so the operator can
+// intervene (restart the process or rebuild the job). R51-QUAL-001: prior
+// to this sentinel, persistJobsLocked returned a silent no-op func on
+// marshal error, causing DeleteJob to "succeed" via the API while the
+// deletion never reached disk — a restart replayed the deleted job.
+var ErrPersistFailed = errors.New("cron: persist jobs failed")
+
 // SessionRouter is the subset of session.Router that the cron Scheduler
 // actually consumes. Declaring it here (consumer-side interface, Go idiom)
 // inverts the historical cron → session dependency: a future Router refactor
@@ -484,9 +495,16 @@ func (s *Scheduler) AddJob(j *Job) error {
 		}
 	}
 	s.jobs[j.ID] = j
-	save := s.persistJobsLocked()
+	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
+	if perr != nil {
+		// In-memory insertion + cron scheduling already happened; we cannot
+		// roll those back safely (another goroutine may have observed the
+		// registered entry). Surface the error so the HTTP layer returns a
+		// 500 and the operator sees the persistence gap.
+		return perr
+	}
 	save()
 	s.registerStub(j)
 	return nil
@@ -578,9 +596,12 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 	// entry here could split the CAS gate between two goroutines and permit
 	// double execution. Retaining the entry is bounded by maxJobsHardCap
 	// (one *atomic.Bool per historical job) — cheap vs a correctness gap.
-	save := s.persistJobsLocked()
+	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
+	if perr != nil {
+		return nil, perr
+	}
 	save()
 	return j, nil
 }
@@ -604,9 +625,12 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 		j.entryID = 0
 	}
 	j.Paused = true
-	save := s.persistJobsLocked()
+	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
+	if perr != nil {
+		return nil, perr
+	}
 	save()
 	return j, nil
 }
@@ -630,9 +654,12 @@ func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 		return nil, err
 	}
 	j.Paused = false
-	save := s.persistJobsLocked()
+	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
+	if perr != nil {
+		return nil, perr
+	}
 	save()
 	return j, nil
 }
@@ -726,12 +753,15 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		}
 	}
 
-	save := s.persistJobsLocked()
+	save, perr := s.persistJobsLocked()
 	// Value-copy while still under lock so the caller sees a stable result
 	// even if another goroutine mutates the job right after we unlock.
 	result := *j
 	s.mu.Unlock()
 
+	if perr != nil {
+		return nil, perr
+	}
 	save()
 	// Pass the snapshotted value (via result) to registerStub so a concurrent
 	// SetJobPrompt cannot tear the Prompt/WorkDir pointers we read.
@@ -771,9 +801,12 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 		}
 		j.Paused = false
 	}
-	save := s.persistJobsLocked()
+	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
+	if perr != nil {
+		return perr
+	}
 	save()
 	slog.Info("cron job prompt set", "id", id, "prompt_len", len(prompt))
 	return nil
@@ -864,9 +897,12 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 	delete(s.jobs, j.ID)
 	// Retain the runningJobs entry for the same reason as DeleteJobByID —
 	// a concurrent execute() may still be mid-CAS on this guard.
-	save := s.persistJobsLocked()
+	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
+	if perr != nil {
+		return nil, perr
+	}
 	save()
 	return j, nil
 }
@@ -890,9 +926,12 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 		j.entryID = 0
 	}
 	j.Paused = true
-	save := s.persistJobsLocked()
+	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
+	if perr != nil {
+		return nil, perr
+	}
 	save()
 	return j, nil
 }
@@ -916,9 +955,12 @@ func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
 		return nil, err
 	}
 	j.Paused = false
-	save := s.persistJobsLocked()
+	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
+	if perr != nil {
+		return nil, perr
+	}
 	save()
 	return j, nil
 }
@@ -1325,11 +1367,18 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg string) {
 	j.LastRunAt = time.Now()
 	j.LastResult = result
 	j.LastError = errMsg
-	save := s.persistJobsLocked()
+	save, perr := s.persistJobsLocked()
 	fn := s.onExecute
 	s.mu.Unlock()
 
-	save()
+	// recordResult has no error return (it runs from the internal execute
+	// goroutine), so marshal failure here can only be logged. persistJobsLocked
+	// already emitted the slog.Error; proceed with onExecute so the dashboard
+	// still sees the LastResult update via live broadcast even when the on-disk
+	// snapshot misses this run.
+	if perr == nil {
+		save()
+	}
 	if fn != nil {
 		fn(j.ID, result, errMsg)
 	}
@@ -1457,6 +1506,12 @@ func (s *Scheduler) findByPrefix(idPrefix, plat, chatID string) (*Job, error) {
 	}
 }
 
+// marshalJobs is the JSON serializer used by marshalJobsLocked. It is a
+// package-level var (not a direct json.Marshal call) so tests can inject a
+// failure path to exercise ErrPersistFailed without needing to construct a
+// cyclic graph in Job. Production always uses json.Marshal.
+var marshalJobs = json.Marshal
+
 // marshalJobsLocked serialises the current jobs map to JSON while the caller
 // still holds s.mu. Round 47: replaces the map clone on every mutation. Safe
 // because json.Marshal only reads Job fields (no mutation) and the output []byte
@@ -1468,22 +1523,33 @@ func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
 	for _, j := range s.jobs {
 		entries = append(entries, j)
 	}
-	return json.Marshal(entries)
+	return marshalJobs(entries)
 }
 
 // persistJobsLocked marshals under the caller's s.mu and writes asynchronously.
 // Callers hold s.mu (write or read), invoke this to produce the byte payload
 // and the save func, unlock, then call the save func. This keeps marshal
 // latency in the critical section (needed for snapshot consistency) but moves
-// disk I/O + storeMu contention outside. Returns a no-op if marshal fails so
-// callers do not need error plumbing — the error is logged internally.
-func (s *Scheduler) persistJobsLocked() func() {
+// disk I/O + storeMu contention outside.
+//
+// Return contract:
+//   - On success, returns a non-nil save func and nil err. Caller must unlock
+//     s.mu before invoking save() so disk I/O does not block the mutex.
+//   - On marshal failure, returns (nil, ErrPersistFailed). Caller MUST plumb
+//     the error back to the HTTP layer (e.g. map to 500) because the in-memory
+//     mutation has already happened and is now unpersisted — a restart would
+//     replay the prior on-disk state. marshal failure is only observable under
+//     OOM or a broken Job schema; either way an alert-worthy event.
+//
+// R51-QUAL-001: previously this returned a no-op func on marshal failure,
+// so every mutation appeared to succeed even when nothing reached disk.
+func (s *Scheduler) persistJobsLocked() (func(), error) {
 	data, err := s.marshalJobsLocked()
 	if err != nil {
 		slog.Error("marshal cron store", "err", err)
-		return func() {}
+		return nil, fmt.Errorf("%w: %v", ErrPersistFailed, err)
 	}
-	return func() { s.saveMarshaled(data) }
+	return func() { s.saveMarshaled(data) }, nil
 }
 
 // saveMarshaled persists an already-marshaled jobs payload to disk. Serialised

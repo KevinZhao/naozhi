@@ -244,6 +244,16 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		Paused:         req.Prompt == "", // auto-pause when no prompt
 	}
 	if err := h.scheduler.AddJob(job); err != nil {
+		// ErrPersistFailed signals the job was inserted into the in-memory
+		// map and cron scheduler but JSON marshal (and therefore the on-disk
+		// store) failed; surface it as 500 so operators see the persistence
+		// gap instead of the dashboard silently treating the create as a
+		// successful 2xx that won't survive a restart. R51-QUAL-001.
+		if errors.Is(err, cron.ErrPersistFailed) {
+			slog.Error("cron AddJob persisted in-memory but store write failed", "err", err, "id", job.ID)
+			http.Error(w, "job created but not persisted; please check server logs", http.StatusInternalServerError)
+			return
+		}
 		// robfig/cron parser errors can mention internal field offsets and
 		// parsed expressions; log the full detail for operator triage but
 		// return a sanitized message to the dashboard client.
@@ -278,9 +288,17 @@ func (h *CronHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 
 	j, err := h.scheduler.DeleteJobByID(id)
 	if err != nil {
-		if errors.Is(err, cron.ErrJobNotFound) {
+		switch {
+		case errors.Is(err, cron.ErrJobNotFound):
 			http.Error(w, "job not found", http.StatusNotFound)
-		} else {
+		case errors.Is(err, cron.ErrPersistFailed):
+			// In-memory + cron entry deletion already happened, but the
+			// store write failed — a restart would replay the deleted job.
+			// 500 alerts the operator to inspect logs instead of treating
+			// the delete as quietly successful. R51-QUAL-001.
+			slog.Error("cron DeleteJobByID deletion not persisted", "err", err, "id", id)
+			http.Error(w, "job deleted but not persisted; please check server logs", http.StatusInternalServerError)
+		default:
 			slog.Debug("cron delete failed", "err", err)
 			http.Error(w, "delete failed", http.StatusBadRequest)
 		}
@@ -319,6 +337,9 @@ func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "job not found", http.StatusNotFound)
 		case errors.Is(err, cron.ErrJobAlreadyPaused):
 			http.Error(w, "job already paused", http.StatusConflict)
+		case errors.Is(err, cron.ErrPersistFailed):
+			slog.Error("cron PauseJobByID pause not persisted", "err", err, "id", req.ID)
+			http.Error(w, "job paused but not persisted; please check server logs", http.StatusInternalServerError)
 		default:
 			slog.Debug("cron pause failed", "err", err)
 			http.Error(w, "pause failed", http.StatusBadRequest)
@@ -356,6 +377,9 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "job not found", http.StatusNotFound)
 		case errors.Is(err, cron.ErrJobNotPaused):
 			http.Error(w, "job not paused", http.StatusConflict)
+		case errors.Is(err, cron.ErrPersistFailed):
+			slog.Error("cron ResumeJobByID resume not persisted", "err", err, "id", req.ID)
+			http.Error(w, "job resumed but not persisted; please check server logs", http.StatusInternalServerError)
 		default:
 			slog.Debug("cron resume failed", "err", err)
 			http.Error(w, "resume failed", http.StatusBadRequest)
@@ -596,12 +620,16 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		FreshContext:   req.FreshContext,
 	})
 	if err != nil {
-		if errors.Is(err, cron.ErrJobNotFound) {
+		switch {
+		case errors.Is(err, cron.ErrJobNotFound):
 			// Fixed string (not err.Error()) to stay consistent with
 			// handleDelete and guard against future ErrJobNotFound variants
 			// that carry a wrapped ID.
 			http.Error(w, "job not found", http.StatusNotFound)
-		} else {
+		case errors.Is(err, cron.ErrPersistFailed):
+			slog.Error("cron UpdateJob update not persisted", "err", err, "id", id)
+			http.Error(w, "job updated but not persisted; please check server logs", http.StatusInternalServerError)
+		default:
 			// Sanitize: the underlying parser error can leak internal field
 			// names and offsets if the new schedule is rejected.
 			slog.Warn("cron UpdateJob rejected", "err", err, "id", id)
