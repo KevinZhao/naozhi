@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -76,9 +77,34 @@ func (e *APIError) Error() string {
 //   - 99991668: app not authorized
 //   - 1061045: bot not in chat (permanent for that chat)
 //   - 230001: invalid receive_id
+//
+// Note: token-expired codes (99991671/99991672) are NOT permanent — they
+// are handled by invalidateAccessToken + retry, see IsTokenExpired.
 func (e *APIError) IsPermanent() bool {
 	switch e.Code {
 	case 99991663, 99991664, 99991668, 1061045, 230001:
+		return true
+	}
+	return false
+}
+
+// IsTokenExpired reports whether the error indicates that the tenant access
+// token presented with the request was rejected by Feishu (invalid or
+// expired). When this fires, the cached token in Feishu.accessToken is
+// stale and MUST be invalidated so the next getAccessToken call refreshes
+// it — otherwise ReplyWithRetry's 3 attempts all send the same stale token
+// and all fail identically. R83 / RETRY1.
+//
+// Feishu's catalogue groups a few codes under the "tenant access token
+// invalid" umbrella depending on endpoint version. Listing them here keeps
+// the retry policy authoritative.
+//   - 99991671: tenant access token invalid
+//   - 99991672: app access token invalid (shouldn't occur via Reply but
+//     listed for symmetry with outbound admin calls)
+//   - 99991673: user access token invalid (same)
+func (e *APIError) IsTokenExpired() bool {
+	switch e.Code {
+	case 99991671, 99991672, 99991673:
 		return true
 	}
 	return false
@@ -303,15 +329,22 @@ func (f *Feishu) Reply(ctx context.Context, msg platform.OutgoingMessage) (strin
 	if msg.Text != "" {
 		id, err := f.sendText(ctx, msg.ChatID, msg.Text)
 		if err != nil {
-			return "", err
+			// Any outbound-API failure whose APIError is IsTokenExpired
+			// invalidates the cache so ReplyWithRetry's next attempt
+			// carries a fresh token. R83 / RETRY1.
+			return "", f.maybeInvalidateOnTokenError(err)
 		}
 		lastMsgID = id
 	}
 
-	// Send image messages
+	// Send image messages. Image failures are log-and-continue (the text part
+	// already landed), but the token-invalidation side effect still needs to
+	// happen so a subsequent Reply call on the same Feishu instance picks up
+	// a fresh token instead of re-hammering with the rejected one.
 	for _, img := range msg.Images {
 		id, err := f.sendImage(ctx, msg.ChatID, img)
 		if err != nil {
+			f.maybeInvalidateOnTokenError(err)
 			slog.Warn("feishu send image failed", "err", err)
 			continue
 		}
@@ -686,6 +719,49 @@ func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) err
 		return fmt.Errorf("feishu edit error: code=%d msg=%s", result.Code, result.Msg)
 	}
 	return nil
+}
+
+// invalidateAccessToken clears the cached tenant access token so the next
+// getAccessToken call forces a refresh. Called when an API response reports
+// "tenant access token invalid" (APIError.IsTokenExpired) — the cache's
+// `tokenExpiry` guard normally keeps a token until ~60s before its stated
+// TTL, but Feishu can revoke a token early (credential rotation, admin
+// action) and in that case the cache holds a stale value until the 2-hour
+// TTL naturally lapses. Without this invalidation ReplyWithRetry's 3
+// attempts all present the same rejected token and all fail identically.
+//
+// Also clears tokenLastFailed so a preceding circuit-breaker state does
+// not refuse the fresh attempt: the caller has just received confirmed
+// evidence that the remote is responsive (it returned a structured error,
+// not a network failure), so the preceding failure cooldown is irrelevant.
+// R83 / RETRY1.
+func (f *Feishu) invalidateAccessToken() {
+	f.tokenMu.Lock()
+	f.accessToken = ""
+	f.tokenExpiry = time.Time{}
+	f.tokenLastFailed = nil
+	f.tokenLastFailAt = time.Time{}
+	f.tokenMu.Unlock()
+}
+
+// maybeInvalidateOnTokenError calls invalidateAccessToken if err's chain
+// carries an APIError with IsTokenExpired() == true. Returns err unchanged.
+// Reply/sendText/sendCard/sendImage use this as a post-call hook so the
+// next ReplyWithRetry attempt will see a fresh token. Kept as a helper
+// rather than inline at every call site so future outbound API additions
+// (edit card, delete message, upload file) cannot accidentally omit the
+// cache invalidation when they return APIErrors.
+func (f *Feishu) maybeInvalidateOnTokenError(err error) error {
+	if err == nil {
+		return nil
+	}
+	var api *APIError
+	if errors.As(err, &api) && api.IsTokenExpired() {
+		slog.Warn("feishu tenant access token rejected, invalidating cache",
+			"code", api.Code, "op", api.Op)
+		f.invalidateAccessToken()
+	}
+	return err
 }
 
 // getAccessToken returns a valid tenant access token, refreshing if needed.
