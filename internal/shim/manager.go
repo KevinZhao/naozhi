@@ -268,31 +268,52 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	readyTimer := time.NewTimer(30 * time.Second)
 	defer readyTimer.Stop()
 
+	// killAndUnblock terminates the shim and closes the caller-side stdout
+	// pipe so the scanner goroutine spawned above is not left parked on a
+	// Read that won't return until the OS tears down the shim's stdout fd.
+	// Closing stdout here raises an error in the goroutine's Scan() and lets
+	// it deliver to the buffered readyCh + run its own defer stdout.Close()
+	// (double Close returns ErrClosed, which is harmless). Without this
+	// helper, a shim that ignores SIGTERM keeps the goroutine alive for up
+	// to its 4 h idle-timeout — under high-frequency restart pressure this
+	// previously accumulated dozens to hundreds of leaked goroutines.
+	// R40-CONCUR1 / R42-REL-SHIM-PGKILL.
+	killAndUnblock := func() {
+		_ = stdout.Close()
+		_ = cmd.Process.Kill()
+	}
+
 	var tokenB64 string
 	select {
 	case result := <-readyCh:
 		if result.err != nil {
-			cmd.Process.Kill() //nolint:errcheck
+			killAndUnblock()
 			return nil, result.err
 		}
 		tokenB64 = result.token
 	case <-readyTimer.C:
-		cmd.Process.Kill() //nolint:errcheck
+		killAndUnblock()
 		return nil, fmt.Errorf("shim ready timeout")
 	case <-ctx.Done():
-		cmd.Process.Kill() //nolint:errcheck
+		killAndUnblock()
 		return nil, ctx.Err()
 	}
 
 	tokenRaw, err := base64.StdEncoding.DecodeString(tokenB64)
 	if err != nil {
+		// Kill the shim and close stdout alongside: the scanner goroutine
+		// already received the successful ready frame and is parked on its
+		// defer-only path, so this is just about reaping the process — no
+		// unblock needed — but keeping the shared helper keeps the 4
+		// failure branches symmetric. R40-CONCUR1.
+		killAndUnblock()
 		return nil, fmt.Errorf("decode shim token: %w", err)
 	}
 
 	// Connect to shim socket
 	handle, err := m.connect(socketPath, tokenRaw, 0)
 	if err != nil {
-		cmd.Process.Kill() //nolint:errcheck
+		killAndUnblock()
 		return nil, fmt.Errorf("connect to new shim: %w", err)
 	}
 
