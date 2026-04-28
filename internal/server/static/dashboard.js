@@ -1358,11 +1358,17 @@ function eventHtml(e) {
   const copyBtn = ((e.type === 'text' || e.type === 'user') && cleanRaw.length > 500)
     ? '<button class="event-copy-btn" data-raw="' + escAttr(cleanRaw) + '" onclick="copyEventContent(this)">copy</button>'
     : '';
+  // Ask-aside ("↗ 追问") button on AI text bubbles — opens the scratch
+  // drawer seeded with this message's content. Shown only on non-empty AI
+  // text bubbles so system / init / result / todo rows stay uncluttered.
+  const askBtn = (e.type === 'text' && cleanRaw && cleanRaw.length > 10)
+    ? '<button class="event-ask-btn" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" onclick="askAside(this)" title="基于此内容追问">↗ 追问</button>'
+    : '';
 
   const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';
   return '<div class="event ' + esc(e.type||'') + '"' + timeAttr + '>' +
     '<span class="event-icon">' + icon + '</span>' +
-    '<div class="event-content">' + content + imgHtml + copyBtn + '</div></div>';
+    '<div class="event-content">' + content + imgHtml + copyBtn + askBtn + '</div></div>';
 }
 
 // Walk a list of events and produce an HTML string with time dividers inserted
