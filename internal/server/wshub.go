@@ -715,6 +715,34 @@ func capHistoryBatch(entries []cli.EventEntry) []cli.EventEntry {
 	return entries[len(entries)-maxHistoryPushEntries:]
 }
 
+// eventPushLoop is the per-subscription pump that reads EventLog notifications
+// and streams entries to the WS client. It owns exactly one clientWG slot for
+// its entire lifetime (Add happens in completeSubscribe before go; Done runs
+// in the goroutine's defer).
+//
+// CLIENTWG CONTRACT (R49-CONCUR-RESUBSCRIBE-CLIENTWG): when resubscribeEvents
+// transparently swaps `sess` for a new process's session (the `!ok` arm
+// below), the loop keeps running in the same goroutine — we do NOT Add(1)
+// for the new subscription. This is correct because:
+//
+//  1. The lifetime being tracked is "this pushLoop goroutine", not "this
+//     particular EventLog subscription". A single Add/Done pair covers
+//     every successful resubscribe within the goroutine.
+//  2. resubscribeEvents installs the new `unsub` into c.subscriptions[key]
+//     under h.mu, replacing the stale one — so Hub.Shutdown walking
+//     c.subscriptions sees the current generation's unsub without any
+//     additional bookkeeping.
+//  3. The unsub → notify closure ensures resubscribeEvents returns ok=false
+//     on Shutdown (h.ctx.Done is checked), so the goroutine exits and
+//     the single deferred Done balances the single Add.
+//
+// If you ever split the resubscribe path into a new goroutine (e.g. to
+// parallelise multi-session fan-in), you MUST Add(1) for the new goroutine
+// and Done from its own defer — otherwise Shutdown's clientWG.Wait either
+// hangs (Add without Done) or panics with negative counter (Done without
+// Add). The guarantee is enforced by code shape, not by assertion; a
+// review that simply notes "+1 goroutine here" is insufficient without
+// also updating the WG pairing.
 func (h *Hub) eventPushLoop(c *wsClient, key string, gen uint64, notify <-chan struct{}, sess *session.ManagedSession, lastTime int64) {
 	for {
 		select {
