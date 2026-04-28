@@ -434,6 +434,18 @@ var stopBudget = 30 * time.Second
 // or a stuck triggerWG (deliverNotice → platform Reply webhook that refuses
 // to honour its own timeout) cannot hold us past this budget. The final
 // saveJobs runs regardless so a stuck drain does not cost the state file.
+//
+// CONTRACT: Stop assumes the naozhi process terminates shortly after it
+// returns. When triggerWG.Wait is cut off by the budget, the wrapper
+// goroutine around it is intentionally leaked — the deliverNotice that
+// holds it is typically blocked on a hung platform webhook, and the only
+// way to reclaim it is to let the OS tear the process down. This is
+// acceptable precisely because Scheduler is not reusable: there is no
+// path that calls Stop() and then constructs new cron work on the same
+// instance. If you ever add one, you MUST replace the bare wrapper with
+// a ctx-aware pattern and reclaim the goroutine, otherwise restart
+// cycles accumulate stuck webhook goroutines until OOM. R44-REL-
+// TRIGGER-GOROUTINE.
 func (s *Scheduler) Stop() {
 	s.stopCancel()
 	cronDoneCtx := s.cron.Stop()

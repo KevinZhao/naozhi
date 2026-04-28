@@ -2324,6 +2324,18 @@ func (r *Router) StartShimReconcileLoop(ctx context.Context, interval time.Durat
 
 // Shutdown gracefully closes all sessions, waiting for running ones to complete.
 // Idempotent: subsequent calls return immediately after the first completes.
+//
+// CONTRACT: Shutdown assumes the naozhi process terminates shortly after it
+// returns. Two watcher goroutines (the one below that wraps
+// `r.historyWg.Wait()` + the shim reconcile ticker in Scheduler.Stop) are
+// allowed to outlive Shutdown when their work is blocked on hung I/O —
+// relying on OS teardown for cleanup. If future code ever makes Router
+// reusable after Shutdown (tests that spin a router up and down, hot
+// reloads, etc.), those watchers would accumulate one-per-cycle. The
+// R44-REL-HIST-GOROUTINE / R44-REL-TRIGGER-GOROUTINE audit items pin this
+// assumption; a `TestShutdown_SingleShotContract` source-level test
+// enforces `shutdownOnce` stays in place so any attempt to make Shutdown
+// reversible trips CI and forces a re-audit.
 func (r *Router) Shutdown() {
 	r.shutdownOnce.Do(r.shutdown)
 }
@@ -2343,9 +2355,20 @@ func (r *Router) shutdown() {
 	// Reduced from 15s to 5s now that cancellation short-circuits the
 	// loaders at the next chunk/line boundary; the remaining budget is
 	// for goroutines mid-syscall.
+	//
+	// Goroutine leak on timeout is intentional and bounded by the
+	// "Shutdown is single-shot, process terminates next" contract above.
+	// The wrapper goroutine exits the moment historyWg reaches zero —
+	// either naturally (loaders finish) or after the CLI process hosting
+	// the hung syscall is reaped by the kernel on OS teardown. Do NOT
+	// replace historyWg.Wait() with a ctx-aware pattern here: the only
+	// reason we spawn a goroutine at all is that WaitGroup has no
+	// ctx-aware Wait; the select below IS the bounded-wait primitive.
 	historyDone := make(chan struct{})
 	go func() {
 		// Goroutine intentionally left running on timeout; cleaned up on process exit.
+		// See Shutdown godoc for the single-shot lifecycle contract that
+		// makes this acceptable. R44-REL-HIST-GOROUTINE.
 		r.historyWg.Wait()
 		close(historyDone)
 	}()
