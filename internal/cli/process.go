@@ -1087,12 +1087,25 @@ func (p *Process) InterruptViaControl() error {
 // swallowed and the Send would fall back to findResultSince.
 func (p *Process) drainStaleEvents(ctx context.Context) error {
 	cutoff := time.Now()
-	if p.interrupted.Swap(false) {
+	// Read-and-clear interrupted/interruptedRun atomically w.r.t. Interrupt()
+	// / InterruptViaControl(), which hold p.mu while Store-ing both flags. A
+	// naïve two-call Swap(false) here opened a window where a concurrent
+	// Interrupt between the two Swaps could Store interruptedRun=true after
+	// we Swap'd interrupted=false — the new Interrupt's intent would be lost
+	// (interruptedRun later Swap'd to false here, but interrupted already
+	// consumed, so the next Send's drainStaleEvents would see interrupted=
+	// false/interruptedRun=false and skip the settle window entirely — the
+	// SIGINT-produced result event leaks into the next turn). R39-CONCUR1.
+	p.mu.Lock()
+	wasInterrupted := p.interrupted.Swap(false)
+	wasRunning := p.interruptedRun.Swap(false)
+	p.mu.Unlock()
+	if wasInterrupted {
 		// Only wait for the interrupted result if the CLI was actively
 		// processing a turn when Interrupt() was called. An idle process
 		// won't produce a result event, so the settle timer would always
 		// expire causing an unnecessary 500ms delay.
-		if p.interruptedRun.Swap(false) {
+		if wasRunning {
 			slog.Debug("send: draining interrupted turn result")
 			settle := time.NewTimer(500 * time.Millisecond)
 			defer settle.Stop()
