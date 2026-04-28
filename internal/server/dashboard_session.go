@@ -252,6 +252,20 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		if snap.DeathReason != "" && snap.LastActive < cutoff24h {
 			continue
 		}
+		// Scratch (ephemeral aside) sessions must never appear in the sidebar.
+		// They own a CLI process and therefore show up in router.ListSessions,
+		// but the drawer UX treats them as private to one dashboard tab. Keep
+		// running/ready counts inclusive of scratches so maxProcs pressure
+		// stays visible in stats.
+		if session.IsScratchKey(snap.Key) {
+			switch snap.State {
+			case "running":
+				running++
+			case "ready":
+				ready++
+			}
+			continue
+		}
 		switch snap.State {
 		case "running":
 			running++

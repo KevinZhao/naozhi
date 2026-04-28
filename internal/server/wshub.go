@@ -56,9 +56,13 @@ type Hub struct {
 	projectMgr   *project.Manager
 	scheduler    *cron.Scheduler // optional, for cron prompt auto-save
 	uploadStore  *uploadStore    // optional, for resolving WS-sent file_ids
-	allowedRoot  string          // workspace paths must be under this root (empty = unrestricted)
-	ctx          context.Context // cancelled on Shutdown to stop in-flight sends
-	cancel       context.CancelFunc
+	// scratchPool lets sessionOptsFor resolve the inherited AgentOpts for an
+	// ephemeral "scratch" key without touching the persistent agent registry.
+	// Nil when the scratch feature is disabled (tests, headless mode).
+	scratchPool *session.ScratchPool
+	allowedRoot string          // workspace paths must be under this root (empty = unrestricted)
+	ctx         context.Context // cancelled on Shutdown to stop in-flight sends
+	cancel      context.CancelFunc
 	// sendWG tracks background send goroutines (ownerLoop, sessionSendLegacy)
 	// so Shutdown can wait for them to exit before returning. Without this,
 	// goroutines may read router/session after Shutdown tears them down.
@@ -168,6 +172,11 @@ func (h *Hub) SetScheduler(s *cron.Scheduler) { h.scheduler = s }
 // SetUploadStore wires the upload store used by WS sends to resolve file_ids
 // that were pre-uploaded via POST /api/sessions/upload.
 func (h *Hub) SetUploadStore(s *uploadStore) { h.uploadStore = s }
+
+// SetScratchPool wires the ephemeral-session pool so sessionOptsFor can
+// resolve AgentOpts for scratch keys without touching the sidebar-visible
+// router state.
+func (h *Hub) SetScratchPool(p *session.ScratchPool) { h.scratchPool = p }
 
 // HandleUpgrade upgrades an HTTP connection to WebSocket.
 func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {

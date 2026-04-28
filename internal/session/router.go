@@ -1813,6 +1813,117 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 	return s, nil
 }
 
+// RenameSession moves a session entry from oldKey to newKey, preserving the
+// running process, sessionID, history, and totalCost. Used by the scratch
+// promote flow to turn an ephemeral aside into a regular sidebar session
+// without killing the CLI process underneath.
+//
+// Returns false when:
+//   - oldKey == newKey
+//   - oldKey does not exist
+//   - newKey already exists (collision would otherwise drop an active session)
+//   - newKey fails session-key validation
+//
+// The caller must ensure no Send is actively in flight for oldKey. In the
+// scratch promote flow the drawer UI disables the save button while a turn
+// is running, so the handler only invokes this when the session is idle.
+//
+// The onSessionID closure on the fresh ManagedSession captures newKey by
+// value. A second RenameSession on the promoted key would leave that closure
+// writing the pre-second-rename newKey into sessionIDToKey; today only the
+// scratch → sidebar promote path invokes this, so that race is not reachable.
+// If a future caller chains renames on the same session, rebuild onSessionID
+// inside the destination struct or switch it to read s.key lazily.
+func (r *Router) RenameSession(oldKey, newKey string) bool {
+	if oldKey == newKey {
+		return false
+	}
+	if err := ValidateSessionKey(newKey); err != nil {
+		slog.Warn("RenameSession: invalid new key", "err", err)
+		return false
+	}
+	r.mu.Lock()
+
+	old, ok := r.sessions[oldKey]
+	if !ok {
+		r.mu.Unlock()
+		return false
+	}
+	if _, collision := r.sessions[newKey]; collision {
+		r.mu.Unlock()
+		return false
+	}
+
+	// Session key is immutable on ManagedSession (parseKeyParts caches via
+	// sync.Once; Snapshot depends on those cached parts). A fresh struct is
+	// the only safe way to change the key.
+	fresh := &ManagedSession{
+		key:              newKey,
+		workspace:        old.workspace,
+		persistedHistory: old.persistedHistory,
+		prevSessionIDs:   old.prevSessionIDs,
+		totalCost:        old.totalCost,
+		exempt:           old.exempt,
+		onSessionID: func(id string) {
+			r.mu.Lock()
+			r.trackSessionID(id)
+			if id != "" {
+				r.sessionIDToKey[id] = newKey
+			}
+			r.mu.Unlock()
+		},
+	}
+	// Copy atomic fields (backend / CLI name+ver / user label / death reason /
+	// lastActive / lastPrompt / lastActivity / sessionID). Each field is an
+	// atomic.Value so plain Load/Store round-trips are race-safe; we hold
+	// r.mu which blocks concurrent writers of everything except the Send hot
+	// path (lastPrompt / lastActivity), which are idempotent on copy.
+	fresh.SetBackend(old.Backend())
+	fresh.SetCLIName(old.CLIName())
+	fresh.SetCLIVersion(old.CLIVersion())
+	fresh.SetUserLabel(old.UserLabel())
+	if dr, ok := old.deathReason.Load().(string); ok && dr != "" {
+		fresh.deathReason.Store(dr)
+	}
+	fresh.lastActive.Store(old.lastActive.Load())
+	if v := old.lastPrompt.Load(); v != nil {
+		fresh.lastPrompt.Store(v)
+	}
+	if v := old.lastActivity.Load(); v != nil {
+		fresh.lastActivity.Store(v)
+	}
+	fresh.setSessionID(old.getSessionID())
+
+	// Move the process pointer so the running CLI keeps serving requests
+	// under the new key. The old struct becomes an orphan with process=nil,
+	// so any goroutine holding a stale reference to `old` that attempts Send
+	// fails cleanly with "no active process".
+	if proc := old.loadProcess(); proc != nil {
+		fresh.storeProcess(proc)
+	}
+	old.storeProcess(nil)
+
+	// Swap map entries and maintain every derived index.
+	r.sessions[newKey] = fresh
+	delete(r.sessions, oldKey)
+	r.indexDel(oldKey)
+	r.indexAdd(newKey)
+	if id := fresh.getSessionID(); id != "" {
+		r.sessionIDToKey[id] = newKey
+	}
+	if b, ok := r.backendOverrides[oldKey]; ok {
+		r.backendOverrides[newKey] = b
+		delete(r.backendOverrides, oldKey)
+	}
+	r.storeDirty = true
+	r.storeGen.Add(1)
+	r.mu.Unlock()
+
+	slog.Info("session renamed", "old", oldKey, "new", newKey)
+	r.notifyChange()
+	return true
+}
+
 // Remove removes a session from the router and kills its process.
 // Used by the dashboard to hide sessions from the list.
 func (r *Router) Remove(key string) bool {

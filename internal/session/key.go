@@ -51,5 +51,12 @@ func ValidateSessionKey(k string) error {
 			return errors.New("session key contains invisible control character")
 		}
 	}
+	// Note: ValidateSessionKey does NOT enforce that the key has exactly 4
+	// colon-separated segments. Cross-node protocols (internal/upstream)
+	// forward operator-supplied keys whose shape may be unknown — the
+	// "unknown key" path expects validation to accept arbitrary strings so
+	// that downstream router.GetSession can report the absence. Call sites
+	// that rely on a 4-segment shape (promote, ChatKey extraction) must do
+	// their own split check.
 	return nil
 }

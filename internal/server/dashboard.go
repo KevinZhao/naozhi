@@ -199,6 +199,19 @@ func (s *Server) registerDashboard() {
 		trustedProxy:  s.auth.trustedProxy,
 	}
 
+	// Scratch (ephemeral aside) API. Pool was constructed in New(); wire it
+	// through the hub (for sessionOptsFor lookup) and start the TTL sweeper.
+	if s.scratchPool != nil {
+		s.hub.SetScratchPool(s.scratchPool)
+		s.scratchPool.StartSweeper()
+		s.scratchH = &ScratchHandler{
+			hub:       s.hub,
+			pool:      s.scratchPool,
+			openLimit: newIPLimiterWithProxy(rate.Every(12*time.Second), 5, s.auth.trustedProxy), // 5 opens/min per IP
+			agents:    s.agents,
+		}
+	}
+
 	// Push session list changes to WS clients
 	s.router.SetOnChange(func() { s.hub.BroadcastSessionsUpdate() })
 
@@ -241,6 +254,11 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("POST /api/cron/trigger", auth(s.cronH.handleTrigger))
 	s.mux.HandleFunc("GET /api/cron/preview", auth(s.cronH.handlePreview))
 	s.mux.HandleFunc("POST /api/auth/logout", auth(s.auth.handleLogout))
+	if s.scratchH != nil {
+		s.mux.HandleFunc("POST /api/scratch/open", auth(s.scratchH.handleOpen))
+		s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(s.scratchH.handlePromote))
+		s.mux.HandleFunc("DELETE /api/scratch/{id}", auth(s.scratchH.handleDelete))
+	}
 
 	// Unauthenticated routes (login, static assets, WebSocket with own auth)
 	s.mux.HandleFunc("POST /api/auth/login", s.auth.handleLogin)

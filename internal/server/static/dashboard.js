@@ -6202,3 +6202,334 @@ initSwipeBack();
   window.openLightbox=function(src){reset();img.src=src;ov.classList.add('active')};
   document.addEventListener('keydown',function(e){if(!ov.classList.contains('active'))return;if(e.key==='Escape')close();else if(e.key==='+'||e.key==='='){scale=Math.min(scale*1.2,10);apply();showHint()}else if(e.key==='-'){scale=Math.max(scale/1.2,.5);apply();showHint()}else if(e.key==='0'){reset();apply();showHint()}});
 })();
+
+/* ─────────────────────────────────────────────────────────────────────────────
+   Aside (scratch) drawer — preview-pane追问
+   Opens on the ↗ button added to AI bubbles. Creates a scratch session on
+   the server, polls events for it, sends messages, and optionally promotes
+   it into a sidebar-visible session. Drawer DOM lives in dashboard.html.
+   ───────────────────────────────────────────────────────────────────────── */
+(function(){
+  const drawer = document.getElementById('aside-drawer');
+  if (!drawer) return;
+  const $ = (id) => document.getElementById(id);
+  const elMsgs = $('ad-messages');
+  const elEmpty = $('ad-empty');
+  const elInput = $('ad-input');
+  const elSend = $('ad-send');
+  const elClose = $('ad-close');
+  const elSave = $('ad-save');
+  const elQuoteChip = $('ad-quote-chip');
+  const elQuotePreview = $('ad-quote-preview');
+  const elQuoteTrunc = $('ad-quote-trunc');
+  const elLoading = $('ad-loading');
+  const elAgent = $('ad-agent');
+
+  let state = null;            // {scratchId, key, agentId, sourceKey, sourceMsgTime, quote, lastEventTime, pendingUserEchoes}
+  let pollTimer = null;
+  let sending = false;
+
+  function authHeaders(extra) {
+    const h = Object.assign({}, extra || {});
+    try {
+      const t = getToken();
+      if (t) h['Authorization'] = 'Bearer ' + t;
+    } catch (_) {}
+    return h;
+  }
+
+  function clearMessages() {
+    if (!elMsgs) return;
+    // Preserve the empty placeholder for re-use.
+    elMsgs.innerHTML = '';
+    elMsgs.appendChild(elEmpty);
+  }
+
+  function showDrawer() { drawer.classList.add('visible'); }
+  function hideDrawer() { drawer.classList.remove('visible'); }
+
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  async function closeScratch(silent) {
+    stopPolling();
+    hideDrawer();
+    if (!state) return;
+    const id = state.scratchId;
+    state = null;
+    elSave.classList.remove('visible');
+    clearMessages();
+    elInput.value = '';
+    if (!id) return;
+    try {
+      await fetch('/api/scratch/' + encodeURIComponent(id), {
+        method: 'DELETE', headers: authHeaders(),
+      });
+    } catch (_) { /* best effort */ }
+    if (!silent && typeof showToast === 'function') { /* no toast on normal close */ }
+  }
+
+  function previewText(s) {
+    if (!s) return '';
+    const one = s.replace(/\s+/g, ' ').trim();
+    return one.length > 40 ? one.slice(0, 40) + '…' : one;
+  }
+
+  // De-duplicate echoed user messages: sendInScratch renders the user bubble
+  // immediately for perceived responsiveness, then the server's event stream
+  // echoes the same text back as a `user` event. Without this filter the
+  // user's own message would appear twice. We compare the trimmed detail
+  // against the pendingUserEchoes set populated by sendInScratch; the set
+  // is bounded at 10 entries (most users don't queue more than 2-3 sends
+  // before polling catches up).
+  function matchesPendingEcho(ev) {
+    if (!state || !state.pendingUserEchoes || ev.type !== 'user') return false;
+    const body = String(ev.detail || ev.summary || '').trim();
+    if (!body) return false;
+    for (const pending of state.pendingUserEchoes) {
+      if (pending === body) {
+        state.pendingUserEchoes.delete(pending);
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function renderNewEvents(events) {
+    if (!Array.isArray(events) || events.length === 0) return;
+    // Clear placeholder on first real content.
+    if (elEmpty && elEmpty.parentNode === elMsgs) {
+      elMsgs.removeChild(elEmpty);
+    }
+    for (const e of events) {
+      // Drop server-echoed user messages that we already rendered locally.
+      if (matchesPendingEcho(e)) {
+        if (e.time && e.time > state.lastEventTime) state.lastEventTime = e.time;
+        continue;
+      }
+      // Reuse the main event renderer so aside bubbles match the transcript
+      // style (markdown, code blocks, etc.) without duplicating logic.
+      const h = (typeof eventHtml === 'function') ? eventHtml(e) : '';
+      if (!h) continue;
+      const tmp = document.createElement('div');
+      tmp.innerHTML = h;
+      while (tmp.firstChild) elMsgs.appendChild(tmp.firstChild);
+      if (e.time && e.time > state.lastEventTime) state.lastEventTime = e.time;
+    }
+    // Hide any "↗ 追问" buttons inside the aside itself — stacking is disabled.
+    for (const btn of elMsgs.querySelectorAll('.event-ask-btn')) btn.remove();
+    elMsgs.scrollTop = elMsgs.scrollHeight;
+    // Save button appears once there's at least one AI reply.
+    if (events.some(e => e.type === 'text' || e.type === 'result')) {
+      elSave.classList.add('visible');
+    }
+  }
+
+  async function pollOnce() {
+    if (!state) return;
+    try {
+      let url = '/api/sessions/events?key=' + encodeURIComponent(state.key);
+      if (state.lastEventTime > 0) url += '&after=' + state.lastEventTime;
+      else url += '&limit=50';
+      const r = await fetch(url, { headers: authHeaders() });
+      if (!r.ok) return;
+      const evs = await r.json();
+      if (Array.isArray(evs) && evs.length > 0) {
+        renderNewEvents(evs);
+        // Hide the "thinking…" indicator once the first bubble arrives.
+        if (evs.some(e => e.type === 'text' || e.type === 'result')) {
+          elLoading.classList.remove('visible');
+        }
+      }
+    } catch (_) { /* swallow */ }
+  }
+
+  function startPolling() {
+    stopPolling();
+    pollTimer = setInterval(pollOnce, 1000);
+  }
+
+  async function openScratch(quote, agentId, sourceKey, sourceMsgTime) {
+    // Confirm replacement if an aside is already open.
+    if (state) {
+      if (!confirm('当前追问窗口将被替换，继续？')) return;
+      await closeScratch(true);
+    }
+    try {
+      const r = await fetch('/api/scratch/open', {
+        method: 'POST',
+        headers: authHeaders({'Content-Type': 'application/json'}),
+        body: JSON.stringify({
+          source_key: sourceKey,
+          source_message_id: String(sourceMsgTime || ''),
+          quote,
+        }),
+      });
+      if (!r.ok) {
+        const txt = (await r.text().catch(() => '')).slice(0, 160);
+        if (typeof showToast === 'function') showToast('打开追问失败：' + (txt || r.status));
+        return;
+      }
+      const data = await r.json();
+      state = {
+        scratchId: data.scratch_id,
+        key: data.key,
+        agentId: data.agent_id || agentId || 'general',
+        sourceKey,
+        sourceMsgTime: sourceMsgTime || 0,
+        quote,
+        lastEventTime: 0,
+        // Bounded Set of user-message bodies that sendInScratch rendered
+        // locally. Consumed by matchesPendingEcho when the server event
+        // stream replays the same text as a `user` event. Set over array
+        // for O(1) lookup; bounded at ~10 entries by sendInScratch.
+        pendingUserEchoes: new Set(),
+      };
+      elAgent.textContent = state.agentId && state.agentId !== 'general' ? '· ' + state.agentId : '';
+      elQuotePreview.textContent = previewText(quote);
+      elQuoteTrunc.style.display = data.quote_truncated ? 'inline' : 'none';
+      elQuoteChip.classList.remove('expanded');
+      elQuoteChip.dataset.full = quote;
+      clearMessages();
+      elSave.classList.remove('visible');
+      showDrawer();
+      setTimeout(() => elInput.focus(), 60);
+      startPolling();
+    } catch (e) {
+      console.error('open scratch', e);
+      if (typeof showToast === 'function') showToast('网络错误');
+    }
+  }
+
+  async function sendInScratch() {
+    if (sending || !state) return;
+    const text = elInput.value.trim();
+    if (!text) return;
+    sending = true;
+    elSend.disabled = true;
+    elLoading.classList.add('visible');
+    // Cap the pending echo set at 10 to bound memory under rapid repeated
+    // sends; old entries are dropped FIFO-ish (Set iteration order =
+    // insertion order).
+    if (state.pendingUserEchoes.size >= 10) {
+      const first = state.pendingUserEchoes.values().next().value;
+      if (first !== undefined) state.pendingUserEchoes.delete(first);
+    }
+    state.pendingUserEchoes.add(text);
+    // Render the user message immediately for perceived responsiveness via
+    // the same HTML path as renderNewEvents, but skipping matchesPendingEcho
+    // — the pending entry exists to consume the *server-side* replay, not
+    // this local render.
+    const localEvent = {type: 'user', detail: text, time: Date.now()};
+    if (elEmpty && elEmpty.parentNode === elMsgs) {
+      elMsgs.removeChild(elEmpty);
+    }
+    const localHtml = (typeof eventHtml === 'function') ? eventHtml(localEvent) : '';
+    if (localHtml) {
+      const tmp = document.createElement('div');
+      tmp.innerHTML = localHtml;
+      while (tmp.firstChild) elMsgs.appendChild(tmp.firstChild);
+      for (const btn of elMsgs.querySelectorAll('.event-ask-btn')) btn.remove();
+      elMsgs.scrollTop = elMsgs.scrollHeight;
+    }
+    elInput.value = '';
+    try {
+      const r = await fetch('/api/sessions/send', {
+        method: 'POST',
+        headers: authHeaders({'Content-Type': 'application/json'}),
+        body: JSON.stringify({key: state.key, text}),
+      });
+      if (!r.ok) {
+        const txt = (await r.text().catch(() => '')).slice(0, 160);
+        if (typeof showToast === 'function') showToast('发送失败：' + (txt || r.status));
+        elLoading.classList.remove('visible');
+      }
+    } catch (e) {
+      console.error('scratch send', e);
+      if (typeof showToast === 'function') showToast('网络错误');
+      elLoading.classList.remove('visible');
+    } finally {
+      sending = false;
+      elSend.disabled = false;
+      elInput.focus();
+    }
+  }
+
+  async function promoteScratch() {
+    if (!state) return;
+    const id = state.scratchId;
+    try {
+      const r = await fetch('/api/scratch/' + encodeURIComponent(id) + '/promote', {
+        method: 'POST', headers: authHeaders(),
+      });
+      if (!r.ok) {
+        const txt = (await r.text().catch(() => '')).slice(0, 160);
+        if (typeof showToast === 'function') showToast('保存失败：' + (txt || r.status));
+        return;
+      }
+      const data = await r.json();
+      state = null;   // scratch was detached server-side; skip the DELETE in closeScratch
+      stopPolling();
+      hideDrawer();
+      clearMessages();
+      elSave.classList.remove('visible');
+      elInput.value = '';
+      if (typeof showToast === 'function') showToast('已保存为正式会话');
+      // Refresh sidebar and try to select the new key.
+      try {
+        if (typeof lastVersion !== 'undefined') lastVersion = 0;
+        if (typeof fetchSessions === 'function') await fetchSessions();
+        if (typeof selectSession === 'function' && data.key) selectSession(data.key, 'local');
+      } catch (_) {}
+    } catch (e) {
+      console.error('promote scratch', e);
+      if (typeof showToast === 'function') showToast('网络错误');
+    }
+  }
+
+  // Expose the global used by the ↗ button in eventHtml.
+  window.askAside = function(btn) {
+    if (!btn) return;
+    const raw = btn.getAttribute('data-raw') || '';
+    const msgTime = Number(btn.getAttribute('data-msg-time') || 0);
+    if (!raw || raw.length < 1) return;
+    if (!selectedKey) {
+      if (typeof showToast === 'function') showToast('请先选择会话');
+      return;
+    }
+    // Derive agentId from the current session key (4th segment) so the
+    // server can inherit the matching agent registration.
+    const parts = String(selectedKey).split(':');
+    const agentId = parts.length >= 4 ? parts[3] : 'general';
+    openScratch(raw, agentId, selectedKey, msgTime);
+  };
+
+  // Wire drawer buttons.
+  elClose.addEventListener('click', () => { closeScratch(true); });
+  elSend.addEventListener('click', sendInScratch);
+  elInput.addEventListener('keydown', (e) => {
+    // Enter sends; Shift+Enter inserts newline.
+    if (e.key === 'Enter' && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      sendInScratch();
+    }
+  });
+  elSave.addEventListener('click', promoteScratch);
+  elQuoteChip.addEventListener('click', () => {
+    const expanded = elQuoteChip.classList.toggle('expanded');
+    elQuotePreview.textContent = expanded ? (elQuoteChip.dataset.full || '') : previewText(elQuoteChip.dataset.full || '');
+    // Clicking the already-expanded chip scrolls the main transcript to the source.
+    if (!expanded && state && state.sourceMsgTime) {
+      const el = document.querySelector('.event[data-time="' + state.sourceMsgTime + '"]');
+      if (el && typeof el.scrollIntoView === 'function') {
+        el.scrollIntoView({behavior: 'smooth', block: 'center'});
+      }
+    }
+  });
+
+  // ESC closes when drawer has focus.
+  drawer.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') { e.preventDefault(); closeScratch(true); }
+  });
+})();

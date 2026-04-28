@@ -66,6 +66,14 @@ type Server struct {
 	healthH     *HealthHandler
 	sendH       *SendHandler
 	cliH        *CLIBackendsHandler
+	scratchH    *ScratchHandler
+
+	// scratchPool manages ephemeral "aside" sessions backing the dashboard
+	// preview drawer. Separate from router.sessions because scratches must
+	// not appear in the sidebar, persist across restarts, or tie up maxProcs
+	// beyond their 10-minute idle TTL. Owned by Server so Shutdown can stop
+	// the sweeper alongside the rest of the teardown chain.
+	scratchPool *session.ScratchPool
 
 	// Watchdog kill counters — incremented atomically, exposed via /health and /api/sessions.
 	watchdogNoOutputKills atomic.Int64
@@ -474,6 +482,14 @@ func buildServer(opts ServerOptions) *Server {
 	}
 	s.sessionH.initStaticStats()
 	s.sessionH.WarmHistoryCache()
+
+	// Scratch pool (ephemeral aside sessions). Bound to the same router so
+	// scratches flow through the standard spawn/send/event path as managed
+	// sessions; the saveStore/handleList filters on the "scratch:" prefix
+	// keep them off the sidebar and out of sessions.json. The sweeper is
+	// started later in registerDashboard so an early New() failure does not
+	// leak the ticker goroutine.
+	s.scratchPool = session.NewScratchPool(router, session.DefaultScratchMax, session.DefaultScratchTTL)
 	// Thread StartupCtx into the --version probe so SIGTERM during
 	// startup aborts promptly (R55-QUAL-004). Nil ctx falls back to
 	// NewCLIBackendsHandler's Background-derived path via the delegating
@@ -654,6 +670,13 @@ func (s *Server) Start(ctx context.Context) error {
 		// Shutdown WebSocket hub
 		if s.hub != nil {
 			s.hub.Shutdown()
+		}
+
+		// Stop the scratch-pool sweeper so its ticker goroutine exits before
+		// the listener teardown completes. Stop is idempotent and drains in
+		// under a second in practice.
+		if s.scratchPool != nil {
+			s.scratchPool.Stop()
 		}
 
 		// Drain any in-flight WarmHistoryCache goroutine before tearing down

@@ -344,10 +344,31 @@ func (h *Hub) handleOwnerLoopPanic(key string, onAsyncError func(string), r any)
 	}
 }
 
+// sessionOptsFor returns the AgentOpts to use when spawning (or resuming)
+// the session for key.
+//
+// Scratch (ephemeral aside) keys are resolved via the pool so the inherited
+// agent/backend/model/workspace config plus the --append-system-prompt quote
+// shim land on the spawned CLI. Every other key falls back to
+// buildSessionOpts, which consults the agent registry and planner overrides.
+//
+// The pool lookup touches the scratch's lastUsed timestamp so an actively
+// used aside is not swept out from under the user. This "Touch on lookup"
+// pattern is the only mechanism preventing the sweeper from evicting a
+// scratch that is about to receive its first send — do not remove it.
+func (h *Hub) sessionOptsFor(key string) session.AgentOpts {
+	if h.scratchPool != nil && session.IsScratchKey(key) {
+		if opts, ok := h.scratchPool.OptsForKey(key); ok {
+			return opts
+		}
+	}
+	return buildSessionOpts(key, h.agents, h.projectMgr)
+}
+
 // runTurn executes one send turn: GetOrCreate + sendWithBroadcast.
 func (h *Hub) runTurn(key, text string, images []cli.ImageData, onAsyncError func(string)) {
 	sendStart := time.Now()
-	opts := buildSessionOpts(key, h.agents, h.projectMgr)
+	opts := h.sessionOptsFor(key)
 	sess, status, err := h.router.GetOrCreate(h.ctx, key, opts)
 	if err != nil {
 		slog.Error("send: get session", "key", key, "err", err)

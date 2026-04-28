@@ -69,6 +69,15 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 
 	entries := make([]storeEntry, 0, len(sessions))
 	for _, s := range sessions {
+		// Scratch (ephemeral aside) sessions are deliberately volatile: they
+		// must not persist across restarts, or loadStore would resurrect a
+		// zombie scratch whose quoted-context --append-system-prompt is long
+		// gone and whose dashboard tab has been closed. Skip them here — the
+		// pool TTL sweeper handles live cleanup; persistence simply never
+		// records them.
+		if IsScratchKey(s.key) {
+			continue
+		}
 		// Use getSessionID to avoid data race with concurrent Send.
 		// Fallback to process's SessionID which is set earlier (on system/init),
 		// before Send() completes and propagates it to ManagedSession.
