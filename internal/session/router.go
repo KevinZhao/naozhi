@@ -78,6 +78,19 @@ const (
 	// for orphan shims, skip for drifted shims, log+continue for spawn).
 	shimReconnectTimeout = 15 * time.Second
 
+	// shimReconnectGraceDelay is how long the deferred history-load path
+	// waits for ReconnectShims to complete its first pass before backfilling
+	// JSONL for a session that shimManagedKeys() claimed at startup.
+	// R53-ARCH-001: a shim that appears in the first Discover() but has
+	// exited by the second (ReconnectShims') Discover() would previously
+	// leave the session with no history at all. 5s comfortably exceeds a
+	// normal ReconnectShims pass (per-key budget bounded by
+	// shimReconnectTimeout=15s but most keys connect in < 500ms) on any
+	// realistic deployment; the backfill is gated by hasInjectedHistory()
+	// so the happy path (ReconnectShims succeeded) pays only the 5s wait
+	// + a read-lock check, no FS I/O.
+	shimReconnectGraceDelay = 5 * time.Second
+
 	// knownIDsSaveInterval throttles knownIDs fsync to limit disk I/O.
 	// A crash losing up to this much session-ID tracking costs one
 	// discovery rescan cycle. Shared between Cleanup and saveIfDirty.
@@ -646,9 +659,18 @@ func NewRouter(cfg RouterConfig) *Router {
 	// Loads the full session chain (prev → current) to restore history
 	// that accumulated across multiple CLI session IDs.
 	//
-	// Skip sessions that will be handled by ReconnectShims (has a surviving
-	// shim process). ReconnectShims injects both replay events and JSONL
-	// history, so loading here would cause duplicates in the EventLog.
+	// Two load paths:
+	//   1. Non-shim-managed sessions (default): load immediately.
+	//   2. Shim-managed sessions (shimKeys[key]==true): defer for
+	//      shimReconnectGraceDelay to let ReconnectShims inject its own
+	//      replay + JSONL history first; then backfill only if the session
+	//      is still empty. This guards against R53-ARCH-001 — a short-lived
+	//      shim that appears in shimManagedKeys() at startup but has
+	//      exited by the time ReconnectShims runs its second Discover,
+	//      previously leaving the session with no history (skipped by
+	//      path #1, missed by ReconnectShims) until the user sent a
+	//      message. The deferred backfill checks hasInjectedHistory()
+	//      so successful ReconnectShims runs do not get duplicated.
 	if r.claudeDir != "" {
 		shimKeys := r.shimManagedKeys()
 		sem := make(chan struct{}, historyLoadConcurrency) // limit concurrent disk I/O
@@ -657,12 +679,30 @@ func NewRouter(cfg RouterConfig) *Router {
 			if s.getSessionID() == "" {
 				continue
 			}
-			if shimKeys[s.key] {
-				continue
-			}
+			deferred := shimKeys[s.key]
 			r.historyWg.Add(1)
 			go func() {
 				defer r.historyWg.Done()
+				if deferred {
+					// Wait for ReconnectShims to complete its first pass.
+					// historyCtx cancel (Shutdown) aborts the wait cleanly.
+					select {
+					case <-time.After(shimReconnectGraceDelay):
+					case <-r.historyCtx.Done():
+						return
+					}
+					// If ReconnectShims already populated history (happy
+					// path), skip the JSONL load to avoid duplicate entries.
+					if s.hasInjectedHistory() {
+						return
+					}
+					// Otherwise fall through: the shim disappeared between
+					// shimManagedKeys() and ReconnectShims' Discover, so we
+					// must backfill directly or the dashboard shows empty
+					// history until the next message.
+					slog.Info("shim-managed session missing history after reconnect grace, falling back to JSONL load",
+						"key", s.key)
+				}
 				select {
 				case sem <- struct{}{}:
 				case <-r.historyCtx.Done():
@@ -684,8 +724,15 @@ func NewRouter(cfg RouterConfig) *Router {
 				if len(allEntries) == 0 {
 					return
 				}
+				// Final check for the deferred path: ReconnectShims may have
+				// raced us between the grace timer and LoadHistory returning.
+				// InjectHistory appends (not replaces), so a double-inject
+				// shows duplicates in the sidebar.
+				if deferred && s.hasInjectedHistory() {
+					return
+				}
 				s.InjectHistory(allEntries)
-				slog.Info("loaded session history on startup", "key", s.key, "entries", len(allEntries), "chain", len(ids))
+				slog.Info("loaded session history on startup", "key", s.key, "entries", len(allEntries), "chain", len(ids), "deferred", deferred)
 				r.notifyChange()
 			}()
 		}

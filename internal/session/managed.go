@@ -637,6 +637,18 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 	return snap
 }
 
+// hasInjectedHistory reports whether persistedHistory contains any entries.
+// Used by the startup history loader (router.go, R53-ARCH-001 fix) to decide
+// whether the deferred JSONL backfill path is needed: if ReconnectShims
+// already injected history via proc.InjectHistory → s.InjectHistory → the
+// persistedHistory append at managed.go:778, the flag is set and we skip
+// the redundant FS read. Read-only, no copy — callers just need a boolean.
+func (s *ManagedSession) hasInjectedHistory() bool {
+	s.historyMu.RLock()
+	defer s.historyMu.RUnlock()
+	return len(s.persistedHistory) > 0
+}
+
 // EventEntries returns the event log entries for this session.
 // Returns persisted history when the process is nil or dead.
 func (s *ManagedSession) EventEntries() []cli.EventEntry {
