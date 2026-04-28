@@ -6302,12 +6302,64 @@ initSwipeBack();
     return false;
   }
 
+  // isNearBottom mirrors the main transcript's wasBottom check (dashboard.js
+  // around line 1242 + 4604). 30px slack absorbs sub-pixel layout jitter.
+  function isNearBottom() {
+    if (!elMsgs) return true;
+    return elMsgs.scrollTop + elMsgs.clientHeight >= elMsgs.scrollHeight - 30;
+  }
+
+  // stickBottom mirrors the main transcript's stickEventsBottom: two rAFs
+  // to outlast KaTeX/mermaid layout bumps, plus image-load listeners so a
+  // late-loading thumbnail doesn't scroll the user away from the bottom.
+  // Used only when the caller wants a *forced* pin — incremental renders
+  // go through the isNearBottom path instead, matching the main window.
+  function stickBottom() {
+    if (!elMsgs) return;
+    elMsgs.scrollTop = elMsgs.scrollHeight;
+    requestAnimationFrame(() => {
+      elMsgs.scrollTop = elMsgs.scrollHeight;
+      requestAnimationFrame(() => { elMsgs.scrollTop = elMsgs.scrollHeight; });
+    });
+    elMsgs.querySelectorAll('img').forEach(img => {
+      if (img.complete) return;
+      const restick = () => { elMsgs.scrollTop = elMsgs.scrollHeight; };
+      img.addEventListener('load', restick, { once: true });
+      img.addEventListener('error', restick, { once: true });
+    });
+  }
+
+  // Time-divider helpers mirror renderEventsWithDividers in the main file.
+  // Keeping this scoped copy lets the aside share the visual grammar
+  // (mm/dd HH:MM dividers every >15min gap) without exporting internals.
+  const EVENT_DIVIDER_GAP_MS = 15 * 60 * 1000;
+  function asideLastTime() {
+    // Walk backwards through already-rendered .event nodes to find the
+    // newest data-time; used to decide whether a fresh divider is needed.
+    for (let i = elMsgs.children.length - 1; i >= 0; i--) {
+      const c = elMsgs.children[i];
+      if (c.classList && c.classList.contains('event')) {
+        return Number(c.getAttribute('data-time') || 0);
+      }
+    }
+    return 0;
+  }
+
   function renderNewEvents(events) {
     if (!Array.isArray(events) || events.length === 0) return;
+    // Remember whether the user was reading the latest message BEFORE we
+    // mutate the DOM. Mirrors the main transcript's policy: only auto-pin
+    // to the bottom if the user is already there, never drag them away
+    // from content they're reading. The visible symptom on mobile — the
+    // drawer snapping to the newest message every poll tick — was the
+    // earlier "always scrollTop=scrollHeight" behaviour.
+    const wasBottom = isNearBottom();
     // Clear placeholder on first real content.
     if (elEmpty && elEmpty.parentNode === elMsgs) {
       elMsgs.removeChild(elEmpty);
     }
+    let sawUser = false;
+    let prevT = asideLastTime();
     for (const e of events) {
       // Drop server-echoed user messages that we already rendered locally.
       if (matchesPendingEcho(e)) {
@@ -6318,14 +6370,27 @@ initSwipeBack();
       // style (markdown, code blocks, etc.) without duplicating logic.
       const h = (typeof eventHtml === 'function') ? eventHtml(e) : '';
       if (!h) continue;
+      const t = e.time || 0;
+      // Insert a divider when the gap between adjacent visible bubbles
+      // exceeds EVENT_DIVIDER_GAP_MS — matches the main-window grammar.
+      if (t && (prevT === 0 || t - prevT >= EVENT_DIVIDER_GAP_MS)
+          && typeof timeDividerHtml === 'function') {
+        elMsgs.insertAdjacentHTML('beforeend', timeDividerHtml(t));
+      }
       const tmp = document.createElement('div');
       tmp.innerHTML = h;
       while (tmp.firstChild) elMsgs.appendChild(tmp.firstChild);
+      if (t) prevT = t;
       if (e.time && e.time > state.lastEventTime) state.lastEventTime = e.time;
+      if (e.type === 'user') sawUser = true;
     }
     // Hide any "↗ 追问" buttons inside the aside itself — stacking is disabled.
     for (const btn of elMsgs.querySelectorAll('.event-ask-btn')) btn.remove();
-    elMsgs.scrollTop = elMsgs.scrollHeight;
+    // Scroll policy, aligned with main window:
+    //  - the user just sent (sawUser on a local-render call): force-pin.
+    //  - otherwise: only stick if they were already at the bottom.
+    if (sawUser) stickBottom();
+    else if (wasBottom) elMsgs.scrollTop = elMsgs.scrollHeight;
     // Save button appears once there's at least one AI reply.
     if (events.some(e => e.type === 'text' || e.type === 'result')) {
       elSave.classList.add('visible');
@@ -6423,22 +6488,12 @@ initSwipeBack();
       if (first !== undefined) state.pendingUserEchoes.delete(first);
     }
     state.pendingUserEchoes.add(text);
-    // Render the user message immediately for perceived responsiveness via
-    // the same HTML path as renderNewEvents, but skipping matchesPendingEcho
-    // — the pending entry exists to consume the *server-side* replay, not
-    // this local render.
-    const localEvent = {type: 'user', detail: text, time: Date.now()};
-    if (elEmpty && elEmpty.parentNode === elMsgs) {
-      elMsgs.removeChild(elEmpty);
-    }
-    const localHtml = (typeof eventHtml === 'function') ? eventHtml(localEvent) : '';
-    if (localHtml) {
-      const tmp = document.createElement('div');
-      tmp.innerHTML = localHtml;
-      while (tmp.firstChild) elMsgs.appendChild(tmp.firstChild);
-      for (const btn of elMsgs.querySelectorAll('.event-ask-btn')) btn.remove();
-      elMsgs.scrollTop = elMsgs.scrollHeight;
-    }
+    // Render the user message immediately via renderNewEvents so scroll
+    // policy, divider insertion, and ↗-button stripping all match the
+    // poll path. The time stamp is just above Date.now() so it sorts
+    // after whatever was already rendered; the subsequent server replay
+    // will be consumed by matchesPendingEcho.
+    renderNewEvents([{type: 'user', detail: text, time: Date.now()}]);
     elInput.value = '';
     try {
       const r = await fetch('/api/sessions/send', {

@@ -805,6 +805,11 @@ body.kbd-open .sidebar-footer{display:none}
 .aside-drawer .ad-loading.visible{display:block}
 @media (max-width: 768px){
   .aside-drawer{width:100%;max-width:100vw;border-left:none}
+  /* On phones the drawer fills the screen, so align event padding with the
+     main transcript (6px 24px) rather than the narrow-drawer compression.
+     Keeps body feel identical whether the user is reading the main window
+     or the aside. */
+  .aside-drawer .ad-messages .event{padding:6px 20px}
 }
 /* Ask-aside (↗ 追问) button on AI bubbles. Sits next to copy button; same
    visual weight so the bubble footer row stays balanced. Larger tap target
