@@ -771,54 +771,82 @@ body.kbd-open .sidebar-footer{display:none}
 @media (min-width: 3200px){ .sidebar{width:460px} }
 
 /* Aside (scratch) drawer — right-side preview pane for follow-up questions
-   ("追问"). Independent of main transcript layout so quoting doesn't shift
-   the reader. On phones the drawer goes full-width. */
-.aside-drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,94vw);background:var(--nz-bg-0);border-left:1px solid var(--nz-border);display:flex;flex-direction:column;transform:translateX(105%);transition:transform .22s ease;z-index:60;box-shadow:-8px 0 24px rgba(0,0,0,.35)}
+   ("追问"). Intentionally mirrors .fv-drawer's surface treatment (bg-1,
+   box-shadow, z-index, slide transition) so the dashboard has a single
+   "drawer" visual vocabulary, and reuses .main-header + .input-area token
+   spacing so the input/header feel matches the main transcript. */
+.aside-drawer{position:fixed;top:0;right:0;bottom:0;width:min(420px,94vw);background:var(--nz-bg-1);border-left:1px solid var(--nz-border);z-index:200;display:flex;flex-direction:column;transform:translateX(100%);transition:transform .2s ease;box-shadow:-2px 0 12px rgba(0,0,0,.4)}
 .aside-drawer.visible{transform:translateX(0)}
-.aside-drawer .ad-header{display:flex;align-items:center;justify-content:space-between;gap:8px;padding:10px 14px;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-0)}
-.aside-drawer .ad-title{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--nz-text);font-weight:600;min-width:0}
-.aside-drawer .ad-title .ad-agent{color:var(--nz-text-dim);font-weight:400;font-size:12px;margin-left:4px}
-.aside-drawer .ad-close{background:none;border:none;color:var(--nz-text-mute);font-size:22px;cursor:pointer;padding:6px 10px;border-radius:4px;min-width:44px;min-height:44px;display:flex;align-items:center;justify-content:center}
-.aside-drawer .ad-close:hover{background:var(--nz-bg-1);color:var(--nz-text)}
-.aside-drawer .ad-quote-chip{padding:6px 14px;font-size:11px;color:var(--nz-text-dim);background:var(--nz-bg-1);border-bottom:1px solid var(--nz-border);cursor:pointer;display:flex;align-items:center;gap:6px;user-select:none}
+/* Header shares .fv-header's proportions (10px 14px padding, min-height 48px,
+   13px title). Background inherits .aside-drawer bg-1; no separate color so
+   the header melts into the drawer body like file-viewer does. */
+.aside-drawer .ad-header{display:flex;align-items:center;gap:8px;padding:10px 14px;border-bottom:1px solid var(--nz-border);flex-shrink:0;min-height:48px}
+.aside-drawer .ad-title{flex:1;min-width:0;display:flex;align-items:center;gap:6px;font-size:13px;color:var(--nz-text-strong);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-weight:600}
+.aside-drawer .ad-title .ad-agent{color:var(--nz-text-dim);font-weight:400;font-size:12px;margin-left:4px;overflow:hidden;text-overflow:ellipsis}
+.aside-drawer .ad-actions{display:flex;gap:6px;flex-shrink:0}
+/* Close button borrows .fv-close directly (font-size:18;line-height:1;padding:0 8px)
+   so its optical weight matches the file-viewer drawer users already know. */
+.aside-drawer .ad-close{height:26px;padding:0 8px;border:1px solid var(--nz-border);border-radius:6px;background:var(--nz-bg-2);color:var(--nz-text);font-size:18px;line-height:1;font-family:inherit;cursor:pointer;transition:all .15s}
+.aside-drawer .ad-close:hover{background:var(--nz-bg-0);border-color:var(--nz-accent);color:var(--nz-accent)}
+.aside-drawer .ad-quote-chip{padding:6px 14px;font-size:11px;color:var(--nz-text-dim);background:var(--nz-bg-2);border-bottom:1px solid var(--nz-border);cursor:pointer;display:flex;align-items:center;gap:6px;user-select:none;flex-shrink:0}
 .aside-drawer .ad-quote-chip:hover{color:var(--nz-text-mute)}
-.aside-drawer .ad-quote-chip .ad-arrow{color:var(--nz-text-faint)}
+.aside-drawer .ad-quote-chip .ad-arrow{color:var(--nz-text-faint);flex-shrink:0}
 .aside-drawer .ad-quote-chip .ad-preview{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-style:italic}
 .aside-drawer .ad-quote-chip.expanded .ad-preview{white-space:pre-wrap;font-style:normal}
-.aside-drawer .ad-quote-chip .ad-trunc{color:var(--nz-red);font-size:10px;margin-left:4px}
-.aside-drawer .ad-messages{flex:1;overflow-y:auto;overflow-x:hidden;padding:12px 0;display:flex;flex-direction:column;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent}
+.aside-drawer .ad-quote-chip .ad-trunc{color:var(--nz-red);font-size:10px;margin-left:4px;flex-shrink:0}
+/* Messages area mirrors .events (padding:16px 0, thin scrollbar). */
+.aside-drawer .ad-messages{flex:1;overflow-y:auto;overflow-x:hidden;padding:16px 0;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent;min-width:0;background:var(--nz-bg-0)}
+/* Narrow-drawer compression for .event rows: main window uses 6px 24px but
+   on a 420px drawer that leaves too little content width. Mobile overrides
+   below restore the main-window padding when the drawer is full-screen. */
 .aside-drawer .ad-messages .event{max-width:100%;padding:4px 14px}
 .aside-drawer .ad-messages .event.user .event-content,
 .aside-drawer .ad-messages .event.text .event-content{max-width:95%}
 .aside-drawer .ad-empty{padding:40px 20px;text-align:center;color:var(--nz-text-dim);font-size:13px;line-height:1.5}
-.aside-drawer .ad-input-area{border-top:1px solid var(--nz-border);padding:10px 12px;flex-shrink:0}
-.aside-drawer .ad-input-row{display:flex;gap:6px;align-items:flex-end}
-.aside-drawer .ad-input{flex:1;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:8px;color:var(--nz-text);padding:8px 10px;font-family:inherit;font-size:16px;min-height:40px;max-height:120px;outline:none;line-height:1.4;resize:none;overflow-y:auto;-webkit-user-select:text;user-select:text}
+/* Input area reuses .input-area's visual weight (12px 20px → 10px 14px here
+   for the narrower drawer; bg-0 keeps the "floor" feel aligned). */
+.aside-drawer .ad-input-area{border-top:1px solid var(--nz-border);padding:10px 14px;flex-shrink:0;background:var(--nz-bg-0)}
+.aside-drawer .ad-input-row{display:flex;gap:8px;align-items:flex-end}
+/* Input shares #msg-input's box model exactly: same bg, radius, padding,
+   min-height 38px, font-size 16px (iOS-zoom safe), max-height 120px. */
+.aside-drawer .ad-input{flex:1;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:8px;color:var(--nz-text);padding:8px 12px;font-family:inherit;font-size:16px;min-height:38px;max-height:120px;outline:none;line-height:1.4;resize:none;overflow-y:auto;-webkit-user-select:text;user-select:text}
 .aside-drawer .ad-input:focus{border-color:var(--nz-accent)}
-.aside-drawer .ad-send{width:44px;height:44px;border:1px solid #238636;background:#238636;border-radius:8px;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+/* Send button IS .btn-icon + .btn-send in visual terms — copy their tokens
+   so the hover colour, green fill, border-radius, and 36×36 size match
+   the main transcript send key. Feels like the same button. */
+.aside-drawer .ad-send{width:36px;height:36px;border:1px solid #238636;background:#238636;border-radius:8px;color:#fff;cursor:pointer;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0;transition:all .15s}
 .aside-drawer .ad-send:hover{background:#2ea043}
-.aside-drawer .ad-send:disabled{opacity:.5;cursor:default}
-.aside-drawer .ad-save-btn{display:none;margin-top:8px;width:100%;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:8px;color:var(--nz-text);padding:9px 10px;font-size:13px;cursor:pointer;transition:all .15s;font-family:inherit;min-height:40px}
+.aside-drawer .ad-send:disabled{opacity:.5;cursor:default;pointer-events:none}
+/* Save button follows .btn-icon but full-width + neutral fill. */
+.aside-drawer .ad-save-btn{display:none;margin-top:8px;width:100%;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:8px;color:var(--nz-text);padding:8px 12px;font-size:13px;cursor:pointer;transition:all .15s;font-family:inherit;min-height:36px}
 .aside-drawer .ad-save-btn.visible{display:block}
 .aside-drawer .ad-save-btn:hover{background:var(--nz-bg-2);border-color:var(--nz-accent);color:var(--nz-accent)}
 .aside-drawer .ad-loading{display:none;padding:6px 14px;font-size:11px;color:var(--nz-text-faint);font-style:italic;animation:pulse 1.5s ease-in-out infinite}
 .aside-drawer .ad-loading.visible{display:block}
+/* Phone breakpoint: match .fv-drawer's full-width treatment and apply the
+   same safe-area handling the main .input-area uses so the composer doesn't
+   disappear behind the notch / home indicator. */
 @media (max-width: 768px){
   .aside-drawer{width:100%;max-width:100vw;border-left:none}
-  /* On phones the drawer fills the screen, so align event padding with the
-     main transcript (6px 24px) rather than the narrow-drawer compression.
-     Keeps body feel identical whether the user is reading the main window
-     or the aside. */
+  .aside-drawer .ad-header{padding:max(10px,env(safe-area-inset-top)) max(14px,env(safe-area-inset-right)) 10px max(14px,env(safe-area-inset-left))}
   .aside-drawer .ad-messages .event{padding:6px 20px}
+  .aside-drawer .ad-input-area{padding-left:max(12px,env(safe-area-inset-left));padding-right:max(12px,env(safe-area-inset-right));padding-bottom:max(10px,env(safe-area-inset-bottom))}
+  /* Follow the main window's touch-target scaling: .btn-icon grows to 40×40
+     under ≤768 and to min 44×44 under pointer:coarse. Mirror here so the
+     send key on phones is the same size as the main composer's. */
+  .aside-drawer .ad-send{width:40px;height:40px}
 }
-/* Ask-aside (↗ 追问) button on AI bubbles. Sits next to copy button; same
-   visual weight so the bubble footer row stays balanced. Larger tap target
-   on touch devices so mobile users can hit it reliably. */
+@media (pointer: coarse){
+  .aside-drawer .ad-send,.aside-drawer .ad-close,.aside-drawer .ad-save-btn{min-width:44px;min-height:44px}
+}
+/* Ask-aside (↗ 追问) button on AI bubbles. Sits next to the copy button in
+   the bubble footer; borrows the same box model so the two buttons line up
+   pixel-for-pixel. Tap target enlarges under pointer:coarse along with
+   .event-copy-btn — kept in sync so both bubble actions grow together. */
 .event-ask-btn{display:inline-flex;align-items:center;gap:4px;background:none;border:1px solid var(--nz-border);border-radius:4px;color:var(--nz-text-faint);font-size:11px;padding:1px 8px;cursor:pointer;transition:color .15s,border-color .15s;line-height:1.6;margin-top:8px;margin-left:6px}
 .event-ask-btn:hover{color:var(--nz-accent);border-color:var(--nz-accent)}
 @media (pointer: coarse){
-  .event-ask-btn{font-size:12px;padding:4px 10px;min-height:32px}
-  .event-copy-btn{font-size:12px;padding:4px 10px;min-height:32px}
+  .event-ask-btn,.event-copy-btn{font-size:12px;padding:4px 10px;min-height:32px}
 }
 
 </style>
@@ -883,7 +911,9 @@ body.kbd-open .sidebar-footer{display:none}
       <span>↗ 追问</span>
       <span class="ad-agent" id="ad-agent"></span>
     </div>
-    <button type="button" class="ad-close" id="ad-close" title="关闭" aria-label="关闭追问窗口">&times;</button>
+    <div class="ad-actions">
+      <button type="button" class="ad-close" id="ad-close" title="关闭" aria-label="关闭追问窗口">&times;</button>
+    </div>
   </header>
   <div class="ad-quote-chip" id="ad-quote-chip" title="点击展开/回到源消息">
     <span class="ad-arrow">↳</span>
