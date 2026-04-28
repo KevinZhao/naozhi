@@ -51,6 +51,30 @@ func TestProcStartTime_Idempotent(t *testing.T) {
 	}
 }
 
+// TestProcStartTime_WithinJSONSafeRange pins the invariant that the Linux
+// encoding (jiffies since boot) stays below JavaScript's Number.MAX_SAFE_INTEGER
+// (2^53-1). JSON.parse in dashboard.js silently rounds uint64 values above
+// this threshold to the nearest representable double, which would break
+// handleTakeover's identity equality after restart.
+//
+// With CLK_TCK=100 Hz the budget would only be consumed after ~2.85 million
+// years of system uptime — any failure here signals an accidental encoding
+// change (e.g. somebody switched field 22 to nanoseconds, or changed the
+// reference point) that needs an explicit re-budgeting before JSON egress.
+func TestProcStartTime_WithinJSONSafeRange(t *testing.T) {
+	pid := os.Getpid()
+	pst, err := ProcStartTime(pid)
+	if err != nil {
+		t.Fatalf("ProcStartTime: %v", err)
+	}
+	if pst > MaxSafeJSONInt {
+		t.Errorf("ProcStartTime = %d exceeds MaxSafeJSONInt = %d; "+
+			"JS JSON.parse will truncate the value and PID-identity checks "+
+			"(handleTakeover / verifyProcIdentity) will fail after restart",
+			pst, MaxSafeJSONInt)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // detectCLIName (Linux only - reads /proc/PID/cmdline)
 // ---------------------------------------------------------------------------

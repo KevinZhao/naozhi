@@ -92,22 +92,48 @@ func evictSummaryCache() {
 // narrow window (e.g. 5s) causes ready->running oscillation on every scan.
 const runningThreshold = 30 * time.Second
 
+// MaxSafeJSONInt mirrors JavaScript's Number.MAX_SAFE_INTEGER (2^53 - 1).
+// Any uint64 field that crosses a JSON boundary and may be consumed by a JS
+// front-end (dashboard.js) or a reverse-RPC peer that proxies values into
+// JSON must stay below this ceiling, otherwise JSON.parse silently truncates
+// to the nearest double and PID-identity comparisons (ProcStartTime) return
+// wrong matches after the rounding.
+//
+// Current producers stay well below the bound:
+//   - Linux ProcStartTime (jiffies since boot @ 100 Hz): reaching 2^53 needs
+//     ~2.85 million years of uptime.
+//   - Darwin ProcStartTime (Unix microseconds): reaching 2^53 needs ~2255 CE
+//     (present Unix μs ≈ 1.77e15 ≪ 9.00e15).
+//
+// The constant exists to pin the invariant as a source-level contract: the
+// proc_{linux,darwin}_test.go suites assert ProcStartTime(os.Getpid()) <=
+// MaxSafeJSONInt so a future encoding change (e.g. nanoseconds, or a non-
+// epoch reference) that silently blows the budget fails at CI time.
+const MaxSafeJSONInt uint64 = (1 << 53) - 1
+
 // DiscoveredSession represents a Claude CLI process found on the system.
 type DiscoveredSession struct {
-	PID           int    `json:"pid"`
-	SessionID     string `json:"session_id"`
-	CWD           string `json:"cwd"`
-	StartedAt     int64  `json:"started_at"`            // unix ms
-	LastActive    int64  `json:"last_active"`           // unix ms (from JSONL mtime, fallback to started_at)
-	State         string `json:"state"`                 // "running" or "ready"
-	Kind          string `json:"kind"`                  // "interactive" etc.
-	Entrypoint    string `json:"entrypoint"`            // "cli" etc.
-	CLIName       string `json:"cli_name,omitempty"`    // "claude-code", "kiro" (detected from process cmdline)
-	Summary       string `json:"summary,omitempty"`     // Claude-generated session name from sessions-index
-	LastPrompt    string `json:"last_prompt,omitempty"` // most recent user message
-	ProcStartTime uint64 `json:"proc_start_time"`       // /proc/PID/stat field 22, used to verify PID identity
-	Project       string `json:"project,omitempty"`     // project name resolved from CWD (filled by server)
-	Node          string `json:"node,omitempty"`        // workspace/node ID (filled by server for multi-node)
+	PID        int    `json:"pid"`
+	SessionID  string `json:"session_id"`
+	CWD        string `json:"cwd"`
+	StartedAt  int64  `json:"started_at"`            // unix ms
+	LastActive int64  `json:"last_active"`           // unix ms (from JSONL mtime, fallback to started_at)
+	State      string `json:"state"`                 // "running" or "ready"
+	Kind       string `json:"kind"`                  // "interactive" etc.
+	Entrypoint string `json:"entrypoint"`            // "cli" etc.
+	CLIName    string `json:"cli_name,omitempty"`    // "claude-code", "kiro" (detected from process cmdline)
+	Summary    string `json:"summary,omitempty"`     // Claude-generated session name from sessions-index
+	LastPrompt string `json:"last_prompt,omitempty"` // most recent user message
+	// ProcStartTime encodes a per-PID boot identity used to detect PID reuse.
+	// Linux:  /proc/PID/stat field 22 (jiffies since system boot).
+	// Darwin: Unix microseconds parsed from `ps -o lstart=`.
+	// Crosses JSON boundaries into dashboard.js and reverse-RPC payloads —
+	// MUST stay below MaxSafeJSONInt (2^53-1), otherwise JS JSON.parse
+	// truncates the value and handleTakeover's identity equality fails.
+	// Both producer paths remain bounded by physical units; see MaxSafeJSONInt.
+	ProcStartTime uint64 `json:"proc_start_time"`
+	Project       string `json:"project,omitempty"` // project name resolved from CWD (filled by server)
+	Node          string `json:"node,omitempty"`    // workspace/node ID (filled by server for multi-node)
 }
 
 // sessionFile mirrors the JSON schema of ~/.claude/sessions/{PID}.json.

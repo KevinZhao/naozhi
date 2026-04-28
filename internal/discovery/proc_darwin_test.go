@@ -56,6 +56,30 @@ func TestProcStartTime_Idempotent(t *testing.T) {
 	}
 }
 
+// TestProcStartTime_WithinJSONSafeRange pins the invariant that the Darwin
+// encoding (Unix microseconds) stays below JavaScript's Number.MAX_SAFE_INTEGER
+// (2^53-1). JSON.parse in dashboard.js silently rounds uint64 values above
+// this threshold to the nearest representable double, which would break
+// handleTakeover's identity equality after restart.
+//
+// Unix μs reach 2^53-1 near the year 2255; any failure here signals an
+// accidental encoding change (e.g. somebody switched to nanoseconds, or
+// changed the reference point) that needs an explicit re-budgeting before
+// JSON egress.
+func TestProcStartTime_WithinJSONSafeRange(t *testing.T) {
+	pid := os.Getpid()
+	pst, err := ProcStartTime(pid)
+	if err != nil {
+		t.Fatalf("ProcStartTime: %v", err)
+	}
+	if pst > MaxSafeJSONInt {
+		t.Errorf("ProcStartTime = %d exceeds MaxSafeJSONInt = %d; "+
+			"JS JSON.parse will truncate the value and PID-identity checks "+
+			"(handleTakeover / verifyProcIdentity) will fail after restart",
+			pst, MaxSafeJSONInt)
+	}
+}
+
 // TestProcStartTime_TimezoneSane is the regression guard for the
 // ParseInLocation(time.Local) fix: ps prints lstart in the host's
 // local timezone with no zone suffix. If a future edit accidentally

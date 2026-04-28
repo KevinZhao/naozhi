@@ -12,6 +12,13 @@ import (
 // ProcStartTime returns a value that uniquely identifies a process instance
 // even after PID reuse. On Darwin we use ps(1) to get the process start time
 // and encode it as Unix microseconds.
+//
+// Unix microseconds reach MaxSafeJSONInt (2^53-1 ≈ 9.00e15) only near the
+// year 2255 (current Unix μs ≈ 1.77e15), so JS front-ends (dashboard.js) can
+// safely consume the field via JSON.parse without double-precision
+// truncation. See MaxSafeJSONInt in scanner.go; proc_darwin_test.go pins
+// the invariant. If the encoding is ever changed (e.g. to nanoseconds), the
+// budget collapses — replace μs×1000 and re-check against the guard test.
 func ProcStartTime(pid int) (uint64, error) {
 	// ps -o lstart= outputs e.g. "Sat Apr 12 14:30:00 2026"
 	out, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()

@@ -12,6 +12,12 @@ import (
 // ProcStartTime reads the start time (field 22) from /proc/{pid}/stat.
 // This value uniquely identifies a process instance even after PID reuse.
 // Field 2 (comm) may contain spaces/parentheses, so we locate the last ')' first.
+//
+// Return values are jiffies since system boot. With the default CLK_TCK=100 Hz
+// the value reaches MaxSafeJSONInt (2^53-1) only after ~2.85 million years of
+// uptime, so JS front-ends (dashboard.js) can safely consume the field via
+// JSON.parse without double-precision truncation. See MaxSafeJSONInt in
+// scanner.go; proc_test.go pins the invariant.
 func ProcStartTime(pid int) (uint64, error) {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
