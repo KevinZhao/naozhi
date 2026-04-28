@@ -56,6 +56,12 @@ func runInstall(args []string) {
 	fs := flag.NewFlagSet("install", flag.ExitOnError)
 	configPath := fs.String("config", "", "config file path (default ~/.naozhi/config.yaml)")
 	dryRun := fs.Bool("dry-run", false, "print what would change without writing unit file or invoking systemctl")
+	// -force overrides the idempotency shortcut that skips daemon-reload
+	// when the rendered unit matches the on-disk unit. Use when the unit
+	// file was hand-edited and must be restored, or when you want to
+	// re-run daemon-reload + restart after a binary swap with no unit
+	// churn. Orthogonal to -dry-run (the pair prints the forced plan).
+	force := fs.Bool("force", false, "rewrite unit file and restart even if nothing changed (systemd only)")
 	fs.Parse(args)
 
 	if *configPath == "" {
@@ -79,10 +85,13 @@ func runInstall(args []string) {
 
 	switch runtime.GOOS {
 	case "linux":
-		installSystemd(binary, absConfig, *dryRun)
+		installSystemd(binary, absConfig, *dryRun, *force)
 	case "darwin":
 		if *dryRun {
 			fmt.Println("note: -dry-run is a no-op on darwin (launchd path has no idempotency checks yet)")
+		}
+		if *force {
+			fmt.Println("note: -force is a no-op on darwin (launchd path always writes plist + reloads)")
 		}
 		installLaunchd(binary, absConfig)
 	default:
@@ -160,9 +169,14 @@ type installSystemdPlan struct {
 // planInstallSystemd derives the plan from the rendered-vs-existing unit
 // bytes and the current service state. Pure function — no side effects —
 // so it is trivially unit-tested.
-func planInstallSystemd(renderedUnit, existingUnit string, existingUnitErr error, isActive bool) installSystemdPlan {
+//
+// `force=true` promotes UnitChanged to true regardless of byte-equality,
+// so a rerun with a known-good unit still triggers daemon-reload + the
+// final restart/start hop. Used by the `-force` flag to recover from a
+// hand-edited unit file or push a binary swap without the unit diffing.
+func planInstallSystemd(renderedUnit, existingUnit string, existingUnitErr error, isActive, force bool) installSystemdPlan {
 	unitChanged := true
-	if existingUnitErr == nil && existingUnit == renderedUnit {
+	if !force && existingUnitErr == nil && existingUnit == renderedUnit {
 		unitChanged = false
 	}
 	return installSystemdPlan{
@@ -180,7 +194,7 @@ var systemctlIsActive = func(name string) bool {
 	return cmd.Run() == nil
 }
 
-func installSystemd(binary, configPath string, dryRun bool) {
+func installSystemd(binary, configPath string, dryRun, force bool) {
 	if !dryRun && os.Getuid() != 0 {
 		fatalf("systemd install requires root. Run: sudo naozhi install")
 	}
@@ -189,12 +203,15 @@ func installSystemd(binary, configPath string, dryRun bool) {
 	unit := generateSystemdUnit(binary, configPath, user, home)
 
 	existingBytes, existingErr := os.ReadFile(systemdUnitPath)
-	plan := planInstallSystemd(unit, string(existingBytes), existingErr, systemctlIsActive("naozhi"))
+	plan := planInstallSystemd(unit, string(existingBytes), existingErr, systemctlIsActive("naozhi"), force)
 
 	if dryRun {
 		fmt.Printf("unit path:       %s\n", systemdUnitPath)
 		fmt.Printf("unit changed:    %t\n", plan.UnitChanged)
 		fmt.Printf("service active:  %t\n", plan.ServiceActive)
+		if force {
+			fmt.Println("force:           true (unit will be rewritten even if unchanged)")
+		}
 		fmt.Println()
 		fmt.Println("actions that would run:")
 		for _, step := range plan.steps() {

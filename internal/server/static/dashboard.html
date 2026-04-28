@@ -794,6 +794,7 @@ body.kbd-open .sidebar-footer{display:none}
 .aside-drawer .ad-quote-chip .ad-preview{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;font-style:italic}
 .aside-drawer .ad-quote-chip.expanded .ad-preview{white-space:pre-wrap;font-style:normal}
 .aside-drawer .ad-quote-chip .ad-trunc{color:var(--nz-red);font-size:10px;margin-left:4px;flex-shrink:0}
+.aside-drawer .ad-quote-chip .ad-ctx{color:var(--nz-text-faint);font-size:10px;margin-left:4px;flex-shrink:0}
 /* Messages area mirrors .events (padding:16px 0, thin scrollbar). */
 .aside-drawer .ad-messages{flex:1;overflow-y:auto;overflow-x:hidden;padding:16px 0;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent;min-width:0;background:var(--nz-bg-0)}
 /* Narrow-drawer compression for .event rows: main window uses 6px 24px but
@@ -919,6 +920,7 @@ body.kbd-open .sidebar-footer{display:none}
     <span class="ad-arrow">↳</span>
     <span class="ad-preview" id="ad-quote-preview"></span>
     <span class="ad-trunc" id="ad-quote-trunc" style="display:none">(已截断)</span>
+    <span class="ad-ctx" id="ad-quote-ctx" style="display:none" title="已将源会话中此消息前后若干轮作为上下文注入"></span>
   </div>
   <div class="ad-messages" id="ad-messages">
     <div class="ad-empty" id="ad-empty">就这段内容问点什么？<br><span style="font-size:11px;color:var(--nz-text-faint)">此窗口的对话不会出现在主窗口</span></div>

@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli"
 )
 
 func TestSanitizeQuote(t *testing.T) {
@@ -264,5 +266,224 @@ func TestScratchPool_AgentIDWithColonSanitized(t *testing.T) {
 	// Validate the shape so downstream ValidateSessionKey would accept it.
 	if err := ValidateSessionKey(sc.Key); err != nil {
 		t.Errorf("promoted key failed ValidateSessionKey: %v", err)
+	}
+}
+
+// TestRenderContextTurns_FiltersNoise verifies that tool_use / thinking /
+// todo / init entries are dropped even when they arrive mixed with
+// conversational turns, and that only user/text/result survive into the
+// rendered block.
+func TestRenderContextTurns_FiltersNoise(t *testing.T) {
+	before := []cli.EventEntry{
+		{Type: "user", Detail: "first question"},
+		{Type: "tool_use", Tool: "Read", Summary: "Read file"},
+		{Type: "thinking", Summary: "pondering"},
+		{Type: "text", Detail: "first answer"},
+		{Type: "todo", Summary: "[]"},
+	}
+	block, turns, trunc := renderContextTurns(before, nil, MaxScratchContextBytes)
+	if trunc {
+		t.Errorf("did not expect truncation, got trunc=true block=%q", block)
+	}
+	if turns != 2 {
+		t.Errorf("turns = %d, want 2 (user+text only)", turns)
+	}
+	if !strings.Contains(block, "[user] first question") {
+		t.Errorf("block missing user line: %q", block)
+	}
+	if !strings.Contains(block, "[assistant] first answer") {
+		t.Errorf("block missing assistant line: %q", block)
+	}
+	for _, noise := range []string{"tool_use", "thinking", "todo", "Read file", "pondering"} {
+		if strings.Contains(block, noise) {
+			t.Errorf("block should not carry %q: %q", noise, block)
+		}
+	}
+}
+
+// TestRenderContextTurns_OrderBeforeThenAfter ensures the rendered block
+// preserves chronological order: all before entries (oldest→newest)
+// followed by all after entries (oldest→newest). The quote itself is not
+// part of either slice — the caller excludes it.
+func TestRenderContextTurns_OrderBeforeThenAfter(t *testing.T) {
+	before := []cli.EventEntry{
+		{Type: "user", Detail: "b1"},
+		{Type: "text", Detail: "b2"},
+	}
+	after := []cli.EventEntry{
+		{Type: "text", Detail: "a1"},
+		{Type: "user", Detail: "a2"},
+	}
+	block, turns, _ := renderContextTurns(before, after, MaxScratchContextBytes)
+	if turns != 4 {
+		t.Fatalf("turns = %d, want 4", turns)
+	}
+	want := []string{"b1", "b2", "a1", "a2"}
+	idx := -1
+	for _, s := range want {
+		pos := strings.Index(block, s)
+		if pos < 0 {
+			t.Fatalf("%q missing from block: %q", s, block)
+		}
+		if pos <= idx {
+			t.Fatalf("order violation for %q in %q", s, block)
+		}
+		idx = pos
+	}
+}
+
+// TestRenderContextTurns_BudgetTruncation builds a set of entries whose
+// rendered size exceeds the budget and verifies the returned block fits,
+// the truncated flag is set, and entries closest to the quote are the
+// ones retained (tail of `before`, head of `after`).
+func TestRenderContextTurns_BudgetTruncation(t *testing.T) {
+	big := strings.Repeat("x", 1024) // 1 KiB payload per entry
+	before := []cli.EventEntry{
+		{Type: "user", Detail: "farthest:" + big},
+		{Type: "text", Detail: "middle:" + big},
+		{Type: "user", Detail: "closest-before:" + big},
+	}
+	after := []cli.EventEntry{
+		{Type: "text", Detail: "closest-after:" + big},
+		{Type: "user", Detail: "distant-after:" + big},
+	}
+	// Budget accommodates ~2 entries of ~1 KiB each.
+	block, turns, trunc := renderContextTurns(before, after, 2500)
+	if !trunc {
+		t.Error("expected truncated=true")
+	}
+	if turns < 1 || turns >= 5 {
+		t.Errorf("turns = %d, want a partial subset", turns)
+	}
+	if len(block) > 2500 {
+		t.Errorf("block size %d exceeds budget", len(block))
+	}
+	// Because "closest-before" sits at the tail of before, it should be
+	// included before "farthest". Likewise "closest-after" must appear
+	// before "distant-after" gets considered.
+	if strings.Contains(block, "farthest:") && !strings.Contains(block, "closest-before:") {
+		t.Error("budget pruned the close turn but kept the far one")
+	}
+	if strings.Contains(block, "distant-after:") && !strings.Contains(block, "closest-after:") {
+		t.Error("after-side ordering violated")
+	}
+}
+
+// TestRenderContextTurns_EmptyInputs returns empty strings without a
+// truncation flag when there is nothing to render.
+func TestRenderContextTurns_EmptyInputs(t *testing.T) {
+	block, turns, trunc := renderContextTurns(nil, nil, MaxScratchContextBytes)
+	if block != "" || turns != 0 || trunc {
+		t.Errorf("got (%q, %d, %v); want empty/zero/false", block, turns, trunc)
+	}
+}
+
+// TestRenderContextTurns_ZeroBudget with candidates available must report
+// truncation (context was suppressed) and return an empty block.
+func TestRenderContextTurns_ZeroBudget(t *testing.T) {
+	before := []cli.EventEntry{{Type: "user", Detail: "q"}}
+	block, turns, trunc := renderContextTurns(before, nil, 0)
+	if block != "" {
+		t.Errorf("block should be empty when budget=0, got %q", block)
+	}
+	if turns != 0 {
+		t.Errorf("turns = %d, want 0", turns)
+	}
+	if !trunc {
+		t.Error("trunc=false but context was suppressed due to zero budget")
+	}
+}
+
+// TestScratchPool_OpenInjectsContextBlock checks that Open renders the
+// surrounding turns into the --append-system-prompt value produced for
+// the router, and populates the Scratch metadata.
+func TestScratchPool_OpenInjectsContextBlock(t *testing.T) {
+	p := NewScratchPool(nil, 5, time.Minute)
+	before := []cli.EventEntry{
+		{Type: "user", Detail: "what is the circuit breaker?"},
+		{Type: "text", Detail: "a guard that trips on error."},
+	}
+	after := []cli.EventEntry{
+		{Type: "user", Detail: "how do I tune it?"},
+	}
+	sc, err := p.Open(OpenOptions{
+		SourceKey:     "feishu:direct:alice:general",
+		AgentID:       "general",
+		Quote:         "trips on error.",
+		ContextBefore: before,
+		ContextAfter:  after,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if sc.ContextTurns != 3 {
+		t.Errorf("ContextTurns = %d, want 3", sc.ContextTurns)
+	}
+	if sc.ContextTrunc {
+		t.Error("context should not be truncated under full budget")
+	}
+	prompt := sc.BaseOpts.ExtraArgs[len(sc.BaseOpts.ExtraArgs)-1]
+	if !strings.Contains(prompt, "<conversation_context>") {
+		t.Errorf("prompt missing <conversation_context> block: %q", prompt)
+	}
+	if !strings.Contains(prompt, "[user] what is the circuit breaker?") {
+		t.Errorf("prompt missing first user turn: %q", prompt)
+	}
+	if !strings.Contains(prompt, "[assistant] a guard that trips on error.") {
+		t.Errorf("prompt missing assistant turn: %q", prompt)
+	}
+	if !strings.Contains(prompt, "[user] how do I tune it?") {
+		t.Errorf("prompt missing after-turn: %q", prompt)
+	}
+	if !strings.Contains(prompt, "<selected_quote>") {
+		t.Errorf("prompt missing <selected_quote> block: %q", prompt)
+	}
+}
+
+// TestScratchPool_OpenNoContext confirms backward compatibility: when the
+// caller provides no context entries the prompt shape remains simple
+// (no conversation_context block, quote still present).
+func TestScratchPool_OpenNoContext(t *testing.T) {
+	p := NewScratchPool(nil, 5, time.Minute)
+	sc, err := p.Open(OpenOptions{
+		SourceKey: "feishu:direct:alice:general",
+		Quote:     "ping",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sc.ContextTurns != 0 || sc.ContextTrunc {
+		t.Errorf("unexpected context metadata: turns=%d trunc=%v", sc.ContextTurns, sc.ContextTrunc)
+	}
+	prompt := sc.BaseOpts.ExtraArgs[len(sc.BaseOpts.ExtraArgs)-1]
+	if strings.Contains(prompt, "<conversation_context>") {
+		t.Errorf("empty context should skip the block, got %q", prompt)
+	}
+	if !strings.Contains(prompt, "<selected_quote>") {
+		t.Errorf("prompt missing quote block: %q", prompt)
+	}
+}
+
+// TestScratchPool_OpenContextSharesBudgetWithQuote verifies the context
+// budget shrinks when a large quote consumes most of MaxScratchContextBytes.
+func TestScratchPool_OpenContextSharesBudgetWithQuote(t *testing.T) {
+	p := NewScratchPool(nil, 5, time.Minute)
+	hugeQuote := strings.Repeat("y", MaxScratchQuoteBytes) // fills the quote cap
+	big := strings.Repeat("x", 2048)
+	before := []cli.EventEntry{
+		{Type: "user", Detail: big},
+		{Type: "text", Detail: big},
+	}
+	sc, err := p.Open(OpenOptions{
+		SourceKey:     "feishu:direct:alice:general",
+		Quote:         hugeQuote,
+		ContextBefore: before,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := sc.BaseOpts.ExtraArgs[len(sc.BaseOpts.ExtraArgs)-1]
+	if len(prompt) > MaxScratchContextBytes+512 { // +512 for wrapper + templates
+		t.Errorf("prompt length %d exceeds budget+overhead", len(prompt))
 	}
 }

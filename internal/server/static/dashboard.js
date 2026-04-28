@@ -6228,6 +6228,7 @@ initSwipeBack();
   const elQuoteChip = $('ad-quote-chip');
   const elQuotePreview = $('ad-quote-preview');
   const elQuoteTrunc = $('ad-quote-trunc');
+  const elQuoteCtx = $('ad-quote-ctx');
   const elLoading = $('ad-loading');
   const elAgent = $('ad-agent');
 
@@ -6434,6 +6435,10 @@ initSwipeBack();
         body: JSON.stringify({
           source_key: sourceKey,
           source_message_id: String(sourceMsgTime || ''),
+          // Time hint lets the server fetch 5 turns on each side of the
+          // quoted message. Omitted (0) → server falls back to a tail-only
+          // window which still seeds the aside with some context.
+          source_message_time: Number(sourceMsgTime) || 0,
           quote,
         }),
       });
@@ -6460,6 +6465,26 @@ initSwipeBack();
       elAgent.textContent = state.agentId && state.agentId !== 'general' ? '· ' + state.agentId : '';
       elQuotePreview.textContent = previewText(quote);
       elQuoteTrunc.style.display = data.quote_truncated ? 'inline' : 'none';
+      // Context badge states (all three visible to the user):
+      //   turns > 0                    → "(上下文 N 轮[+])"  — injected; "+" = byte-budget trimmed
+      //   turns = 0 && truncated=true  → "(上下文已抑制)"    — quote filled the budget, nothing else fit
+      //   turns = 0 && truncated=false → hidden              — no eligible surrounding turns
+      // The third case is common for brand-new sessions so we hide the
+      // badge rather than claim "(上下文 0 轮)".
+      if (elQuoteCtx) {
+        const turns = Number(data.context_turns) || 0;
+        const truncated = !!data.context_truncated;
+        if (turns > 0) {
+          elQuoteCtx.textContent = '(上下文 ' + turns + ' 轮' + (truncated ? '+' : '') + ')';
+          elQuoteCtx.style.display = 'inline';
+        } else if (truncated) {
+          elQuoteCtx.textContent = '(上下文已抑制)';
+          elQuoteCtx.style.display = 'inline';
+        } else {
+          elQuoteCtx.textContent = '';
+          elQuoteCtx.style.display = 'none';
+        }
+      }
       elQuoteChip.classList.remove('expanded');
       elQuoteChip.dataset.full = quote;
       clearMessages();

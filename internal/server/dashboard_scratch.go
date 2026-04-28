@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -24,19 +25,23 @@ type ScratchHandler struct {
 
 // openRequest is the POST /api/scratch/open body.
 type openRequest struct {
-	SourceKey       string `json:"source_key"`
-	SourceMessageID string `json:"source_message_id,omitempty"` // echoed back for UI jump-to-source; not forwarded to CLI
-	Quote           string `json:"quote"`
+	SourceKey         string `json:"source_key"`
+	SourceMessageID   string `json:"source_message_id,omitempty"`   // echoed back for UI jump-to-source; not forwarded to CLI
+	SourceMessageTime int64  `json:"source_message_time,omitempty"` // unix ms of the quoted message, used to window surrounding turns
+	Quote             string `json:"quote"`
+	ContextTurns      int    `json:"context_turns,omitempty"` // requested turn count; 0 = server default, clamped to MaxScratchContextTurns
 }
 
 type openResponse struct {
-	ScratchID       string `json:"scratch_id"`
-	Key             string `json:"key"`
-	AgentID         string `json:"agent_id"`
-	Backend         string `json:"backend,omitempty"`
-	Workspace       string `json:"workspace,omitempty"`
-	QuoteTruncated  bool   `json:"quote_truncated,omitempty"`
-	SourceMessageID string `json:"source_message_id,omitempty"`
+	ScratchID        string `json:"scratch_id"`
+	Key              string `json:"key"`
+	AgentID          string `json:"agent_id"`
+	Backend          string `json:"backend,omitempty"`
+	Workspace        string `json:"workspace,omitempty"`
+	QuoteTruncated   bool   `json:"quote_truncated,omitempty"`
+	ContextTurns     int    `json:"context_turns,omitempty"`     // number of surrounding turns actually injected
+	ContextTruncated bool   `json:"context_truncated,omitempty"` // true when some eligible turns did not fit the byte budget
+	SourceMessageID  string `json:"source_message_id,omitempty"`
 }
 
 // handleOpen creates a scratch session seeded with the quote.
@@ -99,13 +104,31 @@ func (h *ScratchHandler) handleOpen(w http.ResponseWriter, r *http.Request) {
 	backend := snap.Backend
 	workspace := snap.Workspace
 
+	// Resolve the turn window around the quoted message. ContextTurns is
+	// the requested count of entries on EACH side; the renderer later
+	// enforces the byte budget and will drop whatever does not fit.
+	turns := req.ContextTurns
+	if turns <= 0 {
+		turns = session.DefaultScratchContextTurns
+	}
+	if turns > session.MaxScratchContextTurns {
+		turns = session.MaxScratchContextTurns
+	}
+	// When the client cannot supply a message timestamp we still do a "best
+	// effort" fill: take the last N entries as the before-window and leave
+	// after empty. This matches the old behaviour of earlier dashboards
+	// that never sent a time hint.
+	before, after := collectScratchContext(src, req.SourceMessageTime, turns)
+
 	sc, err := h.pool.Open(session.OpenOptions{
-		SourceKey: req.SourceKey,
-		AgentID:   agentID,
-		Backend:   backend,
-		Workspace: workspace,
-		BaseOpts:  base,
-		Quote:     req.Quote,
+		SourceKey:     req.SourceKey,
+		AgentID:       agentID,
+		Backend:       backend,
+		Workspace:     workspace,
+		BaseOpts:      base,
+		Quote:         req.Quote,
+		ContextBefore: before,
+		ContextAfter:  after,
 	})
 	if err != nil {
 		switch {
@@ -119,16 +142,78 @@ func (h *ScratchHandler) handleOpen(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	slog.Info("scratch opened", "id", sc.ID, "source", session.SanitizeLogAttr(req.SourceKey), "agent", session.SanitizeLogAttr(agentID), "truncated", sc.QuoteTrunc)
+	slog.Info("scratch opened",
+		"id", sc.ID,
+		"source", session.SanitizeLogAttr(req.SourceKey),
+		"agent", session.SanitizeLogAttr(agentID),
+		"quote_truncated", sc.QuoteTrunc,
+		"requested_turns", req.ContextTurns, // pre-clamp, as the client asked
+		"applied_turns", turns, // post-clamp, what collectScratchContext used
+		"context_turns", sc.ContextTurns, // post-filter + budget, actually rendered
+		"context_truncated", sc.ContextTrunc,
+	)
 	writeJSON(w, openResponse{
-		ScratchID:       sc.ID,
-		Key:             sc.Key,
-		AgentID:         agentID,
-		Backend:         backend,
-		Workspace:       workspace,
-		QuoteTruncated:  sc.QuoteTrunc,
-		SourceMessageID: req.SourceMessageID,
+		ScratchID:        sc.ID,
+		Key:              sc.Key,
+		AgentID:          agentID,
+		Backend:          backend,
+		Workspace:        workspace,
+		QuoteTruncated:   sc.QuoteTrunc,
+		ContextTurns:     sc.ContextTurns,
+		ContextTruncated: sc.ContextTrunc,
+		SourceMessageID:  req.SourceMessageID,
 	})
+}
+
+// collectScratchContext pulls up to `turns` eligible event entries from each
+// side of the quoted message. When sourceMessageTime is 0 we fall back to
+// the tail of the log on the before-side (no after context is available).
+//
+// The event-log accessors return a chronological-order slice; ordering is
+// preserved for the pool's renderer which relies on newest-first truncation
+// on the before-side and oldest-first on the after-side.
+func collectScratchContext(sess *session.ManagedSession, sourceMessageTime int64, turns int) (before, after []cli.EventEntry) {
+	if sess == nil || turns <= 0 {
+		return nil, nil
+	}
+	// Ask for 3x the requested count so the pool's filter (which drops
+	// tool_use / thinking / todo / init / system events) still has a decent
+	// chance of finding `turns` eligible entries. The pool trims again if
+	// too many survive filtering — slight over-fetch is cheaper than under.
+	fetch := turns * 3
+	if sourceMessageTime > 0 {
+		before = sess.EventEntriesBefore(sourceMessageTime, fetch)
+		// EventEntriesSince(t) returns entries with Time > t, so passing
+		// (sourceMessageTime - 1) yields entries with Time >= sourceMessageTime;
+		// the loop then skips the exact-match entry so the quoted message
+		// itself is not echoed into the context block (the quote already
+		// carries that content).
+		raw := sess.EventEntriesSince(sourceMessageTime - 1)
+		// Cap the pre-allocation at `fetch` so a long-running session
+		// that has emitted many events after the quote cannot force an
+		// arbitrarily large slice for what is ultimately a fetch-bounded
+		// result. Worst case len(raw) >> fetch — paying len(raw) caps was
+		// wasting up to several KB per open.
+		afterCap := len(raw)
+		if afterCap > fetch {
+			afterCap = fetch
+		}
+		after = make([]cli.EventEntry, 0, afterCap)
+		for _, e := range raw {
+			if e.Time == sourceMessageTime {
+				continue
+			}
+			after = append(after, e)
+			if len(after) >= fetch {
+				break
+			}
+		}
+	} else {
+		// No time hint: the best we can do is give the pool a tail window.
+		// EventLastN returns chronological order already.
+		before = sess.EventLastN(fetch)
+	}
+	return before, after
 }
 
 // handleDelete tears down a scratch by ID. Idempotent — unknown IDs return

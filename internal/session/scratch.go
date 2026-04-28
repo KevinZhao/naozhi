@@ -10,6 +10,8 @@ import (
 	"sync/atomic"
 	"time"
 	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/cli"
 )
 
 // ScratchKeyPrefix is the session-key prefix used for all ephemeral "aside"
@@ -25,6 +27,23 @@ const ScratchKeyPrefix = "scratch:"
 // arg list from bloating NDJSON frames on ACP protocols that mirror CLI args
 // into control messages.
 const MaxScratchQuoteBytes = 8 * 1024
+
+// MaxScratchContextBytes caps the total rendered size of the conversation-context
+// block (user/assistant turns surrounding the quote) + the quote itself inside
+// the --append-system-prompt arg. 24 KiB stays well under POSIX ARG_MAX while
+// fitting ~5 turns of ordinary English plus a full 8 KiB quote.
+const MaxScratchContextBytes = 24 * 1024
+
+// DefaultScratchContextTurns is the default number of user/assistant turns to
+// pull from the source session on either side of the quoted message. A "turn"
+// here counts a single user or assistant entry (not a matched pair), so 5
+// yields roughly 2-3 exchanges before + 2-3 after.
+const DefaultScratchContextTurns = 5
+
+// MaxScratchContextTurns caps the client-requested turn count so a malicious
+// or buggy client cannot force the server to serialize hundreds of entries
+// just to have them thrown away by the byte budget.
+const MaxScratchContextTurns = 20
 
 // DefaultScratchTTL is how long an idle scratch session can live before the
 // pool sweeper kills it. Shorter than Router.DefaultTTL because scratches are
@@ -56,16 +75,18 @@ var (
 // ScratchPool keeps only metadata and a router key it can use to tear the
 // session down on Close or TTL expiry.
 type Scratch struct {
-	ID         string    // 16-byte hex (32 chars)
-	Key        string    // full router key: "scratch:<id>:general:<sourceAgentID>"
-	SourceKey  string    // key of the session the user quoted from
-	AgentID    string    // inherited from source
-	Backend    string    // inherited from source (empty = router default)
-	Workspace  string    // inherited from source
-	Quote      string    // sanitized, truncated quote
-	QuoteTrunc bool      // true when the quote was truncated at MaxScratchQuoteBytes
-	BaseOpts   AgentOpts // full opts the router will receive on first spawn
-	CreatedAt  time.Time
+	ID           string    // 16-byte hex (32 chars)
+	Key          string    // full router key: "scratch:<id>:general:<sourceAgentID>"
+	SourceKey    string    // key of the session the user quoted from
+	AgentID      string    // inherited from source
+	Backend      string    // inherited from source (empty = router default)
+	Workspace    string    // inherited from source
+	Quote        string    // sanitized, truncated quote
+	QuoteTrunc   bool      // true when the quote was truncated at MaxScratchQuoteBytes
+	ContextTurns int       // number of surrounding turns actually rendered into the system prompt
+	ContextTrunc bool      // true when the context block was shrunk to fit the byte budget
+	BaseOpts     AgentOpts // full opts the router will receive on first spawn
+	CreatedAt    time.Time
 
 	lastUsed atomic.Int64 // unix nano; touched on every send
 }
@@ -183,6 +204,15 @@ type OpenOptions struct {
 	Workspace string    // source session's workspace
 	BaseOpts  AgentOpts // router-resolved AgentOpts for the source agent (model / extra args / workspace)
 	Quote     string    // the text the user selected
+	// ContextBefore/ContextAfter are event entries surrounding the quoted
+	// message in the source session's event log, in chronological order.
+	// Callers should pre-filter to user/text/result types only — Open
+	// defensively re-filters for safety but trusts the caller's ordering.
+	// These feed the <conversation_context> block in the system prompt so
+	// the CLI sees a few turns of surrounding conversation rather than a
+	// lone quoted snippet. Either slice may be empty.
+	ContextBefore []cli.EventEntry
+	ContextAfter  []cli.EventEntry
 }
 
 // Open creates a new scratch session and returns it. The quote is sanitized
@@ -213,12 +243,26 @@ func (p *ScratchPool) Open(opts OpenOptions) (*Scratch, error) {
 	// and the agent slot records the source agent for telemetry + promote.
 	key := ScratchKeyPrefix + id + ":general:" + sanitizeKeyComponent(agentID)
 
+	// Render the surrounding-turn context block under a shared byte budget
+	// with the quote: quote takes priority (bounded at MaxScratchQuoteBytes),
+	// context gets whatever is left of MaxScratchContextBytes. The renderer
+	// drops noisy event types (tool_use / thinking / init / system / todo)
+	// and fills from the turns closest to the quote outward so truncation
+	// lops off the most distant history first.
+	contextBudget := MaxScratchContextBytes - len(clean)
+	if contextBudget < 0 {
+		contextBudget = 0
+	}
+	contextBlock, ctxTurns, ctxTrunc := renderContextTurns(
+		opts.ContextBefore, opts.ContextAfter, contextBudget,
+	)
+
 	// Build BaseOpts: deep-copy the source opts so the scratch-specific
 	// --append-system-prompt doesn't mutate the agent registry map value.
 	cloned := opts.BaseOpts
 	cloned.ExtraArgs = append([]string(nil), opts.BaseOpts.ExtraArgs...)
 	cloned.ExtraArgs = append(cloned.ExtraArgs,
-		"--append-system-prompt", buildScratchSystemPrompt(clean, truncated),
+		"--append-system-prompt", buildScratchSystemPrompt(clean, truncated, contextBlock),
 	)
 	if opts.Workspace != "" {
 		cloned.Workspace = opts.Workspace
@@ -231,16 +275,18 @@ func (p *ScratchPool) Open(opts OpenOptions) (*Scratch, error) {
 	cloned.Exempt = false
 
 	sc := &Scratch{
-		ID:         id,
-		Key:        key,
-		SourceKey:  opts.SourceKey,
-		AgentID:    agentID,
-		Backend:    opts.Backend,
-		Workspace:  opts.Workspace,
-		Quote:      clean,
-		QuoteTrunc: truncated,
-		BaseOpts:   cloned,
-		CreatedAt:  time.Now(),
+		ID:           id,
+		Key:          key,
+		SourceKey:    opts.SourceKey,
+		AgentID:      agentID,
+		Backend:      opts.Backend,
+		Workspace:    opts.Workspace,
+		Quote:        clean,
+		QuoteTrunc:   truncated,
+		ContextTurns: ctxTurns,
+		ContextTrunc: ctxTrunc,
+		BaseOpts:     cloned,
+		CreatedAt:    time.Now(),
 	}
 	sc.lastUsed.Store(sc.CreatedAt.UnixNano())
 
@@ -430,6 +476,10 @@ func SanitizeQuote(s string) (string, bool) {
 // The prompt explicitly instructs the model NOT to echo the quote back so the
 // aside transcript stays focused on the answer.
 //
+// When contextBlock is non-empty it is inserted as a <conversation_context>
+// section preceding the <selected_quote>, giving the model the surrounding
+// turns the user was reading when they clicked "aside".
+//
 // PRIVACY TRADE-OFF: the returned string is handed to the child CLI as a
 // distinct argv element. On Linux this is visible to any process on the same
 // host that can read /proc/<pid>/cmdline — by default world-readable for the
@@ -438,15 +488,215 @@ func SanitizeQuote(s string) (string, bool) {
 // deployment model this is acceptable (no other tenants share the host),
 // but any future multi-tenant deployment must route the quoted context
 // through stdin or an env var instead of argv.
-func buildScratchSystemPrompt(quote string, truncated bool) string {
+func buildScratchSystemPrompt(quote string, truncated bool, contextBlock string) string {
 	var b strings.Builder
-	b.WriteString("用户正在就主对话中选中的以下内容进行追问。请基于此内容回答后续问题，不要在回复中重复引用原文。\n\n<selected_context>\n")
+	b.WriteString("用户正在就主对话中选中的以下内容进行追问。请基于此内容回答后续问题，不要在回复中重复引用原文。")
+	if contextBlock != "" {
+		b.WriteString("\n\n<conversation_context>\n")
+		b.WriteString(contextBlock)
+		b.WriteString("\n</conversation_context>")
+	}
+	b.WriteString("\n\n<selected_quote>\n")
 	b.WriteString(quote)
 	if truncated {
 		b.WriteString("\n…[已截断]")
 	}
-	b.WriteString("\n</selected_context>")
+	b.WriteString("\n</selected_quote>")
 	return b.String()
+}
+
+// renderContextTurns serialises a handful of user/assistant turns surrounding
+// the quoted message into a plain-text block suitable for embedding in the
+// system prompt.
+//
+// Event type filter: only `user`, `text`, and `result` entries contribute.
+// Tool-use / thinking / init / system / todo / agent events are dropped
+// because they bloat the budget with machine-oriented noise the model does
+// not need to reconstruct the conversational gist.
+//
+// Budget policy: we fill from the turns closest to the quote outward (last
+// entries of `before`, first entries of `after`) and stop as soon as adding
+// another turn would exceed budgetBytes. The returned ctxTurns counts how
+// many entries actually made it in; ctxTrunc reports whether any candidate
+// entries were rejected. An empty block (no candidates survived filtering)
+// returns ("", 0, false).
+func renderContextTurns(before, after []cli.EventEntry, budgetBytes int) (string, int, bool) {
+	// Filter once up front so both the zero-budget short-circuit and the
+	// normal-budget walk share a single allocation. Previously the zero-
+	// budget arm re-filtered just to check len() > 0, wasting two slices
+	// on the hot path.
+	beforeFiltered := filterContextEntries(before)
+	afterFiltered := filterContextEntries(after)
+	totalCandidates := len(beforeFiltered) + len(afterFiltered)
+
+	if budgetBytes <= 0 {
+		// No room even for a single byte. Signal truncated=true when we had
+		// candidates so the UI / logs can mention context was suppressed.
+		return "", 0, totalCandidates > 0
+	}
+	if totalCandidates == 0 {
+		return "", 0, false
+	}
+
+	// Walk outward from the quote: before is consumed newest-first (tail),
+	// after is consumed oldest-first (head). Rendered strings are cached
+	// alongside a byte count so we can decide inclusion without rendering
+	// twice.
+	type rendered struct {
+		text  string
+		bytes int
+	}
+	beforeStack := make([]rendered, 0, len(beforeFiltered))
+	for i := len(beforeFiltered) - 1; i >= 0; i-- {
+		line := renderTurnLine(beforeFiltered[i])
+		beforeStack = append(beforeStack, rendered{text: line, bytes: len(line)})
+	}
+	afterQueue := make([]rendered, 0, len(afterFiltered))
+	for i := range afterFiltered {
+		line := renderTurnLine(afterFiltered[i])
+		afterQueue = append(afterQueue, rendered{text: line, bytes: len(line)})
+	}
+
+	// Reconstruct chronological order on the fly using two pointers. `used`
+	// tracks the actual output length — we only charge a join-newline when
+	// there is already content, so N entries cost sum(len(line)) + (N-1)
+	// bytes rather than +N. Earlier code overcounted by 1 byte and could
+	// reject an entry that actually fit, producing a spurious truncated=true.
+	includedBefore := make([]string, 0, len(beforeStack))
+	includedAfter := make([]string, 0, len(afterQueue))
+	used := 0
+	bi, ai := 0, 0
+	// Alternate: prefer the side with more remaining candidates so extreme
+	// imbalance (e.g. no `before` events) still fills the budget. Ties go to
+	// `before` because the most recent prior turn is usually more relevant
+	// than the next reply.
+	for bi < len(beforeStack) || ai < len(afterQueue) {
+		var pick *rendered
+		var isBefore bool
+		switch {
+		case bi >= len(beforeStack):
+			pick, isBefore = &afterQueue[ai], false
+		case ai >= len(afterQueue):
+			pick, isBefore = &beforeStack[bi], true
+		default:
+			if len(beforeStack)-bi >= len(afterQueue)-ai {
+				pick, isBefore = &beforeStack[bi], true
+			} else {
+				pick, isBefore = &afterQueue[ai], false
+			}
+		}
+		// Join-newline is only charged when there is already content in
+		// either side's inclusion list — avoids the +1 overcount that
+		// used to make `used` N bytes higher than actual output length.
+		cost := pick.bytes
+		if len(includedBefore)+len(includedAfter) > 0 {
+			cost++ // newline between this entry and the previous one
+		}
+		if used+cost > budgetBytes {
+			break
+		}
+		used += cost
+		if isBefore {
+			includedBefore = append(includedBefore, pick.text)
+			bi++
+		} else {
+			includedAfter = append(includedAfter, pick.text)
+			ai++
+		}
+	}
+
+	if len(includedBefore) == 0 && len(includedAfter) == 0 {
+		return "", 0, totalCandidates > 0
+	}
+
+	// includedBefore was collected tail-first (newest prior turn first). Flip
+	// it back to chronological order before concatenation.
+	for i, j := 0, len(includedBefore)-1; i < j; i, j = i+1, j-1 {
+		includedBefore[i], includedBefore[j] = includedBefore[j], includedBefore[i]
+	}
+
+	var b strings.Builder
+	b.Grow(used)
+	for i, line := range includedBefore {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(line)
+	}
+	if len(includedBefore) > 0 && len(includedAfter) > 0 {
+		b.WriteByte('\n')
+	}
+	for i, line := range includedAfter {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(line)
+	}
+
+	turns := len(includedBefore) + len(includedAfter)
+	truncated := turns < totalCandidates
+	return b.String(), turns, truncated
+}
+
+// filterContextEntries keeps only event types that carry conversational
+// meaning (user prompts and assistant text / result replies). Everything
+// else — tool_use, thinking, init, system, todo, agent, task_* — is dropped.
+// The returned slice is a new allocation, not aliased.
+func filterContextEntries(in []cli.EventEntry) []cli.EventEntry {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]cli.EventEntry, 0, len(in))
+	for _, e := range in {
+		switch e.Type {
+		case "user", "text", "result":
+			// "result" and "text" can both appear in the same turn (text is
+			// the streaming block, result is the final envelope); we keep
+			// both because either may carry the visible reply depending on
+			// when the source session was captured.
+		default:
+			continue
+		}
+		// Skip entries whose textual payload is empty after picking the
+		// preferred field — rendering them would emit a naked role label
+		// and waste budget.
+		if pickEntryText(e) == "" {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
+}
+
+// renderTurnLine formats a single event entry as a role-tagged line suitable
+// for the <conversation_context> block. The role comes from the entry type;
+// the payload is sanitized (control chars / bidi stripped) and truncated so
+// one noisy multi-KB entry cannot eat the whole budget on its own.
+func renderTurnLine(e cli.EventEntry) string {
+	role := "assistant"
+	if e.Type == "user" {
+		role = "user"
+	}
+	payload, _ := SanitizeQuote(pickEntryText(e)) // reuse control-char / bidi scrubber
+	const perTurnCap = 2 * 1024                   // 2 KiB per rendered turn keeps any single entry from dominating
+	if len(payload) > perTurnCap {
+		cut := perTurnCap
+		for cut > 0 && !utf8.RuneStart(payload[cut]) {
+			cut--
+		}
+		payload = payload[:cut] + "…"
+	}
+	return "[" + role + "] " + payload
+}
+
+// pickEntryText returns the best textual payload for a context entry,
+// preferring Detail (fuller form used by dashboard) and falling back to
+// Summary when Detail is empty.
+func pickEntryText(e cli.EventEntry) string {
+	if e.Detail != "" {
+		return e.Detail
+	}
+	return e.Summary
 }
 
 // newScratchID returns a 32-char lowercase hex string backed by crypto/rand.

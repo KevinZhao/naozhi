@@ -8,6 +8,14 @@ import (
 	_ "image/gif"
 	"image/jpeg"
 	_ "image/png"
+
+	// Register decoders for additional inbound image formats. The dashboard
+	// (dashboard_send.go) and Discord adapter already accept webp/bmp uploads;
+	// previously those formats silently produced an empty thumbnail because
+	// only the stdlib gif/jpeg/png decoders were registered. Output is still
+	// normalized to JPEG — we only need decoder-side support here.
+	_ "golang.org/x/image/bmp"
+	_ "golang.org/x/image/webp"
 )
 
 // maxThumbnailPixels is the maximum source image pixel count allowed for
@@ -20,7 +28,21 @@ var thumbSem = make(chan struct{}, 4)
 
 // MakeThumbnail generates a small JPEG data URI from raw image bytes.
 // Returns empty string if the image cannot be decoded or is too large.
-func MakeThumbnail(data []byte, maxDim int) string {
+//
+// PANIC SAFETY: the pure-Go decoders registered above (webp, bmp, gif, png,
+// jpeg) have historically panicked on crafted-malformed inputs (upstream
+// x/image has accepted several hardening patches over the years, but we
+// decode user-supplied images from the dashboard / Discord / Slack /
+// Feishu adapters — any crash here would tear down the whole process).
+// Treat decoder panics as decode-failures and return the empty string so
+// the caller renders the message without a thumbnail rather than killing
+// the server.
+func MakeThumbnail(data []byte, maxDim int) (result string) {
+	defer func() {
+		if r := recover(); r != nil {
+			result = ""
+		}
+	}()
 	// Pre-check dimensions without full decode to prevent OOM on large images.
 	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
 	if err != nil {

@@ -238,7 +238,7 @@ func TestPlanInstallSystemd_DecisionMatrix(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			plan := planInstallSystemd(rendered, tc.existing, tc.existingErr, tc.active)
+			plan := planInstallSystemd(rendered, tc.existing, tc.existingErr, tc.active, false)
 			if plan.UnitChanged != tc.wantChanged {
 				t.Errorf("UnitChanged = %t, want %t", plan.UnitChanged, tc.wantChanged)
 			}
@@ -269,9 +269,32 @@ func TestPlanInstallSystemd_DecisionMatrix(t *testing.T) {
 // as changed so the installer re-writes a known-good file rather than
 // silently leaving a corrupted one in place.
 func TestPlanInstallSystemd_ReadErrorIsTreatedAsChanged(t *testing.T) {
-	plan := planInstallSystemd("rendered", "partial-or-unreadable", os.ErrPermission, false)
+	plan := planInstallSystemd("rendered", "partial-or-unreadable", os.ErrPermission, false, false)
 	if !plan.UnitChanged {
 		t.Error("ReadFile error must yield UnitChanged=true so the installer re-writes")
+	}
+}
+
+// TestPlanInstallSystemd_ForceOverridesByteEquality locks down the only
+// behavioral contract of the -force flag: even when the rendered unit is
+// byte-identical to what's on disk, force=true must promote UnitChanged so
+// daemon-reload + the final restart/start hop still fire. Used to push a
+// binary swap through when the unit file happens not to churn.
+func TestPlanInstallSystemd_ForceOverridesByteEquality(t *testing.T) {
+	// Identical bytes, no read error, service active — without force this
+	// would be a no-op plan.
+	plan := planInstallSystemd("same", "same", nil, true, true)
+	if !plan.UnitChanged {
+		t.Error("force=true must set UnitChanged even when rendered == existing")
+	}
+	if !plan.ServiceActive {
+		t.Error("ServiceActive must be preserved through the force path")
+	}
+
+	// Control: same inputs with force=false must still report UnitChanged=false.
+	plan = planInstallSystemd("same", "same", nil, true, false)
+	if plan.UnitChanged {
+		t.Error("force=false + identical bytes must keep UnitChanged=false")
 	}
 }
 
