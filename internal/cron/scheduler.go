@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -200,6 +201,23 @@ func (s *Scheduler) SetOnExecute(fn OnExecuteFunc) {
 // overload. 500 jobs ≈ 500 tick timers; well within robfig/cron's tested
 // scale, but higher values tend to indicate a config mistake.
 const maxJobsHardCap = 500
+
+// workDirReachable reports whether workDir exists and resolves to a
+// directory right now. Used before fresh-mode Reset so a job whose
+// workspace has been deleted by an operator does not destroy the
+// existing session just to fail on a GetOrCreate / spawn-shim call.
+// Empty workDir means "use router default" and is always reachable.
+// CRON2.
+func workDirReachable(workDir string) bool {
+	if workDir == "" {
+		return true
+	}
+	info, err := os.Stat(workDir)
+	if err != nil {
+		return false
+	}
+	return info.IsDir()
+}
 
 // workDirUnderRoot reports whether workDir resolves (after symlink evaluation)
 // to a path at or under allowedRoot. EvalSymlinks is done per-call so the
@@ -1222,6 +1240,20 @@ func (s *Scheduler) execute(j *Job) {
 		// run again on the next start.
 		if err := s.stopCtx.Err(); err != nil {
 			lg.Info("cron fresh spawn suppressed during shutdown", "err", err)
+			return
+		}
+		// CRON2 guard: verify workDir still exists before discarding the
+		// existing session. Without this, an admin who removed the workspace
+		// would trigger Reset → spawnSession → shim StartShim with a bogus
+		// cwd → the job records an error *and* the prior session context is
+		// gone. By checking first we preserve the session for the next run
+		// after the directory is restored. The empty-workDir case falls
+		// back to the router's default cwd (always reachable).
+		if !workDirReachable(workDir) {
+			lg.Warn("cron fresh spawn aborted: work_dir unreachable",
+				"work_dir", workDir)
+			s.recordResult(j, "", "work_dir unreachable")
+			s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", jobID))
 			return
 		}
 		s.router.Reset(key)
