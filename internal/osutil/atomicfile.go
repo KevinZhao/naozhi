@@ -9,13 +9,11 @@ import (
 	"syscall"
 )
 
-// IsDiskFull reports whether err is a "no space left on device" error
-// (ENOSPC) from any level of the error chain. Callers can emit a
-// distinct structured log field so monitoring can page on disk-full
-// separately from transient write failures.
-func IsDiskFull(err error) bool {
-	return errors.Is(err, syscall.ENOSPC)
-}
+// IsDiskFull is implemented per-platform: see atomicfile_unix.go (matches
+// against syscall.ENOSPC) and atomicfile_nonunix.go (returns false — the
+// stdlib's errno mapping for Windows ERROR_DISK_FULL does not surface as
+// syscall.ENOSPC, and naozhi currently only runs on Linux, so the honest
+// answer on non-Unix is "unknown, treat as non-disk-full").
 
 // WriteFileAtomic writes data to path via the standard write-tmp → fsync →
 // close → rename pattern used across the naozhi stores. It replaces repeated
