@@ -75,6 +75,53 @@ var cronParser = robfigcron.NewParser(
 // Prevents resource exhaustion from overly frequent schedules like "@every 1s".
 const minCronInterval = 5 * time.Minute
 
+// jobTimeoutRatio scales a job's schedule period into its execution timeout.
+// 0.8 leaves a 20% margin between timeout expiry and the next scheduled tick,
+// so a long-running job does not collide with its own next trigger (which the
+// SkipIfStillRunning chain and jobRunningGuard would otherwise drop entirely).
+const jobTimeoutRatio = 0.8
+
+// minJobTimeout floors the scaled timeout so schedules near minCronInterval
+// (5m × 0.8 = 4m) still leave the job a workable budget. 3m matches the
+// smallest prompt-roundtrip plus startup shim reconnect observed in prod.
+const minJobTimeout = 3 * time.Minute
+
+// computeJobTimeout returns the per-run deadline for a job whose schedule is
+// `schedule`. The timeout is period × jobTimeoutRatio, clamped to
+// [minJobTimeout, maxCap]. maxCap is the scheduler-level ceiling
+// (SchedulerConfig.ExecTimeout) so operators retain a global upper bound.
+//
+// Clamp order matters: cap is applied last so a caller-configured cap that
+// happens to sit below minJobTimeout (pathological / misconfiguration —
+// production applies a 5m cap default, above the 3m floor) still wins.
+// Without that final cap clamp a 30s-cap caller would get 3m back, which
+// would violate the "operators retain a global upper bound" contract.
+//
+// If schedule is unparseable or the period is non-positive (fixed times, DST
+// edge), returns maxCap — safer to fall back to the historical single-timeout
+// behaviour than to misapply a ratio to an undefined period.
+func computeJobTimeout(schedule string, maxCap time.Duration) time.Duration {
+	sched, err := cronParser.Parse(schedule)
+	if err != nil {
+		return maxCap
+	}
+	now := time.Now()
+	first := sched.Next(now)
+	second := sched.Next(first)
+	period := second.Sub(first)
+	if period <= 0 {
+		return maxCap
+	}
+	scaled := time.Duration(float64(period) * jobTimeoutRatio)
+	if scaled < minJobTimeout {
+		scaled = minJobTimeout
+	}
+	if scaled > maxCap {
+		scaled = maxCap
+	}
+	return scaled
+}
+
 // validateSchedule checks if the cron expression is valid and respects the minimum interval.
 func validateSchedule(schedule string) error {
 	sched, err := cronParser.Parse(schedule)

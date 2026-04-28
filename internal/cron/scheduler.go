@@ -1178,6 +1178,7 @@ func (s *Scheduler) execute(j *Job) {
 	notifyPlat := j.NotifyPlatform
 	notifyChat := j.NotifyChatID
 	fresh := j.FreshContext
+	schedule := j.Schedule
 	var notifyOpt *bool
 	if j.Notify != nil {
 		v := *j.Notify
@@ -1199,7 +1200,13 @@ func (s *Scheduler) execute(j *Job) {
 	lg.Info("cron job executing", "prompt_len", len(prompt))
 	execStart := time.Now()
 
-	ctx, cancel := context.WithTimeout(s.stopCtx, s.execTimeout)
+	// Per-job timeout scales with schedule period (80%, capped by s.execTimeout
+	// as the global upper bound). Prevents a recurring-review-style job from
+	// colliding with its own next tick when the work legitimately takes close
+	// to a full period, while still bounding runaway jobs at the configured
+	// ceiling. See computeJobTimeout for the clamp rules.
+	jobTimeout := computeJobTimeout(schedule, s.execTimeout)
+	ctx, cancel := context.WithTimeout(s.stopCtx, jobTimeout)
 	defer cancel()
 
 	agentID, cleanText := session.ResolveAgent(prompt, s.agentCommands)
