@@ -1,10 +1,13 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/config"
 )
 
 func TestSetupWriteConfig_NewFile(t *testing.T) {
@@ -160,5 +163,123 @@ log:
 	}
 	if !strings.Contains(content, "my-token") {
 		t.Error("should contain token")
+	}
+}
+
+// TestSetupWriteConfig_LoadableByConfig checks that the minimal template
+// `naozhi setup weixin` emits parses cleanly through the production config
+// pipeline (yaml.Unmarshal → applyDefaults). Without this regression, a
+// future edit to defaultConfigTemplate that introduces invalid YAML, a
+// removed struct field, or a required-but-missing value would only surface
+// the first time an operator actually ran setup on a clean machine.
+func TestSetupWriteConfig_LoadableByConfig(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	if err := setupWriteConfig(path, "wx-token"); err != nil {
+		t.Fatalf("setupWriteConfig: %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("config.Load(%s) on setup-generated file: %v", path, err)
+	}
+	if cfg == nil {
+		t.Fatal("config.Load returned nil cfg")
+	}
+
+	if cfg.Platforms.Weixin == nil || cfg.Platforms.Weixin.Token != "wx-token" {
+		t.Errorf("weixin token round-trip: got %+v, want token=wx-token",
+			cfg.Platforms.Weixin)
+	}
+	if cfg.CLI.Path != "claude" {
+		t.Errorf("cli.path: got %q, want %q", cfg.CLI.Path, "claude")
+	}
+	if cfg.CLI.Model != "sonnet" {
+		t.Errorf("cli.model: got %q, want %q", cfg.CLI.Model, "sonnet")
+	}
+}
+
+// TestSetupWriteConfig_AppliesRuntimeDefaults is the contract counterpart to
+// the above test: all the keys that USED to live in defaultConfigTemplate
+// (server.addr, session.{ttl,max_procs,prune_ttl,store_path}, log.level,
+// session.queue.{max_depth,collect_delay,mode}) must still be populated by
+// the time Load() returns. If applyDefaults stops filling one of these in
+// (or someone re-adds it to the template creating a drift source again),
+// the failing assertion points directly at the broken key.
+func TestSetupWriteConfig_AppliesRuntimeDefaults(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+
+	if err := setupWriteConfig(path, "wx-token"); err != nil {
+		t.Fatalf("setupWriteConfig: %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("config.Load: %v", err)
+	}
+
+	// Fields previously hard-coded in defaultConfigTemplate — must be
+	// populated post-applyDefaults, not left at zero values.
+	checks := []struct {
+		name string
+		got  any
+		zero any
+	}{
+		{"server.addr", cfg.Server.Addr, ""},
+		{"session.ttl", cfg.Session.TTL, ""},
+		{"session.prune_ttl", cfg.Session.PruneTTL, ""},
+		{"session.max_procs", cfg.Session.MaxProcs, 0},
+		{"session.queue.collect_delay", cfg.Session.Queue.CollectDelay, ""},
+		{"session.queue.mode", cfg.Session.Queue.Mode, ""},
+		{"log.level", cfg.Log.Level, ""},
+		{"workspace.id", cfg.Workspace.ID, ""},
+		{"workspace.name", cfg.Workspace.Name, ""},
+	}
+	for _, c := range checks {
+		if fmt.Sprintf("%v", c.got) == fmt.Sprintf("%v", c.zero) {
+			t.Errorf("%s: got zero value %v, applyDefaults should have filled it", c.name, c.got)
+		}
+	}
+
+	// Queue.MaxDepth is a *int; a nil pointer means applyDefaults did not run.
+	if cfg.Session.Queue.MaxDepth == nil {
+		t.Error("session.queue.max_depth: got nil pointer, applyDefaults should have set default 20")
+	} else if *cfg.Session.Queue.MaxDepth != 20 {
+		t.Errorf("session.queue.max_depth: got %d, want 20", *cfg.Session.Queue.MaxDepth)
+	}
+}
+
+// TestDefaultConfigTemplate_Minimal locks in the intent that the template is
+// kept minimal. If someone re-adds a key that applyDefaults already handles,
+// this test fails and forces the author to add it to the runtime-defaults
+// test above instead of creating a second source of truth.
+func TestDefaultConfigTemplate_Minimal(t *testing.T) {
+	// The keys explicitly forbidden in the minimal template because
+	// config.applyDefaults owns them.
+	forbidden := []string{
+		"max_procs:",
+		"ttl:",
+		"prune_ttl:",
+		"store_path:",
+	}
+	for _, k := range forbidden {
+		if strings.Contains(defaultConfigTemplate, k) {
+			t.Errorf("defaultConfigTemplate contains %q — applyDefaults owns this key; remove from template to prevent drift", k)
+		}
+	}
+
+	// Required anchors users will want to edit or that setup produces.
+	required := []string{
+		"cli:",
+		"platforms:",
+		"weixin:",
+		"token:",
+	}
+	for _, k := range required {
+		if !strings.Contains(defaultConfigTemplate, k) {
+			t.Errorf("defaultConfigTemplate missing anchor %q", k)
+		}
 	}
 }
