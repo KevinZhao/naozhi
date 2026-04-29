@@ -3639,10 +3639,15 @@ function renderMd(s) {
  * batched existence checks, only fetches file content when clicked. */
 
 // Path candidate regex: must contain at least one `/` (filters out bare
-// filenames like "README") and an extension or recognizable directory segment.
-// Optional :line (e.g. src/foo.go:42) or :line-line (foo.go:10-20) suffix.
+// filenames like "README") and accept any non-whitespace, non-colon char in
+// segments so Unicode filenames (Chinese, Japanese, …) are not silently
+// dropped. Optional leading `./`, `../`, or `/` (absolute paths are resolved
+// to project-relative form by resolveProjectForAbsPath before the server
+// call — server still rejects absolute paths for defence in depth).
+// Optional :line (e.g. src/foo.go:42) or :line-line (foo.go:10-20) suffix
+// works because `:` is excluded from segment chars, so it anchors the suffix.
 // Rejects spaces (breaks on prose) and leading URL schemes.
-const FILE_REF_RE = /^(?:\.\/|\.\.\/)?(?!https?:)[A-Za-z0-9._][A-Za-z0-9._\-]*(?:\/[A-Za-z0-9._\-]+)+(?::\d+(?:-\d+)?)?$/;
+const FILE_REF_RE = /^(?:\.\.?\/|\/)?(?!https?:)[^\s:]+(?:\/[^\s:]+)+(?::\d+(?:-\d+)?)?$/;
 
 // Per-project path validation cache: key = "<project>|<path>" → entry.
 // TTL 60s so mtime changes re-verify eventually without the user needing
@@ -3679,6 +3684,39 @@ function splitPathLine(cand) {
   return { path: cand, line: '' };
 }
 
+// resolveProjectForAbsPath maps an absolute path (e.g. `/home/.../gaokao/x.md`)
+// to the owning project on the given node. Returns { name, node, relPath }
+// on match, or null. The server rejects absolute paths by contract (see
+// resolveProjectFileWithRoot); doing the conversion here keeps that boundary
+// intact while letting AI output that quotes absolute paths — which claude CLI
+// routinely does — still produce preview buttons.
+//
+// Scoping rules:
+//   - node must match (cross-node abs paths get no preview).
+//   - longest-prefix wins when a project contains nested projects.
+//   - path must be strictly inside the project dir (no prefix-only match like
+//     `/foo/barfoo` matching project `/foo/bar`).
+function resolveProjectForAbsPath(abs, node) {
+  if (!abs || !abs.startsWith('/') || !projectsData || projectsData.length === 0) return null;
+  const wantNode = node || 'local';
+  let best = null, bestLen = 0;
+  for (const p of projectsData) {
+    if ((p.node || 'local') !== wantNode) continue;
+    if (!p.path) continue;
+    const prefix = p.path.endsWith('/') ? p.path : p.path + '/';
+    if (abs === p.path || abs.startsWith(prefix)) {
+      if (p.path.length > bestLen) {
+        best = p; bestLen = p.path.length;
+      }
+    }
+  }
+  if (!best) return null;
+  let rel = abs === best.path ? '' : abs.slice(best.path.length);
+  if (rel.startsWith('/')) rel = rel.slice(1);
+  if (!rel) return null; // pointing at project root itself is not a file
+  return { name: best.name, node: best.node || 'local', relPath: rel };
+}
+
 function _fileRefCacheGet(key) {
   const hit = _filePathCache.get(key);
   if (!hit) return null;
@@ -3700,9 +3738,23 @@ function _fileRefCacheSet(key, value) {
 // scanEventForFileRefs walks .event-content <code> descendants of a freshly-
 // inserted event bubble and wraps any path-shaped literals in a .file-ref
 // span with data-* attrs so verification + button injection can run async.
+//
+// Absolute paths (e.g. AI output that says `/home/.../gaokao/化学/foo.md`) are
+// mapped to the owning project on the active session's node via
+// resolveProjectForAbsPath — they may belong to a project other than the one
+// matched by the session's workspace (think: a session rooted at repo A that
+// references a file in repo B on the same host). dataset.displayPath keeps
+// the original string for the button's aria-label/title/preview header so the
+// user sees what they expect, while dataset.path holds the project-relative
+// form the server accepts.
 function scanEventForFileRefs(eventEl) {
-  const proj = resolveActiveProject();
-  if (!proj) return;
+  const activeProj = resolveActiveProject();
+  // activeProj is optional now: we can still resolve absolute paths via
+  // projectsData alone as long as we know the node. Fall back to the selected
+  // session's node when no project match exists for the session itself.
+  const activeNode = activeProj ? activeProj.node :
+    (selectedKey ? (selectedNode || 'local') : null);
+  if (!activeNode) return;
   const codeEls = eventEl.querySelectorAll('.event-content code, .event-content .md-code');
   codeEls.forEach(code => {
     if (code.dataset.frScanned === '1') return;
@@ -3715,12 +3767,31 @@ function scanEventForFileRefs(eventEl) {
     // Skip fenced code blocks (<pre><code>): those are content, not refs.
     if (code.closest('pre')) return;
     const { path, line } = splitPathLine(text);
+
+    // Decide which project owns this path. Absolute paths get looked up
+    // against projectsData on the active node; relative paths ride on the
+    // session's active project (the historical behaviour).
+    let projName, projNode, serverPath;
+    if (path.startsWith('/')) {
+      const hit = resolveProjectForAbsPath(path, activeNode);
+      if (!hit) return; // abs path outside any known project on this node
+      projName = hit.name;
+      projNode = hit.node;
+      serverPath = hit.relPath;
+    } else {
+      if (!activeProj) return; // relative path needs an active project
+      projName = activeProj.name;
+      projNode = activeProj.node;
+      serverPath = path.replace(/^\.\//, ''); // strip leading ./ for server
+    }
+
     const wrap = document.createElement('span');
     wrap.className = 'file-ref fr-candidate';
-    wrap.dataset.path = path;
+    wrap.dataset.path = serverPath;       // what we send to the server
+    wrap.dataset.displayPath = path;      // what the user typed / saw
     wrap.dataset.line = line;
-    wrap.dataset.project = proj.name;
-    wrap.dataset.node = proj.node;
+    wrap.dataset.project = projName;
+    wrap.dataset.node = projNode;
     code.parentNode.insertBefore(wrap, code);
     wrap.appendChild(code);
     // Queue for existence check; button DOM is injected once we know the
@@ -3795,13 +3866,17 @@ function applyFileRefResult(wrapEl, entry) {
   wrapEl.dataset.mime = entry.mime || '';
   // Preview and download share the same visual size \u2014 single-glyph icons
   // with an aria-label for accessibility so assistive tech still announces
-  // "Preview" / "Download" clearly.
+  // "Preview" / "Download" clearly. Labels use displayPath (original string
+  // the AI output, e.g. an absolute path) so the tooltip matches what the
+  // user sees in the bubble \u2014 wrapEl.dataset.path may be the rewritten
+  // project-relative form.
+  const label = wrapEl.dataset.displayPath || wrapEl.dataset.path;
   const preview = document.createElement('button');
   preview.type = 'button';
   preview.className = 'fr-btn fr-btn-preview';
   preview.textContent = '\u2197'; // paired with download '\u2193' for symmetric arrow look
-  preview.setAttribute('aria-label', 'Preview ' + wrapEl.dataset.path);
-  preview.title = 'Preview ' + wrapEl.dataset.path;
+  preview.setAttribute('aria-label', 'Preview ' + label);
+  preview.title = 'Preview ' + label;
   preview.addEventListener('click', evt => {
     evt.preventDefault();
     evt.stopPropagation();
@@ -3811,8 +3886,8 @@ function applyFileRefResult(wrapEl, entry) {
   download.type = 'button';
   download.className = 'fr-btn fr-btn-download';
   download.textContent = '\u2193'; // \u2193
-  download.setAttribute('aria-label', 'Download ' + wrapEl.dataset.path);
-  download.title = 'Download ' + wrapEl.dataset.path;
+  download.setAttribute('aria-label', 'Download ' + label);
+  download.title = 'Download ' + label;
   download.addEventListener('click', evt => {
     evt.preventDefault();
     evt.stopPropagation();
@@ -3860,7 +3935,11 @@ async function openFilePreview(wrapEl) {
   drawer.dataset.project = project;
   drawer.dataset.node = node;
   drawer.dataset.path = path;
-  title.textContent = path + (line ? ':' + line : '');
+  // Show the original string (may be abs) in the header so the user can
+  // still match the preview to the bubble they clicked; server calls below
+  // use the workspace-relative `path`.
+  const headerPath = wrapEl.dataset.displayPath || path;
+  title.textContent = headerPath + (line ? ':' + line : '');
   meta.textContent = (mime ? mime + ' \u00b7 ' : '') + formatFileSize(size);
   body.innerHTML = '<div class="fv-loading">loading\u2026</div>';
 
@@ -4140,6 +4219,19 @@ function renderMdUncached(s) {
 
 /* Inline markdown: bold, italic, code, links, math */
 function inlineMd(s) {
+  // Extract `code` spans FIRST — before math/bold/italic — so KaTeX does not
+  // peek inside them. Previously `$NVIDIA_DEVICE_PLUGIN_IMAGE$` written inside
+  // backticks was grabbed by the `$...$` math pass and rendered as italicised
+  // subscripts, mangling legitimate shell/env-var snippets. Code content is
+  // esc()'d immediately so the final token restore emits literal text safely.
+  const codeTokens = [];
+  if (s.indexOf('`') !== -1) {
+    s = s.replace(/`([^`]+)`/g, function(_, c) {
+      const idx = codeTokens.length;
+      codeTokens.push(esc(c));
+      return '\x00CODE' + idx + '\x00';
+    });
+  }
   // Extract inline math before HTML escaping. Use \x00 delimiters to avoid
   // collisions with user content. Fast path: the overwhelming majority of
   // lines in tool output / assistant text have no math markers, so we
@@ -4165,7 +4257,6 @@ function inlineMd(s) {
   // sequences survive esc() (they aren't HTML entities) and would let an
   // attacker-controlled LLM snippet splice unescaped characters into the
   // emitted HTML by embedding `$&` inside a backtick/bold region.
-  s = s.replace(/`([^`]+)`/g, (_, c) => '<code class="md-code">' + c + '</code>');
   s = s.replace(/\*\*(.+?)\*\*/g, (_, c) => '<strong>' + c + '</strong>');
   s = s.replace(/\*(.+?)\*/g, (_, c) => '<em>' + c + '</em>');
   s = s.replace(/\[([^\]]+)\]\(([^)]+)\)/g, function(_, text, url) {
@@ -4191,13 +4282,27 @@ function inlineMd(s) {
   if (mathTokens.length > 0) {
     s = s.replace(/\x00KTX(\d+)\x00/g, function(_, idx) { return mathTokens[+idx]; });
   }
+  // Restore code tokens last — their contents were esc()'d at capture time.
+  if (codeTokens.length > 0) {
+    s = s.replace(/\x00CODE(\d+)\x00/g, function(_, idx) {
+      return '<code class="md-code">' + codeTokens[+idx] + '</code>';
+    });
+  }
   return s;
 }
 
 function renderTable(lines) {
   if (lines.length < 2) return lines.map(l => inlineMd(l) + '\n').join('');
   if (!/^\|[\s\-:]+(\|[\s\-:]+)+\|$/.test(lines[1].trim())) return lines.map(l => inlineMd(l) + '\n').join('');
-  const cells = l => l.trim().replace(/^\||\|$/g, '').split('|').map(c => c.trim());
+  // Honour the GFM `\|` escape for a literal pipe inside a cell (common when
+  // authors quote shell snippets like `cmd \| true`). Without this the cell
+  // splits mid-snippet and the trailing fragment spills into an extra column.
+  // Strategy: encode `\|` → sentinel, split on `|`, decode sentinel → `|`.
+  const PIPE = '\x00PIPE\x00';
+  const cells = l => l.trim().replace(/\\\|/g, PIPE)
+    .replace(/^\||\|$/g, '')
+    .split('|')
+    .map(c => c.trim().split(PIPE).join('|'));
   let h = '<table class="md-table"><thead><tr>' + cells(lines[0]).map(c => '<th>' + inlineMd(c) + '</th>').join('') + '</tr></thead><tbody>';
   for (let i = 2; i < lines.length; i++) h += '<tr>' + cells(lines[i]).map(c => '<td>' + inlineMd(c) + '</td>').join('') + '</tr>';
   return '<div class="md-table-wrap">' + h + '</tbody></table></div>';
