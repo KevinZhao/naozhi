@@ -24,6 +24,17 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
+// handleConnDrainBudget is the hard deadline applied to the deferred
+// wg.Wait() at the end of handleConn. Every worker goroutine is expected
+// to honour connCtx, which is cancelled the moment handleConn returns; the
+// budget covers the pathological case where a stuck downstream call (most
+// notably sess.Send blocked on CLI watchdog timeout ≈ 5 min) refuses to
+// unblock. Hit-budget leaks the stuck goroutine to process teardown —
+// strictly better than pinning the whole upstream reconnect loop on one
+// slow session. R51-REL-005. Package-level var (not const) so tests can
+// shorten it without wall-clock waits.
+var handleConnDrainBudget = 15 * time.Second
+
 // Connector dials a primary naozhi and serves it as a reverse-connected node.
 // Run on machines behind NAT that cannot be reached by the primary directly.
 type Connector struct {
@@ -221,7 +232,29 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	subExited := make(chan subExitNote, 256)
 
 	var wg sync.WaitGroup
-	defer wg.Wait()
+	// R51-REL-005: bound the shutdown-of-handleConn on a hard deadline so a
+	// stuck worker goroutine (typically a send-RPC blocked on sess.Send that
+	// can wait up to CLI watchdog timeout ≈ 5 min) cannot pin reconnect.
+	// connCancel() above already fired by the time we reach this defer —
+	// every wg participant either responds to connCtx or is inherently
+	// short-running (ping ticker, response writer), so the grace timer
+	// covers only the pathological case where a downstream Send refuses
+	// to honour ctx. Exceeding the budget leaks the stuck goroutine to
+	// process teardown, which is strictly better than blocking the whole
+	// upstream reconnect loop.
+	defer func() {
+		done := make(chan struct{})
+		go func() {
+			wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(handleConnDrainBudget):
+			slog.Warn("connector: handleConn drain exceeded budget, proceeding",
+				"budget", handleConnDrainBudget)
+		}
+	}()
 
 	// Periodically send WebSocket-level pings so pongHandler resets the read deadline.
 	wg.Add(1)
