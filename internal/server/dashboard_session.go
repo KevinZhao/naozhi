@@ -192,7 +192,22 @@ type SessionHandlers struct {
 	// readers, who read staticStats without synchronisation. R61-GO-12.
 	staticStatsOnce sync.Once
 
-	// History cache (120s TTL — see cacheTTL in historySessions)
+	// History cache (120s TTL — see cacheTTL in historySessions).
+	//
+	// ALIASING CONTRACT (R62-GO-5): cache hits return the slice *header* only,
+	// not a copy. Multiple readers end up with slice values that alias the same
+	// backing array, which is race-free in Go — the backing array is allocated
+	// fresh by loadHistorySessions() (a `make + append` pipeline that discards
+	// the old backing array on TTL expiry), not mutated in place. Concurrent
+	// readers may observe the array alive past the mutex release because Go's
+	// GC keeps it reachable through every slice header still referencing it.
+	//
+	// The invariant writers MUST preserve: ANY refresh path (loadHistorySessions,
+	// WarmHistoryCache, future features) must assign a freshly allocated slice
+	// to h.historyCache, never mutate the existing backing array via
+	// append-in-place on a header already handed out. Shallow copy before any
+	// such mutation. Breaking this invariant produces cross-reader data
+	// corruption indistinguishable from a classic data race.
 	historyCache     []discovery.RecentSession
 	historyCacheTime time.Time
 	historyCacheMu   sync.Mutex

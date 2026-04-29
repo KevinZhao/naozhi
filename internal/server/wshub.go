@@ -1076,6 +1076,28 @@ func (h *Hub) TrackSend() (release func(), shuttingDown bool) {
 }
 
 // Shutdown closes all WebSocket client connections and relays.
+//
+// LOCK ORDER CONTRACT (R35-REL2): Shutdown acquires h.mu while iterating
+// c.subscriptions to invoke per-key unsub closures. Each unsub closure
+// eventually acquires eventLog.l.subMu (write lock) via
+// EventLog.Unsubscribe. The ordering h.mu → eventLog.subMu is only
+// deadlock-free as long as NO code path acquires eventLog.subMu first
+// and then tries to acquire h.mu.
+//
+// Current state (2026-04-29): notifySubscribers holds subMu.RLock and
+// never touches h.mu; eventPushLoop reads h.clients without h.mu (it
+// holds a pointer directly). The ordering invariant therefore holds.
+//
+// If you add code to eventPushLoop (or any EventLog-driven callback)
+// that acquires h.mu, you MUST either:
+//
+//	(a) release subMu before taking h.mu, or
+//	(b) refactor Shutdown to snapshot c.subscriptions under h.mu and
+//	    invoke the unsub closures after releasing h.mu.
+//
+// Breaking the invariant produces a classic ABBA deadlock on shutdown
+// that shows up as systemd TimeoutStopSec expiry (30s) followed by
+// SIGKILL — observable but extremely confusing to diagnose.
 func (h *Hub) Shutdown() {
 	h.cancel() // cancel in-flight send goroutines
 
