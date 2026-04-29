@@ -525,6 +525,15 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 			if _, err := sess.Send(connCtx, p.Text, nil, nil); err != nil {
 				if connCtx.Err() == nil {
 					slog.Warn("connector send failed", "key", p.Key, "err", err)
+					// R49-REL-CONNECTOR-SEND-RESULT-LOSS: the RPC already
+					// returned {"status":"accepted"} to primary, so a plain
+					// log.Warn leaves the UI showing "sent" while the message
+					// actually failed. Inject a system event into this
+					// session's EventLog so subscribed dashboards surface
+					// the failure on the next event push. Keep the message
+					// compact and classifier-friendly; full detail stays
+					// in the slog line above.
+					sess.LogSystemEvent("发送失败：" + err.Error())
 				}
 			}
 		}()

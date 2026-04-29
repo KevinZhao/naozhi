@@ -760,6 +760,36 @@ func (s *ManagedSession) SubscribeEvents() (<-chan struct{}, func()) {
 	return proc.SubscribeEvents()
 }
 
+// LogSystemEvent appends a single "system"-typed EventEntry with the given
+// summary text to this session's event log and notifies subscribers. Used by
+// off-main-path writers (e.g. upstream/connector's async Send goroutine)
+// that would otherwise lose errors to log.Warn while the primary has
+// already told the UI "accepted". Dashboard renders system events as
+// esc(e.summary), so the text is safe to contain arbitrary error messages.
+//
+// Semantics:
+//   - proc != nil: appends to the live EventLog; push-subscribers (WS
+//     eventPushLoop) wake immediately.
+//   - proc == nil (suspended session): appends to persistedHistory so the
+//     entry shows up on the next subscribe/snapshot. Still bounded by
+//     maxPersistedHistory; the oldest entry is dropped if full.
+//
+// Empty summary is rejected (no-op) to avoid polluting the log with blank
+// system lines on programmer error. R49-REL-CONNECTOR-SEND-RESULT-LOSS.
+func (s *ManagedSession) LogSystemEvent(summary string) {
+	if summary == "" {
+		return
+	}
+	entry := cli.EventEntry{
+		Time:    time.Now().UnixMilli(),
+		Type:    "system",
+		Summary: summary,
+	}
+	// Reuse InjectHistory so proc/persistedHistory routing stays in one
+	// place and subscribers wake via the existing notifySubscribers path.
+	s.InjectHistory([]cli.EventEntry{entry})
+}
+
 // InjectHistory pre-populates the event log with historical entries.
 // Entries are saved to persistedHistory so they survive process restarts.
 func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
