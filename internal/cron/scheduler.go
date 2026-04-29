@@ -188,6 +188,19 @@ type Scheduler struct {
 	// over a newer one). Held only around the saveJobs call — snapshot
 	// construction stays on s.mu to avoid cross-lock latency.
 	storeMu sync.Mutex
+
+	// saveSeq is a monotonic sequence tag attached to every marshaled
+	// snapshot at the moment persistJobsLocked captures it (under s.mu).
+	// saveMarshaled consults lastSavedSeq while holding storeMu and skips
+	// the WriteFileAtomic call if a concurrent writer has already landed
+	// a newer snapshot. This closes R48-REL-PERSIST-ORDERING-RACE: Go
+	// sync.Mutex does not guarantee FIFO acquisition, so two concurrent
+	// mutations could marshal A (older, seq=1) then B (newer, seq=2) and
+	// have B reach storeMu first — without the seq gate, A would then
+	// overwrite B on disk. The gate makes saveMarshaled idempotent w.r.t.
+	// stale payloads and eliminates the ordering window entirely.
+	saveSeq      atomic.Uint64 // assigned while holding s.mu
+	lastSavedSeq atomic.Uint64 // read/CAS'd while holding storeMu
 }
 
 // SetOnExecute registers a callback invoked after each cron job execution.
@@ -1631,13 +1644,23 @@ func (s *Scheduler) persistJobsLocked() (func(), error) {
 		slog.Error("marshal cron store", "err", err)
 		return nil, fmt.Errorf("%w: %v", ErrPersistFailed, err)
 	}
-	return func() { s.saveMarshaled(data) }, nil
+	// Capture a monotonic sequence number under s.mu so it totals-orders all
+	// marshals with the snapshot state they represent. saveMarshaled skips
+	// writes whose seq is older than what has already landed on disk —
+	// closes R48-REL-PERSIST-ORDERING-RACE (Go sync.Mutex is not FIFO so a
+	// later marshal can reach storeMu before an earlier one).
+	seq := s.saveSeq.Add(1)
+	return func() { s.saveMarshaledSeq(data, seq) }, nil
 }
 
 // saveMarshaled persists an already-marshaled jobs payload to disk. Serialised
 // by storeMu so an older snapshot cannot rename-win over a newer one — the
 // .tmp file itself is now unique per call (os.CreateTemp in WriteFileAtomic),
 // so storeMu is a logical ordering barrier rather than file-level protection.
+//
+// Kept as a no-seq variant for Stop()'s single-shot save on shutdown, which
+// runs serially after all mutation paths have drained and has no ordering
+// peer to race against.
 func (s *Scheduler) saveMarshaled(data []byte) {
 	s.storeMu.Lock()
 	defer s.storeMu.Unlock()
@@ -1647,6 +1670,35 @@ func (s *Scheduler) saveMarshaled(data []byte) {
 	if err := osutil.WriteFileAtomic(s.storePath, data, 0600); err != nil {
 		slog.Error("save cron store", "err", err, "disk_full", osutil.IsDiskFull(err))
 	}
+}
+
+// saveMarshaledSeq is the mutation-path persist function. It skips the write
+// if lastSavedSeq has already advanced past our seq — this happens when Go's
+// sync.Mutex hands storeMu to a later writer (larger seq) before us, so our
+// data is strictly stale and writing it would roll back the disk state.
+// Atomic CAS on lastSavedSeq makes the "newer-than-landed" check itself
+// race-free across concurrent mutation goroutines. Closes R48-REL-PERSIST-
+// ORDERING-RACE.
+func (s *Scheduler) saveMarshaledSeq(data []byte, seq uint64) {
+	s.storeMu.Lock()
+	defer s.storeMu.Unlock()
+	if s.storePath == "" {
+		return
+	}
+	if last := s.lastSavedSeq.Load(); seq <= last {
+		// A newer snapshot already won the storeMu race. Dropping our write
+		// is safe — the newer payload already contains every field we would
+		// have persisted (mutations under s.mu are linearised by s.mu, so
+		// seq order matches state order).
+		slog.Debug("cron save skipped: newer snapshot already saved",
+			"our_seq", seq, "last_saved_seq", last)
+		return
+	}
+	if err := osutil.WriteFileAtomic(s.storePath, data, 0600); err != nil {
+		slog.Error("save cron store", "err", err, "disk_full", osutil.IsDiskFull(err))
+		return
+	}
+	s.lastSavedSeq.Store(seq)
 }
 
 // slogWriter adapts slog to io.Writer so robfig/cron's PrintfLogger can route
