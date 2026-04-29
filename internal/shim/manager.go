@@ -355,6 +355,30 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 // startup ordering is owned by the caller (single goroutine), not the
 // manager, and changing that would require re-auditing the Router's
 // reconnectShims lock order. R40-REL1.
+//
+// RACE CONTRACT (R49-REL-SHIM-MANAGER-RECONNECT-CONCUR): when two
+// callers race Reconnect on the same key (net.DialTimeout happens
+// outside m.mu, so both can build their own handle before the winning
+// branch takes m.mu), the late winner's `m.shims[key] = handle`
+// overwrites the early winner's entry. The late branch also closes the
+// prior handle to prevent an fd leak — BUT that handle may already
+// have been delivered to the caller (Router's reconnectShims attaches
+// it to a Process). Closing a handle under active use causes the
+// Process's readLoop to observe EOF and mark the session Dead.
+//
+// Today the scenario is not observed in production because:
+//   - Router's reconcile ticker runs at 30 s intervals and each per-key
+//     Reconnect finishes well within that window.
+//   - StartShim and Reconnect cannot race on the same key either, because
+//     Router only calls Reconnect for suspended-but-shim-alive sessions.
+//
+// If you add a second driver that calls Reconnect (e.g. a UI-triggered
+// "reattach now" action) or shorten the reconcile interval, you MUST
+// introduce per-key serialisation here (e.g. a singleflight keyed on
+// `key`, or a per-key mutex pool) — otherwise the above invariant is
+// one race edge away from breaking and the user sees spurious session
+// deaths on reconcile. The no-leak semantics of the `oldHandle.Close()`
+// step below are contract-tested in manager_reconnect_contract_test.go.
 func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*ShimHandle, error) {
 	keyHash := KeyHash(key)
 	stateFile := StateFilePath(m.stateDir, keyHash)
