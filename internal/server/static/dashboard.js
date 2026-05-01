@@ -9,6 +9,12 @@ let lastCompositionEnd = 0;
 let sessionsData = {};
 let allSessionsCache = [];
 let sessionFirstSeen = (function() { try { return JSON.parse(localStorage.getItem('nz_firstSeen') || '{}'); } catch(_) { return {}; } })();
+// Per-user fold state for project sections, keyed by "<node>:<name>".
+// Persisted in localStorage so it survives reloads.
+let collapsedProjects = (function() {
+  try { return new Set(JSON.parse(localStorage.getItem('nz_collapsedProjects') || '[]')); }
+  catch(_) { return new Set(); }
+})();
 let pendingFiles = []; // {file, id, status: 'uploading'|'ready'|'error'}
 let sending = false;
 let selectedNode = 'local';
@@ -273,7 +279,9 @@ function renderSidebar(data) {
     groupKeys.forEach(k => {
       const g = groups[k];
       const p = projIndex[k] || {name: g.name, node: g.node, favorite: false};
+      p._sessionCount = g.items.length;
       html += sectionHeaderHtml(p);
+      if (collapsedProjects.has(k)) return;
       if (g.items.length > 0) {
         html += g.items.map(sessionCardHtml).join('');
       } else {
@@ -327,12 +335,22 @@ function matchProject(workspace) {
 // that previously implied a per-state SVG difference.
 const STAR_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"/></svg>';
 const GITHUB_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>';
+// Chevron: points down when expanded; CSS rotates -90deg when collapsed
+// so the same glyph serves both states.
+const CHEVRON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
 
 function sectionHeaderHtml(p) {
   const node = p.node || 'local';
   const fav = !!p.favorite;
   const starCls = fav ? 'sh-btn star-on' : 'sh-btn';
   const starTitle = fav ? 'Unfavorite' : 'Favorite';
+  const ck = node + ':' + p.name;
+  const collapsed = collapsedProjects.has(ck);
+  const count = typeof p._sessionCount === 'number' ? p._sessionCount : 0;
+  const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
+  const cTitle = collapsed ? '展开' : '收起';
+  const collapseBtn = '<button type="button" class="' + cCls + '" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '" onclick="event.stopPropagation();toggleProjectCollapsed(this.dataset.key)">' + CHEVRON_SVG + '</button>';
+  const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
   // No longer pass `data-fav` — the handler derives current state from the
   // authoritative `projectsData` at click time, avoiding a stale DOM attribute
   // that could cause a fast second click (before re-render) to send a
@@ -345,8 +363,11 @@ function sectionHeaderHtml(p) {
     ghBtn = '<button type="button" class="sh-btn github-on" data-url="' + escAttr(url) + '" title="GitHub: ' + escAttr(url) + '" aria-label="Show GitHub remote" onclick="event.stopPropagation();showGitRemote(this.dataset.url)">' + GITHUB_SVG + '</button>';
   }
 
-  return '<div class="section-header" role="group" aria-label="' + escAttr(p.name) + '">' + starBtn +
+  const collapsedCls = collapsed ? ' is-collapsed' : '';
+  return '<div class="section-header' + collapsedCls + '" role="group" aria-label="' + escAttr(p.name) + '">' +
+    collapseBtn + starBtn +
     '<span class="sh-name" title="' + escAttr(p.name) + '">' + esc(p.name) + '</span>' +
+    countBadge +
     ghBtn +
     '</div>';
 }
@@ -356,6 +377,18 @@ function sectionEmptyHtml(p) {
   return '<button type="button" class="section-empty" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" onclick="event.stopPropagation();newSessionInProject(this.dataset.name,this.dataset.node)">' +
     '<span class="se-plus">+</span><span>New session in ' + esc(p.name) + '</span>' +
     '</button>';
+}
+
+// Flips a project section's fold state, persists it, and refetches so the
+// sidebar re-renders with the new state applied.
+function toggleProjectCollapsed(key) {
+  if (!key) return;
+  if (collapsedProjects.has(key)) collapsedProjects.delete(key);
+  else collapsedProjects.add(key);
+  try {
+    localStorage.setItem('nz_collapsedProjects', JSON.stringify([...collapsedProjects]));
+  } catch (_) {}
+  fetchSessions();
 }
 
 // In-flight guard against a double-click race: the star button's DOM state
