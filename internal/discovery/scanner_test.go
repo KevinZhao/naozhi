@@ -14,31 +14,34 @@ import (
 // helpers shared across scanner tests
 // ---------------------------------------------------------------------------
 
-// resetCaches resets both package-level caches so parallel subtests don't
-// bleed into each other.  Must be called before creating fixtures that rely
-// on a clean cache state.
+// resetCaches clears the process-wide DefaultScanner's caches so tests
+// that rely on package-level Scan/LookupSummaries wrappers start from a
+// clean slate. For tests that want parallelism, prefer NewScanner() +
+// the *Scanner methods so each subtest has isolated caches.
 func resetCaches(t *testing.T) {
 	t.Helper()
-	promptCache.Lock()
-	promptCache.entries = make(map[string]promptCacheEntry)
-	promptCache.generation = 0
-	promptCache.Unlock()
+	sc := DefaultScanner()
+	sc.promptCache.Lock()
+	sc.promptCache.entries = make(map[string]promptCacheEntry)
+	sc.promptCache.generation = 0
+	sc.promptCache.Unlock()
 
-	summaryCache.Lock()
-	summaryCache.entries = make(map[string]summaryCacheEntry)
-	summaryCache.generation = 0
-	summaryCache.Unlock()
+	sc.summaryCache.Lock()
+	sc.summaryCache.entries = make(map[string]summaryCacheEntry)
+	sc.summaryCache.generation = 0
+	sc.summaryCache.Unlock()
 
 	t.Cleanup(func() {
-		promptCache.Lock()
-		promptCache.entries = make(map[string]promptCacheEntry)
-		promptCache.generation = 0
-		promptCache.Unlock()
+		sc := DefaultScanner()
+		sc.promptCache.Lock()
+		sc.promptCache.entries = make(map[string]promptCacheEntry)
+		sc.promptCache.generation = 0
+		sc.promptCache.Unlock()
 
-		summaryCache.Lock()
-		summaryCache.entries = make(map[string]summaryCacheEntry)
-		summaryCache.generation = 0
-		summaryCache.Unlock()
+		sc.summaryCache.Lock()
+		sc.summaryCache.entries = make(map[string]summaryCacheEntry)
+		sc.summaryCache.generation = 0
+		sc.summaryCache.Unlock()
 	})
 }
 
@@ -86,6 +89,7 @@ func makeSessionFile(t *testing.T, sessDir string, sf sessionFile) {
 // ---------------------------------------------------------------------------
 
 func TestIsValidSessionID(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -101,6 +105,7 @@ func TestIsValidSessionID(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := IsValidSessionID(tc.input)
 			if got != tc.want {
 				t.Errorf("IsValidSessionID(%q) = %v, want %v", tc.input, got, tc.want)
@@ -114,6 +119,7 @@ func TestIsValidSessionID(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestProjDirName(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		cwd  string
 		want string
@@ -124,6 +130,7 @@ func TestProjDirName(t *testing.T) {
 	}
 	for _, tc := range tests {
 		t.Run(tc.cwd, func(t *testing.T) {
+			t.Parallel()
 			got := projDirName(tc.cwd)
 			if got != tc.want {
 				t.Errorf("projDirName(%q) = %q, want %q", tc.cwd, got, tc.want)
@@ -137,6 +144,7 @@ func TestProjDirName(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestJsonlMtime_Fallback(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	// JSONL does not exist: should return startedAt fallback
 	got := jsonlMtime(claudeDir, "/nonexistent/path", "00000000-0000-0000-0000-000000000001", 12345)
@@ -146,6 +154,7 @@ func TestJsonlMtime_Fallback(t *testing.T) {
 }
 
 func TestJsonlMtime_ReadsFile(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/test-mtime"
 	sessionID := "00000000-0000-0000-0000-000000000002"
@@ -173,19 +182,21 @@ func TestJsonlMtime_ReadsFile(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLookupSummaries_Empty(t *testing.T) {
-	resetCaches(t)
-	got := LookupSummaries("", nil)
+	t.Parallel()
+	sc := NewScanner()
+	got := sc.LookupSummaries("", nil)
 	if got != nil {
 		t.Errorf("expected nil, got %v", got)
 	}
-	got = LookupSummaries("/some/dir", nil)
+	got = sc.LookupSummaries("/some/dir", nil)
 	if got != nil {
 		t.Errorf("expected nil for empty sessions map, got %v", got)
 	}
 }
 
 func TestLookupSummaries_BasicLookup(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
+	sc := NewScanner()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/lookup-project"
 	sid := "aaaabbbb-0000-0000-0000-000000000001"
@@ -201,14 +212,15 @@ func TestLookupSummaries_BasicLookup(t *testing.T) {
 		},
 	})
 
-	got := LookupSummaries(claudeDir, map[string]string{sid: cwd})
+	got := sc.LookupSummaries(claudeDir, map[string]string{sid: cwd})
 	if got[sid] != "My session summary" {
 		t.Errorf("LookupSummaries[%q] = %q, want %q", sid, got[sid], "My session summary")
 	}
 }
 
 func TestLookupSummaries_NotInIndex(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
+	sc := NewScanner()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/lookup-missing"
 	sid := "aaaabbbb-0000-0000-0000-000000000002"
@@ -222,14 +234,15 @@ func TestLookupSummaries_NotInIndex(t *testing.T) {
 		Entries:      []sessionsIndexEntry{},
 	})
 
-	got := LookupSummaries(claudeDir, map[string]string{sid: cwd})
+	got := sc.LookupSummaries(claudeDir, map[string]string{sid: cwd})
 	if val, ok := got[sid]; ok {
 		t.Errorf("expected no entry for missing session, got %q", val)
 	}
 }
 
 func TestLookupSummaries_CacheHit(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
+	sc := NewScanner()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/cache-test"
 	sid := "aaaabbbb-0000-0000-0000-000000000003"
@@ -245,32 +258,34 @@ func TestLookupSummaries_CacheHit(t *testing.T) {
 	})
 
 	// First call: cache miss
-	got1 := LookupSummaries(claudeDir, map[string]string{sid: cwd})
+	got1 := sc.LookupSummaries(claudeDir, map[string]string{sid: cwd})
 	if got1[sid] != "cached summary" {
 		t.Errorf("first call: got %q, want cached summary", got1[sid])
 	}
 
 	// Second call on same mtime: cache hit
-	got2 := LookupSummaries(claudeDir, map[string]string{sid: cwd})
+	got2 := sc.LookupSummaries(claudeDir, map[string]string{sid: cwd})
 	if got2[sid] != "cached summary" {
 		t.Errorf("second call (cache hit): got %q, want cached summary", got2[sid])
 	}
 }
 
 func TestLookupSummaries_MissingIndexFile(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
+	sc := NewScanner()
 	claudeDir := makeClaudeDir(t)
 	sid := "aaaabbbb-0000-0000-0000-000000000004"
 	cwd := "/tmp/no-index"
 	// Don't create any directory or index file
-	got := LookupSummaries(claudeDir, map[string]string{sid: cwd})
+	got := sc.LookupSummaries(claudeDir, map[string]string{sid: cwd})
 	if len(got) != 0 {
 		t.Errorf("expected empty map, got %v", got)
 	}
 }
 
 func TestLookupSummaries_MultipleSessionsSameProject(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
+	sc := NewScanner()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/multi"
 	sid1 := "aaaabbbb-0000-0000-0000-000000000005"
@@ -289,7 +304,7 @@ func TestLookupSummaries_MultipleSessionsSameProject(t *testing.T) {
 	})
 
 	sessions := map[string]string{sid1: cwd, sid2: cwd}
-	got := LookupSummaries(claudeDir, sessions)
+	got := sc.LookupSummaries(claudeDir, sessions)
 	if got[sid1] != "summary one" {
 		t.Errorf("sid1 summary = %q, want summary one", got[sid1])
 	}
@@ -303,6 +318,7 @@ func TestLookupSummaries_MultipleSessionsSameProject(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExtractUserText(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		raw  string
@@ -349,7 +365,7 @@ func TestExtractUserText(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExtractLastPromptUncached_Basic(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
 
@@ -368,7 +384,7 @@ func TestExtractLastPromptUncached_Basic(t *testing.T) {
 }
 
 func TestExtractLastPromptUncached_EmptyFile(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "empty.jsonl")
 	if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
@@ -381,7 +397,7 @@ func TestExtractLastPromptUncached_EmptyFile(t *testing.T) {
 }
 
 func TestExtractLastPromptUncached_NonexistentFile(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
 	got := extractLastPromptUncached("/nonexistent/path.jsonl", 0)
 	if got != "" {
 		t.Errorf("expected empty for nonexistent file, got %q", got)
@@ -389,7 +405,7 @@ func TestExtractLastPromptUncached_NonexistentFile(t *testing.T) {
 }
 
 func TestExtractLastPromptUncached_LargeTailFallback(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "large.jsonl")
 
@@ -444,7 +460,8 @@ func TestExtractLastPromptUncached_LargeTailFallback(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExtractLastPrompt_CacheHit(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
+	sc := NewScanner()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/cache-hit"
 	sessionID := "ccccdddd-0000-0000-0000-000000000001"
@@ -457,14 +474,14 @@ func TestExtractLastPrompt_CacheHit(t *testing.T) {
 	makeJSONLWithUserPrompts(t, jsonlPath, []string{"cached prompt"})
 
 	// First call: cache miss → reads file
-	got1 := extractLastPrompt(claudeDir, cwd, sessionID)
+	got1 := sc.extractLastPrompt(claudeDir, cwd, sessionID)
 	if got1 != "cached prompt" {
 		t.Errorf("first call = %q, want cached prompt", got1)
 	}
 	// Verify cache was populated
 	fi, _ := os.Stat(jsonlPath)
 	mtime := fi.ModTime().UnixNano()
-	cached, ok := getCachedPrompt(jsonlPath, mtime)
+	cached, ok := sc.getCachedPrompt(jsonlPath, mtime)
 	if !ok {
 		t.Error("expected cache hit after first extractLastPrompt call")
 	}
@@ -473,14 +490,15 @@ func TestExtractLastPrompt_CacheHit(t *testing.T) {
 	}
 
 	// Second call: cache hit (no file read needed)
-	got2 := extractLastPrompt(claudeDir, cwd, sessionID)
+	got2 := sc.extractLastPrompt(claudeDir, cwd, sessionID)
 	if got2 != "cached prompt" {
 		t.Errorf("second call = %q, want cached prompt", got2)
 	}
 }
 
 func TestExtractLastPrompt_CacheInvalidatedOnMtimeChange(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
+	sc := NewScanner()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/cache-invalidate"
 	sessionID := "ccccdddd-0000-0000-0000-000000000002"
@@ -492,7 +510,7 @@ func TestExtractLastPrompt_CacheInvalidatedOnMtimeChange(t *testing.T) {
 	jsonlPath := filepath.Join(projDir, sessionID+".jsonl")
 	makeJSONLWithUserPrompts(t, jsonlPath, []string{"old prompt"})
 
-	got1 := extractLastPrompt(claudeDir, cwd, sessionID)
+	got1 := sc.extractLastPrompt(claudeDir, cwd, sessionID)
 	if got1 != "old prompt" {
 		t.Errorf("first call = %q, want old prompt", got1)
 	}
@@ -501,7 +519,7 @@ func TestExtractLastPrompt_CacheInvalidatedOnMtimeChange(t *testing.T) {
 	time.Sleep(10 * time.Millisecond)
 	makeJSONLWithUserPrompts(t, jsonlPath, []string{"new prompt"})
 
-	got2 := extractLastPrompt(claudeDir, cwd, sessionID)
+	got2 := sc.extractLastPrompt(claudeDir, cwd, sessionID)
 	if got2 != "new prompt" {
 		t.Errorf("after file update = %q, want new prompt", got2)
 	}
@@ -512,6 +530,7 @@ func TestExtractLastPrompt_CacheInvalidatedOnMtimeChange(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestListJSONLsByMtime_Ordering(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/order-test"
 	dirName := projDirName(cwd)
@@ -546,6 +565,7 @@ func TestListJSONLsByMtime_Ordering(t *testing.T) {
 }
 
 func TestListJSONLsByMtime_SkipNonJSONL(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/skip-test"
 	dirName := projDirName(cwd)
@@ -576,6 +596,7 @@ func TestListJSONLsByMtime_SkipNonJSONL(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestFindJSONLPath(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/find-jsonl"
 	sessionID := "ddddeeee-0000-0000-0000-000000000001"
@@ -605,19 +626,22 @@ func TestFindJSONLPath(t *testing.T) {
 // evictPromptCache and evictSummaryCache
 // ---------------------------------------------------------------------------
 
+// Eviction tests now operate on an isolated *Scanner so they can run in
+// parallel — previously they contended on the package globals.
 func TestEvictPromptCache_UnderThreshold(t *testing.T) {
-	resetCaches(t)
-	promptCache.Lock()
+	t.Parallel()
+	sc := NewScanner()
+	sc.promptCache.Lock()
 	// Fill with 10 entries — well under the 500 threshold
 	for i := 0; i < 10; i++ {
 		key := fmt.Sprintf("path%d", i)
-		promptCache.entries[key] = promptCacheEntry{mtime: 1, prompt: "x", gen: 0}
+		sc.promptCache.entries[key] = promptCacheEntry{mtime: 1, prompt: "x", gen: 0}
 	}
-	promptCache.generation = 5
-	beforeLen := len(promptCache.entries)
-	evictPromptCache() // should be a no-op
-	afterLen := len(promptCache.entries)
-	promptCache.Unlock()
+	sc.promptCache.generation = 5
+	beforeLen := len(sc.promptCache.entries)
+	sc.evictPromptCache() // should be a no-op
+	afterLen := len(sc.promptCache.entries)
+	sc.promptCache.Unlock()
 
 	if beforeLen != afterLen {
 		t.Errorf("evictPromptCache should not evict under threshold: before=%d after=%d", beforeLen, afterLen)
@@ -625,20 +649,21 @@ func TestEvictPromptCache_UnderThreshold(t *testing.T) {
 }
 
 func TestEvictPromptCache_OverThreshold(t *testing.T) {
-	resetCaches(t)
-	promptCache.Lock()
+	t.Parallel()
+	sc := NewScanner()
+	sc.promptCache.Lock()
 	// Fill with 501 entries with old generation
 	for i := 0; i < 501; i++ {
 		key := fmt.Sprintf("path%d", i)
-		promptCache.entries[key] = promptCacheEntry{mtime: 1, prompt: "x", gen: 0}
+		sc.promptCache.entries[key] = promptCacheEntry{mtime: 1, prompt: "x", gen: 0}
 	}
 	// Add one entry with current generation
-	promptCache.entries["current"] = promptCacheEntry{mtime: 1, prompt: "y", gen: 3}
-	promptCache.generation = 3
-	evictPromptCache()
-	afterLen := len(promptCache.entries)
-	_, hasCurrent := promptCache.entries["current"]
-	promptCache.Unlock()
+	sc.promptCache.entries["current"] = promptCacheEntry{mtime: 1, prompt: "y", gen: 3}
+	sc.promptCache.generation = 3
+	sc.evictPromptCache()
+	afterLen := len(sc.promptCache.entries)
+	_, hasCurrent := sc.promptCache.entries["current"]
+	sc.promptCache.Unlock()
 
 	if afterLen >= 502 {
 		t.Errorf("expected eviction to reduce entries, still have %d", afterLen)
@@ -649,18 +674,19 @@ func TestEvictPromptCache_OverThreshold(t *testing.T) {
 }
 
 func TestEvictSummaryCache_OverThreshold(t *testing.T) {
-	resetCaches(t)
-	summaryCache.Lock()
+	t.Parallel()
+	sc := NewScanner()
+	sc.summaryCache.Lock()
 	for i := 0; i < 501; i++ {
 		key := fmt.Sprintf("idx%d", i)
-		summaryCache.entries[key] = summaryCacheEntry{mtime: 1, index: sessionsIndex{}, gen: 0}
+		sc.summaryCache.entries[key] = summaryCacheEntry{mtime: 1, index: sessionsIndex{}, gen: 0}
 	}
-	summaryCache.entries["current"] = summaryCacheEntry{mtime: 1, index: sessionsIndex{}, gen: 3}
-	summaryCache.generation = 3
-	evictSummaryCache()
-	afterLen := len(summaryCache.entries)
-	_, hasCurrent := summaryCache.entries["current"]
-	summaryCache.Unlock()
+	sc.summaryCache.entries["current"] = summaryCacheEntry{mtime: 1, index: sessionsIndex{}, gen: 3}
+	sc.summaryCache.generation = 3
+	sc.evictSummaryCache()
+	afterLen := len(sc.summaryCache.entries)
+	_, hasCurrent := sc.summaryCache.entries["current"]
+	sc.summaryCache.Unlock()
 
 	if afterLen >= 502 {
 		t.Errorf("expected eviction to reduce entries, still have %d", afterLen)
@@ -675,19 +701,21 @@ func TestEvictSummaryCache_OverThreshold(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRefreshDynamic_EmptyInputs(t *testing.T) {
-	resetCaches(t)
-	changed := RefreshDynamic("", nil)
+	t.Parallel()
+	sc := NewScanner()
+	changed := sc.RefreshDynamic("", nil)
 	if changed {
 		t.Error("expected false for empty claudeDir")
 	}
-	changed = RefreshDynamic("/some/dir", []DiscoveredSession{})
+	changed = sc.RefreshDynamic("/some/dir", []DiscoveredSession{})
 	if changed {
 		t.Error("expected false for empty sessions slice")
 	}
 }
 
 func TestRefreshDynamic_LastActiveAndState(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
+	sc := NewScanner()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/refresh-dynamic"
 	sessionID := "eeeeffff-0000-0000-0000-000000000001"
@@ -715,7 +743,7 @@ func TestRefreshDynamic_LastActiveAndState(t *testing.T) {
 		},
 	}
 
-	changed := RefreshDynamic(claudeDir, sessions)
+	changed := sc.RefreshDynamic(claudeDir, sessions)
 	if !changed {
 		t.Error("expected changed=true after refresh")
 	}
@@ -728,7 +756,8 @@ func TestRefreshDynamic_LastActiveAndState(t *testing.T) {
 }
 
 func TestRefreshDynamic_SummaryUpdated(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
+	sc := NewScanner()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/refresh-summary"
 	sessionID := "eeeeffff-0000-0000-0000-000000000002"
@@ -756,7 +785,7 @@ func TestRefreshDynamic_SummaryUpdated(t *testing.T) {
 		},
 	}
 
-	changed := RefreshDynamic(claudeDir, sessions)
+	changed := sc.RefreshDynamic(claudeDir, sessions)
 	if !changed {
 		t.Error("expected changed=true when summary is added")
 	}
@@ -766,7 +795,8 @@ func TestRefreshDynamic_SummaryUpdated(t *testing.T) {
 }
 
 func TestRefreshDynamic_NoChanges(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
+	sc := NewScanner()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/no-change"
 	sessionID := "eeeeffff-0000-0000-0000-000000000003"
@@ -793,7 +823,7 @@ func TestRefreshDynamic_NoChanges(t *testing.T) {
 		},
 	}
 
-	changed := RefreshDynamic(claudeDir, sessions)
+	changed := sc.RefreshDynamic(claudeDir, sessions)
 	if changed {
 		t.Error("expected changed=false when nothing changed")
 	}
@@ -804,14 +834,15 @@ func TestRefreshDynamic_NoChanges(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestPromptCacheRoundTrip(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
+	sc := NewScanner()
 	const path = "/test/path.jsonl"
 	const mtime = int64(99999)
 	const prompt = "my cached prompt"
 
-	setCachedPrompt(path, mtime, prompt)
+	sc.setCachedPrompt(path, mtime, prompt)
 
-	got, ok := getCachedPrompt(path, mtime)
+	got, ok := sc.getCachedPrompt(path, mtime)
 	if !ok {
 		t.Fatal("expected cache hit")
 	}
@@ -820,7 +851,7 @@ func TestPromptCacheRoundTrip(t *testing.T) {
 	}
 
 	// Wrong mtime → miss
-	_, ok2 := getCachedPrompt(path, mtime+1)
+	_, ok2 := sc.getCachedPrompt(path, mtime+1)
 	if ok2 {
 		t.Error("expected cache miss for different mtime")
 	}
@@ -831,7 +862,8 @@ func TestPromptCacheRoundTrip(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestSummaryCacheRoundTrip(t *testing.T) {
-	resetCaches(t)
+	t.Parallel()
+	sc := NewScanner()
 	const path = "/test/sessions-index.json"
 	const mtime = int64(12345)
 	idx := sessionsIndex{
@@ -839,9 +871,9 @@ func TestSummaryCacheRoundTrip(t *testing.T) {
 		Entries:      []sessionsIndexEntry{{SessionID: "abc", Summary: "sum"}},
 	}
 
-	setCachedSummary(path, mtime, idx)
+	sc.setCachedSummary(path, mtime, idx)
 
-	got, ok := getCachedSummary(path, mtime)
+	got, ok := sc.getCachedSummary(path, mtime)
 	if !ok {
 		t.Fatal("expected cache hit")
 	}
@@ -850,7 +882,7 @@ func TestSummaryCacheRoundTrip(t *testing.T) {
 	}
 
 	// Wrong mtime → miss
-	_, ok2 := getCachedSummary(path, mtime+1)
+	_, ok2 := sc.getCachedSummary(path, mtime+1)
 	if ok2 {
 		t.Error("expected cache miss for different mtime")
 	}

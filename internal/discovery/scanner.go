@@ -22,9 +22,32 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 )
 
-// promptCache caches extractLastPrompt results keyed by (path, mtime).
-// Avoids re-reading up to 512KB per discovered session on every 10s scan cycle.
-var promptCache struct {
+// Scanner holds the mutable caches that used to be package-level globals
+// (promptCache, summaryCache). Existing call sites hit the compat
+// wrappers below — `Scan` / `LookupSummaries` / `RefreshDynamic` — which
+// delegate to DefaultScanner(). Tests that need isolation (e.g. parallel
+// subtests that would otherwise contend on the package globals) can
+// instantiate a fresh `*Scanner` via NewScanner() and use its methods
+// directly. Without this struct, `scanner_test.go` could not run any
+// test with `t.Parallel()` — all 29 tests are serial today.
+//
+// Field semantics:
+//
+//	promptCache   — hit-result cache for extractLastPrompt, keyed by
+//	                (JSONL path, mtime). Cleared by Scan's generation
+//	                counter once it exceeds 500 entries.
+//	summaryCache  — hit-result cache for LookupSummaries' index-file
+//	                reads, same 500-entry bound.
+//
+// The two caches share semantics but hold different value types, so they
+// do not unify into one field without an empty-interface box — kept
+// separate for compile-time safety.
+type Scanner struct {
+	promptCache  promptCacheState
+	summaryCache summaryCacheState
+}
+
+type promptCacheState struct {
 	sync.RWMutex
 	entries    map[string]promptCacheEntry
 	generation uint64
@@ -36,12 +59,7 @@ type promptCacheEntry struct {
 	gen    uint64
 }
 
-func init() {
-	promptCache.entries = make(map[string]promptCacheEntry)
-}
-
-// summaryCache caches LookupSummaries index file reads.
-var summaryCache struct {
+type summaryCacheState struct {
 	sync.RWMutex
 	entries    map[string]summaryCacheEntry
 	generation uint64
@@ -53,34 +71,55 @@ type summaryCacheEntry struct {
 	gen   uint64
 }
 
-func init() {
-	summaryCache.entries = make(map[string]summaryCacheEntry)
+// NewScanner returns a fresh Scanner with empty caches. Used directly by
+// tests that need isolation; production callers use the package-level
+// wrappers which hit DefaultScanner.
+func NewScanner() *Scanner {
+	return &Scanner{
+		promptCache:  promptCacheState{entries: make(map[string]promptCacheEntry)},
+		summaryCache: summaryCacheState{entries: make(map[string]summaryCacheEntry)},
+	}
+}
+
+// DefaultScanner returns the process-wide Scanner used by the package-
+// level wrappers. Lazy-initialized via sync.Once so callers that never
+// invoke Scan/LookupSummaries don't allocate the cache maps.
+var (
+	defaultScannerOnce sync.Once
+	defaultScannerInst *Scanner
+)
+
+func DefaultScanner() *Scanner {
+	defaultScannerOnce.Do(func() {
+		defaultScannerInst = NewScanner()
+	})
+	return defaultScannerInst
 }
 
 // evictPromptCache deletes entries that are more than one generation old.
 // Eviction only runs when the cache exceeds 500 entries.
-// Must be called with promptCache.Lock() held.
-func evictPromptCache() {
-	if len(promptCache.entries) <= 500 {
+// Must be called with s.promptCache.Lock() held.
+func (s *Scanner) evictPromptCache() {
+	if len(s.promptCache.entries) <= 500 {
 		return
 	}
-	for k, v := range promptCache.entries {
-		if v.gen+1 < promptCache.generation {
-			delete(promptCache.entries, k)
+	for k, v := range s.promptCache.entries {
+		if v.gen+1 < s.promptCache.generation {
+			delete(s.promptCache.entries, k)
 		}
 	}
 }
 
 // evictSummaryCache deletes entries that are more than one generation old.
 // Eviction only runs when the cache exceeds 500 entries.
-// Must be called with summaryCache.Lock() held.
-func evictSummaryCache() {
-	if len(summaryCache.entries) <= 500 {
+// Must be called with s.summaryCache.Lock() held.
+func (s *Scanner) evictSummaryCache() {
+	if len(s.summaryCache.entries) <= 500 {
 		return
 	}
-	for k, v := range summaryCache.entries {
-		if v.gen+1 < summaryCache.generation {
-			delete(summaryCache.entries, k)
+	for k, v := range s.summaryCache.entries {
+		if v.gen+1 < s.summaryCache.generation {
+			delete(s.summaryCache.entries, k)
 		}
 	}
 }
@@ -152,13 +191,21 @@ type scanCandidate struct {
 	lastActive int64
 }
 
+// Scan is the package-level wrapper that delegates to DefaultScanner.
+// Preserves the pre-refactor signature so call sites in server/ and cmd/
+// do not need to change. Use (*Scanner).Scan directly when you need cache
+// isolation (e.g. parallel test subtests).
+func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
+	return DefaultScanner().Scan(claudeDir, excludePIDs, excludeSessionIDs, managedCWDs)
+}
+
 // Scan reads ~/.claude/sessions/*.json and returns live Claude CLI processes
 // that are not managed by naozhi (excluded via excludePIDs).
 // excludeSessionIDs prevents the session-ID upgrade heuristic from assigning
 // a JSONL file that belongs to a naozhi-managed session to a CLI process.
 // managedCWDs is the set of working directories that have active managed sessions;
 // session ID upgrade is skipped entirely for these CWDs to prevent cross-contamination.
-func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
+func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[string]bool, managedCWDs map[string]bool) ([]DiscoveredSession, error) {
 	sessDir := filepath.Join(claudeDir, "sessions")
 	entries, err := os.ReadDir(sessDir)
 	if err != nil {
@@ -170,13 +217,13 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 
 	// Advance cache generations once per scan so the eviction logic can
 	// identify entries that have not been touched in the last two scan cycles.
-	promptCache.Lock()
-	promptCache.generation++
-	promptCache.Unlock()
+	s.promptCache.Lock()
+	s.promptCache.generation++
+	s.promptCache.Unlock()
 
-	summaryCache.Lock()
-	summaryCache.generation++
-	summaryCache.Unlock()
+	s.summaryCache.Lock()
+	s.summaryCache.generation++
+	s.summaryCache.Unlock()
 
 	// First pass: collect alive sessions with their original session IDs.
 	var candidates []scanCandidate
@@ -293,7 +340,7 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 	for i := range candidates {
 		candidateWorkspaces[candidates[i].sf.SessionID] = candidates[i].sf.CWD
 	}
-	summaryMap := LookupSummaries(claudeDir, candidateWorkspaces)
+	summaryMap := s.LookupSummaries(claudeDir, candidateWorkspaces)
 
 	// Batch-extract last prompts in parallel (up to 4 concurrent I/O operations)
 	// to avoid serial 512KB reads per discovered session.
@@ -306,7 +353,7 @@ func Scan(claudeDir string, excludePIDs map[int]bool, excludeSessionIDs map[stri
 			defer promptWg.Done()
 			promptSem <- struct{}{}
 			defer func() { <-promptSem }()
-			prompts[idx] = extractLastPrompt(claudeDir, candidates[idx].sf.CWD, candidates[idx].sf.SessionID)
+			prompts[idx] = s.extractLastPrompt(claudeDir, candidates[idx].sf.CWD, candidates[idx].sf.SessionID)
 		}(i)
 	}
 	promptWg.Wait()
@@ -427,7 +474,7 @@ type sessionsIndexEntry struct {
 
 // extractLastPrompt reads the JSONL file backwards to find the last user message.
 // Results are cached by (path, mtime) to avoid re-reading 512KB every scan cycle.
-func extractLastPrompt(claudeDir, cwd, sessionID string) string {
+func (s *Scanner) extractLastPrompt(claudeDir, cwd, sessionID string) string {
 	path := findJSONLPath(claudeDir, cwd, sessionID)
 	if path == "" {
 		return ""
@@ -438,43 +485,43 @@ func extractLastPrompt(claudeDir, cwd, sessionID string) string {
 	}
 	mtime := fi.ModTime().UnixNano()
 
-	if cached, ok := getCachedPrompt(path, mtime); ok {
+	if cached, ok := s.getCachedPrompt(path, mtime); ok {
 		return cached
 	}
 
 	result := extractLastPromptUncached(path, fi.Size())
 
-	setCachedPrompt(path, mtime, result)
+	s.setCachedPrompt(path, mtime, result)
 	return result
 }
 
 // getCachedPrompt checks the prompt cache. Reads use RLock; only the gen
 // refresh on a hit upgrades to the write lock (cheap in-place update).
-func getCachedPrompt(path string, mtime int64) (string, bool) {
-	promptCache.RLock()
-	cached, ok := promptCache.entries[path]
-	gen := promptCache.generation
-	promptCache.RUnlock()
+func (s *Scanner) getCachedPrompt(path string, mtime int64) (string, bool) {
+	s.promptCache.RLock()
+	cached, ok := s.promptCache.entries[path]
+	gen := s.promptCache.generation
+	s.promptCache.RUnlock()
 	if !ok || cached.mtime != mtime {
 		return "", false
 	}
 	if cached.gen != gen {
-		promptCache.Lock()
-		if e, ok2 := promptCache.entries[path]; ok2 && e.mtime == mtime {
-			e.gen = promptCache.generation
-			promptCache.entries[path] = e
+		s.promptCache.Lock()
+		if e, ok2 := s.promptCache.entries[path]; ok2 && e.mtime == mtime {
+			e.gen = s.promptCache.generation
+			s.promptCache.entries[path] = e
 		}
-		promptCache.Unlock()
+		s.promptCache.Unlock()
 	}
 	return cached.prompt, true
 }
 
 // setCachedPrompt writes a prompt cache entry under a deferred lock.
-func setCachedPrompt(path string, mtime int64, result string) {
-	promptCache.Lock()
-	defer promptCache.Unlock()
-	promptCache.entries[path] = promptCacheEntry{mtime: mtime, prompt: result, gen: promptCache.generation}
-	evictPromptCache()
+func (s *Scanner) setCachedPrompt(path string, mtime int64, result string) {
+	s.promptCache.Lock()
+	defer s.promptCache.Unlock()
+	s.promptCache.entries[path] = promptCacheEntry{mtime: mtime, prompt: result, gen: s.promptCache.generation}
+	s.evictPromptCache()
 }
 
 // extractLastPromptUncached does the actual 512KB tail read and JSON scanning.
@@ -587,10 +634,17 @@ func findJSONLPath(claudeDir, cwd, sessionID string) string {
 
 var sessionIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
 
+// LookupSummaries is the package-level wrapper that delegates to
+// DefaultScanner. Preserves the pre-refactor signature for zero-churn
+// back-compat at call sites.
+func LookupSummaries(claudeDir string, sessions map[string]string) map[string]string {
+	return DefaultScanner().LookupSummaries(claudeDir, sessions)
+}
+
 // LookupSummaries looks up Claude-generated summaries for the given sessions.
 // The sessions map is sessionID → workspace (CWD path).
 // Returns a map of sessionID → summary.
-func LookupSummaries(claudeDir string, sessions map[string]string) map[string]string {
+func (s *Scanner) LookupSummaries(claudeDir string, sessions map[string]string) map[string]string {
 	if claudeDir == "" || len(sessions) == 0 {
 		return nil
 	}
@@ -615,7 +669,7 @@ func LookupSummaries(claudeDir string, sessions map[string]string) map[string]st
 		mtime := fi.ModTime().UnixNano()
 
 		var idx sessionsIndex
-		if cachedIdx, ok := getCachedSummary(indexPath, mtime); ok {
+		if cachedIdx, ok := s.getCachedSummary(indexPath, mtime); ok {
 			idx = cachedIdx
 		} else {
 			data, err := os.ReadFile(indexPath)
@@ -625,7 +679,7 @@ func LookupSummaries(claudeDir string, sessions map[string]string) map[string]st
 			if err := json.Unmarshal(data, &idx); err != nil {
 				continue
 			}
-			setCachedSummary(indexPath, mtime, idx)
+			s.setCachedSummary(indexPath, mtime, idx)
 		}
 
 		// Build a lookup set once per project: large project directories may
@@ -649,31 +703,31 @@ func LookupSummaries(claudeDir string, sessions map[string]string) map[string]st
 
 // getCachedSummary checks the summary cache. Reads use RLock; only the gen
 // refresh on a hit upgrades to the write lock (cheap in-place update).
-func getCachedSummary(indexPath string, mtime int64) (sessionsIndex, bool) {
-	summaryCache.RLock()
-	cached, ok := summaryCache.entries[indexPath]
-	gen := summaryCache.generation
-	summaryCache.RUnlock()
+func (s *Scanner) getCachedSummary(indexPath string, mtime int64) (sessionsIndex, bool) {
+	s.summaryCache.RLock()
+	cached, ok := s.summaryCache.entries[indexPath]
+	gen := s.summaryCache.generation
+	s.summaryCache.RUnlock()
 	if !ok || cached.mtime != mtime {
 		return sessionsIndex{}, false
 	}
 	if cached.gen != gen {
-		summaryCache.Lock()
-		if e, ok2 := summaryCache.entries[indexPath]; ok2 && e.mtime == mtime {
-			e.gen = summaryCache.generation
-			summaryCache.entries[indexPath] = e
+		s.summaryCache.Lock()
+		if e, ok2 := s.summaryCache.entries[indexPath]; ok2 && e.mtime == mtime {
+			e.gen = s.summaryCache.generation
+			s.summaryCache.entries[indexPath] = e
 		}
-		summaryCache.Unlock()
+		s.summaryCache.Unlock()
 	}
 	return cached.index, true
 }
 
 // setCachedSummary writes a summary cache entry under a deferred lock.
-func setCachedSummary(indexPath string, mtime int64, idx sessionsIndex) {
-	summaryCache.Lock()
-	defer summaryCache.Unlock()
-	summaryCache.entries[indexPath] = summaryCacheEntry{mtime: mtime, index: idx, gen: summaryCache.generation}
-	evictSummaryCache()
+func (s *Scanner) setCachedSummary(indexPath string, mtime int64, idx sessionsIndex) {
+	s.summaryCache.Lock()
+	defer s.summaryCache.Unlock()
+	s.summaryCache.entries[indexPath] = summaryCacheEntry{mtime: mtime, index: idx, gen: s.summaryCache.generation}
+	s.evictSummaryCache()
 }
 
 // RefreshDynamic updates the mutable fields (LastActive, State, Summary,
@@ -681,12 +735,18 @@ func setCachedSummary(indexPath string, mtime int64, idx sessionsIndex) {
 // caches as Scan, so repeated calls for unchanged JSONL/index files are cheap
 // (os.Stat + cache hit).  Returns true if any field changed.
 //
+// RefreshDynamic is the package-level wrapper that delegates to
+// DefaultScanner. Preserves the pre-refactor signature.
+func RefreshDynamic(claudeDir string, sessions []DiscoveredSession) bool {
+	return DefaultScanner().RefreshDynamic(claudeDir, sessions)
+}
+
 // RefreshDynamic deliberately does NOT advance promptCache/summaryCache
 // generations — Scan is the sole authority for aging. Advancing here would
 // double-tick gen when Scan and RefreshDynamic run in the same cycle,
 // halving the effective cache lifetime (entries evicted after 1 cycle
 // instead of 2) and triggering repeated JSONL parses.
-func RefreshDynamic(claudeDir string, sessions []DiscoveredSession) bool {
+func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession) bool {
 	if claudeDir == "" || len(sessions) == 0 {
 		return false
 	}
@@ -696,7 +756,7 @@ func RefreshDynamic(claudeDir string, sessions []DiscoveredSession) bool {
 	for i := range sessions {
 		workspaces[sessions[i].SessionID] = sessions[i].CWD
 	}
-	summaryMap := LookupSummaries(claudeDir, workspaces)
+	summaryMap := s.LookupSummaries(claudeDir, workspaces)
 
 	// Batch-extract last prompts in parallel.
 	prompts := make([]string, len(sessions))
@@ -708,7 +768,7 @@ func RefreshDynamic(claudeDir string, sessions []DiscoveredSession) bool {
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			prompts[idx] = extractLastPrompt(claudeDir, sessions[idx].CWD, sessions[idx].SessionID)
+			prompts[idx] = s.extractLastPrompt(claudeDir, sessions[idx].CWD, sessions[idx].SessionID)
 		}(i)
 	}
 	wg.Wait()
@@ -716,25 +776,25 @@ func RefreshDynamic(claudeDir string, sessions []DiscoveredSession) bool {
 	changed := false
 	nowMs := time.Now().UnixMilli()
 	for i := range sessions {
-		s := &sessions[i]
-		if la := jsonlMtime(claudeDir, s.CWD, s.SessionID, s.StartedAt); la != s.LastActive {
-			s.LastActive = la
+		sess := &sessions[i]
+		if la := jsonlMtime(claudeDir, sess.CWD, sess.SessionID, sess.StartedAt); la != sess.LastActive {
+			sess.LastActive = la
 			changed = true
 		}
 		newState := "ready"
-		if s.LastActive > nowMs-int64(runningThreshold/time.Millisecond) {
+		if sess.LastActive > nowMs-int64(runningThreshold/time.Millisecond) {
 			newState = "running"
 		}
-		if newState != s.State {
-			s.State = newState
+		if newState != sess.State {
+			sess.State = newState
 			changed = true
 		}
-		if sum := summaryMap[s.SessionID]; sum != "" && sum != s.Summary {
-			s.Summary = sum
+		if sum := summaryMap[sess.SessionID]; sum != "" && sum != sess.Summary {
+			sess.Summary = sum
 			changed = true
 		}
-		if prompts[i] != s.LastPrompt {
-			s.LastPrompt = prompts[i]
+		if prompts[i] != sess.LastPrompt {
+			sess.LastPrompt = prompts[i]
 			changed = true
 		}
 	}
