@@ -95,6 +95,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .event.user{flex-direction:row-reverse}
 .event.user .event-icon{background:rgba(88,166,255,.15);color:var(--nz-accent);font-size:13px}
 .event.user .event-content{flex:0 1 auto;max-width:80%;color:#e6edf3;background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.2);padding:10px 14px;border-radius:18px 18px 4px 18px}
+/* Queued-send indicator: inline chip on the optimistic user bubble when
+   send_ack returns status=queued. Replaces the previous top-of-screen
+   toast so the signal stays bound to its message (and vanishes naturally
+   when the real "user" event replaces the optimistic bubble). */
+.event.user.optimistic-msg .msg-queued-chip{display:inline-block;margin-top:4px;font-size:11px;color:var(--nz-text-mute);opacity:.85}
 /* AI text: left-aligned, clean markdown */
 .event.text .event-icon{background:rgba(163,118,255,.15);color:#a376ff;font-size:13px}
 .event.text .event-content{color:var(--nz-text);max-width:clamp(720px,60vw,1100px)}

@@ -4763,7 +4763,19 @@ const wsm = {
     if (msg.status === 'accepted' || msg.status === 'queued') {
       flashSendBtn();
       if (msg.status === 'queued') {
-        showToast('消息已排队，待当前回复完成后处理');
+        // Attach an inline chip to the optimistic user bubble instead of a
+        // top-of-screen toast. The chip is bound to the bubble, so when the
+        // real "user" event replaces it (see the .optimistic-msg removal
+        // path in onEvent) the chip disappears along with the bubble — no
+        // separate lifecycle to manage. Previous toast variant covered the
+        // mobile header and was detached from the message it referred to.
+        const lastOpt = document.querySelector('#events-scroll .event.user.optimistic-msg:last-of-type .event-content');
+        if (lastOpt && !lastOpt.querySelector('.msg-queued-chip')) {
+          const chip = document.createElement('div');
+          chip.className = 'msg-queued-chip';
+          chip.textContent = '排队中…';
+          lastOpt.appendChild(chip);
+        }
       }
       // Subscribe to the session we just sent to, unless we're already
       // subscribed or a subscribe is already pending for this exact key.
