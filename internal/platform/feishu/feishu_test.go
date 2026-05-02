@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -1008,7 +1009,7 @@ func TestFetchBotInfo_APIError(t *testing.T) {
 		t.Fatal("expected error for non-zero code")
 	}
 	var apiErr *APIError
-	if !errorAs(err, &apiErr) {
+	if !errors.As(err, &apiErr) {
 		t.Fatalf("error type = %T, want *APIError", err)
 	}
 	if apiErr.Code != 99991663 {
@@ -1050,17 +1051,4 @@ func TestFetchBotInfo_EmptyOpenID(t *testing.T) {
 	if !strings.Contains(err.Error(), "empty open_id") {
 		t.Errorf("error = %v, want substring 'empty open_id'", err)
 	}
-}
-
-// errorAs is a tiny wrapper so tests don't need to import "errors" just for
-// errors.As — keeps the diff minimal for this single use-case.
-func errorAs(err error, target any) bool {
-	// avoid extra import; replicate errors.As for *APIError only
-	if e, ok := err.(*APIError); ok {
-		if tp, ok := target.(**APIError); ok {
-			*tp = e
-			return true
-		}
-	}
-	return false
 }
