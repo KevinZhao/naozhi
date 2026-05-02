@@ -13,7 +13,12 @@ import (
 
 const (
 	systemdUnitPath = "/etc/systemd/system/naozhi.service"
-	launchdLabel    = "com.naozhi.naozhi"
+	// systemdUnitBackupSuffix is appended to systemdUnitPath to form the
+	// rollback target. Kept next to the unit (not /tmp) so a crashing
+	// installer leaves the evidence in the canonical place operators
+	// check first. Cleared on successful install.
+	systemdUnitBackupSuffix = ".naozhi-install.bak"
+	launchdLabel            = "com.naozhi.naozhi"
 )
 
 func launchdPlistPath() string {
@@ -194,6 +199,79 @@ var systemctlIsActive = func(name string) bool {
 	return cmd.Run() == nil
 }
 
+// rewriteUnitWithRollback writes `renderedUnit` atomically to `unitPath`,
+// first snapshotting the current contents so a failed `daemon-reload` can
+// roll back instead of leaving a broken unit on disk. Pure I/O + injected
+// runners so tests can drive every branch without touching real systemctl.
+//
+// Branches:
+//
+//	existingUnit="", readErr=IsNotExist       — fresh install, no backup needed
+//	existingUnit=X, readErr=nil               — snapshot to backupPath, then write
+//	reload fails after rewrite                — attempt restore backup + second reload
+//	reload success                            — rm backup (best-effort)
+//
+// Return value reports the failure that surfaced to the operator. On rollback,
+// even a successful restore still returns the original reload error so the
+// installer aborts the rest of the flow (enable/start) — the unit on disk
+// now matches the previously-good state but systemd may be in a weird
+// transient state, so re-running install is the safer recovery.
+func rewriteUnitWithRollback(unitPath, renderedUnit, existingUnit string, readErr error, writeFile func(name string, data []byte, perm os.FileMode) error, removeFile func(string) error, daemonReload func() error) error {
+	backupPath := unitPath + systemdUnitBackupSuffix
+	hadExisting := readErr == nil
+	if hadExisting {
+		// Snapshot the current unit before overwriting. If the snapshot
+		// write itself fails, propagate — a rollback we can't honor is
+		// worse than not trying, since the operator may believe the
+		// network-safety net exists when it doesn't.
+		if err := writeFile(backupPath, []byte(existingUnit), 0644); err != nil {
+			return fmt.Errorf("snapshot existing unit to %s: %w", backupPath, err)
+		}
+	}
+
+	if err := writeFile(unitPath, []byte(renderedUnit), 0644); err != nil {
+		// Best-effort cleanup: if we wrote a backup, leave it in place so
+		// the operator can inspect/restore manually. The partial write
+		// failure may have left the unit file in an indeterminate state.
+		return fmt.Errorf("write unit file: %w", err)
+	}
+
+	reloadErr := daemonReload()
+	if reloadErr == nil {
+		// Success: drop the snapshot so the next install path starts
+		// from a clean state. Failure here is non-fatal — a stale .bak
+		// only costs a few KiB and the next install overwrites it.
+		if hadExisting {
+			_ = removeFile(backupPath)
+		}
+		return nil
+	}
+
+	// Reload failed. Try to restore the backup so the unit on disk
+	// matches the previously-good state. If there was no backup (fresh
+	// install), the least-bad option is to leave the freshly-written
+	// unit in place and surface the reload error.
+	if !hadExisting {
+		return fmt.Errorf("daemon-reload: %w (no prior unit to restore)", reloadErr)
+	}
+	if restoreErr := writeFile(unitPath, []byte(existingUnit), 0644); restoreErr != nil {
+		return fmt.Errorf("daemon-reload: %w (rollback ALSO failed: %v; inspect %s and %s manually)",
+			reloadErr, restoreErr, unitPath, backupPath)
+	}
+	// Try one more reload so systemd's in-memory view catches up with
+	// the restored bytes. If this also fails, the on-disk state is at
+	// least known-good; the operator needs to kick systemd manually.
+	if secondReloadErr := daemonReload(); secondReloadErr != nil {
+		return fmt.Errorf("daemon-reload: %w (unit rolled back to prior contents but second reload failed: %v; try `sudo systemctl daemon-reload` manually)",
+			reloadErr, secondReloadErr)
+	}
+	// Backup served its purpose — drop it. Return the original reload
+	// error so the outer installer aborts enable/start; re-running
+	// `naozhi install` is the clean recovery path.
+	_ = removeFile(backupPath)
+	return fmt.Errorf("daemon-reload: %w (unit rolled back to prior contents; re-run `sudo naozhi install` after fixing the underlying issue)", reloadErr)
+}
+
 func installSystemd(binary, configPath string, dryRun, force bool) {
 	if !dryRun && os.Getuid() != 0 {
 		fatalf("systemd install requires root. Run: sudo naozhi install")
@@ -221,11 +299,23 @@ func installSystemd(binary, configPath string, dryRun, force bool) {
 	}
 
 	if plan.UnitChanged {
-		if err := os.WriteFile(systemdUnitPath, []byte(unit), 0644); err != nil {
-			fatalf("write unit file: %v", err)
-		}
-		if err := run("systemctl", "daemon-reload"); err != nil {
-			fatalf("systemctl daemon-reload: %v\n\n%s", err, recoveryHint())
+		// Use rewriteUnitWithRollback so a daemon-reload failure (e.g. a
+		// syntax error introduced by a future template change that slipped
+		// past unit tests) doesn't leave a broken unit file on disk. The
+		// rollback path restores the previously-good bytes; the outer
+		// fatalf still aborts the installer so enable/start don't run
+		// against a systemd still in an error state.
+		reloadErr := rewriteUnitWithRollback(
+			systemdUnitPath,
+			unit,
+			string(existingBytes),
+			existingErr,
+			os.WriteFile,
+			os.Remove,
+			func() error { return run("systemctl", "daemon-reload") },
+		)
+		if reloadErr != nil {
+			fatalf("%v\n\n%s", reloadErr, recoveryHint())
 		}
 	} else {
 		fmt.Println("unit file unchanged; skipping daemon-reload")

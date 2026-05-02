@@ -315,3 +315,216 @@ func TestRecoveryHint_ListsConcreteSteps(t *testing.T) {
 		}
 	}
 }
+
+// rewriteStubs captures the file I/O and daemon-reload interactions for
+// driving rewriteUnitWithRollback in tests. Each call is recorded so
+// assertions can check not just the final error but also the exact
+// sequence of operations — which matters because rollback correctness
+// depends on a strict write → reload → (on failure) restore → reload
+// ordering.
+type rewriteStubs struct {
+	// files simulates the filesystem; key is path, value is last bytes
+	// written. readErr short-circuits the existing-unit read the caller
+	// passes in (simulated at call time, not read via the stub).
+	files map[string]string
+
+	// writeErrOn is consulted per-path; if present the returned error is
+	// substituted for a successful write. Path-scoped so a test can fail
+	// the snapshot write but succeed the main unit write, or vice versa.
+	writeErrOn map[string]error
+
+	// reloadErrs is a queue: pop the head for each call. Empty queue
+	// means the call returns nil. Using a slice (not a single value)
+	// lets us assert that BOTH the first reload fails and the second
+	// (post-rollback) succeeds or fails, which is the whole behavioral
+	// contract.
+	reloadErrs []error
+
+	writeLog  []string // "<path>:<bytes>" on each WriteFile
+	removeLog []string // path on each Remove
+	reloadLog int      // count of daemon-reload calls
+}
+
+func newRewriteStubs() *rewriteStubs {
+	return &rewriteStubs{
+		files:      make(map[string]string),
+		writeErrOn: make(map[string]error),
+	}
+}
+
+func (s *rewriteStubs) write(name string, data []byte, _ os.FileMode) error {
+	if err, ok := s.writeErrOn[name]; ok {
+		return err
+	}
+	s.files[name] = string(data)
+	s.writeLog = append(s.writeLog, name+":"+string(data))
+	return nil
+}
+
+func (s *rewriteStubs) remove(name string) error {
+	delete(s.files, name)
+	s.removeLog = append(s.removeLog, name)
+	return nil
+}
+
+func (s *rewriteStubs) reload() error {
+	s.reloadLog++
+	if len(s.reloadErrs) == 0 {
+		return nil
+	}
+	e := s.reloadErrs[0]
+	s.reloadErrs = s.reloadErrs[1:]
+	return e
+}
+
+// TestRewriteUnitWithRollback_Paths is the full behavior matrix for the
+// rollback flow. Each case wires a distinct combination of read-state,
+// write-state, and reload-state to drive a specific branch, then asserts
+// both the surfaced error and the final on-disk state. Names describe
+// the operator-facing scenario ("fresh install, reload succeeds") rather
+// than the code branch so future debugging reads like a story, not a
+// flowchart lookup.
+func TestRewriteUnitWithRollback_Paths(t *testing.T) {
+	const path = "/etc/systemd/system/naozhi.service"
+	const backup = path + systemdUnitBackupSuffix
+	errReadMissing := os.ErrNotExist
+
+	t.Run("fresh install, reload succeeds", func(t *testing.T) {
+		s := newRewriteStubs()
+		err := rewriteUnitWithRollback(path, "new-unit", "", errReadMissing, s.write, s.remove, s.reload)
+		if err != nil {
+			t.Fatalf("want nil, got %v", err)
+		}
+		if s.files[path] != "new-unit" {
+			t.Errorf("unit not written; files=%v", s.files)
+		}
+		if _, ok := s.files[backup]; ok {
+			t.Error("fresh install must not create a backup (no prior state)")
+		}
+		if s.reloadLog != 1 {
+			t.Errorf("expected 1 reload call, got %d", s.reloadLog)
+		}
+	})
+
+	t.Run("fresh install, reload fails (no backup to restore)", func(t *testing.T) {
+		s := newRewriteStubs()
+		s.reloadErrs = []error{&stubErr{"boot-broken"}}
+		err := rewriteUnitWithRollback(path, "new-unit", "", errReadMissing, s.write, s.remove, s.reload)
+		if err == nil || !strings.Contains(err.Error(), "no prior unit to restore") {
+			t.Fatalf("want reload error noting no rollback; got %v", err)
+		}
+		if s.files[path] != "new-unit" {
+			t.Errorf("unit should remain on disk after reload fail; files=%v", s.files)
+		}
+		if s.reloadLog != 1 {
+			t.Errorf("expected exactly 1 reload attempt on fresh install; got %d", s.reloadLog)
+		}
+	})
+
+	t.Run("edited unit, reload succeeds", func(t *testing.T) {
+		s := newRewriteStubs()
+		err := rewriteUnitWithRollback(path, "new-unit", "old-unit", nil, s.write, s.remove, s.reload)
+		if err != nil {
+			t.Fatalf("want nil, got %v", err)
+		}
+		if s.files[path] != "new-unit" {
+			t.Errorf("unit not written; files=%v", s.files)
+		}
+		if _, ok := s.files[backup]; ok {
+			t.Error("backup must be cleaned up on reload success")
+		}
+		// Expect: snapshot (old-unit) → rewrite (new-unit) → reload ok → rm backup.
+		if len(s.writeLog) != 2 {
+			t.Errorf("expected 2 writes (snapshot + unit); got %d: %v", len(s.writeLog), s.writeLog)
+		}
+		if len(s.removeLog) != 1 || s.removeLog[0] != backup {
+			t.Errorf("expected backup removed exactly once; got %v", s.removeLog)
+		}
+	})
+
+	t.Run("edited unit, reload fails then rollback + second reload succeeds", func(t *testing.T) {
+		s := newRewriteStubs()
+		s.reloadErrs = []error{&stubErr{"syntax-error"}} // first reload fails, second (post-restore) succeeds
+		err := rewriteUnitWithRollback(path, "new-unit", "old-unit", nil, s.write, s.remove, s.reload)
+		if err == nil {
+			t.Fatal("expected error so outer installer aborts enable/start")
+		}
+		if !strings.Contains(err.Error(), "rolled back to prior contents") {
+			t.Errorf("error must explain the rollback for the operator; got %v", err)
+		}
+		if s.files[path] != "old-unit" {
+			t.Errorf("unit must be restored to prior bytes; got %q", s.files[path])
+		}
+		if _, ok := s.files[backup]; ok {
+			t.Error("backup cleaned up after successful second reload")
+		}
+		if s.reloadLog != 2 {
+			t.Errorf("expected 2 reloads (fail + recover); got %d", s.reloadLog)
+		}
+	})
+
+	t.Run("edited unit, reload fails and restore write also fails", func(t *testing.T) {
+		s := newRewriteStubs()
+		s.reloadErrs = []error{&stubErr{"syntax-error"}}
+		// First write succeeds (writes both snapshot + new unit); then
+		// the restore write (same path, new data=old-unit) must fail.
+		callCount := 0
+		s.writeErrOn = map[string]error{}
+		// Manual function: snapshot write → ok, main write → ok, restore
+		// write → fail. Track via a wrapper swapping the closure.
+		write := func(name string, data []byte, perm os.FileMode) error {
+			callCount++
+			// Call 3 = the restore attempt (snapshot, main, restore).
+			if callCount == 3 {
+				return &stubErr{"disk-full"}
+			}
+			return s.write(name, data, perm)
+		}
+		err := rewriteUnitWithRollback(path, "new-unit", "old-unit", nil, write, s.remove, s.reload)
+		if err == nil || !strings.Contains(err.Error(), "rollback ALSO failed") {
+			t.Fatalf("want error naming both failures; got %v", err)
+		}
+		// Unit on disk is still "new-unit" (the failed-to-restore one).
+		// Operator sees the backup file path + the evidence.
+		if s.files[path] != "new-unit" {
+			t.Errorf("if restore fails, the failed unit remains for forensics; got %q", s.files[path])
+		}
+	})
+
+	t.Run("snapshot write fails — refuse to proceed without safety net", func(t *testing.T) {
+		s := newRewriteStubs()
+		s.writeErrOn[backup] = &stubErr{"readonly-fs"}
+		err := rewriteUnitWithRollback(path, "new-unit", "old-unit", nil, s.write, s.remove, s.reload)
+		if err == nil || !strings.Contains(err.Error(), "snapshot existing unit") {
+			t.Fatalf("want snapshot error; got %v", err)
+		}
+		if _, ok := s.files[path]; ok {
+			t.Error("main unit must NOT be written when snapshot failed — safety first")
+		}
+		if s.reloadLog != 0 {
+			t.Errorf("must not reload after snapshot failure; got %d reloads", s.reloadLog)
+		}
+	})
+
+	t.Run("second reload fails — operator must kick systemd manually", func(t *testing.T) {
+		s := newRewriteStubs()
+		s.reloadErrs = []error{&stubErr{"first-fail"}, &stubErr{"second-fail"}}
+		err := rewriteUnitWithRollback(path, "new-unit", "old-unit", nil, s.write, s.remove, s.reload)
+		if err == nil || !strings.Contains(err.Error(), "second reload failed") {
+			t.Fatalf("want error asking for manual daemon-reload; got %v", err)
+		}
+		if s.files[path] != "old-unit" {
+			t.Errorf("unit bytes should still be restored; got %q", s.files[path])
+		}
+		// Backup NOT removed — the operator may need it.
+		if _, ok := s.files[backup]; !ok {
+			t.Error("backup should remain on second-reload failure")
+		}
+	})
+}
+
+// stubErr lets us pack a test-scoped error without dragging in errors.New
+// at every case.
+type stubErr struct{ msg string }
+
+func (e *stubErr) Error() string { return e.msg }
