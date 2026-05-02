@@ -79,10 +79,9 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .sidebar-status .status-dot.offline,.sidebar-status .status-dot.off{background:var(--nz-text-faint)}
 .sidebar-status .status-info{flex:1;min-width:0;overflow:hidden}
 .sidebar-status .status-ws{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.sidebar-status .status-sys{color:var(--nz-text-dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
 /* R110-P1 WS outage duration hint — surfaced alongside the reconnect button
    so users see "已断开 N 秒/分" instead of a static pulsing dot. Amber to
-   mirror the .connecting pulse color; size matches .status-sys. */
+   mirror the .connecting pulse color. */
 .sidebar-status .status-outage{color:var(--nz-amber);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
 /* Auth rate-limit countdown surfaced inline in the sidebar status row
    instead of a top-of-screen toast. Amber mirrors .status-outage (this is
@@ -931,8 +930,7 @@ body.kbd-open .input-hints{display:none}
 /* Sidebar footer: version + help trigger. Keeps the info at the very
    bottom, above the safe-area inset on iOS. Pointer-events isolation so
    the line itself doesn't steal taps meant for scrollable content above. */
-.sidebar-footer{padding:6px 16px;border-top:1px solid var(--nz-border);font-size:11px;color:var(--nz-text-dim);display:flex;align-items:center;justify-content:space-between;gap:8px;flex-shrink:0;min-height:28px}
-.sidebar-footer .sf-version{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-variant-numeric:tabular-nums}
+.sidebar-footer{padding:6px 16px;border-top:1px solid var(--nz-border);font-size:11px;color:var(--nz-text-dim);display:flex;align-items:center;justify-content:flex-end;gap:8px;flex-shrink:0;min-height:28px}
 .sidebar-footer .sf-help{background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);cursor:pointer;border-radius:50%;width:20px;height:20px;line-height:1;padding:0;font-size:12px;display:inline-flex;align-items:center;justify-content:center;flex-shrink:0;font-family:inherit}
 .sidebar-footer .sf-help:hover{color:var(--nz-text-strong);border-color:var(--nz-accent)}
 @media (pointer: coarse){
@@ -1185,7 +1183,6 @@ body.kbd-open .sidebar-footer{display:none}
       </div>
     </div>
     <div class="sidebar-footer" id="sidebar-footer">
-      <span class="sf-version" id="sf-version" title="naozhi 版本">naozhi</span>
       <button type="button" class="sf-help" id="sf-help" title="快捷键 (按 ?)" aria-label="快捷键" aria-haspopup="dialog" onclick="showCheatsheet()">?</button>
     </div>
   </nav>

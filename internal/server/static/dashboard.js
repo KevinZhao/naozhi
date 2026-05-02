@@ -59,7 +59,6 @@ let defaultCLIVersion = '';
 // version) without an extra fetch. Refreshed by fetchSessions on every
 // successful poll. Nil-safe consumer: absence = show nothing, never throw.
 let lastStatsSnapshot = null;
-let localWsInfo = { name: '', sys: '' };
 const sessionWorkspaces = {};
 const sessionNodes = {};
 const sessionBackends = {}; // per-session CLI backend picked at creation ("claude" / "kiro" / ...)
@@ -199,14 +198,7 @@ function debouncedFetchSessions() {
 
 function renderSidebar(data) {
   const st = data.stats;
-  localWsInfo = { name: st.workspace_name || st.workspace_id || '', sys: '' };
-  if (st.system) {
-    const sys = st.system;
-    let memStr = sys.memory_mb > 0 ? (sys.memory_mb >= 1024 ? (sys.memory_mb / 1024).toFixed(1) + 'G' : sys.memory_mb + 'M') : '';
-    localWsInfo.sys = sys.os + '/' + sys.arch + ' \u00b7 ' + sys.cpus + 'C' + (memStr ? '/' + memStr : '');
-  }
   updateStatusBar();
-  updateVersionBadge(st.version_tag);
   if (st.agents) availableAgents = st.agents;
   if (st.default_workspace) defaultWorkspace = st.default_workspace;
   if (st.projects) projectsData = st.projects;
@@ -989,11 +981,13 @@ function cliIcon(name) {
 //   "claude-sonnet-4-6"       → "sonnet"
 //   "haiku-4.5-20251001"      → "haiku"
 //   "claude-opus-4-7[1m]"     → "opus"
-//   "kiro"                    → "kiro" (short-enough as-is)
 //   ""  / "general" / null    → ""    (suppressed — empty chip is noise)
+//   其他未识别值              → ""    (抑制 — 避免与侧栏 header 中的
+//                                     项目/文件夹名重复。dashboard 直创
+//                                     session 的 key 末段是 folderName，
+//                                     会被后端回填为 Agent，不能当模型展示)
 // Pure function so a contract test can assert the match table without
-// driving the DOM. Returns '' for values that shouldn't render a chip at
-// all (empty, generic, or too-generic marker strings).
+// driving the DOM.
 function shortAgentLabel(agent) {
   if (!agent || typeof agent !== 'string') return '';
   const raw = agent.trim().toLowerCase();
@@ -1004,11 +998,7 @@ function shortAgentLabel(agent) {
   for (const family of ['opus', 'sonnet', 'haiku']) {
     if (raw.indexOf(family) !== -1) return family;
   }
-  // Non-Anthropic or unknown: show the first 10 chars of the original
-  // value so operators still get a signal. Use the original (not lowered)
-  // so vanity casing like "Kiro" is preserved.
-  const trimmed = agent.trim();
-  return trimmed.length > 10 ? trimmed.slice(0, 10) : trimmed;
+  return '';
 }
 
 function sessionCardHtml(s) {
@@ -1226,12 +1216,10 @@ function updateStatusBar() {
   const currentIsLocal = !multi || selectedNode === 'local';
 
   // Local node row (always first)
-  const localName = localWsInfo.name || 'workspace';
   // Distinguish short reconnect vs stable polling mode
   const statusKey = (wsm.state === WS_STATES.DISCONNECTED && wsm.backoff > 8000) ? 'disconnected' : (wsm.state === WS_STATES.DISCONNECTED ? 'disconnected_retry' : wsm.state);
-  const localLabel = localName + ' \u00b7 ' + (STATUS_LABELS[statusKey] || wsm.state);
+  const localLabel = STATUS_LABELS[statusKey] || wsm.state;
   const dotKey = statusKey === 'disconnected' ? 'connecting' : wsm.state; // HTTP fallback = yellow dot
-  const localSys = localWsInfo.sys || '';
 
   // UX P1 manual reconnect: when the connection has been down long enough
   // that backoff has grown past 8s (statusKey "disconnected" — the
@@ -1271,7 +1259,6 @@ function updateStatusBar() {
       '<span class="status-dot ' + (VALID_DOT_CLASSES[dotKey] || 'off') + '"></span>' +
       '<div class="status-info">' +
         '<div class="status-ws">' + esc(localLabel) + '</div>' +
-        (localSys ? '<div class="status-sys">' + esc(localSys) + '</div>' : '') +
         (outageLabel ? '<div class="status-outage">' + esc(outageLabel) + '</div>' : '') +
         (authWaitLabel ? '<div class="status-authwait">' + esc(authWaitLabel) + '</div>' : '') +
       '</div>' + reconnectBtnGated +
@@ -1281,16 +1268,13 @@ function updateStatusBar() {
     // remote. Other remotes are summarized by the selector's aggregated
     // alert dot \u2014 users open the dropdown to see the full list.
     const nd = nodesData[selectedNode] || {};
-    const name = nd.display_name || selectedNode;
     const status = nd.status || (wsUp ? 'offline' : 'unreachable');
     const dotCls = VALID_DOT_CLASSES[status] || 'offline';
     const label = REMOTE_LABELS[status] || status;
-    const addr = nd.remote_addr || '';
     html = '<div class="status-row">' +
       '<span class="status-dot ' + dotCls + '"></span>' +
       '<div class="status-info">' +
-        '<div class="status-ws">' + esc(name) + ' \u00b7 ' + esc(label) + '</div>' +
-        (addr ? '<div class="status-sys">' + esc(addr) + '</div>' : '') +
+        '<div class="status-ws">' + esc(label) + '</div>' +
       '</div></div>';
   }
 
@@ -1299,23 +1283,6 @@ function updateStatusBar() {
   // flipping offline should update both the bar below and the selector above
   // without waiting for the next /api/sessions poll.
   updateNodeSelector();
-}
-
-// updateVersionBadge writes the build tag into the sidebar footer. Called
-// on every /api/sessions poll so a hot-reload refresh (e.g. zero-downtime
-// restart) surfaces immediately. An empty tag (server built without
-// -X main.version=…) falls back to the plain product name.
-function updateVersionBadge(tag) {
-  const el = document.getElementById('sf-version');
-  if (!el) return;
-  const clean = typeof tag === 'string' ? tag.trim() : '';
-  if (clean) {
-    el.textContent = 'naozhi ' + clean;
-    el.title = 'naozhi ' + clean;
-  } else {
-    el.textContent = 'naozhi';
-    el.title = 'naozhi (version unknown — build with Makefile for tag)';
-  }
 }
 
 // CHEATSHEET_ENTRIES is the single source of truth for the shortcut modal.

@@ -3894,7 +3894,6 @@ func TestDashboardHTML_R150_FilePreviewA11yLocalized(t *testing.T) {
 		{"fv-btn-copy title", `id="fv-btn-copy" title="复制路径" aria-label="复制路径">复制<`},
 		{"fv-btn-download title", `id="fv-btn-download" title="下载文件" aria-label="下载文件">下载<`},
 		{"fv-btn-close title", `id="fv-btn-close" title="关闭" aria-label="关闭预览">&times;<`},
-		{"sf-version title", `<span class="sf-version" id="sf-version" title="naozhi 版本">naozhi</span>`},
 		{"voice-overlay aria-label", `aria-label="语音录制"`},
 	}
 	for _, w := range wantChinese {
@@ -3914,7 +3913,6 @@ func TestDashboardHTML_R150_FilePreviewA11yLocalized(t *testing.T) {
 		{"fv-btn-copy legacy", `title="Copy path" aria-label="Copy path">copy<`},
 		{"fv-btn-download legacy", `title="Download" aria-label="Download">download<`},
 		{"fv-btn-close legacy", `title="Close" aria-label="Close preview">&times;<`},
-		{"sf-version legacy", `title="naozhi version"`},
 		{"voice-overlay legacy", `aria-label="Voice recording"`},
 	}
 	for _, f := range forbiddenEnglish {
@@ -3927,7 +3925,7 @@ func TestDashboardHTML_R150_FilePreviewA11yLocalized(t *testing.T) {
 	// openFilePreview / openInlineCodePreview grabs #fv-drawer / #fv-title
 	// / #fv-btn-copy etc. by id; a rename here would break the drawer
 	// silently without any a11y signal.
-	for _, id := range []string{`id="fv-drawer"`, `id="fv-title"`, `id="fv-btn-copy"`, `id="fv-btn-download"`, `id="fv-btn-close"`, `id="voice-overlay"`, `id="sf-version"`} {
+	for _, id := range []string{`id="fv-drawer"`, `id="fv-title"`, `id="fv-btn-copy"`, `id="fv-btn-download"`, `id="fv-btn-close"`, `id="voice-overlay"`} {
 		if !strings.Contains(html, id) {
 			t.Errorf("dashboard.html LOST the id anchor %q — JS lookups will return null and break the feature", id)
 		}
