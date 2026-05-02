@@ -1170,7 +1170,10 @@ function _updateStatusTick(state) {
 
 function updateStatusBar() {
   const container = document.getElementById('sidebar-status');
-  if (!container) return;
+  // #sidebar-status 节点已在"底部让位给 session 列表"的迭代中删除。没节点就
+  // 早退，但 updateNodeSelector 必须照常跑——它驱动顶部多节点下拉的显隐，
+  // 跟 sidebar-status 是两码事，否则 multi-node 切换框会一起消失。
+  if (!container) { updateNodeSelector(); return; }
   const wsUp = wsm.state === WS_STATES.CONNECTED;
   // When multiple nodes are connected, the #node-selector widget already
   // surfaces per-node status; the sidebar-status bar collapses to "current
