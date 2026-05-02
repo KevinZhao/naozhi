@@ -334,6 +334,9 @@ func main() {
 		case "shim":
 			runShim(os.Args[2:])
 			return
+		case "doctor":
+			runDoctor(os.Args[2:])
+			return
 		}
 	}
 
