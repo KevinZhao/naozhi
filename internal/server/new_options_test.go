@@ -1,6 +1,8 @@
 package server
 
 import (
+	"os"
+	"strings"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/platform"
@@ -107,5 +109,44 @@ func TestNewWithOptions_NilMapsTolerated(t *testing.T) {
 	})
 	if srv == nil {
 		t.Fatal("NewWithOptions returned nil server for minimal opts")
+	}
+}
+
+// TestServerNew_MarkedDeprecated pins the Round 125 audit: production
+// (cmd/naozhi/main.go) already uses NewWithOptions, and the legacy
+// positional-arg `New` constructor carries a `// Deprecated:` godoc
+// marker so new call sites get a staticcheck/gopls warning. The
+// marker must:
+//
+//  1. Stay on the `New` function (not NewWithOptions).
+//  2. Point callers at NewWithOptions by name so the migration path is
+//     discoverable from the lint message alone.
+//
+// We assert by reading the source file — godoc markers are not
+// reflectable at runtime. This catches both accidental removal during
+// a refactor and silent re-ordering that could break `go doc -all`.
+func TestServerNew_MarkedDeprecated(t *testing.T) {
+	t.Parallel()
+	// Read the server.go source (tests and server are in the same package
+	// so a relative path works).
+	data, err := os.ReadFile("server.go")
+	if err != nil {
+		t.Fatalf("read server.go: %v", err)
+	}
+	src := string(data)
+	// The Deprecated godoc line must immediately precede `func New(`.
+	idx := strings.Index(src, "func New(addr string")
+	if idx < 0 {
+		t.Fatal("func New(addr string ...) not found in server.go")
+	}
+	// Look back for the `// Deprecated:` line within the preceding
+	// godoc block (cap at 600 chars — the current block is ~500).
+	start := idx - 600
+	if start < 0 {
+		start = 0
+	}
+	window := src[start:idx]
+	if !strings.Contains(window, "// Deprecated: use NewWithOptions") {
+		t.Errorf("server.New must carry godoc `// Deprecated: use NewWithOptions` immediately above the func; window=%q", window)
 	}
 }

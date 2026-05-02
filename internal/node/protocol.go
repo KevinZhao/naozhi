@@ -18,6 +18,13 @@ type ServerMsg struct {
 	Reason string           `json:"reason,omitempty"` // additional context
 	Error  string           `json:"error,omitempty"`  // error message
 	Node   string           `json:"node,omitempty"`   // source node
+	// RetryAfter is advisory: when set on auth_fail rate-limit replies, the
+	// client should wait at least this many seconds before retrying. Mirrors
+	// the HTTP Retry-After header the /api/auth/login 429 branch emits, so
+	// WS auth and HTTP login lockouts surface identical UX affordances.
+	// Omitted on non-rate-limit auth_fail (e.g. invalid token) and on all
+	// other message types — older clients silently ignore the unknown field.
+	RetryAfter int `json:"retry_after,omitempty"`
 }
 
 // ClientMsg is a message sent from the WebSocket client.

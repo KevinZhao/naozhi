@@ -23,6 +23,14 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
+// wsAuthRetryAfterSeconds is the advisory "try again in N seconds" value the
+// WS auth_fail rate-limit reply carries. It intentionally mirrors the
+// HTTP /api/auth/login Retry-After header (60s) so the front-end can share
+// one countdown helper across HTTP login and WS auth paths. The underlying
+// limiter refills a token every 12s (burst=5); 60s is a conservative upper
+// bound that avoids sending users into another back-to-back 429 loop.
+const wsAuthRetryAfterSeconds = 60
+
 // Hub manages WebSocket client connections and event subscriptions.
 type Hub struct {
 	mu sync.RWMutex
@@ -322,7 +330,16 @@ func (h *Hub) unregister(c *wsClient) {
 func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 	// Per-IP rate limit to prevent brute-force via rapid connect/auth/disconnect cycles.
 	if h.wsAuthLimiter != nil && !h.wsAuthLimiter(c.remoteIP) {
-		c.SendJSON(node.ServerMsg{Type: "auth_fail", Error: "too many attempts"})
+		// Advisory RetryAfter matches the HTTP /api/auth/login 429 branch
+		// (dashboard_auth.go writes Retry-After: 60) so WS and HTTP auth
+		// lockouts surface identical countdowns on the front end. Clients
+		// older than R110-P2 ignore the field; new clients visually gate
+		// re-auth until the window elapses.
+		c.SendJSON(node.ServerMsg{
+			Type:       "auth_fail",
+			Error:      "too many attempts",
+			RetryAfter: wsAuthRetryAfterSeconds,
+		})
 		return
 	}
 	// Short-circuit when the connection is already authenticated via cookie —

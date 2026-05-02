@@ -317,6 +317,12 @@ func NewWithOptions(opts ServerOptions) *Server {
 // stuffs the positional args into ServerOptions (overriding any matching
 // fields the caller may have also set in opts) and delegates to
 // NewWithOptions. New callers should use NewWithOptions directly.
+//
+// Deprecated: use NewWithOptions. Production (cmd/naozhi/main.go) already
+// calls NewWithOptions; this signature is kept to avoid churning ~20 test
+// call sites at once — they can migrate in-place at any future touch.
+// Gopls / staticcheck will flag new positional-style call sites so the
+// migration path stays discoverable.
 func New(addr string, router *session.Router, platforms map[string]platform.Platform, agents map[string]session.AgentOpts, agentCommands map[string]string, scheduler *cron.Scheduler, backend string, opts ServerOptions) *Server {
 	opts.Addr = addr
 	opts.Router = router
