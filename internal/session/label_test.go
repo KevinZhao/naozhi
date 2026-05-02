@@ -6,6 +6,7 @@ import (
 )
 
 func TestValidateUserLabel(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		in      string
@@ -46,6 +47,7 @@ func TestValidateUserLabel(t *testing.T) {
 // onChange broadcast so connected dashboards refresh immediately instead of
 // waiting up to one poll interval. R64-GO-H1 regression.
 func TestSetUserLabel_NotifiesChange(t *testing.T) {
+	t.Parallel()
 	r := newTestRouter(3)
 	sk := "feishu:direct:test_user:default"
 	injectSession(r, sk, nil)
@@ -68,6 +70,7 @@ func TestSetUserLabel_NotifiesChange(t *testing.T) {
 // key is a true no-op — no onChange fires, so the dashboard doesn't poll
 // uselessly on typos from an RPC client. R64-GO-H1.
 func TestSetUserLabel_UnknownKeyNoNotify(t *testing.T) {
+	t.Parallel()
 	r := newTestRouter(3)
 	var notified int
 	r.SetOnChange(func() { notified++ })
@@ -86,6 +89,7 @@ func TestSetUserLabel_UnknownKeyNoNotify(t *testing.T) {
 // this fix, callers (project favorite toggle) only saw a refresh on the
 // next 5s poll tick despite the bump.
 func TestBumpVersion_NotifiesAndIncrements(t *testing.T) {
+	t.Parallel()
 	r := newTestRouter(3)
 	var notified int
 	r.SetOnChange(func() { notified++ })

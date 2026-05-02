@@ -8,6 +8,7 @@ import (
 )
 
 func TestExpandHome_NoTilde(t *testing.T) {
+	t.Parallel()
 	input := "/absolute/path"
 	got := ExpandHome(input)
 	if got != input {
@@ -16,6 +17,7 @@ func TestExpandHome_NoTilde(t *testing.T) {
 }
 
 func TestExpandHome_RelativePath(t *testing.T) {
+	t.Parallel()
 	input := "relative/path"
 	got := ExpandHome(input)
 	if got != input {
@@ -24,6 +26,7 @@ func TestExpandHome_RelativePath(t *testing.T) {
 }
 
 func TestExpandHome_TildeSlash(t *testing.T) {
+	t.Parallel()
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Skip("cannot determine home dir:", err)
@@ -37,6 +40,7 @@ func TestExpandHome_TildeSlash(t *testing.T) {
 }
 
 func TestExpandHome_TildeOnly(t *testing.T) {
+	t.Parallel()
 	// "~" alone (without slash) should NOT be expanded per the HasPrefix("~/") guard
 	input := "~"
 	got := ExpandHome(input)
@@ -46,6 +50,7 @@ func TestExpandHome_TildeOnly(t *testing.T) {
 }
 
 func TestExpandHome_TildePrefix(t *testing.T) {
+	t.Parallel()
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Skip("cannot determine home dir:", err)
@@ -58,6 +63,7 @@ func TestExpandHome_TildePrefix(t *testing.T) {
 }
 
 func TestExpandHome_EmptyString(t *testing.T) {
+	t.Parallel()
 	got := ExpandHome("")
 	if got != "" {
 		t.Errorf("ExpandHome(\"\") = %q, want empty", got)

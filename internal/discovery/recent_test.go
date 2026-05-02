@@ -14,6 +14,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestResolveWorkspaceByParts_RealDir(t *testing.T) {
+	t.Parallel()
 	// Use t.TempDir() so the path definitely exists.
 	base := t.TempDir()
 	// encoded: replace "/" with "-"
@@ -36,6 +37,7 @@ func TestResolveWorkspaceByParts_RealDir(t *testing.T) {
 }
 
 func TestResolveWorkspaceByParts_Cache(t *testing.T) {
+	t.Parallel()
 	base := t.TempDir()
 	encoded := "-" + base[1:]
 	for i := 0; i < len(encoded); i++ {
@@ -56,6 +58,7 @@ func TestResolveWorkspaceByParts_Cache(t *testing.T) {
 }
 
 func TestResolveWorkspaceByParts_NonexistentPath(t *testing.T) {
+	t.Parallel()
 	// Encode a path that doesn't exist on disk.
 	encoded := "-nonexistent-path-that-cannot-exist-xyz987"
 	dfsPathCache.Delete(encoded)
@@ -68,6 +71,7 @@ func TestResolveWorkspaceByParts_NonexistentPath(t *testing.T) {
 }
 
 func TestResolveWorkspaceByParts_EmptyAndNoLeadingDash(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -92,6 +96,7 @@ func TestResolveWorkspaceByParts_EmptyAndNoLeadingDash(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestCachedJSONLFileInfo_Basic(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	sid1 := "aaaaaaaa-0001-0001-0001-000000000001"
 	sid2 := "aaaaaaaa-0001-0001-0001-000000000002"
@@ -129,6 +134,7 @@ func TestCachedJSONLFileInfo_Basic(t *testing.T) {
 }
 
 func TestCachedJSONLFileInfo_CacheHitAfterRead(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	sid := "aaaaaaaa-0001-0001-0001-000000000003"
 	if err := os.WriteFile(filepath.Join(dir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
@@ -148,6 +154,7 @@ func TestCachedJSONLFileInfo_CacheHitAfterRead(t *testing.T) {
 }
 
 func TestCachedJSONLFileInfo_NonexistentDir(t *testing.T) {
+	t.Parallel()
 	dirFilesCache.Delete("/nonexistent/dir")
 	t.Cleanup(func() { dirFilesCache.Delete("/nonexistent/dir") })
 
@@ -162,6 +169,7 @@ func TestCachedJSONLFileInfo_NonexistentDir(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRecentFromJSONLFiles_Basic(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	workspace := "/tmp/test-workspace"
 	sid := "bbbbbbbb-0001-0001-0001-000000000001"
@@ -186,6 +194,7 @@ func TestRecentFromJSONLFiles_Basic(t *testing.T) {
 }
 
 func TestRecentFromJSONLFiles_ExcludeBySessionID(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	workspace := "/tmp/exclude-test"
 	sid := "bbbbbbbb-0001-0001-0001-000000000002"
@@ -205,6 +214,7 @@ func TestRecentFromJSONLFiles_ExcludeBySessionID(t *testing.T) {
 }
 
 func TestRecentFromJSONLFiles_InvalidSessionIDSkipped(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	workspace := "/tmp/invalid-sid"
 
@@ -235,6 +245,7 @@ func TestRecentFromJSONLFiles_InvalidSessionIDSkipped(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestRecentFromParsedIndex_Basic(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	workspace := "/tmp/index-project"
 	sid := "dddddddd-0001-0001-0001-000000000001"
@@ -271,6 +282,7 @@ func TestRecentFromParsedIndex_Basic(t *testing.T) {
 }
 
 func TestRecentFromParsedIndex_FallsBackToSummaryForPrompt(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	workspace := "/tmp/fallback-prompt"
 	sid := "dddddddd-0001-0001-0001-000000000002"
@@ -300,6 +312,7 @@ func TestRecentFromParsedIndex_FallsBackToSummaryForPrompt(t *testing.T) {
 }
 
 func TestRecentFromParsedIndex_SkipMissingJSONL(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	workspace := "/tmp/missing-jsonl"
 	sid := "dddddddd-0001-0001-0001-000000000003"
@@ -318,6 +331,7 @@ func TestRecentFromParsedIndex_SkipMissingJSONL(t *testing.T) {
 }
 
 func TestRecentFromParsedIndex_ExcludeBySessionID(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	workspace := "/tmp/exclude-idx"
 	sid := "dddddddd-0001-0001-0001-000000000004"
@@ -343,6 +357,7 @@ func TestRecentFromParsedIndex_ExcludeBySessionID(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExtractFirstPrompt_Basic(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "session.jsonl")
 
@@ -360,6 +375,7 @@ func TestExtractFirstPrompt_Basic(t *testing.T) {
 }
 
 func TestExtractFirstPrompt_ReturnsFirstNotLast(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "multi.jsonl")
 
@@ -382,6 +398,7 @@ func TestExtractFirstPrompt_ReturnsFirstNotLast(t *testing.T) {
 }
 
 func TestExtractFirstPrompt_NonexistentFile(t *testing.T) {
+	t.Parallel()
 	got := extractFirstPrompt("/nonexistent/session.jsonl")
 	if got != "" {
 		t.Errorf("expected empty for nonexistent file, got %q", got)
@@ -389,6 +406,7 @@ func TestExtractFirstPrompt_NonexistentFile(t *testing.T) {
 }
 
 func TestExtractFirstPrompt_SkipsNonUserLines(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "mixed.jsonl")
 
@@ -436,6 +454,7 @@ func makeWorkspace(t *testing.T) (claudeDir, workspace, encodedDir string) {
 }
 
 func TestRecentSessions_EmptyDir(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	got := RecentSessions(claudeDir, 10, 7*24*time.Hour, nil)
 	if len(got) != 0 {
@@ -444,6 +463,7 @@ func TestRecentSessions_EmptyDir(t *testing.T) {
 }
 
 func TestRecentSessions_EmptyClaudeDir(t *testing.T) {
+	t.Parallel()
 	got := RecentSessions("", 10, 7*24*time.Hour, nil)
 	if got != nil {
 		t.Errorf("expected nil for empty claudeDir, got %v", got)
@@ -451,6 +471,7 @@ func TestRecentSessions_EmptyClaudeDir(t *testing.T) {
 }
 
 func TestRecentSessions_FallbackFromJSONL(t *testing.T) {
+	t.Parallel()
 	claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
@@ -492,6 +513,7 @@ func TestRecentSessions_FallbackFromJSONL(t *testing.T) {
 }
 
 func TestRecentSessions_WithSessionsIndex(t *testing.T) {
+	t.Parallel()
 	claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
@@ -536,6 +558,7 @@ func TestRecentSessions_WithSessionsIndex(t *testing.T) {
 }
 
 func TestRecentSessions_Limit(t *testing.T) {
+	t.Parallel()
 	claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
@@ -573,6 +596,7 @@ func TestRecentSessions_Limit(t *testing.T) {
 }
 
 func TestRecentSessions_ExcludeByID(t *testing.T) {
+	t.Parallel()
 	claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
@@ -601,6 +625,7 @@ func TestRecentSessions_ExcludeByID(t *testing.T) {
 }
 
 func TestRecentSessions_SkipsHiddenProjectDirs(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	// A dir name containing "--" should be skipped (hidden path pattern)
 	hiddenDir := filepath.Join(claudeDir, "projects", "-home--hidden-project")
@@ -621,6 +646,7 @@ func TestRecentSessions_SkipsHiddenProjectDirs(t *testing.T) {
 }
 
 func TestRecentSessions_MaxAge(t *testing.T) {
+	t.Parallel()
 	claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
@@ -650,6 +676,7 @@ func TestRecentSessions_MaxAge(t *testing.T) {
 }
 
 func TestRecentSessions_SortedByLastActive(t *testing.T) {
+	t.Parallel()
 	claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)
@@ -693,6 +720,7 @@ func TestRecentSessions_SortedByLastActive(t *testing.T) {
 }
 
 func TestRecentSessions_ZeroLimit(t *testing.T) {
+	t.Parallel()
 	claudeDir, workspace, encodedDir := makeWorkspace(t)
 
 	projDir := filepath.Join(claudeDir, "projects", encodedDir)

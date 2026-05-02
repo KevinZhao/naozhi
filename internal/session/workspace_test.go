@@ -10,6 +10,7 @@ import (
 // relative paths, and oversized inputs BEFORE filepath.Clean silently
 // folds `/home/../etc` into `/etc`.
 func TestValidateRemoteWorkspacePath(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name    string
 		input   string

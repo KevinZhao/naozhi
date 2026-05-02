@@ -12,6 +12,7 @@ import (
 // the precise boundary at which IEEE-754 doubles can no longer represent
 // consecutive integers without rounding.
 func TestMaxSafeJSONInt_MatchesJavaScript(t *testing.T) {
+	t.Parallel()
 	// Number.MAX_SAFE_INTEGER in ECMAScript: 2^53 - 1 = 9007199254740991.
 	const jsMaxSafeInteger uint64 = 9007199254740991
 	if MaxSafeJSONInt != jsMaxSafeInteger {
@@ -30,6 +31,7 @@ func TestMaxSafeJSONInt_MatchesJavaScript(t *testing.T) {
 // destination. The test failing would mean float64 suddenly has 64-bit
 // integer precision — i.e. the universe has new physics.
 func TestMaxSafeJSONInt_BoundaryRoundTrip(t *testing.T) {
+	t.Parallel()
 	// At MaxSafeJSONInt the round-trip is exact.
 	safe := MaxSafeJSONInt
 	safeBytes, err := json.Marshal(safe)

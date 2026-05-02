@@ -27,6 +27,7 @@ import (
 // If any of these is removed, the author is forced to re-evaluate the
 // leak/reuse tradeoff instead of silently creating an accumulation bug.
 func TestShutdown_SingleShotContract(t *testing.T) {
+	t.Parallel()
 	src, err := os.ReadFile("router.go")
 	if err != nil {
 		t.Fatalf("read router.go: %v", err)

@@ -13,6 +13,7 @@ import (
 // This is the R49-REL-CONNECTOR-SEND-RESULT-LOSS happy path — upstream/
 // connector calls sess.LogSystemEvent after sess.Send errors.
 func TestLogSystemEvent_AppendsToPersistedHistory(t *testing.T) {
+	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
 
 	s.LogSystemEvent("发送失败：connection refused")
@@ -38,6 +39,7 @@ func TestLogSystemEvent_AppendsToPersistedHistory(t *testing.T) {
 // does not pollute the event stream with empty system rows that the
 // dashboard would render as a blank gear icon.
 func TestLogSystemEvent_EmptySummaryIsNoop(t *testing.T) {
+	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
 
 	s.LogSystemEvent("")
@@ -52,6 +54,7 @@ func TestLogSystemEvent_EmptySummaryIsNoop(t *testing.T) {
 // times in quick succession (retry loop or shim flap), and each failure
 // should be visible to the operator.
 func TestLogSystemEvent_MultipleCallsAllLand(t *testing.T) {
+	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
 
 	s.LogSystemEvent("first failure")
@@ -75,6 +78,7 @@ func TestLogSystemEvent_MultipleCallsAllLand(t *testing.T) {
 // match the user/tool_use/thinking scan nor should they clobber existing
 // lastPrompt / lastActivity (a pending user message set by Send).
 func TestLogSystemEvent_DoesNotOverwriteLivePrompt(t *testing.T) {
+	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
 	s.lastPrompt.Store("live user message")
 	s.lastActivity.Store("live tool")
@@ -102,6 +106,7 @@ func TestLogSystemEvent_DoesNotOverwriteLivePrompt(t *testing.T) {
 // connector errors must not be able to balloon persistedHistory past
 // maxPersistedHistory entries.
 func TestLogSystemEvent_BoundedByMaxPersistedHistory(t *testing.T) {
+	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
 
 	// Pre-fill with maxPersistedHistory-1 non-system entries so the cap

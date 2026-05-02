@@ -25,6 +25,7 @@ func newSolidImage(w, h int, c color.RGBA) *image.RGBA {
 }
 
 func TestMakeThumbnail_PNG(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	if err := png.Encode(&buf, newSolidImage(8, 8, color.RGBA{255, 0, 0, 255})); err != nil {
 		t.Fatalf("png encode: %v", err)
@@ -40,6 +41,7 @@ func TestMakeThumbnail_PNG(t *testing.T) {
 // "unknown format" error and MakeThumbnail silently returns "". Removing the
 // bmp import would immediately fail this test.
 func TestMakeThumbnail_BMP(t *testing.T) {
+	t.Parallel()
 	var buf bytes.Buffer
 	if err := bmp.Encode(&buf, newSolidImage(16, 16, color.RGBA{0, 128, 255, 255})); err != nil {
 		t.Fatalf("bmp encode: %v", err)
@@ -61,6 +63,7 @@ const webpGopher1bppLosslessB64 = "UklGRrIBAABXRUJQVlA4TKUBAAAvSsAYAA8w//M///Mfe
 // than attempting to hand-craft one — WebP's RIFF+VP8L container is too
 // elaborate for a synthetic minimal payload.
 func TestMakeThumbnail_WebP(t *testing.T) {
+	t.Parallel()
 	data, err := base64.StdEncoding.DecodeString(webpGopher1bppLosslessB64)
 	if err != nil {
 		t.Fatalf("decode fixture base64: %v", err)
@@ -75,6 +78,7 @@ func TestMakeThumbnail_WebP(t *testing.T) {
 // anything image.DecodeConfig cannot parse must return "". Guards against a
 // future decoder import accidentally claiming plain bytes.
 func TestMakeThumbnail_UnknownFormat(t *testing.T) {
+	t.Parallel()
 	cases := [][]byte{
 		[]byte("not an image"),
 		{0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07},
@@ -93,6 +97,7 @@ func TestMakeThumbnail_UnknownFormat(t *testing.T) {
 // return "" BEFORE any full Decode attempt. Protects against a future change
 // that would lift the bmp decoder above the pixel cap.
 func TestMakeThumbnail_OversizedPixelCountRejectedBMP(t *testing.T) {
+	t.Parallel()
 	// MakeThumbnail calls image.DecodeConfig (reads header only) before full
 	// Decode, so we can advertise oversized dimensions via a minimal hand-
 	// crafted BMP header without allocating 64 MB of pixels. The DecodeConfig

@@ -14,6 +14,7 @@ import (
 )
 
 func TestNew_Defaults(t *testing.T) {
+	t.Parallel()
 	w := New(Config{Token: "tok"})
 	if w.Name() != "weixin" {
 		t.Errorf("Name() = %q, want %q", w.Name(), "weixin")
@@ -24,6 +25,7 @@ func TestNew_Defaults(t *testing.T) {
 }
 
 func TestNew_CustomMaxReplyLen(t *testing.T) {
+	t.Parallel()
 	w := New(Config{Token: "tok", MaxReplyLen: 2000})
 	if w.MaxReplyLength() != 2000 {
 		t.Errorf("MaxReplyLength() = %d, want 2000", w.MaxReplyLength())
@@ -31,6 +33,7 @@ func TestNew_CustomMaxReplyLen(t *testing.T) {
 }
 
 func TestExtractText(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		msg  weixinMessage
@@ -80,6 +83,7 @@ func TestExtractText(t *testing.T) {
 }
 
 func TestStartStop(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Return empty response for getUpdates
 		json.NewEncoder(w).Encode(getUpdatesResp{Ret: 0})
@@ -105,6 +109,7 @@ func TestStartStop(t *testing.T) {
 }
 
 func TestReply_NoContextToken(t *testing.T) {
+	t.Parallel()
 	w := New(Config{Token: "tok"})
 	_, err := w.Reply(context.Background(), platform.OutgoingMessage{
 		ChatID: "user123",
@@ -116,6 +121,7 @@ func TestReply_NoContextToken(t *testing.T) {
 }
 
 func TestReply_WithContextToken(t *testing.T) {
+	t.Parallel()
 	var called atomic.Bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called.Store(true)
@@ -155,6 +161,7 @@ func TestReply_WithContextToken(t *testing.T) {
 }
 
 func TestPollLoop_ReceivesMessages(t *testing.T) {
+	t.Parallel()
 	pollCount := atomic.Int32{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := pollCount.Add(1)
@@ -241,6 +248,7 @@ func TestPollLoop_ReceivesMessages(t *testing.T) {
 }
 
 func TestPollLoop_SkipsBotMessages(t *testing.T) {
+	t.Parallel()
 	pollCount := atomic.Int32{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		n := pollCount.Add(1)
@@ -284,6 +292,7 @@ func TestPollLoop_SkipsBotMessages(t *testing.T) {
 }
 
 func TestAPIClient_GetUpdates(t *testing.T) {
+	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/ilink/bot/getupdates" {
 			http.Error(w, "not found", 404)
@@ -318,6 +327,7 @@ func TestAPIClient_GetUpdates(t *testing.T) {
 }
 
 func TestAPIClient_SendMessage(t *testing.T) {
+	t.Parallel()
 	var received sendMessageReq
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/ilink/bot/sendmessage" {
@@ -347,6 +357,7 @@ func TestAPIClient_SendMessage(t *testing.T) {
 }
 
 func TestEditMessage_Noop(t *testing.T) {
+	t.Parallel()
 	w := New(Config{Token: "tok"})
 	err := w.EditMessage(context.Background(), "any-id", "new text")
 	if err != nil {
@@ -355,6 +366,7 @@ func TestEditMessage_Noop(t *testing.T) {
 }
 
 func TestRandomWechatUIN(t *testing.T) {
+	t.Parallel()
 	seen := make(map[string]bool)
 	for i := 0; i < 10; i++ {
 		v := randomWechatUIN()

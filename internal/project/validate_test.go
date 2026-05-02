@@ -7,6 +7,7 @@ import (
 )
 
 func TestValidateConfig(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		cfg  ProjectConfig
@@ -32,6 +33,7 @@ func TestValidateConfig(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			err := ValidateConfig(c.cfg)
 			if c.ok && err != nil {
 				t.Errorf("unexpected err: %v", err)

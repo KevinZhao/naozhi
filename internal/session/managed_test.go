@@ -10,6 +10,7 @@ import (
 // key/value separator, so a tab in an IM-originated chat ID would fragment
 // one attr into two. R60-GO-M1.
 func TestSanitizeKeyComponent_StripsTab(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name, in string
 	}{
@@ -30,6 +31,7 @@ func TestSanitizeKeyComponent_StripsTab(t *testing.T) {
 // that slog.TextHandler treats specially: newlines, tabs, ANSI escape, and
 // Unicode bidi/zero-width. R60-GO-H1.
 func TestSanitizeLogAttr_NoLogFragmentation(t *testing.T) {
+	t.Parallel()
 	bad := "user\nadmin=1\tpassword\x1b[31mevil‮reverse​hidden"
 	got := SanitizeLogAttr(bad)
 	for _, r := range []rune{'\n', '\t', 0x1b, 0x202E, 0x200B} {
@@ -45,6 +47,7 @@ func TestSanitizeLogAttr_NoLogFragmentation(t *testing.T) {
 // slow path, where the rune is < 0xA0. Terminals interpret C1 codepoints
 // as control functions, so SanitizeLogAttr must strip them explicitly.
 func TestSanitizeLogAttr_StripsC1Controls(t *testing.T) {
+	t.Parallel()
 	// U+0085 NEL (Next Line) and U+0088 HTS are terminal control functions.
 	in := "useridok"
 	got := SanitizeLogAttr(in)
@@ -60,6 +63,7 @@ func TestSanitizeLogAttr_StripsC1Controls(t *testing.T) {
 }
 
 func TestSessionKey(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		platform, chatType, id, agentID string
 		expected                        string

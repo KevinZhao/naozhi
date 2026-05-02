@@ -7,6 +7,7 @@ import (
 )
 
 func TestEnqueue_FirstMessageBecomesOwner(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueue(10, 500*time.Millisecond)
 	isOwner, enqueued, _, gen := q.Enqueue("k1", QueuedMsg{Text: "hello"})
 	if !isOwner {
@@ -19,6 +20,7 @@ func TestEnqueue_FirstMessageBecomesOwner(t *testing.T) {
 }
 
 func TestEnqueue_SubsequentMessagesEnqueued(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueue(10, 500*time.Millisecond)
 	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
 
@@ -36,6 +38,7 @@ func TestEnqueue_SubsequentMessagesEnqueued(t *testing.T) {
 }
 
 func TestEnqueue_MaxDepthZero_Drops(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueue(0, 0)
 	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
 
@@ -46,6 +49,7 @@ func TestEnqueue_MaxDepthZero_Drops(t *testing.T) {
 }
 
 func TestEnqueue_EvictsOldest(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueue(2, 0)
 	_, _, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
 
@@ -63,6 +67,7 @@ func TestEnqueue_EvictsOldest(t *testing.T) {
 }
 
 func TestDoneOrDrain_EmptyReleasesOwnership(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueue(10, 0)
 	_, _, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
 
@@ -79,6 +84,7 @@ func TestDoneOrDrain_EmptyReleasesOwnership(t *testing.T) {
 }
 
 func TestDoneOrDrain_NonEmptyKeepsOwnership(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueue(10, 0)
 	_, _, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
 	q.Enqueue("k1", QueuedMsg{Text: "B"})
@@ -100,6 +106,7 @@ func TestDoneOrDrain_NonEmptyKeepsOwnership(t *testing.T) {
 }
 
 func TestDiscard_ClearsQueueAndReleasesOwnership(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueue(10, 0)
 	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
 	q.Enqueue("k1", QueuedMsg{Text: "B"})
@@ -118,6 +125,7 @@ func TestDiscard_ClearsQueueAndReleasesOwnership(t *testing.T) {
 }
 
 func TestDiscard_InvalidatesStaleOwner(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueue(10, 0)
 	_, _, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A"}) // gen=0
 	q.Enqueue("k1", QueuedMsg{Text: "B"})
@@ -143,6 +151,7 @@ func TestDiscard_InvalidatesStaleOwner(t *testing.T) {
 }
 
 func TestShouldNotify_RateLimits(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueue(10, 0)
 
 	if !q.ShouldNotify("k1") {
@@ -154,6 +163,7 @@ func TestShouldNotify_RateLimits(t *testing.T) {
 }
 
 func TestIsolation_DifferentKeys(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueue(10, 0)
 	q.Enqueue("k1", QueuedMsg{Text: "A"}) // k1 owner
 	q.Enqueue("k2", QueuedMsg{Text: "B"}) // k2 owner — independent
@@ -170,6 +180,7 @@ func TestIsolation_DifferentKeys(t *testing.T) {
 }
 
 func TestSessionGuardCompat_TryAcquireRelease(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueue(10, 0)
 
 	if !q.TryAcquire("k1") {
@@ -187,6 +198,7 @@ func TestSessionGuardCompat_TryAcquireRelease(t *testing.T) {
 }
 
 func TestLastNotify_CleanedOnDrain(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueue(10, 0)
 	_, _, _, gen := q.Enqueue("k1", QueuedMsg{Text: "A"})
 
@@ -203,6 +215,7 @@ func TestLastNotify_CleanedOnDrain(t *testing.T) {
 }
 
 func TestLastNotify_CleanedOnDiscard(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueue(10, 0)
 	q.Enqueue("k1", QueuedMsg{Text: "A"})
 	q.ShouldNotify("k1")
@@ -215,6 +228,7 @@ func TestLastNotify_CleanedOnDiscard(t *testing.T) {
 }
 
 func TestParseQueueMode(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		in   string
 		want QueueMode
@@ -234,6 +248,7 @@ func TestParseQueueMode(t *testing.T) {
 }
 
 func TestEnqueue_CollectMode_NoInterruptSignal(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueueWithMode(10, 0, ModeCollect)
 	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
 
@@ -247,6 +262,7 @@ func TestEnqueue_CollectMode_NoInterruptSignal(t *testing.T) {
 }
 
 func TestEnqueue_InterruptMode_FirstFollowupSetsSignal(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueueWithMode(10, 0, ModeInterrupt)
 	_, _, shouldInterruptOwner, gen := q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
 	if shouldInterruptOwner {
@@ -282,6 +298,7 @@ func TestEnqueue_InterruptMode_FirstFollowupSetsSignal(t *testing.T) {
 }
 
 func TestEnqueue_InterruptMode_QueueDisabledNoSignal(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueueWithMode(0, 0, ModeInterrupt)
 	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
 
@@ -301,6 +318,7 @@ func TestEnqueue_InterruptMode_QueueDisabledNoSignal(t *testing.T) {
 // reused the *sessionQueue instance instead of going through getOrCreate
 // would silently suppress the interrupt.
 func TestEnqueue_InterruptMode_ReleaseOwnership_ResetsInterruptFlag(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueueWithMode(10, 0, ModeInterrupt)
 
 	// Turn 1: owner + interrupting follow-up.
@@ -335,6 +353,7 @@ func TestEnqueue_InterruptMode_ReleaseOwnership_ResetsInterruptFlag(t *testing.T
 // P1-2 part two: Discard must also reset interruptRequested so /new followed
 // by a fresh turn does not silently suppress the first interrupt.
 func TestEnqueue_InterruptMode_Discard_ResetsInterruptFlag(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueueWithMode(10, 0, ModeInterrupt)
 	q.Enqueue("k1", QueuedMsg{Text: "A"}) // owner
 	if _, _, shouldInterrupt, _ := q.Enqueue("k1", QueuedMsg{Text: "B"}); !shouldInterrupt {
@@ -353,6 +372,7 @@ func TestEnqueue_InterruptMode_Discard_ResetsInterruptFlag(t *testing.T) {
 
 // TestConcurrent_EnqueueDrain verifies no races under concurrent access.
 func TestConcurrent_EnqueueDrain(t *testing.T) {
+	t.Parallel()
 	q := NewMessageQueue(50, 0)
 	const goroutines = 20
 	const msgsPerGoroutine = 100

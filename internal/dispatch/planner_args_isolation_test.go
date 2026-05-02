@@ -20,6 +20,7 @@ import (
 // If a future refactor drops the three-arg expression, `shared` below
 // would mutate and the assertion fails.
 func TestPlannerArgsIsolation_ThreeArgSliceIsolatesAppend(t *testing.T) {
+	t.Parallel()
 	// Simulate d.agents[agentID].ExtraArgs — a slice with spare capacity,
 	// as produced by any append-driven construction or slice-of-literal.
 	shared := make([]string, 2, 8)
@@ -68,6 +69,7 @@ func TestPlannerArgsIsolation_ThreeArgSliceIsolatesAppend(t *testing.T) {
 // slice semantics this would also fail, and the isolation test above
 // would lose its justification. Kept as a documented tripwire.
 func TestPlannerArgsIsolation_TwoArgAppendDoesLeak(t *testing.T) {
+	t.Parallel()
 	shared := make([]string, 2, 8)
 	shared[0] = "--model"
 	shared[1] = "opus"

@@ -11,6 +11,7 @@ import (
 // brand-new ManagedSession with no history returns false, so the
 // R53-ARCH-001 deferred JSONL backfill path will fire.
 func TestHasInjectedHistory_Empty(t *testing.T) {
+	t.Parallel()
 	s := &ManagedSession{}
 	if s.hasInjectedHistory() {
 		t.Error("hasInjectedHistory() = true on empty session, want false")
@@ -23,6 +24,7 @@ func TestHasInjectedHistory_Empty(t *testing.T) {
 // other path) already populated persistedHistory, and the deferred load
 // must skip to avoid duplicate entries.
 func TestHasInjectedHistory_AfterInject(t *testing.T) {
+	t.Parallel()
 	s := &ManagedSession{}
 	entries := []cli.EventEntry{
 		{Type: "user", Summary: "hello", Time: time.Now().UnixMilli()},
@@ -38,6 +40,7 @@ func TestHasInjectedHistory_AfterInject(t *testing.T) {
 // concurrent hasInjectedHistory readers (read lock) must observe the
 // transition atomically and never deadlock / race. Run with -race.
 func TestHasInjectedHistory_ConcurrentReadWrite(t *testing.T) {
+	t.Parallel()
 	s := &ManagedSession{}
 	done := make(chan struct{})
 

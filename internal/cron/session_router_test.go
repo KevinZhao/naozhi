@@ -56,6 +56,7 @@ func (f *fakeSessionRouter) GetOrCreate(ctx context.Context, key string, opts se
 // The test body itself is light because the value comes from the type
 // signatures; we just make sure NewScheduler + AddJob accept our fake.
 func TestSchedulerConfig_AcceptsSessionRouterInterface(t *testing.T) {
+	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
 		Router:  fake,
@@ -102,6 +103,7 @@ func TestSchedulerConfig_AcceptsSessionRouterInterface(t *testing.T) {
 // through SessionRouter.Reset — the cron package must not grow a direct
 // *session.Router dependency for this code path.
 func TestSchedulerConfig_ResetCalledOnDelete(t *testing.T) {
+	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
 		Router:  fake,
@@ -142,5 +144,6 @@ func TestSchedulerConfig_ResetCalledOnDelete(t *testing.T) {
 // the three methods, this test fails to build and flags the drift
 // explicitly rather than letting production miscompile.
 func TestSessionRouterInterface_RealRouterSatisfies(t *testing.T) {
+	t.Parallel()
 	var _ SessionRouter = (*session.Router)(nil)
 }

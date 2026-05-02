@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 )
 
 func TestVerifySignature(t *testing.T) {
+	t.Parallel()
 	timestamp := "1234567890"
 	nonce := "testnonce"
 	encryptKey := "mysecretkey"
@@ -55,6 +57,7 @@ func TestVerifySignature(t *testing.T) {
 }
 
 func TestDefaultMaxReplyLen(t *testing.T) {
+	t.Parallel()
 	f := New(Config{AppID: "id"}, nil)
 	if f.MaxReplyLength() != 4000 {
 		t.Errorf("MaxReplyLength() = %d, want 4000", f.MaxReplyLength())
@@ -62,6 +65,7 @@ func TestDefaultMaxReplyLen(t *testing.T) {
 }
 
 func TestCustomMaxReplyLen(t *testing.T) {
+	t.Parallel()
 	f := New(Config{AppID: "id", MaxReplyLen: 2000}, nil)
 	if f.MaxReplyLength() != 2000 {
 		t.Errorf("MaxReplyLength() = %d, want 2000", f.MaxReplyLength())
@@ -74,6 +78,7 @@ var _ platform.RunnablePlatform = (*Feishu)(nil)
 // --- Start/Stop lifecycle tests ---
 
 func TestStartAlreadyStarted(t *testing.T) {
+	t.Parallel()
 	// Webhook mode requires verification_token or encrypt_key — supply one
 	// so Start() reaches the idempotency guard we're exercising here.
 	f := New(Config{AppID: "id", ConnectionMode: "webhook", VerificationToken: "test-token"}, nil)
@@ -87,6 +92,7 @@ func TestStartAlreadyStarted(t *testing.T) {
 }
 
 func TestStartWebhookRejectsMissingAuth(t *testing.T) {
+	t.Parallel()
 	f := New(Config{AppID: "id", ConnectionMode: "webhook"}, nil)
 	noop := func(context.Context, platform.IncomingMessage) {}
 	if err := f.Start(noop); err == nil {
@@ -95,6 +101,7 @@ func TestStartWebhookRejectsMissingAuth(t *testing.T) {
 }
 
 func TestStopNoop(t *testing.T) {
+	t.Parallel()
 	f := New(Config{AppID: "id", ConnectionMode: "webhook"}, nil)
 	if err := f.Stop(); err != nil {
 		t.Errorf("Stop() error = %v, want nil", err)
@@ -102,6 +109,7 @@ func TestStopNoop(t *testing.T) {
 }
 
 func TestStopCancelsDone(t *testing.T) {
+	t.Parallel()
 	f := New(Config{AppID: "id", ConnectionMode: "webhook"}, nil)
 	// Simulate a started WS by manually setting cancel/done
 	ctx, cancel := context.WithCancel(context.Background())
@@ -128,6 +136,7 @@ func TestStopCancelsDone(t *testing.T) {
 func strPtr(s string) *string { return &s }
 
 func TestParseSDKEvent_TextMessage(t *testing.T) {
+	t.Parallel()
 	event := &larkim.P2MessageReceiveV1{
 		EventV2Base: &larkevent.EventV2Base{
 			Header: &larkevent.EventHeader{EventID: "ev_123"},
@@ -177,6 +186,7 @@ func TestParseSDKEvent_TextMessage(t *testing.T) {
 }
 
 func TestParseSDKEvent_DirectMessage(t *testing.T) {
+	t.Parallel()
 	event := &larkim.P2MessageReceiveV1{
 		EventV2Base: &larkevent.EventV2Base{
 			Header: &larkevent.EventHeader{EventID: "ev_456"},
@@ -204,6 +214,7 @@ func TestParseSDKEvent_DirectMessage(t *testing.T) {
 }
 
 func TestParseSDKEvent_WithMentions(t *testing.T) {
+	t.Parallel()
 	event := &larkim.P2MessageReceiveV1{
 		EventV2Base: &larkevent.EventV2Base{
 			Header: &larkevent.EventHeader{EventID: "ev_789"},
@@ -237,6 +248,7 @@ func TestParseSDKEvent_WithMentions(t *testing.T) {
 }
 
 func TestParseSDKEvent_ImageMessage(t *testing.T) {
+	t.Parallel()
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{
@@ -262,6 +274,7 @@ func TestParseSDKEvent_ImageMessage(t *testing.T) {
 }
 
 func TestParseSDKEvent_ImageMessage_EmptyKey(t *testing.T) {
+	t.Parallel()
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{
@@ -281,6 +294,7 @@ func TestParseSDKEvent_ImageMessage_EmptyKey(t *testing.T) {
 }
 
 func TestParseSDKEvent_UnsupportedType(t *testing.T) {
+	t.Parallel()
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Message: &larkim.EventMessage{
@@ -297,6 +311,7 @@ func TestParseSDKEvent_UnsupportedType(t *testing.T) {
 }
 
 func TestParseSDKEvent_EmptyText(t *testing.T) {
+	t.Parallel()
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{
@@ -316,6 +331,7 @@ func TestParseSDKEvent_EmptyText(t *testing.T) {
 }
 
 func TestParseSDKEvent_MentionOnlyText(t *testing.T) {
+	t.Parallel()
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{
@@ -339,6 +355,7 @@ func TestParseSDKEvent_MentionOnlyText(t *testing.T) {
 }
 
 func TestParseSDKEvent_NilEvent(t *testing.T) {
+	t.Parallel()
 	_, ok := parseSDKEvent(nil)
 	if ok {
 		t.Error("expected ok=false for nil event")
@@ -346,6 +363,7 @@ func TestParseSDKEvent_NilEvent(t *testing.T) {
 }
 
 func TestParseSDKEvent_NilMessage(t *testing.T) {
+	t.Parallel()
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{},
 	}
@@ -356,6 +374,7 @@ func TestParseSDKEvent_NilMessage(t *testing.T) {
 }
 
 func TestParseSDKEvent_AudioMessage(t *testing.T) {
+	t.Parallel()
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{
@@ -385,6 +404,7 @@ func TestParseSDKEvent_AudioMessage(t *testing.T) {
 }
 
 func TestParseSDKEvent_AudioMessage_EmptyKey(t *testing.T) {
+	t.Parallel()
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{
 			Sender: &larkim.EventSender{
@@ -448,6 +468,7 @@ func buildV2MessageBody(eventID, chatID, chatType, text string) []byte {
 }
 
 func TestWebhook_Challenge(t *testing.T) {
+	t.Parallel()
 	// makeWebhookFeishu defaults VerificationToken to "test_token" so the
 	// R67-SEC-9 defense gate passes; the url_verification body carries the
 	// matching token + required timestamp/nonce headers. R67-SEC-9.
@@ -471,6 +492,7 @@ func TestWebhook_Challenge(t *testing.T) {
 }
 
 func TestWebhook_TokenMismatch(t *testing.T) {
+	t.Parallel()
 	f := makeWebhookFeishu(Config{
 		AppID: "id", AppSecret: "secret",
 		VerificationToken: "correct_token",
@@ -495,6 +517,7 @@ func TestWebhook_TokenMismatch(t *testing.T) {
 // with 503 — otherwise the body-parse path below would skip token / signature
 // / nonce checks and process arbitrary payloads.
 func TestHandleWebhook_RefusesZeroCredential(t *testing.T) {
+	t.Parallel()
 	// Call New directly (not makeWebhookFeishu) so neither VerificationToken
 	// nor EncryptKey is auto-filled — we need the zero-credential state to
 	// exercise the defense gate.
@@ -521,6 +544,7 @@ func TestHandleWebhook_RefusesZeroCredential(t *testing.T) {
 // the point of this assertion is that the response is NOT 503 — the request
 // reached the authenticated path rather than being refused outright.
 func TestHandleWebhook_AllowsWhenVerificationTokenSet(t *testing.T) {
+	t.Parallel()
 	f := makeWebhookFeishu(Config{AppID: "id", AppSecret: "secret", VerificationToken: "tok"})
 	mux := http.NewServeMux()
 	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {})
@@ -536,6 +560,7 @@ func TestHandleWebhook_AllowsWhenVerificationTokenSet(t *testing.T) {
 }
 
 func TestWebhook_EmptyTokenBypass(t *testing.T) {
+	t.Parallel()
 	f := makeWebhookFeishu(Config{
 		AppID: "id", AppSecret: "secret",
 		VerificationToken: "correct_token",
@@ -555,6 +580,7 @@ func TestWebhook_EmptyTokenBypass(t *testing.T) {
 }
 
 func TestWebhook_SignatureFailure(t *testing.T) {
+	t.Parallel()
 	f := makeWebhookFeishu(Config{
 		AppID: "id", AppSecret: "secret",
 		EncryptKey: "my_secret_key",
@@ -576,6 +602,7 @@ func TestWebhook_SignatureFailure(t *testing.T) {
 }
 
 func TestWebhook_ValidSignature(t *testing.T) {
+	t.Parallel()
 	encryptKey := "my_secret_key"
 	f := makeWebhookFeishu(Config{
 		AppID: "id", AppSecret: "secret",
@@ -623,6 +650,7 @@ func TestWebhook_ValidSignature(t *testing.T) {
 }
 
 func TestWebhook_NonMessageEvent(t *testing.T) {
+	t.Parallel()
 	f := makeWebhookFeishu(Config{AppID: "id", AppSecret: "secret"})
 	mux := http.NewServeMux()
 	called := false
@@ -646,6 +674,7 @@ func TestWebhook_NonMessageEvent(t *testing.T) {
 }
 
 func TestWebhook_NonTextMessage(t *testing.T) {
+	t.Parallel()
 	f := makeWebhookFeishu(Config{AppID: "id", AppSecret: "secret"})
 	mux := http.NewServeMux()
 	called := false
@@ -687,6 +716,7 @@ func TestWebhook_NonTextMessage(t *testing.T) {
 }
 
 func TestWebhook_InvalidJSON(t *testing.T) {
+	t.Parallel()
 	f := makeWebhookFeishu(Config{AppID: "id", AppSecret: "secret"})
 	mux := http.NewServeMux()
 	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {})
@@ -701,6 +731,7 @@ func TestWebhook_InvalidJSON(t *testing.T) {
 }
 
 func TestWebhook_ValidMessage(t *testing.T) {
+	t.Parallel()
 	f := makeWebhookFeishu(Config{AppID: "id", AppSecret: "secret"})
 	mux := http.NewServeMux()
 	var received platform.IncomingMessage
@@ -755,12 +786,16 @@ func TestWebhook_ValidMessage(t *testing.T) {
 // freshness and replay defenses. Signature is NOT set (EncryptKey mode covers
 // that via buildSignedRequest). Each call uses a unique nonce so repeated
 // calls within a single test do not collide with the nonce-dedup cache.
-var tokenNonceCounter int64
+//
+// Round 159: tokenNonceCounter must be atomic because Round 158 added
+// t.Parallel() to the webhook test suite, which lets multiple tests call
+// buildTokenRequest concurrently. A plain int64 increment races.
+var tokenNonceCounter atomic.Int64
 
 func buildTokenRequest(body []byte) *http.Request {
-	tokenNonceCounter++
+	n := tokenNonceCounter.Add(1)
 	timestamp := fmt.Sprintf("%d", time.Now().Unix())
-	nonce := fmt.Sprintf("tok-nonce-%d-%d", time.Now().UnixNano(), tokenNonceCounter)
+	nonce := fmt.Sprintf("tok-nonce-%d-%d", time.Now().UnixNano(), n)
 	req := httptest.NewRequest("POST", "/webhook/feishu", strings.NewReader(string(body)))
 	req.Header.Set("X-Lark-Request-Timestamp", timestamp)
 	req.Header.Set("X-Lark-Request-Nonce", nonce)
@@ -780,6 +815,7 @@ func buildSignedRequest(t *testing.T, body []byte, timestamp, nonce, encryptKey 
 }
 
 func TestWebhook_NonceReplay_Rejected(t *testing.T) {
+	t.Parallel()
 	const encryptKey = "replay_test_key"
 	f := makeWebhookFeishu(Config{
 		AppID: "id", AppSecret: "secret",
@@ -820,6 +856,7 @@ func TestWebhook_NonceReplay_Rejected(t *testing.T) {
 }
 
 func TestWebhook_DifferentNonce_Allowed(t *testing.T) {
+	t.Parallel()
 	const encryptKey = "replay_test_key2"
 	f := makeWebhookFeishu(Config{
 		AppID: "id", AppSecret: "secret",

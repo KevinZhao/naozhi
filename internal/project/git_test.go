@@ -7,6 +7,7 @@ import (
 )
 
 func TestIsGitHubURL(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name string
 		url  string
@@ -25,6 +26,7 @@ func TestIsGitHubURL(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := isGitHubURL(tc.url)
 			if got != tc.want {
 				t.Errorf("isGitHubURL(%q) = %v, want %v", tc.url, got, tc.want)
@@ -45,6 +47,7 @@ func writeGitConfig(t *testing.T, dir, body string) {
 }
 
 func TestDetectGitHubRemote(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name       string
 		config     string
@@ -105,6 +108,7 @@ func TestDetectGitHubRemote(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			dir := t.TempDir()
 			writeGitConfig(t, dir, tc.config)
 			gotURL, gotGH := DetectGitHubRemote(dir)
@@ -116,6 +120,7 @@ func TestDetectGitHubRemote(t *testing.T) {
 }
 
 func TestDetectGitHubRemote_NoGitDir(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	gotURL, gotGH := DetectGitHubRemote(dir)
 	if gotURL != "" || gotGH {

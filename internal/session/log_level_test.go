@@ -20,6 +20,8 @@ import (
 // assertion. The critical property: the captured Info-level handler must
 // NOT see the "creating new session" message, while a Debug-level handler
 // would still observe it.
+// NOT t.Parallel() — slog.SetDefault mutates a process-global. Any
+// parallel test that emits a log line would race with this buffer swap.
 func TestGetOrCreate_CreatingNewSession_IsDebug(t *testing.T) {
 	old := slog.Default()
 	defer slog.SetDefault(old)
@@ -42,6 +44,7 @@ func TestGetOrCreate_CreatingNewSession_IsDebug(t *testing.T) {
 // half of the demotion: the message is still there, just at Debug. A future
 // refactor that deletes the log line entirely would silently pass the
 // Info-level assertion above, so pair it with a positive-observation test.
+// NOT t.Parallel() — see TestGetOrCreate_CreatingNewSession_IsDebug.
 func TestGetOrCreate_CreatingNewSession_VisibleAtDebug(t *testing.T) {
 	old := slog.Default()
 	defer slog.SetDefault(old)

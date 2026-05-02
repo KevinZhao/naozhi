@@ -41,6 +41,7 @@ import (
 // justification in this test's comment) or re-route through the
 // sendMu-aware ReattachProcess variant.
 func TestReattachProcessNoCallback_ContractContext(t *testing.T) {
+	t.Parallel()
 	// Scan router.go — the only production file that should reference the
 	// no-callback variant outside of its own definition in managed.go.
 	routerSrc, err := os.ReadFile("router.go")

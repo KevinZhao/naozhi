@@ -9,6 +9,7 @@ import (
 )
 
 func TestFormatEventLine_Thinking(t *testing.T) {
+	t.Parallel()
 	ev := cli.Event{
 		Type:    "assistant",
 		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "thinking", Text: "Let me analyze the code structure"}}},
@@ -23,6 +24,7 @@ func TestFormatEventLine_Thinking(t *testing.T) {
 }
 
 func TestFormatEventLine_ThinkingEmpty(t *testing.T) {
+	t.Parallel()
 	ev := cli.Event{
 		Type:    "assistant",
 		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "thinking", Text: ""}}},
@@ -34,6 +36,7 @@ func TestFormatEventLine_ThinkingEmpty(t *testing.T) {
 }
 
 func TestFormatEventLine_ToolUse_Read(t *testing.T) {
+	t.Parallel()
 	input, _ := json.Marshal(map[string]string{"file_path": "/home/user/project/src/main.go"})
 	ev := cli.Event{
 		Type:    "assistant",
@@ -46,6 +49,7 @@ func TestFormatEventLine_ToolUse_Read(t *testing.T) {
 }
 
 func TestFormatEventLine_ToolUse_Bash(t *testing.T) {
+	t.Parallel()
 	input, _ := json.Marshal(map[string]string{"command": "go test ./..."})
 	ev := cli.Event{
 		Type:    "assistant",
@@ -58,6 +62,7 @@ func TestFormatEventLine_ToolUse_Bash(t *testing.T) {
 }
 
 func TestFormatEventLine_ToolUse_Agent(t *testing.T) {
+	t.Parallel()
 	input, _ := json.Marshal(map[string]string{"description": "review code changes"})
 	ev := cli.Event{
 		Type:    "assistant",
@@ -70,6 +75,7 @@ func TestFormatEventLine_ToolUse_Agent(t *testing.T) {
 }
 
 func TestFormatEventLine_ToolUse_Unknown(t *testing.T) {
+	t.Parallel()
 	ev := cli.Event{
 		Type:    "assistant",
 		Message: &cli.AssistantMessage{Content: []cli.ContentBlock{{Type: "tool_use", Name: "CustomTool"}}},
@@ -81,6 +87,7 @@ func TestFormatEventLine_ToolUse_Unknown(t *testing.T) {
 }
 
 func TestFormatEventLine_NoMessage(t *testing.T) {
+	t.Parallel()
 	ev := cli.Event{Type: "assistant"}
 	if got := formatEventLine(ev); got != "" {
 		t.Errorf("expected empty, got %q", got)
@@ -88,6 +95,7 @@ func TestFormatEventLine_NoMessage(t *testing.T) {
 }
 
 func TestAppendStatusLine_Basic(t *testing.T) {
+	t.Parallel()
 	var lines []string
 	lines = appendStatusLine(lines, "🔧 Read")
 	lines = appendStatusLine(lines, "🔧 Edit")
@@ -97,6 +105,7 @@ func TestAppendStatusLine_Basic(t *testing.T) {
 }
 
 func TestAppendStatusLine_CollapseThinking(t *testing.T) {
+	t.Parallel()
 	var lines []string
 	lines = appendStatusLine(lines, "💭 first thought")
 	lines = appendStatusLine(lines, "💭 second thought")
@@ -109,6 +118,7 @@ func TestAppendStatusLine_CollapseThinking(t *testing.T) {
 }
 
 func TestAppendStatusLine_ThinkingThenTool(t *testing.T) {
+	t.Parallel()
 	var lines []string
 	lines = appendStatusLine(lines, "💭 thinking")
 	lines = appendStatusLine(lines, "🔧 Read")
@@ -119,6 +129,7 @@ func TestAppendStatusLine_ThinkingThenTool(t *testing.T) {
 }
 
 func TestAppendStatusLine_MaxLines(t *testing.T) {
+	t.Parallel()
 	var lines []string
 	for i := 0; i < 20; i++ {
 		lines = appendStatusLine(lines, "🔧 tool")
@@ -129,6 +140,7 @@ func TestAppendStatusLine_MaxLines(t *testing.T) {
 }
 
 func TestExtractTodoMessage(t *testing.T) {
+	t.Parallel()
 	input, _ := json.Marshal(map[string]any{
 		"todos": []map[string]any{
 			{"content": "写测试", "status": "pending"},
@@ -169,6 +181,7 @@ func TestExtractTodoMessage(t *testing.T) {
 }
 
 func TestShortenPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		input, want string
 	}{

@@ -40,6 +40,7 @@ func newTakeoverTestRouter(maxProcs int) *Router {
 // the workspace override, and then proceed to spawn (which fails in tests
 // but only after the override is recorded).
 func TestTakeover_NewKey(t *testing.T) {
+	t.Parallel()
 	r := newTakeoverTestRouter(3)
 	key := "feishu:direct:user1:general"
 	workspace := "/tmp/takeover-ws"
@@ -71,6 +72,7 @@ func TestTakeover_NewKey(t *testing.T) {
 // is dead, Takeover takes the else-branch that unregisters without calling
 // Close, and bumps storeGen.
 func TestTakeover_ReplacesDeadSession(t *testing.T) {
+	t.Parallel()
 	r := newTakeoverTestRouter(3)
 	key := "feishu:direct:user2:general"
 
@@ -101,6 +103,7 @@ func TestTakeover_ReplacesDeadSession(t *testing.T) {
 // unregistered under the re-acquired lock. spawnSession fails afterward,
 // but the old process must be Close()'d and the session gone.
 func TestTakeover_ReplacesAliveSession(t *testing.T) {
+	t.Parallel()
 	r := newTakeoverTestRouter(3)
 	key := "feishu:direct:user3:general"
 
@@ -149,6 +152,7 @@ func (h *hookCloseProc) Close() {
 // Close() the old process, Takeover must abort with an explicit error
 // rather than silently unregister the interloper and spawn on top.
 func TestTakeover_ConcurrentCreationAborts(t *testing.T) {
+	t.Parallel()
 	r := newTakeoverTestRouter(3)
 	key := "feishu:direct:user4:general"
 
@@ -194,6 +198,7 @@ func TestTakeover_ConcurrentCreationAborts(t *testing.T) {
 // the caller knows no chat-scoped workspace applies). Using a key that
 // equals its own chatKey exercises that guard.
 func TestTakeover_EmptyWorkspaceSkipsOverride(t *testing.T) {
+	t.Parallel()
 	r := newTakeoverTestRouter(3)
 	// Single-segment key: chatKeyFor returns the key unchanged, so the
 	// `chatKey != key` guard in Takeover must skip the override write.
@@ -219,6 +224,7 @@ func TestTakeover_EmptyWorkspaceSkipsOverride(t *testing.T) {
 // twice should still succeed but must not rebump wsOverridesDirty if the
 // prior value already matches (the guard inside Takeover).
 func TestTakeover_WorkspaceOverrideIdempotent(t *testing.T) {
+	t.Parallel()
 	r := newTakeoverTestRouter(3)
 	key := "feishu:direct:user5:general"
 	chatKey := chatKeyFor(key)

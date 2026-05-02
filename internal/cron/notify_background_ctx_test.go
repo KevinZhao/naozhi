@@ -38,6 +38,7 @@ import (
 // Any future edit that wires stopCtx into this path must re-argue the
 // Round 98 stopBudget shutdown timeline before passing this test.
 func TestNotifyTarget_UsesBackgroundCtxContract(t *testing.T) {
+	t.Parallel()
 	src, err := os.ReadFile("scheduler.go")
 	if err != nil {
 		t.Fatalf("read scheduler.go: %v", err)

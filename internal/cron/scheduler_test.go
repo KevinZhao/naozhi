@@ -10,6 +10,7 @@ import (
 )
 
 func TestGenerateID(t *testing.T) {
+	t.Parallel()
 	id := generateID()
 	if len(id) != 16 {
 		t.Errorf("expected 16 char ID, got %d: %q", len(id), id)
@@ -22,6 +23,7 @@ func TestGenerateID(t *testing.T) {
 }
 
 func TestValidateSchedule(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		schedule string
 		wantErr  bool
@@ -43,6 +45,7 @@ func TestValidateSchedule(t *testing.T) {
 }
 
 func TestStoreRoundTrip(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron_jobs.json")
 
@@ -94,6 +97,7 @@ func TestStoreRoundTrip(t *testing.T) {
 }
 
 func TestLoadJobsMissing(t *testing.T) {
+	t.Parallel()
 	result, err := loadJobs("/nonexistent/path.json")
 	if err != nil {
 		t.Fatalf("missing file should not error: %v", err)
@@ -104,6 +108,7 @@ func TestLoadJobsMissing(t *testing.T) {
 }
 
 func TestLoadJobsEmpty(t *testing.T) {
+	t.Parallel()
 	result, err := loadJobs("")
 	if err != nil {
 		t.Fatalf("empty path should not error: %v", err)
@@ -118,6 +123,7 @@ func TestLoadJobsEmpty(t *testing.T) {
 // the original file untouched, so Scheduler.Start can abort and the operator
 // can inspect/recover the real data.
 func TestLoadJobsOversizeRefuses(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron_jobs.json")
 	// maxCronStoreBytes+1 bytes of valid-looking JSON prefix; contents don't
@@ -152,6 +158,7 @@ func TestLoadJobsOversizeRefuses(t *testing.T) {
 // file is renamed (not deleted), loadJobs returns (nil, nil) so the scheduler
 // can start fresh without destroying the evidence copy.
 func TestLoadJobsCorruptPreserves(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron_jobs.json")
 	if err := os.WriteFile(path, []byte("{ this is not valid json"), 0600); err != nil {
@@ -193,6 +200,7 @@ func TestLoadJobsCorruptPreserves(t *testing.T) {
 // store is oversize, Start returns an error so main.go can os.Exit(1) before
 // any code path triggers persistJobsLocked and clobbers the file with `[]`.
 func TestSchedulerStartFailsOnOversize(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron_jobs.json")
 	payload := make([]byte, maxCronStoreBytes+1)
@@ -224,6 +232,7 @@ func TestSchedulerStartFailsOnOversize(t *testing.T) {
 }
 
 func TestSaveJobsCreatesDir(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "dir", "cron_jobs.json")
 
@@ -237,6 +246,7 @@ func TestSaveJobsCreatesDir(t *testing.T) {
 }
 
 func TestResolveAgent(t *testing.T) {
+	t.Parallel()
 	cmds := map[string]string{
 		"review":   "code-reviewer",
 		"research": "researcher",
@@ -260,6 +270,7 @@ func TestResolveAgent(t *testing.T) {
 }
 
 func TestSchedulerAddAndList(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	s := NewScheduler(SchedulerConfig{
 		StorePath: filepath.Join(dir, "cron.json"),
@@ -300,6 +311,7 @@ func TestSchedulerAddAndList(t *testing.T) {
 }
 
 func TestSchedulerMaxJobs(t *testing.T) {
+	t.Parallel()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 2})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -320,6 +332,7 @@ func TestSchedulerMaxJobs(t *testing.T) {
 }
 
 func TestSchedulerPauseResume(t *testing.T) {
+	t.Parallel()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -359,6 +372,7 @@ func TestSchedulerPauseResume(t *testing.T) {
 }
 
 func TestSchedulerDelete(t *testing.T) {
+	t.Parallel()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -417,6 +431,7 @@ func TestJobRunningGuardReentry(t *testing.T) {
 }
 
 func TestSchedulerInvalidSchedule(t *testing.T) {
+	t.Parallel()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -430,6 +445,7 @@ func TestSchedulerInvalidSchedule(t *testing.T) {
 }
 
 func TestPreviewScheduleN(t *testing.T) {
+	t.Parallel()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
 	if err := s.Start(); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -473,6 +489,7 @@ func TestPreviewScheduleN(t *testing.T) {
 // idempotently while the job still exists, and refuse to create a stub once
 // the job is gone.
 func TestEnsureStub(t *testing.T) {
+	t.Parallel()
 	router := session.NewRouter(session.RouterConfig{})
 	s := NewScheduler(SchedulerConfig{
 		Router:  router,
@@ -545,6 +562,7 @@ func TestEnsureStub(t *testing.T) {
 }
 
 func TestSchedulerPersistence(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron.json")
 
@@ -574,6 +592,7 @@ func TestSchedulerPersistence(t *testing.T) {
 // must preserve the structural prefix so operators still see the class
 // of failure.
 func TestRedactPathsInCronError(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name  string
 		input string

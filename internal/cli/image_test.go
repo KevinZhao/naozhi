@@ -7,6 +7,7 @@ import (
 )
 
 func TestExtractImagePaths(t *testing.T) {
+	t.Parallel()
 	dir := imageSafeTempDir(t)
 	pngPath := filepath.Join(dir, "photo.png")
 	jpgPath := filepath.Join(dir, "image.jpg")
@@ -28,6 +29,7 @@ func TestExtractImagePaths(t *testing.T) {
 }
 
 func TestExtractImagePaths_NoMatches(t *testing.T) {
+	t.Parallel()
 	texts := []string{
 		"hello world, no images here",
 		"some text with relative path image.png but no absolute",
@@ -43,6 +45,7 @@ func TestExtractImagePaths_NoMatches(t *testing.T) {
 }
 
 func TestExtractImagePaths_NonExistent(t *testing.T) {
+	t.Parallel()
 	text := "look at /tmp/does-not-exist-abc123.png and /nonexistent/photo.jpg"
 	paths := ExtractImagePaths(text)
 	if len(paths) != 0 {
@@ -51,6 +54,7 @@ func TestExtractImagePaths_NonExistent(t *testing.T) {
 }
 
 func TestExtractImagePaths_Dedup(t *testing.T) {
+	t.Parallel()
 	dir := imageSafeTempDir(t)
 	pngPath := filepath.Join(dir, "dup.png")
 	os.WriteFile(pngPath, []byte("data"), 0644)
@@ -63,6 +67,7 @@ func TestExtractImagePaths_Dedup(t *testing.T) {
 }
 
 func TestExtractImagePaths_AllExtensions(t *testing.T) {
+	t.Parallel()
 	dir := imageSafeTempDir(t)
 	exts := []string{".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 	var text string
@@ -79,6 +84,7 @@ func TestExtractImagePaths_AllExtensions(t *testing.T) {
 }
 
 func TestExtractImagePaths_TrailingPunctuation(t *testing.T) {
+	t.Parallel()
 	dir := imageSafeTempDir(t)
 	pngPath := filepath.Join(dir, "file.png")
 	os.WriteFile(pngPath, []byte("data"), 0644)
@@ -95,6 +101,7 @@ func TestExtractImagePaths_TrailingPunctuation(t *testing.T) {
 }
 
 func TestMimeFromPath(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		path string
 		want string
@@ -112,6 +119,7 @@ func TestMimeFromPath(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.path, func(t *testing.T) {
+			t.Parallel()
 			got := MimeFromPath(tt.path)
 			if got != tt.want {
 				t.Errorf("MimeFromPath(%q) = %q, want %q", tt.path, got, tt.want)

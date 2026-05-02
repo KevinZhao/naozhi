@@ -14,6 +14,7 @@ import (
 // switch statement does not silently drop one and let ReplyWithRetry hammer
 // the stale cached token. R83 / RETRY1.
 func TestAPIError_IsTokenExpired(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		code int
 		want bool
@@ -41,6 +42,7 @@ func TestAPIError_IsTokenExpired(t *testing.T) {
 // are disjoint: a token-expired error MUST NOT short-circuit retries via
 // IsPermanent, otherwise the cache-invalidation path is unreachable.
 func TestAPIError_TokenExpiredIsNotPermanent(t *testing.T) {
+	t.Parallel()
 	for _, code := range []int{99991671, 99991672, 99991673} {
 		e := &APIError{Code: code, Op: "send"}
 		if e.IsPermanent() {
@@ -56,6 +58,7 @@ func TestAPIError_TokenExpiredIsNotPermanent(t *testing.T) {
 // both the token and the circuit-breaker state so the next getAccessToken
 // call is not blocked by a stale tokenLastFailed. R83 / RETRY1.
 func TestFeishu_InvalidateAccessToken(t *testing.T) {
+	t.Parallel()
 	f := &Feishu{
 		accessToken:     "cached_token",
 		tokenExpiry:     time.Now().Add(time.Hour),
@@ -81,6 +84,7 @@ func TestFeishu_InvalidateAccessToken(t *testing.T) {
 // calls invalidateAccessToken when the error chain carries an APIError
 // with a token-expired code.
 func TestFeishu_MaybeInvalidateOnTokenError_TokenExpired(t *testing.T) {
+	t.Parallel()
 	f := &Feishu{
 		accessToken: "cached_token",
 		tokenExpiry: time.Now().Add(time.Hour),
@@ -101,6 +105,7 @@ func TestFeishu_MaybeInvalidateOnTokenError_TokenExpired(t *testing.T) {
 // are signalling config problems, not token staleness, so refreshing would
 // just waste an HTTP round-trip.
 func TestFeishu_MaybeInvalidateOnTokenError_PermanentError(t *testing.T) {
+	t.Parallel()
 	f := &Feishu{
 		accessToken: "cached_token",
 		tokenExpiry: time.Now().Add(time.Hour),
@@ -117,6 +122,7 @@ func TestFeishu_MaybeInvalidateOnTokenError_PermanentError(t *testing.T) {
 // TestFeishu_MaybeInvalidateOnTokenError_Nil verifies the no-op path — a
 // nil error must not touch the token cache.
 func TestFeishu_MaybeInvalidateOnTokenError_Nil(t *testing.T) {
+	t.Parallel()
 	f := &Feishu{
 		accessToken: "cached_token",
 		tokenExpiry: time.Now().Add(time.Hour),
@@ -133,6 +139,7 @@ func TestFeishu_MaybeInvalidateOnTokenError_Nil(t *testing.T) {
 // errors (network timeouts, wrapped io errors) do not invalidate the cache.
 // Only the structured APIError with a token code should trigger invalidation.
 func TestFeishu_MaybeInvalidateOnTokenError_NonAPIError(t *testing.T) {
+	t.Parallel()
 	f := &Feishu{
 		accessToken: "cached_token",
 		tokenExpiry: time.Now().Add(time.Hour),

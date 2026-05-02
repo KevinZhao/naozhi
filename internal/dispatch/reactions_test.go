@@ -70,6 +70,7 @@ func newTestDispatcherWithPlatform(p platform.Platform) *Dispatcher {
 }
 
 func TestAckQueuedWithReaction_NoMessageID(t *testing.T) {
+	t.Parallel()
 	fp := &fakeReactorPlatform{}
 	d := newTestDispatcherWithPlatform(fp)
 	d.platforms = map[string]platform.Platform{"fake": fp}
@@ -84,6 +85,7 @@ func TestAckQueuedWithReaction_NoMessageID(t *testing.T) {
 }
 
 func TestAckQueuedWithReaction_NonReactorPlatform(t *testing.T) {
+	t.Parallel()
 	fp := &fakePlatform{} // no Reactor capability
 	d := newTestDispatcher(fp, nil)
 	msg := platform.IncomingMessage{Platform: "fake", MessageID: "m1", ChatID: "c1"}
@@ -93,6 +95,7 @@ func TestAckQueuedWithReaction_NonReactorPlatform(t *testing.T) {
 }
 
 func TestAckQueuedWithReaction_Success(t *testing.T) {
+	t.Parallel()
 	fp := &fakeReactorPlatform{}
 	d := newTestDispatcherWithPlatform(fp)
 	d.platforms = map[string]platform.Platform{"fake": fp}
@@ -107,6 +110,7 @@ func TestAckQueuedWithReaction_Success(t *testing.T) {
 }
 
 func TestAckQueuedWithReaction_AddErrorFallsBack(t *testing.T) {
+	t.Parallel()
 	fp := &fakeReactorPlatform{addErr: errors.New("network")}
 	d := newTestDispatcherWithPlatform(fp)
 	d.platforms = map[string]platform.Platform{"fake": fp}
@@ -118,6 +122,7 @@ func TestAckQueuedWithReaction_AddErrorFallsBack(t *testing.T) {
 }
 
 func TestClearQueuedReactions_RemovesOnlyThoseWithMessageID(t *testing.T) {
+	t.Parallel()
 	fp := &fakeReactorPlatform{}
 	d := newTestDispatcherWithPlatform(fp)
 	d.platforms = map[string]platform.Platform{"fake": fp}
@@ -138,6 +143,7 @@ func TestClearQueuedReactions_RemovesOnlyThoseWithMessageID(t *testing.T) {
 }
 
 func TestClearQueuedReactions_NonReactorIsNoOp(t *testing.T) {
+	t.Parallel()
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp, nil)
 	// Must not panic and must leave no side effects.
@@ -146,6 +152,7 @@ func TestClearQueuedReactions_NonReactorIsNoOp(t *testing.T) {
 }
 
 func TestClearQueuedReactions_ErrorsSwallowed(t *testing.T) {
+	t.Parallel()
 	fp := &fakeReactorPlatform{removeErr: errors.New("rate limit")}
 	d := newTestDispatcherWithPlatform(fp)
 	d.platforms = map[string]platform.Platform{"fake": fp}

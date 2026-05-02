@@ -56,6 +56,7 @@ func TestWorkDirReachable_FileNotDir(t *testing.T) {
 // NOT call Reset or GetOrCreate on the fake router, and MUST record a
 // "work_dir unreachable" result on the job.
 func TestCRON2_FreshExecuteSkipsWhenWorkDirMissing(t *testing.T) {
+	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
 		Router:  fake,
@@ -126,6 +127,7 @@ func TestCRON2_FreshExecuteSkipsWhenWorkDirMissing(t *testing.T) {
 // Here we give the job an existing tempdir and expect Reset + GetOrCreate
 // to fire on the fake router as before.
 func TestCRON2_FreshExecuteProceedsWhenWorkDirExists(t *testing.T) {
+	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
 		Router:  fake,
@@ -176,6 +178,7 @@ func TestCRON2_FreshExecuteProceedsWhenWorkDirExists(t *testing.T) {
 // shape: a job without an explicit WorkDir uses the router default.
 // The guard must not reject this (workDirReachable("") returns true).
 func TestCRON2_EmptyWorkDirPassesThrough(t *testing.T) {
+	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
 		Router:  fake,

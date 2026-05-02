@@ -22,6 +22,7 @@ import (
 //
 // The seq gate makes the T1 write a no-op because lastSavedSeq=2 >= 1.
 func TestSaveMarshaledSeq_DropsStaleSeq(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron_jobs.json")
 	s := &Scheduler{storePath: path}
@@ -51,6 +52,7 @@ func TestSaveMarshaledSeq_DropsStaleSeq(t *testing.T) {
 // strict: each successive seq lands, matching the happy case where writers
 // arrive at storeMu in monotonic order.
 func TestSaveMarshaledSeq_AcceptsAdvancingSeq(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron_jobs.json")
 	s := &Scheduler{storePath: path}
@@ -76,6 +78,7 @@ func TestSaveMarshaledSeq_AcceptsAdvancingSeq(t *testing.T) {
 // persistJobsLocked.Add(1) is monotonic, but contract-test the gate) do not
 // both land. This matters if a future refactor ever reuses a seq value.
 func TestSaveMarshaledSeq_EqualSeqIsDropped(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron_jobs.json")
 	s := &Scheduler{storePath: path}
@@ -95,6 +98,7 @@ func TestSaveMarshaledSeq_EqualSeqIsDropped(t *testing.T) {
 // After Wait, the disk MUST hold exactly seq=50's payload. Run with -race
 // to catch any data race on lastSavedSeq / storeMu.
 func TestSaveMarshaledSeq_ConcurrentWritersNoRollback(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "cron_jobs.json")
 	s := &Scheduler{storePath: path}

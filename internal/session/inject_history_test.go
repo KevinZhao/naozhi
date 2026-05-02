@@ -11,6 +11,7 @@ import (
 // the scan still runs, summaries still land in lastPrompt / lastActivity, and
 // the "only set if previously empty" guard still holds.
 func TestInjectHistory_UpdatesLastPromptAndActivity(t *testing.T) {
+	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
 
 	s.InjectHistory([]cli.EventEntry{
@@ -34,6 +35,7 @@ func TestInjectHistory_UpdatesLastPromptAndActivity(t *testing.T) {
 // branch — a second InjectHistory call (e.g. batched JSONL replay) must not
 // clobber summaries already populated by Send.
 func TestInjectHistory_DoesNotOverwriteNonEmpty(t *testing.T) {
+	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
 	s.lastPrompt.Store("set by send")
 	s.lastActivity.Store("live tool")
@@ -55,6 +57,7 @@ func TestInjectHistory_DoesNotOverwriteNonEmpty(t *testing.T) {
 // added while historyMu is briefly held must be observable by the read
 // accessors (EventEntries / EventEntriesBefore) after InjectHistory returns.
 func TestInjectHistory_PersistsEntries(t *testing.T) {
+	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
 	s.InjectHistory([]cli.EventEntry{
 		{Time: 1000, Type: "user", Summary: "q1"},
@@ -75,6 +78,7 @@ func TestInjectHistory_PersistsEntries(t *testing.T) {
 // never a torn slice. The slice returned by EventEntries is a copy, so length
 // equality after a >maxPersistedHistory injection locks the trim behaviour.
 func TestInjectHistory_TrimsToMaxPersisted(t *testing.T) {
+	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
 	oversized := make([]cli.EventEntry, maxPersistedHistory+50)
 	for i := range oversized {

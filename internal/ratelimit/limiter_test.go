@@ -9,6 +9,7 @@ import (
 )
 
 func TestAllowBurstThenBlock(t *testing.T) {
+	t.Parallel()
 	l := New(Config{Rate: rate.Every(time.Hour), Burst: 3})
 	for i := 0; i < 3; i++ {
 		if !l.Allow("a") {
@@ -21,6 +22,7 @@ func TestAllowBurstThenBlock(t *testing.T) {
 }
 
 func TestAllowPerKeyIsolation(t *testing.T) {
+	t.Parallel()
 	l := New(Config{Rate: rate.Every(time.Hour), Burst: 1})
 	if !l.Allow("a") {
 		t.Fatal("Allow(a) first token should pass")
@@ -34,6 +36,7 @@ func TestAllowPerKeyIsolation(t *testing.T) {
 }
 
 func TestEmptyKeyRejected(t *testing.T) {
+	t.Parallel()
 	l := New(Config{Rate: rate.Every(time.Second), Burst: 10})
 	if l.Allow("") {
 		t.Fatal("empty key must not share a global bucket")
@@ -41,6 +44,7 @@ func TestEmptyKeyRejected(t *testing.T) {
 }
 
 func TestLRUEvictionIsO1AndKeepsMaxKeys(t *testing.T) {
+	t.Parallel()
 	l := New(Config{Rate: rate.Every(time.Hour), Burst: 1, MaxKeys: 3})
 	keys := []string{"a", "b", "c", "d", "e"}
 	for _, k := range keys {
@@ -52,6 +56,7 @@ func TestLRUEvictionIsO1AndKeepsMaxKeys(t *testing.T) {
 }
 
 func TestLRUEvictsLeastRecentlyUsed(t *testing.T) {
+	t.Parallel()
 	l := New(Config{Rate: rate.Every(time.Hour), Burst: 1, MaxKeys: 2})
 	l.Allow("a")
 	l.Allow("b")
@@ -66,6 +71,7 @@ func TestLRUEvictsLeastRecentlyUsed(t *testing.T) {
 }
 
 func TestTTLLazyReset(t *testing.T) {
+	t.Parallel()
 	l := New(Config{Rate: rate.Every(time.Hour), Burst: 1, TTL: 10 * time.Millisecond})
 	if !l.Allow("a") {
 		t.Fatal("initial Allow should pass")
@@ -80,6 +86,7 @@ func TestTTLLazyReset(t *testing.T) {
 }
 
 func TestConcurrentAllowRaceFree(t *testing.T) {
+	t.Parallel()
 	l := New(Config{Rate: rate.Every(time.Microsecond), Burst: 100, MaxKeys: 50})
 	var wg sync.WaitGroup
 	for i := 0; i < 16; i++ {
@@ -99,6 +106,7 @@ func TestConcurrentAllowRaceFree(t *testing.T) {
 }
 
 func TestDefaults(t *testing.T) {
+	t.Parallel()
 	l := New(Config{Rate: rate.Every(time.Second), Burst: 1})
 	if l.cfg.MaxKeys != defaultMaxKeys {
 		t.Fatalf("MaxKeys default = %d, want %d", l.cfg.MaxKeys, defaultMaxKeys)

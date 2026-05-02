@@ -20,6 +20,7 @@ import (
 // cancelled before execute() enters the fresh branch. This is the narrow
 // shutdown-overlap window that used to leak orphan CLI processes.
 func TestCRON3_FreshExecuteSkippedAfterStopCtxCancel(t *testing.T) {
+	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
 		Router:  fake,
@@ -86,6 +87,7 @@ func TestCRON3_FreshExecuteSkippedAfterStopCtxCancel(t *testing.T) {
 // — execute() then dereferences sess.Send(). The assertions we care
 // about are already recorded on the fake before the panic fires.
 func TestCRON3_FreshExecuteRunsBeforeStop(t *testing.T) {
+	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
 		Router:  fake,
@@ -148,6 +150,7 @@ func TestCRON3_FreshExecuteRunsBeforeStop(t *testing.T) {
 // lifts the guard out of the fresh branch — and therefore suppresses
 // persistent executions too — fails this regression.
 func TestCRON3_PersistentModeUnaffectedByGuard(t *testing.T) {
+	t.Parallel()
 	fake := &fakeSessionRouter{}
 	s := NewScheduler(SchedulerConfig{
 		Router:  fake,

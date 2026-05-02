@@ -81,6 +81,7 @@ func assistantJSONLLine(text string) string {
 // ---------------------------------------------------------------------------
 
 func TestParseTimestamp(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name  string
 		input string
@@ -109,6 +110,7 @@ func TestParseTimestamp(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExtractText(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name string
 		raw  string
@@ -160,6 +162,7 @@ func TestExtractText(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLoadHistory_EmptyDir(t *testing.T) {
+	t.Parallel()
 	dir := makeClaudeDir(t)
 	entries, err := LoadHistory(dir, "00000000-0000-0000-0000-000000000001", "")
 	if err != nil {
@@ -171,6 +174,7 @@ func TestLoadHistory_EmptyDir(t *testing.T) {
 }
 
 func TestLoadHistory_MissingClaudeDir(t *testing.T) {
+	t.Parallel()
 	entries, err := LoadHistory("/nonexistent/path", "00000000-0000-0000-0000-000000000001", "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -181,6 +185,7 @@ func TestLoadHistory_MissingClaudeDir(t *testing.T) {
 }
 
 func TestLoadHistory_WithCWD(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/myproject"
 	sessionID := "00000000-0000-0000-0000-000000000042"
@@ -209,6 +214,7 @@ func TestLoadHistory_WithCWD(t *testing.T) {
 }
 
 func TestLoadHistory_FallbackScan(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	sessionID := "00000000-0000-0000-0000-000000000043"
 	// The actual project dir name is irrelevant for the scan fallback
@@ -233,6 +239,7 @@ func TestLoadHistory_FallbackScan(t *testing.T) {
 }
 
 func TestLoadHistory_IgnoresMalformedLines(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/malformed"
 	sessionID := "00000000-0000-0000-0000-000000000099"
@@ -258,6 +265,7 @@ func TestLoadHistory_IgnoresMalformedLines(t *testing.T) {
 }
 
 func TestLoadHistory_AssistantBlocks(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/assistant"
 	sessionID := "00000000-0000-0000-0000-000000000044"
@@ -281,6 +289,7 @@ func TestLoadHistory_AssistantBlocks(t *testing.T) {
 }
 
 func TestLoadHistory_Truncation(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/trunc"
 	sessionID := "00000000-0000-0000-0000-000000000045"
@@ -310,6 +319,7 @@ func TestLoadHistory_Truncation(t *testing.T) {
 }
 
 func TestParseJSONL_EmptyLines(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "test.jsonl")
 	// file with empty lines and only whitespace
@@ -327,6 +337,7 @@ func TestParseJSONL_EmptyLines(t *testing.T) {
 }
 
 func TestLoadHistory_UserBlockContent(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/blockuser"
 	sessionID := "00000000-0000-0000-0000-000000000046"

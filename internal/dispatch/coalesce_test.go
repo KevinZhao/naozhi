@@ -9,6 +9,7 @@ import (
 )
 
 func TestCoalesceMessages_Empty(t *testing.T) {
+	t.Parallel()
 	text, images := CoalesceMessages(nil)
 	if text != "" || images != nil {
 		t.Fatalf("expected empty, got %q, %v", text, images)
@@ -16,6 +17,7 @@ func TestCoalesceMessages_Empty(t *testing.T) {
 }
 
 func TestCoalesceMessages_Single(t *testing.T) {
+	t.Parallel()
 	imgs := []cli.ImageData{{Data: []byte("img"), MimeType: "image/png"}}
 	text, images := CoalesceMessages([]QueuedMsg{
 		{Text: "hello", Images: imgs, EnqueueAt: time.Date(2026, 4, 16, 14, 2, 0, 0, time.UTC)},
@@ -29,6 +31,7 @@ func TestCoalesceMessages_Single(t *testing.T) {
 }
 
 func TestCoalesceMessages_Multiple(t *testing.T) {
+	t.Parallel()
 	msgs := []QueuedMsg{
 		{Text: "帮我写个函数", EnqueueAt: time.Date(2026, 4, 16, 14, 2, 0, 0, time.UTC)},
 		{Text: "要用Go", Images: []cli.ImageData{{Data: []byte("a"), MimeType: "image/png"}}, EnqueueAt: time.Date(2026, 4, 16, 14, 2, 30, 0, time.UTC)},
@@ -54,6 +57,7 @@ func TestCoalesceMessages_Multiple(t *testing.T) {
 }
 
 func TestCoalesceMessages_ImagesConcat(t *testing.T) {
+	t.Parallel()
 	msgs := []QueuedMsg{
 		{Text: "A", Images: []cli.ImageData{{Data: []byte("1")}}, EnqueueAt: time.Now()},
 		{Text: "B", Images: []cli.ImageData{{Data: []byte("2")}, {Data: []byte("3")}}, EnqueueAt: time.Now()},
@@ -71,6 +75,7 @@ func TestCoalesceMessages_ImagesConcat(t *testing.T) {
 // while preserving all images. Sized to per-message cap so 8 msgs exceed
 // maxCoalescedTextBytes on any reasonable ingress cap. R60-GO-M4.
 func TestCoalesceMessages_TotalBytesCap(t *testing.T) {
+	t.Parallel()
 	// Use a message size that, multiplied by 8, safely exceeds the coalesce
 	// cap regardless of future bumps to per-msg ingress caps.
 	per := maxCoalescedTextBytes/4 + 1 // 8 × per > 2 × cap
@@ -109,6 +114,7 @@ func TestCoalesceMessages_TotalBytesCap(t *testing.T) {
 // a single oversize message must not bypass the coalesce cap even though
 // ingress paths have their own gates. Defense in depth.
 func TestCoalesceMessages_SingleMessageTruncatesOversize(t *testing.T) {
+	t.Parallel()
 	big := strings.Repeat("y", maxCoalescedTextBytes+1024)
 	msgs := []QueuedMsg{{
 		Text:      big,

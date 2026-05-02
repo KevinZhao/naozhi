@@ -31,6 +31,7 @@ func testIncomingMsg() platform.IncomingMessage {
 }
 
 func TestHandleOwnerLoopPanic_SendsReplyToUser(t *testing.T) {
+	t.Parallel()
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp, nil)
 	d.queue = NewMessageQueue(5, 0)
@@ -50,6 +51,7 @@ func TestHandleOwnerLoopPanic_SendsReplyToUser(t *testing.T) {
 }
 
 func TestHandleOwnerLoopPanic_DiscardsQueue(t *testing.T) {
+	t.Parallel()
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp, nil)
 	d.queue = NewMessageQueue(5, 0)
@@ -70,6 +72,7 @@ func TestHandleOwnerLoopPanic_DiscardsQueue(t *testing.T) {
 }
 
 func TestHandleOwnerLoopPanic_NilQueueNoCrash(t *testing.T) {
+	t.Parallel()
 	fp := &fakePlatform{}
 	d := newTestDispatcher(fp, nil)
 	d.queue = nil // Guard-based deployments leave queue unset.
@@ -83,6 +86,7 @@ func TestHandleOwnerLoopPanic_NilQueueNoCrash(t *testing.T) {
 }
 
 func TestHandleOwnerLoopPanic_ReplyPanicAbsorbed(t *testing.T) {
+	t.Parallel()
 	// Simulate a platform SDK that panics on Reply (e.g., nil chat
 	// handle). The nested recover inside handleOwnerLoopPanic must
 	// swallow this cascade so the caller's outer defer is not unwound

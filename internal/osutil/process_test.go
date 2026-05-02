@@ -6,6 +6,7 @@ import (
 )
 
 func TestPidAlive_Self(t *testing.T) {
+	t.Parallel()
 	// The current process should always be alive.
 	if !PidAlive(os.Getpid()) {
 		t.Error("PidAlive(os.Getpid()) = false, want true")
@@ -22,6 +23,7 @@ func TestPidAlive_Self(t *testing.T) {
 // surfacing an (err) second return would invite callers to drop the
 // guard.
 func TestPidAlive_ZeroPid(t *testing.T) {
+	t.Parallel()
 	if PidAlive(0) {
 		t.Error("PidAlive(0) = true; PID 0 must never report alive (kill(0, sig) broadcasts to process group)")
 	}
@@ -32,6 +34,7 @@ func TestPidAlive_ZeroPid(t *testing.T) {
 // the guard a stray negative PID from e.g. parsing a shim hello field
 // would report any live peer in that group as "alive". R29-DES4.
 func TestPidAlive_NegativePid(t *testing.T) {
+	t.Parallel()
 	if PidAlive(-1) {
 		t.Error("PidAlive(-1) = true; negative PIDs must never report alive (kill(-N, sig) targets process groups)")
 	}
@@ -41,6 +44,7 @@ func TestPidAlive_NegativePid(t *testing.T) {
 }
 
 func TestPidAlive_NonExistentPid(t *testing.T) {
+	t.Parallel()
 	// PID 2^22 is extremely unlikely to exist on any normal system.
 	// If it does exist somehow, the test skips.
 	got := PidAlive(4194304)

@@ -11,6 +11,7 @@ import (
 // ---- IsPlannerKey ----
 
 func TestIsPlannerKey_Valid(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		key  string
 		want bool
@@ -27,6 +28,7 @@ func TestIsPlannerKey_Valid(t *testing.T) {
 }
 
 func TestIsPlannerKey_Invalid(t *testing.T) {
+	t.Parallel()
 	tests := []string{
 		"project::planner",           // name too short (exact sentinel)
 		"project:planner",            // missing name segment
@@ -44,6 +46,7 @@ func TestIsPlannerKey_Invalid(t *testing.T) {
 }
 
 func TestIsPlannerKey_ExactBoundary(t *testing.T) {
+	t.Parallel()
 	// "project::planner" has len == len("project::planner") which equals the sentinel
 	boundary := "project::planner"
 	if IsPlannerKey(boundary) {
@@ -54,6 +57,7 @@ func TestIsPlannerKey_ExactBoundary(t *testing.T) {
 // ---- PlannerKeyFor / PlannerSessionKey ----
 
 func TestPlannerKeyFor(t *testing.T) {
+	t.Parallel()
 	got := PlannerKeyFor("myapp")
 	want := "project:myapp:planner"
 	if got != want {
@@ -62,6 +66,7 @@ func TestPlannerKeyFor(t *testing.T) {
 }
 
 func TestPlannerSessionKey(t *testing.T) {
+	t.Parallel()
 	p := &Project{Name: "webapp"}
 	got := p.PlannerSessionKey()
 	want := "project:webapp:planner"
@@ -73,6 +78,7 @@ func TestPlannerSessionKey(t *testing.T) {
 // ---- snapshot / snapshotLight ----
 
 func TestSnapshot_DeepCopy(t *testing.T) {
+	t.Parallel()
 	orig := &Project{
 		Name: "proj",
 		Path: "/tmp/proj",
@@ -91,6 +97,7 @@ func TestSnapshot_DeepCopy(t *testing.T) {
 }
 
 func TestSnapshotLight_NilBindings(t *testing.T) {
+	t.Parallel()
 	orig := &Project{
 		Name: "proj",
 		Config: ProjectConfig{
@@ -112,6 +119,7 @@ func TestSnapshotLight_NilBindings(t *testing.T) {
 // ---- loadConfig ----
 
 func TestLoadConfig_NotExist(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	cfg, err := loadConfig(dir) // no .naozhi/project.yaml
 	if err != nil {
@@ -124,6 +132,7 @@ func TestLoadConfig_NotExist(t *testing.T) {
 }
 
 func TestLoadConfig_Valid(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	cfgDir := filepath.Join(dir, ".naozhi")
 	if err := os.MkdirAll(cfgDir, 0700); err != nil {
@@ -157,6 +166,7 @@ chat_bindings:
 }
 
 func TestLoadConfig_InvalidYAML(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	cfgDir := filepath.Join(dir, ".naozhi")
 	if err := os.MkdirAll(cfgDir, 0700); err != nil {
@@ -175,6 +185,7 @@ func TestLoadConfig_InvalidYAML(t *testing.T) {
 // ---- saveConfigToPath ----
 
 func TestSaveConfigToPath_RoundTrip(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".naozhi", "project.yaml")
 
@@ -213,6 +224,7 @@ func TestSaveConfigToPath_RoundTrip(t *testing.T) {
 }
 
 func TestSaveConfigToPath_AtomicWrite(t *testing.T) {
+	t.Parallel()
 	// Verify the tmp file does not survive after a successful save.
 	dir := t.TempDir()
 	path := filepath.Join(dir, ".naozhi", "project.yaml")
@@ -234,6 +246,7 @@ func TestSaveConfigToPath_AtomicWrite(t *testing.T) {
 }
 
 func TestSaveConfigToPath_CreatesDir(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	// Deeply nested path that doesn't exist yet
 	path := filepath.Join(dir, "a", "b", "c", "project.yaml")
@@ -246,6 +259,7 @@ func TestSaveConfigToPath_CreatesDir(t *testing.T) {
 }
 
 func TestSaveConfigToPath_OverwriteExisting(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "project.yaml")
 
@@ -272,6 +286,7 @@ func TestSaveConfigToPath_OverwriteExisting(t *testing.T) {
 // ---- snapshotConfig ----
 
 func TestSnapshotConfig_DeepCopy(t *testing.T) {
+	t.Parallel()
 	p := &Project{
 		Config: ProjectConfig{
 			ChatBindings: []ChatBinding{
@@ -287,6 +302,7 @@ func TestSnapshotConfig_DeepCopy(t *testing.T) {
 }
 
 func TestSnapshotConfig_EmptyBindings(t *testing.T) {
+	t.Parallel()
 	p := &Project{Config: ProjectConfig{GitSync: true}}
 	snap := snapshotConfig(p)
 	if snap.ChatBindings != nil {
@@ -297,6 +313,7 @@ func TestSnapshotConfig_EmptyBindings(t *testing.T) {
 // ---- configPath ----
 
 func TestConfigPath(t *testing.T) {
+	t.Parallel()
 	p := &Project{Path: "/home/user/projects/myapp"}
 	got := p.configPath()
 	want := "/home/user/projects/myapp/.naozhi/project.yaml"

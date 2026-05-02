@@ -11,6 +11,7 @@ import (
 var _ platform.RunnablePlatform = (*Slack)(nil)
 
 func TestNew_Defaults(t *testing.T) {
+	t.Parallel()
 	s := New(Config{BotToken: "xoxb-test", AppToken: "xapp-test"})
 	if s.Name() != "slack" {
 		t.Errorf("Name() = %q, want slack", s.Name())
@@ -21,6 +22,7 @@ func TestNew_Defaults(t *testing.T) {
 }
 
 func TestNew_CustomMaxReplyLen(t *testing.T) {
+	t.Parallel()
 	s := New(Config{BotToken: "xoxb-test", AppToken: "xapp-test", MaxReplyLen: 2000})
 	if s.MaxReplyLength() != 2000 {
 		t.Errorf("MaxReplyLength() = %d, want 2000", s.MaxReplyLength())
@@ -28,6 +30,7 @@ func TestNew_CustomMaxReplyLen(t *testing.T) {
 }
 
 func TestStartAlreadyStarted(t *testing.T) {
+	t.Parallel()
 	s := New(Config{BotToken: "xoxb-test", AppToken: "xapp-test"})
 	s.startMu.Lock()
 	s.started = true
@@ -40,6 +43,7 @@ func TestStartAlreadyStarted(t *testing.T) {
 }
 
 func TestStopNoop(t *testing.T) {
+	t.Parallel()
 	s := New(Config{BotToken: "xoxb-test", AppToken: "xapp-test"})
 	if err := s.Stop(); err != nil {
 		t.Errorf("Stop() error = %v", err)
@@ -47,6 +51,7 @@ func TestStopNoop(t *testing.T) {
 }
 
 func TestEditMessage_InvalidFormat(t *testing.T) {
+	t.Parallel()
 	s := New(Config{BotToken: "xoxb-test", AppToken: "xapp-test"})
 	err := s.EditMessage(context.Background(), "no-colon-here", "text")
 	if err == nil {
@@ -55,6 +60,7 @@ func TestEditMessage_InvalidFormat(t *testing.T) {
 }
 
 func TestHandleMessage_BotMessage(t *testing.T) {
+	t.Parallel()
 	s := New(Config{BotToken: "xoxb-test", AppToken: "xapp-test"})
 	called := false
 	s.handler = func(_ context.Context, _ platform.IncomingMessage) { called = true }
@@ -65,6 +71,7 @@ func TestHandleMessage_BotMessage(t *testing.T) {
 }
 
 func TestHandleMessage_SubType(t *testing.T) {
+	t.Parallel()
 	s := New(Config{BotToken: "xoxb-test", AppToken: "xapp-test"})
 	called := false
 	s.handler = func(_ context.Context, _ platform.IncomingMessage) { called = true }
@@ -75,6 +82,7 @@ func TestHandleMessage_SubType(t *testing.T) {
 }
 
 func TestHandleMessage_MentionStrip(t *testing.T) {
+	t.Parallel()
 	s := New(Config{BotToken: "xoxb-test", AppToken: "xapp-test"})
 	s.botID = "U123"
 	var received platform.IncomingMessage
@@ -103,6 +111,7 @@ func TestHandleMessage_MentionStrip(t *testing.T) {
 }
 
 func TestHandleMessage_DirectMessage(t *testing.T) {
+	t.Parallel()
 	s := New(Config{BotToken: "xoxb-test", AppToken: "xapp-test"})
 	var received platform.IncomingMessage
 	done := make(chan struct{})
@@ -121,6 +130,7 @@ func TestHandleMessage_DirectMessage(t *testing.T) {
 }
 
 func TestHandleMessage_EmptyAfterMentionStrip(t *testing.T) {
+	t.Parallel()
 	s := New(Config{BotToken: "xoxb-test", AppToken: "xapp-test"})
 	s.botID = "U123"
 	called := false

@@ -8,6 +8,7 @@ import (
 // an operator who only writes `workspaces:` gets cfg.Nodes populated too,
 // so every downstream consumer (validateConfig, main.go) sees the entries.
 func TestNormalize_WorkspacesOnly(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{
 		Workspaces: map[string]NodeConfig{
 			"macbook": {URL: "https://10.0.0.2:8180", Token: "t"},
@@ -25,6 +26,7 @@ func TestNormalize_WorkspacesOnly(t *testing.T) {
 // TestNormalize_NodesOnly covers the legacy spelling path: both sides are
 // populated so code that migrated to read Workspaces can also find entries.
 func TestNormalize_NodesOnly(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{
 		Nodes: map[string]NodeConfig{
 			"old": {URL: "https://host:8180"},
@@ -42,6 +44,7 @@ func TestNormalize_NodesOnly(t *testing.T) {
 // TestNormalize_BothSet verifies the conflict resolution: Workspaces wins
 // and overwrites Nodes, matching the semantic "workspaces is preferred".
 func TestNormalize_BothSet(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{
 		Nodes: map[string]NodeConfig{
 			"n1": {URL: "https://nodes-variant:1"},
@@ -62,6 +65,7 @@ func TestNormalize_BothSet(t *testing.T) {
 // TestNormalize_Idempotent ensures calling Normalize twice is safe — the
 // second call sees both maps equal and must not drop or duplicate entries.
 func TestNormalize_Idempotent(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{
 		Workspaces: map[string]NodeConfig{
 			"x": {URL: "https://x:8180"},
@@ -80,6 +84,7 @@ func TestNormalize_Idempotent(t *testing.T) {
 // TestNormalize_Empty covers the zero-nodes deployment: Normalize must not
 // panic or fabricate entries when both maps are nil.
 func TestNormalize_Empty(t *testing.T) {
+	t.Parallel()
 	cfg := &Config{}
 	cfg.Normalize()
 	if cfg.Nodes != nil && len(cfg.Nodes) != 0 {

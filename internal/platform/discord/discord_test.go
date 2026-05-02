@@ -11,6 +11,7 @@ import (
 var _ platform.RunnablePlatform = (*Discord)(nil)
 
 func TestNew_Defaults(t *testing.T) {
+	t.Parallel()
 	d := New(Config{BotToken: "test-token"})
 	if d.Name() != "discord" {
 		t.Errorf("Name() = %q, want discord", d.Name())
@@ -21,6 +22,7 @@ func TestNew_Defaults(t *testing.T) {
 }
 
 func TestNew_CustomMaxReplyLen(t *testing.T) {
+	t.Parallel()
 	d := New(Config{BotToken: "test-token", MaxReplyLen: 1500})
 	if d.MaxReplyLength() != 1500 {
 		t.Errorf("MaxReplyLength() = %d, want 1500", d.MaxReplyLength())
@@ -28,6 +30,7 @@ func TestNew_CustomMaxReplyLen(t *testing.T) {
 }
 
 func TestStartAlreadyStarted(t *testing.T) {
+	t.Parallel()
 	d := New(Config{BotToken: "test-token"})
 	d.startMu.Lock()
 	d.started = true
@@ -40,6 +43,7 @@ func TestStartAlreadyStarted(t *testing.T) {
 }
 
 func TestStopNoop(t *testing.T) {
+	t.Parallel()
 	d := New(Config{BotToken: "test-token"})
 	if err := d.Stop(); err != nil {
 		t.Errorf("Stop() error = %v", err)
@@ -47,6 +51,7 @@ func TestStopNoop(t *testing.T) {
 }
 
 func TestEditMessage_InvalidFormat(t *testing.T) {
+	t.Parallel()
 	d := New(Config{BotToken: "test-token"})
 	err := d.EditMessage(context.Background(), "no-colon-here", "text")
 	if err == nil {
@@ -55,6 +60,7 @@ func TestEditMessage_InvalidFormat(t *testing.T) {
 }
 
 func TestOnMessageCreate_NilAuthor(t *testing.T) {
+	t.Parallel()
 	d := New(Config{BotToken: "test-token"})
 	d.botID = "bot123"
 	called := false
@@ -69,6 +75,7 @@ func TestOnMessageCreate_NilAuthor(t *testing.T) {
 }
 
 func TestOnMessageCreate_BotMessage(t *testing.T) {
+	t.Parallel()
 	d := New(Config{BotToken: "test-token"})
 	d.botID = "bot123"
 	called := false
@@ -85,6 +92,7 @@ func TestOnMessageCreate_BotMessage(t *testing.T) {
 }
 
 func TestOnMessageCreate_OwnMessage(t *testing.T) {
+	t.Parallel()
 	d := New(Config{BotToken: "test-token"})
 	d.botID = "bot123"
 	called := false
@@ -101,6 +109,7 @@ func TestOnMessageCreate_OwnMessage(t *testing.T) {
 }
 
 func TestOnMessageCreate_GroupMessage(t *testing.T) {
+	t.Parallel()
 	d := New(Config{BotToken: "test-token"})
 	d.botID = "bot123"
 	var received platform.IncomingMessage
@@ -128,6 +137,7 @@ func TestOnMessageCreate_GroupMessage(t *testing.T) {
 }
 
 func TestOnMessageCreate_DirectMessage(t *testing.T) {
+	t.Parallel()
 	d := New(Config{BotToken: "test-token"})
 	d.botID = "bot123"
 	var received platform.IncomingMessage
@@ -152,6 +162,7 @@ func TestOnMessageCreate_DirectMessage(t *testing.T) {
 }
 
 func TestOnMessageCreate_MentionStrip(t *testing.T) {
+	t.Parallel()
 	d := New(Config{BotToken: "test-token"})
 	d.botID = "bot123"
 	var received platform.IncomingMessage
@@ -180,6 +191,7 @@ func TestOnMessageCreate_MentionStrip(t *testing.T) {
 }
 
 func TestOnMessageCreate_EmptyAfterMentionStrip(t *testing.T) {
+	t.Parallel()
 	d := New(Config{BotToken: "test-token"})
 	d.botID = "bot123"
 	called := false

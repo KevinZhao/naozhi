@@ -6,6 +6,7 @@ import (
 )
 
 func TestComputeJobTimeout(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		name     string
 		schedule string
@@ -78,6 +79,7 @@ func TestComputeJobTimeout(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			got := computeJobTimeout(tc.schedule, tc.cap)
 			if got != tc.want {
 				t.Fatalf("computeJobTimeout(%q, %v) = %v, want %v",

@@ -9,6 +9,7 @@ import (
 // an aside key is moved to a sidebar key while the session ID, workspace,
 // totalCost, userLabel, and backend are preserved.
 func TestRenameSession_HappyPath(t *testing.T) {
+	t.Parallel()
 	r := NewRouter(RouterConfig{})
 	const oldKey = "scratch:abc:general:general"
 	const newKey = "feishu:direct:alice:aside-general-deadbeef"
@@ -60,6 +61,7 @@ func TestRenameSession_HappyPath(t *testing.T) {
 }
 
 func TestRenameSession_MissingSource(t *testing.T) {
+	t.Parallel()
 	r := NewRouter(RouterConfig{})
 	if r.RenameSession("missing:key:x:y", "feishu:direct:alice:aside") {
 		t.Error("RenameSession should fail when source missing")
@@ -67,6 +69,7 @@ func TestRenameSession_MissingSource(t *testing.T) {
 }
 
 func TestRenameSession_CollisionRefused(t *testing.T) {
+	t.Parallel()
 	r := NewRouter(RouterConfig{})
 	const oldKey = "scratch:abc:general:general"
 	const newKey = "feishu:direct:alice:general"
@@ -87,6 +90,7 @@ func TestRenameSession_CollisionRefused(t *testing.T) {
 }
 
 func TestRenameSession_SameKeyRefused(t *testing.T) {
+	t.Parallel()
 	r := NewRouter(RouterConfig{})
 	if r.RenameSession("same:key:a:b", "same:key:a:b") {
 		t.Error("RenameSession(same, same) should return false")
@@ -94,6 +98,7 @@ func TestRenameSession_SameKeyRefused(t *testing.T) {
 }
 
 func TestRenameSession_InvalidNewKey(t *testing.T) {
+	t.Parallel()
 	r := NewRouter(RouterConfig{})
 	const oldKey = "scratch:abc:general:general"
 

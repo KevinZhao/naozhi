@@ -33,6 +33,7 @@ func makeProjectDir(t *testing.T, root, name string, cfg *ProjectConfig) {
 // ---- NewManager ----
 
 func TestNewManager_ValidDir(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	m, err := NewManager(root, PlannerDefaults{})
 	if err != nil {
@@ -44,6 +45,7 @@ func TestNewManager_ValidDir(t *testing.T) {
 }
 
 func TestNewManager_NonExistentDir(t *testing.T) {
+	t.Parallel()
 	_, err := NewManager("/nonexistent/path/xyz", PlannerDefaults{})
 	if err == nil {
 		t.Error("NewManager with missing dir should return error")
@@ -51,6 +53,7 @@ func TestNewManager_NonExistentDir(t *testing.T) {
 }
 
 func TestNewManager_NotADirectory(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	file := filepath.Join(dir, "file.txt")
 	if err := os.WriteFile(file, []byte("hi"), 0644); err != nil {
@@ -65,6 +68,7 @@ func TestNewManager_NotADirectory(t *testing.T) {
 // ---- Scan ----
 
 func TestScan_Empty(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	m, _ := NewManager(root, PlannerDefaults{})
 	if err := m.Scan(); err != nil {
@@ -76,6 +80,7 @@ func TestScan_Empty(t *testing.T) {
 }
 
 func TestScan_SkipsHiddenDirs(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	// Create a hidden directory — should be skipped.
 	hidden := filepath.Join(root, ".hidden")
@@ -91,6 +96,7 @@ func TestScan_SkipsHiddenDirs(t *testing.T) {
 }
 
 func TestScan_SkipsDirsWithoutCLAUDEMd(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	// Directory without CLAUDE.md
 	os.MkdirAll(filepath.Join(root, "noclaudemd"), 0755)
@@ -104,6 +110,7 @@ func TestScan_SkipsDirsWithoutCLAUDEMd(t *testing.T) {
 }
 
 func TestScan_PicksUpProjects(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "alpha", nil)
 	makeProjectDir(t, root, "beta", nil)
@@ -124,6 +131,7 @@ func TestScan_PicksUpProjects(t *testing.T) {
 }
 
 func TestScan_SkipsBadConfig(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	projDir := filepath.Join(root, "badcfg")
 	os.MkdirAll(filepath.Join(projDir, ".naozhi"), 0755)
@@ -142,6 +150,7 @@ func TestScan_SkipsBadConfig(t *testing.T) {
 // ---- Get ----
 
 func TestGet_ExistingProject(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "myproj", nil)
 	m, _ := NewManager(root, PlannerDefaults{})
@@ -157,6 +166,7 @@ func TestGet_ExistingProject(t *testing.T) {
 }
 
 func TestGet_NonExistentProject(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	m, _ := NewManager(root, PlannerDefaults{})
 	m.Scan()
@@ -168,6 +178,7 @@ func TestGet_NonExistentProject(t *testing.T) {
 }
 
 func TestGet_ReturnsCopy(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "copyproj", &ProjectConfig{
 		ChatBindings: []ChatBinding{{Platform: "feishu", ChatID: "c1"}},
@@ -191,6 +202,7 @@ func TestGet_ReturnsCopy(t *testing.T) {
 // ---- All (sorted) ----
 
 func TestAll_Sorted(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	for _, name := range []string{"charlie", "alpha", "beta"} {
 		makeProjectDir(t, root, name, nil)
@@ -214,6 +226,7 @@ func TestAll_Sorted(t *testing.T) {
 // ---- ProjectForChat ----
 
 func TestProjectForChat_Bound(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "proj1", &ProjectConfig{
 		ChatBindings: []ChatBinding{
@@ -233,6 +246,7 @@ func TestProjectForChat_Bound(t *testing.T) {
 }
 
 func TestProjectForChat_Unbound(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "proj1", nil)
 	m, _ := NewManager(root, PlannerDefaults{})
@@ -247,6 +261,7 @@ func TestProjectForChat_Unbound(t *testing.T) {
 // ---- BindChat ----
 
 func TestBindChat_NewBinding(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "bindproj", nil)
 	m, _ := NewManager(root, PlannerDefaults{})
@@ -273,6 +288,7 @@ func TestBindChat_NewBinding(t *testing.T) {
 }
 
 func TestBindChat_Idempotent(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "idempotent", nil)
 	m, _ := NewManager(root, PlannerDefaults{})
@@ -288,6 +304,7 @@ func TestBindChat_Idempotent(t *testing.T) {
 }
 
 func TestBindChat_NotFound(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	m, _ := NewManager(root, PlannerDefaults{})
 	m.Scan()
@@ -299,6 +316,7 @@ func TestBindChat_NotFound(t *testing.T) {
 }
 
 func TestBindChat_PersistsToDisk(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "persist", nil)
 	m, _ := NewManager(root, PlannerDefaults{})
@@ -319,6 +337,7 @@ func TestBindChat_PersistsToDisk(t *testing.T) {
 // ---- UnbindAllChat ----
 
 func TestUnbindAllChat(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "unbindproj", &ProjectConfig{
 		ChatBindings: []ChatBinding{
@@ -343,6 +362,7 @@ func TestUnbindAllChat(t *testing.T) {
 }
 
 func TestUnbindAllChat_NotBound(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "notbound", nil)
 	m, _ := NewManager(root, PlannerDefaults{})
@@ -357,6 +377,7 @@ func TestUnbindAllChat_NotBound(t *testing.T) {
 // ---- UpdateConfig ----
 
 func TestUpdateConfig_Success(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "updateme", nil)
 	m, _ := NewManager(root, PlannerDefaults{})
@@ -377,6 +398,7 @@ func TestUpdateConfig_Success(t *testing.T) {
 }
 
 func TestUpdateConfig_NotFound(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	m, _ := NewManager(root, PlannerDefaults{})
 	err := m.UpdateConfig("ghost", ProjectConfig{})
@@ -388,6 +410,7 @@ func TestUpdateConfig_NotFound(t *testing.T) {
 // ---- ProjectNames ----
 
 func TestProjectNames(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "p1", nil)
 	makeProjectDir(t, root, "p2", nil)
@@ -408,6 +431,7 @@ func TestProjectNames(t *testing.T) {
 // ---- ResolveWorkspaces ----
 
 func TestResolveWorkspaces_Match(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "workspace", nil)
 	m, _ := NewManager(root, PlannerDefaults{})
@@ -423,6 +447,7 @@ func TestResolveWorkspaces_Match(t *testing.T) {
 }
 
 func TestResolveWorkspaces_NoMatch(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "proj", nil)
 	m, _ := NewManager(root, PlannerDefaults{})
@@ -435,6 +460,7 @@ func TestResolveWorkspaces_NoMatch(t *testing.T) {
 }
 
 func TestResolveWorkspaces_DedupPaths(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "dedup", nil)
 	m, _ := NewManager(root, PlannerDefaults{})
@@ -449,6 +475,7 @@ func TestResolveWorkspaces_DedupPaths(t *testing.T) {
 }
 
 func TestResolveWorkspaces_EmptyPath(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	m, _ := NewManager(root, PlannerDefaults{})
 	m.Scan()
@@ -462,6 +489,7 @@ func TestResolveWorkspaces_EmptyPath(t *testing.T) {
 // ---- EffectivePlannerModel / EffectivePlannerPrompt ----
 
 func TestEffectivePlannerModel_ProjectOverride(t *testing.T) {
+	t.Parallel()
 	m := &Manager{defaults: PlannerDefaults{Model: "global-model"}}
 	p := &Project{Config: ProjectConfig{PlannerModel: "project-model"}}
 	got := m.EffectivePlannerModel(p)
@@ -471,6 +499,7 @@ func TestEffectivePlannerModel_ProjectOverride(t *testing.T) {
 }
 
 func TestEffectivePlannerModel_GlobalDefault(t *testing.T) {
+	t.Parallel()
 	m := &Manager{defaults: PlannerDefaults{Model: "global-model"}}
 	p := &Project{}
 	got := m.EffectivePlannerModel(p)
@@ -480,6 +509,7 @@ func TestEffectivePlannerModel_GlobalDefault(t *testing.T) {
 }
 
 func TestEffectivePlannerModel_Empty(t *testing.T) {
+	t.Parallel()
 	m := &Manager{defaults: PlannerDefaults{}}
 	p := &Project{}
 	got := m.EffectivePlannerModel(p)
@@ -489,6 +519,7 @@ func TestEffectivePlannerModel_Empty(t *testing.T) {
 }
 
 func TestEffectivePlannerPrompt_ProjectOverride(t *testing.T) {
+	t.Parallel()
 	m := &Manager{defaults: PlannerDefaults{Prompt: "global-prompt"}}
 	p := &Project{Config: ProjectConfig{PlannerPrompt: "project-prompt"}}
 	got := m.EffectivePlannerPrompt(p)
@@ -498,6 +529,7 @@ func TestEffectivePlannerPrompt_ProjectOverride(t *testing.T) {
 }
 
 func TestEffectivePlannerPrompt_GlobalDefault(t *testing.T) {
+	t.Parallel()
 	m := &Manager{defaults: PlannerDefaults{Prompt: "global-prompt"}}
 	p := &Project{}
 	got := m.EffectivePlannerPrompt(p)
@@ -509,6 +541,7 @@ func TestEffectivePlannerPrompt_GlobalDefault(t *testing.T) {
 // ---- rebuildBindingIndex (via BindChat collision) ----
 
 func TestRebuildBindingIndex_OverwriteOnBind(t *testing.T) {
+	t.Parallel()
 	root := t.TempDir()
 	makeProjectDir(t, root, "proj_a", &ProjectConfig{
 		ChatBindings: []ChatBinding{{Platform: "feishu", ChatType: "group", ChatID: "shared"}},
