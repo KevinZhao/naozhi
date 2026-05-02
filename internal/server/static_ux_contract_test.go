@@ -3017,114 +3017,11 @@ func TestDashboardHTML_R110P1_WSOutageHintStyle(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_R110P1_SidebarAgentChip pins the Round 143 contract for
-// the sidebar session-card model/agent chip. The broader TODO
-// ("sidebar 行加回复摘要") calls for response summary + agent chip +
-// message count; summary and count need backend extensions (no event
-// pagination / tally in the /api/sessions response today), so this round
-// lands ONLY the agent chip as an MVP — the data was already shipped
-// in session.ManagedSession.Agent (managed.go:554), the front-end just
-// wasn't rendering it.
-//
-// Three structural invariants:
-//
-//  1. shortAgentLabel is a pure helper whose match table recognizes the
-//     Anthropic family names (opus > sonnet > haiku priority) AND
-//     suppresses rendering for empty / generic values so stale legacy
-//     sessions don't grow a pointless chip.
-//  2. sessionCardHtml wires the chip into metaHtml AFTER the existing
-//     badges, so the order is stable and the chip doesn't displace the
-//     ` flex-shrink:0; margin-left:auto` alignment that .sc-agents
-//     depends on for right-edge anchoring.
-//  3. The chip class is `.sc-agent` (singular) and MUST be distinct from
-//     `.sc-agents` (plural — the subagent-count chip). Using the same
-//     class name would collapse two semantic surfaces into one style
-//     bucket and make future visual tweaks impossible.
-func TestDashboardJS_R110P1_SidebarAgentChip(t *testing.T) {
-	t.Parallel()
-	data, err := dashboardJS.ReadFile("static/dashboard.js")
-	if err != nil {
-		t.Fatalf("read dashboard.js: %v", err)
-	}
-	js := string(data)
-
-	// Invariant 1: shortAgentLabel defined + covers the priority table
-	// AND the empty/generic suppression contract.
-	if !strings.Contains(js, "function shortAgentLabel(agent)") {
-		t.Fatal("dashboard.js missing shortAgentLabel(agent) helper")
-	}
-	for _, fragment := range []string{
-		`if (!agent || typeof agent !== 'string') return '';`,
-		`if (!raw || raw === 'general') return '';`,
-		`for (const family of ['opus', 'sonnet', 'haiku'])`,
-	} {
-		if !strings.Contains(js, fragment) {
-			t.Errorf("shortAgentLabel body missing contract fragment %q", fragment)
-		}
-	}
-
-	// Invariant 2: sessionCardHtml uses shortAgentLabel + wires modelBadge
-	// into metaHtml. The chip MUST render BEFORE agentBadge (.sc-agents —
-	// the plural robot-count chip uses margin-left:auto to float right;
-	// inserting the new chip after agentBadge would steal that anchor).
-	if !strings.Contains(js, "const agentShort = shortAgentLabel(s.agent);") {
-		t.Error("sessionCardHtml must derive agentShort via shortAgentLabel(s.agent)")
-	}
-	if !strings.Contains(js, `'<span class="sc-agent" title="'`) {
-		t.Error("sessionCardHtml must render chip as <span class=\"sc-agent\" title=\"...\">")
-	}
-	// Order check: modelBadge appears before agentBadge in the meta
-	// concatenation — scan for both names and compare their positions.
-	metaIdx := strings.Index(js, "const metaHtml = ")
-	if metaIdx < 0 {
-		t.Fatal("sessionCardHtml missing `const metaHtml = ...`")
-	}
-	metaBlock := js[metaIdx:minInt(metaIdx+600, len(js))]
-	mbIdx := strings.Index(metaBlock, "modelBadge +")
-	abIdx := strings.Index(metaBlock, "agentBadge;")
-	if mbIdx < 0 || abIdx < 0 || mbIdx > abIdx {
-		t.Error("metaHtml must append modelBadge BEFORE agentBadge so the plural-count chip keeps its margin-left:auto anchor")
-	}
-
-	// Invariant 3: .sc-agent (singular) is rendered — explicit asymmetric
-	// class name vs .sc-agents (plural). The rendering path itself already
-	// covered above; here we double-check that no accidental pluralization
-	// slipped in, which would silently merge the two semantic chips.
-	if strings.Contains(js, `class="sc-agents" title="`) {
-		t.Error("model-family chip must use .sc-agent (singular); .sc-agents is reserved for the subagent count chip")
-	}
-}
-
-// TestDashboardHTML_R110P1_SidebarAgentChipStyle pins the CSS hook for the
-// new chip and enforces the singular-vs-plural naming contract on the
-// stylesheet side. Without a dedicated .sc-agent rule the chip would
-// inherit parent color and flex sizing, visually blending with the
-// displayState text next to it.
-func TestDashboardHTML_R110P1_SidebarAgentChipStyle(t *testing.T) {
-	t.Parallel()
-	data, err := dashboardHTML.ReadFile("static/dashboard.html")
-	if err != nil {
-		t.Fatalf("read dashboard.html: %v", err)
-	}
-	css := string(data)
-
-	// Match .sc-agent{...} specifically (word-boundary via following `{`),
-	// NOT .sc-agents{...}. A regex with the literal `{` is enough.
-	if ok, _ := regexp.MatchString(`\.sc-agent\s*\{`, css); !ok {
-		t.Error("dashboard.html missing .sc-agent{...} rule — the model-family chip would be unstyled")
-	}
-	// Plural rule must still exist (otherwise the subagent-count chip is
-	// unstyled). Catches the scenario where someone "fixes" the perceived
-	// duplication by deleting the wrong rule.
-	if !strings.Contains(css, ".sc-agents{") {
-		t.Error("dashboard.html missing .sc-agents{...} rule — the plural subagent count chip is a separate surface")
-	}
-	// The model chip should use a low-chrome tone (--nz-text-dim or
-	// --nz-text-mute) so the title stays the visual anchor of the card.
-	if ok, _ := regexp.MatchString(`\.sc-agent\s*\{[^}]*--nz-text-dim`, css); !ok {
-		t.Error(".sc-agent must use --nz-text-dim / --nz-text-mute so the chip stays subordinate to the session title")
-	}
-}
+// .sc-agent 模型家族 chip 在 Round R110-P1 作为"侧栏每卡显示模型家族"的
+// MVP 引入，后期因与 section header 的项目名视觉重复被移除——侧栏 chip
+// 的价值抵不过重复造成的噪声，且 dashboard 直创 session 的 key 末段是
+// folderName 会被当成"未知 agent"错误展示。保留 .sc-agents（复数，子
+// agent 计数）。删除后对应契约测试一并移除。
 
 // TestDashboardHTML_R141_ColdStartEmptyStateMatchesHelper pins the invariant
 // that the cold-start `<main id="main">` empty state in dashboard.html and
