@@ -1,0 +1,69 @@
+# naozhi sudoers policy — principle of least privilege
+#
+# Install as /etc/sudoers.d/naozhi (mode 440, root:root) AFTER validating
+# with `visudo -c -f /etc/sudoers.d/naozhi`. A syntactically invalid file
+# locks ALL sudo access on most distros until manually repaired from
+# single-user mode, so NEVER skip the check.
+#
+# WHAT THIS ALLOWS
+# ================
+# Two and only two commands, both required for zero-downtime restart:
+#
+#   1. `busctl call` to create a systemd transient scope adopting existing
+#      shim / Claude-CLI PIDs. The scope name is `naozhi-shim-<PID>.scope`
+#      with `KillMode=none`, making the processes survive naozhi.service
+#      restarts (see internal/shim/manager.go::moveToShimsCgroup).
+#
+#   2. `tee /sys/fs/cgroup/naozhi-shims/cgroup.procs` — fallback path when
+#      busctl is unavailable (older systemd, SELinux denies dbus). Stdin
+#      is a single PID number.
+#
+# WHY LEAST-PRIVILEGE MATTERS
+# ===========================
+# A wide `NOPASSWD: ALL` or `NOPASSWD: /usr/bin/busctl` would let any code
+# running as the naozhi user (incl. the Claude CLI subprocess that has
+# Bash tool access to the operator's development sandbox) escalate to root
+# trivially. The argv patterns below pin every operand naozhi is known to
+# emit, so accidental or malicious variations (different verb, different
+# scope name, different procs path) are rejected.
+#
+# ARGV STABILITY
+# ==============
+# The exact argv that naozhi emits is pinned by
+# `internal/shim/manager_sudoers_argv_test.go`. If someone changes
+# moveToShimsCgroup / moveToShimsCgroupDirect to emit a new argv shape,
+# that test fails loudly so this policy can be updated in lockstep
+# rather than silently starting to 429/deny-log in the journal.
+
+# Replace `ec2-user` with the UNIX user that runs the naozhi service
+# (the same user named in `deploy/naozhi.service` User=). If you rename
+# your service user, update BOTH the unit file and this policy.
+Defaults!NAOZHI_BUSCTL_1, NAOZHI_BUSCTL_2, NAOZHI_TEE_CGROUP setenv
+
+# The busctl call emits either 1 or 2 PIDs (shim-only or shim+cli).
+# sudoers globbing matches exactly one argv position per `*`, so each
+# PID count is listed as a separate Cmnd_Alias.
+
+Cmnd_Alias NAOZHI_BUSCTL_1 = /usr/bin/busctl -n call \
+	org.freedesktop.systemd1 \
+	/org/freedesktop/systemd1 \
+	org.freedesktop.systemd1.Manager \
+	StartTransientUnit \
+	"ssa(sv)a(sa(sv))" \
+	naozhi-shim-[0-9]*.scope fail 2 \
+	PIDs au 1 [0-9]* \
+	KillMode s none 0
+
+Cmnd_Alias NAOZHI_BUSCTL_2 = /usr/bin/busctl -n call \
+	org.freedesktop.systemd1 \
+	/org/freedesktop/systemd1 \
+	org.freedesktop.systemd1.Manager \
+	StartTransientUnit \
+	"ssa(sv)a(sa(sv))" \
+	naozhi-shim-[0-9]*.scope fail 2 \
+	PIDs au 2 [0-9]* [0-9]* \
+	KillMode s none 0
+
+Cmnd_Alias NAOZHI_TEE_CGROUP = /usr/bin/tee /sys/fs/cgroup/naozhi-shims/cgroup.procs
+
+ec2-user ALL=(root) NOPASSWD: NAOZHI_BUSCTL_1, NAOZHI_BUSCTL_2, NAOZHI_TEE_CGROUP

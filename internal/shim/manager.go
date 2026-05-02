@@ -799,22 +799,27 @@ func (m *Manager) DetachAll() {
 	wg.Wait()
 }
 
-// moveToShimsCgroup moves shim and CLI processes to an independent systemd
-// scope so they survive service restarts. Uses busctl to call StartTransientUnit
-// directly with KillMode=none, making the processes invisible to the
-// naozhi.service lifecycle. Falls back to direct cgroup move if
-// busctl is not available.
-func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int) {
-	scopeName := fmt.Sprintf("naozhi-shim-%d.scope", shimPID)
+// cgroupProcsPath is the fixed fallback cgroup file naozhi writes to via
+// `sudo tee` when busctl is unavailable. Exposed as a package-level const
+// so the sudoers policy contract test can assert the exact string and
+// deploy/naozhi-sudoers.example stays synced.
+const cgroupProcsPath = "/sys/fs/cgroup/naozhi-shims/cgroup.procs"
 
-	// Build PID list for the scope
-	pids := []string{strconv.Itoa(shimPID)}
-	if cliPID > 0 {
-		pids = append(pids, strconv.Itoa(cliPID))
-	}
-
-	// Use busctl to create a transient scope adopting the shim PIDs.
-	// This registers them as an independent systemd unit.
+// buildBusctlArgs constructs the argv tail passed to `sudo` for the
+// StartTransientUnit D-Bus call that adopts shim/CLI PIDs into an
+// independent systemd scope. Split out from moveToShimsCgroup so the
+// exact argv shape can be pinned by a unit test — the
+// deploy/naozhi-sudoers.example policy depends on these literals not
+// drifting (see docs/ops/sudoers-hardening.md). The returned slice
+// starts with the "-n" non-interactive flag and the "busctl" command
+// name; moveToShimsCgroup prepends "sudo" via exec.CommandContext.
+//
+// scopeName must already be the final "naozhi-shim-<PID>.scope" form.
+// pids is expected to be len 1 (shim only) or 2 (shim + cli). Other
+// lengths are permitted but are not covered by the shipped sudoers
+// policy — callers that change the expected range must update both
+// this function's contract test and the Cmnd_Alias set in the policy.
+func buildBusctlArgs(scopeName string, pids []int) []string {
 	args := []string{"-n", "busctl", "call",
 		"org.freedesktop.systemd1",
 		"/org/freedesktop/systemd1",
@@ -824,8 +829,30 @@ func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int) {
 		scopeName, "fail", "2",
 		"PIDs", "au", strconv.Itoa(len(pids)),
 	}
-	args = append(args, pids...)
+	for _, p := range pids {
+		args = append(args, strconv.Itoa(p))
+	}
 	args = append(args, "KillMode", "s", "none", "0")
+	return args
+}
+
+// moveToShimsCgroup moves shim and CLI processes to an independent systemd
+// scope so they survive service restarts. Uses busctl to call StartTransientUnit
+// directly with KillMode=none, making the processes invisible to the
+// naozhi.service lifecycle. Falls back to direct cgroup move if
+// busctl is not available.
+func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int) {
+	scopeName := fmt.Sprintf("naozhi-shim-%d.scope", shimPID)
+
+	// Build PID list for the scope
+	pids := []int{shimPID}
+	if cliPID > 0 {
+		pids = append(pids, cliPID)
+	}
+
+	// Use busctl to create a transient scope adopting the shim PIDs.
+	// This registers them as an independent systemd unit.
+	args := buildBusctlArgs(scopeName, pids)
 
 	ctx, cancel := context.WithTimeout(parentCtx, 3*time.Second)
 	defer cancel()
@@ -851,10 +878,13 @@ func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int) {
 // cgroup directly. Less reliable than systemd scope (systemd may still
 // clean it up during restart).
 func moveToShimsCgroupDirect(parentCtx context.Context, pid int) {
-	const procsFile = "/sys/fs/cgroup/naozhi-shims/cgroup.procs"
+	// The procs path is pinned as a package-level const so the sudoers
+	// policy contract test can diff it against the shipped
+	// deploy/naozhi-sudoers.example literal; drifting one without the
+	// other would silently start rejecting the fallback tee at runtime.
 	ctx, cancel := context.WithTimeout(parentCtx, 3*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "sudo", "-n", "tee", procsFile)
+	cmd := exec.CommandContext(ctx, "sudo", "-n", "tee", cgroupProcsPath)
 	cmd.Stdin = strings.NewReader(strconv.Itoa(pid) + "\n")
 	cmd.Stdout = nil // tee copies to stdout; inherit parent (journal) is fine
 	if err := cmd.Run(); err != nil {
