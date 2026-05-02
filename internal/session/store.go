@@ -57,6 +57,42 @@ type storeEntry struct {
 	UserLabel      string   `json:"user_label,omitempty"`  // operator-set display name override
 }
 
+// storeFormatVersion is the current schema version for `sessions.json`.
+// Bump this constant when the JSON shape changes in a way that older
+// naozhi binaries cannot safely parse (e.g. adding a required field,
+// renaming a key). Additive fields with `omitempty` do NOT require a bump
+// — old binaries tolerate unknown fields.
+//
+// The version is NOT embedded in sessions.json itself (that file is a
+// bare JSON array for back-compat with every prior release); instead it
+// lives in a sidecar `sessions.meta.json`. loadStore reads the sidecar,
+// warns if the observed version is newer than this constant, and then
+// proceeds — operators get a heads-up that their binary may mis-parse
+// the on-disk data, but the load never fails hard on a missing sidecar
+// (treated as v1, the initial format).
+const storeFormatVersion = 1
+
+// storeMeta is the payload written to sessions.meta.json alongside the
+// main store file. Kept in its own struct so future schema signalling
+// (compression, sharding, etc.) can grow here without touching storeEntry.
+type storeMeta struct {
+	Version   int    `json:"version"`
+	WrittenAt int64  `json:"written_at"`          // unix nano when saveStore last succeeded
+	Generator string `json:"generator,omitempty"` // human-readable "naozhi <tag>"; omitempty for test paths
+}
+
+// storeMetaPath returns the sidecar meta path derived from the main
+// store path: `.../sessions.json` → `.../sessions.meta.json`.
+func storeMetaPath(storePath string) string {
+	if storePath == "" {
+		return ""
+	}
+	base := filepath.Base(storePath)
+	ext := filepath.Ext(base)
+	stem := base[:len(base)-len(ext)]
+	return filepath.Join(filepath.Dir(storePath), stem+".meta"+ext)
+}
+
 func saveStore(path string, sessions map[string]*ManagedSession) error {
 	if path == "" {
 		return nil
@@ -126,12 +162,79 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 	if err := osutil.WriteFileAtomic(path, data, 0600); err != nil {
 		return fmt.Errorf("save session store: %w", err)
 	}
+	// Best-effort write of the sidecar meta file. A failure here does NOT
+	// fail the save: the main store is already durable, and the meta is
+	// advisory (used to detect cross-version downgrades). Log so operators
+	// catch partial-filesystem issues during normal ops.
+	writeStoreMeta(path)
 	return nil
+}
+
+// writeStoreMeta writes the version sidecar next to the main store. Called
+// after a successful saveStore so the two files stay correlated. Uses the
+// same atomic-write primitive so a crash between the two writes leaves the
+// main store consistent even if the meta is stale by one cycle.
+func writeStoreMeta(storePath string) {
+	metaPath := storeMetaPath(storePath)
+	if metaPath == "" {
+		return
+	}
+	meta := storeMeta{
+		Version:   storeFormatVersion,
+		WrittenAt: time.Now().UnixNano(),
+	}
+	data, err := json.Marshal(meta)
+	if err != nil {
+		slog.Warn("marshal session store meta failed", "err", err)
+		return
+	}
+	if err := osutil.WriteFileAtomic(metaPath, data, 0600); err != nil {
+		slog.Warn("write session store meta failed", "path", metaPath, "err", err)
+	}
+}
+
+// readStoreMeta loads the sidecar. Returns the meta plus a flag indicating
+// whether a sidecar was present at all. A missing sidecar is treated as
+// "unknown / legacy" — the caller handles it as format v1, preserving the
+// contract that sessions.json from any prior naozhi version is readable.
+func readStoreMeta(storePath string) (storeMeta, bool) {
+	metaPath := storeMetaPath(storePath)
+	if metaPath == "" {
+		return storeMeta{}, false
+	}
+	data, err := readCappedFile(metaPath, "session store meta")
+	if err != nil {
+		slog.Warn("read session store meta failed", "path", metaPath, "err", err)
+		return storeMeta{}, false
+	}
+	if data == nil {
+		return storeMeta{}, false
+	}
+	var m storeMeta
+	if err := json.Unmarshal(data, &m); err != nil {
+		slog.Warn("parse session store meta failed", "path", metaPath, "err", err)
+		return storeMeta{}, false
+	}
+	return m, true
 }
 
 func loadStore(path string) map[string]*storeEntry {
 	if path == "" {
 		return nil
+	}
+	// Read the sidecar first so we can warn about future-version downgrades
+	// BEFORE the main parse runs. If the meta claims a version newer than
+	// we know, the parse below may still succeed (the entry schema has only
+	// grown additively so far), but operators should be aware they may be
+	// silently dropping fields the new naozhi binary wrote. Missing meta is
+	// fine — that's the legacy case (sessions.json written by any naozhi
+	// older than the sidecar introduction).
+	if meta, ok := readStoreMeta(path); ok && meta.Version > storeFormatVersion {
+		slog.Warn("session store was written by a newer naozhi; downgrade in progress?",
+			"path", path,
+			"observed_version", meta.Version,
+			"supported_version", storeFormatVersion,
+			"written_at_ns", meta.WrittenAt)
 	}
 	data, err := readCappedFile(path, "session store")
 	if err != nil {
