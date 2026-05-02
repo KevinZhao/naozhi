@@ -171,6 +171,18 @@ type Feishu struct {
 	// reaction. Feishu's delete endpoint requires the reaction_id (there's no
 	// "delete by emoji type" form). Entries are deleted on successful removal.
 	reactionIDs sync.Map
+
+	// botOpenID is the bot's own open_id, populated by fetchBotInfo() during
+	// Start(). Used by isBotMentioned() to distinguish @bot from @other-user
+	// in group chats. Empty if the bot/v3/info call failed — in which case
+	// the mention check degrades to the legacy "any @ means mentioned" rule
+	// (mirror of slack/discord's warn-and-continue on AuthTest failure).
+	//
+	// Guarded by botInfoMu: written once in Start(), read on every inbound
+	// group message. RWMutex chosen over sync.Once+atomic.Value because
+	// future work might want to refresh on rotation; for now it's write-once.
+	botInfoMu sync.RWMutex
+	botOpenID string
 }
 
 // New creates a Feishu platform adapter. transcriber may be nil to disable voice.
@@ -271,6 +283,19 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 	f.startMu.Unlock()
 
 	f.handler = handler
+
+	// Best-effort fetch of the bot's own open_id used by isBotMentioned() to
+	// filter group chat @ events. Failure is logged as a Warn and the mention
+	// check degrades to the legacy "any @ is a hit" rule — same contract as
+	// slack's AuthTest failure path. Time-boxed at 5s so a flaky network
+	// doesn't block startup; Start() proceeds regardless.
+	fetchCtx, cancelFetch := context.WithTimeout(f.stopCtx, 5*time.Second)
+	if err := f.fetchBotInfo(fetchCtx); err != nil {
+		slog.Warn("feishu fetch bot info failed — group mention filtering will fall back to 'any mention' (less precise)",
+			"err", err)
+	}
+	cancelFetch()
+
 	if f.mode == "websocket" {
 		slog.Info("feishu using websocket mode (no public IP needed)")
 		return f.startWebSocket()
@@ -291,6 +316,84 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 	}
 	slog.Info("feishu using webhook mode")
 	return nil
+}
+
+// fetchBotInfo populates botOpenID by calling GET /open-apis/bot/v3/info.
+// Called once from Start(); returns nil on success, error otherwise so the
+// caller can decide whether to log+continue or abort.
+//
+// Response shape (from https://open.feishu.cn/document/server-docs/im-v1/bot/get):
+//
+//	{"code":0,"msg":"ok","bot":{"open_id":"ou_xxx","app_name":"...","activate_status":2}}
+//
+// Note the `bot` field is at top level, NOT under `data` — this is one of the
+// older bot APIs that predates Feishu's standardised envelope.
+func (f *Feishu) fetchBotInfo(ctx context.Context) error {
+	token, err := f.getAccessToken(ctx)
+	if err != nil {
+		return fmt.Errorf("get access token: %w", err)
+	}
+	req, err := http.NewRequestWithContext(ctx, "GET", f.baseURL+"/open-apis/bot/v3/info", nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+
+	resp, err := feishuHTTPClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("send request: %w", err)
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Bot  struct {
+			OpenID  string `json:"open_id"`
+			AppName string `json:"app_name"`
+		} `json:"bot"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&result); err != nil {
+		return fmt.Errorf("decode response: %w", err)
+	}
+	if result.Code != 0 {
+		return &APIError{Code: result.Code, Msg: result.Msg, Op: "bot_info"}
+	}
+	if result.Bot.OpenID == "" {
+		return fmt.Errorf("bot_info: empty open_id in response")
+	}
+
+	f.botInfoMu.Lock()
+	f.botOpenID = result.Bot.OpenID
+	f.botInfoMu.Unlock()
+	slog.Info("feishu bot identity", "open_id", result.Bot.OpenID, "app_name", result.Bot.AppName)
+	return nil
+}
+
+// isBotMentioned reports whether any mention in the list targets this bot.
+// Returns the legacy "any mention = true" behaviour when botOpenID is unknown
+// (e.g. fetchBotInfo failed during Start) so we don't silently lose responses
+// in degraded-startup scenarios.
+//
+// The mentions parameter is abstracted via an extractor closure so webhook
+// (local struct) and WebSocket (*larkim.MentionEvent) schemas share the same
+// matching logic without duplicating the fallback rule.
+func (f *Feishu) isBotMentioned(count int, openIDAt func(i int) string) bool {
+	f.botInfoMu.RLock()
+	botID := f.botOpenID
+	f.botInfoMu.RUnlock()
+	if botID == "" {
+		// Degraded mode: any mention counts. Matches legacy behaviour so a
+		// failed Start() doesn't silently drop responses for DM-heavy users
+		// who don't care about group precision.
+		return count > 0
+	}
+	for i := 0; i < count; i++ {
+		if openIDAt(i) == botID {
+			return true
+		}
+	}
+	return false
 }
 
 // Stop implements RunnablePlatform. Stops WebSocket connection.

@@ -155,7 +155,7 @@ func TestParseSDKEvent_TextMessage(t *testing.T) {
 		},
 	}
 
-	pe, ok := parseSDKEvent(event)
+	pe, ok := (&Feishu{}).parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
@@ -204,7 +204,7 @@ func TestParseSDKEvent_DirectMessage(t *testing.T) {
 		},
 	}
 
-	pe, ok := parseSDKEvent(event)
+	pe, ok := (&Feishu{}).parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
@@ -235,7 +235,7 @@ func TestParseSDKEvent_WithMentions(t *testing.T) {
 		},
 	}
 
-	pe, ok := parseSDKEvent(event)
+	pe, ok := (&Feishu{}).parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true")
 	}
@@ -261,7 +261,7 @@ func TestParseSDKEvent_ImageMessage(t *testing.T) {
 			},
 		},
 	}
-	pe, ok := parseSDKEvent(event)
+	pe, ok := (&Feishu{}).parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true for image message")
 	}
@@ -287,7 +287,7 @@ func TestParseSDKEvent_ImageMessage_EmptyKey(t *testing.T) {
 			},
 		},
 	}
-	_, ok := parseSDKEvent(event)
+	_, ok := (&Feishu{}).parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for image message with empty image_key")
 	}
@@ -304,7 +304,7 @@ func TestParseSDKEvent_UnsupportedType(t *testing.T) {
 			},
 		},
 	}
-	_, ok := parseSDKEvent(event)
+	_, ok := (&Feishu{}).parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for unsupported message type")
 	}
@@ -324,7 +324,7 @@ func TestParseSDKEvent_EmptyText(t *testing.T) {
 			},
 		},
 	}
-	_, ok := parseSDKEvent(event)
+	_, ok := (&Feishu{}).parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for empty text")
 	}
@@ -348,7 +348,7 @@ func TestParseSDKEvent_MentionOnlyText(t *testing.T) {
 			},
 		},
 	}
-	_, ok := parseSDKEvent(event)
+	_, ok := (&Feishu{}).parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for mention-only text")
 	}
@@ -356,7 +356,7 @@ func TestParseSDKEvent_MentionOnlyText(t *testing.T) {
 
 func TestParseSDKEvent_NilEvent(t *testing.T) {
 	t.Parallel()
-	_, ok := parseSDKEvent(nil)
+	_, ok := (&Feishu{}).parseSDKEvent(nil)
 	if ok {
 		t.Error("expected ok=false for nil event")
 	}
@@ -367,7 +367,7 @@ func TestParseSDKEvent_NilMessage(t *testing.T) {
 	event := &larkim.P2MessageReceiveV1{
 		Event: &larkim.P2MessageReceiveV1Data{},
 	}
-	_, ok := parseSDKEvent(event)
+	_, ok := (&Feishu{}).parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for nil message")
 	}
@@ -388,7 +388,7 @@ func TestParseSDKEvent_AudioMessage(t *testing.T) {
 			},
 		},
 	}
-	pe, ok := parseSDKEvent(event)
+	pe, ok := (&Feishu{}).parseSDKEvent(event)
 	if !ok {
 		t.Fatal("expected ok=true for audio message")
 	}
@@ -417,7 +417,7 @@ func TestParseSDKEvent_AudioMessage_EmptyKey(t *testing.T) {
 			},
 		},
 	}
-	_, ok := parseSDKEvent(event)
+	_, ok := (&Feishu{}).parseSDKEvent(event)
 	if ok {
 		t.Error("expected ok=false for audio message with empty file_key")
 	}
@@ -890,4 +890,177 @@ func TestWebhook_DifferentNonce_Allowed(t *testing.T) {
 	if callCount != 2 {
 		t.Errorf("handler call count = %d, want 2 (different nonces must both pass)", callCount)
 	}
+}
+
+// --- MentionMe precision (isBotMentioned) + fetchBotInfo tests ---
+
+// TestIsBotMentioned_ExactMatch: botOpenID is known, at least one mention
+// matches → true.
+func TestIsBotMentioned_ExactMatch(t *testing.T) {
+	t.Parallel()
+	f := &Feishu{botOpenID: "ou_bot_self"}
+	openIDs := []string{"ou_alice", "ou_bot_self", "ou_bob"}
+	got := f.isBotMentioned(len(openIDs), func(i int) string { return openIDs[i] })
+	if !got {
+		t.Error("expected true when bot is among the mentions")
+	}
+}
+
+// TestIsBotMentioned_NoMatch: botOpenID is known but no mention matches → false.
+// This is the core precision fix — the old code returned true here.
+func TestIsBotMentioned_NoMatch(t *testing.T) {
+	t.Parallel()
+	f := &Feishu{botOpenID: "ou_bot_self"}
+	openIDs := []string{"ou_alice", "ou_bob"}
+	got := f.isBotMentioned(len(openIDs), func(i int) string { return openIDs[i] })
+	if got {
+		t.Error("expected false when bot is NOT among the mentions")
+	}
+}
+
+// TestIsBotMentioned_DegradesWhenBotIDUnknown: botOpenID empty (fetchBotInfo
+// failed or hasn't run) → any mention counts, any empty list is false.
+// Preserves legacy behaviour for DM-heavy users.
+func TestIsBotMentioned_DegradesWhenBotIDUnknown(t *testing.T) {
+	t.Parallel()
+	f := &Feishu{} // botOpenID=""
+	if !f.isBotMentioned(3, func(i int) string { return "" }) {
+		t.Error("expected degraded path to return true when any mention exists")
+	}
+	if f.isBotMentioned(0, func(i int) string { return "" }) {
+		t.Error("expected false for zero mentions even in degraded path")
+	}
+}
+
+// TestIsBotMentioned_EmptyOpenIDInPayload: botOpenID known but a mention
+// carries empty open_id (older Feishu schema without id.open_id field) →
+// skip that mention, keep scanning. Matches real-world rollout where some
+// payloads decode with empty ID.
+func TestIsBotMentioned_EmptyOpenIDInPayload(t *testing.T) {
+	t.Parallel()
+	f := &Feishu{botOpenID: "ou_bot_self"}
+	openIDs := []string{"", "ou_bot_self"}
+	if !f.isBotMentioned(len(openIDs), func(i int) string { return openIDs[i] }) {
+		t.Error("expected true when bot appears after an empty-ID entry")
+	}
+	onlyEmpty := []string{"", ""}
+	if f.isBotMentioned(len(onlyEmpty), func(i int) string { return onlyEmpty[i] }) {
+		t.Error("expected false when all IDs are empty and bot ID is known")
+	}
+}
+
+// TestFetchBotInfo_Success: end-to-end happy path — token fetch + bot/v3/info
+// call + botOpenID population. Uses httptest to serve both endpoints so no
+// network is required.
+func TestFetchBotInfo_Success(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = w.Write([]byte(`{"code":0,"tenant_access_token":"t_abc","expire":7200}`))
+		case "/open-apis/bot/v3/info":
+			if got := r.Header.Get("Authorization"); got != "Bearer t_abc" {
+				t.Errorf("Authorization header = %q, want Bearer t_abc", got)
+			}
+			_, _ = w.Write([]byte(`{"code":0,"msg":"ok","bot":{"open_id":"ou_bot_test","app_name":"NaozhiBot"}}`))
+		default:
+			t.Errorf("unexpected path: %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	f := New(Config{AppID: "app", AppSecret: "secret"}, nil)
+	defer func() { _ = f.Stop() }()
+	f.baseURL = server.URL
+
+	if err := f.fetchBotInfo(context.Background()); err != nil {
+		t.Fatalf("fetchBotInfo: %v", err)
+	}
+	f.botInfoMu.RLock()
+	got := f.botOpenID
+	f.botInfoMu.RUnlock()
+	if got != "ou_bot_test" {
+		t.Errorf("botOpenID = %q, want ou_bot_test", got)
+	}
+}
+
+// TestFetchBotInfo_APIError: non-zero code from bot/v3/info surfaces as
+// *APIError so callers can log the upstream code/msg.
+func TestFetchBotInfo_APIError(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = w.Write([]byte(`{"code":0,"tenant_access_token":"t_abc","expire":7200}`))
+		case "/open-apis/bot/v3/info":
+			_, _ = w.Write([]byte(`{"code":99991663,"msg":"app access denied"}`))
+		}
+	}))
+	defer server.Close()
+
+	f := New(Config{AppID: "app", AppSecret: "secret"}, nil)
+	defer func() { _ = f.Stop() }()
+	f.baseURL = server.URL
+
+	err := f.fetchBotInfo(context.Background())
+	if err == nil {
+		t.Fatal("expected error for non-zero code")
+	}
+	var apiErr *APIError
+	if !errorAs(err, &apiErr) {
+		t.Fatalf("error type = %T, want *APIError", err)
+	}
+	if apiErr.Code != 99991663 {
+		t.Errorf("APIError.Code = %d, want 99991663", apiErr.Code)
+	}
+
+	// botOpenID must stay empty on failure so isBotMentioned degrades.
+	f.botInfoMu.RLock()
+	got := f.botOpenID
+	f.botInfoMu.RUnlock()
+	if got != "" {
+		t.Errorf("botOpenID on error = %q, want empty", got)
+	}
+}
+
+// TestFetchBotInfo_EmptyOpenID: response code=0 but data.bot.open_id empty
+// returns a sentinel error so operators see "why" instead of a silently
+// degraded mention check.
+func TestFetchBotInfo_EmptyOpenID(t *testing.T) {
+	t.Parallel()
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/open-apis/auth/v3/tenant_access_token/internal":
+			_, _ = w.Write([]byte(`{"code":0,"tenant_access_token":"t_abc","expire":7200}`))
+		case "/open-apis/bot/v3/info":
+			_, _ = w.Write([]byte(`{"code":0,"msg":"ok","bot":{"open_id":""}}`))
+		}
+	}))
+	defer server.Close()
+
+	f := New(Config{AppID: "app", AppSecret: "secret"}, nil)
+	defer func() { _ = f.Stop() }()
+	f.baseURL = server.URL
+
+	err := f.fetchBotInfo(context.Background())
+	if err == nil {
+		t.Fatal("expected error for empty open_id")
+	}
+	if !strings.Contains(err.Error(), "empty open_id") {
+		t.Errorf("error = %v, want substring 'empty open_id'", err)
+	}
+}
+
+// errorAs is a tiny wrapper so tests don't need to import "errors" just for
+// errors.As — keeps the diff minimal for this single use-case.
+func errorAs(err error, target any) bool {
+	// avoid extra import; replicate errors.As for *APIError only
+	if e, ok := err.(*APIError); ok {
+		if tp, ok := target.(**APIError); ok {
+			*tp = e
+			return true
+		}
+	}
+	return false
 }

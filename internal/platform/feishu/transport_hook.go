@@ -212,6 +212,13 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				Mentions    []struct {
 					Key  string `json:"key"`
 					Name string `json:"name"`
+					// ID.OpenID carries the @-target's bot/user open_id when
+					// present. Feishu event schema has included this field for
+					// years; older payloads that omit it decode as empty and
+					// force isBotMentioned's degraded "any @" path.
+					ID struct {
+						OpenID string `json:"open_id"`
+					} `json:"id"`
 				} `json:"mentions"`
 			} `json:"message"`
 		}
@@ -247,6 +254,15 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			chatType = "group"
 		}
 
+		// Precise bot-mention detection via f.isBotMentioned: match each
+		// mention's id.open_id against the bot's cached open_id. Falls back to
+		// "any mention" when the bot open_id is unknown (fetchBotInfo failed
+		// at Start, or the payload omits id.open_id — older Feishu versions).
+		mentions := event.Message.Mentions
+		hasMention := f.isBotMentioned(len(mentions), func(i int) string {
+			return mentions[i].ID.OpenID
+		})
+
 		msg := platform.IncomingMessage{
 			Platform:  "feishu",
 			EventID:   eventID,
@@ -254,7 +270,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			UserID:    event.Sender.SenderID.OpenID,
 			ChatID:    event.Message.ChatID,
 			ChatType:  chatType,
-			MentionMe: len(event.Message.Mentions) > 0,
+			MentionMe: hasMention,
 		}
 
 		switch msgType {

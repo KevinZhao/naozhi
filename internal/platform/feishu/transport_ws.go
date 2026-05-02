@@ -40,7 +40,7 @@ func (f *Feishu) startWebSocket() error {
 	eventHandler := dispatcher.NewEventDispatcher(
 		f.cfg.VerificationToken, f.cfg.EncryptKey,
 	).OnP2MessageReceiveV1(func(_ context.Context, event *larkim.P2MessageReceiveV1) error {
-		pe, ok := parseSDKEvent(event)
+		pe, ok := f.parseSDKEvent(event)
 		if !ok {
 			return nil
 		}
@@ -154,7 +154,11 @@ func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandle
 }
 
 // parseSDKEvent converts a Feishu SDK event to a parsedEvent.
-func parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, bool) {
+//
+// Method receiver (rather than package function) so we can call
+// f.isBotMentioned against the bot's cached open_id for precise group-chat
+// mention detection.
+func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, bool) {
 	if event == nil || event.Event == nil || event.Event.Message == nil {
 		return parsedEvent{}, false
 	}
@@ -198,7 +202,17 @@ func parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, bool) {
 		messageID = *msg.MessageId
 	}
 
-	hasMention := len(msg.Mentions) > 0
+	// Precise bot-mention detection: match each mention's id.open_id against
+	// the bot's own open_id cached by fetchBotInfo(). Degrades to "any mention"
+	// when the bot open_id is unknown (see isBotMentioned). nil-safe on every
+	// pointer dereference because the SDK returns pointers throughout.
+	hasMention := f.isBotMentioned(len(msg.Mentions), func(i int) string {
+		m := msg.Mentions[i]
+		if m == nil || m.Id == nil || m.Id.OpenId == nil {
+			return ""
+		}
+		return *m.Id.OpenId
+	})
 
 	result := platform.IncomingMessage{
 		Platform:  "feishu",
