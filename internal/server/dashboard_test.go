@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -134,6 +135,94 @@ func TestHandleAPISessionEvents_BeforeAndLimitPrefersNewest(t *testing.T) {
 	if entries[0].Time != 3000 || entries[1].Time != 4000 {
 		t.Errorf("entries times = [%d, %d], want [3000, 4000]",
 			entries[0].Time, entries[1].Time)
+	}
+}
+
+// fakeEventsSource is a history.Source stub for the pagination fallback test.
+// Using a local stub avoids cross-package test imports and keeps the disk-tier
+// expectations self-contained.
+type fakeEventsSource struct {
+	entries []cli.EventEntry
+	called  int
+}
+
+// LoadBefore implements history.Source with a fixed result.
+func (f *fakeEventsSource) LoadBefore(_ context.Context, _ int64, _ int) ([]cli.EventEntry, error) {
+	f.called++
+	return f.entries, nil
+}
+
+// TestHandleAPISessionEvents_BeforeFallsBackToHistorySource pins the contract
+// that the dashboard pagination endpoint consults the session's history.Source
+// once the in-memory ring has nothing strictly older than `before`. This is
+// the whole point of the disk-tier refactor: long chats whose JSONL carries
+// more than the 500-entry in-memory cap must still paginate backwards past
+// the cap, rather than dead-ending at "no more events".
+func TestHandleAPISessionEvents_BeforeFallsBackToHistorySource(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	// Memory has entries 1000, 2000, 3000; Source holds hypothetical older
+	// entries at 100, 200 that no longer fit in the live ring.
+	key := seedEventSession(t, srv, 1000, 2000, 3000)
+	sess := srv.router.GetSession(key)
+	if sess == nil {
+		t.Fatalf("session %q not registered", key)
+	}
+	src := &fakeEventsSource{entries: []cli.EventEntry{
+		{Time: 100, Type: "text", Summary: "ancient-1"},
+		{Time: 200, Type: "text", Summary: "ancient-2"},
+	}}
+	sess.SetHistorySource(src)
+
+	// before=500 — strictly older than every memory entry; memory tier
+	// returns empty and the handler falls back to the Source.
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/sessions/events?key="+key+"&before=500&limit=10", nil)
+	w := httptest.NewRecorder()
+	srv.sessionH.handleEvents(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	var entries []cli.EventEntry
+	if err := json.NewDecoder(w.Body).Decode(&entries); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if src.called != 1 {
+		t.Errorf("history.Source calls = %d, want 1", src.called)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("len = %d, want 2", len(entries))
+	}
+	if entries[0].Summary != "ancient-1" || entries[1].Summary != "ancient-2" {
+		t.Errorf("entries = %+v, want [ancient-1, ancient-2]", entries)
+	}
+}
+
+// TestHandleAPISessionEvents_BeforeSkipsSourceWhenMemoryCovers pins the
+// inverse: when memory can satisfy the page, the Source must not be
+// consulted. Preserves the hot-path invariant that the first N pages of
+// "load earlier" don't incur disk I/O.
+func TestHandleAPISessionEvents_BeforeSkipsSourceWhenMemoryCovers(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+	key := seedEventSession(t, srv, 1000, 2000, 3000)
+	sess := srv.router.GetSession(key)
+	if sess == nil {
+		t.Fatalf("session %q not registered", key)
+	}
+	src := &fakeEventsSource{entries: []cli.EventEntry{{Time: 100, Summary: "ancient"}}}
+	sess.SetHistorySource(src)
+
+	// before=2500 — memory has {1000, 2000} matching; no need for Source.
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/sessions/events?key="+key+"&before=2500&limit=10", nil)
+	w := httptest.NewRecorder()
+	srv.sessionH.handleEvents(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if src.called != 0 {
+		t.Errorf("memory hit must not consult Source, got %d calls", src.called)
 	}
 }
 
@@ -974,5 +1063,100 @@ func TestHistorySessions_EmptyHistoryCached(t *testing.T) {
 	srv.sessionH.historyCacheMu.Unlock()
 	if !cacheTimeAfterSecond.Equal(cacheTimeAfterFirst) {
 		t.Errorf("empty-history cache was re-loaded — cacheTime changed from %v to %v", cacheTimeAfterFirst, cacheTimeAfterSecond)
+	}
+}
+
+// TestHandleDelete_AcceptsQueryAndBody pins the dual-input contract added
+// in Round 120: DELETE /api/sessions must accept the key via either ?key=
+// query string (REST-idiomatic, works for curl -X DELETE URL?key=...)
+// or JSON body (legacy; dashboard.js still uses this).
+//
+// Each case exercises the handler with a router that holds no sessions,
+// so a correctly-parsed key reaches h.router.Remove() and surfaces the
+// "session not found" 404 — a parse failure would instead surface a
+// 400 "key is required". The 400 vs 404 discriminator makes the test
+// trivially robust against refactors that don't touch the parse logic.
+func TestHandleDelete_AcceptsQueryAndBody(t *testing.T) {
+	t.Parallel()
+	router := session.NewRouter(session.RouterConfig{MaxProcs: 5})
+	srv := New(":0", router, nil, nil, nil, nil, "claude", ServerOptions{})
+	srv.registerDashboard()
+
+	cases := []struct {
+		name       string
+		url        string
+		body       string
+		wantStatus int
+		wantBody   string // substring match; "" = no body check
+	}{
+		{
+			name:       "query-only",
+			url:        "/api/sessions?key=missing",
+			body:       "",
+			wantStatus: http.StatusNotFound,
+			wantBody:   "session not found",
+		},
+		{
+			name:       "query with node",
+			url:        "/api/sessions?key=missing&node=local",
+			body:       "",
+			wantStatus: http.StatusNotFound,
+			wantBody:   "session not found",
+		},
+		{
+			name:       "body-only (legacy)",
+			url:        "/api/sessions",
+			body:       `{"key":"missing"}`,
+			wantStatus: http.StatusNotFound,
+			wantBody:   "session not found",
+		},
+		{
+			name:       "query wins when both present",
+			url:        "/api/sessions?key=from-query",
+			body:       `{"key":"from-body"}`,
+			wantStatus: http.StatusNotFound,
+			wantBody:   "session not found", // we don't observe which key was tried, but the 404 confirms parse succeeded
+		},
+		{
+			name:       "no key anywhere → 400",
+			url:        "/api/sessions",
+			body:       "",
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "key is required",
+		},
+		{
+			name:       "malformed JSON, no query → 400",
+			url:        "/api/sessions",
+			body:       `not-json`,
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "key is required",
+		},
+		{
+			name:       "empty JSON body, no query → 400",
+			url:        "/api/sessions",
+			body:       `{}`,
+			wantStatus: http.StatusBadRequest,
+			wantBody:   "key is required",
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			var body io.Reader
+			if tc.body != "" {
+				body = strings.NewReader(tc.body)
+			}
+			req := httptest.NewRequest(http.MethodDelete, tc.url, body)
+			w := httptest.NewRecorder()
+			srv.sessionH.handleDelete(w, req)
+			if w.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d (body=%q)", w.Code, tc.wantStatus, w.Body.String())
+			}
+			if tc.wantBody != "" && !strings.Contains(w.Body.String(), tc.wantBody) {
+				t.Errorf("body = %q, want to contain %q", w.Body.String(), tc.wantBody)
+			}
+		})
 	}
 }

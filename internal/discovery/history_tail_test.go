@@ -17,6 +17,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func TestLoadHistoryTail_LimitHonored(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-limit"
 	sessionID := "00000000-0000-0000-0000-000000001001"
@@ -46,6 +47,7 @@ func TestLoadHistoryTail_LimitHonored(t *testing.T) {
 }
 
 func TestLoadHistoryTail_LimitLargerThanFile(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-small"
 	sessionID := "00000000-0000-0000-0000-000000001002"
@@ -71,6 +73,7 @@ func TestLoadHistoryTail_LimitLargerThanFile(t *testing.T) {
 // TestLoadHistoryTail_SpanningChunks forces a single line to straddle the
 // 256KB tail chunk boundary and verifies the carry-over logic reassembles it.
 func TestLoadHistoryTail_SpanningChunks(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-span"
 	sessionID := "00000000-0000-0000-0000-000000001003"
@@ -107,6 +110,7 @@ func TestLoadHistoryTail_SpanningChunks(t *testing.T) {
 }
 
 func TestLoadHistoryTail_LimitZeroFallsBack(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-fallback"
 	sessionID := "00000000-0000-0000-0000-000000001004"
@@ -129,6 +133,7 @@ func TestLoadHistoryTail_LimitZeroFallsBack(t *testing.T) {
 }
 
 func TestLoadHistoryTail_MissingFile(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	entries, err := LoadHistoryTail(claudeDir, "does-not-exist", "", 50)
 	if err != nil {
@@ -140,6 +145,7 @@ func TestLoadHistoryTail_MissingFile(t *testing.T) {
 }
 
 func TestLoadHistoryTail_SkipsMalformed(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-malformed"
 	sessionID := "00000000-0000-0000-0000-000000001005"
@@ -187,6 +193,9 @@ func TestLoadHistoryTail_SkipsMalformed(t *testing.T) {
 // is past EOF — no entries are returned. This is the correct behaviour
 // in a defence-in-depth context (we sacrifice usable results on a
 // misbehaving mount to guarantee bounded work).
+// Note: NOT t.Parallel() — this test swaps the package-level
+// maxTailReadBytes var to shrink the budget, and any concurrent test
+// that reads that var (LoadHistoryTailCtx, etc.) races with the write.
 func TestParseTail_ScanBudgetBoundsIterations(t *testing.T) {
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-budget"
@@ -227,7 +236,7 @@ func TestParseTail_ScanBudgetBoundsIterations(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := parseTail(ctx, f, fakeSize, 10)
+		_, err := parseTail(ctx, f, fakeSize, 0, 10)
 		done <- err
 	}()
 
@@ -249,6 +258,7 @@ func TestParseTail_ScanBudgetBoundsIterations(t *testing.T) {
 // cap must not affect normal operation. Regression guard for "didn't
 // accidentally change the hot path while adding the security cap".
 func TestParseTail_HonestSizeReturnsAllEntries(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-honest"
 	sessionID := "00000000-0000-0000-0000-000000001098"
@@ -276,6 +286,7 @@ func TestParseTail_HonestSizeReturnsAllEntries(t *testing.T) {
 var _ = cli.EventEntry{}
 
 func TestLoadHistoryTail_CancelledCtx(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/tail-cancel"
 	sessionID := "00000000-0000-0000-0000-000000001006"
@@ -298,6 +309,7 @@ func TestLoadHistoryTail_CancelledCtx(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestLoadHistoryChainTail_StopsAtBudget(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/chain"
 	dirName := projDirName(cwd)
@@ -336,6 +348,7 @@ func TestLoadHistoryChainTail_StopsAtBudget(t *testing.T) {
 }
 
 func TestLoadHistoryChainTail_SpillsIntoPriorSessions(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/chain-spill"
 	dirName := projDirName(cwd)
@@ -376,6 +389,7 @@ func TestLoadHistoryChainTail_SpillsIntoPriorSessions(t *testing.T) {
 }
 
 func TestLoadHistoryChainTail_EmptyInputs(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 
 	if got := LoadHistoryChainTail(claudeDir, nil, "/tmp/x", 10); got != nil {
@@ -390,6 +404,7 @@ func TestLoadHistoryChainTail_EmptyInputs(t *testing.T) {
 }
 
 func TestLoadHistoryChainTail_SkipsMissing(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/chain-miss"
 	dirName := projDirName(cwd)
@@ -417,6 +432,7 @@ func TestLoadHistoryChainTail_SkipsMissing(t *testing.T) {
 }
 
 func TestLoadHistoryChainTail_RespectsCtxCancel(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/chain-ctx"
 	dirName := projDirName(cwd)
@@ -440,6 +456,7 @@ func TestLoadHistoryChainTail_RespectsCtxCancel(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestResolveJSONLPath_CWDHit(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	cwd := "/tmp/resolve"
 	sessionID := "00000000-0000-0000-0000-000000001010"
@@ -459,6 +476,7 @@ func TestResolveJSONLPath_CWDHit(t *testing.T) {
 }
 
 func TestResolveJSONLPath_FallbackScan(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	sessionID := "00000000-0000-0000-0000-000000001011"
 	_, jsonlPath := makeSessionJSONL(t, claudeDir, "-some-dir", sessionID, []string{
@@ -475,6 +493,7 @@ func TestResolveJSONLPath_FallbackScan(t *testing.T) {
 }
 
 func TestResolveJSONLPath_Missing(t *testing.T) {
+	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 	got, err := resolveJSONLPath(claudeDir, "no-such-id", "")
 	if err != nil {
@@ -482,6 +501,231 @@ func TestResolveJSONLPath_Missing(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("expected empty path, got %q", got)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// LoadHistoryTailBeforeCtx
+// ---------------------------------------------------------------------------
+
+// userJSONLLineAt returns a user-role JSONL line with the given unix second
+// timestamp converted to RFC3339. Used by the "before" pagination tests so
+// each record has a distinct, strictly-increasing Time.
+func userJSONLLineAt(content string, unixSec int64) string {
+	ts := time.Unix(unixSec, 0).UTC().Format(time.RFC3339)
+	return fmt.Sprintf(`{"type":"user","timestamp":%q,"message":{"role":"user","content":%q}}`,
+		ts, content)
+}
+
+func TestLoadHistoryTailBeforeCtx_FiltersByTime(t *testing.T) {
+	t.Parallel()
+	claudeDir := makeClaudeDir(t)
+	cwd := "/tmp/tail-before-basic"
+	sessionID := "00000000-0000-0000-0000-0000000020a1"
+	dirName := projDirName(cwd)
+
+	// 10 user lines with strictly increasing timestamps 1000s..1009s.
+	lines := make([]string, 0, 10)
+	for i := 0; i < 10; i++ {
+		lines = append(lines, userJSONLLineAt(fmt.Sprintf("msg-%d", i), int64(1000+i)))
+	}
+	makeSessionJSONL(t, claudeDir, dirName, sessionID, lines)
+
+	// beforeMS = 1005s → only msg-0..msg-4 qualify; limit=10 so we get all 5
+	// in chronological order.
+	beforeMS := int64(1005) * 1000
+	entries, err := LoadHistoryTailBeforeCtx(context.Background(), claudeDir, sessionID, cwd, beforeMS, 10)
+	if err != nil {
+		t.Fatalf("LoadHistoryTailBeforeCtx: %v", err)
+	}
+	if len(entries) != 5 {
+		t.Fatalf("expected 5 entries strictly older than %dms, got %d", beforeMS, len(entries))
+	}
+	if entries[0].Summary != "msg-0" {
+		t.Errorf("entries[0].Summary = %q, want msg-0", entries[0].Summary)
+	}
+	if entries[4].Summary != "msg-4" {
+		t.Errorf("entries[4].Summary = %q, want msg-4", entries[4].Summary)
+	}
+	for _, e := range entries {
+		if e.Time >= beforeMS {
+			t.Errorf("entry Time=%d not strictly < beforeMS=%d", e.Time, beforeMS)
+		}
+	}
+}
+
+func TestLoadHistoryTailBeforeCtx_StrictlyLess(t *testing.T) {
+	// An entry whose Time equals beforeMS must be excluded. This pins the
+	// "< (strict)" contract end-to-end so the dashboard, when passing the
+	// oldest-rendered event's timestamp as beforeMS, never re-receives it.
+	t.Parallel()
+	claudeDir := makeClaudeDir(t)
+	cwd := "/tmp/tail-before-strict"
+	sessionID := "00000000-0000-0000-0000-0000000020a2"
+	dirName := projDirName(cwd)
+
+	lines := []string{
+		userJSONLLineAt("at-boundary", 1000),
+		userJSONLLineAt("after", 1001),
+	}
+	makeSessionJSONL(t, claudeDir, dirName, sessionID, lines)
+
+	beforeMS := int64(1000) * 1000
+	entries, err := LoadHistoryTailBeforeCtx(context.Background(), claudeDir, sessionID, cwd, beforeMS, 10)
+	if err != nil {
+		t.Fatalf("LoadHistoryTailBeforeCtx: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entries with Time == beforeMS must be excluded, got %d", len(entries))
+	}
+}
+
+func TestLoadHistoryTailBeforeCtx_ZeroBeforeMatchesTail(t *testing.T) {
+	// beforeMS=0 should degenerate to the plain LoadHistoryTailCtx so callers
+	// that don't know a pagination cursor still get newest N.
+	t.Parallel()
+	claudeDir := makeClaudeDir(t)
+	cwd := "/tmp/tail-before-zero"
+	sessionID := "00000000-0000-0000-0000-0000000020a3"
+	dirName := projDirName(cwd)
+
+	lines := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		lines = append(lines, userJSONLLineAt(fmt.Sprintf("m-%d", i), int64(2000+i)))
+	}
+	makeSessionJSONL(t, claudeDir, dirName, sessionID, lines)
+
+	entries, err := LoadHistoryTailBeforeCtx(context.Background(), claudeDir, sessionID, cwd, 0, 3)
+	if err != nil {
+		t.Fatalf("LoadHistoryTailBeforeCtx: %v", err)
+	}
+	if len(entries) != 3 {
+		t.Fatalf("expected 3 newest entries, got %d", len(entries))
+	}
+	if entries[0].Summary != "m-2" || entries[2].Summary != "m-4" {
+		t.Errorf("got %q..%q, want m-2..m-4", entries[0].Summary, entries[2].Summary)
+	}
+}
+
+func TestLoadHistoryTailBeforeCtx_LimitHonored(t *testing.T) {
+	// Even when many entries qualify as "< beforeMS", only `limit` are
+	// returned — the newest-of-qualifying tail.
+	t.Parallel()
+	claudeDir := makeClaudeDir(t)
+	cwd := "/tmp/tail-before-limit"
+	sessionID := "00000000-0000-0000-0000-0000000020a4"
+	dirName := projDirName(cwd)
+
+	lines := make([]string, 0, 20)
+	for i := 0; i < 20; i++ {
+		lines = append(lines, userJSONLLineAt(fmt.Sprintf("n-%02d", i), int64(3000+i)))
+	}
+	makeSessionJSONL(t, claudeDir, dirName, sessionID, lines)
+
+	// beforeMS past all entries; limit=5 should return the newest 5 (n-15..n-19).
+	beforeMS := int64(9999) * 1000
+	entries, err := LoadHistoryTailBeforeCtx(context.Background(), claudeDir, sessionID, cwd, beforeMS, 5)
+	if err != nil {
+		t.Fatalf("LoadHistoryTailBeforeCtx: %v", err)
+	}
+	if len(entries) != 5 {
+		t.Fatalf("expected 5 entries (limit), got %d", len(entries))
+	}
+	if entries[0].Summary != "n-15" || entries[4].Summary != "n-19" {
+		t.Errorf("got %q..%q, want n-15..n-19", entries[0].Summary, entries[4].Summary)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// LoadHistoryChainBeforeCtx
+// ---------------------------------------------------------------------------
+
+func TestLoadHistoryChainBeforeCtx_WalksOlderSessions(t *testing.T) {
+	// Chain: two sessions, each 5 entries. beforeMS falls inside the newer
+	// session → we get the older 2 of that session, then spill into the
+	// older session for the remaining 3 to reach limit=5.
+	t.Parallel()
+	claudeDir := makeClaudeDir(t)
+	cwd := "/tmp/chain-before"
+	dirName := projDirName(cwd)
+
+	oldID := "11111111-1111-1111-1111-11111111aaa1"
+	newID := "22222222-2222-2222-2222-22222222aaa2"
+	// Older session: Time 1000s..1004s.
+	oldLines := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		oldLines = append(oldLines, userJSONLLineAt(fmt.Sprintf("old-%d", i), int64(1000+i)))
+	}
+	makeSessionJSONL(t, claudeDir, dirName, oldID, oldLines)
+	// Newer session: Time 2000s..2004s.
+	newLines := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		newLines = append(newLines, userJSONLLineAt(fmt.Sprintf("new-%d", i), int64(2000+i)))
+	}
+	makeSessionJSONL(t, claudeDir, dirName, newID, newLines)
+
+	// ids stored oldest→newest per caller contract.
+	ids := []string{oldID, newID}
+
+	// beforeMS = 2002s → qualifying entries are new-0, new-1 plus everything
+	// in the old session (5). Limit=5 means we take new-1, new-0 (2 from
+	// newer) then spill 3 from older: old-2, old-3, old-4. Returned in
+	// chronological order.
+	beforeMS := int64(2002) * 1000
+	entries := LoadHistoryChainBeforeCtx(context.Background(), claudeDir, ids, cwd, beforeMS, 5)
+	if len(entries) != 5 {
+		t.Fatalf("expected 5 entries, got %d", len(entries))
+	}
+	// Strict < boundary check: no entry's Time may be >= beforeMS.
+	for i, e := range entries {
+		if e.Time >= beforeMS {
+			t.Errorf("entries[%d] Time=%d >= beforeMS=%d", i, e.Time, beforeMS)
+		}
+	}
+	// First entry should be from the older session.
+	if !strings.HasPrefix(entries[0].Summary, "old-") {
+		t.Errorf("entries[0] = %q, expected to spill into older session", entries[0].Summary)
+	}
+	// Last entry should be from the newer session (new-1 — the newest
+	// qualifying entry).
+	if entries[len(entries)-1].Summary != "new-1" {
+		t.Errorf("entries[-1] = %q, expected new-1", entries[len(entries)-1].Summary)
+	}
+}
+
+func TestLoadHistoryChainBeforeCtx_ZeroBeforeDelegates(t *testing.T) {
+	// beforeMS <= 0 must behave identically to LoadHistoryChainTailCtx so
+	// startup callers (which pass beforeMS=0 implicitly via the non-before
+	// helpers) keep their legacy semantics.
+	t.Parallel()
+	claudeDir := makeClaudeDir(t)
+	cwd := "/tmp/chain-before-zero"
+	dirName := projDirName(cwd)
+
+	id := "33333333-3333-3333-3333-33333333aaa3"
+	lines := make([]string, 0, 3)
+	for i := 0; i < 3; i++ {
+		lines = append(lines, userJSONLLineAt(fmt.Sprintf("z-%d", i), int64(4000+i)))
+	}
+	makeSessionJSONL(t, claudeDir, dirName, id, lines)
+
+	got := LoadHistoryChainBeforeCtx(context.Background(), claudeDir, []string{id}, cwd, 0, 10)
+	if len(got) != 3 {
+		t.Fatalf("expected 3 entries via tail delegation, got %d", len(got))
+	}
+}
+
+func TestLoadHistoryChainBeforeCtx_EmptyInputs(t *testing.T) {
+	t.Parallel()
+	claudeDir := makeClaudeDir(t)
+	if got := LoadHistoryChainBeforeCtx(context.Background(), claudeDir, nil, "/tmp/x", 1234, 10); got != nil {
+		t.Errorf("expected nil for empty ids, got %d", len(got))
+	}
+	if got := LoadHistoryChainBeforeCtx(context.Background(), claudeDir, []string{"a"}, "/tmp/x", 1234, 0); got != nil {
+		t.Errorf("expected nil for limit=0, got %d", len(got))
+	}
+	if got := LoadHistoryChainBeforeCtx(context.Background(), "", []string{"a"}, "/tmp/x", 1234, 10); got != nil {
+		t.Errorf("expected nil for empty claudeDir, got %d", len(got))
 	}
 }
 

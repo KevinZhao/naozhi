@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -614,7 +615,13 @@ func (h *SessionHandlers) handleEvents(w http.ResponseWriter, r *http.Request) {
 		if pageLimit == 0 {
 			pageLimit = maxEventsPageLimit
 		}
-		entries = sess.EventEntriesBefore(before, pageLimit)
+		// EventEntriesBeforeCtx falls back to the backend's history.Source
+		// (JSONL for claude) when the in-memory log no longer contains entries
+		// older than `before`. The request context propagates into disk I/O
+		// so a client-cancelled fetch unblocks the reverse JSONL scan on a
+		// slow filesystem. Non-claude backends receive a noop Source and
+		// behave exactly like the legacy memory-only path.
+		entries = sess.EventEntriesBeforeCtx(r.Context(), before, pageLimit)
 	default:
 		entries = sess.EventEntries()
 	}
@@ -622,16 +629,37 @@ func (h *SessionHandlers) handleEvents(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, entries)
 }
 
-// DELETE /api/sessions
+// DELETE /api/sessions accepts two input shapes for the session key:
+//
+//   - Query string:   DELETE /api/sessions?key=<k>&node=<n>   (REST-idiomatic)
+//   - JSON body:      DELETE /api/sessions  {key, node}        (legacy)
+//
+// Query wins when `key` is present there — lets scripted users do
+// `curl -X DELETE .../api/sessions?key=X` without crafting a body, which
+// some HTTP clients (curl -G, fetch()) make awkward. The legacy JSON body
+// path is preserved because the dashboard frontend and existing tests use
+// it; a flag-day migration would gain nothing over this additive change.
+// Both paths converge on the same validation + routing logic below.
 func (h *SessionHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Key  string `json:"key"`
 		Node string `json:"node"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
-		http.Error(w, "key is required", http.StatusBadRequest)
-		return
+	if q := r.URL.Query(); q.Get("key") != "" {
+		req.Key = q.Get("key")
+		req.Node = q.Get("node")
+		// Drain + close body (http.Server will close it for us, but
+		// unreading it could confuse some middleware). MaxBytesReader
+		// still applies to defend against trailer-bomb.
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		_, _ = io.Copy(io.Discard, r.Body)
+		_ = r.Body.Close()
+	} else {
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
+			http.Error(w, "key is required (pass ?key=... or JSON body)", http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Remote node proxy

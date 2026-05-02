@@ -56,6 +56,20 @@ func LoadHistoryTail(claudeDir, sessionID, cwd string, limit int) ([]cli.EventEn
 // between chunks and between parsed lines so a hung NFS read can still be
 // interrupted by Shutdown (subject to the underlying ReadAt's own blocking).
 func LoadHistoryTailCtx(ctx context.Context, claudeDir, sessionID, cwd string, limit int) ([]cli.EventEntry, error) {
+	return LoadHistoryTailBeforeCtx(ctx, claudeDir, sessionID, cwd, 0, limit)
+}
+
+// LoadHistoryTailBeforeCtx returns up to `limit` entries strictly older than
+// `beforeMS` (unix ms) from the tail of the session JSONL, in chronological
+// order. Drives "load earlier" pagination when the in-memory ring no longer
+// contains the requested page.
+//
+// beforeMS <= 0 is treated as "no upper bound" and is equivalent to
+// LoadHistoryTailCtx — the function falls through to the plain tail read.
+//
+// limit <= 0 falls back to the full-file LoadHistory for parity with the
+// legacy LoadHistoryTailCtx contract.
+func LoadHistoryTailBeforeCtx(ctx context.Context, claudeDir, sessionID, cwd string, beforeMS int64, limit int) ([]cli.EventEntry, error) {
 	if limit <= 0 {
 		return LoadHistory(claudeDir, sessionID, cwd)
 	}
@@ -90,7 +104,7 @@ func LoadHistoryTailCtx(ctx context.Context, claudeDir, sessionID, cwd string, l
 			"path", path, "size", size, "cap", maxTailReadBytes)
 	}
 
-	entries, err := parseTail(ctx, f, size, limit)
+	entries, err := parseTail(ctx, f, size, beforeMS, limit)
 	if err != nil {
 		return nil, fmt.Errorf("parse tail %s: %w", path, err)
 	}
@@ -127,6 +141,11 @@ func resolveJSONLPath(claudeDir, sessionID, cwd string) (string, error) {
 // lines from newest to oldest until `limit` decoded entries are collected
 // or the file head is reached.
 //
+// When beforeMS > 0, entries whose Time >= beforeMS are skipped (newer than
+// the pagination cursor) without counting against `limit` or `target`. The
+// caller sees only strictly-older entries. A beforeMS of 0 disables the
+// filter.
+//
 // Internal structure:
 //   - `carry` holds bytes from the previous (newer) chunk that belong to
 //     a line spanning the chunk boundary; it is prepended to the current
@@ -135,7 +154,7 @@ func resolveJSONLPath(claudeDir, sessionID, cwd string) (string, error) {
 //     line becomes 0-N entries (user = 1, assistant = 0-N text blocks).
 //   - the final result is reversed in-place so callers see chronological
 //     order (oldest → newest), matching LoadHistory.
-func parseTail(ctx context.Context, f *os.File, size int64, limit int) ([]cli.EventEntry, error) {
+func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limit int) ([]cli.EventEntry, error) {
 	// Over-collect slightly: assistant lines may contribute 0 text blocks
 	// (tool_use / thinking filtered out), so a small cushion avoids a
 	// second pass when the newest lines are tool-heavy.
@@ -235,8 +254,15 @@ func parseTail(ctx context.Context, f *os.File, size int64, limit int) ([]cli.Ev
 			// parseHistoryLine returns entries in chronological order for
 			// a single line (a single JSONL record). Since we're walking
 			// newest→oldest, prepend the batch by reversing internally.
+			// Entries with Time >= beforeMS are skipped silently (they're
+			// newer than the pagination cursor) without counting against
+			// the collection target. beforeMS == 0 disables the filter.
 			for j := len(lineEntries) - 1; j >= 0; j-- {
-				entries = append(entries, lineEntries[j])
+				e := lineEntries[j]
+				if beforeMS > 0 && e.Time >= beforeMS {
+					continue
+				}
+				entries = append(entries, e)
 				if len(entries) >= target {
 					break
 				}
@@ -381,6 +407,72 @@ func LoadHistoryChainTailCtx(ctx context.Context, claudeDir string, ids []string
 
 	// Buckets are in reverse walk order (newest chain ID first). Flatten in
 	// the opposite direction so the final slice is chronological.
+	totalLen := 0
+	for _, b := range buckets {
+		totalLen += len(b.entries)
+	}
+	out := make([]cli.EventEntry, 0, totalLen)
+	for i := len(buckets) - 1; i >= 0; i-- {
+		out = append(out, buckets[i].entries...)
+	}
+	return out
+}
+
+// LoadHistoryChainBeforeCtx walks the chain newest→oldest and collects up to
+// `limit` entries strictly older than beforeMS. Used by dashboard "load
+// earlier" pagination when the in-memory ring has been exhausted.
+//
+// beforeMS <= 0 degenerates to LoadHistoryChainTailCtx semantics (no upper
+// bound, return newest `limit`). limit <= 0 or empty ids yields nil.
+//
+// Returns entries in chronological order. Entries' Time values are not
+// re-sorted across bucket boundaries — the caller owns final ordering if
+// it merges results with other sources. Within a bucket, chronological
+// order is preserved by parseTail. Between buckets, the natural JSONL
+// timestamps typically already monotonically decrease toward older chain
+// IDs; tie-breaking across branched sessions is the caller's concern.
+func LoadHistoryChainBeforeCtx(ctx context.Context, claudeDir string, ids []string, cwd string, beforeMS int64, limit int) []cli.EventEntry {
+	if limit <= 0 || len(ids) == 0 || claudeDir == "" {
+		return nil
+	}
+	if beforeMS <= 0 {
+		return LoadHistoryChainTailCtx(ctx, claudeDir, ids, cwd, limit)
+	}
+
+	type bucket struct {
+		id      string
+		entries []cli.EventEntry
+	}
+	var buckets []bucket
+	remaining := limit
+
+	for i := len(ids) - 1; i >= 0 && remaining > 0; i-- {
+		if err := ctx.Err(); err != nil {
+			break
+		}
+		id := ids[i]
+		if id == "" {
+			continue
+		}
+		if !IsValidSessionID(id) {
+			continue
+		}
+		entries, err := LoadHistoryTailBeforeCtx(ctx, claudeDir, id, cwd, beforeMS, remaining)
+		if err != nil {
+			slog.Debug("chain tail before load failed", "id", id, "err", err)
+			continue
+		}
+		if len(entries) == 0 {
+			continue
+		}
+		buckets = append(buckets, bucket{id: id, entries: entries})
+		remaining -= len(entries)
+	}
+
+	if len(buckets) == 0 {
+		return nil
+	}
+
 	totalLen := 0
 	for _, b := range buckets {
 		totalLen += len(b.entries)

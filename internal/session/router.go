@@ -17,6 +17,8 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/history"
+	"github.com/naozhi/naozhi/internal/history/claudejsonl"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
 )
@@ -640,6 +642,7 @@ func NewRouter(cfg RouterConfig) *Router {
 			if entry.LastActive != 0 {
 				s.lastActive.Store(entry.LastActive)
 			}
+			r.attachHistorySource(s)
 			r.sessions[key] = s
 			r.indexAdd(key)
 			r.trackSessionID(entry.SessionID)
@@ -739,6 +742,35 @@ func NewRouter(cfg RouterConfig) *Router {
 	}
 
 	return r
+}
+
+// attachHistorySource picks the right history.Source for a session based on
+// its backend ID and installs it. Called immediately after every
+// ManagedSession allocation in this file so EventEntriesBeforeCtx's disk
+// fallback is live before the first pagination request can arrive.
+//
+// Selection:
+//   - "claude" (and legacy empty-string backend rows restored from
+//     sessions.json) → claudejsonl.Source, reading ~/.claude/projects
+//   - anything else → history.Noop placeholder so the call site doesn't
+//     have to nil-check. Per-backend implementations can slot in here
+//     as they land without touching ManagedSession.
+//
+// Missing claudeDir (empty-string config or test harness) degrades to Noop
+// regardless of backend — we can't read JSONL without a root directory.
+func (r *Router) attachHistorySource(s *ManagedSession) {
+	if s == nil {
+		return
+	}
+	backend := s.Backend()
+	if backend == "" {
+		backend = r.defaultBackend
+	}
+	if backend == "claude" && r.claudeDir != "" {
+		s.SetHistorySource(claudejsonl.New(r.claudeDir, s.workspace, s.snapshotChainIDs))
+		return
+	}
+	s.SetHistorySource(history.Noop{})
 }
 
 // shimManagedKeys returns the set of session keys that have a surviving shim
@@ -1615,6 +1647,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		r.sessionIDToKey[resumeID] = key
 	}
 	s.touchLastActive()
+	r.attachHistorySource(s)
 	r.sessions[key] = s
 	r.indexAdd(key)
 	if !opts.Exempt {
@@ -1949,6 +1982,10 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		fresh.storeProcess(proc)
 	}
 	old.storeProcess(nil)
+
+	// Rebind the history source to the renamed session — the old Source
+	// captured `old.snapshotChainIDs` which reads the now-orphaned struct.
+	r.attachHistorySource(fresh)
 
 	// Swap map entries and maintain every derived index.
 	r.sessions[newKey] = fresh
@@ -2881,6 +2918,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 		r.sessionIDToKey[sessionID] = key
 	}
 	s.lastActive.Store(time.Now().UnixNano())
+	r.attachHistorySource(s)
 	r.sessions[key] = s
 	r.indexAdd(key)
 	r.storeDirty = true
@@ -2926,6 +2964,7 @@ func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
 		s.lastPrompt.Store(lastPrompt)
 	}
 	s.lastActive.Store(time.Now().UnixNano())
+	r.attachHistorySource(s)
 	r.sessions[key] = s
 	r.indexAdd(key)
 	r.storeDirty = true

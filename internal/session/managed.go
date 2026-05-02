@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/history"
 )
 
 const (
@@ -132,7 +134,24 @@ type ManagedSession struct {
 	// exempt marks this session as exempt from TTL cleanup, eviction, and activeCount.
 	// Used for planner sessions that should persist indefinitely.
 	exempt bool
+
+	// historySource backs EventEntriesBeforeCtx's disk-tier fallback. Set by
+	// the router at session construction based on the backend: claude sessions
+	// get a claudejsonl.Source; other backends currently get history.Noop so
+	// the call site never has to nil-check.
+	//
+	// Atomic because SetHistorySource is exported and can race with in-flight
+	// pagination reads: the router attaches the source before publishing the
+	// session to r.sessions, but tests and potential future reconfig paths
+	// may reset it after the session is reachable. atomic.Pointer makes the
+	// hand-off race-free without requiring historyMu on every read.
+	historySource atomic.Pointer[historySourceBox]
 }
+
+// historySourceBox wraps history.Source so atomic.Pointer can store it.
+// atomic.Pointer[T] requires a concrete type; an interface-typed field
+// can't be stored directly.
+type historySourceBox struct{ src history.Source }
 
 // SessionKey returns the immutable session key.
 func (s *ManagedSession) SessionKey() string { return s.key }
@@ -176,6 +195,55 @@ func (s *ManagedSession) UserLabel() string { return loadStringAtomic(&s.userLab
 // SetUserLabel records an operator-set display label. Callers must have
 // already validated length/charset; the empty string clears any prior label.
 func (s *ManagedSession) SetUserLabel(v string) { s.userLabel.Store(v) }
+
+// SetHistorySource installs the backend-specific disk-tier Source. Called
+// by the router at session construction; safe to call after the session is
+// published (atomic store) but callers should not rely on mid-flight
+// swaps being observed by a pagination request already in progress.
+// nil disables disk fallback (equivalent to history.Noop).
+func (s *ManagedSession) SetHistorySource(src history.Source) {
+	s.historySource.Store(&historySourceBox{src: src})
+}
+
+// loadHistorySource returns the installed Source, or nil when no source
+// has been attached yet. Callers treat nil the same as history.Noop.
+func (s *ManagedSession) loadHistorySource() history.Source {
+	box := s.historySource.Load()
+	if box == nil {
+		return nil
+	}
+	return box.src
+}
+
+// snapshotChainIDs returns the session-ID chain (oldest → newest) under
+// historyMu so concurrent mutation of prevSessionIDs doesn't produce a
+// torn slice. The current session ID is appended only when non-empty —
+// a just-spawned session that hasn't captured its first ID yet yields
+// the prev chain alone, which matches how router.go builds the chain
+// for JSONL loads today.
+//
+// Exported to package-internal only (not uppercased) because it exposes
+// mutable state via its return value; callers must not mutate the
+// returned slice. Intended for history.Source implementations to pull
+// the current chain at LoadBefore time.
+func (s *ManagedSession) snapshotChainIDs() []string {
+	s.historyMu.RLock()
+	defer s.historyMu.RUnlock()
+	cur := s.getSessionID()
+	n := len(s.prevSessionIDs)
+	if cur != "" {
+		n++
+	}
+	if n == 0 {
+		return nil
+	}
+	out := make([]string, 0, n)
+	out = append(out, s.prevSessionIDs...)
+	if cur != "" {
+		out = append(out, cur)
+	}
+	return out
+}
 
 func (s *ManagedSession) loadProcess() processIface {
 	if box := s.process.Load(); box != nil {
@@ -682,33 +750,72 @@ func (s *ManagedSession) EventLastN(n int) []cli.EventEntry {
 	return out
 }
 
-// EventEntriesSince returns the event log entries after the given unix ms timestamp.
+// sortEntriesByTimeStable sorts entries in-place by Time ascending using a
+// stable sort so that entries sharing the same Time keep their insertion
+// order (matters for InjectHistory batches where a whole chain replay may
+// collapse to a single default timestamp). Callers of EventEntriesSince /
+// EventEntriesBefore depend on chronological output — the ring buffer and
+// persistedHistory themselves don't guarantee strict ordering because
+// (a) InjectHistory may interleave segments from multiple session chains
+// and (b) AppendBatch assigns a single wall-clock to zero-Time entries
+// while older entries might still arrive with real earlier timestamps
+// from resume paths.
+func sortEntriesByTimeStable(entries []cli.EventEntry) {
+	if len(entries) < 2 {
+		return
+	}
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].Time < entries[j].Time
+	})
+}
+
+// EventEntriesSince returns the event log entries with Time > afterMS in
+// chronological order.
+//
+// Live-process branch: proc.EventEntriesSince is backed by cli.EventLog's
+// ring buffer, which records entries in strict append order. Append stamps
+// zero-Time entries with now and AppendBatch uses a single now for the
+// batch, so Time is weakly monotonic by construction and no re-sort is
+// needed. This is the WS push hot path (wshub.go emits on every notify
+// tick), so avoiding an O(n)+sort here matters.
+//
+// Dead-session branch: persistedHistory is NOT guaranteed sorted because
+// InjectHistory may interleave segments from multiple session chains
+// (startup backfill replays prev-session IDs in reverse-chain order).
+// We do a full linear scan + stable sort so paginated fetches see
+// chronological output.
 func (s *ManagedSession) EventEntriesSince(afterMS int64) []cli.EventEntry {
 	proc := s.loadProcess()
 	if proc != nil {
 		return proc.EventEntriesSince(afterMS)
 	}
+	var out []cli.EventEntry
 	s.historyMu.RLock()
-	defer s.historyMu.RUnlock()
-	// Linear scan from the end to find the boundary. persistedHistory may not be
-	// strictly sorted by Time (multiple InjectHistory calls can interleave sessions),
-	// so binary search (sort.Search) would be incorrect.
-	start := len(s.persistedHistory)
-	for start > 0 && s.persistedHistory[start-1].Time > afterMS {
-		start--
+	for _, e := range s.persistedHistory {
+		if e.Time > afterMS {
+			out = append(out, e)
+		}
 	}
-	if start < len(s.persistedHistory) {
-		out := make([]cli.EventEntry, len(s.persistedHistory)-start)
-		copy(out, s.persistedHistory[start:])
-		return out
-	}
-	return nil
+	s.historyMu.RUnlock()
+	sortEntriesByTimeStable(out)
+	return out
 }
 
 // EventEntriesBefore returns up to `limit` entries with Time < beforeMS
-// in chronological order. Drives the dashboard "load earlier" button:
-// caller passes the oldest rendered event's timestamp; server returns the
-// preceding page of up to `limit` entries.
+// drawn from the in-memory log (live process ring or persistedHistory).
+// Entries are returned in chronological order.
+//
+// Scope: memory-tier only. Does NOT consult the backend's disk-tier
+// history.Source — callers that need complete historical coverage should
+// use EventEntriesBeforeCtx which falls back to disk when memory is
+// exhausted. This split preserves the legacy call sites (tests, internal
+// helpers) that can't easily thread a context through.
+//
+// The live-process branch relies on EventLog's insertion-order ring which
+// is already chronological (Append/AppendBatch assign monotonic Time to
+// zero-Time entries), so it returns without re-sorting. Only the
+// persistedHistory branch pays for a stable sort because startup chain
+// replay may interleave segments.
 //
 // beforeMS <= 0 is treated as "no upper bound" — equivalent to the tail
 // of the log, matching EventLastN semantics. limit <= 0 returns nil.
@@ -720,18 +827,64 @@ func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []cli.Eve
 	if proc != nil {
 		return proc.EventEntriesBefore(beforeMS, limit)
 	}
+	out := s.persistedHistoryBefore(beforeMS, limit)
+	sortEntriesByTimeStable(out)
+	return out
+}
+
+// EventEntriesBeforeCtx extends EventEntriesBefore with a disk-tier
+// fallback. When the in-memory log has no entries strictly older than
+// beforeMS, the session's history.Source is consulted. This is the path
+// the dashboard pagination handler takes; legacy non-ctx callers still
+// use the memory-only variant.
+//
+// The two tiers are never merged: the memory tier is authoritative for
+// any range it covers (since it includes naozhi-synthesized events like
+// LogSystemEvent that never reach disk), and falling through to disk
+// only when memory is empty keeps the result strictly chronological
+// without a deduplication step. The trade-off is one extra round trip
+// on the page that straddles the memory-bottom; on all subsequent pages
+// memory returns empty and disk is queried directly.
+func (s *ManagedSession) EventEntriesBeforeCtx(ctx context.Context, beforeMS int64, limit int) []cli.EventEntry {
+	if limit <= 0 {
+		return nil
+	}
+	if mem := s.EventEntriesBefore(beforeMS, limit); len(mem) > 0 {
+		return mem
+	}
+	src := s.loadHistorySource()
+	if src == nil {
+		return nil
+	}
+	entries, err := src.LoadBefore(ctx, beforeMS, limit)
+	if err != nil {
+		// Treat as end-of-history — logging (not propagating) matches the
+		// existing JSONL load sites in router.go which also degrade silently
+		// on read errors.
+		slog.Warn("history source load failed", "key", s.key, "err", err)
+		return nil
+	}
+	sortEntriesByTimeStable(entries)
+	return entries
+}
+
+// persistedHistoryBefore collects up to `limit` entries from persistedHistory
+// strictly older than beforeMS. Returns entries in insertion order — the
+// caller is responsible for the final sort. Only relevant when proc is nil;
+// live-process sessions go through proc.EventEntriesBefore directly.
+func (s *ManagedSession) persistedHistoryBefore(beforeMS int64, limit int) []cli.EventEntry {
+	if limit <= 0 {
+		return nil
+	}
 	s.historyMu.RLock()
 	defer s.historyMu.RUnlock()
 	if len(s.persistedHistory) == 0 {
 		return nil
 	}
 	// Walk backward collecting up to `limit` entries strictly older than
-	// beforeMS. persistedHistory is not guaranteed to be sorted (see
-	// EventEntriesSince), so a full linear walk is the conservative choice.
+	// beforeMS. persistedHistory is not guaranteed to be sorted, so a full
+	// linear walk is the conservative choice.
 	out := make([]cli.EventEntry, 0, limit)
-	// Collect newest-to-oldest into a temp and reverse; keeps order stable
-	// when entries share identical Time values (common for a single batch
-	// InjectHistory where timestamps collapse to the same ms).
 	for i := len(s.persistedHistory) - 1; i >= 0 && len(out) < limit; i-- {
 		e := s.persistedHistory[i]
 		if beforeMS > 0 && e.Time >= beforeMS {
@@ -742,6 +895,8 @@ func (s *ManagedSession) EventEntriesBefore(beforeMS int64, limit int) []cli.Eve
 	if len(out) == 0 {
 		return nil
 	}
+	// Reverse to restore insertion-order (oldest → newest within the page).
+	// Caller sorts for strict chronological ordering.
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
 	}
