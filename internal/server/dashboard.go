@@ -254,6 +254,10 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("POST /api/cron/trigger", auth(s.cronH.handleTrigger))
 	s.mux.HandleFunc("GET /api/cron/preview", auth(s.cronH.handlePreview))
 	s.mux.HandleFunc("POST /api/auth/logout", auth(s.auth.handleLogout))
+	// pprof debug endpoints: auth-gated + loopback-only. Registered via
+	// a package-local helper that wraps the stdlib net/http/pprof
+	// handlers. See internal/server/debug_pprof.go + docs/ops/pprof.md.
+	s.registerPprof()
 	if s.scratchH != nil {
 		s.mux.HandleFunc("POST /api/scratch/open", auth(s.scratchH.handleOpen))
 		s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(s.scratchH.handlePromote))
