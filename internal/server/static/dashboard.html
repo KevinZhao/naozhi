@@ -18,6 +18,28 @@
   --nz-accent:#58a6ff;--nz-blue:#1f6feb;--nz-green:#3fb950;
   --nz-red:#da3633;--nz-amber:#d29922;
   --nz-focus:#58a6ff;
+  /* R110-P1 status-dot palette: side-bar session cards render three
+     states via .dot-running / .dot-ready / .dot-new. Before Round 126
+     running was solid green and ready was solid blue — similar hue
+     weights at 6px made it hard to scan which session was actively
+     working. Running now maps to --nz-amber (matching the already-
+     established .sidebar-status .connecting convention) plus the
+     global @keyframes pulse so it draws attention; ready stays a
+     steady green; new stays dashed blue. Both animations degrade to
+     static under `prefers-reduced-motion` via the site-wide guard
+     at the top of this stylesheet. Future states (error/idle) get
+     new tokens here, never ad-hoc hex in rules. */
+  --nz-status-running:var(--nz-amber);
+  --nz-status-ready:var(--nz-green);
+  --nz-status-new:var(--nz-blue);
+  /* R110-P2 font stack: the body stack above (system-ui + PingFang / Noto CJK
+     + sans-serif) handles CJK well. For tabular / code-ish surfaces we
+     canonicalize here so future code can use var(--nz-font-mono) instead of
+     copy-pasting the stack. Existing `.fv-*` / `.md-*` rules still hard-code
+     their stack — migrating them piecemeal is safe since the strings are
+     visually equivalent. A bare `monospace` fallback keeps compatibility
+     with browsers that don't know ui-monospace yet. */
+  --nz-font-mono:'SF Mono',SFMono-Regular,ui-monospace,Consolas,'Liberation Mono',Menlo,monospace;
 }
 /* Global focus-visible: keyboard users get a clear ring, mouse users don't. */
 :focus{outline:none}
@@ -27,7 +49,17 @@ button:focus-visible,[role="button"]:focus-visible{box-shadow:0 0 0 2px rgba(88,
 @media (prefers-reduced-motion: reduce){*,*::before,*::after{animation-duration:.001ms!important;animation-iteration-count:1!important;transition-duration:.001ms!important}}
 *{margin:0;padding:0;box-sizing:border-box}
 html,body{overflow:hidden;height:100%;width:100%;overscroll-behavior:none;padding:0}
-body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;background:var(--nz-bg-0);color:var(--nz-text);font-size:20px}
+/* Font stack: prose first (CJK aware), code paths opt back into mono explicitly.
+   Previous stack ended in `monospace`, which Chromium/Firefox on Linux surface
+   as DejaVu Sans Mono — a fixed-width latin face that renders CJK glyphs via
+   fallback fonts at uneven widths, giving the whole UI a typewriter-ish feel.
+   The new stack keeps the Apple/Segoe heads (because `-apple-system` on macOS
+   is San Francisco, BlinkMacSystemFont is the platform default) but falls
+   through PingFang SC / Hiragino / Noto Sans CJK SC / Microsoft YaHei so CJK
+   readers get native glyph metrics. Code blocks (`.md-code` / `.md-pre code`
+   / `.fv-body pre` / workspace path labels) already set their own monospace
+   stack inline and are unaffected. */
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hiragino Sans GB','Microsoft YaHei','Noto Sans CJK SC',sans-serif;background:var(--nz-bg-0);color:var(--nz-text);font-size:20px}
 .container{display:flex;height:100%;height:100dvh;overflow:hidden;width:100%}
 
 .sidebar{width:360px;min-width:200px;max-width:60vw;border-right:none;display:flex;flex-direction:column}
@@ -48,6 +80,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .sidebar-status .status-info{flex:1;min-width:0;overflow:hidden}
 .sidebar-status .status-ws{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sidebar-status .status-sys{color:var(--nz-text-dim);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+/* R110-P1 WS outage duration hint — surfaced alongside the reconnect button
+   so users see "已断开 N 秒/分" instead of a static pulsing dot. Amber to
+   mirror the .connecting pulse color; size matches .status-sys. */
+.sidebar-status .status-outage{color:var(--nz-amber);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+/* Auth rate-limit countdown surfaced inline in the sidebar status row
+   instead of a top-of-screen toast. Amber mirrors .status-outage (this is
+   still a connection-health signal, not an operator-visible error). */
+.sidebar-status .status-authwait{color:var(--nz-amber);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:1px}
+/* Manual reconnect button surfaced after WS backoff > 8s — see
+   updateStatusBar gating. Small/dim by default so the status row stays
+   low-chrome; hover pops to accent blue to signal it's actionable. */
+.sidebar-status .status-reconnect{flex-shrink:0;background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);font-family:inherit;font-size:11px;padding:2px 8px;border-radius:4px;cursor:pointer;line-height:1.4;min-height:22px}
+.sidebar-status .status-reconnect:hover{color:var(--nz-accent);border-color:var(--nz-accent);background:rgba(31,111,235,.08)}
 
 .session-card{position:relative;display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:1px solid var(--nz-bg-2);cursor:pointer;transition:background .15s;border-left:3px solid transparent}
 .session-card:hover{background:var(--nz-bg-1)}
@@ -103,10 +148,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 /* AI text: left-aligned, clean markdown */
 .event.text .event-icon{background:rgba(163,118,255,.15);color:#a376ff;font-size:13px}
 .event.text .event-content{color:var(--nz-text);max-width:clamp(720px,60vw,1100px)}
-/* Copy button for long AI messages — bottom of content, always visible */
-.event-copy-btn{display:inline-flex;align-items:center;gap:4px;background:none;border:1px solid var(--nz-border);border-radius:4px;color:var(--nz-text-faint);font-size:11px;padding:1px 8px;cursor:pointer;transition:color .15s,border-color .15s;line-height:1.6;margin-top:8px}
+/* Copy button: permanent for long AI messages; hover-revealed via
+   .hover-only for short bubbles so every text/user message stays
+   copyable without cluttering the default view. The .copied green
+   takes precedence on both variants via visibility:visible override. */
+.event-copy-btn{display:inline-flex;align-items:center;gap:4px;background:none;border:1px solid var(--nz-border);border-radius:4px;color:var(--nz-text-faint);font-size:11px;padding:1px 8px;cursor:pointer;transition:color .15s,border-color .15s,opacity .12s;line-height:1.6;margin-top:8px}
 .event-copy-btn:hover{color:var(--nz-text);border-color:var(--nz-text-faint)}
-.event-copy-btn.copied{color:var(--nz-green);border-color:var(--nz-green)}
+.event-copy-btn.copied{color:var(--nz-green);border-color:var(--nz-green);opacity:1}
+/* hover-only: invisible by default, fades in when the bubble is hovered
+   or the button itself receives keyboard focus. Pointer-events stay on
+   so a full-speed hover-then-click still registers; focus-visible brings
+   keyboard users back into scope. */
+.event-copy-btn.hover-only{opacity:0}
+.event:hover .event-copy-btn.hover-only,.event-copy-btn.hover-only:focus-visible{opacity:1}
 /* System/init: centered label */
 .event.system,.event.init{justify-content:center;padding-top:12px;padding-bottom:12px}
 .event.system .event-icon,.event.init .event-icon{display:none}
@@ -144,6 +198,8 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .event-time-divider{text-align:center;color:var(--nz-text-dim);font-size:11px;margin:16px 0 6px;opacity:.55;user-select:none;letter-spacing:.02em}
 .empty-state{display:flex;align-items:center;justify-content:center;height:100%;color:var(--nz-text-dim);font-size:15px}
 .no-sessions{padding:40px 16px;text-align:center;color:var(--nz-text-faint);font-size:14px}
+.no-sessions-cta{margin-top:12px;padding:8px 16px;background:rgba(31,111,235,.12);border:1px solid var(--nz-blue);border-radius:6px;color:var(--nz-accent);font-family:inherit;font-size:13px;cursor:pointer;min-height:36px}
+.no-sessions-cta:hover{background:rgba(31,111,235,.2)}
 
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 
@@ -151,8 +207,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .input-area{border-top:1px solid var(--nz-border);padding:12px 20px;flex-shrink:0;background:var(--nz-bg-0)}
 .input-area.disabled{opacity:.5;pointer-events:none}
 .file-preview{display:flex;gap:8px;margin-bottom:8px;flex-wrap:wrap}
-.file-thumb{position:relative;width:60px;height:60px;border-radius:6px;overflow:hidden;border:1px solid var(--nz-border)}
-.file-thumb img{width:100%;height:100%;object-fit:cover}
+.file-thumb{position:relative;width:60px;height:60px;border-radius:6px;overflow:hidden;border:1px solid var(--nz-border);transition:opacity .12s,border-color .12s,transform .12s}
+.file-thumb[draggable="true"]{cursor:grab}
+.file-thumb[draggable="true"]:active{cursor:grabbing}
+.file-thumb[draggable="true"]:focus-visible{outline:2px solid var(--nz-accent);outline-offset:2px}
+.file-thumb.dragging{opacity:.4}
+.file-thumb.drop-target{border-color:var(--nz-accent);transform:scale(1.06)}
+.file-thumb img{width:100%;height:100%;object-fit:cover;pointer-events:none;user-select:none;-webkit-user-drag:none}
 .file-thumb .remove{position:absolute;top:-4px;right:-4px;width:16px;height:16px;background:var(--nz-red);color:#fff;border:none;border-radius:50%;font-size:11px;cursor:pointer;display:flex;align-items:center;justify-content:center;line-height:1}
 .upload-status{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:16px;font-weight:700}
 .upload-status.uploading{background:rgba(0,0,0,.45)}
@@ -182,7 +243,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .btn-stop:hover{background:#b62324}
 .btn-mic{font-size:16px;position:relative}
 .btn-mic.recording{background:var(--nz-red);border-color:var(--nz-red);color:#fff;animation:pulse 1.5s ease-in-out infinite}
-.rec-badge{position:absolute;top:-6px;right:-6px;background:var(--nz-red);color:#fff;font-size:10px;min-width:18px;height:18px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-family:monospace;pointer-events:none}
+.rec-badge{position:absolute;top:-6px;right:-6px;background:var(--nz-red);color:#fff;font-size:10px;min-width:18px;height:18px;border-radius:9px;display:flex;align-items:center;justify-content:center;font-family:var(--nz-font-mono);pointer-events:none}
 .btn-mic.transcribing{opacity:.5;pointer-events:none}
 
 /* Voice input mode (WeChat-style hold-to-talk) */
@@ -281,7 +342,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .toast.show{opacity:1;pointer-events:auto}
 
 /* Auth modal */
-.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.6);display:flex;align-items:center;justify-content:center;z-index:200}
+/* Modal scrim: 0.75 matches macOS / Material Design spec for system-level
+   modals — 0.6 (pre-Round 128) let 40% of the main content bleed through,
+   competing for attention with the dialog. Modal body itself is opaque
+   (background:var(--nz-bg-1)) so this value only controls the dim behind
+   the card. Don't push above 0.8 — that reads as "page has crashed / is
+   disabled" rather than "focus on this dialog". */
+.modal-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.75);display:flex;align-items:center;justify-content:center;z-index:200}
 .modal{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:12px;padding:24px;width:360px}
 .modal h3{font-size:15px;color:var(--nz-text-strong);margin-bottom:12px}
 .modal input{width:100%;padding:8px 12px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text);font-size:14px;outline:none}
@@ -289,9 +356,32 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .modal .modal-btns{display:flex;gap:8px;margin-top:16px;justify-content:flex-end}
 .modal .modal-btns button{padding:6px 16px;border-radius:6px;border:1px solid var(--nz-border);background:var(--nz-bg-2);color:var(--nz-text);cursor:pointer;font-size:14px}
 .modal .modal-btns button.primary{background:#238636;border-color:#238636;color:#fff}
+/* UX2: .modal-btns button.danger — red variant for destructive confirm dialogs
+   (delete session, delete cron). Uses the same --nz-red token as .cron-card
+   .cc-btn.danger so the destructive palette is consistent across surfaces. */
+.modal .modal-btns button.danger{background:var(--nz-red);border-color:var(--nz-red);color:#fff}
+.modal .modal-btns button.danger:hover{filter:brightness(1.1)}
+.modal.confirm-dialog p{margin:8px 0 4px;color:var(--nz-text);line-height:1.5}
+.modal.confirm-dialog .confirm-detail{color:var(--nz-text-mute);font-size:13px;margin-top:8px;word-break:break-all}
 .modal textarea{width:100%;padding:8px 12px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text);font-size:14px;font-family:inherit;outline:none;resize:vertical}
 .modal textarea:focus{border-color:var(--nz-accent)}
 .modal-section-label{font-size:12px;color:var(--nz-text-mute);margin-bottom:6px}
+/* Auth modal hint: tells first-time operators where the token lives so the
+   dashboard isn't a dead-end for someone with the URL but no prior context.
+   Inline <code> spans use the same pill treatment as .md-code for visual
+   parity with the rest of the UI's inline code. */
+.modal .auth-hint{font-size:12px;color:var(--nz-text-mute);margin:-4px 0 10px 0;line-height:1.5}
+.modal .auth-hint code{background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:4px;padding:0 5px;font-size:11px;color:var(--nz-text);font-family:'SF Mono',ui-monospace,monospace}
+/* R110-P3 登录页 brand lockup: a small mark + wordmark anchors the auth modal
+   so first-time operators recognize they're on the right service. Using text
+   characters (🧠 脑汁 Naozhi) avoids shipping a logo asset — the bracket mark
+   matches the `>_` motif used in the empty state. Keep subtle: bigger than
+   body copy but still secondary to the primary action (token input). */
+.modal .auth-brand{display:flex;align-items:center;gap:10px;margin-bottom:10px}
+.modal .auth-brand .ab-mark{width:36px;height:36px;border-radius:8px;background:linear-gradient(135deg,rgba(31,111,235,.18),rgba(88,166,255,.08));border:1px solid var(--nz-blue);color:var(--nz-accent);display:flex;align-items:center;justify-content:center;font-family:'SF Mono',ui-monospace,monospace;font-size:17px;font-weight:700;line-height:1}
+.modal .auth-brand .ab-wordmark{display:flex;flex-direction:column;line-height:1.2}
+.modal .auth-brand .ab-wordmark .ab-name{font-size:15px;color:var(--nz-text-strong);font-weight:600}
+.modal .auth-brand .ab-wordmark .ab-tag{font-size:11px;color:var(--nz-text-mute)}
 /* Picker list used in modals (presets, projects, workspaces) */
 .proj-pick{list-style:none;margin:0;padding:0;border:1px solid var(--nz-border);border-radius:6px;background:var(--nz-bg-0);max-height:220px;overflow-y:auto}
 .proj-pick li{padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--nz-bg-2);transition:background .12s;min-height:44px;display:flex;flex-direction:column;justify-content:center;-webkit-tap-highlight-color:transparent}
@@ -317,6 +407,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .cmd-palette-item .cp-path{font-size:11px;color:var(--nz-text-dim);margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,monospace}
 .cmd-palette-item .cp-node{font-size:10px;padding:1px 5px;border-radius:3px;color:#fff;flex-shrink:0}
 .cmd-palette-item .cp-icon{color:var(--nz-text-mute);font-size:14px;flex-shrink:0;width:16px;text-align:center}
+/* R110-P3 palette favorite indicator: gold star at the row icon slot.
+   Same slot as the default ▸ glyph so layout doesn't shift. Color matches
+   the sidebar .section-header .sh-btn.star-on treatment (#e3b341) so the
+   two "this project is starred" surfaces read as the same state. */
+.cmd-palette-item .cp-icon-fav{color:#e3b341}
 .cmd-palette-item mark{background:transparent;color:#79c0ff;font-weight:600}
 .cmd-palette-empty{padding:24px 16px;text-align:center;color:var(--nz-text-dim);font-size:13px}
 .cmd-palette-footer{padding:8px 14px;border-top:1px solid var(--nz-bg-2);font-size:11px;color:var(--nz-text-dim);display:flex;gap:14px;flex-wrap:wrap;flex-shrink:0;background:var(--nz-bg-0)}
@@ -336,7 +431,18 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 
 .history-popover{position:absolute;top:100%;left:0;z-index:100;min-width:280px;max-width:360px;max-height:320px;overflow-y:auto;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.5);padding:0;animation:pop-in .15s ease}
 @keyframes pop-in{from{opacity:0;transform:translateY(-4px)}to{opacity:1;transform:translateY(0)}}
-.history-popover-header{padding:8px 12px;font-size:11px;color:var(--nz-text-mute);border-bottom:1px solid var(--nz-bg-2);font-weight:600;text-transform:uppercase;letter-spacing:.3px;background:var(--nz-bg-0);border-radius:8px 8px 0 0}
+.history-popover-header{padding:8px 12px;font-size:11px;color:var(--nz-text-mute);border-bottom:1px solid var(--nz-bg-2);font-weight:600;letter-spacing:.3px;background:var(--nz-bg-0);border-radius:8px 8px 0 0}
+.history-popover-header .hp-count{color:var(--nz-text-dim);font-weight:500;margin-left:4px}
+/* R110-P1 history-drawer search: the input sits between the header and
+   the items list. Not sticky because the `.hp-day-header` rule already
+   uses position:sticky with top:0 relative to the popover scroll
+   container; adding a second sticky element at the same anchor would
+   make them fight for the top slot on scroll. Operators get their
+   day-anchor; the search stays where they typed. */
+.history-popover-search{padding:6px 12px;background:var(--nz-bg-0);border-bottom:1px solid var(--nz-bg-2)}
+.hp-search-input{width:100%;padding:5px 8px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:4px;color:var(--nz-text);font-size:12px;font-family:inherit;outline:none;transition:border-color .1s}
+.hp-search-input:focus{border-color:var(--nz-accent)}
+.hp-search-input::placeholder{color:var(--nz-text-faint)}
 .history-popover-item{padding:8px 12px;cursor:pointer;transition:background .1s;border-bottom:1px solid var(--nz-bg-2);position:relative}
 .history-popover-item:last-child{border-bottom:none}
 .history-popover-item:hover{background:#1c2129}
@@ -345,8 +451,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .history-popover-item .hp-meta .hp-project{color:#d4a017;font-weight:500}
 .history-popover-item .hp-meta .hp-tool{color:#a5d6ff}
 .history-popover-item .hp-meta .hp-dot{color:var(--nz-border)}
-.hp-day-header{padding:6px 12px 4px;font-size:10px;color:var(--nz-text-mute);font-weight:600;text-transform:uppercase;letter-spacing:.3px;background:var(--nz-bg-0);border-bottom:1px solid var(--nz-bg-2);position:sticky;top:0}
+/* Day group header inside the history popover. Dropped text-transform:uppercase
+   in Round 129 — the browser returns "Wed, Apr 29" for English locales and
+   中文 weekdays like "周三" for CJK locales; uppercase made the former shout
+   ("WED, APR 29") and did nothing for the latter, creating a mixed-register
+   look. Typography now reads naturally in both locales. */
+.hp-day-header{padding:6px 12px 4px;font-size:10px;color:var(--nz-text-mute);font-weight:600;letter-spacing:.3px;background:var(--nz-bg-0);border-bottom:1px solid var(--nz-bg-2);position:sticky;top:0}
 .history-popover-empty{padding:16px;text-align:center;color:var(--nz-text-dim);font-size:12px}
+.history-popover-empty .hp-empty-hint{display:inline-block;margin-top:6px;color:var(--nz-text-faint);font-size:11px}
 
 .workspace-path{font-size:12px;color:var(--nz-text-dim);margin-top:4px;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:'SF Mono',SFMono-Regular,Consolas,monospace}
 .workspace-path:hover{color:var(--nz-text-mute);text-decoration:underline}
@@ -389,24 +501,58 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .hdr-btns{display:flex;gap:4px;align-items:center}
 .hdr-btn{background:none;border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text-mute);cursor:pointer;padding:0;position:relative;transition:all .15s;line-height:1;white-space:nowrap;width:32px;height:32px;display:flex;align-items:center;justify-content:center}
 .hdr-btn:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-text-faint)}
+/* Active state indicates the toggleable pane (currently sidebar search) is
+   open. Matches the accent color used on focus rings across the dashboard
+   so a keyboard user can tell which toggle the button drives. */
+.hdr-btn.active{background:var(--nz-bg-2);color:var(--nz-accent);border-color:var(--nz-accent)}
 .hdr-btn svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-.hdr-badge{position:absolute;top:-5px;right:-5px;background:var(--nz-red);color:#fff;font-size:9px;min-width:15px;height:15px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:700;line-height:1}
+/* UX-P3 sidebar search: toggle-revealed input row under the header-row.
+   Lives inside .sidebar-header (outside #session-list) so sessions_update
+   repaints don't clobber the input value/focus — the renderer reads the
+   input's current value on each repaint and filters accordingly. */
+.sidebar-search{display:flex;gap:6px;align-items:center;margin-top:8px;padding:0 4px}
+.sidebar-search-input{flex:1;padding:6px 10px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text);font-size:13px;font-family:inherit;outline:none;transition:border-color .1s}
+.sidebar-search-input:focus{border-color:var(--nz-accent)}
+.sidebar-search-input::placeholder{color:var(--nz-text-faint)}
+.sidebar-search-clear{background:transparent;border:1px solid transparent;color:var(--nz-text-mute);font-size:16px;line-height:1;padding:4px 8px;border-radius:4px;cursor:pointer;transition:all .1s}
+.sidebar-search-clear:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-border)}
+/* When the filter is active AND empty (no matches), paint a friendly hint
+   instead of the legacy "no sessions" CTA which would mislead operators
+   into thinking they have zero sessions. .session-list-filter-empty is
+   emitted by the renderer's filter branch. */
+.session-list-filter-empty{padding:24px 16px;text-align:center;color:var(--nz-text-dim);font-size:12px}
+.session-list-filter-empty .slfe-hint{display:block;margin-top:6px;color:var(--nz-text-faint);font-size:11px}
+/* Header badges (history count, cron attention count) are neutral by
+   default — red is opt-in via .is-alert (see Track D variants below).
+   Before Round 127 this rule hard-coded --nz-red, then a later Track D
+   rule at ~L800 shadowed the color. Two rules with different intents
+   for the same selector made future refactors error-prone; canonical
+   definition is consolidated here and Track D now only owns the
+   attention / warn variants. */
+.hdr-badge{position:absolute;top:-5px;right:-5px;background:var(--nz-badge-info);color:var(--nz-badge-info-text);border:1px solid var(--nz-border);font-size:9px;min-width:15px;height:15px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-weight:700;line-height:1}
 /* Section header */
-.section-header{padding:6px 12px 6px 16px;font-size:11px;font-weight:600;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;background:var(--nz-bg-1);border-top:1px solid var(--nz-border);border-bottom:1px solid var(--nz-bg-2);position:sticky;top:0;z-index:1;display:flex;align-items:center;gap:6px}
+.section-header{padding:6px 12px 6px 16px;font-size:12px;font-weight:600;color:var(--nz-text-mute);text-transform:none;letter-spacing:0;background:var(--nz-bg-1);border-top:1px solid var(--nz-border);border-bottom:1px solid var(--nz-bg-2);position:sticky;top:0;z-index:1;display:flex;align-items:center;gap:6px}
 .section-header .sh-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .section-header .sh-btn{background:none;border:none;color:var(--nz-text-faint);cursor:pointer;padding:2px 4px;border-radius:4px;display:inline-flex;align-items:center;justify-content:center;line-height:1;transition:color .15s,background .15s;font-size:13px}
 .section-header .sh-btn:hover{background:var(--nz-bg-2);color:var(--nz-text)}
 .section-header .sh-btn.star-on{color:#e3b341}
 .section-header .sh-btn.star-on:hover{color:#f7c744}
 .section-header .sh-btn.github-on{color:#a5d6ff}
+/* Always-on "+ new session in X" header button. Uses --nz-accent on hover
+   to hint at its create-session semantics; size matches the star/github
+   icons so the header row height stays unchanged. */
+.section-header .sh-btn.sh-new:hover{color:var(--nz-accent)}
 .section-header .sh-btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 .section-header .sh-btn.star-on svg{fill:currentColor}
-/* Collapse chevron: expanded = points down; rotated -90deg when collapsed
-   so the same glyph indicates direction without swapping SVGs. */
+/* Collapse chevron: ▾ pointing down = expanded; rotated -90deg (→) when
+   collapsed. Reuses the sh-btn base so the size / hover / focus-visible
+   treatments line up with star/github/+ buttons already in the header. */
 .section-header .sh-btn.sh-collapse svg{transition:transform .15s ease}
 .section-header .sh-btn.sh-collapse.collapsed svg{transform:rotate(-90deg)}
-/* Collapsed count pill next to project name — shows how many sessions are tucked away. */
+/* Count badge next to the project name when collapsed — tells the operator
+   how many sessions are hidden so they don't forget what's tucked away. */
 .section-header .sh-count{font-size:11px;color:var(--nz-text-dim);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:10px;padding:0 6px;line-height:1.6;font-variant-numeric:tabular-nums;flex-shrink:0}
+.section-header.is-collapsed{border-bottom-color:var(--nz-border)}
 .section-empty{padding:8px 16px;font-size:12px;color:var(--nz-text-dim);display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--nz-bg-2);cursor:pointer;background:transparent;border-top:none;border-left:none;border-right:none;width:100%;text-align:left;font-family:inherit}
 .section-empty:hover{color:var(--nz-text);background:var(--nz-bg-1)}
 .section-empty .se-plus{color:var(--nz-accent);font-weight:600}
@@ -419,14 +565,101 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
 .session-card.active.dead-card{opacity:1}
 .session-card .sc-meta{font-size:12px;color:var(--nz-text-mute);display:flex;align-items:center;gap:4px;margin-top:3px;overflow:hidden;white-space:nowrap}
 .sc-dot{display:inline-block;width:6px;height:6px;border-radius:50%;flex-shrink:0}
-.dot-running{background:var(--nz-green)}
-.dot-ready{background:var(--nz-blue)}
-.dot-new{background:var(--nz-blue);border:1px dashed var(--nz-accent);width:5px;height:5px}
+.dot-running{background:var(--nz-status-running);animation:pulse 1.5s ease-in-out infinite}
+.dot-ready{background:var(--nz-status-ready)}
+.dot-new{background:var(--nz-status-new);border:1px dashed var(--nz-accent);width:5px;height:5px}
 .sc-time{flex-shrink:0;font-size:12px;color:var(--nz-text-mute)}
-.sc-node{display:inline-block;padding:0 4px;border-radius:3px;font-size:10px;font-weight:600;color:#fff;margin-left:2px}
+/* Chat-style unread chip — shown on sidebar cards when a turn finished
+   (running -> ready/dead) for a session the operator isn't currently viewing.
+   Sits between prompt text and time so long prompts still truncate first. */
+.sc-unread{flex-shrink:0;display:inline-flex;align-items:center;justify-content:center;min-width:18px;height:18px;padding:0 6px;border-radius:9px;background:var(--nz-red);color:#fff;font-size:11px;font-weight:700;line-height:1;font-family:var(--nz-font-mono);letter-spacing:.2px}
+/* Node selector dropdown — replaces the per-card node badge and the
+   per-node status rows when multiple nodes are connected. Single-node
+   setups hide the whole thing via [hidden] on #node-selector. */
+.node-selector{position:relative;padding:8px 12px;border-bottom:1px solid var(--nz-border);flex-shrink:0}
+.node-selector[hidden]{display:none}
+.ns-trigger{display:flex;align-items:center;gap:8px;width:100%;padding:6px 10px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text);font-family:inherit;font-size:13px;cursor:pointer;line-height:1.2;min-height:32px;text-align:left}
+.ns-trigger:hover{background:var(--nz-bg-2);border-color:var(--nz-text-faint)}
+.ns-trigger[aria-expanded="true"]{border-color:var(--nz-accent);background:var(--nz-bg-2)}
+.ns-trigger .ns-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.ns-trigger .ns-dot.ok,.ns-trigger .ns-dot.connected{background:var(--nz-green)}
+.ns-trigger .ns-dot.connecting,.ns-trigger .ns-dot.authenticating{background:var(--nz-amber);animation:pulse 1.5s ease-in-out infinite}
+.ns-trigger .ns-dot.disconnected,.ns-trigger .ns-dot.error{background:var(--nz-red)}
+.ns-trigger .ns-dot.offline,.ns-trigger .ns-dot.off,.ns-trigger .ns-dot.unreachable{background:var(--nz-text-faint)}
+.ns-trigger .ns-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ns-trigger .ns-alert{width:8px;height:8px;border-radius:50%;background:var(--nz-red);flex-shrink:0}
+.ns-trigger .ns-alert[hidden]{display:none}
+.ns-trigger .ns-chev{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0;transition:transform .15s ease;opacity:.7}
+.ns-trigger[aria-expanded="true"] .ns-chev{transform:rotate(180deg)}
+.ns-dropdown{position:absolute;top:100%;left:12px;right:12px;margin-top:2px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.4);z-index:20;max-height:60vh;overflow-y:auto;padding:4px 0}
+.ns-dropdown[hidden]{display:none}
+.ns-option{display:flex;align-items:center;gap:8px;padding:8px 12px;cursor:pointer;font-size:13px;color:var(--nz-text);background:transparent;border:none;width:100%;text-align:left;font-family:inherit;line-height:1.3}
+.ns-option:hover,.ns-option:focus-visible{background:var(--nz-bg-1);outline:none}
+.ns-option.active{background:rgba(31,111,235,.12);color:var(--nz-accent)}
+.ns-option .ns-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.ns-option .ns-dot.ok,.ns-option .ns-dot.connected{background:var(--nz-green)}
+.ns-option .ns-dot.connecting,.ns-option .ns-dot.authenticating{background:var(--nz-amber);animation:pulse 1.5s ease-in-out infinite}
+.ns-option .ns-dot.disconnected,.ns-option .ns-dot.error{background:var(--nz-red)}
+.ns-option .ns-dot.offline,.ns-option .ns-dot.off,.ns-option .ns-dot.unreachable{background:var(--nz-text-faint)}
+.ns-option .ns-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ns-option .ns-status{color:var(--nz-text-dim);font-size:11px;flex-shrink:0}
+.ns-option .ns-count{color:var(--nz-text-mute);font-size:11px;font-variant-numeric:tabular-nums;flex-shrink:0}
+.ns-option .ns-unread{width:6px;height:6px;border-radius:50%;background:var(--nz-red);flex-shrink:0}
+.ns-option .ns-check{color:var(--nz-accent);font-weight:600;flex-shrink:0}
+.ns-sep{height:1px;background:var(--nz-border);margin:4px 0}
+.ns-addr{display:block;color:var(--nz-text-dim);font-size:11px;margin-top:1px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ns-body{flex:1;min-width:0}
 .sc-type-tag{display:inline-block;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;color:var(--nz-text-mute);background:var(--nz-bg-2);letter-spacing:.2px;flex-shrink:0;margin-left:auto}
 .sc-agents{display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;color:#a5d6ff;background:rgba(56,139,253,.12);flex-shrink:0;margin-left:auto}
+/* R110-P1 model-family chip: low-chrome muted grey so it doesn't compete
+   with the session title. Distinct from .sc-agents (subagent COUNT chip —
+   plural noun + robot emoji) in both color and content; name preserved as
+   .sc-agent (singular) for future i18n readability. */
+.sc-agent{display:inline-flex;align-items:center;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:500;color:var(--nz-text-dim);background:var(--nz-bg-2);flex-shrink:0}
+/* R110-P1 Home panel (idle main area): "最近会话" compact list that appears
+   below the cold-start CTA when sessionsData has entries. Keeps density low
+   (max 5 rows, 36px each) so it doesn't dominate the empty state, but gives
+   users a direct click target to their recent work without going through the
+   sidebar. Zero-session cold-start stays untouched (the wrap renders empty). */
+.recent-panel-wrap{width:100%;max-width:480px}
+.recent-panel{margin-top:8px;padding:12px;border:1px solid var(--nz-border);border-radius:8px;background:var(--nz-bg-1)}
+.recent-panel-title{font-size:11px;color:var(--nz-text-mute);text-transform:none;letter-spacing:.2px;margin-bottom:8px;font-weight:600}
+.recent-panel-list{display:flex;flex-direction:column;gap:4px}
+/* R110-P1 Home stats strip (Round 147): 2-column grid of aggregate metrics
+   computed pure-client-side from allSessionsCache (today-active + total
+   cost). Sits between the panel title and the session list. Low-key colors
+   so the list stays the primary scan target. */
+.recent-panel-stats{display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:10px}
+.recent-stat{padding:10px 12px;border:1px solid var(--nz-border);border-radius:6px;background:var(--nz-bg-0)}
+.recent-stat-value{font-size:18px;font-weight:600;color:var(--nz-text-strong);font-variant-numeric:tabular-nums;line-height:1.2}
+.recent-stat-label{font-size:11px;color:var(--nz-text-mute);margin-top:2px}
+/* R110-P1 Home panel health strip (Round 148): low-chrome meta rows
+   sourced from /api/sessions stats. `.warn` kind flips to amber so
+   watchdog incidents ping the operator without shouting. Border-top
+   separates it from the session list above. */
+.recent-panel-health{margin-top:10px;padding-top:8px;border-top:1px solid var(--nz-border);display:flex;flex-direction:column;gap:2px}
+.recent-health-line{font-size:11px;color:var(--nz-text-mute);line-height:1.5;font-variant-numeric:tabular-nums}
+.recent-health-line.warn{color:var(--nz-amber)}
+.recent-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border:1px solid transparent;border-radius:6px;background:transparent;color:var(--nz-text);cursor:pointer;font-family:inherit;font-size:13px;text-align:left;transition:all .12s}
+.recent-row:hover{background:var(--nz-bg-2);border-color:var(--nz-border);color:var(--nz-text-strong)}
+.recent-row:focus-visible{outline:2px solid var(--nz-focus);outline-offset:1px}
+.recent-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0}
+.recent-dot.dot-running{background:var(--nz-status-running);animation:pulse 1.5s ease-in-out infinite}
+.recent-dot.dot-ready{background:var(--nz-status-ready)}
+.recent-dot.dot-new{background:var(--nz-status-new);border:1px dashed var(--nz-accent)}
+.recent-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.recent-time{color:var(--nz-text-dim);font-size:11px;flex-shrink:0;font-variant-numeric:tabular-nums}
 .sc-cron{display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;color:#ffd9a8;background:rgba(249,115,22,.16);border:1px solid rgba(249,115,22,.35);flex-shrink:0}
+/* R110-P3 IM-origin chip: shared structure, per-platform hue variants. The
+   base rule stays muted so unrecognized/future platforms still render safely
+   (originBadgeHtml returns '' for unknowns, but defence in depth). Platform
+   hues pick brand-adjacent colors; keep alpha conservative so the chip
+   doesn't compete with the session title for attention. */
+.sc-origin{display:inline-flex;align-items:center;padding:1px 6px;border-radius:3px;font-size:10px;font-weight:600;letter-spacing:.2px;flex-shrink:0;color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border)}
+.sc-origin.kind-feishu{color:#a5d6ff;background:rgba(0,122,255,.14);border-color:rgba(0,122,255,.35)}
+.sc-origin.kind-slack{color:#d8b4fe;background:rgba(168,85,247,.14);border-color:rgba(168,85,247,.35)}
+.sc-origin.kind-discord{color:#b4c0ff;background:rgba(88,101,242,.16);border-color:rgba(88,101,242,.38)}
+.sc-origin.kind-weixin{color:#a7f3d0;background:rgba(16,185,129,.14);border-color:rgba(16,185,129,.35)}
 .session-card.cron-card{border-left:3px solid #f97316}
 .session-card.cron-card .sc-cli-icon{position:relative}
 /* History bottom sheet (mobile) */
@@ -506,6 +739,10 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',monospace;backgroun
   .session-card .btn-dismiss{top:6px;right:8px;min-width:32px;min-height:32px;font-size:20px;display:flex;align-items:center;justify-content:center;opacity:.75}
   .btn-icon{width:40px;height:40px}
   .input-row #msg-input{font-size:16px} /* prevents iOS zoom on focus */
+  /* 480px override sets width/height, but the pointer:coarse rule uses
+     min-width/min-height (44). On touch phones the min-* wins so the
+     button ends up 44; on small desktop windows (mouse) this keeps the
+     compact 36 footprint. */
   .hdr-btn{width:36px;height:36px}
   .modal h3{font-size:14px}
   .cmd-palette{width:100vw;max-height:88vh;border-radius:14px 14px 0 0}
@@ -557,9 +794,27 @@ body.kbd-open .input-hints{display:none}
 .cron-card .cc-btn.danger:hover{background:rgba(218,54,51,.12);color:var(--nz-red)}
 .cron-empty{text-align:center;padding:40px 20px}
 .cron-empty-icon{font-size:40px;opacity:.35;margin-bottom:12px}
-.cron-empty-hint{color:var(--nz-text-mute);margin-bottom:16px}
+.cron-empty-hint{color:var(--nz-text-mute);margin-bottom:6px}
+.cron-empty-sub{color:var(--nz-text-faint);font-size:12px;margin-bottom:16px;max-width:320px;margin-left:auto;margin-right:auto;line-height:1.5}
 .cron-empty-cta{padding:10px 22px;border-radius:6px;border:1px solid var(--nz-blue);background:rgba(31,111,235,.12);color:var(--nz-accent);cursor:pointer;font-size:13px;font-family:inherit;min-height:40px}
 .cron-empty-cta:hover{background:rgba(31,111,235,.2)}
+/* R110-P2 cron filter bar (Round 139). The search input lives inside the
+   cron-detail-body but *outside* #cron-list-items so paint-the-list updates
+   (keystroke-driven) don't clobber input value/focus. Chips mirror the
+   sidebar-search aesthetic for consistency. */
+.cron-filter-bar{display:flex;flex-direction:column;gap:8px;margin-bottom:12px}
+.cron-search-row{display:flex;gap:6px;align-items:center}
+.cron-search-input{flex:1;padding:6px 10px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text);font-size:13px;font-family:inherit;outline:none;transition:border-color .1s}
+.cron-search-input:focus{border-color:var(--nz-accent)}
+.cron-search-input::placeholder{color:var(--nz-text-faint)}
+.cron-search-clear{background:transparent;border:1px solid transparent;color:var(--nz-text-mute);font-size:16px;line-height:1;padding:4px 8px;border-radius:4px;cursor:pointer;transition:all .1s}
+.cron-search-clear:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-border)}
+.cron-status-chips{display:flex;gap:6px;flex-wrap:wrap}
+.cron-status-chip{padding:4px 10px;border-radius:12px;border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text-mute);font-size:12px;font-family:inherit;cursor:pointer;transition:all .15s}
+.cron-status-chip:hover{color:var(--nz-text);border-color:var(--nz-text-faint)}
+.cron-status-chip.active{background:rgba(31,111,235,.18);border-color:var(--nz-blue);color:var(--nz-accent)}
+.cron-filter-empty{padding:24px 16px;text-align:center;color:var(--nz-text-dim);font-size:12px}
+.cron-filter-empty .cfe-hint{display:block;margin-top:6px;color:var(--nz-text-faint);font-size:11px}
 .cron-preview-hint{font-size:11px;color:var(--nz-text-mute);margin-top:4px;min-height:16px}
 .cron-preview-hint.ok{color:var(--nz-green)}
 .cron-preview-hint.err{color:var(--nz-red)}
@@ -660,6 +915,12 @@ body.kbd-open .input-hints{display:none}
 .modal.cheatsheet .ks-desc{font-size:13px;color:var(--nz-text);line-height:1.45}
 .modal.cheatsheet .ks-sep{grid-column:1/-1;height:1px;background:var(--nz-bg-2);margin:6px 0}
 .modal.cheatsheet .ks-section{grid-column:1/-1;font-size:11px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-top:2px}
+/* Cheatsheet "好的" confirm is informational (dismiss), not a submit/save
+   action — align it with the global primary blue (--nz-blue) instead of
+   the green used for send/save across the rest of the app (R110-P2 report:
+   "green #22c55e clashes with blue #4a9eff everywhere else"). Other modals
+   keep green because their primary button semantically commits data. */
+.modal.cheatsheet .modal-btns button.primary{background:var(--nz-blue);border-color:var(--nz-blue)}
 
 /* Sidebar footer: version + help trigger. Keeps the info at the very
    bottom, above the safe-area inset on iOS. Pointer-events isolation so
@@ -684,7 +945,13 @@ body.kbd-open .sidebar-footer{display:none}
    Uses (pointer:coarse) so mouse-driven desktops keep their compact sizes. */
 @media (pointer: coarse){
   .btn-icon,.btn-send,.btn-stop{min-width:44px;min-height:44px}
-  .hdr-btn{min-width:40px;min-height:40px}
+  /* R110-P1 touch-target: bump to WCAG AAA 44x44 baseline (matched to
+     .btn-icon / .btn-send) so three header icons packed in a 390px
+     viewport stop being sub-Fitts targets. Paired with .hdr-btns gap
+     bump below so adjacent 44px targets don't overlap the 8px fuzzy
+     zone between tap centers. */
+  .hdr-btn{min-width:44px;min-height:44px}
+  .hdr-btns{gap:8px}
   .section-header .sh-btn{min-width:32px;min-height:32px;padding:6px}
   .session-card .btn-dismiss{min-width:40px;min-height:40px;padding:6px;font-size:19px;opacity:.75}
   .btn-mobile-back{min-width:40px;min-height:40px}
@@ -721,16 +988,16 @@ body.kbd-open .sidebar-footer{display:none}
 }
 
 /* ---- Track D: semantic badge colors — red only means "needs attention" ---- */
-/* Default header badge becomes neutral; red is opt-in via .is-alert (JS can add
-   the class later when there's an actual failure/unread signal). Pure visual
-   change; badge textContent pipeline in dashboard.js is untouched. */
+/* Tokens are consumed by the canonical .hdr-badge rule earlier in this
+   file (base=neutral). Alert / warn variants stay here so the "opt-in
+   red" intent is obvious at the point of definition: JS adds .is-alert
+   when attention > 0, never by default. */
 :root{
   --nz-badge-info:#30363d;       /* neutral count */
   --nz-badge-info-text:#c9d1d9;
   --nz-badge-warn:#d29922;       /* amber */
   --nz-badge-danger:#da3633;     /* unchanged red, opt-in */
 }
-.hdr-badge{background:var(--nz-badge-info);color:var(--nz-badge-info-text);border:1px solid var(--nz-border)}
 .hdr-badge.is-alert{background:var(--nz-badge-danger);color:#fff;border-color:transparent}
 .hdr-badge.is-warn{background:var(--nz-badge-warn);color:#1b1b1b;border-color:transparent}
 
@@ -855,8 +1122,12 @@ body.kbd-open .sidebar-footer{display:none}
    the bubble footer; borrows the same box model so the two buttons line up
    pixel-for-pixel. Tap target enlarges under pointer:coarse along with
    .event-copy-btn — kept in sync so both bubble actions grow together. */
-.event-ask-btn{display:inline-flex;align-items:center;gap:4px;background:none;border:1px solid var(--nz-border);border-radius:4px;color:var(--nz-text-faint);font-size:11px;padding:1px 8px;cursor:pointer;transition:color .15s,border-color .15s;line-height:1.6;margin-top:8px;margin-left:6px}
+.event-ask-btn{display:inline-flex;align-items:center;gap:4px;background:none;border:1px solid var(--nz-border);border-radius:4px;color:var(--nz-text-faint);font-size:11px;padding:1px 8px;cursor:pointer;transition:color .15s,border-color .15s,opacity .12s;line-height:1.6;margin-top:8px;margin-left:6px}
 .event-ask-btn:hover{color:var(--nz-accent);border-color:var(--nz-accent)}
+/* Mirror .event-copy-btn.hover-only so both bubble actions reveal
+   together on hover / keyboard focus and stay hidden otherwise. */
+.event-ask-btn.hover-only{opacity:0}
+.event:hover .event-ask-btn.hover-only,.event-ask-btn.hover-only:focus-visible{opacity:1}
 @media (pointer: coarse){
   .event-ask-btn,.event-copy-btn{font-size:12px;padding:4px 10px;min-height:32px}
 }
@@ -865,16 +1136,36 @@ body.kbd-open .sidebar-footer{display:none}
 </head>
 <body>
 <div class="container">
-  <nav class="sidebar" aria-label="Sessions">
+  <nav class="sidebar" aria-label="会话列表">
     <div class="sidebar-header">
       <div class="header-row">
-        <h1>Dashboard</h1>
+        <h1>脑汁</h1>
         <div class="hdr-btns">
-          <button class="hdr-btn" id="btn-history" onclick="toggleHistory()" title="History" aria-label="Show session history" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="hdr-badge" id="history-badge" style="display:none" aria-label="unread history count"></span></button>
+          <button class="hdr-btn" id="btn-sidebar-search" onclick="toggleSidebarSearch()" title="搜索会话 (按 /)" aria-label="搜索会话" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
+          <button class="hdr-btn" id="btn-history" onclick="toggleHistory()" title="历史会话" aria-label="查看会话历史" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="hdr-badge" id="history-badge" style="display:none" aria-label="历史记录数"></span></button>
           <button class="hdr-btn" onclick="createNewSession()" title="New Session" aria-label="Create new session"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
-          <button class="hdr-btn" id="btn-cron" onclick="openCronPanel()" title="Cron Jobs" aria-label="Cron jobs"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 1.5"/><path d="M5 3L2 6"/><path d="M22 6l-3-3"/><path d="M6.38 18.7L4 21"/><path d="M17.64 18.67L20 21"/></svg><span class="hdr-badge" id="cron-badge" style="display:none" aria-label="cron job count"></span></button>
+          <button class="hdr-btn" id="btn-cron" onclick="openCronPanel()" title="定时任务" aria-label="定时任务面板"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="13" r="8"/><path d="M12 9v4l2.5 1.5"/><path d="M5 3L2 6"/><path d="M22 6l-3-3"/><path d="M6.38 18.7L4 21"/><path d="M17.64 18.67L20 21"/></svg><span class="hdr-badge" id="cron-badge" style="display:none" aria-label="定时任务数"></span></button>
         </div>
       </div>
+      <!-- UX-P3 sidebar search: default-hidden, toggled via btn-sidebar-search
+           or the `/` shortcut. Kept outside #session-list so sessions_update
+           re-renders don't blow away the input value or its focus. -->
+      <div class="sidebar-search" id="sidebar-search" style="display:none">
+        <input type="text" id="sidebar-search-input" class="sidebar-search-input" placeholder="搜索会话、项目或 CLI 名..." autocomplete="off" spellcheck="false" aria-label="搜索会话" />
+        <button type="button" class="sidebar-search-clear" id="sidebar-search-clear" onclick="closeSidebarSearch()" title="关闭搜索" aria-label="关闭搜索">&times;</button>
+      </div>
+    </div>
+    <!-- Node selector: shown only when multiple nodes are connected. Replaces
+         the per-card .sc-node badge and the per-node rows in .sidebar-status;
+         switching a node filters the list to that node's sessions. -->
+    <div class="node-selector" id="node-selector" hidden>
+      <button type="button" class="ns-trigger" id="ns-trigger" aria-haspopup="listbox" aria-expanded="false" aria-controls="ns-dropdown" onclick="toggleNodeSelector(event)">
+        <span class="ns-dot off" id="ns-trigger-dot"></span>
+        <span class="ns-label" id="ns-trigger-label">Local</span>
+        <span class="ns-alert" id="ns-trigger-alert" hidden title="其他节点有异常"></span>
+        <svg class="ns-chev" viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+      </button>
+      <div class="ns-dropdown" id="ns-dropdown" role="listbox" aria-label="选择节点" hidden></div>
     </div>
     <div class="session-list" id="session-list" role="list">
       <div class="no-sessions">loading...</div>
@@ -888,31 +1179,41 @@ body.kbd-open .sidebar-footer{display:none}
       </div>
     </div>
     <div class="sidebar-footer" id="sidebar-footer">
-      <span class="sf-version" id="sf-version" title="naozhi version">naozhi</span>
-      <button type="button" class="sf-help" id="sf-help" title="Keyboard shortcuts (press ?)" aria-label="Keyboard shortcuts" aria-haspopup="dialog" onclick="showCheatsheet()">?</button>
+      <span class="sf-version" id="sf-version" title="naozhi 版本">naozhi</span>
+      <button type="button" class="sf-help" id="sf-help" title="快捷键 (按 ?)" aria-label="快捷键" aria-haspopup="dialog" onclick="showCheatsheet()">?</button>
     </div>
   </nav>
-  <div class="resizer" id="resizer" role="separator" aria-orientation="vertical" aria-label="Resize sidebar" tabindex="0"></div>
-  <main class="main" id="main" aria-label="Session content">
+  <div class="resizer" id="resizer" role="separator" aria-orientation="vertical" aria-label="拖动调整侧栏宽度" tabindex="0"></div>
+  <main class="main" id="main" aria-label="会话内容">
+    <!-- Cold-start empty state. MUST stay in lockstep with mainEmptyHtml() in
+         dashboard.js — dismiss/remove paths call that helper to repaint this
+         region, and any divergence creates a "English on first load, Chinese
+         after dismiss" regression. TestDashboardHTML_R140_ColdStartEmptyStateMatchesHelper
+         locks the two copies together. -->
     <div class="empty-state empty-cta" style="flex-direction:column;gap:16px">
       <span style="font-size:40px;opacity:.35" aria-hidden="true">&gt;_</span>
-      <div style="color:var(--nz-text);font-size:17px">Ready when you are</div>
-      <button class="empty-cta-btn" type="button" onclick="createNewSession()" style="padding:10px 22px;border-radius:8px;border:1px solid var(--nz-blue);background:rgba(31,111,235,.12);color:var(--nz-accent);font-size:14px;cursor:pointer;font-family:inherit">+ New session</button>
-      <div style="font-size:12px;color:var(--nz-text-dim)">or pick one from the sidebar</div>
+      <div style="color:var(--nz-text);font-size:17px">选一个会话开始，或新建一个</div>
+      <button class="empty-cta-btn" type="button" onclick="createNewSession()" style="padding:10px 22px;border-radius:8px;border:1px solid var(--nz-blue);background:rgba(31,111,235,.12);color:var(--nz-accent);font-size:14px;cursor:pointer;font-family:inherit">+ 新建会话</button>
+      <div style="font-size:12px;color:var(--nz-text-dim)">从侧栏选择已有会话，或点上方按钮新建</div>
+      <!-- R110-P1 Home panel slot: renderRecentSessionsPanel() fills this
+           with up to 5 most-recently-active session cards after fetchSessions
+           lands. Stays empty on cold-start (no data yet) or when there are
+           zero sessions, so the minimal empty-state UX doesn't regress. -->
+      <div id="recent-sessions-panel" class="recent-panel-wrap"></div>
     </div>
   </main>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
-<aside class="fv-drawer hidden" id="fv-drawer" role="dialog" aria-modal="false" aria-label="File preview">
+<aside class="fv-drawer hidden" id="fv-drawer" role="dialog" aria-modal="false" aria-label="文件预览">
   <header class="fv-header">
     <div class="fv-title-wrap">
-      <span class="fv-title" id="fv-title">file</span>
+      <span class="fv-title" id="fv-title">文件</span>
       <span class="fv-meta" id="fv-meta"></span>
     </div>
     <div class="fv-actions">
-      <button type="button" class="fv-btn" id="fv-btn-copy" title="Copy path" aria-label="Copy path">copy</button>
-      <button type="button" class="fv-btn" id="fv-btn-download" title="Download" aria-label="Download">download</button>
-      <button type="button" class="fv-btn fv-close" id="fv-btn-close" title="Close" aria-label="Close preview">&times;</button>
+      <button type="button" class="fv-btn" id="fv-btn-copy" title="复制路径" aria-label="复制路径">复制</button>
+      <button type="button" class="fv-btn" id="fv-btn-download" title="下载文件" aria-label="下载文件">下载</button>
+      <button type="button" class="fv-btn fv-close" id="fv-btn-close" title="关闭" aria-label="关闭预览">&times;</button>
     </div>
   </header>
   <div class="fv-body" id="fv-body"></div>
@@ -945,7 +1246,7 @@ body.kbd-open .sidebar-footer{display:none}
     <button type="button" class="ad-save-btn" id="ad-save" title="保存为正式会话">💾 保存为正式会话</button>
   </div>
 </aside>
-<div class="voice-overlay" id="voice-overlay" role="dialog" aria-modal="true" aria-label="Voice recording">
+<div class="voice-overlay" id="voice-overlay" role="dialog" aria-modal="true" aria-label="语音录制">
   <div class="vo-card">
     <div class="vo-timer" id="vo-timer" aria-live="off">0s</div>
     <div class="vo-wave" aria-hidden="true"><span></span><span></span><span></span><span></span><span></span><span></span><span></span></div>

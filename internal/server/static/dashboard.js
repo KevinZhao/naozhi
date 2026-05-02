@@ -9,19 +9,38 @@ let lastCompositionEnd = 0;
 let sessionsData = {};
 let allSessionsCache = [];
 let sessionFirstSeen = (function() { try { return JSON.parse(localStorage.getItem('nz_firstSeen') || '{}'); } catch(_) { return {}; } })();
-// Per-user fold state for project sections, keyed by "<node>:<name>".
-// Persisted in localStorage so it survives reloads.
+// Collapsed project sections: Set of "node:name" keys. Persisted in
+// localStorage so a user's fold state survives reloads. Toggled via the
+// chevron button in the project section-header; the renderer skips emitting
+// cards/empty-CTA for groups whose key is in this set.
 let collapsedProjects = (function() {
   try { return new Set(JSON.parse(localStorage.getItem('nz_collapsedProjects') || '[]')); }
   catch(_) { return new Set(); }
 })();
 let pendingFiles = []; // {file, id, status: 'uploading'|'ready'|'error'}
 let sending = false;
-let selectedNode = 'local';
+// selectedNode doubles as (a) the node the currently-selected session lives on
+// and (b) the "view" filter applied to the sidebar session list when multiple
+// nodes are connected. Persisted to localStorage so a reload keeps the user on
+// the node they were browsing; validated against nodesData on every fetch so a
+// removed/offline remote falls back to 'local'.
+let selectedNode = (function() {
+  try { return localStorage.getItem('nz_selectedNode') || 'local'; }
+  catch(_) { return 'local'; }
+})();
 let nodesData = {};
+// Toggle state for the #node-selector dropdown. Kept in module scope (vs. a
+// DOM attr lookup) so the outside-click listener can bail fast without reading
+// layout. True = dropdown is visible.
+let nodeSelectorOpen = false;
 let lastVersion = 0;
 let lastNodesJSON = '';
 let lastHistoryJSON = '';
+// _lastSidebarData caches the most recent /api/sessions payload so UX-P3
+// sidebar search can re-render locally on each keystroke without
+// re-hitting the server. Set by fetchSessions after a successful render;
+// consumed by the sidebar-search input oninput handler.
+let _lastSidebarData = null;
 let sessionPollTimer = null;
 let discoveredPollTimer = null;
 let discoveredItems = []; // discovered sessions, merged into sidebar
@@ -34,6 +53,12 @@ let defaultWorkspace = '';
 let projectsData = []; // [{name, path, node}] from API
 let defaultCLIName = '';
 let defaultCLIVersion = '';
+// R110-P1 Home panel health strip (Round 148) — cached snapshot of the
+// /api/sessions `stats` object so renderRecentSessionsPanel can surface
+// service health (active / running / ready / uptime / watchdog kills / cli
+// version) without an extra fetch. Refreshed by fetchSessions on every
+// successful poll. Nil-safe consumer: absence = show nothing, never throw.
+let lastStatsSnapshot = null;
 let localWsInfo = { name: '', sys: '' };
 const sessionWorkspaces = {};
 const sessionNodes = {};
@@ -41,6 +66,11 @@ const sessionBackends = {}; // per-session CLI backend picked at creation ("clau
 let cliBackends = null; // cached /api/cli/backends response: {backends, default, detected}
 let cliBackendsFetchedAt = 0;
 const sessionDrafts = {}; // key -> draft text, preserved across session switches
+// sessionUnread: sid(key,node) -> integer count of unread "turn completed" events
+// for sessions that are NOT currently selected. Incremented on running->ready/dead
+// transitions (i.e. the model finished answering) and cleared when the user opens
+// the card. Drives the sidebar chat-style unread bubble.
+const sessionUnread = {};
 let historySessionsData = []; // from API history_sessions (all filesystem sessions)
 
 function getToken() { return ''; }
@@ -81,6 +111,9 @@ async function fetchSessions() {
     if (data.stats.projects) projectsData = data.stats.projects;
     if (data.stats.cli_name) defaultCLIName = data.stats.cli_name;
     if (data.stats.cli_version) defaultCLIVersion = data.stats.cli_version;
+    // R110-P1 Home panel: stash the full stats object so the health strip
+    // can read uptime / watchdog / active-count without a second fetch.
+    lastStatsSnapshot = data.stats;
     historySessionsData = data.history_sessions || [];
 
     // Track which keys the backend knows about
@@ -122,6 +155,11 @@ async function fetchSessions() {
     }
 
     renderSidebar(data);
+    // Stash the last successful /api/sessions payload so the sidebar
+    // search oninput handler can re-render locally without DoS'ing the
+    // server with /api/sessions requests on every keystroke. The renderer
+    // is idempotent — re-calling it with the same data just re-paints.
+    _lastSidebarData = data;
 
     // Reconcile main area state: if the selected session's state changed
     // (e.g. session_state WS message was missed during reconnect), propagate
@@ -177,12 +215,12 @@ function renderSidebar(data) {
   const scrollTop = list.scrollTop;
 
   // Merge discovered into sessions — tag them as source=terminal
-  const allItems = (data.sessions || []).map(s => {
+  const allItemsUnfiltered = (data.sessions || []).map(s => {
     if (!s.source) s.source = 'managed';
     return s;
   });
   discoveredItems.forEach(d => {
-    allItems.push({
+    allItemsUnfiltered.push({
       key: '_discovered:' + d.pid,
       state: d.state || 'ready',
       cli_name: d.cli_name || 'cli',
@@ -197,8 +235,26 @@ function renderSidebar(data) {
     });
   });
 
-  // Workspace sidebar: managed + discovered sessions.
-  allSessionsCache = allItems;
+  // Workspace sidebar: managed + discovered sessions (full cache, pre-filter).
+  // The node selector dropdown needs unfiltered counts, so allSessionsCache
+  // must hold every node's items. The selector itself is refreshed via the
+  // updateStatusBar() call above (which tail-calls updateNodeSelector so a
+  // 1s status tick keeps the trigger dot live during disconnect); session
+  // counts in the dropdown therefore lag by at most one poll cycle, which
+  // only matters while the dropdown is open — an acceptable trade for not
+  // paying two full dropdown repaints per poll.
+
+  allSessionsCache = allItemsUnfiltered;
+
+  // Filter the list by selectedNode when multiple nodes are connected. In
+  // single-node setups (selector is hidden) there's nothing to filter and we
+  // pass everything through so the legacy UX is preserved. Transient states
+  // where selectedNode is null (e.g. previewDiscovered) fall through the
+  // falsy branch and show the full list rather than an empty sidebar.
+  const activeFilter = isMultiNode() && selectedNode;
+  const allItems = activeFilter
+    ? allItemsUnfiltered.filter(s => (s.node || 'local') === selectedNode)
+    : allItemsUnfiltered;
 
   // Stamp first-seen time for each session (stable sort anchor).
   // Once recorded, position never changes regardless of activity.
@@ -224,79 +280,110 @@ function renderSidebar(data) {
     return bFS - aFS;
   });
 
-  // Project lookup by (node,name) so we can reach favorite/github flags.
-  const projIndex = {};
-  projectsData.forEach(p => {
-    projIndex[(p.node || 'local') + ':' + p.name] = p;
-  });
-
-  // Group sessions by (node,name) so remote + local projects with same name stay separate.
-  const groups = {};
-  const ungrouped = [];
-  allItems.forEach(s => {
-    const pn = s.project || '';
-    if (pn) {
-      const k = (s.node || 'local') + ':' + pn;
-      if (!groups[k]) groups[k] = {name: pn, node: s.node || 'local', items: []};
-      groups[k].items.push(s);
-    } else {
-      ungrouped.push(s);
-    }
-  });
-  // Favorite projects get an empty group so their header is always rendered.
-  projectsData.forEach(p => {
-    if (!p.favorite) return;
-    const k = (p.node || 'local') + ':' + p.name;
-    if (!groups[k]) groups[k] = {name: p.name, node: p.node || 'local', items: []};
-  });
-
-  const groupKeys = Object.keys(groups);
-  let html = '';
-  if (groupKeys.length > 0) {
-    // Pre-compute per-group sort keys once — avoids repeated map lookups
-    // inside the sort comparator (fav flag, max firstSeen, display name).
-    // This keeps comparator at O(1) scalar comparisons rather than
-    // O(M + map-lookup) per call. Also sidesteps the Math.max(...spread)
-    // call-stack limit that would eventually RangeError at huge session
-    // counts.
-    const sortKeys = {};
-    groupKeys.forEach(k => {
-      const g = groups[k];
-      const p = projIndex[k];
-      let m = 0;
-      for (const s of g.items) {
-        const fs = sessionFirstSeen[(s.node || 'local') + ':' + s.key] || 0;
-        if (fs > m) m = fs;
-      }
-      sortKeys[k] = { fav: (p && p.favorite) ? 0 : 1, first: m, name: g.name };
-    });
-    groupKeys.sort((a, b) => {
-      const ka = sortKeys[a], kb = sortKeys[b];
-      if (ka.fav !== kb.fav) return ka.fav - kb.fav;
-      if (ka.first !== kb.first) return kb.first - ka.first;
-      return ka.name.localeCompare(kb.name);
-    });
-    groupKeys.forEach(k => {
-      const g = groups[k];
-      const p = projIndex[k] || {name: g.name, node: g.node, favorite: false};
-      p._sessionCount = g.items.length;
-      html += sectionHeaderHtml(p);
-      if (collapsedProjects.has(k)) return;
-      if (g.items.length > 0) {
-        html += g.items.map(sessionCardHtml).join('');
-      } else {
-        html += sectionEmptyHtml(p);
-      }
-    });
-    if (ungrouped.length > 0) {
-      html += '<div class="section-header"><span class="sh-name">Other</span></div>';
-      html += ungrouped.map(sessionCardHtml).join('');
-    }
-  } else {
-    html = allItems.map(sessionCardHtml).join('');
+  // UX-P3 sidebar search: if the filter input is visible and non-empty,
+  // skip the project grouping entirely and render the filtered set as a
+  // flat list. Grouping under a filter scatters matches across day headers
+  // and loses the "search" affordance. Reading the input here (not in a
+  // separate oninput handler) means every sessions_update re-evaluates the
+  // filter — same query, fresh data — without flickering the input.
+  const filterQuery = readSidebarSearchQuery();
+  const filterActive = !!filterQuery;
+  let listHtml = '';
+  if (filterActive) {
+    const matched = filterSessionsByQuery(allItems, filterQuery);
+    listHtml = matched.length === 0
+      ? '<div class="session-list-filter-empty">没有匹配的会话<span class="slfe-hint">试试项目名、CLI 名或 prompt 片段</span></div>'
+      : matched.map(sessionCardHtml).join('');
   }
 
-  if (!html) html = '<div class="no-sessions">no sessions</div>';
+  let html = listHtml;
+  if (!filterActive) {
+    // Project lookup by (node,name) so we can reach favorite/github flags.
+    const projIndex = {};
+    projectsData.forEach(p => {
+      projIndex[(p.node || 'local') + ':' + p.name] = p;
+    });
+
+    // Group sessions by (node,name) so remote + local projects with same name stay separate.
+    const groups = {};
+    const ungrouped = [];
+    allItems.forEach(s => {
+      const pn = s.project || '';
+      if (pn) {
+        const k = (s.node || 'local') + ':' + pn;
+        if (!groups[k]) groups[k] = {name: pn, node: s.node || 'local', items: []};
+        groups[k].items.push(s);
+      } else {
+        ungrouped.push(s);
+      }
+    });
+    // Favorite projects get an empty group so their header is always rendered.
+    // Under the node filter, only inject favorites that belong to the
+    // currently-viewed node — otherwise switching to a remote would surface
+    // an empty header for every local favorite, which defeats the filter.
+    projectsData.forEach(p => {
+      if (!p.favorite) return;
+      const pNode = p.node || 'local';
+      // Only suppress cross-node favorites when the filter is actually live
+      // (multi-node AND selectedNode non-null). Otherwise fall through to
+      // preserve the legacy "every favorite header always renders" behavior.
+      if (activeFilter && pNode !== selectedNode) return;
+      const k = pNode + ':' + p.name;
+      if (!groups[k]) groups[k] = {name: p.name, node: pNode, items: []};
+    });
+
+    const groupKeys = Object.keys(groups);
+    if (groupKeys.length > 0) {
+      // Pre-compute per-group sort keys once — avoids repeated map lookups
+      // inside the sort comparator (fav flag, max firstSeen, display name).
+      // This keeps comparator at O(1) scalar comparisons rather than
+      // O(M + map-lookup) per call. Also sidesteps the Math.max(...spread)
+      // call-stack limit that would eventually RangeError at huge session
+      // counts.
+      const sortKeys = {};
+      groupKeys.forEach(k => {
+        const g = groups[k];
+        const p = projIndex[k];
+        let m = 0;
+        for (const s of g.items) {
+          const fs = sessionFirstSeen[(s.node || 'local') + ':' + s.key] || 0;
+          if (fs > m) m = fs;
+        }
+        sortKeys[k] = { fav: (p && p.favorite) ? 0 : 1, first: m, name: g.name };
+      });
+      groupKeys.sort((a, b) => {
+        const ka = sortKeys[a], kb = sortKeys[b];
+        if (ka.fav !== kb.fav) return ka.fav - kb.fav;
+        if (ka.first !== kb.first) return kb.first - ka.first;
+        return ka.name.localeCompare(kb.name);
+      });
+      groupKeys.forEach(k => {
+        const g = groups[k];
+        const p = projIndex[k] || {name: g.name, node: g.node, favorite: false};
+        p._sessionCount = g.items.length;
+        html += sectionHeaderHtml(p);
+        if (collapsedProjects.has(k)) return;
+        if (g.items.length > 0) {
+          html += g.items.map(sessionCardHtml).join('');
+        } else {
+          html += sectionEmptyHtml(p);
+        }
+      });
+      if (ungrouped.length > 0) {
+        html += '<div class="section-header"><span class="sh-name">Other</span></div>';
+        html += ungrouped.map(sessionCardHtml).join('');
+      }
+    } else {
+      html = allItems.map(sessionCardHtml).join('');
+    }
+  }
+
+  // R110-P2 empty-state CTA: keep the legacy "no sessions" text (E2E asserts
+  // it via toContain) but add a visible call-to-action so first-time users
+  // aren't left staring at a dead sidebar. createNewSession is the same handler
+  // the header `+` button invokes. NOT emitted in filter mode — the
+  // filter-specific empty state ('没有匹配的会话') already covers that path.
+  if (!html && !filterActive) html = '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" onclick="createNewSession()">+ 开启你的第一个会话</button></div>';
   list.innerHTML = html;
   // Restore scroll on the next frame so the browser finishes layout first;
   // synchronous assignment after innerHTML can visibly jump on slow devices.
@@ -312,6 +399,130 @@ function renderSidebar(data) {
     hBadge.textContent = historyCount > 0 ? historyCount : '';
     hBadge.style.display = historyCount > 0 ? '' : 'none';
   }
+
+  // R110-P1 Home panel: refresh after every sidebar repaint so the
+  // "最近会话" list mirrors the authoritative snapshot. Gated by selectedKey
+  // inside the helper so the main shell's active session view isn't touched.
+  renderRecentSessionsPanel();
+}
+
+// --- UX-P3 sidebar search helpers ---
+//
+// readSidebarSearchQuery is called at the top of renderSidebar so every
+// sessions_update repaint re-applies the current filter without a separate
+// oninput handler firing a second render. Returns '' when the search pane
+// is hidden or the input is empty, both of which are "no filter" states.
+function readSidebarSearchQuery() {
+  const pane = document.getElementById('sidebar-search');
+  if (!pane || pane.style.display === 'none') return '';
+  const input = document.getElementById('sidebar-search-input');
+  if (!input) return '';
+  return input.value.trim();
+}
+
+// filterSessionsByQuery is the pure match step — extracted so unit tests
+// can exercise it without driving the DOM. Match surface: user_label,
+// summary, last_prompt, project, cli_name, key (all substring,
+// case-insensitive). session_id is NOT in the surface because it's a
+// long opaque hash no operator types; matching on key is enough when
+// someone wants to paste a slice of it.
+function filterSessionsByQuery(items, query) {
+  const q = (query || '').trim().toLowerCase();
+  if (!q) return items;
+  return items.filter(s => {
+    if (!s) return false;
+    const fields = [
+      s.user_label, s.summary, s.last_prompt,
+      s.project, s.cli_name, s.key,
+    ];
+    for (const f of fields) {
+      if (typeof f === 'string' && f.toLowerCase().indexOf(q) !== -1) return true;
+    }
+    return false;
+  });
+}
+
+// toggleSidebarSearch flips the search pane's visibility. Entering toggle
+// auto-focuses the input; exiting clears it (so re-opening starts clean
+// and a stale filter doesn't silently hide sessions). Mirrors the header
+// button's aria-expanded so screen readers track state.
+function toggleSidebarSearch() {
+  const pane = document.getElementById('sidebar-search');
+  const btn = document.getElementById('btn-sidebar-search');
+  if (!pane || !btn) return;
+  const opening = pane.style.display === 'none';
+  pane.style.display = opening ? 'flex' : 'none';
+  btn.classList.toggle('active', opening);
+  btn.setAttribute('aria-expanded', opening ? 'true' : 'false');
+  if (opening) {
+    const input = document.getElementById('sidebar-search-input');
+    if (input) {
+      // defer focus so the display:flex paint lands first (Safari refuses
+      // focus() on a still-hidden element, then silently drops it).
+      setTimeout(() => { input.focus(); input.select(); }, 30);
+    }
+  } else {
+    // Closing clears the query so the next open starts fresh and the
+    // sidebar immediately re-renders without a lingering filter. Render
+    // locally against the cached payload (if any) to avoid an extra
+    // /api/sessions round-trip — the data is already authoritative.
+    const input = document.getElementById('sidebar-search-input');
+    if (input) input.value = '';
+    if (_lastSidebarData) {
+      renderSidebar(_lastSidebarData);
+    } else {
+      debouncedFetchSessions();
+    }
+  }
+}
+
+// closeSidebarSearch is the explicit "close" path used by the × button
+// and the Esc key — same semantics as toggleSidebarSearch's close arm.
+function closeSidebarSearch() {
+  const pane = document.getElementById('sidebar-search');
+  if (pane && pane.style.display !== 'none') toggleSidebarSearch();
+}
+
+// initSidebarSearch wires the input handler + the `/` and Esc keyboard
+// shortcuts. Call once at startup. The input's oninput handler triggers
+// a debounced sidebar re-fetch so each keystroke re-applies the filter
+// against the canonical sessions data — no client-side cache desync.
+function initSidebarSearch() {
+  const input = document.getElementById('sidebar-search-input');
+  if (input) {
+    input.addEventListener('input', () => {
+      // Re-render locally against the cached /api/sessions payload so
+      // rapid typing doesn't DoS the server with per-keystroke requests.
+      // When no data has landed yet (first load), fall through to a
+      // debounced fetch as a degraded bootstrap.
+      if (_lastSidebarData) {
+        renderSidebar(_lastSidebarData);
+      } else {
+        debouncedFetchSessions();
+      }
+    });
+    input.addEventListener('keydown', e => {
+      if (e.key === 'Escape') { e.preventDefault(); closeSidebarSearch(); }
+    });
+  }
+  // Global `/` shortcut: open sidebar search unless the user is already
+  // typing into some other input/textarea/contenteditable. Mirrors the
+  // `?` help shortcut's skip rule so developer muscle memory works.
+  document.addEventListener('keydown', e => {
+    if (e.key !== '/') return;
+    if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+    const tgt = e.target;
+    if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+    if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
+    e.preventDefault();
+    const pane = document.getElementById('sidebar-search');
+    if (pane && pane.style.display === 'none') {
+      toggleSidebarSearch();
+    } else {
+      const inp = document.getElementById('sidebar-search-input');
+      if (inp) inp.focus();
+    }
+  });
 }
 
 // Match a workspace path to a project from projectsData (longest prefix wins)
@@ -335,8 +546,8 @@ function matchProject(workspace) {
 // that previously implied a per-state SVG difference.
 const STAR_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polygon points="12,2 15.09,8.26 22,9.27 17,14.14 18.18,21.02 12,17.77 5.82,21.02 7,14.14 2,9.27 8.91,8.26"/></svg>';
 const GITHUB_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-5 1.5-5-2.5-7-3m14 6v-3.87a3.37 3.37 0 0 0-.94-2.61c3.14-.35 6.44-1.54 6.44-7A5.44 5.44 0 0 0 20 4.77 5.07 5.07 0 0 0 19.91 1S18.73.65 16 2.48a13.38 13.38 0 0 0-7 0C6.27.65 5.09 1 5.09 1A5.07 5.07 0 0 0 5 4.77a5.44 5.44 0 0 0-1.5 3.78c0 5.42 3.3 6.61 6.44 7A3.37 3.37 0 0 0 9 18.13V22"/></svg>';
-// Chevron: points down when expanded; CSS rotates -90deg when collapsed
-// so the same glyph serves both states.
+// Chevron: points down when expanded (`▾`-like), rotated 90deg via CSS
+// when collapsed so the same glyph serves both states.
 const CHEVRON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
 
 function sectionHeaderHtml(p) {
@@ -360,8 +571,22 @@ function sectionHeaderHtml(p) {
   let ghBtn = '';
   if (p.github) {
     const url = p.git_remote_url || '';
-    ghBtn = '<button type="button" class="sh-btn github-on" data-url="' + escAttr(url) + '" title="GitHub: ' + escAttr(url) + '" aria-label="Show GitHub remote" onclick="event.stopPropagation();showGitRemote(this.dataset.url)">' + GITHUB_SVG + '</button>';
+    // R110-P2 tooltip clarity: the old "GitHub: <url>" left the CTA implicit
+    // — click-to-open was only discoverable by trial. Lead with the verb
+    // "在 GitHub 打开仓库" so the affordance is explicit; append the URL so
+    // operators can still eyeball the remote for the common case where
+    // they're verifying the repo match before clicking.
+    ghBtn = '<button type="button" class="sh-btn github-on" data-url="' + escAttr(url) + '" title="在 GitHub 打开仓库：' + escAttr(url) + '" aria-label="在 GitHub 打开仓库 ' + escAttr(p.name) + '" onclick="event.stopPropagation();showGitRemote(this.dataset.url)">' + GITHUB_SVG + '</button>';
   }
+
+  // R110-P2 "+ New session in X" consistency: previously only groups with no
+  // sessions got the full-width section-empty CTA. Groups that already had
+  // sessions had no per-project create affordance, forcing the user to use
+  // the header `+` then re-type the workspace. This compact `+` icon lives
+  // in every section header so creation is always one click away. The full
+  // section-empty CTA still appears for zero-session groups (it's more
+  // discoverable when the row below would otherwise be blank).
+  const newBtn = '<button type="button" class="sh-btn sh-new" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" title="在 ' + escAttr(p.name) + ' 中新建会话" aria-label="在 ' + escAttr(p.name) + ' 中新建会话" onclick="event.stopPropagation();newSessionInProject(this.dataset.name,this.dataset.node)"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>';
 
   const collapsedCls = collapsed ? ' is-collapsed' : '';
   return '<div class="section-header' + collapsedCls + '" role="group" aria-label="' + escAttr(p.name) + '">' +
@@ -369,6 +594,7 @@ function sectionHeaderHtml(p) {
     '<span class="sh-name" title="' + escAttr(p.name) + '">' + esc(p.name) + '</span>' +
     countBadge +
     ghBtn +
+    newBtn +
     '</div>';
 }
 
@@ -379,8 +605,9 @@ function sectionEmptyHtml(p) {
     '</button>';
 }
 
-// Flips a project section's fold state, persists it, and refetches so the
-// sidebar re-renders with the new state applied.
+// toggleProjectCollapsed flips a project section's fold state, persists
+// it, and re-renders from the last sidebar payload (no network round-trip).
+// Key format: "<node>:<name>" matching the grouping key in renderSidebar.
 function toggleProjectCollapsed(key) {
   if (!key) return;
   if (collapsedProjects.has(key)) collapsedProjects.delete(key);
@@ -388,7 +615,11 @@ function toggleProjectCollapsed(key) {
   try {
     localStorage.setItem('nz_collapsedProjects', JSON.stringify([...collapsedProjects]));
   } catch (_) {}
-  fetchSessions();
+  if (_lastSidebarData) {
+    renderSidebar(_lastSidebarData);
+  } else {
+    debouncedFetchSessions();
+  }
 }
 
 // In-flight guard against a double-click race: the star button's DOM state
@@ -415,7 +646,7 @@ async function toggleFavorite(name, node) {
       (node && node !== 'local' ? '&node=' + encodeURIComponent(node) : '');
     const r = await fetch('/api/projects/favorite?' + qs, { method: 'POST', headers });
     if (!r.ok) {
-      showToast('favorite update failed', 'error');
+      showAPIError(next ? '收藏项目' : '取消收藏', r.status, '');
       // Re-render from the server so the star's visual hover/click state
       // snaps back to the authoritative `projectsData` value; otherwise the
       // user sees a phantom success.
@@ -424,10 +655,10 @@ async function toggleFavorite(name, node) {
     }
     // Optimistic update then refresh.
     proj.favorite = next;
-    showToast(next ? 'Pinned ' + name : 'Unpinned ' + name, 'success');
+    showToast(next ? '已收藏 ' + name : '已取消收藏 ' + name, 'success');
     fetchSessions();
   } catch (e) {
-    showToast('network error', 'error');
+    showNetworkError(next ? '收藏项目' : '取消收藏', e);
     fetchSessions();
   } finally {
     _favInFlight.delete(key);
@@ -488,38 +719,25 @@ function toggleHistory() {
     }));
   merged.sort((a, b) => b.last_active - a.last_active);
 
-  let itemsHtml;
-  if (merged.length === 0) {
-    itemsHtml = '<div class="history-popover-empty">no history</div>';
-  } else {
-    // Group by day.
-    let currentDay = '';
-    itemsHtml = merged.map(s => {
-      let dayHeader = '';
-      if (s.last_active) {
-        const d = new Date(s.last_active);
-        const dayStr = d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', weekday: 'short' });
-        if (dayStr !== currentDay) {
-          currentDay = dayStr;
-          dayHeader = '<div class="hp-day-header">' + esc(dayStr) + '</div>';
-        }
-      }
-      const ago = s.last_active ? timeAgo(s.last_active) : '';
-      const onclick = 'resumeRecentSession(this.dataset.sid);closeHistoryPopover()';
-      return dayHeader +
-        '<div class="history-popover-item" data-sid="' + escAttr(s.session_id) + '" onclick="' + onclick + '">' +
-        (s.prompt ? '<div class="hp-prompt" title="' + escAttr(s.prompt) + '">' + esc(s.prompt) + '</div>' : '<div class="hp-prompt" style="color:#6e7681">(no prompt)</div>') +
-        '<div class="hp-meta">' +
-          (s.project ? '<span class="hp-project">' + esc(s.project) + '</span><span class="hp-dot">&middot;</span>' : '') +
-          (ago ? '<span>' + ago + '</span>' : '') +
-        '</div>' +
-        '</div>';
-    }).join('');
-  }
-
   const popover = document.createElement('div');
   popover.className = isMobile() ? 'history-sheet' : 'history-popover';
-  popover.innerHTML = '<div class="history-popover-header">History (' + merged.length + ')</div>' + itemsHtml;
+  // R110-P1 history-drawer search: the header grows a count chip and a
+  // filter input. Submitting or typing into the input triggers
+  // applyHistoryFilter(merged, query) — a pure function over `merged` that
+  // re-renders the items list and updates the count chip. Keeping `merged`
+  // on the closure means each keystroke is an O(N) scan against the same
+  // dataset — at ~200 entries that's trivial and avoids re-reading
+  // historySessionsData on every keypress.
+  popover.innerHTML =
+    '<div class="history-popover-header">' +
+      '<span>历史 <span class="hp-count" id="hp-count">(' + merged.length + ')</span></span>' +
+    '</div>' +
+    (merged.length > 0
+      ? '<div class="history-popover-search">' +
+          '<input type="text" id="hp-search" class="hp-search-input" placeholder="搜索提示词或项目…" autocomplete="off" spellcheck="false" />' +
+        '</div>'
+      : '') +
+    '<div class="history-popover-items" id="hp-items"></div>';
   if (isMobile()) {
     popover.innerHTML = '<div class="sheet-handle"></div>' + popover.innerHTML;
   }
@@ -534,6 +752,96 @@ function toggleHistory() {
     popover.style.right = (window.innerWidth - rect.right) + 'px';
     popover.style.maxHeight = Math.min(500, window.innerHeight - rect.bottom - 16) + 'px';
   }
+
+  // Paint initial list (empty query = show everything).
+  applyHistoryFilter(merged, '');
+
+  // Wire search input. Setting `oninput` via property rather than HTML
+  // attribute keeps the handler isolated from any CSP tightening that
+  // might disable inline event handlers on the items HTML.
+  const searchInput = document.getElementById('hp-search');
+  if (searchInput) {
+    searchInput.addEventListener('input', e => applyHistoryFilter(merged, e.target.value));
+    // Auto-focus on desktop only; mobile focus pops the keyboard and
+    // pushes the sheet up, which is annoying if the user just wanted to
+    // eyeball the list.
+    if (!isMobile()) {
+      setTimeout(() => searchInput.focus(), 50);
+    }
+  }
+}
+
+// filterHistoryEntries is the pure filtering step extracted for unit
+// testability. Query is case-insensitive and matched as a substring
+// against (prompt, project). Empty query returns the full list. Kept
+// as a standalone function so a contract test can assert the match
+// surface without driving the DOM.
+function filterHistoryEntries(merged, query) {
+  const q = (query || '').trim().toLowerCase();
+  if (!q) return merged;
+  return merged.filter(s => {
+    const p = (s.prompt || '').toLowerCase();
+    if (p.indexOf(q) !== -1) return true;
+    const proj = (s.project || '').toLowerCase();
+    if (proj.indexOf(q) !== -1) return true;
+    return false;
+  });
+}
+
+// applyHistoryFilter renders the filtered subset into the popover and
+// updates the count chip. Separated from the render so the search input
+// handler can call it without rebuilding the popover shell on every
+// keystroke.
+function applyHistoryFilter(merged, query) {
+  const itemsEl = document.getElementById('hp-items');
+  const countEl = document.getElementById('hp-count');
+  if (!itemsEl) return;
+  const filtered = filterHistoryEntries(merged, query);
+  if (countEl) {
+    // "Filtered" count uses the x/total shape so the user knows the
+    // denominator hasn't shrunk — e.g. "(3 / 47)" after typing. When
+    // the query is empty keep the compact "(47)" form.
+    countEl.textContent = query
+      ? '(' + filtered.length + ' / ' + merged.length + ')'
+      : '(' + merged.length + ')';
+  }
+  if (merged.length === 0) {
+    itemsEl.innerHTML = '<div class="history-popover-empty">no history<br><span class="hp-empty-hint">发起对话后，历史记录会出现在这里</span></div>';
+    return;
+  }
+  if (filtered.length === 0) {
+    itemsEl.innerHTML = '<div class="history-popover-empty">没有匹配的历史<br><span class="hp-empty-hint">调整关键词，或清空搜索框查看全部</span></div>';
+    return;
+  }
+  // Group by day. Round 129: label today / yesterday in 中文 so the most
+  // common buckets don't require parsing a date — "今天" / "昨天" / older
+  // entries keep the browser-locale formatted date (e.g. "Wed, Apr 29"
+  // or "4月29日 周三" depending on navigator.language). Day headers are
+  // recomputed on filter because a 3-entry result may span fewer days
+  // than the full list.
+  let currentDay = '';
+  itemsEl.innerHTML = filtered.map(s => {
+    let dayHeader = '';
+    if (s.last_active) {
+      const d = new Date(s.last_active);
+      const dayStr = historyDayLabel(d);
+      if (dayStr !== currentDay) {
+        currentDay = dayStr;
+        dayHeader = '<div class="hp-day-header">' + esc(dayStr) + '</div>';
+      }
+    }
+    const ago = s.last_active ? timeAgo(s.last_active) : '';
+    const abs = s.last_active ? formatAbsTime(s.last_active) : '';
+    const onclick = 'resumeRecentSession(this.dataset.sid);closeHistoryPopover()';
+    return dayHeader +
+      '<div class="history-popover-item" data-sid="' + escAttr(s.session_id) + '" onclick="' + onclick + '">' +
+      (s.prompt ? '<div class="hp-prompt" title="' + escAttr(s.prompt) + '">' + esc(s.prompt) + '</div>' : '<div class="hp-prompt" style="color:#6e7681">未命名</div>') +
+      '<div class="hp-meta">' +
+        (s.project ? '<span class="hp-project">' + esc(s.project) + '</span><span class="hp-dot">&middot;</span>' : '') +
+        (ago ? '<span' + (abs ? ' title="' + escAttr(abs) + '"' : '') + '>' + ago + '</span>' : '') +
+      '</div>' +
+      '</div>';
+  }).join('');
 }
 
 function majorMinor(ver) {
@@ -550,10 +858,98 @@ function sessionTypeTag(cliName, entrypoint) {
   return '<span class="sc-type-tag">' + label + '</span>';
 }
 
+// PLATFORM_ORIGINS maps the first component of a session key (the platform
+// tag emitted by session.SessionKey in internal/session/managed.go) to the
+// user-facing Chinese label shown on the IM-origin badge. Adding a new IM
+// platform means extending this map PLUS picking a CSS variant in
+// dashboard.html `.sc-origin.kind-*`. Non-IM prefixes (dashboard, local,
+// cron, scratch_*, planner) intentionally do NOT appear here — originBadgeInfo
+// returns null for them so those sessions don't grow a misleading "外部
+// 来源" chip.
+const PLATFORM_ORIGINS = {
+  feishu:  { name: '飞书',    kind: 'feishu' },
+  slack:   { name: 'Slack',   kind: 'slack' },
+  discord: { name: 'Discord', kind: 'discord' },
+  weixin:  { name: '微信',    kind: 'weixin' },
+};
+
+// originBadgeInfo derives the IM-origin chip payload from a session key.
+// Returns null when the key doesn't come from a real IM platform — that's
+// the common case (dashboard-created sessions, cron jobs, scratch drawers,
+// planner sessions, local takeovers) and those should render without a
+// badge. Pure function, no DOM touch, so it's easy to unit-test from a
+// contract test that loads dashboard.js as text.
+//
+// R110-P3: scope of this helper is intentionally "platform + 私聊/群"
+// only; it does NOT attempt to display the opaque chat_id nor a jump-back
+// URL because those require backend schema changes (see TODO R110-P3-IM
+// 来源指示 residual scope). Surfacing platform alone already tells the
+// operator "this is a real IM thread, not a dashboard-local conversation",
+// which is the 80% case.
+function originBadgeInfo(key) {
+  if (typeof key !== 'string' || !key) return null;
+  const colon = key.indexOf(':');
+  if (colon <= 0) return null;
+  const platform = key.substring(0, colon);
+  const origin = PLATFORM_ORIGINS[platform];
+  if (!origin) return null;
+  // chatType is the second segment; sanitizeKeyComponent in the Go layer
+  // replaces unsafe chars but keeps 'direct'/'group' verbatim, so raw
+  // substring equality is safe here. Default to 'direct' if the segment
+  // is missing (shouldn't happen for a real IM key but keeps the helper
+  // defensive against malformed inputs).
+  const rest = key.substring(colon + 1);
+  const colon2 = rest.indexOf(':');
+  const chatType = colon2 > 0 ? rest.substring(0, colon2) : 'direct';
+  const chatLabel = chatType === 'group' ? '群' : '私聊';
+  return {
+    label: origin.name + ' · ' + chatLabel,
+    kind: origin.kind,
+  };
+}
+
+// originBadgeHtml renders the IM-origin chip for a given session key.
+// Returns '' when originBadgeInfo yields null — never emit a stray chip
+// for dashboard/cron/scratch/planner sessions. Separate layer so templates
+// can call one function instead of re-implementing the null-check.
+function originBadgeHtml(key) {
+  const info = originBadgeInfo(key);
+  if (!info) return '';
+  return '<span class="sc-origin kind-' + esc(info.kind) + '" title="' + escAttr(info.label) + '">' + esc(info.label) + '</span>';
+}
+
 function cliIcon(name) {
   if (name === 'kiro') return '<svg class="sc-cli-icon" viewBox="0 0 16 16" fill="none"><path d="M8 1L14 5.5V10.5L8 15L2 10.5V5.5L8 1Z" fill="#f97316" opacity="0.85"/><path d="M6 5.5V10.5M6 8H9.5L6 5.5M6 8L9.5 10.5" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   // Default: official Claude logomark (from claude.ai/favicon.svg)
   return '<svg class="sc-cli-icon" viewBox="0 0 248 248" fill="none"><path d="M52.4285 162.873L98.7844 136.879L99.5485 134.602L98.7844 133.334H96.4921L88.7237 132.862L62.2346 132.153L39.3113 131.207L17.0249 130.026L11.4214 128.844L6.2 121.873L6.7094 118.447L11.4214 115.257L18.171 115.847L33.0711 116.911L55.485 118.447L71.6586 119.392L95.728 121.873H99.5485L100.058 120.337L98.7844 119.392L97.7656 118.447L74.5877 102.732L49.4995 86.1905L36.3823 76.62L29.3779 71.7757L25.8121 67.2858L24.2839 57.3608L30.6515 50.2716L39.3113 50.8623L41.4763 51.4531L50.2636 58.1879L68.9842 72.7209L93.4357 90.6804L97.0015 93.6343L98.4374 92.6652L98.6571 91.9801L97.0015 89.2625L83.757 65.2772L69.621 40.8192L63.2534 30.6579L61.5978 24.632C60.9565 22.1032 60.579 20.0111 60.579 17.4246L67.8381 7.49965L71.9133 6.19995L81.7193 7.49965L85.7946 11.0443L91.9074 24.9865L101.714 46.8451L116.996 76.62L121.453 85.4816L123.873 93.6343L124.764 96.1155H126.292V94.6976L127.566 77.9197L129.858 57.3608L132.15 30.8942L132.915 23.4505L136.608 14.4708L143.994 9.62643L149.725 12.344L154.437 19.0788L153.8 23.4505L150.998 41.6463L145.522 70.1215L141.957 89.2625H143.994L146.414 86.7813L156.093 74.0206L172.266 53.698L179.398 45.6635L187.803 36.802L193.152 32.5484H203.34L210.726 43.6549L207.415 55.1159L196.972 68.3492L188.312 79.5739L175.896 96.2095L168.191 109.585L168.882 110.689L170.738 110.53L198.755 104.504L213.91 101.787L231.994 98.7149L240.144 102.496L241.036 106.395L237.852 114.311L218.495 119.037L195.826 123.645L162.07 131.592L161.696 131.893L162.137 132.547L177.36 133.925L183.855 134.279H199.774L229.447 136.524L237.215 141.605L241.8 147.867L241.036 152.711L229.065 158.737L213.019 154.956L175.45 145.977L162.587 142.787H160.805V143.85L171.502 154.366L191.242 172.089L215.82 195.011L217.094 200.682L213.91 205.172L210.599 204.699L188.949 188.394L180.544 181.069L161.696 165.118H160.422V166.772L164.752 173.152L187.803 207.771L188.949 218.405L187.294 221.832L181.308 223.959L174.813 222.777L161.187 203.754L147.305 182.486L136.098 163.345L134.745 164.2L128.075 235.42L125.019 239.082L117.887 241.8L111.902 237.31L108.718 229.984L111.902 215.452L115.722 196.547L118.779 181.541L121.58 162.873L123.291 156.636L123.14 156.219L121.773 156.449L107.699 175.752L86.304 204.699L69.3663 222.777L65.291 224.431L58.2867 220.768L58.9235 214.27L62.8713 208.48L86.304 178.705L100.44 160.155L109.551 149.507L109.462 147.967L108.959 147.924L46.6977 188.512L35.6182 189.93L30.7788 185.44L31.4156 178.115L33.7079 175.752L52.4285 162.873Z" fill="#D97757"/></svg>';
+}
+
+// shortAgentLabel collapses a verbose model / agent name into the short
+// family label that operators actually scan for at a glance. Examples:
+//   "sonnet-4.6"              → "sonnet"
+//   "claude-sonnet-4-6"       → "sonnet"
+//   "haiku-4.5-20251001"      → "haiku"
+//   "claude-opus-4-7[1m]"     → "opus"
+//   "kiro"                    → "kiro" (short-enough as-is)
+//   ""  / "general" / null    → ""    (suppressed — empty chip is noise)
+// Pure function so a contract test can assert the match table without
+// driving the DOM. Returns '' for values that shouldn't render a chip at
+// all (empty, generic, or too-generic marker strings).
+function shortAgentLabel(agent) {
+  if (!agent || typeof agent !== 'string') return '';
+  const raw = agent.trim().toLowerCase();
+  if (!raw || raw === 'general') return '';
+  // Family match first — covers "claude-sonnet-4-6" / "sonnet-4.6" /
+  // "sonnet" uniformly. Check in priority order (opus beats sonnet beats
+  // haiku — matches Anthropic's tier convention).
+  for (const family of ['opus', 'sonnet', 'haiku']) {
+    if (raw.indexOf(family) !== -1) return family;
+  }
+  // Non-Anthropic or unknown: show the first 10 chars of the original
+  // value so operators still get a signal. Use the original (not lowered)
+  // so vanity casing like "Kiro" is preserved.
+  const trimmed = agent.trim();
+  return trimmed.length > 10 ? trimmed.slice(0, 10) : trimmed;
 }
 
 function sessionCardHtml(s) {
@@ -565,7 +961,7 @@ function sessionCardHtml(s) {
 
   // Line 1: prompt. user_label (operator-set via rename) wins over any
   // auto-derived title so the rename is visible immediately across refreshes.
-  const prompt = s.user_label || s.summary || s.last_prompt || (isNew ? '(new session)' : '(no prompt)');
+  const prompt = s.user_label || s.summary || s.last_prompt || (isNew ? '新会话' : '未命名');
   const icon = cliIcon(s.cli_name || 'cli');
 
   // Line 2: status dot + meta. Dead sessions are presented as "ready" to
@@ -574,8 +970,19 @@ function sessionCardHtml(s) {
   const displayState = s.state === 'dead' ? 'ready' : s.state;
   const dotCls = displayState === 'running' ? 'dot-running' : (displayState === 'ready' ? 'dot-ready' : 'dot-new');
   const ago = s.last_active ? timeAgo(s.last_active) : '';
-  const nodeBadge = isMultiNode() && sNode !== 'local'
-    ? '<span class="sc-node" style="background:' + nodeColor(sNode) + '">' + esc(sNode) + '</span>' : '';
+  const absTime = s.last_active ? formatAbsTime(s.last_active) : '';
+  // Chat-style unread chip: rendered only when the session has completed
+  // turns that the operator hasn't opened yet. Hidden on the active card —
+  // selectSession zeroes the counter so this stays consistent on re-render.
+  const unreadCount = sessionUnread[sid(s.key, sNode)] || 0;
+  const unreadBadge = (unreadCount > 0 && !isActive)
+    ? '<span class="sc-unread" aria-label="' + unreadCount + ' 条未读">' + (unreadCount > 99 ? '99+' : unreadCount) + '</span>'
+    : '';
+  // Per-card node badge is no longer needed: the sidebar is filtered to a
+  // single node via the #node-selector, so every visible card is on the
+  // currently-selected node. The badge is kept empty (vs. removed from the
+  // template) so the surrounding .sc-meta layout stays identical.
+  const nodeBadge = '';
 
   const dismissBtn = '<button type="button" class="btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove" aria-label="Remove session">&times;</button>';
 
@@ -583,11 +990,27 @@ function sessionCardHtml(s) {
   const typeTag = s.source === 'terminal' ? sessionTypeTag(s.cli_name, s.entrypoint) : '';
   const agentCount = s.subagents ? s.subagents.length : 0;
   const agentBadge = agentCount > 0 ? '<span class="sc-agents">\u{1F916}\u00D7' + agentCount + '</span>' : '';
+  // Model / agent family chip. Pure-derived from s.agent (already shipped
+  // by the backend today). Suppressed for generic / empty values so the
+  // meta row stays uncluttered for legacy sessions that pre-date agent
+  // routing. Title attribute carries the full string so operators can
+  // hover to disambiguate e.g. sonnet-4.6 vs sonnet-4.5.
+  const agentShort = shortAgentLabel(s.agent);
+  const modelBadge = agentShort
+    ? '<span class="sc-agent" title="' + escAttr(s.agent) + '">' + esc(agentShort) + '</span>'
+    : '';
+  // R110-P3 IM origin: show a small chip for sessions sourced from feishu /
+  // slack / discord / weixin so operators can eyeball which cards are real
+  // IM threads vs dashboard-local conversations. originBadgeHtml returns ''
+  // for non-IM prefixes so the meta line stays clean for those.
+  const originBadge = originBadgeHtml(s.key);
   const metaHtml = '<span class="sc-dot ' + dotCls + '"></span>' +
     '<span>' + esc(displayState) + '</span>' +
     nodeBadge +
+    originBadge +
     cronBadge +
     typeTag +
+    modelBadge +
     agentBadge;
 
   return '<div class="' + cls + '" role="listitem" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" tabindex="0" aria-label="' + escAttr(prompt + ' · ' + displayState) + '" onclick="selectSession(this.dataset.key,this.dataset.node)" onkeydown="sessionCardKey(event)">' +
@@ -596,11 +1019,36 @@ function sessionCardHtml(s) {
     '<div class="sc-body">' +
       '<div class="sc-header">' +
         '<div class="sc-prompt" title="' + escAttr(prompt) + '">' + esc(prompt) + '</div>' +
-        (ago ? '<span class="sc-time">' + ago + '</span>' : '') +
+        unreadBadge +
+        (ago ? '<span class="sc-time"' + (absTime ? ' title="' + escAttr(absTime) + '"' : '') + '>' + ago + '</span>' : '') +
       '</div>' +
       '<div class="sc-meta">' + metaHtml + '</div>' +
     '</div>' +
   '</div>';
+}
+
+// updateCardUnreadChip patches the chat-style unread bubble inside a session
+// card's header. Pulled out of onSessionState so selectSession (and any future
+// caller) can share the same DOM shape without string-rebuilding the card.
+function updateCardUnreadChip(card, count) {
+  if (!card) return;
+  const header = card.querySelector('.sc-header');
+  if (!header) return;
+  let chip = header.querySelector('.sc-unread');
+  if (count > 0 && !card.classList.contains('active')) {
+    const text = count > 99 ? '99+' : String(count);
+    if (!chip) {
+      chip = document.createElement('span');
+      chip.className = 'sc-unread';
+      const timeEl = header.querySelector('.sc-time');
+      if (timeEl) header.insertBefore(chip, timeEl);
+      else header.appendChild(chip);
+    }
+    chip.textContent = text;
+    chip.setAttribute('aria-label', count + ' 条未读');
+  } else if (chip) {
+    chip.remove();
+  }
 }
 
 // Keyboard activation for role=listitem session cards.
@@ -631,7 +1079,11 @@ async function resumeRecentById(sessionId, workspace, lastPrompt) {
       method: 'POST', headers,
       body: JSON.stringify({session_id: sessionId, workspace: workspace || '', last_prompt: lastPrompt || ''})
     });
-    if (!r.ok) { showToast('resume failed'); return; }
+    if (!r.ok) {
+      const raw = await r.text().catch(() => '');
+      showAPIError('恢复会话', r.status, raw);
+      return;
+    }
     const data = await r.json();
     const key = data.key;
     if (!key) return;
@@ -643,7 +1095,7 @@ async function resumeRecentById(sessionId, workspace, lastPrompt) {
     selectSession(key, 'local');
     previewRecentSession(key, sessionId);
   } catch (e) {
-    showToast('resume error: ' + e.message);
+    showNetworkError('恢复会话', e);
   }
 }
 
@@ -667,10 +1119,52 @@ const STATUS_LABELS = { off: 'offline', connecting: 'connecting...', authenticat
 const REMOTE_LABELS = { ok: 'connected', error: 'error', offline: 'offline', unreachable: 'unreachable' };
 const VALID_DOT_CLASSES = { ok: 'ok', error: 'error', offline: 'offline', connecting: 'connecting', off: 'off', connected: 'connected', disconnected: 'disconnected', authenticating: 'authenticating' };
 
+// formatOutageDuration turns an elapsed millisecond count into a Chinese
+// label suitable for the sidebar-status hint. Pure function so a contract
+// test can exercise it without driving the DOM or a WS state machine.
+// Under 5s returns '' (render-suppressed - transient reconnects don't
+// warrant a duration hint); otherwise rounds to seconds up to 90s, then
+// to minutes, then to hours. Kept coarse deliberately: a live-ticking
+// ms counter is anxiety-inducing and would force a re-render every
+// animation frame.
+function formatOutageDuration(elapsedMs) {
+  const ms = Math.max(0, Math.floor(elapsedMs));
+  if (ms < 5000) return '';
+  const s = Math.floor(ms / 1000);
+  if (s < 90) return '已断开 ' + s + ' 秒';
+  const m = Math.floor(s / 60);
+  if (m < 60) return '已断开 ' + m + ' 分';
+  const h = Math.floor(m / 60);
+  const remM = m - h * 60;
+  return remM > 0 ? '已断开 ' + h + ' 小时 ' + remM + ' 分' : '已断开 ' + h + ' 小时';
+}
+
+// _statusTickTimer drives the 1s repaint loop while WS is disconnected so
+// the "已断开 N 秒" label advances without waiting for the next state
+// transition. Started by _updateStatusTick when state != CONNECTED; stopped
+// when state returns to CONNECTED. Repaint cost is O(N) where N = count of
+// sidebar-status rows (<=1 + node count); negligible.
+let _statusTickTimer = null;
+function _updateStatusTick(state) {
+  if (state === WS_STATES.CONNECTED) {
+    if (_statusTickTimer) { clearInterval(_statusTickTimer); _statusTickTimer = null; }
+    return;
+  }
+  if (!_statusTickTimer) {
+    _statusTickTimer = setInterval(updateStatusBar, 1000);
+  }
+}
+
 function updateStatusBar() {
   const container = document.getElementById('sidebar-status');
   if (!container) return;
   const wsUp = wsm.state === WS_STATES.CONNECTED;
+  // When multiple nodes are connected, the #node-selector widget already
+  // surfaces per-node status; the sidebar-status bar collapses to "current
+  // node only" to reclaim vertical space. Single-node setups keep the legacy
+  // behavior (local row always shown) so nothing regresses for the common case.
+  const multi = isMultiNode();
+  const currentIsLocal = !multi || selectedNode === 'local';
 
   // Local node row (always first)
   const localName = localWsInfo.name || 'workspace';
@@ -680,28 +1174,60 @@ function updateStatusBar() {
   const dotKey = statusKey === 'disconnected' ? 'connecting' : wsm.state; // HTTP fallback = yellow dot
   const localSys = localWsInfo.sys || '';
 
-  let html = '<div class="status-row">' +
-    '<span class="status-dot ' + (VALID_DOT_CLASSES[dotKey] || 'off') + '"></span>' +
-    '<div class="status-info">' +
-      '<div class="status-ws">' + esc(localLabel) + '</div>' +
-      (localSys ? '<div class="status-sys">' + esc(localSys) + '</div>' : '') +
-    '</div></div>';
+  // UX P1 manual reconnect: when the connection has been down long enough
+  // that backoff has grown past 8s (statusKey "disconnected" — the
+  // "HTTP fallback" stable state), offer an explicit "reconnect" button
+  // so users don't have to wait for the automatic retry window. The
+  // short-retry state (backoff <= 8s, labeled "reconnecting...") stays
+  // button-free because the next auto-retry is already imminent.
+  const showReconnect = statusKey === 'disconnected';
+  const reconnectBtn = showReconnect
+    ? '<button type="button" class="status-reconnect" onclick="reconnectNow()" title="立即重连" aria-label="立即重连">重连</button>'
+    : '';
 
-  // Remote node rows (from last known nodesData)
-  const nodeIds = Object.keys(nodesData).filter(id => id !== 'local').sort();
-  for (const id of nodeIds) {
-    const nd = nodesData[id];
-    const name = (nd.display_name || id);
-    // Remote status comes from the server's last node health snapshot (via
-    // /api/sessions polling or WS push), so it stays meaningful even while
-    // the local WS briefly reconnects. Only flip to "unreachable" when we
-    // have no recent snapshot at all.
+  // R110-P1 outage duration hint: only when we have a stamped disconnect
+  // timestamp (live outage) AND the state is not CONNECTED. A stale non-zero
+  // timestamp on CONNECTED would be a bug elsewhere; the state gate is
+  // defensive. Empty string from formatOutageDuration means "< 5s, suppress"
+  // so transient flickers don't spawn a noisy hint.
+  const outageLabel = (!wsUp && wsm._disconnectedSince > 0)
+    ? formatOutageDuration(Date.now() - wsm._disconnectedSince)
+    : '';
+
+  // Auth rate-limit countdown surfaces here (replaces the old top-of-screen
+  // toast). Rendered only while the gate is armed; _wsAuthCountdownTimer
+  // repaints this row every second. Suppresses the reconnect button while
+  // active — no point offering a manual dial that connect() will bounce.
+  const authWaitSecs = (wsm._authBlockUntil > 0)
+    ? Math.max(0, Math.ceil((wsm._authBlockUntil - Date.now()) / 1000))
+    : 0;
+  const authWaitLabel = authWaitSecs > 0
+    ? '鉴权过于频繁，' + authWaitSecs + 's 后自动重连'
+    : '';
+  const reconnectBtnGated = authWaitLabel ? '' : reconnectBtn;
+
+  let html = '';
+  if (currentIsLocal) {
+    html = '<div class="status-row">' +
+      '<span class="status-dot ' + (VALID_DOT_CLASSES[dotKey] || 'off') + '"></span>' +
+      '<div class="status-info">' +
+        '<div class="status-ws">' + esc(localLabel) + '</div>' +
+        (localSys ? '<div class="status-sys">' + esc(localSys) + '</div>' : '') +
+        (outageLabel ? '<div class="status-outage">' + esc(outageLabel) + '</div>' : '') +
+        (authWaitLabel ? '<div class="status-authwait">' + esc(authWaitLabel) + '</div>' : '') +
+      '</div>' + reconnectBtnGated +
+      '</div>';
+  } else {
+    // Multi-node view with a remote selected: show one row for the chosen
+    // remote. Other remotes are summarized by the selector's aggregated
+    // alert dot \u2014 users open the dropdown to see the full list.
+    const nd = nodesData[selectedNode] || {};
+    const name = nd.display_name || selectedNode;
     const status = nd.status || (wsUp ? 'offline' : 'unreachable');
     const dotCls = VALID_DOT_CLASSES[status] || 'offline';
     const label = REMOTE_LABELS[status] || status;
     const addr = nd.remote_addr || '';
-
-    html += '<div class="status-row">' +
+    html = '<div class="status-row">' +
       '<span class="status-dot ' + dotCls + '"></span>' +
       '<div class="status-info">' +
         '<div class="status-ws">' + esc(name) + ' \u00b7 ' + esc(label) + '</div>' +
@@ -710,6 +1236,10 @@ function updateStatusBar() {
   }
 
   container.innerHTML = html;
+  // Keep the node selector's trigger dot in sync with live status \u2014 a remote
+  // flipping offline should update both the bar below and the selector above
+  // without waiting for the next /api/sessions poll.
+  updateNodeSelector();
 }
 
 // updateVersionBadge writes the build tag into the sidebar footer. Called
@@ -733,14 +1263,37 @@ function updateVersionBadge(tag) {
 // Keeping it as an array (instead of raw HTML) lets tests grep for specific
 // rows and lets the render path escape user-visible text consistently.
 // The `keys` arrays are rendered as <kbd> chips joined by "+".
+//
+// R110-P2 extension: added "斜杠命令" and "上传" sections so the Help panel
+// documents features that were only discoverable via README / source until
+// now. Slash commands mirror the router in `internal/dispatch/commands.go`
+// (`/new`, `/cron`, `/help`, `/pwd`, `/cd`, `/project`); upload keys
+// describe the `.btn-icon` paperclip and the `dragover/drop` handler on
+// `#input-area`. Features that are NOT yet implemented (image paste,
+// `@` file autocomplete) are deliberately omitted — the Help panel must
+// stay a promise of actually-working UX.
 const CHEATSHEET_ENTRIES = [
   { section: '会话' },
   { keys: ['Cmd/Ctrl', '1'], alt: ['Cmd/Ctrl', '9'], desc: '切换到项目组内第 N 个会话' },
   { keys: ['Cmd/Ctrl', '↑'], alt: ['Cmd/Ctrl', '↓'], desc: '上/下一会话（同项目组内）' },
+  { keys: ['Cmd/Ctrl', 'K'], desc: '打开新建会话面板（最近使用置顶）' },
   { keys: ['Alt', 'N'], desc: '新建会话' },
   { section: '消息' },
+  { keys: ['Enter'], desc: '发送消息' },
+  { keys: ['Shift', 'Enter'], desc: '输入框内换行' },
+  { keys: ['Esc', 'Esc'], desc: '双击 Esc 打断当前运行中的回复' },
   { keys: ['Alt', '↑'], alt: ['Alt', '↓'], desc: '跳到上/下一条消息' },
   { keys: ['Esc'], desc: '关闭弹窗 / 关闭历史面板' },
+  { section: '斜杠命令' },
+  { keys: ['/new'], desc: '重置当前 agent 对话（/new review 切到 code-reviewer 等 agent）' },
+  { keys: ['/cd'], desc: '切换工作目录（/cd <path>；受 session.cwd 的 allowed_root 限制）' },
+  { keys: ['/pwd'], desc: '显示当前工作目录' },
+  { keys: ['/project'], desc: '绑定会话到项目（/project <name> 或 /project off 解绑）' },
+  { keys: ['/cron'], desc: '定时任务：/cron add "<schedule>" <prompt> · /cron list · /cron del <id>' },
+  { keys: ['/help'], desc: '显示可用命令（IM 平台内也可用）' },
+  { section: '上传' },
+  { keys: ['📎'], desc: '点击输入栏左侧图标选图（单文件最多 40MB，总计 10 张）' },
+  { keys: ['拖拽'], desc: '把图片拖入输入区，边框变蓝即可放下上传' },
   { section: '帮助' },
   { keys: ['?'], desc: '打开本快捷键面板' },
 ];
@@ -807,6 +1360,20 @@ document.addEventListener('keydown', function(e) {
   showCheatsheet();
 });
 
+// R110-P3 Cmd/Ctrl+K opens the command palette — a widely-understood
+// convention (GitHub, Slack, Linear). Fires even from inside the message
+// input / textareas because switching sessions mid-typing is a common
+// flow; the palette's trapFocus and input field take over focus so the
+// prior draft remains saved via sessionDrafts per selectSession contract.
+// Skips when another modal/palette is already open so repeated Cmd+K
+// doesn't stack overlays.
+document.addEventListener('keydown', function(e) {
+  if (!(e.metaKey || e.ctrlKey) || e.key !== 'k') return;
+  if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
+  e.preventDefault();
+  createNewSession();
+});
+
 function selectSession(key, node) {
   node = node || 'local';
   resetTurnState();
@@ -832,12 +1399,27 @@ function selectSession(key, node) {
   const prevNode = selectedNode;
   selectedKey = key;
   selectedNode = node;
+  // Opening a card counts as "reading" it — clear the chat-style unread chip
+  // before the DOM toggle below so the next render reflects a zeroed state.
+  const selSid = sid(key, node);
+  if (sessionUnread[selSid]) {
+    delete sessionUnread[selSid];
+  }
+  // Picking a session on a different node shifts the sidebar filter there
+  // too — users expect the selector to follow their click, not strand them
+  // looking at another node's list. Persist + refresh the widget.
+  if (prevNode !== selectedNode) {
+    try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
+    if (typeof updateNodeSelector === 'function') updateNodeSelector();
+  }
   lastEventTime = 0;
   lastRenderedEventTime = 0;
   mobileEnterChat();
   stopPreviewPolling();
   document.querySelectorAll('.session-card').forEach(el => {
-    el.classList.toggle('active', el.dataset.key === key && (el.dataset.node || 'local') === node);
+    const nowActive = el.dataset.key === key && (el.dataset.node || 'local') === node;
+    el.classList.toggle('active', nowActive);
+    if (nowActive) updateCardUnreadChip(el, 0);
   });
   renderMainShell();
   navRebuild(); // clear stale nav state before async events arrive
@@ -859,7 +1441,11 @@ function selectSession(key, node) {
   }
 }
 
-async function dismissSession(key, node) {
+// dismissSession removes a session from the sidebar. The × button deletes
+// immediately with no confirmation — per operator preference, the friction
+// isn't worth it. Accidental deletes are recoverable by re-entering the
+// prompt (pending) or reopening the CLI (remote/discovered).
+async function dismissSession(key, node, opts) {
   node = node || 'local';
   delete sessionDrafts[key];
   // sessionBackends is normally consumed on first sendMessage. A dismiss
@@ -875,7 +1461,7 @@ async function dismissSession(key, node) {
     delete sessionsData[sid(key, node)];
     if (selectedKey === key) {
       selectedKey = null;
-      document.getElementById('main').innerHTML = '<div class="empty-state">select a session</div>';
+      document.getElementById('main').innerHTML = mainEmptyHtml();
     }
     lastVersion = 0;
     debouncedFetchSessions();
@@ -886,7 +1472,7 @@ async function dismissSession(key, node) {
   if (key.startsWith('_discovered:')) {
     const pid = parseInt(key.split(':')[1]);
     const d = discoveredItems.find(x => x.pid === pid);
-    if (!d) { showToast('discovered session not found'); return; }
+    if (!d) { showToast('未找到该外部会话', 'warning'); return; }
     try {
       const headers = {'Content-Type': 'application/json'};
       const token = getToken();
@@ -896,21 +1482,21 @@ async function dismissSession(key, node) {
         body: JSON.stringify({pid: d.pid, session_id: d.session_id || '', cwd: d.cwd || '', proc_start_time: d.proc_start_time || 0, node: node || ''})
       });
       if (!r.ok) {
-        const text = await r.text().catch(() => '' + r.status);
-        showToast('close failed: ' + text);
+        const text = await r.text().catch(() => '');
+        showAPIError('关闭外部会话', r.status, text);
         return;
       }
       discoveredItems = discoveredItems.filter(x => x.pid !== pid);
       if (pendingDiscovered && pendingDiscovered.pid === pid) {
         pendingDiscovered = null;
         stopPreviewPolling();
-        document.getElementById('main').innerHTML = '<div class="empty-state">select a session</div>';
+        document.getElementById('main').innerHTML = mainEmptyHtml();
       }
       const card = document.querySelector('.session-card[data-key="' + key + '"]');
       if (card) card.remove();
       lastVersion = 0;
       debouncedFetchSessions();
-    } catch (e) { showToast('close error: ' + e.message); }
+    } catch (e) { showNetworkError('关闭外部会话', e); }
     return;
   }
 
@@ -922,19 +1508,19 @@ async function dismissSession(key, node) {
     if (node && node !== 'local') body.node = node;
     const r = await fetch('/api/sessions', {method: 'DELETE', headers, body: JSON.stringify(body)});
     if (!r.ok && r.status !== 404) {
-      const text = await r.text().catch(() => r.status);
-      showToast('remove failed: ' + text);
+      const text = await r.text().catch(() => '');
+      showAPIError('删除会话', r.status, text);
       return;
     }
     delete sessionsData[sid(key, node)];
     if (selectedKey === key) {
       selectedKey = null;
       if (wsm.subscribedKey === key) wsm.unsubscribe();
-      document.getElementById('main').innerHTML = '<div class="empty-state">select a session</div>';
+      document.getElementById('main').innerHTML = mainEmptyHtml();
     }
     lastVersion = 0;
     debouncedFetchSessions();
-  } catch (e) { showToast('remove error: ' + e.message); }
+  } catch (e) { showNetworkError('删除会话', e); }
 }
 
 // Operator-facing rename flow. Prompts for a new display label; empty input
@@ -960,8 +1546,8 @@ async function renameSession() {
       body: JSON.stringify(body),
     });
     if (!r.ok) {
-      const text = await r.text().catch(() => '' + r.status);
-      showToast('重命名失败: ' + text);
+      const text = await r.text().catch(() => '');
+      showAPIError('重命名', r.status, text);
       return;
     }
     // Patch local cache so the title refreshes before the next poll lands.
@@ -974,7 +1560,150 @@ async function renameSession() {
     if (typeof renderMainShell === 'function') renderMainShell();
     showToast(next ? '已重命名' : '已恢复默认标题');
   } catch (e) {
-    showToast('重命名失败: ' + e.message);
+    showNetworkError('重命名', e);
+  }
+}
+
+// --- Markdown export (UX P2) ---
+
+// MARKDOWN_EXPORT_IGNORE captures event types that carry no user-visible
+// content in the dashboard render path (tool_use + internal agent
+// bookkeeping + the result envelope duplicated by streaming `text`
+// events). The export pipeline drops them to keep the emitted document
+// aligned with what the operator actually read in the UI.
+const MARKDOWN_EXPORT_IGNORE = new Set(['tool_use', 'result', 'agent', 'task_start', 'task_progress', 'task_done', 'thinking']);
+
+// sessionMarkdownFilename returns a safe, dated filename for a session
+// export. Strips filesystem-hostile characters from the title and caps
+// length so browser download dialogs don't truncate unpredictably.
+function sessionMarkdownFilename(title, whenMS) {
+  const d = new Date(whenMS || Date.now());
+  const pad = n => (n < 10 ? '0' + n : '' + n);
+  const stamp = d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate());
+  let safe = String(title || 'session').replace(/[\\\/:*?"<>|\x00-\x1f]+/g, ' ').trim();
+  // Collapse runs of whitespace to a single dash and cap at 80 chars so
+  // the dated suffix always fits in common filesystem path limits.
+  safe = safe.replace(/\s+/g, '-').slice(0, 80) || 'session';
+  return 'naozhi-' + safe + '-' + stamp + '.md';
+}
+
+// formatSessionMarkdown builds the Markdown body from a list of events.
+// Kept as a pure function (no DOM / fetch access) so it can be tested
+// in isolation — see TestDashboardJS_MarkdownExport_FormatsContent
+// which grep-checks the input→output contract.
+function formatSessionMarkdown(meta, events) {
+  const lines = [];
+  lines.push('# ' + (meta.title || '未命名会话'));
+  lines.push('');
+  if (meta.key) lines.push('- **会话**: `' + meta.key + '`');
+  if (meta.node && meta.node !== 'local') lines.push('- **节点**: `' + meta.node + '`');
+  if (meta.cli) lines.push('- **CLI**: ' + meta.cli);
+  if (meta.workspace) lines.push('- **工作目录**: `' + meta.workspace + '`');
+  if (meta.cost != null) lines.push('- **花费**: $' + (meta.cost.toFixed ? meta.cost.toFixed(4) : meta.cost));
+  lines.push('- **导出时间**: ' + new Date().toISOString());
+  lines.push('');
+  lines.push('---');
+  lines.push('');
+
+  for (const e of events) {
+    if (!e || !e.type) continue;
+    if (MARKDOWN_EXPORT_IGNORE.has(e.type)) continue;
+    // Mirror the UI filter in eventHtml: Claude Code system XML injected
+    // as user messages is noise in both renders.
+    const raw = (e.detail || e.summary || '');
+    if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) continue;
+
+    const ts = e.time ? new Date(e.time).toISOString() : '';
+    if (e.type === 'user') {
+      lines.push('## 用户' + (ts ? ' · ' + ts : ''));
+      lines.push('');
+      lines.push(raw);
+      if (e.images && e.images.length) {
+        lines.push('');
+        e.images.forEach((src, i) => lines.push('![image ' + (i + 1) + '](' + src + ')'));
+      }
+      lines.push('');
+    } else if (e.type === 'text') {
+      lines.push('## 助手' + (ts ? ' · ' + ts : ''));
+      lines.push('');
+      lines.push(raw);
+      lines.push('');
+    } else if (e.type === 'todo') {
+      lines.push('### TODO' + (ts ? ' · ' + ts : ''));
+      lines.push('');
+      // e.detail for todo events is a JSON array of {content, status}; keep
+      // markdown output simple and parseable even on malformed payloads.
+      try {
+        const items = JSON.parse(raw);
+        if (Array.isArray(items)) {
+          items.forEach(it => {
+            const done = it && (it.status === 'completed' || it.status === 'done');
+            lines.push('- [' + (done ? 'x' : ' ') + '] ' + (it && it.content ? it.content : ''));
+          });
+        } else {
+          lines.push(raw);
+        }
+      } catch (_) {
+        lines.push(raw);
+      }
+      lines.push('');
+    } else if (e.type === 'system' || e.type === 'init') {
+      // Surface system notices as blockquotes so reviewers see session
+      // boundaries (init, restart) without mixing them into conversation.
+      const summary = e.summary || e.type;
+      lines.push('> _' + summary + '_' + (ts ? ' · ' + ts : ''));
+      lines.push('');
+    }
+  }
+  return lines.join('\n');
+}
+
+async function downloadSessionMarkdown() {
+  if (!selectedKey) return;
+  try {
+    let url = '/api/sessions/events?key=' + encodeURIComponent(selectedKey);
+    if (selectedNode && selectedNode !== 'local') url += '&node=' + encodeURIComponent(selectedNode);
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch(url, { headers });
+    if (!r.ok) {
+      showAPIError('导出会话', r.status, '');
+      return;
+    }
+    const events = await r.json();
+    if (!Array.isArray(events) || events.length === 0) {
+      showToast('会话无可导出内容', 'warning');
+      return;
+    }
+    const s = sessionsData[sid(selectedKey, selectedNode)] || {};
+    const keyParts = (selectedKey || '').split(':');
+    const title = s.user_label || s.summary || s.last_prompt ||
+      keyParts[keyParts.length - 1] || selectedKey || '';
+    const md = formatSessionMarkdown({
+      title: title,
+      key: selectedKey,
+      node: selectedNode,
+      cli: s.cli_name ? (s.cli_name + (s.cli_version ? ' v' + s.cli_version : '')) : '',
+      workspace: s.workspace || sessionWorkspaces[selectedKey] || '',
+      cost: (typeof s.total_cost === 'number' ? s.total_cost : null),
+    }, events);
+
+    // Browser-download path. Using URL.createObjectURL keeps the blob in
+    // memory only long enough for the anchor click to fire; revoking
+    // immediately would race on some browsers, so we defer via timeout.
+    const blob = new Blob([md], { type: 'text/markdown;charset=utf-8' });
+    const href = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = href;
+    a.download = sessionMarkdownFilename(title, Date.now());
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(href), 60000);
+    showToast('已导出 ' + events.length + ' 条事件', 'success', 2000);
+  } catch (e) {
+    showNetworkError('导出会话', e);
   }
 }
 
@@ -988,43 +1717,61 @@ function renderMainShell() {
   // > agent name > key tail.
   const displayName = s.user_label || s.summary || s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyParts[keyParts.length - 1] || selectedKey || '';
 
-  // Detail line: left = CLI name + version, right = cost (hidden for kiro)
+  // Detail line: left = CLI name + version, middle = IM origin chip (only
+  // for real IM threads — feishu/slack/discord/weixin), right = cost
+  // (hidden for kiro). originBadgeHtml returns '' for non-IM keys so the
+  // chip is invisible on dashboard/cron/scratch/planner sessions.
   const effCLIName = s.cli_name || defaultCLIName;
   const effCLIVersion = s.cli_version || defaultCLIVersion;
   const cliLabel = effCLIName ? esc(effCLIName) + (effCLIVersion ? ' v' + esc(effCLIVersion) : '') : '';
+  const headerOriginBadge = originBadgeHtml(selectedKey);
   const showCost = effCLIName !== 'kiro';
   const cost = s.total_cost || 0;
   const costText = '$' + (cost < 0.01 && cost > 0 ? cost.toFixed(4) : cost.toFixed(2));
   const costClass = 'detail-cost' + (cost >= 1 ? ' high-cost' : cost > 0 ? ' has-cost' : '');
+  // R110-P3 cost tooltip: compute the same detail the live updater
+  // (updateHeaderCost) writes, so the very first render isn't missing
+  // hover content until a subsequent event refresh lands.
+  const costTooltip = formatHeaderCostTooltip(s, selectedKey, selectedNode);
+  const costTitleAttr = costTooltip ? ' title="' + escAttr(costTooltip) + '"' : '';
 
   // Rename is available only for managed sessions owned by this or a connected
   // naozhi instance. Discovered (_discovered:*) entries are external processes
   // with no backend label storage, and we intentionally hide the control there.
   const canRename = selectedKey && !selectedKey.startsWith('_discovered:');
   const renameBtn = canRename
-    ? '<button class="btn-rename" onclick="renameSession()" title="重命名会话" aria-label="Rename session">✎</button>'
+    ? '<button class="btn-rename" onclick="renameSession()" title="重命名会话" aria-label="重命名会话">✎</button>'
+    : '';
+  // UX P2 Markdown export: any session that has an addressable key can be
+  // exported — no dependency on managed status because the /api/sessions/events
+  // endpoint serves both managed and discovered keys uniformly. The button
+  // shares the .btn-rename hover-reveal treatment so the header stays calm
+  // by default.
+  const downloadBtn = selectedKey
+    ? '<button class="btn-rename btn-download" onclick="downloadSessionMarkdown()" title="导出会话为 Markdown" aria-label="Download session as Markdown">⬇</button>'
     : '';
 
   main.innerHTML =
     '<div class="main-header">' +
-      '<button class="btn-mobile-back" onclick="mobileBack()" title="back">&#8592;</button>' +
+      '<button class="btn-mobile-back" onclick="mobileBack()" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">&#8592;</button>' +
       '<div class="main-header-content">' +
-      '<h2>' + esc(displayName) + renameBtn + '</h2>' +
+      '<h2>' + esc(displayName) + renameBtn + downloadBtn + '</h2>' +
       '<div class="detail">' +
         '<span class="detail-left">' + cliLabel + '</span>' +
-        (showCost ? '<span class="' + costClass + '" id="header-cost">' + costText + '</span>' : '') +
+        headerOriginBadge +
+        (showCost ? '<span class="' + costClass + '" id="header-cost"' + costTitleAttr + '>' + costText + '</span>' : '') +
       '</div>' +
       '</div>' +
     '</div>' +
-    '<div class="events" id="events-scroll" role="log" aria-live="polite" aria-relevant="additions">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">loading events\u2026</div>' : '') + '</div>' +
+    '<div class="events" id="events-scroll" role="log" aria-live="polite" aria-relevant="additions">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>' : '') + '</div>' +
     '<div class="nav-pill" id="nav-pill">' +
-      '<button onclick="navMsg(\'prev\')" id="nav-prev" title="previous user message (Alt+\u2191)">&#x25B2;</button>' +
-      '<span class="nav-counter" id="nav-counter" onclick="navShowList()" title="click to list all"></span>' +
-      '<button onclick="navMsg(\'next\')" id="nav-next" title="next user message (Alt+\u2193)">&#x25BC;</button>' +
+      '<button onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">&#x25B2;</button>' +
+      '<span class="nav-counter" id="nav-counter" onclick="navShowList()" title="\u70b9\u51fb\u67e5\u770b\u5168\u90e8\u7528\u6237\u6d88\u606f"></span>' +
+      '<button onclick="navMsg(\'next\')" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">&#x25BC;</button>' +
     '</div>' +
     '<div class="running-banner" id="running-banner" style="display:none" role="status" aria-live="polite">' +
       '<div class="rb-tool-row">' +
-        '<span class="running-status"><span class="running-dot" aria-hidden="true"></span><span id="tool-activity">Working...</span></span>' +
+        '<span class="running-status"><span class="running-dot" aria-hidden="true"></span><span id="tool-activity">处理中...</span></span>' +
         '<span class="rb-elapsed" id="rb-elapsed"></span>' +
       '</div>' +
       '<div class="rb-thinking-summary" id="rb-thinking-summary" style="display:none"></div>' +
@@ -1034,11 +1781,11 @@ function renderMainShell() {
     '<div class="input-area' + (voiceInputMode ? ' voice-mode' : '') + '" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
-        '<button class="btn-icon" onclick="openFilePicker()" title="upload image" aria-label="Upload image">&#x1f4ce;</button>' +
-        '<button class="btn-icon btn-mic" id="btn-mic" onclick="toggleInputMode()" title="' + (voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (voiceInputMode ? 'Switch to keyboard input' : 'Switch to voice input') + '">' + (voiceInputMode ? '&#x2328;' : '&#x1f3a4;') + '</button>' +
-        '<div id="msg-input" contenteditable="true" role="textbox" aria-label="Message input" aria-multiline="true" data-placeholder="send a message..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
-        '<button class="btn-hold-talk" id="btn-hold-talk" aria-label="Hold to record voice">\u6309\u4f4f\u8bf4\u8bdd</button>' +
-        '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="send" aria-label="Send message">&#x27a4;</button>' +
+        '<button class="btn-icon" onclick="openFilePicker()" title="上传图片" aria-label="上传图片">&#x1f4ce;</button>' +
+        '<button class="btn-icon btn-mic" id="btn-mic" onclick="toggleInputMode()" title="' + (voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (voiceInputMode ? '\u5207\u6362\u5230\u952e\u76d8\u8f93\u5165' : '\u5207\u6362\u5230\u8bed\u97f3\u8f93\u5165') + '">' + (voiceInputMode ? '&#x2328;' : '&#x1f3a4;') + '</button>' +
+        '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
+        '<button class="btn-hold-talk" id="btn-hold-talk" title="\u6309\u4f4f\u8bf4\u8bdd\u6539\u5f55\u97f3" aria-label="\u6309\u4f4f\u8bf4\u8bdd\u5f00\u59cb\u5f55\u97f3">\u6309\u4f4f\u8bf4\u8bdd</button>' +
+        '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="发送" aria-label="发送消息">&#x27a4;</button>' +
         '<button class="btn-icon btn-stop" id="btn-stop" onclick="interruptSession()" title="stop" aria-label="Stop current turn">&#x25A0;</button>' +
       '</div>' +
       '<div class="input-hints">Enter send &middot; Shift+Enter newline &middot; Esc interrupt</div>' +
@@ -1212,7 +1959,7 @@ function ensureEarlierButton() {
     btn.type = 'button';
     btn.className = 'earlier-events-btn';
     btn.style.cssText = 'display:block;margin:8px auto;padding:6px 14px;background:#21262d;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;cursor:pointer;font-size:12px';
-    btn.textContent = 'Load earlier';
+    btn.textContent = '加载更早的事件';
     btn.onclick = loadEarlierEvents;
     el.insertBefore(btn, el.firstChild);
   } else if (el.firstChild !== btn) {
@@ -1227,19 +1974,19 @@ function updateEarlierButton(state) {
   btn.dataset.state = state;
   switch (state) {
     case 'loading':
-      btn.textContent = 'Loading…';
+      btn.textContent = '加载中…';
       btn.disabled = true;
       break;
     case 'done':
-      btn.textContent = 'No earlier events';
+      btn.textContent = '没有更早的事件';
       btn.disabled = true;
       break;
     case 'error':
-      btn.textContent = 'Failed — retry';
+      btn.textContent = '加载失败 — 点击重试';
       btn.disabled = false;
       break;
     default:
-      btn.textContent = 'Load earlier';
+      btn.textContent = '加载更早的事件';
       btn.disabled = false;
   }
 }
@@ -1249,7 +1996,7 @@ function renderEvents(events) {
   if (!el) return;
   const display = processEventsForDisplay(events);
   const html = renderEventsWithDividers(display, 0);
-  el.innerHTML = html || (events.length === 0 ? '<div class="empty-state">no events yet</div>' : '');
+  el.innerHTML = html || (events.length === 0 ? '<div class="empty-state">暂无事件</div>' : '');
   // Track the latest rendered event time for deduplication
   if (events.length > 0) {
     const last = events[events.length - 1];
@@ -1387,15 +2134,20 @@ function eventHtml(e) {
     ).join('') + '</div>';
   }
 
-  // Copy button for long text/user messages (>500 chars raw) — inside content, at bottom
-  const copyBtn = ((e.type === 'text' || e.type === 'user') && cleanRaw.length > 500)
-    ? '<button class="event-copy-btn" data-raw="' + escAttr(cleanRaw) + '" onclick="copyEventContent(this)">copy</button>'
+  // Copy + ask-aside bubble actions share one display rule: only long
+  // messages (>500 raw chars) expose the toolbar, and both buttons fade in
+  // on .event hover / keyboard focus via `.hover-only` (see CSS
+  // .event-copy-btn.hover-only / .event-ask-btn.hover-only). Short bubbles
+  // stay uncluttered; long bubbles are where "select-and-copy gets
+  // clobbered by re-render" actually hurts, and where a separate aside
+  // thread is worth opening. Keeping the gate identical for both buttons is
+  // the contract — don't let them diverge.
+  const isLong = !!cleanRaw && cleanRaw.length > 500;
+  const copyBtn = isLong && (e.type === 'text' || e.type === 'user')
+    ? '<button class="event-copy-btn hover-only" data-raw="' + escAttr(cleanRaw) + '" onclick="copyEventContent(this)" title="复制" aria-label="复制消息">复制</button>'
     : '';
-  // Ask-aside ("↗ 追问") button on AI text bubbles — opens the scratch
-  // drawer seeded with this message's content. Shown only on non-empty AI
-  // text bubbles so system / init / result / todo rows stay uncluttered.
-  const askBtn = (e.type === 'text' && cleanRaw && cleanRaw.length > 10)
-    ? '<button class="event-ask-btn" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" onclick="askAside(this)" title="基于此内容追问">↗ 追问</button>'
+  const askBtn = isLong && e.type === 'text'
+    ? '<button class="event-ask-btn hover-only" data-raw="' + escAttr(cleanRaw) + '" data-msg-time="' + (e.time || 0) + '" onclick="askAside(this)" title="基于此内容追问">↗ 追问</button>'
     : '';
 
   const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';
@@ -1458,7 +2210,7 @@ function handleKey(e) {
       interruptSession();
     } else {
       _lastEscAt = now;
-      showToast('press Esc again to interrupt', 'warning', 1000);
+      showToast('再按一次 Esc 发送中断', 'warning', 1000);
     }
     return;
   }
@@ -1481,7 +2233,7 @@ async function sendMessage() {
     sending = true;
     const btn = document.getElementById('btn-send');
     if (btn) btn.classList.add('sending');
-    if (input) input.dataset.placeholder = 'taking over session...';
+    if (input) input.dataset.placeholder = '正在接管会话…';
     if (input) input.contentEditable = 'false';
     const pd = pendingDiscovered;
     try {
@@ -1493,8 +2245,8 @@ async function sendMessage() {
         body: JSON.stringify({pid: pd.pid, session_id: pd.sessionId, cwd: pd.cwd, proc_start_time: pd.procStartTime || 0, node: pd.node || ''})
       });
       if (!r.ok) {
-        const errText = (await r.text().catch(() => '')).slice(0, 160);
-        showToast('takeover failed: ' + (errText || r.status));
+        const errText = await r.text().catch(() => '');
+        showAPIError('接管进程', r.status, errText);
         if (input) { input.dataset.placeholder = 'send a message to take over...'; input.contentEditable = 'true'; }
         sending = false;
         if (btn) btn.classList.remove('sending');
@@ -1502,7 +2254,7 @@ async function sendMessage() {
       }
       const data = await r.json();
       if (!data.key) {
-        showToast('takeover failed: no session key returned');
+        showToast('接管进程失败：未返回会话标识', 'error');
         if (input) { input.dataset.placeholder = 'send a message to take over...'; input.contentEditable = 'true'; }
         sending = false;
         if (btn) btn.classList.remove('sending');
@@ -1525,7 +2277,7 @@ async function sendMessage() {
         if (sessionsData[sid(takenKey, takenNode)]) { ready = true; break; }
       }
       if (!ready) {
-        showToast('takeover timed out — session not ready');
+        showToast('接管超时：会话未就绪，请稍后重试', 'error');
         if (input) { input.dataset.placeholder = 'send a message...'; input.contentEditable = 'true'; }
         sending = false;
         if (btn) btn.classList.remove('sending');
@@ -1540,7 +2292,7 @@ async function sendMessage() {
       await sendMessage();
       return;
     } catch (e) {
-      showToast('takeover error: ' + e.message);
+      showNetworkError('接管进程', e);
       if (input) { input.dataset.placeholder = 'send a message to take over...'; input.contentEditable = 'true'; }
       sending = false;
       if (btn) btn.classList.remove('sending');
@@ -1566,12 +2318,14 @@ async function sendMessage() {
   // we only reference file_ids on the server, so partial uploads would
   // silently drop images. User can retry or remove the bad one.
   if (pendingFiles.some(f => f.status === 'uploading')) {
-    showToast('images still uploading...');
+    showToast('图片上传中，请稍候…', 'warning');
     return;
   }
   const failed = pendingFiles.filter(f => f.status === 'error');
   if (failed.length > 0) {
-    showToast('upload failed: ' + (failed[0].error || 'unknown') + ' (remove or retry)');
+    const detail = failed[0].error || '';
+    const tail = detail ? '（' + detail.slice(0, 120) + '）' : '';
+    showToast('图片上传失败' + tail + '，请移除或重试', 'error');
     return;
   }
   const fileIDs = pendingFiles.map(f => f.id).filter(Boolean);
@@ -1658,7 +2412,7 @@ async function sendMessage() {
     }
     if (r.status === 429) {
       if (input) setMsgValue(input, text);
-      showToast('message queue full, please wait');
+      showToast('消息队列已满，请稍后重试', 'warning');
       return;
     }
     if (!r.ok) {
@@ -1666,9 +2420,9 @@ async function sendMessage() {
       // Some error paths still write text/plain; fall back to text() so we
       // always surface the real message instead of a generic "send failed".
       const raw = await r.text().catch(() => '');
-      let msg = 'send failed: ' + r.status;
-      try { const j = JSON.parse(raw); if (j && j.error) msg = j.error; } catch (_) { if (raw) msg = raw; }
-      showToast(msg);
+      let detail = '';
+      try { const j = JSON.parse(raw); if (j && j.error) detail = j.error; } catch (_) { if (raw) detail = raw; }
+      showAPIError('发送消息', r.status, detail);
       return;
     }
 
@@ -1690,7 +2444,7 @@ async function sendMessage() {
     }
   } catch (e) {
     if (input) input.value = text;
-    showToast('send error: ' + e.message);
+    showNetworkError('发送消息', e);
   } finally {
     sending = false;
     if (btn) btn.classList.remove('sending');
@@ -1747,14 +2501,20 @@ function fmtDuration(ms) {
   return s < 60 ? s.toFixed(1) + 's' : Math.floor(s / 60) + 'm' + Math.floor(s % 60) + 's';
 }
 
+// R110-P2 tool verb localization — these labels surface in the running-
+// banner line-1 via refreshBanner → actEl.textContent. Mapping is strict
+// whitelist on Claude's tool names; unknown tools fall back to "使用 X"
+// (legacy "Using X") so future tools surface without a code change. Tool
+// key names themselves (Read/Edit/Bash/…) are Claude protocol identifiers
+// and MUST stay as map keys — only the display verbs localize.
 const toolVerbs = {
-  Read: 'Reading', Edit: 'Editing', Write: 'Writing', Bash: 'Running',
-  Grep: 'Searching', Glob: 'Finding files', Agent: 'Agent',
-  Notebook: 'Editing notebook', WebFetch: 'Fetching'
+  Read: '读取', Edit: '编辑', Write: '写入', Bash: '执行',
+  Grep: '搜索', Glob: '查找文件', Agent: 'Agent',
+  Notebook: '编辑 Notebook', WebFetch: '抓取'
 };
 
 function toolVerb(tool, summary) {
-  const verb = toolVerbs[tool] || ('Using ' + tool);
+  const verb = toolVerbs[tool] || ('使用 ' + tool);
   if (!summary || summary === tool) return verb + '...';
   return verb + ' ' + summary;
 }
@@ -1770,11 +2530,11 @@ function refreshBanner() {
     if (turnState.currentTool) {
       actEl.textContent = toolVerb(turnState.currentTool.tool, turnState.currentTool.summary);
     } else if (turnState.isThinking) {
-      actEl.textContent = 'Thinking...';
+      actEl.textContent = '思考中...';
     } else if (turnState.isWriting) {
-      actEl.textContent = 'Writing...';
+      actEl.textContent = '输出中...';
     } else {
-      actEl.textContent = 'Working...';
+      actEl.textContent = '处理中...';
     }
   }
 
@@ -2005,7 +2765,7 @@ function interruptSession() {
     const req = { type: 'interrupt', key: selectedKey, id: 'int' + Date.now() };
     if (targetNode) req.node = targetNode;
     wsm.send(req);
-    showToast('interrupt sent', 'warning');
+    showToast('已发送中断', 'warning');
   } else {
     // HTTP fallback when WebSocket is disconnected
     const headers = {'Content-Type': 'application/json'};
@@ -2018,8 +2778,8 @@ function interruptSession() {
       headers,
       body: JSON.stringify(body)
     }).then(r => r.json()).then(d => {
-      showToast(d.status === 'ok' ? 'interrupt sent' : 'session not running', 'warning');
-    }).catch(() => showToast('interrupt failed', 'error'));
+      showToast(d.status === 'ok' ? '已发送中断' : '会话未在运行', 'warning');
+    }).catch((e) => showNetworkError('中断会话', e));
   }
 }
 
@@ -2342,7 +3102,7 @@ function updateSendButton(state) {
     // Replace stale loading indicator if session stopped before events arrived.
     const evEl2 = document.getElementById('events-scroll');
     const loadingEl = evEl2 && evEl2.querySelector('.loading-indicator');
-    if (loadingEl) loadingEl.innerHTML = 'no events yet';
+    if (loadingEl) loadingEl.innerHTML = '暂无事件';
   }
   // Banner show/hide changes .events height — keep latest message visible.
   // Only auto-scroll if the user is already near the bottom; otherwise
@@ -2406,8 +3166,8 @@ function handleFiles(fileList) {
   // before upload, so the 10 MB server ceiling applies to the re-encoded JPEG.
   for (const raw of fileList) {
     if (!raw.type.startsWith('image/')) continue;
-    if (raw.size > 40 * 1024 * 1024) { showToast('file too large (max 40MB)'); continue; }
-    if (pendingFiles.length >= 10) { showToast('max 10 files'); break; }
+    if (raw.size > 40 * 1024 * 1024) { showToast('文件过大（上限 40MB）', 'warning'); continue; }
+    if (pendingFiles.length >= 10) { showToast('最多上传 10 个文件', 'warning'); break; }
     const entry = {
       file: raw,
       blobUrl: URL.createObjectURL(raw),
@@ -2465,6 +3225,90 @@ function removeFile(idx) {
   renderFilePreviews();
 }
 
+// reorderPendingFile moves pendingFiles[from] to position `to`. Pure array
+// operation extracted so the drag-drop handler and a keyboard a11y fallback
+// can share one code path and so contract tests can assert the move semantics
+// without touching the DOM. Returns true when the array actually changed.
+function reorderPendingFile(from, to) {
+  if (!Number.isInteger(from) || !Number.isInteger(to)) return false;
+  if (from < 0 || from >= pendingFiles.length) return false;
+  if (to < 0) to = 0;
+  if (to > pendingFiles.length - 1) to = pendingFiles.length - 1;
+  if (from === to) return false;
+  const [moved] = pendingFiles.splice(from, 1);
+  pendingFiles.splice(to, 0, moved);
+  return true;
+}
+
+// Drag source index for the thumbnail-reorder gesture. A module-level slot is
+// safer than dataTransfer because the latter is sometimes empty on drop in
+// Safari when the drag never left the origin element.
+let _dragReorderFrom = -1;
+
+function onThumbDragStart(ev, idx) {
+  // Only 'ready' files are reorderable; uploading/error thumbs are pinned to
+  // their current slot because their index may still be referenced by the
+  // in-flight upload completion path.
+  const entry = pendingFiles[idx];
+  if (!entry || entry.status !== 'ready') { ev.preventDefault(); return; }
+  _dragReorderFrom = idx;
+  try {
+    ev.dataTransfer.effectAllowed = 'move';
+    // Firefox requires some data to be set or dragstart is cancelled.
+    ev.dataTransfer.setData('text/plain', String(idx));
+  } catch (_) {}
+  ev.currentTarget.classList.add('dragging');
+}
+
+function onThumbDragOver(ev) {
+  if (_dragReorderFrom < 0) return;
+  ev.preventDefault();
+  ev.dataTransfer.dropEffect = 'move';
+  ev.currentTarget.classList.add('drop-target');
+}
+
+function onThumbDragLeave(ev) {
+  ev.currentTarget.classList.remove('drop-target');
+}
+
+function onThumbDrop(ev, idx) {
+  ev.preventDefault();
+  ev.currentTarget.classList.remove('drop-target');
+  const from = _dragReorderFrom;
+  _dragReorderFrom = -1;
+  if (from < 0 || from === idx) { renderFilePreviews(); return; }
+  reorderPendingFile(from, idx);
+  renderFilePreviews();
+}
+
+function onThumbDragEnd() {
+  _dragReorderFrom = -1;
+  const el = document.getElementById('file-preview');
+  if (!el) return;
+  el.querySelectorAll('.file-thumb.dragging, .file-thumb.drop-target').forEach(n => {
+    n.classList.remove('dragging');
+    n.classList.remove('drop-target');
+  });
+}
+
+// Keyboard a11y: when a .file-thumb is focused, Left/Right arrow keys move it
+// left/right by one slot. Mirrors the drag gesture for keyboard-only users.
+function onThumbKeyDown(ev, idx) {
+  if (ev.key !== 'ArrowLeft' && ev.key !== 'ArrowRight') return;
+  const entry = pendingFiles[idx];
+  if (!entry || entry.status !== 'ready') return;
+  const to = idx + (ev.key === 'ArrowLeft' ? -1 : 1);
+  if (!reorderPendingFile(idx, to)) return;
+  ev.preventDefault();
+  renderFilePreviews();
+  // After re-render, restore focus to the moved thumb's new slot so rapid
+  // arrow presses keep working.
+  const el = document.getElementById('file-preview');
+  if (!el) return;
+  const next = el.querySelector('.file-thumb[data-idx="' + to + '"]');
+  if (next) next.focus();
+}
+
 function renderFilePreviews() {
   const el = document.getElementById('file-preview');
   if (!el) return;
@@ -2473,10 +3317,23 @@ function renderFilePreviews() {
       entry.status === 'uploading' ? '<div class="upload-status uploading"></div>' :
       entry.status === 'error' ? '<div class="upload-status error" title="' + escAttr(entry.error || 'upload failed') + '" onclick="retryUpload(' + i + ')">\u21bb</div>' :
       '';
-    return '<div class="file-thumb ' + entry.status + '">' +
-      '<img src="' + entry.blobUrl + '">' +
+    // Only 'ready' files are draggable so an in-flight upload's index stays
+    // stable for the uploadEntry completion handler. tabindex=0 makes the
+    // thumb keyboard-focusable; ArrowLeft/Right then reorder via onThumbKeyDown.
+    const draggable = entry.status === 'ready';
+    return '<div class="file-thumb ' + entry.status + '"' +
+      ' data-idx="' + i + '"' +
+      (draggable ? ' draggable="true" tabindex="0" role="button" aria-label="\u56fe\u7247 ' + (i + 1) + '\uff0c\u62d6\u52a8\u6216\u7528\u5de6\u53f3\u65b9\u5411\u952e\u6392\u5e8f"' : '') +
+      (draggable ? ' ondragstart="onThumbDragStart(event,' + i + ')"' : '') +
+      (draggable ? ' ondragover="onThumbDragOver(event)"' : '') +
+      (draggable ? ' ondragleave="onThumbDragLeave(event)"' : '') +
+      (draggable ? ' ondrop="onThumbDrop(event,' + i + ')"' : '') +
+      (draggable ? ' ondragend="onThumbDragEnd()"' : '') +
+      (draggable ? ' onkeydown="onThumbKeyDown(event,' + i + ')"' : '') +
+      '>' +
+      '<img src="' + entry.blobUrl + '" draggable="false">' +
       overlay +
-      '<button class="remove" onclick="removeFile(' + i + ')">\u00d7</button>' +
+      '<button class="remove" onclick="removeFile(' + i + ')" title="\u79fb\u9664\u56fe\u7247" aria-label="\u79fb\u9664\u56fe\u7247">\u00d7</button>' +
       '</div>';
   }).join('');
 }
@@ -2841,11 +3698,27 @@ function showAuthModal() {
   overlay.className = 'modal-overlay';
   overlay.innerHTML =
     '<div class="modal" role="dialog" aria-modal="true" aria-label="Dashboard API token">' +
+      // R110-P3 brand lockup: `>_` mark + `脑汁 Naozhi` wordmark anchors the
+      // login screen so operators recognize they're on the right service.
+      // Mirrors the `>_` glyph used in the empty state; pure text (no image
+      // asset) keeps the static bundle tiny.
+      '<div class="auth-brand">' +
+        '<div class="ab-mark" aria-hidden="true">&gt;_</div>' +
+        '<div class="ab-wordmark">' +
+          '<span class="ab-name">脑汁 Naozhi</span>' +
+          '<span class="ab-tag">Claude Code on IM</span>' +
+        '</div>' +
+      '</div>' +
       '<h3>Dashboard API Token</h3>' +
-      '<input id="token-input" type="password" placeholder="enter dashboard token..." onkeydown="if(event.key===\'Enter\'){saveToken()}">' +
+      // R110-P3 brand/onboarding hint: first-time operators often don't know
+      // where the token comes from. Points them at the one configuration
+      // surface (dashboard_token in config.yaml). Kept concise; full docs live
+      // in README.md and docs/ops/ so the modal stays task-focused.
+      '<div class="auth-hint">token 配置于 <code>config.yaml</code> 的 <code>dashboard_token</code> 字段</div>' +
+      '<input id="token-input" type="password" placeholder="请输入 dashboard token…" onkeydown="if(event.key===\'Enter\'){saveToken()}">' +
       '<div class="modal-btns">' +
         '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
-        '<button type="button" class="primary" onclick="saveToken()">save</button>' +
+        '<button type="button" class="primary" onclick="saveToken()">保存</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
@@ -2869,13 +3742,110 @@ async function saveToken() {
       wsm.disconnect();
       wsm.connect();
       fetchSessions();
+    } else if (r.status === 429) {
+      // R110-P2 WS auth rate-limit countdown: the old catch-all else
+      // path rendered "invalid token — try again" even when the server
+      // was still locking the caller out, misleading users into retrying
+      // immediately and racking up more 429s. Read Retry-After (seconds,
+      // plain integer as set by dashboard_auth.go) and visually gate the
+      // input until the window elapses.
+      const raHeader = r.headers.get('Retry-After') || '60';
+      let retryAfter = parseInt(raHeader, 10);
+      if (!Number.isFinite(retryAfter) || retryAfter <= 0) retryAfter = 60;
+      startLoginRetryCountdown(retryAfter);
     } else {
       document.getElementById('token-input').value = '';
       document.getElementById('token-input').placeholder = 'invalid token — try again';
     }
   } catch(e) {
-    showToast('network error', 'error');
+    showNetworkError('', e);
   }
+}
+
+// startLoginRetryCountdown disables the auth modal input and save button
+// for `seconds` seconds, ticking down a human-readable placeholder each
+// second. The tick is driven by setInterval — good enough for a 60s
+// countdown, not a precise-timing primitive. Re-entering (second 429
+// before the first countdown completes) clears the prior timer via
+// dataset.countdownId so we don't stack intervals on the same input.
+function startLoginRetryCountdown(seconds) {
+  const input = document.getElementById('token-input');
+  const saveBtn = document.querySelector('.modal-overlay .modal-btns button.primary');
+  if (!input) return;
+  input.value = '';
+  // Clear any prior countdown timer before starting a new one.
+  if (input.dataset.countdownId) {
+    clearInterval(parseInt(input.dataset.countdownId, 10));
+    delete input.dataset.countdownId;
+  }
+  input.disabled = true;
+  if (saveBtn) saveBtn.disabled = true;
+  let remaining = seconds;
+  const render = () => {
+    input.placeholder = '登录尝试过多，请在 ' + remaining + 's 后重试';
+  };
+  render();
+  const id = setInterval(() => {
+    remaining -= 1;
+    if (remaining <= 0) {
+      clearInterval(id);
+      delete input.dataset.countdownId;
+      input.disabled = false;
+      if (saveBtn) saveBtn.disabled = false;
+      input.placeholder = '请输入 dashboard token…';
+      input.focus();
+      return;
+    }
+    render();
+  }, 1000);
+  input.dataset.countdownId = String(id);
+}
+
+// startWSAuthRetryCountdown arms the auth rate-limit gate and drives an
+// inline sidebar-status countdown instead of a top-of-screen toast. The
+// previous toast variant stacked on top of the header on mobile and
+// repeated every second; routing the countdown into updateStatusBar keeps
+// the signal visible but out of the way. Triggered by an
+// auth_fail(Error="too many attempts") message that carries a retry_after
+// hint. On expiry the gate clears and wsm.connect() fires once so the user
+// doesn't have to click anything — matches the UX-P1 auto-recover spec.
+//
+// Idempotent: calling twice (e.g. a second in-flight reconnect that races
+// through before the gate armed) clears the prior tick interval so the
+// countdown reflects the freshest server directive, not a stale one.
+let _wsAuthCountdownTimer = null;
+function startWSAuthRetryCountdown(seconds) {
+  if (typeof wsm === 'undefined' || !wsm) return;
+  if (!Number.isFinite(seconds) || seconds <= 0) seconds = 60;
+  wsm._authBlockUntil = Date.now() + seconds * 1000;
+  if (_wsAuthCountdownTimer) {
+    clearInterval(_wsAuthCountdownTimer);
+    _wsAuthCountdownTimer = null;
+  }
+  // Repaint the sidebar immediately so the "鉴权过于频繁 · Ns" row appears
+  // without waiting for the next 1s tick. updateStatusBar reads
+  // wsm._authBlockUntil directly, so we don't need to pass the remaining
+  // seconds around.
+  updateStatusBar();
+  _wsAuthCountdownTimer = setInterval(() => {
+    if (Date.now() >= wsm._authBlockUntil) {
+      clearInterval(_wsAuthCountdownTimer);
+      _wsAuthCountdownTimer = null;
+      wsm._authBlockUntil = 0;
+      // Clear the existing reconnect timer so connect() fires immediately
+      // rather than waiting out whatever backoff was scheduled alongside
+      // the countdown. Reset backoff so post-recovery reconnect behaves
+      // like a fresh page load. No toast here — the sidebar status row
+      // already moved from "鉴权过于频繁" to "connecting..." which is the
+      // user-visible signal.
+      if (wsm.reconnectTimer) { clearTimeout(wsm.reconnectTimer); wsm.reconnectTimer = null; }
+      wsm.backoff = 1000;
+      updateStatusBar();
+      wsm.connect();
+      return;
+    }
+    updateStatusBar();
+  }, 1000);
 }
 
 // fetchCLIBackends retrieves the enabled CLI backends from the server.
@@ -2937,16 +3907,16 @@ function createNewSession() {
       const overlay = document.createElement('div');
       overlay.className = 'modal-overlay';
       overlay.innerHTML =
-        '<div class="modal" role="dialog" aria-modal="true" aria-label="New session">' +
+        '<div class="modal" role="dialog" aria-modal="true" aria-label="新建会话">' +
           '<h3>New Session</h3>' +
           backendPicker +
           '<div style="margin-bottom:12px">' +
-            '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-workspace">Workspace</label>' +
+            '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-workspace">工作目录</label>' +
             '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(ws) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
           '</div>' +
           '<div class="modal-btns">' +
-            '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
-            '<button type="button" class="primary" onclick="doCreateSession()">create</button>' +
+            '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
+            '<button type="button" class="primary" onclick="doCreateSession()">创建</button>' +
           '</div>' +
         '</div>';
       document.body.appendChild(overlay);
@@ -2967,16 +3937,16 @@ function openProjectPalette(backendsData) {
   const overlay = document.createElement('div');
   overlay.className = 'cmd-palette-overlay';
   overlay.innerHTML =
-    '<div class="cmd-palette" role="dialog" aria-label="New session">' +
+    '<div class="cmd-palette" role="dialog" aria-label="新建会话">' +
       (backendPicker ? '<div class="cmd-palette-backend" style="padding:8px 12px 0">' + backendPicker + '</div>' : '') +
       '<div class="cmd-palette-header">' +
-        '<input id="cp-input" type="text" autocomplete="off" spellcheck="false" placeholder="Search projects or type a path…">' +
+        '<input id="cp-input" type="text" autocomplete="off" spellcheck="false" placeholder="搜索项目或输入路径…">' +
       '</div>' +
       '<div id="cp-list" class="cmd-palette-list" role="listbox"></div>' +
       '<div class="cmd-palette-footer">' +
-        '<span><kbd>↑</kbd><kbd>↓</kbd> navigate</span>' +
-        '<span><kbd>Enter</kbd> open</span>' +
-        '<span><kbd>Esc</kbd> close</span>' +
+        '<span><kbd>↑</kbd><kbd>↓</kbd> 切换</span>' +
+        '<span><kbd>Enter</kbd> 打开</span>' +
+        '<span><kbd>Esc</kbd> 关闭</span>' +
       '</div>' +
     '</div>';
   overlay.addEventListener('click', e => {
@@ -3051,7 +4021,47 @@ function renderPaletteList(state, query) {
       score,
     });
   });
-  if (q) scored.sort((a, b) => b.score - a.score);
+  if (q) {
+    scored.sort((a, b) => b.score - a.score);
+  } else {
+    // R110-P3 palette idle-state ordering: three-tier sort on empty query.
+    //   Tier 0: favorites — surface "pinned" projects first. Users already
+    //           star projects via the sidebar section-header ⭐ button,
+    //           which persists to the backend projects config. Reusing
+    //           that signal avoids a second "palette-pin" concept (which
+    //           would split the mental model and duplicate state).
+    //   Tier 1: recents (localStorage) top-N — most-recently-used.
+    //   Tier 2: everything else in original projectsData order (alpha +
+    //           backend favorite-first order is preserved, so the rest
+    //           bucket doesn't reshuffle unrelated projects).
+    // A project that is BOTH favorite and recent lands in tier 0 only;
+    // the recents lookup skips it so it doesn't appear twice or trigger
+    // a stale rank clash.
+    const recents = loadRecentProjects();
+    const recentRank = new Map();
+    recents.slice(0, RECENT_PROJECTS_SHOW).forEach((e, i) => {
+      recentRank.set(e.name + '|' + (e.node || 'local'), i);
+    });
+    const withIndex = scored.map((s, i) => ({s, i}));
+    withIndex.sort((a, b) => {
+      const pa = a.s.project;
+      const pb = b.s.project;
+      // Tier gate 0: favorite trumps everything else.
+      const fa = pa.favorite ? 0 : 1;
+      const fb = pb.favorite ? 0 : 1;
+      if (fa !== fb) return fa - fb;
+      // Tier gate 1: within the same tier, recents come before non-recents.
+      const ka = pa.name + '|' + (pa.node || 'local');
+      const kb = pb.name + '|' + (pb.node || 'local');
+      const ra = recentRank.has(ka) ? recentRank.get(ka) : Infinity;
+      const rb = recentRank.has(kb) ? recentRank.get(kb) : Infinity;
+      if (ra !== rb) return ra - rb;
+      // Tier gate 2: stable on original projectsData order (input index).
+      return a.i - b.i;
+    });
+    scored.length = 0;
+    withIndex.forEach(w => scored.push(w.s));
+  }
 
   const items = scored.map(s => ({type: 'project', data: s}));
   items.push({type: 'custom', query: q});
@@ -3082,14 +4092,22 @@ function renderPaletteList(state, query) {
 function buildProjectRow(s, idx) {
   const p = s.project;
   const el = document.createElement('div');
-  el.className = 'cmd-palette-item';
+  el.className = 'cmd-palette-item' + (p.favorite ? ' is-favorite' : '');
   el.dataset.idx = String(idx);
   const nodeId = p.node || 'local';
   const nodeBadge = nodeId !== 'local'
     ? '<span class="cp-node" style="background:' + nodeColor(nodeId) + '">' + esc(nodeId) + '</span>'
     : '';
+  // R110-P3 palette favorite indicator: replace the leading ▸ glyph with
+  // a ★ when the project is favorited so the tier-0 ranking is visually
+  // explicit. Screen readers see the label via a title on the row icon
+  // so the distinction isn't purely visual. Non-favorite projects keep
+  // their original ▸ for continuity.
+  const icon = p.favorite
+    ? '<span class="cp-icon cp-icon-fav" title="已收藏" aria-label="已收藏">★</span>'
+    : '<span class="cp-icon">▸</span>';
   el.innerHTML =
-    '<span class="cp-icon">▸</span>' +
+    icon +
     '<div class="cp-main">' +
       '<div class="cp-name">' + highlight(p.name, s.nameRanges) + '</div>' +
       '<div class="cp-path">' + highlight(shortPath(p.path), s.pathRanges) + '</div>' +
@@ -3105,8 +4123,8 @@ function buildCustomRow(query, idx) {
   el.dataset.idx = String(idx);
   const looksLikePath = query && (query.startsWith('/') || query.startsWith('~'));
   const label = looksLikePath
-    ? 'Open custom workspace: <span style="color:#79c0ff">' + esc(query) + '</span>'
-    : 'Open custom workspace…';
+    ? '打开自定义工作目录：<span style="color:#79c0ff">' + esc(query) + '</span>'
+    : '打开自定义工作目录…';
   el.innerHTML =
     '<span class="cp-icon">+</span>' +
     '<div class="cp-main"><div class="cp-name" style="color:#8b949e">' + label + '</div></div>';
@@ -3176,16 +4194,16 @@ function pickPaletteCustom(initialValue) {
   const modal = document.createElement('div');
   modal.className = 'modal-overlay';
   modal.innerHTML =
-    '<div class="modal" role="dialog" aria-modal="true" aria-label="Custom workspace">' +
-      '<h3>Custom Workspace</h3>' +
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="自定义工作目录">' +
+      '<h3>自定义工作目录</h3>' +
       picker +
       '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-workspace">Workspace path</label>' +
+        '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-workspace">工作目录路径</label>' +
         '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(prefill) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
       '</div>' +
       '<div class="modal-btns">' +
-        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
-        '<button type="button" class="primary" onclick="doCreateSession()">create</button>' +
+        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
+        '<button type="button" class="primary" onclick="doCreateSession()">创建</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(modal);
@@ -3216,10 +4234,22 @@ function doCreateInProject(projectPath, projectName, nodeId, backend) {
   if (nodeId && nodeId !== 'local') sessionNodes[key] = nodeId;
   if (backend) sessionBackends[key] = backend;
 
+  // R110-P3 recent-projects: every successful project-scoped session
+  // creation bumps the (name,node) pair to the top of the palette's
+  // recent list so next-time access is one click. Custom-workspace paths
+  // are intentionally NOT recorded — they have no stable project.name
+  // and the palette has no row to highlight them against. Errors from
+  // localStorage are swallowed: Safari private-browsing / out-of-quota /
+  // disabled storage all throw on setItem, and a silently-un-recorded
+  // bump is preferable to breaking the creation flow over a UX tweak.
+  pushRecentProject(projectName, nodeId || 'local');
+
   stopPreviewPolling();
   wsm.unsubscribe();
   selectedKey = key;
   selectedNode = nodeId || 'local';
+  try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
+  if (typeof updateNodeSelector === 'function') updateNodeSelector();
   lastEventTime = 0;
   mobileEnterChat();
   document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
@@ -3228,6 +4258,48 @@ function doCreateInProject(projectPath, projectName, nodeId, backend) {
   lastVersion = 0;
   debouncedFetchSessions();
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
+}
+
+// --- Recent projects (palette ordering) ---
+
+// RECENT_PROJECTS_KEY holds a compact JSON array of {name,node,ts} tuples,
+// ordered by `ts` DESC. Capped at RECENT_PROJECTS_MAX so the stored blob
+// stays small (worst case ~10 * 100 bytes). The palette only surfaces
+// the top 5 (see renderPaletteList) but we retain a deeper tail so a
+// long-absent project can climb back into view after one use.
+const RECENT_PROJECTS_KEY = 'naozhi_recent_projects';
+const RECENT_PROJECTS_MAX = 10;
+const RECENT_PROJECTS_SHOW = 5;
+
+function loadRecentProjects() {
+  try {
+    const raw = localStorage.getItem(RECENT_PROJECTS_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    // Defensive filter: discard entries without a string `name` so a
+    // manually-edited localStorage can't break render.
+    return parsed
+      .filter(e => e && typeof e.name === 'string')
+      .slice(0, RECENT_PROJECTS_MAX);
+  } catch (_) {
+    return [];
+  }
+}
+
+function pushRecentProject(name, node) {
+  if (!name) return;
+  node = node || 'local';
+  try {
+    const list = loadRecentProjects();
+    const filtered = list.filter(e => !(e.name === name && (e.node || 'local') === node));
+    filtered.unshift({name: name, node: node, ts: Date.now()});
+    const trimmed = filtered.slice(0, RECENT_PROJECTS_MAX);
+    localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(trimmed));
+  } catch (_) {
+    // Private browsing / quota / disabled storage — swallow, next
+    // successful write reseeds the list.
+  }
 }
 
 function doCreateSession() {
@@ -3249,6 +4321,8 @@ function doCreateSession() {
   wsm.unsubscribe();
   selectedKey = key;
   selectedNode = 'local';
+  try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
+  if (typeof updateNodeSelector === 'function') updateNodeSelector();
   lastEventTime = 0;
   mobileEnterChat();
   document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
@@ -3262,12 +4336,277 @@ function doCreateSession() {
 
 // --- Utilities ---
 
+// mainEmptyHtml returns the inner HTML for `#main` when no session is
+// selected. Called after dismiss/remove flows that nuke the active
+// session. Kept in sync with the cold-start markup in dashboard.html —
+// both render a `>_` mark, a Chinese lead line, and a primary CTA that
+// invokes createNewSession. Consolidating the three dismiss-path copies
+// into a helper means a future tweak touches one place, not three, and
+// prevents English/Chinese divergence (the prior inline "select a session"
+// string was the only untranslated empty-state left after R110).
+function mainEmptyHtml() {
+  return '<div class="empty-state empty-cta" style="flex-direction:column;gap:16px">' +
+    '<span style="font-size:40px;opacity:.35" aria-hidden="true">&gt;_</span>' +
+    '<div style="color:var(--nz-text);font-size:17px">选一个会话开始，或新建一个</div>' +
+    '<button class="empty-cta-btn" type="button" onclick="createNewSession()" ' +
+      'style="padding:10px 22px;border-radius:8px;border:1px solid var(--nz-blue);' +
+      'background:rgba(31,111,235,.12);color:var(--nz-accent);font-size:14px;' +
+      'cursor:pointer;font-family:inherit">+ 新建会话</button>' +
+    '<div style="font-size:12px;color:var(--nz-text-dim)">从侧栏选择已有会话，或点上方按钮新建</div>' +
+    // R110-P1 空闲态 Home 仪表 MVP 占位：renderRecentSessionsPanel()
+    // 按需注入"最近会话"缩略列表；零 session 时渲染为空字符串，保留冷启动
+    // 简洁空态不退化。Helper 外部调用，不嵌在本 HTML 里以保持 pure 可读。
+    '<div id="recent-sessions-panel" class="recent-panel-wrap"></div>' +
+  '</div>';
+}
+
+// computeHomeStats aggregates allSessionsCache into the two stats surfaced
+// on the idle Home panel. Pure function so a contract test can exercise the
+// "today" boundary and cost summation without driving the DOM.
+//
+// Scope is deliberately conservative: the TODO lists 4 metrics (today active
+// / prompts processed / tokens / cost), but prompts and tokens require an
+// event-log scan or a backend aggregator that doesn't exist yet. The two
+// metrics here (today active count, total cost) are already shipped in
+// /api/sessions per-session fields.
+//
+//   todayActive — sessions whose last_active >= local-midnight today. Uses
+//                 the JS Date constructor so the user's browser timezone
+//                 matches what they'd consider "today" in the sidebar.
+//   totalCost   — sum of s.total_cost across all cached sessions (not gated
+//                 by today, because a cron-heavy workspace accumulates cost
+//                 overnight and wiping at midnight would hide it).
+//
+// Input shape tolerant: missing last_active / total_cost on a session
+// contributes zero / is skipped rather than NaN-poisoning the totals.
+function computeHomeStats(items, nowMs) {
+  const arr = Array.isArray(items) ? items : [];
+  const now = typeof nowMs === 'number' ? nowMs : Date.now();
+  const d = new Date(now);
+  const dayStart = new Date(d.getFullYear(), d.getMonth(), d.getDate(), 0, 0, 0, 0).getTime();
+  let todayActive = 0;
+  let totalCost = 0;
+  for (const s of arr) {
+    if (!s) continue;
+    if (typeof s.last_active === 'number' && s.last_active >= dayStart) todayActive++;
+    if (typeof s.total_cost === 'number' && isFinite(s.total_cost)) totalCost += s.total_cost;
+  }
+  return { todayActive: todayActive, totalCost: totalCost };
+}
+
+// formatHomeCost keeps the $/precision format close to the session card's
+// header cost chip (.high-cost / .has-cost): two decimals once cost is
+// measurable, four decimals for sub-cent fractions (so "$0.0023" still
+// shows signal instead of collapsing to $0.00).
+function formatHomeCost(cost) {
+  const c = typeof cost === 'number' && isFinite(cost) ? cost : 0;
+  if (c >= 0.01) return '$' + c.toFixed(2);
+  if (c > 0) return '$' + c.toFixed(4);
+  return '$0.00';
+}
+
+// buildHomeHealthLines turns a stats snapshot into up to 2 Chinese lines for
+// the bottom health strip of the Home panel. Pure function so a contract
+// test can exercise each data-path without driving the DOM. Returns [] when
+// the snapshot is missing entirely — caller suppresses the strip.
+//
+// Line shape:
+//   Line 1: running/ready/total counts + uptime (always when stats present)
+//   Line 2: CLI name + version (when defaultCLIName is set)
+//   Line 3 (gated): watchdog kills — only when > 0; signals prod trouble
+//
+// Scope: leans entirely on fields ALREADY in /api/sessions `stats`. The TODO
+// lists claude 子进程数 / shim 连通 / cron 队列长度 / 状态文件大小 as future
+// additions — those need backend extensions, so omit here rather than
+// inventing empty placeholders that would never fill.
+function buildHomeHealthLines(stats) {
+  if (!stats || typeof stats !== 'object') return [];
+  const lines = [];
+  // Line 1: session breakdown + uptime.
+  const running = typeof stats.running === 'number' ? stats.running : 0;
+  const ready = typeof stats.ready === 'number' ? stats.ready : 0;
+  const total = typeof stats.total === 'number' ? stats.total : 0;
+  let line1 = '运行 ' + running + ' · 就绪 ' + ready + ' · 总 ' + total;
+  if (stats.uptime) line1 += ' · 运行 ' + stats.uptime;
+  lines.push({ text: line1, kind: 'info' });
+  // Line 2: CLI identity. Helpful when operators have multiple naozhi
+  // deployments on different CLI versions.
+  if (stats.cli_name) {
+    let cli = stats.cli_name;
+    if (stats.cli_version) cli += ' ' + stats.cli_version;
+    lines.push({ text: cli, kind: 'info' });
+  }
+  // Line 3 (gated): watchdog kills > 0 is a prod signal operators should see.
+  const wd = stats.watchdog || {};
+  const totalKills = typeof wd.total_kills === 'number' ? wd.total_kills : 0;
+  if (totalKills > 0) {
+    const noOutput = typeof wd.no_output_kills === 'number' ? wd.no_output_kills : 0;
+    lines.push({
+      text: 'Watchdog 已介入 ' + totalKills + ' 次（无输出 ' + noOutput + '）',
+      kind: 'warn',
+    });
+  }
+  return lines;
+}
+
+// renderRecentSessionsPanel populates the R110-P1 Home-panel slot inside
+// the main empty-state body. Reads allSessionsCache (written by renderSidebar
+// after each fetchSessions → so reflects the same authoritative snapshot the
+// sidebar shows), picks the 5 most recently active sessions, and renders a
+// compact clickable list. When there are zero sessions, returns an empty
+// innerHTML so the cold-start minimal CTA stays unchanged. Callers must
+// guard by selectedKey == null (active-session main shell wins).
+//
+// Pure-rendering: writes to the DOM by id rather than returning HTML, because
+// the cold-start HTML already carries the placeholder div and we don't want
+// to fight the order of initial paint.
+function renderRecentSessionsPanel() {
+  const host = document.getElementById('recent-sessions-panel');
+  if (!host) return;
+  if (selectedKey) return; // active session rendered by renderMainShell
+  const items = Array.isArray(allSessionsCache) ? allSessionsCache : [];
+  if (items.length === 0) { host.innerHTML = ''; return; }
+  // Sort by last_active desc; sessions without last_active sink to the
+  // bottom so a brand-new "new" card doesn't squat on position 1 forever.
+  const top = items.slice().sort((a, b) => (b.last_active || 0) - (a.last_active || 0)).slice(0, 5);
+  const rows = top.map(s => {
+    const sNode = s.node || 'local';
+    const label = s.user_label || s.summary || s.last_prompt || '未命名';
+    const state = s.state === 'dead' ? 'ready' : (s.state || 'ready');
+    const dotCls = state === 'running' ? 'dot-running' : (state === 'ready' ? 'dot-ready' : 'dot-new');
+    const ago = s.last_active ? timeAgo(s.last_active) : '';
+    return '<button type="button" class="recent-row" ' +
+      'data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" ' +
+      'onclick="selectSession(this.dataset.key,this.dataset.node)">' +
+      '<span class="recent-dot ' + dotCls + '" aria-hidden="true"></span>' +
+      '<span class="recent-label" title="' + escAttr(label) + '">' + esc(label) + '</span>' +
+      (ago ? '<span class="recent-time">' + esc(ago) + '</span>' : '') +
+      '</button>';
+  }).join('');
+  // R110-P1 Home stats strip (Round 147): today-active + total cost. Rendered
+  // above the list so operators see a cumulative signal before scanning the
+  // session rows. Prompts and tokens need backend aggregation — omitted here.
+  const stats = computeHomeStats(items, Date.now());
+  const statsHtml =
+    '<div class="recent-panel-stats" role="group" aria-label="今日概览">' +
+      '<div class="recent-stat">' +
+        '<div class="recent-stat-value">' + stats.todayActive + '</div>' +
+        '<div class="recent-stat-label">今日活跃会话</div>' +
+      '</div>' +
+      '<div class="recent-stat">' +
+        '<div class="recent-stat-value">' + esc(formatHomeCost(stats.totalCost)) + '</div>' +
+        '<div class="recent-stat-label">累计花费</div>' +
+      '</div>' +
+    '</div>';
+  // R110-P1 Home health strip (Round 148): bottom meta row sourced from
+  // /api/sessions stats (cached in lastStatsSnapshot). Suppressed when no
+  // stats snapshot has landed yet so cold-start doesn't render a bare div.
+  const healthLines = buildHomeHealthLines(lastStatsSnapshot);
+  const healthHtml = healthLines.length === 0
+    ? ''
+    : '<div class="recent-panel-health" role="status" aria-label="服务健康">' +
+        healthLines.map(l =>
+          '<div class="recent-health-line ' + esc(l.kind || 'info') + '">' + esc(l.text) + '</div>'
+        ).join('') +
+      '</div>';
+  host.innerHTML =
+    '<div class="recent-panel">' +
+      '<div class="recent-panel-title">最近会话</div>' +
+      statsHtml +
+      '<div class="recent-panel-list" role="list">' + rows + '</div>' +
+      healthHtml +
+    '</div>';
+}
+
 function showToast(msg, type, duration) {
   const el = document.getElementById('toast');
   el.textContent = msg;
   el.className = 'toast show' + (type ? ' ' + type : '');
   clearTimeout(el._tid);
   el._tid = setTimeout(() => { el.className = 'toast'; }, duration || 3000);
+}
+
+// localizeAPIError turns an HTTP status code + raw server message into a
+// user-facing Chinese string. Classifies by status class so operators get
+// a consistent mental model — 4xx = "你这边要改", 5xx = "服务端问题，请
+// 稍后重试". The raw tail is appended (truncated to 120 chars) so diagnostic
+// signal isn't lost, but the Chinese prefix is always there for screen-readers
+// and non-technical operators.
+//
+// Why not a full i18n dict: current project is single-locale (zh-CN); a
+// full go-i18n pipeline was floated in UX review but rejected as overkill
+// — UX1 target is "no raw English errors", not "pluggable locales".
+function localizeAPIError(status, raw) {
+  const tail = (raw || '').toString().trim().slice(0, 120);
+  const withTail = tail ? '（' + tail + '）' : '';
+  if (status === 0 || status === undefined || status === null) {
+    return '网络错误' + withTail;
+  }
+  if (status === 401 || status === 403) {
+    return '鉴权失败，请重新登录' + withTail;
+  }
+  if (status === 404) {
+    return '资源不存在' + withTail;
+  }
+  if (status === 409) {
+    return '状态冲突，请刷新后重试' + withTail;
+  }
+  if (status === 413) {
+    return '内容过大' + withTail;
+  }
+  if (status === 429) {
+    return '请求过于频繁，请稍后重试' + withTail;
+  }
+  if (status >= 400 && status < 500) {
+    return '请求失败（HTTP ' + status + '）' + withTail;
+  }
+  if (status === 502 || status === 503 || status === 504) {
+    return '服务暂时不可用，请稍后重试' + withTail;
+  }
+  if (status >= 500) {
+    return '服务器错误（HTTP ' + status + '）' + withTail;
+  }
+  return '操作失败（HTTP ' + status + '）' + withTail;
+}
+
+// showAPIError renders a HTTP-failed fetch as a Chinese toast. `action`
+// is a short user-facing verb (e.g. '删除会话', '保存任务') — it prefixes
+// the localized status reason, so the full toast reads like
+// "删除会话失败：鉴权失败，请重新登录（...）". Pass the raw server message
+// as `raw` (from `await r.text()`) for diagnostic context; truncated at the
+// localize layer.
+function showAPIError(action, status, raw, duration) {
+  const msg = (action ? action + '失败：' : '') + localizeAPIError(status, raw);
+  showToast(msg, 'error', duration);
+}
+
+// showNetworkError handles the catch-branch of fetch/awaited calls. A thrown
+// Error typically means the request never reached the server (DNS / offline
+// / CORS / abort). Keep the Chinese verbiage identical to localizeAPIError's
+// status=0 arm so the user's mental model stays unified.
+function showNetworkError(action, err, duration) {
+  const detail = (err && err.message) ? err.message.slice(0, 120) : '';
+  const tail = detail ? '（' + detail + '）' : '';
+  const msg = (action ? action + '失败：' : '') + '网络错误' + tail;
+  showToast(msg, 'error', duration);
+}
+
+// reconnectNow cancels any pending reconnect timer, resets the exponential
+// backoff so the next failure window starts tight again, and kicks an
+// immediate connect. Triggered by the sidebar-status "reconnect" button
+// that surfaces after backoff has grown past 8s (see updateStatusBar).
+// Idempotent: double-click only results in one connect attempt because
+// wsm.connect short-circuits when the socket is already OPEN/CONNECTING.
+function reconnectNow() {
+  if (wsm.reconnectTimer) {
+    clearTimeout(wsm.reconnectTimer);
+    wsm.reconnectTimer = null;
+  }
+  wsm.backoff = 1000;
+  // No toast: the sidebar status row already flips to "connecting..." when
+  // wsm.connect() sets CONNECTING, and the outage/reconnect button update
+  // through updateStatusBar. A toast here was redundant with that signal.
+  wsm.connect();
 }
 
 function fallbackCopy(text) {
@@ -3282,10 +4621,10 @@ function fallbackCopy(text) {
 
 function copyText(text) {
   if (navigator.clipboard) {
-    navigator.clipboard.writeText(text).then(() => showToast('copied', 'success')).catch(() => { fallbackCopy(text); showToast('copied', 'success'); });
+    navigator.clipboard.writeText(text).then(() => showToast('已复制', 'success')).catch(() => { fallbackCopy(text); showToast('已复制', 'success'); });
   } else {
     fallbackCopy(text);
-    showToast('copied', 'success');
+    showToast('已复制', 'success');
   }
 }
 
@@ -3419,6 +4758,27 @@ function shortPath(p) {
   return p.length > 40 ? '...' + p.substring(p.length - 37) : p;
 }
 
+// historyDayLabel formats a Date as the history drawer's day-group
+// label. Today and yesterday collapse to \u4e2d\u6587 "\u4eca\u5929" / "\u6628\u5929" so the
+// most common buckets read instantly without parsing a date. Older
+// entries defer to the browser locale so CJK users see "4\u670829\u65e5 \u5468\u4e09"
+// and EN users see "Wed, Apr 29" \u2014 both read naturally now that the
+// .hp-day-header uppercase was dropped in Round 129.
+//
+// Exposed at module scope (not inside renderHistoryPopover) so the
+// Round 129 contract test can assert its existence and both branches
+// are easy to eyeball in the source.
+function historyDayLabel(d) {
+  if (!d || isNaN(d.getTime())) return '';
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  const target = new Date(d.getFullYear(), d.getMonth(), d.getDate());
+  const diffDays = Math.round((today.getTime() - target.getTime()) / 86400000);
+  if (diffDays === 0) return '\u4eca\u5929';
+  if (diffDays === 1) return '\u6628\u5929';
+  return d.toLocaleDateString(undefined, { month: 'short', day: 'numeric', weekday: 'short' });
+}
+
 function timeAgo(ms, future) {
   if (!ms) return '\u2014';
   const d = future ? ms - Date.now() : Date.now() - ms;
@@ -3429,6 +4789,29 @@ function timeAgo(ms, future) {
   if (d < 3600000) return Math.floor(d/60000) + 'm' + suffix;
   if (d < 86400000) return Math.floor(d/3600000) + 'h' + suffix;
   return Math.floor(d/86400000) + 'd' + suffix;
+}
+
+// formatAbsTime renders an epoch-ms timestamp in local time as
+// "YYYY-MM-DD HH:MM:SS (TZ)" for use inside title attributes on the various
+// "3m ago" / "next 2h" relative labels. The goal is R110-P3: keep the
+// compact relative form in the UI, but let hover reveal the exact instant
+// so operators can reason about long-running jobs / stale sessions without
+// doing mental arithmetic. Falls back to '' on falsy input so callers can
+// safely gate the title attribute with a truthy check.
+function formatAbsTime(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  if (isNaN(d.getTime())) return '';
+  const pad = n => (n < 10 ? '0' + n : '' + n);
+  const tz = (() => {
+    const off = -d.getTimezoneOffset();
+    const sign = off >= 0 ? '+' : '-';
+    const abs = Math.abs(off);
+    return 'UTC' + sign + pad(Math.floor(abs / 60)) + ':' + pad(abs % 60);
+  })();
+  return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()) +
+    ' ' + pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds()) +
+    ' (' + tz + ')';
 }
 
 function sessionTimeHint(key) {
@@ -3467,6 +4850,86 @@ function trapFocus(overlay) {
     }
   });
   obs.observe(document.body, { childList: true, subtree: false });
+}
+
+// confirmDialog renders a styled confirm prompt matching the rest of the
+// dashboard (reuses .modal-overlay / .modal / .modal-btns). Returns a Promise
+// that resolves to `true` on confirm or `false` on cancel / Esc / backdrop
+// click. Native window.confirm() is blocking + looks out of place next to our
+// custom dark-theme modals; this helper fixes both.
+//
+// Call shape:
+//   const ok = await confirmDialog({
+//     title: '删除定时任务？',
+//     message: '任务将被永久删除，下次不再触发。',
+//     detail: 'cron-id-12345',      // optional mono-spaced tail
+//     confirmText: '删除',
+//     variant: 'danger',            // 'danger' | 'primary' (default danger)
+//   });
+//
+// Semantics:
+//   - Default focus lands on the CANCEL button (safer than focusing the
+//     destructive primary). Enter in a destructive dialog still requires
+//     the user to Tab over first, matching macOS confirm dialogs.
+//   - Esc and backdrop click both resolve to false — identical to the
+//     cancel button. Consistent with every other modal in the dashboard.
+//   - XSS-safe: all caller-supplied text is routed through esc() before
+//     insertion; callers may pass untrusted content (session key, cron id).
+//   - If a dialog is already open, this call resolves immediately to false
+//     to avoid stacking multiple confirms on the same decision.
+function confirmDialog(opts) {
+  return new Promise((resolve) => {
+    if (document.querySelector('.modal-overlay.confirm-overlay')) {
+      resolve(false);
+      return;
+    }
+    const title = (opts && opts.title) || '确认操作';
+    const message = (opts && opts.message) || '';
+    const detail = (opts && opts.detail) || '';
+    const confirmText = (opts && opts.confirmText) || '确认';
+    const cancelText = (opts && opts.cancelText) || '取消';
+    const variant = (opts && opts.variant) || 'danger';
+    const confirmClass = variant === 'danger' ? 'danger' : 'primary';
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay confirm-overlay';
+    overlay.innerHTML =
+      '<div class="modal confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">' +
+        '<h3 id="confirm-title">' + esc(title) + '</h3>' +
+        (message ? '<p>' + esc(message) + '</p>' : '') +
+        (detail ? '<p class="confirm-detail"><code>' + esc(detail) + '</code></p>' : '') +
+        '<div class="modal-btns">' +
+          '<button type="button" class="confirm-cancel">' + esc(cancelText) + '</button>' +
+          '<button type="button" class="' + confirmClass + ' confirm-ok">' + esc(confirmText) + '</button>' +
+        '</div>' +
+      '</div>';
+
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      overlay.remove();
+      resolve(!!ok);
+    };
+
+    overlay.querySelector('.confirm-cancel').addEventListener('click', () => finish(false));
+    overlay.querySelector('.confirm-ok').addEventListener('click', () => finish(true));
+    // Backdrop click cancels. Guard against inner clicks bubbling through
+    // by checking that the click's target is the overlay itself.
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(false); });
+    // trapFocus handles Esc (removes overlay); mirror that by observing the
+    // removal and resolving false if the consumer used Esc / other removal.
+    const obs = new MutationObserver(() => {
+      if (!document.body.contains(overlay)) { obs.disconnect(); finish(false); }
+    });
+    obs.observe(document.body, { childList: true, subtree: false });
+
+    document.body.appendChild(overlay);
+    trapFocus(overlay);
+    // Focus cancel first — protects against a stray Enter auto-firing the
+    // destructive primary. User must explicitly Tab or click to confirm.
+    setTimeout(() => overlay.querySelector('.confirm-cancel').focus(), 50);
+  });
 }
 
 // Time-divider threshold: insert a visual gap label when the interval between
@@ -4080,11 +5543,11 @@ document.addEventListener('DOMContentLoaded', function () {
     const isSnippet = drawer.dataset.snippetMode === '1';
     const text = isSnippet ? _pendingSnippet : drawer.dataset.path;
     if (!text) return;
-    const label = isSnippet ? 'snippet copied' : 'path copied';
+    const label = isSnippet ? '片段已复制' : '路径已复制';
     if (navigator.clipboard && navigator.clipboard.writeText) {
       navigator.clipboard.writeText(text).then(
         () => showToast(label, 'success', 1000),
-        () => showToast('copy failed', 'warning', 1000)
+        () => showToast('复制失败', 'warning', 1000)
       );
     }
   });
@@ -4359,6 +5822,239 @@ function nodeColor(id) {
   return NODE_BADGE_COLORS[h % NODE_BADGE_COLORS.length];
 }
 
+/* ===== Node Selector ===== */
+//
+// The node selector replaces the per-card .sc-node badge + per-node rows in
+// .sidebar-status when more than one node is connected. Clicking the trigger
+// opens a dropdown of all nodes; clicking a node switches the sidebar filter.
+// Single-node setups (local only, or one remote only) hide the whole thing —
+// there is nothing to choose between.
+
+// getNodeDisplayName returns the human label for a node id. Falls back to the
+// raw id for remotes whose display_name the server hasn't populated yet, and
+// uses a Chinese '本地' for 'local' to match the rest of the UI.
+function getNodeDisplayName(id) {
+  if (!id || id === 'local') return '本地';
+  const nd = nodesData[id];
+  if (nd && nd.display_name) return nd.display_name;
+  return id;
+}
+
+// getNodeStatus returns a normalized status key (ok/connecting/offline/
+// unreachable/error) for a node. 'local' tracks the WS state machine; remotes
+// read from the server-side node health snapshot. Falls back to 'offline' when
+// the server has no record — safer than pretending the node is reachable.
+function getNodeStatus(id) {
+  if (!id || id === 'local') {
+    if (wsm.state === WS_STATES.CONNECTED) return 'ok';
+    if (wsm.state === WS_STATES.CONNECTING || wsm.state === WS_STATES.AUTH) return 'connecting';
+    return 'offline';
+  }
+  const nd = nodesData[id];
+  if (!nd) return 'offline';
+  return nd.status || 'offline';
+}
+
+// getNodeSessionCount returns how many sessions are filed under a node in the
+// last-rendered cache. Used in the dropdown rows and for the aggregated alert
+// dot. Cheap to call (linear scan over allSessionsCache; bounded by the sidebar
+// render pass).
+function getNodeSessionCount(id) {
+  if (!allSessionsCache || allSessionsCache.length === 0) return 0;
+  let n = 0;
+  for (const s of allSessionsCache) {
+    if ((s.node || 'local') === id) n++;
+  }
+  return n;
+}
+
+// statusLabelForNode maps a normalized status to a short Chinese/English label
+// used inside the trigger and each dropdown row.
+function statusLabelForNode(status) {
+  const m = {
+    ok: 'connected', connected: 'connected',
+    connecting: 'connecting', authenticating: 'authenticating',
+    offline: 'offline', unreachable: 'unreachable',
+    error: 'error', disconnected: 'disconnected',
+  };
+  return m[status] || status;
+}
+
+// updateNodeSelector is the single render entry point for the node-selector
+// trigger + dropdown visibility. Called after every /api/sessions poll (so
+// new/removed remotes appear immediately) and after every open/close toggle.
+// Fast path when multi-node isn't active: hide the whole widget.
+function updateNodeSelector() {
+  const root = document.getElementById('node-selector');
+  if (!root) return;
+
+  const multi = isMultiNode();
+  if (!multi) {
+    root.hidden = true;
+    nodeSelectorOpen = false;
+    return;
+  }
+
+  // If the persisted selection points at a node that no longer exists,
+  // snap it back to 'local' so the sidebar doesn't render an empty list.
+  // Happens when a remote is removed server-side while the dashboard is open.
+  if (selectedNode !== 'local' && !nodesData[selectedNode]) {
+    selectedNode = 'local';
+    try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
+  }
+
+  root.hidden = false;
+  const trigger = document.getElementById('ns-trigger');
+  const dotEl = document.getElementById('ns-trigger-dot');
+  const labelEl = document.getElementById('ns-trigger-label');
+  const alertEl = document.getElementById('ns-trigger-alert');
+
+  const status = getNodeStatus(selectedNode);
+  const displayName = getNodeDisplayName(selectedNode);
+  const statusLabel = statusLabelForNode(status);
+
+  if (dotEl) {
+    dotEl.className = 'ns-dot ' + (VALID_DOT_CLASSES[status] || 'offline');
+  }
+  if (labelEl) {
+    labelEl.textContent = displayName + ' · ' + statusLabel;
+    labelEl.title = displayName + ' (' + selectedNode + ') · ' + statusLabel;
+  }
+
+  // Aggregated alert dot: any non-current node in a non-ok/connecting state
+  // surfaces a red dot on the trigger so the user knows to open the dropdown.
+  if (alertEl) {
+    let hasAlert = false;
+    for (const id of Object.keys(nodesData)) {
+      if (id === selectedNode) continue;
+      const s = getNodeStatus(id);
+      if (s !== 'ok' && s !== 'connected' && s !== 'connecting' && s !== 'authenticating') {
+        hasAlert = true; break;
+      }
+    }
+    alertEl.hidden = !hasAlert;
+  }
+
+  if (trigger) {
+    trigger.setAttribute('aria-expanded', nodeSelectorOpen ? 'true' : 'false');
+  }
+
+  const dropdown = document.getElementById('ns-dropdown');
+  if (!dropdown) return;
+  if (!nodeSelectorOpen) {
+    dropdown.hidden = true;
+    return;
+  }
+  dropdown.hidden = false;
+  dropdown.innerHTML = renderNodeDropdownHtml();
+}
+
+// renderNodeDropdownHtml builds the list of node options. Local is pinned
+// first; remotes are grouped by status (connected → connecting → offline)
+// then sorted by display name. Each row shows status dot, name, session count,
+// and a check when selected.
+function renderNodeDropdownHtml() {
+  const ids = Object.keys(nodesData);
+  // Ensure 'local' is always present even if the server didn't include it
+  // (defensive — the local node should always be in nodesData, but we don't
+  // want to drop it off the UI if the backend ever forgets to ship it).
+  if (ids.indexOf('local') === -1) ids.unshift('local');
+
+  const rank = { ok: 0, connected: 0, connecting: 1, authenticating: 1, offline: 2, unreachable: 2, error: 2, disconnected: 2, off: 2 };
+  const sortable = ids.map(id => ({
+    id,
+    name: getNodeDisplayName(id),
+    status: getNodeStatus(id),
+    count: getNodeSessionCount(id),
+  }));
+  sortable.sort((a, b) => {
+    // Local always first.
+    if (a.id === 'local' && b.id !== 'local') return -1;
+    if (b.id === 'local' && a.id !== 'local') return 1;
+    const ra = rank[a.status] === undefined ? 9 : rank[a.status];
+    const rb = rank[b.status] === undefined ? 9 : rank[b.status];
+    if (ra !== rb) return ra - rb;
+    return a.name.localeCompare(b.name);
+  });
+
+  let html = '';
+  for (const n of sortable) {
+    const active = n.id === selectedNode;
+    const cls = 'ns-option' + (active ? ' active' : '');
+    const dotCls = VALID_DOT_CLASSES[n.status] || 'offline';
+    const statusLabel = statusLabelForNode(n.status);
+    const addr = (n.id !== 'local' && nodesData[n.id] && nodesData[n.id].remote_addr) ? nodesData[n.id].remote_addr : '';
+    const countBadge = n.count > 0 ? '<span class="ns-count">' + n.count + '</span>' : '';
+    const check = active ? '<span class="ns-check" aria-hidden="true">✓</span>' : '';
+    html += '<button type="button" class="' + cls + '" role="option" aria-selected="' + (active ? 'true' : 'false') + '" data-node="' + escAttr(n.id) + '" onclick="selectNodeFromDropdown(this.dataset.node)">' +
+      '<span class="ns-dot ' + dotCls + '" aria-hidden="true"></span>' +
+      '<span class="ns-body">' +
+        '<span class="ns-name" title="' + escAttr(n.name) + '">' + esc(n.name) + '</span>' +
+        (addr ? '<span class="ns-addr">' + esc(addr) + '</span>' : '') +
+      '</span>' +
+      '<span class="ns-status">' + esc(statusLabel) + '</span>' +
+      countBadge +
+      check +
+      '</button>';
+  }
+  return html;
+}
+
+// toggleNodeSelector is the click handler on the trigger. Flips the dropdown,
+// repaints, and installs a one-shot outside-click listener to close on stray
+// clicks. `event` is stopped so the same click doesn't immediately fire the
+// outside-click listener we're about to install.
+function toggleNodeSelector(event) {
+  if (event) { event.stopPropagation(); event.preventDefault(); }
+  nodeSelectorOpen = !nodeSelectorOpen;
+  updateNodeSelector();
+}
+
+// selectNodeFromDropdown is the click handler on each option. Switches the
+// filter, persists, closes the dropdown, and re-renders the sidebar against
+// the last cached payload so the change is instant (no network round-trip).
+function selectNodeFromDropdown(nodeId) {
+  if (!nodeId) return;
+  nodeSelectorOpen = false;
+  if (nodeId === selectedNode) {
+    updateNodeSelector();
+    return;
+  }
+  selectedNode = nodeId;
+  try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
+  updateNodeSelector();
+  // Re-render the sidebar so the filter takes effect. The selected session
+  // key may be on a different node now — we intentionally do NOT clear
+  // selectedKey here: if the user switches back, the card is still active,
+  // and if they pick a session on the new node, selectSession() will swap.
+  if (_lastSidebarData) {
+    renderSidebar(_lastSidebarData);
+  } else {
+    debouncedFetchSessions();
+  }
+  updateStatusBar();
+}
+
+// Outside-click + Esc to close the dropdown. Installed once at startup and
+// cheap to run (early-returns when the dropdown isn't open).
+document.addEventListener('click', function(e) {
+  if (!nodeSelectorOpen) return;
+  const root = document.getElementById('node-selector');
+  if (root && root.contains(e.target)) return;
+  nodeSelectorOpen = false;
+  updateNodeSelector();
+});
+document.addEventListener('keydown', function(e) {
+  if (!nodeSelectorOpen) return;
+  if (e.key === 'Escape') {
+    e.preventDefault();
+    nodeSelectorOpen = false;
+    updateNodeSelector();
+    const trigger = document.getElementById('ns-trigger');
+    if (trigger) trigger.focus();
+  }
+});
+
 /* ===== WebSocket Connection Manager ===== */
 
 const WS_STATES = { OFF: 'off', CONNECTING: 'connecting', AUTH: 'authenticating', CONNECTED: 'connected', DISCONNECTED: 'disconnected' };
@@ -4375,9 +6071,39 @@ const wsm = {
   lastEventTimeWs: 0,
   sendCounter: 0,
   _initialSubscribe: false,
+  // _everConnected gates the "已重新连接" toast to only fire AFTER the
+  // first successful WS handshake, so a page-load from an already-up
+  // state doesn't emit a bogus "reconnected" toast. Once true, every
+  // subsequent CONNECTED transition from any non-CONNECTED state
+  // triggers the toast — matches the UX P1 spec of surfacing recovery
+  // back to the user.
+  _everConnected: false,
+  // _authBlockUntil is a unix-ms wall-clock deadline. While Date.now() <
+  // _authBlockUntil, connect() skips dialing and scheduleReconnect() pushes
+  // the next attempt to the deadline instead of its own exponential backoff.
+  // Set by startWSAuthRetryCountdown when the server emits auth_fail with
+  // retry_after=N (rate-limit lockout). Without this gate the default
+  // reconnect loop would immediately dial a fresh WS, hit the same 429,
+  // and rack up more lockout events in the journal.
+  _authBlockUntil: 0,
+  // R110-P1 WS outage duration display: wall-clock ms when the connection
+  // first left the CONNECTED state (or 0 when connected). setState maintains
+  // this: any CONNECTED→non-CONNECTED transition writes Date.now() if the
+  // field is still 0 (first outage arm — don't stomp an earlier outage while
+  // cycling connecting → auth → connecting during backoff); CONNECTED clears
+  // it. updateStatusBar reads it to render "已断开 N 秒/分" inline hint so
+  // users distinguish "just lost the WS 2s ago" from "dead for 10 min".
+  _disconnectedSince: 0,
 
   connect() {
     if (this.conn && (this.conn.readyState === WebSocket.OPEN || this.conn.readyState === WebSocket.CONNECTING)) return;
+    // Respect the auth rate-limit gate: skip the dial if we're still within
+    // the lockout window. scheduleReconnect re-arms a timer pointing at the
+    // deadline so we come back exactly when the server says we can.
+    if (this._authBlockUntil > 0 && Date.now() < this._authBlockUntil) {
+      this.scheduleReconnect();
+      return;
+    }
 
     this.setState(WS_STATES.CONNECTING);
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -4420,10 +6146,17 @@ const wsm = {
 
   scheduleReconnect() {
     if (this.reconnectTimer) return;
+    // Pick the later of: the exponential-backoff delay, and the auth-block
+    // deadline. If an auth rate-limit countdown is active, we must not
+    // dial before it expires — the exponential curve would otherwise
+    // happily re-try every 1-30s and wake the 429 bucket over and over.
+    const now = Date.now();
+    const authGap = Math.max(0, this._authBlockUntil - now);
+    const delay = Math.max(this.backoff, authGap);
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
-    }, this.backoff);
+    }, delay);
     this.backoff = Math.min(this.backoff * 2, this.maxBackoff);
   },
 
@@ -4436,7 +6169,26 @@ const wsm = {
         this.onConnected();
         break;
       case 'auth_fail':
-        showToast('WS auth failed: ' + (msg.error || 'invalid token'));
+        // Classify the in-band WS auth error by pattern: the server emits
+        // "too many attempts" for rate-limit lockouts (should be a warn
+        // toast, not an error; the operator just needs to wait), and
+        // anything else is a token-mismatch fail requiring re-login.
+        //
+        // Rate-limit replies also carry `retry_after` (seconds) so the
+        // UI can show a countdown instead of the legacy generic "稍后
+        // 重试" hint. Older servers omit the field — parseInt of
+        // undefined is NaN, and startWSAuthRetryCountdown clamps to a
+        // 60s default so the UX degrades gracefully.
+        {
+          const raw = (msg.error || '').toString();
+          if (raw.toLowerCase().includes('too many')) {
+            let retryAfter = parseInt(msg.retry_after, 10);
+            if (!Number.isFinite(retryAfter) || retryAfter <= 0) retryAfter = 60;
+            startWSAuthRetryCountdown(retryAfter);
+          } else {
+            showAPIError('WebSocket 鉴权', 401, raw || '令牌无效');
+          }
+        }
         this.conn.close();
         break;
       case 'subscribed':
@@ -4578,8 +6330,8 @@ const wsm = {
       } else if (events.length === 0) {
         const sd = sessionsData[sid(selectedKey, selectedNode)];
         el.innerHTML = (sd && sd.state === 'running')
-          ? '<div class="empty-state loading-indicator">loading events\u2026</div>'
-          : '<div class="empty-state">no events yet</div>';
+          ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>'
+          : '<div class="empty-state">\u6682\u65e0\u4e8b\u4ef6</div>';
       } else {
         el.innerHTML = '';
       }
@@ -4767,8 +6519,7 @@ const wsm = {
         // top-of-screen toast. The chip is bound to the bubble, so when the
         // real "user" event replaces it (see the .optimistic-msg removal
         // path in onEvent) the chip disappears along with the bubble — no
-        // separate lifecycle to manage. Previous toast variant covered the
-        // mobile header and was detached from the message it referred to.
+        // separate lifecycle to manage.
         const lastOpt = document.querySelector('#events-scroll .event.user.optimistic-msg:last-of-type .event-content');
         if (lastOpt && !lastOpt.querySelector('.msg-queued-chip')) {
           const chip = document.createElement('div');
@@ -4804,7 +6555,10 @@ const wsm = {
       const opt = document.querySelector('.optimistic-msg');
       if (opt) opt.remove();
     } else if (msg.status === 'error') {
-      showToast('send error: ' + (msg.error || 'unknown'), 'error');
+      // The WS send_ack error is an in-band message, not an HTTP status,
+      // but treat the server-supplied `error` string the same way as an
+      // HTTP 500 body: truncate + prefix with "发送消息失败：".
+      showAPIError('发送消息', 500, msg.error || '');
       // Remove optimistic message on send failure
       const opt = document.querySelector('.optimistic-msg');
       if (opt) opt.remove();
@@ -4817,6 +6571,14 @@ const wsm = {
     const prev = sessionsData[sKey] || {};
     const prevState = prev.state;   // capture before mutation
     const wasDead = prev.death_reason && prevState !== 'running';
+    // Chat-style unread: a running→ready (or dead) transition means the model
+    // just produced a reply. Bump the unread counter unless the operator is
+    // already looking at that card — in which case they're reading it live.
+    const turnCompleted = prevState === 'running' && (msg.state === 'ready' || msg.state === 'dead');
+    const isActive = msg.key === selectedKey && msgNode === selectedNode;
+    if (turnCompleted && !isActive) {
+      sessionUnread[sKey] = (sessionUnread[sKey] || 0) + 1;
+    }
     if (sessionsData[sKey]) {
       sessionsData[sKey].state = msg.state;
       if (msg.reason) {
@@ -4850,6 +6612,10 @@ const wsm = {
         const stateSpan = meta.querySelectorAll('span')[1]; // [0]=dot, [1]=state text
         if (stateSpan && !stateSpan.classList.contains('sc-node')) stateSpan.textContent = displayState;
       }
+      // Sync the unread chip in place. fetchSessions re-renders from template
+      // and reads sessionUnread directly; this path keeps the bubble fresh
+      // between polls (WS state arrives faster than the sessions poll tick).
+      updateCardUnreadChip(card, sessionUnread[sKey] || 0);
     }
     if (msg.key === selectedKey && msgNode === selectedNode) updateMainState(msg.state, msg.reason);
     // Re-subscribe when session transitions to "running" and we need a live event stream.
@@ -4878,9 +6644,37 @@ const wsm = {
   },
 
   setState(s) {
+    const prev = this.state;
     this.state = s;
-    updateStatusBar();
+    // R110-P1 outage duration timestamp maintenance. Arm on first
+    // transition OUT of CONNECTED (or from a cold OFF start that never
+    // reached CONNECTED — treat any persistent non-CONNECTED as outage).
+    // Guard with `=== 0` so a connecting→auth→connecting cycle during
+    // backoff doesn't reset the clock to zero mid-outage. Clear on
+    // entering CONNECTED so the next outage arms fresh.
     if (s === WS_STATES.CONNECTED) {
+      this._disconnectedSince = 0;
+    } else if (prev === WS_STATES.CONNECTED && this._disconnectedSince === 0) {
+      // Just left a healthy connection — stamp the wall clock.
+      this._disconnectedSince = Date.now();
+    } else if (this._disconnectedSince === 0 && s !== WS_STATES.OFF) {
+      // Cold-start / never-connected case: arm from the first
+      // CONNECTING attempt so the user sees a duration even before the
+      // first successful handshake. OFF (the initial synthetic state)
+      // is excluded — pre-boot doesn't count as outage.
+      this._disconnectedSince = Date.now();
+    }
+    updateStatusBar();
+    _updateStatusTick(s);
+    if (s === WS_STATES.CONNECTED) {
+      // No reconnect toast: the sidebar status row already conveys the
+      // transition (amber "connecting..." dot → green "connected" dot,
+      // and .status-outage drops off) which is the user-visible signal.
+      // The previous top-of-screen toast was redundant and on mobile
+      // covered the header. _everConnected stays on the wsm struct because
+      // future consumers may still want to differentiate first-handshake
+      // from reconnect (e.g. fresh session poll vs. no-op).
+      this._everConnected = true;
       // WS connected: stop session polling, rely on push
       if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
       // Reduce discovered scan frequency
@@ -4918,6 +6712,51 @@ function updateHeaderCost() {
   const cost = s.total_cost || 0;
   el.textContent = '$' + (cost < 0.01 && cost > 0 ? cost.toFixed(4) : cost.toFixed(2));
   el.className = 'detail-cost' + (cost >= 1 ? ' high-cost' : cost > 0 ? ' has-cost' : '');
+  // R110-P3 cost-detail hover: keep the title attribute in sync so live
+  // updates (ws session_state / result events) don't leave stale metadata
+  // behind the tooltip. formatHeaderCostTooltip silently returns '' for
+  // a zero-cost session so the chip isn't distracted by a "session_id: …"
+  // hint when there's nothing to explain.
+  el.title = formatHeaderCostTooltip(s, selectedKey, selectedNode);
+}
+
+// formatHeaderCostTooltip builds a multi-line plain-text tooltip for the
+// header cost chip. Pure function so a contract test can exercise it
+// without driving the DOM. Return value is a newline-joined string, not
+// HTML — the browser renders native tooltips for `title` attributes, and
+// wrapping the helper so it ALWAYS returns plain text (never HTML) pins
+// the XSS-safe boundary: even when sess fields carry user-controlled
+// characters, the browser treats them as text and won't parse tags.
+//
+// R110-P3 scope: MVP surfaces data the front-end already has — cost
+// (precise), session creation + last-active timestamps, and the last
+// 8 chars of session_id (operators commonly paste that for CLI
+// `--resume`). Full token/input/output/cache breakdown requires backend
+// schema work and is tracked as residual scope.
+function formatHeaderCostTooltip(s, selKey, selNode) {
+  if (!s || typeof s !== 'object') return '';
+  const cost = s.total_cost || 0;
+  if (cost <= 0 && !s.session_id) return '';
+  const lines = [];
+  if (cost > 0) lines.push('累计花费: $' + cost.toFixed(4));
+  // firstSeen is stored per-(node,key) in localStorage by renderSidebar.
+  // Read it here so the tooltip shows when THIS dashboard first saw the
+  // session — matches operator mental model for "how long has this been
+  // running" better than any server-side timestamp we currently surface.
+  const seenKey = (selNode || 'local') + ':' + (selKey || '');
+  const first = typeof sessionFirstSeen === 'object' && sessionFirstSeen
+    ? sessionFirstSeen[seenKey]
+    : 0;
+  if (first > 0) {
+    lines.push('首次打开: ' + formatAbsTime(first));
+  }
+  if (s.last_active && s.last_active > 0) {
+    lines.push('最后活动: ' + formatAbsTime(s.last_active));
+  }
+  if (typeof s.session_id === 'string' && s.session_id.length >= 8) {
+    lines.push('会话 ID: …' + s.session_id.slice(-8));
+  }
+  return lines.join('\n');
 }
 
 function updateHeaderCLI() {
@@ -4967,9 +6806,12 @@ function handleDiscoveredClick(el) {
 
 async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliName, entrypoint) {
   stopPreviewPolling();
-  // Deselect any managed session
+  // Deselect any managed session. We null `selectedKey` but deliberately
+  // leave `selectedNode` intact — it now doubles as the sidebar filter and
+  // nulling it would strand the user on an empty list until their next
+  // refresh. The "no managed session selected" state is fully represented
+  // by `selectedKey === null`; other call sites check it that way.
   selectedKey = null;
-  selectedNode = null;
   if (wsm.subscribedKey) wsm.unsubscribe();
   if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
   document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
@@ -4984,7 +6826,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
   const main = document.getElementById('main');
   main.innerHTML =
     '<div class="main-header">' +
-      '<button class="btn-mobile-back" onclick="mobileBack()" title="back">&#8592;</button>' +
+      '<button class="btn-mobile-back" onclick="mobileBack()" title="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868" aria-label="\u8fd4\u56de\u4f1a\u8bdd\u5217\u8868">&#8592;</button>' +
       '<div class="main-header-content">' +
         '<h2>' + esc(base) + '</h2>' +
         '<div class="detail">' +
@@ -4992,17 +6834,17 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
         '</div>' +
       '</div>' +
     '</div>' +
-    '<div class="events" id="events-scroll"><div class="empty-state">loading...</div></div>' +
+    '<div class="events" id="events-scroll"><div class="empty-state">加载中...</div></div>' +
     '<div class="nav-pill" id="nav-pill">' +
-      '<button onclick="navMsg(\'prev\')" id="nav-prev" title="previous user message (Alt+\u2191)">&#x25B2;</button>' +
-      '<span class="nav-counter" id="nav-counter" onclick="navShowList()" title="click to list all"></span>' +
-      '<button onclick="navMsg(\'next\')" id="nav-next" title="next user message (Alt+\u2193)">&#x25BC;</button>' +
+      '<button onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">&#x25B2;</button>' +
+      '<span class="nav-counter" id="nav-counter" onclick="navShowList()" title="\u70b9\u51fb\u67e5\u770b\u5168\u90e8\u7528\u6237\u6d88\u606f"></span>' +
+      '<button onclick="navMsg(\'next\')" id="nav-next" title="\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2193)" aria-label="\u8df3\u5230\u4e0b\u4e00\u6761\u7528\u6237\u6d88\u606f">&#x25BC;</button>' +
     '</div>' +
     '<div class="input-area" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
-        '<div id="msg-input" contenteditable="true" role="textbox" data-placeholder="send a message to take over..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
-        '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="send">&#x27a4;</button>' +
+        '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message to take over..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
+        '<button class="btn-icon btn-send" id="btn-send" onclick="sendMessage()" title="发送" aria-label="发送消息">&#x27a4;</button>' +
       '</div>' +
     '</div>';
   navRebuild(); // clear stale nav state before async preview fetch
@@ -5017,8 +6859,8 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     if (!r.ok) {
       const errText = await r.text().catch(() => '');
       const el0 = document.getElementById('events-scroll');
-      if (el0) el0.innerHTML = '<div class="empty-state">' + esc(errText || 'preview failed') + '</div>';
-      showToast(errText || 'preview failed');
+      if (el0) el0.innerHTML = '<div class="empty-state">' + esc(errText || '预览失败') + '</div>';
+      showAPIError('预览会话', r.status, errText);
       return;
     }
     const events = await r.json();
@@ -5026,7 +6868,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     if (!el) return;
     const display = processEventsForDisplay(events);
     if (events.length === 0) {
-      el.innerHTML = '<div class="empty-state">no conversation history</div>';
+      el.innerHTML = '<div class="empty-state">暂无会话历史</div>';
     } else {
       el.innerHTML = renderEventsWithDividers(display, 0);
       stickEventsBottom();
@@ -5067,7 +6909,7 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
       } catch (_) {}
     }, 2000);
   } catch (e) {
-    showToast('preview error: ' + e.message);
+    showNetworkError('预览会话', e);
   }
 }
 
@@ -5077,7 +6919,7 @@ function handleTakeoverClick(el) {
 
 async function takeover(btn, pid, sessionId, cwd, procStartTime, node) {
   btn.classList.add('taking');
-  btn.textContent = 'taking over...';
+  btn.textContent = '接管中...';
   try {
     const headers = {'Content-Type': 'application/json'};
     const token = getToken();
@@ -5087,14 +6929,14 @@ async function takeover(btn, pid, sessionId, cwd, procStartTime, node) {
       body: JSON.stringify({pid: pid, session_id: sessionId, cwd: cwd, proc_start_time: procStartTime || 0, node: node || ''})
     });
     if (!r.ok) {
-      const text = await r.text();
-      showToast('takeover failed: ' + text);
+      const text = await r.text().catch(() => '');
+      showAPIError('接管进程', r.status, text);
       btn.classList.remove('taking');
-      btn.textContent = 'takeover';
+      btn.textContent = '接管';
       return;
     }
     const data = await r.json();
-    showToast('session taken over', 'success');
+    showToast('已接管会话', 'success');
     // Remove from discoveredItems so renderSidebar won't re-create the card
     discoveredItems = discoveredItems.filter(d => d.pid !== pid);
     // Immediately remove the discovered card from DOM
@@ -5107,9 +6949,9 @@ async function takeover(btn, pid, sessionId, cwd, procStartTime, node) {
       selectSession(data.key, node || 'local');
     }
   } catch (e) {
-    showToast('takeover error: ' + e.message);
+    showNetworkError('接管进程', e);
     btn.classList.remove('taking');
-    btn.textContent = 'takeover';
+    btn.textContent = '接管';
   }
 }
 
@@ -5213,7 +7055,10 @@ function initSwipeDelete() {
       c.style.transition = 'transform .2s ease, opacity .2s ease';
       c.style.transform = 'translateX(-100%)';
       c.style.opacity = '0';
-      setTimeout(() => dismissSession(c.dataset.key, c.dataset.node || 'local'), 180);
+      // Swipe past the threshold is an explicit gesture — skip the modal
+      // confirm here so the user doesn't have to re-confirm after already
+      // dragging 40% of the card width. Button-click path still confirms.
+      setTimeout(() => dismissSession(c.dataset.key, c.dataset.node || 'local', { skipConfirm: true }), 180);
     } else {
       c.style.transition = 'transform .2s ease, background .2s ease';
       c.style.transform = '';
@@ -5280,6 +7125,14 @@ let cronTimezoneLabel = '';
 // when the server has no default configured. Used to render helpful copy
 // alongside the notify toggle in create/edit modals.
 let cronNotifyDefault = null;
+// R110-P2 cron filter state — module-level so renderCronList can read the
+// live values each paint without a closure. Mirrors the sidebar-search
+// approach (cronFilterQuery is the substring, cronFilterStatus is one of
+// 'all' | 'active' | 'attention'). 'attention' matches paused-or-last_error,
+// aligning with the header cron-badge's attention definition so the filter
+// "what needs my eyeballs" dovetails with the top-level signal.
+let cronFilterQuery = '';
+let cronFilterStatus = 'all';
 
 // Pads an integer to two digits (e.g. 7 -> "07"). Used for HH/MM rendering.
 function pad2(n) { return (n < 10 ? '0' : '') + n; }
@@ -5392,7 +7245,16 @@ function parseHHMM(s) {
 // a recognized shape.
 function humanizeCron(expr) {
   const d = parseCronToFreq(expr);
-  if (!d) return expr;
+  if (!d) {
+    // parseCronToFreq only recognizes shapes the frequency-picker round-trips
+    // (editor contract). Some common hand-written shapes — notably the
+    // `*/N` step-value form — don't fit that shape but ARE worth
+    // humanizing for the display-only label. Try the label-only hook
+    // before giving up and echoing the raw expression.
+    const step = humanizeCronStepValue(expr);
+    if (step) return step;
+    return expr;
+  }
   if (d.mode === 'interval') {
     return d.unit === 'h' ? ('每 ' + d.n + ' 小时') : ('每 ' + d.n + ' 分钟');
   }
@@ -5406,6 +7268,45 @@ function humanizeCron(expr) {
   }
   if (d.mode === 'monthly') return '每月 ' + d.day + ' 日 ' + d.time;
   return expr;
+}
+
+// humanizeCronStepValue recognizes robfig/cron "step-value" shapes that the
+// frequency-picker intentionally doesn't round-trip, but which operators DO
+// write by hand (copy-pasted from crontab man pages, AI-generated configs,
+// IM commands). Display-only — NEVER used to construct a schedule back
+// from a descriptor, so the picker's round-trip invariant stays intact.
+//
+// Supported shapes (all 5-field cron; 6-field with seconds would be nice
+// but the backend cronParser explicitly omits Second so that won't parse
+// anyway — see internal/cron/job.go cronParser config):
+//   "*\/N * * * *"   → 每 N 分钟          (e.g. "*\/15 * * * *")
+//   "0 *\/N * * *"   → 每 N 小时（整点）   (e.g. "0 *\/6 * * *")
+//
+// Returns '' for anything else so the caller can fall back to raw.
+// Escaped *\/ in comments to keep this JS from looking like a block
+// close; at runtime it's just /*\/N/.
+function humanizeCronStepValue(expr) {
+  if (!expr) return '';
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) return '';
+  const [mm, hh, dom, mon, dow] = parts;
+  if (dom !== '*' || mon !== '*' || dow !== '*') return '';
+  // "*/N * * * *" — every N minutes, N must be 2..59 and > minCronInterval (5).
+  // We don't guard the 5-minute backend floor here: that's the scheduler's
+  // job to reject invalid jobs at create time. The label just describes
+  // what the user wrote.
+  let m = mm.match(/^\*\/(\d+)$/);
+  if (m && hh === '*') {
+    const n = parseInt(m[1], 10);
+    if (n >= 2 && n <= 59) return '每 ' + n + ' 分钟';
+  }
+  // "0 */N * * *" — every N hours on the hour, N must be 2..23.
+  m = hh.match(/^\*\/(\d+)$/);
+  if (m && mm === '0') {
+    const n = parseInt(m[1], 10);
+    if (n >= 2 && n <= 23) return '每 ' + n + ' 小时';
+  }
+  return '';
 }
 
 // DOW_LABELS mirrors robfig/cron DOW indexing (0=Sunday). The picker renders
@@ -5647,9 +7548,9 @@ function freqToggleAdvanced(btn) {
 }
 
 function buildWorkspaceHtml() {
-  let html = '<div style="margin-top:12px"><div class="modal-section-label">Workspace (optional)</div>';
+  let html = '<div style="margin-top:12px"><div class="modal-section-label">工作目录（可选）</div>';
   if (projectsData.length > 0) {
-    html += '<ul class="proj-pick" id="cron-ws-list" role="listbox" aria-label="Workspace">' +
+    html += '<ul class="proj-pick" id="cron-ws-list" role="listbox" aria-label="工作目录">' +
       projectsData.map(p =>
         '<li role="option" data-path="' + escAttr(p.path) + '" onclick="cronSelectWorkspace(this, \'' + escJs(p.path) + '\')">' +
           '<div class="pp-name">' + esc(p.name) + '</div>' +
@@ -5657,12 +7558,12 @@ function buildWorkspaceHtml() {
         '</li>'
       ).join('') +
       '<li id="cron-ws-custom-toggle" role="option" onclick="toggleCronWsCustom()">' +
-        '<div class="pp-custom"><span class="pp-custom-icon">+</span> Custom path</div>' +
+        '<div class="pp-custom"><span class="pp-custom-icon">+</span> 自定义路径</div>' +
       '</li>' +
       '</ul>';
   }
   html += '<div id="cron-ws-custom-form" style="' + (projectsData.length > 0 ? 'display:none;' : '') + 'margin-top:4px">' +
-    '<input id="cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" aria-label="Workspace path">' +
+    '<input id="cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" aria-label="工作目录路径">' +
     '</div></div>';
   return html;
 }
@@ -5676,7 +7577,7 @@ function buildScheduleSection(initialDesc, initialRawExpr) {
   const pickerHtml = buildFreqPickerHtml(initialDesc);
   const advancedOpen = !!initialRawExpr;
   const rawValue = initialRawExpr ? escAttr(initialRawExpr) : '';
-  return '<div class="modal-section-label">Schedule</div>' +
+  return '<div class="modal-section-label">运行频率</div>' +
     pickerHtml +
     '<button type="button" class="freq-advanced-toggle' + (advancedOpen ? ' open' : '') + '" onclick="freqToggleAdvanced(this)">' +
       '<span class="chev">&#9656;</span>' +
@@ -5703,18 +7604,18 @@ function createNewCronJob() {
   const contextHtml = buildCronContextSection(false);
 
   overlay.innerHTML =
-    '<div class="modal" role="dialog" aria-modal="true" aria-label="New cron job">' +
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="新建定时任务">' +
       '<h3>New Cron Job</h3>' +
       '<div class="modal-body">' +
         '<div style="margin-bottom:12px">' +
-          '<div class="modal-section-label">Prompt</div>' +
-          '<textarea id="cron-prompt" placeholder="what should this job do?" style="min-height:72px;max-height:160px" aria-label="Prompt"></textarea>' +
+          '<div class="modal-section-label">提示词</div>' +
+          '<textarea id="cron-prompt" placeholder="这个任务要做什么？" style="min-height:72px;max-height:160px" aria-label="提示词"></textarea>' +
         '</div>' +
         scheduleHtml + wsHtml + notifyHtml + contextHtml +
       '</div>' +
       '<div class="modal-btns">' +
-        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
-        '<button type="button" class="primary" onclick="doCreateCronJob()">create</button>' +
+        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
+        '<button type="button" class="primary" onclick="doCreateCronJob()">创建</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
@@ -5775,8 +7676,8 @@ function buildCronNotifySection(currentNotify, hasOverride, overridePlat, overri
         '<label class="cron-notify-override-toggle" style="font-size:12px;cursor:pointer"><input type="checkbox" id="cron-notify-override" ' + (hasOverride ? 'checked' : '') + ' onchange="cronNotifyOverrideToggle(this)"> 自定义此任务的通知目标</label>' +
       '</div>' +
       '<div id="cron-notify-override-form" style="' + showOverride + 'margin-top:6px;display:flex;gap:6px">' +
-        '<input id="cron-notify-platform" placeholder="feishu" value="' + escAttr(overridePlat || '') + '" aria-label="Platform" style="flex:0 0 100px">' +
-        '<input id="cron-notify-chat-id" placeholder="chat_id" value="' + escAttr(overrideChat || '') + '" aria-label="Chat ID" style="flex:1">' +
+        '<input id="cron-notify-platform" placeholder="feishu" value="' + escAttr(overridePlat || '') + '" aria-label="IM 平台" style="flex:0 0 100px">' +
+        '<input id="cron-notify-chat-id" placeholder="chat_id" value="' + escAttr(overrideChat || '') + '" aria-label="群/会话 ID" style="flex:1">' +
       '</div>' +
     '</div>';
 }
@@ -5886,13 +7787,13 @@ async function doCreateCronJob() {
     if (freshCtx === true) body.fresh_context = true;
     const r = await fetch('/api/cron', {method: 'POST', headers, body: JSON.stringify(body)});
     if (!r.ok) {
-      const errText = (await r.text().catch(() => '')).slice(0, 160);
-      showToast('create failed: ' + (errText || r.status));
+      const errText = await r.text().catch(() => '');
+      showAPIError('创建定时任务', r.status, errText);
       return;
     }
     const data = await r.json();
     if (overlay) overlay.remove();
-    showToast('cron job created', 'success');
+    showToast('定时任务已创建', 'success');
     fetchCronJobs();
     if (data.id) {
       const key = 'cron:' + data.id;
@@ -5901,11 +7802,14 @@ async function doCreateCronJob() {
       await fetchSessions();
       selectSession(key, 'local');
     }
-  } catch (e) { showToast('error: ' + e.message); }
+  } catch (e) { showNetworkError('创建定时任务', e); }
 }
 
 function openCronPanel() {
-  selectedKey = null; selectedNode = null;
+  // Deselect managed session via selectedKey only — selectedNode is the
+  // sidebar filter now (see previewDiscovered comment) and must survive
+  // opening the cron panel so the user comes back to the right node list.
+  selectedKey = null;
   if (wsm.subscribedKey) wsm.unsubscribe();
   if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
   document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
@@ -5918,6 +7822,146 @@ function openCronPanel() {
   fetchCronJobs().then(() => renderCronPanel());
 }
 
+// filterCronJobs is the pure match step for the R110-P2 cron panel filter.
+// Extracted so unit tests exercise the predicate without driving DOM. Match
+// surface for the substring arm: prompt, work_dir, schedule, id (all
+// case-insensitive). Status arm is one of 'all' | 'active' | 'attention',
+// where 'attention' == paused OR last_error (dovetails with the header
+// cron-badge's attention count so both surfaces speak the same predicate).
+function filterCronJobs(jobs, query, status) {
+  const q = (query || '').trim().toLowerCase();
+  const s = status || 'all';
+  return (Array.isArray(jobs) ? jobs : []).filter(j => {
+    if (!j) return false;
+    if (s === 'active' && j.paused) return false;
+    if (s === 'attention' && !(j.paused || j.last_error)) return false;
+    if (!q) return true;
+    const fields = [j.prompt, j.work_dir, j.schedule, j.id];
+    for (const f of fields) {
+      if (typeof f === 'string' && f.toLowerCase().indexOf(q) !== -1) return true;
+    }
+    return false;
+  });
+}
+
+// cronJobCardHtml renders a single cron card. Extracted from the legacy
+// renderCronPanel map() body so renderCronList can iterate over a filtered
+// slice without duplicating the (non-trivial) markup. Pure w.r.t. inputs.
+function cronJobCardHtml(j) {
+  const status = j.paused ? '<span class="badge paused">paused</span>' : '<span class="badge running">active</span>';
+  const nextStr = j.next_run ? timeAgo(j.next_run, true) : '';
+  const lastStr = j.last_run_at ? timeAgo(j.last_run_at) : '';
+  const nextAbs = j.next_run ? formatAbsTime(j.next_run) : '';
+  const lastAbs = j.last_run_at ? formatAbsTime(j.last_run_at) : '';
+  const wdStr = j.work_dir ? '<span class="cc-ws" title="' + escAttr(j.work_dir) + '">' + esc(shortPath(j.work_dir)) + '</span>' : '';
+  let notifyStr = '';
+  if (j.notify === true) {
+    const tgt = (j.notify_platform && j.notify_chat_id)
+      ? j.notify_platform + ':' + j.notify_chat_id
+      : (cronNotifyDefault ? cronNotifyDefault.platform + ':' + cronNotifyDefault.chat_id : 'default');
+    notifyStr = '<span class="cc-notify on" title="IM 通知 → ' + escAttr(tgt) + '">&#128276; notify</span>';
+  } else if (j.notify === false) {
+    notifyStr = '<span class="cc-notify off" title="IM 通知已关闭">&#128277; silent</span>';
+  }
+  const freshStr = j.fresh_context
+    ? '<span class="cc-notify on" title="每次运行前重置会话">&#128260; fresh</span>'
+    : '';
+  let result = '';
+  if (j.last_error) {
+    result = '<div class="cc-result err"><span class="cc-icon">\u2716</span><span class="cc-text">' + esc(j.last_error) + '</span></div>';
+  } else if (j.last_result) {
+    result = '<div class="cc-result ok"><span class="cc-icon">\u2714</span><span class="cc-text">' + esc(j.last_result) + '</span></div>';
+  }
+  const promptBlock = j.prompt
+    ? '<div class="cc-prompt">' + esc(j.prompt) + '</div>'
+    : '<div class="cc-prompt placeholder">未设置 prompt（点右侧 edit 按钮配置）</div>';
+  const toggleBtn = j.paused
+    ? '<button type="button" class="cc-btn" onclick="cronResume(\'' + escJs(j.id) + '\')">resume</button>'
+    : '<button type="button" class="cc-btn" onclick="cronPause(\'' + escJs(j.id) + '\')">pause</button>';
+  const human = humanizeCron(j.schedule);
+  const showRaw = human !== j.schedule;
+  return '<div class="cron-card" role="button" tabindex="0" onclick="openCronSession(\'' + escJs(j.id) + '\')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronSession(\'' + escJs(j.id) + '\')}">' +
+    promptBlock +
+    '<div class="cc-human">' + esc(human) + '</div>' +
+    (showRaw ? '<div class="cc-expr">' + esc(j.schedule) + '</div>' : '') +
+    '<div class="cc-meta">' + status + wdStr + notifyStr + freshStr +
+      (lastStr ? '<span' + (lastAbs ? ' title="last run: ' + escAttr(lastAbs) + '"' : '') + '>ran ' + lastStr + '</span>' : '') +
+      (nextStr ? '<span' + (nextAbs ? ' title="next run: ' + escAttr(nextAbs) + '"' : '') + '>next ' + nextStr + '</span>' : '') +
+    '</div>' +
+    result +
+    '<div class="cc-actions" onclick="event.stopPropagation()">' +
+      '<button type="button" class="cc-btn" onclick="editCronJob(\'' + escJs(j.id) + '\')">edit</button>' +
+      toggleBtn +
+      '<button type="button" class="cc-btn danger" onclick="cronDelete(\'' + escJs(j.id) + '\')">delete</button>' +
+    '</div>' +
+  '</div>';
+}
+
+// renderCronList repaints only the items container. Called by the filter
+// input / chip handlers so typing doesn't rebuild the shell and blow away
+// input focus / value. Also called by renderCronPanel after it builds the
+// shell on first paint.
+function renderCronList() {
+  const host = document.getElementById('cron-list-items');
+  if (!host) return;
+  const filterActive = cronFilterQuery !== '' || cronFilterStatus !== 'all';
+  if (!filterActive && cronJobs.length === 0) {
+    host.innerHTML =
+      '<div class="cron-empty">' +
+        '<div class="cron-empty-icon" aria-hidden="true">&#9201;</div>' +
+        '<div class="cron-empty-hint">No cron jobs yet</div>' +
+        '<div class="cron-empty-sub">让 naozhi 按计划自动在某个工作目录下运行 prompt</div>' +
+        '<button type="button" class="cron-empty-cta" onclick="createNewCronJob()">Create your first cron job</button>' +
+      '</div>';
+    return;
+  }
+  const matched = filterCronJobs(cronJobs, cronFilterQuery, cronFilterStatus);
+  if (matched.length === 0) {
+    host.innerHTML =
+      '<div class="cron-filter-empty">' +
+        '没有匹配的定时任务' +
+        '<div class="cfe-hint">调整关键词或切换状态标签</div>' +
+      '</div>';
+    return;
+  }
+  const sorted = [...matched].sort((a, b) => b.created_at - a.created_at);
+  host.innerHTML = sorted.map(cronJobCardHtml).join('');
+}
+
+// onCronSearchInput is the input oninput handler. Reads the live value,
+// writes it to module state, then repaints only the items container. Cheap
+// and local: typing 50 chars triggers 50 O(N) filter passes on the in-memory
+// cronJobs array, no server round-trips.
+function onCronSearchInput() {
+  const input = document.getElementById('cron-search-input');
+  cronFilterQuery = input ? (input.value || '').trim() : '';
+  renderCronList();
+}
+
+// setCronStatusFilter toggles between the three status modes. Re-applies
+// aria-pressed + active class on the chip row so the current mode is
+// visible + SR-accessible, then repaints the list.
+function setCronStatusFilter(status) {
+  if (status !== 'all' && status !== 'active' && status !== 'attention') return;
+  cronFilterStatus = status;
+  document.querySelectorAll('.cron-status-chip').forEach(el => {
+    const on = el.getAttribute('data-status') === status;
+    el.classList.toggle('active', on);
+    el.setAttribute('aria-pressed', on ? 'true' : 'false');
+  });
+  renderCronList();
+}
+
+// clearCronSearch resets the substring arm but keeps the status chip alone
+// so "view attention" + "clear the search" is one click, not a two-step
+// reset. Called by the x button inside the search input row.
+function clearCronSearch() {
+  const input = document.getElementById('cron-search-input');
+  if (input) input.value = '';
+  cronFilterQuery = '';
+  renderCronList();
+}
+
 function renderCronPanel() {
   // Guard against an async race: fetchCronJobs().then(renderCronPanel) fires
   // after the user may have already clicked a cron card and opened a session.
@@ -5925,9 +7969,19 @@ function renderCronPanel() {
   // the chat history "disappear". Only paint when no session is selected.
   if (selectedKey) return;
   const main = document.getElementById('main');
+  // Shell-preserving repaint: when the cron panel is already mounted (user
+  // is just typing in the search box or toggling a chip), we only want to
+  // repaint the list. Rebuilding the shell would wipe the input value and
+  // steal focus. Detect by probing for the list host element.
+  if (document.getElementById('cron-list-items')) {
+    renderCronList();
+    return;
+  }
   const tzBanner = cronTimezoneLabel
     ? '<div class="cron-tz-banner" title="Schedules are evaluated in this timezone">timezone: ' + esc(cronTimezoneLabel) + '</div>'
     : '';
+  const chipActive = s => cronFilterStatus === s ? ' active' : '';
+  const chipPressed = s => cronFilterStatus === s ? 'true' : 'false';
   let html =
     '<div class="main-header">' +
       '<button class="btn-mobile-back" onclick="mobileBack()" title="back" aria-label="Back to sidebar">&#8592;</button>' +
@@ -5942,71 +7996,25 @@ function renderCronPanel() {
             ' New' +
           '</button>' +
         '</div>' +
-        tzBanner;
-  if (cronJobs.length === 0) {
-    html +=
-      '<div class="cron-empty">' +
-        '<div class="cron-empty-icon" aria-hidden="true">&#9201;</div>' +
-        '<div class="cron-empty-hint">No cron jobs yet</div>' +
-        '<button type="button" class="cron-empty-cta" onclick="createNewCronJob()">Create your first cron job</button>' +
-      '</div>';
-  } else {
-    const sorted = [...cronJobs].sort((a, b) => b.created_at - a.created_at);
-    html += sorted.map(j => {
-      const status = j.paused ? '<span class="badge paused">paused</span>' : '<span class="badge running">active</span>';
-      const nextStr = j.next_run ? timeAgo(j.next_run, true) : '';
-      const lastStr = j.last_run_at ? timeAgo(j.last_run_at) : '';
-      const wdStr = j.work_dir ? '<span class="cc-ws" title="' + escAttr(j.work_dir) + '">' + esc(shortPath(j.work_dir)) + '</span>' : '';
-      // Notify badge: explicit on/off only; legacy-default jobs show nothing.
-      let notifyStr = '';
-      if (j.notify === true) {
-        const tgt = (j.notify_platform && j.notify_chat_id)
-          ? j.notify_platform + ':' + j.notify_chat_id
-          : (cronNotifyDefault ? cronNotifyDefault.platform + ':' + cronNotifyDefault.chat_id : 'default');
-        notifyStr = '<span class="cc-notify on" title="IM 通知 → ' + escAttr(tgt) + '">&#128276; notify</span>';
-      } else if (j.notify === false) {
-        notifyStr = '<span class="cc-notify off" title="IM 通知已关闭">&#128277; silent</span>';
-      }
-      const freshStr = j.fresh_context
-        ? '<span class="cc-notify on" title="每次运行前重置会话">&#128260; fresh</span>'
-        : '';
-      let result = '';
-      if (j.last_error) {
-        result = '<div class="cc-result err"><span class="cc-icon">\u2716</span><span class="cc-text">' + esc(j.last_error) + '</span></div>';
-      } else if (j.last_result) {
-        result = '<div class="cc-result ok"><span class="cc-icon">\u2714</span><span class="cc-text">' + esc(j.last_result) + '</span></div>';
-      }
-      const promptBlock = j.prompt
-        ? '<div class="cc-prompt">' + esc(j.prompt) + '</div>'
-        : '<div class="cc-prompt placeholder">(no prompt — tap to set)</div>';
-      const toggleBtn = j.paused
-        ? '<button type="button" class="cc-btn" onclick="cronResume(\'' + escJs(j.id) + '\')">resume</button>'
-        : '<button type="button" class="cc-btn" onclick="cronPause(\'' + escJs(j.id) + '\')">pause</button>';
-      // Humanize the schedule for the primary label; surface the raw
-      // expression in smaller, dimmer text for users who recognize cron
-      // syntax. Keeping both avoids losing information and makes the card
-      // self-explanatory regardless of how the job was created.
-      const human = humanizeCron(j.schedule);
-      const showRaw = human !== j.schedule;
-      return '<div class="cron-card" role="button" tabindex="0" onclick="openCronSession(\'' + escJs(j.id) + '\')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronSession(\'' + escJs(j.id) + '\')}">' +
-        promptBlock +
-        '<div class="cc-human">' + esc(human) + '</div>' +
-        (showRaw ? '<div class="cc-expr">' + esc(j.schedule) + '</div>' : '') +
-        '<div class="cc-meta">' + status + wdStr + notifyStr + freshStr +
-          (lastStr ? '<span>ran ' + lastStr + '</span>' : '') +
-          (nextStr ? '<span>next ' + nextStr + '</span>' : '') +
+        '<div class="cron-filter-bar">' +
+          '<div class="cron-search-row">' +
+            '<input type="text" id="cron-search-input" class="cron-search-input" placeholder="搜索 prompt、目录、cron 表达式..." autocomplete="off" spellcheck="false" aria-label="搜索定时任务" value="' + escAttr(cronFilterQuery) + '" oninput="onCronSearchInput()" />' +
+            '<button type="button" class="cron-search-clear" onclick="clearCronSearch()" title="清空搜索" aria-label="清空搜索">&times;</button>' +
+          '</div>' +
+          '<div class="cron-status-chips" role="group" aria-label="按状态筛选">' +
+            '<button type="button" class="cron-status-chip' + chipActive('all') + '" data-status="all" aria-pressed="' + chipPressed('all') + '" onclick="setCronStatusFilter(\'all\')">全部</button>' +
+            '<button type="button" class="cron-status-chip' + chipActive('active') + '" data-status="active" aria-pressed="' + chipPressed('active') + '" onclick="setCronStatusFilter(\'active\')">运行中</button>' +
+            '<button type="button" class="cron-status-chip' + chipActive('attention') + '" data-status="attention" aria-pressed="' + chipPressed('attention') + '" onclick="setCronStatusFilter(\'attention\')">需关注</button>' +
+          '</div>' +
         '</div>' +
-        result +
-        '<div class="cc-actions" onclick="event.stopPropagation()">' +
-          '<button type="button" class="cc-btn" onclick="editCronJob(\'' + escJs(j.id) + '\')">edit</button>' +
-          toggleBtn +
-          '<button type="button" class="cc-btn danger" onclick="cronDelete(\'' + escJs(j.id) + '\')">delete</button>' +
-        '</div>' +
-      '</div>';
-    }).join('');
-  }
-  html += '</div></div>';
+        tzBanner +
+        '<div id="cron-list-items"></div>' +
+      '</div>' +
+    '</div>';
   main.innerHTML = html;
+  // Paint list now that the shell is mounted; subsequent keystrokes / chip
+  // flips route through renderCronList directly without touching the shell.
+  renderCronList();
 }
 
 function openCronSession(cronId) {
@@ -6038,6 +8046,11 @@ async function fetchCronJobs() {
       const attention = cronJobs.filter(j => j.paused || j.last_error).length;
       cronBadge.textContent = attention;
       cronBadge.style.display = attention > 0 ? '' : 'none';
+      // Attention badge is semantically an alert (paused / errored jobs), so
+      // opt into the red .is-alert variant defined in dashboard.html Track D.
+      // History badge stays neutral grey because it is a cumulative count, not
+      // an unread/failure signal.
+      cronBadge.classList.toggle('is-alert', attention > 0);
     }
   } catch (e) { console.error('fetch cron:', e); }
 }
@@ -6048,9 +8061,13 @@ async function cronPause(id) {
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch('/api/cron/pause', { method: 'POST', headers, body: JSON.stringify({ id }) });
-    if (!r.ok) { showToast('pause failed'); return; }
+    if (!r.ok) {
+      const raw = await r.text().catch(() => '');
+      showAPIError('暂停定时任务', r.status, raw);
+      return;
+    }
     fetchCronJobs().then(() => renderCronPanel());
-  } catch (e) { showToast('error: ' + e.message); }
+  } catch (e) { showNetworkError('暂停定时任务', e); }
 }
 
 async function cronResume(id) {
@@ -6059,21 +8076,38 @@ async function cronResume(id) {
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch('/api/cron/resume', { method: 'POST', headers, body: JSON.stringify({ id }) });
-    if (!r.ok) { showToast('resume failed'); return; }
+    if (!r.ok) {
+      const raw = await r.text().catch(() => '');
+      showAPIError('恢复定时任务', r.status, raw);
+      return;
+    }
     fetchCronJobs().then(() => renderCronPanel());
-  } catch (e) { showToast('error: ' + e.message); }
+  } catch (e) { showNetworkError('恢复定时任务', e); }
 }
 
 async function cronDelete(id) {
-  if (!confirm('Delete cron job ' + id + '?')) return;
+  const job = (Array.isArray(cronJobs) ? cronJobs.find(j => j.id === id) : null) || {};
+  const promptPreview = (job.prompt || '').slice(0, 200);
+  const ok = await confirmDialog({
+    title: '删除定时任务？',
+    message: '任务将被永久删除，下次不再触发。',
+    detail: promptPreview ? promptPreview : ('id: ' + id),
+    confirmText: '删除',
+    variant: 'danger',
+  });
+  if (!ok) return;
   try {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch('/api/cron?id=' + encodeURIComponent(id), { method: 'DELETE', headers });
-    if (!r.ok) { showToast('delete failed'); return; }
+    if (!r.ok) {
+      const raw = await r.text().catch(() => '');
+      showAPIError('删除定时任务', r.status, raw);
+      return;
+    }
     fetchCronJobs().then(() => renderCronPanel());
-  } catch (e) { showToast('error: ' + e.message); }
+  } catch (e) { showNetworkError('删除定时任务', e); }
 }
 
 // Edit an existing cron job. Opens a modal pre-populated with the current
@@ -6083,7 +8117,7 @@ async function cronDelete(id) {
 // disclosure so it can still be edited without loss.
 function editCronJob(id) {
   const job = cronJobs.find(j => j.id === id);
-  if (!job) { showToast('job not found'); return; }
+  if (!job) { showToast('未找到该任务', 'warning'); return; }
 
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
@@ -6100,24 +8134,24 @@ function editCronJob(id) {
   const scheduleHtml = buildScheduleSection(initialDesc || { mode: 'interval', n: 1, unit: 'h' }, initialRaw);
 
   overlay.innerHTML =
-    '<div class="modal" role="dialog" aria-modal="true" aria-label="Edit cron job">' +
-      '<h3>Edit Cron Job</h3>' +
+    '<div class="modal" role="dialog" aria-modal="true" aria-label="编辑定时任务">' +
+      '<h3>编辑定时任务</h3>' +
       '<div class="modal-body">' +
         '<div style="margin-bottom:12px">' +
-          '<div class="modal-section-label">Prompt</div>' +
-          '<textarea id="edit-cron-prompt" style="min-height:72px;max-height:240px" aria-label="Prompt"></textarea>' +
+          '<div class="modal-section-label">提示词</div>' +
+          '<textarea id="edit-cron-prompt" style="min-height:72px;max-height:240px" aria-label="提示词"></textarea>' +
         '</div>' +
         scheduleHtml +
         '<div style="margin-top:12px">' +
-          '<div class="modal-section-label">Workspace (optional)</div>' +
-          '<input id="edit-cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" aria-label="Workspace path">' +
-          '<div class="cron-tz-hint">留空则使用默认 workspace</div>' +
+          '<div class="modal-section-label">工作目录（可选）</div>' +
+          '<input id="edit-cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" aria-label="工作目录路径">' +
+          '<div class="cron-tz-hint">留空则使用默认工作目录</div>' +
         '</div>' +
         notifyHtml + contextHtml +
       '</div>' +
       '<div class="modal-btns">' +
-        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">cancel</button>' +
-        '<button type="button" class="primary" onclick="doEditCronJob(\'' + escJs(id) + '\')">save</button>' +
+        '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
+        '<button type="button" class="primary" onclick="doEditCronJob(\'' + escJs(id) + '\')">保存</button>' +
       '</div>' +
     '</div>';
   document.body.appendChild(overlay);
@@ -6148,7 +8182,7 @@ async function doEditCronJob(id) {
   const overlay = document.querySelector('.modal-overlay');
   if (!overlay) return;
   const job = cronJobs.find(j => j.id === id);
-  if (!job) { showToast('job not found'); return; }
+  if (!job) { showToast('未找到该任务', 'warning'); return; }
 
   const newPrompt = document.getElementById('edit-cron-prompt').value;
   // Advanced raw input wins over picker; if both empty use overlay cache
@@ -6194,7 +8228,7 @@ async function doEditCronJob(id) {
   }
 
   if (Object.keys(body).length === 0) { overlay.remove(); return; }
-  if (body.schedule === '') { showToast('schedule must not be empty', 'warning'); return; }
+  if (body.schedule === '') { showToast('频率不能为空', 'warning'); return; }
 
   try {
     const headers = Object.assign({ 'Content-Type': 'application/json' }, authHeaders());
@@ -6202,15 +8236,15 @@ async function doEditCronJob(id) {
       method: 'PATCH', headers, body: JSON.stringify(body),
     });
     if (!r.ok) {
-      const raw = (await r.text().catch(() => '')).slice(0, 160);
-      showToast('save failed: ' + (raw || r.status));
+      const raw = await r.text().catch(() => '');
+      showAPIError('保存定时任务', r.status, raw);
       return;
     }
     overlay.remove();
-    showToast('cron job updated', 'success');
+    showToast('定时任务已更新', 'success');
     fetchCronJobs().then(() => renderCronPanel());
   } catch (e) {
-    showToast('error: ' + e.message);
+    showNetworkError('保存定时任务', e);
   }
 }
 
@@ -6330,6 +8364,7 @@ initMobile();
 initViewportTracking();
 initSwipeDelete();
 initSwipeBack();
+initSidebarSearch();
 (function(){
   var ov=document.createElement('div');ov.className='lightbox-overlay';
   ov.setAttribute('role','dialog');ov.setAttribute('aria-modal','true');ov.setAttribute('aria-label','Image preview');
@@ -6573,9 +8608,19 @@ initSwipeBack();
   }
 
   async function openScratch(quote, agentId, sourceKey, sourceMsgTime) {
-    // Confirm replacement if an aside is already open.
+    // Confirm replacement if an aside is already open. Replacement is
+    // non-destructive (the previous scratch is still reachable via history)
+    // so we use 'primary' variant instead of 'danger'.
     if (state) {
-      if (!confirm('当前追问窗口将被替换，继续？')) return;
+      const ok = (typeof confirmDialog === 'function')
+        ? await confirmDialog({
+            title: '替换当前追问窗口？',
+            message: '当前未保存为正式会话的追问内容将被关闭。',
+            confirmText: '替换',
+            variant: 'primary',
+          })
+        : confirm('当前追问窗口将被替换，继续？');
+      if (!ok) return;
       await closeScratch(true);
     }
     try {
@@ -6593,8 +8638,8 @@ initSwipeBack();
         }),
       });
       if (!r.ok) {
-        const txt = (await r.text().catch(() => '')).slice(0, 160);
-        if (typeof showToast === 'function') showToast('打开追问失败：' + (txt || r.status));
+        const txt = await r.text().catch(() => '');
+        if (typeof showAPIError === 'function') showAPIError('打开追问', r.status, txt);
         return;
       }
       const data = await r.json();
@@ -6644,7 +8689,7 @@ initSwipeBack();
       startPolling();
     } catch (e) {
       console.error('open scratch', e);
-      if (typeof showToast === 'function') showToast('网络错误');
+      if (typeof showNetworkError === 'function') showNetworkError('打开追问', e);
     }
   }
 
@@ -6677,13 +8722,13 @@ initSwipeBack();
         body: JSON.stringify({key: state.key, text}),
       });
       if (!r.ok) {
-        const txt = (await r.text().catch(() => '')).slice(0, 160);
-        if (typeof showToast === 'function') showToast('发送失败：' + (txt || r.status));
+        const txt = await r.text().catch(() => '');
+        if (typeof showAPIError === 'function') showAPIError('发送消息', r.status, txt);
         elLoading.classList.remove('visible');
       }
     } catch (e) {
       console.error('scratch send', e);
-      if (typeof showToast === 'function') showToast('网络错误');
+      if (typeof showNetworkError === 'function') showNetworkError('发送消息', e);
       elLoading.classList.remove('visible');
     } finally {
       sending = false;
@@ -6693,18 +8738,24 @@ initSwipeBack();
   }
 
   async function promoteScratch() {
-    if (!state) return;
+    console.log('[scratch] promote click', {hasState: !!state, id: state && state.scratchId});
+    if (!state) {
+      if (typeof showToast === 'function') showToast('追问会话已关闭，无法保存');
+      return;
+    }
     const id = state.scratchId;
     try {
       const r = await fetch('/api/scratch/' + encodeURIComponent(id) + '/promote', {
         method: 'POST', headers: authHeaders(),
       });
+      console.log('[scratch] promote response', r.status);
       if (!r.ok) {
-        const txt = (await r.text().catch(() => '')).slice(0, 160);
-        if (typeof showToast === 'function') showToast('保存失败：' + (txt || r.status));
+        const txt = await r.text().catch(() => '');
+        if (typeof showAPIError === 'function') showAPIError('保存为正式会话', r.status, txt);
         return;
       }
       const data = await r.json();
+      console.log('[scratch] promoted to', data && data.key);
       state = null;   // scratch was detached server-side; skip the DELETE in closeScratch
       stopPolling();
       hideDrawer();
@@ -6720,7 +8771,7 @@ initSwipeBack();
       } catch (_) {}
     } catch (e) {
       console.error('promote scratch', e);
-      if (typeof showToast === 'function') showToast('网络错误');
+      if (typeof showNetworkError === 'function') showNetworkError('保存为正式会话', e);
     }
   }
 
@@ -6751,7 +8802,14 @@ initSwipeBack();
       sendInScratch();
     }
   });
-  elSave.addEventListener('click', promoteScratch);
+  if (elSave) {
+    elSave.addEventListener('click', (ev) => {
+      console.log('[scratch] ad-save click received');
+      promoteScratch();
+    });
+  } else {
+    console.warn('[scratch] ad-save element missing at wire time');
+  }
   elQuoteChip.addEventListener('click', () => {
     const expanded = elQuoteChip.classList.toggle('expanded');
     elQuotePreview.textContent = expanded ? (elQuoteChip.dataset.full || '') : previewText(elQuoteChip.dataset.full || '');
