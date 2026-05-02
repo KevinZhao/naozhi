@@ -1027,3 +1027,115 @@ func TestHandleCronCommand_Add_InvalidSchedule(t *testing.T) {
 		t.Error("expected at least one reply")
 	}
 }
+
+// ---------------------------------------------------------------------------
+// BuildHandler — group chat gate (Commit 1: group + !MentionMe silently drops)
+// ---------------------------------------------------------------------------
+
+// TestBuildHandler_GroupChatGate exercises the gate that silently drops
+// un-mentioned group chat messages. Direct chats are unaffected; mentioned
+// group messages fall through to the normal path.
+//
+// The gate sits BEFORE dispatchCommand, so slash commands in groups ALSO
+// require @bot — this is intentional and enforces the "groups need explicit
+// activation" contract.
+//
+// Indicators used:
+//   - replyCount > 0: handler reached a reply emission path. Plain-text messages
+//     in the test env fail at GetOrCreate (no CLI wrapper) and surface a "会话创建
+//     失败" error reply — still a reply, which is the signal we want. For
+//     slash commands the reply is the /help text.
+//   - messageCount: only bumped for non-slash text that passed dedup+gate; a
+//     durable witness that "the gate let a plain-text message through", since
+//     slash commands skip the counter.
+//
+// Both indicators are synchronous with respect to the gate — no goroutine
+// scheduling involved — so no Eventually loop is needed.
+func TestBuildHandler_GroupChatGate(t *testing.T) {
+	tests := []struct {
+		name        string
+		chatType    string
+		mentionMe   bool
+		text        string
+		wantReply   bool // true if any reply should be sent (success or error)
+		wantMsgsInc bool // true if messageCount should have incremented
+	}{
+		{
+			name:        "direct always responds to plain text",
+			chatType:    "direct",
+			mentionMe:   false,
+			text:        "hello",
+			wantReply:   true, // GetOrCreate error reply
+			wantMsgsInc: true,
+		},
+		{
+			name:        "direct always responds to slash command",
+			chatType:    "direct",
+			mentionMe:   false,
+			text:        "/help",
+			wantReply:   true,  // /help reply
+			wantMsgsInc: false, // slash commands do not bump messageCount
+		},
+		{
+			name:        "group + mention responds to plain text",
+			chatType:    "group",
+			mentionMe:   true,
+			text:        "hello",
+			wantReply:   true,
+			wantMsgsInc: true,
+		},
+		{
+			name:        "group + mention responds to slash command",
+			chatType:    "group",
+			mentionMe:   true,
+			text:        "/help",
+			wantReply:   true,
+			wantMsgsInc: false,
+		},
+		{
+			name:        "group without mention drops plain text",
+			chatType:    "group",
+			mentionMe:   false,
+			text:        "hello",
+			wantReply:   false,
+			wantMsgsInc: false,
+		},
+		{
+			name:        "group without mention drops slash command",
+			chatType:    "group",
+			mentionMe:   false,
+			text:        "/help",
+			wantReply:   false,
+			wantMsgsInc: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			fp := &fakePlatform{}
+			d := newTestDispatcher(fp, nil)
+			// Ensure non-slash path uses the queue branch (not guard) so the
+			// ownerLoop runs inline on the owner and replies synchronously
+			// via the GetOrCreate error arm.
+			d.queue = NewMessageQueue(5, 0)
+
+			msg := platform.IncomingMessage{
+				Platform:  "fake",
+				EventID:   "evt-" + tt.name,
+				UserID:    "u1",
+				ChatID:    "chat1",
+				ChatType:  tt.chatType,
+				MentionMe: tt.mentionMe,
+				Text:      tt.text,
+			}
+			d.BuildHandler()(context.Background(), msg)
+
+			if got := fp.replyCount() > 0; got != tt.wantReply {
+				t.Errorf("replyCount>0 = %v, want %v (replies=%q)", got, tt.wantReply, fp.allReplies())
+			}
+			if got := d.messageCount.Load() > 0; got != tt.wantMsgsInc {
+				t.Errorf("messageCount>0 = %v, want %v", got, tt.wantMsgsInc)
+			}
+		})
+	}
+}

@@ -139,6 +139,26 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 			return
 		}
 
+		// Group chat gate: in group chats, only respond when explicitly mentioned.
+		// Direct (1:1) chats are unaffected — every message is processed.
+		//
+		// Rationale: bots deployed in multi-user group chats should not reply to
+		// every utterance; standard IM UX (Slack, Discord, Feishu bot guidance)
+		// expects @bot to be the activation signal. Naozhi's primary usage is
+		// 1:1 operator → agent, so groups are the exception.
+		//
+		// MentionMe is populated by each platform's transport layer:
+		//   - slack / discord / weixin: already matched against bot self-ID (accurate)
+		//   - feishu: currently "any mention" (loose) — tightened in a follow-up commit
+		//
+		// Gate is placed BEFORE dispatchCommand so slash commands in groups also
+		// require @bot — consistent with social etiquette and simpler (single decision
+		// point). Gated messages are silently dropped: no reply, no metric increment,
+		// dedup entry stays consumed (platform retry won't re-process).
+		if msg.ChatType == "group" && !msg.MentionMe {
+			return
+		}
+
 		// Sanitize the IM-originated attrs before they reach slog. Platform,
 		// UserID, and ChatID all flow through adversary-controlled IM webhook
 		// fields; an attacker-chosen chat ID with embedded \n, \t, or ANSI
