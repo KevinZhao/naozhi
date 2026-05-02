@@ -3091,15 +3091,14 @@ func TestDashboardHTML_R141_ColdStartEmptyStateMatchesHelper(t *testing.T) {
 }
 
 // TestDashboardHTML_R144_TopNavA11yLabelsLocalized pins the Round 144
-// localization sweep for the three main-nav a11y attributes that Round
-// 116 left in English. Mirrors the pattern of Round 141 / 116:
+// localization sweep for the main-nav a11y attributes that Round 116
+// left in English. Mirrors the pattern of Round 141 / 116:
 //
-//  1. Three target elements have Chinese title / aria-label values now:
-//     - .sf-help (?) button → "快捷键 (按 ?)" / "快捷键"
+//  1. Two target elements have Chinese aria-label values now:
 //     - #resizer → "拖动调整侧栏宽度"
 //     - <main id="main"> → "会话内容"
-//  2. Their former English strings ("Keyboard shortcuts" / "Resize sidebar" /
-//     "Session content") are gone so a future revert would trip the check.
+//  2. Their former English strings ("Resize sidebar" / "Session content")
+//     are gone so a future revert would trip the check.
 //  3. CRITICAL preservation: the header `+` button's
 //     `title="New Session"` and `aria-label="Create new session"` MUST
 //     stay English — 6+ E2E tests and a screenshot script select by
@@ -3108,6 +3107,10 @@ func TestDashboardHTML_R141_ColdStartEmptyStateMatchesHelper(t *testing.T) {
 //     scripts/dashboard-screenshots.js
 //     Localizing those would break a stable selector API with no gain,
 //     so this test locks them in place as a deliberate carve-out.
+//
+// 历史注解：本测试原先还校验侧栏底部 .sf-help（？）按钮的中英文切换，
+// 该按钮连同整个 sidebar-footer 在后续"底部信息整块让位给 session 列表"
+// 的 UX 迭代中被删除，对应断言随之移除。
 func TestDashboardHTML_R144_TopNavA11yLabelsLocalized(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardHTML.ReadFile("static/dashboard.html")
@@ -3116,13 +3119,11 @@ func TestDashboardHTML_R144_TopNavA11yLabelsLocalized(t *testing.T) {
 	}
 	html := string(data)
 
-	// Invariant 1: three Chinese anchors present.
+	// Invariant 1: Chinese anchors present.
 	wantChinese := []struct {
 		label    string
 		fragment string
 	}{
-		{"help button title", `title="快捷键 (按 ?)"`},
-		{"help button aria-label", `aria-label="快捷键"`},
 		{"resizer aria-label", `aria-label="拖动调整侧栏宽度"`},
 		{"main aria-label", `aria-label="会话内容"`},
 	}
@@ -3137,8 +3138,6 @@ func TestDashboardHTML_R144_TopNavA11yLabelsLocalized(t *testing.T) {
 		label    string
 		fragment string
 	}{
-		{"help aria-label", `aria-label="Keyboard shortcuts"`},
-		{"help title", `title="Keyboard shortcuts (press ?)"`},
 		{"resizer aria-label", `aria-label="Resize sidebar"`},
 		{"main aria-label", `aria-label="Session content"`},
 	}
