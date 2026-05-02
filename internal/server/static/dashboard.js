@@ -305,13 +305,28 @@ function renderSidebar(data) {
     });
 
     // Group sessions by (node,name) so remote + local projects with same name stay separate.
+    // Fallback groups (project name derived from workspace basename, not a
+    // registered ProjectManager project) include the workspace path in the
+    // key so two unrelated folders that share a basename (e.g. /a/tmp and
+    // /b/tmp) do not collapse into a single mislabeled group.
     const groups = {};
     const ungrouped = [];
     allItems.forEach(s => {
       const pn = s.project || '';
       if (pn) {
-        const k = (s.node || 'local') + ':' + pn;
-        if (!groups[k]) groups[k] = {name: pn, node: s.node || 'local', items: []};
+        const node = s.node || 'local';
+        const k = s.project_fallback
+          ? node + ':' + pn + ':' + (s.workspace || '')
+          : node + ':' + pn;
+        if (!groups[k]) {
+          groups[k] = {
+            name: pn,
+            node,
+            items: [],
+            fallback: !!s.project_fallback,
+            workspace: s.workspace || '',
+          };
+        }
         groups[k].items.push(s);
       } else {
         ungrouped.push(s);
@@ -349,19 +364,30 @@ function renderSidebar(data) {
           const fs = sessionFirstSeen[(s.node || 'local') + ':' + s.key] || 0;
           if (fs > m) m = fs;
         }
-        sortKeys[k] = { fav: (p && p.favorite) ? 0 : 1, first: m, name: g.name };
+        // Tier order: favorite projects → regular projects → fallback
+        // (workspace-basename) groups. Fallback groups represent ad-hoc
+        // quick-session folders that were never registered as projects, so
+        // they should always sink below real project sections.
+        const tier = g.fallback ? 2 : ((p && p.favorite) ? 0 : 1);
+        sortKeys[k] = { tier, first: m, name: g.name };
       });
       groupKeys.sort((a, b) => {
         const ka = sortKeys[a], kb = sortKeys[b];
-        if (ka.fav !== kb.fav) return ka.fav - kb.fav;
+        if (ka.tier !== kb.tier) return ka.tier - kb.tier;
         if (ka.first !== kb.first) return kb.first - ka.first;
         return ka.name.localeCompare(kb.name);
       });
       groupKeys.forEach(k => {
         const g = groups[k];
-        const p = projIndex[k] || {name: g.name, node: g.node, favorite: false};
+        const p = projIndex[k] || {
+          name: g.name,
+          node: g.node,
+          favorite: false,
+          fallback: !!g.fallback,
+          workspace: g.workspace || '',
+        };
         p._sessionCount = g.items.length;
-        html += sectionHeaderHtml(p);
+        html += g.fallback ? sectionHeaderFallbackHtml(p) : sectionHeaderHtml(p);
         if (collapsedProjects.has(k)) return;
         if (g.items.length > 0) {
           html += g.items.map(sessionCardHtml).join('');
@@ -370,7 +396,11 @@ function renderSidebar(data) {
         }
       });
       if (ungrouped.length > 0) {
-        html += '<div class="section-header"><span class="sh-name">Other</span></div>';
+        // Final catch-all: sessions with no project name AND no workspace
+        // (rare — usually transient takeover/planner edge cases). The old
+        // "Other" label predated the workspace-basename fallback; keep a
+        // bucket but label it clearly so it isn't mistaken for a real group.
+        html += '<div class="section-header"><span class="sh-name">未分组</span></div>';
         html += ungrouped.map(sessionCardHtml).join('');
       }
     } else {
@@ -550,6 +580,34 @@ const GITHUB_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-
 // when collapsed so the same glyph serves both states.
 const CHEVRON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
 
+// sectionHeaderFallbackHtml renders the minimal header for ad-hoc workspace
+// groups (p.fallback === true). The group's "project name" is just the
+// workspace basename — it is NOT a registered ProjectManager project — so
+// favorite / GitHub / + buttons have no stable semantics and are omitted.
+// Split out of sectionHeaderHtml to preserve the R110-P2 invariant that
+// sectionHeaderHtml has a single unconditional `return '<div...` with
+// `newBtn` concatenated directly (locked by static_ux_contract_test).
+function sectionHeaderFallbackHtml(p) {
+  const node = p.node || 'local';
+  const workspace = p.workspace || '';
+  // Collapse key matches the group key used in renderSidebar (node:name:ws)
+  // so two folders with the same basename each own their own fold state.
+  const ck = node + ':' + p.name + ':' + workspace;
+  const collapsed = collapsedProjects.has(ck);
+  const count = typeof p._sessionCount === 'number' ? p._sessionCount : 0;
+  const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
+  const cTitle = collapsed ? '展开' : '收起';
+  const collapseBtn = '<button type="button" class="' + cCls + '" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '" onclick="event.stopPropagation();toggleProjectCollapsed(this.dataset.key)">' + CHEVRON_SVG + '</button>';
+  const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
+  const nameTitle = workspace ? escAttr(p.name + ' — ' + workspace) : escAttr(p.name);
+  const collapsedCls = collapsed ? ' is-collapsed' : '';
+  return '<div class="section-header section-header-fallback' + collapsedCls + '" role="group" aria-label="' + escAttr(p.name) + '">' +
+    collapseBtn +
+    '<span class="sh-name" title="' + nameTitle + '">' + esc(p.name) + '</span>' +
+    countBadge +
+    '</div>';
+}
+
 function sectionHeaderHtml(p) {
   const node = p.node || 'local';
   const fav = !!p.favorite;
@@ -562,6 +620,7 @@ function sectionHeaderHtml(p) {
   const cTitle = collapsed ? '展开' : '收起';
   const collapseBtn = '<button type="button" class="' + cCls + '" data-key="' + escAttr(ck) + '" title="' + cTitle + ' ' + escAttr(p.name) + '" aria-label="' + cTitle + ' ' + escAttr(p.name) + '" aria-expanded="' + (collapsed ? 'false' : 'true') + '" onclick="event.stopPropagation();toggleProjectCollapsed(this.dataset.key)">' + CHEVRON_SVG + '</button>';
   const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
+
   // No longer pass `data-fav` — the handler derives current state from the
   // authoritative `projectsData` at click time, avoiding a stale DOM attribute
   // that could cause a fast second click (before re-render) to send a
@@ -3073,12 +3132,24 @@ document.addEventListener('keydown', function(e) {
   }
 });
 
-// Get sessions in the same project group as the current selection (sidebar order)
+// Get sessions in the same project group as the current selection (sidebar order).
+// Fallback groups are workspace-basename pseudo-projects, so two sessions
+// sharing the same project name but different workspaces belong to different
+// groups — include workspace in the match to mirror the sidebar's grouping.
 function currentProjectSessions() {
   if (!allSessionsCache || allSessionsCache.length === 0) return [];
   const cur = allSessionsCache.find(s => s.key === selectedKey && (s.node || 'local') === selectedNode);
-  const proj = cur ? (cur.project || '') : '';
-  return allSessionsCache.filter(s => (s.project || '') === proj);
+  if (!cur) return [];
+  const proj = cur.project || '';
+  const isFallback = !!cur.project_fallback;
+  const ws = cur.workspace || '';
+  return allSessionsCache.filter(s => {
+    if ((s.project || '') !== proj) return false;
+    if (isFallback || s.project_fallback) {
+      return !!s.project_fallback === isFallback && (s.workspace || '') === ws;
+    }
+    return true;
+  });
 }
 
 function updateSendButton(state) {

@@ -617,29 +617,30 @@ func TakeoverKey(cwdKey string) string {
 
 // SessionSnapshot is a point-in-time view of a session for the dashboard API.
 type SessionSnapshot struct {
-	Key          string             `json:"key"`
-	Platform     string             `json:"platform"`
-	Agent        string             `json:"agent"`
-	SessionID    string             `json:"session_id"`
-	State        string             `json:"state"`
-	Protocol     string             `json:"protocol"`
-	Backend      string             `json:"backend,omitempty"`     // "claude", "kiro", ...
-	CLIName      string             `json:"cli_name,omitempty"`    // "claude-code", "kiro"
-	CLIVersion   string             `json:"cli_version,omitempty"` // e.g. "2.1.92"
-	LastActive   int64              `json:"last_active"`           // unix ms
-	TotalCost    float64            `json:"total_cost"`
-	Workspace    string             `json:"workspace,omitempty"`
-	DeathReason  string             `json:"death_reason,omitempty"`
-	ChatType     string             `json:"chat_type,omitempty"`
-	ChatID       string             `json:"chat_id,omitempty"`
-	Node         string             `json:"node,omitempty"`
-	LastPrompt   string             `json:"last_prompt,omitempty"`   // most recent user message
-	LastActivity string             `json:"last_activity,omitempty"` // most recent tool/thinking status
-	Summary      string             `json:"summary,omitempty"`       // Claude-generated session title
-	UserLabel    string             `json:"user_label,omitempty"`    // operator-set override for sidebar/header title
-	Project      string             `json:"project,omitempty"`       // project name (filled by server)
-	IsPlanner    bool               `json:"is_planner,omitempty"`    // true for project planner sessions
-	Subagents    []cli.SubagentInfo `json:"subagents,omitempty"`     // active sub-agent types in current turn
+	Key             string             `json:"key"`
+	Platform        string             `json:"platform"`
+	Agent           string             `json:"agent"`
+	SessionID       string             `json:"session_id"`
+	State           string             `json:"state"`
+	Protocol        string             `json:"protocol"`
+	Backend         string             `json:"backend,omitempty"`     // "claude", "kiro", ...
+	CLIName         string             `json:"cli_name,omitempty"`    // "claude-code", "kiro"
+	CLIVersion      string             `json:"cli_version,omitempty"` // e.g. "2.1.92"
+	LastActive      int64              `json:"last_active"`           // unix ms
+	TotalCost       float64            `json:"total_cost"`
+	Workspace       string             `json:"workspace,omitempty"`
+	DeathReason     string             `json:"death_reason,omitempty"`
+	ChatType        string             `json:"chat_type,omitempty"`
+	ChatID          string             `json:"chat_id,omitempty"`
+	Node            string             `json:"node,omitempty"`
+	LastPrompt      string             `json:"last_prompt,omitempty"`      // most recent user message
+	LastActivity    string             `json:"last_activity,omitempty"`    // most recent tool/thinking status
+	Summary         string             `json:"summary,omitempty"`          // Claude-generated session title
+	UserLabel       string             `json:"user_label,omitempty"`       // operator-set override for sidebar/header title
+	Project         string             `json:"project,omitempty"`          // project name (filled by server)
+	ProjectFallback bool               `json:"project_fallback,omitempty"` // true when Project is a workspace-basename fallback, not a registered project
+	IsPlanner       bool               `json:"is_planner,omitempty"`       // true for project planner sessions
+	Subagents       []cli.SubagentInfo `json:"subagents,omitempty"`        // active sub-agent types in current turn
 }
 
 func (s *ManagedSession) HasProcess() bool {

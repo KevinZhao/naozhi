@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -34,6 +35,22 @@ const maxResumeLastPromptBytes = 2 * 1024
 // (session.ValidateUserLabel / session.MaxUserLabelBytes) so the dashboard
 // HTTP path and the reverse-RPC worker (internal/upstream) share one
 // implementation. R64-GO-H3 / L1 / L2 consolidated the rules there.
+
+// workspaceFallbackName returns the folder name to display as a session's
+// sidebar group when the workspace is not registered with ProjectManager.
+// Returns an empty string for inputs that are empty, root ("/"), or resolve
+// to "." — these cannot produce a meaningful group label so the frontend
+// falls back to the generic catch-all instead.
+func workspaceFallbackName(ws string) string {
+	if ws == "" {
+		return ""
+	}
+	base := filepath.Base(ws)
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return ""
+	}
+	return base
+}
 
 // watchdogStats is the /api/sessions "watchdog" sub-object. Declared as a
 // named struct (not an inline map[string]any) so json/reflect caches the
@@ -323,6 +340,16 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 				}
 			} else if name := wsMap[snapshots[i].Workspace]; name != "" {
 				snapshots[i].Project = name
+			} else if base := workspaceFallbackName(snapshots[i].Workspace); base != "" {
+				// Fallback for unregistered workspaces: show the folder name
+				// so sessions that are not bound to a ProjectManager project
+				// still land in a meaningful sidebar group instead of "Other".
+				// ProjectFallback signals the frontend to include the
+				// workspace path in the group key so two different folders
+				// with the same basename (e.g. /a/tmp and /b/tmp) do not
+				// collapse into one group.
+				snapshots[i].Project = base
+				snapshots[i].ProjectFallback = true
 			}
 		}
 	}
