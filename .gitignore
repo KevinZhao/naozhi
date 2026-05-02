@@ -5,6 +5,7 @@ dist/
 .naozhi/
 sdk-test/
 /tmp/
+tmp/
 
 # Build artifacts
 /naozhi

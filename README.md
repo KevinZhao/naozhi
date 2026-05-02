@@ -398,6 +398,20 @@ sudo systemctl start naozhi
 journalctl -u naozhi -f
 ```
 
+> **可选 · 零停机重启 sudoers 精确化**：若希望 `systemctl restart naozhi` 时 shim
+> 子进程不被 kill，参考 [`docs/ops/sudoers-hardening.md`](docs/ops/sudoers-hardening.md)
+> 安装 `deploy/naozhi-sudoers.example`。不装也能跑 —— 只是每次 restart 会打断正在运行
+> 的会话，journal 打 `WARN` 不致命。**切勿**为省事写 `NOPASSWD: ALL`。
+
+> **在线 profile**：内存暴涨 / goroutine 泄漏 / CPU 热点排障，`ssh host` 后
+> 用 `curl -H "Authorization: Bearer $TOK" http://127.0.0.1:8180/api/debug/pprof/...`
+> 拉 heap / goroutine / CPU profile。端点受 token + **loopback-only** 双重防护，远端
+> 请求（ALB / CloudFront）一律 403。详见 [`docs/ops/pprof.md`](docs/ops/pprof.md)。
+
+> **一键排障**：`naozhi doctor` 聚合 binary / systemd / HTTP / auth / pprof / 状态目录
+> 7 项检查，任一 fail 退出码 1。CI 友好，支持 `--json` 输出。详见
+> [`docs/ops/doctor.md`](docs/ops/doctor.md)。
+
 ### 生产架构
 
 ```
