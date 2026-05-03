@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -32,6 +33,20 @@ type wsRelay struct {
 	lastEvent map[string]int64       // key -> last event unix ms (for reconnect)
 	done      chan struct{}
 	closed    bool
+	// wg tracks goroutines dispatched from Subscribe's second-subscriber
+	// path (sendHistoryToClient). R184-CONC-M1: without this, Close() can
+	// return while a history fetch is still in flight; its ctx is linked
+	// to r.done and cancels promptly, but SendJSON to the EventSink after
+	// Close relies on the sink's non-blocking semantics. Registering the
+	// goroutine and waiting in Close() future-proofs against any EventSink
+	// implementation change to blocking semantics.
+	wg sync.WaitGroup
+	// reconnecting gates re-entrant reconnect loops. R184-CONC-H1:
+	// without this, a writeJSON failure inside a reconnect() resubscribe
+	// would close the conn, trigger readLoop's deferred reconnect, and
+	// spawn a second reconnect goroutine that runs concurrently with
+	// the first — producing duplicate `subscribe` frames on the remote.
+	reconnecting atomic.Bool
 }
 
 func newWSRelay(node *HTTPClient) *wsRelay {
@@ -56,8 +71,18 @@ func (r *wsRelay) Subscribe(c EventSink, key string, after int64) {
 	}
 
 	r.mu.Lock()
+	if r.closed {
+		r.mu.Unlock()
+		c.SendJSON(ServerMsg{Type: "error", Key: key, Node: r.node.ID, Error: "relay closed"})
+		return
+	}
 	alreadySubscribed := len(r.subs[key]) > 0
 	r.subs[key] = append(r.subs[key], c)
+	// R184-CONC-M1: wg.Add under r.mu so Close() observing r.closed=true
+	// is guaranteed to see our Add; Close() sets r.closed before Wait().
+	if alreadySubscribed {
+		r.wg.Add(1)
+	}
 	r.mu.Unlock()
 
 	if alreadySubscribed {
@@ -117,6 +142,12 @@ func (r *wsRelay) Close() {
 	if conn != nil {
 		conn.Close()
 	}
+
+	// R184-CONC-M1: wait for sendHistoryToClient goroutines to exit. Their
+	// FetchEvents ctx is linked to r.done (closed above) so they abort
+	// within milliseconds of HTTP cancellation; bounded by the 5s request
+	// timeout in the worst case.
+	r.wg.Wait()
 }
 
 func (r *wsRelay) ensureConnected() error {
@@ -188,7 +219,13 @@ func (r *wsRelay) connect() error {
 		return fmt.Errorf("auth write %s: %w", r.node.ID, err)
 	}
 	var resp ServerMsg
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	// R184-IDIOM-L1: propagate SetReadDeadline errors (half-closed conn
+	// would otherwise stay in open-ended ReadJSON until TCP keepalive
+	// fires, matches R182-GO-P1-1 / R183-GO-M1 pattern on the server side).
+	if err := conn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		conn.Close()
+		return fmt.Errorf("auth set read deadline %s: %w", r.node.ID, err)
+	}
 	if err := conn.ReadJSON(&resp); err != nil {
 		conn.Close()
 		return fmt.Errorf("auth read %s: %w", r.node.ID, err)
@@ -197,13 +234,22 @@ func (r *wsRelay) connect() error {
 		conn.Close()
 		return fmt.Errorf("auth failed %s: %s", r.node.ID, resp.Error)
 	}
-	conn.SetReadDeadline(time.Time{})
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		conn.Close()
+		return fmt.Errorf("auth clear read deadline %s: %w", r.node.ID, err)
+	}
 
 	// Detect silent disconnections (NAT timeout, crash without FIN/RST)
 	// via read deadline + pong handler, matching reverseconn.go pattern.
-	conn.SetReadDeadline(time.Now().Add(relayReadTimeout))
+	if err := conn.SetReadDeadline(time.Now().Add(relayReadTimeout)); err != nil {
+		conn.Close()
+		return fmt.Errorf("set live read deadline %s: %w", r.node.ID, err)
+	}
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(relayReadTimeout))
+		// Pong-path failures can only arise from a half-closed conn; the
+		// readLoop's next ReadMessage will observe the error, so swallow
+		// here rather than kill the handler and leave the flag dangling.
+		_ = conn.SetReadDeadline(time.Now().Add(relayReadTimeout))
 		return nil
 	})
 
@@ -243,7 +289,18 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 			return
 		default:
 		}
-		go r.reconnect()
+		// R184-CONC-H1: singleflight gate. A writeJSON failure inside the
+		// current reconnect() path can call conn.Close() before that
+		// goroutine finishes its resubscribe loop, causing the very same
+		// readLoop defer to enqueue another reconnect. The CAS blocks the
+		// second enqueue; the primary reconnect() clears the flag when it
+		// exits (see reconnect()).
+		if r.reconnecting.CompareAndSwap(false, true) {
+			go func() {
+				defer r.reconnecting.Store(false)
+				r.reconnect()
+			}()
+		}
 	}()
 
 	for {
@@ -393,7 +450,12 @@ func (r *wsRelay) reconnect() {
 	}
 }
 
+// sendHistoryToClient runs in a goroutine launched from Subscribe's
+// second-subscriber path. The caller is responsible for wg.Add(1); this
+// function owns the matching wg.Done() via defer so exit paths are uniform.
 func (r *wsRelay) sendHistoryToClient(c EventSink, key string, after int64) {
+	defer r.wg.Done()
+
 	c.SendJSON(ServerMsg{Type: "subscribed", Key: key, Node: r.node.ID})
 
 	// Tie the 5s budget to the relay lifecycle so a Close() during fetch
