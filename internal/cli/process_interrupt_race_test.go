@@ -37,6 +37,7 @@ import (
 // that lands concurrently must either be fully applied (caught by this drain)
 // or fully deferred (caught by the next drain) — never "half consumed".
 func TestProcess_DrainStaleEvents_ConcurrentInterruptLossless(t *testing.T) {
+	t.Parallel()
 	if testing.Short() {
 		t.Skip("stress loop; skipped under -short")
 	}
@@ -138,6 +139,7 @@ func TestProcess_DrainStaleEvents_ConcurrentInterruptLossless(t *testing.T) {
 // Post-fix, drain unconditionally Swaps both atomics (under mu) so no stale
 // bit can survive.
 func TestProcess_DrainStaleEvents_ClearsBothFlagsRegardlessOfEntry(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		name              string
 		interrupted       bool
@@ -197,6 +199,7 @@ func TestProcess_DrainStaleEvents_ClearsBothFlagsRegardlessOfEntry(t *testing.T)
 // refactor moves either Swap outside the lock, the R39-CONCUR1 race reopens
 // and no behavioural test will reliably catch it — hence this static check.
 func TestDrainStaleEvents_SwapCallsAreUnderMu(t *testing.T) {
+	t.Parallel()
 	// Locate process.go relative to this test file.
 	_, thisFile, _, _ := runtime.Caller(0)
 	src := filepath.Join(filepath.Dir(thisFile), "process.go")

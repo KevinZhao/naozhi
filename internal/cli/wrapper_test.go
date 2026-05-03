@@ -8,6 +8,7 @@ import (
 )
 
 func TestCandidatePaths_ContainsNativeInstaller(t *testing.T) {
+	t.Parallel()
 	home, err := os.UserHomeDir()
 	if err != nil {
 		t.Skip("no home dir")
@@ -29,6 +30,7 @@ func TestCandidatePaths_ContainsNativeInstaller(t *testing.T) {
 }
 
 func TestCandidatePaths_Kiro(t *testing.T) {
+	t.Parallel()
 	paths := candidatePaths("kiro-cli")
 	if len(paths) == 0 {
 		t.Fatal("expected at least one candidate path")
@@ -40,6 +42,9 @@ func TestCandidatePaths_Kiro(t *testing.T) {
 	}
 }
 
+// NOT t.Parallel() — mutates process-global env PATH/HOME via os.Setenv.
+// Parallel siblings reading PATH (e.g., exec.LookPath) would see torn
+// state across the deferred restore window. Serial only.
 func TestDetectCLI_FallsBackToBareNameWhenNothingFound(t *testing.T) {
 	// candidatePaths uses "claude" for any non-"kiro" backend,
 	// so we test with a name unlikely to exist via PATH lookup
@@ -59,6 +64,8 @@ func TestDetectCLI_FallsBackToBareNameWhenNothingFound(t *testing.T) {
 	}
 }
 
+// NOT t.Parallel() — same os.Setenv("PATH", ...) rationale as
+// TestDetectCLI_FallsBackToBareNameWhenNothingFound above.
 func TestDetectCLI_FindsExistingBinary(t *testing.T) {
 	// Create a temp file that looks like a CLI binary
 	dir := t.TempDir()
@@ -83,6 +90,7 @@ func TestDetectCLI_FindsExistingBinary(t *testing.T) {
 }
 
 func TestNewWrapper_ExplicitPathTakesPrecedence(t *testing.T) {
+	t.Parallel()
 	w := NewWrapper("/custom/path/claude", &ClaudeProtocol{}, "claude")
 	if w.CLIPath != "/custom/path/claude" {
 		t.Errorf("explicit path should be used, got %q", w.CLIPath)
@@ -93,6 +101,7 @@ func TestNewWrapper_ExplicitPathTakesPrecedence(t *testing.T) {
 }
 
 func TestNewWrapper_EmptyPathAutoDetects(t *testing.T) {
+	t.Parallel()
 	w := NewWrapper("", &ClaudeProtocol{}, "claude")
 	if w.CLIPath == "" {
 		t.Error("auto-detect should produce a non-empty path")
@@ -107,6 +116,7 @@ func TestNewWrapper_EmptyPathAutoDetects(t *testing.T) {
 // populates CLIVersion with a placeholder or defaults-on-error, that
 // detection path silently breaks — this test is the tripwire.
 func TestNewWrapper_UnavailableBinaryLeavesVersionEmpty(t *testing.T) {
+	t.Parallel()
 	// Use an absolute path that cannot exist so detectVersion's exec.Command
 	// fails immediately with ENOENT. We intentionally do not tamper with PATH
 	// or HOME here because NewWrapper runs detectVersion against the given

@@ -31,6 +31,7 @@ import (
 // ev.recvAt through UnixMilli to match EventEntry.Time ordering) will fail
 // this test and force the author to re-examine the NTP-safety argument.
 func TestDrainStaleEvents_MonotonicInvariant(t *testing.T) {
+	t.Parallel()
 	src, err := os.ReadFile("process.go")
 	if err != nil {
 		t.Fatalf("read process.go: %v", err)
@@ -83,6 +84,7 @@ func TestDrainStaleEvents_MonotonicInvariant(t *testing.T) {
 // drainStaleEvents' godoc. If stdlib ever changes these semantics (it won't,
 // but the guarantee is worth pinning) the test fails and forces a re-audit.
 func TestMonotonicCompare_SurvivesNTPJump(t *testing.T) {
+	t.Parallel()
 	earlier := time.Now()
 	// Sleep a touch so the monotonic reading measurably advances.
 	time.Sleep(2 * time.Millisecond)

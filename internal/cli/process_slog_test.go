@@ -13,6 +13,11 @@ import (
 // Guards R70-ARCH-M3 so future refactors of readLoop/heartbeatLoop logging
 // can't silently drop the session=key tag that oncall uses to attribute
 // shim disconnect / readloop panic entries across many concurrent sessions.
+//
+// NOT t.Parallel() — mutates process-global slog.Default via slog.SetDefault.
+// A concurrent test also using slog would write to/read from this buffer,
+// producing a data race and/or cross-contaminating captured log output.
+// Same rationale as session/log_level_test.go (Round 161).
 func TestSetSlogKey_AttachesSessionAttr(t *testing.T) {
 	var buf bytes.Buffer
 	// Swap the default logger for a capture-only handler. Restore on exit so
@@ -41,6 +46,7 @@ func TestSetSlogKey_AttachesSessionAttr(t *testing.T) {
 // TestSetSlogKey_EmptyIsNoop prevents accidental nil-deref paths where
 // callers pass "" and expect slogger() to still work.
 func TestSetSlogKey_EmptyIsNoop(t *testing.T) {
+	t.Parallel()
 	p := &Process{}
 	p.SetSlogKey("")
 	if l := p.log.Load(); l != nil {
@@ -56,6 +62,7 @@ func TestSetSlogKey_EmptyIsNoop(t *testing.T) {
 // returns nil (not a panic). This is a freeze test so if we ever change
 // p.log's type we catch the initialisation-order assumption immediately.
 func TestProcessLogPointerZeroValue(t *testing.T) {
+	t.Parallel()
 	var p Process
 	var ptr atomic.Pointer[slog.Logger]
 	if p.log != ptr {

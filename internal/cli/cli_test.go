@@ -11,6 +11,7 @@ import (
 // --- ClaudeProtocol tests ---
 
 func TestClaudeProtocol_Name(t *testing.T) {
+	t.Parallel()
 	p := &ClaudeProtocol{}
 	if p.Name() != "stream-json" {
 		t.Errorf("Name() = %q, want stream-json", p.Name())
@@ -18,6 +19,7 @@ func TestClaudeProtocol_Name(t *testing.T) {
 }
 
 func TestClaudeProtocol_BuildArgs(t *testing.T) {
+	t.Parallel()
 	p := &ClaudeProtocol{}
 	args := p.BuildArgs(SpawnOptions{Model: "opus", ResumeID: "sess_123"})
 
@@ -33,6 +35,7 @@ func TestClaudeProtocol_BuildArgs(t *testing.T) {
 }
 
 func TestClaudeProtocol_BuildArgs_NoResume(t *testing.T) {
+	t.Parallel()
 	p := &ClaudeProtocol{}
 	args := p.BuildArgs(SpawnOptions{Model: "sonnet"})
 	for _, a := range args {
@@ -43,6 +46,7 @@ func TestClaudeProtocol_BuildArgs_NoResume(t *testing.T) {
 }
 
 func TestClaudeProtocol_WriteMessage(t *testing.T) {
+	t.Parallel()
 	p := &ClaudeProtocol{}
 	var buf bytes.Buffer
 	if err := p.WriteMessage(&buf, "hello", nil); err != nil {
@@ -61,6 +65,7 @@ func TestClaudeProtocol_WriteMessage(t *testing.T) {
 }
 
 func TestClaudeProtocol_ReadEvent_Result(t *testing.T) {
+	t.Parallel()
 	p := &ClaudeProtocol{}
 	line := `{"type":"result","result":"done","session_id":"s1","total_cost_usd":0.05}`
 	ev, done, err := p.ReadEvent(line)
@@ -76,6 +81,7 @@ func TestClaudeProtocol_ReadEvent_Result(t *testing.T) {
 }
 
 func TestClaudeProtocol_ReadEvent_Assistant(t *testing.T) {
+	t.Parallel()
 	p := &ClaudeProtocol{}
 	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}`
 	ev, done, err := p.ReadEvent(line)
@@ -91,6 +97,7 @@ func TestClaudeProtocol_ReadEvent_Assistant(t *testing.T) {
 }
 
 func TestClaudeProtocol_ReadEvent_SkipsHooks(t *testing.T) {
+	t.Parallel()
 	p := &ClaudeProtocol{}
 	for _, sub := range []string{"hook_started", "hook_response"} {
 		line := `{"type":"system","subtype":"` + sub + `"}`
@@ -108,6 +115,7 @@ func TestClaudeProtocol_ReadEvent_SkipsHooks(t *testing.T) {
 }
 
 func TestClaudeProtocol_ReadEvent_SystemInit(t *testing.T) {
+	t.Parallel()
 	p := &ClaudeProtocol{}
 	line := `{"type":"system","subtype":"init","session_id":"sess_abc"}`
 	ev, done, err := p.ReadEvent(line)
@@ -123,6 +131,7 @@ func TestClaudeProtocol_ReadEvent_SystemInit(t *testing.T) {
 }
 
 func TestClaudeProtocol_HandleEvent(t *testing.T) {
+	t.Parallel()
 	p := &ClaudeProtocol{}
 	if p.HandleEvent(nil, Event{Type: "result"}) {
 		t.Error("Claude protocol should never handle events internally")
@@ -130,6 +139,7 @@ func TestClaudeProtocol_HandleEvent(t *testing.T) {
 }
 
 func TestClaudeProtocol_WriteInterrupt(t *testing.T) {
+	t.Parallel()
 	p := &ClaudeProtocol{}
 	var buf bytes.Buffer
 	if err := p.WriteInterrupt(&buf, "req-42"); err != nil {
@@ -166,6 +176,7 @@ func TestClaudeProtocol_WriteInterrupt(t *testing.T) {
 }
 
 func TestClaudeProtocol_ReadEvent_SkipsControlResponse(t *testing.T) {
+	t.Parallel()
 	p := &ClaudeProtocol{}
 	line := `{"type":"control_response","response":{"subtype":"success","request_id":"req-1"}}`
 	ev, done, err := p.ReadEvent(line)
@@ -181,6 +192,7 @@ func TestClaudeProtocol_ReadEvent_SkipsControlResponse(t *testing.T) {
 }
 
 func TestACPProtocol_WriteInterrupt_Unsupported(t *testing.T) {
+	t.Parallel()
 	p := &ACPProtocol{}
 	var buf bytes.Buffer
 	err := p.WriteInterrupt(&buf, "req-1")
@@ -196,6 +208,7 @@ func TestACPProtocol_WriteInterrupt_Unsupported(t *testing.T) {
 }
 
 func TestClaudeProtocol_Init(t *testing.T) {
+	t.Parallel()
 	p := &ClaudeProtocol{}
 	id, err := p.Init(nil, "")
 	if err != nil || id != "" {
@@ -206,6 +219,7 @@ func TestClaudeProtocol_Init(t *testing.T) {
 // --- ACPProtocol tests ---
 
 func TestACPProtocol_Name(t *testing.T) {
+	t.Parallel()
 	p := &ACPProtocol{}
 	if p.Name() != "acp" {
 		t.Errorf("Name() = %q, want acp", p.Name())
@@ -213,6 +227,7 @@ func TestACPProtocol_Name(t *testing.T) {
 }
 
 func TestACPProtocol_BuildArgs(t *testing.T) {
+	t.Parallel()
 	p := &ACPProtocol{}
 	args := p.BuildArgs(SpawnOptions{ExtraArgs: []string{"--debug"}})
 	if args[0] != "acp" {
@@ -224,6 +239,7 @@ func TestACPProtocol_BuildArgs(t *testing.T) {
 }
 
 func TestACPProtocol_WriteMessage(t *testing.T) {
+	t.Parallel()
 	p := &ACPProtocol{sessionID: "sess_test"}
 	var buf bytes.Buffer
 	if err := p.WriteMessage(&buf, "hello acp", nil); err != nil {
@@ -242,6 +258,7 @@ func TestACPProtocol_WriteMessage(t *testing.T) {
 }
 
 func TestACPProtocol_ReadEvent_SessionUpdate_TextChunk(t *testing.T) {
+	t.Parallel()
 	p := &ACPProtocol{}
 	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello "}}}}`
 	ev, done, err := p.ReadEvent(line)
@@ -276,6 +293,7 @@ func TestACPProtocol_ReadEvent_SessionUpdate_TextChunk(t *testing.T) {
 }
 
 func TestACPProtocol_ReadEvent_ToolCall(t *testing.T) {
+	t.Parallel()
 	p := &ACPProtocol{}
 	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"Reading file","status":"pending"}}}`
 	ev, done, err := p.ReadEvent(line)
@@ -291,6 +309,7 @@ func TestACPProtocol_ReadEvent_ToolCall(t *testing.T) {
 }
 
 func TestACPProtocol_ReadEvent_Response_TurnComplete(t *testing.T) {
+	t.Parallel()
 	p := &ACPProtocol{sessionID: "sess_1"}
 	p.mu.Lock()
 	p.textBuf.WriteString("final answer")
@@ -320,6 +339,7 @@ func TestACPProtocol_ReadEvent_Response_TurnComplete(t *testing.T) {
 }
 
 func TestACPProtocol_ReadEvent_PermissionRequest(t *testing.T) {
+	t.Parallel()
 	p := &ACPProtocol{}
 	line := `{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"s1","options":[{"optionId":"allow-once","kind":"allow_once"}]}}`
 	ev, done, err := p.ReadEvent(line)
@@ -338,6 +358,7 @@ func TestACPProtocol_ReadEvent_PermissionRequest(t *testing.T) {
 }
 
 func TestACPProtocol_HandleEvent_Permission(t *testing.T) {
+	t.Parallel()
 	p := &ACPProtocol{}
 	var buf bytes.Buffer
 	ev := Event{Type: "permission_request", RPCRequestID: 42}
@@ -357,6 +378,7 @@ func TestACPProtocol_HandleEvent_Permission(t *testing.T) {
 }
 
 func TestACPProtocol_HandleEvent_NonPermission(t *testing.T) {
+	t.Parallel()
 	p := &ACPProtocol{}
 	if p.HandleEvent(nil, Event{Type: "assistant"}) {
 		t.Error("non-permission events should not be handled")
@@ -366,6 +388,7 @@ func TestACPProtocol_HandleEvent_NonPermission(t *testing.T) {
 // --- RPC types tests ---
 
 func TestRPCMessage_IsNotification(t *testing.T) {
+	t.Parallel()
 	msg := RPCMessage{Method: "session/update"}
 	if !msg.IsNotification() {
 		t.Error("should be notification")
@@ -373,6 +396,7 @@ func TestRPCMessage_IsNotification(t *testing.T) {
 }
 
 func TestRPCMessage_IsResponse(t *testing.T) {
+	t.Parallel()
 	id := 1
 	msg := RPCMessage{ID: &id, Result: json.RawMessage(`{}`)}
 	if !msg.IsResponse() {
@@ -381,6 +405,7 @@ func TestRPCMessage_IsResponse(t *testing.T) {
 }
 
 func TestRPCMessage_IsRequest(t *testing.T) {
+	t.Parallel()
 	id := 1
 	msg := RPCMessage{ID: &id, Method: "session/prompt"}
 	if !msg.IsRequest() {
@@ -391,6 +416,7 @@ func TestRPCMessage_IsRequest(t *testing.T) {
 // --- ACP error response test (C2 fix) ---
 
 func TestACPProtocol_ReadEvent_ErrorResponse(t *testing.T) {
+	t.Parallel()
 	p := &ACPProtocol{sessionID: "sess_1"}
 	p.mu.Lock()
 	p.textBuf.WriteString("partial text")
@@ -427,6 +453,7 @@ func (m *mockLineReader) ReadLine() ([]byte, bool, error) {
 }
 
 func TestACPProtocol_Init_NewSession(t *testing.T) {
+	t.Parallel()
 	p := &ACPProtocol{}
 	var written bytes.Buffer
 
@@ -448,6 +475,7 @@ func TestACPProtocol_Init_NewSession(t *testing.T) {
 }
 
 func TestACPProtocol_Init_ResumeSession(t *testing.T) {
+	t.Parallel()
 	p := &ACPProtocol{}
 	var written bytes.Buffer
 
@@ -469,6 +497,7 @@ func TestACPProtocol_Init_ResumeSession(t *testing.T) {
 }
 
 func TestACPProtocol_Init_RPCError(t *testing.T) {
+	t.Parallel()
 	p := &ACPProtocol{}
 	var written bytes.Buffer
 
@@ -489,6 +518,7 @@ func TestACPProtocol_Init_RPCError(t *testing.T) {
 // --- Existing tests preserved ---
 
 func TestProcessStateString(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		state ProcessState
 		want  string
@@ -509,6 +539,7 @@ func TestProcessStateString(t *testing.T) {
 }
 
 func TestNewUserMessage(t *testing.T) {
+	t.Parallel()
 	msg := NewUserMessage("hello world", nil)
 	if msg.Type != "user" {
 		t.Errorf("Type = %q, want %q", msg.Type, "user")
@@ -522,6 +553,7 @@ func TestNewUserMessage(t *testing.T) {
 }
 
 func TestNewUserMessage_WithImages(t *testing.T) {
+	t.Parallel()
 	images := []ImageData{
 		{Data: []byte("fake-png-data"), MimeType: "image/png"},
 		{Data: []byte("fake-jpeg-data"), MimeType: "image/jpeg"},
@@ -591,6 +623,7 @@ func TestNewUserMessage_WithImages(t *testing.T) {
 }
 
 func TestNewUserMessage_WithImages_EmptyText(t *testing.T) {
+	t.Parallel()
 	images := []ImageData{{Data: []byte("img"), MimeType: "image/png"}}
 	msg := NewUserMessage("", images)
 
@@ -605,6 +638,7 @@ func TestNewUserMessage_WithImages_EmptyText(t *testing.T) {
 }
 
 func TestClaudeProtocol_WriteMessage_WithImages(t *testing.T) {
+	t.Parallel()
 	p := &ClaudeProtocol{}
 	var buf bytes.Buffer
 	images := []ImageData{
@@ -639,6 +673,7 @@ func TestClaudeProtocol_WriteMessage_WithImages(t *testing.T) {
 }
 
 func TestACPProtocol_WriteMessage_WithImages(t *testing.T) {
+	t.Parallel()
 	p := &ACPProtocol{sessionID: "sess_img"}
 	var buf bytes.Buffer
 	images := []ImageData{

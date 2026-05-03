@@ -7,6 +7,7 @@ import (
 )
 
 func TestNewEventLog_DefaultSize(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(0)
 	if l.maxSize != defaultEventLogSize {
 		t.Errorf("maxSize = %d, want %d", l.maxSize, defaultEventLogSize)
@@ -14,6 +15,7 @@ func TestNewEventLog_DefaultSize(t *testing.T) {
 }
 
 func TestNewEventLog_CustomSize(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(50)
 	if l.maxSize != 50 {
 		t.Errorf("maxSize = %d, want 50", l.maxSize)
@@ -21,6 +23,7 @@ func TestNewEventLog_CustomSize(t *testing.T) {
 }
 
 func TestEventLog_Append_And_Entries(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(10)
 	l.Append(EventEntry{Time: 1000, Type: "thinking", Summary: "hello"})
 	l.Append(EventEntry{Time: 2000, Type: "tool_use", Summary: "Read"})
@@ -35,6 +38,7 @@ func TestEventLog_Append_And_Entries(t *testing.T) {
 }
 
 func TestEventLog_Append_AutoTimestamp(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(10)
 	l.Append(EventEntry{Type: "system"})
 	entries := l.Entries()
@@ -44,6 +48,7 @@ func TestEventLog_Append_AutoTimestamp(t *testing.T) {
 }
 
 func TestEventLog_Append_Overflow(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(10)
 	for i := 0; i < 20; i++ {
 		l.Append(EventEntry{Time: int64(i + 1), Type: "test"})
@@ -59,6 +64,7 @@ func TestEventLog_Append_Overflow(t *testing.T) {
 }
 
 func TestEventLog_EntriesSince(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 	l.Append(EventEntry{Time: 1000, Type: "a"})
 	l.Append(EventEntry{Time: 2000, Type: "b"})
@@ -74,6 +80,7 @@ func TestEventLog_EntriesSince(t *testing.T) {
 }
 
 func TestEventLog_EntriesSince_NoMatch(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 	l.Append(EventEntry{Time: 1000, Type: "a"})
 	entries := l.EntriesSince(2000)
@@ -83,6 +90,7 @@ func TestEventLog_EntriesSince_NoMatch(t *testing.T) {
 }
 
 func TestEventLog_EntriesBefore_Pagination(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 	l.Append(EventEntry{Time: 1000, Type: "a"})
 	l.Append(EventEntry{Time: 2000, Type: "b"})
@@ -101,6 +109,7 @@ func TestEventLog_EntriesBefore_Pagination(t *testing.T) {
 }
 
 func TestEventLog_EntriesBefore_LimitHonored(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 	for i := 0; i < 10; i++ {
 		l.Append(EventEntry{Time: int64((i + 1) * 1000), Type: "x"})
@@ -119,6 +128,7 @@ func TestEventLog_EntriesBefore_LimitHonored(t *testing.T) {
 }
 
 func TestEventLog_EntriesBefore_ZeroLimitReturnsNil(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 	l.Append(EventEntry{Time: 1000, Type: "x"})
 	if got := l.EntriesBefore(2000, 0); got != nil {
@@ -130,6 +140,7 @@ func TestEventLog_EntriesBefore_ZeroLimitReturnsNil(t *testing.T) {
 }
 
 func TestEventLog_EntriesBefore_ZeroBeforeIsUnbounded(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 	l.Append(EventEntry{Time: 1000, Type: "a"})
 	l.Append(EventEntry{Time: 2000, Type: "b"})
@@ -146,6 +157,7 @@ func TestEventLog_EntriesBefore_ZeroBeforeIsUnbounded(t *testing.T) {
 }
 
 func TestEventLog_EntriesBefore_EmptyLog(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 	if got := l.EntriesBefore(9999, 10); got != nil {
 		t.Errorf("expected nil from empty log, got %v", got)
@@ -153,6 +165,7 @@ func TestEventLog_EntriesBefore_EmptyLog(t *testing.T) {
 }
 
 func TestEventLog_Entries_IsCopy(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(10)
 	l.Append(EventEntry{Time: 1000, Type: "a"})
 	entries := l.Entries()
@@ -165,6 +178,7 @@ func TestEventLog_Entries_IsCopy(t *testing.T) {
 }
 
 func TestTruncateRunes_Short(t *testing.T) {
+	t.Parallel()
 	got := TruncateRunes("hello", 10)
 	if got != "hello" {
 		t.Errorf("got %q, want %q", got, "hello")
@@ -172,6 +186,7 @@ func TestTruncateRunes_Short(t *testing.T) {
 }
 
 func TestTruncateRunes_Truncated(t *testing.T) {
+	t.Parallel()
 	got := TruncateRunes("hello world", 5)
 	if got != "hello..." {
 		t.Errorf("got %q, want %q", got, "hello...")
@@ -179,6 +194,7 @@ func TestTruncateRunes_Truncated(t *testing.T) {
 }
 
 func TestTruncateRunes_Unicode(t *testing.T) {
+	t.Parallel()
 	got := TruncateRunes("你好世界测试", 4)
 	if got != "你好世界..." {
 		t.Errorf("got %q, want %q", got, "你好世界...")
@@ -188,6 +204,7 @@ func TestTruncateRunes_Unicode(t *testing.T) {
 // ─── Subscribe tests ─────────────────────────────────────────────────────────
 
 func TestEventLog_Subscribe_Notified(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 	ch, unsub := l.Subscribe()
 	defer unsub()
@@ -202,6 +219,7 @@ func TestEventLog_Subscribe_Notified(t *testing.T) {
 }
 
 func TestEventLog_Subscribe_NonBlockingWhenFull(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 	ch, unsub := l.Subscribe()
 	defer unsub()
@@ -228,6 +246,7 @@ func TestEventLog_Subscribe_NonBlockingWhenFull(t *testing.T) {
 }
 
 func TestEventLog_Subscribe_MultipleSubscribers(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 	ch1, unsub1 := l.Subscribe()
 	defer unsub1()
@@ -246,6 +265,7 @@ func TestEventLog_Subscribe_MultipleSubscribers(t *testing.T) {
 }
 
 func TestEventLog_Unsubscribe_Cleanup(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 	_, unsub := l.Subscribe()
 
@@ -267,6 +287,7 @@ func TestEventLog_Unsubscribe_Cleanup(t *testing.T) {
 }
 
 func TestEventLog_Unsubscribe_Idempotent(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 	_, unsub := l.Subscribe()
 	unsub()
@@ -274,6 +295,7 @@ func TestEventLog_Unsubscribe_Idempotent(t *testing.T) {
 }
 
 func TestEventLog_Subscribe_ConcurrentSafe(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 	var wg sync.WaitGroup
 
@@ -294,6 +316,7 @@ func TestEventLog_Subscribe_ConcurrentSafe(t *testing.T) {
 }
 
 func TestEventLog_DetailAndToolFields(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(10)
 	l.Append(EventEntry{
 		Time:   1000,
@@ -311,6 +334,7 @@ func TestEventLog_DetailAndToolFields(t *testing.T) {
 }
 
 func TestEventLog_BackgroundAgents(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 
 	// Background agent IS cleared by result or user events (same as foreground).
@@ -348,6 +372,7 @@ func TestEventLog_BackgroundAgents(t *testing.T) {
 }
 
 func TestEventLog_TurnAgents(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 
 	// Initially empty.
@@ -388,6 +413,7 @@ func TestEventLog_TurnAgents(t *testing.T) {
 }
 
 func TestEventLog_TurnAgents_EmptySubagent(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 	l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: ""})
 
@@ -398,6 +424,7 @@ func TestEventLog_TurnAgents_EmptySubagent(t *testing.T) {
 }
 
 func TestEventLog_TurnAgents_IsCopy(t *testing.T) {
+	t.Parallel()
 	l := NewEventLog(100)
 	l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
 

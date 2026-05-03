@@ -20,6 +20,7 @@ import (
 // ≥10s (script). With ctx wiring, an already-cancelled parent returns
 // well under 1s.
 func TestDetectVersionCtx_CancelledCtxAbortsPromptly(t *testing.T) {
+	t.Parallel()
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("sh not available")
 	}
@@ -57,6 +58,7 @@ func TestDetectVersionCtx_CancelledCtxAbortsPromptly(t *testing.T) {
 // return nil under a pre-cancelled parent, because main.go's fail-fast
 // logic relies on a deterministic response shape.
 func TestDetectBackendsCtx_CancelledCtxStillReturnsSlice(t *testing.T) {
+	t.Parallel()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 

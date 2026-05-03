@@ -82,6 +82,7 @@ func (s *shimTestServer) Close() {
 // --- Tests ---
 
 func TestProcess_Alive_TrueWhenDoneOpen(t *testing.T) {
+	t.Parallel()
 	p := &Process{done: make(chan struct{})}
 	if !p.Alive() {
 		t.Error("Alive() = false, want true when done is open")
@@ -89,6 +90,7 @@ func TestProcess_Alive_TrueWhenDoneOpen(t *testing.T) {
 }
 
 func TestProcess_Alive_FalseAfterDoneClosed(t *testing.T) {
+	t.Parallel()
 	p := &Process{done: make(chan struct{})}
 	close(p.done)
 	if p.Alive() {
@@ -97,6 +99,7 @@ func TestProcess_Alive_FalseAfterDoneClosed(t *testing.T) {
 }
 
 func TestProcess_IsRunning(t *testing.T) {
+	t.Parallel()
 	cases := []struct {
 		state ProcessState
 		want  bool
@@ -115,6 +118,7 @@ func TestProcess_IsRunning(t *testing.T) {
 }
 
 func TestProcess_ReadLoop_ForwardsEventsToChannel(t *testing.T) {
+	t.Parallel()
 	p, srv := shimTestPair(&ClaudeProtocol{})
 	go p.readLoop()
 
@@ -140,6 +144,7 @@ func TestProcess_ReadLoop_ForwardsEventsToChannel(t *testing.T) {
 }
 
 func TestProcess_ReadLoop_SetsStateDeadOnCLIExited(t *testing.T) {
+	t.Parallel()
 	p, srv := shimTestPair(&ClaudeProtocol{})
 	go p.readLoop()
 
@@ -161,6 +166,7 @@ func TestProcess_ReadLoop_SetsStateDeadOnCLIExited(t *testing.T) {
 }
 
 func TestProcess_ReadLoop_SetsStateDeadOnDisconnect(t *testing.T) {
+	t.Parallel()
 	p, srv := shimTestPair(&ClaudeProtocol{})
 	go p.readLoop()
 
@@ -178,6 +184,7 @@ func TestProcess_ReadLoop_SetsStateDeadOnDisconnect(t *testing.T) {
 }
 
 func TestProcess_ReadLoop_SkipsInvalidJSON(t *testing.T) {
+	t.Parallel()
 	p, srv := shimTestPair(&ClaudeProtocol{})
 	go p.readLoop()
 
@@ -197,6 +204,7 @@ func TestProcess_ReadLoop_SkipsInvalidJSON(t *testing.T) {
 }
 
 func TestProcess_ReadLoop_SkipsHookEvents(t *testing.T) {
+	t.Parallel()
 	p, srv := shimTestPair(&ClaudeProtocol{})
 	go p.readLoop()
 
@@ -216,6 +224,7 @@ func TestProcess_ReadLoop_SkipsHookEvents(t *testing.T) {
 }
 
 func TestProcess_ReadLoop_ExitsOnKillCh(t *testing.T) {
+	t.Parallel()
 	p, _ := shimTestPair(&ClaudeProtocol{})
 
 	// Use zero-buffer eventCh to force block
@@ -235,6 +244,7 @@ func TestProcess_ReadLoop_ExitsOnKillCh(t *testing.T) {
 }
 
 func TestProcess_StateTransitions(t *testing.T) {
+	t.Parallel()
 	p, srv := shimTestPair(&ClaudeProtocol{})
 
 	if p.State != StateSpawning {
@@ -285,6 +295,7 @@ func TestProcess_StateTransitions(t *testing.T) {
 }
 
 func TestProcess_Kill_Idempotent(t *testing.T) {
+	t.Parallel()
 	p, _ := shimTestPair(&ClaudeProtocol{})
 	// Repeated calls must not panic
 	p.Kill()
@@ -293,6 +304,7 @@ func TestProcess_Kill_Idempotent(t *testing.T) {
 }
 
 func TestProcess_Kill_ConcurrentSafe(t *testing.T) {
+	t.Parallel()
 	p, _ := shimTestPair(&ClaudeProtocol{})
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {
@@ -315,6 +327,10 @@ func TestProcess_Kill_ConcurrentSafe(t *testing.T) {
 // Uses the test process's own PID as the shim PID so the handler observes
 // the signal without spawning a child; the handler is removed at cleanup
 // to avoid leaking SIGUSR2 handling into other tests in the same binary.
+//
+// NOT t.Parallel() — registers a process-global SIGUSR2 handler via
+// signal.Notify. Concurrent tests that also register/observe SIGUSR2 would
+// cross-trigger (one test's Kill → other test's sigCh). Serial only.
 func TestProcess_Kill_SendsSIGUSR2ToShim(t *testing.T) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGUSR2)
@@ -338,6 +354,9 @@ func TestProcess_Kill_SendsSIGUSR2ToShim(t *testing.T) {
 // construct Process without hello data must not trigger a misdirected
 // signal to PID 0 (which is "send to every process in the caller's
 // process group" on Unix, a dangerous broadcast).
+//
+// NOT t.Parallel() — same process-global signal registration rationale
+// as TestProcess_Kill_SendsSIGUSR2ToShim above.
 func TestProcess_Kill_NoSIGUSR2WhenShimPIDZero(t *testing.T) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGUSR2)
@@ -360,6 +379,7 @@ func TestProcess_Kill_NoSIGUSR2WhenShimPIDZero(t *testing.T) {
 
 // Retained from original tests
 func TestParseAgentInput(t *testing.T) {
+	t.Parallel()
 	t.Run("label priority", func(t *testing.T) {
 		cases := []struct {
 			name  string
