@@ -893,6 +893,50 @@ func TestWebhook_DifferentNonce_Allowed(t *testing.T) {
 	}
 }
 
+// TestWebhook_NonceNonPrintableASCII_Rejected covers R176-SEC-M: the nonce
+// header ultimately concatenates into the seenNonces map key and reaches
+// slog via `nonce_len` plus any future helper that logs it. Even though
+// current log attrs print only length, a byte-level restriction to
+// printable ASCII (0x21-0x7E) closes the log-injection class
+// defense-in-depth for any future refactor that surfaces the nonce.
+// Legitimate Feishu nonces are 16-char random strings so this is a
+// pure-defense tightening.
+func TestWebhook_NonceNonPrintableASCII_Rejected(t *testing.T) {
+	t.Parallel()
+	const encryptKey = "nonce_ascii_test_key"
+	f := makeWebhookFeishu(Config{
+		AppID: "id", AppSecret: "secret",
+		VerificationToken: "test_token",
+		EncryptKey:        encryptKey,
+	})
+	mux := http.NewServeMux()
+	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {})
+
+	cases := map[string]string{
+		"embedded_LF":    "nonce\nvalid",
+		"embedded_CR":    "nonce\rvalid",
+		"space_internal": "nonce valid",
+		"c1_NEL":         "noncenel",
+		"bidi_RLO":       "nonce‮rtl",
+		"del_char":       "nonce\x7fdel",
+		"tab_char":       "nonce\tvalid",
+	}
+	body := buildV2MessageBody("ev_nonce_ascii", "oc_chat1", "p2p", "hi")
+	timestamp := fmt.Sprintf("%d", time.Now().Unix())
+	for name, nonce := range cases {
+		name, nonce := name, nonce
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			req := buildSignedRequest(t, body, timestamp, nonce, encryptKey)
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400 (non-printable nonce %q)", w.Code, nonce)
+			}
+		})
+	}
+}
+
 // --- MentionMe precision (isBotMentioned) + fetchBotInfo tests ---
 
 // TestIsBotMentioned_ExactMatch: botOpenID is known, at least one mention

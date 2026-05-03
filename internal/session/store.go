@@ -147,7 +147,7 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 				SessionID:      sid,
 				PrevSessionIDs: prevIDs,
 				TotalCost:      cost,
-				Workspace:      s.workspace,
+				Workspace:      s.Workspace(),
 				Backend:        s.Backend(),
 				LastActive:     s.lastActive.Load(),
 				UserLabel:      s.UserLabel(),

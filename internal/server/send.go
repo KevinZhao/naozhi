@@ -19,6 +19,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -111,24 +112,19 @@ const (
 //
 // onAsyncError is called from the owner goroutine if GetOrCreate fails; it may
 // be nil (HTTP path has no back-channel after ack).
-// maxSessionKeyLen caps the client-supplied session key so a long or
-// malformed key cannot bloat router state, log lines, or session-update
-// broadcasts. Realistic keys (platform:chatType:chatID:agentID) stay well
-// under 256 bytes.
-const maxSessionKeyLen = 512
-
 func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAckStatus, error) {
 	key := p.Key
-	if len(key) == 0 || len(key) > maxSessionKeyLen {
-		return false, "", fmt.Errorf("invalid key length")
-	}
-	// Reject control characters and newlines — they propagate into log lines
-	// and session IDs without adding value.
-	for i := 0; i < len(key); i++ {
-		c := key[i]
-		if c < 0x20 || c == 0x7f {
-			return false, "", fmt.Errorf("invalid key character")
-		}
+	// R175-SEC-P1: use the canonical session.ValidateSessionKey gate
+	// (also used by handleEvents / handleDelete / handleSetLabel / HTTP
+	// handleInterrupt / WS handleSubscribe / WS handleInterrupt). The
+	// previous inline loop only rejected ASCII C0 / DEL; C1 controls
+	// (U+0080-U+009F), bidi overrides (U+202A-U+202E / U+2066-U+2069),
+	// and non-UTF-8 sequences fell through and reached slog attrs +
+	// sessions.json, giving an authenticated caller a log-injection
+	// primitive. ValidateSessionKey also caps at MaxSessionKeyBytes
+	// (~520 B) which supersedes the old local 512 ceiling.
+	if err := session.ValidateSessionKey(key); err != nil {
+		return false, "", fmt.Errorf("invalid key")
 	}
 
 	// Handle /clear and /new — CLI built-in doesn't work in stream-json.
@@ -163,7 +159,15 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 			// on verbose logging. The workspace path is already scrubbed
 			// from the HTTP response, so surfacing it in logs doesn't leak
 			// it to the client. R59-GO-M2.
-			slog.Warn("workspace validation failed", "err", err, "workspace", p.Workspace)
+			//
+			// R175-SEC-P1: p.Workspace is attacker-influenced (authenticated
+			// dashboard/node, but not operator-supplied). The ValidateSessionKey
+			// gate above rejects C1/bidi in the KEY; workspace is validated
+			// separately as a filesystem path and passes through here raw.
+			// Route it through osutil.SanitizeForLog so C1 controls / bidi
+			// overrides / LS/PS cannot flip terminal rendering under `tail
+			// -f` or inject fake lines into JSON log sinks.
+			slog.Warn("workspace validation failed", "err", err, "workspace", osutil.SanitizeForLog(p.Workspace, 1024))
 			return false, "", fmt.Errorf("invalid workspace")
 		}
 		validatedWorkspace = wsPath

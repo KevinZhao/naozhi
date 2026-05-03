@@ -164,6 +164,24 @@ func TestSanitizeDownloadName(t *testing.T) {
 		{"bad\r\nname.txt", "badname.txt"},
 		{`x"y.go`, "x_y.go"},
 		{"", "download"},
+
+		// R175-SEC-LOW: C1 controls (U+0080..U+009F) — U+0085 (NEL) and
+		// U+0090 (DCS) are representative samples. They pass the `r < 0x20`
+		// gate and would otherwise leak into Content-Disposition via RFC
+		// 5987 percent-encoding; some older HTTP intermediaries mis-parse
+		// such bytes in the header value.
+		{"name\u0085nel.txt", "namenel.txt"},
+		{"name\u0090dcs.txt", "namedcs.txt"},
+		// Bidi override (U+202E RLO) / isolate (U+2066 LRI / U+2069 PDI).
+		// These let an attacker supply a filename that renders misleadingly
+		// in a terminal / UI.
+		{"photo\u202Ejpg.exe", "photojpg.exe"},
+		{"name\u2066wrap\u2069.txt", "namewrap.txt"},
+		// Line-separator (U+2028) / paragraph-separator (U+2029) — would
+		// break the quoted filename onto a new line and let an attacker
+		// inject a second header.
+		{"doc\u2028sneaky.md", "docsneaky.md"},
+		{"doc\u2029sneaky.md", "docsneaky.md"},
 	}
 	for _, tc := range cases {
 		got := sanitizeDownloadName(tc.in)
@@ -408,6 +426,46 @@ func TestHandleFileGet_PreviewInvalidUTF8(t *testing.T) {
 	content, _ := resp["content"].(string)
 	if !strings.Contains(content, "\uFFFD") {
 		t.Errorf("invalid UTF-8 should be replaced with U+FFFD, got %q", content)
+	}
+}
+
+// TestHandleFileGet_PreviewRejectsHTML covers R176-SEC-H3: an .html file
+// in the workspace previously flowed through the preview JSON content
+// path (`isTextMime("text/html") == true`), and `writeJSON` has
+// `SetEscapeHTML(false)`. The dashboard renderer uses `esc()` today but
+// the JS-side defense is one regression away from stored XSS. The
+// server-side contract must refuse text/html for preview — clients
+// switch to download mode — mirroring serveRaw's explicit rejection.
+func TestHandleFileGet_PreviewRejectsHTML(t *testing.T) {
+	h, proj, projDir := newProjectHandlersForTest(t, nil)
+	// CLI tool writes an arbitrary .html file into the workspace.
+	htmlBytes := []byte(`<!doctype html><html><body><script>alert(1)</script></body></html>`)
+	if err := os.WriteFile(filepath.Join(projDir, "report.html"), htmlBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+proj+"&path=report.html&mode=preview", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 with binary=true payload", w.Code)
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal resp: %v", err)
+	}
+	if resp["binary"] != true {
+		t.Errorf("binary = %v, want true (text/html must NOT flow through preview content)", resp["binary"])
+	}
+	if resp["content"] != "" {
+		t.Errorf("content = %q, want empty string (html bytes leaked into JSON)", resp["content"])
+	}
+	// Defense-in-depth: the <script> substring must NOT appear anywhere
+	// in the JSON body. If a future refactor loses the guard, this
+	// catches the regression even if `binary` is also set correctly.
+	if strings.Contains(w.Body.String(), "<script>") {
+		t.Errorf("response body contains <script>; text/html leaked through preview")
 	}
 }
 

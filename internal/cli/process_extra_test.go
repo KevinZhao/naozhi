@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -690,6 +691,52 @@ func TestProcess_Close_SendsShutdownNotCloseStdin(t *testing.T) {
 	}
 
 	<-done
+}
+
+// TestProcess_Close_SetsWriteDeadline is an R175-P1 regression gate: Close()
+// must route its "shutdown" send through shimWMu+SetWriteDeadline just like
+// Kill()/Detach() do. Without that, an alive-but-wedged shim (TCP write
+// buffer full / GC pause / stuck child) pins shimWMu for minutes waiting for
+// the kernel keepalive to give up, starving every concurrent shimSend
+// (heartbeat, ping, interrupt) and stretching Router.Reset / shutdown past
+// the SIGTERM grace. Source-level scan so a future refactor that reverts to
+// the bare p.shimSend(shutdown) pattern fails loudly.
+func TestProcess_Close_SetsWriteDeadline(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("process.go")
+	if err != nil {
+		t.Fatalf("read process.go: %v", err)
+	}
+	src := string(data)
+	idx := strings.Index(src, "func (p *Process) Close() {")
+	if idx < 0 {
+		t.Fatal("Close method not found")
+	}
+	end := strings.Index(src[idx:], "\n}\n")
+	if end < 0 {
+		t.Fatal("Close method body not terminated")
+	}
+	body := src[idx : idx+end]
+	// Invariant 1: must take shimWMu.
+	if !strings.Contains(body, "p.shimWMu.Lock()") {
+		t.Error("Close must acquire shimWMu before sending shutdown (mirror Kill/Detach)")
+	}
+	// Invariant 2: must call SetWriteDeadline with captured error — the
+	// SetWriteDeadline contract test enforces this syntactically repo-wide,
+	// but we also pin the call site so a pure-refactor that drops the
+	// deadline altogether is caught here specifically.
+	if !strings.Contains(body, "SetWriteDeadline(") {
+		t.Error("Close must call SetWriteDeadline on shimConn before shutdown write")
+	}
+	// Invariant 3: must use shimSendLocked (not shimSend) after taking the
+	// lock — shimSend re-acquires shimWMu and would deadlock.
+	if !strings.Contains(body, "shimSendLocked(shimClientMsg{Type: \"shutdown\"})") {
+		t.Error("Close must call shimSendLocked under shimWMu with shutdown msg")
+	}
+	// Invariant 4: reject the legacy bare-send pattern.
+	if strings.Contains(body, "p.shimSend(shimClientMsg{Type: \"shutdown\"})") {
+		t.Error("Close must NOT call p.shimSend(shutdown) directly — use shimSendLocked under shimWMu with SetWriteDeadline")
+	}
 }
 
 // ---------------------------------------------------------------------------

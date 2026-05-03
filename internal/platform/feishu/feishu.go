@@ -15,6 +15,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync"
@@ -230,31 +231,54 @@ func (f *Feishu) cleanupNonces(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			now := time.Now().Unix()
-			deleted := int64(0)
-			f.seenNonces.Range(func(k, v any) bool {
-				// Defensive type assertion: sync.Map has no compile-time type
-				// safety, so guard against accidental cross-type Store from a
-				// future refactor. Drop malformed entries so the map recovers.
-				ts, ok := v.(int64)
-				if !ok || ts < now {
-					f.seenNonces.Delete(k)
-					deleted++
-				}
-				return true
-			})
-			if deleted > 0 {
-				// Clamp at zero: every webhook insert MUST pair with Add(1),
-				// but defensive type assertion above can delete entries that
-				// bypassed the counted insert path (future refactor risk). A
-				// negative counter would eventually bump legitimate traffic
-				// against the maxSeenNonces ceiling until restart.
-				if n := f.seenNoncesCount.Add(-deleted); n < 0 {
-					f.seenNoncesCount.Store(0)
-				}
-			}
+			// R175-P1: wrap each tick's work in its own recover frame so a
+			// panic in a single Range/Delete pass (e.g. from a future
+			// refactor that stores a different value type, or a corrupt
+			// sync.Map internal) does NOT tear the goroutine down. The
+			// previous shape had `defer recover()` at the function scope,
+			// which would recover the panic but then unwind out of the
+			// `for` loop and terminate the goroutine — replay protection
+			// was permanently disabled until restart, exactly the outcome
+			// the earlier comment promised to prevent. Now the loop
+			// survives and the next tick retries cleanup.
+			f.cleanupNoncesTick()
 		case <-ctx.Done():
 			return
+		}
+	}
+}
+
+// cleanupNoncesTick performs one sweep of the expired-nonce map. Extracted so
+// each call has its own recover frame — a panic here is logged and the caller
+// (cleanupNonces) moves to the next tick rather than exiting.
+func (f *Feishu) cleanupNoncesTick() {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("feishu: cleanupNonces tick panic recovered; replay protection continues on next tick",
+				"panic", r, "stack", string(debug.Stack()))
+		}
+	}()
+	now := time.Now().Unix()
+	deleted := int64(0)
+	f.seenNonces.Range(func(k, v any) bool {
+		// Defensive type assertion: sync.Map has no compile-time type
+		// safety, so guard against accidental cross-type Store from a
+		// future refactor. Drop malformed entries so the map recovers.
+		ts, ok := v.(int64)
+		if !ok || ts < now {
+			f.seenNonces.Delete(k)
+			deleted++
+		}
+		return true
+	})
+	if deleted > 0 {
+		// Clamp at zero: every webhook insert MUST pair with Add(1),
+		// but defensive type assertion above can delete entries that
+		// bypassed the counted insert path (future refactor risk). A
+		// negative counter would eventually bump legitimate traffic
+		// against the maxSeenNonces ceiling until restart.
+		if n := f.seenNoncesCount.Add(-deleted); n < 0 {
+			f.seenNoncesCount.Store(0)
 		}
 	}
 }

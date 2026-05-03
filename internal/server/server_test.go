@@ -127,9 +127,19 @@ func TestValidateRemoteWorkspace(t *testing.T) {
 		{"nul rejected", "/home/user/\x00proj", true},
 		{"oversize rejected", "/" + strings.Repeat("a", 5000), true},
 		{"DEL rejected", "/home/user/\x7fproj", true},
+		// R176-SEC-M: C1 / bidi / LS / PS runes are >= 0x20 at the byte
+		// level and slipped past the old ASCII-only loop. isLogInjectionRune
+		// now rejects all four classes so they cannot reach slog attrs.
+		{"C1 NEL rejected", "/home/user/proj", true},
+		{"C1 DCS rejected", "/home/user/proj", true},
+		{"bidi RLO rejected", "/home/user/‮proj", true},
+		{"bidi LRI rejected", "/home/user/⁦proj", true},
+		{"line separator rejected", "/home/user/ proj", true},
+		{"paragraph separator rejected", "/home/user/ proj", true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			err := validateRemoteWorkspace(tc.input)
 			if (err != nil) != tc.wantErr {
 				t.Errorf("validateRemoteWorkspace(%q) err=%v wantErr=%v", tc.input, err, tc.wantErr)

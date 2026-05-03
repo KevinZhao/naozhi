@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -46,6 +47,116 @@ func TestHandleAPISessionEvents_SessionNotFound(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "session not found") {
 		t.Errorf("body = %q, want 'session not found'", w.Body.String())
+	}
+}
+
+// TestHandleAPISessionEvents_RejectsInvalidKey covers R172-SEC-L2: the
+// reverse-RPC fetch_events worker in internal/upstream/connector.go
+// already runs session.ValidateSessionKey on every inbound key, but the
+// dashboard HTTP surface used to forward authenticated-user input
+// straight into GetSession and slog without a length / control-char
+// gate. Keys containing embedded NUL/CR or multi-KB filler must fail
+// with 400 before reaching the router map.
+func TestHandleAPISessionEvents_RejectsInvalidKey(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+
+	// Build a key that exceeds session.MaxSessionKeyBytes (~520 B).
+	tooLong := "test:direct:" + strings.Repeat("a", 4*1024) + ":general"
+	cases := map[string]string{
+		"embedded_LF":  "test:direct:abc\ndef:general",
+		"embedded_NUL": "test:direct:abc\x00def:general",
+		"too_long":     tooLong,
+		"bidi_RLO":     "test:direct:abc‮def:general",
+	}
+	for name, key := range cases {
+		key := key
+		t.Run(name, func(t *testing.T) {
+			// Use url.QueryEscape so raw control bytes (NUL, LF) do not
+			// trip url.Parse before the handler ever sees them.
+			req := httptest.NewRequest(http.MethodGet,
+				"/api/sessions/events?key="+url.QueryEscape(key), nil)
+			w := httptest.NewRecorder()
+			srv.sessionH.handleEvents(w, req)
+
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("status = %d, want 400", w.Code)
+			}
+			if !strings.Contains(w.Body.String(), "invalid key") {
+				t.Errorf("body = %q, want 'invalid key'", w.Body.String())
+			}
+		})
+	}
+}
+
+// TestHandleAPISessionDelete_SetLabel_Interrupt_RejectInvalidKey covers
+// R175-SEC-M: the DELETE /api/sessions / PATCH /api/sessions/label / POST
+// /api/sessions/interrupt dashboard handlers historically trusted the
+// authenticated-operator-supplied JSON body and forwarded req.Key straight
+// into Router methods + slog.Warn attrs on failure. handleEvents already
+// enforces session.ValidateSessionKey (Round 173 R172-SEC-L2); this test
+// locks the same gate into the three other session-lifecycle handlers so
+// they reject multi-KB keys, embedded NUL/CR/LF, and bidi-override
+// characters uniformly.
+func TestHandleAPISessionDelete_SetLabel_Interrupt_RejectInvalidKey(t *testing.T) {
+	srv := newTestServer(&mockPlatform{})
+
+	tooLong := "test:direct:" + strings.Repeat("a", 4*1024) + ":general"
+	cases := map[string]string{
+		"embedded_LF":  "test:direct:abc\ndef:general",
+		"embedded_NUL": "test:direct:abc\x00def:general",
+		"too_long":     tooLong,
+		"bidi_RLO":     "test:direct:abc‮def:general",
+	}
+	for name, key := range cases {
+		key := key
+		t.Run("delete_body_"+name, func(t *testing.T) {
+			raw, _ := json.Marshal(map[string]string{"key": key})
+			req := httptest.NewRequest(http.MethodDelete, "/api/sessions", bytes.NewReader(raw))
+			w := httptest.NewRecorder()
+			srv.sessionH.handleDelete(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("delete status = %d, want 400", w.Code)
+			}
+			if !strings.Contains(w.Body.String(), "invalid key") {
+				t.Errorf("delete body = %q, want 'invalid key'", w.Body.String())
+			}
+		})
+		t.Run("delete_query_"+name, func(t *testing.T) {
+			u := "/api/sessions?key=" + url.QueryEscape(key)
+			req := httptest.NewRequest(http.MethodDelete, u, nil)
+			w := httptest.NewRecorder()
+			srv.sessionH.handleDelete(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("delete(query) status = %d, want 400", w.Code)
+			}
+			if !strings.Contains(w.Body.String(), "invalid key") {
+				t.Errorf("delete(query) body = %q, want 'invalid key'", w.Body.String())
+			}
+		})
+		t.Run("set_label_"+name, func(t *testing.T) {
+			raw, _ := json.Marshal(map[string]string{"key": key, "label": "x"})
+			req := httptest.NewRequest(http.MethodPatch, "/api/sessions/label", bytes.NewReader(raw))
+			w := httptest.NewRecorder()
+			srv.sessionH.handleSetLabel(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("set_label status = %d, want 400", w.Code)
+			}
+			if !strings.Contains(w.Body.String(), "invalid key") {
+				t.Errorf("set_label body = %q, want 'invalid key'", w.Body.String())
+			}
+		})
+		t.Run("interrupt_"+name, func(t *testing.T) {
+			raw, _ := json.Marshal(map[string]string{"key": key})
+			req := httptest.NewRequest(http.MethodPost, "/api/sessions/interrupt", bytes.NewReader(raw))
+			w := httptest.NewRecorder()
+			srv.sessionH.handleInterrupt(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Errorf("interrupt status = %d, want 400", w.Code)
+			}
+			if !strings.Contains(w.Body.String(), "invalid key") {
+				t.Errorf("interrupt body = %q, want 'invalid key'", w.Body.String())
+			}
+		})
 	}
 }
 
@@ -337,8 +448,10 @@ func TestHandleAPISend_RejectControlInKey(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "invalid key character") {
-		t.Errorf("body = %q, want 'invalid key character'", w.Body.String())
+	// R175-SEC-P1: switched to session.ValidateSessionKey; response text
+	// collapsed to "invalid key" (covers C0/C1/bidi/non-UTF-8 uniformly).
+	if !strings.Contains(w.Body.String(), "invalid key") {
+		t.Errorf("body = %q, want 'invalid key'", w.Body.String())
 	}
 }
 

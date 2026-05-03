@@ -267,6 +267,16 @@ func isRawPreviewMime(mime string) bool {
 // response headers (HTTP response splitting) or cause Windows to treat the
 // download as a path reference. filepath.Base handles the path; we still need
 // to scrub control bytes the base retains.
+//
+// R175-SEC-LOW: also drop C1 controls (U+0080-U+009F) and the bidi/LS/PS class
+// (U+202A-U+202E, U+2066-U+2069, U+2028, U+2029) that survive `r < 0x20`. The
+// Content-Disposition header is built via RFC 6266's `filename*=UTF-8”...`
+// with percent-encoding for non-ASCII, so C1 bytes would be passed through in
+// percent-encoded form — some older HTTP intermediaries still choke on them,
+// and bidi overrides let an attacker-supplied filename render as `foo.exe`
+// despite the real extension being `foo.txt` when the file preview UI echos
+// back to the operator. Aligns with the isLogInjectionRune policy in
+// dashboard_cron.go.
 func sanitizeDownloadName(p string) string {
 	base := filepath.Base(p)
 	var b strings.Builder
@@ -274,7 +284,15 @@ func sanitizeDownloadName(p string) string {
 	for _, r := range base {
 		switch {
 		case r < 0x20 || r == 0x7f:
-			// drop controls
+			// drop C0 controls
+		case r >= 0x80 && r <= 0x9f:
+			// drop C1 controls (not caught by r < 0x20)
+		case r == 0x2028 || r == 0x2029:
+			// drop LS / PS — line-breaking Unicode whitespace
+		case r >= 0x202a && r <= 0x202e:
+			// drop bidi override / embedding chars
+		case r >= 0x2066 && r <= 0x2069:
+			// drop bidi isolate chars
 		case r == '"', r == '\\':
 			b.WriteRune('_')
 		default:
@@ -551,6 +569,29 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, resolved string, i
 		// Not text — clients should switch to raw/download mode. Return a
 		// structured response so the drawer can render "binary file, please
 		// download" without a second round-trip.
+		writeJSON(w, map[string]any{
+			"content":   "",
+			"size":      size,
+			"mime":      mime,
+			"truncated": false,
+			"binary":    true,
+		})
+		return
+	}
+	// R176-SEC-H3: text/html files MUST NOT flow through the preview JSON
+	// content path. writeJSON disables HTML escaping (SetEscapeHTML(false),
+	// dashboard.go), so any <script> bytes in the workspace file land
+	// verbatim inside the response JSON — the dashboard currently uses
+	// `<pre><code>esc(content)</code></pre>` which is safe, but that is a
+	// JS-side convention one regression away from stored XSS. serveRaw
+	// already rejects text/html / image/svg+xml via explicit HasPrefix
+	// guards (see below); mirror that contract here so the server-side
+	// defense is symmetric across preview and raw modes. A Claude CLI
+	// tool writing `<script>fetch('/api/sessions')</script>` to any
+	// .html file in the workspace cannot reach the dashboard renderer.
+	// HasPrefix covers detector outputs that append parameters like
+	// "text/html; charset=utf-8".
+	if strings.HasPrefix(mime, "text/html") {
 		writeJSON(w, map[string]any{
 			"content":   "",
 			"size":      size,

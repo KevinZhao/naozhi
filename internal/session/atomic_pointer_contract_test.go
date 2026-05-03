@@ -31,6 +31,7 @@ func TestManagedSession_AtomicPointerStringFields(t *testing.T) {
 	for _, name := range []string{
 		"sessionID", "lastPrompt", "lastActivity",
 		"backend", "cliName", "cliVersion", "deathReason", "userLabel",
+		"workspace",
 	} {
 		f, ok := typ.FieldByName(name)
 		if !ok {

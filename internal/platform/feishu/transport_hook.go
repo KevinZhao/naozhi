@@ -123,6 +123,21 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 					w.WriteHeader(http.StatusBadRequest)
 					return
 				}
+				// R176-SEC-M: nonce is concatenated into the seenNonces map
+				// key and reaches slog attrs indirectly via helper logs in
+				// future refactors. Restrict to printable ASCII (0x21-0x7E)
+				// so byte-level C0/C1/bidi/LS/PS cannot corrupt structured
+				// log output. Real Feishu nonces are base-16-ish random
+				// strings so this is a pure-defense tightening — no valid
+				// traffic should trip it.
+				for i := 0; i < len(nonce); i++ {
+					c := nonce[i]
+					if c < 0x21 || c > 0x7e {
+						slog.Warn("feishu webhook nonce contains non-printable bytes", "len", len(nonce))
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+				}
 				// Global cap: refuse new nonces once the map hits maxSeenNonces
 				// so a flood of unique-nonce requests cannot bloat heap. Legitimate
 				// traffic at a 5-minute TTL stays well below this cap.

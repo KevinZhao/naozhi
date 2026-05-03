@@ -14,7 +14,8 @@ func TestRenameSession_HappyPath(t *testing.T) {
 	const oldKey = "scratch:abc:general:general"
 	const newKey = "feishu:direct:alice:aside-general-deadbeef"
 
-	s := &ManagedSession{key: oldKey, workspace: "/tmp/repo"}
+	s := &ManagedSession{key: oldKey}
+	s.setWorkspace("/tmp/repo")
 	s.setSessionID("sess-promote-1")
 	s.SetBackend("claude")
 	s.SetCLIName("claude-code")
@@ -42,8 +43,8 @@ func TestRenameSession_HappyPath(t *testing.T) {
 	if got.getSessionID() != "sess-promote-1" {
 		t.Errorf("sessionID not preserved: %q", got.getSessionID())
 	}
-	if got.workspace != "/tmp/repo" {
-		t.Errorf("workspace not preserved: %q", got.workspace)
+	if got.Workspace() != "/tmp/repo" {
+		t.Errorf("workspace not preserved: %q", got.Workspace())
 	}
 	if got.totalCost != 1.42 {
 		t.Errorf("totalCost not preserved: %v", got.totalCost)

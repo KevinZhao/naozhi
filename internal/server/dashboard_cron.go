@@ -6,10 +6,12 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // Bounds for notify target fields set by authenticated dashboard users. The
@@ -66,6 +68,13 @@ const maxCronWorkDirBytesDashboard = 1024
 // log pipelines that use U+2028 as a line boundary. Matches the filter
 // applied by sanitizeKeyComponent in the session package so cron fields
 // and session-key fields reject the same log-injection class uniformly.
+//
+// R172-SEC-L1: relative paths are rejected up front so the cron edge
+// boundary does not depend on validateWorkspace to fail on "." / "foo/bar"
+// later. Defense-in-depth: if validateWorkspace ever loosens its IsAbs
+// check (e.g. to accept workspace-relative paths for a new feature) the
+// cron handler continues to enforce the stricter contract inherited from
+// the scheduler worker which runs on absolute paths only.
 func validateCronWorkDir(wd string) error {
 	if len(wd) > maxCronWorkDirBytesDashboard {
 		return fmt.Errorf("work_dir exceeds %d-byte limit", maxCronWorkDirBytesDashboard)
@@ -81,28 +90,17 @@ func validateCronWorkDir(wd string) error {
 			return fmt.Errorf("work_dir contains invalid unicode control characters")
 		}
 	}
+	if !filepath.IsAbs(wd) {
+		return fmt.Errorf("work_dir must be an absolute path")
+	}
 	return nil
 }
 
-// isLogInjectionRune reports whether r is a Unicode codepoint that would
-// corrupt structured log output or terminal rendering when embedded in a
-// user-supplied attribute. Covers bidi override / embedding / isolate
-// codepoints and line/paragraph separators that byte-level < 0x20 filters
-// miss. C1 controls (U+0080–U+009F) are also caught here because they
-// encode as 2-byte UTF-8 starting with 0xC2 (>= 0x20).
-func isLogInjectionRune(r rune) bool {
-	switch {
-	case r >= 0x80 && r <= 0x9F: // C1 controls
-		return true
-	case r >= 0x202A && r <= 0x202E: // LRE/RLE/PDF/LRO/RLO
-		return true
-	case r >= 0x2066 && r <= 0x2069: // LRI/RLI/FSI/PDI
-		return true
-	case r == 0x2028 || r == 0x2029: // LS/PS
-		return true
-	}
-	return false
-}
+// isLogInjectionRune is a thin wrapper around osutil.IsLogInjectionRune kept
+// for existing call sites (+ dashboard_cron_validate_test.go) that reference
+// the package-local name. The canonical policy lives in osutil/loginject.go;
+// see R172-SEC-M4.
+func isLogInjectionRune(r rune) bool { return osutil.IsLogInjectionRune(r) }
 
 // validateNotifyTarget enforces platform allowlist + chat_id size bound.
 func validateNotifyTarget(platform, chatID string) error {

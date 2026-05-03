@@ -648,11 +648,11 @@ func NewRouter(cfg RouterConfig) *Router {
 			}
 			s := &ManagedSession{
 				key:            key,
-				workspace:      entry.Workspace,
 				totalCost:      entry.TotalCost,
 				prevSessionIDs: entry.PrevSessionIDs,
 				exempt:         isExemptKey(key),
 			}
+			s.setWorkspace(entry.Workspace)
 			s.SetBackend(restoreBackendID)
 			s.SetCLIName(cliName)
 			s.SetCLIVersion(cliVersion)
@@ -710,9 +710,17 @@ func NewRouter(cfg RouterConfig) *Router {
 				if deferred {
 					// Wait for ReconnectShims to complete its first pass.
 					// historyCtx cancel (Shutdown) aborts the wait cleanly.
+					// R175-P3: use NewTimer + Stop instead of time.After —
+					// on fast shutdown (within shimReconnectGraceDelay) the
+					// time.After variant leaks a runtime timer per goroutine
+					// for the full grace window, and at startup we can have
+					// up to historyLoadConcurrency * #deferred-sessions
+					// goroutines parked here.
+					graceTimer := time.NewTimer(shimReconnectGraceDelay)
 					select {
-					case <-time.After(shimReconnectGraceDelay):
+					case <-graceTimer.C:
 					case <-r.historyCtx.Done():
+						graceTimer.Stop()
 						return
 					}
 					// If ReconnectShims already populated history (happy
@@ -743,7 +751,7 @@ func NewRouter(cfg RouterConfig) *Router {
 				ids = append(ids, s.getSessionID())
 
 				allEntries := discovery.LoadHistoryChainTailCtx(
-					r.historyCtx, r.claudeDir, ids, s.workspace, maxPersistedHistory,
+					r.historyCtx, r.claudeDir, ids, s.Workspace(), maxPersistedHistory,
 				)
 				if len(allEntries) == 0 {
 					return
@@ -788,7 +796,7 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 		backend = r.defaultBackend
 	}
 	if backend == "claude" && r.claudeDir != "" {
-		s.SetHistorySource(claudejsonl.New(r.claudeDir, s.workspace, s.snapshotChainIDs))
+		s.SetHistorySource(claudejsonl.New(r.claudeDir, s.Workspace(), s.snapshotChainIDs))
 		return
 	}
 	s.SetHistorySource(history.Noop{})
@@ -986,7 +994,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				ids = append(ids, state.SessionID)
 				histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 				histEntries := discovery.LoadHistoryChainTailCtx(
-					histCtx, r.claudeDir, ids, sess.workspace, maxPersistedHistory,
+					histCtx, r.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
 				)
 				histCancel()
 				if len(histEntries) > 0 {
@@ -1071,7 +1079,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			// shimReconnectTimeout still protect against hung storage.
 			histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 			histEntries := discovery.LoadHistoryChainTailCtx(
-				histCtx, r.claudeDir, ids, sess.workspace, maxPersistedHistory,
+				histCtx, r.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
 			)
 			histCancel()
 			if len(histEntries) > 0 {
@@ -1506,8 +1514,10 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	// the old session's stored workspace so --resume finds the session in the
 	// correct project directory (Claude stores sessions under ~/.claude/projects/<sha256(cwd)>/).
 	if !workspaceOverridden && resumeID != "" {
-		if old := r.sessions[key]; old != nil && old.workspace != "" {
-			workspace = old.workspace
+		if old := r.sessions[key]; old != nil {
+			if ws := old.Workspace(); ws != "" {
+				workspace = ws
+			}
 		}
 	}
 
@@ -1636,7 +1646,6 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 
 	s := &ManagedSession{
 		key:              key,
-		workspace:        workspace,
 		persistedHistory: oldHistory,
 		prevSessionIDs:   prevIDs,
 		totalCost:        oldTotalCost,
@@ -1650,6 +1659,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 			r.mu.Unlock()
 		},
 	}
+	s.setWorkspace(workspace)
 	s.SetBackend(backendID)
 	s.SetCLIName(wrapper.CLIName)
 	s.SetCLIVersion(wrapper.CLIVersion)
@@ -1960,7 +1970,6 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	// the only safe way to change the key.
 	fresh := &ManagedSession{
 		key:              newKey,
-		workspace:        old.workspace,
 		persistedHistory: old.persistedHistory,
 		prevSessionIDs:   old.prevSessionIDs,
 		totalCost:        old.totalCost,
@@ -1974,6 +1983,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 			r.mu.Unlock()
 		},
 	}
+	fresh.setWorkspace(old.Workspace())
 	// Copy atomic fields (backend / CLI name+ver / user label / death reason /
 	// lastActive / lastPrompt / lastActivity / sessionID). Each field is an
 	// atomic.Pointer[string] so plain Load/Store round-trips are race-safe;
@@ -2931,9 +2941,9 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 		delete(r.sessionIDToKey, sessionID)
 	}
 	s := &ManagedSession{
-		key:       key,
-		workspace: workspace,
+		key: key,
 	}
+	s.setWorkspace(workspace)
 	s.SetCLIName(r.cliNameDefault())
 	s.SetCLIVersion(r.cliVersionDefault())
 	s.setSessionID(sessionID)
@@ -2968,7 +2978,7 @@ func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
 		// Refresh workspace/prompt on existing stub; don't touch live process.
 		if existing.loadProcess() == nil {
 			if workspace != "" {
-				existing.workspace = workspace
+				existing.setWorkspace(workspace)
 			}
 			if lastPrompt != "" {
 				storeStringAtomic(&existing.lastPrompt, lastPrompt)
@@ -2981,10 +2991,10 @@ func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
 		return
 	}
 	s := &ManagedSession{
-		key:       key,
-		workspace: workspace,
-		exempt:    true,
+		key:    key,
+		exempt: true,
 	}
+	s.setWorkspace(workspace)
 	s.SetCLIName(r.cliNameDefault())
 	s.SetCLIVersion(r.cliVersionDefault())
 	if lastPrompt != "" {
@@ -3017,8 +3027,8 @@ func (r *Router) ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]
 			if pid := p.PID(); pid > 0 {
 				pids[pid] = true
 			}
-			if s.workspace != "" {
-				cwds[s.workspace] = true
+			if ws := s.Workspace(); ws != "" {
+				cwds[ws] = true
 			}
 		}
 	}

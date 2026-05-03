@@ -552,6 +552,16 @@ func (h *SessionHandlers) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing key parameter", http.StatusBadRequest)
 		return
 	}
+	// R172-SEC-L2: same validation the reverse-RPC fetch_events handler
+	// enforces at the connector edge (internal/upstream/connector.go).
+	// Without this gate an authenticated operator could post a multi-KB
+	// key that lands in slog attrs on the "session not found" path or
+	// embeds control bytes that corrupt log pipelines. ValidateSessionKey
+	// also implicitly caps length at MaxSessionKeyBytes (~520 B).
+	if err := session.ValidateSessionKey(key); err != nil {
+		http.Error(w, "invalid key parameter", http.StatusBadRequest)
+		return
+	}
 
 	q := r.URL.Query()
 	afterStr := q.Get("after")
@@ -688,6 +698,15 @@ func (h *SessionHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// R175-SEC-M: same gate handleEvents already runs (R172-SEC-L2). Without
+	// it an authenticated operator could post a multi-KB key that reaches the
+	// "remote remove session failed" slog.Warn attr (line below) or embeds
+	// control bytes that corrupt log pipelines. ValidateSessionKey also caps
+	// length at MaxSessionKeyBytes (~520 B).
+	if err := session.ValidateSessionKey(req.Key); err != nil {
+		http.Error(w, "invalid key parameter", http.StatusBadRequest)
+		return
+	}
 
 	// Remote node proxy
 	if req.Node != "" && req.Node != "local" {
@@ -737,6 +756,13 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
 		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+	// R175-SEC-M: gate req.Key before it reaches slog attrs (remote failure
+	// path below logs both node + key) or router lookups. Same policy as
+	// handleEvents / handleDelete.
+	if err := session.ValidateSessionKey(req.Key); err != nil {
+		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return
 	}
 
@@ -874,6 +900,12 @@ func (h *SessionHandlers) handleInterrupt(w http.ResponseWriter, r *http.Request
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
 		http.Error(w, "key is required", http.StatusBadRequest)
+		return
+	}
+	// R175-SEC-M: gate req.Key before it reaches slog attrs / router lookup.
+	// Same policy as handleEvents / handleDelete / handleSetLabel.
+	if err := session.ValidateSessionKey(req.Key); err != nil {
+		http.Error(w, "invalid key parameter", http.StatusBadRequest)
 		return
 	}
 

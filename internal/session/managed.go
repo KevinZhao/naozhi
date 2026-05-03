@@ -101,7 +101,14 @@ type ManagedSession struct {
 	sendMu     sync.Mutex                 // serializes messages to the same session
 	historyMu  sync.RWMutex               // protects persistedHistory reads/writes (independent of sendMu)
 	sendCancel atomic.Pointer[context.CancelFunc]
-	workspace  string // effective cwd at spawn time
+	// workspace is the effective cwd at spawn time. Writers hold r.mu in the
+	// router (spawnSession / RegisterCronStub / SetWorkspace), but Snapshot()
+	// is called from Hub handlers WITHOUT r.mu (see wshub.go:466, 520). Direct
+	// string read there races the write — harmless today (word-sized assign),
+	// but flagged by -race and future-unsafe if pointee ever grows. Go through
+	// atomic.Pointer[string] to match the backend/cliName/cliVersion pattern
+	// already established above.
+	workspace atomic.Pointer[string]
 	// backend/cliName/cliVersion are written at spawn time AND later by
 	// reconnectShims under r.mu (write), but read by Snapshot() without
 	// any lock (called via ListSessions which only holds RLock while
@@ -163,6 +170,16 @@ type historySourceBox struct{ src history.Source }
 
 // SessionKey returns the immutable session key.
 func (s *ManagedSession) SessionKey() string { return s.key }
+
+// Workspace returns the effective cwd recorded for this session. Lock-free;
+// safe to call from Hub handlers and other call sites that don't hold r.mu.
+func (s *ManagedSession) Workspace() string { return loadStringAtomic(&s.workspace) }
+
+// SetWorkspaceAtomic stores the workspace path. Router-internal helper — all
+// writers already hold r.mu, but we route through the helper so the string is
+// always handed to the atomic.Pointer via one place (matches storeStringAtomic
+// convention for backend/cliName/cliVersion).
+func (s *ManagedSession) setWorkspace(ws string) { storeStringAtomic(&s.workspace, ws) }
 
 // IsExempt returns whether this session is exempt from TTL and eviction.
 func (s *ManagedSession) IsExempt() bool { return s.exempt }
@@ -675,7 +692,7 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		Agent:      s.keyAgentID,
 		SessionID:  s.getSessionID(),
 		LastActive: s.GetLastActive().UnixMilli(),
-		Workspace:  s.workspace,
+		Workspace:  s.Workspace(),
 		Backend:    s.Backend(),
 		CLIName:    s.CLIName(),
 		CLIVersion: s.CLIVersion(),

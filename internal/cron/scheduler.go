@@ -1087,6 +1087,17 @@ func (s *Scheduler) TriggerNow(id string) error {
 		// robfig/cron EntryIDs are a monotonically incrementing int and never
 		// reused within a process; this rules out the "stale entryID returns a
 		// different job's entry" hazard.
+		//
+		// CRON4 (Round 174): both the "run" arm and the "entry gone" arm
+		// defer triggerWG.Done() from inside a spawned goroutine. Previously
+		// the "entry gone" arm called Done() synchronously on the caller's
+		// goroutine before the function returned — logically correct but
+		// fragile: a concurrent Stop()'s triggerWG.Wait() could observe a
+		// zero counter between our Add(1) in the caller's frame and the
+		// spawned goroutine's Done. Using the same `go func { defer Done;
+		// ... }()` shape in both arms keeps the lifetime of every reserved
+		// WG slot tied to an actual goroutine, matching the entryID==0
+		// branch below.
 		entry := s.cron.Entry(entryID)
 		if entry.WrappedJob != nil {
 			go func() {
@@ -1094,10 +1105,13 @@ func (s *Scheduler) TriggerNow(id string) error {
 				entry.WrappedJob.Run()
 			}()
 		} else {
-			// Entry was concurrently deleted — skip execution and release
-			// the WaitGroup slot we reserved above.
-			s.triggerWG.Done()
-			slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "id", id, "entry_id", entryID)
+			// Entry was concurrently deleted — spawn a no-op goroutine whose
+			// sole job is to release the WaitGroup slot. Same shape as the
+			// sibling arm; see godoc above.
+			go func() {
+				defer s.triggerWG.Done()
+				slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "id", id, "entry_id", entryID)
+			}()
 		}
 	} else {
 		// Resolve the job by ID inside the goroutine so the freshest pointer

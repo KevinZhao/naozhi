@@ -182,6 +182,19 @@ func validateRemoteWorkspace(workspace string) error {
 			return fmt.Errorf("invalid workspace")
 		}
 	}
+	// R176-SEC-M: rune-level sweep for C1 controls + bidi / LS / PS
+	// runes that survive the byte-level `< 0x20` filter. Same policy
+	// validateCronWorkDir / validateCronPrompt already enforce via
+	// isLogInjectionRune. Without this, an authenticated operator can
+	// post `/tmp/ws‮.sock` and trip log-injection in
+	// `slog.Warn("remote ws send failed", "key", ..., "workspace", ws)`
+	// at wshub.go:1405 or pipe-style misrendering in terminal viewers
+	// (Loki / grep).
+	for _, r := range workspace {
+		if isLogInjectionRune(r) {
+			return fmt.Errorf("invalid workspace")
+		}
+	}
 	if !filepath.IsAbs(workspace) {
 		return fmt.Errorf("workspace must be absolute")
 	}

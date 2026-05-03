@@ -20,6 +20,7 @@ import (
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -567,7 +568,21 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 					// the failure on the next event push. Keep the message
 					// compact and classifier-friendly; full detail stays
 					// in the slog line above.
-					sess.LogSystemEvent("发送失败：" + err.Error())
+					//
+					// R172-SEC-M4: err.Error() originates from a remote /
+					// transport stack — it may contain C1 controls, bidi
+					// overrides, or LS/PS characters that byte-level
+					// `< 0x20` gates miss. The summary is broadcast to every
+					// dashboard WS client subscribed to this session AND
+					// appended to persistedHistory (journalctl / sessions
+					// persistence), so an unsanitized error string here is a
+					// log-injection primitive that can flip terminal output
+					// under `tail -f` for operators and pollute dashboard
+					// rendering. Sanitize through osutil.SanitizeForLog and
+					// cap at 512 bytes — long remote stack traces beyond
+					// that point add noise without diagnostic value (full
+					// detail is already in the slog.Warn above).
+					sess.LogSystemEvent("发送失败：" + osutil.SanitizeForLog(err.Error(), 512))
 				}
 			}
 		}()

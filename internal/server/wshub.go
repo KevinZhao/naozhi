@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -394,6 +395,19 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "error", Error: "key is required"})
 		return
 	}
+	// R175-SEC-P1: same gate the HTTP session handlers enforce
+	// (R172-SEC-L2 / R175-SEC-M). Without this, a WS client can post a
+	// multi-KB key containing C1 controls or bidi characters that reach
+	// slog attrs (router "session not found" path), persist into the
+	// per-connection c.subscriptions map, and eventually land in
+	// sessions.json at shutdown. ValidateSessionKey also caps length at
+	// MaxSessionKeyBytes (~520 B) — the inline loop in sessionSend only
+	// rejects ASCII C0/DEL, leaving C1 / bidi / non-UTF-8 as a log-
+	// injection class for the WS subscribe path.
+	if err := session.ValidateSessionKey(key); err != nil {
+		c.SendJSON(node.ServerMsg{Type: "error", Error: "invalid key"})
+		return
+	}
 
 	// Remote node delegation
 	if msg.Node != "" && msg.Node != "local" {
@@ -558,6 +572,19 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 	key := msg.Key
 
+	// R176-SEC-P1: same gate as handleSubscribe / handleInterrupt. Without
+	// this, an authenticated WS client can hand-craft a `key` containing
+	// C1 / bidi / non-UTF-8 bytes that lands in the echoed
+	// `{"type":"unsubscribed","key":...}` reply and any structured log
+	// attr on the path. ValidateSessionKey also caps at MaxSessionKeyBytes.
+	// Gate BEFORE the remote-node delegation: handleRemoteUnsubscribe reads
+	// msg.Key too, so the local-only placement of this check would leave
+	// the remote path unguarded.
+	if err := session.ValidateSessionKey(key); err != nil {
+		c.SendJSON(node.ServerMsg{Type: "error", Error: "invalid key"})
+		return
+	}
+
 	// Remote node delegation
 	if msg.Node != "" && msg.Node != "local" {
 		h.handleRemoteUnsubscribe(c, msg)
@@ -663,6 +690,13 @@ func (h *Hub) handleInterrupt(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Error: "key is required"})
 		return
 	}
+	// R175-SEC-P1: same policy as handleSubscribe / HTTP handlers. Reject
+	// C1 / bidi / multi-KB keys before they land in router lookup + slog
+	// attrs (both local and remote paths).
+	if err := session.ValidateSessionKey(key); err != nil {
+		c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: msg.ID, Status: "error", Error: "invalid key"})
+		return
+	}
 
 	// Remote node delegation
 	if msg.Node != "" && msg.Node != "local" {
@@ -711,9 +745,24 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 	}
 	go func() {
 		defer release()
+		capturedID, capturedKey := msg.ID, msg.Key
+		// R175-SEC-P1: malformed RPC payloads from a compromised node could
+		// panic inside ProxyInterruptSession's json decode path; without a
+		// recover the whole naozhi service goes down, affecting every other
+		// session. Mirror the ownerLoop/readLoop defensive pattern: log and
+		// reply "error" so the dashboard surfaces the failure.
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("remote ws interrupt goroutine panic",
+					"node", nodeID, "key", capturedKey,
+					"panic", r, "stack", string(debug.Stack()))
+				c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: capturedID,
+					Status: "error", Key: capturedKey, Node: nodeID,
+					Error: "internal error"})
+			}
+		}()
 		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
 		defer cancel()
-		capturedID, capturedKey := msg.ID, msg.Key
 		interrupted, err := nc.ProxyInterruptSession(ctx, capturedKey)
 		if err != nil {
 			slog.Error("remote ws interrupt failed", "node", nodeID, "key", capturedKey, "err", err)
@@ -1341,9 +1390,22 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 	}
 	go func() {
 		defer release()
+		capturedID, capturedKey := msg.ID, msg.Key
+		// R175-SEC-P1: same rationale as handleRemoteInterrupt — a panic
+		// inside nc.Send (e.g. malformed RPC response from a compromised
+		// node) would otherwise take the whole naozhi service down.
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Error("remote ws send goroutine panic",
+					"node", nodeID, "key", capturedKey,
+					"panic", r, "stack", string(debug.Stack()))
+				c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID,
+					Status: "error", Key: capturedKey, Node: nodeID,
+					Error: "internal error"})
+			}
+		}()
 		ctx, cancel := context.WithTimeout(h.ctx, 10*time.Second)
 		defer cancel()
-		capturedID, capturedKey := msg.ID, msg.Key
 		if err := nc.Send(ctx, capturedKey, msg.Text, msg.Workspace); err != nil {
 			slog.Error("remote ws send failed", "node", nodeID, "key", capturedKey, "err", err)
 			// Do not surface the raw err: transport-level messages can leak

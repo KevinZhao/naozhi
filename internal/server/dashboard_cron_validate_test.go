@@ -122,6 +122,42 @@ func TestValidateCronPrompt_RejectsUnicodeBidi(t *testing.T) {
 	}
 }
 
+// TestValidateCronWorkDir_RejectsRelativePath locks the R172-SEC-L1
+// defense-in-depth check: even if validateWorkspace later loosens its
+// IsAbs enforcement, the cron handler itself rejects `.`, `./foo`,
+// `foo/bar`, or bare `foo`. Catches the class of bug where an upstream
+// validator change silently admits workspace-relative paths.
+func TestValidateCronWorkDir_RejectsRelativePath(t *testing.T) {
+	t.Parallel()
+	cases := []string{
+		".",
+		"./foo",
+		"foo",
+		"foo/bar",
+		"../etc",
+		"~/somewhere",
+	}
+	for _, wd := range cases {
+		wd := wd
+		t.Run(wd, func(t *testing.T) {
+			t.Parallel()
+			if err := validateCronWorkDir(wd); err == nil {
+				t.Errorf("expected rejection for relative path %q, got nil", wd)
+			}
+		})
+	}
+	// Absolute paths still pass (ASCII + Unicode controls aside).
+	for _, wd := range []string{"/", "/tmp", "/home/ec2-user/project"} {
+		wd := wd
+		t.Run("abs_"+wd, func(t *testing.T) {
+			t.Parallel()
+			if err := validateCronWorkDir(wd); err != nil {
+				t.Errorf("expected accept for absolute path %q, got %v", wd, err)
+			}
+		})
+	}
+}
+
 // TestIsLogInjectionRune covers the helper shared by work_dir + prompt
 // validation so future callers (a third cron field, a project metadata
 // field) pick up the same policy automatically.

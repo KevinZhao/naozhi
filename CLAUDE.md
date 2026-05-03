@@ -136,7 +136,7 @@ The dashboard is an embedded single-page HTML (`server/static/dashboard.html`) s
 - **Server messages**: `auth_ok`, `auth_fail`, `subscribed`, `unsubscribed`, `history`, `event`, `send_ack`, `pong`, `error`
 - Remote node events are relayed transparently -- subscribe with `node` field to stream from a remote session.
 
-REST API endpoints: `/api/sessions` (GET/DELETE), `/api/sessions/events`, `/api/sessions/send`, `/api/discovered`, `/api/discovered/preview`, `/api/discovered/takeover`, `/api/projects`, `/api/projects/config` (GET/PUT), `/api/projects/planner/restart`, `/api/transcribe`, `/api/cron` (GET/POST/DELETE), `/api/cron/pause`, `/api/cron/resume`. WebSocket: `/ws` (dashboard), `/ws-node` (reverse-connect nodes).
+REST API endpoints: `/api/sessions` (GET/DELETE), `/api/sessions/events`, `/api/sessions/send`, `/api/discovered`, `/api/discovered/preview`, `/api/discovered/takeover`, `/api/projects`, `/api/projects/config` (GET/PUT), `/api/projects/planner/restart`, `/api/transcribe`, `/api/cron` (GET/POST/PATCH/DELETE), `/api/cron/pause`, `/api/cron/resume`, `/api/cron/trigger` (manual run-now), `/api/cron/preview` (schedule validation). WebSocket: `/ws` (dashboard), `/ws-node` (reverse-connect nodes).
 
 ### Session Discovery & Takeover
 
@@ -146,6 +146,7 @@ The `discovery` package scans `~/.claude/sessions/*.json` to find external (non-
 
 Sessions are persisted to `~/.naozhi/sessions.json` at shutdown:
 - Each entry stores `key`, `session_id`, `workspace`, `total_cost`
+- A sibling `sessions.meta.json` sidecar records `{version, written_at, generator}`; the main file stays as a plain JSON array so older naozhi builds read it unchanged. `loadStore` treats a missing sidecar as legacy v1 and only `slog.Warn`s if the sidecar reports a version higher than the one this build understands
 - On restart, dead sessions are loaded and history is async-loaded from Claude's JSONL files
 - Next message to a dead session resumes via `--resume`
 - Captures session_id under sendMu to avoid Send() data races

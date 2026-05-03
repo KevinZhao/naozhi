@@ -235,7 +235,7 @@ type Protocol interface {
     BuildArgs(opts SpawnOptions) []string             // 构建 CLI 启动参数
     Init(rw *JSONRW, resumeID string) (string, error) // 协议握手 (ACP: initialize + session/new)
     WriteMessage(w io.Writer, text string) error      // 写入用户消息
-    ReadEvent(line []byte) (Event, bool, error)       // 解析事件 (bool=轮次完成)
+    ReadEvent(line string) (Event, bool, error)       // 解析事件 (bool=轮次完成)
     HandleEvent(w io.Writer, ev Event) bool           // 处理内部事件 (如 ACP 权限自动授权)
 }
 ```

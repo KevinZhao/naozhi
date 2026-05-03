@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/session"
 )
 
 // SendHandler serves the HTTP send API, delegating to Hub for local sends.
@@ -249,21 +250,16 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "key is required"})
 		return
 	}
-	// Pre-validate key length + control characters at the HTTP boundary so
-	// the raw attacker-controlled string cannot flow into slog attrs (e.g.
-	// the "workspace validation failed" Warn at send.go:166) before
-	// sessionSend's own validation rejects it. Mirrors the R60-GO-H1
-	// sanitize-before-log pattern on the IM path. R60-SEC-8.
-	if len(key) > maxSessionKeyLen {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "key too long"})
+	// Pre-validate key at the HTTP boundary so the raw attacker-controlled
+	// string cannot flow into slog attrs (e.g. the "workspace validation
+	// failed" Warn at send.go:166) before sessionSend's own validation
+	// rejects it. Mirrors the R60-GO-H1 sanitize-before-log pattern on the
+	// IM path. R60-SEC-8 / R175-SEC-P1: promoted to the full
+	// session.ValidateSessionKey contract (C1 / bidi / non-UTF-8 also
+	// rejected).
+	if err := session.ValidateSessionKey(key); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid key"})
 		return
-	}
-	for i := 0; i < len(key); i++ {
-		c := key[i]
-		if c < 0x20 || c == 0x7f {
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid key character"})
-			return
-		}
 	}
 	// Enforce the same per-field text cap on the HTTP JSON/multipart path as
 	// the WS path enforces (see wshub.go handleSend). Without this, the WS

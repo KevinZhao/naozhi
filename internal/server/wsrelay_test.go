@@ -413,3 +413,48 @@ func TestHub_RemoteUnsubscribe_NoRelay(t *testing.T) {
 		t.Errorf("type = %q, want unsubscribed", msg.Type)
 	}
 }
+
+// TestHub_Unsubscribe_RejectInvalidKey covers R176-SEC-P1: handleSubscribe
+// and handleInterrupt already run session.ValidateSessionKey; handleUnsubscribe
+// did not, so an authenticated WS client could echo a key with embedded
+// NUL / C1 / bidi / multi-KB payload straight into the
+// `{"type":"unsubscribed","key":...}` reply (and any log attr a future
+// refactor adds). The gate must fire BEFORE remote-node delegation so
+// the remote path is also guarded. Mirrors the existing subscribe/interrupt
+// regression tests in dashboard_test.go.
+func TestHub_Unsubscribe_RejectInvalidKey(t *testing.T) {
+	hub, _ := newTestHub("")
+	defer hub.Shutdown()
+	cases := map[string]string{
+		"embedded_LF":  "test:direct:abc\ndef:general",
+		"embedded_NUL": "test:direct:abc\x00def:general",
+	}
+	for name, key := range cases {
+		name, key := name, key
+		t.Run("local_"+name, func(t *testing.T) {
+			client := newTestWSClient()
+			hub.handleUnsubscribe(client, node.ClientMsg{
+				Type: "unsubscribe",
+				Key:  key,
+			})
+			msg := readClientMsg(t, client, 2*time.Second)
+			if msg.Type != "error" {
+				t.Errorf("type = %q, want error (local)", msg.Type)
+			}
+		})
+		t.Run("remote_"+name, func(t *testing.T) {
+			client := newTestWSClient()
+			hub.handleUnsubscribe(client, node.ClientMsg{
+				Type: "unsubscribe",
+				Key:  key,
+				Node: "remote",
+			})
+			msg := readClientMsg(t, client, 2*time.Second)
+			// Must be error — gate runs before remote delegation, so the
+			// mock node's "unsubscribed" success reply must never fire.
+			if msg.Type != "error" {
+				t.Errorf("type = %q, want error (remote delegation bypassed gate)", msg.Type)
+			}
+		})
+	}
+}

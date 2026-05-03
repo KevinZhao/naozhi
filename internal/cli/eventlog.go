@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -8,6 +9,49 @@ import (
 )
 
 const defaultEventLogSize = 500
+
+// imageDataURIPrefix is the required leading substring for every entry in
+// EventEntry.Images. Today the only producer is MakeThumbnail (process.go:853),
+// which always returns "data:image/jpeg;base64,..." or "". Future refactors
+// that allow other producers — for instance passing through a remote URL or an
+// IM CDN link — MUST keep this prefix so the dashboard's <img src=...> render
+// path cannot be coerced into fetching `javascript:`, `http://evil/`, or
+// arbitrary `data:text/html` payloads. Legacy browsers historically did not
+// block `javascript:` in <img src>, and defense-in-depth here is cheap.
+// S15 (Round 174).
+const imageDataURIPrefix = "data:image/"
+
+// sanitizeImages drops any data URI that is not an image/* data URL. Empty
+// strings are also stripped so a single skipped thumbnail does not leave a
+// "" slot the dashboard would have to render defensively. Returns the input
+// slice unchanged when every entry is already valid, avoiding an allocation
+// on the happy path (MakeThumbnail conforming producer).
+func sanitizeImages(imgs []string) []string {
+	if len(imgs) == 0 {
+		return imgs
+	}
+	allOK := true
+	for _, s := range imgs {
+		if s == "" || !strings.HasPrefix(s, imageDataURIPrefix) {
+			allOK = false
+			break
+		}
+	}
+	if allOK {
+		return imgs
+	}
+	filtered := make([]string, 0, len(imgs))
+	for _, s := range imgs {
+		if s == "" || !strings.HasPrefix(s, imageDataURIPrefix) {
+			continue
+		}
+		filtered = append(filtered, s)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
+}
 
 // EventEntry is a simplified event record for the dashboard.
 type EventEntry struct {
@@ -124,6 +168,13 @@ func (l *EventLog) Append(e EventEntry) {
 	if e.Time == 0 {
 		e.Time = time.Now().UnixMilli()
 	}
+	// Server-side enforcement that every image entry is a data:image/* URI.
+	// Today's sole producer (MakeThumbnail) already conforms, but enforcing
+	// the contract here rather than trusting callers means any future
+	// producer that accidentally passes through an external URL or a
+	// javascript: URI gets stripped before it can reach the dashboard's
+	// <img src=...> render path. S15 (Round 174).
+	e.Images = sanitizeImages(e.Images)
 	l.entries[l.head] = e
 	l.head = (l.head + 1) % l.maxSize
 	if l.count < l.maxSize {
@@ -181,6 +232,11 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 		if e.Time == 0 {
 			e.Time = defaultTime
 		}
+		// S15 (Round 174): same enforcement as Append. Replays from history
+		// (InjectHistory → AppendBatch) should never contain non-image data
+		// URIs today, but defense-in-depth is trivially cheap and locks the
+		// contract to a single sink.
+		e.Images = sanitizeImages(e.Images)
 		l.entries[l.head] = e
 		l.head = (l.head + 1) % l.maxSize
 		if l.count < l.maxSize {

@@ -251,6 +251,71 @@ func TestSetupWriteConfig_AppliesRuntimeDefaults(t *testing.T) {
 	}
 }
 
+// TestSetupWriteConfig_TokenWithYAMLSpecials covers R172-SEC-M3: a
+// compromised or buggy vendor QR endpoint could return a token
+// containing YAML specials (`"`, `#`, `:`, `\n`). The old fast path
+// substituted the token via fmt.Sprintf into a template quoted with
+// raw double-quotes, so a `"` or newline would truncate / inject
+// adjacent YAML keys. All paths now funnel through updateWeixinToken
+// (yaml.Node + DoubleQuotedStyle) which emits a correctly escaped
+// scalar no matter what bytes the token carries.
+func TestSetupWriteConfig_TokenWithYAMLSpecials(t *testing.T) {
+	// NUL intentionally left out — yaml.v3 rejects C0 controls during
+	// Encode. These are the YAML-meaningful specials that would break
+	// the old fmt.Sprintf path.
+	cases := map[string]string{
+		"embedded_dquote": `tok"injected: "evil`,
+		"hash_comment":    `tok#comment`,
+		"colon":           `tok:evil`,
+		"newline":         "tok\ninjected: true",
+		"tab":             "tok\twith\ttabs",
+		"backslash":       `tok\escape`,
+	}
+	for name, token := range cases {
+		name, token := name, token
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			dir := t.TempDir()
+			path := filepath.Join(dir, "config.yaml")
+
+			if err := setupWriteConfig(path, token); err != nil {
+				t.Fatalf("setupWriteConfig: %v", err)
+			}
+
+			// Round-trip through the production config loader — if the
+			// token bytes produced an "injected: evil" key, the resulting
+			// YAML would either fail to parse, decode to a different
+			// token, or surface an unexpected `admin: true` style field.
+			cfg, err := config.Load(path)
+			if err != nil {
+				t.Fatalf("config.Load(setup-generated): %v", err)
+			}
+			if cfg.Platforms.Weixin == nil {
+				t.Fatal("weixin section missing after round-trip")
+			}
+			if cfg.Platforms.Weixin.Token != token {
+				t.Errorf("token round-trip mismatch: got %q, want %q",
+					cfg.Platforms.Weixin.Token, token)
+			}
+		})
+	}
+}
+
+// TestDefaultConfigTemplate_TokenPlaceholderEmpty verifies that the
+// minimal template is now a static YAML document (no %s anywhere) so
+// `yaml.Unmarshal` can parse it directly. The token is injected
+// exclusively through updateWeixinToken to guarantee safe escaping.
+func TestDefaultConfigTemplate_TokenPlaceholderEmpty(t *testing.T) {
+	if strings.Contains(defaultConfigTemplate, "%s") {
+		t.Error("defaultConfigTemplate must not use fmt placeholder; " +
+			"token must go through updateWeixinToken for YAML-safe escaping")
+	}
+	if !strings.Contains(defaultConfigTemplate, `token: ""`) {
+		t.Error("defaultConfigTemplate should contain empty token anchor " +
+			`token: "" for updateWeixinToken to overwrite`)
+	}
+}
+
 // TestDefaultConfigTemplate_Minimal locks in the intent that the template is
 // kept minimal. If someone re-adds a key that applyDefaults already handles,
 // this test fails and forces the author to add it to the runtime-defaults

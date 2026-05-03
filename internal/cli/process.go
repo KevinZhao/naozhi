@@ -1304,7 +1304,41 @@ func (p *Process) Kill() {
 // Callers that want the naozhi-restart-friendly "keep shim alive" semantics
 // must use Detach(), not Close().
 func (p *Process) Close() {
-	_ = p.shimSend(shimClientMsg{Type: "shutdown"})
+	// R175-P1: Close() previously called p.shimSend(...) directly, which has no
+	// write deadline. Kill() and Detach() both batch SetWriteDeadline+send
+	// under shimWMu for good reason — without it, a shim that is alive but
+	// whose TCP buffer is full (GC pause, stuck child, network wedge) pins
+	// shimWMu until the OS keepalive timer fires (minutes). All other
+	// shimSend callers (heartbeat, ping, interrupt) would block on the same
+	// lock, and Router.Reset / shutdown would stall past the SIGTERM grace.
+	// Mirror the Detach() pattern: grab shimWMu, set a short deadline, and
+	// only send if the deadline was accepted. Deadline failure means the
+	// conn is already broken, short-circuit to Kill().
+	p.shimWMu.Lock()
+	if err := p.shimConn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		p.shimWMu.Unlock()
+		p.Kill()
+		return
+	}
+	sendErr := p.shimSendLocked(shimClientMsg{Type: "shutdown"})
+	// R175-P2: clear the 2s write deadline *before* releasing shimWMu so a
+	// concurrent heartbeat ping inheriting the now-expired deadline cannot
+	// see a stale `i/o timeout` and call Kill() — which would bypass the
+	// graceful shim teardown this function is designed to drive (UCCLEP-
+	// 2026-04-26). Kept under the lock to close the race window entirely.
+	// SetWriteDeadline failure here is harmless: zero-time deadline is a
+	// "no deadline" signal, so even on error the connection is no worse off
+	// than before this defensive clear.
+	_ = p.shimConn.SetWriteDeadline(time.Time{})
+	p.shimWMu.Unlock()
+	if sendErr != nil {
+		// Write-path error (closed conn, deadline exceeded, EOF) means the
+		// shim will not process the shutdown — waiting processCloseTimeout
+		// on <-p.done just doubles teardown latency on the hot eviction
+		// path. Fall straight through to Kill().
+		p.Kill()
+		return
+	}
 	timer := time.NewTimer(processCloseTimeout)
 	defer timer.Stop()
 	select {
