@@ -4,7 +4,7 @@ import (
 	"context"
 	"os"
 	"os/exec"
-	"sort"
+	"slices"
 )
 
 // BackendInfo describes a probed CLI backend available on this host.
@@ -80,10 +80,16 @@ func DetectBackendsCtx(ctx context.Context) []BackendInfo {
 // ones while preserving the knownBackends order within each group. Callers
 // use this for UI rendering so unusable entries drop to the tail.
 func SortBackendsAvailableFirst(backends []BackendInfo) {
-	sort.SliceStable(backends, func(i, j int) bool {
-		if backends[i].Available != backends[j].Available {
-			return backends[i].Available
+	// R179-GO-P2: slices.SortStableFunc replaces sort.SliceStable — typed
+	// comparator avoids interface{} boxing and matches the rest of the
+	// codebase's generic-sort idiom.
+	slices.SortStableFunc(backends, func(a, b BackendInfo) int {
+		if a.Available == b.Available {
+			return 0
 		}
-		return false
+		if a.Available {
+			return -1
+		}
+		return 1
 	})
 }

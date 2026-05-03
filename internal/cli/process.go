@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -844,13 +845,7 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 			}
 			wg.Wait()
 		}
-		filtered := thumbs[:0]
-		for _, t := range thumbs {
-			if t != "" {
-				filtered = append(filtered, t)
-			}
-		}
-		userEntry.Images = filtered
+		userEntry.Images = sanitizeImages(thumbs)
 	}
 	p.eventLog.Append(userEntry)
 
@@ -1069,7 +1064,10 @@ func (p *Process) InterruptViaControl() error {
 	if state != StateRunning {
 		return ErrNoActiveTurn
 	}
-	reqID := fmt.Sprintf("naozhi-int-%d", p.interruptSeq.Add(1))
+	// R179-PERF-P3: direct concat + strconv avoids fmt.Sprintf's reflection
+	// + scratch buffer. reqID is only used for local control-response echo
+	// matching, so format quality doesn't matter.
+	reqID := "naozhi-int-" + strconv.FormatInt(p.interruptSeq.Add(1), 10)
 	if err := p.protocol.WriteInterrupt(p.shimStdinWriter(), reqID); err != nil {
 		// Write failed: no control_request reached the CLI, so there is no
 		// trailing result event to drain. Roll the settle flags back
@@ -1513,13 +1511,8 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 	return nil
 }
 
-// logEvent converts an Event to one or more EventEntry values and appends them to the event log.
-func (p *Process) logEvent(ev Event) {
-	p.logEventAt(ev, time.Now().UnixMilli())
-}
-
-// logEventAt is the caller-supplied-now variant used by readLoop to reuse
-// the same time.Now() value that stamps ev.recvAt. R67-PERF-9.
+// logEventAt converts an Event to one or more EventEntry values and appends them to the event log.
+// readLoop passes the same time.Now() value that stamps ev.recvAt so timestamps match. R67-PERF-9.
 func (p *Process) logEventAt(ev Event, nowMS int64) {
 	entries := EventEntriesFromEventAt(ev, nowMS)
 	if len(entries) == 0 {
@@ -1558,6 +1551,8 @@ func parseAgentInput(input json.RawMessage) agentInput {
 	return inp
 }
 
+// label returns the preferred human-readable identifier for an Agent tool call.
+// Used by tests that lock the Agent event formatting contract.
 func (a agentInput) label() string {
 	if a.SubagentType != "" {
 		return a.SubagentType

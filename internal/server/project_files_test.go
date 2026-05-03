@@ -469,6 +469,66 @@ func TestHandleFileGet_PreviewRejectsHTML(t *testing.T) {
 	}
 }
 
+// TestHandleFileGet_PreviewRejectsXHTMLXMLVariants covers R179-SEC-2: an
+// .xml file with XHTML content would be served inline (both the preview
+// JSON content path and serveRaw), and browsers parse XHTML with full
+// DOM+script support — achieving same-origin script execution on a user
+// that clicks the raw-preview link. Guard mirrors the text/html case.
+func TestHandleFileGet_PreviewRejectsXHTMLXMLVariants(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		path    string
+		content string
+	}{
+		{
+			name:    "xhtml_namespace",
+			path:    "evil.xml",
+			content: `<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><body><script>alert(1)</script></body></html>`,
+		},
+		{
+			name:    "plain_xml_with_script_entity",
+			path:    "a.xml",
+			content: `<?xml version="1.0"?><root><data>x</data></root>`,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h, proj, projDir := newProjectHandlersForTest(t, nil)
+			if err := os.WriteFile(filepath.Join(projDir, tc.path), []byte(tc.content), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			// Preview path: response must be binary:true with empty content.
+			req := httptest.NewRequest(http.MethodGet,
+				"/api/projects/file?project="+proj+"&path="+tc.path+"&mode=preview", nil)
+			w := httptest.NewRecorder()
+			h.handleFileGet(w, req)
+			if w.Code != http.StatusOK {
+				t.Fatalf("preview status = %d, want 200 with binary=true payload", w.Code)
+			}
+			var resp map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if resp["binary"] != true {
+				t.Errorf("binary = %v, want true (XML must NOT flow through preview content)", resp["binary"])
+			}
+			if resp["content"] != "" {
+				t.Errorf("content = %q, want empty string", resp["content"])
+			}
+			// Raw path: must be refused with 415.
+			rawReq := httptest.NewRequest(http.MethodGet,
+				"/api/projects/file?project="+proj+"&path="+tc.path+"&mode=raw", nil)
+			rawW := httptest.NewRecorder()
+			h.handleFileGet(rawW, rawReq)
+			if rawW.Code != http.StatusUnsupportedMediaType {
+				t.Errorf("raw status = %d, want 415 (XML must not be served inline)", rawW.Code)
+			}
+		})
+	}
+}
+
 // ─── handleFileGet: raw ───────────────────────────────────────────────────────
 
 func TestHandleFileGet_RawImage(t *testing.T) {

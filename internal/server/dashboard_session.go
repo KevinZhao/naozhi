@@ -21,6 +21,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -866,7 +867,10 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 			// *os.PathError (e.g. with %w) cannot leak resolved filesystem
 			// paths to the dashboard user. validateWorkspace already logs
 			// diagnostic detail via slog. R61-SEC-10.
-			slog.Warn("resume workspace validation failed", "err", err, "workspace", workspace)
+			// R179-SEC-1: sanitize the workspace before it lands in slog attrs
+			// — authenticated callers can slip bidi/C1/newline bytes past the
+			// structural path check. Mirrors the send.go (R175-SEC-P1) gate.
+			slog.Warn("resume workspace validation failed", "err", err, "workspace", osutil.SanitizeForLog(workspace, 1024))
 			writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": "invalid workspace"})
 			return
 		}

@@ -2,6 +2,7 @@ package cron
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -328,29 +330,27 @@ func (s *Scheduler) Start() error {
 	// future UpdateJob could race with a stub read via the map pointer.
 	type stubRow struct{ id, workDir, prompt string }
 	var stubs []stubRow
-	if restored != nil {
-		for _, j := range restored {
-			// Reject persisted jobs whose WorkDir escapes the configured
-			// sandbox. Replaying an on-disk tampered entry must not grant
-			// filesystem access that validateWorkspace would reject at
-			// creation. When allowedRoot is empty (tests), this is a no-op.
-			if s.allowedRoot != "" && j.WorkDir != "" && !workDirUnderRoot(j.WorkDir, s.allowedRoot) {
-				slog.Warn("cron job work_dir outside allowed_root; skipping",
-					"id", j.ID, "work_dir", j.WorkDir)
-				continue
-			}
-			if j.Paused {
-				s.jobs[j.ID] = j
-				stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt})
-				continue
-			}
-			if err := s.registerJob(j); err != nil {
-				slog.Warn("skip invalid cron job", "id", j.ID, "schedule", j.Schedule, "err", err)
-				continue
-			}
+	for _, j := range restored {
+		// Reject persisted jobs whose WorkDir escapes the configured
+		// sandbox. Replaying an on-disk tampered entry must not grant
+		// filesystem access that validateWorkspace would reject at
+		// creation. When allowedRoot is empty (tests), this is a no-op.
+		if s.allowedRoot != "" && j.WorkDir != "" && !workDirUnderRoot(j.WorkDir, s.allowedRoot) {
+			slog.Warn("cron job work_dir outside allowed_root; skipping",
+				"id", j.ID, "work_dir", j.WorkDir)
+			continue
+		}
+		if j.Paused {
 			s.jobs[j.ID] = j
 			stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt})
+			continue
 		}
+		if err := s.registerJob(j); err != nil {
+			slog.Warn("skip invalid cron job", "id", j.ID, "schedule", j.Schedule, "err", err)
+			continue
+		}
+		s.jobs[j.ID] = j
+		stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt})
 	}
 	jobCount := len(s.jobs)
 	s.mu.Unlock()
@@ -1463,6 +1463,20 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg string) {
 	// the structural prefix ("session error: …" / "send error: …") so the
 	// error class remains obvious. R61-SEC-8.
 	errMsg = redactPathsInCronError(errMsg)
+	// R177-SEC-1: AI-authored result text and error strings may contain C1
+	// controls, bidi overrides, LS/PS, or embedded newlines (especially
+	// when the user prompt tricks the agent into echoing attacker-supplied
+	// strings). Those flow into (a) cron_jobs.json on disk, (b) the
+	// cronResultMsg WS broadcast to every authenticated dashboard client,
+	// and (c) any future slog attr that logs j.LastResult — each is a
+	// log-injection / stored-UI-spoofing vector. Apply the same
+	// SanitizeForLog gate used on remote workspace / feishu nonce paths.
+	// The length caps below (4K result, 512 err) double up with the rune
+	// truncation above but SanitizeForLog's cap is measured in runes, so
+	// a 4K-rune result that was already shaped by runeByteOffset is a
+	// no-op for length and only scrubs control runes.
+	result = osutil.SanitizeForLog(result, 4*1024)
+	errMsg = osutil.SanitizeForLog(errMsg, 512)
 	s.mu.Lock()
 	// If the job was deleted between execute()'s snapshot and recordResult's
 	// write-back, skip both the persist and the onExecute callback: broadcasting
@@ -1632,6 +1646,11 @@ func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
 	for _, j := range s.jobs {
 		entries = append(entries, j)
 	}
+	// Sort by ID for deterministic on-disk order. Map iteration is random, so
+	// identical in-memory state would produce diff-noisy JSON across saves —
+	// breaking git audit of backed-up cron_jobs.json and making post-incident
+	// diffs much harder to read.
+	slices.SortFunc(entries, func(a, b *Job) int { return cmp.Compare(a.ID, b.ID) })
 	return marshalJobs(entries)
 }
 
@@ -1665,25 +1684,6 @@ func (s *Scheduler) persistJobsLocked() (func(), error) {
 	// later marshal can reach storeMu before an earlier one).
 	seq := s.saveSeq.Add(1)
 	return func() { s.saveMarshaledSeq(data, seq) }, nil
-}
-
-// saveMarshaled persists an already-marshaled jobs payload to disk. Serialised
-// by storeMu so an older snapshot cannot rename-win over a newer one — the
-// .tmp file itself is now unique per call (os.CreateTemp in WriteFileAtomic),
-// so storeMu is a logical ordering barrier rather than file-level protection.
-//
-// Kept as a no-seq variant for Stop()'s single-shot save on shutdown, which
-// runs serially after all mutation paths have drained and has no ordering
-// peer to race against.
-func (s *Scheduler) saveMarshaled(data []byte) {
-	s.storeMu.Lock()
-	defer s.storeMu.Unlock()
-	if s.storePath == "" {
-		return
-	}
-	if err := osutil.WriteFileAtomic(s.storePath, data, 0600); err != nil {
-		slog.Error("save cron store", "err", err, "disk_full", osutil.IsDiskFull(err))
-	}
 }
 
 // saveMarshaledSeq is the mutation-path persist function. It skips the write

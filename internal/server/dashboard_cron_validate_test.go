@@ -180,3 +180,35 @@ func TestIsLogInjectionRune(t *testing.T) {
 		}
 	}
 }
+
+// TestValidateCronFields_RejectInvalidUTF8 covers R179-GO-P1: a
+// `for _, r := range s` over broken UTF-8 yields utf8.RuneError (U+FFFD)
+// for each bad byte, which IsLogInjectionRune does not flag — lone
+// continuation bytes could smuggle arbitrary bytes into cron_jobs.json
+// and the WS broadcast. All four dashboard cron validators must
+// short-circuit on utf8.ValidString==false.
+func TestValidateCronFields_RejectInvalidUTF8(t *testing.T) {
+	t.Parallel()
+	// Lone continuation byte 0x80 is invalid UTF-8 (no leading byte);
+	// 0xFE / 0xFF can never appear in valid UTF-8 at all.
+	bad := []string{
+		"/tmp/\x80bad",
+		"/tmp/\xff\xfe",
+		"\xc3", // incomplete 2-byte sequence
+	}
+	for _, s := range bad {
+		s := s
+		if err := validateCronWorkDir(s); err == nil {
+			t.Errorf("validateCronWorkDir(%q) = nil, want error for invalid UTF-8", s)
+		}
+		if err := validateCronPrompt(s); err == nil {
+			t.Errorf("validateCronPrompt(%q) = nil, want error for invalid UTF-8", s)
+		}
+		if err := validateCronScheduleChars(s); err == nil {
+			t.Errorf("validateCronScheduleChars(%q) = nil, want error for invalid UTF-8", s)
+		}
+		if err := validateNotifyTarget("feishu", s); err == nil {
+			t.Errorf("validateNotifyTarget(feishu,%q) = nil, want error for invalid UTF-8", s)
+		}
+	}
+}

@@ -591,7 +591,14 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, resolved string, i
 	// .html file in the workspace cannot reach the dashboard renderer.
 	// HasPrefix covers detector outputs that append parameters like
 	// "text/html; charset=utf-8".
-	if strings.HasPrefix(mime, "text/html") {
+	// R179-SEC-2: extend the guard to XML/XHTML MIMEs — an XHTML document
+	// parsed by a browser executes <script>, so if the preview JSON's content
+	// field ever becomes innerHTML (a single JS regression), stored XSS from
+	// a workspace .xml is reachable. Mirror the serveRaw guard so preview and
+	// raw are defense-symmetric.
+	if strings.HasPrefix(mime, "text/html") ||
+		strings.HasPrefix(mime, "application/xhtml") ||
+		strings.HasPrefix(mime, "application/xml") || strings.HasPrefix(mime, "text/xml") {
 		writeJSON(w, map[string]any{
 			"content":   "",
 			"size":      size,
@@ -609,7 +616,7 @@ func (h *ProjectHandlers) servePreview(w http.ResponseWriter, resolved string, i
 	}
 	buf := make([]byte, readSize)
 	read, err := io.ReadFull(f, buf)
-	if err != nil && err != io.ErrUnexpectedEOF && err != io.EOF {
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "read failed"})
 		return
 	}
@@ -670,7 +677,17 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 	// only reach the browser as attachments.
 	// HasPrefix on both so a future detector output of "image/svg+xml; charset=utf-8"
 	// (or any parameter) still trips the guard instead of falling through to inline.
-	if strings.HasPrefix(mime, "text/html") || strings.HasPrefix(mime, "image/svg+xml") {
+	//
+	// R179-SEC-2: application/xml and application/xhtml+xml encompass XHTML
+	// documents that modern browsers parse with full DOM+script support when
+	// served inline. A crafted .xml in the workspace with an XHTML namespace
+	// + <script> block achieves same-origin script execution on top-level
+	// navigation, bypassing the CSP sandbox (which only applies in iframe
+	// embedding). Route these to the download guard like text/html and SVG.
+	// text/xml is equivalent to application/xml for XHTML purposes.
+	if strings.HasPrefix(mime, "text/html") || strings.HasPrefix(mime, "image/svg+xml") ||
+		strings.HasPrefix(mime, "application/xhtml") ||
+		strings.HasPrefix(mime, "application/xml") || strings.HasPrefix(mime, "text/xml") {
 		writeJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "inline preview disabled for this type; use download mode"})
 		return
 	}

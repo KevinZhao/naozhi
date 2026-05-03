@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -79,6 +80,14 @@ func validateCronWorkDir(wd string) error {
 	if len(wd) > maxCronWorkDirBytesDashboard {
 		return fmt.Errorf("work_dir exceeds %d-byte limit", maxCronWorkDirBytesDashboard)
 	}
+	// R179-GO-P1: validate UTF-8 before the rune-range loop below. A `for _, r
+	// := range s` over broken UTF-8 silently produces utf8.RuneError (U+FFFD)
+	// for each invalid byte, which IsLogInjectionRune does not flag — this lets
+	// a crafted string with lone continuation bytes smuggle arbitrary bytes
+	// into cron_jobs.json / WS broadcasts. Mirrors validateProjectName.
+	if !utf8.ValidString(wd) {
+		return fmt.Errorf("work_dir contains invalid characters")
+	}
 	for i := 0; i < len(wd); i++ {
 		c := wd[i]
 		if c == 0 || c < 0x20 || c == 0x7f {
@@ -103,12 +112,58 @@ func validateCronWorkDir(wd string) error {
 func isLogInjectionRune(r rune) bool { return osutil.IsLogInjectionRune(r) }
 
 // validateNotifyTarget enforces platform allowlist + chat_id size bound.
+// R177-SEC-7: additionally reject C0/C1/bidi/LS/PS runes so a crafted
+// chat_id cannot land log-injection bytes in persisted cron_jobs.json
+// or forge structure in the /api/cron WS broadcast.
 func validateNotifyTarget(platform, chatID string) error {
 	if _, ok := validNotifyPlatforms[platform]; !ok {
 		return fmt.Errorf("invalid notify_platform")
 	}
 	if len(chatID) > maxNotifyChatIDLen {
 		return fmt.Errorf("notify_chat_id too long")
+	}
+	// R179-GO-P1: guard against invalid UTF-8 before the rune loop — see
+	// validateCronWorkDir for the full attack rationale.
+	if !utf8.ValidString(chatID) {
+		return fmt.Errorf("notify_chat_id contains invalid characters")
+	}
+	for i := 0; i < len(chatID); i++ {
+		c := chatID[i]
+		if c < 0x20 || c == 0x7f {
+			return fmt.Errorf("notify_chat_id contains invalid characters")
+		}
+	}
+	for _, r := range chatID {
+		if isLogInjectionRune(r) {
+			return fmt.Errorf("notify_chat_id contains invalid characters")
+		}
+	}
+	return nil
+}
+
+// validateCronScheduleChars rejects C0/C1/bidi/LS/PS runes in a cron
+// schedule expression before it reaches robfig/cron's parser. robfig
+// does not scrub its input, so log lines like `slog.Debug("cron
+// preview parse failed", "err", err)` would forward unescaped bidi
+// overrides into operator logs. Authenticated-only endpoint so the
+// CVSS is low, but this keeps the log-injection posture consistent
+// across every user-controlled string entering scheduler paths.
+// R177-SEC-9.
+func validateCronScheduleChars(schedule string) error {
+	// R179-GO-P1: UTF-8 guard before the rune loop below.
+	if !utf8.ValidString(schedule) {
+		return fmt.Errorf("schedule contains invalid characters")
+	}
+	for i := 0; i < len(schedule); i++ {
+		c := schedule[i]
+		if c < 0x20 || c == 0x7f {
+			return fmt.Errorf("schedule contains invalid characters")
+		}
+	}
+	for _, r := range schedule {
+		if isLogInjectionRune(r) {
+			return fmt.Errorf("schedule contains invalid characters")
+		}
 	}
 	return nil
 }
@@ -125,6 +180,10 @@ func validateNotifyTarget(platform, chatID string) error {
 func validateCronPrompt(prompt string) error {
 	if len(prompt) > maxCronPromptBytesDashboard {
 		return fmt.Errorf("prompt exceeds %d-byte limit", maxCronPromptBytesDashboard)
+	}
+	// R179-GO-P1: UTF-8 guard before the rune loop — see validateCronWorkDir.
+	if !utf8.ValidString(prompt) {
+		return fmt.Errorf("prompt contains invalid characters")
 	}
 	for i := 0; i < len(prompt); i++ {
 		c := prompt[i]
@@ -258,6 +317,10 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// and force per-field regex work. Mirrors handlePreview (line 381).
 	if len(req.Schedule) > maxCronScheduleBytesDashboard {
 		http.Error(w, "schedule too long", http.StatusBadRequest)
+		return
+	}
+	if err := validateCronScheduleChars(req.Schedule); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if err := validateCronPrompt(req.Prompt); err != nil {
@@ -519,6 +582,10 @@ func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "schedule too long", http.StatusBadRequest)
 		return
 	}
+	if err := validateCronScheduleChars(schedule); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
 	count := 1
 	if raw := r.URL.Query().Get("count"); raw != "" {
@@ -636,6 +703,12 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	if req.Schedule != nil && len(*req.Schedule) > maxCronScheduleBytesDashboard {
 		http.Error(w, "schedule too long", http.StatusBadRequest)
 		return
+	}
+	if req.Schedule != nil {
+		if err := validateCronScheduleChars(*req.Schedule); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 
 	// Re-validate workspace against allowedRoot; a cleared WorkDir is
