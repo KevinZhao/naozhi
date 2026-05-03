@@ -2743,12 +2743,22 @@ func (r *Router) GetSession(key string) *ManagedSession {
 // dashboards see the change immediately (not on the next /api/sessions poll).
 //
 // Returns false when the session key is unknown (no mutation performed).
+//
+// No-op fast path: when the requested label equals the current value, skip
+// the dirty flag + version bump + WS broadcast. A dashboard that replays the
+// same label (e.g. blur-without-edit on an editable title) otherwise forces a
+// full saveIfDirty cycle (2-5 ms fsync on SSD) and a sessions_update fanout
+// to every connected client for zero behavioural change. R176-PERF-P1.
 func (r *Router) SetUserLabel(key, label string) bool {
 	r.mu.Lock()
 	s := r.sessions[key]
 	if s == nil {
 		r.mu.Unlock()
 		return false
+	}
+	if s.UserLabel() == label {
+		r.mu.Unlock()
+		return true
 	}
 	s.SetUserLabel(label)
 	r.storeDirty = true
@@ -2975,18 +2985,34 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
 	r.mu.Lock()
 	if existing, ok := r.sessions[key]; ok {
+		changed := false
 		// Refresh workspace/prompt on existing stub; don't touch live process.
 		if existing.loadProcess() == nil {
-			if workspace != "" {
+			if workspace != "" && existing.Workspace() != workspace {
 				existing.setWorkspace(workspace)
+				changed = true
 			}
-			if lastPrompt != "" {
+			if lastPrompt != "" && loadStringAtomic(&existing.lastPrompt) != lastPrompt {
 				storeStringAtomic(&existing.lastPrompt, lastPrompt)
+				changed = true
 			}
-			r.storeDirty = true
-			r.storeGen.Add(1)
+			// R176-PERF-P1: only mark dirty + bump version when something
+			// actually changed. Cron scheduler calls RegisterCronStub on
+			// every reload of cron.yaml, and most reloads are a no-op — the
+			// stubs already reflect the file's contents. Without this gate
+			// each reload forced a saveIfDirty fsync (2-5 ms on SSD) and a
+			// sessions_update fanout with no observable effect.
+			if changed {
+				r.storeDirty = true
+				r.storeGen.Add(1)
+			}
 		}
 		r.mu.Unlock()
+		// Preserve the original "always notify on refresh" behaviour so the
+		// dashboard's sidebar edit flow (rename → save → reload) gets an
+		// immediate WS kick rather than waiting up to one poll interval.
+		// notifyChange is cheap; the expensive path (saveIfDirty) is what we
+		// just guarded above.
 		r.notifyChange()
 		return
 	}
