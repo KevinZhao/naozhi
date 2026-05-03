@@ -5,9 +5,11 @@ import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/url"
 	"os"
@@ -257,7 +259,7 @@ func setupWriteConfig(path, token string) error {
 	}
 
 	// New file: generate from template
-	if _, err := os.Stat(path); os.IsNotExist(err) {
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) {
 		return osutil.WriteFileAtomic(path, []byte(fmt.Sprintf(defaultConfigTemplate, token)), 0600)
 	}
 

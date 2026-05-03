@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net/http"
 	"net/url"
@@ -191,7 +192,7 @@ func resolveProjectFileWithRoot(rootResolved, rel string) (string, error) {
 	full := filepath.Join(rootResolved, cleaned)
 	resolved, err := filepath.EvalSymlinks(full)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return "", os.ErrNotExist
 		}
 		return "", err
@@ -626,7 +627,9 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 	// `sandbox` directive only applies to iframe embedding, not to the
 	// tab the user lands on when clicking the preview URL. SVGs must
 	// only reach the browser as attachments.
-	if strings.HasPrefix(mime, "text/html") || mime == "image/svg+xml" {
+	// HasPrefix on both so a future detector output of "image/svg+xml; charset=utf-8"
+	// (or any parameter) still trips the guard instead of falling through to inline.
+	if strings.HasPrefix(mime, "text/html") || strings.HasPrefix(mime, "image/svg+xml") {
 		writeJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "inline preview disabled for this type; use download mode"})
 		return
 	}

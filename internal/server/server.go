@@ -88,6 +88,15 @@ type Server struct {
 	// knownNodes holds all configured node IDs → display names, including
 	// reverse nodes that may currently be disconnected. Never mutated after startup.
 	knownNodes map[string]string
+
+	// appCtx is the top-level application context set by Start before it
+	// wires dependent subsystems (hub, caches, scan loops). Forwarded into
+	// HubOptions.ParentCtx so parent-ctx cancellation propagates to Hub's
+	// send/push goroutines even if a future code path forgets to call
+	// hub.Shutdown() (CTX1). Zero value (nil) in headless wiring / tests
+	// that construct the server via New() without Start(); NewHub treats
+	// nil as context.Background() to preserve legacy behaviour.
+	appCtx context.Context
 }
 
 // validateWorkspace checks that workspace is an existing directory within allowedRoot.
@@ -613,6 +622,7 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	s.mux.HandleFunc("GET /health", s.healthH.handleHealth)
+	s.appCtx = ctx
 	s.discoveryH.appCtx = ctx
 	s.registerDashboard()
 	s.nodeCache.StartLoop(ctx)

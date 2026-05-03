@@ -3,7 +3,9 @@ package discovery
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -55,11 +57,53 @@ func LoadHistory(claudeDir, sessionID, cwd string) ([]cli.EventEntry, error) {
 }
 
 // findSessionJSONL searches claudeDir/projects/**/{sessionID}.jsonl.
+// Package-level wrapper delegates to DefaultScanner so historical callers
+// keep the same signature while gaining the pathCache. Tests that need
+// isolation (or that want to exercise a fresh cold-start cache) should
+// construct their own *Scanner via NewScanner() and call findSessionJSONL
+// directly on it.
 func findSessionJSONL(claudeDir, sessionID string) (string, error) {
+	return DefaultScanner().findSessionJSONL(claudeDir, sessionID)
+}
+
+// findSessionJSONL performs the slow O(projects) fan-out scan, fronted by
+// a per-Scanner pathCache. Cache semantics:
+//
+//   - Positive hit (path != "", cached from a prior success): os.Stat
+//     the cached path; if it still exists, return immediately (1 syscall
+//     vs N). If Stat fails we drop the entry and fall through to a full
+//     rescan — claude CLI can rename or delete JSONL files during
+//     history compaction, so the cache must self-heal.
+//   - Negative hit (path == "", negativeUntil in the future): return
+//     ("", nil) without touching the disk. Caps the blast radius of a
+//     startup burst where 10 resume-chain goroutines look up the same
+//     missing sessionID concurrently.
+//   - Miss / expired negative: run the real scan and record the result
+//     (positive or negative) back into the cache.
+func (s *Scanner) findSessionJSONL(claudeDir, sessionID string) (string, error) {
+	key := pathCacheKey(claudeDir, sessionID)
+
+	if path, ok := s.pathCacheLookup(key); ok {
+		if path == "" {
+			// Cached negative verdict still fresh.
+			return "", nil
+		}
+		if _, err := os.Stat(path); err == nil {
+			return path, nil
+		}
+		// Stale positive entry — file moved or deleted. Evict and fall
+		// through to a fresh scan so the next lookup can re-learn the
+		// new location (or confirm true absence).
+		s.pathCacheInvalidate(key)
+	}
+
 	projectsDir := filepath.Join(claudeDir, "projects")
 	entries, err := os.ReadDir(projectsDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
+			// Cache the negative result so a missing ~/.claude/projects
+			// dir doesn't rerun ReadDir for every subsequent lookup.
+			s.pathCacheStoreNegative(key)
 			return "", nil
 		}
 		return "", fmt.Errorf("read projects dir: %w", err)
@@ -70,10 +114,108 @@ func findSessionJSONL(claudeDir, sessionID string) (string, error) {
 		}
 		candidate := filepath.Join(projectsDir, e.Name(), sessionID+".jsonl")
 		if _, err := os.Stat(candidate); err == nil {
+			s.pathCacheStorePositive(key, candidate)
 			return candidate, nil
 		}
 	}
+	s.pathCacheStoreNegative(key)
 	return "", nil
+}
+
+// pathCacheKey packs claudeDir + sessionID into a single map key. NUL
+// byte separates the two fields so "prefix" collisions between
+// similarly-named claude dirs cannot produce false hits.
+func pathCacheKey(claudeDir, sessionID string) string {
+	return claudeDir + "\x00" + sessionID
+}
+
+// pathCacheLookup returns (path, true) on a hit, ("", false) on a miss
+// or an expired negative entry. Hot path: takes only RLock.
+func (s *Scanner) pathCacheLookup(key string) (string, bool) {
+	s.pathCache.RLock()
+	entry, ok := s.pathCache.entries[key]
+	s.pathCache.RUnlock()
+	if !ok {
+		return "", false
+	}
+	if entry.path != "" {
+		return entry.path, true
+	}
+	if entry.negativeUntil.After(time.Now()) {
+		return "", true
+	}
+	return "", false
+}
+
+// pathCacheStorePositive commits a successfully-resolved path. Eviction
+// is skipped when the map size is within bounds; above cap we drop
+// expired negative entries first (positive entries are strictly more
+// valuable because each represents a full ReadDir already amortized).
+func (s *Scanner) pathCacheStorePositive(key, path string) {
+	s.pathCache.Lock()
+	defer s.pathCache.Unlock()
+	if len(s.pathCache.entries) >= pathCacheMaxEntries {
+		s.evictPathCacheLocked()
+	}
+	s.pathCache.entries[key] = pathCacheEntry{path: path}
+}
+
+// pathCacheStoreNegative commits a "scanned and didn't find it" verdict
+// with a bounded TTL so a later-created JSONL is still picked up on
+// the next lookup.
+func (s *Scanner) pathCacheStoreNegative(key string) {
+	s.pathCache.Lock()
+	defer s.pathCache.Unlock()
+	if len(s.pathCache.entries) >= pathCacheMaxEntries {
+		s.evictPathCacheLocked()
+	}
+	s.pathCache.entries[key] = pathCacheEntry{
+		negativeUntil: time.Now().Add(pathCacheNegativeTTL),
+	}
+}
+
+// pathCacheInvalidate drops a cached entry, used by callers that just
+// observed the cached path no longer exists on disk.
+func (s *Scanner) pathCacheInvalidate(key string) {
+	s.pathCache.Lock()
+	delete(s.pathCache.entries, key)
+	s.pathCache.Unlock()
+}
+
+// evictPathCacheLocked enforces pathCacheMaxEntries. Caller MUST hold
+// s.pathCache.Lock(). Strategy:
+//  1. First pass drops expired negative entries — cheap wins that were
+//     going to fall through to a rescan anyway.
+//  2. If the map is still above cap (all entries are positive, or all
+//     negatives are still fresh), drop an arbitrary slice of entries until
+//     we are back under cap. Without this fallback a long-running process
+//     that sees tens of thousands of distinct sessionIDs (resume chain
+//     replays, dashboard queries) would grow the map without bound once
+//     all 2048 slots hold positive entries. Map iteration order is
+//     randomised in Go, so "arbitrary" is effectively random eviction —
+//     simple, allocation-free, and good enough; LRU would require a
+//     doubly-linked list that costs more than the ReadDir we'd save.
+func (s *Scanner) evictPathCacheLocked() {
+	now := time.Now()
+	for k, v := range s.pathCache.entries {
+		if v.path == "" && !v.negativeUntil.After(now) {
+			delete(s.pathCache.entries, k)
+		}
+	}
+	if len(s.pathCache.entries) < pathCacheMaxEntries {
+		return
+	}
+	// Second pass: drop arbitrary entries (random via map iteration) until
+	// we drop below cap. Leave pathCacheEvictBatch headroom so the next
+	// store isn't forced to re-evict immediately.
+	excess := len(s.pathCache.entries) - pathCacheMaxEntries + pathCacheEvictBatch
+	for k := range s.pathCache.entries {
+		if excess <= 0 {
+			break
+		}
+		delete(s.pathCache.entries, k)
+		excess--
+	}
 }
 
 func parseJSONL(path string) ([]cli.EventEntry, error) {

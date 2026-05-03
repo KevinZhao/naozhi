@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
+	"io/fs"
 	"net/http"
 	"os"
 	"os/exec"
@@ -281,7 +283,7 @@ func (d *doctor) checkStateDir() {
 	dir := filepath.Join(home, ".naozhi")
 	info, err := os.Stat(dir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			d.add("state dir", "warn", dir+" missing (first run?)")
 			return
 		}

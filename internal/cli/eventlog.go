@@ -51,9 +51,22 @@ type EventLog struct {
 	maxSize int
 
 	// Cached summaries updated atomically on Append for efficient access
-	// without copying all entries.
-	lastPromptSummary   atomic.Value // string: most recent "user" entry summary
-	lastActivitySummary atomic.Value // string: most recent "tool_use"/"thinking" entry summary
+	// without copying all entries. atomic.Pointer[string] is type-safe vs
+	// atomic.Value (which accepts any interface value); Load returns nil
+	// when never stored, distinct from a stored empty string.
+	lastPromptSummary   atomic.Pointer[string] // most recent "user" entry summary
+	lastActivitySummary atomic.Pointer[string] // most recent "tool_use"/"thinking" entry summary
+
+	// userTurnCount is a monotonic counter of "user" entries appended to this
+	// log since the Process was spawned. Exposed on SessionSnapshot.MessageCount
+	// for sidebar / main-header chip display. Counts every user prompt including
+	// those replayed via AppendBatch from persistedHistory — Process.InjectHistory
+	// after shim reconnect rebuilds the counter to match the historical turn
+	// count (persistence layer re-runs AppendBatch on startup; there is no
+	// spurious reset). Oldest entries evicted by the ring buffer do not
+	// decrement the counter: the semantic is "cumulative turn count", not
+	// "live entries".
+	userTurnCount atomic.Int64
 
 	// Per-turn sub-agent tracking: reset on "result"/"user" events.
 	turnAgents []SubagentInfo // foreground agents in current turn; protected by mu
@@ -126,9 +139,10 @@ func (l *EventLog) Append(e EventEntry) {
 	// entry-ordering-inverted by lock release scheduling.
 	switch e.Type {
 	case "user":
-		l.lastPromptSummary.Store(e.Summary)
+		storeAtomicString(&l.lastPromptSummary, e.Summary)
+		l.userTurnCount.Add(1)
 	case "tool_use", "thinking", "agent", "task_start", "task_progress", "todo":
-		l.lastActivitySummary.Store(e.Summary)
+		storeAtomicString(&l.lastActivitySummary, e.Summary)
 	}
 
 	l.mu.Unlock()
@@ -152,6 +166,7 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 	var (
 		lastPrompt, lastActivity string
 		sawPrompt, sawActivity   bool
+		userDelta                int64
 	)
 	// Capture a single wall-clock read before locking so the N zero-time
 	// entries inside the loop (typical case: InjectHistory's 500-entry
@@ -183,6 +198,7 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 		case "user":
 			lastPrompt = e.Summary
 			sawPrompt = true
+			userDelta++
 		case "tool_use", "thinking", "agent", "task_start", "task_progress", "todo":
 			lastActivity = e.Summary
 			sawActivity = true
@@ -190,10 +206,17 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 	}
 
 	if sawPrompt {
-		l.lastPromptSummary.Store(lastPrompt)
+		storeAtomicString(&l.lastPromptSummary, lastPrompt)
 	}
 	if sawActivity {
-		l.lastActivitySummary.Store(lastActivity)
+		storeAtomicString(&l.lastActivitySummary, lastActivity)
+	}
+	if userDelta > 0 {
+		// Single atomic add mirrors the lastPromptSummary single Store above —
+		// callers observe the batch's cumulative impact in one step. Under l.mu
+		// so the count is seen by any concurrent Snapshot that also reads
+		// other per-turn state.
+		l.userTurnCount.Add(userDelta)
 	}
 	l.mu.Unlock()
 
@@ -441,16 +464,31 @@ func (l *EventLog) LastActivitySummary() string {
 	return loadAtomicString(&l.lastActivitySummary)
 }
 
-// loadAtomicString returns the stored string or "" on nil/wrong type, guarding
-// callers from a panic if the Value is accidentally stored with a non-string
-// type in a future refactor.
-func loadAtomicString(v *atomic.Value) string {
-	if raw := v.Load(); raw != nil {
-		if s, ok := raw.(string); ok {
-			return s
-		}
+// UserTurnCount returns the cumulative count of "user" entries appended to
+// this log since the Process was spawned. Consumed by SessionSnapshot.MessageCount
+// for sidebar / main-header display. Increments once per Append of a user entry
+// and by the batch's user-entry count inside AppendBatch. Ring-buffer eviction
+// does not decrement.
+func (l *EventLog) UserTurnCount() int64 {
+	return l.userTurnCount.Load()
+}
+
+// loadAtomicString returns the stored string or "" when the pointer is nil
+// (never stored). Type-safe via atomic.Pointer[string]; no dynamic type check
+// is needed.
+func loadAtomicString(v *atomic.Pointer[string]) string {
+	if p := v.Load(); p != nil {
+		return *p
 	}
 	return ""
+}
+
+// storeAtomicString writes a string value through atomic.Pointer[string].
+// The pointer captures the address of the string argument (already a local
+// copy on each call), mirroring how we used to pass a string directly to
+// atomic.Value.Store.
+func storeAtomicString(v *atomic.Pointer[string], s string) {
+	v.Store(&s)
 }
 
 // TurnAgents returns a copy of all currently active agents (foreground + background)

@@ -381,6 +381,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .modal .auth-brand .ab-wordmark{display:flex;flex-direction:column;line-height:1.2}
 .modal .auth-brand .ab-wordmark .ab-name{font-size:15px;color:var(--nz-text-strong);font-weight:600}
 .modal .auth-brand .ab-wordmark .ab-tag{font-size:11px;color:var(--nz-text-mute)}
+/* R110-P1 long-press context menu: surfaces session-card actions (rename /
+   delete / copy key) on touch devices where hover-only buttons are invisible.
+   Rendered as an overlay + positioned menu pair so click-outside-to-close is
+   cheap to implement. z-index 210 sits above .modal-overlay (200) so the
+   menu can opt to layer on top of a confirm dialog mid-flight without
+   swapping stacking contexts. Animation: none — a 120ms fade-in would hurt
+   perceived latency on the long-press target state that already takes 500ms
+   to trigger. */
+.ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:210}
+.ctx-menu{position:fixed;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:8px;padding:4px;min-width:160px;box-shadow:0 12px 32px rgba(0,0,0,.5);z-index:211;user-select:none;-webkit-user-select:none}
+.ctx-menu-item{display:flex;align-items:center;gap:10px;padding:10px 12px;border-radius:6px;cursor:pointer;color:var(--nz-text);font-size:14px;min-height:44px;-webkit-tap-highlight-color:transparent;transition:background .1s}
+.ctx-menu-item:hover,.ctx-menu-item:focus-visible{background:var(--nz-bg-2);outline:none}
+.ctx-menu-item.danger{color:var(--nz-red)}
+.ctx-menu-item.danger:hover{background:rgba(218,54,51,.15)}
+.ctx-menu-item .ctx-icon{width:16px;flex-shrink:0;text-align:center;opacity:.7}
+.session-card.long-pressing{background:rgba(88,166,255,.08);transition:background .12s}
 /* Picker list used in modals (presets, projects, workspaces) */
 .proj-pick{list-style:none;margin:0;padding:0;border:1px solid var(--nz-border);border-radius:6px;background:var(--nz-bg-0);max-height:220px;overflow-y:auto}
 .proj-pick li{padding:8px 12px;cursor:pointer;border-bottom:1px solid var(--nz-bg-2);transition:background .12s;min-height:44px;display:flex;flex-direction:column;justify-content:center;-webkit-tap-highlight-color:transparent}
@@ -558,9 +574,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
    path lives in the sh-name title attribute (tooltip on hover). */
 .section-header-fallback{background:transparent;color:var(--nz-text-faint)}
 .section-header-fallback .sh-name{font-style:italic;font-weight:500}
-.section-empty{padding:8px 16px;font-size:12px;color:var(--nz-text-dim);display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--nz-bg-2);cursor:pointer;background:transparent;border-top:none;border-left:none;border-right:none;width:100%;text-align:left;font-family:inherit}
-.section-empty:hover{color:var(--nz-text);background:var(--nz-bg-1)}
-.section-empty .se-plus{color:var(--nz-accent);font-weight:600}
 /* Session card v2 (two-line flat, IM-style) */
 .sc-cli-icon{width:36px;height:36px;flex-shrink:0;border-radius:8px}
 .sc-body{flex:1;min-width:0}
@@ -954,7 +967,6 @@ body.kbd-open .sidebar-footer{display:none}
   .section-header .sh-btn{min-width:32px;min-height:32px;padding:6px}
   .session-card .btn-dismiss{min-width:40px;min-height:40px;padding:6px;font-size:19px;opacity:.75}
   .btn-mobile-back{min-width:40px;min-height:40px}
-  .section-empty{min-height:44px;padding-top:12px;padding-bottom:12px}
   .empty-cta-btn{min-height:44px}
   .fv-btn{min-width:40px;min-height:40px}
   /* Inline @file reference chips: keep the visual small but grow the tap area. */

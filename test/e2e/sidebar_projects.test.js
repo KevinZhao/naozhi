@@ -53,16 +53,17 @@ test('favorite star toggles and triggers API call', async ({ page }) => {
   await expect(header.locator('.sh-btn.star-on')).toHaveCount(1, { timeout: 5000 });
 });
 
-test('favorited project with no sessions still renders header + new session CTA', async ({ page }) => {
+test('favorited project with no sessions still renders header + sh-new CTA', async ({ page }) => {
   // pinned-empty has favorite: true in the mock but no sessions.
   const header = page.locator('.section-header', { hasText: 'pinned-empty' });
   await expect(header).toHaveCount(1);
   // Star is active.
   await expect(header.locator('.sh-btn.star-on')).toHaveCount(1);
-  // The empty-state CTA is rendered directly under it.
-  const empty = page.locator('.section-empty', { hasText: 'pinned-empty' });
-  await expect(empty).toHaveCount(1);
-  await expect(empty).toContainText('New session in pinned-empty');
+  // The header's compact `+` button is now the sole per-project create
+  // affordance — the old full-width "New session in pinned-empty" row below
+  // the header was removed as redundant once the header carried its own `+`.
+  await expect(header.locator('.sh-btn.sh-new')).toHaveCount(1);
+  await expect(page.locator('.section-empty', { hasText: 'pinned-empty' })).toHaveCount(0);
 });
 
 test('favorited groups sort before non-favorite groups', async ({ page }) => {

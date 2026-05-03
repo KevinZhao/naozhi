@@ -770,7 +770,12 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		// operator grepping journalctl sees every label change regardless of
 		// which node owns the session. R64-GO-M3.
 		slog.Info("session label updated", "node", req.Node, "key", req.Key, "label_len", len(label))
-		writeJSON(w, map[string]string{"status": "ok", "label": label})
+		// Don't echo label — it is attacker-influenced text. Validation already
+		// ensured it is safe in storage, but reflecting user input in an HTTP
+		// body is a latent reflected-XSS vector if any future caller renders
+		// the response via innerHTML. Client patches its cache from its own
+		// optimistic value, not from the response.
+		writeOK(w)
 		return
 	}
 
@@ -780,7 +785,9 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 	}
 
 	slog.Info("session label updated", "node", "local", "key", req.Key, "label_len", len(label))
-	writeJSON(w, map[string]string{"status": "ok", "label": label})
+	// Don't echo label — reflected-XSS precaution matches the remote-path
+	// above. Client patches its cache from its own optimistic value.
+	writeOK(w)
 }
 
 // POST /api/sessions/resume

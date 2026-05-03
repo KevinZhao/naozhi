@@ -127,6 +127,14 @@ type HubOptions struct {
 	AllowedRoot   string
 	TrustedProxy  bool
 	WSAuthLimiter func(ip string) bool
+	// ParentCtx is the application-level context whose cancellation must
+	// propagate to the Hub. When set, NewHub derives h.ctx via
+	// context.WithCancel(ParentCtx) so that parent-ctx cancel tears down
+	// send/push goroutines even if Shutdown() is not explicitly called
+	// (e.g. a future panic-early-exit path in main that forgets Shutdown).
+	// Nil falls back to context.Background() to preserve legacy behaviour
+	// for tests and headless wiring. CTX1 (Round 167).
+	ParentCtx context.Context
 }
 
 // Pre-marshaled static messages to avoid repeated JSON serialization.
@@ -141,8 +149,21 @@ func init() {
 }
 
 // NewHub creates a new WebSocket hub.
+//
+// h.ctx is derived from opts.ParentCtx when set, otherwise
+// context.Background() (legacy behaviour for tests and headless wiring).
+// Deriving from a parent ctx means a parent cancel propagates to Hub
+// goroutines even if Shutdown() is never called — closes the gap
+// documented in CTX1: a future panic-early-exit path that forgets to
+// call Shutdown would otherwise leak send/push goroutines. Shutdown()
+// still calls h.cancel() explicitly; context.CancelFunc is idempotent
+// so the two paths compose without races.
 func NewHub(opts HubOptions) *Hub {
-	ctx, cancel := context.WithCancel(context.Background())
+	parent := opts.ParentCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parent)
 	h := &Hub{
 		clients:       make(map[*wsClient]struct{}),
 		router:        opts.Router,
@@ -875,6 +896,17 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 		}
 
 		// Update the subscription registration for this client.
+		//
+		// H8 (Round 163): capture the old unsub while holding h.mu but call
+		// it *after* releasing the lock. The current lock order is
+		// h.mu → EventLog.subMu (enforced by Hub.Shutdown's contract and the
+		// shutdown_lock_order_test.go tripwire), so calling oldUnsub() under
+		// h.mu is technically safe today. Releasing h.mu first removes a
+		// latent hazard: if oldUnsub() were ever extended to take additional
+		// locks (e.g. a future per-client audit mutex or a sub-layer WG
+		// protected by h.mu), calling it under h.mu would reintroduce a
+		// reverse acquisition order. Swap is a rare path (resubscribe
+		// collision), so the extra unlock/relock has no measurable cost.
 		h.mu.Lock()
 		if c.subscriptions == nil {
 			// Client was removed during Shutdown.
@@ -888,11 +920,12 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 			unsub()
 			return false, nil
 		}
-		if oldUnsub, exists := c.subscriptions[key]; exists {
-			oldUnsub()
-		}
+		oldUnsub := c.subscriptions[key]
 		c.subscriptions[key] = unsub
 		h.mu.Unlock()
+		if oldUnsub != nil {
+			oldUnsub()
+		}
 
 		*notify = newNotify
 		return true, currentSess
@@ -901,14 +934,21 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 	// can surface a "subscription expired" indicator instead of silently
 	// showing stale state. Clean up the dead subscription slot so it doesn't
 	// count toward the per-connection cap.
+	//
+	// H8 (Round 163): same lock-order precaution — snapshot oldUnsub
+	// under h.mu, release the lock, then invoke it.
 	h.mu.Lock()
+	var staleUnsub func()
 	if c.subscriptions != nil {
-		if oldUnsub, exists := c.subscriptions[key]; exists {
-			oldUnsub()
+		if u, exists := c.subscriptions[key]; exists {
+			staleUnsub = u
 			delete(c.subscriptions, key)
 		}
 	}
 	h.mu.Unlock()
+	if staleUnsub != nil {
+		staleUnsub()
+	}
 	c.SendJSON(node.ServerMsg{Type: "session_state", Key: key, State: "ready", Reason: "subscription_timeout"})
 	return false, nil
 }

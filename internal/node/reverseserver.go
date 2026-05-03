@@ -151,8 +151,12 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Bound the register response write so a slow-read attacker can't
 	// park this goroutine indefinitely at the TCP window. newReverseConn
 	// applies 10s per write thereafter; this pre-handoff write needs the
-	// same protection.
-	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	// same protection. If SetWriteDeadline fails (conn closed mid-handshake),
+	// abort before WriteJSON would block deadline-less on a dead socket.
+	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		rc.Close()
+		return
+	}
 	if err := conn.WriteJSON(ReverseMsg{Type: "registered"}); err != nil {
 		rc.Close()
 		return

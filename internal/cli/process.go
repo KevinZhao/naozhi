@@ -166,9 +166,10 @@ type Process struct {
 	// deathReason records why the process exited (passive death) or was killed.
 	// Written exactly once by the code path that transitions State→Dead.
 	// Read by session.ManagedSession.Send on ErrProcessExited (or via
-	// LoadDeathReason from router/dashboard). Stored string for atomic.Value
-	// lock-free reads; empty means "alive or never recorded".
-	deathReason atomic.Value
+	// LoadDeathReason from router/dashboard). atomic.Pointer[string] provides
+	// type-safe lock-free reads; Load returns nil when never stored (distinct
+	// from a pointer to ""), enabling the first-writer-wins CAS below.
+	deathReason atomic.Pointer[string]
 
 	// log is a pre-bound logger that readLoop/heartbeatLoop use so shim
 	// disconnect and readloop panic entries carry a "session" attribute
@@ -216,33 +217,39 @@ const (
 // so the root cause is preserved even when readLoop's unwind triggers a second
 // transition (e.g. cli_exited → defer hits the no-reason StateDead fallback).
 //
-// Uses atomic.Value.CompareAndSwap to close the TOCTOU gap between Load and
-// Store that a naive "check-then-store" would leave open. Without CAS, two
-// concurrent death paths (panic defer vs. cli_exited handler) can both observe
-// an empty value on Load and then both Store, letting the slower goroutine
-// overwrite the earlier classification.
+// Uses atomic.Pointer[string].CompareAndSwap to close the TOCTOU gap between
+// Load and Store that a naive "check-then-store" would leave open. Without
+// CAS, two concurrent death paths (panic defer vs. cli_exited handler) can
+// both observe a nil pointer on Load and then both Store, letting the slower
+// goroutine overwrite the earlier classification.
+//
+// Each Store allocates a fresh *string (captured by address of a local); the
+// CAS loop retries while an empty string is in place (defensive — no code path
+// stores "" today, but tolerating the upgrade is cheap and forward-compatible).
 func (p *Process) setDeathReason(reason string) {
 	if reason == "" {
 		return
 	}
-	// First attempt: store only if the value is still the zero interface
-	// (never set). atomic.Value.CompareAndSwap returns true on success, so a
-	// subsequent caller whose Load would have seen "" drops out here.
-	if p.deathReason.CompareAndSwap(nil, reason) {
+	// First attempt: store only if the pointer is still nil (never set).
+	// CompareAndSwap returns true on success, so a subsequent caller observing
+	// a non-nil pointer drops out here.
+	fresh := reason
+	if p.deathReason.CompareAndSwap(nil, &fresh) {
 		return
 	}
-	// If somebody stored the empty string explicitly (not a path we take
-	// today, but cheap to tolerate), upgrade it to the real reason. Still
-	// uses CAS so we never overwrite a non-empty value.
-	_ = p.deathReason.CompareAndSwap("", reason)
+	// Upgrade path: if somebody stored a pointer to "" explicitly (not taken
+	// today, but cheap to tolerate), swap it for the real reason. Snapshot
+	// the current pointer and CAS against it; a concurrent non-empty writer
+	// will invalidate our CAS and we bail to preserve first-writer-wins.
+	if cur := p.deathReason.Load(); cur != nil && *cur == "" {
+		_ = p.deathReason.CompareAndSwap(cur, &fresh)
+	}
 }
 
 // DeathReason returns the recorded death reason, or "" if alive or unset.
 func (p *Process) DeathReason() string {
-	if cur := p.deathReason.Load(); cur != nil {
-		if s, ok := cur.(string); ok {
-			return s
-		}
+	if ptr := p.deathReason.Load(); ptr != nil {
+		return *ptr
 	}
 	return ""
 }
@@ -516,9 +523,16 @@ func (p *Process) readLoop() {
 		// expanded backing array instead of reverting to the original 4096.
 		// Without this, a single large event forces every subsequent
 		// iteration to re-grow from 4KB through a chain of doublings.
+		//
+		// Exception: on capExceeded we shrink back to a fresh 4KB buffer.
+		// Holding onto a ~16MB backing array forever because one malformed
+		// shim message grew us there is a silent memory hog; the rare legit
+		// large event will pay the re-grow cost again rather than keeping
+		// pathological capacity on the hot path.
 		lineBuf = line
 		if capExceeded {
 			log.Warn("readLoop: oversized shim message, skipping", "size", len(line))
+			lineBuf = make([]byte, 0, 4096)
 			// Drain the rest of this overlong line so the next iteration
 			// doesn't read the tail as a separate message.
 			for {
@@ -1251,9 +1265,15 @@ func (p *Process) Kill() {
 		// takes shimWMu for the write, so we acquire it here and call
 		// shimSendLocked which skips the re-lock.
 		p.shimWMu.Lock()
-		p.shimConn.SetWriteDeadline(time.Now().Add(time.Second)) //nolint:errcheck
-		_ = p.shimSendLocked(shimClientMsg{Type: "kill"})
-		p.shimConn.Close()
+		// If SetWriteDeadline fails (conn already closed / broken socket,
+		// "use of closed network connection" after GC finalize), skip the
+		// write entirely — without a deadline, shimSendLocked can block
+		// until OS TCP keepalive expires (minutes), holding shimWMu and
+		// starving every concurrent shimSend (heartbeat/ping/interrupt).
+		if err := p.shimConn.SetWriteDeadline(time.Now().Add(time.Second)); err == nil {
+			_ = p.shimSendLocked(shimClientMsg{Type: "kill"})
+		}
+		_ = p.shimConn.Close()
 		p.shimWMu.Unlock()
 
 		if p.shimPID > 0 {
@@ -1303,9 +1323,15 @@ func (p *Process) Close() {
 // minutes, blocking SIGTERM handling).
 func (p *Process) Detach() {
 	p.shimWMu.Lock()
-	p.shimConn.SetWriteDeadline(time.Now().Add(2 * time.Second)) //nolint:errcheck
-	_ = p.shimSendLocked(shimClientMsg{Type: "detach"})
-	p.shimConn.Close()
+	// If SetWriteDeadline fails (conn already closed / broken), skip the
+	// detach send — without a deadline, shimSendLocked can block on a
+	// dead socket until TCP keepalive expires (minutes), which is
+	// precisely what Detach is meant to avoid (Router.Shutdown's
+	// wg.Wait() would stall past SIGTERM grace). Same pattern as Kill().
+	if err := p.shimConn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err == nil {
+		_ = p.shimSendLocked(shimClientMsg{Type: "detach"})
+	}
+	_ = p.shimConn.Close()
 	p.shimWMu.Unlock()
 }
 
@@ -1699,6 +1725,14 @@ func (p *Process) TurnAgents() []SubagentInfo {
 // entry, as maintained atomically by EventLog.Append.
 func (p *Process) LastActivitySummary() string {
 	return p.eventLog.LastActivitySummary()
+}
+
+// UserTurnCount returns the cumulative count of "user" entries this Process
+// has observed since spawn. Pass-through to EventLog; consumed by
+// ManagedSession.Snapshot to populate SessionSnapshot.MessageCount for
+// sidebar / main-header chip display.
+func (p *Process) UserTurnCount() int64 {
+	return p.eventLog.UserTurnCount()
 }
 
 // SubscribeEvents returns a notification channel and unsubscribe function.

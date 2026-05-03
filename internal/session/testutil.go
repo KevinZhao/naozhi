@@ -54,6 +54,7 @@ func (p *TestProcess) LastEntryOfType(typ string) cli.EventEntry {
 	return p.EventLog.LastEntryOfType(typ)
 }
 func (p *TestProcess) LastActivitySummary() string                { return p.EventLog.LastActivitySummary() }
+func (p *TestProcess) UserTurnCount() int64                       { return p.EventLog.UserTurnCount() }
 func (p *TestProcess) ProtocolName() string                       { return "test" }
 func (p *TestProcess) SubscribeEvents() (<-chan struct{}, func()) { return p.EventLog.Subscribe() }
 func (p *TestProcess) PID() int                                   { return 0 }

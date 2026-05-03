@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"net"
 	"os"
@@ -717,10 +718,18 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	go func() {
 		defer close(writerDone)
 		w := bufio.NewWriter(conn)
+		// If SetWriteDeadline fails (conn already closed / half-closed), skip the
+		// Flush entirely. Without a deadline, bufio.Flush can block until TCP
+		// keepalive expires (minutes), wedging this writer goroutine and
+		// starving the defer that signals clientDone to readers. Clearing the
+		// deadline after a successful Flush is best-effort — if it fails the
+		// conn is dying and the outer close will tear everything down.
 		flushWithDeadline := func() error {
-			conn.SetWriteDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
+			if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+				return fmt.Errorf("set write deadline: %w", err)
+			}
 			err := w.Flush()
-			conn.SetWriteDeadline(time.Time{}) //nolint:errcheck
+			_ = conn.SetWriteDeadline(time.Time{})
 			return err
 		}
 		for {
@@ -909,7 +918,13 @@ func writeMsg(conn net.Conn, msg ServerMsg) {
 	if err != nil {
 		return
 	}
-	_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	// If SetWriteDeadline fails (conn already closed by defer teardown), skip
+	// the write. Without a deadline, a stalled client could pin the single-
+	// client semaphore slot indefinitely — the point of the deadline is to
+	// guarantee this helper never blocks beyond 10s.
+	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return
+	}
 	defer func() { _ = conn.SetWriteDeadline(time.Time{}) }()
 	conn.Write(data) //nolint:errcheck
 }
@@ -1089,14 +1104,14 @@ func WaitSocketGone(socketPath string, maxWait time.Duration) bool {
 	}
 	deadline := time.Now().Add(maxWait)
 	// Fast path: already gone.
-	if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+	if _, err := os.Stat(socketPath); errors.Is(err, fs.ErrNotExist) {
 		return true
 	}
 	t := time.NewTicker(20 * time.Millisecond)
 	defer t.Stop()
 	for {
 		<-t.C
-		if _, err := os.Stat(socketPath); os.IsNotExist(err) {
+		if _, err := os.Stat(socketPath); errors.Is(err, fs.ErrNotExist) {
 			return true
 		}
 		if time.Now().After(deadline) {

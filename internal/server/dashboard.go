@@ -183,6 +183,11 @@ func (s *Server) registerDashboard() {
 		AllowedRoot:   s.allowedRoot,
 		TrustedProxy:  s.auth.trustedProxy,
 		WSAuthLimiter: s.auth.loginAllow,
+		// Forward the application-level ctx so a parent cancel cascades
+		// to Hub goroutines even when Shutdown() is not explicitly
+		// invoked (CTX1). Zero value in pure-unit tests that bypass
+		// Start() is harmless — NewHub falls back to Background().
+		ParentCtx: s.appCtx,
 	})
 	s.hub.SetScheduler(s.scheduler)
 

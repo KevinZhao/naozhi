@@ -44,6 +44,66 @@ const maxCronIDLenDashboard = 64
 // update so both paths treat the parser as a trusted-input boundary.
 const maxCronScheduleBytesDashboard = 256
 
+// maxCronWorkDirBytesDashboard caps the raw work_dir string before it reaches
+// validateWorkspace. Even absolute paths rarely exceed 1 KiB on Linux
+// (PATH_MAX is typically 4096), so 1024 is generous. Without this guard a
+// multi-MB work_dir body would be echoed into slog attrs via the debug-log
+// on validation failure, allowing log-flood from an authenticated attacker.
+const maxCronWorkDirBytesDashboard = 1024
+
+// validateCronWorkDir rejects work_dir strings with embedded control
+// characters that would corrupt slog attribute logging (ANSI injection into
+// structured logs, CR/LF line-wrapping into log pipelines). Length check
+// matches prompt/schedule guards so all three fields reject the same class
+// of log-injection payloads at the handler edge, before validateWorkspace
+// sees them.
+//
+// The second pass (rune-level) also rejects Unicode bidi override /
+// embedding / directional isolate characters (U+202A–U+202E, U+2066–U+2069)
+// and Unicode line/paragraph separators (U+2028/U+2029) which encode as
+// valid UTF-8 sequences with all bytes >= 0x20 and therefore pass the
+// byte loop above. These characters can flip terminal rendering and corrupt
+// log pipelines that use U+2028 as a line boundary. Matches the filter
+// applied by sanitizeKeyComponent in the session package so cron fields
+// and session-key fields reject the same log-injection class uniformly.
+func validateCronWorkDir(wd string) error {
+	if len(wd) > maxCronWorkDirBytesDashboard {
+		return fmt.Errorf("work_dir exceeds %d-byte limit", maxCronWorkDirBytesDashboard)
+	}
+	for i := 0; i < len(wd); i++ {
+		c := wd[i]
+		if c == 0 || c < 0x20 || c == 0x7f {
+			return fmt.Errorf("work_dir contains invalid control characters")
+		}
+	}
+	for _, r := range wd {
+		if isLogInjectionRune(r) {
+			return fmt.Errorf("work_dir contains invalid unicode control characters")
+		}
+	}
+	return nil
+}
+
+// isLogInjectionRune reports whether r is a Unicode codepoint that would
+// corrupt structured log output or terminal rendering when embedded in a
+// user-supplied attribute. Covers bidi override / embedding / isolate
+// codepoints and line/paragraph separators that byte-level < 0x20 filters
+// miss. C1 controls (U+0080–U+009F) are also caught here because they
+// encode as 2-byte UTF-8 starting with 0xC2 (>= 0x20).
+func isLogInjectionRune(r rune) bool {
+	switch {
+	case r >= 0x80 && r <= 0x9F: // C1 controls
+		return true
+	case r >= 0x202A && r <= 0x202E: // LRE/RLE/PDF/LRO/RLO
+		return true
+	case r >= 0x2066 && r <= 0x2069: // LRI/RLI/FSI/PDI
+		return true
+	case r == 0x2028 || r == 0x2029: // LS/PS
+		return true
+	}
+	return false
+}
+
 // validateNotifyTarget enforces platform allowlist + chat_id size bound.
 func validateNotifyTarget(platform, chatID string) error {
 	if _, ok := validNotifyPlatforms[platform]; !ok {
@@ -60,6 +120,10 @@ func validateNotifyTarget(platform, chatID string) error {
 // planner_prompt guard: null bytes are silently truncated by execve, and
 // raw \n/\r into the CLI --append-system-prompt path corrupts shim NDJSON
 // framing. Tab is allowed because prompts may indent examples.
+//
+// Second pass mirrors validateCronWorkDir: reject C1 controls + Unicode
+// bidi / directional isolate / line separator runes that are >= 0x20 at
+// the byte level and therefore bypass the ASCII loop above.
 func validateCronPrompt(prompt string) error {
 	if len(prompt) > maxCronPromptBytesDashboard {
 		return fmt.Errorf("prompt exceeds %d-byte limit", maxCronPromptBytesDashboard)
@@ -68,6 +132,11 @@ func validateCronPrompt(prompt string) error {
 		c := prompt[i]
 		if c == 0 || (c < 0x20 && c != '\t') || c == 0x7f {
 			return fmt.Errorf("prompt contains invalid control characters")
+		}
+	}
+	for _, r := range prompt {
+		if isLogInjectionRune(r) {
+			return fmt.Errorf("prompt contains invalid unicode control characters")
 		}
 	}
 	return nil
@@ -202,6 +271,10 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// 403 Forbidden used by /api/sessions/send so clients see a uniform
 	// status code for boundary violations rather than ambiguous 400s.
 	if req.WorkDir != "" {
+		if err := validateCronWorkDir(req.WorkDir); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		validated, err := validateWorkspace(req.WorkDir, h.allowedRoot)
 		if err != nil {
 			// Avoid echoing the raw validation detail (which can reveal the
@@ -571,6 +644,10 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	// accepted as-is and will fall back to the router default. 403 matches
 	// handleCreate and the send handler for boundary violations.
 	if req.WorkDir != nil && *req.WorkDir != "" {
+		if err := validateCronWorkDir(*req.WorkDir); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
 		validated, err := validateWorkspace(*req.WorkDir, h.allowedRoot)
 		if err != nil {
 			// Avoid echoing the raw validation detail (which can reveal the

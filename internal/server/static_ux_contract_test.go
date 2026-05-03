@@ -302,14 +302,12 @@ func TestDashboardJS_CheatsheetDocumentsSlashCommands(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_SectionHeaderHasNewButton pins the R110-P2
-// "+ New session in X" consistency fix: every project section header now
-// carries a compact `+` button that invokes newSessionInProject, so groups
-// with existing sessions can still create from the header without using the
-// top-right `+` (which opens a generic modal requiring re-typing the
-// workspace). The zero-session `sectionEmptyHtml` CTA must keep its
-// "New session in X" text because test/e2e/sidebar_projects.test.js asserts
-// on that exact string.
+// TestDashboardJS_SectionHeaderHasNewButton pins that every project section
+// header carries a compact `+` button that invokes newSessionInProject, so
+// groups with existing sessions — and empty favorite groups where the
+// full-width "New session in X" CTA used to live — can still create from the
+// header without using the top-right `+` (which opens a generic modal
+// requiring re-typing the workspace).
 func TestDashboardJS_SectionHeaderHasNewButton(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
@@ -326,10 +324,15 @@ func TestDashboardJS_SectionHeaderHasNewButton(t *testing.T) {
 	if !strings.Contains(js, `onclick="event.stopPropagation();newSessionInProject(this.dataset.name,this.dataset.node)"`) {
 		t.Error("sh-new button must wire onclick to newSessionInProject via stopPropagation")
 	}
-	// Sanity: the zero-session CTA text still exists for E2E
-	// test/e2e/sidebar_projects.test.js at line 65.
-	if !strings.Contains(js, `'<span class="se-plus">+</span><span>New session in '`) {
-		t.Error("section-empty CTA string 'New session in X' must remain for E2E compatibility")
+	// The legacy sectionEmptyHtml CTA was removed — guard against regressions:
+	// empty favorite groups now rely on the header sh-new `+` button alone,
+	// and a redundant full-width "New session in X" row directly below would
+	// just duplicate the affordance.
+	if strings.Contains(js, "function sectionEmptyHtml") {
+		t.Error("sectionEmptyHtml was removed; empty favorite groups rely on the header sh-new button alone")
+	}
+	if strings.Contains(js, `class="section-empty"`) {
+		t.Error("section-empty row was removed; header sh-new button is the sole per-project create CTA")
 	}
 }
 
@@ -2790,30 +2793,21 @@ func min2(a, b int) int {
 	return b
 }
 
-// TestDashboardJS_R110P2_SectionHeaderNewButtonConsistency pins three
-// invariants that together close the R110-P2 "+ New session in X"
-// consistency item:
+// TestDashboardJS_R110P2_SectionHeaderNewButtonConsistency pins two
+// invariants around the per-project "+" create affordance:
 //
 //  1. The `sh-new` compact + button is emitted by sectionHeaderHtml
 //     unconditionally — no `if (g.items.length === 0)` or similar gate
-//     that would bring back the original regression (JD had a "+ New
-//     session in JD" CTA but NAOZHI / EFA-VALIDATION did not because
-//     those had sessions already). TestDashboardJS_SectionHeaderHasNewButton
-//     already locks the class name + onclick wiring; this test locks the
-//     unconditional-emission contract by counting call sites inside
-//     sectionHeaderHtml's single-expression return.
-//  2. Both the header `+` button and the zero-session full-width CTA
-//     target the SAME newSessionInProject(name, node) entry point, so
-//     clicking either produces identical behaviour. Anything that forks
-//     the two paths (different opts, different modal) would be a silent
-//     UX regression.
-//  3. The per-project sh-new button's title + aria-label are localized
+//     that would bring back the original regression where groups with
+//     existing sessions had no per-project create affordance. The header
+//     `+` is now the sole per-project create surface (the old full-width
+//     "New session in X" row below empty favorite groups was removed as
+//     redundant), so regressing emission would leave empty favorite
+//     groups with no CTA at all.
+//  2. The per-project sh-new button's title + aria-label are localized
 //     to Chinese ("在 X 中新建会话") — the top-right header `+` already
 //     carries Chinese copy elsewhere; keeping the per-project one English
-//     would be a mixed-locale inconsistency. The section-empty CTA span
-//     intentionally stays English because test/e2e/sidebar_projects.test.js
-//     asserts on that exact string (locked by
-//     TestDashboardJS_SectionHeaderHasNewButton).
+//     would be a mixed-locale inconsistency.
 func TestDashboardJS_R110P2_SectionHeaderNewButtonConsistency(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
@@ -2861,19 +2855,15 @@ func TestDashboardJS_R110P2_SectionHeaderNewButtonConsistency(t *testing.T) {
 		t.Error("sectionHeaderHtml must not wrap newBtn in a ternary — that would gate emission and regress the consistency fix")
 	}
 
-	// Invariant 2: both entry points call newSessionInProject with the
-	// same (name, node) argument shape. Diff in arguments would split the
-	// behaviour silently.
+	// The sh-new data-driven call site must still exist. After the removal
+	// of sectionEmptyHtml this is the only caller using this exact arg
+	// shape; if it disappears the header `+` button is broken.
 	shNewCallPattern := `newSessionInProject(this.dataset.name,this.dataset.node)`
-	occurrences := strings.Count(js, shNewCallPattern)
-	// Expect exactly 2 matches: one in sectionHeaderHtml's sh-new button,
-	// one in sectionEmptyHtml's section-empty button. More than 2 means a
-	// third call site (fine in principle, but deserves a review).
-	if occurrences < 2 {
-		t.Errorf("expected at least 2 `newSessionInProject(this.dataset.name,this.dataset.node)` call sites (sh-new + section-empty), got %d", occurrences)
+	if strings.Count(js, shNewCallPattern) < 1 {
+		t.Errorf("expected at least 1 `newSessionInProject(this.dataset.name,this.dataset.node)` call site (sh-new header button), got 0")
 	}
 
-	// Invariant 3: the sh-new button's title + aria-label are localized.
+	// Invariant 2: the sh-new button's title + aria-label are localized.
 	// Scope the check to the newBtn declaration to avoid false positives
 	// from the header `+` button's English "New Session" title at the
 	// top-right of the dashboard.
@@ -4302,5 +4292,615 @@ func TestDashboardHTML_R110P1_HdrBtnCoarsePointerSize(t *testing.T) {
 	}
 	if !strings.Contains(css, ".hdr-btn{width:36px;height:36px}") {
 		t.Error("`@media(max-width:480px)` `.hdr-btn{width:36px;height:36px}` override must stay — narrow desktop windows (mouse) get 36, not 44")
+	}
+}
+
+// TestDashboardJS_R110P2_CronRunNowButton pins the "Run Now" button added to
+// the cron card action row. Four invariants together guarantee the feature
+// cannot silently regress:
+//
+//  1. cronJobCardHtml emits a run button that calls cronTriggerNow, gated on
+//     !j.paused so the backend's ErrJobPaused 409 arm doesn't become the
+//     click's only feedback.
+//  2. The button is appended to the existing .cc-actions row (not rendered
+//     as a new row / floating FAB) — shares .cc-btn styling with edit/pause.
+//  3. cronTriggerNow handler exists and POSTs to /api/cron/trigger with the
+//     id in the JSON body, which mirrors cronPause/cronResume's payload
+//     shape. Auth header uses the same Bearer token path as other cron
+//     mutations.
+//  4. Error-path delegation goes through the localized helpers (showAPIError
+//     + showNetworkError) with the Chinese action label '立即执行定时任务',
+//     so a future untranslated toast regresses this test.
+func TestDashboardJS_R110P2_CronRunNowButton(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// Invariant 1: run button gated on !j.paused. We don't match the entire
+	// conditional string (prettier may reflow quotes/whitespace); we verify
+	// the gate + the handler it invokes together.
+	if !strings.Contains(js, "const runBtn = j.paused") {
+		t.Error("cronJobCardHtml must gate run button on j.paused — paused jobs can't be triggered, showing the button would mislead")
+	}
+	// The run-button inline onclick must call cronTriggerNow with the escJs'd
+	// job id. Pin the call-site literal to catch refactors that rename the
+	// handler or drop escJs (which would let a malicious id break out of
+	// the onclick attr).
+	if !strings.Contains(js, "cronTriggerNow(\\'' + escJs(j.id) + '\\')") {
+		t.Error("cronJobCardHtml run button must invoke cronTriggerNow(<escJs id>) — renaming this handler breaks the contract")
+	}
+
+	// Invariant 2: run button is placed inside .cc-actions — grep for the
+	// runBtn token being injected before the edit button in the actions row.
+	// Order is a UX call (positive actions before edit) so we pin it to
+	// prevent accidental reordering that drops the run button to the
+	// destructive-actions neighborhood.
+	ccActionsIdx := strings.Index(js, "'<div class=\"cc-actions\" onclick=\"event.stopPropagation()\">' +")
+	if ccActionsIdx < 0 {
+		t.Fatal("cronJobCardHtml missing .cc-actions wrapper — card structure changed unexpectedly")
+	}
+	actionsWindow := js[ccActionsIdx:min2(ccActionsIdx+400, len(js))]
+	runBtnIdx := strings.Index(actionsWindow, "runBtn +")
+	editBtnIdx := strings.Index(actionsWindow, "editCronJob(")
+	if runBtnIdx < 0 {
+		t.Error(".cc-actions must include `runBtn +` — run button dropped out of the action row")
+	}
+	if editBtnIdx < 0 {
+		t.Fatal("cronJobCardHtml missing edit button — card action row changed unexpectedly")
+	}
+	if runBtnIdx >= 0 && editBtnIdx >= 0 && runBtnIdx > editBtnIdx {
+		t.Error("run button must precede edit in .cc-actions (positive-actions-first convention)")
+	}
+
+	// Invariant 3: handler + endpoint + method + payload shape.
+	if !strings.Contains(js, "async function cronTriggerNow(id)") {
+		t.Fatal("dashboard.js missing cronTriggerNow(id) handler")
+	}
+	if !strings.Contains(js, "fetch('/api/cron/trigger', { method: 'POST'") {
+		t.Error("cronTriggerNow must POST to /api/cron/trigger — matches the backend route in dashboard.go")
+	}
+	if !strings.Contains(js, "body: JSON.stringify({ id })") {
+		t.Error("cronTriggerNow must send {id} JSON body — backend decodes into {ID string `json:\"id\"`}")
+	}
+	// Auth header must use the Bearer token the same way cronPause/Resume do.
+	triggerIdx := strings.Index(js, "async function cronTriggerNow(id)")
+	if triggerIdx >= 0 {
+		body := js[triggerIdx:min2(triggerIdx+1200, len(js))]
+		if !strings.Contains(body, "headers['Authorization'] = 'Bearer ' + t") {
+			t.Error("cronTriggerNow must set Bearer auth header — mutating cron jobs is a privileged action")
+		}
+	}
+
+	// Invariant 4: localized error surface. The raw 409 / 404 / 5xx error
+	// body is intentionally NOT used in the toast (that's localizeAPIError's
+	// job); we only need to confirm showAPIError is wired with the Chinese
+	// action label so a future untranslated path trips this test.
+	if !strings.Contains(js, "showAPIError('立即执行定时任务'") {
+		t.Error("cronTriggerNow must route 4xx/5xx through showAPIError with Chinese action '立即执行定时任务'")
+	}
+	if !strings.Contains(js, "showNetworkError('立即执行定时任务'") {
+		t.Error("cronTriggerNow must route network errors through showNetworkError with Chinese action '立即执行定时任务'")
+	}
+}
+
+// TestDashboardJS_FetchEventsConcurrencyGuard pins the R166 fix that added an
+// in-flight guard to fetchEvents. The 1 s setInterval driver plus the
+// on-demand `full` fetch (session switch / WS fallback / reconnect) could
+// otherwise stack multiple requests against /api/sessions/events while the
+// network was slow; responses could arrive out of order and produce a
+// reordered appendEvents. loadEarlierEvents already used a `_earlierLoading`
+// module flag for the same reason — this test makes sure the tail-poll
+// fetch grew a parallel `_fetchEventsInFlight` flag with the same shape,
+// the stale-selection bail-out after await, and the finally-release
+// contract.
+func TestDashboardJS_FetchEventsConcurrencyGuard(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// 1) Module-scoped declaration, mirroring the existing _earlierLoading
+	//    gate (both are let-initialised to false). Keeping them declared
+	//    the same way prevents a future reviewer from accidentally
+	//    promoting one to a const or dropping the initialiser.
+	if !strings.Contains(js, "let _fetchEventsInFlight = false;") {
+		t.Error("dashboard.js missing module-scoped `let _fetchEventsInFlight = false;` — fetchEvents concurrency guard requires a toggleable flag")
+	}
+
+	// 2) Locate fetchEvents' body once; subsequent assertions all scope to
+	//    this function so we don't false-positive on a distant source line.
+	startIdx := strings.Index(js, "async function fetchEvents(full) {")
+	if startIdx < 0 {
+		t.Fatal("dashboard.js missing `async function fetchEvents(full)` — structural anchor for the rest of the assertions")
+	}
+	// Scan forward until the matching close brace at the same depth. A
+	// naive forward-scan for `\n}` works here because fetchEvents is a
+	// top-level async function and the declaration is followed by the
+	// canonical `\n}\n\n// loadEarlierEvents` separator. We cap at 8 KiB
+	// so a future 10x growth of the function doesn't silently disable
+	// any of the below asserts.
+	endIdx := strings.Index(js[startIdx:], "\n}\n")
+	if endIdx < 0 || endIdx > 8192 {
+		t.Fatalf("could not locate fetchEvents end brace within 8 KiB — body scan failed (endIdx=%d)", endIdx)
+	}
+	body := js[startIdx : startIdx+endIdx+2]
+
+	// 3) Early bail-out: fetchEvents must return when a prior invocation is
+	//    still in flight. The precise string `if (_fetchEventsInFlight) return;`
+	//    pins the gate so a refactor that inverts the flag or routes it
+	//    through a helper will trip this test.
+	if !strings.Contains(body, "if (_fetchEventsInFlight) return;") {
+		t.Error("fetchEvents must early-return when _fetchEventsInFlight is true — guards against overlapping polls")
+	}
+
+	// 4) Dispatch-time capture of selectedKey/selectedNode. appendEvents
+	//    on the wrong session is the concrete harm we're preventing, so
+	//    the snapshot must exist before the awaited fetch().
+	for _, needed := range []string{
+		"const dispatchKey = selectedKey;",
+		"const dispatchNode = selectedNode;",
+	} {
+		if !strings.Contains(body, needed) {
+			t.Errorf("fetchEvents missing pre-await selection snapshot %q — stale fetches could graft onto the wrong session", needed)
+		}
+	}
+
+	// 5) URL construction must use the snapshot, not the live `selectedKey`.
+	//    If a refactor loses this invariant, a mid-flight switch would hit
+	//    `/api/sessions/events?key=<new>` with the old `after` cursor,
+	//    showing seemingly impossible backlog gaps.
+	for _, needed := range []string{
+		"encodeURIComponent(dispatchKey)",
+		"encodeURIComponent(dispatchNode)",
+	} {
+		if !strings.Contains(body, needed) {
+			t.Errorf("fetchEvents URL must encode the dispatch-time snapshot %q, not live selectedKey/selectedNode", needed)
+		}
+	}
+
+	// 6) Stale-response bail-out after await. The snapshot captured in
+	//    step 4 must be re-checked once the fetch resolves, because
+	//    selectedKey could have flipped during the suspend.
+	if !strings.Contains(body, "if (selectedKey !== dispatchKey || selectedNode !== dispatchNode) return;") {
+		t.Error("fetchEvents must drop stale responses after await — prevents appendEvents from targeting the wrong session")
+	}
+
+	// 7) finally-block must always release the flag. Without finally,
+	//    a throw from renderEvents / appendEvents (e.g. malformed event
+	//    payload) would leave the flag stuck at true and silently kill
+	//    future polls for the life of the page.
+	if !strings.Contains(body, "_fetchEventsInFlight = false;") {
+		t.Error("fetchEvents must reset _fetchEventsInFlight to false — otherwise one throw kills all subsequent polls")
+	}
+	if !strings.Contains(body, "} finally {") {
+		t.Error("fetchEvents must release the guard inside a `finally` block — a plain try/catch would leak the gate on thrown errors")
+	}
+}
+
+// TestDashboardJS_R167_AgentPicker locks the Round 167 R110-P3 agent-picker
+// contract. The feature lets operators pick an agent (e.g. sonnet / haiku /
+// a custom config.yaml entry) when creating a new dashboard session, and
+// rewrites the key schema so the server-side buildSessionOpts correctly
+// resolves AgentOpts from parts[3].
+//
+// Invariants:
+//  1. renderAgentPicker helper exists, emits a <select id="new-agent"> when
+//     availableAgents.length > 1, and collapses to an empty string otherwise.
+//  2. getSelectedAgent reads the <select>, defaults to "general", and
+//     persists the pick to localStorage under `naozhi_last_agent`.
+//  3. Three session-creation entry points call renderAgentPicker: the
+//     no-projects modal in createNewSession, the palette in
+//     openProjectPalette, and the Custom Workspace modal in pickPaletteCustom.
+//  4. buildDashboardSessionKey emits 4-segment keys with agentID as parts[3]
+//     (not projectName), and sanitizeKeySlug normalizes project/folder names.
+//  5. doCreateInProject and doCreateSession construct keys via the new
+//     helper — the legacy inline `'dashboard:direct:' + ts + ':' + proj`
+//     form must not resurface.
+//  6. keyTailDisplay provides a safe fallback for the sidebar/main-header
+//     displayName so the schema change doesn't regress the empty-fallback
+//     UI to showing raw agentIDs ("general") as session labels.
+func TestDashboardJS_R167_AgentPicker(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// Invariant 1: renderAgentPicker helper.
+	for _, need := range []string{
+		"function renderAgentPicker()",
+		"availableAgents.length <= 1",
+		`id="new-agent"`,
+		`localStorage.getItem('naozhi_last_agent')`,
+	} {
+		if !strings.Contains(js, need) {
+			t.Errorf("renderAgentPicker invariant missing: %q", need)
+		}
+	}
+
+	// Invariant 2: getSelectedAgent helper.
+	for _, need := range []string{
+		"function getSelectedAgent()",
+		`document.getElementById('new-agent')`,
+		`localStorage.setItem('naozhi_last_agent', v)`,
+		"return v || 'general';",
+	} {
+		if !strings.Contains(js, need) {
+			t.Errorf("getSelectedAgent invariant missing: %q", need)
+		}
+	}
+
+	// Invariant 3: three call sites. Tolerate whitespace shuffles by
+	// counting occurrences rather than matching exact formatting.
+	if c := strings.Count(js, "renderAgentPicker()"); c < 4 {
+		// 1 definition + 3 call sites = 4 minimum occurrences.
+		t.Errorf("renderAgentPicker() must have at least 3 call sites (found %d total incl. definition)", c)
+	}
+
+	// Invariant 4: key builder.
+	for _, need := range []string{
+		"function sanitizeKeySlug(s)",
+		"function buildDashboardSessionKey(timestamp, projectOrFolder, agentID)",
+		"'dashboard:direct:' + timestamp + '-' + slug + ':' + agent",
+	} {
+		if !strings.Contains(js, need) {
+			t.Errorf("key builder invariant missing: %q", need)
+		}
+	}
+
+	// Invariant 5: legacy inline key form must not resurface in the
+	// creation helpers. The `+ projectName` / `+ folderName` tails are
+	// the precise shape we migrated away from. Scratch sessions
+	// (dashboard_session.go:860) use a different Go-side construction
+	// that does not appear in dashboard.js, so no server-side regression.
+	forbidden := []string{
+		"'dashboard:direct:' + ts + ':' + projectName",
+		"'dashboard:direct:' + ts + ':' + folderName",
+	}
+	for _, bad := range forbidden {
+		if strings.Contains(js, bad) {
+			t.Errorf("legacy inline key form resurfaced: %q — route through buildDashboardSessionKey instead", bad)
+		}
+	}
+
+	// Both creation helpers must use the new helper.
+	if c := strings.Count(js, "buildDashboardSessionKey("); c < 2 {
+		t.Errorf("buildDashboardSessionKey must be called from both doCreateInProject and doCreateSession (found %d call sites)", c)
+	}
+
+	// Invariant 6: displayName fallback defers to keyTailDisplay rather
+	// than the legacy `keyParts[keyParts.length - 1]` tail-read, which
+	// under the new schema would surface agentIDs ("general") as the
+	// visible session label.
+	if !strings.Contains(js, "function keyTailDisplay(keyParts)") {
+		t.Error("keyTailDisplay helper missing — displayName fallbacks would regress to raw agentID under Round 167 schema")
+	}
+	// renderMainShell + downloadSessionMarkdown both migrated.
+	if c := strings.Count(js, "keyTailDisplay(keyParts)"); c < 2 {
+		t.Errorf("keyTailDisplay must be used at both displayName fallback sites (renderMainShell + Markdown export) (found %d)", c)
+	}
+	// Regex extraction anchors the ts prefix (YYYY-MM-DD-…) so the
+	// trailing slug survives intact. Prettier may escape the shape; use
+	// the raw character class as the anchor.
+	if !strings.Contains(js, `^\d{4}-\d{2}-\d{2}-\d+-\d+-`) {
+		t.Error("keyTailDisplay must anchor chatID prefix to `^\\d{4}-\\d{2}-\\d{2}-\\d+-\\d+-` so trailing slug is returned in Round 167 keys")
+	}
+}
+
+// TestDashboardJS_R167_PendingAgentFromKey locks that fetchSessions's pending
+// session merge reads the agent off the key tail instead of hardcoding
+// "general". Without this, every pending card would show the wrong agent
+// chip regardless of the palette choice, breaking visual feedback on the
+// agent picker.
+func TestDashboardJS_R167_PendingAgentFromKey(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// Narrow the search window to fetchSessions's pending-merge block so
+	// unrelated "agent: 'general'" occurrences elsewhere (e.g. scratch
+	// state defaults) don't trigger false failures.
+	start := strings.Index(js, "// Merge pending dashboard sessions into data")
+	if start < 0 {
+		t.Fatal("fetchSessions pending-merge block missing — anchor comment moved?")
+	}
+	end := start + 2000
+	if end > len(js) {
+		end = len(js)
+	}
+	window := js[start:end]
+
+	if !strings.Contains(window, "const pendingAgent = parts.length >= 4 && parts[3] ? parts[3] : 'general';") {
+		t.Error("pending-merge block must derive agent from the key tail (parts[3]) under the Round 167 schema")
+	}
+	// The legacy hardcoded 'general' in the same block is gone.
+	if strings.Contains(window, "agent: 'general',") {
+		t.Error("legacy hardcoded agent: 'general' in pending-merge block must be replaced by pendingAgent lookup")
+	}
+}
+
+// TestDashboardJS_R110P1_LongPressContextMenu locks the MVP of the mobile
+// long-press context menu. The hover-only ×/✎ session-card buttons are
+// invisible on touch devices, so without a discoverable alternative,
+// operators have no way to rename or delete a session on mobile other
+// than the swipe-to-delete gesture (which also isn't obvious). This
+// contract captures the shape of the long-press + right-click affordance
+// so future refactors don't silently regress it.
+//
+// Invariants:
+//  1. Long-press constants are declared at module scope with values that
+//     match the design (500ms trigger, >=8px movement cancels). These
+//     constants are the contract between swipe-to-delete and long-press
+//     — swipe's own 5px tracking gate and the 8px long-press cancel gate
+//     must stay in the right order so a deliberate swipe always wins over
+//     an accidental long-press.
+//  2. showSessionContextMenu + closeContextMenu + openSessionContextMenu
+//     helpers exist so the menu has a single entry point reachable from
+//     both touchstart's long-press path and the contextmenu right-click
+//     path.
+//  3. initSwipeDelete wires a 500ms setTimeout on touchstart, cancels
+//     it on touchmove when movement passes the threshold, and also
+//     cancels on touchend + touchcancel — otherwise the menu would fire
+//     after the user has already lifted their finger or the browser has
+//     reclaimed the gesture.
+//  4. The click bubble-up handler swallows the post-long-press click so
+//     selectSession does not also fire under the menu. Capture phase is
+//     critical — the onclick attribute fires during bubble, so capture
+//     is the only sane spot to stop it.
+//  5. Menu items array shape (label / icon / action / danger) is stable
+//     so future extensions do not accidentally rename keys. The three
+//     MVP items (重命名 / 复制 key / 删除) are present with their
+//     respective actions wired to renameSession / copyStringToClipboard
+//     / dismissSession.
+func TestDashboardJS_R110P1_LongPressContextMenu(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// Invariant 1: module-level constants with correct values. 500ms
+	// lines up with Android/iOS native defaults; 8px > swipe's 5px so
+	// a deliberate swipe always kills long-press before it fires.
+	if !strings.Contains(js, "const LONG_PRESS_MS = 500;") {
+		t.Error("LONG_PRESS_MS must be 500ms (matches native long-press conventions)")
+	}
+	if !strings.Contains(js, "const LONG_PRESS_MOVE_CANCEL_PX = 8;") {
+		t.Error("LONG_PRESS_MOVE_CANCEL_PX must be 8 so swipe's 5px gate doesn't accidentally cancel long-press")
+	}
+	if !strings.Contains(js, "let _longPressTimer = null;") {
+		t.Error("_longPressTimer must be declared at module scope so touchstart/move/end share one handle")
+	}
+	if !strings.Contains(js, "let _longPressFired = false;") {
+		t.Error("_longPressFired module flag must exist so the click-capture handler can distinguish post-long-press clicks")
+	}
+
+	// Invariant 2: three helpers exist so the menu has one entry
+	// point shared between long-press and right-click.
+	for _, need := range []string{
+		"function closeContextMenu()",
+		"function showSessionContextMenu(x, y, items)",
+		"function openSessionContextMenu(card, x, y)",
+		"function copyStringToClipboard(s)",
+	} {
+		if !strings.Contains(js, need) {
+			t.Errorf("helper missing: %q", need)
+		}
+	}
+
+	// Invariant 3: initSwipeDelete wires the timer + cancel paths.
+	// Search within initSwipeDelete's body so other long-press uses
+	// (if any added later) don't pollute the signal.
+	idxInit := strings.Index(js, "function initSwipeDelete() {")
+	if idxInit < 0 {
+		t.Fatal("initSwipeDelete function missing")
+	}
+	// Conservative window — function body is ~80 lines including
+	// long-press additions; 6KiB covers it with margin.
+	end := idxInit + 6000
+	if end > len(js) {
+		end = len(js)
+	}
+	body := js[idxInit:end]
+
+	if !strings.Contains(body, "_longPressTimer = setTimeout(") {
+		t.Error("initSwipeDelete must schedule the long-press via setTimeout on touchstart")
+	}
+	if !strings.Contains(body, "LONG_PRESS_MS") {
+		t.Error("setTimeout must reference LONG_PRESS_MS (not a magic number literal)")
+	}
+	if !strings.Contains(body, "LONG_PRESS_MOVE_CANCEL_PX") {
+		t.Error("touchmove must reference LONG_PRESS_MOVE_CANCEL_PX to cancel long-press on directional intent")
+	}
+	if !strings.Contains(body, "list.addEventListener('touchcancel'") {
+		t.Error("touchcancel handler missing — an interrupted gesture would leak _longPressTimer without it")
+	}
+	if !strings.Contains(body, "openSessionContextMenu(target, x, y);") {
+		t.Error("long-press timer callback must invoke openSessionContextMenu")
+	}
+	// Cancel path must live in a reusable helper so every exit point
+	// (timer fire / touchend / touchmove over threshold / touchcancel)
+	// routes through the same cleanup.
+	if !strings.Contains(body, "const cancelLongPress = () =>") {
+		t.Error("cancelLongPress closure must exist so all exit paths share one cleanup routine")
+	}
+
+	// Invariant 4: capture-phase click handler swallows the post-long-press click.
+	if !strings.Contains(body, "list.addEventListener('click', e => {") {
+		t.Error("initSwipeDelete must attach a click listener to catch post-long-press bubble")
+	}
+	if !strings.Contains(body, "if (_longPressFired) {") {
+		t.Error("click handler must gate on _longPressFired so short taps still reach selectSession")
+	}
+	// The third argument `true` = capture phase — required because
+	// the onclick attribute on .session-card fires during bubble.
+	if !strings.Contains(body, "e.stopPropagation();") {
+		t.Error("post-long-press click must call stopPropagation to keep selectSession from firing")
+	}
+	// contextmenu for desktop right-click parity.
+	if !strings.Contains(body, "list.addEventListener('contextmenu'") {
+		t.Error("initSwipeDelete must also wire a contextmenu listener for desktop right-click")
+	}
+
+	// Invariant 5: menu item shape + Chinese labels for the three MVP actions.
+	idxOpen := strings.Index(js, "function openSessionContextMenu(card, x, y)")
+	if idxOpen < 0 {
+		t.Fatal("openSessionContextMenu function missing")
+	}
+	endOpen := idxOpen + 4000
+	if endOpen > len(js) {
+		endOpen = len(js)
+	}
+	openBody := js[idxOpen:endOpen]
+	for _, need := range []string{
+		"label: '重命名'",
+		"label: '复制 key'",
+		"label: '删除'",
+		"danger: true,",
+		"renameSession();",
+		"copyStringToClipboard(key)",
+		"dismissSession(key, node);",
+	} {
+		// Labels may be prettier-escaped to \uXXXX in the final bundle;
+		// Chinese labels embedded in a string literal stay raw UTF-8 in
+		// modern Go embed, so the raw form is what lands in the embedded
+		// file content. Keep the assertion simple.
+		if !strings.Contains(openBody, need) {
+			t.Errorf("openSessionContextMenu body missing item or action: %q", need)
+		}
+	}
+}
+
+// TestDashboardHTML_R110P1_ContextMenuStyles locks the CSS hooks that the JS
+// side relies on for the long-press context menu. Missing any of these
+// would leave the menu unstyled (unreadable text over transparent
+// background) or unclickable (wrong z-index stacking under modal-overlay).
+func TestDashboardHTML_R110P1_ContextMenuStyles(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(data)
+
+	// All six CSS selectors are emitted by showSessionContextMenu;
+	// absence of any single one would cause a visual regression.
+	for _, need := range []string{
+		".ctx-menu-overlay{",
+		".ctx-menu{",
+		".ctx-menu-item{",
+		".ctx-menu-item.danger{",
+		".session-card.long-pressing{",
+	} {
+		if !strings.Contains(html, need) {
+			t.Errorf("CSS hook missing: %q", need)
+		}
+	}
+
+	// z-index contract: menu (211) above overlay (210), both above
+	// .modal-overlay (200). If the menu drops below modal-overlay a
+	// stray confirmDialog would hide it.
+	if !strings.Contains(html, ".ctx-menu-overlay{position:fixed;top:0;left:0;right:0;bottom:0;background:transparent;z-index:210}") {
+		t.Error(".ctx-menu-overlay must have z-index:210 to sit above modal-overlay (z-index:200)")
+	}
+	if !strings.Contains(html, "z-index:211") {
+		t.Error(".ctx-menu must have z-index:211 so it renders above its overlay")
+	}
+
+	// 44px min-height on items for WCAG 2.5.5 AAA touch target size —
+	// same contract we enforced on .hdr-btn in the coarse pointer rule.
+	if !strings.Contains(html, "min-height:44px") {
+		t.Error(".ctx-menu-item min-height must remain 44px for touch target size parity with .hdr-btn")
+	}
+}
+
+// TestDashboardJS_PasteImageRoutesToUpload pins the paste-handler image
+// branch. Background: when the user pastes a screenshot (Cmd/Ctrl+V,
+// or "copy image" from another app) into #msg-input, the clipboard
+// typically carries ONLY an image File — no text/plain. The legacy
+// paste handler short-circuited on `if (!text) return;` so:
+//
+//  1. the image never reached handleFiles / pendingFiles,
+//  2. the browser's default paste embedded the image as <img src="data:...">
+//     inside the contenteditable,
+//  3. getMsgValue(input).trim() (innerText-based) returned ” for the
+//     image-only paste, so sendMessage dispatched neither text nor
+//     file_ids and Claude never saw the image.
+//
+// The fix routes image clipboard payloads to handleFiles BEFORE the text
+// branch, mirroring the paperclip / drag-drop paths. This test pins the
+// contract so a future "simplify paste handler" refactor can't silently
+// reintroduce the silent-drop regression.
+func TestDashboardJS_PasteImageRoutesToUpload(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// The image short-circuit must precede the text-plain branch — otherwise
+	// a paste with BOTH text and image (rare but valid: "copy" from a rich
+	// editor) would take the text path and silently drop the image.
+	imgIdx := strings.Index(js, "imageFiles.length > 0")
+	textIdx := strings.Index(js, "const text = cd.getData('text/plain');")
+	if imgIdx < 0 {
+		t.Fatal("paste handler missing imageFiles branch — image clipboard payloads would be dropped silently")
+	}
+	if textIdx < 0 {
+		t.Fatal("paste handler missing text/plain branch — regression check cannot compare ordering")
+	}
+	if imgIdx > textIdx {
+		t.Error("paste handler must check imageFiles BEFORE text/plain; reversing the order lets an image+text paste fall into the text branch and lose the image")
+	}
+
+	// Image branch must call handleFiles (the same entry point as the
+	// paperclip button + drag-drop) so pendingFiles / upload / file_ids
+	// all stay on one code path. Bypassing handleFiles would skip the
+	// 40 MB cap, MIME filter, normalizeImage re-encode, and the 10-file
+	// ceiling — all of which are enforced inside handleFiles.
+	if !strings.Contains(js, "handleFiles(imageFiles)") {
+		t.Error("paste image branch must route through handleFiles so pendingFiles / upload / file_ids stays on one code path")
+	}
+
+	// preventDefault on the image branch is mandatory: without it the
+	// browser's default paste would also embed <img src=\"data:...\"> into
+	// the contenteditable, producing a duplicate render (one in the input
+	// preview row, another as ghost content the user can't easily remove).
+	pasteIdx := strings.Index(js, "document.addEventListener('paste'")
+	if pasteIdx < 0 {
+		t.Fatal("paste handler not registered on document — image-paste bug cannot be fixed without this listener")
+	}
+	// Search within a bounded window to keep the assertion local.
+	window := js[pasteIdx:min2(pasteIdx+2000, len(js))]
+	if !strings.Contains(window, "e.preventDefault();\n    if (typeof handleFiles") {
+		// Looser check: just ensure preventDefault appears before the
+		// handleFiles call so the default embed is suppressed.
+		pdIdx := strings.Index(window, "e.preventDefault()")
+		hfIdx := strings.Index(window, "handleFiles(imageFiles)")
+		if pdIdx < 0 || hfIdx < 0 || pdIdx > hfIdx {
+			t.Error("image paste branch must call e.preventDefault() BEFORE handleFiles so browser doesn't also embed <img> into contenteditable")
+		}
+	}
+
+	// Both cd.files and cd.items paths must be present: Chromium/Safari
+	// expose the image via cd.files, but some legacy Firefox versions
+	// surface it only via cd.items[i].getAsFile(). Supporting both keeps
+	// the fix cross-browser without a user-agent sniff.
+	if !strings.Contains(js, "cd.files") {
+		t.Error("paste handler must check cd.files for images — Chromium/Safari deliver screenshot paste here")
+	}
+	if !strings.Contains(js, "cd.items") || !strings.Contains(js, "getAsFile()") {
+		t.Error("paste handler must fall back to cd.items.getAsFile() — older Firefox paths only expose images there")
 	}
 }

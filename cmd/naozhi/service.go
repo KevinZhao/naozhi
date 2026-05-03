@@ -1,9 +1,11 @@
 package main
 
 import (
+	"errors"
 	"flag"
 	"fmt"
 	"html"
+	iofs "io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -78,7 +80,7 @@ func runInstall(args []string) {
 	if err != nil {
 		fatalf("resolve config path: %v", err)
 	}
-	if _, err := os.Stat(absConfig); os.IsNotExist(err) {
+	if _, err := os.Stat(absConfig); errors.Is(err, iofs.ErrNotExist) {
 		fatalf("config not found: %s\nRun 'naozhi setup' first to generate config.", absConfig)
 	}
 
@@ -401,7 +403,7 @@ func uninstallSystemd() {
 	_ = run("systemctl", "stop", "naozhi")
 	_ = run("systemctl", "disable", "naozhi")
 
-	if err := os.Remove(systemdUnitPath); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(systemdUnitPath); err != nil && !errors.Is(err, iofs.ErrNotExist) {
 		fatalf("remove unit file: %v", err)
 	}
 
@@ -483,7 +485,7 @@ func uninstallLaunchd() {
 		_ = run("launchctl", "unload", plistPath)
 	}
 
-	if err := os.Remove(plistPath); err != nil && !os.IsNotExist(err) {
+	if err := os.Remove(plistPath); err != nil && !errors.Is(err, iofs.ErrNotExist) {
 		fatalf("remove plist: %v", err)
 	}
 

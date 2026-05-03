@@ -44,6 +44,27 @@ var ErrMaxExemptSessions = errors.New("max exempt sessions reached")
 // should stop on this sentinel.
 var ErrNoCLIWrapper = errors.New("no CLI wrapper configured")
 
+// exemptKeyPrefixes lists the session-key namespaces that are exempt from
+// TTL expiry, LRU eviction, and the active-process counter. Centralising
+// the list keeps the policy one line away from anyone adding a new
+// long-lived session type (e.g. a future "planner:" family) — previously
+// the predicate was inlined at the single construction site while three
+// separate skip branches read `s.exempt`. Keep the list sorted for grep.
+var exemptKeyPrefixes = []string{"cron:", "project:"}
+
+// isExemptKey reports whether key belongs to an exempt namespace. Callers
+// that already have a ManagedSession should prefer reading s.exempt —
+// this helper exists for the construction path and for external callers
+// that know the key but not the session.
+func isExemptKey(key string) bool {
+	for _, prefix := range exemptKeyPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 // Router defaults applied by NewRouter when the corresponding RouterConfig
 // field is zero. Exported so other packages (tests, config validation, CLI
 // flag defaults) can reference the single source of truth instead of
@@ -630,7 +651,7 @@ func NewRouter(cfg RouterConfig) *Router {
 				workspace:      entry.Workspace,
 				totalCost:      entry.TotalCost,
 				prevSessionIDs: entry.PrevSessionIDs,
-				exempt:         strings.HasPrefix(key, "project:") || strings.HasPrefix(key, "cron:"),
+				exempt:         isExemptKey(key),
 			}
 			s.SetBackend(restoreBackendID)
 			s.SetCLIName(cliName)
@@ -1080,8 +1101,8 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// Record the backend + wrapper-provided CLI identity so the
 		// dashboard snapshot reflects the actual backend post-reconnect,
 		// even for sessions restored from a pre-multi-backend store.
-		// Writes go through atomic.Value so the lock-free Snapshot() in
-		// ListSessions remains race-free.
+		// Writes go through atomic.Pointer[string] so the lock-free Snapshot()
+		// in ListSessions remains race-free.
 		if recBackendID != "" {
 			sess.SetBackend(recBackendID)
 		}
@@ -1738,7 +1759,7 @@ func (r *Router) evictOldest() bool {
 		return false
 	}
 	slog.Info("evicting oldest session", "key", oldest.key, "idle", time.Since(oldest.GetLastActive()))
-	oldest.deathReason.Store("evicted")
+	storeStringAtomic(&oldest.deathReason, "evicted")
 	// Keep oldest.process non-nil so concurrent holders don't get nil-panic.
 	// After Close(), Alive() returns false; countActive() below recounts correctly.
 	//
@@ -1955,22 +1976,28 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	}
 	// Copy atomic fields (backend / CLI name+ver / user label / death reason /
 	// lastActive / lastPrompt / lastActivity / sessionID). Each field is an
-	// atomic.Value so plain Load/Store round-trips are race-safe; we hold
-	// r.mu which blocks concurrent writers of everything except the Send hot
-	// path (lastPrompt / lastActivity), which are idempotent on copy.
+	// atomic.Pointer[string] so plain Load/Store round-trips are race-safe;
+	// we hold r.mu which blocks concurrent writers of everything except the
+	// Send hot path (lastPrompt / lastActivity), which are idempotent on copy.
 	fresh.SetBackend(old.Backend())
 	fresh.SetCLIName(old.CLIName())
 	fresh.SetCLIVersion(old.CLIVersion())
 	fresh.SetUserLabel(old.UserLabel())
-	if dr, ok := old.deathReason.Load().(string); ok && dr != "" {
-		fresh.deathReason.Store(dr)
+	if dr := loadStringAtomic(&old.deathReason); dr != "" {
+		storeStringAtomic(&fresh.deathReason, dr)
 	}
 	fresh.lastActive.Store(old.lastActive.Load())
-	if v := old.lastPrompt.Load(); v != nil {
-		fresh.lastPrompt.Store(v)
+	// Go through storeStringAtomic so each write allocates a fresh *string —
+	// direct `.Store(lp)` would share the underlying pointer with `old` and
+	// diverge from the rest of the codebase's "always helper" convention.
+	// Currently safe because strings are immutable, but keeping the invariant
+	// uniform avoids confusion if a future refactor ever makes the pointee
+	// mutable.
+	if lp := loadStringAtomic(&old.lastPrompt); lp != "" {
+		storeStringAtomic(&fresh.lastPrompt, lp)
 	}
-	if v := old.lastActivity.Load(); v != nil {
-		fresh.lastActivity.Store(v)
+	if la := loadStringAtomic(&old.lastActivity); la != "" {
+		storeStringAtomic(&fresh.lastActivity, la)
 	}
 	fresh.setSessionID(old.getSessionID())
 
@@ -2110,7 +2137,7 @@ func (r *Router) Cleanup() {
 			if age := now.Sub(c.lastActive); age > stuckThreshold {
 				slog.Warn("stuck running session detected, force killing",
 					"key", c.key, "running_for", age, "threshold", stuckThreshold)
-				c.s.deathReason.Store("stuck_running")
+				storeStringAtomic(&c.s.deathReason, "stuck_running")
 				stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc})
 			}
 			continue
@@ -2120,7 +2147,7 @@ func (r *Router) Cleanup() {
 		if pid := c.proc.PID(); pid > 0 && !osutil.PidAlive(pid) {
 			slog.Warn("CLI process gone but session still alive, force killing",
 				"key", c.key, "pid", pid)
-			c.s.deathReason.Store("pid_gone")
+			storeStringAtomic(&c.s.deathReason, "pid_gone")
 			stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc})
 			continue
 		}
@@ -2128,7 +2155,7 @@ func (r *Router) Cleanup() {
 		// Normal idle TTL expiry.
 		if now.Sub(c.lastActive) > ttl {
 			slog.Info("session expired", "key", c.key, "idle", now.Sub(c.lastActive))
-			c.s.deathReason.Store("idle_timeout")
+			storeStringAtomic(&c.s.deathReason, "idle_timeout")
 			expired = append(expired, expiredEntry{c.s, c.key, c.proc})
 		}
 	}
@@ -2911,7 +2938,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 	s.SetCLIVersion(r.cliVersionDefault())
 	s.setSessionID(sessionID)
 	if lastPrompt != "" {
-		s.lastPrompt.Store(lastPrompt)
+		storeStringAtomic(&s.lastPrompt, lastPrompt)
 	}
 	r.trackSessionID(sessionID)
 	if sessionID != "" {
@@ -2944,7 +2971,7 @@ func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
 				existing.workspace = workspace
 			}
 			if lastPrompt != "" {
-				existing.lastPrompt.Store(lastPrompt)
+				storeStringAtomic(&existing.lastPrompt, lastPrompt)
 			}
 			r.storeDirty = true
 			r.storeGen.Add(1)
@@ -2961,7 +2988,7 @@ func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
 	s.SetCLIName(r.cliNameDefault())
 	s.SetCLIVersion(r.cliVersionDefault())
 	if lastPrompt != "" {
-		s.lastPrompt.Store(lastPrompt)
+		storeStringAtomic(&s.lastPrompt, lastPrompt)
 	}
 	s.lastActive.Store(time.Now().UnixNano())
 	r.attachHistorySource(s)

@@ -80,8 +80,8 @@ func TestLogSystemEvent_MultipleCallsAllLand(t *testing.T) {
 func TestLogSystemEvent_DoesNotOverwriteLivePrompt(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
-	s.lastPrompt.Store("live user message")
-	s.lastActivity.Store("live tool")
+	storeStringAtomic(&s.lastPrompt, "live user message")
+	storeStringAtomic(&s.lastActivity, "live tool")
 
 	s.LogSystemEvent("retry failed")
 

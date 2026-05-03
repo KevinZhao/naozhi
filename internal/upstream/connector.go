@@ -194,12 +194,38 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	return true, c.handleConn(ctx, conn)
 }
 
+// pingOnce runs a single WebSocket-level ping under writeMu and closes the
+// conn on any failure. Returns true if the ping succeeded (caller keeps the
+// ticker running), false if the conn was torn down (caller returns).
+// Extracted from the ping-loop body so defer writeMu.Unlock() covers every
+// exit path — the inline form had three separate manual Unlock sites that
+// were easy to miss when adding a new failure branch.
+func pingOnce(conn *websocket.Conn, writeMu *sync.Mutex) bool {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		_ = conn.Close()
+		return false
+	}
+	if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+		_ = conn.Close()
+		return false
+	}
+	return true
+}
+
 func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error {
 	var writeMu sync.Mutex
 	writeJSON := func(v any) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+		// If SetWriteDeadline fails (conn half-closed / already closed),
+		// skip WriteJSON to avoid a deadline-less write that can block
+		// until TCP keepalive expires. Return the underlying error so the
+		// caller reconnects instead of silently hanging.
+		if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			return fmt.Errorf("set write deadline: %w", err)
+		}
 		return conn.WriteJSON(v)
 	}
 
@@ -265,15 +291,23 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 		for {
 			select {
 			case <-ticker.C:
-				writeMu.Lock()
-				conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
-				err := conn.WriteMessage(websocket.PingMessage, nil)
-				writeMu.Unlock()
-				if err != nil {
-					// Force the outer ReadJSON to unblock immediately so the
-					// connection rebuilds instead of waiting out the 90s
-					// ReadDeadline for TCP to surface the dead peer.
-					_ = conn.Close()
+				// Hold writeMu across the Close on failure so conn.Close does
+				// not race with a concurrent writeJSON that has just entered
+				// the critical section. gorilla/websocket requires at most
+				// one writer at a time; closing under the lock serializes us
+				// against WriteJSON. Any writeJSON that then acquires the
+				// lock will see SetWriteDeadline fail (closed conn) and
+				// return its error cleanly. Force-close is what breaks the
+				// outer ReadJSON out of its 90s pong wait when the peer is
+				// dead — we want that to happen even if no Write failed
+				// yet, so emit the Close without unlocking first.
+				//
+				// pingOnce encapsulates the "lock → try write → close on
+				// failure" triad in a single scope so a single `defer
+				// writeMu.Unlock()` covers every exit. The boolean return
+				// lets the outer loop exit without keeping the lock live
+				// across the return.
+				if !pingOnce(conn, &writeMu) {
 					return
 				}
 			case <-connCtx.Done():

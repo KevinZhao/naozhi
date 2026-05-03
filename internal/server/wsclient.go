@@ -103,17 +103,21 @@ func (c *wsClient) readPump() {
 	}()
 
 	c.conn.SetReadLimit(wsMaxMessageSize)
-	c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	// Unauthenticated connections get the shorter auth window; authenticated
+	// ones get the full pong window so the PongHandler keeps them alive.
+	// Single write avoids the earlier "set wsPongWait then immediately
+	// overwrite with wsAuthTimeout" dead-code pattern.
+	if c.authenticated.Load() {
+		c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
+	} else {
+		c.conn.SetReadDeadline(time.Now().Add(wsAuthTimeout))
+	}
 	c.conn.SetPongHandler(func(string) error {
 		if c.authenticated.Load() {
 			c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
 		}
 		return nil
 	})
-
-	if !c.authenticated.Load() {
-		c.conn.SetReadDeadline(time.Now().Add(wsAuthTimeout))
-	}
 
 	for {
 		_, data, err := c.conn.ReadMessage()
@@ -200,14 +204,22 @@ func (c *wsClient) writePump() {
 	for {
 		select {
 		case message := <-c.send:
-			c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+			// If SetWriteDeadline fails (conn closed), fall through to return
+			// so the defer closes/unregisters. Without a deadline, WriteMessage
+			// could block on a half-closed socket until TCP keepalive expires,
+			// leaving the hub broadcasting to a zombie client.
+			if err := c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait)); err != nil {
+				return
+			}
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				return
 			}
 		case <-c.done:
 			return
 		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
+			if err := c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait)); err != nil {
+				return
+			}
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}

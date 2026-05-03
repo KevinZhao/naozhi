@@ -138,11 +138,16 @@ async function fetchSessions() {
       for (const key of pendingKeys) {
         if (!backendKeys.has(key)) {
           const parts = key.split(':');
+          // Read the agentID off the key tail so the sidebar's agent chip
+          // reflects the user's palette pick rather than always "general".
+          // Legacy 3-segment keys (shouldn't exist post-Round 167 but be
+          // defensive) degrade to "general".
+          const pendingAgent = parts.length >= 4 && parts[3] ? parts[3] : 'general';
           data.sessions.push({
             key: key,
             state: 'new',
             platform: parts[0] || 'dashboard',
-            agent: 'general',
+            agent: pendingAgent,
             workspace: sessionWorkspaces[key],
             last_active: 0,
             last_prompt: '',
@@ -383,9 +388,11 @@ function renderSidebar(data) {
         if (collapsedProjects.has(k)) return;
         if (g.items.length > 0) {
           html += g.items.map(sessionCardHtml).join('');
-        } else {
-          html += sectionEmptyHtml(p);
         }
+        // Empty favorite groups intentionally render no row below the header:
+        // the header's `sh-new` `+` button already provides the create
+        // affordance, so a duplicate "New session in X" CTA would just add
+        // visual noise.
       });
       if (ungrouped.length > 0) {
         // Final catch-all: sessions with no project name AND no workspace
@@ -630,13 +637,10 @@ function sectionHeaderHtml(p) {
     ghBtn = '<button type="button" class="sh-btn github-on" data-url="' + escAttr(url) + '" title="在 GitHub 打开仓库：' + escAttr(url) + '" aria-label="在 GitHub 打开仓库 ' + escAttr(p.name) + '" onclick="event.stopPropagation();showGitRemote(this.dataset.url)">' + GITHUB_SVG + '</button>';
   }
 
-  // R110-P2 "+ New session in X" consistency: previously only groups with no
-  // sessions got the full-width section-empty CTA. Groups that already had
-  // sessions had no per-project create affordance, forcing the user to use
-  // the header `+` then re-type the workspace. This compact `+` icon lives
-  // in every section header so creation is always one click away. The full
-  // section-empty CTA still appears for zero-session groups (it's more
-  // discoverable when the row below would otherwise be blank).
+  // Compact `+` icon in every section header so creation is always one click
+  // away — also serves as the only per-project create affordance for empty
+  // favorite groups (the old full-width "New session in X" CTA under the
+  // header was removed as redundant).
   const newBtn = '<button type="button" class="sh-btn sh-new" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" title="在 ' + escAttr(p.name) + ' 中新建会话" aria-label="在 ' + escAttr(p.name) + ' 中新建会话" onclick="event.stopPropagation();newSessionInProject(this.dataset.name,this.dataset.node)"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>';
 
   const collapsedCls = collapsed ? ' is-collapsed' : '';
@@ -647,13 +651,6 @@ function sectionHeaderHtml(p) {
     ghBtn +
     newBtn +
     '</div>';
-}
-
-function sectionEmptyHtml(p) {
-  const node = p.node || 'local';
-  return '<button type="button" class="section-empty" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" onclick="event.stopPropagation();newSessionInProject(this.dataset.name,this.dataset.node)">' +
-    '<span class="se-plus">+</span><span>New session in ' + esc(p.name) + '</span>' +
-    '</button>';
 }
 
 // toggleProjectCollapsed flips a project section's fold state, persists
@@ -1672,7 +1669,7 @@ async function downloadSessionMarkdown() {
     const s = sessionsData[sid(selectedKey, selectedNode)] || {};
     const keyParts = (selectedKey || '').split(':');
     const title = s.user_label || s.summary || s.last_prompt ||
-      keyParts[keyParts.length - 1] || selectedKey || '';
+      keyTailDisplay(keyParts) || selectedKey || '';
     const md = formatSessionMarkdown({
       title: title,
       key: selectedKey,
@@ -1708,7 +1705,7 @@ function renderMainShell() {
   const agentIsGeneric = !s.agent || s.agent === 'general';
   // Primary title: user_label (operator-set rename) > summary > latest prompt
   // > agent name > key tail.
-  const displayName = s.user_label || s.summary || s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyParts[keyParts.length - 1] || selectedKey || '';
+  const displayName = s.user_label || s.summary || s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyTailDisplay(keyParts) || selectedKey || '';
 
   // Detail line: left = CLI name + version, middle = IM origin chip (only
   // for real IM threads — feishu/slack/discord/weixin), right = cost
@@ -1814,11 +1811,31 @@ function renderMainShell() {
   }, {passive:true});
 }
 
+// _fetchEventsInFlight gates concurrent HTTP polls of `/api/sessions/events`.
+// The 1 s `setInterval` driver and the on-demand `full` fetch (session
+// switch / WS fallback) can otherwise pile up when the network lags or the
+// server is slow: the second request completes first, `appendEvents`
+// re-orders events, and the first response is then applied on top. The
+// simpler in-flight flag (mirroring `_earlierLoading` on
+// `loadEarlierEvents`) skips overlapping polls — a missed tick is cheap
+// because the next tick will pick up any accumulated events via `after=`
+// anyway. A full fetch while a tail fetch is in flight is also coalesced;
+// the next tick finishes rendering the backlog.
+let _fetchEventsInFlight = false;
 async function fetchEvents(full) {
   if (!selectedKey) return;
+  if (_fetchEventsInFlight) return;
+  // Capture session identity at dispatch time so a mid-flight switch doesn't
+  // apply stale events to the new session's DOM. `selectedKey` can flip
+  // synchronously from `pickSession`/`dismiss` callbacks while `await`
+  // suspends us; applying `appendEvents` after that point would graft the
+  // prior session's tail into the newly-opened session's scroller.
+  const dispatchKey = selectedKey;
+  const dispatchNode = selectedNode;
+  _fetchEventsInFlight = true;
   try {
-    let url = '/api/sessions/events?key=' + encodeURIComponent(selectedKey);
-    if (selectedNode && selectedNode !== 'local') url += '&node=' + encodeURIComponent(selectedNode);
+    let url = '/api/sessions/events?key=' + encodeURIComponent(dispatchKey);
+    if (dispatchNode && dispatchNode !== 'local') url += '&node=' + encodeURIComponent(dispatchNode);
     if (!full && lastEventTime > 0) {
       url += '&after=' + lastEventTime;
     } else if (full) {
@@ -1834,6 +1851,10 @@ async function fetchEvents(full) {
     if (!r.ok) return;
     const events = await r.json();
     if (!events || events.length === 0) return;
+    // Drop stale responses whose selection has since moved. Clearing
+    // `lastEventTime` is the caller's job at switch time, so we don't touch
+    // it here.
+    if (selectedKey !== dispatchKey || selectedNode !== dispatchNode) return;
 
     if (full) {
       renderEvents(events);
@@ -1843,7 +1864,11 @@ async function fetchEvents(full) {
 
     const last = events[events.length - 1];
     if (last && last.time > lastEventTime) lastEventTime = last.time;
-  } catch (e) { console.error('fetch events:', e); }
+  } catch (e) {
+    console.error('fetch events:', e);
+  } finally {
+    _fetchEventsInFlight = false;
+  }
 }
 
 // loadEarlierEvents fetches up to EARLIER_PAGE_LIMIT events older than the
@@ -2971,14 +2996,46 @@ function navShowList() {
   attachNavScroll();
 })();
 
-// Force plain-text paste into #msg-input so rich formatting from Word/web pages
-// doesn't leak into the contenteditable. Uses execCommand('insertText') to
-// preserve cursor position and undo history; falls back to Range insertion.
+// Paste handler for #msg-input:
+//   1. Image files on the clipboard (screenshot Cmd/Ctrl+V, "copy image" from
+//      another app) are routed to handleFiles so they land in pendingFiles and
+//      ride the same upload / file_ids path as the paperclip button. Without
+//      this branch the browser's default paste embeds the image as
+//      `<img src="data:...">` inside the contenteditable — `innerText.trim()`
+//      drops it silently so the send ends up carrying neither text nor
+//      file_ids, and Claude never sees the image the user thought they sent.
+//   2. Plain text is forced in via execCommand('insertText') so rich
+//      formatting from Word / web pages doesn't leak into the contenteditable.
 document.addEventListener('paste', function(e) {
   const t = e.target;
   if (!t || !t.closest || !t.closest('#msg-input')) return;
   const cd = e.clipboardData || window.clipboardData;
   if (!cd) return;
+
+  // Image branch: walk clipboardData.files first (most reliable on Chromium
+  // + Safari), fall back to clipboardData.items for older paths. Any image
+  // file short-circuits the default paste so the browser doesn't also embed
+  // a stray `<img>` into the contenteditable.
+  const imageFiles = [];
+  if (cd.files && cd.files.length) {
+    for (const f of cd.files) {
+      if (f && f.type && f.type.startsWith('image/')) imageFiles.push(f);
+    }
+  }
+  if (imageFiles.length === 0 && cd.items) {
+    for (const it of cd.items) {
+      if (it && it.kind === 'file' && it.type && it.type.startsWith('image/')) {
+        const f = it.getAsFile();
+        if (f) imageFiles.push(f);
+      }
+    }
+  }
+  if (imageFiles.length > 0) {
+    e.preventDefault();
+    if (typeof handleFiles === 'function') handleFiles(imageFiles);
+    return;
+  }
+
   const text = cd.getData('text/plain');
   if (!text) return;
   e.preventDefault();
@@ -3900,6 +3957,123 @@ function getSelectedBackend() {
   return el && el.value ? el.value : '';
 }
 
+// R110-P3 agent picker (Round 167) — returns an HTML fragment for an agent
+// <select>, or an empty string when only the default 'general' agent is
+// configured (no meaningful choice to offer). Mirrors renderBackendPicker's
+// shape: single <select> with id="new-agent", consumed by getSelectedAgent()
+// at submit time, defaulting to the last-picked agent (localStorage) so
+// power users who always want e.g. 'sonnet' don't re-pick every session.
+function renderAgentPicker() {
+  if (!Array.isArray(availableAgents) || availableAgents.length <= 1) return '';
+  // Remember the last picked agent across reloads. Falls back to 'general'
+  // on first use or when the previously-selected agent has been removed
+  // from the backend config (e.g. config.yaml edit). Swallow errors from
+  // private browsing / disabled storage so the picker always renders.
+  let remembered = 'general';
+  try {
+    const v = localStorage.getItem('naozhi_last_agent');
+    if (v && availableAgents.indexOf(v) >= 0) remembered = v;
+  } catch (_) { /* noop */ }
+  const options = availableAgents.map(a => {
+    const selected = a === remembered ? ' selected' : '';
+    return '<option value="' + escAttr(a) + '"' + selected + '>' + esc(a) + '</option>';
+  }).join('');
+  return '<div style="margin-bottom:12px">' +
+    '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-agent">Agent</label>' +
+    '<select id="new-agent" style="width:100%;padding:6px 8px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px">' +
+    options +
+    '</select>' +
+    '</div>';
+}
+
+function getSelectedAgent() {
+  const el = document.getElementById('new-agent');
+  const v = el && el.value ? el.value : '';
+  if (v) {
+    // Persist so the next modal defaults to this agent without asking again.
+    try { localStorage.setItem('naozhi_last_agent', v); } catch (_) { /* noop */ }
+  }
+  return v || 'general';
+}
+
+// R110-P3 key schema (Round 167) — dashboard sessions historically used
+//   'dashboard:direct:<ts>:<projectName>'
+// which collides with the 4-segment SessionKey contract: buildSessionOpts
+// reads parts[3] as the agentID, so projectName was silently getting looked
+// up in the agents registry (returning zero AgentOpts{}) and AgentOpts was
+// never actually applied. This helper emits the correct shape:
+//   'dashboard:direct:<ts>-<slug>:<agentID>'
+// where `<slug>` is the sanitized project/folder name and `<agentID>` maps
+// to config.yaml's agents entries. Matches the shape scratch sessions already
+// use (dashboard_session.go:860 — 'dashboard:direct:r<hex>:general').
+//
+// The sanitizer strips colons and control bytes (sanitizeKeyComponent on the
+// server rejects them) and normalizes whitespace so the key remains readable
+// in logs. Empty slug falls back to 'session' so the chatID segment is never
+// empty (SanitizeLogAttr would accept it but downstream UI shows a blank).
+function sanitizeKeySlug(s) {
+  if (!s) return 'session';
+  // Replace ASCII colons + Unicode lookalike colons (FULLWIDTH U+FF1A,
+  // PRESENTATION FORM U+FE13, MODIFIER LETTER U+A789, RATIO U+2236) so a
+  // project folder containing e.g. 'foo：bar' cannot survive as a
+  // colon-like byte into the 4-segment key that strings.SplitN(":",4)
+  // relies on server-side. Also strips bidi override / embedding /
+  // directional isolate characters (U+202A–U+202E, U+2066–U+2069) and
+  // Unicode line separators (U+2028/U+2029) that bypass the
+  // ASCII-control-only filter below and can corrupt log output. Then
+  // collapse runs of filesystem-hostile chars into single dashes so the
+  // key stays short and readable. Cap at 64 bytes to leave plenty of
+  // headroom under the 128-byte sanitizeKeyComponent cap.
+  let safe = String(s)
+    .replace(/[:：︓꞉∶]/g, '-')
+    .replace(/[‪-‮⁦-⁩  ]/g, '')
+    .replace(/[\s/\\?*<>|"\x00-\x1f\x7f]+/g, '-');
+  safe = safe.replace(/-+/g, '-').replace(/^-|-$/g, '');
+  if (safe.length > 64) safe = safe.slice(0, 64);
+  return safe || 'session';
+}
+
+function buildDashboardSessionKey(timestamp, projectOrFolder, agentID) {
+  const slug = sanitizeKeySlug(projectOrFolder);
+  const agent = agentID && String(agentID).trim() ? sanitizeKeySlug(agentID) : 'general';
+  // chatID segment merges timestamp + slug so parts[3] remains the agentID
+  // while still surfacing the project in log lines / sidebar fallbacks.
+  return 'dashboard:direct:' + timestamp + '-' + slug + ':' + agent;
+}
+
+// keyTailDisplay returns the most informative human-readable fallback for a
+// session key's trailing display label. Historically dashboard.js used
+// `parts[parts.length - 1]` directly, which made sense when the last segment
+// was the projectName under the legacy `dashboard:direct:<ts>:<projectName>`
+// schema. The Round 167 schema moves the agentID into that slot, so showing
+// the bare agentID ('general', 'sonnet', …) as a session label would
+// regress the UX: every pending session would read "general" in the header.
+//
+// The helper looks at the chatID segment (parts[2]) and, when it matches the
+// dashboard key shape `<ts>-<slug>` (ts = `YYYY-MM-DD-HHMMSS-N`), prefers the
+// trailing slug piece over the terminal agentID. For non-dashboard keys
+// (IM platforms, scratch, cron) parts[2] is an opaque chat ID, so we retain
+// the legacy tail-segment behaviour. Both behaviours are covered by contract
+// tests in static_ux_contract_test.go.
+function keyTailDisplay(keyParts) {
+  if (!Array.isArray(keyParts) || keyParts.length === 0) return '';
+  // Dashboard-shaped keys: platform:chatType:chatID:agentID with chatID of
+  // the form `<ts>-<slug>`. ts is `YYYY-MM-DD-HHMMSS-N`, so we need to keep
+  // the segment after the last `-` followed by a non-digit to isolate the
+  // slug. Simpler heuristic: strip the leading ISO-ish numeric prefix and
+  // return the remainder when it exists and isn't empty.
+  if (keyParts.length >= 4 && keyParts[0] === 'dashboard' && keyParts[1] === 'direct') {
+    const chatID = keyParts[2] || '';
+    // Match `<ts>-<slug>` where ts begins with YYYY-MM-DD- (numeric only).
+    const m = chatID.match(/^\d{4}-\d{2}-\d{2}-\d+-\d+-(.+)$/);
+    if (m && m[1]) return m[1];
+    // Fallback for chatID without the ts prefix: show the full chatID
+    // (scratch / back-compat keys such as `dashboard:direct:r<hex>:general`).
+    if (chatID) return chatID;
+  }
+  return keyParts[keyParts.length - 1] || '';
+}
+
 function createNewSession() {
   // Fetch backends upfront so the picker (if any) is ready when the modal
   // renders. Failure falls back to the single-backend UI — cli.backends
@@ -3915,6 +4089,7 @@ function createNewSession() {
         '<div class="modal" role="dialog" aria-modal="true" aria-label="新建会话">' +
           '<h3>New Session</h3>' +
           backendPicker +
+          renderAgentPicker() +
           '<div style="margin-bottom:12px">' +
             '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-workspace">工作目录</label>' +
             '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(ws) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
@@ -3936,14 +4111,23 @@ function createNewSession() {
 
 function openProjectPalette(backendsData) {
   const backendPicker = renderBackendPicker(backendsData);
+  const agentPicker = renderAgentPicker();
   // Stash the picker HTML on the overlay dataset so the custom-workspace
   // modal (spawned from a palette row) can surface the same choice. When
   // only one backend exists, picker is empty and we skip the header slot.
+  // The agent picker is shown inline next to the backend slot so multi-agent
+  // setups can pick both at once without leaving the palette.
+  const pickerSlot = (backendPicker || agentPicker)
+    ? '<div class="cmd-palette-backend" style="padding:8px 12px 0;display:flex;gap:12px">' +
+        (backendPicker ? '<div style="flex:1;min-width:0">' + backendPicker + '</div>' : '') +
+        (agentPicker ? '<div style="flex:1;min-width:0">' + agentPicker + '</div>' : '') +
+      '</div>'
+    : '';
   const overlay = document.createElement('div');
   overlay.className = 'cmd-palette-overlay';
   overlay.innerHTML =
     '<div class="cmd-palette" role="dialog" aria-label="新建会话">' +
-      (backendPicker ? '<div class="cmd-palette-backend" style="padding:8px 12px 0">' + backendPicker + '</div>' : '') +
+      pickerSlot +
       '<div class="cmd-palette-header">' +
         '<input id="cp-input" type="text" autocomplete="off" spellcheck="false" placeholder="搜索项目或输入路径…">' +
       '</div>' +
@@ -4183,25 +4367,32 @@ function handlePaletteKey(e, state, input) {
 
 function pickPaletteProject(p) {
   const backend = getSelectedBackend();
-  doCreateInProject(p.path, p.name, p.node || 'local', backend);
+  const agent = getSelectedAgent();
+  doCreateInProject(p.path, p.name, p.node || 'local', backend, agent);
 }
 
 function pickPaletteCustom(initialValue) {
-  // Capture the palette's backend choice before we remove the overlay.
-  const preselected = getSelectedBackend();
+  // Capture the palette's backend + agent choice before we remove the overlay.
+  // The Custom Workspace modal re-renders its own copies of both pickers,
+  // so we need to pass the pre-selection forward rather than relying on the
+  // palette's DOM (which is about to be nuked).
+  const preselectedBackend = getSelectedBackend();
+  const preselectedAgent = getSelectedAgent();
   const overlay = document.querySelector('.cmd-palette-overlay');
   if (overlay) overlay.remove();
   const ws = defaultWorkspace || '';
   const prefill = initialValue && (initialValue.startsWith('/') || initialValue.startsWith('~')) ? initialValue : '';
-  // Re-render the backend picker inside the modal and pre-select the
-  // palette's choice, so switching to Custom Workspace doesn't drop it.
+  // Re-render the backend + agent pickers inside the modal and pre-select the
+  // palette's choice, so switching to Custom Workspace doesn't drop either.
   const picker = renderBackendPicker(cliBackends);
+  const agentPicker = renderAgentPicker();
   const modal = document.createElement('div');
   modal.className = 'modal-overlay';
   modal.innerHTML =
     '<div class="modal" role="dialog" aria-modal="true" aria-label="自定义工作目录">' +
       '<h3>自定义工作目录</h3>' +
       picker +
+      agentPicker +
       '<div style="margin-bottom:12px">' +
         '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-workspace">工作目录路径</label>' +
         '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(prefill) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
@@ -4213,9 +4404,15 @@ function pickPaletteCustom(initialValue) {
     '</div>';
   document.body.appendChild(modal);
   trapFocus(modal);
-  if (preselected) {
+  if (preselectedBackend) {
     const sel = document.getElementById('new-backend');
-    if (sel) sel.value = preselected;
+    if (sel) sel.value = preselectedBackend;
+  }
+  if (preselectedAgent) {
+    const sel = document.getElementById('new-agent');
+    if (sel && Array.from(sel.options).some(o => o.value === preselectedAgent)) {
+      sel.value = preselectedAgent;
+    }
   }
   setTimeout(() => {
     const el = document.getElementById('new-workspace');
@@ -4223,17 +4420,22 @@ function pickPaletteCustom(initialValue) {
   }, 50);
 }
 
-function doCreateInProject(projectPath, projectName, nodeId, backend) {
-  // Read the backend from the still-mounted overlay BEFORE removing it,
+function doCreateInProject(projectPath, projectName, nodeId, backend, agent) {
+  // Read the backend/agent from the still-mounted overlay BEFORE removing it,
   // so callers that omit the explicit argument still get the user's pick.
   if (backend === undefined) backend = getSelectedBackend();
+  if (agent === undefined) agent = getSelectedAgent();
   const overlay = document.querySelector('.modal-overlay, .cmd-palette-overlay');
   if (overlay) overlay.remove();
   sessionCounter++;
   const now = new Date();
   const ts = now.toISOString().slice(0,10) + '-' +
     now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
-  const key = 'dashboard:direct:' + ts + ':' + projectName;
+  // R110-P3 key schema: 4 segments (platform:chatType:chatID:agentID).
+  // Merges ts + projectName into the chatID segment so parts[3] is the
+  // agentID (buildSessionOpts reads parts[3]). See buildDashboardSessionKey
+  // godoc for the contract.
+  const key = buildDashboardSessionKey(ts, projectName, agent);
 
   sessionWorkspaces[key] = projectPath;
   if (nodeId && nodeId !== 'local') sessionNodes[key] = nodeId;
@@ -4310,6 +4512,7 @@ function pushRecentProject(name, node) {
 function doCreateSession() {
   const workspace = document.getElementById('new-workspace').value.trim();
   const backend = getSelectedBackend();
+  const agent = getSelectedAgent();
   const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'session') : 'session';
   document.querySelector('.modal-overlay').remove();
 
@@ -4317,7 +4520,10 @@ function doCreateSession() {
   const now = new Date();
   const ts = now.toISOString().slice(0,10) + '-' +
     now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
-  const key = 'dashboard:direct:' + ts + ':' + folderName;
+  // R110-P3 key schema (see buildDashboardSessionKey godoc): 4 segments
+  // with agentID as the terminal segment so buildSessionOpts picks up the
+  // right AgentOpts entry.
+  const key = buildDashboardSessionKey(ts, folderName, agent);
 
   if (workspace) sessionWorkspaces[key] = workspace;
   if (backend) sessionBackends[key] = backend;
@@ -7027,20 +7233,204 @@ function initViewportTracking() {
   apply();
 }
 
+// R110-P1 long-press context menu state + constants. LONG_PRESS_MS matches
+// the Android / iOS WebKit default for "long-press" detection; shorter feels
+// trigger-happy (users misfire while scrolling) and longer reads as a hang.
+// MOVE_CANCEL_PX below the 5px swipe threshold so "small jitter" does not
+// cancel long-press before swipe starts tracking, but any directional intent
+// above 8px unambiguously means the user wants to swipe (or scroll).
+const LONG_PRESS_MS = 500;
+const LONG_PRESS_MOVE_CANCEL_PX = 8;
+let _longPressTimer = null;
+let _longPressFired = false;
+
+// closeContextMenu tears down any open .ctx-menu + its overlay. Safe to call
+// when nothing is open (no-op). Exposed at module scope so both the menu
+// actions and the global touch/click handlers can call it.
+function closeContextMenu() {
+  const m = document.getElementById('session-ctx-menu');
+  if (m) m.remove();
+  const ov = document.getElementById('session-ctx-overlay');
+  if (ov) ov.remove();
+}
+
+// showSessionContextMenu renders a floating menu anchored near (x, y) with
+// rename / copy-key / delete actions for the given session card. Clamps the
+// menu inside the viewport so long-pressing near a screen edge doesn't push
+// the menu off-screen. Uses a transparent overlay to capture outside clicks
+// (cheaper than attaching a document-level click handler that would need
+// careful removal). Items array shape is [{ label, icon, action, danger }]
+// so future extensions (pin / favorite) drop in without refactoring.
+function showSessionContextMenu(x, y, items) {
+  closeContextMenu();
+  const ov = document.createElement('div');
+  ov.id = 'session-ctx-overlay';
+  ov.className = 'ctx-menu-overlay';
+  ov.addEventListener('click', closeContextMenu, {passive:true});
+  ov.addEventListener('touchstart', e => {
+    // Prevent the overlay's touchstart from triggering a scroll on mobile
+    // while the menu is open — users tapping outside expect "close" not
+    // "keep scrolling through the underlying list".
+    if (e.target === ov) { closeContextMenu(); }
+  }, {passive:true});
+  document.body.appendChild(ov);
+
+  const menu = document.createElement('div');
+  menu.id = 'session-ctx-menu';
+  menu.className = 'ctx-menu';
+  menu.setAttribute('role', 'menu');
+  menu.setAttribute('aria-label', '会话操作');
+  menu.innerHTML = items.map((it, i) =>
+    '<div class="ctx-menu-item' + (it.danger ? ' danger' : '') + '"' +
+    ' role="menuitem" tabindex="0" data-idx="' + i + '">' +
+    '<span class="ctx-icon" aria-hidden="true">' + esc(it.icon || '') + '</span>' +
+    '<span>' + esc(it.label) + '</span></div>'
+  ).join('');
+  document.body.appendChild(menu);
+
+  // Clamp menu position inside viewport with 8px padding. Measure first so we
+  // know actual rendered size (padding/border/content-driven width).
+  const rect = menu.getBoundingClientRect();
+  const pad = 8;
+  let left = x, top = y;
+  if (left + rect.width + pad > window.innerWidth) left = window.innerWidth - rect.width - pad;
+  if (top + rect.height + pad > window.innerHeight) top = window.innerHeight - rect.height - pad;
+  if (left < pad) left = pad;
+  if (top < pad) top = pad;
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+
+  menu.addEventListener('click', e => {
+    const it = e.target.closest('.ctx-menu-item');
+    if (!it) return;
+    const idx = parseInt(it.dataset.idx, 10);
+    closeContextMenu();
+    if (items[idx] && typeof items[idx].action === 'function') items[idx].action();
+  });
+  menu.addEventListener('keydown', e => {
+    if (e.key === 'Escape') { e.preventDefault(); closeContextMenu(); }
+  });
+  // Focus the first item so keyboard users (rare on mobile but happens with
+  // BT keyboards / accessibility tools) have a landing point after the menu
+  // opens. Desktop right-click path also benefits.
+  const first = menu.querySelector('.ctx-menu-item');
+  if (first) first.focus();
+}
+
+// copyStringToClipboard writes a string to the system clipboard using the
+// modern navigator.clipboard API with a document.execCommand fallback for
+// older browsers / non-HTTPS contexts. Returns a Promise<boolean>.
+async function copyStringToClipboard(s) {
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(s);
+      return true;
+    }
+  } catch (_) { /* fall through */ }
+  const ta = document.createElement('textarea');
+  try {
+    ta.value = s;
+    ta.style.position = 'fixed';
+    ta.style.opacity = '0';
+    document.body.appendChild(ta);
+    ta.select();
+    return document.execCommand('copy');
+  } catch (_) {
+    return false;
+  } finally {
+    // Always detach — if execCommand throws (sandboxed iframes, locked
+    // clipboards) the caught return skipped an inline removeChild before,
+    // leaking the <textarea> (containing the user-supplied string) into
+    // the DOM for the page lifetime.
+    if (ta.parentNode) ta.parentNode.removeChild(ta);
+  }
+}
+
+// openSessionContextMenu assembles the items for a given session card and
+// opens the menu anchored near the touch coordinates. Rename reuses the
+// existing modal-prompt pattern by selecting the session first, then
+// deferring to renameSession(); copy-key writes the key to clipboard with
+// a toast confirmation; delete routes through dismissSession() which
+// surfaces the existing confirmDialog flow on its own.
+function openSessionContextMenu(card, x, y) {
+  const key = card.dataset.key;
+  const node = card.dataset.node || 'local';
+  if (!key) return;
+  showSessionContextMenu(x, y, [
+    {
+      label: '重命名', icon: '✎',
+      action: () => {
+        // renameSession() reads selectedKey/selectedNode, so we flip the
+        // selection first. Keeps the prompt simple (same input widget the
+        // hover-visible ✎ button uses) at the cost of one extra click if
+        // the user was on a different session — acceptable for a mobile-
+        // only power-user shortcut.
+        selectedKey = key;
+        selectedNode = node;
+        renameSession();
+      },
+    },
+    {
+      label: '复制 key', icon: '⎘',
+      action: async () => {
+        const ok = await copyStringToClipboard(key);
+        showToast(ok ? '已复制 key' : '复制失败', ok ? 'success' : 'warning');
+      },
+    },
+    {
+      label: '删除', icon: '🗑', danger: true,
+      action: () => { dismissSession(key, node); },
+    },
+  ]);
+}
+
 function initSwipeDelete() {
   const list = document.getElementById('session-list');
   if (!list) return;
   let card = null, startX = 0, startY = 0, tracking = false;
+  // cancelLongPress clears the in-flight long-press timer + any visual
+  // target state. Called from every exit path so a jittery touch cannot
+  // leave the card stuck in the .long-pressing style.
+  const cancelLongPress = () => {
+    if (_longPressTimer) { clearTimeout(_longPressTimer); _longPressTimer = null; }
+    if (card) card.classList.remove('long-pressing');
+  };
   list.addEventListener('touchstart', e => {
-    if (e.touches.length !== 1) { card = null; return; }
+    if (e.touches.length !== 1) { card = null; cancelLongPress(); return; }
     const c = e.target.closest('.session-card[data-key]');
     if (!c) return;
     card = c; startX = e.touches[0].clientX; startY = e.touches[0].clientY; tracking = false;
+    _longPressFired = false;
+    // Schedule long-press. If the user lifts / moves before the timer
+    // fires, the cancel path below wipes it; otherwise we trigger the
+    // context menu AND null out `card` so the subsequent touchend does
+    // not accidentally also trigger a select/click on the card beneath.
+    _longPressTimer = setTimeout(() => {
+      _longPressTimer = null;
+      if (!card) return;
+      _longPressFired = true;
+      const x = startX, y = startY;
+      const target = card;
+      card = null; tracking = false;
+      target.classList.remove('long-pressing');
+      openSessionContextMenu(target, x, y);
+    }, LONG_PRESS_MS);
+    // Mild visual feedback on press — users need to know "something is
+    // happening" before the 500ms elapses. Kept to a subtle background
+    // tint so it doesn't read as a selection.
+    card.classList.add('long-pressing');
   }, {passive:true});
   list.addEventListener('touchmove', e => {
     if (!card) return;
     const dx = e.touches[0].clientX - startX;
     const dy = e.touches[0].clientY - startY;
+    // Cancel long-press as soon as directional intent emerges. Threshold
+    // is slightly looser than swipe's 5px trigger so small jitters don't
+    // cancel long-press unnecessarily, but any real swipe intent kills
+    // the menu before it can fire.
+    if (Math.abs(dx) >= LONG_PRESS_MOVE_CANCEL_PX || Math.abs(dy) >= LONG_PRESS_MOVE_CANCEL_PX) {
+      cancelLongPress();
+    }
     if (!tracking) {
       if (Math.abs(dx) < 5 && Math.abs(dy) < 5) return;
       if (Math.abs(dy) >= Math.abs(dx)) { card = null; return; }
@@ -7052,6 +7442,7 @@ function initSwipeDelete() {
     card.style.background = 'rgba(218,54,51,' + Math.min(0.35, -dx / card.offsetWidth * 0.6) + ')';
   }, {passive:true});
   list.addEventListener('touchend', e => {
+    cancelLongPress();
     if (!card || !tracking) { card = null; tracking = false; return; }
     const dx = e.changedTouches[0].clientX - startX;
     const c = card; card = null; tracking = false;
@@ -7071,6 +7462,38 @@ function initSwipeDelete() {
       setTimeout(() => { c.style.transition = ''; }, 200);
     }
   }, {passive:true});
+  // touchcancel fires when the system interrupts the gesture (incoming call,
+  // scroll takeover by browser UI). Mirror cleanup so _longPressTimer
+  // can't fire after the finger has already gone.
+  list.addEventListener('touchcancel', () => {
+    cancelLongPress();
+    if (card) {
+      card.classList.remove('swiping');
+      card.style.transform = '';
+      card.style.background = '';
+    }
+    card = null; tracking = false;
+  }, {passive:true});
+  // Click bubbles up after touchend. If a long-press just fired we have
+  // already null'd `card`, but the underlying anchor click (selectSession
+  // via onclick) still fires. Swallow it when _longPressFired is set.
+  list.addEventListener('click', e => {
+    if (_longPressFired) {
+      _longPressFired = false;
+      e.preventDefault();
+      e.stopPropagation();
+    }
+  }, true);
+  // Desktop right-click also surfaces the same menu for parity with the
+  // mobile long-press path. Power users can reach every action via the
+  // hover buttons too; this just gives keyboard-unfriendly trackpad users
+  // a discoverable alternative.
+  list.addEventListener('contextmenu', e => {
+    const c = e.target.closest('.session-card[data-key]');
+    if (!c) return;
+    e.preventDefault();
+    openSessionContextMenu(c, e.clientX, e.clientY);
+  });
 }
 
 function initSwipeBack() {
@@ -7883,6 +8306,14 @@ function cronJobCardHtml(j) {
   const toggleBtn = j.paused
     ? '<button type="button" class="cc-btn" onclick="cronResume(\'' + escJs(j.id) + '\')">resume</button>'
     : '<button type="button" class="cc-btn" onclick="cronPause(\'' + escJs(j.id) + '\')">pause</button>';
+  // Run Now button — hidden for paused jobs because the backend rejects
+  // TriggerNow with 409 ErrJobPaused, so the click would only produce a
+  // localized "状态冲突" toast without advancing the operator. For active
+  // jobs the backend's jobRunningGuard + SkipIfStillRunning chain already
+  // protects against overlap; we don't need a frontend disable state.
+  const runBtn = j.paused
+    ? ''
+    : '<button type="button" class="cc-btn" onclick="cronTriggerNow(\'' + escJs(j.id) + '\')" title="立即执行一次" aria-label="立即执行一次">run</button>';
   const human = humanizeCron(j.schedule);
   const showRaw = human !== j.schedule;
   return '<div class="cron-card" role="button" tabindex="0" onclick="openCronSession(\'' + escJs(j.id) + '\')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronSession(\'' + escJs(j.id) + '\')}">' +
@@ -7895,6 +8326,7 @@ function cronJobCardHtml(j) {
     '</div>' +
     result +
     '<div class="cc-actions" onclick="event.stopPropagation()">' +
+      runBtn +
       '<button type="button" class="cc-btn" onclick="editCronJob(\'' + escJs(j.id) + '\')">edit</button>' +
       toggleBtn +
       '<button type="button" class="cc-btn danger" onclick="cronDelete(\'' + escJs(j.id) + '\')">delete</button>' +
@@ -8058,6 +8490,37 @@ async function fetchCronJobs() {
       cronBadge.classList.toggle('is-alert', attention > 0);
     }
   } catch (e) { console.error('fetch cron:', e); }
+}
+
+// cronTriggerNow calls POST /api/cron/trigger to kick off a job immediately
+// without waiting for the next scheduled tick. Useful when the operator
+// wants to verify a prompt edit or rerun after a transient failure.
+//
+// Contract notes:
+//   - Backend rejects paused jobs with 409 ErrJobPaused; the button is
+//     hidden for paused jobs (cronJobCardHtml), so 409 here usually means a
+//     pause landed between render and click — surface it via showAPIError
+//     rather than a custom message.
+//   - Backend's jobRunningGuard + SkipIfStillRunning chain serializes
+//     against the scheduled-tick path, so a double-click at worst sees one
+//     execution plus an "already running, skipping overlap" Info log. No
+//     frontend debounce is needed.
+//   - Success response is {status:"triggered"}; the eventual run completion
+//     arrives via the existing cron_update WS event (last_run_at / last_result)
+//     which already repaints the card.
+async function cronTriggerNow(id) {
+  try {
+    const headers = { 'Content-Type': 'application/json' };
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch('/api/cron/trigger', { method: 'POST', headers, body: JSON.stringify({ id }) });
+    if (!r.ok) {
+      const raw = await r.text().catch(() => '');
+      showAPIError('立即执行定时任务', r.status, raw);
+      return;
+    }
+    showToast('已触发执行', 'success', 2000);
+  } catch (e) { showNetworkError('立即执行定时任务', e); }
 }
 
 async function cronPause(id) {
@@ -8743,7 +9206,6 @@ initSidebarSearch();
   }
 
   async function promoteScratch() {
-    console.log('[scratch] promote click', {hasState: !!state, id: state && state.scratchId});
     if (!state) {
       if (typeof showToast === 'function') showToast('追问会话已关闭，无法保存');
       return;
@@ -8753,14 +9215,12 @@ initSidebarSearch();
       const r = await fetch('/api/scratch/' + encodeURIComponent(id) + '/promote', {
         method: 'POST', headers: authHeaders(),
       });
-      console.log('[scratch] promote response', r.status);
       if (!r.ok) {
         const txt = await r.text().catch(() => '');
         if (typeof showAPIError === 'function') showAPIError('保存为正式会话', r.status, txt);
         return;
       }
       const data = await r.json();
-      console.log('[scratch] promoted to', data && data.key);
       state = null;   // scratch was detached server-side; skip the DELETE in closeScratch
       stopPolling();
       hideDrawer();
@@ -8808,10 +9268,7 @@ initSidebarSearch();
     }
   });
   if (elSave) {
-    elSave.addEventListener('click', (ev) => {
-      console.log('[scratch] ad-save click received');
-      promoteScratch();
-    });
+    elSave.addEventListener('click', () => { promoteScratch(); });
   } else {
     console.warn('[scratch] ad-save element missing at wire time');
   }

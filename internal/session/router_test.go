@@ -18,12 +18,13 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeProcess struct {
-	mu        sync.Mutex
-	isAlive   bool
-	isRunning bool
-	closeOnce sync.Once
-	entries   []cli.EventEntry // returned by EventEntries
-	totalCost float64          // returned by TotalCost
+	mu            sync.Mutex
+	isAlive       bool
+	isRunning     bool
+	closeOnce     sync.Once
+	entries       []cli.EventEntry // returned by EventEntries
+	totalCost     float64          // returned by TotalCost
+	userTurnCount int64            // returned by UserTurnCount (test-only)
 
 	// Interrupt instrumentation (used by TestInterruptSessionSafe_*).
 	// viaControlErr is what InterruptViaControl() returns. interruptCalls is
@@ -168,8 +169,13 @@ func (f *fakeProcess) LastEntryOfType(typ string) cli.EventEntry {
 	return cli.EventEntry{}
 }
 func (f *fakeProcess) LastActivitySummary() string { return "" }
-func (f *fakeProcess) ProtocolName() string        { return "test" }
-func (f *fakeProcess) GetSessionID() string        { return "" }
+func (f *fakeProcess) UserTurnCount() int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.userTurnCount
+}
+func (f *fakeProcess) ProtocolName() string { return "test" }
+func (f *fakeProcess) GetSessionID() string { return "" }
 func (f *fakeProcess) Interrupt() {
 	f.mu.Lock()
 	f.interruptCalls++

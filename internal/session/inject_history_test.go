@@ -37,8 +37,8 @@ func TestInjectHistory_UpdatesLastPromptAndActivity(t *testing.T) {
 func TestInjectHistory_DoesNotOverwriteNonEmpty(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
-	s.lastPrompt.Store("set by send")
-	s.lastActivity.Store("live tool")
+	storeStringAtomic(&s.lastPrompt, "set by send")
+	storeStringAtomic(&s.lastActivity, "live tool")
 
 	s.InjectHistory([]cli.EventEntry{
 		{Type: "user", Summary: "historical prompt"},

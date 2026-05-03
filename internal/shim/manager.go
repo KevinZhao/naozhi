@@ -457,14 +457,20 @@ func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*Shim
 		Seq:   lastSeq,
 	}
 	data, _ := json.Marshal(attach)
-	conn.SetWriteDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
-	writer.Write(data)                                      //nolint:errcheck
-	writer.Write([]byte{'\n'})                              //nolint:errcheck
+	// If SetWriteDeadline fails (conn closed by peer between Dial and here),
+	// bail early with the real cause rather than letting the bufio Flush block
+	// on a deadline-less write until TCP keepalive eventually surfaces.
+	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("set attach write deadline: %w", err)
+	}
+	writer.Write(data)         //nolint:errcheck
+	writer.Write([]byte{'\n'}) //nolint:errcheck
 	if err := writer.Flush(); err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("write attach: %w", err)
 	}
-	conn.SetWriteDeadline(time.Time{}) //nolint:errcheck
+	_ = conn.SetWriteDeadline(time.Time{})
 
 	// Read hello or auth_failed. The hello envelope is a few hundred bytes
 	// of JSON; a 64 KB ceiling here prevents a malicious or buggy shim from

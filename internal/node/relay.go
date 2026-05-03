@@ -431,7 +431,14 @@ func (r *wsRelay) writeJSON(v any) {
 	if conn == nil || closed {
 		return
 	}
-	conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	// If SetWriteDeadline fails (conn half-closed), close and trigger
+	// reconnect rather than letting WriteJSON block deadline-less on a
+	// dead socket until TCP keepalive expires.
+	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		slog.Warn("relay set write deadline failed, closing connection for reconnect", "node", r.node.ID, "err", err)
+		conn.Close()
+		return
+	}
 	if err := conn.WriteJSON(v); err != nil {
 		slog.Warn("relay write failed, closing connection for reconnect", "node", r.node.ID, "err", err)
 		conn.Close() // triggers readLoop exit → automatic reconnect

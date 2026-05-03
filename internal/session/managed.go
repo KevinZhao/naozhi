@@ -53,6 +53,9 @@ type processIface interface {
 	EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry
 	LastEntryOfType(typ string) cli.EventEntry
 	LastActivitySummary() string
+	// UserTurnCount returns the cumulative count of "user" entries the
+	// process's EventLog has seen since spawn. Feeds SessionSnapshot.MessageCount.
+	UserTurnCount() int64
 	ProtocolName() string
 	SubscribeEvents() (<-chan struct{}, func())
 	PID() int
@@ -69,7 +72,9 @@ type ManagedSession struct {
 
 	// sessionID stores the CLI session ID atomically.
 	// Written once during first successful Send, read by Snapshot lock-free.
-	sessionID atomic.Value // stores string
+	// atomic.Pointer[string] is type-safe: Load returns *string (nil when never
+	// stored, distinct from a stored empty string).
+	sessionID atomic.Pointer[string]
 
 	// onSessionID is called when a session ID is first captured from Send().
 	// Set by the Router to track known IDs for history exclusion.
@@ -80,10 +85,10 @@ type ManagedSession struct {
 	lastActive atomic.Int64
 
 	// lastPrompt caches the most recent user message summary (atomic for lock-free Snapshot reads).
-	lastPrompt atomic.Value // stores string
+	lastPrompt atomic.Pointer[string]
 
 	// lastActivity caches the most recent tool_use/thinking summary.
-	lastActivity atomic.Value // stores string
+	lastActivity atomic.Pointer[string]
 
 	// Cached key parts, parsed once via keyOnce. Key is immutable.
 	keyOnce     sync.Once
@@ -100,17 +105,20 @@ type ManagedSession struct {
 	// backend/cliName/cliVersion are written at spawn time AND later by
 	// reconnectShims under r.mu (write), but read by Snapshot() without
 	// any lock (called via ListSessions which only holds RLock while
-	// collecting refs). Using atomic.Value keeps the read/write race-free
-	// without round-tripping Snapshot through r.mu. Stored type is string.
-	backend     atomic.Value // string: backend ID ("claude" | "kiro"); empty = router default
-	cliName     atomic.Value // string: "claude-code", "kiro" — set at creation from Wrapper
-	cliVersion  atomic.Value // string: semver from --version
-	deathReason atomic.Value // string: why process died, empty if alive
+	// collecting refs). Using atomic.Pointer[string] keeps the read/write
+	// race-free without round-tripping Snapshot through r.mu — type-safe
+	// (unlike atomic.Value which accepts any interface value), and Load
+	// returns nil when never stored so an explicit empty-string store is
+	// distinguishable from "untouched".
+	backend     atomic.Pointer[string] // backend ID ("claude" | "kiro"); empty = router default
+	cliName     atomic.Pointer[string] // "claude-code", "kiro" — set at creation from Wrapper
+	cliVersion  atomic.Pointer[string] // semver from --version
+	deathReason atomic.Pointer[string] // why process died, empty if alive
 	// userLabel is an operator-set display name that overrides summary/last_prompt
 	// in the dashboard sidebar and header. Empty = unset, fall back to
 	// summary → last_prompt. Lock-free reads from Snapshot() mirror the
-	// backend/cliName/cliVersion pattern. Stored type is string.
-	userLabel atomic.Value
+	// backend/cliName/cliVersion pattern.
+	userLabel atomic.Pointer[string]
 	// totalCost is the cumulative cost carried over from a previous process
 	// incarnation: written once at construction (either in NewRouter() when
 	// restoring from store, or in spawnSession() when inheriting from the
@@ -159,15 +167,21 @@ func (s *ManagedSession) SessionKey() string { return s.key }
 // IsExempt returns whether this session is exempt from TTL and eviction.
 func (s *ManagedSession) IsExempt() bool { return s.exempt }
 
-// loadStringAtomic reads a *atomic.Value known to store a string, returning
-// "" when the value has never been written.
-func loadStringAtomic(v *atomic.Value) string {
-	if raw := v.Load(); raw != nil {
-		if s, ok := raw.(string); ok {
-			return s
-		}
+// loadStringAtomic reads an atomic.Pointer[string], returning "" when never stored.
+// Retained as a helper since several callers need the "nil → empty string" collapse.
+func loadStringAtomic(v *atomic.Pointer[string]) string {
+	if p := v.Load(); p != nil {
+		return *p
 	}
 	return ""
+}
+
+// storeStringAtomic writes a string via atomic.Pointer[string]. Addresses
+// Go's "addressable value" requirement: &id inside a func body references a
+// local copy, but passing the string through this helper makes the pointer
+// semantics obvious at call sites.
+func storeStringAtomic(v *atomic.Pointer[string], s string) {
+	v.Store(&s)
 }
 
 // Backend returns the backend ID ("" when the router default is in effect).
@@ -175,26 +189,26 @@ func (s *ManagedSession) Backend() string { return loadStringAtomic(&s.backend) 
 
 // SetBackend records the backend ID for this session. Called at spawn time
 // and (rarely) by reconnectShims after a naozhi restart.
-func (s *ManagedSession) SetBackend(id string) { s.backend.Store(id) }
+func (s *ManagedSession) SetBackend(id string) { storeStringAtomic(&s.backend, id) }
 
 // CLIName returns the CLI display name (e.g. "claude-code", "kiro").
 func (s *ManagedSession) CLIName() string { return loadStringAtomic(&s.cliName) }
 
 // SetCLIName records the wrapper-provided CLI display name.
-func (s *ManagedSession) SetCLIName(name string) { s.cliName.Store(name) }
+func (s *ManagedSession) SetCLIName(name string) { storeStringAtomic(&s.cliName, name) }
 
 // CLIVersion returns the detected CLI version string.
 func (s *ManagedSession) CLIVersion() string { return loadStringAtomic(&s.cliVersion) }
 
 // SetCLIVersion records the wrapper-provided CLI version.
-func (s *ManagedSession) SetCLIVersion(v string) { s.cliVersion.Store(v) }
+func (s *ManagedSession) SetCLIVersion(v string) { storeStringAtomic(&s.cliVersion, v) }
 
 // UserLabel returns the operator-set display label ("" when unset).
 func (s *ManagedSession) UserLabel() string { return loadStringAtomic(&s.userLabel) }
 
 // SetUserLabel records an operator-set display label. Callers must have
 // already validated length/charset; the empty string clears any prior label.
-func (s *ManagedSession) SetUserLabel(v string) { s.userLabel.Store(v) }
+func (s *ManagedSession) SetUserLabel(v string) { storeStringAtomic(&s.userLabel, v) }
 
 // SetHistorySource installs the backend-specific disk-tier Source. Called
 // by the router at session construction; safe to call after the session is
@@ -273,7 +287,7 @@ func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
 
 	s.storeProcess(proc)
 	s.setSessionID(sessionID)
-	s.deathReason.Store("")
+	storeStringAtomic(&s.deathReason, "")
 	s.lastActive.Store(time.Now().UnixNano())
 
 	if s.onSessionID != nil && sessionID != "" {
@@ -299,7 +313,7 @@ func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
 func (s *ManagedSession) ReattachProcessNoCallback(proc processIface, sessionID string) {
 	s.storeProcess(proc)
 	s.setSessionID(sessionID)
-	s.deathReason.Store("")
+	storeStringAtomic(&s.deathReason, "")
 	s.lastActive.Store(time.Now().UnixNano())
 }
 
@@ -333,7 +347,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	if len(images) > 0 {
 		prompt += fmt.Sprintf(" [+%d image(s)]", len(images))
 	}
-	s.lastPrompt.Store(prompt)
+	storeStringAtomic(&s.lastPrompt, prompt)
 
 	proc := s.loadProcess()
 	if proc == nil {
@@ -349,9 +363,9 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	if err != nil {
 		switch {
 		case errors.Is(err, cli.ErrNoOutputTimeout):
-			s.deathReason.Store("no_output_timeout")
+			storeStringAtomic(&s.deathReason, "no_output_timeout")
 		case errors.Is(err, cli.ErrTotalTimeout):
-			s.deathReason.Store("total_timeout")
+			storeStringAtomic(&s.deathReason, "total_timeout")
 		case errors.Is(err, cli.ErrProcessExited):
 			// Prefer the precise reason recorded by readLoop (e.g.
 			// cli_exited_code_1, shim_eof, readloop_panic) over a generic
@@ -360,7 +374,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 			if dr := proc.DeathReason(); dr != "" {
 				reason = dr
 			}
-			s.deathReason.Store(reason)
+			storeStringAtomic(&s.deathReason, reason)
 		}
 		return nil, err
 	}
@@ -464,18 +478,14 @@ func (s *ManagedSession) InterruptViaControl() InterruptOutcome {
 	}
 }
 
-// getSessionID returns the session ID lock-free via atomic.Value.
+// getSessionID returns the session ID lock-free via atomic.Pointer[string].
 func (s *ManagedSession) getSessionID() string {
-	v := s.sessionID.Load()
-	if v == nil {
-		return ""
-	}
-	return v.(string)
+	return loadStringAtomic(&s.sessionID)
 }
 
 // setSessionID stores the session ID atomically.
 func (s *ManagedSession) setSessionID(id string) {
-	s.sessionID.Store(id)
+	storeStringAtomic(&s.sessionID, id)
 }
 
 // parseKeyParts lazily parses the immutable session key into cached components.
@@ -641,6 +651,13 @@ type SessionSnapshot struct {
 	ProjectFallback bool               `json:"project_fallback,omitempty"` // true when Project is a workspace-basename fallback, not a registered project
 	IsPlanner       bool               `json:"is_planner,omitempty"`       // true for project planner sessions
 	Subagents       []cli.SubagentInfo `json:"subagents,omitempty"`        // active sub-agent types in current turn
+	// MessageCount is the cumulative "user" turn count observed by the live
+	// Process event log since the current spawn. Zero when no process is
+	// attached (persistedHistory only sessions). Not persisted to sessions.json:
+	// after shim reconnect, InjectHistory → EventLog.AppendBatch re-applies
+	// the historical user entries so the counter rebuilds to the historical
+	// value as part of normal startup.
+	MessageCount int64 `json:"message_count,omitempty"`
 }
 
 func (s *ManagedSession) HasProcess() bool {
@@ -664,9 +681,7 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		CLIVersion: s.CLIVersion(),
 		UserLabel:  s.UserLabel(),
 	}
-	if dr, ok := s.deathReason.Load().(string); ok {
-		snap.DeathReason = dr
-	}
+	snap.DeathReason = loadStringAtomic(&s.deathReason)
 
 	proc := s.loadProcess()
 	if proc == nil {
@@ -691,15 +706,20 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		// event) so we don't need a wrapper closure around Send just to track
 		// lastActivity.
 		snap.LastActivity = proc.LastActivitySummary()
+		// MessageCount is the cumulative user turn count observed by the
+		// current Process since its last spawn. proc==nil branch leaves the
+		// field at zero so UI code can gate visibility on `> 0` and skip the
+		// chip for brand-new sessions that haven't yet received a prompt.
+		snap.MessageCount = proc.UserTurnCount()
 	}
 
 	// Read cached values instead of copying the full event log.
-	if v := s.lastPrompt.Load(); v != nil {
-		snap.LastPrompt = v.(string)
+	if lp := loadStringAtomic(&s.lastPrompt); lp != "" {
+		snap.LastPrompt = lp
 	}
 	if snap.LastActivity == "" {
-		if v := s.lastActivity.Load(); v != nil {
-			snap.LastActivity = v.(string)
+		if la := loadStringAtomic(&s.lastActivity); la != "" {
+			snap.LastActivity = la
 		}
 	}
 
@@ -954,8 +974,8 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	}
 	// Scan the injected batch for prompt/activity summaries outside the lock:
 	// the scan operates on the caller-supplied slice only (not persistedHistory),
-	// and the only side-effects are atomic.Value Store calls. Keeping it out
-	// of historyMu lets concurrent readers (EventEntries / EventEntriesSince
+	// and the only side-effects are atomic.Pointer[string] Store calls. Keeping
+	// it out of historyMu lets concurrent readers (EventEntries / EventEntriesSince
 	// / EventEntriesBefore) proceed during 500-entry JSONL replays at startup.
 	// R61-PERF-9.
 	var prompt, activity string
@@ -992,23 +1012,19 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	// benign TOCTOU — a concurrent Send writing the same field races, but
 	// both values are "most recent" views and whichever lands is acceptable.
 	if prompt != "" && loadStringOrEmpty(&s.lastPrompt) == "" {
-		s.lastPrompt.Store(prompt)
+		storeStringAtomic(&s.lastPrompt, prompt)
 	}
 	if activity != "" && loadStringOrEmpty(&s.lastActivity) == "" {
-		s.lastActivity.Store(activity)
+		storeStringAtomic(&s.lastActivity, activity)
 	}
 }
 
 // loadStringOrEmpty returns the stored string or "" if never stored / stored as "".
-// Avoids the pitfall where `atomic.Value.Load() == nil` misreports "already set"
-// after an empty string was stored.
-func loadStringOrEmpty(v *atomic.Value) string {
-	if x := v.Load(); x != nil {
-		if s, ok := x.(string); ok {
-			return s
-		}
-	}
-	return ""
+// With atomic.Pointer[string] this is functionally identical to loadStringAtomic;
+// retained as an alias so tests in inject_history_test.go / log_system_event_test.go
+// that reference this name still compile without churn.
+func loadStringOrEmpty(v *atomic.Pointer[string]) string {
+	return loadStringAtomic(v)
 }
 
 // extractLastPromptFromProcess scans the attached process's event log to populate
@@ -1037,9 +1053,9 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 		}
 	}
 	if prompt != "" && loadStringOrEmpty(&s.lastPrompt) == "" {
-		s.lastPrompt.Store(prompt)
+		storeStringAtomic(&s.lastPrompt, prompt)
 	}
 	if activity != "" && loadStringOrEmpty(&s.lastActivity) == "" {
-		s.lastActivity.Store(activity)
+		storeStringAtomic(&s.lastActivity, activity)
 	}
 }

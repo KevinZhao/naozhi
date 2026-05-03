@@ -94,9 +94,18 @@ type ReverseConn struct {
 	done    chan struct{}
 	closed  bool
 	closeMu sync.Mutex
+
+	// baseCtx is the parent context for in-flight Subscribe history fetches
+	// (and any future per-connection RPCs that should abort on disconnect).
+	// baseCancel fires on Close()/markDisconnected() so timeout contexts
+	// derived from baseCtx unwind without needing a separate "cancel on
+	// c.done" watcher goroutine per RPC. H7 (Round 163).
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
 }
 
 func newReverseConn(id, displayName, remoteAddr string, conn *websocket.Conn) *ReverseConn {
+	baseCtx, baseCancel := context.WithCancel(context.Background())
 	return &ReverseConn{
 		id:          id,
 		displayName: displayName,
@@ -106,6 +115,8 @@ func newReverseConn(id, displayName, remoteAddr string, conn *websocket.Conn) *R
 		subs:        make(map[string][]EventSink),
 		status:      "ok",
 		done:        make(chan struct{}),
+		baseCtx:     baseCtx,
+		baseCancel:  baseCancel,
 	}
 }
 
@@ -130,13 +141,22 @@ func (c *ReverseConn) Close() {
 	conn := c.conn
 	c.closeMu.Unlock()
 
+	// Cancel baseCtx so any in-flight Subscribe history fetches unwind
+	// without relying on an auxiliary watcher goroutine per RPC. Safe to
+	// call multiple times; markDisconnected may also fire it.
+	c.baseCancel()
 	conn.Close()
 }
 
 func (c *ReverseConn) writeJSON(v any) error {
 	c.writeMu.Lock()
 	defer c.writeMu.Unlock()
-	c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	// If SetWriteDeadline fails (conn half-closed / closed), return the
+	// error instead of issuing a deadline-less WriteJSON that can block
+	// until TCP keepalive expires; the caller's error path will re-dial.
+	if err := c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		return fmt.Errorf("set write deadline: %w", err)
+	}
 	return c.conn.WriteJSON(v)
 }
 
@@ -365,21 +385,12 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 
 	if alreadySub {
 		// Additional subscriber: send history via RPC (non-blocking).
-		// Anchor the timeout to the connection's done channel so a drop
-		// mid-fetch cancels the RPC instead of running to completion then
-		// writing to a potentially closed EventSink.
+		// Derive the timeout from baseCtx so a connection drop mid-fetch
+		// cancels the RPC through ctx cancellation — no auxiliary
+		// watcher goroutine needed. H7 (Round 163).
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(c.baseCtx, 5*time.Second)
 			defer cancel()
-			cancelOnClose := make(chan struct{})
-			go func() {
-				select {
-				case <-c.done:
-					cancel()
-				case <-cancelOnClose:
-				}
-			}()
-			defer close(cancelOnClose)
 
 			entries, err := c.FetchEvents(ctx, key, after)
 			if err != nil {
@@ -413,18 +424,13 @@ func (c *ReverseConn) Subscribe(cl EventSink, key string, after int64) {
 		// order. Order doesn't matter for the client: onHistory merges by
 		// key/time, and the initial page render is keyed on history arrival
 		// not on subscribed arrival.
+		//
+		// Derive the timeout from baseCtx so a connection drop cancels the
+		// RPC through ctx cancellation — no auxiliary watcher goroutine
+		// needed. H7 (Round 163).
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(c.baseCtx, 5*time.Second)
 			defer cancel()
-			cancelOnClose := make(chan struct{})
-			go func() {
-				select {
-				case <-c.done:
-					cancel()
-				case <-cancelOnClose:
-				}
-			}()
-			defer close(cancelOnClose)
 
 			entries, err := c.FetchEvents(ctx, key, after)
 			if err != nil {
@@ -616,6 +622,10 @@ func (c *ReverseConn) markDisconnected() {
 		close(c.done)
 	}
 	c.closeMu.Unlock()
+
+	// Mirror Close(): cancel baseCtx so Subscribe history goroutines unwind
+	// the 5s FetchEvents timeout rather than waiting it out. Idempotent.
+	c.baseCancel()
 
 	// Drop EventSink references so disconnected browser clients don't keep
 	// sinks live for the hub's 90s subscription TTL.

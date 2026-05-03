@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -42,9 +43,20 @@ import (
 // The two caches share semantics but hold different value types, so they
 // do not unify into one field without an empty-interface box — kept
 // separate for compile-time safety.
+//
+// pathCache accelerates findSessionJSONL's fallback-scan path: when cwd
+// is unknown the scanner must os.ReadDir(claudeDir/projects) and Stat one
+// `<project>/<sessionID>.jsonl` candidate per project. On fleets with
+// hundreds of historical project directories that is O(N) syscalls per
+// lookup — amplified by NewRouter's 10-wide historyWg goroutine pool
+// replaying resume chains at startup. A small map keyed by
+// (claudeDir + sessionID) collapses the repeat cost: positive hits
+// re-validate with a single os.Stat, negative hits expire after a short
+// TTL so a newly-created JSONL is picked up automatically.
 type Scanner struct {
 	promptCache  promptCacheState
 	summaryCache summaryCacheState
+	pathCache    pathCacheState
 }
 
 type promptCacheState struct {
@@ -71,6 +83,53 @@ type summaryCacheEntry struct {
 	gen   uint64
 }
 
+// pathCacheState maps (claudeDir + "\x00" + sessionID) to the resolved
+// JSONL path when known, or a zero-path entry with a negativeUntil
+// deadline when a recent scan failed to locate the file. Access is
+// arbitrated by sync.RWMutex: the hit path uses RLock and the slow
+// `os.ReadDir` + Stat fan-out takes the write lock only to commit
+// results. findSessionJSONL can race with itself for distinct
+// sessionIDs without contention because the map lookup is O(1).
+type pathCacheState struct {
+	sync.RWMutex
+	entries map[string]pathCacheEntry
+}
+
+// pathCacheEntry holds either a positive result (path != "") or a
+// bounded negative result (path == "" && !negativeUntil.IsZero()).
+// Positive entries have no explicit TTL: callers validate the path
+// with os.Stat and drop the cache on mismatch, so claude CLI deleting
+// or renaming the JSONL self-heals on the next lookup. Negative
+// entries expire after pathCacheNegativeTTL so a legitimately new
+// JSONL (e.g. a session that started after the last scan) eventually
+// makes it past the cache rather than being shadowed forever.
+type pathCacheEntry struct {
+	path          string
+	negativeUntil time.Time
+}
+
+// pathCacheNegativeTTL caps how long a "scanned everything and didn't
+// find it" verdict stays cached. 60s matches the feeling of "retry
+// soon if you care" without letting a startup burst of 10 concurrent
+// resume-chain walks each pay for a full os.ReadDir pass. Positive
+// entries have no TTL — os.Stat revalidation covers invalidation.
+const pathCacheNegativeTTL = 60 * time.Second
+
+// pathCacheMaxEntries bounds the map so a long-running process that
+// sees tens of thousands of distinct sessionIDs (via resume chains or
+// dashboard queries) does not grow the map without limit. When the
+// cap is reached expired negative entries are dropped first; if all
+// entries are positive or fresh-negative, evictPathCacheLocked falls
+// through to arbitrary (random map-iteration) eviction so the cap is
+// enforced unconditionally.
+const pathCacheMaxEntries = 2048
+
+// pathCacheEvictBatch is the headroom evictPathCacheLocked creates after
+// running the arbitrary-eviction fallback pass. Dropping exactly one entry
+// per store at the cap would thrash the map — this cushions the cap so
+// subsequent stores amortise the eviction pass.
+const pathCacheEvictBatch = 16
+
 // NewScanner returns a fresh Scanner with empty caches. Used directly by
 // tests that need isolation; production callers use the package-level
 // wrappers which hit DefaultScanner.
@@ -78,6 +137,7 @@ func NewScanner() *Scanner {
 	return &Scanner{
 		promptCache:  promptCacheState{entries: make(map[string]promptCacheEntry)},
 		summaryCache: summaryCacheState{entries: make(map[string]summaryCacheEntry)},
+		pathCache:    pathCacheState{entries: make(map[string]pathCacheEntry)},
 	}
 }
 
@@ -209,7 +269,7 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 	sessDir := filepath.Join(claudeDir, "sessions")
 	entries, err := os.ReadDir(sessDir)
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
 		return nil, err
