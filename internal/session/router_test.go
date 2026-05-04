@@ -469,7 +469,8 @@ func TestSnapshotCostFallback(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			s := &ManagedSession{key: "k", totalCost: tt.sessCost}
+			s := &ManagedSession{key: "k"}
+			storeTotalCost(&s.totalCost, tt.sessCost)
 			if !tt.procNil {
 				p := newIdleProc()
 				p.totalCost = tt.procCost

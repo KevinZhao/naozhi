@@ -137,7 +137,7 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 			if proc != nil {
 				cost = proc.TotalCost()
 			} else {
-				cost = s.totalCost
+				cost = loadTotalCost(&s.totalCost)
 			}
 			// Clone PrevSessionIDs so the persistence path does not share
 			// the backing array with live session mutations (spawnSession

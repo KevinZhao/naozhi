@@ -689,10 +689,10 @@ func NewRouter(cfg RouterConfig) *Router {
 			}
 			s := &ManagedSession{
 				key:            key,
-				totalCost:      entry.TotalCost,
 				prevSessionIDs: entry.PrevSessionIDs,
 				exempt:         isExemptKey(key),
 			}
+			storeTotalCost(&s.totalCost, entry.TotalCost)
 			s.setWorkspace(entry.Workspace)
 			s.SetBackend(restoreBackendID)
 			s.SetCLIName(cliName)
@@ -1660,7 +1660,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 			oldTotalCost = p.TotalCost()
 		}
 		if oldTotalCost == 0 {
-			oldTotalCost = old.totalCost
+			oldTotalCost = loadTotalCost(&old.totalCost)
 		}
 	}
 	r.mu.Unlock()
@@ -1712,7 +1712,6 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		key:              key,
 		persistedHistory: oldHistory,
 		prevSessionIDs:   prevIDs,
-		totalCost:        oldTotalCost,
 		exempt:           opts.Exempt,
 		onSessionID: func(id string) {
 			r.mu.Lock()
@@ -1723,6 +1722,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 			r.mu.Unlock()
 		},
 	}
+	storeTotalCost(&s.totalCost, oldTotalCost)
 	s.setWorkspace(workspace)
 	s.SetBackend(backendID)
 	s.SetCLIName(wrapper.CLIName)
@@ -2064,7 +2064,6 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 		key:              newKey,
 		persistedHistory: old.persistedHistory,
 		prevSessionIDs:   slices.Clone(old.prevSessionIDs),
-		totalCost:        old.totalCost,
 		exempt:           old.exempt,
 		onSessionID: func(id string) {
 			r.mu.Lock()
@@ -2075,6 +2074,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 			r.mu.Unlock()
 		},
 	}
+	storeTotalCost(&fresh.totalCost, loadTotalCost(&old.totalCost))
 	fresh.setWorkspace(old.Workspace())
 	// Copy atomic fields (backend / CLI name+ver / user label / death reason /
 	// lastActive / lastPrompt / lastActivity / sessionID). Each field is an

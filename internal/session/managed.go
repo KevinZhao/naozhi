@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"strings"
 	"sync"
@@ -128,13 +129,23 @@ type ManagedSession struct {
 	// backend/cliName/cliVersion pattern.
 	userLabel atomic.Pointer[string]
 	// totalCost is the cumulative cost carried over from a previous process
-	// incarnation: written once at construction (either in NewRouter() when
+	// incarnation: written at construction (either in NewRouter() when
 	// restoring from store, or in spawnSession() when inheriting from the
-	// replaced session) and read-only thereafter. Snapshot() falls back to
-	// this value when the live process hasn't yet reported a result event —
-	// this avoids the $0.00 flash after resume/reconnect. Per-instance
-	// immutability means no sync is needed.
-	totalCost float64
+	// replaced session) and effectively read-only thereafter. Snapshot()
+	// falls back to this value when the live process hasn't yet reported a
+	// result event — this avoids the $0.00 flash after resume/reconnect.
+	//
+	// R183-CONCUR-M2: stored as atomic.Uint64 holding math.Float64bits()
+	// pack of the float64 value, mirroring the pattern the other 9 atomic
+	// fields use. The struct's lifecycle guarantees saveStore snapshots the
+	// *ManagedSession pointer under r.mu before reading cost, but the
+	// plain-float64 layout left the type-level contract "implicit sync-only"
+	// — any future refactor that adds a post-publication writer (e.g. a
+	// live-cost updater) would silently introduce a torn-read race. Making
+	// the field atomic at the type level prevents that regression.
+	// Read/write via loadTotalCost/storeTotalCost to avoid spreading the
+	// math.Float64bits incantation across call sites.
+	totalCost atomic.Uint64
 
 	// persistedHistory stores event entries that survive process restarts.
 	// Populated by InjectHistory and carried over when the process is replaced.
@@ -221,6 +232,23 @@ func storeStringAtomic(v *atomic.Pointer[string], s string) {
 	p := new(string)
 	*p = s
 	v.Store(p)
+}
+
+// loadTotalCost reads the float64 cumulative cost from an atomic.Uint64
+// field, decoding the IEEE-754 bit pattern via math.Float64frombits.
+// Returns 0 when the field has never been written (Load() → 0 maps to
+// float64 zero, same default the plain-float64 field had).
+func loadTotalCost(v *atomic.Uint64) float64 {
+	return math.Float64frombits(v.Load())
+}
+
+// storeTotalCost writes a float64 cumulative cost via atomic.Uint64,
+// encoding through math.Float64bits. Paired with loadTotalCost to keep the
+// packing/unpacking convention in one place — R183-CONCUR-M2 made the
+// field atomic to harden against future post-publication writers, and
+// having a helper keeps call sites free of bit-level noise.
+func storeTotalCost(v *atomic.Uint64, cost float64) {
+	v.Store(math.Float64bits(cost))
 }
 
 // Backend returns the backend ID ("" when the router default is in effect).
@@ -723,8 +751,9 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 	snap.DeathReason = loadStringAtomic(&s.deathReason)
 
 	proc := s.loadProcess()
+	sessCost := loadTotalCost(&s.totalCost)
 	if proc == nil {
-		snap.TotalCost = s.totalCost
+		snap.TotalCost = sessCost
 		snap.State = "ready"
 	} else {
 		snap.State = proc.GetState().String()
@@ -735,10 +764,10 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		// Claude CLI's total_cost_usd under --resume is cumulative, so once
 		// the next result lands, proc.TotalCost() will be >= s.totalCost
 		// and the display won't regress.
-		if pc := proc.TotalCost(); pc > s.totalCost {
+		if pc := proc.TotalCost(); pc > sessCost {
 			snap.TotalCost = pc
 		} else {
-			snap.TotalCost = s.totalCost
+			snap.TotalCost = sessCost
 		}
 		snap.Subagents = proc.TurnAgents()
 		// Prefer the EventLog-maintained summary (updated lock-free on every

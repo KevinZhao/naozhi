@@ -21,7 +21,7 @@ func TestRenameSession_HappyPath(t *testing.T) {
 	s.SetCLIName("claude-code")
 	s.SetCLIVersion("2.0.0")
 	s.SetUserLabel("")
-	s.totalCost = 1.42
+	storeTotalCost(&s.totalCost, 1.42)
 	s.lastActive.Store(time.Now().UnixNano())
 
 	r.mu.Lock()
@@ -46,8 +46,8 @@ func TestRenameSession_HappyPath(t *testing.T) {
 	if got.Workspace() != "/tmp/repo" {
 		t.Errorf("workspace not preserved: %q", got.Workspace())
 	}
-	if got.totalCost != 1.42 {
-		t.Errorf("totalCost not preserved: %v", got.totalCost)
+	if gotCost := loadTotalCost(&got.totalCost); gotCost != 1.42 {
+		t.Errorf("totalCost not preserved: %v", gotCost)
 	}
 	if got.Backend() != "claude" {
 		t.Errorf("backend not preserved: %q", got.Backend())
