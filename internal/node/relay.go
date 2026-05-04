@@ -35,6 +35,12 @@ type wsRelay struct {
 	lastEvent map[string]int64       // key -> last event unix ms (for reconnect)
 	done      chan struct{}
 	closed    bool
+	// R190-LEAK-M1 / R188-CONC-H1: baseCtx unifies cancellation of in-flight
+	// sendHistoryToClient RPCs. Close() fires baseCancel so FetchEvents
+	// unwinds without needing a per-call watcher goroutine. Mirrors the
+	// pattern established in ReverseConn (reverseconn.go:103).
+	baseCtx    context.Context
+	baseCancel context.CancelFunc
 	// wg tracks goroutines dispatched from Subscribe's second-subscriber
 	// path (sendHistoryToClient). R184-CONC-M1: without this, Close() can
 	// return while a history fetch is still in flight; its ctx is linked
@@ -55,12 +61,15 @@ func newWSRelay(node *HTTPClient) *wsRelay {
 	// Pre-compute the JSON field injection bytes once per relay.
 	nodeJSON, _ := json.Marshal(node.ID)
 	nodeField := []byte(`"node":` + string(nodeJSON) + `,`)
+	baseCtx, baseCancel := context.WithCancel(context.Background())
 	return &wsRelay{
-		node:      node,
-		nodeField: nodeField,
-		subs:      make(map[string][]EventSink),
-		lastEvent: make(map[string]int64),
-		done:      make(chan struct{}),
+		node:       node,
+		nodeField:  nodeField,
+		subs:       make(map[string][]EventSink),
+		lastEvent:  make(map[string]int64),
+		done:       make(chan struct{}),
+		baseCtx:    baseCtx,
+		baseCancel: baseCancel,
 	}
 }
 
@@ -140,6 +149,11 @@ func (r *wsRelay) Close() {
 	r.subs = make(map[string][]EventSink)
 	r.lastEvent = make(map[string]int64)
 	r.mu.Unlock()
+
+	// R190-LEAK-M1: cancel baseCtx so any in-flight FetchEvents inside
+	// sendHistoryToClient unwinds immediately. This replaces the per-call
+	// watcher goroutine (see sendHistoryToClient below).
+	r.baseCancel()
 
 	if conn != nil {
 		conn.Close()
@@ -485,18 +499,12 @@ func (r *wsRelay) sendHistoryToClient(c EventSink, key string, after int64) {
 
 	c.SendJSON(ServerMsg{Type: "subscribed", Key: key, Node: r.node.ID})
 
-	// Tie the 5s budget to the relay lifecycle so a Close() during fetch
-	// aborts the HTTP call immediately instead of letting the goroutine
-	// run for up to 5s and then send to a half-closed EventSink.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	// R190-LEAK-M1: derive the 5s RPC timeout from baseCtx so Close() can
+	// cancel every in-flight fetch by calling baseCancel() — no per-RPC
+	// watcher goroutine needed. Mirrors ReverseConn.Subscribe pattern that
+	// already passed reverseconn_basectx_test.go contract tests.
+	ctx, cancel := context.WithTimeout(r.baseCtx, 5*time.Second)
 	defer cancel()
-	go func() {
-		select {
-		case <-r.done:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
 
 	entries, err := r.node.FetchEvents(ctx, key, after)
 	if err != nil {

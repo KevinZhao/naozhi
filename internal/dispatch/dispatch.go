@@ -478,6 +478,16 @@ func (d *Dispatcher) sendAndReply(
 		switch {
 		case errors.Is(err, session.ErrMaxProcs):
 			errMsg = "当前处理已满，请稍后重试。"
+		case errors.Is(err, session.ErrMaxExemptSessions):
+			// R190-WRAP-M1: exempt-session cap means "too many projects/cron
+			// workers"; user /new won't clear it because the exempt counter
+			// is independent of user sessions. Tell the user explicitly so
+			// they contact the operator instead of looping on /new.
+			errMsg = "长时会话（planner/cron）已满，请联系管理员。"
+		case errors.Is(err, session.ErrNoCLIWrapper):
+			// R190-WRAP-M1: permanent config error; /new retry is hopeless.
+			// Surface a clear "ask operator" so IM users don't spin on it.
+			errMsg = "会话后端未配置，请联系管理员。"
 		case errors.Is(err, context.Canceled):
 			errMsg = "系统正在重启，请稍后重试。"
 			// R188-CONC-M1: ctx is already Done on shutdown path; using it for

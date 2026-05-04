@@ -242,6 +242,11 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	slog.Info("reverse node registered", "node_id", safeNodeID, "ip", ip)
 
 	if s.OnRegister != nil {
+		// msg.NodeID is kept verbatim here so downstream state
+		// (`s.conns[msg.NodeID]`, Server.nodes, knownNodes) is keyed with
+		// the authenticated-config id; OnDeregister below must pass the
+		// same value so the map entries round-trip correctly. Sanitizing
+		// only the slog.Info label (safeNodeID above) matches R181-SEC-P2-1.
 		s.OnRegister(msg.NodeID, rc)
 	}
 

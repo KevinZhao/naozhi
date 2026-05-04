@@ -12,6 +12,7 @@ import (
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
@@ -67,7 +68,11 @@ func (f *Feishu) startWebSocket() error {
 				msg := pe.Msg
 				data, mime, err := f.DownloadImage(ctx, pe.MessageID, pe.MediaKey)
 				if err != nil {
-					slog.Error("feishu ws download image failed", "err", err, "key", pe.MediaKey)
+					// R190-SEC-M3: pe.MediaKey is derived from user-crafted
+					// Feishu message content (image_key). Sanitize before slog
+					// so C1/bidi/LS/PS can't fragment structured-log fields.
+					slog.Error("feishu ws download image failed", "err", err,
+						"key", osutil.SanitizeForLog(pe.MediaKey, 128))
 					return
 				}
 				msg.Images = []platform.Image{{Data: data, MimeType: mime}}
@@ -137,7 +142,10 @@ func (f *Feishu) handleAudio(ctx context.Context, handler platform.MessageHandle
 
 	data, mime, err := f.DownloadAudio(ctx, messageID, fileKey)
 	if err != nil {
-		slog.Error("feishu download audio failed", "err", err, "key", fileKey)
+		// R190-SEC-M3: fileKey originates from user-crafted Feishu message
+		// content (file_key in audio messages). Sanitize before slog.
+		slog.Error("feishu download audio failed", "err", err,
+			"key", osutil.SanitizeForLog(fileKey, 128))
 		f.replyError(ctx, msg.ChatID, "[语音消息下载失败，请重试]")
 		return
 	}

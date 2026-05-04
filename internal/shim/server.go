@@ -840,7 +840,18 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 					return
 				}
 				if s.cli.alive() {
-					s.cli.stdin.Write([]byte(msg.Line + "\n")) //nolint:errcheck
+					// R190-ERR-M1: previously the write error was silently
+					// dropped. If the CLI process dies between alive() and
+					// Write (EPIPE), the client's message is lost without
+					// notification — the client keeps waiting for a reply
+					// that will never arrive until its next ping times out.
+					// Log the failure and disconnect the client so it can
+					// reconnect to a fresh shim; cli.exited will fire on
+					// the next loop iteration and take the normal exit path.
+					if _, err := s.cli.stdin.Write([]byte(msg.Line + "\n")); err != nil {
+						slog.Warn("shim: cli stdin write failed, disconnecting client", "err", err)
+						return
+					}
 				}
 			case "interrupt":
 				s.cli.interrupt()

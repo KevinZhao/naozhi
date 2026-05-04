@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"unicode"
 
@@ -140,7 +141,17 @@ func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.Incomin
 		"  /cron <add|list|del|pause|resume> — 定时任务"
 	if len(d.agentCommands) > 0 {
 		help += "\n\n可用 Agent:"
-		for cmd, agentID := range d.agentCommands {
+		// R190-MAP-L1: map iteration is non-deterministic, so /help would
+		// return agent lines in a random order each call, confusing users
+		// and breaking golden-file tests. Sort by command name so output is
+		// stable and comparable across invocations.
+		cmds := make([]string, 0, len(d.agentCommands))
+		for cmd := range d.agentCommands {
+			cmds = append(cmds, cmd)
+		}
+		slices.Sort(cmds)
+		for _, cmd := range cmds {
+			agentID := d.agentCommands[cmd]
 			// R188-GO-L2: cmd/agentID from operator config.yaml agent_commands;
 			// low-risk but sanitize for consistency with per-output policy —
 			// a misconfigured agent name with bidi/C1 runes would otherwise
@@ -203,10 +214,13 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 				// echo back to avoid bidi-override visual spoofing.
 				errMsg := "未知的 agent: " + osutil.SanitizeForLog(agentToReset, 64)
 				if len(d.agentCommands) > 0 {
-					var names []string
+					// R190-MAP-L1: sort so the hint line is stable across
+					// calls; otherwise the "可用:" list shuffles randomly.
+					names := make([]string, 0, len(d.agentCommands))
 					for cmd := range d.agentCommands {
 						names = append(names, cmd)
 					}
+					slices.Sort(names)
 					errMsg += "\n可用: " + strings.Join(names, ", ")
 				}
 				d.replyText(ctx, msg, errMsg, log)
@@ -274,7 +288,13 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 			return
 		}
 		next := d.scheduler.NextRun(job)
-		reply(fmt.Sprintf("Job %s 已创建。Schedule: %s, Next: %s", job.ID, job.Schedule, next.Format("01/02 15:04")))
+		// R190-LOG-M1: even though ParseCronAdd rejects C0/C1/bidi runes now,
+		// defence-in-depth: any future parser change that relaxes the policy
+		// must not leak visual-spoofing bytes back into group-chat replies.
+		reply(fmt.Sprintf("Job %s 已创建。Schedule: %s, Next: %s",
+			job.ID,
+			osutil.SanitizeForLog(job.Schedule, 256),
+			next.Format("01/02 15:04")))
 		log.Info("cron job created", "id", job.ID,
 			"schedule", osutil.SanitizeForLog(job.Schedule, 256))
 
@@ -588,6 +608,14 @@ func ParseCronAdd(args string) (schedule, prompt string, err error) {
 			return "", "", fmt.Errorf("schedule contains invalid control characters")
 		}
 	}
+	// R190-SEC-M2: rune-level catch for C1 controls / bidi overrides / LS/PS
+	// that byte-level loop above misses (all >= 0x20 in UTF-8 encoding).
+	// Mirrors dashboard's validateCronPrompt (dashboard_cron.go:194).
+	for _, r := range schedule {
+		if osutil.IsLogInjectionRune(r) {
+			return "", "", fmt.Errorf("schedule contains invalid unicode control characters")
+		}
+	}
 	prompt = strings.TrimSpace(tail)
 	if prompt == "" {
 		return "", "", fmt.Errorf("prompt cannot be empty")
@@ -603,6 +631,16 @@ func ParseCronAdd(args string) (schedule, prompt string, err error) {
 		c := prompt[i]
 		if c == 0 || (c < 0x20 && c != '\t') || c == 0x7f {
 			return "", "", fmt.Errorf("prompt contains invalid control characters")
+		}
+	}
+	// R190-SEC-M2: rune-level catch for C1 controls / bidi overrides / LS/PS.
+	// Matches server.validateCronPrompt second-pass scan so IM and dashboard
+	// ingress enforce the same policy. Unicode bidi overrides in --append-
+	// system-prompt argv are visible in /proc/<pid>/cmdline and can corrupt
+	// any terminal-based log viewer.
+	for _, r := range prompt {
+		if osutil.IsLogInjectionRune(r) {
+			return "", "", fmt.Errorf("prompt contains invalid unicode control characters")
 		}
 	}
 	return schedule, prompt, nil

@@ -1882,10 +1882,16 @@ func sanitizeStderrLine(line string) string {
 	// escape sequences nor stray control bytes. Scanning once cheaply and
 	// returning the original string avoids a strings.Builder allocation and
 	// a full-line copy on the common path.
+	//
+	// R190-SEC-L1: ASCII-only fast path. If the line contains any non-ASCII
+	// byte, bail to the slow path so the terminating rune-map can drop
+	// C1/bidi/LS/PS codepoints (>= 0x20 at the byte level, >=0xC0 as UTF-8
+	// leading bytes). A compromised claude CLI emitting bidi overrides in
+	// stderr could otherwise reverse operator journalctl output verbatim.
 	clean := true
 	for i := 0; i < len(line); i++ {
 		c := line[i]
-		if c == 0x1b || (c < 0x20 && c != '\t') {
+		if c == 0x1b || (c < 0x20 && c != '\t') || c >= 0x80 {
 			clean = false
 			break
 		}
@@ -1947,5 +1953,15 @@ func sanitizeStderrLine(line string) string {
 	// sanitizer only removes bytes from that capped input (ANSI escapes +
 	// control chars), so the resulting builder is guaranteed to be no longer
 	// than the pre-truncated input. No post-sanitize truncation needed.
-	return b.String()
+	//
+	// R190-SEC-L1: byte-level loop above drops ASCII C0 (< 0x20) but passes
+	// C1 controls (U+0080–U+009F), bidi overrides/isolates, LS/PS (>=0x20
+	// when decoded). Run one more pass with strings.Map at the rune level to
+	// match the policy SanitizeQuote / SanitizeForLog enforce elsewhere.
+	return strings.Map(func(r rune) rune {
+		if osutil.IsLogInjectionRune(r) {
+			return -1
+		}
+		return r
+	}, b.String())
 }

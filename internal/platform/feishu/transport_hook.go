@@ -386,7 +386,12 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				imgMsg := msg
 				data, mime, err := f.DownloadImage(f.stopCtx, event.Message.MessageID, content.ImageKey)
 				if err != nil {
-					slog.Error("feishu download image failed", "err", err, "key", content.ImageKey)
+					// R190-SEC-M3: content.ImageKey is attacker-controlled (a
+					// Feishu workspace member can craft a message with any
+					// image_key string). Sanitize before slog so C1/bidi/LS/PS
+					// runes can't fragment structured-log fields.
+					slog.Error("feishu download image failed", "err", err,
+						"key", osutil.SanitizeForLog(content.ImageKey, 128))
 					return
 				}
 				imgMsg.Images = []platform.Image{{Data: data, MimeType: mime}}

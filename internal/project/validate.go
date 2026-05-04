@@ -86,6 +86,17 @@ func ValidateConfig(cfg ProjectConfig) error {
 			return fmt.Errorf("%w: planner_prompt contains invalid control characters", ErrInvalidConfig)
 		}
 	}
+	// R190-SEC-M1: byte loop above catches ASCII C0/DEL; rune loop catches
+	// C1 controls (U+0080–U+009F), bidi overrides/isolates (U+202A–U+202E,
+	// U+2066–U+2069), LS/PS (U+2028/U+2029), zero-width joiners, etc — all
+	// >= 0x20 at byte level so they bypass the ASCII scan. PlannerPrompt
+	// flows into CLI argv (--append-system-prompt) and slog attrs; mirror
+	// the dashboard cron validator which already enforces this policy.
+	for _, r := range cfg.PlannerPrompt {
+		if osutil.IsLogInjectionRune(r) {
+			return fmt.Errorf("%w: planner_prompt contains invalid unicode control characters", ErrInvalidConfig)
+		}
+	}
 	if len(cfg.PlannerModel) > maxPlannerModelBytes {
 		return fmt.Errorf("%w: planner_model exceeds %d-byte limit", ErrInvalidConfig, maxPlannerModelBytes)
 	}
