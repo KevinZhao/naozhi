@@ -115,8 +115,19 @@ func applyClaudeEnvSettings() error {
 		if !matchesAnyPrefix(k, claudeEnvAllowedPrefixes) {
 			continue
 		}
+		// R188-SEC-M1: the prefix allowlist restricts key namespace but puts
+		// no constraint on the value. A malicious ~/.claude/settings.json
+		// could set ANTHROPIC_BASE_URL to an attacker-controlled host or
+		// inject NUL/newline into the process env that child processes
+		// inherit via execve. Gate the value size + reject NUL/newline.
+		if strings.ContainsAny(v, "\x00\n\r") || len(v) > 4096 {
+			slog.Warn("claude settings env: rejecting unsafe value", "key", k, "len", len(v))
+			continue
+		}
 		if _, exists := os.LookupEnv(k); !exists {
-			os.Setenv(k, v) //nolint:errcheck
+			if err := os.Setenv(k, v); err != nil {
+				slog.Warn("claude settings env: setenv failed", "key", k, "err", err)
+			}
 		}
 	}
 	return nil

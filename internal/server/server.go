@@ -234,16 +234,28 @@ func pathErrReason(err error) string {
 func loadOrCreateCookieSecret(stateDir string) []byte {
 	if stateDir != "" {
 		path := filepath.Join(stateDir, "cookie_secret")
-		if fi, err := os.Stat(path); err == nil {
-			if fi.Mode().Perm() != 0600 {
+		// R188-SEC-L4: use os.Lstat so a symlink attack (e.g. cookie_secret →
+		// /etc/some-readable-file) is detected instead of silently validated
+		// against the target's mode. A local attacker who can write stateDir
+		// would otherwise trick the check into passing against an arbitrary
+		// file and leak its contents via the cookie secret ABI, or trigger
+		// rotation loops that invalidate all sessions.
+		if fi, err := os.Lstat(path); err == nil {
+			switch {
+			case fi.Mode()&os.ModeSymlink != 0:
+				slog.Error("cookie_secret regenerated because file is a symlink",
+					"path", path, "reason", "symlink")
+			case fi.Mode().Perm() != 0600:
 				// Log at Error with an explicit reason so monitoring can
 				// distinguish "unsafe perms forced rotation" from first-run
 				// regeneration. All existing browser sessions will be
 				// invalidated — operator should know why.
 				slog.Error("cookie_secret regenerated due to unsafe permissions",
 					"path", path, "mode", fi.Mode().Perm(), "reason", "unsafe_permissions")
-			} else if data, err := os.ReadFile(path); err == nil && len(data) == 32 {
-				return data
+			default:
+				if data, err := os.ReadFile(path); err == nil && len(data) == 32 {
+					return data
+				}
 			}
 		}
 		b := make([]byte, 32)

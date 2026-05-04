@@ -182,6 +182,14 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	if dialErr != nil {
 		return false, fmt.Errorf("dial: %w", dialErr)
 	}
+	// R188-SEC-L2: surface operator signal when tokens are transmitted
+	// over plaintext ws:// (requires config.upstream.insecure=true to pass
+	// validation). A single warn per successful dial is enough for ops
+	// dashboards to catch forgotten insecure mode without spamming the
+	// journal on reconnect loops.
+	if strings.HasPrefix(c.cfg.URL, "ws://") {
+		slog.Warn("upstream connector: transmitting token over plaintext ws:// — set upstream.insecure=false and use wss:// for production")
+	}
 	// Bound inbound frame size so a malicious or buggy primary cannot
 	// exhaust memory with a single huge message. 16 MB matches the primary
 	// side's ReverseConn limit (reverseserver.go).

@@ -30,7 +30,39 @@ func lookupFFmpeg() (string, error) {
 type pcmStream struct {
 	cmd    *exec.Cmd
 	stdout io.ReadCloser
-	stderr bytes.Buffer
+	stderr cappedBuffer
+}
+
+// cappedBuffer wraps bytes.Buffer with a max-byte gate to bound memory used
+// by ffmpeg stderr capture. R188-SEC-L3: without a cap a malicious audio file
+// that triggers pathological ffmpeg stderr output could accumulate unbounded
+// memory × transcribeSemCap concurrent instances.
+type cappedBuffer struct {
+	buf     bytes.Buffer
+	dropped int
+}
+
+const ffmpegStderrCap = 64 * 1024
+
+func (c *cappedBuffer) Write(p []byte) (int, error) {
+	remain := ffmpegStderrCap - c.buf.Len()
+	if remain <= 0 {
+		c.dropped += len(p)
+		return len(p), nil
+	}
+	if len(p) > remain {
+		c.buf.Write(p[:remain])
+		c.dropped += len(p) - remain
+		return len(p), nil
+	}
+	return c.buf.Write(p)
+}
+
+func (c *cappedBuffer) String() string {
+	if c.dropped == 0 {
+		return c.buf.String()
+	}
+	return fmt.Sprintf("%s...[%d bytes dropped]", c.buf.String(), c.dropped)
 }
 
 // Read implements io.Reader, reading PCM data from ffmpeg stdout.

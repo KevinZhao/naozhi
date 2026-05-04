@@ -474,15 +474,24 @@ func (d *Dispatcher) sendAndReply(
 			log.Error("get session", "err", err)
 		}
 		var errMsg string
+		replyCtx := ctx
 		switch {
 		case errors.Is(err, session.ErrMaxProcs):
 			errMsg = "当前处理已满，请稍后重试。"
 		case errors.Is(err, context.Canceled):
 			errMsg = "系统正在重启，请稍后重试。"
+			// R188-CONC-M1: ctx is already Done on shutdown path; using it for
+			// the user-facing error reply silently drops the notification at
+			// the platform layer. Match the handleOwnerLoopPanic recovery
+			// pattern and use a fresh Background ctx with short timeout so the
+			// user actually sees the "restart, retry" message.
+			notifyCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			replyCtx = notifyCtx
 		default:
 			errMsg = "会话创建失败，请发送 /new 重置后重试。"
 		}
-		d.replyText(ctx, msg, errMsg, log)
+		d.replyText(replyCtx, msg, errMsg, log)
 		return
 	}
 

@@ -7,6 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"io"
 	"os"
 	"strings"
@@ -14,6 +17,77 @@ import (
 	"testing"
 	"time"
 )
+
+// readMethodBody parses srcPath with go/parser and returns the exact source
+// text between the opening '{' and closing '}' of the method named methodName
+// on the receiver type recvType. Using AST-accurate token offsets instead of
+// the older `strings.Index(src[idx:], "\n}\n")` fragment-scan means:
+//
+//  1. Refactors that reflow whitespace inside the body (removing blank lines,
+//     changing brace placement) don't break the extraction.
+//
+//  2. A neighbouring function that happens to end with "}\n}" (e.g. nested
+//     struct literal on the last line) can no longer cause the scan to stop
+//     early and silently return a smaller slice.
+//
+//  3. A neighbouring function that happens to have "\n}\n" before the real
+//     end of the target function can no longer steal content — the target's
+//     body is bounded by token.Pos from the parser, not text heuristics.
+//
+// R175-P3: replaces the fragile "\n}\n" fragment extraction that earlier
+// contract tests relied on.
+func readMethodBody(t *testing.T, srcPath, recvType, methodName string) string {
+	t.Helper()
+	data, err := os.ReadFile(srcPath)
+	if err != nil {
+		t.Fatalf("read %s: %v", srcPath, err)
+	}
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, srcPath, data, parser.SkipObjectResolution)
+	if err != nil {
+		t.Fatalf("parse %s: %v", srcPath, err)
+	}
+	for _, decl := range file.Decls {
+		fn, ok := decl.(*ast.FuncDecl)
+		if !ok || fn.Name == nil || fn.Name.Name != methodName {
+			continue
+		}
+		if !methodReceiverMatches(fn, recvType) {
+			continue
+		}
+		if fn.Body == nil {
+			t.Fatalf("%s.%s has no body", recvType, methodName)
+		}
+		// Body.Lbrace and Body.Rbrace straddle '{' and '}'. Offsets are 1-based;
+		// convert with fset.Position().Offset - 1 to byte index.
+		start := fset.Position(fn.Body.Lbrace).Offset
+		end := fset.Position(fn.Body.Rbrace).Offset + 1 // include the closing brace
+		if start < 0 || end > len(data) || start >= end {
+			t.Fatalf("invalid body range for %s.%s: [%d,%d)", recvType, methodName, start, end)
+		}
+		return string(data[start:end])
+	}
+	t.Fatalf("method %s.%s not found in %s", recvType, methodName, srcPath)
+	return ""
+}
+
+// methodReceiverMatches reports whether fn is a method on recvType. It handles
+// both value and pointer receivers and ignores the receiver variable name.
+func methodReceiverMatches(fn *ast.FuncDecl, recvType string) bool {
+	if fn.Recv == nil || len(fn.Recv.List) == 0 {
+		return false
+	}
+	expr := fn.Recv.List[0].Type
+	// Unwrap *T.
+	if star, ok := expr.(*ast.StarExpr); ok {
+		expr = star.X
+	}
+	ident, ok := expr.(*ast.Ident)
+	if !ok {
+		return false
+	}
+	return ident.Name == recvType
+}
 
 // startServerDrain starts a goroutine that reads and discards all data the
 // client sends to the server side of the shim connection. This is required
@@ -703,20 +777,11 @@ func TestProcess_Close_SendsShutdownNotCloseStdin(t *testing.T) {
 // the bare p.shimSend(shutdown) pattern fails loudly.
 func TestProcess_Close_SetsWriteDeadline(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("process.go")
-	if err != nil {
-		t.Fatalf("read process.go: %v", err)
-	}
-	src := string(data)
-	idx := strings.Index(src, "func (p *Process) Close() {")
-	if idx < 0 {
-		t.Fatal("Close method not found")
-	}
-	end := strings.Index(src[idx:], "\n}\n")
-	if end < 0 {
-		t.Fatal("Close method body not terminated")
-	}
-	body := src[idx : idx+end]
+	// R175-P3: use AST-accurate body extraction instead of `\n}\n` fragment
+	// scan so a future refactor that changes brace-placement inside Close (or
+	// in a neighbouring method) cannot silently widen/truncate the slice and
+	// turn these assertions into false positives/negatives.
+	body := readMethodBody(t, "process.go", "Process", "Close")
 	// Invariant 1: must take shimWMu.
 	if !strings.Contains(body, "p.shimWMu.Lock()") {
 		t.Error("Close must acquire shimWMu before sending shutdown (mirror Kill/Detach)")
@@ -1372,4 +1437,84 @@ func TestSanitizeStderrLine_Truncate(t *testing.T) {
 	if !strings.HasPrefix(got, strings.Repeat("x", maxStderrLogLineBytes)) {
 		t.Errorf("expected %d x prefix, got len=%d", maxStderrLogLineBytes, len(got))
 	}
+}
+
+// TestReadMethodBody_Contract locks the semantics of the AST-accurate
+// body-extraction helper that replaces the fragile `\n}\n` fragment scan used
+// by earlier contract tests (R175-P3). If these invariants regress, the
+// downstream contract tests (TestProcess_Close_SetsWriteDeadline et al.) can
+// silently succeed on bodies that no longer contain their required patterns.
+func TestReadMethodBody_Contract(t *testing.T) {
+	t.Parallel()
+
+	// Invariant 1: the helper must resolve a real method on *Process that
+	// contains its documented markers. Close was the original motivating
+	// caller, so we reuse it as the positive example.
+	body := readMethodBody(t, "process.go", "Process", "Close")
+	if !strings.Contains(body, "shimSendLocked") {
+		t.Errorf("Close body must contain shimSendLocked call; extracted body missing marker — helper may be returning the wrong range. Body:\n%s", body)
+	}
+	if !strings.HasPrefix(strings.TrimLeft(body, " \t"), "{") {
+		t.Errorf("extracted body must start with an opening brace; got prefix=%q", body[:min2(16, len(body))])
+	}
+	if !strings.HasSuffix(strings.TrimRight(body, " \t\n"), "}") {
+		t.Errorf("extracted body must end with a closing brace; got suffix=%q", body[max2(0, len(body)-16):])
+	}
+
+	// Invariant 2: braces must balance in the extracted slice. A miscount by
+	// one would indicate the helper stopped at a nested inline literal rather
+	// than the method's true end. We deliberately count only the literal
+	// braces in source text (including those inside string literals / comments)
+	// because a correctly-extracted method body is a self-contained scope and
+	// therefore brace-balanced at the lexical level.
+	opens := strings.Count(body, "{")
+	closes := strings.Count(body, "}")
+	if opens != closes {
+		t.Errorf("extracted body has unbalanced braces: opens=%d closes=%d — helper likely truncated. Body:\n%s", opens, closes, body)
+	}
+
+	// Invariant 3 (missing method must fail loudly) is deliberately NOT
+	// covered here because Go's testing package exposes no way to construct
+	// a *testing.T that captures Fatalf without also failing the parent test.
+	// The helper's contract is "call t.Fatalf on miss" — this is enforced by
+	// normal usage: every caller in this file treats t as the real test
+	// driver, and a regression that silently returns "" would cause every
+	// downstream Contains assertion to fail, which is itself a loud signal.
+
+	// Invariant 4: extraction must differentiate between two methods with
+	// similar neighbouring signatures. Spawn and Send both exist on *Process;
+	// extracting Spawn must not include any text from Send (or vice versa).
+	// We verify by extracting Kill and checking that a marker unique to
+	// Detach (the sibling method) does not appear. If the helper stopped at
+	// a neighbour's closing brace it would bleed Detach content in.
+	killBody := readMethodBody(t, "process.go", "Process", "Kill")
+	if strings.Contains(killBody, "Detach()") && !strings.Contains(killBody, "// Kill") {
+		// Kill body legitimately may reference Detach in a comment chain, but
+		// calling Detach() from Kill() would be unusual — flag as a smell.
+		t.Logf("Kill body references Detach(); confirm helper did not bleed across methods")
+	}
+	// Deterministic check: Kill must be a reasonably-sized slice, not the
+	// entire rest of the file. Real Kill is a few dozen lines; if the helper
+	// returned everything to EOF it would be tens of KB.
+	if len(killBody) > 8*1024 {
+		t.Errorf("Kill body extraction returned %d bytes — helper likely over-reached past method end", len(killBody))
+	}
+}
+
+// min2 / max2 are tiny integer helpers used by TestReadMethodBody_Contract's
+// slice-bounds diagnostics. Named to avoid colliding with the stdlib `min` /
+// `max` builtins introduced in Go 1.21 (those accept any ordered type but the
+// compile-time overload could produce surprising types here).
+func min2(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+func max2(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
 }

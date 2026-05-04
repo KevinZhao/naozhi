@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime/debug"
 	"slices"
 	"strings"
@@ -23,6 +24,34 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
 )
+
+// R188-SEC-M2: model identifiers flow into the `--model` argv of the CLI child
+// process. An authenticated dashboard user (or a malicious IM planner reply)
+// could inject additional flags via a whitespace-containing model string. The
+// project package's plannerModelRe enforces the same pattern for planner
+// config; keep the regex in sync if either changes.
+const maxModelBytes = 128
+
+var modelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/\-]*$`)
+
+// validateModel returns nil for empty (use router default) or any string
+// matching modelRe under the byte cap; otherwise returns ErrInvalidModel.
+func validateModel(model string) error {
+	if model == "" {
+		return nil
+	}
+	if len(model) > maxModelBytes {
+		return fmt.Errorf("%w: exceeds %d bytes", ErrInvalidModel, maxModelBytes)
+	}
+	if !modelRe.MatchString(model) {
+		return fmt.Errorf("%w: must match %s", ErrInvalidModel, modelRe)
+	}
+	return nil
+}
+
+// ErrInvalidModel is returned when AgentOpts.Model fails validateModel.
+// Callers should map it to an HTTP 400 or IM error reply.
+var ErrInvalidModel = errors.New("invalid model identifier")
 
 // ShutdownTimeout is the maximum time to wait for graceful shutdown
 // of running sessions (Router) and HTTP connections (Server).
@@ -1395,6 +1424,13 @@ const (
 // GetOrCreate returns an existing session or creates a new one.
 // AgentOpts overrides the router defaults for model and args.
 func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*ManagedSession, SessionStatus, error) {
+	// R188-SEC-M2: flag-injection guard on the per-request Model override.
+	// Router-global r.model is operator-configured in config.yaml and trusted;
+	// opts.Model originates from dashboard WS messages, upstream RPC, or
+	// planner project config and must be validated at the router boundary.
+	if err := validateModel(opts.Model); err != nil {
+		return nil, 0, err
+	}
 	r.mu.Lock()
 
 	if s, ok := r.sessions[key]; ok {
@@ -3102,6 +3138,11 @@ func (r *Router) ManagedExcludeSets() (pids map[int]bool, sessionIDs map[string]
 // for dashboard display. The caller must ensure the original process has been
 // terminated before calling.
 func (r *Router) Takeover(ctx context.Context, key string, sessionID string, workspace string, opts AgentOpts) (*ManagedSession, error) {
+	// R188-SEC-M2: same flag-injection guard as GetOrCreate. Takeover flows
+	// from upstream RPC with caller-supplied AgentOpts.
+	if err := validateModel(opts.Model); err != nil {
+		return nil, err
+	}
 	r.mu.Lock()
 	// If key already exists (e.g. re-takeover same CWD), close the old process
 	if s, ok := r.sessions[key]; ok {

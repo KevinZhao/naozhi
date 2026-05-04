@@ -705,7 +705,11 @@ func (h *ShimHandle) ReadMsg() (ServerMsg, error) {
 	var buf []byte
 	for {
 		chunk, err := h.Reader.ReadSlice('\n')
-		if err != nil && err != bufio.ErrBufferFull {
+		if err != nil && !errors.Is(err, bufio.ErrBufferFull) {
+			// R188-ERR-H1: use errors.Is to match cli/process.go convention;
+			// a future bufio wrapper that wraps ErrBufferFull would otherwise
+			// be treated as terminal and close the connection on every
+			// oversized message instead of continuing to accumulate chunks.
 			// Any partial chunk on a terminal error is abandoned; we cannot
 			// parse a half line and the bufio reader is about to be closed.
 			return ServerMsg{}, err

@@ -40,7 +40,16 @@ func (d *Dispatcher) replyText(ctx context.Context, msg platform.IncomingMessage
 		if log != nil {
 			log.Warn("reply failed", "err", err)
 		} else {
-			slog.Warn("reply failed", "platform", msg.Platform, "chat", msg.ChatID, "err", err)
+			// R188-SEC-M1: when nil log is passed (callers: handleHelpCommand,
+			// handleOwnerLoopPanic recovery), msg.ChatID / msg.Platform come from
+			// webhook payloads and are never sanitized upstream. Apply the same
+			// SanitizeLogAttr guard BuildHandler uses for the enriched logger so
+			// control chars / bidi overrides from malicious chat IDs cannot
+			// fragment journald structured fields.
+			slog.Warn("reply failed",
+				"platform", session.SanitizeLogAttr(msg.Platform),
+				"chat", session.SanitizeLogAttr(msg.ChatID),
+				"err", err)
 		}
 	}
 	return true
@@ -94,7 +103,16 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 	case trimmed == "/pwd":
 		chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
 		ws := d.router.GetWorkspace(chatKey)
-		d.replyText(ctx, msg, "当前工作目录: "+ws, log)
+		if ws == "" {
+			d.replyText(ctx, msg, "当前工作目录: （未设置，使用进程默认）", log)
+			return true
+		}
+		// R188-SEC-H1: defence-in-depth sanitize before echoing to IM channel.
+		// absPath is stored by /cd (already EvalSymlinks-resolved and bounded by
+		// allowedRoot prefix check), but operator-supplied state dirs may still
+		// contain control chars from mis-configuration. Same hardening as /cd
+		// echo (R185-SEC-H1).
+		d.replyText(ctx, msg, "当前工作目录: "+osutil.SanitizeForLog(ws, 4096), log)
 		return true
 
 	case trimmed == "/project" || strings.HasPrefix(trimmed, "/project "):
@@ -123,7 +141,11 @@ func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.Incomin
 	if len(d.agentCommands) > 0 {
 		help += "\n\n可用 Agent:"
 		for cmd, agentID := range d.agentCommands {
-			help += "\n  /" + cmd + " → " + agentID
+			// R188-GO-L2: cmd/agentID from operator config.yaml agent_commands;
+			// low-risk but sanitize for consistency with per-output policy —
+			// a misconfigured agent name with bidi/C1 runes would otherwise
+			// be forwarded to potentially many group-chat users.
+			help += "\n  /" + osutil.SanitizeForLog(cmd, 64) + " → " + osutil.SanitizeForLog(agentID, 64)
 		}
 	}
 	d.replyText(ctx, msg, help, nil)
@@ -243,13 +265,18 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 			// server-normalized form of the attacker's input and parser
 			// token positions. Log the detail for operator triage, reply
 			// with a generic message. Mirrors dashboard_cron handleCreate.
-			log.Warn("cron AddJob rejected", "err", err, "schedule", job.Schedule)
+			// R188-LOG-M1: schedule comes from user IM input; ParseCronAdd
+			// only gates ASCII C0/DEL, leaving C1 controls / bidi / LS/PS
+			// that can fragment journald structured fields.
+			log.Warn("cron AddJob rejected", "err", err,
+				"schedule", osutil.SanitizeForLog(job.Schedule, 256))
 			reply("创建失败：请检查定时表达式格式")
 			return
 		}
 		next := d.scheduler.NextRun(job)
 		reply(fmt.Sprintf("Job %s 已创建。Schedule: %s, Next: %s", job.ID, job.Schedule, next.Format("01/02 15:04")))
-		log.Info("cron job created", "id", job.ID, "schedule", job.Schedule)
+		log.Info("cron job created", "id", job.ID,
+			"schedule", osutil.SanitizeForLog(job.Schedule, 256))
 
 	case "list":
 		jobs := d.scheduler.ListJobs(msg.Platform, msg.ChatID)

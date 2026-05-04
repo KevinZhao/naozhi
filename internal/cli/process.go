@@ -155,6 +155,16 @@ type Process struct {
 	// the session layer to broadcast state changes (e.g., after shim reconnect
 	// where isMidTurn set StateRunning but the CLI finished before Send was called).
 	// Protected by mu — use SetOnTurnDone to assign.
+	//
+	// Idempotency contract (R183-CONCUR-M1): implementations MUST be idempotent
+	// and safe to call multiple times in quick succession. readLoop fires the
+	// callback from several arms that may execute back-to-back inside a single
+	// iteration — notably the `result + reconnectedMidTurn` CAS path followed by
+	// `<-killCh` when Kill() races the mid-turn reconnect finishing. It is also
+	// fired by cli_exited, the fall-out StateDead path, and the panic-recover
+	// defer. Current session-layer callbacks (`r.notifyChange()` and Send()'s
+	// NotifyIdle → Broadcast) are already idempotent, but the contract is
+	// documented here so future callbacks do not silently regress.
 	onTurnDone func()
 
 	// reconnectedMidTurn is set by SpawnReconnect when the last replayed event
@@ -653,6 +663,10 @@ func (p *Process) readLoop() {
 				cb := p.onTurnDone
 				p.mu.Unlock()
 				if wasRunning && cb != nil {
+					// R183-CONCUR-M1: the killCh select below may fire cb again
+					// in the same readLoop iteration if Kill() was racing this
+					// stray-result path. See onTurnDone godoc for the idempotency
+					// contract that makes this safe.
 					cb()
 				}
 			}
@@ -1588,7 +1602,13 @@ func parseAgentInput(input json.RawMessage) agentInput {
 	}
 	var inp agentInput
 	if err := json.Unmarshal(input, &inp); err != nil {
-		slog.Debug("parseAgentInput: unmarshal failed", "err", err)
+		// R188-PANIC-H1: upgrade from Debug to Warn. Silent zero-value return
+		// produces blank agent cards in the dashboard; at Warn operators can
+		// trace which CLI emitted a malformed Agent.input and whether the
+		// schema drifted (e.g. CLI emitting "input": "string" instead of
+		// {"subagent_type": ...}).
+		slog.Warn("parseAgentInput: unmarshal failed",
+			"err", err, "input_len", len(input))
 	}
 	return inp
 }
@@ -1697,11 +1717,22 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 			return toolName + " " + TruncateRunes(s.Description, 60)
 		}
 	default:
-		// Fallback: try common keys with a map (rare path for unknown tools)
-		var inp map[string]json.RawMessage
+		// R188-PERF-P2-C: replaced map[string]json.RawMessage decode with
+		// concrete struct — json.Decoder ignores unknown fields by default so
+		// MCP tools that add new schemas still work, and we skip the reflect
+		// + map alloc cost on the unknown-tool fallback path.
+		// Fallback: try common keys with a struct (rare path for unknown tools)
+		var inp struct {
+			Description string `json:"description"`
+			FilePath    string `json:"file_path"`
+			Path        string `json:"path"`
+			Command     string `json:"command"`
+			Pattern     string `json:"pattern"`
+			Prompt      string `json:"prompt"`
+		}
 		if json.Unmarshal(input, &inp) == nil {
-			for _, key := range []string{"description", "file_path", "path", "command", "pattern", "prompt"} {
-				if v := getStr(inp, key); v != "" {
+			for _, v := range []string{inp.Description, inp.FilePath, inp.Path, inp.Command, inp.Pattern, inp.Prompt} {
+				if v != "" {
 					return toolName + " " + TruncateRunes(v, 80)
 				}
 			}
@@ -1721,6 +1752,13 @@ func (p *Process) GetState() ProcessState {
 // SetOnTurnDone sets the callback invoked by readLoop when a result event
 // transitions the process from Running to Ready without an active Send().
 // Thread-safe: may be called while readLoop is running.
+//
+// The callback MUST be idempotent — readLoop can fire it multiple times in
+// rapid succession when a mid-turn reconnect CAS path is immediately followed
+// by a Kill (see the `onTurnDone` field godoc for the full list of fan-in
+// sites). Implementations should assume "invocation count ≥ state change
+// count" and perform only wake/broadcast/notify work that collapses naturally
+// under repeated calls.
 func (p *Process) SetOnTurnDone(fn func()) {
 	p.mu.Lock()
 	p.onTurnDone = fn
