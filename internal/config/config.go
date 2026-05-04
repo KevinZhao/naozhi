@@ -431,6 +431,23 @@ func validateConfig(cfg *Config) error {
 		if cfg.Platforms.Weixin.Token == "" {
 			return fmt.Errorf("weixin token is required")
 		}
+		// R191-SEC-M3: base_url flows into every platform HTTP call. Without
+		// this validation an operator could point it at http://169.254.169.254
+		// (EC2 IMDS) or http://localhost:9200 (internal services) and every
+		// long-poll/send request is weaponised into SSRF. node config already
+		// enforces scheme+host (see validateNodeURL); weixin was the gap.
+		if bu := cfg.Platforms.Weixin.BaseURL; bu != "" {
+			u, err := url.Parse(bu)
+			if err != nil {
+				return fmt.Errorf("weixin base_url invalid: %w", err)
+			}
+			if u.Scheme != "http" && u.Scheme != "https" {
+				return fmt.Errorf("weixin base_url must use http or https (got %q)", u.Scheme)
+			}
+			if u.Host == "" {
+				return fmt.Errorf("weixin base_url must have a host")
+			}
+		}
 	}
 
 	for id, nc := range cfg.Nodes {
@@ -502,6 +519,28 @@ func validateConfig(cfg *Config) error {
 		// credential: the placeholder is readable in the repository, so
 		// anyone who ever sees the config knows the login token.
 		return fmt.Errorf("server.dashboard_token contains unexpanded ${VAR} — check environment variables (refusing to run with a guessable token)")
+	}
+
+	// R191-ARCH-L12: cross-reference cron.notify_default.platform against
+	// configured platform sections. Without this check a typo silently falls
+	// into the per-tick warning path ("cron notify: platform not found") and
+	// operators only discover the misconfig once a notification actually
+	// fires. An empty platform disables the default entirely and is legal.
+	if np := cfg.Cron.NotifyDefault.Platform; np != "" {
+		ok := false
+		switch np {
+		case "feishu":
+			ok = cfg.Platforms.Feishu != nil
+		case "slack":
+			ok = cfg.Platforms.Slack != nil
+		case "discord":
+			ok = cfg.Platforms.Discord != nil
+		case "weixin":
+			ok = cfg.Platforms.Weixin != nil
+		}
+		if !ok {
+			return fmt.Errorf("cron.notify_default.platform %q is not a configured platform (set platforms.%s or clear notify_default)", np, np)
+		}
 	}
 
 	return nil

@@ -1041,13 +1041,16 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	if len(s.persistedHistory) > maxPersistedHistory {
 		s.persistedHistory = s.persistedHistory[len(s.persistedHistory)-maxPersistedHistory:]
 	}
-	proc := s.loadProcess()
 	s.historyMu.Unlock()
 
+	// R191-GO-M1: reload proc AFTER unlock so we see any fresh process stored
+	// between append and forward. The prior snapshot-under-lock path could
+	// forward entries to a dying process while a concurrent spawnSession stored
+	// a replacement, causing the replacement to miss the entries.
 	// proc.InjectHistory takes its own eventLog.mu write lock; calling it
 	// after releasing historyMu avoids holding two locks simultaneously and
 	// matches the rest of this file's loadProcess-then-call pattern.
-	if proc != nil {
+	if proc := s.loadProcess(); proc != nil {
 		proc.InjectHistory(entries)
 	}
 

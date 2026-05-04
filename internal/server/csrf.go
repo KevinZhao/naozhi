@@ -67,6 +67,14 @@ func sameOriginOK(r *http.Request, trustedProxy bool) bool {
 		if err != nil || u.Host == "" {
 			return false
 		}
+		// R191-SEC-M1: Reject non-http(s) Referer schemes. javascript:,
+		// data:, ftp:, file:, blob:, etc. can parse with the correct host
+		// but must not count as browser same-origin; a crafted non-browser
+		// client (or misconfigured intermediary) could otherwise bypass
+		// the CSRF gate by supplying ftp://host/x.
+		if u.Scheme != "http" && u.Scheme != "https" {
+			return false
+		}
 		return u.Host == host
 	}
 	// RFC 6454 allows "null" for opaque origins (sandboxed iframes, file://
@@ -77,6 +85,10 @@ func sameOriginOK(r *http.Request, trustedProxy bool) bool {
 	}
 	u, err := url.Parse(origin)
 	if err != nil || u.Host == "" {
+		return false
+	}
+	// R191-SEC-M1: Same scheme guard as the Referer fallback above.
+	if u.Scheme != "http" && u.Scheme != "https" {
 		return false
 	}
 	return u.Host == host

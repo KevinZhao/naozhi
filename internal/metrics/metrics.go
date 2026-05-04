@@ -4,11 +4,15 @@
 // pprof), so post-incident analysis relied on parsing journalctl. This
 // package adds five counters covering the highest-signal lifecycle events:
 //
-//   - SessionCreateTotal:  successful spawnSession calls
-//   - SessionEvictTotal:   LRU eviction frees a slot
-//   - CLISpawnTotal:       wrapper.Spawn returns a Process (new CLI child)
-//   - WSAuthFailTotal:     WebSocket auth_fail reply emitted
-//   - ShimRestartTotal:    shim.Manager.StartShimWithBackend succeeds
+//   - SessionCreateTotal:     successful spawnSession calls
+//   - SessionEvictTotal:      LRU eviction frees a slot
+//   - CLISpawnTotal:          wrapper.Spawn returns a Process (new CLI child)
+//   - WSAuthFailTotal:        WebSocket auth_fail reply emitted
+//   - ShimRestartTotal:       shim.Manager.StartShimWithBackend succeeds
+//   - SpawnPanicRecoveredTotal: panicSafeSpawn absorbs a wrapper.Spawn panic
+//     (shim exec crash / bogus protocol Init / etc.). A non-zero value is an
+//     operator-actionable reliability signal: the recover path keeps naozhi
+//     alive but the underlying bug should be investigated. R172-ARCH-D10.
 //
 // Counters are published via the stdlib expvar package, which auto-registers
 // itself on /debug/vars. Exposing them requires routing /debug/vars through
@@ -62,4 +66,13 @@ var (
 	// of live sessions at restart time. Growing between restarts indicates
 	// shim crash / respawn churn.
 	ShimRestartTotal = expvar.NewInt("naozhi_shim_restart_total")
+
+	// SpawnPanicRecoveredTotal counts panics absorbed by panicSafeSpawn in
+	// session.Router (wraps cli.Wrapper.Spawn). Each increment corresponds to
+	// a slog.Error("spawnSession: wrapper.Spawn panicked", ...) record with a
+	// full stack trace — operators should grep journalctl for those lines to
+	// find the root cause. The counter itself is the at-a-glance "has a panic
+	// ever happened on this process lifetime?" indicator without scanning
+	// logs. R172-ARCH-D10.
+	SpawnPanicRecoveredTotal = expvar.NewInt("naozhi_spawn_panic_recovered_total")
 )

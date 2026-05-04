@@ -98,7 +98,14 @@ type Hub struct {
 	// Per-IP rate limiter for WebSocket auth attempts — prevents token brute-force
 	// via repeated connect/auth/disconnect cycles that bypass HTTP login rate limits.
 	// Returns true when the IP is allowed; false signals rate-limit hit.
-	wsAuthLimiter func(ip string) bool
+	//
+	// R191-SEC-M2 split: wsAuthLimiter gates the *inner* `auth` WS message
+	// (direct credential test, reuses loginLimiter). wsUpgradeLimiter gates
+	// the upgrade handshake itself, which can fire legitimately on tab-reload
+	// / mobile-wake without any credential test — a looser budget prevents
+	// the two paths from DoS'ing each other via a shared bucket.
+	wsAuthLimiter    func(ip string) bool
+	wsUpgradeLimiter func(ip string) bool
 
 	trustedProxy bool // trust X-Forwarded-For for client IP extraction
 	upgrader     websocket.Upgrader
@@ -117,19 +124,20 @@ type Hub struct {
 
 // HubOptions holds configuration for a Hub.
 type HubOptions struct {
-	Router        *session.Router
-	Agents        map[string]session.AgentOpts
-	AgentCmds     map[string]string
-	DashToken     string
-	CookieMAC     string
-	Guard         *session.Guard
-	Queue         *dispatch.MessageQueue
-	Nodes         map[string]node.Conn
-	NodesMu       *sync.RWMutex
-	ProjectMgr    *project.Manager
-	AllowedRoot   string
-	TrustedProxy  bool
-	WSAuthLimiter func(ip string) bool
+	Router           *session.Router
+	Agents           map[string]session.AgentOpts
+	AgentCmds        map[string]string
+	DashToken        string
+	CookieMAC        string
+	Guard            *session.Guard
+	Queue            *dispatch.MessageQueue
+	Nodes            map[string]node.Conn
+	NodesMu          *sync.RWMutex
+	ProjectMgr       *project.Manager
+	AllowedRoot      string
+	TrustedProxy     bool
+	WSAuthLimiter    func(ip string) bool
+	WSUpgradeLimiter func(ip string) bool
 	// ParentCtx is the application-level context whose cancellation must
 	// propagate to the Hub. When set, NewHub derives h.ctx via
 	// context.WithCancel(ParentCtx) so that parent-ctx cancel tears down
@@ -168,22 +176,23 @@ func NewHub(opts HubOptions) *Hub {
 	}
 	ctx, cancel := context.WithCancel(parent)
 	h := &Hub{
-		clients:       make(map[*wsClient]struct{}),
-		router:        opts.Router,
-		agents:        opts.Agents,
-		agentCmds:     opts.AgentCmds,
-		dashToken:     opts.DashToken,
-		cookieMAC:     opts.CookieMAC,
-		guard:         opts.Guard,
-		queue:         opts.Queue,
-		nodes:         opts.Nodes,
-		nodesMu:       opts.NodesMu,
-		projectMgr:    opts.ProjectMgr,
-		allowedRoot:   opts.AllowedRoot,
-		trustedProxy:  opts.TrustedProxy,
-		wsAuthLimiter: opts.WSAuthLimiter,
-		ctx:           ctx,
-		cancel:        cancel,
+		clients:          make(map[*wsClient]struct{}),
+		router:           opts.Router,
+		agents:           opts.Agents,
+		agentCmds:        opts.AgentCmds,
+		dashToken:        opts.DashToken,
+		cookieMAC:        opts.CookieMAC,
+		guard:            opts.Guard,
+		queue:            opts.Queue,
+		nodes:            opts.Nodes,
+		nodesMu:          opts.NodesMu,
+		projectMgr:       opts.ProjectMgr,
+		allowedRoot:      opts.AllowedRoot,
+		trustedProxy:     opts.TrustedProxy,
+		wsAuthLimiter:    opts.WSAuthLimiter,
+		wsUpgradeLimiter: opts.WSUpgradeLimiter,
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 	h.upgrader = websocket.Upgrader{
 		// Delegate to the shared sameOriginOK helper so WS upgrade and the
@@ -212,14 +221,24 @@ func (h *Hub) SetScratchPool(p *session.ScratchPool) { h.scratchPool = p }
 
 // HandleUpgrade upgrades an HTTP connection to WebSocket.
 func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
-	// Per-IP rate limit at the upgrade boundary so a single IP cannot burn
-	// through the 500 global connection budget via rapid connect/disconnect
-	// cycles. Reuses the same login limiter wiring (5 attempts/min burst).
-	if h.wsAuthLimiter != nil {
-		// loginAllow maps "" to a shared unknown-IP bucket, so do not skip
-		// the check on empty IP — that would let malformed RemoteAddr bypass
-		// the per-IP budget entirely.
-		if !h.wsAuthLimiter(clientIP(r, h.trustedProxy)) {
+	// R191-SEC-M2: Per-IP rate limit at the upgrade boundary uses the
+	// *separate* wsUpgradeLimiter bucket (20/s burst, 60/min sustained) so
+	// legitimate tab-reload / mobile-wake bursts do not consume the tight
+	// loginLimiter budget used by password brute-force defence. The inner
+	// `auth` WS message (handleAuth) continues to call wsAuthLimiter which
+	// draws from loginLimiter (5/min burst) — direct credential tests keep
+	// the strict budget. Fallback to wsAuthLimiter preserves behaviour for
+	// tests that only wire the old field.
+	limiterFn := h.wsUpgradeLimiter
+	if limiterFn == nil {
+		limiterFn = h.wsAuthLimiter
+	}
+	if limiterFn != nil {
+		// The underlying *Allow implementations map "" to a shared
+		// unknown-IP bucket, so we do not skip the check on empty IP —
+		// that would let malformed RemoteAddr bypass the per-IP budget
+		// entirely.
+		if !limiterFn(clientIP(r, h.trustedProxy)) {
 			http.Error(w, "too many requests", http.StatusTooManyRequests)
 			return
 		}

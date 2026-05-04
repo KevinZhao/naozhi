@@ -17,6 +17,7 @@ func TestCountersRegisteredUnderStableNames(t *testing.T) {
 		"naozhi_cli_spawn_total",
 		"naozhi_ws_auth_fail_total",
 		"naozhi_shim_restart_total",
+		"naozhi_spawn_panic_recovered_total",
 	}
 	for _, name := range want {
 		name := name
@@ -41,11 +42,12 @@ func TestCountersIncrement(t *testing.T) {
 	// binary may mutate them. We capture start values and assert the
 	// delta only, which is safe for concurrent readers.
 	counters := map[string]*expvar.Int{
-		"session_create": SessionCreateTotal,
-		"session_evict":  SessionEvictTotal,
-		"cli_spawn":      CLISpawnTotal,
-		"ws_auth_fail":   WSAuthFailTotal,
-		"shim_restart":   ShimRestartTotal,
+		"session_create":        SessionCreateTotal,
+		"session_evict":         SessionEvictTotal,
+		"cli_spawn":             CLISpawnTotal,
+		"ws_auth_fail":          WSAuthFailTotal,
+		"shim_restart":          ShimRestartTotal,
+		"spawn_panic_recovered": SpawnPanicRecoveredTotal,
 	}
 	for name, c := range counters {
 		name, c := name, c
@@ -68,7 +70,7 @@ func TestCountersJSONEncodable(t *testing.T) {
 	t.Parallel()
 	for _, c := range []*expvar.Int{
 		SessionCreateTotal, SessionEvictTotal, CLISpawnTotal,
-		WSAuthFailTotal, ShimRestartTotal,
+		WSAuthFailTotal, ShimRestartTotal, SpawnPanicRecoveredTotal,
 	} {
 		raw := c.String() // expvar.Int.String returns its JSON form
 		var n json.Number

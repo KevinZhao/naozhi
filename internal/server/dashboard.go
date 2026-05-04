@@ -170,19 +170,20 @@ func writeJSONStatus(w http.ResponseWriter, status int, v any) {
 
 func (s *Server) registerDashboard() {
 	s.hub = NewHub(HubOptions{
-		Router:        s.router,
-		Agents:        s.agents,
-		AgentCmds:     s.agentCommands,
-		DashToken:     s.dashboardToken,
-		CookieMAC:     s.auth.cookieMAC(),
-		Guard:         s.sessionGuard,
-		Queue:         s.msgQueue,
-		Nodes:         s.nodes,
-		NodesMu:       &s.nodesMu,
-		ProjectMgr:    s.projectMgr,
-		AllowedRoot:   s.allowedRoot,
-		TrustedProxy:  s.auth.trustedProxy,
-		WSAuthLimiter: s.auth.loginAllow,
+		Router:           s.router,
+		Agents:           s.agents,
+		AgentCmds:        s.agentCommands,
+		DashToken:        s.dashboardToken,
+		CookieMAC:        s.auth.cookieMAC(),
+		Guard:            s.sessionGuard,
+		Queue:            s.msgQueue,
+		Nodes:            s.nodes,
+		NodesMu:          &s.nodesMu,
+		ProjectMgr:       s.projectMgr,
+		AllowedRoot:      s.allowedRoot,
+		TrustedProxy:     s.auth.trustedProxy,
+		WSAuthLimiter:    s.auth.loginAllow,
+		WSUpgradeLimiter: s.auth.wsUpgradeAllow,
 		// Forward the application-level ctx so a parent cancel cascades
 		// to Hub goroutines even when Shutdown() is not explicitly
 		// invoked (CTX1). Zero value in pure-unit tests that bypass

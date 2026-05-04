@@ -51,6 +51,15 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			path:    "../shim/manager.go",
 			pattern: `metrics\.ShimRestartTotal\.Add\(1\)`,
 		},
+		{
+			// R172-ARCH-D10: lives inside panicSafeSpawnFn's recover arm so
+			// it is incremented once per absorbed panic. Wiring outside the
+			// recover arm (or removing it entirely) would silence the
+			// operator's "spawn panic happened" signal.
+			name:    "SpawnPanicRecoveredTotal fires in panicSafeSpawnFn recover arm",
+			path:    "../session/router.go",
+			pattern: `metrics\.SpawnPanicRecoveredTotal\.Add\(1\)`,
+		},
 	}
 	for _, c := range cases {
 		c := c
@@ -66,6 +75,31 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 					c.name, c.pattern, c.path)
 			}
 		})
+	}
+}
+
+// TestOBS2_SpawnPanicRecoveredInRecoverArm pins that SpawnPanicRecoveredTotal
+// lives INSIDE the `if r := recover(); r != nil` arm of panicSafeSpawnFn —
+// incrementing it on the happy path would turn the counter into "spawn
+// attempts" instead of "panics absorbed" and silently invert its operational
+// meaning. Source-level check because the happy path has no panic-injection
+// seam that would drive the bug at runtime.
+func TestOBS2_SpawnPanicRecoveredInRecoverArm(t *testing.T) {
+	t.Parallel()
+	data, err := os.ReadFile("../session/router.go")
+	if err != nil {
+		t.Fatalf("read router.go: %v", err)
+	}
+	// Match the recover arm up to the counter Add. `(?s)` lets `.` cross
+	// newlines; the non-greedy `.*?` ensures we find the nearest Add after
+	// the recover check, not a later one in a different function.
+	re := regexp.MustCompile(`(?s)if r := recover\(\); r != nil \{.*?metrics\.SpawnPanicRecoveredTotal\.Add\(1\)`)
+	if !re.Match(data) {
+		t.Error("metrics.SpawnPanicRecoveredTotal.Add(1) not found inside a " +
+			"`if r := recover(); r != nil` arm in router.go. The counter must " +
+			"live in the recover branch of panicSafeSpawnFn — incrementing it " +
+			"on the happy path (every Spawn call) would turn 'panics absorbed' " +
+			"into 'spawn attempts' and break the R172-ARCH-D10 signal.")
 	}
 }
 

@@ -309,6 +309,12 @@ func panicSafeSpawnFn(
 ) (proc *cli.Process, err error) {
 	defer func() {
 		if r := recover(); r != nil {
+			// R172-ARCH-D10: counter sits inside the recover arm so it is
+			// incremented exactly once per absorbed panic, paired with the
+			// slog.Error record below. Operators watching
+			// naozhi_spawn_panic_recovered_total see a non-zero value and can
+			// grep journalctl for the paired record to pinpoint root cause.
+			metrics.SpawnPanicRecoveredTotal.Add(1)
 			slog.Error("spawnSession: wrapper.Spawn panicked",
 				"key", key, "backend", backendID, "panic", r,
 				"stack", string(debug.Stack()))
@@ -1396,8 +1402,11 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 	for _, proc := range toClose {
 		proc.Close()
 	}
+	// R191-CONC-H1-e: Broadcast under r.mu (see evictOldest comment).
 	if r.shutdownCond != nil {
+		r.mu.Lock()
 		r.shutdownCond.Broadcast()
+		r.mu.Unlock()
 	}
 
 	r.notifyChange()
@@ -1847,10 +1856,17 @@ func (r *Router) evictOldest() bool {
 	proc := oldest.loadProcess()
 	r.mu.Unlock()
 	proc.Close()
+	r.mu.Lock()
+	// R191-CONC-H1: Broadcast under r.mu to avoid missed-wakeup window with
+	// Shutdown's cond.Wait. sync.Cond.Broadcast docs say holding L is optional
+	// only when the wakeup predicate is purely state-atomic; here the predicate
+	// reads r.sessions[*].loadProcess().IsRunning() which the Close() above
+	// just flipped. R183-REL-H1 established the "hold r.mu across Broadcast"
+	// pattern for NotifyIdle; extending here to evict/reset/remove/cleanup
+	// (R191-CONC-H1-a/b/c/d).
 	if r.shutdownCond != nil {
 		r.shutdownCond.Broadcast()
 	}
-	r.mu.Lock()
 	r.countActive() // recount instead of manual decrement to avoid double-count races
 	// Mark store dirty + bump version so the eviction is persisted on the
 	// next save cycle and propagated to the dashboard on the next Version()
@@ -1918,8 +1934,11 @@ func (r *Router) Reset(key string) {
 	// described in shim/server.go. Bounded at 2s so a truly stuck shim
 	// falls through and the caller sees the real error instead of hanging.
 	waitSocketGoneForKey(key, 2*time.Second)
+	// R191-CONC-H1-b: Broadcast under r.mu (see evictOldest comment).
 	if r.shutdownCond != nil {
+		r.mu.Lock()
 		r.shutdownCond.Broadcast()
+		r.mu.Unlock()
 	}
 
 	slog.Info("session reset", "key", key)
@@ -1970,10 +1989,11 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 			// zombie window and fails with "refusing to clobber"
 			// on the immediate re-bind.
 			waitSocketGoneForKey(key, 2*time.Second)
+			r.mu.Lock()
+			// R191-CONC-H1-f: Broadcast under r.mu (see evictOldest comment).
 			if r.shutdownCond != nil {
 				r.shutdownCond.Broadcast()
 			}
-			r.mu.Lock()
 		}
 	}
 
@@ -2148,8 +2168,11 @@ func (r *Router) Remove(key string) bool {
 		// the UCCLEP-2026-04-26 pattern.
 		proc.Close()
 	}
+	// R191-CONC-H1-c: Broadcast under r.mu (see evictOldest comment).
 	if r.shutdownCond != nil {
+		r.mu.Lock()
 		r.shutdownCond.Broadcast()
+		r.mu.Unlock()
 	}
 
 	slog.Info("session removed", "key", key)
@@ -2254,11 +2277,14 @@ func (r *Router) Cleanup() {
 		e.proc.Close()
 		closedCount++
 	}
+
+	r.mu.Lock()
+	// R191-CONC-H1-d: Broadcast under r.mu (see evictOldest comment). Moved
+	// from before Lock to after Lock so Shutdown's cond.Wait predicate
+	// (IsRunning check) cannot re-evaluate between Close() and Broadcast.
 	if r.shutdownCond != nil {
 		r.shutdownCond.Broadcast()
 	}
-
-	r.mu.Lock()
 	// Prune orphaned sessions: nil process, no session ID, past prune TTL.
 	// Maintain a running newActive counter so we avoid a separate countActive() O(n) pass.
 	var pruned int

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/platform"
 
@@ -43,7 +44,17 @@ func New(cfg Config) *Slack {
 	if cfg.MaxReplyLen <= 0 {
 		cfg.MaxReplyLen = 4000
 	}
-	api := slack.New(cfg.BotToken, slack.OptionAppLevelToken(cfg.AppToken))
+	// R191-ARCH-M3: enforce a transport-level timeout on the slack HTTP
+	// client. Context cancellation is advisory in slack-go; a slow Slack
+	// response could otherwise hold a connection for Slack's server timeout
+	// (60+ s), pinning todoLoop goroutines (held by loopWG) and blocking
+	// Stop()'s drain. Feishu's httpClient enforces the same 10s cap.
+	httpClient := &http.Client{Timeout: 10 * time.Second}
+	api := slack.New(
+		cfg.BotToken,
+		slack.OptionAppLevelToken(cfg.AppToken),
+		slack.OptionHTTPClient(httpClient),
+	)
 	return &Slack{cfg: cfg, api: api}
 }
 

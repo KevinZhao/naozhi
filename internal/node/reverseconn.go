@@ -54,16 +54,14 @@ const maxPushedNodeStringBytes = 512
 // legitimate history replays are never truncated. R67-SEC-3.
 const maxPushedHistoryEvents = 500
 
-// truncateString returns s bounded to max bytes. Trailing UTF-8 partial
-// runes from a byte-level cut are harmless in the browser (rendered as
-// the replacement char) and the cost of a rune-aware cut on every event
-// is not worth the fidelity on what is already an adversary-controlled
-// diagnostic string.
+// truncateString returns s bounded to max bytes with log-injection codepoints
+// stripped. These fields (session_state.Reason, subscribe_error.Error) arrive
+// from reverse nodes with valid tokens and flow into slog attrs plus every
+// subscribed browser client; a compromised node could otherwise inject bidi
+// overrides or C0/C1 bytes. R191-SEC-L1 aligns this helper with
+// truncateLabelUTF8 in reverseserver.go (R180-SEC-M2).
 func truncateString(s string, max int) string {
-	if len(s) <= max {
-		return s
-	}
-	return s[:max]
+	return truncateLabelUTF8(s, max)
 }
 
 type reverseResult struct {

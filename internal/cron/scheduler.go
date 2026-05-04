@@ -1352,8 +1352,21 @@ func (s *Scheduler) execute(j *Job) {
 		return
 	}
 
+	// R191-ARCH-M5: Send uses a ctx derived from Background, not stopCtx.
+	// Rationale: once GetOrCreate has handed us a live session we should
+	// either record a result or a real error. If we piggy-back on stopCtx
+	// here, Scheduler.Stop()'s first act (stopCancel) cancels this ctx and
+	// the in-flight Send's result is silently dropped — the job records no
+	// LastRunAt, is re-run on the next start, and "cron send cancelled"
+	// logs make shutdown look like a failure. notifyTarget (this file)
+	// already uses Background for delivery after shutdown for the same
+	// reason; make Send consistent. Shutdown latency is bounded by
+	// Router.Shutdown's drain timeout (ShutdownTimeout) + cron.Stop()'s
+	// own cron.Stop() chain drain.
+	sendCtx, sendCancel := context.WithTimeout(context.Background(), jobTimeout)
+	defer sendCancel()
 	// Direct Send without sendWithBroadcast — cron jobs notify via onExecute callback instead.
-	result, err := sess.Send(ctx, cleanText, nil, nil)
+	result, err := sess.Send(sendCtx, cleanText, nil, nil)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			// Same rationale as the session-error branch above: suppress

@@ -24,17 +24,39 @@ type AuthHandlers struct {
 	// block legitimate logins; the ratelimit package does insertion, LRU
 	// eviction and TTL reset in constant time.
 	loginLimiter *ratelimit.Limiter
-	trustedProxy bool // trust X-Forwarded-For for client IP extraction
+	// R191-SEC-M2: wsUpgradeLimiter is a separate bucket gated ONLY on WS
+	// upgrade attempts. Previously the Hub used loginAllow directly, so 5
+	// rapid WS connects from a NATed client could starve the same IP's HTTP
+	// login attempts for 60s (and vice versa). The upgrade path sees
+	// legitimately bursty traffic on tab-reload / mobile wake, so we grant
+	// a looser budget; the inner /api/auth/login POST still uses the tight
+	// loginLimiter for brute-force guard.
+	wsUpgradeLimiter *ratelimit.Limiter
+	trustedProxy     bool // trust X-Forwarded-For for client IP extraction
 }
 
 const maxLoginLimiters = 10000
 
-// newLoginLimiter returns the shared per-IP login rate limiter used by both
-// the HTTP /api/auth/login endpoint and WebSocket auth.
+// newLoginLimiter returns the per-IP rate limiter for HTTP /api/auth/login
+// and for the WS `auth` inner message (both of which directly test
+// credentials and deserve tight brute-force budgets).
 func newLoginLimiter() *ratelimit.Limiter {
 	return ratelimit.New(ratelimit.Config{
 		Rate:    rate.Every(12 * time.Second), // 5 attempts per minute
 		Burst:   5,
+		MaxKeys: maxLoginLimiters,
+		TTL:     10 * time.Minute,
+	})
+}
+
+// newWSUpgradeLimiter returns the per-IP WS-upgrade limiter. It is
+// intentionally looser than newLoginLimiter because the upgrade itself
+// performs no credential check (cookie auth happens inline; password auth
+// happens via the `auth` message which goes through loginLimiter).
+func newWSUpgradeLimiter() *ratelimit.Limiter {
+	return ratelimit.New(ratelimit.Config{
+		Rate:    rate.Every(time.Second), // 60 attempts per minute sustained
+		Burst:   20,                      // tolerate tab-reload / mobile-wake bursts
 		MaxKeys: maxLoginLimiters,
 		TTL:     10 * time.Minute,
 	})
@@ -48,6 +70,22 @@ func (a *AuthHandlers) loginAllow(ip string) bool {
 		ip = unknownIPKey
 	}
 	return a.loginLimiter.Allow(ip)
+}
+
+// wsUpgradeAllow reports whether the given IP is allowed one more WS upgrade.
+// Separate from loginAllow (R191-SEC-M2) to prevent WS-flood → login-DoS
+// and login-flood → WS-DoS cross-endpoint lockouts.
+func (a *AuthHandlers) wsUpgradeAllow(ip string) bool {
+	if ip == "" {
+		ip = unknownIPKey
+	}
+	if a.wsUpgradeLimiter == nil {
+		// Fallback so tests that construct AuthHandlers without the new
+		// limiter don't silently disable upgrade gating (return false would
+		// break them; return true preserves prior behaviour).
+		return true
+	}
+	return a.wsUpgradeLimiter.Allow(ip)
 }
 
 // cookieMAC returns an HMAC-derived value used as the auth cookie value.

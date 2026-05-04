@@ -439,10 +439,11 @@ func buildServer(opts ServerOptions) *Server {
 
 		// Extracted handler groups
 		auth: &AuthHandlers{
-			dashboardToken: opts.DashboardToken,
-			cookieSecret:   cookieSecret,
-			loginLimiter:   newLoginLimiter(),
-			trustedProxy:   opts.TrustedProxy,
+			dashboardToken:   opts.DashboardToken,
+			cookieSecret:     cookieSecret,
+			loginLimiter:     newLoginLimiter(),
+			wsUpgradeLimiter: newWSUpgradeLimiter(),
+			trustedProxy:     opts.TrustedProxy,
 		},
 		cronH: &CronHandlers{
 			scheduler:   scheduler,
