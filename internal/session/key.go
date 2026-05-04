@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"strings"
 	"unicode/utf8"
 )
 
@@ -11,6 +12,62 @@ import (
 // sanitizeKeyComponent on IM-path construction. The `4 * 128 + 3 separators`
 // ceiling gives a safe upper bound for validators at RPC / HTTP entrypoints.
 const MaxSessionKeyBytes = 4*maxKeyComponent + 3
+
+// Reserved session-key namespace prefixes.
+//
+// The canonical IM session key shape is `{platform}:{chatType}:{id}:{agentID}`
+// (DESIGN.md §"Session key"), but several internal subsystems synthesise keys
+// that deliberately escape this schema — their platform slot is not a real IM
+// platform name and they must be filtered / routed specially. Listing the
+// prefixes in one place lets feature code consult a single source of truth
+// instead of re-growing the same strings.HasPrefix check in every new
+// subsystem. R176-ARCH-M1.
+//
+// Each prefix is a full token (trailing colon) so substring collisions cannot
+// accidentally misclassify a key like "cronographer:..." as cron-owned.
+const (
+	// CronKeyPrefix is used for cron-scheduler-owned sessions. Key shape is
+	// "cron:{jobID}" — see internal/cron/scheduler.go RegisterCronStub.
+	CronKeyPrefix = "cron:"
+	// ProjectKeyPrefix is used for project-scoped planner sessions. Key
+	// shape is "project:{name}:planner" — see internal/project.IsPlannerKey.
+	ProjectKeyPrefix = "project:"
+	// ScratchKeyPrefix is already defined in scratch.go; listed here only in
+	// documentation for grep-ability. Do not redefine.
+)
+
+// reservedKeyPrefixes is the authoritative list of namespaces that do NOT
+// follow the standard IM key shape. Kept sorted for grep. When adding a new
+// entry, update:
+//   - DESIGN.md §"Session key namespace"
+//   - exemptKeyPrefixes (router.go) if the new namespace is TTL-exempt
+//   - the sidebar / persistence filter if the new namespace should not be
+//     persisted / displayed in the default UI
+var reservedKeyPrefixes = []string{
+	CronKeyPrefix,
+	ProjectKeyPrefix,
+	ScratchKeyPrefix,
+}
+
+// IsReservedNamespace reports whether the given key belongs to any reserved
+// namespace (cron / project / scratch). Callers should prefer the namespace-
+// specific helpers (IsCronKey / project.IsPlannerKey / IsScratchKey) when
+// they care which one; this umbrella check is for validators and tooling
+// that only need "is this the standard IM shape or not".
+func IsReservedNamespace(key string) bool {
+	for _, prefix := range reservedKeyPrefixes {
+		if strings.HasPrefix(key, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// IsCronKey reports whether the key belongs to the cron namespace. See
+// CronKeyPrefix.
+func IsCronKey(key string) bool {
+	return strings.HasPrefix(key, CronKeyPrefix)
+}
 
 // ValidateSessionKey rejects session keys that contain control bytes, non-UTF-8
 // sequences, or exceed MaxSessionKeyBytes. It mirrors the per-component gate

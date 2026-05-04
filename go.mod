@@ -11,7 +11,7 @@ require (
 	github.com/larksuite/oapi-sdk-go/v3 v3.5.3
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/slack-go/slack v0.19.0
-	golang.org/x/image v0.33.0
+	golang.org/x/image v0.39.0
 	golang.org/x/sync v0.20.0
 	golang.org/x/time v0.15.0
 	gopkg.in/yaml.v3 v3.0.1

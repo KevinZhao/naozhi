@@ -377,7 +377,7 @@ func (p *Process) readLoop() {
         switch msg.Type {
         case "stdout":
             p.lastSeq = msg.Seq
-            ev, _, _ := p.protocol.ReadEvent([]byte(msg.Line))
+            ev, _, _ := p.protocol.ReadEvent(msg.Line)
             if ev.Type == "" { continue }
             if p.protocol.HandleEvent(p.shimStdinWriter(), ev) { continue }
             select {

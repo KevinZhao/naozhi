@@ -282,8 +282,8 @@ func TestSocketPath_XDGRuntimeDir(t *testing.T) {
 
 func TestStateFilePath(t *testing.T) {
 	tests := []struct {
-		stateDir string
-		keyHash  string
+		stateDir   string
+		keyHash    string
 		wantSuffix string
 	}{
 		{"/var/lib/naozhi/shims", "abc123", "/var/lib/naozhi/shims/abc123.json"},

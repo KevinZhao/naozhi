@@ -36,6 +36,26 @@ import (
 // shorten it without wall-clock waits.
 var handleConnDrainBudget = 15 * time.Second
 
+// circuitBreakerThreshold is the number of consecutive runOnce failures
+// that triggers the circuit breaker. With the 1s→30s backoff schedule
+// (doubling: 1, 2, 4, 8, 16, 30), 6 failures cover ≈ 1 minute of wall
+// time before the longer breaker backoff kicks in.
+//
+// ARCH-D6 (Round 177): prior to this, a mis-configured primary (wrong URL,
+// wrong token, network partition) would reconnect forever at a fixed 30s
+// ceiling — a steady log firehose and constant CPU on both sides with no
+// signal that "this has been failing for a while now". The breaker trades
+// a longer-but-finite recovery delay for a single sharp WARN when things
+// are clearly broken.
+var circuitBreakerThreshold = 6
+
+// circuitBreakerBackoff is the backoff floor applied once the breaker
+// trips. 5 minutes is short enough that transient outages (DNS hiccup,
+// primary restart, cert rollover) still auto-recover without operator
+// intervention, but long enough to cut log noise dramatically versus the
+// 30s ceiling.
+var circuitBreakerBackoff = 5 * time.Minute
+
 // Connector dials a primary naozhi and serves it as a reverse-connected node.
 // Run on machines behind NAT that cannot be reached by the primary directly.
 type Connector struct {
@@ -78,8 +98,22 @@ func (c *Connector) SetPreviewFunc(fn func(sessionID string) (json.RawMessage, e
 
 // Run connects to the primary and serves requests. Reconnects on disconnect.
 // Blocks until ctx is cancelled.
+//
+// Reconnect schedule: 1s → 2s → 4s → 8s → 16s → 30s (ceiling), all jittered
+// in [0.75x, 1.25x). Any successful session resets backoff to 1s.
+//
+// ARCH-D6 (Round 177) circuit breaker: once runOnce fails consecutively
+// circuitBreakerThreshold times with no intervening success, the backoff
+// floor jumps to circuitBreakerBackoff (5 min) and a single breaker-tripped
+// WARN is emitted. Subsequent failures stay at the 5 min floor with no
+// repeated WARN — this cuts log noise on mis-configured primaries from
+// every ~30s to every 5 min while still auto-recovering on the first
+// success. The per-attempt "connector disconnected" WARN continues to
+// fire so operators can still see each failure reason.
 func (c *Connector) Run(ctx context.Context) {
 	backoff := time.Second
+	consecutiveFailures := 0
+	circuitTripped := false
 	for {
 		connected, err := c.runOnce(ctx)
 		if ctx.Err() != nil {
@@ -88,10 +122,33 @@ func (c *Connector) Run(ctx context.Context) {
 		if err != nil {
 			slog.Warn("connector disconnected", "url", c.cfg.URL, "err", err)
 		}
-		// Reset backoff after a successful session so reconnect after
-		// sleep/restart is fast (1s) rather than up to 30s.
+		// Track consecutive failures for the circuit breaker. A
+		// "successful session" here means we connected and stayed up
+		// long enough that runOnce returned connected=true, even if the
+		// eventual disconnect surfaced an error.
 		if connected {
+			consecutiveFailures = 0
+			if circuitTripped {
+				slog.Info("connector circuit breaker reset after successful connection", "url", c.cfg.URL)
+				circuitTripped = false
+			}
+			// Reset backoff after a successful session so reconnect
+			// after sleep/restart is fast (1s) rather than up to 30s.
 			backoff = time.Second
+		} else {
+			consecutiveFailures++
+			if consecutiveFailures >= circuitBreakerThreshold {
+				if !circuitTripped {
+					slog.Warn("connector circuit breaker tripped, extending backoff",
+						"url", c.cfg.URL,
+						"consecutive_failures", consecutiveFailures,
+						"backoff", circuitBreakerBackoff)
+					circuitTripped = true
+				}
+				if backoff < circuitBreakerBackoff {
+					backoff = circuitBreakerBackoff
+				}
+			}
 		}
 		// Jitter the sleep so many connectors restarted together (e.g. fleet
 		// SIGHUP) don't hammer the primary on aligned deadlines. backoff
@@ -102,7 +159,13 @@ func (c *Connector) Run(ctx context.Context) {
 			timer.Stop()
 			return
 		case <-timer.C:
-			backoff = min(backoff*2, 30*time.Second)
+			// Only double within the normal 1s→30s ceiling. Once the
+			// breaker has tripped, backoff stays pinned at
+			// circuitBreakerBackoff until the next successful connect
+			// clears it.
+			if backoff < circuitBreakerBackoff {
+				backoff = min(backoff*2, 30*time.Second)
+			}
 		}
 	}
 }
@@ -275,9 +338,16 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 			wg.Wait()
 			close(done)
 		}()
+		// R180-GO-P1 / R180-PERF-P2: use NewTimer + explicit Stop instead of
+		// time.After. time.After always arms a runtime timer; if wg.Wait()
+		// finishes fast (the common happy path) the timer goroutine leaks
+		// until handleConnDrainBudget (15s) expires. This pattern is already
+		// fixed in router.go:713 and shim/manager.go:264.
+		drainTimer := time.NewTimer(handleConnDrainBudget)
+		defer drainTimer.Stop()
 		select {
 		case <-done:
-		case <-time.After(handleConnDrainBudget):
+		case <-drainTimer.C:
 			slog.Warn("connector: handleConn drain exceeded budget, proceeding",
 				"budget", handleConnDrainBudget)
 		}
@@ -353,7 +423,18 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 				defer wg.Done()
 				defer func() {
 					if r := recover(); r != nil {
-						slog.Error("connector request panic", "req_id", req.ReqID, "method", req.Method, "panic", r, "stack", string(debug.Stack()))
+						// R180-SEC-H1 / R181-GO-P2-1: req.ReqID and req.Method
+						// come from the primary's JSON frame with no prior
+						// sanitization. A compromised / middleman-tampered
+						// primary can inject bidi/C1/newline bytes to forge
+						// log entries. SanitizeForLog keeps attrs as plain
+						// strings (strips unsafe runes → '_') instead of the
+						// Go-quoted form of %q which slog's JSON handler then
+						// double-escapes.
+						slog.Error("connector request panic",
+							"req_id", osutil.SanitizeForLog(req.ReqID, 128),
+							"method", osutil.SanitizeForLog(req.Method, 64),
+							"panic", r, "stack", string(debug.Stack()))
 					}
 				}()
 				select {
@@ -376,6 +457,16 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 
 		case "subscribe":
 			key := msg.Key
+			// R180-SEC-M3: gate the subscribe path at the trust boundary.
+			// handleRequest's per-method branches all run ValidateSessionKey,
+			// but the subscribe/unsubscribe main-loop cases previously
+			// accepted any string and piped it straight into slog attrs +
+			// router.GetSession map lookup. A compromised primary could
+			// inject bidi/C1/newline bytes via msg.Key.
+			if err := session.ValidateSessionKey(key); err != nil {
+				slog.Debug("connector subscribe: invalid key", "err", err)
+				break
+			}
 			// Cancel stale subscription if the previous streamEvents goroutine
 			// exited (e.g. process died). This allows the hub to re-subscribe
 			// after a remote send so events flow for the new process.
@@ -415,6 +506,11 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 
 		case "unsubscribe":
 			key := msg.Key
+			// R180-SEC-M3: same trust-boundary guard as subscribe.
+			if err := session.ValidateSessionKey(key); err != nil {
+				slog.Debug("connector unsubscribe: invalid key", "err", err)
+				break
+			}
 			if cancel, ok := activeSubs[key]; ok {
 				cancel()
 				delete(activeSubs, key)
@@ -483,7 +579,11 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		}
 		sess := c.router.GetSession(p.Key)
 		if sess == nil {
-			return nil, fmt.Errorf("session not found: %s", p.Key)
+			// R180-SEC-M1 / R180-GO-P1: %q escapes any bidi/C1/newline bytes
+			// that ValidateSessionKey would accept but would break log
+			// parsing / bidi-flip the terminal if they reach slog via the
+			// returned err.Error() on the opposite node.
+			return nil, fmt.Errorf("session not found: %q", p.Key)
 		}
 		return marshalResult(sess.EventEntriesSince(p.After))
 
@@ -746,12 +846,21 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("restart_planner params: %w", err)
 		}
+		// R181-SEC-P2-2: validate project_name at the trust boundary so
+		// bidi/C1/newline bytes never reach ErrNotFound / slog attrs on
+		// the miss path. Consistent with update_config below.
+		if err := project.ValidateProjectName(p.ProjectName); err != nil {
+			return nil, fmt.Errorf("restart_planner: %w", err)
+		}
 		if c.projMgr == nil {
 			return nil, fmt.Errorf("projects not configured")
 		}
 		proj := c.projMgr.Get(p.ProjectName)
 		if proj == nil {
-			return nil, fmt.Errorf("project not found: %s", p.ProjectName)
+			// Use %q so bidi/C1/newline bytes in the primary-supplied name
+			// cannot forge structured-log fields when the remote side logs
+			// this error. R177-SEC-2.
+			return nil, fmt.Errorf("project not found: %q", p.ProjectName)
 		}
 		plannerKey := proj.PlannerSessionKey()
 		opts := session.AgentOpts{
@@ -775,6 +884,13 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("update_config params: %w", err)
 		}
+		// R181-SEC-P2-2: validate project_name up front so the surrounding
+		// ErrNotFound (now %q-escaped per project/manager.go:228) and
+		// ValidateConfig error paths never log attacker-controlled bidi /
+		// newline bytes.
+		if err := project.ValidateProjectName(p.ProjectName); err != nil {
+			return nil, fmt.Errorf("update_config: %w", err)
+		}
 		if c.projMgr == nil {
 			return nil, fmt.Errorf("projects not configured")
 		}
@@ -786,8 +902,11 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		// or misconfigured primary must not be able to push unbounded prompts,
 		// NUL-truncated argv, or flag-injected model names through the
 		// reverse-RPC trust boundary. R68-SEC-H2.
+		// R180-GO-P1: wrap to match the surrounding handleRequest style
+		// (every other error return uses "<method>: %w") so caller slog
+		// attrs identify which RPC method triggered the validation failure.
 		if err := project.ValidateConfig(cfg); err != nil {
-			return nil, err
+			return nil, fmt.Errorf("update_config validate: %w", err)
 		}
 		if err := c.projMgr.UpdateConfig(p.ProjectName, cfg); err != nil {
 			return nil, fmt.Errorf("update config: %w", err)
@@ -858,6 +977,13 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if err := json.Unmarshal(req.Params, &p); err != nil {
 			return nil, fmt.Errorf("set_favorite params: %w", err)
 		}
+		// R182-SEC-M1: mirror restart_planner / update_config — validate
+		// project_name at the trust boundary so bidi/C1/newline bytes
+		// cannot reach ErrNotFound wrap (see manager.go:208 also upgraded
+		// to %q for defense-in-depth) or subsequent slog attrs.
+		if err := project.ValidateProjectName(p.ProjectName); err != nil {
+			return nil, fmt.Errorf("set_favorite: %w", err)
+		}
 		if c.projMgr == nil {
 			return nil, fmt.Errorf("projects not configured")
 		}
@@ -867,7 +993,10 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		return marshalResult(map[string]any{"status": "ok", "favorite": p.Favorite})
 
 	default:
-		return nil, fmt.Errorf("unknown method: %s", req.Method)
+		// %q so any bidi/C1/newline bytes in a primary-injected method name
+		// are escaped rather than propagating verbatim into the error
+		// string that the remote logs. R177-SEC-2.
+		return nil, fmt.Errorf("unknown method: %q", req.Method)
 	}
 }
 

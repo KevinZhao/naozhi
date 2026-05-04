@@ -1,11 +1,12 @@
 package session
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"log/slog"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -197,8 +198,29 @@ func loadStringAtomic(v *atomic.Pointer[string]) string {
 // Go's "addressable value" requirement: &id inside a func body references a
 // local copy, but passing the string through this helper makes the pointer
 // semantics obvious at call sites.
+//
+// Fast-path short-circuit (R176-PERF-P1): when the currently stored string
+// equals s, skip the store entirely. Many callers (SetBackend /
+// SetCLIName / SetCLIVersion at reconnect, lastPrompt / lastActivity under
+// AppendBatch's tail loop, deathReason idempotent clears) pass the same
+// value they already hold; skipping redundant stores avoids per-call *string
+// heap allocation and an atomic write on a cache line that readers poll at
+// high rates (Snapshot / sidebar refresh).
+//
+// Safety: the compare-and-store is not atomic as a pair, so a concurrent
+// writer may slip a different value between our Load and Store. That is
+// the same race that already exists between two direct .Store calls on
+// the same pointer, so semantics are unchanged: we only promise
+// last-writer-wins, and the fast-path "skip when equal" preserves that
+// (if our s is equal to the observed value, writing s would produce the
+// same visible state regardless of the intermediate race).
 func storeStringAtomic(v *atomic.Pointer[string], s string) {
-	v.Store(&s)
+	if cur := v.Load(); cur != nil && *cur == s {
+		return
+	}
+	p := new(string)
+	*p = s
+	v.Store(p)
 }
 
 // Backend returns the backend ID ("" when the router default is in effect).
@@ -802,8 +824,8 @@ func sortEntriesByTimeStable(entries []cli.EventEntry) {
 	if len(entries) < 2 {
 		return
 	}
-	sort.SliceStable(entries, func(i, j int) bool {
-		return entries[i].Time < entries[j].Time
+	slices.SortStableFunc(entries, func(a, b cli.EventEntry) int {
+		return cmp.Compare(a.Time, b.Time)
 	})
 }
 
@@ -986,7 +1008,12 @@ func (s *ManagedSession) LogSystemEvent(summary string) {
 // InjectHistory pre-populates the event log with historical entries.
 // Entries are saved to persistedHistory so they survive process restarts.
 func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
-	if len(entries) >= maxPersistedHistory {
+	if len(entries) > maxPersistedHistory {
+		slog.Debug("InjectHistory: batch exceeds cap, truncating oldest",
+			"key", s.key,
+			"batch_len", len(entries),
+			"cap", maxPersistedHistory,
+			"dropped", len(entries)-maxPersistedHistory)
 		entries = entries[len(entries)-maxPersistedHistory:]
 	}
 	// Scan the injected batch for prompt/activity summaries outside the lock:

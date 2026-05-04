@@ -30,13 +30,13 @@ func TestIsPlannerKey_Valid(t *testing.T) {
 func TestIsPlannerKey_Invalid(t *testing.T) {
 	t.Parallel()
 	tests := []string{
-		"project::planner",           // name too short (exact sentinel)
-		"project:planner",            // missing name segment
-		"feishu:foo:planner",         // wrong prefix
-		"project:foo:general",        // wrong suffix
-		"",                           // empty
-		"planner",                    // no prefix
-		"project:foo:planner:extra",  // extra segment still ends with ":extra" not ":planner"
+		"project::planner",          // name too short (exact sentinel)
+		"project:planner",           // missing name segment
+		"feishu:foo:planner",        // wrong prefix
+		"project:foo:general",       // wrong suffix
+		"",                          // empty
+		"planner",                   // no prefix
+		"project:foo:planner:extra", // extra segment still ends with ":extra" not ":planner"
 	}
 	for _, key := range tests {
 		if IsPlannerKey(key) {

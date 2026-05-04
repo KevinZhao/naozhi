@@ -140,6 +140,56 @@ func TestDoctor_PprofLoopbackGate(t *testing.T) {
 	}
 }
 
+// TestDoctor_ExpvarLoopbackGate covers the three interesting expvar
+// states analogously to pprof plus a fourth: 200 with missing counter
+// body (routing broken) must be a fail so operators catch "endpoint up
+// but empty".
+func TestDoctor_ExpvarLoopbackGate(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name      string
+		status    int
+		body      string
+		wantLevel string
+	}{
+		{"pass-ok-body", http.StatusOK, `{"naozhi_session_create_total":0}`, "pass"},
+		{"fail-empty-body", http.StatusOK, `{"other":1}`, "fail"},
+		{"warn-forbidden", http.StatusForbidden, "", "warn"},
+		{"warn-bad-gateway", http.StatusBadGateway, "", "warn"},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+			d := &doctor{addr: srv.URL, token: "T", timeout: 2 * time.Second, out: io.Discard}
+			d.checkExpvar()
+			if d.findings[0].Level != tc.wantLevel {
+				t.Errorf("status %d body=%q → level %q, want %q",
+					tc.status, tc.body, d.findings[0].Level, tc.wantLevel)
+			}
+		})
+	}
+}
+
+// TestDoctor_ExpvarNoToken pins the no-token degraded path: warn, not
+// fail, consistent with the other auth-gated probes.
+func TestDoctor_ExpvarNoToken(t *testing.T) {
+	t.Parallel()
+	d := &doctor{addr: "http://127.0.0.1:1", timeout: 100 * time.Millisecond, out: io.Discard}
+	d.checkExpvar()
+	if d.hasFail {
+		t.Error("missing token must not fail the doctor — it's a config issue")
+	}
+	if d.findings[0].Level != "warn" {
+		t.Errorf("no-token expvar check level = %q, want warn", d.findings[0].Level)
+	}
+}
+
 // TestDoctor_StateDirProbes covers the writability check — the only
 // piece that touches the local fs. Uses t.TempDir as a fake $HOME to
 // avoid polluting the real user dir. Cannot t.Parallel because

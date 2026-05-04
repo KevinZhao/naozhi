@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -28,11 +27,6 @@ func wsTestServer(t *testing.T, onConn func(*websocket.Conn)) *httptest.Server {
 		onConn(conn)
 	}))
 	return srv
-}
-
-// wsURL converts an httptest server URL from http to ws.
-func wsURL(srv *httptest.Server) string {
-	return "ws" + strings.TrimPrefix(srv.URL, "http")
 }
 
 // newRelayNode builds an HTTPClient pointing at srv and creates a wsRelay.

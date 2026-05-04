@@ -11,6 +11,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // ACPProtocol implements Protocol for the Agent Client Protocol (JSON-RPC 2.0).
@@ -19,7 +21,13 @@ type ACPProtocol struct {
 	// nextID is Int64 to avoid sign flip if a very long-running connector
 	// ever surpassed 2^31 RPC calls (it currently won't in practice, but the
 	// wider type costs nothing and removes the overflow footgun).
-	nextID    atomic.Int64
+	// NOTE: allocID() narrows to int for RPCRequest.ID/RPCMessage.ID JSON
+	// compatibility; 64-bit platforms only (naozhi does not support 32-bit).
+	nextID atomic.Int64
+	// sessionID is guarded by mu. Init writes once before startReadLoop, but
+	// readLoop (ReadEvent) and Send (WriteMessage) goroutines both read it
+	// concurrently afterwards, so touches on both reads pair with the single
+	// write via mu to satisfy the Go memory model and keep -race quiet.
 	sessionID string
 	// textBuf accumulates assistant_message_chunk text during a turn
 	textBuf strings.Builder
@@ -35,7 +43,7 @@ func (p *ACPProtocol) BuildArgs(opts SpawnOptions) []string {
 	return args
 }
 
-func (p *ACPProtocol) Init(rw *JSONRW, resumeID string) (string, error) {
+func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, error) {
 	// Step 1: initialize handshake
 	initID := p.allocID()
 	initReq := RPCRequest{
@@ -53,8 +61,13 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string) (string, error) {
 		return "", fmt.Errorf("acp initialize: %w", err)
 	}
 
-	// Step 2: session/new or session/load
-	cwd := os.TempDir()
+	// Step 2: session/new or session/load. The cwd passed into Init is the
+	// session's workspace (opts.WorkingDir in SpawnOptions); fall back to
+	// os.TempDir() only when the caller omitted one (tests, startup probe)
+	// so the ACP agent still lands in a valid filesystem location.
+	if cwd == "" {
+		cwd = os.TempDir()
+	}
 	if resumeID != "" {
 		loadID := p.allocID()
 		loadReq := RPCRequest{
@@ -64,7 +77,9 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string) (string, error) {
 		if err := p.sendAndWaitResponse(rw, loadReq); err != nil {
 			return "", fmt.Errorf("acp session/load: %w", err)
 		}
+		p.mu.Lock()
 		p.sessionID = resumeID
+		p.mu.Unlock()
 	} else {
 		newID := p.allocID()
 		newReq := RPCRequest{
@@ -87,15 +102,21 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string) (string, error) {
 		if err := json.Unmarshal(resp.Result, &result); err != nil {
 			return "", fmt.Errorf("acp parse session/new result: %w", err)
 		}
+		p.mu.Lock()
 		p.sessionID = result.SessionID
+		p.mu.Unlock()
 	}
 
-	return p.sessionID, nil
+	p.mu.Lock()
+	sid := p.sessionID
+	p.mu.Unlock()
+	return sid, nil
 }
 
 func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData) error {
 	p.mu.Lock()
 	p.textBuf.Reset() // reset text accumulator for new turn
+	sid := p.sessionID
 	p.mu.Unlock()
 
 	// Build prompt content blocks
@@ -118,7 +139,7 @@ func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData)
 	req := RPCRequest{
 		JSONRPC: "2.0", ID: id, Method: "session/prompt",
 		Params: map[string]any{
-			"sessionId": p.sessionID,
+			"sessionId": sid,
 			"prompt":    prompt,
 		},
 	}
@@ -161,18 +182,26 @@ func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 	// Response (turn complete for session/prompt)
 	if msg.IsResponse() {
 		if msg.Error != nil {
-			return Event{}, false, fmt.Errorf("acp rpc error %d: %s", msg.Error.Code, msg.Error.Message)
+			// R184-SEC-M1: msg.Error.Message comes from the ACP agent (kiro /
+			// Gemini CLI / etc), a separate trust boundary. The error string
+			// flows into slog attrs (`readLoop` Warn) and surfaces on the
+			// dashboard, so untrusted control characters / bidi overrides must
+			// be scrubbed before they reach structured logs. Matches the
+			// R172-SEC-M4 / R175-SEC-P1 / R183-SEC-H1 sanitize policy.
+			return Event{}, false, fmt.Errorf("acp rpc error %d: %s",
+				msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))
 		}
 
 		p.mu.Lock()
 		text := p.textBuf.String()
 		p.textBuf.Reset()
+		sid := p.sessionID
 		p.mu.Unlock()
 
 		ev := Event{
 			Type:      "result",
 			Result:    text,
-			SessionID: p.sessionID,
+			SessionID: sid,
 		}
 		return ev, true, nil
 	}
@@ -300,7 +329,10 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 			}
 			if msg.IsResponse() && msg.ID != nil && *msg.ID == expectedID {
 				if msg.Error != nil {
-					ch <- readResult{nil, fmt.Errorf("rpc error %d: %s", msg.Error.Code, msg.Error.Message)}
+					// R184-SEC-M1: sanitize RPC error text before it bubbles
+					// up through caller slog attrs. See ReadEvent above.
+					ch <- readResult{nil, fmt.Errorf("rpc error %d: %s",
+						msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))}
 					return
 				}
 				ch <- readResult{&msg, nil}
@@ -324,6 +356,21 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 		return r.msg, r.err
 	case <-timer.C:
 		close(done)
+		// R184-CONCUR-H1: `done` is only polled between ReadLine calls; a
+		// reader parked inside the underlying bufio.ReadBytes syscall never
+		// observes it. If the goroutine has a shim-backed reader, poke the
+		// underlying net.Conn's read deadline so ReadBytes returns
+		// immediately with i/o timeout, letting the reader goroutine exit
+		// instead of lingering for the lifetime of the shim connection.
+		if sl, ok := rw.R.(*shimLineReader); ok && sl.proc != nil && sl.proc.shimConn != nil {
+			// Pulse the deadline to unblock any in-flight ReadBytes, then
+			// clear it so subsequent operations on shimConn (e.g. if caller
+			// fails to Kill/Close promptly) are not prematurely cancelled.
+			// The reader goroutine observing EOF/err is what we want — not
+			// permanently arming an expired deadline.
+			_ = sl.proc.shimConn.SetReadDeadline(time.Now())
+			_ = sl.proc.shimConn.SetReadDeadline(time.Time{})
+		}
 		return nil, fmt.Errorf("timeout waiting for ACP response (id=%d)", expectedID)
 	}
 }

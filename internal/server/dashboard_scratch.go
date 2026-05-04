@@ -8,8 +8,10 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -65,6 +67,24 @@ func (h *ScratchHandler) handleOpen(w http.ResponseWriter, r *http.Request) {
 	if req.Quote == "" {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "quote is required"})
 		return
+	}
+	// R177-SEC-11: the pool sanitizer collapses empty quotes but doesn't
+	// reject bidi/C1 runes in a non-empty body. Quote becomes a synthetic
+	// assistant turn in the CLI history and propagates into every log attr
+	// that echoes it; scrub at the trust boundary to match the last_prompt
+	// / cron_prompt policy.
+	if !utf8.ValidString(req.Quote) {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "quote contains invalid characters"})
+		return
+	}
+	// R181-GO-P2-3: rune name `ch` instead of `r` to avoid shadowing
+	// the outer *http.Request. A future edit that reads r.Header inside
+	// this loop would silently typecheck against the rune.
+	for _, ch := range req.Quote {
+		if osutil.IsLogInjectionRune(ch) {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "quote contains invalid characters"})
+			return
+		}
 	}
 	// Validate the source key at the trust boundary before it is indexed into
 	// logs or fed to GetSession — mirrors the IM ValidateSessionKey gate.

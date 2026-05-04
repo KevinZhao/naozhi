@@ -20,6 +20,10 @@ import (
 // the normal sidebar or get written to sessions.json. Mutations to this
 // constant must be accompanied by updates in saveStore (filter) and the
 // dashboard handleList filter.
+//
+// R176-ARCH-M1: canonical reserved-namespace prefixes are listed together in
+// key.go (reservedKeyPrefixes); this constant lives here for historical
+// proximity to the ScratchPool implementation.
 const ScratchKeyPrefix = "scratch:"
 
 // MaxScratchQuoteBytes caps the quoted context passed to --append-system-prompt.

@@ -347,6 +347,17 @@ func contentDisposition(kind, resolved string) string {
 // outside the workspace come back as {exists:false} rather than an error, so
 // the frontend can treat validation as a cheap yes/no.
 func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Request) {
+	// S13: Rate-limit before any work to cap the cost a single authenticated
+	// caller can impose. The endpoint fans out up to maxExistsPaths (100)
+	// filesystem stats per request with a fileStatTimeout (2s) budget; without
+	// this gate a post-auth attacker targeting deep NFS mounts, symlink loops,
+	// or gigantic directory trees can tie up worker goroutines. Nil-guarded for
+	// tests that build ProjectHandlers by hand via newProjectHandlersForTest;
+	// wiring lives in server.New (see ProjectHandlers.filesExistsLimiter godoc).
+	if h.filesExistsLimiter != nil && !h.filesExistsLimiter.AllowRequest(r) {
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "files/exists rate limit exceeded"})
+		return
+	}
 	if h.projectMgr == nil {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "projects not configured"})
 		return
@@ -362,6 +373,15 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 
 	if req.Project == "" {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project is required"})
+		return
+	}
+	// R183-SEC-M2: every other /api/projects path gates on validateProjectName
+	// before touching projectMgr; handleFilesExists previously passed raw
+	// req.Project straight into the map lookup. The miss path is currently
+	// silent, but one future slog.Debug("project not found", ...) is enough
+	// to open a log-injection hole. Enforce the trust-boundary policy up front.
+	if err := validateProjectName(req.Project); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
 		return
 	}
 	if len(req.Paths) == 0 {
@@ -490,6 +510,11 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	}
 	if project == "" || path == "" {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project and path are required"})
+		return
+	}
+	// R183-SEC-M2: same trust-boundary gate as handleFilesExists above.
+	if err := validateProjectName(project); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
 		return
 	}
 
@@ -699,6 +724,10 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 	// download path so the browser / OS handler treats them as explicit
 	// attachments. R71-SEC-M2.
 	if mime == "application/pdf" {
+		// R186-QUAL-M1: serveDownload re-opens the file itself; release our fd
+		// first so we don't briefly hold two descriptors for the same file and
+		// the deferred Close above doesn't race with serveDownload's own defer.
+		_ = f.Close()
 		h.serveDownload(w, r, resolved, info)
 		return
 	}

@@ -76,17 +76,25 @@ type Protocol interface {
     Name() string
     Clone() Protocol
     BuildArgs(opts SpawnOptions) []string
-    Init(rw *JSONRW, resumeID string) (sessionID string, err error)
+    Init(rw *JSONRW, resumeID string, cwd string) (sessionID string, err error)
     WriteMessage(w io.Writer, text string, images []ImageData) error
+    WriteInterrupt(w io.Writer, requestID string) error
     ReadEvent(line string) (ev Event, done bool, err error)
     HandleEvent(w io.Writer, ev Event) (handled bool)
 }
 ```
 
-> Note: `ReadEvent` currently takes `string` (one per NDJSON line). R67-PERF-1
-> proposes migrating to `[]byte` to avoid a per-event heap copy on the shim
-> stdout hot path; until that lands, implementors must match the `string`
-> signature or the build will fail.
+> Notes:
+> - `Init` takes the workspace `cwd` so ACP can pass it in `session/new`;
+>   `ClaudeProtocol` ignores the argument because stream-json inherits the
+>   shim's `os.Chdir`.
+> - `WriteInterrupt` emits a mid-turn interrupt; ACP returns
+>   `ErrInterruptUnsupported` so callers fall back to SIGINT.
+> - `ReadEvent` takes a single NDJSON line as `string`. A prior proposal
+>   (R67-PERF-1) considered migrating to `[]byte` to skip a per-event heap
+>   copy on the shim stdout hot path, but the current signature is shared
+>   by DESIGN.md, this file, and `internal/cli/protocol.go`; any change
+>   must update all three in lockstep.
 
 ### Platform Adapter Pattern
 

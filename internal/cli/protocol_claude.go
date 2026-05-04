@@ -41,7 +41,7 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	return args
 }
 
-func (p *ClaudeProtocol) Init(_ *JSONRW, _ string) (string, error) {
+func (p *ClaudeProtocol) Init(_ *JSONRW, _, _ string) (string, error) {
 	return "", nil
 }
 

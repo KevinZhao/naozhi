@@ -102,3 +102,55 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 - 启用 block/mutex profiling —— 可单独立项，加 `config.debug.enable_block_profile` 开关
 - `go tool pprof -http=` 服务器侧直接托管 UI —— 避免把交互式 UI 暴露在生产
 - 集成到 continuous profiling 服务（Pyroscope / Polar Signals）—— 需要更重的架构决策
+
+---
+
+## expvar 计数器（OBS2）
+
+`/api/debug/vars` 暴露 stdlib `expvar.Handler()`，安全模型与 pprof **完全一致**（requireAuth + loopback-only + trustedProxy 不豁免）。
+
+### 当前 5 个 naozhi 计数器
+
+| 名称 | 语义 | 什么时候值得警觉 |
+|---|---|---|
+| `naozhi_session_create_total` | spawnSession 成功（exempt 会话**不计**） | 突增常伴 IM spam |
+| `naozhi_session_evict_total` | LRU evictOldest 成功释放一个 slot | 长期线性上升 = `session.max_procs` 太低 |
+| `naozhi_cli_spawn_total` | `wrapper.Spawn` 成功（新 CLI 子进程出生；reconnect **不计**） | 通常 ≥ session_create_total，大幅超出 = exempt（planner/scratch）churn |
+| `naozhi_ws_auth_fail_total` | WS auth_fail 回包（rate-limit 和 invalid-token 两种都计） | 每分钟 >10 = 很可能在被 brute-force |
+| `naozhi_shim_restart_total` | `shim.StartShimWithBackend` 成功（Reconnect **不计**） | 两次重启间持续增长 = shim 在 crash→respawn |
+
+### 拉取
+
+```bash
+ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1:8180/api/debug/vars' | jq '{
+  session_create: .naozhi_session_create_total,
+  session_evict: .naozhi_session_evict_total,
+  cli_spawn: .naozhi_cli_spawn_total,
+  ws_auth_fail: .naozhi_ws_auth_fail_total,
+  shim_restart: .naozhi_shim_restart_total,
+  uptime: .memstats.uptime
+}'
+```
+
+### 与 `/health` 的分工
+
+- `/health`: 少量高层状态（status / uptime / watchdog kills），前端 dashboard 会持续 poll
+- `/api/debug/vars`: 运维场景下按需拉取的完整计数器 + stdlib 的 memstats/cmdline
+
+两者不重复 counter；watchdog kills 暂时保留在 `/health` 兼容既有 dashboard，未来若升级 Prometheus 会迁到 metrics 包。
+
+### 回归契约
+
+- `internal/metrics/metrics_test.go`: 锁 expvar 名 / Add 语义 / JSON shape
+- `internal/metrics/counter_wiring_contract_test.go`: source-grep 锁 5 个 call site + WSAuthFail 两分支 ≥2 次
+- `internal/server/debug_expvar_test.go`: 锁 auth 401 / 非 loopback 403 / loopback+auth 返 JSON 含全部 5 个 counter + stdlib memstats
+- `cmd/naozhi/doctor_test.go`: `checkExpvar` 覆盖 pass/fail/warn/no-token 4 档
+
+任何改动 call sites 的 PR 都会动这些测试。
+
+### 升级路径
+
+若未来部署进入有 Prometheus scraper 的环境：
+1. `internal/metrics/metrics.go` 把 `expvar.NewInt` 换成 `prometheus.NewCounter`，保留 `*expvar.Int` 变量名别名（或定义 `type Counter interface { Add(int64) }`）
+2. 新增 `/metrics` 端点挂 `promhttp.Handler()`（同样 auth + loopback 保护）
+3. call sites 零改动

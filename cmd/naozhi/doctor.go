@@ -15,6 +15,8 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // runDoctor prints a one-shot diagnostic report. Stays CLI-local (no
@@ -128,6 +130,7 @@ func (d *doctor) run() {
 	d.checkHealth()
 	d.checkAuth()
 	d.checkPprof()
+	d.checkExpvar()
 	d.checkStateDir()
 	d.checkZeroDowntimeScopes()
 	d.render()
@@ -195,7 +198,10 @@ func (d *doctor) checkSystemd() {
 	show, _ := runOutput(exec.Command("systemctl", "show", "naozhi",
 		"--property=MainPID,ActiveEnterTimestamp,NRestarts", "--no-pager"))
 	show = strings.ReplaceAll(strings.TrimSpace(show), "\n", " · ")
-	d.add("systemd", "pass", "active · "+show)
+	// R187-SEC-M1: systemctl show output is local but goes to the operator
+	// terminal. Sanitize any bidi/C1/ANSI escapes defensively so a crafted
+	// unit file (or a future --property value) can't flip display order.
+	d.add("systemd", "pass", "active · "+osutil.SanitizeForLog(show, 512))
 }
 
 func (d *doctor) checkHealth() {
@@ -214,11 +220,15 @@ func (d *doctor) checkHealth() {
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	// R187-SEC-M1: /health response echoes to terminal. If the configured
+	// addr is hijacked or a future /health implementation emits untrusted
+	// strings, bidi / ANSI escapes would flip operator display. Sanitize.
+	bodyStr := osutil.SanitizeForLog(strings.TrimSpace(string(body)), 512)
 	if resp.StatusCode != http.StatusOK {
-		d.add("http /health", "fail", fmt.Sprintf("status=%d body=%s", resp.StatusCode, strings.TrimSpace(string(body))))
+		d.add("http /health", "fail", fmt.Sprintf("status=%d body=%s", resp.StatusCode, bodyStr))
 		return
 	}
-	d.add("http /health", "pass", strings.TrimSpace(string(body)))
+	d.add("http /health", "pass", bodyStr)
 }
 
 func (d *doctor) checkAuth() {
@@ -229,7 +239,11 @@ func (d *doctor) checkAuth() {
 	url := d.addr + "/api/sessions"
 	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		d.add("auth", "fail", "request build: "+err.Error())
+		return
+	}
 	req.Header.Set("Authorization", "Bearer "+d.token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -255,7 +269,11 @@ func (d *doctor) checkPprof() {
 	url := d.addr + "/api/debug/pprof/"
 	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
 	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		d.add("pprof", "fail", "request build: "+err.Error())
+		return
+	}
 	req.Header.Set("Authorization", "Bearer "+d.token)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -271,6 +289,55 @@ func (d *doctor) checkPprof() {
 			"403 — non-loopback (doctor not running on the naozhi host?) or hardening works as intended")
 	default:
 		d.add("pprof", "warn", fmt.Sprintf("unexpected status %d", resp.StatusCode))
+	}
+}
+
+// checkExpvar probes /api/debug/vars to confirm the OBS2 counters endpoint
+// is reachable. Like pprof, this sits behind auth + loopback-only; a 403
+// when doctor runs from outside the host is the hardening working.
+func (d *doctor) checkExpvar() {
+	if d.token == "" {
+		d.add("expvar", "warn", "no token; expvar reachability not verified")
+		return
+	}
+	url := d.addr + "/api/debug/vars"
+	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		d.add("expvar", "fail", "request build: "+err.Error())
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+d.token)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		d.add("expvar", "fail", "request failed: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+	switch resp.StatusCode {
+	case http.StatusOK:
+		// Spot-check one naozhi_* counter — if the endpoint responds but the
+		// payload is empty (e.g. operator hit the stdlib /debug/vars mount
+		// instead of /api/debug/vars in a misconfigured proxy), we want to
+		// surface that as fail, not pass.
+		// R185-QUAL-M1: surface read errors distinctly so a truncated body
+		// from a transient network glitch is not misreported as a routing bug.
+		body, readErr := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+		if readErr != nil {
+			d.add("expvar", "fail", "read body failed: "+readErr.Error())
+			return
+		}
+		if !strings.Contains(string(body), "naozhi_session_create_total") {
+			d.add("expvar", "fail", "reachable but counter missing from payload — routing wrong?")
+			return
+		}
+		d.add("expvar", "pass", "reachable at "+url)
+	case http.StatusForbidden:
+		d.add("expvar", "warn",
+			"403 — non-loopback (doctor not running on the naozhi host?) or hardening works as intended")
+	default:
+		d.add("expvar", "warn", fmt.Sprintf("unexpected status %d", resp.StatusCode))
 	}
 }
 

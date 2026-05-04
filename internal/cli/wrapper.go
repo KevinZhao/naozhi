@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
 )
@@ -194,6 +196,21 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 		return nil, fmt.Errorf("drain replay: %w", err)
 	}
 
+	// R181-ARCH-P1-19: log a warning when the shim's protocol_version
+	// differs from the compiled-in constant. Hot-upgrade paths may mix
+	// an older shim binary with a newer naozhi; a silent mismatch here
+	// manifested earlier as cryptic framing bugs. We intentionally do
+	// NOT hard-fail yet — the field was added in v1 and older shims
+	// emit 0, so a refusal would break every forward migration — but
+	// operator visibility via slog is the cheapest safety net.
+	if hv := handle.Hello.ProtocolVersion; hv != shim.ProtocolVersion {
+		slog.Warn("shim protocol_version mismatch",
+			"shim", hv,
+			"naozhi", shim.ProtocolVersion,
+			"key", opts.Key,
+		)
+	}
+
 	cliPID := 0
 	if handle.Hello.CLIPID > 0 {
 		cliPID = handle.Hello.CLIPID
@@ -215,7 +232,7 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 		W: proc.shimStdinWriter(),
 		R: &shimLineReader{proc: proc},
 	}
-	sessionID, err := proto.Init(rw, opts.ResumeID)
+	sessionID, err := proto.Init(rw, opts.ResumeID, opts.WorkingDir)
 	if err != nil {
 		// proc.Kill() signals the shim to exit but does NOT close the net
 		// connection owned by handle (Process.startReadLoop hasn't run, so
@@ -236,6 +253,11 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	}
 
 	proc.startReadLoop()
+	// OBS2: counts successful fresh CLI spawns. SpawnReconnect is not counted
+	// here — reconnect does not fork a new CLI child, it only re-attaches to
+	// an already-running shim's socket. Incrementing only on Spawn keeps the
+	// metric aligned with "new CLI process births".
+	metrics.CLISpawnTotal.Add(1)
 	return proc, nil
 }
 

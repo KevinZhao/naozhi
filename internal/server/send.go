@@ -393,8 +393,8 @@ func (h *Hub) runTurn(key, text string, images []cli.ImageData, onAsyncError fun
 
 	if _, err := h.sendWithBroadcast(h.ctx, key, sess, text, images, nil); err != nil {
 		slog.Error("send: send", "key", key, "err", err)
-	} else if h.scheduler != nil && strings.HasPrefix(key, "cron:") {
-		if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, "cron:"), text); err != nil {
+	} else if h.scheduler != nil && session.IsCronKey(key) {
+		if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, session.CronKeyPrefix), text); err != nil {
 			slog.Warn("send: set cron prompt", "key", key, "err", err)
 		}
 	}

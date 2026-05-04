@@ -87,10 +87,10 @@ func TestNormalize_Empty(t *testing.T) {
 	t.Parallel()
 	cfg := &Config{}
 	cfg.Normalize()
-	if cfg.Nodes != nil && len(cfg.Nodes) != 0 {
+	if len(cfg.Nodes) != 0 {
 		t.Errorf("Nodes should remain nil/empty, got %v", cfg.Nodes)
 	}
-	if cfg.Workspaces != nil && len(cfg.Workspaces) != 0 {
+	if len(cfg.Workspaces) != 0 {
 		t.Errorf("Workspaces should remain nil/empty, got %v", cfg.Workspaces)
 	}
 }

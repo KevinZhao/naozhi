@@ -45,15 +45,21 @@ func (f *Feishu) startWebSocket() error {
 			return nil
 		}
 
+		// R184-CONCUR-H1: wg.Add(1) MUST precede the msgSem select, so a
+		// concurrent Stop()/wg.Wait() cannot observe counter=0 between the
+		// goroutine being dispatched and wg.Add running. The drop branch
+		// must balance with wg.Done(). Mirrors the wshub.go invariant
+		// where clientWG.Add(2) precedes register().
 		switch pe.MediaType {
 		case "image":
+			f.wg.Add(1)
 			select {
 			case msgSem <- struct{}{}:
 			default:
+				f.wg.Done()
 				slog.Warn("feishu ws: handler semaphore full, dropping image message")
 				return nil
 			}
-			f.wg.Add(1)
 			go func() {
 				defer f.wg.Done()
 				defer func() { <-msgSem }()
@@ -69,13 +75,14 @@ func (f *Feishu) startWebSocket() error {
 			}()
 
 		case "audio":
+			f.wg.Add(1)
 			select {
 			case msgSem <- struct{}{}:
 			default:
+				f.wg.Done()
 				slog.Warn("feishu ws: handler semaphore full, dropping audio message")
 				return nil
 			}
-			f.wg.Add(1)
 			go func() {
 				defer f.wg.Done()
 				defer func() { <-msgSem }()
@@ -85,13 +92,14 @@ func (f *Feishu) startWebSocket() error {
 			}()
 
 		default:
+			f.wg.Add(1)
 			select {
 			case msgSem <- struct{}{}:
 			default:
+				f.wg.Done()
 				slog.Warn("feishu ws: handler semaphore full, dropping message")
 				return nil
 			}
-			f.wg.Add(1)
 			go func() {
 				defer f.wg.Done()
 				defer func() { <-msgSem }()
@@ -196,6 +204,14 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 	if event.EventV2Base != nil && event.EventV2Base.Header != nil {
 		eventID = event.EventV2Base.Header.EventID
 	}
+	// R186-SEC-L: symmetric with transport_hook's cap. WS path is signed by
+	// Feishu's SDK, but the dedup map still grows one key per delivered event;
+	// bounding the key size guards against an unexpected wire-format bump.
+	if len(eventID) > 256 {
+		slog.Warn("feishu ws: event_id too long, skipping dedup for this delivery",
+			"len", len(eventID))
+		eventID = ""
+	}
 
 	messageID := ""
 	if msg.MessageId != nil {
@@ -233,6 +249,18 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 			return parsedEvent{}, false
 		}
 		text := content.Text
+		// Mirror the webhook-path guard in transport_hook.go: reject oversized
+		// text bodies at the ingress boundary so multi-KB payloads never reach
+		// slog attrs, dispatch queue, or CLI stdin. Feishu's upstream limit is
+		// ~4 KiB (~1333 CJK chars); 8 KiB is 2× that official ceiling.
+		// Keeping WS and webhook paths symmetric prevents a regression where
+		// one transport silently accepts what the other rejects. R184-SEC-H1a.
+		const maxTextBytes = 8 * 1024
+		if len(text) > maxTextBytes {
+			slog.Warn("feishu ws: text exceeds limit, dropping",
+				"size", len(text))
+			return parsedEvent{}, false
+		}
 		for _, m := range msg.Mentions {
 			if m.Key != nil {
 				text = strings.ReplaceAll(text, *m.Key, "")

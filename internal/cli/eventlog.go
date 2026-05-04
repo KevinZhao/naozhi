@@ -540,11 +540,33 @@ func loadAtomicString(v *atomic.Pointer[string]) string {
 }
 
 // storeAtomicString writes a string value through atomic.Pointer[string].
-// The pointer captures the address of the string argument (already a local
-// copy on each call), mirroring how we used to pass a string directly to
-// atomic.Value.Store.
+//
+// Fast-path short-circuit (R176-PERF-P1): when the currently stored string
+// equals s, skip the store entirely. Append runs storeAtomicString under
+// l.mu for every user / tool_use / thinking / agent / task_start /
+// task_progress / todo event, and the summaries are frequently repeated
+// (e.g. a "Bash" tool_use fires the same one-liner on every step). By
+// returning early on equality we avoid:
+//
+//  1. Allocating a fresh *string on the heap (the `&p` below forces
+//     escape — on the slow path that's unavoidable because atomic.Pointer
+//     must see a stable address; on the fast path we never take an
+//     address at all, so escape analysis can keep s on the stack).
+//  2. An atomic pointer write on a cache line that other goroutines' Load
+//     paths (Snapshot, LastPromptSummary, LastActivitySummary) read at
+//     high frequency.
+//
+// Safety: every caller writes while holding l.mu, so Load → compare →
+// Store is atomic with respect to concurrent stores on this pointer.
+// Concurrent readers either observe the old value (if we skipped) or the
+// new value (if we wrote) — both valid prior-art snapshots.
 func storeAtomicString(v *atomic.Pointer[string], s string) {
-	v.Store(&s)
+	if cur := v.Load(); cur != nil && *cur == s {
+		return
+	}
+	p := new(string)
+	*p = s
+	v.Store(p)
 }
 
 // TurnAgents returns a copy of all currently active agents (foreground + background)

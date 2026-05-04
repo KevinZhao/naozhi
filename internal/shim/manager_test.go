@@ -49,15 +49,6 @@ func readLineMsgConn(conn net.Conn, dst interface{}) error {
 	return json.Unmarshal(line, dst)
 }
 
-// readLineMsg is a test-context wrapper that fails the test on error.
-// Must only be called from the test goroutine itself, not from a goroutine.
-func readLineMsg(t *testing.T, conn net.Conn, dst interface{}) {
-	t.Helper()
-	if err := readLineMsgConn(conn, dst); err != nil {
-		t.Fatalf("readLineMsg: %v", err)
-	}
-}
-
 // mustNewManager wraps NewManager + t.Fatal so tests do not have to repeat the
 // error check. NewManager returns an error only when os.Executable() fails,
 // which does not happen on any supported CI platform.

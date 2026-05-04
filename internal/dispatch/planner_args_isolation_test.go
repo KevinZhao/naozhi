@@ -74,8 +74,8 @@ func TestPlannerArgsIsolation_TwoArgAppendDoesLeak(t *testing.T) {
 	shared[0] = "--model"
 	shared[1] = "opus"
 
-	optsA := shared
-	optsA = append(optsA, "--append-system-prompt", "A") // two-arg: unsafe
+	// two-arg append: unsafe (writes into shared's backing array when cap>len)
+	_ = append(shared, "--append-system-prompt", "A")
 
 	// Shared's backing array now carries optsA's append, even though the
 	// header length is still 2 — re-slicing exposes the stored values.

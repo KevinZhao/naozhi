@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 const (
@@ -232,7 +234,11 @@ func (r *wsRelay) connect() error {
 	}
 	if resp.Type != "auth_ok" {
 		conn.Close()
-		return fmt.Errorf("auth failed %s: %s", r.node.ID, resp.Error)
+		// R187-SEC-L1: resp.Error comes from a remote (semi-trusted) node
+		// and flows into slog.Warn via reconnect's err wrap. Bidi/C1/newline
+		// in this field could forge journald structured fields. Align with
+		// R183-SEC-H1 / R184-SEC-M1 sanitize-wire-input policy.
+		return fmt.Errorf("auth failed %s: %s", r.node.ID, osutil.SanitizeForLog(resp.Error, 256))
 	}
 	if err := conn.SetReadDeadline(time.Time{}); err != nil {
 		conn.Close()
@@ -314,7 +320,13 @@ func (r *wsRelay) readLoop(conn *websocket.Conn) {
 		if err != nil {
 			return
 		}
-		conn.SetReadDeadline(time.Now().Add(relayReadTimeout))
+		// R185-CONC-M1: on half-closed TCP, SetReadDeadline can fail; if we
+		// ignore the error the next ReadMessage may block forever and the
+		// ping/pong sanity loop is silently defeated. Fail the readLoop so
+		// the defer triggers reconnect instead. Mirrors connect()'s pattern.
+		if err := conn.SetReadDeadline(time.Now().Add(relayReadTimeout)); err != nil {
+			return
+		}
 
 		// Parse only the key and type for routing + lastEvent tracking.
 		// Avoid full unmarshal+remarshal by injecting the node field into raw bytes.

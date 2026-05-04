@@ -135,7 +135,6 @@ func TestWatchdog_StopPrevents(t *testing.T) {
 	}
 }
 
-
 // TestWatchdog_ResetStaleCallbackNoOp verifies the generation-counter fix:
 // a callback that was already scheduled at the time of Reset must not fire.
 // We use a very short timeout and call Reset just before expiry, then confirm

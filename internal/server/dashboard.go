@@ -263,6 +263,10 @@ func (s *Server) registerDashboard() {
 	// a package-local helper that wraps the stdlib net/http/pprof
 	// handlers. See internal/server/debug_pprof.go + docs/ops/pprof.md.
 	s.registerPprof()
+	// expvar /debug/vars: same auth + loopback posture as pprof. Exposes
+	// the five naozhi_* counters from internal/metrics plus stdlib
+	// cmdline/memstats. OBS2.
+	s.registerExpvar()
 	if s.scratchH != nil {
 		s.mux.HandleFunc("POST /api/scratch/open", auth(s.scratchH.handleOpen))
 		s.mux.HandleFunc("POST /api/scratch/{id}/promote", auth(s.scratchH.handlePromote))

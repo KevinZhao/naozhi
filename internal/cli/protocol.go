@@ -27,8 +27,11 @@ type Protocol interface {
 
 	// Init performs any handshake required after process spawn but before readLoop.
 	// For stream-json: no-op. For ACP: sends initialize + session/new or session/load.
-	// Returns sessionID if established during init (empty if deferred to first message).
-	Init(rw *JSONRW, resumeID string) (sessionID string, err error)
+	// cwd is the workspace directory the agent should treat as its working directory
+	// (ACP passes this in session/new params; stream-json inherits os.Chdir set by
+	// the shim). Returns sessionID if established during init (empty if deferred to
+	// first message).
+	Init(rw *JSONRW, resumeID string, cwd string) (sessionID string, err error)
 
 	// WriteMessage writes a user message (with optional images) to the agent's stdin.
 	WriteMessage(w io.Writer, text string, images []ImageData) error

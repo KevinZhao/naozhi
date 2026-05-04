@@ -19,7 +19,9 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -362,6 +364,11 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 			Error:      "too many attempts",
 			RetryAfter: wsAuthRetryAfterSeconds,
 		})
+		// OBS2: rate-limit-triggered auth_fail counts for brute-force detection
+		// the same way invalid-token auth_fail does — operators watching
+		// naozhi_ws_auth_fail_total should see both signals blended, and
+		// Retry-After tells them whether the limiter is actively engaging.
+		metrics.WSAuthFailTotal.Add(1)
 		return
 	}
 	// Short-circuit when the connection is already authenticated via cookie —
@@ -386,6 +393,7 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "auth_ok"})
 	} else {
 		c.SendJSON(node.ServerMsg{Type: "auth_fail", Error: "invalid token"})
+		metrics.WSAuthFailTotal.Add(1)
 	}
 }
 
@@ -617,6 +625,19 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	key := msg.Key
 	if key == "" {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "key is required"})
+		return
+	}
+	// R183-SEC-M1: the remote-node delegation branch above forwards to
+	// handleRemoteSend which re-enters the connector's ValidateSessionKey
+	// gate; the local fast path here previously skipped that gate,
+	// violating the trust-boundary policy every other ws path (subscribe
+	// / unsubscribe / interrupt) already follows. An authenticated WS
+	// client could land a multi-KB key containing C1/bidi/newline bytes
+	// into the dispatch queue, the sessionSend log attrs, and eventually
+	// sessions.json at shutdown. ValidateSessionKey also caps length at
+	// MaxSessionKeyBytes (~520 B).
+	if err := session.ValidateSessionKey(key); err != nil {
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "invalid key"})
 		return
 	}
 	if msg.Text == "" && len(msg.FileIDs) == 0 {
@@ -1140,16 +1161,20 @@ func (h *Hub) doBroadcastSessionsUpdate() {
 // type descriptor once across all calls.
 type cronResultMsg struct {
 	Type   string `json:"type"`
-	JobID  string `json:"job_id"`
+	JobID  string `json:"job_id,omitempty"`
 	Result string `json:"result,omitempty"`
 	Error  string `json:"error,omitempty"`
 }
 
 // BroadcastCronResult notifies all connected WS clients that a cron job completed.
 func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
+	// R185-SEC-H2: scheduler generates jobID as 8-char hex today, but if a
+	// future path ever surfaces a config-supplied / user-typed ID, bidi/C0
+	// chars would reach the dashboard via a SetEscapeHTML(false) encoder.
+	// Sanitize defensively; result/errMsg are already scrubbed at recordResult.
 	data, err := marshalPooled(cronResultMsg{
 		Type:   "cron_result",
-		JobID:  jobID,
+		JobID:  osutil.SanitizeForLog(jobID, 64),
 		Result: result,
 		Error:  errMsg,
 	})

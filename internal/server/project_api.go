@@ -41,29 +41,23 @@ func redactGitRemoteURL(raw string) string {
 }
 
 // maxProjectNameLen bounds the `name` query param on project endpoints.
-// Project names are directory names under projects_root; 128 matches the
-// session-key component cap and is well above any realistic directory.
-const maxProjectNameLen = 128
+// Kept as an alias of project.MaxProjectNameBytes so existing tests /
+// callers compile unchanged; the two constants were always required to
+// stay in lockstep. R183-REFACTOR-L1.
+const maxProjectNameLen = project.MaxProjectNameBytes
 
-// validateProjectName rejects oversized or control-character names before
-// they flow into slog attrs. Without this a post-auth caller could emit a
-// 30 KB ANSI-escape-laden name attr on every log line, bloating log
-// storage and (in terminal-rendered log viewers) corrupting output.
-// R68-SEC-M3.
+// validateProjectName is a thin wrapper over project.ValidateProjectName.
+//
+// Previously this file carried a full duplicate of the policy with the
+// same 128-byte cap, C0/DEL gate, and IsLogInjectionRune sweep. Keeping
+// two validators in sync across code review rounds was error-prone —
+// R181-SEC-P2-2 explicitly introduced project.ValidateProjectName as
+// the single source of truth for trust boundaries (reverse-RPC worker +
+// dashboard). R183-REFACTOR-L1 collapses the dashboard path onto the
+// same function so a future tightening (e.g. rejecting leading hyphens
+// to block flag injection through filesystem lookups) needs one edit.
 func validateProjectName(name string) error {
-	if name == "" {
-		return errors.New("name is required")
-	}
-	if len(name) > maxProjectNameLen {
-		return errors.New("name too long")
-	}
-	for i := 0; i < len(name); i++ {
-		c := name[i]
-		if c < 0x20 || c == 0x7f {
-			return errors.New("name contains invalid characters")
-		}
-	}
-	return nil
+	return project.ValidateProjectName(name)
 }
 
 // ProjectHandlers groups the project management API endpoints.
@@ -73,6 +67,17 @@ type ProjectHandlers struct {
 	nodeAccess NodeAccessor
 	nodeCache  *node.CacheManager
 	ctxFunc    func() context.Context // returns hub.ctx or Background
+	// filesExistsLimiter caps how often a single authenticated caller can
+	// invoke /api/projects/files/exists. The endpoint fans out up to
+	// maxExistsPaths (100) filesystem stats per request with a
+	// fileStatTimeout (2s) budget, so unmetered calls let a post-auth
+	// attacker tie up worker goroutines against slow/deep directory trees
+	// (NFS mounts, gigantic monorepos, symlink loops). Mirrors the
+	// uploadLimiter policy (6s period × 10 burst ≈ 10/min) since both
+	// endpoints do filesystem I/O and belong to the same DoS class.
+	// Nil in tests that build ProjectHandlers by hand; handleFilesExists
+	// guards with a nil check so the limiter is optional. S13.
+	filesExistsLimiter *ipLimiter
 }
 
 // GET /api/projects — list all projects (local + remote).
@@ -196,11 +201,17 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 	}
 
 	if err := project.ValidateConfig(cfg); err != nil {
-		// Surface the wrapped reason directly — it reports *which* field
-		// was rejected without leaking decoder internals. The same
-		// validator gates the reverse-RPC update_config path in
-		// internal/upstream/connector.go. R68-SEC-H2.
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		// R181-SEC-P2-5: ValidateConfig returns field-specific strings
+		// like "planner_prompt exceeds 8192-byte limit" that echo the
+		// internal size caps — a low-risk information leak to
+		// authenticated users probing config field names. The wrapped
+		// err.Error() is logged for operator diagnosis but the HTTP
+		// response stays generic. The reverse-RPC worker's same guard
+		// (internal/upstream/connector.go update_config) does surface
+		// the detail because the primary is already trusted enough to
+		// hold config, but dashboard users may be more broadly authz'd.
+		slog.Debug("project update_config: ValidateConfig failed", "project", name, "err", err)
+		http.Error(w, "invalid project config", http.StatusBadRequest)
 		return
 	}
 

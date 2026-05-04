@@ -2,6 +2,7 @@ package transcribe
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -88,9 +89,18 @@ func (s *awsService) streamFromBuffer(ctx context.Context, data []byte, mimeType
 	}
 
 	stream := resp.GetStream()
-	defer stream.Close()
+	// R186-RELY-H1 / R178-T: the sender goroutine uses stream.Writer; if
+	// collectTranscripts returns early (Reader.Err, partial result, ctx
+	// cancellation) the deferred stream.Close would race with an in-flight
+	// Writer.Send. Gate the Close on the sender's completion instead.
+	senderDone := make(chan struct{})
+	defer func() {
+		<-senderDone
+		stream.Close()
+	}()
 
 	go func() {
+		defer close(senderDone)
 		const chunkSize = 16 * 1024
 		for i := 0; i < len(data); i += chunkSize {
 			end := min(i+chunkSize, len(data))
@@ -122,15 +132,28 @@ func (s *awsService) streamFromFFmpeg(ctx context.Context, data []byte) (string,
 	}
 
 	stream := resp.GetStream()
-	defer stream.Close()
+	// R186-RELY-H1 / R178-T: see streamFromBuffer; wait for sender goroutine
+	// before stream.Close() to avoid use-after-close on Writer.Send.
+	senderDone := make(chan struct{})
+	defer func() {
+		<-senderDone
+		stream.Close()
+	}()
 
 	// Read from ffmpeg stdout → send to Transcribe, concurrently with ffmpeg
 	go func() {
+		defer close(senderDone)
 		defer pcm.Close()
 		buf := make([]byte, 16*1024)
 		for {
 			n, readErr := pcm.Read(buf)
 			if n > 0 {
+				// The chunk copy is required because `buf` is reused across
+				// iterations; AWS Go SDK v2 currently serializes AudioChunk
+				// synchronously inside Send, but that behaviour is not part
+				// of the public contract. Removing the copy to "optimize"
+				// would introduce a race if the SDK ever adds async
+				// buffering. R187-RELY-L1.
 				chunk := make([]byte, n)
 				copy(chunk, buf[:n])
 				if sendErr := stream.Writer.Send(ctx, &types.AudioStreamMemberAudioEvent{
@@ -141,7 +164,7 @@ func (s *awsService) streamFromFFmpeg(ctx context.Context, data []byte) (string,
 				}
 			}
 			if readErr != nil {
-				if readErr != io.EOF {
+				if !errors.Is(readErr, io.EOF) {
 					slog.Debug("ffmpeg read failed", "err", readErr)
 				}
 				break
@@ -186,10 +209,24 @@ func (s *awsService) buildInput(encoding types.MediaEncoding, sampleRate int32) 
 	}
 	if s.isMultiLang() {
 		input.IdentifyMultipleLanguages = true
-		// Normalize: strip spaces around each language code
-		parts := strings.Split(s.cfg.LanguageCode, ",")
-		for i := range parts {
-			parts[i] = strings.TrimSpace(parts[i])
+		// Normalize: strip spaces around each language code and drop empty
+		// segments so leading/trailing commas (",en-US" / "zh-CN,") or doubles
+		// (",,") do not leave PreferredLanguage = "" and trip AWS API 400.
+		// R185-REL-M1.
+		raw := strings.Split(s.cfg.LanguageCode, ",")
+		parts := raw[:0]
+		for _, p := range raw {
+			if t := strings.TrimSpace(p); t != "" {
+				parts = append(parts, t)
+			}
+		}
+		if len(parts) == 0 {
+			// Degrade gracefully: multi-lang config that resolved to zero
+			// entries falls back to single-LanguageCode with the raw string
+			// (AWS will return a clearer "invalid LanguageCode" if still bad).
+			input.IdentifyMultipleLanguages = false
+			input.LanguageCode = types.LanguageCode(s.cfg.LanguageCode)
+			return input
 		}
 		input.LanguageOptions = aws.String(strings.Join(parts, ","))
 		input.PreferredLanguage = types.LanguageCode(parts[0])

@@ -10,7 +10,9 @@ import (
 	"unicode"
 
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -151,7 +153,10 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 					d.discardQueue(key)
 					d.replyText(ctx, msg, "会话已重置 ("+id+")。", log)
 				} else {
-					d.replyText(ctx, msg, "未知的 agent: "+agentToReset, log)
+					// R187-SEC-M1: agentToReset is user IM input, sanitize
+					// before echo into group chat to prevent bidi-override
+					// visual spoofing. Matches /cd/echo sanitize (R185-SEC-H1).
+					d.replyText(ctx, msg, "未知的 agent: "+osutil.SanitizeForLog(agentToReset, 64), log)
 				}
 			}
 			return
@@ -172,7 +177,9 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 				}
 			}
 			if !found {
-				errMsg := "未知的 agent: " + agentToReset
+				// R187-SEC-M1: agentToReset is user IM input, sanitize before
+				// echo back to avoid bidi-override visual spoofing.
+				errMsg := "未知的 agent: " + osutil.SanitizeForLog(agentToReset, 64)
 				if len(d.agentCommands) > 0 {
 					var names []string
 					for cmd := range d.agentCommands {
@@ -374,9 +381,22 @@ func (d *Dispatcher) handleProjectCommand(ctx context.Context, msg platform.Inco
 		d.replyText(ctx, msg, "可用项目:\n"+strings.Join(lines, "\n"), log)
 
 	default:
+		// Validate at the IM trust boundary before Get / BindChat so a crafted
+		// /project <bidi_or_C0_name> cannot inject into slog attrs (via the
+		// manager's internal logging) or get echoed back into the chat reply.
+		// Also keeps symmetry with the dashboard + reverse-RPC gates that
+		// already share project.ValidateProjectName (R181-SEC-P2-2).
+		if err := project.ValidateProjectName(arg); err != nil {
+			d.replyText(ctx, msg, "项目名不合法。\n使用 /project list 查看可用项目。", log)
+			return
+		}
 		proj := d.projectMgr.Get(arg)
 		if proj == nil {
-			d.replyText(ctx, msg, "项目不存在: "+arg+"\n使用 /project list 查看可用项目。", log)
+			// Do NOT echo the unvalidated user-supplied name back into the
+			// reply body: even after name validation, avoiding echo eliminates
+			// a whole class of social-engineering games where the bot mirrors
+			// attacker text into a group chat. R184-SEC-H1b.
+			d.replyText(ctx, msg, "项目不存在。\n使用 /project list 查看可用项目。", log)
 			return
 		}
 		if err := d.projectMgr.BindChat(proj.Name, msg.Platform, msg.ChatType, msg.ChatID); err != nil {
@@ -401,11 +421,25 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		return
 	}
 
+	// R185-QUAL-M1: preserve the original user-typed form for the reply echo.
+	// tilde expansion below mutates `path` to the absolute home-rooted form,
+	// which would leak the server's /home/<user> prefix back into the IM
+	// channel (violates the same policy as R184-SEC-M2). Echo the pre-expansion
+	// shape instead; slog still logs the resolved absPath for operator debugging.
+	originalInput := path
+
 	if strings.HasPrefix(path, "~") {
+		// R186-GO-M1: silently ignoring os.UserHomeDir error leaves path as "~/foo",
+		// which later fails filepath.IsAbs → relative path branch → EvalSymlinks
+		// against an irrelevant base → misleading "目录不存在或无权限" message.
+		// Fail fast with an actionable hint so operators know to use an absolute
+		// path instead.
 		home, err := os.UserHomeDir()
-		if err == nil {
-			path = filepath.Join(home, path[1:])
+		if err != nil {
+			d.replyText(ctx, msg, "无法获取用户主目录，请使用绝对路径（例: /cd /home/ubuntu/project）", log)
+			return
 		}
+		path = filepath.Join(home, path[1:])
 	}
 
 	var absPath string
@@ -414,6 +448,13 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 	} else {
 		chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
 		currentWS := d.router.GetWorkspace(chatKey)
+		// R185-GO-L3: relative path requires a prior /cd <abs> to anchor
+		// workspace; without it, filepath.Join("", rel) == rel and EvalSymlinks
+		// resolves against process cwd, which is meaningless to the user.
+		if currentWS == "" {
+			d.replyText(ctx, msg, "请先用绝对路径设置工作目录（例: /cd /home/ubuntu/project）再使用相对路径", log)
+			return
+		}
 		absPath = filepath.Join(currentWS, path)
 	}
 
@@ -444,7 +485,17 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 	d.router.SetWorkspace(chatKey, absPath)
 	d.router.ResetChat(chatKey)
 
-	d.replyText(ctx, msg, "工作目录已切换到: "+absPath+"\n所有会话已重置，新消息将在此目录下执行。", log)
+	// R184-SEC-M2 / R185-QUAL-M1: echo the user-supplied form (pre-tilde
+	// expansion + Clean) rather than absPath or post-expansion path, which
+	// would disclose resolved symlink targets / server home directory on the
+	// server. slog still captures absPath for operator debugging; only the IM
+	// reply body is user-facing.
+	displayPath := filepath.Clean(originalInput)
+	// R185-SEC-H1: scrub bidi overrides / C0/C1 control chars before echoing
+	// back into the IM channel so a crafted `/cd /tmp/‮kcatta` cannot render
+	// deceptively inside chat clients (same hardening as slog sanitize).
+	displayPath = osutil.SanitizeForLog(displayPath, 4096)
+	d.replyText(ctx, msg, "工作目录已切换到: "+displayPath+"\n所有会话已重置，新消息将在此目录下执行。", log)
 	log.Info("workspace changed", "chat_key", chatKey, "path", absPath)
 }
 

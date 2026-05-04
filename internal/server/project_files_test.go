@@ -9,8 +9,12 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"golang.org/x/time/rate"
 
 	"github.com/naozhi/naozhi/internal/project"
+	"github.com/naozhi/naozhi/internal/session"
 )
 
 // newProjectHandlersForTest builds a ProjectHandlers pointed at a temp
@@ -322,6 +326,119 @@ func TestHandleFilesExists_InvalidJSON(t *testing.T) {
 	h.handleFilesExists(w, req)
 	if w.Code != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", w.Code)
+	}
+}
+
+// TestHandleFilesExists_RateLimit pins the S13 per-IP limiter contract.
+// The endpoint does up to maxExistsPaths (100) filesystem stats per request
+// inside a fileStatTimeout budget, so unmetered access lets an authenticated
+// caller tie up worker goroutines by pointing the batch at deep NFS mounts or
+// symlink loops. A wire-level burst cap is the first (and cheapest) line of
+// defense. We install a burst-1 limiter so two requests from the same IP
+// deterministically drive the bucket empty without relying on wall-clock
+// timing; the production policy (rate.Every(6s), burst 10) is smoke-tested
+// by the TestProjectHandlers_FilesExistsLimiter_Wired contract below.
+func TestHandleFilesExists_RateLimit(t *testing.T) {
+	t.Parallel()
+	h, proj, _ := newProjectHandlersForTest(t, map[string]string{"a.txt": "hi"})
+	h.filesExistsLimiter = newIPLimiterWithProxy(rate.Every(time.Hour), 1, false)
+
+	body, _ := json.Marshal(existsReq{Project: proj, Paths: []string{"a.txt"}})
+	mkReq := func() *http.Request {
+		r := httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", bytes.NewReader(body))
+		r.Header.Set("Content-Type", "application/json")
+		r.RemoteAddr = "10.0.0.7:54321"
+		return r
+	}
+
+	// First request consumes the burst slot and succeeds.
+	w1 := httptest.NewRecorder()
+	h.handleFilesExists(w1, mkReq())
+	if w1.Code != http.StatusOK {
+		t.Fatalf("first request: status = %d, want 200 (body=%q)",
+			w1.Code, strings.TrimSpace(w1.Body.String()))
+	}
+
+	// Second request from the same IP must hit the limiter before any
+	// filesystem I/O starts; the 429 must carry the JSON error so curl /
+	// dashboard clients can distinguish rate-limit from other 4xx classes.
+	w2 := httptest.NewRecorder()
+	h.handleFilesExists(w2, mkReq())
+	if w2.Code != http.StatusTooManyRequests {
+		t.Fatalf("second request: status = %d, want 429 (body=%q)",
+			w2.Code, strings.TrimSpace(w2.Body.String()))
+	}
+	if ct := w2.Header().Get("Content-Type"); ct != "application/json" {
+		t.Errorf("429 Content-Type = %q, want application/json", ct)
+	}
+	if !strings.Contains(w2.Body.String(), "rate limit") {
+		t.Errorf("429 body = %q, want JSON with 'rate limit' message", w2.Body.String())
+	}
+
+	// A request from a different IP bypasses the drained bucket because the
+	// limiter keys on client IP. This also asserts that newProjectHandlersForTest
+	// wiring hasn't accidentally promoted the limiter to a global bucket.
+	r3 := mkReq()
+	r3.RemoteAddr = "10.0.0.8:54321"
+	w3 := httptest.NewRecorder()
+	h.handleFilesExists(w3, r3)
+	if w3.Code != http.StatusOK {
+		t.Fatalf("third request (different IP): status = %d, want 200 (body=%q)",
+			w3.Code, strings.TrimSpace(w3.Body.String()))
+	}
+}
+
+// TestProjectHandlers_FilesExistsLimiter_Wired locks the S13 wiring: server.New
+// must install a non-nil filesExistsLimiter on ProjectHandlers so the
+// production path has DoS protection out of the box. Without this contract a
+// refactor that drops the newIPLimiterWithProxy call in server.go would leave
+// the handler technically correct but unprotected — regressions like that have
+// shipped before (see R59-PERF-M3 where resolveProjectFile was called per
+// path). We verify by inspecting the struct field on a minimally-configured
+// Server, not by probing the rate-limiter timing (which would be flaky).
+func TestProjectHandlers_FilesExistsLimiter_Wired(t *testing.T) {
+	t.Parallel()
+	router := session.NewRouter(session.RouterConfig{})
+	srv := NewWithOptions(ServerOptions{
+		Addr:   ":0",
+		Router: router,
+	})
+	if srv == nil {
+		t.Fatal("NewWithOptions returned nil")
+	}
+	if srv.projectH == nil {
+		t.Fatal("projectH must be constructed even with nil ProjectManager")
+	}
+	if srv.projectH.filesExistsLimiter == nil {
+		t.Error("server.New must wire ProjectHandlers.filesExistsLimiter (S13); " +
+			"a nil limiter leaves /api/projects/files/exists unprotected against DoS")
+	}
+}
+
+// TestHandleFilesExists_NilLimiterBypasses locks the optional-wiring contract.
+// newProjectHandlersForTest builds a handler with no limiter; the nil-guard in
+// handleFilesExists keeps those tests green without forcing every test to wire
+// a limiter. A regression that flips the nil-guard to a fail-closed check
+// would break newProjectHandlersForTest silently for every future test.
+func TestHandleFilesExists_NilLimiterBypasses(t *testing.T) {
+	t.Parallel()
+	h, proj, _ := newProjectHandlersForTest(t, map[string]string{"a.txt": "hi"})
+	if h.filesExistsLimiter != nil {
+		t.Fatal("newProjectHandlersForTest must leave filesExistsLimiter nil")
+	}
+
+	body, _ := json.Marshal(existsReq{Project: proj, Paths: []string{"a.txt"}})
+	// 5 back-to-back requests must all succeed — no limiter => no 429.
+	for i := 0; i < 5; i++ {
+		req := httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "10.0.0.9:54321"
+		w := httptest.NewRecorder()
+		h.handleFilesExists(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("req %d: status = %d, want 200 (body=%q)",
+				i, w.Code, strings.TrimSpace(w.Body.String()))
+		}
 	}
 }
 

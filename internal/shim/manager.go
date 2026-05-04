@@ -18,6 +18,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/metrics"
 )
 
 // ErrMaxShims is returned by StartShim when the configured shim cap is hit.
@@ -211,7 +213,16 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	// Reap the shim process asynchronously to prevent zombie accumulation.
 	// The shim is designed to outlive naozhi (Setsid: true), but when it exits
 	// on its own (idle timeout, CLI exit), cmd.Wait() collects its status.
-	go cmd.Wait() //nolint:errcheck
+	//
+	// R187-RELY-L1: log non-nil Wait errors so an OOM-killed / exec-permission
+	// shim doesn't silently vanish. Normal termination (idle-timeout exit 0)
+	// returns nil and stays quiet; any other exit surfaces in journald with
+	// the keyHash so operators can correlate with the next dial failure.
+	go func() {
+		if err := cmd.Wait(); err != nil {
+			slog.Warn("shim exited unexpectedly", "key_hash", keyHash, "err", err)
+		}
+	}()
 
 	// Read ready message (with timeout)
 	readyCh := make(chan struct {
@@ -338,6 +349,10 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 		oldHandle.Close()
 	}
 
+	// OBS2: count every successful fresh shim birth. Reconnect (which reattaches
+	// to an existing shim socket) is NOT counted — this metric answers "how many
+	// shim processes forked" rather than "how many shim handshakes happened".
+	metrics.ShimRestartTotal.Add(1)
 	return handle, nil
 }
 

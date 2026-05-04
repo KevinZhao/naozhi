@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -193,7 +194,7 @@ func parseTail(ctx context.Context, f *os.File, size int64, beforeMS int64, limi
 		scanBudget -= chunkSize
 
 		readBuf := buf[:chunkSize]
-		if _, err := f.ReadAt(readBuf, offset); err != nil && err != io.EOF {
+		if _, err := f.ReadAt(readBuf, offset); err != nil && !errors.Is(err, io.EOF) {
 			return nil, fmt.Errorf("readAt offset=%d size=%d: %w", offset, chunkSize, err)
 		}
 

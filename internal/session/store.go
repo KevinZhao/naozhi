@@ -31,14 +31,19 @@ func readCappedFile(path string, label string) ([]byte, error) {
 		if errors.Is(err, fs.ErrNotExist) {
 			return nil, nil
 		}
-		return nil, err
+		// R180-GO-P2: wrap so the loadStore slog attr identifies the specific
+		// path + open-phase failure instead of the bare os.PathError text.
+		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
 	defer f.Close()
 	data, err := io.ReadAll(io.LimitReader(f, maxStoreFileBytes+1))
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("read %s: %w", path, err)
 	}
-	if int64(len(data)) > maxStoreFileBytes {
+	// R180-GO-P2: drop the unnecessary int64 cast. maxStoreFileBytes is an
+	// untyped constant and len returns int; the comparison cannot overflow
+	// on any 64-bit platform. Matches the unadorned len(data) below.
+	if len(data) > maxStoreFileBytes {
 		slog.Warn(label+" exceeds size cap; refusing to load",
 			"path", path, "cap_bytes", maxStoreFileBytes, "observed_bytes", len(data))
 		return nil, fmt.Errorf("%s %s exceeds %d-byte cap", label, path, maxStoreFileBytes)
@@ -188,7 +193,14 @@ func writeStoreMeta(storePath string) {
 		slog.Warn("marshal session store meta failed", "err", err)
 		return
 	}
-	if err := osutil.WriteFileAtomic(metaPath, data, 0600); err != nil {
+	// The meta sidecar is advisory (used only for cross-version downgrade
+	// detection) — failure here does not compromise the already-durable main
+	// store. A plain write spares two fsyncs per save (vs. WriteFileAtomic's
+	// fsync tmp + SyncDir pair), which matters on slower durable backends like
+	// EBS gp2 where each fsync can run 20-50ms. A partial write on crash only
+	// loses the sidecar; readStoreMeta treats a missing/malformed sidecar as
+	// legacy v1, so the downgrade check degrades gracefully.
+	if err := os.WriteFile(metaPath, data, 0600); err != nil {
 		slog.Warn("write session store meta failed", "path", metaPath, "err", err)
 	}
 }
@@ -321,6 +333,11 @@ func saveKnownIDs(storePath string, ids map[string]bool) error {
 	for id := range ids {
 		list = append(list, id)
 	}
+	// R180-GO-P2: Go map iteration is randomised per run; without this
+	// sort each saveKnownIDs write produces different byte output for the
+	// same logical set, which adds pointless diff noise to backups / audit
+	// tooling and makes on-disk regression testing harder.
+	slices.Sort(list)
 	data, err := json.Marshal(list)
 	if err != nil {
 		return fmt.Errorf("marshal known IDs: %w", err)

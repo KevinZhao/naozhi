@@ -46,11 +46,11 @@ func TestClientMsgJSONRoundTrip(t *testing.T) {
 		{
 			name: "with resume_id and node",
 			msg: ClientMsg{
-				Type:      "send",
-				Key:       "feishu:group:123",
-				Text:      "hi",
-				Node:      "node-2",
-				ResumeID:  "sess-abc",
+				Type:     "send",
+				Key:      "feishu:group:123",
+				Text:     "hi",
+				Node:     "node-2",
+				ResumeID: "sess-abc",
 			},
 		},
 	}

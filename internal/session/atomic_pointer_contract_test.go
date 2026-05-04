@@ -124,6 +124,54 @@ func TestLoadStringAtomic_NilPointer_ReturnsEmpty(t *testing.T) {
 	}
 }
 
+// TestStoreStringAtomic_SkipsEqualWrite pins the R176-PERF-P1 compare-before-store
+// fast path: when the currently stored string equals the incoming s, the helper
+// must not allocate a fresh *string or issue an atomic Store. Verified by
+// capturing the pointer value through two equal stores and asserting address
+// identity — a naive implementation that always allocates would produce a
+// fresh address on the second call. A functional regression (wrong comparison
+// semantics) would instead observe a different string after the second call,
+// which is also asserted.
+func TestStoreStringAtomic_SkipsEqualWrite(t *testing.T) {
+	t.Parallel()
+	var v atomic.Pointer[string]
+	storeStringAtomic(&v, "hot-tool-label")
+	firstPtr := v.Load()
+	if firstPtr == nil || *firstPtr != "hot-tool-label" {
+		t.Fatalf("first store failed: got %v", firstPtr)
+	}
+	// Second store with the same value MUST be a no-op: pointer identity unchanged.
+	storeStringAtomic(&v, "hot-tool-label")
+	if got := v.Load(); got != firstPtr {
+		t.Errorf("equal-value second store allocated a new pointer (%p != %p) — fast path regression", got, firstPtr)
+	}
+	// Divergent store MUST write a fresh pointer.
+	storeStringAtomic(&v, "different-label")
+	if got := v.Load(); got == firstPtr {
+		t.Errorf("divergent store skipped write — compare-before-store semantics broken")
+	}
+	if got := loadStringAtomic(&v); got != "different-label" {
+		t.Errorf("after divergent store: got %q, want \"different-label\"", got)
+	}
+}
+
+// TestStoreStringAtomic_NilToEmptyIsNotSkipped ensures the first write of an
+// empty string from a never-stored pointer actually installs a non-nil
+// pointer. The fast-path check `cur != nil && *cur == s` must short-circuit
+// on nil, otherwise tests like TestStoreStringAtomic_RoundTrip's "empty store
+// leaves pointer non-nil" invariant would silently break.
+func TestStoreStringAtomic_NilToEmptyIsNotSkipped(t *testing.T) {
+	t.Parallel()
+	var v atomic.Pointer[string]
+	if v.Load() != nil {
+		t.Fatal("precondition: zero-value atomic.Pointer must Load() nil")
+	}
+	storeStringAtomic(&v, "")
+	if v.Load() == nil {
+		t.Error("first store of \"\" from nil pointer was skipped — fast path must not short-circuit when cur==nil")
+	}
+}
+
 // TestStoreStringAtomic_RoundTrip covers the common mutation path: store a
 // string, read it back via loadStringAtomic. A naive `v.Store(&s)` where `s`
 // is a loop-captured variable would let later writes mutate prior pointers;

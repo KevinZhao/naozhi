@@ -231,12 +231,14 @@ Watchdog 机制：
 
 ```go
 type Protocol interface {
-    Name() string                                    // "stream-json" | "acp"
-    BuildArgs(opts SpawnOptions) []string             // 构建 CLI 启动参数
-    Init(rw *JSONRW, resumeID string) (string, error) // 协议握手 (ACP: initialize + session/new)
-    WriteMessage(w io.Writer, text string) error      // 写入用户消息
-    ReadEvent(line string) (Event, bool, error)       // 解析事件 (bool=轮次完成)
-    HandleEvent(w io.Writer, ev Event) bool           // 处理内部事件 (如 ACP 权限自动授权)
+    Name() string                                                  // "stream-json" | "acp"
+    Clone() Protocol                                               // 新进程的副本（stateless 可返回 receiver）
+    BuildArgs(opts SpawnOptions) []string                          // 构建 CLI 启动参数
+    Init(rw *JSONRW, resumeID string, cwd string) (string, error)  // 协议握手 (ACP: initialize + session/new)
+    WriteMessage(w io.Writer, text string, images []ImageData) error // 写入用户消息（含可选图片）
+    WriteInterrupt(w io.Writer, requestID string) error            // 中断当前轮次（ACP 返回 ErrInterruptUnsupported）
+    ReadEvent(line string) (Event, bool, error)                    // 解析 NDJSON 行 (bool=轮次完成)
+    HandleEvent(w io.Writer, ev Event) bool                        // 处理内部事件 (如 ACP 权限自动授权)
 }
 ```
 
@@ -277,6 +279,27 @@ func (p *Process) Kill()
 - 同一 session 的消息串行处理（排队，通过 sendMu 保护）
 - 持久化到 JSON 文件 (`~/.naozhi/sessions.json`)，启动时恢复
 - 关闭前等待 running 完成（超时 30s），然后保存 store
+
+#### 保留 session-key 命名空间
+
+除标准 IM shape 之外，以下前缀属于内部子系统的保留命名空间，不遵循
+`{platform}:{chatType}:{userId}:{agentId}` 约定。新增保留前缀需同步更新
+`internal/session/key.go` (`reservedKeyPrefixes`) 以及本表，并考虑是否要接入
+`exemptKeyPrefixes`（TTL 豁免）、`saveStore` 过滤、Dashboard sidebar 过滤。
+
+| 前缀 | 常量 | 所有者 | key 形状 | TTL 豁免 | 持久化 | Sidebar 可见 |
+|---|---|---|---|---|---|---|
+| `cron:` | `session.CronKeyPrefix` | `internal/cron` | `cron:{jobID}` | ✓ | ✓ | ✓（cron 面板） |
+| `project:` | `session.ProjectKeyPrefix` | `internal/project` | `project:{name}:planner` | ✓ | ✓ | ✓（planner 行） |
+| `scratch:` | `session.ScratchKeyPrefix` | `internal/session/scratch.go` | `scratch:{id}:general:{sourceAgentID}` | ✗ | ✗（ephemeral） | ✗（抽屉独立 UI） |
+
+判定规则（`internal/session/key.go`）：
+- `IsReservedNamespace(key)` — 任一保留前缀命中
+- `IsCronKey(key)` — cron 专有路径
+- `IsScratchKey(key)` — scratch 专有路径（定义于 `scratch.go`）
+- `project.IsPlannerKey(key)` — 要求 `project:` 前缀且 `:planner` 后缀（更严格）
+
+所有前缀都带 trailing colon，避免 `cronographer:` / `projectile:` 这类子串误判。
 
 **并发模型** (已验证: 每个 claude 进程 ~350MB RSS):
 

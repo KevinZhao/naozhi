@@ -917,7 +917,7 @@ func TestWebhook_NonceNonPrintableASCII_Rejected(t *testing.T) {
 		"embedded_CR":    "nonce\rvalid",
 		"space_internal": "nonce valid",
 		"c1_NEL":         "noncenel",
-		"bidi_RLO":       "nonce‮rtl",
+		"bidi_RLO":       "nonce\u202ertl",
 		"del_char":       "nonce\x7fdel",
 		"tab_char":       "nonce\tvalid",
 	}

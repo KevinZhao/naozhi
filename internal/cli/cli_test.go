@@ -210,7 +210,7 @@ func TestACPProtocol_WriteInterrupt_Unsupported(t *testing.T) {
 func TestClaudeProtocol_Init(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
-	id, err := p.Init(nil, "")
+	id, err := p.Init(nil, "", "")
 	if err != nil || id != "" {
 		t.Errorf("Init() = (%q, %v), want (\"\", nil)", id, err)
 	}
@@ -465,7 +465,7 @@ func TestACPProtocol_Init_NewSession(t *testing.T) {
 	}}
 	rw := &JSONRW{W: &written, R: mock}
 
-	sessionID, err := p.Init(rw, "")
+	sessionID, err := p.Init(rw, "", "")
 	if err != nil {
 		t.Fatalf("Init error: %v", err)
 	}
@@ -487,7 +487,7 @@ func TestACPProtocol_Init_ResumeSession(t *testing.T) {
 	}}
 	rw := &JSONRW{W: &written, R: mock}
 
-	sessionID, err := p.Init(rw, "sess_existing_456")
+	sessionID, err := p.Init(rw, "sess_existing_456", "")
 	if err != nil {
 		t.Fatalf("Init error: %v", err)
 	}
@@ -506,7 +506,7 @@ func TestACPProtocol_Init_RPCError(t *testing.T) {
 	}}
 	rw := &JSONRW{W: &written, R: mock}
 
-	_, err := p.Init(rw, "")
+	_, err := p.Init(rw, "", "")
 	if err == nil {
 		t.Fatal("expected error for RPC error in init")
 	}

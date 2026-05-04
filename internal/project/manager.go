@@ -142,11 +142,27 @@ func (m *Manager) ProjectForChat(platform, chatType, chatID string) *Project {
 
 // BindChat binds a chat to a project and persists the binding to project.yaml.
 func (m *Manager) BindChat(projectName, platform, chatType, chatID string) error {
+	// R185-SEC-M1: IM /project <name> → BindChat is another trust boundary
+	// into bindingIndex. Enforce the same field invariants as ValidateConfig
+	// (R184-SEC-M1b) so the index's "platform:chatType:chatID" key invariant
+	// is upheld regardless of ingress. Empty required fields are also rejected
+	// (R185-SEC-M2).
+	if platform == "" || chatType == "" || chatID == "" {
+		return fmt.Errorf("%w: BindChat requires non-empty platform/chatType/chatID", ErrInvalidConfig)
+	}
+	if err := validateBindingField(platform, chatType, chatID); err != nil {
+		return fmt.Errorf("%w: BindChat: %s", ErrInvalidConfig, err.Error())
+	}
 	m.mu.Lock()
 	p, ok := m.projects[projectName]
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("%w: %s", ErrNotFound, projectName)
+		// R183-SEC-L1: use %q to mirror UpdateConfig / SetFavorite (lines 211,
+		// 237). An exported function is one future caller away from being
+		// reached without a trust-boundary ValidateProjectName; defense-in-
+		// depth quoting means bidi/C1/newline bytes in projectName cannot
+		// forge structured log entries via err.Error().
+		return fmt.Errorf("%w: %q", ErrNotFound, projectName)
 	}
 
 	binding := ChatBinding{Platform: platform, ChatID: chatID, ChatType: chatType}
@@ -205,7 +221,10 @@ func (m *Manager) SetFavorite(name string, favorite bool) error {
 	p, ok := m.projects[name]
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("%w: %s", ErrNotFound, name)
+		// R182-SEC-L1: %q mirrors UpdateConfig (line 234). set_favorite now
+		// validates at the RPC boundary (R182-SEC-M1), but function is
+		// defense-in-depth for any future caller that forgets to validate.
+		return fmt.Errorf("%w: %q", ErrNotFound, name)
 	}
 	if p.Config.Favorite == favorite {
 		m.mu.Unlock()
@@ -225,7 +244,12 @@ func (m *Manager) UpdateConfig(name string, cfg ProjectConfig) error {
 	p, ok := m.projects[name]
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("%w: %s", ErrNotFound, name)
+		// R181-SEC-P2-2: name comes from reverse-RPC frames (update_config)
+		// and dashboard query strings. %q escapes bidi/C1/newline so the
+		// wrapped error cannot forge structured log entries when the caller
+		// logs err.Error(). BindChat / UpdateBinding / SetFavorite now all
+		// use %q too (R182/R183/R185) so every ErrNotFound path is uniform.
+		return fmt.Errorf("%w: %q", ErrNotFound, name)
 	}
 	p.Config = cfg
 	m.rebuildBindingIndex()

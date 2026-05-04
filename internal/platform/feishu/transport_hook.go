@@ -10,6 +10,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
@@ -192,6 +193,18 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				w.WriteHeader(http.StatusBadRequest)
 				return
 			}
+			// R182-SEC-L3: utf8.ValidString only rejects malformed UTF-8,
+			// not valid-but-hazardous runes (C0/C1/bidi override/LS/PS).
+			// Feishu challenges are documented as opaque ASCII tokens, so
+			// rejecting anything that would be sanitized in logs has zero
+			// false-positive risk and mirrors the nonce sweep above.
+			for _, r := range envelope.Challenge {
+				if r < 0x20 || r == 0x7f || osutil.IsLogInjectionRune(r) {
+					slog.Warn("feishu challenge contains control/bidi rune")
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+			}
 			w.Header().Set("Content-Type", "application/json")
 			if err := json.NewEncoder(w).Encode(map[string]string{"challenge": envelope.Challenge}); err != nil {
 				slog.Warn("feishu challenge encode failed", "err", err)
@@ -262,6 +275,19 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			if ts != "" && nonce != "" {
 				eventID = "v1:" + ts + ":" + nonce
 			}
+		}
+		// R186-SEC-L: cap eventID length before it reaches Dedup.Seen, which
+		// stores the raw string as a map key. Feishu event_ids are UUID-ish
+		// (~36 bytes); the nonce+timestamp fallback tops out at ~64. A tampered
+		// or malicious upstream (or a future Feishu schema bump emitting larger
+		// IDs) could otherwise feed the dedup map with 64 KiB keys up to the
+		// per-bucket cap (50000), i.e. ~3 GiB heap worst-case. Drop the ID
+		// (skip dedup) so a single replayed event may double-process but the
+		// server stays within memory budget.
+		if len(eventID) > 256 {
+			slog.Warn("feishu webhook: event_id too long, skipping dedup for this delivery",
+				"len", len(eventID))
+			eventID = ""
 		}
 
 		chatType := "direct"

@@ -18,6 +18,8 @@ import (
 	"syscall"
 	"time"
 	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // ProcessState represents the lifecycle state of a CLI process.
@@ -207,11 +209,13 @@ func (p *Process) slogger() *slog.Logger {
 // Death reason labels. Kept as exported constants so session/router callers
 // can match without relying on stringly-typed literals that drift.
 const (
-	DeathReasonCLIExited     = "cli_exited"
-	DeathReasonShimEOF       = "shim_eof"
-	DeathReasonShimReadErr   = "shim_read_error"
-	DeathReasonReadLoopPanic = "readloop_panic"
-	DeathReasonKilled        = "killed"
+	DeathReasonCLIExited       = "cli_exited"
+	DeathReasonShimEOF         = "shim_eof"
+	DeathReasonShimReadErr     = "shim_read_error"
+	DeathReasonReadLoopPanic   = "readloop_panic"
+	DeathReasonKilled          = "killed"
+	DeathReasonNoOutputTimeout = "no_output_timeout"
+	DeathReasonTotalTimeout    = "total_timeout"
 )
 
 // setDeathReason records the death reason if not already set. First writer wins
@@ -289,6 +293,12 @@ func (p *Process) shimStdinWriter() io.Writer {
 
 // shimWriter wraps shim protocol write commands as an io.Writer.
 // Thread-safe: readLoop (HandleEvent) and Send (WriteMessage) may call concurrently.
+//
+// Lock ordering: shimWriter.mu -> Process.shimWMu.
+// Write() holds w.mu, then calls p.shimSend() which acquires p.shimWMu internally.
+// Callers that already hold p.shimWMu (e.g. Kill's pre-close write) must NOT
+// go through shimWriter.Write — use shimSendLocked directly to avoid a reverse
+// lock ordering and potential deadlock.
 type shimWriter struct {
 	p   *Process
 	mu  sync.Mutex
@@ -514,7 +524,10 @@ func (p *Process) readLoop() {
 			if err == nil {
 				break // terminator found
 			}
-			if err == bufio.ErrBufferFull {
+			// R182-GO-P1-2: use errors.Is so a wrapped ErrBufferFull (from
+			// future middleware or bufio chain) still matches. Matches the
+			// errors.Is(readErr, io.EOF) style used elsewhere in this loop.
+			if errors.Is(err, bufio.ErrBufferFull) {
 				continue // keep reading until newline or cap
 			}
 			readErr = err
@@ -544,7 +557,9 @@ func (p *Process) readLoop() {
 				if err == nil {
 					break
 				}
-				if err != bufio.ErrBufferFull {
+				// R182-GO-P1-2: errors.Is to survive future wrapping; same
+				// reason as the first call site above.
+				if !errors.Is(err, bufio.ErrBufferFull) {
 					readErr = err
 					break
 				}
@@ -678,10 +693,24 @@ func (p *Process) readLoop() {
 			}
 			log.Info("CLI exited via shim", "code", code)
 			reason := DeathReasonCLIExited
+			// R180-PERF-P2: string concat + strconv avoids fmt.Sprintf's
+			// reflection + scratch-buffer allocation. The death reason is
+			// stored in an atomic.Pointer[string] and consumed by health
+			// dashboards, so the cold-path savings are trivial but the
+			// replacement is zero-risk.
 			if code != 0 {
-				reason = fmt.Sprintf("%s_code_%d", DeathReasonCLIExited, code)
+				reason = DeathReasonCLIExited + "_code_" + strconv.Itoa(code)
 			} else if msg.Signal != "" {
-				reason = fmt.Sprintf("%s_signal_%s", DeathReasonCLIExited, msg.Signal)
+				// R183-SEC-H1: msg.Signal is the Signal field of the shim's
+				// cli_exited JSON frame. Normal shim builds emit canonical
+				// signal names ("SIGKILL", "SIGTERM"), but the shim is a
+				// separate process: a tampered shim (local attacker, future
+				// downgrade attack via stale binary) could ship arbitrary
+				// bytes. deathReason flows into slog attrs and the dashboard
+				// JSON for "/api/sessions" → HTML. Mirror the SanitizeForLog
+				// pattern (R172-SEC-M4 / R175-SEC-P1) used across the
+				// codebase; the numeric `code` branch is safe via Itoa.
+				reason = DeathReasonCLIExited + "_signal_" + osutil.SanitizeForLog(msg.Signal, 32)
 			}
 			p.setDeathReason(reason)
 			p.mu.Lock()
@@ -707,7 +736,11 @@ func (p *Process) readLoop() {
 			}
 
 		case "error":
-			log.Warn("shim error", "msg", msg.Line)
+			// Sanitize shim-supplied message: shim wire is a semi-trusted
+			// boundary (degraded/tampered shim could emit arbitrary bytes).
+			// Mirrors the R183-SEC-H1 / R184-SEC-M1 policy used for
+			// cli_exited.Signal and ACP rpc error messages.
+			log.Warn("shim error", "msg", osutil.SanitizeForLog(msg.Line, 256))
 		}
 	}
 
@@ -957,7 +990,12 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 				if sr := p.findResultSince(turnStartMS); sr != nil {
 					return sr, nil
 				}
-				slog.Error("watchdog: no output timeout", "timeout", noOutputDur)
+				// Set death reason BEFORE Kill so readLoop's shim_eof/
+				// shim_read_error classification (triggered by shimConn.Close)
+				// cannot overwrite the true root cause. setDeathReason is
+				// first-writer-wins, so the earlier set wins the CAS.
+				p.setDeathReason(DeathReasonNoOutputTimeout)
+				p.slogger().Error("watchdog: no output timeout", "timeout", noOutputDur)
 				p.Kill()
 				return nil, fmt.Errorf("%w (%s)", ErrNoOutputTimeout, noOutputDur)
 			}
@@ -965,7 +1003,8 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 				if sr := p.findResultSince(turnStartMS); sr != nil {
 					return sr, nil
 				}
-				slog.Error("watchdog: total timeout", "timeout", totalDur)
+				p.setDeathReason(DeathReasonTotalTimeout)
+				p.slogger().Error("watchdog: total timeout", "timeout", totalDur)
 				p.Kill()
 				return nil, fmt.Errorf("%w (%s)", ErrTotalTimeout, totalDur)
 			}
@@ -1223,8 +1262,11 @@ drain:
 }
 
 // isChanAlive reports whether done is still open (readLoop still running, so
-// eventCh remains safe to send on). readLoop defers `close(p.done)` followed
-// by `close(p.eventCh)` in LIFO order — if p.done is open, eventCh is too.
+// eventCh remains safe to send on). readLoop's defers are registered in this
+// declaration order: close(eventCh), close(done), CloseSubscribers, recover.
+// LIFO execution order is therefore: recover → CloseSubscribers → close(done)
+// → close(eventCh). Invariant used here: `done` closes strictly BEFORE
+// `eventCh`, so if `done` is still open, `eventCh` is also still open.
 func isChanAlive(done <-chan struct{}) bool {
 	select {
 	case <-done:
@@ -1616,7 +1658,10 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 			Pattern string `json:"pattern"`
 		}
 		if json.Unmarshal(input, &s) == nil && s.Pattern != "" {
-			return toolName + " " + s.Pattern
+			// R187-PERF-L1: cap pattern to prevent an adversarial LLM response
+			// from inflating EventLog entries (300 runes matches the default
+			// tail below).
+			return toolName + " " + TruncateRunes(s.Pattern, 300)
 		}
 	case "Grep":
 		var s struct {
@@ -1624,7 +1669,8 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 			Path    string `json:"path"`
 		}
 		if json.Unmarshal(input, &s) == nil && s.Pattern != "" {
-			result := toolName + " " + s.Pattern
+			// R187-PERF-L1: cap pattern (see Glob note).
+			result := toolName + " " + TruncateRunes(s.Pattern, 300)
 			if s.Path != "" {
 				result += " in " + shortPath(s.Path)
 			}

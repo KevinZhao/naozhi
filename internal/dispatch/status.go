@@ -114,7 +114,10 @@ func formatToolUse(name string, input json.RawMessage) string {
 	case "Agent":
 		var s agentInput
 		if json.Unmarshal(input, &s) == nil && s.Description != "" {
-			return "🤖 " + s.Description
+			// R184-GO-L1: Agent.Description can be multi-line or arbitrarily
+			// long (matches the CLI spawn arg); all other tool_use arms truncate
+			// to a status-banner-friendly rune count, so mirror that here.
+			return "🤖 " + cli.TruncateRunes(s.Description, 50)
 		}
 	}
 	// Fallback: ACP tool_call titles or unknown tools

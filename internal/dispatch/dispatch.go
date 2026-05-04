@@ -891,10 +891,10 @@ func (t *replyTracker) editLoop() {
 		return
 	}
 
+	// Go 1.23+ made timer Stop/Reset self-draining; the manual channel drain
+	// of pre-1.23 idioms is no longer needed (and would even deadlock on a
+	// zero-duration timer that has not yet fired on a slow scheduler).
 	rateTimer := time.NewTimer(0)
-	if !rateTimer.Stop() {
-		<-rateTimer.C
-	}
 	defer rateTimer.Stop()
 
 	for {

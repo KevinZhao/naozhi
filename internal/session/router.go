@@ -19,6 +19,7 @@ import (
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/history/claudejsonl"
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
 )
@@ -50,7 +51,12 @@ var ErrNoCLIWrapper = errors.New("no CLI wrapper configured")
 // long-lived session type (e.g. a future "planner:" family) — previously
 // the predicate was inlined at the single construction site while three
 // separate skip branches read `s.exempt`. Keep the list sorted for grep.
-var exemptKeyPrefixes = []string{"cron:", "project:"}
+//
+// R176-ARCH-M1: references the canonical prefix constants in key.go so
+// there is one source of truth for reserved namespaces. Scratch keys are
+// deliberately NOT exempt — they are short-lived and should pay the
+// normal TTL / eviction cost.
+var exemptKeyPrefixes = []string{CronKeyPrefix, ProjectKeyPrefix}
 
 // isExemptKey reports whether key belongs to an exempt namespace. Callers
 // that already have a ManagedSession should prefer reading s.exempt —
@@ -1183,11 +1189,24 @@ func (r *Router) notifyChange() {
 
 // NotifyIdle wakes the Shutdown wait loop so it can re-check running sessions.
 // Call this after a message send completes (session transitions from running to ready).
-// Broadcast does not require the associated lock to be held.
+//
+// R183-REL-H1: acquire r.mu before Broadcast. sync.Cond.Broadcast technically
+// accepts being called without the associated lock held, but Shutdown's loop
+// re-checks "running" between each Wait() — if NotifyIdle fires in the window
+// between Shutdown clearing `running` and entering Wait(), the signal is lost
+// and Shutdown only wakes from the 30s AfterFunc safety net. Holding r.mu
+// around Broadcast blocks NotifyIdle until Shutdown is actually parked in
+// Wait() (which re-releases r.mu internally), eliminating the missed-wakeup
+// race. Every other Broadcast site in this file acquires r.mu first; this
+// was the sole exception. All callers of NotifyIdle are off the hot path
+// (end-of-turn only, not per-event) so the extra lock round-trip is free.
 func (r *Router) NotifyIdle() {
-	if r.shutdownCond != nil {
-		r.shutdownCond.Broadcast()
+	if r.shutdownCond == nil {
+		return
 	}
+	r.mu.Lock()
+	r.shutdownCond.Broadcast()
+	r.mu.Unlock()
 }
 
 // ChatKey builds a chat-level key (without agent suffix) for workspace
@@ -1688,6 +1707,13 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	r.storeDirty = true
 	r.storeGen.Add(1)
 	slog.Info("session spawned", "key", key, "active", r.activeCount.Load(), "exempt", opts.Exempt)
+	// OBS2: counter bumped inside the write-lock so it reflects the authoritative
+	// "spawn succeeded" point (past both TOCTOU guards, past storeProcess). Exempt
+	// sessions are excluded — they don't consume a normal session slot and
+	// inflating session_create_total with planner/scratch churn muddies the signal.
+	if !opts.Exempt {
+		metrics.SessionCreateTotal.Add(1)
+	}
 	r.mu.Unlock()
 
 	// Load conversation history from Claude's local JSONL when resuming.
@@ -1769,6 +1795,10 @@ func (r *Router) evictOldest() bool {
 		return false
 	}
 	slog.Info("evicting oldest session", "key", oldest.key, "idle", time.Since(oldest.GetLastActive()))
+	// OBS2: bump before Unlock so it aligns with the "decision to evict" point;
+	// the subsequent proc.Close() is async-capable and can fail, but the eviction
+	// decision is already committed (deathReason set, storeDirty marked below).
+	metrics.SessionEvictTotal.Add(1)
 	storeStringAtomic(&oldest.deathReason, "evicted")
 	// Keep oldest.process non-nil so concurrent holders don't get nil-panic.
 	// After Close(), Alive() returns false; countActive() below recounts correctly.
@@ -1968,10 +1998,16 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	// Session key is immutable on ManagedSession (parseKeyParts caches via
 	// sync.Once; Snapshot depends on those cached parts). A fresh struct is
 	// the only safe way to change the key.
+	// R184-IDIOM-L2: clone prevSessionIDs so a subsequent spawnSession path
+	// that appends to old.prevSessionIDs (in-place if cap permits) cannot
+	// silently mutate fresh.prevSessionIDs. spawnSession already clones at
+	// its construction site; Rename must do the same for symmetry.
+	// persistedHistory is not re-written by the old session after Rename so
+	// it is safe to share the backing array.
 	fresh := &ManagedSession{
 		key:              newKey,
 		persistedHistory: old.persistedHistory,
-		prevSessionIDs:   old.prevSessionIDs,
+		prevSessionIDs:   slices.Clone(old.prevSessionIDs),
 		totalCost:        old.totalCost,
 		exempt:           old.exempt,
 		onSessionID: func(id string) {

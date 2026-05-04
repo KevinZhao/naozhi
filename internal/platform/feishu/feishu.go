@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/transcribe"
 	"golang.org/x/sync/singleflight"
@@ -61,8 +62,15 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
+	// R181-SEC-P2-4: e.Msg is the `msg` field of the Feishu API HTTP
+	// response. In the normal path Feishu returns short ASCII strings,
+	// but a DNS/MITM-compromised path (pre-TLS-handshake rollover,
+	// a mis-issued CA cert) could return bidi/C1/newline bytes. Using
+	// %q keeps the rendered error safe to feed into slog attrs without
+	// double-escaping (slog JSON handler re-escapes as needed; text
+	// handler also reads the quoted form cleanly).
 	if e.Msg != "" {
-		return fmt.Sprintf("feishu %s: code=%d msg=%s", e.Op, e.Code, e.Msg)
+		return fmt.Sprintf("feishu %s: code=%d msg=%q", e.Op, e.Code, e.Msg)
 	}
 	return fmt.Sprintf("feishu %s: code=%d", e.Op, e.Code)
 }
@@ -167,10 +175,14 @@ type Feishu struct {
 	// check and increment, which is bounded and harmless.
 	seenNoncesCount atomic.Int64
 
-	// reactionIDs caches (messageID + emoji_type) -> reaction_id returned by
-	// the create-reaction API, so RemoveReaction can later target the correct
+	// reactionIDs caches (messageID + emoji_type) -> reactionCacheEntry returned
+	// by the create-reaction API, so RemoveReaction can later target the correct
 	// reaction. Feishu's delete endpoint requires the reaction_id (there's no
-	// "delete by emoji type" form). Entries are deleted on successful removal.
+	// "delete by emoji type" form). Entries are deleted on successful removal
+	// OR by the cleanupNonces ticker once the stored expiry passes — any
+	// unpaired Add (bot restart between Add and Remove, Feishu-side message
+	// deletion, early-exit send-reply paths) would otherwise accumulate
+	// indefinitely. TTL is reactionCacheTTL. R175-P1.
 	reactionIDs sync.Map
 
 	// botOpenID is the bot's own open_id, populated by fetchBotInfo() during
@@ -225,6 +237,25 @@ const maxSeenNonces = 50000
 // with upstream rate protection.
 const tokenFailCooldown = 5 * time.Second
 
+// reactionCacheTTL bounds how long an unpaired reactionIDs entry lingers
+// before the cleanup sweep drops it. Add-without-Remove windows come from:
+// (a) bot restart between the two calls (rare; queue processing is short);
+// (b) the Feishu user deleting the message out from under us; (c) an early
+// return in the dispatch path before RemoveReaction fires. 12h comfortably
+// exceeds the session ttl default (30m) and the longest reasonable "queued"
+// lifespan a message might have, so any live RemoveReaction still hits a
+// cached entry; anything older than 12h is almost certainly orphaned and
+// safe to GC. R175-P1.
+const reactionCacheTTL = 12 * time.Hour
+
+// reactionCacheEntry is the sync.Map value shape for reactionIDs. Kept as a
+// struct (not a raw string) so the expiry can be checked without consulting
+// any external state. R175-P1.
+type reactionCacheEntry struct {
+	id     string
+	expiry int64 // UnixNano; expired when time.Now().UnixNano() >= expiry (boundary-inclusive, matches sweep at cleanupNoncesTick)
+}
+
 func (f *Feishu) cleanupNonces(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Minute)
 	defer ticker.Stop()
@@ -258,7 +289,13 @@ func (f *Feishu) cleanupNoncesTick() {
 				"panic", r, "stack", string(debug.Stack()))
 		}
 	}()
-	now := time.Now().Unix()
+	// R186-CONC-L1: capture once so the nonce sweep and the reactionIDs sweep
+	// below share a single wall-time basis. Two independent time.Now() calls
+	// otherwise straddle a scheduler hiccup and produce inconsistent cutoff
+	// decisions for entries sitting near either TTL boundary — harmless today
+	// but confusing when correlating sweep logs.
+	nowT := time.Now()
+	now := nowT.Unix()
 	deleted := int64(0)
 	f.seenNonces.Range(func(k, v any) bool {
 		// Defensive type assertion: sync.Map has no compile-time type
@@ -281,6 +318,19 @@ func (f *Feishu) cleanupNoncesTick() {
 			f.seenNoncesCount.Store(0)
 		}
 	}
+
+	// R175-P1: piggy-back the reactionIDs sweep onto the same 5-minute
+	// tick. Using UnixNano throughout keeps the ticker schedule decoupled
+	// from real-time drift (whereas seenNonces above uses Unix seconds
+	// because its TTL is 5 min — precision is not load-bearing there).
+	nowNano := nowT.UnixNano()
+	f.reactionIDs.Range(func(k, v any) bool {
+		entry, ok := v.(reactionCacheEntry)
+		if !ok || entry.expiry <= nowNano {
+			f.reactionIDs.Delete(k)
+		}
+		return true
+	})
 }
 
 func (f *Feishu) Name() string { return "feishu" }
@@ -390,7 +440,12 @@ func (f *Feishu) fetchBotInfo(ctx context.Context) error {
 	f.botInfoMu.Lock()
 	f.botOpenID = result.Bot.OpenID
 	f.botInfoMu.Unlock()
-	slog.Info("feishu bot identity", "open_id", result.Bot.OpenID, "app_name", result.Bot.AppName)
+	// R182-SEC-L2: AppName / OpenID come from the upstream Feishu API body.
+	// Under a TLS MITM or misissued CA scenario they could carry C1/bidi/
+	// newline bytes. Symmetric with the existing %q-guarded APIError path.
+	slog.Info("feishu bot identity",
+		"open_id", osutil.SanitizeForLog(result.Bot.OpenID, 64),
+		"app_name", osutil.SanitizeForLog(result.Bot.AppName, 128))
 	return nil
 }
 
@@ -677,7 +732,10 @@ func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resTy
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-		return nil, "", fmt.Errorf("download %s: status %d, body: %s", resType, resp.StatusCode, body)
+		// R181-SEC-P3-2: upstream response body flows into err.Error() and
+		// then into slog attrs; %q escapes bidi/C1/newline so a DNS/MITM-
+		// compromised path cannot forge log lines via the failure branch.
+		return nil, "", fmt.Errorf("download %s: status %d, body: %q", resType, resp.StatusCode, body)
 	}
 
 	// Read up to maxBytes+1 so we can distinguish "exactly maxBytes" (legal)
@@ -843,7 +901,9 @@ func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) err
 		return fmt.Errorf("decode edit response: %w", err)
 	}
 	if result.Code != 0 {
-		return fmt.Errorf("feishu edit error: code=%d msg=%s", result.Code, result.Msg)
+		// R181-SEC-P2-4: result.Msg sourced from upstream response body; %q
+		// escapes bidi/C1/newline so downstream slog attrs stay parseable.
+		return fmt.Errorf("feishu edit error: code=%d msg=%q", result.Code, result.Msg)
 	}
 	return nil
 }
@@ -943,6 +1003,14 @@ func (f *Feishu) getAccessToken(_ context.Context) (string, error) {
 		// aborts by cancelling stopCtx. singleflight shares the returned
 		// (v, err) value with late callers — they never see refreshCtx — so
 		// the `defer cancel()` here only bounds the in-flight HTTP request.
+		//
+		// R182-GO-P1-3 LIFO ORDERING CONTRACT: `defer cancel()` is registered
+		// here, `defer resp.Body.Close()` is registered below after Do()
+		// returns. Go runs defers in reverse order, so Body.Close() runs
+		// before cancel() — which is required: cancel() before Body.Close()
+		// would mid-abort the Decode's LimitReader read in the error-path
+		// re-try case. DO NOT insert additional defers between these two or
+		// convert either to an explicit call without preserving this order.
 		refreshCtx, cancel := context.WithTimeout(f.stopCtx, 10*time.Second)
 		defer cancel()
 
@@ -1070,6 +1138,19 @@ func reactionCacheKey(messageID, emojiType string) string {
 	return messageID + "|" + emojiType
 }
 
+// reactionRequestBody is the JSON body sent to POST /reactions.
+// R182-PERF-P1-1: a fixed struct avoids the 2 map[string]any / map[string]string
+// heap allocations (and the map-key sort inside json.Marshal) that the previous
+// inline map literal incurred on every outgoing reaction. Hot path: one call
+// per dispatched IM message.
+type reactionRequestBody struct {
+	ReactionType reactionTypeField `json:"reaction_type"`
+}
+
+type reactionTypeField struct {
+	EmojiType string `json:"emoji_type"`
+}
+
 // AddReaction implements platform.Reactor. Creates a reaction on messageID
 // via POST /open-apis/im/v1/messages/:msg_id/reactions and caches the
 // returned reaction_id so RemoveReaction can later delete by id.
@@ -1089,8 +1170,8 @@ func (f *Feishu) AddReaction(ctx context.Context, messageID string, r platform.R
 	if err != nil {
 		return fmt.Errorf("get access token: %w", err)
 	}
-	reqBody, err := json.Marshal(map[string]any{
-		"reaction_type": map[string]string{"emoji_type": emojiType},
+	reqBody, err := json.Marshal(reactionRequestBody{
+		ReactionType: reactionTypeField{EmojiType: emojiType},
 	})
 	if err != nil {
 		return fmt.Errorf("marshal reaction request: %w", err)
@@ -1121,10 +1202,17 @@ func (f *Feishu) AddReaction(ctx context.Context, messageID string, r platform.R
 		return fmt.Errorf("decode reaction response: %w", err)
 	}
 	if result.Code != 0 {
-		return fmt.Errorf("feishu reaction api: code=%d msg=%s", result.Code, result.Msg)
+		// R181-SEC-P2-4: %q escapes bidi/C1/newline in upstream msg so slog attrs stay safe.
+		return fmt.Errorf("feishu reaction api: code=%d msg=%q", result.Code, result.Msg)
 	}
 	if result.Data.ReactionID != "" {
-		f.reactionIDs.Store(reactionCacheKey(messageID, emojiType), result.Data.ReactionID)
+		// R175-P1: store as struct with expiry so cleanupNoncesTick can
+		// GC orphaned entries (bot-restart / message-deleted / early-exit
+		// paths that never invoke RemoveReaction).
+		f.reactionIDs.Store(reactionCacheKey(messageID, emojiType), reactionCacheEntry{
+			id:     result.Data.ReactionID,
+			expiry: time.Now().Add(reactionCacheTTL).UnixNano(),
+		})
 	}
 	return nil
 }
@@ -1146,10 +1234,14 @@ func (f *Feishu) RemoveReaction(ctx context.Context, messageID string, r platfor
 	if !ok {
 		return nil
 	}
-	reactionID, _ := v.(string)
-	if reactionID == "" {
+	entry, ok := v.(reactionCacheEntry)
+	if !ok || entry.id == "" {
+		// Defensive: a future refactor that stores a different value type
+		// should not wedge RemoveReaction. Silently drop — LoadAndDelete
+		// already removed the malformed entry from the map.
 		return nil
 	}
+	reactionID := entry.id
 	token, err := f.getAccessToken(ctx)
 	if err != nil {
 		return fmt.Errorf("get access token: %w", err)
@@ -1176,7 +1268,8 @@ func (f *Feishu) RemoveReaction(ctx context.Context, messageID string, r platfor
 		return fmt.Errorf("decode delete reaction response: %w", err)
 	}
 	if result.Code != 0 {
-		return fmt.Errorf("feishu delete reaction api: code=%d msg=%s", result.Code, result.Msg)
+		// R181-SEC-P2-4: %q escapes bidi/C1/newline in upstream msg so slog attrs stay safe.
+		return fmt.Errorf("feishu delete reaction api: code=%d msg=%q", result.Code, result.Msg)
 	}
 	return nil
 }

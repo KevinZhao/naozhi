@@ -100,3 +100,47 @@ func TestLoadAtomicString_NilPointer_ReturnsEmpty(t *testing.T) {
 		t.Errorf("loadAtomicString(nil ptr) = %q, want \"\"", got)
 	}
 }
+
+// TestStoreAtomicString_SkipsEqualWrite pins the R176-PERF-P1 compare-before-store
+// fast path on the cli-package helper. EventLog.Append invokes this helper
+// for every user / tool_use / thinking / agent / task_start / task_progress
+// / todo event under l.mu; high-frequency cron + long-session workloads
+// repeatedly store the same Summary string (the same Bash one-liner across
+// a 50-step turn). The fast path avoids per-call *string allocation and
+// spurious atomic writes on a cache line that the Snapshot / LastPromptSummary
+// / LastActivitySummary readers poll at high rates.
+func TestStoreAtomicString_SkipsEqualWrite(t *testing.T) {
+	t.Parallel()
+	var v atomic.Pointer[string]
+	storeAtomicString(&v, "Bash")
+	firstPtr := v.Load()
+	if firstPtr == nil || *firstPtr != "Bash" {
+		t.Fatalf("first store failed: got %v", firstPtr)
+	}
+	storeAtomicString(&v, "Bash")
+	if got := v.Load(); got != firstPtr {
+		t.Errorf("equal-value second store allocated a new pointer (%p != %p) — fast path regression", got, firstPtr)
+	}
+	storeAtomicString(&v, "Read")
+	if got := v.Load(); got == firstPtr {
+		t.Errorf("divergent store skipped write — compare-before-store semantics broken")
+	}
+	if got := loadAtomicString(&v); got != "Read" {
+		t.Errorf("after divergent store: got %q, want \"Read\"", got)
+	}
+}
+
+// TestStoreAtomicString_NilToEmptyIsNotSkipped: first write of "" from a
+// never-stored pointer must install a non-nil pointer so downstream code
+// can distinguish "explicit empty" from "never written".
+func TestStoreAtomicString_NilToEmptyIsNotSkipped(t *testing.T) {
+	t.Parallel()
+	var v atomic.Pointer[string]
+	if v.Load() != nil {
+		t.Fatal("precondition: zero-value atomic.Pointer must Load() nil")
+	}
+	storeAtomicString(&v, "")
+	if v.Load() == nil {
+		t.Error("first store of \"\" from nil pointer was skipped — fast path must not short-circuit when cur==nil")
+	}
+}

@@ -4026,7 +4026,7 @@ function sanitizeKeySlug(s) {
   // headroom under the 128-byte sanitizeKeyComponent cap.
   let safe = String(s)
     .replace(/[:：︓꞉∶]/g, '-')
-    .replace(/[‪-‮⁦-⁩  ]/g, '')
+    .replace(/[‪-‮⁦-⁩\u2028\u2029]/g, '')
     .replace(/[\s/\\?*<>|"\x00-\x1f\x7f]+/g, '-');
   safe = safe.replace(/-+/g, '-').replace(/^-|-$/g, '');
   if (safe.length > 64) safe = safe.slice(0, 64);
