@@ -287,6 +287,16 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 	}
 }
 
+// allocID returns a monotonically increasing RPC id.
+//
+// R185-GO-L1: the narrowing from int64 → int is a deliberate contract —
+// RPCRequest.ID and RPCMessage.ID are `int` to keep JSON marshaling
+// idiomatic, and on 64-bit platforms (the only naozhi build target) int
+// is a full 64-bit word so the conversion is lossless for any id the
+// connector can produce in its lifetime. On a 32-bit target the top 32
+// bits would silently truncate and collide with earlier ids; we document
+// this here rather than adding a runtime guard because cross-compiling
+// naozhi to 32-bit is not supported.
 func (p *ACPProtocol) allocID() int {
 	return int(p.nextID.Add(1) - 1)
 }

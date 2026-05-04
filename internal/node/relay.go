@@ -457,6 +457,21 @@ func (r *wsRelay) reconnect() {
 		for _, e := range resubscribes {
 			r.writeJSON(ClientMsg{Type: "subscribe", Key: e.key, After: e.after})
 		}
+		// R185-REL-M1: detect Close() racing resubscribes. writeJSON's
+		// closed-guard silently returns when r.closed=true, so if Close()
+		// landed between the snapshot and the loop above, some (or all)
+		// subscribe frames never left the process — yet the reconnect
+		// would otherwise log a misleading "reconnected" INFO while the
+		// relay is already in a half-state (connected but no events flow
+		// to remote subscribers). Re-check closed here; on race, log
+		// WARN so operators see the half-state rather than a false success.
+		r.mu.Lock()
+		stillOpen := !r.closed
+		r.mu.Unlock()
+		if !stillOpen {
+			slog.Warn("relay reconnect aborted by close", "node", r.node.ID, "keys", len(resubscribes))
+			return
+		}
 		slog.Info("relay reconnected", "node", r.node.ID, "keys", len(resubscribes))
 		return
 	}
