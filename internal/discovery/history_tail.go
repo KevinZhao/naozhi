@@ -308,7 +308,7 @@ func parseHistoryLine(line []byte) ([]cli.EventEntry, bool) {
 			return nil, false
 		}
 		text := extractText(msg.Content)
-		if text == "" {
+		if text == "" || IsClaudeSystemInjectedText(text) {
 			return nil, false
 		}
 		return []cli.EventEntry{{

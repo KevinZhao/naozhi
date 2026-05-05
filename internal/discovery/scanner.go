@@ -621,7 +621,8 @@ func extractLastPromptUncached(path string, fileSize int64) string {
 }
 
 // scanUserPrompt scans lines from the current file position and returns
-// the last user message that contains actual text (not tool_result).
+// the last user message that contains actual text (not tool_result, and
+// not one of Claude Code's system-injected XML frames).
 func scanUserPrompt(f *os.File) string {
 	var lastPrompt string
 	scanner := bufio.NewScanner(f)
@@ -644,11 +645,51 @@ func scanUserPrompt(f *os.File) string {
 			continue
 		}
 		text := extractUserText(hl.Message)
-		if text != "" {
-			lastPrompt = text
+		if text == "" || IsClaudeSystemInjectedText(text) {
+			continue
 		}
+		lastPrompt = text
 	}
 	return lastPrompt
+}
+
+// claudeSystemInjectedTagNames enumerates the XML-like tags that Claude
+// Code and its plugins inject as synthetic user messages (task queue
+// notifications, hook system reminders, slash-command envelopes, deferred-
+// tool announcements). These are operational noise, not user intent, and
+// must not become the session title or an entry in the history view.
+//
+// Kept in lockstep with the UI-side filter in internal/server/static/dashboard.js
+// (eventHtml + formatSessionMarkdown). When adding a tag in one place, add
+// it in the other, otherwise exports and titles drift apart.
+var claudeSystemInjectedTagNames = [...]string{
+	"task-notification",
+	"system-reminder",
+	"local-command",
+	"command-name",
+	"available-deferred-tools",
+}
+
+// IsClaudeSystemInjectedText reports whether text is a Claude-Code-injected
+// system XML frame (e.g. "<task-notification>…"). A leading "<tag>" or
+// "<tag " counts as a match; anything else is treated as real user content.
+func IsClaudeSystemInjectedText(text string) bool {
+	if len(text) < 3 || text[0] != '<' {
+		return false
+	}
+	for _, name := range claudeSystemInjectedTagNames {
+		if len(text) < len(name)+2 {
+			continue
+		}
+		if text[1:1+len(name)] != name {
+			continue
+		}
+		next := text[1+len(name)]
+		if next == '>' || next == ' ' || next == '\t' || next == '\n' || next == '\r' {
+			return true
+		}
+	}
+	return false
 }
 
 // extractUserText extracts the text content from a user message.

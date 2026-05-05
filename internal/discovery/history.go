@@ -249,7 +249,7 @@ func parseJSONL(path string) ([]cli.EventEntry, error) {
 				continue
 			}
 			text := extractText(msg.Content)
-			if text == "" {
+			if text == "" || IsClaudeSystemInjectedText(text) {
 				continue
 			}
 			entries = append(entries, cli.EventEntry{
