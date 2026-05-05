@@ -199,6 +199,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .no-sessions{padding:40px 16px;text-align:center;color:var(--nz-text-faint);font-size:14px}
 .no-sessions-cta{margin-top:12px;padding:8px 16px;background:rgba(31,111,235,.12);border:1px solid var(--nz-blue);border-radius:6px;color:var(--nz-accent);font-family:inherit;font-size:13px;cursor:pointer;min-height:36px}
 .no-sessions-cta:hover{background:rgba(31,111,235,.2)}
+/* Quick-ask 空态输入框：默认目录 + general agent 的"问一下"入口 */
+.quick-ask-form{display:flex;gap:8px;width:min(560px,92%);align-items:flex-end}
+.quick-ask-input{flex:1;min-height:44px;max-height:200px;padding:12px 14px;background:var(--nz-bg-1);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:10px;font:inherit;font-size:14px;line-height:1.5;resize:none;outline:none;transition:border-color .15s,box-shadow .15s;box-shadow:0 1px 2px rgba(0,0,0,.2)}
+.quick-ask-input:focus{border-color:var(--nz-blue);box-shadow:0 0 0 2px rgba(31,111,235,.18)}
+.quick-ask-input::placeholder{color:var(--nz-text-faint)}
+.quick-ask-send{flex:0 0 auto;width:44px;height:44px;display:flex;align-items:center;justify-content:center;background:var(--nz-blue);color:#fff;border:none;border-radius:10px;cursor:pointer;transition:filter .15s,opacity .15s}
+.quick-ask-send:hover{filter:brightness(1.15)}
+.quick-ask-send:disabled{opacity:.45;cursor:default}
+.quick-ask-send svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 
 @keyframes pulse{0%,100%{opacity:1}50%{opacity:.5}}
 
@@ -1232,12 +1241,19 @@ body.kbd-open .sidebar-footer{display:none}
          dashboard.js — dismiss/remove paths call that helper to repaint this
          region, and any divergence creates a "English on first load, Chinese
          after dismiss" regression. TestDashboardHTML_R140_ColdStartEmptyStateMatchesHelper
-         locks the two copies together. -->
-    <div class="empty-state empty-cta" style="flex-direction:column;gap:16px">
+         locks the two copies together.
+
+         "问点什么？"输入框即空态主 CTA — 敲字 Enter 直接起一个 quick session
+         （默认工作目录 + general agent），跳过项目 palette 与弹窗选择，
+         最贴近"快速查询"的使用心智。侧栏的 `+` 入口保留给项目化工作流。 -->
+    <div class="empty-state empty-cta empty-quick" style="flex-direction:column;gap:14px">
       <span style="font-size:40px;opacity:.35" aria-hidden="true">&gt;_</span>
-      <div style="color:var(--nz-text);font-size:17px">选一个会话开始，或新建一个</div>
-      <button class="empty-cta-btn" type="button" onclick="createNewSession()" style="padding:10px 22px;border-radius:8px;border:1px solid var(--nz-blue);background:rgba(31,111,235,.12);color:var(--nz-accent);font-size:14px;cursor:pointer;font-family:inherit">+ 新建会话</button>
-      <div style="font-size:12px;color:var(--nz-text-dim)">从侧栏选择已有会话，或点上方按钮新建</div>
+      <div style="color:var(--nz-text);font-size:17px">问点什么？</div>
+      <form class="quick-ask-form" onsubmit="event.preventDefault();submitQuickAsk(event)">
+        <textarea id="quick-ask-input" class="quick-ask-input" rows="1" placeholder="Enter 发送 · Shift+Enter 换行" autocomplete="off" spellcheck="false" aria-label="快速提问输入框"></textarea>
+        <button type="submit" class="quick-ask-send" aria-label="发送"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg></button>
+      </form>
+      <div style="font-size:12px;color:var(--nz-text-dim)">默认目录 · general agent · 随时 <code>/cd</code> 切换目录，或用上方 <b>+</b> 开项目会话</div>
       <!-- R110-P1 Home panel slot: renderRecentSessionsPanel() fills this
            with up to 5 most-recently-active session cards after fetchSessions
            lands. Stays empty on cold-start (no data yet) or when there are

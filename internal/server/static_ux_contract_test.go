@@ -1245,12 +1245,15 @@ func TestDashboardJS_R117_MainEmptyStateHelper(t *testing.T) {
 		t.Errorf("dashboard.js still has raw English empty state %q — route it through mainEmptyHtml()", forbidden)
 	}
 
-	// Arm 2: helper exists and carries the expected pieces.
+	// Arm 2: helper exists and carries the expected pieces. The empty state
+	// was redesigned post-Round 141 from a "+ 新建会话" button to a
+	// "问点什么？" quick-ask textarea — both the lead line and the textarea
+	// element must appear in the helper output.
 	for _, want := range []string{
 		"function mainEmptyHtml()",
-		"选一个会话开始",
-		"onclick=\"createNewSession()\"",
-		"+ 新建会话",
+		"问点什么？",
+		`id="quick-ask-input"`,
+		"submitQuickAsk",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("mainEmptyHtml() missing expected fragment %q", want)
@@ -1263,6 +1266,21 @@ func TestDashboardJS_R117_MainEmptyStateHelper(t *testing.T) {
 	// 3 call sites + 1 definition + possible doc references → >= 4.
 	if count < 4 {
 		t.Errorf("expected ≥4 mainEmptyHtml references (3 call sites + 1 def); got %d", count)
+	}
+
+	// Arm 3: every dismiss path that calls mainEmptyHtml() MUST also call
+	// wireQuickAskInput() to rebind the fresh textarea's Enter / auto-grow
+	// handlers. Without the rebind, a dismiss-repaint leaves the quick-ask
+	// textarea inert — Enter falls through to form submit, refreshing the
+	// page. 3 dismiss call sites + 1 function definition + 1 cold-start
+	// bootstrap = ≥5 occurrences. The bootstrap intentionally passes
+	// autofocus=true; dismiss paths should NOT (autofocus theft on
+	// mid-interaction dismiss). We don't assert arg polarity here because
+	// the argumentless vs argumented split is a behaviour concern, not a
+	// shape concern — a separate test would gate it if it ever regresses.
+	wireCount := strings.Count(js, "wireQuickAskInput(")
+	if wireCount < 5 {
+		t.Errorf("expected ≥5 wireQuickAskInput(...) references (3 dismiss + 1 def + 1 bootstrap); got %d", wireCount)
 	}
 }
 
@@ -3022,10 +3040,17 @@ func TestDashboardHTML_R110P1_WSOutageHintStyle(t *testing.T) {
 // while dismissing a session (which repaints via the helper) flipped the
 // region to Chinese. That language flicker is a surprising UX regression.
 //
-// Three structural invariants:
-//  1. The cold-start HTML carries the same Chinese lead line
-//     "选一个会话开始，或新建一个" as the helper emits.
-//  2. The cold-start HTML carries the same CTA label "+ 新建会话".
+// The empty state was redesigned post-Round 141: instead of a "+ 新建会话"
+// button pointing at the project palette, the region now renders a
+// "问点什么？" quick-ask textarea that — on Enter — creates a general-agent
+// session in the default workspace and ships the message in one shot. The
+// contract still holds: cold-start HTML and the dismiss-path helper must
+// render the same markup shape so there is no flicker when dismissing a
+// session.
+//
+// Three structural invariants (updated for the quick-ask redesign):
+//  1. Both files carry the "问点什么？" lead line.
+//  2. Both files carry the quick-ask textarea element (id="quick-ask-input").
 //  3. The old English strings are gone from dashboard.html so a future
 //     revert of localization would fail this test.
 func TestDashboardHTML_R141_ColdStartEmptyStateMatchesHelper(t *testing.T) {
@@ -3054,10 +3079,10 @@ func TestDashboardHTML_R141_ColdStartEmptyStateMatchesHelper(t *testing.T) {
 	}
 	mainBody := html[mainIdx : mainIdx+mainEnd]
 
-	// Invariant 1 + 2: Chinese strings present in BOTH files.
+	// Invariant 1 + 2: quick-ask lead line and textarea present in BOTH files.
 	for _, want := range []string{
-		`选一个会话开始，或新建一个`,
-		`+ 新建会话`,
+		`问点什么？`,
+		`id="quick-ask-input"`,
 	} {
 		if !strings.Contains(mainBody, want) {
 			t.Errorf("dashboard.html cold-start empty state missing %q — must match mainEmptyHtml() helper copy", want)

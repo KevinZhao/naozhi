@@ -65,6 +65,11 @@ const sessionBackends = {}; // per-session CLI backend picked at creation ("clau
 let cliBackends = null; // cached /api/cli/backends response: {backends, default, detected}
 let cliBackendsFetchedAt = 0;
 const sessionDrafts = {}; // key -> draft text, preserved across session switches
+// sessionScrollPos: sid(key,node) -> {fromBottom, atBottom}
+// 记住每个会话上次切走时的 events-scroll 位置，回来时恢复，避免正在阅读
+// 历史被强行拉回底部。atBottom=true 表示离开前就在底，回来后继续走贴底路径，
+// 让新事件照常把视口拉到最新。
+const sessionScrollPos = {};
 // sessionUnread: sid(key,node) -> integer count of unread "turn completed" events
 // for sessions that are NOT currently selected. Incremented on running->ready/dead
 // transitions (i.e. the model finished answering) and cleared when the user opens
@@ -1375,6 +1380,8 @@ function selectSession(key, node) {
     const draft = getMsgValue(inp);
     if (draft) sessionDrafts[selectedKey] = draft;
     else delete sessionDrafts[selectedKey];
+    // 同时快照当前会话的滚动位置，回来时恢复
+    saveScrollPos(selectedKey, selectedNode);
   }
   if (key.startsWith('_discovered:')) {
     const pid = parseInt(key.split(':')[1]);
@@ -1438,6 +1445,7 @@ function selectSession(key, node) {
 async function dismissSession(key, node, opts) {
   node = node || 'local';
   delete sessionDrafts[key];
+  delete sessionScrollPos[sid(key, node)];
   // sessionBackends is normally consumed on first sendMessage. A dismiss
   // before any send leaves the entry behind; clear it defensively so a
   // subsequent re-create with the same key (unlikely but possible if the
@@ -1452,6 +1460,7 @@ async function dismissSession(key, node, opts) {
     if (selectedKey === key) {
       selectedKey = null;
       document.getElementById('main').innerHTML = mainEmptyHtml();
+      wireQuickAskInput();
     }
     lastVersion = 0;
     debouncedFetchSessions();
@@ -1481,6 +1490,7 @@ async function dismissSession(key, node, opts) {
         pendingDiscovered = null;
         stopPreviewPolling();
         document.getElementById('main').innerHTML = mainEmptyHtml();
+        wireQuickAskInput();
       }
       const card = document.querySelector('.session-card[data-key="' + key + '"]');
       if (card) card.remove();
@@ -1507,6 +1517,7 @@ async function dismissSession(key, node, opts) {
       selectedKey = null;
       if (wsm.subscribedKey === key) wsm.unsubscribe();
       document.getElementById('main').innerHTML = mainEmptyHtml();
+      wireQuickAskInput();
     }
     lastVersion = 0;
     debouncedFetchSessions();
@@ -2028,8 +2039,10 @@ function renderEvents(events) {
   runMermaid();
   runKatex();
   navRebuild();
-  // Bottom-anchor after async layout (button insert, images, mermaid/katex).
-  stickEventsBottom();
+  // 若有上次切走时保存的滚动位置且不在底部，恢复它；否则照旧贴底。
+  if (!restoreScrollPos(selectedKey, selectedNode)) {
+    stickEventsBottom();
+  }
 }
 
 function appendEvents(events) {
@@ -2816,6 +2829,40 @@ function scrollEventsToBottom() {
   if (el) el.scrollTop = el.scrollHeight;
 }
 
+// saveScrollPos / restoreScrollPos: 按 (key,node) 保存离开时的滚动位置，
+// 回到同一会话时恢复。用「距底距离」而不是 scrollTop，因为会话再进入时
+// 可能会多加载更早的事件导致 scrollHeight 变大，距底更稳定。atBottom 单
+// 独标记以便新消息到来时继续贴底（shell 式滚动），只有用户明确滚开时才
+// 进入「保持位置」分支。
+function saveScrollPos(key, node) {
+  const el = document.getElementById('events-scroll');
+  if (!el || !key) return;
+  const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+  const atBottom = fromBottom <= 30;
+  sessionScrollPos[sid(key, node || 'local')] = { fromBottom, atBottom };
+}
+
+// restoreScrollPos: 如果有保存的位置且不是贴底，则恢复并返回 true；
+// 否则（无记录 / 之前在底）返回 false，交由调用方走 stickEventsBottom 贴底。
+function restoreScrollPos(key, node) {
+  const el = document.getElementById('events-scroll');
+  if (!el || !key) return false;
+  const pos = sessionScrollPos[sid(key, node || 'local')];
+  if (!pos || pos.atBottom) return false;
+  const apply = () => {
+    const target = Math.max(0, el.scrollHeight - el.clientHeight - pos.fromBottom);
+    el.scrollTop = target;
+  };
+  apply();
+  // 异步布局（图片 / mermaid / katex / "加载更早" 按钮注入）会改变
+  // scrollHeight，再跑两帧复位保持「距底距离」不变。
+  requestAnimationFrame(() => {
+    apply();
+    requestAnimationFrame(apply);
+  });
+  return true;
+}
+
 // stickEventsBottom forces the events pane to the last bubble and keeps it there
 // across the async layout tail — lazy-loaded images, mermaid diagrams, katex
 // formulas, and the "load earlier" button that inserts at the top after the
@@ -2877,18 +2924,22 @@ function navCurrentIdxFromScroll() {
 
 function navMsg(dir) {
   if (navUserEls.length === 0) return;
-  // Seed navIdx from scroll position on the first keypress so the arrow
-  // steps relative to the user's current view, not from the list's edge.
-  if (navIdx < 0) navIdx = navCurrentIdxFromScroll();
+  // Shell-history 语义：第一次按方向键只定位到「视图锚点」消息本身
+  // （prev → 最近一条用户消息；next → 视图内第一条用户消息），
+  // 不额外再走一步。只有已在导航中（navIdx >= 0）时才做 ±1 步进。
+  const firstPress = navIdx < 0;
+  if (firstPress) navIdx = navCurrentIdxFromScroll();
   let target;
   if (dir === 'prev') {
-    // navIdx === -1 means viewport is above every user msg → first prev = last;
-    // otherwise step back, clamped at 0.
-    target = navIdx < 0 ? navUserEls.length - 1 : Math.max(0, navIdx - 1);
+    target = firstPress
+      ? (navIdx < 0 ? navUserEls.length - 1 : navIdx)
+      : Math.max(0, navIdx - 1);
   } else {
-    target = navIdx < 0 ? 0 : Math.min(navUserEls.length - 1, navIdx + 1);
+    target = firstPress
+      ? (navIdx < 0 ? 0 : navIdx)
+      : Math.min(navUserEls.length - 1, navIdx + 1);
   }
-  if (target === navIdx) {
+  if (!firstPress && target === navIdx) {
     // Already at the edge — flash the current one so the user sees the no-op.
     const cur = navUserEls[navIdx];
     if (cur) {
@@ -4595,26 +4646,190 @@ function doCreateSession() {
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
 }
 
+// createQuickSession opens a pre-configured session with zero clicks:
+// general agent, default backend, default workspace (session.cwd). No modal,
+// no palette, no project picker — optimised for "I just want to ask Claude
+// something fast" without deciding where it lives first. The user can still
+// /cd later if they want a different workspace, or rename the session.
+//
+// When `initialText` is non-empty, it is dropped into the composer after
+// renderMainShell paints AND sendMessage is invoked — so submitQuickAsk
+// ships "type in empty-state → Enter → question flies" without the user
+// having to click the composer a second time.
+//
+// renderMainShell is synchronous and writes `#msg-input` into the DOM
+// immediately, but we still defer the setMsgValue + sendMessage call by
+// one rAF tick so the browser has a chance to flush layout (contenteditable
+// focus + selection state is finicky before paint). If `#msg-input` is
+// still missing after the tick we ship text back to the caller via the
+// optional `onTextStranded` callback so the caller can re-enable its own
+// input and surface a toast — prevents silent message loss if a future
+// renderMainShell refactor becomes async or conditional.
+//
+// Rationale: the modal + palette are the right default for project work, but
+// they add 2-3 clicks to the common "quick lookup" case. Surfacing this
+// entry point — paired with the empty-state quick-ask input — lets the
+// palette stay rich without penalising quick queries.
+function createQuickSession(initialText, onTextStranded) {
+  // Close any lingering modal/palette so repeated entry-point triggers don't
+  // stack overlays (e.g. a quick-ask fired while a modal was still mounted).
+  document.querySelectorAll('.modal-overlay, .cmd-palette-overlay').forEach(el => el.remove());
+
+  const workspace = defaultWorkspace || '';
+  const agent = 'general';
+  const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'quick') : 'quick';
+
+  sessionCounter++;
+  const now = new Date();
+  const ts = now.toISOString().slice(0,10) + '-' +
+    now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
+  const key = buildDashboardSessionKey(ts, folderName, agent);
+
+  if (workspace) sessionWorkspaces[key] = workspace;
+  // Backend left unset → router falls back to the configured default.
+
+  stopPreviewPolling();
+  wsm.unsubscribe();
+  selectedKey = key;
+  selectedNode = 'local';
+  try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
+  if (typeof updateNodeSelector === 'function') updateNodeSelector();
+  lastEventTime = 0;
+  mobileEnterChat();
+  document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
+  renderMainShell();
+  navRebuild();
+  lastVersion = 0;
+  debouncedFetchSessions();
+  const text = (initialText || '').trim();
+  // requestAnimationFrame ensures the composer DOM produced by renderMainShell
+  // is laid out before we write into it. Falls back to setTimeout when rAF
+  // is unavailable (shouldn't happen on any supported browser but keeps the
+  // branch testable in jsdom-style runners).
+  const schedule = typeof requestAnimationFrame === 'function'
+    ? requestAnimationFrame
+    : (fn) => setTimeout(fn, 16);
+  schedule(() => {
+    const input = document.getElementById('msg-input');
+    if (!input) {
+      // Composer never materialised — surface the text back so the caller
+      // can restore it rather than leaving the user staring at a blank
+      // screen wondering where their question went.
+      if (text && typeof onTextStranded === 'function') onTextStranded(text);
+      return;
+    }
+    if (text) {
+      setMsgValue(input, text);
+      // sendMessage reads from #msg-input directly — no extra threading needed.
+      sendMessage();
+    } else {
+      input.focus();
+    }
+  });
+}
+
+// submitQuickAsk is the Enter-key / submit-button handler for the empty-state
+// "问点什么？" composer. Reads the textarea, creates a quick session, and
+// forwards the text to sendMessage() in one shot — so the user goes
+// "type → Enter → see answer" with zero intermediate clicks.
+function submitQuickAsk(e) {
+  if (e && e.preventDefault) e.preventDefault();
+  const ta = document.getElementById('quick-ask-input');
+  if (!ta) return;
+  const text = (ta.value || '').trim();
+  if (!text) { ta.focus(); return; }
+  // Disable while the session spins up so a double-Enter can't fire two
+  // sessions. renderMainShell synchronously replaces the empty-state DOM
+  // including this textarea, so the "re-enable" obligation falls on the
+  // stranded-text callback below (only hit when the composer failed to
+  // materialise, an edge case we still want to recover from).
+  ta.disabled = true;
+  const btn = document.querySelector('.quick-ask-send');
+  if (btn) btn.disabled = true;
+  createQuickSession(text, function(strandedText) {
+    // Composer was supposed to appear but didn't. Put the text back in the
+    // quick-ask box, re-enable controls, and tell the user so they can retry.
+    // Guarded with existence checks because by this point the DOM may already
+    // have been replaced by a late-arriving render.
+    const ta2 = document.getElementById('quick-ask-input');
+    const btn2 = document.querySelector('.quick-ask-send');
+    if (ta2) { ta2.disabled = false; ta2.value = strandedText; ta2.focus(); }
+    if (btn2) btn2.disabled = false;
+    if (typeof showToast === 'function') showToast('发送失败，请重试', 'error');
+  });
+}
+
+// wireQuickAskInput binds the in-empty-state textarea to Enter-to-submit and
+// auto-grow behaviour. Safe to call repeatedly — a data-bound marker prevents
+// double-wire after mainEmptyHtml() re-renders on dismiss paths.
+//
+// autofocus: when true, steal keyboard focus to the textarea so "open the
+// page, start typing" works with zero clicks. Dismiss paths pass false
+// because the user may already be mid-click on the sidebar to switch to
+// another session — grabbing focus 50ms later would intercept keystrokes.
+function wireQuickAskInput(autofocus) {
+  const ta = document.getElementById('quick-ask-input');
+  if (!ta || ta.dataset.wired === '1') return;
+  ta.dataset.wired = '1';
+  ta.addEventListener('keydown', function(e) {
+    // Enter (without modifiers) sends; Shift+Enter keeps native newline.
+    if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !e.isComposing) {
+      e.preventDefault();
+      submitQuickAsk(e);
+    }
+  });
+  ta.addEventListener('input', function() {
+    ta.style.height = 'auto';
+    const next = Math.min(ta.scrollHeight, 200);
+    ta.style.height = next + 'px';
+  });
+  // Autofocus only when the caller asks for it AND we're on a pointer-fine
+  // device. On mobile we skip it — iOS Safari pops the keyboard and shifts
+  // layout, which is worse UX than "tap to type". On dismiss-path repaints
+  // we skip it to avoid intercepting a follow-up click/keystroke the user
+  // already aimed at something else.
+  if (autofocus && window.matchMedia && window.matchMedia('(pointer: fine)').matches) {
+    setTimeout(() => ta.focus(), 50);
+  }
+}
+// Wire on first paint (cold start HTML is already in the DOM). Cold start is
+// the one path where autofocus is unambiguously wanted: the user just loaded
+// the dashboard, there's no other UI they could be aiming at.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => wireQuickAskInput(true));
+} else {
+  wireQuickAskInput(true);
+}
+
 
 // --- Utilities ---
 
 // mainEmptyHtml returns the inner HTML for `#main` when no session is
 // selected. Called after dismiss/remove flows that nuke the active
 // session. Kept in sync with the cold-start markup in dashboard.html —
-// both render a `>_` mark, a Chinese lead line, and a primary CTA that
-// invokes createNewSession. Consolidating the three dismiss-path copies
-// into a helper means a future tweak touches one place, not three, and
-// prevents English/Chinese divergence (the prior inline "select a session"
-// string was the only untranslated empty-state left after R110).
+// both render a `>_` mark, a Chinese lead line "问点什么？", and the
+// quick-ask textarea that fires submitQuickAsk() on Enter. Consolidating
+// the copies into a helper means a future tweak touches one place and
+// prevents cold-start / dismiss-path divergence.
+//
+// After rendering, callers SHOULD invoke wireQuickAskInput() to bind the
+// keydown / auto-grow handlers on the freshly-painted textarea (the cold
+// start HTML gets wired on DOMContentLoaded).
 function mainEmptyHtml() {
-  return '<div class="empty-state empty-cta" style="flex-direction:column;gap:16px">' +
+  return '<div class="empty-state empty-cta empty-quick" style="flex-direction:column;gap:14px">' +
     '<span style="font-size:40px;opacity:.35" aria-hidden="true">&gt;_</span>' +
-    '<div style="color:var(--nz-text);font-size:17px">选一个会话开始，或新建一个</div>' +
-    '<button class="empty-cta-btn" type="button" onclick="createNewSession()" ' +
-      'style="padding:10px 22px;border-radius:8px;border:1px solid var(--nz-blue);' +
-      'background:rgba(31,111,235,.12);color:var(--nz-accent);font-size:14px;' +
-      'cursor:pointer;font-family:inherit">+ 新建会话</button>' +
-    '<div style="font-size:12px;color:var(--nz-text-dim)">从侧栏选择已有会话，或点上方按钮新建</div>' +
+    '<div style="color:var(--nz-text);font-size:17px">问点什么？</div>' +
+    '<form class="quick-ask-form" onsubmit="event.preventDefault();submitQuickAsk(event)">' +
+      '<textarea id="quick-ask-input" class="quick-ask-input" rows="1" ' +
+        'placeholder="Enter 发送 · Shift+Enter 换行" autocomplete="off" spellcheck="false" ' +
+        'aria-label="快速提问输入框"></textarea>' +
+      '<button type="submit" class="quick-ask-send" aria-label="发送">' +
+        '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+          '<line x1="22" y1="2" x2="11" y2="13"/>' +
+          '<polygon points="22 2 15 22 11 13 2 9 22 2"/>' +
+        '</svg></button>' +
+    '</form>' +
+    '<div style="font-size:12px;color:var(--nz-text-dim)">默认目录 · general agent · 随时 <code>/cd</code> 切换目录，或用上方 <b>+</b> 开项目会话</div>' +
     // R110-P1 空闲态 Home 仪表 MVP 占位：renderRecentSessionsPanel()
     // 按需注入"最近会话"缩略列表；零 session 时渲染为空字符串，保留冷启动
     // 简洁空态不退化。Helper 外部调用，不嵌在本 HTML 里以保持 pure 可读。
@@ -6611,8 +6826,10 @@ const wsm = {
       runMermaid();
       runKatex();
       navRebuild();
-      // Bottom-anchor after async layout (button insert, images, mermaid/katex).
-      stickEventsBottom();
+      // 若有上次切走时保存的滚动位置且不在底部，恢复它；否则照旧贴底。
+      if (!restoreScrollPos(selectedKey, selectedNode)) {
+        stickEventsBottom();
+      }
     } else {
       const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
       // Remove stale "no events yet" before processing incremental events
