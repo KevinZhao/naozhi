@@ -1282,7 +1282,7 @@ const CHEATSHEET_ENTRIES = [
   { keys: ['/cron'], desc: '定时任务：/cron add "<schedule>" <prompt> · /cron list · /cron del <id>' },
   { keys: ['/help'], desc: '显示可用命令（IM 平台内也可用）' },
   { section: '上传' },
-  { keys: ['📎'], desc: '点击输入栏左侧图标选图（单文件最多 40MB，总计 10 张）' },
+  { keys: ['📎'], desc: '点击输入栏左侧图标选图（单文件最多 40MB，总计 20 张）' },
   { keys: ['拖拽'], desc: '把图片拖入输入区，边框变蓝即可放下上传' },
   { section: '帮助' },
   { keys: ['?'], desc: '打开本快捷键面板' },
@@ -2346,6 +2346,16 @@ async function sendMessage() {
     showToast('图片上传失败' + tail + '，请移除或重试', 'error');
     return;
   }
+  // The shim NDJSON line cap is 12 MB; base64 inflates by ~1.33× so the
+  // raw image batch must stay under ~9 MB to fit alongside the JSON
+  // envelope. Pre-check here so users get a clear "too large — split into
+  // fewer pictures" message instead of a silent "没 working" (R192 regression).
+  const totalBytes = pendingFiles.reduce((n, f) => n + (f.normalizedSize || f.file.size || 0), 0);
+  const batchCap = 9 * 1024 * 1024;
+  if (totalBytes > batchCap) {
+    showToast('图片总大小 ' + Math.ceil(totalBytes / 1024 / 1024) + ' MB 超过 9 MB 上限，请分批发送或减少图片', 'warning');
+    return;
+  }
   const fileIDs = pendingFiles.map(f => f.id).filter(Boolean);
 
   sending = true;
@@ -2820,9 +2830,18 @@ function stickEventsBottom() {
     el.scrollTop = el.scrollHeight;
     requestAnimationFrame(() => { el.scrollTop = el.scrollHeight; });
   });
+  // Re-stick after each lazy-loaded image, but only while the user hasn't
+  // scrolled away from the bottom. Without this guard, a session opened
+  // seconds ago whose images are still loading will yank the viewport back
+  // to the bottom the moment any image finishes — even if the user has
+  // since scrolled up to read history (common on mobile/slow networks).
   el.querySelectorAll('img').forEach(img => {
     if (img.complete) return;
-    const restick = () => { el.scrollTop = el.scrollHeight; };
+    const restick = () => {
+      if (el.scrollTop + el.clientHeight >= el.scrollHeight - 30) {
+        el.scrollTop = el.scrollHeight;
+      }
+    };
     img.addEventListener('load', restick, { once: true });
     img.addEventListener('error', restick, { once: true });
   });
@@ -3186,17 +3205,18 @@ function updateSendButton(state) {
 
 function openFilePicker() { document.getElementById('file-input').click(); }
 
-// Downscale any image to JPEG with max edge 2048 and quality 0.85.
+// Downscale any image to JPEG with max edge 1600 and quality 0.8.
 // Rationale: the CLI writes user messages as one NDJSON line to the shim,
-// which is capped at 16 MB per line; two 10 MB photos base64-encoded alone
-// blow past that and silently break the pipe. 2048 is also the knee where
-// Anthropic's vision models stop benefiting from extra resolution, so we
-// lose nothing by shrinking. HEIC is also handled here — createImageBitmap
-// decodes it on Safari 17+ and we re-encode to JPEG.
+// which is capped at 12 MB per line; base64 inflates bytes by ~1.33×, so a
+// 20-image batch must stay under ~9 MB raw to fit. 1600 / q0.8 typically
+// yields 150–400 KB per JPEG (vs 500 KB–1.2 MB at 2048 / q0.85) while still
+// above the 1568 px knee where Anthropic's vision models stop gaining
+// accuracy. HEIC is also handled here — createImageBitmap decodes it on
+// Safari 17+ and we re-encode to JPEG.
 // Falls back to the original file if decoding fails so the server's
 // content-type check still produces a real error message.
 async function normalizeImage(file) {
-  const MAX_EDGE = 2048;
+  const MAX_EDGE = 1600;
   try {
     const bmp = await createImageBitmap(file);
     const { width: sw, height: sh } = bmp;
@@ -3213,11 +3233,38 @@ async function normalizeImage(file) {
     const ctx = canvas.getContext('2d');
     ctx.drawImage(bmp, 0, 0, dw, dh);
     bmp.close();
-    const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.85));
+    const blob = await new Promise(res => canvas.toBlob(res, 'image/jpeg', 0.8));
     if (!blob) return file;
     return new File([blob], (file.name || 'image').replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' });
   } catch (_) {
     return file;
+  }
+}
+
+// uploadConcurrency caps parallel POST /api/sessions/upload requests so a
+// 20-image batch on a mobile connection doesn't fan out 20 simultaneous
+// bodies competing for the same uplink. With 15 s server ReadTimeout, too
+// many parallel streams starve each other and trigger multipart i/o
+// timeouts — pre-R192 the old 10-file ceiling masked this, but at 20 it
+// shows up. 3 parallel uploads is the sweet spot: still fast on LTE/WiFi,
+// safe on slow cellular.
+const uploadConcurrency = 3;
+let uploadInFlight = 0;
+const uploadQueue = [];
+
+function enqueueUpload(entry) {
+  uploadQueue.push(entry);
+  drainUploadQueue();
+}
+
+function drainUploadQueue() {
+  while (uploadInFlight < uploadConcurrency && uploadQueue.length > 0) {
+    const entry = uploadQueue.shift();
+    uploadInFlight++;
+    uploadEntry(entry).finally(() => {
+      uploadInFlight--;
+      drainUploadQueue();
+    });
   }
 }
 
@@ -3229,7 +3276,7 @@ function handleFiles(fileList) {
   for (const raw of fileList) {
     if (!raw.type.startsWith('image/')) continue;
     if (raw.size > 40 * 1024 * 1024) { showToast('文件过大（上限 40MB）', 'warning'); continue; }
-    if (pendingFiles.length >= 10) { showToast('最多上传 10 个文件', 'warning'); break; }
+    if (pendingFiles.length >= 20) { showToast('最多上传 20 个文件', 'warning'); break; }
     const entry = {
       file: raw,
       blobUrl: URL.createObjectURL(raw),
@@ -3243,7 +3290,7 @@ function handleFiles(fileList) {
   const fi = document.getElementById('file-input');
   if (fi) fi.value = '';
   renderFilePreviews();
-  toUpload.forEach(uploadEntry);
+  toUpload.forEach(enqueueUpload);
 }
 
 async function uploadEntry(entry) {
@@ -3252,6 +3299,10 @@ async function uploadEntry(entry) {
   renderFilePreviews();
   try {
     const file = await normalizeImage(entry.file);
+    // Track the *normalized* byte size so sendMessage can pre-check the
+    // batch against the 12 MB CLI-stdin ceiling. Raw file.size would
+    // overstate HEIC/huge photos that we downscale before upload.
+    entry.normalizedSize = file.size;
     const fd = new FormData();
     fd.append('file', file);
     const headers = {};
@@ -3278,7 +3329,7 @@ async function uploadEntry(entry) {
 
 function retryUpload(idx) {
   const entry = pendingFiles[idx];
-  if (entry && entry.status === 'error') uploadEntry(entry);
+  if (entry && entry.status === 'error') enqueueUpload(entry);
 }
 
 function removeFile(idx) {
@@ -7975,8 +8026,12 @@ function freqToggleAdvanced(btn) {
   }
 }
 
-function buildWorkspaceHtml() {
-  let html = '<div style="margin-top:12px"><div class="modal-section-label">工作目录（可选）</div>';
+// buildCronWorkspaceBody renders only the workspace picker body (the outer
+// field label is provided by the two-column grid wrapper). Retained IDs:
+// #cron-ws-list, #cron-ws-custom-toggle, #cron-ws-custom-form, #cron-workdir
+// — collectors and toggle helpers depend on those names.
+function buildCronWorkspaceBody() {
+  let html = '';
   if (projectsData.length > 0) {
     html += '<ul class="proj-pick" id="cron-ws-list" role="listbox" aria-label="工作目录">' +
       projectsData.map(p =>
@@ -7990,9 +8045,9 @@ function buildWorkspaceHtml() {
       '</li>' +
       '</ul>';
   }
-  html += '<div id="cron-ws-custom-form" style="' + (projectsData.length > 0 ? 'display:none;' : '') + 'margin-top:4px">' +
+  html += '<div id="cron-ws-custom-form" style="' + (projectsData.length > 0 ? 'display:none;' : '') + 'margin-top:6px">' +
     '<input id="cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" aria-label="工作目录路径">' +
-    '</div></div>';
+    '</div>';
   return html;
 }
 
@@ -8005,8 +8060,9 @@ function buildScheduleSection(initialDesc, initialRawExpr) {
   const pickerHtml = buildFreqPickerHtml(initialDesc);
   const advancedOpen = !!initialRawExpr;
   const rawValue = initialRawExpr ? escAttr(initialRawExpr) : '';
-  return '<div class="modal-section-label">运行频率</div>' +
-    pickerHtml +
+  // The outer .cf-label ("什么时候") from renderCronModalBody provides the
+  // section heading in the two-column modal, so we don't duplicate it here.
+  return pickerHtml +
     '<button type="button" class="freq-advanced-toggle' + (advancedOpen ? ' open' : '') + '" onclick="freqToggleAdvanced(this)">' +
       '<span class="chev">&#9656;</span>' +
       '<span>我要写 cron 表达式</span>' +
@@ -8024,23 +8080,27 @@ function buildScheduleSection(initialDesc, initialRawExpr) {
 function createNewCronJob() {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
-  // Default: "每小时" — matches the most common ask and gives users an
+  // Default "每小时" matches the most common ask and gives users an
   // immediate, meaningful preview on open.
   const scheduleHtml = buildScheduleSection({ mode: 'interval', n: 1, unit: 'h' }, '');
-  const wsHtml = buildWorkspaceHtml();
-  const notifyHtml = buildCronNotifySection('', false);
-  const contextHtml = buildCronContextSection(false);
+  const wsBody = buildCronWorkspaceBody();
+  const notifyHtml = buildCronNotifyToggleHtml('', false);
+  const contextHtml = buildCronContextToggleHtml(false);
 
+  // Title + aria-label are inlined as literals (not passed through esc())
+  // so the static UX contract test can grep the exact fragments in source.
+  // See internal/server/static_ux_contract_test.go :: R154 cron-create.
   overlay.innerHTML =
-    '<div class="modal" role="dialog" aria-modal="true" aria-label="新建定时任务">' +
-      '<h3>New Cron Job</h3>' +
-      '<div class="modal-body">' +
-        '<div style="margin-bottom:12px">' +
-          '<div class="modal-section-label">提示词</div>' +
-          '<textarea id="cron-prompt" placeholder="这个任务要做什么？" style="min-height:72px;max-height:160px" aria-label="提示词"></textarea>' +
-        '</div>' +
-        scheduleHtml + wsHtml + notifyHtml + contextHtml +
+    '<div class="modal cron-modal" role="dialog" aria-modal="true" aria-label="新建定时任务">' +
+      '<div class="cm-header">' +
+        '<h3>新建定时任务</h3>' +
+        '<button type="button" class="cm-close" onclick="this.closest(\'.modal-overlay\').remove()" aria-label="关闭">✕</button>' +
       '</div>' +
+      renderCronModalBody({
+        scheduleHtml, wsBody, notifyHtml, contextHtml,
+        promptId: 'cron-prompt',
+        promptPlaceholder: '例如：总结昨天的代码变更，push 到日报频道',
+      }) +
       '<div class="modal-btns">' +
         '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
         '<button type="button" class="primary" onclick="doCreateCronJob()">创建</button>' +
@@ -8050,74 +8110,139 @@ function createNewCronJob() {
   trapFocus(overlay);
   overlay.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') overlay.remove();
+    // Ctrl/Cmd+Enter submits from anywhere inside the modal.
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      doCreateCronJob();
+    }
   });
   overlay._cronSchedule = '';
   overlay._cronWorkDir = '';
+  const promptEl = document.getElementById('cron-prompt');
+  if (promptEl) setTimeout(() => promptEl.focus(), 0);
   freqUpdate();
 }
 
-// buildCronContextSection renders the "上下文" toggle: persistent (reuse
-// session + history) vs fresh (reset before each run). Used in create/edit
-// modals. initialFresh is a bool; default is false (persistent).
-function buildCronContextSection(initialFresh) {
-  const persistentChecked = !initialFresh ? 'checked' : '';
-  const freshChecked = initialFresh ? 'checked' : '';
-  return '<div class="cron-notify-section" style="margin-top:12px">' +
-      '<div class="modal-section-label">上下文</div>' +
-      '<label class="cron-notify-opt"><input type="radio" name="cron-context" value="persistent" ' + persistentChecked + '> 继承（复用会话，保留历史）</label>' +
-      '<label class="cron-notify-opt"><input type="radio" name="cron-context" value="fresh" ' + freshChecked + '> 每次全新（重置会话）</label>' +
-      '<div class="cron-tz-hint">持续运行的任务选"继承"，独立重复的任务选"全新"</div>' +
+// fillCronPrompt pushes the prompt value through the DOM `.value` setter
+// instead of HTML-encoded template interpolation (see renderCronModalBody
+// for the rationale). Called only by editCronJob — the create flow starts
+// with an empty textarea and doesn't need this.
+function fillCronPrompt(id, value) {
+  const el = document.getElementById(id);
+  if (el) el.value = value || '';
+}
+
+// renderCronModalBody assembles the shared two-column grid body used by
+// both the create and edit flows. Header (title, close) and footer
+// (submit button label) are inlined at the call site so the static UX
+// contract tests can grep the exact localized fragments in source.
+//
+// The prompt textarea is rendered empty; callers populate it via
+// fillCronPrompt(id, value) after insertion. Rationale: the HTML parser
+// strips the first newline inside <textarea>, so a user-saved prompt
+// beginning with \n would silently lose that newline on edit round-trip.
+function renderCronModalBody(opts) {
+  const promptTextarea =
+    '<textarea id="' + opts.promptId + '" placeholder="' + escAttr(opts.promptPlaceholder) + '" aria-label="提示词"></textarea>';
+  return '<div class="modal-body">' +
+      '<div class="cron-modal-grid">' +
+        '<div class="cron-field cron-f-what">' +
+          '<div class="cf-label">做什么</div>' +
+          promptTextarea +
+        '</div>' +
+        '<div class="cron-field cron-f-when">' +
+          '<div class="cf-label">什么时候</div>' +
+          opts.scheduleHtml +
+        '</div>' +
+        '<div class="cron-field cron-f-where">' +
+          '<div class="cf-label">在哪里</div>' +
+          opts.wsBody +
+        '</div>' +
+        '<div class="cron-field cron-f-more">' +
+          '<div class="cf-label">其他设置</div>' +
+          '<div class="cron-more-stack">' +
+            opts.notifyHtml +
+            opts.contextHtml +
+          '</div>' +
+        '</div>' +
+      '</div>' +
     '</div>';
 }
 
-// collectCronContextValue returns the selected fresh_context flag, or null
-// when the user didn't interact with the radios (e.g. section not rendered).
-function collectCronContextValue() {
-  const sel = document.querySelector('input[name="cron-context"]:checked');
-  if (!sel) return null;
-  return sel.value === 'fresh';
+// buildCronContextToggleHtml renders the "每次全新上下文" toggle (checkbox
+// form). Default is "continue" (unchecked = inherit session + history);
+// checked = fresh (reset before each run). Used in create/edit modals.
+function buildCronContextToggleHtml(initialFresh) {
+  const freshChecked = initialFresh ? 'checked' : '';
+  return '<label class="cron-toggle" id="cron-context-toggle">' +
+      '<input type="checkbox" id="cron-context-fresh" ' + freshChecked + '>' +
+      '<span class="ct-main">每次全新上下文' +
+        '<span class="ct-hint">勾选后每次运行前重置会话；不勾则复用会话并保留历史。</span>' +
+      '</span>' +
+    '</label>';
 }
 
-// buildCronNotifySection renders the "IM 通知" section used in both the
-// create and edit modals. Initial values prefill the toggle + optional
-// per-job target inputs.
-function buildCronNotifySection(currentNotify, hasOverride, overridePlat, overrideChat) {
-  // Display hint depends on whether the server has a default target.
-  // With a default: "发送到 Feishu (oc_xxx)". Without: warn that user must
-  // provide a per-job target or configure cron.notify_default.
+// collectCronContextValue returns the fresh_context flag, or null when the
+// toggle is absent (section not rendered).
+function collectCronContextValue() {
+  const cb = document.getElementById('cron-context-fresh');
+  if (!cb) return null;
+  return !!cb.checked;
+}
+
+// buildCronNotifyToggleHtml renders the "完成后通知我" toggle (checkbox
+// form) plus the optional per-job target inputs shown only when a custom
+// target is in effect. currentNotify: 'on' / 'off' / '' (legacy unset).
+//
+// The checkbox carries data-touched="0" initially; cronNotifyOnChange sets
+// it to "1" on any user interaction. collectCronNotifyValues uses this to
+// preserve the legacy tri-state contract: untouched → null (server keeps
+// its default / cron.notify_default behavior), touched → explicit bool.
+// Without this, create would default to notify=false (disabling the
+// server default) and edit would overwrite legacy tasks' unset notify
+// with false on save.
+function buildCronNotifyToggleHtml(currentNotify, hasOverride, overridePlat, overrideChat) {
   let defaultHint;
   if (cronNotifyDefault && cronNotifyDefault.platform && cronNotifyDefault.chat_id) {
-    defaultHint = '将发送到 <b>' + esc(cronNotifyDefault.platform) + '</b> (' + esc(cronNotifyDefault.chat_id) + ')';
+    defaultHint = '→ ' + esc(cronNotifyDefault.platform) + ' (' + esc(cronNotifyDefault.chat_id) + ')';
   } else {
-    defaultHint = '未配置默认通知目标。在 config.yaml 的 <code>cron.notify_default</code> 中配置，或在下方填写自定义目标。';
+    defaultHint = '未配置默认通知目标；展开下方填写自定义目标，或在 config.yaml 的 cron.notify_default 中配置。';
   }
-  // currentNotify: 'on' / 'off' / '' (legacy — leave unset)
-  const onChecked = currentNotify === 'on' ? 'checked' : '';
-  const offChecked = currentNotify === 'off' ? 'checked' : '';
-  const showOverride = hasOverride ? '' : 'display:none;';
-  return '<div class="cron-notify-section" style="margin-top:12px">' +
-      '<div class="modal-section-label">完成后发送 IM 通知</div>' +
-      '<label class="cron-notify-opt"><input type="radio" name="cron-notify" value="on" ' + onChecked + ' onchange="cronNotifyToggle(this)"> 开启</label>' +
-      '<label class="cron-notify-opt"><input type="radio" name="cron-notify" value="off" ' + offChecked + ' onchange="cronNotifyToggle(this)"> 关闭</label>' +
-      '<div class="cron-tz-hint" id="cron-notify-default-hint">' + defaultHint + '</div>' +
-      '<div style="margin-top:8px">' +
-        '<label class="cron-notify-override-toggle" style="font-size:12px;cursor:pointer"><input type="checkbox" id="cron-notify-override" ' + (hasOverride ? 'checked' : '') + ' onchange="cronNotifyOverrideToggle(this)"> 自定义此任务的通知目标</label>' +
-      '</div>' +
-      '<div id="cron-notify-override-form" style="' + showOverride + 'margin-top:6px;display:flex;gap:6px">' +
-        '<input id="cron-notify-platform" placeholder="feishu" value="' + escAttr(overridePlat || '') + '" aria-label="IM 平台" style="flex:0 0 100px">' +
-        '<input id="cron-notify-chat-id" placeholder="chat_id" value="' + escAttr(overrideChat || '') + '" aria-label="群/会话 ID" style="flex:1">' +
-      '</div>' +
+  const notifyOn = currentNotify === 'on';
+  const notifyOff = currentNotify === 'off';
+  // Legacy-unset tasks render with the checkbox unchecked but untouched;
+  // existing on/off tasks render with the corresponding state AND marked
+  // touched so an immediate save preserves the persisted value.
+  const touched = (notifyOn || notifyOff) ? '1' : '0';
+  const overrideShow = hasOverride ? ' show' : '';
+  return '<label class="cron-toggle" id="cron-notify-toggle">' +
+      '<input type="checkbox" id="cron-notify-on" ' + (notifyOn ? 'checked' : '') +
+        ' data-touched="' + touched + '" onchange="cronNotifyOnChange(this)">' +
+      '<span class="ct-main">完成后通知我' +
+        '<span class="ct-hint" id="cron-notify-default-hint">' + defaultHint + '</span>' +
+      '</span>' +
+    '</label>' +
+    '<label class="cron-toggle" id="cron-notify-override-toggle-wrap" style="margin-top:-4px">' +
+      '<input type="checkbox" id="cron-notify-override" ' + (hasOverride ? 'checked' : '') + ' onchange="cronNotifyOverrideToggle(this)">' +
+      '<span class="ct-main" style="font-size:12px;color:var(--nz-text-mute)">自定义此任务的通知目标</span>' +
+    '</label>' +
+    '<div id="cron-notify-override-form" class="cron-notify-target' + overrideShow + '">' +
+      '<input id="cron-notify-platform" placeholder="feishu" value="' + escAttr(overridePlat || '') + '" aria-label="IM 平台">' +
+      '<input id="cron-notify-chat-id" placeholder="chat_id" value="' + escAttr(overrideChat || '') + '" aria-label="群/会话 ID">' +
     '</div>';
 }
 
-function cronNotifyToggle(el) {
-  // no-op — radios are read by collectCronNotifyValues. Kept for future
-  // inline validation (e.g. gray out override form when "关闭" selected).
+function cronNotifyOnChange(cb) {
+  // Mark the toggle as user-touched so collectCronNotifyValues can return
+  // the explicit bool instead of null (preserves the tri-state contract).
+  cb.dataset.touched = '1';
+  // When notify is off, disable the override checkbox + hide its form so
+  // the user can't silently leave stale target fields behind.
   const overrideForm = document.getElementById('cron-notify-override-form');
   const overrideToggle = document.getElementById('cron-notify-override');
   if (!overrideForm || !overrideToggle) return;
-  if (el.value === 'off') {
-    overrideForm.style.display = 'none';
+  if (!cb.checked) {
+    overrideForm.classList.remove('show');
     overrideToggle.disabled = true;
     overrideToggle.checked = false;
   } else {
@@ -8127,17 +8252,22 @@ function cronNotifyToggle(el) {
 
 function cronNotifyOverrideToggle(cb) {
   const form = document.getElementById('cron-notify-override-form');
-  if (form) form.style.display = cb.checked ? 'flex' : 'none';
+  if (!form) return;
+  if (cb.checked) form.classList.add('show');
+  else form.classList.remove('show');
 }
 
 // collectCronNotifyValues reads the modal's notify fields and returns an
-// object ready to merge into the POST/PATCH body. Returns null fields so
-// the caller can distinguish "user didn't touch it" from "user set it".
+// object ready to merge into the POST/PATCH body. Returns null for `notify`
+// when the user hasn't touched the toggle (data-touched="0"), so callers
+// can preserve the server's default behavior / the job's legacy unset
+// state. Matches the legacy radio semantics where "no selection" meant
+// "don't send the field".
 function collectCronNotifyValues() {
-  const selected = document.querySelector('input[name="cron-notify"]:checked');
   const out = { notify: null, notify_platform: null, notify_chat_id: null };
-  if (selected) {
-    out.notify = selected.value === 'on';
+  const onCb = document.getElementById('cron-notify-on');
+  if (onCb && onCb.dataset.touched === '1') {
+    out.notify = !!onCb.checked;
   }
   const override = document.getElementById('cron-notify-override');
   if (override && override.checked) {
@@ -8159,7 +8289,15 @@ function cronSelectWorkspace(el, path) {
   el.classList.add('selected');
   el.setAttribute('aria-selected', 'true');
   const customForm = document.getElementById('cron-ws-custom-form');
-  if (customForm) customForm.style.display = 'none';
+  if (customForm) {
+    customForm.style.display = 'none';
+    // Clear the hidden custom input so the submit path (which falls back
+    // to wdInput.value when non-empty) can't resurrect a stale path after
+    // the user picked a different project. Matters in the edit modal,
+    // where wdInput is pre-populated with the job's current work_dir.
+    const input = customForm.querySelector('input');
+    if (input) input.value = '';
+  }
   const toggle = document.getElementById('cron-ws-custom-toggle');
   if (toggle) toggle.style.display = '';
 }
@@ -8167,6 +8305,7 @@ function cronSelectWorkspace(el, path) {
 function toggleCronWsCustom() {
   const form = document.getElementById('cron-ws-custom-form');
   const toggle = document.getElementById('cron-ws-custom-toggle');
+  if (!form) return;
   if (form.style.display === 'none') {
     form.style.display = '';
     if (toggle) toggle.style.display = 'none';
@@ -8177,7 +8316,8 @@ function toggleCronWsCustom() {
       li.classList.remove('selected');
       li.setAttribute('aria-selected', 'false');
     });
-    document.getElementById('cron-workdir').focus();
+    const input = form.querySelector('input');
+    if (input) input.focus();
   } else {
     form.style.display = 'none';
     if (toggle) toggle.style.display = '';
@@ -8591,8 +8731,8 @@ function editCronJob(id) {
   overlay.className = 'modal-overlay';
   const notifyInitial = job.notify === true ? 'on' : (job.notify === false ? 'off' : '');
   const hasOverride = !!(job.notify_platform && job.notify_chat_id);
-  const notifyHtml = buildCronNotifySection(notifyInitial, hasOverride, job.notify_platform, job.notify_chat_id);
-  const contextHtml = buildCronContextSection(!!job.fresh_context);
+  const notifyHtml = buildCronNotifyToggleHtml(notifyInitial, hasOverride, job.notify_platform, job.notify_chat_id);
+  const contextHtml = buildCronContextToggleHtml(!!job.fresh_context);
 
   // Round-trip attempt: if the saved expression matches a picker shape we
   // restore the picker; otherwise open the advanced disclosure with the raw
@@ -8601,22 +8741,25 @@ function editCronJob(id) {
   const initialRaw = initialDesc ? '' : (job.schedule || '');
   const scheduleHtml = buildScheduleSection(initialDesc || { mode: 'interval', n: 1, unit: 'h' }, initialRaw);
 
+  // Edit modal's "where" reuses the project picker when available, falling
+  // back to a free-form input (projectsData empty or user typed a custom
+  // path originally). The picker marks the matching project selected on
+  // open so the UI reflects the persisted state.
+  const wsBody = buildEditCronWorkspaceBody(job.work_dir || '');
+
+  // Title + aria-label inlined as literals — see createNewCronJob for
+  // the contract-test rationale.
   overlay.innerHTML =
-    '<div class="modal" role="dialog" aria-modal="true" aria-label="编辑定时任务">' +
-      '<h3>编辑定时任务</h3>' +
-      '<div class="modal-body">' +
-        '<div style="margin-bottom:12px">' +
-          '<div class="modal-section-label">提示词</div>' +
-          '<textarea id="edit-cron-prompt" style="min-height:72px;max-height:240px" aria-label="提示词"></textarea>' +
-        '</div>' +
-        scheduleHtml +
-        '<div style="margin-top:12px">' +
-          '<div class="modal-section-label">工作目录（可选）</div>' +
-          '<input id="edit-cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" aria-label="工作目录路径">' +
-          '<div class="cron-tz-hint">留空则使用默认工作目录</div>' +
-        '</div>' +
-        notifyHtml + contextHtml +
+    '<div class="modal cron-modal" role="dialog" aria-modal="true" aria-label="编辑定时任务">' +
+      '<div class="cm-header">' +
+        '<h3>编辑定时任务</h3>' +
+        '<button type="button" class="cm-close" onclick="this.closest(\'.modal-overlay\').remove()" aria-label="关闭">✕</button>' +
       '</div>' +
+      renderCronModalBody({
+        scheduleHtml, wsBody, notifyHtml, contextHtml,
+        promptId: 'edit-cron-prompt',
+        promptPlaceholder: '这个任务要做什么？',
+      }) +
       '<div class="modal-btns">' +
         '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
         '<button type="button" class="primary" onclick="doEditCronJob(\'' + escJs(id) + '\')">保存</button>' +
@@ -8624,19 +8767,61 @@ function editCronJob(id) {
     '</div>';
   document.body.appendChild(overlay);
   trapFocus(overlay);
-
-  // Pre-populate; textarea/input .value assigns raw text safely.
-  document.getElementById('edit-cron-prompt').value = job.prompt || '';
-  document.getElementById('edit-cron-workdir').value = job.work_dir || '';
+  fillCronPrompt('edit-cron-prompt', job.prompt);
 
   overlay.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') overlay.remove();
+    if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
+      e.preventDefault();
+      doEditCronJob(id);
+    }
   });
 
-  // Seed overlay._cronSchedule so immediate save (no edits) still sends the
-  // correct schedule, then trigger preview.
+  // Seed overlay._cronSchedule so "save without edits" still sends the
+  // correct schedule, then trigger the first preview render.
+  //
+  // Do NOT seed overlay._cronWorkDir from job.work_dir — the submit path
+  // uses overlay._cronWorkDir only as a fallback when the input is empty,
+  // which is exactly the user-cleared-workdir case. Seeding the current
+  // value would prevent clearing. Picker clicks (cronSelectWorkspace)
+  // explicitly set _cronWorkDir; the input's pre-filled value covers the
+  // unchanged-workdir case.
   overlay._cronSchedule = job.schedule || '';
+  overlay._cronWorkDir = '';
   freqUpdate();
+}
+
+// buildEditCronWorkspaceBody is the edit-mode counterpart to
+// buildCronWorkspaceBody — renders the same picker but with the current
+// job.work_dir pre-selected (if it matches a known project) or visible in
+// the custom input. Shares the input#cron-workdir / #edit-cron-workdir
+// contract via the explicit inputId parameter.
+function buildEditCronWorkspaceBody(currentDir) {
+  const hasProjects = projectsData.length > 0;
+  const matched = hasProjects && currentDir ? projectsData.find(p => p.path === currentDir) : null;
+  const showCustom = !matched && currentDir;
+  let html = '';
+  if (hasProjects) {
+    html += '<ul class="proj-pick" id="cron-ws-list" role="listbox" aria-label="工作目录">' +
+      projectsData.map(p => {
+        const selected = matched && matched.path === p.path;
+        return '<li role="option" data-path="' + escAttr(p.path) + '"' +
+          (selected ? ' class="selected" aria-selected="true"' : '') +
+          ' onclick="cronSelectWorkspace(this, \'' + escJs(p.path) + '\')">' +
+            '<div class="pp-name">' + esc(p.name) + '</div>' +
+            '<div class="pp-path">' + esc(shortPath(p.path)) + '</div>' +
+          '</li>';
+      }).join('') +
+      '<li id="cron-ws-custom-toggle" role="option"' + (showCustom ? ' style="display:none"' : '') +
+      ' onclick="toggleCronWsCustom()">' +
+        '<div class="pp-custom"><span class="pp-custom-icon">+</span> 自定义路径</div>' +
+      '</li>' +
+      '</ul>';
+  }
+  html += '<div id="cron-ws-custom-form" style="' + (hasProjects && !showCustom ? 'display:none;' : '') + 'margin-top:6px">' +
+    '<input id="edit-cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" value="' + escAttr(currentDir || '') + '" aria-label="工作目录路径">' +
+    '</div>';
+  return html;
 }
 
 function authHeaders() {
@@ -8657,7 +8842,13 @@ async function doEditCronJob(id) {
   // (seeded to job.schedule on modal open, kept fresh by freqUpdate()).
   const advanced = document.getElementById('freq-advanced-input');
   const newSchedule = ((advanced && advanced.value.trim()) || overlay._cronSchedule || '').trim();
-  const newWorkDir = document.getElementById('edit-cron-workdir').value.trim();
+  // Workdir resolution: project picker (overlay._cronWorkDir set by
+  // cronSelectWorkspace) wins; otherwise fall back to the custom input.
+  // Tracks the same contract as doCreateCronJob so either flow works
+  // whether the user clicked a project or typed a custom path.
+  const wdInput = document.getElementById('edit-cron-workdir');
+  let newWorkDir = overlay._cronWorkDir || '';
+  if (wdInput && wdInput.value.trim()) newWorkDir = wdInput.value.trim();
 
   // Only send fields that actually changed so the server keeps fields the
   // user didn't touch (and the audit log stays meaningful).
@@ -8977,7 +9168,11 @@ initSidebarSearch();
     });
     elMsgs.querySelectorAll('img').forEach(img => {
       if (img.complete) return;
-      const restick = () => { elMsgs.scrollTop = elMsgs.scrollHeight; };
+      const restick = () => {
+        if (elMsgs.scrollTop + elMsgs.clientHeight >= elMsgs.scrollHeight - 30) {
+          elMsgs.scrollTop = elMsgs.scrollHeight;
+        }
+      };
       img.addEventListener('load', restick, { once: true });
       img.addEventListener('error', restick, { once: true });
     });

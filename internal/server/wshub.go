@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -387,7 +388,12 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		// the same way invalid-token auth_fail does — operators watching
 		// naozhi_ws_auth_fail_total should see both signals blended, and
 		// Retry-After tells them whether the limiter is actively engaging.
+		// R172-ARCH-D10: also bump the dedicated "rate-limited" split so
+		// operators can tell whether the limiter is the dominant source of
+		// auth_fail (e.g. looping client) vs a credential spray pacing under
+		// the limiter threshold.
 		metrics.WSAuthFailTotal.Add(1)
+		metrics.WSAuthFailRateLimitedTotal.Add(1)
 		return
 	}
 	// Short-circuit when the connection is already authenticated via cookie —
@@ -412,7 +418,11 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "auth_ok"})
 	} else {
 		c.SendJSON(node.ServerMsg{Type: "auth_fail", Error: "invalid token"})
+		// R172-ARCH-D10: also bump the dedicated "invalid-token" split so
+		// operators can distinguish credential spray (this counter rising)
+		// from throttling storms (*RateLimitedTotal rising).
 		metrics.WSAuthFailTotal.Add(1)
+		metrics.WSAuthFailInvalidTokenTotal.Add(1)
 	}
 }
 
@@ -551,6 +561,12 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 	c.subscriptions[key] = unsub
 	c.subGen[key]++
 	gen := c.subGen[key]
+	// R175-P2: the key is live again, so any pending reclamation marker for
+	// this key is stale. If we left it in place, a sweep triggered mid-life
+	// would delete subGen[key] out from under an active subscription and
+	// the next resubscribeEvents tick would see the counter collapse back
+	// toward 0, breaking the R163 takeover-detection contract.
+	c.clearSubGenReleasable(key)
 	// Add to clientWG BEFORE releasing h.mu. Shutdown walks h.clients under
 	// h.mu to close conns, then calls clientWG.Wait; if we Add(1) after
 	// releasing here, Shutdown's Wait can return before the eventPushLoop
@@ -626,9 +642,17 @@ func (h *Hub) handleUnsubscribe(c *wsClient, msg node.ClientMsg) {
 		// this subscription may still be parked in resubscribeEvents' ticker
 		// (up to 60s). Deleting subGen[key] and allowing a new subscribe to
 		// reset the counter to 1 would let the stale goroutine's gen=1 match
-		// the fresh subGen[key]=1 and silently resume. The per-connection
-		// subscription cap already bounds map growth, and the map is freed
-		// wholesale when the wsClient is torn down.
+		// the fresh subGen[key]=1 and silently resume.
+		//
+		// R175-P2: mark for delayed reclamation. Without this, long-lived
+		// dashboard clients that flap through many session panels would grow
+		// c.subGen without bound (10k+ keys over a multi-day connection was
+		// observed in production telemetry). The 75s retention window is
+		// longer than resubscribeEvents' worst-case 60s park so any stale
+		// goroutine is guaranteed to have exited before we delete the entry.
+		nowNanos := time.Now().UnixNano()
+		c.markSubGenReleasable(key, nowNanos)
+		c.sweepSubGenExpiredLocked(nowNanos)
 	}
 	h.mu.Unlock()
 	c.SendJSON(node.ServerMsg{Type: "unsubscribed", Key: key})
@@ -674,8 +698,8 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "text too long"})
 		return
 	}
-	if len(msg.FileIDs) > 10 {
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "too many files (max 10)"})
+	if len(msg.FileIDs) > maxFilesPerSend {
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: fmt.Sprintf("too many files (max %d)", maxFilesPerSend)})
 		return
 	}
 

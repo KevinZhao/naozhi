@@ -839,9 +839,6 @@ body.kbd-open .input-hints{display:none}
 .cron-preview-hint.err{color:var(--nz-red)}
 .cron-tz-banner{font-size:11px;color:var(--nz-text-mute);margin:8px 0 12px;padding:6px 10px;border-radius:4px;background:rgba(255,255,255,.04);border:1px solid var(--nz-border)}
 .cron-tz-hint{font-size:11px;color:var(--nz-text-mute);margin-top:4px}
-.cron-notify-section{padding:10px;border-radius:4px;background:rgba(255,255,255,.03);border:1px solid var(--nz-border)}
-.cron-notify-opt{display:inline-flex;align-items:center;gap:4px;margin-right:12px;font-size:13px;cursor:pointer}
-.cron-notify-opt input{margin-right:2px}
 .cc-notify{font-size:11px;padding:1px 6px;border-radius:3px}
 .cc-notify.on{background:rgba(46,160,67,.15);color:var(--nz-green)}
 .cc-notify.off{background:rgba(139,148,158,.15);color:var(--nz-text-mute)}
@@ -892,6 +889,46 @@ body.kbd-open .input-hints{display:none}
 @media(max-width:480px){
   .freq-tab{font-size:12px;padding:8px 4px}
   .freq-dow{min-width:36px;padding:0 6px;font-size:12px}
+}
+
+/* ===== Cron editor — two-column modal (PC) / stacked sheet (mobile) ===== */
+.modal.cron-modal{width:min(760px,calc(100vw - 64px));padding:20px 24px;border-radius:16px}
+.modal.cron-modal .cm-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:18px}
+.modal.cron-modal .cm-header h3{margin:0;font-size:15px;color:var(--nz-text-strong)}
+.modal.cron-modal .cm-close{background:none;border:none;color:var(--nz-text-mute);cursor:pointer;font-size:18px;line-height:1;padding:4px 8px;border-radius:6px;font-family:inherit}
+.modal.cron-modal .cm-close:hover{background:var(--nz-bg-2);color:var(--nz-text)}
+.cron-modal-grid{display:grid;grid-template-columns:320px 1fr;column-gap:28px;row-gap:20px}
+.cron-f-what{grid-column:1;grid-row:1}
+.cron-f-when{grid-column:2;grid-row:1}
+.cron-f-where{grid-column:1;grid-row:2}
+.cron-f-more{grid-column:2;grid-row:2}
+.cron-field .cf-label{font-size:12px;color:var(--nz-text-mute);margin-bottom:6px;letter-spacing:.2px}
+.cron-modal textarea#cron-prompt,.cron-modal textarea#edit-cron-prompt{min-height:200px;max-height:360px;resize:vertical}
+.cron-more-stack{display:flex;flex-direction:column;gap:14px}
+.cron-toggle{display:flex;align-items:flex-start;gap:8px;font-size:13px;color:var(--nz-text);cursor:pointer;user-select:none}
+.cron-toggle input[type=checkbox]{margin-top:3px;cursor:pointer;flex-shrink:0}
+.cron-toggle .ct-main{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px;line-height:1.4}
+.cron-toggle .ct-hint{font-size:11px;color:var(--nz-text-mute);line-height:1.4;word-break:break-word}
+.cron-notify-target{margin-top:6px;margin-left:24px;display:none;gap:6px}
+.cron-notify-target.show{display:flex}
+.cron-notify-target input{flex:1;padding:6px 10px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text);font-size:12px;outline:none;min-width:0}
+.cron-notify-target input:focus{border-color:var(--nz-accent)}
+.cron-notify-target input:first-child{flex:0 0 90px}
+/* Tighten freq preview in the new grid */
+.cron-modal .freq-preview{margin-top:12px}
+
+/* Mobile: single column, sheet, textarea grow-on-focus */
+@media(max-width:720px){
+  .modal.cron-modal{width:100%;padding:18px;border-radius:16px 16px 0 0}
+  .cron-modal-grid{grid-template-columns:1fr;column-gap:0;row-gap:18px}
+  .cron-f-what{grid-column:1;grid-row:1}
+  .cron-f-when{grid-column:1;grid-row:2}
+  .cron-f-where{grid-column:1;grid-row:3}
+  .cron-f-more{grid-column:1;grid-row:4}
+  .cron-modal textarea#cron-prompt,.cron-modal textarea#edit-cron-prompt{min-height:96px;max-height:320px;transition:min-height .18s ease}
+  .cron-modal textarea#cron-prompt:focus,.cron-modal textarea#edit-cron-prompt:focus{min-height:180px}
+  .cron-modal .proj-pick{max-height:160px}
+  .modal.cron-modal .modal-btns{position:sticky;bottom:0;background:var(--nz-bg-1);margin:0 -18px -18px;padding:12px 18px max(12px,env(safe-area-inset-bottom));border-top:1px solid var(--nz-bg-2)}
 }
 
 /* Mobile polish for Cron cards + modal */

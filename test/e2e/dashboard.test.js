@@ -901,7 +901,7 @@ test.describe('Cron panel', () => {
     await page.waitForSelector('.modal-overlay');
 
     const title = await page.$eval('.modal h3', el => el.textContent);
-    expect(title).toBe('New Cron Job');
+    expect(title).toBe('新建定时任务');
 
     await ctx.close();
   });

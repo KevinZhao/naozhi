@@ -773,6 +773,12 @@ func NewRouter(cfg RouterConfig) *Router {
 					// shimManagedKeys() and ReconnectShims' Discover, so we
 					// must backfill directly or the dashboard shows empty
 					// history until the next message.
+					// R172-ARCH-D10: counter sits AFTER the hasInjectedHistory
+					// short-circuit, so only the fallback branch increments it.
+					// A non-zero value flags the short-lived-shim race from
+					// R53-ARCH-001 — ReconnectShims' happy path must not move
+					// this number, or the signal inverts.
+					metrics.ShimReconnectGraceBackfillTotal.Add(1)
 					slog.Info("shim-managed session missing history after reconnect grace, falling back to JSONL load",
 						"key", s.key)
 				}
@@ -2598,10 +2604,17 @@ func (r *Router) shutdown() {
 	case <-historyTimer.C:
 		slog.Warn("shutdown: history loading timed out after 5s, proceeding")
 	}
-	// Deadline timer: broadcast to unblock Wait() when timeout expires
+	// Deadline timer: broadcast to unblock Wait() when timeout expires.
+	// R192-CONC-H1: must hold r.mu across Broadcast so the cond.Wait predicate
+	// evaluation window below (lines referencing `running`) cannot race with
+	// the timer firing and silently lose the wakeup. This mirrors the
+	// contract documented on NotifyIdle (R183-REL-H1) and the sibling
+	// Broadcast call-sites fixed in R191-CONC-H1.
 	timer := time.AfterFunc(ShutdownTimeout, func() {
 		if r.shutdownCond != nil {
+			r.mu.Lock()
 			r.shutdownCond.Broadcast()
+			r.mu.Unlock()
 		}
 	})
 	defer timer.Stop()
@@ -2963,7 +2976,23 @@ func (r *Router) InterruptSessionViaControl(key string) InterruptOutcome {
 	if s == nil {
 		return InterruptNoSession
 	}
-	return s.InterruptViaControl()
+	outcome := s.InterruptViaControl()
+	// R172-ARCH-D10: counter per outcome class. NoSession is deliberately
+	// NOT counted here — that path returns early above, and a
+	// key-does-not-exist lookup isn't a signal about interrupt behaviour.
+	// Sent is counted so operators have a denominator for "what fraction of
+	// interrupts actually reached the CLI?".
+	switch outcome {
+	case InterruptSent:
+		metrics.InterruptSentTotal.Add(1)
+	case InterruptNoTurn:
+		metrics.InterruptNoTurnTotal.Add(1)
+	case InterruptUnsupported:
+		metrics.InterruptUnsupportedTotal.Add(1)
+	case InterruptError:
+		metrics.InterruptErrorTotal.Add(1)
+	}
+	return outcome
 }
 
 // DiscoveryExcludeIDs returns session IDs to exclude from filesystem discovery.

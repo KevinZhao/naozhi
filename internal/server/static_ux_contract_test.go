@@ -3402,16 +3402,19 @@ func TestDashboard_R154_ModalsAndSectionsLocalized(t *testing.T) {
 		}
 	}
 
-	// Invariant 3: cron-create modal. <h3>New Cron Job</h3> is E2E-locked.
-	if !strings.Contains(js, `<h3>New Cron Job</h3>`) {
-		t.Error("E2E contract: <h3>New Cron Job</h3> must remain — dashboard.test.js:904")
+	// Invariant 3: cron-create modal. Two-column layout uses .cf-label
+	// field headers ("做什么 / 什么时候 / 在哪里 / 其他设置") instead of the
+	// legacy .modal-section-label stacked sections. Title is E2E-locked to
+	// the Chinese string "新建定时任务" (dashboard.test.js:904).
+	if !strings.Contains(js, `<h3>新建定时任务</h3>`) {
+		t.Error("E2E contract: <h3>新建定时任务</h3> must remain — dashboard.test.js:904")
 	}
 	for _, want := range []string{
 		`aria-label="新建定时任务">`,
-		`<div class="modal-section-label">提示词</div>`,
-		`<div class="modal-section-label">运行频率</div>`,
-		`<div class="modal-section-label">工作目录（可选）</div>`,
-		`placeholder="这个任务要做什么？"`,
+		`<div class="cf-label">做什么</div>`,
+		`<div class="cf-label">什么时候</div>`,
+		`<div class="cf-label">在哪里</div>`,
+		`<div class="cf-label">其他设置</div>`,
 		`aria-label="提示词">`,
 		`aria-label="工作目录">`,
 		`<span class="pp-custom-icon">+</span> 自定义路径`,
@@ -3421,6 +3424,7 @@ func TestDashboard_R154_ModalsAndSectionsLocalized(t *testing.T) {
 		}
 	}
 	for _, legacy := range []string{
+		`<h3>New Cron Job</h3>`,
 		`<div class="modal-section-label">Schedule</div>`,
 		`<div class="modal-section-label">Prompt</div>`,
 		`<div class="modal-section-label">Workspace (optional)</div>`,
@@ -3441,7 +3445,6 @@ func TestDashboard_R154_ModalsAndSectionsLocalized(t *testing.T) {
 		`<h3>编辑定时任务</h3>`,
 		`doEditCronJob(`,
 		`">保存</button>`,
-		`留空则使用默认工作目录`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("cron-edit modal missing localized fragment: %q", want)

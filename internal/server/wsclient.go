@@ -39,6 +39,28 @@ const (
 	// still leaving CLI-stdin headroom with the coalesce/MaxDepth caps.
 	// R59-SEC-H1.
 	maxWSSendTextBytes = 1024 * 1024
+
+	// subGenRetentionNanos is how long a wsClient.subGen[key] entry must be
+	// kept alive past its last unsubscribe before it can be reclaimed. The
+	// stale-goroutine hazard R163 warned about lives inside resubscribeEvents
+	// (see its godoc): that loop runs 12 iterations of 5s timer waits = 60s
+	// max, checking subGen[key] == gen each iteration to detect takeover.
+	// Deleting subGen[key] while a stale loop is still parked would let a
+	// fresh subscribe's gen=1 match the stale loop's remembered gen=1 and
+	// silently resume on the wrong ManagedSession. 75s retention puts a
+	// comfortable 15s buffer past the worst-case park window. R175-P2.
+	subGenRetentionNanos = int64(75 * time.Second)
+	// subGenSweepMinIntervalNanos rate-limits opportunistic scans of
+	// subGenReleaseAt so a flurry of subscribe/unsubscribe messages from a
+	// flappy client does not turn each handler into an O(map) scan under
+	// h.mu. 30s is well under the 75s retention window so expired entries
+	// are still reclaimed promptly.
+	subGenSweepMinIntervalNanos = int64(30 * time.Second)
+	// subGenHighWaterMark is the entry count above which we force an
+	// immediate sweep regardless of the last-sweep throttle. This bounds
+	// worst-case map growth on long-lived clients that open/close many
+	// session panels between the natural 30s sweep ticks.
+	subGenHighWaterMark = 200
 )
 
 type wsClient struct {
@@ -52,14 +74,91 @@ type wsClient struct {
 	interruptLimiter *rate.Limiter     // per-connection rate limit on "interrupt" messages (separate from send)
 	subscriptions    map[string]func() // key -> unsubscribe function
 	subGen           map[string]uint64 // key -> subscription generation (detects resubscribe race)
-	done             chan struct{}
-	doneOnce         sync.Once
-	dropped          atomic.Int64 // messages dropped due to full send buffer
-	uploadOwner      string       // upload-store owner key derived from auth cookie (or IP in no-token mode)
+	// subGenReleaseAt tracks the earliest wall-clock unix-nano deadline after
+	// which a subGen[key] entry may be deleted. R175-P2: long-lived dashboard
+	// clients that rapidly open/close many session panels accumulate subGen
+	// entries forever because R163's contract forbids deleting them at
+	// unsubscribe time (stale eventPushLoop goroutines may still be parked in
+	// resubscribeEvents' 60s ticker and would silently resume if a fresh
+	// subscribe reset the generation back to a value they remember). The
+	// retention window (subGenRetentionNanos) is longer than the longest
+	// possible resubscribeEvents wait (12 × 5s = 60s) so stale goroutines
+	// are guaranteed to have exited before their subGen entry is reclaimed.
+	// A nil map is equivalent to "empty"; the map is lazily populated only
+	// when a key is actually unsubscribed.
+	subGenReleaseAt map[string]int64
+	// subGenLastSweepNs is the unix-nano of the last opportunistic sweep of
+	// subGenReleaseAt. Sweeps run at most once per subGenSweepMinIntervalNs
+	// from handleSubscribe / handleUnsubscribe so N concurrent clients flapping
+	// subscribes do not each trigger an O(map) scan under h.mu.
+	subGenLastSweepNs int64
+	done              chan struct{}
+	doneOnce          sync.Once
+	dropped           atomic.Int64 // messages dropped due to full send buffer
+	uploadOwner       string       // upload-store owner key derived from auth cookie (or IP in no-token mode)
 }
 
 func (c *wsClient) closeDone() {
 	c.doneOnce.Do(func() { close(c.done) })
+}
+
+// markSubGenReleasable flags a key for delayed reclamation. Callers MUST hold
+// Hub.mu (the enclosing mutex that serialises access to c.subscriptions /
+// c.subGen). The entry itself is NOT deleted here; sweepSubGenExpiredLocked
+// performs the deletion later once the 75s retention window elapses. This
+// preserves the R163 stale-goroutine contract: resubscribeEvents keeps
+// checking subGen[key] == gen for up to 60s after an unsubscribe, and we
+// only reclaim after any such stale goroutine is guaranteed to have exited.
+func (c *wsClient) markSubGenReleasable(key string, nowNanos int64) {
+	if c.subGenReleaseAt == nil {
+		c.subGenReleaseAt = make(map[string]int64)
+	}
+	c.subGenReleaseAt[key] = nowNanos + subGenRetentionNanos
+}
+
+// clearSubGenReleasable cancels a pending reclamation. Callers MUST hold
+// Hub.mu. Used when a fresh subscribe arrives for a key that was marked for
+// release, so the retention marker does not outlive the now-active subscription.
+func (c *wsClient) clearSubGenReleasable(key string) {
+	if c.subGenReleaseAt == nil {
+		return
+	}
+	delete(c.subGenReleaseAt, key)
+}
+
+// sweepSubGenExpiredLocked reclaims expired subGen entries. Callers MUST hold
+// Hub.mu. Throttled by subGenLastSweepNs + subGenSweepMinIntervalNanos unless
+// the map has grown past subGenHighWaterMark (in which case a sweep runs
+// regardless, to put a hard bound on memory). Returns the number of entries
+// reclaimed, for observability in tests.
+func (c *wsClient) sweepSubGenExpiredLocked(nowNanos int64) int {
+	if c.subGenReleaseAt == nil || len(c.subGenReleaseAt) == 0 {
+		return 0
+	}
+	// Throttle: skip the scan if a recent sweep ran, unless the map has
+	// grown past the high-water mark (forces the scan to bound memory).
+	if len(c.subGenReleaseAt) < subGenHighWaterMark &&
+		nowNanos-c.subGenLastSweepNs < subGenSweepMinIntervalNanos {
+		return 0
+	}
+	c.subGenLastSweepNs = nowNanos
+	reclaimed := 0
+	for key, releaseAt := range c.subGenReleaseAt {
+		if nowNanos < releaseAt {
+			continue
+		}
+		// Final safety check: if the key is still actively subscribed, the
+		// marker is stale (bookkeeping bug elsewhere); leave subGen[key] in
+		// place and just drop the marker. Otherwise reclaim both.
+		if _, active := c.subscriptions[key]; active {
+			delete(c.subGenReleaseAt, key)
+			continue
+		}
+		delete(c.subGen, key)
+		delete(c.subGenReleaseAt, key)
+		reclaimed++
+	}
+	return reclaimed
 }
 
 func (c *wsClient) SendJSON(v any) {

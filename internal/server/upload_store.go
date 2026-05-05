@@ -19,7 +19,12 @@ const (
 	// hold. Without this, one user leaving 100 un-claimed uploads (e.g.
 	// a forgotten browser tab) starves every other user with 429 until
 	// the next cleanup tick, up to 1 minute of wedging.
-	maxUploadPerOwner = 20
+	maxUploadPerOwner = 40
+	// maxFilesPerSend caps how many files (inline + pre-uploaded) a single
+	// send can reference. Matched at the WS, HTTP JSON, and HTTP multipart
+	// paths. Kept below maxUploadPerOwner so a full batch can still be
+	// accompanied by an in-flight retry without tripping the per-owner quota.
+	maxFilesPerSend = 20
 )
 
 type uploadEntry struct {

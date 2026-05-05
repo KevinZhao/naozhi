@@ -16,8 +16,15 @@ func TestCountersRegisteredUnderStableNames(t *testing.T) {
 		"naozhi_session_evict_total",
 		"naozhi_cli_spawn_total",
 		"naozhi_ws_auth_fail_total",
+		"naozhi_ws_auth_fail_rate_limited_total",
+		"naozhi_ws_auth_fail_invalid_token_total",
 		"naozhi_shim_restart_total",
 		"naozhi_spawn_panic_recovered_total",
+		"naozhi_shim_reconnect_grace_backfill_total",
+		"naozhi_interrupt_sent_total",
+		"naozhi_interrupt_no_turn_total",
+		"naozhi_interrupt_unsupported_total",
+		"naozhi_interrupt_error_total",
 	}
 	for _, name := range want {
 		name := name
@@ -42,12 +49,19 @@ func TestCountersIncrement(t *testing.T) {
 	// binary may mutate them. We capture start values and assert the
 	// delta only, which is safe for concurrent readers.
 	counters := map[string]*expvar.Int{
-		"session_create":        SessionCreateTotal,
-		"session_evict":         SessionEvictTotal,
-		"cli_spawn":             CLISpawnTotal,
-		"ws_auth_fail":          WSAuthFailTotal,
-		"shim_restart":          ShimRestartTotal,
-		"spawn_panic_recovered": SpawnPanicRecoveredTotal,
+		"session_create":                SessionCreateTotal,
+		"session_evict":                 SessionEvictTotal,
+		"cli_spawn":                     CLISpawnTotal,
+		"ws_auth_fail":                  WSAuthFailTotal,
+		"ws_auth_fail_rate_limited":     WSAuthFailRateLimitedTotal,
+		"ws_auth_fail_invalid_token":    WSAuthFailInvalidTokenTotal,
+		"shim_restart":                  ShimRestartTotal,
+		"spawn_panic_recovered":         SpawnPanicRecoveredTotal,
+		"shim_reconnect_grace_backfill": ShimReconnectGraceBackfillTotal,
+		"interrupt_sent":                InterruptSentTotal,
+		"interrupt_no_turn":             InterruptNoTurnTotal,
+		"interrupt_unsupported":         InterruptUnsupportedTotal,
+		"interrupt_error":               InterruptErrorTotal,
 	}
 	for name, c := range counters {
 		name, c := name, c
@@ -70,7 +84,10 @@ func TestCountersJSONEncodable(t *testing.T) {
 	t.Parallel()
 	for _, c := range []*expvar.Int{
 		SessionCreateTotal, SessionEvictTotal, CLISpawnTotal,
-		WSAuthFailTotal, ShimRestartTotal, SpawnPanicRecoveredTotal,
+		WSAuthFailTotal, WSAuthFailRateLimitedTotal, WSAuthFailInvalidTokenTotal,
+		ShimRestartTotal, SpawnPanicRecoveredTotal, ShimReconnectGraceBackfillTotal,
+		InterruptSentTotal, InterruptNoTurnTotal, InterruptUnsupportedTotal,
+		InterruptErrorTotal,
 	} {
 		raw := c.String() // expvar.Int.String returns its JSON form
 		var n json.Number
