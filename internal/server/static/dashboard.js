@@ -5998,7 +5998,10 @@ function inlineMd(s) {
   // — on a 200-line response the savings are measurable in V8 profiler.
   const mathTokens = [];
   if (s.indexOf('$') !== -1 || s.indexOf('\\(') !== -1) {
-    s = s.replace(/\$([^\$\n]+?)\$/g, function(_, tex) {
+    // `$...$`: require non-alphanumeric outside + LaTeX-ish char inside,
+    // else prose like "每月$650$USD" gets rendered as italic math.
+    s = s.replace(/(?<![A-Za-z0-9])\$([^\s\$][^\$\n]*?[^\s\$]|[^\s\$])\$(?![A-Za-z0-9])/g, function(match, tex) {
+      if (!/[\\^_{}]/.test(tex)) return match;
       const idx = mathTokens.length;
       mathTokens.push(renderKatex(tex, false));
       return '\x00KTX' + idx + '\x00';
