@@ -8752,6 +8752,21 @@ function cronJobCardHtml(j) {
   const lastStr = j.last_run_at ? timeAgo(j.last_run_at) : '';
   const nextAbs = j.next_run ? formatAbsTime(j.next_run) : '';
   const lastAbs = j.last_run_at ? formatAbsTime(j.last_run_at) : '';
+  // Increment E: 右上角 Next run 徽章。paused 时 hidden；next_run 距现在
+  // < 10 分钟高亮（imminent）。meta 行里仍保留文字版 "next: xxx"，两处
+  // 不冲突——徽章抢注意力，meta 行留给一眼扫过的完整信息。
+  // 关联：docs/rfc/cron-v2-polish.md §3.5。
+  let nextBadge = '';
+  if (!j.paused && j.next_run) {
+    const msUntil = j.next_run - Date.now();
+    const imminent = msUntil > 0 && msUntil < 10 * 60 * 1000;
+    nextBadge =
+      '<div class="cc-next-badge' + (imminent ? ' imminent' : '') + '"' +
+        (nextAbs ? ' title="next run: ' + escAttr(nextAbs) + '"' : '') + '>' +
+        '<span class="cc-next-label">下次</span>' +
+        '<span class="cc-next-rel">' + esc(nextStr || '—') + '</span>' +
+      '</div>';
+  }
   const wdStr = j.work_dir ? '<span class="cc-ws" title="' + escAttr(j.work_dir) + '">' + esc(shortPath(j.work_dir)) + '</span>' : '';
   let notifyStr = '';
   if (j.notify === true) {
@@ -8796,6 +8811,7 @@ function cronJobCardHtml(j) {
   const human = humanizeCron(j.schedule);
   const showRaw = human !== j.schedule;
   return '<div class="cron-card" role="button" tabindex="0" onclick="openCronSession(\'' + escJs(j.id) + '\')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronSession(\'' + escJs(j.id) + '\')}">' +
+    nextBadge +
     titleBlock +
     promptBlock +
     '<div class="cc-human">' + esc(human) + '</div>' +
