@@ -95,6 +95,11 @@ systemctl is-active naozhi → active。
 - 大消息（~1MB）的 passthrough flow
 - 持续负载下 MaxPending=16 的压力点
 
+## 5.1 ⚠️ 待 review 的设计决策
+
+- **`/urgent` 命名 + 抽象**：当前是 naozhi 自创的命令，包装 CC 原生 `priority:"now"` 字段。CC TUI 本身没这个命令（只有 ESC 中断）。详细讨论见 `passthrough-mode.md` §11.8。候选：`/urgent` / `/now` / `/interrupt` / `/pre-empt` / 合并到 `/stop <msg>` / 前缀 `!!` / 完全不暴露给 IM 用户。**Phase D 启用前需要锁定**
+- **IM 路径下 slash 命令的 agent 解析**：`/urgent` 和 `/stop` 硬编码 `agentID="general"`，多 agent 场景下会找错 session。详见 `passthrough-mode.md` §11.9
+
 ## 6. 总结
 
 **Phase C PASS** — Passthrough 模式在 dashboard 路径上 ✅ 完整工作：

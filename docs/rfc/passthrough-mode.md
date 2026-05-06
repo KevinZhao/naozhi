@@ -969,6 +969,19 @@ queue:
 5. **`/urgent` 自带 text 为空怎么处理**：ACP 降级路径需要 `Send("", ...)`，而 ACP `Send("")` 的语义不明确。建议 v2.2 实施阶段实测 ACP 行为后决定
 6. **合并 result 的 IM UX 实现成本**：`markMessageMerged` 需要各平台 reaction 接口支持；Feishu/Slack 有，Discord 也有，Weixin 不确定。退化方案：不支持 reaction 的平台 fall back 到发一条 "这条消息已合并到上一条的回复中" 小气泡
 7. **单 turn 合并 follower 数上限**：极端情况下一次合并几十条消息，fan-out 给 follower 会产生几十次 reaction call。需不需要 batch？Phase D 再观察
+8. **`/urgent` 命名 + 抽象是否合理**（⚠️ 待 review）：
+   - 当前实现：`/urgent <msg>` 是 naozhi **自创**的命令，包装 CC 协议原生字段 `priority:"now"`。CC TUI 本身**没有**这个命令（只有 ESC 中断）
+   - 候选命名：`/urgent` / `/now` / `/interrupt <msg>` / `/priority <msg>` / `/pre-empt` / `/cut`
+   - 风险点：
+     a) 用户认知 — CC 用户用 TUI 不会找到等价物，会误以为是 naozhi 独有"魔法"
+     b) 语义暧昧 — "urgent" 暗示"重要"，但实际是"抢占"。语气容易让用户滥用
+     c) 和 `/stop` 的关系模糊 — `/stop` = 只中断不替换；`/urgent msg` = 中断并替换；这个差别命名上没体现
+   - 可能的替代设计：
+     a) 取消专用命令，文档里告知"发消息时加特殊前缀 `!` / `!!` 代表抢占"（更轻量）
+     b) 合并到 `/stop` — `/stop` 无参数只中断，`/stop <msg>` 中断并发新消息
+     c) 只保留 `priority:"now"` 作为 API / dashboard 控件属性，不给 IM 用户暴露命令
+   - 决策：**Phase D 前 review 后确定**。当前实现可用但未锁定
+9. **IM 路径下 `/urgent` / `/stop` 硬编码 `agentID="general"`**：如果用户先用 `/review xxx` 启动 code-reviewer agent 后 `/urgent`，会找错 session key（走到 general agent 的 key 上）。dashboard 路径不受影响（显式带 key）。修复方向：dispatch 跟踪每个 chatKey 最近用的 agent；或 `/urgent` 带 agent 子参数 `/urgent [agent] <msg>`
 
 ## 12. 附录: 与 CC TUI 的能力差距
 
