@@ -70,6 +70,11 @@ cron:
   notify_default:
     platform: "feishu"
     chat_id: "${NAOZHI_CRON_NOTIFY_CHAT_ID}"
+  # 调度抖动上限：多个同 schedule 的 job 不再"整点同秒起跑"，而是在
+  # [0, min(jitter_max, period/4)] 区间内随机延迟，拍平 CPU / API 并发峰值。
+  # 默认 2m。"0" 关闭抖动（回退到 v1 行为）。上限硬编码 10m。TriggerNow
+  # （dashboard 的 "run now" 按钮）始终跳过抖动立即执行。
+  jitter_max: "2m"
 
 platforms:
   feishu:

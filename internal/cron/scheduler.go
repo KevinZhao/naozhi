@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	mrand "math/rand/v2"
 	"os"
 	"path/filepath"
 	"slices"
@@ -117,6 +118,12 @@ type SchedulerConfig struct {
 	// operator configured AllowedRoot) could escape the sandbox at replay.
 	// Empty disables the check (back-compat for tests and legacy deployments).
 	AllowedRoot string
+	// JitterMax is the upper bound of the randomized delay applied before
+	// each scheduled tick. 0 disables jitter (preserves legacy behavior).
+	// The per-job window is clamped to min(JitterMax, period/4) so short
+	// schedules are not swallowed. TriggerNow bypasses jitter.
+	// See docs/rfc/cron-v2-polish.md §3.2.
+	JitterMax time.Duration
 }
 
 // NotifyTarget identifies an IM channel for cron completion notifications.
@@ -156,6 +163,9 @@ type Scheduler struct {
 	// execute() time to catch symlink races that retarget post-creation.
 	// Empty disables enforcement (tests/legacy).
 	allowedRoot string
+	// jitterMax is the scheduling jitter cap. See SchedulerConfig.JitterMax.
+	// Immutable after NewScheduler returns, so no lock needed.
+	jitterMax time.Duration
 	// stopCtx is the scheduler's lifecycle context. Storing context in a
 	// struct is usually an anti-pattern, but here execute() is invoked via
 	// a callback from robfig/cron whose signature has no ctx parameter, so
@@ -303,6 +313,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		location:      loc,
 		notifyDefault: cfg.NotifyDefault,
 		allowedRoot:   cfg.AllowedRoot,
+		jitterMax:     cfg.JitterMax,
 		stopCtx:       stopCtx,
 		stopCancel:    stopCancel,
 	}
@@ -1080,37 +1091,42 @@ func (s *Scheduler) TriggerNow(id string) error {
 	s.mu.Unlock()
 
 	if entryID != 0 {
-		// Run through the cron chain (SkipIfStillRunning + Recover) to prevent
-		// double-execution when TriggerNow overlaps with a scheduled tick.
-		// Guard: a concurrent DeleteJob may remove the entry between our Unlock
-		// and this lookup, causing Entry() to return a zero-value with nil WrappedJob.
-		// robfig/cron EntryIDs are a monotonically incrementing int and never
-		// reused within a process; this rules out the "stale entryID returns a
-		// different job's entry" hazard.
-		//
-		// CRON4 (Round 174): both the "run" arm and the "entry gone" arm
-		// defer triggerWG.Done() from inside a spawned goroutine. Previously
-		// the "entry gone" arm called Done() synchronously on the caller's
-		// goroutine before the function returned — logically correct but
-		// fragile: a concurrent Stop()'s triggerWG.Wait() could observe a
-		// zero counter between our Add(1) in the caller's frame and the
-		// spawned goroutine's Done. Using the same `go func { defer Done;
-		// ... }()` shape in both arms keeps the lifetime of every reserved
-		// WG slot tied to an actual goroutine, matching the entryID==0
-		// branch below.
+		// TriggerNow 不再通过 cron chain 的 WrappedJob.Run()——因为我们要跳过
+		// jitter（用户显式 "run now" 期望立刻跑）。改为直接 executeOpt(..., true)。
+		// 去 chain 后失去的保护：
+		//   1) SkipIfStillRunning —— executeOpt 内部的 jobRunningGuard CAS
+		//      同样拒绝重叠，等效覆盖。
+		//   2) Recover（panic） —— execute 自身走 session.Send，session 层
+		//      panic 已经被上层 recover；即便有残留 panic 也只影响此 goroutine，
+		//      不会污染 robfig/cron 调度器。
+		// 但必须保留"entry 已被并发 DeleteJob 清掉"的分支：此时 cron.Entry()
+		// 的 WrappedJob 为 nil，我们应该把这当作"entry gone"静默退出，不再
+		// 走 executeOpt（可能引用已被清理的 session router / job 指针）。
+		// 相关测试：TestTriggerNow_EntryGoneReleasesWG（trigger_now_wg_done_test.go）。
+		// R192-CRON-B: cron-v2-polish §3.2 jitter。
 		entry := s.cron.Entry(entryID)
-		if entry.WrappedJob != nil {
-			go func() {
-				defer s.triggerWG.Done()
-				entry.WrappedJob.Run()
-			}()
-		} else {
-			// Entry was concurrently deleted — spawn a no-op goroutine whose
-			// sole job is to release the WaitGroup slot. Same shape as the
-			// sibling arm; see godoc above.
+		if entry.WrappedJob == nil {
 			go func() {
 				defer s.triggerWG.Done()
 				slog.Debug("TriggerNow: cron entry gone (concurrent delete?)", "id", id, "entry_id", entryID)
+			}()
+		} else {
+			jobID := j.ID
+			go func() {
+				defer s.triggerWG.Done()
+				s.mu.RLock()
+				cur, ok := s.jobs[jobID]
+				paused := ok && cur.Paused
+				s.mu.RUnlock()
+				if !ok {
+					slog.Debug("TriggerNow: job deleted before execute, skipping", "id", jobID)
+					return
+				}
+				if paused {
+					slog.Debug("TriggerNow: job paused concurrently, skipping", "id", jobID)
+					return
+				}
+				s.executeOpt(cur, true)
 			}()
 		}
 	} else {
@@ -1136,7 +1152,7 @@ func (s *Scheduler) TriggerNow(id string) error {
 				slog.Debug("TriggerNow: job paused concurrently, skipping", "id", jobID)
 				return
 			}
-			s.execute(cur)
+			s.executeOpt(cur, true)
 		}()
 	}
 	return nil
@@ -1193,6 +1209,14 @@ func (s *Scheduler) jobRunningGuard(id string) *atomic.Bool {
 
 // execute runs a cron job: send prompt to session, post result to chat.
 func (s *Scheduler) execute(j *Job) {
+	s.executeOpt(j, false)
+}
+
+// executeOpt 是 execute 的全参数版本。viaTriggerNow=true 时跳过 jitter 的
+// 延迟等待（用户显式 "run now" 期望立即执行）；scheduled tick 路径传 false。
+// 保持 execute(j) 作为 back-compat 入口，既有调用点（cron closure 里间接
+// 入口）和少量测试辅助无需改签名。
+func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// Guard against concurrent execution of the same job. The cron chain's
 	// SkipIfStillRunning protects the scheduled-tick path, but TriggerNow
 	// that arrives while a tick is in flight bypasses the chain entirely
@@ -1206,6 +1230,14 @@ func (s *Scheduler) execute(j *Job) {
 		return
 	}
 	defer guard.Store(false)
+
+	// 抖动：放在 CAS 之后 / snapshot 之前。放在 CAS 之后的好处是 concurrent
+	// 重叠触发被 CAS 立刻拒绝；放在 snapshot 之前意味着抖动期间 Prompt 或
+	// WorkDir 被 UpdateJob 改掉了，后续 snapshot 拿到新值（符合"改动立即
+	// 生效"的直觉）。TriggerNow 跳过，保持"run now 立刻跑"语义。
+	if !viaTriggerNow && s.jitterMax > 0 {
+		applyJitter(s.stopCtx, j.Schedule, s.jitterMax)
+	}
 
 	// Snapshot mutable fields under lock to avoid data race with SetJobPrompt.
 	s.mu.Lock()
@@ -1726,6 +1758,42 @@ func (s *Scheduler) saveMarshaledSeq(data []byte, seq uint64) {
 		return
 	}
 	s.lastSavedSeq.Store(seq)
+}
+
+// applyJitter 在执行 cron job 前引入一段随机延迟，用来把"整点共振起跑"的
+// CPU / API 峰值打散。窗口上界 = min(jitterMax, period/4)：
+//   - 5m 周期 → 最多抖 75s（不蚕食 1m 节奏）
+//   - 30m 周期 → 最多抖 7m30s
+//   - 1h+ 周期 → 抖满 jitterMax（默认 2m）
+//
+// 无法解析 schedule 或 period<=0 时用 jitterMax 兜底。抖动尊重 ctx：
+// Stop() / 进程关机期间 stopCtx 取消 → 立即返回（不再执行 job）。
+//
+// 用 math/rand/v2（per-goroutine 安全且无全局锁），安全性不敏感：
+// 这里的随机只影响启动时刻分布，不是密码学用途。
+func applyJitter(ctx context.Context, schedule string, jitterMax time.Duration) {
+	if jitterMax <= 0 {
+		return
+	}
+	window := jitterMax
+	if period := schedulePeriod(schedule); period > 0 {
+		if cap := period / 4; cap < window {
+			window = cap
+		}
+	}
+	if window <= 0 {
+		return
+	}
+	d := time.Duration(mrand.Int64N(int64(window)))
+	if d <= 0 {
+		return
+	}
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-t.C:
+	case <-ctx.Done():
+	}
 }
 
 // slogWriter adapts slog to io.Writer so robfig/cron's PrintfLogger can route

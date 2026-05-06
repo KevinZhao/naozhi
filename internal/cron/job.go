@@ -101,14 +101,7 @@ const minJobTimeout = 3 * time.Minute
 // edge), returns maxCap — safer to fall back to the historical single-timeout
 // behaviour than to misapply a ratio to an undefined period.
 func computeJobTimeout(schedule string, maxCap time.Duration) time.Duration {
-	sched, err := cronParser.Parse(schedule)
-	if err != nil {
-		return maxCap
-	}
-	now := time.Now()
-	first := sched.Next(now)
-	second := sched.Next(first)
-	period := second.Sub(first)
+	period := schedulePeriod(schedule)
 	if period <= 0 {
 		return maxCap
 	}
@@ -120,6 +113,21 @@ func computeJobTimeout(schedule string, maxCap time.Duration) time.Duration {
 		scaled = maxCap
 	}
 	return scaled
+}
+
+// schedulePeriod 估算给定 cron 表达式的周期（相邻两次触发的间隔）。
+// 通过 sched.Next 两次外推实现，精度对 "每 N 分钟 / 每天 HH:MM" 这类
+// 常见形态足够。无法解析 / 不等间隔（DST 切换窗口）时返回 0，调用方
+// 自行决定 fallback。computeJobTimeout 和 applyJitter 都基于此。
+func schedulePeriod(schedule string) time.Duration {
+	sched, err := cronParser.Parse(schedule)
+	if err != nil {
+		return 0
+	}
+	now := time.Now()
+	first := sched.Next(now)
+	second := sched.Next(first)
+	return second.Sub(first)
 }
 
 // validateSchedule checks if the cron expression is valid and respects the minimum interval.

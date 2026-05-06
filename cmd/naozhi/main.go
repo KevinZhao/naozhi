@@ -651,6 +651,7 @@ func main() {
 		Location:      cronLoc,
 		NotifyDefault: notifyDefault,
 		AllowedRoot:   workspace,
+		JitterMax:     cfg.ParseCronJitterMax(),
 		ParentCtx:     ctx,
 	})
 	if err := scheduler.Start(); err != nil {
