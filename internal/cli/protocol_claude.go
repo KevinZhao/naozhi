@@ -25,6 +25,12 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 		"--output-format", "stream-json",
 		"--input-format", "stream-json",
 		"--verbose",
+		// Passthrough matching depends on CLI echoing every stdin user message
+		// back as an isReplay:true event with round-tripped uuid. See
+		// docs/rfc/passthrough-mode.md §5.3 and validation report V3/V6.
+		// Safe to always enable: replay events are filtered out of EventLog
+		// (see filterReplayEvent).
+		"--replay-user-messages",
 		"--setting-sources", "", // disable standard settings to avoid hook loops
 		"--dangerously-skip-permissions",
 	}
@@ -46,7 +52,17 @@ func (p *ClaudeProtocol) Init(_ *JSONRW, _, _ string) (string, error) {
 }
 
 func (p *ClaudeProtocol) WriteMessage(w io.Writer, text string, images []ImageData) error {
-	msg := NewUserMessage(text, images)
+	return p.WriteUserMessageLocked(w, "", text, images, "")
+}
+
+// WriteUserMessageLocked writes a user message with optional uuid + priority.
+// Caller must already hold Process.shimWMu (see protocol.go interface doc).
+//
+// Empty uuid / priority are omitted from the JSON (omitempty), so the payload
+// is byte-identical to the legacy WriteMessage path when both are empty —
+// safe for tests and ACP-backed stream-json paths that never set them.
+func (p *ClaudeProtocol) WriteUserMessageLocked(w io.Writer, uuid, text string, images []ImageData, priority string) error {
+	msg := NewUserMessageWithMeta(text, images, uuid, priority)
 	data, err := json.Marshal(msg)
 	if err != nil {
 		return err
@@ -55,6 +71,9 @@ func (p *ClaudeProtocol) WriteMessage(w io.Writer, text string, images []ImageDa
 	_, err = w.Write(data)
 	return err
 }
+
+func (p *ClaudeProtocol) SupportsPriority() bool { return true }
+func (p *ClaudeProtocol) SupportsReplay() bool   { return true }
 
 // controlRequestInterrupt is the NDJSON payload for an in-band "abort this turn"
 // signal sent via stdin. The Claude CLI reacts by killing any in-flight tool

@@ -47,6 +47,22 @@ func (d *Dispatcher) ackQueuedWithReaction(ctx context.Context, msg platform.Inc
 	return true
 }
 
+// ackMergedFollower signals that this user message was merged into another
+// message's reply (passthrough head/follower fan-out). Preferred surface is
+// a reaction on the user's message; fall back to a short text reply when
+// the platform is not reactor-capable. Rate-limited via ShouldNotify so a
+// burst of follower acks doesn't spam the chat.
+func (d *Dispatcher) ackMergedFollower(ctx context.Context, msg platform.IncomingMessage, mergedCount int, log *slog.Logger) {
+	if d.ackQueuedWithReaction(ctx, msg, log) {
+		return
+	}
+	if d.queue != nil && !d.queue.ShouldNotify(msg.ChatID) {
+		return
+	}
+	_ = mergedCount // reserved for future reaction variant showing count
+	d.replyText(ctx, msg, "已合并到上一条回复。", log)
+}
+
 // clearQueuedReactions removes the "queued" reaction from each drained
 // message. Called from ownerLoop after a drain-batch has been processed.
 // Errors are logged and swallowed — a lingering reaction is cosmetically

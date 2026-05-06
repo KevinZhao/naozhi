@@ -38,6 +38,24 @@ func (p *TestProcess) Send(ctx context.Context, text string, images []cli.ImageD
 	return &cli.SendResult{Text: "mock response"}, nil
 }
 
+// SendPassthrough mirrors Send for tests that don't care about passthrough
+// semantics. Ignores priority; returns the same mock result as Send.
+func (p *TestProcess) SendPassthrough(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback, priority string) (*cli.SendResult, error) {
+	return p.Send(ctx, text, images, onEvent)
+}
+
+// DiscardPassthroughPending is a no-op on the test stub — there are no real
+// pending slots to flush.
+func (p *TestProcess) DiscardPassthroughPending(reason error) {}
+
+// PassthroughDepth always reports 0 on the test stub.
+func (p *TestProcess) PassthroughDepth() int { return 0 }
+
+// SupportsPassthrough defaults to false so tests that don't opt in use the
+// legacy Send path. A test wanting to exercise passthrough can assign a
+// TestProcess whose wrapper overrides this (or supply a real *cli.Process).
+func (p *TestProcess) SupportsPassthrough() bool { return false }
+
 func (p *TestProcess) GetSessionID() string              { return "" }
 func (p *TestProcess) GetState() cli.ProcessState        { return p.StateVal }
 func (p *TestProcess) DeathReason() string               { return p.DeathReasonVal }

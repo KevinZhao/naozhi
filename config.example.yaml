@@ -27,6 +27,20 @@ session:
   store_path: "~/.naozhi/sessions.json"
   shim:
     idle_timeout: "8h"
+  queue:
+    # Message queuing when a session is busy. Three modes:
+    #   collect     (default) — queue new messages, wait for current turn,
+    #                 merge into a single follow-up prompt after a settle delay
+    #   interrupt   — auto-abort the current turn on every new message; burns
+    #                 tokens but minimizes response latency
+    #   passthrough — forward every message directly to the CLI; each message
+    #                 gets its own result (or a merged group result with
+    #                 head/follower IM fan-out). Requires stream-json backend
+    #                 (Claude CLI). ACP backends silently fall back to collect.
+    #                 Enables /urgent <msg> for priority:"now" preemption.
+    mode: "collect"
+    max_depth: 20
+    collect_delay: "500ms"
 
 agents:
   code-reviewer:

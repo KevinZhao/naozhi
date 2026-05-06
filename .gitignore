@@ -38,3 +38,6 @@ config-local.yaml
 preview-start.sh
 .mcp.json
 *.tar.gz
+
+# Python bytecode cache (test/e2e/passthrough/*.py harness)
+__pycache__/

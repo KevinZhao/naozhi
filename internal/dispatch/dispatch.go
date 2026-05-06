@@ -251,6 +251,24 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 			images = append(images, cli.ImageData{Data: img.Data, MimeType: img.MimeType})
 		}
 
+		// Passthrough mode: direct dispatch — every message gets its own
+		// goroutine. Ordering and merging handled by the CLI's commandQueue
+		// plus the Process-level sendSlot FIFO. No naozhi-side coalesce.
+		//
+		// Fallback: if the session's protocol does not expose the
+		// --replay-user-messages primitive (e.g. ACP), sendFn silently
+		// downgrades to the legacy sendMu-serialized Send path. That loses
+		// the passthrough merge optimization but preserves correctness: each
+		// of N concurrent goroutines blocks on sendMu in arrival order.
+		if d.queue != nil && d.queue.Mode() == ModePassthrough {
+			log.Info("message received (passthrough)", "agent", agentID, "text_len", len(cleanText), "images", len(images))
+			go d.sendAndReply(WithPassthrough(ctx), key, cleanText, images, agentID, opts, msg, log, true)
+			// Ack arrival so the IM user sees a reaction/receipt. This is
+			// cheap and does not depend on the turn completing.
+			d.ackQueuedWithReaction(ctx, msg, log)
+			return
+		}
+
 		// Enqueue message. If queue is nil or disabled, fall back to Guard.
 		if d.queue != nil {
 			qm := QueuedMsg{
@@ -333,9 +351,17 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 }
 
 // discardQueue is a nil-safe helper to clear queued messages for a key.
+// In passthrough mode it also fires ErrSessionReset to any in-flight
+// SendPassthrough callers so the IM user sees the turn as cancelled rather
+// than silently hanging.
 func (d *Dispatcher) discardQueue(key string) {
 	if d.queue != nil {
 		d.queue.Discard(key)
+	}
+	if d.router != nil {
+		if sess := d.router.GetSession(key); sess != nil {
+			sess.DiscardPassthroughPending(cli.ErrSessionReset)
+		}
 	}
 }
 
@@ -539,6 +565,19 @@ func (d *Dispatcher) sendAndReply(
 			// the user to resend (do NOT claim "already reconnected" —
 			// the reconnect happens on their next message).
 			errMsg = "进程意外退出，请重新发送消息，系统会自动重启会话。"
+		case errors.Is(err, cli.ErrAbortedByUrgent):
+			// /urgent preempted this message before the model saw it.
+			// Dispatcher keeps the user-facing message short — the urgent
+			// follow-up's own reply is already being processed.
+			errMsg = "上一条消息已被 /urgent 打断，请在当前任务完成后重发。"
+		case errors.Is(err, cli.ErrReconnectedUnknown):
+			errMsg = "系统已重启，处理状态未知，请查看历史记录或重发。"
+		case errors.Is(err, cli.ErrSessionReset):
+			// User triggered /new or /clear — they know what happened; suppress
+			// the extra bot reply (return early without posting errMsg).
+			return
+		case errors.Is(err, cli.ErrTooManyPending):
+			errMsg = "当前会话排队已满，请稍候或使用 /stop 取消。"
 		default:
 			errMsg = "处理失败，请发送 /new 重置后重试。"
 		}
@@ -549,7 +588,18 @@ func (d *Dispatcher) sendAndReply(
 		return
 	}
 
-	log.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD)
+	log.Info("message replied", "result_len", len(result.Text), "cost", result.CostUSD,
+		"merged_count", result.MergedCount, "merged_with_head", result.MergedWithHead)
+
+	// Passthrough merge fan-out: follower slots get MergedCount>1 and an
+	// empty Text. The head slot for the merge group delivered the full
+	// reply on its own bubble; followers should surface a short "合并" hint
+	// on the user's original message instead of echoing the same text again.
+	if result.MergedCount > 1 && result.Text == "" {
+		d.ackMergedFollower(ctx, msg, result.MergedCount, log)
+		d.markReplySuccess()
+		return
+	}
 
 	// Record turn success regardless of reply text length. A successful
 	// sendFn with empty result (e.g. a turn that only produces tool calls
@@ -559,6 +609,11 @@ func (d *Dispatcher) sendAndReply(
 	d.markReplySuccess()
 
 	replyText := localizeAPIError(result.Text)
+	// Head slot of a merge group: append a small chip so the user knows the
+	// single bot bubble covers N messages.
+	if result.MergedCount > 1 && replyText != "" {
+		replyText += fmt.Sprintf("\n\n*— 合并了 %d 条消息的回复*", result.MergedCount)
+	}
 	if d.replyFooter != "" {
 		replyText += "\n\n— " + d.replyFooter
 	}

@@ -36,6 +36,26 @@ type Protocol interface {
 	// WriteMessage writes a user message (with optional images) to the agent's stdin.
 	WriteMessage(w io.Writer, text string, images []ImageData) error
 
+	// WriteUserMessageLocked is the passthrough-aware writer. The caller MUST
+	// already hold the per-process stdin write lock (Process.shimWMu). For
+	// protocols that do not honor uuid/priority (ACP), the extras are ignored
+	// and behavior degrades to WriteMessage. Used so Process.Send can append
+	// the sendSlot and write the NDJSON line under a single mutex — without
+	// this, concurrent Send calls can interleave slot-append vs stdin-write
+	// and break FIFO matching (see docs/rfc/passthrough-mode.md §5.2.2).
+	WriteUserMessageLocked(w io.Writer, uuid, text string, images []ImageData, priority string) error
+
+	// SupportsPriority reports whether this protocol forwards a top-level
+	// "priority" field to the backing agent. Callers gate /urgent behavior on
+	// this: false means "no `now` channel, fall back to interrupt+send".
+	SupportsPriority() bool
+
+	// SupportsReplay reports whether the backing agent echoes stdin user
+	// messages as replay events (with round-tripped uuid). Required for
+	// passthrough slot matching; when false the session falls back to Collect
+	// mode regardless of queue.mode config.
+	SupportsReplay() bool
+
 	// WriteInterrupt writes an in-band interrupt request to the agent's stdin.
 	// For stream-json, this emits the `control_request` message which the
 	// Claude CLI honours by terminating the active turn (including killing

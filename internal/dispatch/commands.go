@@ -125,9 +125,85 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 		d.handleNewCommand(ctx, msg, trimmed, log)
 		return true
 
+	case trimmed == "/stop" || strings.HasPrefix(trimmed, "/stop "):
+		d.handleStopCommand(ctx, msg, log)
+		return true
+
+	case strings.HasPrefix(trimmed, "/urgent "):
+		rest := strings.TrimSpace(strings.TrimPrefix(trimmed, "/urgent "))
+		d.handleUrgentCommand(ctx, msg, rest, log)
+		return true
+
+	case trimmed == "/urgent":
+		d.replyText(ctx, msg, "用法：/urgent <紧急消息>（该消息会立即中断正在进行的回复）", log)
+		return true
+
 	default:
 		return false
 	}
+}
+
+// handleStopCommand aborts the in-flight turn for this chat's session.
+// Uses the CLI's native control_request interrupt (stream-json) when
+// available; ACP-backed sessions fall back to SIGINT-equivalent Interrupt().
+// In passthrough mode, pending slots remain queued — only the active turn
+// is dropped; CLI moves on to the next message automatically.
+func (d *Dispatcher) handleStopCommand(ctx context.Context, msg platform.IncomingMessage, log *slog.Logger) {
+	agentID := "general"
+	key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+	if d.projectMgr != nil {
+		if proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
+			key = proj.PlannerSessionKey()
+		}
+	}
+	outcome := d.router.InterruptSessionViaControl(key)
+	switch outcome {
+	case session.InterruptSent:
+		d.replyText(ctx, msg, "已中断当前回复。", log)
+	case session.InterruptNoTurn, session.InterruptNoSession:
+		d.replyText(ctx, msg, "当前没有正在进行的回复。", log)
+	case session.InterruptUnsupported:
+		d.replyText(ctx, msg, "当前后端不支持软中断。", log)
+	case session.InterruptError:
+		d.replyText(ctx, msg, "中断失败，请稍后重试或使用 /new 重置会话。", log)
+	}
+}
+
+// handleUrgentCommand dispatches a priority:"now" passthrough message. The
+// CLI aborts any in-flight turn and processes the urgent message next;
+// pending messages written before this /urgent are failed with
+// ErrAbortedByUrgent so the user sees which ones were superseded.
+//
+// When the session's protocol doesn't support passthrough (ACP), we fall
+// back to InterruptViaControl + legacy Send so /urgent still has user-
+// visible "cancel current + run this" semantics.
+func (d *Dispatcher) handleUrgentCommand(ctx context.Context, msg platform.IncomingMessage, text string, log *slog.Logger) {
+	if text == "" {
+		d.replyText(ctx, msg, "用法：/urgent <紧急消息>", log)
+		return
+	}
+
+	// Resolve session key (same logic as BuildHandler's project/agent path).
+	agentID := "general"
+	key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+	opts := d.agents[agentID]
+	if d.projectMgr != nil {
+		if proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
+			key = proj.PlannerSessionKey()
+			opts.Exempt = true
+			opts.Workspace = proj.Path
+		}
+	}
+
+	log.Info("/urgent dispatched", "session_key", key, "text_len", len(text))
+
+	// Ack with a reaction so the user knows the urgent was received.
+	d.ackQueuedWithReaction(ctx, msg, log)
+
+	// Spawn in its own goroutine like regular passthrough sends — sendAndReply
+	// will handle GetOrCreate + reply. The priority field is threaded through
+	// dispatch → SendPassthrough via ctx + the priorityCtxKey extension.
+	go d.sendAndReply(WithUrgent(WithPassthrough(ctx)), key, text, nil, agentID, opts, msg, log, false)
 }
 
 func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.IncomingMessage) {
@@ -135,6 +211,8 @@ func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.Incomin
 		"  /help — 显示此帮助\n" +
 		"  /new [agent] — 重置会话\n" +
 		"  /clear — 重置会话（同 /new）\n" +
+		"  /stop — 中断当前回复（保留后续排队消息）\n" +
+		"  /urgent <消息> — 紧急打断并优先处理该消息\n" +
 		"  /cd <路径> — 切换工作目录\n" +
 		"  /pwd — 显示当前工作目录\n" +
 		"  /project [name|off|list] — 项目绑定\n" +
