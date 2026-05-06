@@ -3,6 +3,8 @@ package cli
 import (
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -102,11 +104,57 @@ func (m *AssistantMessage) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// ImageData holds a downloaded image for passing to the CLI.
-type ImageData struct {
-	Data     []byte
+// AttachmentKind discriminates between inline and file-reference attachments.
+//
+//   - KindImageInline: raw bytes forwarded as an Anthropic image content block.
+//   - KindFileRef:     a file already written to the session workspace; CLI is
+//     asked to read it via its native Read tool. Used for PDFs whose base64
+//     encoding would exceed the 12 MB stdin line cap — see
+//     docs/rfc/pdf-attachment.md §2.1.
+const (
+	KindImageInline = "image_inline"
+	KindFileRef     = "file_ref"
+)
+
+// Attachment is an inline user-message asset (image bytes) or a workspace
+// file reference (PDF). The dispatch → coalesce → protocol chain passes
+// []Attachment end-to-end; NewUserMessageWithMeta decides per-element
+// whether to emit an image content block, omit the element (file_ref is
+// handled through the text prefix), or surface the reference in a
+// prepended instruction to Claude.
+type Attachment struct {
+	// Kind is KindImageInline (default, zero value means image for legacy
+	// call sites) or KindFileRef.
+	Kind string
+
+	// Data holds raw bytes when Kind==KindImageInline. Nil for file_ref.
+	Data []byte
+
+	// MimeType is always set. For file_ref, this is the content type of the
+	// workspace file (e.g. "application/pdf").
 	MimeType string
+
+	// WorkspacePath is a project-root-relative path to a file written by
+	// naozhi into the session workspace. Only meaningful for KindFileRef.
+	// Always uses forward slashes even on Windows so it can be pasted into
+	// the CLI Read tool directly.
+	WorkspacePath string
+
+	// OrigName is the user-provided filename at upload time, preserved for
+	// UI display and the prepended CLI instruction. May be empty.
+	OrigName string
+
+	// Size is the byte size of the on-disk file for KindFileRef; 0 for
+	// image_inline (Data carries the bytes). Used only for display.
+	Size int64
 }
+
+// ImageData is retained as a type alias for the pre-PDF call sites. New code
+// uses Attachment directly with an explicit Kind. The alias keeps legacy
+// constructors (many tests, dispatch/coalesce, platform adapters) compiling
+// without edits; migrations that promote Kind/WorkspacePath fields happen on
+// a case-by-case basis. Final removal is tracked in docs/TODO.md.
+type ImageData = Attachment
 
 // InputMessage is what we write to claude CLI stdin.
 //
@@ -155,6 +203,93 @@ func NewUserMessage(text string, images []ImageData) InputMessage {
 	return NewUserMessageWithMeta(text, images, "", "")
 }
 
+// splitAttachments partitions atts into inline (image) and file-reference
+// slices while preserving original order within each bucket. The zero-value
+// Kind ("") is treated as KindImageInline so legacy call sites that never
+// set Kind continue to behave exactly as before.
+func splitAttachments(atts []Attachment) (inline []Attachment, refs []Attachment) {
+	for _, a := range atts {
+		switch a.Kind {
+		case KindFileRef:
+			refs = append(refs, a)
+		default: // "" and KindImageInline
+			inline = append(inline, a)
+		}
+	}
+	return inline, refs
+}
+
+// prependFileRefHint returns text with a Read-tool instruction prepended when
+// refs is non-empty. When refs is empty the original text is returned
+// unchanged (byte-identical to the pre-PDF code path — important because it
+// keeps the stream-json NDJSON wire form stable for image-only sends).
+//
+// The hint intentionally mentions workspace-relative paths with forward
+// slashes: the CLI Read tool resolves relative paths against the session
+// working directory (SpawnOptions.WorkingDir) which naozhi always sets to
+// the resolved workspace root (see internal/session/router.go:1629).
+func prependFileRefHint(text string, refs []Attachment) string {
+	if len(refs) == 0 {
+		return text
+	}
+	var b strings.Builder
+	// Rough pre-allocation: ~80 bytes header + ~120 bytes per ref + user text.
+	b.Grow(80 + 120*len(refs) + len(text))
+	if len(refs) == 1 {
+		b.WriteString("[System: The user attached 1 file to the workspace. ")
+	} else {
+		fmt.Fprintf(&b, "[System: The user attached %d files to the workspace. ", len(refs))
+	}
+	b.WriteString("Read the following file(s) with the Read tool before responding:\n")
+	for _, r := range refs {
+		p := r.WorkspacePath
+		// The Read tool accepts both absolute and workspace-relative paths;
+		// we always write forward-slash relative paths so the same string
+		// shown to the user in the dashboard is what Claude sees.
+		if p == "" {
+			// A file_ref without a WorkspacePath is a caller bug — skip it
+			// rather than injecting an empty bullet that would confuse the
+			// model. The sender pipeline is expected to populate this before
+			// calling NewUserMessageWithMeta.
+			continue
+		}
+		b.WriteString("  - ")
+		b.WriteString(p)
+		if r.OrigName != "" && r.OrigName != p {
+			b.WriteString(" (original name: ")
+			b.WriteString(r.OrigName)
+			b.WriteString(")")
+		}
+		if r.Size > 0 {
+			fmt.Fprintf(&b, " [%s]", formatBytesShort(r.Size))
+		}
+		b.WriteString("\n")
+	}
+	b.WriteString("]\n\n")
+	if text != "" {
+		b.WriteString(text)
+	}
+	return b.String()
+}
+
+// formatBytesShort renders a byte count as a human-friendly short string
+// (e.g. 1.2 MB). Used only inside the attachment hint; precision is
+// intentionally coarse so the prompt size is predictable.
+func formatBytesShort(n int64) string {
+	const (
+		kb = 1024
+		mb = 1024 * kb
+	)
+	switch {
+	case n >= mb:
+		return fmt.Sprintf("%.1f MB", float64(n)/float64(mb))
+	case n >= kb:
+		return fmt.Sprintf("%d KB", n/kb)
+	default:
+		return fmt.Sprintf("%d B", n)
+	}
+}
+
 // NewUserMessageWithMeta is the passthrough-aware constructor. When uuid /
 // priority are empty strings they are omitted from the JSON (legacy-identical
 // payload). When non-empty they are serialised as top-level fields.
@@ -162,13 +297,26 @@ func NewUserMessage(text string, images []ImageData) InputMessage {
 // The CLI (verified against 2.1.126) accepts any top-level uuid/priority on
 // the NDJSON user message and round-trips uuid on the corresponding replay
 // event. Priority "now" is an explicit abort signal (print.ts:1858-1863).
-func NewUserMessageWithMeta(text string, images []ImageData, uuid, priority string) InputMessage {
+func NewUserMessageWithMeta(text string, atts []Attachment, uuid, priority string) InputMessage {
+	// file_ref attachments do NOT produce a content block — they are surfaced
+	// to Claude via a prepended instruction in the text, so the CLI's native
+	// Read tool picks them up. Split once here so subsequent logic only has to
+	// reason about inline bytes.
+	inline, refs := splitAttachments(atts)
+
+	// Prepend the Read-tool hint before the user's own text. The hint is in
+	// English because the CC base system prompt is English-primary and
+	// language-mixed prompts have been observed to cause the model to switch
+	// reply language unpredictably. Original filenames (often Chinese) are
+	// preserved verbatim in the hint for user recognition.
+	effectiveText := prependFileRefHint(text, refs)
+
 	var content any
-	if len(images) == 0 {
-		content = text
+	if len(inline) == 0 {
+		content = effectiveText
 	} else {
-		blocks := make([]any, 0, 1+len(images))
-		for _, img := range images {
+		blocks := make([]any, 0, 1+len(inline))
+		for _, img := range inline {
 			blocks = append(blocks, inputImageBlock{
 				Type: "image",
 				Source: imageSource{
@@ -178,8 +326,8 @@ func NewUserMessageWithMeta(text string, images []ImageData, uuid, priority stri
 				},
 			})
 		}
-		if text != "" {
-			blocks = append(blocks, inputTextBlock{Type: "text", Text: text})
+		if effectiveText != "" {
+			blocks = append(blocks, inputTextBlock{Type: "text", Text: effectiveText})
 		}
 		content = blocks
 	}

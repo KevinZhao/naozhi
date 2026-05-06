@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -134,6 +135,85 @@ func TestUploadStoreTakeAll_HappyPathConsumesAllInOrder(t *testing.T) {
 	// All entries consumed — a second TakeAll must fail.
 	if _, err := s.TakeAll([]string{id1}, "alice"); err == nil {
 		t.Error("second TakeAll after full consume should error")
+	}
+}
+
+// TestUploadStorePerOwnerByteCap validates the byte-accounting path added
+// alongside PDF support. A single owner must hit errUploadPerOwner once
+// their live payload sum would exceed maxUploadBytesPerOwner, even when
+// the entry-count sub-limit has headroom.
+func TestUploadStorePerOwnerByteCap(t *testing.T) {
+	s := newUploadStore()
+	// Synthesize just above the per-owner byte budget across two entries
+	// while staying well under the 40-entry count cap.
+	half := maxUploadBytesPerOwner/2 + 1
+	big := cli.ImageData{Data: make([]byte, half), MimeType: "application/pdf"}
+
+	if _, err := s.Put("alice", big); err != nil {
+		t.Fatalf("first Put should succeed: %v", err)
+	}
+	_, err := s.Put("alice", big)
+	if !errors.Is(err, errUploadPerOwner) {
+		t.Fatalf("second Put err=%v, want errUploadPerOwner", err)
+	}
+
+	// A different owner is unaffected.
+	if _, err := s.Put("bob", big); err != nil {
+		t.Errorf("bob should be unaffected by alice's byte cap: %v", err)
+	}
+}
+
+// TestUploadStoreGlobalByteCap confirms the global byte ceiling trips
+// before the 100-entry count cap does for large PDFs — the count cap
+// alone would permit ~3.2 GB which is not acceptable.
+func TestUploadStoreGlobalByteCap(t *testing.T) {
+	s := newUploadStore()
+	// Fill near the global byte cap using different owners so the
+	// per-owner byte cap does not trigger first. 6 owners * 90 MB = 540 MB
+	// attempted, cap is 512 MB.
+	big := cli.ImageData{Data: make([]byte, 90*1024*1024), MimeType: "application/pdf"}
+	succeeded := 0
+	for i, o := range []string{"a", "b", "c", "d", "e", "f"} {
+		_, err := s.Put(o, big)
+		if err == nil {
+			succeeded++
+			continue
+		}
+		if !errors.Is(err, errUploadStoreFull) {
+			t.Fatalf("owner %s (i=%d) got unexpected err: %v", o, i, err)
+		}
+		// Once the global cap trips, subsequent owners should also trip.
+		break
+	}
+	// 5 * 90 MB = 450 MB fits; 6th (540 MB) must be rejected.
+	if succeeded != 5 {
+		t.Errorf("expected exactly 5 Puts to succeed before global cap, got %d", succeeded)
+	}
+}
+
+// TestUploadStoreBytesReleasedOnTake makes sure consuming an entry frees
+// the byte budget so a follow-up Put by the same owner succeeds. Without
+// this, the per-owner cap would wedge the user after a single large send.
+func TestUploadStoreBytesReleasedOnTake(t *testing.T) {
+	s := newUploadStore()
+	big := cli.ImageData{
+		Data:     make([]byte, maxUploadBytesPerOwner-1024),
+		MimeType: "application/pdf",
+	}
+	id, err := s.Put("alice", big)
+	if err != nil {
+		t.Fatalf("first Put: %v", err)
+	}
+	// Near-full owner budget — a second big Put must fail.
+	if _, err := s.Put("alice", big); !errors.Is(err, errUploadPerOwner) {
+		t.Fatalf("second Put err=%v, want errUploadPerOwner", err)
+	}
+	// Consume the first entry; budget should be reclaimed.
+	if got := s.Take(id, "alice"); got == nil {
+		t.Fatal("Take after Put returned nil")
+	}
+	if _, err := s.Put("alice", big); err != nil {
+		t.Errorf("Put after Take should succeed: %v", err)
 	}
 }
 

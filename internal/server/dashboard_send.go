@@ -14,8 +14,25 @@ import (
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/attachment"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session"
+)
+
+// Upload size ceilings. Images stay at the long-standing 10 MB; PDFs get
+// their own cap derived from Anthropic's 32 MB document-block limit — we
+// honour the upstream ceiling so a file accepted here won't later be
+// rejected by the API. Both match the byte counts announced to the user
+// so frontend and backend error messages agree.
+const (
+	maxImageBytes = 10 << 20 // 10 MB
+	maxPDFBytes   = 32 << 20 // 32 MB (Anthropic API limit)
+
+	// uploadBodyBytes bounds the multipart envelope for /api/sessions/upload.
+	// Max payload is maxPDFBytes + ~2 MB for multipart overhead (boundary,
+	// Content-Disposition headers, form-field metadata). Lifted from 11 MB
+	// when PDFs joined the upload path.
+	uploadBodyBytes = maxPDFBytes + (2 << 20)
 )
 
 // SendHandler serves the HTTP send API, delegating to Hub for local sends.
@@ -60,54 +77,261 @@ func uploadOwner(r *http.Request, trustedProxy bool) string {
 	return clientIP(r, trustedProxy)
 }
 
-// parseImageFile reads and validates a single multipart file as an image.
-func parseImageFile(fh *multipart.FileHeader) (cli.ImageData, error) {
-	if fh.Size > 10<<20 {
-		return cli.ImageData{}, fmt.Errorf("file too large (max 10MB)")
+// parseAttachmentFile reads and validates a single multipart file. Images
+// become KindImageInline with raw bytes; PDFs become KindFileRef with the
+// bytes still in Data for the caller to later persist to the session
+// workspace (the HTTP layer doesn't know which workspace yet when the
+// upload-only endpoint is hit). Anything else is rejected.
+//
+// allowPDF is false for the legacy inline-multipart path of /api/sessions/send:
+// that path caps body size at ~22 MB for images only, so letting a 32 MB
+// PDF through would trigger a confusing "bad multipart form" error from
+// MaxBytesReader instead of a clean "too large" message. The upload-only
+// endpoint sets allowPDF=true.
+func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachment, error) {
+	declared := fh.Header.Get("Content-Type")
+	isPDF := declared == "application/pdf"
+	if isPDF && !allowPDF {
+		return cli.Attachment{}, fmt.Errorf("PDF attachments must be sent via /api/sessions/upload")
 	}
+
+	// Size gates before read: refuse oversize on metadata alone so we don't
+	// pull a 50 MB file into memory just to reject it.
+	switch {
+	case isPDF:
+		if fh.Size > maxPDFBytes {
+			return cli.Attachment{}, fmt.Errorf("PDF too large (max %d MB)", maxPDFBytes>>20)
+		}
+	default:
+		if fh.Size > maxImageBytes {
+			return cli.Attachment{}, fmt.Errorf("file too large (max %d MB)", maxImageBytes>>20)
+		}
+	}
+
 	f, err := fh.Open()
 	if err != nil {
 		// Wrapped os.PathError can surface the temp-file path; keep that for
 		// operator logs, return a generic message to the client.
 		slog.Debug("upload: open multipart file failed", "err", err)
-		return cli.ImageData{}, errors.New("failed to read uploaded file")
+		return cli.Attachment{}, errors.New("failed to read uploaded file")
 	}
 	defer f.Close()
 	data, err := io.ReadAll(f)
 	if err != nil {
 		slog.Debug("upload: read multipart file failed", "err", err)
-		return cli.ImageData{}, errors.New("failed to read uploaded file")
+		return cli.Attachment{}, errors.New("failed to read uploaded file")
 	}
-	mime := fh.Header.Get("Content-Type")
-	if !strings.HasPrefix(mime, "image/") {
-		return cli.ImageData{}, fmt.Errorf("only image/* files are accepted")
-	}
+
 	detected := http.DetectContentType(data)
-	// Allowlist the raster formats Claude actually accepts. In particular
-	// reject SVG: even though DetectContentType returns text/xml for svg
-	// (so the prefix check below would already block it), we want a
-	// defence-in-depth check against a future sniffer that labels SVG as
-	// image/svg+xml — SVG can embed <script> and is unsafe to forward to
-	// any consumer that renders it.
+	if isPDF {
+		// PDF magic is "%PDF-" in the first 5 bytes; http.DetectContentType
+		// returns "application/pdf" for that signature. A caller claiming
+		// PDF but sniffing as anything else is either spoofing or corrupt —
+		// reject before we persist bytes we can't trust.
+		if detected != "application/pdf" {
+			return cli.Attachment{}, fmt.Errorf("file does not look like a PDF")
+		}
+		return cli.Attachment{
+			Kind:     cli.KindFileRef,
+			Data:     data,
+			MimeType: "application/pdf",
+			OrigName: sanitizeClientFilename(fh.Filename),
+			Size:     int64(len(data)),
+		}, nil
+	}
+
+	// Image path — preserve the pre-PDF allowlist and prefix guard. SVG is
+	// deliberately rejected: even though DetectContentType returns text/xml
+	// for SVG (which would already fall through the image/* prefix check),
+	// we allowlist the raster formats Claude actually accepts so a future
+	// sniffer change cannot silently let SVG + script payloads through.
+	if !strings.HasPrefix(declared, "image/") {
+		return cli.Attachment{}, fmt.Errorf("only image/* or application/pdf files are accepted")
+	}
 	switch detected {
 	case "image/jpeg", "image/png", "image/gif", "image/webp":
 		// ok
 	default:
-		return cli.ImageData{}, fmt.Errorf("unsupported image format (jpeg/png/gif/webp only)")
+		return cli.Attachment{}, fmt.Errorf("unsupported image format (jpeg/png/gif/webp only)")
 	}
-	return cli.ImageData{Data: data, MimeType: detected}, nil
+	return cli.Attachment{
+		Kind:     cli.KindImageInline,
+		Data:     data,
+		MimeType: detected,
+	}, nil
 }
 
-// handleUpload accepts a single image file and stores it for later reference by file_ids.
+// parseImageFile is retained as a thin shim so test helpers and any external
+// callers that imported the old name keep compiling during the migration.
+// New code should call parseAttachmentFile directly with allowPDF explicitly.
+func parseImageFile(fh *multipart.FileHeader) (cli.ImageData, error) {
+	return parseAttachmentFile(fh, false)
+}
+
+// hasFileRef reports whether any attachment in atts needs to be persisted
+// to the session workspace (PDF today; other formats in the future). O(n)
+// on a list already bounded at maxFilesPerSend (20), so cost is trivial.
+func hasFileRef(atts []cli.Attachment) bool {
+	for _, a := range atts {
+		if a.Kind == cli.KindFileRef {
+			return true
+		}
+	}
+	return false
+}
+
+// persistErr is the (status, msg) pair returned from persistFileRefs. The
+// struct lets the handler forward both pieces without building a new error
+// type hierarchy just for this one call site.
+type persistErr struct {
+	status int
+	msg    string
+}
+
+// persistFileRefs walks atts and, for every Kind==KindFileRef entry,
+// writes its Data to the session workspace via internal/attachment.Persist.
+// It returns a new []cli.Attachment slice where file_ref entries now carry
+// WorkspacePath (and have Data cleared to release memory) and image_inline
+// entries are passed through unchanged.
+//
+// rollback, when non-nil, removes every file that Persist just wrote.
+// Callers use it on any failure path between this call and the point
+// where sessionSend accepts the request — without rollback, a validation
+// failure after persist would leak disk until the GC sweep.
+//
+// Workspace requirement: file_ref attachments need a real absolute path.
+// If workspace is empty or relative, we refuse here rather than silently
+// writing somewhere unexpected. The same guard fires upstream in
+// session.router (workspace resolution), but surfacing it at the HTTP
+// layer gives the user a readable 400 instead of a generic forbidden.
+func persistFileRefs(workspace string, atts []cli.Attachment, sessionKey, owner string) ([]cli.Attachment, func(), *persistErr) {
+	if workspace == "" {
+		return nil, nil, &persistErr{status: http.StatusBadRequest, msg: "workspace is required for file attachments"}
+	}
+
+	out := make([]cli.Attachment, len(atts))
+	// written tracks absPaths across the batch so rollback can remove
+	// every file if a later element fails. Capacity matches the realistic
+	// upper bound (batch size) to avoid a growth reallocation in the
+	// common happy path.
+	written := make([]string, 0, len(atts))
+	rollback := func() {
+		for _, p := range written {
+			attachment.Remove(p)
+		}
+	}
+
+	for i, a := range atts {
+		if a.Kind != cli.KindFileRef {
+			out[i] = a
+			continue
+		}
+		// Map MimeType to an extension allowlist entry. Only PDF is live
+		// today — future formats add a case.
+		var ext string
+		switch a.MimeType {
+		case "application/pdf":
+			ext = ".pdf"
+		default:
+			rollback()
+			return nil, nil, &persistErr{
+				status: http.StatusBadRequest,
+				msg:    "unsupported attachment type",
+			}
+		}
+		meta := attachment.Meta{
+			OrigName:   a.OrigName,
+			MimeType:   a.MimeType,
+			Size:       int64(len(a.Data)),
+			SessionKey: sessionKey,
+			Owner:      owner,
+		}
+		p, err := attachment.Persist(workspace, a.Data, ext, meta)
+		if err != nil {
+			rollback()
+			// A disk-full / permission error is operator-visible via slog but
+			// collapsed to a generic message for the client; exposing the path
+			// would leak workspace layout.
+			slog.Warn("attachment persist failed",
+				"key", sessionKey, "owner", owner, "err", err)
+			return nil, nil, &persistErr{
+				status: http.StatusInternalServerError,
+				msg:    "failed to save attachment",
+			}
+		}
+		written = append(written, p.AbsPath)
+		out[i] = cli.Attachment{
+			Kind:          cli.KindFileRef,
+			MimeType:      a.MimeType,
+			WorkspacePath: p.RelPath,
+			OrigName:      a.OrigName,
+			Size:          p.Size,
+			// Data intentionally nil: coalesce/dispatch will copy this slice
+			// multiple times and we don't want a 32 MB PDF riding along in
+			// memory for a trip that only needs the path string.
+		}
+	}
+	return out, rollback, nil
+}
+
+// sanitizeClientFilename reduces the attacker-controlled filename down to a
+// display-safe string. The value flows into:
+//
+//  1. the .meta sidecar (JSON-encoded, so raw control bytes are escaped)
+//  2. the prepended text that Claude receives
+//  3. dashboard UI previews
+//
+// A filename containing C0 controls or path separators would confuse the
+// dashboard renderer (case 3) or be mistakenly trusted as a path fragment
+// if ever reused (cases that would be bugs, but cheap to preempt). We
+// strip control bytes, collapse path separators to underscores, and
+// truncate to a sane length. We do NOT base this on filepath.Base —
+// Windows separators ("\\") on a Linux server wouldn't be stripped by
+// filepath.Base.
+func sanitizeClientFilename(name string) string {
+	if name == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(name))
+	for _, r := range name {
+		switch {
+		case r < 0x20 || r == 0x7f:
+			// drop control chars
+		case r == '/' || r == '\\':
+			b.WriteByte('_')
+		default:
+			b.WriteRune(r)
+		}
+	}
+	out := b.String()
+	// Cap length so a 4 KB filename cannot bloat the prompt or the
+	// meta sidecar. 120 runes is plenty for real filenames; longer values
+	// are almost certainly adversarial.
+	const maxFilenameLen = 120
+	if len([]rune(out)) > maxFilenameLen {
+		runes := []rune(out)
+		out = string(runes[:maxFilenameLen])
+	}
+	return out
+}
+
+// handleUpload accepts a single image OR PDF file and stores it for later
+// reference by file_ids. PDFs are held in memory until the matching send
+// call, at which point they are persisted into the session workspace so
+// Claude can read them via its native Read tool (images remain inline).
 // POST /api/sessions/upload  (multipart/form-data, field "file")
-// Response: {"id": "<hex>"}
+// Response: {"id": "<hex>", "kind": "image_inline"|"file_ref", "size": <bytes>, "name": "..."}
 func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 	if h.uploadLimiter != nil && !h.uploadLimiter.AllowRequest(r) {
 		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "upload rate limit exceeded"})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 11<<20) // 10MB + form overhead
-	if err := r.ParseMultipartForm(10 << 20); err != nil {
+	// PDF cap dominates the body size. MaxBytesReader gives a clean 413
+	// rather than the opaque "bad multipart form" that ParseMultipartForm
+	// returns when the body exceeds its own limit.
+	r.Body = http.MaxBytesReader(w, r.Body, int64(uploadBodyBytes))
+	if err := r.ParseMultipartForm(int64(uploadBodyBytes)); err != nil {
 		// Don't echo stdlib internals (boundary details, file-system paths)
 		// back to the client; log internally for operator triage.
 		slog.Warn("upload: multipart parse failed", "err", err)
@@ -119,13 +343,13 @@ func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "exactly one file required"})
 		return
 	}
-	img, err := parseImageFile(files[0])
+	att, err := parseAttachmentFile(files[0], true)
 	if err != nil {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
 	owner := uploadOwner(r, h.trustedProxy)
-	id, err := h.uploadStore.Put(owner, img)
+	id, err := h.uploadStore.Put(owner, att)
 	if err != nil {
 		// Distinguish per-owner quota from global exhaustion so the client
 		// can show "你上传的文件过多" vs a generic "服务繁忙" prompt.
@@ -136,7 +360,16 @@ func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": msg})
 		return
 	}
-	writeJSON(w, map[string]string{"id": id})
+	// Echo attachment kind + size + name so the frontend can render a PDF
+	// chip differently from an image thumbnail without needing a second
+	// round-trip.
+	writeJSON(w, map[string]any{
+		"id":   id,
+		"kind": att.Kind,
+		"size": att.Size,
+		"name": att.OrigName,
+		"mime": att.MimeType,
+	})
 }
 
 func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
@@ -276,9 +509,67 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Remote-node sends don't carry attachments (the node has no way to
+	// host the workspace file locally). Reject BEFORE persisting so we
+	// don't leave files on disk that will never be read. The deeper
+	// remote-node branch below repeats this check for defence in depth.
+	if node != "" && node != "local" && len(images) > 0 {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "files not supported for remote nodes"})
+		return
+	}
+
+	// Persist file_ref attachments (PDFs) into the session workspace so
+	// Claude's Read tool can reach them. Done here rather than in
+	// sessionSend because:
+	//   1. We need the authenticated owner + workspace + key all together,
+	//      and this is the last HTTP-layer point where the request cookie /
+	//      bearer is still in scope.
+	//   2. A failure to persist must be surfaced synchronously as 4xx/5xx
+	//      so the user can retry; moving it into sessionSend would require
+	//      a new error sentinel and a round-trip through the queue path.
+	//   3. Remote node proxying (below) doesn't take attachments, so we
+	//      guard before that branch.
+	//
+	// Rollback semantics: `rollback` runs on EVERY failure path below
+	// (400/403/5xx) but is set to nil once sessionSend reports an accepted
+	// status so the files stay on disk for the session's Read tool.
+	var rollback func()
+	if hasFileRef(images) {
+		// R61-SEC: validate workspace against allowedRoot BEFORE writing
+		// anything. `workspace` is attacker-influenced (dashboard form
+		// field); without this check a client could direct writes to any
+		// absolute path the naozhi user can touch (e.g. /tmp). sessionSend
+		// runs the same validation further down, but by then we would have
+		// already persisted bytes. Matching the error shape sessionSend
+		// returns keeps the handler response identical whichever layer
+		// rejects.
+		validatedWS, err := validateWorkspace(workspace, h.hub.allowedRoot)
+		if err != nil {
+			slog.Warn("attachment workspace validation failed",
+				"key", key, "err", err)
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid workspace"})
+			return
+		}
+		resolved, rb, perr := persistFileRefs(validatedWS, images, key, owner)
+		if perr != nil {
+			writeJSONStatus(w, perr.status, map[string]string{"error": perr.msg})
+			return
+		}
+		images = resolved
+		rollback = rb
+	}
+	// Named helper so every early-return path below deletes the just-written
+	// files. Safe to call when rollback is nil.
+	cleanup := func() {
+		if rollback != nil {
+			rollback()
+		}
+	}
+
 	// Remote node proxy
 	if node != "" && node != "local" {
 		if len(images) > 0 {
+			cleanup()
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "files not supported for remote nodes"})
 			return
 		}
@@ -345,9 +636,13 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		Workspace: workspace, ResumeID: resumeID, Backend: backend,
 	}, nil)
 	if err != nil {
+		cleanup()
 		writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": err.Error()})
 		return
 	}
+	// From this point on the attachments have entered the dispatch pipeline
+	// and must remain on disk until the GC ages them out — clear rollback.
+	rollback = nil
 	if reset {
 		writeJSON(w, map[string]string{"key": key, "status": "reset"})
 		return
