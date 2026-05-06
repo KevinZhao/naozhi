@@ -189,6 +189,14 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 		if h.queue != nil {
 			h.queue.Discard(key)
 		}
+		// passthrough 模式下 dashboard /new 必须与 IM 路径（dispatch.discardQueue）
+		// 对齐：queue.Discard 只清 MessageQueue 里的排队消息，还要把 session
+		// 层 in-flight 的 SendPassthrough goroutine 也通知到，否则它们会继续
+		// 占着 sendSlot 直到自然超时，期间新消息被 ErrTooManyPending 拒绝，
+		// 用户看到"排队已满"而非干净重置。R192-SRV-P0-NewDiscardPassthrough。
+		if sess := h.router.GetSession(key); sess != nil {
+			sess.DiscardPassthroughPending(cli.ErrSessionReset)
+		}
 		h.router.Reset(key)
 		h.BroadcastSessionsUpdate()
 		return true, "", nil
@@ -396,6 +404,16 @@ func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyn
 		// onAsyncError only applies to the first turn (one ack per request);
 		// subsequent coalesced turns log failures without a back-channel.
 		h.runTurn(key, text, images, nil)
+		// 与 dispatch.ownerLoop 对齐：Reset 前 Stop + drain，防止未来循环
+		// 形状变化（例如 early-continue）让 timer 的残留 tick 立即 fire，
+		// 导致 DoneOrDrain 被多调一次、刚入队的消息被丢弃且无任何提示。
+		// R192-SRV-P0-CollectTimerDrain。
+		if !collectTimer.Stop() {
+			select {
+			case <-collectTimer.C:
+			default:
+			}
+		}
 		collectTimer.Reset(h.queue.CollectDelay())
 	}
 }
