@@ -7907,6 +7907,47 @@ let cronNotifyDefault = null;
 // "what needs my eyeballs" dovetails with the top-level signal.
 let cronFilterQuery = '';
 let cronFilterStatus = 'all';
+// cronSortOrder 控制 cron 面板列表的排序模式。保存在 localStorage 里，
+// 切回页面保留用户偏好。四种模式见 cronSortComparators。cron-v2-polish §3.4。
+let cronSortOrder = (function() {
+  try {
+    const saved = localStorage.getItem('nz_cron_sort');
+    if (saved && cronSortComparatorsHasKey(saved)) return saved;
+  } catch (_) {}
+  return 'created_desc';
+})();
+
+// cronSortComparators 定义四种排序模式的 compare 函数。
+// - created_desc: 默认，最新创建在前（与旧版一致）
+// - next_asc    : 按 next_run 升序——"接下来谁先跑"排在前；无 next_run 沉底
+// - last_desc   : 最近跑过的排在前；从未跑过沉底
+// - title_asc   : 按 title / prompt-fallback 字典序升序——便于按名字扫
+const cronSortComparators = {
+  created_desc: (a, b) => (b.created_at || 0) - (a.created_at || 0),
+  next_asc: (a, b) => {
+    const av = a.next_run || Number.POSITIVE_INFINITY;
+    const bv = b.next_run || Number.POSITIVE_INFINITY;
+    return av - bv;
+  },
+  last_desc: (a, b) => (b.last_run_at || 0) - (a.last_run_at || 0),
+  title_asc: (a, b) => {
+    const at = ((a.title || '').trim() || firstNonEmptyLine(a.prompt || '', 60)).toLowerCase();
+    const bt = ((b.title || '').trim() || firstNonEmptyLine(b.prompt || '', 60)).toLowerCase();
+    return at.localeCompare(bt);
+  },
+};
+
+function cronSortComparatorsHasKey(k) {
+  return Object.prototype.hasOwnProperty.call(cronSortComparators, k);
+}
+
+// setCronSortOrder 切换排序模式，持久化到 localStorage 并重绘列表。
+function setCronSortOrder(order) {
+  if (!cronSortComparatorsHasKey(order)) return;
+  cronSortOrder = order;
+  try { localStorage.setItem('nz_cron_sort', order); } catch (_) {}
+  renderCronList();
+}
 
 // Pads an integer to two digits (e.g. 7 -> "07"). Used for HH/MM rendering.
 function pad2(n) { return (n < 10 ? '0' : '') + n; }
@@ -8857,7 +8898,8 @@ function renderCronList() {
       '</div>';
     return;
   }
-  const sorted = [...matched].sort((a, b) => b.created_at - a.created_at);
+  const cmp = cronSortComparators[cronSortOrder] || cronSortComparators.created_desc;
+  const sorted = [...matched].sort(cmp);
   host.innerHTML = sorted.map(cronJobCardHtml).join('');
 }
 
@@ -8931,13 +8973,22 @@ function renderCronPanel() {
         '</div>' +
         '<div class="cron-filter-bar">' +
           '<div class="cron-search-row">' +
-            '<input type="text" id="cron-search-input" class="cron-search-input" placeholder="搜索 prompt、目录、cron 表达式..." autocomplete="off" spellcheck="false" aria-label="搜索定时任务" value="' + escAttr(cronFilterQuery) + '" oninput="onCronSearchInput()" />' +
+            '<input type="text" id="cron-search-input" class="cron-search-input" placeholder="搜索名称、prompt、目录、cron 表达式..." autocomplete="off" spellcheck="false" aria-label="搜索定时任务" value="' + escAttr(cronFilterQuery) + '" oninput="onCronSearchInput()" />' +
             '<button type="button" class="cron-search-clear" onclick="clearCronSearch()" title="清空搜索" aria-label="清空搜索">&times;</button>' +
           '</div>' +
           '<div class="cron-status-chips" role="group" aria-label="按状态筛选">' +
             '<button type="button" class="cron-status-chip' + chipActive('all') + '" data-status="all" aria-pressed="' + chipPressed('all') + '" onclick="setCronStatusFilter(\'all\')">全部</button>' +
             '<button type="button" class="cron-status-chip' + chipActive('active') + '" data-status="active" aria-pressed="' + chipPressed('active') + '" onclick="setCronStatusFilter(\'active\')">运行中</button>' +
             '<button type="button" class="cron-status-chip' + chipActive('attention') + '" data-status="attention" aria-pressed="' + chipPressed('attention') + '" onclick="setCronStatusFilter(\'attention\')">需关注</button>' +
+            // cron-v2-polish §3.4 Increment D: 排序 select。放在 chips 行末尾，
+            // 和状态筛选同属"视图控制"范畴。持久化到 localStorage 按用户偏好
+            // 记忆。
+            '<select class="cron-sort-select" aria-label="排序方式" onchange="setCronSortOrder(this.value)">' +
+              '<option value="created_desc"' + (cronSortOrder === 'created_desc' ? ' selected' : '') + '>最新创建</option>' +
+              '<option value="next_asc"' + (cronSortOrder === 'next_asc' ? ' selected' : '') + '>接下来</option>' +
+              '<option value="last_desc"' + (cronSortOrder === 'last_desc' ? ' selected' : '') + '>最近运行</option>' +
+              '<option value="title_asc"' + (cronSortOrder === 'title_asc' ? ' selected' : '') + '>按名字</option>' +
+            '</select>' +
           '</div>' +
         '</div>' +
         tzBanner +

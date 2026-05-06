@@ -854,10 +854,14 @@ body.kbd-open .input-hints{display:none}
 .cron-search-input::placeholder{color:var(--nz-text-faint)}
 .cron-search-clear{background:transparent;border:1px solid transparent;color:var(--nz-text-mute);font-size:16px;line-height:1;padding:4px 8px;border-radius:4px;cursor:pointer;transition:all .1s}
 .cron-search-clear:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-border)}
-.cron-status-chips{display:flex;gap:6px;flex-wrap:wrap}
+.cron-status-chips{display:flex;gap:6px;flex-wrap:wrap;align-items:center}
 .cron-status-chip{padding:4px 10px;border-radius:12px;border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text-mute);font-size:12px;font-family:inherit;cursor:pointer;transition:all .15s}
 .cron-status-chip:hover{color:var(--nz-text);border-color:var(--nz-text-faint)}
 .cron-status-chip.active{background:rgba(31,111,235,.18);border-color:var(--nz-blue);color:var(--nz-accent)}
+/* Increment D: 排序 select —— 和 status chip 同一行末尾，风格对齐 */
+.cron-sort-select{margin-left:auto;padding:4px 22px 4px 10px;border-radius:12px;border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text-mute);font-size:12px;font-family:inherit;cursor:pointer;transition:all .15s;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 8' fill='%23848d97'><path d='M6 8L0 0h12z'/></svg>");background-repeat:no-repeat;background-position:right 6px center;background-size:8px 6px}
+.cron-sort-select:hover{color:var(--nz-text);border-color:var(--nz-text-faint)}
+.cron-sort-select:focus{outline:none;border-color:var(--nz-blue);color:var(--nz-accent)}
 .cron-filter-empty{padding:24px 16px;text-align:center;color:var(--nz-text-dim);font-size:12px}
 .cron-filter-empty .cfe-hint{display:block;margin-top:6px;color:var(--nz-text-faint);font-size:11px}
 .cron-preview-hint{font-size:11px;color:var(--nz-text-mute);margin-top:4px;min-height:16px}
