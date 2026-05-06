@@ -2672,8 +2672,11 @@ func TestDashboardJS_R110P2_CronPanelFilter(t *testing.T) {
 	if !strings.Contains(js, "s === 'active' && j.paused") {
 		t.Error("filterCronJobs 'active' arm must exclude paused jobs")
 	}
-	if !strings.Contains(js, "s === 'attention' && !(j.paused || j.last_error)") {
-		t.Error("filterCronJobs 'attention' arm must match paused OR last_error, aligned with the cron-badge's attention definition")
+	// cron-v2-polish §3.3 Increment C 将 missed（进程重启空窗期跳过）纳入
+	// attention。断言扩展为 paused || last_error || missed；cronBadge 计数
+	// 同步更新以保持"filter 和徽章同源"的反漂移不变式。
+	if !strings.Contains(js, "s === 'attention' && !(j.paused || j.last_error || j.missed)") {
+		t.Error("filterCronJobs 'attention' arm must match paused OR last_error OR missed — cron-v2-polish §3.3 引入 missed 并与 cronBadge 计数保持同源")
 	}
 
 	// Invariant 2: renderCronPanel short-circuits to renderCronList when the

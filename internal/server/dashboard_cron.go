@@ -262,6 +262,12 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		// explicit true/false). nil renders as "legacy default" on the client.
 		Notify       *bool `json:"notify,omitempty"`
 		FreshContext bool  `json:"fresh_context,omitempty"`
+		// Missed / MissedSince: cron-v2-polish §3.3 Increment C。
+		// missed=true 表示进程休眠 / 重启空窗期该 job 错过了至少一次调度。
+		// MissedSince 是"按 schedule 算上一次应跑的毫秒时刻"，UI 可以用来
+		// 显示 "上次应跑于 …"。未 missed 时两个字段都省略。
+		Missed      bool  `json:"missed,omitempty"`
+		MissedSince int64 `json:"missed_since,omitempty"`
 	}
 	views := make([]cronJobView, 0, len(jobs))
 	for _, entry := range jobs {
@@ -289,6 +295,15 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 		if !entry.NextRun.IsZero() {
 			v.NextRun = entry.NextRun.UnixMilli()
+		}
+		// missed-schedule 检测：cron-v2-polish §3.3 Increment C。
+		// 只对非 paused 的 job 判定——paused 的任务用户主动停了，错过
+		// 是预期行为不应告警。
+		if !j.Paused {
+			if missed, prevAt := cron.HasMissedSchedule(&j, time.Now(), h.scheduler.StartedAt()); missed {
+				v.Missed = true
+				v.MissedSince = prevAt.UnixMilli()
+			}
 		}
 		views = append(views, v)
 	}

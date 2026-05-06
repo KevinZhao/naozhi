@@ -188,6 +188,86 @@ func schedulePeriod(schedule string) time.Duration {
 	return second.Sub(first)
 }
 
+// previousTickBefore 算给定 schedule 在 now 之前最近一次应该触发的时刻。
+// robfig/cron 只提供 Next()，没有 Prev()。这里用"从 now 回推 3 × period
+// 的窗口，在窗口内用 sched.Next(起点) 逼近最接近 now 的 tick"的办法：
+//
+//  1. 先估计 period（Next 两次）
+//  2. 起点 = now - 3 × period（保证至少覆盖一个完整周期）
+//  3. 起点不断 Next，直到下一次 Next 超过 now；此时当前 Next 即为"最后
+//     一次 ≤ now 的触发时刻"。
+//
+// 窗口乘 3 是为了应对 DST / 月份 / 闰年这类非等间隔形态（每月 29 日
+// 在 2 月可能 "跳 31 天"），给足裕量。每次 Next 是 O(1)，循环最多跑
+// 3-5 次，开销可忽略。无法解析的 schedule 返回零值 time。
+func previousTickBefore(schedule string, now time.Time) time.Time {
+	sched, err := cronParser.Parse(schedule)
+	if err != nil {
+		return time.Time{}
+	}
+	period := schedulePeriod(schedule)
+	if period <= 0 {
+		return time.Time{}
+	}
+	// 回推起点；加一个安全系数 3 应对月份/DST 的非等距触发
+	start := now.Add(-3 * period)
+	prev := time.Time{}
+	for {
+		next := sched.Next(start)
+		if !next.Before(now) {
+			return prev
+		}
+		prev = next
+		start = next
+	}
+}
+
+// HasMissedSchedule 判断 Job 是否曾经错过调度（进程休眠或重启空窗期）。
+// 返回 (missed, prevExpectedAt)：prevExpectedAt 是"按 schedule 算上一次
+// 应该跑的时刻"，调用方可用来显示 "上次应跑于 …"。
+//
+// 判定规则：
+//  1. schedule 无法解析 / period<=0 → 不算 missed（保守）。
+//  2. startedAt 不为零且 now - startedAt < 5 × period：刚启动的抑制窗口，
+//     避免刚 boot 时所有长周期 job 都被误判 missed。测试可以传
+//     time.Time{} 绕过。
+//  3. 从未跑过 (LastRunAt.IsZero)：若 now - CreatedAt > period 则判 missed
+//     （任务创建后本应至少跑过一次）。
+//  4. 跑过：若 prevExpectedAt - LastRunAt > period × 1.5 则判 missed
+//     （允许 50% 裕量应对 jitter + 轻微延迟）。
+//
+// 关联：docs/rfc/cron-v2-polish.md §3.3 Increment C。
+func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
+	if j == nil {
+		return false, time.Time{}
+	}
+	period := schedulePeriod(j.Schedule)
+	if period <= 0 {
+		return false, time.Time{}
+	}
+	// 启动抑制：刚 boot 时所有 long-period job 都会"错过"，这是可预期的。
+	// 5 × period 给足让第一轮调度落地的余量。
+	if !startedAt.IsZero() && now.Sub(startedAt) < 5*period {
+		return false, time.Time{}
+	}
+	prev := previousTickBefore(j.Schedule, now)
+	if prev.IsZero() {
+		return false, time.Time{}
+	}
+	if j.LastRunAt.IsZero() {
+		// 从未跑过：看任务本身存在了多久
+		if !j.CreatedAt.IsZero() && now.Sub(j.CreatedAt) > period {
+			return true, prev
+		}
+		return false, time.Time{}
+	}
+	// 跑过：对比上次跑的时刻和"上次应跑的时刻"
+	if prev.Sub(j.LastRunAt) > period*3/2 {
+		return true, prev
+	}
+	return false, time.Time{}
+}
+
 // validateSchedule checks if the cron expression is valid and respects the minimum interval.
 func validateSchedule(schedule string) error {
 	sched, err := cronParser.Parse(schedule)

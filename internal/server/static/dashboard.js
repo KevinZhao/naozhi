@@ -8754,7 +8754,9 @@ function filterCronJobs(jobs, query, status) {
   return (Array.isArray(jobs) ? jobs : []).filter(j => {
     if (!j) return false;
     if (s === 'active' && j.paused) return false;
-    if (s === 'attention' && !(j.paused || j.last_error)) return false;
+    // cron-v2-polish §3.3: attention 扩展为 paused || last_error || missed，
+    // 与 fetchCronJobs 里的 cronBadge 计数同源，避免两处判断漂移。
+    if (s === 'attention' && !(j.paused || j.last_error || j.missed)) return false;
     if (!q) return true;
     const fields = [j.title, j.prompt, j.work_dir, j.schedule, j.id];
     for (const f of fields) {
@@ -8821,6 +8823,15 @@ function cronJobCardHtml(j) {
   const freshStr = j.fresh_context
     ? '<span class="cc-notify on" title="每次运行前重置会话">&#128260; fresh</span>'
     : '';
+  // cron-v2-polish §3.3 Increment C: missed 徽章。与 notifyStr / freshStr
+  // 同在 cc-meta 行，红色强调。title 悬浮显示"上次应跑于"绝对时间，
+  // 方便定位重启/休眠空窗窗口。
+  let missedStr = '';
+  if (j.missed) {
+    const sinceAbs = j.missed_since ? formatAbsTime(j.missed_since) : '';
+    const tip = sinceAbs ? '上次应跑于 ' + sinceAbs + '；进程可能刚重启或休眠过' : '已错过至少一次调度';
+    missedStr = '<span class="cc-notify missed" title="' + escAttr(tip) + '">&#9888; missed</span>';
+  }
   let result = '';
   if (j.last_error) {
     result = '<div class="cc-result err"><span class="cc-icon">\u2716</span><span class="cc-text">' + esc(j.last_error) + '</span></div>';
@@ -8857,7 +8868,7 @@ function cronJobCardHtml(j) {
     promptBlock +
     '<div class="cc-human">' + esc(human) + '</div>' +
     (showRaw ? '<div class="cc-expr">' + esc(j.schedule) + '</div>' : '') +
-    '<div class="cc-meta">' + status + wdStr + notifyStr + freshStr +
+    '<div class="cc-meta">' + status + wdStr + notifyStr + freshStr + missedStr +
       (lastStr ? '<span' + (lastAbs ? ' title="last run: ' + escAttr(lastAbs) + '"' : '') + '>ran ' + lastStr + '</span>' : '') +
       (nextStr ? '<span' + (nextAbs ? ' title="next run: ' + escAttr(nextAbs) + '"' : '') + '>next ' + nextStr + '</span>' : '') +
     '</div>' +
@@ -8955,6 +8966,16 @@ function renderCronPanel() {
   const tzBanner = cronTimezoneLabel
     ? '<div class="cron-tz-banner" title="Schedules are evaluated in this timezone">timezone: ' + esc(cronTimezoneLabel) + '</div>'
     : '';
+  // cron-v2-polish §3.3: missed banner。Count 取自 cronJobs 本地缓存，
+  // 与 attention 计数同源。点击切到 attention filter，与 header cron-badge
+  // 的红点导航保持一致的"点进去看哪些 job 需要关注"语义。
+  const missedCount = cronJobs.filter(j => j.missed).length;
+  const missedBanner = missedCount > 0
+    ? '<div class="cron-missed-banner" role="alert" onclick="setCronStatusFilter(\'attention\')" title="进程重启或休眠期间错过的调度不会自动补跑">' +
+        '<span class="cmb-icon">&#9888;</span>' +
+        '<span class="cmb-text">有 ' + missedCount + ' 个任务曾错过调度 — 进程重启或休眠空窗期未补跑。点此查看。</span>' +
+      '</div>'
+    : '';
   const chipActive = s => cronFilterStatus === s ? ' active' : '';
   const chipPressed = s => cronFilterStatus === s ? 'true' : 'false';
   let html =
@@ -8991,6 +9012,7 @@ function renderCronPanel() {
             '</select>' +
           '</div>' +
         '</div>' +
+        missedBanner +
         tzBanner +
         '<div id="cron-list-items"></div>' +
       '</div>' +
@@ -9027,7 +9049,9 @@ async function fetchCronJobs() {
     if (cronBadge) {
       // Badge surfaces jobs needing attention (paused or last run errored),
       // not the raw total — avoids a persistent red dot on healthy setups.
-      const attention = cronJobs.filter(j => j.paused || j.last_error).length;
+      // cron-v2-polish §3.3: missed jobs（进程重启空窗期跳过的调度）也
+      // 纳入 attention，与 filterCronJobs 判定对齐。
+      const attention = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
       cronBadge.textContent = attention;
       cronBadge.style.display = attention > 0 ? '' : 'none';
       // Attention badge is semantically an alert (paused / errored jobs), so

@@ -818,6 +818,15 @@ body.kbd-open .input-hints{display:none}
 .cron-card .cc-next-badge .cc-next-rel{font-weight:500}
 .cron-card .cc-next-badge.imminent{color:var(--nz-accent)}
 .cron-card .cc-next-badge.imminent .cc-next-rel{font-weight:600}
+/* Increment C: missed 徽章色 —— 在 cc-meta 行里和 notify/fresh 同级
+ * 形状，但用 red token 强调 "这个需要你看一眼"。*/
+.cron-card .cc-notify.missed{color:var(--nz-red);font-weight:600}
+/* Increment C: missed banner —— 整个 cron 面板顶部告警条，红色强调 +
+ * 可点切 filter。alert role 提示屏幕阅读器。 */
+.cron-missed-banner{display:flex;align-items:center;gap:8px;padding:10px 14px;margin:0 0 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.35);border-radius:8px;color:var(--nz-red);font-size:13px;cursor:pointer;transition:background .15s}
+.cron-missed-banner:hover{background:rgba(239,68,68,.15)}
+.cron-missed-banner .cmb-icon{font-size:16px;line-height:1}
+.cron-missed-banner .cmb-text{flex:1;color:var(--nz-text)}
 @media (max-width:540px){.cron-card{padding-right:12px}.cron-card .cc-next-badge{position:static;margin-bottom:4px}}
 .cron-card .cc-title{font-size:15px;color:var(--nz-text-strong);font-weight:600;overflow-wrap:anywhere;margin-bottom:4px;line-height:1.35}
 .cron-card .cc-prompt{font-size:14px;color:var(--nz-text-strong);font-weight:500;overflow-wrap:anywhere}
