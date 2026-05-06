@@ -180,6 +180,57 @@ func hasFileRef(atts []cli.Attachment) bool {
 	return false
 }
 
+// resolveAttachmentWorkspace picks the validated absolute path to write
+// file_ref attachments under for the given session key. Resolution order:
+//
+//  1. If the caller's request carries an explicit `reqWorkspace`, use it
+//     (matches the existing "dashboard can pick a CWD per send" semantics).
+//  2. Otherwise consult the router's saved workspace for the chat:
+//     - live ManagedSession.Workspace() if a session is already spawned
+//     - router.GetWorkspace(chatKey) from the persisted workspaceOverrides
+//     or the default workspace, as a fallback for discovered/paused sessions
+//
+// This plugs the bug where sending to an already-running session from the
+// dashboard WS path carried msg.Workspace="" (the frontend has no reason
+// to re-announce the workspace on every send) and attachment persistence
+// failed with "workspace is not a valid directory".
+//
+// Returns the validated absolute path or an error that mirrors
+// validateWorkspace's generic client-facing message. The key/hub arguments
+// are required because the fallback crosses into router state.
+func resolveAttachmentWorkspace(hub *Hub, sessionKey, reqWorkspace string) (string, error) {
+	// Hot path: client announced a workspace — trust but validate it.
+	if reqWorkspace != "" {
+		return validateWorkspace(reqWorkspace, hub.allowedRoot)
+	}
+	// Fallback: pull from the session / router. Prefer the live session's
+	// Workspace() because that is the cwd the CLI process is actually
+	// running under; if it's absent (paused / discovered / fresh key), fall
+	// back to the chat-prefix override lookup used across dispatch /
+	// takeover paths. The router lookup takes the chat-key prefix — the
+	// trailing ":general" / ":<agent>" suffix is a per-agent discriminator,
+	// not part of the workspace override key.
+	var ws string
+	if sess := hub.router.GetSession(sessionKey); sess != nil {
+		ws = sess.Workspace()
+	}
+	if ws == "" {
+		chatKey := sessionKey
+		if idx := strings.LastIndexByte(sessionKey, ':'); idx > 0 {
+			chatKey = sessionKey[:idx]
+		}
+		ws = hub.router.GetWorkspace(chatKey)
+	}
+	if ws == "" {
+		return "", fmt.Errorf("workspace is not a valid directory")
+	}
+	// Revalidate against allowedRoot — the saved workspace was validated at
+	// SetWorkspace time but config changes (allowedRoot tightened since the
+	// last SetWorkspace) could leave a stale entry that would otherwise
+	// slip past the path-traversal gate.
+	return validateWorkspace(ws, hub.allowedRoot)
+}
+
 // persistErr is the (status, msg) pair returned from persistFileRefs. The
 // struct lets the handler forward both pieces without building a new error
 // type hierarchy just for this one call site.
@@ -540,10 +591,14 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		// field); without this check a client could direct writes to any
 		// absolute path the naozhi user can touch (e.g. /tmp). sessionSend
 		// runs the same validation further down, but by then we would have
-		// already persisted bytes. Matching the error shape sessionSend
-		// returns keeps the handler response identical whichever layer
-		// rejects.
-		validatedWS, err := validateWorkspace(workspace, h.hub.allowedRoot)
+		// already persisted bytes.
+		//
+		// resolveAttachmentWorkspace adds a fallback to the router's saved
+		// workspace when the request omits it — the dashboard does not
+		// re-send the workspace on every message for an established session,
+		// and without this the second PDF upload to a running session would
+		// fail with "workspace is not a valid directory".
+		validatedWS, err := resolveAttachmentWorkspace(h.hub, key, workspace)
 		if err != nil {
 			slog.Warn("attachment workspace validation failed",
 				"key", key, "err", err)
