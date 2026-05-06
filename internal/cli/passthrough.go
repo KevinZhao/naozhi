@@ -391,11 +391,19 @@ func deliverSlotResult(s *sendSlot, r *SendResult) {
 }
 
 // discardAllPending is used when the CLI is known dead or the session is
-// reset. All pending+currentTurn slots receive the given error; caller should
-// not touch slot state afterwards.
+// reset. All pending + currentTurn slots receive the given error; caller
+// should not touch slot state afterwards.
+//
+// currentTurnSlots 必须和 pendingSlots 一起被通知：有些 slot 已经被 replay
+// 从 pendingSlots 移入 currentTurnSlots，若只 nil 掉 currentTurnSlots 而不
+// 给它们投 errCh，对应的 SendPassthrough goroutine 会阻塞到 total+30s bail
+// timer 才返回，IM 用户表现为"无响应"而非明确错误，同时 goroutine + 栈
+// 内存悬挂 5.5 分钟。R192-CLI-P0-DiscardCurrentTurn。
 func (p *Process) discardAllPending(reason error) {
 	p.slotsMu.Lock()
-	victims := append([]*sendSlot(nil), p.pendingSlots...)
+	victims := make([]*sendSlot, 0, len(p.pendingSlots)+len(p.currentTurnSlots))
+	victims = append(victims, p.pendingSlots...)
+	victims = append(victims, p.currentTurnSlots...)
 	p.pendingSlots = nil
 	p.currentTurnSlots = nil
 	p.inTurn = false
