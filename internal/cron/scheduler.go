@@ -533,6 +533,11 @@ func (s *Scheduler) AddJob(j *Job) error {
 	if err := validateSchedule(j.Schedule); err != nil {
 		return fmt.Errorf("invalid schedule %q: %w", j.Schedule, err)
 	}
+	// Title 长度校验在 scheduler 层兜底，避免绕过 dashboard handler（例如
+	// store 直接加载被篡改的 cron_jobs.json）把超长字符串持久化进内存。
+	if n := utf8.RuneCountInString(j.Title); n > MaxCronTitleLen {
+		return fmt.Errorf("title too long: %d runes > %d cap", n, MaxCronTitleLen)
+	}
 
 	s.mu.Lock()
 
@@ -756,6 +761,9 @@ type JobUpdate struct {
 	// FreshContext toggles whether each run resets the session before
 	// executing. nil leaves existing behavior unchanged.
 	FreshContext *bool
+	// Title 是人类可读名称。nil 保持原值；pointer 到 "" 会清空
+	// （UI 侧回退到 Prompt 首行）。长度由 handler 层先行校验。
+	Title *string
 }
 
 // UpdateJob applies a partial edit to an existing cron job. Schedule changes
@@ -780,6 +788,11 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	if upd.WorkDir != nil && *upd.WorkDir != "" && s.allowedRoot != "" {
 		if !workDirUnderRoot(*upd.WorkDir, s.allowedRoot) {
 			return nil, fmt.Errorf("work_dir outside allowed root")
+		}
+	}
+	if upd.Title != nil {
+		if n := utf8.RuneCountInString(*upd.Title); n > MaxCronTitleLen {
+			return nil, fmt.Errorf("title too long: %d runes > %d cap", n, MaxCronTitleLen)
 		}
 	}
 
@@ -808,6 +821,9 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	}
 	if upd.FreshContext != nil {
 		j.FreshContext = *upd.FreshContext
+	}
+	if upd.Title != nil {
+		j.Title = *upd.Title
 	}
 
 	if upd.Schedule != nil && *upd.Schedule != j.Schedule {

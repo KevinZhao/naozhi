@@ -177,6 +177,34 @@ func validateCronScheduleChars(schedule string) error {
 // Second pass mirrors validateCronWorkDir: reject C1 controls + Unicode
 // bidi / directional isolate / line separator runes that are >= 0x20 at
 // the byte level and therefore bypass the ASCII loop above.
+// validateCronTitle 是 Job.Title 在 handler 层的守门：单行（禁内嵌换行，
+// 卡片布局不允许）、长度 256 rune、禁控制字符 + 日志注入 rune。空值合法
+// （允许用户不填，UI 自动 fallback 到 Prompt 首行）。
+// 与 validateCronPrompt 一致的清洗集，只多禁换行。
+func validateCronTitle(title string) error {
+	if title == "" {
+		return nil
+	}
+	if n := utf8.RuneCountInString(title); n > cron.MaxCronTitleLen {
+		return fmt.Errorf("title exceeds %d-rune limit", cron.MaxCronTitleLen)
+	}
+	if !utf8.ValidString(title) {
+		return fmt.Errorf("title contains invalid characters")
+	}
+	for _, r := range title {
+		if r == '\n' || r == '\r' {
+			return fmt.Errorf("title must be a single line")
+		}
+		if r == 0 || (r < 0x20 && r != '\t') || r == 0x7f {
+			return fmt.Errorf("title contains invalid control characters")
+		}
+		if isLogInjectionRune(r) {
+			return fmt.Errorf("title contains invalid unicode control characters")
+		}
+	}
+	return nil
+}
+
 func validateCronPrompt(prompt string) error {
 	if len(prompt) > maxCronPromptBytesDashboard {
 		return fmt.Errorf("prompt exceeds %d-byte limit", maxCronPromptBytesDashboard)
@@ -217,6 +245,7 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		ID             string `json:"id"`
 		Schedule       string `json:"schedule"`
 		Prompt         string `json:"prompt"`
+		Title          string `json:"title,omitempty"`
 		Platform       string `json:"platform"`
 		ChatID         string `json:"chat_id"`
 		CreatedBy      string `json:"created_by,omitempty"`
@@ -241,6 +270,7 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			ID:             j.ID,
 			Schedule:       j.Schedule,
 			Prompt:         j.Prompt,
+			Title:          j.Title,
 			Platform:       j.Platform,
 			ChatID:         j.ChatID,
 			CreatedBy:      j.CreatedBy,
@@ -296,6 +326,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Schedule       string `json:"schedule"`
 		Prompt         string `json:"prompt"`
+		Title          string `json:"title,omitempty"`
 		WorkDir        string `json:"work_dir,omitempty"`
 		NotifyPlatform string `json:"notify_platform,omitempty"`
 		NotifyChatID   string `json:"notify_chat_id,omitempty"`
@@ -309,6 +340,10 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Schedule == "" {
 		http.Error(w, "schedule is required", http.StatusBadRequest)
+		return
+	}
+	if err := validateCronTitle(req.Title); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	// Cap schedule length before handing to validateSchedule → robfig/cron
@@ -367,6 +402,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 	job := &cron.Job{
 		Schedule:       req.Schedule,
 		Prompt:         req.Prompt,
+		Title:          req.Title,
 		Platform:       "dashboard",
 		ChatID:         "global",
 		CreatedBy:      "dashboard",
@@ -677,6 +713,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Schedule       *string `json:"schedule,omitempty"`
 		Prompt         *string `json:"prompt,omitempty"`
+		Title          *string `json:"title,omitempty"`
 		WorkDir        *string `json:"work_dir,omitempty"`
 		Notify         *bool   `json:"notify,omitempty"`
 		NotifyPlatform *string `json:"notify_platform,omitempty"`
@@ -688,7 +725,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if req.Schedule == nil && req.Prompt == nil && req.WorkDir == nil &&
+	if req.Schedule == nil && req.Prompt == nil && req.Title == nil && req.WorkDir == nil &&
 		req.Notify == nil && req.NotifyPlatform == nil && req.NotifyChatID == nil &&
 		req.FreshContext == nil {
 		http.Error(w, "at least one field must be provided", http.StatusBadRequest)
@@ -696,6 +733,12 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Prompt != nil {
 		if err := validateCronPrompt(*req.Prompt); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if req.Title != nil {
+		if err := validateCronTitle(*req.Title); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -761,6 +804,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	j, err := h.scheduler.UpdateJob(id, cron.JobUpdate{
 		Schedule:       req.Schedule,
 		Prompt:         req.Prompt,
+		Title:          req.Title,
 		WorkDir:        req.WorkDir,
 		Notify:         req.Notify,
 		NotifyPlatform: req.NotifyPlatform,

@@ -2656,13 +2656,14 @@ func TestDashboardJS_R110P2_CronPanelFilter(t *testing.T) {
 	js := string(data)
 
 	// Invariant 1: filterCronJobs exists and its match surface covers the
-	// four documented fields. Using substring anchors rather than regex
-	// because the field list lives on a single source line.
+	// documented fields. cron-v2-polish §3.1 Increment A 扩展了 title 字段，
+	// 放在 fields 数组的第一位（最高匹配优先），其余字段保持不变。使用
+	// substring 精确锚定 fields 字面量避免重构漂移。
 	if !strings.Contains(js, "function filterCronJobs(jobs, query, status)") {
 		t.Fatal("dashboard.js missing filterCronJobs(jobs, query, status) — R110-P2 cron filter predicate")
 	}
-	if !strings.Contains(js, "[j.prompt, j.work_dir, j.schedule, j.id]") {
-		t.Error("filterCronJobs match surface must include prompt, work_dir, schedule, id — operators search by any of these")
+	if !strings.Contains(js, "[j.title, j.prompt, j.work_dir, j.schedule, j.id]") {
+		t.Error("filterCronJobs match surface must include title, prompt, work_dir, schedule, id — operators search by any of these; title 是 cron-v2-polish §3.1 引入的人类可读名称")
 	}
 	// Status gate: both 'active' and 'attention' arms must exist + use the
 	// same attention definition as the cron-badge (paused OR last_error),

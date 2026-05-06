@@ -3,6 +3,7 @@ package cron
 import (
 	"crypto/rand"
 	"fmt"
+	"strings"
 	"time"
 
 	robfigcron "github.com/robfig/cron/v3"
@@ -19,6 +20,13 @@ type Job struct {
 	CreatedBy string    `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 	Paused    bool      `json:"paused"`
+
+	// Title 是人类可读的任务名称，用于卡片列表显示、搜索主 key、通知标题。
+	// 为空时 UI 自动回退到 Prompt 首行（见 JobTitleOrFallback），保持对旧
+	// cron_jobs.json 的向后兼容：JSON 反序列化后 Title == "" 不会破坏任何
+	// 渲染/搜索路径。上限 MaxCronTitleLen 字节。
+	// 引入背景：docs/rfc/cron-v2-polish.md §3.1。
+	Title string `json:"title,omitempty"`
 
 	// Optional working directory override for the CLI process.
 	WorkDir string `json:"work_dir,omitempty"`
@@ -64,6 +72,56 @@ func generateID() string {
 		panic("crypto/rand unavailable: " + err.Error())
 	}
 	return fmt.Sprintf("%x", b)
+}
+
+// MaxCronTitleLen 是 Job.Title 的字符上限（UTF-8 rune 计）。256 覆盖绝大多数
+// 人类可读名称，且与 dashboard 的 escAttr 线长相容。导出以便 server 包
+// 在 handler 层复用同一上限，避免两处数字不同步漂移。
+const MaxCronTitleLen = 256
+
+// titleFallbackRuneLimit 是 Title 为空时 UI/搜索用 Prompt 首行截断的
+// 长度上限（按 rune 算，避免切断中文）。60 rune 与卡片视觉宽度对齐。
+const titleFallbackRuneLimit = 60
+
+// JobTitleOrFallback 返回用于 UI 显示 / 搜索主 key 的人类可读名称：
+//  1. 如果 Job.Title 非空，直接返回（Trim 后）。
+//  2. 否则取 Prompt 的首个非空行，截断到 titleFallbackRuneLimit rune。
+//  3. 若 Prompt 也为空，返回空字符串——调用方（UI 层）自行决定占位符。
+//
+// 提供在 cron 包内，供 scheduler / dashboard / IM 通知复用，避免 fallback
+// 逻辑散落在各处 UI 代码里时序不一致（dashboard 和后端通知显示的标题
+// 出现分歧）。
+func JobTitleOrFallback(j *Job) string {
+	if j == nil {
+		return ""
+	}
+	if t := strings.TrimSpace(j.Title); t != "" {
+		return t
+	}
+	p := strings.TrimSpace(j.Prompt)
+	if p == "" {
+		return ""
+	}
+	// 取首个非空行
+	line := p
+	if idx := strings.IndexByte(p, '\n'); idx >= 0 {
+		line = strings.TrimSpace(p[:idx])
+		if line == "" {
+			// 罕见：以空白换行开头，继续扫
+			for _, l := range strings.Split(p, "\n") {
+				if l = strings.TrimSpace(l); l != "" {
+					line = l
+					break
+				}
+			}
+		}
+	}
+	// rune-level 截断，保证不切断多字节
+	runes := []rune(line)
+	if len(runes) > titleFallbackRuneLimit {
+		line = string(runes[:titleFallbackRuneLimit]) + "…"
+	}
+	return line
 }
 
 // cronParser is the shared parser for all schedule validation and preview.

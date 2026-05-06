@@ -8439,8 +8439,18 @@ function fillCronPrompt(id, value) {
 function renderCronModalBody(opts) {
   const promptTextarea =
     '<textarea id="' + opts.promptId + '" placeholder="' + escAttr(opts.promptPlaceholder) + '" aria-label="提示词"></textarea>';
+  // Title 字段跨两列独立一行，放在最上方——符合"先起名，再写提示词"的
+  // 直觉顺序，与 Claude Scheduled Tasks UI 的 Name → Description → Prompt
+  // 结构对齐。留空允许，UI 自动回退显示 Prompt 首行（JobTitleOrFallback）。
+  // 关联：docs/rfc/cron-v2-polish.md §3.1 Increment A。
+  const titleField =
+    '<div class="cron-field cron-f-title" style="grid-column:1 / -1">' +
+      '<div class="cf-label">名称 <span style="color:var(--nz-text-faint);font-weight:normal;font-size:11px">（可选）</span></div>' +
+      '<input id="' + escAttr(opts.titleId || 'cron-title') + '" type="text" placeholder="' + escAttr(opts.titlePlaceholder || '例如：日报总结 · 周一早会准备') + '" maxlength="256" aria-label="任务名称">' +
+    '</div>';
   return '<div class="modal-body">' +
       '<div class="cron-modal-grid">' +
+        titleField +
         '<div class="cron-field cron-f-what">' +
           '<div class="cf-label">做什么</div>' +
           promptTextarea +
@@ -8631,6 +8641,9 @@ async function doCreateCronJob() {
   // Resolve prompt
   const promptInput = document.getElementById('cron-prompt');
   const prompt = promptInput ? promptInput.value.trim() : '';
+  // Resolve title（可选）
+  const titleInput = document.getElementById('cron-title');
+  const title = titleInput ? titleInput.value.trim() : '';
   // Resolve work_dir: project selection or custom input
   let workDir = overlay._cronWorkDir || '';
   const wdInput = document.getElementById('cron-workdir');
@@ -8641,6 +8654,7 @@ async function doCreateCronJob() {
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const body = {schedule};
     if (prompt) body.prompt = prompt;
+    if (title) body.title = title;
     if (workDir) body.work_dir = workDir;
     const notifyVals = collectCronNotifyValues();
     if (notifyVals.notify !== null) body.notify = notifyVals.notify;
@@ -8687,10 +8701,12 @@ function openCronPanel() {
 
 // filterCronJobs is the pure match step for the R110-P2 cron panel filter.
 // Extracted so unit tests exercise the predicate without driving DOM. Match
-// surface for the substring arm: prompt, work_dir, schedule, id (all
-// case-insensitive). Status arm is one of 'all' | 'active' | 'attention',
-// where 'attention' == paused OR last_error (dovetails with the header
-// cron-badge's attention count so both surfaces speak the same predicate).
+// surface for the substring arm: title, prompt, work_dir, schedule, id (all
+// case-insensitive). title 放在最前，匹配优先 —— 人们搜索 cron 时最先想到
+// 的就是自己给任务起的那个名字。Status arm is one of 'all' | 'active' |
+// 'attention', where 'attention' == paused OR last_error (dovetails with
+// the header cron-badge's attention count so both surfaces speak the same
+// predicate).
 function filterCronJobs(jobs, query, status) {
   const q = (query || '').trim().toLowerCase();
   const s = status || 'all';
@@ -8699,12 +8715,32 @@ function filterCronJobs(jobs, query, status) {
     if (s === 'active' && j.paused) return false;
     if (s === 'attention' && !(j.paused || j.last_error)) return false;
     if (!q) return true;
-    const fields = [j.prompt, j.work_dir, j.schedule, j.id];
+    const fields = [j.title, j.prompt, j.work_dir, j.schedule, j.id];
     for (const f of fields) {
       if (typeof f === 'string' && f.toLowerCase().indexOf(q) !== -1) return true;
     }
     return false;
   });
+}
+
+// firstNonEmptyLine 取文本的首个非空行并按 rune 截断到 limit。
+// 与后端 cron.JobTitleOrFallback 行为对齐——显式 title 为空时前后端
+// 应该渲染一致的 fallback 标题。limit 默认 60 rune 匹配卡片视觉宽度。
+function firstNonEmptyLine(text, limit) {
+  if (!text) return '';
+  const lines = String(text).split('\n');
+  let line = '';
+  for (const l of lines) {
+    const t = l.trim();
+    if (t) { line = t; break; }
+  }
+  if (!line) return '';
+  const max = limit > 0 ? limit : 60;
+  // Array.from 处理 UTF-16 surrogate pair（emoji、非 BMP 字符），避免
+  // substring 切断代理对产生替换字符。
+  const chars = Array.from(line);
+  if (chars.length <= max) return line;
+  return chars.slice(0, max).join('') + '…';
 }
 
 // cronJobCardHtml renders a single cron card. Extracted from the legacy
@@ -8735,8 +8771,16 @@ function cronJobCardHtml(j) {
   } else if (j.last_result) {
     result = '<div class="cc-result ok"><span class="cc-icon">\u2714</span><span class="cc-text">' + esc(j.last_result) + '</span></div>';
   }
+  // Title 层：显式 title 优先，否则回退到 prompt 首行（与后端
+  // cron.JobTitleOrFallback 逻辑等价，在前端避免一次 HTTP 往返）。
+  // 当 title 存在时 promptBlock 降级为次级显示，细小字体 + 褪色；title
+  // 缺省时保持老样式（cc-prompt 即主标题），不退化。
+  const titleStr = (j.title || '').trim() || firstNonEmptyLine(j.prompt || '', 60);
+  const titleBlock = titleStr
+    ? '<div class="cc-title">' + esc(titleStr) + '</div>'
+    : '';
   const promptBlock = j.prompt
-    ? '<div class="cc-prompt">' + esc(j.prompt) + '</div>'
+    ? '<div class="cc-prompt' + (titleStr ? ' secondary' : '') + '">' + esc(j.prompt) + '</div>'
     : '<div class="cc-prompt placeholder">未设置 prompt（点右侧 edit 按钮配置）</div>';
   const toggleBtn = j.paused
     ? '<button type="button" class="cc-btn" onclick="cronResume(\'' + escJs(j.id) + '\')">resume</button>'
@@ -8752,6 +8796,7 @@ function cronJobCardHtml(j) {
   const human = humanizeCron(j.schedule);
   const showRaw = human !== j.schedule;
   return '<div class="cron-card" role="button" tabindex="0" onclick="openCronSession(\'' + escJs(j.id) + '\')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronSession(\'' + escJs(j.id) + '\')}">' +
+    titleBlock +
     promptBlock +
     '<div class="cc-human">' + esc(human) + '</div>' +
     (showRaw ? '<div class="cc-expr">' + esc(j.schedule) + '</div>' : '') +
@@ -9054,6 +9099,7 @@ function editCronJob(id) {
         scheduleHtml, wsBody, notifyHtml, contextHtml,
         promptId: 'edit-cron-prompt',
         promptPlaceholder: '这个任务要做什么？',
+        titleId: 'edit-cron-title',
       }) +
       '<div class="modal-btns">' +
         '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
@@ -9063,6 +9109,10 @@ function editCronJob(id) {
   document.body.appendChild(overlay);
   trapFocus(overlay);
   fillCronPrompt('edit-cron-prompt', job.prompt);
+  // 回填 title。用 value 属性赋值避开 HTML 特殊字符在模板插值中的风险，
+  // 与 fillCronPrompt 的 rationale 一致（参见 renderCronModalBody 注释）。
+  const titleEl = document.getElementById('edit-cron-title');
+  if (titleEl) titleEl.value = job.title || '';
 
   overlay.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') overlay.remove();
@@ -9133,6 +9183,7 @@ async function doEditCronJob(id) {
   if (!job) { showToast('未找到该任务', 'warning'); return; }
 
   const newPrompt = document.getElementById('edit-cron-prompt').value;
+  const newTitle = (document.getElementById('edit-cron-title')?.value || '').trim();
   // Advanced raw input wins over picker; if both empty use overlay cache
   // (seeded to job.schedule on modal open, kept fresh by freqUpdate()).
   const advanced = document.getElementById('freq-advanced-input');
@@ -9149,6 +9200,7 @@ async function doEditCronJob(id) {
   // user didn't touch (and the audit log stays meaningful).
   const body = {};
   if (newPrompt !== (job.prompt || '')) body.prompt = newPrompt;
+  if (newTitle !== (job.title || '')) body.title = newTitle;
   if (newSchedule !== job.schedule) body.schedule = newSchedule;
   if (newWorkDir !== (job.work_dir || '')) body.work_dir = newWorkDir;
 
