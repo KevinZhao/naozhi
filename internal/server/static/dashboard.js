@@ -2837,6 +2837,10 @@ function scrollEventsToBottom() {
 function saveScrollPos(key, node) {
   const el = document.getElementById('events-scroll');
   if (!el || !key) return;
+  // clientHeight === 0 发生在 events-scroll 还未 layout 完（极早期竞态），
+  // 这时算出来的 fromBottom=0、atBottom=true 会把之前真实保存的位置擦掉。
+  // 直接跳过，保留上一份快照。
+  if (el.clientHeight === 0) return;
   const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
   const atBottom = fromBottom <= 30;
   sessionScrollPos[sid(key, node || 'local')] = { fromBottom, atBottom };
