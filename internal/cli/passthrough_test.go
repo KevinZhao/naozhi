@@ -432,9 +432,11 @@ func TestPassthrough_PriorityNowForwarded(t *testing.T) {
 	sh.srv.SendCLIExited(0)
 }
 
-// TestPassthrough_ReplayEventNotLoggedAsUserTurn verifies that replay events
-// do NOT show up as entries in EventLog (they are ack echoes, not new user
-// messages). Otherwise the dashboard would display each message twice.
+// TestPassthrough_ReplayEventNotLoggedAsUserTurn verifies that the CLI's
+// replay echo does NOT produce a *second* user entry in EventLog. The first
+// entry is the one SendPassthrough writes itself (so session-switch reloads
+// can re-render the bubble — mirrors legacy Send); readLoop's replay filter
+// must drop the echo so the dashboard doesn't render the same message twice.
 func TestPassthrough_ReplayEventNotLoggedAsUserTurn(t *testing.T) {
 	sh := newPassthroughShim(t)
 	defer sh.close()
@@ -452,12 +454,17 @@ func TestPassthrough_ReplayEventNotLoggedAsUserTurn(t *testing.T) {
 	sh.emitResult("s1", "reply")
 	<-out
 
-	// EventLog should contain the result entry but NOT a user-replay entry.
+	// EventLog should contain exactly one user entry (from SendPassthrough's
+	// own Append) — the replay echo must not add a duplicate.
 	entries := sh.proc.EventEntries()
+	userCount := 0
 	for _, e := range entries {
 		if e.Type == "user" && strings.Contains(e.Summary, "hi") {
-			t.Errorf("EventLog contains a user entry for 'hi' — replay should be filtered. got=%+v", e)
+			userCount++
 		}
+	}
+	if userCount != 1 {
+		t.Errorf("want exactly one user entry for 'hi' (from SendPassthrough Append, replay filtered), got %d: %+v", userCount, entries)
 	}
 	// Must contain a result entry
 	foundResult := false

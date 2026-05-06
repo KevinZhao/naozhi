@@ -1017,6 +1017,41 @@ func (p *Process) findResultSince(afterMS int64) *SendResult {
 // EventCallback is called for each intermediate event during Send.
 type EventCallback func(ev Event)
 
+// buildUserEntry renders the EventLog entry that represents a single user
+// message, including per-image thumbnail generation. Shared between Send
+// (legacy collect mode) and SendPassthrough so the dashboard sees the same
+// bubble regardless of dispatch path — passthrough mode used to skip this
+// because the CLI echoes a replay event, but readLoop filters replays out
+// of EventLog (see process.go ~755), so without an explicit append the
+// user's typed message disappears on the next session re-subscribe.
+func buildUserEntry(text string, images []ImageData) EventEntry {
+	entry := EventEntry{
+		Time:    time.Now().UnixMilli(),
+		Type:    "user",
+		Summary: TruncateRunes(text, 120),
+		Detail:  TruncateRunes(text, 2000),
+	}
+	if len(images) > 0 {
+		entry.Summary += fmt.Sprintf(" [+%d image(s)]", len(images))
+		thumbs := make([]string, len(images))
+		if len(images) == 1 {
+			thumbs[0] = MakeThumbnail(images[0].Data, 600)
+		} else {
+			var wg sync.WaitGroup
+			for i, img := range images {
+				wg.Add(1)
+				go func(i int, data []byte) {
+					defer wg.Done()
+					thumbs[i] = MakeThumbnail(data, 600)
+				}(i, img.Data)
+			}
+			wg.Wait()
+		}
+		entry.Images = sanitizeImages(thumbs)
+	}
+	return entry
+}
+
 // Send writes a user message to stdin and reads events until result.
 func (p *Process) Send(ctx context.Context, text string, images []ImageData, onEvent EventCallback) (*SendResult, error) {
 	p.mu.Lock()
@@ -1036,31 +1071,7 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 	}()
 
 	// Log user message before sending
-	userEntry := EventEntry{
-		Time:    time.Now().UnixMilli(),
-		Type:    "user",
-		Summary: TruncateRunes(text, 120),
-		Detail:  TruncateRunes(text, 2000),
-	}
-	if len(images) > 0 {
-		userEntry.Summary += fmt.Sprintf(" [+%d image(s)]", len(images))
-		thumbs := make([]string, len(images))
-		if len(images) == 1 {
-			thumbs[0] = MakeThumbnail(images[0].Data, 600)
-		} else {
-			var wg sync.WaitGroup
-			for i, img := range images {
-				wg.Add(1)
-				go func(i int, data []byte) {
-					defer wg.Done()
-					thumbs[i] = MakeThumbnail(data, 600)
-				}(i, img.Data)
-			}
-			wg.Wait()
-		}
-		userEntry.Images = sanitizeImages(thumbs)
-	}
-	p.eventLog.Append(userEntry)
+	p.eventLog.Append(buildUserEntry(text, images))
 
 	// Drain stale events from a previous turn that completed while no Send()
 	// was active (e.g., CLI was mid-turn when service restarted and reconnected

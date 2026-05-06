@@ -98,6 +98,17 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Ima
 		return nil, fmt.Errorf("passthrough write: %w", writeErr)
 	}
 
+	// Mirror Send's EventLog.Append for the user message so a later
+	// subscribe (session switch, reconnect) can re-render the bubble.
+	// readLoop filters the CLI's replay echo out of EventLog to avoid
+	// double-display against the dashboard's optimistic bubble, so without
+	// this append the user turn only lives in the client DOM and the JSONL
+	// on disk — not in naozhi's in-memory transcript. Placed after the
+	// successful stdin write so a rejected write (e.g. closed shim socket)
+	// does not leave a ghost entry; subscribers already poll after any
+	// Append via the live notify-subscribers path.
+	p.eventLog.Append(buildUserEntry(text, images))
+
 	// Defensive bail timer. Passthrough does not have a per-turn watchdog
 	// (CLI 本身和 shim 的 heartbeat 负责探测进程级死锁；slot 级超时由 bail
 	// 兜底)。Set to totalTimeout + 30s so in the rare case where readLoop
