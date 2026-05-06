@@ -1782,7 +1782,7 @@ function renderMainShell() {
     '<div class="input-area' + (voiceInputMode ? ' voice-mode' : '') + '" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
-        '<button class="btn-icon" onclick="openFilePicker()" title="上传图片" aria-label="上传图片">&#x1f4ce;</button>' +
+        '<button class="btn-icon" onclick="openFilePicker()" title="上传图片或 PDF" aria-label="上传图片或 PDF">&#x1f4ce;</button>' +
         '<button class="btn-icon btn-mic" id="btn-mic" onclick="toggleInputMode()" title="' + (voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (voiceInputMode ? '\u5207\u6362\u5230\u952e\u76d8\u8f93\u5165' : '\u5207\u6362\u5230\u8bed\u97f3\u8f93\u5165') + '">' + (voiceInputMode ? '&#x2328;' : '&#x1f3a4;') + '</button>' +
         '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
         '<button class="btn-hold-talk" id="btn-hold-talk" title="\u6309\u4f4f\u8bf4\u8bdd\u6539\u5f55\u97f3" aria-label="\u6309\u4f4f\u8bf4\u8bdd\u5f00\u59cb\u5f55\u97f3">\u6309\u4f4f\u8bf4\u8bdd</button>' +
@@ -1790,7 +1790,7 @@ function renderMainShell() {
         '<button class="btn-icon btn-stop" id="btn-stop" onclick="interruptSession()" title="stop" aria-label="Stop current turn">&#x25A0;</button>' +
       '</div>' +
       '<div class="input-hints">Enter send &middot; Shift+Enter newline &middot; Esc interrupt</div>' +
-      '<input type="file" id="file-input" accept="image/*" multiple style="display:none" onchange="handleFiles(this.files)">' +
+      '<input type="file" id="file-input" accept="image/*,application/pdf" multiple style="display:none" onchange="handleFiles(this.files)">' +
     '</div>';
 
   // Enable drag-drop
@@ -2363,7 +2363,16 @@ async function sendMessage() {
   // raw image batch must stay under ~9 MB to fit alongside the JSON
   // envelope. Pre-check here so users get a clear "too large — split into
   // fewer pictures" message instead of a silent "没 working" (R192 regression).
-  const totalBytes = pendingFiles.reduce((n, f) => n + (f.normalizedSize || f.file.size || 0), 0);
+  //
+  // PDFs do NOT count toward this budget — they travel as file_ref (server
+  // persists the bytes to the session workspace; only the path string ends
+  // up in the NDJSON line). Filtering by kind here keeps mixed image+PDF
+  // sends from tripping the cap on the PDF's 20 MB that will never hit
+  // stdin anyway.
+  const totalBytes = pendingFiles.reduce((n, f) => {
+    if (f.kind === 'pdf' || f.serverKind === 'file_ref') return n;
+    return n + (f.normalizedSize || f.file.size || 0);
+  }, 0);
   const batchCap = 9 * 1024 * 1024;
   if (totalBytes > batchCap) {
     showToast('图片总大小 ' + Math.ceil(totalBytes / 1024 / 1024) + ' MB 超过 9 MB 上限，请分批发送或减少图片', 'warning');
@@ -3323,18 +3332,46 @@ function drainUploadQueue() {
   }
 }
 
+// fileKind maps a browser File's MIME type to the 2 classes naozhi accepts.
+// PDF sniffing looks at file.type AND the .pdf extension because some mobile
+// Safari builds drop a `content-type: application/octet-stream` on PDFs
+// picked from iCloud Drive — the server still sniffs magic bytes, so accepting
+// optimistically here just lets the server give the authoritative reject.
+function fileKind(f) {
+  if (f && f.type === 'application/pdf') return 'pdf';
+  if (f && /\.pdf$/i.test(f.name || '')) return 'pdf';
+  if (f && f.type && f.type.startsWith('image/')) return 'image';
+  return '';
+}
+
 function handleFiles(fileList) {
   const toUpload = [];
-  // Relax the source-file ceiling to 40 MB: iPhone HEIC/JPEG straight from
-  // Photos is often ~6–12 MB, and browsers deliver HEIC as-is. We downscale
-  // before upload, so the 10 MB server ceiling applies to the re-encoded JPEG.
+  // Image source ceiling is kept at 40 MB so iPhone HEIC/JPEG straight from
+  // Photos (~6–12 MB) still fits; normalizeImage downscales before upload,
+  // so the 10 MB server cap applies to the re-encoded JPEG. PDFs bypass
+  // normalization and must stay under the server's 32 MB Anthropic ceiling.
+  const MAX_IMAGE_BYTES = 40 * 1024 * 1024;
+  const MAX_PDF_BYTES = 32 * 1024 * 1024;
   for (const raw of fileList) {
-    if (!raw.type.startsWith('image/')) continue;
-    if (raw.size > 40 * 1024 * 1024) { showToast('文件过大（上限 40MB）', 'warning'); continue; }
+    const kind = fileKind(raw);
+    if (!kind) continue;
+    if (kind === 'pdf' && raw.size > MAX_PDF_BYTES) {
+      showToast('PDF 过大（上限 32 MB）', 'warning');
+      continue;
+    }
+    if (kind === 'image' && raw.size > MAX_IMAGE_BYTES) {
+      showToast('图片过大（上限 40 MB）', 'warning');
+      continue;
+    }
     if (pendingFiles.length >= 20) { showToast('最多上传 20 个文件', 'warning'); break; }
     const entry = {
       file: raw,
-      blobUrl: URL.createObjectURL(raw),
+      kind,
+      // blobUrl is still set for images so the existing thumbnail path works
+      // unchanged. PDFs render as an icon card (see renderFilePreviews) so no
+      // URL.createObjectURL is needed and we skip it to save the tiny
+      // revoke-on-remove bookkeeping.
+      blobUrl: kind === 'image' ? URL.createObjectURL(raw) : '',
       id: '',
       status: 'uploading',
       error: '',
@@ -3353,10 +3390,14 @@ async function uploadEntry(entry) {
   entry.error = '';
   renderFilePreviews();
   try {
-    const file = await normalizeImage(entry.file);
-    // Track the *normalized* byte size so sendMessage can pre-check the
-    // batch against the 12 MB CLI-stdin ceiling. Raw file.size would
-    // overstate HEIC/huge photos that we downscale before upload.
+    // PDFs skip normalizeImage: they travel to the server as-is and end up
+    // persisted to the session workspace (see
+    // docs/rfc/pdf-attachment.md). Only images go through the downscale
+    // step. Track the transmitted byte size on `normalizedSize` for the
+    // sendMessage batch-cap check below — for PDFs this equals raw size
+    // but is NOT counted against the 9 MB image batch cap (PDFs travel
+    // via file_ref, not inline base64).
+    const file = entry.kind === 'pdf' ? entry.file : await normalizeImage(entry.file);
     entry.normalizedSize = file.size;
     const fd = new FormData();
     fd.append('file', file);
@@ -3374,6 +3415,11 @@ async function uploadEntry(entry) {
     const j = await r.json();
     if (!j.id) throw new Error('no id in response');
     entry.id = j.id;
+    // Server echoes kind/size/name — trust its view so a client/server
+    // sniff disagreement (optimistic PDF accept above, for instance)
+    // settles in the server's favour. The UI card uses these.
+    if (j.kind) entry.serverKind = j.kind;
+    if (j.name) entry.serverName = j.name;
     entry.status = 'ready';
   } catch (e) {
     entry.status = 'error';
@@ -3477,6 +3523,16 @@ function onThumbKeyDown(ev, idx) {
   if (next) next.focus();
 }
 
+// formatFileSize renders a byte count as a short human label (e.g. "1.2 MB").
+// Only used for PDF chips where we want to surface size to the user; images
+// still show the thumbnail itself, so size is not rendered for them.
+function formatFileSize(n) {
+  if (!n || n < 0) return '';
+  if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  if (n >= 1024) return Math.round(n / 1024) + ' KB';
+  return n + ' B';
+}
+
 function renderFilePreviews() {
   const el = document.getElementById('file-preview');
   if (!el) return;
@@ -3489,9 +3545,24 @@ function renderFilePreviews() {
     // stable for the uploadEntry completion handler. tabindex=0 makes the
     // thumb keyboard-focusable; ArrowLeft/Right then reorder via onThumbKeyDown.
     const draggable = entry.status === 'ready';
-    return '<div class="file-thumb ' + entry.status + '"' +
+    const isPDF = entry.kind === 'pdf';
+    // PDF card: fixed-size chip with the .pdf icon + filename + size.
+    // Image thumb: the existing <img> preview. Both share the remove button
+    // and the upload-status overlay.
+    const body = isPDF
+      ? ('<div class="pdf-chip" aria-hidden="true">' +
+           '<div class="pdf-icon">PDF</div>' +
+           '<div class="pdf-meta">' +
+             '<div class="pdf-name" title="' + escAttr(entry.file.name || 'document.pdf') + '">' +
+               esc((entry.file.name || 'document.pdf')) +
+             '</div>' +
+             '<div class="pdf-size">' + esc(formatFileSize(entry.file.size || 0)) + '</div>' +
+           '</div>' +
+         '</div>')
+      : '<img src="' + entry.blobUrl + '" draggable="false">';
+    return '<div class="file-thumb ' + entry.status + (isPDF ? ' pdf' : '') + '"' +
       ' data-idx="' + i + '"' +
-      (draggable ? ' draggable="true" tabindex="0" role="button" aria-label="\u56fe\u7247 ' + (i + 1) + '\uff0c\u62d6\u52a8\u6216\u7528\u5de6\u53f3\u65b9\u5411\u952e\u6392\u5e8f"' : '') +
+      (draggable ? ' draggable="true" tabindex="0" role="button" aria-label="' + (isPDF ? 'PDF' : '\u56fe\u7247') + ' ' + (i + 1) + '\uff0c\u62d6\u52a8\u6216\u7528\u5de6\u53f3\u65b9\u5411\u952e\u6392\u5e8f"' : '') +
       (draggable ? ' ondragstart="onThumbDragStart(event,' + i + ')"' : '') +
       (draggable ? ' ondragover="onThumbDragOver(event)"' : '') +
       (draggable ? ' ondragleave="onThumbDragLeave(event)"' : '') +
@@ -3499,9 +3570,9 @@ function renderFilePreviews() {
       (draggable ? ' ondragend="onThumbDragEnd()"' : '') +
       (draggable ? ' onkeydown="onThumbKeyDown(event,' + i + ')"' : '') +
       '>' +
-      '<img src="' + entry.blobUrl + '" draggable="false">' +
+      body +
       overlay +
-      '<button class="remove" onclick="removeFile(' + i + ')" title="\u79fb\u9664\u56fe\u7247" aria-label="\u79fb\u9664\u56fe\u7247">\u00d7</button>' +
+      '<button class="remove" onclick="removeFile(' + i + ')" title="\u79fb\u9664" aria-label="\u79fb\u9664">\u00d7</button>' +
       '</div>';
   }).join('');
 }

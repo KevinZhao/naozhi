@@ -3498,18 +3498,24 @@ func TestDashboard_R154_ModalsAndSectionsLocalized(t *testing.T) {
 	for _, want := range []string{
 		`title="立即重连" aria-label="立即重连"`,
 		`title="重命名会话" aria-label="重命名会话"`,
-		`title="上传图片" aria-label="上传图片"`,
+		// Upload button title was broadened from "上传图片" to
+		// "上传图片或 PDF" when PDF attachment support landed (see
+		// docs/rfc/pdf-attachment.md).
+		`title="上传图片或 PDF" aria-label="上传图片或 PDF"`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("icon-button title+aria-label missing: %q", want)
 		}
 	}
-	// Remove-image label: CJK codepoints are 移 U+79FB 除 U+9664 图 U+56FE
-	// 片 U+7247 — match raw or escaped form.
-	removeImgUtf8 := `title="移除图片" aria-label="移除图片"`
-	removeImgEsc := `title="\u79fb\u9664\u56fe\u7247" aria-label="\u79fb\u9664\u56fe\u7247"`
-	if !strings.Contains(js, removeImgUtf8) && !strings.Contains(js, removeImgEsc) {
-		t.Errorf("remove-image icon-button missing localized title+aria-label — neither UTF-8 %q nor \\u-escape %q present", removeImgUtf8, removeImgEsc)
+	// Remove label: generalised from "移除图片" to plain "移除" because the
+	// same button renders on image thumbs AND PDF chips since
+	// docs/rfc/pdf-attachment.md. 移 U+79FB 除 U+9664 — match raw UTF-8
+	// or \u-escape form (Go literal vs prettier-reformatted JS literal
+	// may differ).
+	removeUtf8 := `title="移除" aria-label="移除"`
+	removeEsc := `title="\u79fb\u9664" aria-label="\u79fb\u9664"`
+	if !strings.Contains(js, removeUtf8) && !strings.Contains(js, removeEsc) {
+		t.Errorf("remove icon-button missing localized title+aria-label — neither UTF-8 %q nor \\u-escape %q present", removeUtf8, removeEsc)
 	}
 	for _, legacy := range []string{
 		`aria-label="Reconnect now"`,
