@@ -169,10 +169,19 @@ func validateCronScheduleChars(schedule string) error {
 }
 
 // validateCronPrompt rejects prompts larger than the dashboard cap or
-// containing control characters. Matches project_api.handleConfigPut's
-// planner_prompt guard: null bytes are silently truncated by execve, and
-// raw \n/\r into the CLI --append-system-prompt path corrupts shim NDJSON
-// framing. Tab is allowed because prompts may indent examples.
+// containing control characters. Cron prompts are delivered via stdin as a
+// stream-json user message (cron/scheduler.go → session.Send → NewUserMessage),
+// where json.Marshal escapes embedded \n so NDJSON framing stays intact. LF is
+// therefore allowed to support multi-paragraph playbook prompts. CR is still
+// rejected because `tail -f` / `journalctl` treat it as a carriage return that
+// overwrites the current log line — a log-poisoning surface unrelated to
+// framing. null bytes remain forbidden (execve silently truncates at the first
+// NUL). Tab is allowed because prompts may indent examples.
+//
+// Unlike project_api.handleConfigPut's planner_prompt guard, cron prompts do
+// not end up in argv — planner_prompt and scratch context still flow into
+// `--append-system-prompt` and must stay single-line; do not copy this relaxed
+// policy back to those fields without re-auditing their downstream writers.
 //
 // Second pass mirrors validateCronWorkDir: reject C1 controls + Unicode
 // bidi / directional isolate / line separator runes that are >= 0x20 at
@@ -215,7 +224,7 @@ func validateCronPrompt(prompt string) error {
 	}
 	for i := 0; i < len(prompt); i++ {
 		c := prompt[i]
-		if c == 0 || (c < 0x20 && c != '\t') || c == 0x7f {
+		if c == 0 || (c < 0x20 && c != '\t' && c != '\n') || c == 0x7f {
 			return fmt.Errorf("prompt contains invalid control characters")
 		}
 	}

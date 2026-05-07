@@ -90,10 +90,9 @@ func TestValidateCronWorkDir_LengthCap(t *testing.T) {
 }
 
 // TestValidateCronPrompt_RejectsUnicodeBidi mirrors the workdir test for the
-// prompt path. A successful cron run replays prompt into the CLI via
-// --append-system-prompt; a prompt containing U+202E would also corrupt
-// log output and could confuse reviewers about what the prompt actually
-// says before the ticker fires.
+// prompt path. Bidi overrides corrupt log output (journalctl, activity feed)
+// and could confuse reviewers about what the prompt actually says before the
+// ticker fires.
 func TestValidateCronPrompt_RejectsUnicodeBidi(t *testing.T) {
 	t.Parallel()
 	for _, tc := range []struct {
@@ -112,9 +111,21 @@ func TestValidateCronPrompt_RejectsUnicodeBidi(t *testing.T) {
 			}
 		})
 	}
-	// LF is rejected even when tab is also present.
-	if err := validateCronPrompt("step 1:\n\tchild"); err == nil {
-		t.Error("prompt containing LF should be rejected even alongside tab")
+	// LF is allowed — multi-line playbook prompts are the reason this
+	// validator was relaxed. Cron prompts flow to the CLI via stdin as a
+	// stream-json user message, where json.Marshal escapes embedded \n.
+	if err := validateCronPrompt("step 1:\n\tchild"); err != nil {
+		t.Errorf("LF should be allowed in multi-line prompts, got %v", err)
+	}
+	// CR is still rejected — `tail -f` / `journalctl` treat it as carriage
+	// return and overwrite the current log line, a log-poisoning surface
+	// unrelated to stream-json framing.
+	if err := validateCronPrompt("step 1\rclobber"); err == nil {
+		t.Error("CR should still be rejected (log overwrite hazard)")
+	}
+	// NUL is still rejected — execve silently truncates at the first NUL.
+	if err := validateCronPrompt("step 1\x00child"); err == nil {
+		t.Error("NUL should still be rejected (execve truncation)")
 	}
 	// Tab alone is allowed for indentation.
 	if err := validateCronPrompt("step 1\tchild"); err != nil {
