@@ -327,11 +327,11 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 
 		for i := range snapshots {
 			if project.IsPlannerKey(snapshots[i].Key) {
-				// Planner keys look like "planner:{name}:{agent}". SplitN
-				// allocates a []string per poll; use IndexByte twice for
-				// zero-alloc extraction of the middle segment.
+				// Planner keys are "project:{name}:planner". Extract the
+				// middle segment with two IndexByte calls to avoid the
+				// []string alloc from SplitN.
 				key := snapshots[i].Key
-				const plannerPrefix = "planner:"
+				const plannerPrefix = "project:"
 				if len(key) > len(plannerPrefix) {
 					rest := key[len(plannerPrefix):]
 					if j := strings.IndexByte(rest, ':'); j > 0 {
