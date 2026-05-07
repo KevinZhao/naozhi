@@ -243,7 +243,6 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 	// Reserve the slot atomically: the previous RLock/check/unlock sequence was a
 	// TOCTOU window where a concurrent burst could all observe count < cap and
 	// all complete the upgrade. CAS on connCount collapses the gate into one step.
-	const maxWSConns = 500
 	if n := h.connCount.Add(1); n > maxWSConns {
 		h.connCount.Add(-1)
 		http.Error(w, "too many WebSocket connections", http.StatusServiceUnavailable)
@@ -846,9 +845,14 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 		// reply "error" so the dashboard surfaces the failure.
 		defer func() {
 			if r := recover(); r != nil {
+				// Panic cause at Error, verbose stack at Debug — stack
+				// frames leak internal paths to journald/log aggregators.
 				slog.Error("remote ws interrupt goroutine panic",
 					"node", nodeID, "key", capturedKey,
-					"panic", r, "stack", string(debug.Stack()))
+					"panic", fmt.Sprintf("%v", r))
+				slog.Debug("remote ws interrupt goroutine panic: stack",
+					"node", nodeID, "key", capturedKey,
+					"stack", string(debug.Stack()))
 				c.SendJSON(node.ServerMsg{Type: "interrupt_ack", ID: capturedID,
 					Status: "error", Key: capturedKey, Node: nodeID,
 					Error: "internal error"})
@@ -1095,10 +1099,20 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 	return false, nil
 }
 
+// maxWSConns caps simultaneous WebSocket upgrades. Exposed here so the
+// per-tick broadcast pool (below) stays sized to the real deployment
+// envelope instead of a hand-picked 256 that silently disables pooling
+// whenever connCount grows past it.
+const maxWSConns = 500
+
 // broadcastClientSnapPool reuses the []*wsClient backing array across
 // broadcasts so high-frequency session_state / sessions_update traffic does
-// not allocate one slice per broadcast. Entries that grow beyond 256 clients
-// are dropped on Put so the pool never pins a large backing array.
+// not allocate one slice per broadcast. The drop threshold is keyed off
+// maxWSConns so a steady-state fleet at any size up to the ceiling keeps
+// pooling; only genuinely oversized slices (e.g. after a brief spike over
+// the cap) fall through to a fresh allocation.
+const broadcastSnapPoolMaxCap = maxWSConns
+
 var broadcastClientSnapPool = sync.Pool{
 	New: func() any {
 		s := make([]*wsClient, 0, 32)
@@ -1142,7 +1156,7 @@ func (h *Hub) broadcastToAuthenticated(data []byte) {
 	// backing array so the pool slot is not permanently depleted — otherwise
 	// a single "big broadcast" would shrink the pool by one slot until
 	// process exit. R58-PERF-005.
-	if cap(snap) <= 256 {
+	if cap(snap) <= broadcastSnapPoolMaxCap {
 		*snapPtr = snap[:0]
 	} else {
 		*snapPtr = make([]*wsClient, 0, 32)
@@ -1493,9 +1507,14 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		// node) would otherwise take the whole naozhi service down.
 		defer func() {
 			if r := recover(); r != nil {
+				// Same split as handleRemoteInterrupt: cause at Error,
+				// stack at Debug. Stack frames expose internal layout.
 				slog.Error("remote ws send goroutine panic",
 					"node", nodeID, "key", capturedKey,
-					"panic", r, "stack", string(debug.Stack()))
+					"panic", fmt.Sprintf("%v", r))
+				slog.Debug("remote ws send goroutine panic: stack",
+					"node", nodeID, "key", capturedKey,
+					"stack", string(debug.Stack()))
 				c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID,
 					Status: "error", Key: capturedKey, Node: nodeID,
 					Error: "internal error"})

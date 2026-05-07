@@ -3,6 +3,7 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"net"
 	"net/url"
 	"os"
 	"regexp"
@@ -466,6 +467,21 @@ func validateConfig(cfg *Config) error {
 			if u.Host == "" {
 				return fmt.Errorf("weixin base_url must have a host")
 			}
+			// Literal-IP SSRF guard: a hostname like `wechat.example.com`
+			// still resolves at dial time via the OS resolver, so DNS-based
+			// SSRF requires a runtime Dialer hook; this stanza only blocks
+			// the cheap-and-common case of putting a raw private/loopback
+			// /link-local IP directly in config. CheckRedirect elsewhere
+			// blocks the redirect variant.
+			if host := u.Hostname(); host != "" {
+				if ip := net.ParseIP(host); ip != nil {
+					if ip.IsLoopback() || ip.IsPrivate() ||
+						ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+						ip.IsUnspecified() {
+						return fmt.Errorf("weixin base_url host %q is a loopback/private/link-local address; refusing (SSRF guard)", host)
+					}
+				}
+			}
 		}
 	}
 
@@ -562,6 +578,40 @@ func validateConfig(cfg *Config) error {
 		}
 	}
 
+	// CLI argv flows directly to exec.Command; reject NUL / C0 control bytes
+	// here so a compromised or mistaken config file cannot smuggle delimiters
+	// into argv that the OS would misinterpret. Primary argv injection gate
+	// lives in protocol/shim/session validators (R195-SEC), this adds a
+	// config-layer equivalent for configured args that never pass through
+	// user input validators.
+	if err := validateArgvStrings("cli.args", cfg.CLI.Args); err != nil {
+		return err
+	}
+	for _, b := range cfg.CLI.Backends {
+		if err := validateArgvStrings(fmt.Sprintf("cli.backends[%s].args", b.ID), b.Args); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// validateArgvStrings rejects control characters and NUL bytes inside argv
+// elements. Empty elements are rejected too so an accidental YAML "- " does
+// not silently pass an empty argument to the CLI. Kept narrow and local to
+// the config package; broader runtime validators (session.ValidateSessionKey,
+// shim.validateKeyForShim) cover user-controlled strings.
+func validateArgvStrings(field string, args []string) error {
+	for i, a := range args {
+		if a == "" {
+			return fmt.Errorf("%s[%d] is empty — refusing (likely YAML typo)", field, i)
+		}
+		for _, r := range a {
+			if r == 0 || (r < 0x20 && r != '\t') || r == 0x7f {
+				return fmt.Errorf("%s[%d] contains control byte (0x%02x) — refusing (argv injection guard)", field, i, r)
+			}
+		}
+	}
 	return nil
 }
 

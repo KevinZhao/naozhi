@@ -309,6 +309,11 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
+	// Permissions-Policy: block camera/microphone/geolocation/payment API
+	// access outright. Embedded CDN scripts (mermaid, KaTeX) are SRI-pinned
+	// but defence in depth — if the CDN is ever compromised, the hostile
+	// replacement still cannot silently invoke getUserMedia etc.
+	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("dashboard write", "err", err)
 	}

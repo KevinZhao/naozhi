@@ -4,10 +4,12 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"crypto/subtle"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -144,14 +146,74 @@ func (a *AuthHandlers) requireAuth(next http.HandlerFunc) http.HandlerFunc {
 
 func (a *AuthHandlers) serveLoginPage(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
-	w.Header().Set("Content-Security-Policy", "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'self'")
+	// CSP uses hash-based allowlist for the single inline <script>/<style>
+	// blocks baked into loginPageHTML. `unsafe-inline` would neutralise any
+	// future XSS defence on this origin, so we pin the exact bytes of the
+	// inline content instead. The hashes are computed once at package init
+	// (see loginPageCSP) so the page stays static but any accidental edit
+	// to the inline blocks immediately breaks loading — that's the
+	// intended self-check: if the hash no longer matches, an operator
+	// notices during manual review, rather than silently broadening the
+	// policy.
+	w.Header().Set("Content-Security-Policy", loginPageCSP)
 	w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
+	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
 	if _, err := w.Write([]byte(loginPageHTML)); err != nil {
 		slog.Debug("serve login page", "err", err)
 	}
+}
+
+// loginPageCSP is the strict CSP served with the login page. The inline
+// <script> and <style> blocks in loginPageHTML are allowlisted by their
+// SHA-256 hashes; adding `unsafe-inline` (as the prior implementation did)
+// would make any XSS on this origin capable of exfiltrating the dashboard
+// token field. Hashes are extracted from loginPageHTML at package init so
+// the string stays authoritative for both page bytes and CSP.
+var loginPageCSP = buildLoginPageCSP()
+
+func buildLoginPageCSP() string {
+	var scriptHashes, styleHashes []string
+	for _, b := range extractInlineBlocks(loginPageHTML, inlineScriptRe) {
+		scriptHashes = append(scriptHashes, "'sha256-"+hashInline(b)+"'")
+	}
+	for _, b := range extractInlineBlocks(loginPageHTML, inlineStyleRe) {
+		styleHashes = append(styleHashes, "'sha256-"+hashInline(b)+"'")
+	}
+	scriptSrc := "'none'"
+	if len(scriptHashes) > 0 {
+		scriptSrc = strings.Join(scriptHashes, " ")
+	}
+	styleSrc := "'none'"
+	if len(styleHashes) > 0 {
+		styleSrc = strings.Join(styleHashes, " ")
+	}
+	return "default-src 'none'; script-src " + scriptSrc + "; style-src " + styleSrc + "; connect-src 'self'"
+}
+
+// Separate regexes per tag: a single `</(?:script|style)>` alternation would
+// let a `<script>…</style>` cross-closure match and silently produce the
+// wrong hash (CSP still refuses the page, failing closed, but this keeps
+// the error surface obvious).
+var (
+	inlineScriptRe = regexp.MustCompile(`(?s)<script[^>]*>(.*?)</script>`)
+	inlineStyleRe  = regexp.MustCompile(`(?s)<style[^>]*>(.*?)</style>`)
+)
+
+func extractInlineBlocks(html string, re *regexp.Regexp) []string {
+	matches := re.FindAllStringSubmatch(html, -1)
+	out := make([]string, 0, len(matches))
+	for _, m := range matches {
+		out = append(out, m[1])
+	}
+	return out
+}
+
+func hashInline(body string) string {
+	sum := sha256.Sum256([]byte(body))
+	return base64.StdEncoding.EncodeToString(sum[:])
 }
 
 // clientIP extracts the client IP from the request.

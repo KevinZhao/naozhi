@@ -232,6 +232,23 @@ func pathErrReason(err error) string {
 // if the file cannot be read or written (e.g. no stateDir configured).
 func loadOrCreateCookieSecret(stateDir string) []byte {
 	if stateDir != "" {
+		// Defence in depth: the symlink check below pins cookie_secret
+		// itself, but a local attacker who can repoint stateDir (e.g.
+		// stateDir → /tmp/pwn/ because the parent is world-writable)
+		// bypasses that by placing a well-formed cookie_secret inside
+		// their own directory. Lstat'ing stateDir first makes that
+		// class of attack visible — a symlink'd stateDir gets flagged
+		// and the secret is regenerated (ephemeral fallback) instead
+		// of silently trusting whatever the target directory serves.
+		if fi, err := os.Lstat(stateDir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			slog.Error("cookie_secret regenerated because stateDir is a symlink",
+				"state_dir", stateDir, "reason", "statedir_symlink")
+			b := make([]byte, 32)
+			if _, err := rand.Read(b); err != nil {
+				panic("crypto/rand unavailable: " + err.Error())
+			}
+			return b
+		}
 		path := filepath.Join(stateDir, "cookie_secret")
 		// R188-SEC-L4: use os.Lstat so a symlink attack (e.g. cookie_secret →
 		// /etc/some-readable-file) is detected instead of silently validated
