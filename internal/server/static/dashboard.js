@@ -996,7 +996,11 @@ function sessionCardHtml(s) {
   const isActive = selectedKey === s.key && selectedNode === sNode;
   const isNew = s.state === 'new';
   const isCron = typeof s.key === 'string' && s.key.indexOf('cron:') === 0;
-  const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '') + (isCron ? ' cron-card' : '');
+  // sc-cron-card (not cron-card) because `.cron-card` is also the cron
+  // panel's job card class — reusing it here pulled the panel's padding /
+  // border / padding-right:100px into the sidebar card and pushed the time
+  // + agent badge into the wrong positions.
+  const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '') + (isCron ? ' sc-cron-card' : '');
 
   // Line 1: prompt. user_label (operator-set via rename) wins over any
   // auto-derived title so the rename is visible immediately across refreshes.
