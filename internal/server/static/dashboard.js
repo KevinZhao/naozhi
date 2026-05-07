@@ -65,6 +65,11 @@ const sessionBackends = {}; // per-session CLI backend picked at creation ("clau
 let cliBackends = null; // cached /api/cli/backends response: {backends, default, detected}
 let cliBackendsFetchedAt = 0;
 const sessionDrafts = {}; // key -> draft text, preserved across session switches
+// sessionScrollPos: sid(key,node) -> {fromBottom, atBottom}
+// 记住每个会话上次切走时的 events-scroll 位置，回来时恢复，避免正在阅读
+// 历史被强行拉回底部。atBottom=true 表示离开前就在底，回来后继续走贴底路径，
+// 让新事件照常把视口拉到最新。
+const sessionScrollPos = {};
 // sessionUnread: sid(key,node) -> integer count of unread "turn completed" events
 // for sessions that are NOT currently selected. Incremented on running->ready/dead
 // transitions (i.e. the model finished answering) and cleared when the user opens
@@ -1375,6 +1380,8 @@ function selectSession(key, node) {
     const draft = getMsgValue(inp);
     if (draft) sessionDrafts[selectedKey] = draft;
     else delete sessionDrafts[selectedKey];
+    // 同时快照当前会话的滚动位置，回来时恢复
+    saveScrollPos(selectedKey, selectedNode);
   }
   if (key.startsWith('_discovered:')) {
     const pid = parseInt(key.split(':')[1]);
@@ -1438,6 +1445,7 @@ function selectSession(key, node) {
 async function dismissSession(key, node, opts) {
   node = node || 'local';
   delete sessionDrafts[key];
+  delete sessionScrollPos[sid(key, node)];
   // sessionBackends is normally consumed on first sendMessage. A dismiss
   // before any send leaves the entry behind; clear it defensively so a
   // subsequent re-create with the same key (unlikely but possible if the
@@ -1452,6 +1460,7 @@ async function dismissSession(key, node, opts) {
     if (selectedKey === key) {
       selectedKey = null;
       document.getElementById('main').innerHTML = mainEmptyHtml();
+      wireQuickAskInput();
     }
     lastVersion = 0;
     debouncedFetchSessions();
@@ -1481,6 +1490,7 @@ async function dismissSession(key, node, opts) {
         pendingDiscovered = null;
         stopPreviewPolling();
         document.getElementById('main').innerHTML = mainEmptyHtml();
+        wireQuickAskInput();
       }
       const card = document.querySelector('.session-card[data-key="' + key + '"]');
       if (card) card.remove();
@@ -1507,6 +1517,7 @@ async function dismissSession(key, node, opts) {
       selectedKey = null;
       if (wsm.subscribedKey === key) wsm.unsubscribe();
       document.getElementById('main').innerHTML = mainEmptyHtml();
+      wireQuickAskInput();
     }
     lastVersion = 0;
     debouncedFetchSessions();
@@ -1771,7 +1782,7 @@ function renderMainShell() {
     '<div class="input-area' + (voiceInputMode ? ' voice-mode' : '') + '" id="input-area">' +
       '<div class="file-preview" id="file-preview"></div>' +
       '<div class="input-row">' +
-        '<button class="btn-icon" onclick="openFilePicker()" title="上传图片" aria-label="上传图片">&#x1f4ce;</button>' +
+        '<button class="btn-icon" onclick="openFilePicker()" title="上传图片或 PDF" aria-label="上传图片或 PDF">&#x1f4ce;</button>' +
         '<button class="btn-icon btn-mic" id="btn-mic" onclick="toggleInputMode()" title="' + (voiceInputMode ? '\u5207\u6362\u952e\u76d8' : '\u5207\u6362\u8bed\u97f3') + '" aria-label="' + (voiceInputMode ? '\u5207\u6362\u5230\u952e\u76d8\u8f93\u5165' : '\u5207\u6362\u5230\u8bed\u97f3\u8f93\u5165') + '">' + (voiceInputMode ? '&#x2328;' : '&#x1f3a4;') + '</button>' +
         '<div id="msg-input" contenteditable="true" role="textbox" aria-label="消息输入框" aria-multiline="true" data-placeholder="send a message..." onkeydown="handleKey(event)" oncompositionend="lastCompositionEnd=Date.now()"></div>' +
         '<button class="btn-hold-talk" id="btn-hold-talk" title="\u6309\u4f4f\u8bf4\u8bdd\u6539\u5f55\u97f3" aria-label="\u6309\u4f4f\u8bf4\u8bdd\u5f00\u59cb\u5f55\u97f3">\u6309\u4f4f\u8bf4\u8bdd</button>' +
@@ -1779,7 +1790,7 @@ function renderMainShell() {
         '<button class="btn-icon btn-stop" id="btn-stop" onclick="interruptSession()" title="stop" aria-label="Stop current turn">&#x25A0;</button>' +
       '</div>' +
       '<div class="input-hints">Enter send &middot; Shift+Enter newline &middot; Esc interrupt</div>' +
-      '<input type="file" id="file-input" accept="image/*" multiple style="display:none" onchange="handleFiles(this.files)">' +
+      '<input type="file" id="file-input" accept="image/*,application/pdf" multiple style="display:none" onchange="handleFiles(this.files)">' +
     '</div>';
 
   // Enable drag-drop
@@ -2028,8 +2039,10 @@ function renderEvents(events) {
   runMermaid();
   runKatex();
   navRebuild();
-  // Bottom-anchor after async layout (button insert, images, mermaid/katex).
-  stickEventsBottom();
+  // 若有上次切走时保存的滚动位置且不在底部，恢复它；否则照旧贴底。
+  if (!restoreScrollPos(selectedKey, selectedNode)) {
+    stickEventsBottom();
+  }
 }
 
 function appendEvents(events) {
@@ -2144,12 +2157,27 @@ function eventHtml(e) {
     content = esc(e.detail || e.summary || e.type);
   }
 
-  // Render image thumbnails for user messages
+  // Render image thumbnails for user messages. When ImagePaths is populated
+  // (image was persisted to the workspace attachment directory), the click
+  // target is the full-size /api/sessions/attachment URL instead of the
+  // thumbnail itself — the lightbox then shows the original image rather
+  // than a 600 px blur. Falls back to the data URI for legacy entries that
+  // predate the persist path. The thumbnail's <img src> is always the data
+  // URI so the bubble render stays instant (no network fetch for preview).
   let imgHtml = '';
   if (e.images && e.images.length > 0) {
-    imgHtml = '<div class="event-images">' + e.images.map(src =>
-      '<img src="' + escAttr(src) + '" loading="lazy" onclick="openLightbox(this.src)">'
-    ).join('') + '</div>';
+    const paths = e.image_paths || [];
+    imgHtml = '<div class="event-images">' + e.images.map((src, i) => {
+      const p = paths[i] || '';
+      let full = src;
+      if (p && selectedKey) {
+        full = '/api/sessions/attachment?key=' + encodeURIComponent(selectedKey) +
+          '&path=' + encodeURIComponent(p);
+      }
+      return '<img src="' + escAttr(src) + '" loading="lazy" ' +
+        'data-full="' + escAttr(full) + '" ' +
+        'onclick="openLightbox(this.dataset.full)">';
+    }).join('') + '</div>';
   }
 
   // Copy + ask-aside bubble actions share one display rule: only long
@@ -2350,7 +2378,16 @@ async function sendMessage() {
   // raw image batch must stay under ~9 MB to fit alongside the JSON
   // envelope. Pre-check here so users get a clear "too large — split into
   // fewer pictures" message instead of a silent "没 working" (R192 regression).
-  const totalBytes = pendingFiles.reduce((n, f) => n + (f.normalizedSize || f.file.size || 0), 0);
+  //
+  // PDFs do NOT count toward this budget — they travel as file_ref (server
+  // persists the bytes to the session workspace; only the path string ends
+  // up in the NDJSON line). Filtering by kind here keeps mixed image+PDF
+  // sends from tripping the cap on the PDF's 20 MB that will never hit
+  // stdin anyway.
+  const totalBytes = pendingFiles.reduce((n, f) => {
+    if (f.kind === 'pdf' || f.serverKind === 'file_ref') return n;
+    return n + (f.normalizedSize || f.file.size || 0);
+  }, 0);
   const batchCap = 9 * 1024 * 1024;
   if (totalBytes > batchCap) {
     showToast('图片总大小 ' + Math.ceil(totalBytes / 1024 / 1024) + ' MB 超过 9 MB 上限，请分批发送或减少图片', 'warning');
@@ -2816,6 +2853,44 @@ function scrollEventsToBottom() {
   if (el) el.scrollTop = el.scrollHeight;
 }
 
+// saveScrollPos / restoreScrollPos: 按 (key,node) 保存离开时的滚动位置，
+// 回到同一会话时恢复。用「距底距离」而不是 scrollTop，因为会话再进入时
+// 可能会多加载更早的事件导致 scrollHeight 变大，距底更稳定。atBottom 单
+// 独标记以便新消息到来时继续贴底（shell 式滚动），只有用户明确滚开时才
+// 进入「保持位置」分支。
+function saveScrollPos(key, node) {
+  const el = document.getElementById('events-scroll');
+  if (!el || !key) return;
+  // clientHeight === 0 发生在 events-scroll 还未 layout 完（极早期竞态），
+  // 这时算出来的 fromBottom=0、atBottom=true 会把之前真实保存的位置擦掉。
+  // 直接跳过，保留上一份快照。
+  if (el.clientHeight === 0) return;
+  const fromBottom = el.scrollHeight - el.scrollTop - el.clientHeight;
+  const atBottom = fromBottom <= 30;
+  sessionScrollPos[sid(key, node || 'local')] = { fromBottom, atBottom };
+}
+
+// restoreScrollPos: 如果有保存的位置且不是贴底，则恢复并返回 true；
+// 否则（无记录 / 之前在底）返回 false，交由调用方走 stickEventsBottom 贴底。
+function restoreScrollPos(key, node) {
+  const el = document.getElementById('events-scroll');
+  if (!el || !key) return false;
+  const pos = sessionScrollPos[sid(key, node || 'local')];
+  if (!pos || pos.atBottom) return false;
+  const apply = () => {
+    const target = Math.max(0, el.scrollHeight - el.clientHeight - pos.fromBottom);
+    el.scrollTop = target;
+  };
+  apply();
+  // 异步布局（图片 / mermaid / katex / "加载更早" 按钮注入）会改变
+  // scrollHeight，再跑两帧复位保持「距底距离」不变。
+  requestAnimationFrame(() => {
+    apply();
+    requestAnimationFrame(apply);
+  });
+  return true;
+}
+
 // stickEventsBottom forces the events pane to the last bubble and keeps it there
 // across the async layout tail — lazy-loaded images, mermaid diagrams, katex
 // formulas, and the "load earlier" button that inserts at the top after the
@@ -2877,18 +2952,22 @@ function navCurrentIdxFromScroll() {
 
 function navMsg(dir) {
   if (navUserEls.length === 0) return;
-  // Seed navIdx from scroll position on the first keypress so the arrow
-  // steps relative to the user's current view, not from the list's edge.
-  if (navIdx < 0) navIdx = navCurrentIdxFromScroll();
+  // Shell-history 语义：第一次按方向键只定位到「视图锚点」消息本身
+  // （prev → 最近一条用户消息；next → 视图内第一条用户消息），
+  // 不额外再走一步。只有已在导航中（navIdx >= 0）时才做 ±1 步进。
+  const firstPress = navIdx < 0;
+  if (firstPress) navIdx = navCurrentIdxFromScroll();
   let target;
   if (dir === 'prev') {
-    // navIdx === -1 means viewport is above every user msg → first prev = last;
-    // otherwise step back, clamped at 0.
-    target = navIdx < 0 ? navUserEls.length - 1 : Math.max(0, navIdx - 1);
+    target = firstPress
+      ? (navIdx < 0 ? navUserEls.length - 1 : navIdx)
+      : Math.max(0, navIdx - 1);
   } else {
-    target = navIdx < 0 ? 0 : Math.min(navUserEls.length - 1, navIdx + 1);
+    target = firstPress
+      ? (navIdx < 0 ? 0 : navIdx)
+      : Math.min(navUserEls.length - 1, navIdx + 1);
   }
-  if (target === navIdx) {
+  if (!firstPress && target === navIdx) {
     // Already at the edge — flash the current one so the user sees the no-op.
     const cur = navUserEls[navIdx];
     if (cur) {
@@ -3268,18 +3347,46 @@ function drainUploadQueue() {
   }
 }
 
+// fileKind maps a browser File's MIME type to the 2 classes naozhi accepts.
+// PDF sniffing looks at file.type AND the .pdf extension because some mobile
+// Safari builds drop a `content-type: application/octet-stream` on PDFs
+// picked from iCloud Drive — the server still sniffs magic bytes, so accepting
+// optimistically here just lets the server give the authoritative reject.
+function fileKind(f) {
+  if (f && f.type === 'application/pdf') return 'pdf';
+  if (f && /\.pdf$/i.test(f.name || '')) return 'pdf';
+  if (f && f.type && f.type.startsWith('image/')) return 'image';
+  return '';
+}
+
 function handleFiles(fileList) {
   const toUpload = [];
-  // Relax the source-file ceiling to 40 MB: iPhone HEIC/JPEG straight from
-  // Photos is often ~6–12 MB, and browsers deliver HEIC as-is. We downscale
-  // before upload, so the 10 MB server ceiling applies to the re-encoded JPEG.
+  // Image source ceiling is kept at 40 MB so iPhone HEIC/JPEG straight from
+  // Photos (~6–12 MB) still fits; normalizeImage downscales before upload,
+  // so the 10 MB server cap applies to the re-encoded JPEG. PDFs bypass
+  // normalization and must stay under the server's 32 MB Anthropic ceiling.
+  const MAX_IMAGE_BYTES = 40 * 1024 * 1024;
+  const MAX_PDF_BYTES = 32 * 1024 * 1024;
   for (const raw of fileList) {
-    if (!raw.type.startsWith('image/')) continue;
-    if (raw.size > 40 * 1024 * 1024) { showToast('文件过大（上限 40MB）', 'warning'); continue; }
+    const kind = fileKind(raw);
+    if (!kind) continue;
+    if (kind === 'pdf' && raw.size > MAX_PDF_BYTES) {
+      showToast('PDF 过大（上限 32 MB）', 'warning');
+      continue;
+    }
+    if (kind === 'image' && raw.size > MAX_IMAGE_BYTES) {
+      showToast('图片过大（上限 40 MB）', 'warning');
+      continue;
+    }
     if (pendingFiles.length >= 20) { showToast('最多上传 20 个文件', 'warning'); break; }
     const entry = {
       file: raw,
-      blobUrl: URL.createObjectURL(raw),
+      kind,
+      // blobUrl is still set for images so the existing thumbnail path works
+      // unchanged. PDFs render as an icon card (see renderFilePreviews) so no
+      // URL.createObjectURL is needed and we skip it to save the tiny
+      // revoke-on-remove bookkeeping.
+      blobUrl: kind === 'image' ? URL.createObjectURL(raw) : '',
       id: '',
       status: 'uploading',
       error: '',
@@ -3298,10 +3405,14 @@ async function uploadEntry(entry) {
   entry.error = '';
   renderFilePreviews();
   try {
-    const file = await normalizeImage(entry.file);
-    // Track the *normalized* byte size so sendMessage can pre-check the
-    // batch against the 12 MB CLI-stdin ceiling. Raw file.size would
-    // overstate HEIC/huge photos that we downscale before upload.
+    // PDFs skip normalizeImage: they travel to the server as-is and end up
+    // persisted to the session workspace (see
+    // docs/rfc/pdf-attachment.md). Only images go through the downscale
+    // step. Track the transmitted byte size on `normalizedSize` for the
+    // sendMessage batch-cap check below — for PDFs this equals raw size
+    // but is NOT counted against the 9 MB image batch cap (PDFs travel
+    // via file_ref, not inline base64).
+    const file = entry.kind === 'pdf' ? entry.file : await normalizeImage(entry.file);
     entry.normalizedSize = file.size;
     const fd = new FormData();
     fd.append('file', file);
@@ -3319,6 +3430,11 @@ async function uploadEntry(entry) {
     const j = await r.json();
     if (!j.id) throw new Error('no id in response');
     entry.id = j.id;
+    // Server echoes kind/size/name — trust its view so a client/server
+    // sniff disagreement (optimistic PDF accept above, for instance)
+    // settles in the server's favour. The UI card uses these.
+    if (j.kind) entry.serverKind = j.kind;
+    if (j.name) entry.serverName = j.name;
     entry.status = 'ready';
   } catch (e) {
     entry.status = 'error';
@@ -3422,6 +3538,16 @@ function onThumbKeyDown(ev, idx) {
   if (next) next.focus();
 }
 
+// formatFileSize renders a byte count as a short human label (e.g. "1.2 MB").
+// Only used for PDF chips where we want to surface size to the user; images
+// still show the thumbnail itself, so size is not rendered for them.
+function formatFileSize(n) {
+  if (!n || n < 0) return '';
+  if (n >= 1024 * 1024) return (n / (1024 * 1024)).toFixed(1) + ' MB';
+  if (n >= 1024) return Math.round(n / 1024) + ' KB';
+  return n + ' B';
+}
+
 function renderFilePreviews() {
   const el = document.getElementById('file-preview');
   if (!el) return;
@@ -3434,9 +3560,24 @@ function renderFilePreviews() {
     // stable for the uploadEntry completion handler. tabindex=0 makes the
     // thumb keyboard-focusable; ArrowLeft/Right then reorder via onThumbKeyDown.
     const draggable = entry.status === 'ready';
-    return '<div class="file-thumb ' + entry.status + '"' +
+    const isPDF = entry.kind === 'pdf';
+    // PDF card: fixed-size chip with the .pdf icon + filename + size.
+    // Image thumb: the existing <img> preview. Both share the remove button
+    // and the upload-status overlay.
+    const body = isPDF
+      ? ('<div class="pdf-chip" aria-hidden="true">' +
+           '<div class="pdf-icon">PDF</div>' +
+           '<div class="pdf-meta">' +
+             '<div class="pdf-name" title="' + escAttr(entry.file.name || 'document.pdf') + '">' +
+               esc((entry.file.name || 'document.pdf')) +
+             '</div>' +
+             '<div class="pdf-size">' + esc(formatFileSize(entry.file.size || 0)) + '</div>' +
+           '</div>' +
+         '</div>')
+      : '<img src="' + entry.blobUrl + '" draggable="false">';
+    return '<div class="file-thumb ' + entry.status + (isPDF ? ' pdf' : '') + '"' +
       ' data-idx="' + i + '"' +
-      (draggable ? ' draggable="true" tabindex="0" role="button" aria-label="\u56fe\u7247 ' + (i + 1) + '\uff0c\u62d6\u52a8\u6216\u7528\u5de6\u53f3\u65b9\u5411\u952e\u6392\u5e8f"' : '') +
+      (draggable ? ' draggable="true" tabindex="0" role="button" aria-label="' + (isPDF ? 'PDF' : '\u56fe\u7247') + ' ' + (i + 1) + '\uff0c\u62d6\u52a8\u6216\u7528\u5de6\u53f3\u65b9\u5411\u952e\u6392\u5e8f"' : '') +
       (draggable ? ' ondragstart="onThumbDragStart(event,' + i + ')"' : '') +
       (draggable ? ' ondragover="onThumbDragOver(event)"' : '') +
       (draggable ? ' ondragleave="onThumbDragLeave(event)"' : '') +
@@ -3444,9 +3585,9 @@ function renderFilePreviews() {
       (draggable ? ' ondragend="onThumbDragEnd()"' : '') +
       (draggable ? ' onkeydown="onThumbKeyDown(event,' + i + ')"' : '') +
       '>' +
-      '<img src="' + entry.blobUrl + '" draggable="false">' +
+      body +
       overlay +
-      '<button class="remove" onclick="removeFile(' + i + ')" title="\u79fb\u9664\u56fe\u7247" aria-label="\u79fb\u9664\u56fe\u7247">\u00d7</button>' +
+      '<button class="remove" onclick="removeFile(' + i + ')" title="\u79fb\u9664" aria-label="\u79fb\u9664">\u00d7</button>' +
       '</div>';
   }).join('');
 }
@@ -4595,26 +4736,190 @@ function doCreateSession() {
   setTimeout(() => { const input = document.getElementById('msg-input'); if (input) input.focus(); }, 100);
 }
 
+// createQuickSession opens a pre-configured session with zero clicks:
+// general agent, default backend, default workspace (session.cwd). No modal,
+// no palette, no project picker — optimised for "I just want to ask Claude
+// something fast" without deciding where it lives first. The user can still
+// /cd later if they want a different workspace, or rename the session.
+//
+// When `initialText` is non-empty, it is dropped into the composer after
+// renderMainShell paints AND sendMessage is invoked — so submitQuickAsk
+// ships "type in empty-state → Enter → question flies" without the user
+// having to click the composer a second time.
+//
+// renderMainShell is synchronous and writes `#msg-input` into the DOM
+// immediately, but we still defer the setMsgValue + sendMessage call by
+// one rAF tick so the browser has a chance to flush layout (contenteditable
+// focus + selection state is finicky before paint). If `#msg-input` is
+// still missing after the tick we ship text back to the caller via the
+// optional `onTextStranded` callback so the caller can re-enable its own
+// input and surface a toast — prevents silent message loss if a future
+// renderMainShell refactor becomes async or conditional.
+//
+// Rationale: the modal + palette are the right default for project work, but
+// they add 2-3 clicks to the common "quick lookup" case. Surfacing this
+// entry point — paired with the empty-state quick-ask input — lets the
+// palette stay rich without penalising quick queries.
+function createQuickSession(initialText, onTextStranded) {
+  // Close any lingering modal/palette so repeated entry-point triggers don't
+  // stack overlays (e.g. a quick-ask fired while a modal was still mounted).
+  document.querySelectorAll('.modal-overlay, .cmd-palette-overlay').forEach(el => el.remove());
+
+  const workspace = defaultWorkspace || '';
+  const agent = 'general';
+  const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'quick') : 'quick';
+
+  sessionCounter++;
+  const now = new Date();
+  const ts = now.toISOString().slice(0,10) + '-' +
+    now.toTimeString().slice(0,8).replace(/:/g, '') + '-' + sessionCounter;
+  const key = buildDashboardSessionKey(ts, folderName, agent);
+
+  if (workspace) sessionWorkspaces[key] = workspace;
+  // Backend left unset → router falls back to the configured default.
+
+  stopPreviewPolling();
+  wsm.unsubscribe();
+  selectedKey = key;
+  selectedNode = 'local';
+  try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
+  if (typeof updateNodeSelector === 'function') updateNodeSelector();
+  lastEventTime = 0;
+  mobileEnterChat();
+  document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
+  renderMainShell();
+  navRebuild();
+  lastVersion = 0;
+  debouncedFetchSessions();
+  const text = (initialText || '').trim();
+  // requestAnimationFrame ensures the composer DOM produced by renderMainShell
+  // is laid out before we write into it. Falls back to setTimeout when rAF
+  // is unavailable (shouldn't happen on any supported browser but keeps the
+  // branch testable in jsdom-style runners).
+  const schedule = typeof requestAnimationFrame === 'function'
+    ? requestAnimationFrame
+    : (fn) => setTimeout(fn, 16);
+  schedule(() => {
+    const input = document.getElementById('msg-input');
+    if (!input) {
+      // Composer never materialised — surface the text back so the caller
+      // can restore it rather than leaving the user staring at a blank
+      // screen wondering where their question went.
+      if (text && typeof onTextStranded === 'function') onTextStranded(text);
+      return;
+    }
+    if (text) {
+      setMsgValue(input, text);
+      // sendMessage reads from #msg-input directly — no extra threading needed.
+      sendMessage();
+    } else {
+      input.focus();
+    }
+  });
+}
+
+// submitQuickAsk is the Enter-key / submit-button handler for the empty-state
+// "问点什么？" composer. Reads the textarea, creates a quick session, and
+// forwards the text to sendMessage() in one shot — so the user goes
+// "type → Enter → see answer" with zero intermediate clicks.
+function submitQuickAsk(e) {
+  if (e && e.preventDefault) e.preventDefault();
+  const ta = document.getElementById('quick-ask-input');
+  if (!ta) return;
+  const text = (ta.value || '').trim();
+  if (!text) { ta.focus(); return; }
+  // Disable while the session spins up so a double-Enter can't fire two
+  // sessions. renderMainShell synchronously replaces the empty-state DOM
+  // including this textarea, so the "re-enable" obligation falls on the
+  // stranded-text callback below (only hit when the composer failed to
+  // materialise, an edge case we still want to recover from).
+  ta.disabled = true;
+  const btn = document.querySelector('.quick-ask-send');
+  if (btn) btn.disabled = true;
+  createQuickSession(text, function(strandedText) {
+    // Composer was supposed to appear but didn't. Put the text back in the
+    // quick-ask box, re-enable controls, and tell the user so they can retry.
+    // Guarded with existence checks because by this point the DOM may already
+    // have been replaced by a late-arriving render.
+    const ta2 = document.getElementById('quick-ask-input');
+    const btn2 = document.querySelector('.quick-ask-send');
+    if (ta2) { ta2.disabled = false; ta2.value = strandedText; ta2.focus(); }
+    if (btn2) btn2.disabled = false;
+    if (typeof showToast === 'function') showToast('发送失败，请重试', 'error');
+  });
+}
+
+// wireQuickAskInput binds the in-empty-state textarea to Enter-to-submit and
+// auto-grow behaviour. Safe to call repeatedly — a data-bound marker prevents
+// double-wire after mainEmptyHtml() re-renders on dismiss paths.
+//
+// autofocus: when true, steal keyboard focus to the textarea so "open the
+// page, start typing" works with zero clicks. Dismiss paths pass false
+// because the user may already be mid-click on the sidebar to switch to
+// another session — grabbing focus 50ms later would intercept keystrokes.
+function wireQuickAskInput(autofocus) {
+  const ta = document.getElementById('quick-ask-input');
+  if (!ta || ta.dataset.wired === '1') return;
+  ta.dataset.wired = '1';
+  ta.addEventListener('keydown', function(e) {
+    // Enter (without modifiers) sends; Shift+Enter keeps native newline.
+    if (e.key === 'Enter' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !e.isComposing) {
+      e.preventDefault();
+      submitQuickAsk(e);
+    }
+  });
+  ta.addEventListener('input', function() {
+    ta.style.height = 'auto';
+    const next = Math.min(ta.scrollHeight, 200);
+    ta.style.height = next + 'px';
+  });
+  // Autofocus only when the caller asks for it AND we're on a pointer-fine
+  // device. On mobile we skip it — iOS Safari pops the keyboard and shifts
+  // layout, which is worse UX than "tap to type". On dismiss-path repaints
+  // we skip it to avoid intercepting a follow-up click/keystroke the user
+  // already aimed at something else.
+  if (autofocus && window.matchMedia && window.matchMedia('(pointer: fine)').matches) {
+    setTimeout(() => ta.focus(), 50);
+  }
+}
+// Wire on first paint (cold start HTML is already in the DOM). Cold start is
+// the one path where autofocus is unambiguously wanted: the user just loaded
+// the dashboard, there's no other UI they could be aiming at.
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => wireQuickAskInput(true));
+} else {
+  wireQuickAskInput(true);
+}
+
 
 // --- Utilities ---
 
 // mainEmptyHtml returns the inner HTML for `#main` when no session is
 // selected. Called after dismiss/remove flows that nuke the active
 // session. Kept in sync with the cold-start markup in dashboard.html —
-// both render a `>_` mark, a Chinese lead line, and a primary CTA that
-// invokes createNewSession. Consolidating the three dismiss-path copies
-// into a helper means a future tweak touches one place, not three, and
-// prevents English/Chinese divergence (the prior inline "select a session"
-// string was the only untranslated empty-state left after R110).
+// both render a `>_` mark, a Chinese lead line "问点什么？", and the
+// quick-ask textarea that fires submitQuickAsk() on Enter. Consolidating
+// the copies into a helper means a future tweak touches one place and
+// prevents cold-start / dismiss-path divergence.
+//
+// After rendering, callers SHOULD invoke wireQuickAskInput() to bind the
+// keydown / auto-grow handlers on the freshly-painted textarea (the cold
+// start HTML gets wired on DOMContentLoaded).
 function mainEmptyHtml() {
-  return '<div class="empty-state empty-cta" style="flex-direction:column;gap:16px">' +
+  return '<div class="empty-state empty-cta empty-quick" style="flex-direction:column;gap:14px">' +
     '<span style="font-size:40px;opacity:.35" aria-hidden="true">&gt;_</span>' +
-    '<div style="color:var(--nz-text);font-size:17px">选一个会话开始，或新建一个</div>' +
-    '<button class="empty-cta-btn" type="button" onclick="createNewSession()" ' +
-      'style="padding:10px 22px;border-radius:8px;border:1px solid var(--nz-blue);' +
-      'background:rgba(31,111,235,.12);color:var(--nz-accent);font-size:14px;' +
-      'cursor:pointer;font-family:inherit">+ 新建会话</button>' +
-    '<div style="font-size:12px;color:var(--nz-text-dim)">从侧栏选择已有会话，或点上方按钮新建</div>' +
+    '<div style="color:var(--nz-text);font-size:17px">问点什么？</div>' +
+    '<form class="quick-ask-form" onsubmit="event.preventDefault();submitQuickAsk(event)">' +
+      '<textarea id="quick-ask-input" class="quick-ask-input" rows="1" ' +
+        'placeholder="Enter 发送 · Shift+Enter 换行" autocomplete="off" spellcheck="false" ' +
+        'aria-label="快速提问输入框"></textarea>' +
+      '<button type="submit" class="quick-ask-send" aria-label="发送">' +
+        '<svg viewBox="0 0 24 24" aria-hidden="true">' +
+          '<line x1="22" y1="2" x2="11" y2="13"/>' +
+          '<polygon points="22 2 15 22 11 13 2 9 22 2"/>' +
+        '</svg></button>' +
+    '</form>' +
+    '<div style="font-size:12px;color:var(--nz-text-dim)">默认目录 · general agent · 随时 <code>/cd</code> 切换目录，或用上方 <b>+</b> 开项目会话</div>' +
     // R110-P1 空闲态 Home 仪表 MVP 占位：renderRecentSessionsPanel()
     // 按需注入"最近会话"缩略列表；零 session 时渲染为空字符串，保留冷启动
     // 简洁空态不退化。Helper 外部调用，不嵌在本 HTML 里以保持 pure 可读。
@@ -5259,12 +5564,23 @@ function escJs(s) {
   if (!s) return '';
   return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/</g,'\\u003c').replace(/>/g,'\\u003e');
 }
-// URL schemes that are safe to embed in <a href>. Anything else (including
-// javascript:, data:, vbscript:, file:, about:) gets rewritten to '#'.
+// URL schemes that are safe to embed in <a href>.
+// RNEW-SEC-007: Only https?: and fragment-only URLs (#...) are accepted.
+// Previously the allowlist also matched mailto:, absolute paths (/...),
+// and query-only URLs (?...). Those introduced defence-in-depth gaps:
+//   - mailto: can trigger unexpected behaviour in Electron/extension hosts
+//     and is never present in LLM-rendered markdown anchor targets today.
+//   - A single leading "/" lets any string starting with a slash pass the
+//     check; if a caller ever forgot to esc() the capture first, a payload
+//     like "/"+"><script>..." would reach href and bypass the scheme
+//     gate. The stricter regex fails closed in that scenario.
+// Internal links should be constructed against absolute /api/... paths in
+// code, not routed through safeUrl.
+// Anything else (javascript:, data:, vbscript:, file:, about:) -> '#'.
 function safeUrl(u) {
   if (!u) return '#';
   const trimmed = String(u).trim();
-  if (/^(https?:|mailto:|\/|#|\?)/i.test(trimmed)) return trimmed;
+  if (/^(https?:|#)/i.test(trimmed)) return trimmed;
   return '#';
 }
 
@@ -5998,7 +6314,10 @@ function inlineMd(s) {
   // — on a 200-line response the savings are measurable in V8 profiler.
   const mathTokens = [];
   if (s.indexOf('$') !== -1 || s.indexOf('\\(') !== -1) {
-    s = s.replace(/\$([^\$\n]+?)\$/g, function(_, tex) {
+    // `$...$`: require non-alphanumeric outside + LaTeX-ish char inside,
+    // else prose like "每月$650$USD" gets rendered as italic math.
+    s = s.replace(/(?<![A-Za-z0-9])\$([^\s\$][^\$\n]*?[^\s\$]|[^\s\$])\$(?![A-Za-z0-9])/g, function(match, tex) {
+      if (!/[\\^_{}]/.test(tex)) return match;
       const idx = mathTokens.length;
       mathTokens.push(renderKatex(tex, false));
       return '\x00KTX' + idx + '\x00';
@@ -6414,7 +6733,14 @@ const wsm = {
     // happily re-try every 1-30s and wake the 429 bucket over and over.
     const now = Date.now();
     const authGap = Math.max(0, this._authBlockUntil - now);
-    const delay = Math.max(this.backoff, authGap);
+    // RNEW-UX-001: add randomised jitter (0-500ms) on top of the computed
+    // delay. Without jitter, N tabs that all dropped together on the same
+    // server restart would redial on identical millisecond ticks, briefly
+    // saturating the upgrade limiter and causing a thundering herd. The
+    // jitter is additive (never shortens the gate) so the auth-block
+    // invariant above is preserved.
+    const jitter = Math.floor(Math.random() * 500);
+    const delay = Math.max(this.backoff, authGap) + jitter;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
@@ -6608,8 +6934,10 @@ const wsm = {
       runMermaid();
       runKatex();
       navRebuild();
-      // Bottom-anchor after async layout (button insert, images, mermaid/katex).
-      stickEventsBottom();
+      // 若有上次切走时保存的滚动位置且不在底部，恢复它；否则照旧贴底。
+      if (!restoreScrollPos(selectedKey, selectedNode)) {
+        stickEventsBottom();
+      }
     } else {
       const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
       // Remove stale "no events yet" before processing incremental events
@@ -7612,6 +7940,47 @@ let cronNotifyDefault = null;
 // "what needs my eyeballs" dovetails with the top-level signal.
 let cronFilterQuery = '';
 let cronFilterStatus = 'all';
+// cronSortOrder 控制 cron 面板列表的排序模式。保存在 localStorage 里，
+// 切回页面保留用户偏好。四种模式见 cronSortComparators。cron-v2-polish §3.4。
+let cronSortOrder = (function() {
+  try {
+    const saved = localStorage.getItem('nz_cron_sort');
+    if (saved && cronSortComparatorsHasKey(saved)) return saved;
+  } catch (_) {}
+  return 'created_desc';
+})();
+
+// cronSortComparators 定义四种排序模式的 compare 函数。
+// - created_desc: 默认，最新创建在前（与旧版一致）
+// - next_asc    : 按 next_run 升序——"接下来谁先跑"排在前；无 next_run 沉底
+// - last_desc   : 最近跑过的排在前；从未跑过沉底
+// - title_asc   : 按 title / prompt-fallback 字典序升序——便于按名字扫
+const cronSortComparators = {
+  created_desc: (a, b) => (b.created_at || 0) - (a.created_at || 0),
+  next_asc: (a, b) => {
+    const av = a.next_run || Number.POSITIVE_INFINITY;
+    const bv = b.next_run || Number.POSITIVE_INFINITY;
+    return av - bv;
+  },
+  last_desc: (a, b) => (b.last_run_at || 0) - (a.last_run_at || 0),
+  title_asc: (a, b) => {
+    const at = ((a.title || '').trim() || firstNonEmptyLine(a.prompt || '', 60)).toLowerCase();
+    const bt = ((b.title || '').trim() || firstNonEmptyLine(b.prompt || '', 60)).toLowerCase();
+    return at.localeCompare(bt);
+  },
+};
+
+function cronSortComparatorsHasKey(k) {
+  return Object.prototype.hasOwnProperty.call(cronSortComparators, k);
+}
+
+// setCronSortOrder 切换排序模式，持久化到 localStorage 并重绘列表。
+function setCronSortOrder(order) {
+  if (!cronSortComparatorsHasKey(order)) return;
+  cronSortOrder = order;
+  try { localStorage.setItem('nz_cron_sort', order); } catch (_) {}
+  renderCronList();
+}
 
 // Pads an integer to two digits (e.g. 7 -> "07"). Used for HH/MM rendering.
 function pad2(n) { return (n < 10 ? '0' : '') + n; }
@@ -7621,16 +7990,16 @@ function pad2(n) { return (n < 10 ? '0' : '') + n; }
 // can restore. Returning null means "we don't recognize this — fall back to
 // the raw expression editor." This is intentionally narrow: we only recognize
 // the exact shapes buildFreqSchedule emits, so round-tripping is lossless.
+// parseCronToFreq identifies the descriptor that buildFreqSchedule would have
+// produced this expression from, so edit-modal can restore the picker state.
+// Return null means the expression can't round-trip — legacy jobs with
+// interval/custom shapes now degrade to the default Daily picker on edit
+// (acceptable: user re-picks once and the new shape is persisted).
 function parseCronToFreq(expr) {
   if (!expr) return null;
   const s = expr.trim();
-  let m = s.match(/^@every\s+(\d+)(m|h)$/i);
-  if (m) {
-    const n = parseInt(m[1], 10);
-    const unit = m[2].toLowerCase();
-    if (unit === 'm' && n < 5) return null;
-    return { mode: 'interval', n, unit };
-  }
+  // Hourly: "0 * * * *"
+  if (s === '0 * * * *') return { mode: 'hourly' };
   const parts = s.split(/\s+/);
   if (parts.length !== 5) return null;
   const [mm, hh, dom, mon, dow] = parts;
@@ -7646,8 +8015,20 @@ function parseCronToFreq(expr) {
     if (d >= 1 && d <= 31) return { mode: 'monthly', day: d, time: hhmm };
   }
   if (dom === '*' && dow !== '*') {
+    // "1-5" → Weekdays shortcut
+    if (dow === '1-5') return { mode: 'weekdays', time: hhmm };
+    // Weekend shortcut "0,6" 或反写 "6,0"
+    if (dow === '0,6' || dow === '6,0' || dow === '6,7' || dow === '7,6') {
+      // 周末没有 v2 picker 模式——返回 null 让上层走 legacy hint，保留
+      // 原 schedule 不乱改；humanizeCron 会把它识别为 "周末 HH:MM"。
+      return null;
+    }
     const days = parseDowField(dow);
-    if (days) return { mode: 'weekly', dows: days, time: hhmm };
+    // v2 picker 的 Weekly 是单选。多选 (dows.length>1 且非 weekdays/
+    // weekend shortcut) 无法 round-trip —— 返回 null 触发 legacy hint
+    // 路径，保留原 schedule，防止"Weekly 星期一"的视觉误导把用户在周
+    // 一三五跑的任务静默改成只在周一跑。
+    if (days && days.length === 1) return { mode: 'weekly', dows: days, time: hhmm };
   }
   return null;
 }
@@ -7679,20 +8060,24 @@ function parseDowField(field) {
 
 // buildFreqSchedule assembles a cron expression from a frequency descriptor.
 // Returns {expr, err}. err is a human-readable message when the descriptor
-// is invalid (e.g. interval <5min, no weekday selected).
+// is invalid (e.g. no weekday selected).
+//
+// v2 polish: interval mode 被移除（对普通用户概念太重）；新增 hourly
+// （整点每小时）和 weekdays（Mon-Fri shortcut）。
 function buildFreqSchedule(desc) {
   if (!desc) return { err: '请选择频率' };
-  if (desc.mode === 'interval') {
-    const n = parseInt(desc.n, 10);
-    if (!Number.isFinite(n) || n < 1) return { err: '间隔必须是正整数' };
-    if (desc.unit === 'm' && n < 5) return { err: '最短间隔为 5 分钟' };
-    if (desc.unit !== 'm' && desc.unit !== 'h') return { err: '单位无效' };
-    return { expr: '@every ' + n + desc.unit };
+  if (desc.mode === 'hourly') {
+    return { expr: '0 * * * *' };
   }
   if (desc.mode === 'daily') {
     const t = parseHHMM(desc.time);
     if (!t) return { err: '时间格式无效' };
     return { expr: t.m + ' ' + t.h + ' * * *' };
+  }
+  if (desc.mode === 'weekdays') {
+    const t = parseHHMM(desc.time);
+    if (!t) return { err: '时间格式无效' };
+    return { expr: t.m + ' ' + t.h + ' * * 1-5' };
   }
   if (desc.mode === 'weekly') {
     if (!desc.dows || desc.dows.length === 0) return { err: '至少选择一个星期几' };
@@ -7725,19 +8110,26 @@ function parseHHMM(s) {
 function humanizeCron(expr) {
   const d = parseCronToFreq(expr);
   if (!d) {
-    // parseCronToFreq only recognizes shapes the frequency-picker round-trips
-    // (editor contract). Some common hand-written shapes — notably the
-    // `*/N` step-value form — don't fit that shape but ARE worth
-    // humanizing for the display-only label. Try the label-only hook
-    // before giving up and echoing the raw expression.
+    // parseCronToFreq only recognizes shapes the v2 frequency-picker
+    // round-trips. 以下几种 hand-written / legacy shapes 不 round-trip
+    // 但可以 humanize 成人类可读标签，保留给列表和 legacy hint 显示：
+    //   "*/N * * * *"  → 每 N 分钟（humanizeCronStepValue）
+    //   "0 */N * * *"  → 每 N 小时
+    //   "@every 30m"   → 每 30 分钟  (v1 interval shape)
+    //   "@every 2h"    → 每 2 小时
+    //   "m h * * 1,3,5" / "m h * * 0,6" → 多选 weekly / 周末
+    //     （v2 picker 的 Weekly 单选不再 round-trip 这些 shape）
     const step = humanizeCronStepValue(expr);
     if (step) return step;
+    const legacy = humanizeCronLegacyEvery(expr);
+    if (legacy) return legacy;
+    const multiDow = humanizeCronMultiDow(expr);
+    if (multiDow) return multiDow;
     return expr;
   }
-  if (d.mode === 'interval') {
-    return d.unit === 'h' ? ('每 ' + d.n + ' 小时') : ('每 ' + d.n + ' 分钟');
-  }
+  if (d.mode === 'hourly') return '每小时';
   if (d.mode === 'daily') return '每天 ' + d.time;
+  if (d.mode === 'weekdays') return '工作日 ' + d.time;
   if (d.mode === 'weekly') {
     const names = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
     const set = new Set(d.dows);
@@ -7764,6 +8156,39 @@ function humanizeCron(expr) {
 // Returns '' for anything else so the caller can fall back to raw.
 // Escaped *\/ in comments to keep this JS from looking like a block
 // close; at runtime it's just /*\/N/.
+// humanizeCronMultiDow 为 parseCronToFreq 不再 round-trip 的多选 weekly
+// shape（v2 Weekly 是单选；周末 / 周一三五等历史数据仍要能人类读）生成
+// 中文标签。display-only，不构造回 schedule。
+function humanizeCronMultiDow(expr) {
+  if (!expr) return '';
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) return '';
+  const [mm, hh, dom, mon, dow] = parts;
+  if (!/^\d+$/.test(mm) || !/^\d+$/.test(hh)) return '';
+  if (mon !== '*' || dom !== '*' || dow === '*') return '';
+  const days = parseDowField(dow);
+  if (!days || days.length < 2) return '';
+  const time = pad2(parseInt(hh, 10)) + ':' + pad2(parseInt(mm, 10));
+  const names = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  const set = new Set(days);
+  if (days.length === 2 && set.has(0) && set.has(6)) return '周末 ' + time;
+  return days.map(i => names[i]).join('、') + ' ' + time;
+}
+
+// humanizeCronLegacyEvery 识别 v1 的 @every 表达式并本地化为中文标签。
+// 仅 display-only（卡片 cc-human / 编辑模态的 legacy hint）；v2 picker
+// 已删掉 interval 模式，所以这个 shape 不会被 buildFreqSchedule 重新
+// 产生。仅在 parseCronToFreq 返回 null 的 fallback 链里用。
+function humanizeCronLegacyEvery(expr) {
+  if (!expr) return '';
+  const m = expr.trim().match(/^@every\s+(\d+)(m|h)$/i);
+  if (!m) return '';
+  const n = parseInt(m[1], 10);
+  const unit = m[2].toLowerCase();
+  if (!Number.isFinite(n) || n < 1) return '';
+  return unit === 'h' ? ('每 ' + n + ' 小时') : ('每 ' + n + ' 分钟');
+}
+
 function humanizeCronStepValue(expr) {
   if (!expr) return '';
   const parts = expr.trim().split(/\s+/);
@@ -7797,284 +8222,245 @@ const DOW_LABELS = [
   { i: 0, label: '日' },
 ];
 
-// buildFreqPickerHtml renders the frequency tab UI. initial is an optional
-// descriptor to pre-fill (used by edit modal); when absent we default to
-// "every 1 hour" which matches the most common ask.
+// buildFreqPickerHtml renders the Claude-style compact Frequency row:
+//
+//   [Frequency ▾] [time] [extra: weekday ▾ / day-of-month ▾]
+//
+// v2 polish: 彻底移除"cron 表达式"概念和 interval 模式（5/15/30 分钟这种对
+// 初级用户过于工程化），只保留 Hourly / Daily / Weekdays / Weekly / Monthly
+// 五档——覆盖绝大多数实际用例，表达方式清晰。preset 按钮 / 多次运行预览 /
+// 高级 raw cron 输入全部删除，对齐 Claude Scheduled Tasks 的简洁直觉。
+//
+// 后端约束：cron.minCronInterval=5m，Hourly (60m) 及以上都满足，无需前端
+// 再提示。Monthly 的日期超过当月最后一天时 robfig/cron 自动跳过，无需警告
+// 文案污染 UI。
+//
+// initial 是可选的 descriptor 用来回填（编辑流），默认 Daily 9:00。
 function buildFreqPickerHtml(initial) {
-  const d = initial || { mode: 'interval', n: 1, unit: 'h' };
-  const tab = (mode, label) =>
-    '<button type="button" class="freq-tab' + (d.mode === mode ? ' active' : '') + '" data-mode="' + mode + '" onclick="freqSelectTab(this, \'' + mode + '\')">' + esc(label) + '</button>';
+  const d = initial || { mode: 'daily', time: '09:00' };
+  const mode = d.mode || 'daily';
+  const modeOption = (m, label) =>
+    '<option value="' + m + '"' + (mode === m ? ' selected' : '') + '>' + esc(label) + '</option>';
 
-  const iv = d.mode === 'interval' ? d : { n: 1, unit: 'h' };
-  const intervalHtml =
-    '<div class="freq-body" data-mode="interval" style="' + (d.mode === 'interval' ? '' : 'display:none') + '">' +
-      '<div class="freq-row">' +
-        '<span class="freq-label">每隔</span>' +
-        '<input class="freq-num" id="freq-iv-n" type="number" min="1" max="59" value="' + esc(String(iv.n)) + '" oninput="freqUpdate()">' +
-        '<select class="freq-select" id="freq-iv-unit" onchange="freqUpdate()">' +
-          '<option value="m"' + (iv.unit === 'm' ? ' selected' : '') + '>分钟</option>' +
-          '<option value="h"' + (iv.unit === 'h' ? ' selected' : '') + '>小时</option>' +
-        '</select>' +
-      '</div>' +
-      '<div class="freq-preset-row">' +
-        '<button type="button" class="freq-preset" onclick="freqIntervalPreset(5,\'m\')">每 5 分钟</button>' +
-        '<button type="button" class="freq-preset" onclick="freqIntervalPreset(15,\'m\')">每 15 分钟</button>' +
-        '<button type="button" class="freq-preset" onclick="freqIntervalPreset(30,\'m\')">每 30 分钟</button>' +
-        '<button type="button" class="freq-preset" onclick="freqIntervalPreset(1,\'h\')">每小时</button>' +
-        '<button type="button" class="freq-preset" onclick="freqIntervalPreset(6,\'h\')">每 6 小时</button>' +
-      '</div>' +
-    '</div>';
+  // time 从当前 descriptor 取；hourly 不需要 time（置为空 placeholder）。
+  // onchange/oninput 先 freqMarkTouched() 再 freqUpdate()——只有用户真的
+  // 动过控件才写 overlay._cronSchedule。见 freqMarkTouched 注释的数据
+  // 损坏场景。
+  const time = d.time || '09:00';
+  const timeInput =
+    '<input class="freq-time" id="freq-time" type="time" value="' + esc(time) + '"' +
+      ' onchange="freqMarkTouched();freqUpdate()" oninput="freqMarkTouched();freqUpdate()"' +
+      (mode === 'hourly' ? ' style="display:none"' : '') + '>';
 
-  const da = d.mode === 'daily' ? d : { time: '09:00' };
-  const dailyHtml =
-    '<div class="freq-body" data-mode="daily" style="' + (d.mode === 'daily' ? '' : 'display:none') + '">' +
-      '<div class="freq-row">' +
-        '<span class="freq-label">每天</span>' +
-        '<input class="freq-time" id="freq-daily-time" type="time" value="' + esc(da.time) + '" onchange="freqUpdate()" oninput="freqUpdate()">' +
-      '</div>' +
-      '<div class="freq-preset-row">' +
-        '<button type="button" class="freq-preset" onclick="freqDailyPreset(\'09:00\')">早上 9 点</button>' +
-        '<button type="button" class="freq-preset" onclick="freqDailyPreset(\'12:00\')">中午 12 点</button>' +
-        '<button type="button" class="freq-preset" onclick="freqDailyPreset(\'18:00\')">傍晚 6 点</button>' +
-        '<button type="button" class="freq-preset" onclick="freqDailyPreset(\'22:00\')">晚上 10 点</button>' +
-      '</div>' +
-    '</div>';
+  // weekly 的星期下拉（单选）。默认 Monday。
+  const weeklyDow = (mode === 'weekly' && Array.isArray(d.dows) && d.dows.length > 0) ? d.dows[0] : 1;
+  const dowOption = (i, label) =>
+    '<option value="' + i + '"' + (weeklyDow === i ? ' selected' : '') + '>' + esc(label) + '</option>';
+  const weeklySelect =
+    '<select class="freq-extra" id="freq-weekly-dow" onchange="freqMarkTouched();freqUpdate()"' +
+      (mode === 'weekly' ? '' : ' style="display:none"') + '>' +
+      dowOption(1, '星期一') + dowOption(2, '星期二') + dowOption(3, '星期三') +
+      dowOption(4, '星期四') + dowOption(5, '星期五') + dowOption(6, '星期六') +
+      dowOption(0, '星期日') +
+    '</select>';
 
-  const wk = d.mode === 'weekly' ? d : { dows: [1, 2, 3, 4, 5], time: '09:00' };
-  const selectedDows = new Set(wk.dows || []);
-  const dowBtns = DOW_LABELS.map(x =>
-    '<button type="button" class="freq-dow' + (selectedDows.has(x.i) ? ' on' : '') +
-    '" data-dow="' + x.i + '" onclick="freqToggleDow(this)">' + esc(x.label) + '</button>'
-  ).join('');
-  const weeklyHtml =
-    '<div class="freq-body" data-mode="weekly" style="' + (d.mode === 'weekly' ? '' : 'display:none') + '">' +
-      '<div class="freq-row"><span class="freq-label">星期</span><div class="freq-dows" id="freq-weekly-dows">' + dowBtns + '</div></div>' +
-      '<div class="freq-row">' +
-        '<span class="freq-label">时间</span>' +
-        '<input class="freq-time" id="freq-weekly-time" type="time" value="' + esc(wk.time) + '" onchange="freqUpdate()" oninput="freqUpdate()">' +
-      '</div>' +
-      '<div class="freq-preset-row">' +
-        '<button type="button" class="freq-preset" onclick="freqWeeklyPreset([1,2,3,4,5],\'09:00\')">工作日 9 点</button>' +
-        '<button type="button" class="freq-preset" onclick="freqWeeklyPreset([0,6],\'10:00\')">周末 10 点</button>' +
-        '<button type="button" class="freq-preset" onclick="freqWeeklyPreset([1],\'09:00\')">每周一 9 点</button>' +
-      '</div>' +
-    '</div>';
-
-  const mo = d.mode === 'monthly' ? d : { day: 1, time: '09:00' };
+  // monthly 的日期下拉
+  const monthlyDay = (mode === 'monthly' && d.day) ? d.day : 1;
   let dayOpts = '';
   for (let i = 1; i <= 31; i++) {
-    dayOpts += '<option value="' + i + '"' + (mo.day === i ? ' selected' : '') + '>' + i + '</option>';
+    dayOpts += '<option value="' + i + '"' + (monthlyDay === i ? ' selected' : '') + '>' + i + ' 日</option>';
   }
-  const monthlyHtml =
-    '<div class="freq-body" data-mode="monthly" style="' + (d.mode === 'monthly' ? '' : 'display:none') + '">' +
-      '<div class="freq-row">' +
-        '<span class="freq-label">每月</span>' +
-        '<select class="freq-select" id="freq-monthly-day" onchange="freqUpdate()">' + dayOpts + '</select>' +
-        '<span class="freq-label">日</span>' +
-        '<input class="freq-time" id="freq-monthly-time" type="time" value="' + esc(mo.time) + '" onchange="freqUpdate()" oninput="freqUpdate()">' +
-      '</div>' +
-      '<div class="cron-tz-hint" style="margin-top:6px">如果选择 29、30、31 日，当月没有这一天时会跳过。</div>' +
-    '</div>';
+  const monthlySelect =
+    '<select class="freq-extra" id="freq-monthly-day" onchange="freqMarkTouched();freqUpdate()"' +
+      (mode === 'monthly' ? '' : ' style="display:none"') + '>' +
+      dayOpts +
+    '</select>';
 
-  return '<div class="freq-tabs" role="tablist">' +
-      tab('interval', '间隔') + tab('daily', '每天') + tab('weekly', '每周') + tab('monthly', '每月') +
+  return '<div class="freq-row-inline">' +
+      '<select class="freq-mode-select" id="freq-mode-select" aria-label="频率模式" onchange="freqSelectMode(this.value)">' +
+        modeOption('hourly', 'Hourly') +
+        modeOption('daily', 'Daily') +
+        modeOption('weekdays', 'Weekdays') +
+        modeOption('weekly', 'Weekly') +
+        modeOption('monthly', 'Monthly') +
+      '</select>' +
+      timeInput +
+      weeklySelect +
+      monthlySelect +
     '</div>' +
-    intervalHtml + dailyHtml + weeklyHtml + monthlyHtml;
+    '<div class="freq-hint">任务会在上述时间点后 0-2 分钟内随机启动（防并发峰值）。</div>';
 }
 
-// freqCurrentDescriptor reads the picker state back into a descriptor object.
+// freqCurrentDescriptor reads the picker state back into a descriptor.
 // Returns null when the picker is absent.
+//
+// Descriptor shapes:
+//   hourly   -> { mode:'hourly' }
+//   daily    -> { mode:'daily',  time:'HH:MM' }
+//   weekdays -> { mode:'weekdays', time:'HH:MM' }   // Mon-Fri，buildFreqSchedule 会展开成 dows=[1..5]
+//   weekly   -> { mode:'weekly', time:'HH:MM', dows:[N] }  // 单选
+//   monthly  -> { mode:'monthly', time:'HH:MM', day:N }
 function freqCurrentDescriptor() {
-  const active = document.querySelector('.freq-tabs .freq-tab.active');
-  if (!active) return null;
-  const mode = active.getAttribute('data-mode');
-  if (mode === 'interval') {
-    const n = parseInt(document.getElementById('freq-iv-n').value, 10);
-    const unit = document.getElementById('freq-iv-unit').value;
-    return { mode, n, unit };
+  const sel = document.getElementById('freq-mode-select');
+  if (!sel) return null;
+  const mode = sel.value;
+  const time = (document.getElementById('freq-time') || {}).value || '09:00';
+  if (mode === 'hourly') {
+    return { mode };
   }
   if (mode === 'daily') {
-    return { mode, time: document.getElementById('freq-daily-time').value };
+    return { mode, time };
+  }
+  if (mode === 'weekdays') {
+    return { mode, time };
   }
   if (mode === 'weekly') {
-    const btns = document.querySelectorAll('#freq-weekly-dows .freq-dow.on');
-    const dows = [...btns].map(b => parseInt(b.getAttribute('data-dow'), 10)).sort((a, b) => a - b);
-    return { mode, dows, time: document.getElementById('freq-weekly-time').value };
+    const dow = parseInt((document.getElementById('freq-weekly-dow') || {}).value, 10);
+    return { mode, time, dows: Number.isFinite(dow) ? [dow] : [1] };
   }
   if (mode === 'monthly') {
-    return {
-      mode,
-      day: parseInt(document.getElementById('freq-monthly-day').value, 10),
-      time: document.getElementById('freq-monthly-time').value,
-    };
+    const day = parseInt((document.getElementById('freq-monthly-day') || {}).value, 10);
+    return { mode, time, day: Number.isFinite(day) ? day : 1 };
   }
   return null;
 }
 
-function freqSelectTab(btn, mode) {
-  document.querySelectorAll('.freq-tabs .freq-tab').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
-  document.querySelectorAll('.freq-body').forEach(el => {
-    el.style.display = el.getAttribute('data-mode') === mode ? '' : 'none';
-  });
-  freqUpdate();
-}
-function freqToggleDow(btn) { btn.classList.toggle('on'); freqUpdate(); }
-function freqIntervalPreset(n, unit) {
-  document.getElementById('freq-iv-n').value = n;
-  document.getElementById('freq-iv-unit').value = unit;
-  freqUpdate();
-}
-function freqDailyPreset(t) {
-  document.getElementById('freq-daily-time').value = t;
-  freqUpdate();
-}
-function freqWeeklyPreset(dows, t) {
-  const set = new Set(dows);
-  document.querySelectorAll('#freq-weekly-dows .freq-dow').forEach(b => {
-    const i = parseInt(b.getAttribute('data-dow'), 10);
-    b.classList.toggle('on', set.has(i));
-  });
-  document.getElementById('freq-weekly-time').value = t;
+// freqSelectMode 切换频率模式。根据模式显示/隐藏 time / weekly-dow /
+// monthly-day 三个辅助控件。hourly 无 time（整点即跑）。
+// 用户主动切 mode 算 "touched"——之后 freqUpdate 才开始把 picker 结果
+// 写入 overlay._cronSchedule；见 freqMarkTouched 的注释。
+function freqSelectMode(mode) {
+  const time = document.getElementById('freq-time');
+  const dow = document.getElementById('freq-weekly-dow');
+  const day = document.getElementById('freq-monthly-day');
+  if (time) time.style.display = (mode === 'hourly') ? 'none' : '';
+  if (dow) dow.style.display = (mode === 'weekly') ? '' : 'none';
+  if (day) day.style.display = (mode === 'monthly') ? '' : 'none';
+  freqMarkTouched();
   freqUpdate();
 }
 
-// freqUpdate refreshes overlay._cronSchedule and the multi-run preview.
-// Advanced raw-cron input takes priority when non-empty; otherwise the
-// picker's descriptor feeds buildFreqSchedule.
+// freqMarkTouched 标记用户真的交互过频率控件。编辑流里，打开 modal 时
+// overlay._cronSchedule 被 seed 成 job.schedule 的原始值（可能是无法
+// round-trip 的 legacy shape，如 @every 30m 或 * * * * 1,3,5）；只有
+// 用户真的动过 freq-mode-select / freq-time / freq-weekly-dow /
+// freq-monthly-day 才允许 freqUpdate 覆盖这个 seed——否则"打开旧任务
+// 未改频率即保存"会把原 schedule 静默改成 UI 默认的 Daily 09:00，
+// 造成数据损坏。
+// 创建流：createNewCronJob 显式调用 freqMarkTouched() 让初始 Daily 09:00
+// 立刻写入，保证"打开即保存"能提交合法 schedule。
+function freqMarkTouched() {
+  const overlay = document.querySelector('.modal-overlay');
+  if (!overlay) return;
+  overlay._cronScheduleTouched = true;
+}
+
+// freqUpdate refreshes overlay._cronSchedule from the current picker state.
+// v2 polish: advanced raw-cron input and multi-run preview 已移除；submit
+// 路径只需要一个 cron expression，由 freqCurrentDescriptor + buildFreqSchedule
+// 产出即可。
+//
+// Gating by _cronScheduleTouched：不动用户"未触碰"的 seed（见
+// freqMarkTouched 注释的数据损坏场景）。
 function freqUpdate() {
   const overlay = document.querySelector('.modal-overlay');
   if (!overlay) return;
-  const advanced = document.getElementById('freq-advanced-input');
-  if (advanced && advanced.value.trim()) {
-    overlay._cronSchedule = advanced.value.trim();
-    previewFreqSchedule(overlay._cronSchedule);
-    return;
-  }
+  if (!overlay._cronScheduleTouched) return;
   const desc = freqCurrentDescriptor();
-  const { expr, err } = buildFreqSchedule(desc);
-  if (err) {
-    overlay._cronSchedule = '';
-    renderFreqPreview({ valid: false, error: err });
-    return;
-  }
-  overlay._cronSchedule = expr;
-  previewFreqSchedule(expr);
+  const { expr } = buildFreqSchedule(desc);
+  overlay._cronSchedule = expr || '';
 }
 
-let _freqPreviewTimer = null;
-function previewFreqSchedule(expr) {
-  clearTimeout(_freqPreviewTimer);
-  _freqPreviewTimer = setTimeout(() => doPreviewFreq(expr), 200);
-}
-async function doPreviewFreq(expr) {
-  if (!expr) { renderFreqPreview({ valid: false, error: '' }); return; }
-  try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch('/api/cron/preview?count=5&schedule=' + encodeURIComponent(expr), { headers });
-    const data = await r.json();
-    renderFreqPreview(data);
-  } catch (e) {
-    renderFreqPreview({ valid: false, error: 'preview error' });
-  }
-}
+// v2 polish: previewFreqSchedule / doPreviewFreq / renderFreqPreview /
+// freqToggleAdvanced 在改造后全部删除。多次运行预览 + raw cron 表达式
+// 入口已从 modal 中移除（对初级用户过于工程化）；submit 路径不再需要
+// 经过 preview 即可判定 schedule 是否合法——后端 validateSchedule 会在
+// AddJob 时兜底返回 400。
 
-function renderFreqPreview(data) {
-  const box = document.getElementById('freq-preview');
-  if (!box) return;
-  if (!data || !data.valid) {
-    box.className = 'freq-preview err';
-    box.innerHTML = '<div class="freq-preview-title">schedule 无效</div>' +
-      '<div style="color:var(--nz-red)">' + esc(data && data.error || '请完成频率设置') + '</div>';
-    return;
-  }
-  const runs = data.next_runs || (data.next_run ? [data.next_run] : []);
-  box.className = 'freq-preview';
-  let list = '';
-  for (let i = 0; i < runs.length; i++) {
-    const ts = runs[i];
-    const d = new Date(ts);
-    const pretty = d.toLocaleString(undefined, {
-      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
-    });
-    const rel = i === 0 ? timeAgo(ts, true) : '';
-    list += '<li><span>' + esc(pretty) + '</span>' + (rel ? '<span class="fp-rel">' + esc(rel) + '</span>' : '') + '</li>';
-  }
-  const tz = data.timezone_label || data.timezone || cronTimezoneLabel;
-  box.innerHTML =
-    '<div class="freq-preview-title">接下来会在这些时间运行</div>' +
-    '<ul class="freq-preview-list">' + list + '</ul>' +
-    (tz ? '<div class="freq-preview-tz">时区：' + esc(tz) + '</div>' : '');
-}
 
-// Toggle the advanced (raw cron expression) disclosure. Closing clears the
-// advanced input so the picker resumes control.
-function freqToggleAdvanced(btn) {
-  const body = document.getElementById('freq-advanced-body');
-  const open = body.style.display !== 'none';
-  body.style.display = open ? 'none' : '';
-  btn.classList.toggle('open', !open);
-  if (!open) {
-    const input = document.getElementById('freq-advanced-input');
-    if (input) input.focus();
-  } else {
-    const input = document.getElementById('freq-advanced-input');
-    if (input) input.value = '';
-    freqUpdate();
-  }
-}
-
-// buildCronWorkspaceBody renders only the workspace picker body (the outer
-// field label is provided by the two-column grid wrapper). Retained IDs:
-// #cron-ws-list, #cron-ws-custom-toggle, #cron-ws-custom-form, #cron-workdir
-// — collectors and toggle helpers depend on those names.
+// buildCronWorkspaceBody renders the workspace picker as a dropdown button +
+// popover（v2 polish，参考 Claude Scheduled Tasks 的 "Work in a project ▾"
+// 样式）。点击按钮展开列表；选中后 popover 折叠并把按钮文本改为所选 path。
+//
+// 保留 IDs 契约：#cron-ws-list, #cron-ws-custom-toggle, #cron-ws-custom-form,
+// #cron-workdir 被 cronSelectWorkspace / toggleCronWsCustom / 提交 collector
+// 读取；外壳改造但这些稳定锚点保持。aria-label="工作目录路径" 也是契约锁定
+// 字符串（static_ux_contract_test 会 grep）。
 function buildCronWorkspaceBody() {
-  let html = '';
+  return buildCronWorkspaceBodyInternal({
+    inputId: 'cron-workdir',
+    selectedPath: '',
+  });
+}
+
+function buildCronWorkspaceBodyInternal(opts) {
+  const selected = opts.selectedPath || '';
+  // Button label: 选中的项目名 > 选中的路径尾段 > 默认占位
+  let label = '默认工作目录';
+  if (selected) {
+    const match = projectsData.find(p => p.path === selected);
+    label = match ? match.name : shortPath(selected);
+  }
+  // 下拉按钮，点击 toggle popover
+  const buttonHtml =
+    '<button type="button" class="ws-dropdown-btn" id="' + escAttr(opts.buttonId || 'cron-ws-dropdown') + '"' +
+      ' aria-haspopup="listbox" aria-expanded="false" onclick="toggleCronWsDropdown(event)">' +
+      '<span class="ws-dropdown-icon" aria-hidden="true">&#128193;</span>' +
+      '<span class="ws-dropdown-label">' + esc(label) + '</span>' +
+      '<span class="ws-dropdown-caret" aria-hidden="true">&#9662;</span>' +
+    '</button>';
+  // Popover 内容：项目列表 + "自定义路径" 触发条目
+  let listItems = '';
   if (projectsData.length > 0) {
-    html += '<ul class="proj-pick" id="cron-ws-list" role="listbox" aria-label="工作目录">' +
-      projectsData.map(p =>
-        '<li role="option" data-path="' + escAttr(p.path) + '" onclick="cronSelectWorkspace(this, \'' + escJs(p.path) + '\')">' +
+    listItems = projectsData.map(p => {
+      const sel = selected && p.path === selected;
+      return '<li role="option" data-path="' + escAttr(p.path) + '"' +
+        (sel ? ' class="selected" aria-selected="true"' : ' aria-selected="false"') +
+        ' onclick="cronSelectWorkspace(this, \'' + escJs(p.path) + '\')">' +
           '<div class="pp-name">' + esc(p.name) + '</div>' +
           '<div class="pp-path">' + esc(shortPath(p.path)) + '</div>' +
-        '</li>'
-      ).join('') +
-      '<li id="cron-ws-custom-toggle" role="option" onclick="toggleCronWsCustom()">' +
-        '<div class="pp-custom"><span class="pp-custom-icon">+</span> 自定义路径</div>' +
-      '</li>' +
-      '</ul>';
+        '</li>';
+    }).join('');
   }
-  html += '<div id="cron-ws-custom-form" style="' + (projectsData.length > 0 ? 'display:none;' : '') + 'margin-top:6px">' +
-    '<input id="cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" aria-label="工作目录路径">' +
+  listItems +=
+    '<li id="cron-ws-custom-toggle" role="option" onclick="toggleCronWsCustom()">' +
+      '<div class="pp-custom"><span class="pp-custom-icon">+</span> 自定义路径</div>' +
+    '</li>';
+
+  const popoverHtml =
+    '<div class="ws-dropdown-popover" id="cron-ws-popover" role="listbox" aria-label="选择工作目录">' +
+      '<ul class="proj-pick" id="cron-ws-list" role="listbox" aria-label="工作目录">' +
+        listItems +
+      '</ul>' +
+      '<div id="cron-ws-custom-form" style="display:' + (selected && !projectsData.find(p => p.path === selected) ? '' : 'none') + ';padding:8px">' +
+        '<input id="' + escAttr(opts.inputId) + '" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '"' +
+          ' value="' + escAttr(selected && !projectsData.find(p => p.path === selected) ? selected : '') + '"' +
+          ' aria-label="工作目录路径">' +
+      '</div>' +
     '</div>';
-  return html;
+
+  return '<div class="ws-dropdown-wrap">' + buttonHtml + popoverHtml + '</div>';
 }
 
-// buildScheduleSection renders the frequency picker + advanced disclosure +
-// preview panel used by create and edit modals. initialRawExpr is only set
-// when an existing job's schedule doesn't match any picker shape; we surface
-// it via the advanced input so the user can still edit without losing the
-// original expression.
+// buildScheduleSection renders the frequency picker. v2 polish 之后只剩下
+// 单行 picker（mode select + time + optional weekday/day-of-month），没有
+// 预览面板和 raw cron 入口。
+//
+// initialRawExpr 非空表示调用方检测到了一个"无法被 v2 picker round-trip"
+// 的老 schedule（@every 30m、* * * * 1,3,5 等）——picker 渲染默认 Daily
+// 09:00，但 overlay._cronScheduleTouched 会被编辑流置为 false，原 schedule
+// 保留在 overlay._cronSchedule 里，直到用户真的动一次控件才覆盖。
+// 为了避免"UI 显示 Daily 09:00 但实际不是"的视觉误导，我们在 picker 上方
+// 插一条轻量 hint："当前频率：每 30 分钟（动下方控件即切换到新频率）"。
 function buildScheduleSection(initialDesc, initialRawExpr) {
   const pickerHtml = buildFreqPickerHtml(initialDesc);
-  const advancedOpen = !!initialRawExpr;
-  const rawValue = initialRawExpr ? escAttr(initialRawExpr) : '';
-  // The outer .cf-label ("什么时候") from renderCronModalBody provides the
-  // section heading in the two-column modal, so we don't duplicate it here.
-  return pickerHtml +
-    '<button type="button" class="freq-advanced-toggle' + (advancedOpen ? ' open' : '') + '" onclick="freqToggleAdvanced(this)">' +
-      '<span class="chev">&#9656;</span>' +
-      '<span>我要写 cron 表达式</span>' +
-    '</button>' +
-    '<div class="freq-advanced-body" id="freq-advanced-body" style="' + (advancedOpen ? '' : 'display:none') + '">' +
-      '<input id="freq-advanced-input" type="text" placeholder="@every 30m or 0 9 * * 1-5" value="' + rawValue + '" oninput="freqUpdate()">' +
-      '<div class="cron-tz-hint" style="margin-top:4px">留空则使用上面的频率选择器；填写后覆盖选择器。</div>' +
+  if (!initialRawExpr) return pickerHtml;
+  const human = humanizeCron(initialRawExpr);
+  return '<div class="freq-legacy-hint" role="note">' +
+      '当前频率：<b>' + esc(human) + '</b>' +
+      '<span class="freq-legacy-sub">这是 v1 的老格式。如需修改，请用下方控件选一个新频率。</span>' +
     '</div>' +
-    '<div class="freq-preview" id="freq-preview">' +
-      '<div class="freq-preview-title">接下来会在这些时间运行</div>' +
-      '<div style="color:var(--nz-text-faint)">...</div>' +
-    '</div>';
+    pickerHtml;
 }
 
 function createNewCronJob() {
@@ -8118,6 +8504,10 @@ function createNewCronJob() {
   });
   overlay._cronSchedule = '';
   overlay._cronWorkDir = '';
+  // 创建流：默认 Daily 09:00 立即生效，"打开即保存"也能提交合法 schedule。
+  // 与编辑流相反——编辑流必须不 touched，保留 job.schedule 原值直到用户
+  // 主动改。
+  overlay._cronScheduleTouched = true;
   const promptEl = document.getElementById('cron-prompt');
   if (promptEl) setTimeout(() => promptEl.focus(), 0);
   freqUpdate();
@@ -8144,8 +8534,18 @@ function fillCronPrompt(id, value) {
 function renderCronModalBody(opts) {
   const promptTextarea =
     '<textarea id="' + opts.promptId + '" placeholder="' + escAttr(opts.promptPlaceholder) + '" aria-label="提示词"></textarea>';
+  // Title 字段跨两列独立一行，放在最上方——符合"先起名，再写提示词"的
+  // 直觉顺序，与 Claude Scheduled Tasks UI 的 Name → Description → Prompt
+  // 结构对齐。留空允许，UI 自动回退显示 Prompt 首行（JobTitleOrFallback）。
+  // 关联：docs/rfc/cron-v2-polish.md §3.1 Increment A。
+  const titleField =
+    '<div class="cron-field cron-f-title">' +
+      '<div class="cf-label">名称 <span style="color:var(--nz-text-faint);font-weight:normal;font-size:11px">（可选）</span></div>' +
+      '<input id="' + escAttr(opts.titleId || 'cron-title') + '" type="text" placeholder="' + escAttr(opts.titlePlaceholder || '例如：日报总结 · 周一早会准备') + '" maxlength="256" aria-label="任务名称">' +
+    '</div>';
   return '<div class="modal-body">' +
       '<div class="cron-modal-grid">' +
+        titleField +
         '<div class="cron-field cron-f-what">' +
           '<div class="cf-label">做什么</div>' +
           promptTextarea +
@@ -8279,6 +8679,40 @@ function collectCronNotifyValues() {
   return out;
 }
 
+// toggleCronWsDropdown 打开/关闭工作目录 popover。event.stopPropagation 防止
+// 顶层 document 的 outside-click handler 立即把它再关掉。
+function toggleCronWsDropdown(e) {
+  if (e) { e.preventDefault(); e.stopPropagation(); }
+  const pop = document.getElementById('cron-ws-popover');
+  const btn = document.getElementById('cron-ws-dropdown') || document.getElementById('edit-cron-ws-dropdown');
+  if (!pop) return;
+  const open = pop.classList.toggle('open');
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) wireCronWsOutsideClick();
+}
+
+// 单例 outside-click 监听，capture 阶段判断点击是否在 popover 外部；
+// 若是则关闭。只在 popover 打开期间挂载，关闭时自 remove。
+function wireCronWsOutsideClick() {
+  if (wireCronWsOutsideClick._on) return;
+  const h = function(ev) {
+    const pop = document.getElementById('cron-ws-popover');
+    const btn = document.getElementById('cron-ws-dropdown') || document.getElementById('edit-cron-ws-dropdown');
+    if (!pop || !pop.classList.contains('open')) {
+      document.removeEventListener('mousedown', h, true);
+      wireCronWsOutsideClick._on = false;
+      return;
+    }
+    if (pop.contains(ev.target) || (btn && btn.contains(ev.target))) return;
+    pop.classList.remove('open');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('mousedown', h, true);
+    wireCronWsOutsideClick._on = false;
+  };
+  document.addEventListener('mousedown', h, true);
+  wireCronWsOutsideClick._on = true;
+}
+
 function cronSelectWorkspace(el, path) {
   const overlay = el.closest('.modal-overlay');
   overlay._cronWorkDir = path;
@@ -8300,6 +8734,26 @@ function cronSelectWorkspace(el, path) {
   }
   const toggle = document.getElementById('cron-ws-custom-toggle');
   if (toggle) toggle.style.display = '';
+  // v2 polish: 选中即把 popover 折叠 + 把按钮文本更新为项目名
+  updateCronWsDropdownLabel(path);
+  closeCronWsPopover();
+}
+
+function updateCronWsDropdownLabel(path) {
+  const btn = document.getElementById('cron-ws-dropdown') || document.getElementById('edit-cron-ws-dropdown');
+  if (!btn) return;
+  const labelEl = btn.querySelector('.ws-dropdown-label');
+  if (!labelEl) return;
+  if (!path) { labelEl.textContent = '默认工作目录'; return; }
+  const match = projectsData.find(p => p.path === path);
+  labelEl.textContent = match ? match.name : shortPath(path);
+}
+
+function closeCronWsPopover() {
+  const pop = document.getElementById('cron-ws-popover');
+  const btn = document.getElementById('cron-ws-dropdown') || document.getElementById('edit-cron-ws-dropdown');
+  if (pop) pop.classList.remove('open');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
 }
 
 function toggleCronWsCustom() {
@@ -8336,6 +8790,9 @@ async function doCreateCronJob() {
   // Resolve prompt
   const promptInput = document.getElementById('cron-prompt');
   const prompt = promptInput ? promptInput.value.trim() : '';
+  // Resolve title（可选）
+  const titleInput = document.getElementById('cron-title');
+  const title = titleInput ? titleInput.value.trim() : '';
   // Resolve work_dir: project selection or custom input
   let workDir = overlay._cronWorkDir || '';
   const wdInput = document.getElementById('cron-workdir');
@@ -8346,6 +8803,7 @@ async function doCreateCronJob() {
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const body = {schedule};
     if (prompt) body.prompt = prompt;
+    if (title) body.title = title;
     if (workDir) body.work_dir = workDir;
     const notifyVals = collectCronNotifyValues();
     if (notifyVals.notify !== null) body.notify = notifyVals.notify;
@@ -8392,24 +8850,48 @@ function openCronPanel() {
 
 // filterCronJobs is the pure match step for the R110-P2 cron panel filter.
 // Extracted so unit tests exercise the predicate without driving DOM. Match
-// surface for the substring arm: prompt, work_dir, schedule, id (all
-// case-insensitive). Status arm is one of 'all' | 'active' | 'attention',
-// where 'attention' == paused OR last_error (dovetails with the header
-// cron-badge's attention count so both surfaces speak the same predicate).
+// surface for the substring arm: title, prompt, work_dir, schedule, id (all
+// case-insensitive). title 放在最前，匹配优先 —— 人们搜索 cron 时最先想到
+// 的就是自己给任务起的那个名字。Status arm is one of 'all' | 'active' |
+// 'attention', where 'attention' == paused OR last_error (dovetails with
+// the header cron-badge's attention count so both surfaces speak the same
+// predicate).
 function filterCronJobs(jobs, query, status) {
   const q = (query || '').trim().toLowerCase();
   const s = status || 'all';
   return (Array.isArray(jobs) ? jobs : []).filter(j => {
     if (!j) return false;
     if (s === 'active' && j.paused) return false;
-    if (s === 'attention' && !(j.paused || j.last_error)) return false;
+    // cron-v2-polish §3.3: attention 扩展为 paused || last_error || missed，
+    // 与 fetchCronJobs 里的 cronBadge 计数同源，避免两处判断漂移。
+    if (s === 'attention' && !(j.paused || j.last_error || j.missed)) return false;
     if (!q) return true;
-    const fields = [j.prompt, j.work_dir, j.schedule, j.id];
+    const fields = [j.title, j.prompt, j.work_dir, j.schedule, j.id];
     for (const f of fields) {
       if (typeof f === 'string' && f.toLowerCase().indexOf(q) !== -1) return true;
     }
     return false;
   });
+}
+
+// firstNonEmptyLine 取文本的首个非空行并按 rune 截断到 limit。
+// 与后端 cron.JobTitleOrFallback 行为对齐——显式 title 为空时前后端
+// 应该渲染一致的 fallback 标题。limit 默认 60 rune 匹配卡片视觉宽度。
+function firstNonEmptyLine(text, limit) {
+  if (!text) return '';
+  const lines = String(text).split('\n');
+  let line = '';
+  for (const l of lines) {
+    const t = l.trim();
+    if (t) { line = t; break; }
+  }
+  if (!line) return '';
+  const max = limit > 0 ? limit : 60;
+  // Array.from 处理 UTF-16 surrogate pair（emoji、非 BMP 字符），避免
+  // substring 切断代理对产生替换字符。
+  const chars = Array.from(line);
+  if (chars.length <= max) return line;
+  return chars.slice(0, max).join('') + '…';
 }
 
 // cronJobCardHtml renders a single cron card. Extracted from the legacy
@@ -8421,6 +8903,21 @@ function cronJobCardHtml(j) {
   const lastStr = j.last_run_at ? timeAgo(j.last_run_at) : '';
   const nextAbs = j.next_run ? formatAbsTime(j.next_run) : '';
   const lastAbs = j.last_run_at ? formatAbsTime(j.last_run_at) : '';
+  // Increment E: 右上角 Next run 徽章。paused 时 hidden；next_run 距现在
+  // < 10 分钟高亮（imminent）。meta 行里仍保留文字版 "next: xxx"，两处
+  // 不冲突——徽章抢注意力，meta 行留给一眼扫过的完整信息。
+  // 关联：docs/rfc/cron-v2-polish.md §3.5。
+  let nextBadge = '';
+  if (!j.paused && j.next_run) {
+    const msUntil = j.next_run - Date.now();
+    const imminent = msUntil > 0 && msUntil < 10 * 60 * 1000;
+    nextBadge =
+      '<div class="cc-next-badge' + (imminent ? ' imminent' : '') + '"' +
+        (nextAbs ? ' title="next run: ' + escAttr(nextAbs) + '"' : '') + '>' +
+        '<span class="cc-next-label">下次</span>' +
+        '<span class="cc-next-rel">' + esc(nextStr || '—') + '</span>' +
+      '</div>';
+  }
   const wdStr = j.work_dir ? '<span class="cc-ws" title="' + escAttr(j.work_dir) + '">' + esc(shortPath(j.work_dir)) + '</span>' : '';
   let notifyStr = '';
   if (j.notify === true) {
@@ -8434,14 +8931,31 @@ function cronJobCardHtml(j) {
   const freshStr = j.fresh_context
     ? '<span class="cc-notify on" title="每次运行前重置会话">&#128260; fresh</span>'
     : '';
+  // cron-v2-polish §3.3 Increment C: missed 徽章。与 notifyStr / freshStr
+  // 同在 cc-meta 行，红色强调。title 悬浮显示"上次应跑于"绝对时间，
+  // 方便定位重启/休眠空窗窗口。
+  let missedStr = '';
+  if (j.missed) {
+    const sinceAbs = j.missed_since ? formatAbsTime(j.missed_since) : '';
+    const tip = sinceAbs ? '上次应跑于 ' + sinceAbs + '；进程可能刚重启或休眠过' : '已错过至少一次调度';
+    missedStr = '<span class="cc-notify missed" title="' + escAttr(tip) + '">&#9888; missed</span>';
+  }
   let result = '';
   if (j.last_error) {
     result = '<div class="cc-result err"><span class="cc-icon">\u2716</span><span class="cc-text">' + esc(j.last_error) + '</span></div>';
   } else if (j.last_result) {
     result = '<div class="cc-result ok"><span class="cc-icon">\u2714</span><span class="cc-text">' + esc(j.last_result) + '</span></div>';
   }
+  // Title 层：显式 title 优先，否则回退到 prompt 首行（与后端
+  // cron.JobTitleOrFallback 逻辑等价，在前端避免一次 HTTP 往返）。
+  // 当 title 存在时 promptBlock 降级为次级显示，细小字体 + 褪色；title
+  // 缺省时保持老样式（cc-prompt 即主标题），不退化。
+  const titleStr = (j.title || '').trim() || firstNonEmptyLine(j.prompt || '', 60);
+  const titleBlock = titleStr
+    ? '<div class="cc-title">' + esc(titleStr) + '</div>'
+    : '';
   const promptBlock = j.prompt
-    ? '<div class="cc-prompt">' + esc(j.prompt) + '</div>'
+    ? '<div class="cc-prompt' + (titleStr ? ' secondary' : '') + '">' + esc(j.prompt) + '</div>'
     : '<div class="cc-prompt placeholder">未设置 prompt（点右侧 edit 按钮配置）</div>';
   const toggleBtn = j.paused
     ? '<button type="button" class="cc-btn" onclick="cronResume(\'' + escJs(j.id) + '\')">resume</button>'
@@ -8455,12 +8969,17 @@ function cronJobCardHtml(j) {
     ? ''
     : '<button type="button" class="cc-btn" onclick="cronTriggerNow(\'' + escJs(j.id) + '\')" title="立即执行一次" aria-label="立即执行一次">run</button>';
   const human = humanizeCron(j.schedule);
-  const showRaw = human !== j.schedule;
+  // v2 polish: 不再把"不能 round-trip"的 cron 表达式暴露给用户——对
+  // 初级用户无信息价值。始终只显示人类可读的 humanizeCron 结果（对未识
+  // 别的 expression humanizeCron 会兜底返回原串，依然可读）。
+  const showRaw = false;
   return '<div class="cron-card" role="button" tabindex="0" onclick="openCronSession(\'' + escJs(j.id) + '\')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronSession(\'' + escJs(j.id) + '\')}">' +
+    nextBadge +
+    titleBlock +
     promptBlock +
     '<div class="cc-human">' + esc(human) + '</div>' +
     (showRaw ? '<div class="cc-expr">' + esc(j.schedule) + '</div>' : '') +
-    '<div class="cc-meta">' + status + wdStr + notifyStr + freshStr +
+    '<div class="cc-meta">' + status + wdStr + notifyStr + freshStr + missedStr +
       (lastStr ? '<span' + (lastAbs ? ' title="last run: ' + escAttr(lastAbs) + '"' : '') + '>ran ' + lastStr + '</span>' : '') +
       (nextStr ? '<span' + (nextAbs ? ' title="next run: ' + escAttr(nextAbs) + '"' : '') + '>next ' + nextStr + '</span>' : '') +
     '</div>' +
@@ -8486,9 +9005,9 @@ function renderCronList() {
     host.innerHTML =
       '<div class="cron-empty">' +
         '<div class="cron-empty-icon" aria-hidden="true">&#9201;</div>' +
-        '<div class="cron-empty-hint">No cron jobs yet</div>' +
-        '<div class="cron-empty-sub">让 naozhi 按计划自动在某个工作目录下运行 prompt</div>' +
-        '<button type="button" class="cron-empty-cta" onclick="createNewCronJob()">Create your first cron job</button>' +
+        '<div class="cron-empty-hint">还没有定时任务</div>' +
+        '<div class="cron-empty-sub">按计划自动在某个工作目录下运行提示词</div>' +
+        '<button type="button" class="cron-empty-cta" onclick="createNewCronJob()">创建第一个定时任务</button>' +
       '</div>';
     return;
   }
@@ -8501,7 +9020,8 @@ function renderCronList() {
       '</div>';
     return;
   }
-  const sorted = [...matched].sort((a, b) => b.created_at - a.created_at);
+  const cmp = cronSortComparators[cronSortOrder] || cronSortComparators.created_desc;
+  const sorted = [...matched].sort(cmp);
   host.innerHTML = sorted.map(cronJobCardHtml).join('');
 }
 
@@ -8557,33 +9077,53 @@ function renderCronPanel() {
   const tzBanner = cronTimezoneLabel
     ? '<div class="cron-tz-banner" title="Schedules are evaluated in this timezone">timezone: ' + esc(cronTimezoneLabel) + '</div>'
     : '';
+  // cron-v2-polish §3.3: missed banner。Count 取自 cronJobs 本地缓存，
+  // 与 attention 计数同源。点击切到 attention filter，与 header cron-badge
+  // 的红点导航保持一致的"点进去看哪些 job 需要关注"语义。
+  const missedCount = cronJobs.filter(j => j.missed).length;
+  const missedBanner = missedCount > 0
+    ? '<div class="cron-missed-banner" role="alert" onclick="setCronStatusFilter(\'attention\')" title="进程重启或休眠期间错过的调度不会自动补跑">' +
+        '<span class="cmb-icon">&#9888;</span>' +
+        '<span class="cmb-text">有 ' + missedCount + ' 个任务曾错过调度 — 进程重启或休眠空窗期未补跑。点此查看。</span>' +
+      '</div>'
+    : '';
   const chipActive = s => cronFilterStatus === s ? ' active' : '';
   const chipPressed = s => cronFilterStatus === s ? 'true' : 'false';
   let html =
     '<div class="main-header">' +
       '<button class="btn-mobile-back" onclick="mobileBack()" title="back" aria-label="Back to sidebar">&#8592;</button>' +
-      '<div class="main-header-content"><h2>Cron Jobs</h2></div>' +
+      '<div class="main-header-content"><h2>定时任务</h2></div>' +
     '</div>' +
     '<div class="cron-detail">' +
       '<div class="cron-detail-body">' +
         '<div class="cron-list-head">' +
-          '<h3>Cron Jobs</h3>' +
-          '<button type="button" class="cron-new-btn" onclick="createNewCronJob()" aria-label="Create new cron job">' +
+          '<h3>定时任务</h3>' +
+          '<button type="button" class="cron-new-btn" onclick="createNewCronJob()" aria-label="新建定时任务">' +
             '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>' +
-            ' New' +
+            ' 新建' +
           '</button>' +
         '</div>' +
         '<div class="cron-filter-bar">' +
           '<div class="cron-search-row">' +
-            '<input type="text" id="cron-search-input" class="cron-search-input" placeholder="搜索 prompt、目录、cron 表达式..." autocomplete="off" spellcheck="false" aria-label="搜索定时任务" value="' + escAttr(cronFilterQuery) + '" oninput="onCronSearchInput()" />' +
+            '<input type="text" id="cron-search-input" class="cron-search-input" placeholder="搜索名称、提示词、目录..." autocomplete="off" spellcheck="false" aria-label="搜索定时任务" value="' + escAttr(cronFilterQuery) + '" oninput="onCronSearchInput()" />' +
             '<button type="button" class="cron-search-clear" onclick="clearCronSearch()" title="清空搜索" aria-label="清空搜索">&times;</button>' +
           '</div>' +
           '<div class="cron-status-chips" role="group" aria-label="按状态筛选">' +
             '<button type="button" class="cron-status-chip' + chipActive('all') + '" data-status="all" aria-pressed="' + chipPressed('all') + '" onclick="setCronStatusFilter(\'all\')">全部</button>' +
             '<button type="button" class="cron-status-chip' + chipActive('active') + '" data-status="active" aria-pressed="' + chipPressed('active') + '" onclick="setCronStatusFilter(\'active\')">运行中</button>' +
             '<button type="button" class="cron-status-chip' + chipActive('attention') + '" data-status="attention" aria-pressed="' + chipPressed('attention') + '" onclick="setCronStatusFilter(\'attention\')">需关注</button>' +
+            // cron-v2-polish §3.4 Increment D: 排序 select。放在 chips 行末尾，
+            // 和状态筛选同属"视图控制"范畴。持久化到 localStorage 按用户偏好
+            // 记忆。
+            '<select class="cron-sort-select" aria-label="排序方式" onchange="setCronSortOrder(this.value)">' +
+              '<option value="created_desc"' + (cronSortOrder === 'created_desc' ? ' selected' : '') + '>最新创建</option>' +
+              '<option value="next_asc"' + (cronSortOrder === 'next_asc' ? ' selected' : '') + '>接下来</option>' +
+              '<option value="last_desc"' + (cronSortOrder === 'last_desc' ? ' selected' : '') + '>最近运行</option>' +
+              '<option value="title_asc"' + (cronSortOrder === 'title_asc' ? ' selected' : '') + '>按名字</option>' +
+            '</select>' +
           '</div>' +
         '</div>' +
+        missedBanner +
         tzBanner +
         '<div id="cron-list-items"></div>' +
       '</div>' +
@@ -8620,7 +9160,9 @@ async function fetchCronJobs() {
     if (cronBadge) {
       // Badge surfaces jobs needing attention (paused or last run errored),
       // not the raw total — avoids a persistent red dot on healthy setups.
-      const attention = cronJobs.filter(j => j.paused || j.last_error).length;
+      // cron-v2-polish §3.3: missed jobs（进程重启空窗期跳过的调度）也
+      // 纳入 attention，与 filterCronJobs 判定对齐。
+      const attention = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
       cronBadge.textContent = attention;
       cronBadge.style.display = attention > 0 ? '' : 'none';
       // Attention badge is semantically an alert (paused / errored jobs), so
@@ -8734,12 +9276,18 @@ function editCronJob(id) {
   const notifyHtml = buildCronNotifyToggleHtml(notifyInitial, hasOverride, job.notify_platform, job.notify_chat_id);
   const contextHtml = buildCronContextToggleHtml(!!job.fresh_context);
 
-  // Round-trip attempt: if the saved expression matches a picker shape we
-  // restore the picker; otherwise open the advanced disclosure with the raw
-  // expression so power users don't lose their handcrafted schedule.
+  // Round-trip attempt: if the saved expression matches a v2 picker shape
+  // we pre-fill the picker; otherwise render the default picker and add a
+  // "当前频率：<human-readable>" hint above it so the user sees the real
+  // schedule (UI shows Daily/09:00 default which is a visual lie without
+  // the hint). _cronScheduleTouched stays false so "save without touching
+  // the frequency controls" preserves the legacy expression intact.
+  // 关联 Issue #1（Round ? review）。
   const initialDesc = parseCronToFreq(job.schedule);
-  const initialRaw = initialDesc ? '' : (job.schedule || '');
-  const scheduleHtml = buildScheduleSection(initialDesc || { mode: 'interval', n: 1, unit: 'h' }, initialRaw);
+  const scheduleHtml = buildScheduleSection(
+    initialDesc || { mode: 'daily', time: '09:00' },
+    initialDesc ? '' : (job.schedule || '')
+  );
 
   // Edit modal's "where" reuses the project picker when available, falling
   // back to a free-form input (projectsData empty or user typed a custom
@@ -8759,6 +9307,7 @@ function editCronJob(id) {
         scheduleHtml, wsBody, notifyHtml, contextHtml,
         promptId: 'edit-cron-prompt',
         promptPlaceholder: '这个任务要做什么？',
+        titleId: 'edit-cron-title',
       }) +
       '<div class="modal-btns">' +
         '<button type="button" onclick="this.closest(\'.modal-overlay\').remove()">取消</button>' +
@@ -8768,6 +9317,10 @@ function editCronJob(id) {
   document.body.appendChild(overlay);
   trapFocus(overlay);
   fillCronPrompt('edit-cron-prompt', job.prompt);
+  // 回填 title。用 value 属性赋值避开 HTML 特殊字符在模板插值中的风险，
+  // 与 fillCronPrompt 的 rationale 一致（参见 renderCronModalBody 注释）。
+  const titleEl = document.getElementById('edit-cron-title');
+  if (titleEl) titleEl.value = job.title || '';
 
   overlay.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') overlay.remove();
@@ -8777,8 +9330,15 @@ function editCronJob(id) {
     }
   });
 
-  // Seed overlay._cronSchedule so "save without edits" still sends the
-  // correct schedule, then trigger the first preview render.
+  // Seed overlay._cronSchedule with the job's ACTUAL schedule (not whatever
+  // the picker would render back from parseCronToFreq). Critical for legacy
+  // shapes that don't round-trip: @every 30m / multi-dow weekly / hand-
+  // crafted expressions all parseCronToFreq → null → default Daily picker.
+  // Without the touched gate, an immediate freqUpdate() would overwrite
+  // _cronSchedule to "0 9 * * *" and a "save without changes" click would
+  // silently rewrite the user's 30-minute job to every day 9 AM. See
+  // freqMarkTouched doc. 不要调 freqUpdate()——让 seed 保持到用户真的
+  // 交互频率控件为止。
   //
   // Do NOT seed overlay._cronWorkDir from job.work_dir — the submit path
   // uses overlay._cronWorkDir only as a fallback when the input is empty,
@@ -8787,41 +9347,19 @@ function editCronJob(id) {
   // explicitly set _cronWorkDir; the input's pre-filled value covers the
   // unchanged-workdir case.
   overlay._cronSchedule = job.schedule || '';
+  overlay._cronScheduleTouched = false;
   overlay._cronWorkDir = '';
-  freqUpdate();
 }
 
-// buildEditCronWorkspaceBody is the edit-mode counterpart to
-// buildCronWorkspaceBody — renders the same picker but with the current
-// job.work_dir pre-selected (if it matches a known project) or visible in
-// the custom input. Shares the input#cron-workdir / #edit-cron-workdir
-// contract via the explicit inputId parameter.
+// buildEditCronWorkspaceBody is the edit-mode counterpart. v2 polish 之后
+// 与 create 共享 buildCronWorkspaceBodyInternal，只传不同的 inputId 和
+// 已选中的 currentDir 用来回填按钮文本 + 自定义路径输入。
 function buildEditCronWorkspaceBody(currentDir) {
-  const hasProjects = projectsData.length > 0;
-  const matched = hasProjects && currentDir ? projectsData.find(p => p.path === currentDir) : null;
-  const showCustom = !matched && currentDir;
-  let html = '';
-  if (hasProjects) {
-    html += '<ul class="proj-pick" id="cron-ws-list" role="listbox" aria-label="工作目录">' +
-      projectsData.map(p => {
-        const selected = matched && matched.path === p.path;
-        return '<li role="option" data-path="' + escAttr(p.path) + '"' +
-          (selected ? ' class="selected" aria-selected="true"' : '') +
-          ' onclick="cronSelectWorkspace(this, \'' + escJs(p.path) + '\')">' +
-            '<div class="pp-name">' + esc(p.name) + '</div>' +
-            '<div class="pp-path">' + esc(shortPath(p.path)) + '</div>' +
-          '</li>';
-      }).join('') +
-      '<li id="cron-ws-custom-toggle" role="option"' + (showCustom ? ' style="display:none"' : '') +
-      ' onclick="toggleCronWsCustom()">' +
-        '<div class="pp-custom"><span class="pp-custom-icon">+</span> 自定义路径</div>' +
-      '</li>' +
-      '</ul>';
-  }
-  html += '<div id="cron-ws-custom-form" style="' + (hasProjects && !showCustom ? 'display:none;' : '') + 'margin-top:6px">' +
-    '<input id="edit-cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" value="' + escAttr(currentDir || '') + '" aria-label="工作目录路径">' +
-    '</div>';
-  return html;
+  return buildCronWorkspaceBodyInternal({
+    inputId: 'edit-cron-workdir',
+    buttonId: 'edit-cron-ws-dropdown',
+    selectedPath: currentDir || '',
+  });
 }
 
 function authHeaders() {
@@ -8838,6 +9376,7 @@ async function doEditCronJob(id) {
   if (!job) { showToast('未找到该任务', 'warning'); return; }
 
   const newPrompt = document.getElementById('edit-cron-prompt').value;
+  const newTitle = (document.getElementById('edit-cron-title')?.value || '').trim();
   // Advanced raw input wins over picker; if both empty use overlay cache
   // (seeded to job.schedule on modal open, kept fresh by freqUpdate()).
   const advanced = document.getElementById('freq-advanced-input');
@@ -8854,6 +9393,7 @@ async function doEditCronJob(id) {
   // user didn't touch (and the audit log stays meaningful).
   const body = {};
   if (newPrompt !== (job.prompt || '')) body.prompt = newPrompt;
+  if (newTitle !== (job.title || '')) body.title = newTitle;
   if (newSchedule !== job.schedule) body.schedule = newSchedule;
   if (newWorkDir !== (job.work_dir || '')) body.work_dir = newWorkDir;
 
@@ -9019,6 +9559,32 @@ scanDiscovered();
 discoveredPollTimer = setInterval(scanDiscovered, 30000);
 fetchCronJobs(); // load initial cron state for badge
 wsm.connect();
+
+// RNEW-UX-014: suspend background pollers when the tab is hidden. 1-5s
+// setInterval loops on a backgrounded tab burn battery, mobile data, and
+// server bandwidth for no user-visible benefit. Resume on visibility
+// change so the first thing a returning user sees is fresh state.
+// WS event delivery is not affected — the socket stays open in hidden
+// tabs and delivers live updates instantly when the user returns.
+(function () {
+  const stopPollers = () => {
+    if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
+    if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
+  };
+  const startPollers = () => {
+    if (!sessionPollTimer) {
+      fetchSessions(); // immediate refresh on resume so UI is not stale
+      sessionPollTimer = setInterval(fetchSessions, 5000);
+    }
+    if (!discoveredPollTimer) {
+      discoveredPollTimer = setInterval(scanDiscovered, 30000);
+    }
+  };
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopPollers();
+    else startPollers();
+  });
+})();
 initMobile();
 initViewportTracking();
 initSwipeDelete();

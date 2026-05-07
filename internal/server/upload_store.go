@@ -25,6 +25,20 @@ const (
 	// paths. Kept below maxUploadPerOwner so a full batch can still be
 	// accompanied by an in-flight retry without tripping the per-owner quota.
 	maxFilesPerSend = 20
+	// maxUploadBytesPerOwner bounds the sum of live entry payload sizes
+	// per owner. Added when PDFs joined the upload path: with images alone
+	// the 10 MB * 40 entries = 400 MB per-owner worst case was tolerable;
+	// with PDFs at up to 32 MB each the entry-count cap alone would permit
+	// 32*40 = 1.28 GB resident per bad actor. This byte cap (96 MB ≈
+	// 3 PDFs + many images) is the real safety rail while the entry count
+	// stays a cheap O(1) guard for pathological many-small-file floods.
+	maxUploadBytesPerOwner = 96 * 1024 * 1024 // 96 MB
+	// maxUploadBytesGlobal caps the sum of all live entry payload sizes.
+	// With maxUploadEntries at 100 and PDFs up to 32 MB, without this cap
+	// the store could hold 3.2 GB resident even with the per-owner cap —
+	// a handful of colluding owners could still starve the host. 512 MB
+	// accommodates realistic bursts while preventing runaway growth.
+	maxUploadBytesGlobal = 512 * 1024 * 1024 // 512 MB
 )
 
 type uploadEntry struct {
@@ -43,16 +57,25 @@ type uploadEntry struct {
 // the cleanup goroutine. Invariant: ownerCounts[o] == |{e | e.Owner==o}|
 // for every live entry, and owner "" is intentionally not tracked (the
 // per-owner cap is bypassed for unauthenticated requests — see Put).
+//
+// ownerBytes + totalBytes run on the same invariant principle for byte
+// accounting. Byte caps fire BEFORE entry-count caps because the former is
+// the real memory backstop; either tripping rejects the Put with the same
+// errUploadPerOwner / errUploadStoreFull sentinels (callers don't need to
+// distinguish count-vs-byte exhaustion — both are "try again later").
 type uploadStore struct {
 	mu          sync.Mutex
 	entries     map[string]*uploadEntry
 	ownerCounts map[string]int
+	ownerBytes  map[string]int64
+	totalBytes  int64
 }
 
 func newUploadStore() *uploadStore {
 	return &uploadStore{
 		entries:     make(map[string]*uploadEntry),
 		ownerCounts: make(map[string]int),
+		ownerBytes:  make(map[string]int64),
 	}
 }
 
@@ -68,8 +91,9 @@ var (
 )
 
 // Put stores an image owned by owner and returns a random hex ID.
-// Returns errUploadStoreFull when the global cap is hit, or
-// errUploadPerOwner when the caller already has maxUploadPerOwner live entries.
+// Returns errUploadStoreFull when either the global entry cap or global
+// byte cap is hit, or errUploadPerOwner when the caller's entry/byte
+// sub-limit would be exceeded.
 func (s *uploadStore) Put(owner string, img cli.ImageData) (string, error) {
 	b := make([]byte, 16)
 	if _, err := rand.Read(b); err != nil {
@@ -77,35 +101,72 @@ func (s *uploadStore) Put(owner string, img cli.ImageData) (string, error) {
 	}
 	id := hex.EncodeToString(b)
 
+	sz := entrySize(img)
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.entries) >= maxUploadEntries {
+		return "", errUploadStoreFull
+	}
+	if s.totalBytes+sz > maxUploadBytesGlobal {
 		return "", errUploadStoreFull
 	}
 	// Per-owner sub-limit: O(1) via ownerCounts map. Empty owner bypasses
 	// the check — unauthenticated deployments (dashToken=="") fall through
 	// with owner=="" and should not be rejected by this limit; callers
 	// authenticated via token/cookie always produce a non-empty owner.
-	if owner != "" && s.ownerCounts[owner] >= maxUploadPerOwner {
-		return "", errUploadPerOwner
+	if owner != "" {
+		if s.ownerCounts[owner] >= maxUploadPerOwner {
+			return "", errUploadPerOwner
+		}
+		if s.ownerBytes[owner]+sz > maxUploadBytesPerOwner {
+			return "", errUploadPerOwner
+		}
 	}
 	s.entries[id] = &uploadEntry{Image: img, Owner: owner, Created: time.Now()}
+	s.totalBytes += sz
 	if owner != "" {
 		s.ownerCounts[owner]++
+		s.ownerBytes[owner] += sz
 	}
 	return id, nil
 }
 
-// removeEntryLocked decrements the owner counter and deletes the entry.
-// Caller must hold s.mu. Keeping the bookkeeping in one place preserves
-// the ownerCounts invariant across Take/evict paths.
+// entrySize reports the payload byte count used for quota accounting. Only
+// Data contributes — MimeType / OrigName / WorkspacePath are tiny and their
+// overhead is comfortably absorbed by the per-entry budget. Counting
+// everything would make the caps less predictable without meaningful
+// defence benefit.
+func entrySize(img cli.ImageData) int64 {
+	return int64(len(img.Data))
+}
+
+// removeEntryLocked decrements the owner counter / byte accounting and
+// deletes the entry. Caller must hold s.mu. Keeping the bookkeeping in
+// one place preserves the ownerCounts / ownerBytes / totalBytes invariants
+// across Take/evict paths.
 func (s *uploadStore) removeEntryLocked(id string, e *uploadEntry) {
 	delete(s.entries, id)
+	sz := entrySize(e.Image)
+	s.totalBytes -= sz
+	if s.totalBytes < 0 {
+		// Defensive: a negative total would surface as an integer
+		// underflow wrap on int64 arithmetic later. The invariant says
+		// this is unreachable, but pinning it at zero on the off chance
+		// a future refactor breaks the invariant keeps the accounting
+		// sane without a panic.
+		s.totalBytes = 0
+	}
 	if e.Owner != "" {
 		if n := s.ownerCounts[e.Owner] - 1; n <= 0 {
 			delete(s.ownerCounts, e.Owner)
 		} else {
 			s.ownerCounts[e.Owner] = n
+		}
+		if b := s.ownerBytes[e.Owner] - sz; b <= 0 {
+			delete(s.ownerBytes, e.Owner)
+		} else {
+			s.ownerBytes[e.Owner] = b
 		}
 	}
 }

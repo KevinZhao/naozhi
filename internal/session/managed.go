@@ -41,6 +41,24 @@ type processIface interface {
 	// Returns cli.ErrInterruptUnsupported for protocols without this primitive.
 	InterruptViaControl() error
 	Send(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+	// SendPassthrough is the passthrough-mode Send. Callers must ensure the
+	// underlying protocol reports SupportsReplay()==true; otherwise this
+	// returns an error. Unlike Send, multiple goroutines may call this
+	// concurrently on the same process — ordering is handled by the CLI's
+	// internal commandQueue plus a naozhi-side sendSlot FIFO.
+	SendPassthrough(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback, priority string) (*cli.SendResult, error)
+	// DiscardPassthroughPending cancels all in-flight passthrough sends and
+	// fires the given error to each caller. Used on /new, /clear, or forced
+	// session reset.
+	DiscardPassthroughPending(reason error)
+	// PassthroughDepth returns the current pending-slot count for dashboard/
+	// status display.
+	PassthroughDepth() int
+	// SupportsPassthrough reports whether this process's protocol can operate
+	// in passthrough mode (i.e. Protocol.SupportsReplay()). Dispatch uses
+	// this to fall back to legacy Send when the protocol can't provide the
+	// replay events passthrough matching relies on.
+	SupportsPassthrough() bool
 	// Dashboard introspection
 	GetSessionID() string
 	GetState() cli.ProcessState
@@ -394,6 +412,97 @@ func (s *ManagedSession) touchLastActive() {
 	s.lastActive.Store(time.Now().UnixNano())
 }
 
+// SendPassthrough is the concurrent-capable Send for passthrough mode.
+// Unlike Send, this does NOT acquire sendMu — the CLI's internal commandQueue
+// plus the Process-level sendSlot FIFO provide ordering, and serializing at
+// this layer would defeat passthrough's whole point (instant dispatch, tool-
+// boundary mid-turn injection).
+//
+// Callers must verify SupportsPassthrough() before invoking. For protocols
+// that don't support replay, the dispatcher should fall back to the legacy
+// Send path. Calling SendPassthrough on an unsupported protocol just returns
+// an error; it does not hang.
+//
+// `priority` is one of "", "now", "next", "later". Empty lets the CLI default
+// ("next") win. "now" aborts the in-flight turn (see docs/rfc/
+// passthrough-mode.md §5.6, validation V2).
+func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback, priority string) (*cli.SendResult, error) {
+	s.touchLastActive()
+
+	prompt := cli.TruncateRunes(text, 120)
+	if len(images) > 0 {
+		prompt += fmt.Sprintf(" [+%d image(s)]", len(images))
+	}
+	storeStringAtomic(&s.lastPrompt, prompt)
+
+	proc := s.loadProcess()
+	if proc == nil {
+		return nil, fmt.Errorf("session %s has no active process", s.key)
+	}
+
+	result, err := proc.SendPassthrough(ctx, text, images, onEvent, priority)
+	if err != nil {
+		s.mapSendError(proc, err)
+		return nil, err
+	}
+	if s.getSessionID() == "" && result.SessionID != "" {
+		s.setSessionID(result.SessionID)
+		if s.onSessionID != nil {
+			s.onSessionID(result.SessionID)
+		}
+	}
+	return result, nil
+}
+
+// SupportsPassthrough exposes the underlying process's passthrough capability
+// so the dispatcher can pick between passthrough and legacy Send per session
+// (ACP-backed sessions fall back; Claude-backed sessions use passthrough).
+func (s *ManagedSession) SupportsPassthrough() bool {
+	proc := s.loadProcess()
+	if proc == nil {
+		return false
+	}
+	return proc.SupportsPassthrough()
+}
+
+// DiscardPassthroughPending delegates to the process's pending-slot cleanup.
+// Called on /new, /clear, and forced session reset.
+func (s *ManagedSession) DiscardPassthroughPending(reason error) {
+	proc := s.loadProcess()
+	if proc == nil {
+		return
+	}
+	proc.DiscardPassthroughPending(reason)
+}
+
+// PassthroughDepth is a read-only view of pending slots for dashboard /
+// status display.
+func (s *ManagedSession) PassthroughDepth() int {
+	proc := s.loadProcess()
+	if proc == nil {
+		return 0
+	}
+	return proc.PassthroughDepth()
+}
+
+// mapSendError translates Process-level errors into ManagedSession
+// deathReason bookkeeping. Shared between Send and SendPassthrough so new
+// error sentinels live in one place.
+func (s *ManagedSession) mapSendError(proc processIface, err error) {
+	switch {
+	case errors.Is(err, cli.ErrNoOutputTimeout):
+		storeStringAtomic(&s.deathReason, "no_output_timeout")
+	case errors.Is(err, cli.ErrTotalTimeout):
+		storeStringAtomic(&s.deathReason, "total_timeout")
+	case errors.Is(err, cli.ErrProcessExited):
+		reason := "process_exited"
+		if dr := proc.DeathReason(); dr != "" {
+			reason = dr
+		}
+		storeStringAtomic(&s.deathReason, reason)
+	}
+}
+
 // Send delivers a message to the claude process and returns the result.
 // Messages to the same session are serialized via sendMu.
 func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error) {
@@ -428,21 +537,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	// indirect call per event on the Send path.
 	result, err := proc.Send(ctx, text, images, onEvent)
 	if err != nil {
-		switch {
-		case errors.Is(err, cli.ErrNoOutputTimeout):
-			storeStringAtomic(&s.deathReason, "no_output_timeout")
-		case errors.Is(err, cli.ErrTotalTimeout):
-			storeStringAtomic(&s.deathReason, "total_timeout")
-		case errors.Is(err, cli.ErrProcessExited):
-			// Prefer the precise reason recorded by readLoop (e.g.
-			// cli_exited_code_1, shim_eof, readloop_panic) over a generic
-			// "process_exited" so operators can tell a crash from a clean exit.
-			reason := "process_exited"
-			if dr := proc.DeathReason(); dr != "" {
-				reason = dr
-			}
-			storeStringAtomic(&s.deathReason, reason)
-		}
+		s.mapSendError(proc, err)
 		return nil, err
 	}
 

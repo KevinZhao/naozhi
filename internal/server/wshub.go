@@ -723,6 +723,35 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		images = append(images, taken...)
 	}
 
+	// Persist file_ref attachments (PDFs) into the workspace. Mirrors the
+	// HTTP handleSend flow; without this the file_ref entry reaches
+	// NewUserMessageWithMeta with an empty WorkspacePath and its Read-tool
+	// bullet is silently dropped (see prependFileRefHint's skip branch).
+	// That presented to the user as a "[System: The user attached 1 file]"
+	// prompt with no path — exactly the bug report that triggered this fix.
+	var wsRollback func()
+	if hasPersistableAttachment(images) {
+		// resolveAttachmentWorkspace falls back to the session/router's
+		// saved workspace when msg.Workspace is empty. The dashboard does
+		// not re-send workspace on every WS message for an already-running
+		// session, so this is the common path; without the fallback every
+		// post-first send of a PDF returned "invalid workspace".
+		validatedWS, err := resolveAttachmentWorkspace(h, key, msg.Workspace)
+		if err != nil {
+			slog.Warn("ws attachment workspace validation failed",
+				"key", key, "err", err)
+			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "invalid workspace"})
+			return
+		}
+		resolved, rb, perr := persistFileRefs(validatedWS, images, key, c.uploadOwner)
+		if perr != nil {
+			c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: perr.msg})
+			return
+		}
+		images = resolved
+		wsRollback = rb
+	}
+
 	capturedID, capturedKey := msg.ID, key
 	reset, status, err := h.sessionSend(sendParams{
 		Key:       key,
@@ -735,9 +764,15 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: capturedID, Status: "error", Key: capturedKey, Error: errMsg})
 	})
 	if err != nil {
+		if wsRollback != nil {
+			wsRollback()
+		}
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: err.Error()})
 		return
 	}
+	// sessionSend accepted (or reset-processed) the request — files must stay on disk.
+	wsRollback = nil
+	_ = wsRollback // documents the post-accept state
 	if reset {
 		// /clear or /new — HTTP path reports "reset"; keep the WS path in sync so
 		// clients can uniformly distinguish reset from accepted/queued turns

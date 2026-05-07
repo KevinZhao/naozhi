@@ -1,0 +1,50 @@
+# Dependabot v2 config (RNEW-OPS-413).
+#
+# Scope:
+#   - gomod:        weekly scan of go.mod / go.sum
+#   - github-actions: weekly scan of workflow files
+#
+# Not enabled:
+#   - npm/yarn:     naozhi has no JS build (dashboard is hand-written vanilla JS).
+#   - docker:       no Dockerfile in this repo.
+#
+# Security fix PRs bypass the weekly cadence and open immediately; the
+# schedule below only affects regular version-bump PRs.
+version: 2
+updates:
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(deps)"
+      include: scope
+    labels:
+      - dependencies
+      - go
+    groups:
+      # Minor/patch bumps share a single PR to cut review overhead.
+      # Major bumps still open one PR per module.
+      go-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "03:00"
+      timezone: Asia/Shanghai
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: "chore(ci)"
+      include: scope
+    labels:
+      - dependencies
+      - ci

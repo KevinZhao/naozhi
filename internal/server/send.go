@@ -10,6 +10,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"runtime/debug"
@@ -36,16 +37,53 @@ func (h *Hub) sendWithBroadcast(
 	images []cli.ImageData,
 	onEvent cli.EventCallback,
 ) (*cli.SendResult, error) {
-	// Notify ALL dashboard clients that this session is running so they can
-	// auto-subscribe. Uses BroadcastSessionReady (sends to all authenticated
-	// clients) instead of broadcastState (only subscribed clients), because
-	// for new sessions nobody is subscribed yet.
+	return h.sendWithBroadcastPriority(ctx, key, sess, text, images, onEvent, "")
+}
+
+// sendWithBroadcastPriority is the passthrough-aware variant of
+// sendWithBroadcast. When priority is non-empty (or when the dispatch layer
+// asks for passthrough via context key), the session routes through
+// SendPassthrough so multiple calls for the same session can run concurrently;
+// otherwise the legacy serialized Send path is used. The broadcast calls are
+// identical — they only signal "session active / state changed" to dashboard
+// subscribers, which is agnostic to the concurrency model underneath.
+//
+// When the ctx carries dispatch.WithUrgent, the explicit `priority` argument
+// is upgraded to "now" if not already set — this lets handlers opt into the
+// urgent path without threading the priority field through every wrapper.
+func (h *Hub) sendWithBroadcastPriority(
+	ctx context.Context,
+	key string,
+	sess *session.ManagedSession,
+	text string,
+	images []cli.ImageData,
+	onEvent cli.EventCallback,
+	priority string,
+) (*cli.SendResult, error) {
 	h.BroadcastSessionReady(key)
 	h.BroadcastSessionsUpdate()
 
-	result, err := sess.Send(ctx, text, images, onEvent)
+	if priority == "" && dispatch.IsUrgent(ctx) {
+		priority = "now"
+	}
 
-	// Broadcast final state after Send completes.
+	var (
+		result *cli.SendResult
+		err    error
+	)
+	switch {
+	case usePassthrough(ctx, sess):
+		result, err = sess.SendPassthrough(ctx, text, images, onEvent, priority)
+	case priority == "now":
+		// ACP / legacy protocols: emulate urgent by interrupting the in-flight
+		// turn before sending the new message. Best-effort; failures are not
+		// fatal — the message still lands on the next turn.
+		sess.InterruptViaControl()
+		result, err = sess.Send(ctx, text, images, onEvent)
+	default:
+		result, err = sess.Send(ctx, text, images, onEvent)
+	}
+
 	if rs := h.router.GetSession(key); rs != nil {
 		snap := rs.Snapshot()
 		h.broadcastState(key, snap.State, snap.DeathReason)
@@ -53,6 +91,15 @@ func (h *Hub) sendWithBroadcast(
 	h.BroadcastSessionsUpdate()
 
 	return result, err
+}
+
+// usePassthrough reports whether this turn should take the passthrough path.
+// Gate: ctx carries dispatch.WithPassthrough AND session reports support.
+func usePassthrough(ctx context.Context, sess *session.ManagedSession) bool {
+	if sess == nil || !sess.SupportsPassthrough() {
+		return false
+	}
+	return dispatch.IsPassthrough(ctx)
 }
 
 // sendWithBroadcast is a nil-safe delegation to Hub.sendWithBroadcast.
@@ -73,6 +120,11 @@ func (s *Server) sendWithBroadcast(
 	}
 	if s.hub != nil {
 		return s.hub.sendWithBroadcast(ctx, key, sess, text, images, onEvent)
+	}
+	// Headless mode (no hub): still route through passthrough when caller
+	// set the ctx marker and session supports it.
+	if usePassthrough(ctx, sess) {
+		return sess.SendPassthrough(ctx, text, images, onEvent, "")
 	}
 	return sess.Send(ctx, text, images, onEvent)
 }
@@ -136,6 +188,14 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 	if trimmed == "/clear" || trimmed == "/new" {
 		if h.queue != nil {
 			h.queue.Discard(key)
+		}
+		// passthrough 模式下 dashboard /new 必须与 IM 路径（dispatch.discardQueue）
+		// 对齐：queue.Discard 只清 MessageQueue 里的排队消息，还要把 session
+		// 层 in-flight 的 SendPassthrough goroutine 也通知到，否则它们会继续
+		// 占着 sendSlot 直到自然超时，期间新消息被 ErrTooManyPending 拒绝，
+		// 用户看到"排队已满"而非干净重置。R192-SRV-P0-NewDiscardPassthrough。
+		if sess := h.router.GetSession(key); sess != nil {
+			sess.DiscardPassthroughPending(cli.ErrSessionReset)
 		}
 		h.router.Reset(key)
 		h.BroadcastSessionsUpdate()
@@ -215,6 +275,33 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 	// Fallback to legacy guard path when no queue is configured (tests, headless).
 	if h.queue == nil {
 		return h.sessionSendLegacy(p, onAsyncError)
+	}
+
+	// Passthrough mode: direct dispatch — every send gets its own goroutine
+	// and runs concurrently with any other in-flight send for the same
+	// session. The CLI's commandQueue + Process-level sendSlot FIFO handle
+	// ordering. If the session's protocol doesn't support replay,
+	// usePassthrough() inside sendWithBroadcast transparently falls back
+	// to the legacy serialized Send path.
+	if h.queue.Mode() == dispatch.ModePassthrough {
+		release, shuttingDown := h.TrackSend()
+		if shuttingDown {
+			return false, sendAckBusy, nil
+		}
+		// /urgent prefix → strip + set priority:"now" so the CLI aborts
+		// the in-flight turn. Keeps dashboard behavior parallel with the IM
+		// dispatcher's /urgent command (dispatch/commands.go handleUrgent).
+		text := p.Text
+		priority := ""
+		if strings.HasPrefix(strings.TrimSpace(text), "/urgent ") {
+			text = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(text), "/urgent "))
+			priority = "now"
+		}
+		go func() {
+			defer release()
+			h.runTurnPassthrough(p.Key, text, p.Images, priority, onAsyncError)
+		}()
+		return false, sendAckAccepted, nil
 	}
 
 	qm := dispatch.QueuedMsg{
@@ -317,6 +404,16 @@ func (h *Hub) ownerLoop(key string, gen uint64, first dispatch.QueuedMsg, onAsyn
 		// onAsyncError only applies to the first turn (one ack per request);
 		// subsequent coalesced turns log failures without a back-channel.
 		h.runTurn(key, text, images, nil)
+		// 与 dispatch.ownerLoop 对齐：Reset 前 Stop + drain，防止未来循环
+		// 形状变化（例如 early-continue）让 timer 的残留 tick 立即 fire，
+		// 导致 DoneOrDrain 被多调一次、刚入队的消息被丢弃且无任何提示。
+		// R192-SRV-P0-CollectTimerDrain。
+		if !collectTimer.Stop() {
+			select {
+			case <-collectTimer.C:
+			default:
+			}
+		}
 		collectTimer.Reset(h.queue.CollectDelay())
 	}
 }
@@ -399,6 +496,48 @@ func (h *Hub) runTurn(key, text string, images []cli.ImageData, onAsyncError fun
 		}
 	}
 	slog.Debug("send: turn complete", "key", key, "elapsed_ms", time.Since(sendStart).Milliseconds())
+}
+
+// runTurnPassthrough runs one passthrough-mode turn. Called from a detached
+// goroutine so multiple sends on the same session execute concurrently. The
+// session layer routes through SendPassthrough when the protocol supports
+// replay; otherwise it transparently falls back to the legacy serialized
+// Send path (matching dispatch's fallback semantics).
+//
+// `priority` is forwarded as-is to SendPassthrough: "" for normal messages,
+// "now" for /urgent preemption.
+func (h *Hub) runTurnPassthrough(key, text string, images []cli.ImageData, priority string, onAsyncError func(string)) {
+	sendStart := time.Now()
+	opts := h.sessionOptsFor(key)
+	sess, _, err := h.router.GetOrCreate(h.ctx, key, opts)
+	if err != nil {
+		slog.Error("passthrough: get session", "key", key, "err", err)
+		if onAsyncError != nil {
+			onAsyncError(err.Error())
+		}
+		return
+	}
+	ctx := dispatch.WithPassthrough(h.ctx)
+	if _, err := h.sendWithBroadcastPriority(ctx, key, sess, text, images, nil, priority); err != nil {
+		// ErrAbortedByUrgent, ErrReconnectedUnknown, ErrSessionReset are
+		// informational — the user knows what happened (or will see a
+		// dashboard state update). Only log at Warn for surprising failures.
+		if errors.Is(err, cli.ErrAbortedByUrgent) ||
+			errors.Is(err, cli.ErrSessionReset) ||
+			errors.Is(err, cli.ErrReconnectedUnknown) {
+			slog.Debug("passthrough: send completed with informational error", "key", key, "err", err)
+		} else {
+			slog.Warn("passthrough: send failed", "key", key, "err", err)
+		}
+		if onAsyncError != nil {
+			onAsyncError(err.Error())
+		}
+	} else if h.scheduler != nil && session.IsCronKey(key) {
+		if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, session.CronKeyPrefix), text); err != nil {
+			slog.Warn("passthrough: set cron prompt", "key", key, "err", err)
+		}
+	}
+	slog.Debug("passthrough: turn complete", "key", key, "elapsed_ms", time.Since(sendStart).Milliseconds())
 }
 
 // sessionSendLegacy keeps the pre-queue guard/interrupt behavior for code paths

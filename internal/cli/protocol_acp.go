@@ -159,6 +159,16 @@ func (p *ACPProtocol) WriteInterrupt(_ io.Writer, _ string) error {
 	return ErrInterruptUnsupported
 }
 
+// WriteUserMessageLocked ignores uuid and priority — ACP has neither concept.
+// Sessions whose protocol has SupportsReplay()==false fall back to Collect
+// mode regardless of queue.mode config (see dispatcher selection logic).
+func (p *ACPProtocol) WriteUserMessageLocked(w io.Writer, _, text string, images []ImageData, _ string) error {
+	return p.WriteMessage(w, text, images)
+}
+
+func (p *ACPProtocol) SupportsPriority() bool { return false }
+func (p *ACPProtocol) SupportsReplay() bool   { return false }
+
 func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 	var msg RPCMessage
 	if err := json.Unmarshal([]byte(line), &msg); err != nil {

@@ -1,0 +1,296 @@
+# 直通模式 (Passthrough Mode) 设计文档
+
+> **状态**: 设计提案 / 基于实测的可行性分析
+>
+> **背景**: 现有 `ModeCollect` / `ModeInterrupt` 在 turn 层合并消息、存在 settle delay；用户希望实现 CC REPL 式"新消息立即进入 CLI 排队，等 CLI 自己顺序处理"的行为。
+>
+> **结论**: 部分可行，存在关键约束。必须在改造前通过前置验证消除一个核心风险（CLI 队列合并语义），并调整 Process 并发模型。
+
+---
+
+## 1. 背景与动机
+
+### 1.1 现有机制的摘要
+
+| 模块 | 职责 |
+|---|---|
+| `dispatch/msgqueue.go` | per-session 忙闲状态 + 待处理消息切片，`maxDepth` eviction |
+| `dispatch.go` / `server/send.go` 的 `ownerLoop` | turn 结束后等 `collectDelay`，调 `DoneOrDrain` 取出队列，`CoalesceMessages` 合并为一个 prompt，作为下一个 turn |
+| `cli/process.go Process.Send` | `State==Running` 互斥，同一 Process 一次只能有一个 Send |
+| `ModeInterrupt` | 新消息到达立即 `InterruptViaControl` 中断当前 turn，然后合并当成下一 turn |
+
+### 1.2 用户诉求
+
+> "当正在进行一个比较长的任务的时候，新输入的消息可以进入 CC 正在运行的队列。"
+
+希望的交互特征（期望对齐 CC REPL）：
+
+- 新消息**立即**送达 CC，不等当前 turn 结束，不经过合并
+- 每条消息独立得到一个回复
+- 上下文沿 session 自然延续
+- 不需要用户操作 "/stop"
+
+### 1.3 关键约束（来自实测）
+
+stream-json 协议**没有 mid-turn user-append 原语**。真正的"当前 turn 引用新消息"只在 CC TUI 进程内部 agent loop 的 tool-call 边界实现，对 stream-json 观察者不可见。
+
+---
+
+## 2. 实测数据（claude 2.1.126, stream-json, Bedrock opus-4-6）
+
+以下实测在 `/tmp` 手动驱动 `claude -p --input-format stream-json --output-format stream-json` 完成，脚本保留于 `/tmp/test_*.py`。
+
+### 2.1 T1 — 中途注入 + 有 bash tool
+
+- T=0s 发 msg1（运行 20s bash，之后讲笑话）
+- T=5s 发 msg2（"忘掉笑话，只回 BLUE"）
+- T=26s bash tool_result 回
+- T=37.9s 模型 thinking **原文引用了 msg2**，但判定为 tool_result 里的 prompt injection，**拒绝执行**
+- `num_turns=2`，同一 turn 内多跳
+- **结论**: mid-turn 进到 tool_result 尾部，safety classifier 会拦截，**不可用**
+
+### 2.2 T2 — 中途注入 + 纯生成
+
+- T=0s 发 msg1（写灯塔守护者故事）
+- T=1.5s 发 msg2（"改写猫"）
+- T=14.58s 第一个 `result`（灯塔守护者），**msg2 未影响**
+- T=14.58s CLI 自动 emit 新的 `system/init`（同 session_id）
+- T=28.3s 第二个 `result`（猫的故事）
+- 两次都 `num_turns=1`
+- **结论**: msg2 在 msg1 turn 期间写入不会影响当前 turn；turn 结束后 CLI 自动启动下一个 turn 处理 msg2；同 session 上下文延续
+
+### 2.3 T3 — 三条连发（间隔 100ms，turn 启动前全部入队）
+
+- 发 msg1/msg2/msg3 间隔 100ms
+- 产出 **2 个 result**，分别 `"RED"` 和 `"GREEN\nBLUE"`
+- **结论**: CLI **合并了连续入队但尚未启动 turn 的消息**。msg1 独立（已被当前 turn 读），msg2+msg3 在 turn1 跑时堆积 stdin，被合并成一个 turn 处理
+
+### 2.4 T4 — 连发 2 条，第 2 条依赖第 1 条的上下文
+
+- msg1: "记住 42，回 OK"
+- msg2 (100ms 后): "我让你记了啥"
+- 产出 **1 个 result** `"42"`, `num_turns=4`
+- **结论**: 两条消息被合并进同一个 turn。CLI 尝试了多跳处理才给出答案。上下文在**同 turn 内**共享没问题，但没有分别得到 "OK" / "42" 两个独立回复
+
+### 2.5 T5 — 连发 2 条后发 control_request interrupt
+
+- msg1: 海洋诗
+- msg2 (300ms 后): 改山脉
+- T=2.3s 发 interrupt
+- T=2.3s CLI 立即产出 `result subtype=error_during_execution`，附带 `{"type":"user", "content":[{"text":"[Request interrupted by user]"}]}`
+- T=16.2s 第二个 `result` 是**关于山脉的** 300 字诗
+- **结论**: interrupt 可以精确中断 turn1，**并不丢弃 msg2**；msg2 紧接着作为新 turn 执行
+
+### 2.6 T6 — 5 条连发（50ms 间隔）
+
+- APPLE / BANANA / CHERRY / DATE / ELDERBERRY
+- 产出 **2 个 result**: `"APPLE"` 和 `"ELDERBERRY"`（中间三条被吞入最后一个 turn，模型只回答了最后一条）
+- **结论**: CLI 的队列合并**丢失了中间消息的独立回复**。这是 passthrough 的头号风险
+
+### 2.7 T7 — 间隔 ≥0s（等 result1 再发 msg2）
+
+- gap = 0 / 0.3 / 1 / 3s
+- 4 个 gap 都得到 `['ONE', 'TWO']` 两个独立 result
+- **结论**: 只要 msg2 **在 result1 之后**写入 stdin，就稳定得到 2 个独立 turn
+
+### 2.8 T8 — 纯生成 turn 进行中注入
+
+- msg1: 写 500 字龙的故事（耗时 ~22s）
+- T=3s 发 msg2: "说 XYLOPHONE"
+- 产出 2 个 result: 龙的故事（完整） + `"XYLOPHONE."`
+- **结论**: 纯生成 turn 进行中注入安全——msg1 不受干扰，msg2 作为独立 turn 顺序执行
+
+### 2.9 T9 — bash tool 执行期间注入
+
+- msg1: 运行 20s bash，之后说 DONE
+- T=5s 发 msg2: "也加个 EXTRA"
+- 产出 **1 个 result** `"DONE EXTRA"`, `num_turns=2`
+- **结论**: bash 执行期间注入的消息会被当前 turn 吸收（在 tool_result 后作为新用户输入参与同一 turn 决策）。模型**没把它当 prompt injection**（与 T1 不同，这次不是"改变原任务"而是"附加要求"）
+
+### 2.10 实测结论一览表
+
+| 场景 | CLI 行为 | 对 passthrough 的意义 |
+|---|---|---|
+| 空闲期顺发（等 result） | 每条独立 turn | ✅ 安全 |
+| 初始连发多条（首 turn 未启动） | 首条独立，其余合并 | ⚠️ 需 naozhi 节流 |
+| Turn 执行中注入（纯生成） | 新消息转下一 turn | ✅ 安全 |
+| Turn 执行中注入（bash tool） | 可能并入当前 turn（附加式）或下一 turn | ⚠️ 语义不确定 |
+| Turn 执行中注入（带改主题） | 可能被 safety classifier 拦截 | ⚠️ 边缘情况 |
+| 连发 N 条（turn 运行中） | N-1 条合并成一个 turn，只回最后一条 | ❌ 丢消息 |
+| control_request interrupt | 中断当前 turn，**不丢队列** | ✅ 可以保留作为 /stop |
+
+---
+
+## 3. 核心风险与前置验证要求
+
+**风险 A（阻断级别）**: 用户在 turn 运行中连发多条消息，CLI 会把 stdin 里堆积的 user 消息合并成一个 turn，只回复最后一条。用户视角就是"中间消息丢了"。
+
+**风险 B**: Turn 执行中（尤其 bash tool 期间）注入的消息可能被吞入当前 turn，语义不稳定（T9 吸收；T1 被 safety classifier 拒绝）。
+
+**风险 C**: 并发 Send 需要修改 `Process.Send()` 的 `State==Running` 互斥（当前会直接返回 `process busy`）。
+
+**风险 D**: `result` 事件不带 `client_request_id` → 多条 pending 时要靠 **FIFO 顺序**匹配。如果 CLI 合并了多条（风险 A），顺序假设就会错位。
+
+### 3.1 前置验证清单
+
+**在开写生产代码之前**必须跑完并得到预期结果：
+
+| ID | 场景 | 期望 | 阻断判定 |
+|---|---|---|---|
+| V1 | 实测 N=5 条连发在 turn 运行中，统计独立 result 数量 | 最差 2 个 | 若 <2，passthrough 不可行 |
+| V2 | V1 的输入间隔分别为 50ms/500ms/1s/2s，看 CLI 合并阈值 | 找到 CLI "批量处理窗口" | 决定 naozhi 节流阈值 |
+| V3 | 实测 `control_request interrupt` 在 N 条 pending 时的行为 | 只中断当前 turn，剩余 pending 继续 | 决定 /stop 语义 |
+| V4 | 实测 CLI 死亡（kill -9）时 pending queue 状态 | readLoop 收到 EOF，pending 全部回 `ErrProcessExited` | 决定失败处理 |
+| V5 | 实测大消息（1MB+）连续两条的 stdin 压力 | 不丢 result，顺序正确 | 决定 backpressure |
+| V6 | 实测 `/new` `/clear`（naozhi 层语义）对 pending queue 的影响 | Discard 所有 pending 并回 `ErrSessionReset` | 决定重置语义 |
+| V7 | 实测 result 事件的顺序严格对应 stdin 写入顺序（N=10 条） | 严格 FIFO | 决定 FIFO 匹配可行性 |
+
+目前 T3/T6/T8/T9 已覆盖 V1/V2 部分，**V3-V7 需要在实现前补齐**。
+
+---
+
+## 4. 推荐方案：直通 + 节流
+
+### 4.1 核心思路
+
+- 消息到达后**立即**写 CLI stdin，但受**节流阀**控制——如果上一条消息的 result 还没回来，新消息进**短暂缓冲**（e.g. 150ms）
+- 缓冲期内到达的消息也只是"稍等发送"，不是合并
+- 节流阀保证 **CLI 内部同一时刻 stdin 里最多有 1 条未被启动的 user 消息**（即保证 CLI 永远看到的是一条一条的 turn 启动信号，不给 CLI 合并的机会）
+- 每个消息有自己的 `result` channel，FIFO 匹配 `result` 事件
+
+### 4.2 为什么需要节流而不是完全直通
+
+T3/T6 证实：**如果 CLI 上游 stdin 堆积 ≥2 条 user，CLI 就会合并**。所以 naozhi 必须控制上游只把"下一条"送进去，等 result 回来再放下一条。实际上这就是 CC REPL TUI 在做的事。
+
+### 4.3 形象地说
+
+旧 Collect: `[msg A..F 合并] → [一个大 prompt] → 一个 result`
+
+直通 + 节流: `msg A → turn → result A`，期间 `[msg B]`→暂存；A 完成后立即 `msg B → turn → result B`
+
+对用户体感：
+- A 跑 30s 期间用户发了 B/C/D，B/C/D 依次被独立处理、独立回复
+- **不像 CC REPL "当前任务引用"**（那个原理上做不到），而是"排队顺序执行"
+
+### 4.4 关键实现要点
+
+#### 4.4.1 `cli/process.go` 并发模型改造
+
+- 新增 `pendingSends []*sendSlot`（per-Process），含 `{resultCh chan *SendResult, errCh chan error, meta sendMeta}`
+- `Send(ctx, text, images, onEvent) → (*SendResult, error)` 改为：
+  1. 创建 slot，push 到 `pendingSends`（同一把 `sendMu`）
+  2. `WriteMessage` 到 stdin
+  3. 等 `slot.resultCh` / `slot.errCh` / `ctx.Done`
+- `readLoop` 收到 `result`：pop `pendingSends[0]`，投递到其 channel
+- 状态语义：`State` 从"是否在跑一个 Send"变成"是否在跑一个 turn"；is_running=true 持续覆盖整个 turn 生命期；dashboard UI 不变
+- 并发 Send 不再互斥阻塞，改为"可同时发起，等结果"
+
+#### 4.4.2 `dispatch` 层改造
+
+- 删除 `msgqueue.go` 合并逻辑 + `CoalesceMessages` + `ownerLoop` 的 drain loop
+- 新增 `sessionThrottle` per-session: 限制"允许直接写 stdin"的并发度为 1（互斥），超过的消息进 `pending []QueuedMsg`
+- 每条消息的发送流程：
+  1. 拿 `sessionThrottle.Lock()` — 如果没拿到，push 到 `pending`
+  2. 拿到后 → `sess.Send(...)` → 等 result → `sessionThrottle.Unlock()`
+  3. Unlock 时，如果 pending 非空，pop 头部继续 Send
+- **这个 `sessionThrottle` 就是"新 msgqueue"** — 简化版，只做 FIFO，不合并，不设 settle delay
+
+#### 4.4.3 naozhi 层仍然要记录的 user 消息元数据
+
+- `EnqueueAt` / `SentAt` / `CompletedAt`: 用于 UI 显示"已送达"/"排队中"/"处理中"
+- `MessageID` (IM inbound): reaction clear
+- `ChatKey` / `AgentID` / 来源连接 (WS sub-generation): 反向路由
+- `resultCh` 的 bookkeeping: 超时、取消传播
+- **与旧 msgqueue 的区别**: 不存消息内容（已写到 CLI 了），只存元数据跟 matcher
+
+#### 4.4.4 interrupt / /stop 语义
+
+- 保留 `InterruptViaControl` 作为显式 `/stop` 命令
+- 新语义：只中断当前 in-flight turn；naozhi 侧的 pending FIFO 继续；失败的 turn 回错给对应的 sendSlot
+- 丢弃所有 pending（`/new` 或 `/clear`）仍然可以，Discard 时把 pending 的所有 slot 都投递 `ErrSessionReset`
+
+#### 4.4.5 失败与清理
+
+- CLI 死亡（eventCh close）：readLoop 的 `!ok` 分支遍历 `pendingSends`，全部投递 `ErrProcessExited`
+- `ctx.Done`: 单个 sendSlot 的 ctx 只影响自己，其余继续
+- 超时：`noOutputTimeout` / `totalTimeout` 的 watchdog 仍然按 turn 维度（当前 head-of-queue）
+- 重连（`SpawnReconnect` 的 `reconnectedMidTurn`）：pending 全部投递 `ErrProcessExited`（因为重连后无法还原 naozhi 侧的 sendSlot ↔ CLI 排队一一对应）
+
+#### 4.4.6 UI / UX 变化
+
+- 旧的 "排队中…" chip（send_ack 返回 queued 时贴到乐观气泡）→ 保留，文案可改为"已送达，等待处理"
+- Dashboard 侧每个 user 气泡独立对应一个 result
+- IM 侧：reaction 仍然表示"收到"，每条独立处理完独立回复
+- 新增：用户可以在排队中看到"你前面还有 N 条消息"（从 `pendingSends` 长度读）
+
+### 4.5 兼容性与灰度
+
+- 配置 `queue.mode: passthrough` (新), 默认 `collect`（行为不变）
+- `passthrough` 与 `interrupt` / `collect` 互斥（三选一）
+- 新老模式共存一段时间，passthrough 稳定后再考虑移除 collect
+
+### 4.6 什么功能会被移除 / 被替换
+
+| 旧组件 | 状态 |
+|---|---|
+| `dispatch.CoalesceMessages` | 删除 |
+| `dispatch.MessageQueue` 消息 slice | 删除；保留 `busy` 语义迁到新 `sessionThrottle` |
+| `MessageQueue.collectDelay` | 删除 |
+| `ModeCollect` / `ModeInterrupt` | 保留至 passthrough 稳定 |
+| `ownerLoop` 的 drain 循环 | 删除 |
+| `msgqueue.interruptRequested` / auto-interrupt on enqueue | 删除（不再自动中断） |
+| `InterruptViaControl` | **保留**，转为 `/stop` 显式命令 |
+| send_ack `queued` 状态 | 保留，语义变为"已入 naozhi 节流队列" |
+
+---
+
+## 5. 非目标（明确排除）
+
+- **不实现"当前 turn 引用新消息"**。T1/T2 实测证实该语义要么被 safety classifier 拦截，要么根本不生效。需要这种行为的用户走 `/stop` + 重发
+- **不尝试与 CC TUI 的队列机制 100% 对齐**：我们的是外部 stdin 驱动的顺序排队，CC TUI 的是进程内 agent loop 的 polling
+- **不对 turn 内部行为做任何假设**：assistant / tool_use 事件的顺序由 CLI 主导，naozhi 只按 FIFO 匹配 result
+
+---
+
+## 6. 开放问题
+
+1. **节流阈值**：是否允许 stdin 有"预装"一条（提升 CLI 启动下一 turn 的延迟）？如果 T3 的 100ms 合并阈值可以用"预装后 CLI 处理到第一条 result 前不再写"的策略规避，整体 p50 延迟会更好。需要 V2 数据决定
+2. **IM 侧多条消息的合并 UX**：用户快速连发 5 条，如果每条一个独立回复会不会 IM 聊天洪水？是否在 IM 层保留可配置的"IM 侧 coalesce"（只合并 IM 的**回复** display，不合并 prompt）
+3. **单 Process 的 subagents / nested tool**：如果一个 turn 内嵌套 Task → subagent，pending queue 的 FIFO 是否仍然可靠？需要 V7 的变种测试验证
+4. **大消息的 write 阻塞**：`shimWriter.Write` 会阻塞到 shim 接收；如果一条超大消息阻塞 10s，后面 pending 消息在 naozhi 层等多久才该给 "busy" 反馈？
+
+---
+
+## 7. 落地步骤
+
+1. **Phase 0 — 前置验证**（建议 1 天）
+   - 把 `/tmp/test_*.py` 脚本迁到 `test/e2e/passthrough/`，跑通 V3/V4/V5/V6/V7
+   - 输出 `docs/rfc/passthrough-mode-validation.md` 记录每个场景的实测结论
+   - **阻断**: V7 必须通过（严格 FIFO 才能做）
+
+2. **Phase 1 — Process 并发模型**
+   - 在 `cli/process.go` 引入 `sendSlot` + `pendingSends`
+   - `Send` 重构为 slot 驱动
+   - 单元测试覆盖：并发 2/5/10 条；结果顺序匹配；CLI 死亡清理；interrupt 保留 pending
+   - **不接入 dispatch 层**，仅本包内跑通
+
+3. **Phase 2 — naozhi 节流层**
+   - `dispatch/msgqueue.go` 替换为 `sessionThrottle`（或新增并发 flag 切换）
+   - `ownerLoop` 删除 drain 循环，只保留 send+wait
+   - `sendParams` / send_ack 状态扩展
+
+4. **Phase 3 — dashboard / IM 适配**
+   - UI 排队显示 "N 条排队中"
+   - IM reaction 逐条 clear
+   - 配置开关 `queue.mode: passthrough` 上线
+
+5. **Phase 4 — 灰度 + 移除老路径**
+   - Passthrough 在本地 + 1 个用户生产跑 1 周
+   - 稳定后 deprecate Collect/Interrupt，保留代码 2 个版本后删除
+
+---
+
+## 8. 回滚策略
+
+- 若 passthrough 在生产发现数据丢失 / 顺序错乱：**配置切回 `queue.mode: collect`**，无需重启代码
+- 若发现是 Process 层面的 bug：revert Phase 1 的 `sendSlot` 改造，Send 回到互斥模型；此时 Collect 仍然可用

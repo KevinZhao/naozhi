@@ -62,6 +62,46 @@ var (
 // rather than counting it as a no-output stall.
 var ErrProcessExited = errors.New("process exited during send")
 
+// Passthrough-mode sentinels. Kept in a separate block so callers can do
+// targeted errors.Is switches without depending on the wider process error
+// vocabulary.
+var (
+	// ErrSessionReset fires when a user slash-command (/new, /clear) or a
+	// forced wrapper reset cancels all pending sends. Dispatcher should not
+	// surface this to IM because the user triggered it knowingly.
+	ErrSessionReset = errors.New("session reset")
+
+	// ErrReconnectedUnknown fires when naozhi re-attaches to a shim+CLI that
+	// survived a naozhi restart and had pending messages in flight. naozhi
+	// cannot tell which messages were consumed, so every pending slot gets
+	// this error. Dispatcher should surface "状态未知，请查看历史或重发"
+	// so users can decide whether to resend.
+	ErrReconnectedUnknown = errors.New("reconnected: processing state unknown")
+
+	// ErrTooManyPending fires when Send is called while pendingSlots already
+	// holds maxPendingSlots entries. The message is rejected up front — CLI
+	// never sees it. Dispatcher maps this to sendAckBusy.
+	ErrTooManyPending = errors.New("too many pending messages")
+
+	// ErrOrphanedSlot is a pure defensive fallback: Send's select has a timer
+	// tripwire at totalTimeout + 30s in case watchdog and readLoop both miss
+	// delivering a result. Should only fire on genuine bugs.
+	ErrOrphanedSlot = errors.New("slot orphaned: no result or error received")
+)
+
+// maxPendingSlots caps the per-Process passthrough pending queue depth. 16
+// covers realistic IM bursts comfortably (CC TUI's equivalent is unbounded,
+// but this is a goroutine-leak / memory backstop rather than a business
+// limit). Can be tuned via Process.SetMaxPendingSlots.
+const maxPendingSlots = 16
+
+// ErrAbortedByUrgent fires when a priority:"now" stdin message causes the
+// CLI to drop the in-flight turn. Any older pending slot that was enqueued
+// before the urgent message and had not yet been replayed gets this error —
+// its text never reached the model. Dispatcher should tell the user the
+// message was superseded and let them decide whether to resend.
+var ErrAbortedByUrgent = errors.New("aborted by priority:now preemption")
+
 // ErrNoActiveTurn is returned by InterruptViaControl when the process is not
 // currently running a turn (StateSpawning, StateReady, or StateDead). The
 // caller didn't do anything wrong, but nothing was interrupted; logs should
@@ -193,6 +233,67 @@ type Process struct {
 	// Read lock-free via atomic.Pointer — writers are the one-shot
 	// constructor path (no concurrency with readLoop). R70-ARCH-M3.
 	log atomic.Pointer[slog.Logger]
+
+	// Passthrough slot machinery. Lives alongside the legacy Send path —
+	// when SendPassthrough is used, readLoop routes result events through
+	// fanoutTurnResult instead of eventCh. Legacy Send (used by ACP, tests,
+	// and pre-passthrough callers) is unaffected: pendingSlots stays nil
+	// and readLoop keeps the existing eventCh delivery.
+	//
+	// Lock ordering (documented in docs/rfc/passthrough-mode.md §5.2.6):
+	//   shimWMu → slotsMu  (Send path; append slot + write stdin atomically)
+	//   slotsMu alone      (readLoop, cancel, reconnect)
+	slotsMu          sync.Mutex
+	pendingSlots     []*sendSlot // FIFO by stdin write order
+	currentTurnSlots []*sendSlot // slots claimed by the in-flight turn
+	turnStartedAt    time.Time   // set on system/init; zeroed on result
+	inTurn           bool
+	slotIDGen        atomic.Uint64
+}
+
+// sendSlot tracks one in-flight passthrough Send call. The slot is appended
+// to Process.pendingSlots atomically with the stdin write (see Process.Send
+// for the lock dance), then matched to the CLI's replay event by uuid (single
+// sender) or by text (merged sender). When the turn's result arrives, the
+// result is fanned out to every slot the turn claimed.
+//
+// canceled is the tombstone flag: when a Send caller leaves via ctx.Done, the
+// slot stays in pendingSlots so FIFO positioning isn't broken, but the fan-out
+// goroutine drops the result instead of trying to deliver to a channel with
+// no listener. See docs/rfc/passthrough-mode.md §5.2.2.
+type sendSlot struct {
+	id       uint64
+	uuid     string
+	text     string
+	priority string // "" | "now" | "next" | "later"
+	onEvent  EventCallback
+	resultCh chan *SendResult
+	errCh    chan error
+
+	// Only mutated under Process.slotsMu
+	canceled  bool
+	replayed  bool
+	enqueueAt time.Time
+	writtenAt time.Time
+}
+
+// isCanceled reads canceled under the lock-free atomic assumption that callers
+// outside slotsMu only read — writes happen with slotsMu held. Used by fanout
+// to avoid writing to a resultCh whose listener already returned.
+//
+// NB: this is not atomic in the strict sense, but the read-after-write ordering
+// in the Send/cancel/fanout interleaving is always slotsMu-synchronised at the
+// write side. The worst case of a racy read here is delivering one more
+// resultCh to a canceled slot — buffered channel absorbs it; Send listener is
+// already gone; memory is reclaimed at next GC. This is acceptable and lets
+// fanout proceed outside slotsMu (see §5.2 lock ordering).
+func (s *sendSlot) isCanceled() bool {
+	// slotsMu is held by the caller in readLoop paths, but fanoutTurnResult
+	// is explicitly documented to run *after* releasing slotsMu so heavy
+	// channel writes don't serialize the readLoop. Re-reading here is a
+	// belt-and-suspenders check; a narrow race is harmless per the note
+	// above.
+	return s.canceled
 }
 
 // SetSlogKey records the session key associated with this process so
@@ -480,11 +581,16 @@ func (p *Process) startReadLoop() {
 // readLoop reads NDJSON messages from the shim socket and dispatches events.
 func (p *Process) readLoop() {
 	log := p.slogger()
-	// LIFO defer order is important: the recover must run *first* so
-	// p.State is set to StateDead before the channels below close. Otherwise
-	// a waiter on <-p.done could read a stale p.State in the window between
-	// done-close and recover running. Defers execute in reverse declaration
-	// order, so the recover block is registered last.
+	// RNEW-007: Defers execute LIFO. Declaration order below is:
+	//   close(eventCh) -> close(done) -> CloseSubscribers -> recover
+	// Execution order on return is the reverse:
+	//   1. recover block: transition p.State to StateDead and fire onTurnDone
+	//   2. CloseSubscribers: unblock EventLog subscribers
+	//   3. close(done): signal readLoop exit to waiters
+	//   4. close(eventCh): isChanAlive relies on done closing BEFORE eventCh so
+	//      any producer guarded by "is done open?" never sends on a closed
+	//      eventCh. See drainStaleEvents / isChanAlive for the invariant.
+	// If you reorder these defers, re-verify the isChanAlive invariant.
 	defer close(p.eventCh)
 	defer close(p.done)
 	defer p.eventLog.CloseSubscribers()
@@ -635,6 +741,65 @@ func (p *Process) readLoop() {
 			// R67-PERF-9.
 			now := time.Now()
 
+			// ---- Passthrough mode hooks ----
+			// These run before the legacy eventCh / EventLog delivery paths.
+			// They are cheap no-ops when passthrough is not in use (zero
+			// pending slots, inTurn=false, protocol doesn't support replay).
+
+			// system/init: mark start of new turn for turn-aggregation owner
+			// tracking and watchdog baseline. Keeping this unconditional is
+			// harmless — onSystemInit only matters when pendingSlots is
+			// non-empty and a replay arrives later.
+			if ev.Type == "system" && ev.SubType == "init" && p.protocol.SupportsReplay() {
+				p.onSystemInit()
+			}
+
+			// user replay: claim slots into currentTurnSlots. Filter out of
+			// EventLog + eventCh so replay events don't pollute the dashboard
+			// transcript or trigger legacy result detection.
+			if ev.Type == "user" && ev.IsReplay {
+				p.slotsMu.Lock()
+				p.handleReplayEventLocked(ev)
+				p.slotsMu.Unlock()
+				continue // skip logEventAt / eventCh below
+			}
+
+			// result under passthrough: fan-out to claimed slots and skip
+			// legacy eventCh delivery. We still log to EventLog so dashboard
+			// sees the turn-complete event.
+			if ev.Type == "result" && p.protocol.SupportsReplay() {
+				// error_during_execution signals the CLI aborted the turn —
+				// e.g. a priority:"now" preempted it. Any older pending slot
+				// written before `now` that was never replayed was dropped
+				// by the CLI; fire ErrAbortedByUrgent for those.
+				if ev.SubType == "error_during_execution" {
+					victims := p.reapAbortedPreempted()
+					fireAbortErrors(victims)
+				}
+				owners, _ := p.onTurnResult()
+				if len(owners) > 0 {
+					p.logEventAt(ev, now.UnixMilli())
+					// Fire onEvent for each owner's turn-scope callback
+					// before delivering the terminal result.
+					for _, owner := range owners {
+						if owner.onEvent != nil {
+							owner.onEvent(ev)
+						}
+					}
+					fanoutTurnResult(owners, ev)
+					continue
+				}
+				// No owners claim this result. Under passthrough this means
+				// either (a) an abort with no claimed slots, handled above,
+				// or (b) stray result during reconnect. Either way skip
+				// legacy eventCh; dashboard EventLog already has the entry.
+				if ev.SubType == "error_during_execution" {
+					p.logEventAt(ev, now.UnixMilli())
+					continue
+				}
+				// Fall through to legacy path only for true stray results.
+			}
+
 			// Always log to EventLog so dashboard subscribers see events
 			// even when no Send() is active (e.g., after service restart
 			// reconnects to a shim that's mid-turn).
@@ -734,6 +899,10 @@ func (p *Process) readLoop() {
 			if cb != nil {
 				cb()
 			}
+			// Passthrough slot cleanup: every pending slot's caller is
+			// blocked inside SendPassthrough waiting on resultCh/errCh.
+			// Fire ErrProcessExited so they unblock with a clear error.
+			p.discardAllPending(ErrProcessExited)
 			// Close shim conn so heartbeatLoop stops writing pings into a dead
 			// socket and the bufio.Writer's fd is released promptly. Without
 			// this, if the process isn't subsequently Kill/Detach'd (e.g. when
@@ -770,6 +939,8 @@ func (p *Process) readLoop() {
 	if cb != nil {
 		cb()
 	}
+	// Passthrough: fan-out ErrProcessExited to any still-blocking SendPassthrough callers.
+	p.discardAllPending(ErrProcessExited)
 }
 
 // heartbeatLoop sends periodic ping messages to the shim and kills the process
@@ -851,6 +1022,70 @@ func (p *Process) findResultSince(afterMS int64) *SendResult {
 // EventCallback is called for each intermediate event during Send.
 type EventCallback func(ev Event)
 
+// buildUserEntry renders the EventLog entry that represents a single user
+// message, including per-image thumbnail generation. Shared between Send
+// (legacy collect mode) and SendPassthrough so the dashboard sees the same
+// bubble regardless of dispatch path — passthrough mode used to skip this
+// because the CLI echoes a replay event, but readLoop filters replays out
+// of EventLog (see process.go ~755), so without an explicit append the
+// user's typed message disappears on the next session re-subscribe.
+func buildUserEntry(text string, images []ImageData) EventEntry {
+	entry := EventEntry{
+		Time:    time.Now().UnixMilli(),
+		Type:    "user",
+		Summary: TruncateRunes(text, 120),
+		Detail:  TruncateRunes(text, 2000),
+	}
+	if len(images) > 0 {
+		entry.Summary += fmt.Sprintf(" [+%d image(s)]", len(images))
+		thumbs := make([]string, len(images))
+		if len(images) == 1 {
+			thumbs[0] = MakeThumbnail(images[0].Data, 600)
+		} else {
+			var wg sync.WaitGroup
+			for i, img := range images {
+				wg.Add(1)
+				go func(i int, data []byte) {
+					defer wg.Done()
+					thumbs[i] = MakeThumbnail(data, 600)
+				}(i, img.Data)
+			}
+			wg.Wait()
+		}
+		// ImagePaths rides alongside Images so the dashboard can offer
+		// "view original" without bloating the eventlog with full-size
+		// base64. sanitizeImages can drop entries (invalid/empty data
+		// URI), so build ImagePaths from the same index set that
+		// survives that filter: walk pre-sanitize, emit (thumb, path)
+		// pairs only when the thumb is valid. Preserves the
+		// index-alignment contract documented on EventEntry.ImagePaths.
+		sanitizedThumbs := make([]string, 0, len(thumbs))
+		sanitizedPaths := make([]string, 0, len(images))
+		anyPath := false
+		for i, t := range thumbs {
+			if t == "" || !strings.HasPrefix(t, imageDataURIPrefix) {
+				continue
+			}
+			sanitizedThumbs = append(sanitizedThumbs, t)
+			p := ""
+			if i < len(images) {
+				p = images[i].WorkspacePath
+			}
+			sanitizedPaths = append(sanitizedPaths, p)
+			if p != "" {
+				anyPath = true
+			}
+		}
+		if len(sanitizedThumbs) > 0 {
+			entry.Images = sanitizedThumbs
+		}
+		if anyPath {
+			entry.ImagePaths = sanitizedPaths
+		}
+	}
+	return entry
+}
+
 // Send writes a user message to stdin and reads events until result.
 func (p *Process) Send(ctx context.Context, text string, images []ImageData, onEvent EventCallback) (*SendResult, error) {
 	p.mu.Lock()
@@ -870,31 +1105,7 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 	}()
 
 	// Log user message before sending
-	userEntry := EventEntry{
-		Time:    time.Now().UnixMilli(),
-		Type:    "user",
-		Summary: TruncateRunes(text, 120),
-		Detail:  TruncateRunes(text, 2000),
-	}
-	if len(images) > 0 {
-		userEntry.Summary += fmt.Sprintf(" [+%d image(s)]", len(images))
-		thumbs := make([]string, len(images))
-		if len(images) == 1 {
-			thumbs[0] = MakeThumbnail(images[0].Data, 600)
-		} else {
-			var wg sync.WaitGroup
-			for i, img := range images {
-				wg.Add(1)
-				go func(i int, data []byte) {
-					defer wg.Done()
-					thumbs[i] = MakeThumbnail(data, 600)
-				}(i, img.Data)
-			}
-			wg.Wait()
-		}
-		userEntry.Images = sanitizeImages(thumbs)
-	}
-	p.eventLog.Append(userEntry)
+	p.eventLog.Append(buildUserEntry(text, images))
 
 	// Drain stale events from a previous turn that completed while no Send()
 	// was active (e.g., CLI was mid-turn when service restarted and reconnected
@@ -1446,6 +1657,14 @@ func EventEntriesFromEvent(ev Event) []EventEntry {
 // to share a single time.Now() call between ev.recvAt assignment and entry
 // timestamping. Public callers still use EventEntriesFromEvent. R67-PERF-9.
 func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
+	// Replay events are a passthrough-internal CLI ack for messages naozhi
+	// already showed to the user via the optimistic bubble. Writing them to
+	// EventLog causes double-display on the dashboard. readLoop already
+	// short-circuits replay events before logEventAt, but belt-and-suspenders:
+	// if any future caller passes a replay directly, still skip.
+	if ev.Type == "user" && ev.IsReplay {
+		return nil
+	}
 	now := nowMS
 	base := EventEntry{Time: now}
 

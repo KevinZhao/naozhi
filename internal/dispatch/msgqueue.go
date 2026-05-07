@@ -37,15 +37,24 @@ const (
 	// next prompt on the same live process. Fastest user-facing pivot, but
 	// burns the tokens already spent on the aborted turn.
 	ModeInterrupt
+	// ModePassthrough writes each user message directly to the CLI and lets
+	// the CLI's own commandQueue handle merging. Every message gets an
+	// independent result (or a merged-group result with head/follower
+	// semantics). Requires Protocol.SupportsReplay()==true; sessions whose
+	// protocol can't provide replay events silently fall back to ModeCollect.
+	// See docs/rfc/passthrough-mode.md.
+	ModePassthrough
 )
 
-// ParseQueueMode accepts "collect" or "interrupt" (case-insensitive) and
-// returns the corresponding QueueMode. Empty / unknown strings map to
-// ModeCollect so callers can feed raw YAML values without defensive checks.
+// ParseQueueMode accepts "collect" / "interrupt" / "passthrough"
+// (case-insensitive). Empty or unknown strings map to ModeCollect so callers
+// can feed raw YAML values without defensive checks.
 func ParseQueueMode(s string) QueueMode {
 	switch strings.ToLower(strings.TrimSpace(s)) {
 	case "interrupt":
 		return ModeInterrupt
+	case "passthrough":
+		return ModePassthrough
 	default:
 		return ModeCollect
 	}

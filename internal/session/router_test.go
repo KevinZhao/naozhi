@@ -203,6 +203,15 @@ func (f *fakeProcess) SubscribeEvents() (<-chan struct{}, func()) {
 	return ch, func() {}
 }
 
+// Passthrough mocks — default to "not supported" so legacy-path tests are
+// unchanged. Passthrough-specific tests inject a real *cli.Process.
+func (f *fakeProcess) SendPassthrough(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback, priority string) (*cli.SendResult, error) {
+	return f.Send(ctx, text, images, onEvent)
+}
+func (f *fakeProcess) DiscardPassthroughPending(_ error) {}
+func (f *fakeProcess) PassthroughDepth() int             { return 0 }
+func (f *fakeProcess) SupportsPassthrough() bool         { return false }
+
 // setRunning safely changes the running state (used in shutdown tests).
 func (f *fakeProcess) setRunning(v bool) {
 	f.mu.Lock()

@@ -1,3 +1,37 @@
+# naozhi config.example.yaml — copy to config.yaml before first run.
+#
+# ============================================================================
+# Configuration precedence (RNEW-ARCH-405)
+# ============================================================================
+# Values are resolved top-down; later sources override earlier ones when the
+# same field is set in multiple places.
+#
+#   1. Built-in defaults         in internal/config/config.go (applyDefaults)
+#   2. config.yaml               this file (--config flag path)
+#   3. ~/.claude/settings.json   a subset of Claude CLI env vars (proxy, API
+#                                base URL) gets injected into os.Environ
+#                                before CLI spawn. Applied by
+#                                cmd/naozhi/main.go applyClaudeEnvSettings.
+#   4. .naozhi/<project>.yaml    per-project overrides when a CWD matches a
+#                                project entry. Only the planner_defaults
+#                                subset is respected.
+#   5. Environment variables     `${VAR}` expansion happens in *this* YAML
+#                                at load time, and a handful of runtime
+#                                knobs (NAOZHI_DASHBOARD_TOKEN,
+#                                TZ, HOME …) are read directly via
+#                                os.Getenv.
+#   6. CLI flags                 `--config`, `--log-level`, `--doctor`,
+#                                `--install`; these always win.
+#
+# Two-name compatibility:
+#   - `nodes:` and `reverse_nodes:` are treated as synonyms; pick one.
+#   - `workspaces:` and `projects:` map to the same Project registry.
+#   - `session.cwd` and `session.workspace` both set the default CWD.
+#
+# When in doubt: `sudo NAOZHI_DASHBOARD_TOKEN=xxx bin/naozhi --config …
+# --doctor` prints the effective resolved config.
+# ============================================================================
+
 server:
   addr: ":8180"
   dashboard_token: "${NAOZHI_DASHBOARD_TOKEN}"
@@ -16,6 +50,25 @@ cli:
   # collapsible widgets. Instruct the model to stick to pure Markdown.
   args: []
 
+  # Optional: multiple backends in one deployment (RNEW-DOC-421).
+  #
+  # Uncomment `backends:` to enable Claude + Kiro side-by-side. When
+  # `backends` is empty naozhi uses single-backend mode driven by
+  # cli.backend (default "claude") and cli.path/model/args above.
+  #
+  # Per-backend fields are optional and fall back to the top-level cli.*
+  # values above. The `backend` field picks which entry is the default
+  # when a new session does not request a specific one; the first entry
+  # also appears first in the dashboard backend picker.
+  #
+  #backend: "claude"
+  #backends:
+  #  - id: "claude"
+  #    # path/model/args inherit from cli.path + cli.args above when omitted.
+  #  - id: "kiro"
+  #    path: "~/.local/bin/kiro"
+  #    # ACP protocol is auto-selected by id="kiro"; no extra flag needed.
+
 session:
   max_procs: 20
   ttl: "30m"
@@ -27,6 +80,20 @@ session:
   store_path: "~/.naozhi/sessions.json"
   shim:
     idle_timeout: "8h"
+  queue:
+    # Message queuing when a session is busy. Three modes:
+    #   collect     (default) — queue new messages, wait for current turn,
+    #                 merge into a single follow-up prompt after a settle delay
+    #   interrupt   — auto-abort the current turn on every new message; burns
+    #                 tokens but minimizes response latency
+    #   passthrough — forward every message directly to the CLI; each message
+    #                 gets its own result (or a merged group result with
+    #                 head/follower IM fan-out). Requires stream-json backend
+    #                 (Claude CLI). ACP backends silently fall back to collect.
+    #                 Enables /urgent <msg> for priority:"now" preemption.
+    mode: "collect"
+    max_depth: 20
+    collect_delay: "500ms"
 
 agents:
   code-reviewer:
@@ -56,6 +123,11 @@ cron:
   notify_default:
     platform: "feishu"
     chat_id: "${NAOZHI_CRON_NOTIFY_CHAT_ID}"
+  # 调度抖动上限：多个同 schedule 的 job 不再"整点同秒起跑"，而是在
+  # [0, min(jitter_max, period/4)] 区间内随机延迟，拍平 CPU / API 并发峰值。
+  # 默认 2m。"0" 关闭抖动（回退到 v1 行为）。上限硬编码 10m。TriggerNow
+  # （dashboard 的 "run now" 按钮）始终跳过抖动立即执行。
+  jitter_max: "2m"
 
 platforms:
   feishu:

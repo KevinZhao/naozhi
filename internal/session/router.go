@@ -318,7 +318,11 @@ func panicSafeSpawnFn(
 			slog.Error("spawnSession: wrapper.Spawn panicked",
 				"key", key, "backend", backendID, "panic", r,
 				"stack", string(debug.Stack()))
-			err = fmt.Errorf("spawn process: panic: %v", r)
+			// RNEW-009: caller at line 1656 wraps with "spawn process: %w".
+			// Keep this message unprefixed so logs read
+			// "spawn process: panic: <value>" instead of the doubled
+			// "spawn process: spawn process: panic: ...".
+			err = fmt.Errorf("panic: %v", r)
 		}
 	}()
 	return spawn(ctx, opts)
@@ -1448,18 +1452,42 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	}
 	r.mu.Lock()
 
-	if s, ok := r.sessions[key]; ok {
-		if s.isAlive() {
-			s.touchLastActive()
-			r.mu.Unlock()
-			return s, SessionExisting, nil
+	// Passthrough exposes a concurrency pattern that the old Send path never
+	// did: N goroutines call GetOrCreate on the same key simultaneously for a
+	// fresh (not-yet-existing) session. Without coordination each goroutine
+	// calls spawnSession → wrapper.Spawn → shim.StartShim and only one wins
+	// the shim-socket dial guard; the rest fail with "refusing to clobber".
+	// Drop and retry while spawnSession for this key is in flight so the late
+	// callers just pick up the session the winner creates.
+	for {
+		if s, ok := r.sessions[key]; ok {
+			if s.isAlive() {
+				s.touchLastActive()
+				r.mu.Unlock()
+				return s, SessionExisting, nil
+			}
+			slog.Info("session process exited, resuming", "key", key, "session_id", s.getSessionID())
+			s, err := r.spawnSession(ctx, key, s.getSessionID(), opts)
+			if err != nil {
+				return nil, 0, fmt.Errorf("session %s: %w", key, err)
+			}
+			return s, SessionResumed, nil
 		}
-		slog.Info("session process exited, resuming", "key", key, "session_id", s.getSessionID())
-		s, err := r.spawnSession(ctx, key, s.getSessionID(), opts)
-		if err != nil {
-			return nil, 0, fmt.Errorf("session %s: %w", key, err)
+		if _, inflight := r.spawningKeys[key]; !inflight {
+			break
 		}
-		return s, SessionResumed, nil
+		// Someone else is spawning this key right now. Release the router
+		// mutex, yield briefly, and retry — the winner will either fill
+		// r.sessions[key] (we pick SessionExisting) or fail (we retry our
+		// own spawn). Keep the sleep tiny so perceived latency stays flat;
+		// a typical shim spawn takes 100-300 ms.
+		r.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return nil, 0, ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+		r.mu.Lock()
 	}
 
 	// Debug (not Info): spawnSession will emit "session spawned" at Info

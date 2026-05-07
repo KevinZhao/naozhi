@@ -3,6 +3,7 @@ package cron
 import (
 	"crypto/rand"
 	"fmt"
+	"strings"
 	"time"
 
 	robfigcron "github.com/robfig/cron/v3"
@@ -19,6 +20,13 @@ type Job struct {
 	CreatedBy string    `json:"created_by"`
 	CreatedAt time.Time `json:"created_at"`
 	Paused    bool      `json:"paused"`
+
+	// Title 是人类可读的任务名称，用于卡片列表显示、搜索主 key、通知标题。
+	// 为空时 UI 自动回退到 Prompt 首行（见 JobTitleOrFallback），保持对旧
+	// cron_jobs.json 的向后兼容：JSON 反序列化后 Title == "" 不会破坏任何
+	// 渲染/搜索路径。上限 MaxCronTitleLen 字节。
+	// 引入背景：docs/rfc/cron-v2-polish.md §3.1。
+	Title string `json:"title,omitempty"`
 
 	// Optional working directory override for the CLI process.
 	WorkDir string `json:"work_dir,omitempty"`
@@ -66,6 +74,56 @@ func generateID() string {
 	return fmt.Sprintf("%x", b)
 }
 
+// MaxCronTitleLen 是 Job.Title 的字符上限（UTF-8 rune 计）。256 覆盖绝大多数
+// 人类可读名称，且与 dashboard 的 escAttr 线长相容。导出以便 server 包
+// 在 handler 层复用同一上限，避免两处数字不同步漂移。
+const MaxCronTitleLen = 256
+
+// titleFallbackRuneLimit 是 Title 为空时 UI/搜索用 Prompt 首行截断的
+// 长度上限（按 rune 算，避免切断中文）。60 rune 与卡片视觉宽度对齐。
+const titleFallbackRuneLimit = 60
+
+// JobTitleOrFallback 返回用于 UI 显示 / 搜索主 key 的人类可读名称：
+//  1. 如果 Job.Title 非空，直接返回（Trim 后）。
+//  2. 否则取 Prompt 的首个非空行，截断到 titleFallbackRuneLimit rune。
+//  3. 若 Prompt 也为空，返回空字符串——调用方（UI 层）自行决定占位符。
+//
+// 提供在 cron 包内，供 scheduler / dashboard / IM 通知复用，避免 fallback
+// 逻辑散落在各处 UI 代码里时序不一致（dashboard 和后端通知显示的标题
+// 出现分歧）。
+func JobTitleOrFallback(j *Job) string {
+	if j == nil {
+		return ""
+	}
+	if t := strings.TrimSpace(j.Title); t != "" {
+		return t
+	}
+	p := strings.TrimSpace(j.Prompt)
+	if p == "" {
+		return ""
+	}
+	// 取首个非空行
+	line := p
+	if idx := strings.IndexByte(p, '\n'); idx >= 0 {
+		line = strings.TrimSpace(p[:idx])
+		if line == "" {
+			// 罕见：以空白换行开头，继续扫
+			for _, l := range strings.Split(p, "\n") {
+				if l = strings.TrimSpace(l); l != "" {
+					line = l
+					break
+				}
+			}
+		}
+	}
+	// rune-level 截断，保证不切断多字节
+	runes := []rune(line)
+	if len(runes) > titleFallbackRuneLimit {
+		line = string(runes[:titleFallbackRuneLimit]) + "…"
+	}
+	return line
+}
+
 // cronParser is the shared parser for all schedule validation and preview.
 var cronParser = robfigcron.NewParser(
 	robfigcron.Minute | robfigcron.Hour | robfigcron.Dom | robfigcron.Month | robfigcron.Dow | robfigcron.Descriptor,
@@ -101,14 +159,7 @@ const minJobTimeout = 3 * time.Minute
 // edge), returns maxCap — safer to fall back to the historical single-timeout
 // behaviour than to misapply a ratio to an undefined period.
 func computeJobTimeout(schedule string, maxCap time.Duration) time.Duration {
-	sched, err := cronParser.Parse(schedule)
-	if err != nil {
-		return maxCap
-	}
-	now := time.Now()
-	first := sched.Next(now)
-	second := sched.Next(first)
-	period := second.Sub(first)
+	period := schedulePeriod(schedule)
 	if period <= 0 {
 		return maxCap
 	}
@@ -120,6 +171,101 @@ func computeJobTimeout(schedule string, maxCap time.Duration) time.Duration {
 		scaled = maxCap
 	}
 	return scaled
+}
+
+// schedulePeriod 估算给定 cron 表达式的周期（相邻两次触发的间隔）。
+// 通过 sched.Next 两次外推实现，精度对 "每 N 分钟 / 每天 HH:MM" 这类
+// 常见形态足够。无法解析 / 不等间隔（DST 切换窗口）时返回 0，调用方
+// 自行决定 fallback。computeJobTimeout 和 applyJitter 都基于此。
+func schedulePeriod(schedule string) time.Duration {
+	sched, err := cronParser.Parse(schedule)
+	if err != nil {
+		return 0
+	}
+	now := time.Now()
+	first := sched.Next(now)
+	second := sched.Next(first)
+	return second.Sub(first)
+}
+
+// previousTickBefore 算给定 schedule 在 now 之前最近一次应该触发的时刻。
+// robfig/cron 只提供 Next()，没有 Prev()。这里用"从 now 回推 3 × period
+// 的窗口，在窗口内用 sched.Next(起点) 逼近最接近 now 的 tick"的办法：
+//
+//  1. 先估计 period（Next 两次）
+//  2. 起点 = now - 3 × period（保证至少覆盖一个完整周期）
+//  3. 起点不断 Next，直到下一次 Next 超过 now；此时当前 Next 即为"最后
+//     一次 ≤ now 的触发时刻"。
+//
+// 窗口乘 3 是为了应对 DST / 月份 / 闰年这类非等间隔形态（每月 29 日
+// 在 2 月可能 "跳 31 天"），给足裕量。每次 Next 是 O(1)，循环最多跑
+// 3-5 次，开销可忽略。无法解析的 schedule 返回零值 time。
+func previousTickBefore(schedule string, now time.Time) time.Time {
+	sched, err := cronParser.Parse(schedule)
+	if err != nil {
+		return time.Time{}
+	}
+	period := schedulePeriod(schedule)
+	if period <= 0 {
+		return time.Time{}
+	}
+	// 回推起点；加一个安全系数 3 应对月份/DST 的非等距触发
+	start := now.Add(-3 * period)
+	prev := time.Time{}
+	for {
+		next := sched.Next(start)
+		if !next.Before(now) {
+			return prev
+		}
+		prev = next
+		start = next
+	}
+}
+
+// HasMissedSchedule 判断 Job 是否曾经错过调度（进程休眠或重启空窗期）。
+// 返回 (missed, prevExpectedAt)：prevExpectedAt 是"按 schedule 算上一次
+// 应该跑的时刻"，调用方可用来显示 "上次应跑于 …"。
+//
+// 判定规则：
+//  1. schedule 无法解析 / period<=0 → 不算 missed（保守）。
+//  2. startedAt 不为零且 now - startedAt < 5 × period：刚启动的抑制窗口，
+//     避免刚 boot 时所有长周期 job 都被误判 missed。测试可以传
+//     time.Time{} 绕过。
+//  3. 从未跑过 (LastRunAt.IsZero)：若 now - CreatedAt > period 则判 missed
+//     （任务创建后本应至少跑过一次）。
+//  4. 跑过：若 prevExpectedAt - LastRunAt > period × 1.5 则判 missed
+//     （允许 50% 裕量应对 jitter + 轻微延迟）。
+//
+// 关联：docs/rfc/cron-v2-polish.md §3.3 Increment C。
+func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
+	if j == nil {
+		return false, time.Time{}
+	}
+	period := schedulePeriod(j.Schedule)
+	if period <= 0 {
+		return false, time.Time{}
+	}
+	// 启动抑制：刚 boot 时所有 long-period job 都会"错过"，这是可预期的。
+	// 5 × period 给足让第一轮调度落地的余量。
+	if !startedAt.IsZero() && now.Sub(startedAt) < 5*period {
+		return false, time.Time{}
+	}
+	prev := previousTickBefore(j.Schedule, now)
+	if prev.IsZero() {
+		return false, time.Time{}
+	}
+	if j.LastRunAt.IsZero() {
+		// 从未跑过：看任务本身存在了多久
+		if !j.CreatedAt.IsZero() && now.Sub(j.CreatedAt) > period {
+			return true, prev
+		}
+		return false, time.Time{}
+	}
+	// 跑过：对比上次跑的时刻和"上次应跑的时刻"
+	if prev.Sub(j.LastRunAt) > period*3/2 {
+		return true, prev
+	}
+	return false, time.Time{}
 }
 
 // validateSchedule checks if the cron expression is valid and respects the minimum interval.

@@ -637,6 +637,138 @@ func TestNewUserMessage_WithImages_EmptyText(t *testing.T) {
 	}
 }
 
+// TestNewUserMessage_WithFileRef_PrependsHint verifies the core of the PDF
+// support: a KindFileRef attachment must NOT produce a content block, but
+// it MUST prepend a Read-tool instruction to the text so Claude opens the
+// workspace file on its own.
+func TestNewUserMessage_WithFileRef_PrependsHint(t *testing.T) {
+	t.Parallel()
+	atts := []Attachment{{
+		Kind:          KindFileRef,
+		MimeType:      "application/pdf",
+		WorkspacePath: ".naozhi/attachments/2026-05-06/deadbeef.pdf",
+		OrigName:      "report.pdf",
+		Size:          1024 * 1024,
+	}}
+	msg := NewUserMessage("summarize key points", atts)
+
+	// Text-only message: the Content field must be a plain string (no
+	// multimodal block array) because we have no inline bytes. This keeps
+	// the wire form identical to a legacy text-only send plus a prefix.
+	s, ok := msg.Message.Content.(string)
+	if !ok {
+		t.Fatalf("Content type = %T, want string (file_ref alone)", msg.Message.Content)
+	}
+	if !strings.Contains(s, ".naozhi/attachments/2026-05-06/deadbeef.pdf") {
+		t.Errorf("text missing workspace path: %q", s)
+	}
+	if !strings.Contains(s, "Read tool") {
+		t.Errorf("text missing Read-tool hint: %q", s)
+	}
+	if !strings.Contains(s, "report.pdf") {
+		t.Errorf("text missing original filename: %q", s)
+	}
+	if !strings.Contains(s, "summarize key points") {
+		t.Errorf("user text dropped: %q", s)
+	}
+	// User text must appear AFTER the hint — the model needs the
+	// instruction before the question so the Read call happens first.
+	hintIdx := strings.Index(s, "Read tool")
+	userIdx := strings.Index(s, "summarize key points")
+	if hintIdx == -1 || userIdx == -1 || hintIdx >= userIdx {
+		t.Errorf("hint should precede user text, got hint@%d user@%d in %q", hintIdx, userIdx, s)
+	}
+}
+
+// TestNewUserMessage_WithImageAndFileRef_Mixed covers the realistic case
+// where a user attaches both a PDF and a screenshot. Inline images still
+// produce image blocks; file_refs still go into the text prefix.
+func TestNewUserMessage_WithImageAndFileRef_Mixed(t *testing.T) {
+	t.Parallel()
+	atts := []Attachment{
+		{Kind: KindImageInline, Data: []byte("png"), MimeType: "image/png"},
+		{Kind: KindFileRef, MimeType: "application/pdf",
+			WorkspacePath: ".naozhi/attachments/x/y.pdf", OrigName: "y.pdf"},
+	}
+	msg := NewUserMessage("compare these", atts)
+
+	blocks, ok := msg.Message.Content.([]any)
+	if !ok {
+		t.Fatalf("Content type = %T, want []any", msg.Message.Content)
+	}
+	// 1 image block + 1 text block (text carries the hint and user text
+	// together; the file_ref does NOT produce its own block).
+	if len(blocks) != 2 {
+		t.Fatalf("len(blocks) = %d, want 2", len(blocks))
+	}
+
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, `"type":"image"`) {
+		t.Error("missing image block in wire form")
+	}
+	if !strings.Contains(got, `"type":"text"`) {
+		t.Error("missing text block in wire form")
+	}
+	if !strings.Contains(got, "y.pdf") {
+		t.Error("file_ref path absent from text block")
+	}
+	// The PDF bytes must NOT appear in the wire form — the whole point of
+	// file_ref is to avoid forwarding the payload over stdin.
+	if strings.Contains(got, "application/pdf") {
+		t.Error("file_ref should not emit application/pdf in content blocks")
+	}
+}
+
+// TestNewUserMessage_NoFileRef_ByteIdentical pins the no-regression
+// invariant: when no file_ref is present, the wire form must be bit-for-bit
+// identical to the pre-PDF code path. Otherwise every image-only send in
+// production would subtly change behaviour on rollout.
+func TestNewUserMessage_NoFileRef_ByteIdentical(t *testing.T) {
+	t.Parallel()
+	// Text-only
+	text := NewUserMessage("just text", nil)
+	s, ok := text.Message.Content.(string)
+	if !ok || s != "just text" {
+		t.Errorf("text-only content changed: got %T %v", text.Message.Content, text.Message.Content)
+	}
+
+	// Image-only
+	imgs := []Attachment{{Kind: KindImageInline, Data: []byte("x"), MimeType: "image/png"}}
+	m := NewUserMessage("look", imgs)
+	blocks, _ := m.Message.Content.([]any)
+	if len(blocks) != 2 {
+		t.Fatalf("image+text expected 2 blocks, got %d", len(blocks))
+	}
+	// The text block must carry the user text verbatim, no hint prefix.
+	last, _ := blocks[len(blocks)-1].(inputTextBlock)
+	if last.Text != "look" {
+		t.Errorf("image-only text block leaked hint prefix: %q", last.Text)
+	}
+}
+
+// TestNewUserMessage_FileRefWithoutPath_Skipped covers a caller bug:
+// WorkspacePath must be populated before calling NewUserMessageWithMeta.
+// A missing path means the persistence layer didn't run; we silently drop
+// the bullet rather than confuse the model with an empty "- \n" line.
+func TestNewUserMessage_FileRefWithoutPath_Skipped(t *testing.T) {
+	t.Parallel()
+	atts := []Attachment{{
+		Kind:     KindFileRef,
+		MimeType: "application/pdf",
+		// WorkspacePath intentionally empty
+		OrigName: "orphan.pdf",
+	}}
+	msg := NewUserMessage("hello", atts)
+	s, _ := msg.Message.Content.(string)
+	if strings.Contains(s, "  - \n") {
+		t.Errorf("empty path should be skipped, got hint: %q", s)
+	}
+}
+
 func TestClaudeProtocol_WriteMessage_WithImages(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}

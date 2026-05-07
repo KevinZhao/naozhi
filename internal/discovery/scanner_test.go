@@ -455,6 +455,88 @@ func TestExtractLastPromptUncached_LargeTailFallback(t *testing.T) {
 	}
 }
 
+// TestExtractLastPromptUncached_SkipsSystemInjectedXML verifies that
+// Claude-Code-injected synthetic user messages (e.g. <task-notification>,
+// <system-reminder>) do not leak into the session's last_prompt, which
+// would otherwise surface as the session card title. The last real user
+// prompt must win even when injected frames appear after it. Regression
+// guard for the "card shows <task-notification>" UX bug.
+func TestExtractLastPromptUncached_SkipsSystemInjectedXML(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "session.jsonl")
+
+	realPrompt := "比较 NIXL 和 Mooncake 的 EFA 性能"
+	injected := []string{
+		"<task-notification>\n<task-id>abc</task-id>\n<status>completed</status>\n</task-notification>",
+		"<system-reminder>ignore me</system-reminder>",
+		"<local-command>/do something</local-command>",
+		"<command-name>foo</command-name>",
+		"<available-deferred-tools>x,y,z</available-deferred-tools>",
+	}
+
+	var lines []string
+	// Real prompt first.
+	msg, _ := json.Marshal(struct {
+		Role    string `json:"role"`
+		Content string `json:"content"`
+	}{Role: "user", Content: realPrompt})
+	lines = append(lines, fmt.Sprintf(`{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":%s}`, string(msg)))
+	// Then a series of system-injected synthetic user messages.
+	for i, inj := range injected {
+		m, _ := json.Marshal(struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		}{Role: "user", Content: inj})
+		lines = append(lines, fmt.Sprintf(`{"type":"user","timestamp":"2026-01-01T%02d:00:00Z","message":%s}`, i+1, string(m)))
+	}
+	writeJSONLFile(t, path, lines)
+
+	fi, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := extractLastPromptUncached(path, fi.Size())
+	if got != realPrompt {
+		t.Errorf("extractLastPromptUncached = %q, want %q (injected frames must be skipped)", got, realPrompt)
+	}
+}
+
+// TestIsClaudeSystemInjectedText exercises the tag-prefix matcher used by
+// scanUserPrompt and the history loaders. Keep the whitelist in sync with
+// the UI filter in internal/server/static/dashboard.js.
+func TestIsClaudeSystemInjectedText(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		in   string
+		want bool
+	}{
+		{"task-notification close", "<task-notification>x</task-notification>", true},
+		{"task-notification with space", "<task-notification attr=\"v\">x</task-notification>", true},
+		{"task-notification with newline", "<task-notification\nx></task-notification>", true},
+		{"system-reminder", "<system-reminder>foo</system-reminder>", true},
+		{"local-command", "<local-command>/do</local-command>", true},
+		{"command-name", "<command-name>foo</command-name>", true},
+		{"available-deferred-tools", "<available-deferred-tools>x</available-deferred-tools>", true},
+		{"real user text starting with <", "<think> this is a thought", false},
+		{"real user text starting with angle", "<html> tag in a question", false},
+		{"empty", "", false},
+		{"unrelated tag", "<foo>bar</foo>", false},
+		{"similar prefix but not exact", "<task-notifications>x</task-notifications>", false},
+		{"plain text", "hello world", false},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsClaudeSystemInjectedText(tc.in); got != tc.want {
+				t.Errorf("IsClaudeSystemInjectedText(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // extractLastPrompt cache behaviour
 // ---------------------------------------------------------------------------

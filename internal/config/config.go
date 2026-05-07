@@ -44,6 +44,7 @@ type Config struct {
 	cachedTotalTimeout    time.Duration `yaml:"-"`
 	cachedExecTimeout     time.Duration `yaml:"-"`
 	cachedCollectDelay    time.Duration `yaml:"-"`
+	cachedJitterMax       time.Duration `yaml:"-"`
 }
 
 // WorkspaceConfig identifies this naozhi instance.
@@ -187,6 +188,14 @@ type CronConfig struct {
 	// but no per-job NotifyPlatform / NotifyChatID. Empty fields disable the
 	// default, in which case only per-job targets deliver notifications.
 	NotifyDefault CronNotifyTarget `yaml:"notify_default,omitempty"`
+	// JitterMax caps the randomized delay applied before each scheduled
+	// tick fires, to flatten the "burst on the hour" CPU / API peak when
+	// many jobs share a schedule. Default 2m. "0" disables jitter entirely.
+	// The effective per-job jitter is min(JitterMax, period/4) so short
+	// schedules don't get swallowed by a long window. TriggerNow (manual
+	// "run now") bypasses jitter for responsiveness. See
+	// docs/rfc/cron-v2-polish.md §3.2.
+	JitterMax string `yaml:"jitter_max,omitempty"`
 }
 
 // CronNotifyTarget identifies an IM channel used as the fallback delivery
@@ -386,6 +395,16 @@ func parseDurations(cfg *Config) error {
 	if cfg.cachedCollectDelay, err = parseDurationRequired(cfg.Session.Queue.CollectDelay, "session.queue.collect_delay", 500*time.Millisecond); err != nil {
 		return err
 	}
+	if cfg.cachedJitterMax, err = parseDurationNonNegative(cfg.Cron.JitterMax, "cron.jitter_max", 2*time.Minute); err != nil {
+		return err
+	}
+	// 硬上限 10m：抖动比大多数任务周期还长就毫无意义，clamp 并 warn，
+	// 不把配置错误升成启动失败。
+	if cfg.cachedJitterMax > 10*time.Minute {
+		slog.Warn("cron.jitter_max exceeds 10m hard cap, clamping",
+			"requested", cfg.cachedJitterMax, "cap", 10*time.Minute)
+		cfg.cachedJitterMax = 10 * time.Minute
+	}
 	return nil
 }
 
@@ -562,6 +581,23 @@ func parseDurationRequired(s, name string, fallback time.Duration) (time.Duratio
 	return d, nil
 }
 
+// parseDurationNonNegative 允许 "0" / "0s" 作为显式关闭的合法值，
+// 非零值必须为正。空字符串返回 fallback。用于 cron.jitter_max 这类
+// "默认开启、允许关闭" 的可选配置。
+func parseDurationNonNegative(s, name string, fallback time.Duration) (time.Duration, error) {
+	if s == "" {
+		return fallback, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid %s %q: %w", name, s, err)
+	}
+	if d < 0 {
+		return 0, fmt.Errorf("invalid %s %q: must be zero or positive", name, s)
+	}
+	return d, nil
+}
+
 // ParseTTL returns the TTL duration (cached after Load).
 func (c *Config) ParseTTL() time.Duration {
 	return c.cachedTTL
@@ -601,6 +637,12 @@ func (c *Config) ParseCronTimezone() *time.Location {
 // ParseCollectDelay returns the queue collect delay (cached after Load).
 func (c *Config) ParseCollectDelay() time.Duration {
 	return c.cachedCollectDelay
+}
+
+// ParseCronJitterMax returns the cron scheduling jitter cap (cached after Load).
+// 0 means jitter is disabled. See cron.Scheduler.applyJitter.
+func (c *Config) ParseCronJitterMax() time.Duration {
+	return c.cachedJitterMax
 }
 
 // EnabledBackends returns the normalized list of backends to enable.

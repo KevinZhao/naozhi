@@ -378,18 +378,25 @@ func TestDashboardJS_CronEmptyStateSub(t *testing.T) {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
 	js := string(data)
-	// Legacy lines must remain for E2E.
+	// cron-v2-polish §3.1: 面板本地化，去 "cron" 术语。E2E 同步改（见
+	// test/e2e/dashboard.test.js:987-989）。hint / sub / cta 都改中文。
 	for _, want := range []string{
-		`class="cron-empty-hint">No cron jobs yet</div>`,
-		`class="cron-empty-cta" onclick="createNewCronJob()">Create your first cron job</button>`,
+		`class="cron-empty-hint">还没有定时任务</div>`,
+		`class="cron-empty-sub">按计划自动在某个工作目录下运行提示词</div>`,
+		`class="cron-empty-cta" onclick="createNewCronJob()">创建第一个定时任务</button>`,
 	} {
 		if !strings.Contains(js, want) {
-			t.Errorf("cron empty state missing legacy string for E2E compatibility: %s", want)
+			t.Errorf("cron empty state missing fragment: %s", want)
 		}
 	}
-	// New sub-hint.
-	if !strings.Contains(js, `class="cron-empty-sub">让 naozhi 按计划自动在某个工作目录下运行 prompt</div>`) {
-		t.Error("cron empty state must include the Chinese sub-hint")
+	// Legacy English fragments must be gone.
+	for _, legacy := range []string{
+		`>No cron jobs yet<`,
+		`>Create your first cron job<`,
+	} {
+		if strings.Contains(js, legacy) {
+			t.Errorf("legacy English cron-empty fragment %q must be removed", legacy)
+		}
 	}
 	data2, err := dashboardHTML.ReadFile("static/dashboard.html")
 	if err != nil {
@@ -1245,12 +1252,15 @@ func TestDashboardJS_R117_MainEmptyStateHelper(t *testing.T) {
 		t.Errorf("dashboard.js still has raw English empty state %q — route it through mainEmptyHtml()", forbidden)
 	}
 
-	// Arm 2: helper exists and carries the expected pieces.
+	// Arm 2: helper exists and carries the expected pieces. The empty state
+	// was redesigned post-Round 141 from a "+ 新建会话" button to a
+	// "问点什么？" quick-ask textarea — both the lead line and the textarea
+	// element must appear in the helper output.
 	for _, want := range []string{
 		"function mainEmptyHtml()",
-		"选一个会话开始",
-		"onclick=\"createNewSession()\"",
-		"+ 新建会话",
+		"问点什么？",
+		`id="quick-ask-input"`,
+		"submitQuickAsk",
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("mainEmptyHtml() missing expected fragment %q", want)
@@ -1263,6 +1273,21 @@ func TestDashboardJS_R117_MainEmptyStateHelper(t *testing.T) {
 	// 3 call sites + 1 definition + possible doc references → >= 4.
 	if count < 4 {
 		t.Errorf("expected ≥4 mainEmptyHtml references (3 call sites + 1 def); got %d", count)
+	}
+
+	// Arm 3: every dismiss path that calls mainEmptyHtml() MUST also call
+	// wireQuickAskInput() to rebind the fresh textarea's Enter / auto-grow
+	// handlers. Without the rebind, a dismiss-repaint leaves the quick-ask
+	// textarea inert — Enter falls through to form submit, refreshing the
+	// page. 3 dismiss call sites + 1 function definition + 1 cold-start
+	// bootstrap = ≥5 occurrences. The bootstrap intentionally passes
+	// autofocus=true; dismiss paths should NOT (autofocus theft on
+	// mid-interaction dismiss). We don't assert arg polarity here because
+	// the argumentless vs argumented split is a behaviour concern, not a
+	// shape concern — a separate test would gate it if it ever regresses.
+	wireCount := strings.Count(js, "wireQuickAskInput(")
+	if wireCount < 5 {
+		t.Errorf("expected ≥5 wireQuickAskInput(...) references (3 dismiss + 1 def + 1 bootstrap); got %d", wireCount)
 	}
 }
 
@@ -2638,13 +2663,14 @@ func TestDashboardJS_R110P2_CronPanelFilter(t *testing.T) {
 	js := string(data)
 
 	// Invariant 1: filterCronJobs exists and its match surface covers the
-	// four documented fields. Using substring anchors rather than regex
-	// because the field list lives on a single source line.
+	// documented fields. cron-v2-polish §3.1 Increment A 扩展了 title 字段，
+	// 放在 fields 数组的第一位（最高匹配优先），其余字段保持不变。使用
+	// substring 精确锚定 fields 字面量避免重构漂移。
 	if !strings.Contains(js, "function filterCronJobs(jobs, query, status)") {
 		t.Fatal("dashboard.js missing filterCronJobs(jobs, query, status) — R110-P2 cron filter predicate")
 	}
-	if !strings.Contains(js, "[j.prompt, j.work_dir, j.schedule, j.id]") {
-		t.Error("filterCronJobs match surface must include prompt, work_dir, schedule, id — operators search by any of these")
+	if !strings.Contains(js, "[j.title, j.prompt, j.work_dir, j.schedule, j.id]") {
+		t.Error("filterCronJobs match surface must include title, prompt, work_dir, schedule, id — operators search by any of these; title 是 cron-v2-polish §3.1 引入的人类可读名称")
 	}
 	// Status gate: both 'active' and 'attention' arms must exist + use the
 	// same attention definition as the cron-badge (paused OR last_error),
@@ -2653,8 +2679,11 @@ func TestDashboardJS_R110P2_CronPanelFilter(t *testing.T) {
 	if !strings.Contains(js, "s === 'active' && j.paused") {
 		t.Error("filterCronJobs 'active' arm must exclude paused jobs")
 	}
-	if !strings.Contains(js, "s === 'attention' && !(j.paused || j.last_error)") {
-		t.Error("filterCronJobs 'attention' arm must match paused OR last_error, aligned with the cron-badge's attention definition")
+	// cron-v2-polish §3.3 Increment C 将 missed（进程重启空窗期跳过）纳入
+	// attention。断言扩展为 paused || last_error || missed；cronBadge 计数
+	// 同步更新以保持"filter 和徽章同源"的反漂移不变式。
+	if !strings.Contains(js, "s === 'attention' && !(j.paused || j.last_error || j.missed)") {
+		t.Error("filterCronJobs 'attention' arm must match paused OR last_error OR missed — cron-v2-polish §3.3 引入 missed 并与 cronBadge 计数保持同源")
 	}
 
 	// Invariant 2: renderCronPanel short-circuits to renderCronList when the
@@ -3022,10 +3051,17 @@ func TestDashboardHTML_R110P1_WSOutageHintStyle(t *testing.T) {
 // while dismissing a session (which repaints via the helper) flipped the
 // region to Chinese. That language flicker is a surprising UX regression.
 //
-// Three structural invariants:
-//  1. The cold-start HTML carries the same Chinese lead line
-//     "选一个会话开始，或新建一个" as the helper emits.
-//  2. The cold-start HTML carries the same CTA label "+ 新建会话".
+// The empty state was redesigned post-Round 141: instead of a "+ 新建会话"
+// button pointing at the project palette, the region now renders a
+// "问点什么？" quick-ask textarea that — on Enter — creates a general-agent
+// session in the default workspace and ships the message in one shot. The
+// contract still holds: cold-start HTML and the dismiss-path helper must
+// render the same markup shape so there is no flicker when dismissing a
+// session.
+//
+// Three structural invariants (updated for the quick-ask redesign):
+//  1. Both files carry the "问点什么？" lead line.
+//  2. Both files carry the quick-ask textarea element (id="quick-ask-input").
 //  3. The old English strings are gone from dashboard.html so a future
 //     revert of localization would fail this test.
 func TestDashboardHTML_R141_ColdStartEmptyStateMatchesHelper(t *testing.T) {
@@ -3054,10 +3090,10 @@ func TestDashboardHTML_R141_ColdStartEmptyStateMatchesHelper(t *testing.T) {
 	}
 	mainBody := html[mainIdx : mainIdx+mainEnd]
 
-	// Invariant 1 + 2: Chinese strings present in BOTH files.
+	// Invariant 1 + 2: quick-ask lead line and textarea present in BOTH files.
 	for _, want := range []string{
-		`选一个会话开始，或新建一个`,
-		`+ 新建会话`,
+		`问点什么？`,
+		`id="quick-ask-input"`,
 	} {
 		if !strings.Contains(mainBody, want) {
 			t.Errorf("dashboard.html cold-start empty state missing %q — must match mainEmptyHtml() helper copy", want)
@@ -3473,18 +3509,24 @@ func TestDashboard_R154_ModalsAndSectionsLocalized(t *testing.T) {
 	for _, want := range []string{
 		`title="立即重连" aria-label="立即重连"`,
 		`title="重命名会话" aria-label="重命名会话"`,
-		`title="上传图片" aria-label="上传图片"`,
+		// Upload button title was broadened from "上传图片" to
+		// "上传图片或 PDF" when PDF attachment support landed (see
+		// docs/rfc/pdf-attachment.md).
+		`title="上传图片或 PDF" aria-label="上传图片或 PDF"`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("icon-button title+aria-label missing: %q", want)
 		}
 	}
-	// Remove-image label: CJK codepoints are 移 U+79FB 除 U+9664 图 U+56FE
-	// 片 U+7247 — match raw or escaped form.
-	removeImgUtf8 := `title="移除图片" aria-label="移除图片"`
-	removeImgEsc := `title="\u79fb\u9664\u56fe\u7247" aria-label="\u79fb\u9664\u56fe\u7247"`
-	if !strings.Contains(js, removeImgUtf8) && !strings.Contains(js, removeImgEsc) {
-		t.Errorf("remove-image icon-button missing localized title+aria-label — neither UTF-8 %q nor \\u-escape %q present", removeImgUtf8, removeImgEsc)
+	// Remove label: generalised from "移除图片" to plain "移除" because the
+	// same button renders on image thumbs AND PDF chips since
+	// docs/rfc/pdf-attachment.md. 移 U+79FB 除 U+9664 — match raw UTF-8
+	// or \u-escape form (Go literal vs prettier-reformatted JS literal
+	// may differ).
+	removeUtf8 := `title="移除" aria-label="移除"`
+	removeEsc := `title="\u79fb\u9664" aria-label="\u79fb\u9664"`
+	if !strings.Contains(js, removeUtf8) && !strings.Contains(js, removeEsc) {
+		t.Errorf("remove icon-button missing localized title+aria-label — neither UTF-8 %q nor \\u-escape %q present", removeUtf8, removeEsc)
 	}
 	for _, legacy := range []string{
 		`aria-label="Reconnect now"`,
