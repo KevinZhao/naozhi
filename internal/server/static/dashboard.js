@@ -7997,10 +7997,20 @@ function parseCronToFreq(expr) {
     if (d >= 1 && d <= 31) return { mode: 'monthly', day: d, time: hhmm };
   }
   if (dom === '*' && dow !== '*') {
-    // "1-5" → Weekdays shortcut；单日或多日 → Weekly（单选模式下取首日）
+    // "1-5" → Weekdays shortcut
     if (dow === '1-5') return { mode: 'weekdays', time: hhmm };
+    // Weekend shortcut "0,6" 或反写 "6,0"
+    if (dow === '0,6' || dow === '6,0' || dow === '6,7' || dow === '7,6') {
+      // 周末没有 v2 picker 模式——返回 null 让上层走 legacy hint，保留
+      // 原 schedule 不乱改；humanizeCron 会把它识别为 "周末 HH:MM"。
+      return null;
+    }
     const days = parseDowField(dow);
-    if (days) return { mode: 'weekly', dows: days, time: hhmm };
+    // v2 picker 的 Weekly 是单选。多选 (dows.length>1 且非 weekdays/
+    // weekend shortcut) 无法 round-trip —— 返回 null 触发 legacy hint
+    // 路径，保留原 schedule，防止"Weekly 星期一"的视觉误导把用户在周
+    // 一三五跑的任务静默改成只在周一跑。
+    if (days && days.length === 1) return { mode: 'weekly', dows: days, time: hhmm };
   }
   return null;
 }
@@ -8082,13 +8092,21 @@ function parseHHMM(s) {
 function humanizeCron(expr) {
   const d = parseCronToFreq(expr);
   if (!d) {
-    // parseCronToFreq only recognizes shapes the frequency-picker round-trips
-    // (editor contract). Some common hand-written shapes — notably the
-    // `*/N` step-value form — don't fit that shape but ARE worth
-    // humanizing for the display-only label. Try the label-only hook
-    // before giving up and echoing the raw expression.
+    // parseCronToFreq only recognizes shapes the v2 frequency-picker
+    // round-trips. 以下几种 hand-written / legacy shapes 不 round-trip
+    // 但可以 humanize 成人类可读标签，保留给列表和 legacy hint 显示：
+    //   "*/N * * * *"  → 每 N 分钟（humanizeCronStepValue）
+    //   "0 */N * * *"  → 每 N 小时
+    //   "@every 30m"   → 每 30 分钟  (v1 interval shape)
+    //   "@every 2h"    → 每 2 小时
+    //   "m h * * 1,3,5" / "m h * * 0,6" → 多选 weekly / 周末
+    //     （v2 picker 的 Weekly 单选不再 round-trip 这些 shape）
     const step = humanizeCronStepValue(expr);
     if (step) return step;
+    const legacy = humanizeCronLegacyEvery(expr);
+    if (legacy) return legacy;
+    const multiDow = humanizeCronMultiDow(expr);
+    if (multiDow) return multiDow;
     return expr;
   }
   if (d.mode === 'hourly') return '每小时';
@@ -8120,6 +8138,39 @@ function humanizeCron(expr) {
 // Returns '' for anything else so the caller can fall back to raw.
 // Escaped *\/ in comments to keep this JS from looking like a block
 // close; at runtime it's just /*\/N/.
+// humanizeCronMultiDow 为 parseCronToFreq 不再 round-trip 的多选 weekly
+// shape（v2 Weekly 是单选；周末 / 周一三五等历史数据仍要能人类读）生成
+// 中文标签。display-only，不构造回 schedule。
+function humanizeCronMultiDow(expr) {
+  if (!expr) return '';
+  const parts = expr.trim().split(/\s+/);
+  if (parts.length !== 5) return '';
+  const [mm, hh, dom, mon, dow] = parts;
+  if (!/^\d+$/.test(mm) || !/^\d+$/.test(hh)) return '';
+  if (mon !== '*' || dom !== '*' || dow === '*') return '';
+  const days = parseDowField(dow);
+  if (!days || days.length < 2) return '';
+  const time = pad2(parseInt(hh, 10)) + ':' + pad2(parseInt(mm, 10));
+  const names = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
+  const set = new Set(days);
+  if (days.length === 2 && set.has(0) && set.has(6)) return '周末 ' + time;
+  return days.map(i => names[i]).join('、') + ' ' + time;
+}
+
+// humanizeCronLegacyEvery 识别 v1 的 @every 表达式并本地化为中文标签。
+// 仅 display-only（卡片 cc-human / 编辑模态的 legacy hint）；v2 picker
+// 已删掉 interval 模式，所以这个 shape 不会被 buildFreqSchedule 重新
+// 产生。仅在 parseCronToFreq 返回 null 的 fallback 链里用。
+function humanizeCronLegacyEvery(expr) {
+  if (!expr) return '';
+  const m = expr.trim().match(/^@every\s+(\d+)(m|h)$/i);
+  if (!m) return '';
+  const n = parseInt(m[1], 10);
+  const unit = m[2].toLowerCase();
+  if (!Number.isFinite(n) || n < 1) return '';
+  return unit === 'h' ? ('每 ' + n + ' 小时') : ('每 ' + n + ' 分钟');
+}
+
 function humanizeCronStepValue(expr) {
   if (!expr) return '';
   const parts = expr.trim().split(/\s+/);
@@ -8173,10 +8224,14 @@ function buildFreqPickerHtml(initial) {
   const modeOption = (m, label) =>
     '<option value="' + m + '"' + (mode === m ? ' selected' : '') + '>' + esc(label) + '</option>';
 
-  // time 从当前 descriptor 取；hourly 不需要 time（置为空 placeholder）
+  // time 从当前 descriptor 取；hourly 不需要 time（置为空 placeholder）。
+  // onchange/oninput 先 freqMarkTouched() 再 freqUpdate()——只有用户真的
+  // 动过控件才写 overlay._cronSchedule。见 freqMarkTouched 注释的数据
+  // 损坏场景。
   const time = d.time || '09:00';
   const timeInput =
-    '<input class="freq-time" id="freq-time" type="time" value="' + esc(time) + '" onchange="freqUpdate()" oninput="freqUpdate()"' +
+    '<input class="freq-time" id="freq-time" type="time" value="' + esc(time) + '"' +
+      ' onchange="freqMarkTouched();freqUpdate()" oninput="freqMarkTouched();freqUpdate()"' +
       (mode === 'hourly' ? ' style="display:none"' : '') + '>';
 
   // weekly 的星期下拉（单选）。默认 Monday。
@@ -8184,7 +8239,7 @@ function buildFreqPickerHtml(initial) {
   const dowOption = (i, label) =>
     '<option value="' + i + '"' + (weeklyDow === i ? ' selected' : '') + '>' + esc(label) + '</option>';
   const weeklySelect =
-    '<select class="freq-extra" id="freq-weekly-dow" onchange="freqUpdate()"' +
+    '<select class="freq-extra" id="freq-weekly-dow" onchange="freqMarkTouched();freqUpdate()"' +
       (mode === 'weekly' ? '' : ' style="display:none"') + '>' +
       dowOption(1, '星期一') + dowOption(2, '星期二') + dowOption(3, '星期三') +
       dowOption(4, '星期四') + dowOption(5, '星期五') + dowOption(6, '星期六') +
@@ -8198,7 +8253,7 @@ function buildFreqPickerHtml(initial) {
     dayOpts += '<option value="' + i + '"' + (monthlyDay === i ? ' selected' : '') + '>' + i + ' 日</option>';
   }
   const monthlySelect =
-    '<select class="freq-extra" id="freq-monthly-day" onchange="freqUpdate()"' +
+    '<select class="freq-extra" id="freq-monthly-day" onchange="freqMarkTouched();freqUpdate()"' +
       (mode === 'monthly' ? '' : ' style="display:none"') + '>' +
       dayOpts +
     '</select>';
@@ -8254,6 +8309,8 @@ function freqCurrentDescriptor() {
 
 // freqSelectMode 切换频率模式。根据模式显示/隐藏 time / weekly-dow /
 // monthly-day 三个辅助控件。hourly 无 time（整点即跑）。
+// 用户主动切 mode 算 "touched"——之后 freqUpdate 才开始把 picker 结果
+// 写入 overlay._cronSchedule；见 freqMarkTouched 的注释。
 function freqSelectMode(mode) {
   const time = document.getElementById('freq-time');
   const dow = document.getElementById('freq-weekly-dow');
@@ -8261,16 +8318,36 @@ function freqSelectMode(mode) {
   if (time) time.style.display = (mode === 'hourly') ? 'none' : '';
   if (dow) dow.style.display = (mode === 'weekly') ? '' : 'none';
   if (day) day.style.display = (mode === 'monthly') ? '' : 'none';
+  freqMarkTouched();
   freqUpdate();
+}
+
+// freqMarkTouched 标记用户真的交互过频率控件。编辑流里，打开 modal 时
+// overlay._cronSchedule 被 seed 成 job.schedule 的原始值（可能是无法
+// round-trip 的 legacy shape，如 @every 30m 或 * * * * 1,3,5）；只有
+// 用户真的动过 freq-mode-select / freq-time / freq-weekly-dow /
+// freq-monthly-day 才允许 freqUpdate 覆盖这个 seed——否则"打开旧任务
+// 未改频率即保存"会把原 schedule 静默改成 UI 默认的 Daily 09:00，
+// 造成数据损坏。
+// 创建流：createNewCronJob 显式调用 freqMarkTouched() 让初始 Daily 09:00
+// 立刻写入，保证"打开即保存"能提交合法 schedule。
+function freqMarkTouched() {
+  const overlay = document.querySelector('.modal-overlay');
+  if (!overlay) return;
+  overlay._cronScheduleTouched = true;
 }
 
 // freqUpdate refreshes overlay._cronSchedule from the current picker state.
 // v2 polish: advanced raw-cron input and multi-run preview 已移除；submit
 // 路径只需要一个 cron expression，由 freqCurrentDescriptor + buildFreqSchedule
 // 产出即可。
+//
+// Gating by _cronScheduleTouched：不动用户"未触碰"的 seed（见
+// freqMarkTouched 注释的数据损坏场景）。
 function freqUpdate() {
   const overlay = document.querySelector('.modal-overlay');
   if (!overlay) return;
+  if (!overlay._cronScheduleTouched) return;
   const desc = freqCurrentDescriptor();
   const { expr } = buildFreqSchedule(desc);
   overlay._cronSchedule = expr || '';
@@ -8349,12 +8426,23 @@ function buildCronWorkspaceBodyInternal(opts) {
 
 // buildScheduleSection renders the frequency picker. v2 polish 之后只剩下
 // 单行 picker（mode select + time + optional weekday/day-of-month），没有
-// 预览面板和 raw cron 入口。initialRawExpr 参数保留但仅用作 fallback：
-// 若 schedule 无法 round-trip，静默降级为默认 descriptor，用户需重新选
-// 一次（比 legacy advanced 分支简单得多）。
+// 预览面板和 raw cron 入口。
+//
+// initialRawExpr 非空表示调用方检测到了一个"无法被 v2 picker round-trip"
+// 的老 schedule（@every 30m、* * * * 1,3,5 等）——picker 渲染默认 Daily
+// 09:00，但 overlay._cronScheduleTouched 会被编辑流置为 false，原 schedule
+// 保留在 overlay._cronSchedule 里，直到用户真的动一次控件才覆盖。
+// 为了避免"UI 显示 Daily 09:00 但实际不是"的视觉误导，我们在 picker 上方
+// 插一条轻量 hint："当前频率：每 30 分钟（动下方控件即切换到新频率）"。
 function buildScheduleSection(initialDesc, initialRawExpr) {
-  void initialRawExpr; // 兼容老调用点；v2 不再使用
-  return buildFreqPickerHtml(initialDesc);
+  const pickerHtml = buildFreqPickerHtml(initialDesc);
+  if (!initialRawExpr) return pickerHtml;
+  const human = humanizeCron(initialRawExpr);
+  return '<div class="freq-legacy-hint" role="note">' +
+      '当前频率：<b>' + esc(human) + '</b>' +
+      '<span class="freq-legacy-sub">这是 v1 的老格式。如需修改，请用下方控件选一个新频率。</span>' +
+    '</div>' +
+    pickerHtml;
 }
 
 function createNewCronJob() {
@@ -8398,6 +8486,10 @@ function createNewCronJob() {
   });
   overlay._cronSchedule = '';
   overlay._cronWorkDir = '';
+  // 创建流：默认 Daily 09:00 立即生效，"打开即保存"也能提交合法 schedule。
+  // 与编辑流相反——编辑流必须不 touched，保留 job.schedule 原值直到用户
+  // 主动改。
+  overlay._cronScheduleTouched = true;
   const promptEl = document.getElementById('cron-prompt');
   if (promptEl) setTimeout(() => promptEl.focus(), 0);
   freqUpdate();
@@ -9166,12 +9258,18 @@ function editCronJob(id) {
   const notifyHtml = buildCronNotifyToggleHtml(notifyInitial, hasOverride, job.notify_platform, job.notify_chat_id);
   const contextHtml = buildCronContextToggleHtml(!!job.fresh_context);
 
-  // Round-trip attempt: if the saved expression matches a picker shape we
-  // restore the picker; otherwise open the advanced disclosure with the raw
-  // expression so power users don't lose their handcrafted schedule.
+  // Round-trip attempt: if the saved expression matches a v2 picker shape
+  // we pre-fill the picker; otherwise render the default picker and add a
+  // "当前频率：<human-readable>" hint above it so the user sees the real
+  // schedule (UI shows Daily/09:00 default which is a visual lie without
+  // the hint). _cronScheduleTouched stays false so "save without touching
+  // the frequency controls" preserves the legacy expression intact.
+  // 关联 Issue #1（Round ? review）。
   const initialDesc = parseCronToFreq(job.schedule);
-  const initialRaw = initialDesc ? '' : (job.schedule || '');
-  const scheduleHtml = buildScheduleSection(initialDesc || { mode: 'interval', n: 1, unit: 'h' }, initialRaw);
+  const scheduleHtml = buildScheduleSection(
+    initialDesc || { mode: 'daily', time: '09:00' },
+    initialDesc ? '' : (job.schedule || '')
+  );
 
   // Edit modal's "where" reuses the project picker when available, falling
   // back to a free-form input (projectsData empty or user typed a custom
@@ -9214,8 +9312,15 @@ function editCronJob(id) {
     }
   });
 
-  // Seed overlay._cronSchedule so "save without edits" still sends the
-  // correct schedule, then trigger the first preview render.
+  // Seed overlay._cronSchedule with the job's ACTUAL schedule (not whatever
+  // the picker would render back from parseCronToFreq). Critical for legacy
+  // shapes that don't round-trip: @every 30m / multi-dow weekly / hand-
+  // crafted expressions all parseCronToFreq → null → default Daily picker.
+  // Without the touched gate, an immediate freqUpdate() would overwrite
+  // _cronSchedule to "0 9 * * *" and a "save without changes" click would
+  // silently rewrite the user's 30-minute job to every day 9 AM. See
+  // freqMarkTouched doc. 不要调 freqUpdate()——让 seed 保持到用户真的
+  // 交互频率控件为止。
   //
   // Do NOT seed overlay._cronWorkDir from job.work_dir — the submit path
   // uses overlay._cronWorkDir only as a fallback when the input is empty,
@@ -9224,8 +9329,8 @@ function editCronJob(id) {
   // explicitly set _cronWorkDir; the input's pre-filled value covers the
   // unchanged-workdir case.
   overlay._cronSchedule = job.schedule || '';
+  overlay._cronScheduleTouched = false;
   overlay._cronWorkDir = '';
-  freqUpdate();
 }
 
 // buildEditCronWorkspaceBody is the edit-mode counterpart. v2 polish 之后

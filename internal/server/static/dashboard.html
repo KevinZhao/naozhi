@@ -892,6 +892,12 @@ body.kbd-open .input-hints{display:none}
 .freq-mode-select:focus,.freq-extra:focus{border-color:var(--nz-accent)}
 .freq-extra{min-width:100px;padding:8px 28px 8px 12px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:8px;color:var(--nz-text-strong);font-size:14px;font-family:inherit;outline:none;cursor:pointer;appearance:none;-webkit-appearance:none;background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 10 10' fill='none' stroke='%238b949e' stroke-width='1.5'><path d='M2 4 L5 7 L8 4'/></svg>");background-repeat:no-repeat;background-position:right 10px center;min-height:38px}
 .freq-hint{margin-top:8px;font-size:12px;color:var(--nz-text-mute);line-height:1.5}
+/* v2 polish: 编辑老任务（v1 schedule 无法 round-trip 到新 picker）时
+ * 显示"当前频率：xxx"作为视觉参照，防止 UI 展示 Daily/09:00 默认值
+ * 与实际 schedule 不符造成的误导。 */
+.freq-legacy-hint{display:flex;flex-direction:column;gap:2px;margin-bottom:10px;padding:8px 12px;background:rgba(210,153,34,.08);border:1px solid rgba(210,153,34,.25);border-radius:6px;color:var(--nz-text);font-size:12px;line-height:1.5}
+.freq-legacy-hint b{color:var(--nz-text-strong);font-weight:600}
+.freq-legacy-hint .freq-legacy-sub{font-size:11px;color:var(--nz-text-mute)}
 .freq-time{padding:8px 10px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:8px;color:var(--nz-text-strong);font-size:14px;font-family:inherit;outline:none;min-height:38px}
 .freq-time:hover{border-color:var(--nz-text-faint)}
 .freq-time:focus{border-color:var(--nz-accent)}
