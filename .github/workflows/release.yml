@@ -62,7 +62,7 @@ jobs:
           go build -trimpath -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o "dist/${OUTPUT}" ./cmd/naozhi/
           cd dist && sha256sum "${OUTPUT}" > "${OUTPUT}.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: naozhi-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/
