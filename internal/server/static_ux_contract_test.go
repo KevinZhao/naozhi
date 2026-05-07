@@ -378,18 +378,25 @@ func TestDashboardJS_CronEmptyStateSub(t *testing.T) {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
 	js := string(data)
-	// Legacy lines must remain for E2E.
+	// cron-v2-polish §3.1: 面板本地化，去 "cron" 术语。E2E 同步改（见
+	// test/e2e/dashboard.test.js:987-989）。hint / sub / cta 都改中文。
 	for _, want := range []string{
-		`class="cron-empty-hint">No cron jobs yet</div>`,
-		`class="cron-empty-cta" onclick="createNewCronJob()">Create your first cron job</button>`,
+		`class="cron-empty-hint">还没有定时任务</div>`,
+		`class="cron-empty-sub">按计划自动在某个工作目录下运行提示词</div>`,
+		`class="cron-empty-cta" onclick="createNewCronJob()">创建第一个定时任务</button>`,
 	} {
 		if !strings.Contains(js, want) {
-			t.Errorf("cron empty state missing legacy string for E2E compatibility: %s", want)
+			t.Errorf("cron empty state missing fragment: %s", want)
 		}
 	}
-	// New sub-hint.
-	if !strings.Contains(js, `class="cron-empty-sub">让 naozhi 按计划自动在某个工作目录下运行 prompt</div>`) {
-		t.Error("cron empty state must include the Chinese sub-hint")
+	// Legacy English fragments must be gone.
+	for _, legacy := range []string{
+		`>No cron jobs yet<`,
+		`>Create your first cron job<`,
+	} {
+		if strings.Contains(js, legacy) {
+			t.Errorf("legacy English cron-empty fragment %q must be removed", legacy)
+		}
 	}
 	data2, err := dashboardHTML.ReadFile("static/dashboard.html")
 	if err != nil {

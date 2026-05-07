@@ -7972,16 +7972,16 @@ function pad2(n) { return (n < 10 ? '0' : '') + n; }
 // can restore. Returning null means "we don't recognize this — fall back to
 // the raw expression editor." This is intentionally narrow: we only recognize
 // the exact shapes buildFreqSchedule emits, so round-tripping is lossless.
+// parseCronToFreq identifies the descriptor that buildFreqSchedule would have
+// produced this expression from, so edit-modal can restore the picker state.
+// Return null means the expression can't round-trip — legacy jobs with
+// interval/custom shapes now degrade to the default Daily picker on edit
+// (acceptable: user re-picks once and the new shape is persisted).
 function parseCronToFreq(expr) {
   if (!expr) return null;
   const s = expr.trim();
-  let m = s.match(/^@every\s+(\d+)(m|h)$/i);
-  if (m) {
-    const n = parseInt(m[1], 10);
-    const unit = m[2].toLowerCase();
-    if (unit === 'm' && n < 5) return null;
-    return { mode: 'interval', n, unit };
-  }
+  // Hourly: "0 * * * *"
+  if (s === '0 * * * *') return { mode: 'hourly' };
   const parts = s.split(/\s+/);
   if (parts.length !== 5) return null;
   const [mm, hh, dom, mon, dow] = parts;
@@ -7997,6 +7997,8 @@ function parseCronToFreq(expr) {
     if (d >= 1 && d <= 31) return { mode: 'monthly', day: d, time: hhmm };
   }
   if (dom === '*' && dow !== '*') {
+    // "1-5" → Weekdays shortcut；单日或多日 → Weekly（单选模式下取首日）
+    if (dow === '1-5') return { mode: 'weekdays', time: hhmm };
     const days = parseDowField(dow);
     if (days) return { mode: 'weekly', dows: days, time: hhmm };
   }
@@ -8030,20 +8032,24 @@ function parseDowField(field) {
 
 // buildFreqSchedule assembles a cron expression from a frequency descriptor.
 // Returns {expr, err}. err is a human-readable message when the descriptor
-// is invalid (e.g. interval <5min, no weekday selected).
+// is invalid (e.g. no weekday selected).
+//
+// v2 polish: interval mode 被移除（对普通用户概念太重）；新增 hourly
+// （整点每小时）和 weekdays（Mon-Fri shortcut）。
 function buildFreqSchedule(desc) {
   if (!desc) return { err: '请选择频率' };
-  if (desc.mode === 'interval') {
-    const n = parseInt(desc.n, 10);
-    if (!Number.isFinite(n) || n < 1) return { err: '间隔必须是正整数' };
-    if (desc.unit === 'm' && n < 5) return { err: '最短间隔为 5 分钟' };
-    if (desc.unit !== 'm' && desc.unit !== 'h') return { err: '单位无效' };
-    return { expr: '@every ' + n + desc.unit };
+  if (desc.mode === 'hourly') {
+    return { expr: '0 * * * *' };
   }
   if (desc.mode === 'daily') {
     const t = parseHHMM(desc.time);
     if (!t) return { err: '时间格式无效' };
     return { expr: t.m + ' ' + t.h + ' * * *' };
+  }
+  if (desc.mode === 'weekdays') {
+    const t = parseHHMM(desc.time);
+    if (!t) return { err: '时间格式无效' };
+    return { expr: t.m + ' ' + t.h + ' * * 1-5' };
   }
   if (desc.mode === 'weekly') {
     if (!desc.dows || desc.dows.length === 0) return { err: '至少选择一个星期几' };
@@ -8085,10 +8091,9 @@ function humanizeCron(expr) {
     if (step) return step;
     return expr;
   }
-  if (d.mode === 'interval') {
-    return d.unit === 'h' ? ('每 ' + d.n + ' 小时') : ('每 ' + d.n + ' 分钟');
-  }
+  if (d.mode === 'hourly') return '每小时';
   if (d.mode === 'daily') return '每天 ' + d.time;
+  if (d.mode === 'weekdays') return '工作日 ' + d.time;
   if (d.mode === 'weekly') {
     const names = ['周日', '周一', '周二', '周三', '周四', '周五', '周六'];
     const set = new Set(d.dows);
@@ -8148,245 +8153,135 @@ const DOW_LABELS = [
   { i: 0, label: '日' },
 ];
 
-// buildFreqPickerHtml renders the frequency tab UI. initial is an optional
-// descriptor to pre-fill (used by edit modal); when absent we default to
-// "every 1 hour" which matches the most common ask.
+// buildFreqPickerHtml renders the Claude-style compact Frequency row:
+//
+//   [Frequency ▾] [time] [extra: weekday ▾ / day-of-month ▾]
+//
+// v2 polish: 彻底移除"cron 表达式"概念和 interval 模式（5/15/30 分钟这种对
+// 初级用户过于工程化），只保留 Hourly / Daily / Weekdays / Weekly / Monthly
+// 五档——覆盖绝大多数实际用例，表达方式清晰。preset 按钮 / 多次运行预览 /
+// 高级 raw cron 输入全部删除，对齐 Claude Scheduled Tasks 的简洁直觉。
+//
+// 后端约束：cron.minCronInterval=5m，Hourly (60m) 及以上都满足，无需前端
+// 再提示。Monthly 的日期超过当月最后一天时 robfig/cron 自动跳过，无需警告
+// 文案污染 UI。
+//
+// initial 是可选的 descriptor 用来回填（编辑流），默认 Daily 9:00。
 function buildFreqPickerHtml(initial) {
-  const d = initial || { mode: 'interval', n: 1, unit: 'h' };
-  const modeOption = (mode, label) =>
-    '<option value="' + mode + '"' + (d.mode === mode ? ' selected' : '') + '>' + esc(label) + '</option>';
+  const d = initial || { mode: 'daily', time: '09:00' };
+  const mode = d.mode || 'daily';
+  const modeOption = (m, label) =>
+    '<option value="' + m + '"' + (mode === m ? ' selected' : '') + '>' + esc(label) + '</option>';
 
-  const iv = d.mode === 'interval' ? d : { n: 1, unit: 'h' };
-  const intervalHtml =
-    '<div class="freq-body" data-mode="interval" style="' + (d.mode === 'interval' ? '' : 'display:none') + '">' +
-      '<div class="freq-row">' +
-        '<span class="freq-label">每隔</span>' +
-        '<input class="freq-num" id="freq-iv-n" type="number" min="1" max="59" value="' + esc(String(iv.n)) + '" oninput="freqUpdate()">' +
-        '<select class="freq-select" id="freq-iv-unit" onchange="freqUpdate()">' +
-          '<option value="m"' + (iv.unit === 'm' ? ' selected' : '') + '>分钟</option>' +
-          '<option value="h"' + (iv.unit === 'h' ? ' selected' : '') + '>小时</option>' +
-        '</select>' +
-      '</div>' +
-      '<div class="freq-preset-row">' +
-        '<button type="button" class="freq-preset" onclick="freqIntervalPreset(5,\'m\')">每 5 分钟</button>' +
-        '<button type="button" class="freq-preset" onclick="freqIntervalPreset(15,\'m\')">每 15 分钟</button>' +
-        '<button type="button" class="freq-preset" onclick="freqIntervalPreset(30,\'m\')">每 30 分钟</button>' +
-        '<button type="button" class="freq-preset" onclick="freqIntervalPreset(1,\'h\')">每小时</button>' +
-        '<button type="button" class="freq-preset" onclick="freqIntervalPreset(6,\'h\')">每 6 小时</button>' +
-      '</div>' +
-    '</div>';
+  // time 从当前 descriptor 取；hourly 不需要 time（置为空 placeholder）
+  const time = d.time || '09:00';
+  const timeInput =
+    '<input class="freq-time" id="freq-time" type="time" value="' + esc(time) + '" onchange="freqUpdate()" oninput="freqUpdate()"' +
+      (mode === 'hourly' ? ' style="display:none"' : '') + '>';
 
-  const da = d.mode === 'daily' ? d : { time: '09:00' };
-  const dailyHtml =
-    '<div class="freq-body" data-mode="daily" style="' + (d.mode === 'daily' ? '' : 'display:none') + '">' +
-      '<div class="freq-row">' +
-        '<span class="freq-label">每天</span>' +
-        '<input class="freq-time" id="freq-daily-time" type="time" value="' + esc(da.time) + '" onchange="freqUpdate()" oninput="freqUpdate()">' +
-      '</div>' +
-      '<div class="freq-preset-row">' +
-        '<button type="button" class="freq-preset" onclick="freqDailyPreset(\'09:00\')">早上 9 点</button>' +
-        '<button type="button" class="freq-preset" onclick="freqDailyPreset(\'12:00\')">中午 12 点</button>' +
-        '<button type="button" class="freq-preset" onclick="freqDailyPreset(\'18:00\')">傍晚 6 点</button>' +
-        '<button type="button" class="freq-preset" onclick="freqDailyPreset(\'22:00\')">晚上 10 点</button>' +
-      '</div>' +
-    '</div>';
+  // weekly 的星期下拉（单选）。默认 Monday。
+  const weeklyDow = (mode === 'weekly' && Array.isArray(d.dows) && d.dows.length > 0) ? d.dows[0] : 1;
+  const dowOption = (i, label) =>
+    '<option value="' + i + '"' + (weeklyDow === i ? ' selected' : '') + '>' + esc(label) + '</option>';
+  const weeklySelect =
+    '<select class="freq-extra" id="freq-weekly-dow" onchange="freqUpdate()"' +
+      (mode === 'weekly' ? '' : ' style="display:none"') + '>' +
+      dowOption(1, '星期一') + dowOption(2, '星期二') + dowOption(3, '星期三') +
+      dowOption(4, '星期四') + dowOption(5, '星期五') + dowOption(6, '星期六') +
+      dowOption(0, '星期日') +
+    '</select>';
 
-  const wk = d.mode === 'weekly' ? d : { dows: [1, 2, 3, 4, 5], time: '09:00' };
-  const selectedDows = new Set(wk.dows || []);
-  const dowBtns = DOW_LABELS.map(x =>
-    '<button type="button" class="freq-dow' + (selectedDows.has(x.i) ? ' on' : '') +
-    '" data-dow="' + x.i + '" onclick="freqToggleDow(this)">' + esc(x.label) + '</button>'
-  ).join('');
-  const weeklyHtml =
-    '<div class="freq-body" data-mode="weekly" style="' + (d.mode === 'weekly' ? '' : 'display:none') + '">' +
-      '<div class="freq-row"><span class="freq-label">星期</span><div class="freq-dows" id="freq-weekly-dows">' + dowBtns + '</div></div>' +
-      '<div class="freq-row">' +
-        '<span class="freq-label">时间</span>' +
-        '<input class="freq-time" id="freq-weekly-time" type="time" value="' + esc(wk.time) + '" onchange="freqUpdate()" oninput="freqUpdate()">' +
-      '</div>' +
-      '<div class="freq-preset-row">' +
-        '<button type="button" class="freq-preset" onclick="freqWeeklyPreset([1,2,3,4,5],\'09:00\')">工作日 9 点</button>' +
-        '<button type="button" class="freq-preset" onclick="freqWeeklyPreset([0,6],\'10:00\')">周末 10 点</button>' +
-        '<button type="button" class="freq-preset" onclick="freqWeeklyPreset([1],\'09:00\')">每周一 9 点</button>' +
-      '</div>' +
-    '</div>';
-
-  const mo = d.mode === 'monthly' ? d : { day: 1, time: '09:00' };
+  // monthly 的日期下拉
+  const monthlyDay = (mode === 'monthly' && d.day) ? d.day : 1;
   let dayOpts = '';
   for (let i = 1; i <= 31; i++) {
-    dayOpts += '<option value="' + i + '"' + (mo.day === i ? ' selected' : '') + '>' + i + '</option>';
+    dayOpts += '<option value="' + i + '"' + (monthlyDay === i ? ' selected' : '') + '>' + i + ' 日</option>';
   }
-  const monthlyHtml =
-    '<div class="freq-body" data-mode="monthly" style="' + (d.mode === 'monthly' ? '' : 'display:none') + '">' +
-      '<div class="freq-row">' +
-        '<span class="freq-label">每月</span>' +
-        '<select class="freq-select" id="freq-monthly-day" onchange="freqUpdate()">' + dayOpts + '</select>' +
-        '<span class="freq-label">日</span>' +
-        '<input class="freq-time" id="freq-monthly-time" type="time" value="' + esc(mo.time) + '" onchange="freqUpdate()" oninput="freqUpdate()">' +
-      '</div>' +
-      '<div class="cron-tz-hint" style="margin-top:6px">如果选择 29、30、31 日，当月没有这一天时会跳过。</div>' +
-    '</div>';
+  const monthlySelect =
+    '<select class="freq-extra" id="freq-monthly-day" onchange="freqUpdate()"' +
+      (mode === 'monthly' ? '' : ' style="display:none"') + '>' +
+      dayOpts +
+    '</select>';
 
-  // v2 polish: 从 4-tab 切换器改成单 select 下拉（参考 Claude Scheduled
-  // Tasks 的 Frequency dropdown）。当前模式挂在 #freq-mode-select 的 value
-  // 上，freqCurrentDescriptor / freqSelectMode 都从这里读。保留的
-  // "freq-tabs" 外层 div 作为语义锚点，避免依赖外部查找 role="tablist"
-  // 的测试失效——实际控件是里面的 select。
-  return '<div class="freq-tabs" role="tablist">' +
+  return '<div class="freq-row-inline">' +
       '<select class="freq-mode-select" id="freq-mode-select" aria-label="频率模式" onchange="freqSelectMode(this.value)">' +
-        modeOption('interval', '间隔') +
-        modeOption('daily', '每天') +
-        modeOption('weekly', '每周') +
-        modeOption('monthly', '每月') +
+        modeOption('hourly', 'Hourly') +
+        modeOption('daily', 'Daily') +
+        modeOption('weekdays', 'Weekdays') +
+        modeOption('weekly', 'Weekly') +
+        modeOption('monthly', 'Monthly') +
       '</select>' +
+      timeInput +
+      weeklySelect +
+      monthlySelect +
     '</div>' +
-    intervalHtml + dailyHtml + weeklyHtml + monthlyHtml;
+    '<div class="freq-hint">任务会在上述时间点后 0-2 分钟内随机启动（防并发峰值）。</div>';
 }
 
-// freqCurrentDescriptor reads the picker state back into a descriptor object.
+// freqCurrentDescriptor reads the picker state back into a descriptor.
 // Returns null when the picker is absent.
+//
+// Descriptor shapes:
+//   hourly   -> { mode:'hourly' }
+//   daily    -> { mode:'daily',  time:'HH:MM' }
+//   weekdays -> { mode:'weekdays', time:'HH:MM' }   // Mon-Fri，buildFreqSchedule 会展开成 dows=[1..5]
+//   weekly   -> { mode:'weekly', time:'HH:MM', dows:[N] }  // 单选
+//   monthly  -> { mode:'monthly', time:'HH:MM', day:N }
 function freqCurrentDescriptor() {
   const sel = document.getElementById('freq-mode-select');
   if (!sel) return null;
   const mode = sel.value;
-  if (mode === 'interval') {
-    const n = parseInt(document.getElementById('freq-iv-n').value, 10);
-    const unit = document.getElementById('freq-iv-unit').value;
-    return { mode, n, unit };
+  const time = (document.getElementById('freq-time') || {}).value || '09:00';
+  if (mode === 'hourly') {
+    return { mode };
   }
   if (mode === 'daily') {
-    return { mode, time: document.getElementById('freq-daily-time').value };
+    return { mode, time };
+  }
+  if (mode === 'weekdays') {
+    return { mode, time };
   }
   if (mode === 'weekly') {
-    const btns = document.querySelectorAll('#freq-weekly-dows .freq-dow.on');
-    const dows = [...btns].map(b => parseInt(b.getAttribute('data-dow'), 10)).sort((a, b) => a - b);
-    return { mode, dows, time: document.getElementById('freq-weekly-time').value };
+    const dow = parseInt((document.getElementById('freq-weekly-dow') || {}).value, 10);
+    return { mode, time, dows: Number.isFinite(dow) ? [dow] : [1] };
   }
   if (mode === 'monthly') {
-    return {
-      mode,
-      day: parseInt(document.getElementById('freq-monthly-day').value, 10),
-      time: document.getElementById('freq-monthly-time').value,
-    };
+    const day = parseInt((document.getElementById('freq-monthly-day') || {}).value, 10);
+    return { mode, time, day: Number.isFinite(day) ? day : 1 };
   }
   return null;
 }
 
-// freqSelectMode 切换频率模式（interval/daily/weekly/monthly）。v2 polish
-// 替换了老的 freqSelectTab——触发点从 tab 按钮 onclick 改成 select onchange，
-// 但下方 freq-body 的可见性切换语义不变。
+// freqSelectMode 切换频率模式。根据模式显示/隐藏 time / weekly-dow /
+// monthly-day 三个辅助控件。hourly 无 time（整点即跑）。
 function freqSelectMode(mode) {
-  document.querySelectorAll('.freq-body').forEach(el => {
-    el.style.display = el.getAttribute('data-mode') === mode ? '' : 'none';
-  });
-  freqUpdate();
-}
-function freqToggleDow(btn) { btn.classList.toggle('on'); freqUpdate(); }
-function freqIntervalPreset(n, unit) {
-  document.getElementById('freq-iv-n').value = n;
-  document.getElementById('freq-iv-unit').value = unit;
-  freqUpdate();
-}
-function freqDailyPreset(t) {
-  document.getElementById('freq-daily-time').value = t;
-  freqUpdate();
-}
-function freqWeeklyPreset(dows, t) {
-  const set = new Set(dows);
-  document.querySelectorAll('#freq-weekly-dows .freq-dow').forEach(b => {
-    const i = parseInt(b.getAttribute('data-dow'), 10);
-    b.classList.toggle('on', set.has(i));
-  });
-  document.getElementById('freq-weekly-time').value = t;
+  const time = document.getElementById('freq-time');
+  const dow = document.getElementById('freq-weekly-dow');
+  const day = document.getElementById('freq-monthly-day');
+  if (time) time.style.display = (mode === 'hourly') ? 'none' : '';
+  if (dow) dow.style.display = (mode === 'weekly') ? '' : 'none';
+  if (day) day.style.display = (mode === 'monthly') ? '' : 'none';
   freqUpdate();
 }
 
-// freqUpdate refreshes overlay._cronSchedule and the multi-run preview.
-// Advanced raw-cron input takes priority when non-empty; otherwise the
-// picker's descriptor feeds buildFreqSchedule.
+// freqUpdate refreshes overlay._cronSchedule from the current picker state.
+// v2 polish: advanced raw-cron input and multi-run preview 已移除；submit
+// 路径只需要一个 cron expression，由 freqCurrentDescriptor + buildFreqSchedule
+// 产出即可。
 function freqUpdate() {
   const overlay = document.querySelector('.modal-overlay');
   if (!overlay) return;
-  const advanced = document.getElementById('freq-advanced-input');
-  if (advanced && advanced.value.trim()) {
-    overlay._cronSchedule = advanced.value.trim();
-    previewFreqSchedule(overlay._cronSchedule);
-    return;
-  }
   const desc = freqCurrentDescriptor();
-  const { expr, err } = buildFreqSchedule(desc);
-  if (err) {
-    overlay._cronSchedule = '';
-    renderFreqPreview({ valid: false, error: err });
-    return;
-  }
-  overlay._cronSchedule = expr;
-  previewFreqSchedule(expr);
+  const { expr } = buildFreqSchedule(desc);
+  overlay._cronSchedule = expr || '';
 }
 
-let _freqPreviewTimer = null;
-function previewFreqSchedule(expr) {
-  clearTimeout(_freqPreviewTimer);
-  _freqPreviewTimer = setTimeout(() => doPreviewFreq(expr), 200);
-}
-async function doPreviewFreq(expr) {
-  if (!expr) { renderFreqPreview({ valid: false, error: '' }); return; }
-  try {
-    const headers = {};
-    const t = getToken();
-    if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch('/api/cron/preview?count=5&schedule=' + encodeURIComponent(expr), { headers });
-    const data = await r.json();
-    renderFreqPreview(data);
-  } catch (e) {
-    renderFreqPreview({ valid: false, error: 'preview error' });
-  }
-}
+// v2 polish: previewFreqSchedule / doPreviewFreq / renderFreqPreview /
+// freqToggleAdvanced 在改造后全部删除。多次运行预览 + raw cron 表达式
+// 入口已从 modal 中移除（对初级用户过于工程化）；submit 路径不再需要
+// 经过 preview 即可判定 schedule 是否合法——后端 validateSchedule 会在
+// AddJob 时兜底返回 400。
 
-function renderFreqPreview(data) {
-  const box = document.getElementById('freq-preview');
-  if (!box) return;
-  if (!data || !data.valid) {
-    box.className = 'freq-preview err';
-    box.innerHTML = '<div class="freq-preview-title">schedule 无效</div>' +
-      '<div style="color:var(--nz-red)">' + esc(data && data.error || '请完成频率设置') + '</div>';
-    return;
-  }
-  const runs = data.next_runs || (data.next_run ? [data.next_run] : []);
-  box.className = 'freq-preview';
-  let list = '';
-  for (let i = 0; i < runs.length; i++) {
-    const ts = runs[i];
-    const d = new Date(ts);
-    const pretty = d.toLocaleString(undefined, {
-      month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit', hour12: false,
-    });
-    const rel = i === 0 ? timeAgo(ts, true) : '';
-    list += '<li><span>' + esc(pretty) + '</span>' + (rel ? '<span class="fp-rel">' + esc(rel) + '</span>' : '') + '</li>';
-  }
-  const tz = data.timezone_label || data.timezone || cronTimezoneLabel;
-  box.innerHTML =
-    '<div class="freq-preview-title">接下来会在这些时间运行</div>' +
-    '<ul class="freq-preview-list">' + list + '</ul>' +
-    (tz ? '<div class="freq-preview-tz">时区：' + esc(tz) + '</div>' : '');
-}
-
-// Toggle the advanced (raw cron expression) disclosure. Closing clears the
-// advanced input so the picker resumes control.
-function freqToggleAdvanced(btn) {
-  const body = document.getElementById('freq-advanced-body');
-  const open = body.style.display !== 'none';
-  body.style.display = open ? 'none' : '';
-  btn.classList.toggle('open', !open);
-  if (!open) {
-    const input = document.getElementById('freq-advanced-input');
-    if (input) input.focus();
-  } else {
-    const input = document.getElementById('freq-advanced-input');
-    if (input) input.value = '';
-    freqUpdate();
-  }
-}
 
 // buildCronWorkspaceBody renders the workspace picker as a dropdown button +
 // popover（v2 polish，参考 Claude Scheduled Tasks 的 "Work in a project ▾"
@@ -8452,30 +8347,14 @@ function buildCronWorkspaceBodyInternal(opts) {
   return '<div class="ws-dropdown-wrap">' + buttonHtml + popoverHtml + '</div>';
 }
 
-// buildScheduleSection renders the frequency picker + advanced disclosure +
-// preview panel used by create and edit modals. initialRawExpr is only set
-// when an existing job's schedule doesn't match any picker shape; we surface
-// it via the advanced input so the user can still edit without losing the
-// original expression.
+// buildScheduleSection renders the frequency picker. v2 polish 之后只剩下
+// 单行 picker（mode select + time + optional weekday/day-of-month），没有
+// 预览面板和 raw cron 入口。initialRawExpr 参数保留但仅用作 fallback：
+// 若 schedule 无法 round-trip，静默降级为默认 descriptor，用户需重新选
+// 一次（比 legacy advanced 分支简单得多）。
 function buildScheduleSection(initialDesc, initialRawExpr) {
-  const pickerHtml = buildFreqPickerHtml(initialDesc);
-  const advancedOpen = !!initialRawExpr;
-  const rawValue = initialRawExpr ? escAttr(initialRawExpr) : '';
-  // The outer .cf-label ("什么时候") from renderCronModalBody provides the
-  // section heading in the two-column modal, so we don't duplicate it here.
-  return pickerHtml +
-    '<button type="button" class="freq-advanced-toggle' + (advancedOpen ? ' open' : '') + '" onclick="freqToggleAdvanced(this)">' +
-      '<span class="chev">&#9656;</span>' +
-      '<span>我要写 cron 表达式</span>' +
-    '</button>' +
-    '<div class="freq-advanced-body" id="freq-advanced-body" style="' + (advancedOpen ? '' : 'display:none') + '">' +
-      '<input id="freq-advanced-input" type="text" placeholder="@every 30m or 0 9 * * 1-5" value="' + rawValue + '" oninput="freqUpdate()">' +
-      '<div class="cron-tz-hint" style="margin-top:4px">留空则使用上面的频率选择器；填写后覆盖选择器。</div>' +
-    '</div>' +
-    '<div class="freq-preview" id="freq-preview">' +
-      '<div class="freq-preview-title">接下来会在这些时间运行</div>' +
-      '<div style="color:var(--nz-text-faint)">...</div>' +
-    '</div>';
+  void initialRawExpr; // 兼容老调用点；v2 不再使用
+  return buildFreqPickerHtml(initialDesc);
 }
 
 function createNewCronJob() {
@@ -8980,7 +8859,10 @@ function cronJobCardHtml(j) {
     ? ''
     : '<button type="button" class="cc-btn" onclick="cronTriggerNow(\'' + escJs(j.id) + '\')" title="立即执行一次" aria-label="立即执行一次">run</button>';
   const human = humanizeCron(j.schedule);
-  const showRaw = human !== j.schedule;
+  // v2 polish: 不再把"不能 round-trip"的 cron 表达式暴露给用户——对
+  // 初级用户无信息价值。始终只显示人类可读的 humanizeCron 结果（对未识
+  // 别的 expression humanizeCron 会兜底返回原串，依然可读）。
+  const showRaw = false;
   return '<div class="cron-card" role="button" tabindex="0" onclick="openCronSession(\'' + escJs(j.id) + '\')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronSession(\'' + escJs(j.id) + '\')}">' +
     nextBadge +
     titleBlock +
@@ -9013,9 +8895,9 @@ function renderCronList() {
     host.innerHTML =
       '<div class="cron-empty">' +
         '<div class="cron-empty-icon" aria-hidden="true">&#9201;</div>' +
-        '<div class="cron-empty-hint">No cron jobs yet</div>' +
-        '<div class="cron-empty-sub">让 naozhi 按计划自动在某个工作目录下运行 prompt</div>' +
-        '<button type="button" class="cron-empty-cta" onclick="createNewCronJob()">Create your first cron job</button>' +
+        '<div class="cron-empty-hint">还没有定时任务</div>' +
+        '<div class="cron-empty-sub">按计划自动在某个工作目录下运行提示词</div>' +
+        '<button type="button" class="cron-empty-cta" onclick="createNewCronJob()">创建第一个定时任务</button>' +
       '</div>';
     return;
   }
@@ -9100,20 +8982,20 @@ function renderCronPanel() {
   let html =
     '<div class="main-header">' +
       '<button class="btn-mobile-back" onclick="mobileBack()" title="back" aria-label="Back to sidebar">&#8592;</button>' +
-      '<div class="main-header-content"><h2>Cron Jobs</h2></div>' +
+      '<div class="main-header-content"><h2>定时任务</h2></div>' +
     '</div>' +
     '<div class="cron-detail">' +
       '<div class="cron-detail-body">' +
         '<div class="cron-list-head">' +
-          '<h3>Cron Jobs</h3>' +
-          '<button type="button" class="cron-new-btn" onclick="createNewCronJob()" aria-label="Create new cron job">' +
+          '<h3>定时任务</h3>' +
+          '<button type="button" class="cron-new-btn" onclick="createNewCronJob()" aria-label="新建定时任务">' +
             '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>' +
-            ' New' +
+            ' 新建' +
           '</button>' +
         '</div>' +
         '<div class="cron-filter-bar">' +
           '<div class="cron-search-row">' +
-            '<input type="text" id="cron-search-input" class="cron-search-input" placeholder="搜索名称、prompt、目录、cron 表达式..." autocomplete="off" spellcheck="false" aria-label="搜索定时任务" value="' + escAttr(cronFilterQuery) + '" oninput="onCronSearchInput()" />' +
+            '<input type="text" id="cron-search-input" class="cron-search-input" placeholder="搜索名称、提示词、目录..." autocomplete="off" spellcheck="false" aria-label="搜索定时任务" value="' + escAttr(cronFilterQuery) + '" oninput="onCronSearchInput()" />' +
             '<button type="button" class="cron-search-clear" onclick="clearCronSearch()" title="清空搜索" aria-label="清空搜索">&times;</button>' +
           '</div>' +
           '<div class="cron-status-chips" role="group" aria-label="按状态筛选">' +

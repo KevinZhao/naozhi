@@ -985,8 +985,10 @@ test.describe('Cron panel', () => {
     await page.waitForSelector('.cron-detail');
 
     const text = await page.$eval('.cron-detail', el => el.textContent);
-    expect(text).toContain('No cron jobs yet');
-    expect(text).toContain('Create your first cron job');
+    // cron-v2-polish §3.1: 面板本地化为中文，去掉 "cron" 对初级用户过于
+    // 工程化的术语。legacy 英文 fragment 同步在 static_ux_contract_test 解除锁定。
+    expect(text).toContain('还没有定时任务');
+    expect(text).toContain('创建第一个定时任务');
 
     await ctx.close();
     emptyCronMock.server.close();
