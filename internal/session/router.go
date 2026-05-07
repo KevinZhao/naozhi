@@ -390,29 +390,23 @@ func resolveResumeID(claudeDir, workspace, key, resumeID string) string {
 	return resumeID
 }
 
-// cliNameDefault returns the CLI display name from the wrapper, or empty if no wrapper.
-// Kept as an internal helper (not inlined into CLIName) because snapshot
-// builders in this file already route through it.
-func (r *Router) cliNameDefault() string {
+// CLIName exposes the wrapper's CLI display name for status endpoints.
+// Returns empty when no wrapper is wired (tests, early boot).
+func (r *Router) CLIName() string {
 	if r.wrapper != nil {
 		return r.wrapper.CLIName
 	}
 	return ""
 }
 
-// cliVersionDefault returns the CLI version from the wrapper, or empty if no wrapper.
-func (r *Router) cliVersionDefault() string {
+// CLIVersion exposes the wrapper's detected CLI version for status endpoints.
+// Returns empty when no wrapper is wired.
+func (r *Router) CLIVersion() string {
 	if r.wrapper != nil {
 		return r.wrapper.CLIVersion
 	}
 	return ""
 }
-
-// CLIName exposes the wrapper's CLI display name for status endpoints.
-func (r *Router) CLIName() string { return r.cliNameDefault() }
-
-// CLIVersion exposes the wrapper's detected CLI version for status endpoints.
-func (r *Router) CLIVersion() string { return r.cliVersionDefault() }
 
 // wrapperFor selects the wrapper for the requested backend ID.
 // Empty backend picks the router default. Returns (wrapper, effectiveID).
@@ -686,7 +680,7 @@ func NewRouter(cfg RouterConfig) *Router {
 			// restore (no shim reconnect). Pre-multi-backend entries have
 			// empty Backend and fall back to the router default.
 			restoreWrapper, restoreBackendID := r.wrapperFor(entry.Backend)
-			cliName, cliVersion := r.cliNameDefault(), r.cliVersionDefault()
+			cliName, cliVersion := r.CLIName(), r.CLIVersion()
 			if restoreWrapper != nil {
 				cliName = restoreWrapper.CLIName
 				cliVersion = restoreWrapper.CLIVersion
@@ -764,8 +758,11 @@ func NewRouter(cfg RouterConfig) *Router {
 					graceTimer := time.NewTimer(shimReconnectGraceDelay)
 					select {
 					case <-graceTimer.C:
+						// Fired — no Stop needed, timer channel already drained.
 					case <-r.historyCtx.Done():
-						graceTimer.Stop()
+						if !graceTimer.Stop() {
+							<-graceTimer.C
+						}
 						return
 					}
 					// If ReconnectShims already populated history (happy
@@ -1481,11 +1478,16 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 		// r.sessions[key] (we pick SessionExisting) or fail (we retry our
 		// own spawn). Keep the sleep tiny so perceived latency stays flat;
 		// a typical shim spawn takes 100-300 ms.
+		// Use NewTimer+Stop instead of time.After: at N concurrent waiters
+		// on the same key, time.After leaks one runtime timer per iteration
+		// until GC notices (often >1s).
 		r.mu.Unlock()
+		waitT := time.NewTimer(20 * time.Millisecond)
 		select {
 		case <-ctx.Done():
+			waitT.Stop()
 			return nil, 0, ctx.Err()
-		case <-time.After(20 * time.Millisecond):
+		case <-waitT.C:
 		}
 		r.mu.Lock()
 	}
@@ -3109,8 +3111,8 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 		key: key,
 	}
 	s.setWorkspace(workspace)
-	s.SetCLIName(r.cliNameDefault())
-	s.SetCLIVersion(r.cliVersionDefault())
+	s.SetCLIName(r.CLIName())
+	s.SetCLIVersion(r.CLIVersion())
 	s.setSessionID(sessionID)
 	if lastPrompt != "" {
 		storeStringAtomic(&s.lastPrompt, lastPrompt)
@@ -3176,8 +3178,8 @@ func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
 		exempt: true,
 	}
 	s.setWorkspace(workspace)
-	s.SetCLIName(r.cliNameDefault())
-	s.SetCLIVersion(r.cliVersionDefault())
+	s.SetCLIName(r.CLIName())
+	s.SetCLIVersion(r.CLIVersion())
 	if lastPrompt != "" {
 		storeStringAtomic(&s.lastPrompt, lastPrompt)
 	}

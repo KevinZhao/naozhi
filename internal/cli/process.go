@@ -846,6 +846,12 @@ func (p *Process) readLoop() {
 				if cb != nil {
 					cb()
 				}
+				// Unblock any passthrough SendPassthrough callers immediately.
+				// The defer at readLoop end also calls discardAllPending, but
+				// that runs after we drain any remaining stdin frames — a kill
+				// race with active slots would otherwise wait for the outer
+				// loop to fully unwind (tens of ms under load).
+				p.discardAllPending(ErrProcessExited)
 				return
 			default:
 			}
@@ -860,6 +866,14 @@ func (p *Process) readLoop() {
 			select {
 			case p.eventCh <- ev:
 			default:
+				// Full buffer: drop is safe (EventLog kept the entry) but
+				// dropping a `result` event forces Send() into the
+				// findResultSince fallback, so log at Warn for observability.
+				if ev.Type == "result" {
+					log.Warn("eventCh full, dropped result", "subtype", ev.SubType)
+				} else {
+					log.Debug("eventCh full, dropped", "type", ev.Type)
+				}
 			}
 
 		case "stderr":
@@ -1037,7 +1051,7 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 		Detail:  TruncateRunes(text, 2000),
 	}
 	if len(images) > 0 {
-		entry.Summary += fmt.Sprintf(" [+%d image(s)]", len(images))
+		entry.Summary += " [+" + strconv.Itoa(len(images)) + " image(s)]"
 		thumbs := make([]string, len(images))
 		if len(images) == 1 {
 			thumbs[0] = MakeThumbnail(images[0].Data, 600)
@@ -2160,9 +2174,23 @@ func sanitizeStderrLine(line string) string {
 			}
 			continue
 		}
-		// Drop bare control chars (keep \t).
+		// Drop bare ASCII C0 control chars (keep \t).
 		if c < 0x20 && c != '\t' {
 			i++
+			continue
+		}
+		// Non-ASCII: decode rune and drop if it's a known log-injection
+		// codepoint (C1 controls, bidi overrides/isolates, LS/PS). Folding
+		// this into the byte-level loop avoids the second strings.Map pass
+		// which always allocates a fresh backing string even on a no-op.
+		if c >= 0x80 {
+			r, sz := utf8.DecodeRuneInString(line[i:])
+			if osutil.IsLogInjectionRune(r) {
+				i += sz
+				continue
+			}
+			b.WriteString(line[i : i+sz])
+			i += sz
 			continue
 		}
 		b.WriteByte(c)
@@ -2170,17 +2198,7 @@ func sanitizeStderrLine(line string) string {
 	}
 	// The pre-truncation step above already capped the input length; the
 	// sanitizer only removes bytes from that capped input (ANSI escapes +
-	// control chars), so the resulting builder is guaranteed to be no longer
-	// than the pre-truncated input. No post-sanitize truncation needed.
-	//
-	// R190-SEC-L1: byte-level loop above drops ASCII C0 (< 0x20) but passes
-	// C1 controls (U+0080–U+009F), bidi overrides/isolates, LS/PS (>=0x20
-	// when decoded). Run one more pass with strings.Map at the rune level to
-	// match the policy SanitizeQuote / SanitizeForLog enforce elsewhere.
-	return strings.Map(func(r rune) rune {
-		if osutil.IsLogInjectionRune(r) {
-			return -1
-		}
-		return r
-	}, b.String())
+	// control chars + log-injection runes), so the resulting builder is
+	// guaranteed to be no longer than the pre-truncated input.
+	return b.String()
 }

@@ -95,6 +95,13 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Ima
 		// CLI never saw this message — remove slot now; caller gets the raw
 		// error. FIFO is not harmed because we wrote nothing to stdin.
 		p.removeSlotByID(slot.id)
+		// If the write failed because the process died between Alive()
+		// check and shim write, surface ErrProcessExited so upstream
+		// sees the canonical "process gone" signal rather than an opaque
+		// shim-pipe error.
+		if !p.Alive() {
+			return nil, ErrProcessExited
+		}
 		return nil, fmt.Errorf("passthrough write: %w", writeErr)
 	}
 
@@ -208,19 +215,46 @@ func (p *Process) removeSlotsLocked(victims []*sendSlot) {
 	if len(victims) == 0 {
 		return
 	}
-	victimSet := make(map[uint64]struct{}, len(victims))
-	for _, v := range victims {
-		victimSet[v.id] = struct{}{}
-	}
+	// Fast path: for ≤4 victims (common passthrough case: 1 owner per turn)
+	// a linear scan is allocation-free and faster than building a map.
 	kept := p.pendingSlots[:0]
-	for _, s := range p.pendingSlots {
-		if _, isVictim := victimSet[s.id]; !isVictim {
-			kept = append(kept, s)
+	if len(victims) <= 4 {
+		for _, s := range p.pendingSlots {
+			isVictim := false
+			for _, v := range victims {
+				if s.id == v.id {
+					isVictim = true
+					break
+				}
+			}
+			if !isVictim {
+				kept = append(kept, s)
+			}
+		}
+	} else {
+		victimSet := make(map[uint64]struct{}, len(victims))
+		for _, v := range victims {
+			victimSet[v.id] = struct{}{}
+		}
+		for _, s := range p.pendingSlots {
+			if _, isVictim := victimSet[s.id]; !isVictim {
+				kept = append(kept, s)
+			}
 		}
 	}
 	// Zero out the tail so GC can reclaim the trailing slot references.
 	for i := len(kept); i < len(p.pendingSlots); i++ {
 		p.pendingSlots[i] = nil
+	}
+	// Reclaim capacity when the slice has shrunk to <25% of its backing
+	// array: a session that briefly burst to maxPendingSlots then went
+	// idle would otherwise permanently hold a maxPendingSlots-sized
+	// backing array for the rest of its lifetime. Only copy if the win
+	// is real (len*4 < cap) to avoid thrashing on steady-state traffic.
+	if cap(kept) > 8 && len(kept)*4 < cap(kept) {
+		shrunk := make([]*sendSlot, len(kept), len(kept)+2)
+		copy(shrunk, kept)
+		kept = shrunk
 	}
 	p.pendingSlots = kept
 }
@@ -237,33 +271,6 @@ func (p *Process) findSlotByUUIDLocked(u string) *sendSlot {
 		}
 	}
 	return nil
-}
-
-// matchMergedSlotsLocked pairs each text from a merged replay event with a
-// pending slot using FIFO-first tie-break for duplicate texts. Matched slots
-// are marked replayed=true and returned in the order the replay content blocks
-// listed them. Caller must hold slotsMu.
-func (p *Process) matchMergedSlotsLocked(texts []string) []*sendSlot {
-	matched := make([]*sendSlot, 0, len(texts))
-	usedIDs := make(map[uint64]struct{}, len(texts))
-	for _, want := range texts {
-		for _, s := range p.pendingSlots {
-			if s.replayed {
-				continue
-			}
-			if _, used := usedIDs[s.id]; used {
-				continue
-			}
-			if s.text != want {
-				continue
-			}
-			s.replayed = true
-			usedIDs[s.id] = struct{}{}
-			matched = append(matched, s)
-			break
-		}
-	}
-	return matched
 }
 
 // handleReplayEventLocked dispatches a user replay event. The CLI emits
@@ -520,9 +527,12 @@ func (p *Process) reapAbortedPreempted() []*sendSlot {
 }
 
 // fireAbortErrors delivers ErrAbortedByUrgent to each aborted slot's caller.
+// Uses isCanceled() (not direct field read) to match deliverSlotResult and
+// avoid the "concurrent canceled-field write vs fireAbortErrors read" race
+// when reapAbortedPreempted releases slotsMu before fireAbortErrors runs.
 func fireAbortErrors(victims []*sendSlot) {
 	for _, s := range victims {
-		if s.canceled {
+		if s.isCanceled() {
 			continue
 		}
 		select {

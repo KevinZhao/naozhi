@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -431,7 +432,7 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 
 	prompt := cli.TruncateRunes(text, 120)
 	if len(images) > 0 {
-		prompt += fmt.Sprintf(" [+%d image(s)]", len(images))
+		prompt += " [+" + strconv.Itoa(len(images)) + " image(s)]"
 	}
 	storeStringAtomic(&s.lastPrompt, prompt)
 
@@ -521,7 +522,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	// Cache the user prompt for Snapshot (matches how process.go logs user events).
 	prompt := cli.TruncateRunes(text, 120)
 	if len(images) > 0 {
-		prompt += fmt.Sprintf(" [+%d image(s)]", len(images))
+		prompt += " [+" + strconv.Itoa(len(images)) + " image(s)]"
 	}
 	storeStringAtomic(&s.lastPrompt, prompt)
 

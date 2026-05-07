@@ -446,14 +446,18 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		stats.Projects = projectList
 	}
 
-	// Take a snapshot of nodes under lock for thread-safe access
+	// Take a snapshot of nodes under lock for thread-safe access.
+	// knownNodes is referenced three times below (len check, pre-size, and
+	// offline-node fill-in); each KnownNodes() call acquires the nodeAccess
+	// lock + rebuilds the map. Snapshot once and reuse.
 	nodesSnapshot := h.nodeAccess.NodesSnapshot()
+	knownNodes := h.nodeAccess.KnownNodes()
 
 	// No configured nodes at all: use simple single-node response format.
 	// Pre-size resp to 3 so the optional history_sessions insert doesn't
 	// trigger a bucket rehash on fresh-deployment dashboards that always
 	// have JSONL history to show. R64-PERF-10.
-	if len(h.nodeAccess.KnownNodes()) == 0 {
+	if len(knownNodes) == 0 {
 		resp := make(map[string]any, 3)
 		resp["sessions"] = snapshots
 		resp["stats"] = stats
@@ -481,7 +485,7 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	// prior shape paid N inner-map allocs + interface{} boxing per key on
 	// every 1 Hz /api/sessions poll. Marshals identically to the JSON
 	// clients expect. R62-PERF-1.
-	nodeStatus := make(map[string]nodeStatusEntry, 1+len(nodesSnapshot)+len(h.nodeAccess.KnownNodes()))
+	nodeStatus := make(map[string]nodeStatusEntry, 1+len(nodesSnapshot)+len(knownNodes))
 	nodeStatus["local"] = nodeStatusEntry{DisplayName: localName, Status: "ok"}
 
 	cachedSessions, cachedStatus := h.nodeCache.Sessions()
@@ -501,7 +505,7 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Always include all configured nodes, even when currently disconnected.
-	for id, displayName := range h.nodeAccess.KnownNodes() {
+	for id, displayName := range knownNodes {
 		if _, connected := nodeStatus[id]; !connected {
 			nodeStatus[id] = nodeStatusEntry{
 				DisplayName: displayName,
