@@ -18,9 +18,46 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/metrics"
 )
+
+// validateKeyForShim rejects keys that would leak control bytes into the
+// shim argv / socket path. Mirrors session.ValidateSessionKey; we keep a
+// local copy here because session → shim is a one-way import and the
+// shim package must remain a leaf. Keep this rule set in sync with
+// session.ValidateSessionKey — the byte cap below matches
+// session.MaxSessionKeyBytes (4*128+3=515), and the rune filter mirrors
+// that function verbatim. If either side grows new rune classes, update
+// both together.
+func validateKeyForShim(k string) error {
+	if k == "" {
+		return errors.New("empty key")
+	}
+	// Matches session.MaxSessionKeyBytes; a divergence here would reject
+	// keys that passed every upstream gate.
+	const maxKeyBytes = 515
+	if len(k) > maxKeyBytes {
+		return errors.New("key too long")
+	}
+	if !utf8.ValidString(k) {
+		return errors.New("key invalid utf-8")
+	}
+	for _, r := range k {
+		if r == 0 || r < 0x20 || (r >= 0x7F && r <= 0x9F) {
+			return errors.New("key contains control character")
+		}
+		switch {
+		case r >= 0x200B && r <= 0x200F, // zero-width / LTR-RTL marks
+			r >= 0x202A && r <= 0x202E, // bidi embedding / override
+			r == 0x2028, r == 0x2029,   // line / paragraph separator
+			r == 0xFEFF: // BOM
+			return errors.New("key contains invisible control character")
+		}
+	}
+	return nil
+}
 
 // ErrMaxShims is returned by StartShim when the configured shim cap is hit.
 // Distinct from session.ErrMaxProcs so callers can apply different retry
@@ -138,6 +175,14 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 // Pass cliPath == "" to fall back to the manager's default, and backend ==
 // "" when the caller is a legacy single-backend user.
 func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backend string, cliArgs []string, cwd string) (*ShimHandle, error) {
+	// Defence-in-depth: the key flows into the shim argv as `--key <key>`.
+	// Upstream callers (HTTP / WS / reverse-RPC) already run
+	// session.ValidateSessionKey, but the shim manager must not trust
+	// that unconditionally — any future call path that forgets the check
+	// would silently let control bytes reach exec argv.
+	if err := validateKeyForShim(key); err != nil {
+		return nil, fmt.Errorf("shim key rejected: %w", err)
+	}
 	if cliPath == "" {
 		cliPath = m.cliPath
 	}

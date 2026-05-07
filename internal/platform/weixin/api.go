@@ -59,6 +59,14 @@ func newAPIClient(baseURL, token string) *apiClient {
 		httpClient: &http.Client{
 			Transport: transport,
 			Timeout:   defaultLongPollTimeout + 10*time.Second, // covers long-poll (35s) + margin
+			// Block redirects: a compromised or MITM'd relay could 3xx us
+			// to an IMDS address (169.254.169.254) or an internal admin
+			// port, with the Bearer token riding along. Feishu's client
+			// does the same. ErrUseLastResponse returns the 3xx body
+			// unchanged so callers see the upstream decision explicitly.
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }

@@ -8,6 +8,8 @@ import (
 	"io"
 	"os/exec"
 	"sync"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // ErrFFmpegNotFound is returned when ffmpeg is not installed.
@@ -73,7 +75,12 @@ func (p *pcmStream) Read(buf []byte) (int, error) {
 // Wait waits for ffmpeg to finish and returns any error.
 func (p *pcmStream) Wait() error {
 	if err := p.cmd.Wait(); err != nil {
-		return fmt.Errorf("ffmpeg convert: %w (stderr: %s)", err, p.stderr.String())
+		// Sanitize ffmpeg stderr before it flows into slog/error chains.
+		// A crafted audio file can trigger error output carrying C0/C1/
+		// bidi bytes that corrupt structured log parsing or terminal
+		// rendering.
+		return fmt.Errorf("ffmpeg convert: %w (stderr: %s)", err,
+			osutil.SanitizeForLog(p.stderr.String(), 4096))
 	}
 	return nil
 }

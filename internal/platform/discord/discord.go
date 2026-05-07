@@ -361,20 +361,21 @@ func downloadURL(rawURL string) ([]byte, string, error) {
 	if err != nil {
 		return nil, "", err
 	}
-	ct := stripMIMEParams(resp.Header.Get("Content-Type"))
+	headerCT := stripMIMEParams(resp.Header.Get("Content-Type"))
+	// Prefer the sniffed type over the CDN header: the header is upstream-
+	// controlled and can carry parameters, arbitrary media types, or
+	// deliberate mismatches. The sniffed value is derived from the bytes
+	// we just read and is safer to forward downstream.
+	ct := headerCT
+	if len(data) > 0 {
+		sniffed := stripMIMEParams(http.DetectContentType(data))
+		if !strings.HasPrefix(sniffed, "image/") {
+			return nil, "", fmt.Errorf("download: mime mismatch (header=%s sniffed=%s)", headerCT, sniffed)
+		}
+		ct = sniffed
+	}
 	if ct == "" {
 		ct = "image/png"
-	}
-	// Content-based verification: the Content-Type header is upstream-
-	// provided. A compromised CDN (or cache poisoning) could deliver
-	// arbitrary bytes labeled as image/png. http.DetectContentType sniffs
-	// the first 512 bytes against the WHATWG MIME-Sniffing standard; reject
-	// when the sniffed family is clearly not an image.
-	if len(data) > 0 {
-		sniffed := http.DetectContentType(data)
-		if !strings.HasPrefix(sniffed, "image/") {
-			return nil, "", fmt.Errorf("download: mime mismatch (header=%s sniffed=%s)", ct, sniffed)
-		}
 	}
 	return data, ct, nil
 }

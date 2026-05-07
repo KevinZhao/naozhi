@@ -140,9 +140,14 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 					}
 				}
 				// Global cap: refuse new nonces once the map hits maxSeenNonces
-				// so a flood of unique-nonce requests cannot bloat heap. Legitimate
-				// traffic at a 5-minute TTL stays well below this cap.
-				if f.seenNoncesCount.Load() >= maxSeenNonces {
+				// so a flood of unique-nonce requests cannot bloat heap.
+				// Reserve-then-check pattern: increment first, then attempt
+				// insert; decrement on duplicate or over-cap. Without this,
+				// a concurrent burst of N webhooks could each pass the Load()
+				// guard before any Add(1) fires, letting count overshoot the
+				// cap by up to N (bounded by hookSem but still observable).
+				if n := f.seenNoncesCount.Add(1); n > maxSeenNonces {
+					f.seenNoncesCount.Add(-1)
 					slog.Warn("feishu webhook nonce map at cap, dropping request",
 						"cap", maxSeenNonces)
 					w.WriteHeader(http.StatusTooManyRequests)
@@ -151,6 +156,8 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				key := ts + ":" + nonce
 				expiry := time.Now().Add(nonceTTL).Unix()
 				if _, loaded := f.seenNonces.LoadOrStore(key, expiry); loaded {
+					// Undo our speculative increment since no new entry landed.
+					f.seenNoncesCount.Add(-1)
 					// Log only the length and timestamp rather than the raw
 					// nonce header value — attacker-supplied bytes can contain
 					// newlines or JSON metacharacters that distort structured
@@ -160,7 +167,6 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 					w.WriteHeader(http.StatusUnauthorized)
 					return
 				}
-				f.seenNoncesCount.Add(1)
 			} else if f.cfg.EncryptKey != "" || f.cfg.VerificationToken != "" {
 				// Authenticated modes must always supply a nonce; missing
 				// nonce leaves the request replayable within the 5min

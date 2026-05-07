@@ -4,7 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 )
+
+// resumeIDRe accepts only characters that can legally appear in a Claude
+// session UUID (hex + hyphen). This is a defence-in-depth check at the CLI
+// argv boundary — without it, a crafted resume_id beginning with `-` could
+// be re-interpreted by the Claude CLI as a flag.
+var resumeIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
 
 // ClaudeProtocol implements Protocol for Claude CLI's stream-json format.
 type ClaudeProtocol struct {
@@ -40,7 +47,9 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 	if opts.Model != "" {
 		args = append(args, "--model", opts.Model)
 	}
-	if opts.ResumeID != "" {
+	if opts.ResumeID != "" && resumeIDRe.MatchString(opts.ResumeID) {
+		// Silently drop malformed IDs rather than erroring: the caller may
+		// have passed a user-facing label; we still want a fresh session.
 		args = append(args, "--resume", opts.ResumeID)
 	}
 	args = append(args, opts.ExtraArgs...)
