@@ -243,14 +243,26 @@ func newID() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
-// sanitizeExt rejects anything outside a tiny allowlist. Today only ".pdf"
-// is allowed; adding ".docx" would be a one-line change plus a matching
-// entry in the upload handler. Keeping this narrow forces a compile/review
-// touchpoint before a new format can slip through.
+// sanitizeExt rejects anything outside a tiny allowlist. ".pdf" was the
+// original entry (see docs/rfc/pdf-attachment.md); images joined when the
+// dashboard lightbox grew a "view original" affordance and needed a
+// durable URL instead of the 600 px thumbnail data URI. Keeping this
+// narrow forces a compile/review touchpoint before a new format can
+// slip through.
 func sanitizeExt(ext string) (string, error) {
 	switch strings.ToLower(ext) {
 	case ".pdf":
 		return ".pdf", nil
+	case ".jpg":
+		return ".jpg", nil
+	case ".jpeg":
+		return ".jpg", nil
+	case ".png":
+		return ".png", nil
+	case ".gif":
+		return ".gif", nil
+	case ".webp":
+		return ".webp", nil
 	default:
 		return "", fmt.Errorf("attachment: unsupported extension %q", ext)
 	}

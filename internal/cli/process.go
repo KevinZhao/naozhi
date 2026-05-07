@@ -1047,7 +1047,36 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 			}
 			wg.Wait()
 		}
-		entry.Images = sanitizeImages(thumbs)
+		// ImagePaths rides alongside Images so the dashboard can offer
+		// "view original" without bloating the eventlog with full-size
+		// base64. sanitizeImages can drop entries (invalid/empty data
+		// URI), so build ImagePaths from the same index set that
+		// survives that filter: walk pre-sanitize, emit (thumb, path)
+		// pairs only when the thumb is valid. Preserves the
+		// index-alignment contract documented on EventEntry.ImagePaths.
+		sanitizedThumbs := make([]string, 0, len(thumbs))
+		sanitizedPaths := make([]string, 0, len(images))
+		anyPath := false
+		for i, t := range thumbs {
+			if t == "" || !strings.HasPrefix(t, imageDataURIPrefix) {
+				continue
+			}
+			sanitizedThumbs = append(sanitizedThumbs, t)
+			p := ""
+			if i < len(images) {
+				p = images[i].WorkspacePath
+			}
+			sanitizedPaths = append(sanitizedPaths, p)
+			if p != "" {
+				anyPath = true
+			}
+		}
+		if len(sanitizedThumbs) > 0 {
+			entry.Images = sanitizedThumbs
+		}
+		if anyPath {
+			entry.ImagePaths = sanitizedPaths
+		}
 	}
 	return entry
 }

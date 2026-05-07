@@ -2157,12 +2157,27 @@ function eventHtml(e) {
     content = esc(e.detail || e.summary || e.type);
   }
 
-  // Render image thumbnails for user messages
+  // Render image thumbnails for user messages. When ImagePaths is populated
+  // (image was persisted to the workspace attachment directory), the click
+  // target is the full-size /api/sessions/attachment URL instead of the
+  // thumbnail itself — the lightbox then shows the original image rather
+  // than a 600 px blur. Falls back to the data URI for legacy entries that
+  // predate the persist path. The thumbnail's <img src> is always the data
+  // URI so the bubble render stays instant (no network fetch for preview).
   let imgHtml = '';
   if (e.images && e.images.length > 0) {
-    imgHtml = '<div class="event-images">' + e.images.map(src =>
-      '<img src="' + escAttr(src) + '" loading="lazy" onclick="openLightbox(this.src)">'
-    ).join('') + '</div>';
+    const paths = e.image_paths || [];
+    imgHtml = '<div class="event-images">' + e.images.map((src, i) => {
+      const p = paths[i] || '';
+      let full = src;
+      if (p && selectedKey) {
+        full = '/api/sessions/attachment?key=' + encodeURIComponent(selectedKey) +
+          '&path=' + encodeURIComponent(p);
+      }
+      return '<img src="' + escAttr(src) + '" loading="lazy" ' +
+        'data-full="' + escAttr(full) + '" ' +
+        'onclick="openLightbox(this.dataset.full)">';
+    }).join('') + '</div>';
   }
 
   // Copy + ask-aside bubble actions share one display rule: only long

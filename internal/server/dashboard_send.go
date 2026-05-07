@@ -11,6 +11,9 @@ import (
 	"log/slog"
 	"mime/multipart"
 	"net/http"
+	"os"
+	"path"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -180,6 +183,43 @@ func hasFileRef(atts []cli.Attachment) bool {
 	return false
 }
 
+// hasPersistableAttachment reports whether any attachment needs to hit
+// persistFileRefs. file_ref must land on disk or the Read-tool hint has
+// nothing to point at; inline images are persisted on a best-effort basis
+// so the dashboard lightbox can load the original instead of the 600 px
+// thumbnail. If neither applies (e.g. no attachments at all), the caller
+// can skip the workspace resolution + persist round trip entirely.
+func hasPersistableAttachment(atts []cli.Attachment) bool {
+	for _, a := range atts {
+		if a.Kind == cli.KindFileRef {
+			return true
+		}
+		if imageExtForMime(a.MimeType) != "" && len(a.Data) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// imageExtForMime maps a recognised image MIME type to its canonical file
+// extension (including the leading dot). Returns "" for anything not in
+// the allowlist — matches attachment.sanitizeExt so a MIME that slips past
+// here also cannot slip past Persist.
+func imageExtForMime(mime string) string {
+	switch mime {
+	case "image/jpeg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/gif":
+		return ".gif"
+	case "image/webp":
+		return ".webp"
+	default:
+		return ""
+	}
+}
+
 // resolveAttachmentWorkspace picks the validated absolute path to write
 // file_ref attachments under for the given session key. Resolution order:
 //
@@ -245,6 +285,15 @@ type persistErr struct {
 // WorkspacePath (and have Data cleared to release memory) and image_inline
 // entries are passed through unchanged.
 //
+// Image inline entries are ALSO persisted to disk as a side effect: the
+// inline Data still rides along to the CLI (unchanged), but a copy is
+// written to the workspace attachment directory and the relative path is
+// stashed in WorkspacePath. buildUserEntry pulls it onto EventEntry so the
+// dashboard lightbox can load the original via /api/sessions/attachment
+// instead of a downsampled data URI. If the persist fails, we log and
+// continue — the inline bytes still reach the CLI so the model call
+// succeeds; only the "view original" affordance degrades to the thumbnail.
+//
 // rollback, when non-nil, removes every file that Persist just wrote.
 // Callers use it on any failure path between this call and the point
 // where sessionSend accepts the request — without rollback, a validation
@@ -275,6 +324,31 @@ func persistFileRefs(workspace string, atts []cli.Attachment, sessionKey, owner 
 	for i, a := range atts {
 		if a.Kind != cli.KindFileRef {
 			out[i] = a
+			// Inline images: best-effort persist a copy to disk so the
+			// dashboard lightbox can fetch the original. Failure is
+			// non-fatal — the inline Data still rides along to the CLI.
+			// out[i].Data is DELIBERATELY retained (unlike file_ref
+			// below which clears Data post-persist) because the inline
+			// image path ships bytes as a content block; the on-disk
+			// copy is purely for the dashboard's "view original" URL.
+			// Lifetime is request-scoped — the duplicate bytes are
+			// freed when the send completes, not cached indefinitely.
+			if ext := imageExtForMime(a.MimeType); ext != "" && len(a.Data) > 0 {
+				meta := attachment.Meta{
+					OrigName:   a.OrigName,
+					MimeType:   a.MimeType,
+					Size:       int64(len(a.Data)),
+					SessionKey: sessionKey,
+					Owner:      owner,
+				}
+				if p, err := attachment.Persist(workspace, a.Data, ext, meta); err == nil {
+					written = append(written, p.AbsPath)
+					out[i].WorkspacePath = p.RelPath
+				} else {
+					slog.Debug("inline image persist failed",
+						"key", sessionKey, "err", err)
+				}
+			}
 			continue
 		}
 		// Map MimeType to an extension allowlist entry. Only PDF is live
@@ -585,7 +659,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	// (400/403/5xx) but is set to nil once sessionSend reports an accepted
 	// status so the files stay on disk for the session's Read tool.
 	var rollback func()
-	if hasFileRef(images) {
+	if hasPersistableAttachment(images) {
 		// R61-SEC: validate workspace against allowedRoot BEFORE writing
 		// anything. `workspace` is attacker-influenced (dashboard form
 		// field); without this check a client could direct writes to any
@@ -703,4 +777,184 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSONStatus(w, http.StatusAccepted, map[string]string{"status": string(status), "key": key})
+}
+
+// attachmentDirPrefix is the workspace-relative prefix every path served
+// via /api/sessions/attachment must start with. Matches attachment.Dir
+// expressed with forward slashes (the sole form seen in EventEntry.ImagePaths).
+// Kept separate from attachment.Dir so the HTTP layer's guard does not silently
+// loosen if attachment.Dir grows a platform-dependent separator someday.
+const attachmentDirPrefix = ".naozhi/attachments/"
+
+// maxAttachmentBytes caps the per-response size. Images from the dashboard
+// are already downscaled to <=1600 px long edge / q0.8 so sit well under
+// this; the cap exists to neutralise a crafted session that attached a
+// 10 MB image before this endpoint existed — we refuse to stream it
+// inline and the client falls back to the thumbnail. 16 MB leaves headroom
+// for future raw-mode uploads while staying below the 50 MB project file
+// cap that serveRaw uses.
+const maxAttachmentBytes = 16 << 20
+
+// handleAttachment streams an on-disk inline image from the session
+// workspace attachment directory. Supersedes the data-URI thumbnail for
+// the dashboard lightbox "view original" affordance — the thumbnail
+// remains embedded in EventEntry.Images for backward compatibility and
+// as a fallback when ImagePaths is empty.
+//
+// Request: GET /api/sessions/attachment?key=<session>&path=<ws-rel>
+// Response: image/jpeg | image/png | image/gif | image/webp
+//
+// Authentication is the standard auth middleware (session cookie / Bearer).
+// Authorization reuses the "session exists" boundary: anyone who can reach
+// /api/sessions/events for a key can also reach its attachments. Path is
+// constrained to attachmentDirPrefix under the session's current workspace,
+// so a compromised key field cannot exfiltrate arbitrary workspace files.
+func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	key := q.Get("key")
+	relRaw := q.Get("path")
+	if key == "" || relRaw == "" {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "key and path are required"})
+		return
+	}
+	if err := session.ValidateSessionKey(key); err != nil {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid key"})
+		return
+	}
+
+	// Strict path shape: workspace-relative, forward slashes only, no
+	// absolute paths, no traversal, no NUL. Mirrors resolveProjectFile's
+	// guard so a crafted `path` field cannot escape the attachment dir
+	// even if the workspace resolution below returns a path the user
+	// does not own.
+	if len(relRaw) > 1024 {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "path too long"})
+		return
+	}
+	if strings.ContainsRune(relRaw, 0) {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
+		return
+	}
+	if strings.ContainsRune(relRaw, '\\') || filepath.IsAbs(relRaw) {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
+		return
+	}
+	cleaned := path.Clean(relRaw)
+	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
+		return
+	}
+	// Pin to attachment subtree — refuses /etc/passwd, /workspace/secret.env,
+	// and any other workspace path that happens to be an image. The only
+	// authoritative producer of these paths is persistFileRefs writing
+	// under .naozhi/attachments/<date>/<uuid>.<ext>, so a legitimate URL
+	// always starts with the prefix.
+	if !strings.HasPrefix(cleaned, attachmentDirPrefix) {
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	// Resolve the session workspace. Session may be live (GetSession) or
+	// paused/discovered (router.GetWorkspace fallback), matching the
+	// resolveAttachmentWorkspace contract. We do NOT accept a `workspace`
+	// query parameter: the path is pinned to whatever workspace is
+	// associated with the key, so a crafted workspace in the query would
+	// just be ignored.
+	var ws string
+	if sess := h.hub.router.GetSession(key); sess != nil {
+		ws = sess.Workspace()
+	}
+	if ws == "" {
+		chatKey := key
+		if idx := strings.LastIndexByte(key, ':'); idx > 0 {
+			chatKey = key[:idx]
+		}
+		ws = h.hub.router.GetWorkspace(chatKey)
+	}
+	if ws == "" {
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+	validatedWS, err := validateWorkspace(ws, h.hub.allowedRoot)
+	if err != nil {
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	abs := filepath.Join(validatedWS, filepath.FromSlash(cleaned))
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+			return
+		}
+		slog.Debug("attachment: eval symlinks failed", "err", err)
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+	// Symlink-escape defence: resolved MUST still live under validatedWS/attachmentDir.
+	attachRootAbs := filepath.Join(validatedWS, filepath.FromSlash(strings.TrimSuffix(attachmentDirPrefix, "/")))
+	if resolved != attachRootAbs &&
+		!strings.HasPrefix(resolved, attachRootAbs+string(filepath.Separator)) {
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	info, err := os.Stat(resolved)
+	if err != nil || info.IsDir() {
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+	if info.Size() > maxAttachmentBytes {
+		writeJSONStatus(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "file too large"})
+		return
+	}
+
+	f, err := os.Open(resolved)
+	if err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "open failed"})
+		return
+	}
+	defer f.Close()
+
+	// Pin MIME from the file extension (we own the producer) rather than
+	// sniffing content. attachment.sanitizeExt is the only path that can
+	// create these files, so ext is always one of our allowlist entries.
+	ext := strings.ToLower(filepath.Ext(resolved))
+	var mime string
+	switch ext {
+	case ".jpg", ".jpeg":
+		mime = "image/jpeg"
+	case ".png":
+		mime = "image/png"
+	case ".gif":
+		mime = "image/gif"
+	case ".webp":
+		mime = "image/webp"
+	default:
+		// Unknown extension inside our own subtree — refuse rather than
+		// guess. This path is only reachable if an operator manually
+		// dropped a non-image file into the attachment dir.
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+
+	etag := fmt.Sprintf(`"%d-%d"`, info.Size(), info.ModTime().UnixNano())
+	if inm := r.Header.Get("If-None-Match"); inm != "" && inm == etag {
+		w.Header().Set("ETag", etag)
+		w.WriteHeader(http.StatusNotModified)
+		return
+	}
+	w.Header().Set("ETag", etag)
+	w.Header().Set("Content-Type", mime)
+	w.Header().Set("Content-Disposition", "inline")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	w.Header().Set("Cache-Control", "private, max-age=3600")
+	// Tight CSP: attachments are image-only, no inline scripts, no third-
+	// party resources. sandbox closes top-level-navigation XSS channels for
+	// formats (e.g. a future .svg) that slip past the ext check.
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox; img-src 'self' data:")
+
+	http.ServeContent(w, r, filepath.Base(resolved), info.ModTime(), f)
 }

@@ -26,9 +26,21 @@ const imageDataURIPrefix = "data:image/"
 // "" slot the dashboard would have to render defensively. Returns the input
 // slice unchanged when every entry is already valid, avoiding an allocation
 // on the happy path (MakeThumbnail conforming producer).
+//
+// paths is an optional index-aligned slice of workspace-relative paths
+// (EventEntry.ImagePaths) that MUST be filtered in lock-step so the
+// dashboard's click-thumbnail-for-original flow stays aligned with the
+// thumbnail it drew. Pass nil when the caller has no paths. The returned
+// filtered paths slice is nil when every Images entry was valid (no
+// allocation) OR when every path was dropped.
 func sanitizeImages(imgs []string) []string {
+	out, _ := sanitizeImagesAligned(imgs, nil)
+	return out
+}
+
+func sanitizeImagesAligned(imgs, paths []string) ([]string, []string) {
 	if len(imgs) == 0 {
-		return imgs
+		return imgs, nil
 	}
 	allOK := true
 	for _, s := range imgs {
@@ -38,33 +50,71 @@ func sanitizeImages(imgs []string) []string {
 		}
 	}
 	if allOK {
-		return imgs
+		return imgs, paths
 	}
 	filtered := make([]string, 0, len(imgs))
-	for _, s := range imgs {
+	var filteredPaths []string
+	if len(paths) > 0 {
+		filteredPaths = make([]string, 0, len(imgs))
+	}
+	anyPath := false
+	for i, s := range imgs {
 		if s == "" || !strings.HasPrefix(s, imageDataURIPrefix) {
 			continue
 		}
 		filtered = append(filtered, s)
+		// Lock-step append to filteredPaths — NEVER skip an append when
+		// `paths` is non-empty, otherwise `filtered[j]` stops matching
+		// `filteredPaths[j]` and a dashboard thumbnail click could fetch
+		// the bytes of a DIFFERENT image in the same message. The gate is
+		// "filteredPaths was initialised", not "i < len(paths)": replayed
+		// history (AppendBatch/InjectHistory) can feed untrusted
+		// EventEntry values where len(ImagePaths) < len(Images); pad with
+		// "" so the lightbox degrades to the thumbnail for that slot
+		// instead of serving a sibling image.
+		if filteredPaths != nil {
+			var p string
+			if i < len(paths) {
+				p = paths[i]
+			}
+			filteredPaths = append(filteredPaths, p)
+			if p != "" {
+				anyPath = true
+			}
+		}
 	}
 	if len(filtered) == 0 {
-		return nil
+		return nil, nil
 	}
-	return filtered
+	if !anyPath {
+		filteredPaths = nil
+	}
+	return filtered, filteredPaths
 }
 
 // EventEntry is a simplified event record for the dashboard.
 type EventEntry struct {
-	Time       int64    `json:"time"`                  // unix ms
-	Type       string   `json:"type"`                  // init, thinking, tool_use, text, result, system, agent, todo, task_start, task_progress (also maps task_updated), task_done
-	Summary    string   `json:"summary,omitempty"`     // brief description
-	Cost       float64  `json:"cost,omitempty"`        // cumulative cost (result events only)
-	Detail     string   `json:"detail,omitempty"`      // fuller content for terminal view
-	Tool       string   `json:"tool,omitempty"`        // tool name for tool_use events
-	Subagent   string   `json:"subagent,omitempty"`    // subagent_type or name (empty for team-only agents)
-	TeamName   string   `json:"team_name,omitempty"`   // team grouping key for agent team members
-	Background bool     `json:"background,omitempty"`  // true for run_in_background team agents
-	Images     []string `json:"images,omitempty"`      // thumbnail data URIs for user image uploads
+	Time       int64    `json:"time"`                 // unix ms
+	Type       string   `json:"type"`                 // init, thinking, tool_use, text, result, system, agent, todo, task_start, task_progress (also maps task_updated), task_done
+	Summary    string   `json:"summary,omitempty"`    // brief description
+	Cost       float64  `json:"cost,omitempty"`       // cumulative cost (result events only)
+	Detail     string   `json:"detail,omitempty"`     // fuller content for terminal view
+	Tool       string   `json:"tool,omitempty"`       // tool name for tool_use events
+	Subagent   string   `json:"subagent,omitempty"`   // subagent_type or name (empty for team-only agents)
+	TeamName   string   `json:"team_name,omitempty"`  // team grouping key for agent team members
+	Background bool     `json:"background,omitempty"` // true for run_in_background team agents
+	Images     []string `json:"images,omitempty"`     // thumbnail data URIs for user image uploads
+	// ImagePaths is the workspace-relative path of the on-disk copy of each
+	// inline image, index-aligned with Images. Populated opportunistically by
+	// buildUserEntry when persistFileRefs persisted an image to the workspace
+	// attachment directory. Consumed by the dashboard lightbox so clicking a
+	// thumbnail can load the original via /api/sessions/attachment instead of
+	// the downsampled data URI. An empty slot (e.g. persist failed, or a
+	// legacy replayed event) falls back to the thumbnail. ALWAYS sanitized
+	// before use: callers join it under the session workspace and must reject
+	// any absolute or escaping path — validation lives in the HTTP handler,
+	// not here, so persisted history is pass-through.
+	ImagePaths []string `json:"image_paths,omitempty"`
 	TaskID     string   `json:"task_id,omitempty"`     // agent task correlation ID
 	ToolUseID  string   `json:"tool_use_id,omitempty"` // links Agent tool_use → task_started
 	LastTool   string   `json:"last_tool,omitempty"`   // most recent tool in agent task
@@ -174,7 +224,7 @@ func (l *EventLog) Append(e EventEntry) {
 	// producer that accidentally passes through an external URL or a
 	// javascript: URI gets stripped before it can reach the dashboard's
 	// <img src=...> render path. S15 (Round 174).
-	e.Images = sanitizeImages(e.Images)
+	e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
 	l.entries[l.head] = e
 	l.head = (l.head + 1) % l.maxSize
 	if l.count < l.maxSize {
@@ -236,7 +286,7 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 		// (InjectHistory → AppendBatch) should never contain non-image data
 		// URIs today, but defense-in-depth is trivially cheap and locks the
 		// contract to a single sink.
-		e.Images = sanitizeImages(e.Images)
+		e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
 		l.entries[l.head] = e
 		l.head = (l.head + 1) % l.maxSize
 		if l.count < l.maxSize {

@@ -235,6 +235,7 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.handleEvents))
 	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
 	s.mux.HandleFunc("POST /api/sessions/upload", auth(s.sendH.handleUpload))
+	s.mux.HandleFunc("GET /api/sessions/attachment", auth(s.sendH.handleAttachment))
 	s.mux.HandleFunc("DELETE /api/sessions", auth(s.sessionH.handleDelete))
 	s.mux.HandleFunc("POST /api/sessions/resume", auth(s.sessionH.handleResume))
 	s.mux.HandleFunc("POST /api/sessions/interrupt", auth(s.sessionH.handleInterrupt))

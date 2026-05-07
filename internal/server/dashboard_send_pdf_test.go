@@ -182,6 +182,110 @@ func TestPersistFileRefs_WritesToWorkspace(t *testing.T) {
 	}
 }
 
+// TestPersistFileRefs_InlineImage_PersistsCopy verifies the "view
+// original" path: inline images are best-effort persisted so the
+// dashboard lightbox can load the full-size image over HTTP. The
+// inline Data MUST remain populated — the CLI still needs to receive
+// the bytes in the user message content block.
+func TestPersistFileRefs_InlineImage_PersistsCopy(t *testing.T) {
+	ws := t.TempDir()
+	atts := []cli.Attachment{{
+		Kind:     cli.KindImageInline,
+		Data:     []byte("PNG-bytes"),
+		MimeType: "image/png",
+		OrigName: "photo.png",
+	}}
+	resolved, rb, perr := persistFileRefs(ws, atts, "dash:direct:alice:general", "alice")
+	if perr != nil {
+		t.Fatalf("persistFileRefs: %+v", perr)
+	}
+	defer rb()
+	if len(resolved) != 1 {
+		t.Fatalf("resolved len=%d", len(resolved))
+	}
+	got := resolved[0]
+	if got.Kind != cli.KindImageInline {
+		t.Errorf("Kind=%q want %q", got.Kind, cli.KindImageInline)
+	}
+	// Data MUST survive the persist — the CLI user-message content block
+	// carries inline bytes. Unlike file_ref we do not clear it after write.
+	if !bytes.Equal(got.Data, []byte("PNG-bytes")) {
+		t.Errorf("Data corrupted after inline persist: %q", got.Data)
+	}
+	if got.WorkspacePath == "" {
+		t.Fatal("WorkspacePath empty — lightbox would fall back to thumbnail")
+	}
+	if !strings.HasPrefix(got.WorkspacePath, ".naozhi/attachments/") {
+		t.Errorf("WorkspacePath=%q not under attachment dir", got.WorkspacePath)
+	}
+	// File exists on disk at the declared relative path.
+	abs := filepath.Join(ws, filepath.FromSlash(got.WorkspacePath))
+	b, err := os.ReadFile(abs)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	if !bytes.Equal(b, []byte("PNG-bytes")) {
+		t.Errorf("on-disk bytes mismatch: %q", b)
+	}
+}
+
+// TestPersistFileRefs_InlineImage_PersistFailureIsNonFatal — if the
+// workspace write fails for an inline image, we still forward the
+// attachment to the CLI (the user's message must not be blocked by a
+// cosmetic lightbox degradation).
+func TestPersistFileRefs_InlineImage_UnknownMimeSkipsPersist(t *testing.T) {
+	ws := t.TempDir()
+	atts := []cli.Attachment{{
+		Kind:     cli.KindImageInline,
+		Data:     []byte("garbage"),
+		MimeType: "image/tiff", // not in allowlist
+	}}
+	resolved, rb, perr := persistFileRefs(ws, atts, "k", "o")
+	if perr != nil {
+		t.Fatalf("persist unexpectedly failed: %+v", perr)
+	}
+	defer rb()
+	if resolved[0].WorkspacePath != "" {
+		t.Errorf("WorkspacePath should stay empty for unsupported mime, got %q", resolved[0].WorkspacePath)
+	}
+	// Data untouched — the CLI will still receive the inline bytes.
+	if !bytes.Equal(resolved[0].Data, []byte("garbage")) {
+		t.Errorf("Data corrupted on non-persist path")
+	}
+}
+
+// TestHasPersistableAttachment covers the hot-path gate in
+// dashboard_send.go / wshub.go. Any image_inline with bytes and a
+// recognised MIME must trigger persist, because the lightbox relies
+// on that workspace copy.
+func TestHasPersistableAttachment(t *testing.T) {
+	cases := []struct {
+		name string
+		atts []cli.Attachment
+		want bool
+	}{
+		{"empty", nil, false},
+		{"text-only", []cli.Attachment{}, false},
+		{"image-png", []cli.Attachment{{
+			Kind: cli.KindImageInline, Data: []byte("x"), MimeType: "image/png",
+		}}, true},
+		{"image-jpeg", []cli.Attachment{{
+			Kind: cli.KindImageInline, Data: []byte("x"), MimeType: "image/jpeg",
+		}}, true},
+		{"image-unknown-mime", []cli.Attachment{{
+			Kind: cli.KindImageInline, Data: []byte("x"), MimeType: "image/tiff",
+		}}, false},
+		{"file_ref", []cli.Attachment{{
+			Kind: cli.KindFileRef, MimeType: "application/pdf",
+		}}, true},
+	}
+	for _, c := range cases {
+		if got := hasPersistableAttachment(c.atts); got != c.want {
+			t.Errorf("%s: got %v want %v", c.name, got, c.want)
+		}
+	}
+}
+
 func TestPersistFileRefs_MixedImageAndPDF(t *testing.T) {
 	ws := t.TempDir()
 	atts := []cli.Attachment{

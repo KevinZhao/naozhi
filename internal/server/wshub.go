@@ -730,7 +730,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 	// That presented to the user as a "[System: The user attached 1 file]"
 	// prompt with no path — exactly the bug report that triggered this fix.
 	var wsRollback func()
-	if hasFileRef(images) {
+	if hasPersistableAttachment(images) {
 		// resolveAttachmentWorkspace falls back to the session/router's
 		// saved workspace when msg.Workspace is empty. The dashboard does
 		// not re-send workspace on every WS message for an already-running
