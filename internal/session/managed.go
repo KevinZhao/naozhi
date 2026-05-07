@@ -446,11 +446,23 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 		s.mapSendError(proc, err)
 		return nil, err
 	}
-	if s.getSessionID() == "" && result.SessionID != "" {
-		s.setSessionID(result.SessionID)
-		if s.onSessionID != nil {
-			s.onSessionID(result.SessionID)
+	if result.SessionID != "" && s.getSessionID() == "" {
+		// Serialise session-ID capture through sendMu. Two concurrent
+		// passthrough turns would otherwise both observe an empty ID and
+		// both invoke onSessionID (which takes r.mu and writes
+		// r.sessionIDToKey); the lock ordering contract at the top of
+		// router.go (sendMu → r.mu) already covers Send's capture path,
+		// so SendPassthrough must honour the same order. sendMu is only
+		// held around this short CAS — it does not serialise the
+		// passthrough turn itself.
+		s.sendMu.Lock()
+		if s.getSessionID() == "" {
+			s.setSessionID(result.SessionID)
+			if s.onSessionID != nil {
+				s.onSessionID(result.SessionID)
+			}
 		}
+		s.sendMu.Unlock()
 	}
 	return result, nil
 }
@@ -1080,11 +1092,11 @@ func (s *ManagedSession) persistedHistoryBefore(beforeMS int64, limit int) []cli
 	if len(out) == 0 {
 		return nil
 	}
-	// Reverse to restore insertion-order (oldest → newest within the page).
-	// Caller sorts for strict chronological ordering.
-	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
-		out[i], out[j] = out[j], out[i]
-	}
+	// Order does not matter: the only caller (EventEntriesBefore) pipes
+	// this through sortEntriesByTimeStable, which overrides whatever
+	// order we produce here. The prior code reversed `out` to restore
+	// insertion order, but stable-sort-by-Time then re-orders by Time
+	// making the reversal pure waste. Leave the reverse-walk order.
 	return out
 }
 

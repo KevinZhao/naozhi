@@ -471,12 +471,18 @@ func (r *Router) BackendIDs() []string {
 			out = append(out, r.defaultBackend)
 		}
 	}
+	// Sort the non-default remainder so dashboard enumeration is stable
+	// across process restarts — Go map iteration is randomised, so without
+	// this the dropdown order flips on every tick.
+	rest := make([]string, 0, len(r.wrappers))
 	for id := range r.wrappers {
 		if id == r.defaultBackend {
 			continue
 		}
-		out = append(out, id)
+		rest = append(rest, id)
 	}
+	slices.Sort(rest)
+	out = append(out, rest...)
 	return out
 }
 
@@ -612,12 +618,20 @@ func NewRouter(cfg RouterConfig) *Router {
 		defaultWrapper = wrappers[defaultBackend]
 	}
 	if defaultWrapper == nil {
-		for id, w := range wrappers {
-			defaultWrapper = w
+		// Pick deterministically: Go map iteration is randomised, so
+		// without sorting a multi-backend deployment without an explicit
+		// DefaultBackend would flip its default on every process start.
+		ids := make([]string, 0, len(wrappers))
+		for id := range wrappers {
+			ids = append(ids, id)
+		}
+		slices.Sort(ids)
+		if len(ids) > 0 {
+			id := ids[0]
+			defaultWrapper = wrappers[id]
 			if defaultBackend == "" {
 				defaultBackend = id
 			}
-			break
 		}
 	}
 
@@ -940,8 +954,16 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		r.mu.Lock()
 		sess, ok := r.sessions[state.Key]
 		var hasLiveProcess bool
+		var sessPrevIDs []string
 		if ok && sess.isAlive() {
 			hasLiveProcess = true
+		}
+		// Snapshot prevSessionIDs while still holding r.mu; the field is
+		// guarded by r.mu and the async history-load goroutine (see
+		// NewRouter) plus concurrent spawnSession both write to it. Reading
+		// after Unlock would data-race with those writers.
+		if ok {
+			sessPrevIDs = slices.Clone(sess.prevSessionIDs)
 		}
 		_, spawning := r.spawningKeys[state.Key]
 		r.mu.Unlock()
@@ -1037,8 +1059,8 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			// persistedHistory (InjectHistory is proc-nil safe) so the sidebar
 			// shows the last conversation while the session waits for revival.
 			if r.claudeDir != "" && state.SessionID != "" {
-				ids := make([]string, 0, len(sess.prevSessionIDs)+1)
-				ids = append(ids, sess.prevSessionIDs...)
+				ids := make([]string, 0, len(sessPrevIDs)+1)
+				ids = append(ids, sessPrevIDs...)
 				ids = append(ids, state.SessionID)
 				histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 				histEntries := discovery.LoadHistoryChainTailCtx(
@@ -1113,8 +1135,8 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// entries for that turn are transiently absent from the dashboard
 		// until the next live event repopulates them. Self-healing.
 		if r.claudeDir != "" {
-			ids := make([]string, 0, len(sess.prevSessionIDs)+1)
-			ids = append(ids, sess.prevSessionIDs...)
+			ids := make([]string, 0, len(sessPrevIDs)+1)
+			ids = append(ids, sessPrevIDs...)
 			if state.SessionID != "" {
 				ids = append(ids, state.SessionID)
 			}
@@ -1456,6 +1478,17 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	// the shim-socket dial guard; the rest fail with "refusing to clobber".
 	// Drop and retry while spawnSession for this key is in flight so the late
 	// callers just pick up the session the winner creates.
+	//
+	// Reuse a single timer across iterations. NewTimer+Stop inside the loop
+	// already fixes the time.After leak, but at N concurrent waiters each
+	// iteration still allocates a *time.Timer + registers a new runtime
+	// timer; Reset lets the runtime re-queue the same entry.
+	var waitT *time.Timer
+	defer func() {
+		if waitT != nil {
+			waitT.Stop()
+		}
+	}()
 	for {
 		if s, ok := r.sessions[key]; ok {
 			if s.isAlive() {
@@ -1478,14 +1511,17 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 		// r.sessions[key] (we pick SessionExisting) or fail (we retry our
 		// own spawn). Keep the sleep tiny so perceived latency stays flat;
 		// a typical shim spawn takes 100-300 ms.
-		// Use NewTimer+Stop instead of time.After: at N concurrent waiters
-		// on the same key, time.After leaks one runtime timer per iteration
-		// until GC notices (often >1s).
 		r.mu.Unlock()
-		waitT := time.NewTimer(20 * time.Millisecond)
+		if waitT == nil {
+			waitT = time.NewTimer(20 * time.Millisecond)
+		} else {
+			waitT.Reset(20 * time.Millisecond)
+		}
 		select {
 		case <-ctx.Done():
-			waitT.Stop()
+			if !waitT.Stop() {
+				<-waitT.C
+			}
 			return nil, 0, ctx.Err()
 		case <-waitT.C:
 		}
@@ -2094,11 +2130,15 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	// that appends to old.prevSessionIDs (in-place if cap permits) cannot
 	// silently mutate fresh.prevSessionIDs. spawnSession already clones at
 	// its construction site; Rename must do the same for symmetry.
-	// persistedHistory is not re-written by the old session after Rename so
-	// it is safe to share the backing array.
+	// persistedHistory: clone the backing array too. NewRouter launches an
+	// async history-load goroutine that holds the `s` pointer; if the load
+	// completes after Rename swapped keys, s.InjectHistory appends to
+	// old.persistedHistory. When len<cap in that backing array, the append
+	// writes into bytes that fresh.persistedHistory also points to.
+	freshHistory := slices.Clone(old.persistedHistory)
 	fresh := &ManagedSession{
 		key:              newKey,
-		persistedHistory: old.persistedHistory,
+		persistedHistory: freshHistory,
 		prevSessionIDs:   slices.Clone(old.prevSessionIDs),
 		exempt:           old.exempt,
 		onSessionID: func(id string) {
@@ -3108,7 +3148,8 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 		delete(r.sessionIDToKey, sessionID)
 	}
 	s := &ManagedSession{
-		key: key,
+		key:    key,
+		exempt: isExemptKey(key),
 	}
 	s.setWorkspace(workspace)
 	s.SetCLIName(r.CLIName())

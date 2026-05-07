@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"runtime/debug"
 	"strconv"
@@ -158,14 +159,19 @@ type Process struct {
 
 	SessionID string
 	State     ProcessState
-	// mu protects State / SessionID / onTurnDone / totalCost. Read-only
-	// accessors (GetState / IsRunning / GetSessionID / TotalCost) use RLock
-	// so concurrent ListSessions snapshots across N sessions and M tabs
-	// proceed in parallel instead of serialising through a single Mutex.
-	// Write paths (readLoop state transitions, Send State→Running, Interrupt
+	// mu protects State / SessionID / onTurnDone. Read-only accessors
+	// (GetState / IsRunning / GetSessionID) use RLock so concurrent
+	// ListSessions snapshots across N sessions and M tabs proceed in
+	// parallel instead of serialising through a single Mutex. Write paths
+	// (readLoop state transitions, Send State→Running, Interrupt
 	// snapshot-and-flag) continue to use Lock to preserve the existing
 	// "read State and set interrupted together under one lock" contract.
 	// R70-PERF-L3.
+	//
+	// totalCost is stored separately as an atomic.Uint64 (math.Float64bits)
+	// so Snapshot() paths that want lock-free reads (mirroring the
+	// ManagedSession.totalCost pattern, R183-CONCUR-M2) never have to
+	// nest p.mu.RLock under ownership of r.mu or sendMu.
 	mu sync.RWMutex
 
 	eventCh  chan Event
@@ -186,7 +192,7 @@ type Process struct {
 	interruptSeq atomic.Int64
 
 	eventLog  *EventLog
-	totalCost float64
+	totalCost atomic.Uint64 // math.Float64bits(lastResultCostUSD); atomic so Snapshot is lock-free.
 	lastSeq   atomic.Int64  // last received shim seq, for reconnect
 	pongRecv  chan struct{} // signaled by readLoop on pong receipt
 
@@ -776,7 +782,7 @@ func (p *Process) readLoop() {
 					victims := p.reapAbortedPreempted()
 					fireAbortErrors(victims)
 				}
-				owners, _ := p.onTurnResult()
+				owners := p.onTurnResult()
 				if len(owners) > 0 {
 					p.logEventAt(ev, now.UnixMilli())
 					// Fire onEvent for each owner's turn-scope callback
@@ -1809,9 +1815,7 @@ func (p *Process) logEventAt(ev Event, nowMS int64) {
 	}
 	// Update process-level cost tracking for result events.
 	if ev.Type == "result" {
-		p.mu.Lock()
-		p.totalCost = ev.CostUSD
-		p.mu.Unlock()
+		p.totalCost.Store(math.Float64bits(ev.CostUSD))
 	}
 	// AppendBatch holds l.mu and notifies subscribers ONCE rather than
 	// once per entry. Multi-block assistant events (thinking + tool_use +
@@ -2005,11 +2009,9 @@ func (p *Process) GetSessionID() string {
 	return p.SessionID
 }
 
-// TotalCost returns the cumulative cost.
+// TotalCost returns the cumulative cost (lock-free via atomic.Uint64).
 func (p *Process) TotalCost() float64 {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.totalCost
+	return math.Float64frombits(p.totalCost.Load())
 }
 
 // ProtocolName returns the protocol name.

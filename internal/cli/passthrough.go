@@ -474,9 +474,9 @@ func (p *Process) onSystemInit() {
 // slot" and fire ErrAbortedByUrgent so their SendPassthrough callers unblock.
 // The caller still owns fanout for the actual claimed turn slots; those
 // just get the (empty) error result as a regular fanout.
-func (p *Process) onTurnResult() (owners []*sendSlot, aborted []*sendSlot) {
+func (p *Process) onTurnResult() []*sendSlot {
 	p.slotsMu.Lock()
-	owners = p.currentTurnSlots
+	owners := p.currentTurnSlots
 	p.currentTurnSlots = nil
 	p.inTurn = false
 	p.removeSlotsLocked(owners)
@@ -496,7 +496,7 @@ func (p *Process) onTurnResult() (owners []*sendSlot, aborted []*sendSlot) {
 		}
 		p.mu.Unlock()
 	}
-	return owners, nil
+	return owners
 }
 
 // reapAbortedPreempted collects pending slots that were discarded by the CLI
