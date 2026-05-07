@@ -4949,3 +4949,103 @@ func TestDashboardJS_PasteImageRoutesToUpload(t *testing.T) {
 		t.Error("paste handler must fall back to cd.items.getAsFile() — older Firefox paths only expose images there")
 	}
 }
+
+// TestDashboardJS_LoadEarlierFallbackWhenAllInternal pins the fix for the
+// "parallel agent team ate my history" bug. Scenario: the trailing 100
+// events of a session are entirely tool_use / agent / task_start /
+// task_progress / task_done / result (all in INTERNAL_EVENT_TYPES, all
+// filtered out by processEventsForDisplay). Before the fix:
+//
+//  1. renderEvents produced an empty HTML string and wrote ” into the
+//     scroller — the panel looked blank with no hint that events existed.
+//  2. loadEarlierEvents walked the DOM looking for the first `.event`
+//     to derive its `before=` cursor. With nothing rendered the cursor
+//     was 0 and the function bailed — the "加载更早的事件" button
+//     appeared dead.
+//
+// The invariants below encode the DOM-independent pagination cursor
+// (oldestFetchedEventTime) and the placeholder render that together
+// keep the pane usable when the tail of a session is all internal
+// activity.
+func TestDashboardJS_LoadEarlierFallbackWhenAllInternal(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// 1) Module-scoped pagination cursor declared alongside the other
+	//    event-time trackers so a future refactor can't accidentally
+	//    promote it to a local or drop its initialiser.
+	if !strings.Contains(js, "let oldestFetchedEventTime = 0;") {
+		t.Error("dashboard.js missing `let oldestFetchedEventTime = 0;` — DOM-independent pagination cursor for loadEarlierEvents fallback")
+	}
+
+	// 2) loadEarlierEvents must fall back to the cursor when the DOM walk
+	//    produced 0. The textual shape is pinned so a reviewer can't drop
+	//    the fallback assignment without tripping the test.
+	if !strings.Contains(js, "if (!oldestTime) oldestTime = oldestFetchedEventTime;") {
+		t.Error("loadEarlierEvents must fall back to oldestFetchedEventTime when the DOM `.event` walk returns 0 — otherwise a fully-filtered page makes the pagination button dead")
+	}
+
+	// 3) renderEvents must advance oldestFetchedEventTime from the first
+	//    event in the incoming batch so pagination survives a fully-
+	//    filtered initial page. We anchor on the exact guard so the
+	//    "only decrease" semantics survive refactors.
+	if !strings.Contains(js, "oldestFetchedEventTime === 0 || first.time < oldestFetchedEventTime") {
+		t.Error("renderEvents must update oldestFetchedEventTime to the first event's time (taking min) on every render — feeds loadEarlierEvents fallback")
+	}
+
+	// 4) renderEvents must emit a non-empty placeholder when the server
+	//    returned events but every one was internal-filtered. A blank
+	//    innerHTML is exactly what the bug produced; surface a hint so
+	//    the operator knows the "load earlier" button is the path back.
+	if !strings.Contains(js, "该会话最近仅有 agent 活动") {
+		t.Error("renderEvents must surface a placeholder like '该会话最近仅有 agent 活动' when every event was filtered — a blank pane is how the bug reproduced")
+	}
+
+	// 5) selectSession must reset oldestFetchedEventTime alongside
+	//    lastEventTime / lastRenderedEventTime so switching into a fresh
+	//    session doesn't inherit the prior session's cursor (which would
+	//    cause the new session's "load earlier" to page beyond its own
+	//    history).
+	selectSessionIdx := strings.Index(js, "lastEventTime = 0;\n  lastRenderedEventTime = 0;\n  oldestFetchedEventTime = 0;")
+	if selectSessionIdx < 0 {
+		t.Error("selectSession reset block must include `oldestFetchedEventTime = 0;` next to the other per-session cursors — stale cursor would cross-contaminate pagination after a session switch")
+	}
+
+	// 6) onHistory (WS initial subscribe) must maintain the cursor too —
+	//    the WS path is the dashboard default when connected, so a fix
+	//    that only touches the HTTP fallback wouldn't actually help the
+	//    operators hitting the bug.
+	onHistoryIdx := strings.Index(js, "onHistory(msg) {")
+	if onHistoryIdx < 0 {
+		t.Fatal("dashboard.js missing `onHistory(msg) {` — structural anchor for the WS-path assertion")
+	}
+	onHistoryEnd := strings.Index(js[onHistoryIdx:], "\n  },\n")
+	if onHistoryEnd < 0 || onHistoryEnd > 12288 {
+		t.Fatalf("could not locate onHistory end brace within 12 KiB (endIdx=%d)", onHistoryEnd)
+	}
+	onHistoryBody := js[onHistoryIdx : onHistoryIdx+onHistoryEnd]
+	if !strings.Contains(onHistoryBody, "oldestFetchedEventTime") {
+		t.Error("onHistory must maintain oldestFetchedEventTime — otherwise the WS initial subscribe path leaves pagination broken on the agent-team tail")
+	}
+
+	// 7) prependEvents must advance the cursor when the page it just
+	//    loaded was itself fully-filtered — otherwise a second click on
+	//    "load earlier" would re-request the same before= cursor and
+	//    the operator would be stuck paging against a fixed floor.
+	prependIdx := strings.Index(js, "function prependEvents(events) {")
+	if prependIdx < 0 {
+		t.Fatal("dashboard.js missing `function prependEvents(events)` — structural anchor for the prepend-cursor assertion")
+	}
+	prependEnd := strings.Index(js[prependIdx:], "\n}\n")
+	if prependEnd < 0 || prependEnd > 4096 {
+		t.Fatalf("could not locate prependEvents end brace within 4 KiB (endIdx=%d)", prependEnd)
+	}
+	prependBody := js[prependIdx : prependIdx+prependEnd]
+	if !strings.Contains(prependBody, "oldestFetchedEventTime") {
+		t.Error("prependEvents must advance oldestFetchedEventTime — otherwise consecutive load-earlier clicks on fully-internal pages loop against the same cursor")
+	}
+}

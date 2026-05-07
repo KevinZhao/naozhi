@@ -5,6 +5,18 @@ let selectedKey = null;
 let eventTimer = null;
 let lastEventTime = 0;
 let lastRenderedEventTime = 0;
+// oldestFetchedEventTime tracks the earliest server event we've already
+// requested, independent of what's currently rendered in the DOM. The
+// "load earlier" pagination originally took its cursor from the first
+// `.event` child in the scroller — but when a page of 100 events is
+// entirely internal-only (tool_use / agent / task_start / task_progress /
+// task_done / result, filtered out by INTERNAL_EVENT_TYPES), no `.event`
+// is rendered and the pagination silently bails with no cursor. That
+// happens in practice whenever a parallel agent team runs long enough to
+// fill the ring buffer with tool activity; the operator sees a blank
+// events panel and a dead "加载更早的事件" button. Keep this cursor so
+// pagination works regardless of what got filtered out.
+let oldestFetchedEventTime = 0;
 let lastCompositionEnd = 0;
 let sessionsData = {};
 let allSessionsCache = [];
@@ -1429,6 +1441,7 @@ function selectSession(key, node) {
   }
   lastEventTime = 0;
   lastRenderedEventTime = 0;
+  oldestFetchedEventTime = 0;
   mobileEnterChat();
   stopPreviewPolling();
   document.querySelectorAll('.session-card').forEach(el => {
@@ -1921,6 +1934,12 @@ async function loadEarlierEvents() {
       break;
     }
   }
+  // Fallback: when no `.event` is rendered (e.g. the visible page was
+  // entirely internal events filtered out by INTERNAL_EVENT_TYPES during a
+  // parallel agent team turn), page against the cursor we recorded at
+  // fetch time. Without this the button appears to do nothing and the
+  // operator has no path back to the earlier conversation.
+  if (!oldestTime) oldestTime = oldestFetchedEventTime;
   if (!oldestTime) return;
 
   _earlierLoading = true;
@@ -1958,6 +1977,14 @@ function prependEvents(events) {
   const el = document.getElementById('events-scroll');
   if (!el || !events || events.length === 0) return;
 
+  // Advance the pagination cursor before DOM work so a subsequent
+  // loadEarlierEvents sees the new floor even if the freshly prepended
+  // batch was entirely internal-filtered.
+  const firstT = events[0] && events[0].time;
+  if (firstT && (oldestFetchedEventTime === 0 || firstT < oldestFetchedEventTime)) {
+    oldestFetchedEventTime = firstT;
+  }
+
   // Remove "load earlier" button so we can place new events first; it'll be
   // re-added after.
   const btn = document.getElementById('earlier-events-btn');
@@ -1965,6 +1992,11 @@ function prependEvents(events) {
 
   const display = processEventsForDisplay(events);
   const html = renderEventsWithDividers(display, 0);
+  // Drop a placeholder the first time a chat is entered through a
+  // fully-internal page; leaving it in place would push the prepended
+  // real messages below the placeholder, so clean it out before insert.
+  const placeholder = el.querySelector('.empty-state');
+  if (placeholder) placeholder.remove();
 
   // Preserve visual stability: capture distance-from-bottom before mutation,
   // then restore after. scrollTop alone breaks because inserted content above
@@ -2043,21 +2075,35 @@ function renderEvents(events) {
   if (!el) return;
   const display = processEventsForDisplay(events);
   const html = renderEventsWithDividers(display, 0);
-  el.innerHTML = html || (events.length === 0 ? '<div class="empty-state">暂无事件</div>' : '');
-  // Track the latest rendered event time for deduplication
+  if (html) {
+    el.innerHTML = html;
+  } else if (events.length === 0) {
+    el.innerHTML = '<div class="empty-state">暂无事件</div>';
+  } else {
+    // The server returned events but every one was filtered out by
+    // INTERNAL_EVENT_TYPES — typically a parallel agent team where the
+    // visible tail of the log is all tool_use / task_progress. Render a
+    // neutral placeholder so the panel isn't a blank void, and still
+    // show the "load earlier" affordance below so the operator can
+    // page back to the real messages.
+    el.innerHTML = '<div class="empty-state">该会话最近仅有 agent 活动，点击下方加载更早的消息</div>';
+  }
   if (events.length > 0) {
     const last = events[events.length - 1];
     if (last.time) lastRenderedEventTime = last.time;
+    const first = events[0];
+    if (first.time && (oldestFetchedEventTime === 0 || first.time < oldestFetchedEventTime)) {
+      oldestFetchedEventTime = first.time;
+    }
   }
-  // If we got a full initial page there's probably more history available;
-  // show the "Load earlier" affordance. Empty state keeps no button.
+  // Mount "load earlier" whenever we got a full page — more history likely
+  // exists, regardless of whether the visible slice survived the filter.
   if (events.length >= INITIAL_HISTORY_LIMIT) {
     ensureEarlierButton();
   }
   runMermaid();
   runKatex();
   navRebuild();
-  // 若有上次切走时保存的滚动位置且不在底部，恢复它；否则照旧贴底。
   if (!restoreScrollPos(selectedKey, selectedNode)) {
     stickEventsBottom();
   }
@@ -6999,10 +7045,24 @@ const wsm = {
           ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>'
           : '<div class="empty-state">\u6682\u65e0\u4e8b\u4ef6</div>';
       } else {
-        el.innerHTML = '';
+        // Server returned events but every one was internal-filtered
+        // (parallel agent team tail). Placeholder keeps the pane from
+        // looking broken; the "load earlier" button mounted below is the
+        // path back to real messages.
+        el.innerHTML = '<div class="empty-state">\u8be5\u4f1a\u8bdd\u6700\u8fd1\u4ec5\u6709 agent \u6d3b\u52a8\uff0c\u70b9\u51fb\u4e0b\u65b9\u52a0\u8f7d\u66f4\u65e9\u7684\u6d88\u606f</div>';
       }
-      // Reset dedup tracker on full render
-      if (events.length > 0) { const last = events[events.length - 1]; if (last.time) lastRenderedEventTime = last.time; }
+      // Reset dedup tracker on full render and anchor the pagination
+      // cursor to the earliest event we received, independent of DOM
+      // contents so loadEarlierEvents still works after a fully-filtered
+      // page.
+      if (events.length > 0) {
+        const last = events[events.length - 1];
+        if (last.time) lastRenderedEventTime = last.time;
+        const first = events[0];
+        if (first.time && (oldestFetchedEventTime === 0 || first.time < oldestFetchedEventTime)) {
+          oldestFetchedEventTime = first.time;
+        }
+      }
       // Mount "load earlier" affordance when the server returned a full page
       // (more history likely exists). Skipped for short histories so we don't
       // surface a useless button.
