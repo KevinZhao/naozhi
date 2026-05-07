@@ -937,10 +937,13 @@ body.kbd-open .input-hints{display:none}
 .modal.cron-modal .cm-close{background:none;border:none;color:var(--nz-text-mute);cursor:pointer;font-size:18px;line-height:1;padding:4px 8px;border-radius:6px;font-family:inherit}
 .modal.cron-modal .cm-close:hover{background:var(--nz-bg-2);color:var(--nz-text)}
 .cron-modal-grid{display:grid;grid-template-columns:320px 1fr;column-gap:28px;row-gap:20px}
-.cron-f-what{grid-column:1;grid-row:1}
-.cron-f-when{grid-column:2;grid-row:1}
-.cron-f-where{grid-column:1;grid-row:2}
-.cron-f-more{grid-column:2;grid-row:2}
+/* cron-v2-polish §3.1: Title 字段跨两列置顶作为 row 1。其余四格依次下移
+ * 到 row 2/3，显式绑 grid-row 避免 auto-placement 把 title 挤到末尾。 */
+.cron-f-title{grid-column:1 / -1;grid-row:1}
+.cron-f-what{grid-column:1;grid-row:2}
+.cron-f-when{grid-column:2;grid-row:2}
+.cron-f-where{grid-column:1;grid-row:3}
+.cron-f-more{grid-column:2;grid-row:3}
 .cron-field .cf-label{font-size:12px;color:var(--nz-text-mute);margin-bottom:6px;letter-spacing:.2px}
 .cron-modal textarea#cron-prompt,.cron-modal textarea#edit-cron-prompt{min-height:200px;max-height:360px;resize:vertical}
 .cron-more-stack{display:flex;flex-direction:column;gap:14px}
@@ -960,10 +963,11 @@ body.kbd-open .input-hints{display:none}
 @media(max-width:720px){
   .modal.cron-modal{width:100%;padding:18px;border-radius:16px 16px 0 0}
   .cron-modal-grid{grid-template-columns:1fr;column-gap:0;row-gap:18px}
-  .cron-f-what{grid-column:1;grid-row:1}
-  .cron-f-when{grid-column:1;grid-row:2}
-  .cron-f-where{grid-column:1;grid-row:3}
-  .cron-f-more{grid-column:1;grid-row:4}
+  .cron-f-title{grid-column:1;grid-row:1}
+  .cron-f-what{grid-column:1;grid-row:2}
+  .cron-f-when{grid-column:1;grid-row:3}
+  .cron-f-where{grid-column:1;grid-row:4}
+  .cron-f-more{grid-column:1;grid-row:5}
   .cron-modal textarea#cron-prompt,.cron-modal textarea#edit-cron-prompt{min-height:96px;max-height:320px;transition:min-height .18s ease}
   .cron-modal textarea#cron-prompt:focus,.cron-modal textarea#edit-cron-prompt:focus{min-height:180px}
   .cron-modal .proj-pick{max-height:160px}

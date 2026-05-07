@@ -8485,7 +8485,7 @@ function renderCronModalBody(opts) {
   // 结构对齐。留空允许，UI 自动回退显示 Prompt 首行（JobTitleOrFallback）。
   // 关联：docs/rfc/cron-v2-polish.md §3.1 Increment A。
   const titleField =
-    '<div class="cron-field cron-f-title" style="grid-column:1 / -1">' +
+    '<div class="cron-field cron-f-title">' +
       '<div class="cf-label">名称 <span style="color:var(--nz-text-faint);font-weight:normal;font-size:11px">（可选）</span></div>' +
       '<input id="' + escAttr(opts.titleId || 'cron-title') + '" type="text" placeholder="' + escAttr(opts.titlePlaceholder || '例如：日报总结 · 周一早会准备') + '" maxlength="256" aria-label="任务名称">' +
     '</div>';
