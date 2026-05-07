@@ -54,16 +54,6 @@ const maxPushedNodeStringBytes = 512
 // legitimate history replays are never truncated. R67-SEC-3.
 const maxPushedHistoryEvents = 500
 
-// truncateString returns s bounded to max bytes with log-injection codepoints
-// stripped. These fields (session_state.Reason, subscribe_error.Error) arrive
-// from reverse nodes with valid tokens and flow into slog attrs plus every
-// subscribed browser client; a compromised node could otherwise inject bidi
-// overrides or C0/C1 bytes. R191-SEC-L1 aligns this helper with
-// truncateLabelUTF8 in reverseserver.go (R180-SEC-M2).
-func truncateString(s string, max int) string {
-	return truncateLabelUTF8(s, max)
-}
-
 type reverseResult struct {
 	result json.RawMessage
 	err    error
@@ -596,7 +586,7 @@ func (c *ReverseConn) readLoop() {
 			// Bound Reason to prevent a compromised node from flooding
 			// subscribed browser clients and forcing send-channel drops.
 			// R61-SEC-9.
-			c.broadcastToSubs(msg.Key, ServerMsg{Type: "session_state", Key: msg.Key, State: msg.State, Reason: truncateString(msg.Reason, maxPushedNodeStringBytes), Node: c.id}, false)
+			c.broadcastToSubs(msg.Key, ServerMsg{Type: "session_state", Key: msg.Key, State: msg.State, Reason: truncateLabelUTF8(msg.Reason, maxPushedNodeStringBytes), Node: c.id}, false)
 
 		case "subscribed":
 			c.broadcastToSubs(msg.Key, ServerMsg{Type: "subscribed", Key: msg.Key, Node: c.id}, false)
@@ -604,7 +594,7 @@ func (c *ReverseConn) readLoop() {
 		case "subscribe_error":
 			// Same cap as session_state.Reason; msg.Error reaches every
 			// subscribed client on the 'error' type. R61-SEC-9.
-			c.broadcastToSubs(msg.Key, ServerMsg{Type: "error", Key: msg.Key, Node: c.id, Error: truncateString(msg.Error, maxPushedNodeStringBytes)}, true)
+			c.broadcastToSubs(msg.Key, ServerMsg{Type: "error", Key: msg.Key, Node: c.id, Error: truncateLabelUTF8(msg.Error, maxPushedNodeStringBytes)}, true)
 		}
 	}
 }

@@ -168,19 +168,15 @@ type PermanentError interface {
 
 // IsPermanent walks the error chain and reports whether any wrapped error
 // signals a permanent condition. Returns false for nil.
+//
+// errors.As already walks the full chain (including branches joined via
+// errors.Join) so a single call subsumes the earlier manual Unwrap loop.
+// The manual loop also exited early on errors.Join boundaries where
+// errors.Unwrap returns nil, which could miss a PermanentError buried in
+// a join branch.
 func IsPermanent(err error) bool {
 	var pe PermanentError
-	for err != nil {
-		if errors.As(err, &pe) && pe.IsPermanent() {
-			return true
-		}
-		unwrapped := errors.Unwrap(err)
-		if unwrapped == err || unwrapped == nil {
-			return false
-		}
-		err = unwrapped
-	}
-	return false
+	return errors.As(err, &pe) && pe.IsPermanent()
 }
 
 // ReplyWithRetry calls p.Reply up to maxAttempts times with exponential backoff

@@ -169,8 +169,7 @@ func validateRemoteWorkspace(workspace string) error {
 		// Empty means "use remote's default workspace" — intentional, allowed.
 		return nil
 	}
-	const maxWorkspacePath = 4096
-	if len(workspace) > maxWorkspacePath {
+	if len(workspace) > session.MaxRemoteWorkspacePath {
 		return fmt.Errorf("workspace too long")
 	}
 	if strings.ContainsRune(workspace, 0) {
@@ -185,13 +184,13 @@ func validateRemoteWorkspace(workspace string) error {
 	// R176-SEC-M: rune-level sweep for C1 controls + bidi / LS / PS
 	// runes that survive the byte-level `< 0x20` filter. Same policy
 	// validateCronWorkDir / validateCronPrompt already enforce via
-	// isLogInjectionRune. Without this, an authenticated operator can
+	// osutil.IsLogInjectionRune. Without this, an authenticated operator can
 	// post `/tmp/ws‮.sock` and trip log-injection in
 	// `slog.Warn("remote ws send failed", "key", ..., "workspace", ws)`
 	// at wshub.go:1405 or pipe-style misrendering in terminal viewers
 	// (Loki / grep).
 	for _, r := range workspace {
-		if isLogInjectionRune(r) {
+		if osutil.IsLogInjectionRune(r) {
 			return fmt.Errorf("invalid workspace")
 		}
 	}
@@ -303,7 +302,7 @@ type ServerOptions struct {
 	Transcriber       transcribe.Service
 	OnReady           func() // called after the listener is bound and serving
 	// StartupCtx, when set, is threaded into blocking init probes (e.g.
-	// cli.DetectBackends's --version subprocess) so SIGTERM during naozhi
+	// cli.DetectBackendsCtx's --version subprocess) so SIGTERM during naozhi
 	// startup aborts them promptly instead of burning the full 5s×N
 	// timeout. Nil is equivalent to context.Background() — safe default
 	// for tests and callers that don't have a shutdown ctx yet.

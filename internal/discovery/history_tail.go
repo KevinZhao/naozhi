@@ -49,7 +49,7 @@ var maxTailReadBytes int64 = 128 * 1024 * 1024
 // drops from ~1-2s to ~30ms.
 //
 // `limit <= 0` falls back to the legacy full-file LoadHistory behaviour.
-func LoadHistoryTail(claudeDir, sessionID, cwd string, limit int) ([]cli.EventEntry, error) {
+func loadHistoryTail(claudeDir, sessionID, cwd string, limit int) ([]cli.EventEntry, error) {
 	return LoadHistoryTailCtx(context.Background(), claudeDir, sessionID, cwd, limit)
 }
 
@@ -356,7 +356,7 @@ func parseHistoryLine(line []byte) ([]cli.EventEntry, bool) {
 // every JSONL only to discard all but the last 500 entries is wasteful.
 // Walking in reverse and stopping when the budget is met typically opens
 // only 1-2 files for a normal session.
-func LoadHistoryChainTail(claudeDir string, ids []string, cwd string, limit int) []cli.EventEntry {
+func loadHistoryChainTail(claudeDir string, ids []string, cwd string, limit int) []cli.EventEntry {
 	return LoadHistoryChainTailCtx(context.Background(), claudeDir, ids, cwd, limit)
 }
 

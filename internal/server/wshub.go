@@ -5,7 +5,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -149,16 +148,11 @@ type HubOptions struct {
 	ParentCtx context.Context
 }
 
-// Pre-marshaled static messages to avoid repeated JSON serialization.
-var sessionsUpdateMsg []byte
-
-func init() {
-	var err error
-	sessionsUpdateMsg, err = json.Marshal(node.ServerMsg{Type: "sessions_update"})
-	if err != nil {
-		panic("sessionsUpdateMsg: " + err.Error())
-	}
-}
+// Pre-marshaled static message body. A plain byte literal avoids paying
+// a json.Marshal on package init and removes the nominal panic branch
+// (the struct has only a Type string field so Marshal cannot fail). The
+// shape must stay exactly in sync with node.ServerMsg JSON encoding.
+var sessionsUpdateMsg = []byte(`{"type":"sessions_update"}`)
 
 // NewHub creates a new WebSocket hub.
 //

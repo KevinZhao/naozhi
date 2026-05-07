@@ -95,7 +95,7 @@ func validateCronWorkDir(wd string) error {
 		}
 	}
 	for _, r := range wd {
-		if isLogInjectionRune(r) {
+		if osutil.IsLogInjectionRune(r) {
 			return fmt.Errorf("work_dir contains invalid unicode control characters")
 		}
 	}
@@ -104,12 +104,6 @@ func validateCronWorkDir(wd string) error {
 	}
 	return nil
 }
-
-// isLogInjectionRune is a thin wrapper around osutil.IsLogInjectionRune kept
-// for existing call sites (+ dashboard_cron_validate_test.go) that reference
-// the package-local name. The canonical policy lives in osutil/loginject.go;
-// see R172-SEC-M4.
-func isLogInjectionRune(r rune) bool { return osutil.IsLogInjectionRune(r) }
 
 // validateNotifyTarget enforces platform allowlist + chat_id size bound.
 // R177-SEC-7: additionally reject C0/C1/bidi/LS/PS runes so a crafted
@@ -134,7 +128,7 @@ func validateNotifyTarget(platform, chatID string) error {
 		}
 	}
 	for _, r := range chatID {
-		if isLogInjectionRune(r) {
+		if osutil.IsLogInjectionRune(r) {
 			return fmt.Errorf("notify_chat_id contains invalid characters")
 		}
 	}
@@ -161,7 +155,7 @@ func validateCronScheduleChars(schedule string) error {
 		}
 	}
 	for _, r := range schedule {
-		if isLogInjectionRune(r) {
+		if osutil.IsLogInjectionRune(r) {
 			return fmt.Errorf("schedule contains invalid characters")
 		}
 	}
@@ -207,7 +201,7 @@ func validateCronTitle(title string) error {
 		if r == 0 || (r < 0x20 && r != '\t') || r == 0x7f {
 			return fmt.Errorf("title contains invalid control characters")
 		}
-		if isLogInjectionRune(r) {
+		if osutil.IsLogInjectionRune(r) {
 			return fmt.Errorf("title contains invalid unicode control characters")
 		}
 	}
@@ -229,7 +223,7 @@ func validateCronPrompt(prompt string) error {
 		}
 	}
 	for _, r := range prompt {
-		if isLogInjectionRune(r) {
+		if osutil.IsLogInjectionRune(r) {
 			return fmt.Errorf("prompt contains invalid unicode control characters")
 		}
 	}

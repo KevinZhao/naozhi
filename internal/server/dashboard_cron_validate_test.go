@@ -3,6 +3,8 @@ package server
 import (
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // TestValidateCronWorkDir_RejectsASCIIControl pins the original byte-level
@@ -180,13 +182,13 @@ func TestIsLogInjectionRune(t *testing.T) {
 		0x2066, 0x2067, 0x2068, 0x2069,
 		0x2028, 0x2029,
 	} {
-		if !isLogInjectionRune(r) {
+		if !osutil.IsLogInjectionRune(r) {
 			t.Errorf("U+%04X should be rejected", r)
 		}
 	}
 	// Plain ASCII + non-bidi Unicode must pass.
 	for _, r := range []rune{' ', 'a', '/', '中', 0x2000, 0x4E00} {
-		if isLogInjectionRune(r) {
+		if osutil.IsLogInjectionRune(r) {
 			t.Errorf("U+%04X should be allowed", r)
 		}
 	}

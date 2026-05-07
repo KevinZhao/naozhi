@@ -440,7 +440,7 @@ func (h *Hub) handleOwnerLoopPanic(key string, onAsyncError func(string), r any)
 	if onAsyncError != nil {
 		func() {
 			defer func() { _ = recover() }()
-			onAsyncError("处理异常，请刷新页面或稍后重试。")
+			onAsyncError("处理异常，请稍后重试。")
 		}()
 	}
 }

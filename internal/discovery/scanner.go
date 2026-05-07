@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // Scanner holds the mutable caches that used to be package-level globals
@@ -450,15 +451,11 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 }
 
 // processAlive checks whether a process with the given PID exists.
+// Delegates to osutil.PidAlive so the pid<=0 guard (kill(0, sig) broadcasts
+// to the whole process group and kill(-N, sig) targets groups — both would
+// misreport phantom processes as alive) is consistent across packages.
 func processAlive(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// Signal 0 tests existence without actually sending a signal.
-	// EPERM means the process exists but is owned by a different user.
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil || errors.Is(err, syscall.EPERM)
+	return osutil.PidAlive(pid)
 }
 
 type jsonlEntry struct {
