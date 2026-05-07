@@ -363,12 +363,18 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 	// check degrades to the legacy "any @ is a hit" rule — same contract as
 	// slack's AuthTest failure path. Time-boxed at 5s so a flaky network
 	// doesn't block startup; Start() proceeds regardless.
-	fetchCtx, cancelFetch := context.WithTimeout(f.stopCtx, 5*time.Second)
-	if err := f.fetchBotInfo(fetchCtx); err != nil {
-		slog.Warn("feishu fetch bot info failed — group mention filtering will fall back to 'any mention' (less precise)",
-			"err", err)
-	}
-	cancelFetch()
+	// IIFE + defer ensures cancelFetch() runs even if fetchBotInfo panics,
+	// releasing the 5s context timer. Bare `cancelFetch()` after the call
+	// would be skipped on panic, leaking the timer goroutine until stopCtx
+	// fires.
+	func() {
+		fetchCtx, cancelFetch := context.WithTimeout(f.stopCtx, 5*time.Second)
+		defer cancelFetch()
+		if err := f.fetchBotInfo(fetchCtx); err != nil {
+			slog.Warn("feishu fetch bot info failed — group mention filtering will fall back to 'any mention' (less precise)",
+				"err", err)
+		}
+	}()
 
 	if f.mode == "websocket" {
 		slog.Info("feishu using websocket mode (no public IP needed)")
