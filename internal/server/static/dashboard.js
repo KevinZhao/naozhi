@@ -8153,8 +8153,8 @@ const DOW_LABELS = [
 // "every 1 hour" which matches the most common ask.
 function buildFreqPickerHtml(initial) {
   const d = initial || { mode: 'interval', n: 1, unit: 'h' };
-  const tab = (mode, label) =>
-    '<button type="button" class="freq-tab' + (d.mode === mode ? ' active' : '') + '" data-mode="' + mode + '" onclick="freqSelectTab(this, \'' + mode + '\')">' + esc(label) + '</button>';
+  const modeOption = (mode, label) =>
+    '<option value="' + mode + '"' + (d.mode === mode ? ' selected' : '') + '>' + esc(label) + '</option>';
 
   const iv = d.mode === 'interval' ? d : { n: 1, unit: 'h' };
   const intervalHtml =
@@ -8227,8 +8227,18 @@ function buildFreqPickerHtml(initial) {
       '<div class="cron-tz-hint" style="margin-top:6px">如果选择 29、30、31 日，当月没有这一天时会跳过。</div>' +
     '</div>';
 
+  // v2 polish: 从 4-tab 切换器改成单 select 下拉（参考 Claude Scheduled
+  // Tasks 的 Frequency dropdown）。当前模式挂在 #freq-mode-select 的 value
+  // 上，freqCurrentDescriptor / freqSelectMode 都从这里读。保留的
+  // "freq-tabs" 外层 div 作为语义锚点，避免依赖外部查找 role="tablist"
+  // 的测试失效——实际控件是里面的 select。
   return '<div class="freq-tabs" role="tablist">' +
-      tab('interval', '间隔') + tab('daily', '每天') + tab('weekly', '每周') + tab('monthly', '每月') +
+      '<select class="freq-mode-select" id="freq-mode-select" aria-label="频率模式" onchange="freqSelectMode(this.value)">' +
+        modeOption('interval', '间隔') +
+        modeOption('daily', '每天') +
+        modeOption('weekly', '每周') +
+        modeOption('monthly', '每月') +
+      '</select>' +
     '</div>' +
     intervalHtml + dailyHtml + weeklyHtml + monthlyHtml;
 }
@@ -8236,9 +8246,9 @@ function buildFreqPickerHtml(initial) {
 // freqCurrentDescriptor reads the picker state back into a descriptor object.
 // Returns null when the picker is absent.
 function freqCurrentDescriptor() {
-  const active = document.querySelector('.freq-tabs .freq-tab.active');
-  if (!active) return null;
-  const mode = active.getAttribute('data-mode');
+  const sel = document.getElementById('freq-mode-select');
+  if (!sel) return null;
+  const mode = sel.value;
   if (mode === 'interval') {
     const n = parseInt(document.getElementById('freq-iv-n').value, 10);
     const unit = document.getElementById('freq-iv-unit').value;
@@ -8262,9 +8272,10 @@ function freqCurrentDescriptor() {
   return null;
 }
 
-function freqSelectTab(btn, mode) {
-  document.querySelectorAll('.freq-tabs .freq-tab').forEach(b => b.classList.remove('active'));
-  btn.classList.add('active');
+// freqSelectMode 切换频率模式（interval/daily/weekly/monthly）。v2 polish
+// 替换了老的 freqSelectTab——触发点从 tab 按钮 onclick 改成 select onchange，
+// 但下方 freq-body 的可见性切换语义不变。
+function freqSelectMode(mode) {
   document.querySelectorAll('.freq-body').forEach(el => {
     el.style.display = el.getAttribute('data-mode') === mode ? '' : 'none';
   });
@@ -8377,29 +8388,68 @@ function freqToggleAdvanced(btn) {
   }
 }
 
-// buildCronWorkspaceBody renders only the workspace picker body (the outer
-// field label is provided by the two-column grid wrapper). Retained IDs:
-// #cron-ws-list, #cron-ws-custom-toggle, #cron-ws-custom-form, #cron-workdir
-// — collectors and toggle helpers depend on those names.
+// buildCronWorkspaceBody renders the workspace picker as a dropdown button +
+// popover（v2 polish，参考 Claude Scheduled Tasks 的 "Work in a project ▾"
+// 样式）。点击按钮展开列表；选中后 popover 折叠并把按钮文本改为所选 path。
+//
+// 保留 IDs 契约：#cron-ws-list, #cron-ws-custom-toggle, #cron-ws-custom-form,
+// #cron-workdir 被 cronSelectWorkspace / toggleCronWsCustom / 提交 collector
+// 读取；外壳改造但这些稳定锚点保持。aria-label="工作目录路径" 也是契约锁定
+// 字符串（static_ux_contract_test 会 grep）。
 function buildCronWorkspaceBody() {
-  let html = '';
+  return buildCronWorkspaceBodyInternal({
+    inputId: 'cron-workdir',
+    selectedPath: '',
+  });
+}
+
+function buildCronWorkspaceBodyInternal(opts) {
+  const selected = opts.selectedPath || '';
+  // Button label: 选中的项目名 > 选中的路径尾段 > 默认占位
+  let label = '默认工作目录';
+  if (selected) {
+    const match = projectsData.find(p => p.path === selected);
+    label = match ? match.name : shortPath(selected);
+  }
+  // 下拉按钮，点击 toggle popover
+  const buttonHtml =
+    '<button type="button" class="ws-dropdown-btn" id="' + escAttr(opts.buttonId || 'cron-ws-dropdown') + '"' +
+      ' aria-haspopup="listbox" aria-expanded="false" onclick="toggleCronWsDropdown(event)">' +
+      '<span class="ws-dropdown-icon" aria-hidden="true">&#128193;</span>' +
+      '<span class="ws-dropdown-label">' + esc(label) + '</span>' +
+      '<span class="ws-dropdown-caret" aria-hidden="true">&#9662;</span>' +
+    '</button>';
+  // Popover 内容：项目列表 + "自定义路径" 触发条目
+  let listItems = '';
   if (projectsData.length > 0) {
-    html += '<ul class="proj-pick" id="cron-ws-list" role="listbox" aria-label="工作目录">' +
-      projectsData.map(p =>
-        '<li role="option" data-path="' + escAttr(p.path) + '" onclick="cronSelectWorkspace(this, \'' + escJs(p.path) + '\')">' +
+    listItems = projectsData.map(p => {
+      const sel = selected && p.path === selected;
+      return '<li role="option" data-path="' + escAttr(p.path) + '"' +
+        (sel ? ' class="selected" aria-selected="true"' : ' aria-selected="false"') +
+        ' onclick="cronSelectWorkspace(this, \'' + escJs(p.path) + '\')">' +
           '<div class="pp-name">' + esc(p.name) + '</div>' +
           '<div class="pp-path">' + esc(shortPath(p.path)) + '</div>' +
-        '</li>'
-      ).join('') +
-      '<li id="cron-ws-custom-toggle" role="option" onclick="toggleCronWsCustom()">' +
-        '<div class="pp-custom"><span class="pp-custom-icon">+</span> 自定义路径</div>' +
-      '</li>' +
-      '</ul>';
+        '</li>';
+    }).join('');
   }
-  html += '<div id="cron-ws-custom-form" style="' + (projectsData.length > 0 ? 'display:none;' : '') + 'margin-top:6px">' +
-    '<input id="cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" aria-label="工作目录路径">' +
+  listItems +=
+    '<li id="cron-ws-custom-toggle" role="option" onclick="toggleCronWsCustom()">' +
+      '<div class="pp-custom"><span class="pp-custom-icon">+</span> 自定义路径</div>' +
+    '</li>';
+
+  const popoverHtml =
+    '<div class="ws-dropdown-popover" id="cron-ws-popover" role="listbox" aria-label="选择工作目录">' +
+      '<ul class="proj-pick" id="cron-ws-list" role="listbox" aria-label="工作目录">' +
+        listItems +
+      '</ul>' +
+      '<div id="cron-ws-custom-form" style="display:' + (selected && !projectsData.find(p => p.path === selected) ? '' : 'none') + ';padding:8px">' +
+        '<input id="' + escAttr(opts.inputId) + '" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '"' +
+          ' value="' + escAttr(selected && !projectsData.find(p => p.path === selected) ? selected : '') + '"' +
+          ' aria-label="工作目录路径">' +
+      '</div>' +
     '</div>';
-  return html;
+
+  return '<div class="ws-dropdown-wrap">' + buttonHtml + popoverHtml + '</div>';
 }
 
 // buildScheduleSection renders the frequency picker + advanced disclosure +
@@ -8640,6 +8690,40 @@ function collectCronNotifyValues() {
   return out;
 }
 
+// toggleCronWsDropdown 打开/关闭工作目录 popover。event.stopPropagation 防止
+// 顶层 document 的 outside-click handler 立即把它再关掉。
+function toggleCronWsDropdown(e) {
+  if (e) { e.preventDefault(); e.stopPropagation(); }
+  const pop = document.getElementById('cron-ws-popover');
+  const btn = document.getElementById('cron-ws-dropdown') || document.getElementById('edit-cron-ws-dropdown');
+  if (!pop) return;
+  const open = pop.classList.toggle('open');
+  if (btn) btn.setAttribute('aria-expanded', open ? 'true' : 'false');
+  if (open) wireCronWsOutsideClick();
+}
+
+// 单例 outside-click 监听，capture 阶段判断点击是否在 popover 外部；
+// 若是则关闭。只在 popover 打开期间挂载，关闭时自 remove。
+function wireCronWsOutsideClick() {
+  if (wireCronWsOutsideClick._on) return;
+  const h = function(ev) {
+    const pop = document.getElementById('cron-ws-popover');
+    const btn = document.getElementById('cron-ws-dropdown') || document.getElementById('edit-cron-ws-dropdown');
+    if (!pop || !pop.classList.contains('open')) {
+      document.removeEventListener('mousedown', h, true);
+      wireCronWsOutsideClick._on = false;
+      return;
+    }
+    if (pop.contains(ev.target) || (btn && btn.contains(ev.target))) return;
+    pop.classList.remove('open');
+    if (btn) btn.setAttribute('aria-expanded', 'false');
+    document.removeEventListener('mousedown', h, true);
+    wireCronWsOutsideClick._on = false;
+  };
+  document.addEventListener('mousedown', h, true);
+  wireCronWsOutsideClick._on = true;
+}
+
 function cronSelectWorkspace(el, path) {
   const overlay = el.closest('.modal-overlay');
   overlay._cronWorkDir = path;
@@ -8661,6 +8745,26 @@ function cronSelectWorkspace(el, path) {
   }
   const toggle = document.getElementById('cron-ws-custom-toggle');
   if (toggle) toggle.style.display = '';
+  // v2 polish: 选中即把 popover 折叠 + 把按钮文本更新为项目名
+  updateCronWsDropdownLabel(path);
+  closeCronWsPopover();
+}
+
+function updateCronWsDropdownLabel(path) {
+  const btn = document.getElementById('cron-ws-dropdown') || document.getElementById('edit-cron-ws-dropdown');
+  if (!btn) return;
+  const labelEl = btn.querySelector('.ws-dropdown-label');
+  if (!labelEl) return;
+  if (!path) { labelEl.textContent = '默认工作目录'; return; }
+  const match = projectsData.find(p => p.path === path);
+  labelEl.textContent = match ? match.name : shortPath(path);
+}
+
+function closeCronWsPopover() {
+  const pop = document.getElementById('cron-ws-popover');
+  const btn = document.getElementById('cron-ws-dropdown') || document.getElementById('edit-cron-ws-dropdown');
+  if (pop) pop.classList.remove('open');
+  if (btn) btn.setAttribute('aria-expanded', 'false');
 }
 
 function toggleCronWsCustom() {
@@ -9242,37 +9346,15 @@ function editCronJob(id) {
   freqUpdate();
 }
 
-// buildEditCronWorkspaceBody is the edit-mode counterpart to
-// buildCronWorkspaceBody — renders the same picker but with the current
-// job.work_dir pre-selected (if it matches a known project) or visible in
-// the custom input. Shares the input#cron-workdir / #edit-cron-workdir
-// contract via the explicit inputId parameter.
+// buildEditCronWorkspaceBody is the edit-mode counterpart. v2 polish 之后
+// 与 create 共享 buildCronWorkspaceBodyInternal，只传不同的 inputId 和
+// 已选中的 currentDir 用来回填按钮文本 + 自定义路径输入。
 function buildEditCronWorkspaceBody(currentDir) {
-  const hasProjects = projectsData.length > 0;
-  const matched = hasProjects && currentDir ? projectsData.find(p => p.path === currentDir) : null;
-  const showCustom = !matched && currentDir;
-  let html = '';
-  if (hasProjects) {
-    html += '<ul class="proj-pick" id="cron-ws-list" role="listbox" aria-label="工作目录">' +
-      projectsData.map(p => {
-        const selected = matched && matched.path === p.path;
-        return '<li role="option" data-path="' + escAttr(p.path) + '"' +
-          (selected ? ' class="selected" aria-selected="true"' : '') +
-          ' onclick="cronSelectWorkspace(this, \'' + escJs(p.path) + '\')">' +
-            '<div class="pp-name">' + esc(p.name) + '</div>' +
-            '<div class="pp-path">' + esc(shortPath(p.path)) + '</div>' +
-          '</li>';
-      }).join('') +
-      '<li id="cron-ws-custom-toggle" role="option"' + (showCustom ? ' style="display:none"' : '') +
-      ' onclick="toggleCronWsCustom()">' +
-        '<div class="pp-custom"><span class="pp-custom-icon">+</span> 自定义路径</div>' +
-      '</li>' +
-      '</ul>';
-  }
-  html += '<div id="cron-ws-custom-form" style="' + (hasProjects && !showCustom ? 'display:none;' : '') + 'margin-top:6px">' +
-    '<input id="edit-cron-workdir" placeholder="' + escAttr(defaultWorkspace || '/home/user/project') + '" value="' + escAttr(currentDir || '') + '" aria-label="工作目录路径">' +
-    '</div>';
-  return html;
+  return buildCronWorkspaceBodyInternal({
+    inputId: 'edit-cron-workdir',
+    buttonId: 'edit-cron-ws-dropdown',
+    selectedPath: currentDir || '',
+  });
 }
 
 function authHeaders() {
