@@ -75,6 +75,12 @@ const sessionScrollPos = {};
 // transitions (i.e. the model finished answering) and cleared when the user opens
 // the card. Drives the sidebar chat-style unread bubble.
 const sessionUnread = {};
+// sessionOptimisticRunning: sid(key,node) -> true when sendMessage flipped
+// state to 'running' locally before the server broadcast arrived. Rolled back
+// by onSendAck on busy/error so the banner doesn't get stuck. Cleared on
+// accepted/queued (server-side session_state takes over) and on any real
+// session_state WS push.
+const sessionOptimisticRunning = {};
 let historySessionsData = []; // from API history_sessions (all filesystem sessions)
 
 function getToken() { return ''; }
@@ -124,7 +130,15 @@ async function fetchSessions() {
     const backendKeys = new Set();
     (data.sessions || []).forEach(s => {
       const n = s.node || 'local';
-      sessionsData[sid(s.key, n)] = s;
+      const sKey = sid(s.key, n);
+      // Preserve the optimistic 'running' flip when the REST snapshot is still
+      // lagging behind the send — otherwise the banner appears for a split
+      // second, then a /api/sessions poll rewrites state to 'ready' and hides
+      // it until the server's real session_state broadcast catches up.
+      if (sessionOptimisticRunning[sKey] && s.state !== 'running') {
+        s = Object.assign({}, s, { state: 'running' });
+      }
+      sessionsData[sKey] = s;
       backendKeys.add(s.key);
     });
 
@@ -2442,6 +2456,7 @@ async function sendMessage() {
       if (input) clearMsg(input);
       delete sessionDrafts[selectedKey];
       clearPendingFiles();
+      markSessionOptimisticRunning(selectedKey, selectedNode);
       sending = false;
       if (btn) btn.classList.remove('sending');
       return;
@@ -2491,10 +2506,20 @@ async function sendMessage() {
       return;
     }
 
+    // /clear and /new return status:"reset" — no CLI turn to run, so don't
+    // flip to 'running'. Every other success ('accepted'/'queued') should
+    // show the banner immediately. Read the body once (before clearing the
+    // input) so we can branch on status without reviving the stale text.
+    let ackStatus = '';
+    try { const j = await r.json(); if (j && j.status) ackStatus = j.status; } catch (_) {}
+
     // Clear input only after confirmed success
     if (input) clearMsg(input);
     delete sessionDrafts[selectedKey];
     clearPendingFiles();
+    if (ackStatus !== 'reset') {
+      markSessionOptimisticRunning(selectedKey, selectedNode);
+    }
 
     // Speed up polling when WS not connected
     if (!wsm.isConnected()) {
@@ -2520,6 +2545,55 @@ function clearPendingFiles() {
   pendingFiles.forEach(f => { if (f.blobUrl) URL.revokeObjectURL(f.blobUrl); });
   pendingFiles = [];
   renderFilePreviews();
+}
+
+// markSessionOptimisticRunning flips the selected session's local state to
+// 'running' immediately after send succeeds so the running-banner shows
+// without waiting for the server's session_state broadcast. The server can
+// take 100ms–several seconds to emit BroadcastSessionReady when GetOrCreate
+// has to spawn a new CLI subprocess, during which the dashboard previously
+// looked idle even though the turn was already queued. Rolled back by
+// onSendAck on 'busy'/'error' so a rejected send doesn't leave a stuck banner.
+// Tracked with a 20s safety timer so a lost session_state push can't keep
+// the banner stuck forever.
+const _optimisticRunningTimers = {};
+function markSessionOptimisticRunning(key, node) {
+  if (!key) return;
+  const sKey = sid(key, node || 'local');
+  const sd = sessionsData[sKey];
+  if (!sd) return;
+  if (sd.state === 'running') return; // server already said running
+  sd.state = 'running';
+  sessionOptimisticRunning[sKey] = true;
+  if (_optimisticRunningTimers[sKey]) clearTimeout(_optimisticRunningTimers[sKey]);
+  _optimisticRunningTimers[sKey] = setTimeout(() => {
+    delete _optimisticRunningTimers[sKey];
+    // Only rollback if still optimistic (no real running state arrived).
+    if (sessionOptimisticRunning[sKey]) {
+      rollbackOptimisticRunning(key, node);
+    }
+  }, 20000);
+  if (key === selectedKey && (node || 'local') === selectedNode) {
+    updateSendButton('running');
+  }
+}
+
+function rollbackOptimisticRunning(key, node) {
+  if (!key) return;
+  const sKey = sid(key, node || 'local');
+  if (!sessionOptimisticRunning[sKey]) return;
+  delete sessionOptimisticRunning[sKey];
+  if (_optimisticRunningTimers[sKey]) {
+    clearTimeout(_optimisticRunningTimers[sKey]);
+    delete _optimisticRunningTimers[sKey];
+  }
+  const sd = sessionsData[sKey];
+  if (sd && sd.state === 'running') {
+    sd.state = 'ready';
+    if (key === selectedKey && (node || 'local') === selectedNode) {
+      updateSendButton('ready');
+    }
+  }
 }
 
 // --- Running banner: tool activity + agent tracking ---
@@ -7100,6 +7174,13 @@ const wsm = {
   },
 
   onSendAck(msg) {
+    // "reset" = /clear or /new — the send was consumed by the router to reset
+    // the session, not handed to the CLI, so roll back the optimistic running
+    // flip. No banner, no turn.
+    if (msg.status === 'reset') {
+      rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
+      return;
+    }
     // "accepted" = owner of a new turn, "queued" = appended to an active turn.
     // Both are success cases; the dashboard should behave the same way.
     if (msg.status === 'accepted' || msg.status === 'queued') {
@@ -7144,6 +7225,7 @@ const wsm = {
       showToast('会话正忙，消息未送达，请稍后重试', 'error');
       const opt = document.querySelector('.optimistic-msg');
       if (opt) opt.remove();
+      rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
     } else if (msg.status === 'error') {
       // The WS send_ack error is an in-band message, not an HTTP status,
       // but treat the server-supplied `error` string the same way as an
@@ -7152,12 +7234,21 @@ const wsm = {
       // Remove optimistic message on send failure
       const opt = document.querySelector('.optimistic-msg');
       if (opt) opt.remove();
+      rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
     }
   },
 
   onSessionState(msg) {
     const msgNode = msg.node || 'local';
     const sKey = sid(msg.key, msgNode);
+    // Real state arrived — the optimistic flip has served its purpose, regardless
+    // of whether the server says running/ready/dead. Clear the flag so future
+    // turns don't short-circuit the running→ready rollback logic.
+    delete sessionOptimisticRunning[sKey];
+    if (_optimisticRunningTimers[sKey]) {
+      clearTimeout(_optimisticRunningTimers[sKey]);
+      delete _optimisticRunningTimers[sKey];
+    }
     const prev = sessionsData[sKey] || {};
     const prevState = prev.state;   // capture before mutation
     const wasDead = prev.death_reason && prevState !== 'running';
