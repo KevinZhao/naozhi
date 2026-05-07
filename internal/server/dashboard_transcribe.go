@@ -50,6 +50,9 @@ func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Requ
 		http.Error(w, "invalid multipart form", http.StatusBadRequest)
 		return
 	}
+	if rejectIfTooManyFields(w, r) {
+		return
+	}
 	defer r.MultipartForm.RemoveAll()
 
 	files := r.MultipartForm.File["audio"]

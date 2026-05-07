@@ -36,7 +36,36 @@ const (
 	// Content-Disposition headers, form-field metadata). Lifted from 11 MB
 	// when PDFs joined the upload path.
 	uploadBodyBytes = maxPDFBytes + (2 << 20)
+
+	// RNEW-SEC-001: cap the number of non-file form fields we accept in
+	// any multipart request. Go's http package has a soft default of 1000
+	// Value entries; for naozhi no legitimate request needs more than a
+	// handful (key, text, node, workspace, resume_id, backend, file_ids
+	// repeated up to maxFilesPerSend). A padded-body attacker could
+	// otherwise inflate the in-memory Value map without exceeding our
+	// byte cap. 32 leaves generous headroom for legitimate clients.
+	maxMultipartFields = 32
 )
+
+// rejectIfTooManyFields returns true (and writes a 400) when the
+// multipart form carries more than maxMultipartFields non-file entries.
+// Callers must invoke this immediately after ParseMultipartForm and bail
+// out on a true return. File uploads are counted separately by the
+// caller-specific "files"/"file" slice length checks.
+func rejectIfTooManyFields(w http.ResponseWriter, r *http.Request) bool {
+	if r.MultipartForm == nil {
+		return false
+	}
+	total := 0
+	for _, vs := range r.MultipartForm.Value {
+		total += len(vs)
+		if total > maxMultipartFields {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "too many form fields"})
+			return true
+		}
+	}
+	return false
+}
 
 // SendHandler serves the HTTP send API, delegating to Hub for local sends.
 type SendHandler struct {
@@ -125,6 +154,15 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 		return cli.Attachment{}, errors.New("failed to read uploaded file")
 	}
 
+	// RNEW-SEC-002: defence-in-depth against a PDF-shaped gzip bomb. Our
+	// downstream doesn't decompress attachments today, but the two-byte
+	// gzip magic (0x1F 0x8B) would not trigger DetectContentType's PDF
+	// branch — so this check catches it before anything else can. Still
+	// we reject explicitly to stop any future component from unwittingly
+	// accepting a compressed container for text/pdf.
+	if len(data) >= 2 && data[0] == 0x1F && data[1] == 0x8B {
+		return cli.Attachment{}, fmt.Errorf("compressed files are not accepted")
+	}
 	detected := http.DetectContentType(data)
 	if isPDF {
 		// PDF magic is "%PDF-" in the first 5 bytes; http.DetectContentType
@@ -463,6 +501,9 @@ func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "bad multipart form"})
 		return
 	}
+	if rejectIfTooManyFields(w, r) {
+		return
+	}
 	files := r.MultipartForm.File["file"]
 	if len(files) != 1 {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "exactly one file required"})
@@ -526,6 +567,9 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseMultipartForm(12 << 20); err != nil {
 			slog.Warn("send: multipart parse failed", "err", err)
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "bad multipart form"})
+			return
+		}
+		if rejectIfTooManyFields(w, r) {
 			return
 		}
 		key = r.FormValue("key")
@@ -939,7 +983,16 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	etag := fmt.Sprintf(`"%d-%d"`, info.Size(), info.ModTime().UnixNano())
+	// RNEW-SEC-004: ETag is derived from sha256(size||mtime) and then
+	// truncated to 16 hex chars. The prior "%d-%d" form leaked both the
+	// exact size in bytes AND a nanosecond-precision mtime through the
+	// response header on any authenticated GET — enough to passively
+	// track when a user's workspace attachments change. The hash
+	// preserves cacheability (same inputs → same ETag) and collision
+	// resistance is ample for a per-object validator.
+	etagSeed := fmt.Sprintf("%d|%d", info.Size(), info.ModTime().UnixNano())
+	etagSum := sha256.Sum256([]byte(etagSeed))
+	etag := `"` + hex.EncodeToString(etagSum[:8]) + `"`
 	if inm := r.Header.Get("If-None-Match"); inm != "" && inm == etag {
 		w.Header().Set("ETag", etag)
 		w.WriteHeader(http.StatusNotModified)

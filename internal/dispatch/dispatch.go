@@ -485,8 +485,17 @@ func (d *Dispatcher) sendAndReply(
 	// handler-chain alloc.
 
 	// Takeover check only on first message for a key.
+	//
+	// RNEW-010: takeoverFn returns bool to indicate whether an external
+	// Claude session was adopted. We intentionally ignore the result here:
+	// success means the old process was killed and the session was
+	// registered for resume — GetOrCreate below will rebuild with the
+	// resumed SessionID. Failure (returns false) means no external session
+	// was found, which is the common case; GetOrCreate still needs to run
+	// to spawn a fresh one. Either way the caller behaviour is identical,
+	// so we discard explicitly rather than branch on it.
 	if isFirst {
-		d.takeoverFn(ctx, session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID), key, opts)
+		_ = d.takeoverFn(ctx, session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID), key, opts)
 	}
 
 	sess, sessStatus, err := d.router.GetOrCreate(ctx, key, opts)

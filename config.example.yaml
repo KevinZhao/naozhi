@@ -1,3 +1,37 @@
+# naozhi config.example.yaml — copy to config.yaml before first run.
+#
+# ============================================================================
+# Configuration precedence (RNEW-ARCH-405)
+# ============================================================================
+# Values are resolved top-down; later sources override earlier ones when the
+# same field is set in multiple places.
+#
+#   1. Built-in defaults         in internal/config/config.go (applyDefaults)
+#   2. config.yaml               this file (--config flag path)
+#   3. ~/.claude/settings.json   a subset of Claude CLI env vars (proxy, API
+#                                base URL) gets injected into os.Environ
+#                                before CLI spawn. Applied by
+#                                cmd/naozhi/main.go applyClaudeEnvSettings.
+#   4. .naozhi/<project>.yaml    per-project overrides when a CWD matches a
+#                                project entry. Only the planner_defaults
+#                                subset is respected.
+#   5. Environment variables     `${VAR}` expansion happens in *this* YAML
+#                                at load time, and a handful of runtime
+#                                knobs (NAOZHI_DASHBOARD_TOKEN,
+#                                TZ, HOME …) are read directly via
+#                                os.Getenv.
+#   6. CLI flags                 `--config`, `--log-level`, `--doctor`,
+#                                `--install`; these always win.
+#
+# Two-name compatibility:
+#   - `nodes:` and `reverse_nodes:` are treated as synonyms; pick one.
+#   - `workspaces:` and `projects:` map to the same Project registry.
+#   - `session.cwd` and `session.workspace` both set the default CWD.
+#
+# When in doubt: `sudo NAOZHI_DASHBOARD_TOKEN=xxx bin/naozhi --config …
+# --doctor` prints the effective resolved config.
+# ============================================================================
+
 server:
   addr: ":8180"
   dashboard_token: "${NAOZHI_DASHBOARD_TOKEN}"
@@ -15,6 +49,25 @@ cli:
   # <summary>, <kbd>, <sub>, <sup> etc. render as literal text instead of
   # collapsible widgets. Instruct the model to stick to pure Markdown.
   args: []
+
+  # Optional: multiple backends in one deployment (RNEW-DOC-421).
+  #
+  # Uncomment `backends:` to enable Claude + Kiro side-by-side. When
+  # `backends` is empty naozhi uses single-backend mode driven by
+  # cli.backend (default "claude") and cli.path/model/args above.
+  #
+  # Per-backend fields are optional and fall back to the top-level cli.*
+  # values above. The `backend` field picks which entry is the default
+  # when a new session does not request a specific one; the first entry
+  # also appears first in the dashboard backend picker.
+  #
+  #backend: "claude"
+  #backends:
+  #  - id: "claude"
+  #    # path/model/args inherit from cli.path + cli.args above when omitted.
+  #  - id: "kiro"
+  #    path: "~/.local/bin/kiro"
+  #    # ACP protocol is auto-selected by id="kiro"; no extra flag needed.
 
 session:
   max_procs: 20

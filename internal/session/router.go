@@ -318,7 +318,11 @@ func panicSafeSpawnFn(
 			slog.Error("spawnSession: wrapper.Spawn panicked",
 				"key", key, "backend", backendID, "panic", r,
 				"stack", string(debug.Stack()))
-			err = fmt.Errorf("spawn process: panic: %v", r)
+			// RNEW-009: caller at line 1656 wraps with "spawn process: %w".
+			// Keep this message unprefixed so logs read
+			// "spawn process: panic: <value>" instead of the doubled
+			// "spawn process: spawn process: panic: ...".
+			err = fmt.Errorf("panic: %v", r)
 		}
 	}()
 	return spawn(ctx, opts)

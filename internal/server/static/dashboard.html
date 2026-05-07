@@ -1031,8 +1031,15 @@ body.kbd-open .sidebar-footer{display:none}
   .hdr-btn{min-width:44px;min-height:44px}
   .hdr-btns{gap:8px}
   .section-header .sh-btn{min-width:32px;min-height:32px;padding:6px}
-  .session-card .btn-dismiss{min-width:40px;min-height:40px;padding:6px;font-size:19px;opacity:.75}
-  .btn-mobile-back{min-width:40px;min-height:40px}
+  /* RNEW-UX-011: bumped from 40 to 44 to hit the WCAG 2.5.5 AA floor for
+     touch targets. The visual footprint stays the same (padding + icon
+     are unchanged); only the hit-box widens. */
+  .session-card .btn-dismiss{min-width:44px;min-height:44px;padding:8px;font-size:19px;opacity:.75}
+  .btn-mobile-back{min-width:44px;min-height:44px}
+  /* RNEW-UX-011: manual-reconnect chip was 22px tall — impossible to tap
+     reliably on a phone right after a WS blip. Only grow the hit-box on
+     coarse pointers so desktop keeps the compact 11px / 22px chrome. */
+  .sidebar-status .status-reconnect{min-width:44px;min-height:44px;padding:8px 12px;font-size:13px}
   .empty-cta-btn{min-height:44px}
   .fv-btn{min-width:40px;min-height:40px}
   /* Inline @file reference chips: keep the visual small but grow the tap area. */

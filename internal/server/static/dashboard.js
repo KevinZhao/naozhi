@@ -5564,12 +5564,23 @@ function escJs(s) {
   if (!s) return '';
   return String(s).replace(/\\/g,'\\\\').replace(/'/g,"\\'").replace(/"/g,'\\"').replace(/\n/g,'\\n').replace(/\r/g,'\\r').replace(/</g,'\\u003c').replace(/>/g,'\\u003e');
 }
-// URL schemes that are safe to embed in <a href>. Anything else (including
-// javascript:, data:, vbscript:, file:, about:) gets rewritten to '#'.
+// URL schemes that are safe to embed in <a href>.
+// RNEW-SEC-007: Only https?: and fragment-only URLs (#...) are accepted.
+// Previously the allowlist also matched mailto:, absolute paths (/...),
+// and query-only URLs (?...). Those introduced defence-in-depth gaps:
+//   - mailto: can trigger unexpected behaviour in Electron/extension hosts
+//     and is never present in LLM-rendered markdown anchor targets today.
+//   - A single leading "/" lets any string starting with a slash pass the
+//     check; if a caller ever forgot to esc() the capture first, a payload
+//     like "/"+"><script>..." would reach href and bypass the scheme
+//     gate. The stricter regex fails closed in that scenario.
+// Internal links should be constructed against absolute /api/... paths in
+// code, not routed through safeUrl.
+// Anything else (javascript:, data:, vbscript:, file:, about:) -> '#'.
 function safeUrl(u) {
   if (!u) return '#';
   const trimmed = String(u).trim();
-  if (/^(https?:|mailto:|\/|#|\?)/i.test(trimmed)) return trimmed;
+  if (/^(https?:|#)/i.test(trimmed)) return trimmed;
   return '#';
 }
 
@@ -6722,7 +6733,14 @@ const wsm = {
     // happily re-try every 1-30s and wake the 429 bucket over and over.
     const now = Date.now();
     const authGap = Math.max(0, this._authBlockUntil - now);
-    const delay = Math.max(this.backoff, authGap);
+    // RNEW-UX-001: add randomised jitter (0-500ms) on top of the computed
+    // delay. Without jitter, N tabs that all dropped together on the same
+    // server restart would redial on identical millisecond ticks, briefly
+    // saturating the upgrade limiter and causing a thundering herd. The
+    // jitter is additive (never shortens the gate) so the auth-block
+    // invariant above is preserved.
+    const jitter = Math.floor(Math.random() * 500);
+    const delay = Math.max(this.backoff, authGap) + jitter;
     this.reconnectTimer = setTimeout(() => {
       this.reconnectTimer = null;
       this.connect();
@@ -9541,6 +9559,32 @@ scanDiscovered();
 discoveredPollTimer = setInterval(scanDiscovered, 30000);
 fetchCronJobs(); // load initial cron state for badge
 wsm.connect();
+
+// RNEW-UX-014: suspend background pollers when the tab is hidden. 1-5s
+// setInterval loops on a backgrounded tab burn battery, mobile data, and
+// server bandwidth for no user-visible benefit. Resume on visibility
+// change so the first thing a returning user sees is fresh state.
+// WS event delivery is not affected — the socket stays open in hidden
+// tabs and delivers live updates instantly when the user returns.
+(function () {
+  const stopPollers = () => {
+    if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
+    if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
+  };
+  const startPollers = () => {
+    if (!sessionPollTimer) {
+      fetchSessions(); // immediate refresh on resume so UI is not stale
+      sessionPollTimer = setInterval(fetchSessions, 5000);
+    }
+    if (!discoveredPollTimer) {
+      discoveredPollTimer = setInterval(scanDiscovered, 30000);
+    }
+  };
+  document.addEventListener('visibilitychange', () => {
+    if (document.hidden) stopPollers();
+    else startPollers();
+  });
+})();
 initMobile();
 initViewportTracking();
 initSwipeDelete();

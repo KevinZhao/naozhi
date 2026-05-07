@@ -535,6 +535,24 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	}
 }
 
+// handleRequest dispatches a reverse-RPC request received from the primary.
+//
+// Context selection matrix (RNEW-008):
+//
+//   - connCtx ("connection-scoped"): cancelled when handleConn returns
+//     (WebSocket drop, ping timeout, graceful shutdown). Use for any work
+//     whose result is meaningless after this connection ends, so
+//     reconnects do not leak goroutines. Examples: `send` stream waits,
+//     synchronous `fetch_events`, `router.GetOrCreate` called on the
+//     RPC's behalf.
+//
+//   - appCtx ("app-scoped"): cancelled only when the Connector shuts
+//     down entirely. Use when the work MUST outlive the current WS
+//     connection — typically takeover / discovery waits where the
+//     CLI child process is expected to survive reconnects.
+//
+// New RPC branches: default to connCtx. Only switch to appCtx when you
+// can justify in a comment why cross-reconnect persistence is required.
 func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.ReverseMsg, wg *sync.WaitGroup) (json.RawMessage, error) {
 	switch req.Method {
 	case "fetch_sessions":
@@ -1049,7 +1067,12 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 				// entries are chronological; last entry has the highest timestamp
 				lastTime = entries[len(entries)-1].Time
 			}
-			// Only push session_state when it actually changes
+			// Only push session_state when it actually changes.
+			// RNEW-005 invariant: sess is non-nil here. It was nil-checked
+			// at loop entry (line 1031) and the only code path that
+			// reassigns it inside the loop (line 1057) also gates on
+			// non-nil. Do not introduce any assignment to sess without
+			// re-verifying this precondition — Snapshot() would panic.
 			snap := sess.Snapshot()
 			if snap.State != lastState {
 				lastState = snap.State

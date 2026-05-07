@@ -581,11 +581,16 @@ func (p *Process) startReadLoop() {
 // readLoop reads NDJSON messages from the shim socket and dispatches events.
 func (p *Process) readLoop() {
 	log := p.slogger()
-	// LIFO defer order is important: the recover must run *first* so
-	// p.State is set to StateDead before the channels below close. Otherwise
-	// a waiter on <-p.done could read a stale p.State in the window between
-	// done-close and recover running. Defers execute in reverse declaration
-	// order, so the recover block is registered last.
+	// RNEW-007: Defers execute LIFO. Declaration order below is:
+	//   close(eventCh) -> close(done) -> CloseSubscribers -> recover
+	// Execution order on return is the reverse:
+	//   1. recover block: transition p.State to StateDead and fire onTurnDone
+	//   2. CloseSubscribers: unblock EventLog subscribers
+	//   3. close(done): signal readLoop exit to waiters
+	//   4. close(eventCh): isChanAlive relies on done closing BEFORE eventCh so
+	//      any producer guarded by "is done open?" never sends on a closed
+	//      eventCh. See drainStaleEvents / isChanAlive for the invariant.
+	// If you reorder these defers, re-verify the isChanAlive invariant.
 	defer close(p.eventCh)
 	defer close(p.done)
 	defer p.eventLog.CloseSubscribers()

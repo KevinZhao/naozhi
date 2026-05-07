@@ -1,0 +1,33 @@
+# CODEOWNERS (RNEW-DOC-422)
+#
+# 规则优先级：从下往上后匹配者胜出。GitHub 会据此自动把 PR 指派给对应
+# owner，也是 Required Reviewers 的数据源。
+#
+# 目前 naozhi 维护者只有一位，所有路径都指向 @kevinzhao。若以后加入
+# co-maintainer，只需在对应子路径另加一行即可。
+
+*                                   @kevinzhao
+
+# Security-sensitive paths 单独列出以确保任何 PR 触碰时立即提醒维护者，
+# 即使路径已被上面的 `*` 覆盖。
+/internal/server/dashboard_auth.go  @kevinzhao
+/internal/server/csrf.go            @kevinzhao
+/internal/server/wshub.go           @kevinzhao
+/internal/platform/feishu/          @kevinzhao
+/internal/project/validate.go       @kevinzhao
+/internal/server/dashboard_cron.go  @kevinzhao
+/internal/server/dashboard_send.go  @kevinzhao
+/internal/shim/                     @kevinzhao
+
+# 部署 / 运维
+/deploy/                            @kevinzhao
+/cmd/naozhi/service.go              @kevinzhao
+/Makefile                           @kevinzhao
+/install.sh                         @kevinzhao
+
+# Governance / 治理文档
+/CONTRIBUTING.md                    @kevinzhao
+/SECURITY.md                        @kevinzhao
+/CHANGELOG.md                       @kevinzhao
+/CODE_OF_CONDUCT.md                 @kevinzhao
+/LICENSE                            @kevinzhao
