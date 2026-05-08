@@ -338,8 +338,21 @@ function renderSidebar(data) {
     // key so two unrelated folders that share a basename (e.g. /a/tmp and
     // /b/tmp) do not collapse into a single mislabeled group.
     const groups = {};
+    const cronItems = [];
     const ungrouped = [];
     allItems.forEach(s => {
+      // Cron-scheduler sessions (key prefix "cron:") always belong in the
+      // dedicated "定时任务" section, regardless of whether the job has a
+      // WorkDir (which would otherwise bucket them under a project group)
+      // or not (which previously sent them to the "未分组" catch-all).
+      // Operators expect every scheduled task to live together so they can
+      // eyeball attention and trigger status without scanning 10 project
+      // headers for cron badges.
+      const isCron = typeof s.key === 'string' && s.key.indexOf('cron:') === 0;
+      if (isCron) {
+        cronItems.push(s);
+        return;
+      }
       const pn = s.project || '';
       if (pn) {
         const node = s.node || 'local';
@@ -376,7 +389,9 @@ function renderSidebar(data) {
     });
 
     const groupKeys = Object.keys(groups);
-    if (groupKeys.length > 0) {
+    // cron 分组要和 project 分组并列展示；如果只有 cron session（无任何
+    // project header），也要保留分组结构而不是回落到扁平列表。
+    if (groupKeys.length > 0 || cronItems.length > 0) {
       // Pre-compute per-group sort keys once — avoids repeated map lookups
       // inside the sort comparator (fav flag, max firstSeen, display name).
       // This keeps comparator at O(1) scalar comparisons rather than
@@ -425,6 +440,16 @@ function renderSidebar(data) {
         // affordance, so a duplicate "New session in X" CTA would just add
         // visual noise.
       });
+      if (cronItems.length > 0) {
+        html += sectionHeaderCronHtml(cronItems.length);
+        if (!collapsedProjects.has('cron:__all__')) {
+          // Stable ordering inside the cron bucket: by firstSeen desc, same
+          // as the global sort above already placed them. Use them as-is
+          // rather than re-sorting so the earlier "running first" tier is
+          // preserved (cron stubs that are actually executing bubble up).
+          html += cronItems.map(sessionCardHtml).join('');
+        }
+      }
       if (ungrouped.length > 0) {
         // Final catch-all: sessions with no project name AND no workspace
         // (rare — usually transient takeover/planner edge cases). The old
@@ -609,6 +634,31 @@ const GITHUB_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-
 // Chevron: points down when expanded (`▾`-like), rotated 90deg via CSS
 // when collapsed so the same glyph serves both states.
 const CHEVRON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
+
+// sectionHeaderCronHtml renders the dedicated "定时任务" section header that
+// holds every cron-scheduler session (key prefix "cron:"). The header is
+// collapsible (key "cron:__all__", shared in collapsedProjects), and its
+// trailing "+" button jumps straight to the cron-create modal so operators
+// have a one-click path to schedule a new task — mirroring the per-project
+// header's create affordance but bound to the cron surface instead of a
+// workspace. Favorite / GitHub / rename are intentionally absent because
+// the cron group is not a ProjectManager entity.
+function sectionHeaderCronHtml(count) {
+  const ck = 'cron:__all__';
+  const collapsed = collapsedProjects.has(ck);
+  const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
+  const cTitle = collapsed ? '展开' : '收起';
+  const collapseBtn = '<button type="button" class="' + cCls + '" data-key="' + escAttr(ck) + '" title="' + cTitle + ' 定时任务" aria-label="' + cTitle + ' 定时任务" aria-expanded="' + (collapsed ? 'false' : 'true') + '" onclick="event.stopPropagation();toggleProjectCollapsed(this.dataset.key)">' + CHEVRON_SVG + '</button>';
+  const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
+  const newBtn = '<button type="button" class="sh-btn sh-new" title="新建定时任务" aria-label="新建定时任务" onclick="event.stopPropagation();createNewCronJob()"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>';
+  const collapsedCls = collapsed ? ' is-collapsed' : '';
+  return '<div class="section-header section-header-cron' + collapsedCls + '" role="group" aria-label="定时任务">' +
+    collapseBtn +
+    '<span class="sh-name" title="定时任务">⏰ 定时任务</span>' +
+    countBadge +
+    newBtn +
+    '</div>';
+}
 
 // sectionHeaderFallbackHtml renders the minimal header for ad-hoc workspace
 // groups (p.fallback === true). The group's "project name" is just the
