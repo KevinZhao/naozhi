@@ -44,6 +44,14 @@ const (
 	// value used to produce a silent "connection reset by peer" from the
 	// shim — now we fail fast with a clear error so the dashboard can surface it.
 	maxStdinLineBytes = 12 * 1024 * 1024
+
+	// lineBufShrinkThreshold caps how much capacity readLoop's lineBuf is
+	// allowed to retain across iterations before being shrunk back to the
+	// 4 KiB starting size. A rare large legitimate event (e.g. a 50 KiB
+	// assistant-text chunk) would otherwise pin the backing array for the
+	// process lifetime; at 50 live sessions that is ~2.5 MiB of silent
+	// resident overhead. Legit large events re-grow on demand.
+	lineBufShrinkThreshold = 64 * 1024
 )
 
 // ErrMessageTooLarge is returned when a user message (after JSON encoding)
@@ -660,12 +668,21 @@ func (p *Process) readLoop() {
 		// Without this, a single large event forces every subsequent
 		// iteration to re-grow from 4KB through a chain of doublings.
 		//
-		// Exception: on capExceeded we shrink back to a fresh 4KB buffer.
+		// Exception 1: on capExceeded we shrink back to a fresh 4KB buffer.
 		// Holding onto a ~16MB backing array forever because one malformed
-		// shim message grew us there is a silent memory hog; the rare legit
-		// large event will pay the re-grow cost again rather than keeping
-		// pathological capacity on the hot path.
+		// shim message grew us there is a silent memory hog.
+		//
+		// Exception 2: if a single legitimate large event pushed capacity
+		// past lineBufShrinkThreshold (64 KiB), reset too. Most stream-json
+		// events are <4 KiB; one 50 KB assistant text event per session
+		// would otherwise pin ~50 KB of backing memory on the readLoop
+		// goroutine for the process lifetime (50 sessions × 50 KB ≈ 2.5 MB
+		// of quiet resident overhead). A legit large event paying the
+		// re-grow cost again is cheaper than the permanent footprint.
 		lineBuf = line
+		if cap(lineBuf) > lineBufShrinkThreshold && !capExceeded {
+			lineBuf = make([]byte, 0, 4096)
+		}
 		if capExceeded {
 			log.Warn("readLoop: oversized shim message, skipping", "size", len(line))
 			lineBuf = make([]byte, 0, 4096)
@@ -1968,10 +1985,22 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 			Prompt      string `json:"prompt"`
 		}
 		if json.Unmarshal(input, &inp) == nil {
-			for _, v := range []string{inp.Description, inp.FilePath, inp.Path, inp.Command, inp.Pattern, inp.Prompt} {
-				if v != "" {
-					return toolName + " " + TruncateRunes(v, 80)
-				}
+			// Avoid a []string{...} slice literal on the unknown-tool
+			// fallback path — a chain of short-circuit checks matches the
+			// previous semantics without the per-call slice alloc.
+			switch {
+			case inp.Description != "":
+				return toolName + " " + TruncateRunes(inp.Description, 80)
+			case inp.FilePath != "":
+				return toolName + " " + TruncateRunes(inp.FilePath, 80)
+			case inp.Path != "":
+				return toolName + " " + TruncateRunes(inp.Path, 80)
+			case inp.Command != "":
+				return toolName + " " + TruncateRunes(inp.Command, 80)
+			case inp.Pattern != "":
+				return toolName + " " + TruncateRunes(inp.Pattern, 80)
+			case inp.Prompt != "":
+				return toolName + " " + TruncateRunes(inp.Prompt, 80)
 			}
 		}
 	}

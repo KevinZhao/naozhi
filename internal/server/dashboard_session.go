@@ -446,11 +446,11 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		stats.Projects = projectList
 	}
 
-	// Take a snapshot of nodes under lock for thread-safe access.
-	// knownNodes is referenced three times below (len check, pre-size, and
-	// offline-node fill-in); each KnownNodes() call acquires the nodeAccess
-	// lock + rebuilds the map. Snapshot once and reuse.
-	nodesSnapshot := h.nodeAccess.NodesSnapshot()
+	// KnownNodes returns an immutable snapshot without acquiring the
+	// nodeAccess lock; NodesSnapshot does both. Single-node deployments
+	// (the common case) have len(knownNodes)==0 and never need the live
+	// snapshot — check KnownNodes first and short-circuit before paying
+	// the NodesSnapshot RLock + map alloc.
 	knownNodes := h.nodeAccess.KnownNodes()
 
 	// No configured nodes at all: use simple single-node response format.
@@ -468,6 +468,10 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, resp)
 		return
 	}
+
+	// Multi-node path: now we actually need the live nodesSnapshot for
+	// connection status + fill-in. This acquires the nodeAccess lock.
+	nodesSnapshot := h.nodeAccess.NodesSnapshot()
 
 	// Multi-node: tag local sessions and merge with cached remote sessions
 	allSessions := make([]any, 0, len(snapshots))

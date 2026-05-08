@@ -131,6 +131,12 @@ const pathCacheMaxEntries = 2048
 // subsequent stores amortise the eviction pass.
 const pathCacheEvictBatch = 16
 
+// maxSessionFileBytes caps the size of Claude session-state files we will
+// read during Scan. Real files are tiny (under a few KB); anything larger
+// is either corruption or an operator artifact and should be skipped
+// rather than parsed.
+const maxSessionFileBytes int64 = 1024 * 1024
+
 // NewScanner returns a fresh Scanner with empty caches. Used directly by
 // tests that need isolation; production callers use the package-level
 // wrappers which hit DefaultScanner.
@@ -149,6 +155,17 @@ var (
 	defaultScannerOnce sync.Once
 	defaultScannerInst *Scanner
 )
+
+// scanUserPromptBufPool recycles the 16 KiB initial line buffers passed to
+// bufio.Scanner in scanUserPrompt. The hot path is extractLastPromptUncached
+// running up to 4 candidate JSONLs concurrently per Scan; without a pool
+// every candidate pays a fresh 16 KiB heap alloc.
+var scanUserPromptBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 16*1024)
+		return &b
+	},
+}
 
 func DefaultScanner() *Scanner {
 	defaultScannerOnce.Do(func() {
@@ -291,6 +308,15 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+
+		// Session files are small by construction (a handful of fields).
+		// If a file has somehow grown pathologically large (operator dropped
+		// something in the Claude sessions dir, or disk corruption), skip
+		// it rather than allocating megabytes of data we will then try to
+		// parse as JSON. 1 MiB is ~100x the expected max size.
+		if info, ierr := entry.Info(); ierr == nil && info.Size() > maxSessionFileBytes {
 			continue
 		}
 
@@ -623,7 +649,16 @@ func extractLastPromptUncached(path string, fileSize int64) string {
 func scanUserPrompt(f *os.File) string {
 	var lastPrompt string
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 16*1024), 256*1024)
+	bufPtr := scanUserPromptBufPool.Get().(*[]byte)
+	// bufio.Scanner may grow the provided slice; reset to zero length on
+	// return and rely on Scanner's internal growth not modifying capacity
+	// below the initial 16 KiB (buf cap only grows, never shrinks).
+	defer func() {
+		buf := (*bufPtr)[:0]
+		*bufPtr = buf
+		scanUserPromptBufPool.Put(bufPtr)
+	}()
+	scanner.Buffer(*bufPtr, 256*1024)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -934,7 +969,7 @@ func WaitAndCleanup(ctx context.Context, pid int, procStartTime uint64, claudeDi
 		_ = os.Remove(filepath.Join(claudeDir, "sessions", fmt.Sprintf("%d.json", pid)))
 	}
 	if cwd != "" && sessionID != "" && IsValidSessionID(sessionID) {
-		encodedCWD := strings.ReplaceAll(cwd, "/", "-")
+		encodedCWD := projDirName(cwd)
 		tmpBase := os.TempDir()
 		lockDir := filepath.Clean(filepath.Join(tmpBase, fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID))
 		// Defense-in-depth: use filepath.Rel to verify lockDir stays
