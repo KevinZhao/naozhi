@@ -670,7 +670,14 @@ var claudeSystemInjectedTagNames = [...]string{
 // IsClaudeSystemInjectedText reports whether text is a Claude-Code-injected
 // system XML frame (e.g. "<task-notification>…"). A leading "<tag>" or
 // "<tag " counts as a match; anything else is treated as real user content.
+// Also catches the CLI's synthetic "[Request interrupted by user]" marker
+// (and its "for tool use" variant), which the CLI writes as a user message
+// when SIGINT aborts a turn — it is not user intent and should be filtered
+// out of titles, previews, and transcript exports.
 func IsClaudeSystemInjectedText(text string) bool {
+	if isClaudeInterruptMarker(text) {
+		return true
+	}
 	if len(text) < 3 || text[0] != '<' {
 		return false
 	}
@@ -687,6 +694,15 @@ func IsClaudeSystemInjectedText(text string) bool {
 		}
 	}
 	return false
+}
+
+// isClaudeInterruptMarker matches the CLI-synthesised user messages that
+// represent an interrupt (SIGINT / stop button) rather than user intent.
+// Two known variants in Claude CLI ≥ 2.1: plain turn interrupt, and the
+// "for tool use" suffix when the interrupt landed between tool_use blocks.
+func isClaudeInterruptMarker(text string) bool {
+	return text == "[Request interrupted by user]" ||
+		text == "[Request interrupted by user for tool use]"
 }
 
 // extractUserText extracts the text content from a user message.

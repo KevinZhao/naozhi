@@ -1703,6 +1703,9 @@ function formatSessionMarkdown(meta, events) {
     // as user messages is noise in both renders.
     const raw = (e.detail || e.summary || '');
     if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) continue;
+    // CLI-synthesised interrupt marker (SIGINT-aborted turn): not user intent,
+    // mirrors the Go-side isClaudeInterruptMarker filter.
+    if (e.type === 'user' && (raw === '[Request interrupted by user]' || raw === '[Request interrupted by user for tool use]')) continue;
 
     const ts = e.time ? new Date(e.time).toISOString() : '';
     if (e.type === 'user') {
@@ -2262,6 +2265,8 @@ function eventHtml(e) {
   // Filter out Claude Code system XML injected as user messages
   const raw = e.detail || e.summary || '';
   if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return '';
+  // CLI-synthesised interrupt marker: SIGINT-aborted turn, not user intent.
+  if (e.type === 'user' && (raw === '[Request interrupted by user]' || raw === '[Request interrupted by user for tool use]')) return '';
   const icons = {init:'\u2699',system:'\u2699',user:'\u{1f464}',text:'\u2726',todo:'\u2630'};
   const icon = icons[e.type] || '';
 
