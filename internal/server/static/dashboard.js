@@ -93,6 +93,12 @@ const sessionUnread = {};
 // accepted/queued (server-side session_state takes over) and on any real
 // session_state WS push.
 const sessionOptimisticRunning = {};
+// sessionLastSent: sid(key,node) -> 最近一次发出的用户文本（当前 turn 的输入）。
+// 在 sendMessage 成功发出后记录；turn 自然跑完 (running→ready/dead) 时清掉。
+// 若用户在 running 中点击中断，则把这段文本回填到 #msg-input（Claude Code
+// 的中断-回填行为），方便修改后重发。只在输入框当前为空时回填，避免覆盖
+// 用户已经开始敲的新内容。
+const sessionLastSent = {};
 let historySessionsData = []; // from API history_sessions (all filesystem sessions)
 
 function getToken() { return ''; }
@@ -2556,6 +2562,7 @@ async function sendMessage() {
       if (input) clearMsg(input);
       delete sessionDrafts[selectedKey];
       clearPendingFiles();
+      if (text) sessionLastSent[sid(selectedKey, selectedNode)] = text;
       markSessionOptimisticRunning(selectedKey, selectedNode);
       sending = false;
       if (btn) btn.classList.remove('sending');
@@ -2618,6 +2625,7 @@ async function sendMessage() {
     delete sessionDrafts[selectedKey];
     clearPendingFiles();
     if (ackStatus !== 'reset') {
+      if (text) sessionLastSent[sid(selectedKey, selectedNode)] = text;
       markSessionOptimisticRunning(selectedKey, selectedNode);
     }
 
@@ -3000,6 +3008,27 @@ function interruptSession() {
   const sd = sessionsData[sid(selectedKey, selectedNode || 'local')];
   if (!sd || sd.state !== 'running') return;
   const targetNode = selectedNode && selectedNode !== 'local' ? selectedNode : '';
+  // Claude Code 风格：中断时把刚发的那条用户文本回填到输入框方便改写。
+  // 只在输入框当前为空时回填，避免覆盖用户已经开始输入的新内容；回填后
+  // 把光标挪到末尾、聚焦、滚进视口。回填完成即消费掉 lastSent，防止同一条
+  // 文本在后续多次中断里反复回填。
+  const lastText = sessionLastSent[sid(selectedKey, selectedNode)];
+  if (lastText) {
+    const input = document.getElementById('msg-input');
+    if (input && !getMsgValue(input)) {
+      setMsgValue(input, lastText);
+      try {
+        input.focus();
+        const range = document.createRange();
+        range.selectNodeContents(input);
+        range.collapse(false);
+        const sel = window.getSelection();
+        if (sel) { sel.removeAllRanges(); sel.addRange(range); }
+      } catch (_) {}
+      sessionDrafts[selectedKey] = lastText;
+      delete sessionLastSent[sid(selectedKey, selectedNode)];
+    }
+  }
   if (wsm.isConnected()) {
     const req = { type: 'interrupt', key: selectedKey, id: 'int' + Date.now() };
     if (targetNode) req.node = targetNode;
@@ -7293,6 +7322,7 @@ const wsm = {
     // flip. No banner, no turn.
     if (msg.status === 'reset') {
       rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
+      delete sessionLastSent[sid(msg.key || selectedKey, msg.node || selectedNode)];
       return;
     }
     // "accepted" = owner of a new turn, "queued" = appended to an active turn.
@@ -7340,6 +7370,9 @@ const wsm = {
       const opt = document.querySelector('.optimistic-msg');
       if (opt) opt.remove();
       rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
+      // send 从未真正进入 turn，别把它当成「当前 turn 的输入」残留 —— 否则
+      // 下次中断会把这条从未送达的文本回填上来。
+      delete sessionLastSent[sid(msg.key || selectedKey, msg.node || selectedNode)];
     } else if (msg.status === 'error') {
       // The WS send_ack error is an in-band message, not an HTTP status,
       // but treat the server-supplied `error` string the same way as an
@@ -7349,6 +7382,7 @@ const wsm = {
       const opt = document.querySelector('.optimistic-msg');
       if (opt) opt.remove();
       rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
+      delete sessionLastSent[sid(msg.key || selectedKey, msg.node || selectedNode)];
     }
   },
 
@@ -7374,6 +7408,10 @@ const wsm = {
     if (turnCompleted && !isActive) {
       sessionUnread[sKey] = (sessionUnread[sKey] || 0) + 1;
     }
+    // Turn 自然跑完后清掉上一次发出的文本缓存，否则下一轮刚进 running
+    // 就中断会把陈旧文本回填上来。中断路径不会走到这里被清掉，因为
+    // interruptSession 会先消费 lastSent 再发中断。
+    if (turnCompleted) delete sessionLastSent[sKey];
     if (sessionsData[sKey]) {
       sessionsData[sKey].state = msg.state;
       if (msg.reason) {
