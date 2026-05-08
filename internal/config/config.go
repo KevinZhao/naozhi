@@ -592,6 +592,13 @@ func validateConfig(cfg *Config) error {
 			return err
 		}
 	}
+	// agents[*].args 同样会被拼进 exec.Command（session/router.go 按 agentID
+	// 合并 AgentOpts.ExtraArgs），配置层漏过等于放弃 NUL/控制字符防御。
+	for id, a := range cfg.Agents {
+		if err := validateArgvStrings(fmt.Sprintf("agents[%s].args", id), a.Args); err != nil {
+			return err
+		}
+	}
 
 	return nil
 }

@@ -299,12 +299,10 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	// connect-src includes both ws: and wss:. ws: is required for local HTTP
-	// development (browsers reject ws:// under a CSP that only lists wss:) while
-	// wss: covers production TLS deployments. The browser automatically picks
-	// the matching scheme based on page origin, so listing both does not widen
-	// the attack surface for TLS users.
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:")
+	// connect-src 只保留 'self'：同源页面发起的 ws:// 与 wss:// 已由 'self'
+	// 隐式覆盖（浏览器按页面 scheme 自动选）。显式写 `ws: wss:` 会放宽到
+	// **任何**跨源 WebSocket 端点，为潜在 XSS/XS-Leak 外泄数据留口。
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:")
 	w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
