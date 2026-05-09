@@ -504,7 +504,7 @@ func TestEnsureStub(t *testing.T) {
 	if err := s.AddJob(job); err != nil {
 		t.Fatalf("AddJob: %v", err)
 	}
-	key := "cron:" + job.ID
+	key := session.CronKey(job.ID)
 
 	// AddJob already registers the stub; simulate sidebar "×" that removed it.
 	if !router.Remove(key) {

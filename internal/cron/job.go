@@ -167,7 +167,7 @@ const minJobTimeout = 3 * time.Minute
 // edge), returns maxCap — safer to fall back to the historical single-timeout
 // behaviour than to misapply a ratio to an undefined period.
 func computeJobTimeout(schedule string, maxCap time.Duration) time.Duration {
-	period := schedulePeriod(schedule)
+	period := schedulePeriod(schedule, time.Now())
 	if period <= 0 {
 		return maxCap
 	}
@@ -181,16 +181,21 @@ func computeJobTimeout(schedule string, maxCap time.Duration) time.Duration {
 	return scaled
 }
 
-// schedulePeriod 估算给定 cron 表达式的周期（相邻两次触发的间隔）。
-// 通过 sched.Next 两次外推实现，精度对 "每 N 分钟 / 每天 HH:MM" 这类
-// 常见形态足够。无法解析 / 不等间隔（DST 切换窗口）时返回 0，调用方
-// 自行决定 fallback。computeJobTimeout 和 applyJitter 都基于此。
-func schedulePeriod(schedule string) time.Duration {
+// schedulePeriod 估算给定 cron 表达式在参考时刻 now 附近的周期（相邻两次
+// 触发的间隔）。通过 sched.Next 两次外推实现，精度对 "每 N 分钟 /
+// 每天 HH:MM" 这类常见形态足够。无法解析 / 不等间隔（DST 切换窗口）
+// 时返回 0，调用方自行决定 fallback。
+//
+// now 必须由调用方显式提供，保证和上层 HasMissedSchedule /
+// previousTickBefore 读取的"现在"完全同步——避免在 DST 切换或 NTP 校
+// 正瞬间两者跨越不同小时，导致 period 估成 23h/25h 而产生 missed 假
+// 判定。computeJobTimeout / applyJitter 不在意这种纳秒级 skew，传
+// time.Now() 即可。
+func schedulePeriod(schedule string, now time.Time) time.Duration {
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {
 		return 0
 	}
-	now := time.Now()
 	first := sched.Next(now)
 	second := sched.Next(first)
 	return second.Sub(first)
@@ -213,7 +218,7 @@ func previousTickBefore(schedule string, now time.Time) time.Time {
 	if err != nil {
 		return time.Time{}
 	}
-	period := schedulePeriod(schedule)
+	period := schedulePeriod(schedule, now)
 	if period <= 0 {
 		return time.Time{}
 	}
@@ -249,7 +254,7 @@ func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
 	if j == nil {
 		return false, time.Time{}
 	}
-	period := schedulePeriod(j.Schedule)
+	period := schedulePeriod(j.Schedule, now)
 	if period <= 0 {
 		return false, time.Time{}
 	}

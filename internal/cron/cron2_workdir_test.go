@@ -15,6 +15,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/naozhi/naozhi/internal/session"
 )
 
 func TestWorkDirReachable_EmptyPath(t *testing.T) {
@@ -97,7 +99,7 @@ func TestCRON2_FreshExecuteSkipsWhenWorkDirMissing(t *testing.T) {
 	baselineGetCreate := len(fake.getCreateKeys)
 	fake.mu.Unlock()
 
-	s.execute(job)
+	s.executeOpt(job, false)
 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
@@ -156,12 +158,12 @@ func TestCRON2_FreshExecuteProceedsWhenWorkDirExists(t *testing.T) {
 	// before the panic site.
 	func() {
 		defer func() { _ = recover() }()
-		s.execute(job)
+		s.executeOpt(job, false)
 	}()
 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	wantKey := "cron:" + job.ID
+	wantKey := session.CronKey(job.ID)
 	resetFound := false
 	for _, k := range fake.resetCalls {
 		if k == wantKey {
@@ -203,13 +205,13 @@ func TestCRON2_EmptyWorkDirPassesThrough(t *testing.T) {
 
 	func() {
 		defer func() { _ = recover() }()
-		s.execute(job)
+		s.executeOpt(job, false)
 	}()
 
 	// Empty WorkDir must reach Reset (guard is permissive on empty).
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	wantKey := "cron:" + job.ID
+	wantKey := session.CronKey(job.ID)
 	found := false
 	for _, k := range fake.resetCalls {
 		if k == wantKey {

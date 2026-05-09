@@ -148,10 +148,10 @@ func TestPreviousTickBefore_Unparsable(t *testing.T) {
 // 等短周期；daily 形态是生产里最常见但测试盲区，`previousTickBefore` 回推
 // 3×period（= 72h）的分支没有独立覆盖。RNEW-TEST-431。
 //
-// TZ 说明：now/LastRunAt 用固定 UTC 时刻避免 previousTickBefore 的
-// `sched.Next(now.Location())` 行为飘移。`schedulePeriod` 内部仍调
-// `time.Now()` 锚到 host TZ，非 UTC host + DST 切换窗口理论上可能让
-// period 暂时返回 23h/25h；这是 job.go 现有实现的既有语义，测试未覆盖。
+// TZ 说明：now/LastRunAt 用固定 UTC 时刻。schedulePeriod 现在从调用方
+// 显式接受 now（见 job.go）——HasMissedSchedule 把它传递给
+// previousTickBefore 和 schedulePeriod，三者锚到同一瞬间，不再受 host TZ
+// 或 DST 切换影响。
 func TestHasMissedSchedule_DailySchedule_RecentRun_NotMissed(t *testing.T) {
 	t.Parallel()
 	// 用固定 UTC 时刻避免 host TZ 影响：9:15 UTC 对应 `0 9 * * *` 的最近一次

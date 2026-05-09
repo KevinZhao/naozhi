@@ -169,6 +169,16 @@ type Scheduler struct {
 	// execute() time to catch symlink races that retarget post-creation.
 	// Empty disables enforcement (tests/legacy).
 	allowedRoot string
+	// allowedRootResolved is a construction-time snapshot of
+	// filepath.EvalSymlinks(allowedRoot), used as a best-effort fallback
+	// by workDirUnderRoot when the per-call EvalSymlinks on allowedRoot
+	// itself fails (e.g. the root is temporarily unmounted / missing).
+	// The per-call EvalSymlinks is still the primary path so the TOCTOU
+	// protection against symlink swaps on the root side is preserved.
+	// Empty means no cache; workDirUnderRoot then falls back to the raw
+	// allowedRoot string when its own EvalSymlinks fails (legacy
+	// behaviour).
+	allowedRootResolved string
 	// jitterMax is the scheduling jitter cap. See SchedulerConfig.JitterMax.
 	// Immutable after NewScheduler returns, so no lock needed.
 	jitterMax time.Duration
@@ -262,11 +272,18 @@ func workDirReachable(workDir string) bool {
 }
 
 // workDirUnderRoot reports whether workDir resolves (after symlink evaluation)
-// to a path at or under allowedRoot. EvalSymlinks is done per-call so the
-// check reflects current filesystem state, which closes the TOCTOU window
-// between creation-time validateWorkspace and execute-time workspace binding.
-// Both arguments must be absolute; relative workDir is rejected.
-func workDirUnderRoot(workDir, allowedRoot string) bool {
+// to a path at or under allowedRoot. EvalSymlinks is done per-call for both
+// sides so the check reflects current filesystem state — this closes the
+// TOCTOU window between creation-time validateWorkspace and execute-time
+// workspace binding AND the separate window where allowedRoot itself (if a
+// symlink) could be retargeted after construction. Both arguments must be
+// absolute; relative workDir is rejected. allowedRootResolved, when
+// non-empty, is a best-effort prior resolution of allowedRoot that is used
+// as a fallback only if the per-call EvalSymlinks on allowedRoot itself
+// fails (e.g. the path was temporarily unmounted). This preserves the
+// security contract while still avoiding most of the syscall cost of a
+// cold re-resolution on the happy path.
+func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 	if workDir == "" || allowedRoot == "" {
 		return true // empty WorkDir uses router default; empty root = disabled
 	}
@@ -281,7 +298,14 @@ func workDirUnderRoot(workDir, allowedRoot string) bool {
 	}
 	rootResolved, err := filepath.EvalSymlinks(allowedRoot)
 	if err != nil {
-		rootResolved = allowedRoot
+		// Fall back to the cached resolution (captured at construction) or
+		// the raw path if no cache exists. Either way the fallback chain
+		// preserves the historical behaviour when EvalSymlinks fails.
+		if allowedRootResolved != "" {
+			rootResolved = allowedRootResolved
+		} else {
+			rootResolved = allowedRoot
+		}
 	}
 	if resolved == rootResolved {
 		return true
@@ -306,6 +330,15 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		parent = context.Background()
 	}
 	stopCtx, stopCancel := context.WithCancel(parent)
+	// Resolve the allowed root once at construction; subsequent workDir
+	// checks skip the syscall chain for the root side. Empty result falls
+	// back to lazy resolution per-call.
+	var allowedRootResolved string
+	if cfg.AllowedRoot != "" {
+		if r, err := filepath.EvalSymlinks(cfg.AllowedRoot); err == nil {
+			allowedRootResolved = r
+		}
+	}
 	cronLogger := robfigcron.PrintfLogger(log.New(slogWriter{}, "cron: ", 0))
 	loc := cfg.Location
 	if loc == nil {
@@ -319,20 +352,21 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 				robfigcron.SkipIfStillRunning(cronLogger),
 			),
 		),
-		jobs:          make(map[string]*Job),
-		router:        cfg.Router,
-		platforms:     cfg.Platforms,
-		agents:        cfg.Agents,
-		agentCommands: cfg.AgentCommands,
-		storePath:     cfg.StorePath,
-		maxJobs:       cfg.MaxJobs,
-		execTimeout:   cfg.ExecTimeout,
-		location:      loc,
-		notifyDefault: cfg.NotifyDefault,
-		allowedRoot:   cfg.AllowedRoot,
-		jitterMax:     cfg.JitterMax,
-		stopCtx:       stopCtx,
-		stopCancel:    stopCancel,
+		jobs:                make(map[string]*Job),
+		router:              cfg.Router,
+		platforms:           cfg.Platforms,
+		agents:              cfg.Agents,
+		agentCommands:       cfg.AgentCommands,
+		storePath:           cfg.StorePath,
+		maxJobs:             cfg.MaxJobs,
+		execTimeout:         cfg.ExecTimeout,
+		location:            loc,
+		notifyDefault:       cfg.NotifyDefault,
+		allowedRoot:         cfg.AllowedRoot,
+		allowedRootResolved: allowedRootResolved,
+		jitterMax:           cfg.JitterMax,
+		stopCtx:             stopCtx,
+		stopCancel:          stopCancel,
 	}
 }
 
@@ -375,7 +409,7 @@ func (s *Scheduler) Start() error {
 		// sandbox. Replaying an on-disk tampered entry must not grant
 		// filesystem access that validateWorkspace would reject at
 		// creation. When allowedRoot is empty (tests), this is a no-op.
-		if s.allowedRoot != "" && j.WorkDir != "" && !workDirUnderRoot(j.WorkDir, s.allowedRoot) {
+		if s.allowedRoot != "" && j.WorkDir != "" && !workDirUnderRoot(j.WorkDir, s.allowedRoot, s.allowedRootResolved) {
 			slog.Warn("cron job work_dir outside allowed_root; skipping",
 				"id", j.ID, "work_dir", j.WorkDir)
 			continue
@@ -422,7 +456,7 @@ func (s *Scheduler) registerStub(j *Job) {
 	if j.LastSessionID != "" {
 		chain = []string{j.LastSessionID}
 	}
-	s.router.RegisterCronStubWithChain("cron:"+j.ID, j.WorkDir, j.Prompt, chain)
+	s.router.RegisterCronStubWithChain(session.CronKey(j.ID), j.WorkDir, j.Prompt, chain)
 }
 
 // registerStubByValue is the pointer-free variant used from Start() where the
@@ -435,7 +469,7 @@ func (s *Scheduler) registerStubByValue(id, workDir, prompt, lastSessionID strin
 	if lastSessionID != "" {
 		chain = []string{lastSessionID}
 	}
-	s.router.RegisterCronStubWithChain("cron:"+id, workDir, prompt, chain)
+	s.router.RegisterCronStubWithChain(session.CronKey(id), workDir, prompt, chain)
 }
 
 // EnsureStub lazily (re-)registers a dashboard stub session for the given
@@ -452,11 +486,10 @@ func (s *Scheduler) registerStubByValue(id, workDir, prompt, lastSessionID strin
 // has nothing to attach to. This method is the idempotent recovery hook
 // wired into handleSubscribe and /api/sessions/events.
 func (s *Scheduler) EnsureStub(key string) bool {
-	const prefix = "cron:"
-	if !strings.HasPrefix(key, prefix) {
+	if !session.IsCronKey(key) {
 		return false
 	}
-	id := key[len(prefix):]
+	id := key[len(session.CronKeyPrefix):]
 	if id == "" {
 		return false
 	}
@@ -706,7 +739,7 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 		s.cron.Remove(j.entryID)
 	}
 	if s.router != nil {
-		s.router.Reset("cron:" + j.ID)
+		s.router.Reset(session.CronKey(j.ID))
 	}
 	delete(s.jobs, j.ID)
 	// Intentionally do NOT delete from s.runningJobs here: a concurrent
@@ -828,7 +861,7 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	// path that execute() will later refuse at runtime. AddJob's creation
 	// path applies the same check; UpdateJob previously skipped it.
 	if upd.WorkDir != nil && *upd.WorkDir != "" && s.allowedRoot != "" {
-		if !workDirUnderRoot(*upd.WorkDir, s.allowedRoot) {
+		if !workDirUnderRoot(*upd.WorkDir, s.allowedRoot, s.allowedRootResolved) {
 			return nil, fmt.Errorf("work_dir outside allowed root")
 		}
 	}
@@ -1035,7 +1068,7 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 		s.cron.Remove(j.entryID)
 	}
 	if s.router != nil {
-		s.router.Reset("cron:" + j.ID)
+		s.router.Reset(session.CronKey(j.ID))
 	}
 	delete(s.jobs, j.ID)
 	// Retain the runningJobs entry for the same reason as DeleteJobByID —
@@ -1277,13 +1310,6 @@ func (s *Scheduler) jobRunningGuard(id string) *atomic.Bool {
 	return actual.(*atomic.Bool)
 }
 
-// execute runs a cron job with default scheduled-tick semantics. Retained
-// as a thin wrapper for test helpers that call execute(j) directly; the
-// scheduled-tick path in registerJob now calls executeOpt(j, false).
-func (s *Scheduler) execute(j *Job) {
-	s.executeOpt(j, false)
-}
-
 // executeOpt runs a cron job: send prompt to session, post result to chat.
 // viaTriggerNow=true skips jitter delay (explicit user "run now" expects
 // immediate execution); scheduled tick callers pass false.
@@ -1358,8 +1384,9 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		// Re-check allowedRoot at execute time to close the symlink-swap race:
 		// validateWorkspace at creation resolved symlinks once, but the target
 		// could have been retargeted since. workDirUnderRoot re-evaluates
-		// symlinks against the current filesystem state before binding.
-		if s.allowedRoot != "" && !workDirUnderRoot(workDir, s.allowedRoot) {
+		// both sides on every call; allowedRootResolved is only used as a
+		// fallback if the per-call EvalSymlinks on the root fails.
+		if s.allowedRoot != "" && !workDirUnderRoot(workDir, s.allowedRoot, s.allowedRootResolved) {
 			lg.Warn("cron job work_dir outside allowed_root; aborting run",
 				"work_dir", workDir)
 			s.recordResult(j, "", "work_dir outside allowed_root", "")
@@ -1367,7 +1394,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		}
 		opts.Workspace = filepath.Clean(workDir)
 	}
-	key := "cron:" + jobID
+	key := session.CronKey(jobID)
 
 	// Fresh mode: drop any existing session (and its process + history) so
 	// GetOrCreate spawns a brand-new CLI. Reset is a no-op when no session
@@ -1860,7 +1887,7 @@ func applyJitter(ctx context.Context, schedule string, jitterMax time.Duration) 
 		return
 	}
 	window := jitterMax
-	if period := schedulePeriod(schedule); period > 0 {
+	if period := schedulePeriod(schedule, time.Now()); period > 0 {
 		if cap := period / 4; cap < window {
 			window = cap
 		}

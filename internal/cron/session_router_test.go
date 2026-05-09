@@ -94,7 +94,7 @@ func TestSchedulerConfig_AcceptsSessionRouterInterface(t *testing.T) {
 		t.Fatalf("expected exactly 1 stub register call, got %d", len(fake.registerCalls))
 	}
 	got := fake.registerCalls[0]
-	wantKey := "cron:" + job.ID
+	wantKey := session.CronKey(job.ID)
 	if got.key != wantKey {
 		t.Errorf("register key = %q, want %q", got.key, wantKey)
 	}
@@ -136,7 +136,7 @@ func TestSchedulerConfig_ResetCalledOnDelete(t *testing.T) {
 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	wantKey := "cron:" + job.ID
+	wantKey := session.CronKey(job.ID)
 	found := false
 	for _, k := range fake.resetCalls {
 		if k == wantKey {
