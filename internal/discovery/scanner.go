@@ -468,7 +468,7 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 			Kind:          c.sf.Kind,
 			Entrypoint:    c.sf.Entrypoint,
 			CLIName:       detectCLIName(c.sf.PID),
-			Summary:       summaryMap[c.sf.SessionID],
+			Summary:       SanitizePromptForTransport(summaryMap[c.sf.SessionID]),
 			LastPrompt:    prompts[i],
 			ProcStartTime: pst,
 		})
@@ -695,7 +695,56 @@ func scanUserPrompt(f *os.File) string {
 		}
 		lastPrompt = text
 	}
-	return lastPrompt
+	return SanitizePromptForTransport(lastPrompt)
+}
+
+// SanitizePromptForTransport strips bytes that corrupt structured log output,
+// terminal rendering, or /api/sessions/resume's charset gate. Scoped to
+// last_prompt / first_prompt strings that flow from a CLI JSONL file through
+// the sidebar JSON response and (optionally) back to the resume endpoint as
+// a client-echoed value.
+//
+// Claude CLI occasionally emits user messages that include control bytes
+// (PDF upload notifications use U+0085 NEL, shell tool outputs contain
+// C0 noise). Leaving those bytes inside last_prompt corrupts slog JSON,
+// breaks /api/sessions/resume round-trips (which enforce a stricter
+// charset), and can introduce ANSI control sequences into the sidebar.
+//
+// Tab is preserved because tab-delimited snippets are legitimate user
+// content and slog JSONHandler escapes tab safely.
+//
+// Exported so recent.go (extractFirstPrompt) and any future JSONL preview
+// path can share the same policy without import cycles.
+func SanitizePromptForTransport(s string) string {
+	if s == "" {
+		return s
+	}
+	clean := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\t' {
+			continue
+		}
+		if c < 0x20 || c == 0x7f || c >= 0x80 {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '\t' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f {
+			return '_'
+		}
+		if osutil.IsLogInjectionRune(r) {
+			return '_'
+		}
+		return r
+	}, s)
 }
 
 // claudeSystemInjectedTagNames enumerates the XML-like tags that Claude
@@ -844,19 +893,32 @@ func (s *Scanner) LookupSummaries(claudeDir string, sessions map[string]string) 
 			s.setCachedSummary(indexPath, mtime, idx)
 		}
 
-		// Build a lookup set once per project: large project directories may
-		// have 100s of entries and multi-concurrent sids, so O(entries×sids)
-		// scaling hurts. Map build + O(1) membership is faster once sids > ~3.
-		sidSet := make(map[string]struct{}, len(sids))
-		for _, s := range sids {
-			sidSet[s] = struct{}{}
-		}
-		for _, e := range idx.Entries {
-			if e.Summary == "" {
-				continue
-			}
-			if _, ok := sidSet[e.SessionID]; ok {
+		// Single-session projects (the common case) skip the map alloc: a
+		// linear scan for one id is cheaper than allocating a map header +
+		// bucket. Larger sids lists fall back to O(1) membership via a set
+		// since idx.Entries can grow into the hundreds for long-lived
+		// projects and O(entries×sids) scaling hurts.
+		switch len(sids) {
+		case 1:
+			want := sids[0]
+			for _, e := range idx.Entries {
+				if e.Summary == "" || e.SessionID != want {
+					continue
+				}
 				result[e.SessionID] = e.Summary
+			}
+		default:
+			sidSet := make(map[string]struct{}, len(sids))
+			for _, s := range sids {
+				sidSet[s] = struct{}{}
+			}
+			for _, e := range idx.Entries {
+				if e.Summary == "" {
+					continue
+				}
+				if _, ok := sidSet[e.SessionID]; ok {
+					result[e.SessionID] = e.Summary
+				}
 			}
 		}
 	}
@@ -951,7 +1013,7 @@ func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession)
 			sess.State = newState
 			changed = true
 		}
-		if sum := summaryMap[sess.SessionID]; sum != "" && sum != sess.Summary {
+		if sum := SanitizePromptForTransport(summaryMap[sess.SessionID]); sum != "" && sum != sess.Summary {
 			sess.Summary = sum
 			changed = true
 		}
@@ -964,8 +1026,28 @@ func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession)
 }
 
 // IsValidSessionID checks whether s is a valid UUID-format session ID.
+// Hand-rolled 36-char format check (8-4-4-4-12 lowercase hex with dashes)
+// to avoid the DFA lookup cost sessionIDRe.MatchString pays on every
+// discovered session during each Scan. The regexp is still kept as the
+// canonical pattern reference but is no longer on the hot path.
 func IsValidSessionID(s string) bool {
-	return sessionIDRe.MatchString(s)
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < 36; i++ {
+		c := s[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // WaitAndCleanup waits for pid to exit (up to 5 s or until ctx is cancelled),
@@ -999,24 +1081,28 @@ func WaitAndCleanup(ctx context.Context, pid int, procStartTime uint64, claudeDi
 }
 
 // waitForExit polls until the process exits or ctx is cancelled.
-// Returns true if ctx was cancelled before the process exited.
+// Returns true if ctx was cancelled before the process exited. A single
+// timer is reused across the back-off loop (Stop+Reset) to avoid 5-6
+// per-call time.NewTimer allocations during cluster-wide WaitAndCleanup
+// sweeps.
 func waitForExit(ctx context.Context, pid int) bool {
 	deadline := time.Now().Add(5 * time.Second)
 	wait := 50 * time.Millisecond
+	t := time.NewTimer(wait)
+	defer t.Stop()
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(pid, 0); err != nil {
 			return false
 		}
-		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
-			t.Stop()
 			return true
 		case <-t.C:
 		}
 		if wait < 500*time.Millisecond {
 			wait *= 2
 		}
+		t.Reset(wait)
 	}
 	return false
 }
