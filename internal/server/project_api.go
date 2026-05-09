@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -192,7 +191,7 @@ func (h *ProjectHandlers) handleConfigPut(w http.ResponseWriter, r *http.Request
 	}
 
 	var cfg project.ProjectConfig
-	if err := json.NewDecoder(r.Body).Decode(&cfg); err != nil {
+	if err := decodeJSONBody(r, &cfg); err != nil {
 		// Fixed error string: echoing err.Error() leaks the decoder's field
 		// names / offsets which help schema enumeration.
 		slog.Debug("project config: decode failed", "err", err, "project", name)

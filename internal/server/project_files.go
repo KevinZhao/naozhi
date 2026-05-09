@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -365,7 +364,7 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxExistsBody)
 	var req existsReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		slog.Debug("files exists: decode failed", "err", err)
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return

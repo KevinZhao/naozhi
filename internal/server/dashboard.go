@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -147,6 +148,29 @@ func writeOK(w http.ResponseWriter) {
 	if _, err := w.Write(jsonOKBody); err != nil {
 		slog.Debug("write json response", "err", err)
 	}
+}
+
+// decodeJSONBody reads r.Body into memory and unmarshals it into dst.
+//
+// Callers MUST have wrapped r.Body with http.MaxBytesReader beforehand so an
+// oversize client cannot force unbounded io.ReadAll; the 15+ JSON POST
+// handlers in this package all follow that pattern. RNEW-PERF-001: compared
+// with json.NewDecoder(r.Body).Decode(dst), this variant avoids the 4 KiB
+// bufio.Reader the stdlib Decoder wraps around every request body — bodies
+// are already ≤ a few MiB and fit comfortably in a single []byte.
+//
+// Error semantics match Decoder.Decode closely: unmarshal errors, empty
+// body (io.EOF equivalent → json.Unmarshal returns "unexpected end of JSON
+// input"), and MaxBytesError all surface as a single error value the
+// caller can log/return as 400. Callers that previously wrote specific
+// 413 responses from MaxBytesReader must still check errors.As against
+// *http.MaxBytesError; they already do today.
+func decodeJSONBody(r *http.Request, dst any) error {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(body, dst)
 }
 
 // writeJSONStatus is like writeJSON but writes a non-200 HTTP status code.

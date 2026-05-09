@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -606,7 +605,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			Backend   string   `json:"backend"`
 			FileIDs   []string `json:"file_ids"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodeJSONBody(r, &req); err != nil {
 			slog.Debug("dashboard send: invalid JSON", "err", err)
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 			return

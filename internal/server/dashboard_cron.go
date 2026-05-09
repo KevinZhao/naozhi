@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -352,7 +351,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		FreshContext   bool   `json:"fresh_context,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64 KB
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
@@ -508,7 +507,7 @@ func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
 		ID string `json:"id"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KB
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+	if err := decodeJSONBody(r, &req); err != nil || req.ID == "" {
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
@@ -550,7 +549,7 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		ID string `json:"id"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KB
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+	if err := decodeJSONBody(r, &req); err != nil || req.ID == "" {
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
@@ -590,7 +589,7 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		ID string `json:"id"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -739,7 +738,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		FreshContext   *bool   `json:"fresh_context,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}

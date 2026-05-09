@@ -3,7 +3,6 @@ package server
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -702,7 +701,7 @@ func (h *SessionHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 		_ = r.Body.Close()
 	} else {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
+		if err := decodeJSONBody(r, &req); err != nil || req.Key == "" {
 			http.Error(w, "key is required (pass ?key=... or JSON body)", http.StatusBadRequest)
 			return
 		}
@@ -763,7 +762,7 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		Label string `json:"label"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
+	if err := decodeJSONBody(r, &req); err != nil || req.Key == "" {
 		http.Error(w, "key is required", http.StatusBadRequest)
 		return
 	}
@@ -833,7 +832,7 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		LastPrompt string `json:"last_prompt"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+	if err := decodeJSONBody(r, &req); err != nil || req.SessionID == "" {
 		http.Error(w, "session_id is required", http.StatusBadRequest)
 		return
 	}
@@ -910,7 +909,7 @@ func (h *SessionHandlers) handleInterrupt(w http.ResponseWriter, r *http.Request
 		Node string `json:"node"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
+	if err := decodeJSONBody(r, &req); err != nil || req.Key == "" {
 		http.Error(w, "key is required", http.StatusBadRequest)
 		return
 	}
