@@ -20,6 +20,14 @@ func TestDetectFormat(t *testing.T) {
 		{"amr magic bytes", []byte("#!AMR\nrest"), "audio/amr"},
 		{"mp4 ftyp at offset 4", []byte("\x00\x00\x00\x1cftypM4A "), "audio/mp4"},
 		{"wav riff header", []byte("RIFF\x00\x00\x00\x00WAVE"), "audio/wav"},
+		{"wav riff with payload", []byte("RIFF\x24\x00\x00\x00WAVEfmt \x10\x00\x00\x00\x01\x00\x01\x00"), "audio/wav"},
+		// RIFF is a generic container header; AVI / WEBP / AIFF-RIFF share
+		// the same prefix. DetectFormat must not return audio/wav for them
+		// — any non-WAVE RIFF falls through to "" so the caller can rely on
+		// the mimeType hint rather than a misclassified audio tag.
+		{"riff avi rejected", []byte("RIFF\x00\x00\x00\x00AVI LIST"), ""},
+		{"riff webp rejected", []byte("RIFF\x00\x00\x00\x00WEBPVP8 "), ""},
+		{"riff too short for wave check", []byte("RIFF\x00\x00\x00\x00"), ""},
 		{"empty data", []byte{}, ""},
 		{"short data 1 byte", []byte{0x42}, ""},
 		{"short data 3 bytes", []byte{0x01, 0x02, 0x03}, ""},

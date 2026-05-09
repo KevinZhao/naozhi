@@ -286,7 +286,13 @@ func DetectFormat(data []byte) string {
 	if len(data) >= 8 && string(data[4:8]) == "ftyp" {
 		return "audio/mp4"
 	}
-	if len(data) >= 4 && string(data[:4]) == "RIFF" {
+	// RIFF is a generic container header shared by WAV, AVI, WEBP, AIFF-RIFF
+	// and others. Only the WAVE subtype (bytes 8..12) is an audio stream we
+	// want to admit as audio/wav — returning audio/wav for a WEBP image or
+	// AVI video would have that asset mislabelled downstream (Whisper/
+	// ffmpeg spends cycles on an audio decode that will never produce
+	// speech). Require the 4-byte subtype explicitly.
+	if len(data) >= 12 && string(data[:4]) == "RIFF" && string(data[8:12]) == "WAVE" {
 		return "audio/wav"
 	}
 	return ""
