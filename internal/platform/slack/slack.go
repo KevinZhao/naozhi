@@ -39,21 +39,39 @@ type Slack struct {
 	handlerWg sync.WaitGroup // tracks in-flight message handler goroutines
 }
 
+// slackHTTPClient is shared by all Slack adapter instances for Web API calls
+// (auth.test / chat.postMessage / files.upload etc). Two defences in one:
+//
+//   - R191-ARCH-M3 enforces a 10s Timeout. Context cancellation is advisory
+//     in slack-go, so a slow Slack response would otherwise hold a connection
+//     for Slack's server timeout (60+s), pinning todoLoop goroutines (held by
+//     loopWG) and blocking Stop()'s drain. Feishu's httpClient caps at the
+//     same 10s.
+//
+//   - CheckRedirect blocks all 3xx. Slack Web API endpoints do not rely on
+//     cross-host redirects for any documented flow. Following a redirect
+//     would let a DNS/MITM-compromised path or a malicious proxy redirect
+//     the Bearer-token-carrying request at an internal address (IMDS
+//     169.254.169.254, loopback admin port, etc.) — classic SSRF-via-
+//     redirect. Feishu / Discord / Weixin all short-circuit the same way;
+//     this aligns Slack with them. ErrUseLastResponse surfaces the 3xx
+//     response unchanged so the caller fails cleanly instead of following.
+var slackHTTPClient = &http.Client{
+	Timeout: 10 * time.Second,
+	CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	},
+}
+
 // New creates a Slack platform adapter.
 func New(cfg Config) *Slack {
 	if cfg.MaxReplyLen <= 0 {
 		cfg.MaxReplyLen = 4000
 	}
-	// R191-ARCH-M3: enforce a transport-level timeout on the slack HTTP
-	// client. Context cancellation is advisory in slack-go; a slow Slack
-	// response could otherwise hold a connection for Slack's server timeout
-	// (60+ s), pinning todoLoop goroutines (held by loopWG) and blocking
-	// Stop()'s drain. Feishu's httpClient enforces the same 10s cap.
-	httpClient := &http.Client{Timeout: 10 * time.Second}
 	api := slack.New(
 		cfg.BotToken,
 		slack.OptionAppLevelToken(cfg.AppToken),
-		slack.OptionHTTPClient(httpClient),
+		slack.OptionHTTPClient(slackHTTPClient),
 	)
 	return &Slack{cfg: cfg, api: api}
 }
