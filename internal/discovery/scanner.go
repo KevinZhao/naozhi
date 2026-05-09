@@ -526,10 +526,23 @@ func sortByLastActive(indices []int, candidates []scanCandidate) {
 	})
 }
 
-// projDirName converts a CWD path to the Claude project directory name.
-// e.g. "/home/user/workspace/foo" -> "-home-user-workspace-foo"
-func projDirName(cwd string) string {
+// ClaudeProjectSlug converts a CWD path to the Claude project directory name.
+// e.g. "/home/user/workspace/foo" -> "-home-user-workspace-foo".
+//
+// This is the single source of truth for Claude CLI's ~/.claude/projects/
+// directory-naming scheme. internal/session mirrors it via a thin wrapper that
+// calls this function, and a cross-package equivalence test pins the two
+// call sites together so a future change to Claude's scheme cannot be
+// applied to only one side (RNEW-002).
+func ClaudeProjectSlug(cwd string) string {
 	return strings.ReplaceAll(cwd, "/", "-")
+}
+
+// projDirName is the package-internal alias retained for call-site brevity.
+// It intentionally delegates to ClaudeProjectSlug so the exported form stays
+// the single source of truth.
+func projDirName(cwd string) string {
+	return ClaudeProjectSlug(cwd)
 }
 
 // jsonlMtime returns the JSONL conversation file's mtime as unix ms.

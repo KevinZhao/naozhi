@@ -369,12 +369,13 @@ func isENOENTErr(err error) bool {
 }
 
 // claudeProjectSlug maps a CWD to the directory name Claude CLI uses under
-// ~/.claude/projects/. Mirrors the transformation in internal/discovery
-// (projDirName): every "/" becomes "-", so "/home/user/proj" → "-home-user-proj".
-// Duplicated here rather than imported to keep discovery's internal helpers
-// package-private; the two must stay in sync if Claude's scheme ever changes.
+// ~/.claude/projects/. Thin wrapper over discovery.ClaudeProjectSlug so the
+// two call sites (session + discovery) can never drift: if Claude's naming
+// scheme ever changes, the single implementation in internal/discovery is
+// the one to edit. TestClaudeProjectSlug_MatchesDiscovery pins the behaviour.
+// RNEW-002.
 func claudeProjectSlug(cwd string) string {
-	return strings.ReplaceAll(cwd, "/", "-")
+	return discovery.ClaudeProjectSlug(cwd)
 }
 
 // resolveResumeID returns resumeID if the corresponding jsonl conversation
