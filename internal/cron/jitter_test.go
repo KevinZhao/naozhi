@@ -52,7 +52,7 @@ func TestApplyJitter_CapClampedByPeriod(t *testing.T) {
 
 	// 直接调 schedulePeriod 验证 period 侧的 cap 计算，避免真的 sleep 测试
 	// 里做 75s 的实时等待（测试时间会爆炸）。
-	period := schedulePeriod("@every 5m")
+	period := schedulePeriod("@every 5m", time.Now())
 	if period != 5*time.Minute {
 		t.Fatalf("schedulePeriod(@every 5m) = %v, want 5m", period)
 	}
@@ -71,7 +71,7 @@ func TestApplyJitter_UnparsableSchedule_UsesMaxCap(t *testing.T) {
 
 	// 构造一个无法解析的 schedule。5-field cron "every second" 是非法的
 	// （robfig/cron 不支持 second 字段）。
-	period := schedulePeriod("not-a-cron-expr")
+	period := schedulePeriod("not-a-cron-expr", time.Now())
 	if period != 0 {
 		t.Fatalf("schedulePeriod(bogus) = %v, want 0", period)
 	}
@@ -176,6 +176,9 @@ type jitterStubRouter struct {
 
 func (r *jitterStubRouter) RegisterCronStub(key, workspace, lastPrompt string) {
 	_, _, _ = key, workspace, lastPrompt
+}
+func (r *jitterStubRouter) RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string) {
+	_, _, _, _ = key, workspace, lastPrompt, chainIDs
 }
 func (r *jitterStubRouter) Reset(key string) { _ = key }
 func (r *jitterStubRouter) GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error) {

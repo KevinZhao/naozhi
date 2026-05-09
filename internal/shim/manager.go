@@ -18,9 +18,47 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/metrics"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// validateKeyForShim rejects keys that would leak control bytes into the
+// shim argv / socket path. Mirrors session.ValidateSessionKey; we keep a
+// local copy here because session → shim is a one-way import and the
+// shim package must remain a leaf. Keep this rule set in sync with
+// session.ValidateSessionKey — the byte cap below matches
+// session.MaxSessionKeyBytes (4*128+3=515), and the rune filter mirrors
+// that function verbatim. If either side grows new rune classes, update
+// both together.
+func validateKeyForShim(k string) error {
+	if k == "" {
+		return errors.New("empty key")
+	}
+	// Matches session.MaxSessionKeyBytes; a divergence here would reject
+	// keys that passed every upstream gate.
+	const maxKeyBytes = 515
+	if len(k) > maxKeyBytes {
+		return errors.New("key too long")
+	}
+	if !utf8.ValidString(k) {
+		return errors.New("key invalid utf-8")
+	}
+	for _, r := range k {
+		if r == 0 || r < 0x20 || (r >= 0x7F && r <= 0x9F) {
+			return errors.New("key contains control character")
+		}
+		switch {
+		case r >= 0x200B && r <= 0x200F, // zero-width / LTR-RTL marks
+			r >= 0x202A && r <= 0x202E, // bidi embedding / override
+			r == 0x2028, r == 0x2029,   // line / paragraph separator
+			r == 0xFEFF: // BOM
+			return errors.New("key contains invisible control character")
+		}
+	}
+	return nil
+}
 
 // ErrMaxShims is returned by StartShim when the configured shim cap is hit.
 // Distinct from session.ErrMaxProcs so callers can apply different retry
@@ -138,6 +176,14 @@ func (m *Manager) StartShim(ctx context.Context, key string, cliArgs []string, c
 // Pass cliPath == "" to fall back to the manager's default, and backend ==
 // "" when the caller is a legacy single-backend user.
 func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backend string, cliArgs []string, cwd string) (*ShimHandle, error) {
+	// Defence-in-depth: the key flows into the shim argv as `--key <key>`.
+	// Upstream callers (HTTP / WS / reverse-RPC) already run
+	// session.ValidateSessionKey, but the shim manager must not trust
+	// that unconditionally — any future call path that forgets the check
+	// would silently let control bytes reach exec argv.
+	if err := validateKeyForShim(key); err != nil {
+		return nil, fmt.Errorf("shim key rejected: %w", err)
+	}
 	if cliPath == "" {
 		cliPath = m.cliPath
 	}
@@ -883,13 +929,14 @@ func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int) {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "sudo", args...)
 	if out, err := cmd.CombinedOutput(); err != nil {
-		// Truncate busctl's combined stdout+stderr so repeated failures
-		// can't flood the journal with D-Bus diagnostic payloads.
-		if len(out) > 512 {
-			out = append(out[:512:512], []byte("...(truncated)")...)
-		}
+		// Sanitize + truncate busctl's combined stdout+stderr: D-Bus
+		// diagnostics can carry bidi / C1 control bytes that would
+		// otherwise corrupt journalctl rendering. 512 bytes matches the
+		// existing truncation budget and aligns with R183-SEC-H1 /
+		// R190-SEC-M3 precedent elsewhere in this codebase.
+		sanitized := osutil.SanitizeForLog(string(out), 512)
 		slog.Warn("moveToShimsCgroup: systemd scope failed, trying direct cgroup — zero-downtime restart may not survive service restart",
-			"pid", shimPID, "err", err, "output", string(out))
+			"pid", shimPID, "err", err, "output", sanitized)
 		moveToShimsCgroupDirect(parentCtx, shimPID)
 		if cliPID > 0 {
 			moveToShimsCgroupDirect(parentCtx, cliPID)

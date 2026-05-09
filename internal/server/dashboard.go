@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"embed"
 	"encoding/json"
+	"errors"
+	"io"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -148,6 +150,45 @@ func writeOK(w http.ResponseWriter) {
 		slog.Debug("write json response", "err", err)
 	}
 }
+
+// decodeJSONBody reads r.Body into memory and unmarshals it into dst.
+//
+// Callers MUST have wrapped r.Body with http.MaxBytesReader beforehand so an
+// oversize client cannot force unbounded io.ReadAll; the 15+ JSON POST
+// handlers in this package all follow that pattern. RNEW-PERF-001: compared
+// with json.NewDecoder(r.Body).Decode(dst), this variant avoids the 4 KiB
+// bufio.Reader the stdlib Decoder wraps around every request body — bodies
+// are already ≤ a few MiB and fit comfortably in a single []byte.
+//
+// Error semantics match Decoder.Decode closely: unmarshal errors, empty
+// body (io.EOF equivalent → json.Unmarshal returns "unexpected end of JSON
+// input"), and MaxBytesError all surface as a single error value the
+// caller can log/return as 400. Callers that previously wrote specific
+// 413 responses from MaxBytesReader must still check errors.As against
+// *http.MaxBytesError; they already do today.
+func decodeJSONBody(r *http.Request, dst any) error {
+	// net/http closes the body after the handler returns, but closing here
+	// is still correct for future non-HTTP callers (test mocks, potential
+	// reverse-RPC adapters) and keeps the body-lifecycle contract local to
+	// this helper.
+	defer r.Body.Close()
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		return err
+	}
+	if len(body) == 0 {
+		// Distinguishing empty-body from malformed-JSON lets handlers emit
+		// a more actionable 400 than the default "unexpected end of JSON
+		// input" that json.Unmarshal would otherwise produce.
+		return errEmptyJSONBody
+	}
+	return json.Unmarshal(body, dst)
+}
+
+// errEmptyJSONBody is returned by decodeJSONBody when the request has a zero-
+// length body. Callers can errors.Is against it to emit a specific message
+// instead of the generic JSON parse error.
+var errEmptyJSONBody = errors.New("empty request body")
 
 // writeJSONStatus is like writeJSON but writes a non-200 HTTP status code.
 // Content-Type must be set before WriteHeader, so this helper ensures
@@ -299,16 +340,19 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
-	// connect-src includes both ws: and wss:. ws: is required for local HTTP
-	// development (browsers reject ws:// under a CSP that only lists wss:) while
-	// wss: covers production TLS deployments. The browser automatically picks
-	// the matching scheme based on page origin, so listing both does not widen
-	// the attack surface for TLS users.
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:")
+	// connect-src 只保留 'self'：同源页面发起的 ws:// 与 wss:// 已由 'self'
+	// 隐式覆盖（浏览器按页面 scheme 自动选）。显式写 `ws: wss:` 会放宽到
+	// **任何**跨源 WebSocket 端点，为潜在 XSS/XS-Leak 外泄数据留口。
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:")
 	w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
+	// Permissions-Policy: block camera/microphone/geolocation/payment API
+	// access outright. Embedded CDN scripts (mermaid, KaTeX) are SRI-pinned
+	// but defence in depth — if the CDN is ever compromised, the hostile
+	// replacement still cannot silently invoke getUserMedia etc.
+	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("dashboard write", "err", err)
 	}

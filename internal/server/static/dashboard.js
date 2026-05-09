@@ -5,6 +5,18 @@ let selectedKey = null;
 let eventTimer = null;
 let lastEventTime = 0;
 let lastRenderedEventTime = 0;
+// oldestFetchedEventTime tracks the earliest server event we've already
+// requested, independent of what's currently rendered in the DOM. The
+// "load earlier" pagination originally took its cursor from the first
+// `.event` child in the scroller — but when a page of 100 events is
+// entirely internal-only (tool_use / agent / task_start / task_progress /
+// task_done / result, filtered out by INTERNAL_EVENT_TYPES), no `.event`
+// is rendered and the pagination silently bails with no cursor. That
+// happens in practice whenever a parallel agent team runs long enough to
+// fill the ring buffer with tool activity; the operator sees a blank
+// events panel and a dead "加载更早的事件" button. Keep this cursor so
+// pagination works regardless of what got filtered out.
+let oldestFetchedEventTime = 0;
 let lastCompositionEnd = 0;
 let sessionsData = {};
 let allSessionsCache = [];
@@ -75,6 +87,18 @@ const sessionScrollPos = {};
 // transitions (i.e. the model finished answering) and cleared when the user opens
 // the card. Drives the sidebar chat-style unread bubble.
 const sessionUnread = {};
+// sessionOptimisticRunning: sid(key,node) -> true when sendMessage flipped
+// state to 'running' locally before the server broadcast arrived. Rolled back
+// by onSendAck on busy/error so the banner doesn't get stuck. Cleared on
+// accepted/queued (server-side session_state takes over) and on any real
+// session_state WS push.
+const sessionOptimisticRunning = {};
+// sessionLastSent: sid(key,node) -> 最近一次发出的用户文本（当前 turn 的输入）。
+// 在 sendMessage 成功发出后记录；turn 自然跑完 (running→ready/dead) 时清掉。
+// 若用户在 running 中点击中断，则把这段文本回填到 #msg-input（Claude Code
+// 的中断-回填行为），方便修改后重发。只在输入框当前为空时回填，避免覆盖
+// 用户已经开始敲的新内容。
+const sessionLastSent = {};
 let historySessionsData = []; // from API history_sessions (all filesystem sessions)
 
 function getToken() { return ''; }
@@ -124,7 +148,15 @@ async function fetchSessions() {
     const backendKeys = new Set();
     (data.sessions || []).forEach(s => {
       const n = s.node || 'local';
-      sessionsData[sid(s.key, n)] = s;
+      const sKey = sid(s.key, n);
+      // Preserve the optimistic 'running' flip when the REST snapshot is still
+      // lagging behind the send — otherwise the banner appears for a split
+      // second, then a /api/sessions poll rewrites state to 'ready' and hides
+      // it until the server's real session_state broadcast catches up.
+      if (sessionOptimisticRunning[sKey] && s.state !== 'running') {
+        s = Object.assign({}, s, { state: 'running' });
+      }
+      sessionsData[sKey] = s;
       backendKeys.add(s.key);
     });
 
@@ -312,8 +344,24 @@ function renderSidebar(data) {
     // key so two unrelated folders that share a basename (e.g. /a/tmp and
     // /b/tmp) do not collapse into a single mislabeled group.
     const groups = {};
+    const cronItems = [];
     const ungrouped = [];
     allItems.forEach(s => {
+      // Cron-scheduler sessions (key prefix "cron:"): if the job carries a
+      // WorkDir that the backend resolved to a real project name, let it
+      // flow into that project's group just like any other session — the
+      // cron badge (⏰) on the card already signals its nature. Only cron
+      // jobs without a project (no WorkDir, or WorkDir outside any
+      // registered project AND no workspace-basename fallback) fall into
+      // the dedicated "定时任务" bucket, so they don't drop into the generic
+      // "未分组" catch-all either. 这样定了 WorkDir 的定时任务会出现在
+      // 它实际运行的项目下，符合操作者的定位直觉；纯无归属的定时任务
+      // 才统一收进定时任务分组。
+      const isCron = typeof s.key === 'string' && s.key.indexOf('cron:') === 0;
+      if (isCron && !s.project) {
+        cronItems.push(s);
+        return;
+      }
       const pn = s.project || '';
       if (pn) {
         const node = s.node || 'local';
@@ -350,7 +398,9 @@ function renderSidebar(data) {
     });
 
     const groupKeys = Object.keys(groups);
-    if (groupKeys.length > 0) {
+    // cron 分组要和 project 分组并列展示；如果只有 cron session（无任何
+    // project header），也要保留分组结构而不是回落到扁平列表。
+    if (groupKeys.length > 0 || cronItems.length > 0) {
       // Pre-compute per-group sort keys once — avoids repeated map lookups
       // inside the sort comparator (fav flag, max firstSeen, display name).
       // This keeps comparator at O(1) scalar comparisons rather than
@@ -399,6 +449,16 @@ function renderSidebar(data) {
         // affordance, so a duplicate "New session in X" CTA would just add
         // visual noise.
       });
+      if (cronItems.length > 0) {
+        html += sectionHeaderCronHtml(cronItems.length);
+        if (!collapsedProjects.has('cron:__all__')) {
+          // Stable ordering inside the cron bucket: by firstSeen desc, same
+          // as the global sort above already placed them. Use them as-is
+          // rather than re-sorting so the earlier "running first" tier is
+          // preserved (cron stubs that are actually executing bubble up).
+          html += cronItems.map(sessionCardHtml).join('');
+        }
+      }
       if (ungrouped.length > 0) {
         // Final catch-all: sessions with no project name AND no workspace
         // (rare — usually transient takeover/planner edge cases). The old
@@ -583,6 +643,31 @@ const GITHUB_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-
 // Chevron: points down when expanded (`▾`-like), rotated 90deg via CSS
 // when collapsed so the same glyph serves both states.
 const CHEVRON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
+
+// sectionHeaderCronHtml renders the dedicated "定时任务" section header that
+// holds every cron-scheduler session (key prefix "cron:"). The header is
+// collapsible (key "cron:__all__", shared in collapsedProjects), and its
+// trailing "+" button jumps straight to the cron-create modal so operators
+// have a one-click path to schedule a new task — mirroring the per-project
+// header's create affordance but bound to the cron surface instead of a
+// workspace. Favorite / GitHub / rename are intentionally absent because
+// the cron group is not a ProjectManager entity.
+function sectionHeaderCronHtml(count) {
+  const ck = 'cron:__all__';
+  const collapsed = collapsedProjects.has(ck);
+  const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
+  const cTitle = collapsed ? '展开' : '收起';
+  const collapseBtn = '<button type="button" class="' + cCls + '" data-key="' + escAttr(ck) + '" title="' + cTitle + ' 定时任务" aria-label="' + cTitle + ' 定时任务" aria-expanded="' + (collapsed ? 'false' : 'true') + '" onclick="event.stopPropagation();toggleProjectCollapsed(this.dataset.key)">' + CHEVRON_SVG + '</button>';
+  const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
+  const newBtn = '<button type="button" class="sh-btn sh-new" title="新建定时任务" aria-label="新建定时任务" onclick="event.stopPropagation();createNewCronJob()"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>';
+  const collapsedCls = collapsed ? ' is-collapsed' : '';
+  return '<div class="section-header section-header-cron' + collapsedCls + '" role="group" aria-label="定时任务">' +
+    collapseBtn +
+    '<span class="sh-name" title="定时任务">⏰ 定时任务</span>' +
+    countBadge +
+    newBtn +
+    '</div>';
+}
 
 // sectionHeaderFallbackHtml renders the minimal header for ad-hoc workspace
 // groups (p.fallback === true). The group's "project name" is just the
@@ -982,7 +1067,11 @@ function sessionCardHtml(s) {
   const isActive = selectedKey === s.key && selectedNode === sNode;
   const isNew = s.state === 'new';
   const isCron = typeof s.key === 'string' && s.key.indexOf('cron:') === 0;
-  const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '') + (isCron ? ' cron-card' : '');
+  // sc-cron-card (not cron-card) because `.cron-card` is also the cron
+  // panel's job card class — reusing it here pulled the panel's padding /
+  // border / padding-right:100px into the sidebar card and pushed the time
+  // + agent badge into the wrong positions.
+  const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '') + (isCron ? ' sc-cron-card' : '');
 
   // Line 1: prompt. user_label (operator-set via rename) wins over any
   // auto-derived title so the rename is visible immediately across refreshes.
@@ -1411,6 +1500,7 @@ function selectSession(key, node) {
   }
   lastEventTime = 0;
   lastRenderedEventTime = 0;
+  oldestFetchedEventTime = 0;
   mobileEnterChat();
   stopPreviewPolling();
   document.querySelectorAll('.session-card').forEach(el => {
@@ -1613,6 +1703,9 @@ function formatSessionMarkdown(meta, events) {
     // as user messages is noise in both renders.
     const raw = (e.detail || e.summary || '');
     if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) continue;
+    // CLI-synthesised interrupt marker (SIGINT-aborted turn): not user intent,
+    // mirrors the Go-side isClaudeInterruptMarker filter.
+    if (e.type === 'user' && (raw === '[Request interrupted by user]' || raw === '[Request interrupted by user for tool use]')) continue;
 
     const ts = e.time ? new Date(e.time).toISOString() : '';
     if (e.type === 'user') {
@@ -1903,6 +1996,12 @@ async function loadEarlierEvents() {
       break;
     }
   }
+  // Fallback: when no `.event` is rendered (e.g. the visible page was
+  // entirely internal events filtered out by INTERNAL_EVENT_TYPES during a
+  // parallel agent team turn), page against the cursor we recorded at
+  // fetch time. Without this the button appears to do nothing and the
+  // operator has no path back to the earlier conversation.
+  if (!oldestTime) oldestTime = oldestFetchedEventTime;
   if (!oldestTime) return;
 
   _earlierLoading = true;
@@ -1940,6 +2039,14 @@ function prependEvents(events) {
   const el = document.getElementById('events-scroll');
   if (!el || !events || events.length === 0) return;
 
+  // Advance the pagination cursor before DOM work so a subsequent
+  // loadEarlierEvents sees the new floor even if the freshly prepended
+  // batch was entirely internal-filtered.
+  const firstT = events[0] && events[0].time;
+  if (firstT && (oldestFetchedEventTime === 0 || firstT < oldestFetchedEventTime)) {
+    oldestFetchedEventTime = firstT;
+  }
+
   // Remove "load earlier" button so we can place new events first; it'll be
   // re-added after.
   const btn = document.getElementById('earlier-events-btn');
@@ -1947,6 +2054,11 @@ function prependEvents(events) {
 
   const display = processEventsForDisplay(events);
   const html = renderEventsWithDividers(display, 0);
+  // Drop a placeholder the first time a chat is entered through a
+  // fully-internal page; leaving it in place would push the prepended
+  // real messages below the placeholder, so clean it out before insert.
+  const placeholder = el.querySelector('.empty-state');
+  if (placeholder) placeholder.remove();
 
   // Preserve visual stability: capture distance-from-bottom before mutation,
   // then restore after. scrollTop alone breaks because inserted content above
@@ -2025,21 +2137,35 @@ function renderEvents(events) {
   if (!el) return;
   const display = processEventsForDisplay(events);
   const html = renderEventsWithDividers(display, 0);
-  el.innerHTML = html || (events.length === 0 ? '<div class="empty-state">暂无事件</div>' : '');
-  // Track the latest rendered event time for deduplication
+  if (html) {
+    el.innerHTML = html;
+  } else if (events.length === 0) {
+    el.innerHTML = '<div class="empty-state">暂无事件</div>';
+  } else {
+    // The server returned events but every one was filtered out by
+    // INTERNAL_EVENT_TYPES — typically a parallel agent team where the
+    // visible tail of the log is all tool_use / task_progress. Render a
+    // neutral placeholder so the panel isn't a blank void, and still
+    // show the "load earlier" affordance below so the operator can
+    // page back to the real messages.
+    el.innerHTML = '<div class="empty-state">该会话最近仅有 agent 活动，点击下方加载更早的消息</div>';
+  }
   if (events.length > 0) {
     const last = events[events.length - 1];
     if (last.time) lastRenderedEventTime = last.time;
+    const first = events[0];
+    if (first.time && (oldestFetchedEventTime === 0 || first.time < oldestFetchedEventTime)) {
+      oldestFetchedEventTime = first.time;
+    }
   }
-  // If we got a full initial page there's probably more history available;
-  // show the "Load earlier" affordance. Empty state keeps no button.
+  // Mount "load earlier" whenever we got a full page — more history likely
+  // exists, regardless of whether the visible slice survived the filter.
   if (events.length >= INITIAL_HISTORY_LIMIT) {
     ensureEarlierButton();
   }
   runMermaid();
   runKatex();
   navRebuild();
-  // 若有上次切走时保存的滚动位置且不在底部，恢复它；否则照旧贴底。
   if (!restoreScrollPos(selectedKey, selectedNode)) {
     stickEventsBottom();
   }
@@ -2139,6 +2265,8 @@ function eventHtml(e) {
   // Filter out Claude Code system XML injected as user messages
   const raw = e.detail || e.summary || '';
   if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return '';
+  // CLI-synthesised interrupt marker: SIGINT-aborted turn, not user intent.
+  if (e.type === 'user' && (raw === '[Request interrupted by user]' || raw === '[Request interrupted by user for tool use]')) return '';
   const icons = {init:'\u2699',system:'\u2699',user:'\u{1f464}',text:'\u2726',todo:'\u2630'};
   const icon = icons[e.type] || '';
 
@@ -2442,6 +2570,8 @@ async function sendMessage() {
       if (input) clearMsg(input);
       delete sessionDrafts[selectedKey];
       clearPendingFiles();
+      if (text) sessionLastSent[sid(selectedKey, selectedNode)] = text;
+      markSessionOptimisticRunning(selectedKey, selectedNode);
       sending = false;
       if (btn) btn.classList.remove('sending');
       return;
@@ -2491,10 +2621,21 @@ async function sendMessage() {
       return;
     }
 
+    // /clear and /new return status:"reset" — no CLI turn to run, so don't
+    // flip to 'running'. Every other success ('accepted'/'queued') should
+    // show the banner immediately. Read the body once (before clearing the
+    // input) so we can branch on status without reviving the stale text.
+    let ackStatus = '';
+    try { const j = await r.json(); if (j && j.status) ackStatus = j.status; } catch (_) {}
+
     // Clear input only after confirmed success
     if (input) clearMsg(input);
     delete sessionDrafts[selectedKey];
     clearPendingFiles();
+    if (ackStatus !== 'reset') {
+      if (text) sessionLastSent[sid(selectedKey, selectedNode)] = text;
+      markSessionOptimisticRunning(selectedKey, selectedNode);
+    }
 
     // Speed up polling when WS not connected
     if (!wsm.isConnected()) {
@@ -2520,6 +2661,55 @@ function clearPendingFiles() {
   pendingFiles.forEach(f => { if (f.blobUrl) URL.revokeObjectURL(f.blobUrl); });
   pendingFiles = [];
   renderFilePreviews();
+}
+
+// markSessionOptimisticRunning flips the selected session's local state to
+// 'running' immediately after send succeeds so the running-banner shows
+// without waiting for the server's session_state broadcast. The server can
+// take 100ms–several seconds to emit BroadcastSessionReady when GetOrCreate
+// has to spawn a new CLI subprocess, during which the dashboard previously
+// looked idle even though the turn was already queued. Rolled back by
+// onSendAck on 'busy'/'error' so a rejected send doesn't leave a stuck banner.
+// Tracked with a 20s safety timer so a lost session_state push can't keep
+// the banner stuck forever.
+const _optimisticRunningTimers = {};
+function markSessionOptimisticRunning(key, node) {
+  if (!key) return;
+  const sKey = sid(key, node || 'local');
+  const sd = sessionsData[sKey];
+  if (!sd) return;
+  if (sd.state === 'running') return; // server already said running
+  sd.state = 'running';
+  sessionOptimisticRunning[sKey] = true;
+  if (_optimisticRunningTimers[sKey]) clearTimeout(_optimisticRunningTimers[sKey]);
+  _optimisticRunningTimers[sKey] = setTimeout(() => {
+    delete _optimisticRunningTimers[sKey];
+    // Only rollback if still optimistic (no real running state arrived).
+    if (sessionOptimisticRunning[sKey]) {
+      rollbackOptimisticRunning(key, node);
+    }
+  }, 20000);
+  if (key === selectedKey && (node || 'local') === selectedNode) {
+    updateSendButton('running');
+  }
+}
+
+function rollbackOptimisticRunning(key, node) {
+  if (!key) return;
+  const sKey = sid(key, node || 'local');
+  if (!sessionOptimisticRunning[sKey]) return;
+  delete sessionOptimisticRunning[sKey];
+  if (_optimisticRunningTimers[sKey]) {
+    clearTimeout(_optimisticRunningTimers[sKey]);
+    delete _optimisticRunningTimers[sKey];
+  }
+  const sd = sessionsData[sKey];
+  if (sd && sd.state === 'running') {
+    sd.state = 'ready';
+    if (key === selectedKey && (node || 'local') === selectedNode) {
+      updateSendButton('ready');
+    }
+  }
 }
 
 // --- Running banner: tool activity + agent tracking ---
@@ -2826,6 +3016,27 @@ function interruptSession() {
   const sd = sessionsData[sid(selectedKey, selectedNode || 'local')];
   if (!sd || sd.state !== 'running') return;
   const targetNode = selectedNode && selectedNode !== 'local' ? selectedNode : '';
+  // Claude Code 风格：中断时把刚发的那条用户文本回填到输入框方便改写。
+  // 只在输入框当前为空时回填，避免覆盖用户已经开始输入的新内容；回填后
+  // 把光标挪到末尾、聚焦、滚进视口。回填完成即消费掉 lastSent，防止同一条
+  // 文本在后续多次中断里反复回填。
+  const lastText = sessionLastSent[sid(selectedKey, selectedNode)];
+  if (lastText) {
+    const input = document.getElementById('msg-input');
+    if (input && !getMsgValue(input)) {
+      setMsgValue(input, lastText);
+      try {
+        input.focus();
+        const range = document.createRange();
+        range.selectNodeContents(input);
+        range.collapse(false);
+        const sel = window.getSelection();
+        if (sel) { sel.removeAllRanges(); sel.addRange(range); }
+      } catch (_) {}
+      sessionDrafts[selectedKey] = lastText;
+      delete sessionLastSent[sid(selectedKey, selectedNode)];
+    }
+  }
   if (wsm.isConnected()) {
     const req = { type: 'interrupt', key: selectedKey, id: 'int' + Date.now() };
     if (targetNode) req.node = targetNode;
@@ -5109,8 +5320,11 @@ function localizeAPIError(status, raw) {
   if (status === 0 || status === undefined || status === null) {
     return '网络错误' + withTail;
   }
-  if (status === 401 || status === 403) {
+  if (status === 401) {
     return '鉴权失败，请重新登录' + withTail;
+  }
+  if (status === 403) {
+    return '无权限或参数越界' + withTail;
   }
   if (status === 404) {
     return '资源不存在' + withTail;
@@ -6921,10 +7135,24 @@ const wsm = {
           ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>'
           : '<div class="empty-state">\u6682\u65e0\u4e8b\u4ef6</div>';
       } else {
-        el.innerHTML = '';
+        // Server returned events but every one was internal-filtered
+        // (parallel agent team tail). Placeholder keeps the pane from
+        // looking broken; the "load earlier" button mounted below is the
+        // path back to real messages.
+        el.innerHTML = '<div class="empty-state">\u8be5\u4f1a\u8bdd\u6700\u8fd1\u4ec5\u6709 agent \u6d3b\u52a8\uff0c\u70b9\u51fb\u4e0b\u65b9\u52a0\u8f7d\u66f4\u65e9\u7684\u6d88\u606f</div>';
       }
-      // Reset dedup tracker on full render
-      if (events.length > 0) { const last = events[events.length - 1]; if (last.time) lastRenderedEventTime = last.time; }
+      // Reset dedup tracker on full render and anchor the pagination
+      // cursor to the earliest event we received, independent of DOM
+      // contents so loadEarlierEvents still works after a fully-filtered
+      // page.
+      if (events.length > 0) {
+        const last = events[events.length - 1];
+        if (last.time) lastRenderedEventTime = last.time;
+        const first = events[0];
+        if (first.time && (oldestFetchedEventTime === 0 || first.time < oldestFetchedEventTime)) {
+          oldestFetchedEventTime = first.time;
+        }
+      }
       // Mount "load earlier" affordance when the server returned a full page
       // (more history likely exists). Skipped for short histories so we don't
       // surface a useless button.
@@ -7100,6 +7328,14 @@ const wsm = {
   },
 
   onSendAck(msg) {
+    // "reset" = /clear or /new — the send was consumed by the router to reset
+    // the session, not handed to the CLI, so roll back the optimistic running
+    // flip. No banner, no turn.
+    if (msg.status === 'reset') {
+      rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
+      delete sessionLastSent[sid(msg.key || selectedKey, msg.node || selectedNode)];
+      return;
+    }
     // "accepted" = owner of a new turn, "queued" = appended to an active turn.
     // Both are success cases; the dashboard should behave the same way.
     if (msg.status === 'accepted' || msg.status === 'queued') {
@@ -7144,6 +7380,10 @@ const wsm = {
       showToast('会话正忙，消息未送达，请稍后重试', 'error');
       const opt = document.querySelector('.optimistic-msg');
       if (opt) opt.remove();
+      rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
+      // send 从未真正进入 turn，别把它当成「当前 turn 的输入」残留 —— 否则
+      // 下次中断会把这条从未送达的文本回填上来。
+      delete sessionLastSent[sid(msg.key || selectedKey, msg.node || selectedNode)];
     } else if (msg.status === 'error') {
       // The WS send_ack error is an in-band message, not an HTTP status,
       // but treat the server-supplied `error` string the same way as an
@@ -7152,12 +7392,22 @@ const wsm = {
       // Remove optimistic message on send failure
       const opt = document.querySelector('.optimistic-msg');
       if (opt) opt.remove();
+      rollbackOptimisticRunning(msg.key || selectedKey, msg.node || selectedNode);
+      delete sessionLastSent[sid(msg.key || selectedKey, msg.node || selectedNode)];
     }
   },
 
   onSessionState(msg) {
     const msgNode = msg.node || 'local';
     const sKey = sid(msg.key, msgNode);
+    // Real state arrived — the optimistic flip has served its purpose, regardless
+    // of whether the server says running/ready/dead. Clear the flag so future
+    // turns don't short-circuit the running→ready rollback logic.
+    delete sessionOptimisticRunning[sKey];
+    if (_optimisticRunningTimers[sKey]) {
+      clearTimeout(_optimisticRunningTimers[sKey]);
+      delete _optimisticRunningTimers[sKey];
+    }
     const prev = sessionsData[sKey] || {};
     const prevState = prev.state;   // capture before mutation
     const wasDead = prev.death_reason && prevState !== 'running';
@@ -7169,6 +7419,10 @@ const wsm = {
     if (turnCompleted && !isActive) {
       sessionUnread[sKey] = (sessionUnread[sKey] || 0) + 1;
     }
+    // Turn 自然跑完后清掉上一次发出的文本缓存，否则下一轮刚进 running
+    // 就中断会把陈旧文本回填上来。中断路径不会走到这里被清掉，因为
+    // interruptSession 会先消费 lastSent 再发中断。
+    if (turnCompleted) delete sessionLastSent[sKey];
     if (sessionsData[sKey]) {
       sessionsData[sKey].state = msg.state;
       if (msg.reason) {

@@ -225,7 +225,7 @@ func extractFirstPrompt(path string) string {
 		}
 		text := extractUserText(hl.Message)
 		if text != "" {
-			return cli.TruncateRunes(text, 120)
+			return SanitizePromptForTransport(cli.TruncateRunes(text, 120))
 		}
 	}
 	return ""
@@ -284,8 +284,8 @@ func recentFromParsedIndex(idx *sessionsIndex, projDir, workspace string, exclud
 		}
 		out = append(out, RecentSession{
 			SessionID:  entry.SessionID,
-			Summary:    entry.Summary,
-			LastPrompt: cli.TruncateRunes(prompt, 120),
+			Summary:    SanitizePromptForTransport(entry.Summary),
+			LastPrompt: SanitizePromptForTransport(cli.TruncateRunes(prompt, 120)),
 			LastActive: mtime,
 			Workspace:  workspace,
 		})

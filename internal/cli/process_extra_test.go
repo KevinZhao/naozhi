@@ -1354,26 +1354,6 @@ func TestShortPath(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// getStr
-// ---------------------------------------------------------------------------
-
-func TestGetStr(t *testing.T) {
-	m := map[string]json.RawMessage{
-		"key": json.RawMessage(`"value"`),
-		"num": json.RawMessage(`42`),
-	}
-	if got := getStr(m, "key"); got != "value" {
-		t.Errorf("getStr key = %q, want value", got)
-	}
-	if got := getStr(m, "missing"); got != "" {
-		t.Errorf("getStr missing = %q, want empty", got)
-	}
-	if got := getStr(m, "num"); got != "" {
-		t.Errorf("getStr num = %q, want empty (not a string)", got)
-	}
-}
-
-// ---------------------------------------------------------------------------
 // formatToolDetail
 // ---------------------------------------------------------------------------
 

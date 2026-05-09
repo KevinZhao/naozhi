@@ -1,6 +1,7 @@
 package session
 
 import (
+	"slices"
 	"testing"
 )
 
@@ -139,5 +140,113 @@ func TestRegisterCronStub_EmptyValuesDoNotClobber(t *testing.T) {
 	}
 	if got := loadStringAtomic(&r.sessions["cron:job-4"].lastPrompt); got != "keepme" {
 		t.Errorf("lastPrompt clobbered by empty refresh: got %q", got)
+	}
+}
+
+// TestRegisterCronStubWithChain_SetsChainOnFreshStub 固化 fresh stub 注入
+// chain 的契约：无 chain 的旧路径会得到 nil prevSessionIDs；带 chain 时
+// 必须 Clone 进 ManagedSession（不共享底层数组，防 caller 改 slice
+// 污染 router 内部状态）。
+func TestRegisterCronStubWithChain_SetsChainOnFreshStub(t *testing.T) {
+	t.Parallel()
+	r := newTestRouter(3)
+	chain := []string{"sess-aaa", "sess-bbb"}
+
+	r.RegisterCronStubWithChain("cron:job-c1", "/w", "p", chain)
+
+	r.mu.RLock()
+	s := r.sessions["cron:job-c1"]
+	r.mu.RUnlock()
+	if s == nil {
+		t.Fatal("stub not registered")
+	}
+	if !slices.Equal(s.prevSessionIDs, chain) {
+		t.Errorf("prevSessionIDs = %v, want %v", s.prevSessionIDs, chain)
+	}
+	// Caller mutation of the passed slice must not affect router state.
+	chain[0] = "hijacked"
+	if s.prevSessionIDs[0] == "hijacked" {
+		t.Errorf("caller-side mutation bled into router: prevSessionIDs shares backing array")
+	}
+}
+
+// TestRegisterCronStubWithChain_NoOpOnIdenticalChain pins that a reload with
+// the same chainIDs does not mark the store dirty or bump the generation.
+// Cron's stubRefresh goroutine is paved over onExecute; repeat calls with
+// unchanged chain are the steady-state case, which must stay fsync-free.
+func TestRegisterCronStubWithChain_NoOpOnIdenticalChain(t *testing.T) {
+	t.Parallel()
+	r := newTestRouter(3)
+	r.RegisterCronStubWithChain("cron:job-c2", "/w", "p", []string{"sess-xxx"})
+
+	r.SetOnChange(func() {})
+	r.mu.Lock()
+	r.storeDirty = false
+	genBefore := r.storeGen.Load()
+	r.mu.Unlock()
+
+	r.RegisterCronStubWithChain("cron:job-c2", "/w", "p", []string{"sess-xxx"})
+
+	r.mu.RLock()
+	dirty := r.storeDirty
+	r.mu.RUnlock()
+	if dirty {
+		t.Errorf("storeDirty flipped on identical chain refresh")
+	}
+	if got := r.storeGen.Load(); got != genBefore {
+		t.Errorf("storeGen advanced on identical chain refresh: got %d, want %d", got, genBefore)
+	}
+}
+
+// TestRegisterCronStubWithChain_DirtyOnChainChange covers the new code path:
+// when the chain actually changes (cron recorded a new LastSessionID), the
+// stub's prevSessionIDs must be updated in place and the store marked
+// dirty so sessions.json persists the new chain on the next save tick.
+func TestRegisterCronStubWithChain_DirtyOnChainChange(t *testing.T) {
+	t.Parallel()
+	r := newTestRouter(3)
+	r.RegisterCronStubWithChain("cron:job-c3", "/w", "p", []string{"sess-old"})
+
+	r.SetOnChange(func() {})
+	r.mu.Lock()
+	r.storeDirty = false
+	genBefore := r.storeGen.Load()
+	r.mu.Unlock()
+
+	newChain := []string{"sess-new"}
+	r.RegisterCronStubWithChain("cron:job-c3", "/w", "p", newChain)
+
+	r.mu.RLock()
+	dirty := r.storeDirty
+	s := r.sessions["cron:job-c3"]
+	r.mu.RUnlock()
+	if !dirty {
+		t.Errorf("storeDirty should be true after chain change")
+	}
+	if got := r.storeGen.Load(); got == genBefore {
+		t.Errorf("storeGen did not advance on chain change")
+	}
+	if !slices.Equal(s.prevSessionIDs, newChain) {
+		t.Errorf("prevSessionIDs = %v, want %v", s.prevSessionIDs, newChain)
+	}
+}
+
+// TestRegisterCronStubWithChain_NilChainLeavesExistingChain fixes the legacy
+// compatibility rule: the nil/empty chain branch (how RegisterCronStub 走到
+// 这里) must NOT wipe an already-recorded chain. Otherwise the old
+// RegisterCronStub signature (used by legacy integrations or tests) would
+// silently blow away cron history lookup on every reload.
+func TestRegisterCronStubWithChain_NilChainLeavesExistingChain(t *testing.T) {
+	t.Parallel()
+	r := newTestRouter(3)
+	r.RegisterCronStubWithChain("cron:job-c4", "/w", "p", []string{"sess-keep"})
+
+	r.RegisterCronStub("cron:job-c4", "/w", "p") // equivalent to nil chain
+
+	r.mu.RLock()
+	s := r.sessions["cron:job-c4"]
+	r.mu.RUnlock()
+	if !slices.Equal(s.prevSessionIDs, []string{"sess-keep"}) {
+		t.Errorf("nil chain wiped existing prevSessionIDs: got %v", s.prevSessionIDs)
 	}
 }

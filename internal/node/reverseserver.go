@@ -100,9 +100,22 @@ type ReverseServer struct {
 func NewReverseServer(auth map[string]config.ReverseNodeEntry, trustedProxy bool) *ReverseServer {
 	tokens := make(map[string]string, len(auth))
 	names := make(map[string]string, len(auth))
+	// 两个 node 拿到同一个 token 等于身份可互换——token 认证靠 ConstantTimeCompare
+	// 只按值匹配，node_id 在 ReadJSON 那一刻由客户端自报。运维误配（复制粘贴）
+	// 最常见，启动时 WARN 一下，不拒启动（允许临时 rotate 场景）。
+	seen := make(map[string]string, len(auth))
 	for id, e := range auth {
 		tokens[id] = e.Token
 		names[id] = e.DisplayName
+		if e.Token == "" {
+			continue
+		}
+		if other, dup := seen[e.Token]; dup {
+			slog.Warn("reverse node duplicate token; node_ids are interchangeable under this token — rotate one",
+				"node_id_a", other, "node_id_b", id)
+			continue
+		}
+		seen[e.Token] = id
 	}
 	return &ReverseServer{
 		auth:  tokens,

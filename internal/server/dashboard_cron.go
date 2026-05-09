@@ -1,7 +1,6 @@
 package server
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -95,7 +94,7 @@ func validateCronWorkDir(wd string) error {
 		}
 	}
 	for _, r := range wd {
-		if isLogInjectionRune(r) {
+		if osutil.IsLogInjectionRune(r) {
 			return fmt.Errorf("work_dir contains invalid unicode control characters")
 		}
 	}
@@ -104,12 +103,6 @@ func validateCronWorkDir(wd string) error {
 	}
 	return nil
 }
-
-// isLogInjectionRune is a thin wrapper around osutil.IsLogInjectionRune kept
-// for existing call sites (+ dashboard_cron_validate_test.go) that reference
-// the package-local name. The canonical policy lives in osutil/loginject.go;
-// see R172-SEC-M4.
-func isLogInjectionRune(r rune) bool { return osutil.IsLogInjectionRune(r) }
 
 // validateNotifyTarget enforces platform allowlist + chat_id size bound.
 // R177-SEC-7: additionally reject C0/C1/bidi/LS/PS runes so a crafted
@@ -134,7 +127,7 @@ func validateNotifyTarget(platform, chatID string) error {
 		}
 	}
 	for _, r := range chatID {
-		if isLogInjectionRune(r) {
+		if osutil.IsLogInjectionRune(r) {
 			return fmt.Errorf("notify_chat_id contains invalid characters")
 		}
 	}
@@ -161,7 +154,7 @@ func validateCronScheduleChars(schedule string) error {
 		}
 	}
 	for _, r := range schedule {
-		if isLogInjectionRune(r) {
+		if osutil.IsLogInjectionRune(r) {
 			return fmt.Errorf("schedule contains invalid characters")
 		}
 	}
@@ -169,10 +162,19 @@ func validateCronScheduleChars(schedule string) error {
 }
 
 // validateCronPrompt rejects prompts larger than the dashboard cap or
-// containing control characters. Matches project_api.handleConfigPut's
-// planner_prompt guard: null bytes are silently truncated by execve, and
-// raw \n/\r into the CLI --append-system-prompt path corrupts shim NDJSON
-// framing. Tab is allowed because prompts may indent examples.
+// containing control characters. Cron prompts are delivered via stdin as a
+// stream-json user message (cron/scheduler.go → session.Send → NewUserMessage),
+// where json.Marshal escapes embedded \n so NDJSON framing stays intact. LF is
+// therefore allowed to support multi-paragraph playbook prompts. CR is still
+// rejected because `tail -f` / `journalctl` treat it as a carriage return that
+// overwrites the current log line — a log-poisoning surface unrelated to
+// framing. null bytes remain forbidden (execve silently truncates at the first
+// NUL). Tab is allowed because prompts may indent examples.
+//
+// Unlike project_api.handleConfigPut's planner_prompt guard, cron prompts do
+// not end up in argv — planner_prompt and scratch context still flow into
+// `--append-system-prompt` and must stay single-line; do not copy this relaxed
+// policy back to those fields without re-auditing their downstream writers.
 //
 // Second pass mirrors validateCronWorkDir: reject C1 controls + Unicode
 // bidi / directional isolate / line separator runes that are >= 0x20 at
@@ -198,7 +200,7 @@ func validateCronTitle(title string) error {
 		if r == 0 || (r < 0x20 && r != '\t') || r == 0x7f {
 			return fmt.Errorf("title contains invalid control characters")
 		}
-		if isLogInjectionRune(r) {
+		if osutil.IsLogInjectionRune(r) {
 			return fmt.Errorf("title contains invalid unicode control characters")
 		}
 	}
@@ -215,12 +217,12 @@ func validateCronPrompt(prompt string) error {
 	}
 	for i := 0; i < len(prompt); i++ {
 		c := prompt[i]
-		if c == 0 || (c < 0x20 && c != '\t') || c == 0x7f {
+		if c == 0 || (c < 0x20 && c != '\t' && c != '\n') || c == 0x7f {
 			return fmt.Errorf("prompt contains invalid control characters")
 		}
 	}
 	for _, r := range prompt {
-		if isLogInjectionRune(r) {
+		if osutil.IsLogInjectionRune(r) {
 			return fmt.Errorf("prompt contains invalid unicode control characters")
 		}
 	}
@@ -349,7 +351,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		FreshContext   bool   `json:"fresh_context,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64 KB
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
@@ -505,7 +507,7 @@ func (h *CronHandlers) handlePause(w http.ResponseWriter, r *http.Request) {
 		ID string `json:"id"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KB
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+	if err := decodeJSONBody(r, &req); err != nil || req.ID == "" {
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
@@ -547,7 +549,7 @@ func (h *CronHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		ID string `json:"id"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10) // 1 KB
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.ID == "" {
+	if err := decodeJSONBody(r, &req); err != nil || req.ID == "" {
 		http.Error(w, "id is required", http.StatusBadRequest)
 		return
 	}
@@ -587,7 +589,7 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		ID string `json:"id"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<10)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		http.Error(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
@@ -736,7 +738,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		FreshContext   *bool   `json:"fresh_context,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}

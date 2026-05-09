@@ -1098,10 +1098,13 @@ func TestHandleClient_KillCommand(t *testing.T) {
 
 func TestHandleClient_ShutdownCommand(t *testing.T) {
 	_, client, cleanup := setupShimServerWithClient(t)
-	// cleanup would block because handleClient already exited;
-	// just close the connection and let the goroutines drain
+	// Same rationale as TestHandleClient_ShutdownWithAuthedClientWithin60s:
+	// cleanup's <-handlerDone is the barrier we want so the defer
+	// saveState() inside handleClient finishes before t.TempDir's RemoveAll
+	// runs — otherwise WriteStateFile's CreateTemp+Rename races with
+	// cleanup and surfaces "directory not empty".
 	defer client.conn.Close()
-	_ = cleanup
+	defer cleanup()
 
 	sendClientCmd(t, client, ClientMsg{Type: "shutdown"})
 
@@ -1118,7 +1121,13 @@ func TestHandleClient_ShutdownCommand(t *testing.T) {
 func TestHandleClient_ShutdownWithAuthedClientWithin60s(t *testing.T) {
 	s, client, cleanup := setupShimServerWithClient(t)
 	defer client.conn.Close()
-	_ = cleanup
+	// cleanup waits on handlerDone inside — without it, handleClient's
+	// defer saveState() (server.go:797) can still be running WriteStateFile
+	// (os.CreateTemp + Rename under t.TempDir()) when the test returns,
+	// racing with t.TempDir()'s RemoveAll and surfacing "directory not
+	// empty" flakes. Using defer cleanup() attaches that barrier without
+	// altering the shutdown semantics this test asserts.
+	defer cleanup()
 
 	// Simulate a freshly-started shim — this is the case where the old
 	// guard would have bailed out with "ignoring shutdown".

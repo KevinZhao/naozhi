@@ -153,6 +153,12 @@ const (
 	// A crash losing up to this much session-ID tracking costs one
 	// discovery rescan cycle. Shared between Cleanup and saveIfDirty.
 	knownIDsSaveInterval = 5 * time.Minute
+
+	// sessionSaveInterval controls the cadence of the periodic
+	// sessions.json flush in StartCleanupLoop. Kept shorter than
+	// knownIDsSaveInterval so a crash loses at most this window of
+	// session-state updates, while still limiting fsync churn.
+	sessionSaveInterval = 30 * time.Second
 )
 
 // Router manages session key -> ManagedSession mapping.
@@ -336,13 +342,26 @@ func chatKeyFor(key string) string {
 	return key
 }
 
+// isENOENTErr reports whether err (or any error it wraps) ultimately
+// carries syscall.ENOENT. The helper exists primarily to make the intent
+// explicit at call sites and to spell out why we must NOT match the
+// strerror text ("no such file or directory") — it is locale-dependent
+// (e.g. LANG=zh_CN.UTF-8 returns a Chinese translation) and silently
+// regresses under non-English containers. errors.Is already walks the
+// %w chain through *os.PathError / *os.SyscallError transparently, so
+// a single call suffices.
+func isENOENTErr(err error) bool {
+	return err != nil && errors.Is(err, syscall.ENOENT)
+}
+
 // claudeProjectSlug maps a CWD to the directory name Claude CLI uses under
-// ~/.claude/projects/. Mirrors the transformation in internal/discovery
-// (projDirName): every "/" becomes "-", so "/home/user/proj" → "-home-user-proj".
-// Duplicated here rather than imported to keep discovery's internal helpers
-// package-private; the two must stay in sync if Claude's scheme ever changes.
+// ~/.claude/projects/. Thin wrapper over discovery.ClaudeProjectSlug so the
+// two call sites (session + discovery) can never drift: if Claude's naming
+// scheme ever changes, the single implementation in internal/discovery is
+// the one to edit. TestClaudeProjectSlug_MatchesDiscovery pins the behaviour.
+// RNEW-002.
 func claudeProjectSlug(cwd string) string {
-	return strings.ReplaceAll(cwd, "/", "-")
+	return discovery.ClaudeProjectSlug(cwd)
 }
 
 // resolveResumeID returns resumeID if the corresponding jsonl conversation
@@ -390,29 +409,23 @@ func resolveResumeID(claudeDir, workspace, key, resumeID string) string {
 	return resumeID
 }
 
-// cliNameDefault returns the CLI display name from the wrapper, or empty if no wrapper.
-// Kept as an internal helper (not inlined into CLIName) because snapshot
-// builders in this file already route through it.
-func (r *Router) cliNameDefault() string {
+// CLIName exposes the wrapper's CLI display name for status endpoints.
+// Returns empty when no wrapper is wired (tests, early boot).
+func (r *Router) CLIName() string {
 	if r.wrapper != nil {
 		return r.wrapper.CLIName
 	}
 	return ""
 }
 
-// cliVersionDefault returns the CLI version from the wrapper, or empty if no wrapper.
-func (r *Router) cliVersionDefault() string {
+// CLIVersion exposes the wrapper's detected CLI version for status endpoints.
+// Returns empty when no wrapper is wired.
+func (r *Router) CLIVersion() string {
 	if r.wrapper != nil {
 		return r.wrapper.CLIVersion
 	}
 	return ""
 }
-
-// CLIName exposes the wrapper's CLI display name for status endpoints.
-func (r *Router) CLIName() string { return r.cliNameDefault() }
-
-// CLIVersion exposes the wrapper's detected CLI version for status endpoints.
-func (r *Router) CLIVersion() string { return r.cliVersionDefault() }
 
 // wrapperFor selects the wrapper for the requested backend ID.
 // Empty backend picks the router default. Returns (wrapper, effectiveID).
@@ -477,12 +490,18 @@ func (r *Router) BackendIDs() []string {
 			out = append(out, r.defaultBackend)
 		}
 	}
+	// Sort the non-default remainder so dashboard enumeration is stable
+	// across process restarts — Go map iteration is randomised, so without
+	// this the dropdown order flips on every tick.
+	rest := make([]string, 0, len(r.wrappers))
 	for id := range r.wrappers {
 		if id == r.defaultBackend {
 			continue
 		}
-		out = append(out, id)
+		rest = append(rest, id)
 	}
+	slices.Sort(rest)
+	out = append(out, rest...)
 	return out
 }
 
@@ -618,12 +637,20 @@ func NewRouter(cfg RouterConfig) *Router {
 		defaultWrapper = wrappers[defaultBackend]
 	}
 	if defaultWrapper == nil {
-		for id, w := range wrappers {
-			defaultWrapper = w
+		// Pick deterministically: Go map iteration is randomised, so
+		// without sorting a multi-backend deployment without an explicit
+		// DefaultBackend would flip its default on every process start.
+		ids := make([]string, 0, len(wrappers))
+		for id := range wrappers {
+			ids = append(ids, id)
+		}
+		slices.Sort(ids)
+		if len(ids) > 0 {
+			id := ids[0]
+			defaultWrapper = wrappers[id]
 			if defaultBackend == "" {
 				defaultBackend = id
 			}
-			break
 		}
 	}
 
@@ -686,7 +713,7 @@ func NewRouter(cfg RouterConfig) *Router {
 			// restore (no shim reconnect). Pre-multi-backend entries have
 			// empty Backend and fall back to the router default.
 			restoreWrapper, restoreBackendID := r.wrapperFor(entry.Backend)
-			cliName, cliVersion := r.cliNameDefault(), r.cliVersionDefault()
+			cliName, cliVersion := r.CLIName(), r.CLIVersion()
 			if restoreWrapper != nil {
 				cliName = restoreWrapper.CLIName
 				cliVersion = restoreWrapper.CLIVersion
@@ -764,8 +791,11 @@ func NewRouter(cfg RouterConfig) *Router {
 					graceTimer := time.NewTimer(shimReconnectGraceDelay)
 					select {
 					case <-graceTimer.C:
+						// Fired — no Stop needed, timer channel already drained.
 					case <-r.historyCtx.Done():
-						graceTimer.Stop()
+						if !graceTimer.Stop() {
+							<-graceTimer.C
+						}
 						return
 					}
 					// If ReconnectShims already populated history (happy
@@ -943,8 +973,16 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		r.mu.Lock()
 		sess, ok := r.sessions[state.Key]
 		var hasLiveProcess bool
+		var sessPrevIDs []string
 		if ok && sess.isAlive() {
 			hasLiveProcess = true
+		}
+		// Snapshot prevSessionIDs while still holding r.mu; the field is
+		// guarded by r.mu and the async history-load goroutine (see
+		// NewRouter) plus concurrent spawnSession both write to it. Reading
+		// after Unlock would data-race with those writers.
+		if ok {
+			sessPrevIDs = slices.Clone(sess.prevSessionIDs)
 		}
 		_, spawning := r.spawningKeys[state.Key]
 		r.mu.Unlock()
@@ -1040,8 +1078,8 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			// persistedHistory (InjectHistory is proc-nil safe) so the sidebar
 			// shows the last conversation while the session waits for revival.
 			if r.claudeDir != "" && state.SessionID != "" {
-				ids := make([]string, 0, len(sess.prevSessionIDs)+1)
-				ids = append(ids, sess.prevSessionIDs...)
+				ids := make([]string, 0, len(sessPrevIDs)+1)
+				ids = append(ids, sessPrevIDs...)
 				ids = append(ids, state.SessionID)
 				histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
 				histEntries := discovery.LoadHistoryChainTailCtx(
@@ -1073,13 +1111,11 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 			// next 30s tick, but that means 30s of WARN spam AND every
 			// dashboard retry in between also fails. Eagerly clean up so
 			// the next user message spawns a fresh shim instead of hitting
-			// the same dead path. errors.Is(err, syscall.ENOENT) is the
-			// canonical check, but the error wraps through fmt.Errorf("%w")
-			// layers in SpawnReconnect → Reconnect → net.Dial, so we also
-			// match the textual "no such file or directory" suffix as a
-			// belt-and-braces fallback.
-			if errors.Is(err, syscall.ENOENT) ||
-				strings.Contains(err.Error(), "no such file or directory") {
+			// the same dead path. isENOENTErr unwraps any wrapper layers
+			// (fmt.Errorf → net.OpError → os.SyscallError) and avoids
+			// matching against the strerror text — that string is locale-
+			// dependent and silently mismatches under LANG=zh_CN.UTF-8.
+			if isENOENTErr(err) {
 				slog.Warn("shim reconnect: socket missing, cleaning up zombie",
 					"key", state.Key, "pid", state.ShimPID, "err", err)
 				if mgr := r.managerFor(recBackendID); mgr != nil {
@@ -1116,8 +1152,8 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// entries for that turn are transiently absent from the dashboard
 		// until the next live event repopulates them. Self-healing.
 		if r.claudeDir != "" {
-			ids := make([]string, 0, len(sess.prevSessionIDs)+1)
-			ids = append(ids, sess.prevSessionIDs...)
+			ids := make([]string, 0, len(sessPrevIDs)+1)
+			ids = append(ids, sessPrevIDs...)
 			if state.SessionID != "" {
 				ids = append(ids, state.SessionID)
 			}
@@ -1459,6 +1495,17 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 	// the shim-socket dial guard; the rest fail with "refusing to clobber".
 	// Drop and retry while spawnSession for this key is in flight so the late
 	// callers just pick up the session the winner creates.
+	//
+	// Reuse a single timer across iterations. NewTimer+Stop inside the loop
+	// already fixes the time.After leak, but at N concurrent waiters each
+	// iteration still allocates a *time.Timer + registers a new runtime
+	// timer; Reset lets the runtime re-queue the same entry.
+	var waitT *time.Timer
+	defer func() {
+		if waitT != nil {
+			waitT.Stop()
+		}
+	}()
 	for {
 		if s, ok := r.sessions[key]; ok {
 			if s.isAlive() {
@@ -1482,10 +1529,18 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 		// own spawn). Keep the sleep tiny so perceived latency stays flat;
 		// a typical shim spawn takes 100-300 ms.
 		r.mu.Unlock()
+		if waitT == nil {
+			waitT = time.NewTimer(20 * time.Millisecond)
+		} else {
+			waitT.Reset(20 * time.Millisecond)
+		}
 		select {
 		case <-ctx.Done():
+			if !waitT.Stop() {
+				<-waitT.C
+			}
 			return nil, 0, ctx.Err()
-		case <-time.After(20 * time.Millisecond):
+		case <-waitT.C:
 		}
 		r.mu.Lock()
 	}
@@ -2092,11 +2147,15 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	// that appends to old.prevSessionIDs (in-place if cap permits) cannot
 	// silently mutate fresh.prevSessionIDs. spawnSession already clones at
 	// its construction site; Rename must do the same for symmetry.
-	// persistedHistory is not re-written by the old session after Rename so
-	// it is safe to share the backing array.
+	// persistedHistory: clone the backing array too. NewRouter launches an
+	// async history-load goroutine that holds the `s` pointer; if the load
+	// completes after Rename swapped keys, s.InjectHistory appends to
+	// old.persistedHistory. When len<cap in that backing array, the append
+	// writes into bytes that fresh.persistedHistory also points to.
+	freshHistory := slices.Clone(old.persistedHistory)
 	fresh := &ManagedSession{
 		key:              newKey,
-		persistedHistory: old.persistedHistory,
+		persistedHistory: freshHistory,
 		prevSessionIDs:   slices.Clone(old.prevSessionIDs),
 		exempt:           old.exempt,
 		onSessionID: func(id string) {
@@ -2455,9 +2514,9 @@ func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 	go func() {
 		cleanupTicker := time.NewTicker(interval)
 		defer cleanupTicker.Stop()
-		// Save dirty state every 30s to reduce crash-recovery data loss
-		// from ~TTL/2 (~15min) to ~30s.
-		saveTicker := time.NewTicker(30 * time.Second)
+		// Save dirty state on sessionSaveInterval to reduce crash-recovery
+		// data loss from ~TTL/2 to one window.
+		saveTicker := time.NewTicker(sessionSaveInterval)
 		defer saveTicker.Stop()
 		for {
 			select {
@@ -3106,11 +3165,12 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 		delete(r.sessionIDToKey, sessionID)
 	}
 	s := &ManagedSession{
-		key: key,
+		key:    key,
+		exempt: isExemptKey(key),
 	}
 	s.setWorkspace(workspace)
-	s.SetCLIName(r.cliNameDefault())
-	s.SetCLIVersion(r.cliVersionDefault())
+	s.SetCLIName(r.CLIName())
+	s.SetCLIVersion(r.CLIVersion())
 	s.setSessionID(sessionID)
 	if lastPrompt != "" {
 		storeStringAtomic(&s.lastPrompt, lastPrompt)
@@ -3137,7 +3197,25 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 // lastPrompt are refreshed in place (to reflect edits via dashboard).
 // The stub has no process and no session ID; the first GetOrCreate call
 // (at cron execute time) will spawn a real CLI process and reuse this entry.
+//
+// 等价于 RegisterCronStubWithChain(key, workspace, lastPrompt, nil)，
+// 保留给不关心 history chain 的调用方（测试、旧集成）。
 func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
+	r.RegisterCronStubWithChain(key, workspace, lastPrompt, nil)
+}
+
+// RegisterCronStubWithChain 在 RegisterCronStub 的基础上注入一个
+// session-ID 链：stub 没有自己的 sessionID（exempt=true，无进程），但
+// historySource 查 JSONL 时要用到 chain。对于 cron 任务，chain 就是
+// 上一次成功执行留下的 session_id（cron.Job.LastSessionID）。没有它，
+// fresh_context=true 场景每次 Reset 都会让 stub 的 chain 为空，dashboard
+// 点击定时任务只能看到一个空白的事件面板。
+//
+// chainIDs 空 / nil 时行为与 RegisterCronStub 相同。existing 分支下如果
+// 新 chain 与旧 chain 不同，会同步刷新 prevSessionIDs 并重挂
+// historySource，保证 cron 每次执行完 recordResult 后侧边栏立刻能查到
+// 最新一次的 JSONL（而不是等下次重启）。
+func (r *Router) RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string) {
 	r.mu.Lock()
 	if existing, ok := r.sessions[key]; ok {
 		changed := false
@@ -3149,6 +3227,21 @@ func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
 			}
 			if lastPrompt != "" && loadStringAtomic(&existing.lastPrompt) != lastPrompt {
 				storeStringAtomic(&existing.lastPrompt, lastPrompt)
+				changed = true
+			}
+			// prevSessionIDs 的所有历史写路径（spawnSession:1786 / RenameSession:2142
+			// / 本函数 new 分支:3259）都在 r.mu 下做，读路径（961 / 1722 / 3083
+			// 以及下一行）也全部在 r.mu 下。managed.go:snapshotChainIDs 虽然用
+			// historyMu.RLock，但因为写者不拿 historyMu，historyMu 对该字段
+			// 而言并不构成真正的同步——真正的 invariant 是"r.mu 写/r.mu 读"。
+			// 因此 chain 刷新直接在 r.mu 临界区内做，与其它写路径一致，不引入
+			// 混合锁协议；attachHistorySource 只读 r 的不可变字段 + 写 s 的
+			// atomic.Pointer，同样安全可以在 r.mu 下调。
+			if len(chainIDs) > 0 && !slices.Equal(existing.prevSessionIDs, chainIDs) {
+				existing.prevSessionIDs = slices.Clone(chainIDs)
+				// workspace 变了 historySource 里也要刷（cwd 变化会导致
+				// projDirName 命中不同的 claude 项目目录）；一并重装最省心。
+				r.attachHistorySource(existing)
 				changed = true
 			}
 			// R176-PERF-P1: only mark dirty + bump version when something
@@ -3175,9 +3268,12 @@ func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
 		key:    key,
 		exempt: true,
 	}
+	if len(chainIDs) > 0 {
+		s.prevSessionIDs = slices.Clone(chainIDs)
+	}
 	s.setWorkspace(workspace)
-	s.SetCLIName(r.cliNameDefault())
-	s.SetCLIVersion(r.cliVersionDefault())
+	s.SetCLIName(r.CLIName())
+	s.SetCLIVersion(r.CLIVersion())
 	if lastPrompt != "" {
 		storeStringAtomic(&s.lastPrompt, lastPrompt)
 	}

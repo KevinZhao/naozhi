@@ -5,6 +5,15 @@ import (
 	"testing"
 )
 
+// sanitizeImages is the test-only single-arg convenience wrapper around
+// sanitizeImagesAligned. Production code has always passed the aligned
+// paths slice directly; exposing a paths-less variant on the package
+// surface just for test brevity is unnecessary.
+func sanitizeImages(imgs []string) []string {
+	out, _ := sanitizeImagesAligned(imgs, nil)
+	return out
+}
+
 // TestSanitizeImages_KeepsValidDataURIs asserts the happy path: entries that
 // already look like MakeThumbnail output survive untouched, and the original
 // slice is returned (no allocation). Locks the "zero-cost on conforming

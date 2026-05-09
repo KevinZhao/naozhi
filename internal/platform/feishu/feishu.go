@@ -363,12 +363,18 @@ func (f *Feishu) Start(handler platform.MessageHandler) error {
 	// check degrades to the legacy "any @ is a hit" rule — same contract as
 	// slack's AuthTest failure path. Time-boxed at 5s so a flaky network
 	// doesn't block startup; Start() proceeds regardless.
-	fetchCtx, cancelFetch := context.WithTimeout(f.stopCtx, 5*time.Second)
-	if err := f.fetchBotInfo(fetchCtx); err != nil {
-		slog.Warn("feishu fetch bot info failed — group mention filtering will fall back to 'any mention' (less precise)",
-			"err", err)
-	}
-	cancelFetch()
+	// IIFE + defer ensures cancelFetch() runs even if fetchBotInfo panics,
+	// releasing the 5s context timer. Bare `cancelFetch()` after the call
+	// would be skipped on panic, leaking the timer goroutine until stopCtx
+	// fires.
+	func() {
+		fetchCtx, cancelFetch := context.WithTimeout(f.stopCtx, 5*time.Second)
+		defer cancelFetch()
+		if err := f.fetchBotInfo(fetchCtx); err != nil {
+			slog.Warn("feishu fetch bot info failed — group mention filtering will fall back to 'any mention' (less precise)",
+				"err", err)
+		}
+	}()
 
 	if f.mode == "websocket" {
 		slog.Info("feishu using websocket mode (no public IP needed)")
@@ -770,6 +776,15 @@ func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resTy
 	// it does not know (e.g. Opus-in-WebM). The accept-list below covers the
 	// OGG case explicitly while still rejecting clearly-wrong families
 	// (image/*, text/*, etc.).
+	//
+	// R175-P2: audio path also runs an explicit magic-byte allowlist
+	// (audioMagicOK) on top of the sniffer. DetectContentType can admit
+	// "audio/*" for borderline inputs and returns application/octet-stream
+	// for unknown formats — a compromised upstream could deliver arbitrary
+	// bytes that trip the generic prefix check. The magic check narrows
+	// acceptance to formats the transcribe pipeline is expected to handle
+	// (OGG / MP3 / WAV / M4A / FLAC) so a crafted payload cannot broaden
+	// the ffmpeg/Whisper attack surface just by setting an audio/* header.
 	if len(data) > 0 {
 		sniffed := http.DetectContentType(data)
 		ok := true
@@ -777,13 +792,84 @@ func (f *Feishu) downloadResource(ctx context.Context, messageID, fileKey, resTy
 		case "image":
 			ok = strings.HasPrefix(sniffed, "image/")
 		case "audio":
-			ok = strings.HasPrefix(sniffed, "audio/") || sniffed == "application/ogg"
+			ok = (strings.HasPrefix(sniffed, "audio/") || sniffed == "application/ogg") && audioMagicOK(data)
 		}
 		if !ok {
 			return nil, "", fmt.Errorf("download %s: mime mismatch (header=%s sniffed=%s)", resType, contentType, sniffed)
 		}
 	}
 	return data, contentType, nil
+}
+
+// audioMagicOK reports whether data's first bytes match one of the audio
+// container magic numbers the Feishu voice pipeline is expected to carry.
+// Defence-in-depth against DetectContentType admitting a borderline header;
+// even if the sniffer says audio/*, we still require the payload to *look*
+// like a format we actually want to feed into transcribe/ffmpeg/Whisper.
+//
+// Accepted families:
+//   - OGG container        ("OggS")
+//   - MP3 with ID3v2 tag   ("ID3")
+//   - Raw MP3 frame sync   (0xFF, {0xF2/F3/FA/FB})
+//   - WAV                  ("RIFF" … "WAVE")
+//   - MP4/M4A ftyp box     (bytes 4..7 == "ftyp", brand is an audio/video
+//     codec we accept — mp42 is a common container brand and M4A files
+//     normally tag themselves "M4A ")
+//   - FLAC                 ("fLaC")
+//
+// Any payload that does not match one of the patterns above is rejected.
+// Keep this function pure (no I/O, no locks) so tests can hammer it with a
+// table of adversarial inputs.
+// AMR (#!AMR) and raw AAC-ADTS (0xFFF1/0xFFF9) are intentionally NOT in the
+// accept list: Feishu voice messages are OGG/Opus (or M4A on some clients),
+// both the upstream DefaultMIME (audio/ogg) and observed traffic agree. If a
+// future Feishu client rolls out AMR/ADTS audio, add them here explicitly
+// rather than widening the sniffer fallback.
+func audioMagicOK(data []byte) bool {
+	if len(data) < 4 {
+		return false
+	}
+	// OGG.
+	if bytes.HasPrefix(data, []byte("OggS")) {
+		return true
+	}
+	// MP3 ID3v2 tag: "ID3" + version major (2/3/4) + revision + flags.
+	// Require the version byte to be a known ID3v2 major so an attacker-
+	// controlled ASCII "ID3…" string cannot slip past the check.
+	if len(data) >= 5 && bytes.HasPrefix(data, []byte("ID3")) && data[3] >= 2 && data[3] <= 4 {
+		return true
+	}
+	// Raw MP3 frame header: 0xFF followed by 0xF2/0xF3/0xFA/0xFB. A bare
+	// 0xFFE* could also be a valid MPEG sync but those variants are not
+	// used by Feishu voice and widening the mask reduces specificity.
+	if data[0] == 0xFF {
+		switch data[1] {
+		case 0xF2, 0xF3, 0xFA, 0xFB:
+			return true
+		}
+	}
+	// WAV: RIFF + 4-byte size + "WAVE".
+	if len(data) >= 12 && bytes.HasPrefix(data, []byte("RIFF")) && bytes.Equal(data[8:12], []byte("WAVE")) {
+		return true
+	}
+	// MP4/M4A ftyp box. Layout: 4-byte size | "ftyp" | 4-byte brand.
+	// Whitelist the brands Feishu clients are known to emit / the transcribe
+	// pipeline is known to consume (M4A/mp4a audio, isom/mp42/dash common
+	// containers). Brands like `ftypqt  ` (QuickTime) and `ftypf4v ` (Flash
+	// Video) are intentionally rejected — the sniffer sometimes labels them
+	// audio/video generically, but Whisper/ffmpeg compatibility is spottier
+	// and they are not part of the normal Feishu surface.
+	if len(data) >= 12 && bytes.Equal(data[4:8], []byte("ftyp")) {
+		switch string(data[8:12]) {
+		case "M4A ", "mp4a", "isom", "mp42", "dash":
+			return true
+		}
+	}
+	// FLAC.
+	if bytes.HasPrefix(data, []byte("fLaC")) {
+		return true
+	}
+	return false
 }
 
 // replyError sends an error message directly to the user, bypassing Claude.

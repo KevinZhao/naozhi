@@ -20,8 +20,13 @@ import (
 )
 
 // SessionGuard prevents multiple concurrent messages to the same session.
-// Used by the Dashboard/WebSocket path (server/send.go) which retains
-// interrupt-on-busy behavior. The IM path uses MessageQueue instead.
+// Two implementations share this surface:
+//   - session.Guard — per-key mutex used by the Dashboard/WebSocket path
+//     (server/send.go) which retains interrupt-on-busy behaviour.
+//   - MessageQueue — also satisfies this interface; the IM path uses it
+//     so queue-mode gates and the guard contract stay compatible.
+//
+// Keep the method set minimal: any future guard variant has to fit.
 type SessionGuard interface {
 	TryAcquire(key string) bool
 	ShouldSendWait(key string) bool
@@ -262,7 +267,13 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		// of N concurrent goroutines blocks on sendMu in arrival order.
 		if d.queue != nil && d.queue.Mode() == ModePassthrough {
 			log.Info("message received (passthrough)", "agent", agentID, "text_len", len(cleanText), "images", len(images))
-			go d.sendAndReply(WithPassthrough(ctx), key, cleanText, images, agentID, opts, msg, log, true)
+			// Detach from the platform handler ctx: webhook handlers return
+			// in seconds while LLM turns take minutes. If we keep the caller
+			// ctx, handler-return cancels it and SendPassthrough bails early,
+			// leaking slots into the 5.5-min bail timer. Use WithoutCancel
+			// to preserve values (log fields, auth) without the cancellation.
+			sendCtx := context.WithoutCancel(ctx)
+			go d.sendAndReply(WithPassthrough(sendCtx), key, cleanText, images, agentID, opts, msg, log, true)
 			// Ack arrival so the IM user sees a reaction/receipt. This is
 			// cheap and does not depend on the turn completing.
 			d.ackQueuedWithReaction(ctx, msg, log)
@@ -682,15 +693,30 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 }
 
 // formatChineseDuration formats a duration into a short Chinese string.
+// Mixed durations (90m → "1 小时 30 分钟", 90s → "1 分钟 30 秒") are
+// rendered with the largest meaningful unit pair; pure-round durations
+// collapse to a single unit for readability.
 func formatChineseDuration(d time.Duration) string {
 	if d <= 0 {
 		return "未知"
 	}
-	if d >= time.Hour && d%time.Hour == 0 {
-		return fmt.Sprintf("%d 小时", int(d.Hours()))
+	if d >= time.Hour {
+		h := int(d / time.Hour)
+		rem := d - time.Duration(h)*time.Hour
+		m := int(rem / time.Minute)
+		if m == 0 {
+			return fmt.Sprintf("%d 小时", h)
+		}
+		return fmt.Sprintf("%d 小时 %d 分钟", h, m)
 	}
-	if d >= time.Minute && d%time.Minute == 0 {
-		return fmt.Sprintf("%d 分钟", int(d.Minutes()))
+	if d >= time.Minute {
+		m := int(d / time.Minute)
+		rem := d - time.Duration(m)*time.Minute
+		s := int(rem / time.Second)
+		if s == 0 {
+			return fmt.Sprintf("%d 分钟", m)
+		}
+		return fmt.Sprintf("%d 分钟 %d 秒", m, s)
 	}
 	return fmt.Sprintf("%d 秒", int(d.Seconds()))
 }

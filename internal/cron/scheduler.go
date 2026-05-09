@@ -68,6 +68,12 @@ type SessionRouter interface {
 	// entry so the cron job shows up in the dashboard sidebar before its
 	// first run. Key is always "cron:<jobID>".
 	RegisterCronStub(key, workspace, lastPrompt string)
+	// RegisterCronStubWithChain 在 RegisterCronStub 的基础上额外注入
+	// 一个 session-ID 链，赋给 stub 的 prevSessionIDs。这样 fresh_context
+	// cron 每次 Reset 后新建的 stub 仍然能通过 historySource 查到上一次
+	// 成功运行留下的 JSONL 历史（~/.claude/projects/<cwd>/<id>.jsonl）。
+	// chainIDs 为空 / nil 时等同于 RegisterCronStub。
+	RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string)
 	// Reset discards the session for the given key (used by fresh-mode
 	// cron jobs and by Delete/Rename flows).
 	Reset(key string)
@@ -163,6 +169,16 @@ type Scheduler struct {
 	// execute() time to catch symlink races that retarget post-creation.
 	// Empty disables enforcement (tests/legacy).
 	allowedRoot string
+	// allowedRootResolved is a construction-time snapshot of
+	// filepath.EvalSymlinks(allowedRoot), used as a best-effort fallback
+	// by workDirUnderRoot when the per-call EvalSymlinks on allowedRoot
+	// itself fails (e.g. the root is temporarily unmounted / missing).
+	// The per-call EvalSymlinks is still the primary path so the TOCTOU
+	// protection against symlink swaps on the root side is preserved.
+	// Empty means no cache; workDirUnderRoot then falls back to the raw
+	// allowedRoot string when its own EvalSymlinks fails (legacy
+	// behaviour).
+	allowedRootResolved string
 	// jitterMax is the scheduling jitter cap. See SchedulerConfig.JitterMax.
 	// Immutable after NewScheduler returns, so no lock needed.
 	jitterMax time.Duration
@@ -231,6 +247,13 @@ func (s *Scheduler) SetOnExecute(fn OnExecuteFunc) {
 // scale, but higher values tend to indicate a config mistake.
 const maxJobsHardCap = 500
 
+// DefaultMaxJobsPerChat bounds how many cron jobs a single chat (platform+
+// chat_id pair) may own. Prevents one loud group from consuming the
+// global MaxJobs quota. Exported so tests and docs can reference the
+// value; config override is deliberately not wired up yet — if operators
+// need it tunable, promote it into SchedulerConfig as a follow-up.
+const DefaultMaxJobsPerChat = 10
+
 // workDirReachable reports whether workDir exists and resolves to a
 // directory right now. Used before fresh-mode Reset so a job whose
 // workspace has been deleted by an operator does not destroy the
@@ -249,11 +272,18 @@ func workDirReachable(workDir string) bool {
 }
 
 // workDirUnderRoot reports whether workDir resolves (after symlink evaluation)
-// to a path at or under allowedRoot. EvalSymlinks is done per-call so the
-// check reflects current filesystem state, which closes the TOCTOU window
-// between creation-time validateWorkspace and execute-time workspace binding.
-// Both arguments must be absolute; relative workDir is rejected.
-func workDirUnderRoot(workDir, allowedRoot string) bool {
+// to a path at or under allowedRoot. EvalSymlinks is done per-call for both
+// sides so the check reflects current filesystem state — this closes the
+// TOCTOU window between creation-time validateWorkspace and execute-time
+// workspace binding AND the separate window where allowedRoot itself (if a
+// symlink) could be retargeted after construction. Both arguments must be
+// absolute; relative workDir is rejected. allowedRootResolved, when
+// non-empty, is a best-effort prior resolution of allowedRoot that is used
+// as a fallback only if the per-call EvalSymlinks on allowedRoot itself
+// fails (e.g. the path was temporarily unmounted). This preserves the
+// security contract while still avoiding most of the syscall cost of a
+// cold re-resolution on the happy path.
+func workDirUnderRoot(workDir, allowedRoot, allowedRootResolved string) bool {
 	if workDir == "" || allowedRoot == "" {
 		return true // empty WorkDir uses router default; empty root = disabled
 	}
@@ -268,7 +298,14 @@ func workDirUnderRoot(workDir, allowedRoot string) bool {
 	}
 	rootResolved, err := filepath.EvalSymlinks(allowedRoot)
 	if err != nil {
-		rootResolved = allowedRoot
+		// Fall back to the cached resolution (captured at construction) or
+		// the raw path if no cache exists. Either way the fallback chain
+		// preserves the historical behaviour when EvalSymlinks fails.
+		if allowedRootResolved != "" {
+			rootResolved = allowedRootResolved
+		} else {
+			rootResolved = allowedRoot
+		}
 	}
 	if resolved == rootResolved {
 		return true
@@ -293,6 +330,15 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		parent = context.Background()
 	}
 	stopCtx, stopCancel := context.WithCancel(parent)
+	// Resolve the allowed root once at construction; subsequent workDir
+	// checks skip the syscall chain for the root side. Empty result falls
+	// back to lazy resolution per-call.
+	var allowedRootResolved string
+	if cfg.AllowedRoot != "" {
+		if r, err := filepath.EvalSymlinks(cfg.AllowedRoot); err == nil {
+			allowedRootResolved = r
+		}
+	}
 	cronLogger := robfigcron.PrintfLogger(log.New(slogWriter{}, "cron: ", 0))
 	loc := cfg.Location
 	if loc == nil {
@@ -306,20 +352,21 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 				robfigcron.SkipIfStillRunning(cronLogger),
 			),
 		),
-		jobs:          make(map[string]*Job),
-		router:        cfg.Router,
-		platforms:     cfg.Platforms,
-		agents:        cfg.Agents,
-		agentCommands: cfg.AgentCommands,
-		storePath:     cfg.StorePath,
-		maxJobs:       cfg.MaxJobs,
-		execTimeout:   cfg.ExecTimeout,
-		location:      loc,
-		notifyDefault: cfg.NotifyDefault,
-		allowedRoot:   cfg.AllowedRoot,
-		jitterMax:     cfg.JitterMax,
-		stopCtx:       stopCtx,
-		stopCancel:    stopCancel,
+		jobs:                make(map[string]*Job),
+		router:              cfg.Router,
+		platforms:           cfg.Platforms,
+		agents:              cfg.Agents,
+		agentCommands:       cfg.AgentCommands,
+		storePath:           cfg.StorePath,
+		maxJobs:             cfg.MaxJobs,
+		execTimeout:         cfg.ExecTimeout,
+		location:            loc,
+		notifyDefault:       cfg.NotifyDefault,
+		allowedRoot:         cfg.AllowedRoot,
+		allowedRootResolved: allowedRootResolved,
+		jitterMax:           cfg.JitterMax,
+		stopCtx:             stopCtx,
+		stopCancel:          stopCancel,
 	}
 }
 
@@ -352,21 +399,24 @@ func (s *Scheduler) Start() error {
 	// Snapshot the fields we pass to registerStub under lock so we don't
 	// dereference *Job after releasing s.mu — once cron.Start() fires, any
 	// future UpdateJob could race with a stub read via the map pointer.
-	type stubRow struct{ id, workDir, prompt string }
+	// lastSessionID 跟其它字段一起快照，这样重启后恢复的 cron stub 仍然
+	// 带上上次成功执行留下的 session_id，historySource 才能从 JSONL 把
+	// 历史读回来给 dashboard 显示。
+	type stubRow struct{ id, workDir, prompt, lastSessionID string }
 	var stubs []stubRow
 	for _, j := range restored {
 		// Reject persisted jobs whose WorkDir escapes the configured
 		// sandbox. Replaying an on-disk tampered entry must not grant
 		// filesystem access that validateWorkspace would reject at
 		// creation. When allowedRoot is empty (tests), this is a no-op.
-		if s.allowedRoot != "" && j.WorkDir != "" && !workDirUnderRoot(j.WorkDir, s.allowedRoot) {
+		if s.allowedRoot != "" && j.WorkDir != "" && !workDirUnderRoot(j.WorkDir, s.allowedRoot, s.allowedRootResolved) {
 			slog.Warn("cron job work_dir outside allowed_root; skipping",
 				"id", j.ID, "work_dir", j.WorkDir)
 			continue
 		}
 		if j.Paused {
 			s.jobs[j.ID] = j
-			stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt})
+			stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 			continue
 		}
 		if err := s.registerJob(j); err != nil {
@@ -374,7 +424,7 @@ func (s *Scheduler) Start() error {
 			continue
 		}
 		s.jobs[j.ID] = j
-		stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt})
+		stubs = append(stubs, stubRow{j.ID, j.WorkDir, j.Prompt, j.LastSessionID})
 	}
 	jobCount := len(s.jobs)
 	s.mu.Unlock()
@@ -383,7 +433,7 @@ func (s *Scheduler) Start() error {
 	// values (not the *Job pointer) so a concurrent UpdateJob mutating the map
 	// entry cannot race with our reads.
 	for _, st := range stubs {
-		s.registerStubByValue(st.id, st.workDir, st.prompt)
+		s.registerStubByValue(st.id, st.workDir, st.prompt, st.lastSessionID)
 	}
 	s.cron.Start()
 	slog.Info("cron scheduler started", "jobs", jobCount)
@@ -392,21 +442,34 @@ func (s *Scheduler) Start() error {
 
 // registerStub creates (or refreshes) a router session entry for the job so it
 // appears in the dashboard workspace list. Safe to call without a router (tests).
-// Callers must not be holding s.mu — RegisterCronStub re-enters router state.
+// Callers must not be holding s.mu — RegisterCronStubWithChain re-enters router state.
+//
+// 当 job 存了 LastSessionID（最近一次成功执行的 session_id），会把它
+// 作为单元素 chain 传给 stub，这样 dashboard 点击 cron 侧边栏时能按
+// 该 ID 从 claude 项目目录找到 JSONL 历史。否则 fresh_context=true 的
+// 定时任务每次 Reset 都会把 stub 的 chain 清空，事件面板就永远是空白。
 func (s *Scheduler) registerStub(j *Job) {
 	if s.router == nil {
 		return
 	}
-	s.router.RegisterCronStub("cron:"+j.ID, j.WorkDir, j.Prompt)
+	var chain []string
+	if j.LastSessionID != "" {
+		chain = []string{j.LastSessionID}
+	}
+	s.router.RegisterCronStubWithChain(session.CronKey(j.ID), j.WorkDir, j.Prompt, chain)
 }
 
 // registerStubByValue is the pointer-free variant used from Start() where the
 // caller has already snapshotted mutable fields under s.mu.
-func (s *Scheduler) registerStubByValue(id, workDir, prompt string) {
+func (s *Scheduler) registerStubByValue(id, workDir, prompt, lastSessionID string) {
 	if s.router == nil {
 		return
 	}
-	s.router.RegisterCronStub("cron:"+id, workDir, prompt)
+	var chain []string
+	if lastSessionID != "" {
+		chain = []string{lastSessionID}
+	}
+	s.router.RegisterCronStubWithChain(session.CronKey(id), workDir, prompt, chain)
 }
 
 // EnsureStub lazily (re-)registers a dashboard stub session for the given
@@ -423,30 +486,30 @@ func (s *Scheduler) registerStubByValue(id, workDir, prompt string) {
 // has nothing to attach to. This method is the idempotent recovery hook
 // wired into handleSubscribe and /api/sessions/events.
 func (s *Scheduler) EnsureStub(key string) bool {
-	const prefix = "cron:"
-	if !strings.HasPrefix(key, prefix) {
+	if !session.IsCronKey(key) {
 		return false
 	}
-	id := key[len(prefix):]
+	id := key[len(session.CronKeyPrefix):]
 	if id == "" {
 		return false
 	}
 	// Snapshot workDir/prompt under RLock, release before reaching into
-	// router: RegisterCronStub calls notifyChange which fans out to hub
-	// broadcasters, and holding s.mu across that path risks lock-order
+	// router: RegisterCronStubWithChain calls notifyChange which fans out to
+	// hub broadcasters, and holding s.mu across that path risks lock-order
 	// inversion with the cron dispatcher (see ListAllJobsWithNextRun).
 	s.mu.RLock()
 	j, ok := s.jobs[id]
-	var workDir, prompt string
+	var workDir, prompt, lastSessionID string
 	if ok {
 		workDir = j.WorkDir
 		prompt = j.Prompt
+		lastSessionID = j.LastSessionID
 	}
 	s.mu.RUnlock()
 	if !ok {
 		return false
 	}
-	s.registerStubByValue(id, workDir, prompt)
+	s.registerStubByValue(id, workDir, prompt, lastSessionID)
 	return true
 }
 
@@ -559,17 +622,16 @@ func (s *Scheduler) AddJob(j *Job) error {
 		return fmt.Errorf("max cron jobs reached (%d)", s.maxJobs)
 	}
 
-	// Per-chat limit to prevent one chat from exhausting global quota
-	const maxJobsPerChat = 10
+	// Per-chat limit to prevent one chat from exhausting global quota.
 	chatCount := 0
 	for _, existing := range s.jobs {
 		if existing.Platform == j.Platform && existing.ChatID == j.ChatID {
 			chatCount++
 		}
 	}
-	if chatCount >= maxJobsPerChat {
+	if chatCount >= DefaultMaxJobsPerChat {
 		s.mu.Unlock()
-		return fmt.Errorf("per-chat cron limit reached (%d)", maxJobsPerChat)
+		return fmt.Errorf("per-chat cron limit reached (%d)", DefaultMaxJobsPerChat)
 	}
 
 	j.ID = generateID()
@@ -677,7 +739,7 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 		s.cron.Remove(j.entryID)
 	}
 	if s.router != nil {
-		s.router.Reset("cron:" + j.ID)
+		s.router.Reset(session.CronKey(j.ID))
 	}
 	delete(s.jobs, j.ID)
 	// Intentionally do NOT delete from s.runningJobs here: a concurrent
@@ -799,7 +861,7 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	// path that execute() will later refuse at runtime. AddJob's creation
 	// path applies the same check; UpdateJob previously skipped it.
 	if upd.WorkDir != nil && *upd.WorkDir != "" && s.allowedRoot != "" {
-		if !workDirUnderRoot(*upd.WorkDir, s.allowedRoot) {
+		if !workDirUnderRoot(*upd.WorkDir, s.allowedRoot, s.allowedRootResolved) {
 			return nil, fmt.Errorf("work_dir outside allowed root")
 		}
 	}
@@ -820,6 +882,18 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		j.Prompt = *upd.Prompt
 	}
 	if upd.WorkDir != nil {
+		// WorkDir 一换 LastSessionID 就失效：claude JSONL 按 cwd 归档，
+		// 用老 workspace 的 session_id 去新 cwd 下查 history 只会 Stat 落空。
+		// 清零后下次执行写入的新 SessionID 会自然属于新 workspace。
+		//
+		// 对比靠原生字符串相等，依赖 dashboard / AddJob 路径已对 WorkDir 做
+		// 归一化（filepath.Clean / validateWorkspace）。如果将来有新 caller
+		// 绕过归一化直接塞相对路径，会导致清零误判：合法但路径写法不同的
+		// 相同 workspace 会被判定为变更而清零，后果是用户需要重跑一次才
+		// 能恢复 chain，不致数据损坏。
+		if *upd.WorkDir != j.WorkDir {
+			j.LastSessionID = ""
+		}
 		j.WorkDir = *upd.WorkDir
 	}
 	if upd.Notify != nil {
@@ -994,7 +1068,7 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 		s.cron.Remove(j.entryID)
 	}
 	if s.router != nil {
-		s.router.Reset("cron:" + j.ID)
+		s.router.Reset(session.CronKey(j.ID))
 	}
 	delete(s.jobs, j.ID)
 	// Retain the runningJobs entry for the same reason as DeleteJobByID —
@@ -1214,7 +1288,7 @@ func (s *Scheduler) registerJob(j *Job) error {
 			slog.Debug("cron: tick fired for job paused concurrently, skipping", "id", jobID)
 			return
 		}
-		s.execute(cur)
+		s.executeOpt(cur, false)
 	})
 	if err != nil {
 		return fmt.Errorf("register cron: %w", err)
@@ -1236,15 +1310,9 @@ func (s *Scheduler) jobRunningGuard(id string) *atomic.Bool {
 	return actual.(*atomic.Bool)
 }
 
-// execute runs a cron job: send prompt to session, post result to chat.
-func (s *Scheduler) execute(j *Job) {
-	s.executeOpt(j, false)
-}
-
-// executeOpt 是 execute 的全参数版本。viaTriggerNow=true 时跳过 jitter 的
-// 延迟等待（用户显式 "run now" 期望立即执行）；scheduled tick 路径传 false。
-// 保持 execute(j) 作为 back-compat 入口，既有调用点（cron closure 里间接
-// 入口）和少量测试辅助无需改签名。
+// executeOpt runs a cron job: send prompt to session, post result to chat.
+// viaTriggerNow=true skips jitter delay (explicit user "run now" expects
+// immediate execution); scheduled tick callers pass false.
 func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// Guard against concurrent execution of the same job. The cron chain's
 	// SkipIfStillRunning protects the scheduled-tick path, but TriggerNow
@@ -1316,16 +1384,17 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		// Re-check allowedRoot at execute time to close the symlink-swap race:
 		// validateWorkspace at creation resolved symlinks once, but the target
 		// could have been retargeted since. workDirUnderRoot re-evaluates
-		// symlinks against the current filesystem state before binding.
-		if s.allowedRoot != "" && !workDirUnderRoot(workDir, s.allowedRoot) {
+		// both sides on every call; allowedRootResolved is only used as a
+		// fallback if the per-call EvalSymlinks on the root fails.
+		if s.allowedRoot != "" && !workDirUnderRoot(workDir, s.allowedRoot, s.allowedRootResolved) {
 			lg.Warn("cron job work_dir outside allowed_root; aborting run",
 				"work_dir", workDir)
-			s.recordResult(j, "", "work_dir outside allowed_root")
+			s.recordResult(j, "", "work_dir outside allowed_root", "")
 			return
 		}
 		opts.Workspace = filepath.Clean(workDir)
 	}
-	key := "cron:" + jobID
+	key := session.CronKey(jobID)
 
 	// Fresh mode: drop any existing session (and its process + history) so
 	// GetOrCreate spawns a brand-new CLI. Reset is a no-op when no session
@@ -1359,7 +1428,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		if !workDirReachable(workDir) {
 			lg.Warn("cron fresh spawn aborted: work_dir unreachable",
 				"work_dir", workDir)
-			s.recordResult(j, "", "work_dir unreachable")
+			s.recordResult(j, "", "work_dir unreachable", "")
 			s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", jobID))
 			return
 		}
@@ -1407,7 +1476,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		} else {
 			lg.Error("cron session error", "err", err)
 		}
-		s.recordResult(j, "", "session error: "+err.Error())
+		s.recordResult(j, "", "session error: "+err.Error(), "")
 		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", jobID))
 		stubRefresh()
 		return
@@ -1442,7 +1511,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		} else {
 			lg.Error("cron send error", "err", err)
 		}
-		s.recordResult(j, "", "send error: "+err.Error())
+		s.recordResult(j, "", "send error: "+err.Error(), "")
 		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", jobID))
 		stubRefresh()
 		return
@@ -1451,7 +1520,12 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	lg.Info("cron job completed",
 		"result_len", len(result.Text),
 		"elapsed_ms", time.Since(execStart).Milliseconds())
-	s.recordResult(j, result.Text, "")
+	// 把本次产生的 Claude session_id 也记下来：fresh_context=true 的
+	// 路径下一次 Reset 会清掉 stub 的 chain，不保留这个 ID 的话
+	// dashboard 点击 cron 侧边栏就看不到上一次的 JSONL 历史。
+	// Send 路径的 result 帧总会带 SessionID（process.go 成功分支会填），
+	// 传空只会出现在错误路径，recordResult 的 "" 分支自行短路。
+	s.recordResult(j, result.Text, "", result.SessionID)
 
 	replyText := fmt.Sprintf("[Cron %s] %s", jobID, result.Text)
 	s.deliverNotice(notifyTo, replyText)
@@ -1522,7 +1596,12 @@ func runeByteOffset(s string, maxRunes int) (int, bool) {
 }
 
 // recordResult persists the last execution result on the job and invokes the onExecute callback.
-func (s *Scheduler) recordResult(j *Job, result, errMsg string) {
+//
+// sessionID 是本次执行从 CLI 拿到的 Claude session_id。成功路径传非空值，
+// 错误路径（work_dir/session/send error）传空串：空值分支不会触碰
+// j.LastSessionID，保留上一次成功执行留下的 ID，这样 dashboard 点击
+// cron 侧边栏仍然能按历史 ID 拉到 JSONL 内容而不是空白面板。
+func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
 	const maxStoredRunes = 4 * 1024
 	// Byte-level rune decode: avoids the two O(n) rune-slice allocations that
 	// `string([]rune(result)[:maxStoredRunes])` performs on a 4KB-result path.
@@ -1564,6 +1643,9 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg string) {
 	j.LastRunAt = time.Now()
 	j.LastResult = result
 	j.LastError = errMsg
+	if sessionID != "" {
+		j.LastSessionID = sessionID
+	}
 	save, perr := s.persistJobsLocked()
 	fn := s.onExecute
 	s.mu.Unlock()
@@ -1805,7 +1887,7 @@ func applyJitter(ctx context.Context, schedule string, jitterMax time.Duration) 
 		return
 	}
 	window := jitterMax
-	if period := schedulePeriod(schedule); period > 0 {
+	if period := schedulePeriod(schedule, time.Now()); period > 0 {
 		if cap := period / 4; cap < window {
 			window = cap
 		}

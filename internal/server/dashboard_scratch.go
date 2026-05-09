@@ -3,7 +3,6 @@ package server
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -59,7 +58,7 @@ func (h *ScratchHandler) handleOpen(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB — headroom over 8 KiB quote cap
 	var req openRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		slog.Debug("scratch open: invalid JSON", "err", err)
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 		return

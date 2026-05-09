@@ -997,12 +997,15 @@ func TestHandleSetLabel_RemoteProxy(t *testing.T) {
 
 // ─── handleResume last_prompt charset (R65-SEC-M-3) ──────────────────────────
 
-// TestHandleResume_LastPromptC1Rejected verifies that a C1 control codepoint
+// TestHandleResume_LastPromptC1Sanitized verifies that a C1 control codepoint
 // inside last_prompt (arriving as valid UTF-8 continuation bytes 0xC2 0x85 for
-// U+0085 NEL) is rejected. The prior byte-only loop only checked `c < 0x20`,
-// which misses C1: continuation byte 0x85 falls in 0x80..0xBF and survived
-// the check. R65-SEC-M-3 regression.
-func TestHandleResume_LastPromptC1Rejected(t *testing.T) {
+// U+0085 NEL) is sanitized to "_" rather than rejected. The prior policy
+// (R65-SEC-M-3) hard-rejected C1 to block slog-injection, but that stranded
+// sessions whose CLI JSONL contained CLI-injected control bytes (PDF upload
+// notifications emit U+0085) in the history pane. Sanitization preserves the
+// injection defense (C1 is replaced before reaching slog attrs / the session
+// store) while letting the resume round-trip succeed.
+func TestHandleResume_LastPromptC1Sanitized(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
 
 	// Valid UUID + C1 NEL (U+0085) inside last_prompt.
@@ -1011,11 +1014,38 @@ func TestHandleResume_LastPromptC1Rejected(t *testing.T) {
 	w := httptest.NewRecorder()
 	srv.sessionH.handleResume(w, req)
 
-	if w.Code != http.StatusBadRequest {
-		t.Fatalf("status = %d, want 400 (body=%q)", w.Code, w.Body.String())
+	if w.Code == http.StatusBadRequest && strings.Contains(w.Body.String(), "invalid control characters") {
+		t.Fatalf("C1 byte should be sanitized, not 400'd: body=%q", w.Body.String())
 	}
-	if !strings.Contains(w.Body.String(), "invalid control characters") {
-		t.Errorf("body = %q, want 'invalid control characters' message", w.Body.String())
+}
+
+// TestSanitizeResumeLastPrompt_Policy pins the rune-level policy so a future
+// refactor reaches consensus via this test. Tab is preserved; C0/DEL/C1/bidi/
+// LS/PS are all replaced with "_".
+func TestSanitizeResumeLastPrompt_Policy(t *testing.T) {
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"clean ascii", "hello world", "hello world"},
+		{"tab preserved", "col1\tcol2", "col1\tcol2"},
+		{"C0 NUL", "a\x00b", "a_b"},
+		{"C0 BS", "a\x08b", "a_b"},
+		{"DEL", "a\x7fb", "a_b"},
+		{"C1 NEL U+0085", "a\u0085b", "a_b"},
+		{"bidi RLO U+202E", "a\u202eb", "a_b"},
+		{"LS U+2028", "a\u2028b", "a_b"},
+		{"CJK kept", "\u4f60\u597d", "\u4f60\u597d"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := sanitizeResumeLastPrompt(tc.in, 0)
+			if got != tc.want {
+				t.Errorf("sanitizeResumeLastPrompt(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
 	}
 }
 

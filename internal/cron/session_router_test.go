@@ -24,12 +24,19 @@ type stubCall struct {
 	key       string
 	workspace string
 	prompt    string
+	chainIDs  []string
 }
 
 func (f *fakeSessionRouter) RegisterCronStub(key, workspace, prompt string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.registerCalls = append(f.registerCalls, stubCall{key, workspace, prompt})
+	f.registerCalls = append(f.registerCalls, stubCall{key, workspace, prompt, nil})
+}
+
+func (f *fakeSessionRouter) RegisterCronStubWithChain(key, workspace, prompt string, chainIDs []string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.registerCalls = append(f.registerCalls, stubCall{key, workspace, prompt, chainIDs})
 }
 
 func (f *fakeSessionRouter) Reset(key string) {
@@ -84,10 +91,10 @@ func TestSchedulerConfig_AcceptsSessionRouterInterface(t *testing.T) {
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
 	if len(fake.registerCalls) != 1 {
-		t.Fatalf("expected exactly 1 RegisterCronStub call, got %d", len(fake.registerCalls))
+		t.Fatalf("expected exactly 1 stub register call, got %d", len(fake.registerCalls))
 	}
 	got := fake.registerCalls[0]
-	wantKey := "cron:" + job.ID
+	wantKey := session.CronKey(job.ID)
 	if got.key != wantKey {
 		t.Errorf("register key = %q, want %q", got.key, wantKey)
 	}
@@ -96,6 +103,11 @@ func TestSchedulerConfig_AcceptsSessionRouterInterface(t *testing.T) {
 	}
 	if got.prompt != "hello from fake" {
 		t.Errorf("register prompt = %q, want %q", got.prompt, "hello from fake")
+	}
+	// 新加的 job 还没执行过，不应该带 chainIDs；将来 chainFromLastSessionID
+	// 改了逻辑这里会立刻报错，把契约固化下来。
+	if got.chainIDs != nil {
+		t.Errorf("register chainIDs = %v, want nil for job without LastSessionID", got.chainIDs)
 	}
 }
 
@@ -124,7 +136,7 @@ func TestSchedulerConfig_ResetCalledOnDelete(t *testing.T) {
 
 	fake.mu.Lock()
 	defer fake.mu.Unlock()
-	wantKey := "cron:" + job.ID
+	wantKey := session.CronKey(job.ID)
 	found := false
 	for _, k := range fake.resetCalls {
 		if k == wantKey {

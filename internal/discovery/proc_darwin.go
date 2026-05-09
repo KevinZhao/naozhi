@@ -9,6 +9,12 @@ import (
 	"time"
 )
 
+// psPath pins the ps(1) binary to /bin/ps so a PATH-manipulation attack
+// (local user appending a malicious "ps" earlier in PATH) cannot replace
+// the lookup. On macOS /bin is always on the root filesystem and ps is
+// guaranteed to exist there.
+const psPath = "/bin/ps"
+
 // ProcStartTime returns a value that uniquely identifies a process instance
 // even after PID reuse. On Darwin we use ps(1) to get the process start time
 // and encode it as Unix microseconds.
@@ -21,7 +27,7 @@ import (
 // budget collapses — replace μs×1000 and re-check against the guard test.
 func ProcStartTime(pid int) (uint64, error) {
 	// ps -o lstart= outputs e.g. "Sat Apr 12 14:30:00 2026"
-	out, err := exec.Command("ps", "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
+	out, err := exec.Command(psPath, "-o", "lstart=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return 0, fmt.Errorf("ps lstart for pid %d: %w", pid, err)
 	}
@@ -51,7 +57,7 @@ func ProcStartTime(pid int) (uint64, error) {
 // detectCLIName uses ps(1) to determine which CLI binary is running.
 // Returns "claude-code", "kiro", or "cli" as fallback.
 func detectCLIName(pid int) string {
-	out, err := exec.Command("ps", "-o", "command=", "-p", strconv.Itoa(pid)).Output()
+	out, err := exec.Command(psPath, "-o", "command=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
 		return "cli"
 	}

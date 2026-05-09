@@ -90,6 +90,15 @@ var (
 	errUploadNotFound = errors.New("file not found or expired")
 )
 
+// unknownOwner is used as the per-owner bucket key when Put is called
+// with an empty owner string. Without this fallback, empty-owner callers
+// (no dashboard token configured + unresolvable clientIP) would bypass
+// per-owner quotas entirely and could saturate the global cap for every
+// other user — effectively a DoS vector against shared slot capacity.
+// Attackers who can spoof IPs (trustedProxy=false) still share this one
+// bucket, preserving a cap rather than removing it.
+const unknownOwner = "__unknown__"
+
 // Put stores an image owned by owner and returns a random hex ID.
 // Returns errUploadStoreFull when either the global entry cap or global
 // byte cap is hit, or errUploadPerOwner when the caller's entry/byte
@@ -103,6 +112,14 @@ func (s *uploadStore) Put(owner string, img cli.ImageData) (string, error) {
 
 	sz := entrySize(img)
 
+	// Empty-owner callers fold into a single shared bucket so they still
+	// participate in per-owner accounting. Previously empty owner bypassed
+	// the sub-limit entirely, leaving global quota as the only cap.
+	bucket := owner
+	if bucket == "" {
+		bucket = unknownOwner
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.entries) >= maxUploadEntries {
@@ -111,24 +128,16 @@ func (s *uploadStore) Put(owner string, img cli.ImageData) (string, error) {
 	if s.totalBytes+sz > maxUploadBytesGlobal {
 		return "", errUploadStoreFull
 	}
-	// Per-owner sub-limit: O(1) via ownerCounts map. Empty owner bypasses
-	// the check — unauthenticated deployments (dashToken=="") fall through
-	// with owner=="" and should not be rejected by this limit; callers
-	// authenticated via token/cookie always produce a non-empty owner.
-	if owner != "" {
-		if s.ownerCounts[owner] >= maxUploadPerOwner {
-			return "", errUploadPerOwner
-		}
-		if s.ownerBytes[owner]+sz > maxUploadBytesPerOwner {
-			return "", errUploadPerOwner
-		}
+	if s.ownerCounts[bucket] >= maxUploadPerOwner {
+		return "", errUploadPerOwner
 	}
-	s.entries[id] = &uploadEntry{Image: img, Owner: owner, Created: time.Now()}
+	if s.ownerBytes[bucket]+sz > maxUploadBytesPerOwner {
+		return "", errUploadPerOwner
+	}
+	s.entries[id] = &uploadEntry{Image: img, Owner: bucket, Created: time.Now()}
 	s.totalBytes += sz
-	if owner != "" {
-		s.ownerCounts[owner]++
-		s.ownerBytes[owner] += sz
-	}
+	s.ownerCounts[bucket]++
+	s.ownerBytes[bucket] += sz
 	return id, nil
 }
 
@@ -157,6 +166,11 @@ func (s *uploadStore) removeEntryLocked(id string, e *uploadEntry) {
 		// sane without a panic.
 		s.totalBytes = 0
 	}
+	// Defensive empty→unknownOwner fold in case a future refactor
+	// bypasses Put's owner normalisation; matches Take/TakeAll semantics.
+	if e.Owner == "" {
+		e.Owner = unknownOwner
+	}
 	if e.Owner != "" {
 		if n := s.ownerCounts[e.Owner] - 1; n <= 0 {
 			delete(s.ownerCounts, e.Owner)
@@ -176,6 +190,11 @@ func (s *uploadStore) removeEntryLocked(id string, e *uploadEntry) {
 // receive the same "not found" response regardless of the failure reason
 // to avoid leaking the existence of another user's upload.
 func (s *uploadStore) Take(id, owner string) *cli.ImageData {
+	// Mirror Put's empty-owner fold so Take can match entries stored
+	// under the shared unknownOwner bucket.
+	if owner == "" {
+		owner = unknownOwner
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	e, ok := s.entries[id]
@@ -215,6 +234,11 @@ func (s *uploadStore) Take(id, owner string) *cli.ImageData {
 func (s *uploadStore) TakeAll(ids []string, owner string) ([]cli.ImageData, error) {
 	if len(ids) == 0 {
 		return nil, nil
+	}
+	// Mirror Put's empty-owner fold so batched Takes match entries stored
+	// under the shared unknownOwner bucket.
+	if owner == "" {
+		owner = unknownOwner
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

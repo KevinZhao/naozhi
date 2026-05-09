@@ -554,9 +554,11 @@ func TestFormatChineseDuration(t *testing.T) {
 		{2 * time.Hour, "2 小时"},
 		{3 * time.Minute, "3 分钟"},
 		{45 * time.Second, "45 秒"},
-		{90 * time.Second, "90 秒"},
-		// not exact hour → seconds
-		{time.Hour + time.Second, "3601 秒"},
+		// 混合分秒、时分（R23-QUAL-001）
+		{90 * time.Second, "1 分钟 30 秒"},
+		{90 * time.Minute, "1 小时 30 分钟"},
+		// 时 + 不足 1 分钟的尾巴 → 秒被忽略（分钟精度上呈现为整点）
+		{time.Hour + time.Second, "1 小时"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.d.String(), func(t *testing.T) {

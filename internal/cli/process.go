@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
 	"net"
 	"runtime/debug"
 	"strconv"
@@ -43,6 +44,14 @@ const (
 	// value used to produce a silent "connection reset by peer" from the
 	// shim — now we fail fast with a clear error so the dashboard can surface it.
 	maxStdinLineBytes = 12 * 1024 * 1024
+
+	// lineBufShrinkThreshold caps how much capacity readLoop's lineBuf is
+	// allowed to retain across iterations before being shrunk back to the
+	// 4 KiB starting size. A rare large legitimate event (e.g. a 50 KiB
+	// assistant-text chunk) would otherwise pin the backing array for the
+	// process lifetime; at 50 live sessions that is ~2.5 MiB of silent
+	// resident overhead. Legit large events re-grow on demand.
+	lineBufShrinkThreshold = 64 * 1024
 )
 
 // ErrMessageTooLarge is returned when a user message (after JSON encoding)
@@ -158,14 +167,19 @@ type Process struct {
 
 	SessionID string
 	State     ProcessState
-	// mu protects State / SessionID / onTurnDone / totalCost. Read-only
-	// accessors (GetState / IsRunning / GetSessionID / TotalCost) use RLock
-	// so concurrent ListSessions snapshots across N sessions and M tabs
-	// proceed in parallel instead of serialising through a single Mutex.
-	// Write paths (readLoop state transitions, Send State→Running, Interrupt
+	// mu protects State / SessionID / onTurnDone. Read-only accessors
+	// (GetState / IsRunning / GetSessionID) use RLock so concurrent
+	// ListSessions snapshots across N sessions and M tabs proceed in
+	// parallel instead of serialising through a single Mutex. Write paths
+	// (readLoop state transitions, Send State→Running, Interrupt
 	// snapshot-and-flag) continue to use Lock to preserve the existing
 	// "read State and set interrupted together under one lock" contract.
 	// R70-PERF-L3.
+	//
+	// totalCost is stored separately as an atomic.Uint64 (math.Float64bits)
+	// so Snapshot() paths that want lock-free reads (mirroring the
+	// ManagedSession.totalCost pattern, R183-CONCUR-M2) never have to
+	// nest p.mu.RLock under ownership of r.mu or sendMu.
 	mu sync.RWMutex
 
 	eventCh  chan Event
@@ -186,7 +200,7 @@ type Process struct {
 	interruptSeq atomic.Int64
 
 	eventLog  *EventLog
-	totalCost float64
+	totalCost atomic.Uint64 // math.Float64bits(lastResultCostUSD); atomic so Snapshot is lock-free.
 	lastSeq   atomic.Int64  // last received shim seq, for reconnect
 	pongRecv  chan struct{} // signaled by readLoop on pong receipt
 
@@ -654,12 +668,21 @@ func (p *Process) readLoop() {
 		// Without this, a single large event forces every subsequent
 		// iteration to re-grow from 4KB through a chain of doublings.
 		//
-		// Exception: on capExceeded we shrink back to a fresh 4KB buffer.
+		// Exception 1: on capExceeded we shrink back to a fresh 4KB buffer.
 		// Holding onto a ~16MB backing array forever because one malformed
-		// shim message grew us there is a silent memory hog; the rare legit
-		// large event will pay the re-grow cost again rather than keeping
-		// pathological capacity on the hot path.
+		// shim message grew us there is a silent memory hog.
+		//
+		// Exception 2: if a single legitimate large event pushed capacity
+		// past lineBufShrinkThreshold (64 KiB), reset too. Most stream-json
+		// events are <4 KiB; one 50 KB assistant text event per session
+		// would otherwise pin ~50 KB of backing memory on the readLoop
+		// goroutine for the process lifetime (50 sessions × 50 KB ≈ 2.5 MB
+		// of quiet resident overhead). A legit large event paying the
+		// re-grow cost again is cheaper than the permanent footprint.
 		lineBuf = line
+		if cap(lineBuf) > lineBufShrinkThreshold && !capExceeded {
+			lineBuf = make([]byte, 0, 4096)
+		}
 		if capExceeded {
 			log.Warn("readLoop: oversized shim message, skipping", "size", len(line))
 			lineBuf = make([]byte, 0, 4096)
@@ -776,7 +799,7 @@ func (p *Process) readLoop() {
 					victims := p.reapAbortedPreempted()
 					fireAbortErrors(victims)
 				}
-				owners, _ := p.onTurnResult()
+				owners := p.onTurnResult()
 				if len(owners) > 0 {
 					p.logEventAt(ev, now.UnixMilli())
 					// Fire onEvent for each owner's turn-scope callback
@@ -846,6 +869,12 @@ func (p *Process) readLoop() {
 				if cb != nil {
 					cb()
 				}
+				// Unblock any passthrough SendPassthrough callers immediately.
+				// The defer at readLoop end also calls discardAllPending, but
+				// that runs after we drain any remaining stdin frames — a kill
+				// race with active slots would otherwise wait for the outer
+				// loop to fully unwind (tens of ms under load).
+				p.discardAllPending(ErrProcessExited)
 				return
 			default:
 			}
@@ -860,6 +889,14 @@ func (p *Process) readLoop() {
 			select {
 			case p.eventCh <- ev:
 			default:
+				// Full buffer: drop is safe (EventLog kept the entry) but
+				// dropping a `result` event forces Send() into the
+				// findResultSince fallback, so log at Warn for observability.
+				if ev.Type == "result" {
+					log.Warn("eventCh full, dropped result", "subtype", ev.SubType)
+				} else {
+					log.Debug("eventCh full, dropped", "type", ev.Type)
+				}
 			}
 
 		case "stderr":
@@ -1037,7 +1074,7 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 		Detail:  TruncateRunes(text, 2000),
 	}
 	if len(images) > 0 {
-		entry.Summary += fmt.Sprintf(" [+%d image(s)]", len(images))
+		entry.Summary += " [+" + strconv.Itoa(len(images)) + " image(s)]"
 		thumbs := make([]string, len(images))
 		if len(images) == 1 {
 			thumbs[0] = MakeThumbnail(images[0].Data, 600)
@@ -1718,11 +1755,10 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 		if ev.Message == nil {
 			return nil
 		}
-		// Lazy-allocate out: most assistant events carry a single content block
-		// (pure text or a single tool_use). `make([]EventEntry, 0, 1)` would
-		// still force a heap alloc for the backing array; `nil` lets the
-		// first append pay 1 alloc only when we have real blocks to write.
-		var out []EventEntry
+		// Pre-size to the content block count: single-block events pay 1
+		// alloc (same as the old nil+append path), and multi-block events
+		// (thinking+tool_use+text) avoid 2-3 append-driven growth reallocs.
+		out := make([]EventEntry, 0, len(ev.Message.Content))
 		for _, block := range ev.Message.Content {
 			entry := base
 			switch block.Type {
@@ -1795,9 +1831,7 @@ func (p *Process) logEventAt(ev Event, nowMS int64) {
 	}
 	// Update process-level cost tracking for result events.
 	if ev.Type == "result" {
-		p.mu.Lock()
-		p.totalCost = ev.CostUSD
-		p.mu.Unlock()
+		p.totalCost.Store(math.Float64bits(ev.CostUSD))
 	}
 	// AppendBatch holds l.mu and notifies subscribers ONCE rather than
 	// once per entry. Multi-block assistant events (thinking + tool_use +
@@ -1849,18 +1883,6 @@ func formatToolDetail(block ContentBlock) string {
 		return block.Name
 	}
 	return FormatToolInput(block.Name, block.Input)
-}
-
-func getStr(m map[string]json.RawMessage, key string) string {
-	raw, ok := m[key]
-	if !ok || len(raw) == 0 {
-		return ""
-	}
-	var s string
-	if json.Unmarshal(raw, &s) == nil {
-		return s
-	}
-	return ""
 }
 
 func shortPath(p string) string {
@@ -1950,10 +1972,22 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 			Prompt      string `json:"prompt"`
 		}
 		if json.Unmarshal(input, &inp) == nil {
-			for _, v := range []string{inp.Description, inp.FilePath, inp.Path, inp.Command, inp.Pattern, inp.Prompt} {
-				if v != "" {
-					return toolName + " " + TruncateRunes(v, 80)
-				}
+			// Avoid a []string{...} slice literal on the unknown-tool
+			// fallback path — a chain of short-circuit checks matches the
+			// previous semantics without the per-call slice alloc.
+			switch {
+			case inp.Description != "":
+				return toolName + " " + TruncateRunes(inp.Description, 80)
+			case inp.FilePath != "":
+				return toolName + " " + TruncateRunes(inp.FilePath, 80)
+			case inp.Path != "":
+				return toolName + " " + TruncateRunes(inp.Path, 80)
+			case inp.Command != "":
+				return toolName + " " + TruncateRunes(inp.Command, 80)
+			case inp.Pattern != "":
+				return toolName + " " + TruncateRunes(inp.Pattern, 80)
+			case inp.Prompt != "":
+				return toolName + " " + TruncateRunes(inp.Prompt, 80)
 			}
 		}
 	}
@@ -1991,11 +2025,9 @@ func (p *Process) GetSessionID() string {
 	return p.SessionID
 }
 
-// TotalCost returns the cumulative cost.
+// TotalCost returns the cumulative cost (lock-free via atomic.Uint64).
 func (p *Process) TotalCost() float64 {
-	p.mu.RLock()
-	defer p.mu.RUnlock()
-	return p.totalCost
+	return math.Float64frombits(p.totalCost.Load())
 }
 
 // ProtocolName returns the protocol name.
@@ -2160,9 +2192,23 @@ func sanitizeStderrLine(line string) string {
 			}
 			continue
 		}
-		// Drop bare control chars (keep \t).
+		// Drop bare ASCII C0 control chars (keep \t).
 		if c < 0x20 && c != '\t' {
 			i++
+			continue
+		}
+		// Non-ASCII: decode rune and drop if it's a known log-injection
+		// codepoint (C1 controls, bidi overrides/isolates, LS/PS). Folding
+		// this into the byte-level loop avoids the second strings.Map pass
+		// which always allocates a fresh backing string even on a no-op.
+		if c >= 0x80 {
+			r, sz := utf8.DecodeRuneInString(line[i:])
+			if osutil.IsLogInjectionRune(r) {
+				i += sz
+				continue
+			}
+			b.WriteString(line[i : i+sz])
+			i += sz
 			continue
 		}
 		b.WriteByte(c)
@@ -2170,17 +2216,7 @@ func sanitizeStderrLine(line string) string {
 	}
 	// The pre-truncation step above already capped the input length; the
 	// sanitizer only removes bytes from that capped input (ANSI escapes +
-	// control chars), so the resulting builder is guaranteed to be no longer
-	// than the pre-truncated input. No post-sanitize truncation needed.
-	//
-	// R190-SEC-L1: byte-level loop above drops ASCII C0 (< 0x20) but passes
-	// C1 controls (U+0080–U+009F), bidi overrides/isolates, LS/PS (>=0x20
-	// when decoded). Run one more pass with strings.Map at the rune level to
-	// match the policy SanitizeQuote / SanitizeForLog enforce elsewhere.
-	return strings.Map(func(r rune) rune {
-		if osutil.IsLogInjectionRune(r) {
-			return -1
-		}
-		return r
-	}, b.String())
+	// control chars + log-injection runes), so the resulting builder is
+	// guaranteed to be no longer than the pre-truncated input.
+	return b.String()
 }

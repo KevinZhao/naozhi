@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"unicode/utf8"
 )
 
 // ErrNotFound is returned when a project name does not exist in the manager.
@@ -320,11 +321,35 @@ func (m *Manager) EffectivePlannerModel(p *Project) string {
 }
 
 // EffectivePlannerPrompt returns the prompt for the planner (project override > global default > "").
+//
+// Prompt 最终会被拼成 argv 里的 `--append-system-prompt <prompt>` 传给 CLI 子进程，
+// prompt 字符串来自磁盘 CLAUDE.md（Claude tool 可写），必须在源头拦截 NUL / C0
+// 控制字节 + 非法 UTF-8，防止 argv 截断或 shim stream-json 编码受污染。
+// 非法 prompt 返回空串（等价于没有配置 planner prompt），而不是返回部分字符，
+// 避免"静默截断"产生难以追踪的 planner 行为漂移。
 func (m *Manager) EffectivePlannerPrompt(p *Project) string {
-	if p.Config.PlannerPrompt != "" {
-		return p.Config.PlannerPrompt
+	raw := p.Config.PlannerPrompt
+	if raw == "" {
+		raw = m.defaults.Prompt
 	}
-	return m.defaults.Prompt
+	if raw == "" {
+		return ""
+	}
+	if !utf8.ValidString(raw) {
+		slog.Warn("planner prompt contains invalid UTF-8; dropping", "project", p.Name)
+		return ""
+	}
+	for i := 0; i < len(raw); i++ {
+		c := raw[i]
+		// 0x09 tab / 0x0A LF / 0x0D CR 是 markdown/CLAUDE.md 合法内容，放行；
+		// 其余 C0 控制字节 + NUL 会破坏 argv 或 stream-json，整串丢弃。
+		if c == 0 || (c < 0x20 && c != 0x09 && c != 0x0a && c != 0x0d) {
+			slog.Warn("planner prompt contains control byte; dropping",
+				"project", p.Name, "byte", c)
+			return ""
+		}
+	}
+	return raw
 }
 
 // rebuildBindingIndex rebuilds the chat -> project index from all project configs.

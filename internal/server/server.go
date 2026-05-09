@@ -169,8 +169,7 @@ func validateRemoteWorkspace(workspace string) error {
 		// Empty means "use remote's default workspace" — intentional, allowed.
 		return nil
 	}
-	const maxWorkspacePath = 4096
-	if len(workspace) > maxWorkspacePath {
+	if len(workspace) > session.MaxRemoteWorkspacePath {
 		return fmt.Errorf("workspace too long")
 	}
 	if strings.ContainsRune(workspace, 0) {
@@ -185,13 +184,13 @@ func validateRemoteWorkspace(workspace string) error {
 	// R176-SEC-M: rune-level sweep for C1 controls + bidi / LS / PS
 	// runes that survive the byte-level `< 0x20` filter. Same policy
 	// validateCronWorkDir / validateCronPrompt already enforce via
-	// isLogInjectionRune. Without this, an authenticated operator can
+	// osutil.IsLogInjectionRune. Without this, an authenticated operator can
 	// post `/tmp/ws‮.sock` and trip log-injection in
 	// `slog.Warn("remote ws send failed", "key", ..., "workspace", ws)`
 	// at wshub.go:1405 or pipe-style misrendering in terminal viewers
 	// (Loki / grep).
 	for _, r := range workspace {
-		if isLogInjectionRune(r) {
+		if osutil.IsLogInjectionRune(r) {
 			return fmt.Errorf("invalid workspace")
 		}
 	}
@@ -233,6 +232,23 @@ func pathErrReason(err error) string {
 // if the file cannot be read or written (e.g. no stateDir configured).
 func loadOrCreateCookieSecret(stateDir string) []byte {
 	if stateDir != "" {
+		// Defence in depth: the symlink check below pins cookie_secret
+		// itself, but a local attacker who can repoint stateDir (e.g.
+		// stateDir → /tmp/pwn/ because the parent is world-writable)
+		// bypasses that by placing a well-formed cookie_secret inside
+		// their own directory. Lstat'ing stateDir first makes that
+		// class of attack visible — a symlink'd stateDir gets flagged
+		// and the secret is regenerated (ephemeral fallback) instead
+		// of silently trusting whatever the target directory serves.
+		if fi, err := os.Lstat(stateDir); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			slog.Error("cookie_secret regenerated because stateDir is a symlink",
+				"state_dir", stateDir, "reason", "statedir_symlink")
+			b := make([]byte, 32)
+			if _, err := rand.Read(b); err != nil {
+				panic("crypto/rand unavailable: " + err.Error())
+			}
+			return b
+		}
 		path := filepath.Join(stateDir, "cookie_secret")
 		// R188-SEC-L4: use os.Lstat so a symlink attack (e.g. cookie_secret →
 		// /etc/some-readable-file) is detected instead of silently validated
@@ -303,7 +319,7 @@ type ServerOptions struct {
 	Transcriber       transcribe.Service
 	OnReady           func() // called after the listener is bound and serving
 	// StartupCtx, when set, is threaded into blocking init probes (e.g.
-	// cli.DetectBackends's --version subprocess) so SIGTERM during naozhi
+	// cli.DetectBackendsCtx's --version subprocess) so SIGTERM during naozhi
 	// startup aborts them promptly instead of burning the full 5s×N
 	// timeout. Nil is equivalent to context.Background() — safe default
 	// for tests and callers that don't have a shutdown ctx yet.
@@ -684,6 +700,14 @@ func (s *Server) Start(ctx context.Context) error {
 		slog.Warn(noTokenOpenWarning,
 			"addr", s.addr,
 			"trusted_proxy", s.auth.trustedProxy,
+		)
+	} else if s.dashboardToken == "" {
+		// Loopback + no token is the "local dev" happy path, but if a systemd
+		// unit or orchestration layer accidentally clears the token the
+		// operator gets no signal that auth is off. Log once at startup so
+		// journalctl shows the state regardless of reachability. R23-SEC-M5.
+		slog.Warn("dashboard token not configured; all API callers accepted without authentication",
+			"addr", s.addr,
 		)
 	}
 	// /ws-node reverse-node channel sends node tokens and session payloads in

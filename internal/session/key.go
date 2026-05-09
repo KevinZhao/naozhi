@@ -69,6 +69,15 @@ func IsCronKey(key string) bool {
 	return strings.HasPrefix(key, CronKeyPrefix)
 }
 
+// CronKey synthesises the session key for a cron job. Keep cron-namespace
+// key construction in one place so prefix changes (e.g. a future v2
+// namespace) only need to touch CronKeyPrefix here — callers in the cron
+// package previously inlined `"cron:" + id`, which the linker could not
+// detect if the constant drifted.
+func CronKey(id string) string {
+	return CronKeyPrefix + id
+}
+
 // ValidateSessionKey rejects session keys that contain control bytes, non-UTF-8
 // sequences, or exceed MaxSessionKeyBytes. It mirrors the per-component gate
 // enforced by sanitizeKeyComponent for IM-originated keys — the IM path

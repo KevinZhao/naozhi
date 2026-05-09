@@ -3,7 +3,6 @@ package server
 import (
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"io"
 	"log/slog"
 	"net/http"
@@ -31,6 +30,54 @@ import (
 // megabyte-scale string from being persisted on the session and then echoed
 // to every dashboard client on each /api/sessions poll.
 const maxResumeLastPromptBytes = 2 * 1024
+
+// sanitizeResumeLastPrompt strips injection-prone bytes from a resume
+// last_prompt before it reaches slog attrs or /api/sessions broadcasts,
+// while preserving tab (operators paste tab-delimited snippets and slog
+// JSONHandler escapes tab safely).
+//
+// Mirrors osutil.SanitizeForLog except for the tab carve-out. Inlined here
+// because the tab allowance is a dashboard-specific relaxation — ordinary
+// log attrs should keep the stricter rule.
+func sanitizeResumeLastPrompt(s string, maxLen int) string {
+	if s == "" {
+		return s
+	}
+	clean := true
+	if maxLen > 0 && len(s) > maxLen {
+		clean = false
+	} else {
+		for i := 0; i < len(s); i++ {
+			c := s[i]
+			if c == '\t' {
+				continue
+			}
+			if c < 0x20 || c == 0x7f || c >= 0x80 {
+				clean = false
+				break
+			}
+		}
+	}
+	if clean {
+		return s
+	}
+	mapped := strings.Map(func(r rune) rune {
+		if r == '\t' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f {
+			return '_'
+		}
+		if osutil.IsLogInjectionRune(r) {
+			return '_'
+		}
+		return r
+	}, s)
+	if maxLen > 0 && len(mapped) > maxLen {
+		mapped = mapped[:maxLen]
+	}
+	return mapped
+}
 
 // Note: user-label validation lives in the session package
 // (session.ValidateUserLabel / session.MaxUserLabelBytes) so the dashboard
@@ -327,11 +374,11 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 
 		for i := range snapshots {
 			if project.IsPlannerKey(snapshots[i].Key) {
-				// Planner keys look like "planner:{name}:{agent}". SplitN
-				// allocates a []string per poll; use IndexByte twice for
-				// zero-alloc extraction of the middle segment.
+				// Planner keys are "project:{name}:planner". Extract the
+				// middle segment with two IndexByte calls to avoid the
+				// []string alloc from SplitN.
 				key := snapshots[i].Key
-				const plannerPrefix = "planner:"
+				const plannerPrefix = "project:"
 				if len(key) > len(plannerPrefix) {
 					rest := key[len(plannerPrefix):]
 					if j := strings.IndexByte(rest, ':'); j > 0 {
@@ -446,14 +493,18 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		stats.Projects = projectList
 	}
 
-	// Take a snapshot of nodes under lock for thread-safe access
-	nodesSnapshot := h.nodeAccess.NodesSnapshot()
+	// KnownNodes returns an immutable snapshot without acquiring the
+	// nodeAccess lock; NodesSnapshot does both. Single-node deployments
+	// (the common case) have len(knownNodes)==0 and never need the live
+	// snapshot — check KnownNodes first and short-circuit before paying
+	// the NodesSnapshot RLock + map alloc.
+	knownNodes := h.nodeAccess.KnownNodes()
 
 	// No configured nodes at all: use simple single-node response format.
 	// Pre-size resp to 3 so the optional history_sessions insert doesn't
 	// trigger a bucket rehash on fresh-deployment dashboards that always
 	// have JSONL history to show. R64-PERF-10.
-	if len(h.nodeAccess.KnownNodes()) == 0 {
+	if len(knownNodes) == 0 {
 		resp := make(map[string]any, 3)
 		resp["sessions"] = snapshots
 		resp["stats"] = stats
@@ -464,6 +515,10 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, resp)
 		return
 	}
+
+	// Multi-node path: now we actually need the live nodesSnapshot for
+	// connection status + fill-in. This acquires the nodeAccess lock.
+	nodesSnapshot := h.nodeAccess.NodesSnapshot()
 
 	// Multi-node: tag local sessions and merge with cached remote sessions
 	allSessions := make([]any, 0, len(snapshots))
@@ -481,7 +536,7 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	// prior shape paid N inner-map allocs + interface{} boxing per key on
 	// every 1 Hz /api/sessions poll. Marshals identically to the JSON
 	// clients expect. R62-PERF-1.
-	nodeStatus := make(map[string]nodeStatusEntry, 1+len(nodesSnapshot)+len(h.nodeAccess.KnownNodes()))
+	nodeStatus := make(map[string]nodeStatusEntry, 1+len(nodesSnapshot)+len(knownNodes))
 	nodeStatus["local"] = nodeStatusEntry{DisplayName: localName, Status: "ok"}
 
 	cachedSessions, cachedStatus := h.nodeCache.Sessions()
@@ -501,7 +556,7 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Always include all configured nodes, even when currently disconnected.
-	for id, displayName := range h.nodeAccess.KnownNodes() {
+	for id, displayName := range knownNodes {
 		if _, connected := nodeStatus[id]; !connected {
 			nodeStatus[id] = nodeStatusEntry{
 				DisplayName: displayName,
@@ -694,7 +749,7 @@ func (h *SessionHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 		_ = r.Body.Close()
 	} else {
 		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
+		if err := decodeJSONBody(r, &req); err != nil || req.Key == "" {
 			http.Error(w, "key is required (pass ?key=... or JSON body)", http.StatusBadRequest)
 			return
 		}
@@ -755,7 +810,7 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		Label string `json:"label"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
+	if err := decodeJSONBody(r, &req); err != nil || req.Key == "" {
 		http.Error(w, "key is required", http.StatusBadRequest)
 		return
 	}
@@ -825,7 +880,7 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		LastPrompt string `json:"last_prompt"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.SessionID == "" {
+	if err := decodeJSONBody(r, &req); err != nil || req.SessionID == "" {
 		http.Error(w, "session_id is required", http.StatusBadRequest)
 		return
 	}
@@ -840,23 +895,23 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "last_prompt too long", http.StatusBadRequest)
 		return
 	}
-	// Rune-level scan: a byte-only gate missed C1 control points (U+0080..
-	// U+009F), which arrive as valid UTF-8 continuation bytes in the 0x80..
-	// 0x9F range and slipped past a `< 0x20` byte check. C1 bytes in
-	// last_prompt are broadcast on every /api/sessions poll and flow into
-	// slog attrs, so they corrupt structured logs and terminal viewers.
-	// `\t` is intentionally still allowed (prompts may contain tab) as
-	// before — slog escapes tab in JSONHandler output. R65-SEC-M-3.
+	// Invalid UTF-8 is still rejected — a bad encoding usually indicates a
+	// buggy client and carries no safe sanitization.
 	if !utf8.ValidString(req.LastPrompt) {
 		http.Error(w, "last_prompt is not valid utf-8", http.StatusBadRequest)
 		return
 	}
-	for _, r := range req.LastPrompt {
-		if r == 0 || (r < 0x20 && r != '\t') || (r >= 0x7F && r <= 0x9F) {
-			http.Error(w, "last_prompt contains invalid control characters", http.StatusBadRequest)
-			return
-		}
-	}
+	// Control / bidi / LS-PS bytes are sanitized instead of rejected. The
+	// prior policy (R65-SEC-M-3) returned 400 to block slog-injection via
+	// `/api/sessions` broadcasts. sanitizeResumeLastPrompt replaces the
+	// dangerous class with "_" — the injection surface still closed,
+	// and unlike a hard reject, sanitization lets sessions whose CLI
+	// JSONL contains CLI-injected control bytes (e.g. PDF upload
+	// notifications emitting U+0085 NEL) still resume from the history
+	// pane. Tab is preserved (operators paste tab-delimited snippets
+	// and slog JSONHandler escapes tab). last_prompt is display/log-only,
+	// so lossy mapping on the rest of the class is acceptable.
+	req.LastPrompt = sanitizeResumeLastPrompt(req.LastPrompt, maxResumeLastPromptBytes)
 
 	workspace := req.Workspace
 	if workspace != "" {
@@ -902,7 +957,7 @@ func (h *SessionHandlers) handleInterrupt(w http.ResponseWriter, r *http.Request
 		Node string `json:"node"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.Key == "" {
+	if err := decodeJSONBody(r, &req); err != nil || req.Key == "" {
 		http.Error(w, "key is required", http.StatusBadRequest)
 		return
 	}

@@ -1,6 +1,7 @@
 package feishu
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"io"
@@ -73,7 +74,12 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			if envelope.Header != nil && envelope.Header.Token != "" {
 				token = envelope.Header.Token
 			}
-			if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(f.cfg.VerificationToken)) != 1 {
+			// Hash both sides to a fixed-length digest before the constant-time
+			// compare so that pathologically short/long attacker tokens cannot
+			// leak the real token's length via timing on the length prefix
+			// check that ConstantTimeCompare does internally when operand sizes
+			// differ.
+			if token == "" || !constantTimeEqualString(token, f.cfg.VerificationToken) {
 				slog.Warn("feishu token mismatch")
 				w.WriteHeader(http.StatusUnauthorized)
 				return
@@ -140,9 +146,14 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 					}
 				}
 				// Global cap: refuse new nonces once the map hits maxSeenNonces
-				// so a flood of unique-nonce requests cannot bloat heap. Legitimate
-				// traffic at a 5-minute TTL stays well below this cap.
-				if f.seenNoncesCount.Load() >= maxSeenNonces {
+				// so a flood of unique-nonce requests cannot bloat heap.
+				// Reserve-then-check pattern: increment first, then attempt
+				// insert; decrement on duplicate or over-cap. Without this,
+				// a concurrent burst of N webhooks could each pass the Load()
+				// guard before any Add(1) fires, letting count overshoot the
+				// cap by up to N (bounded by hookSem but still observable).
+				if n := f.seenNoncesCount.Add(1); n > maxSeenNonces {
+					f.seenNoncesCount.Add(-1)
 					slog.Warn("feishu webhook nonce map at cap, dropping request",
 						"cap", maxSeenNonces)
 					w.WriteHeader(http.StatusTooManyRequests)
@@ -151,6 +162,8 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				key := ts + ":" + nonce
 				expiry := time.Now().Add(nonceTTL).Unix()
 				if _, loaded := f.seenNonces.LoadOrStore(key, expiry); loaded {
+					// Undo our speculative increment since no new entry landed.
+					f.seenNoncesCount.Add(-1)
 					// Log only the length and timestamp rather than the raw
 					// nonce header value — attacker-supplied bytes can contain
 					// newlines or JSON metacharacters that distort structured
@@ -160,7 +173,6 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 					w.WriteHeader(http.StatusUnauthorized)
 					return
 				}
-				f.seenNoncesCount.Add(1)
 			} else if f.cfg.EncryptKey != "" || f.cfg.VerificationToken != "" {
 				// Authenticated modes must always supply a nonce; missing
 				// nonce leaves the request replayable within the 5min
@@ -206,7 +218,15 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				}
 			}
 			w.Header().Set("Content-Type", "application/json")
-			if err := json.NewEncoder(w).Encode(map[string]string{"challenge": envelope.Challenge}); err != nil {
+			// SetEscapeHTML(false) mirrors feishu.go buildMarkdownCardJSON:
+			// Feishu's verification endpoint compares our response against
+			// the raw challenge it sent, and default HTML-entity escaping
+			// of `<`, `>`, `&` could make a challenge containing those
+			// characters fail to match. Challenges already went through
+			// the control/bidi sweep above so no injection risk.
+			enc := json.NewEncoder(w)
+			enc.SetEscapeHTML(false)
+			if err := enc.Encode(map[string]string{"challenge": envelope.Challenge}); err != nil {
 				slog.Warn("feishu challenge encode failed", "err", err)
 			}
 			return
@@ -425,4 +445,16 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			}()
 		}
 	})
+}
+
+// constantTimeEqualString compares two strings in constant time without leaking
+// their lengths. subtle.ConstantTimeCompare returns 0 immediately when operand
+// lengths differ, which allows an attacker to probe the configured token's
+// length via timing. Hashing both sides to a fixed-length SHA-256 digest first
+// equalises lengths before the constant-time compare, at the cost of two
+// extra hashes per request.
+func constantTimeEqualString(a, b string) bool {
+	ha := sha256.Sum256([]byte(a))
+	hb := sha256.Sum256([]byte(b))
+	return subtle.ConstantTimeCompare(ha[:], hb[:]) == 1
 }

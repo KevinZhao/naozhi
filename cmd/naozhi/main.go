@@ -52,6 +52,22 @@ var claudeEnvAllowedPrefixes = []string{
 	"http_proxy", "https_proxy", "no_proxy",
 }
 
+// awsEnvDenyList 在 AWS_ 前缀允许之上再画一条"禁止跨入"的线：这些键会
+// 改变 AWS 认证来源（角色切换、凭据文件重定向），~/.claude/settings.json
+// 可以被 Claude tool 写入，放行等于给一个不受控的 env 注入通道对
+// transcribe/S3 执行凭据劫持。默认只允许标准的 region/credentials/session
+// 组合走进子进程。
+var awsEnvDenyList = map[string]bool{
+	"AWS_ROLE_ARN":                true,
+	"AWS_WEB_IDENTITY_TOKEN_FILE": true,
+	"AWS_SHARED_CREDENTIALS_FILE": true,
+	"AWS_CONFIG_FILE":             true,
+	"AWS_PROFILE":                 true,
+	"AWS_DEFAULT_PROFILE":         true,
+	"AWS_CA_BUNDLE":               true,
+	"AWS_ENDPOINT_URL":            true,
+}
+
 // readClaudeSettingsRaw reads ~/.claude/settings.json and returns its raw bytes,
 // retrying a few times if JSON parsing fails. The retry handles the race where
 // another process (Claude CLI, a VS Code extension, etc.) is rewriting the file
@@ -113,6 +129,10 @@ func applyClaudeEnvSettings() error {
 	}
 	for k, v := range s.Env {
 		if !matchesAnyPrefix(k, claudeEnvAllowedPrefixes) {
+			continue
+		}
+		if awsEnvDenyList[k] {
+			slog.Warn("claude settings env: refusing to propagate auth-source AWS var", "key", k)
 			continue
 		}
 		// R188-SEC-M1: the prefix allowlist restricts key namespace but puts

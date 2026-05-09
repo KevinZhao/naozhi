@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/attachment"
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -200,13 +200,6 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 		Data:     data,
 		MimeType: detected,
 	}, nil
-}
-
-// parseImageFile is retained as a thin shim so test helpers and any external
-// callers that imported the old name keep compiling during the migration.
-// New code should call parseAttachmentFile directly with allowPDF explicitly.
-func parseImageFile(fh *multipart.FileHeader) (cli.ImageData, error) {
-	return parseAttachmentFile(fh, false)
 }
 
 // hasFileRef reports whether any attachment in atts needs to be persisted
@@ -460,7 +453,11 @@ func sanitizeClientFilename(name string) string {
 	for _, r := range name {
 		switch {
 		case r < 0x20 || r == 0x7f:
-			// drop control chars
+			// drop C0 control chars
+		case osutil.IsLogInjectionRune(r):
+			// drop C1 controls and bidi-override runes so they do not
+			// reach the .meta sidecar, Content-Disposition header, or
+			// the text hint Claude receives.
 		case r == '/' || r == '\\':
 			b.WriteByte('_')
 		default:
@@ -590,7 +587,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		for _, fh := range files {
-			img, err := parseImageFile(fh)
+			img, err := parseAttachmentFile(fh, false)
 			if err != nil {
 				writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 				return
@@ -608,7 +605,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			Backend   string   `json:"backend"`
 			FileIDs   []string `json:"file_ids"`
 		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		if err := decodeJSONBody(r, &req); err != nil {
 			slog.Debug("dashboard send: invalid JSON", "err", err)
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON"})
 			return

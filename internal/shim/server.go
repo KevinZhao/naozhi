@@ -41,6 +41,22 @@ const maxClientLineBytes = 16 * 1024 * 1024 // 16MB
 // without allocating 13 MB — regression coverage without a heavy test.
 var maxWriteLineBytes = 12 * 1024 * 1024 // 12MB
 
+// Shim server timers. These three durations historically shared the same
+// "30s" literal but are semantically independent:
+//   - shimSocketWatchInterval: cadence of the defense-in-depth stat() poll
+//     that detects a deleted AF_UNIX socket file so an orphaned shim can
+//     initiate self-shutdown.
+//   - shimShutdownGracePeriod: time after SIGTERM/SIGINT within which a
+//     fresh client Attach must arrive; otherwise the shim exits (matches
+//     the intended systemctl-stop behaviour).
+//   - shimAuthReadDeadline: how long the shim waits for a connecting peer
+//     to send its first line ("attach"/"hello") after AF_UNIX dial.
+const (
+	shimSocketWatchInterval = 30 * time.Second
+	shimShutdownGracePeriod = 30 * time.Second
+	shimAuthReadDeadline    = 30 * time.Second
+)
+
 // Config holds shim process configuration passed via CLI flags.
 type Config struct {
 	Key             string
@@ -179,7 +195,7 @@ func Run(cfg Config) error {
 	// SIGTERM. This is a defense-in-depth layer behind Manager.Discover's
 	// socket check (F4) and StartShim's dial-first guard (F3); under normal
 	// operation it never fires.
-	go s.watchSocketFile(cfg.SocketPath, 30*time.Second)
+	go s.watchSocketFile(cfg.SocketPath, shimSocketWatchInterval)
 
 	// SIGTERM/SIGINT: always start a 30s grace period regardless of whether a
 	// client is currently connected. Previously the grace timer was skipped when
@@ -205,7 +221,7 @@ func Run(cfg Config) error {
 			if s.graceTimer != nil {
 				s.graceTimer.Stop()
 			}
-			s.graceTimer = time.AfterFunc(30*time.Second, func() {
+			s.graceTimer = time.AfterFunc(shimShutdownGracePeriod, func() {
 				slog.Info("grace period expired, shutting down")
 				s.initiateShutdown()
 			})
@@ -619,8 +635,8 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 		return
 	}
 
-	// Set read deadline for auth phase (30s to send attach)
-	conn.SetReadDeadline(time.Now().Add(30 * time.Second)) //nolint:errcheck
+	// Set read deadline for auth phase (shimAuthReadDeadline to send attach)
+	conn.SetReadDeadline(time.Now().Add(shimAuthReadDeadline)) //nolint:errcheck
 
 	// Use LimitedReader to prevent pre-auth memory exhaustion
 	lr := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes) + 1}

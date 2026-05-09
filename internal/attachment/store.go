@@ -115,7 +115,11 @@ func Persist(workspace string, data []byte, ext string, meta Meta) (Persisted, e
 	// on DST edges.
 	dateDir := time.Now().UTC().Format("2006-01-02")
 	absDir := filepath.Join(workspace, Dir, dateDir)
-	if err := os.MkdirAll(absDir, 0o755); err != nil {
+	// Restrict to owner-only (0o700). Multi-tenant hosts would otherwise
+	// let co-resident users walk the attachments subtree and read uploaded
+	// content directly off disk. Single-user deployments see no behaviour
+	// change; shared deployments gain a meaningful barrier.
+	if err := os.MkdirAll(absDir, 0o700); err != nil {
 		return Persisted{}, fmt.Errorf("mkdir %s: %w", absDir, err)
 	}
 
@@ -130,7 +134,11 @@ func Persist(workspace string, data []byte, ext string, meta Meta) (Persisted, e
 	// Write the payload atomically first. If meta fails after the payload
 	// landed, we rollback the payload — ensures "no half-committed
 	// attachment" from the caller's point of view.
-	if err := osutil.WriteFileAtomic(absPath, data, 0o644); err != nil {
+	//
+	// 0o600 keeps payload readable only by the naozhi user. Pairs with the
+	// 0o700 date-dir mode above; without it a group-readable directory
+	// cap is defeated by world-readable files inside.
+	if err := osutil.WriteFileAtomic(absPath, data, 0o600); err != nil {
 		return Persisted{}, err
 	}
 
@@ -145,7 +153,9 @@ func Persist(workspace string, data []byte, ext string, meta Meta) (Persisted, e
 		_ = os.Remove(absPath)
 		return Persisted{}, fmt.Errorf("marshal meta: %w", err)
 	}
-	if err := osutil.WriteFileAtomic(metaPath, metaBytes, 0o644); err != nil {
+	// Meta carries Owner / SessionKey — restrict to owner-only for the
+	// same reasons as the payload itself.
+	if err := osutil.WriteFileAtomic(metaPath, metaBytes, 0o600); err != nil {
 		_ = os.Remove(absPath)
 		return Persisted{}, err
 	}
@@ -221,6 +231,21 @@ func GC(workspace string, ttl time.Duration, now time.Time) (int, error) {
 		// from silently being 6 days at 00:00 UTC.
 		if t.Add(24 * time.Hour).Before(cutoff) {
 			p := filepath.Join(root, e.Name())
+			// Lstat (not Stat) so we can detect a symlink whose target
+			// points outside the attachment root. os.RemoveAll follows
+			// symlinked *directories* on Linux, so a date-named symlink
+			// dropped into the attachments root could delete arbitrary
+			// operator data. Refuse to touch any non-directory entry we
+			// see after ReadDir said it was a dir — the only explanation
+			// is a TOCTOU swap or a tampered filesystem.
+			if li, lerr := os.Lstat(p); lerr != nil {
+				slog.Warn("attachment GC: lstat failed", "dir", p, "err", lerr)
+				continue
+			} else if li.Mode()&os.ModeSymlink != 0 || !li.IsDir() {
+				slog.Warn("attachment GC: refusing to remove non-directory entry",
+					"dir", p, "mode", li.Mode().String())
+				continue
+			}
 			if err := os.RemoveAll(p); err != nil {
 				slog.Warn("attachment GC: remove failed", "dir", p, "err", err)
 				continue

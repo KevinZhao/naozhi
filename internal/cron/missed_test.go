@@ -141,3 +141,74 @@ func TestPreviousTickBefore_Unparsable(t *testing.T) {
 		t.Fatalf("unparsable schedule should return zero time, got %v", prev)
 	}
 }
+
+// TestHasMissedSchedule_DailySchedule_RecentRun_NotMissed 锁定 daily cron
+// 形态（`0 9 * * *`，period=24h）下 "LastRunAt 落在最近一次应触发时刻附近"
+// 不判 missed。现有 TestHasMissedSchedule_RecentRun_NoMiss 只覆盖 `@every 30m`
+// 等短周期；daily 形态是生产里最常见但测试盲区，`previousTickBefore` 回推
+// 3×period（= 72h）的分支没有独立覆盖。RNEW-TEST-431。
+//
+// TZ 说明：now/LastRunAt 用固定 UTC 时刻。schedulePeriod 现在从调用方
+// 显式接受 now（见 job.go）——HasMissedSchedule 把它传递给
+// previousTickBefore 和 schedulePeriod，三者锚到同一瞬间，不再受 host TZ
+// 或 DST 切换影响。
+func TestHasMissedSchedule_DailySchedule_RecentRun_NotMissed(t *testing.T) {
+	t.Parallel()
+	// 用固定 UTC 时刻避免 host TZ 影响：9:15 UTC 对应 `0 9 * * *` 的最近一次
+	// tick 是 "今天 9:00 UTC"，距 now 只差 15 分钟，远小于 period*1.5=36h。
+	now := time.Date(2026, 5, 9, 9, 15, 0, 0, time.UTC)
+	// startedAt 放 8 天前，足够越过 5×period=5 天的启动抑制窗口。
+	startedAt := now.Add(-8 * 24 * time.Hour)
+	j := &Job{
+		Schedule:  "0 9 * * *",
+		CreatedAt: now.Add(-30 * 24 * time.Hour),
+		LastRunAt: time.Date(2026, 5, 9, 9, 0, 0, 0, time.UTC),
+	}
+	missed, _ := HasMissedSchedule(j, now, startedAt)
+	if missed {
+		t.Fatalf("daily 9am cron run at the expected tick must not be flagged missed (now=%v lastRun=%v)", now, j.LastRunAt)
+	}
+}
+
+// TestHasMissedSchedule_DailySchedule_StaleByThreeDays_Missed 锁定 daily cron
+// 形态下 "LastRunAt 已过 3 天没跑" 必须判 missed。对照上一个 not-missed
+// 测试，这对断言同时覆盖 HasMissedSchedule 对 daily 形态的"跑过但过期"
+// 判定；period*1.5=36h，3 天远超阈值。RNEW-TEST-431。
+func TestHasMissedSchedule_DailySchedule_StaleByThreeDays_Missed(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 9, 9, 15, 0, 0, time.UTC)
+	startedAt := now.Add(-8 * 24 * time.Hour)
+	j := &Job{
+		Schedule:  "0 9 * * *",
+		CreatedAt: now.Add(-30 * 24 * time.Hour),
+		LastRunAt: now.Add(-3 * 24 * time.Hour), // 3 天没跑
+	}
+	missed, prev := HasMissedSchedule(j, now, startedAt)
+	if !missed {
+		t.Fatalf("daily 9am cron with LastRunAt=3 days ago must be flagged missed (now=%v lastRun=%v)", now, j.LastRunAt)
+	}
+	if prev.IsZero() {
+		t.Error("prev expected tick must be non-zero when missed=true")
+	}
+	if !prev.Before(now) || !prev.After(j.LastRunAt) {
+		t.Errorf("prev=%v should sit strictly between LastRunAt=%v and now=%v", prev, j.LastRunAt, now)
+	}
+}
+
+// TestHasMissedSchedule_DailySchedule_StartupSuppression 锁定 daily cron 形态
+// 下的启动抑制：5×period=5 天；重启 15 分钟后即使 LastRunAt 很老也不应
+// 报 missed（避免运行几分钟就拉起一堆 "错过" 告警）。RNEW-TEST-431。
+func TestHasMissedSchedule_DailySchedule_StartupSuppression(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 5, 9, 9, 15, 0, 0, time.UTC)
+	startedAt := now.Add(-15 * time.Minute) // 刚启动 15 分钟
+	j := &Job{
+		Schedule:  "0 9 * * *",
+		CreatedAt: now.Add(-30 * 24 * time.Hour),
+		LastRunAt: now.Add(-10 * 24 * time.Hour), // 10 天没跑
+	}
+	missed, _ := HasMissedSchedule(j, now, startedAt)
+	if missed {
+		t.Fatalf("startup suppression (5×24h window) must swallow missed flag even for 10-day-stale LastRunAt (startedAt=%v)", startedAt)
+	}
+}

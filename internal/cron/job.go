@@ -62,6 +62,14 @@ type Job struct {
 	LastRunAt  time.Time `json:"last_run_at"`
 	LastError  string    `json:"last_error,omitempty"`
 
+	// LastSessionID 是最近一次成功执行产生的 Claude session_id。持久化后
+	// 供 registerStub 注入到新创建的 cron stub 的 prevSessionIDs，让
+	// dashboard 点击 cron 侧边栏时 history.Source 能按这个 ID 从
+	// ~/.claude/projects 里加载 JSONL 历史。没有它的话 fresh_context=true
+	// 场景下每次 Reset 都会清掉 stub 的 chain IDs，stub 的事件面板
+	// 就永远是空的。仅 Send 成功路径写入；错误路径保留上一次的值。
+	LastSessionID string `json:"last_session_id,omitempty"`
+
 	entryID robfigcron.EntryID // runtime only, not persisted
 }
 
@@ -159,7 +167,7 @@ const minJobTimeout = 3 * time.Minute
 // edge), returns maxCap — safer to fall back to the historical single-timeout
 // behaviour than to misapply a ratio to an undefined period.
 func computeJobTimeout(schedule string, maxCap time.Duration) time.Duration {
-	period := schedulePeriod(schedule)
+	period := schedulePeriod(schedule, time.Now())
 	if period <= 0 {
 		return maxCap
 	}
@@ -173,16 +181,21 @@ func computeJobTimeout(schedule string, maxCap time.Duration) time.Duration {
 	return scaled
 }
 
-// schedulePeriod 估算给定 cron 表达式的周期（相邻两次触发的间隔）。
-// 通过 sched.Next 两次外推实现，精度对 "每 N 分钟 / 每天 HH:MM" 这类
-// 常见形态足够。无法解析 / 不等间隔（DST 切换窗口）时返回 0，调用方
-// 自行决定 fallback。computeJobTimeout 和 applyJitter 都基于此。
-func schedulePeriod(schedule string) time.Duration {
+// schedulePeriod 估算给定 cron 表达式在参考时刻 now 附近的周期（相邻两次
+// 触发的间隔）。通过 sched.Next 两次外推实现，精度对 "每 N 分钟 /
+// 每天 HH:MM" 这类常见形态足够。无法解析 / 不等间隔（DST 切换窗口）
+// 时返回 0，调用方自行决定 fallback。
+//
+// now 必须由调用方显式提供，保证和上层 HasMissedSchedule /
+// previousTickBefore 读取的"现在"完全同步——避免在 DST 切换或 NTP 校
+// 正瞬间两者跨越不同小时，导致 period 估成 23h/25h 而产生 missed 假
+// 判定。computeJobTimeout / applyJitter 不在意这种纳秒级 skew，传
+// time.Now() 即可。
+func schedulePeriod(schedule string, now time.Time) time.Duration {
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {
 		return 0
 	}
-	now := time.Now()
 	first := sched.Next(now)
 	second := sched.Next(first)
 	return second.Sub(first)
@@ -205,7 +218,7 @@ func previousTickBefore(schedule string, now time.Time) time.Time {
 	if err != nil {
 		return time.Time{}
 	}
-	period := schedulePeriod(schedule)
+	period := schedulePeriod(schedule, now)
 	if period <= 0 {
 		return time.Time{}
 	}
@@ -241,7 +254,7 @@ func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
 	if j == nil {
 		return false, time.Time{}
 	}
-	period := schedulePeriod(j.Schedule)
+	period := schedulePeriod(j.Schedule, now)
 	if period <= 0 {
 		return false, time.Time{}
 	}

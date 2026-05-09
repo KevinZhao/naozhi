@@ -702,20 +702,23 @@ func ParseCronAdd(args string) (schedule, prompt string, err error) {
 		return "", "", fmt.Errorf("prompt too long (max %d bytes)", maxCronPromptBytes)
 	}
 	// Reject the same control-character set the dashboard rejects: null bytes
-	// are silently truncated by execve and raw \r/\n into --append-system-prompt
-	// corrupts shim NDJSON framing. Tab is allowed because prompts may indent
-	// examples. Mirrors server.validateCronPrompt (dashboard_cron.go).
+	// are silently truncated by execve, CR poisons tail -f / journalctl by
+	// overwriting the current log line, and C1 / bidi runes corrupt terminal
+	// rendering. LF is allowed — cron prompts reach the CLI via stdin as a
+	// stream-json user message where json.Marshal escapes embedded newlines,
+	// so multi-line playbook prompts are framing-safe. Tab is allowed for
+	// indented examples. Mirrors server.validateCronPrompt (dashboard_cron.go).
 	for i := 0; i < len(prompt); i++ {
 		c := prompt[i]
-		if c == 0 || (c < 0x20 && c != '\t') || c == 0x7f {
+		if c == 0 || (c < 0x20 && c != '\t' && c != '\n') || c == 0x7f {
 			return "", "", fmt.Errorf("prompt contains invalid control characters")
 		}
 	}
 	// R190-SEC-M2: rune-level catch for C1 controls / bidi overrides / LS/PS.
 	// Matches server.validateCronPrompt second-pass scan so IM and dashboard
-	// ingress enforce the same policy. Unicode bidi overrides in --append-
-	// system-prompt argv are visible in /proc/<pid>/cmdline and can corrupt
-	// any terminal-based log viewer.
+	// ingress enforce the same policy. Unicode bidi overrides would corrupt
+	// any terminal-based log viewer that renders the prompt (journalctl,
+	// the dashboard activity feed, etc.).
 	for _, r := range prompt {
 		if osutil.IsLogInjectionRune(r) {
 			return "", "", fmt.Errorf("prompt contains invalid unicode control characters")

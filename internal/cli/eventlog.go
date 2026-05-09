@@ -21,8 +21,8 @@ const defaultEventLogSize = 500
 // S15 (Round 174).
 const imageDataURIPrefix = "data:image/"
 
-// sanitizeImages drops any data URI that is not an image/* data URL. Empty
-// strings are also stripped so a single skipped thumbnail does not leave a
+// sanitizeImagesAligned drops any data URI that is not an image/* data URL
+// and strips empty strings so a single skipped thumbnail does not leave a
 // "" slot the dashboard would have to render defensively. Returns the input
 // slice unchanged when every entry is already valid, avoiding an allocation
 // on the happy path (MakeThumbnail conforming producer).
@@ -33,11 +33,6 @@ const imageDataURIPrefix = "data:image/"
 // thumbnail it drew. Pass nil when the caller has no paths. The returned
 // filtered paths slice is nil when every Images entry was valid (no
 // allocation) OR when every path was dropped.
-func sanitizeImages(imgs []string) []string {
-	out, _ := sanitizeImagesAligned(imgs, nil)
-	return out
-}
-
 func sanitizeImagesAligned(imgs, paths []string) ([]string, []string) {
 	if len(imgs) == 0 {
 		return imgs, nil

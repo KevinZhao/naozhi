@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -55,6 +56,13 @@ var circuitBreakerThreshold = 6
 // intervention, but long enough to cut log noise dramatically versus the
 // 30s ceiling.
 var circuitBreakerBackoff = 5 * time.Minute
+
+// reasonSessionReset is the Reason value emitted for the terminal
+// session_state message in streamEvents when the router has already dropped
+// the session (Reset raced ahead of the notify-close path). Centralised so
+// downstream consumers (reverseconn.go, dashboard.js) have one literal to
+// match on, not a scatter of stringly-typed tokens. RNEW-005.
+const reasonSessionReset = "session_reset"
 
 // Connector dials a primary naozhi and serves it as a reverse-connected node.
 // Run on machines behind NAT that cannot be reached by the primary directly.
@@ -831,9 +839,44 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		// reject syntactic `..` traversal / control bytes / non-absolute paths
 		// up front to avoid depending on a single defense layer). Parallels the
 		// takeover-side check at line 520. R-close-discovered-cwd-validate.
+		//
+		// When defaultWorkspace is configured, additionally enforce the same
+		// EvalSymlinks + allowedRoot prefix check that takeover performs. This
+		// closes the gap called out in the 2026-05-08 security review: without
+		// it a primary could point close_discovered at a CWD outside the
+		// reverse node's configured root, and WaitAndCleanup would derive the
+		// lockDir from that path. When defaultWorkspace is empty we fall back
+		// to syntactic-only validation to preserve compatibility with single-
+		// node deployments that never configure an allowed root.
 		if p.CWD != "" {
 			if err := session.ValidateRemoteWorkspacePath(p.CWD); err != nil {
 				return nil, fmt.Errorf("close_discovered cwd invalid: %w", err)
+			}
+			if c.defaultWorkspace != "" {
+				// Unlike takeover (which expects the CWD to exist because
+				// the shim is still running inside it), close_discovered
+				// frequently runs AFTER the Claude CLI has exited and the
+				// working directory may already be gone. Treat ENOENT as
+				// "not a symlink attack, path just vanished" — fall back to
+				// the cleaned syntactic path and still enforce the allowed-
+				// root prefix check so a relocated-but-existed attacker
+				// payload like "/etc/passwd" cannot slip through.
+				cleaned := filepath.Clean(p.CWD)
+				cleanCWD, err := filepath.EvalSymlinks(cleaned)
+				if err != nil {
+					if !errors.Is(err, fs.ErrNotExist) {
+						return nil, fmt.Errorf("close_discovered cwd path invalid: %w", err)
+					}
+					cleanCWD = cleaned
+				}
+				if !filepath.IsAbs(cleanCWD) {
+					return nil, fmt.Errorf("close_discovered cwd must be absolute path")
+				}
+				if cleanCWD != c.defaultWorkspace &&
+					!strings.HasPrefix(cleanCWD, c.defaultWorkspace+string(filepath.Separator)) {
+					return nil, fmt.Errorf("close_discovered cwd %q outside allowed root %q", cleanCWD, c.defaultWorkspace)
+				}
+				p.CWD = cleanCWD
 			}
 		}
 		actual, err := discovery.ProcStartTime(p.PID)
@@ -1040,11 +1083,23 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 				// Session was reset/replaced; the notify channel is closed.
 				// Send final state so the hub knows the process died and can
 				// trigger a re-subscribe when the next send arrives.
-				if s := c.router.GetSession(key); s != nil {
+				//
+				// RNEW-005: if Reset removed the session from the router
+				// between the notify close and our GetSession below, the
+				// previous code returned silently — leaving the primary
+				// unaware that the key no longer has a live stream. Always
+				// emit a terminal session_state so reverseconn.go's
+				// session_state handler can propagate it downstream and the
+				// primary can re-subscribe on the next send.
+				s := c.router.GetSession(key)
+				msg := node.ReverseMsg{Type: "session_state", Key: key, State: "dead", Reason: reasonSessionReset}
+				if s != nil {
 					snap := s.Snapshot()
-					if err := writeJSON(node.ReverseMsg{Type: "session_state", Key: key, State: snap.State, Reason: snap.DeathReason}); err != nil {
-						slog.Debug("connector write final session_state", "key", key, "err", err)
-					}
+					msg.State = snap.State
+					msg.Reason = snap.DeathReason
+				}
+				if err := writeJSON(msg); err != nil {
+					slog.Debug("connector write final session_state", "key", key, "err", err)
 				}
 				return
 			}

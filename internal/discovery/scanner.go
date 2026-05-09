@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // Scanner holds the mutable caches that used to be package-level globals
@@ -130,6 +131,12 @@ const pathCacheMaxEntries = 2048
 // subsequent stores amortise the eviction pass.
 const pathCacheEvictBatch = 16
 
+// maxSessionFileBytes caps the size of Claude session-state files we will
+// read during Scan. Real files are tiny (under a few KB); anything larger
+// is either corruption or an operator artifact and should be skipped
+// rather than parsed.
+const maxSessionFileBytes int64 = 1024 * 1024
+
 // NewScanner returns a fresh Scanner with empty caches. Used directly by
 // tests that need isolation; production callers use the package-level
 // wrappers which hit DefaultScanner.
@@ -148,6 +155,17 @@ var (
 	defaultScannerOnce sync.Once
 	defaultScannerInst *Scanner
 )
+
+// scanUserPromptBufPool recycles the 16 KiB initial line buffers passed to
+// bufio.Scanner in scanUserPrompt. The hot path is extractLastPromptUncached
+// running up to 4 candidate JSONLs concurrently per Scan; without a pool
+// every candidate pays a fresh 16 KiB heap alloc.
+var scanUserPromptBufPool = sync.Pool{
+	New: func() any {
+		b := make([]byte, 0, 16*1024)
+		return &b
+	},
+}
 
 func DefaultScanner() *Scanner {
 	defaultScannerOnce.Do(func() {
@@ -290,6 +308,15 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+
+		// Session files are small by construction (a handful of fields).
+		// If a file has somehow grown pathologically large (operator dropped
+		// something in the Claude sessions dir, or disk corruption), skip
+		// it rather than allocating megabytes of data we will then try to
+		// parse as JSON. 1 MiB is ~100x the expected max size.
+		if info, ierr := entry.Info(); ierr == nil && info.Size() > maxSessionFileBytes {
 			continue
 		}
 
@@ -441,7 +468,7 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 			Kind:          c.sf.Kind,
 			Entrypoint:    c.sf.Entrypoint,
 			CLIName:       detectCLIName(c.sf.PID),
-			Summary:       summaryMap[c.sf.SessionID],
+			Summary:       SanitizePromptForTransport(summaryMap[c.sf.SessionID]),
 			LastPrompt:    prompts[i],
 			ProcStartTime: pst,
 		})
@@ -450,15 +477,11 @@ func (s *Scanner) Scan(claudeDir string, excludePIDs map[int]bool, excludeSessio
 }
 
 // processAlive checks whether a process with the given PID exists.
+// Delegates to osutil.PidAlive so the pid<=0 guard (kill(0, sig) broadcasts
+// to the whole process group and kill(-N, sig) targets groups — both would
+// misreport phantom processes as alive) is consistent across packages.
 func processAlive(pid int) bool {
-	proc, err := os.FindProcess(pid)
-	if err != nil {
-		return false
-	}
-	// Signal 0 tests existence without actually sending a signal.
-	// EPERM means the process exists but is owned by a different user.
-	err = proc.Signal(syscall.Signal(0))
-	return err == nil || errors.Is(err, syscall.EPERM)
+	return osutil.PidAlive(pid)
 }
 
 type jsonlEntry struct {
@@ -503,10 +526,23 @@ func sortByLastActive(indices []int, candidates []scanCandidate) {
 	})
 }
 
-// projDirName converts a CWD path to the Claude project directory name.
-// e.g. "/home/user/workspace/foo" -> "-home-user-workspace-foo"
-func projDirName(cwd string) string {
+// ClaudeProjectSlug converts a CWD path to the Claude project directory name.
+// e.g. "/home/user/workspace/foo" -> "-home-user-workspace-foo".
+//
+// This is the single source of truth for Claude CLI's ~/.claude/projects/
+// directory-naming scheme. internal/session mirrors it via a thin wrapper that
+// calls this function, and a cross-package equivalence test pins the two
+// call sites together so a future change to Claude's scheme cannot be
+// applied to only one side (RNEW-002).
+func ClaudeProjectSlug(cwd string) string {
 	return strings.ReplaceAll(cwd, "/", "-")
+}
+
+// projDirName is the package-internal alias retained for call-site brevity.
+// It intentionally delegates to ClaudeProjectSlug so the exported form stays
+// the single source of truth.
+func projDirName(cwd string) string {
+	return ClaudeProjectSlug(cwd)
 }
 
 // jsonlMtime returns the JSONL conversation file's mtime as unix ms.
@@ -626,7 +662,16 @@ func extractLastPromptUncached(path string, fileSize int64) string {
 func scanUserPrompt(f *os.File) string {
 	var lastPrompt string
 	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 16*1024), 256*1024)
+	bufPtr := scanUserPromptBufPool.Get().(*[]byte)
+	// bufio.Scanner may grow the provided slice; reset to zero length on
+	// return and rely on Scanner's internal growth not modifying capacity
+	// below the initial 16 KiB (buf cap only grows, never shrinks).
+	defer func() {
+		buf := (*bufPtr)[:0]
+		*bufPtr = buf
+		scanUserPromptBufPool.Put(bufPtr)
+	}()
+	scanner.Buffer(*bufPtr, 256*1024)
 
 	for scanner.Scan() {
 		line := scanner.Bytes()
@@ -650,7 +695,56 @@ func scanUserPrompt(f *os.File) string {
 		}
 		lastPrompt = text
 	}
-	return lastPrompt
+	return SanitizePromptForTransport(lastPrompt)
+}
+
+// SanitizePromptForTransport strips bytes that corrupt structured log output,
+// terminal rendering, or /api/sessions/resume's charset gate. Scoped to
+// last_prompt / first_prompt strings that flow from a CLI JSONL file through
+// the sidebar JSON response and (optionally) back to the resume endpoint as
+// a client-echoed value.
+//
+// Claude CLI occasionally emits user messages that include control bytes
+// (PDF upload notifications use U+0085 NEL, shell tool outputs contain
+// C0 noise). Leaving those bytes inside last_prompt corrupts slog JSON,
+// breaks /api/sessions/resume round-trips (which enforce a stricter
+// charset), and can introduce ANSI control sequences into the sidebar.
+//
+// Tab is preserved because tab-delimited snippets are legitimate user
+// content and slog JSONHandler escapes tab safely.
+//
+// Exported so recent.go (extractFirstPrompt) and any future JSONL preview
+// path can share the same policy without import cycles.
+func SanitizePromptForTransport(s string) string {
+	if s == "" {
+		return s
+	}
+	clean := true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c == '\t' {
+			continue
+		}
+		if c < 0x20 || c == 0x7f || c >= 0x80 {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
+	return strings.Map(func(r rune) rune {
+		if r == '\t' {
+			return r
+		}
+		if r < 0x20 || r == 0x7f {
+			return '_'
+		}
+		if osutil.IsLogInjectionRune(r) {
+			return '_'
+		}
+		return r
+	}, s)
 }
 
 // claudeSystemInjectedTagNames enumerates the XML-like tags that Claude
@@ -673,7 +767,14 @@ var claudeSystemInjectedTagNames = [...]string{
 // IsClaudeSystemInjectedText reports whether text is a Claude-Code-injected
 // system XML frame (e.g. "<task-notification>…"). A leading "<tag>" or
 // "<tag " counts as a match; anything else is treated as real user content.
+// Also catches the CLI's synthetic "[Request interrupted by user]" marker
+// (and its "for tool use" variant), which the CLI writes as a user message
+// when SIGINT aborts a turn — it is not user intent and should be filtered
+// out of titles, previews, and transcript exports.
 func IsClaudeSystemInjectedText(text string) bool {
+	if isClaudeInterruptMarker(text) {
+		return true
+	}
 	if len(text) < 3 || text[0] != '<' {
 		return false
 	}
@@ -690,6 +791,15 @@ func IsClaudeSystemInjectedText(text string) bool {
 		}
 	}
 	return false
+}
+
+// isClaudeInterruptMarker matches the CLI-synthesised user messages that
+// represent an interrupt (SIGINT / stop button) rather than user intent.
+// Two known variants in Claude CLI ≥ 2.1: plain turn interrupt, and the
+// "for tool use" suffix when the interrupt landed between tool_use blocks.
+func isClaudeInterruptMarker(text string) bool {
+	return text == "[Request interrupted by user]" ||
+		text == "[Request interrupted by user for tool use]"
 }
 
 // extractUserText extracts the text content from a user message.
@@ -783,19 +893,32 @@ func (s *Scanner) LookupSummaries(claudeDir string, sessions map[string]string) 
 			s.setCachedSummary(indexPath, mtime, idx)
 		}
 
-		// Build a lookup set once per project: large project directories may
-		// have 100s of entries and multi-concurrent sids, so O(entries×sids)
-		// scaling hurts. Map build + O(1) membership is faster once sids > ~3.
-		sidSet := make(map[string]struct{}, len(sids))
-		for _, s := range sids {
-			sidSet[s] = struct{}{}
-		}
-		for _, e := range idx.Entries {
-			if e.Summary == "" {
-				continue
-			}
-			if _, ok := sidSet[e.SessionID]; ok {
+		// Single-session projects (the common case) skip the map alloc: a
+		// linear scan for one id is cheaper than allocating a map header +
+		// bucket. Larger sids lists fall back to O(1) membership via a set
+		// since idx.Entries can grow into the hundreds for long-lived
+		// projects and O(entries×sids) scaling hurts.
+		switch len(sids) {
+		case 1:
+			want := sids[0]
+			for _, e := range idx.Entries {
+				if e.Summary == "" || e.SessionID != want {
+					continue
+				}
 				result[e.SessionID] = e.Summary
+			}
+		default:
+			sidSet := make(map[string]struct{}, len(sids))
+			for _, s := range sids {
+				sidSet[s] = struct{}{}
+			}
+			for _, e := range idx.Entries {
+				if e.Summary == "" {
+					continue
+				}
+				if _, ok := sidSet[e.SessionID]; ok {
+					result[e.SessionID] = e.Summary
+				}
 			}
 		}
 	}
@@ -890,7 +1013,7 @@ func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession)
 			sess.State = newState
 			changed = true
 		}
-		if sum := summaryMap[sess.SessionID]; sum != "" && sum != sess.Summary {
+		if sum := SanitizePromptForTransport(summaryMap[sess.SessionID]); sum != "" && sum != sess.Summary {
 			sess.Summary = sum
 			changed = true
 		}
@@ -903,8 +1026,28 @@ func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession)
 }
 
 // IsValidSessionID checks whether s is a valid UUID-format session ID.
+// Hand-rolled 36-char format check (8-4-4-4-12 lowercase hex with dashes)
+// to avoid the DFA lookup cost sessionIDRe.MatchString pays on every
+// discovered session during each Scan. The regexp is still kept as the
+// canonical pattern reference but is no longer on the hot path.
 func IsValidSessionID(s string) bool {
-	return sessionIDRe.MatchString(s)
+	if len(s) != 36 {
+		return false
+	}
+	for i := 0; i < 36; i++ {
+		c := s[i]
+		switch i {
+		case 8, 13, 18, 23:
+			if c != '-' {
+				return false
+			}
+		default:
+			if !(c >= '0' && c <= '9') && !(c >= 'a' && c <= 'f') {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // WaitAndCleanup waits for pid to exit (up to 5 s or until ctx is cancelled),
@@ -921,7 +1064,7 @@ func WaitAndCleanup(ctx context.Context, pid int, procStartTime uint64, claudeDi
 		_ = os.Remove(filepath.Join(claudeDir, "sessions", fmt.Sprintf("%d.json", pid)))
 	}
 	if cwd != "" && sessionID != "" && IsValidSessionID(sessionID) {
-		encodedCWD := strings.ReplaceAll(cwd, "/", "-")
+		encodedCWD := projDirName(cwd)
 		tmpBase := os.TempDir()
 		lockDir := filepath.Clean(filepath.Join(tmpBase, fmt.Sprintf("claude-%d", os.Getuid()), encodedCWD, sessionID))
 		// Defense-in-depth: use filepath.Rel to verify lockDir stays
@@ -938,24 +1081,28 @@ func WaitAndCleanup(ctx context.Context, pid int, procStartTime uint64, claudeDi
 }
 
 // waitForExit polls until the process exits or ctx is cancelled.
-// Returns true if ctx was cancelled before the process exited.
+// Returns true if ctx was cancelled before the process exited. A single
+// timer is reused across the back-off loop (Stop+Reset) to avoid 5-6
+// per-call time.NewTimer allocations during cluster-wide WaitAndCleanup
+// sweeps.
 func waitForExit(ctx context.Context, pid int) bool {
 	deadline := time.Now().Add(5 * time.Second)
 	wait := 50 * time.Millisecond
+	t := time.NewTimer(wait)
+	defer t.Stop()
 	for time.Now().Before(deadline) {
 		if err := syscall.Kill(pid, 0); err != nil {
 			return false
 		}
-		t := time.NewTimer(wait)
 		select {
 		case <-ctx.Done():
-			t.Stop()
 			return true
 		case <-t.C:
 		}
 		if wait < 500*time.Millisecond {
 			wait *= 2
 		}
+		t.Reset(wait)
 	}
 	return false
 }

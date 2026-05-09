@@ -2,7 +2,6 @@ package server
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -275,7 +274,7 @@ func isRawPreviewMime(mime string) bool {
 // percent-encoded form — some older HTTP intermediaries still choke on them,
 // and bidi overrides let an attacker-supplied filename render as `foo.exe`
 // despite the real extension being `foo.txt` when the file preview UI echos
-// back to the operator. Aligns with the isLogInjectionRune policy in
+// back to the operator. Aligns with the osutil.IsLogInjectionRune policy in
 // dashboard_cron.go.
 func sanitizeDownloadName(p string) string {
 	base := filepath.Base(p)
@@ -365,7 +364,7 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxExistsBody)
 	var req existsReq
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeJSONBody(r, &req); err != nil {
 		slog.Debug("files exists: decode failed", "err", err)
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 		return

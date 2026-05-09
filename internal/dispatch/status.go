@@ -52,13 +52,9 @@ func extractTodoMessage(ev cli.Event) (string, bool) {
 }
 
 // Per-tool input structs — zero-alloc alternative to generic map decoding.
-type readInput struct {
-	FilePath string `json:"file_path"`
-}
-type editInput struct {
-	FilePath string `json:"file_path"`
-}
-type writeInput struct {
+// Read/Edit/Write share the single-field file_path shape so they reuse one
+// decoder struct; other tools have distinct shapes and stay separate.
+type filePathInput struct {
 	FilePath string `json:"file_path"`
 }
 type bashInput struct {
@@ -82,17 +78,17 @@ type agentInput struct {
 func formatToolUse(name string, input json.RawMessage) string {
 	switch name {
 	case "Read":
-		var s readInput
+		var s filePathInput
 		if json.Unmarshal(input, &s) == nil && s.FilePath != "" {
 			return "📖 " + shortenPath(s.FilePath)
 		}
 	case "Edit":
-		var s editInput
+		var s filePathInput
 		if json.Unmarshal(input, &s) == nil && s.FilePath != "" {
 			return "✏️ " + shortenPath(s.FilePath)
 		}
 	case "Write":
-		var s writeInput
+		var s filePathInput
 		if json.Unmarshal(input, &s) == nil && s.FilePath != "" {
 			return "📝 " + shortenPath(s.FilePath)
 		}

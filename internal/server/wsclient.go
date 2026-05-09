@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"runtime/debug"
 	"sync"
@@ -193,8 +194,15 @@ func (c *wsClient) SendRaw(data []byte) {
 func (c *wsClient) readPump() {
 	defer func() {
 		if r := recover(); r != nil {
+			// Log the panic cause at Error so operators are alerted, but
+			// keep the verbose stack trace at Debug — shipping it to
+			// journald / aggregated log stores would broadcast internal
+			// file paths and function names, which is not useful after
+			// the fact once the panic type is known.
 			slog.Error("panic in ws readPump (recovered)",
-				"remote", c.remoteIP, "panic", r, "stack", string(debug.Stack()))
+				"remote", c.remoteIP, "panic", fmt.Sprintf("%v", r))
+			slog.Debug("panic in ws readPump: stack",
+				"remote", c.remoteIP, "stack", string(debug.Stack()))
 		}
 		c.closeDone()
 		c.hub.unregister(c)
