@@ -3,6 +3,7 @@ package cli
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,16 @@ import (
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// ErrACPRPC wraps any agent-side JSON-RPC error ("error" field populated).
+// Typed so dispatch / upstream layers can errors.Is-classify ACP failures
+// distinctly from transport / timeout / parse faults.
+var ErrACPRPC = errors.New("acp rpc error")
+
+// ErrACPTimeout is returned when waitForResponse gives up on a specific
+// JSON-RPC id after the 30s deadline. Callers can treat it as a transient
+// failure (retry next turn) rather than a permanent protocol break.
+var ErrACPTimeout = errors.New("acp response timeout")
 
 // ACPProtocol implements Protocol for the Agent Client Protocol (JSON-RPC 2.0).
 type ACPProtocol struct {
@@ -198,7 +209,7 @@ func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 			// dashboard, so untrusted control characters / bidi overrides must
 			// be scrubbed before they reach structured logs. Matches the
 			// R172-SEC-M4 / R175-SEC-P1 / R183-SEC-H1 sanitize policy.
-			return Event{}, false, fmt.Errorf("acp rpc error %d: %s",
+			return Event{}, false, fmt.Errorf("%w %d: %s", ErrACPRPC,
 				msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))
 		}
 
@@ -351,7 +362,7 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 				if msg.Error != nil {
 					// R184-SEC-M1: sanitize RPC error text before it bubbles
 					// up through caller slog attrs. See ReadEvent above.
-					ch <- readResult{nil, fmt.Errorf("rpc error %d: %s",
+					ch <- readResult{nil, fmt.Errorf("%w %d: %s", ErrACPRPC,
 						msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))}
 					return
 				}
@@ -391,6 +402,6 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 			_ = sl.proc.shimConn.SetReadDeadline(time.Now())
 			_ = sl.proc.shimConn.SetReadDeadline(time.Time{})
 		}
-		return nil, fmt.Errorf("timeout waiting for ACP response (id=%d)", expectedID)
+		return nil, fmt.Errorf("%w (id=%d)", ErrACPTimeout, expectedID)
 	}
 }

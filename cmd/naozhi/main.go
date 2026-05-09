@@ -518,12 +518,15 @@ func main() {
 		ClaudeDir:        claudeDir,
 	})
 
-	// Reconnect to surviving shim processes from previous naozhi run
-	router.ReconnectShims()
-
-	// Context with cancellation for graceful shutdown
+	// Context with cancellation for graceful shutdown. Created before
+	// ReconnectShimsCtx so a SIGTERM arriving during a long shim handshake
+	// (10+ shims × 15s each = 150s worst case) can abort promptly instead
+	// of running systemd's TimeoutStartSec out.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Reconnect to surviving shim processes from previous naozhi run
+	router.ReconnectShimsCtx(ctx)
 
 	// Start cleanup loop
 	router.StartCleanupLoop(ctx, cfg.ParseTTL()/2)

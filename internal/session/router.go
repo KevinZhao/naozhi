@@ -74,6 +74,13 @@ var ErrMaxExemptSessions = errors.New("max exempt sessions reached")
 // should stop on this sentinel.
 var ErrNoCLIWrapper = errors.New("no CLI wrapper configured")
 
+// ErrNoActiveProcess is returned by ManagedSession.Send / SendPassthrough
+// when the underlying process handle has been released (paused, reclaimed,
+// or never spawned). Callers can errors.Is this sentinel to distinguish
+// "process needs to be spawned" from real CLI failures, avoiding the
+// "处理失败，请 /new 重置" fallback in dispatch.mapSendError.
+var ErrNoActiveProcess = errors.New("session has no active process")
+
 // exemptKeyPrefixes lists the session-key namespaces that are exempt from
 // TTL expiry, LRU eviction, and the active-process counter. Centralising
 // the list keeps the policy one line away from anyone adding a new

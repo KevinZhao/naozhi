@@ -438,7 +438,7 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 
 	proc := s.loadProcess()
 	if proc == nil {
-		return nil, fmt.Errorf("session %s has no active process", s.key)
+		return nil, fmt.Errorf("session %s: %w", s.key, ErrNoActiveProcess)
 	}
 
 	result, err := proc.SendPassthrough(ctx, text, images, onEvent, priority)
@@ -540,7 +540,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 
 	proc := s.loadProcess()
 	if proc == nil {
-		return nil, fmt.Errorf("session %s has no active process", s.key)
+		return nil, fmt.Errorf("session %s: %w", s.key, ErrNoActiveProcess)
 	}
 
 	// lastActivity tracking is handled lock-free by EventLog.Append via its

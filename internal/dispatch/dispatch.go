@@ -598,6 +598,15 @@ func (d *Dispatcher) sendAndReply(
 			return
 		case errors.Is(err, cli.ErrTooManyPending):
 			errMsg = "当前会话排队已满，请稍候或使用 /stop 取消。"
+		case errors.Is(err, cli.ErrProcessBusy):
+			// Legacy (non-passthrough) state machine says "turn already running".
+			// Surface this distinctly so users don't get the generic /new reset
+			// hint for what is actually a transient "wait for current turn".
+			errMsg = "当前会话正在处理上一条消息，请稍候再发。"
+		case errors.Is(err, session.ErrNoActiveProcess):
+			// Session has no attached process (paused / reclaimed). A fresh
+			// send will re-spawn via GetOrCreate; the user just needs to retry.
+			errMsg = "会话已休眠，请重新发送消息以唤醒。"
 		default:
 			errMsg = "处理失败，请发送 /new 重置后重试。"
 		}

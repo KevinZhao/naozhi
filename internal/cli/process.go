@@ -71,6 +71,12 @@ var (
 // rather than counting it as a no-output stall.
 var ErrProcessExited = errors.New("process exited during send")
 
+// ErrProcessBusy is returned by Send when the (legacy, non-passthrough)
+// state machine is already StateRunning. Typed so dispatch.mapSendError
+// can reply "正在处理中" instead of falling into the generic /new reset
+// hint. Passthrough-mode processes do not emit this.
+var ErrProcessBusy = errors.New("process busy")
+
 // Passthrough-mode sentinels. Kept in a separate block so callers can do
 // targeted errors.Is switches without depending on the wider process error
 // vocabulary.
@@ -1128,7 +1134,7 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 	p.mu.Lock()
 	if p.State == StateRunning {
 		p.mu.Unlock()
-		return nil, fmt.Errorf("process busy (state=%s)", p.State)
+		return nil, fmt.Errorf("process busy (state=%s): %w", p.State, ErrProcessBusy)
 	}
 	p.State = StateRunning
 	p.mu.Unlock()
