@@ -458,13 +458,25 @@ func statRelWithRoot(rootResolved, rel string) existsEntry {
 		return existsEntry{Exists: true, IsDir: true, Size: info.Size()}
 	}
 
-	// Peek the first 512 bytes for MIME detection. On small files this is
-	// the entire content; reading it here avoids a second open in the
-	// preview handler later. We intentionally do NOT cache this across
-	// calls — mtime changes would stale the cache and the per-call cost is
-	// dominated by the open, not the read.
+	// RNEW-PERF-006: skip the open+read sniff when the extension alone already
+	// resolves to a known MIME. 100-path batch dashboards (project file picker)
+	// are dominated by .go/.py/.md/.json, all of which previewableByExt covers
+	// — short-circuiting saves one open+close+512B-read per path and makes the
+	// 2s fileStatTimeout much less pressurised on NFS/HDD. Extensions not in
+	// the table (or the empty-extension "Dockerfile"-ish path) still fall back
+	// to the sniff so binary detection and source-code-without-extension keep
+	// working.
 	mime := ""
-	if info.Size() > 0 {
+	if info.Size() == 0 {
+		mime = "text/plain"
+	} else if m, ok := mimeFromExtOnly(resolved); ok {
+		mime = m
+	} else {
+		// Peek the first 512 bytes for MIME detection. On small files this is
+		// the entire content; reading it here avoids a second open in the
+		// preview handler later. We intentionally do NOT cache this across
+		// calls — mtime changes would stale the cache and the per-call cost is
+		// dominated by the open, not the read.
 		f, openErr := os.Open(resolved)
 		if openErr == nil {
 			head := make([]byte, 512)
@@ -472,10 +484,37 @@ func statRelWithRoot(rootResolved, rel string) existsEntry {
 			f.Close()
 			mime = detectMime(resolved, head[:n])
 		}
-	} else {
-		mime = "text/plain"
 	}
 	return existsEntry{Exists: true, Size: info.Size(), Mime: mime}
+}
+
+// mimeFromExtOnly returns the extension-derived MIME when the path alone
+// unambiguously resolves it — no sniff required. Used by statRelWithRoot's
+// batch fast path to avoid an open+read on every .go / .py / .md / .json
+// in a 100-path batch. Returns (mime, true) only when we're confident the
+// sniff would yield the same answer:
+//   - .svg is pinned to image/svg+xml regardless of sniff (XSS gate in
+//     detectMime); safe to short-circuit.
+//   - previewableByExt entries are authoritative text/source types; the
+//     sniff path ultimately calls this same table after DetectContentType
+//     returns text/plain or application/octet-stream.
+//
+// Anything else (empty extension, binary formats like .png/.pdf where
+// DetectContentType is the authority) falls through to the sniff path.
+func mimeFromExtOnly(resolved string) (string, bool) {
+	ext := strings.ToLower(filepath.Ext(resolved))
+	if ext == ".svg" {
+		return "image/svg+xml", true
+	}
+	if ext == "" {
+		// Extensionless files (Dockerfile, Makefile, LICENSE) need basename
+		// lookup; defer to detectMime which handles it correctly.
+		return "", false
+	}
+	if v, ok := previewableByExt[ext]; ok {
+		return v, true
+	}
+	return "", false
 }
 
 // GET /api/projects/file?project=X&path=Y&mode=preview|raw|download

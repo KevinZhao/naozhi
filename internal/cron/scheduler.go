@@ -1640,6 +1640,19 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
 		s.mu.Unlock()
 		return
 	}
+	// RNEW-011: snapshot the four fields we're about to overwrite so marshal
+	// failure can roll back in-memory state. Without rollback the live WS
+	// broadcast and the on-disk snapshot diverge: dashboard shows "succeeded
+	// at T" while cron_jobs.json still points at the previous run, and a
+	// restart replays the stale result as authoritative. We keep the rollback
+	// inside s.mu so the broadcast (fn, fired after Unlock) always sees either
+	// the fully-applied new values (persist OK) or the fully-restored old ones
+	// (persist failed) — never a half-applied mix.
+	prevLastRunAt := j.LastRunAt
+	prevLastResult := j.LastResult
+	prevLastError := j.LastError
+	prevLastSessionID := j.LastSessionID
+
 	j.LastRunAt = time.Now()
 	j.LastResult = result
 	j.LastError = errMsg
@@ -1647,17 +1660,23 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
 		j.LastSessionID = sessionID
 	}
 	save, perr := s.persistJobsLocked()
+	if perr != nil {
+		// Marshal failed: revert the four fields so in-memory and disk agree.
+		// slog was already emitted by persistJobsLocked; add one more line so
+		// operators can correlate rollback with broadcast suppression.
+		j.LastRunAt = prevLastRunAt
+		j.LastResult = prevLastResult
+		j.LastError = prevLastError
+		j.LastSessionID = prevLastSessionID
+		s.mu.Unlock()
+		slog.Warn("cron: recordResult persist failed; in-memory result reverted",
+			"job_id", j.ID, "err", perr)
+		return
+	}
 	fn := s.onExecute
 	s.mu.Unlock()
 
-	// recordResult has no error return (it runs from the internal execute
-	// goroutine), so marshal failure here can only be logged. persistJobsLocked
-	// already emitted the slog.Error; proceed with onExecute so the dashboard
-	// still sees the LastResult update via live broadcast even when the on-disk
-	// snapshot misses this run.
-	if perr == nil {
-		save()
-	}
+	save()
 	if fn != nil {
 		fn(j.ID, result, errMsg)
 	}

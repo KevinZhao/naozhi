@@ -1094,6 +1094,107 @@ func TestDashboardHTML_UX2_DangerButtonStyle(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_RNEW_UX013_PromptDialog pins RNEW-UX-013 — the themed
+// promptDialog() replaces native window.prompt() for the session rename flow
+// and the scratch-drawer replacement confirm fallback drops native confirm().
+// Four arms:
+//
+//  1. promptDialog helper must exist, return a Promise, and focus+select the
+//     input on open so the default value is replaced on first keystroke.
+//  2. No call site may invoke window.prompt(...) — blocks event loop and
+//     looks out of place next to the dashboard dark theme.
+//  3. renameSession must use promptDialog (Chinese title present) and not
+//     fall back to the native prompt.
+//  4. scratch-drawer openScratch must use confirmDialog directly, not the
+//     legacy ternary that branched to native confirm('…继续？'). That
+//     fallback was dead code (confirmDialog is unconditionally defined) and
+//     defeated theme parity.
+func TestDashboardJS_RNEW_UX013_PromptDialog(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// Arm 1: helper exists with expected structure.
+	for _, want := range []string{
+		"function promptDialog(opts)",
+		"overlay.className = 'modal-overlay prompt-overlay'",
+		// Focus+select on open so the default is replaced on first keystroke.
+		"input.focus(); input.select();",
+		// Enter key submits.
+		"e.key === 'Enter'",
+		// Backdrop click cancels (mirrors confirmDialog).
+		"e.target === overlay",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("promptDialog helper missing expected structure %q", want)
+		}
+	}
+
+	// Arm 2: no window.prompt() call site. The string may legitimately
+	// appear in comments (this very file mentions it), so scan line by line
+	// and skip full-line comments (`//...`) and doc-comment bodies (` * ...`).
+	{
+		lines := strings.Split(js, "\n")
+		for i, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") {
+				continue
+			}
+			if strings.Contains(trimmed, "window.prompt(") {
+				t.Errorf("dashboard.js line %d uses native window.prompt(); use promptDialog() instead: %q", i+1, trimmed)
+			}
+		}
+	}
+
+	// Arm 3: renameSession wires promptDialog with the expected Chinese title.
+	if !strings.Contains(js, "title: '重命名会话'") {
+		t.Error("renameSession must invoke promptDialog with Chinese title '重命名会话'")
+	}
+	// Legacy native prompt copy must be gone — the old prompt string was
+	// '重命名会话（留空恢复默认标题，最多 128 字节）'. Any survivor means the
+	// flow regressed to window.prompt.
+	if strings.Contains(js, "window.prompt('重命名会话") {
+		t.Error("renameSession still falls back to window.prompt — regression")
+	}
+
+	// Arm 4: scratch-drawer replacement confirm must NOT use the legacy
+	// ternary that branched to native confirm('当前追问窗口将被替换，继续？').
+	legacyFallback := "confirm('当前追问窗口将被替换，继续？')"
+	if strings.Contains(js, legacyFallback) {
+		t.Errorf("openScratch must not retain native confirm fallback: %q", legacyFallback)
+	}
+	// Positive: the themed dialog title must be present.
+	if !strings.Contains(js, "title: '替换当前追问窗口？'") {
+		t.Error("openScratch must invoke confirmDialog with Chinese title '替换当前追问窗口？'")
+	}
+}
+
+// TestDashboardHTML_RNEW_UX013_PromptDialogStyles pins the CSS hooks that
+// promptDialog relies on. Missing either rule means the dialog falls back to
+// the neutral .modal styling and the message text visually collides with the
+// input below it.
+func TestDashboardHTML_RNEW_UX013_PromptDialogStyles(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(data)
+
+	wants := []string{
+		".modal.prompt-dialog .prompt-message",
+		".modal.prompt-dialog .prompt-input",
+	}
+	for _, want := range wants {
+		if !strings.Contains(html, want) {
+			t.Errorf("dashboard.html missing prompt-dialog style: %q", want)
+		}
+	}
+}
+
 // TestDashboardJS_R110A11y_IconButtonLabels pins R110-P2 — every icon-only
 // button that the operator can click must carry both a non-empty `title`
 // (tooltip) and `aria-label` (screen-reader hook). The audit found 6
@@ -5158,4 +5259,154 @@ func TestDashboardJS_HTMLRenderSandbox(t *testing.T) {
 	if staleChecks < 3 {
 		t.Errorf("renderHtmlInSandbox must check mySeq !== _htmlRenderSeq at every await boundary (got %d, want >=3)", staleChecks)
 	}
+}
+
+// TestDashboardJS_RNEW_UX002_GlobalErrorHandler pins the RNEW-UX-002 fix:
+// the SPA registers module-scope window listeners for both uncaught errors
+// and unhandled promise rejections. Without these, a silent handler throw
+// freezes the UI with no signal to the operator. The contract guards the
+// invariants most likely to silently regress during refactors.
+func TestDashboardJS_RNEW_UX002_GlobalErrorHandler(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// 1. The RNEW-UX-002 JSDoc comment anchors the handler block and
+	//    documents intent. If the block is moved / deleted, the test
+	//    points at the right ticket for the reviewer.
+	anchor := "RNEW-UX-002: global error handler"
+	anchorIdx := strings.Index(js, anchor)
+	if anchorIdx < 0 {
+		t.Fatalf("dashboard.js missing RNEW-UX-002 anchor comment %q — handler block cannot be located", anchor)
+	}
+	// Scope all further checks to a window around the handler so later
+	// unrelated mentions of "addEventListener('error'" inside feature
+	// handlers (e.g. <img> onerror wiring) or later preventDefault()
+	// calls in the image-lightbox IIFE don't false-positive. Use the
+	// first IIFE close `})();` after the anchor as the right boundary
+	// — that's the exact end of the handler block.
+	searchFrom := js[anchorIdx:]
+	iifeEndRel := strings.Index(searchFrom, "})();")
+	if iifeEndRel < 0 {
+		t.Fatal("RNEW-UX-002: could not locate IIFE close `})();` after anchor — block structure changed")
+	}
+	winEnd := anchorIdx + iifeEndRel + len("})();")
+	if winEnd > len(js) {
+		winEnd = len(js)
+	}
+	block := js[anchorIdx:winEnd]
+
+	// 2. Both listeners exist.
+	errListenerRe := regexp.MustCompile(`window\.addEventListener\(\s*['"]error['"]\s*,`)
+	if !errListenerRe.MatchString(block) {
+		t.Error("RNEW-UX-002: window.addEventListener('error', ...) must be registered — uncaught errors otherwise freeze the UI silently")
+	}
+	rejListenerRe := regexp.MustCompile(`window\.addEventListener\(\s*['"]unhandledrejection['"]\s*,`)
+	if !rejListenerRe.MatchString(block) {
+		t.Error("RNEW-UX-002: window.addEventListener('unhandledrejection', ...) must be registered — unhandled promise rejections otherwise vanish")
+	}
+
+	// 3. The 'error' listener MUST be registered at module scope, not
+	//    inside a function body that never runs. We verify this by
+	//    checking the listener registration isn't nested behind a
+	//    `function ...()` keyword between the top of the anchor block
+	//    and the call site. The handler is wrapped in an IIFE
+	//    `(function () { ... })()` which is acceptable — the invocation
+	//    is synchronous at module load. To distinguish IIFE from a
+	//    named-function definition, require the IIFE `})();` pattern
+	//    appears after both listener registrations.
+	iifeCloseRe := regexp.MustCompile(`\}\)\(\)\s*;`)
+	if !iifeCloseRe.MatchString(block) {
+		t.Error("RNEW-UX-002: handler must be wrapped in an immediately-invoked function — without `})();` the listeners are never actually registered at module load")
+	}
+
+	// 4. Throttle window is referenced so duplicate errors within ~5s
+	//    don't spam the toast layer. Accept either the literal 5000 or
+	//    the `5 * 1000` form used in the source.
+	throttleRe := regexp.MustCompile(`5\s*\*\s*1000|\b5000\b`)
+	if !throttleRe.MatchString(block) {
+		t.Error("RNEW-UX-002: throttle window (5000 or 5 * 1000) must be referenced — without it a tight error loop spams the toast layer")
+	}
+
+	// 5. Handler must NOT suppress the browser's own console output.
+	//    Calling preventDefault or returning true both swallow the
+	//    default logging — operators debugging from devtools lose the
+	//    native stack trace, which is the most useful signal we have.
+	//    Strip block comments / line comments before the check so a
+	//    JSDoc line that mentions "Never calls preventDefault" doesn't
+	//    false-positive the contract.
+	codeOnly := stripJSComments(block)
+	if strings.Contains(codeOnly, "preventDefault(") {
+		t.Error("RNEW-UX-002: handler must NOT call preventDefault() — the browser's own console.error output is the primary debug signal")
+	}
+	if regexp.MustCompile(`return\s+true\b`).MatchString(codeOnly) {
+		t.Error("RNEW-UX-002: handler must NOT `return true` — legacy onerror truthy-return suppresses default logging")
+	}
+
+	// 6. Console log uses the [global-error] prefix so operators
+	//    filtering devtools by string can locate these quickly. Without
+	//    a stable prefix the logs get lost in normal chat chatter.
+	if !strings.Contains(block, "[global-error]") {
+		t.Error("RNEW-UX-002: console.error must carry the `[global-error]` prefix — without it operators can't filter devtools output")
+	}
+
+	// 7. Sanity: a warning-style toast (not an error toast) is surfaced
+	//    so a transient hiccup doesn't yell at the user. This keeps the
+	//    UX warmth invariant from regressing to 'error'. The message may
+	//    be built via concatenation, so we verify the two halves — the
+	//    Chinese 异常 literal and the 'warning' type argument — rather
+	//    than forcing them to sit in a single regex-reachable span.
+	if !strings.Contains(block, "异常") {
+		t.Error("RNEW-UX-002: must surface a Chinese user-facing 异常 message in the toast — English-only errors break the zh-CN UX contract")
+	}
+	if !regexp.MustCompile(`showToast\([^;]*,\s*['"]warning['"]`).MatchString(block) {
+		t.Error("RNEW-UX-002: must call showToast(..., 'warning') — transient errors shouldn't render as red error toasts")
+	}
+}
+
+// stripJSComments removes //... line comments and /*...*/ block comments
+// from a JS source window so contract-string checks don't false-positive
+// on documentation that mentions forbidden tokens. Intentionally simple —
+// it does not track string literals, so a comment-like sequence inside a
+// string would still be stripped; for the narrow windows this test works
+// with, that's an acceptable trade. If the window starts INSIDE a block
+// comment (e.g. the caller sliced starting at a JSDoc anchor phrase),
+// we still skip everything up to the first `*/` so the stripped text
+// begins with real code.
+func stripJSComments(src string) string {
+	var b strings.Builder
+	b.Grow(len(src))
+	i, n := 0, len(src)
+	// If the window starts within a block comment, skip to the
+	// terminator before scanning normally.
+	if idx := strings.Index(src, "*/"); idx >= 0 {
+		// Only treat as continuation if no opening /* appears before it.
+		if open := strings.Index(src[:idx], "/*"); open < 0 {
+			i = idx + 2
+		}
+	}
+	for i < n {
+		if i+1 < n && src[i] == '/' && src[i+1] == '*' {
+			end := strings.Index(src[i+2:], "*/")
+			if end < 0 {
+				break
+			}
+			i += 2 + end + 2
+			continue
+		}
+		if i+1 < n && src[i] == '/' && src[i+1] == '/' {
+			end := strings.IndexByte(src[i:], '\n')
+			if end < 0 {
+				break
+			}
+			i += end
+			continue
+		}
+		b.WriteByte(src[i])
+		i++
+	}
+	return b.String()
 }

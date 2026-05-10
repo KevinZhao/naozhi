@@ -34,6 +34,17 @@ func TestCountersRegisteredUnderStableNames(t *testing.T) {
 		"naozhi_attachment_ref_clear_total",
 		"naozhi_attachment_ref_meta_error_total",
 		"naozhi_attachment_ref_drop_total",
+		// RNEW-OPS-414: startup phase timing gauges. Same expvar.Int
+		// storage as the counters above, so they belong in the same
+		// stable-names pin; the `_ms` suffix distinguishes them as
+		// gauges semantically for dashboards.
+		"naozhi_startup_phase_config_ms",
+		"naozhi_startup_phase_router_ms",
+		"naozhi_startup_phase_shim_reconnect_ms",
+		"naozhi_startup_phase_platforms_ms",
+		"naozhi_startup_phase_scheduler_ms",
+		"naozhi_startup_phase_server_ms",
+		"naozhi_startup_phase_ready_ms",
 	}
 	for _, name := range want {
 		name := name
@@ -80,6 +91,17 @@ func TestCountersIncrement(t *testing.T) {
 		"attachment_ref_clear":          AttachmentRefClearTotal,
 		"attachment_ref_meta_error":     AttachmentRefMetaErrorTotal,
 		"attachment_ref_drop":           AttachmentRefDropTotal,
+		// RNEW-OPS-414: startup phase gauges share the expvar.Int storage
+		// with the counters, so Add-based delta observation still holds
+		// — in production these are written via Set once per process,
+		// but the underlying integer semantics are identical.
+		"startup_phase_config":         StartupPhaseConfigMs,
+		"startup_phase_router":         StartupPhaseRouterMs,
+		"startup_phase_shim_reconnect": StartupPhaseShimReconnectMs,
+		"startup_phase_platforms":      StartupPhasePlatformsMs,
+		"startup_phase_scheduler":      StartupPhaseSchedulerMs,
+		"startup_phase_server":         StartupPhaseServerMs,
+		"startup_phase_ready":          StartupPhaseReadyMs,
 	}
 	for name, c := range counters {
 		name, c := name, c
@@ -111,6 +133,11 @@ func TestCountersJSONEncodable(t *testing.T) {
 		EventLogPersistReplayLeakTotal,
 		AttachmentRefBumpTotal, AttachmentRefClearTotal,
 		AttachmentRefMetaErrorTotal, AttachmentRefDropTotal,
+		// RNEW-OPS-414: startup phase gauges use expvar.Int too, so the
+		// same JSON-number shape pin applies.
+		StartupPhaseConfigMs, StartupPhaseRouterMs, StartupPhaseShimReconnectMs,
+		StartupPhasePlatformsMs, StartupPhaseSchedulerMs, StartupPhaseServerMs,
+		StartupPhaseReadyMs,
 	} {
 		raw := c.String() // expvar.Int.String returns its JSON form
 		var n json.Number

@@ -1628,7 +1628,17 @@ async function renameSession() {
   if (!selectedKey) return;
   const s = sessionsData[sid(selectedKey, selectedNode)] || {};
   const current = s.user_label || '';
-  const input = window.prompt('重命名会话（留空恢复默认标题，最多 128 字节）', current);
+  // RNEW-UX-013: replaced window.prompt with themed promptDialog so the
+  // rename flow matches the rest of the dashboard (dark theme, trapFocus,
+  // Esc/backdrop cancel) and doesn't block the event loop on mobile.
+  const input = await promptDialog({
+    title: '重命名会话',
+    message: '留空恢复默认标题，最多 128 字节',
+    defaultValue: current,
+    placeholder: '输入新标题',
+    confirmText: '保存',
+    maxLength: 128,
+  });
   if (input === null) return; // user cancelled
   const next = input.trim();
   if (next === current) return;
@@ -5895,6 +5905,97 @@ function confirmDialog(opts) {
     // Focus cancel first — protects against a stray Enter auto-firing the
     // destructive primary. User must explicitly Tab or click to confirm.
     setTimeout(() => overlay.querySelector('.confirm-cancel').focus(), 50);
+  });
+}
+
+// RNEW-UX-013: promptDialog is the themed replacement for native window.prompt().
+// Matches confirmDialog shape (overlay + .modal-btns) so the two share styling,
+// trapFocus, Esc/backdrop-cancel semantics, and XSS-safe rendering. Returns a
+// Promise that resolves to the trimmed input string on confirm, or null on
+// cancel / Esc / backdrop click (mirroring window.prompt's null-for-cancel
+// convention so existing call sites translate without special-casing).
+//
+// Call shape:
+//   const next = await promptDialog({
+//     title: '重命名会话',
+//     message: '留空恢复默认标题，最多 128 字节',
+//     defaultValue: current,
+//     placeholder: '输入新标题',
+//     confirmText: '保存',
+//     maxLength: 128,
+//   });
+//   if (next === null) return;  // user cancelled
+//
+// Semantics:
+//   - Enter inside the input submits (matching window.prompt expectations —
+//     the information-entry dialog defaults to primary, not cancel, because
+//     the action isn't destructive).
+//   - Esc and backdrop cancel (resolve null). Consistent with confirmDialog.
+//   - If a prompt dialog is already open, this call resolves immediately to
+//     null to avoid stacking.
+//   - XSS-safe: every caller-supplied string routes through esc() before
+//     insertion. defaultValue is set via .value (DOM property) not innerHTML.
+function promptDialog(opts) {
+  return new Promise((resolve) => {
+    if (document.querySelector('.modal-overlay.prompt-overlay')) {
+      resolve(null);
+      return;
+    }
+    const title = (opts && opts.title) || '输入内容';
+    const message = (opts && opts.message) || '';
+    const defaultValue = (opts && opts.defaultValue) != null ? String(opts.defaultValue) : '';
+    const placeholder = (opts && opts.placeholder) || '';
+    const confirmText = (opts && opts.confirmText) || '确认';
+    const cancelText = (opts && opts.cancelText) || '取消';
+    const maxLength = (opts && opts.maxLength) || 0;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay prompt-overlay';
+    const maxAttr = maxLength > 0 ? ' maxlength="' + maxLength + '"' : '';
+    overlay.innerHTML =
+      '<div class="modal prompt-dialog" role="dialog" aria-modal="true" aria-labelledby="prompt-title">' +
+        '<h3 id="prompt-title">' + esc(title) + '</h3>' +
+        (message ? '<p class="prompt-message">' + esc(message) + '</p>' : '') +
+        '<input type="text" class="prompt-input" placeholder="' + escAttr(placeholder) + '"' + maxAttr + '>' +
+        '<div class="modal-btns">' +
+          '<button type="button" class="prompt-cancel">' + esc(cancelText) + '</button>' +
+          '<button type="button" class="primary prompt-ok">' + esc(confirmText) + '</button>' +
+        '</div>' +
+      '</div>';
+
+    const input = overlay.querySelector('.prompt-input');
+    // Use the DOM .value property (not innerHTML interpolation) to seed the
+    // default — avoids having to escape attribute quotes and preserves any
+    // literal whitespace the caller relied on.
+    input.value = defaultValue;
+
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      overlay.remove();
+      resolve(value);
+    };
+
+    overlay.querySelector('.prompt-cancel').addEventListener('click', () => finish(null));
+    overlay.querySelector('.prompt-ok').addEventListener('click', () => finish(input.value));
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(null); });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); finish(input.value); }
+    });
+    // Mirror confirmDialog: if the overlay is removed externally (trapFocus
+    // Esc handling, or a caller manipulating DOM), settle as cancelled.
+    const obs = new MutationObserver(() => {
+      if (!document.body.contains(overlay)) { obs.disconnect(); finish(null); }
+    });
+    obs.observe(document.body, { childList: true, subtree: false });
+
+    document.body.appendChild(overlay);
+    trapFocus(overlay);
+    // Focus the input so the user can type immediately. Select all so the
+    // default value is replaced on first keystroke — matches window.prompt
+    // behaviour in Chrome/Firefox.
+    setTimeout(() => { input.focus(); input.select(); }, 50);
   });
 }
 
@@ -10640,6 +10741,52 @@ wsm.connect();
     else startPollers();
   });
 })();
+
+/*
+ * RNEW-UX-002: global error handler.
+ *
+ * Before this, an uncaught exception inside a handler (async listener, WS
+ * callback, render path) would bubble to the browser's default handler and
+ * silently freeze the UI — operators had to open devtools to notice. This
+ * block catches both sync errors and unhandled promise rejections, surfaces
+ * a warning toast so the user knows to consider a refresh, and dumps full
+ * details to console with a [global-error] prefix for devtools triage. We
+ * throttle identical messages within 5s so a tight error loop doesn't spam
+ * the toast layer. Never calls preventDefault — the browser's own console
+ * output is still allowed to fire, preserving stack traces for remote debug.
+ */
+(function () {
+  const THROTTLE_MS = 5 * 1000;
+  const seen = new Map(); // message -> last-shown timestamp (ms)
+  function handle(ev) {
+    try {
+      const isReject = ev && ev.type === 'unhandledrejection';
+      const err = isReject ? (ev.reason || {}) : (ev && ev.error) || {};
+      const rawMsg = (err && err.message) || (ev && ev.message) || String(err || 'unknown error');
+      const msg = String(rawMsg).slice(0, 100);
+      const now = Date.now();
+      const last = seen.get(msg) || 0;
+      if (now - last < THROTTLE_MS) return; // coalesce
+      seen.set(msg, now);
+      // Best-effort map trim so long-running tabs don't leak entries.
+      if (seen.size > 64) { const k = seen.keys().next().value; if (k) seen.delete(k); }
+      console.error('[global-error]', {
+        type: ev && ev.type,
+        message: rawMsg,
+        stack: err && err.stack,
+        source: ev && ev.filename,
+        line: ev && ev.lineno,
+        col: ev && ev.colno,
+      });
+      if (typeof showToast === 'function') {
+        showToast('页面遇到异常，可能需要刷新：' + msg, 'warning', 4000);
+      }
+    } catch (_) { /* last-resort: never throw from the error handler */ }
+  }
+  window.addEventListener('error', handle, true);
+  window.addEventListener('unhandledrejection', handle);
+})();
+
 initMobile();
 initViewportTracking();
 initSwipeDelete();
@@ -10944,14 +11091,16 @@ initSidebarSearch();
     // non-destructive (the previous scratch is still reachable via history)
     // so we use 'primary' variant instead of 'danger'.
     if (state) {
-      const ok = (typeof confirmDialog === 'function')
-        ? await confirmDialog({
-            title: '替换当前追问窗口？',
-            message: '当前未保存为正式会话的追问内容将被关闭。',
-            confirmText: '替换',
-            variant: 'primary',
-          })
-        : confirm('当前追问窗口将被替换，继续？');
+      // RNEW-UX-013: confirmDialog is unconditionally defined earlier in this
+      // file, so the native-confirm fallback was dead code that defeated
+      // theme/focus parity. Drop the fallback and rely on the themed dialog
+      // directly.
+      const ok = await confirmDialog({
+        title: '替换当前追问窗口？',
+        message: '当前未保存为正式会话的追问内容将被关闭。',
+        confirmText: '替换',
+        variant: 'primary',
+      });
       if (!ok) return;
       await closeScratch(true);
     }

@@ -138,6 +138,37 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 
 这个表的"完整性"由 `internal/metrics/metrics_doc_sync_test.go` 锁定：metrics.go 新增 counter 但未同步文档会在 CI 红。
 
+### 启动阶段 gauge（RNEW-OPS-414）
+
+以下 7 个指标记录冷启动每个阶段完成时 `time.Since(t0).Milliseconds()`（t0 在 `cmd/naozhi/main.go` 顶部一次性抓取），每进程**只 Set 一次**。值**单调递增**（累积），相邻行相减即该阶段耗时。命名用 `_ms` 后缀区别于 counter 的 `_total`——这是 gauge 而非 counter，Prometheus scraper 不应 rate()。
+
+| 名称 | 语义（完成时刻） | 什么时候值得警觉 |
+|---|---|---|
+| `naozhi_startup_phase_config_ms` | `config.Load` 返回 | >500ms = YAML 巨大或 fs 慢 |
+| `naozhi_startup_phase_router_ms` | `session.NewRouter` 返回（含 sessions.json 加载 + eventlog 目录扫描 + backend 版本探测） | 温启动中通常最大的一段 |
+| `naozhi_startup_phase_shim_reconnect_ms` | `router.ReconnectShimsCtx` 返回 | 接近 `N_shims × 15s` = shim socket 僵住 |
+| `naozhi_startup_phase_platforms_ms` | platforms 注册 + 并行 init WG（transcribe / project scan）drain 完 | 比 router 延迟大 = transcribe.New 或 project scan 慢 |
+| `naozhi_startup_phase_scheduler_ms` | `scheduler.Start` 返回 | 慢 = cron store 文件过大 |
+| `naozhi_startup_phase_server_ms` | `server.NewWithOptions` 返回（路由注册 / WS hub wire / dashboard 资源挂载） | 不含 `srv.Start` (后台 listen loop) |
+| `naozhi_startup_phase_ready_ms` | 主 goroutine 进入 shutdown select 前一行 | 对比 systemd `START_USEC` 验证 `TimeoutStartSec` margin |
+
+用法示例：
+
+```bash
+curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1:8180/api/debug/vars | jq '{
+  config: .naozhi_startup_phase_config_ms,
+  router_delta: (.naozhi_startup_phase_router_ms - .naozhi_startup_phase_config_ms),
+  shim_reconnect_delta: (.naozhi_startup_phase_shim_reconnect_ms - .naozhi_startup_phase_router_ms),
+  platforms_delta: (.naozhi_startup_phase_platforms_ms - .naozhi_startup_phase_shim_reconnect_ms),
+  scheduler_delta: (.naozhi_startup_phase_scheduler_ms - .naozhi_startup_phase_platforms_ms),
+  server_delta: (.naozhi_startup_phase_server_ms - .naozhi_startup_phase_scheduler_ms),
+  ready_delta: (.naozhi_startup_phase_ready_ms - .naozhi_startup_phase_server_ms),
+  ready_total: .naozhi_startup_phase_ready_ms
+}'
+```
+
+`metrics_doc_sync_test.go` 的正则只匹配 `*_total`，所以新增 gauge 不会强制文档同步；但保持本表跟 `metrics.go` 齐整对操作员仍然有价值。
+
 ### 拉取
 
 ```bash

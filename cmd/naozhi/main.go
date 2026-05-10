@@ -21,6 +21,7 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -371,6 +372,11 @@ func main() {
 		}
 	}
 
+	// t0 anchors every startup phase gauge (RNEW-OPS-414). Captured after
+	// the subcommand dispatch so setup/install/doctor invocations do not
+	// pollute the naozhi boot histogram.
+	t0 := time.Now()
+
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	flag.Parse()
 
@@ -379,6 +385,7 @@ func main() {
 		slog.Error("load config", "err", err)
 		os.Exit(1)
 	}
+	metrics.StartupPhaseConfigMs.Set(time.Since(t0).Milliseconds())
 
 	// Setup logging
 	level := slog.LevelInfo
@@ -527,6 +534,7 @@ func main() {
 		EventLogDir:       eventLogDir,
 		EventLogGenerator: "naozhi",
 	})
+	metrics.StartupPhaseRouterMs.Set(time.Since(t0).Milliseconds())
 
 	// Context with cancellation for graceful shutdown. Created before
 	// ReconnectShimsCtx so a SIGTERM arriving during a long shim handshake
@@ -537,6 +545,7 @@ func main() {
 
 	// Reconnect to surviving shim processes from previous naozhi run
 	router.ReconnectShimsCtx(ctx)
+	metrics.StartupPhaseShimReconnectMs.Set(time.Since(t0).Milliseconds())
 
 	// Start cleanup loop
 	router.StartCleanupLoop(ctx, cfg.ParseTTL()/2)
@@ -657,6 +666,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	metrics.StartupPhasePlatformsMs.Set(time.Since(t0).Milliseconds())
 
 	// Cron Scheduler
 	cronLoc := cfg.ParseCronTimezone()
@@ -691,6 +701,7 @@ func main() {
 		slog.Error("start cron scheduler", "err", err)
 		os.Exit(1)
 	}
+	metrics.StartupPhaseSchedulerMs.Set(time.Since(t0).Milliseconds())
 
 	// Configure remote nodes for multi-node aggregation
 	var nodes map[string]node.Conn
@@ -741,6 +752,7 @@ func main() {
 			}
 		},
 	})
+	metrics.StartupPhaseServerMs.Set(time.Since(t0).Milliseconds())
 
 	// Start upstream connector (this node connects to a primary)
 	if cfg.Upstream != nil {
@@ -867,6 +879,8 @@ func main() {
 			}
 		}
 	}()
+
+	metrics.StartupPhaseReadyMs.Set(time.Since(t0).Milliseconds())
 
 	select {
 	case err := <-serverErr:

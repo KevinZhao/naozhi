@@ -217,4 +217,68 @@ var (
 	// event-log Persister's drop counter — operator runbook is the
 	// same: investigate disk latency / writer stall.
 	AttachmentRefDropTotal = expvar.NewInt("naozhi_attachment_ref_drop_total")
+
+	// --- Startup phase timing gauges (RNEW-OPS-414) -----------------------
+	//
+	// Cold-start observability: historically the only signal operators had
+	// for a slow boot was grepping journalctl timestamps across slog lines.
+	// These gauges record milliseconds from process start (t0 captured in
+	// main) to the end of each logical phase, set exactly once per process.
+	// Values are cumulative (phase N ms = total ms from t0 through phase N)
+	// so operators can read the table top-to-bottom and see per-phase
+	// duration as the difference between adjacent rows.
+	//
+	// Gauge semantics (not counter): values are written once via Set, never
+	// Add'd. Naming uses `_ms` suffix — NOT `_total` — so dashboards treat
+	// them as gauges and the `*_total` doc-sync regex correctly ignores
+	// them. Using expvar.Int (int64 millis) keeps zero dependencies and
+	// avoids float encoding surprises downstream. Prometheus migration
+	// path: swap to `prometheus.NewGauge` with `_milliseconds` suffix, or
+	// to `_seconds` converted to float.
+	//
+	// Measurement pattern at each call site:
+	//     metrics.StartupPhaseXxxMs.Set(time.Since(t0).Milliseconds())
+	// Set takes <1µs and cannot block boot.
+
+	// StartupPhaseConfigMs is set after config.Load returns — captures
+	// flag parsing + YAML read + env-file resolution cost. Unusually high
+	// (>500ms on a warm disk) points at a very large config or slow
+	// filesystem.
+	StartupPhaseConfigMs = expvar.NewInt("naozhi_startup_phase_config_ms")
+
+	// StartupPhaseRouterMs is set after session.NewRouter returns —
+	// captures sessions.json load, eventlog dir scan, wrapper map
+	// assembly, and backend version probes. This is typically the largest
+	// phase on a warm host with many persisted sessions.
+	StartupPhaseRouterMs = expvar.NewInt("naozhi_startup_phase_router_ms")
+
+	// StartupPhaseShimReconnectMs is set after router.ReconnectShimsCtx
+	// returns — captures stat() + handshake against each surviving shim
+	// from the previous naozhi run. Worst case ≈ N_shims × 15s handshake
+	// timeout; a slow value here means shim sockets are stuck (SIGTERM
+	// arriving now will abort cleanly thanks to the ctx plumbing).
+	StartupPhaseShimReconnectMs = expvar.NewInt("naozhi_startup_phase_shim_reconnect_ms")
+
+	// StartupPhasePlatformsMs is set after platform adapters are
+	// registered AND the parallel init WG (transcriber + project scan)
+	// has drained — so a slow transcribe.New or projects.Scan is visible
+	// here rather than hidden inside a goroutine.
+	StartupPhasePlatformsMs = expvar.NewInt("naozhi_startup_phase_platforms_ms")
+
+	// StartupPhaseSchedulerMs is set after scheduler.Start returns —
+	// captures cron store load + jitter planning. A slow value here
+	// usually means the cron store file grew large; see
+	// cron.StorePath.
+	StartupPhaseSchedulerMs = expvar.NewInt("naozhi_startup_phase_scheduler_ms")
+
+	// StartupPhaseServerMs is set after server.NewWithOptions returns —
+	// captures route registration, WS hub wiring, and dashboard asset
+	// mounting. Not including srv.Start (HTTP listen loop) because that
+	// runs in a goroutine for the remainder of the process lifetime.
+	StartupPhaseServerMs = expvar.NewInt("naozhi_startup_phase_server_ms")
+
+	// StartupPhaseReadyMs is set just before main blocks on the shutdown
+	// select — the effective "naozhi is up" moment. Compare against
+	// systemd's START_USEC to cross-check TimeoutStartSec margin.
+	StartupPhaseReadyMs = expvar.NewInt("naozhi_startup_phase_ready_ms")
 )

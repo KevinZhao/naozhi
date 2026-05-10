@@ -132,6 +132,48 @@ func TestDetectMime_SourceCodeExtensions(t *testing.T) {
 	}
 }
 
+// TestMimeFromExtOnly locks the RNEW-PERF-006 fast-path contract:
+// extension-only paths resolve without open+read, but empty-extension and
+// binary-formats-not-in-table fall back to the sniff path.
+func TestMimeFromExtOnly(t *testing.T) {
+	cases := []struct {
+		name     string
+		path     string
+		wantMime string
+		wantOK   bool
+	}{
+		// Common source extensions: must short-circuit.
+		{"go source", "src/foo.go", "text/x-go", true},
+		{"python", "a.py", "text/x-python", true},
+		{"markdown", "README.md", "text/markdown", true},
+		{"json", "config.json", "application/json", true},
+		{"yaml", "ci.yaml", "application/yaml", true},
+		// .svg is pinned regardless of bytes — must short-circuit to the
+		// safe MIME so serveRaw's XSS gate stays effective.
+		{"svg pinned", "icon.svg", "image/svg+xml", true},
+		// Extensionless files (Dockerfile, Makefile, LICENSE) need basename
+		// lookup in detectMime — must NOT short-circuit here.
+		{"no ext", "Dockerfile", "", false},
+		// Binary formats not in previewableByExt must defer to
+		// http.DetectContentType; short-circuit here would return wrong MIME.
+		{"png not short-circuited", "icon.png", "", false},
+		{"pdf not short-circuited", "doc.pdf", "", false},
+		// Unknown extension — fall through.
+		{"unknown ext", "blob.xyz", "", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := mimeFromExtOnly(tc.path)
+			if got != tc.wantMime || ok != tc.wantOK {
+				t.Errorf("mimeFromExtOnly(%q) = (%q, %v), want (%q, %v)",
+					tc.path, got, ok, tc.wantMime, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestIsTextMime(t *testing.T) {
 	if !isTextMime("text/plain; charset=utf-8") {
 		t.Error("text/plain should be text")
