@@ -117,6 +117,18 @@ type EventEntry struct {
 	Tokens     int      `json:"tokens,omitempty"`      // total tokens consumed by agent task
 	DurationMS int      `json:"duration_ms,omitempty"` // elapsed ms for agent task
 	Status     string   `json:"status,omitempty"`      // agent task status (completed, error, etc.)
+	// Agent team internal-view linkage (RFC v4 agent-team-ui §3.2.2).
+	// All four fields are persisted to sessions/*.jsonl on "agent" and
+	// "task_start" entries so SubagentLinker.SeedFromHistory can rebuild
+	// the task_id → on-disk-transcript mapping after shim reconnect or
+	// CLI-dead respawn without re-scanning ~/.claude/projects/.
+	// Async backfilled via EventLog.SetAgentInternalID once the linker
+	// resolves, hence all omitempty.
+	TaskType        string `json:"task_type,omitempty"`         // "in_process_teammate" | "local_bash" | ""
+	InternalAgentID string `json:"internal_agent_id,omitempty"` // "agent-<hex17>" filename stem under <projectDir>/<sessionID>/subagents/
+	JSONLPath       string `json:"jsonl_path,omitempty"`        // absolute path to agent transcript jsonl
+	FirstPromptID   string `json:"first_prompt_id,omitempty"`   // jsonl first-line promptId; guards against same-name re-spawn
+
 	// AskQuestion carries the interactive AskUserQuestion card payload. Only
 	// set on Type=="ask_question" entries synthesised from an AskUserQuestion
 	// tool_use block — kept as a separate field (rather than stuffing JSON
@@ -127,10 +139,32 @@ type EventEntry struct {
 }
 
 // SubagentInfo holds display information about an active sub-agent in the current turn.
+// Fields below "Background" are added by RFC v4 agent-team-ui §3.2.2 to surface
+// per-agent linkage (task_id/tool_use_id), lifecycle status, and aggregator
+// metrics. All values are derived from EventEntry fields or server-side tailer
+// state (§3.5.4 enrichSnapshot); none are persisted independently — the
+// canonical source remains the ring-buffered EventEntry list.
 type SubagentInfo struct {
 	Name       string `json:"name"`
 	Activity   string `json:"activity,omitempty"`   // task description from agent event
 	Background bool   `json:"background,omitempty"` // true for run_in_background agents
+	TaskID     string `json:"task_id,omitempty"`
+	ToolUseID  string `json:"tool_use_id,omitempty"`
+	TaskType   string `json:"task_type,omitempty"`
+	// InternalAgentID mirrors EventEntry.InternalAgentID once SubagentLinker
+	// resolves the task_id → on-disk agent-<hex>.jsonl mapping. Empty before
+	// async Resolve completes (~0.1-3s grace) and on tombstoned tasks.
+	InternalAgentID string `json:"internal_agent_id,omitempty"`
+	Status          string `json:"status,omitempty"`        // "spawned" | "running" | "completed" | "error"
+	StartedAtMS     int64  `json:"started_at_ms,omitempty"` // task_start wall-clock
+	// Aggregator-injected fields (server.enrichSnapshot). LastTool/LastDetail
+	// come from the silent tailer's parse of the agent transcript; ToolUses
+	// and DurationMS use task_notification's usage payload when present,
+	// otherwise the tailer's running counters.
+	LastTool   string `json:"last_tool,omitempty"`
+	LastDetail string `json:"last_detail,omitempty"`
+	ToolUses   int    `json:"tool_uses,omitempty"`
+	DurationMS int    `json:"duration_ms,omitempty"`
 }
 
 type subscriber struct {
@@ -201,15 +235,143 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) {
 		if label == "" {
 			label = "agent"
 		}
-		info := SubagentInfo{Name: label, Activity: e.Summary, Background: e.Background}
+		info := SubagentInfo{
+			Name:       label,
+			Activity:   e.Summary,
+			Background: e.Background,
+			ToolUseID:  e.ToolUseID,
+			TaskType:   e.TaskType,
+			Status:     "spawned",
+		}
 		if e.Background {
 			l.bgAgents = append(l.bgAgents, info)
 		} else {
 			l.turnAgents = append(l.turnAgents, info)
 		}
+	case "task_start":
+		// task_started arrives 0-200ms after the "agent" tool_use. Match
+		// by ToolUseID (authoritative; Agent tool_use → system.task_started
+		// carries the same id). RFC §3.2 deliberately skips InternalAgentID
+		// here — SubagentLinker.Resolve is async and fills it via
+		// SetAgentInternalID below once the on-disk jsonl is located.
+		for i := range l.turnAgents {
+			if l.turnAgents[i].ToolUseID != "" && l.turnAgents[i].ToolUseID == e.ToolUseID {
+				l.turnAgents[i].TaskID = e.TaskID
+				l.turnAgents[i].Status = "running"
+				l.turnAgents[i].StartedAtMS = e.Time
+				return
+			}
+		}
+		for i := range l.bgAgents {
+			if l.bgAgents[i].ToolUseID != "" && l.bgAgents[i].ToolUseID == e.ToolUseID {
+				l.bgAgents[i].TaskID = e.TaskID
+				l.bgAgents[i].Status = "running"
+				l.bgAgents[i].StartedAtMS = e.Time
+				return
+			}
+		}
+	case "task_progress":
+		// Update live counters from the parent stream. Aggregator in
+		// agent_tailer.go may also push meta, but the parent stream is
+		// authoritative for totals when present.
+		for i := range l.turnAgents {
+			if l.turnAgents[i].TaskID != "" && l.turnAgents[i].TaskID == e.TaskID {
+				if e.LastTool != "" {
+					l.turnAgents[i].LastTool = e.LastTool
+				}
+				if e.ToolUses > 0 {
+					l.turnAgents[i].ToolUses = e.ToolUses
+				}
+				if e.DurationMS > 0 {
+					l.turnAgents[i].DurationMS = e.DurationMS
+				}
+				return
+			}
+		}
+	case "task_done":
+		for i := range l.turnAgents {
+			if l.turnAgents[i].TaskID != "" && l.turnAgents[i].TaskID == e.TaskID {
+				status := e.Status
+				if status == "" {
+					status = "completed"
+				}
+				l.turnAgents[i].Status = status
+				if e.DurationMS > 0 {
+					l.turnAgents[i].DurationMS = e.DurationMS
+				}
+				if e.ToolUses > 0 {
+					l.turnAgents[i].ToolUses = e.ToolUses
+				}
+				return
+			}
+		}
+		for i := range l.bgAgents {
+			if l.bgAgents[i].TaskID != "" && l.bgAgents[i].TaskID == e.TaskID {
+				status := e.Status
+				if status == "" {
+					status = "completed"
+				}
+				l.bgAgents[i].Status = status
+				if e.DurationMS > 0 {
+					l.bgAgents[i].DurationMS = e.DurationMS
+				}
+				return
+			}
+		}
 	case "result", "user":
 		l.turnAgents = l.turnAgents[:0]
 		l.bgAgents = l.bgAgents[:0]
+	}
+}
+
+// SetAgentInternalID writes the SubagentLinker-resolved linkage back into
+// the most recent matching "agent" / "task_start" EventEntry and the live
+// SubagentInfo. Called from the Linker's OnResolve callback.
+//
+// All four fields are written together so persistHistory's next flush captures
+// a self-contained record that SeedFromHistory can re-consume on restart
+// (RFC v4 §3.3.7). Idempotent: repeated calls with the same values are no-ops;
+// distinct internal_agent_id for the same tool_use_id overwrites (Resolve
+// should never produce divergent values for the same tool_use_id, but the
+// guard keeps the state machine simple if it ever does).
+func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, firstPromptID string) {
+	if toolUseID == "" {
+		return
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// Backfill live SubagentInfo first (hot read path for Snapshot).
+	for i := range l.turnAgents {
+		if l.turnAgents[i].ToolUseID == toolUseID {
+			l.turnAgents[i].InternalAgentID = internalAgentID
+			break
+		}
+	}
+	for i := range l.bgAgents {
+		if l.bgAgents[i].ToolUseID == toolUseID {
+			l.bgAgents[i].InternalAgentID = internalAgentID
+			break
+		}
+	}
+
+	// Backfill ring-buffer entries so future persistHistory / Entries /
+	// EntriesSince reads carry the linkage. Walk backwards — the matching
+	// "agent" and "task_start" entries are almost always among the last N
+	// entries; N small in practice (single turn) so the O(count) walk is cheap.
+	start := (l.head - l.count + l.maxSize) % l.maxSize
+	for i := l.count - 1; i >= 0; i-- {
+		idx := (start + i) % l.maxSize
+		e := &l.entries[idx]
+		if e.ToolUseID != toolUseID {
+			continue
+		}
+		if e.Type != "agent" && e.Type != "task_start" {
+			continue
+		}
+		e.InternalAgentID = internalAgentID
+		e.JSONLPath = jsonlPath
+		e.FirstPromptID = firstPromptID
 	}
 }
 

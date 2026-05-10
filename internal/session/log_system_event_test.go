@@ -87,10 +87,10 @@ func TestLogSystemEvent_DoesNotOverwriteLivePrompt(t *testing.T) {
 
 	// System events should not feed the prompt/activity scan — those
 	// fields must remain what Send wrote.
-	if got := loadStringOrEmpty(&s.lastPrompt); got != "live user message" {
+	if got := loadStringAtomic(&s.lastPrompt); got != "live user message" {
 		t.Errorf("lastPrompt = %q, want to remain \"live user message\"", got)
 	}
-	if got := loadStringOrEmpty(&s.lastActivity); got != "live tool" {
+	if got := loadStringAtomic(&s.lastActivity); got != "live tool" {
 		t.Errorf("lastActivity = %q, want to remain \"live tool\"", got)
 	}
 

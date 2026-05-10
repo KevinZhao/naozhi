@@ -760,7 +760,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		if wsRollback != nil {
 			wsRollback()
 		}
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: err.Error()})
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: asyncErrorMessage(err)})
 		return
 	}
 	// sessionSend accepted (or reset-processed) the request — files must stay on disk.

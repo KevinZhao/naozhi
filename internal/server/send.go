@@ -227,7 +227,11 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 			// Route it through osutil.SanitizeForLog so C1 controls / bidi
 			// overrides / LS/PS cannot flip terminal rendering under `tail
 			// -f` or inject fake lines into JSON log sinks.
-			slog.Warn("workspace validation failed", "err", err, "workspace", osutil.SanitizeForLog(p.Workspace, 1024))
+			// 200 bytes matches the cap used for other attacker-influenced
+			// fields in this package (chatID, session key); the previous 1024
+			// allowed ~300 CJK/emoji glyphs of attacker-controlled content per
+			// log line, which still afforded a journal-noise primitive.
+			slog.Warn("workspace validation failed", "err", err, "workspace", osutil.SanitizeForLog(p.Workspace, 200))
 			return false, "", fmt.Errorf("invalid workspace")
 		}
 		validatedWorkspace = wsPath
@@ -474,7 +478,7 @@ func (h *Hub) runTurn(key, text string, images []cli.ImageData, onAsyncError fun
 	if err != nil {
 		slog.Error("send: get session", "key", key, "err", err)
 		if onAsyncError != nil {
-			onAsyncError(err.Error())
+			onAsyncError(asyncErrorMessage(err))
 		}
 		return
 	}
@@ -513,7 +517,7 @@ func (h *Hub) runTurnPassthrough(key, text string, images []cli.ImageData, prior
 	if err != nil {
 		slog.Error("passthrough: get session", "key", key, "err", err)
 		if onAsyncError != nil {
-			onAsyncError(err.Error())
+			onAsyncError(asyncErrorMessage(err))
 		}
 		return
 	}
@@ -530,7 +534,7 @@ func (h *Hub) runTurnPassthrough(key, text string, images []cli.ImageData, prior
 			slog.Warn("passthrough: send failed", "key", key, "err", err)
 		}
 		if onAsyncError != nil {
-			onAsyncError(err.Error())
+			onAsyncError(asyncErrorMessage(err))
 		}
 	} else if h.scheduler != nil && session.IsCronKey(key) {
 		if err := h.scheduler.SetJobPrompt(strings.TrimPrefix(key, session.CronKeyPrefix), text); err != nil {

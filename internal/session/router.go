@@ -98,6 +98,11 @@ var exemptKeyPrefixes = []string{CronKeyPrefix, ProjectKeyPrefix}
 // that already have a ManagedSession should prefer reading s.exempt —
 // this helper exists for the construction path and for external callers
 // that know the key but not the session.
+//
+// Note: ScratchKeyPrefix is intentionally NOT an exempt namespace — scratch
+// sessions are ephemeral and MUST remain subject to the regular TTL /
+// eviction policy so an abandoned scratch conversation eventually releases
+// its process slot. ScratchPool manages its own lifetime on top of that.
 func isExemptKey(key string) bool {
 	for _, prefix := range exemptKeyPrefixes {
 		if strings.HasPrefix(key, prefix) {

@@ -1195,27 +1195,19 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	// is atomic so no lock is needed; the "only set if empty" check is a
 	// benign TOCTOU — a concurrent Send writing the same field races, but
 	// both values are "most recent" views and whichever lands is acceptable.
-	if prompt != "" && loadStringOrEmpty(&s.lastPrompt) == "" {
+	if prompt != "" && loadStringAtomic(&s.lastPrompt) == "" {
 		storeStringAtomic(&s.lastPrompt, prompt)
 	}
-	if activity != "" && loadStringOrEmpty(&s.lastActivity) == "" {
+	if activity != "" && loadStringAtomic(&s.lastActivity) == "" {
 		storeStringAtomic(&s.lastActivity, activity)
 	}
-}
-
-// loadStringOrEmpty returns the stored string or "" if never stored / stored as "".
-// With atomic.Pointer[string] this is functionally identical to loadStringAtomic;
-// retained as an alias so tests in inject_history_test.go / log_system_event_test.go
-// that reference this name still compile without churn.
-func loadStringOrEmpty(v *atomic.Pointer[string]) string {
-	return loadStringAtomic(v)
 }
 
 // extractLastPromptFromProcess scans the attached process's event log to populate
 // lastPrompt and lastActivity when they haven't been set yet (e.g. after shim reconnect
 // where events were injected directly into the process, bypassing InjectHistory).
 func (s *ManagedSession) extractLastPromptFromProcess() {
-	if loadStringOrEmpty(&s.lastPrompt) != "" && loadStringOrEmpty(&s.lastActivity) != "" {
+	if loadStringAtomic(&s.lastPrompt) != "" && loadStringAtomic(&s.lastActivity) != "" {
 		return
 	}
 	p := s.loadProcess()
@@ -1236,10 +1228,10 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 			break
 		}
 	}
-	if prompt != "" && loadStringOrEmpty(&s.lastPrompt) == "" {
+	if prompt != "" && loadStringAtomic(&s.lastPrompt) == "" {
 		storeStringAtomic(&s.lastPrompt, prompt)
 	}
-	if activity != "" && loadStringOrEmpty(&s.lastActivity) == "" {
+	if activity != "" && loadStringAtomic(&s.lastActivity) == "" {
 		storeStringAtomic(&s.lastActivity, activity)
 	}
 }

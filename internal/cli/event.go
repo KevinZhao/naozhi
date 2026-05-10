@@ -121,22 +121,44 @@ func (m *AssistantMessage) UnmarshalJSON(data []byte) error {
 		m.Content = nil
 		return nil
 	}
-	// Try array first (most events).
-	var blocks []ContentBlock
-	if err := json.Unmarshal(raw.Content, &blocks); err == nil {
-		m.Content = blocks
-		return nil
-	}
-	// Fall back to string (replay-user-messages text-only payload).
-	var text string
-	if err := json.Unmarshal(raw.Content, &text); err == nil {
-		m.Content = []ContentBlock{{Type: "text", Text: text}}
-		return nil
+	// Route on the first non-whitespace byte to avoid speculatively
+	// Unmarshal-ing into []ContentBlock when the shape is a bare string.
+	// The old two-try fallback allocated (and partially filled) a
+	// []ContentBlock slice every time we hit the replay-text path before
+	// discarding it.
+	first := firstJSONByte(raw.Content)
+	switch first {
+	case '[':
+		var blocks []ContentBlock
+		if err := json.Unmarshal(raw.Content, &blocks); err == nil {
+			m.Content = blocks
+			return nil
+		}
+	case '"':
+		var text string
+		if err := json.Unmarshal(raw.Content, &text); err == nil {
+			m.Content = []ContentBlock{{Type: "text", Text: text}}
+			return nil
+		}
 	}
 	// Unknown shape: leave Content nil so downstream code treats it as empty
 	// rather than erroring the whole event.
 	m.Content = nil
 	return nil
+}
+
+// firstJSONByte returns the first non-whitespace byte of a JSON raw message,
+// or 0 if the buffer is empty or whitespace-only.
+func firstJSONByte(raw []byte) byte {
+	for _, b := range raw {
+		switch b {
+		case ' ', '\t', '\n', '\r':
+			continue
+		default:
+			return b
+		}
+	}
+	return 0
 }
 
 // AttachmentKind discriminates between inline and file-reference attachments.
