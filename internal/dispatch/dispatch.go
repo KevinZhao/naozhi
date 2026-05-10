@@ -658,7 +658,28 @@ func (d *Dispatcher) sendAndReply(
 
 	tracker.waitReady(ctx)
 
-	if replyText != "" {
+	// AskUserQuestion suppression: when this turn surfaced an interactive
+	// question card, `claude -p` also emits a bailout text ("I've asked you
+	// two questions ...") because it auto-rejects the tool to unblock
+	// headless mode. That text is redundant with the card and makes the
+	// session look "finished" instead of "waiting for answer". Replace it
+	// with a short wait-hint on the thinking banner so the user's next view
+	// on the IM channel is the card + a single "waiting" line, nothing else.
+	// The card itself stays rendered above; clicking it sends the answer.
+	//
+	// Dashboard is not affected: it already renders the card as a native
+	// bubble separate from the reply stream, and suppressing the text
+	// simply removes the duplicate final bubble.
+	if tracker.askQuestionFired.Load() {
+		if msgID := tracker.getThinkingMsgID(); msgID != "" {
+			// Best-effort — if the banner edit fails, we log and move on;
+			// there's no user-visible recovery better than "tried to clear".
+			if err := p.EditMessage(ctx, msgID, "⏳ 等待你的选择…"); err != nil {
+				slog.Debug("ask_question: banner edit failed", "err", err)
+			}
+		}
+		log.Info("ask_question suppressed redundant reply", "result_len", len(result.Text))
+	} else if replyText != "" {
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, replyText); err != nil {
 				slog.Warn("edit message failed, sending new", "err", err)
@@ -790,6 +811,16 @@ type replyTracker struct {
 	// is a no-op.
 	initialReplyReservation   sync.Once
 	initialReplyReservationOn bool
+
+	// askQuestionFired signals that this turn emitted at least one
+	// AskUserQuestion card. Read by sendAndReply to suppress the bailout
+	// text that `claude -p` always produces after auto-rejecting the
+	// tool ("I've asked you..."). Without this suppression users see a
+	// redundant message next to the card; with it, only the card surfaces
+	// and the session "appears" to be waiting for the answer. Written
+	// from onEvent (readLoop goroutine) and read after waitReady returns,
+	// so atomic access is sufficient.
+	askQuestionFired atomic.Bool
 }
 
 func (t *replyTracker) releaseInitialReplySlot() {
@@ -980,6 +1011,7 @@ func (t *replyTracker) onEvent(ev cli.Event) {
 	// question as a native interactive card (or a plain-text fallback)
 	// so the next user turn carries the selected option(s).
 	if ev.AskQuestion != nil {
+		t.askQuestionFired.Store(true)
 		t.sendAskQuestionCard(ev.AskQuestion)
 		// Fall through so the existing status-banner logic (tool_use line etc.)
 		// also runs — the card is a parallel surface, not a replacement.
