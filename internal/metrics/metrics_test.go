@@ -25,6 +25,15 @@ func TestCountersRegisteredUnderStableNames(t *testing.T) {
 		"naozhi_interrupt_no_turn_total",
 		"naozhi_interrupt_unsupported_total",
 		"naozhi_interrupt_error_total",
+		"naozhi_eventlog_persist_written_total",
+		"naozhi_eventlog_persist_dropped_total",
+		"naozhi_eventlog_persist_fsync_total",
+		"naozhi_eventlog_persist_malformed_lines_total",
+		"naozhi_eventlog_persist_replay_leak_total",
+		"naozhi_attachment_ref_bump_total",
+		"naozhi_attachment_ref_clear_total",
+		"naozhi_attachment_ref_meta_error_total",
+		"naozhi_attachment_ref_drop_total",
 	}
 	for _, name := range want {
 		name := name
@@ -62,6 +71,15 @@ func TestCountersIncrement(t *testing.T) {
 		"interrupt_no_turn":             InterruptNoTurnTotal,
 		"interrupt_unsupported":         InterruptUnsupportedTotal,
 		"interrupt_error":               InterruptErrorTotal,
+		"eventlog_persist_written":      EventLogPersistWrittenTotal,
+		"eventlog_persist_dropped":      EventLogPersistDroppedTotal,
+		"eventlog_persist_fsync":        EventLogPersistFsyncTotal,
+		"eventlog_persist_malformed":    EventLogPersistMalformedLinesTotal,
+		"eventlog_persist_replay_leak":  EventLogPersistReplayLeakTotal,
+		"attachment_ref_bump":           AttachmentRefBumpTotal,
+		"attachment_ref_clear":          AttachmentRefClearTotal,
+		"attachment_ref_meta_error":     AttachmentRefMetaErrorTotal,
+		"attachment_ref_drop":           AttachmentRefDropTotal,
 	}
 	for name, c := range counters {
 		name, c := name, c
@@ -88,6 +106,11 @@ func TestCountersJSONEncodable(t *testing.T) {
 		ShimRestartTotal, SpawnPanicRecoveredTotal, ShimReconnectGraceBackfillTotal,
 		InterruptSentTotal, InterruptNoTurnTotal, InterruptUnsupportedTotal,
 		InterruptErrorTotal,
+		EventLogPersistWrittenTotal, EventLogPersistDroppedTotal,
+		EventLogPersistFsyncTotal, EventLogPersistMalformedLinesTotal,
+		EventLogPersistReplayLeakTotal,
+		AttachmentRefBumpTotal, AttachmentRefClearTotal,
+		AttachmentRefMetaErrorTotal, AttachmentRefDropTotal,
 	} {
 		raw := c.String() // expvar.Int.String returns its JSON form
 		var n json.Number

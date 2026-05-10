@@ -2533,19 +2533,34 @@ function eventHtml(e) {
   // than a 600 px blur. Falls back to the data URI for legacy entries that
   // predate the persist path. The thumbnail's <img src> is always the data
   // URI so the bubble render stays instant (no network fetch for preview).
+  //
+  // Cache-busting: the attachment store re-uses date-partitioned UUIDs,
+  // so two sessions cannot legitimately share an attachment URL — but if
+  // the browser has a cached 404 from a GC-expired attachment, it will
+  // short-circuit onerror on the very first load AFTER the attachment is
+  // restored (unlikely but possible during operator file shuffles). A
+  // per-event `?v=<time>` query string side-steps the negative cache
+  // without invalidating legitimate hits.
+  //
+  // Fallback to thumb on load failure: `openLightbox(full, thumb)` below
+  // covers both HTTP 404 (attachment GC'd) and Content-Type mismatch
+  // (openLightbox checks naturalWidth===0 after onload). See
+  // dashboard.js's openLightbox comment for rationale. RFC §3.6.3.
   let imgHtml = '';
   if (e.images && e.images.length > 0) {
     const paths = e.image_paths || [];
+    const cacheBust = e.time ? ('&v=' + e.time) : '';
     imgHtml = '<div class="event-images">' + e.images.map((src, i) => {
       const p = paths[i] || '';
       let full = src;
       if (p && selectedKey) {
         full = '/api/sessions/attachment?key=' + encodeURIComponent(selectedKey) +
-          '&path=' + encodeURIComponent(p);
+          '&path=' + encodeURIComponent(p) + cacheBust;
       }
       return '<img src="' + escAttr(src) + '" loading="lazy" ' +
         'data-full="' + escAttr(full) + '" ' +
-        'onclick="openLightbox(this.dataset.full)">';
+        'data-thumb="' + escAttr(src) + '" ' +
+        'onclick="openLightbox(this.dataset.full, this.dataset.thumb)">';
     }).join('') + '</div>';
   }
 
@@ -10655,7 +10670,55 @@ initSidebarSearch();
   img.addEventListener('touchstart',function(e){if(e.touches.length===2){e.preventDefault();iDist=t2d(e.touches);iScale=scale}else if(e.touches.length===1&&scale>1){lx=e.touches[0].clientX;ly=e.touches[0].clientY;dragging=true}},{passive:false});
   img.addEventListener('touchmove',function(e){if(e.touches.length===2&&iDist){e.preventDefault();scale=Math.min(Math.max(iScale*(t2d(e.touches)/iDist),.5),10);apply();showHint()}else if(e.touches.length===1&&dragging){e.preventDefault();panX+=e.touches[0].clientX-lx;panY+=e.touches[0].clientY-ly;lx=e.touches[0].clientX;ly=e.touches[0].clientY;apply()}},{passive:false});
   img.addEventListener('touchend',function(e){if(e.touches.length<2)iDist=0;if(e.touches.length===0){dragging=false;if(e.changedTouches.length===1){var now=Date.now();if(now-lastTap<300){e.preventDefault();if(scale>1.05)reset();else scale=2.5;apply();showHint()}lastTap=now}}});
-  window.openLightbox=function(src){reset();img.src=src;ov.classList.add('active')};
+  // openLightbox(src, [fallback]) opens the full-size image at `src`.
+  //
+  // When the optional `fallback` argument is supplied and the primary
+  // `src` fails to load, the lightbox silently switches to the fallback
+  // and keeps the overlay open. This addresses the attachment-GC-expired
+  // path (RFC §3.6.3): the on-disk original at
+  // /api/sessions/attachment?... is gone, but the embedded thumbnail
+  // data URI was persisted alongside it and renders identically (though
+  // at 600px). Without the fallback the user would see a broken-image
+  // glyph.
+  //
+  // Two failure modes the handler has to cover:
+  //   1. HTTP 404 / network error → <img>'s onerror fires.
+  //   2. HTTP 200 but wrong Content-Type / corrupt body → onerror does
+  //      NOT fire on all browsers; we detect this post-load by checking
+  //      naturalWidth === 0 and swap to the fallback.
+  //
+  // The img element is reused across calls, so its onload / onerror
+  // handlers are re-assigned (not addEventListener'd) to avoid
+  // accumulating stale listeners when users open the lightbox repeatedly.
+  window.openLightbox=function(src,fallback){
+    reset();
+    var primaryTried=false;
+    function useFallback(){
+      if(!fallback||fallback===src)return false;
+      // Guard against infinite recursion if the fallback itself 404s.
+      img.onerror=function(){img.onerror=null;img.onload=null};
+      img.onload=function(){img.onerror=null;img.onload=null};
+      img.src=fallback;
+      return true;
+    }
+    img.onerror=function(){
+      img.onerror=null;
+      if(!useFallback())img.onload=null;
+    };
+    img.onload=function(){
+      if(!primaryTried){
+        primaryTried=true;
+        // naturalWidth===0 indicates the resource loaded (no onerror)
+        // but decoded to nothing — usually a Content-Type that Chrome
+        // refuses to render as an image. Treat identically to an
+        // onerror so we fall back to the thumb.
+        if(img.naturalWidth===0&&useFallback())return;
+      }
+      img.onerror=null;img.onload=null;
+    };
+    img.src=src;
+    ov.classList.add('active');
+  };
   document.addEventListener('keydown',function(e){if(!ov.classList.contains('active'))return;if(e.key==='Escape')close();else if(e.key==='+'||e.key==='='){scale=Math.min(scale*1.2,10);apply();showHint()}else if(e.key==='-'){scale=Math.max(scale/1.2,.5);apply();showHint()}else if(e.key==='0'){reset();apply();showHint()}});
 })();
 

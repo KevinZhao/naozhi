@@ -144,4 +144,77 @@ var (
 	// shim is likely zombied. Pair with naozhi_shim_restart_total to see
 	// whether reconcile is actually clearing them. R172-ARCH-D10.
 	InterruptErrorTotal = expvar.NewInt("naozhi_interrupt_error_total")
+
+	// EventLogPersistWrittenTotal counts individual EventEntry records
+	// successfully committed to <keyhash>.log by the per-session
+	// persister. Rising in lock-step with conversation traffic is the
+	// expected signal — a pause while traffic continues means either
+	// the persister goroutine stalled or the PersistSink channel is
+	// saturated (see EventLogPersistDroppedTotal for that path). RFC §6.3.
+	EventLogPersistWrittenTotal = expvar.NewInt("naozhi_eventlog_persist_written_total")
+
+	// EventLogPersistDroppedTotal counts EventEntry records dropped
+	// because the per-session PersistSink channel was full when the
+	// Append hot path tried to enqueue. A sustained non-zero delta
+	// here is an operator-actionable signal: the disk or writer
+	// goroutine is not draining fast enough and live dashboard events
+	// are being lost from the persistent tier (they survive only in
+	// the in-memory ring). RFC §3.2.3 / §6.3.
+	EventLogPersistDroppedTotal = expvar.NewInt("naozhi_eventlog_persist_dropped_total")
+
+	// EventLogPersistFsyncTotal counts fsync(log) / fsync(idx) calls
+	// the persister has issued. Two fsyncs per debounce window in
+	// normal operation (log first, idx second); a value that grows
+	// well past the expected ~10/s rate indicates the debounce is
+	// not coalescing (misconfiguration of FlushInterval) or there
+	// are many tiny Flush() calls forcing out-of-band fsyncs. RFC §6.3.
+	EventLogPersistFsyncTotal = expvar.NewInt("naozhi_eventlog_persist_fsync_total")
+
+	// EventLogPersistMalformedLinesTotal counts records the persister
+	// refused to write because schema.MarshalRecord rejected them
+	// (oversize record, encoding failure). Zero in steady state; a
+	// delta implies an upstream caller is producing malformed entries
+	// and the corresponding slog.Warn has the offending UUID / size.
+	// RFC §6.3.
+	EventLogPersistMalformedLinesTotal = expvar.NewInt("naozhi_eventlog_persist_malformed_lines_total")
+
+	// EventLogPersistReplayLeakTotal counts batches that reached the
+	// PersistSink with replayPhase=true. In production this MUST stay
+	// at 0: a non-zero value means some caller installed the sink
+	// BEFORE InjectHistory completed, violating RFC §3.2.2's ordering
+	// contract. The Persister drops the batch (preventing the
+	// infinite-persist loop), so dashboard behaviour doesn't degrade
+	// visibly, but a monitor paging on `*ReplayLeakTotal != 0` is
+	// recommended so the underlying bug gets a fix. RFC §3.2.3.
+	EventLogPersistReplayLeakTotal = expvar.NewInt("naozhi_eventlog_persist_replay_leak_total")
+
+	// AttachmentRefBumpTotal counts .meta rewrites performed by the
+	// attachment refcount tracker (see docs/rfc/attachment-refcount.md).
+	// Each increment represents one ReferencingKeyHashes / LastReferencedAt
+	// update; coalesce collapses N rapid bumps on the same (session,
+	// attachment) pair into a single increment. Delta rate roughly
+	// tracks "new image events reaching disk" multiplied by the number
+	// of distinct attachments referenced.
+	AttachmentRefBumpTotal = expvar.NewInt("naozhi_attachment_ref_bump_total")
+
+	// AttachmentRefClearTotal counts .meta rewrites performed during
+	// session removal (OnSessionRemoved walks the workspace dir and
+	// drops the keyhash from every attachment that references it).
+	// A single session deletion may bump this by the number of
+	// attachments it touched. Steady zero in normal operation; a
+	// delta matches an operator clicking × on a dashboard card.
+	AttachmentRefClearTotal = expvar.NewInt("naozhi_attachment_ref_clear_total")
+
+	// AttachmentRefMetaErrorTotal counts tracker errors writing the
+	// .meta sidecar — usually missing sidecar (legacy attachments
+	// without the refcount fields), ENOSPC, or permission denied.
+	// Non-zero steady-state is a signal the tracker cannot keep up:
+	// attachments will fall back to upload-only TTL GC.
+	AttachmentRefMetaErrorTotal = expvar.NewInt("naozhi_attachment_ref_meta_error_total")
+
+	// AttachmentRefDropTotal counts bumps rejected by the tracker's
+	// non-blocking enqueue path (channel at capacity). Mirrors the
+	// event-log Persister's drop counter — operator runbook is the
+	// same: investigate disk latency / writer stall.
+	AttachmentRefDropTotal = expvar.NewInt("naozhi_attachment_ref_drop_total")
 )

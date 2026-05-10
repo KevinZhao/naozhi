@@ -474,6 +474,8 @@
       fetch('/api/sessions/agent_events' + qs, { credentials: 'same-origin' })
         .then(function (r) {
           if (taskID !== state.activeTaskID) return;
+          // 202 = tailer still spinning up; no body to parse, wait next tick.
+          if (r.status === 202) return;
           if (!r.ok) return;
           return r.json();
         })
@@ -482,7 +484,14 @@
           for (var i = 0; i < events.length; i++) {
             appendAgentEvent(events[i]);
           }
-          state.pollAfterMS = events[events.length - 1].time || state.pollAfterMS;
+          // Advance the watermark only when the server gave us a real
+          // timestamp. time===0 means the event predates the field; treating
+          // it as "newest" would pin after=0 forever and cause duplicate
+          // renders on every 3s tick.
+          var lastTime = events[events.length - 1].time;
+          if (typeof lastTime === 'number' && lastTime > state.pollAfterMS) {
+            state.pollAfterMS = lastTime;
+          }
         })
         .catch(function () { /* swallow; will retry */ });
     }, 3000);
@@ -504,7 +513,7 @@
     // dashboard's interrupt shortcut owns Esc there).
     var t = e.target;
     if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' ||
-      (t.isContentEditable && t.id !== 'events-scroll'))) {
+      t.isContentEditable)) {
       return;
     }
     e.preventDefault();
@@ -515,16 +524,33 @@
   // When the user picks a different session, any open drill-in on the
   // previous session must close — otherwise agent_event messages for the
   // now-inactive taskID would leak into the new session's event list.
-
-  function onSessionSwitch() {
+  //
+  // Called by dashboard.js's selectSession *before* it mutates selectedKey
+  // (so saveScrollPos still keys off the old session). We therefore accept
+  // the target key/node as arguments rather than comparing against the now-
+  // stale global. When onSessionSwitch is called with no args (legacy call
+  // sites), fall back to unconditional cleanup — any call site that did not
+  // pass a target is by construction changing sessions.
+  function onSessionSwitch(targetKey, targetNode) {
     if (!state.activeTaskID) return;
-    if (state.activeKey !== selectedKey) {
-      unsubscribeCurrent();
-      stopHttpPoll();
-      state.activeTaskID = '';
-      state.activeKey = '';
-      hideBreadcrumb();
+    var tKey = targetKey == null ? null : targetKey;
+    var tNode = targetNode == null ? null : targetNode;
+    if (tKey !== null) {
+      var curNode = state.activeKey ? (selectedNode || 'local') : '';
+      if (tKey === state.activeKey &&
+          (tNode === null || tNode === (curNode || 'local'))) {
+        // Same session re-click — keep drill-in alive.
+        return;
+      }
     }
+    unsubscribeCurrent();
+    stopHttpPoll();
+    state.activeTaskID = '';
+    state.activeKey = '';
+    state.activeAgentName = '';
+    state.activeTeamName = '';
+    state.activeStatus = '';
+    hideBreadcrumb();
   }
 
   // ─── Exports ───────────────────────────────────────────────────────

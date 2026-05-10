@@ -1344,7 +1344,8 @@ Phase 3 的新增代码全部落在 agent_view.js。
 - `internal/server/agent_tailer_test.go` ~320
 - `internal/server/ws_agent_subscribe.go` ~140
 - `internal/server/ws_agent_subscribe_test.go` ~280
-- `internal/server/static/agent_view.js` ~900（Phase 2.5 骨架 + Phase 3 实装）
+- `internal/server/static/agent_view.js` ~560（Phase 2.5 骨架 + Phase 3 实装；
+  比预估 ~900 少，因 auto-collapse 延后、turnState 未拆分；见 §10 v4.1）
 - `cmd/probe/agent_events/main.go` ~150（D1）
 
 **修改**（约 +900 / −80 行）：
@@ -1359,8 +1360,10 @@ Phase 3 的新增代码全部落在 agent_view.js。
 - `internal/server/server.go`：新路由
 - `internal/server/wshub.go`：agent_* 分发 + enrichSnapshot +
   agent_subscribe_rejected 消息路径
-- `internal/server/static/dashboard.js`：turnState 拆分 + banner 逻辑 **搬出** 到
-  agent_view.js；本文件只留 `applyEventToTurnState` 薄派发
+- `internal/server/static/dashboard.js`：banner 5 函数 **搬出** 到
+  agent_view.js（Phase 2.5），新增 4 个 `agent_*` WS 分派 + `tool_result`
+  折叠渲染 + 10 条 tool verb 映射。`applyEventToTurnState` 未瘦身、turnState
+  未拆分（实施偏差，见 §10 v4.1）
 - `internal/server/static/dashboard.html`：+ `<script src="agent_view.js">` +
   ~80 行 CSS
 - `docs/design/agent-team-ui-design.md`：降级为指向本 RFC 的 stub（v4 P0）
@@ -1374,6 +1377,28 @@ Phase 3 的新增代码全部落在 agent_view.js。
   已给 banner 状态，父视图无需再展示。
 
 ## 10. 决策记录
+
+### v4.1 实施偏差（Phase 2.5+3 落地后补记，2026-05-10）
+
+Phase 2.5 + Phase 3 已合并（commit fb34291 + 修复轮）。以下 3 项 RFC 文本与实
+现存在差距，不是 bug，是显式决策：
+
+- **turnState 未拆分**：§3.6.1 设想的 `turnState.parent.*` / `agents[]` /
+  `activeAgentView` / `collapsedByAuto` / `readyCollapseTimerId` 子树未实装。
+  `dashboard.js` 的 `turnState` 维持扁平结构，`agent_view.js` 用闭包内独立
+  `state = {activeKey, activeTaskID, activeAgentName, activeTeamName,
+  activeStatus, switchSeq, retries, pollTimer, pollAfterMS}` 管理 drill-in
+  态。两模块共享 `turnState.agents[]` 做 banner 渲染。理由：改 turnState
+  形状影响 50+ 调用点，收益（语义分离）低于风险（回归）。
+- **auto-collapse 未实装**：§3.6.3 的 30s ready 自动折叠 / "本轮 team (N) ▶"
+  chip / 用户展开后本轮不再折叠 / 新 turn 复位，全部延后到 Phase 4（或不做，
+  视用户反馈）。当前 banner 不会自动折叠；用户信噪比由 team-header + solo
+  分隔已基本可接受。`collapsedByAuto` 字段保留在 `agent_view.js` 作为未来
+  兼容位。
+- **applyEventToTurnState 未拆分**：§3.6.0 "applyEventToTurnState 瘦身为
+  派发" 未做。`dashboard.js` 的 `applyEventToTurnState` 继续处理
+  thinking/text/tool_use/agent/task_*；agent_event 的分派走 `window.AgentView.*`
+  入口函数而非 `applyAgentMetaEvent`。两分派点共存但不冲突。
 
 ### v4 变更（vs v3 — Review 2026-05-10 落地）
 

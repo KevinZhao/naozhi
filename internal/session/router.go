@@ -18,8 +18,11 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/history/claudejsonl"
+	"github.com/naozhi/naozhi/internal/history/merged"
+	"github.com/naozhi/naozhi/internal/history/naozhilog"
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
@@ -292,6 +295,21 @@ type Router struct {
 	// race the broadcast timer, re-close historyCtx via historyCancel (safe
 	// on its own but noisy) and double-detach shim processes. R49-REL-SHUTDOWN-ONCE.
 	shutdownOnce sync.Once
+
+	// eventLogDir is the directory naozhi's per-session event log files
+	// live under. Empty disables the event log persistence entirely —
+	// useful for tests and for deployments that explicitly opt out via
+	// configuration. When non-empty, the Router uses eventLogPersister
+	// to spool cli.EventEntry batches to disk and naozhilog.Source to
+	// read them back on restart / pagination.
+	eventLogDir       string
+	eventLogPersister *persist.Persister
+
+	// attachmentTracker is the refcount tracker that bridges
+	// event-log persist events to .meta sidecar updates. nil when
+	// eventLogDir is unset (refcount tracking has no source of
+	// events in that case). See docs/rfc/attachment-refcount.md.
+	attachmentTracker *attachmentTracker
 }
 
 // spawnerFunc is the signature panicSafeSpawnFn executes; abstracting it lets
@@ -615,6 +633,31 @@ type RouterConfig struct {
 	NoOutputTimeout  time.Duration
 	TotalTimeout     time.Duration
 	ClaudeDir        string
+	// EventLogDir is where naozhi's per-session event log files live.
+	// When empty, event log persistence is DISABLED and the router
+	// falls back to Claude CLI JSONL as the sole history source. When
+	// non-empty, the router spins up a persist.Persister on startup,
+	// wires every session's cli.EventLog to it, and installs a
+	// merged.Source (naozhilog + claudejsonl) as the history fallback.
+	//
+	// Common layout places this next to StorePath — for example
+	// "/home/user/.naozhi/events" alongside "/home/user/.naozhi/sessions.json".
+	// The cmd/naozhi wiring sets both values together.
+	//
+	// See docs/rfc/event-log-persistence.md §4 for the full startup
+	// sequence.
+	EventLogDir string
+	// EventLogGenerator tags every new <keyhash>.log file's header
+	// with the naozhi build identifier so operators running `jq` on
+	// the file can tell which build produced it. Optional; empty
+	// produces files with a blank generator field.
+	EventLogGenerator string
+	// EventLogDevMode enables Persister's panic-on-replay-phase
+	// guard (RFC §3.2.3). Test / CI builds set this true so any
+	// SetPersistSink ordering regression surfaces as an immediate
+	// panic; production sets it false so the sink drops + counters
+	// instead.
+	EventLogDevMode bool
 }
 
 // NewRouter creates a session router.
@@ -689,6 +732,25 @@ func NewRouter(cfg RouterConfig) *Router {
 		spawningKeys:       make(map[string]struct{}),
 		noOutputTimeout:    cfg.NoOutputTimeout,
 		totalTimeout:       cfg.TotalTimeout,
+		eventLogDir:        cfg.EventLogDir,
+	}
+	// Spin up the event-log persister BEFORE we touch the session
+	// store; the startup load path needs a live sink to attach
+	// to spawned ManagedSessions as they get restored.
+	if cfg.EventLogDir != "" {
+		p, err := persist.NewPersister(persist.Options{
+			Dir:       cfg.EventLogDir,
+			Generator: cfg.EventLogGenerator,
+			DevMode:   cfg.EventLogDevMode,
+			Observer:  eventLogMetricsObserver{},
+		})
+		if err != nil {
+			slog.Error("event log persister init failed; disabling event log persistence",
+				"dir", cfg.EventLogDir, "err", err)
+			r.eventLogDir = ""
+		} else {
+			r.eventLogPersister = p
+		}
 	}
 	r.shutdownCond = sync.NewCond(&r.mu)
 	// historyCtx is cancelled by Shutdown so startup history loads and
@@ -762,12 +824,60 @@ func NewRouter(cfg RouterConfig) *Router {
 	// "history" panel so that Remove is a durable delete — the user must
 	// explicitly resume an entry before it re-enters the sidebar.
 
-	// Async-load JSONL history for all suspended sessions so the dashboard
+	// Async-load history for all suspended sessions so the dashboard
 	// shows conversation history without waiting for the next message.
-	// Loads the full session chain (prev → current) to restore history
-	// that accumulated across multiple CLI session IDs.
 	//
-	// Two load paths:
+	// Tier 1: naozhilog (naozhi-native per-session log). When the
+	// event log persister is configured (r.eventLogDir != "") we
+	// LoadLatest from the local .log file. This tier preserves
+	// Images / ImagePaths / AskQuestion / agent-team linkage fields
+	// that Claude JSONL cannot provide.
+	//
+	// Tier 2: Claude CLI JSONL. Used when the local tier returns
+	// nothing (fresh deploy, user cleared events/). The walk is the
+	// same chain walker the reconnect path uses.
+	//
+	// Both tiers complete BEFORE the corresponding process's
+	// PersistSink is installed (via spawnSession / ReconnectShims),
+	// so replayed entries are tagged replayPhase=true and dropped by
+	// the Persister rather than re-persisted.
+	if r.eventLogPersister != nil {
+		sem := make(chan struct{}, historyLoadConcurrency)
+		for _, s := range r.sessions {
+			s := s
+			r.historyWg.Add(1)
+			go func() {
+				defer r.historyWg.Done()
+				select {
+				case sem <- struct{}{}:
+				case <-r.historyCtx.Done():
+					return
+				}
+				defer func() { <-sem }()
+				src := naozhilog.New(r.eventLogDir, s.key)
+				entries, err := src.LoadLatest(r.historyCtx, maxPersistedHistory)
+				if err != nil || len(entries) == 0 {
+					return
+				}
+				// hasInjectedHistory guards against a concurrent
+				// ReconnectShims having already filled the session —
+				// we'd double-inject otherwise.
+				if s.hasInjectedHistory() {
+					return
+				}
+				s.InjectHistory(entries)
+				slog.Info("loaded session history from naozhi event log",
+					"key", s.key, "entries", len(entries))
+				r.notifyChange()
+			}()
+		}
+	}
+
+	// Tier 2 (Claude CLI JSONL) — runs unconditionally; the
+	// hasInjectedHistory check inside each goroutine skips work when
+	// tier 1 already populated the session.
+	//
+	// Two sub-paths (unchanged from pre-eventlog behaviour):
 	//   1. Non-shim-managed sessions (default): load immediately.
 	//   2. Shim-managed sessions (shimKeys[key]==true): defer for
 	//      shimReconnectGraceDelay to let ReconnectShims inject its own
@@ -835,6 +945,14 @@ func NewRouter(cfg RouterConfig) *Router {
 				}
 				defer func() { <-sem }()
 
+				// Skip when tier 1 (naozhilog) already filled the
+				// session. Without this, a deploy with BOTH event-log
+				// persistence and a populated Claude JSONL would
+				// double-inject the first ~500 entries.
+				if s.hasInjectedHistory() {
+					return
+				}
+
 				// Build ordered list of all session IDs: prev chain + current.
 				// LoadHistoryChainTailCtx walks from newest→oldest and stops
 				// as soon as maxPersistedHistory entries are collected, so a
@@ -863,6 +981,21 @@ func NewRouter(cfg RouterConfig) *Router {
 		}
 	}
 
+	// Reap <keyhash>.log files that don't correspond to any restored
+	// session AND are older than orphanSweepAge. See §4.4 of
+	// docs/rfc/event-log-persistence.md for the rationale; in short,
+	// DropKey failures + sessions.json rewrites can leave stranded
+	// logs that never get reclaimed otherwise.
+	r.runOrphanSweep()
+
+	// Attachment refcount tracker. See docs/rfc/attachment-refcount.md.
+	// Must be started AFTER r.sessions is populated so the resolver
+	// closure can see them; first OnPersistedEntry callback arrives
+	// when a live CLI produces a new EventEntry which cannot happen
+	// until callers call GetOrCreate, which can't happen until
+	// NewRouter returns.
+	r.startAttachmentTracker()
+
 	return r
 }
 
@@ -871,15 +1004,17 @@ func NewRouter(cfg RouterConfig) *Router {
 // ManagedSession allocation in this file so EventEntriesBeforeCtx's disk
 // fallback is live before the first pagination request can arrive.
 //
-// Selection:
-//   - "claude" (and legacy empty-string backend rows restored from
-//     sessions.json) → claudejsonl.Source, reading ~/.claude/projects
-//   - anything else → history.Noop placeholder so the call site doesn't
-//     have to nil-check. Per-backend implementations can slot in here
-//     as they land without touching ManagedSession.
-//
-// Missing claudeDir (empty-string config or test harness) degrades to Noop
-// regardless of backend — we can't read JSONL without a root directory.
+// Composition (RFC §3.4 / §3.5):
+//   - The local tier is naozhilog.Source (empty when eventLogDir is
+//     unset). It reads naozhi-native per-session logs that carry full
+//     EventEntry fidelity including Images, ImagePaths, and agent-team
+//     linkage.
+//   - The fallback tier is the per-backend source:
+//     "claude" / empty → claudejsonl.Source (reads ~/.claude/projects)
+//     anything else      → history.Noop (until a per-backend source lands)
+//   - MergedSource wraps both and returns a UUID-deduped, time-sorted
+//     result. Skipping the merge when the local tier is disabled keeps
+//     the old single-source path live for deployments that opt out.
 func (r *Router) attachHistorySource(s *ManagedSession) {
 	if s == nil {
 		return
@@ -888,11 +1023,25 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 	if backend == "" {
 		backend = r.defaultBackend
 	}
-	if backend == "claude" && r.claudeDir != "" {
-		s.SetHistorySource(claudejsonl.New(r.claudeDir, s.Workspace(), s.snapshotChainIDs))
+
+	var fallback history.Source
+	switch {
+	case backend == "claude" && r.claudeDir != "":
+		fallback = claudejsonl.New(r.claudeDir, s.Workspace(), s.snapshotChainIDs)
+	default:
+		fallback = history.Noop{}
+	}
+
+	if r.eventLogDir == "" {
+		// Event log persistence opted out — old single-source behaviour.
+		s.SetHistorySource(fallback)
 		return
 	}
-	s.SetHistorySource(history.Noop{})
+
+	s.SetHistorySource(&merged.Source{
+		Local:    naozhilog.New(r.eventLogDir, s.key),
+		Fallback: fallback,
+	})
 }
 
 // shimManagedKeys returns the set of session keys that have a surviving shim
@@ -1235,6 +1384,12 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		r.storeDirty = true
 		r.storeGen.Add(1)
 		r.mu.Unlock()
+
+		// Event-log persist sink goes last so the InjectHistory +
+		// shim replay above land with sinkReady=false (replayPhase=true
+		// on the persister side) and are dropped rather than written
+		// back to disk. See RFC §3.2.2.
+		r.installPersistSink(proc, state.Key)
 
 		// Extract lastPrompt/lastActivity from replay + JSONL entries so the
 		// sidebar shows a meaningful label instead of "(no prompt)".
@@ -1890,8 +2045,48 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		}
 	}
 
+	// RFC §3.2.2 ordering contract: SetPersistSink ONLY after every
+	// InjectHistory call above has completed. Any remaining bulk
+	// history injection for this session happens later via the
+	// NewRouter startup goroutine, which uses s.InjectHistory; the
+	// AppendBatch that flows through must carry replayPhase=true
+	// because sinkReady was still false when those entries were
+	// appended. Persister drops them (see RFC §3.2.3 runtime guard).
+	r.installPersistSink(proc, key)
+
 	r.notifyChange()
 	return s, nil
+}
+
+// installPersistSink wires the event-log persister into the given
+// Process's EventLog. No-op when the persister is disabled. Called
+// exclusively from spawnSession / ReattachProcess AFTER any
+// InjectHistory calls have completed, per the ordering contract in
+// RFC §3.2.2.
+//
+// Called with a nil proc in some test harnesses; we guard because
+// Process is behind an interface (processIface) and the hook is
+// only meaningful for real CLI-backed processes. Fake processes
+// used in router_test.go don't expose SetPersistSink; they're
+// caught by the type assertion below and silently skipped.
+func (r *Router) installPersistSink(proc processIface, key string) {
+	if r.eventLogPersister == nil {
+		return
+	}
+	realProc, ok := proc.(*cli.Process)
+	if !ok {
+		return
+	}
+	log := realProc.EventLog()
+	if log == nil {
+		return
+	}
+	sink := newEventLogSink(
+		r.eventLogPersister.SinkFor(key),
+		r.attachmentTracker,
+		persist.KeyHash(key),
+	)
+	log.SetPersistSink(sink)
 }
 
 // countActive recounts alive processes (corrects drift from undetected exits).
@@ -2255,6 +2450,11 @@ func (r *Router) Remove(key string) bool {
 	// Kill process if alive
 	proc := s.loadProcess()
 	wasActive := !s.exempt && proc != nil && proc.Alive()
+	// Snapshot the workspace BEFORE unregister so the attachment
+	// tracker's OnSessionRemoved walk has the right root. After
+	// unregisterSessionLocked the session is gone from r.sessions
+	// and the workspace lookup would fail.
+	workspaceSnapshot := s.Workspace()
 	r.unregisterSessionLocked(key, s, false)
 	if wasActive {
 		if r.activeCount.Add(-1) < 0 {
@@ -2273,6 +2473,18 @@ func (r *Router) Remove(key string) bool {
 		// the UCCLEP-2026-04-26 pattern.
 		proc.Close()
 	}
+	// Drop the on-disk event log so a future session reusing the same
+	// key starts with an empty history. Best-effort: a DropKey failure
+	// leaves the file behind; the next spawnSession's Recover pass
+	// will tolerate stale bytes but operators will see larger disk
+	// usage than expected.
+	r.dropEventLogForKey(key)
+	// Clear the attachment tracker's refs for this session so the
+	// double-TTL GC will reclaim images once LastReferencedAt
+	// elapses. Best-effort — a failure leaves stale keyhash entries
+	// behind which do not affect correctness (GC still collects on
+	// uploadTTL expiry).
+	r.clearAttachmentTrackerRefs(key, workspaceSnapshot)
 	// R191-CONC-H1-c: Broadcast under r.mu (see evictOldest comment).
 	if r.shutdownCond != nil {
 		r.mu.Lock()
@@ -2283,6 +2495,41 @@ func (r *Router) Remove(key string) bool {
 	slog.Info("session removed", "key", key)
 	r.notifyChange()
 	return true
+}
+
+// dropEventLogForKey removes a session's persisted event log files
+// (.log + .idx). Safe to call with no persister configured or for
+// keys that were never written to — the Persister's DropKey path
+// tolerates missing files.
+func (r *Router) dropEventLogForKey(key string) {
+	if r.eventLogPersister == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	if err := r.eventLogPersister.DropKey(ctx, key); err != nil {
+		slog.Warn("event log drop failed", "key", key, "err", err)
+	}
+}
+
+// clearAttachmentTrackerRefs runs the tracker's OnSessionRemoved
+// sweep so every .meta file under `workspace` loses this session's
+// keyhash. Safe to call with no tracker configured or an empty
+// workspace snapshot.
+//
+// We use a short ctx timeout so a permission-denied subtree or
+// slow FS cannot wedge Router.Remove. A failure only delays
+// attachment GC by a generation; correctness is unaffected.
+func (r *Router) clearAttachmentTrackerRefs(key, workspace string) {
+	if r.attachmentTracker == nil || workspace == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := r.attachmentTracker.OnSessionRemoved(ctx, persist.KeyHash(key), workspace); err != nil {
+		slog.Warn("attachment tracker clear failed",
+			"key", key, "workspace", workspace, "err", err)
+	}
 }
 
 // Cleanup closes sessions idle beyond TTL.
@@ -2810,6 +3057,25 @@ func (r *Router) shutdown() {
 		}(proc)
 	}
 	wg.Wait()
+
+	// Flush & stop the event-log persister last so any batches still in
+	// the in-channel (e.g. emitted while CLIs were detaching) reach
+	// disk. 5s matches the historyWg budget above — ample for the
+	// typical 200 ms debounce plus a final fsync, but bounded so a
+	// wedged disk doesn't hold Shutdown open.
+	if r.eventLogPersister != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := r.eventLogPersister.Stop(ctx); err != nil {
+			slog.Warn("event log persister stop timed out",
+				"err", err, "stats", r.eventLogPersister.Stats())
+		}
+		cancel()
+	}
+
+	// Stop the attachment tracker AFTER the persister so no more
+	// OnPersistedEntry bumps arrive during the tracker's drain.
+	// Ordering matters: a bump after Stop would silently drop.
+	r.stopAttachmentTracker()
 }
 
 // DefaultWorkspace returns the router's default working directory.

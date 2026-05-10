@@ -311,11 +311,14 @@ func parseHistoryLine(line []byte) ([]cli.EventEntry, bool) {
 		if text == "" || IsClaudeSystemInjectedText(text) {
 			return nil, false
 		}
+		summary := cli.TruncateRunes(text, 120)
+		detail := cli.TruncateRunes(text, 2000)
 		return []cli.EventEntry{{
+			UUID:    uuidFromClaudeLine(hl, ts, "user", summary, detail),
 			Time:    ts,
 			Type:    "user",
-			Summary: cli.TruncateRunes(text, 120),
-			Detail:  cli.TruncateRunes(text, 2000),
+			Summary: summary,
+			Detail:  detail,
 		}}, true
 
 	case "assistant":
@@ -328,15 +331,18 @@ func parseHistoryLine(line []byte) ([]cli.EventEntry, bool) {
 			return nil, false
 		}
 		out := make([]cli.EventEntry, 0, len(blocks))
-		for _, b := range blocks {
+		for idx, b := range blocks {
 			if b.Type != "text" || strings.TrimSpace(b.Text) == "" {
 				continue
 			}
+			summary := cli.TruncateRunes(b.Text, 120)
+			detail := cli.TruncateRunes(b.Text, 16000)
 			out = append(out, cli.EventEntry{
+				UUID:    uuidFromClaudeBlock(hl, idx, ts, "text", summary, detail),
 				Time:    ts,
 				Type:    "text",
-				Summary: cli.TruncateRunes(b.Text, 120),
-				Detail:  cli.TruncateRunes(b.Text, 16000),
+				Summary: summary,
+				Detail:  detail,
 			})
 		}
 		if len(out) == 0 {

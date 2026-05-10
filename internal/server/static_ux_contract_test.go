@@ -3752,13 +3752,26 @@ func TestDashboard_R151_EventStreamAndBannerLocalized(t *testing.T) {
 
 	// Invariant 3: tool verb map — strict whitelist of keys with
 	// localized verbs, plus Agent staying English as a proper noun.
-	wantVerbMap := `const toolVerbs = {
-  Read: '读取', Edit: '编辑', Write: '写入', Bash: '执行',
-  Grep: '搜索', Glob: '查找文件', Agent: 'Agent',
-  Notebook: '编辑 Notebook', WebFetch: '抓取'
-};`
-	if !strings.Contains(js, wantVerbMap) {
-		t.Error("toolVerbs map must match the Round 151 localized shape exactly (Read/Edit/Write/Bash/Grep/Glob/Agent/Notebook/WebFetch with Chinese verbs + Agent kept English)")
+	// RFC v4 §3.6.8 extended the set with 10 new Claude tools (Team*/
+	// SendMessage/ToolSearch/Task*/ScheduleWakeup/Cron*). Each entry
+	// below must be present for the banner to surface the Chinese verb
+	// instead of the "使用 <tool>" fallback.
+	wantVerbEntries := []string{
+		// Round 151 originals.
+		`Read: '读取'`, `Edit: '编辑'`, `Write: '写入'`, `Bash: '执行'`,
+		`Grep: '搜索'`, `Glob: '查找文件'`, `Agent: 'Agent'`,
+		`Notebook: '编辑 Notebook'`, `WebFetch: '抓取'`,
+		// RFC v4 §3.6.8 extension.
+		`TeamCreate: '创建团队'`, `TeamDelete: '解散团队'`,
+		`SendMessage: '发消息'`, `ToolSearch: '加载工具'`,
+		`TaskOutput: '读 agent 输出'`, `TaskStop: '停止 agent'`,
+		`ScheduleWakeup: '排唤醒'`,
+		`CronCreate: '建定时任务'`, `CronDelete: '删定时任务'`, `CronList: '查定时任务'`,
+	}
+	for _, entry := range wantVerbEntries {
+		if !strings.Contains(js, entry) {
+			t.Errorf("toolVerbs map missing localized entry: %s", entry)
+		}
 	}
 	if !strings.Contains(js, `const verb = toolVerbs[tool] || ('使用 ' + tool);`) {
 		t.Error("toolVerb fallback must be '使用 ' prefix for unknown tools (was 'Using ')")

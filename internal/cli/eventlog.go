@@ -89,6 +89,19 @@ func sanitizeImagesAligned(imgs, paths []string) ([]string, []string) {
 
 // EventEntry is a simplified event record for the dashboard.
 type EventEntry struct {
+	// UUID is a 32-char lowercase hex identity for this event,
+	// assigned at Append-time by EventLog.stampUUID. Stable across
+	// process restarts because it rides along with the entry into
+	// the on-disk event log (internal/eventlog/persist). MergedSource
+	// uses UUID as the exact-match dedup key between the local
+	// JSONL tier and Claude CLI JSONL fallback — see RFC §3.5.2.
+	//
+	// "" means "legacy entry (from a pre-UUID persisted record or
+	// a Claude JSONL replay that hasn't been fingerprinted yet)".
+	// MergedSource handles the empty case by deriving a stable UUID
+	// from (Time + Summary) so two replays of the same Claude record
+	// land on the same key.
+	UUID       string   `json:"uuid,omitempty"`
 	Time       int64    `json:"time"`                 // unix ms
 	Type       string   `json:"type"`                 // init, thinking, tool_use, text, result, system, agent, todo, task_start, task_progress (also maps task_updated), task_done
 	Summary    string   `json:"summary,omitempty"`    // brief description
@@ -221,6 +234,115 @@ type EventLog struct {
 	subscribers map[*subscriber]struct{}
 	subsClosed  bool         // CloseSubscribers has been called; no new subscribers accepted
 	subCount    atomic.Int32 // mirrors len(subscribers); lets notifySubscribers skip the lock when zero
+
+	// persistSink is the optional on-disk persistence hook. RFC
+	// §3.2 / §3.3 cover the full contract; the two-atomic design
+	// below serves as the runtime half of the "runtime + AST"
+	// double-check on "SetPersistSink must run AFTER InjectHistory":
+	//
+	//   - sinkReady starts false. Every Append/AppendBatch that
+	//     fires while sinkReady is false carries replayPhase=true
+	//     to the sink (if one has already been stored), letting
+	//     the Persister drop + counter rather than commit a replay
+	//     loop to disk.
+	//   - persistSinkPtr holds the sink closure. It is populated
+	//     atomically by SetPersistSink, along with a Store(true)
+	//     on sinkReady in the same method. Reads on the hot path
+	//     Load() the pointer; nil means "no persistence configured",
+	//     which is the zero-configuration default for tests and
+	//     fake processes.
+	//
+	// The two-stage (sinkReady bool + sink pointer) construction
+	// mirrors the schema-level invariant that schema.Record.ReplayPhase
+	// is a declared field — but here ReplayPhase is derived at Append
+	// time from sinkReady, not carried on EventEntry. Keeping the
+	// EventEntry struct size constant matters because EventLog's
+	// ring buffer pre-allocates maxSize entries.
+	sinkReady      atomic.Bool
+	persistSinkPtr atomic.Pointer[PersistSink]
+}
+
+// PersistSink is the event log's persistence hook contract.
+// cli.EventLog calls the stored sink (when set) after every Append
+// and AppendBatch, passing:
+//
+//   - entries: a defensive copy of the appended EventEntry values
+//     (sink implementations may retain the slice — EventLog will
+//     not modify it after the call returns).
+//   - replayPhase: true while sinkReady is false (i.e. this Append
+//     came before SetPersistSink was called). The Persister drops
+//     and counter-metrics these batches so a broken call path
+//     (InjectHistory after SetPersistSink) cannot create a
+//     log-replay-amplification loop.
+//
+// Implementations MUST be non-blocking. Persister.SinkFor satisfies
+// this contract by using a non-blocking channel send + drop policy;
+// a custom sink may choose a different policy (synchronous disk
+// commit in a test, metrics-only accounting) but must NEVER hold
+// up the Append caller — EventLog takes pains to release l.mu
+// before invoking the sink specifically so slow sinks can't stall
+// the ring buffer.
+type PersistSink func(entries []EventEntry, replayPhase bool)
+
+// SetPersistSink installs the on-disk persistence hook. See the
+// PersistSink contract + the sinkReady field godoc for the full
+// ordering rules.
+//
+// This method is the only public way to flip sinkReady to true.
+// Calling it twice replaces the sink (last-writer-wins); calling
+// it with nil "clears" the sink but does NOT flip sinkReady back
+// to false — operators who want a clean replay phase should create
+// a fresh EventLog rather than try to uninstall.
+func (l *EventLog) SetPersistSink(fn PersistSink) {
+	if fn == nil {
+		l.persistSinkPtr.Store(nil)
+		return
+	}
+	// Store the sink pointer FIRST so any concurrent Append that
+	// reads sinkReady=true will also see a valid sink. Without this
+	// ordering there's a window where Append sees sinkReady=true
+	// but Load returns nil, losing the event.
+	p := fn
+	l.persistSinkPtr.Store(&p)
+	l.sinkReady.Store(true)
+}
+
+// invokePersistSink is the Append / AppendBatch helper that fires
+// the sink (when set) after the ring-buffer mutations are committed
+// and l.mu has been released.
+//
+// replayPhase is derived from sinkReady at the time of the call —
+// entries appended before SetPersistSink ran are replay-tagged,
+// entries after are live.
+//
+// `entries` must be a slice that is safe for the sink to retain —
+// callers pass a freshly-copied slice (not a view into the ring
+// buffer) because the ring can wrap and overwrite slots shortly
+// after.
+func (l *EventLog) invokePersistSink(entries []EventEntry) {
+	p := l.persistSinkPtr.Load()
+	if p == nil {
+		return
+	}
+	// When sinkReady is false the batch must be tagged replayPhase=true
+	// — this is the runtime blocker-1 guard from RFC §3.2.3.
+	replay := !l.sinkReady.Load()
+	(*p)(entries, replay)
+}
+
+// stampUUID guarantees every appended EventEntry has a non-empty
+// UUID. Legacy callers that already set UUID (e.g. history replay
+// paths using DeriveLegacyUUID for determinism) keep their value;
+// everything else gets a fresh newEventUUID.
+//
+// Called from Append / AppendBatch inside the l.mu write-lock so
+// the ring buffer always stores the definitive UUID downstream
+// readers (Entries, EntriesSince, EntriesBefore, invokePersistSink)
+// see.
+func stampUUID(e *EventEntry) {
+	if e.UUID == "" {
+		e.UUID = newEventUUID()
+	}
 }
 
 // NewEventLog creates an event log with the given max size.
@@ -444,6 +566,7 @@ func (l *EventLog) Append(e EventEntry) {
 	if e.Time == 0 {
 		e.Time = time.Now().UnixMilli()
 	}
+	stampUUID(&e)
 	// Server-side enforcement that every image entry is a data:image/* URI.
 	// Today's sole producer (MakeThumbnail) already conforms, but enforcing
 	// the contract here rather than trusting callers means any future
@@ -481,6 +604,11 @@ func (l *EventLog) Append(e EventEntry) {
 		l.fireTaskDoneCallbacks([]pendingTaskDone{pending})
 	}
 
+	// Invoke persistence sink OUTSIDE l.mu. Passing a fresh one-slot
+	// slice matches PersistSink's retention contract (callers may hold
+	// the slice past return). The slice copy is O(1) because len=1.
+	l.invokePersistSink([]EventEntry{e})
+
 	l.notifySubscribers()
 }
 
@@ -511,11 +639,17 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 	// semantically correct as the per-entry reads they replace, while
 	// keeping the write-lock hold time bounded. R71-PERF-L2.
 	defaultTime := time.Now().UnixMilli()
+	// Allocate the sink-copy slice outside the lock so the write
+	// lock hold time is bounded by the ring write itself. The slice
+	// is populated inside the loop and handed to invokePersistSink
+	// after unlock.
+	sinkCopy := make([]EventEntry, 0, len(entries))
 	l.mu.Lock()
 	for _, e := range entries {
 		if e.Time == 0 {
 			e.Time = defaultTime
 		}
+		stampUUID(&e)
 		// S15 (Round 174): same enforcement as Append. Replays from history
 		// (InjectHistory → AppendBatch) should never contain non-image data
 		// URIs today, but defense-in-depth is trivially cheap and locks the
@@ -526,6 +660,8 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 		if l.count < l.maxSize {
 			l.count++
 		}
+
+		sinkCopy = append(sinkCopy, e)
 
 		if fire, p := l.applyEntryStateLocked(e); fire {
 			pendingDone = append(pendingDone, p)
@@ -563,6 +699,13 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 	l.mu.Unlock()
 
 	l.fireTaskDoneCallbacks(pendingDone)
+
+	// Invoke persistence sink outside l.mu. sinkCopy holds the
+	// post-stamp, post-sanitize entries in the SAME order they were
+	// committed to the ring buffer — critical for the Persister's
+	// write-order guarantees.
+	l.invokePersistSink(sinkCopy)
+
 	l.notifySubscribers()
 }
 

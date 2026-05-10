@@ -79,17 +79,70 @@ type healthDispatchStats struct {
 // the embedded fields into the top-level object so the wire shape stays
 // identical to the prior `map[string]any` version. R60-PERF-001.
 type healthAuthSection struct {
-	Sessions      healthSessionStats   `json:"sessions"`
-	WorkspaceID   string               `json:"workspace_id"`
-	WorkspaceName string               `json:"workspace_name"`
-	System        map[string]any       `json:"system"`
-	Goroutines    int                  `json:"goroutines"`
-	Watchdog      healthWatchdogStats  `json:"watchdog"`
-	WSDropped     *int64               `json:"ws_dropped,omitempty"`
-	Dispatch      *healthDispatchStats `json:"dispatch,omitempty"`
-	CLIAvailable  bool                 `json:"cli_available"`
-	Nodes         map[string]string    `json:"nodes,omitempty"`
-	Platforms     map[string]string    `json:"platforms"`
+	Sessions          healthSessionStats      `json:"sessions"`
+	WorkspaceID       string                  `json:"workspace_id"`
+	WorkspaceName     string                  `json:"workspace_name"`
+	System            map[string]any          `json:"system"`
+	Goroutines        int                     `json:"goroutines"`
+	Watchdog          healthWatchdogStats     `json:"watchdog"`
+	WSDropped         *int64                  `json:"ws_dropped,omitempty"`
+	Dispatch          *healthDispatchStats    `json:"dispatch,omitempty"`
+	CLIAvailable      bool                    `json:"cli_available"`
+	Nodes             map[string]string       `json:"nodes,omitempty"`
+	Platforms         map[string]string       `json:"platforms"`
+	EventLog          *healthEventLogStats    `json:"eventlog,omitempty"`
+	AttachmentTracker *healthAttachTrackStats `json:"attachment_tracker,omitempty"`
+}
+
+// healthEventLogStats mirrors session.EventLogHealth over the wire.
+// Kept as a server-internal struct so the JSON shape isn't coupled
+// to session package refactors — a field rename there won't silently
+// break dashboards reading /health.
+//
+// The `writer_alive` definition per RFC §6.3:
+//
+//	last_drain_ms_ago < 5000  AND  channel_depth < 0.8 * channel_cap
+//
+// Both component fields are exposed independently so operators can
+// distinguish "writer goroutine deadlocked" from "writer goroutine
+// keeping up but channel about to overflow" without parsing the bool.
+type healthEventLogStats struct {
+	Dir            string `json:"dir"`
+	WriterAlive    bool   `json:"writer_alive"`
+	ChannelDepth   int    `json:"channel_depth"`
+	ChannelCap     int    `json:"channel_cap"`
+	LastDrainMsAgo int64  `json:"last_drain_ms_ago"`
+	Written        int64  `json:"written_total"`
+	Dropped        int64  `json:"dropped_total"`
+	Fsyncs         int64  `json:"fsync_total"`
+	Malformed      int64  `json:"malformed_total"`
+	ReplayLeak     int64  `json:"replay_leak_total"`
+	FSType         string `json:"fs_type"`
+	FSSupported    bool   `json:"fs_supported"`
+}
+
+// healthAttachTrackStats mirrors session.AttachmentTrackerHealth
+// over the wire. Kept server-internal for the same reasons as
+// healthEventLogStats — the wire shape should not drift when the
+// session-level struct evolves.
+//
+// writer_alive uses the same formula as the event-log tracker:
+//
+//	last_drain_ms < 5000 AND channel_depth < 0.8 * channel_cap
+//
+// Per-component fields are exposed so operators can distinguish
+// "tracker deadlocked" from "just backed up" without reverse-
+// engineering the bool.
+type healthAttachTrackStats struct {
+	WriterAlive  bool  `json:"writer_alive"`
+	ChannelDepth int   `json:"channel_depth"`
+	ChannelCap   int   `json:"channel_cap"`
+	LastDrainMs  int64 `json:"last_drain_ms"`
+	Pending      int   `json:"pending"`
+	Written      int64 `json:"written_total"`
+	Cleared      int64 `json:"cleared_total"`
+	Dropped      int64 `json:"dropped_total"`
+	Errors       int64 `json:"meta_error_total"`
 }
 
 // healthResp is the JSON response for /health. Prior code built a
@@ -172,6 +225,37 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		platStatus[name] = "registered"
 	}
 	auth.Platforms = platStatus
+
+	if el := h.router.EventLogStats(); el.Enabled {
+		auth.EventLog = &healthEventLogStats{
+			Dir:            el.Dir,
+			WriterAlive:    el.WriterAlive,
+			ChannelDepth:   el.ChannelDepth,
+			ChannelCap:     el.ChannelCap,
+			LastDrainMsAgo: el.LastDrainMsAgo,
+			Written:        el.Written,
+			Dropped:        el.Dropped,
+			Fsyncs:         el.Fsyncs,
+			Malformed:      el.Malformed,
+			ReplayLeak:     el.ReplayLeak,
+			FSType:         el.FSType,
+			FSSupported:    el.FSSupported,
+		}
+	}
+
+	if at := h.router.AttachmentTrackerStats(); at.Enabled {
+		auth.AttachmentTracker = &healthAttachTrackStats{
+			WriterAlive:  at.WriterAlive,
+			ChannelDepth: at.ChannelDepth,
+			ChannelCap:   at.ChannelCap,
+			LastDrainMs:  at.LastDrainMs,
+			Pending:      at.Pending,
+			Written:      at.Written,
+			Cleared:      at.Cleared,
+			Dropped:      at.Dropped,
+			Errors:       at.Errors,
+		}
+	}
 
 	resp.healthAuthSection = auth
 	writeJSON(w, resp)

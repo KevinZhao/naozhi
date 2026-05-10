@@ -500,22 +500,32 @@ func main() {
 	if home, err := os.UserHomeDir(); err == nil {
 		claudeDir = filepath.Join(home, ".claude")
 	}
+	// Event-log persistence directory sits next to sessions.json so
+	// operators can co-locate state. Empty StorePath (test harnesses)
+	// disables the event log persister via the same empty-string
+	// guard inside NewRouter.
+	eventLogDir := ""
+	if storePath != "" {
+		eventLogDir = filepath.Join(filepath.Dir(storePath), "events")
+	}
 	router := session.NewRouter(session.RouterConfig{
-		Wrapper:          wrapper,
-		Wrappers:         wrappers,
-		DefaultBackend:   defaultBackend,
-		MaxProcs:         cfg.Session.MaxProcs,
-		TTL:              cfg.ParseTTL(),
-		PruneTTL:         cfg.ParsePruneTTL(),
-		Model:            cfg.CLI.Model,
-		ExtraArgs:        cfg.CLI.Args,
-		BackendModels:    backendModels,
-		BackendExtraArgs: backendExtraArgs,
-		Workspace:        workspace,
-		StorePath:        storePath,
-		NoOutputTimeout:  noOutputTimeout,
-		TotalTimeout:     totalTimeout,
-		ClaudeDir:        claudeDir,
+		Wrapper:           wrapper,
+		Wrappers:          wrappers,
+		DefaultBackend:    defaultBackend,
+		MaxProcs:          cfg.Session.MaxProcs,
+		TTL:               cfg.ParseTTL(),
+		PruneTTL:          cfg.ParsePruneTTL(),
+		Model:             cfg.CLI.Model,
+		ExtraArgs:         cfg.CLI.Args,
+		BackendModels:     backendModels,
+		BackendExtraArgs:  backendExtraArgs,
+		Workspace:         workspace,
+		StorePath:         storePath,
+		NoOutputTimeout:   noOutputTimeout,
+		TotalTimeout:      totalTimeout,
+		ClaudeDir:         claudeDir,
+		EventLogDir:       eventLogDir,
+		EventLogGenerator: "naozhi",
 	})
 
 	// Context with cancellation for graceful shutdown. Created before

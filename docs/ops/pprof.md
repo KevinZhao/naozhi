@@ -126,6 +126,15 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_interrupt_no_turn_total` | InterruptViaControl session 在但无 active turn | 相对 sent 占比高 = UI 该在 idle 状态禁用 interrupt 按钮 |
 | `naozhi_interrupt_unsupported_total` | InterruptViaControl 当前协议无 stdin-level interrupt（ACP 等），router fallback SIGINT | 反映部署对 SIGINT fallback 的依赖度（SIGINT 语义更重，整 CLI kill） |
 | `naozhi_interrupt_error_total` | InterruptViaControl transport write 失败（shim socket 死 / broken pipe） | 非零几乎肯定意味着 shim 僵尸，pair `naozhi_shim_restart_total` 看 reconcile 是否清理 |
+| `naozhi_eventlog_persist_written_total` | 写到 `<keyhash>.log` 的 EventEntry 条数 | 对话量稳定但 written 停涨 = persist goroutine 卡死或 PersistSink channel 满（看 dropped） |
+| `naozhi_eventlog_persist_dropped_total` | PersistSink channel 满时丢弃的 EventEntry 条数 | 持续非零 = 磁盘或 writer goroutine 不堪负载；持久化层丢事件（内存 ring 里仍在） |
+| `naozhi_eventlog_persist_fsync_total` | Persister 发起的 fsync(log)+fsync(idx) 总次数 | 稳态 ~10/s；远超说明 debounce 没聚合（FlushInterval 配置太小 / 频繁 Flush()） |
+| `naozhi_eventlog_persist_malformed_lines_total` | `schema.MarshalRecord` 拒绝的条数（oversize / 编码失败） | 稳态 0；非零 = 有上游产出畸形 entry，对应 slog.Warn 有 UUID / size 信息 |
+| `naozhi_eventlog_persist_replay_leak_total` | replayPhase=true 的 batch 到达 sink 的累计条数 | **必须稳态 0**；非零 = 某调用路径在 InjectHistory 前挂了 SetPersistSink，违反 RFC §3.2.2 顺序契约 |
+| `naozhi_attachment_ref_bump_total` | attachment 引用计数 .meta 重写次数(coalesce 后) | 跟"含图事件达盘次数 × 不同 attachment 数"同步涨 |
+| `naozhi_attachment_ref_clear_total` | OnSessionRemoved 走 workspace 清 keyhash 的 .meta 重写次数 | 仅在 session 被删时短时涨,平时 0 |
+| `naozhi_attachment_ref_meta_error_total` | tracker UpdateMetaFile 失败数(缺 sidecar / ENOSPC / perm) | 稳态 0;非零 = attachment 将回退到仅 uploaded_at TTL GC |
+| `naozhi_attachment_ref_drop_total` | tracker 非阻塞 enqueue 满 channel 丢弃数 | 稳态 0;非零 = 调用方提交过快或磁盘 latency 异常,同 Persister 运维 |
 
 这个表的"完整性"由 `internal/metrics/metrics_doc_sync_test.go` 锁定：metrics.go 新增 counter 但未同步文档会在 CI 红。
 
@@ -146,6 +155,15 @@ ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1
   interrupt_no_turn: .naozhi_interrupt_no_turn_total,
   interrupt_unsupported: .naozhi_interrupt_unsupported_total,
   interrupt_error: .naozhi_interrupt_error_total,
+  eventlog_written: .naozhi_eventlog_persist_written_total,
+  eventlog_dropped: .naozhi_eventlog_persist_dropped_total,
+  eventlog_fsync: .naozhi_eventlog_persist_fsync_total,
+  eventlog_malformed: .naozhi_eventlog_persist_malformed_lines_total,
+  eventlog_replay_leak: .naozhi_eventlog_persist_replay_leak_total,
+  attachment_ref_bump: .naozhi_attachment_ref_bump_total,
+  attachment_ref_clear: .naozhi_attachment_ref_clear_total,
+  attachment_ref_meta_error: .naozhi_attachment_ref_meta_error_total,
+  attachment_ref_drop: .naozhi_attachment_ref_drop_total,
   uptime: .memstats.uptime
 }'
 ```
