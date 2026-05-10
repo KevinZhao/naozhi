@@ -3,6 +3,7 @@ package project
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -307,6 +308,55 @@ func TestSnapshotConfig_EmptyBindings(t *testing.T) {
 	snap := snapshotConfig(p)
 	if snap.ChatBindings != nil {
 		t.Error("snapshotConfig should preserve nil ChatBindings")
+	}
+}
+
+// ---- DisplayName / Emoji (R110-P2 foundation) ----
+
+func TestProjectConfig_DisplayNameEmojiRoundtrip(t *testing.T) {
+	t.Parallel()
+	in := ProjectConfig{DisplayName: "My Project", Emoji: "\U0001F525"}
+	data, err := yaml.Marshal(&in)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var out ProjectConfig
+	if err := yaml.Unmarshal(data, &out); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if out.DisplayName != in.DisplayName || out.Emoji != in.Emoji {
+		t.Errorf("round-trip mismatch: in=%+v out=%+v", in, out)
+	}
+}
+
+func TestProjectConfig_LegacyYamlWithoutDisplayName(t *testing.T) {
+	t.Parallel()
+	legacy := []byte("git_sync: true\ngit_remote: origin\n")
+	var cfg ProjectConfig
+	if err := yaml.Unmarshal(legacy, &cfg); err != nil {
+		t.Fatalf("legacy unmarshal: %v", err)
+	}
+	if cfg.DisplayName != "" || cfg.Emoji != "" {
+		t.Errorf("legacy yaml should leave DisplayName/Emoji empty, got %q/%q", cfg.DisplayName, cfg.Emoji)
+	}
+	if !cfg.GitSync || cfg.GitRemote != "origin" {
+		t.Errorf("legacy fields corrupted: %+v", cfg)
+	}
+}
+
+func TestProjectConfig_DisplayNameTooLong(t *testing.T) {
+	t.Parallel()
+	cfg := ProjectConfig{DisplayName: strings.Repeat("x", 129)}
+	if err := ValidateConfig(cfg); err == nil {
+		t.Error("expected 129-rune DisplayName to fail ValidateConfig")
+	}
+}
+
+func TestProjectConfig_EmojiTooLong(t *testing.T) {
+	t.Parallel()
+	cfg := ProjectConfig{Emoji: strings.Repeat("a", 9)}
+	if err := ValidateConfig(cfg); err == nil {
+		t.Error("expected 9-rune Emoji to fail ValidateConfig")
 	}
 }
 

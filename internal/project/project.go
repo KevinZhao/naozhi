@@ -34,6 +34,15 @@ type ProjectConfig struct {
 	PlannerModel  string `yaml:"planner_model,omitempty" json:"planner_model,omitempty"`
 	PlannerPrompt string `yaml:"planner_prompt,omitempty" json:"planner_prompt,omitempty"`
 
+	// DisplayName is the operator-facing label that overrides the directory
+	// name in dashboard rendering. Empty means "use directory name".
+	// R110-P2 foundation: schema only, not yet wired through to UI.
+	DisplayName string `yaml:"display_name,omitempty" json:"display_name,omitempty"`
+	// Emoji is a single Unicode emoji (or short label prefix up to 8 runes)
+	// rendered alongside DisplayName. A single emoji may be up to ~4 runes
+	// once modifiers and ZWJ joiners are counted. Empty means "no prefix".
+	Emoji string `yaml:"emoji,omitempty" json:"emoji,omitempty"`
+
 	ChatBindings []ChatBinding `yaml:"chat_bindings,omitempty" json:"chat_bindings,omitempty"`
 }
 

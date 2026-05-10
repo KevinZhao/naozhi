@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 func TestWatchdog_NotStartedDoesNotFire(t *testing.T) {
@@ -26,7 +28,12 @@ func TestWatchdog_StartTwiceIsSafe(t *testing.T) {
 	w.Start()
 	w.Start() // second call must be idempotent
 
-	time.Sleep(200 * time.Millisecond)
+	// Watchdog timeout is 50ms; poll until the fire is observed. The poll
+	// replaces the previous `time.Sleep(200ms)` and fails fast on slow CI
+	// with a clear diagnostic instead of a silent count mismatch.
+	testhelper.Eventually(t, func() bool { return count.Load() >= 1 }, time.Second, "watchdog did not fire after Start()")
+	// Give any duplicate Start() a chance to double-fire (would be a bug).
+	time.Sleep(50 * time.Millisecond)
 
 	if got := count.Load(); got != 1 {
 		t.Errorf("expected exactly 1 fire, got %d", got)

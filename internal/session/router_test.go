@@ -611,6 +611,44 @@ func TestResetRunningSession(t *testing.T) {
 	}
 }
 
+// TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace verifies the
+// atomic Reset+delete path used by /new (Round-207 SM1). Deterministic
+// case asserts the override is gone; race case stresses the codepath
+// under -race to catch any lock regression.
+func TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace(t *testing.T) {
+	r := newTestRouter(3)
+	r.workspaceOverrides = make(map[string]string)
+	r.workspace = "/default"
+	injectSession(r, "key1", newIdleProc())
+	r.SetWorkspace("key1", "/tmp/override")
+	if got := r.GetWorkspace("key1"); got != "/tmp/override" {
+		t.Fatalf("pre-reset workspace = %q, want /tmp/override", got)
+	}
+	r.ResetAndDiscardOverride("key1")
+	if _, ok := r.workspaceOverrides["key1"]; ok {
+		t.Error("workspaceOverrides[key1] still present after ResetAndDiscardOverride")
+	}
+	if got := r.GetWorkspace("key1"); got != "/default" {
+		t.Errorf("post-reset workspace = %q, want /default", got)
+	}
+
+	// Race sub-case: concurrent SetWorkspace with ResetAndDiscardOverride
+	// must not trip -race; either order is acceptable as long as the lock
+	// pairs the clear with the override delete.
+	injectSession(r, "key2", newIdleProc())
+	r.SetWorkspace("key2", "/tmp/initial")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			r.SetWorkspace("key2", fmt.Sprintf("/tmp/racing-%d", i))
+		}
+	}()
+	r.ResetAndDiscardOverride("key2")
+	<-done
+	_ = r.GetWorkspace("key2")
+}
+
 // TestWaitSocketGoneForKey_EmptyKey — the helper must be a no-op when
 // called with an empty key (unused session). Without this guard Reset
 // would block the caller for 2s for every test that never started a shim.

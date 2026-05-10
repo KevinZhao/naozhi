@@ -501,6 +501,7 @@ func main() {
 		slog.Error("create workspace dir", "path", workspace, "err", err)
 		os.Exit(1)
 	}
+	warnIfStateDirLarge(filepath.Dir(storePath))
 
 	// Session Router
 	claudeDir := ""
@@ -941,6 +942,32 @@ func parseBytesOrDefault(s string, def int64) int64 {
 		return def
 	}
 	return n * multiplier
+}
+
+// stateDirWarnMB is the soft ceiling for ~/.naozhi/ total size; see
+// docs/ops/disk-budget.md. RNEW-OPS-415 tracks quota enforcement.
+const stateDirWarnMB = 500
+
+// warnIfStateDirLarge walks stateDir once at startup and warns if total
+// bytes exceed stateDirWarnMB. First-run / permission errors are silent;
+// a truncated scan still warns using the partial total as a lower bound.
+func warnIfStateDirLarge(stateDir string) {
+	if stateDir == "" || stateDir == "." {
+		return
+	}
+	bytes, err := osutil.StateDirSize(stateDir)
+	truncated := errors.Is(err, osutil.ErrStateDirScanTruncated)
+	if err != nil && !truncated {
+		return
+	}
+	sizeMB := bytes / (1024 * 1024)
+	if sizeMB < stateDirWarnMB {
+		return
+	}
+	slog.Warn("state directory large",
+		"path", stateDir, "size_mb", sizeMB, "threshold_mb", stateDirWarnMB,
+		"truncated", truncated,
+		"hint", "prune attachments/events; see docs/ops/disk-budget.md")
 }
 
 // chatIDSuffix returns the last 8 characters of a chat ID for logging,

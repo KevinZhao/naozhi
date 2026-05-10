@@ -16,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // readMethodBody parses srcPath with go/parser and returns the exact source
@@ -1054,13 +1056,13 @@ func TestProcess_StartReadLoop_StateReady(t *testing.T) {
 		t.Errorf("initial State = %v, want StateSpawning", p.State)
 	}
 	p.startReadLoop()
-	time.Sleep(10 * time.Millisecond)
-	p.mu.Lock()
-	s := p.State
-	p.mu.Unlock()
-	if s != StateReady {
-		t.Errorf("State after startReadLoop = %v, want StateReady", s)
-	}
+	// Poll for StateReady instead of sleeping a fixed 10ms; this is
+	// faster on idle runs and tolerant under -race / slow CI.
+	testhelper.Eventually(t, func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.State == StateReady
+	}, time.Second, "startReadLoop did not reach StateReady")
 	p.Kill()
 }
 

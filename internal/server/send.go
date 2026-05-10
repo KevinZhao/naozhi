@@ -197,7 +197,10 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 		if sess := h.router.GetSession(key); sess != nil {
 			sess.DiscardPassthroughPending(cli.ErrSessionReset)
 		}
-		h.router.Reset(key)
+		// Round-207 SM1: atomic Reset + workspaceOverride delete closes
+		// the race where a concurrent SetWorkspace would survive a naive
+		// Reset+delete pair and leak into the fresh session.
+		h.router.ResetAndDiscardOverride(key)
 		h.BroadcastSessionsUpdate()
 		return true, "", nil
 	}

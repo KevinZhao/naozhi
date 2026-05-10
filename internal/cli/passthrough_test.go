@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // passthroughShim extends shimTestServer with a recv goroutine that parses
@@ -296,9 +298,12 @@ func TestPassthrough_CtxCancel_TombstoneDoesNotBreakFIFO(t *testing.T) {
 	sh.emitReplay(inputA.UUID, "msg A")
 	sh.emitResult("s1", "reply to A")
 
-	// Need a short moment for the canceled slot's result to be dropped
-	// and removed from pendingSlots before B's turn arrives.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the canceled slot A to be dropped from pendingSlots before
+	// B's turn begins — observable via PassthroughDepth rather than a
+	// fixed 100ms sleep that is too long on idle and too short on -race.
+	testhelper.Eventually(t, func() bool {
+		return sh.proc.PassthroughDepth() <= 1
+	}, 2*time.Second, "canceled slot A was not dropped from pendingSlots")
 
 	sh.emitInit("s1")
 	sh.emitReplay(inputB.UUID, "msg B")

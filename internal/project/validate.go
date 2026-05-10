@@ -44,6 +44,15 @@ func ValidateProjectName(name string) error {
 	return nil
 }
 
+// maxDisplayNameRunes caps the operator-facing label so it cannot bloat
+// dashboard rows or slog attrs. 128 runes matches MaxProjectNameBytes.
+const maxDisplayNameRunes = 128
+
+// maxEmojiRunes caps the emoji prefix. A single Unicode emoji with skin
+// tone + ZWJ + variation selector can reach ~4 runes; 8 gives headroom
+// without permitting full words.
+const maxEmojiRunes = 8
+
 // maxPlannerPromptBytes is the hard cap on PlannerPrompt size. An
 // oversized prompt would inflate the exec.Command argv past Linux's
 // ARG_MAX (~2 MB) and make Spawn fail with a cryptic E2BIG.
@@ -102,6 +111,25 @@ func ValidateConfig(cfg ProjectConfig) error {
 	}
 	if cfg.PlannerModel != "" && !plannerModelRe.MatchString(cfg.PlannerModel) {
 		return fmt.Errorf("%w: planner_model contains invalid characters", ErrInvalidConfig)
+	}
+	// R110-P2: DisplayName + Emoji foundation. Reject embedded C0/C1/bidi/
+	// LS-PS via IsLogInjectionRune to mirror PlannerPrompt policy — these
+	// strings flow into dashboard HTML and slog attrs.
+	if utf8.RuneCountInString(cfg.DisplayName) > maxDisplayNameRunes {
+		return fmt.Errorf("%w: display_name exceeds %d-rune limit", ErrInvalidConfig, maxDisplayNameRunes)
+	}
+	for _, r := range cfg.DisplayName {
+		if r == 0 || r == 0x7f || (r < 0x20 && r != '\t') || osutil.IsLogInjectionRune(r) {
+			return fmt.Errorf("%w: display_name contains invalid characters", ErrInvalidConfig)
+		}
+	}
+	if utf8.RuneCountInString(cfg.Emoji) > maxEmojiRunes {
+		return fmt.Errorf("%w: emoji exceeds %d-rune limit", ErrInvalidConfig, maxEmojiRunes)
+	}
+	for _, r := range cfg.Emoji {
+		if r == 0 || r == 0x7f || r < 0x20 || osutil.IsLogInjectionRune(r) {
+			return fmt.Errorf("%w: emoji contains invalid characters", ErrInvalidConfig)
+		}
 	}
 	// R184-SEC-M1: reject ChatBindings fields that would break the
 	// bindingIndex key invariant "platform:chatType:chatID". A colon in any

@@ -2280,16 +2280,14 @@ func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBack
 	}
 }
 
-// Reset discards the session for the given key (user sent /new).
-func (r *Router) Reset(key string) {
-	r.mu.Lock()
-
+// resetLocked performs the in-lock teardown shared by Reset and
+// ResetAndDiscardOverride. Caller holds r.mu and must run the
+// finishResetUnlocked sequence after releasing it.
+func (r *Router) resetLocked(key string) (processIface, bool) {
 	s, ok := r.sessions[key]
 	if !ok {
-		r.mu.Unlock()
-		return
+		return nil, false
 	}
-
 	proc := s.loadProcess()
 	wasActive := !s.exempt && proc != nil && proc.Alive()
 	r.unregisterSessionLocked(key, s, false)
@@ -2300,8 +2298,42 @@ func (r *Router) Reset(key string) {
 	}
 	r.storeDirty = true
 	r.storeGen.Add(1)
-	r.mu.Unlock()
+	return proc, true
+}
 
+// Reset discards the session for the given key (user sent /new).
+func (r *Router) Reset(key string) {
+	r.mu.Lock()
+	proc, ok := r.resetLocked(key)
+	r.mu.Unlock()
+	if !ok {
+		return
+	}
+	r.finishResetUnlocked(key, proc)
+}
+
+// ResetAndDiscardOverride atomically resets the session AND deletes the
+// per-chat workspace override, closing the race where a concurrent
+// SetWorkspace would otherwise survive a bare Reset+delete pair and leak
+// into the next session (Round-207 SM1).
+func (r *Router) ResetAndDiscardOverride(key string) {
+	r.mu.Lock()
+	proc, hadSession := r.resetLocked(key)
+	if _, existed := r.workspaceOverrides[key]; existed {
+		delete(r.workspaceOverrides, key)
+		r.wsOverridesDirty = true
+		r.wsOverridesGen.Add(1)
+	}
+	r.mu.Unlock()
+	if !hadSession {
+		return
+	}
+	r.finishResetUnlocked(key, proc)
+}
+
+// finishResetUnlocked runs the post-unlock teardown shared by Reset and
+// ResetAndDiscardOverride. Must be called without r.mu held.
+func (r *Router) finishResetUnlocked(key string, proc processIface) {
 	if proc != nil && proc.Alive() {
 		proc.Close()
 	}
