@@ -2897,6 +2897,14 @@ async function sendMessage() {
   sending = true;
   const btn = document.getElementById('btn-send');
   if (btn) btn.classList.add('sending');
+  // Flip the send→stop button + running banner BEFORE the network round trip,
+  // not after — a resumed session has no CLI process yet, so the first send
+  // triggers a subprocess spawn that can take several hundred ms. Leaving the
+  // green send button visible during that window makes the click feel ignored
+  // and invites double-sends. onSendAck/rollbackOptimisticRunning undo this on
+  // busy/error/reset; the 20s safety timer in markSessionOptimisticRunning
+  // prevents a stuck banner if the server never responds.
+  markSessionOptimisticRunning(selectedKey, selectedNode);
 
   // WS path: always preferred now — uploads already on server, only file_ids travel.
   if (wsm.isConnected()) {
@@ -2942,7 +2950,7 @@ async function sendMessage() {
       delete sessionDrafts[selectedKey];
       clearPendingFiles();
       if (text) sessionLastSent[sid(selectedKey, selectedNode)] = text;
-      markSessionOptimisticRunning(selectedKey, selectedNode);
+      // Optimistic running flip already applied above — no-op if unchanged.
       sending = false;
       if (btn) btn.classList.remove('sending');
       return;
@@ -2973,16 +2981,19 @@ async function sendMessage() {
 
     if (r.status === 401 || r.status === 403) {
       if (input) setMsgValue(input, text);
+      rollbackOptimisticRunning(selectedKey, selectedNode);
       showAuthModal();
       return;
     }
     if (r.status === 429) {
       if (input) setMsgValue(input, text);
+      rollbackOptimisticRunning(selectedKey, selectedNode);
       showToast('消息队列已满，请稍后重试', 'warning');
       return;
     }
     if (!r.ok) {
       if (input) setMsgValue(input, text);
+      rollbackOptimisticRunning(selectedKey, selectedNode);
       // Some error paths still write text/plain; fall back to text() so we
       // always surface the real message instead of a generic "send failed".
       const raw = await r.text().catch(() => '');
@@ -3003,9 +3014,13 @@ async function sendMessage() {
     if (input) clearMsg(input);
     delete sessionDrafts[selectedKey];
     clearPendingFiles();
-    if (ackStatus !== 'reset') {
+    if (ackStatus === 'reset') {
+      // /clear and /new do not spawn a turn — undo the pre-send optimistic flip
+      // so the running banner doesn't hang on a no-op command.
+      rollbackOptimisticRunning(selectedKey, selectedNode);
+    } else {
       if (text) sessionLastSent[sid(selectedKey, selectedNode)] = text;
-      markSessionOptimisticRunning(selectedKey, selectedNode);
+      // Optimistic running flip already applied above — keep it.
     }
 
     // Speed up polling when WS not connected
@@ -3021,6 +3036,7 @@ async function sendMessage() {
     }
   } catch (e) {
     if (input) input.value = text;
+    rollbackOptimisticRunning(selectedKey, selectedNode);
     showNetworkError('发送消息', e);
   } finally {
     sending = false;
