@@ -202,6 +202,15 @@ type EventLog struct {
 	turnAgents []SubagentInfo // foreground agents in current turn; protected by mu
 	bgAgents   []SubagentInfo // background (run_in_background) agents; cleared on turn boundaries like turnAgents; protected by mu
 
+	// onAgentTaskDone fires after applyEntryStateLocked ingests a "task_done"
+	// entry, carrying the task_id and final status. The server layer uses
+	// this to close the corresponding agent tailer (RFC v4 §3.5.4). Fired
+	// OUTSIDE l.mu to avoid back-pressure on hot Append paths; callers must
+	// be fast + re-entrant safe (the agent_tailer.closeTask path is).
+	// Zero/nil = no subscriber.
+	onAgentTaskDoneMu sync.Mutex
+	onAgentTaskDoneFn func(taskID, status string)
+
 	// subMu is an RWMutex because the hot path notifySubscribers only reads
 	// the subscribers map (iterate + non-blocking channel send, which is
 	// goroutine-safe). Subscribe/Unsubscribe/CloseSubscribers mutate the map
@@ -222,10 +231,25 @@ func NewEventLog(maxSize int) *EventLog {
 	return &EventLog{maxSize: maxSize, entries: make([]EventEntry, maxSize)}
 }
 
+// pendingTaskDone captures a task_done callback invocation that
+// applyEntryStateLocked wants to run *after* the caller has released l.mu.
+// Deferring the dispatch keeps Append / AppendBatch's "one lock acquisition
+// per call" contract intact — firing inline and re-acquiring would let a
+// concurrent Append slip between batch entries and interleave ring-buffer
+// writes. R201-CRIT-1.
+type pendingTaskDone struct {
+	TaskID string
+	Status string
+}
+
 // applyEntryStateLocked updates per-turn agent tracking for a single entry.
 // Caller MUST hold l.mu. Summary atomic writes are the caller's responsibility
 // so that AppendBatch can coalesce multiple per-type updates into one Store.
-func (l *EventLog) applyEntryStateLocked(e EventEntry) {
+//
+// Returns (true, pending) when the entry is a "task_done" event that warrants
+// an external callback dispatch; callers should accumulate pending patches
+// and fire them after releasing l.mu via fireTaskDoneCallbacks.
+func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendingTaskDone) {
 	switch e.Type {
 	case "agent":
 		label := e.Subagent
@@ -259,7 +283,7 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) {
 				l.turnAgents[i].TaskID = e.TaskID
 				l.turnAgents[i].Status = "running"
 				l.turnAgents[i].StartedAtMS = e.Time
-				return
+				return false, pendingTaskDone{}
 			}
 		}
 		for i := range l.bgAgents {
@@ -267,7 +291,7 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) {
 				l.bgAgents[i].TaskID = e.TaskID
 				l.bgAgents[i].Status = "running"
 				l.bgAgents[i].StartedAtMS = e.Time
-				return
+				return false, pendingTaskDone{}
 			}
 		}
 	case "task_progress":
@@ -285,16 +309,17 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) {
 				if e.DurationMS > 0 {
 					l.turnAgents[i].DurationMS = e.DurationMS
 				}
-				return
+				return false, pendingTaskDone{}
 			}
 		}
 	case "task_done":
+		status := e.Status
+		if status == "" {
+			status = "completed"
+		}
+		matched := false
 		for i := range l.turnAgents {
 			if l.turnAgents[i].TaskID != "" && l.turnAgents[i].TaskID == e.TaskID {
-				status := e.Status
-				if status == "" {
-					status = "completed"
-				}
 				l.turnAgents[i].Status = status
 				if e.DurationMS > 0 {
 					l.turnAgents[i].DurationMS = e.DurationMS
@@ -302,25 +327,62 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) {
 				if e.ToolUses > 0 {
 					l.turnAgents[i].ToolUses = e.ToolUses
 				}
-				return
+				matched = true
+				break
 			}
 		}
-		for i := range l.bgAgents {
-			if l.bgAgents[i].TaskID != "" && l.bgAgents[i].TaskID == e.TaskID {
-				status := e.Status
-				if status == "" {
-					status = "completed"
+		if !matched {
+			for i := range l.bgAgents {
+				if l.bgAgents[i].TaskID != "" && l.bgAgents[i].TaskID == e.TaskID {
+					l.bgAgents[i].Status = status
+					if e.DurationMS > 0 {
+						l.bgAgents[i].DurationMS = e.DurationMS
+					}
+					break
 				}
-				l.bgAgents[i].Status = status
-				if e.DurationMS > 0 {
-					l.bgAgents[i].DurationMS = e.DurationMS
-				}
-				return
 			}
 		}
+		if e.TaskID != "" {
+			return true, pendingTaskDone{TaskID: e.TaskID, Status: status}
+		}
+		return false, pendingTaskDone{}
 	case "result", "user":
 		l.turnAgents = l.turnAgents[:0]
 		l.bgAgents = l.bgAgents[:0]
+	}
+	return false, pendingTaskDone{}
+}
+
+// SetOnAgentTaskDone installs a callback that fires when a "task_done"
+// EventEntry is appended. Serialised via its own mutex so multiple
+// subscribers are forbidden — setting a second time replaces the first.
+// Used by the server-side tailer registry to stop tailers promptly
+// once the parent stream marks an agent task finished.
+func (l *EventLog) SetOnAgentTaskDone(fn func(taskID, status string)) {
+	l.onAgentTaskDoneMu.Lock()
+	l.onAgentTaskDoneFn = fn
+	l.onAgentTaskDoneMu.Unlock()
+}
+
+// fireTaskDoneCallbacks dispatches previously-collected task_done callbacks
+// outside l.mu. Append/AppendBatch accumulate pendingTaskDone entries while
+// holding l.mu, release the lock cleanly, and then call this helper — so a
+// slow callback (e.g. tailer registry closing 50 tailers) cannot block
+// concurrent Appends or interleave ring-buffer writes. R201-CRIT-1.
+//
+// Safe to call with an empty slice; common case on non-task_done appends.
+func (l *EventLog) fireTaskDoneCallbacks(pending []pendingTaskDone) {
+	if len(pending) == 0 {
+		return
+	}
+	l.onAgentTaskDoneMu.Lock()
+	fn := l.onAgentTaskDoneFn
+	l.onAgentTaskDoneMu.Unlock()
+	if fn == nil {
+		return
+	}
+	for _, p := range pending {
+		fn(p.TaskID, p.Status)
 	}
 }
 
@@ -395,7 +457,7 @@ func (l *EventLog) Append(e EventEntry) {
 		l.count++
 	}
 
-	l.applyEntryStateLocked(e)
+	firePending, pending := l.applyEntryStateLocked(e)
 
 	// Atomic summary stores are issued *inside* l.mu so that AppendBatch,
 	// which holds l.mu for its full duration, cannot have its later Store
@@ -411,6 +473,13 @@ func (l *EventLog) Append(e EventEntry) {
 	}
 
 	l.mu.Unlock()
+
+	// Fire task_done callbacks OUTSIDE l.mu so a slow subscriber (e.g. the
+	// server tailer registry closing N tailers) cannot serialise concurrent
+	// Append calls or wedge the ring buffer mid-write. R201-CRIT-1.
+	if firePending {
+		l.fireTaskDoneCallbacks([]pendingTaskDone{pending})
+	}
 
 	l.notifySubscribers()
 }
@@ -432,6 +501,7 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 		lastPrompt, lastActivity string
 		sawPrompt, sawActivity   bool
 		userDelta                int64
+		pendingDone              []pendingTaskDone
 	)
 	// Capture a single wall-clock read before locking so the N zero-time
 	// entries inside the loop (typical case: InjectHistory's 500-entry
@@ -457,7 +527,9 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 			l.count++
 		}
 
-		l.applyEntryStateLocked(e)
+		if fire, p := l.applyEntryStateLocked(e); fire {
+			pendingDone = append(pendingDone, p)
+		}
 
 		// Track last-of-kind summaries so a single Store (below, still
 		// under l.mu) captures the tail of the batch. The "saw" flag is
@@ -490,6 +562,7 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 	}
 	l.mu.Unlock()
 
+	l.fireTaskDoneCallbacks(pendingDone)
 	l.notifySubscribers()
 }
 
@@ -796,6 +869,34 @@ func (l *EventLog) TurnAgents() []SubagentInfo {
 	out := make([]SubagentInfo, total)
 	copy(out, l.turnAgents)
 	copy(out[len(l.turnAgents):], l.bgAgents)
+	return out
+}
+
+// Subagents returns a copy of foreground turn agents only. Used by dashboard
+// snapshot enrichment (server.enrichSnapshot) where banner solo/team rows
+// need to stay separated from long-lived [bg] tags. Tests also use this to
+// pin per-agent lifecycle state without the foreground/background merge.
+func (l *EventLog) Subagents() []SubagentInfo {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if len(l.turnAgents) == 0 {
+		return nil
+	}
+	out := make([]SubagentInfo, len(l.turnAgents))
+	copy(out, l.turnAgents)
+	return out
+}
+
+// BgSubagents returns a copy of background (run_in_background) turn agents.
+// Symmetric with Subagents — see that method's doc for rationale.
+func (l *EventLog) BgSubagents() []SubagentInfo {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if len(l.bgAgents) == 0 {
+		return nil
+	}
+	out := make([]SubagentInfo, len(l.bgAgents))
+	copy(out, l.bgAgents)
 	return out
 }
 

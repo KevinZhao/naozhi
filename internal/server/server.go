@@ -56,17 +56,18 @@ type Server struct {
 	discoveryCache    *discoveryCache    // background-cached local discovery results
 
 	// Extracted handler groups
-	auth        *AuthHandlers
-	cronH       *CronHandlers
-	transcribeH *TranscribeHandler
-	nodeAccess  *nodeAccessor
-	discoveryH  *DiscoveryHandlers
-	projectH    *ProjectHandlers
-	sessionH    *SessionHandlers
-	healthH     *HealthHandler
-	sendH       *SendHandler
-	cliH        *CLIBackendsHandler
-	scratchH    *ScratchHandler
+	auth         *AuthHandlers
+	cronH        *CronHandlers
+	transcribeH  *TranscribeHandler
+	nodeAccess   *nodeAccessor
+	discoveryH   *DiscoveryHandlers
+	projectH     *ProjectHandlers
+	sessionH     *SessionHandlers
+	healthH      *HealthHandler
+	sendH        *SendHandler
+	cliH         *CLIBackendsHandler
+	scratchH     *ScratchHandler
+	agentEventsH *AgentEventsHandlers
 
 	// scratchPool manages ephemeral "aside" sessions backing the dashboard
 	// preview drawer. Separate from router.sessions because scratches must
@@ -546,6 +547,10 @@ func buildServer(opts ServerOptions) *Server {
 	}
 	s.sessionH.initStaticStats()
 	s.sessionH.WarmHistoryCache()
+	s.agentEventsH = &AgentEventsHandlers{
+		router:     router,
+		nodeAccess: s.nodeAccess,
+	}
 
 	// Scratch pool (ephemeral aside sessions). Bound to the same router so
 	// scratches flow through the standard spawn/send/event path as managed

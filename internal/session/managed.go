@@ -928,6 +928,56 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 	return out
 }
 
+// SubagentLinker returns the SubagentLinker owned by the live *cli.Process,
+// or nil when the session is not backed by a live Claude-CLI process (fake
+// test process, dead process, ACP protocol, etc.). Callers must guard the
+// nil return — the agent-team UI endpoints downgrade to 404 in that case.
+//
+// Intentionally type-asserts rather than widening processIface so the fake
+// processes in router/managed tests don't need to implement the full Linker
+// surface. The downside — a test process that wants real linker behaviour
+// must wrap *cli.Process directly — is acceptable because the linker's own
+// unit tests in internal/cli/subagent_link_test.go are the canonical spot
+// for that coverage.
+//
+// TODO(RFC v4 phase 3+): if a second backend needs internal agent-view
+// support (e.g. ACP / Kiro), abstract via:
+//
+//	type AgentIntrospector interface {
+//	    Linker() *cli.SubagentLinker
+//	    EventLog() *cli.EventLog
+//	}
+//
+// and have *cli.Process implement it, then switch this to a type-safe
+// assertion. Today only stream-json-backed Claude writes the on-disk
+// transcript, so the cost of the abstraction is not warranted yet.
+func (s *ManagedSession) SubagentLinker() *cli.SubagentLinker {
+	proc := s.loadProcess()
+	if proc == nil {
+		return nil
+	}
+	real, ok := proc.(*cli.Process)
+	if !ok {
+		return nil
+	}
+	return real.Linker()
+}
+
+// AgentEventLog exposes the live *cli.EventLog so the server-side tailer
+// registry can install its task_done hook. nil for fake processes / dead
+// sessions, same policy as SubagentLinker above.
+func (s *ManagedSession) AgentEventLog() *cli.EventLog {
+	proc := s.loadProcess()
+	if proc == nil {
+		return nil
+	}
+	real, ok := proc.(*cli.Process)
+	if !ok {
+		return nil
+	}
+	return real.EventLog()
+}
+
 // EventLastN returns the most recent n event entries.
 func (s *ManagedSession) EventLastN(n int) []cli.EventEntry {
 	proc := s.loadProcess()

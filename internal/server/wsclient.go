@@ -287,6 +287,22 @@ func (c *wsClient) readPump() {
 				continue
 			}
 			c.SendJSON(node.ServerMsg{Type: "pong"})
+		case "agent_subscribe":
+			if !c.authenticated.Load() {
+				c.SendJSON(node.ServerMsg{Type: "error", Error: "not authenticated"})
+				continue
+			}
+			// Reuse sendLimiter's budget — a client cannot spin subscribe
+			// loops to pin tailers and DoS the 50-tailer cap.
+			if !c.sendLimiter.Allow() {
+				continue
+			}
+			c.hub.handleAgentSubscribe(c, msg)
+		case "agent_unsubscribe":
+			if !c.authenticated.Load() {
+				continue
+			}
+			c.hub.handleAgentUnsubscribe(c, msg)
 		}
 	}
 }

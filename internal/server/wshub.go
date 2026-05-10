@@ -120,6 +120,22 @@ type Hub struct {
 	// its clientWG.Wait could schedule a callback that never gets Waited on,
 	// or worse, add to clientWG after Wait has already returned.
 	debounceClosed bool
+
+	// tailers owns the agentTailer registry backing agent_subscribe / agent_
+	// unsubscribe WS flows (RFC v4 agent-team-ui §3.5.4). Initialised by
+	// NewHub so the nil-guard at each call site can simplify to a presence
+	// check. Shutdown tears it down alongside other background loops.
+	tailers *tailerRegistry
+
+	// wiredLinkersMu + wiredLinkers track the *cli.SubagentLinker pointers
+	// we've already attached the server-side OnResolve+task_done callbacks
+	// to, so repeat completeSubscribe calls (re-subscribe on reconnect)
+	// don't register duplicate callbacks. Kept per-Hub so tests that build
+	// multiple Hubs don't share state; Shutdown clears the map so the
+	// Linker pointers can be GC'd (previously they were leaked in a
+	// package-level map for the process lifetime). R201-CRIT-2.
+	wiredLinkersMu sync.Mutex
+	wiredLinkers   map[*cli.SubagentLinker]struct{}
 }
 
 // HubOptions holds configuration for a Hub.
@@ -199,6 +215,8 @@ func NewHub(opts HubOptions) *Hub {
 		ReadBufferSize:  8192,
 		WriteBufferSize: 8192,
 	}
+	h.tailers = newTailerRegistry(h)
+	h.wiredLinkers = make(map[*cli.SubagentLinker]struct{})
 	return h
 }
 
@@ -341,6 +359,13 @@ func (h *Hub) unregister(c *wsClient) {
 		// `removed` so a double-unregister (stale close path) cannot leak
 		// the counter into negative territory.
 		h.connCount.Add(-1)
+		// Drop any agent_subscribe refs this client was holding so refCount
+		// stays accurate — otherwise an abrupt disconnect (mobile sleep)
+		// would leave the tailer in broadcasting mode forever, wedging a
+		// slot in the 50-tailer cap.
+		if h.tailers != nil {
+			h.tailers.detachClient(c)
+		}
 	}
 
 	// Snapshot nodes under nodesMu to avoid data race. Single-node deployments
@@ -536,6 +561,13 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		h.mu.Unlock()
 		return
 	}
+	// Wire server-side tailer ensure on Linker.Resolve. Idempotent: the
+	// Linker's OnResolve list accumulates per-subscribe because completeSubscribe
+	// fires on every re-subscribe, but ensureTailer is guarded by the
+	// (key, taskID) map and extra callback invocations are cheap no-ops on
+	// an already-running tailer. The "right" place is router.spawnSession,
+	// but avoiding that coupling keeps server/cli layering clean. S2-OK.
+	h.maybeWireLinkerTailer(key, sess)
 	notify, unsub := sess.SubscribeEvents()
 
 	h.mu.Lock()
@@ -1369,6 +1401,21 @@ func (h *Hub) Shutdown() {
 	for _, conn := range conns {
 		conn.Close()
 	}
+
+	// Stop all agent tailers so their ticker goroutines do not race the
+	// client closure below (a tailer SendJSON to a half-closed wsClient
+	// would be logged as a drop and bump droppedTotal, but is otherwise
+	// harmless). Done AFTER closing the conns so in-flight pollOnce calls
+	// finish their single iteration against a subscriber set that includes
+	// the closed client; SendRaw's select-default drops gracefully.
+	if h.tailers != nil {
+		h.tailers.Shutdown()
+	}
+	// Release wiredLinkers so *SubagentLinker pointers can be GC'd —
+	// previously this was a process-lifetime package-level leak.
+	h.wiredLinkersMu.Lock()
+	h.wiredLinkers = nil
+	h.wiredLinkersMu.Unlock()
 
 	// Now that conns are closed, pumps will observe the read/write error
 	// and exit their loops; eventPushLoop sees h.ctx.Done() or c.done.

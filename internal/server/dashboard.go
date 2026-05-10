@@ -233,6 +233,12 @@ func (s *Server) registerDashboard() {
 	})
 	s.hub.SetScheduler(s.scheduler)
 
+	// Route /api/sessions snapshot enrichment through the hub's tailer
+	// registry now that both exist. RFC v4 agent-team-ui §3.5.4.
+	if s.sessionH != nil {
+		s.sessionH.snapshotEnricher = s.hub.enrichSnapshot
+	}
+
 	// Wire sendH now that hub exists
 	uploads := newUploadStore()
 	uploads.StartCleanup(s.hub.ctx)
@@ -274,6 +280,8 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /api/cli/backends", auth(s.cliH.handle))
 	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.handleList))
 	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.handleEvents))
+	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.handleAgentEvents))
+	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.handleToolResult))
 	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
 	s.mux.HandleFunc("POST /api/sessions/upload", auth(s.sendH.handleUpload))
 	s.mux.HandleFunc("GET /api/sessions/attachment", auth(s.sendH.handleAttachment))

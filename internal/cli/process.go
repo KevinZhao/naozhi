@@ -269,6 +269,16 @@ type Process struct {
 	turnStartedAt    time.Time   // set on system/init; zeroed on result
 	inTurn           bool
 	slotIDGen        atomic.Uint64
+
+	// linker maps parallel-agent task_ids to on-disk transcript jsonl paths
+	// so the dashboard's /api/sessions/agent_events endpoint can stream each
+	// agent's internal events. Initialised by Wrapper.Spawn via InitLinker;
+	// nil for processes that predate the agent-team UI feature (test fakes).
+	linker *SubagentLinker
+	// cwd is the working directory passed to Spawn. Captured so linker
+	// projectDir can be (re)derived on shim reconnect without plumbing
+	// SpawnOptions through every call site.
+	cwd string
 }
 
 // sendSlot tracks one in-flight passthrough Send call. The slot is appended
@@ -833,6 +843,38 @@ func (p *Process) readLoop() {
 					continue
 				}
 				// Fall through to legacy path only for true stray results.
+			}
+
+			// SubagentLinker plumbing for RFC v4 agent-team-ui.
+			//   - system.init carries the parent session_uuid used as the
+			//     sub-key under ~/.claude/projects/<projectDir>/.
+			//   - system.task_started with task_type=="in_process_teammate"
+			//     is our cue that the CLI has (or is about to) write
+			//     subagents/agent-<hex>.jsonl; kick off an async Resolve
+			//     bounded by the linker's retry budget so readLoop stays
+			//     responsive.
+			if p.linker != nil {
+				if ev.Type == "system" && ev.SubType == "init" && ev.SessionID != "" {
+					projectDir := resolveProjectDir(p.cwd)
+					p.linker.SetContext(projectDir, ev.SessionID)
+				}
+				if ev.Type == "system" && ev.SubType == "task_started" && ev.TaskType == "in_process_teammate" && ev.ToolUseID != "" {
+					taskID := ev.TaskID
+					toolUseID := ev.ToolUseID
+					name := ev.Description
+					if nameTrim := strings.TrimSpace(name); nameTrim != "" {
+						// task_started.description is "<name>: <prompt body>".
+						// The linker selector only needs the leading name.
+						if idx := strings.IndexByte(nameTrim, ':'); idx > 0 {
+							name = strings.TrimSpace(nameTrim[:idx])
+						} else {
+							name = nameTrim
+						}
+					}
+					agentToolUseMS := now.UnixMilli()
+					linker := p.linker
+					go linker.Resolve(taskID, toolUseID, name, ev.Description, agentToolUseMS)
+				}
 			}
 
 			// Always log to EventLog so dashboard subscribers see events
@@ -1730,6 +1772,7 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 			entry.Type = "task_start"
 			entry.TaskID = ev.TaskID
 			entry.ToolUseID = ev.ToolUseID
+			entry.TaskType = ev.TaskType
 			if ev.Description != "" {
 				entry.Summary = TruncateRunes(ev.Description, 120)
 			}
@@ -2079,9 +2122,70 @@ func (p *Process) GetTotalTimeout() time.Duration {
 	return DefaultTotalTimeout
 }
 
-// InjectHistory pre-populates the event log with historical entries.
+// InjectHistory pre-populates the event log with historical entries. Also
+// seeds the SubagentLinker so team agent rows in the dashboard banner can
+// resume the task_id → jsonl mapping established in a previous process
+// lifetime (RFC v4 agent-team-ui §3.3.7 — A3 defence against CLI-dead
+// respawn changing session_uuid).
 func (p *Process) InjectHistory(entries []EventEntry) {
 	p.eventLog.AppendBatch(entries)
+	if p.linker != nil {
+		p.linker.SeedFromHistory(entries)
+	}
+}
+
+// InitLinker wires a SubagentLinker into the process. Called by Wrapper.Spawn
+// once the working directory is known. Safe to call before the first system.init
+// event — the Linker is context-free until SetContext fires from readLoop's
+// init handler.
+//
+// The OnResolve callback writes the resolved (internal_agent_id, jsonl_path,
+// first_prompt_id) tuple back onto the matching "agent" / "task_start"
+// EventEntry so persistHistory flushes a self-contained record.
+func (p *Process) InitLinker(cwd string) {
+	p.cwd = cwd
+	p.linker = NewSubagentLinker()
+	log := p.eventLog
+	p.linker.OnResolve(func(taskID, toolUseID, internalAgentID string) {
+		if toolUseID == "" || log == nil {
+			return
+		}
+		info, _ := p.linker.Query(taskID)
+		log.SetAgentInternalID(toolUseID, internalAgentID, info.JSONLPath, info.FirstPromptID)
+	})
+}
+
+// Linker returns the SubagentLinker, or nil when none has been installed
+// (test fakes / unusual spawn paths).
+func (p *Process) Linker() *SubagentLinker {
+	return p.linker
+}
+
+// EventLog returns the process's underlying *EventLog so the server-side
+// tailer registry can register its SetOnAgentTaskDone callback. Returning
+// the concrete type is a minor API widening but stays symmetric with
+// Linker() above — both are escape hatches for tightly-coupled server
+// integrations that the public method set does not otherwise expose.
+func (p *Process) EventLog() *EventLog {
+	return p.eventLog
+}
+
+// SetCwdForLinker plumbs the working directory into the Linker after a shim
+// reconnect. SpawnReconnect does not have cwd handy (shim owns it); the
+// session router provides it once the session record is re-read. Safe to
+// call any time — updates projectDir only; does not touch parent_session_id
+// (which arrives via the next system.init event).
+func (p *Process) SetCwdForLinker(cwd string) {
+	if p.linker == nil || cwd == "" {
+		return
+	}
+	p.cwd = cwd
+	projectDir := resolveProjectDir(cwd)
+	// Preserve any already-captured sessionID — SetContext takes both at once.
+	p.linker.mu.RLock()
+	session := p.linker.parentSessionID
+	p.linker.mu.RUnlock()
+	p.linker.SetContext(projectDir, session)
 }
 
 // EventEntries returns a copy of all event log entries.

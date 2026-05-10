@@ -1,0 +1,533 @@
+package cli
+
+import (
+	"bufio"
+	"encoding/json"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"regexp"
+	"strings"
+	"sync"
+	"time"
+)
+
+// agentHexRe whitelists the hex component of an agent-<hex>.jsonl filename
+// before we accept it from the subagents/ directory. Claude CLI today emits
+// 17-char lowercase hex; we accept 8-64 for forward compatibility but refuse
+// anything containing path separators, dots, or shell metacharacters.
+// R201-SEC-M2 defense-in-depth: filepath.Join(dir, "agent-"+hex+".jsonl")
+// with a malformed hex would normally be cleaned by filepath.Clean, but
+// having the sanity gate here removes any doubt about cross-platform
+// traversal corner cases (Windows short names, symlink prefix collapse).
+var agentHexRe = regexp.MustCompile(`^[A-Za-z0-9]{8,64}$`)
+
+// SubagentLinker maps agent task_ids (and their originating Agent tool_use_ids)
+// to the on-disk transcript jsonl Claude CLI writes under
+// <projectDir>/<sessionID>/subagents/agent-<hex>.jsonl. The dashboard uses
+// this mapping to render each agent's internal event stream when the user
+// clicks an agent row in the banner (RFC v4 agent-team-ui §3.3).
+//
+// Resolve is async — the CLI emits system.task_started immediately after the
+// parent-stream Agent tool_use, but flushes the first .meta.json / jsonl row
+// 0-500 ms later. Callers spawn Resolve in a goroutine with a bounded grace
+// window (default 3 s). The on-resolve callback then starts the silent
+// TranscriptReader tailer and backfills EventEntry.InternalAgentID so
+// persistHistory captures the linkage (see §3.3.7 SeedFromHistory).
+type SubagentLinker struct {
+	mu              sync.RWMutex
+	byTaskID        map[string]LinkInfo
+	byToolUseID     map[string]LinkInfo
+	byName          map[string][]LinkInfo
+	projectDir      string
+	parentSessionID string
+
+	dirCache struct {
+		at      time.Time
+		entries []metaEntry
+	}
+
+	onResolveMu  sync.Mutex
+	onResolveFns []func(taskID, toolUseID, internalAgentID string)
+
+	// Tunable via tests. Defaults: 250ms * 12 = 3s grace; 200ms dir cache.
+	retryInterval time.Duration
+	retryLimit    int
+	cacheTTL      time.Duration
+
+	// Optional hook fired after every rawScan of the subagents directory.
+	// Wired by TestLinker_Resolve_DirCacheTTL to count cache hits/misses
+	// without adding a telemetry atomic to production code.
+	scanHook func()
+}
+
+// LinkInfo is the resolved mapping for a single agent task. Zero value is the
+// "unknown task" sentinel. An entry with Resolved=true + InternalAgentID=""
+// is a tombstone (grace window expired, jsonl missing or pruned).
+type LinkInfo struct {
+	InternalAgentID string
+	JSONLPath       string
+	Name            string
+	Resolved        bool
+	FirstPromptID   string
+	FromHistory     bool
+}
+
+// metaEntry is one on-disk candidate surfaced by scanMetaFiles.
+type metaEntry struct {
+	hex       string
+	metaPath  string
+	jsonlPath string
+	agentType string
+}
+
+// NewSubagentLinker returns an empty, context-free linker. Call SetContext
+// after the parent process emits its first system.init event.
+func NewSubagentLinker() *SubagentLinker {
+	return &SubagentLinker{
+		byTaskID:      make(map[string]LinkInfo),
+		byToolUseID:   make(map[string]LinkInfo),
+		byName:        make(map[string][]LinkInfo),
+		retryInterval: 250 * time.Millisecond,
+		retryLimit:    12,
+		cacheTTL:      200 * time.Millisecond,
+	}
+}
+
+// SetContext installs the on-disk lookup root. Must be called before Resolve
+// can succeed. Project dir is derived from the process cwd (resolveProjectDir);
+// sessionID comes from the first system.init event.
+func (l *SubagentLinker) SetContext(projectDir, parentSessionID string) {
+	l.mu.Lock()
+	l.projectDir = projectDir
+	l.parentSessionID = parentSessionID
+	l.mu.Unlock()
+}
+
+// OnResolve appends a callback fired after every Resolve (success or
+// tombstone). Multiple subscribers compose: the cli package registers one
+// that writes InternalAgentID back to the EventLog; the server package
+// registers another to kick off agent_tailer. Callbacks run in append
+// order, outside l.mu but serialised by onResolveMu.
+//
+// Tombstone resolutions fire with internalAgentID="" so the server tailer
+// layer can skip starting a silent tailer rather than waiting forever.
+func (l *SubagentLinker) OnResolve(fn func(taskID, toolUseID, internalAgentID string)) {
+	if fn == nil {
+		return
+	}
+	l.onResolveMu.Lock()
+	l.onResolveFns = append(l.onResolveFns, fn)
+	l.onResolveMu.Unlock()
+}
+
+// Query returns the cached mapping for taskID without scanning disk. Used by
+// the HTTP /api/sessions/agent_events handler; returns ok=false for unknown
+// task_ids and ok=true+empty InternalAgentID for tombstones so the handler
+// can distinguish "still resolving" (202) from "no record" (404).
+func (l *SubagentLinker) Query(taskID string) (LinkInfo, bool) {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	info, ok := l.byTaskID[taskID]
+	return info, ok
+}
+
+// ConfigureForTest overrides the default grace/poll/cache timings so tests
+// reach terminal verdicts in milliseconds rather than 3+ seconds. Not meant
+// for production callers — the private fields it mutates are the same ones
+// subagent_link_test.go manipulates directly via the test-only in-package
+// access; this entrypoint exists so cross-package tests (server/httptest)
+// can dial them in too.
+func (l *SubagentLinker) ConfigureForTest(retryIntervalNS int64, retryLimit int, cacheTTLNS int64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.retryInterval = time.Duration(retryIntervalNS)
+	l.retryLimit = retryLimit
+	l.cacheTTL = time.Duration(cacheTTLNS)
+}
+
+// ProjectSessionDir returns <projectDir>/<parentSessionID>. Empty if context
+// not yet installed. Used by the /api/sessions/tool_result endpoint to anchor
+// path-traversal defence (§4 Security).
+func (l *SubagentLinker) ProjectSessionDir() string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	if l.projectDir == "" || l.parentSessionID == "" {
+		return ""
+	}
+	return filepath.Join(l.projectDir, l.parentSessionID)
+}
+
+// Resolve executes the 7-step algorithm in RFC §3.3.1.
+// Returns the LinkInfo and whether Resolve has reached a terminal verdict
+// (Resolved=true). Idempotent: once cached, subsequent calls are O(1).
+//
+// Tombstones are cached so repeated Resolve attempts on a permanently-missing
+// task_id do not re-scan every poll.
+func (l *SubagentLinker) Resolve(taskID, toolUseID, name, description string, agentToolUseMS int64) (LinkInfo, bool) {
+	// Step 1: already resolved?
+	l.mu.RLock()
+	if info, ok := l.byTaskID[taskID]; ok {
+		l.mu.RUnlock()
+		return info, info.Resolved
+	}
+	projectDir := l.projectDir
+	sessionID := l.parentSessionID
+	l.mu.RUnlock()
+	if projectDir == "" || sessionID == "" {
+		return LinkInfo{}, false
+	}
+
+	subagentDir := filepath.Join(projectDir, sessionID, "subagents")
+	var picked metaEntry
+	var pickedFirst firstLineMeta
+
+	// Steps 2-4: scan, filter by agentType, retry while empty.
+	for attempt := 0; attempt <= l.retryLimit; attempt++ {
+		entries := l.scanMetaFiles(subagentDir)
+		candidates := entries[:0:0]
+		for _, e := range entries {
+			if e.agentType == name {
+				candidates = append(candidates, e)
+			}
+		}
+		if len(candidates) == 0 {
+			if attempt == l.retryLimit {
+				break
+			}
+			time.Sleep(l.retryInterval)
+			continue
+		}
+
+		// Step 5: per-candidate stat + first-line sessionId & timestamp cross-check.
+		type scored struct {
+			entry   metaEntry
+			first   firstLineMeta
+			modTime time.Time
+			size    int64
+		}
+		filtered := make([]scored, 0, len(candidates))
+		for _, cand := range candidates {
+			st, err := os.Stat(cand.jsonlPath)
+			if err != nil || st.Size() == 0 {
+				continue
+			}
+			first, err := readFirstLineMeta(cand.jsonlPath)
+			if err != nil {
+				continue
+			}
+			if first.SessionID != "" && first.SessionID != sessionID {
+				continue
+			}
+			// R10: if the jsonl's first row timestamp predates the parent's
+			// Agent tool_use by more than 10s, treat as stale (same-name reuse).
+			if !first.Timestamp.IsZero() && agentToolUseMS > 0 {
+				agentTS := time.UnixMilli(agentToolUseMS)
+				if first.Timestamp.Before(agentTS.Add(-10 * time.Second)) {
+					continue
+				}
+			}
+			filtered = append(filtered, scored{cand, first, st.ModTime(), st.Size()})
+		}
+		if len(filtered) == 0 {
+			if attempt == l.retryLimit {
+				break
+			}
+			time.Sleep(l.retryInterval)
+			continue
+		}
+
+		// Step 6: pick by (mtime desc, size desc).
+		best := filtered[0]
+		for _, s := range filtered[1:] {
+			if s.modTime.After(best.modTime) || (s.modTime.Equal(best.modTime) && s.size > best.size) {
+				best = s
+			}
+		}
+		picked = best.entry
+		pickedFirst = best.first
+		break
+	}
+
+	// Step 7: finalise cache entry.
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	// Re-check under write lock — a concurrent Resolve may have resolved first.
+	if info, ok := l.byTaskID[taskID]; ok {
+		return info, info.Resolved
+	}
+
+	if picked.hex == "" {
+		// Tombstone path.
+		info := LinkInfo{Resolved: true, Name: name}
+		l.byTaskID[taskID] = info
+		if toolUseID != "" {
+			l.byToolUseID[toolUseID] = info
+		}
+		l.fireOnResolveLocked(taskID, toolUseID, "")
+		return info, true
+	}
+
+	info := LinkInfo{
+		InternalAgentID: "agent-" + picked.hex,
+		JSONLPath:       picked.jsonlPath,
+		Name:            name,
+		Resolved:        true,
+		FirstPromptID:   pickedFirst.PromptID,
+	}
+
+	// Step 7b: same-name respawn defence. If we've already resolved a
+	// LinkInfo for `name` with a different promptId, we're looking at a
+	// CLI same-name reuse. Log it and refuse to touch existing task_id
+	// mappings — only this new task_id gets the new LinkInfo.
+	if existing := l.byName[name]; len(existing) > 0 && pickedFirst.PromptID != "" {
+		for _, prev := range existing {
+			if prev.FirstPromptID != "" && prev.FirstPromptID != pickedFirst.PromptID {
+				slog.Warn("agent_link: duplicate name spawn detected",
+					"name", name,
+					"old_prompt_id", prev.FirstPromptID,
+					"new_prompt_id", pickedFirst.PromptID,
+					"task_id", taskID,
+				)
+				break
+			}
+		}
+	}
+
+	l.byTaskID[taskID] = info
+	if toolUseID != "" {
+		l.byToolUseID[toolUseID] = info
+	}
+	l.byName[name] = append(l.byName[name], info)
+	l.fireOnResolveLocked(taskID, toolUseID, info.InternalAgentID)
+	return info, true
+}
+
+// SeedFromHistory pre-populates the cache from persisted EventEntry records.
+// Called by Process.InjectHistory after AppendBatch so that shim reconnect
+// / CLI-dead respawn do not lose the task_id → jsonl mapping established in
+// a previous session lifetime (A3 defence, §3.3.7).
+//
+// Tolerant of gaps: EventEntry with empty InternalAgentID or JSONLPath is
+// skipped silently — the Linker will re-Resolve on live events as usual.
+//
+// Defense in depth (R201-SEC-M1): the persisted JSONL file is writable by
+// anything running as the naozhi uid, but we still refuse to trust a path
+// that does not live under the expected ~/.claude/projects/ tree. Without
+// this check, an attacker who could mutate sessions/*.jsonl (e.g. via a
+// separate file-disclosure bug or filesystem-level compromise) could
+// redirect agent_events streaming to an arbitrary readable file.
+func (l *SubagentLinker) SeedFromHistory(entries []EventEntry) {
+	if len(entries) == 0 {
+		return
+	}
+	// Lock against concurrent Resolve + snapshot the project root for the
+	// prefix check. projectDir comes from resolveProjectDir(cwd), so it
+	// already ends at ~/.claude/projects/<encoded>.
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	claudeRoot := claudeProjectsRoot()
+	for _, e := range entries {
+		if e.TaskID == "" || e.InternalAgentID == "" || e.JSONLPath == "" {
+			continue
+		}
+		// Refuse jsonl paths that escape the claude projects root. Accept
+		// either l.projectDir (strictest) OR claudeRoot (for entries
+		// persisted under a previous cwd whose projectDir no longer matches
+		// — shim reconnect after `cd` within the same session). Rejecting
+		// an otherwise-valid historical entry just costs us Resolve having
+		// to re-scan, which is the exact path Linker was designed to handle.
+		clean := filepath.Clean(e.JSONLPath)
+		if !strings.HasPrefix(clean, claudeRoot+string(filepath.Separator)) {
+			slog.Warn("agent_link: SeedFromHistory rejected jsonl path outside claude projects root",
+				"task_id", e.TaskID, "path", e.JSONLPath)
+			continue
+		}
+		// Don't overwrite an already-cached task_id — a live Resolve
+		// outranks historical data.
+		if _, ok := l.byTaskID[e.TaskID]; ok {
+			continue
+		}
+		info := LinkInfo{
+			InternalAgentID: e.InternalAgentID,
+			JSONLPath:       clean,
+			Name:            e.Subagent,
+			FirstPromptID:   e.FirstPromptID,
+			Resolved:        true,
+			FromHistory:     true,
+		}
+		l.byTaskID[e.TaskID] = info
+		if e.ToolUseID != "" {
+			if _, ok := l.byToolUseID[e.ToolUseID]; !ok {
+				l.byToolUseID[e.ToolUseID] = info
+			}
+		}
+		if e.Subagent != "" {
+			l.byName[e.Subagent] = append(l.byName[e.Subagent], info)
+		}
+	}
+}
+
+// claudeProjectsRoot returns ~/.claude/projects exactly as resolveProjectDir
+// derives it. Kept as a separate helper so SeedFromHistory's prefix check
+// stays in lockstep with Resolve's path construction; changing one without
+// the other would either let a bogus path through or reject valid entries.
+func claudeProjectsRoot() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = os.Getenv("HOME")
+	}
+	return filepath.Join(home, ".claude", "projects")
+}
+
+// fireOnResolveLocked runs every registered callback OUTSIDE the main mu
+// lock but INSIDE onResolveMu to guarantee serial delivery across all
+// subscribers. Caller holds l.mu as a write lock; we drop it around the
+// callback so a slow listener (e.g. the server tailer starting goroutine)
+// cannot block a concurrent Resolve. The mu-release-reacquire pattern also
+// matches the pre-multi-subscriber semantics so call-sites don't need
+// reordering.
+func (l *SubagentLinker) fireOnResolveLocked(taskID, toolUseID, internalAgentID string) {
+	l.onResolveMu.Lock()
+	fns := make([]func(string, string, string), len(l.onResolveFns))
+	copy(fns, l.onResolveFns)
+	l.onResolveMu.Unlock()
+	if len(fns) == 0 {
+		return
+	}
+	l.mu.Unlock()
+	for _, fn := range fns {
+		fn(taskID, toolUseID, internalAgentID)
+	}
+	l.mu.Lock()
+}
+
+// scanMetaFiles reads subagentDir and parses each .meta.json to surface
+// (hex, agentType) pairs. TTL-cached (default 200ms) so a burst of 3+
+// concurrent Resolve calls during the same turn share one disk scan.
+//
+// Cache miss → rawScan populates dirCache. Cache hit → returns the cached
+// slice by reference; callers must not mutate it.
+func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if !l.dirCache.at.IsZero() && time.Since(l.dirCache.at) < l.cacheTTL {
+		return l.dirCache.entries
+	}
+	if l.scanHook != nil {
+		l.scanHook()
+	}
+	entries := rawScanSubagentsDir(dir)
+	l.dirCache.at = time.Now()
+	l.dirCache.entries = entries
+	return entries
+}
+
+func rawScanSubagentsDir(dir string) []metaEntry {
+	ents, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	out := make([]metaEntry, 0, len(ents))
+	for _, ent := range ents {
+		if ent.IsDir() {
+			continue
+		}
+		name := ent.Name()
+		if !strings.HasPrefix(name, "agent-") || !strings.HasSuffix(name, ".meta.json") {
+			continue
+		}
+		hex := strings.TrimSuffix(strings.TrimPrefix(name, "agent-"), ".meta.json")
+		if !agentHexRe.MatchString(hex) {
+			continue
+		}
+		metaPath := filepath.Join(dir, name)
+		data, err := os.ReadFile(metaPath)
+		if err != nil {
+			continue
+		}
+		var m struct {
+			AgentType string `json:"agentType"`
+		}
+		if err := json.Unmarshal(data, &m); err != nil {
+			continue
+		}
+		if m.AgentType == "" {
+			continue
+		}
+		out = append(out, metaEntry{
+			hex:       hex,
+			metaPath:  metaPath,
+			jsonlPath: filepath.Join(dir, "agent-"+hex+".jsonl"),
+			agentType: m.AgentType,
+		})
+	}
+	return out
+}
+
+// firstLineMeta holds the fields Resolve step 5 needs from the agent jsonl.
+type firstLineMeta struct {
+	SessionID string    `json:"sessionId"`
+	PromptID  string    `json:"promptId"`
+	Timestamp time.Time `json:"-"`
+}
+
+func readFirstLineMeta(path string) (firstLineMeta, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return firstLineMeta{}, err
+	}
+	defer f.Close()
+	reader := bufio.NewReaderSize(f, 32*1024)
+	line, err := reader.ReadSlice('\n')
+	if err != nil && len(line) == 0 {
+		return firstLineMeta{}, err
+	}
+	var raw struct {
+		SessionID string `json:"sessionId"`
+		PromptID  string `json:"promptId"`
+		Timestamp string `json:"timestamp"`
+	}
+	if err := json.Unmarshal(line, &raw); err != nil {
+		return firstLineMeta{}, err
+	}
+	out := firstLineMeta{SessionID: raw.SessionID, PromptID: raw.PromptID}
+	if raw.Timestamp != "" {
+		if ts, err := time.Parse(time.RFC3339Nano, raw.Timestamp); err == nil {
+			out.Timestamp = ts
+		}
+	}
+	return out, nil
+}
+
+// resolveProjectDir mirrors Claude CLI's encoded-cwd convention used for
+// ~/.claude/projects/<encoded>. Walks runes and replaces every non-[A-Za-z0-9]
+// rune with a single '-'. Does NOT collapse consecutive dashes — "/tmp/a--b"
+// and "/tmp/a..b" encode differently. Empty input → empty output (callers
+// treat this as "no project dir", i.e. Resolve bails).
+//
+// The encoding is lossy: "/tmp/a.b", "/tmp/a_b", "/tmp/a-b" all collide to
+// "-tmp-a-b". Resolve defends against this via the first-line sessionId
+// cross-check (§3.3.1 step 5).
+func resolveProjectDir(cwd string) string {
+	if cwd == "" {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		home = os.Getenv("HOME")
+	}
+	claudeRoot := filepath.Join(home, ".claude", "projects")
+	var b strings.Builder
+	b.Grow(len(cwd))
+	for _, r := range cwd {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('-')
+		}
+	}
+	return filepath.Join(claudeRoot, b.String())
+}
