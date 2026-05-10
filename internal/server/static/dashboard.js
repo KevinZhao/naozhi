@@ -1461,6 +1461,12 @@ document.addEventListener('keydown', function(e) {
 function selectSession(key, node) {
   node = node || 'local';
   resetTurnState();
+  // Close any open agent drill-in view before the selectedKey flips
+  // (RFC v4 agent-team-ui §3.6.6). Must run BEFORE saveScrollPos so the
+  // agent-view scroll snapshot still keys off the old session id.
+  if (window.AgentView && typeof window.AgentView.onSessionSwitch === 'function') {
+    window.AgentView.onSessionSwitch();
+  }
   // Recent session card click → trigger resume flow
   // Discovered session card click → trigger preview flow
   // Save draft for current session before switching
@@ -2494,6 +2500,31 @@ function eventHtml(e) {
     content = renderMd(cleanRaw || e.type);
   } else if (e.type === 'todo') {
     content = renderTodoList(e.detail, e.summary);
+  } else if (e.type === 'tool_result') {
+    // RFC v4 agent-team-ui §3.6.7 — fold long outputs by default. The
+    // summary is the first line (< 120 chars) and the full detail is
+    // capped at 16 KB server-side. When the CLI emitted a
+    // <persisted-output>, the Tool field carries "persisted:tool-results/
+    // <id>.ext" so the frontend can offer a fetch-full button.
+    var summary = e.summary || '(tool result)';
+    var detail = e.detail || '';
+    var persistedPath = '';
+    if (typeof e.tool === 'string' && e.tool.indexOf('persisted:') === 0) {
+      persistedPath = e.tool.slice('persisted:'.length);
+    }
+    var detailHtml = detail
+      ? '<pre class="tr-detail">' + esc(detail) + '</pre>'
+      : '';
+    var persistedBtn = '';
+    if (persistedPath && selectedKey) {
+      var toolURL = '/api/sessions/tool_result?key=' + encodeURIComponent(selectedKey) +
+        '&node=' + encodeURIComponent(selectedNode || 'local') +
+        '&path=' + encodeURIComponent(persistedPath);
+      persistedBtn = '<a class="tr-persisted" href="' + escAttr(toolURL) +
+        '" target="_blank" rel="noopener" title="查看完整输出">📎 打开完整输出</a>';
+    }
+    content = '<details class="tr-wrap"><summary class="tr-summary">' +
+      esc(summary) + '</summary>' + detailHtml + persistedBtn + '</details>';
   } else {
     content = esc(e.detail || e.summary || e.type);
   }
@@ -3070,89 +3101,12 @@ function updateSidebarAgentBadge() {
   } else if (existing) { existing.remove(); }
 }
 
-function renderAgentRows() {
-  var agents = turnState.agents;
-  if (agents.length === 0) return '';
-
-  // Separate solo subagents from team members
-  var solos = [];
-  var teams = {}; // teamName -> [agent, ...]
-  for (var i = 0; i < agents.length; i++) {
-    var a = agents[i];
-    if (a.teamName) {
-      if (!teams[a.teamName]) teams[a.teamName] = [];
-      teams[a.teamName].push(a);
-    } else {
-      solos.push(a);
-    }
-  }
-
-  var html = '';
-  // Solo subagents
-  for (var j = 0; j < solos.length; j++) {
-    html += agentRowHtml(solos[j]);
-  }
-  // Team groups
-  var teamNames = Object.keys(teams);
-  for (var k = 0; k < teamNames.length; k++) {
-    var tn = teamNames[k];
-    var members = teams[tn];
-    html += '<div class="rb-team-header"><span class="team-icon">\u25c6</span>' + esc(tn) + '<span class="team-count">' + members.length + ' agents</span></div>';
-    for (var m = 0; m < members.length; m++) {
-      html += agentRowHtml(members[m]);
-    }
-  }
-  return html;
-}
-
-function agentRowHtml(a) {
-  var isDone = a.status === 'completed' || a.status === 'error';
-  var cls = 'rb-agent-row' + (isDone ? ' done' : '');
-  var label = a.name || a.description || 'agent';
-  var parts = '<div class="' + cls + '"><span class="sa-dot"></span>';
-  if (a.background) parts += '<span class="sa-bg">[bg]</span>';
-  parts += '<span class="sa-name">' + esc(label) + '</span>';
-  // Detail: lastTool or description
-  var detail = '';
-  if (a.lastTool) detail = a.lastTool;
-  else if (a.description && a.name) detail = a.description;
-  if (detail) parts += '<span class="sa-detail">\u00b7 ' + esc(detail) + '</span>';
-  // Stats
-  var stat = '';
-  if (a.toolUses > 0) stat += a.toolUses + ' calls';
-  if (a.durationMs > 0) stat += (stat ? ' \u00b7 ' : '') + fmtDuration(a.durationMs);
-  if (isDone) stat += (stat ? ' \u00b7 ' : '') + '\u2713';
-  if (stat) parts += '<span class="sa-stat">\u00b7 ' + stat + '</span>';
-  parts += '</div>';
-  return parts;
-}
-
-function findAgentByToolUseId(tuid) {
-  for (var i = 0; i < turnState.agents.length; i++) {
-    if (turnState.agents[i].toolUseId === tuid) return turnState.agents[i];
-  }
-  return null;
-}
-
-function findAgentByTaskId(tid) {
-  for (var i = 0; i < turnState.agents.length; i++) {
-    if (turnState.agents[i].taskId === tid) return turnState.agents[i];
-  }
-  return null;
-}
-
-function initAgentsFromSession() {
-  const sd = sessionsData[sid(selectedKey, selectedNode || 'local')];
-  if (sd && sd.subagents && sd.subagents.length > 0) {
-    turnState.agents = sd.subagents.map(function(sa) {
-      return {
-        toolUseId: '', taskId: '', name: sa.name, teamName: '',
-        description: sa.activity || '', background: !!sa.background,
-        lastTool: '', toolUses: 0, totalTokens: 0, durationMs: 0, status: 'running'
-      };
-    });
-  }
-}
+// renderAgentRows / agentRowHtml / findAgentByToolUseId / findAgentByTaskId /
+// initAgentsFromSession moved to static/agent_view.js (RFC v4 agent-team-ui
+// Phase 2.5). The names remain published on window so call sites here keep
+// working unchanged; the indirection gives Phase 3 a clean module boundary
+// to grow the banner/switchAgentView/WS-agent logic without piling onto
+// this already-oversized file.
 
 function applyEventToTurnState(ev) {
   startTurnTimer();
@@ -7441,6 +7395,21 @@ const wsm = {
         break;
       case 'pong':
         break;
+      // RFC v4 agent-team-ui §3.5.2 — drill-in flow. All four handlers
+      // live in agent_view.js so new agent-view functionality doesn't
+      // mean touching this dispatch table.
+      case 'agent_event':
+        if (window.AgentView) window.AgentView.onAgentEvent(msg);
+        break;
+      case 'agent_meta':
+        if (window.AgentView) window.AgentView.onAgentMeta(msg);
+        break;
+      case 'agent_done':
+        if (window.AgentView) window.AgentView.onAgentDone(msg);
+        break;
+      case 'agent_subscribe_rejected':
+        if (window.AgentView) window.AgentView.onAgentSubscribeRejected(msg);
+        break;
     }
   },
 
@@ -7697,6 +7666,11 @@ const wsm = {
       refreshBanner();
     }
     if (isInternalEvent(ev)) return;
+    // RFC v4 agent-team-ui §3.6.2 — when the user has drilled into an
+    // agent, the events-scroll pane belongs to that agent; parent events
+    // still feed into turnState / banner (handled above) but must not
+    // land in the DOM until the user returns.
+    if (window.AgentView && window.AgentView.activeTaskID()) return;
     const html = eventHtml(ev);
     if (!html) return;
     const el = document.getElementById('events-scroll');

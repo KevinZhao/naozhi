@@ -352,6 +352,32 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .rb-team-header .team-count{color:var(--nz-text-dim);font-size:10px}
 .rb-stats{padding:2px 12px 4px 22px;font-size:11px;color:var(--nz-text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+/* RFC v4 agent-team-ui §3.6 — drill-in affordances.
+   The banner's agent rows are clickable; "active" row shows which internal
+   stream the main event area is rendering. Breadcrumb sits above the
+   events-scroll pane in agent-view mode with a back arrow. */
+.rb-agent-row[role="button"]{cursor:pointer;border-radius:4px;transition:background-color .15s}
+.rb-agent-row[role="button"]:hover{background:var(--nz-bg-2)}
+.rb-agent-row[role="button"]:focus{outline:2px solid var(--nz-accent);outline-offset:-1px}
+.rb-agent-row.active{background:var(--nz-bg-2);border-left:2px solid var(--nz-accent);padding-left:20px}
+.rb-agent-row.active .sa-name{color:var(--nz-accent)}
+
+.agent-breadcrumb{display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-1);font-size:12px;flex-wrap:wrap}
+.agent-breadcrumb .bc-back{background:transparent;color:var(--nz-accent);border:1px solid var(--nz-border);border-radius:4px;padding:2px 10px;font-size:12px;cursor:pointer}
+.agent-breadcrumb .bc-back:hover{background:var(--nz-bg-2)}
+.agent-breadcrumb .bc-tag{display:inline-block;background:var(--nz-accent);color:#fff;border-radius:3px;font-size:10px;padding:1px 6px;text-transform:uppercase}
+.agent-breadcrumb .bc-name{color:var(--nz-text);font-weight:500}
+.agent-breadcrumb .bc-team{color:var(--nz-amber);font-size:11px}
+.agent-breadcrumb .bc-stat{color:var(--nz-text-dim);margin-left:auto;font-size:11px}
+
+/* tool_result folded render — details/summary pattern for low-noise view. */
+.event.tool_result .tr-wrap{border-left:2px solid var(--nz-border);padding-left:10px;margin:2px 0}
+.event.tool_result .tr-summary{color:var(--nz-text-dim);cursor:pointer;font-size:12px;padding:2px 0}
+.event.tool_result .tr-summary:hover{color:var(--nz-text)}
+.event.tool_result .tr-detail{margin:4px 0;padding:6px 8px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:4px;font-size:11px;max-height:400px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+.event.tool_result .tr-persisted{display:inline-block;margin-top:4px;font-size:11px;color:var(--nz-accent);text-decoration:none;border:1px solid var(--nz-border);border-radius:4px;padding:2px 8px}
+.event.tool_result .tr-persisted:hover{background:var(--nz-bg-2)}
+
 /* Toast */
 .toast{position:fixed;bottom:20px;right:20px;background:var(--nz-red);color:#fff;padding:8px 16px;border-radius:8px;font-size:14px;z-index:100;opacity:0;pointer-events:none;transition:opacity .3s}
 .toast.show{opacity:1;pointer-events:auto}
@@ -1445,5 +1471,6 @@ body.kbd-open .sidebar-footer{display:none}
   </div>
 </div>
 <script src="/static/dashboard.js"></script>
+<script src="/static/agent_view.js"></script>
 </body>
 </html>

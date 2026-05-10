@@ -30,6 +30,9 @@ var swJS embed.FS
 //go:embed static/dashboard.js
 var dashboardJS embed.FS
 
+//go:embed static/agent_view.js
+var agentViewJS embed.FS
+
 const authCookieName = "naozhi_auth"
 
 // jsonEncBuf pairs a pooled bytes.Buffer with a json.Encoder bound to it.
@@ -330,6 +333,7 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /manifest.json", s.handleManifest)
 	s.mux.HandleFunc("GET /sw.js", s.handleSW)
 	s.mux.HandleFunc("GET /static/dashboard.js", s.handleDashboardJS)
+	s.mux.HandleFunc("GET /static/agent_view.js", s.handleAgentViewJS)
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
 	if s.reverseNodeServer != nil {
 		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
@@ -412,6 +416,23 @@ func (s *Server) handleDashboardJS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("dashboard js write", "err", err)
+	}
+}
+
+// handleAgentViewJS serves static/agent_view.js — the RFC v4 agent-team-ui
+// dashboard module. Mirrors handleDashboardJS for caching/CSP headers so
+// the two scripts behave identically in the browser cache.
+func (s *Server) handleAgentViewJS(w http.ResponseWriter, r *http.Request) {
+	data, err := agentViewJS.ReadFile("static/agent_view.js")
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if _, err := w.Write(data); err != nil {
+		slog.Debug("agent_view js write", "err", err)
 	}
 }
 
