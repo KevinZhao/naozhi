@@ -877,6 +877,7 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 		// reply "error" so the dashboard surfaces the failure.
 		defer func() {
 			if r := recover(); r != nil {
+				metrics.PanicRecoveredTotal.Add(1)
 				// Panic cause at Error, verbose stack at Debug — stack
 				// frames leak internal paths to journald/log aggregators.
 				slog.Error("remote ws interrupt goroutine panic",
@@ -1554,6 +1555,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		// node) would otherwise take the whole naozhi service down.
 		defer func() {
 			if r := recover(); r != nil {
+				metrics.PanicRecoveredTotal.Add(1)
 				// Same split as handleRemoteInterrupt: cause at Error,
 				// stack at Debug. Stack frames expose internal layout.
 				slog.Error("remote ws send goroutine panic",

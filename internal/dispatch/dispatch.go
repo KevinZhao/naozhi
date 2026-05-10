@@ -14,6 +14,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -465,6 +466,7 @@ func (d *Dispatcher) ownerLoop(
 // platform SDK panicking on a nil chat handle) so the outer defer always
 // completes and the process can drain other owners cleanly.
 func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessage, r any) {
+	metrics.PanicRecoveredTotal.Add(1)
 	slog.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
 	if d.queue != nil {
 		d.queue.Discard(key)

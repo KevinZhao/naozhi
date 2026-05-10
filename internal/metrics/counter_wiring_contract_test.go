@@ -125,6 +125,45 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 	}
 }
 
+// TestOBS1_PanicRecoveredWiredIntoTopSites pins that PanicRecoveredTotal.Add(1)
+// is wired into the highest-signal recover() sites (user/IM-facing traffic
+// paths). The counter is a global "any panic absorbed" signal with no
+// dimensional split, so what matters for the contract is that at least a
+// quorum of the expected sites actually increment it — a regression that
+// silently removes the .Add from one of them still keeps the signal flowing
+// from the others, but removing it from most hides the signal entirely.
+//
+// A minimum of 3 wired files is required; the list below documents the
+// currently-wired set so a grep-curious reader can verify coverage. OBS1.
+func TestOBS1_PanicRecoveredWiredIntoTopSites(t *testing.T) {
+	t.Parallel()
+	expected := []string{
+		"../server/wsclient.go",        // dashboard WS readPump
+		"../server/wshub.go",           // remote WS interrupt + send goroutines
+		"../dispatch/dispatch.go",      // ownerLoop (core IM turn loop)
+		"../platform/feishu/feishu.go", // cleanupNoncesTick (replay protection)
+	}
+	re := regexp.MustCompile(`metrics\.PanicRecoveredTotal\.Add\(1\)`)
+	hit := 0
+	var missing []string
+	for _, p := range expected {
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Fatalf("read %s: %v", p, err)
+		}
+		if re.Match(data) {
+			hit++
+		} else {
+			missing = append(missing, p)
+		}
+	}
+	if hit < 3 {
+		t.Errorf("PanicRecoveredTotal.Add(1) wired in only %d of %d expected files; "+
+			"need ≥3 for the global panic signal to stay useful. Missing: %v",
+			hit, len(expected), missing)
+	}
+}
+
 // TestOBS2_SpawnPanicRecoveredInRecoverArm pins that SpawnPanicRecoveredTotal
 // lives INSIDE the `if r := recover(); r != nil` arm of panicSafeSpawnFn —
 // incrementing it on the happy path would turn the counter into "spawn

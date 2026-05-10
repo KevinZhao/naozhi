@@ -5588,3 +5588,109 @@ func stripJSComments(src string) string {
 	}
 	return b.String()
 }
+
+// TestDashboard_RNEW_UX010_AriaLiveRegion pins the screen-reader live-region
+// wiring: HTML must expose #sr-announce with aria-live=polite, a .sr-only
+// CSS rule must visually hide it (not display:none, which suppresses AT
+// output), and dashboard.js must define an announce() helper that targets
+// it. Regression would silently drop accessibility for WS state / session
+// lifecycle events, so we lock every piece here.
+func TestDashboard_RNEW_UX010_AriaLiveRegion(t *testing.T) {
+	t.Parallel()
+	htmlBytes, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(htmlBytes)
+	if !strings.Contains(html, `id="sr-announce"`) {
+		t.Error("RNEW-UX-010: dashboard.html missing #sr-announce live region")
+	}
+	// The region must be polite (not assertive) so it queues behind user
+	// speech rather than interrupting.
+	if !regexp.MustCompile(`id="sr-announce"[^>]*aria-live="polite"`).MatchString(html) {
+		t.Error("RNEW-UX-010: #sr-announce must declare aria-live=\"polite\"")
+	}
+	// sr-only class must exist as a real CSS rule — visually-hidden clip recipe.
+	if !strings.Contains(html, `.sr-only{`) {
+		t.Error("RNEW-UX-010: dashboard.html missing .sr-only{ CSS rule")
+	}
+	if !strings.Contains(html, `clip:rect(0,0,0,0)`) {
+		t.Error("RNEW-UX-010: .sr-only should use clip:rect(0,0,0,0) visually-hidden pattern")
+	}
+	jsBytes, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(jsBytes)
+	if !strings.Contains(js, "function announce(") {
+		t.Error("RNEW-UX-010: dashboard.js missing announce() helper")
+	}
+	if !strings.Contains(js, "getElementById('sr-announce')") {
+		t.Error("RNEW-UX-010: announce() must target #sr-announce")
+	}
+	// At least one call-site must exist — otherwise the helper is dead code
+	// and accessibility announcements never fire.
+	if strings.Count(js, "announce(") < 3 {
+		t.Errorf("RNEW-UX-010: expected announce() wired into multiple signal sites, found %d occurrences", strings.Count(js, "announce("))
+	}
+}
+
+// TestDashboard_RNEW_UX012_SkeletonLoader pins the sidebar skeleton-loading
+// state — replaces the flash-of-"loading..." text with shimmering placeholder
+// cards while the first sessions fetch is in flight.
+func TestDashboard_RNEW_UX012_SkeletonLoader(t *testing.T) {
+	t.Parallel()
+	htmlBytes, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(htmlBytes)
+	if !strings.Contains(html, `.skeleton-card{`) {
+		t.Error("RNEW-UX-012: dashboard.html missing .skeleton-card CSS rule")
+	}
+	if !strings.Contains(html, `@keyframes skeleton-shimmer`) {
+		t.Error("RNEW-UX-012: dashboard.html missing @keyframes skeleton-shimmer animation")
+	}
+	// The session list body must actually use the skeleton markup so the
+	// first paint renders placeholders instead of the old "loading..." text.
+	if !strings.Contains(html, `class="skeleton-card"`) {
+		t.Error("RNEW-UX-012: dashboard.html session-list should render skeleton-card placeholders on cold paint")
+	}
+	if strings.Contains(html, `<div class="no-sessions">loading...</div>`) {
+		t.Error("RNEW-UX-012: legacy \"loading...\" text should be replaced by skeleton cards")
+	}
+}
+
+// TestDashboard_RNEW_UX007_PreserveSelection pins the renderEvents short-
+// circuit that skips an innerHTML refresh while the user has an active
+// text selection inside the events panel. Without this guard, every event
+// push wipes the user's in-progress copy action.
+func TestDashboard_RNEW_UX007_PreserveSelection(t *testing.T) {
+	t.Parallel()
+	jsBytes, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(jsBytes)
+	// Locate renderEvents and inspect its body up to the first innerHTML
+	// assignment — the selection guard must sit before that point, otherwise
+	// the refresh still destroys the selection.
+	fnIdx := strings.Index(js, "function renderEvents(")
+	if fnIdx < 0 {
+		t.Fatal("RNEW-UX-007: renderEvents not found")
+	}
+	htmlAssignIdx := strings.Index(js[fnIdx:], "el.innerHTML = html")
+	if htmlAssignIdx < 0 {
+		t.Fatal("RNEW-UX-007: expected el.innerHTML = html inside renderEvents")
+	}
+	window := js[fnIdx : fnIdx+htmlAssignIdx]
+	if !strings.Contains(window, "getSelection") {
+		t.Error("RNEW-UX-007: renderEvents must consult window.getSelection() before innerHTML replace")
+	}
+	if !strings.Contains(window, "isCollapsed") {
+		t.Error("RNEW-UX-007: selection guard must check isCollapsed so caret-only clicks do not block refresh")
+	}
+	if !strings.Contains(window, "contains(sel.anchorNode)") {
+		t.Error("RNEW-UX-007: selection guard must scope to selections inside the events panel (contains(anchorNode))")
+	}
+}

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -21,6 +22,29 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
+
+// anonCookieName labels a per-browser random bucket used ONLY in no-token
+// (opt-in) mode to disambiguate uploadOwner between co-NAT users. NOT an
+// auth credential — just a 16-byte random label hashed into the owner key
+// so User A's upload cannot be claimed by User B via TakeAll.
+const anonCookieName = "nz_anon"
+
+// mintAnonCookie writes a freshly-random nz_anon cookie and returns its value.
+// HttpOnly, SameSite=Lax, Secure gated by auth.isSecure(r), 30-day MaxAge.
+func mintAnonCookie(w http.ResponseWriter, r *http.Request, auth *AuthHandlers) (string, error) {
+	var buf [16]byte
+	if _, err := rand.Read(buf[:]); err != nil {
+		return "", fmt.Errorf("read random bytes: %w", err)
+	}
+	val := hex.EncodeToString(buf[:])
+	secure := auth != nil && auth.isSecure(r)
+	http.SetCookie(w, &http.Cookie{
+		Name: anonCookieName, Value: val, Path: "/",
+		HttpOnly: true, SameSite: http.SameSiteLaxMode,
+		Secure: secure, MaxAge: 30 * 24 * 3600,
+	})
+	return val, nil
+}
 
 // Upload size ceilings. Images stay at the long-standing 10 MB; PDFs get
 // their own cap derived from Anthropic's 32 MB document-block limit — we
@@ -72,9 +96,10 @@ type SendHandler struct {
 	nodeAccess    NodeAccessor
 	hub           *Hub
 	uploadStore   *uploadStore
-	uploadLimiter *ipLimiter // per-IP upload rate limiter (10/min)
-	sendLimiter   *ipLimiter // per-IP send rate limiter (30/min)
-	trustedProxy  bool       // whether to trust X-Forwarded-For for client IP
+	uploadLimiter *ipLimiter    // per-IP upload rate limiter (10/min)
+	sendLimiter   *ipLimiter    // per-IP send rate limiter (30/min)
+	auth          *AuthHandlers // for isSecure(r) when minting the nz_anon cookie in no-token mode
+	trustedProxy  bool          // whether to trust X-Forwarded-For for client IP
 }
 
 // ownerKeyFromCookie returns a stable owner key derived from an HMAC
@@ -89,23 +114,31 @@ func ownerKeyFromCookie(cookieValue string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-// uploadOwner derives a stable owner key from the request's auth cookie,
-// Bearer token, or (as a fallback) client IP. Cookie and Bearer paths both
-// end up as hex-encoded SHA-256 prefixes so HTTP and WebSocket owner keys
-// are comparable when both sides hold the same cookie.
-func uploadOwner(r *http.Request, trustedProxy bool) string {
+// uploadOwner derives a stable owner key from auth cookie, Bearer token, or
+// (in no-token mode) a per-browser nz_anon cookie. RNEW-SEC-005: previously
+// no-token mode fell to clientIP(), so co-NAT User B could claim User A's
+// upload via TakeAll. Minting nz_anon gives each browser a distinct owner;
+// IP remains a last-resort fallback only when crypto/rand fails.
+func uploadOwner(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, trustedProxy bool) string {
 	if c, err := r.Cookie(authCookieName); err == nil && c.Value != "" {
 		return ownerKeyFromCookie(c.Value)
 	}
-	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") {
-		token := strings.TrimPrefix(auth, "Bearer ")
-		if token != "" {
+	if bearer := r.Header.Get("Authorization"); strings.HasPrefix(bearer, "Bearer ") {
+		if token := strings.TrimPrefix(bearer, "Bearer "); token != "" {
 			sum := sha256.Sum256([]byte(token))
 			return hex.EncodeToString(sum[:8])
 		}
 	}
-	// Unauthenticated (no-token mode): use real client IP as owner.
+	if c, err := r.Cookie(anonCookieName); err == nil && c.Value != "" {
+		return ownerKeyFromCookie(c.Value)
+	}
+	if w != nil {
+		val, err := mintAnonCookie(w, r, auth)
+		if err == nil {
+			return ownerKeyFromCookie(val)
+		}
+		slog.Warn("uploadOwner: mintAnonCookie failed, falling back to client IP", "err", err)
+	}
 	return clientIP(r, trustedProxy)
 }
 
@@ -511,7 +544,7 @@ func (h *SendHandler) handleUpload(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
 		return
 	}
-	owner := uploadOwner(r, h.trustedProxy)
+	owner := uploadOwner(w, r, h.auth, h.trustedProxy)
 	id, err := h.uploadStore.Put(owner, att)
 	if err != nil {
 		// Distinguish per-owner quota from global exhaustion so the client
@@ -634,7 +667,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	// nothing is consumed — the user can retry the whole batch after
 	// re-uploading instead of losing the earlier valid images silently.
 	// R37-CONCUR4.
-	owner := uploadOwner(r, h.trustedProxy)
+	owner := uploadOwner(w, r, h.auth, h.trustedProxy)
 	if len(fileIDs) > 0 {
 		taken, err := h.uploadStore.TakeAll(fileIDs, owner)
 		if err != nil {

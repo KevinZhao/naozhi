@@ -23,7 +23,7 @@ Cross-compile for deployment target (ARM64 Linux):
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/naozhi ./cmd/naozhi/
 ```
 
-Deploy: see `deploy/naozhi.service` for systemd unit. Manual deploy via SSM + S3.
+Deploy: `cmd/naozhi/service.go::generateSystemdUnit` is authoritative for `sudo naozhi install`; `deploy/naozhi.service` is a manual-deploy reference kept in sync (regression gate: `TestGenerateSystemdUnit_MatchesDeployTemplate`).
 
 ## Architecture
 

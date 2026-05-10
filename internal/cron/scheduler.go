@@ -252,6 +252,15 @@ const maxJobsHardCap = 500
 // global MaxJobs quota. Exported so tests and docs can reference the
 // value; config override is deliberately not wired up yet — if operators
 // need it tunable, promote it into SchedulerConfig as a follow-up.
+//
+// Relationship to exempt pool (BL2 acknowledged design):
+// Every cron job calls session.Router.RegisterCronStub at scheduler
+// Start / AddJob time and consumes 1 slot from session.maxExemptSessions
+// (currently 20). At DefaultMaxJobsPerChat=10 × 2 busy chats, the exempt
+// pool is fully consumed and planner/scratch exempt sessions may be
+// starved. This is an acknowledged trade-off: a separate
+// maxCronExemptSessions reserve or per-chat fair-share eviction is the
+// escape hatch if pressure materialises.
 const DefaultMaxJobsPerChat = 10
 
 // workDirReachable reports whether workDir exists and resolves to a

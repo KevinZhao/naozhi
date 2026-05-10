@@ -392,7 +392,8 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/naozhi ./cmd/naozhi/
 # 上传到服务器
 scp bin/naozhi server:/usr/local/bin/
 
-# 安装 systemd service
+# 安装 systemd service（推荐 `sudo naozhi install`，自动生成单元文件；
+# deploy/naozhi.service 是手动部署参考，与 cmd/naozhi/service.go 保持同步）
 sudo cp deploy/naozhi.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable naozhi
 

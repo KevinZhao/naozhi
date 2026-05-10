@@ -2138,8 +2138,56 @@ func (p *Process) GetTotalTimeout() time.Duration {
 // respawn changing session_uuid).
 func (p *Process) InjectHistory(entries []EventEntry) {
 	p.eventLog.AppendBatch(entries)
-	if p.linker != nil {
-		p.linker.SeedFromHistory(entries)
+	if p.linker == nil {
+		return
+	}
+	p.linker.SeedFromHistory(entries)
+
+	// A3 second-leg: entries persisted by an older naozhi (before the RFC v4
+	// §3.2.2 four-field backfill shipped) lack InternalAgentID / JSONLPath,
+	// so SeedFromHistory skips them. Yet the in-process team agents those
+	// entries describe may still be running under the live shim — their
+	// task_id → jsonl mapping has to come from an active Resolve. Walk the
+	// batch for terminal-but-unresolved "agent" / "task_start" pairs and
+	// kick off async Resolves so the dashboard drill-in has something to
+	// serve when the user clicks.
+	//
+	// agent: agent entries carry {ToolUseID, Subagent, Background};
+	//        task_start entries carry {TaskID, ToolUseID} and usually arrive
+	//        right after the paired agent entry.
+	// We index task_start by ToolUseID so a single pass assembles the args
+	// Resolve wants: (taskID, toolUseID, name, description, agentToolUseMS).
+	taskStartByToolUse := make(map[string]EventEntry, len(entries))
+	for _, e := range entries {
+		if e.Type == "task_start" && e.ToolUseID != "" {
+			taskStartByToolUse[e.ToolUseID] = e
+		}
+	}
+	for _, e := range entries {
+		if e.Type != "agent" || e.ToolUseID == "" {
+			continue
+		}
+		if e.InternalAgentID != "" {
+			continue // SeedFromHistory already took care of it
+		}
+		ts, ok := taskStartByToolUse[e.ToolUseID]
+		if !ok || ts.TaskID == "" {
+			continue // task never started — nothing to resolve against
+		}
+		// Cheap guard against ballooning goroutines during a huge replay:
+		// Resolve holds a short dirCache + exits fast on already-cached
+		// task_ids. Still: one goroutine per live team agent from the
+		// last session lifetime is a reasonable ceiling.
+		linker := p.linker
+		taskID := ts.TaskID
+		toolUseID := e.ToolUseID
+		name := e.Subagent
+		if name == "" {
+			name = e.TeamName
+		}
+		desc := e.Summary
+		wallclock := e.Time
+		go linker.Resolve(taskID, toolUseID, name, desc, wallclock)
 	}
 }
 
@@ -2182,18 +2230,28 @@ func (p *Process) EventLog() *EventLog {
 // SetCwdForLinker plumbs the working directory into the Linker after a shim
 // reconnect. SpawnReconnect does not have cwd handy (shim owns it); the
 // session router provides it once the session record is re-read. Safe to
-// call any time — updates projectDir only; does not touch parent_session_id
-// (which arrives via the next system.init event).
+// call any time — updates projectDir and, when the reconnect handshake
+// already carried a session_id, also populates parentSessionID so Resolve
+// can succeed without waiting for the next live system.init event (which
+// never fires when the CLI is idle post-reconnect).
 func (p *Process) SetCwdForLinker(cwd string) {
 	if p.linker == nil || cwd == "" {
 		return
 	}
 	p.cwd = cwd
 	projectDir := resolveProjectDir(cwd)
-	// Preserve any already-captured sessionID — SetContext takes both at once.
 	p.linker.mu.RLock()
 	session := p.linker.parentSessionID
 	p.linker.mu.RUnlock()
+	// On reconnect the wrapper populates proc.SessionID from
+	// handle.Hello.SessionID BEFORE the first live init event arrives —
+	// mirror that into the linker so Resolve works immediately on
+	// historical agent tasks replayed via InjectHistory. If readLoop
+	// later ingests an init with a different id, the normal SetContext
+	// call in the readLoop path updates it.
+	if session == "" && p.SessionID != "" {
+		session = p.SessionID
+	}
 	p.linker.SetContext(projectDir, session)
 }
 

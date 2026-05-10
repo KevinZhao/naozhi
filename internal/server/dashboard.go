@@ -252,6 +252,7 @@ func (s *Server) registerDashboard() {
 		uploadStore:   uploads,
 		uploadLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, s.auth.trustedProxy), // 10 uploads/min per IP
 		sendLimiter:   newIPLimiterWithProxy(rate.Every(2*time.Second), 30, s.auth.trustedProxy), // 30 sends/min per IP (burst 30)
+		auth:          s.auth,
 		trustedProxy:  s.auth.trustedProxy,
 	}
 

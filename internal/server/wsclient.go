@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/time/rate"
 
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 )
 
@@ -194,6 +195,9 @@ func (c *wsClient) SendRaw(data []byte) {
 func (c *wsClient) readPump() {
 	defer func() {
 		if r := recover(); r != nil {
+			// OBS1: increment panic counter before logging so observers see
+			// the rate even when stack-dump output is truncated.
+			metrics.PanicRecoveredTotal.Add(1)
 			// Log the panic cause at Error so operators are alerted, but
 			// keep the verbose stack trace at Debug — shipping it to
 			// journald / aggregated log stores would broadcast internal

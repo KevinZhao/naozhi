@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/transcribe"
@@ -289,6 +290,7 @@ func (f *Feishu) cleanupNonces(ctx context.Context) {
 func (f *Feishu) cleanupNoncesTick() {
 	defer func() {
 		if r := recover(); r != nil {
+			metrics.PanicRecoveredTotal.Add(1)
 			slog.Error("feishu: cleanupNonces tick panic recovered; replay protection continues on next tick",
 				"panic", r, "stack", string(debug.Stack()))
 		}

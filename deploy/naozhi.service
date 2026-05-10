@@ -1,3 +1,11 @@
+# RNEW-OPS-412: This file is a manual-deploy reference that stays in sync
+# with cmd/naozhi/service.go::generateSystemdUnit. The Go generator is the
+# authoritative source used by `naozhi install`; this template exists for
+# operators who prefer `cp` + edit in place without running the binary.
+# If you change this file, update generateSystemdUnit and its
+# TestGenerateSystemdUnit_MatchesDeployTemplate regression test to match.
+# Prefer `sudo ./naozhi install` for production deploys.
+
 [Unit]
 Description=Naozhi - Claude Code IM Gateway
 After=network-online.target

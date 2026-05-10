@@ -56,3 +56,43 @@ jobs:
 
       - name: Run govulncheck
         run: govulncheck ./...
+
+  # RNEW-TEST-432: darwin build-tag coverage — catches
+  # proc_darwin.go / sdnotify_darwin / atomicfile_nonunix divergences
+  # that pass Linux but break macOS silently.
+  test-macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build (darwin hard gate)
+        run: go build ./...
+
+      - name: Test
+        # -short because some race tests are Linux-tuned. Informational for
+        # now; promote to hard gate once darwin flake surface is known.
+        run: go test -race -timeout 300s -short ./...
+        continue-on-error: true
+
+  # RNEW-TEST-432: Windows build-only job. Not a supported runtime — the
+  # gate exists to surface regressions outside internal/shim (which uses
+  # POSIX-only syscalls that cannot compile on Windows). Job-level
+  # continue-on-error tolerates known-breaking shim compilation.
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...

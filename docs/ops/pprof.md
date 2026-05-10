@@ -109,7 +109,7 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 
 `/api/debug/vars` 暴露 stdlib `expvar.Handler()`，安全模型与 pprof **完全一致**（requireAuth + loopback-only + trustedProxy 不豁免）。
 
-### 当前 13 个 naozhi 计数器
+### 当前 naozhi 计数器
 
 | 名称 | 语义 | 什么时候值得警觉 |
 |---|---|---|
@@ -121,6 +121,7 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_ws_auth_fail_invalid_token_total` | WSAuthFail 的 invalid-token 分支子集 | 相对 rate_limited 占比高 = 单 IP 在 pace 下撞密码（credential spray 特征） |
 | `naozhi_shim_restart_total` | `shim.StartShimWithBackend` 成功（Reconnect **不计**） | 两次重启间持续增长 = shim 在 crash→respawn |
 | `naozhi_spawn_panic_recovered_total` | `panicSafeSpawn` 吞掉的 wrapper.Spawn panic | 非零即需 grep journalctl 定位 root cause（进程活着但 bug 存在） |
+| `naozhi_panic_recovered_total` | 全局 recover() 吞掉的 panic 数（wsclient readPump / wshub 远程 send+interrupt goroutine / dispatch ownerLoop / feishu cleanupNoncesTick 等高信号点）；`spawn_panic_recovered` 是其真子集 | 非零=有 panic 被 recover；按时间戳对齐 slog.Error stack dump 定位 root cause |
 | `naozhi_shim_reconnect_grace_backfill_total` | shim 场景 `shimReconnectGraceDelay` 超时的 JSONL 延后 backfill（R53-ARCH-001 兜底路径） | 非零 = ReconnectShims 漏了某些 shim（shim 在 shimManagedKeys 与 Discover 间 die） |
 | `naozhi_interrupt_sent_total` | InterruptViaControl 成功把 control_request 送到 CLI | dashboard interrupt 按钮的 happy path，pair Interrupt* 其它 3 个看用户效用 |
 | `naozhi_interrupt_no_turn_total` | InterruptViaControl session 在但无 active turn | 相对 sent 占比高 = UI 该在 idle 状态禁用 interrupt 按钮 |
@@ -181,6 +182,7 @@ ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1
   ws_auth_fail_invalid_token: .naozhi_ws_auth_fail_invalid_token_total,
   shim_restart: .naozhi_shim_restart_total,
   spawn_panic_recovered: .naozhi_spawn_panic_recovered_total,
+  panic_recovered: .naozhi_panic_recovered_total,
   shim_reconnect_grace_backfill: .naozhi_shim_reconnect_grace_backfill_total,
   interrupt_sent: .naozhi_interrupt_sent_total,
   interrupt_no_turn: .naozhi_interrupt_no_turn_total,
@@ -218,7 +220,7 @@ ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1
 
 ### 回归契约
 
-- `internal/metrics/metrics_test.go`: 锁 13 个 expvar 名 / Add 语义 / JSON shape
+- `internal/metrics/metrics_test.go`: 锁 expvar 名 / Add 语义 / JSON shape
 - `internal/metrics/metrics_doc_sync_test.go`: 对比 `docs/ops/pprof.md` 表中的 counter 名与 `metrics.go` 中 `expvar.NewInt` 的实际集合，漏/多均失败
 - `internal/metrics/counter_wiring_contract_test.go`: source-grep 锁 call site + WSAuthFail 两分支 ≥2 次
 - `internal/server/debug_expvar_test.go`: 锁 auth 401 / 非 loopback 403 / loopback+auth 返 JSON 含已注册 counter + stdlib memstats

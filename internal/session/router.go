@@ -1304,6 +1304,16 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		// "running" spinner until the next unrelated broadcast.
 		proc.SetOnTurnDone(func() { r.notifyChange() })
 
+		// Wrapper.SpawnReconnect has no cwd (shim owns it), so its
+		// proc.InitLinker("") left the SubagentLinker with empty
+		// projectDir and Resolve bails on every team agent task_id.
+		// Replay the workspace from the persisted session record so the
+		// Linker can locate ~/.claude/projects/<encoded-cwd>/<session>/
+		// subagents/ for any in-flight teammate tasks.
+		if ws := sess.Workspace(); ws != "" {
+			proc.SetCwdForLinker(ws)
+		}
+
 		// Restore dashboard history from JSONL only.
 		//
 		// Replay events are intentionally NOT injected into persistedHistory:

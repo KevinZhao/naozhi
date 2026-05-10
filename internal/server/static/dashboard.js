@@ -2164,6 +2164,19 @@ function updateEarlierButton(state) {
 function renderEvents(events) {
   const el = document.getElementById('events-scroll');
   if (!el) return;
+  // RNEW-UX-007 — innerHTML replace below wipes any live text selection
+  // inside the events panel (user was mid-copy of a chat bubble). Events
+  // are replayed idempotently each poll/push tick, so skipping one refresh
+  // while the user has an active selection inside the events list is safe:
+  // the next tick lands with the same data and re-renders then. We check
+  // anchorNode lineage so selections elsewhere (sidebar, input, modal) are
+  // not affected by this guard.
+  try {
+    const sel = window.getSelection && window.getSelection();
+    if (sel && !sel.isCollapsed && sel.anchorNode && el.contains(sel.anchorNode)) {
+      return;
+    }
+  } catch (_) { /* getSelection unavailable — proceed with refresh */ }
   const display = processEventsForDisplay(events);
   const html = renderEventsWithDividers(display, 0);
   if (html) {
@@ -3226,6 +3239,22 @@ function applyEventToTurnState(ev) {
       turnState.isWriting = true;
       turnState.currentTool = null;
       turnState.thinkingSummary = '';
+      break;
+    case 'user':
+    case 'result':
+      // Turn boundary: mirror the backend eventlog.applyEntryStateLocked
+      // clearing of turnAgents/bgAgents so the banner doesn't carry over
+      // agent rows from a previous turn (and, post-reconnect, from
+      // replayed history where the Linker no longer has the task mapping).
+      // Without this, the banner keeps showing clickable agent rows for
+      // tasks that can never be resolved, and every click wastes ~5s
+      // of 202-pending retries before the loading indicator clears.
+      turnState.agents = [];
+      turnState.currentTool = null;
+      turnState.isThinking = false;
+      turnState.isWriting = false;
+      turnState.thinkingSummary = '';
+      updateSidebarAgentBadge();
       break;
   }
 }
@@ -5523,6 +5552,21 @@ function showToast(msg, type, duration) {
   el._tid = setTimeout(() => { el.className = 'toast'; }, duration || 3000);
 }
 
+// RNEW-UX-010 — polite announcement into #sr-announce for screen readers.
+// Used for signals that don't surface as a toast (WS connect/disconnect,
+// new-session arrival, cron completion). We clear the textContent after a
+// short tick so an identical follow-up message still re-triggers the AT
+// announcement (some readers skip unchanged text). Silent no-op if the
+// element isn't mounted yet (e.g. during very early boot).
+function announce(msg) {
+  const el = document.getElementById('sr-announce');
+  if (!el || !msg) return;
+  el.textContent = '';
+  setTimeout(() => { el.textContent = String(msg); }, 50);
+  clearTimeout(el._clearTid);
+  el._clearTid = setTimeout(() => { el.textContent = ''; }, 3000);
+}
+
 // localizeAPIError turns an HTTP status code + raw server message into a
 // user-facing Chinese string. Classifies by status class so operators get
 // a consistent mental model — 4xx = "你这边要改", 5xx = "服务端问题，请
@@ -7697,7 +7741,11 @@ const wsm = {
       case 'session_state':
         this.onSessionState(msg);
         break;
-      case 'sessions_update':
+      case 'sessions_update': {
+        // RNEW-UX-010 — snapshot pre-update session-key set so we can spot
+        // a newly-added key after the fetch completes. Comparing sizes is
+        // not enough (delete+create at the same tick would net to zero).
+        const prevSessKeys = new Set(Object.keys(sessionsData || {}));
         debouncedFetchSessions().then(() => {
           // Auto-subscribe to newly created session if we don't have an active
           // subscription. _pendingSubscribeKey is intentionally not checked:
@@ -7707,9 +7755,16 @@ const wsm = {
           if (selectedKey && !wsm.subscribedKey && sessionsData[sid(selectedKey, selectedNode)]) {
             wsm.subscribe(selectedKey, selectedNode);
           }
+          const added = Object.keys(sessionsData || {}).filter(k => !prevSessKeys.has(k));
+          if (added.length > 0) announce('新会话已创建');
         });
         break;
+      }
       case 'cron_result':
+        // RNEW-UX-010 — cron completion is a fire-and-forget background
+        // event; the only sighted signal is a badge count bump. Announce
+        // politely so AT users learn the job landed.
+        announce('定时任务已完成');
         fetchCronJobs().then(() => renderCronPanel());
         break;
       case 'pong':
@@ -8208,6 +8263,11 @@ const wsm = {
       // covered the header. _everConnected stays on the wsm struct because
       // future consumers may still want to differentiate first-handshake
       // from reconnect (e.g. fresh session poll vs. no-op).
+      // RNEW-UX-010 — sighted users see the dot flip; AT users get the
+      // transition announced politely. Only announce when it's a real
+      // transition (prev !== CONNECTED) to avoid re-announcing on no-op
+      // state refreshes.
+      if (prev !== WS_STATES.CONNECTED) announce(this._everConnected ? '已重新连接' : '已连接');
       this._everConnected = true;
       // WS connected: stop session polling, rely on push
       if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
@@ -8217,6 +8277,9 @@ const wsm = {
       // Pull fresh node/session state immediately to clear stale data
       debouncedFetchSessions();
     } else if (s === WS_STATES.DISCONNECTED) {
+      // RNEW-UX-010 — announce only on real transitions from connected, so
+      // initial cold boot (OFF→CONNECTING→DISCONNECTED retry) stays silent.
+      if (prev === WS_STATES.CONNECTED) announce('连接已断开，正在重试');
       // WS lost: start fallback polling
       if (!sessionPollTimer) sessionPollTimer = setInterval(fetchSessions, 5000);
       if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }

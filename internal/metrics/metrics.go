@@ -107,6 +107,20 @@ var (
 	// logs. R172-ARCH-D10.
 	SpawnPanicRecoveredTotal = expvar.NewInt("naozhi_spawn_panic_recovered_total")
 
+	// PanicRecoveredTotal is a global counter for panics that crossed a
+	// recover() boundary anywhere in the process. Dimensional split by call
+	// site is NOT provided — operators can correlate with slog.Error stack
+	// dumps (which every recover site already emits) by timestamp. Distinct
+	// from SpawnPanicRecoveredTotal which is spawn-specific and a subset of
+	// this total.
+	//
+	// Wired into the highest-signal recover sites (dashboard WS readPump,
+	// federated remote-node send/interrupt goroutines, dispatch ownerLoop,
+	// feishu cleanupNoncesTick). Non-zero is an operator-actionable
+	// reliability signal: the recover path kept naozhi alive but the
+	// underlying bug should be investigated. OBS1.
+	PanicRecoveredTotal = expvar.NewInt("naozhi_panic_recovered_total")
+
 	// ShimReconnectGraceBackfillTotal counts deferred JSONL history loads that
 	// fired because a shim-managed session was still missing history after
 	// shimReconnectGraceDelay elapsed (the R53-ARCH-001 fallback). The happy

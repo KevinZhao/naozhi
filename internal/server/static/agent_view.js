@@ -204,6 +204,20 @@
             switchTo(null);
             return;
           }
+          // Tell the user we're polling so 5s of "正在加载…" doesn't feel
+          // like the UI hung. Without this feedback, historical agent rows
+          // (from sessions that predate the linker fix) look identical to
+          // a truly loading view for the full retry window.
+          if (state.retries >= 4) {
+            var elLoad = document.getElementById('events-scroll');
+            if (elLoad) {
+              var loadDiv = elLoad.querySelector('.loading-indicator');
+              if (loadDiv) {
+                loadDiv.textContent = '等待 agent 内部事件… (' +
+                  state.retries + '/' + MAX_SWITCH_RETRIES + ')';
+              }
+            }
+          }
           setTimeout(function () {
             if (seq !== state.switchSeq) return;
             fetchAgentEventsInitial(taskID, dispatchKey, node, seq);
