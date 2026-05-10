@@ -1,9 +1,38 @@
 # RFC: 并行 Agent/Team 可视化 + 内部过程查看
 
 Status: Ready for implementation
-Date: 2026-05-08 (v3 — second-pass review)
+Date: 2026-05-10 (v4 — review feedback folded in)
 Author: naozhi dashboard
 Scope: internal/cli + internal/session + internal/server + static/dashboard.{html,js}
+
+## v4 变更摘要（vs v3）
+
+1. **单一设计来源**：`docs/design/agent-team-ui-design.md` 降级为指向本 RFC 的
+   stub，不再双处维护（Review P0）。
+2. **Phase 1 即做历史反查**：`EventEntry.InternalAgentID` 不再是 "异步回填供
+   当前 turn 消费" 的一次性字段，而是**持久化到 `sessions/*.jsonl`**；Linker
+   启动时从历史 EventEntry `SeedFromHistory` 预填 `byTaskID`，shim 重连或
+   session_uuid 变化后老 task_id 仍能回看（Review P0；原 Phase 4 → Phase 1）。
+3. **§3.2 承认现状**：`EventEntry` 已有 `TaskID/ToolUseID/LastTool/ToolUses/
+   Tokens/DurationMS/Status`；`SubagentInfo` 已有 `Name/Activity/Background`。
+   本 RFC **真正新增**字段仅 `TaskType`（EventEntry） + `InternalAgentID`
+   （EventEntry + SubagentInfo）+ 6 个 aggregator 注入字段（SubagentInfo），
+   避免读起来像白板（Review P1）。
+4. **dirCache TTL 500 → 200 ms**：与轮询 250 ms 间隔匹配，3 次轮询都命中新
+   扫描（Review P1；详 §3.3.3 计算表）。
+5. **Phase 3 前置模块拆分**：新增 `internal/server/static/agent_view.js`（~900
+   行）隔离 banner/switchAgentView/agent-event 分派，不再追加到
+   `dashboard.js`（Review P1；详 §3.6.0 + §5 Phase 2.5）。
+6. **§3.4.1 与 §1.7 对齐**：A7 "未完全验证" 旧注释删除；A7 已在 Phase 0 验收。
+   persistedPath 取值改为在 TranscriptReader 层**抓 basename**，endpoint 侧
+   只接受 `tool-results/<basename>` 相对路径（Review P2）。
+7. **50 tailer 超限显式降级**：WS 回 `{type:"agent_subscribe_rejected",
+   reason:"capacity"}`；前端收到后切换为 3 s HTTP poll（Review P2）。
+8. **同 name 再 spawn 防错**：LinkInfo 增 `FirstPromptID`；二次 Resolve 若
+   `agentToolUseWallclockMS` 接近但 `FirstPromptID` 不同 → warn + 保留
+   原映射不覆盖（Review P2）。
+9. **§7 测试补 E2E**：重启 naozhi 后历史 team turn 点 agent row 的回看路径
+   进入 7.3 必测清单。
 
 ## 1. 背景
 
@@ -147,12 +176,12 @@ subagents/ 只出现一份一级 jsonl。
 |---|---|---|---|
 | **A1** | 真嵌套 Agent 时二级 jsonl 仍落同目录 | 未验证（模型退化成 Skill 伪调用） | 本 RFC 不做 drill-in；若未来落别处，§3.4.1 退化为普通 tool_use 仍安全 |
 | **A2** | `run_in_background=true` 的 agent 是否落盘 | ✅ **已验**：落 `subagents/agent-<hex>.jsonl` + meta.json；但**只一份**（无双版本） meta.json 多 `description` + `name` 字段 | Linker selector 的单候选路径已覆盖；meta.json 的 description 字段可供冗余校验 |
-| **A3** | Shim 重连后父 session_uuid 稳定 | **有条件成立**：正常 reconnect（CLI 活、走 SpawnReconnect）→ session_id 从 shim state 透传、稳定；CLI 死后 respawn → **可能变**（router 注释 "sometimes losing resume context"） | Linker 重建策略：历史 EventEntry 持久化的 `InternalAgentID` 优先于重跑 Resolve（Phase 4 InjectHistory 路径） |
+| **A3** | Shim 重连后父 session_uuid 稳定 | **有条件成立**：正常 reconnect（CLI 活、走 SpawnReconnect）→ session_id 从 shim state 透传、稳定；CLI 死后 respawn → **可能变**（router 注释 "sometimes losing resume context"） | **Phase 1 已处理**：`InternalAgentID/JSONLPath/FirstPromptID` 持久化到 EventEntry；Linker 启动时走 `SeedFromHistory` 预填 byTaskID，不依赖 session_uuid 稳定性（§3.3.7） |
 | **A4** | ACP (Gemini) 协议的 transcript 结构 | 未验证（纯 Claude 项目） | Phase 4 前按 `ProtocolName() != "stream-json"` 直接 tombstone，UI toast |
 | **A5** | CLI transcript 清理触发条件 | 未验证 | 砍 410 状态码，全用 404；按"文件不存在"统一处理 |
 | **A6** | parentUuid 成链无环 | 未验证 | Phase 4 若做时间轴回放再验；本 RFC 不依赖 |
 | **A7** | tool-results 文件名和父流 task_id 的关系 | ✅ **已验**：**完全独立**命名空间（8-12 字符 base36）；agent 内部 jsonl **不出 `system.task_started`**，文件名是 CLI 对大输出生成的独立 id；`<persisted-output>` 文本里给**绝对路径** | endpoint 路径校验按 basename 正则 + 目录约束，不要求映射到任何 task_id |
-| **A8** | 同 session 重复 spawn 同 name | 未验证 | §2.2 声明不支持；代码 warn log 监测 |
+| **A8** | 同 session 重复 spawn 同 name | 未验证 | §2.2 声明不支持；`LinkInfo.FirstPromptID` 冲突检测 + warn log + 保留旧映射（§3.3.1 step 7b） |
 
 **Phase 0 新增确认**：
 1. **双 jsonl 是 team-only**：只在 `task_type=in_process_teammate` 场景出现；
@@ -213,40 +242,62 @@ subagents/ 只出现一份一级 jsonl。
 
 ### 3.2 EventEntry / SubagentInfo 字段扩展
 
-`internal/cli/eventlog.go` EventEntry 新增 **2** 字段（SubagentSource 砍
-掉，视图切换是排他的）：
+#### 3.2.1 现状盘点（v4 修订）
+
+`internal/cli/eventlog.go:90-134` 的 EventEntry 已经有：
 
 ```go
 type EventEntry struct {
-    ...existing...
-    TaskType        string `json:"task_type,omitempty"`          // "in_process_teammate" | "local_bash" | ""
-    InternalAgentID string `json:"internal_agent_id,omitempty"`  // "<hex17>"；异步回填
+    // ...（Time/Type/Summary/Cost/Detail/Tool/Images/...）
+    Subagent    string  `json:"subagent,omitempty"`
+    TeamName    string  `json:"team_name,omitempty"`
+    Background  bool    `json:"background,omitempty"`
+    TaskID      string  `json:"task_id,omitempty"`
+    ToolUseID   string  `json:"tool_use_id,omitempty"`
+    LastTool    string  `json:"last_tool,omitempty"`
+    ToolUses    int     `json:"tool_uses,omitempty"`
+    Tokens      int     `json:"tokens,omitempty"`
+    DurationMS  int     `json:"duration_ms,omitempty"`
+    Status      string  `json:"status,omitempty"`
 }
 ```
 
-**兼容性**：TaskType 仅出现于 system subtype 派生 entry，omitempty，历史
-`sessions/*.jsonl` 新旧混读无冲突；旧 naozhi 回放新文件时字段被静默忽略。
+`process.go:1781-1791` 已在 `tool_use(Agent)` 落 `Subagent/TeamName/Background/
+ToolUseID`；`task_started/task_updated/task_notification` 已落 `TaskID/ToolUseID/
+LastTool/ToolUses/Tokens/DurationMS/Status`。`applyEntryStateLocked`
+（eventlog.go:194-214）已按 `Background` 入 bg/turnAgents。
 
-`cli.SubagentInfo` 扩展：
+`SubagentInfo`（eventlog.go:129-134）现有 `Name / Activity / Background`。
+
+#### 3.2.2 真正新增字段
+
+**EventEntry**（持久化到 `sessions/*.jsonl`，历史反查路径用）：
 
 ```go
-type SubagentInfo struct {
-    Name            string `json:"name"`
-    Activity        string `json:"activity,omitempty"`
-    Background      bool   `json:"background,omitempty"`
-    // 新增：
-    TaskID          string `json:"task_id,omitempty"`
-    ToolUseID       string `json:"tool_use_id,omitempty"`
-    TaskType        string `json:"task_type,omitempty"`
-    InternalAgentID string `json:"internal_agent_id,omitempty"`
-    Status          string `json:"status,omitempty"`     // "" | "spawned" | "running" | "completed" | "error"
-    StartedAtMS     int64  `json:"started_at_ms,omitempty"`
-    // Aggregator 注入（§3.5.4）：
-    LastTool        string `json:"last_tool,omitempty"`
-    LastDetail      string `json:"last_detail,omitempty"`
-    ToolUses        int    `json:"tool_uses,omitempty"`
-    DurationMS      int    `json:"duration_ms,omitempty"`
-}
+TaskType        string `json:"task_type,omitempty"`          // "in_process_teammate" | "local_bash" | ""
+InternalAgentID string `json:"internal_agent_id,omitempty"`  // "<hex17>"；Resolve 后异步回填
+JSONLPath       string `json:"jsonl_path,omitempty"`         // 绝对路径；SeedFromHistory 用
+FirstPromptID   string `json:"first_prompt_id,omitempty"`    // jsonl 首行 promptId；同 name 二次 spawn 识别用
+```
+
+**兼容性**：四个字段均 omitempty，只附在 task_start/task_progress/agent
+entry 上；旧 naozhi 回放新文件、或新 naozhi 读旧历史都静默忽略。
+
+**SubagentInfo**（Snapshot 传给前端；不持久化）：
+
+```go
+// 新增：
+TaskID          string `json:"task_id,omitempty"`
+ToolUseID       string `json:"tool_use_id,omitempty"`
+TaskType        string `json:"task_type,omitempty"`
+InternalAgentID string `json:"internal_agent_id,omitempty"`
+Status          string `json:"status,omitempty"`     // "" | "spawned" | "running" | "completed" | "error"
+StartedAtMS     int64  `json:"started_at_ms,omitempty"`
+// Aggregator 注入（§3.5.4）：
+LastTool        string `json:"last_tool,omitempty"`
+LastDetail      string `json:"last_detail,omitempty"`
+ToolUses        int    `json:"tool_uses,omitempty"`
+DurationMS      int    `json:"duration_ms,omitempty"`
 ```
 
 `applyEntryStateLocked` 扩展（R11/R12 修正）：
@@ -302,11 +353,12 @@ type SubagentLinker struct {
     mu              sync.RWMutex
     byTaskID        map[string]LinkInfo
     byToolUseID     map[string]LinkInfo
+    byName          map[string][]LinkInfo // §3.3.1 step 7b 同名冲突检测
     resolvedTaskID  map[string]struct{}   // tombstone：已试过解（成功或失败）的 task_id
     projectDir      string                // ""=未就绪
     parentSessionID string                // ""=未就绪（init 前）
 
-    dirCache        struct {               // §3.3.3 TTL 缓存
+    dirCache        struct {               // §3.3.3 TTL 缓存（200ms）
         at      time.Time
         entries []metaEntry
     }
@@ -319,6 +371,8 @@ type LinkInfo struct {
     JSONLPath       string
     Name            string
     Resolved        bool   // 区分 "未解" vs "已解=空"
+    FirstPromptID   string // jsonl 首行 promptId；同 name 二次 spawn 识别（§3.3.1 step 7b）
+    FromHistory     bool   // true=SeedFromHistory 预填，不需要 Resolve（§3.3.7）
 }
 ```
 
@@ -356,15 +410,34 @@ Pre:   l.projectDir != "" && l.parentSessionID != ""
 # 取首位
 6. if len(filtered) == 0 → tombstone → return ""
    sort filtered by (ModTime desc, Size desc) → take [0]
+   firstPromptID := parsePromptID(firstLine)  // 从首行抓 promptId 字段
 
-# 写缓存
-7. l.mu.Lock()
-   info := LinkInfo{InternalAgentID: hex, JSONLPath: jsonlPath, Name: name, Resolved: true}
-   l.byTaskID[taskID] = info
-   l.byToolUseID[toolUseID] = info
-   l.mu.Unlock()
-   fire onResolve(taskID, toolUseID, hex)
-   return hex
+# 写缓存（含同 name 冲突检测）
+7a. l.mu.Lock()
+    info := LinkInfo{
+        InternalAgentID: hex, JSONLPath: jsonlPath, Name: name,
+        Resolved: true, FirstPromptID: firstPromptID,
+    }
+
+7b. // §2.2 声明不支持同 name 二次 spawn，但 Claude CLI 若将来放开，
+    // mtime 排序会把老 task_id 的 activeAgentView 切到新 agent 内容 —
+    // 主动检测：相同 name 已存在且 promptId 不同 = 发生了同名复用。
+    for existing := range l.byName[name] {
+        if existing.FirstPromptID != "" && existing.FirstPromptID != firstPromptID {
+            log.Warn("agent_link: duplicate name spawn detected",
+                "name", name, "old_prompt", existing.FirstPromptID,
+                "new_prompt", firstPromptID, "task_id", taskID)
+            // 不覆盖已有 task_id 的映射；新 task_id 走正常写入
+            break
+        }
+    }
+
+    l.byTaskID[taskID] = info
+    l.byToolUseID[toolUseID] = info
+    l.byName[name] = append(l.byName[name], info)
+    l.mu.Unlock()
+    fire onResolve(taskID, toolUseID, hex)
+    return hex
 ```
 
 #### 3.3.2 projectDir 推导（R7 修正）
@@ -399,13 +472,13 @@ func resolveProjectDir(cwd string) string {
 **防御**：Resolve 必须读 jsonl 首行 `sessionId` 校验等于 parentSessionID
 （§3.3.1 step 5），否则丢弃该候选。cwd 冲突下 session_uuid 撞车概率 ≈ 0。
 
-#### 3.3.3 dirCache TTL（R9 修正）
+#### 3.3.3 dirCache TTL（v4 修正：500→200ms）
 
 ```go
 func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
     l.mu.Lock()
     defer l.mu.Unlock()
-    if time.Since(l.dirCache.at) < 500*time.Millisecond {
+    if time.Since(l.dirCache.at) < 200*time.Millisecond {
         return l.dirCache.entries
     }
     entries := rawScan(dir)   // os.ReadDir + parse each .meta.json
@@ -415,9 +488,19 @@ func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
 }
 ```
 
-3 个 task_started 250 ms 内连发时共享一次扫描。TTL=500ms 保证"等待 CLI
-写盘的轮询"能看到新 .meta.json 文件（轮询间隔 250ms，TTL 500ms 允许
-旧缓存命中一次后强制刷新）。
+**为什么 200ms**（Review P1）：
+
+| t (ms) | 动作 | `Since(at)` | 缓存决策 |
+|---|---|---|---|
+| 0 | task_started #1 调用 | — | miss → rawScan |
+| 0-50 | task_started #2/#3 排队进来 | <200ms | hit → 复用（并发去重） |
+| 250 | 轮询重试（候选扫空时） | ≈200ms | **miss → rawScan** ✓ |
+| 500 | 下一次重试 | ≈250ms | miss → rawScan ✓ |
+| ... | 12 次共 3s | 每次 >200ms | 每次 miss → rawScan ✓ |
+
+500ms 方案下 t=250ms 重试会命中旧缓存（`Since < 500ms`），有效只有 2 次
+真正扫磁盘。200ms 方案保证 3s 宽限里 12 次轮询都拿到新结果，同时同 turn
+3 个 task_started 50ms 内到齐仍共享 1 次扫描。
 
 #### 3.3.4 生命周期
 
@@ -427,9 +510,10 @@ func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
 - readLoop 在 `system.task_started`（task_type==in_process_teammate）后
   `go linker.Resolve(...)`，带 ctx=3s；主循环不阻塞。
 - Resolve 完成回调：`l.onResolve(taskID, toolUseID, internalAgentID)` → tailer
-  + `EventLog.SetAgentInternalID(toolUseID, id)`。
-- Process 退出丢弃 Linker。InjectHistory 重放时历史 Agent/task_start 再
-  跑 Resolve（best-effort；文件可能已被 CLI /new 清理，此时 tombstone）。
+  + `EventLog.SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, firstPromptID)`
+  把四字段写回对应 EventEntry（§3.3.7 持久化路径）。
+- Process 启动 / InjectHistory 完成后立刻 `linker.SeedFromHistory(entries)`
+  填充 byTaskID（§3.3.7）；后续活 turn 仍走异步 Resolve。
 
 #### 3.3.5 锁 pattern（D5 修正）
 
@@ -443,6 +527,63 @@ func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
 
 - 同一 turn 的 3 个 task_started 并发 Resolve → 受 dirCache 保护只扫一次。
 - 文件 size/stat 调用无锁并行。
+
+#### 3.3.7 SeedFromHistory（v4 新增 — 解决 A3）
+
+**触发**：`Process.InjectHistory` 调用 `AppendBatch` 之后，立刻调
+`linker.SeedFromHistory(entries)`，不走异步 Resolve。
+
+```go
+// Seed pre-populates byTaskID/byToolUseID/byName from history EventEntry
+// so shim reconnect or CLI-dead-respawn can still open historical team
+// agent views without depending on A3 (session_uuid stability).
+//
+// For each entry with InternalAgentID + JSONLPath persisted: fill LinkInfo
+// with FromHistory=true, Resolved=true. No disk access in hot path.
+// If the file is gone at read time (/api/sessions/agent_events path), the
+// endpoint layer surfaces 404 with existing tombstone UX — no new code
+// path, just "历史已清理" toast (§3.7 降级矩阵).
+func (l *SubagentLinker) SeedFromHistory(entries []EventEntry) {
+    l.mu.Lock()
+    defer l.mu.Unlock()
+    for _, e := range entries {
+        if e.TaskID == "" || e.InternalAgentID == "" || e.JSONLPath == "" {
+            continue
+        }
+        info := LinkInfo{
+            InternalAgentID: e.InternalAgentID,
+            JSONLPath:       e.JSONLPath,
+            Name:            e.Subagent,
+            FirstPromptID:   e.FirstPromptID,
+            Resolved:        true,
+            FromHistory:     true,
+        }
+        l.byTaskID[e.TaskID] = info
+        if e.ToolUseID != "" {
+            l.byToolUseID[e.ToolUseID] = info
+        }
+        if e.Subagent != "" {
+            l.byName[e.Subagent] = append(l.byName[e.Subagent], info)
+        }
+    }
+}
+```
+
+**为什么 Phase 1 就做（不留 Phase 4）**（Review P0）：
+
+A3 结论是 "CLI-dead 后 session_uuid **可能变**"。如果只走异步 Resolve，
+shim 重连后新 Process 拿到新 session_uuid → `<projectDir>/<newUUID>/subagents/`
+扫不到老文件 → 全部 tombstone → 整个 team 历史 agent_view 全部作废。
+
+`SeedFromHistory` 绕开 "projectDir/parentSessionID → 扫描" 这一步，直接用
+历史 EventEntry 里持久化的 **JSONLPath 绝对路径**，文件没被 CLI `/new`
+清理就能读。这把 A3 从 "Phase 4 风险" 降级为 "文件系统一致性问题"，后者
+已在 §3.7 降级矩阵里有合理 UX（tombstone + toast）。
+
+**持久化写入点**：`Linker.OnResolve` 回调除了启动 tailer，还要调
+`EventLog.SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, firstPromptID)`
+把四个字段写回对应 `agent`/`task_start` EventEntry，让 `persistHistory` 落盘
+时带上。写入是幂等的（多次触发同一 toolUseID 写相同值，无竞争）。
 
 ### 3.4 TranscriptReader
 
@@ -530,12 +671,26 @@ func flattenToolResult(c any) (string, string, string, bool) {
 }
 ```
 
-`extractPersistedPath(s)` 返回的 path **保留原始格式**（可能是绝对路径）；
-server endpoint 负责相对化 + 白名单校验。
+`extractPersistedPath(s)` **在 TranscriptReader 层就取 basename**（v4 修正）：
 
-**注意（§1.7 A7）**：`<persisted-output>` 里的 "saved at" 路径是 CLI 写
-的绝对路径，server 端不能直接打开；必须 strip 前缀只保留 `tool-results/<id>.ext`。
-**A7 未完全验证**，Phase 1 前需确认路径格式。
+```go
+func extractPersistedPath(s string) string {
+    // "saved at: /home/ec2-user/.claude/projects/.../tool-results/abc12.txt"
+    re := regexp.MustCompile(`saved at:\s*(\S+)`)
+    m := re.FindStringSubmatch(s)
+    if len(m) < 2 { return "" }
+    abs := m[1]
+    base := filepath.Base(abs)  // "abc12.txt"
+    if !toolResultBasenameRe.MatchString(base) { return "" }
+    return "tool-results/" + base  // 前端拼接用
+}
+var toolResultBasenameRe = regexp.MustCompile(`^[a-z0-9]{1,32}\.(txt|json|log)$`)
+```
+
+这样 EventEntry 里落的 `persisted_path` 已经是 `tool-results/<id>.ext` 形式，
+endpoint 侧只需校验格式 + 拼 `<projectSessionDir>/<cleaned>`（§3.5.1 tool_result
+handler）。A7 已在 Phase 0 ✅ 验证（§1.7），basename 命名空间独立于 task_id，
+此处无遗留未知。
 
 ### 3.5 Server API
 
@@ -631,6 +786,8 @@ func (h *AgentH) handleToolResult(w, r) {
  "task_id":"tXXX", "status":"completed|error"}
 {"type":"agent_meta", "key":"...", "node":"local",
  "task_id":"tXXX", "meta": {last_tool, tool_uses, duration_ms}}
+{"type":"agent_subscribe_rejected", "key":"...", "node":"local",
+ "task_id":"tXXX", "reason":"capacity"}
 ```
 
 ACL：agent_subscribe 校验 key 属于当前 dashboard token（复用
@@ -684,7 +841,57 @@ linker.OnResolve(func(taskID, toolUseID, internalAgentID string) {
 - 同 taskID 多订阅幂等（refCount++）。
 - WS agent_unsubscribe / disconnect → refCount--；refCount==0 回到 silent。
 - task_done → close tailer（无论 refCount）。
-- 活跃 tailer 上限 50，超限不再起 silent；HTTP 轮询路径仍工作。
+- 活跃 tailer 上限 50。超限处理（v4 修正）：
+
+**超限路径**：
+
+```
+用户打开 agent view
+  ↓ WS agent_subscribe
+server: activeTailerCount == 50
+  ↓
+WS 回 {type:"agent_subscribe_rejected",
+       task_id:"tXXX", reason:"capacity"}
+  ↓
+前端 switchAgentView 收到 rejected
+  ↓
+降级为 HTTP poll 模式：
+  - 立刻 fetch(/api/sessions/agent_events?after=0)
+  - setInterval 3s poll with after=lastEventTime
+  - 保留 activeAgentView=taskId
+  - banner 角标显示 "⏱ 轮询中"（辨识度；非警告）
+  - switchAgentView(null) 时清 interval
+```
+
+前端代码（§3.6.4 补充）：
+
+```js
+wsm.onMessage('agent_subscribe_rejected', (msg) => {
+  if (msg.task_id !== turnState.activeAgentView) return;
+  if (msg.reason === 'capacity') {
+    showToast('高负载下改用轮询（3s 刷新）', 'info');
+    startAgentHttpPoll(msg.task_id);
+  }
+});
+
+let agentPollTimer = null;
+function startAgentHttpPoll(taskId) {
+  stopAgentHttpPoll();
+  let lastAt = 0;
+  agentPollTimer = setInterval(async () => {
+    if (turnState.activeAgentView !== taskId) { stopAgentHttpPoll(); return; }
+    const r = await fetch(agentEventsURL(taskId, lastAt, 200));
+    if (!r.ok) return;
+    const events = await r.json();
+    if (!events.length) return;
+    lastAt = events[events.length - 1].time;
+    appendAgentEvents(events);
+  }, 3000);
+}
+function stopAgentHttpPoll() {
+  if (agentPollTimer) { clearInterval(agentPollTimer); agentPollTimer = null; }
+}
+```
 
 **Aggregator 状态存在 tailer 本地（D4 修正）**，不回写 EventLog.turnAgents。
 Snapshot 时 server 层在 `managed.go` Snapshot() 返回后做 enrich：
@@ -709,6 +916,35 @@ func enrichSnapshot(s *session.SessionSnapshot, hub *Hub) {
 这样 `cli` 包不依赖 `server` 包；aggregator 彻底属于 server 层。
 
 ### 3.6 前端重设计
+
+#### 3.6.0 模块拆分（v4 新增 — Review P1）
+
+`dashboard.js` 已 10008 行（Round 194）。再追加 800-1000 行并全局 grep/replace
+`turnState` 会进一步劣化可维护性。本 RFC 前置一步："先搬家再动工"。
+
+**新增文件**：`internal/server/static/agent_view.js`（~900 行，Phase 2.5 交付，
+§5）。职责：
+
+- `turnState.parent` 与 `turnState.agents` 相关的分派（applyParentEvent /
+  applyAgentMetaEvent）
+- banner 渲染（renderAgentRows / agentRowHtml / 自动折叠）
+- switchAgentView + 面包屑
+- HTTP poll 降级路径（§3.5.4 前端代码）
+- WS agentSubscribe / Unsubscribe 绑定
+
+**加载方式**：`dashboard.html` 按顺序 `<script src="agent_view.js">` 放在
+`dashboard.js` **之后**（因为依赖现有 `esc / fetch / wsm / sessionsData /
+selectedKey / sessionScrollPos` 等全局）。不引入 ES module（项目一贯
+约定：vanilla + 全局 symbol，无构建步骤）。
+
+**边界**：`dashboard.js` 的 `applyEventToTurnState`（现 line ~3119）**瘦身**
+为 "派发给 agent_view.applyParentEvent / applyAgentEvent"；body 移到新文件。
+所有 `turnState.parent.*` / `turnState.agents.*` 读写归属 agent_view.js。
+不动 `dashboard.js` 里的 sessions 列表 / 历史面板 / settings / cron 代码。
+
+**验收**：`go test ./internal/server/... -run TestDashboard` 的 embed
+contract test 新增 `TestDashboardJS_AgentViewModuleLoaded`：断言 HTML 里
+引用 agent_view.js 且文件非空。
 
 #### 3.6.1 turnState 结构
 
@@ -908,7 +1144,8 @@ const toolVerbs = {
 | WS 断连 | HTTP 轮询兜底；重连后 resubscribe |
 | cwd 含罕见字符 | projectDir 编码规则通用（R7 修正）；若 CLI 改规则则 §1.7 需补验证 |
 | ACP 协议无 subagents/ | §1.7 A4 验证前：全部 tombstone；验证后可能需按 ProtocolName 分支 |
-| session_uuid 重连后变化 | §1.7 A3 验证前：重连后 Linker 重置 projectDir 时捕获新 uuid；历史映射丢失是可接受的 |
+| session_uuid 重连后变化 | v4：`SeedFromHistory` 从历史 EventEntry 预填 byTaskID，不依赖 uuid 稳定；文件被 CLI `/new` 清理才 tombstone（§3.3.7） |
+| 50 tailer 超限 | v4：WS 回 `agent_subscribe_rejected{reason:"capacity"}` → 前端切 3s HTTP poll（§3.5.4） |
 
 ## 4. 安全
 
@@ -941,36 +1178,57 @@ const toolVerbs = {
 
 其余 A1/A4/A5/A6/A8 延到 Phase 4 按需验。
 
-### Phase 1 — 磁盘定位 + Linker + HTTP API（~750 行 + 测试）
+### Phase 1 — 磁盘定位 + Linker + HTTP API + SeedFromHistory（~900 行 + 测试）
 
 1. `subagent_link.go` + test：7 步算法含所有 §3.3.1 edge cases +
-   dirCache TTL + sessionId 校验 + parentSessionID==""/projectDir=="" 门控
+   dirCache TTL 200ms + sessionId 校验 + parentSessionID==""/projectDir==""
+   门控 + `byName` 同 name 冲突检测 + **`SeedFromHistory`（§3.3.7）**
 2. `subagent_transcript.go` + test：映射表全路径 + flattenToolResult
-   三 shape + 首行残片
-3. EventEntry/SubagentInfo 字段扩展 + applyEntryStateLocked 新分支
+   三 shape + 首行残片 + `extractPersistedPath` 取 basename
+3. EventEntry 新增 `TaskType/InternalAgentID/JSONLPath/FirstPromptID`（v4 §3.2）；
+   SubagentInfo 扩展；applyEntryStateLocked 新分支
 4. `Process` 挂 Linker；`Wrapper.Spawn` 注入 projectDir；readLoop 异步 Resolve
-5. `EventLog.SetAgentInternalID` + `UpdateAgentMeta`
-6. `/api/sessions/agent_events` + `/api/sessions/tool_result` + 访问链
+5. `EventLog.SetAgentInternalID(toolUseID, hex, jsonlPath, firstPromptID)`
+   四字段一次性写回，**持久化路径**（被 `persistHistory` 自动落盘）
+6. `Process.InjectHistory` 末尾调 `linker.SeedFromHistory(entries)`（A3 防御）
+7. `/api/sessions/agent_events` + `/api/sessions/tool_result` + 访问链
    handler + 路径白名单
-7. **Phase 1 验收工具**（D1 修正）：
+8. **Phase 1 验收工具**（D1 修正）：
    - 单测 pass + `go test -race -cover ./internal/cli/... ./internal/server/...`
    - 新增 `cmd/probe/agent_events/main.go`：spawn mock CLI + mock shim →
      发 3 个 Agent tool_use + task_started + 磁盘写 transcript →
      HTTP assert 返回合理 EventEntry 列表
+   - **新增 A3 回归**：重启 naozhi 进程 → 历史 sessions/*.jsonl 里含
+     InternalAgentID+JSONLPath 的 task_id → curl agent_events 仍返回 200
    - 真机手工验证：dashboard 启 team；浏览器 devtools 看 Subagents 里的
      task_id → curl agent_events + tool_result 双端点
 
-### Phase 2 — WS + silent tailer + aggregator（~500 行 + 测试）
+### Phase 2 — WS + silent tailer + aggregator（~550 行 + 测试）
 
-1. `agent_tailer.go` + refCount + silent/broadcasting 模式
+1. `agent_tailer.go` + refCount + silent/broadcasting 模式 + **50 上限 +
+   rejected 消息**（v4 §3.5.4）
 2. wshub agent_subscribe/unsubscribe 分发 + 150 ms debounce
 3. `Linker.OnResolve` 回调 → ensureTailer
 4. `enrichSnapshot`（server 层，D4）
-5. `agent_meta`/`agent_done` WS 消息
+5. `agent_meta`/`agent_done`/`agent_subscribe_rejected` WS 消息
 
-验收：devtools 看 agent_event/meta 推入；tailer 计数稳定；停订阅 tailer 回收。
+验收：devtools 看 agent_event/meta 推入；tailer 计数稳定；停订阅 tailer 回收；
+**手工注入 50 个假 tailer → 第 51 个 subscribe 收到 rejected**。
 
-### Phase 3 — 前端 UI（~800-1000 行 JS + ~80 行 CSS，D3 修正）
+### Phase 2.5 — 前端模块拆分（~100 行搬家 + 契约测试，v4 新增）
+
+1. 创建 `internal/server/static/agent_view.js` 空文件 + embed
+2. `dashboard.html` 插入 `<script src="agent_view.js">`（放在 dashboard.js 后）
+3. 新增 `TestDashboardJS_AgentViewModuleLoaded` 契约测试
+4. 把现有 `renderAgentRows/agentRowHtml/findAgentByToolUseId/findAgentByTaskId/
+   initAgentsFromSession` 5 个函数搬到 agent_view.js（不改逻辑，只换文件）
+5. 验收：`go test ./internal/server/...` 全绿；浏览器打开 dashboard，team
+   banner 行为和 v3 前完全一致
+
+**边界**：本阶段**只搬家不扩功能**，隔离一次"只是换位置"的回归测试。
+Phase 3 的新增代码全部落在 agent_view.js。
+
+### Phase 3 — 前端 UI（~800-900 行 JS + ~80 行 CSS，全部落入 agent_view.js）
 
 1. turnState.parent 拆分（全局 grep/replace）
 2. 事件分派表实现（applyParentEvent/applyAgentMetaEvent 拆分）
@@ -989,13 +1247,13 @@ const toolVerbs = {
 - ready 30 s 后自动折叠；用户展开后本轮不再折叠；新 turn 重置
 - 完成 agent row 仍可点击回看
 
-### Phase 4 — 回放 & 边界（~200 行）
+### Phase 4 — 收尾 & 边界（~120 行）
 
-1. InjectHistory 重放触发 Linker 重解（best-effort）
-2. transcript 清理后 tombstone 行为
+1. ~~InjectHistory 重放触发 Linker 重解~~ → **已前置到 Phase 1**（SeedFromHistory）
+2. transcript 清理后 tombstone 行为（404 + UI toast）
 3. 完成 agent 列表折叠 chip 的展开/收起动画
 4. 嵌套 Agent 降级（§2.2；agent 视图内 Agent tool_use 不产 agent 行）
-5. §1.7 剩余假设 (A1/A2/A4/A5/A6/A8) 的实测覆盖
+5. §1.7 剩余假设 (A1/A2/A4/A5/A6) 的实测覆盖（A3/A7/A8 已在 Phase 0/1/2 处理）
 
 ## 6. 风险登记
 
@@ -1006,10 +1264,14 @@ const toolVerbs = {
 4. **嵌套 Agent（A1 未验证）**：本 RFC 不 drill-in；若未来二级 jsonl 落
    别处，§3.4.1 退化显示仍安全。
 5. **silent tailer 资源**：50 上限 + 30 s idle 回收 + task_done 关闭。
-6. **Reconnect 历史丢失（A3 未验证）**：若 session_uuid 变，老 task_id 映
-   射作废；Linker 重置 tombstone；UI 降级。
+6. **Reconnect 历史丢失**：v4 SeedFromHistory 把 InternalAgentID/JSONLPath
+   持久化到 EventEntry，shim 重连 / CLI-dead 后老 task_id 仍能从历史反查
+   出文件路径，**只在 `~/.claude/projects` 被清理时降级为 tombstone**。
 7. **ACP 协议（A4 未验证）**：Phase 4 前按 ProtocolName 全链降级到
    tombstone；dashboard 不崩。
+8. **同 name 再 spawn 选错**：v4 `LinkInfo.FirstPromptID` + `byName` 冲突
+   检测 + warn log；不覆盖已有 task_id 映射。实际未在 Claude CLI 看到此
+   行为（§2.2 非目标），加防御是因为 mtime-desc selector 对此情况脆弱。
 
 ## 7. 测试策略
 
@@ -1017,13 +1279,16 @@ const toolVerbs = {
 
 - `subagent_link_test.go`：
   - 单候选 / size=0 过滤 / mtime 择最新
-  - dirCache TTL 命中（2 次 Resolve 只 1 次 ReadDir）
+  - dirCache TTL 200ms 命中（同 turn 3 并发 Resolve 只 1 次 ReadDir）
+  - dirCache 250ms 重试时已 miss 并重扫（v4）
   - sessionId 校验错 → skip
   - 首行 timestamp 比父流 Agent 早 >5 s → skip
   - 空目录 3 s 超时 → tombstone
   - projectDir/parentSessionID 为空 → 直接 ""
   - 非法 agentType / 非法 hex → skip
   - R7 编码：`/tmp/a.b` → `-tmp-a-b`
+  - **SeedFromHistory**：预填后 Resolve 直接返回已知 InternalAgentID，不扫目录（v4）
+  - **同 name 二次 spawn**：FirstPromptID 冲突时 warn + 旧映射不被覆盖（v4）
 - `subagent_transcript_test.go`：
   - 所有映射路径
   - `<teammate-message>` 跳过（prompt + shutdown 两场景）
@@ -1041,6 +1306,8 @@ const toolVerbs = {
 - `ws_agent_subscribe_test.go`：订阅 → 模拟磁盘追加 → 收到事件；
   多订阅共享 tailer；unsubscribe 回收；silent tailer 由 OnResolve 自起；
   debounce 150 ms 验证
+- **50 上限回归**（v4）：注入 50 个假 tailer → 第 51 个 subscribe →
+  收到 `agent_subscribe_rejected{reason:"capacity"}` 且 tailer 数量不增
 
 ### 7.3 端到端（手动）
 
@@ -1053,35 +1320,50 @@ const toolVerbs = {
 4. 大 Bash 输出触发 persisted_path，点击打开
 5. ready 30 s 自动折叠 + 展开后本轮不折叠
 6. cwd 含 `.` 的项目下跑 team（验证 §3.3.2 编码）
+7. **重启 naozhi 后历史 team turn 回看**（v4 — A3 防线）：
+   - 跑完一个 3-agent team turn，等待 result
+   - `sudo systemctl restart naozhi`
+   - 打开同一 session，从历史滚到那个 turn
+   - 点任一 agent row → 应显示内部事件，或 **`~/.claude/projects/` 被
+     清理时**显式 "该 agent 暂无内部记录" toast（不白屏，不崩）
+8. **50 tailer 超限降级**（v4）：调小上限到 2 → 开第 3 个 agent view →
+   页面切到 HTTP 轮询模式，仍能每 3s 看到新事件；toast 提示"高负载下改用轮询"
 
 ## 8. 文件清单
 
-**新增**（~1,650 行）：
-- `internal/cli/subagent_link.go` ~250
-- `internal/cli/subagent_link_test.go` ~350
+**新增**（~1,850 行，v4 调整）：
+- `internal/cli/subagent_link.go` ~320（+byName + SeedFromHistory + FirstPromptID）
+- `internal/cli/subagent_link_test.go` ~400
 - `internal/cli/subagent_transcript.go` ~300
 - `internal/cli/subagent_transcript_test.go` ~350
 - `internal/server/dashboard_agent_events.go` ~180
 - `internal/server/dashboard_agent_events_test.go` ~220
 - `internal/server/dashboard_tool_result.go` ~100
 - `internal/server/dashboard_tool_result_test.go` ~100
-- `internal/server/agent_tailer.go` ~250
-- `internal/server/agent_tailer_test.go` ~300
-- `internal/server/ws_agent_subscribe.go` ~120
-- `internal/server/ws_agent_subscribe_test.go` ~250
+- `internal/server/agent_tailer.go` ~280（+50 上限 reject 路径）
+- `internal/server/agent_tailer_test.go` ~320
+- `internal/server/ws_agent_subscribe.go` ~140
+- `internal/server/ws_agent_subscribe_test.go` ~280
+- `internal/server/static/agent_view.js` ~900（Phase 2.5 骨架 + Phase 3 实装）
 - `cmd/probe/agent_events/main.go` ~150（D1）
 
 **修改**（约 +900 / −80 行）：
-- `internal/cli/eventlog.go`：EventEntry + SubagentInfo 扩展 +
-  `SetAgentInternalID` + `UpdateAgentMeta` + `applyEntryStateLocked` 新 case
-- `internal/cli/process.go`：Linker 字段 + readLoop Resolve 异步
+- `internal/cli/eventlog.go`：EventEntry 新增 4 字段（TaskType/
+  InternalAgentID/JSONLPath/FirstPromptID）+ SubagentInfo 扩展 +
+  `SetAgentInternalID(toolUseID, hex, path, promptID)` + `UpdateAgentMeta` +
+  `applyEntryStateLocked` 新 case
+- `internal/cli/process.go`：Linker 字段 + readLoop Resolve 异步 +
+  `InjectHistory` 末尾调 `SeedFromHistory`
 - `internal/cli/wrapper.go`：Spawn 注入 projectDir
 - `internal/session/managed.go`：Snapshot.Subagents 透传
 - `internal/server/server.go`：新路由
-- `internal/server/wshub.go`：agent_* 分发 + enrichSnapshot
-- `internal/server/static/dashboard.js`：turnState 拆分 + banner +
-  switchAgentView + 分派 + tool_result / persisted_path / 折叠
-- `internal/server/static/dashboard.html`：~80 行 CSS
+- `internal/server/wshub.go`：agent_* 分发 + enrichSnapshot +
+  agent_subscribe_rejected 消息路径
+- `internal/server/static/dashboard.js`：turnState 拆分 + banner 逻辑 **搬出** 到
+  agent_view.js；本文件只留 `applyEventToTurnState` 薄派发
+- `internal/server/static/dashboard.html`：+ `<script src="agent_view.js">` +
+  ~80 行 CSS
+- `docs/design/agent-team-ui-design.md`：降级为指向本 RFC 的 stub（v4 P0）
 
 ## 9. 开放问题
 
@@ -1091,7 +1373,30 @@ const toolVerbs = {
 - 父视图加 "task_done 占位事件"：本 RFC 不加；父流 task_notification
   已给 banner 状态，父视图无需再展示。
 
-## 10. 决策记录（vs v2 差异）
+## 10. 决策记录
+
+### v4 变更（vs v3 — Review 2026-05-10 落地）
+
+- **V4-P0a 单源文档**：`docs/design/agent-team-ui-design.md` → stub，避免
+  46 KB 双份 drift。
+- **V4-P0b SeedFromHistory 前置**：原 Phase 4 的 "InjectHistory 重放 Resolve"
+  提到 Phase 1，改为基于持久化 `InternalAgentID/JSONLPath/FirstPromptID`
+  的历史反查（§3.3.7）。把 A3 风险从 "整个 team 历史作废" 降级为 "文件
+  被清理才 tombstone"。
+- **V4-P1a §3.2 承认现状**：列出 EventEntry/SubagentInfo 已有字段和真正
+  新增字段（4 + 10），避免读起来像白板。
+- **V4-P1b dirCache TTL 500→200ms**：与 250ms 轮询匹配，3s 宽限真 12 次扫描。
+- **V4-P1c 前端模块拆分**：新增 `agent_view.js`，Phase 2.5 搬家 + Phase 3
+  扩功能。控制 `dashboard.js` 增长。
+- **V4-P2a §3.4.1 清理**：删 "A7 未完全验证"；`extractPersistedPath` 直接
+  取 basename，endpoint 简化。
+- **V4-P2b 50 tailer 显式降级**：WS `agent_subscribe_rejected` +
+  前端 `startAgentHttpPoll` 3s 节奏。
+- **V4-P2c 同名防错**：`LinkInfo.FirstPromptID` + `byName` + warn log +
+  不覆盖已有映射。
+- **V4-P2d §7 补 E2E**：重启 naozhi 历史回看 / 50 上限降级两条 end-to-end。
+
+### v3 变更（vs v2）
 
 - **R7** projectDir 编码改为通用 `[^A-Za-z0-9]→'-'` + sessionId 二次校验。
 - **R8** endpoint 必须按 key → session → linker 访问，从根上避免 task_id 撞车。
