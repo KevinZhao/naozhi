@@ -211,6 +211,18 @@ type EventLog struct {
 	// "live entries".
 	userTurnCount atomic.Int64
 
+	// lastEventAt is the wall-clock (unix nano) of the most recent live
+	// Append. Used by Router.Cleanup's stuckKill / idle_timeout checks as a
+	// second-chance activity signal: the session-level lastActive is only
+	// refreshed on Send entry, so a long-running turn (>2×TotalTimeout)
+	// whose CLI is still streaming tool_use / thinking events would
+	// otherwise be misclassified as "stuck" and killed. Any live event
+	// (assistant, tool_use, thinking, agent, result, …) is enough to prove
+	// the process is making progress. AppendBatch from InjectHistory /
+	// recovery replays does NOT update this value — replayed entries have
+	// historical timestamps and are not evidence of live activity.
+	lastEventAt atomic.Int64
+
 	// Per-turn sub-agent tracking: reset on "result"/"user" events.
 	turnAgents []SubagentInfo // foreground agents in current turn; protected by mu
 	bgAgents   []SubagentInfo // background (run_in_background) agents; cleared on turn boundaries like turnAgents; protected by mu
@@ -595,6 +607,11 @@ func (l *EventLog) Append(e EventEntry) {
 		storeAtomicString(&l.lastActivitySummary, e.Summary)
 	}
 
+	// Record live-activity timestamp. A single Store is fine: Cleanup only
+	// cares about "some event landed recently", and later Appends overwrite
+	// with a never-decreasing value.
+	l.lastEventAt.Store(time.Now().UnixNano())
+
 	l.mu.Unlock()
 
 	// Fire task_done callbacks OUTSIDE l.mu so a slow subscriber (e.g. the
@@ -948,6 +965,19 @@ func (l *EventLog) LastEntryOfType(typ string) EventEntry {
 // LastActivitySummary returns the summary of the most recent "tool_use" or "thinking" entry.
 func (l *EventLog) LastActivitySummary() string {
 	return loadAtomicString(&l.lastActivitySummary)
+}
+
+// LastEventAt returns the wall-clock time of the most recent live Append,
+// or the zero Time when no live event has been appended yet (only
+// InjectHistory / AppendBatch replays, or a freshly spawned log).
+// Consumed by Router.Cleanup to avoid misclassifying a long-running but
+// actively streaming turn as a stuck session. Lock-free.
+func (l *EventLog) LastEventAt() time.Time {
+	ns := l.lastEventAt.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
 }
 
 // UserTurnCount returns the cumulative count of "user" entries appended to

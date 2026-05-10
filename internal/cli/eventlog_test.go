@@ -436,3 +436,45 @@ func TestEventLog_TurnAgents_IsCopy(t *testing.T) {
 		t.Error("TurnAgents should return a copy")
 	}
 }
+
+// TestEventLog_LastEventAt verifies live Appends update lastEventAt
+// (used by Router.Cleanup as a long-turn activity heartbeat), and that
+// AppendBatch (history replay) does NOT overwrite it with historical
+// event data — only live events prove the process is making progress.
+func TestEventLog_LastEventAt(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(10)
+
+	if got := l.LastEventAt(); !got.IsZero() {
+		t.Errorf("fresh EventLog LastEventAt = %v, want zero", got)
+	}
+
+	before := time.Now()
+	l.Append(EventEntry{Type: "thinking", Summary: "working"})
+	after := time.Now()
+
+	got := l.LastEventAt()
+	if got.Before(before) || got.After(after) {
+		t.Errorf("LastEventAt = %v; want in [%v, %v]", got, before, after)
+	}
+
+	// AppendBatch is used by InjectHistory on shim reconnect. Replayed
+	// entries have historical Time fields and must not advance the live
+	// activity clock — doing so would make Router.Cleanup think a
+	// reconnected-but-idle session is actively streaming.
+	prevLive := got
+	time.Sleep(10 * time.Millisecond)
+	l.AppendBatch([]EventEntry{
+		{Type: "user", Time: 1000, Summary: "ancient"},
+		{Type: "assistant", Time: 2000, Summary: "older"},
+	})
+	if got := l.LastEventAt(); !got.Equal(prevLive) {
+		t.Errorf("AppendBatch advanced LastEventAt from %v to %v; replay should not count as live activity", prevLive, got)
+	}
+
+	// A subsequent live Append must advance it again.
+	l.Append(EventEntry{Type: "tool_use", Summary: "Read"})
+	if got := l.LastEventAt(); !got.After(prevLive) {
+		t.Errorf("live Append after batch did not advance LastEventAt: %v vs prev %v", got, prevLive)
+	}
+}

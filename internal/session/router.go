@@ -135,6 +135,15 @@ const (
 const (
 	// maxExemptSessions caps the number of alive exempt (planner) sessions
 	// to prevent unbounded growth when many projects are configured.
+	//
+	// Shared across all exempt-marked sessions (BL2, known design limit):
+	//   - Cron stubs: each job consumes 1 slot via RegisterCronStub,
+	//     with cron.DefaultMaxJobsPerChat (currently 10) as the per-chat cap.
+	//   - Project planners: up to 1 per project.
+	//   - Scratch drawers: up to ~5-10 per active dashboard session.
+	// At high cron density the pool can be dominated by cron stubs,
+	// squeezing planner/scratch slots. Tracked as acknowledged trade-off;
+	// a dedicated maxCronExemptSessions sub-cap is a possible follow-up.
 	maxExemptSessions = 20
 
 	// historyLoadConcurrency limits parallel disk I/O goroutines during
@@ -2589,9 +2598,22 @@ func (r *Router) Cleanup() {
 		}
 		running := c.proc.IsRunning()
 
+		// Effective activity = max(session.lastActive, process.LastEventAt).
+		// lastActive is only refreshed at Send entry, so a single long-
+		// running turn (e.g. 20 min code analysis) would age past any
+		// threshold even while the CLI is actively streaming tool_use /
+		// thinking events. Folding in LastEventAt turns "a live event
+		// landed recently" into a first-class progress signal and kills
+		// the stuck-running false positive that used to vaporise running
+		// sessions from the dashboard.
+		effective := c.lastActive
+		if le := c.proc.LastEventAt(); le.After(effective) {
+			effective = le
+		}
+
 		// Stuck running: watchdog failed, reclaim slot.
 		if running {
-			if age := now.Sub(c.lastActive); age > stuckThreshold {
+			if age := now.Sub(effective); age > stuckThreshold {
 				slog.Warn("stuck running session detected, force killing",
 					"key", c.key, "running_for", age, "threshold", stuckThreshold)
 				storeStringAtomic(&c.s.deathReason, "stuck_running")
@@ -2610,8 +2632,8 @@ func (r *Router) Cleanup() {
 		}
 
 		// Normal idle TTL expiry.
-		if now.Sub(c.lastActive) > ttl {
-			slog.Info("session expired", "key", c.key, "idle", now.Sub(c.lastActive))
+		if now.Sub(effective) > ttl {
+			slog.Info("session expired", "key", c.key, "idle", now.Sub(effective))
 			storeStringAtomic(&c.s.deathReason, "idle_timeout")
 			expired = append(expired, expiredEntry{c.s, c.key, c.proc})
 		}

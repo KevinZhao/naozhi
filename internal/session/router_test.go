@@ -26,6 +26,7 @@ type fakeProcess struct {
 	entries       []cli.EventEntry // returned by EventEntries
 	totalCost     float64          // returned by TotalCost
 	userTurnCount int64            // returned by UserTurnCount (test-only)
+	lastEventAt   time.Time        // returned by LastEventAt (test-only)
 
 	// Interrupt instrumentation (used by TestInterruptSessionSafe_*).
 	// viaControlErr is what InterruptViaControl() returns. interruptCalls is
@@ -170,6 +171,11 @@ func (f *fakeProcess) LastEntryOfType(typ string) cli.EventEntry {
 	return cli.EventEntry{}
 }
 func (f *fakeProcess) LastActivitySummary() string { return "" }
+func (f *fakeProcess) LastEventAt() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastEventAt
+}
 func (f *fakeProcess) UserTurnCount() int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -664,6 +670,67 @@ func TestCleanupExpiredSession(t *testing.T) {
 
 	if proc.Alive() {
 		t.Error("expired session process should be closed")
+	}
+}
+
+// TestCleanupRunningSession_LiveEventsBlockStuckKill verifies the fix for
+// "running sessions disappear from the sidebar during long turns": lastActive
+// is only touched at Send entry, so a 20-minute code analysis would age past
+// the 2×DefaultTotalTimeout stuck threshold and be Kill()'d mid-turn. The
+// fix folds EventLog.LastEventAt() into the activity calculation so any
+// streamed tool_use / thinking / assistant event proves the turn is alive.
+func TestCleanupRunningSession_LiveEventsBlockStuckKill(t *testing.T) {
+	r := &Router{
+		sessions:     make(map[string]*ManagedSession),
+		maxProcs:     3,
+		ttl:          1 * time.Minute,
+		pruneTTL:     72 * time.Hour,
+		totalTimeout: 5 * time.Minute, // stuckThreshold = 10 min
+	}
+	proc := newRunningProc()
+	// Ancient lastActive (25 min ago) would normally trip stuck_running, but
+	// a fresh LastEventAt (10 s ago) should protect the session.
+	proc.lastEventAt = time.Now().Add(-10 * time.Second)
+	s := injectSession(r, "key1", proc)
+	s.lastActive.Store(time.Now().Add(-25 * time.Minute).UnixNano())
+
+	r.Cleanup()
+
+	if !proc.Alive() {
+		t.Fatal("running session with live events must survive Cleanup; stuckKill regression")
+	}
+	if got := loadStringAtomic(&s.deathReason); got == "stuck_running" {
+		t.Errorf("deathReason = %q, want empty (session should not be classified as stuck)", got)
+	}
+}
+
+// TestCleanupRunningSession_NoLiveEventsStillKilled verifies the stuckKill
+// safety net still fires when the process is truly silent: lastActive stale
+// AND LastEventAt stale (or zero) means the turn is not making progress.
+func TestCleanupRunningSession_NoLiveEventsStillKilled(t *testing.T) {
+	r := &Router{
+		sessions:     make(map[string]*ManagedSession),
+		maxProcs:     3,
+		ttl:          1 * time.Minute,
+		pruneTTL:     72 * time.Hour,
+		totalTimeout: 5 * time.Minute,
+	}
+	proc := newRunningProc()
+	// LastEventAt deliberately left at zero so "max(lastActive, LastEventAt)"
+	// falls back to lastActive. Simulates a shim that accepted a Send but
+	// never returned a single stream-json event (genuine hang).
+	s := injectSession(r, "key1", proc)
+	s.lastActive.Store(time.Now().Add(-25 * time.Minute).UnixNano())
+
+	r.Cleanup()
+
+	if proc.Alive() {
+		// expected — Kill() set isAlive=false
+	} else if got := loadStringAtomic(&s.deathReason); got != "stuck_running" {
+		t.Errorf("deathReason = %q, want %q", got, "stuck_running")
+	}
+	if proc.Alive() {
+		t.Error("truly stuck running session must still be killed")
 	}
 }
 

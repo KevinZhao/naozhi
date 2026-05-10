@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
 )
@@ -72,6 +73,7 @@ func (p *TestProcess) LastEntryOfType(typ string) cli.EventEntry {
 	return p.EventLog.LastEntryOfType(typ)
 }
 func (p *TestProcess) LastActivitySummary() string                { return p.EventLog.LastActivitySummary() }
+func (p *TestProcess) LastEventAt() time.Time                     { return p.EventLog.LastEventAt() }
 func (p *TestProcess) UserTurnCount() int64                       { return p.EventLog.UserTurnCount() }
 func (p *TestProcess) ProtocolName() string                       { return "test" }
 func (p *TestProcess) SubscribeEvents() (<-chan struct{}, func()) { return p.EventLog.Subscribe() }

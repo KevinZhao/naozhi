@@ -2235,6 +2235,17 @@ func (p *Process) LastActivitySummary() string {
 	return p.eventLog.LastActivitySummary()
 }
 
+// LastEventAt returns the wall-clock time of the most recent live event
+// observed by this process's EventLog. Zero Time means no live event has
+// landed yet. Consumed by Router.Cleanup to treat a long-running turn
+// (e.g. a 20-minute code analysis) as still active as long as the CLI
+// keeps emitting tool_use / thinking / assistant events, rather than
+// falsely flagging it as stuck when session.lastActive was last touched
+// at Send entry. Lock-free.
+func (p *Process) LastEventAt() time.Time {
+	return p.eventLog.LastEventAt()
+}
+
 // UserTurnCount returns the cumulative count of "user" entries this Process
 // has observed since spawn. Pass-through to EventLog; consumed by
 // ManagedSession.Snapshot to populate SessionSnapshot.MessageCount for
