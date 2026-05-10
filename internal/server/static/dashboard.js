@@ -6938,12 +6938,41 @@ function renderTable(lines) {
   // splits mid-snippet and the trailing fragment spills into an extra column.
   // Strategy: encode `\|` → sentinel, split on `|`, decode sentinel → `|`.
   const PIPE = '\x00PIPE\x00';
-  const cells = l => l.trim().replace(/\\\|/g, PIPE)
-    .replace(/^\||\|$/g, '')
-    .split('|')
-    .map(c => c.trim().split(PIPE).join('|'));
-  let h = '<table class="md-table"><thead><tr>' + cells(lines[0]).map(c => '<th>' + inlineMd(c) + '</th>').join('') + '</tr></thead><tbody>';
-  for (let i = 2; i < lines.length; i++) h += '<tr>' + cells(lines[i]).map(c => '<td>' + inlineMd(c) + '</td>').join('') + '</tr>';
+  // LLM output frequently embeds unescaped `|` inside `$...$`, `\(...\)`,
+  // or backtick code spans (e.g. `$|AB|=2$`, `$2^a - 2$ | < | ...`).
+  // Protect those regions BEFORE splitting on `|`, otherwise a single math
+  // formula would get sliced into many spurious columns.
+  const cells = l => {
+    let s = l.trim().replace(/\\\|/g, PIPE);
+    const guards = [];
+    const stash = (re) => {
+      s = s.replace(re, m => {
+        guards.push(m);
+        return '\x00G' + (guards.length - 1) + '\x00';
+      });
+    };
+    stash(/`[^`]+`/g);
+    stash(/\\\([^)]+?\\\)/g);
+    stash(/\$[^$\n]+?\$/g);
+    return s.replace(/^\||\|$/g, '')
+      .split('|')
+      .map(c => c.trim()
+        .replace(/\x00G(\d+)\x00/g, (_, i) => guards[+i])
+        .split(PIPE).join('|'));
+  };
+  const header = cells(lines[0]);
+  const ncol = header.length;
+  // Overflow guard: when an LLM emits a row with more cells than the header
+  // (unbalanced pipes it refused to escape), merge the tail into the last
+  // cell instead of letting empty columns spill off to the right.
+  const clamp = row => {
+    if (row.length <= ncol) return row;
+    const head = row.slice(0, ncol - 1);
+    const tail = row.slice(ncol - 1).join(' | ');
+    return head.concat([tail]);
+  };
+  let h = '<table class="md-table"><thead><tr>' + header.map(c => '<th>' + inlineMd(c) + '</th>').join('') + '</tr></thead><tbody>';
+  for (let i = 2; i < lines.length; i++) h += '<tr>' + clamp(cells(lines[i])).map(c => '<td>' + inlineMd(c) + '</td>').join('') + '</tr>';
   return '<div class="md-table-wrap">' + h + '</tbody></table></div>';
 }
 
