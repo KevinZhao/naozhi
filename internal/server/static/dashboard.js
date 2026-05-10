@@ -8239,10 +8239,6 @@ function initSwipeBack() {
 /* ===== Cron Tab ===== */
 
 let cronJobs = [];
-// Timezone the backend uses to evaluate cron schedules. Surfaced in the
-// modal and job list so users aren't guessing whether "0 9 * * *" means
-// 9am local or 9am UTC.
-let cronTimezoneLabel = '';
 // Configured default IM target for cron completion notifications, or null
 // when the server has no default configured. Used to render helpful copy
 // alongside the notify toggle in create/edit modals.
@@ -9611,9 +9607,6 @@ function renderCronPanel() {
     renderCronList();
     return;
   }
-  const tzBanner = cronTimezoneLabel
-    ? '<div class="cron-tz-banner" title="Schedules are evaluated in this timezone">timezone: ' + esc(cronTimezoneLabel) + '</div>'
-    : '';
   // cron-v2-polish §3.3: missed banner。Count 取自 cronJobs 本地缓存，
   // 与 attention 计数同源。点击切到 attention filter，与 header cron-badge
   // 的红点导航保持一致的"点进去看哪些 job 需要关注"语义。
@@ -9684,7 +9677,6 @@ function renderCronPanel() {
         '</div>' +
         filterBar +
         missedBanner +
-        tzBanner +
         '<div id="cron-list-items"></div>' +
       '</div>' +
     '</div>';
@@ -9714,7 +9706,6 @@ async function fetchCronJobs() {
     if (!r.ok) return;
     const data = await r.json();
     cronJobs = data.jobs || [];
-    cronTimezoneLabel = data.timezone_label || data.timezone || '';
     cronNotifyDefault = data.notify_default || null;
     const cronBadge = document.getElementById('cron-badge');
     if (cronBadge) {
