@@ -904,23 +904,22 @@ body.kbd-open .input-hints{display:none}
 .cj-row.is-error{box-shadow:inset 3px 0 0 var(--nz-red)}
 .cj-row.is-missed{box-shadow:inset 3px 0 0 var(--nz-amber)}
 .cj-row.is-error.is-missed{box-shadow:inset 3px 0 0 var(--nz-red)}
-/* 状态圆点 */
+/* 状态圆点：二态设计——●活跃 / ○暂停。错误/missed 用左侧色条表达，
+ * 避免同一信息三处重复编码(圆点+色条+错误条) */
 .cj-dot{width:8px;height:8px;border-radius:50%;background:var(--nz-green);flex-shrink:0;justify-self:center}
 .cj-row.paused .cj-dot{background:transparent;border:1px solid var(--nz-text-faint);width:9px;height:9px}
-.cj-row.is-error .cj-dot{background:var(--nz-red)}
-.cj-row.is-missed:not(.is-error) .cj-dot{background:var(--nz-amber)}
 /* 主列：任务标题 + 节奏(副行) */
 .cj-main{min-width:0;display:flex;flex-direction:column;gap:2px}
 .cj-title{font-size:14px;color:var(--nz-text-strong);font-weight:500;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cj-title.placeholder{color:var(--nz-text-dim);font-style:italic;font-weight:400}
 .cj-sub{font-size:12px;color:var(--nz-text-mute);line-height:1.35;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.cj-sub .cj-schedule{color:var(--nz-text);cursor:pointer;text-decoration:underline dotted transparent;transition:text-decoration-color .12s}
-.cj-sub .cj-schedule:hover{text-decoration-color:var(--nz-text-faint)}
+.cj-sub .cj-schedule{color:var(--nz-text);cursor:pointer;text-decoration:underline dotted var(--nz-text-faint);text-underline-offset:2px;transition:text-decoration-color .12s,color .12s;outline:none;border-radius:3px}
+.cj-sub .cj-schedule:hover{color:var(--nz-text-strong);text-decoration-color:var(--nz-text-mute)}
+.cj-sub .cj-schedule:focus-visible{outline:1px solid var(--nz-accent);outline-offset:2px}
 .cj-sub .cj-icon{font-size:11px;color:var(--nz-text-mute);flex-shrink:0}
 .cj-sub .cj-icon.notify-off{color:var(--nz-text-faint)}
 .cj-sub .cj-icon.fresh{color:var(--nz-green)}
 .cj-sub .cj-icon.missed{color:var(--nz-amber);font-weight:600}
-.cj-sub .cj-ws{color:#a5d6ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:180px;font-size:11px}
 /* 下次运行时间列 */
 .cj-when{font-size:12px;color:var(--nz-text-mute);white-space:nowrap;text-align:right;flex-shrink:0}
 .cj-when.imminent{color:var(--nz-accent);font-weight:600}
@@ -936,22 +935,10 @@ body.kbd-open .input-hints{display:none}
 .cj-error{grid-column:2 / -1;margin:-4px 12px 0 0;padding:6px 10px;background:rgba(218,54,51,.08);border:1px solid rgba(218,54,51,.25);border-radius:6px;font-size:12px;color:var(--nz-red);line-height:1.5;display:flex;gap:6px;align-items:flex-start;word-break:break-word;overflow-wrap:anywhere}
 .cj-error .cj-err-icon{flex-shrink:0}
 .cj-error .cj-err-text{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-/* 就地展开的详情区 */
-.cj-detail{grid-column:1 / -1;margin-top:6px;padding:10px 12px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:6px;display:flex;flex-direction:column;gap:10px}
-.cj-detail .cjd-field{display:flex;flex-direction:column;gap:2px}
-.cj-detail .cjd-label{font-size:10px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.3px}
-.cj-detail .cjd-value{font-size:13px;color:var(--nz-text);word-break:break-word;white-space:pre-wrap;line-height:1.5}
-.cj-detail .cjd-value.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:#a5d6ff}
-.cj-detail .cjd-value.ok{color:var(--nz-text)}
-.cj-detail .cjd-link{color:var(--nz-accent);cursor:pointer;text-decoration:none;font-size:13px}
-.cj-detail .cjd-link:hover{text-decoration:underline}
-.cj-detail .cjd-history{display:flex;flex-direction:column;gap:4px}
-.cj-detail .cjd-history-item{font-size:12px;color:var(--nz-text-mute);display:flex;gap:8px;align-items:center}
-.cj-detail .cjd-history-item .cjd-h-badge{display:inline-flex;align-items:center;justify-content:center;width:14px;height:14px;border-radius:50%;font-size:10px;flex-shrink:0}
-.cj-detail .cjd-history-item.ok .cjd-h-badge{background:rgba(63,185,80,.15);color:var(--nz-green)}
-.cj-detail .cjd-history-item.err .cjd-h-badge{background:rgba(218,54,51,.15);color:var(--nz-red)}
-/* ⋯ popover menu */
-.cj-menu{position:absolute;top:calc(100% - 4px);right:8px;z-index:20;min-width:180px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);padding:4px;display:none}
+/* ⋯ popover menu —— 用 position:fixed 加 JS 定位，避免 .cron-detail-body
+ * 的 overflow:auto 把行底部的菜单剪掉。JS 负责 top/left 计算 + 空间不够
+ * 时向上翻转。 */
+.cj-menu{position:fixed;z-index:200;min-width:180px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);padding:4px;display:none}
 .cj-menu.open{display:block}
 .cj-menu-item{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;background:transparent;border:none;border-radius:6px;color:var(--nz-text);font-size:13px;font-family:inherit;cursor:pointer;text-align:left;min-height:34px}
 .cj-menu-item:hover{background:var(--nz-bg-2)}
@@ -965,15 +952,19 @@ body.kbd-open .input-hints{display:none}
 @media (hover:none){
   .cj-row .cj-run{opacity:1}
 }
-/* 小屏适配：< 640 时隐藏 cj-when 列（避免三列挤），相对时间移入 cj-sub */
+/* 小屏适配：< 640 时隐藏 cj-when 列（避免三列挤），相对时间移入 cj-sub；
+ * 同时在 sub-row 里隐藏桌面端的 cj-ago（上次 …），避免 when/ago 两条
+ * 冗余信息挤到同一行 */
+.cj-sub .cj-when-inline{display:none}
 @media (max-width:640px){
   .cj-row{grid-template-columns:18px minmax(0,1fr) auto;gap:8px;padding:10px 10px 10px 12px}
   .cj-when{display:none}
   .cj-sub .cj-when-inline{display:inline;color:var(--nz-text-mute)}
   .cj-sub .cj-when-inline.imminent{color:var(--nz-accent);font-weight:600}
+  .cj-sub .cj-when-inline.paused{color:var(--nz-text-faint)}
+  .cj-sub .cj-ago{display:none}
   .cj-row:hover .cj-run{opacity:1}
 }
-.cj-sub .cj-when-inline{display:none}
 /* v3 hides the legacy .cc-actions wrapper (still emitted for contract
  * test compatibility) since actions moved to .cj-actions + ⋯ menu */
 .cj-row .cc-actions{display:none}
