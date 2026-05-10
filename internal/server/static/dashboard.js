@@ -2260,10 +2260,12 @@ function renderTodoList(detail, summary) {
   return header + '<ul class="todo-list">' + items + '</ul>';
 }
 
-// AskUserQuestion card state lives client-side only — we don't persist which
-// button was clicked. The keyed set below disables option buttons after the
-// first click so rapid double-clicks (or re-render during answer round-trip)
-// don't fire two answers. Keyed by tool_use_id which is stable per card.
+// AskUserQuestion cards are single-submit: user picks one option per question
+// (or multiple when multiSelect=true), then clicks a bottom "提交" button.
+// That one click produces a single user message combining all answers, so CC
+// never sees a partial answer. _askAnswered stores tool_use_ids that have
+// already been submitted so a re-render (e.g. late history replay) can't
+// resurrect an actionable card.
 const _askAnswered = new Set();
 
 function renderAskQuestionCard(e) {
@@ -2274,14 +2276,15 @@ function renderAskQuestionCard(e) {
       '<div class="event-content">' + esc(e.summary || 'AskUserQuestion') + '</div></div>';
   }
   const tuid = aq.tool_use_id || '';
-  const disabled = _askAnswered.has(tuid);
+  const locked = _askAnswered.has(tuid);
   const groups = aq.items.map((item, qi) => {
     const header = item.header ? '<div class="ask-q-header">' + esc(item.header) + '</div>' : '';
     const question = '<div class="ask-q-text">' + esc(item.question || '') + '</div>';
     const multi = !!item.multi_select;
     const opts = (item.options || []).map((opt, oi) => {
-      // data-header/data-label let the click handler build the reply text
-      // without keeping the whole tree in memory.
+      // Buttons toggle a .selected class only; nothing is sent until the
+      // card-level submit. data-* attrs carry the minimal info the compose
+      // step needs so the handler doesn't have to walk the aq tree.
       return '<button class="ask-opt" type="button"' +
         ' data-tuid="' + escAttr(tuid) + '"' +
         ' data-qi="' + qi + '"' +
@@ -2289,27 +2292,28 @@ function renderAskQuestionCard(e) {
         ' data-multi="' + (multi ? '1' : '0') + '"' +
         ' data-header="' + escAttr(item.header || '') + '"' +
         ' data-label="' + escAttr(opt.label || '') + '"' +
-        (disabled ? ' disabled' : '') +
-        ' onclick="onAskOptionClick(this)">' +
+        (locked ? ' disabled' : '') +
+        ' onclick="onAskOptionToggle(this)">' +
         '<span class="ask-opt-label">' + esc(opt.label || '') + '</span>' +
         (opt.description ? '<span class="ask-opt-desc">' + esc(opt.description) + '</span>' : '') +
         '</button>';
     }).join('');
-    const submitBtn = multi
-      ? '<button class="ask-submit" type="button"' +
-        ' data-tuid="' + escAttr(tuid) + '"' +
-        ' data-qi="' + qi + '"' +
-        ' data-header="' + escAttr(item.header || '') + '"' +
-        (disabled ? ' disabled' : '') +
-        ' onclick="onAskMultiSubmit(this)">提交</button>'
+    const hint = multi
+      ? '<div class="ask-q-hint">可多选</div>'
       : '';
-    return '<div class="ask-q-group" data-multi="' + (multi ? '1' : '0') + '">' +
-      header + question +
+    return '<div class="ask-q-group" data-qi="' + qi + '" data-multi="' + (multi ? '1' : '0') + '">' +
+      header + question + hint +
       '<div class="ask-opts">' + opts + '</div>' +
-      submitBtn +
       '</div>';
   }).join('');
-  const status = disabled
+  // Single bottom submit: disabled until every question has ≥1 selection.
+  // updateAskSubmitState toggles the disabled attribute on every toggle.
+  const submitBtn =
+    '<button class="ask-submit" type="button"' +
+    ' data-tuid="' + escAttr(tuid) + '"' +
+    (locked ? ' disabled' : ' disabled') +
+    ' onclick="onAskSubmit(this)">提交全部回答</button>';
+  const status = locked
     ? '<div class="ask-status">已回答</div>'
     : '';
   const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';
@@ -2317,88 +2321,99 @@ function renderAskQuestionCard(e) {
     ' data-tool-use-id="' + escAttr(tuid) + '">' +
     '<span class="event-icon">?</span>' +
     '<div class="event-content ask-card">' +
-      '<div class="ask-title">AskUserQuestion</div>' +
+      '<div class="ask-title">AskUserQuestion · 全部作答后提交</div>' +
       groups +
+      '<div class="ask-submit-row">' + submitBtn + '</div>' +
       status +
     '</div></div>';
 }
 
-// Build the plain-text answer payload from a card click. Single-select: one
-// option per question. Format: "Header: Label." joined with " " — this is the
-// shape verified in test/e2e/askuser/aq4 as being understood by CC.
-function composeAskAnswer(parts) {
-  // parts is array of {header, label}
-  return parts.map(p => {
-    const h = (p.header || '').trim();
-    const l = (p.label || '').trim();
-    if (!h) return l;
-    return h + ': ' + l;
-  }).filter(Boolean).join('. ') + (parts.length > 0 ? '.' : '');
-}
-
-function onAskOptionClick(btn) {
-  const tuid = btn.dataset.tuid || '';
-  if (!tuid || _askAnswered.has(tuid)) return;
-  const multi = btn.dataset.multi === '1';
-  if (multi) {
-    // Toggle the button's selected state; actual send happens on submit.
-    btn.classList.toggle('selected');
-    return;
-  }
-  // Single-select: lock card + send one option as the answer.
-  _askAnswered.add(tuid);
-  const parts = [{ header: btn.dataset.header || '', label: btn.dataset.label || '' }];
-  sendAskAnswer(tuid, btn, parts);
-}
-
-function onAskMultiSubmit(btn) {
-  const tuid = btn.dataset.tuid || '';
-  const qi = btn.dataset.qi;
-  if (!tuid || _askAnswered.has(tuid)) return;
-  const header = btn.dataset.header || '';
-  const groupSel = '.event.ask_question[data-tool-use-id="' + (tuid || '').replace(/"/g, '\\"') + '"]';
-  const card = document.querySelector(groupSel);
-  if (!card) return;
-  const selected = card.querySelectorAll('.ask-q-group[data-multi="1"] .ask-opt.selected');
-  if (selected.length === 0) return;
-  const labels = [];
-  selected.forEach(b => {
-    // Only collect labels from the same question group this submit belongs to.
-    if (b.dataset.qi === qi) labels.push(b.dataset.label || '');
+// Compose the final reply text from every question's chosen labels.
+// Format: "Header1: Label1. Header2: A, B. Label-only question: Label."
+// The final "." is added per group so grouping is unambiguous to CC.
+// AQ4 verified this format is sufficient context for CC to continue.
+function composeAskAnswerFromGroups(groups) {
+  const parts = [];
+  groups.forEach(g => {
+    if (!g.labels.length) return;
+    const h = (g.header || '').trim();
+    const l = g.labels.map(s => s.trim()).filter(Boolean).join(', ');
+    if (!l) return;
+    parts.push(h ? (h + ': ' + l) : l);
   });
-  if (labels.length === 0) return;
-  _askAnswered.add(tuid);
-  const parts = [{ header: header, label: labels.join(', ') }];
-  sendAskAnswer(tuid, btn, parts);
+  if (parts.length === 0) return '';
+  return parts.join('. ') + '.';
 }
 
-function sendAskAnswer(tuid, originBtn, parts) {
-  const answer = composeAskAnswer(parts);
-  if (!answer) return;
-  // Disable all option / submit buttons inside this card immediately.
-  const card = originBtn.closest('.event.ask_question');
-  if (card) {
-    card.querySelectorAll('button').forEach(b => { b.disabled = true; });
-    const content = card.querySelector('.event-content');
-    if (content && !content.querySelector('.ask-status')) {
-      const div = document.createElement('div');
-      div.className = 'ask-status';
-      div.textContent = '已选择：' + answer;
-      content.appendChild(div);
-    }
+// Toggle the clicked option. Single-select: clear siblings in the same
+// question group, mark the clicked one. Multi-select: just toggle.
+// Then re-evaluate the submit button's disabled state.
+function onAskOptionToggle(btn) {
+  const tuid = btn.dataset.tuid || '';
+  if (!tuid || _askAnswered.has(tuid)) return;
+  const group = btn.closest('.ask-q-group');
+  if (!group) return;
+  const multi = group.dataset.multi === '1';
+  if (multi) {
+    btn.classList.toggle('selected');
+  } else {
+    group.querySelectorAll('.ask-opt').forEach(b => b.classList.remove('selected'));
+    btn.classList.add('selected');
   }
-  // Reuse the server's session send endpoint so queue / passthrough /
+  updateAskSubmitState(btn.closest('.event.ask_question'));
+}
+
+// Enable submit only when every question has at least one selected option.
+function updateAskSubmitState(card) {
+  if (!card) return;
+  const groups = card.querySelectorAll('.ask-q-group');
+  let allAnswered = groups.length > 0;
+  groups.forEach(g => {
+    if (!g.querySelector('.ask-opt.selected')) allAnswered = false;
+  });
+  const submit = card.querySelector('.ask-submit');
+  if (!submit) return;
+  submit.disabled = !allAnswered;
+}
+
+function onAskSubmit(btn) {
+  const tuid = btn.dataset.tuid || '';
+  if (!tuid || _askAnswered.has(tuid)) return;
+  const card = btn.closest('.event.ask_question');
+  if (!card) return;
+  // Gather selections per question group.
+  const groups = [];
+  card.querySelectorAll('.ask-q-group').forEach(g => {
+    const header = (g.querySelector('.ask-q-header') || {}).textContent || '';
+    const labels = [];
+    g.querySelectorAll('.ask-opt.selected').forEach(b => {
+      const l = b.dataset.label || '';
+      if (l) labels.push(l);
+    });
+    groups.push({ header: header, labels: labels });
+  });
+  const answer = composeAskAnswerFromGroups(groups);
+  if (!answer) return;
+  // Lock the card so re-clicks or slow network can't duplicate the send.
+  _askAnswered.add(tuid);
+  card.querySelectorAll('button').forEach(b => { b.disabled = true; });
+  const content = card.querySelector('.event-content');
+  if (content && !content.querySelector('.ask-status')) {
+    const div = document.createElement('div');
+    div.className = 'ask-status';
+    div.textContent = '已回答：' + answer;
+    content.appendChild(div);
+  }
+  // Route through the regular session send endpoint so queue / passthrough /
   // broadcast semantics all apply; we do NOT call sendMessage() because that
-  // path reads from the message input box and manages optimistic rendering,
-  // which is a mismatch for card-triggered sends (no input value, the card
-  // itself already shows "已选择").
+  // path reads from the input box and manages optimistic rendering — the card
+  // already shows "已回答", so duplicating would clash.
   sendAskAnswerViaAPI(answer).catch(err => {
     _askAnswered.delete(tuid);
-    if (card) {
-      card.querySelectorAll('button').forEach(b => { b.disabled = false; });
-      const status = card.querySelector('.ask-status');
-      if (status) status.textContent = '发送失败：' + (err && err.message || err);
-    }
+    card.querySelectorAll('button').forEach(b => { b.disabled = false; });
+    updateAskSubmitState(card);
+    const status = card.querySelector('.ask-status');
+    if (status) status.textContent = '发送失败：' + (err && err.message || err);
   });
 }
 

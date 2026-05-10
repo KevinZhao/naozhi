@@ -12,12 +12,17 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
-// SendQuestionCard posts an AskUserQuestion interactive card to the given
-// Feishu chat. Each option becomes a clickable button whose value carries
-// the session key + tool_use_id + picked label; when the user clicks,
-// Feishu delivers an im.card.action.v1_trigger event which askQuestionWebhook
-// (registered by dispatcher) parses and forwards as a normal IncomingMessage
-// so the answer flows through the regular send path.
+// SendQuestionCard posts an AskUserQuestion prompt to the Feishu chat.
+//
+// Multi-question cards (len(Items) > 1) are rendered as a read-only
+// markdown card that enumerates every question + options and asks the
+// user to reply with a free-form text containing all answers at once.
+// This avoids the Feishu interactive-card pitfall where each button click
+// immediately fires a separate card_action event — which would deliver a
+// partial answer to CC before the user finished picking the rest.
+//
+// Single-question cards (len(Items) == 1) keep the per-option buttons
+// since one click unambiguously IS the full answer.
 //
 // Feishu card schema 2.0: open.feishu.cn/document/feishu-cards/quick-start
 func (f *Feishu) SendQuestionCard(ctx context.Context, chatID string, card platform.QuestionCard) (string, error) {
@@ -25,7 +30,14 @@ func (f *Feishu) SendQuestionCard(ctx context.Context, chatID string, card platf
 		return "", fmt.Errorf("feishu question card: no items")
 	}
 
-	body, err := buildQuestionCardJSON(card)
+	var body []byte
+	var err error
+	if len(card.Items) == 1 {
+		body, err = buildQuestionCardJSON(card)
+	} else {
+		// Multi-question: markdown-only card with typed-reply hint.
+		body, err = buildMultiQuestionMarkdownCardJSON(card)
+	}
 	if err != nil {
 		return "", fmt.Errorf("build question card: %w", err)
 	}
@@ -44,6 +56,73 @@ func (f *Feishu) SendQuestionCard(ctx context.Context, chatID string, card platf
 		return "", fmt.Errorf("marshal request body: %w", err)
 	}
 	return f.postMessage(ctx, token, reqBody)
+}
+
+// buildMultiQuestionMarkdownCardJSON renders a read-only card that lists
+// every question + numbered options and asks the user to reply in one
+// message. We keep the same schema-2.0 envelope so the markdown renders
+// with the full GitHub-flavored feature set; the absence of an action
+// block is what makes it free-form-answer only.
+func buildMultiQuestionMarkdownCardJSON(card platform.QuestionCard) ([]byte, error) {
+	var b strings.Builder
+	b.WriteString("**Claude 想请你确认以下问题，请在一条消息里一次回复全部：**\n")
+	for qi, item := range card.Items {
+		b.WriteString("\n")
+		if item.Header != "" {
+			fmt.Fprintf(&b, "**【%s】** ", escapeMarkdown(item.Header))
+		} else {
+			fmt.Fprintf(&b, "**问题 %d** ", qi+1)
+		}
+		b.WriteString(escapeMarkdown(item.Question))
+		if item.MultiSelect {
+			b.WriteString("  *(可多选)*")
+		}
+		b.WriteString("\n")
+		for _, opt := range item.Options {
+			fmt.Fprintf(&b, "  - %s", escapeMarkdown(opt.Label))
+			if opt.Description != "" {
+				fmt.Fprintf(&b, " — %s", escapeMarkdown(opt.Description))
+			}
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\n回复示例：")
+	// Build a friendly example using the first option of each question.
+	parts := make([]string, 0, len(card.Items))
+	for _, item := range card.Items {
+		if len(item.Options) == 0 {
+			continue
+		}
+		h := item.Header
+		if h == "" {
+			h = item.Question
+			if len(h) > 20 {
+				h = h[:20]
+			}
+		}
+		parts = append(parts, h+"："+item.Options[0].Label)
+	}
+	if len(parts) > 0 {
+		b.WriteString("「")
+		b.WriteString(strings.Join(parts, "；"))
+		b.WriteString("」")
+	}
+
+	payload := map[string]any{
+		"schema": "2.0",
+		"body": map[string]any{
+			"elements": []any{
+				map[string]any{"tag": "markdown", "content": b.String()},
+			},
+		},
+	}
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(payload); err != nil {
+		return nil, err
+	}
+	return bytes.TrimRight(buf.Bytes(), "\n"), nil
 }
 
 // buildQuestionCardJSON constructs a Feishu schema-2.0 interactive card with

@@ -56,6 +56,83 @@ func TestBuildQuestionCardJSON_Shape(t *testing.T) {
 	}
 }
 
+func TestBuildMultiQuestionMarkdownCardJSON(t *testing.T) {
+	t.Parallel()
+	card := platform.QuestionCard{
+		ToolUseID: "toolu_abc",
+		Items: []platform.QuestionItem{
+			{
+				Question: "Which approach?",
+				Header:   "Error style",
+				Options: []platform.QuestionOption{
+					{Label: "Return an error", Description: "idiomatic"},
+					{Label: "Panic"},
+				},
+			},
+			{
+				Question: "Target?",
+				Header:   "Target",
+				Options:  []platform.QuestionOption{{Label: "I'll paste code"}, {Label: "Point me to file"}},
+			},
+		},
+	}
+	data, err := buildMultiQuestionMarkdownCardJSON(card)
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("unmarshal err=%v", err)
+	}
+	if got["schema"] != "2.0" {
+		t.Errorf("schema = %v", got["schema"])
+	}
+	// Walk to the markdown content and assert both questions appear.
+	body := got["body"].(map[string]any)
+	elems := body["elements"].([]any)
+	if len(elems) != 1 {
+		t.Fatalf("expected 1 element (markdown only — no action module), got %d", len(elems))
+	}
+	md := elems[0].(map[string]any)
+	if md["tag"] != "markdown" {
+		t.Errorf("expected markdown tag, got %v", md["tag"])
+	}
+	content := md["content"].(string)
+	mustContain := []string{
+		"Error style", "Target",
+		"Return an error", "Panic", "I'll paste code", "Point me to file",
+		"一次回复全部", // the reply-together prompt
+		"回复示例",   // example reply
+	}
+	for _, s := range mustContain {
+		if !strings.Contains(content, s) {
+			t.Errorf("multi-question card missing %q", s)
+		}
+	}
+}
+
+// Single-question cards must keep the action module so one click is the
+// complete answer.
+func TestBuildQuestionCard_SingleQuestionKeepsButtons(t *testing.T) {
+	t.Parallel()
+	card := platform.QuestionCard{
+		ToolUseID: "t1",
+		Items: []platform.QuestionItem{{
+			Question: "q",
+			Header:   "H",
+			Options:  []platform.QuestionOption{{Label: "A"}, {Label: "B"}},
+		}},
+	}
+	data, err := buildQuestionCardJSON(card)
+	if err != nil {
+		t.Fatalf("err=%v", err)
+	}
+	s := string(data)
+	if !strings.Contains(s, `"tag":"button"`) {
+		t.Errorf("single-question card missing action buttons: %s", s)
+	}
+}
+
 func TestBuildQuestionCardJSON_LongLabelTrimmed(t *testing.T) {
 	t.Parallel()
 	// Use distinct characters for the label vs description so we can assert on
