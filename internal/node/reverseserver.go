@@ -261,6 +261,10 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// typo in config.yaml with a bidi/C1/newline char would reach slog
 	// attrs verbatim. Symmetric with the auth-failed path and cheap.
 	safeNodeID := truncateLabelUTF8(msg.NodeID, 64)
+	// R212-ARCH-402: WARN (fires first, before the Info below) when the
+	// remote advertises capability tags outside this binary's known set.
+	// Pure observability — the node is still registered normally.
+	logUnknownCaps(safeNodeID, msg.Capabilities)
 	// RNEW-SEC-006: symmetric with the auth-failed path above — log
 	// r.Host so operators can correlate registered nodes with the
 	// Host header they came in on.

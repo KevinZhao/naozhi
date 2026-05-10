@@ -242,6 +242,17 @@ type Protocol interface {
 }
 ```
 
+**Capabilities 聚合** (Round 209 / RNEW-ARCH-404)：
+
+`cli.Caps` 是 Protocol 能力位的聚合结构（`Replay` / `Priority` /
+`SoftInterrupt` / `StreamJSON` 等），`cli.ProtocolCaps(p)` 是统一入口：
+若实现提供 `Capabilities() Caps` 方法则优先采用，否则回退到原有
+`SupportsReplay()` / `SupportsPriority()` + `Name()` 派生默认值。现有
+`SupportsReplay` / `SupportsPriority` 将逐步迁移到 `Caps` 字段；新增
+Protocol 实现应直接提供 `Capabilities() Caps`，调用方也应优先读
+`ProtocolCaps(p).X` 而非散落的 `p.SupportsX()`。这样后续新增能力位
+（例如 `StreamJSON`、`SoftInterrupt`）不再需要同步扩展 Protocol 接口。
+
 **两种实现**:
 
 | 维度 | ClaudeProtocol (stream-json) | ACPProtocol (JSON-RPC 2.0) |
@@ -901,6 +912,20 @@ avg turn 2-5:        1.5s
 
 两者区别：TTL 回收是"暂停"，`/new` 是"重来"。
 
+**Reset 的两条路径** (Round 208 / SM1)：
+
+Router 暴露两个语义不同的 reset 入口，调用方按场景选择：
+
+- `Router.Reset(key)` — 只清理 session 本身（杀进程、从 map 删除、下次落盘不含此 key）。
+  用于 LRU eviction、空闲清理等"我只是要回收这个 session"的路径。
+  `workspaceOverride` 被有意保留，下次同 key 重建 session 时仍生效。
+- `Router.ResetAndDiscardOverride(key)` — 在同一把 `r.mu` 下同时清理 session
+  **和** `workspaceOverrides[key]`。操作员 `/new`（以及其他"用户想彻底重来"的路径）
+  必须走这一条，否则存在并发 `SetWorkspace` 把旧 override 漏进新 session 的竞态窗口。
+
+判定规则：只要语义上是"用户想丢掉这个会话的一切状态"，就用
+`ResetAndDiscardOverride`；纯粹的资源回收继续走 `Reset`。
+
 **消息格式** (Phase 1 scope)：
 - 入站：只取纯文本，@mention 去掉 bot 名字前缀，忽略图片/文件/卡片
 - 出站：纯文本回复，超过 MaxReplyLength 自动分割
@@ -1174,6 +1199,12 @@ deploy/
 6. Phase 6: Multi-Node — 多节点聚合 **[已完成]**
    - NodeClient HTTP 聚合 + WS Relay 实时转发
    - 反向连接 (NAT 穿越): Connector + ReverseNodeConn
+   - Reverse 协议 forward-compat 标记 (Round 209 / RNEW-ARCH-402)：
+     `node.ReverseMsg` 在 register 握手上携带 `ProtocolVersion`（当前隐式为 1）
+     和 `Capabilities`（如 `"gemini"` / `"acp"` / `"askuser"`）；缺省字段视作
+     版本 1、空能力集。Round 213 的 consumer 把"未知 cap"降级为 WARN 日志，
+     不 fail-close，让新旧节点共存不必 flag-day 升级。协议细节见
+     [rfc/reverse-protocol.md](../rfc/reverse-protocol.md)。
 7. Phase 7: Workspace → Project → Session 三层组织
    - 7.0: ProjectManager + Planner + IM 路由 **[已完成]**
    - 7.1: Discovered sessions 合并进 sidebar **[已完成]**
@@ -1803,6 +1834,7 @@ Planner 在 shutdown 时与普通 session 一致：等待 running 完成 → 保
 | 功能 | 设计文档 | 状态 |
 |------|---------|------|
 | 多节点聚合 (Direct + Reverse) | [multi-node-design.md](multi-node-design.md) | 已实现 |
+| Reverse 协议 (wire format) | [../rfc/reverse-protocol.md](../rfc/reverse-protocol.md) | 已实现 |
 | Shim 进程 (零中断热重启) | [shim-design.md](shim-design.md) | 已实现 |
 | server 包拆分 | [server-split-design.md](server-split-design.md) | Phase 1-2 已完成 |
 | 语音消息转写 | [voice-transcription.md](voice-transcription.md) | 已实现 |

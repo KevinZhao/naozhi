@@ -2154,57 +2154,10 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		return existing, nil
 	}
 
-	s := &ManagedSession{
-		key:              key,
-		persistedHistory: oldHistory,
-		prevSessionIDs:   prevIDs,
-		exempt:           opts.Exempt,
-		onSessionID: func(id string) {
-			r.mu.Lock()
-			r.trackSessionID(id)
-			if id != "" {
-				r.sessionIDToKey[id] = key
-			}
-			r.mu.Unlock()
-		},
-	}
-	storeTotalCost(&s.totalCost, oldTotalCost)
-	s.setWorkspace(workspace)
-	s.SetBackend(backendID)
-	s.SetCLIName(wrapper.CLIName)
-	s.SetCLIVersion(wrapper.CLIVersion)
-	s.storeProcess(proc)
-	// Matches the reconnect path (ReconnectShims): notify the dashboard when
-	// a turn completes out-of-band (e.g. result arrives via readLoop without
-	// an active Send capturing it). SetOnTurnDone is mu-guarded inside Process,
-	// so calling it after storeProcess is safe.
-	proc.SetOnTurnDone(func() { r.notifyChange() })
-	if len(oldHistory) > 0 {
-		proc.InjectHistory(oldHistory)
-	}
-	s.setSessionID(resumeID)
-	r.trackSessionID(resumeID)
-	if resumeID != "" {
-		r.sessionIDToKey[resumeID] = key
-	}
-	s.touchLastActive()
-	r.attachHistorySource(s)
-	r.sessions[key] = s
-	r.indexAdd(key)
-	if !opts.Exempt {
-		r.activeCount.Add(1)
-	}
-
-	r.storeDirty = true
-	r.storeGen.Add(1)
-	slog.Info("session spawned", "key", key, "active", r.activeCount.Load(), "exempt", opts.Exempt)
-	// OBS2: counter bumped inside the write-lock so it reflects the authoritative
-	// "spawn succeeded" point (past both TOCTOU guards, past storeProcess). Exempt
-	// sessions are excluded — they don't consume a normal session slot and
-	// inflating session_create_total with planner/scratch churn muddies the signal.
-	if !opts.Exempt {
-		metrics.SessionCreateTotal.Add(1)
-	}
+	s := r.installFreshSessionLocked(
+		key, proc, workspace, backendID, wrapper, resumeID,
+		oldHistory, prevIDs, oldTotalCost, opts.Exempt,
+	)
 	r.mu.Unlock()
 
 	// Load conversation history from Claude's local JSONL when resuming.
@@ -2246,6 +2199,77 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 
 	r.notifyChange()
 	return s, nil
+}
+
+// installFreshSessionLocked attaches a freshly-spawned process to the
+// router indices + event log. Caller MUST hold r.mu. Extracted from
+// spawnSession (CQ2 Round 213); pure state-mutation block with no I/O.
+// Ordering matches the original inlined block verbatim; callers must
+// still invoke installPersistSink AFTER this returns (RFC §3.2.2).
+func (r *Router) installFreshSessionLocked(
+	key string,
+	proc *cli.Process,
+	workspace string,
+	backendID string,
+	wrapper *cli.Wrapper,
+	resumeID string,
+	oldHistory []cli.EventEntry,
+	prevIDs []string,
+	oldTotalCost float64,
+	exempt bool,
+) *ManagedSession {
+	s := &ManagedSession{
+		key:              key,
+		persistedHistory: oldHistory,
+		prevSessionIDs:   prevIDs,
+		exempt:           exempt,
+		onSessionID: func(id string) {
+			r.mu.Lock()
+			r.trackSessionID(id)
+			if id != "" {
+				r.sessionIDToKey[id] = key
+			}
+			r.mu.Unlock()
+		},
+	}
+	storeTotalCost(&s.totalCost, oldTotalCost)
+	s.setWorkspace(workspace)
+	s.SetBackend(backendID)
+	s.SetCLIName(wrapper.CLIName)
+	s.SetCLIVersion(wrapper.CLIVersion)
+	s.storeProcess(proc)
+	// Matches the reconnect path (ReconnectShims): notify the dashboard when
+	// a turn completes out-of-band (e.g. result arrives via readLoop without
+	// an active Send capturing it). SetOnTurnDone is mu-guarded inside Process,
+	// so calling it after storeProcess is safe.
+	proc.SetOnTurnDone(func() { r.notifyChange() })
+	if len(oldHistory) > 0 {
+		proc.InjectHistory(oldHistory)
+	}
+	s.setSessionID(resumeID)
+	r.trackSessionID(resumeID)
+	if resumeID != "" {
+		r.sessionIDToKey[resumeID] = key
+	}
+	s.touchLastActive()
+	r.attachHistorySource(s)
+	r.sessions[key] = s
+	r.indexAdd(key)
+	if !exempt {
+		r.activeCount.Add(1)
+	}
+
+	r.storeDirty = true
+	r.storeGen.Add(1)
+	slog.Info("session spawned", "key", key, "active", r.activeCount.Load(), "exempt", exempt)
+	// OBS2: counter bumped inside the write-lock so it reflects the authoritative
+	// "spawn succeeded" point (past both TOCTOU guards, past storeProcess). Exempt
+	// sessions are excluded — they don't consume a normal session slot and
+	// inflating session_create_total with planner/scratch churn muddies the signal.
+	if !exempt {
+		metrics.SessionCreateTotal.Add(1)
+	}
+	return s
 }
 
 // installPersistSink wires the event-log persister into the given

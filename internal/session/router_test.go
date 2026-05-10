@@ -2230,3 +2230,36 @@ func TestCollectPreviousHistory(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// installFreshSessionLocked — CQ2 Round 213 extraction
+// ---------------------------------------------------------------------------
+//
+// installFreshSessionLocked takes a concrete *cli.Process (the in-band
+// SetOnTurnDone hook is not part of processIface), so a behavior-level
+// table test would require spinning a real CLI subprocess. Instead we
+// assert the method exists with the expected signature — this guards
+// against accidental rename / parameter drift by future refactors and
+// confirms the extraction compiles as a pure relocation. The
+// underlying behavior is already covered end-to-end by every
+// TestSpawnSession* case that exercises the enclosing spawnSession
+// path, which now routes through this helper.
+func TestInstallFreshSessionLocked_SignatureGuard(t *testing.T) {
+	var fn func(
+		key string,
+		proc *cli.Process,
+		workspace string,
+		backendID string,
+		wrapper *cli.Wrapper,
+		resumeID string,
+		oldHistory []cli.EventEntry,
+		prevIDs []string,
+		oldTotalCost float64,
+		exempt bool,
+	) *ManagedSession
+	r := &Router{}
+	fn = r.installFreshSessionLocked
+	if fn == nil {
+		t.Fatal("installFreshSessionLocked method missing")
+	}
+}

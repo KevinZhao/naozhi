@@ -254,6 +254,30 @@ naozhi 断连期间，shim 自行监控 CLI 健康：
 
 naozhi 连接前验证：socket 路径在预期目录内 + shim_pid 存活 + /proc/pid/exe 正确。
 
+#### Schema versioning (Round 209 / RNEW-ARCH-403)
+
+State file 有两个版本字段，职责清晰分离：
+
+- `Version` (`"version"`) — 既有的**硬门**，当前固定为 1。
+  整份文档结构发生不兼容变动（重命名/删除字段、语义翻转等）时才 bump。
+  `ReadState` 对非 1 值直接报错返回。
+- `SchemaVersion` (`"schema_version"`, `omitempty`) — 新加的**软提示**，当前
+  `maxSupportedSchemaVersion = 1`。每次对该文件做**加法式**演进（新增可选字段、
+  为老字段放宽允许值）时 bump。老 writer 不写此字段 → reader 解到 `0`，按
+  "等价于 v1" 处理；新 reader 解到 `> maxSupportedSchemaVersion` → 拒绝并返回
+  带 `schema_version N > max supported M` 的错误（即更新的 naozhi 写的，
+  本进程不敢碰）。
+
+两者配合规则：
+- 加字段：bump `SchemaVersion`，保持 `Version=1`。老 naozhi 读到仍是 v1，
+  忽略未知字段；新 naozhi 看到 schema 低于自己也能读。
+- 改字段语义：bump `Version`。等同于 flag-day 升级，两个版本不互认。
+
+测试覆盖：`TestShimState_SchemaVersionPersisted` /
+`TestShimState_ZeroSchemaVersionIsV1` /
+`TestReadState_SchemaVersionExceedsMaxRejected` /
+`TestReadState_SchemaVersionEqualToMaxAccepted`。
+
 ### 3.6 Socket 路径与认证
 
 优先 `XDG_RUNTIME_DIR`（`/run/user/<uid>/naozhi/`），回退 `~/.naozhi/run/`。目录 0700。

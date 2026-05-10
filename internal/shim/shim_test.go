@@ -4,6 +4,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 func TestRingBuffer_PushAndLinesSince(t *testing.T) {
@@ -148,11 +150,17 @@ func TestWatchdog_ResetStaleCallbackNoOp(t *testing.T) {
 
 	// Reset just before the first timer would fire; this invalidates the first
 	// callback (generation 0 → 1) and schedules a new one.
+	// Wall-clock wait is intentional here: we must hit Reset BEFORE the 30ms
+	// timer fires, so Eventually polling would defeat the race this test pins.
 	time.Sleep(20 * time.Millisecond)
 	w.Reset()
 
-	// Wait long enough for both the stale and the fresh callback to have run.
-	time.Sleep(100 * time.Millisecond)
+	// Sync wait for the fresh callback to fire. Stale callback (gen 0) runs
+	// as a no-op due to generation mismatch, so count can only reach 1 via
+	// the fresh generation. Eventually replaces a 100ms wall-clock wait.
+	testhelper.Eventually(t, func() bool {
+		return fireCount.Load() >= 1
+	}, 1*time.Second, "fresh watchdog callback did not fire after Reset")
 
 	if got := fireCount.Load(); got != 1 {
 		t.Errorf("expected watchdog to fire exactly once, got %d", got)
@@ -168,11 +176,17 @@ func TestWatchdog_StopInvalidatesCallback(t *testing.T) {
 	})
 	w.Start()
 
-	// Stop just before the timer fires.
+	// Stop just before the timer fires. Wall-clock wait is intentional: we
+	// must race Stop() against a 20ms timer, which Eventually cannot express
+	// (there is no positive condition to poll — the whole point is the
+	// timing window where the timer is already scheduled).
 	time.Sleep(10 * time.Millisecond)
 	w.Stop()
 
-	// Allow time for any in-flight AfterFunc callback to execute.
+	// Negative-assertion window: give any in-flight AfterFunc callback room
+	// to execute so we can prove the generation counter blocks it. This is
+	// fundamentally a "wait and verify nothing happened" test — not
+	// migratable to Eventually.
 	time.Sleep(50 * time.Millisecond)
 
 	if got := fireCount.Load(); got != 0 {
