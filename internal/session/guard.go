@@ -65,7 +65,11 @@ func (g *Guard) AcquireTimeout(ctx context.Context, key string, timeout time.Dur
 	closeDone := func() { closeOnce.Do(func() { close(done) }) }
 	timer := time.AfterFunc(timeout, func() {
 		closeDone()
-		g.cond.Broadcast() // unblock Wait
+		// Hold cond.L while Broadcasting to avoid the missed-wakeup race
+		// with Wait's recheck loop (see sync.Cond docs).
+		g.cond.L.Lock()
+		g.cond.Broadcast()
+		g.cond.L.Unlock()
 	})
 	localDone := make(chan struct{})
 	defer close(localDone)
@@ -73,7 +77,9 @@ func (g *Guard) AcquireTimeout(ctx context.Context, key string, timeout time.Dur
 	go func() {
 		select {
 		case <-ctx.Done():
+			g.cond.L.Lock()
 			g.cond.Broadcast()
+			g.cond.L.Unlock()
 		case <-localDone:
 		}
 	}()

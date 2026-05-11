@@ -238,18 +238,6 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 	}, nil
 }
 
-// hasFileRef reports whether any attachment in atts needs to be persisted
-// to the session workspace (PDF today; other formats in the future). O(n)
-// on a list already bounded at maxFilesPerSend (20), so cost is trivial.
-func hasFileRef(atts []cli.Attachment) bool {
-	for _, a := range atts {
-		if a.Kind == cli.KindFileRef {
-			return true
-		}
-	}
-	return false
-}
-
 // hasPersistableAttachment reports whether any attachment needs to hit
 // persistFileRefs. file_ref must land on disk or the Read-tool hint has
 // nothing to point at; inline images are persisted on a best-effort basis
@@ -825,7 +813,9 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			}
 			defer cancel()
 			if err := nc.Send(ctx, capturedKey, capturedText, capturedWorkspace); err != nil {
-				slog.Error("remote send", "node", node, "key", capturedKey, "err", err)
+				slog.Error("remote send",
+					"node", osutil.SanitizeForLog(node, 128),
+					"key", capturedKey, "err", err)
 			} else {
 				nc.RefreshSubscription(capturedKey)
 			}

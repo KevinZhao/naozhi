@@ -436,7 +436,18 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "auth_ok"})
 		return
 	}
-	if h.dashToken == "" || subtle.ConstantTimeCompare([]byte(msg.Token), []byte(h.dashToken)) == 1 {
+	// Pre-hash both sides to normalize length — subtle.ConstantTimeCompare
+	// returns 0 immediately when operand lengths differ, leaking the token
+	// length via response latency. HTTP Bearer path (dashboard_auth.go:113)
+	// already applies this pattern; mirror it here so brute-force attackers
+	// cannot discover the correct token length via the WS auth endpoint.
+	tokenOK := false
+	if h.dashToken != "" {
+		got := sha256.Sum256([]byte(msg.Token))
+		want := sha256.Sum256([]byte(h.dashToken))
+		tokenOK = subtle.ConstantTimeCompare(got[:], want[:]) == 1
+	}
+	if h.dashToken == "" || tokenOK {
 		c.authenticated.Store(true)
 		// Derive uploadOwner from the provided token so WS token-auth enforces
 		// the same per-owner upload quota as HTTP Bearer auth. Without this,
