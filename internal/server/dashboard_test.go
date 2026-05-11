@@ -1182,6 +1182,19 @@ func TestHandleTakeover_NoClaudeDirRefuses(t *testing.T) {
 // as "not cached" and drove a redundant FS scan per TTL window.
 func TestHistorySessions_EmptyHistoryCached(t *testing.T) {
 	srv := newTestServer(&mockPlatform{})
+	// Wait for the WarmHistoryCache goroutine that New() launches before
+	// mutating claudeDir — otherwise the warm goroutine reads the field
+	// while the test writes it and -race trips. The warm goroutine uses
+	// the runner's real ~/.claude so its result is discarded below by
+	// forcing historyCacheTime=zero; we only need to sync with it.
+	srv.sessionH.WaitWarmHistory()
+
+	// Reset cache from the warm pass so the first test call is a real miss.
+	srv.sessionH.historyCacheMu.Lock()
+	srv.sessionH.historyCache = nil
+	srv.sessionH.historyCacheTime = time.Time{}
+	srv.sessionH.historyCacheMu.Unlock()
+
 	// Empty claudeDir so loadHistorySessions naturally yields nil.
 	srv.sessionH.claudeDir = t.TempDir()
 

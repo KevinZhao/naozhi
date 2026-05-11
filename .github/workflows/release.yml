@@ -12,7 +12,7 @@ jobs:
   check-branch:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Verify tag is on master
@@ -46,9 +46,9 @@ jobs:
           # MINGW/MSYS/CYGWIN targets. Re-adding Windows requires a compat
           # layer in internal/shim behind build tags (_unix.go / _windows.go).
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
 
@@ -62,7 +62,7 @@ jobs:
           go build -trimpath -ldflags="-s -w -X main.version=${{ github.ref_name }}" -o "dist/${OUTPUT}" ./cmd/naozhi/
           cd dist && sha256sum "${OUTPUT}" > "${OUTPUT}.sha256"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: naozhi-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/
@@ -74,9 +74,9 @@ jobs:
       # Need the repo for install.sh to ship as a release asset. install.sh
       # is intentionally static (no per-release substitution); it fetches
       # checksums.txt from whichever tag it targets at runtime.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@v8
         with:
           path: dist/
           merge-multiple: true

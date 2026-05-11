@@ -655,7 +655,18 @@ func TestRecentSessions_MaxAge(t *testing.T) {
 	}
 
 	sid := "ffffffff-0001-0001-0001-000000000031"
-	if err := os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
+	jsonlPath := filepath.Join(projDir, sid+".jsonl")
+	if err := os.WriteFile(jsonlPath, []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Force the JSONL mtime an hour into the past so the maxAge filter has
+	// unambiguous comparison room. Without this, CI runners where the test
+	// wrote the file and called RecentSessions within the same millisecond
+	// observed mtime == cutoff and the "<" comparison failed to exclude
+	// the "old" session — the previous 1ns maxAge tried to express the
+	// intent but the filter rounds to ms, so 1ns and 0ns were identical.
+	oldMtime := time.Now().Add(-time.Hour)
+	if err := os.Chtimes(jsonlPath, oldMtime, oldMtime); err != nil {
 		t.Fatal(err)
 	}
 	writeSessionsIndex(t, projDir, sessionsIndex{
@@ -666,8 +677,8 @@ func TestRecentSessions_MaxAge(t *testing.T) {
 	dirFilesCache.Delete(projDir)
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-	// Use a tiny maxAge (1ns) so the freshly written file is "too old"
-	got := RecentSessions(claudeDir, 10, time.Nanosecond, nil)
+	// maxAge = 1 minute; the file is 1 hour old so it must be filtered out.
+	got := RecentSessions(claudeDir, 10, time.Minute, nil)
 	for _, s := range got {
 		if s.SessionID == sid {
 			t.Errorf("session should be filtered by maxAge, but appeared: %+v", s)

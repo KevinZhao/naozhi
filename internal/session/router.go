@@ -1194,7 +1194,7 @@ func shutdownShimViaReconnect(
 		return
 	}
 	if sigusr2Fallback {
-		syscall.Kill(state.ShimPID, syscall.SIGUSR2) //nolint:errcheck
+		_ = osutil.SendShimReload(state.ShimPID)
 	}
 }
 

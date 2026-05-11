@@ -778,7 +778,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if actual != p.ProcStartTime {
 			return nil, fmt.Errorf("process identity mismatch (pid %d may have been reused)", p.PID)
 		}
-		if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil {
+		if err := osutil.SendTerm(p.PID); err != nil {
 			if !errors.Is(err, syscall.ESRCH) {
 				return nil, fmt.Errorf("kill process %d: %w", p.PID, err)
 			}
@@ -916,7 +916,7 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		if actual != p.ProcStartTime {
 			return nil, fmt.Errorf("process identity mismatch (pid %d may have been reused)", p.PID)
 		}
-		if err := syscall.Kill(p.PID, syscall.SIGTERM); err != nil {
+		if err := osutil.SendTerm(p.PID); err != nil {
 			if !errors.Is(err, syscall.ESRCH) {
 				return nil, fmt.Errorf("kill process %d: %w", p.PID, err)
 			}
