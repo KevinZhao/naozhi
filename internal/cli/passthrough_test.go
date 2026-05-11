@@ -540,8 +540,10 @@ func TestPassthrough_FIFOOrder_TwoIndependentSends(t *testing.T) {
 func TestPassthrough_ACPProtocol_Rejected(t *testing.T) {
 	// Construct a Process with an ACP-like protocol that returns
 	// SupportsReplay() == false.
+	proto := &ACPProtocol{}
 	p := &Process{
-		protocol: &ACPProtocol{},
+		protocol: proto,
+		caps:     ProtocolCaps(proto),
 		done:     make(chan struct{}),
 	}
 	_, err := p.SendPassthrough(context.Background(), "msg", nil, nil, "")
@@ -553,8 +555,10 @@ func TestPassthrough_ACPProtocol_Rejected(t *testing.T) {
 // TestPassthrough_DeadProcess_FastReject verifies that SendPassthrough on a
 // dead Process returns ErrProcessExited without blocking.
 func TestPassthrough_DeadProcess_FastReject(t *testing.T) {
+	proto := &ClaudeProtocol{}
 	p := &Process{
-		protocol: &ClaudeProtocol{},
+		protocol: proto,
+		caps:     ProtocolCaps(proto),
 		done:     make(chan struct{}),
 	}
 	close(p.done)

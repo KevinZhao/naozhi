@@ -585,7 +585,12 @@ func (l *EventLog) Append(e EventEntry) {
 	// producer that accidentally passes through an external URL or a
 	// javascript: URI gets stripped before it can reach the dashboard's
 	// <img src=...> render path. S15 (Round 174).
-	e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
+	//
+	// Fast-path skip: 99%+ of events carry no images; hoist the len check
+	// to avoid the function call overhead on every live append.
+	if len(e.Images) > 0 {
+		e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
+	}
 	l.entries[l.head] = e
 	l.head = (l.head + 1) % l.maxSize
 	if l.count < l.maxSize {
@@ -671,7 +676,9 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 		// (InjectHistory → AppendBatch) should never contain non-image data
 		// URIs today, but defense-in-depth is trivially cheap and locks the
 		// contract to a single sink.
-		e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
+		if len(e.Images) > 0 {
+			e.Images, e.ImagePaths = sanitizeImagesAligned(e.Images, e.ImagePaths)
+		}
 		l.entries[l.head] = e
 		l.head = (l.head + 1) % l.maxSize
 		if l.count < l.maxSize {

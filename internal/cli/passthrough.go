@@ -37,7 +37,7 @@ func newSlotUUID() string {
 func (p *Process) SendPassthrough(ctx context.Context, text string, images []ImageData,
 	onEvent EventCallback, priority string) (*SendResult, error) {
 
-	if !ProtocolCaps(p.protocol).Replay {
+	if !p.caps.Replay {
 		return nil, fmt.Errorf("passthrough: protocol %s does not support replay", p.protocol.Name())
 	}
 
@@ -324,22 +324,6 @@ func (p *Process) handleReplayEventLocked(ev Event) {
 		"pending_total", len(p.pendingSlots))
 }
 
-// extractReplayTexts pulls out text blocks from a user-replay event's content.
-// Returns an empty slice if the event doesn't carry text blocks (e.g. a
-// tool_result user event that slipped in; caller filters those upstream).
-func extractReplayTexts(ev Event) []string {
-	if ev.Message == nil {
-		return nil
-	}
-	out := make([]string, 0, len(ev.Message.Content))
-	for _, b := range ev.Message.Content {
-		if b.Type == "text" {
-			out = append(out, b.Text)
-		}
-	}
-	return out
-}
-
 // fanoutTurnResult delivers one CLI result event to every slot the turn
 // claimed. The first claimed slot gets the full SendResult; the rest get a
 // follower SendResult with MergedWithHead pointing at the head slot.
@@ -563,5 +547,5 @@ func (p *Process) PassthroughDepth() int {
 // in passthrough mode. Currently equivalent to ProtocolCaps(...).Replay
 // because replay events are required for naozhi ↔ CLI slot matching.
 func (p *Process) SupportsPassthrough() bool {
-	return ProtocolCaps(p.protocol).Replay
+	return p.caps.Replay
 }

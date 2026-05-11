@@ -220,8 +220,10 @@ func (p *Process) readLoop() {
 			// drainStaleEvents) and the EventEntry.Time values produced by
 			// logEventAt. Previously the two read wall-clock independently,
 			// which is measurable at 5-50 events/s × N active sessions.
-			// R67-PERF-9.
+			// R67-PERF-9. Also cache UnixMilli once — used up to 4× per
+			// event by the dispatch below.
 			now := time.Now()
+			nowMS := now.UnixMilli()
 
 			// ---- Passthrough mode hooks ----
 			// These run before the legacy eventCh / EventLog delivery paths.
@@ -232,7 +234,7 @@ func (p *Process) readLoop() {
 			// tracking and watchdog baseline. Keeping this unconditional is
 			// harmless — onSystemInit only matters when pendingSlots is
 			// non-empty and a replay arrives later.
-			if ev.Type == "system" && ev.SubType == "init" && ProtocolCaps(p.protocol).Replay {
+			if ev.Type == "system" && ev.SubType == "init" && p.caps.Replay {
 				p.onSystemInit()
 			}
 
@@ -249,7 +251,7 @@ func (p *Process) readLoop() {
 			// result under passthrough: fan-out to claimed slots and skip
 			// legacy eventCh delivery. We still log to EventLog so dashboard
 			// sees the turn-complete event.
-			if ev.Type == "result" && ProtocolCaps(p.protocol).Replay {
+			if ev.Type == "result" && p.caps.Replay {
 				// error_during_execution signals the CLI aborted the turn —
 				// e.g. a priority:"now" preempted it. Any older pending slot
 				// written before `now` that was never replayed was dropped
@@ -260,7 +262,7 @@ func (p *Process) readLoop() {
 				}
 				owners := p.onTurnResult()
 				if len(owners) > 0 {
-					p.logEventAt(ev, now.UnixMilli())
+					p.logEventAt(ev, nowMS)
 					// Fire onEvent for each owner's turn-scope callback
 					// before delivering the terminal result.
 					for _, owner := range owners {
@@ -276,7 +278,7 @@ func (p *Process) readLoop() {
 				// or (b) stray result during reconnect. Either way skip
 				// legacy eventCh; dashboard EventLog already has the entry.
 				if ev.SubType == "error_during_execution" {
-					p.logEventAt(ev, now.UnixMilli())
+					p.logEventAt(ev, nowMS)
 					continue
 				}
 				// Fall through to legacy path only for true stray results.
@@ -318,16 +320,15 @@ func (p *Process) readLoop() {
 							name = nameTrim
 						}
 					}
-					agentToolUseMS := now.UnixMilli()
 					linker := p.linker
-					go linker.Resolve(taskID, toolUseID, name, ev.Description, agentToolUseMS)
+					go linker.Resolve(taskID, toolUseID, name, ev.Description, nowMS)
 				}
 			}
 
 			// Always log to EventLog so dashboard subscribers see events
 			// even when no Send() is active (e.g., after service restart
 			// reconnects to a shim that's mid-turn).
-			p.logEventAt(ev, now.UnixMilli())
+			p.logEventAt(ev, nowMS)
 
 			// If a result event arrives while no Send() is active (e.g.,
 			// after shim reconnect set state to Running via isMidTurn but

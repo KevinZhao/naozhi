@@ -157,8 +157,9 @@ type Process struct {
 	shimWMu     sync.Mutex
 	stdinWriter *shimWriter // cached shimStdinWriter instance
 	protocol    Protocol
-	cliPID      int // CLI PID reported by shim hello
-	shimPID     int // shim PID reported by shim hello; used by Kill() for SIGUSR2 fallback
+	caps        Caps // cached protocol capabilities (immutable after construction)
+	cliPID      int  // CLI PID reported by shim hello
+	shimPID     int  // shim PID reported by shim hello; used by Kill() for SIGUSR2 fallback
 
 	SessionID string
 	State     ProcessState
@@ -398,6 +399,7 @@ func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 		shimR:           reader,
 		shimW:           writer,
 		protocol:        proto,
+		caps:            ProtocolCaps(proto),
 		cliPID:          cliPID,
 		shimPID:         shimPID,
 		State:           StateSpawning,
