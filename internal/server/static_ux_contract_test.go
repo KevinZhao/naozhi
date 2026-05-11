@@ -5793,3 +5793,82 @@ func TestDashboardJS_RNEW_UX003_FetchJSONHelper(t *testing.T) {
 		t.Errorf("RNEW-UX-003: expected >=1 fetchJSON( caller plus the definition, got %d total occurrences", n)
 	}
 }
+
+// TestDashboardJS_CronSessionsHiddenByDefault pins the policy that cron-
+// scheduler sessions (key prefix "cron:") are not rendered in the sidebar
+// unless explicitly opened by the operator. The 定时任务 panel owns cron
+// lifecycle end-to-end; the sidebar is reserved for operator-opened
+// conversations. If someone accidentally removes the filter, every cron
+// job would spill back into the sidebar and the dismiss-×-deletes-the-job
+// regression (× calling DELETE /api/sessions on a cron key) would return.
+//
+// The test locks four co-dependent invariants:
+//  1. `cronVisibleKeys` set exists as the ephemeral whitelist.
+//  2. renderSidebar computes a `visibleItems` that filters out un-listed
+//     cron keys before any grouping/search branch runs.
+//  3. The "promote to sidebar" call sites — openCronSession (panel click)
+//     and doCreateCronJob (just-created job) — invoke markCronSessionVisible.
+//  4. dismissSession has a cron-specific branch that removes from the set
+//     WITHOUT calling DELETE /api/sessions — the cron scheduler is the
+//     sole owner of cron-job lifecycle.
+func TestDashboardJS_CronSessionsHiddenByDefault(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// 1. Whitelist set + helper exist.
+	if !strings.Contains(js, "let cronVisibleKeys = new Set()") {
+		t.Error("dashboard.js: cronVisibleKeys whitelist Set must exist — cron sidebar policy depends on it")
+	}
+	if !strings.Contains(js, "function isCronSessionKey(key)") {
+		t.Error("dashboard.js: isCronSessionKey helper must exist as single source of truth for the cron: prefix check")
+	}
+	if !strings.Contains(js, "function markCronSessionVisible(key)") {
+		t.Error("dashboard.js: markCronSessionVisible helper must exist to keep the policy centralised")
+	}
+
+	// 2. renderSidebar filters into visibleItems before grouping/search.
+	//    Locked as one expression — if future refactors split the filter
+	//    per branch, the substring will stop matching and flag it.
+	if !strings.Contains(js, "!isCronSessionKey(s.key) || cronVisibleKeys.has(s.key)") {
+		t.Error("dashboard.js: renderSidebar must gate cron sessions via `!isCronSessionKey(s.key) || cronVisibleKeys.has(s.key)` before rendering")
+	}
+
+	// 3. Promote-to-sidebar call sites. These two are the ONLY officially
+	//    supported entrypoints; a new entrypoint must also call
+	//    markCronSessionVisible or the session will stay hidden.
+	if n := strings.Count(js, "markCronSessionVisible("); n < 2 {
+		t.Errorf("dashboard.js: markCronSessionVisible must be called from openCronSession and doCreateCronJob (>=2 call sites), got %d", n)
+	}
+
+	// 4. dismissSession cron branch: removes from whitelist but must not
+	//    hit DELETE /api/sessions. We verify this structurally — the
+	//    cron-key guard + `cronVisibleKeys.delete` must be present, and
+	//    they must appear BEFORE the DELETE /api/sessions fetch.
+	dismissIdx := strings.Index(js, "async function dismissSession(")
+	if dismissIdx < 0 {
+		t.Fatal("dashboard.js: dismissSession function not found")
+	}
+	// Scope the search to dismissSession's body — ~3KB is more than enough
+	// for the function even after future edits without leaking into the
+	// next function.
+	end := dismissIdx + 4000
+	if end > len(js) {
+		end = len(js)
+	}
+	body := js[dismissIdx:end]
+	if !strings.Contains(body, "if (isCronSessionKey(key))") {
+		t.Error("dashboard.js: dismissSession must short-circuit on cron keys via `if (isCronSessionKey(key))`")
+	}
+	if !strings.Contains(body, "cronVisibleKeys.delete(key)") {
+		t.Error("dashboard.js: dismissSession cron branch must remove from the whitelist with cronVisibleKeys.delete(key)")
+	}
+	cronBranchIdx := strings.Index(body, "if (isCronSessionKey(key))")
+	deleteAPIIdx := strings.Index(body, "'/api/sessions'")
+	if cronBranchIdx >= 0 && deleteAPIIdx >= 0 && cronBranchIdx > deleteAPIIdx {
+		t.Error("dashboard.js: cron-key guard in dismissSession must appear BEFORE DELETE /api/sessions path so × never destroys a scheduled job")
+	}
+}

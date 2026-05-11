@@ -367,6 +367,16 @@ function renderSidebar(data) {
     return bFS - aFS;
   });
 
+  // Hide cron-scheduler sessions from the sidebar unless the operator has
+  // explicitly opened one (tracked via cronVisibleKeys). This is applied
+  // once here so every downstream branch — search filter, project
+  // grouping, fallback flat list — sees the same "visible" universe. The
+  // upstream allSessionsCache still holds every session so history-badge
+  // counts and other aggregates are unaffected.
+  const visibleItems = allItems.filter(s =>
+    !isCronSessionKey(s.key) || cronVisibleKeys.has(s.key)
+  );
+
   // UX-P3 sidebar search: if the filter input is visible and non-empty,
   // skip the project grouping entirely and render the filtered set as a
   // flat list. Grouping under a filter scatters matches across day headers
@@ -377,7 +387,7 @@ function renderSidebar(data) {
   const filterActive = !!filterQuery;
   let listHtml = '';
   if (filterActive) {
-    const matched = filterSessionsByQuery(allItems, filterQuery);
+    const matched = filterSessionsByQuery(visibleItems, filterQuery);
     listHtml = matched.length === 0
       ? '<div class="session-list-filter-empty">没有匹配的会话<span class="slfe-hint">试试项目名、CLI 名或 prompt 片段</span></div>'
       : matched.map(sessionCardHtml).join('');
@@ -397,24 +407,15 @@ function renderSidebar(data) {
     // key so two unrelated folders that share a basename (e.g. /a/tmp and
     // /b/tmp) do not collapse into a single mislabeled group.
     const groups = {};
-    const cronItems = [];
     const ungrouped = [];
-    allItems.forEach(s => {
-      // Cron-scheduler sessions (key prefix "cron:"): if the job carries a
-      // WorkDir that the backend resolved to a real project name, let it
-      // flow into that project's group just like any other session — the
-      // cron badge (⏰) on the card already signals its nature. Only cron
-      // jobs without a project (no WorkDir, or WorkDir outside any
-      // registered project AND no workspace-basename fallback) fall into
-      // the dedicated "定时任务" bucket, so they don't drop into the generic
-      // "未分组" catch-all either. 这样定了 WorkDir 的定时任务会出现在
-      // 它实际运行的项目下，符合操作者的定位直觉；纯无归属的定时任务
-      // 才统一收进定时任务分组。
-      const isCron = typeof s.key === 'string' && s.key.indexOf('cron:') === 0;
-      if (isCron && !s.project) {
-        cronItems.push(s);
-        return;
-      }
+    // visibleItems already applied the cron visibility gate up above, so
+    // every entry here is either (a) not a cron session, or (b) a cron
+    // session the operator has explicitly opened. Visible cron sessions
+    // keep flowing through the project-grouping logic so they land next
+    // to their workspace peers, matching the "I want to see THIS one"
+    // intent; project-less cron sessions fall into the catch-all
+    // ungrouped bucket — no dedicated 定时任务 sidebar section any more.
+    visibleItems.forEach(s => {
       const pn = s.project || '';
       if (pn) {
         const node = s.node || 'local';
@@ -451,9 +452,13 @@ function renderSidebar(data) {
     });
 
     const groupKeys = Object.keys(groups);
-    // cron 分组要和 project 分组并列展示；如果只有 cron session（无任何
-    // project header），也要保留分组结构而不是回落到扁平列表。
-    if (groupKeys.length > 0 || cronItems.length > 0) {
+    // Visible cron sessions (those in cronVisibleKeys) either fell into a
+    // project group via s.project above, or — if they have no project —
+    // dropped into `ungrouped`. No dedicated cron-group header is rendered
+    // any more: the sidebar is reserved for operator-opened conversations,
+    // and the 定时任务 panel owns the full scheduled-task catalog. See
+    // cronVisibleKeys comment block.
+    if (groupKeys.length > 0) {
       // Pre-compute per-group sort keys once — avoids repeated map lookups
       // inside the sort comparator (fav flag, max firstSeen, display name).
       // This keeps comparator at O(1) scalar comparisons rather than
@@ -502,16 +507,11 @@ function renderSidebar(data) {
         // affordance, so a duplicate "New session in X" CTA would just add
         // visual noise.
       });
-      if (cronItems.length > 0) {
-        html += sectionHeaderCronHtml(cronItems.length);
-        if (!collapsedProjects.has('cron:__all__')) {
-          // Stable ordering inside the cron bucket: by firstSeen desc, same
-          // as the global sort above already placed them. Use them as-is
-          // rather than re-sorting so the earlier "running first" tier is
-          // preserved (cron stubs that are actually executing bubble up).
-          html += cronItems.map(sessionCardHtml).join('');
-        }
-      }
+      // NOTE: the dedicated 定时任务 sidebar section was removed.
+      // Cron sessions now hide by default (see cronVisibleKeys) and
+      // visible ones flow into their project's group. If they have no
+      // project, they fall into the catch-all "未分组" bucket below,
+      // which is consistent with how other project-less sessions behave.
       if (ungrouped.length > 0) {
         // Final catch-all: sessions with no project name AND no workspace
         // (rare — usually transient takeover/planner edge cases). The old
@@ -521,7 +521,7 @@ function renderSidebar(data) {
         html += ungrouped.map(sessionCardHtml).join('');
       }
     } else {
-      html = allItems.map(sessionCardHtml).join('');
+      html = visibleItems.map(sessionCardHtml).join('');
     }
   }
 
@@ -701,31 +701,6 @@ const GITHUB_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-
 // Chevron: points down when expanded (`▾`-like), rotated 90deg via CSS
 // when collapsed so the same glyph serves both states.
 const CHEVRON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
-
-// sectionHeaderCronHtml renders the dedicated "定时任务" section header that
-// holds every cron-scheduler session (key prefix "cron:"). The header is
-// collapsible (key "cron:__all__", shared in collapsedProjects), and its
-// trailing "+" button jumps straight to the cron-create modal so operators
-// have a one-click path to schedule a new task — mirroring the per-project
-// header's create affordance but bound to the cron surface instead of a
-// workspace. Favorite / GitHub / rename are intentionally absent because
-// the cron group is not a ProjectManager entity.
-function sectionHeaderCronHtml(count) {
-  const ck = 'cron:__all__';
-  const collapsed = collapsedProjects.has(ck);
-  const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
-  const cTitle = collapsed ? '展开' : '收起';
-  const collapseBtn = '<button type="button" class="' + cCls + '" data-key="' + escAttr(ck) + '" title="' + cTitle + ' 定时任务" aria-label="' + cTitle + ' 定时任务" aria-expanded="' + (collapsed ? 'false' : 'true') + '" onclick="event.stopPropagation();toggleProjectCollapsed(this.dataset.key)">' + CHEVRON_SVG + '</button>';
-  const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
-  const newBtn = '<button type="button" class="sh-btn sh-new" title="新建定时任务" aria-label="新建定时任务" onclick="event.stopPropagation();createNewCronJob()"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>';
-  const collapsedCls = collapsed ? ' is-collapsed' : '';
-  return '<div class="section-header section-header-cron' + collapsedCls + '" role="group" aria-label="定时任务">' +
-    collapseBtn +
-    '<span class="sh-name" title="定时任务">⏰ 定时任务</span>' +
-    countBadge +
-    newBtn +
-    '</div>';
-}
 
 // sectionHeaderFallbackHtml renders the minimal header for ad-hoc workspace
 // groups (p.fallback === true). The group's "project name" is just the
@@ -1126,7 +1101,7 @@ function sessionCardHtml(s) {
   const sNode = s.node || 'local';
   const isActive = selectedKey === s.key && selectedNode === sNode;
   const isNew = s.state === 'new';
-  const isCron = typeof s.key === 'string' && s.key.indexOf('cron:') === 0;
+  const isCron = isCronSessionKey(s.key);
   // sc-cron-card (not cron-card) because `.cron-card` is also the cron
   // panel's job card class — reusing it here pulled the panel's padding /
   // border / padding-right:100px into the sidebar card and pushed the time
@@ -1611,6 +1586,33 @@ async function dismissSession(key, node, opts) {
   // ms timestamp collides on rapid double-create) doesn't inherit a
   // stale backend pick.
   delete sessionBackends[key];
+
+  // Cron sessions get a "hide from sidebar" semantics instead of a true
+  // delete: the × button is a UI-level dismiss, not a destructive one.
+  // Deleting the managed session here would NOT remove the scheduled job
+  // (the cron scheduler re-registers a stub on every refresh — see
+  // session.RegisterCronStub), and the user would just see the card
+  // pop back the next time the job ticks. Worse, if we hit
+  // DELETE /api/sessions the router would reject or tear down state the
+  // scheduler still considers live. Single-source-of-truth for cron
+  // lifecycle is the 定时任务 panel (cronDelete → DELETE /api/cron).
+  if (isCronSessionKey(key)) {
+    cronVisibleKeys.delete(key);
+    if (selectedKey === key) {
+      selectedKey = null;
+      if (wsm.subscribedKey === key) wsm.unsubscribe();
+      document.getElementById('main').innerHTML = mainEmptyHtml();
+      wireQuickAskInput();
+    }
+    // Drop the card out of the DOM immediately for a snappy dismiss;
+    // lastVersion=0 + a debounced fetch reconciles with the server on
+    // the next tick (same pattern as the discovered-session branch).
+    const card = document.querySelector('.session-card[data-key="' + key + '"]');
+    if (card) card.remove();
+    lastVersion = 0;
+    debouncedFetchSessions();
+    return;
+  }
 
   // If it's a pending (never-sent) session, just remove from localStorage
   if (sessionWorkspaces[key] !== undefined) {
@@ -9055,6 +9057,31 @@ let cronJobs = [];
 // when the server has no default configured. Used to render helpful copy
 // alongside the notify toggle in create/edit modals.
 let cronNotifyDefault = null;
+// cronVisibleKeys gates which cron-scheduler sessions the sidebar paints.
+// Policy (operator-confirmed): cron sessions are NOT shown in the sidebar
+// by default — they live in the "定时任务" panel. When the operator
+// explicitly opens a cron session (from the panel, or right after creating
+// one), we add its key here so the sidebar surfaces it. Dismissing the
+// session card (×) removes the key again; it does NOT delete the cron job
+// itself (see dismissSession's isCron branch). Deliberately NOT persisted
+// across reloads — the white-list is an ephemeral "I'm currently looking
+// at this" marker, not a permanent preference.
+let cronVisibleKeys = new Set();
+
+// isCronSessionKey 是 sidebar 过滤和 dismiss 分支共享的判定。
+// 与 cron_stub 约定的 key shape ("cron:<jobID>") 对齐，保持与后端
+// session.CronKeyPrefix 单一真源。
+function isCronSessionKey(key) {
+  return typeof key === 'string' && key.indexOf('cron:') === 0;
+}
+
+// markCronSessionVisible 把一个 cron session key 加入白名单并触发侧栏
+// 重绘。给 openCronSession / doCreateCronJob / 未来的"打开到侧栏"入口
+// 共享，这样可见性策略只在一个地方维护。
+function markCronSessionVisible(key) {
+  if (!isCronSessionKey(key)) return;
+  cronVisibleKeys.add(key);
+}
 // R110-P2 cron filter state — module-level so renderCronList can read the
 // live values each paint without a closure. Mirrors the sidebar-search
 // approach (cronFilterQuery is the substring, cronFilterStatus is one of
@@ -9949,6 +9976,12 @@ async function doCreateCronJob() {
     fetchCronJobs();
     if (data.id) {
       const key = 'cron:' + data.id;
+      // Freshly-created cron sessions are surfaced in the sidebar
+      // immediately — right after creation is the one moment the
+      // operator does want to see the job they just set up. Post-dismiss
+      // they fall back to panel-only per the default cron visibility
+      // policy (see cronVisibleKeys comment).
+      markCronSessionVisible(key);
       sessionWorkspaces[key] = workDir || defaultWorkspace || '/tmp';
       lastVersion = 0;
       await fetchSessions();
@@ -10503,6 +10536,10 @@ function renderCronPanel() {
 
 function openCronSession(cronId) {
   const key = 'cron:' + cronId;
+  // Cron sessions are sidebar-hidden by default; explicitly opening one
+  // from the 定时任务 panel promotes it into the visible set so the
+  // sidebar can surface (and keep) it until the operator × 's it away.
+  markCronSessionVisible(key);
   // Ensure the session appears in the sidebar (may be pending if never sent)
   if (!sessionsData[sid(key, 'local')] && !sessionWorkspaces[key]) {
     sessionWorkspaces[key] = defaultWorkspace || '/tmp';
