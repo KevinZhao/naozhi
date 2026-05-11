@@ -209,12 +209,13 @@ func TestProcess_DrainStaleEvents_ClearsBothFlagsRegardlessOfEntry(t *testing.T)
 // and no behavioural test will reliably catch it — hence this static check.
 func TestDrainStaleEvents_SwapCallsAreUnderMu(t *testing.T) {
 	t.Parallel()
-	// Locate process.go relative to this test file.
+	// drainStaleEvents moved to process_turn.go in Phase 4 of
+	// docs/rfc/process-split.md. Locate it there.
 	_, thisFile, _, _ := runtime.Caller(0)
-	src := filepath.Join(filepath.Dir(thisFile), "process.go")
+	src := filepath.Join(filepath.Dir(thisFile), "process_turn.go")
 	data, err := os.ReadFile(src)
 	if err != nil {
-		t.Fatalf("read process.go: %v", err)
+		t.Fatalf("read process_turn.go: %v", err)
 	}
 	body := string(data)
 

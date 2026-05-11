@@ -2,7 +2,6 @@ package cli
 
 import (
 	"bufio"
-	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,11 +11,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
-	"unicode/utf8"
-
-	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // ProcessState represents the lifecycle state of a CLI process.
@@ -436,21 +431,6 @@ func (p *Process) startReadLoop() {
 }
 
 // findResultSince checks EventLog for a result entry logged after afterMS.
-// Used as fallback when eventCh may have dropped events due to full buffer.
-func (p *Process) findResultSince(afterMS int64) *SendResult {
-	entries := p.eventLog.EntriesSince(afterMS)
-	for i := len(entries) - 1; i >= 0; i-- {
-		if entries[i].Type == "result" {
-			return &SendResult{
-				Text:      entries[i].Detail,
-				SessionID: p.GetSessionID(),
-				CostUSD:   entries[i].Cost,
-			}
-		}
-	}
-	return nil
-}
-
 // Alive returns true if the process has not exited.
 func (p *Process) Alive() bool {
 	select {
@@ -468,147 +448,7 @@ func (p *Process) IsRunning() bool {
 	return p.State == StateRunning
 }
 
-// Interrupt sends SIGINT to the CLI process via shim.
-func (p *Process) drainStaleEvents(ctx context.Context) error {
-	cutoff := time.Now()
-	// Read-and-clear interrupted/interruptedRun atomically w.r.t. Interrupt()
-	// / InterruptViaControl(), which hold p.mu while Store-ing both flags. A
-	// naïve two-call Swap(false) here opened a window where a concurrent
-	// Interrupt between the two Swaps could Store interruptedRun=true after
-	// we Swap'd interrupted=false — the new Interrupt's intent would be lost
-	// (interruptedRun later Swap'd to false here, but interrupted already
-	// consumed, so the next Send's drainStaleEvents would see interrupted=
-	// false/interruptedRun=false and skip the settle window entirely — the
-	// SIGINT-produced result event leaks into the next turn). R39-CONCUR1.
-	p.mu.Lock()
-	wasInterrupted := p.interrupted.Swap(false)
-	wasRunning := p.interruptedRun.Swap(false)
-	p.mu.Unlock()
-	if wasInterrupted {
-		// Only wait for the interrupted result if the CLI was actively
-		// processing a turn when Interrupt() was called. An idle process
-		// won't produce a result event, so the settle timer would always
-		// expire causing an unnecessary 500ms delay.
-		if wasRunning {
-			slog.Debug("send: draining interrupted turn result")
-			settle := time.NewTimer(500 * time.Millisecond)
-			defer settle.Stop()
-			for {
-				select {
-				case ev, ok := <-p.eventCh:
-					if !ok || ev.Type == "result" {
-						goto drain
-					}
-					if ev.recvAt.After(cutoff) {
-						// Event produced after we entered drain belongs to the
-						// new turn. Try to put it back (buffered channel may
-						// have room); if the channel is already full we fall
-						// back to findResultSince which reads from EventLog.
-						select {
-						case p.eventCh <- ev:
-						default:
-						}
-						goto drain
-					}
-				case <-settle.C:
-					slog.Debug("send: settle timeout, no stale result")
-					goto drain
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-		} else {
-			slog.Debug("send: interrupted but idle, skipping settle wait")
-		}
-	}
-drain:
-	// Non-blocking drain of any remaining buffered events that predate the
-	// cutoff. Events produced after cutoff are collected and re-enqueued at
-	// the end so the live consumer still observes them. Returning the moment
-	// we hit one post-cutoff event would leave any interleaved pre-cutoff
-	// stragglers in the channel where they would be consumed by the new
-	// turn as if they were current — producing phantom tool_use/assistant
-	// events from the prior turn.
-	//
-	// Backing storage is a stack-allocated [4]Event array — post-cutoff events
-	// during an interrupt are rare (typically 0-1, occasionally 2-3 from
-	// in-flight stream-json blocks). `holdback := holdbackArr[:0]` starts with
-	// cap=4, so the common post-interrupt shape appends without heap allocation;
-	// append promotes to the heap only when >4 post-cutoff events stack up,
-	// which has never been observed in practice. R64-PERF-M7.
-	var holdbackArr [4]Event
-	holdback := holdbackArr[:0]
-	for {
-		select {
-		case <-ctx.Done():
-			// Re-enqueue anything we have already collected so we do not
-			// drop the fresh-turn events on cancellation. Guard against the
-			// readLoop having closed eventCh concurrently: sending on a
-			// closed channel panics regardless of the `default` arm in a
-			// select, because the send case is always ready-to-run on a
-			// closed channel and select will pick it. EventLog is the
-			// authoritative store for logged events, so dropping holdback
-			// when eventCh is torn down is safe.
-			if isChanAlive(p.done) {
-				for _, ev := range holdback {
-					select {
-					case p.eventCh <- ev:
-					default:
-					}
-				}
-			}
-			return ctx.Err()
-		case ev, ok := <-p.eventCh:
-			if !ok {
-				// Channel closed (process exited). Any post-cutoff events
-				// already in holdback were also logged to EventLog by readLoop
-				// before being pushed to eventCh (see logEvent call above), so
-				// the live Send() can recover a result via findResultSince().
-				// Dropping holdback here is safe because EventLog is authoritative.
-				return nil
-			}
-			if ev.recvAt.After(cutoff) {
-				holdback = append(holdback, ev)
-			}
-			// pre-cutoff events are dropped (drained)
-		default:
-			// Channel empty — push back any collected post-cutoff events.
-			// Same readLoop-closed guard as the ctx.Done arm above.
-			if !isChanAlive(p.done) {
-				return nil
-			}
-			for _, ev := range holdback {
-				select {
-				case p.eventCh <- ev:
-				default:
-					// eventCh is full; fresh events are being dropped here.
-					// findResultSince will recover the result from EventLog but
-					// surface the occurrence so operators can enlarge the
-					// channel if it persists under load.
-					slog.Warn("drainStaleEvents: eventCh full, dropped fresh event",
-						"type", ev.Type, "session", ev.SessionID)
-				}
-			}
-			return nil
-		}
-	}
-}
-
 // isChanAlive reports whether done is still open (readLoop still running, so
-// eventCh remains safe to send on). readLoop's defers are registered in this
-// declaration order: close(eventCh), close(done), CloseSubscribers, recover.
-// LIFO execution order is therefore: recover → CloseSubscribers → close(done)
-// → close(eventCh). Invariant used here: `done` closes strictly BEFORE
-// `eventCh`, so if `done` is still open, `eventCh` is also still open.
-func isChanAlive(done <-chan struct{}) bool {
-	select {
-	case <-done:
-		return false
-	default:
-		return true
-	}
-}
-
 // Kill forcefully terminates the CLI process via shim.
 //
 // After sending the "kill" message and closing the naozhi-side conn, send
@@ -654,9 +494,10 @@ func (p *Process) Kill() {
 			// and the main Run loop releases the listener and unlinks the
 			// socket. A failing Signal (shim already exited, PID reused) is
 			// fine — the socket is either already gone or will be reaped by
-			// Discover's F4 stat-check within 30s.
-			if err := syscall.Kill(p.shimPID, syscall.SIGUSR2); err != nil {
-				slog.Debug("kill: SIGUSR2 to shim failed (likely already exited)",
+			// Discover's F4 stat-check within 30s. Windows: no-op (shim is
+			// POSIX-only; see release.yml matrix note).
+			if err := signalShimShutdown(p.shimPID); err != nil {
+				slog.Debug("kill: signalShimShutdown failed (likely already exited)",
 					"shim_pid", p.shimPID, "err", err)
 			}
 		}
@@ -1346,117 +1187,3 @@ func (p *Process) SubscribeEvents() (<-chan struct{}, func()) {
 
 // LastSeq returns the last received shim sequence number (for reconnect).
 func (p *Process) LastSeq() int64 { return p.lastSeq.Load() }
-
-const maxStderrLogLineBytes = 500
-
-// sanitizeStderrLine removes ANSI escape sequences (SGR color, cursor movement,
-// OSC/DCS) and truncates the stderr line so that terminal-aware log viewers
-// aren't colorized/repositioned by whatever the Claude CLI wrote, and so a
-// runaway stderr cannot fill the journal with a single multi-MB line.
-func sanitizeStderrLine(line string) string {
-	if line == "" {
-		return line
-	}
-	// Pre-truncate before the ANSI scanner so a pathological single-line
-	// OSC sequence (ESC ] ... no BEL/ST for MBs) doesn't force a full-length
-	// strings.Builder allocation just to be truncated afterward. The shim
-	// caps stdin lines at 12 MB; without this, a crafted line would allocate
-	// the full builder before truncation.
-	if len(line) > maxStderrLogLineBytes {
-		cut := maxStderrLogLineBytes
-		for cut > 0 && !utf8.RuneStart(line[cut]) {
-			cut--
-		}
-		line = line[:cut] + "…(truncated)"
-	}
-	// Fast path: most CLI stderr output is plain log text with neither ANSI
-	// escape sequences nor stray control bytes. Scanning once cheaply and
-	// returning the original string avoids a strings.Builder allocation and
-	// a full-line copy on the common path.
-	//
-	// R190-SEC-L1: ASCII-only fast path. If the line contains any non-ASCII
-	// byte, bail to the slow path so the terminating rune-map can drop
-	// C1/bidi/LS/PS codepoints (>= 0x20 at the byte level, >=0xC0 as UTF-8
-	// leading bytes). A compromised claude CLI emitting bidi overrides in
-	// stderr could otherwise reverse operator journalctl output verbatim.
-	clean := true
-	for i := 0; i < len(line); i++ {
-		c := line[i]
-		if c == 0x1b || (c < 0x20 && c != '\t') || c >= 0x80 {
-			clean = false
-			break
-		}
-	}
-	if clean {
-		return line
-	}
-	var b strings.Builder
-	b.Grow(len(line))
-	for i := 0; i < len(line); {
-		c := line[i]
-		if c == 0x1b { // ESC
-			// CSI: ESC [ ... final byte in @ .. ~
-			if i+1 < len(line) && line[i+1] == '[' {
-				j := i + 2
-				for j < len(line) && (line[j] < 0x40 || line[j] > 0x7e) {
-					j++
-				}
-				if j < len(line) {
-					j++ // consume final byte
-				}
-				i = j
-				continue
-			}
-			// OSC: ESC ] ... (ST = ESC \ or BEL)
-			if i+1 < len(line) && line[i+1] == ']' {
-				j := i + 2
-				for j < len(line) {
-					if line[j] == 0x07 { // BEL
-						j++
-						break
-					}
-					if line[j] == 0x1b && j+1 < len(line) && line[j+1] == '\\' {
-						j += 2
-						break
-					}
-					j++
-				}
-				i = j
-				continue
-			}
-			// Two-byte ESC sequence.
-			if i+1 < len(line) {
-				i += 2
-			} else {
-				i++
-			}
-			continue
-		}
-		// Drop bare ASCII C0 control chars (keep \t).
-		if c < 0x20 && c != '\t' {
-			i++
-			continue
-		}
-		// Non-ASCII: decode rune and drop if it's a known log-injection
-		// codepoint (C1 controls, bidi overrides/isolates, LS/PS). Folding
-		// this into the byte-level loop avoids the second strings.Map pass
-		// which always allocates a fresh backing string even on a no-op.
-		if c >= 0x80 {
-			r, sz := utf8.DecodeRuneInString(line[i:])
-			if osutil.IsLogInjectionRune(r) {
-				i += sz
-				continue
-			}
-			b.WriteString(line[i : i+sz])
-			i += sz
-			continue
-		}
-		b.WriteByte(c)
-		i++
-	}
-	// The pre-truncation step above already capped the input length; the
-	// sanitizer only removes bytes from that capped input (ANSI escapes +
-	// control chars + log-injection runes), so the resulting builder is
-	// guaranteed to be no longer than the pre-truncated input.
-	return b.String()
-}

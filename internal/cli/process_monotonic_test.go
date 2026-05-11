@@ -32,20 +32,20 @@ import (
 // this test and force the author to re-examine the NTP-safety argument.
 func TestDrainStaleEvents_MonotonicInvariant(t *testing.T) {
 	t.Parallel()
-	// Concatenate process.go and process_readloop.go. readLoop (which
-	// owns the `ev.recvAt = now` assignment) was moved to
-	// process_readloop.go in Phase 2 of docs/rfc/process-split.md;
-	// drainStaleEvents (which owns `cutoff := time.Now()`) still lives
-	// in process.go for now.
-	src1, err := os.ReadFile("process.go")
-	if err != nil {
-		t.Fatalf("read process.go: %v", err)
+	// Concatenate all process*.go sources that host the two timestamps
+	// this test pins. readLoop (owner of `ev.recvAt = now`) moved to
+	// process_readloop.go in Phase 2; drainStaleEvents (owner of
+	// `cutoff := time.Now()`) moved to process_turn.go in Phase 4
+	// (see docs/rfc/process-split.md).
+	files := []string{"process.go", "process_readloop.go", "process_turn.go"}
+	var src []byte
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		src = append(src, b...)
 	}
-	src2, err := os.ReadFile("process_readloop.go")
-	if err != nil {
-		t.Fatalf("read process_readloop.go: %v", err)
-	}
-	src := append(append([]byte{}, src1...), src2...)
 
 	// 1) cutoff must be from time.Now() (keeps monotonic clock).
 	if !regexp.MustCompile(`cutoff\s*:=\s*time\.Now\(\)`).Match(src) {
