@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
@@ -52,6 +53,9 @@ func newAPIClient(baseURL, token string) *apiClient {
 		MaxIdleConnsPerHost: 4,
 		IdleConnTimeout:     90 * time.Second,
 		TLSHandshakeTimeout: 10 * time.Second,
+		// Refuse TLS 1.0/1.1 negotiation even if compiled against an older Go
+		// toolchain; matches feishu/slack/discord clients.
+		TLSClientConfig: &tls.Config{MinVersion: tls.VersionTLS12},
 	}
 	return &apiClient{
 		baseURL: baseURL,

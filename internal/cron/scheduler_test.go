@@ -619,3 +619,58 @@ func TestRedactPathsInCronError(t *testing.T) {
 		})
 	}
 }
+
+// TestSchedulerMaxJobsPerChat pins the per-chat cap wiring — default
+// path, override path, and the zero-means-default fallback. R208-BL2.
+func TestSchedulerMaxJobsPerChat(t *testing.T) {
+	t.Parallel()
+
+	addN := func(t *testing.T, s *Scheduler, n int) int {
+		t.Helper()
+		ok := 0
+		for i := 0; i < n; i++ {
+			err := s.AddJob(&Job{Schedule: "@hourly", Prompt: "p", Platform: "p", ChatID: "c"})
+			if err != nil {
+				return ok
+			}
+			ok++
+		}
+		return ok
+	}
+
+	t.Run("default_fallback", func(t *testing.T) {
+		t.Parallel()
+		s := NewScheduler(SchedulerConfig{MaxJobs: 500})
+		if err := s.Start(); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer s.Stop()
+		got := addN(t, s, DefaultMaxJobsPerChat+1)
+		if got != DefaultMaxJobsPerChat {
+			t.Errorf("default cap: accepted %d jobs, want %d", got, DefaultMaxJobsPerChat)
+		}
+	})
+
+	t.Run("override_lower", func(t *testing.T) {
+		t.Parallel()
+		s := NewScheduler(SchedulerConfig{MaxJobs: 500, MaxJobsPerChat: 5})
+		if err := s.Start(); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		defer s.Stop()
+		got := addN(t, s, 6)
+		if got != 5 {
+			t.Errorf("override cap=5: accepted %d jobs, want 5", got)
+		}
+	})
+
+	t.Run("zero_falls_back_to_default", func(t *testing.T) {
+		t.Parallel()
+		// Explicit zero must behave identically to unset — no way to
+		// disable the cap without recompiling.
+		s := NewScheduler(SchedulerConfig{MaxJobs: 500, MaxJobsPerChat: 0})
+		if s.maxJobsPerChat != DefaultMaxJobsPerChat {
+			t.Errorf("zero cap: resolved to %d, want %d (default)", s.maxJobsPerChat, DefaultMaxJobsPerChat)
+		}
+	})
+}

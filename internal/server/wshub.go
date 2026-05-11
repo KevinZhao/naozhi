@@ -55,18 +55,26 @@ type Hub struct {
 	// concurrent SendRaw drops).
 	droppedTotal atomic.Int64
 	clients      map[*wsClient]struct{}
-	router       *session.Router
-	agents       map[string]session.AgentOpts
-	agentCmds    map[string]string
-	dashToken    string
-	cookieMAC    string // HMAC-derived cookie value (different from dashToken)
-	guard        *session.Guard
-	queue        *dispatch.MessageQueue // per-key FIFO queue for dashboard sends
-	nodes        map[string]node.Conn
-	nodesMu      *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
-	projectMgr   *project.Manager
-	scheduler    *cron.Scheduler // optional, for cron prompt auto-save
-	uploadStore  *uploadStore    // optional, for resolving WS-sent file_ids
+	// router is the HubRouter subset (consumer.go). *session.Router
+	// satisfies this interface implicitly; kept as an interface so
+	// tests can inject a fake and a future Router sub-aggregation
+	// can swap implementations without touching Hub internals.
+	router     HubRouter
+	agents     map[string]session.AgentOpts
+	agentCmds  map[string]string
+	dashToken  string
+	cookieMAC  string // HMAC-derived cookie value (different from dashToken)
+	guard      *session.Guard
+	queue      *dispatch.MessageQueue // per-key FIFO queue for dashboard sends
+	nodes      map[string]node.Conn
+	nodesMu    *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
+	projectMgr *project.Manager
+	// resolver centralises session key → opts derivation; used by
+	// sessionOptsFor / buildSessionOpts. Nil keeps legacy fallback
+	// wiring for tests that don't construct a resolver.
+	resolver    *session.KeyResolver
+	scheduler   *cron.Scheduler // optional, for cron prompt auto-save
+	uploadStore *uploadStore    // optional, for resolving WS-sent file_ids
 	// scratchPool lets sessionOptsFor resolve the inherited AgentOpts for an
 	// ephemeral "scratch" key without touching the persistent agent registry.
 	// Nil when the scratch feature is disabled (tests, headless mode).
@@ -120,20 +128,42 @@ type Hub struct {
 	// its clientWG.Wait could schedule a callback that never gets Waited on,
 	// or worse, add to clientWG after Wait has already returned.
 	debounceClosed bool
+
+	// tailers owns the agentTailer registry backing agent_subscribe / agent_
+	// unsubscribe WS flows (RFC v4 agent-team-ui §3.5.4). Initialised by
+	// NewHub so the nil-guard at each call site can simplify to a presence
+	// check. Shutdown tears it down alongside other background loops.
+	tailers *tailerRegistry
+
+	// wiredLinkersMu + wiredLinkers track the *cli.SubagentLinker pointers
+	// we've already attached the server-side OnResolve+task_done callbacks
+	// to, so repeat completeSubscribe calls (re-subscribe on reconnect)
+	// don't register duplicate callbacks. Kept per-Hub so tests that build
+	// multiple Hubs don't share state; Shutdown clears the map so the
+	// Linker pointers can be GC'd (previously they were leaked in a
+	// package-level map for the process lifetime). R201-CRIT-2.
+	wiredLinkersMu sync.Mutex
+	wiredLinkers   map[*cli.SubagentLinker]struct{}
 }
 
 // HubOptions holds configuration for a Hub.
 type HubOptions struct {
-	Router           *session.Router
-	Agents           map[string]session.AgentOpts
-	AgentCmds        map[string]string
-	DashToken        string
-	CookieMAC        string
-	Guard            *session.Guard
-	Queue            *dispatch.MessageQueue
-	Nodes            map[string]node.Conn
-	NodesMu          *sync.RWMutex
-	ProjectMgr       *project.Manager
+	Router     *session.Router
+	Agents     map[string]session.AgentOpts
+	AgentCmds  map[string]string
+	DashToken  string
+	CookieMAC  string
+	Guard      *session.Guard
+	Queue      *dispatch.MessageQueue
+	Nodes      map[string]node.Conn
+	NodesMu    *sync.RWMutex
+	ProjectMgr *project.Manager
+	// Resolver, when non-nil, centralises session-key → opts derivation
+	// for sessionOptsFor / buildSessionOpts. Wired by server.Start so
+	// WS subscribe / send paths share the same planner-binding
+	// precedence as the IM dispatch path. Nil falls back to the legacy
+	// inlined merge.
+	Resolver         *session.KeyResolver
 	AllowedRoot      string
 	TrustedProxy     bool
 	WSAuthLimiter    func(ip string) bool
@@ -182,6 +212,7 @@ func NewHub(opts HubOptions) *Hub {
 		nodes:            opts.Nodes,
 		nodesMu:          opts.NodesMu,
 		projectMgr:       opts.ProjectMgr,
+		resolver:         opts.Resolver,
 		allowedRoot:      opts.AllowedRoot,
 		trustedProxy:     opts.TrustedProxy,
 		wsAuthLimiter:    opts.WSAuthLimiter,
@@ -199,6 +230,8 @@ func NewHub(opts HubOptions) *Hub {
 		ReadBufferSize:  8192,
 		WriteBufferSize: 8192,
 	}
+	h.tailers = newTailerRegistry(h)
+	h.wiredLinkers = make(map[*cli.SubagentLinker]struct{})
 	return h
 }
 
@@ -341,6 +374,13 @@ func (h *Hub) unregister(c *wsClient) {
 		// `removed` so a double-unregister (stale close path) cannot leak
 		// the counter into negative territory.
 		h.connCount.Add(-1)
+		// Drop any agent_subscribe refs this client was holding so refCount
+		// stays accurate — otherwise an abrupt disconnect (mobile sleep)
+		// would leave the tailer in broadcasting mode forever, wedging a
+		// slot in the 50-tailer cap.
+		if h.tailers != nil {
+			h.tailers.detachClient(c)
+		}
 	}
 
 	// Snapshot nodes under nodesMu to avoid data race. Single-node deployments
@@ -396,7 +436,18 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "auth_ok"})
 		return
 	}
-	if h.dashToken == "" || subtle.ConstantTimeCompare([]byte(msg.Token), []byte(h.dashToken)) == 1 {
+	// Pre-hash both sides to normalize length — subtle.ConstantTimeCompare
+	// returns 0 immediately when operand lengths differ, leaking the token
+	// length via response latency. HTTP Bearer path (dashboard_auth.go:113)
+	// already applies this pattern; mirror it here so brute-force attackers
+	// cannot discover the correct token length via the WS auth endpoint.
+	tokenOK := false
+	if h.dashToken != "" {
+		got := sha256.Sum256([]byte(msg.Token))
+		want := sha256.Sum256([]byte(h.dashToken))
+		tokenOK = subtle.ConstantTimeCompare(got[:], want[:]) == 1
+	}
+	if h.dashToken == "" || tokenOK {
 		c.authenticated.Store(true)
 		// Derive uploadOwner from the provided token so WS token-auth enforces
 		// the same per-owner upload quota as HTTP Bearer auth. Without this,
@@ -536,6 +587,13 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 		h.mu.Unlock()
 		return
 	}
+	// Wire server-side tailer ensure on Linker.Resolve. Idempotent: the
+	// Linker's OnResolve list accumulates per-subscribe because completeSubscribe
+	// fires on every re-subscribe, but ensureTailer is guarded by the
+	// (key, taskID) map and extra callback invocations are cheap no-ops on
+	// an already-running tailer. The "right" place is router.spawnSession,
+	// but avoiding that coupling keeps server/cli layering clean. S2-OK.
+	h.maybeWireLinkerTailer(key, sess)
 	notify, unsub := sess.SubscribeEvents()
 
 	h.mu.Lock()
@@ -760,7 +818,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		if wsRollback != nil {
 			wsRollback()
 		}
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: err.Error()})
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: asyncErrorMessage(err)})
 		return
 	}
 	// sessionSend accepted (or reset-processed) the request — files must stay on disk.
@@ -845,6 +903,7 @@ func (h *Hub) handleRemoteInterrupt(c *wsClient, msg node.ClientMsg) {
 		// reply "error" so the dashboard surfaces the failure.
 		defer func() {
 			if r := recover(); r != nil {
+				metrics.PanicRecoveredTotal.Add(1)
 				// Panic cause at Error, verbose stack at Debug — stack
 				// frames leak internal paths to journald/log aggregators.
 				slog.Error("remote ws interrupt goroutine panic",
@@ -1196,6 +1255,9 @@ func (h *Hub) BroadcastSessionsUpdate() {
 		debounceInterval = 50 * time.Millisecond
 		maxDebounceDelay = 500 * time.Millisecond
 	)
+	// Capture wall clock outside the critical section so the vDSO call
+	// does not extend the mutex window.
+	now := time.Now()
 	h.debounceMu.Lock()
 	defer h.debounceMu.Unlock()
 	// Shutdown already drained the debounce WG slot; any new scheduling here
@@ -1203,7 +1265,6 @@ func (h *Hub) BroadcastSessionsUpdate() {
 	if h.debounceClosed {
 		return
 	}
-	now := time.Now()
 	if h.debounceTimer != nil {
 		if now.Sub(h.debounceFirst) >= maxDebounceDelay {
 			// Hard cap reached — let the pending timer fire without resetting.
@@ -1370,6 +1431,21 @@ func (h *Hub) Shutdown() {
 		conn.Close()
 	}
 
+	// Stop all agent tailers so their ticker goroutines do not race the
+	// client closure below (a tailer SendJSON to a half-closed wsClient
+	// would be logged as a drop and bump droppedTotal, but is otherwise
+	// harmless). Done AFTER closing the conns so in-flight pollOnce calls
+	// finish their single iteration against a subscriber set that includes
+	// the closed client; SendRaw's select-default drops gracefully.
+	if h.tailers != nil {
+		h.tailers.Shutdown()
+	}
+	// Release wiredLinkers so *SubagentLinker pointers can be GC'd —
+	// previously this was a process-lifetime package-level leak.
+	h.wiredLinkersMu.Lock()
+	h.wiredLinkers = nil
+	h.wiredLinkersMu.Unlock()
+
 	// Now that conns are closed, pumps will observe the read/write error
 	// and exit their loops; eventPushLoop sees h.ctx.Done() or c.done.
 	// Wait bounds the shutdown on explicit goroutine lifecycle rather than
@@ -1507,6 +1583,7 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		// node) would otherwise take the whole naozhi service down.
 		defer func() {
 			if r := recover(); r != nil {
+				metrics.PanicRecoveredTotal.Add(1)
 				// Same split as handleRemoteInterrupt: cause at Error,
 				// stack at Debug. Stack frames expose internal layout.
 				slog.Error("remote ws send goroutine panic",

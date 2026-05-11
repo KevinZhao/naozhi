@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"syscall"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
 )
 
@@ -124,7 +124,7 @@ func runShimStop(args []string) {
 			fmt.Fprintf(os.Stderr, "connect to %s: %v\n", state.Key, err)
 			// Fallback: send SIGUSR2 for immediate shutdown
 			if state.ShimPID > 0 {
-				syscall.Kill(state.ShimPID, syscall.SIGUSR2) //nolint:errcheck
+				_ = osutil.SendShimReload(state.ShimPID)
 				fmt.Fprintf(os.Stderr, "  sent SIGUSR2 to PID %d\n", state.ShimPID)
 				stopped++
 			}

@@ -240,6 +240,15 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		if envelope.Header != nil {
 			eventType = envelope.Header.EventType
 		}
+		// Interactive-card button click from an AskUserQuestion card. Route
+		// it through the card_action branch instead of dropping it; on
+		// success the handler synthesises an IncomingMessage whose Text is
+		// the chosen option so the answer flows through the same dispatch
+		// path as a regular chat reply.
+		if eventType == "card.action.trigger" || eventType == "im.card.action.v1_trigger" {
+			f.handleCardActionWebhook(r.Context(), envelope.Event, handler)
+			return
+		}
 		if eventType != "im.message.receive_v1" {
 			return
 		}
@@ -358,8 +367,15 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 					"msg_id", event.Message.MessageID, "len", len(text))
 				return
 			}
-			for _, m := range event.Message.Mentions {
-				text = strings.ReplaceAll(text, m.Key, "")
+			// Strip all @-mention tokens in a single pass. Previously each
+			// ReplaceAll allocated a fresh string and copied the whole text;
+			// a group message with multiple @ users did that N times.
+			if len(event.Message.Mentions) > 0 {
+				pairs := make([]string, 0, len(event.Message.Mentions)*2)
+				for _, m := range event.Message.Mentions {
+					pairs = append(pairs, m.Key, "")
+				}
+				text = strings.NewReplacer(pairs...).Replace(text)
 			}
 			text = strings.TrimSpace(text)
 			if text == "" {

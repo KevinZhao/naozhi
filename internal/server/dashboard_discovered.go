@@ -204,7 +204,7 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 			http.Error(w, "process identity changed (PID reused)", http.StatusConflict)
 			return
 		}
-		if err := syscall.Kill(req.PID, syscall.SIGTERM); err != nil {
+		if err := osutil.SendTerm(req.PID); err != nil {
 			if !errors.Is(err, syscall.ESRCH) {
 				slog.Error("failed to terminate process", "pid", req.PID, "err", err)
 				http.Error(w, "failed to terminate process", http.StatusInternalServerError)
@@ -329,7 +329,7 @@ func (h *DiscoveryHandlers) handleClose(w http.ResponseWriter, r *http.Request) 
 			http.Error(w, "process identity changed (PID reused)", http.StatusConflict)
 			return
 		}
-		if err := syscall.Kill(req.PID, syscall.SIGTERM); err != nil {
+		if err := osutil.SendTerm(req.PID); err != nil {
 			// ESRCH = process disappeared between alive check and kill — treat as success.
 			if !errors.Is(err, syscall.ESRCH) {
 				slog.Error("failed to terminate process", "pid", req.PID, "err", err)

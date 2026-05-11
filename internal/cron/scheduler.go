@@ -21,6 +21,7 @@ import (
 
 	robfigcron "github.com/robfig/cron/v3"
 
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
@@ -94,7 +95,13 @@ type SchedulerConfig struct {
 	AgentCommands map[string]string
 	StorePath     string
 	MaxJobs       int
-	ExecTimeout   time.Duration
+	// MaxJobsPerChat overrides DefaultMaxJobsPerChat when > 0. Zero (and
+	// negative) values fall back to the default — this is deliberate so
+	// operators cannot accidentally disable the cap and let one chat
+	// starve the exempt-session pool (see DefaultMaxJobsPerChat's BL2
+	// note). R208-BL2.
+	MaxJobsPerChat int
+	ExecTimeout    time.Duration
 	// Location is the timezone in which schedule expressions are evaluated.
 	// nil defaults to time.Local so cron expressions match wall-clock time
 	// on the host (respects $TZ / /etc/localtime).
@@ -156,7 +163,11 @@ type Scheduler struct {
 	agentCommands map[string]string
 	storePath     string
 	maxJobs       int
-	execTimeout   time.Duration
+	// maxJobsPerChat is the resolved per-chat cap: SchedulerConfig
+	// MaxJobsPerChat when > 0, otherwise DefaultMaxJobsPerChat. Immutable
+	// after NewScheduler returns, so AddJob can read it lock-free.
+	maxJobsPerChat int
+	execTimeout    time.Duration
 	// location is the timezone used to interpret schedule expressions and to
 	// compute preview/next-run times exposed via the dashboard.
 	location *time.Location
@@ -250,9 +261,26 @@ const maxJobsHardCap = 500
 // DefaultMaxJobsPerChat bounds how many cron jobs a single chat (platform+
 // chat_id pair) may own. Prevents one loud group from consuming the
 // global MaxJobs quota. Exported so tests and docs can reference the
-// value; config override is deliberately not wired up yet — if operators
-// need it tunable, promote it into SchedulerConfig as a follow-up.
+// value; operators can override per deployment via
+// SchedulerConfig.MaxJobsPerChat (zero / unset falls back to this
+// default — no way to "disable" the cap without rebuilding).
+//
+// Relationship to exempt pool (BL2 acknowledged design):
+// Every cron job calls session.Router.RegisterCronStub at scheduler
+// Start / AddJob time and consumes 1 slot from session.maxExemptSessions
+// (currently 20). At DefaultMaxJobsPerChat=10 × 2 busy chats, the exempt
+// pool is fully consumed and planner/scratch exempt sessions may be
+// starved. This is an acknowledged trade-off: a separate
+// maxCronExemptSessions reserve or per-chat fair-share eviction is the
+// escape hatch if pressure materialises.
 const DefaultMaxJobsPerChat = 10
+
+// cronSlowThreshold is the wall-clock budget beyond which a successful
+// cron execution is counted as "slow" (metrics.CronExecutionSlowTotal).
+// 30s is picked as an order-of-magnitude above a typical interactive
+// agent turn; jobs that regularly tip over are candidates for timeout /
+// workflow inspection. R208-OBS1.
+const cronSlowThreshold = 30 * time.Second
 
 // workDirReachable reports whether workDir exists and resolves to a
 // directory right now. Used before fresh-mode Reset so a job whose
@@ -322,6 +350,12 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		slog.Warn("cron max_jobs exceeds hard cap, clamping", "requested", cfg.MaxJobs, "cap", maxJobsHardCap)
 		cfg.MaxJobs = maxJobsHardCap
 	}
+	// Resolve per-chat cap at construction: <= 0 maps to the default so a
+	// zero struct field cannot silently disable the cap. R208-BL2.
+	maxPerChat := cfg.MaxJobsPerChat
+	if maxPerChat <= 0 {
+		maxPerChat = DefaultMaxJobsPerChat
+	}
 	if cfg.ExecTimeout <= 0 {
 		cfg.ExecTimeout = 5 * time.Minute
 	}
@@ -359,6 +393,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		agentCommands:       cfg.AgentCommands,
 		storePath:           cfg.StorePath,
 		maxJobs:             cfg.MaxJobs,
+		maxJobsPerChat:      maxPerChat,
 		execTimeout:         cfg.ExecTimeout,
 		location:            loc,
 		notifyDefault:       cfg.NotifyDefault,
@@ -629,9 +664,9 @@ func (s *Scheduler) AddJob(j *Job) error {
 			chatCount++
 		}
 	}
-	if chatCount >= DefaultMaxJobsPerChat {
+	if chatCount >= s.maxJobsPerChat {
 		s.mu.Unlock()
-		return fmt.Errorf("per-chat cron limit reached (%d)", DefaultMaxJobsPerChat)
+		return fmt.Errorf("per-chat cron limit reached (%d)", s.maxJobsPerChat)
 	}
 
 	j.ID = generateID()
@@ -1517,9 +1552,22 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		return
 	}
 
+	elapsed := time.Since(execStart)
 	lg.Info("cron job completed",
 		"result_len", len(result.Text),
-		"elapsed_ms", time.Since(execStart).Milliseconds())
+		"elapsed_ms", elapsed.Milliseconds())
+	if elapsed > cronSlowThreshold {
+		// R208-OBS1: poor-man's histogram — a single counter that fires
+		// when a successful execution takes longer than cronSlowThreshold.
+		// Wired here (not in recordResult) so only success-path latency
+		// counts; error paths already surface via the existing
+		// LastError plumbing.
+		metrics.CronExecutionSlowTotal.Add(1)
+		lg.Warn("cron execution slow",
+			"job_id", jobID,
+			"elapsed_ms", elapsed.Milliseconds(),
+			"threshold_ms", cronSlowThreshold.Milliseconds())
+	}
 	// 把本次产生的 Claude session_id 也记下来：fresh_context=true 的
 	// 路径下一次 Reset 会清掉 stub 的 chain，不保留这个 ID 的话
 	// dashboard 点击 cron 侧边栏就看不到上一次的 JSONL 历史。
@@ -1640,6 +1688,19 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
 		s.mu.Unlock()
 		return
 	}
+	// RNEW-011: snapshot the four fields we're about to overwrite so marshal
+	// failure can roll back in-memory state. Without rollback the live WS
+	// broadcast and the on-disk snapshot diverge: dashboard shows "succeeded
+	// at T" while cron_jobs.json still points at the previous run, and a
+	// restart replays the stale result as authoritative. We keep the rollback
+	// inside s.mu so the broadcast (fn, fired after Unlock) always sees either
+	// the fully-applied new values (persist OK) or the fully-restored old ones
+	// (persist failed) — never a half-applied mix.
+	prevLastRunAt := j.LastRunAt
+	prevLastResult := j.LastResult
+	prevLastError := j.LastError
+	prevLastSessionID := j.LastSessionID
+
 	j.LastRunAt = time.Now()
 	j.LastResult = result
 	j.LastError = errMsg
@@ -1647,17 +1708,23 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
 		j.LastSessionID = sessionID
 	}
 	save, perr := s.persistJobsLocked()
+	if perr != nil {
+		// Marshal failed: revert the four fields so in-memory and disk agree.
+		// slog was already emitted by persistJobsLocked; add one more line so
+		// operators can correlate rollback with broadcast suppression.
+		j.LastRunAt = prevLastRunAt
+		j.LastResult = prevLastResult
+		j.LastError = prevLastError
+		j.LastSessionID = prevLastSessionID
+		s.mu.Unlock()
+		slog.Warn("cron: recordResult persist failed; in-memory result reverted",
+			"job_id", j.ID, "err", perr)
+		return
+	}
 	fn := s.onExecute
 	s.mu.Unlock()
 
-	// recordResult has no error return (it runs from the internal execute
-	// goroutine), so marshal failure here can only be logged. persistJobsLocked
-	// already emitted the slog.Error; proceed with onExecute so the dashboard
-	// still sees the LastResult update via live broadcast even when the on-disk
-	// snapshot misses this run.
-	if perr == nil {
-		save()
-	}
+	save()
 	if fn != nil {
 		fn(j.ID, result, errMsg)
 	}
@@ -1785,11 +1852,20 @@ func (s *Scheduler) findByPrefix(idPrefix, plat, chatID string) (*Job, error) {
 	}
 }
 
-// marshalJobs is the JSON serializer used by marshalJobsLocked. It is a
-// package-level var (not a direct json.Marshal call) so tests can inject a
-// failure path to exercise ErrPersistFailed without needing to construct a
-// cyclic graph in Job. Production always uses json.Marshal.
-var marshalJobs = json.Marshal
+// marshalJobsFn is the signature of the JSON serializer used by
+// marshalJobsLocked. It is swapped via atomic.Pointer in tests (see
+// withFailingMarshal) to exercise persist-failure paths without constructing
+// a cyclic graph in Job. Kept behind an atomic.Pointer because other cron
+// tests in the same package run with t.Parallel(); a naked var swap races
+// with concurrent marshalJobsLocked readers under -race.
+type marshalJobsFn func(any) ([]byte, error)
+
+var marshalJobs atomic.Pointer[marshalJobsFn]
+
+func init() {
+	fn := marshalJobsFn(json.Marshal)
+	marshalJobs.Store(&fn)
+}
 
 // marshalJobsLocked serialises the current jobs map to JSON while the caller
 // still holds s.mu. Round 47: replaces the map clone on every mutation. Safe
@@ -1807,7 +1883,7 @@ func (s *Scheduler) marshalJobsLocked() ([]byte, error) {
 	// breaking git audit of backed-up cron_jobs.json and making post-incident
 	// diffs much harder to read.
 	slices.SortFunc(entries, func(a, b *Job) int { return cmp.Compare(a.ID, b.ID) })
-	return marshalJobs(entries)
+	return (*marshalJobs.Load())(entries)
 }
 
 // persistJobsLocked marshals under the caller's s.mu and writes asynchronously.
@@ -1888,8 +1964,8 @@ func applyJitter(ctx context.Context, schedule string, jitterMax time.Duration) 
 	}
 	window := jitterMax
 	if period := schedulePeriod(schedule, time.Now()); period > 0 {
-		if cap := period / 4; cap < window {
-			window = cap
+		if quarter := period / 4; quarter < window {
+			window = quarter
 		}
 	}
 	if window <= 0 {

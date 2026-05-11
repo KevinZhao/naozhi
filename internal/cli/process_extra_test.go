@@ -16,6 +16,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // readMethodBody parses srcPath with go/parser and returns the exact source
@@ -238,7 +240,10 @@ func TestProcess_Send_ResultEvent(t *testing.T) {
 		sendErr <- err
 	}()
 
-	time.Sleep(30 * time.Millisecond)
+	// Wait for Send goroutine to flip State→Running before injecting the
+	// result; otherwise the stdout arrives while Send is still logging the
+	// user entry / draining stale events and can be mis-sequenced.
+	testhelper.Eventually(t, func() bool { return p.GetState() == StateRunning }, time.Second, "Send did not reach StateRunning")
 	srv.SendStdout(`{"type":"result","result":"answer","session_id":"sess1","total_cost_usd":0.01}`)
 
 	select {
@@ -309,7 +314,8 @@ func TestProcess_Send_ProcessExits(t *testing.T) {
 		errCh <- err
 	}()
 
-	time.Sleep(30 * time.Millisecond)
+	// Wait for Send goroutine to start (State→Running) before faking exit.
+	testhelper.Eventually(t, func() bool { return p.GetState() == StateRunning }, time.Second, "Send did not reach StateRunning")
 	srv.SendCLIExited(1) // exit without result
 
 	select {
@@ -337,7 +343,8 @@ func TestProcess_Send_CapturesSessionID(t *testing.T) {
 		done <- err
 	}()
 
-	time.Sleep(30 * time.Millisecond)
+	// Wait for Send goroutine to start before feeding init/result events.
+	testhelper.Eventually(t, func() bool { return p.GetState() == StateRunning }, time.Second, "Send did not reach StateRunning")
 	srv.SendStdout(`{"type":"system","subtype":"init","session_id":"session-abc"}`)
 	srv.SendStdout(`{"type":"result","result":"done","session_id":"session-abc"}`)
 
@@ -376,7 +383,9 @@ func TestProcess_Send_OnEventCallback(t *testing.T) {
 		done <- err
 	}()
 
-	time.Sleep(30 * time.Millisecond)
+	// Wait for Send goroutine to enter the running state before delivering
+	// the thinking/result pair to onEvent.
+	testhelper.Eventually(t, func() bool { return p.GetState() == StateRunning }, time.Second, "Send did not reach StateRunning")
 	srv.SendStdout(`{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","text":"analyzing"}]}}`)
 	srv.SendStdout(`{"type":"result","result":"done"}`)
 
@@ -413,7 +422,8 @@ func TestProcess_Send_WithImages(t *testing.T) {
 		done <- err
 	}()
 
-	time.Sleep(30 * time.Millisecond)
+	// Wait for Send to reach StateRunning before answering.
+	testhelper.Eventually(t, func() bool { return p.GetState() == StateRunning }, time.Second, "Send did not reach StateRunning")
 	srv.SendStdout(`{"type":"result","result":"it is an image"}`)
 
 	select {
@@ -654,7 +664,10 @@ func TestProcess_DrainStaleEvents_InterruptedRunning_WithResult(t *testing.T) {
 		done <- p.drainStaleEvents(context.Background())
 	}()
 
-	time.Sleep(20 * time.Millisecond)
+	// drainStaleEvents Swap(false)'s both flags on entry. Once interrupted
+	// clears, drain has taken ownership and is waiting on p.eventCh for the
+	// stale result — safe to inject it now.
+	testhelper.Eventually(t, func() bool { return !p.interrupted.Load() }, time.Second, "drainStaleEvents did not enter settle window")
 	srv.SendStdout(`{"type":"result","result":"interrupted_result"}`)
 
 	select {
@@ -1054,13 +1067,13 @@ func TestProcess_StartReadLoop_StateReady(t *testing.T) {
 		t.Errorf("initial State = %v, want StateSpawning", p.State)
 	}
 	p.startReadLoop()
-	time.Sleep(10 * time.Millisecond)
-	p.mu.Lock()
-	s := p.State
-	p.mu.Unlock()
-	if s != StateReady {
-		t.Errorf("State after startReadLoop = %v, want StateReady", s)
-	}
+	// Poll for StateReady instead of sleeping a fixed 10ms; this is
+	// faster on idle runs and tolerant under -race / slow CI.
+	testhelper.Eventually(t, func() bool {
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return p.State == StateReady
+	}, time.Second, "startReadLoop did not reach StateReady")
 	p.Kill()
 }
 

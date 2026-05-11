@@ -1,6 +1,7 @@
 package node
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"log/slog"
 	"net/http"
@@ -177,16 +178,42 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Validate token — constant-time comparison to prevent timing oracle.
-	// Generic error to avoid node_id enumeration.
+	// Generic error to avoid node_id enumeration. When the node_id is unknown
+	// we still run a fixed-length compare so the reject path does not leak (via
+	// response latency) whether the node_id exists at all. Pre-hashing both
+	// sides with SHA-256 normalises the compare length to 32 bytes regardless
+	// of the submitted token length — ConstantTimeCompare short-circuits on
+	// length mismatch, so comparing raw bytes would still leak "my stored
+	// expected is (or isn't) the same length as the probe token".
 	expected, ok := s.auth[msg.NodeID]
-	if !ok || expected == "" || subtle.ConstantTimeCompare([]byte(expected), []byte(msg.Token)) != 1 {
+	if !ok || expected == "" {
+		var dummy [32]byte
+		probe := sha256.Sum256([]byte(msg.Token))
+		_ = subtle.ConstantTimeCompare(dummy[:], probe[:])
+	}
+	var matched bool
+	if ok && expected != "" {
+		expectedHash := sha256.Sum256([]byte(expected))
+		probeHash := sha256.Sum256([]byte(msg.Token))
+		matched = subtle.ConstantTimeCompare(expectedHash[:], probeHash[:]) == 1
+	}
+	if !matched {
 		// R180-SEC-H2 / R181-GO-P2-1: msg.NodeID comes from an unauthenticated
 		// 4 KB frame on the public /ws-node endpoint. Anyone can probe with
 		// arbitrary bytes. SanitizeForLog keeps attr values machine-readable
 		// (strips C0/C1/bidi/LS-PS → '_') instead of the earlier %q path
 		// which produced Go-quoted strings that then got double-escaped by
 		// slog's JSON handler.
-		slog.Warn("reverse node auth failed", "ip", ip, "node_id", osutil.SanitizeForLog(msg.NodeID, 64))
+		// RNEW-SEC-006: log r.Host as a forensic breadcrumb. The upgrader
+		// does not enforce a Host allowlist (no config surface today),
+		// so the only recourse for "is this IP talking to the expected
+		// virtual host?" triage is after-the-fact log inspection.
+		// Sanitized so a Host: header carrying bidi/C1/newline bytes
+		// cannot corrupt slog attrs.
+		slog.Warn("reverse node auth failed",
+			"ip", ip,
+			"node_id", osutil.SanitizeForLog(msg.NodeID, 64),
+			"host", osutil.SanitizeForLog(r.Host, 256))
 		conn.WriteJSON(ReverseMsg{Type: "register_fail", Error: "auth failed"}) //nolint
 		conn.Close()
 		return
@@ -252,7 +279,17 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// typo in config.yaml with a bidi/C1/newline char would reach slog
 	// attrs verbatim. Symmetric with the auth-failed path and cheap.
 	safeNodeID := truncateLabelUTF8(msg.NodeID, 64)
-	slog.Info("reverse node registered", "node_id", safeNodeID, "ip", ip)
+	// R212-ARCH-402: WARN (fires first, before the Info below) when the
+	// remote advertises capability tags outside this binary's known set.
+	// Pure observability — the node is still registered normally.
+	logUnknownCaps(safeNodeID, msg.Capabilities)
+	// RNEW-SEC-006: symmetric with the auth-failed path above — log
+	// r.Host so operators can correlate registered nodes with the
+	// Host header they came in on.
+	slog.Info("reverse node registered",
+		"node_id", safeNodeID,
+		"ip", ip,
+		"host", osutil.SanitizeForLog(r.Host, 256))
 
 	if s.OnRegister != nil {
 		// msg.NodeID is kept verbatim here so downstream state

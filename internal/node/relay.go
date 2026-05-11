@@ -89,6 +89,18 @@ func (r *wsRelay) Subscribe(c EventSink, key string, after int64) {
 	}
 	alreadySubscribed := len(r.subs[key]) > 0
 	r.subs[key] = append(r.subs[key], c)
+	// R184-REL-M2: seed r.lastEvent[key] with the caller's `after` on
+	// first subscribe. Without this, a racing reconnect() that snapshots
+	// r.subs/r.lastEvent between our append here and the server's first
+	// forwarded event would see lastEvent[key] = 0 and resend
+	// subscribe(key, after=0), causing the server to replay the entire
+	// session history and the browser to see duplicate events. Second
+	// and later subscribers go through sendHistoryToClient for their
+	// own initial backfill; they must not regress the seed because a
+	// smaller `after` here would reopen the same replay window.
+	if !alreadySubscribed {
+		r.lastEvent[key] = after
+	}
 	// R184-CONC-M1: wg.Add under r.mu so Close() observing r.closed=true
 	// is guaranteed to see our Add; Close() sets r.closed before Wait().
 	if alreadySubscribed {

@@ -211,7 +211,6 @@ type CronNotifyTarget struct {
 type LogConfig struct {
 	Level  string `yaml:"level"`
 	Format string `yaml:"format"` // "json" (default) | "text"
-	File   string `yaml:"file"`
 }
 
 type SlackConfig struct {
@@ -233,7 +232,6 @@ type WeixinConfig struct {
 
 type TranscribeConfig struct {
 	Enabled  bool   `yaml:"enabled"`
-	Provider string `yaml:"provider"` // "aws" (default)
 	Region   string `yaml:"region"`
 	Language string `yaml:"language"` // BCP-47, default: zh-CN
 }
@@ -242,7 +240,13 @@ type TranscribeConfig struct {
 func Load(path string) (*Config, error) {
 	// Reject config file if readable by group or others BEFORE reading its
 	// contents into memory — the file may contain secrets (app_secret, tokens).
-	if fi, statErr := os.Stat(path); statErr == nil {
+	// Use Lstat (not Stat) so a symlink pointing at a 0644 file cannot bypass
+	// the check via a strict-mode symlink.
+	if fi, statErr := os.Lstat(path); statErr == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("config file %s is a symlink; refusing to load (resolve the link or point --config at the target directly)",
+				path)
+		}
 		if fi.Mode()&0o044 != 0 {
 			return nil, fmt.Errorf("config file %s is group/world-readable (mode %04o); restrict with: chmod 0600 %s",
 				path, fi.Mode().Perm(), path)

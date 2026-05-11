@@ -270,14 +270,15 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .input-area.voice-mode .btn-mic{background:var(--nz-bg-2);border-color:var(--nz-accent);color:var(--nz-accent)}
 
 /* Inline file reference chips in event bubbles */
-.file-ref{display:inline-flex;align-items:center;gap:4px;vertical-align:baseline}
+.file-ref{display:inline-flex;align-items:center;gap:4px;vertical-align:baseline;flex-wrap:wrap}
 .file-ref code{cursor:default}
+.fr-slot{display:inline-flex;align-items:center;gap:3px}
+.fr-tag{font-size:10px;padding:1px 5px;border:1px solid var(--nz-border);border-radius:3px;color:var(--nz-text-dim);background:var(--nz-bg-2);font-family:inherit}
 .file-ref .fr-btn{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0;border:1px solid var(--nz-border);border-radius:4px;background:var(--nz-bg-2);color:var(--nz-text-mute);font-size:12px;font-family:inherit;cursor:pointer;line-height:1;transition:all .15s}
 .file-ref .fr-btn:hover{background:var(--nz-bg-1);color:var(--nz-accent);border-color:var(--nz-accent)}
-.file-ref.fr-verified .fr-btn{border-color:rgba(88,166,255,.4)}
-.file-ref.fr-candidate .fr-btn{border-style:dashed;opacity:.7}
-.file-ref.fr-missing{opacity:.6}
-.file-ref.fr-missing .fr-btn{display:none}
+.fr-slot.fr-verified .fr-btn{border-color:rgba(88,166,255,.4)}
+.fr-slot.fr-candidate .fr-btn{border-style:dashed;opacity:.7}
+.fr-slot.fr-missing{display:none}
 
 /* File viewer drawer — side panel for previewing workspace files */
 .fv-drawer{position:fixed;top:0;right:0;bottom:0;width:min(720px,60vw);background:var(--nz-bg-1);border-left:1px solid var(--nz-border);z-index:200;display:flex;flex-direction:column;transform:translateX(100%);transition:transform .2s ease;box-shadow:-2px 0 12px rgba(0,0,0,.4)}
@@ -351,9 +352,50 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .rb-team-header .team-count{color:var(--nz-text-dim);font-size:10px}
 .rb-stats{padding:2px 12px 4px 22px;font-size:11px;color:var(--nz-text-dim);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 
+/* RFC v4 agent-team-ui §3.6 — drill-in affordances.
+   The banner's agent rows are clickable; "active" row shows which internal
+   stream the main event area is rendering. Breadcrumb sits above the
+   events-scroll pane in agent-view mode with a back arrow. */
+.rb-agent-row[role="button"]{cursor:pointer;border-radius:4px;transition:background-color .15s}
+.rb-agent-row[role="button"]:hover{background:var(--nz-bg-2)}
+.rb-agent-row[role="button"]:focus{outline:2px solid var(--nz-accent);outline-offset:-1px}
+.rb-agent-row.active{background:var(--nz-bg-2);box-shadow:inset 2px 0 0 var(--nz-accent)}
+.rb-agent-row.active .sa-name{color:var(--nz-accent)}
+
+.agent-breadcrumb{display:flex;align-items:center;gap:8px;padding:6px 12px;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-1);font-size:12px;flex-wrap:wrap}
+.agent-breadcrumb .bc-back{background:transparent;color:var(--nz-accent);border:1px solid var(--nz-border);border-radius:4px;padding:2px 10px;font-size:12px;cursor:pointer}
+.agent-breadcrumb .bc-back:hover{background:var(--nz-bg-2)}
+.agent-breadcrumb .bc-tag{display:inline-block;background:var(--nz-accent);color:#fff;border-radius:3px;font-size:10px;padding:1px 6px;text-transform:uppercase}
+.agent-breadcrumb .bc-name{color:var(--nz-text);font-weight:500}
+.agent-breadcrumb .bc-team{color:var(--nz-amber);font-size:11px}
+.agent-breadcrumb .bc-stat{color:var(--nz-text-dim);margin-left:auto;font-size:11px}
+
+/* tool_result folded render — details/summary pattern for low-noise view. */
+.event.tool_result .tr-wrap{border-left:2px solid var(--nz-border);padding-left:10px;margin:2px 0}
+.event.tool_result .tr-summary{color:var(--nz-text-dim);cursor:pointer;font-size:12px;padding:2px 0}
+.event.tool_result .tr-summary:hover{color:var(--nz-text)}
+.event.tool_result .tr-detail{margin:4px 0;padding:6px 8px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:4px;font-size:11px;max-height:400px;overflow:auto;white-space:pre-wrap;word-break:break-word}
+.event.tool_result .tr-persisted{display:inline-block;margin-top:4px;font-size:11px;color:var(--nz-accent);text-decoration:none;border:1px solid var(--nz-border);border-radius:4px;padding:2px 8px}
+.event.tool_result .tr-persisted:hover{background:var(--nz-bg-2)}
+
 /* Toast */
 .toast{position:fixed;bottom:20px;right:20px;background:var(--nz-red);color:#fff;padding:8px 16px;border-radius:8px;font-size:14px;z-index:100;opacity:0;pointer-events:none;transition:opacity .3s}
 .toast.show{opacity:1;pointer-events:auto}
+/* RNEW-UX-010 — visually hidden live region for assistive tech. Uses the
+   standard "sr-only" recipe: in flow but clipped to 1x1, so screen readers
+   pick it up but sighted users never see it. Display:none would suppress
+   announcement, hence the clip() trick instead. */
+.sr-only{position:absolute!important;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+/* RNEW-UX-012 — skeleton placeholders while the first sessions fetch is in
+   flight. Matches .session-card metrics (padding 12x16, ~54px tall) so the
+   transition to real cards doesn't shift layout. Shimmer is a left-to-right
+   gradient sweep over ~1.4s — fast enough to read as "loading", slow enough
+   not to distract. */
+.skeleton-card{padding:12px 16px;border-bottom:1px solid var(--nz-bg-2);display:flex;flex-direction:column;gap:8px}
+.skeleton-line{height:12px;border-radius:4px;background:linear-gradient(90deg,var(--nz-bg-1) 0,var(--nz-bg-2) 40%,var(--nz-bg-1) 80%);background-size:200% 100%;animation:skeleton-shimmer 1.4s ease-in-out infinite}
+.skeleton-line.sk-title{width:70%;height:14px}
+.skeleton-line.sk-meta{width:45%;height:10px}
+@keyframes skeleton-shimmer{0%{background-position:200% 0}100%{background-position:-200% 0}}
 
 /* Auth modal */
 /* Modal scrim: 0.75 matches macOS / Material Design spec for system-level
@@ -377,6 +419,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .modal .modal-btns button.danger:hover{filter:brightness(1.1)}
 .modal.confirm-dialog p{margin:8px 0 4px;color:var(--nz-text);line-height:1.5}
 .modal.confirm-dialog .confirm-detail{color:var(--nz-text-mute);font-size:13px;margin-top:8px;word-break:break-all}
+/* RNEW-UX-013 prompt-dialog shares modal shell with confirm-dialog but has an
+   input. Message above the input uses the mute colour so the input itself
+   stays the primary focal point. */
+.modal.prompt-dialog .prompt-message{margin:8px 0 10px;color:var(--nz-text-mute);font-size:13px;line-height:1.5}
+.modal.prompt-dialog .prompt-input{margin-top:4px}
 .modal textarea{width:100%;padding:8px 12px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text);font-size:14px;font-family:inherit;outline:none;resize:vertical}
 .modal textarea:focus{border-color:var(--nz-accent)}
 .modal-section-label{font-size:12px;color:var(--nz-text-mute);margin-bottom:6px}
@@ -523,6 +570,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .md-math-display .katex-display{margin:0.5em 0}
 .katex{font-size:1.1em}
 .katex-html{overflow-wrap:break-word}
+/* Placeholder shown while KaTeX lazy-loads; raw TeX stays readable so users
+   on slow connections don't stare at nothing. runKatex() swaps this span
+   for the rendered formula once the bundle lands. */
+.katex-pending{font-family:'SF Mono',Consolas,monospace;color:var(--nz-text-dim);font-size:0.95em;padding:0 2px;background:var(--nz-bg-1);border-radius:3px}
+/* renderRich output host — preview drawer today, scratch/aside drawers
+   tomorrow. Block-level so list/table/code children stack naturally;
+   .md-* styles continue to apply to markdown content inside. */
+.fv-rich{padding:8px 12px;font-size:13px;line-height:1.7}
+.fv-rich>.md-math-display{margin:12px 0}
+/* Preformatted text emitted by renderTexDoc for non-math fragments in
+   .tex/.latex files. Visually close to .fv-lined <pre> so switching
+   between file types doesn't jolt the reader. */
+.rich-plain{margin:0 0 8px 0;padding:0;white-space:pre-wrap;word-break:break-word;font-family:'SF Mono',Consolas,monospace;color:var(--nz-text);background:transparent;border:none}
 .ts-subagent{display:inline-block;background:#1f2937;color:#a5d6ff;padding:0 5px;border-radius:4px;font-size:11px;font-weight:600;margin-left:2px}
 
 
@@ -589,12 +649,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
    path lives in the sh-name title attribute (tooltip on hover). */
 .section-header-fallback{background:transparent;color:var(--nz-text-faint)}
 .section-header-fallback .sh-name{font-style:italic;font-weight:500}
-/* Cron section-header: dedicated bucket for all scheduled tasks regardless
-   of whether they carry a WorkDir. Tinted slightly to visually separate
-   from project sections, but not loud — most dashboards will have only a
-   handful of cron jobs and the group should read as a peer of projects. */
-.section-header-cron{background:rgba(234,179,8,.06)}
-.section-header-cron .sh-name{color:#f0c674}
 /* Session card v2 (two-line flat, IM-style) */
 .sc-cli-icon{width:36px;height:36px;flex-shrink:0;border-radius:8px}
 .sc-body{flex:1;min-width:0}
@@ -882,11 +936,89 @@ body.kbd-open .input-hints{display:none}
 .cron-preview-hint{font-size:11px;color:var(--nz-text-mute);margin-top:4px;min-height:16px}
 .cron-preview-hint.ok{color:var(--nz-green)}
 .cron-preview-hint.err{color:var(--nz-red)}
-.cron-tz-banner{font-size:11px;color:var(--nz-text-mute);margin:8px 0 12px;padding:6px 10px;border-radius:4px;background:rgba(255,255,255,.04);border:1px solid var(--nz-border)}
-.cron-tz-hint{font-size:11px;color:var(--nz-text-mute);margin-top:4px}
 .cc-notify{font-size:11px;padding:1px 6px;border-radius:3px}
 .cc-notify.on{background:rgba(46,160,67,.15);color:var(--nz-green)}
 .cc-notify.off{background:rgba(139,148,158,.15);color:var(--nz-text-mute)}
+
+/* ===== Cron list rows (v3 redesign) =====
+ * 高密度行式布局，取代 v2 的 .cron-card 大卡片。灵感：Claude Code Routines、
+ * Every Agent Tasks、shadcn cron-jobs block。一行 ~48px，异常态(error / missed)
+ * 左侧加色条 + inline 展开一行错误摘要；正常态安静不吵。操作收到 ghost Run +
+ * ⋯ 菜单，不再平铺四个实心按钮。点击行就地展开详情。*/
+.cj-list{display:flex;flex-direction:column;border:1px solid var(--nz-border);border-radius:10px;overflow:hidden;background:var(--nz-bg-1)}
+.cj-row{position:relative;display:grid;grid-template-columns:18px minmax(0,1fr) auto auto;align-items:center;gap:12px;padding:10px 12px 10px 14px;border-bottom:1px solid var(--nz-border);cursor:pointer;transition:background .12s,border-color .12s;min-height:48px}
+.cj-row:last-child{border-bottom:none}
+.cj-row:hover{background:#1c2129}
+.cj-row.paused{opacity:.6}
+.cj-row.paused:hover{opacity:.85}
+/* 左侧 3px 色条：错误=红，missed=琥珀。正常态无色条。 */
+.cj-row.is-error{box-shadow:inset 3px 0 0 var(--nz-red)}
+.cj-row.is-missed{box-shadow:inset 3px 0 0 var(--nz-amber)}
+.cj-row.is-error.is-missed{box-shadow:inset 3px 0 0 var(--nz-red)}
+/* 状态圆点：二态设计——●活跃 / ○暂停。错误/missed 用左侧色条表达，
+ * 避免同一信息三处重复编码(圆点+色条+错误条) */
+.cj-dot{width:8px;height:8px;border-radius:50%;background:var(--nz-green);flex-shrink:0;justify-self:center}
+.cj-row.paused .cj-dot{background:transparent;border:1px solid var(--nz-text-faint);width:9px;height:9px}
+/* 主列：任务标题 + 节奏(副行) */
+.cj-main{min-width:0;display:flex;flex-direction:column;gap:2px}
+.cj-title{font-size:14px;color:var(--nz-text-strong);font-weight:500;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cj-title.placeholder{color:var(--nz-text-dim);font-style:italic;font-weight:400}
+.cj-sub{font-size:12px;color:var(--nz-text-mute);line-height:1.35;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.cj-sub .cj-schedule{color:var(--nz-text);cursor:pointer;text-decoration:underline dotted var(--nz-text-faint);text-underline-offset:2px;transition:text-decoration-color .12s,color .12s;outline:none;border-radius:3px}
+.cj-sub .cj-schedule:hover{color:var(--nz-text-strong);text-decoration-color:var(--nz-text-mute)}
+.cj-sub .cj-schedule:focus-visible{outline:1px solid var(--nz-accent);outline-offset:2px}
+.cj-sub .cj-icon{font-size:11px;color:var(--nz-text-mute);flex-shrink:0}
+.cj-sub .cj-icon.notify-off{color:var(--nz-text-faint)}
+.cj-sub .cj-icon.fresh{color:var(--nz-green)}
+.cj-sub .cj-icon.missed{color:var(--nz-amber);font-weight:600}
+/* 下次运行时间列 */
+.cj-when{font-size:12px;color:var(--nz-text-mute);white-space:nowrap;text-align:right;flex-shrink:0}
+.cj-when.imminent{color:var(--nz-accent);font-weight:600}
+.cj-when.paused{color:var(--nz-text-faint)}
+/* 操作区：ghost Run + ⋯ 菜单。默认 Run 不显示，hover 行或触屏时浮出 */
+.cj-actions{display:flex;gap:4px;align-items:center;flex-shrink:0}
+.cj-run{padding:4px 10px;border-radius:6px;border:1px solid var(--nz-border);background:transparent;color:var(--nz-text-mute);font-size:12px;font-family:inherit;cursor:pointer;min-height:28px;display:inline-flex;align-items:center;gap:4px;opacity:0;transition:opacity .12s,color .12s,border-color .12s,background .12s}
+.cj-row:hover .cj-run,.cj-run:focus-visible{opacity:1}
+.cj-run:hover{color:var(--nz-accent);border-color:var(--nz-accent);background:rgba(31,111,235,.08)}
+.cj-menu-btn{width:28px;height:28px;border-radius:6px;border:1px solid transparent;background:transparent;color:var(--nz-text-mute);font-size:18px;line-height:1;cursor:pointer;padding:0;display:inline-flex;align-items:center;justify-content:center;font-family:inherit}
+.cj-menu-btn:hover{background:var(--nz-bg-2);color:var(--nz-text-strong);border-color:var(--nz-border)}
+/* 错误摘要行：inline 展开在主行下方，独立一行，可读不挤 */
+.cj-error{grid-column:2 / -1;margin:-4px 12px 0 0;padding:6px 10px;background:rgba(218,54,51,.08);border:1px solid rgba(218,54,51,.25);border-radius:6px;font-size:12px;color:var(--nz-red);line-height:1.5;display:flex;gap:6px;align-items:flex-start;word-break:break-word;overflow-wrap:anywhere}
+.cj-error .cj-err-icon{flex-shrink:0}
+.cj-error .cj-err-text{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
+/* ⋯ popover menu —— 用 position:fixed 加 JS 定位，避免 .cron-detail-body
+ * 的 overflow:auto 把行底部的菜单剪掉。JS 负责 top/left 计算 + 空间不够
+ * 时向上翻转。 */
+.cj-menu{position:fixed;z-index:200;min-width:180px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);padding:4px;display:none}
+.cj-menu.open{display:block}
+.cj-menu-item{display:flex;align-items:center;gap:8px;width:100%;padding:8px 10px;background:transparent;border:none;border-radius:6px;color:var(--nz-text);font-size:13px;font-family:inherit;cursor:pointer;text-align:left;min-height:34px}
+.cj-menu-item:hover{background:var(--nz-bg-2)}
+.cj-menu-item.danger{color:var(--nz-red)}
+.cj-menu-item.danger:hover{background:rgba(218,54,51,.12)}
+.cj-menu-sep{height:1px;background:var(--nz-border);margin:4px 0}
+/* 状态摘要行（标题旁"3 运行中 · 1 需关注"）*/
+.cj-summary{font-size:12px;color:var(--nz-text-mute);margin-left:10px;font-weight:400}
+.cj-summary .cj-summary-attn{color:var(--nz-red);font-weight:500}
+/* 触屏设备：ghost Run 始终可见（不能靠 hover）*/
+@media (hover:none){
+  .cj-row .cj-run{opacity:1}
+}
+/* 小屏适配：< 640 时隐藏 cj-when 列（避免三列挤），相对时间移入 cj-sub；
+ * 同时在 sub-row 里隐藏桌面端的 cj-ago（上次 …），避免 when/ago 两条
+ * 冗余信息挤到同一行 */
+.cj-sub .cj-when-inline{display:none}
+@media (max-width:640px){
+  .cj-row{grid-template-columns:18px minmax(0,1fr) auto;gap:8px;padding:10px 10px 10px 12px}
+  .cj-when{display:none}
+  .cj-sub .cj-when-inline{display:inline;color:var(--nz-text-mute)}
+  .cj-sub .cj-when-inline.imminent{color:var(--nz-accent);font-weight:600}
+  .cj-sub .cj-when-inline.paused{color:var(--nz-text-faint)}
+  .cj-sub .cj-ago{display:none}
+  .cj-row:hover .cj-run{opacity:1}
+}
+/* v3 hides the legacy .cc-actions wrapper (still emitted for contract
+ * test compatibility) since actions moved to .cj-actions + ⋯ menu */
+.cj-row .cc-actions{display:none}
 
 /* ===== Frequency picker (Claude-style compact row) =====
  * v2 polish: 单行横排 [Frequency ▾] [time] [weekday ▾ / day ▾]，
@@ -1223,6 +1355,32 @@ body.kbd-open .sidebar-footer{display:none}
   .event-ask-btn,.event-copy-btn{font-size:12px;padding:4px 10px;min-height:32px}
 }
 
+/* AskUserQuestion interactive card. Rendered as a bubble of type
+   .event.ask_question; mirrors .event.todo density (tight vertical rhythm,
+   high contrast borders) so the card reads as an actionable block without
+   overwhelming the conversation. */
+.event.ask_question .ask-card{border:1px solid var(--nz-border);border-radius:8px;padding:12px 14px;background:var(--nz-bg-1)}
+.event.ask_question .ask-title{font-size:11px;color:var(--nz-text-faint);text-transform:uppercase;letter-spacing:.6px;margin-bottom:8px}
+.ask-q-group + .ask-q-group{margin-top:14px;padding-top:12px;border-top:1px solid var(--nz-bg-2)}
+.ask-q-header{font-size:12px;color:var(--nz-text-faint);margin-bottom:2px}
+.ask-q-text{font-size:14px;line-height:1.5;color:var(--nz-text);margin-bottom:6px}
+.ask-q-hint{font-size:11px;color:var(--nz-text-faint);margin-bottom:8px;font-style:italic}
+.ask-opts{display:flex;flex-direction:column;gap:6px}
+.ask-opt{text-align:left;display:flex;flex-direction:column;gap:2px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:6px;padding:8px 10px;cursor:pointer;color:var(--nz-text);font:inherit;transition:border-color .15s,background .15s,color .15s}
+.ask-opt:hover:not([disabled]){border-color:var(--nz-accent);background:var(--nz-bg-2)}
+.ask-opt.selected{border-color:var(--nz-accent);background:var(--nz-bg-2);color:var(--nz-accent)}
+.ask-opt[disabled]{opacity:.55;cursor:not-allowed}
+.ask-opt-label{font-size:14px;font-weight:500}
+.ask-opt-desc{font-size:12px;color:var(--nz-text-faint);line-height:1.45}
+.ask-submit-row{margin-top:14px;padding-top:12px;border-top:1px solid var(--nz-bg-2);display:flex;justify-content:flex-end}
+.ask-submit{background:var(--nz-accent);color:var(--nz-bg-0);border:none;border-radius:6px;padding:8px 18px;font-size:13px;font-weight:500;cursor:pointer;font:inherit;transition:opacity .15s}
+.ask-submit[disabled]{opacity:.4;cursor:not-allowed}
+.ask-status{margin-top:10px;font-size:12px;color:var(--nz-text-faint);padding-top:8px;border-top:1px dashed var(--nz-bg-2)}
+@media (pointer: coarse){
+  .ask-opt{padding:10px 12px}
+  .ask-submit{min-height:36px;padding:8px 16px}
+}
+
 </style>
 </head>
 <body>
@@ -1259,7 +1417,12 @@ body.kbd-open .sidebar-footer{display:none}
       <div class="ns-dropdown" id="ns-dropdown" role="listbox" aria-label="选择节点" hidden></div>
     </div>
     <div class="session-list" id="session-list" role="list">
-      <div class="no-sessions">loading...</div>
+      <!-- RNEW-UX-012 — 3 skeleton cards pre-fetch. renderSidebar() replaces
+           innerHTML on first successful data load, so skeletons vanish
+           naturally without any extra teardown logic. -->
+      <div class="skeleton-card" aria-hidden="true"><div class="skeleton-line sk-title"></div><div class="skeleton-line sk-meta"></div></div>
+      <div class="skeleton-card" aria-hidden="true"><div class="skeleton-line sk-title"></div><div class="skeleton-line sk-meta"></div></div>
+      <div class="skeleton-card" aria-hidden="true"><div class="skeleton-line sk-title"></div><div class="skeleton-line sk-meta"></div></div>
     </div>
   </nav>
   <div class="resizer" id="resizer" role="separator" aria-orientation="vertical" aria-label="拖动调整侧栏宽度" tabindex="0"></div>
@@ -1290,6 +1453,11 @@ body.kbd-open .sidebar-footer{display:none}
   </main>
 </div>
 <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
+<!-- RNEW-UX-010 — dedicated polite live region for non-toast announcements
+     (WS state transitions, new sessions, cron completions). Kept separate
+     from #toast so toast re-paints don't interrupt in-flight announcements
+     and vice-versa. announce() in dashboard.js drives this element. -->
+<div id="sr-announce" role="status" aria-live="polite" aria-atomic="true" class="sr-only"></div>
 <aside class="fv-drawer hidden" id="fv-drawer" role="dialog" aria-modal="false" aria-label="文件预览">
   <header class="fv-header">
     <div class="fv-title-wrap">
@@ -1340,5 +1508,6 @@ body.kbd-open .sidebar-footer{display:none}
   </div>
 </div>
 <script src="/static/dashboard.js"></script>
+<script src="/static/agent_view.js"></script>
 </body>
 </html>

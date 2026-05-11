@@ -52,14 +52,30 @@ cli:
 
   # Optional: multiple backends in one deployment (RNEW-DOC-421).
   #
-  # Uncomment `backends:` to enable Claude + Kiro side-by-side. When
-  # `backends` is empty naozhi uses single-backend mode driven by
-  # cli.backend (default "claude") and cli.path/model/args above.
+  # When to use: you want a single naozhi instance to spawn more than one
+  # CLI flavor (Claude stream-json + Kiro ACP, or Claude + Gemini) so the
+  # dashboard "new session" picker can choose per-session which backend
+  # runs each conversation. The per-request override travels via
+  # /api/cli/backends + the `backend` field on /api/sessions/send; when
+  # omitted the router falls back to the default below.
   #
-  # Per-backend fields are optional and fall back to the top-level cli.*
-  # values above. The `backend` field picks which entry is the default
-  # when a new session does not request a specific one; the first entry
-  # also appears first in the dashboard backend picker.
+  # Authority: pick one layout per deployment — either the legacy
+  # single-backend (cli.path + cli.model + cli.args above, with no
+  # `backends:` block) OR the multi-backend form (cli.backends + optional
+  # cli.backend for the default). Leaving both populated is legal — the
+  # per-backend fields just inherit from the top-level cli.* values — but
+  # mixing them makes the effective config hard to reason about. If you
+  # enable `backends:`, treat cli.path/model/args as inheritable defaults
+  # only, not as "the real backend".
+  #
+  # Runtime selection:
+  #   - Dashboard "new session" dropdown picks backend per session
+  #   - API: POST /api/sessions/send {"backend": "kiro", ...}
+  #   - Omitted => cli.backend (or first entry in `backends:`)
+  #
+  # Per-backend path/model/args are optional and fall back to cli.* above.
+  # ACP protocol is auto-selected for id="kiro"; stream-json for everything
+  # else — no extra flag needed.
   #
   #backend: "claude"
   #backends:
@@ -67,7 +83,8 @@ cli:
   #    # path/model/args inherit from cli.path + cli.args above when omitted.
   #  - id: "kiro"
   #    path: "~/.local/bin/kiro"
-  #    # ACP protocol is auto-selected by id="kiro"; no extra flag needed.
+  #    model: "anthropic.claude-sonnet-4-5"
+  #    args: []
 
 session:
   max_procs: 20
@@ -142,7 +159,6 @@ log:
 
 transcribe:
   enabled: true
-  provider: "aws"
   region: "ap-northeast-1"
   language: "zh-CN,en-US"
 

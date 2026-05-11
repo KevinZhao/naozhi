@@ -20,11 +20,33 @@ func TestCountersRegisteredUnderStableNames(t *testing.T) {
 		"naozhi_ws_auth_fail_invalid_token_total",
 		"naozhi_shim_restart_total",
 		"naozhi_spawn_panic_recovered_total",
+		"naozhi_panic_recovered_total",
 		"naozhi_shim_reconnect_grace_backfill_total",
 		"naozhi_interrupt_sent_total",
 		"naozhi_interrupt_no_turn_total",
 		"naozhi_interrupt_unsupported_total",
 		"naozhi_interrupt_error_total",
+		"naozhi_eventlog_persist_written_total",
+		"naozhi_eventlog_persist_dropped_total",
+		"naozhi_eventlog_persist_fsync_total",
+		"naozhi_eventlog_persist_malformed_lines_total",
+		"naozhi_eventlog_persist_replay_leak_total",
+		"naozhi_attachment_ref_bump_total",
+		"naozhi_attachment_ref_clear_total",
+		"naozhi_attachment_ref_meta_error_total",
+		"naozhi_attachment_ref_drop_total",
+		"naozhi_cron_execution_slow_total",
+		// RNEW-OPS-414: startup phase timing gauges. Same expvar.Int
+		// storage as the counters above, so they belong in the same
+		// stable-names pin; the `_ms` suffix distinguishes them as
+		// gauges semantically for dashboards.
+		"naozhi_startup_phase_config_ms",
+		"naozhi_startup_phase_router_ms",
+		"naozhi_startup_phase_shim_reconnect_ms",
+		"naozhi_startup_phase_platforms_ms",
+		"naozhi_startup_phase_scheduler_ms",
+		"naozhi_startup_phase_server_ms",
+		"naozhi_startup_phase_ready_ms",
 	}
 	for _, name := range want {
 		name := name
@@ -57,11 +79,33 @@ func TestCountersIncrement(t *testing.T) {
 		"ws_auth_fail_invalid_token":    WSAuthFailInvalidTokenTotal,
 		"shim_restart":                  ShimRestartTotal,
 		"spawn_panic_recovered":         SpawnPanicRecoveredTotal,
+		"panic_recovered":               PanicRecoveredTotal,
 		"shim_reconnect_grace_backfill": ShimReconnectGraceBackfillTotal,
 		"interrupt_sent":                InterruptSentTotal,
 		"interrupt_no_turn":             InterruptNoTurnTotal,
 		"interrupt_unsupported":         InterruptUnsupportedTotal,
 		"interrupt_error":               InterruptErrorTotal,
+		"eventlog_persist_written":      EventLogPersistWrittenTotal,
+		"eventlog_persist_dropped":      EventLogPersistDroppedTotal,
+		"eventlog_persist_fsync":        EventLogPersistFsyncTotal,
+		"eventlog_persist_malformed":    EventLogPersistMalformedLinesTotal,
+		"eventlog_persist_replay_leak":  EventLogPersistReplayLeakTotal,
+		"attachment_ref_bump":           AttachmentRefBumpTotal,
+		"attachment_ref_clear":          AttachmentRefClearTotal,
+		"attachment_ref_meta_error":     AttachmentRefMetaErrorTotal,
+		"attachment_ref_drop":           AttachmentRefDropTotal,
+		"cron_execution_slow":           CronExecutionSlowTotal,
+		// RNEW-OPS-414: startup phase gauges share the expvar.Int storage
+		// with the counters, so Add-based delta observation still holds
+		// — in production these are written via Set once per process,
+		// but the underlying integer semantics are identical.
+		"startup_phase_config":         StartupPhaseConfigMs,
+		"startup_phase_router":         StartupPhaseRouterMs,
+		"startup_phase_shim_reconnect": StartupPhaseShimReconnectMs,
+		"startup_phase_platforms":      StartupPhasePlatformsMs,
+		"startup_phase_scheduler":      StartupPhaseSchedulerMs,
+		"startup_phase_server":         StartupPhaseServerMs,
+		"startup_phase_ready":          StartupPhaseReadyMs,
 	}
 	for name, c := range counters {
 		name, c := name, c
@@ -85,9 +129,21 @@ func TestCountersJSONEncodable(t *testing.T) {
 	for _, c := range []*expvar.Int{
 		SessionCreateTotal, SessionEvictTotal, CLISpawnTotal,
 		WSAuthFailTotal, WSAuthFailRateLimitedTotal, WSAuthFailInvalidTokenTotal,
-		ShimRestartTotal, SpawnPanicRecoveredTotal, ShimReconnectGraceBackfillTotal,
+		ShimRestartTotal, SpawnPanicRecoveredTotal, PanicRecoveredTotal,
+		ShimReconnectGraceBackfillTotal,
 		InterruptSentTotal, InterruptNoTurnTotal, InterruptUnsupportedTotal,
 		InterruptErrorTotal,
+		EventLogPersistWrittenTotal, EventLogPersistDroppedTotal,
+		EventLogPersistFsyncTotal, EventLogPersistMalformedLinesTotal,
+		EventLogPersistReplayLeakTotal,
+		AttachmentRefBumpTotal, AttachmentRefClearTotal,
+		AttachmentRefMetaErrorTotal, AttachmentRefDropTotal,
+		CronExecutionSlowTotal,
+		// RNEW-OPS-414: startup phase gauges use expvar.Int too, so the
+		// same JSON-number shape pin applies.
+		StartupPhaseConfigMs, StartupPhaseRouterMs, StartupPhaseShimReconnectMs,
+		StartupPhasePlatformsMs, StartupPhaseSchedulerMs, StartupPhaseServerMs,
+		StartupPhaseReadyMs,
 	} {
 		raw := c.String() // expvar.Int.String returns its JSON form
 		var n json.Number

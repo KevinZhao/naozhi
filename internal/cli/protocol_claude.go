@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"regexp"
 )
 
@@ -84,6 +85,13 @@ func (p *ClaudeProtocol) WriteUserMessageLocked(w io.Writer, uuid, text string, 
 func (p *ClaudeProtocol) SupportsPriority() bool { return true }
 func (p *ClaudeProtocol) SupportsReplay() bool   { return true }
 
+// Capabilities returns the hard-coded Caps for Claude stream-json.
+// See RNEW-ARCH-404: opt-in accessor for consumers migrating off
+// individual SupportsX() methods.
+func (p *ClaudeProtocol) Capabilities() Caps {
+	return Caps{Replay: true, Priority: true, SoftInterrupt: false, StreamJSON: true}
+}
+
 // controlRequestInterrupt is the NDJSON payload for an in-band "abort this turn"
 // signal sent via stdin. The Claude CLI reacts by killing any in-flight tool
 // call (bash children are SIGKILL'd), closing the current turn with a
@@ -131,7 +139,75 @@ func (p *ClaudeProtocol) ReadEvent(line string) (Event, bool, error) {
 	if ev.Type == "control_response" {
 		return Event{}, false, nil
 	}
+	// AskUserQuestion surfacing: in `claude -p` (headless) mode the CLI
+	// auto-injects an is_error:true tool_result ~3ms after the tool_use,
+	// bailing the model back to a text response inside the same turn
+	// (verified in test/e2e/askuser/). We can't intercept that — but we
+	// can observe the tool_use and let dispatch render an interactive
+	// card so the next user turn carries the chosen option(s). The
+	// AskQuestion field rides on the same assistant event so the existing
+	// tool_use EventLog entry still flows through unchanged.
+	if ev.Type == "assistant" && ev.Message != nil {
+		if aq := extractAskQuestion(ev.Message.Content); aq != nil {
+			ev.AskQuestion = aq
+		}
+	}
 	return ev, ev.Type == "result", nil
+}
+
+// askUserQuestionInput matches the `input` field of an AskUserQuestion tool_use
+// block. Field tags match the exact keys observed in test/e2e/askuser logs.
+type askUserQuestionInput struct {
+	Questions []struct {
+		Question    string `json:"question"`
+		Header      string `json:"header"`
+		MultiSelect bool   `json:"multiSelect"`
+		Options     []struct {
+			Label       string `json:"label"`
+			Description string `json:"description"`
+		} `json:"options"`
+	} `json:"questions"`
+}
+
+// extractAskQuestion returns the AskQuestion payload when the content blocks
+// contain a tool_use with name "AskUserQuestion" and valid input.
+// Returns nil when no AQ tool_use present or the input fails to decode —
+// callers treat nil as "no card to render".
+func extractAskQuestion(blocks []ContentBlock) *AskQuestion {
+	for _, b := range blocks {
+		if b.Type != "tool_use" || b.Name != "AskUserQuestion" || len(b.Input) == 0 {
+			continue
+		}
+		var inp askUserQuestionInput
+		if err := json.Unmarshal(b.Input, &inp); err != nil {
+			// Log at Debug so a CC schema drift (shape evolving away from
+			// what test/e2e/askuser validated) is traceable instead of
+			// silently producing zero cards. Only log input_len — the raw
+			// payload may contain user prompt fragments that don't belong
+			// in structured logs.
+			slog.Debug("extractAskQuestion: input unmarshal failed",
+				"err", err, "input_len", len(b.Input))
+			return nil
+		}
+		if len(inp.Questions) == 0 {
+			return nil
+		}
+		items := make([]AskQuestionItem, 0, len(inp.Questions))
+		for _, q := range inp.Questions {
+			opts := make([]AskQuestionOpt, 0, len(q.Options))
+			for _, o := range q.Options {
+				opts = append(opts, AskQuestionOpt{Label: o.Label, Description: o.Description})
+			}
+			items = append(items, AskQuestionItem{
+				Question:    q.Question,
+				Header:      q.Header,
+				MultiSelect: q.MultiSelect,
+				Options:     opts,
+			})
+		}
+		return &AskQuestion{ToolUseID: b.ID, Items: items}
+	}
+	return nil
 }
 
 func (p *ClaudeProtocol) HandleEvent(_ io.Writer, _ Event) bool {

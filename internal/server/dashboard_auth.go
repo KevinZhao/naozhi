@@ -103,11 +103,18 @@ func (a *AuthHandlers) isAuthenticated(r *http.Request) bool {
 	if a.dashboardToken == "" {
 		return true
 	}
-	// Bearer header
+	// Bearer header. Compare SHA-256 digests so length differences do not
+	// leak via the short-circuit branch inside ConstantTimeCompare (which
+	// returns 0 immediately when operand lengths differ). Mirrors the
+	// feishu webhook constantTimeEqualString pattern.
 	auth := r.Header.Get("Authorization")
-	token := strings.TrimPrefix(auth, "Bearer ")
-	if strings.HasPrefix(auth, "Bearer ") && subtle.ConstantTimeCompare([]byte(token), []byte(a.dashboardToken)) == 1 {
-		return true
+	if strings.HasPrefix(auth, "Bearer ") {
+		token := strings.TrimPrefix(auth, "Bearer ")
+		got := sha256.Sum256([]byte(token))
+		want := sha256.Sum256([]byte(a.dashboardToken))
+		if subtle.ConstantTimeCompare(got[:], want[:]) == 1 {
+			return true
+		}
 	}
 	// Cookie fallback — value is HMAC-derived, not the raw token
 	if c, err := r.Cookie(authCookieName); err == nil {
@@ -262,7 +269,17 @@ func (a *AuthHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"error":"bad request"}`, http.StatusBadRequest)
 		return
 	}
-	if a.dashboardToken == "" || subtle.ConstantTimeCompare([]byte(req.Token), []byte(a.dashboardToken)) != 1 {
+	// Same SHA-256 pre-digest trick as isAuthenticated so a timing probe
+	// cannot distinguish "wrong length" from "wrong bytes" — ConstantTimeCompare
+	// short-circuits on length mismatch. Aligns both auth entry points.
+	gotLogin := sha256.Sum256([]byte(req.Token))
+	wantLogin := sha256.Sum256([]byte(a.dashboardToken))
+	// Always execute the constant-time compare first so a timing probe cannot
+	// distinguish "no token configured" from "configured but wrong" via
+	// response latency. Gate the final auth decision on the short-circuit
+	// afterwards.
+	matched := subtle.ConstantTimeCompare(gotLogin[:], wantLogin[:]) == 1
+	if a.dashboardToken == "" || !matched {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		if _, err := w.Write([]byte(`{"error":"invalid token"}`)); err != nil {

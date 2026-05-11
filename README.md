@@ -306,10 +306,12 @@ cli:
   args:
     - "--dangerously-skip-permissions"
 
-  # 可选：多 backend 并存（Claude + Kiro 同时启用）。
-  # 不设置 `backends` 时走单 backend 模式，使用上面的 cli.path/model/args。
+  # 可选：多 backend 并存（Claude + Kiro 同时启用）。dashboard "new session"
+  # 下拉菜单可以按会话选 backend，API 端通过 /api/sessions/send {"backend": ...}
+  # 覆盖。不设置 `backends` 时走单 backend 模式，使用上面的 cli.path/model/args；
   # 每条 backend 的 path/model/args 省略时从顶层 cli.* 继承；`backend` 字段决定
-  # 默认 backend（同时也作为 dashboard 下拉第一项）。
+  # 默认 backend（同时也作为 dashboard 下拉第一项）。完整注释示例见
+  # config.example.yaml `cli.backends` 段。
   # backends:
   #   - id: claude
   #   - id: kiro
@@ -390,7 +392,8 @@ CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/naozhi ./cmd/naozhi/
 # 上传到服务器
 scp bin/naozhi server:/usr/local/bin/
 
-# 安装 systemd service
+# 安装 systemd service（推荐 `sudo naozhi install`，自动生成单元文件；
+# deploy/naozhi.service 是手动部署参考，与 cmd/naozhi/service.go 保持同步）
 sudo cp deploy/naozhi.service /etc/systemd/system/
 sudo systemctl daemon-reload && sudo systemctl enable naozhi
 

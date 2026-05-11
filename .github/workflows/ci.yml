@@ -1,0 +1,98 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - master
+      - dev
+  pull_request:
+    branches:
+      - master
+      - dev
+
+# Cancel in-progress runs on the same ref to save CI budget.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test -race -timeout 300s ./...
+
+      # TODO: add coverage upload (codecov or similar) once the project
+      # decides on a coverage target. Skipped now to keep CI minimal.
+
+  vuln:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Vulnerability findings should be visible but not block feature PRs;
+    # operators review them asynchronously.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+
+      - name: Run govulncheck
+        run: govulncheck ./...
+
+  # RNEW-TEST-432: darwin build-tag coverage — catches
+  # proc_darwin.go / sdnotify_darwin / atomicfile_nonunix divergences
+  # that pass Linux but break macOS silently.
+  test-macos:
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build (darwin hard gate)
+        run: go build ./...
+
+      - name: Test
+        # -short because some race tests are Linux-tuned. Informational for
+        # now; promote to hard gate once darwin flake surface is known.
+        run: go test -race -timeout 300s -short ./...
+        continue-on-error: true
+
+  # RNEW-TEST-432: Windows build-only job. Not a supported runtime — the
+  # gate exists to surface regressions outside internal/shim (which uses
+  # POSIX-only syscalls that cannot compile on Windows). Job-level
+  # continue-on-error tolerates known-breaking shim compilation.
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...

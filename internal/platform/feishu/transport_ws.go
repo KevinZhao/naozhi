@@ -9,6 +9,7 @@ import (
 
 	larkcore "github.com/larksuite/oapi-sdk-go/v3/core"
 	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher"
+	"github.com/larksuite/oapi-sdk-go/v3/event/dispatcher/callback"
 	larkim "github.com/larksuite/oapi-sdk-go/v3/service/im/v1"
 	larkws "github.com/larksuite/oapi-sdk-go/v3/ws"
 
@@ -113,6 +114,47 @@ func (f *Feishu) startWebSocket() error {
 			}()
 		}
 		return nil
+	}).OnP2CardActionTrigger(func(cardCtx context.Context, event *callback.CardActionTriggerEvent) (*callback.CardActionTriggerResponse, error) {
+		// Card button click — decode the `value` payload we emitted in
+		// SendQuestionCard and dispatch as a synthesised user message.
+		// We must return non-nil because the SDK expects a response; an
+		// empty Toast keeps the Feishu client silent (no popup spam).
+		if event == nil || event.Event == nil || event.Event.Action == nil {
+			return &callback.CardActionTriggerResponse{}, nil
+		}
+		// Decode Action.Value (map[string]any) into our typed payload so the
+		// downstream dispatchCardAction path is uniform across WS + webhook.
+		raw, err := json.Marshal(event.Event.Action.Value)
+		if err != nil {
+			slog.Warn("feishu ws card_action: marshal value failed", "err", err)
+			return &callback.CardActionTriggerResponse{}, nil
+		}
+		var val cardActionPayload
+		if err := json.Unmarshal(raw, &val); err != nil {
+			slog.Warn("feishu ws card_action: decode value failed", "err", err)
+			return &callback.CardActionTriggerResponse{}, nil
+		}
+		var chatID, messageID string
+		if event.Event.Context != nil {
+			chatID = event.Event.Context.OpenChatID
+			messageID = event.Event.Context.OpenMessageID
+		}
+		operatorID := ""
+		if event.Event.Operator != nil {
+			operatorID = event.Event.Operator.OpenID
+		}
+		// Card actions don't carry a chat_type; we infer from chat_id prefix:
+		// "oc_" is a group chat (open_chat_id), "ou_" would be direct (open_id
+		// used as chat target in 1:1). Feishu's card actions originate from a
+		// message in a chat, so oc_ indicates group; anything else we call
+		// direct. Defensive default: group chats get authorization via
+		// dispatch's own mention/owner rules.
+		chatType := "direct"
+		if strings.HasPrefix(chatID, "oc_") {
+			chatType = "group"
+		}
+		f.dispatchCardAction(cardCtx, val, chatID, messageID, chatType, operatorID, handler)
+		return &callback.CardActionTriggerResponse{}, nil
 	})
 
 	cli := larkws.NewClient(f.cfg.AppID, f.cfg.AppSecret,

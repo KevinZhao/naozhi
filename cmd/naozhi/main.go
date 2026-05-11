@@ -21,6 +21,7 @@ import (
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
@@ -371,6 +372,11 @@ func main() {
 		}
 	}
 
+	// t0 anchors every startup phase gauge (RNEW-OPS-414). Captured after
+	// the subcommand dispatch so setup/install/doctor invocations do not
+	// pollute the naozhi boot histogram.
+	t0 := time.Now()
+
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	flag.Parse()
 
@@ -379,6 +385,7 @@ func main() {
 		slog.Error("load config", "err", err)
 		os.Exit(1)
 	}
+	metrics.StartupPhaseConfigMs.Set(time.Since(t0).Milliseconds())
 
 	// Setup logging
 	level := slog.LevelInfo
@@ -494,36 +501,52 @@ func main() {
 		slog.Error("create workspace dir", "path", workspace, "err", err)
 		os.Exit(1)
 	}
+	warnIfStateDirLarge(filepath.Dir(storePath))
 
 	// Session Router
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
 		claudeDir = filepath.Join(home, ".claude")
 	}
+	// Event-log persistence directory sits next to sessions.json so
+	// operators can co-locate state. Empty StorePath (test harnesses)
+	// disables the event log persister via the same empty-string
+	// guard inside NewRouter.
+	eventLogDir := ""
+	if storePath != "" {
+		eventLogDir = filepath.Join(filepath.Dir(storePath), "events")
+	}
 	router := session.NewRouter(session.RouterConfig{
-		Wrapper:          wrapper,
-		Wrappers:         wrappers,
-		DefaultBackend:   defaultBackend,
-		MaxProcs:         cfg.Session.MaxProcs,
-		TTL:              cfg.ParseTTL(),
-		PruneTTL:         cfg.ParsePruneTTL(),
-		Model:            cfg.CLI.Model,
-		ExtraArgs:        cfg.CLI.Args,
-		BackendModels:    backendModels,
-		BackendExtraArgs: backendExtraArgs,
-		Workspace:        workspace,
-		StorePath:        storePath,
-		NoOutputTimeout:  noOutputTimeout,
-		TotalTimeout:     totalTimeout,
-		ClaudeDir:        claudeDir,
+		Wrapper:           wrapper,
+		Wrappers:          wrappers,
+		DefaultBackend:    defaultBackend,
+		MaxProcs:          cfg.Session.MaxProcs,
+		TTL:               cfg.ParseTTL(),
+		PruneTTL:          cfg.ParsePruneTTL(),
+		Model:             cfg.CLI.Model,
+		ExtraArgs:         cfg.CLI.Args,
+		BackendModels:     backendModels,
+		BackendExtraArgs:  backendExtraArgs,
+		Workspace:         workspace,
+		StorePath:         storePath,
+		NoOutputTimeout:   noOutputTimeout,
+		TotalTimeout:      totalTimeout,
+		ClaudeDir:         claudeDir,
+		EventLogDir:       eventLogDir,
+		EventLogGenerator: "naozhi",
 	})
+	metrics.StartupPhaseRouterMs.Set(time.Since(t0).Milliseconds())
 
-	// Reconnect to surviving shim processes from previous naozhi run
-	router.ReconnectShims()
-
-	// Context with cancellation for graceful shutdown
+	// Context with cancellation for graceful shutdown. Created before
+	// ReconnectShimsCtx so a SIGTERM arriving during a long shim handshake
+	// (10+ shims × 15s each = 150s worst case) can abort promptly instead
+	// of running systemd's TimeoutStartSec out.
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+
+	// Reconnect to surviving shim processes from previous naozhi run
+	router.ReconnectShimsCtx(ctx)
+	metrics.StartupPhaseShimReconnectMs.Set(time.Since(t0).Milliseconds())
 
 	// Start cleanup loop
 	router.StartCleanupLoop(ctx, cfg.ParseTTL()/2)
@@ -588,40 +611,10 @@ func main() {
 	}
 
 	// Register platforms
-	platforms := make(map[string]platform.Platform)
-	if cfg.Platforms.Feishu != nil {
-		f := feishu.New(feishu.Config{
-			AppID:             cfg.Platforms.Feishu.AppID,
-			AppSecret:         cfg.Platforms.Feishu.AppSecret,
-			ConnectionMode:    cfg.Platforms.Feishu.ConnectionMode,
-			VerificationToken: cfg.Platforms.Feishu.VerificationToken,
-			EncryptKey:        cfg.Platforms.Feishu.EncryptKey,
-			MaxReplyLen:       cfg.Platforms.Feishu.MaxReplyLength,
-		}, stt)
-		platforms["feishu"] = f
-	}
-	if cfg.Platforms.Slack != nil {
-		s := slackplatform.New(slackplatform.Config{
-			BotToken:    cfg.Platforms.Slack.BotToken,
-			AppToken:    cfg.Platforms.Slack.AppToken,
-			MaxReplyLen: cfg.Platforms.Slack.MaxReplyLength,
-		})
-		platforms["slack"] = s
-	}
-	if cfg.Platforms.Discord != nil {
-		d := discordplatform.New(discordplatform.Config{
-			BotToken:    cfg.Platforms.Discord.BotToken,
-			MaxReplyLen: cfg.Platforms.Discord.MaxReplyLength,
-		})
-		platforms["discord"] = d
-	}
-	if cfg.Platforms.Weixin != nil {
-		wx := weixinplatform.New(weixinplatform.Config{
-			Token:       cfg.Platforms.Weixin.Token,
-			BaseURL:     cfg.Platforms.Weixin.BaseURL,
-			MaxReplyLen: cfg.Platforms.Weixin.MaxReplyLength,
-		})
-		platforms["weixin"] = wx
+	platforms, err := initPlatforms(cfg, stt)
+	if err != nil {
+		slog.Error("init platforms failed", "err", err)
+		os.Exit(1)
 	}
 
 	if len(platforms) == 0 {
@@ -644,6 +637,7 @@ func main() {
 			os.Exit(1)
 		}
 	}
+	metrics.StartupPhasePlatformsMs.Set(time.Since(t0).Milliseconds())
 
 	// Cron Scheduler
 	cronLoc := cfg.ParseCronTimezone()
@@ -678,6 +672,7 @@ func main() {
 		slog.Error("start cron scheduler", "err", err)
 		os.Exit(1)
 	}
+	metrics.StartupPhaseSchedulerMs.Set(time.Since(t0).Milliseconds())
 
 	// Configure remote nodes for multi-node aggregation
 	var nodes map[string]node.Conn
@@ -728,10 +723,18 @@ func main() {
 			}
 		},
 	})
+	metrics.StartupPhaseServerMs.Set(time.Since(t0).Milliseconds())
 
 	// Start upstream connector (this node connects to a primary)
 	if cfg.Upstream != nil {
-		conn := upstream.New(cfg.Upstream, router, projectMgr)
+		// Build a KeyResolver for the connector so reverse-RPC planner
+		// restart (#7) goes through the same ResolveForPlannerKey path
+		// as the dashboard HTTP handler (#6). Independent instance from
+		// the server's resolver — the agents map and project data are
+		// the same source of truth, but wiring through main.go avoids
+		// coupling upstream to the server package.
+		upstreamResolver := session.NewKeyResolver(agents, project.NewDataSource(projectMgr))
+		conn := upstream.New(cfg.Upstream, router, projectMgr, upstreamResolver)
 		if claudeDir != "" {
 			conn.SetDiscoverFunc(func() (json.RawMessage, error) {
 				pids, sids, cwds := router.ManagedExcludeSets()
@@ -855,6 +858,8 @@ func main() {
 		}
 	}()
 
+	metrics.StartupPhaseReadyMs.Set(time.Since(t0).Milliseconds())
+
 	select {
 	case err := <-serverErr:
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -871,6 +876,51 @@ func main() {
 		// Wait for HTTP server to finish draining in-flight requests
 		<-serverErr
 	}
+}
+
+// initPlatforms wires each configured IM platform adapter into a map.
+// Extracted from main() for testability + readability (CQ1). Callers
+// still own lifecycle — initPlatforms neither starts goroutines nor
+// touches globals; it just constructs the adapters and returns them.
+// The transcribe service is threaded through so Feishu can accept voice
+// messages; other adapters do not need it today.
+func initPlatforms(cfg *config.Config, stt transcribe.Service) (map[string]platform.Platform, error) {
+	platforms := make(map[string]platform.Platform)
+	if cfg.Platforms.Feishu != nil {
+		f := feishu.New(feishu.Config{
+			AppID:             cfg.Platforms.Feishu.AppID,
+			AppSecret:         cfg.Platforms.Feishu.AppSecret,
+			ConnectionMode:    cfg.Platforms.Feishu.ConnectionMode,
+			VerificationToken: cfg.Platforms.Feishu.VerificationToken,
+			EncryptKey:        cfg.Platforms.Feishu.EncryptKey,
+			MaxReplyLen:       cfg.Platforms.Feishu.MaxReplyLength,
+		}, stt)
+		platforms["feishu"] = f
+	}
+	if cfg.Platforms.Slack != nil {
+		s := slackplatform.New(slackplatform.Config{
+			BotToken:    cfg.Platforms.Slack.BotToken,
+			AppToken:    cfg.Platforms.Slack.AppToken,
+			MaxReplyLen: cfg.Platforms.Slack.MaxReplyLength,
+		})
+		platforms["slack"] = s
+	}
+	if cfg.Platforms.Discord != nil {
+		d := discordplatform.New(discordplatform.Config{
+			BotToken:    cfg.Platforms.Discord.BotToken,
+			MaxReplyLen: cfg.Platforms.Discord.MaxReplyLength,
+		})
+		platforms["discord"] = d
+	}
+	if cfg.Platforms.Weixin != nil {
+		wx := weixinplatform.New(weixinplatform.Config{
+			Token:       cfg.Platforms.Weixin.Token,
+			BaseURL:     cfg.Platforms.Weixin.BaseURL,
+			MaxReplyLen: cfg.Platforms.Weixin.MaxReplyLength,
+		})
+		platforms["weixin"] = wx
+	}
+	return platforms, nil
 }
 
 // parseDurationOrDefault parses a duration string, returning def on empty or error.
@@ -914,6 +964,32 @@ func parseBytesOrDefault(s string, def int64) int64 {
 		return def
 	}
 	return n * multiplier
+}
+
+// stateDirWarnMB is the soft ceiling for ~/.naozhi/ total size; see
+// docs/ops/disk-budget.md. RNEW-OPS-415 tracks quota enforcement.
+const stateDirWarnMB = 500
+
+// warnIfStateDirLarge walks stateDir once at startup and warns if total
+// bytes exceed stateDirWarnMB. First-run / permission errors are silent;
+// a truncated scan still warns using the partial total as a lower bound.
+func warnIfStateDirLarge(stateDir string) {
+	if stateDir == "" || stateDir == "." {
+		return
+	}
+	bytes, err := osutil.StateDirSize(stateDir)
+	truncated := errors.Is(err, osutil.ErrStateDirScanTruncated)
+	if err != nil && !truncated {
+		return
+	}
+	sizeMB := bytes / (1024 * 1024)
+	if sizeMB < stateDirWarnMB {
+		return
+	}
+	slog.Warn("state directory large",
+		"path", stateDir, "size_mb", sizeMB, "threshold_mb", stateDirWarnMB,
+		"truncated", truncated,
+		"hint", "prune attachments/events; see docs/ops/disk-budget.md")
 }
 
 // chatIDSuffix returns the last 8 characters of a chat ID for logging,

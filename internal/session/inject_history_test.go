@@ -22,11 +22,11 @@ func TestInjectHistory_UpdatesLastPromptAndActivity(t *testing.T) {
 	})
 
 	// Scan iterates newest→oldest; latest user entry wins.
-	if got, want := loadStringOrEmpty(&s.lastPrompt), "second question"; got != want {
+	if got, want := loadStringAtomic(&s.lastPrompt), "second question"; got != want {
 		t.Errorf("lastPrompt = %q, want %q", got, want)
 	}
 	// tool_use / thinking: whichever is newest wins; here that's "thinking".
-	if got, want := loadStringOrEmpty(&s.lastActivity), "considering"; got != want {
+	if got, want := loadStringAtomic(&s.lastActivity), "considering"; got != want {
 		t.Errorf("lastActivity = %q, want %q", got, want)
 	}
 }
@@ -45,10 +45,10 @@ func TestInjectHistory_DoesNotOverwriteNonEmpty(t *testing.T) {
 		{Type: "tool_use", Summary: "historical tool"},
 	})
 
-	if got, want := loadStringOrEmpty(&s.lastPrompt), "set by send"; got != want {
+	if got, want := loadStringAtomic(&s.lastPrompt), "set by send"; got != want {
 		t.Errorf("lastPrompt overwritten: got %q, want %q", got, want)
 	}
-	if got, want := loadStringOrEmpty(&s.lastActivity), "live tool"; got != want {
+	if got, want := loadStringAtomic(&s.lastActivity), "live tool"; got != want {
 		t.Errorf("lastActivity overwritten: got %q, want %q", got, want)
 	}
 }

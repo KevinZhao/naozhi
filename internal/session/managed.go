@@ -74,6 +74,13 @@ type processIface interface {
 	EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry
 	LastEntryOfType(typ string) cli.EventEntry
 	LastActivitySummary() string
+	// LastEventAt returns the wall-clock time of the most recent live event
+	// appended to the process's EventLog, or zero Time when nothing has
+	// arrived yet. Router.Cleanup uses it as a fallback activity signal so
+	// a long-running turn that streams tool_use / thinking events is not
+	// misclassified as stuck when the session-level lastActive timestamp
+	// (only refreshed at Send entry) has aged past the stuck threshold.
+	LastEventAt() time.Time
 	// UserTurnCount returns the cumulative count of "user" entries the
 	// process's EventLog has seen since spawn. Feeds SessionSnapshot.MessageCount.
 	UserTurnCount() int64
@@ -438,7 +445,7 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 
 	proc := s.loadProcess()
 	if proc == nil {
-		return nil, fmt.Errorf("session %s has no active process", s.key)
+		return nil, fmt.Errorf("session %s: %w", s.key, ErrNoActiveProcess)
 	}
 
 	result, err := proc.SendPassthrough(ctx, text, images, onEvent, priority)
@@ -540,7 +547,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 
 	proc := s.loadProcess()
 	if proc == nil {
-		return nil, fmt.Errorf("session %s has no active process", s.key)
+		return nil, fmt.Errorf("session %s: %w", s.key, ErrNoActiveProcess)
 	}
 
 	// lastActivity tracking is handled lock-free by EventLog.Append via its
@@ -928,6 +935,56 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 	return out
 }
 
+// SubagentLinker returns the SubagentLinker owned by the live *cli.Process,
+// or nil when the session is not backed by a live Claude-CLI process (fake
+// test process, dead process, ACP protocol, etc.). Callers must guard the
+// nil return — the agent-team UI endpoints downgrade to 404 in that case.
+//
+// Intentionally type-asserts rather than widening processIface so the fake
+// processes in router/managed tests don't need to implement the full Linker
+// surface. The downside — a test process that wants real linker behaviour
+// must wrap *cli.Process directly — is acceptable because the linker's own
+// unit tests in internal/cli/subagent_link_test.go are the canonical spot
+// for that coverage.
+//
+// TODO(RFC v4 phase 3+): if a second backend needs internal agent-view
+// support (e.g. ACP / Kiro), abstract via:
+//
+//	type AgentIntrospector interface {
+//	    Linker() *cli.SubagentLinker
+//	    EventLog() *cli.EventLog
+//	}
+//
+// and have *cli.Process implement it, then switch this to a type-safe
+// assertion. Today only stream-json-backed Claude writes the on-disk
+// transcript, so the cost of the abstraction is not warranted yet.
+func (s *ManagedSession) SubagentLinker() *cli.SubagentLinker {
+	proc := s.loadProcess()
+	if proc == nil {
+		return nil
+	}
+	real, ok := proc.(*cli.Process)
+	if !ok {
+		return nil
+	}
+	return real.Linker()
+}
+
+// AgentEventLog exposes the live *cli.EventLog so the server-side tailer
+// registry can install its task_done hook. nil for fake processes / dead
+// sessions, same policy as SubagentLinker above.
+func (s *ManagedSession) AgentEventLog() *cli.EventLog {
+	proc := s.loadProcess()
+	if proc == nil {
+		return nil
+	}
+	real, ok := proc.(*cli.Process)
+	if !ok {
+		return nil
+	}
+	return real.EventLog()
+}
+
 // EventLastN returns the most recent n event entries.
 func (s *ManagedSession) EventLastN(n int) []cli.EventEntry {
 	proc := s.loadProcess()
@@ -1195,27 +1252,19 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	// is atomic so no lock is needed; the "only set if empty" check is a
 	// benign TOCTOU — a concurrent Send writing the same field races, but
 	// both values are "most recent" views and whichever lands is acceptable.
-	if prompt != "" && loadStringOrEmpty(&s.lastPrompt) == "" {
+	if prompt != "" && loadStringAtomic(&s.lastPrompt) == "" {
 		storeStringAtomic(&s.lastPrompt, prompt)
 	}
-	if activity != "" && loadStringOrEmpty(&s.lastActivity) == "" {
+	if activity != "" && loadStringAtomic(&s.lastActivity) == "" {
 		storeStringAtomic(&s.lastActivity, activity)
 	}
-}
-
-// loadStringOrEmpty returns the stored string or "" if never stored / stored as "".
-// With atomic.Pointer[string] this is functionally identical to loadStringAtomic;
-// retained as an alias so tests in inject_history_test.go / log_system_event_test.go
-// that reference this name still compile without churn.
-func loadStringOrEmpty(v *atomic.Pointer[string]) string {
-	return loadStringAtomic(v)
 }
 
 // extractLastPromptFromProcess scans the attached process's event log to populate
 // lastPrompt and lastActivity when they haven't been set yet (e.g. after shim reconnect
 // where events were injected directly into the process, bypassing InjectHistory).
 func (s *ManagedSession) extractLastPromptFromProcess() {
-	if loadStringOrEmpty(&s.lastPrompt) != "" && loadStringOrEmpty(&s.lastActivity) != "" {
+	if loadStringAtomic(&s.lastPrompt) != "" && loadStringAtomic(&s.lastActivity) != "" {
 		return
 	}
 	p := s.loadProcess()
@@ -1236,10 +1285,10 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 			break
 		}
 	}
-	if prompt != "" && loadStringOrEmpty(&s.lastPrompt) == "" {
+	if prompt != "" && loadStringAtomic(&s.lastPrompt) == "" {
 		storeStringAtomic(&s.lastPrompt, prompt)
 	}
-	if activity != "" && loadStringOrEmpty(&s.lastActivity) == "" {
+	if activity != "" && loadStringAtomic(&s.lastActivity) == "" {
 		storeStringAtomic(&s.lastActivity, activity)
 	}
 }

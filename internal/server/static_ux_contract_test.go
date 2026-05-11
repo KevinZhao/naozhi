@@ -705,8 +705,8 @@ func TestDashboardJS_MarkdownExport(t *testing.T) {
 	//    plus `thinking` which the UI also hides. Drift between this
 	//    set and INTERNAL_EVENT_TYPES would cause the export to contain
 	//    content the operator never saw.
-	if !strings.Contains(js, "const MARKDOWN_EXPORT_IGNORE = new Set(['tool_use', 'result', 'agent', 'task_start', 'task_progress', 'task_done', 'thinking']);") {
-		t.Error("MARKDOWN_EXPORT_IGNORE must list exactly the UI-hidden types (tool_use/result/agent/task_*/thinking)")
+	if !strings.Contains(js, "const MARKDOWN_EXPORT_IGNORE = new Set(['tool_use', 'result', 'agent', 'task_start', 'task_progress', 'task_done', 'thinking', 'ask_question']);") {
+		t.Error("MARKDOWN_EXPORT_IGNORE must list exactly the UI-hidden types (tool_use/result/agent/task_*/thinking/ask_question)")
 	}
 
 	// 3. Formatter signature + key behaviours.
@@ -1091,6 +1091,107 @@ func TestDashboardHTML_UX2_DangerButtonStyle(t *testing.T) {
 	detailSel := ".modal.confirm-dialog .confirm-detail"
 	if !strings.Contains(html, detailSel) {
 		t.Errorf("dashboard.html missing confirm-detail style: %q", detailSel)
+	}
+}
+
+// TestDashboardJS_RNEW_UX013_PromptDialog pins RNEW-UX-013 — the themed
+// promptDialog() replaces native window.prompt() for the session rename flow
+// and the scratch-drawer replacement confirm fallback drops native confirm().
+// Four arms:
+//
+//  1. promptDialog helper must exist, return a Promise, and focus+select the
+//     input on open so the default value is replaced on first keystroke.
+//  2. No call site may invoke window.prompt(...) — blocks event loop and
+//     looks out of place next to the dashboard dark theme.
+//  3. renameSession must use promptDialog (Chinese title present) and not
+//     fall back to the native prompt.
+//  4. scratch-drawer openScratch must use confirmDialog directly, not the
+//     legacy ternary that branched to native confirm('…继续？'). That
+//     fallback was dead code (confirmDialog is unconditionally defined) and
+//     defeated theme parity.
+func TestDashboardJS_RNEW_UX013_PromptDialog(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// Arm 1: helper exists with expected structure.
+	for _, want := range []string{
+		"function promptDialog(opts)",
+		"overlay.className = 'modal-overlay prompt-overlay'",
+		// Focus+select on open so the default is replaced on first keystroke.
+		"input.focus(); input.select();",
+		// Enter key submits.
+		"e.key === 'Enter'",
+		// Backdrop click cancels (mirrors confirmDialog).
+		"e.target === overlay",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("promptDialog helper missing expected structure %q", want)
+		}
+	}
+
+	// Arm 2: no window.prompt() call site. The string may legitimately
+	// appear in comments (this very file mentions it), so scan line by line
+	// and skip full-line comments (`//...`) and doc-comment bodies (` * ...`).
+	{
+		lines := strings.Split(js, "\n")
+		for i, line := range lines {
+			trimmed := strings.TrimSpace(line)
+			if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "*") {
+				continue
+			}
+			if strings.Contains(trimmed, "window.prompt(") {
+				t.Errorf("dashboard.js line %d uses native window.prompt(); use promptDialog() instead: %q", i+1, trimmed)
+			}
+		}
+	}
+
+	// Arm 3: renameSession wires promptDialog with the expected Chinese title.
+	if !strings.Contains(js, "title: '重命名会话'") {
+		t.Error("renameSession must invoke promptDialog with Chinese title '重命名会话'")
+	}
+	// Legacy native prompt copy must be gone — the old prompt string was
+	// '重命名会话（留空恢复默认标题，最多 128 字节）'. Any survivor means the
+	// flow regressed to window.prompt.
+	if strings.Contains(js, "window.prompt('重命名会话") {
+		t.Error("renameSession still falls back to window.prompt — regression")
+	}
+
+	// Arm 4: scratch-drawer replacement confirm must NOT use the legacy
+	// ternary that branched to native confirm('当前追问窗口将被替换，继续？').
+	legacyFallback := "confirm('当前追问窗口将被替换，继续？')"
+	if strings.Contains(js, legacyFallback) {
+		t.Errorf("openScratch must not retain native confirm fallback: %q", legacyFallback)
+	}
+	// Positive: the themed dialog title must be present.
+	if !strings.Contains(js, "title: '替换当前追问窗口？'") {
+		t.Error("openScratch must invoke confirmDialog with Chinese title '替换当前追问窗口？'")
+	}
+}
+
+// TestDashboardHTML_RNEW_UX013_PromptDialogStyles pins the CSS hooks that
+// promptDialog relies on. Missing either rule means the dialog falls back to
+// the neutral .modal styling and the message text visually collides with the
+// input below it.
+func TestDashboardHTML_RNEW_UX013_PromptDialogStyles(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(data)
+
+	wants := []string{
+		".modal.prompt-dialog .prompt-message",
+		".modal.prompt-dialog .prompt-input",
+	}
+	for _, want := range wants {
+		if !strings.Contains(html, want) {
+			t.Errorf("dashboard.html missing prompt-dialog style: %q", want)
+		}
 	}
 }
 
@@ -3752,13 +3853,26 @@ func TestDashboard_R151_EventStreamAndBannerLocalized(t *testing.T) {
 
 	// Invariant 3: tool verb map — strict whitelist of keys with
 	// localized verbs, plus Agent staying English as a proper noun.
-	wantVerbMap := `const toolVerbs = {
-  Read: '读取', Edit: '编辑', Write: '写入', Bash: '执行',
-  Grep: '搜索', Glob: '查找文件', Agent: 'Agent',
-  Notebook: '编辑 Notebook', WebFetch: '抓取'
-};`
-	if !strings.Contains(js, wantVerbMap) {
-		t.Error("toolVerbs map must match the Round 151 localized shape exactly (Read/Edit/Write/Bash/Grep/Glob/Agent/Notebook/WebFetch with Chinese verbs + Agent kept English)")
+	// RFC v4 §3.6.8 extended the set with 10 new Claude tools (Team*/
+	// SendMessage/ToolSearch/Task*/ScheduleWakeup/Cron*). Each entry
+	// below must be present for the banner to surface the Chinese verb
+	// instead of the "使用 <tool>" fallback.
+	wantVerbEntries := []string{
+		// Round 151 originals.
+		`Read: '读取'`, `Edit: '编辑'`, `Write: '写入'`, `Bash: '执行'`,
+		`Grep: '搜索'`, `Glob: '查找文件'`, `Agent: 'Agent'`,
+		`Notebook: '编辑 Notebook'`, `WebFetch: '抓取'`,
+		// RFC v4 §3.6.8 extension.
+		`TeamCreate: '创建团队'`, `TeamDelete: '解散团队'`,
+		`SendMessage: '发消息'`, `ToolSearch: '加载工具'`,
+		`TaskOutput: '读 agent 输出'`, `TaskStop: '停止 agent'`,
+		`ScheduleWakeup: '排唤醒'`,
+		`CronCreate: '建定时任务'`, `CronDelete: '删定时任务'`, `CronList: '查定时任务'`,
+	}
+	for _, entry := range wantVerbEntries {
+		if !strings.Contains(js, entry) {
+			t.Errorf("toolVerbs map missing localized entry: %s", entry)
+		}
 	}
 	if !strings.Contains(js, `const verb = toolVerbs[tool] || ('使用 ' + tool);`) {
 		t.Error("toolVerb fallback must be '使用 ' prefix for unknown tools (was 'Using ')")
@@ -5052,5 +5166,709 @@ func TestDashboardJS_LoadEarlierFallbackWhenAllInternal(t *testing.T) {
 	prependBody := js[prependIdx : prependIdx+prependEnd]
 	if !strings.Contains(prependBody, "oldestFetchedEventTime") {
 		t.Error("prependEvents must advance oldestFetchedEventTime — otherwise consecutive load-earlier clicks on fully-internal pages loop against the same cursor")
+	}
+}
+
+// TestDashboardJS_HTMLRenderSandbox pins the B1 HTML-preview client contract.
+//
+// Three invariants must all hold, or workspace HTML can escape to same-origin
+// execution in the dashboard:
+//
+//  1. The iframe MUST be created with sandbox=” — any allow-* token
+//     re-grants a capability.
+//  2. The bytes must arrive via fetch → Blob({type:'text/html'}) → blob
+//     URL, NOT via iframe.src = fileApiUrl(...render). The server returns
+//     application/octet-stream specifically so a direct URL hit downloads;
+//     client must never bypass that by pointing iframe.src at the API.
+//  3. The blob URL must be revoked when the drawer closes, or every open
+//     leaks up to maxRawBytes (50 MB) until the tab reloads.
+//
+// We scan the renderHtmlInSandbox helper body so the assertion is robust
+// against unrelated edits elsewhere in dashboard.js.
+func TestDashboardJS_HTMLRenderSandbox(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	helperIdx := strings.Index(js, "async function renderHtmlInSandbox(")
+	if helperIdx < 0 {
+		t.Fatal("dashboard.js missing renderHtmlInSandbox — structural anchor for HTML sandbox contract")
+	}
+	// The helper fits comfortably in 4 KiB; scoping keeps unrelated future
+	// mentions of "sandbox" or "allow-scripts" from tripping the checks.
+	end := helperIdx + 4096
+	if end > len(js) {
+		end = len(js)
+	}
+	helper := js[helperIdx:end]
+
+	// Invariant 1: sandbox attribute is set with an empty string value.
+	sandboxRe := regexp.MustCompile(`setAttribute\(\s*['"]sandbox['"]\s*,\s*['"]\s*['"]\s*\)`)
+	if !sandboxRe.MatchString(helper) {
+		t.Error("renderHtmlInSandbox must call setAttribute('sandbox', '') — empty string grants zero capabilities; any other value weakens the iframe")
+	}
+	for _, forbidden := range []string{"allow-scripts", "allow-same-origin", "allow-forms", "allow-top-navigation", "allow-popups"} {
+		if strings.Contains(helper, forbidden) {
+			t.Errorf("renderHtmlInSandbox must not include sandbox token %q — re-opens the escape it exists to prevent", forbidden)
+		}
+	}
+
+	// Invariant 2: bytes routed through fetch + Blob + createObjectURL.
+	for _, required := range []string{"fileApiUrl(", "'render'", "arrayBuffer", "new Blob(", "URL.createObjectURL("} {
+		if !strings.Contains(helper, required) {
+			t.Errorf("renderHtmlInSandbox must use %s — bypassing the blob path re-exposes the Firefox CSP-sandbox top-level-nav gap", required)
+		}
+	}
+	// Blob type MUST be forced to text/html — server returns octet-stream,
+	// so only the client-constructed Blob's type tells the browser how to
+	// interpret the bytes.
+	typeRe := regexp.MustCompile(`type\s*:\s*['"]text/html['"]`)
+	if !typeRe.MatchString(helper) {
+		t.Error("renderHtmlInSandbox must wrap bytes as Blob({type:'text/html'}) — without this the iframe gets octet-stream and shows download UI")
+	}
+
+	// Invariant 3: blob URL is tracked and revoked on drawer close.
+	closeIdx := strings.Index(js, "function closeFilePreview(")
+	if closeIdx < 0 {
+		t.Fatal("dashboard.js missing closeFilePreview — structural anchor for blob-revoke contract")
+	}
+	closeEnd := closeIdx + 2048
+	if closeEnd > len(js) {
+		closeEnd = len(js)
+	}
+	closeBody := js[closeIdx:closeEnd]
+	if !strings.Contains(closeBody, "revokeObjectURL") || !strings.Contains(closeBody, "_pendingHtmlBlobUrl") {
+		t.Error("closeFilePreview must revoke the tracked blob URL — each open otherwise leaks up to maxRawBytes (50 MB) until the tab reloads")
+	}
+
+	// Invariant 4: renderHtmlInSandbox uses a monotonic seq token to
+	// detect a superseding render while fetch is in flight, and revokes
+	// its own stale blob URL instead of overwriting the tracked slot.
+	// Missing this, rapidly opening file A then file B leaks A's blob.
+	if !strings.Contains(helper, "_htmlRenderSeq") {
+		t.Error("renderHtmlInSandbox must use _htmlRenderSeq token — without it, a second HTML open while the first fetch is in flight leaks the first blob URL")
+	}
+	// At minimum 3 staleness checks: after fetch headers, after arrayBuffer
+	// body, and one more either around the URL allocation or the catch
+	// branch. Count occurrences of the compare to catch regressions that
+	// drop a single check.
+	staleChecks := strings.Count(helper, "mySeq !== _htmlRenderSeq")
+	if staleChecks < 3 {
+		t.Errorf("renderHtmlInSandbox must check mySeq !== _htmlRenderSeq at every await boundary (got %d, want >=3)", staleChecks)
+	}
+}
+
+// TestDashboardJS_RNEW_UX002_GlobalErrorHandler pins the RNEW-UX-002 fix:
+// the SPA registers module-scope window listeners for both uncaught errors
+// and unhandled promise rejections. Without these, a silent handler throw
+// freezes the UI with no signal to the operator. The contract guards the
+// invariants most likely to silently regress during refactors.
+func TestDashboardJS_RNEW_UX002_GlobalErrorHandler(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// 1. The RNEW-UX-002 JSDoc comment anchors the handler block and
+	//    documents intent. If the block is moved / deleted, the test
+	//    points at the right ticket for the reviewer.
+	anchor := "RNEW-UX-002: global error handler"
+	anchorIdx := strings.Index(js, anchor)
+	if anchorIdx < 0 {
+		t.Fatalf("dashboard.js missing RNEW-UX-002 anchor comment %q — handler block cannot be located", anchor)
+	}
+	// Scope all further checks to a window around the handler so later
+	// unrelated mentions of "addEventListener('error'" inside feature
+	// handlers (e.g. <img> onerror wiring) or later preventDefault()
+	// calls in the image-lightbox IIFE don't false-positive. Use the
+	// first IIFE close `})();` after the anchor as the right boundary
+	// — that's the exact end of the handler block.
+	searchFrom := js[anchorIdx:]
+	iifeEndRel := strings.Index(searchFrom, "})();")
+	if iifeEndRel < 0 {
+		t.Fatal("RNEW-UX-002: could not locate IIFE close `})();` after anchor — block structure changed")
+	}
+	winEnd := anchorIdx + iifeEndRel + len("})();")
+	if winEnd > len(js) {
+		winEnd = len(js)
+	}
+	block := js[anchorIdx:winEnd]
+
+	// 2. Both listeners exist.
+	errListenerRe := regexp.MustCompile(`window\.addEventListener\(\s*['"]error['"]\s*,`)
+	if !errListenerRe.MatchString(block) {
+		t.Error("RNEW-UX-002: window.addEventListener('error', ...) must be registered — uncaught errors otherwise freeze the UI silently")
+	}
+	rejListenerRe := regexp.MustCompile(`window\.addEventListener\(\s*['"]unhandledrejection['"]\s*,`)
+	if !rejListenerRe.MatchString(block) {
+		t.Error("RNEW-UX-002: window.addEventListener('unhandledrejection', ...) must be registered — unhandled promise rejections otherwise vanish")
+	}
+
+	// 3. The 'error' listener MUST be registered at module scope, not
+	//    inside a function body that never runs. We verify this by
+	//    checking the listener registration isn't nested behind a
+	//    `function ...()` keyword between the top of the anchor block
+	//    and the call site. The handler is wrapped in an IIFE
+	//    `(function () { ... })()` which is acceptable — the invocation
+	//    is synchronous at module load. To distinguish IIFE from a
+	//    named-function definition, require the IIFE `})();` pattern
+	//    appears after both listener registrations.
+	iifeCloseRe := regexp.MustCompile(`\}\)\(\)\s*;`)
+	if !iifeCloseRe.MatchString(block) {
+		t.Error("RNEW-UX-002: handler must be wrapped in an immediately-invoked function — without `})();` the listeners are never actually registered at module load")
+	}
+
+	// 4. Throttle window is referenced so duplicate errors within ~5s
+	//    don't spam the toast layer. Accept either the literal 5000 or
+	//    the `5 * 1000` form used in the source.
+	throttleRe := regexp.MustCompile(`5\s*\*\s*1000|\b5000\b`)
+	if !throttleRe.MatchString(block) {
+		t.Error("RNEW-UX-002: throttle window (5000 or 5 * 1000) must be referenced — without it a tight error loop spams the toast layer")
+	}
+
+	// 5. Handler must NOT suppress the browser's own console output.
+	//    Calling preventDefault or returning true both swallow the
+	//    default logging — operators debugging from devtools lose the
+	//    native stack trace, which is the most useful signal we have.
+	//    Strip block comments / line comments before the check so a
+	//    JSDoc line that mentions "Never calls preventDefault" doesn't
+	//    false-positive the contract.
+	codeOnly := stripJSComments(block)
+	if strings.Contains(codeOnly, "preventDefault(") {
+		t.Error("RNEW-UX-002: handler must NOT call preventDefault() — the browser's own console.error output is the primary debug signal")
+	}
+	if regexp.MustCompile(`return\s+true\b`).MatchString(codeOnly) {
+		t.Error("RNEW-UX-002: handler must NOT `return true` — legacy onerror truthy-return suppresses default logging")
+	}
+
+	// 6. Console log uses the [global-error] prefix so operators
+	//    filtering devtools by string can locate these quickly. Without
+	//    a stable prefix the logs get lost in normal chat chatter.
+	if !strings.Contains(block, "[global-error]") {
+		t.Error("RNEW-UX-002: console.error must carry the `[global-error]` prefix — without it operators can't filter devtools output")
+	}
+
+	// 7. Sanity: a warning-style toast (not an error toast) is surfaced
+	//    so a transient hiccup doesn't yell at the user. This keeps the
+	//    UX warmth invariant from regressing to 'error'. The message may
+	//    be built via concatenation, so we verify the two halves — the
+	//    Chinese 异常 literal and the 'warning' type argument — rather
+	//    than forcing them to sit in a single regex-reachable span.
+	if !strings.Contains(block, "异常") {
+		t.Error("RNEW-UX-002: must surface a Chinese user-facing 异常 message in the toast — English-only errors break the zh-CN UX contract")
+	}
+	if !regexp.MustCompile(`showToast\([^;]*,\s*['"]warning['"]`).MatchString(block) {
+		t.Error("RNEW-UX-002: must call showToast(..., 'warning') — transient errors shouldn't render as red error toasts")
+	}
+}
+
+// stripJSComments removes //... line comments and /*...*/ block comments
+// from a JS source window so contract-string checks don't false-positive
+// on documentation that mentions forbidden tokens. Intentionally simple —
+// TestServiceWorker_RNEW_UX005_Contract pins the RNEW-UX-005 rewrite of
+// sw.js: the minimal PWA service worker must expose a versioned SW_VERSION
+// constant, immediately activate new versions via skipWaiting +
+// clients.claim, and retain a fetch listener so browsers still mark the
+// SW as controlling (required for installability).
+func TestServiceWorker_RNEW_UX005_Contract(t *testing.T) {
+	t.Parallel()
+	data, err := swJS.ReadFile("static/sw.js")
+	if err != nil {
+		t.Fatalf("read sw.js: %v", err)
+	}
+	src := string(data)
+	for _, want := range []string{
+		"SW_VERSION",
+		"skipWaiting",
+		"clients.claim",
+	} {
+		if !strings.Contains(src, want) {
+			t.Errorf("sw.js missing required token %q (RNEW-UX-005)", want)
+		}
+	}
+	// A fetch event listener must still be registered so browsers treat
+	// the SW as controlling — without it, "Add to Home Screen" breaks.
+	if !regexp.MustCompile(`addEventListener\(\s*['"]fetch['"]`).MatchString(src) {
+		t.Error("sw.js missing fetch event listener (required for PWA installability)")
+	}
+}
+
+// TestDashboardJS_RNEW_UX004_LSHelper pins the RNEW-UX-004 fix that
+// introduced a unified localStorage helper (LS_PREFIX/lsSet/lsGet/lsRemove)
+// to replace the historical mix of 'nz_' and 'naozhi_' raw-key call sites.
+// The contract is intentionally loose: legacy raw localStorage.* call sites
+// must keep working (persisted user state across upgrades), so we only
+// assert the helper exists and is exercised by at least one call site.
+func TestDashboardJS_RNEW_UX004_LSHelper(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+	for _, want := range []string{
+		"const LS_PREFIX = 'nz:'",
+		"function lsSet(",
+		"function lsGet(",
+		"function lsRemove(",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("dashboard.js missing RNEW-UX-004 helper token %q", want)
+		}
+	}
+	// At least one call site must actually use the helper (a write or a
+	// read), otherwise the helper is dead code. Count occurrences that
+	// look like invocations rather than the definition itself.
+	callSites := strings.Count(js, "lsSet(") + strings.Count(js, "lsGet(") + strings.Count(js, "lsRemove(")
+	// Subtract the definition lines (one per helper) to count real calls.
+	if callSites-3 < 1 {
+		t.Errorf("dashboard.js: expected >=1 call site of lsSet/lsGet/lsRemove, got %d (after subtracting 3 definitions)", callSites-3)
+	}
+}
+
+// TestDashboardJS_RNEW_SEC008_DataRawAlwaysEscAttr pins the RNEW-SEC-008
+// contract: every `data-raw="..."` attribute emission in dashboard.js must
+// route user content through `escAttr(` — never through `renderMd(` or any
+// other helper. The invariant matters because attribute escaping and HTML
+// escaping differ: escAttr() encodes quote/&/< for attribute context, while
+// renderMd() emits raw HTML (intended for innerHTML). Routing markdown-
+// rendered HTML into an attribute would let a crafted message close the
+// attribute and inject a new handler — a stored-XSS pathway. Today only the
+// copy-button and ask-button in renderEvent use data-raw; this test is a
+// regression gate so any future data-raw site inherits the same escaping.
+func TestDashboardJS_RNEW_SEC008_DataRawAlwaysEscAttr(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	// Operate on raw source: stripJSComments is naive about `//` inside JS
+	// string literals and would eat real code. `data-raw=` is a specific
+	// enough token that false positives from code comments are unlikely,
+	// and even if one appeared the shape-based classification below would
+	// skip pure literals rather than misfire.
+	js := string(data)
+
+	// Locate every `data-raw=` occurrence. We classify the value expression
+	// that follows each match.
+	locs := regexp.MustCompile(`data-raw=`).FindAllStringIndex(js, -1)
+	if len(locs) == 0 {
+		t.Fatal("RNEW-SEC-008: no data-raw= occurrences found — test anchor is stale, verify dashboard.js still uses this attribute or remove the contract")
+	}
+	// Require at least the 2 currently-known sites (copy + ask). If the
+	// count drops below, the audit anchor moved and the test should be
+	// re-evaluated rather than silently passing zero assertions.
+	if len(locs) < 2 {
+		t.Errorf("RNEW-SEC-008: expected >=2 data-raw= sites (copy + ask), found %d — verify the audit is still complete", len(locs))
+	}
+
+	// Pure-literal attribute values contain no interpolation markers
+	// (`$` for template literals, `` ` `` for nested template-literal
+	// fragments). Those are always safe.
+	literalRe := regexp.MustCompile("^data-raw=\"[^\"$`]*\"")
+	// Template-literal style: `data-raw="${EXPR}"`. EXPR's first call
+	// must be escAttr(.
+	tmplRe := regexp.MustCompile(`^data-raw="\$\{([^}]*)\}`)
+	// String-concat style inside a single-quoted or backtick-delimited
+	// outer literal: `data-raw="' + ESCAPER(...)`. ESCAPER must be escAttr.
+	concatRe := regexp.MustCompile("^data-raw=\"['`]\\s*\\+\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*\\(")
+
+	enforced := 0
+	for _, loc := range locs {
+		// 200 chars is >2x the longest current occurrence and keeps the
+		// regex anchors cheap.
+		end := loc[0] + 200
+		if end > len(js) {
+			end = len(js)
+		}
+		window := js[loc[0]:end]
+
+		// Hard forbid: renderMd anywhere before the attribute's closing
+		// quote. renderMd emits HTML — using it in attribute context
+		// would be stored-XSS.
+		if cq := findDataRawAttrValueEnd(window); cq > 0 {
+			if strings.Contains(window[:cq], "renderMd(") {
+				t.Errorf("RNEW-SEC-008: data-raw= value must not call renderMd() — it emits HTML, not attribute-safe text. Window: %q", window[:cq])
+				continue
+			}
+		}
+
+		// Case 1: pure literal — no interpolation, safe.
+		if literalRe.MatchString(window) {
+			enforced++
+			continue
+		}
+		// Case 2: template literal — first ${...} must call escAttr(.
+		if m := tmplRe.FindStringSubmatch(window); m != nil {
+			expr := strings.TrimSpace(m[1])
+			if !strings.HasPrefix(expr, "escAttr(") {
+				t.Errorf("RNEW-SEC-008: data-raw=\"${...}\" must open with escAttr(, got %q", expr)
+			}
+			enforced++
+			continue
+		}
+		// Case 3: string concat — first call after `' +` must be escAttr.
+		if m := concatRe.FindStringSubmatch(window); m != nil {
+			if m[1] != "escAttr" {
+				t.Errorf("RNEW-SEC-008: data-raw=\"' + X(...) — first call must be escAttr, got %q", m[1])
+			}
+			enforced++
+			continue
+		}
+		// Unknown shape: reject so a new emission pattern has to extend
+		// this contract explicitly.
+		t.Errorf("RNEW-SEC-008: unrecognized data-raw= value shape — extend the contract to cover it. Window: %q", window)
+	}
+	if enforced == 0 {
+		t.Error("RNEW-SEC-008: found data-raw= sites but none were classifiable — the contract matched zero patterns, which is a test bug")
+	}
+}
+
+// findDataRawAttrValueEnd returns the index of the closing `"` of a
+// data-raw= attribute value that begins at offset 0 of `window`. Returns
+// -1 if no closing quote is found. The scan is naive — it treats the
+// first `"` after the opening one as the terminator, which is correct
+// for the current emission shapes (escAttr() never produces a literal `"`,
+// and the outer string literals use single quotes or backticks).
+func findDataRawAttrValueEnd(window string) int {
+	const prefix = `data-raw="`
+	if !strings.HasPrefix(window, prefix) {
+		return -1
+	}
+	for i := len(prefix); i < len(window); i++ {
+		if window[i] == '"' {
+			return i
+		}
+	}
+	return -1
+}
+
+// it does not track string literals, so a comment-like sequence inside a
+// string would still be stripped; for the narrow windows this test works
+// with, that's an acceptable trade. If the window starts INSIDE a block
+// comment (e.g. the caller sliced starting at a JSDoc anchor phrase),
+// we still skip everything up to the first `*/` so the stripped text
+// begins with real code.
+func stripJSComments(src string) string {
+	var b strings.Builder
+	b.Grow(len(src))
+	i, n := 0, len(src)
+	// If the window starts within a block comment, skip to the
+	// terminator before scanning normally.
+	if idx := strings.Index(src, "*/"); idx >= 0 {
+		// Only treat as continuation if no opening /* appears before it.
+		if open := strings.Index(src[:idx], "/*"); open < 0 {
+			i = idx + 2
+		}
+	}
+	for i < n {
+		if i+1 < n && src[i] == '/' && src[i+1] == '*' {
+			end := strings.Index(src[i+2:], "*/")
+			if end < 0 {
+				break
+			}
+			i += 2 + end + 2
+			continue
+		}
+		if i+1 < n && src[i] == '/' && src[i+1] == '/' {
+			end := strings.IndexByte(src[i:], '\n')
+			if end < 0 {
+				break
+			}
+			i += end
+			continue
+		}
+		b.WriteByte(src[i])
+		i++
+	}
+	return b.String()
+}
+
+// TestDashboard_RNEW_UX010_AriaLiveRegion pins the screen-reader live-region
+// wiring: HTML must expose #sr-announce with aria-live=polite, a .sr-only
+// CSS rule must visually hide it (not display:none, which suppresses AT
+// output), and dashboard.js must define an announce() helper that targets
+// it. Regression would silently drop accessibility for WS state / session
+// lifecycle events, so we lock every piece here.
+func TestDashboard_RNEW_UX010_AriaLiveRegion(t *testing.T) {
+	t.Parallel()
+	htmlBytes, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(htmlBytes)
+	if !strings.Contains(html, `id="sr-announce"`) {
+		t.Error("RNEW-UX-010: dashboard.html missing #sr-announce live region")
+	}
+	// The region must be polite (not assertive) so it queues behind user
+	// speech rather than interrupting.
+	if !regexp.MustCompile(`id="sr-announce"[^>]*aria-live="polite"`).MatchString(html) {
+		t.Error("RNEW-UX-010: #sr-announce must declare aria-live=\"polite\"")
+	}
+	// sr-only class must exist as a real CSS rule — visually-hidden clip recipe.
+	if !strings.Contains(html, `.sr-only{`) {
+		t.Error("RNEW-UX-010: dashboard.html missing .sr-only{ CSS rule")
+	}
+	if !strings.Contains(html, `clip:rect(0,0,0,0)`) {
+		t.Error("RNEW-UX-010: .sr-only should use clip:rect(0,0,0,0) visually-hidden pattern")
+	}
+	jsBytes, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(jsBytes)
+	if !strings.Contains(js, "function announce(") {
+		t.Error("RNEW-UX-010: dashboard.js missing announce() helper")
+	}
+	if !strings.Contains(js, "getElementById('sr-announce')") {
+		t.Error("RNEW-UX-010: announce() must target #sr-announce")
+	}
+	// At least one call-site must exist — otherwise the helper is dead code
+	// and accessibility announcements never fire.
+	if strings.Count(js, "announce(") < 3 {
+		t.Errorf("RNEW-UX-010: expected announce() wired into multiple signal sites, found %d occurrences", strings.Count(js, "announce("))
+	}
+}
+
+// TestDashboard_RNEW_UX012_SkeletonLoader pins the sidebar skeleton-loading
+// state — replaces the flash-of-"loading..." text with shimmering placeholder
+// cards while the first sessions fetch is in flight.
+func TestDashboard_RNEW_UX012_SkeletonLoader(t *testing.T) {
+	t.Parallel()
+	htmlBytes, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(htmlBytes)
+	if !strings.Contains(html, `.skeleton-card{`) {
+		t.Error("RNEW-UX-012: dashboard.html missing .skeleton-card CSS rule")
+	}
+	if !strings.Contains(html, `@keyframes skeleton-shimmer`) {
+		t.Error("RNEW-UX-012: dashboard.html missing @keyframes skeleton-shimmer animation")
+	}
+	// The session list body must actually use the skeleton markup so the
+	// first paint renders placeholders instead of the old "loading..." text.
+	if !strings.Contains(html, `class="skeleton-card"`) {
+		t.Error("RNEW-UX-012: dashboard.html session-list should render skeleton-card placeholders on cold paint")
+	}
+	if strings.Contains(html, `<div class="no-sessions">loading...</div>`) {
+		t.Error("RNEW-UX-012: legacy \"loading...\" text should be replaced by skeleton cards")
+	}
+}
+
+// TestDashboard_RNEW_UX007_PreserveSelection pins the renderEvents short-
+// circuit that skips an innerHTML refresh while the user has an active
+// text selection inside the events panel. Without this guard, every event
+// push wipes the user's in-progress copy action.
+func TestDashboard_RNEW_UX007_PreserveSelection(t *testing.T) {
+	t.Parallel()
+	jsBytes, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(jsBytes)
+	// Locate renderEvents and inspect its body up to the first innerHTML
+	// assignment — the selection guard must sit before that point, otherwise
+	// the refresh still destroys the selection.
+	fnIdx := strings.Index(js, "function renderEvents(")
+	if fnIdx < 0 {
+		t.Fatal("RNEW-UX-007: renderEvents not found")
+	}
+	htmlAssignIdx := strings.Index(js[fnIdx:], "el.innerHTML = html")
+	if htmlAssignIdx < 0 {
+		t.Fatal("RNEW-UX-007: expected el.innerHTML = html inside renderEvents")
+	}
+	window := js[fnIdx : fnIdx+htmlAssignIdx]
+	if !strings.Contains(window, "getSelection") {
+		t.Error("RNEW-UX-007: renderEvents must consult window.getSelection() before innerHTML replace")
+	}
+	if !strings.Contains(window, "isCollapsed") {
+		t.Error("RNEW-UX-007: selection guard must check isCollapsed so caret-only clicks do not block refresh")
+	}
+	if !strings.Contains(window, "contains(sel.anchorNode)") {
+		t.Error("RNEW-UX-007: selection guard must scope to selections inside the events panel (contains(anchorNode))")
+	}
+}
+
+// TestDashboardJS_RNEW_UX008_ActiveCardHelper pins the RNEW-UX-008 fix that
+// replaced 7+ copies of O(N) `querySelectorAll('.session-card').forEach(...
+// classList.remove('active'))` with a single helper backed by a cached
+// reference (_activeCardEl). Sidebar switching used to scan every card on
+// every click; with many sessions the latency became visible. The contract
+// pins (a) the cache variable declaration, (b) the helper function, and
+// (c) that at most one legacy forEach + classList.remove('active') site
+// survives (a defensive initial-clear slot is tolerated; two or more
+// indicates the refactor regressed).
+func TestDashboardJS_RNEW_UX008_ActiveCardHelper(t *testing.T) {
+	t.Parallel()
+	jsBytes, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(jsBytes)
+	if !strings.Contains(js, "let _activeCardEl") {
+		t.Error("RNEW-UX-008: expected module-scoped `let _activeCardEl` cache for the active session card")
+	}
+	if !strings.Contains(js, "function setActiveSessionCard(") {
+		t.Error("RNEW-UX-008: expected helper `function setActiveSessionCard(...)` that toggles .active via cached ref")
+	}
+	// Count legacy forEach + classList.remove('active') sites. Each legacy
+	// site is a pair (querySelectorAll line, classList.remove('active')
+	// callback). Counting the callbacks is the reliable signal — the
+	// helper body itself calls classList.remove('active') but on the
+	// cached element, not via forEach.
+	legacyPattern := regexp.MustCompile(`querySelectorAll\('\.session-card'\)[^;]*forEach[^;]*classList\.remove\('active'\)`)
+	legacy := legacyPattern.FindAllStringIndex(js, -1)
+	if len(legacy) >= 2 {
+		t.Errorf("RNEW-UX-008: expected at most 1 legacy querySelectorAll('.session-card').forEach + remove('active') site, found %d", len(legacy))
+	}
+}
+
+// TestDashboardJS_RNEW_UX015_HexBaseline is a regression ratchet on inline
+// 6-char hex color literals in dashboard.js. The long-running RNEW-UX-015
+// migration moves `#rrggbb` into the canonical `var(--nz-*)` tokens declared
+// in dashboard.html, so operators restyling via the CSS variables get uniform
+// propagation (dark-mode, high-contrast, etc.). Round 208's micro-batch
+// converted 5 sites (8 hex instances) — new dashboard.js PRs should LOWER
+// this ceiling (or leave it flat), never raise it. If a PR needs to add a
+// brand-new hex that has no canonical variable, the correct response is
+// (1) define a new --nz-* token in dashboard.html, (2) use it here, or
+// (3) raise this ceiling with a comment explaining why. Silent growth is
+// the failure mode this guard exists for.
+func TestDashboardJS_RNEW_UX015_HexBaseline(t *testing.T) {
+	t.Parallel()
+	jsBytes, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	// Strict 6-char hex; this skips HTML numeric entities (&#8592; etc.)
+	// and avoids matching 3-char shorthand (no current call sites use it).
+	hexPattern := regexp.MustCompile(`#[0-9a-fA-F]{6}`)
+	hits := hexPattern.FindAllIndex(jsBytes, -1)
+	const ceiling = 14
+	if got := len(hits); got > ceiling {
+		t.Errorf("RNEW-UX-015: inline 6-char hex literals in dashboard.js grew to %d, ceiling is %d. "+
+			"Prefer var(--nz-*) tokens from dashboard.html — if a new color is truly needed, "+
+			"add a --nz-* variable there first and reference it. See also R208-RNEW-UX-015 residual.",
+			got, ceiling)
+	}
+}
+
+// TestDashboardJS_RNEW_UX003_FetchJSONHelper pins the starter slice of
+// RNEW-UX-003: a central fetchJSON() wrapper with AbortController and a
+// 10s default timeout, plus at least one migrated call site. 38 raw
+// fetch() call sites originally had no timeout, so a NAT-dropped TCP
+// connection could leave spinners stuck for minutes. The remaining 35
+// sites migrate in later rounds.
+func TestDashboardJS_RNEW_UX003_FetchJSONHelper(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+	idx := strings.Index(js, "async function fetchJSON(url, opts")
+	if idx < 0 {
+		t.Fatalf("RNEW-UX-003: missing fetchJSON helper declaration")
+	}
+	end := idx + 4096
+	if end > len(js) {
+		end = len(js)
+	}
+	body := js[idx:end]
+	if !strings.Contains(body, "AbortController") {
+		t.Errorf("RNEW-UX-003: fetchJSON body missing AbortController reference")
+	}
+	if !strings.Contains(body, "timeoutMs = 10000") && !strings.Contains(body, "10000") {
+		t.Errorf("RNEW-UX-003: fetchJSON missing 10000ms default timeout")
+	}
+	// Helper's own declaration uses `function fetchJSON(`, so counting
+	// `fetchJSON(` occurrences must be >=2 to prove at least one caller.
+	if n := strings.Count(js, "fetchJSON("); n < 2 {
+		t.Errorf("RNEW-UX-003: expected >=1 fetchJSON( caller plus the definition, got %d total occurrences", n)
+	}
+}
+
+// TestDashboardJS_CronSessionsHiddenByDefault pins the policy that cron-
+// scheduler sessions (key prefix "cron:") are not rendered in the sidebar
+// unless explicitly opened by the operator. The 定时任务 panel owns cron
+// lifecycle end-to-end; the sidebar is reserved for operator-opened
+// conversations. If someone accidentally removes the filter, every cron
+// job would spill back into the sidebar and the dismiss-×-deletes-the-job
+// regression (× calling DELETE /api/sessions on a cron key) would return.
+//
+// The test locks four co-dependent invariants:
+//  1. `cronVisibleKeys` set exists as the ephemeral whitelist.
+//  2. renderSidebar computes a `visibleItems` that filters out un-listed
+//     cron keys before any grouping/search branch runs.
+//  3. The "promote to sidebar" call sites — openCronSession (panel click)
+//     and doCreateCronJob (just-created job) — invoke markCronSessionVisible.
+//  4. dismissSession has a cron-specific branch that removes from the set
+//     WITHOUT calling DELETE /api/sessions — the cron scheduler is the
+//     sole owner of cron-job lifecycle.
+func TestDashboardJS_CronSessionsHiddenByDefault(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// 1. Whitelist set + helper exist.
+	if !strings.Contains(js, "let cronVisibleKeys = new Set()") {
+		t.Error("dashboard.js: cronVisibleKeys whitelist Set must exist — cron sidebar policy depends on it")
+	}
+	if !strings.Contains(js, "function isCronSessionKey(key)") {
+		t.Error("dashboard.js: isCronSessionKey helper must exist as single source of truth for the cron: prefix check")
+	}
+	if !strings.Contains(js, "function markCronSessionVisible(key)") {
+		t.Error("dashboard.js: markCronSessionVisible helper must exist to keep the policy centralised")
+	}
+
+	// 2. renderSidebar filters into visibleItems before grouping/search.
+	//    Locked as one expression — if future refactors split the filter
+	//    per branch, the substring will stop matching and flag it.
+	if !strings.Contains(js, "!isCronSessionKey(s.key) || cronVisibleKeys.has(s.key)") {
+		t.Error("dashboard.js: renderSidebar must gate cron sessions via `!isCronSessionKey(s.key) || cronVisibleKeys.has(s.key)` before rendering")
+	}
+
+	// 3. Promote-to-sidebar call sites. These two are the ONLY officially
+	//    supported entrypoints; a new entrypoint must also call
+	//    markCronSessionVisible or the session will stay hidden.
+	if n := strings.Count(js, "markCronSessionVisible("); n < 2 {
+		t.Errorf("dashboard.js: markCronSessionVisible must be called from openCronSession and doCreateCronJob (>=2 call sites), got %d", n)
+	}
+
+	// 4. dismissSession cron branch: removes from whitelist but must not
+	//    hit DELETE /api/sessions. We verify this structurally — the
+	//    cron-key guard + `cronVisibleKeys.delete` must be present, and
+	//    they must appear BEFORE the DELETE /api/sessions fetch.
+	dismissIdx := strings.Index(js, "async function dismissSession(")
+	if dismissIdx < 0 {
+		t.Fatal("dashboard.js: dismissSession function not found")
+	}
+	// Scope the search to dismissSession's body — ~3KB is more than enough
+	// for the function even after future edits without leaking into the
+	// next function.
+	end := dismissIdx + 4000
+	if end > len(js) {
+		end = len(js)
+	}
+	body := js[dismissIdx:end]
+	if !strings.Contains(body, "if (isCronSessionKey(key))") {
+		t.Error("dashboard.js: dismissSession must short-circuit on cron keys via `if (isCronSessionKey(key))`")
+	}
+	if !strings.Contains(body, "cronVisibleKeys.delete(key)") {
+		t.Error("dashboard.js: dismissSession cron branch must remove from the whitelist with cronVisibleKeys.delete(key)")
+	}
+	cronBranchIdx := strings.Index(body, "if (isCronSessionKey(key))")
+	deleteAPIIdx := strings.Index(body, "'/api/sessions'")
+	if cronBranchIdx >= 0 && deleteAPIIdx >= 0 && cronBranchIdx > deleteAPIIdx {
+		t.Error("dashboard.js: cron-key guard in dismissSession must appear BEFORE DELETE /api/sessions path so × never destroys a scheduled job")
 	}
 }

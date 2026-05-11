@@ -23,7 +23,7 @@ Cross-compile for deployment target (ARM64 Linux):
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -o bin/naozhi ./cmd/naozhi/
 ```
 
-Deploy: see `deploy/naozhi.service` for systemd unit. Manual deploy via SSM + S3.
+Deploy: `cmd/naozhi/service.go::generateSystemdUnit` is authoritative for `sudo naozhi install`; `deploy/naozhi.service` is a manual-deploy reference kept in sync (regression gate: `TestGenerateSystemdUnit_MatchesDeployTemplate`).
 
 ## Architecture
 
@@ -155,9 +155,53 @@ The `discovery` package scans `~/.claude/sessions/*.json` to find external (non-
 Sessions are persisted to `~/.naozhi/sessions.json` at shutdown:
 - Each entry stores `key`, `session_id`, `workspace`, `total_cost`
 - A sibling `sessions.meta.json` sidecar records `{version, written_at, generator}`; the main file stays as a plain JSON array so older naozhi builds read it unchanged. `loadStore` treats a missing sidecar as legacy v1 and only `slog.Warn`s if the sidecar reports a version higher than the one this build understands
-- On restart, dead sessions are loaded and history is async-loaded from Claude's JSONL files
+- On restart, dead sessions are loaded and history is async-loaded (naozhi event log first, Claude JSONL fallback)
 - Next message to a dead session resumes via `--resume`
 - Captures session_id under sendMu to avoid Send() data races
+
+### Event Log Persistence (`docs/rfc/event-log-persistence.md`)
+
+A second persistence tier lives at `~/.naozhi/events/<keyhash>.log` / `.idx`. Unlike `sessions.json` which only records session metadata, the event log captures every `cli.EventEntry` — including fields that Claude's own JSONL cannot recover such as `Images` (thumbnail data URIs), `ImagePaths` (workspace-relative attachment paths), `AskQuestion` card payloads, and agent-team linkage IDs.
+
+Layout:
+
+```
+~/.naozhi/
+  sessions.json                    # session catalog
+  events/
+    <keyhash>.log                  # append-only length-prefixed records
+    <keyhash>.idx                  # sparse seq → byteOffset index
+```
+
+Key invariants:
+- `<keyhash>` is `sha256(session_key)[:16]` — file names never leak the raw session key; the in-file header records the plaintext key so operators can `less`/`jq` to audit
+- Write order is strict: `log.Write → log.Sync → idx.Write → idx.Sync`. A crash between any two steps is recovered by `Recover()` on next startup by truncating the log to the idx-backed safe edge
+- `cli.EventLog.SetPersistSink` MUST be called AFTER any `InjectHistory` (replay) completes. A runtime `replayPhase` guard in `EventLog` tags pre-sink entries so a broken caller gets surfaced as `naozhi_eventlog_persist_replay_leak_total > 0` (or panic in DevMode)
+- Read path is `merged.Source` = `naozhilog.Source` (primary) + `claudejsonl.Source` (fallback). UUID dedup keeps the local richer entry when both tiers see the same turn
+- Rotate threshold 100 MiB; rotate keeps the newest `DefaultKeepRecords` (1000) records, splices via offset-index so it's O(1) in practice
+- Orphan `<keyhash>.log` files whose stem doesn't match any known session AND whose mtime is > 30 days get swept on NewRouter startup
+- FS detection (Linux `statfs`) runs once and surfaces via `/health.eventlog.{fs_type, fs_supported}`; NFS/overlayfs report `supported=false` so operators see a warning
+
+`/health.eventlog` fields: `writer_alive` (= `last_drain_ms_ago < 5s AND channel_depth < 0.8*cap`), `channel_depth`, `channel_cap`, `last_drain_ms_ago`, `written_total`, `dropped_total`, `fsync_total`, `malformed_total`, `replay_leak_total`, `fs_type`, `fs_supported`.
+
+### Attachment Refcount (`docs/rfc/attachment-refcount.md`)
+
+A companion tier on top of event log persistence. Each image attachment's `.meta` sidecar (`<workspace>/.naozhi/attachments/<date>/<uuid>.meta`) now records `ReferencingKeyHashes []string` (sorted SHA-256 session hashes that have persisted an entry referencing the attachment) and `LastReferencedAt int64` (latest unix ms bump).
+
+The `internal/attachment/tracker` package runs a single-goroutine worker that observes non-replay `EventEntry.ImagePaths` via the event-log sink bridge and coalesces bumps within a 1s window before rewriting `.meta`. On `Router.Remove` the tracker walks the workspace and removes the keyhash from every `.meta`. `OnPersistedEntry` is non-blocking (drops + counter on full channel); `OnSessionRemoved` is synchronous (serialized in the worker) with 5s timeout.
+
+`attachment.GCWithRefs(workspace, uploadTTL, refTTL, now)` replaces the legacy day-directory reaper with per-file double-TTL eligibility:
+
+```
+keep iff ( uploaded_at + uploadTTL > now )
+    OR  ( len(ReferencingKeyHashes) > 0 AND last_referenced_at + refTTL > now )
+```
+
+Defaults: `uploadTTL=7d` (operator-tunable), `refTTL=30d` (via `DefaultRefTTL`). Files predating the refcount RFC (Meta without the new fields) fall back to the legacy single-TTL path so an upgrade doesn't delete lot-sized history on day 0.
+
+`/health.attachment_tracker` exposes `writer_alive` (same formula as eventlog's), `channel_depth`, `channel_cap`, `last_drain_ms`, `pending`, `written_total`, `cleared_total`, `dropped_total`, `meta_error_total`. `/debug/vars` adds `naozhi_attachment_ref_{bump,clear,meta_error,drop}_total` counters.
+
+GC caller wiring in `cmd/naozhi` is pending operator work — `GCWithRefs` is ready to call from a cron job, but the historic `cmd/naozhi/main.go` never registered an `attachment-gc` job. Until it does, tracker data accumulates but never drives reclamation (attachments only grow). This is a documented follow-up, not a blocker for the refcount MVP.
 
 ### Graceful Shutdown
 
@@ -174,7 +218,7 @@ On SIGTERM/SIGINT:
 `config.yaml` supports `${ENV_VAR}` expansion. Key sections:
 
 - **server.addr**: Listen address (default `:8080`)
-- **cli**: `backend` (`claude`|`kiro`), `path`, `model`, `args`
+- **cli**: `backend` (`claude`|`kiro`), `path`, `model`, `args`. Multi-backend deployments use `cli.backends: [{id, path, model, args}, ...]` so the dashboard picker can choose per-session — see `config.example.yaml` for the commented-out canonical example
 - **session**: `max_procs`, `ttl`, `cwd` (working directory), `store_path`, `watchdog.no_output_timeout`, `watchdog.total_timeout`
 - **agents**: Map of agent_id -> {model, args}. Each agent spawns with custom system prompt via `--append-system-prompt`
 - **agent_commands**: Map of command -> agent_id for routing (e.g., `review: code-reviewer`)

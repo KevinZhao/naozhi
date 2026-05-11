@@ -36,11 +36,46 @@ type Event struct {
 	// RPCRequestID is set for ACP permission_request events that need a response.
 	RPCRequestID int `json:"-"`
 
+	// AskQuestion is populated for synthetic Type:"ask_question" events derived
+	// from an AskUserQuestion tool_use in the assistant stream. The CLI's
+	// headless -p mode auto-rejects the tool with is_error:true, so this is
+	// observational only — dispatch uses it to surface an interactive card.
+	// The user's answer flows back as a normal user message on the next turn.
+	// See docs/rfc/askuser-question.md and test/e2e/askuser/.
+	AskQuestion *AskQuestion `json:"ask_question,omitempty"`
+
 	// recvAt is the wall-clock moment readLoop pushed the event to eventCh.
 	// Used by drainStaleEvents to distinguish events belonging to a previous
 	// (possibly interrupted) turn from events produced for the current turn
 	// after drain entered. Not serialized.
 	recvAt time.Time
+}
+
+// AskQuestion mirrors the shape of AskUserQuestion.input observed against
+// claude CLI 2.1.132 (see test/e2e/askuser/aq1_aq2_trigger_and_schema.py).
+// ToolUseID is the tool_use id emitted by the assistant and serves as a
+// correlation key across dashboard + IM renderings of the same question.
+type AskQuestion struct {
+	ToolUseID string            `json:"tool_use_id"`
+	Items     []AskQuestionItem `json:"items"`
+}
+
+// AskQuestionItem is one question in a possibly multi-question card.
+// MultiSelect=true signals checkbox semantics; the CLI may set it but the
+// dashboard currently degrades to single-select (one click = one answer).
+type AskQuestionItem struct {
+	Question    string           `json:"question"`
+	Header      string           `json:"header,omitempty"`
+	MultiSelect bool             `json:"multi_select,omitempty"`
+	Options     []AskQuestionOpt `json:"options"`
+}
+
+// AskQuestionOpt is one selectable choice. Label is the user-facing text that
+// the answer composer will echo back ("Header: Label."). Description is shown
+// in the card tooltip / secondary line but never echoed.
+type AskQuestionOpt struct {
+	Label       string `json:"label"`
+	Description string `json:"description,omitempty"`
 }
 
 // TaskUsage holds resource consumption stats from agent task events.
@@ -71,8 +106,8 @@ type ContentBlock struct {
 //
 // We can't silently fall back to a single text-block array for *all* string
 // shapes, because tool_result user events also encode content as an array.
-// Only the shape normalization happens here; downstream extractReplayTexts
-// handles the single-text case uniformly.
+// Only the shape normalization happens here; downstream consumers handle the
+// single-text case uniformly via the resulting ContentBlock array.
 func (m *AssistantMessage) UnmarshalJSON(data []byte) error {
 	var raw struct {
 		Role    string          `json:"role"`
@@ -86,22 +121,44 @@ func (m *AssistantMessage) UnmarshalJSON(data []byte) error {
 		m.Content = nil
 		return nil
 	}
-	// Try array first (most events).
-	var blocks []ContentBlock
-	if err := json.Unmarshal(raw.Content, &blocks); err == nil {
-		m.Content = blocks
-		return nil
-	}
-	// Fall back to string (replay-user-messages text-only payload).
-	var text string
-	if err := json.Unmarshal(raw.Content, &text); err == nil {
-		m.Content = []ContentBlock{{Type: "text", Text: text}}
-		return nil
+	// Route on the first non-whitespace byte to avoid speculatively
+	// Unmarshal-ing into []ContentBlock when the shape is a bare string.
+	// The old two-try fallback allocated (and partially filled) a
+	// []ContentBlock slice every time we hit the replay-text path before
+	// discarding it.
+	first := firstJSONByte(raw.Content)
+	switch first {
+	case '[':
+		var blocks []ContentBlock
+		if err := json.Unmarshal(raw.Content, &blocks); err == nil {
+			m.Content = blocks
+			return nil
+		}
+	case '"':
+		var text string
+		if err := json.Unmarshal(raw.Content, &text); err == nil {
+			m.Content = []ContentBlock{{Type: "text", Text: text}}
+			return nil
+		}
 	}
 	// Unknown shape: leave Content nil so downstream code treats it as empty
 	// rather than erroring the whole event.
 	m.Content = nil
 	return nil
+}
+
+// firstJSONByte returns the first non-whitespace byte of a JSON raw message,
+// or 0 if the buffer is empty or whitespace-only.
+func firstJSONByte(raw []byte) byte {
+	for _, b := range raw {
+		switch b {
+		case ' ', '\t', '\n', '\r':
+			continue
+		default:
+			return b
+		}
+	}
+	return 0
 }
 
 // AttachmentKind discriminates between inline and file-reference attachments.

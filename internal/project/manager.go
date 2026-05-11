@@ -79,6 +79,17 @@ func (m *Manager) Scan() error {
 			slog.Warn("skip project with bad config", "name", name, "err", err)
 			continue
 		}
+		// Defense-in-depth: the write-path (HTTP PUT / reverse-RPC
+		// update_config) already runs ValidateConfig, but a tampered
+		// project.yaml committed via git pull or a direct filesystem
+		// edit could land invalid values that flow into CLI argv
+		// (PlannerPrompt/PlannerModel) or bindingIndex (ChatBindings
+		// with ':' / NUL) if load accepted them silently. Skip the
+		// project same as a parse failure.
+		if err := ValidateConfig(cfg); err != nil {
+			slog.Warn("skip project with invalid config", "name", name, "err", err)
+			continue
+		}
 
 		remote, isGH := DetectGitHubRemote(absPath)
 		projects[name] = &Project{

@@ -5,6 +5,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 func TestWatchdog_NotStartedDoesNotFire(t *testing.T) {
@@ -26,7 +28,12 @@ func TestWatchdog_StartTwiceIsSafe(t *testing.T) {
 	w.Start()
 	w.Start() // second call must be idempotent
 
-	time.Sleep(200 * time.Millisecond)
+	// Watchdog timeout is 50ms; poll until the fire is observed. The poll
+	// replaces the previous `time.Sleep(200ms)` and fails fast on slow CI
+	// with a clear diagnostic instead of a silent count mismatch.
+	testhelper.Eventually(t, func() bool { return count.Load() >= 1 }, time.Second, "watchdog did not fire after Start()")
+	// Give any duplicate Start() a chance to double-fire (would be a bug).
+	time.Sleep(50 * time.Millisecond)
 
 	if got := count.Load(); got != 1 {
 		t.Errorf("expected exactly 1 fire, got %d", got)
@@ -40,6 +47,9 @@ func TestWatchdog_StopTwiceIsSafe(t *testing.T) {
 	w.Stop()
 	w.Stop() // second Stop must be idempotent
 
+	// Negative-assertion window: we need to wait past the 50ms timer
+	// deadline to prove Stop prevents firing. Eventually cannot poll for
+	// "nothing happened" — this wall-clock wait is intentional.
 	time.Sleep(150 * time.Millisecond)
 	if got := count.Load(); got != 0 {
 		t.Errorf("expected 0 fires after Stop, got %d", got)
@@ -114,8 +124,14 @@ func TestWatchdog_MultipleResets_FiresOnce(t *testing.T) {
 		w.Reset()
 	}
 
-	// Now stop preventing fire
-	time.Sleep(200 * time.Millisecond)
+	// Now stop preventing fire — sync wait for count >= 1. After the final
+	// Reset the timer is armed for 40ms; Eventually replaces a 200ms
+	// wall-clock sleep with a 10ms poll that exits as soon as the fire
+	// lands. The subsequent == 1 assertion is unaffected because stale
+	// generations no-op via the generation counter.
+	testhelper.Eventually(t, func() bool {
+		return count.Load() >= 1
+	}, 1*time.Second, "watchdog did not fire after Reset loop ended")
 	if got := count.Load(); got != 1 {
 		t.Errorf("expected exactly 1 fire, got %d", got)
 	}

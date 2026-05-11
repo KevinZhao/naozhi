@@ -149,13 +149,7 @@ func (d *Dispatcher) dispatchCommand(ctx context.Context, msg platform.IncomingM
 // In passthrough mode, pending slots remain queued — only the active turn
 // is dropped; CLI moves on to the next message automatically.
 func (d *Dispatcher) handleStopCommand(ctx context.Context, msg platform.IncomingMessage, log *slog.Logger) {
-	agentID := "general"
-	key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
-	if d.projectMgr != nil {
-		if proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
-			key = proj.PlannerSessionKey()
-		}
-	}
+	key := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, "general")
 	outcome := d.router.InterruptSessionViaControl(key)
 	switch outcome {
 	case session.InterruptSent:
@@ -183,15 +177,26 @@ func (d *Dispatcher) handleUrgentCommand(ctx context.Context, msg platform.Incom
 		return
 	}
 
-	// Resolve session key (same logic as BuildHandler's project/agent path).
+	// Resolve session key and opts — delegate to KeyResolver so /urgent
+	// gets the same project-bound opts as the main IM path (previously
+	// /urgent set only Exempt+Workspace and silently dropped planner
+	// model/prompt overrides — see docs/rfc/key-resolver.md §2.1 #3).
+	// Legacy fallback preserves the old "Exempt+Workspace only" behaviour
+	// for headless/test constructions that don't wire a resolver.
 	agentID := "general"
-	key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
-	opts := d.agents[agentID]
-	if d.projectMgr != nil {
-		if proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
-			key = proj.PlannerSessionKey()
-			opts.Exempt = true
-			opts.Workspace = proj.Path
+	var key string
+	var opts session.AgentOpts
+	if d.resolver != nil {
+		key, opts = d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+	} else {
+		key = session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+		opts = d.agents[agentID]
+		if d.projectMgr != nil {
+			if proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
+				key = proj.PlannerSessionKey()
+				opts.Exempt = true
+				opts.Workspace = proj.Path
+			}
 		}
 	}
 
@@ -249,17 +254,21 @@ func (d *Dispatcher) handleNewCommand(ctx context.Context, msg platform.Incoming
 		agentToReset = strings.ToLower(trimUnicodeSpace(parts[1]))
 	}
 
-	// In project-bound mode: /new resets planner, /new {agent} resets that agent
+	// In project-bound mode: /new resets planner, /new {agent} resets that agent.
+	// Probe the project-bound-ness via KeyResolver.KeyForChat: for agentID
+	// "general", a bound chat yields a planner key (prefixed "project:"),
+	// unbound yields an IM key. The project name is recovered from the
+	// router-side metadata (slog attr) not re-fetched here.
 	if d.projectMgr != nil {
 		if proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
 			if agentToReset == "" {
-				plannerKey := proj.PlannerSessionKey()
+				plannerKey := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, "general")
 				d.router.Reset(plannerKey)
 				d.discardQueue(plannerKey)
 				d.replyText(ctx, msg, "项目 "+proj.Name+" 的 planner 已重置。", log)
 			} else {
 				if id, ok := d.agentCommands[agentToReset]; ok {
-					key := session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, id)
+					key := d.keyForChat(msg.Platform, msg.ChatType, msg.ChatID, id)
 					d.router.Reset(key)
 					d.discardQueue(key)
 					d.replyText(ctx, msg, "会话已重置 ("+id+")。", log)

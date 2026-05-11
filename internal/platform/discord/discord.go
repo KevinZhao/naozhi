@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 
 	"github.com/bwmarrin/discordgo"
@@ -94,7 +95,9 @@ func (d *Discord) Start(handler platform.MessageHandler) error {
 
 	if sess.State != nil && sess.State.User != nil {
 		d.botID = sess.State.User.ID
-		slog.Info("discord gateway connected", "bot_id", d.botID, "bot_name", sess.State.User.Username)
+		slog.Info("discord gateway connected",
+			"bot_id", d.botID,
+			"bot_name", osutil.SanitizeForLog(sess.State.User.Username, 128))
 	} else {
 		slog.Warn("discord gateway connected but bot identity unavailable")
 	}

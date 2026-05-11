@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -147,6 +148,104 @@ func TestScan_SkipsBadConfig(t *testing.T) {
 	}
 }
 
+// TestScan_SkipsSemanticallyInvalidConfig covers the defense-in-depth
+// alignment: ValidateConfig runs on the write-path (HTTP PUT +
+// reverse-RPC update_config) but the Scan load-path historically didn't,
+// so a tampered .naozhi/project.yaml committed via git (or edited by a
+// user with file-system access) would bring its bad values straight into
+// memory — PlannerPrompt would reach CLI argv, PlannerModel would reach
+// exec flag splitting, ChatBinding fields with ':' would collide into
+// bindingIndex and silently misroute IM events.
+//
+// Each subcase writes a project whose YAML parses fine but violates
+// ValidateConfig, then asserts Scan drops it the same way it already
+// drops parse failures. Uses raw YAML rather than saveConfigToPath to
+// bypass any write-side validator. The valid-control project proves we
+// didn't break the happy path.
+func TestScan_SkipsSemanticallyInvalidConfig(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+
+	// Valid baseline alongside each bad project: Scan must still pick
+	// these up so the test isolates the validator's behaviour from any
+	// unrelated skip path (missing CLAUDE.md, etc).
+	makeProjectDir(t, root, "good", nil)
+
+	cases := []struct {
+		name string
+		yaml string
+	}{
+		{
+			// PlannerPrompt carrying a UTF-8 bidi override (U+202E)
+			// — byte-level scan would miss it; IsLogInjectionRune
+			// fires on the rune.
+			name: "prompt_bidi_override",
+			yaml: "planner_prompt: \"hello \xe2\x80\xae world\"\n",
+		},
+		{
+			// PlannerModel with a leading dash — the plannerModelRe
+			// guards against exec flag injection like
+			// "-dangerously-skip-permissions".
+			name: "model_flag_injection",
+			yaml: "planner_model: \"--dangerously-skip-permissions\"\n",
+		},
+		{
+			// ChatBinding with empty required Platform — would
+			// insert nonsense key ":group:oc_xxx" into bindingIndex.
+			name: "binding_empty_platform",
+			yaml: "chat_bindings:\n  - platform: \"\"\n    chat_type: \"group\"\n    chat_id: \"oc_x\"\n",
+		},
+		{
+			// ChatBinding with ':' in ChatID — would collide with a
+			// different (platform,chatType,chatID) triple in
+			// bindingIndex and silently misroute IM events.
+			name: "binding_colon_in_chatid",
+			yaml: "chat_bindings:\n  - platform: \"feishu\"\n    chat_type: \"group\"\n    chat_id: \"oc:bad\"\n",
+		},
+		{
+			// Oversized PlannerPrompt — past maxPlannerPromptBytes
+			// would inflate exec.Command argv past ARG_MAX. Exercises
+			// the length cap branch of ValidateConfig.
+			name: "prompt_oversized",
+			yaml: "planner_prompt: \"" + strings.Repeat("x", 8*1024+1) + "\"\n",
+		},
+		{
+			// Oversized PlannerModel — past maxPlannerModelBytes.
+			name: "model_oversized",
+			yaml: "planner_model: \"" + strings.Repeat("m", 257) + "\"\n",
+		},
+	}
+
+	for _, tc := range cases {
+		projDir := filepath.Join(root, tc.name)
+		if err := os.MkdirAll(filepath.Join(projDir, ".naozhi"), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", tc.name, err)
+		}
+		if err := os.WriteFile(filepath.Join(projDir, "CLAUDE.md"), []byte("x"), 0644); err != nil {
+			t.Fatalf("write CLAUDE.md %s: %v", tc.name, err)
+		}
+		if err := os.WriteFile(filepath.Join(projDir, ".naozhi", "project.yaml"), []byte(tc.yaml), 0600); err != nil {
+			t.Fatalf("write project.yaml %s: %v", tc.name, err)
+		}
+	}
+
+	m, _ := NewManager(root, PlannerDefaults{})
+	if err := m.Scan(); err != nil {
+		t.Fatalf("Scan = %v", err)
+	}
+
+	all := m.All()
+	if len(all) != 1 || all[0].Name != "good" {
+		var names []string
+		for _, p := range all {
+			names = append(names, p.Name)
+		}
+		t.Errorf("Scan() should have kept only \"good\"; got %v — "+
+			"semantically invalid project.yaml files slipped past load-time validation",
+			names)
+	}
+}
+
 // ---- Get ----
 
 func TestGet_ExistingProject(t *testing.T) {
@@ -180,8 +279,12 @@ func TestGet_NonExistentProject(t *testing.T) {
 func TestGet_ReturnsCopy(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
+	// ChatType must be non-empty to pass load-time ValidateConfig
+	// (TestScan_SkipsSemanticallyInvalidConfig's "binding_empty_platform"
+	// case locks the symmetric policy). Prior to that load-time gate the
+	// field was optional and this test got away with omitting it.
 	makeProjectDir(t, root, "copyproj", &ProjectConfig{
-		ChatBindings: []ChatBinding{{Platform: "feishu", ChatID: "c1"}},
+		ChatBindings: []ChatBinding{{Platform: "feishu", ChatType: "group", ChatID: "c1"}},
 	})
 	m, _ := NewManager(root, PlannerDefaults{})
 	m.Scan()

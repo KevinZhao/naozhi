@@ -14,6 +14,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/cron"
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
@@ -36,18 +37,28 @@ type SessionGuard interface {
 // Dispatcher holds the dependencies needed to dispatch incoming IM messages
 // to the session router, handle slash commands, and stream results back.
 type Dispatcher struct {
-	router        *session.Router
+	// router is the SessionRouter subset used by dispatch (consumer.go).
+	// *session.Router satisfies this implicitly; kept as an interface so
+	// tests can inject fakes and a future Router sub-aggregation can
+	// swap implementations without touching dispatch internals. The
+	// router field itself is guaranteed non-nil in production wiring.
+	router        SessionRouter
 	platforms     map[string]platform.Platform
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
 	scheduler     *cron.Scheduler
 	projectMgr    *project.Manager
-	guard         SessionGuard // used by Dashboard/WS path
-	queue         *MessageQueue
-	dedup         *platform.Dedup
-	allowedRoot   string
-	claudeDir     string
-	replyFooter   string
+	// resolver centralises (key, opts) derivation. When non-nil the main
+	// IM path uses it instead of the inlined projectMgr+agents merge.
+	// Nil keeps legacy behaviour for tests / headless constructions that
+	// don't wire a resolver. See docs/rfc/key-resolver.md Phase 2.
+	resolver    *session.KeyResolver
+	guard       SessionGuard // used by Dashboard/WS path
+	queue       *MessageQueue
+	dedup       *platform.Dedup
+	allowedRoot string
+	claudeDir   string
+	replyFooter string
 
 	noOutputTimeout       time.Duration
 	totalTimeout          time.Duration
@@ -63,6 +74,24 @@ type Dispatcher struct {
 
 	sendFn     func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
 	takeoverFn func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
+}
+
+// keyForChat returns the routed session key for the given chat coordinates
+// and agentID. Prefers the KeyResolver (project-bound general → planner);
+// falls back to the inlined lookup when no resolver is wired. Kept as a
+// Dispatcher method so slash-command handlers share a single derivation
+// path with the main IM path — see docs/rfc/key-resolver.md §4.2-4.4.
+func (d *Dispatcher) keyForChat(platform, chatType, chatID, agentID string) string {
+	if d.resolver != nil {
+		return d.resolver.KeyForChat(platform, chatType, chatID, agentID)
+	}
+	// Legacy fallback: duplicate minimal project-binding check.
+	if d.projectMgr != nil && agentID == "general" {
+		if proj := d.projectMgr.ProjectForChat(platform, chatType, chatID); proj != nil {
+			return proj.PlannerSessionKey()
+		}
+	}
+	return session.SessionKey(platform, chatType, chatID, agentID)
 }
 
 // Metrics returns a snapshot of operational counters for /health.
@@ -91,12 +120,17 @@ type DispatcherConfig struct {
 	AgentCommands map[string]string
 	Scheduler     *cron.Scheduler
 	ProjectMgr    *project.Manager
-	Guard         SessionGuard
-	Queue         *MessageQueue
-	Dedup         *platform.Dedup
-	AllowedRoot   string
-	ClaudeDir     string
-	ReplyFooter   string
+	// Resolver, when non-nil, is used by the main IM path for (key, opts)
+	// derivation instead of the legacy inlined merge. Nil keeps the
+	// legacy path for headless/test constructions. Production wiring in
+	// cmd/naozhi.main should always pass a live KeyResolver.
+	Resolver    *session.KeyResolver
+	Guard       SessionGuard
+	Queue       *MessageQueue
+	Dedup       *platform.Dedup
+	AllowedRoot string
+	ClaudeDir   string
+	ReplyFooter string
 
 	NoOutputTimeout       time.Duration
 	TotalTimeout          time.Duration
@@ -108,14 +142,27 @@ type DispatcherConfig struct {
 }
 
 // NewDispatcher creates a Dispatcher from the given config.
+//
+// cfg.Router is a concrete *session.Router but Dispatcher.router is
+// the SessionRouter interface. Assigning a nil *session.Router into
+// an interface field produces a typed-nil: the field compares !=
+// nil yet dereferences panic. Normalise to untyped nil so call-site
+// guards like `if d.router != nil` behave as readers expect.
+// Production wiring (server.Start) never passes nil; the guard covers
+// headless/test wiring that may leave the field zeroed.
 func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
+	var router SessionRouter
+	if cfg.Router != nil {
+		router = cfg.Router
+	}
 	return &Dispatcher{
-		router:                cfg.Router,
+		router:                router,
 		platforms:             cfg.Platforms,
 		agents:                cfg.Agents,
 		agentCommands:         cfg.AgentCommands,
 		scheduler:             cfg.Scheduler,
 		projectMgr:            cfg.ProjectMgr,
+		resolver:              cfg.Resolver,
 		guard:                 cfg.Guard,
 		queue:                 cfg.Queue,
 		dedup:                 cfg.Dedup,
@@ -210,44 +257,41 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		// include slash commands, ignored non-text items, or dedup hits.
 		d.messageCount.Add(1)
 
-		// Determine session key and opts: project-bound chat routes to planner
+		// Determine session key and opts. Prefer KeyResolver (centralises
+		// project-binding precedence + aliasing-safe ExtraArgs merge as
+		// internal invariants — see docs/rfc/key-resolver.md §3.1 and
+		// session/routing.go). Legacy inlined merge retained as fallback
+		// for headless/test constructions that don't wire a resolver.
 		var key string
-		opts := d.agents[agentID] // zero value = use router defaults
-
-		if d.projectMgr != nil {
-			if proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
-				if agentID == "general" {
-					key = proj.PlannerSessionKey()
-					opts.Exempt = true
-					opts.Workspace = proj.Path
-					if m := d.projectMgr.EffectivePlannerModel(proj); m != "" {
-						opts.Model = m
+		var opts session.AgentOpts
+		if d.resolver != nil {
+			key, opts = d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+		} else {
+			// Legacy path: duplicates resolver logic for zero-resolver
+			// test wiring. R37-CONCUR1 aliasing protection lives here
+			// until all legacy callers are migrated.
+			opts = d.agents[agentID]
+			if d.projectMgr != nil {
+				if proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
+					if agentID == "general" {
+						key = proj.PlannerSessionKey()
+						opts.Exempt = true
+						opts.Workspace = proj.Path
+						if m := d.projectMgr.EffectivePlannerModel(proj); m != "" {
+							opts.Model = m
+						}
+						if p := d.projectMgr.EffectivePlannerPrompt(proj); p != "" {
+							opts.ExtraArgs = append(opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)], "--append-system-prompt", p)
+						}
+					} else {
+						key = session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+						opts.Workspace = proj.Path
 					}
-					if p := d.projectMgr.EffectivePlannerPrompt(proj); p != "" {
-						// Three-arg slice `[:len:len]` forces append to
-						// allocate a fresh backing array instead of
-						// writing past the caller's slice length —
-						// opts.ExtraArgs starts life as a copy of the
-						// shared d.agents[agentID].ExtraArgs value, and
-						// the underlying array is therefore aliased with
-						// every other caller that read the same map
-						// entry. A plain two-arg append would smash those
-						// neighbours with "--append-system-prompt" the
-						// first time cap>len. Downstream router.go also
-						// does a make+copy before handing args to the
-						// CLI spawn, but we harden here too so a future
-						// refactor that drops the downstream copy cannot
-						// cross-contaminate agent configs. R37-CONCUR1.
-						opts.ExtraArgs = append(opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)], "--append-system-prompt", p)
-					}
-				} else {
-					key = session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
-					opts.Workspace = proj.Path
 				}
 			}
-		}
-		if key == "" {
-			key = session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+			if key == "" {
+				key = session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
+			}
 		}
 
 		// Convert platform images to CLI image data
@@ -465,12 +509,17 @@ func (d *Dispatcher) ownerLoop(
 // platform SDK panicking on a nil chat handle) so the outer defer always
 // completes and the process can drain other owners cleanly.
 func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessage, r any) {
+	metrics.PanicRecoveredTotal.Add(1)
 	slog.Error("ownerLoop panic", "key", key, "panic", r, "stack", string(debug.Stack()))
 	if d.queue != nil {
 		d.queue.Discard(key)
 	}
 	func() {
-		defer func() { _ = recover() }()
+		defer func() {
+			if rr := recover(); rr != nil {
+				slog.Error("ownerLoop reply panic recovered", "key", key, "panic", rr)
+			}
+		}()
 		notifyCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 		d.replyText(notifyCtx, msg, "处理异常，请稍后重试。", nil)
@@ -598,6 +647,21 @@ func (d *Dispatcher) sendAndReply(
 			return
 		case errors.Is(err, cli.ErrTooManyPending):
 			errMsg = "当前会话排队已满，请稍候或使用 /stop 取消。"
+		case errors.Is(err, cli.ErrProcessBusy):
+			// Legacy (non-passthrough) state machine says "turn already running".
+			// Surface this distinctly so users don't get the generic /new reset
+			// hint for what is actually a transient "wait for current turn".
+			errMsg = "当前会话正在处理上一条消息，请稍候再发。"
+		case errors.Is(err, cli.ErrMessageTooLarge):
+			// Distinct from the generic "/new" hint — a reset won't help, the
+			// only remedy is to shorten the message or downscale attachments.
+			errMsg = "消息内容过大，请缩短后重试。"
+		case errors.Is(err, cli.ErrOrphanedSlot):
+			errMsg = "处理超时，请稍后重试。"
+		case errors.Is(err, session.ErrNoActiveProcess):
+			// Session has no attached process (paused / reclaimed). A fresh
+			// send will re-spawn via GetOrCreate; the user just needs to retry.
+			errMsg = "会话已休眠，请重新发送消息以唤醒。"
 		default:
 			errMsg = "处理失败，请发送 /new 重置后重试。"
 		}
@@ -649,7 +713,28 @@ func (d *Dispatcher) sendAndReply(
 
 	tracker.waitReady(ctx)
 
-	if replyText != "" {
+	// AskUserQuestion suppression: when this turn surfaced an interactive
+	// question card, `claude -p` also emits a bailout text ("I've asked you
+	// two questions ...") because it auto-rejects the tool to unblock
+	// headless mode. That text is redundant with the card and makes the
+	// session look "finished" instead of "waiting for answer". Replace it
+	// with a short wait-hint on the thinking banner so the user's next view
+	// on the IM channel is the card + a single "waiting" line, nothing else.
+	// The card itself stays rendered above; clicking it sends the answer.
+	//
+	// Dashboard is not affected: it already renders the card as a native
+	// bubble separate from the reply stream, and suppressing the text
+	// simply removes the duplicate final bubble.
+	if tracker.askQuestionFired.Load() {
+		if msgID := tracker.getThinkingMsgID(); msgID != "" {
+			// Best-effort — if the banner edit fails, we log and move on;
+			// there's no user-visible recovery better than "tried to clear".
+			if err := p.EditMessage(ctx, msgID, "⏳ 等待你的选择…"); err != nil {
+				slog.Debug("ask_question: banner edit failed", "err", err)
+			}
+		}
+		log.Info("ask_question suppressed redundant reply", "result_len", len(result.Text))
+	} else if replyText != "" {
 		if msgID := tracker.getThinkingMsgID(); msgID != "" {
 			if err := p.EditMessage(ctx, msgID, replyText); err != nil {
 				slog.Warn("edit message failed, sending new", "err", err)
@@ -776,6 +861,16 @@ type replyTracker struct {
 	// is a no-op.
 	initialReplyReservation   sync.Once
 	initialReplyReservationOn bool
+
+	// askQuestionFired signals that this turn emitted at least one
+	// AskUserQuestion card. Read by sendAndReply to suppress the bailout
+	// text that `claude -p` always produces after auto-rejecting the
+	// tool ("I've asked you..."). Without this suppression users see a
+	// redundant message next to the card; with it, only the card surfaces
+	// and the session "appears" to be waiting for the answer. Written
+	// from onEvent (readLoop goroutine) and read after waitReady returns,
+	// so atomic access is sufficient.
+	askQuestionFired atomic.Bool
 }
 
 func (t *replyTracker) releaseInitialReplySlot() {
@@ -852,6 +947,89 @@ func (t *replyTracker) todoLoop() {
 	}
 }
 
+// sendAskQuestionCard posts the AskUserQuestion card on a detached goroutine.
+// onEvent runs on the readLoop path; a synchronous Feishu Open API call
+// could park there for up to 15s on flaky networks, stalling every event
+// for every session multiplexed through this process. The handler returns
+// immediately while the card post completes in the background, bounded by
+// its own 15s ctx. Any error falls back to a plain-text fallback post.
+//
+// Safety: snapshot (p, chatID, turnCtx) so later mutations to t don't
+// race with the goroutine; the turn context drives cancellation so a
+// session tear-down stops the post cleanly.
+func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
+	if aq == nil || len(aq.Items) == 0 {
+		return
+	}
+	p := t.p
+	chatID := t.chatID
+	turnCtx := t.ctx
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				slog.Warn("ask_question: card send panic recovered",
+					"chat_id", chatID, "tool_use_id", aq.ToolUseID, "panic", r)
+			}
+		}()
+		rctx, cancel := context.WithTimeout(turnCtx, 15*time.Second)
+		defer cancel()
+
+		if sender, ok := platform.AsQuestionCardSender(p); ok {
+			card := platform.QuestionCard{
+				ToolUseID: aq.ToolUseID,
+				Items:     make([]platform.QuestionItem, 0, len(aq.Items)),
+			}
+			for _, q := range aq.Items {
+				opts := make([]platform.QuestionOption, 0, len(q.Options))
+				for _, o := range q.Options {
+					opts = append(opts, platform.QuestionOption{Label: o.Label, Description: o.Description})
+				}
+				card.Items = append(card.Items, platform.QuestionItem{
+					Question: q.Question, Header: q.Header,
+					MultiSelect: q.MultiSelect, Options: opts,
+				})
+			}
+			if _, err := sender.SendQuestionCard(rctx, chatID, card); err != nil {
+				slog.Warn("ask_question card send failed, falling back to text",
+					"chat_id", chatID, "tool_use_id", aq.ToolUseID, "err", err)
+				t.sendAskQuestionFallback(rctx, aq)
+			}
+			return
+		}
+		t.sendAskQuestionFallback(rctx, aq)
+	}()
+}
+
+// sendAskQuestionFallback posts a plain-text message listing the questions +
+// options so a user on a platform without native card support can still reply
+// free-form (their next message becomes the answer).
+func (t *replyTracker) sendAskQuestionFallback(ctx context.Context, aq *cli.AskQuestion) {
+	var b strings.Builder
+	b.WriteString("Claude 想请你确认：\n")
+	for qi, q := range aq.Items {
+		if q.Header != "" {
+			fmt.Fprintf(&b, "\n【%s】", q.Header)
+		} else {
+			fmt.Fprintf(&b, "\n问题 %d：", qi+1)
+		}
+		b.WriteString(q.Question)
+		b.WriteString("\n")
+		for oi, o := range q.Options {
+			fmt.Fprintf(&b, "  %d. %s", oi+1, o.Label)
+			if o.Description != "" {
+				fmt.Fprintf(&b, " — %s", o.Description)
+			}
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\n直接回复选项内容即可（例如：「Error style: Return an error」）。")
+	if _, err := t.p.Reply(ctx, platform.OutgoingMessage{ChatID: t.chatID, Text: b.String()}); err != nil {
+		slog.Debug("ask_question text fallback failed",
+			"chat_id", t.chatID, "tool_use_id", aq.ToolUseID, "err", err)
+	}
+}
+
 // sendTodoMessage posts the rendered checklist as a standalone Reply. Identical
 // consecutive checklists are suppressed so repeated TodoWrite calls that didn't
 // change anything don't spam the chat. Uses an independent bounded ctx so a
@@ -892,6 +1070,18 @@ func (t *replyTracker) stop() {
 }
 
 func (t *replyTracker) onEvent(ev cli.Event) {
+	// AskUserQuestion: when the assistant emits a tool_use for this tool,
+	// the CLI auto-rejects it (verified in test/e2e/askuser — CC injects
+	// is_error:true tool_result within ~3ms in -p mode). We surface the
+	// question as a native interactive card (or a plain-text fallback)
+	// so the next user turn carries the selected option(s).
+	if ev.AskQuestion != nil {
+		t.askQuestionFired.Store(true)
+		t.sendAskQuestionCard(ev.AskQuestion)
+		// Fall through so the existing status-banner logic (tool_use line etc.)
+		// also runs — the card is a parallel surface, not a replacement.
+	}
+
 	// TodoWrite gets its own chat bubble: send as a standalone Reply so it
 	// isn't overwritten by the next banner edit, and so platforms that don't
 	// support interim edits (Weixin) still surface the checklist — the task

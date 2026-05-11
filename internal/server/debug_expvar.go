@@ -4,9 +4,18 @@ import (
 	"expvar"
 	"log/slog"
 	"net/http"
+	"runtime"
+	"sync"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 )
+
+// goroutinesPublishOnce guards the expvar.Publish("goroutines", ...) call so
+// multiple Server instances in the same process (e.g. test servers) do not
+// trip the stdlib's "Reuse of exported var name" panic. The gauge itself is
+// process-scoped — NumGoroutine() is not per-Server state — so a single
+// registration is semantically correct regardless of how many servers exist.
+var goroutinesPublishOnce sync.Once
 
 // registerExpvar wires stdlib expvar's /debug/vars JSON endpoint onto the
 // server mux, gated identically to pprof:
@@ -28,6 +37,17 @@ import (
 // See docs/ops/pprof.md for the equivalent runbook — expvar has no pprof
 // CPU / heap cost but exposes the same sensitivity class.
 func (s *Server) registerExpvar() {
+	// R208-OBS1 residual: publish runtime.NumGoroutine() as an expvar.Func
+	// gauge so operators monitoring /api/debug/vars can alert on goroutine-
+	// count spikes as an early signal for leaks (wsclient readPump / wshub
+	// send goroutines / dispatch ownerLoop are the usual suspects — see the
+	// `naozhi_panic_recovered_total` row in docs/ops/pprof.md). NumGoroutine
+	// is cheap (runtime fastpath over allg) so on-demand evaluation at scrape
+	// time is safe; no background sampler needed.
+	goroutinesPublishOnce.Do(func() {
+		expvar.Publish("goroutines", expvar.Func(func() any { return runtime.NumGoroutine() }))
+	})
+
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !isLoopbackRemote(r.RemoteAddr) {
 			// R186-SEC-L1: r.URL.Path is URL-decoded from the client-supplied

@@ -46,7 +46,11 @@ func TestProcess_DrainStaleEvents_ConcurrentInterruptLossless(t *testing.T) {
 	p.startReadLoop()
 	defer p.Kill()
 
-	// Let readLoop reach steady-state before we start racing atomics.
+	// TRUE-time-delay (not migrated to testhelper.Eventually):
+	// startReadLoop sets State=StateReady synchronously, so there is no
+	// State-based condition to poll; we are waiting for the goroutines
+	// (readLoop + heartbeat) to be scheduled and block on their
+	// respective reads before racing atomics against them.
 	time.Sleep(10 * time.Millisecond)
 
 	const iterations = 5000
@@ -171,6 +175,11 @@ func TestProcess_DrainStaleEvents_ClearsBothFlagsRegardlessOfEntry(t *testing.T)
 			// the test does not pay 500ms.
 			if tc.interrupted && tc.interruptedRun {
 				go func() {
+					// TRUE-time-delay (not migrated to
+					// testhelper.Eventually): intentional delay so the
+					// drain enters its 500ms settle window before a
+					// synthetic result arrives, exercising the settle
+					// path without paying the full settle timeout.
 					time.Sleep(20 * time.Millisecond)
 					srv.SendStdout(`{"type":"result","result":"drain"}`)
 				}()
@@ -200,12 +209,13 @@ func TestProcess_DrainStaleEvents_ClearsBothFlagsRegardlessOfEntry(t *testing.T)
 // and no behavioural test will reliably catch it — hence this static check.
 func TestDrainStaleEvents_SwapCallsAreUnderMu(t *testing.T) {
 	t.Parallel()
-	// Locate process.go relative to this test file.
+	// drainStaleEvents moved to process_turn.go in Phase 4 of
+	// docs/rfc/process-split.md. Locate it there.
 	_, thisFile, _, _ := runtime.Caller(0)
-	src := filepath.Join(filepath.Dir(thisFile), "process.go")
+	src := filepath.Join(filepath.Dir(thisFile), "process_turn.go")
 	data, err := os.ReadFile(src)
 	if err != nil {
-		t.Fatalf("read process.go: %v", err)
+		t.Fatalf("read process_turn.go: %v", err)
 	}
 	body := string(data)
 

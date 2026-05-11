@@ -125,6 +125,122 @@ func TestWriteStateFile_SetsVersion(t *testing.T) {
 	}
 }
 
+func TestShimState_SchemaVersionPersisted(t *testing.T) {
+	// Writers that set SchemaVersion must see it round-trip intact, so a
+	// future reader can inspect the advisory marker without re-parsing.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "schema_version.json")
+
+	want := State{
+		SchemaVersion: 1,
+		ShimPID:       1,
+		Socket:        "/tmp/s.sock",
+		AuthToken:     "dA==",
+		Key:           "k",
+	}
+	if err := WriteStateFile(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadStateFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SchemaVersion != 1 {
+		t.Errorf("SchemaVersion round-trip = %d, want 1", got.SchemaVersion)
+	}
+
+	// Also verify the on-disk JSON key is the canonical snake_case form.
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), `"schema_version": 1`) {
+		t.Errorf("on-disk JSON missing schema_version key: %s", raw)
+	}
+}
+
+func TestShimState_ZeroSchemaVersionIsV1(t *testing.T) {
+	// Contract: an older writer omits schema_version entirely (omitempty on
+	// zero). Readers must tolerate this and interpret missing/zero as v1.
+	// This test documents that semantics — no runtime translation is done
+	// today, but the contract is locked so future consumers can rely on it.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "no_schema_version.json")
+
+	// Older-style payload: "version":1 present, "schema_version" absent.
+	payload := `{"version":1,"shim_pid":1,"cli_pid":0,"socket":"/tmp/s.sock","auth_token":"dA==","key":"k","session_id":"","workspace":"","cli_args":null,"cli_alive":false,"started_at":"","buffer_count":0}`
+	if err := os.WriteFile(path, []byte(payload), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadStateFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.SchemaVersion != 0 {
+		t.Errorf("absent schema_version should decode to zero, got %d", got.SchemaVersion)
+	}
+	// Contract: zero reads as v1. Consumers doing capability checks should
+	// treat got.SchemaVersion == 0 equivalently to got.SchemaVersion == 1.
+	effective := got.SchemaVersion
+	if effective == 0 {
+		effective = 1
+	}
+	if effective != 1 {
+		t.Errorf("effective schema version = %d, want 1 (zero-means-v1 contract)", effective)
+	}
+}
+
+func TestReadState_SchemaVersionExceedsMaxRejected(t *testing.T) {
+	// A state file claiming schema_version > maxSupportedSchemaVersion
+	// was written by a newer naozhi with fields/semantics this binary
+	// cannot interpret. Reader MUST refuse and return the zero State
+	// rather than silently dropping data.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "future.json")
+	payload := `{"version":1,"schema_version":2,"shim_pid":1,"socket":"/tmp/s.sock","auth_token":"dA==","key":"k"}`
+	if err := os.WriteFile(path, []byte(payload), 0600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadStateFile(path)
+	if err == nil {
+		t.Fatal("expected error for schema_version > max, got nil")
+	}
+	if !strings.Contains(err.Error(), "schema_version 2") || !strings.Contains(err.Error(), "max supported 1") {
+		t.Errorf("error should name both observed and max schema version, got: %v", err)
+	}
+	// On schema rejection the returned State must be the zero value; asserting
+	// on the fields populated by the rejected payload is enough to prove no
+	// partial data leaked through.
+	if got.ShimPID != 0 || got.Socket != "" || got.AuthToken != "" || got.Key != "" ||
+		got.Version != 0 || got.SchemaVersion != 0 || got.CLIArgs != nil {
+		t.Errorf("on schema rejection, returned State must be zero value; got %+v", got)
+	}
+}
+
+func TestReadState_SchemaVersionEqualToMaxAccepted(t *testing.T) {
+	// schema_version == maxSupportedSchemaVersion is inside the
+	// supported range and must round-trip without error.
+	dir := t.TempDir()
+	path := filepath.Join(dir, "max.json")
+	want := State{
+		SchemaVersion: maxSupportedSchemaVersion,
+		ShimPID:       1,
+		Socket:        "/tmp/s.sock",
+		AuthToken:     "dA==",
+		Key:           "k",
+	}
+	if err := WriteStateFile(path, want); err != nil {
+		t.Fatal(err)
+	}
+	got, err := ReadStateFile(path)
+	if err != nil {
+		t.Fatalf("ReadStateFile: %v", err)
+	}
+	if got.SchemaVersion != maxSupportedSchemaVersion {
+		t.Errorf("SchemaVersion = %d, want %d", got.SchemaVersion, maxSupportedSchemaVersion)
+	}
+}
+
 func TestReadStateFile_NotFound(t *testing.T) {
 	_, err := ReadStateFile("/nonexistent/path/state.json")
 	if err == nil {

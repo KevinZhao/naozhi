@@ -12,6 +12,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
 
 // ---------------------------------------------------------------------------
@@ -26,6 +27,7 @@ type fakeProcess struct {
 	entries       []cli.EventEntry // returned by EventEntries
 	totalCost     float64          // returned by TotalCost
 	userTurnCount int64            // returned by UserTurnCount (test-only)
+	lastEventAt   time.Time        // returned by LastEventAt (test-only)
 
 	// Interrupt instrumentation (used by TestInterruptSessionSafe_*).
 	// viaControlErr is what InterruptViaControl() returns. interruptCalls is
@@ -170,6 +172,11 @@ func (f *fakeProcess) LastEntryOfType(typ string) cli.EventEntry {
 	return cli.EventEntry{}
 }
 func (f *fakeProcess) LastActivitySummary() string { return "" }
+func (f *fakeProcess) LastEventAt() time.Time {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.lastEventAt
+}
 func (f *fakeProcess) UserTurnCount() int64 {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -605,6 +612,44 @@ func TestResetRunningSession(t *testing.T) {
 	}
 }
 
+// TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace verifies the
+// atomic Reset+delete path used by /new (Round-207 SM1). Deterministic
+// case asserts the override is gone; race case stresses the codepath
+// under -race to catch any lock regression.
+func TestRouter_ResetAndDiscardOverride_RacesWithSetWorkspace(t *testing.T) {
+	r := newTestRouter(3)
+	r.workspaceOverrides = make(map[string]string)
+	r.workspace = "/default"
+	injectSession(r, "key1", newIdleProc())
+	r.SetWorkspace("key1", "/tmp/override")
+	if got := r.GetWorkspace("key1"); got != "/tmp/override" {
+		t.Fatalf("pre-reset workspace = %q, want /tmp/override", got)
+	}
+	r.ResetAndDiscardOverride("key1")
+	if _, ok := r.workspaceOverrides["key1"]; ok {
+		t.Error("workspaceOverrides[key1] still present after ResetAndDiscardOverride")
+	}
+	if got := r.GetWorkspace("key1"); got != "/default" {
+		t.Errorf("post-reset workspace = %q, want /default", got)
+	}
+
+	// Race sub-case: concurrent SetWorkspace with ResetAndDiscardOverride
+	// must not trip -race; either order is acceptable as long as the lock
+	// pairs the clear with the override delete.
+	injectSession(r, "key2", newIdleProc())
+	r.SetWorkspace("key2", "/tmp/initial")
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for i := 0; i < 200; i++ {
+			r.SetWorkspace("key2", fmt.Sprintf("/tmp/racing-%d", i))
+		}
+	}()
+	r.ResetAndDiscardOverride("key2")
+	<-done
+	_ = r.GetWorkspace("key2")
+}
+
 // TestWaitSocketGoneForKey_EmptyKey — the helper must be a no-op when
 // called with an empty key (unused session). Without this guard Reset
 // would block the caller for 2s for every test that never started a shim.
@@ -664,6 +709,67 @@ func TestCleanupExpiredSession(t *testing.T) {
 
 	if proc.Alive() {
 		t.Error("expired session process should be closed")
+	}
+}
+
+// TestCleanupRunningSession_LiveEventsBlockStuckKill verifies the fix for
+// "running sessions disappear from the sidebar during long turns": lastActive
+// is only touched at Send entry, so a 20-minute code analysis would age past
+// the 2×DefaultTotalTimeout stuck threshold and be Kill()'d mid-turn. The
+// fix folds EventLog.LastEventAt() into the activity calculation so any
+// streamed tool_use / thinking / assistant event proves the turn is alive.
+func TestCleanupRunningSession_LiveEventsBlockStuckKill(t *testing.T) {
+	r := &Router{
+		sessions:     make(map[string]*ManagedSession),
+		maxProcs:     3,
+		ttl:          1 * time.Minute,
+		pruneTTL:     72 * time.Hour,
+		totalTimeout: 5 * time.Minute, // stuckThreshold = 10 min
+	}
+	proc := newRunningProc()
+	// Ancient lastActive (25 min ago) would normally trip stuck_running, but
+	// a fresh LastEventAt (10 s ago) should protect the session.
+	proc.lastEventAt = time.Now().Add(-10 * time.Second)
+	s := injectSession(r, "key1", proc)
+	s.lastActive.Store(time.Now().Add(-25 * time.Minute).UnixNano())
+
+	r.Cleanup()
+
+	if !proc.Alive() {
+		t.Fatal("running session with live events must survive Cleanup; stuckKill regression")
+	}
+	if got := loadStringAtomic(&s.deathReason); got == "stuck_running" {
+		t.Errorf("deathReason = %q, want empty (session should not be classified as stuck)", got)
+	}
+}
+
+// TestCleanupRunningSession_NoLiveEventsStillKilled verifies the stuckKill
+// safety net still fires when the process is truly silent: lastActive stale
+// AND LastEventAt stale (or zero) means the turn is not making progress.
+func TestCleanupRunningSession_NoLiveEventsStillKilled(t *testing.T) {
+	r := &Router{
+		sessions:     make(map[string]*ManagedSession),
+		maxProcs:     3,
+		ttl:          1 * time.Minute,
+		pruneTTL:     72 * time.Hour,
+		totalTimeout: 5 * time.Minute,
+	}
+	proc := newRunningProc()
+	// LastEventAt deliberately left at zero so "max(lastActive, LastEventAt)"
+	// falls back to lastActive. Simulates a shim that accepted a Send but
+	// never returned a single stream-json event (genuine hang).
+	s := injectSession(r, "key1", proc)
+	s.lastActive.Store(time.Now().Add(-25 * time.Minute).UnixNano())
+
+	r.Cleanup()
+
+	if proc.Alive() {
+		// expected — Kill() set isAlive=false
+	} else if got := loadStringAtomic(&s.deathReason); got != "stuck_running" {
+		t.Errorf("deathReason = %q, want %q", got, "stuck_running")
+	}
+	if proc.Alive() {
+		t.Error("truly stuck running session must still be killed")
 	}
 }
 
@@ -1421,14 +1527,9 @@ func TestStartCleanupLoop_TriggersCleanup(t *testing.T) {
 	r.StartCleanupLoop(ctx, 20*time.Millisecond)
 
 	// Wait for at least one cleanup cycle.
-	deadline := time.Now().Add(500 * time.Millisecond)
-	for time.Now().Before(deadline) {
-		if !proc.Alive() {
-			return // cleanup fired and closed the expired session
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Error("cleanup loop did not close expired session within 500ms")
+	testhelper.Eventually(t, func() bool {
+		return !proc.Alive() // cleanup fired and closed the expired session
+	}, 500*time.Millisecond, "cleanup loop did not close expired session")
 }
 
 func TestStartCleanupLoop_StopsOnContextCancel(t *testing.T) {
@@ -1903,4 +2004,264 @@ func TestResolveResumeID(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// resolveSpawnParamsLocked — R70-ARCH-H2
+// ---------------------------------------------------------------------------
+
+func TestResolveSpawnParamsLocked(t *testing.T) {
+	// Router with one default backend "claude" plus a secondary "kiro" so
+	// backend-override cases have a real target.
+	mkRouter := func() *Router {
+		return &Router{
+			sessions: make(map[string]*ManagedSession),
+			wrappers: map[string]*cli.Wrapper{
+				"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+				"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
+			},
+			defaultBackend:     "claude",
+			model:              "sonnet-default",
+			extraArgs:          []string{"--flag-a"},
+			backendModels:      map[string]string{"kiro": "kiro-model"},
+			backendExtraArgs:   map[string][]string{"kiro": {"--kiro-arg"}},
+			workspace:          "/default/ws",
+			workspaceOverrides: make(map[string]string),
+			backendOverrides:   make(map[string]string),
+		}
+	}
+
+	t.Run("backendOverride wins when opts.Backend empty", func(t *testing.T) {
+		r := mkRouter()
+		r.backendOverrides["feishu:user:bob:agent1"] = "kiro"
+		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "", AgentOpts{})
+		if sp.BackendID != "kiro" {
+			t.Errorf("BackendID = %q, want kiro", sp.BackendID)
+		}
+		if sp.Model != "kiro-model" {
+			t.Errorf("Model = %q, want kiro-model", sp.Model)
+		}
+		if len(sp.Args) != 1 || sp.Args[0] != "--kiro-arg" {
+			t.Errorf("Args = %v, want [--kiro-arg]", sp.Args)
+		}
+		// Override is consumed (one-shot).
+		if _, still := r.backendOverrides["feishu:user:bob:agent1"]; still {
+			t.Error("backendOverride was not consumed")
+		}
+	})
+
+	t.Run("opts.Backend beats backendOverride", func(t *testing.T) {
+		r := mkRouter()
+		r.backendOverrides["feishu:user:bob:agent1"] = "kiro"
+		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "",
+			AgentOpts{Backend: "claude"})
+		if sp.BackendID != "claude" {
+			t.Errorf("BackendID = %q, want claude", sp.BackendID)
+		}
+	})
+
+	t.Run("workspaceOverride (chatKey) wins when opts.Workspace empty", func(t *testing.T) {
+		r := mkRouter()
+		r.workspaceOverrides["feishu:user:alice"] = "/override/ws"
+		sp := r.resolveSpawnParamsLocked("feishu:user:alice:agent1", "", AgentOpts{})
+		if sp.Workspace != "/override/ws" {
+			t.Errorf("Workspace = %q, want /override/ws", sp.Workspace)
+		}
+	})
+
+	t.Run("opts.Workspace beats workspaceOverride", func(t *testing.T) {
+		r := mkRouter()
+		r.workspaceOverrides["feishu:user:alice"] = "/override/ws"
+		sp := r.resolveSpawnParamsLocked("feishu:user:alice:agent1", "",
+			AgentOpts{Workspace: "/opts/ws"})
+		if sp.Workspace != "/opts/ws" {
+			t.Errorf("Workspace = %q, want /opts/ws", sp.Workspace)
+		}
+	})
+
+	t.Run("invalid resumeID downgrades to empty", func(t *testing.T) {
+		// claudeDir + workspace set, jsonl missing → resolveResumeID returns "".
+		r := mkRouter()
+		r.claudeDir = t.TempDir()
+		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1",
+			"00000000-0000-0000-0000-000000000000", AgentOpts{Workspace: "/some/ws"})
+		if sp.ResumeID != "" {
+			t.Errorf("ResumeID = %q, want \"\" (downgraded)", sp.ResumeID)
+		}
+	})
+
+	t.Run("all defaults when opts empty and no overrides", func(t *testing.T) {
+		r := mkRouter()
+		sp := r.resolveSpawnParamsLocked("feishu:user:bob:agent1", "", AgentOpts{})
+		if sp.BackendID != "claude" {
+			t.Errorf("BackendID = %q, want claude", sp.BackendID)
+		}
+		if sp.Model != "sonnet-default" {
+			t.Errorf("Model = %q, want sonnet-default", sp.Model)
+		}
+		if len(sp.Args) != 1 || sp.Args[0] != "--flag-a" {
+			t.Errorf("Args = %v, want [--flag-a]", sp.Args)
+		}
+		if sp.Workspace != "/default/ws" {
+			t.Errorf("Workspace = %q, want /default/ws", sp.Workspace)
+		}
+		if sp.ResumeID != "" {
+			t.Errorf("ResumeID = %q, want empty", sp.ResumeID)
+		}
+	})
+
+	t.Run("opts.ExtraArgs appended after backend args", func(t *testing.T) {
+		r := mkRouter()
+		sp := r.resolveSpawnParamsLocked("k", "",
+			AgentOpts{Backend: "kiro", ExtraArgs: []string{"--extra"}})
+		want := []string{"--kiro-arg", "--extra"}
+		if len(sp.Args) != 2 || sp.Args[0] != want[0] || sp.Args[1] != want[1] {
+			t.Errorf("Args = %v, want %v", sp.Args, want)
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// classifyShimState — R70-ARCH-H4
+// ---------------------------------------------------------------------------
+
+func TestClassifyShimState(t *testing.T) {
+	cases := []struct {
+		name                                            string
+		spawning, sessFound, hasLive, wrapperNil, drift bool
+		want                                            shimState
+	}{
+		// spawning wins against every other signal
+		{"spawning+everything", true, true, true, true, true, shimStateSkip},
+		{"spawning alone", true, false, false, false, false, shimStateSkip},
+
+		// no session → orphan (regardless of wrapper/drift)
+		{"orphan clean", false, false, false, false, false, shimStateOrphan},
+		{"orphan with wrapper nil", false, false, false, true, false, shimStateOrphan},
+		{"orphan with drift flag", false, false, false, false, true, shimStateOrphan},
+
+		// session exists with live process → skip
+		{"live process", false, true, true, false, false, shimStateSkip},
+		{"live process with drift", false, true, true, false, true, shimStateSkip},
+		{"live process with wrapperNil", false, true, true, true, false, shimStateSkip},
+
+		// session exists, no live process, no wrapper → noWrapper
+		{"no wrapper", false, true, false, true, false, shimStateNoWrapper},
+		{"no wrapper with drift", false, true, false, true, true, shimStateNoWrapper},
+
+		// session exists, wrapper, drift → drift
+		{"drift", false, true, false, false, true, shimStateDrift},
+
+		// happy path → reconnect
+		{"reconnect", false, true, false, false, false, shimStateReconnect},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := classifyShimState(tc.spawning, tc.sessFound, tc.hasLive,
+				tc.wrapperNil, tc.drift)
+			if got != tc.want {
+				t.Errorf("classifyShimState(spawning=%v, sessFound=%v, hasLive=%v, wrapperNil=%v, drift=%v) = %v, want %v",
+					tc.spawning, tc.sessFound, tc.hasLive, tc.wrapperNil, tc.drift, got, tc.want)
+			}
+		})
+	}
+}
+
+// ---------------------------------------------------------------------------
+// collectPreviousHistory — R70-ARCH-H2 paired with resolveSpawnParamsLocked
+// ---------------------------------------------------------------------------
+
+// TestCollectPreviousHistory covers the three shapes spawnSession feeds
+// in: fresh (no prior session), resume-same-id (no chain growth), and
+// respawn-different-id (old ID appended to prevIDs).
+func TestCollectPreviousHistory(t *testing.T) {
+	t.Run("fresh: nil old session returns empty", func(t *testing.T) {
+		entries, prev := collectPreviousHistory(nil, nil, "")
+		if entries != nil || prev != nil {
+			t.Errorf("collectPreviousHistory(nil) = (%v, %v), want (nil, nil)", entries, prev)
+		}
+	})
+
+	t.Run("resume same id: chain unchanged, persistedHistory cloned", func(t *testing.T) {
+		persisted := []cli.EventEntry{
+			{Time: 1000, Type: "user", Summary: "hi"},
+		}
+		oldPrev := []string{"id-a"}
+		s := &ManagedSession{persistedHistory: persisted}
+		s.setSessionID("id-b")
+
+		entries, prev := collectPreviousHistory(s, oldPrev, "id-b")
+
+		if len(entries) != 1 || entries[0].Summary != "hi" {
+			t.Errorf("entries = %v, want one 'hi' entry", entries)
+		}
+		if len(prev) != 1 || prev[0] != "id-a" {
+			t.Errorf("prev = %v, want [id-a] (same id, no growth)", prev)
+		}
+	})
+
+	t.Run("respawn new id: old id appended to chain", func(t *testing.T) {
+		s := &ManagedSession{}
+		s.setSessionID("id-old")
+
+		_, prev := collectPreviousHistory(s, []string{"id-a"}, "id-new")
+
+		if len(prev) != 2 || prev[0] != "id-a" || prev[1] != "id-old" {
+			t.Errorf("prev = %v, want [id-a id-old]", prev)
+		}
+	})
+
+	t.Run("chain cap: bounded at maxPrevSessionIDs", func(t *testing.T) {
+		s := &ManagedSession{}
+		s.setSessionID("id-old")
+
+		// Seed oldPrev at the cap so appending old.sessionID overflows.
+		oldPrev := make([]string, maxPrevSessionIDs)
+		for i := range oldPrev {
+			oldPrev[i] = fmt.Sprintf("id-%d", i)
+		}
+		_, prev := collectPreviousHistory(s, oldPrev, "id-new")
+
+		if len(prev) != maxPrevSessionIDs {
+			t.Fatalf("prev len = %d, want %d (capped)", len(prev), maxPrevSessionIDs)
+		}
+		if prev[len(prev)-1] != "id-old" {
+			t.Errorf("last entry = %q, want id-old (newest retained)", prev[len(prev)-1])
+		}
+	})
+}
+
+// ---------------------------------------------------------------------------
+// installFreshSessionLocked — CQ2 Round 213 extraction
+// ---------------------------------------------------------------------------
+//
+// installFreshSessionLocked takes a concrete *cli.Process (the in-band
+// SetOnTurnDone hook is not part of processIface), so a behavior-level
+// table test would require spinning a real CLI subprocess. Instead we
+// assert the method exists with the expected signature — this guards
+// against accidental rename / parameter drift by future refactors and
+// confirms the extraction compiles as a pure relocation. The
+// underlying behavior is already covered end-to-end by every
+// TestSpawnSession* case that exercises the enclosing spawnSession
+// path, which now routes through this helper.
+func TestInstallFreshSessionLocked_SignatureGuard(t *testing.T) {
+	// Compile-time pin: if installFreshSessionLocked's signature drifts,
+	// this assignment fails to build. Method values on a concrete type
+	// are never nil, so a runtime nil-check here would be vacuous
+	// (staticcheck SA4031).
+	var _ = func(r *Router) func(
+		key string,
+		proc *cli.Process,
+		workspace string,
+		backendID string,
+		wrapper *cli.Wrapper,
+		resumeID string,
+		oldHistory []cli.EventEntry,
+		prevIDs []string,
+		oldTotalCost float64,
+		exempt bool,
+	) *ManagedSession {
+		return r.installFreshSessionLocked
+	}
+	_ = t
 }

@@ -235,6 +235,12 @@ type SessionHandlers struct {
 	watchdogNoOut *atomic.Int64
 	watchdogTotal *atomic.Int64
 
+	// snapshotEnricher is an optional hook wired from server.go to
+	// Hub.enrichSnapshot so SubagentInfo rows in /api/sessions responses
+	// carry the tailer-side LastTool / ToolUses / DurationMS that never
+	// appear in the parent stream. nil in tests that don't build a Hub.
+	snapshotEnricher func(*session.SessionSnapshot)
+
 	// uptimeCache memoises the formatted uptime string at 1-second resolution.
 	// handleList is hit at 1 Hz × N dashboard tabs, and
 	// time.Since(startedAt).Round(time.Second).String() allocates a short
@@ -357,6 +363,15 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		n++
 	}
 	snapshots = snapshots[:n]
+
+	// Overlay tailer-side agent metrics (RFC v4 §3.5.4). No-op when the
+	// hub tailer registry is empty or hasn't been wired — safe for tests
+	// that build SessionHandlers without a Hub.
+	if h.snapshotEnricher != nil {
+		for i := range snapshots {
+			h.snapshotEnricher(&snapshots[i])
+		}
+	}
 
 	// Fill project field from ProjectManager
 	if h.projectMgr != nil {

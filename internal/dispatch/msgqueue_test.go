@@ -197,6 +197,49 @@ func TestSessionGuardCompat_TryAcquireRelease(t *testing.T) {
 	}
 }
 
+// TestRelease_DrainsQueuedMessages locks in R37-REL1: if the Dashboard/WS
+// Guard path acquires a session via TryAcquire and IM Enqueue lands messages
+// during the busy window, ReleaseWithDrain must surface those messages to the
+// caller (FIFO) rather than leaving them stranded until a future Enqueue.
+func TestRelease_DrainsQueuedMessages(t *testing.T) {
+	t.Parallel()
+	q := NewMessageQueue(10, 0)
+
+	// Dashboard Guard path acquires the session.
+	if !q.TryAcquire("k1") {
+		t.Fatal("TryAcquire should succeed on idle key")
+	}
+
+	// Two IM messages land while the session is busy.
+	if _, enqueued, _, _ := q.Enqueue("k1", QueuedMsg{Text: "A"}); !enqueued {
+		t.Fatal("A should be enqueued during busy window")
+	}
+	if _, enqueued, _, _ := q.Enqueue("k1", QueuedMsg{Text: "B"}); !enqueued {
+		t.Fatal("B should be enqueued during busy window")
+	}
+
+	var drained []string
+	q.ReleaseWithDrain("k1", func(m QueuedMsg) {
+		drained = append(drained, m.Text)
+	})
+
+	if len(drained) != 2 {
+		t.Fatalf("drained = %d, want 2", len(drained))
+	}
+	if drained[0] != "A" || drained[1] != "B" {
+		t.Fatalf("drained order = %v, want [A B]", drained)
+	}
+
+	// Post-drain the session must be fully releasable: next TryAcquire
+	// starts idle and Depth returns 0.
+	if d := q.Depth("k1"); d != 0 {
+		t.Fatalf("Depth = %d, want 0 after drain", d)
+	}
+	if !q.TryAcquire("k1") {
+		t.Fatal("TryAcquire should succeed after ReleaseWithDrain")
+	}
+}
+
 func TestLastNotify_CleanedOnDrain(t *testing.T) {
 	t.Parallel()
 	q := NewMessageQueue(10, 0)
@@ -367,6 +410,43 @@ func TestEnqueue_InterruptMode_Discard_ResetsInterruptFlag(t *testing.T) {
 	q.Enqueue("k1", QueuedMsg{Text: "C"})
 	if _, _, shouldInterrupt, _ := q.Enqueue("k1", QueuedMsg{Text: "D"}); !shouldInterrupt {
 		t.Fatal("after Discard, next turn's first follow-up must interrupt")
+	}
+}
+
+// TestMessageQueue_Cleanup_RemovesMapEntry verifies Cleanup drops the entry
+// Discard retains for gen-monotonicity, and the next Enqueue starts at gen=0.
+func TestMessageQueue_Cleanup_RemovesMapEntry(t *testing.T) {
+	t.Parallel()
+	q := NewMessageQueue(10, 0)
+	q.Enqueue("k1", QueuedMsg{Text: "A"})
+	q.Enqueue("k2", QueuedMsg{Text: "A"})
+	q.Discard("k1") // retains the map entry with bumped gen
+
+	q.mu.Lock()
+	before := len(q.queues)
+	_, retained := q.queues["k1"]
+	q.mu.Unlock()
+	if !retained {
+		t.Fatal("Discard should retain the map entry")
+	}
+
+	q.Cleanup("k1")
+	q.Cleanup("never-seen") // no-op on unknown key
+
+	q.mu.Lock()
+	after := len(q.queues)
+	_, present := q.queues["k1"]
+	q.mu.Unlock()
+	if present {
+		t.Fatal("Cleanup should delete the map entry")
+	}
+	if got := before - after; got != 1 {
+		t.Fatalf("len(queues) dropped by %d, want 1", got)
+	}
+
+	isOwner, _, _, gen := q.Enqueue("k1", QueuedMsg{Text: "fresh"})
+	if !isOwner || gen != 0 {
+		t.Fatalf("post-Cleanup: isOwner=%v, gen=%d; want true, 0", isOwner, gen)
 	}
 }
 

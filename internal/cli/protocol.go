@@ -75,6 +75,37 @@ type Protocol interface {
 	HandleEvent(w io.Writer, ev Event) (handled bool)
 }
 
+// Caps aggregates Protocol capabilities in a single type so consumers
+// can feature-route via a single accessor instead of individual
+// SupportsX() methods sprinkled everywhere. The struct is value-copy
+// cheap (all bool); future fields may include timeout tiers or
+// version hints. See RNEW-ARCH-404.
+type Caps struct {
+	Replay        bool // true if the protocol can replay events from disk (Claude stream-json)
+	Priority      bool // true if the protocol supports priority queueing (Claude has a spawn-priority path)
+	SoftInterrupt bool // true if WriteInterrupt is a no-op safe soft cancel (ACP has this; Claude SIGINTs)
+	StreamJSON    bool // true if the protocol's wire format is stream-json (Claude) vs something else (ACP JSON-RPC)
+}
+
+// ProtocolCaps returns the capability set of any Protocol. Default
+// derives from existing SupportsReplay / SupportsPriority / Name()
+// so implementations without their own Capabilities() method still
+// get the right answer. Implementations that want direct control
+// can provide a Capabilities() Caps method; if found via type
+// assertion, that wins.
+func ProtocolCaps(p Protocol) Caps {
+	if cp, ok := p.(interface{ Capabilities() Caps }); ok {
+		return cp.Capabilities()
+	}
+	return Caps{
+		Replay:     p.SupportsReplay(),
+		Priority:   p.SupportsPriority(),
+		StreamJSON: p.Name() != "acp",
+		// SoftInterrupt absent from current surface; leave false by default.
+		// Backends wanting to opt in should implement Capabilities().
+	}
+}
+
 // JSONRW provides line-oriented JSON read/write over stdin/stdout.
 type JSONRW struct {
 	W io.Writer

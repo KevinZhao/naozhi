@@ -1,3 +1,5 @@
+//go:build linux
+
 package discovery
 
 import (
@@ -13,7 +15,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -166,6 +167,11 @@ var scanUserPromptBufPool = sync.Pool{
 		return &b
 	},
 }
+
+// userTypeMarker is the JSONL quick-filter prefix used by scanUserPrompt.
+// Hoisted to package scope so the `[]byte(...)` literal does not allocate
+// on every line of the hot JSONL scan loop.
+var userTypeMarker = []byte(`"type":"user"`)
 
 func DefaultScanner() *Scanner {
 	defaultScannerOnce.Do(func() {
@@ -679,7 +685,7 @@ func scanUserPrompt(f *os.File) string {
 			continue
 		}
 		// Quick check before full parse
-		if !bytes.Contains(line, []byte(`"type":"user"`)) {
+		if !bytes.Contains(line, userTypeMarker) {
 			continue
 		}
 		var hl struct {
@@ -843,8 +849,6 @@ func findJSONLPath(claudeDir, cwd, sessionID string) string {
 //   proc_linux.go  — reads /proc/PID/stat and /proc/PID/cmdline
 //   proc_darwin.go — uses sysctl and ps(1)
 
-var sessionIDRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
-
 // LookupSummaries is the package-level wrapper that delegates to
 // DefaultScanner. Preserves the pre-refactor signature for zero-churn
 // back-compat at call sites.
@@ -861,7 +865,11 @@ func (s *Scanner) LookupSummaries(claudeDir string, sessions map[string]string) 
 	}
 
 	// Group session IDs by project directory to read each index file once.
-	byProjDir := make(map[string][]string) // indexPath → []sessionID
+	// Preallocate upper bound len(sessions): worst case each session is in
+	// its own project dir. Actual entry count is typically ≤ number of
+	// distinct workspaces, so some headroom is acceptable vs. map rehash
+	// cost on the growing path.
+	byProjDir := make(map[string][]string, len(sessions)) // indexPath → []sessionID
 	for sid, workspace := range sessions {
 		if workspace == "" {
 			continue
@@ -1027,9 +1035,8 @@ func (s *Scanner) RefreshDynamic(claudeDir string, sessions []DiscoveredSession)
 
 // IsValidSessionID checks whether s is a valid UUID-format session ID.
 // Hand-rolled 36-char format check (8-4-4-4-12 lowercase hex with dashes)
-// to avoid the DFA lookup cost sessionIDRe.MatchString pays on every
-// discovered session during each Scan. The regexp is still kept as the
-// canonical pattern reference but is no longer on the hot path.
+// to avoid the DFA lookup cost a regexp.MatchString pays on every
+// discovered session during each Scan.
 func IsValidSessionID(s string) bool {
 	if len(s) != 36 {
 		return false

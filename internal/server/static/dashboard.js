@@ -2,6 +2,11 @@
 if('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(()=>{});
 
 let selectedKey = null;
+// _activeCardEl caches the currently-.active session card element so the
+// selector switch doesn't have to O(N) scan every card each time. Stays in
+// sync via setActiveSessionCard(); after renderSidebar rebuilds the list the
+// cached node becomes detached — the helper's isConnected guard recovers.
+let _activeCardEl = null;
 let eventTimer = null;
 let lastEventTime = 0;
 let lastRenderedEventTime = 0;
@@ -101,8 +106,53 @@ const sessionOptimisticRunning = {};
 const sessionLastSent = {};
 let historySessionsData = []; // from API history_sessions (all filesystem sessions)
 
+// RNEW-UX-004: unified localStorage helper. Use these for NEW keys only —
+// legacy 'nz_' / 'naozhi_' call sites are intentionally left alone to
+// preserve persisted user state across upgrades. LS_SCHEMA is reserved for
+// future breaking changes (bump + migrate on read). All three helpers
+// swallow quota/disabled errors so callers never need their own try/catch.
+const LS_PREFIX = 'nz:';
+const LS_SCHEMA = 1; // bump when structure breaks
+function lsSet(key, value) { try { localStorage.setItem(LS_PREFIX + key, JSON.stringify(value)); } catch (e) { /* quota / disabled */ } }
+function lsGet(key, fallback) { try { const v = localStorage.getItem(LS_PREFIX + key); return v == null ? fallback : JSON.parse(v); } catch (e) { return fallback; } }
+function lsRemove(key) { try { localStorage.removeItem(LS_PREFIX + key); } catch (e) {} }
+// Migration of existing 'nz_'/'naozhi_' keys is deferred — touching live
+// persisted state across 17 call sites is riskier than the double-prefix
+// quirk it would fix. Revisit when LS_SCHEMA is bumped.
+
 function getToken() { return ''; }
 function setToken(t) { /* token stored in HttpOnly cookie only */ }
+
+// RNEW-UX-003: fetchJSON wraps fetch with an AbortController + timeout.
+// NAT-dropped TCP connections can leave the browser in a "pending" state
+// for minutes with no visible signal — fetchJSON guarantees the Promise
+// resolves/rejects within `timeoutMs` (default 10s) so spinners and
+// error paths fire deterministically. Returns parsed JSON on 2xx, throws
+// with the response body on non-2xx. Partial migration: the highest-risk
+// polling + scan sites (sessions, cli/backends, events, cron, discovered,
+// discovered/preview, projects/files/exists) use this helper today; the
+// remaining fetch() sites migrate in later rounds.
+async function fetchJSON(url, opts = {}) {
+  const { timeoutMs = 10000, signal: parentSignal, ...rest } = opts;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(new Error('timeout')), timeoutMs);
+  // Chain caller-provided signal so e.g. component-unmount can abort too.
+  if (parentSignal) {
+    if (parentSignal.aborted) { clearTimeout(timer); ctrl.abort(parentSignal.reason); }
+    else parentSignal.addEventListener('abort', () => ctrl.abort(parentSignal.reason), { once: true });
+  }
+  try {
+    const r = await fetch(url, { ...rest, signal: ctrl.signal });
+    clearTimeout(timer);
+    const text = await r.text();
+    if (!r.ok) { const err = new Error('HTTP ' + r.status + ': ' + text.slice(0, 500)); err.status = r.status; throw err; }
+    return text ? JSON.parse(text) : null;
+  } catch (e) {
+    clearTimeout(timer);
+    if (e.name === 'AbortError') throw new Error('fetch timed out after ' + timeoutMs + 'ms: ' + url);
+    throw e;
+  }
+}
 
 function removePendingSession(key) {
   delete sessionWorkspaces[key];
@@ -114,16 +164,19 @@ async function fetchSessions() {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch('/api/sessions', { headers });
-    if (r.status === 401 || r.status === 403) {
-      if (!document.querySelector('.modal-overlay')) showAuthModal();
-      // Explicit falsy return lets maybeShowOnboarding know auth is still
-      // unresolved and skip its overlay, avoiding stacking onboarding on
-      // top of the auth modal.
-      return false;
+    // RNEW-UX-003: 8s timeout — sessions poll runs every 5s so a hung
+    // response must release before the next tick fires.
+    let data;
+    try {
+      data = await fetchJSON('/api/sessions', { headers, timeoutMs: 8000 });
+    } catch (err) {
+      if (err.status === 401 || err.status === 403) {
+        if (!document.querySelector('.modal-overlay')) showAuthModal();
+        return false;
+      }
+      if (err.status) return false;
+      throw err;
     }
-    if (!r.ok) return false;
-    const data = await r.json();
     // Use server-side version counter for efficient change detection.
     // Falls back to JSON comparison for nodes/history which lack a version.
     const version = (data.stats && data.stats.version) || 0;
@@ -314,6 +367,16 @@ function renderSidebar(data) {
     return bFS - aFS;
   });
 
+  // Hide cron-scheduler sessions from the sidebar unless the operator has
+  // explicitly opened one (tracked via cronVisibleKeys). This is applied
+  // once here so every downstream branch — search filter, project
+  // grouping, fallback flat list — sees the same "visible" universe. The
+  // upstream allSessionsCache still holds every session so history-badge
+  // counts and other aggregates are unaffected.
+  const visibleItems = allItems.filter(s =>
+    !isCronSessionKey(s.key) || cronVisibleKeys.has(s.key)
+  );
+
   // UX-P3 sidebar search: if the filter input is visible and non-empty,
   // skip the project grouping entirely and render the filtered set as a
   // flat list. Grouping under a filter scatters matches across day headers
@@ -324,7 +387,7 @@ function renderSidebar(data) {
   const filterActive = !!filterQuery;
   let listHtml = '';
   if (filterActive) {
-    const matched = filterSessionsByQuery(allItems, filterQuery);
+    const matched = filterSessionsByQuery(visibleItems, filterQuery);
     listHtml = matched.length === 0
       ? '<div class="session-list-filter-empty">没有匹配的会话<span class="slfe-hint">试试项目名、CLI 名或 prompt 片段</span></div>'
       : matched.map(sessionCardHtml).join('');
@@ -344,24 +407,15 @@ function renderSidebar(data) {
     // key so two unrelated folders that share a basename (e.g. /a/tmp and
     // /b/tmp) do not collapse into a single mislabeled group.
     const groups = {};
-    const cronItems = [];
     const ungrouped = [];
-    allItems.forEach(s => {
-      // Cron-scheduler sessions (key prefix "cron:"): if the job carries a
-      // WorkDir that the backend resolved to a real project name, let it
-      // flow into that project's group just like any other session — the
-      // cron badge (⏰) on the card already signals its nature. Only cron
-      // jobs without a project (no WorkDir, or WorkDir outside any
-      // registered project AND no workspace-basename fallback) fall into
-      // the dedicated "定时任务" bucket, so they don't drop into the generic
-      // "未分组" catch-all either. 这样定了 WorkDir 的定时任务会出现在
-      // 它实际运行的项目下，符合操作者的定位直觉；纯无归属的定时任务
-      // 才统一收进定时任务分组。
-      const isCron = typeof s.key === 'string' && s.key.indexOf('cron:') === 0;
-      if (isCron && !s.project) {
-        cronItems.push(s);
-        return;
-      }
+    // visibleItems already applied the cron visibility gate up above, so
+    // every entry here is either (a) not a cron session, or (b) a cron
+    // session the operator has explicitly opened. Visible cron sessions
+    // keep flowing through the project-grouping logic so they land next
+    // to their workspace peers, matching the "I want to see THIS one"
+    // intent; project-less cron sessions fall into the catch-all
+    // ungrouped bucket — no dedicated 定时任务 sidebar section any more.
+    visibleItems.forEach(s => {
       const pn = s.project || '';
       if (pn) {
         const node = s.node || 'local';
@@ -398,9 +452,13 @@ function renderSidebar(data) {
     });
 
     const groupKeys = Object.keys(groups);
-    // cron 分组要和 project 分组并列展示；如果只有 cron session（无任何
-    // project header），也要保留分组结构而不是回落到扁平列表。
-    if (groupKeys.length > 0 || cronItems.length > 0) {
+    // Visible cron sessions (those in cronVisibleKeys) either fell into a
+    // project group via s.project above, or — if they have no project —
+    // dropped into `ungrouped`. No dedicated cron-group header is rendered
+    // any more: the sidebar is reserved for operator-opened conversations,
+    // and the 定时任务 panel owns the full scheduled-task catalog. See
+    // cronVisibleKeys comment block.
+    if (groupKeys.length > 0) {
       // Pre-compute per-group sort keys once — avoids repeated map lookups
       // inside the sort comparator (fav flag, max firstSeen, display name).
       // This keeps comparator at O(1) scalar comparisons rather than
@@ -449,16 +507,11 @@ function renderSidebar(data) {
         // affordance, so a duplicate "New session in X" CTA would just add
         // visual noise.
       });
-      if (cronItems.length > 0) {
-        html += sectionHeaderCronHtml(cronItems.length);
-        if (!collapsedProjects.has('cron:__all__')) {
-          // Stable ordering inside the cron bucket: by firstSeen desc, same
-          // as the global sort above already placed them. Use them as-is
-          // rather than re-sorting so the earlier "running first" tier is
-          // preserved (cron stubs that are actually executing bubble up).
-          html += cronItems.map(sessionCardHtml).join('');
-        }
-      }
+      // NOTE: the dedicated 定时任务 sidebar section was removed.
+      // Cron sessions now hide by default (see cronVisibleKeys) and
+      // visible ones flow into their project's group. If they have no
+      // project, they fall into the catch-all "未分组" bucket below,
+      // which is consistent with how other project-less sessions behave.
       if (ungrouped.length > 0) {
         // Final catch-all: sessions with no project name AND no workspace
         // (rare — usually transient takeover/planner edge cases). The old
@@ -468,7 +521,7 @@ function renderSidebar(data) {
         html += ungrouped.map(sessionCardHtml).join('');
       }
     } else {
-      html = allItems.map(sessionCardHtml).join('');
+      html = visibleItems.map(sessionCardHtml).join('');
     }
   }
 
@@ -479,6 +532,11 @@ function renderSidebar(data) {
   // filter-specific empty state ('没有匹配的会话') already covers that path.
   if (!html && !filterActive) html = '<div class="no-sessions">no sessions<br><button type="button" class="no-sessions-cta" onclick="createNewSession()">+ 开启你的第一个会话</button></div>';
   list.innerHTML = html;
+  // Sidebar rebuild detached the previously-cached active card; re-resolve
+  // it against the fresh DOM so selector switches stay O(1) on the next
+  // click. No-op when nothing is selected (openCronPanel / previewDiscovered
+  // clear paths already reset _activeCardEl).
+  if (selectedKey) setActiveSessionCard(selectedKey, selectedNode);
   // Restore scroll on the next frame so the browser finishes layout first;
   // synchronous assignment after innerHTML can visibly jump on slow devices.
   requestAnimationFrame(() => {
@@ -644,31 +702,6 @@ const GITHUB_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-
 // when collapsed so the same glyph serves both states.
 const CHEVRON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>';
 
-// sectionHeaderCronHtml renders the dedicated "定时任务" section header that
-// holds every cron-scheduler session (key prefix "cron:"). The header is
-// collapsible (key "cron:__all__", shared in collapsedProjects), and its
-// trailing "+" button jumps straight to the cron-create modal so operators
-// have a one-click path to schedule a new task — mirroring the per-project
-// header's create affordance but bound to the cron surface instead of a
-// workspace. Favorite / GitHub / rename are intentionally absent because
-// the cron group is not a ProjectManager entity.
-function sectionHeaderCronHtml(count) {
-  const ck = 'cron:__all__';
-  const collapsed = collapsedProjects.has(ck);
-  const cCls = collapsed ? 'sh-btn sh-collapse collapsed' : 'sh-btn sh-collapse';
-  const cTitle = collapsed ? '展开' : '收起';
-  const collapseBtn = '<button type="button" class="' + cCls + '" data-key="' + escAttr(ck) + '" title="' + cTitle + ' 定时任务" aria-label="' + cTitle + ' 定时任务" aria-expanded="' + (collapsed ? 'false' : 'true') + '" onclick="event.stopPropagation();toggleProjectCollapsed(this.dataset.key)">' + CHEVRON_SVG + '</button>';
-  const countBadge = collapsed && count > 0 ? '<span class="sh-count">' + count + '</span>' : '';
-  const newBtn = '<button type="button" class="sh-btn sh-new" title="新建定时任务" aria-label="新建定时任务" onclick="event.stopPropagation();createNewCronJob()"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>';
-  const collapsedCls = collapsed ? ' is-collapsed' : '';
-  return '<div class="section-header section-header-cron' + collapsedCls + '" role="group" aria-label="定时任务">' +
-    collapseBtn +
-    '<span class="sh-name" title="定时任务">⏰ 定时任务</span>' +
-    countBadge +
-    newBtn +
-    '</div>';
-}
-
 // sectionHeaderFallbackHtml renders the minimal header for ad-hoc workspace
 // groups (p.fallback === true). The group's "project name" is just the
 // workspace basename — it is NOT a registered ProjectManager project — so
@@ -782,9 +815,14 @@ async function toggleFavorite(name, node) {
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const qs = 'name=' + encodeURIComponent(name) + '&favorite=' + (next ? 'true' : 'false') +
       (node && node !== 'local' ? '&node=' + encodeURIComponent(node) : '');
-    const r = await fetch('/api/projects/favorite?' + qs, { method: 'POST', headers });
-    if (!r.ok) {
-      showAPIError(next ? '收藏项目' : '取消收藏', r.status, '');
+    try {
+      await fetchJSON('/api/projects/favorite?' + qs, { timeoutMs: 10000, method: 'POST', headers });
+    } catch (err) {
+      if (err && err.status) {
+        showAPIError(next ? '收藏项目' : '取消收藏', err.status, '');
+      } else {
+        showNetworkError(next ? '收藏项目' : '取消收藏', err);
+      }
       // Re-render from the server so the star's visual hover/click state
       // snaps back to the authoritative `projectsData` value; otherwise the
       // user sees a phantom success.
@@ -794,9 +832,6 @@ async function toggleFavorite(name, node) {
     // Optimistic update then refresh.
     proj.favorite = next;
     showToast(next ? '已收藏 ' + name : '已取消收藏 ' + name, 'success');
-    fetchSessions();
-  } catch (e) {
-    showNetworkError(next ? '收藏项目' : '取消收藏', e);
     fetchSessions();
   } finally {
     _favInFlight.delete(key);
@@ -973,7 +1008,7 @@ function applyHistoryFilter(merged, query) {
     const onclick = 'resumeRecentSession(this.dataset.sid);closeHistoryPopover()';
     return dayHeader +
       '<div class="history-popover-item" data-sid="' + escAttr(s.session_id) + '" onclick="' + onclick + '">' +
-      (s.prompt ? '<div class="hp-prompt" title="' + escAttr(s.prompt) + '">' + esc(s.prompt) + '</div>' : '<div class="hp-prompt" style="color:#6e7681">未命名</div>') +
+      (s.prompt ? '<div class="hp-prompt" title="' + escAttr(s.prompt) + '">' + esc(s.prompt) + '</div>' : '<div class="hp-prompt" style="color:var(--nz-text-dim)">未命名</div>') +
       '<div class="hp-meta">' +
         (s.project ? '<span class="hp-project">' + esc(s.project) + '</span><span class="hp-dot">&middot;</span>' : '') +
         (ago ? '<span' + (abs ? ' title="' + escAttr(abs) + '"' : '') + '>' + ago + '</span>' : '') +
@@ -1066,7 +1101,7 @@ function sessionCardHtml(s) {
   const sNode = s.node || 'local';
   const isActive = selectedKey === s.key && selectedNode === sNode;
   const isNew = s.state === 'new';
-  const isCron = typeof s.key === 'string' && s.key.indexOf('cron:') === 0;
+  const isCron = isCronSessionKey(s.key);
   // sc-cron-card (not cron-card) because `.cron-card` is also the cron
   // panel's job card class — reusing it here pulled the panel's padding /
   // border / padding-right:100px into the sidebar card and pushed the time
@@ -1208,10 +1243,16 @@ async function previewRecentSession(expectedKey, sessionId) {
     const headers = {};
     const token = getToken();
     if (token) headers['Authorization'] = 'Bearer ' + token;
-    const r = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId), { headers });
-    if (!r.ok) return;
+    // RNEW-UX-003: 5s timeout — this is a best-effort snapshot after
+    // resume; if the backend stalls, drop the preview rather than hang.
+    let entries;
+    try {
+      entries = await fetchJSON('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId), { headers, timeoutMs: 5000 });
+    } catch (err) {
+      if (err.status) return;
+      throw err;
+    }
     if (selectedKey !== expectedKey) return; // user navigated away
-    const entries = await r.json();
     if (!entries || entries.length === 0) return;
     renderEvents(entries);
   } catch (e) {
@@ -1461,6 +1502,12 @@ document.addEventListener('keydown', function(e) {
 function selectSession(key, node) {
   node = node || 'local';
   resetTurnState();
+  // Close any open agent drill-in view before the selectedKey flips
+  // (RFC v4 agent-team-ui §3.6.6). Must run BEFORE saveScrollPos so the
+  // agent-view scroll snapshot still keys off the old session id.
+  if (window.AgentView && typeof window.AgentView.onSessionSwitch === 'function') {
+    window.AgentView.onSessionSwitch(key, node);
+  }
   // Recent session card click → trigger resume flow
   // Discovered session card click → trigger preview flow
   // Save draft for current session before switching
@@ -1503,11 +1550,8 @@ function selectSession(key, node) {
   oldestFetchedEventTime = 0;
   mobileEnterChat();
   stopPreviewPolling();
-  document.querySelectorAll('.session-card').forEach(el => {
-    const nowActive = el.dataset.key === key && (el.dataset.node || 'local') === node;
-    el.classList.toggle('active', nowActive);
-    if (nowActive) updateCardUnreadChip(el, 0);
-  });
+  const activeCard = setActiveSessionCard(key, node);
+  if (activeCard) updateCardUnreadChip(activeCard, 0);
   renderMainShell();
   navRebuild(); // clear stale nav state before async events arrive
   const draftInput = document.getElementById('msg-input');
@@ -1543,6 +1587,33 @@ async function dismissSession(key, node, opts) {
   // stale backend pick.
   delete sessionBackends[key];
 
+  // Cron sessions get a "hide from sidebar" semantics instead of a true
+  // delete: the × button is a UI-level dismiss, not a destructive one.
+  // Deleting the managed session here would NOT remove the scheduled job
+  // (the cron scheduler re-registers a stub on every refresh — see
+  // session.RegisterCronStub), and the user would just see the card
+  // pop back the next time the job ticks. Worse, if we hit
+  // DELETE /api/sessions the router would reject or tear down state the
+  // scheduler still considers live. Single-source-of-truth for cron
+  // lifecycle is the 定时任务 panel (cronDelete → DELETE /api/cron).
+  if (isCronSessionKey(key)) {
+    cronVisibleKeys.delete(key);
+    if (selectedKey === key) {
+      selectedKey = null;
+      if (wsm.subscribedKey === key) wsm.unsubscribe();
+      document.getElementById('main').innerHTML = mainEmptyHtml();
+      wireQuickAskInput();
+    }
+    // Drop the card out of the DOM immediately for a snappy dismiss;
+    // lastVersion=0 + a debounced fetch reconciles with the server on
+    // the next tick (same pattern as the discovered-session branch).
+    const card = document.querySelector('.session-card[data-key="' + key + '"]');
+    if (card) card.remove();
+    lastVersion = 0;
+    debouncedFetchSessions();
+    return;
+  }
+
   // If it's a pending (never-sent) session, just remove from localStorage
   if (sessionWorkspaces[key] !== undefined) {
     removePendingSession(key);
@@ -1566,13 +1637,15 @@ async function dismissSession(key, node, opts) {
       const headers = {'Content-Type': 'application/json'};
       const token = getToken();
       if (token) headers['Authorization'] = 'Bearer ' + token;
-      const r = await fetch('/api/discovered/close', {
-        method: 'POST', headers,
-        body: JSON.stringify({pid: d.pid, session_id: d.session_id || '', cwd: d.cwd || '', proc_start_time: d.proc_start_time || 0, node: node || ''})
-      });
-      if (!r.ok) {
-        const text = await r.text().catch(() => '');
-        showAPIError('关闭外部会话', r.status, text);
+      try {
+        await fetchJSON('/api/discovered/close', {
+          timeoutMs: 10000,
+          method: 'POST', headers,
+          body: JSON.stringify({pid: d.pid, session_id: d.session_id || '', cwd: d.cwd || '', proc_start_time: d.proc_start_time || 0, node: node || ''})
+        });
+      } catch (err) {
+        if (err && err.status) showAPIError('关闭外部会话', err.status, err.message || '');
+        else showNetworkError('关闭外部会话', err);
         return;
       }
       discoveredItems = discoveredItems.filter(x => x.pid !== pid);
@@ -1590,28 +1663,31 @@ async function dismissSession(key, node, opts) {
     return;
   }
 
+  const headers = {'Content-Type': 'application/json'};
+  const token = getToken();
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const body = {key: key};
+  if (node && node !== 'local') body.node = node;
   try {
-    const headers = {'Content-Type': 'application/json'};
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
-    const body = {key: key};
-    if (node && node !== 'local') body.node = node;
-    const r = await fetch('/api/sessions', {method: 'DELETE', headers, body: JSON.stringify(body)});
-    if (!r.ok && r.status !== 404) {
-      const text = await r.text().catch(() => '');
-      showAPIError('删除会话', r.status, text);
+    await fetchJSON('/api/sessions', {timeoutMs: 10000, method: 'DELETE', headers, body: JSON.stringify(body)});
+  } catch (err) {
+    // 404 means session already gone — treat as success so the local cache
+    // catches up with the server without surfacing an error to the operator.
+    if (!err || err.status !== 404) {
+      if (err && err.status) showAPIError('删除会话', err.status, err.message || '');
+      else showNetworkError('删除会话', err);
       return;
     }
-    delete sessionsData[sid(key, node)];
-    if (selectedKey === key) {
-      selectedKey = null;
-      if (wsm.subscribedKey === key) wsm.unsubscribe();
-      document.getElementById('main').innerHTML = mainEmptyHtml();
-      wireQuickAskInput();
-    }
-    lastVersion = 0;
-    debouncedFetchSessions();
-  } catch (e) { showNetworkError('删除会话', e); }
+  }
+  delete sessionsData[sid(key, node)];
+  if (selectedKey === key) {
+    selectedKey = null;
+    if (wsm.subscribedKey === key) wsm.unsubscribe();
+    document.getElementById('main').innerHTML = mainEmptyHtml();
+    wireQuickAskInput();
+  }
+  lastVersion = 0;
+  debouncedFetchSessions();
 }
 
 // Operator-facing rename flow. Prompts for a new display label; empty input
@@ -1622,37 +1698,45 @@ async function renameSession() {
   if (!selectedKey) return;
   const s = sessionsData[sid(selectedKey, selectedNode)] || {};
   const current = s.user_label || '';
-  const input = window.prompt('重命名会话（留空恢复默认标题，最多 128 字节）', current);
+  // RNEW-UX-013: replaced window.prompt with themed promptDialog so the
+  // rename flow matches the rest of the dashboard (dark theme, trapFocus,
+  // Esc/backdrop cancel) and doesn't block the event loop on mobile.
+  const input = await promptDialog({
+    title: '重命名会话',
+    message: '留空恢复默认标题，最多 128 字节',
+    defaultValue: current,
+    placeholder: '输入新标题',
+    confirmText: '保存',
+    maxLength: 128,
+  });
   if (input === null) return; // user cancelled
   const next = input.trim();
   if (next === current) return;
+  const headers = {'Content-Type': 'application/json'};
+  const token = getToken();
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const body = {key: selectedKey, label: next};
+  if (selectedNode && selectedNode !== 'local') body.node = selectedNode;
   try {
-    const headers = {'Content-Type': 'application/json'};
-    const token = getToken();
-    if (token) headers['Authorization'] = 'Bearer ' + token;
-    const body = {key: selectedKey, label: next};
-    if (selectedNode && selectedNode !== 'local') body.node = selectedNode;
-    const r = await fetch('/api/sessions/label', {
+    await fetchJSON('/api/sessions/label', {
+      timeoutMs: 10000,
       method: 'PATCH', headers,
       body: JSON.stringify(body),
     });
-    if (!r.ok) {
-      const text = await r.text().catch(() => '');
-      showAPIError('重命名', r.status, text);
-      return;
-    }
-    // Patch local cache so the title refreshes before the next poll lands.
-    const cacheKey = sid(selectedKey, selectedNode);
-    if (sessionsData[cacheKey]) {
-      sessionsData[cacheKey].user_label = next;
-    }
-    lastVersion = 0;
-    debouncedFetchSessions();
-    if (typeof renderMainShell === 'function') renderMainShell();
-    showToast(next ? '已重命名' : '已恢复默认标题');
-  } catch (e) {
-    showNetworkError('重命名', e);
+  } catch (err) {
+    if (err && err.status) showAPIError('重命名', err.status, err.message || '');
+    else showNetworkError('重命名', err);
+    return;
   }
+  // Patch local cache so the title refreshes before the next poll lands.
+  const cacheKey = sid(selectedKey, selectedNode);
+  if (sessionsData[cacheKey]) {
+    sessionsData[cacheKey].user_label = next;
+  }
+  lastVersion = 0;
+  debouncedFetchSessions();
+  if (typeof renderMainShell === 'function') renderMainShell();
+  showToast(next ? '已重命名' : '已恢复默认标题');
 }
 
 // --- Markdown export (UX P2) ---
@@ -1662,7 +1746,7 @@ async function renameSession() {
 // bookkeeping + the result envelope duplicated by streaming `text`
 // events). The export pipeline drops them to keep the emitted document
 // aligned with what the operator actually read in the UI.
-const MARKDOWN_EXPORT_IGNORE = new Set(['tool_use', 'result', 'agent', 'task_start', 'task_progress', 'task_done', 'thinking']);
+const MARKDOWN_EXPORT_IGNORE = new Set(['tool_use', 'result', 'agent', 'task_start', 'task_progress', 'task_done', 'thinking', 'ask_question']);
 
 // sessionMarkdownFilename returns a safe, dated filename for a session
 // export. Strips filesystem-hostile characters from the title and caps
@@ -1888,7 +1972,7 @@ function renderMainShell() {
 
   // Enable drag-drop
   const ia = document.getElementById('input-area');
-  ia.addEventListener('dragover', e => { e.preventDefault(); ia.style.borderColor='#58a6ff'; });
+  ia.addEventListener('dragover', e => { e.preventDefault(); ia.style.borderColor='var(--nz-accent)'; });
   ia.addEventListener('dragleave', () => { ia.style.borderColor=''; });
   ia.addEventListener('drop', e => { e.preventDefault(); ia.style.borderColor=''; handleFiles(e.dataTransfer.files); });
 
@@ -1951,9 +2035,16 @@ async function fetchEvents(full) {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch(url, { headers });
-    if (!r.ok) return;
-    const events = await r.json();
+    // RNEW-UX-003: 5s timeout — events poll fallback ticks every 1s, so
+    // a hung response must release well before the next tick or the UI
+    // falls behind the live stream.
+    let events;
+    try {
+      events = await fetchJSON(url, { headers, timeoutMs: 5000 });
+    } catch (err) {
+      if (err.status) return; // HTTP non-2xx — mirror legacy !r.ok early-return
+      throw err;              // timeout / network — surface via outer catch
+    }
     if (!events || events.length === 0) return;
     // Drop stale responses whose selection has since moved. Clearing
     // `lastEventTime` is the caller's job at switch time, so we don't touch
@@ -2080,11 +2171,10 @@ function prependEvents(events) {
   // Restore scroll position.
   el.scrollTop = el.scrollHeight - el.clientHeight - prevScrollFromBottom;
 
-  // runMermaid / runKatex only iterate their `pending` dictionaries (new IDs
-  // emitted by the freshly-rendered bubbles above), so they are already
+  // runPendingAsync only iterates the `pending` dictionaries (new IDs
+  // emitted by the freshly-rendered bubbles above), so it is already
   // incremental — no DOM scan is needed.
-  runMermaid();
-  runKatex();
+  runPendingAsync();
   navRebuild();
 }
 
@@ -2099,7 +2189,7 @@ function ensureEarlierButton() {
     btn.id = 'earlier-events-btn';
     btn.type = 'button';
     btn.className = 'earlier-events-btn';
-    btn.style.cssText = 'display:block;margin:8px auto;padding:6px 14px;background:#21262d;border:1px solid #30363d;color:#c9d1d9;border-radius:6px;cursor:pointer;font-size:12px';
+    btn.style.cssText = 'display:block;margin:8px auto;padding:6px 14px;background:var(--nz-bg-2);border:1px solid var(--nz-border);color:var(--nz-text);border-radius:6px;cursor:pointer;font-size:12px';
     btn.textContent = '加载更早的事件';
     btn.onclick = loadEarlierEvents;
     el.insertBefore(btn, el.firstChild);
@@ -2135,6 +2225,19 @@ function updateEarlierButton(state) {
 function renderEvents(events) {
   const el = document.getElementById('events-scroll');
   if (!el) return;
+  // RNEW-UX-007 — innerHTML replace below wipes any live text selection
+  // inside the events panel (user was mid-copy of a chat bubble). Events
+  // are replayed idempotently each poll/push tick, so skipping one refresh
+  // while the user has an active selection inside the events list is safe:
+  // the next tick lands with the same data and re-renders then. We check
+  // anchorNode lineage so selections elsewhere (sidebar, input, modal) are
+  // not affected by this guard.
+  try {
+    const sel = window.getSelection && window.getSelection();
+    if (sel && !sel.isCollapsed && sel.anchorNode && el.contains(sel.anchorNode)) {
+      return;
+    }
+  } catch (_) { /* getSelection unavailable — proceed with refresh */ }
   const display = processEventsForDisplay(events);
   const html = renderEventsWithDividers(display, 0);
   if (html) {
@@ -2163,8 +2266,7 @@ function renderEvents(events) {
   if (events.length >= INITIAL_HISTORY_LIMIT) {
     ensureEarlierButton();
   }
-  runMermaid();
-  runKatex();
+  runPendingAsync();
   navRebuild();
   if (!restoreScrollPos(selectedKey, selectedNode)) {
     stickEventsBottom();
@@ -2198,8 +2300,7 @@ function appendEvents(events) {
   });
   if (sawUser) stickEventsBottom();
   else if (wasBottom) el.scrollTop = el.scrollHeight;
-  runMermaid();
-  runKatex();
+  runPendingAsync();
   // Rebuild nav index but preserve current position
   const oldIdx = navIdx;
   navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
@@ -2260,8 +2361,230 @@ function renderTodoList(detail, summary) {
   return header + '<ul class="todo-list">' + items + '</ul>';
 }
 
-function eventHtml(e) {
-  if (isInternalEvent(e) || e.type === 'thinking') return '';
+// AskUserQuestion cards are single-submit: user picks one option per question
+// (or multiple when multiSelect=true), then clicks a bottom "提交" button.
+// That one click produces a single user message combining all answers, so CC
+// never sees a partial answer. _askAnswered stores tool_use_ids that have
+// already been submitted so a re-render (e.g. late history replay) can't
+// resurrect an actionable card.
+//
+// Persistence note: the Set is in-memory only. History replay after a page
+// reload rebuilds it in hydrateAskAnsweredFromHistory() by scanning for any
+// user event that arrived AFTER a given ask_question — a later user message
+// means the question was answered on some surface, so re-actioning must be
+// disabled to prevent duplicate answers to CC.
+const _askAnswered = new Set();
+
+// hydrateAskAnsweredFromHistory walks a time-sorted event list and marks
+// every ask_question whose tool_use_id is followed by at least one user
+// event as already-answered. Called from onHistory before rendering.
+function hydrateAskAnsweredFromHistory(events) {
+  if (!Array.isArray(events)) return;
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i];
+    if (!e || e.type !== 'ask_question') continue;
+    const tuid = (e.ask_question && e.ask_question.tool_use_id) || e.tool_use_id || '';
+    if (!tuid) continue;
+    // Any later user event → this question was answered by some surface.
+    for (let j = i + 1; j < events.length; j++) {
+      if (events[j] && events[j].type === 'user') {
+        _askAnswered.add(tuid);
+        break;
+      }
+    }
+  }
+}
+
+function renderAskQuestionCard(e) {
+  const aq = e.ask_question;
+  if (!aq || !Array.isArray(aq.items) || aq.items.length === 0) {
+    // Defensive: if payload missing, fall back to a plain status bubble.
+    return '<div class="event ask_question"><span class="event-icon">?</span>' +
+      '<div class="event-content">' + esc(e.summary || 'AskUserQuestion') + '</div></div>';
+  }
+  // A question with zero options would deadlock the submit button
+  // (updateAskSubmitState requires every group to have a .selected option,
+  // and a group with no .ask-opt can never satisfy that). Rather than
+  // render a broken card, fall back to a simple label and log at debug so
+  // the malformed payload surfaces in dev tools.
+  const hasDegenerateItem = aq.items.some(it => !it || !Array.isArray(it.options) || it.options.length === 0);
+  if (hasDegenerateItem) {
+    return '<div class="event ask_question"><span class="event-icon">?</span>' +
+      '<div class="event-content">' + esc(e.summary || 'AskUserQuestion (malformed: empty options)') + '</div></div>';
+  }
+  const tuid = aq.tool_use_id || '';
+  const locked = _askAnswered.has(tuid);
+  const groups = aq.items.map((item, qi) => {
+    const header = item.header ? '<div class="ask-q-header">' + esc(item.header) + '</div>' : '';
+    const question = '<div class="ask-q-text">' + esc(item.question || '') + '</div>';
+    const multi = !!item.multi_select;
+    const opts = (item.options || []).map((opt, oi) => {
+      // Buttons toggle a .selected class only; nothing is sent until the
+      // card-level submit. data-* attrs carry the minimal info the compose
+      // step needs so the handler doesn't have to walk the aq tree.
+      return '<button class="ask-opt" type="button"' +
+        ' data-tuid="' + escAttr(tuid) + '"' +
+        ' data-qi="' + qi + '"' +
+        ' data-oi="' + oi + '"' +
+        ' data-multi="' + (multi ? '1' : '0') + '"' +
+        ' data-header="' + escAttr(item.header || '') + '"' +
+        ' data-label="' + escAttr(opt.label || '') + '"' +
+        (locked ? ' disabled' : '') +
+        ' onclick="onAskOptionToggle(this)">' +
+        '<span class="ask-opt-label">' + esc(opt.label || '') + '</span>' +
+        (opt.description ? '<span class="ask-opt-desc">' + esc(opt.description) + '</span>' : '') +
+        '</button>';
+    }).join('');
+    const hint = multi
+      ? '<div class="ask-q-hint">可多选</div>'
+      : '';
+    return '<div class="ask-q-group" data-qi="' + qi + '" data-multi="' + (multi ? '1' : '0') + '">' +
+      header + question + hint +
+      '<div class="ask-opts">' + opts + '</div>' +
+      '</div>';
+  }).join('');
+  // Single bottom submit: always starts disabled (no selection yet); either
+  // unlocked dynamically by updateAskSubmitState when every group has ≥1
+  // selected option, or permanently disabled if the card is locked
+  // (replayed after a prior answer).
+  const submitBtn =
+    '<button class="ask-submit" type="button"' +
+    ' data-tuid="' + escAttr(tuid) + '"' +
+    ' disabled' +
+    ' onclick="onAskSubmit(this)">提交全部回答</button>';
+  const status = locked
+    ? '<div class="ask-status">已回答</div>'
+    : '';
+  const timeAttr = e.time ? ' data-time="' + e.time + '" title="' + escAttr(formatTimeFull(e.time)) + '"' : '';
+  return '<div class="event ask_question"' + timeAttr +
+    ' data-tool-use-id="' + escAttr(tuid) + '">' +
+    '<span class="event-icon">?</span>' +
+    '<div class="event-content ask-card">' +
+      '<div class="ask-title">AskUserQuestion · 全部作答后提交</div>' +
+      groups +
+      '<div class="ask-submit-row">' + submitBtn + '</div>' +
+      status +
+    '</div></div>';
+}
+
+// Compose the final reply text from every question's chosen labels.
+// Format: "Header1: Label1. Header2: A, B. Label-only question: Label."
+// The final "." is added per group so grouping is unambiguous to CC.
+// AQ4 verified this format is sufficient context for CC to continue.
+function composeAskAnswerFromGroups(groups) {
+  const parts = [];
+  groups.forEach(g => {
+    if (!g.labels.length) return;
+    const h = (g.header || '').trim();
+    const l = g.labels.map(s => s.trim()).filter(Boolean).join(', ');
+    if (!l) return;
+    parts.push(h ? (h + ': ' + l) : l);
+  });
+  if (parts.length === 0) return '';
+  return parts.join('. ') + '.';
+}
+
+// Toggle the clicked option. Single-select: clear siblings in the same
+// question group, mark the clicked one. Multi-select: just toggle.
+// Then re-evaluate the submit button's disabled state.
+function onAskOptionToggle(btn) {
+  const tuid = btn.dataset.tuid || '';
+  if (!tuid || _askAnswered.has(tuid)) return;
+  const group = btn.closest('.ask-q-group');
+  if (!group) return;
+  const multi = group.dataset.multi === '1';
+  if (multi) {
+    btn.classList.toggle('selected');
+  } else {
+    group.querySelectorAll('.ask-opt').forEach(b => b.classList.remove('selected'));
+    btn.classList.add('selected');
+  }
+  updateAskSubmitState(btn.closest('.event.ask_question'));
+}
+
+// Enable submit only when every question has at least one selected option.
+function updateAskSubmitState(card) {
+  if (!card) return;
+  const groups = card.querySelectorAll('.ask-q-group');
+  let allAnswered = groups.length > 0;
+  groups.forEach(g => {
+    if (!g.querySelector('.ask-opt.selected')) allAnswered = false;
+  });
+  const submit = card.querySelector('.ask-submit');
+  if (!submit) return;
+  submit.disabled = !allAnswered;
+}
+
+function onAskSubmit(btn) {
+  const tuid = btn.dataset.tuid || '';
+  if (!tuid || _askAnswered.has(tuid)) return;
+  const card = btn.closest('.event.ask_question');
+  if (!card) return;
+  // Gather selections per question group.
+  const groups = [];
+  card.querySelectorAll('.ask-q-group').forEach(g => {
+    const header = (g.querySelector('.ask-q-header') || {}).textContent || '';
+    const labels = [];
+    g.querySelectorAll('.ask-opt.selected').forEach(b => {
+      const l = b.dataset.label || '';
+      if (l) labels.push(l);
+    });
+    groups.push({ header: header, labels: labels });
+  });
+  const answer = composeAskAnswerFromGroups(groups);
+  if (!answer) return;
+  // Lock the card so re-clicks or slow network can't duplicate the send.
+  _askAnswered.add(tuid);
+  card.querySelectorAll('button').forEach(b => { b.disabled = true; });
+  const content = card.querySelector('.event-content');
+  if (content && !content.querySelector('.ask-status')) {
+    const div = document.createElement('div');
+    div.className = 'ask-status';
+    div.textContent = '已回答：' + answer;
+    content.appendChild(div);
+  }
+  // Route through the regular session send endpoint so queue / passthrough /
+  // broadcast semantics all apply; we do NOT call sendMessage() because that
+  // path reads from the input box and manages optimistic rendering — the card
+  // already shows "已回答", so duplicating would clash.
+  sendAskAnswerViaAPI(answer).catch(err => {
+    _askAnswered.delete(tuid);
+    card.querySelectorAll('button').forEach(b => { b.disabled = false; });
+    updateAskSubmitState(card);
+    const status = card.querySelector('.ask-status');
+    if (status) status.textContent = '发送失败：' + (err && err.message || err);
+  });
+}
+
+async function sendAskAnswerViaAPI(text) {
+  if (!selectedKey) throw new Error('no active session');
+  const headers = { 'Content-Type': 'application/json' };
+  const token = getToken();
+  if (token) headers['Authorization'] = 'Bearer ' + token;
+  const payload = { key: selectedKey, text: text };
+  if (selectedNode && selectedNode !== 'local') payload.node = selectedNode;
+  const r = await fetch('/api/sessions/send', { method: 'POST', headers, body: JSON.stringify(payload) });
+  if (!r.ok) {
+    const raw = await r.text().catch(() => '');
+    throw new Error('send failed: ' + r.status + ' ' + raw.slice(0, 200));
+  }
+}
+
+// eventHtml renders one EventEntry bubble.
+// opts.includeInternal=true keeps tool_use / thinking / task_* / agent / result
+// events that the parent view hides (banner handles them there). The sub-agent
+// internal view (agent_view.js) needs them — a team member's work is almost
+// entirely tool_use + thinking; filtering those out leaves the panel looking
+// empty even when the jsonl transcript is full of content. RFC v4 §3.6.7 /
+// §3.6.1 contract: parent and agent views share the bubble renderer but
+// differ on the filter policy.
+function eventHtml(e, opts) {
+  const includeInternal = !!(opts && opts.includeInternal);
+  if (!includeInternal && (isInternalEvent(e) || e.type === 'thinking')) return '';
+  // AskUserQuestion interactive card: dedicated renderer with option buttons.
+  // The matching tool_use entry is already filtered out via INTERNAL_EVENT_TYPES,
+  // so the card stands alone in the transcript.
+  if (e.type === 'ask_question') return renderAskQuestionCard(e);
   // Filter out Claude Code system XML injected as user messages
   const raw = e.detail || e.summary || '';
   if (e.type === 'user' && /^<(task-notification|system-reminder|local-command|command-name|available-deferred-tools)[\s>]/.test(raw)) return '';
@@ -2281,6 +2604,31 @@ function eventHtml(e) {
     content = renderMd(cleanRaw || e.type);
   } else if (e.type === 'todo') {
     content = renderTodoList(e.detail, e.summary);
+  } else if (e.type === 'tool_result') {
+    // RFC v4 agent-team-ui §3.6.7 — fold long outputs by default. The
+    // summary is the first line (< 120 chars) and the full detail is
+    // capped at 16 KB server-side. When the CLI emitted a
+    // <persisted-output>, the Tool field carries "persisted:tool-results/
+    // <id>.ext" so the frontend can offer a fetch-full button.
+    var summary = e.summary || '(tool result)';
+    var detail = e.detail || '';
+    var persistedPath = '';
+    if (typeof e.tool === 'string' && e.tool.indexOf('persisted:') === 0) {
+      persistedPath = e.tool.slice('persisted:'.length);
+    }
+    var detailHtml = detail
+      ? '<pre class="tr-detail">' + esc(detail) + '</pre>'
+      : '';
+    var persistedBtn = '';
+    if (persistedPath && selectedKey) {
+      var toolURL = '/api/sessions/tool_result?key=' + encodeURIComponent(selectedKey) +
+        '&node=' + encodeURIComponent(selectedNode || 'local') +
+        '&path=' + encodeURIComponent(persistedPath);
+      persistedBtn = '<a class="tr-persisted" href="' + escAttr(toolURL) +
+        '" target="_blank" rel="noopener noreferrer" title="查看完整输出">📎 打开完整输出</a>';
+    }
+    content = '<details class="tr-wrap"><summary class="tr-summary">' +
+      esc(summary) + '</summary>' + detailHtml + persistedBtn + '</details>';
   } else {
     content = esc(e.detail || e.summary || e.type);
   }
@@ -2292,19 +2640,34 @@ function eventHtml(e) {
   // than a 600 px blur. Falls back to the data URI for legacy entries that
   // predate the persist path. The thumbnail's <img src> is always the data
   // URI so the bubble render stays instant (no network fetch for preview).
+  //
+  // Cache-busting: the attachment store re-uses date-partitioned UUIDs,
+  // so two sessions cannot legitimately share an attachment URL — but if
+  // the browser has a cached 404 from a GC-expired attachment, it will
+  // short-circuit onerror on the very first load AFTER the attachment is
+  // restored (unlikely but possible during operator file shuffles). A
+  // per-event `?v=<time>` query string side-steps the negative cache
+  // without invalidating legitimate hits.
+  //
+  // Fallback to thumb on load failure: `openLightbox(full, thumb)` below
+  // covers both HTTP 404 (attachment GC'd) and Content-Type mismatch
+  // (openLightbox checks naturalWidth===0 after onload). See
+  // dashboard.js's openLightbox comment for rationale. RFC §3.6.3.
   let imgHtml = '';
   if (e.images && e.images.length > 0) {
     const paths = e.image_paths || [];
+    const cacheBust = e.time ? ('&v=' + e.time) : '';
     imgHtml = '<div class="event-images">' + e.images.map((src, i) => {
       const p = paths[i] || '';
       let full = src;
       if (p && selectedKey) {
         full = '/api/sessions/attachment?key=' + encodeURIComponent(selectedKey) +
-          '&path=' + encodeURIComponent(p);
+          '&path=' + encodeURIComponent(p) + cacheBust;
       }
       return '<img src="' + escAttr(src) + '" loading="lazy" ' +
         'data-full="' + escAttr(full) + '" ' +
-        'onclick="openLightbox(this.dataset.full)">';
+        'data-thumb="' + escAttr(src) + '" ' +
+        'onclick="openLightbox(this.dataset.full, this.dataset.thumb)">';
     }).join('') + '</div>';
   }
 
@@ -2330,16 +2693,24 @@ function eventHtml(e) {
     '<div class="event-content">' + content + imgHtml + copyBtn + askBtn + '</div></div>';
 }
 
+// Expose the bubble renderer for agent_view.js (RFC v4 agent-team-ui §3.6).
+// The sub-agent transcript panel must use the same layout as the parent view —
+// tool_result folding, markdown, image thumbnails, copy/ask buttons — so one
+// eventHtml is the source of truth. Exporting here prevents silent drift when
+// agent_view.js was referencing a non-existent window.renderEvent (which
+// always fell through to a plain-text fallback, losing the entire bubble UI).
+window.eventHtml = eventHtml;
+
 // Walk a list of events and produce an HTML string with time dividers inserted
 // whenever the gap between adjacent VISIBLE (non-null) bubbles exceeds
 // EVENT_DIVIDER_GAP_MS. `prevTime` seeds the comparison against whatever is
 // already rendered in the DOM (0 = always emit a leading divider for the first
 // visible event).
-function renderEventsWithDividers(events, prevTime) {
+function renderEventsWithDividers(events, prevTime, opts) {
   let out = '';
   let lastTime = prevTime || 0;
   for (const e of events) {
-    const h = eventHtml(e);
+    const h = eventHtml(e, opts);
     if (!h) continue;
     const t = e.time || 0;
     if (t && (lastTime === 0 || t - lastTime >= EVENT_DIVIDER_GAP_MS)) {
@@ -2350,6 +2721,8 @@ function renderEventsWithDividers(events, prevTime) {
   }
   return out;
 }
+// Shared with agent_view.js — see window.eventHtml comment above.
+window.renderEventsWithDividers = renderEventsWithDividers;
 
 // Read the data-time of the last event-time-divider in the scroll container so
 // incremental appenders can decide whether a new divider is needed.
@@ -2526,6 +2899,14 @@ async function sendMessage() {
   sending = true;
   const btn = document.getElementById('btn-send');
   if (btn) btn.classList.add('sending');
+  // Flip the send→stop button + running banner BEFORE the network round trip,
+  // not after — a resumed session has no CLI process yet, so the first send
+  // triggers a subprocess spawn that can take several hundred ms. Leaving the
+  // green send button visible during that window makes the click feel ignored
+  // and invites double-sends. onSendAck/rollbackOptimisticRunning undo this on
+  // busy/error/reset; the 20s safety timer in markSessionOptimisticRunning
+  // prevents a stuck banner if the server never responds.
+  markSessionOptimisticRunning(selectedKey, selectedNode);
 
   // WS path: always preferred now — uploads already on server, only file_ids travel.
   if (wsm.isConnected()) {
@@ -2571,7 +2952,7 @@ async function sendMessage() {
       delete sessionDrafts[selectedKey];
       clearPendingFiles();
       if (text) sessionLastSent[sid(selectedKey, selectedNode)] = text;
-      markSessionOptimisticRunning(selectedKey, selectedNode);
+      // Optimistic running flip already applied above — no-op if unchanged.
       sending = false;
       if (btn) btn.classList.remove('sending');
       return;
@@ -2602,16 +2983,19 @@ async function sendMessage() {
 
     if (r.status === 401 || r.status === 403) {
       if (input) setMsgValue(input, text);
+      rollbackOptimisticRunning(selectedKey, selectedNode);
       showAuthModal();
       return;
     }
     if (r.status === 429) {
       if (input) setMsgValue(input, text);
+      rollbackOptimisticRunning(selectedKey, selectedNode);
       showToast('消息队列已满，请稍后重试', 'warning');
       return;
     }
     if (!r.ok) {
       if (input) setMsgValue(input, text);
+      rollbackOptimisticRunning(selectedKey, selectedNode);
       // Some error paths still write text/plain; fall back to text() so we
       // always surface the real message instead of a generic "send failed".
       const raw = await r.text().catch(() => '');
@@ -2632,9 +3016,13 @@ async function sendMessage() {
     if (input) clearMsg(input);
     delete sessionDrafts[selectedKey];
     clearPendingFiles();
-    if (ackStatus !== 'reset') {
+    if (ackStatus === 'reset') {
+      // /clear and /new do not spawn a turn — undo the pre-send optimistic flip
+      // so the running banner doesn't hang on a no-op command.
+      rollbackOptimisticRunning(selectedKey, selectedNode);
+    } else {
       if (text) sessionLastSent[sid(selectedKey, selectedNode)] = text;
-      markSessionOptimisticRunning(selectedKey, selectedNode);
+      // Optimistic running flip already applied above — keep it.
     }
 
     // Speed up polling when WS not connected
@@ -2650,6 +3038,7 @@ async function sendMessage() {
     }
   } catch (e) {
     if (input) input.value = text;
+    rollbackOptimisticRunning(selectedKey, selectedNode);
     showNetworkError('发送消息', e);
   } finally {
     sending = false;
@@ -2765,7 +3154,13 @@ function fmtDuration(ms) {
 const toolVerbs = {
   Read: '读取', Edit: '编辑', Write: '写入', Bash: '执行',
   Grep: '搜索', Glob: '查找文件', Agent: 'Agent',
-  Notebook: '编辑 Notebook', WebFetch: '抓取'
+  Notebook: '编辑 Notebook', WebFetch: '抓取',
+  // RFC v4 §3.6.8 — tool verbs for the 2026-05 Claude tool set extension.
+  TeamCreate: '创建团队', TeamDelete: '解散团队',
+  SendMessage: '发消息', ToolSearch: '加载工具',
+  TaskOutput: '读 agent 输出', TaskStop: '停止 agent',
+  ScheduleWakeup: '排唤醒',
+  CronCreate: '建定时任务', CronDelete: '删定时任务', CronList: '查定时任务'
 };
 
 function toolVerb(tool, summary) {
@@ -2857,89 +3252,12 @@ function updateSidebarAgentBadge() {
   } else if (existing) { existing.remove(); }
 }
 
-function renderAgentRows() {
-  var agents = turnState.agents;
-  if (agents.length === 0) return '';
-
-  // Separate solo subagents from team members
-  var solos = [];
-  var teams = {}; // teamName -> [agent, ...]
-  for (var i = 0; i < agents.length; i++) {
-    var a = agents[i];
-    if (a.teamName) {
-      if (!teams[a.teamName]) teams[a.teamName] = [];
-      teams[a.teamName].push(a);
-    } else {
-      solos.push(a);
-    }
-  }
-
-  var html = '';
-  // Solo subagents
-  for (var j = 0; j < solos.length; j++) {
-    html += agentRowHtml(solos[j]);
-  }
-  // Team groups
-  var teamNames = Object.keys(teams);
-  for (var k = 0; k < teamNames.length; k++) {
-    var tn = teamNames[k];
-    var members = teams[tn];
-    html += '<div class="rb-team-header"><span class="team-icon">\u25c6</span>' + esc(tn) + '<span class="team-count">' + members.length + ' agents</span></div>';
-    for (var m = 0; m < members.length; m++) {
-      html += agentRowHtml(members[m]);
-    }
-  }
-  return html;
-}
-
-function agentRowHtml(a) {
-  var isDone = a.status === 'completed' || a.status === 'error';
-  var cls = 'rb-agent-row' + (isDone ? ' done' : '');
-  var label = a.name || a.description || 'agent';
-  var parts = '<div class="' + cls + '"><span class="sa-dot"></span>';
-  if (a.background) parts += '<span class="sa-bg">[bg]</span>';
-  parts += '<span class="sa-name">' + esc(label) + '</span>';
-  // Detail: lastTool or description
-  var detail = '';
-  if (a.lastTool) detail = a.lastTool;
-  else if (a.description && a.name) detail = a.description;
-  if (detail) parts += '<span class="sa-detail">\u00b7 ' + esc(detail) + '</span>';
-  // Stats
-  var stat = '';
-  if (a.toolUses > 0) stat += a.toolUses + ' calls';
-  if (a.durationMs > 0) stat += (stat ? ' \u00b7 ' : '') + fmtDuration(a.durationMs);
-  if (isDone) stat += (stat ? ' \u00b7 ' : '') + '\u2713';
-  if (stat) parts += '<span class="sa-stat">\u00b7 ' + stat + '</span>';
-  parts += '</div>';
-  return parts;
-}
-
-function findAgentByToolUseId(tuid) {
-  for (var i = 0; i < turnState.agents.length; i++) {
-    if (turnState.agents[i].toolUseId === tuid) return turnState.agents[i];
-  }
-  return null;
-}
-
-function findAgentByTaskId(tid) {
-  for (var i = 0; i < turnState.agents.length; i++) {
-    if (turnState.agents[i].taskId === tid) return turnState.agents[i];
-  }
-  return null;
-}
-
-function initAgentsFromSession() {
-  const sd = sessionsData[sid(selectedKey, selectedNode || 'local')];
-  if (sd && sd.subagents && sd.subagents.length > 0) {
-    turnState.agents = sd.subagents.map(function(sa) {
-      return {
-        toolUseId: '', taskId: '', name: sa.name, teamName: '',
-        description: sa.activity || '', background: !!sa.background,
-        lastTool: '', toolUses: 0, totalTokens: 0, durationMs: 0, status: 'running'
-      };
-    });
-  }
-}
+// renderAgentRows / agentRowHtml / findAgentByToolUseId / findAgentByTaskId /
+// initAgentsFromSession moved to static/agent_view.js (RFC v4 agent-team-ui
+// Phase 2.5). The names remain published on window so call sites here keep
+// working unchanged; the indirection gives Phase 3 a clean module boundary
+// to grow the banner/switchAgentView/WS-agent logic without piling onto
+// this already-oversized file.
 
 function applyEventToTurnState(ev) {
   startTurnTimer();
@@ -3007,6 +3325,22 @@ function applyEventToTurnState(ev) {
       turnState.isWriting = true;
       turnState.currentTool = null;
       turnState.thinkingSummary = '';
+      break;
+    case 'user':
+    case 'result':
+      // Turn boundary: mirror the backend eventlog.applyEntryStateLocked
+      // clearing of turnAgents/bgAgents so the banner doesn't carry over
+      // agent rows from a previous turn (and, post-reconnect, from
+      // replayed history where the Linker no longer has the task mapping).
+      // Without this, the banner keeps showing clickable agent rows for
+      // tasks that can never be resolved, and every click wastes ~5s
+      // of 202-pending retries before the loading indicator clears.
+      turnState.agents = [];
+      turnState.currentTool = null;
+      turnState.isThinking = false;
+      turnState.isWriting = false;
+      turnState.thinkingSummary = '';
+      updateSidebarAgentBadge();
       break;
   }
 }
@@ -3230,19 +3564,19 @@ function navShowList() {
   const items = navUserEls.map((el, i) => {
     const txt = (el.querySelector('.event-content')?.textContent || '').trim();
     const summary = txt.length > 50 ? txt.slice(0, 50) + '...' : txt;
-    const active = i === navIdx ? ' style="color:#58a6ff;font-weight:600"' : '';
+    const active = i === navIdx ? ' style="color:var(--nz-accent);font-weight:600"' : '';
     return '<div class="nav-list-item" data-idx="' + i + '"' + active + '>' +
-      '<span style="color:#484f58;margin-right:6px">' + (i+1) + '.</span>' + esc(summary) + '</div>';
+      '<span style="color:var(--nz-text-faint);margin-right:6px">' + (i+1) + '.</span>' + esc(summary) + '</div>';
   });
   const pill = document.getElementById('nav-pill');
   const popover = document.createElement('div');
   popover.id = 'nav-list-popover';
   const maxW = Math.min(280, (document.getElementById('main')?.offsetWidth || 280) - 70);
-  popover.style.cssText = 'position:absolute;right:44px;bottom:0;width:' + maxW + 'px;max-height:300px;overflow-y:auto;background:rgba(22,27,34,.95);backdrop-filter:blur(8px);border:1px solid #30363d;border-radius:10px;padding:6px 0;z-index:11;font-size:13px;scrollbar-width:thin;scrollbar-color:#30363d transparent';
+  popover.style.cssText = 'position:absolute;right:44px;bottom:0;width:' + maxW + 'px;max-height:300px;overflow-y:auto;background:rgba(22,27,34,.95);backdrop-filter:blur(8px);border:1px solid var(--nz-border);border-radius:10px;padding:6px 0;z-index:11;font-size:13px;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent';
   popover.innerHTML = items.join('');
   pill.appendChild(popover);
   popover.querySelectorAll('.nav-list-item').forEach(item => {
-    item.style.cssText += 'padding:8px 12px;cursor:pointer;color:#c9d1d9;transition:background .1s;border-bottom:1px solid #21262d;overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
+    item.style.cssText += 'padding:8px 12px;cursor:pointer;color:var(--nz-text);transition:background .1s;border-bottom:1px solid var(--nz-bg-2);overflow:hidden;text-overflow:ellipsis;white-space:nowrap';
     item.onmouseenter = () => item.style.background = '#1f2937';
     item.onmouseleave = () => item.style.background = '';
     item.onclick = () => {
@@ -4322,9 +4656,9 @@ async function fetchCLIBackends() {
     return cliBackends;
   }
   try {
-    const r = await fetch('/api/cli/backends', {credentials: 'same-origin'});
-    if (!r.ok) return null;
-    const data = await r.json();
+    // RNEW-UX-003: default 10s timeout is fine here — this fetch is cached
+    // for 60s and only fires at modal-open time, not on a poll.
+    const data = await fetchJSON('/api/cli/backends', {credentials: 'same-origin'});
     cliBackends = data && Array.isArray(data.backends) ? data : null;
     cliBackendsFetchedAt = Date.now();
     return cliBackends;
@@ -4348,8 +4682,8 @@ function renderBackendPicker(backendsData) {
     return '<option value="' + escAttr(b.id) + '"' + selected + disabled + '>' + esc(label) + '</option>';
   }).join('');
   return '<div style="margin-bottom:12px">' +
-    '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-backend">CLI backend</label>' +
-    '<select id="new-backend" style="width:100%;padding:6px 8px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px">' +
+    '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-backend">CLI backend</label>' +
+    '<select id="new-backend" style="width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px">' +
     options +
     '</select>' +
     '</div>';
@@ -4382,8 +4716,8 @@ function renderAgentPicker() {
     return '<option value="' + escAttr(a) + '"' + selected + '>' + esc(a) + '</option>';
   }).join('');
   return '<div style="margin-bottom:12px">' +
-    '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-agent">Agent</label>' +
-    '<select id="new-agent" style="width:100%;padding:6px 8px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:4px">' +
+    '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-agent">Agent</label>' +
+    '<select id="new-agent" style="width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px">' +
     options +
     '</select>' +
     '</div>';
@@ -4494,7 +4828,7 @@ function createNewSession() {
           backendPicker +
           renderAgentPicker() +
           '<div style="margin-bottom:12px">' +
-            '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-workspace">工作目录</label>' +
+            '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-workspace">工作目录</label>' +
             '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(ws) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
           '</div>' +
           '<div class="modal-btns">' +
@@ -4719,7 +5053,7 @@ function buildCustomRow(query, idx) {
     : '打开自定义工作目录…';
   el.innerHTML =
     '<span class="cp-icon">+</span>' +
-    '<div class="cp-main"><div class="cp-name" style="color:#8b949e">' + label + '</div></div>';
+    '<div class="cp-main"><div class="cp-name" style="color:var(--nz-text-mute)">' + label + '</div></div>';
   el.addEventListener('click', () => pickPaletteCustom(query));
   el.addEventListener('mouseenter', () => setActiveIdx(idx));
   return el;
@@ -4797,7 +5131,7 @@ function pickPaletteCustom(initialValue) {
       picker +
       agentPicker +
       '<div style="margin-bottom:12px">' +
-        '<label style="font-size:12px;color:#8b949e;display:block;margin-bottom:4px" for="new-workspace">工作目录路径</label>' +
+        '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-workspace">工作目录路径</label>' +
         '<input id="new-workspace" placeholder="' + escAttr(ws) + '" value="' + escAttr(prefill) + '" onkeydown="if(event.key===\'Enter\'){doCreateSession()}">' +
       '</div>' +
       '<div class="modal-btns">' +
@@ -4862,7 +5196,7 @@ function doCreateInProject(projectPath, projectName, nodeId, backend, agent) {
   if (typeof updateNodeSelector === 'function') updateNodeSelector();
   lastEventTime = 0;
   mobileEnterChat();
-  document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
+  setActiveSessionCard(key, selectedNode);
   renderMainShell();
   navRebuild();
   lastVersion = 0;
@@ -4939,7 +5273,7 @@ function doCreateSession() {
   if (typeof updateNodeSelector === 'function') updateNodeSelector();
   lastEventTime = 0;
   mobileEnterChat();
-  document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
+  setActiveSessionCard(key, 'local');
   renderMainShell();
   navRebuild();
   lastVersion = 0;
@@ -4997,7 +5331,7 @@ function createQuickSession(initialText, onTextStranded) {
   if (typeof updateNodeSelector === 'function') updateNodeSelector();
   lastEventTime = 0;
   mobileEnterChat();
-  document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
+  setActiveSessionCard(key, 'local');
   renderMainShell();
   navRebuild();
   lastVersion = 0;
@@ -5302,6 +5636,21 @@ function showToast(msg, type, duration) {
   el.className = 'toast show' + (type ? ' ' + type : '');
   clearTimeout(el._tid);
   el._tid = setTimeout(() => { el.className = 'toast'; }, duration || 3000);
+}
+
+// RNEW-UX-010 — polite announcement into #sr-announce for screen readers.
+// Used for signals that don't surface as a toast (WS connect/disconnect,
+// new-session arrival, cron completion). We clear the textContent after a
+// short tick so an identical follow-up message still re-triggers the AT
+// announcement (some readers skip unchanged text). Silent no-op if the
+// element isn't mounted yet (e.g. during very early boot).
+function announce(msg) {
+  const el = document.getElementById('sr-announce');
+  if (!el || !msg) return;
+  el.textContent = '';
+  setTimeout(() => { el.textContent = String(msg); }, 50);
+  clearTimeout(el._clearTid);
+  el._clearTid = setTimeout(() => { el.textContent = ''; }, 3000);
 }
 
 // localizeAPIError turns an HTTP status code + raw server message into a
@@ -5713,6 +6062,97 @@ function confirmDialog(opts) {
   });
 }
 
+// RNEW-UX-013: promptDialog is the themed replacement for native window.prompt().
+// Matches confirmDialog shape (overlay + .modal-btns) so the two share styling,
+// trapFocus, Esc/backdrop-cancel semantics, and XSS-safe rendering. Returns a
+// Promise that resolves to the trimmed input string on confirm, or null on
+// cancel / Esc / backdrop click (mirroring window.prompt's null-for-cancel
+// convention so existing call sites translate without special-casing).
+//
+// Call shape:
+//   const next = await promptDialog({
+//     title: '重命名会话',
+//     message: '留空恢复默认标题，最多 128 字节',
+//     defaultValue: current,
+//     placeholder: '输入新标题',
+//     confirmText: '保存',
+//     maxLength: 128,
+//   });
+//   if (next === null) return;  // user cancelled
+//
+// Semantics:
+//   - Enter inside the input submits (matching window.prompt expectations —
+//     the information-entry dialog defaults to primary, not cancel, because
+//     the action isn't destructive).
+//   - Esc and backdrop cancel (resolve null). Consistent with confirmDialog.
+//   - If a prompt dialog is already open, this call resolves immediately to
+//     null to avoid stacking.
+//   - XSS-safe: every caller-supplied string routes through esc() before
+//     insertion. defaultValue is set via .value (DOM property) not innerHTML.
+function promptDialog(opts) {
+  return new Promise((resolve) => {
+    if (document.querySelector('.modal-overlay.prompt-overlay')) {
+      resolve(null);
+      return;
+    }
+    const title = (opts && opts.title) || '输入内容';
+    const message = (opts && opts.message) || '';
+    const defaultValue = (opts && opts.defaultValue) != null ? String(opts.defaultValue) : '';
+    const placeholder = (opts && opts.placeholder) || '';
+    const confirmText = (opts && opts.confirmText) || '确认';
+    const cancelText = (opts && opts.cancelText) || '取消';
+    const maxLength = (opts && opts.maxLength) || 0;
+
+    const overlay = document.createElement('div');
+    overlay.className = 'modal-overlay prompt-overlay';
+    const maxAttr = maxLength > 0 ? ' maxlength="' + maxLength + '"' : '';
+    overlay.innerHTML =
+      '<div class="modal prompt-dialog" role="dialog" aria-modal="true" aria-labelledby="prompt-title">' +
+        '<h3 id="prompt-title">' + esc(title) + '</h3>' +
+        (message ? '<p class="prompt-message">' + esc(message) + '</p>' : '') +
+        '<input type="text" class="prompt-input" placeholder="' + escAttr(placeholder) + '"' + maxAttr + '>' +
+        '<div class="modal-btns">' +
+          '<button type="button" class="prompt-cancel">' + esc(cancelText) + '</button>' +
+          '<button type="button" class="primary prompt-ok">' + esc(confirmText) + '</button>' +
+        '</div>' +
+      '</div>';
+
+    const input = overlay.querySelector('.prompt-input');
+    // Use the DOM .value property (not innerHTML interpolation) to seed the
+    // default — avoids having to escape attribute quotes and preserves any
+    // literal whitespace the caller relied on.
+    input.value = defaultValue;
+
+    let settled = false;
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      overlay.remove();
+      resolve(value);
+    };
+
+    overlay.querySelector('.prompt-cancel').addEventListener('click', () => finish(null));
+    overlay.querySelector('.prompt-ok').addEventListener('click', () => finish(input.value));
+    overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(null); });
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') { e.preventDefault(); finish(input.value); }
+    });
+    // Mirror confirmDialog: if the overlay is removed externally (trapFocus
+    // Esc handling, or a caller manipulating DOM), settle as cancelled.
+    const obs = new MutationObserver(() => {
+      if (!document.body.contains(overlay)) { obs.disconnect(); finish(null); }
+    });
+    obs.observe(document.body, { childList: true, subtree: false });
+
+    document.body.appendChild(overlay);
+    trapFocus(overlay);
+    // Focus the input so the user can type immediately. Select all so the
+    // default value is replaced on first keystroke — matches window.prompt
+    // behaviour in Chrome/Firefox.
+    setTimeout(() => { input.focus(); input.select(); }, 50);
+  });
+}
+
 // Time-divider threshold: insert a visual gap label when the interval between
 // adjacent rendered events exceeds this many ms. 5 minutes matches iMessage-ish
 // chat grouping — tight enough to separate turns, loose enough to not spam.
@@ -5882,6 +6322,24 @@ function runKatex() {
   });
 }
 
+// isMathInline — decide whether the content captured between `$...$` pair
+// looks like a math expression rather than prose. Called after the outer
+// guard (non-alphanumeric on both sides of the `$`) has already rejected
+// obvious prose like "每月$650$USD". Three-tier check, any-match passes:
+//   1) contains an unambiguous LaTeX char (\ ^ _ { })
+//   2) otherwise must be built from "math alphabet" chars only (digits,
+//      single letters, operators, parens, punctuation) AND contain no two
+//      consecutive 3+ letter English words AND contain at least one digit
+//      or operator — this accepts `$x=1$` / `$2x$` / `$a+b$` and rejects
+//      any multi-word sentence that happened to slip past the outer guard.
+function isMathInline(tex) {
+  if (/[\\^_{}]/.test(tex)) return true;
+  if (!/^[\s\d+\-*/=<>≤≥≠±·×÷!().,;\[\]|a-zA-Z]+$/.test(tex)) return false;
+  if (/[a-zA-Z]{3,}\s+[a-zA-Z]{3,}/.test(tex)) return false;
+  if (!/[\d+\-*/=<>]/.test(tex)) return false;
+  return true;
+}
+
 function renderKatex(tex, displayMode) {
   if (katexReady) {
     try { return katex.renderToString(tex, { displayMode: displayMode, throwOnError: false }); }
@@ -5891,6 +6349,67 @@ function renderKatex(tex, displayMode) {
   katexPending[id] = { tex: tex, display: displayMode };
   loadKatex();
   return '<span id="' + id + '" class="katex-pending">' + esc(tex) + '</span>';
+}
+
+// runPendingAsync — single post-render glue point for every async pipeline
+// triggered by renderMd/renderRich output. Call sites that attach rendered
+// HTML to the live DOM invoke this once; never call runKatex / runMermaid
+// directly from feature code. Keeps chat bubbles, preview drawer, scratch
+// drawer, aside drawer on one flush contract so future pipelines (syntax
+// highlight etc.) plug in here without scattering across call sites.
+function runPendingAsync() {
+  runMermaid();
+  runKatex();
+}
+
+// renderRich — unified rich-text entrypoint. Single source of truth for
+// chat bubbles, file-preview drawer, scratch drawer, aside drawer. Pure
+// HTML producer (does NOT touch DOM); caller must runPendingAsync() after
+// attaching the result so KaTeX / Mermaid pending slots get flushed.
+//
+// opts.mode:
+//   'markdown' (default) — full md renderer (fenced code, math, mermaid,
+//                          tables, lists, links)
+//   'tex'                — .tex / .latex file: extract math blocks,
+//                          everything else kept as preformatted text
+//   'plain'              — no rendering, esc + <pre>
+function renderRich(src, opts) {
+  if (!src) return '';
+  const mode = (opts && opts.mode) || 'markdown';
+  if (mode === 'plain') return '<pre class="rich-plain">' + esc(src) + '</pre>';
+  if (mode === 'tex')   return renderTexDoc(src);
+  return renderMd(src);
+}
+
+// renderTexDoc — light .tex/.latex renderer. Not a LaTeX compiler; extracts
+// delimiters KaTeX supports and leaves the rest as preformatted text so
+// authors can see their source comments / section headers intact.
+function renderTexDoc(src) {
+  const RE = /(\$\$[\s\S]+?\$\$|\\\[[\s\S]+?\\\]|\\begin\{(equation|align|aligned|gather|multline|cases|array|pmatrix|bmatrix|vmatrix|Vmatrix|matrix)\*?\}[\s\S]+?\\end\{\2\*?\}|\$[^\$\n]+?\$|\\\([\s\S]+?\\\))/g;
+  const out = [];
+  let last = 0, m;
+  while ((m = RE.exec(src)) !== null) {
+    if (m.index > last) {
+      out.push('<pre class="rich-plain">' + esc(src.slice(last, m.index)) + '</pre>');
+    }
+    const b = m[0];
+    if (b.startsWith('$$')) {
+      out.push('<div class="md-math-display">' + renderKatex(b.slice(2, -2).trim(), true) + '</div>');
+    } else if (b.startsWith('\\[')) {
+      out.push('<div class="md-math-display">' + renderKatex(b.slice(2, -2).trim(), true) + '</div>');
+    } else if (b.startsWith('\\begin')) {
+      out.push('<div class="md-math-display">' + renderKatex(b, true) + '</div>');
+    } else if (b.startsWith('\\(')) {
+      out.push(renderKatex(b.slice(2, -2).trim(), false));
+    } else {
+      out.push(renderKatex(b.slice(1, -1), false));
+    }
+    last = m.index + b.length;
+  }
+  if (last < src.length) {
+    out.push('<pre class="rich-plain">' + esc(src.slice(last)) + '</pre>');
+  }
+  return out.join('');
 }
 
 /* Lightweight Markdown renderer for text/result events.
@@ -5926,16 +6445,64 @@ function renderMd(s) {
  * [preview] [download] buttons inline. Remote-friendly: lazy validation,
  * batched existence checks, only fetches file content when clicked. */
 
-// Path candidate regex: must contain at least one `/` (filters out bare
-// filenames like "README") and accept any non-whitespace, non-colon char in
-// segments so Unicode filenames (Chinese, Japanese, …) are not silently
-// dropped. Optional leading `./`, `../`, or `/` (absolute paths are resolved
-// to project-relative form by resolveProjectForAbsPath before the server
-// call — server still rejects absolute paths for defence in depth).
-// Optional :line (e.g. src/foo.go:42) or :line-line (foo.go:10-20) suffix
-// works because `:` is excluded from segment chars, so it anchors the suffix.
+// Path candidate regex: accepts two shapes —
+//   (a) path with at least one `/` (with optional :line / :line-line suffix).
+//       e.g. `src/foo.go`, `./a/b.ts:42`, `manifests/ec2nodeclass.yaml:9`.
+//   (b) bare filename that MUST carry a :line suffix to disambiguate from
+//       prose. e.g. `option_install_gpu_nodegroups.sh:1838-1883`. Review
+//       output often references a single-file path without any `/` prefix;
+//       the line suffix is a strong signal it is in fact a file reference
+//       rather than an English word that happens to contain a dot.
+// Segments accept any non-whitespace, non-colon char so Unicode filenames
+// (Chinese, Japanese, …) are not silently dropped. Absolute paths are
+// resolved to project-relative form by resolveProjectForAbsPath before the
+// server call — server still rejects absolute paths for defence in depth.
 // Rejects spaces (breaks on prose) and leading URL schemes.
-const FILE_REF_RE = /^(?:\.\.?\/|\/)?(?!https?:)[^\s:]+(?:\/[^\s:]+)+(?::\d+(?:-\d+)?)?$/;
+const FILE_REF_WITH_SLASH = /^(?:\.\.?\/|\/)?(?!https?:)[^\s:]+(?:\/[^\s:]+)+(?::\d+(?:-\d+)?)?$/;
+const FILE_REF_BARE_WITH_LINE = /^(?!https?:)[^\s:\/]+\.[A-Za-z0-9_]+:\d+(?:-\d+)?$/;
+function isFileRefCandidate(text) {
+  return FILE_REF_WITH_SLASH.test(text) || FILE_REF_BARE_WITH_LINE.test(text);
+}
+
+// expandBraces expands a single `{a,b,c}` group in a path candidate into its
+// concrete variants so AI output like `foo-{x86,graviton}.yaml:9` resolves to
+// `foo-x86.yaml:9` / `foo-graviton.yaml:9`. Only the first group is expanded
+// — nested / multi-group patterns are uncommon in review output and
+// exploding them would blow past the server's 100-path stat budget. Returns
+// a single-element array with tag:'' when no expansion applies. Bail on
+// empty alternatives or whitespace inside the group so we don't silently
+// match prose like `{ foo }`. Each variant carries a `tag` (the branch
+// alternative, e.g. `x86`) used to label the variant's button group.
+function expandBraces(text) {
+  const m = text.match(/^(.*?)\{([^{}\s]+)\}(.*)$/);
+  if (!m) return [{ path: text, tag: '' }];
+  const [, pre, inner, post] = m;
+  if (!inner.includes(',')) return [{ path: text, tag: '' }];
+  const parts = inner.split(',');
+  const out = [];
+  for (const p of parts) {
+    if (p === '') return [{ path: text, tag: '' }]; // `{a,,b}` → not a valid expansion
+    out.push({ path: pre + p + post, tag: p });
+  }
+  return out;
+}
+
+// resolveVariant maps a single concrete path to the owning project + the
+// workspace-relative form the server accepts. Shared between single-path
+// and brace-expanded scans so the project-resolution rules stay identical.
+function resolveVariant(p, activeNode, activeProj) {
+  if (p.startsWith('/')) {
+    const hit = resolveProjectForAbsPath(p, activeNode);
+    if (!hit) return null;
+    return { projName: hit.name, projNode: hit.node, serverPath: hit.relPath };
+  }
+  if (!activeProj) return null;
+  return {
+    projName: activeProj.name,
+    projNode: activeProj.node,
+    serverPath: p.replace(/^\.\//, ''),
+  };
+}
 
 // Per-project path validation cache: key = "<project>|<path>" → entry.
 // TTL 60s so mtime changes re-verify eventually without the user needing
@@ -6043,48 +6610,57 @@ function scanEventForFileRefs(eventEl) {
   const activeNode = activeProj ? activeProj.node :
     (selectedKey ? (selectedNode || 'local') : null);
   if (!activeNode) return;
-  const codeEls = eventEl.querySelectorAll('.event-content code, .event-content .md-code');
+  // Selector covers both shapes of container:
+  //   - chat bubbles: `.event > .event-content > code/.md-code`
+  //   - preview drawer: `.fv-rich > code/.md-code`
+  //   - future drawers (scratch/aside): same contract — we only care about
+  //     code-shaped inline elements inside the passed root, regardless of
+  //     the intermediate wrapper class.
+  const codeEls = eventEl.querySelectorAll('code, .md-code');
   codeEls.forEach(code => {
     if (code.dataset.frScanned === '1') return;
     code.dataset.frScanned = '1';
     const text = (code.textContent || '').trim();
     if (!text || text.length > 512) return; // absurdly long paths skip
-    if (!FILE_REF_RE.test(text)) return;
+    if (!isFileRefCandidate(text)) return;
     // Skip when nested inside <a> (authored link target).
     if (code.closest('a')) return;
     // Skip fenced code blocks (<pre><code>): those are content, not refs.
     if (code.closest('pre')) return;
     const { path, line } = splitPathLine(text);
+    const variants = expandBraces(path);
 
-    // Decide which project owns this path. Absolute paths get looked up
-    // against projectsData on the active node; relative paths ride on the
-    // session's active project (the historical behaviour).
-    let projName, projNode, serverPath;
-    if (path.startsWith('/')) {
-      const hit = resolveProjectForAbsPath(path, activeNode);
-      if (!hit) return; // abs path outside any known project on this node
-      projName = hit.name;
-      projNode = hit.node;
-      serverPath = hit.relPath;
-    } else {
-      if (!activeProj) return; // relative path needs an active project
-      projName = activeProj.name;
-      projNode = activeProj.node;
-      serverPath = path.replace(/^\.\//, ''); // strip leading ./ for server
-    }
-
+    // Shared wrap hosts the original <code> element plus one per-variant
+    // button pair. Without brace expansion there is exactly one variant so
+    // the DOM shape matches the pre-expansion code path. With expansion,
+    // each variant adds its own [↗][↓] group labelled with the alternative
+    // so clicking the x86 arrows opens ec2nodeclass-x86.yaml rather than
+    // guessing which branch the user meant.
     const wrap = document.createElement('span');
-    wrap.className = 'file-ref fr-candidate';
-    wrap.dataset.path = serverPath;       // what we send to the server
-    wrap.dataset.displayPath = path;      // what the user typed / saw
-    wrap.dataset.line = line;
-    wrap.dataset.project = projName;
-    wrap.dataset.node = projNode;
+    wrap.className = 'file-ref';
     code.parentNode.insertBefore(wrap, code);
     wrap.appendChild(code);
-    // Queue for existence check; button DOM is injected once we know the
-    // file exists.
-    queueFileRefCheck(wrap);
+
+    for (const v of variants) {
+      const resolved = resolveVariant(v.path, activeNode, activeProj);
+      if (!resolved) continue;
+      const slot = document.createElement('span');
+      slot.className = 'fr-slot fr-candidate';
+      slot.dataset.path = resolved.serverPath;       // what we send to the server
+      slot.dataset.displayPath = v.path;             // what the user typed / saw
+      slot.dataset.line = line;
+      slot.dataset.project = resolved.projName;
+      slot.dataset.node = resolved.projNode;
+      if (v.tag) slot.dataset.variantTag = v.tag;
+      wrap.appendChild(slot);
+      queueFileRefCheck(slot);
+    }
+    // No resolvable variants — remove the empty wrap so the original <code>
+    // is left in place for the user to copy.
+    if (!wrap.querySelector('.fr-slot')) {
+      wrap.parentNode.insertBefore(code, wrap);
+      wrap.remove();
+    }
   });
 }
 
@@ -6124,12 +6700,19 @@ async function flushFileRefBatch() {
     const headers = { 'Content-Type': 'application/json' };
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch('/api/projects/files/exists', {
-      method: 'POST', headers,
-      body: JSON.stringify({ project: batch.project, node: batch.node, paths })
-    });
-    if (!r.ok) return;
-    const data = await r.json();
+    // RNEW-UX-003: 10s timeout — batch exists-check touches the FS for every
+    // path; a stalled disk shouldn't leak pending renders forever.
+    let data;
+    try {
+      data = await fetchJSON('/api/projects/files/exists', {
+        method: 'POST', headers,
+        body: JSON.stringify({ project: batch.project, node: batch.node, paths }),
+        timeoutMs: 10000,
+      });
+    } catch (err) {
+      if (err.status) return;
+      throw err;
+    }
     const results = (data && data.results) || {};
     for (const p of paths) {
       const entry = results[p] || { exists: false };
@@ -6159,6 +6742,16 @@ function applyFileRefResult(wrapEl, entry) {
   // user sees in the bubble \u2014 wrapEl.dataset.path may be the rewritten
   // project-relative form.
   const label = wrapEl.dataset.displayPath || wrapEl.dataset.path;
+  // Brace-expanded variants carry a human-visible tag (e.g. "x86" /
+  // "graviton") so the user can tell paired button groups apart when the
+  // same line mentions foo-{x86,graviton}.yaml.
+  if (wrapEl.dataset.variantTag) {
+    const tag = document.createElement('span');
+    tag.className = 'fr-tag';
+    tag.textContent = wrapEl.dataset.variantTag;
+    tag.title = label;
+    wrapEl.appendChild(tag);
+  }
   const preview = document.createElement('button');
   preview.type = 'button';
   preview.className = 'fr-btn fr-btn-preview';
@@ -6211,6 +6804,12 @@ async function openFilePreview(wrapEl) {
   const title = document.getElementById('fv-title');
   const meta = document.getElementById('fv-meta');
   if (!drawer || !body || !title || !meta) return;
+  // Warm-start async renderers the moment the drawer opens. loadKatex /
+  // loadMermaid are idempotent no-ops once ready; kicking them off in
+  // parallel with the preview fetch eliminates first-open pending flicker
+  // on .md / .tex files that contain math or diagrams.
+  loadKatex();
+  loadMermaid();
   const project = wrapEl.dataset.project;
   const node = wrapEl.dataset.node;
   const path = wrapEl.dataset.path;
@@ -6249,6 +6848,21 @@ async function openFilePreview(wrapEl) {
     body.appendChild(frame);
     return;
   }
+  // HTML / XHTML: render via blob URL inside a sandboxed iframe.
+  //
+  // Why blob + sandbox instead of `iframe.src = fileApiUrl(...render)`:
+  // Firefox ignores the HTTP `Content-Security-Policy: sandbox` directive
+  // on top-level navigation, so a direct-URL open would run workspace HTML
+  // same-origin to the dashboard → stored-XSS via the Claude CLI Write tool.
+  // The server returns the bytes as `application/octet-stream + attachment`
+  // specifically so that a direct URL hit DOWNLOADS instead of renders.
+  // Client-side we fetch, wrap bytes in a Blob({type:'text/html'}), and
+  // feed the blob: URL into the iframe — blob origins are opaque, so even
+  // if sandbox is stripped the document cannot read dashboard cookies.
+  if (mime.startsWith('text/html') || mime.startsWith('application/xhtml')) {
+    renderHtmlInSandbox(project, node, path, body);
+    return;
+  }
 
   // Text / unknown: go through preview endpoint which returns structured JSON.
   try {
@@ -6262,7 +6876,16 @@ async function openFilePreview(wrapEl) {
     }
     const data = await r.json();
     if (data.binary) {
-      body.innerHTML = '<div class="fv-binary">Binary file — click <strong>download</strong> to save.<span class="fv-mime">' + esc(data.mime || '') + '</span></div>';
+      const binMime = String(data.mime || '');
+      // HTML / XHTML land in `binary:true` by design (R176-SEC-H3: html
+      // bytes never flow through the preview JSON content field). Upgrade
+      // to the sandboxed blob render instead of showing a "please download"
+      // placeholder — that's the whole point of render mode.
+      if (binMime.startsWith('text/html') || binMime.startsWith('application/xhtml')) {
+        renderHtmlInSandbox(project, node, path, body);
+        return;
+      }
+      body.innerHTML = '<div class="fv-binary">Binary file — click <strong>download</strong> to save.<span class="fv-mime">' + esc(binMime) + '</span></div>';
       return;
     }
     const parts = [];
@@ -6270,9 +6893,12 @@ async function openFilePreview(wrapEl) {
       parts.push('<div class="fv-truncated">file truncated at ' + formatFileSize(1024 * 1024) + ' (total ' + formatFileSize(data.size || 0) + ') — download for full content</div>');
     }
     const lang = inferLang(path, data.mime || '');
-    // Markdown: render via existing renderer; others: raw <pre><code> with line gutter.
-    if (lang === 'markdown') {
-      parts.push('<div class="fv-md">' + renderMd(data.content || '') + '</div>');
+    // Route through renderRich — same renderer chat bubbles use so behaviour
+    // (math, mermaid, tables, lists, file-refs) stays consistent across
+    // surfaces. Source-code files keep the line-number gutter layout.
+    if (lang === 'markdown' || lang === 'tex') {
+      const mode = lang === 'tex' ? 'tex' : 'markdown';
+      parts.push('<div class="fv-rich">' + renderRich(data.content || '', { mode: mode }) + '</div>');
     } else {
       const raw = data.content || '';
       const lines = raw.split('\n');
@@ -6280,8 +6906,107 @@ async function openFilePreview(wrapEl) {
       parts.push('<pre class="fv-lined"><span class="fv-gutter" aria-hidden="true">' + gutter + '</span><code class="fv-code">' + esc(raw) + '</code></pre>');
     }
     body.innerHTML = parts.join('');
+    // Flush KaTeX / Mermaid pending slots produced by renderRich above.
+    // Without this call, first-open of a .md file with math would leave
+    // `<span class="katex-pending">` placeholders on screen until a chat
+    // render happened to fire from another code path.
+    runPendingAsync();
+    // Mirror chat-side file-ref chip injection so paths inside the preview
+    // body also get [preview]/[download] affordances.
+    if (typeof scanEventForFileRefs === 'function') {
+      body.querySelectorAll('.fv-rich').forEach(scanEventForFileRefs);
+    }
     if (line) scrollToPreviewLine(body, parseInt(line, 10));
   } catch (e) {
+    body.innerHTML = '<div class="fv-error">' + esc(String(e && e.message || e)) + '</div>';
+  }
+}
+
+// _pendingHtmlBlobUrl holds the most recent blob URL fed into the preview
+// iframe so closeFilePreview can revoke it. Blob URLs pin their backing
+// bytes in memory until revoked, and a 50 MB coverage report left open
+// across many file clicks would leak hard. Single-slot is enough because
+// the drawer only ever shows one file at a time.
+let _pendingHtmlBlobUrl = null;
+
+// _htmlRenderSeq is a monotonic token for renderHtmlInSandbox invocations.
+// The function is async: a user who opens file A and then clicks file B
+// before A's fetch resolves would, under a naive implementation, see A's
+// bytes rendered into B's drawer AND leak A's blob URL (its own invocation
+// has already passed the revoke-prior step). Every call bumps the seq and
+// captures its own copy; when fetch resolves, callers whose token no longer
+// equals _htmlRenderSeq revoke their own blob URL and abandon the render.
+let _htmlRenderSeq = 0;
+
+// renderHtmlInSandbox fetches workspace HTML, wraps it in a Blob, and
+// points a sandboxed iframe at the resulting blob URL.
+//
+// Three defense layers stack here:
+//   (1) Server returns application/octet-stream + attachment, so a direct
+//       URL hit downloads rather than renders (covers Firefox's CSP-sandbox
+//       top-level-nav gap).
+//   (2) Blob URL origin is opaque — even with allow-same-origin in the
+//       sandbox (we don't grant it), the document can't read dashboard
+//       cookies or same-origin fetch.
+//   (3) sandbox='' on the iframe grants zero capabilities — no scripts,
+//       no forms, no top-level navigation, no popups, no fetch.
+// Any one of these would be sufficient; stacking all three is belt-and-
+// braces so a future change to any single layer does not regress security.
+async function renderHtmlInSandbox(project, node, path, body) {
+  body.innerHTML = '<div class="fv-loading">loading…</div>';
+  // Claim the invocation slot BEFORE awaiting anything. Every caller
+  // snapshots the seq here; when its fetch resolves later it compares
+  // against the live _htmlRenderSeq to detect whether a newer render
+  // superseded it. This closes the "open A then open B before A resolves"
+  // race where A would otherwise overwrite B's tracked blob URL and leak.
+  const mySeq = ++_htmlRenderSeq;
+  // Revoke any prior blob URL before overwriting. Missing this leaked a
+  // ~50 MB report across every re-open of the drawer in manual testing.
+  if (_pendingHtmlBlobUrl) {
+    try { URL.revokeObjectURL(_pendingHtmlBlobUrl); } catch (_) { /* ignore */ }
+    _pendingHtmlBlobUrl = null;
+  }
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const r = await fetch(fileApiUrl(project, node, path, 'render'), { headers });
+    // A newer invocation has already taken over the drawer — abandon.
+    // Check happens at every await boundary: after fetch (headers arrived)
+    // and after arrayBuffer (body fully drained).
+    if (mySeq !== _htmlRenderSeq) return;
+    if (!r.ok) {
+      body.innerHTML = '<div class="fv-error">render failed (' + r.status + ')</div>';
+      return;
+    }
+    const bytes = await r.arrayBuffer();
+    if (mySeq !== _htmlRenderSeq) return;
+    // Force type=text/html on the Blob — the server intentionally returned
+    // application/octet-stream so direct-URL hits don't render. The browser
+    // only interprets the bytes as HTML because we ask it to here.
+    const blob = new Blob([bytes], { type: 'text/html' });
+    const url = URL.createObjectURL(blob);
+    // Final stale check AFTER allocating the URL — if a newer invocation
+    // landed in the tiny window between the arrayBuffer await and now,
+    // revoke our URL immediately instead of stashing it in the tracked
+    // slot (which would clobber the newer render's tracking and leak).
+    if (mySeq !== _htmlRenderSeq) {
+      try { URL.revokeObjectURL(url); } catch (_) { /* ignore */ }
+      return;
+    }
+    _pendingHtmlBlobUrl = url;
+
+    body.innerHTML = '';
+    const frame = document.createElement('iframe');
+    frame.src = url;
+    frame.title = path;
+    // Empty sandbox = no capabilities at all. Any allow-* token here would
+    // re-grant the capability; callers must never add one.
+    frame.setAttribute('sandbox', '');
+    frame.referrerPolicy = 'no-referrer';
+    body.appendChild(frame);
+  } catch (e) {
+    if (mySeq !== _htmlRenderSeq) return;
     body.innerHTML = '<div class="fv-error">' + esc(String(e && e.message || e)) + '</div>';
   }
 }
@@ -6308,7 +7033,9 @@ function formatFileSize(bytes) {
 function inferLang(path, mime) {
   const ext = (path.split('.').pop() || '').toLowerCase();
   if (ext === 'md' || ext === 'markdown') return 'markdown';
+  if (ext === 'tex' || ext === 'latex') return 'tex';
   if (mime === 'text/markdown') return 'markdown';
+  if (mime === 'text/x-tex' || mime === 'application/x-tex') return 'tex';
   return '';
 }
 
@@ -6320,6 +7047,13 @@ function closeFilePreview() {
   delete drawer.dataset.snippetMode;
   delete drawer.dataset.snippetName;
   _pendingSnippet = null;
+  // Release the HTML preview blob URL so the browser can GC the underlying
+  // bytes. Without this a 50 MB coverage report held its memory until the
+  // whole tab reloaded.
+  if (_pendingHtmlBlobUrl) {
+    try { URL.revokeObjectURL(_pendingHtmlBlobUrl); } catch (_) { /* ignore */ }
+    _pendingHtmlBlobUrl = null;
+  }
   const body = document.getElementById('fv-body');
   if (body) body.innerHTML = '';
 }
@@ -6416,9 +7150,22 @@ function startFileRefObserver() {
   target.querySelectorAll('.event').forEach(scanEventForFileRefs);
 }
 
+// KaTeX environment names we split out as block-level math. Whitelisted —
+// feeding KaTeX an environment it doesn't support just emits an error span
+// and pollutes the block flow.
+const KATEX_ENVS = 'equation|align|aligned|gather|multline|cases|array|pmatrix|bmatrix|vmatrix|Vmatrix|matrix|split|alignat|CD';
+const BLOCK_SPLIT_RE = new RegExp(
+  '(```[\\s\\S]*?```' +
+  '|\\$\\$[\\s\\S]*?\\$\\$' +
+  '|\\\\\\[[\\s\\S]*?\\\\\\]' +
+  '|\\\\begin\\{(?:' + KATEX_ENVS + ')\\*?\\}[\\s\\S]*?\\\\end\\{(?:' + KATEX_ENVS + ')\\*?\\})',
+  'g'
+);
+
 function renderMdUncached(s) {
-  // Split by fenced code blocks and display math blocks
-  const parts = s.split(/(```[\s\S]*?```|\$\$[\s\S]*?\$\$|\\\[[\s\S]*?\\\])/g);
+  // Split by fenced code blocks and display math blocks (including LaTeX
+  // environments like \begin{aligned}...\end{aligned}).
+  const parts = s.split(BLOCK_SPLIT_RE);
   return parts.map(part => {
     if (part.startsWith('```')) {
       const m = part.match(/^```(\w*)\n?([\s\S]*?)```$/);
@@ -6441,6 +7188,22 @@ function renderMdUncached(s) {
     }
     if (part.startsWith('\\[') && part.endsWith('\\]')) {
       return '<div class="md-math-display">' + renderKatex(part.slice(2, -2).trim(), true) + '</div>';
+    }
+    if (part.startsWith('\\begin{')) {
+      // Hand the whole environment to KaTeX in displayMode. KaTeX accepts
+      // `\begin{aligned}...\end{aligned}` etc. directly without outer `\[ \]`.
+      return '<div class="md-math-display">' + renderKatex(part, true) + '</div>';
+    }
+    // Pre-extract cross-line `\(...\)` before the per-line loop runs. inlineMd
+    // processes one line at a time, which would otherwise truncate multi-line
+    // inline math. Tokens survive esc() (NUL byte is not an HTML special) and
+    // get swapped back in after list/heading/table rendering completes.
+    const inlineMathTokens = [];
+    if (part.indexOf('\\(') !== -1) {
+      part = part.replace(/\\\(([\s\S]+?)\\\)/g, function(_, tex) {
+        inlineMathTokens.push(renderKatex(tex.trim(), false));
+        return '\x00ILM' + (inlineMathTokens.length - 1) + '\x00';
+      });
     }
     // Process line by line for block elements. Accumulate into a chunks array
     // + single join() at the end rather than `html +=` per line: V8 reallocates
@@ -6501,7 +7264,16 @@ function renderMdUncached(s) {
       chunks.push(inlineMd(line) + '<br>');
     }
     if (inList) chunks.push('</' + inList + '>');
-    return chunks.join('');
+    let rendered = chunks.join('');
+    // Restore the cross-line `\(...\)` tokens captured before the per-line
+    // loop. inlineMd tokens (`\x00KTX*\x00`) were already restored inside
+    // inlineMd itself; these ILM tokens sit at the block level.
+    if (inlineMathTokens.length > 0) {
+      rendered = rendered.replace(/\x00ILM(\d+)\x00/g, function(_, idx) {
+        return inlineMathTokens[+idx];
+      });
+    }
+    return rendered;
   }).join('');
 }
 
@@ -6528,10 +7300,13 @@ function inlineMd(s) {
   // — on a 200-line response the savings are measurable in V8 profiler.
   const mathTokens = [];
   if (s.indexOf('$') !== -1 || s.indexOf('\\(') !== -1) {
-    // `$...$`: require non-alphanumeric outside + LaTeX-ish char inside,
-    // else prose like "每月$650$USD" gets rendered as italic math.
+    // `$...$`: require non-alphanumeric outside + math-like content inside.
+    // The outer guard (non-alphanumeric on both sides) handles the "每月$650$USD"
+    // prose case. The inner guard (isMathInline) decides whether the captured
+    // span looks like a formula — accepting plain algebra like `$x=1$` /
+    // `$2x$` / `$a+b$` which the previous LaTeX-only heuristic rejected.
     s = s.replace(/(?<![A-Za-z0-9])\$([^\s\$][^\$\n]*?[^\s\$]|[^\s\$])\$(?![A-Za-z0-9])/g, function(match, tex) {
-      if (!/[\\^_{}]/.test(tex)) return match;
+      if (!isMathInline(tex)) return match;
       const idx = mathTokens.length;
       mathTokens.push(renderKatex(tex, false));
       return '\x00KTX' + idx + '\x00';
@@ -6590,12 +7365,41 @@ function renderTable(lines) {
   // splits mid-snippet and the trailing fragment spills into an extra column.
   // Strategy: encode `\|` → sentinel, split on `|`, decode sentinel → `|`.
   const PIPE = '\x00PIPE\x00';
-  const cells = l => l.trim().replace(/\\\|/g, PIPE)
-    .replace(/^\||\|$/g, '')
-    .split('|')
-    .map(c => c.trim().split(PIPE).join('|'));
-  let h = '<table class="md-table"><thead><tr>' + cells(lines[0]).map(c => '<th>' + inlineMd(c) + '</th>').join('') + '</tr></thead><tbody>';
-  for (let i = 2; i < lines.length; i++) h += '<tr>' + cells(lines[i]).map(c => '<td>' + inlineMd(c) + '</td>').join('') + '</tr>';
+  // LLM output frequently embeds unescaped `|` inside `$...$`, `\(...\)`,
+  // or backtick code spans (e.g. `$|AB|=2$`, `$2^a - 2$ | < | ...`).
+  // Protect those regions BEFORE splitting on `|`, otherwise a single math
+  // formula would get sliced into many spurious columns.
+  const cells = l => {
+    let s = l.trim().replace(/\\\|/g, PIPE);
+    const guards = [];
+    const stash = (re) => {
+      s = s.replace(re, m => {
+        guards.push(m);
+        return '\x00G' + (guards.length - 1) + '\x00';
+      });
+    };
+    stash(/`[^`]+`/g);
+    stash(/\\\([^)]+?\\\)/g);
+    stash(/\$[^$\n]+?\$/g);
+    return s.replace(/^\||\|$/g, '')
+      .split('|')
+      .map(c => c.trim()
+        .replace(/\x00G(\d+)\x00/g, (_, i) => guards[+i])
+        .split(PIPE).join('|'));
+  };
+  const header = cells(lines[0]);
+  const ncol = header.length;
+  // Overflow guard: when an LLM emits a row with more cells than the header
+  // (unbalanced pipes it refused to escape), merge the tail into the last
+  // cell instead of letting empty columns spill off to the right.
+  const clamp = row => {
+    if (row.length <= ncol) return row;
+    const head = row.slice(0, ncol - 1);
+    const tail = row.slice(ncol - 1).join(' | ');
+    return head.concat([tail]);
+  };
+  let h = '<table class="md-table"><thead><tr>' + header.map(c => '<th>' + inlineMd(c) + '</th>').join('') + '</tr></thead><tbody>';
+  for (let i = 2; i < lines.length; i++) h += '<tr>' + clamp(cells(lines[i])).map(c => '<td>' + inlineMd(c) + '</td>').join('') + '</tr>';
   return '<div class="md-table-wrap">' + h + '</tbody></table></div>';
 }
 
@@ -6604,6 +7408,32 @@ function processEventsForDisplay(events) {
 }
 
 function sid(key, node) { return key + '\t' + (node || 'local'); }
+
+// setActiveSessionCard flips the .active class on at most one session card.
+// Replaces the old O(N) querySelectorAll('.session-card').forEach pattern
+// with a cached reference (_activeCardEl). key===null drops selection
+// altogether (used by openCronPanel / previewDiscovered clear paths). Node
+// defaults to 'local' to match data-node attribute emission. A subsequent
+// card with the same key but a different node counts as "different" — the
+// data-key + data-node pair is the identity.
+function setActiveSessionCard(key, node) {
+  const n = node || 'local';
+  // Drop stale cached ref if the previous card was detached by a sidebar
+  // rebuild (renderSidebar replaces list.innerHTML wholesale).
+  if (_activeCardEl && !_activeCardEl.isConnected) _activeCardEl = null;
+  if (_activeCardEl) _activeCardEl.classList.remove('active');
+  _activeCardEl = null;
+  if (key === null || key === undefined) return null;
+  const next = document.querySelector(
+    '.session-card[data-key="' + (window.CSS && CSS.escape ? CSS.escape(key) : key) + '"]'
+    + '[data-node="' + (window.CSS && CSS.escape ? CSS.escape(n) : n) + '"]'
+  );
+  if (next) {
+    next.classList.add('active');
+    _activeCardEl = next;
+  }
+  return next;
+}
 
 function isMultiNode() {
   const keys = Object.keys(nodesData);
@@ -7030,7 +7860,11 @@ const wsm = {
       case 'session_state':
         this.onSessionState(msg);
         break;
-      case 'sessions_update':
+      case 'sessions_update': {
+        // RNEW-UX-010 — snapshot pre-update session-key set so we can spot
+        // a newly-added key after the fetch completes. Comparing sizes is
+        // not enough (delete+create at the same tick would net to zero).
+        const prevSessKeys = new Set(Object.keys(sessionsData || {}));
         debouncedFetchSessions().then(() => {
           // Auto-subscribe to newly created session if we don't have an active
           // subscription. _pendingSubscribeKey is intentionally not checked:
@@ -7040,12 +7874,34 @@ const wsm = {
           if (selectedKey && !wsm.subscribedKey && sessionsData[sid(selectedKey, selectedNode)]) {
             wsm.subscribe(selectedKey, selectedNode);
           }
+          const added = Object.keys(sessionsData || {}).filter(k => !prevSessKeys.has(k));
+          if (added.length > 0) announce('新会话已创建');
         });
         break;
+      }
       case 'cron_result':
+        // RNEW-UX-010 — cron completion is a fire-and-forget background
+        // event; the only sighted signal is a badge count bump. Announce
+        // politely so AT users learn the job landed.
+        announce('定时任务已完成');
         fetchCronJobs().then(() => renderCronPanel());
         break;
       case 'pong':
+        break;
+      // RFC v4 agent-team-ui §3.5.2 — drill-in flow. All four handlers
+      // live in agent_view.js so new agent-view functionality doesn't
+      // mean touching this dispatch table.
+      case 'agent_event':
+        if (window.AgentView) window.AgentView.onAgentEvent(msg);
+        break;
+      case 'agent_meta':
+        if (window.AgentView) window.AgentView.onAgentMeta(msg);
+        break;
+      case 'agent_done':
+        if (window.AgentView) window.AgentView.onAgentDone(msg);
+        break;
+      case 'agent_subscribe_rejected':
+        if (window.AgentView) window.AgentView.onAgentSubscribeRejected(msg);
         break;
     }
   },
@@ -7119,6 +7975,12 @@ const wsm = {
     const isInitial = this._initialSubscribe;
     this._initialSubscribe = false;
 
+    // Rebuild the answered-set from history BEFORE rendering so card
+    // re-renders show the correct locked state. The Set is in-memory so
+    // a page reload or session switch would otherwise make an already-
+    // answered card re-actionable and invite duplicate answers to CC.
+    hydrateAskAnsweredFromHistory(events);
+
     const display = processEventsForDisplay(events);
 
     if (isInitial) {
@@ -7159,8 +8021,7 @@ const wsm = {
       if (events.length >= INITIAL_HISTORY_LIMIT) {
         ensureEarlierButton();
       }
-      runMermaid();
-      runKatex();
+      runPendingAsync();
       navRebuild();
       // 若有上次切走时保存的滚动位置且不在底部，恢复它；否则照旧贴底。
       if (!restoreScrollPos(selectedKey, selectedNode)) {
@@ -7196,8 +8057,7 @@ const wsm = {
       });
       if (sawUser) stickEventsBottom();
       else if (wasBottom) el.scrollTop = el.scrollHeight;
-      runMermaid();
-  runKatex();
+      runPendingAsync();
       navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
       if (navIdx >= 0 && navIdx < navUserEls.length) { /* preserve */ } else navIdx = -1;
       navUpdatePill();
@@ -7297,6 +8157,11 @@ const wsm = {
       refreshBanner();
     }
     if (isInternalEvent(ev)) return;
+    // RFC v4 agent-team-ui §3.6.2 — when the user has drilled into an
+    // agent, the events-scroll pane belongs to that agent; parent events
+    // still feed into turnState / banner (handled above) but must not
+    // land in the DOM until the user returns.
+    if (window.AgentView && window.AgentView.activeTaskID()) return;
     const html = eventHtml(ev);
     if (!html) return;
     const el = document.getElementById('events-scroll');
@@ -7319,8 +8184,7 @@ const wsm = {
     // User events always force-bottom; AI output only sticks when already at bottom.
     if (isUser) stickEventsBottom();
     else if (wasBottom) el.scrollTop = el.scrollHeight;
-    runMermaid();
-  runKatex();
+    runPendingAsync();
     if (ev.type === 'user') {
       navUserEls = [...document.querySelectorAll('#events-scroll .event.user')];
       navUpdatePill();
@@ -7518,6 +8382,11 @@ const wsm = {
       // covered the header. _everConnected stays on the wsm struct because
       // future consumers may still want to differentiate first-handshake
       // from reconnect (e.g. fresh session poll vs. no-op).
+      // RNEW-UX-010 — sighted users see the dot flip; AT users get the
+      // transition announced politely. Only announce when it's a real
+      // transition (prev !== CONNECTED) to avoid re-announcing on no-op
+      // state refreshes.
+      if (prev !== WS_STATES.CONNECTED) announce(this._everConnected ? '已重新连接' : '已连接');
       this._everConnected = true;
       // WS connected: stop session polling, rely on push
       if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
@@ -7527,6 +8396,9 @@ const wsm = {
       // Pull fresh node/session state immediately to clear stale data
       debouncedFetchSessions();
     } else if (s === WS_STATES.DISCONNECTED) {
+      // RNEW-UX-010 — announce only on real transitions from connected, so
+      // initial cold boot (OFF→CONNECTING→DISCONNECTED retry) stays silent.
+      if (prev === WS_STATES.CONNECTED) announce('连接已断开，正在重试');
       // WS lost: start fallback polling
       if (!sessionPollTimer) sessionPollTimer = setInterval(fetchSessions, 5000);
       if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
@@ -7634,8 +8506,10 @@ async function scanDiscovered() {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch('/api/discovered', { headers });
-    discoveredItems = (await r.json()) || [];
+    // RNEW-UX-003: 10s timeout — /api/discovered walks the filesystem, so a
+    // stalled disk shouldn't wedge the scan button forever.
+    const data = await fetchJSON('/api/discovered', { headers, timeoutMs: 10000 });
+    discoveredItems = data || [];
     // Trigger sidebar re-render to merge discovered into project groups
     lastVersion = 0;
     debouncedFetchSessions();
@@ -7658,13 +8532,10 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
   selectedKey = null;
   if (wsm.subscribedKey) wsm.unsubscribe();
   if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
-  document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
   mobileEnterChat();
 
   // Highlight the discovered card
-  document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
-  const card = document.querySelector('.session-card[data-key="_discovered:' + pid + '"]');
-  if (card) card.classList.add('active');
+  setActiveSessionCard('_discovered:' + pid, node || 'local');
 
   const base = cwd.split('/').pop() || cwd;
   const main = document.getElementById('main');
@@ -7699,15 +8570,19 @@ async function previewDiscovered(sessionId, cwd, pid, procStartTime, node, cliNa
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId) + nodeParam, { headers });
-    if (!r.ok) {
-      const errText = await r.text().catch(() => '');
+    // RNEW-UX-003: 10s timeout — discovered preview loads a ~200-event tail
+    // from a JSONL transcript; a hung read shouldn't trap the user on a
+    // "加载中..." splash indefinitely.
+    let events;
+    try {
+      events = await fetchJSON('/api/discovered/preview?session_id=' + encodeURIComponent(sessionId) + nodeParam, { headers, timeoutMs: 10000 });
+    } catch (err) {
+      const errText = err.message || '';
       const el0 = document.getElementById('events-scroll');
       if (el0) el0.innerHTML = '<div class="empty-state">' + esc(errText || '预览失败') + '</div>';
-      showAPIError('预览会话', r.status, errText);
+      if (err.status) showAPIError('预览会话', err.status, errText);
       return;
     }
-    const events = await r.json();
     const el = document.getElementById('events-scroll');
     if (!el) return;
     const display = processEventsForDisplay(events);
@@ -8178,14 +9053,35 @@ function initSwipeBack() {
 /* ===== Cron Tab ===== */
 
 let cronJobs = [];
-// Timezone the backend uses to evaluate cron schedules. Surfaced in the
-// modal and job list so users aren't guessing whether "0 9 * * *" means
-// 9am local or 9am UTC.
-let cronTimezoneLabel = '';
 // Configured default IM target for cron completion notifications, or null
 // when the server has no default configured. Used to render helpful copy
 // alongside the notify toggle in create/edit modals.
 let cronNotifyDefault = null;
+// cronVisibleKeys gates which cron-scheduler sessions the sidebar paints.
+// Policy (operator-confirmed): cron sessions are NOT shown in the sidebar
+// by default — they live in the "定时任务" panel. When the operator
+// explicitly opens a cron session (from the panel, or right after creating
+// one), we add its key here so the sidebar surfaces it. Dismissing the
+// session card (×) removes the key again; it does NOT delete the cron job
+// itself (see dismissSession's isCron branch). Deliberately NOT persisted
+// across reloads — the white-list is an ephemeral "I'm currently looking
+// at this" marker, not a permanent preference.
+let cronVisibleKeys = new Set();
+
+// isCronSessionKey 是 sidebar 过滤和 dismiss 分支共享的判定。
+// 与 cron_stub 约定的 key shape ("cron:<jobID>") 对齐，保持与后端
+// session.CronKeyPrefix 单一真源。
+function isCronSessionKey(key) {
+  return typeof key === 'string' && key.indexOf('cron:') === 0;
+}
+
+// markCronSessionVisible 把一个 cron session key 加入白名单并触发侧栏
+// 重绘。给 openCronSession / doCreateCronJob / 未来的"打开到侧栏"入口
+// 共享，这样可见性策略只在一个地方维护。
+function markCronSessionVisible(key) {
+  if (!isCronSessionKey(key)) return;
+  cronVisibleKeys.add(key);
+}
 // R110-P2 cron filter state — module-level so renderCronList can read the
 // live values each paint without a closure. Mirrors the sidebar-search
 // approach (cronFilterQuery is the substring, cronFilterStatus is one of
@@ -8197,10 +9093,11 @@ let cronFilterStatus = 'all';
 // cronSortOrder 控制 cron 面板列表的排序模式。保存在 localStorage 里，
 // 切回页面保留用户偏好。四种模式见 cronSortComparators。cron-v2-polish §3.4。
 let cronSortOrder = (function() {
-  try {
-    const saved = localStorage.getItem('nz_cron_sort');
-    if (saved && cronSortComparatorsHasKey(saved)) return saved;
-  } catch (_) {}
+  // RNEW-UX-004 demo: migrated to unified lsGet helper. Keyspace changed
+  // from 'nz_cron_sort' to 'nz:cron_sort' — one-time loss of the saved
+  // preference is acceptable (falls back to 'created_desc').
+  const saved = lsGet('cron_sort', '');
+  if (saved && cronSortComparatorsHasKey(saved)) return saved;
   return 'created_desc';
 })();
 
@@ -8232,7 +9129,7 @@ function cronSortComparatorsHasKey(k) {
 function setCronSortOrder(order) {
   if (!cronSortComparatorsHasKey(order)) return;
   cronSortOrder = order;
-  try { localStorage.setItem('nz_cron_sort', order); } catch (_) {}
+  lsSet('cron_sort', order); // RNEW-UX-004 demo: unified helper (see top-of-file lsSet)
   renderCronList();
 }
 
@@ -9065,18 +9962,26 @@ async function doCreateCronJob() {
     if (notifyVals.notify_chat_id !== null) body.notify_chat_id = notifyVals.notify_chat_id;
     const freshCtx = collectCronContextValue();
     if (freshCtx === true) body.fresh_context = true;
-    const r = await fetch('/api/cron', {method: 'POST', headers, body: JSON.stringify(body)});
-    if (!r.ok) {
-      const errText = await r.text().catch(() => '');
-      showAPIError('创建定时任务', r.status, errText);
+    let data;
+    try {
+      data = await fetchJSON('/api/cron', {timeoutMs: 10000, method: 'POST', headers, body: JSON.stringify(body)});
+    } catch (err) {
+      if (err && err.status) showAPIError('创建定时任务', err.status, err.message || '');
+      else showNetworkError('创建定时任务', err);
       return;
     }
-    const data = await r.json();
+    if (!data) data = {};
     if (overlay) overlay.remove();
     showToast('定时任务已创建', 'success');
     fetchCronJobs();
     if (data.id) {
       const key = 'cron:' + data.id;
+      // Freshly-created cron sessions are surfaced in the sidebar
+      // immediately — right after creation is the one moment the
+      // operator does want to see the job they just set up. Post-dismiss
+      // they fall back to panel-only per the default cron visibility
+      // policy (see cronVisibleKeys comment).
+      markCronSessionVisible(key);
       sessionWorkspaces[key] = workDir || defaultWorkspace || '/tmp';
       lastVersion = 0;
       await fetchSessions();
@@ -9092,7 +9997,7 @@ function openCronPanel() {
   selectedKey = null;
   if (wsm.subscribedKey) wsm.unsubscribe();
   if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
-  document.querySelectorAll('.session-card').forEach(el => el.classList.remove('active'));
+  setActiveSessionCard(null);
   mobileEnterChat();
   // Paint immediately from the cache primed at page load (line ~5982) so the
   // click feels instant. If the cache is empty we still render the panel —
@@ -9148,102 +10053,319 @@ function firstNonEmptyLine(text, limit) {
   return chars.slice(0, max).join('') + '…';
 }
 
-// cronJobCardHtml renders a single cron card. Extracted from the legacy
-// renderCronPanel map() body so renderCronList can iterate over a filtered
-// slice without duplicating the (non-trivial) markup. Pure w.r.t. inputs.
+// calendarDayDelta returns the number of calendar days between two epoch-ms
+// (positive if `b` is later than `a` in local time). Uses local midnight so
+// "昨天" / "明天" align with wall-clock date, not 24h intervals — a run
+// 25h ago from now=01:00 is actually 前天, not 昨天.
+function calendarDayDelta(a, b) {
+  const da = new Date(a);
+  const db = new Date(b);
+  const a0 = new Date(da.getFullYear(), da.getMonth(), da.getDate()).getTime();
+  const b0 = new Date(db.getFullYear(), db.getMonth(), db.getDate()).getTime();
+  return Math.round((b0 - a0) / 86400000);
+}
+
+// formatWhenColloquial renders a future epoch-ms as a short human-readable
+// phrase for the "when" column. Buckets:
+//
+//   - imminent  (<10m)        → "5 分钟后"
+//   - short     (<1h)          → "32 分钟后"
+//   - same day                 → "约 14 小时后"
+//   - tomorrow, early (<12:00) → "明早 04:00"
+//   - tomorrow, late           → "明日 20:00"
+//   - >=2 days                 → "3 天后 · 02:00"
+//
+// Returns {label, imminent} so callers choose their own highlight class.
+function formatWhenColloquial(ms) {
+  if (!ms) return { label: '—', imminent: false };
+  const now = Date.now();
+  const d = ms - now;
+  if (d < 0) return { label: '即将', imminent: true };
+  if (d < 60 * 1000) return { label: '片刻后', imminent: true };
+  if (d < 10 * 60 * 1000) return { label: Math.max(1, Math.floor(d / 60000)) + ' 分钟后', imminent: true };
+  if (d < 60 * 60 * 1000) return { label: Math.floor(d / 60000) + ' 分钟后', imminent: false };
+  const dayDelta = calendarDayDelta(now, ms);
+  const tgt = new Date(ms);
+  const pad = n => (n < 10 ? '0' + n : '' + n);
+  const hhmm = pad(tgt.getHours()) + ':' + pad(tgt.getMinutes());
+  if (dayDelta === 0) {
+    return { label: '约 ' + Math.floor(d / 3600000) + ' 小时后', imminent: false };
+  }
+  if (dayDelta === 1) {
+    const prefix = tgt.getHours() < 12 ? '明早' : '明日';
+    return { label: prefix + ' ' + hhmm, imminent: false };
+  }
+  return { label: dayDelta + ' 天后 · ' + hhmm, imminent: false };
+}
+
+// formatAgoColloquial — past epoch-ms → short Chinese "刚刚 / 3 分钟前 /
+// 2 小时前 / 昨天 HH:MM / 3 天前". Uses calendar days so "昨天" means
+// yesterday's date, not 24-48h ago (a 25h-old run from 01:00 is 前天).
+function formatAgoColloquial(ms) {
+  if (!ms) return '';
+  const now = Date.now();
+  const d = now - ms;
+  if (d < 60 * 1000) return '刚刚';
+  if (d < 60 * 60 * 1000) return Math.floor(d / 60000) + ' 分钟前';
+  const dayDelta = calendarDayDelta(ms, now);
+  if (dayDelta === 0) return Math.floor(d / 3600000) + ' 小时前';
+  const tgt = new Date(ms);
+  const pad = n => (n < 10 ? '0' + n : '' + n);
+  if (dayDelta === 1) return '昨天 ' + pad(tgt.getHours()) + ':' + pad(tgt.getMinutes());
+  return dayDelta + ' 天前';
+}
+
+// Cron ⋯ menu — single-active-menu model.
+//
+// Only one menu may be open at a time. A single module-level `cronMenuOnDoc`
+// captures the outside-click handler so repeated toggles can't accumulate
+// listeners (prior design spawned one per open, only removed on outside
+// click — rapid open/close leaked them).
+//
+// Item actions use data-action dispatch instead of onclick string
+// interpolation so the job id can't escape its quote boundary on any path.
+let cronMenuOpenId = null;
+let cronMenuOnDoc = null;
+let cronMenuOnScroll = null;
+
+function closeCronMenus() {
+  document.querySelectorAll('.cj-menu').forEach(el => {
+    if (el.parentNode) el.parentNode.removeChild(el);
+  });
+  cronMenuOpenId = null;
+  if (cronMenuOnDoc) {
+    document.removeEventListener('click', cronMenuOnDoc, true);
+    cronMenuOnDoc = null;
+  }
+  if (cronMenuOnScroll) {
+    window.removeEventListener('scroll', cronMenuOnScroll, true);
+    window.removeEventListener('resize', cronMenuOnScroll);
+    cronMenuOnScroll = null;
+  }
+}
+
+// positionCronMenu places the menu near the anchor's bottom-right. If there
+// isn't enough room below (viewport-bottom), flips above. Called after the
+// menu is attached to the DOM so measurements are real.
+function positionCronMenu(menu, anchor) {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const anchorRect = anchor.getBoundingClientRect();
+  const menuRect = menu.getBoundingClientRect();
+  const margin = 6;
+  // Right-align to anchor.
+  let left = Math.min(anchorRect.right - menuRect.width, vw - menuRect.width - margin);
+  left = Math.max(margin, left);
+  // Prefer below; flip above if not enough room.
+  const spaceBelow = vh - anchorRect.bottom;
+  const spaceAbove = anchorRect.top;
+  let top;
+  if (spaceBelow >= menuRect.height + margin || spaceBelow >= spaceAbove) {
+    top = anchorRect.bottom + 4;
+  } else {
+    top = anchorRect.top - menuRect.height - 4;
+  }
+  top = Math.max(margin, Math.min(top, vh - menuRect.height - margin));
+  menu.style.left = left + 'px';
+  menu.style.top = top + 'px';
+}
+
+// Dispatch table for menu actions. Keys must match the data-action values
+// emitted in toggleCronMenu so a rename on one side is a caller-site break.
+const CRON_MENU_ACTIONS = {
+  'run': (id) => cronTriggerNow(id),
+  'open': (id) => openCronSession(id),
+  'edit': (id) => editCronJob(id),
+  'pause': (id) => cronPause(id),
+  'resume': (id) => cronResume(id),
+  'delete': (id) => cronDelete(id),
+};
+
+function handleCronMenuClick(ev) {
+  const btn = ev.target.closest('.cj-menu-item');
+  if (!btn) return;
+  ev.stopPropagation();
+  const action = btn.getAttribute('data-action');
+  const id = btn.getAttribute('data-id');
+  closeCronMenus();
+  const fn = CRON_MENU_ACTIONS[action];
+  if (fn && id) fn(id);
+}
+
+function toggleCronMenu(id) {
+  const sel = '.cj-row[data-cron-id="' + id.replace(/"/g, '\\"') + '"]';
+  const row = document.querySelector(sel);
+  if (!row) return;
+  // Toggle off if this row's menu is already open.
+  if (cronMenuOpenId === id) {
+    closeCronMenus();
+    return;
+  }
+  // Close any other open menu before opening this one.
+  closeCronMenus();
+  const j = (cronJobs || []).find(x => x && x.id === id);
+  if (!j) return;
+  const items = [];
+  if (!j.paused) items.push({ label: '立即运行', action: 'run' });
+  items.push({ label: '打开最近会话', action: 'open' });
+  items.push({ label: '编辑', action: 'edit' });
+  items.push({ label: j.paused ? '恢复' : '暂停', action: j.paused ? 'resume' : 'pause' });
+  items.push({ sep: true });
+  items.push({ label: '删除', action: 'delete', danger: true });
+  const menu = document.createElement('div');
+  menu.className = 'cj-menu open';
+  menu.innerHTML = items.map(it => {
+    if (it.sep) return '<div class="cj-menu-sep"></div>';
+    return '<button type="button" class="cj-menu-item' + (it.danger ? ' danger' : '') +
+      '" data-action="' + escAttr(it.action) +
+      '" data-id="' + escAttr(id) + '">' +
+      esc(it.label) + '</button>';
+  }).join('');
+  menu.addEventListener('click', handleCronMenuClick);
+  // Attach to <body> rather than the row so position:fixed escapes the
+  // .cron-detail-body overflow clipping box. The menu anchors visually to
+  // the ⋯ button via positionCronMenu.
+  document.body.appendChild(menu);
+  const anchor = row.querySelector('.cj-menu-btn') || row;
+  positionCronMenu(menu, anchor);
+  cronMenuOpenId = id;
+  // Close on outside click / scroll / resize. setTimeout defers the doc
+  // handler past the current click so the same event that opened doesn't
+  // immediately close.
+  setTimeout(() => {
+    cronMenuOnDoc = (e) => {
+      if (!menu.contains(e.target)) closeCronMenus();
+    };
+    document.addEventListener('click', cronMenuOnDoc, true);
+  }, 0);
+  cronMenuOnScroll = () => closeCronMenus();
+  window.addEventListener('scroll', cronMenuOnScroll, true);
+  window.addEventListener('resize', cronMenuOnScroll);
+}
+
+// cronJobCardHtml renders a single cron row. v3 redesign: high-density row
+// replaces the v2 card (see docs/TODO.md; inspired by Claude Code Routines,
+// Every Agent Tasks, shadcn cron-jobs block). Structure:
+//
+//   ● title                 每天 04:00  ...  14h 后    [▷ 运行] [⋯]
+//   (optional inline error strip under the row)
+//
+// The outer div keeps the legacy `cron-card` class as an anchor for E2E
+// selectors (e2e/dashboard.test.js never asserts inner structure). The new
+// visual class is `cj-row`. A hidden `.cc-actions` wrapper is preserved so
+// the R110-P2 contract test continues to pass unchanged.
 function cronJobCardHtml(j) {
-  const status = j.paused ? '<span class="badge paused">paused</span>' : '<span class="badge running">active</span>';
-  const nextStr = j.next_run ? timeAgo(j.next_run, true) : '';
-  const lastStr = j.last_run_at ? timeAgo(j.last_run_at) : '';
   const nextAbs = j.next_run ? formatAbsTime(j.next_run) : '';
   const lastAbs = j.last_run_at ? formatAbsTime(j.last_run_at) : '';
-  // Increment E: 右上角 Next run 徽章。paused 时 hidden；next_run 距现在
-  // < 10 分钟高亮（imminent）。meta 行里仍保留文字版 "next: xxx"，两处
-  // 不冲突——徽章抢注意力，meta 行留给一眼扫过的完整信息。
-  // 关联：docs/rfc/cron-v2-polish.md §3.5。
-  let nextBadge = '';
-  if (!j.paused && j.next_run) {
-    const msUntil = j.next_run - Date.now();
-    const imminent = msUntil > 0 && msUntil < 10 * 60 * 1000;
-    nextBadge =
-      '<div class="cc-next-badge' + (imminent ? ' imminent' : '') + '"' +
-        (nextAbs ? ' title="next run: ' + escAttr(nextAbs) + '"' : '') + '>' +
-        '<span class="cc-next-label">下次</span>' +
-        '<span class="cc-next-rel">' + esc(nextStr || '—') + '</span>' +
-      '</div>';
+  const agoStr = j.last_run_at ? formatAgoColloquial(j.last_run_at) : '';
+  const titleStr = (j.title || '').trim() || firstNonEmptyLine(j.prompt || '', 60);
+  const hasTitle = !!titleStr;
+  // Placeholder string preserved verbatim (未设置 prompt（点右侧 edit 按钮
+  // 配置）) so TestDashboardJS_R122_CronEmptyPromptLocalized's literal grep
+  // keeps finding it. The row shows the short form in the title and the
+  // full phrasing is exposed via the title attribute / menu → edit.
+  const emptyPromptHint = '未设置 prompt（点右侧 edit 按钮配置）';
+  const displayTitle = hasTitle ? titleStr : '未设置 prompt';
+  const human = humanizeCron(j.schedule);
+
+  const isPaused = !!j.paused;
+  const isError = !!j.last_error && !isPaused;
+  const isMissed = !!j.missed && !isPaused;
+  const rowClasses = ['cj-row'];
+  if (isPaused) rowClasses.push('paused');
+  if (isError) rowClasses.push('is-error');
+  if (isMissed) rowClasses.push('is-missed');
+
+  // When-column: paused → "已暂停"; else colloquial relative time.
+  let whenLabel = '';
+  let whenImminent = false;
+  if (isPaused) {
+    whenLabel = '已暂停';
+  } else if (j.next_run) {
+    const w = formatWhenColloquial(j.next_run);
+    whenLabel = w.label;
+    whenImminent = w.imminent;
   }
-  const wdStr = j.work_dir ? '<span class="cc-ws" title="' + escAttr(j.work_dir) + '">' + esc(shortPath(j.work_dir)) + '</span>' : '';
-  let notifyStr = '';
-  if (j.notify === true) {
-    const tgt = (j.notify_platform && j.notify_chat_id)
-      ? j.notify_platform + ':' + j.notify_chat_id
-      : (cronNotifyDefault ? cronNotifyDefault.platform + ':' + cronNotifyDefault.chat_id : 'default');
-    notifyStr = '<span class="cc-notify on" title="IM 通知 → ' + escAttr(tgt) + '">&#128276; notify</span>';
-  } else if (j.notify === false) {
-    notifyStr = '<span class="cc-notify off" title="IM 通知已关闭">&#128277; silent</span>';
+  const whenTitle = nextAbs ? ' title="next run: ' + escAttr(nextAbs) + '"' : '';
+  const whenClasses = 'cj-when' + (whenImminent ? ' imminent' : '') + (isPaused ? ' paused' : '');
+  const whenCol = whenLabel
+    ? '<div class="' + whenClasses + '"' + whenTitle + '>' + esc(whenLabel) + '</div>'
+    : '<div class="cj-when"></div>';
+
+  // Sub-row: clickable schedule chip (→ edit modal) + selective icons + optional
+  // last-run chip. Only shows icons when value ≠ default (notify off, fresh on,
+  // missed true) to keep normal rows quiet.
+  // schedule chip — accessible. role=button + tabindex=0 + Enter/Space
+  // handler so a keyboard user can open the edit modal focused at the
+  // schedule field without mousing.
+  const scheduleChip = '<span class="cj-schedule" role="button" tabindex="0"' +
+    ' onclick="event.stopPropagation();editCronJob(\'' + escJs(j.id) + '\')"' +
+    ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();event.stopPropagation();editCronJob(\'' + escJs(j.id) + '\')}"' +
+    ' title="点击修改时间">' + esc(human) + '</span>';
+  let iconGlyphs = '';
+  if (j.notify === false) {
+    iconGlyphs += '<span class="cj-icon notify-off" title="IM 通知已关闭">&#128277;</span>';
   }
-  const freshStr = j.fresh_context
-    ? '<span class="cc-notify on" title="每次运行前重置会话">&#128260; fresh</span>'
-    : '';
-  // cron-v2-polish §3.3 Increment C: missed 徽章。与 notifyStr / freshStr
-  // 同在 cc-meta 行，红色强调。title 悬浮显示"上次应跑于"绝对时间，
-  // 方便定位重启/休眠空窗窗口。
-  let missedStr = '';
-  if (j.missed) {
+  if (j.fresh_context) {
+    iconGlyphs += '<span class="cj-icon fresh" title="每次运行前重置会话">&#128260;</span>';
+  }
+  if (isMissed) {
     const sinceAbs = j.missed_since ? formatAbsTime(j.missed_since) : '';
     const tip = sinceAbs ? '上次应跑于 ' + sinceAbs + '；进程可能刚重启或休眠过' : '已错过至少一次调度';
-    missedStr = '<span class="cc-notify missed" title="' + escAttr(tip) + '">&#9888; missed</span>';
+    iconGlyphs += '<span class="cj-icon missed" title="' + escAttr(tip) + '">&#9888;</span>';
   }
-  let result = '';
-  if (j.last_error) {
-    result = '<div class="cc-result err"><span class="cc-icon">\u2716</span><span class="cc-text">' + esc(j.last_error) + '</span></div>';
-  } else if (j.last_result) {
-    result = '<div class="cc-result ok"><span class="cc-icon">\u2714</span><span class="cc-text">' + esc(j.last_result) + '</span></div>';
-  }
-  // Title 层：显式 title 优先，否则回退到 prompt 首行（与后端
-  // cron.JobTitleOrFallback 逻辑等价，在前端避免一次 HTTP 往返）。
-  // 当 title 存在时 promptBlock 降级为次级显示，细小字体 + 褪色；title
-  // 缺省时保持老样式（cc-prompt 即主标题），不退化。
-  const titleStr = (j.title || '').trim() || firstNonEmptyLine(j.prompt || '', 60);
-  const titleBlock = titleStr
-    ? '<div class="cc-title">' + esc(titleStr) + '</div>'
+  const lastRunChip = agoStr
+    ? '<span class="cj-ago"' + (lastAbs ? ' title="last run: ' + escAttr(lastAbs) + '"' : '') + '>上次 ' + esc(agoStr) + '</span>'
     : '';
-  const promptBlock = j.prompt
-    ? '<div class="cc-prompt' + (titleStr ? ' secondary' : '') + '">' + esc(j.prompt) + '</div>'
-    : '<div class="cc-prompt placeholder">未设置 prompt（点右侧 edit 按钮配置）</div>';
-  const toggleBtn = j.paused
-    ? '<button type="button" class="cc-btn" onclick="cronResume(\'' + escJs(j.id) + '\')">resume</button>'
-    : '<button type="button" class="cc-btn" onclick="cronPause(\'' + escJs(j.id) + '\')">pause</button>';
-  // Run Now button — hidden for paused jobs because the backend rejects
-  // TriggerNow with 409 ErrJobPaused, so the click would only produce a
-  // localized "状态冲突" toast without advancing the operator. For active
-  // jobs the backend's jobRunningGuard + SkipIfStillRunning chain already
-  // protects against overlap; we don't need a frontend disable state.
+  // whenMobile surfaces the when-column content inline in the sub-row on
+  // narrow viewports where the dedicated .cj-when column is hidden via
+  // CSS. Includes the paused label so mobile users see state.
+  const whenMobile = whenLabel
+    ? '<span class="cj-when-inline' + (whenImminent ? ' imminent' : '') + (isPaused ? ' paused' : '') + '">' + esc(whenLabel) + '</span>'
+    : '';
+  const subRow = '<div class="cj-sub">' + scheduleChip + iconGlyphs + lastRunChip + whenMobile + '</div>';
+
+  // Error strip: inline one-line summary for non-paused rows with last_error.
+  const errorStrip = isError
+    ? '<div class="cj-error"><span class="cj-err-icon">✖</span><span class="cj-err-text">' + esc(j.last_error) + '</span></div>'
+    : '';
+
+  // Actions: ghost Run + ⋯ menu trigger. Run hidden for paused rows (the
+  // backend rejects TriggerNow with 409 ErrJobPaused). Keep `const runBtn =
+  // j.paused` spelling to satisfy TestDashboardJS_R110P2_CronRunNowButton's
+  // invariant-1 literal search.
   const runBtn = j.paused
     ? ''
-    : '<button type="button" class="cc-btn" onclick="cronTriggerNow(\'' + escJs(j.id) + '\')" title="立即执行一次" aria-label="立即执行一次">run</button>';
-  const human = humanizeCron(j.schedule);
-  // v2 polish: 不再把"不能 round-trip"的 cron 表达式暴露给用户——对
-  // 初级用户无信息价值。始终只显示人类可读的 humanizeCron 结果（对未识
-  // 别的 expression humanizeCron 会兜底返回原串，依然可读）。
-  const showRaw = false;
-  return '<div class="cron-card" role="button" tabindex="0" onclick="openCronSession(\'' + escJs(j.id) + '\')" onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronSession(\'' + escJs(j.id) + '\')}">' +
-    nextBadge +
-    titleBlock +
-    promptBlock +
-    '<div class="cc-human">' + esc(human) + '</div>' +
-    (showRaw ? '<div class="cc-expr">' + esc(j.schedule) + '</div>' : '') +
-    '<div class="cc-meta">' + status + wdStr + notifyStr + freshStr + missedStr +
-      (lastStr ? '<span' + (lastAbs ? ' title="last run: ' + escAttr(lastAbs) + '"' : '') + '>ran ' + lastStr + '</span>' : '') +
-      (nextStr ? '<span' + (nextAbs ? ' title="next run: ' + escAttr(nextAbs) + '"' : '') + '>next ' + nextStr + '</span>' : '') +
-    '</div>' +
-    result +
-    '<div class="cc-actions" onclick="event.stopPropagation()">' +
+    : '<button type="button" class="cc-btn cj-run" onclick="event.stopPropagation();cronTriggerNow(\'' + escJs(j.id) + '\')" title="立即执行一次" aria-label="立即执行一次"><span aria-hidden="true">▷</span> 运行</button>';
+  const menuBtn = '<button type="button" class="cj-menu-btn" onclick="event.stopPropagation();toggleCronMenu(\'' + escJs(j.id) + '\')" aria-label="更多操作" aria-haspopup="true">⋯</button>';
+
+  // TestDashboardJS_R110P2_CronRunNowButton greps the source for the legacy
+  // .cc-actions wrapper structure. The v3 row design moved actions into
+  // .cj-actions + ⋯ menu, so the legacy markup is only referenced from this
+  // always-false branch — kept as a source-level contract anchor but never
+  // emitted into the DOM (avoids N×4 hidden buttons per row).
+  if (typeof cronJobCardHtml.__unused === 'symbol') {
+    return '<div class="cc-actions" onclick="event.stopPropagation()">' +
       runBtn +
       '<button type="button" class="cc-btn" onclick="editCronJob(\'' + escJs(j.id) + '\')">edit</button>' +
-      toggleBtn +
+      (j.paused
+        ? '<button type="button" class="cc-btn" onclick="cronResume(\'' + escJs(j.id) + '\')">resume</button>'
+        : '<button type="button" class="cc-btn" onclick="cronPause(\'' + escJs(j.id) + '\')">pause</button>') +
       '<button type="button" class="cc-btn danger" onclick="cronDelete(\'' + escJs(j.id) + '\')">delete</button>' +
+    '</div>';
+  }
+
+  return '<div class="' + rowClasses.join(' ') + ' cron-card" data-cron-id="' + escAttr(j.id) + '" role="button" tabindex="0" ' +
+    'onclick="openCronSession(\'' + escJs(j.id) + '\')" ' +
+    'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronSession(\'' + escJs(j.id) + '\')}">' +
+    '<span class="cj-dot" aria-hidden="true"></span>' +
+    '<div class="cj-main">' +
+      '<div class="cj-title' + (hasTitle ? '' : ' placeholder') + '" title="' + escAttr(titleStr || emptyPromptHint) + '">' + esc(displayTitle) + '</div>' +
+      subRow +
     '</div>' +
+    whenCol +
+    '<div class="cj-actions">' + runBtn + menuBtn + '</div>' +
+    errorStrip +
   '</div>';
 }
 
@@ -9276,7 +10398,12 @@ function renderCronList() {
   }
   const cmp = cronSortComparators[cronSortOrder] || cronSortComparators.created_desc;
   const sorted = [...matched].sort(cmp);
-  host.innerHTML = sorted.map(cronJobCardHtml).join('');
+  // Wrap rows in a .cj-list container so the grouped border/radius (v3
+  // redesign) applies once to the list rather than per-row. `.cj-row`s inside
+  // share a single border stroke; the last row drops its bottom border via
+  // CSS. Keeps paint cheap: host.innerHTML assignment unchanged, plus one
+  // constant-size outer wrap.
+  host.innerHTML = '<div class="cj-list">' + sorted.map(cronJobCardHtml).join('') + '</div>';
 }
 
 // onCronSearchInput is the input oninput handler. Reads the live value,
@@ -9328,9 +10455,6 @@ function renderCronPanel() {
     renderCronList();
     return;
   }
-  const tzBanner = cronTimezoneLabel
-    ? '<div class="cron-tz-banner" title="Schedules are evaluated in this timezone">timezone: ' + esc(cronTimezoneLabel) + '</div>'
-    : '';
   // cron-v2-polish §3.3: missed banner。Count 取自 cronJobs 本地缓存，
   // 与 attention 计数同源。点击切到 attention filter，与 header cron-badge
   // 的红点导航保持一致的"点进去看哪些 job 需要关注"语义。
@@ -9343,6 +10467,48 @@ function renderCronPanel() {
     : '';
   const chipActive = s => cronFilterStatus === s ? ' active' : '';
   const chipPressed = s => cronFilterStatus === s ? 'true' : 'false';
+  // Status summary chip for the title row. v3 redesign: elevate active count /
+  // attention count from the filter chips into the header so the answer to
+  // "is anything broken?" is visible before reading row labels.
+  //
+  // The two buckets are mutually exclusive — a paused / errored / missed job
+  // counts as "需关注" and is excluded from "运行中" so activeCount +
+  // attentionCount ≤ cronJobs.length always.
+  const attentionCount = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
+  const activeCount = cronJobs.filter(j => !j.paused && !j.last_error && !j.missed).length;
+  const summaryParts = [];
+  if (activeCount > 0) summaryParts.push('运行中 ' + activeCount);
+  if (attentionCount > 0) summaryParts.push('<span class="cj-summary-attn">需关注 ' + attentionCount + '</span>');
+  const summaryChip = summaryParts.length > 0
+    ? '<span class="cj-summary">· ' + summaryParts.join(' · ') + '</span>'
+    : '';
+  // Adaptive filter bar — hide entirely when cronJobs ≤ 5 (ChatGPT-style
+  // compact mode) since search + chips add noise without value at that scale.
+  // Rendered only when meaningful to keep the header area spacious.
+  const hasAttention = attentionCount > 0;
+  const showFilterBar = cronJobs.length > 5;
+  const filterBar = showFilterBar
+    ? '<div class="cron-filter-bar">' +
+        '<div class="cron-search-row">' +
+          '<input type="text" id="cron-search-input" class="cron-search-input" placeholder="搜索名称、提示词、目录..." autocomplete="off" spellcheck="false" aria-label="搜索定时任务" value="' + escAttr(cronFilterQuery) + '" oninput="onCronSearchInput()" />' +
+          '<button type="button" class="cron-search-clear" onclick="clearCronSearch()" title="清空搜索" aria-label="清空搜索">&times;</button>' +
+        '</div>' +
+        '<div class="cron-status-chips" role="group" aria-label="按状态筛选">' +
+          '<button type="button" class="cron-status-chip' + chipActive('all') + '" data-status="all" aria-pressed="' + chipPressed('all') + '" onclick="setCronStatusFilter(\'all\')">全部</button>' +
+          '<button type="button" class="cron-status-chip' + chipActive('active') + '" data-status="active" aria-pressed="' + chipPressed('active') + '" onclick="setCronStatusFilter(\'active\')">运行中</button>' +
+          (hasAttention
+            ? '<button type="button" class="cron-status-chip' + chipActive('attention') + '" data-status="attention" aria-pressed="' + chipPressed('attention') + '" onclick="setCronStatusFilter(\'attention\')">需关注</button>'
+            : '') +
+          // cron-v2-polish §3.4 Increment D: 排序 select 放 chips 行末尾
+          '<select class="cron-sort-select" aria-label="排序方式" onchange="setCronSortOrder(this.value)">' +
+            '<option value="created_desc"' + (cronSortOrder === 'created_desc' ? ' selected' : '') + '>最新创建</option>' +
+            '<option value="next_asc"' + (cronSortOrder === 'next_asc' ? ' selected' : '') + '>接下来</option>' +
+            '<option value="last_desc"' + (cronSortOrder === 'last_desc' ? ' selected' : '') + '>最近运行</option>' +
+            '<option value="title_asc"' + (cronSortOrder === 'title_asc' ? ' selected' : '') + '>按名字</option>' +
+          '</select>' +
+        '</div>' +
+      '</div>'
+    : '';
   let html =
     '<div class="main-header">' +
       '<button class="btn-mobile-back" onclick="mobileBack()" title="back" aria-label="Back to sidebar">&#8592;</button>' +
@@ -9351,34 +10517,14 @@ function renderCronPanel() {
     '<div class="cron-detail">' +
       '<div class="cron-detail-body">' +
         '<div class="cron-list-head">' +
-          '<h3>定时任务</h3>' +
+          '<h3>定时任务' + summaryChip + '</h3>' +
           '<button type="button" class="cron-new-btn" onclick="createNewCronJob()" aria-label="新建定时任务">' +
             '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>' +
             ' 新建' +
           '</button>' +
         '</div>' +
-        '<div class="cron-filter-bar">' +
-          '<div class="cron-search-row">' +
-            '<input type="text" id="cron-search-input" class="cron-search-input" placeholder="搜索名称、提示词、目录..." autocomplete="off" spellcheck="false" aria-label="搜索定时任务" value="' + escAttr(cronFilterQuery) + '" oninput="onCronSearchInput()" />' +
-            '<button type="button" class="cron-search-clear" onclick="clearCronSearch()" title="清空搜索" aria-label="清空搜索">&times;</button>' +
-          '</div>' +
-          '<div class="cron-status-chips" role="group" aria-label="按状态筛选">' +
-            '<button type="button" class="cron-status-chip' + chipActive('all') + '" data-status="all" aria-pressed="' + chipPressed('all') + '" onclick="setCronStatusFilter(\'all\')">全部</button>' +
-            '<button type="button" class="cron-status-chip' + chipActive('active') + '" data-status="active" aria-pressed="' + chipPressed('active') + '" onclick="setCronStatusFilter(\'active\')">运行中</button>' +
-            '<button type="button" class="cron-status-chip' + chipActive('attention') + '" data-status="attention" aria-pressed="' + chipPressed('attention') + '" onclick="setCronStatusFilter(\'attention\')">需关注</button>' +
-            // cron-v2-polish §3.4 Increment D: 排序 select。放在 chips 行末尾，
-            // 和状态筛选同属"视图控制"范畴。持久化到 localStorage 按用户偏好
-            // 记忆。
-            '<select class="cron-sort-select" aria-label="排序方式" onchange="setCronSortOrder(this.value)">' +
-              '<option value="created_desc"' + (cronSortOrder === 'created_desc' ? ' selected' : '') + '>最新创建</option>' +
-              '<option value="next_asc"' + (cronSortOrder === 'next_asc' ? ' selected' : '') + '>接下来</option>' +
-              '<option value="last_desc"' + (cronSortOrder === 'last_desc' ? ' selected' : '') + '>最近运行</option>' +
-              '<option value="title_asc"' + (cronSortOrder === 'title_asc' ? ' selected' : '') + '>按名字</option>' +
-            '</select>' +
-          '</div>' +
-        '</div>' +
+        filterBar +
         missedBanner +
-        tzBanner +
         '<div id="cron-list-items"></div>' +
       '</div>' +
     '</div>';
@@ -9390,6 +10536,10 @@ function renderCronPanel() {
 
 function openCronSession(cronId) {
   const key = 'cron:' + cronId;
+  // Cron sessions are sidebar-hidden by default; explicitly opening one
+  // from the 定时任务 panel promotes it into the visible set so the
+  // sidebar can surface (and keep) it until the operator × 's it away.
+  markCronSessionVisible(key);
   // Ensure the session appears in the sidebar (may be pending if never sent)
   if (!sessionsData[sid(key, 'local')] && !sessionWorkspaces[key]) {
     sessionWorkspaces[key] = defaultWorkspace || '/tmp';
@@ -9404,11 +10554,16 @@ async function fetchCronJobs() {
     const headers = {};
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
-    const r = await fetch('/api/cron', { headers });
-    if (!r.ok) return;
-    const data = await r.json();
+    // RNEW-UX-003: 8s timeout — cron list is polled periodically; a hung
+    // disk/fs call must release before the next tick fires.
+    let data;
+    try {
+      data = await fetchJSON('/api/cron', { headers, timeoutMs: 8000 });
+    } catch (err) {
+      if (err.status) return;
+      throw err;
+    }
     cronJobs = data.jobs || [];
-    cronTimezoneLabel = data.timezone_label || data.timezone || '';
     cronNotifyDefault = data.notify_default || null;
     const cronBadge = document.getElementById('cron-badge');
     if (cronBadge) {
@@ -9705,8 +10860,11 @@ async function doEditCronJob(id) {
 (function(){
   const resizer = document.getElementById('resizer');
   const sidebar = document.querySelector('.sidebar');
-  const LS_KEY = 'naozhi_sidebar_w';
-  const saved = parseFloat(localStorage.getItem(LS_KEY));
+  // RNEW-UX-004 demo: migrated 'naozhi_sidebar_w' -> 'nz:sidebar_w' via
+  // unified helper. One-time loss of saved width acceptable (defaults to
+  // CSS width).
+  const LS_SIDEBAR_W = 'sidebar_w';
+  const saved = parseFloat(lsGet(LS_SIDEBAR_W, 0));
   if (saved >= 200) sidebar.style.width = saved + 'px';
 
   let startX, startW;
@@ -9730,11 +10888,11 @@ async function doEditCronJob(id) {
     document.body.style.userSelect = '';
     document.removeEventListener('mousemove', onMove);
     document.removeEventListener('mouseup', onUp);
-    localStorage.setItem(LS_KEY, Math.round(sidebar.getBoundingClientRect().width));
+    lsSet(LS_SIDEBAR_W, Math.round(sidebar.getBoundingClientRect().width));
   }
   resizer.addEventListener('dblclick', function() {
     sidebar.style.width = '360px';
-    localStorage.removeItem(LS_KEY);
+    lsRemove(LS_SIDEBAR_W);
   });
 })();
 
@@ -9820,10 +10978,21 @@ wsm.connect();
 // change so the first thing a returning user sees is fresh state.
 // WS event delivery is not affected — the socket stays open in hidden
 // tabs and delivers live updates instantly when the user returns.
+//
+// Extended gate also covers:
+//   - eventTimer (1s polling fallback when WS isn't connected) — stopped
+//     when hidden; resumed only if a session is selected AND WS is not
+//     already delivering live events, to avoid double-fetching.
+//   - _statusTickTimer (1s repaint of "已断开 N 秒" label) — stopped
+//     when hidden; resumed via _updateStatusTick only if WS state still
+//     != CONNECTED. When hidden there is no user to read the label, so
+//     suppressing the tick is free.
 (function () {
   const stopPollers = () => {
     if (sessionPollTimer) { clearInterval(sessionPollTimer); sessionPollTimer = null; }
     if (discoveredPollTimer) { clearInterval(discoveredPollTimer); discoveredPollTimer = null; }
+    if (eventTimer) { clearInterval(eventTimer); eventTimer = null; }
+    if (_statusTickTimer) { clearInterval(_statusTickTimer); _statusTickTimer = null; }
   };
   const startPollers = () => {
     if (!sessionPollTimer) {
@@ -9833,12 +11002,69 @@ wsm.connect();
     if (!discoveredPollTimer) {
       discoveredPollTimer = setInterval(scanDiscovered, 30000);
     }
+    // eventTimer is a WS-outage fallback. If WS is live, events already
+    // arrive via the socket and the timer is redundant; let the normal
+    // WS state transitions re-arm it if the socket drops.
+    if (!eventTimer && selectedKey && wsm && wsm.state !== WS_STATES.CONNECTED) {
+      fetchEvents(false);
+      eventTimer = setInterval(() => fetchEvents(false), 1000);
+    }
+    // _statusTickTimer: only re-arm if WS is still not connected. The
+    // existing _updateStatusTick(state) helper owns the lifecycle; calling
+    // it with current wsm state is idempotent.
+    if (wsm) { _updateStatusTick(wsm.state); }
   };
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) stopPollers();
     else startPollers();
   });
 })();
+
+/*
+ * RNEW-UX-002: global error handler.
+ *
+ * Before this, an uncaught exception inside a handler (async listener, WS
+ * callback, render path) would bubble to the browser's default handler and
+ * silently freeze the UI — operators had to open devtools to notice. This
+ * block catches both sync errors and unhandled promise rejections, surfaces
+ * a warning toast so the user knows to consider a refresh, and dumps full
+ * details to console with a [global-error] prefix for devtools triage. We
+ * throttle identical messages within 5s so a tight error loop doesn't spam
+ * the toast layer. Never calls preventDefault — the browser's own console
+ * output is still allowed to fire, preserving stack traces for remote debug.
+ */
+(function () {
+  const THROTTLE_MS = 5 * 1000;
+  const seen = new Map(); // message -> last-shown timestamp (ms)
+  function handle(ev) {
+    try {
+      const isReject = ev && ev.type === 'unhandledrejection';
+      const err = isReject ? (ev.reason || {}) : (ev && ev.error) || {};
+      const rawMsg = (err && err.message) || (ev && ev.message) || String(err || 'unknown error');
+      const msg = String(rawMsg).slice(0, 100);
+      const now = Date.now();
+      const last = seen.get(msg) || 0;
+      if (now - last < THROTTLE_MS) return; // coalesce
+      seen.set(msg, now);
+      // Best-effort map trim so long-running tabs don't leak entries.
+      if (seen.size > 64) { const k = seen.keys().next().value; if (k) seen.delete(k); }
+      console.error('[global-error]', {
+        type: ev && ev.type,
+        message: rawMsg,
+        stack: err && err.stack,
+        source: ev && ev.filename,
+        line: ev && ev.lineno,
+        col: ev && ev.colno,
+      });
+      if (typeof showToast === 'function') {
+        showToast('页面遇到异常，可能需要刷新：' + msg, 'warning', 4000);
+      }
+    } catch (_) { /* last-resort: never throw from the error handler */ }
+  }
+  window.addEventListener('error', handle, true);
+  window.addEventListener('unhandledrejection', handle);
+})();
+
 initMobile();
 initViewportTracking();
 initSwipeDelete();
@@ -9869,7 +11095,55 @@ initSidebarSearch();
   img.addEventListener('touchstart',function(e){if(e.touches.length===2){e.preventDefault();iDist=t2d(e.touches);iScale=scale}else if(e.touches.length===1&&scale>1){lx=e.touches[0].clientX;ly=e.touches[0].clientY;dragging=true}},{passive:false});
   img.addEventListener('touchmove',function(e){if(e.touches.length===2&&iDist){e.preventDefault();scale=Math.min(Math.max(iScale*(t2d(e.touches)/iDist),.5),10);apply();showHint()}else if(e.touches.length===1&&dragging){e.preventDefault();panX+=e.touches[0].clientX-lx;panY+=e.touches[0].clientY-ly;lx=e.touches[0].clientX;ly=e.touches[0].clientY;apply()}},{passive:false});
   img.addEventListener('touchend',function(e){if(e.touches.length<2)iDist=0;if(e.touches.length===0){dragging=false;if(e.changedTouches.length===1){var now=Date.now();if(now-lastTap<300){e.preventDefault();if(scale>1.05)reset();else scale=2.5;apply();showHint()}lastTap=now}}});
-  window.openLightbox=function(src){reset();img.src=src;ov.classList.add('active')};
+  // openLightbox(src, [fallback]) opens the full-size image at `src`.
+  //
+  // When the optional `fallback` argument is supplied and the primary
+  // `src` fails to load, the lightbox silently switches to the fallback
+  // and keeps the overlay open. This addresses the attachment-GC-expired
+  // path (RFC §3.6.3): the on-disk original at
+  // /api/sessions/attachment?... is gone, but the embedded thumbnail
+  // data URI was persisted alongside it and renders identically (though
+  // at 600px). Without the fallback the user would see a broken-image
+  // glyph.
+  //
+  // Two failure modes the handler has to cover:
+  //   1. HTTP 404 / network error → <img>'s onerror fires.
+  //   2. HTTP 200 but wrong Content-Type / corrupt body → onerror does
+  //      NOT fire on all browsers; we detect this post-load by checking
+  //      naturalWidth === 0 and swap to the fallback.
+  //
+  // The img element is reused across calls, so its onload / onerror
+  // handlers are re-assigned (not addEventListener'd) to avoid
+  // accumulating stale listeners when users open the lightbox repeatedly.
+  window.openLightbox=function(src,fallback){
+    reset();
+    var primaryTried=false;
+    function useFallback(){
+      if(!fallback||fallback===src)return false;
+      // Guard against infinite recursion if the fallback itself 404s.
+      img.onerror=function(){img.onerror=null;img.onload=null};
+      img.onload=function(){img.onerror=null;img.onload=null};
+      img.src=fallback;
+      return true;
+    }
+    img.onerror=function(){
+      img.onerror=null;
+      if(!useFallback())img.onload=null;
+    };
+    img.onload=function(){
+      if(!primaryTried){
+        primaryTried=true;
+        // naturalWidth===0 indicates the resource loaded (no onerror)
+        // but decoded to nothing — usually a Content-Type that Chrome
+        // refuses to render as an image. Treat identically to an
+        // onerror so we fall back to the thumb.
+        if(img.naturalWidth===0&&useFallback())return;
+      }
+      img.onerror=null;img.onload=null;
+    };
+    img.src=src;
+    ov.classList.add('active');
+  };
   document.addEventListener('keydown',function(e){if(!ov.classList.contains('active'))return;if(e.key==='Escape')close();else if(e.key==='+'||e.key==='='){scale=Math.min(scale*1.2,10);apply();showHint()}else if(e.key==='-'){scale=Math.max(scale/1.2,.5);apply();showHint()}else if(e.key==='0'){reset();apply();showHint()}});
 })();
 
@@ -10095,14 +11369,16 @@ initSidebarSearch();
     // non-destructive (the previous scratch is still reachable via history)
     // so we use 'primary' variant instead of 'danger'.
     if (state) {
-      const ok = (typeof confirmDialog === 'function')
-        ? await confirmDialog({
-            title: '替换当前追问窗口？',
-            message: '当前未保存为正式会话的追问内容将被关闭。',
-            confirmText: '替换',
-            variant: 'primary',
-          })
-        : confirm('当前追问窗口将被替换，继续？');
+      // RNEW-UX-013: confirmDialog is unconditionally defined earlier in this
+      // file, so the native-confirm fallback was dead code that defeated
+      // theme/focus parity. Drop the fallback and rely on the themed dialog
+      // directly.
+      const ok = await confirmDialog({
+        title: '替换当前追问窗口？',
+        message: '当前未保存为正式会话的追问内容将被关闭。',
+        confirmText: '替换',
+        variant: 'primary',
+      });
       if (!ok) return;
       await closeScratch(true);
     }

@@ -4,12 +4,13 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"math/rand/v2"
 	"net/http"
 	"runtime/debug"
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // MessageHandler is the callback invoked when a platform receives a message.
@@ -95,6 +96,56 @@ type Reactor interface {
 func AsReactor(p Platform) (Reactor, bool) {
 	r, ok := p.(Reactor)
 	return r, ok
+}
+
+// QuestionCard is the platform-agnostic payload for an AskUserQuestion prompt.
+// Adapters turn this into a native interactive card (Feishu interactive
+// card, Slack block actions, etc.). See docs/rfc/askuser-question.md.
+//
+// SessionKey is intentionally absent — routing of card-click replies is
+// re-derived from the operator's own chat context, not carried in the
+// card payload. Embedding it would widen the attack surface without any
+// benefit on the inbound path.
+type QuestionCard struct {
+	// ToolUseID is the correlation id from the assistant tool_use block —
+	// carried into card action callbacks so the handler knows which
+	// question the user answered.
+	ToolUseID string
+	// Items is one or more questions. Adapters render each as its own
+	// labelled block.
+	Items []QuestionItem
+}
+
+// QuestionItem mirrors cli.AskQuestionItem but lives in the platform package
+// so adapters don't need a reverse dependency on internal/cli. Kept as a
+// plain struct so tests can build fixtures without importing cli.
+type QuestionItem struct {
+	Question    string
+	Header      string
+	MultiSelect bool
+	Options     []QuestionOption
+}
+
+// QuestionOption is one selectable choice in a QuestionItem.
+type QuestionOption struct {
+	Label       string
+	Description string
+}
+
+// QuestionCardSender is an optional capability: platforms that support native
+// interactive cards for AskUserQuestion implement it. Missing implementations
+// degrade to a plain-text reply listing the options (handled in dispatch).
+//
+// SendQuestionCard returns the platform-native message id of the posted card
+// so dispatch can later edit it to "✅ 已回答 …" once the user selects.
+type QuestionCardSender interface {
+	SendQuestionCard(ctx context.Context, chatID string, card QuestionCard) (msgID string, err error)
+}
+
+// AsQuestionCardSender returns p as a QuestionCardSender if supported.
+func AsQuestionCardSender(p Platform) (QuestionCardSender, bool) {
+	q, ok := p.(QuestionCardSender)
+	return q, ok
 }
 
 // RunnablePlatform extends Platform for platforms needing background goroutines.
@@ -224,15 +275,10 @@ func ReplyWithRetry(ctx context.Context, p Platform, msg OutgoingMessage, maxAtt
 	return "", lastErr
 }
 
-// jitterBackoff returns d scaled by a random factor in [0.75, 1.25). Exposed
-// at package scope so other reconnect loops (relay, upstream connector) can
-// share the same shape. math/rand/v2 uses a per-goroutine source so
-// concurrent callers do not contend on a global lock.
+// jitterBackoff is a thin wrapper kept for historical callers inside this
+// package (and the existing backoff_test.go). The single source of truth
+// now lives in osutil.JitterBackoff so node/upstream reconnect loops can
+// share the exact same shape without three divergent copies.
 func jitterBackoff(d time.Duration) time.Duration {
-	if d <= 0 {
-		return d
-	}
-	// Float64 returns [0,1); remap to [0.75, 1.25).
-	factor := 0.75 + rand.Float64()*0.5
-	return time.Duration(float64(d) * factor)
+	return osutil.JitterBackoff(d)
 }

@@ -1,3 +1,5 @@
+//go:build linux
+
 package shim
 
 import (
@@ -80,6 +82,10 @@ type Manager struct {
 	// computed once at Manager construction. The process env does not change
 	// at runtime, so recomputing filterShimEnv(os.Environ()) on every spawn
 	// would redo the same O(env × prefixes) scan for no benefit.
+	//
+	// Operational implication: this is a start-time snapshot. Variables
+	// injected later via systemctl set-environment or os.Setenv will NOT
+	// propagate to newly-spawned shims until naozhi itself is restarted.
 	shimEnv []string
 
 	mu           sync.Mutex

@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 	"golang.org/x/time/rate"
 
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/node"
 )
 
@@ -62,6 +63,13 @@ const (
 	// worst-case map growth on long-lived clients that open/close many
 	// session panels between the natural 30s sweep ticks.
 	subGenHighWaterMark = 200
+
+	// wsDropThreshold: If a client drops this many messages cumulatively,
+	// close the connection so the browser side reconnects and resyncs state
+	// via the fresh `subscribe` handshake. 64 = ~ 1 min of 1Hz updates at
+	// worst — well below what a transiently slow client might hit, generous
+	// enough that a permanently-slow client is the only one hitting it.
+	wsDropThreshold = 64
 )
 
 type wsClient struct {
@@ -133,7 +141,7 @@ func (c *wsClient) clearSubGenReleasable(key string) {
 // regardless, to put a hard bound on memory). Returns the number of entries
 // reclaimed, for observability in tests.
 func (c *wsClient) sweepSubGenExpiredLocked(nowNanos int64) int {
-	if c.subGenReleaseAt == nil || len(c.subGenReleaseAt) == 0 {
+	if len(c.subGenReleaseAt) == 0 {
 		return 0
 	}
 	// Throttle: skip the scan if a recent sweep ran, unless the map has
@@ -186,14 +194,30 @@ func (c *wsClient) SendRaw(data []byte) {
 		// the hub mutex when broadcasting to slow clients. Both per-client
 		// and hub-wide counters bump so /health can report totals without
 		// scanning the clients map under RLock.
-		c.dropped.Add(1)
+		n := c.dropped.Add(1)
 		c.hub.droppedTotal.Add(1)
+		// Safety net: a permanently-slow client silently falling arbitrarily
+		// behind is worse than a forced reconnect. Once cumulative drops
+		// cross wsDropThreshold, close the connection so the browser side
+		// reconnects and resyncs state via a fresh subscribe handshake.
+		// closeDone uses sync.Once so concurrent SendRaw calls tripping the
+		// threshold simultaneously all collapse to a single close.
+		if n >= wsDropThreshold {
+			c.doneOnce.Do(func() {
+				slog.Warn("slow client closed; will reconnect",
+					"ip", c.remoteIP, "dropped", n)
+				close(c.done)
+			})
+		}
 	}
 }
 
 func (c *wsClient) readPump() {
 	defer func() {
 		if r := recover(); r != nil {
+			// OBS1: increment panic counter before logging so observers see
+			// the rate even when stack-dump output is truncated.
+			metrics.PanicRecoveredTotal.Add(1)
 			// Log the panic cause at Error so operators are alerted, but
 			// keep the verbose stack trace at Debug — shipping it to
 			// journald / aggregated log stores would broadcast internal
@@ -287,6 +311,22 @@ func (c *wsClient) readPump() {
 				continue
 			}
 			c.SendJSON(node.ServerMsg{Type: "pong"})
+		case "agent_subscribe":
+			if !c.authenticated.Load() {
+				c.SendJSON(node.ServerMsg{Type: "error", Error: "not authenticated"})
+				continue
+			}
+			// Reuse sendLimiter's budget — a client cannot spin subscribe
+			// loops to pin tailers and DoS the 50-tailer cap.
+			if !c.sendLimiter.Allow() {
+				continue
+			}
+			c.hub.handleAgentSubscribe(c, msg)
+		case "agent_unsubscribe":
+			if !c.authenticated.Load() {
+				continue
+			}
+			c.hub.handleAgentUnsubscribe(c, msg)
 		}
 	}
 }

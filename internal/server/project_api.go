@@ -63,6 +63,12 @@ func validateProjectName(name string) error {
 type ProjectHandlers struct {
 	projectMgr *project.Manager
 	router     *session.Router
+	// resolver centralises planner-view opts (docs/rfc/key-resolver.md
+	// §3.1 ResolveForPlannerKey). Used by planner restart to avoid
+	// re-implementing the "no defaults inheritance" contract that
+	// distinguishes administrative planner restarts from chat-view
+	// session spawns. Nil falls back to the legacy inlined merge.
+	resolver   *session.KeyResolver
 	nodeAccess NodeAccessor
 	nodeCache  *node.CacheManager
 	ctxFunc    func() context.Context // returns hub.ctx or Background
@@ -315,21 +321,37 @@ func (h *ProjectHandlers) handlePlannerRestart(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	p := h.projectMgr.Get(name)
-	if p == nil {
-		http.Error(w, "project not found", http.StatusNotFound)
-		return
-	}
-
-	// Reset and spawn a new planner atomically with current config
-	plannerKey := p.PlannerSessionKey()
-	opts := session.AgentOpts{
-		Model:     h.projectMgr.EffectivePlannerModel(p),
-		Workspace: p.Path,
-		Exempt:    true,
-	}
-	if prompt := h.projectMgr.EffectivePlannerPrompt(p); prompt != "" {
-		opts.ExtraArgs = []string{"--append-system-prompt", prompt}
+	// Delegate planner-view opts derivation to Resolver
+	// (ResolveForPlannerKey). This preserves the "do not read defaults"
+	// contract that keeps administrative planner restarts decoupled from
+	// agent defaults (docs/rfc/key-resolver.md §2.2 #6). Legacy fallback
+	// reproduces the original literal-AgentOpts construction for headless
+	// test paths that don't wire a resolver.
+	var plannerKey string
+	var opts session.AgentOpts
+	if h.resolver != nil {
+		key, plannerOpts, ok := h.resolver.ResolveForPlannerKey(name)
+		if !ok {
+			http.Error(w, "project not found", http.StatusNotFound)
+			return
+		}
+		plannerKey = key
+		opts = plannerOpts
+	} else {
+		p := h.projectMgr.Get(name)
+		if p == nil {
+			http.Error(w, "project not found", http.StatusNotFound)
+			return
+		}
+		plannerKey = p.PlannerSessionKey()
+		opts = session.AgentOpts{
+			Model:     h.projectMgr.EffectivePlannerModel(p),
+			Workspace: p.Path,
+			Exempt:    true,
+		}
+		if prompt := h.projectMgr.EffectivePlannerPrompt(p); prompt != "" {
+			opts.ExtraArgs = []string{"--append-system-prompt", prompt}
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(h.ctxFunc(), 30*time.Second)

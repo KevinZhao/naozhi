@@ -64,6 +64,116 @@ type Meta struct {
 	// Owner is the dashboard-auth-derived identifier from uploadOwner().
 	// Used only for internal logs — do not surface to other users.
 	Owner string `json:"owner,omitempty"`
+
+	// ReferencingKeyHashes is the sorted set of session key-hashes
+	// (persist.KeyHash(key)) whose on-disk event log has persisted an
+	// entry carrying this attachment's relative path. Maintained by
+	// the attachment tracker running inside session.Router.
+	//
+	// Semantics for GC (RFC: attachment-refcount §3.3):
+	//
+	//   - A nil / missing slice means this attachment predates the
+	//     refcount RFC. The legacy upload-time TTL alone drives
+	//     cleanup for such files.
+	//
+	//   - A non-empty slice means at least one session's event log
+	//     references this attachment. The file is retained as long
+	//     as the second time-bound (refTTL, anchored on
+	//     LastReferencedAt) has NOT elapsed; an empty slice after
+	//     the tracker has removed every session is treated exactly
+	//     like "no references" and falls back to the legacy upload
+	//     TTL decision.
+	//
+	// Stored as a sorted []string so an operator inspecting the
+	// .meta file with `cat` or `jq` can spot which sessions touched
+	// the attachment without needing an external index.
+	ReferencingKeyHashes []string `json:"referencing_keyhashes,omitempty"`
+
+	// LastReferencedAt records the most recent unix-ms wall-clock
+	// moment at which any session's event log was observed referencing
+	// this attachment. The GC keeps the attachment as long as
+	//
+	//	now.UnixMilli() - LastReferencedAt < refTTL
+	//
+	// even if UploadedAt is well past the primary TTL. A zero / missing
+	// value signals the tracker has never observed the attachment
+	// (legacy or the Meta was written before the refcount RFC landed).
+	LastReferencedAt int64 `json:"last_referenced_at,omitempty"`
+}
+
+// AddReference inserts keyhash into ReferencingKeyHashes keeping the
+// slice sorted + deduplicated. Idempotent: the same keyhash can be
+// bumped repeatedly without growing the list. Returns true if the
+// slice actually changed, which the tracker uses to skip unnecessary
+// .meta rewrites.
+func (m *Meta) AddReference(keyhash string) bool {
+	if keyhash == "" {
+		return false
+	}
+	// Binary search to keep the common "already present" path
+	// alloc-free.
+	lo, hi := 0, len(m.ReferencingKeyHashes)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		switch {
+		case m.ReferencingKeyHashes[mid] < keyhash:
+			lo = mid + 1
+		case m.ReferencingKeyHashes[mid] > keyhash:
+			hi = mid
+		default:
+			return false // already present
+		}
+	}
+	m.ReferencingKeyHashes = append(m.ReferencingKeyHashes, "")
+	copy(m.ReferencingKeyHashes[lo+1:], m.ReferencingKeyHashes[lo:])
+	m.ReferencingKeyHashes[lo] = keyhash
+	return true
+}
+
+// RemoveReference drops keyhash from ReferencingKeyHashes (if
+// present). Returns true when the slice shrank. Paired with
+// AddReference for session-deletion propagation — the tracker walks
+// every referenced attachment and calls this when a session is
+// removed.
+func (m *Meta) RemoveReference(keyhash string) bool {
+	if keyhash == "" {
+		return false
+	}
+	lo, hi := 0, len(m.ReferencingKeyHashes)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		switch {
+		case m.ReferencingKeyHashes[mid] < keyhash:
+			lo = mid + 1
+		case m.ReferencingKeyHashes[mid] > keyhash:
+			hi = mid
+		default:
+			m.ReferencingKeyHashes = append(
+				m.ReferencingKeyHashes[:mid],
+				m.ReferencingKeyHashes[mid+1:]...,
+			)
+			return true
+		}
+	}
+	return false
+}
+
+// HasReference is a tiny helper for readers that need to test for
+// membership without mutating.
+func (m *Meta) HasReference(keyhash string) bool {
+	lo, hi := 0, len(m.ReferencingKeyHashes)
+	for lo < hi {
+		mid := (lo + hi) / 2
+		switch {
+		case m.ReferencingKeyHashes[mid] < keyhash:
+			lo = mid + 1
+		case m.ReferencingKeyHashes[mid] > keyhash:
+			hi = mid
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // Persisted is what Persist returns: enough to build a cli.Attachment with
@@ -192,16 +302,21 @@ func Remove(absPath string) {
 	}
 }
 
-// GC removes attachment date-directories older than ttl under workspace.
-// Returns the number of directories removed. Errors on individual removes
-// are logged but do not abort the sweep — a single permission-denied entry
-// should not leave the rest of the backlog untouched.
+// GC is the legacy day-directory reaper: it drops an entire
+// <workspace>/.naozhi/attachments/<date>/ subtree once the day is
+// more than ttl old. Retained for back-compat with callers that
+// haven't migrated to GCWithRefs; does NOT consult .meta files and
+// therefore cannot honour ReferencingKeyHashes / LastReferencedAt.
 //
-// GC does NOT walk into the date directories. Since naozhi owns the entire
-// Dir subtree, dropping the directory covers both .pdf payloads and .meta
-// sidecars in one syscall. Any unexpected files an operator dropped in
-// by hand will also be removed — that is the documented tradeoff of
-// having naozhi own a subtree.
+// Prefer GCWithRefs for new call sites. This function is kept so
+// naozhi deployments with no event log persistence (EventLogDir "")
+// still have a functional GC path — the tracker never writes meta
+// updates there, so per-file per-ref logic would be equivalent to
+// the legacy code anyway.
+//
+// Errors on individual removes are logged but do not abort the
+// sweep — a single permission-denied entry should not leave the
+// rest of the backlog untouched.
 func GC(workspace string, ttl time.Duration, now time.Time) (int, error) {
 	if workspace == "" {
 		return 0, ErrWorkspaceRequired
@@ -254,6 +369,258 @@ func GC(workspace string, ttl time.Duration, now time.Time) (int, error) {
 		}
 	}
 	return removed, nil
+}
+
+// DefaultRefTTL is the second time-bound applied by GCWithRefs:
+// files referenced by at least one session's event log survive this
+// long past their last observed reference even if UploadedAt is
+// older than uploadTTL. The 30-day default is conservative enough
+// that a user returning to a session after a long gap still sees
+// their images; operators can tighten it via cron job arguments.
+const DefaultRefTTL = 30 * 24 * time.Hour
+
+// GCWithRefs is the refcount-aware reaper (see RFC §3.3). For every
+// image / PDF file under <workspace>/.naozhi/attachments/<date>/
+// it reads the sibling .meta sidecar and keeps the file when:
+//
+//	( now - UploadedAt        <  uploadTTL )
+//	OR
+//	( len(ReferencingKeyHashes) > 0 AND
+//	  now - UnixMilli(LastReferencedAt) < refTTL )
+//
+// Files without a .meta sidecar fall back to the date-directory
+// mtime for the upload-TTL check and are treated as unreferenced —
+// the upload-TTL branch alone decides them. That mirrors legacy GC
+// behaviour for migration.
+//
+// Empty date directories are pruned after the per-file sweep so the
+// top-level directory listing stays tidy.
+//
+// Returns the number of files removed (not the number of records
+// touched). Errors on individual files are logged + skipped so a
+// permission problem on one attachment doesn't stop the sweep.
+//
+// Callers: the attachment-gc cron job in cmd/naozhi/main.go. The
+// tracker (internal/attachment/tracker) runs separately — it only
+// WRITES refcount data, it never deletes.
+func GCWithRefs(workspace string, uploadTTL, refTTL time.Duration, now time.Time) (int, error) {
+	if workspace == "" {
+		return 0, ErrWorkspaceRequired
+	}
+	root := filepath.Join(workspace, Dir)
+	dayEntries, err := os.ReadDir(root)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("read %s: %w", root, err)
+	}
+
+	nowMS := now.UnixMilli()
+	uploadCutoff := now.UTC().Add(-uploadTTL)
+	refCutoffMS := now.Add(-refTTL).UnixMilli()
+
+	removed := 0
+	for _, de := range dayEntries {
+		if !de.IsDir() {
+			continue
+		}
+		// Refuse to follow a symlinked date directory; same reasoning
+		// as the legacy GC.
+		dayPath := filepath.Join(root, de.Name())
+		li, lerr := os.Lstat(dayPath)
+		if lerr != nil || li.Mode()&os.ModeSymlink != 0 || !li.IsDir() {
+			if lerr == nil {
+				slog.Warn("attachment GC: refusing to traverse non-directory",
+					"dir", dayPath, "mode", li.Mode().String())
+			}
+			continue
+		}
+		dayTime, parseErr := time.Parse("2006-01-02", de.Name())
+		if parseErr != nil {
+			// Unknown directory name — operator footprint; leave alone.
+			continue
+		}
+
+		fileEntries, err := os.ReadDir(dayPath)
+		if err != nil {
+			slog.Warn("attachment GC: read day dir failed",
+				"dir", dayPath, "err", err)
+			continue
+		}
+		// First pass: decide per-file keep/delete.
+		kept := 0
+		for _, fe := range fileEntries {
+			if fe.IsDir() {
+				// No nested directories expected; Lstat + skip so a
+				// rogue symlink can't cause an os.Remove to eat
+				// upstream data.
+				continue
+			}
+			name := fe.Name()
+			// Skip .meta sidecars — they follow the payload file's
+			// decision, not their own.
+			if strings.HasSuffix(name, ".meta") {
+				continue
+			}
+			abs := filepath.Join(dayPath, name)
+
+			keep, err := shouldKeepAttachment(abs, dayTime, uploadCutoff, refCutoffMS, nowMS)
+			if err != nil {
+				slog.Warn("attachment GC: keep-decision failed",
+					"path", abs, "err", err)
+				// Err on the side of retaining data; the next sweep
+				// revisits it.
+				kept++
+				continue
+			}
+			if keep {
+				kept++
+				continue
+			}
+			// Remove payload + .meta. Errors only logged.
+			if err := os.Remove(abs); err != nil {
+				slog.Warn("attachment GC: remove payload failed",
+					"path", abs, "err", err)
+				continue
+			}
+			metaPath := metaPathFor(abs)
+			if err := os.Remove(metaPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				slog.Warn("attachment GC: remove meta failed",
+					"path", metaPath, "err", err)
+			}
+			removed++
+		}
+
+		// Prune empty day directories opportunistically. Only when the
+		// day is older than uploadTTL — a freshly uploaded day that
+		// happens to end up empty after GC (unusual) should stay on
+		// disk in case subsequent uploads land there.
+		if kept == 0 && dayTime.Add(24*time.Hour).Before(uploadCutoff) {
+			if err := os.Remove(dayPath); err != nil && !errors.Is(err, fs.ErrNotExist) {
+				slog.Debug("attachment GC: empty day dir remove failed",
+					"dir", dayPath, "err", err)
+			}
+		}
+	}
+	return removed, nil
+}
+
+// shouldKeepAttachment applies the double-TTL rule. See GCWithRefs
+// godoc for the precise formula.
+//
+// Missing .meta: the attachment predates the refcount RFC. We fall
+// back to the date-directory parse time for upload-age (the actual
+// upload time is unrecoverable without the sidecar) and assume no
+// references — same as legacy GC behaviour.
+func shouldKeepAttachment(absPath string, dayTime time.Time, uploadCutoff time.Time, refCutoffMS int64, nowMS int64) (bool, error) {
+	metaPath := metaPathFor(absPath)
+	meta, err := loadMetaFile(metaPath)
+	if err != nil {
+		return false, err
+	}
+
+	// Upload-age decision.
+	uploadOld := false
+	switch {
+	case meta == nil:
+		// Legacy attachment — use dayTime + 24h as the liberal
+		// "uploaded on this day or later" proxy.
+		uploadOld = dayTime.Add(24 * time.Hour).Before(uploadCutoff)
+	default:
+		uploadTime := meta.UploadedAt
+		if uploadTime.IsZero() {
+			// Meta exists but UploadedAt was never populated (should
+			// not happen post-Persist; defensive). Fall back to the
+			// day-parse conservative rule.
+			uploadTime = dayTime.Add(24 * time.Hour)
+		}
+		uploadOld = uploadTime.Before(uploadCutoff)
+	}
+
+	// Refcount decision.
+	hasRefs := meta != nil && len(meta.ReferencingKeyHashes) > 0
+	refRecent := meta != nil && meta.LastReferencedAt > 0 &&
+		meta.LastReferencedAt > refCutoffMS
+
+	// Keep when either bound still holds.
+	if !uploadOld {
+		return true, nil
+	}
+	if hasRefs && refRecent {
+		return true, nil
+	}
+	return false, nil
+}
+
+// loadMetaFile reads + parses a single .meta sidecar. Missing files
+// return (nil, nil) — the caller treats them as legacy attachments.
+// Corrupt JSON returns an error so the caller retains the file
+// (err-on-the-side-of-keep semantics).
+func loadMetaFile(path string) (*Meta, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read meta %s: %w", path, err)
+	}
+	var m Meta
+	if err := json.Unmarshal(data, &m); err != nil {
+		return nil, fmt.Errorf("parse meta %s: %w", path, err)
+	}
+	return &m, nil
+}
+
+// metaPathFor returns the sibling .meta path for an attachment
+// payload file. Matches the layout Persist creates: strips the
+// payload extension and appends ".meta".
+func metaPathFor(absPayload string) string {
+	base := filepath.Base(absPayload)
+	if idx := strings.LastIndex(base, "."); idx > 0 {
+		return filepath.Join(filepath.Dir(absPayload), base[:idx]+".meta")
+	}
+	// Edge case: no extension. Append directly — Persist never
+	// produces this, but the helper should still return a
+	// well-formed path rather than panic.
+	return absPayload + ".meta"
+}
+
+// UpdateMetaFile reads <path>.meta, applies mutate, and writes it
+// back atomically. Used by the tracker to bump LastReferencedAt and
+// the ReferencingKeyHashes set without duplicating the
+// read-modify-write boilerplate.
+//
+// Concurrency: caller owns serialization. In production the tracker's
+// single writer goroutine is the only UpdateMetaFile caller, so no
+// locking is needed here. Tests that exercise concurrent updates
+// must serialise externally.
+//
+// Returns (changed, err) — `changed=false` when mutate reported no
+// change, in which case we skip the write entirely (cheap idempotence
+// guard for the common "already present" case).
+func UpdateMetaFile(metaPath string, mutate func(*Meta) bool) (bool, error) {
+	m, err := loadMetaFile(metaPath)
+	if err != nil {
+		return false, err
+	}
+	if m == nil {
+		// Legacy attachment with no meta; we cannot append references
+		// without inventing upload metadata, so we refuse rather than
+		// write a partial sidecar.
+		return false, fmt.Errorf("meta sidecar missing: %s", metaPath)
+	}
+	if !mutate(m) {
+		return false, nil
+	}
+	buf, err := json.Marshal(m)
+	if err != nil {
+		return false, fmt.Errorf("marshal meta %s: %w", metaPath, err)
+	}
+	if err := osutil.WriteFileAtomic(metaPath, buf, 0o600); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // newID returns a 128-bit random hex string. crypto/rand is the only

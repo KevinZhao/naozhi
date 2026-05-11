@@ -30,6 +30,9 @@ var swJS embed.FS
 //go:embed static/dashboard.js
 var dashboardJS embed.FS
 
+//go:embed static/agent_view.js
+var agentViewJS embed.FS
+
 const authCookieName = "naozhi_auth"
 
 // jsonEncBuf pairs a pooled bytes.Buffer with a json.Encoder bound to it.
@@ -221,6 +224,7 @@ func (s *Server) registerDashboard() {
 		Nodes:            s.nodes,
 		NodesMu:          &s.nodesMu,
 		ProjectMgr:       s.projectMgr,
+		Resolver:         s.resolver,
 		AllowedRoot:      s.allowedRoot,
 		TrustedProxy:     s.auth.trustedProxy,
 		WSAuthLimiter:    s.auth.loginAllow,
@@ -233,6 +237,12 @@ func (s *Server) registerDashboard() {
 	})
 	s.hub.SetScheduler(s.scheduler)
 
+	// Route /api/sessions snapshot enrichment through the hub's tailer
+	// registry now that both exist. RFC v4 agent-team-ui §3.5.4.
+	if s.sessionH != nil {
+		s.sessionH.snapshotEnricher = s.hub.enrichSnapshot
+	}
+
 	// Wire sendH now that hub exists
 	uploads := newUploadStore()
 	uploads.StartCleanup(s.hub.ctx)
@@ -243,6 +253,7 @@ func (s *Server) registerDashboard() {
 		uploadStore:   uploads,
 		uploadLimiter: newIPLimiterWithProxy(rate.Every(6*time.Second), 10, s.auth.trustedProxy), // 10 uploads/min per IP
 		sendLimiter:   newIPLimiterWithProxy(rate.Every(2*time.Second), 30, s.auth.trustedProxy), // 30 sends/min per IP (burst 30)
+		auth:          s.auth,
 		trustedProxy:  s.auth.trustedProxy,
 	}
 
@@ -274,6 +285,8 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /api/cli/backends", auth(s.cliH.handle))
 	s.mux.HandleFunc("GET /api/sessions", auth(s.sessionH.handleList))
 	s.mux.HandleFunc("GET /api/sessions/events", auth(s.sessionH.handleEvents))
+	s.mux.HandleFunc("GET /api/sessions/agent_events", auth(s.agentEventsH.handleAgentEvents))
+	s.mux.HandleFunc("GET /api/sessions/tool_result", auth(s.agentEventsH.handleToolResult))
 	s.mux.HandleFunc("POST /api/sessions/send", auth(s.sendH.handleSend))
 	s.mux.HandleFunc("POST /api/sessions/upload", auth(s.sendH.handleUpload))
 	s.mux.HandleFunc("GET /api/sessions/attachment", auth(s.sendH.handleAttachment))
@@ -322,6 +335,7 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("GET /manifest.json", s.handleManifest)
 	s.mux.HandleFunc("GET /sw.js", s.handleSW)
 	s.mux.HandleFunc("GET /static/dashboard.js", s.handleDashboardJS)
+	s.mux.HandleFunc("GET /static/agent_view.js", s.handleAgentViewJS)
 	s.mux.HandleFunc("GET /ws", s.hub.HandleUpgrade)
 	if s.reverseNodeServer != nil {
 		s.mux.Handle("GET /ws-node", s.reverseNodeServer)
@@ -344,7 +358,13 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// 隐式覆盖（浏览器按页面 scheme 自动选）。显式写 `ws: wss:` 会放宽到
 	// **任何**跨源 WebSocket 端点，为潜在 XSS/XS-Leak 外泄数据留口。
 	w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; connect-src 'self'; style-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; font-src 'self' https://cdn.jsdelivr.net; img-src 'self' data: blob:")
-	w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+	// HSTS is only meaningful over TLS (RFC 6797 §7.2). Sending it on plain
+	// HTTP would still be honoured by browsers and can brick local HTTP
+	// loopback access for a year. Gate on the same isSecure() helper the
+	// auth cookie Secure flag uses, so behaviour is consistent.
+	if s.auth.isSecure(r) {
+		w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+	}
 	w.Header().Set("X-Frame-Options", "DENY")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "same-origin")
@@ -353,6 +373,12 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// but defence in depth — if the CDN is ever compromised, the hostile
 	// replacement still cannot silently invoke getUserMedia etc.
 	w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+	// COOP isolates the dashboard browsing context from cross-origin popups so
+	// `window.opener` leaks (Spectre / XS-Leak) cannot reach naozhi state.
+	// CORP blocks other origins from embedding this HTML via <img>/<script>/
+	// <iframe> no-cors fetches — complements the existing X-Frame-Options.
+	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
+	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("dashboard write", "err", err)
 	}
@@ -401,6 +427,23 @@ func (s *Server) handleDashboardJS(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// handleAgentViewJS serves static/agent_view.js — the RFC v4 agent-team-ui
+// dashboard module. Mirrors handleDashboardJS for caching/CSP headers so
+// the two scripts behave identically in the browser cache.
+func (s *Server) handleAgentViewJS(w http.ResponseWriter, r *http.Request) {
+	data, err := agentViewJS.ReadFile("static/agent_view.js")
+	if err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Content-Type", "application/javascript")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if _, err := w.Write(data); err != nil {
+		slog.Debug("agent_view js write", "err", err)
+	}
+}
+
 // strOrFallback extracts a string from a map, trying the primary key first then the fallback.
 // Used to handle remote nodes that may send Go-default JSON keys (e.g. "Name") instead of
 // tagged lowercase keys (e.g. "name").
@@ -412,8 +455,34 @@ func strOrFallback(m map[string]any, key, fallback string) string {
 	return v
 }
 
-// buildSessionOpts resolves agent config and planner overrides for a session key.
-func buildSessionOpts(key string, agents map[string]session.AgentOpts, projectMgr *project.Manager) session.AgentOpts {
+// buildSessionOpts resolves agent config and planner overrides for a
+// session key. When resolver is non-nil, delegates to ResolveForKey for
+// the planner branch (preserving the "do not read defaults" contract of
+// planner-restart semantics) and for IM-4-segment keys. Falls back to
+// the legacy inlined merge otherwise, e.g. headless/test constructions
+// that wire no resolver.
+//
+// Behaviour parity with the legacy path:
+//   - IM 4-segment key → opts = agents[agentID]; Workspace NOT overlaid
+//     (resume path: workspace comes from sessions.json, not fresh chat)
+//   - planner key + project exists → Resolver's planner-view opts
+//     (Exempt=true + Workspace + Model + --append-system-prompt)
+//   - planner key + project missing → ResolveForKey returns ok=false;
+//     we fall back to legacy "opts.Exempt=true, agent defaults only"
+//     so the session still spawns (planner without project config is a
+//     degenerate but recoverable state — e.g. project deleted between
+//     sessions.json save and dashboard resume)
+func buildSessionOpts(key string, resolver *session.KeyResolver, agents map[string]session.AgentOpts, projectMgr *project.Manager) session.AgentOpts {
+	if resolver != nil {
+		if opts, ok := resolver.ResolveForKey(key); ok {
+			return opts
+		}
+		// ok=false for planner with missing project, or scratch/cron/
+		// malformed keys. Fall through to the legacy inline merge so
+		// we stay lenient — dashboard resume must never fail hard on
+		// a stale key.
+	}
+
 	parts := strings.SplitN(key, ":", 4)
 	agentID := "general"
 	if len(parts) == 4 {

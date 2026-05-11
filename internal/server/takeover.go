@@ -8,6 +8,7 @@ import (
 	"syscall"
 
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -29,7 +30,7 @@ func (s *Server) killAndCleanupClaude(ctx context.Context, pid int, procStartTim
 	if procStartTime != 0 && !verifyProcIdentity(pid, procStartTime) {
 		return fmt.Errorf("process identity changed (PID reused): pid=%d", pid)
 	}
-	if err := syscall.Kill(pid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := osutil.SendTerm(pid); err != nil && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("sigterm pid %d: %w", pid, err)
 	}
 	discovery.WaitAndCleanup(ctx, pid, procStartTime, s.claudeDir, cwd, sessionID)

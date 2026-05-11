@@ -226,6 +226,7 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 		opts.NoOutputTimeout, opts.TotalTimeout,
 	)
 	proc.SetSlogKey(opts.Key)
+	proc.InitLinker(cwd)
 
 	// Protocol init handshake (stream-json: no-op; ACP: initialize + session/new)
 	rw := &JSONRW{
@@ -295,6 +296,11 @@ func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64,
 		noOutputTimeout, totalTimeout,
 	)
 	proc.SetSlogKey(key)
+	// cwd unavailable on the reconnect path — shim owns it in its state file.
+	// Caller (SessionRouter) supplies it via Process.SetCwdForLinker once the
+	// session record is reloaded; until then SubagentLinker.Resolve bails out
+	// with projectDir=="" and the dashboard falls back to the tombstone UX.
+	proc.InitLinker("")
 
 	if handle.Hello.SessionID != "" {
 		proc.SessionID = handle.Hello.SessionID

@@ -15,8 +15,25 @@ import (
 )
 
 // State represents the persistent state of a running shim, stored as JSON.
+//
+// Versioning contract:
+//   - Version (legacy "version" tag) is the hard schema version gate; readers
+//     refuse to load a file whose Version != stateVersion. Historically the
+//     only versioning signal; kept unchanged to preserve binary compatibility
+//     across rolling upgrades.
+//   - SchemaVersion (canonical forward-compat marker) is the advisory schema
+//     version reported on disk. Starts at 1 and increments only on
+//     major-breaking layout changes; additive fields use omitempty without a
+//     bump. Readers that see SchemaVersion > theirMax SHOULD log a warning
+//     and refuse to reconnect — contract documented here, enforcement lands
+//     in a follow-up lane. A zero value on read (omitempty default on older
+//     writers) MUST be interpreted as v1.
 type State struct {
-	Version         int      `json:"version"`
+	Version int `json:"version"`
+	// SchemaVersion is the advisory forward-compat schema marker. See the
+	// struct-level "Versioning contract" godoc above. Omitted when zero;
+	// readers treat absent/zero as v1.
+	SchemaVersion   int      `json:"schema_version,omitempty"`
 	ShimPID         int      `json:"shim_pid"`
 	CLIPID          int      `json:"cli_pid"`
 	Socket          string   `json:"socket"`
@@ -33,6 +50,13 @@ type State struct {
 }
 
 const stateVersion = 1
+
+// maxSupportedSchemaVersion is the largest SchemaVersion this naozhi
+// build knows how to read. A state file claiming a higher version
+// may contain fields / semantics this binary doesn't understand,
+// so Reader REFUSES to parse it rather than silently dropping data.
+// Bump this when the schema grows a new forward-compatible field.
+const maxSupportedSchemaVersion = 1
 
 // WriteStateFile atomically writes the state to path with mode 0600.
 func WriteStateFile(path string, state State) error {
@@ -117,6 +141,9 @@ func ReadStateFile(path string) (State, error) {
 	}
 	if state.Version != stateVersion {
 		return State{}, fmt.Errorf("unsupported state version %d (want %d) in %s", state.Version, stateVersion, path)
+	}
+	if state.SchemaVersion > maxSupportedSchemaVersion {
+		return State{}, fmt.Errorf("shim state schema_version %d > max supported %d (newer naozhi wrote it)", state.SchemaVersion, maxSupportedSchemaVersion)
 	}
 	return state, nil
 }

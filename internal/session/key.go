@@ -78,6 +78,43 @@ func CronKey(id string) string {
 	return CronKeyPrefix + id
 }
 
+// plannerKeyFor is the session-package local replica of
+// internal/project.PlannerKeyFor. Kept unexported because external callers
+// should continue to use the project package's exported API. KeyResolver
+// needs to construct planner keys without importing project (reverse
+// dependency), so we replicate the literal here.
+//
+// Consistency with project.PlannerKeyFor is enforced by double-ended
+// hardcoded assertions: session/routing_test.go asserts
+// plannerKeyFor("foo") == "project:foo:planner" and project_test.go's
+// TestPlannerKeyFor asserts the same literal. A format change must update
+// both.
+func plannerKeyFor(name string) string {
+	return ProjectKeyPrefix + name + ":planner"
+}
+
+// plannerKeySuffix is the fixed suffix after {name} in a planner key.
+const plannerKeySuffix = ":planner"
+
+// isPlannerKey is the session-package local replica of
+// internal/project.IsPlannerKey. Same motivation as plannerKeyFor.
+func isPlannerKey(key string) bool {
+	if !strings.HasPrefix(key, ProjectKeyPrefix) {
+		return false
+	}
+	if !strings.HasSuffix(key, plannerKeySuffix) {
+		return false
+	}
+	// Reject empty-name edge case "project::planner" — mid must be non-empty.
+	return len(key) > len(ProjectKeyPrefix)+len(plannerKeySuffix)
+}
+
+// plannerNameFromKey extracts {name} from "project:{name}:planner". Callers
+// must have verified isPlannerKey(key) first; otherwise behaviour is undefined.
+func plannerNameFromKey(key string) string {
+	return key[len(ProjectKeyPrefix) : len(key)-len(plannerKeySuffix)]
+}
+
 // ValidateSessionKey rejects session keys that contain control bytes, non-UTF-8
 // sequences, or exceed MaxSessionKeyBytes. It mirrors the per-component gate
 // enforced by sanitizeKeyComponent for IM-originated keys — the IM path

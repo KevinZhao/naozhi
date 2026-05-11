@@ -132,6 +132,48 @@ func TestDetectMime_SourceCodeExtensions(t *testing.T) {
 	}
 }
 
+// TestMimeFromExtOnly locks the RNEW-PERF-006 fast-path contract:
+// extension-only paths resolve without open+read, but empty-extension and
+// binary-formats-not-in-table fall back to the sniff path.
+func TestMimeFromExtOnly(t *testing.T) {
+	cases := []struct {
+		name     string
+		path     string
+		wantMime string
+		wantOK   bool
+	}{
+		// Common source extensions: must short-circuit.
+		{"go source", "src/foo.go", "text/x-go", true},
+		{"python", "a.py", "text/x-python", true},
+		{"markdown", "README.md", "text/markdown", true},
+		{"json", "config.json", "application/json", true},
+		{"yaml", "ci.yaml", "application/yaml", true},
+		// .svg is pinned regardless of bytes — must short-circuit to the
+		// safe MIME so serveRaw's XSS gate stays effective.
+		{"svg pinned", "icon.svg", "image/svg+xml", true},
+		// Extensionless files (Dockerfile, Makefile, LICENSE) need basename
+		// lookup in detectMime — must NOT short-circuit here.
+		{"no ext", "Dockerfile", "", false},
+		// Binary formats not in previewableByExt must defer to
+		// http.DetectContentType; short-circuit here would return wrong MIME.
+		{"png not short-circuited", "icon.png", "", false},
+		{"pdf not short-circuited", "doc.pdf", "", false},
+		// Unknown extension — fall through.
+		{"unknown ext", "blob.xyz", "", false},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got, ok := mimeFromExtOnly(tc.path)
+			if got != tc.wantMime || ok != tc.wantOK {
+				t.Errorf("mimeFromExtOnly(%q) = (%q, %v), want (%q, %v)",
+					tc.path, got, ok, tc.wantMime, tc.wantOK)
+			}
+		})
+	}
+}
+
 func TestIsTextMime(t *testing.T) {
 	if !isTextMime("text/plain; charset=utf-8") {
 		t.Error("text/plain should be text")
@@ -688,6 +730,185 @@ func TestHandleFileGet_RawRejectsBinary(t *testing.T) {
 	h.handleFileGet(w, req)
 	if w.Code != http.StatusUnsupportedMediaType {
 		t.Errorf("status = %d, want 415", w.Code)
+	}
+}
+
+// ─── handleFileGet: render (HTML sandboxed preview) ──────────────────────────
+
+// TestHandleFileGet_RenderHTML pins the B1 contract: mode=render on a
+// workspace .html file serves the bytes in a form that CANNOT render inline
+// on direct URL navigation. Critical: Content-Type is application/octet-
+// stream + attachment disposition, NOT text/html. This neuters Firefox's
+// CSP-sandbox top-level-nav gap where the HTTP sandbox directive is ignored
+// — a user pasting the render URL into a new tab always downloads.
+// Rendering happens only via the blob-URL path the dashboard JS constructs
+// client-side, where the iframe sandbox contract is reliable.
+func TestHandleFileGet_RenderHTML(t *testing.T) {
+	h, proj, projDir := newProjectHandlersForTest(t, nil)
+	htmlBytes := []byte(`<!doctype html><html><body><h1>Coverage Report</h1><script>window.top.location='x'</script></body></html>`)
+	if err := os.WriteFile(filepath.Join(projDir, "coverage.html"), htmlBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+proj+"&path=coverage.html&mode=render", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%q)", w.Code, w.Body.String())
+	}
+	// MUST NOT be text/html — direct URL navigation must download, not render.
+	ct := w.Header().Get("Content-Type")
+	if ct != "application/octet-stream" {
+		t.Errorf("Content-Type = %q, want application/octet-stream (defends against Firefox CSP-sandbox-ignored top-level nav)", ct)
+	}
+	cd := w.Header().Get("Content-Disposition")
+	if !strings.HasPrefix(cd, "attachment") {
+		t.Errorf("Content-Disposition = %q, want attachment prefix (ditto — must force download on direct URL hit)", cd)
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "sandbox") || !strings.Contains(csp, "default-src 'none'") {
+		t.Errorf("CSP missing defense-in-depth sandbox/default-src, got %q", csp)
+	}
+	if strings.Contains(csp, "allow-scripts") || strings.Contains(csp, "allow-same-origin") ||
+		strings.Contains(csp, "allow-forms") || strings.Contains(csp, "allow-top-navigation") {
+		t.Errorf("CSP must not grant any sandbox allow-* token, got %q", csp)
+	}
+	if corp := w.Header().Get("Cross-Origin-Resource-Policy"); corp != "same-origin" {
+		t.Errorf("Cross-Origin-Resource-Policy = %q, want same-origin", corp)
+	}
+	if rp := w.Header().Get("Referrer-Policy"); rp != "no-referrer" {
+		t.Errorf("Referrer-Policy = %q, want no-referrer", rp)
+	}
+	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", cc)
+	}
+	if xcto := w.Header().Get("X-Content-Type-Options"); xcto != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", xcto)
+	}
+	// ETag must be absent — Cache-Control: no-store with a validator is
+	// semantically inconsistent, and the blob-URL consumer re-fetches fresh.
+	if et := w.Header().Get("ETag"); et != "" {
+		t.Errorf("ETag = %q, must be absent under Cache-Control: no-store", et)
+	}
+	if !bytes.Equal(w.Body.Bytes(), htmlBytes) {
+		t.Error("body should match input bytes verbatim (server does not rewrite HTML)")
+	}
+}
+
+// TestHandleFileGet_RenderHTMLWithBOM verifies that an HTML file beginning
+// with a UTF-8 BOM still routes through serveRender. http.DetectContentType
+// for `\xef\xbb\xbf<!doctype...` returns "text/plain; charset=utf-8" —
+// without the extension override in detectMime we'd 415 a legitimate file.
+func TestHandleFileGet_RenderHTMLWithBOM(t *testing.T) {
+	h, proj, projDir := newProjectHandlersForTest(t, nil)
+	content := append([]byte{0xef, 0xbb, 0xbf}, []byte(`<!doctype html><html><body>hi</body></html>`)...)
+	if err := os.WriteFile(filepath.Join(projDir, "bom.html"), content, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+proj+"&path=bom.html&mode=render", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("BOM-prefixed .html: status = %d, want 200", w.Code)
+	}
+}
+
+// TestHandleFileGet_RenderRejectsNonHTML locks the MIME whitelist: the
+// render route must refuse anything that isn't literally text/html or
+// application/xhtml+xml. SVG is intentionally rejected here even though
+// it's technically XML — SVG can embed <script> and has its own forced-
+// download path via serveRaw. Every other file type has a dedicated route.
+func TestHandleFileGet_RenderRejectsNonHTML(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		path    string
+		content []byte
+	}{
+		{"plain_text", "notes.txt", []byte("just text")},
+		{"json", "a.json", []byte(`{"a":1}`)},
+		{"svg", "pic.svg", []byte(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`)},
+		{"xml", "doc.xml", []byte(`<?xml version="1.0"?><root/>`)},
+		{"xhtml_nsmatch_xml_ext", "evil.xml", []byte(`<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><script>alert(1)</script></html>`)},
+		{"png", "logo.png", []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			h, proj, projDir := newProjectHandlersForTest(t, nil)
+			if err := os.WriteFile(filepath.Join(projDir, tc.path), tc.content, 0o644); err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(http.MethodGet,
+				"/api/projects/file?project="+proj+"&path="+tc.path+"&mode=render", nil)
+			w := httptest.NewRecorder()
+			h.handleFileGet(w, req)
+			if w.Code != http.StatusUnsupportedMediaType {
+				t.Errorf("status = %d, want 415 (render must be HTML-only)", w.Code)
+			}
+		})
+	}
+}
+
+// TestHandleFileGet_RenderEmptyHTML is a known edge case: a zero-byte
+// .html file is unusual but valid. detectMime falls back to the extension
+// override when the sniff head is empty, so we still route through render
+// and return 200 with an empty body. Documents the actual behavior so a
+// future change to detectMime's empty-head handling flags this test.
+func TestHandleFileGet_RenderEmptyHTML(t *testing.T) {
+	h, proj, projDir := newProjectHandlersForTest(t, nil)
+	if err := os.WriteFile(filepath.Join(projDir, "empty.html"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+proj+"&path=empty.html&mode=render", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+	// 200 is the accepted contract; any other status deserves a look.
+	if w.Code != http.StatusOK {
+		t.Errorf("empty .html: status = %d, want 200", w.Code)
+	}
+}
+
+// TestHandleFileGet_RenderTooLarge mirrors serveRaw's cap. Without it a
+// multi-hundred-MB report could exhaust the dashboard tab's memory when
+// the JS wraps the bytes in a Blob.
+func TestHandleFileGet_RenderTooLarge(t *testing.T) {
+	h, proj, projDir := newProjectHandlersForTest(t, nil)
+	path := filepath.Join(projDir, "huge.html")
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Truncate(int64(maxRawBytes) + 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+proj+"&path=huge.html&mode=render", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+	if w.Code != http.StatusRequestEntityTooLarge {
+		t.Errorf("status = %d, want 413", w.Code)
+	}
+}
+
+// TestHandleFileGet_RenderInvalidMode pins the mode allowlist. Any
+// unrecognised value — including near-misses like "rendr" — must 400 so a
+// silent fall-through from the switch can't expose raw bytes through the
+// wrong headers.
+func TestHandleFileGet_RenderInvalidMode(t *testing.T) {
+	h, proj, _ := newProjectHandlersForTest(t, map[string]string{"a.html": "<p>hi</p>"})
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+proj+"&path=a.html&mode=rendr", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Errorf("status = %d, want 400 for typo'd mode", w.Code)
 	}
 }
 

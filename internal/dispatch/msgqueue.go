@@ -307,6 +307,23 @@ func (q *MessageQueue) Discard(key string) {
 	}
 }
 
+// Cleanup UNCONDITIONALLY deletes the map entry for key — the only public
+// method allowed to break gen-monotonicity. Callers MUST ensure no in-flight
+// owner can arrive on this key afterwards (otherwise a stale owner whose gen
+// equals the from-scratch 0 could drain a newly-enqueued batch). Intended
+// caller: session.Router on user-initiated terminal removal (Reset/Remove),
+// where the preceding Discard already signalled any racing owner to stop.
+// No-op for unknown keys. Also clears the dropNotifyLRU entry for key.
+func (q *MessageQueue) Cleanup(key string) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	delete(q.queues, key)
+	if elem, ok := q.dropNotifyIndex[key]; ok {
+		q.dropNotifyLRU.Remove(elem)
+		delete(q.dropNotifyIndex, key)
+	}
+}
+
 // Depth returns the number of queued messages for key (excludes the active one).
 func (q *MessageQueue) Depth(key string) int {
 	q.mu.Lock()
@@ -392,13 +409,66 @@ func (q *MessageQueue) ShouldSendWait(key string) bool {
 }
 
 // Release implements SessionGuard. Releases ownership without draining.
+// R37-REL1: if messages landed during the busy window (concurrent Enqueue
+// while Dashboard/WS Guard held the session), they would otherwise be stuck
+// until the next Enqueue re-entered the queue. Callers that can process the
+// drained batch should use ReleaseWithDrain instead.
 func (q *MessageQueue) Release(key string) {
+	// Peek depth under the lock so we can warn callers about stranded messages
+	// without changing Release's no-drain contract. Without this log the only
+	// signal is a silent "queue appears to lose messages" user report.
 	q.mu.Lock()
-	defer q.mu.Unlock()
+	depth := 0
+	if sq := q.queues[key]; sq != nil {
+		depth = len(sq.msgs)
+	}
+	q.mu.Unlock()
+	if depth > 0 {
+		// `pending` is a lock-release snapshot — Enqueue callers racing this
+		// unlock can shift the real depth. Accurate enough for "a caller
+		// stranded N+ messages" triage.
+		slog.Warn("msgqueue release with pending messages, use ReleaseWithDrain to avoid strand",
+			"key", key, "pending_snapshot", depth)
+	}
+	q.ReleaseWithDrain(key, nil)
+}
+
+// ReleaseWithDrain is the drain-aware variant of Release. If messages are
+// queued when ownership is released, onDrain is invoked once per message in
+// FIFO order while the internal queue state has already been cleared and the
+// session marked idle — so the callback can safely re-enter Enqueue or
+// otherwise process each message without re-acquiring q.mu re-entrantly.
+//
+// onDrain may be nil; in that case behaviour matches the legacy Release
+// (messages stay in sq.msgs waiting for a future Enqueue owner to sweep
+// them via DoneOrDrain).
+//
+// Callback invocation happens AFTER the queue state is cleared and the lock
+// released, mirroring DoneOrDrain's out-of-lock delivery contract.
+func (q *MessageQueue) ReleaseWithDrain(key string, onDrain func(QueuedMsg)) {
+	q.mu.Lock()
+	var drained []QueuedMsg
 	if sq := q.queues[key]; sq != nil {
 		sq.busy = false
 		if len(sq.msgs) == 0 {
 			delete(q.queues, key)
+		} else if onDrain != nil {
+			// Transfer the queued batch to the caller and clear the internal
+			// slice so a later Enqueue starts fresh. Ownership is released
+			// (busy=false) so the next Enqueue becomes owner; if we kept the
+			// msgs in place, that owner would still receive them via
+			// DoneOrDrain — but nothing guarantees a next Enqueue arrives.
+			// Draining here ensures progress even on a quiet session.
+			drained = sq.msgs
+			sq.msgs = nil
+			// Entry becomes eligible for deletion now that it carries no
+			// queued state; mirroring the empty branch above keeps the map
+			// from accumulating idle sessionQueue instances.
+			delete(q.queues, key)
 		}
+	}
+	q.mu.Unlock()
+	for _, m := range drained {
+		onDrain(m)
 	}
 }

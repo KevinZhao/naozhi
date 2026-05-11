@@ -50,23 +50,30 @@ type Server struct {
 	nodesMu           sync.RWMutex
 	claudeDir         string // path to ~/.claude for session discovery
 	projectMgr        *project.Manager
-	workspaceName     string
-	allowedRoot       string             // /cd is restricted to paths under this directory (used by Hub)
-	nodeCache         *node.CacheManager // background-cached remote node data
-	discoveryCache    *discoveryCache    // background-cached local discovery results
+	// resolver centralises session-key → opts derivation. Constructed
+	// once in buildServer from (agents, project.NewDataSource(projectMgr))
+	// and shared across Dispatcher / Hub / ProjectHandlers. Guaranteed
+	// non-nil in production wiring; tests that bypass buildServer may
+	// leave it unset (callers fall back to legacy inlined merge).
+	resolver       *session.KeyResolver
+	workspaceName  string
+	allowedRoot    string             // /cd is restricted to paths under this directory (used by Hub)
+	nodeCache      *node.CacheManager // background-cached remote node data
+	discoveryCache *discoveryCache    // background-cached local discovery results
 
 	// Extracted handler groups
-	auth        *AuthHandlers
-	cronH       *CronHandlers
-	transcribeH *TranscribeHandler
-	nodeAccess  *nodeAccessor
-	discoveryH  *DiscoveryHandlers
-	projectH    *ProjectHandlers
-	sessionH    *SessionHandlers
-	healthH     *HealthHandler
-	sendH       *SendHandler
-	cliH        *CLIBackendsHandler
-	scratchH    *ScratchHandler
+	auth         *AuthHandlers
+	cronH        *CronHandlers
+	transcribeH  *TranscribeHandler
+	nodeAccess   *nodeAccessor
+	discoveryH   *DiscoveryHandlers
+	projectH     *ProjectHandlers
+	sessionH     *SessionHandlers
+	healthH      *HealthHandler
+	sendH        *SendHandler
+	cliH         *CLIBackendsHandler
+	scratchH     *ScratchHandler
+	agentEventsH *AgentEventsHandlers
 
 	// scratchPool manages ephemeral "aside" sessions backing the dashboard
 	// preview drawer. Separate from router.sessions because scratches must
@@ -425,6 +432,13 @@ func buildServer(opts ServerOptions) *Server {
 
 	cookieSecret := loadOrCreateCookieSecret(opts.StateDir)
 
+	// Construct KeyResolver once and share across dispatcher (wired in
+	// Start), hub, and ProjectHandlers. project.NewDataSource returns
+	// untyped nil when projectMgr is nil so the Resolver correctly
+	// short-circuits the project-binding lookup in that mode.
+	// docs/rfc/key-resolver.md Phase 4.
+	resolver := session.NewKeyResolver(agents, project.NewDataSource(opts.ProjectManager))
+
 	s := &Server{
 		addr:         addr,
 		mux:          http.NewServeMux(),
@@ -450,6 +464,7 @@ func buildServer(opts ServerOptions) *Server {
 		dashboardToken:  opts.DashboardToken,
 		onReady:         opts.OnReady,
 		projectMgr:      opts.ProjectManager,
+		resolver:        resolver,
 		nodes:           nodes,
 		knownNodes:      knownNodes,
 
@@ -471,6 +486,15 @@ func buildServer(opts ServerOptions) *Server {
 			sem:               make(chan struct{}, transcribeSemCap),
 		},
 	}
+
+	// Q1: wire router's terminal-removal hook to msgQueue.Cleanup so the
+	// per-session FIFO map entry is truly deleted when the user resets or
+	// removes a session (/new, dashboard delete). Without this the entry
+	// is retained forever for gen-monotonicity — fine under LRU eviction
+	// (the session might return) but a slow leak when the key is never
+	// reused. Router.Reset and Router.Remove both fire this callback; LRU
+	// evictOldest deliberately does NOT.
+	router.SetOnKeyRetired(s.msgQueue.Cleanup)
 
 	s.nodeAccess = newNodeAccessor(&s.nodesMu, s.nodes, s.knownNodes)
 
@@ -505,6 +529,7 @@ func buildServer(opts ServerOptions) *Server {
 	s.projectH = &ProjectHandlers{
 		projectMgr: opts.ProjectManager,
 		router:     router,
+		resolver:   resolver,
 		nodeAccess: s.nodeAccess,
 		nodeCache:  s.nodeCache,
 		ctxFunc: func() context.Context {
@@ -546,6 +571,10 @@ func buildServer(opts ServerOptions) *Server {
 	}
 	s.sessionH.initStaticStats()
 	s.sessionH.WarmHistoryCache()
+	s.agentEventsH = &AgentEventsHandlers{
+		router:     router,
+		nodeAccess: s.nodeAccess,
+	}
 
 	// Scratch pool (ephemeral aside sessions). Bound to the same router so
 	// scratches flow through the standard spawn/send/event path as managed
@@ -619,6 +648,9 @@ func buildServer(opts ServerOptions) *Server {
 
 // Start registers routes and begins serving.
 func (s *Server) Start(ctx context.Context) error {
+	// Resolver is constructed in buildServer and reused across the
+	// dispatch / hub / project-api surfaces. docs/rfc/key-resolver.md
+	// Phase 4.
 	d := dispatch.NewDispatcher(dispatch.DispatcherConfig{
 		Router:                s.router,
 		Platforms:             s.platforms,
@@ -626,6 +658,7 @@ func (s *Server) Start(ctx context.Context) error {
 		AgentCommands:         s.agentCommands,
 		Scheduler:             s.scheduler,
 		ProjectMgr:            s.projectMgr,
+		Resolver:              s.resolver,
 		Guard:                 s.sessionGuard,
 		Queue:                 s.msgQueue,
 		Dedup:                 s.dedup,

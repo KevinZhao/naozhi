@@ -22,6 +22,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/transcribe"
@@ -212,7 +213,11 @@ func New(cfg Config, transcriber transcribe.Service) *Feishu {
 	f.cleanupWg.Add(1)
 	go func() {
 		defer f.cleanupWg.Done()
-		f.cleanupNonces(ctx)
+		// Pass f.stopCtx by field lookup rather than the local `ctx`
+		// variable so any future refactor that replaces stopCtx (e.g.
+		// swaps in a shutdown-hierarchy ctx) does not leave this
+		// goroutine subscribed to the original, never-cancelled one.
+		f.cleanupNonces(f.stopCtx)
 	}()
 	return f
 }
@@ -285,6 +290,7 @@ func (f *Feishu) cleanupNonces(ctx context.Context) {
 func (f *Feishu) cleanupNoncesTick() {
 	defer func() {
 		if r := recover(); r != nil {
+			metrics.PanicRecoveredTotal.Add(1)
 			slog.Error("feishu: cleanupNonces tick panic recovered; replay protection continues on next tick",
 				"panic", r, "stack", string(debug.Stack()))
 		}
@@ -557,16 +563,26 @@ func (f *Feishu) sendText(ctx context.Context, chatID, text string) (string, err
 // legacy 1.0 shape (bare "elements" array) only supports a restricted subset
 // (bold/italic/links/lists) so Claude-style output rendered as plain text.
 // See: open.feishu.cn/document/feishu-cards/quick-start
+// Static card shape — typed so json.Marshal walks named fields instead of
+// three levels of map[string]any + []any interface boxing on every reply.
+// The shape is fixed per Feishu schema 2.0 spec (one markdown element).
+type feishuMarkdownElement struct {
+	Tag     string `json:"tag"`
+	Content string `json:"content"`
+}
+type feishuCardBody struct {
+	Elements [1]feishuMarkdownElement `json:"elements"`
+}
+type feishuCard struct {
+	Schema string         `json:"schema"`
+	Body   feishuCardBody `json:"body"`
+}
+
 func buildMarkdownCardJSON(text string) ([]byte, error) {
-	card := map[string]any{
-		"schema": "2.0",
-		"body": map[string]any{
-			"elements": []any{
-				map[string]any{
-					"tag":     "markdown",
-					"content": text,
-				},
-			},
+	card := feishuCard{
+		Schema: "2.0",
+		Body: feishuCardBody{
+			Elements: [1]feishuMarkdownElement{{Tag: "markdown", Content: text}},
 		},
 	}
 	// Disable HTML escaping so Claude output containing `<`, `>`, `&`
@@ -597,11 +613,15 @@ func (f *Feishu) sendCard(ctx context.Context, chatID, text string) (string, err
 	if err != nil {
 		return "", fmt.Errorf("marshal card: %w", err)
 	}
-	reqBody, err := json.Marshal(map[string]any{
-		"receive_id": chatID,
-		"msg_type":   "interactive",
-		"content":    string(cardJSON),
-	})
+	// Feishu's send-message endpoint requires `content` to be a stringified
+	// JSON (not a nested object), so json.RawMessage would emit the wrong
+	// shape. But replacing the outer map[string]any with a named struct
+	// still eliminates the 3-entry map + 3 interface{} boxes per reply.
+	reqBody, err := json.Marshal(struct {
+		ReceiveID string `json:"receive_id"`
+		MsgType   string `json:"msg_type"`
+		Content   string `json:"content"`
+	}{ReceiveID: chatID, MsgType: "interactive", Content: string(cardJSON)})
 	if err != nil {
 		return "", fmt.Errorf("marshal request body: %w", err)
 	}
@@ -954,9 +974,9 @@ func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) err
 	if err != nil {
 		return fmt.Errorf("marshal card: %w", err)
 	}
-	reqBody, err := json.Marshal(map[string]string{
-		"content": string(cardJSON),
-	})
+	reqBody, err := json.Marshal(struct {
+		Content string `json:"content"`
+	}{Content: string(cardJSON)})
 	if err != nil {
 		return fmt.Errorf("marshal request body: %w", err)
 	}
@@ -987,9 +1007,11 @@ func (f *Feishu) EditMessage(ctx context.Context, msgID string, text string) err
 		return fmt.Errorf("decode edit response: %w", err)
 	}
 	if result.Code != 0 {
-		// R181-SEC-P2-4: result.Msg sourced from upstream response body; %q
-		// escapes bidi/C1/newline so downstream slog attrs stay parseable.
-		return fmt.Errorf("feishu edit error: code=%d msg=%q", result.Code, result.Msg)
+		// Return the structured APIError so ReplyWithRetry / maybeInvalidateOnTokenError
+		// can inspect Code (errors.As) and react to 99991663/invalid-token the same way
+		// they do for sendText/sendCard. The previous fmt.Errorf string was opaque to
+		// errors.As and caused edit-path token-refresh to silently skip.
+		return &APIError{Code: result.Code, Msg: result.Msg, Op: "edit"}
 	}
 	return nil
 }

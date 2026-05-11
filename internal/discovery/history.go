@@ -16,9 +16,17 @@ import (
 )
 
 // historyLine is the minimal schema for a ~/.claude/projects/.../{sessionId}.jsonl line.
+//
+// UUID is Claude's own record identifier, stable across re-reads of the
+// same file. naozhi adopts it verbatim as EventEntry.UUID so MergedSource
+// can dedup a Claude-JSONL-derived entry against the naozhi-native
+// persisted copy of the same turn. When UUID is absent (rare — some
+// older CLI versions omit it on assistant records), DeriveLegacyUUID
+// produces a stable fallback from (time + summary + detail).
 type historyLine struct {
 	Type      string          `json:"type"`
 	Timestamp string          `json:"timestamp"` // RFC3339
+	UUID      string          `json:"uuid"`
 	Message   json.RawMessage `json:"message"`
 }
 
@@ -252,11 +260,14 @@ func parseJSONL(path string) ([]cli.EventEntry, error) {
 			if text == "" || IsClaudeSystemInjectedText(text) {
 				continue
 			}
+			summary := cli.TruncateRunes(text, 120)
+			detail := cli.TruncateRunes(text, 2000)
 			entries = append(entries, cli.EventEntry{
+				UUID:    uuidFromClaudeLine(hl, ts, "user", summary, detail),
 				Time:    ts,
 				Type:    "user",
-				Summary: cli.TruncateRunes(text, 120),
-				Detail:  cli.TruncateRunes(text, 2000),
+				Summary: summary,
+				Detail:  detail,
 			})
 
 		case "assistant":
@@ -268,7 +279,7 @@ func parseJSONL(path string) ([]cli.EventEntry, error) {
 			if err := json.Unmarshal(msg.Content, &blocks); err != nil {
 				continue
 			}
-			for _, b := range blocks {
+			for idx, b := range blocks {
 				// Only parse text blocks for history display.
 				// tool_use and thinking are always filtered out by the
 				// dashboard (eventHtml / processEventsForDisplay) and
@@ -277,16 +288,106 @@ func parseJSONL(path string) ([]cli.EventEntry, error) {
 				if b.Type != "text" || strings.TrimSpace(b.Text) == "" {
 					continue
 				}
+				summary := cli.TruncateRunes(b.Text, 120)
+				detail := cli.TruncateRunes(b.Text, 16000)
 				entries = append(entries, cli.EventEntry{
+					UUID:    uuidFromClaudeBlock(hl, idx, ts, "text", summary, detail),
 					Time:    ts,
 					Type:    "text",
-					Summary: cli.TruncateRunes(b.Text, 120),
-					Detail:  cli.TruncateRunes(b.Text, 16000),
+					Summary: summary,
+					Detail:  detail,
 				})
 			}
 		}
 	}
 	return entries, scanner.Err()
+}
+
+// uuidFromClaudeLine returns a stable UUID for a single-entry
+// Claude JSONL line (user records today). Prefers Claude's own uuid
+// field; falls back to DeriveLegacyUUID keyed on (time + type +
+// summary + detail) when the line predates uuid or the field is
+// missing.
+//
+// Output shape matches cli.newEventUUID (32 lowercase hex chars):
+// when Claude supplies a dash-separated UUID we strip dashes so
+// both code paths produce the same width (MergedSource compares
+// the string verbatim).
+func uuidFromClaudeLine(hl historyLine, ts int64, typ, summary, detail string) string {
+	if u := normalizeClaudeUUID(hl.UUID); u != "" {
+		return u
+	}
+	return cli.DeriveLegacyUUID(ts, typ, summary, detail)
+}
+
+// uuidFromClaudeBlock handles assistant records whose line-level UUID
+// covers ALL text blocks collectively. When the JSONL line has a
+// uuid, we derive per-block identities by hashing (line UUID +
+// block index) so two text blocks at the same timestamp stay
+// distinguishable. Missing uuid falls back to DeriveLegacyUUID over
+// (ts + block index + summary) — the index keeps distinct blocks in
+// the same line from collapsing.
+func uuidFromClaudeBlock(hl historyLine, blockIndex int, ts int64, typ, summary, detail string) string {
+	if u := normalizeClaudeUUID(hl.UUID); u != "" {
+		// For multi-block assistant lines, first block inherits the
+		// line UUID directly (the common case — 1 text block per
+		// line). Subsequent blocks rehash so they don't collide.
+		if blockIndex == 0 {
+			return u
+		}
+		return cli.DeriveLegacyUUID(ts, typ, u+"#"+intToA(blockIndex), detail)
+	}
+	return cli.DeriveLegacyUUID(ts, typ, summary+"#"+intToA(blockIndex), detail)
+}
+
+// normalizeClaudeUUID strips dashes from a Claude-style UUID so its
+// shape matches cli.newEventUUID's dashless 32-char hex. An empty
+// input returns empty. Non-hex input returns empty so the caller
+// falls back to DeriveLegacyUUID rather than produce a garbage key.
+func normalizeClaudeUUID(u string) string {
+	if u == "" {
+		return ""
+	}
+	var b []byte
+	for i := 0; i < len(u); i++ {
+		c := u[i]
+		if c == '-' {
+			continue
+		}
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
+			return ""
+		}
+		// Lowercase ASCII hex.
+		if c >= 'A' && c <= 'F' {
+			c = c + 32
+		}
+		b = append(b, c)
+	}
+	if len(b) != 32 {
+		return ""
+	}
+	return string(b)
+}
+
+// intToA is a minimal int-to-string without pulling strconv just
+// for the block-index formatter. Values here are small (< 10).
+func intToA(n int) string {
+	if n == 0 {
+		return "0"
+	}
+	var out []byte
+	neg := n < 0
+	if neg {
+		n = -n
+	}
+	for n > 0 {
+		out = append([]byte{byte('0' + n%10)}, out...)
+		n /= 10
+	}
+	if neg {
+		out = append([]byte{'-'}, out...)
+	}
+	return string(out)
 }
 
 // extractText handles content that is either a plain string or []block.

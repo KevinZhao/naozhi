@@ -106,6 +106,14 @@ func TestExpvar_LoopbackAuthenticatedServesJSON(t *testing.T) {
 			t.Errorf("expvar payload missing stdlib var %q", want)
 		}
 	}
+	// R208-OBS1: runtime goroutine gauge must be present and numeric; a
+	// missing key means registerExpvar() did not publish it, a non-number
+	// value means the expvar.Func returned the wrong type.
+	if g, ok := payload["goroutines"]; !ok {
+		t.Errorf("expvar payload missing runtime gauge %q", "goroutines")
+	} else if _, numeric := g.(float64); !numeric {
+		t.Errorf("expvar `goroutines` value is not numeric: %T = %v", g, g)
+	}
 }
 
 func newExpvarTestServer(t *testing.T, token string) *Server {
