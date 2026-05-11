@@ -27,11 +27,20 @@ import (
 func TestOnTurnDoneIdempotencyContract(t *testing.T) {
 	t.Parallel()
 
-	src, err := os.ReadFile("process.go")
+	// Concatenate process.go and process_readloop.go. readLoop was
+	// moved to process_readloop.go in Phase 2 of
+	// docs/rfc/process-split.md; the field + setter godoc still live
+	// in process.go. Scanning both as a single string lets existing
+	// index offsets continue to work.
+	src1, err := os.ReadFile("process.go")
 	if err != nil {
 		t.Fatalf("read process.go: %v", err)
 	}
-	body := string(src)
+	src2, err := os.ReadFile("process_readloop.go")
+	if err != nil {
+		t.Fatalf("read process_readloop.go: %v", err)
+	}
+	body := string(src1) + "\n" + string(src2)
 
 	// The onTurnDone field godoc must mention the idempotency contract.
 	// We deliberately anchor on the exact R-number because that is how the
