@@ -208,7 +208,11 @@ func (d *Dispatcher) handleUrgentCommand(ctx context.Context, msg platform.Incom
 	// Spawn in its own goroutine like regular passthrough sends — sendAndReply
 	// will handle GetOrCreate + reply. The priority field is threaded through
 	// dispatch → SendPassthrough via ctx + the priorityCtxKey extension.
-	go d.sendAndReply(WithUrgent(WithPassthrough(ctx)), key, text, nil, agentID, opts, msg, log, false)
+	// Use context.WithoutCancel so the platform handler returning early does
+	// not cancel the in-flight LLM turn (matches the regular passthrough
+	// path in dispatch.go:319). Values from ctx (logger fields, tracing)
+	// remain available to the spawned goroutine.
+	go d.sendAndReply(WithUrgent(WithPassthrough(context.WithoutCancel(ctx))), key, text, nil, agentID, opts, msg, log, false)
 }
 
 func (d *Dispatcher) handleHelpCommand(ctx context.Context, msg platform.IncomingMessage) {
@@ -646,23 +650,14 @@ var smartQuoteNormalizer = strings.NewReplacer(
 	"\u2019", "\"", // RIGHT SINGLE QUOTATION MARK ’
 )
 
-// maxCronPromptBytes bounds the prompt body accepted via `/cron add` so a single
-// IM message can't stuff megabytes into cron_jobs.json. The limit mirrors the
-// dashboard planner_prompt cap — anything beyond this is almost certainly a
-// cut-paste mistake, and every cron run replays the full prompt through the
-// CLI stdin, so runaway sizes multiply across invocations.
-const maxCronPromptBytes = 8 * 1024
-
-// maxCronIDLen bounds the ID accepted from IM `/cron del|pause|resume <id>`
-// commands. Generated IDs are 8-char hex (see scheduler.generateID); 64 bytes
-// leaves slack for future ID schemes while preventing multi-MB inputs from
-// propagating into log/error allocations on the miss path.
-const maxCronIDLen = 64
-
-// maxCronScheduleBytes caps the schedule expression length. robfig/cron
-// expressions are short (e.g. "@every 30m", "0 9 * * *"); anything beyond
-// 256 bytes is almost certainly abuse. Matches the dashboard preview guard.
-const maxCronScheduleBytes = 256
+// Cron input bounds are shared with the dashboard HTTP path; see
+// internal/cron/limits.go for rationale. Aliased here to avoid renaming
+// every existing call site. R216-CR-1.
+const (
+	maxCronPromptBytes   = cron.MaxPromptBytes
+	maxCronIDLen         = cron.MaxIDLen
+	maxCronScheduleBytes = cron.MaxScheduleBytes
+)
 
 // ParseCronAdd parses the args of /cron add: "schedule" prompt
 func ParseCronAdd(args string) (schedule, prompt string, err error) {

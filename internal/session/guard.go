@@ -74,15 +74,21 @@ func (g *Guard) AcquireTimeout(ctx context.Context, key string, timeout time.Dur
 	localDone := make(chan struct{})
 	defer close(localDone)
 	// Also broadcast on context cancellation to unblock Wait promptly.
-	go func() {
-		select {
-		case <-ctx.Done():
-			g.cond.L.Lock()
-			g.cond.Broadcast()
-			g.cond.L.Unlock()
-		case <-localDone:
-		}
-	}()
+	// Skip the goroutine entirely when ctx is non-cancellable (e.g.
+	// context.Background or a context.WithoutCancel-derived ctx with a
+	// nil Done channel) — receiving from a nil channel blocks forever
+	// and the wakeup arm is structurally unreachable.
+	if ctx.Done() != nil {
+		go func() {
+			select {
+			case <-ctx.Done():
+				g.cond.L.Lock()
+				g.cond.Broadcast()
+				g.cond.L.Unlock()
+			case <-localDone:
+			}
+		}()
+	}
 	g.cond.L.Lock()
 	defer func() {
 		g.cond.L.Unlock()

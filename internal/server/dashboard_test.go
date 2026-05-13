@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/node"
@@ -1016,6 +1017,52 @@ func TestHandleResume_LastPromptC1Sanitized(t *testing.T) {
 
 	if w.Code == http.StatusBadRequest && strings.Contains(w.Body.String(), "invalid control characters") {
 		t.Fatalf("C1 byte should be sanitized, not 400'd: body=%q", w.Body.String())
+	}
+}
+
+// TestSanitizeResumeLastPrompt_RuneSafeTruncation pins R217's rune-boundary
+// truncation: when len(mapped) > maxLen, we must NOT split a multi-byte
+// codepoint mid-sequence, otherwise sessions.json / dashboard surfaces the
+// invalid UTF-8 as a replacement glyph.
+func TestSanitizeResumeLastPrompt_RuneSafeTruncation(t *testing.T) {
+	cases := []struct {
+		name   string
+		in     string
+		maxLen int
+		want   string
+	}{
+		// "你好" (3 bytes each in UTF-8). maxLen=3 should keep one rune,
+		// not "你" + first byte of "好" (which would be invalid UTF-8).
+		{"truncate at first rune boundary", "你好", 3, "你"},
+		// maxLen falls between a rune; rtruncByteLen walks back to the
+		// most recent valid boundary.
+		{"truncate before second rune", "你好", 4, "你"},
+		// ASCII-only: byte == rune, no walkback needed.
+		{"ascii truncate", "abcdef", 3, "abc"},
+		// maxLen large enough to fit the whole string: no truncation.
+		{"no truncation needed", "你好", 10, "你好"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			// Force the sanitize-then-truncate path by including a control
+			// char that strings.Map will replace, ensuring we exit the
+			// `clean` short-circuit. Then strip the inserted control to
+			// get the rune-boundary-truncation result.
+			input := "\x00" + tc.in
+			want := "_" + tc.want
+			// rtruncByteLen returns up to maxLen bytes ending at a rune
+			// boundary; for a sentinel "_" + body the cap is len(want).
+			got := sanitizeResumeLastPrompt(input, len(want))
+			if got != want {
+				t.Errorf("sanitizeResumeLastPrompt(%q, %d) = %q, want %q",
+					input, len(want), got, want)
+			}
+			// Result must be valid UTF-8 even on the truncation branch.
+			if !utf8.ValidString(got) {
+				t.Errorf("result %q is not valid UTF-8", got)
+			}
+		})
 	}
 }
 

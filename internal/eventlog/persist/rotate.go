@@ -215,7 +215,15 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 	if err != nil {
 		return 0, nil, fmt.Errorf("create tmp log: %w", err)
 	}
-	defer dst.Close()
+	// Explicit close so a write-flush failure surfaces before the caller
+	// fsyncs and renames the tmp file. dstClosed guards the deferred
+	// fallback close on the error paths below.
+	dstClosed := false
+	defer func() {
+		if !dstClosed {
+			_ = dst.Close()
+		}
+	}()
 
 	// ----- copy header record verbatim ------------------------
 	headerEntry := idxEntries[0]
@@ -290,6 +298,14 @@ func spliceLog(srcPath, dstPath string, idxEntries []schema.IdxEntry, cutIdx int
 		}
 		dstOff += int64(frameLen)
 	}
+
+	// Explicit Close before the caller fsyncs the path: a deferred close
+	// would silently drop a flush error from the buffered file's kernel
+	// page-cache, leaving the caller to fsync potentially-partial bytes.
+	if cerr := dst.Close(); cerr != nil {
+		return 0, nil, fmt.Errorf("close tmp log: %w", cerr)
+	}
+	dstClosed = true
 
 	return dstOff, newIdx, nil
 }

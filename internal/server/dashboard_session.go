@@ -74,9 +74,26 @@ func sanitizeResumeLastPrompt(s string, maxLen int) string {
 		return r
 	}, s)
 	if maxLen > 0 && len(mapped) > maxLen {
-		mapped = mapped[:maxLen]
+		// Truncate at a rune boundary so we never split a multi-byte UTF-8
+		// codepoint — the result feeds into sessions.json and the dashboard
+		// UI, where invalid UTF-8 surfaces as garbled glyphs.
+		mapped = mapped[:rtruncByteLen(mapped, maxLen)]
 	}
 	return mapped
+}
+
+// rtruncByteLen returns the largest n <= maxBytes such that s[:n] ends on a
+// rune boundary. Assumes s is valid UTF-8 (strings.Map output).
+func rtruncByteLen(s string, maxBytes int) int {
+	if maxBytes <= 0 || maxBytes >= len(s) {
+		return len(s)
+	}
+	for n := maxBytes; n > 0; n-- {
+		if utf8.RuneStart(s[n]) {
+			return n
+		}
+	}
+	return 0
 }
 
 // Note: user-label validation lives in the session package

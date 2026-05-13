@@ -822,8 +822,9 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 	// sessionSend accepted (or reset-processed) the request — files must stay on disk.
-	wsRollback = nil
-	_ = wsRollback // documents the post-accept state
+	// Below this point wsRollback must NOT be invoked: documentation only,
+	// no further branches reference it.
+	_ = wsRollback
 	if reset {
 		// /clear or /new — HTTP path reports "reset"; keep the WS path in sync so
 		// clients can uniformly distinguish reset from accepted/queued turns

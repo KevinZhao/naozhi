@@ -1132,11 +1132,11 @@ func (r *Router) shimManagers() []*shim.Manager {
 
 // ReconnectShims discovers surviving shim processes and reconnects sessions.
 // Called after NewRouter to restore sessions that were active before naozhi restart.
-// Accepts a context so reconcile-loop callers can propagate shutdown cancellation
-// into per-shim timeout contexts; pass context.Background() from startup paths
-// where no shutdown signal is available yet.
+// Uses the router's historyCtx so SIGTERM during startup aborts the per-shim
+// handshakes (15s each) instead of blocking shutdown until every reconnect
+// times out. R216-GO-4.
 func (r *Router) ReconnectShims() {
-	r.reconnectShims(context.Background())
+	r.reconnectShims(r.historyCtx)
 }
 
 // ReconnectShimsCtx is the context-aware variant used by the reconcile loop so

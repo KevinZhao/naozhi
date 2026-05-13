@@ -539,12 +539,19 @@ func (p *Persister) handleOp(o op) {
 // this (via handleOp), so there's no concurrent competition for the
 // recv side.
 func (p *Persister) drainInChannel() {
+	// One Clock+atomic Store after the loop instead of one per batch:
+	// drain may pull dozens of queued batches in a tight burst.
+	// R216-PERF-7.
+	drained := false
 	for {
 		select {
 		case job := <-p.in:
 			p.handleBatch(job)
-			p.lastDrainNS.Store(p.opts.Clock().UnixNano())
+			drained = true
 		default:
+			if drained {
+				p.lastDrainNS.Store(p.opts.Clock().UnixNano())
+			}
 			return
 		}
 	}
@@ -735,7 +742,12 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 	// recovery). Header goes at seq=0.
 	if rec.LogSize == 0 && !rec.HeaderValid {
 		hdr := schema.NewHeader(key, p.opts.Clock().UnixMilli(), p.opts.Generator)
-		body, _ := schema.MarshalRecord(hdr)
+		body, mErr := schema.MarshalRecord(hdr)
+		if mErr != nil {
+			logFile.Close()
+			idxW.Close()
+			return nil, fmt.Errorf("marshal initial header: %w", mErr)
+		}
 		n, err := WriteRecordRaw(logFile, body)
 		if err != nil {
 			logFile.Close()

@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/attachment"
 	"github.com/naozhi/naozhi/internal/cli"
@@ -493,7 +494,8 @@ func sanitizeClientFilename(name string) string {
 	// meta sidecar. 120 runes is plenty for real filenames; longer values
 	// are almost certainly adversarial.
 	const maxFilenameLen = 120
-	if len([]rune(out)) > maxFilenameLen {
+	// Byte short-circuit: a string ≤ 120 bytes cannot exceed 120 runes.
+	if len(out) > maxFilenameLen && utf8.RuneCountInString(out) > maxFilenameLen {
 		runes := []rune(out)
 		out = string(runes[:maxFilenameLen])
 	}

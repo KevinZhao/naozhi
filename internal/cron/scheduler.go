@@ -193,10 +193,13 @@ type Scheduler struct {
 	// jitterMax is the scheduling jitter cap. See SchedulerConfig.JitterMax.
 	// Immutable after NewScheduler returns, so no lock needed.
 	jitterMax time.Duration
-	// startedAt 是 Start() 被调用的时刻。用于 missed-schedule 检测的启动
+	// startedAtNanos 是 Start() 被调用的时刻（UnixNano）。用于 missed-schedule 检测的启动
 	// 抑制窗口——刚启动时所有长间隔 job 都会被算成"错过过"，需要
-	// (now - startedAt) > 5×period 时才算 missed。只读，Start 之后不再改。
-	startedAt time.Time
+	// (now - startedAt) > 5×period 时才算 missed。原本用 time.Time 字段，
+	// Start() 写入和 StartedAt() 读取走两条路径无锁同步；-race 下 dashboard
+	// 启动后立刻 poll StartedAt() 会被探测为竞态。改成 atomic.Int64 (UnixNano)
+	// 后写读都走 atomic Load/Store。R216-GO-3。
+	startedAtNanos atomic.Int64
 	// stopCtx is the scheduler's lifecycle context. Storing context in a
 	// struct is usually an anti-pattern, but here execute() is invoked via
 	// a callback from robfig/cron whose signature has no ctx parameter, so
@@ -411,14 +414,20 @@ func (s *Scheduler) NotifyDefault() NotifyTarget { return s.notifyDefault }
 
 // StartedAt 返回 Scheduler 最近一次 Start() 的时刻。用于 missed-schedule
 // 检测的启动抑制窗口。未 Start 前返回零值。
-func (s *Scheduler) StartedAt() time.Time { return s.startedAt }
+func (s *Scheduler) StartedAt() time.Time {
+	ns := s.startedAtNanos.Load()
+	if ns == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, ns)
+}
 
 // Start loads persisted jobs and starts the cron scheduler.
 func (s *Scheduler) Start() error {
 	// 记录启动时刻，missed-schedule 检测靠它做启动抑制窗口（见
 	// HasMissedSchedule）。写在 loadJobs 之前保证即使 loadJobs 失败 StartedAt
 	// 也不被污染——失败时 Start 提前返回，下次重试会覆盖。
-	s.startedAt = time.Now()
+	s.startedAtNanos.Store(time.Now().UnixNano())
 
 	// loadJobs distinguishes three outcomes: (map, nil) normal, (nil, nil)
 	// corrupt-but-rescued, (nil, error) original file still on disk. In the
