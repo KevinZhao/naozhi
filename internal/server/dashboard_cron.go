@@ -28,23 +28,14 @@ var validNotifyPlatforms = map[string]struct{}{
 
 const maxNotifyChatIDLen = 256
 
-// maxCronPromptBytesDashboard mirrors dispatch.maxCronPromptBytes (8 KiB); the
-// duplicate constant avoids a circular import. Each cron tick replays this
-// prompt into the CLI stdin, so large prompts amplify linearly with run count.
-const maxCronPromptBytesDashboard = 8 * 1024
-
-// maxCronIDLenDashboard bounds cron job IDs arriving via URL query parameters.
-// Mirrors dispatch.maxCronIDLen (64); job IDs are 8-byte hex so anything larger
-// is certainly malformed. Prevents multi-MB id query strings from being echoed
-// into slog attrs on the error path.
-const maxCronIDLenDashboard = 64
-
-// maxCronScheduleBytesDashboard mirrors dispatch.maxCronScheduleBytes (256 B).
-// The 64 KB MaxBytesReader body cap is body-level; a single schedule field can
-// still be 63 KB of garbage and reach robfig/cron's regex parser. handlePreview
-// already enforces the same 256-byte cap — apply it consistently to create +
-// update so both paths treat the parser as a trusted-input boundary.
-const maxCronScheduleBytesDashboard = 256
+// Cron input bounds shared with the IM `/cron` path. Both surfaces feed the
+// same on-disk cron_jobs.json schema, so the limits must stay in lockstep —
+// see internal/cron/limits.go. R216-CR-1.
+const (
+	maxCronPromptBytesDashboard   = cron.MaxPromptBytes
+	maxCronIDLenDashboard         = cron.MaxIDLen
+	maxCronScheduleBytesDashboard = cron.MaxScheduleBytes
+)
 
 // maxCronWorkDirBytesDashboard caps the raw work_dir string before it reaches
 // validateWorkspace. Even absolute paths rarely exceed 1 KiB on Linux
@@ -631,7 +622,7 @@ func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 	// Cap schedule length so the cron parser (regex + split) cannot be DoS'd
 	// with a megabyte-scale query parameter. Real cron expressions are far
 	// below this limit; robfig/cron rejects extremely long descriptors anyway.
-	if len(schedule) > 256 {
+	if len(schedule) > maxCronScheduleBytesDashboard {
 		http.Error(w, "schedule too long", http.StatusBadRequest)
 		return
 	}

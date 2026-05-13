@@ -862,6 +862,13 @@ type replyTracker struct {
 	initialReplyReservation   sync.Once
 	initialReplyReservationOn bool
 
+	// supportsInterim caches platform.SupportsInterimMessages(p) at
+	// construction time. The value is stable for the lifetime of a turn
+	// and the function is called per streaming event in onEvent — caching
+	// removes one interface dispatch per event on busy sessions.
+	// R216-PERF-13.
+	supportsInterim bool
+
 	// askQuestionFired signals that this turn emitted at least one
 	// AskUserQuestion card. Read by sendAndReply to suppress the bailout
 	// text that `claude -p` always produces after auto-rejecting the
@@ -891,17 +898,24 @@ func (t *replyTracker) getThinkingMsgID() string {
 }
 
 func newIMEventTracker(ctx context.Context, p platform.Platform, chatID string) *replyTracker {
+	supportsInterim := platform.SupportsInterimMessages(p)
 	t := &replyTracker{
-		ctx:         ctx,
-		p:           p,
-		chatID:      chatID,
-		statusLines: make([]string, 0, maxStatusLines),
-		msgIDReady:  make(chan struct{}),
-		editCh:      make(chan struct{}, 1),
-		todoWake:    make(chan struct{}, 1),
-		done:        make(chan struct{}),
+		ctx:             ctx,
+		p:               p,
+		chatID:          chatID,
+		msgIDReady:      make(chan struct{}),
+		editCh:          make(chan struct{}, 1),
+		todoWake:        make(chan struct{}, 1),
+		done:            make(chan struct{}),
+		supportsInterim: supportsInterim,
 	}
-	if !platform.SupportsInterimMessages(p) {
+	// statusLines is only ever written when supportsInterim is true (see
+	// onEvent's gate). Skip the per-turn make on platforms (Weixin,
+	// non-edit Discord) that never use it. R216-PERF-19.
+	if supportsInterim {
+		t.statusLines = make([]string, 0, maxStatusLines)
+	}
+	if !supportsInterim {
 		t.sent.Do(func() {
 			close(t.msgIDReady)
 		})
@@ -1104,7 +1118,7 @@ func (t *replyTracker) onEvent(ev cli.Event) {
 		return
 	}
 
-	if !platform.SupportsInterimMessages(t.p) {
+	if !t.supportsInterim {
 		return
 	}
 
