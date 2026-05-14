@@ -22,9 +22,16 @@ import (
 var ErrACPRPC = errors.New("acp rpc error")
 
 // ErrACPTimeout is returned when waitForResponse gives up on a specific
-// JSON-RPC id after the 30s deadline. Callers can treat it as a transient
-// failure (retry next turn) rather than a permanent protocol break.
+// JSON-RPC id after the acpHandshakeTimeout deadline. Callers can treat it
+// as a transient failure (retry next turn) rather than a permanent protocol
+// break.
 var ErrACPTimeout = errors.New("acp response timeout")
+
+// acpHandshakeTimeout caps how long ACP RPC waits for a matching response
+// before surfacing ErrACPTimeout. Distinct from the unrelated 30s
+// shimAuthReadDeadline (shim/server.go) and cronSlowThreshold (cron):
+// keeping them named separately avoids cross-tuning by accident.
+const acpHandshakeTimeout = 30 * time.Second
 
 // ACPProtocol implements Protocol for the Agent Client Protocol (JSON-RPC 2.0).
 type ACPProtocol struct {
@@ -387,7 +394,7 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 		}
 	}()
 
-	timer := time.NewTimer(30 * time.Second)
+	timer := time.NewTimer(acpHandshakeTimeout)
 	defer timer.Stop()
 	select {
 	case r := <-ch:

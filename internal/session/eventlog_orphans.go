@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
@@ -155,7 +154,3 @@ func (r *Router) runOrphanSweep() {
 		}
 	}()
 }
-
-// _ guards the `sync` import so refactors that temporarily remove
-// the one reference below don't have to re-add it.
-var _ sync.Mutex

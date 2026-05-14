@@ -28,6 +28,13 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
+// interruptedSettleWindow caps how long a fresh Send waits for the previous
+// turn's result event to flush after Interrupt() was called. 500 ms balances
+// "long enough that an in-flight result still drains" against "short enough
+// that the new prompt isn't perceptibly delayed". Round-tested across
+// multiple review rounds; change with care and re-run drainStaleEvents tests.
+const interruptedSettleWindow = 500 * time.Millisecond
+
 // findResultSince checks EventLog for a result entry logged after afterMS.
 // Used as fallback when eventCh may have dropped events due to full buffer.
 func (p *Process) findResultSince(afterMS int64) *SendResult {
@@ -75,7 +82,7 @@ func (p *Process) drainStaleEvents(ctx context.Context) error {
 		// expire causing an unnecessary 500ms delay.
 		if wasRunning {
 			slog.Debug("send: draining interrupted turn result")
-			settle := time.NewTimer(500 * time.Millisecond)
+			settle := time.NewTimer(interruptedSettleWindow)
 			defer settle.Stop()
 			for {
 				select {
