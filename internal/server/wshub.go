@@ -34,6 +34,17 @@ import (
 // bound that avoids sending users into another back-to-back 429 loop.
 const wsAuthRetryAfterSeconds = 60
 
+// Pre-encoded WS frames for messages whose body never varies. SendJSON would
+// otherwise reflect-marshal `node.ServerMsg{Type: "auth_ok"}` (and similar)
+// on every authentication or ping reply. Since these are emitted on the auth
+// hot path (one per connection) and the pong path (every keepalive), the
+// pre-encode collapses them to a single shared []byte. R218-PERF-15.
+var (
+	wsAuthOkMsg          = []byte(`{"type":"auth_ok"}`)
+	wsPongMsg            = []byte(`{"type":"pong"}`)
+	wsAuthFailInvalidMsg = []byte(`{"type":"auth_fail","error":"invalid token"}`)
+)
+
 // Hub manages WebSocket client connections and event subscriptions.
 type Hub struct {
 	mu sync.RWMutex
@@ -433,7 +444,7 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 	// do not touch msg.Token or run the ConstantTimeCompare so the
 	// cookie-authed and token-authed paths are cleanly separated.
 	if c.authenticated.Load() {
-		c.SendJSON(node.ServerMsg{Type: "auth_ok"})
+		c.SendRaw(wsAuthOkMsg)
 		return
 	}
 	// Pre-hash both sides to normalize length — subtle.ConstantTimeCompare
@@ -459,9 +470,9 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 			sum := sha256.Sum256([]byte(msg.Token))
 			c.uploadOwner = hex.EncodeToString(sum[:8])
 		}
-		c.SendJSON(node.ServerMsg{Type: "auth_ok"})
+		c.SendRaw(wsAuthOkMsg)
 	} else {
-		c.SendJSON(node.ServerMsg{Type: "auth_fail", Error: "invalid token"})
+		c.SendRaw(wsAuthFailInvalidMsg)
 		// R172-ARCH-D10: also bump the dedicated "invalid-token" split so
 		// operators can distinguish credential spray (this counter rising)
 		// from throttling storms (*RateLimitedTotal rising).
@@ -647,7 +658,16 @@ func (h *Hub) completeSubscribe(c *wsClient, key string, msg node.ClientMsg, ses
 
 	var lastTime int64
 	if len(entries) > 0 {
-		c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries})
+		// Pooled marshal — initial history payloads can be hundreds of KB
+		// (max msg.Limit entries × ~500B-4KB each). SendJSON would otherwise
+		// allocate a fresh buffer per subscribe handshake; eventPushLoop
+		// already uses marshalPooled for the same shape. R218-PERF-14.
+		if data, err := marshalPooled(node.ServerMsg{Type: "history", Key: key, Events: entries}); err == nil {
+			c.SendRaw(data)
+		} else {
+			slog.Warn("history marshal failed, falling back", "err", err, "key", key)
+			c.SendJSON(node.ServerMsg{Type: "history", Key: key, Events: entries})
+		}
 		lastTime = entries[len(entries)-1].Time
 	} else if snap.State == "running" {
 		// Always send an (empty) history for running sessions so the client's

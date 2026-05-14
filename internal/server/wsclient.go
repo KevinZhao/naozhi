@@ -310,7 +310,7 @@ func (c *wsClient) readPump() {
 			if !c.sendLimiter.Allow() {
 				continue
 			}
-			c.SendJSON(node.ServerMsg{Type: "pong"})
+			c.SendRaw(wsPongMsg)
 		case "agent_subscribe":
 			if !c.authenticated.Load() {
 				c.SendJSON(node.ServerMsg{Type: "error", Error: "not authenticated"})

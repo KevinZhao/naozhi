@@ -244,9 +244,25 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		// it through the card_action branch instead of dropping it; on
 		// success the handler synthesises an IncomingMessage whose Text is
 		// the chosen option so the answer flows through the same dispatch
-		// path as a regular chat reply.
+		// path as a regular chat reply. Run on hookSem + f.wg like other
+		// message types so a burst of card clicks cannot exhaust HTTP
+		// server goroutines, and graceful shutdown can wait for in-flight
+		// dispatch. R218-SEC-P1.
 		if eventType == "card.action.trigger" || eventType == "im.card.action.v1_trigger" {
-			f.handleCardActionWebhook(r.Context(), envelope.Event, handler)
+			select {
+			case f.hookSem <- struct{}{}:
+			default:
+				slog.Warn("feishu webhook: handler semaphore full, dropping card action")
+				return
+			}
+			f.wg.Add(1)
+			rawEvent := envelope.Event
+			go func() {
+				defer f.wg.Done()
+				defer func() { <-f.hookSem }()
+				defer platform.RecoverHandler("feishu card_action")
+				f.handleCardActionWebhook(f.stopCtx, rawEvent, handler)
+			}()
 			return
 		}
 		if eventType != "im.message.receive_v1" {

@@ -264,15 +264,20 @@ func Load(path string) (*Config, error) {
 	// Re-check on the open fd: if the path was swapped to a symlink between
 	// Lstat and OpenFile, Fstat sees the resolved target's mode. We cannot
 	// detect the symlink swap directly via Fstat, but a 0644 swap-target
-	// would trip the same world-readable gate.
-	if fi, ferr := f.Stat(); ferr == nil {
-		if !fi.Mode().IsRegular() {
-			return nil, fmt.Errorf("config file %s is not a regular file", path)
-		}
-		if fi.Mode()&0o044 != 0 {
-			return nil, fmt.Errorf("config file %s is group/world-readable (mode %04o); restrict with: chmod 0600 %s",
-				path, fi.Mode().Perm(), path)
-		}
+	// would trip the same world-readable gate. Treat fd-stat failure as
+	// fatal — silently skipping the regular-file / mode gates would let an
+	// attacker who can interrupt Fstat (signal storm, deliberate EBADF race)
+	// bypass the second permission check.
+	fi, ferr := f.Stat()
+	if ferr != nil {
+		return nil, fmt.Errorf("stat config fd: %w", ferr)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("config file %s is not a regular file", path)
+	}
+	if fi.Mode()&0o044 != 0 {
+		return nil, fmt.Errorf("config file %s is group/world-readable (mode %04o); restrict with: chmod 0600 %s",
+			path, fi.Mode().Perm(), path)
 	}
 	data, err := io.ReadAll(f)
 	if err != nil {

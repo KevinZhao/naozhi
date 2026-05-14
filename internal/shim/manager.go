@@ -1,5 +1,3 @@
-//go:build linux
-
 package shim
 
 import (
@@ -15,7 +13,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -23,7 +20,6 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/metrics"
-	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // validateKeyForShim rejects keys that would leak control bytes into the
@@ -461,16 +457,16 @@ func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*Sh
 		return nil, fmt.Errorf("shim PID %d not alive: %w", state.ShimPID, err)
 	}
 
-	// Validate shim binary identity via /proc/pid/exe (Linux only).
-	// After a rebuild, the old binary shows "(deleted)" suffix — strip it.
-	if exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", state.ShimPID)); err == nil {
-		cleanPath := strings.TrimSuffix(exePath, " (deleted)")
-		if cleanPath != m.naozhiBin {
-			syscall.Kill(state.ShimPID, syscall.SIGUSR2) //nolint:errcheck
-			RemoveStateFile(stateFile)
-			return nil, fmt.Errorf("shim PID %d binary mismatch: got %s, want %s", state.ShimPID, exePath, m.naozhiBin)
-		}
-	} else {
+	// Validate shim binary identity. On Linux this reads /proc/PID/exe;
+	// on Darwin it falls back to ps -o comm= (a weaker check — no path,
+	// just program basename — but still detects PID reuse by an unrelated
+	// process). After a rebuild, Linux marks the old binary as "(deleted)"
+	// in /proc/PID/exe; the linux helper strips that suffix.
+	if mismatch, err := shimPIDBinaryMismatch(state.ShimPID, m.naozhiBin); err == nil && mismatch {
+		syscall.Kill(state.ShimPID, syscall.SIGUSR2) //nolint:errcheck
+		RemoveStateFile(stateFile)
+		return nil, fmt.Errorf("shim PID %d binary mismatch", state.ShimPID)
+	} else if err != nil {
 		slog.Warn("binary identity check skipped", "pid", state.ShimPID, "err", err)
 	}
 
@@ -624,24 +620,24 @@ func (m *Manager) ForceCleanupZombie(state State) {
 	}
 }
 
-// isOurShimPID returns true when the process at pid is still running AND its
-// /proc/PID/exe points at the naozhi binary we launched from (modulo the
-// "(deleted)" suffix Linux adds after a rebuild). Mirrors the Discover-time
-// binary-identity check so anyone considering signalling a PID learned
-// from a state file runs the same safety gate.
+// isOurShimPID returns true when the process at pid is still running AND
+// its binary identity matches the naozhi binary we launched from. The
+// underlying check is platform-specific: Linux reads /proc/PID/exe (modulo
+// the "(deleted)" suffix added after a rebuild), Darwin falls back to
+// ps -o comm=. Mirrors the Discover-time gate so anyone considering
+// signalling a PID learned from a state file runs the same safety check.
 func (m *Manager) isOurShimPID(pid int) bool {
 	if syscall.Kill(pid, 0) != nil {
 		return false
 	}
-	exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+	mismatch, err := shimPIDBinaryMismatch(pid, m.naozhiBin)
 	if err != nil {
-		// On platforms without /proc (not currently supported, but keep
-		// the call safe) we cannot confirm identity. Err on the side of
-		// NOT signalling unknown PIDs — the state-file cleanup alone is
-		// enough to exit the ENOENT loop.
+		// Unable to confirm identity — err on the side of NOT signalling
+		// unknown PIDs. The state-file cleanup alone is enough to exit
+		// the ENOENT loop.
 		return false
 	}
-	return strings.TrimSuffix(exePath, " (deleted)") == m.naozhiBin
+	return !mismatch
 }
 
 // Discover scans the state directory for existing shim state files.
@@ -684,17 +680,16 @@ func (m *Manager) Discover() ([]State, error) {
 			RemoveStateFile(path)
 			continue
 		}
-		// Validate binary identity to detect PID reuse.
-		// After a rebuild, Linux marks the old binary as "(deleted)" in /proc/pid/exe
-		// (e.g. "/path/to/naozhi (deleted)"). Strip the suffix so that upgraded shims
-		// are still recognized as ours.
-		if exePath, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", state.ShimPID)); err == nil {
-			cleanPath := strings.TrimSuffix(exePath, " (deleted)")
-			if cleanPath != m.naozhiBin {
-				slog.Info("removing stale shim state file (binary mismatch)", "path", path, "pid", state.ShimPID, "exe", exePath)
-				RemoveStateFile(path)
-				continue
-			}
+		// Validate binary identity to detect PID reuse. Implementation is
+		// platform-specific (see shimPIDBinaryMismatch) — Linux reads
+		// /proc/PID/exe, Darwin falls back to ps -o comm=. After a rebuild
+		// Linux marks the old binary as "(deleted)" in /proc/PID/exe; the
+		// linux helper strips that suffix so upgraded shims are still
+		// recognized as ours.
+		if mismatch, ierr := shimPIDBinaryMismatch(state.ShimPID, m.naozhiBin); ierr == nil && mismatch {
+			slog.Info("removing stale shim state file (binary mismatch)", "path", path, "pid", state.ShimPID)
+			RemoveStateFile(path)
+			continue
 		}
 		// PID alive + binary matches, but is the socket still reachable?
 		// "Live shim + missing socket" is the zombie signature: the process
@@ -876,101 +871,19 @@ func (m *Manager) DetachAll() {
 	wg.Wait()
 }
 
-// cgroupProcsPath is the fixed fallback cgroup file naozhi writes to via
-// `sudo tee` when busctl is unavailable. Exposed as a package-level const
-// so the sudoers policy contract test can assert the exact string and
-// deploy/naozhi-sudoers.example stays synced.
-const cgroupProcsPath = "/sys/fs/cgroup/naozhi-shims/cgroup.procs"
-
-// buildBusctlArgs constructs the argv tail passed to `sudo` for the
-// StartTransientUnit D-Bus call that adopts shim/CLI PIDs into an
-// independent systemd scope. Split out from moveToShimsCgroup so the
-// exact argv shape can be pinned by a unit test — the
-// deploy/naozhi-sudoers.example policy depends on these literals not
-// drifting (see docs/ops/sudoers-hardening.md). The returned slice
-// starts with the "-n" non-interactive flag and the "busctl" command
-// name; moveToShimsCgroup prepends "sudo" via exec.CommandContext.
+// moveToShimsCgroup moves shim and CLI processes to a dedicated lifecycle
+// boundary so they survive a naozhi service restart. The implementation is
+// platform-specific:
+//   - Linux: uses busctl to register a transient systemd scope with
+//     KillMode=none, falling back to direct cgroup write if busctl is
+//     unavailable. See manager_linux.go.
+//   - Darwin: no-op. launchd's default kill semantics only target the
+//     plist's main process, so a child started with Setsid: true is
+//     automatically reparented to launchd (PID 1) and survives restart
+//     without any external lifecycle moves. See manager_darwin.go.
 //
-// scopeName must already be the final "naozhi-shim-<PID>.scope" form.
-// pids is expected to be len 1 (shim only) or 2 (shim + cli). Other
-// lengths are permitted but are not covered by the shipped sudoers
-// policy — callers that change the expected range must update both
-// this function's contract test and the Cmnd_Alias set in the policy.
-func buildBusctlArgs(scopeName string, pids []int) []string {
-	args := []string{"-n", "busctl", "call",
-		"org.freedesktop.systemd1",
-		"/org/freedesktop/systemd1",
-		"org.freedesktop.systemd1.Manager",
-		"StartTransientUnit",
-		"ssa(sv)a(sa(sv))",
-		scopeName, "fail", "2",
-		"PIDs", "au", strconv.Itoa(len(pids)),
-	}
-	for _, p := range pids {
-		args = append(args, strconv.Itoa(p))
-	}
-	args = append(args, "KillMode", "s", "none", "0")
-	return args
-}
-
-// moveToShimsCgroup moves shim and CLI processes to an independent systemd
-// scope so they survive service restarts. Uses busctl to call StartTransientUnit
-// directly with KillMode=none, making the processes invisible to the
-// naozhi.service lifecycle. Falls back to direct cgroup move if
-// busctl is not available.
-func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int) {
-	scopeName := fmt.Sprintf("naozhi-shim-%d.scope", shimPID)
-
-	// Build PID list for the scope
-	pids := []int{shimPID}
-	if cliPID > 0 {
-		pids = append(pids, cliPID)
-	}
-
-	// Use busctl to create a transient scope adopting the shim PIDs.
-	// This registers them as an independent systemd unit.
-	args := buildBusctlArgs(scopeName, pids)
-
-	ctx, cancel := context.WithTimeout(parentCtx, 3*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "sudo", args...)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		// Sanitize + truncate busctl's combined stdout+stderr: D-Bus
-		// diagnostics can carry bidi / C1 control bytes that would
-		// otherwise corrupt journalctl rendering. 512 bytes matches the
-		// existing truncation budget and aligns with R183-SEC-H1 /
-		// R190-SEC-M3 precedent elsewhere in this codebase.
-		sanitized := osutil.SanitizeForLog(string(out), 512)
-		slog.Warn("moveToShimsCgroup: systemd scope failed, trying direct cgroup — zero-downtime restart may not survive service restart",
-			"pid", shimPID, "err", err, "output", sanitized)
-		moveToShimsCgroupDirect(parentCtx, shimPID)
-		if cliPID > 0 {
-			moveToShimsCgroupDirect(parentCtx, cliPID)
-		}
-		return
-	}
-	slog.Info("moved shim to independent systemd scope", "scope", scopeName, "pids", pids)
-}
-
-// moveToShimsCgroupDirect is the fallback: move a process to a root-level
-// cgroup directly. Less reliable than systemd scope (systemd may still
-// clean it up during restart).
-func moveToShimsCgroupDirect(parentCtx context.Context, pid int) {
-	// The procs path is pinned as a package-level const so the sudoers
-	// policy contract test can diff it against the shipped
-	// deploy/naozhi-sudoers.example literal; drifting one without the
-	// other would silently start rejecting the fallback tee at runtime.
-	ctx, cancel := context.WithTimeout(parentCtx, 3*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "sudo", "-n", "tee", cgroupProcsPath)
-	cmd.Stdin = strings.NewReader(strconv.Itoa(pid) + "\n")
-	cmd.Stdout = nil // tee copies to stdout; inherit parent (journal) is fine
-	if err := cmd.Run(); err != nil {
-		slog.Warn("moveToShimsCgroupDirect: failed — shim may not survive service restart", "pid", pid, "err", err)
-		return
-	}
-	slog.Info("moved shim to independent cgroup (direct)", "pid", pid)
-}
+// The package-level wrapper here delegates to the platform helper so the
+// StartShimWithBackend hot path stays platform-agnostic.
 
 // Remove removes a shim handle from the manager's tracking.
 func (m *Manager) Remove(key string) {
@@ -998,8 +911,16 @@ var shimEnvAllowedPrefixes = []string{
 	// Claude CLI / Anthropic
 	"ANTHROPIC_", "CLAUDE_",
 
-	// AWS (Bedrock auth)
-	"AWS_",
+	// AWS (Bedrock auth) — explicit list of variables required by the AWS
+	// SDK to authenticate Bedrock. Avoid the wildcard "AWS_" prefix because
+	// it would forward unrelated AWS_* variables (e.g. AWS_MFA_TOKEN, custom
+	// admin profiles, AWS_SHARED_CREDENTIALS_FILE pointing at high-privilege
+	// files) into the CLI subprocess where the Bash tool can read them.
+	"AWS_REGION=", "AWS_DEFAULT_REGION=",
+	"AWS_ACCESS_KEY_ID=", "AWS_SECRET_ACCESS_KEY=", "AWS_SESSION_TOKEN=",
+	"AWS_PROFILE=", "AWS_SHARED_CREDENTIALS_FILE=", "AWS_CONFIG_FILE=",
+	"AWS_ROLE_ARN=", "AWS_WEB_IDENTITY_TOKEN_FILE=",
+	"AWS_ENDPOINT_URL=", "AWS_BEDROCK_ENDPOINT=",
 
 	// Git (SSH, config)
 	"SSH_AUTH_SOCK=", "GIT_",
@@ -1016,7 +937,10 @@ var shimEnvAllowedPrefixes = []string{
 	//   - PYTHONINSPECT (drops into REPL after script)
 	"GOPATH=", "GOROOT=", "GOBIN=",
 	"CARGO_HOME=", "RUSTUP_HOME=",
-	"NVM_DIR=", "NODE_ENV=", "NODE_PATH=", "NPM_",
+	// NODE_PATH excluded: when pointed at an attacker-writable directory,
+	// `require()` resolution from any Node.js subprocess (Claude CLI is
+	// itself Node.js) loads code from that directory ahead of system paths.
+	"NVM_DIR=", "NODE_ENV=", "NPM_",
 	"PYTHONPATH=", "PYTHONHOME=", "PYTHONDONTWRITEBYTECODE=", "PYTHONUNBUFFERED=",
 	"VIRTUAL_ENV=", "CONDA_",
 	"JAVA_HOME=",

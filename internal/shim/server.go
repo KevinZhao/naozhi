@@ -1,5 +1,3 @@
-//go:build linux
-
 package shim
 
 import (
@@ -412,7 +410,11 @@ func (s *shimServer) watchSocketFile(socketPath string, interval time.Duration) 
 		case <-s.done:
 			return
 		case <-t.C:
-			if _, err := os.Stat(socketPath); err != nil {
+			// Lstat (not Stat) so a symlink swap pointing at a still-existing
+			// path cannot keep this watcher alive past the real socket's
+			// removal — Stat follows symlinks and would happily report success
+			// on the swap target. R218-SEC-12.
+			if _, err := os.Lstat(socketPath); err != nil {
 				// Only self-terminate on confirmed ENOENT — transient errors
 				// like EACCES (SELinux relabel mid-deploy), ESTALE (NFS), or
 				// EINTR would otherwise take down a healthy shim on the next

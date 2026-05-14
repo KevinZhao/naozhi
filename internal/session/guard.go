@@ -29,12 +29,18 @@ func (g *Guard) TryAcquire(key string) bool {
 	return !loaded
 }
 
+// waitReplyDedupeWindow caps how often the dispatcher will reply with a
+// "please wait" notice for the same session key. Bursts of user messages
+// while the CLI is still processing one turn would otherwise spam the IM
+// channel; the window collapses N rapid attempts into a single notice.
+const waitReplyDedupeWindow = 3 * time.Second
+
 // ShouldSendWait returns true if enough time has passed since the last
 // "please wait" reply for this key (avoids spamming the user).
 func (g *Guard) ShouldSendWait(key string) bool {
 	g.waitMu.Lock()
 	defer g.waitMu.Unlock()
-	if time.Since(g.lastWait[key]) < 3*time.Second {
+	if time.Since(g.lastWait[key]) < waitReplyDedupeWindow {
 		return false
 	}
 	g.lastWait[key] = time.Now()

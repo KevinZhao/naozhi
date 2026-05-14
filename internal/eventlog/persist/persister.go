@@ -725,6 +725,14 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 		return nil, fmt.Errorf("open idx %s: %w", idxPath, err)
 	}
 
+	// Pre-cap pendingIdx so the typical batch fills without triggering
+	// nil→1→2→4→… grow churn. IdxStride drives the steady-state fill
+	// (one append per IdxStride events), so 2*IdxStride covers two
+	// stride windows comfortably. R218-PERF-8.
+	pendingCap := 16
+	if p.opts.IdxStride > 1 {
+		pendingCap = p.opts.IdxStride * 2
+	}
 	w := &perKeyWriter{
 		key:          key,
 		stem:         stem,
@@ -735,6 +743,7 @@ func (p *Persister) writerFor(key, stem string) (*perKeyWriter, error) {
 		idxPath:      idxPath,
 		nextSeq:      rec.NextSeq,
 		bytes:        rec.LogSize,
+		pendingIdx:   make([]schema.IdxEntry, 0, pendingCap),
 		lastActivity: p.opts.Clock(),
 	}
 
@@ -796,6 +805,7 @@ type perKeyWriter struct {
 	nextSeq              uint64
 	bytes                int64
 	pendingIdx           []schema.IdxEntry // buffered until fsync time
+	idxScratch           []schema.IdxEntry // selectForIdx scratch, reused across flushes
 	entriesSinceIdxWrite int
 
 	dirty        bool
@@ -832,7 +842,15 @@ func (w *perKeyWriter) flush(p *Persister) error {
 		// plus header (seq=0) and the last entry of the batch (so
 		// recovery can always find a safe edge near EOF). Dropping
 		// middle entries is the reason idx is sparse.
-		kept := selectForIdx(w.pendingIdx, p.opts.IdxStride, w.entriesSinceIdxWrite)
+		kept := selectForIdx(w.pendingIdx, p.opts.IdxStride, w.entriesSinceIdxWrite, w.idxScratch[:0])
+		// Only retain `kept` as the persistent scratch when stride > 1 — in
+		// the stride<=1 fast path selectForIdx returns `pending` itself, and
+		// aliasing it into idxScratch would let the next flush share the
+		// backing array with pendingIdx (pendingIdx[:0] keeps the same
+		// array). On reuse, append into both slices would corrupt the idx.
+		if p.opts.IdxStride > 1 {
+			w.idxScratch = kept
+		}
 		if err := w.idxWriter.AppendBatch(kept); err != nil {
 			return fmt.Errorf("append idx batch: %w", err)
 		}
@@ -890,14 +908,25 @@ func (w *perKeyWriter) close() error {
 // keep the last entry in the batch. Keeping the last entry means
 // recovery can locate the nearest safe edge within stride-1 bytes of
 // EOF rather than up to stride records back.
-func selectForIdx(pending []schema.IdxEntry, stride, cursor int) []schema.IdxEntry {
+//
+// `scratch` is a caller-owned slice (typically perKeyWriter.idxScratch[:0])
+// that is reused across flushes to avoid a per-flush heap allocation. When
+// `stride <= 1` the function returns `pending` directly without touching
+// scratch. R218-PERF-7.
+func selectForIdx(pending []schema.IdxEntry, stride, cursor int, scratch []schema.IdxEntry) []schema.IdxEntry {
 	if stride <= 1 {
 		return pending
 	}
 	if len(pending) == 0 {
 		return nil
 	}
-	kept := make([]schema.IdxEntry, 0, len(pending)/stride+2)
+	estCap := len(pending)/stride + 2
+	var kept []schema.IdxEntry
+	if cap(scratch) >= estCap {
+		kept = scratch[:0]
+	} else {
+		kept = make([]schema.IdxEntry, 0, estCap)
+	}
 	for i, e := range pending {
 		// Header (seq=0) is always kept.
 		if e.Seq == 0 {

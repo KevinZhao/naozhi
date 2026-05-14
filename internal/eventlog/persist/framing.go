@@ -207,13 +207,18 @@ func ReadFramedBody(br *bufio.Reader) ([]byte, int, error) {
 	if len(digits) == 0 || len(digits) > maxLengthDigits {
 		return nil, 0, ErrMalformedFrame
 	}
+	// Inline byte-level decimal parse — strconv.Atoi(string(digits)) used to
+	// force a bytes→string heap copy on every frame, and the recovery path
+	// reads thousands of frames at startup. R218-PERF-10. The digit-range
+	// check below collapses the validation loop into the parse.
+	n := 0
 	for _, b := range digits {
 		if b < '0' || b > '9' {
 			return nil, 0, ErrMalformedFrame
 		}
+		n = n*10 + int(b-'0')
 	}
-	n, err := strconv.Atoi(string(digits))
-	if err != nil || n <= 0 {
+	if n <= 0 {
 		return nil, 0, ErrMalformedFrame
 	}
 	if n > schema.MaxRecordBytes {

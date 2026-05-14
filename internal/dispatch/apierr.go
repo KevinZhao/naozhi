@@ -5,11 +5,13 @@ import (
 	"strings"
 )
 
-// envelopePrefixMaxLen is the maximum number of leading bytes we lowercase to
-// test whether a result string looks like an API-error envelope. Keeping this
-// small avoids an O(N) copy on every normal assistant reply (which may be tens
-// of KB) just to discover the text is not an error.
-const envelopePrefixMaxLen = 64
+// envelopePrefixScanBytes bounds how many leading bytes we lowercase when
+// probing whether a result string looks like an API-error envelope. Naming
+// reflects the actual purpose ("how many bytes do we scan") rather than
+// suggesting it caps the envelope itself. Keeping the scan small avoids an
+// O(N) copy on every normal assistant reply (tens of KB) just to discover
+// the text is not an error.
+const envelopePrefixScanBytes = 64
 
 // localizeAPIError rewrites common Claude / Anthropic API error strings that
 // surface verbatim in the CLI result into friendlier Chinese guidance for IM
@@ -35,8 +37,8 @@ func localizeAPIError(text string) string {
 	// assistant replies can be tens of KB; a full ToLower on every reply
 	// just to test HasPrefix is a wasteful allocation on the IM hot path.
 	prefix := trimmed
-	if len(prefix) > envelopePrefixMaxLen {
-		prefix = prefix[:envelopePrefixMaxLen]
+	if len(prefix) > envelopePrefixScanBytes {
+		prefix = prefix[:envelopePrefixScanBytes]
 	}
 	lowerPrefix := strings.ToLower(prefix)
 	isEnvelope := strings.HasPrefix(lowerPrefix, "api error") ||

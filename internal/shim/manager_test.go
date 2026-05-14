@@ -518,7 +518,11 @@ func TestFilterShimEnv_AllowsExpectedPrefixes(t *testing.T) {
 		{"ANTHROPIC_API_KEY=sk-abc", true},
 		{"CLAUDE_MODEL=claude-opus", true},
 		{"AWS_REGION=us-east-1", true},
+		{"AWS_DEFAULT_REGION=us-east-1", true},
 		{"AWS_ACCESS_KEY_ID=AKIA...", true},
+		{"AWS_SECRET_ACCESS_KEY=...", true},
+		{"AWS_SESSION_TOKEN=...", true},
+		{"AWS_PROFILE=default", true},
 		{"SSH_AUTH_SOCK=/tmp/ssh.sock", true},
 		{"GIT_AUTHOR_NAME=Alice", true},
 		{"GOPATH=/home/user/go", true},
@@ -528,7 +532,6 @@ func TestFilterShimEnv_AllowsExpectedPrefixes(t *testing.T) {
 		{"RUSTUP_HOME=/home/user/.rustup", true},
 		{"NVM_DIR=/home/user/.nvm", true},
 		{"NODE_ENV=production", true},
-		{"NODE_PATH=/usr/lib/node_modules", true},
 		{"NPM_TOKEN=abc", true},
 		{"PYTHONPATH=/usr/lib/python3", true},
 		{"PYTHONHOME=/usr", true},
@@ -551,11 +554,17 @@ func TestFilterShimEnv_AllowsExpectedPrefixes(t *testing.T) {
 
 		// Blocked — Node.js / Python runtime loaders (code injection vectors)
 		{"NODE_OPTIONS=--require /tmp/evil.js", false},
+		{"NODE_PATH=/usr/lib/node_modules", false}, // module resolution hijack vector
 		{"NODE_EXTRA_CA_CERTS=/tmp/fake.pem", false},
 		{"NODE_TLS_REJECT_UNAUTHORIZED=0", false},
 		{"PYTHONSTARTUP=/tmp/evil.py", false},
 		{"PYTHONINSPECT=1", false},
 		{"PYTHON=/usr/bin/python3", false}, // bare "PYTHON" no longer allowed
+		// Blocked — AWS_* variables outside the explicit Bedrock allow list.
+		// R218-SEC-10: wildcard "AWS_" used to forward any AWS_-prefixed
+		// variable into the CLI; collapse to the documented Bedrock surface.
+		{"AWS_MFA_TOKEN=arbitrary", false},
+		{"AWS_VAULT=session-name", false},
 	}
 
 	for _, tc := range tests {
