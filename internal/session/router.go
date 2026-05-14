@@ -80,7 +80,10 @@ func validateBackend(backend string) error {
 		return fmt.Errorf("%w: exceeds %d bytes", ErrInvalidBackend, maxBackendBytes)
 	}
 	if !backendRe.MatchString(backend) {
-		return fmt.Errorf("%w: must match %s", ErrInvalidBackend, backendRe)
+		// Don't echo the regex pattern itself — this error surfaces in IM
+		// replies and slog attrs where the cryptic literal pattern adds
+		// noise without helping users self-diagnose. Mirrors validateModel.
+		return fmt.Errorf("%w: must be alphanumeric with optional dots, hyphens or underscores", ErrInvalidBackend)
 	}
 	return nil
 }
@@ -1336,17 +1339,23 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				ids := make([]string, 0, len(sessPrevIDs)+1)
 				ids = append(ids, sessPrevIDs...)
 				ids = append(ids, state.SessionID)
-				histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
-				histEntries := discovery.LoadHistoryChainTailCtx(
-					histCtx, r.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
-				)
-				histCancel()
-				if len(histEntries) > 0 {
-					sess.InjectHistory(histEntries)
-					sess.extractLastPromptFromProcess()
-					slog.Info("drifted shim: backfilled JSONL history",
-						"key", state.Key, "entries", len(histEntries))
-				}
+				// Wrap in an IIFE so a panic inside InjectHistory /
+				// extractLastPromptFromProcess still releases the context's
+				// timer. Mirrors the pattern used in spawnSession's history
+				// load. R218-GO-10.
+				func() {
+					histCtx, histCancel := context.WithTimeout(parentCtx, shimReconnectTimeout)
+					defer histCancel()
+					histEntries := discovery.LoadHistoryChainTailCtx(
+						histCtx, r.claudeDir, ids, sess.Workspace(), maxPersistedHistory,
+					)
+					if len(histEntries) > 0 {
+						sess.InjectHistory(histEntries)
+						sess.extractLastPromptFromProcess()
+						slog.Info("drifted shim: backfilled JSONL history",
+							"key", state.Key, "entries", len(histEntries))
+					}
+				}()
 			}
 			continue
 		}
@@ -3089,6 +3098,15 @@ func (r *Router) shouldPrune(s *ManagedSession, now time.Time) bool {
 // StartCleanupLoop runs Cleanup periodically and saves dirty session state
 // on a shorter interval to reduce data loss on crash.
 func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
+	// time.NewTicker(d) panics for d<=0; the panic-recovery defer would then
+	// schedule another StartCleanupLoop via AfterFunc, which would re-panic on
+	// the same NewTicker call, producing an unbounded retry chain. Reject the
+	// misconfiguration up front.
+	if interval <= 0 {
+		slog.Warn("StartCleanupLoop: non-positive interval, cleanup disabled",
+			"interval", interval)
+		return
+	}
 	go func() {
 		// Panic recovery: a bug inside Cleanup or saveIfDirty would silently
 		// kill the loop, allowing sessions to accumulate indefinitely past
@@ -3219,7 +3237,30 @@ func (r *Router) saveIfDirty() {
 // connection to a shim drops during normal operation (e.g. temporary I/O error)
 // but the shim and CLI process are still alive.
 func (r *Router) StartShimReconcileLoop(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		slog.Warn("StartShimReconcileLoop: non-positive interval, reconcile disabled",
+			"interval", interval)
+		return
+	}
 	go func() {
+		// Mirror StartCleanupLoop: a panic inside ReconnectShimsCtx would
+		// otherwise silently kill the loop goroutine and shim recovery would
+		// stop for the lifetime of the process. Auto-restart with a short
+		// cool-down so a panicking iteration cannot hot-loop.
+		defer func() {
+			if rec := recover(); rec != nil {
+				slog.Error("router shim-reconcile loop panic recovered",
+					"panic", rec, "stack", string(debug.Stack()))
+				if ctx.Err() == nil {
+					time.AfterFunc(5*time.Second, func() {
+						if ctx.Err() != nil {
+							return
+						}
+						r.StartShimReconcileLoop(ctx, interval)
+					})
+				}
+			}
+		}()
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
 		for {

@@ -81,6 +81,13 @@ func (w *shimWriter) Write(data []byte) (int, error) {
 			return 0, fmt.Errorf("%w: %d bytes > %d", ErrMessageTooLarge, len(line)-1, maxStdinLineBytes)
 		}
 		trimmed := string(line[:len(line)-1])
+		// A bare "\n" line (e.g. left-over from a previous Write that put
+		// back a partial residual starting with newline) yields an empty
+		// trimmed string. The shim ignores blank lines but emitting them
+		// wastes a round-trip and pollutes the protocol stream.
+		if len(trimmed) == 0 {
+			continue
+		}
 		if err := w.p.shimSend(shimClientMsg{Type: "write", Line: trimmed}); err != nil {
 			// Same reason as the size-limit branch: the failed line was
 			// already consumed, so leaving the remainder in the buffer would
