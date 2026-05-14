@@ -473,7 +473,7 @@ func TestForceCleanupZombie_RemovesStateAndHandle(t *testing.T) {
 // kernel kept the listener fd alive, but filesystem path was gone → any
 // naozhi Reconnect would ENOENT forever.
 func TestEnsureSocketFreeForReuse_RefusesLiveListener(t *testing.T) {
-	dir := t.TempDir()
+	dir := shortSocketDir(t)
 	path := filepath.Join(dir, "live.sock")
 	ln, err := net.Listen("unix", path)
 	if err != nil {
