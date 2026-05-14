@@ -835,7 +835,13 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	}, nil)
 	if err != nil {
 		cleanup()
-		writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": err.Error()})
+		// Forward only the localised user-facing label; the raw error may
+		// embed workspace paths or internal session keys that an authenticated
+		// dashboard user (or a stolen cookie) should not learn from a 403.
+		// Operators retain full diagnostics via the slog at sessionSend's
+		// own callsite. R218-SEC-P1.
+		slog.Warn("dashboard sessionSend rejected", "key", key, "err", err)
+		writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": asyncErrorMessage(err)})
 		return
 	}
 	// From this point on the attachments have entered the dispatch pipeline

@@ -1216,17 +1216,28 @@ func verifySignature(timestamp, nonce, encryptKey string, body []byte, signature
 	return subtle.ConstantTimeCompare(hexBuf[:], []byte(signature)) == 1
 }
 
-// verifyTimestamp checks that the request timestamp is within 5 minutes of now.
+// verifyTimestamp checks that the request timestamp is plausibly recent.
+//
+// Asymmetric window:
+//
+//   - up to 5 minutes in the past (300s) covers normal network latency and
+//     legitimate retries from Feishu's side.
+//   - at most 30 seconds in the future tolerates clock skew without giving
+//     attackers a 5-minute pre-issuance window to amplify nonce-replay
+//     opportunities. R218-SEC-13.
 func verifyTimestamp(timestamp string) bool {
 	ts, err := strconv.ParseInt(timestamp, 10, 64)
 	if err != nil {
 		return false
 	}
-	diff := time.Now().Unix() - ts
-	if diff < 0 {
-		diff = -diff
+	now := time.Now().Unix()
+	if ts > now+30 {
+		return false
 	}
-	return diff <= 300 // 5 minutes
+	if now-ts > 300 {
+		return false
+	}
+	return true
 }
 
 // reactionEmojiType maps platform-agnostic ReactionType to Feishu emoji_type.

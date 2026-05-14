@@ -998,8 +998,16 @@ var shimEnvAllowedPrefixes = []string{
 	// Claude CLI / Anthropic
 	"ANTHROPIC_", "CLAUDE_",
 
-	// AWS (Bedrock auth)
-	"AWS_",
+	// AWS (Bedrock auth) — explicit list of variables required by the AWS
+	// SDK to authenticate Bedrock. Avoid the wildcard "AWS_" prefix because
+	// it would forward unrelated AWS_* variables (e.g. AWS_MFA_TOKEN, custom
+	// admin profiles, AWS_SHARED_CREDENTIALS_FILE pointing at high-privilege
+	// files) into the CLI subprocess where the Bash tool can read them.
+	"AWS_REGION=", "AWS_DEFAULT_REGION=",
+	"AWS_ACCESS_KEY_ID=", "AWS_SECRET_ACCESS_KEY=", "AWS_SESSION_TOKEN=",
+	"AWS_PROFILE=", "AWS_SHARED_CREDENTIALS_FILE=", "AWS_CONFIG_FILE=",
+	"AWS_ROLE_ARN=", "AWS_WEB_IDENTITY_TOKEN_FILE=",
+	"AWS_ENDPOINT_URL=", "AWS_BEDROCK_ENDPOINT=",
 
 	// Git (SSH, config)
 	"SSH_AUTH_SOCK=", "GIT_",
@@ -1016,7 +1024,10 @@ var shimEnvAllowedPrefixes = []string{
 	//   - PYTHONINSPECT (drops into REPL after script)
 	"GOPATH=", "GOROOT=", "GOBIN=",
 	"CARGO_HOME=", "RUSTUP_HOME=",
-	"NVM_DIR=", "NODE_ENV=", "NODE_PATH=", "NPM_",
+	// NODE_PATH excluded: when pointed at an attacker-writable directory,
+	// `require()` resolution from any Node.js subprocess (Claude CLI is
+	// itself Node.js) loads code from that directory ahead of system paths.
+	"NVM_DIR=", "NODE_ENV=", "NPM_",
 	"PYTHONPATH=", "PYTHONHOME=", "PYTHONDONTWRITEBYTECODE=", "PYTHONUNBUFFERED=",
 	"VIRTUAL_ENV=", "CONDA_",
 	"JAVA_HOME=",
