@@ -5003,7 +5003,9 @@ function renderPaletteList(state, query) {
     withIndex.forEach(w => scored.push(w.s));
   }
 
-  const items = scored.map(s => ({type: 'project', data: s}));
+  const items = [];
+  if (!q) items.push({type: 'quick'});
+  scored.forEach(s => items.push({type: 'project', data: s}));
   items.push({type: 'custom', query: q});
   state.items = items;
   state.activeIdx = 0;
@@ -5020,7 +5022,9 @@ function renderPaletteList(state, query) {
 
   list.innerHTML = '';
   items.forEach((it, i) => {
-    if (it.type === 'project') {
+    if (it.type === 'quick') {
+      list.appendChild(buildQuickRow(i));
+    } else if (it.type === 'project') {
       list.appendChild(buildProjectRow(it.data, i));
     } else {
       list.appendChild(buildCustomRow(it.query, i));
@@ -5055,6 +5059,28 @@ function buildProjectRow(s, idx) {
   el.addEventListener('click', () => pickPaletteProject(p));
   el.addEventListener('mouseenter', () => setActiveIdx(idx));
   return el;
+}
+
+function buildQuickRow(idx) {
+  const ws = defaultWorkspace || '';
+  const el = document.createElement('div');
+  el.className = 'cmd-palette-item';
+  el.dataset.idx = String(idx);
+  el.innerHTML =
+    '<span class="cp-icon">⚡</span>' +
+    '<div class="cp-main">' +
+      '<div class="cp-name">快速新建</div>' +
+      (ws ? '<div class="cp-path">' + esc(shortPath(ws)) + '</div>' : '') +
+    '</div>';
+  el.addEventListener('click', () => pickPaletteQuick());
+  el.addEventListener('mouseenter', () => setActiveIdx(idx));
+  return el;
+}
+
+function pickPaletteQuick() {
+  const workspace = defaultWorkspace || '';
+  const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'quick') : 'quick';
+  doCreateInProject(workspace, folderName, 'local');
 }
 
 function buildCustomRow(query, idx) {
@@ -5111,7 +5137,8 @@ function handlePaletteKey(e, state, input) {
     e.preventDefault();
     const item = state.items[state.activeIdx];
     if (!item) return;
-    if (item.type === 'project') pickPaletteProject(item.data.project);
+    if (item.type === 'quick') pickPaletteQuick();
+    else if (item.type === 'project') pickPaletteProject(item.data.project);
     else pickPaletteCustom(input.value.trim());
   }
 }
