@@ -960,21 +960,25 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 // assertion. Today only stream-json-backed Claude writes the on-disk
 // transcript, so the cost of the abstraction is not warranted yet.
 func (s *ManagedSession) SubagentLinker() *cli.SubagentLinker {
-	proc := s.loadProcess()
-	if proc == nil {
-		return nil
+	if real := s.loadCliProcess(); real != nil {
+		return real.Linker()
 	}
-	real, ok := proc.(*cli.Process)
-	if !ok {
-		return nil
-	}
-	return real.Linker()
+	return nil
 }
 
 // AgentEventLog exposes the live *cli.EventLog so the server-side tailer
 // registry can install its task_done hook. nil for fake processes / dead
 // sessions, same policy as SubagentLinker above.
 func (s *ManagedSession) AgentEventLog() *cli.EventLog {
+	if real := s.loadCliProcess(); real != nil {
+		return real.EventLog()
+	}
+	return nil
+}
+
+// loadCliProcess returns the live *cli.Process when the session is backed by
+// one, nil otherwise (fake test process, dead session, ACP protocol, etc.).
+func (s *ManagedSession) loadCliProcess() *cli.Process {
 	proc := s.loadProcess()
 	if proc == nil {
 		return nil
@@ -983,7 +987,7 @@ func (s *ManagedSession) AgentEventLog() *cli.EventLog {
 	if !ok {
 		return nil
 	}
-	return real.EventLog()
+	return real
 }
 
 // EventLastN returns the most recent n event entries.
