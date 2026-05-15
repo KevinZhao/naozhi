@@ -15,7 +15,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 	"unicode/utf8"
 
@@ -234,7 +233,7 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	// Use exec.Command (not CommandContext): shim must outlive naozhi.
 	// Context is only used for the startup handshake timeout below.
 	cmd := exec.Command(m.naozhiBin, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	setSetsid(cmd)
 	cmd.Env = m.shimEnv
 
 	// Remove stale socket from a previous shim that didn't clean up
@@ -452,9 +451,9 @@ func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*Sh
 	}
 
 	// Validate shim is alive
-	if err := syscall.Kill(state.ShimPID, 0); err != nil {
+	if !pidAlive(state.ShimPID) {
 		RemoveStateFile(stateFile)
-		return nil, fmt.Errorf("shim PID %d not alive: %w", state.ShimPID, err)
+		return nil, fmt.Errorf("shim PID %d not alive", state.ShimPID)
 	}
 
 	// Validate shim binary identity. On Linux this reads /proc/PID/exe;
@@ -463,7 +462,7 @@ func (m *Manager) Reconnect(ctx context.Context, key string, lastSeq int64) (*Sh
 	// process). After a rebuild, Linux marks the old binary as "(deleted)"
 	// in /proc/PID/exe; the linux helper strips that suffix.
 	if mismatch, err := shimPIDBinaryMismatch(state.ShimPID, m.naozhiBin); err == nil && mismatch {
-		syscall.Kill(state.ShimPID, syscall.SIGUSR2) //nolint:errcheck
+		sendSIGUSR2(state.ShimPID) //nolint:errcheck
 		RemoveStateFile(stateFile)
 		return nil, fmt.Errorf("shim PID %d binary mismatch", state.ShimPID)
 	} else if err != nil {
@@ -616,7 +615,7 @@ func (m *Manager) ForceCleanupZombie(state State) {
 	delete(m.shims, state.Key)
 	m.mu.Unlock()
 	if state.ShimPID > 0 && m.isOurShimPID(state.ShimPID) {
-		_ = syscall.Kill(state.ShimPID, syscall.SIGTERM)
+		_ = sendSIGTERM(state.ShimPID)
 	}
 }
 
@@ -627,7 +626,7 @@ func (m *Manager) ForceCleanupZombie(state State) {
 // ps -o comm=. Mirrors the Discover-time gate so anyone considering
 // signalling a PID learned from a state file runs the same safety check.
 func (m *Manager) isOurShimPID(pid int) bool {
-	if syscall.Kill(pid, 0) != nil {
+	if !pidAlive(pid) {
 		return false
 	}
 	mismatch, err := shimPIDBinaryMismatch(pid, m.naozhiBin)
@@ -675,8 +674,8 @@ func (m *Manager) Discover() ([]State, error) {
 			continue
 		}
 		// Check if shim is alive
-		if err := syscall.Kill(state.ShimPID, 0); err != nil {
-			slog.Info("removing stale shim state file", "path", path, "pid", state.ShimPID, "err", err)
+		if !pidAlive(state.ShimPID) {
+			slog.Info("removing stale shim state file", "path", path, "pid", state.ShimPID)
 			RemoveStateFile(path)
 			continue
 		}
@@ -713,8 +712,8 @@ func (m *Manager) Discover() ([]State, error) {
 			// the noisy "caught SIGTERM during shutdown" log line from the
 			// shim's crash path and the small but real wrong-PID risk.
 			// R65-GO-L-2.
-			if err := syscall.Kill(state.ShimPID, 0); err == nil {
-				_ = syscall.Kill(state.ShimPID, syscall.SIGTERM)
+			if pidAlive(state.ShimPID) {
+				_ = sendSIGTERM(state.ShimPID)
 			}
 			RemoveStateFile(path)
 			continue
