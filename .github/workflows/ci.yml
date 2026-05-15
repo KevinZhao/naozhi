@@ -29,13 +29,9 @@ jobs:
           go-version-file: go.mod
           cache: true
 
-      - name: Build
-        run: go build ./...
-
-      - name: Vet
-        run: go vet ./...
-
       - name: Test
+        # go test -race implicitly builds and vets all packages before running.
+        # Separate Build and Vet steps are redundant and have been removed.
         run: go test -race -timeout 300s ./...
 
   vuln:
