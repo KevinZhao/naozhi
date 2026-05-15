@@ -56,7 +56,7 @@ func (h *ScratchHandler) handleOpen(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "open rate limit exceeded"})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1 MiB — headroom over 8 KiB quote cap
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	var req openRequest
 	if err := decodeJSONBody(r, &req); err != nil {
 		slog.Debug("scratch open: invalid JSON", "err", err)

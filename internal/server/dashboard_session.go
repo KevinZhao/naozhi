@@ -776,11 +776,11 @@ func (h *SessionHandlers) handleDelete(w http.ResponseWriter, r *http.Request) {
 		// Drain + close body (http.Server will close it for us, but
 		// unreading it could confuse some middleware). MaxBytesReader
 		// still applies to defend against trailer-bomb.
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 		_, _ = io.Copy(io.Discard, r.Body)
 		_ = r.Body.Close()
 	} else {
-		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 		if err := decodeJSONBody(r, &req); err != nil || req.Key == "" {
 			http.Error(w, "key is required (pass ?key=... or JSON body)", http.StatusBadRequest)
 			return
@@ -841,7 +841,7 @@ func (h *SessionHandlers) handleSetLabel(w http.ResponseWriter, r *http.Request)
 		Node  string `json:"node"`
 		Label string `json:"label"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	if err := decodeJSONBody(r, &req); err != nil || req.Key == "" {
 		http.Error(w, "key is required", http.StatusBadRequest)
 		return
@@ -911,7 +911,7 @@ func (h *SessionHandlers) handleResume(w http.ResponseWriter, r *http.Request) {
 		Workspace  string `json:"workspace"`
 		LastPrompt string `json:"last_prompt"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	if err := decodeJSONBody(r, &req); err != nil || req.SessionID == "" {
 		http.Error(w, "session_id is required", http.StatusBadRequest)
 		return
@@ -988,7 +988,7 @@ func (h *SessionHandlers) handleInterrupt(w http.ResponseWriter, r *http.Request
 		Key  string `json:"key"`
 		Node string `json:"node"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	if err := decodeJSONBody(r, &req); err != nil || req.Key == "" {
 		http.Error(w, "key is required", http.StatusBadRequest)
 		return

@@ -27,7 +27,16 @@ import (
 	"golang.org/x/time/rate"
 )
 
-const defaultDedupCapacity = 10000
+const (
+	defaultDedupCapacity = 10000
+
+	// maxRequestBodyBytes is the per-handler request-body read limit applied
+	// via http.MaxBytesReader. 1 MiB is well above the largest JSON payload
+	// any handler legitimately accepts, but safely below typical DoS-attempt
+	// sizes. All dashboard mutation handlers must use this constant so the
+	// limit is adjusted in one place.
+	maxRequestBodyBytes = 1 << 20
+)
 
 // Server is the HTTP entry point for Naozhi.
 type Server struct {

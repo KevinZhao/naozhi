@@ -113,7 +113,7 @@ func (h *DiscoveryHandlers) handleTakeover(w http.ResponseWriter, r *http.Reques
 		ProcStartTime uint64 `json:"proc_start_time"`
 		Node          string `json:"node"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	if err := decodeJSONBody(r, &req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
@@ -265,7 +265,7 @@ func (h *DiscoveryHandlers) handleClose(w http.ResponseWriter, r *http.Request) 
 		ProcStartTime uint64 `json:"proc_start_time"`
 		Node          string `json:"node"`
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	if err := decodeJSONBody(r, &req); err != nil {
 		http.Error(w, "invalid JSON", http.StatusBadRequest)
 		return
