@@ -1,3 +1,5 @@
+//go:build linux
+
 package discovery
 
 import (
@@ -7,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 )
 
 // ProcStartTime reads the start time (field 22) from /proc/{pid}/stat.
@@ -38,6 +41,11 @@ func ProcStartTime(pid int) (uint64, error) {
 	}
 	return strconv.ParseUint(fields[startTimeIdx], 10, 64)
 }
+
+var ErrUnsupportedPlatform = fmt.Errorf("operation not supported on this platform")
+
+func procPidAlive(pid int) bool        { return syscall.Kill(pid, 0) == nil }
+func procKillSIGKILL(pid int)          { _ = syscall.Kill(pid, syscall.SIGKILL) }
 
 // detectCLIName reads /proc/PID/cmdline to determine which CLI binary is running.
 // Returns "claude-code", "kiro", or "cli" as fallback.
