@@ -21,6 +21,13 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
+// shimReadyMsg carries the result of the shim's ready-line scan back to
+// StartShimWithBackend via the readyCh channel.
+type shimReadyMsg struct {
+	token string
+	err   error
+}
+
 // validateKeyForShim rejects keys that would leak control bytes into the
 // shim argv / socket path. Mirrors session.ValidateSessionKey; we keep a
 // local copy here because session → shim is a one-way import and the
@@ -272,10 +279,7 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	}()
 
 	// Read ready message (with timeout)
-	readyCh := make(chan struct {
-		token string
-		err   error
-	}, 1)
+	readyCh := make(chan shimReadyMsg, 1)
 	go func() {
 		defer stdout.Close()
 		scanner := bufio.NewScanner(stdout)
@@ -287,35 +291,20 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 				Error  string `json:"error"`
 			}
 			if err := json.Unmarshal(scanner.Bytes(), &ready); err != nil {
-				readyCh <- struct {
-					token string
-					err   error
-				}{"", fmt.Errorf("parse ready: %w", err)}
+				readyCh <- shimReadyMsg{"", fmt.Errorf("parse ready: %w", err)}
 				return
 			}
 			if ready.Status == "error" {
-				readyCh <- struct {
-					token string
-					err   error
-				}{"", fmt.Errorf("shim startup failed: %s", ready.Error)}
+				readyCh <- shimReadyMsg{"", fmt.Errorf("shim startup failed: %s", ready.Error)}
 				return
 			}
 			if ready.Status != "ready" {
-				readyCh <- struct {
-					token string
-					err   error
-				}{"", fmt.Errorf("unexpected status: %s", ready.Status)}
+				readyCh <- shimReadyMsg{"", fmt.Errorf("unexpected status: %s", ready.Status)}
 				return
 			}
-			readyCh <- struct {
-				token string
-				err   error
-			}{ready.Token, nil}
+			readyCh <- shimReadyMsg{ready.Token, nil}
 		} else {
-			readyCh <- struct {
-				token string
-				err   error
-			}{"", fmt.Errorf("shim exited before ready")}
+			readyCh <- shimReadyMsg{"", fmt.Errorf("shim exited before ready")}
 		}
 	}()
 
