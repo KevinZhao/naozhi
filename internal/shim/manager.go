@@ -112,6 +112,13 @@ type ManagerConfig struct {
 	MaxShims        int
 }
 
+// shimReadyMsg is the result sent on the readyCh channel inside
+// StartShimWithBackend once the shim's JSON ready-line has been parsed.
+type shimReadyMsg struct {
+	token string
+	err   error
+}
+
 // NewManager creates a shim manager.
 // Returns an error if the running binary path cannot be resolved: the path is
 // required for Reconnect's identity check (comparing /proc/<shimPID>/exe), and
@@ -272,10 +279,7 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 	}()
 
 	// Read ready message (with timeout)
-	readyCh := make(chan struct {
-		token string
-		err   error
-	}, 1)
+	readyCh := make(chan shimReadyMsg, 1)
 	go func() {
 		defer stdout.Close()
 		scanner := bufio.NewScanner(stdout)
@@ -287,35 +291,20 @@ func (m *Manager) StartShimWithBackend(ctx context.Context, key, cliPath, backen
 				Error  string `json:"error"`
 			}
 			if err := json.Unmarshal(scanner.Bytes(), &ready); err != nil {
-				readyCh <- struct {
-					token string
-					err   error
-				}{"", fmt.Errorf("parse ready: %w", err)}
+				readyCh <- shimReadyMsg{"", fmt.Errorf("parse ready: %w", err)}
 				return
 			}
 			if ready.Status == "error" {
-				readyCh <- struct {
-					token string
-					err   error
-				}{"", fmt.Errorf("shim startup failed: %s", ready.Error)}
+				readyCh <- shimReadyMsg{"", fmt.Errorf("shim startup failed: %s", ready.Error)}
 				return
 			}
 			if ready.Status != "ready" {
-				readyCh <- struct {
-					token string
-					err   error
-				}{"", fmt.Errorf("unexpected status: %s", ready.Status)}
+				readyCh <- shimReadyMsg{"", fmt.Errorf("unexpected status: %s", ready.Status)}
 				return
 			}
-			readyCh <- struct {
-				token string
-				err   error
-			}{ready.Token, nil}
+			readyCh <- shimReadyMsg{ready.Token, nil}
 		} else {
-			readyCh <- struct {
-				token string
-				err   error
-			}{"", fmt.Errorf("shim exited before ready")}
+			readyCh <- shimReadyMsg{"", fmt.Errorf("shim exited before ready")}
 		}
 	}()
 
