@@ -22,6 +22,12 @@ import "unicode/utf8"
 // that never need trimming — skipping the utf8 decode loop eliminates a
 // steady CPU baseline.
 func TruncateRunes(s string, maxRunes int) string {
+	// maxRunes <= 0 is treated as "no limit": return s unchanged.
+	// All production call sites pass positive constants; this guard prevents
+	// an infinite loop if a misconfigured maxRunes ever reaches this function.
+	if maxRunes <= 0 {
+		return s
+	}
 	if len(s) <= maxRunes {
 		return s
 	}
