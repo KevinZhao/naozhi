@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // ---------------------------------------------------------------------------
@@ -312,7 +312,7 @@ func TestLoadHistory_Truncation(t *testing.T) {
 	}
 	got := entries[0].Summary
 	// TruncateRunes at 120 produces "aaa...aaa" (120 rune max, appends "...")
-	want := cli.TruncateRunes(longText, 120)
+	want := textutil.TruncateRunes(longText, 120)
 	if got != want {
 		t.Errorf("summary = %q, want %q", got, want)
 	}

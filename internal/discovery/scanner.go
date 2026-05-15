@@ -1,3 +1,5 @@
+//go:build linux
+
 package discovery
 
 import (
@@ -19,8 +21,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // Scanner holds the mutable caches that used to be package-level globals
@@ -657,7 +659,7 @@ func extractLastPromptUncached(path string, fileSize int64) string {
 		}
 	}
 
-	return cli.TruncateRunes(lastPrompt, 120)
+	return textutil.TruncateRunes(lastPrompt, 120)
 }
 
 // scanUserPrompt scans lines from the current file position and returns

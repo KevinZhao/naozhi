@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // RecentSession represents a past Claude session found on the filesystem.
@@ -225,7 +225,7 @@ func extractFirstPrompt(path string) string {
 		}
 		text := extractUserText(hl.Message)
 		if text != "" {
-			return SanitizePromptForTransport(cli.TruncateRunes(text, 120))
+			return SanitizePromptForTransport(textutil.TruncateRunes(text, 120))
 		}
 	}
 	return ""
@@ -285,7 +285,7 @@ func recentFromParsedIndex(idx *sessionsIndex, projDir, workspace string, exclud
 		out = append(out, RecentSession{
 			SessionID:  entry.SessionID,
 			Summary:    SanitizePromptForTransport(entry.Summary),
-			LastPrompt: SanitizePromptForTransport(cli.TruncateRunes(prompt, 120)),
+			LastPrompt: SanitizePromptForTransport(textutil.TruncateRunes(prompt, 120)),
 			LastActive: mtime,
 			Workspace:  workspace,
 		})
