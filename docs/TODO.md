@@ -111,7 +111,7 @@
 ### 代码质量 — 小改动等合并窗口
 
 - [ ] **R217-CR-1 — `sanitizeClientFilename` 改用 `utf8.RuneCountInString` 短路前已落地（本轮）**：保留作为已修锚。
-- [ ] **R217-CR-2 — `processIface.LastEntryOfType` 在生产路径无调用**: 接口最小化原则，删未用方法（影响 TestProcess stub）。
+- [x] **R217-CR-2 — `processIface.LastEntryOfType` 在生产路径无调用**: 接口最小化原则，删未用方法（影响 TestProcess stub）。 — 已修复，见 PR #27
 - [ ] **R217-CR-3 — `Cleanup` 三阶段加锁窗口**：worst-case stuckKill 目标进程在 Pass 2 已被 spawnSession 替换。`shouldPrune` 已 mitigates，stuckKill 路径未 re-check。需要 pass-2 再次 verify。
 - [ ] **R217-CR-4 — `Hub god struct 36 字段 / `node.Conn` 18+ 方法巨型接口**: 子聚合拆分。
 - [ ] **R217-CR-5 — cross-node 错误注入方向不对称**: 反向有 LogSystemEvent，正向 node.Conn.Send 失败只 slog 不进 EventLog。
@@ -699,13 +699,13 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：加方法级注释说明双重检查的 rationale（atomic 读为 fast-path optimisation）。
   - 涉及: `internal/session/managed.go:463-473`
 
-- [ ] **R215-GO-P2-3 — `shim.Manager.StartShimWithBackend` 匿名 struct 6× 重复**: `struct{token string; err error}` 6 处出现，未来加字段要同步 6 次。
+- [x] **R215-GO-P2-3 — `shim.Manager.StartShimWithBackend` 匿名 struct 6× 重复**: `struct{token string; err error}` 6 处出现，未来加字段要同步 6 次。
   - 方案：package-private `type shimReadyMsg struct{...}`。
-  - 涉及: `internal/shim/manager.go:280-321`
+  - 涉及: `internal/shim/manager.go:280-321` — 已修复，见 PR #25
 
-- [ ] **R215-GO-P2-4 — Unicode 控制字符测试文件用原生字节而非 \uXXXX 转义**: 9 处 staticcheck ST1018，易被编辑器/git hook 破坏。
+- [x] **R215-GO-P2-4 — Unicode 控制字符测试文件用原生字节而非 \uXXXX 转义**: 9 处 staticcheck ST1018，易被编辑器/git hook 破坏。
   - 方案：改 `` / `‮` 等转义。
-  - 涉及: `internal/osutil/loginject_test.go` 等测试文件
+  - 涉及: `internal/osutil/loginject_test.go` 等测试文件 — 已修复，见 PR #26（PR/commit 描述误用 R215-GO-P2-5 编号）
 
 - [ ] **R215-GO-P2-5 — `router.ReconnectShims` reconcile 期 `sess.ReattachProcessNoCallback` 无 sendMu 保护（继承 R51-CONCUR-002）**: 运行期 reconcile 与 ManagedSession.Send 并发时，storeProcess 原子替换旧 process 指针 + clearDeathReason 与 Send() 的 timeout 写入有逻辑 race。
   - 方案：加 sendMu 快照契约或显式序列化。涉及 sendMu/r.mu lock ordering。
