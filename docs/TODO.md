@@ -142,8 +142,9 @@
 - [ ] **R216-GO-1 — `ReattachProcessNoCallback` 无 sendMu 保护（R51-CONCUR-002 再确认）**: reconcile 周期调用对运行中 session 发生，docstring 明确标注 "Send() 不在飞行中"，但运行期 reconcile 不满足该假设。需跨 managed.go / router.go 改 lock ordering，合并 RFC。
 - [ ] **R216-GO-2 — `shim.Run()` package-level `shimLogFile *os.File` global**: 包级变量被 deferred panic handler 跨 goroutine 读取，race detector 会报。方案：改 local + closure，或 atomic.Pointer。
   - 涉及：`internal/shim/server.go:78`
-- [ ] **R216-GO-3 — shim accept loop 内 `defer timer.Stop()` 错位**: defer 绑 function scope 而非 select arm，timer 累积泄漏。
+- [x] **R216-GO-3 — shim accept loop 内 `defer timer.Stop()` 错位**: defer 绑 function scope 而非 select arm，timer 累积泄漏。
   - 涉及：`internal/shim/server.go:300-353`
+  — 已修复，见 PR fix/todo-shim-20260515-1837
 - [ ] **R216-GO-4 — `ReconnectShims()` 用 `context.Background()` 启动路径**: N sessions × 15s/timeout，SIGTERM 无法取消启动阶段重连。方案：接受 appCtx 参数。
   - 涉及：`internal/session/router.go:1109-1111`
 - [ ] **R216-GO-5 — cron `Stop()` deadline 后泄漏 triggerWG goroutine（R44 已归档，重申）**: 单 shot 设计内可接受；测试 `-count=N` 下会污染。长期修需重构 triggerWG 与 Stop 协议。
@@ -183,9 +184,10 @@
 
 ### Round 194 新发现（2026-05-07）
 
-- [ ] **RNEW-004 — cron `executeOpt` 的 `context.Canceled` 分支跳过 `recordResult` + `stubRefresh`**: `scheduler.go:1395-1413` 当 ctx（derived from stopCtx）在 GetOrCreate 后 Send 前被 cancel，函数走 canceled early-exit 但未调 `recordResult`，cron row 的 `LastRunAt` 保持空；stub 可能消失直到下 tick，live session 进程仍在跑 —— 仪表盘与实际状态分裂。
+- [x] **RNEW-004 — cron `executeOpt` 的 `context.Canceled` 分支跳过 `recordResult` + `stubRefresh`**: `scheduler.go:1395-1413` 当 ctx（derived from stopCtx）在 GetOrCreate 后 Send 前被 cancel，函数走 canceled early-exit 但未调 `recordResult`，cron row 的 `LastRunAt` 保持空；stub 可能消失直到下 tick，live session 进程仍在跑 —— 仪表盘与实际状态分裂。
   - 方案: canceled 分支也调 `stubRefresh()`；或 `defer stubRefresh()` + 成功路径抑制 flag。
   - 涉及: `internal/cron/scheduler.go:1395-1413, 1432`
+  — 已修复，见 PR fix/todo-cron-20260515-1836
 
 - [ ] **SM3 — `ManagedSession.Send` sendCancel 先于 loadProcess (Round 174 发现, 2026-05-10 降级 LOW)**: `session/managed.go:336-352` 先 `s.sendCancel.Store(&cancel)` 再 `proc := s.loadProcess()`。并发 `spawnSession` 替换 process 的窄 window 里，`Interrupt()` 调 `(*cancel)()` 可能取消到错 ctx。**现状 accepted**：无数据损坏（只是 Interrupt 语义弱化 —— 旧 ctx cancel 对新 process 无副作用），window 纳秒级，高并发 Interrupt × spawn 的真实触发率未观测到；修需跨 managed.go/router.go sendMu/r.mu lock ordering 重构。留作"stable-process invariant"专项 RFC 材料。
   - 待决策：是否引入 "stable-process invariant" 让 sendCancel 绑定到 process epoch？涉及 sendMu / r.mu lock ordering，改动面跨包
@@ -511,9 +513,10 @@
 
 ### Round 194 发现（前端 UX / JS 可维护性，2026-05-07）
 
-- [ ] **RNEW-UX-001 — WS 重连无 jitter，N 客户端雪崩**: `dashboard.js:6717-6730` `backoff = min(backoff*2, 30s)` 纯指数，服务重启时所有 tab 在同一 ms 点重连，瞬时打满。
+- [x] **RNEW-UX-001 — WS 重连无 jitter，N 客户端雪崩**: `dashboard.js:6717-6730` `backoff = min(backoff*2, 30s)` 纯指数，服务重启时所有 tab 在同一 ms 点重连，瞬时打满。
   - 方案: `delay += Math.floor(Math.random() * 500)` 或 full-jitter。
   - 涉及: `dashboard.js:6717-6730`
+  — 已修复（代码库已有更完整实现：scheduleReconnect 内加 jitter 到 delay 局部变量），确认落地
 
 - [ ] **RNEW-UX-003 — 173 处 `fetch(...)` 无 AbortController / 无超时**: NAT 空闲 TCP 被丢时 ajax 挂死数分钟，按钮无响应也无 spinner。
   - 方案: 全局 `fetchJSON(url, {timeoutMs:10000})` wrapper；切页面/会话时 abort 上一批 in-flight。
@@ -699,13 +702,15 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：加方法级注释说明双重检查的 rationale（atomic 读为 fast-path optimisation）。
   - 涉及: `internal/session/managed.go:463-473`
 
-- [ ] **R215-GO-P2-3 — `shim.Manager.StartShimWithBackend` 匿名 struct 6× 重复**: `struct{token string; err error}` 6 处出现，未来加字段要同步 6 次。
+- [x] **R215-GO-P2-3 — `shim.Manager.StartShimWithBackend` 匿名 struct 6× 重复**: `struct{token string; err error}` 6 处出现，未来加字段要同步 6 次。
   - 方案：package-private `type shimReadyMsg struct{...}`。
   - 涉及: `internal/shim/manager.go:280-321`
+  — 已修复，见 PR fix/todo-shim-20260515-1837
 
-- [ ] **R215-GO-P2-4 — Unicode 控制字符测试文件用原生字节而非 \uXXXX 转义**: 9 处 staticcheck ST1018，易被编辑器/git hook 破坏。
+- [x] **R215-GO-P2-4 — Unicode 控制字符测试文件用原生字节而非 \uXXXX 转义**: 9 处 staticcheck ST1018，易被编辑器/git hook 破坏。
   - 方案：改 `` / `‮` 等转义。
   - 涉及: `internal/osutil/loginject_test.go` 等测试文件
+  — 已修复，见 PR fix/todo-osutil-20260515-1837
 
 - [ ] **R215-GO-P2-5 — `router.ReconnectShims` reconcile 期 `sess.ReattachProcessNoCallback` 无 sendMu 保护（继承 R51-CONCUR-002）**: 运行期 reconcile 与 ManagedSession.Send 并发时，storeProcess 原子替换旧 process 指针 + clearDeathReason 与 Send() 的 timeout 写入有逻辑 race。
   - 方案：加 sendMu 快照契约或显式序列化。涉及 sendMu/r.mu lock ordering。
