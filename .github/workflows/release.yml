@@ -40,17 +40,16 @@ jobs:
             goarch: amd64
           - goos: darwin
             goarch: arm64
-          # Windows is intentionally not in the release matrix: internal/shim
-          # relies on POSIX-only syscalls (Kill, Setsid) that do not exist in
-          # syscall.SysProcAttr on windows/*, and install.sh already refuses
-          # MINGW/MSYS/CYGWIN targets. Re-adding Windows requires a compat
-          # layer in internal/shim behind build tags (_unix.go / _windows.go).
+          # Windows is not in the release matrix: install.sh refuses MINGW/MSYS/
+          # CYGWIN and the shim requires POSIX process semantics (Setsid, Kill)
+          # that have no Windows equivalent even with the syscall build-tag split.
     steps:
       - uses: actions/checkout@v5
 
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          cache: true
 
       - name: Build
         env:
