@@ -228,7 +228,11 @@ func (h *AgentEventsHandlers) handleToolResult(w http.ResponseWriter, r *http.Re
 		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
-	root = filepath.Clean(root)
+	// EvalSymlinks resolves the full real path (e.g. /private/var on macOS);
+	// root must be resolved the same way so the prefix check is consistent.
+	if resolvedRoot, err := filepath.EvalSymlinks(root); err == nil {
+		root = resolvedRoot
+	}
 	toolResultsRoot := filepath.Join(root, "tool-results")
 	if !strings.HasPrefix(resolved, toolResultsRoot+string(filepath.Separator)) {
 		http.Error(w, "not found", http.StatusNotFound)
