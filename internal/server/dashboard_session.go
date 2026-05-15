@@ -43,22 +43,11 @@ func sanitizeResumeLastPrompt(s string, maxLen int) string {
 	if s == "" {
 		return s
 	}
-	clean := true
-	if maxLen > 0 && len(s) > maxLen {
-		clean = false
-	} else {
-		for i := 0; i < len(s); i++ {
-			c := s[i]
-			if c == '\t' {
-				continue
-			}
-			if c < 0x20 || c == 0x7f || c >= 0x80 {
-				clean = false
-				break
-			}
-		}
-	}
-	if clean {
+	needsClean := (maxLen > 0 && len(s) > maxLen) ||
+		strings.IndexFunc(s, func(r rune) bool {
+			return r != '\t' && (r < 0x20 || r == 0x7f || r > 0x7f)
+		}) >= 0
+	if !needsClean {
 		return s
 	}
 	mapped := strings.Map(func(r rune) rune {
