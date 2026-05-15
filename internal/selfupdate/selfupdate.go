@@ -4,10 +4,9 @@
 //
 // Flow:
 //
-//	LatestVersion()     → GitHub redirect → semver tag
+//	LatestRelease()     → GitHub redirect → semver tag
 //	Download()          → binary + checksums.txt → tmp dir
-//	VerifyChecksum()    → sha256 match
-//	Replace()           → backup current, os.Rename new binary
+//	Replace()           → backup current, rename new binary into place
 //	RestartService()    → systemctl restart / launchctl reload
 package selfupdate
 
@@ -31,11 +30,14 @@ const (
 	repo           = "KevinZhao/naozhi"
 	defaultTimeout = 60 * time.Second
 	backupSuffix   = ".naozhi-upgrade.bak"
+
+	// maxBinaryBytes caps the download size to guard against a rogue release
+	// asset or MITM response filling the disk.
+	maxBinaryBytes = 200 * 1024 * 1024 // 200 MB
 )
 
-// ErrAlreadyLatest is returned by CheckAndDownload when the running version
-// matches the latest release.
-var ErrAlreadyLatest = errors.New("already at the latest version")
+// ErrUnsupportedPlatform is returned when the current OS has no release asset.
+var ErrUnsupportedPlatform = errors.New("upgrade not supported on this platform (no release asset)")
 
 // Release holds metadata about a GitHub Release.
 type Release struct {
@@ -48,8 +50,11 @@ type Release struct {
 // /releases/latest redirect. No API token required (anonymous, no rate-limit
 // concern for a single query per upgrade call).
 func LatestRelease(ctx context.Context) (*Release, error) {
-	url := fmt.Sprintf("https://github.com/%s/releases/latest", repo)
+	if err := checkPlatform(); err != nil {
+		return nil, err
+	}
 
+	url := fmt.Sprintf("https://github.com/%s/releases/latest", repo)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
@@ -86,8 +91,8 @@ func LatestRelease(ctx context.Context) (*Release, error) {
 	}, nil
 }
 
-// Download fetches the binary and checksums.txt into dir, returning the path
-// to the downloaded binary.
+// Download fetches the binary and checksums.txt into dir, verifies the
+// SHA-256 checksum, and returns the path to the downloaded binary.
 func Download(ctx context.Context, rel *Release, dir string) (binPath string, err error) {
 	asset := assetName()
 	binPath = filepath.Join(dir, asset)
@@ -107,21 +112,30 @@ func Download(ctx context.Context, rel *Release, dir string) (binPath string, er
 
 // Replace atomically swaps newBin into installPath:
 //  1. Backs up the current binary to installPath + backupSuffix.
-//  2. Copies newBin over installPath (os.Rename may fail across devices).
-//  3. On any failure after backup, restores the backup.
+//  2. Writes newBin to a staging file in the same directory.
+//  3. os.Rename (atomic on same filesystem) stages → installPath.
+//  4. On any failure after backup, restores the backup.
 func Replace(newBin, installPath string) (backupPath string, err error) {
 	backupPath = installPath + backupSuffix
+	stagePath := installPath + ".naozhi-upgrade.staging"
 
-	// Backup current binary.
+	// Backup current binary so we can roll back on service-restart failure.
 	if err := copyFile(installPath, backupPath); err != nil {
 		return "", fmt.Errorf("backup current binary: %w", err)
 	}
 
-	if err := copyFile(newBin, installPath); err != nil {
-		// Restore backup on failure.
-		_ = copyFile(backupPath, installPath)
+	// Write to a staging file in the same directory (guarantees same device
+	// for the subsequent Rename, which is atomic on POSIX).
+	if err := copyFile(newBin, stagePath); err != nil {
 		_ = os.Remove(backupPath)
-		return "", fmt.Errorf("replace binary: %w", err)
+		return "", fmt.Errorf("stage new binary: %w", err)
+	}
+
+	if err := os.Rename(stagePath, installPath); err != nil {
+		_ = os.Remove(stagePath)
+		_ = copyFile(backupPath, installPath) // best-effort restore
+		_ = os.Remove(backupPath)
+		return "", fmt.Errorf("rename staged binary into place: %w", err)
 	}
 	return backupPath, nil
 }
@@ -156,12 +170,19 @@ func extractTag(url string) string {
 	return m[1]
 }
 
+// checkPlatform returns ErrUnsupportedPlatform on operating systems that have
+// no entry in the release matrix (currently Windows only).
+func checkPlatform() error {
+	if runtime.GOOS == "windows" {
+		return ErrUnsupportedPlatform
+	}
+	return nil
+}
+
 // assetName returns the release asset filename for the current platform,
 // matching what release.yml produces.
 func assetName() string {
-	goos := runtime.GOOS
-	goarch := runtime.GOARCH
-	return fmt.Sprintf("naozhi-%s-%s", goos, goarch)
+	return fmt.Sprintf("naozhi-%s-%s", runtime.GOOS, runtime.GOARCH)
 }
 
 func fetchFile(ctx context.Context, url, dest string) error {
@@ -184,8 +205,12 @@ func fetchFile(ctx context.Context, url, dest string) error {
 		return err
 	}
 	defer f.Close()
-	_, err = io.Copy(f, resp.Body)
-	return err
+
+	if _, err := io.Copy(f, io.LimitReader(resp.Body, maxBinaryBytes)); err != nil {
+		return err
+	}
+	// Flush to disk before the caller verifies the checksum.
+	return f.Sync()
 }
 
 func verifyChecksum(binPath, sumPath, asset string) error {
@@ -224,7 +249,8 @@ func verifyChecksum(binPath, sumPath, asset string) error {
 	return nil
 }
 
-// copyFile copies src to dst, preserving the src file mode.
+// copyFile copies src to dst (preserving src mode) and fsyncs the destination.
+// Used for backup and rollback where data integrity matters more than speed.
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
@@ -243,6 +269,8 @@ func copyFile(src, dst string) error {
 	}
 	defer out.Close()
 
-	_, err = io.Copy(out, in)
-	return err
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return out.Sync()
 }

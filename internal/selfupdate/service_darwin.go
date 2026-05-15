@@ -7,7 +7,10 @@ import (
 	"path/filepath"
 )
 
-func launchdPlistPath() string {
+// LaunchdPlistPath returns the LaunchAgents plist path for the naozhi service.
+func LaunchdPlistPath() string {
 	home, _ := os.UserHomeDir()
-	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")
+	return filepath.Join(home, "Library", "LaunchAgents", LaunchdLabel+".plist")
 }
+
+func launchdPlistPath() string { return LaunchdPlistPath() }

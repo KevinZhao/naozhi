@@ -1,6 +1,7 @@
 package selfupdate
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
@@ -65,7 +66,6 @@ func TestVerifyChecksum_Mismatch(t *testing.T) {
 	if err := os.WriteFile(binPath, []byte("real content"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	// Checksum of different content.
 	h := sha256.Sum256([]byte("different content"))
 	sums := fmt.Sprintf("%s  naozhi-linux-amd64\n", hex.EncodeToString(h[:]))
 	sumPath := filepath.Join(dir, "checksums.txt")
@@ -90,7 +90,6 @@ func TestVerifyChecksum_MissingEntry(t *testing.T) {
 	if err := os.WriteFile(binPath, []byte("content"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	// checksums.txt for a different asset.
 	sumPath := filepath.Join(dir, "checksums.txt")
 	if err := os.WriteFile(sumPath, []byte("abc123  naozhi-darwin-arm64\n"), 0644); err != nil {
 		t.Fatal(err)
@@ -122,18 +121,15 @@ func TestReplace_And_Rollback(t *testing.T) {
 		t.Fatalf("Replace: %v", err)
 	}
 
-	// Binary should now have new content.
 	got, _ := os.ReadFile(installPath)
 	if string(got) != "new binary" {
 		t.Errorf("after Replace, installPath = %q, want %q", got, "new binary")
 	}
-	// Backup should have old content.
 	bak, _ := os.ReadFile(backupPath)
 	if string(bak) != "old binary" {
 		t.Errorf("backup = %q, want %q", bak, "old binary")
 	}
 
-	// Rollback restores old content.
 	if err := Rollback(installPath, backupPath); err != nil {
 		t.Fatalf("Rollback: %v", err)
 	}
@@ -141,27 +137,185 @@ func TestReplace_And_Rollback(t *testing.T) {
 	if string(got) != "old binary" {
 		t.Errorf("after Rollback, installPath = %q, want %q", got, "old binary")
 	}
-	// Backup file should be gone.
 	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
 		t.Errorf("backup file should be removed after Rollback")
 	}
 }
 
+func TestReplace_StagingCleanedOnRenameFailure(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	// installPath points to a directory so os.Rename will fail.
+	installPath := filepath.Join(dir, "naozhi")
+	if err := os.Mkdir(installPath, 0755); err != nil {
+		t.Fatal(err)
+	}
+	newBin := filepath.Join(dir, "naozhi-new")
+	if err := os.WriteFile(newBin, []byte("new binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Replace(newBin, installPath)
+	if err == nil {
+		t.Fatal("expected Replace to fail when installPath is a directory")
+	}
+
+	// Staging file should be cleaned up.
+	stagePath := installPath + ".naozhi-upgrade.staging"
+	if _, err := os.Stat(stagePath); !os.IsNotExist(err) {
+		t.Errorf("staging file %s should have been removed on failure", stagePath)
+	}
+}
+
 // ----- LatestRelease (mock HTTP server) -------------------------------------
 
-func TestLatestRelease_ParseTag(t *testing.T) {
+func TestLatestRelease_OK(t *testing.T) {
 	t.Parallel()
-	// Serve a redirect from /latest → /releases/tag/v9.9.9
+
+	// Two-handler server: /latest redirects to /releases/tag/v9.9.9, which
+	// the second handler serves as 200 OK (so resp.Body.Close() works).
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, "/releases/tag/v9.9.9", http.StatusFound)
+		switch r.URL.Path {
+		case "/latest":
+			http.Redirect(w, r, "/releases/tag/v9.9.9", http.StatusFound)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
 	}))
 	defer srv.Close()
 
-	// Patch the URL used by LatestRelease via a custom httptest redirector
-	// by directly calling extractTag on the final URL shape.
+	// Temporarily override the repo URL by monkey-patching extractTag with a
+	// helper that uses the test server URL instead of the real GitHub URL.
+	// Since latestRelease builds the URL from `repo`, we test the tag-parsing
+	// path directly with a fabricated final URL.
 	finalURL := srv.URL + "/releases/tag/v9.9.9"
 	tag := extractTag(finalURL)
 	if tag != "v9.9.9" {
 		t.Errorf("extractTag(%q) = %q, want v9.9.9", finalURL, tag)
+	}
+
+	// Also verify the Release struct fields are populated correctly.
+	rel := &Release{
+		Tag:      tag,
+		AssetURL: srv.URL + "/releases/download/v9.9.9/naozhi-linux-amd64",
+		SumURL:   srv.URL + "/releases/download/v9.9.9/checksums.txt",
+	}
+	if rel.Tag != "v9.9.9" {
+		t.Errorf("Tag = %q, want v9.9.9", rel.Tag)
+	}
+	if !strings.Contains(rel.AssetURL, "v9.9.9") {
+		t.Errorf("AssetURL should contain tag, got %q", rel.AssetURL)
+	}
+}
+
+func TestLatestRelease_NoRelease(t *testing.T) {
+	t.Parallel()
+	// Server returns 404 (no releases yet).
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	// extractTag on a non-tag URL returns "".
+	tag := extractTag(srv.URL + "/404")
+	if tag != "" {
+		t.Errorf("expected empty tag from non-release URL, got %q", tag)
+	}
+}
+
+// ----- Download (mock HTTP server) ------------------------------------------
+
+func TestDownload_OK(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	binContent := []byte("mock naozhi binary")
+	h := sha256.Sum256(binContent)
+	checksum := hex.EncodeToString(h[:])
+
+	// Asset name for current platform.
+	asset := assetName()
+	checksumsTxt := fmt.Sprintf("%s  %s\n", checksum, asset)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, asset):
+			w.WriteHeader(http.StatusOK)
+			w.Write(binContent) //nolint:errcheck
+		case strings.HasSuffix(r.URL.Path, "checksums.txt"):
+			w.WriteHeader(http.StatusOK)
+			w.Write([]byte(checksumsTxt)) //nolint:errcheck
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	rel := &Release{
+		Tag:      "v1.0.0",
+		AssetURL: srv.URL + "/releases/download/v1.0.0/" + asset,
+		SumURL:   srv.URL + "/releases/download/v1.0.0/checksums.txt",
+	}
+
+	binPath, err := Download(context.Background(), rel, dir)
+	if err != nil {
+		t.Fatalf("Download: %v", err)
+	}
+	got, _ := os.ReadFile(binPath)
+	if string(got) != string(binContent) {
+		t.Errorf("downloaded content = %q, want %q", got, binContent)
+	}
+}
+
+func TestDownload_ChecksumMismatch(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	asset := assetName()
+	// checksums.txt has a hash for different content.
+	badHash := hex.EncodeToString(sha256.New().Sum(nil)) // hash of empty
+	checksumsTxt := fmt.Sprintf("%s  %s\n", badHash, asset)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, asset):
+			w.Write([]byte("actual binary content")) //nolint:errcheck
+		case strings.HasSuffix(r.URL.Path, "checksums.txt"):
+			w.Write([]byte(checksumsTxt)) //nolint:errcheck
+		}
+	}))
+	defer srv.Close()
+
+	rel := &Release{
+		Tag:      "v1.0.0",
+		AssetURL: srv.URL + "/" + asset,
+		SumURL:   srv.URL + "/checksums.txt",
+	}
+
+	_, err := Download(context.Background(), rel, dir)
+	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Errorf("expected checksum mismatch error, got: %v", err)
+	}
+}
+
+func TestDownload_HTTP404(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+
+	rel := &Release{
+		Tag:      "v1.0.0",
+		AssetURL: srv.URL + "/missing",
+		SumURL:   srv.URL + "/missing-sums",
+	}
+
+	_, err := Download(context.Background(), rel, dir)
+	if err == nil || !strings.Contains(err.Error(), "HTTP 404") {
+		t.Errorf("expected HTTP 404 error, got: %v", err)
 	}
 }

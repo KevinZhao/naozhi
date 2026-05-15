@@ -33,7 +33,12 @@ func ServiceRunning() bool {
 	}
 }
 
-const launchdLabel = "com.naozhi.naozhi"
+// LaunchdLabel is the launchd service label used by both naozhi install and
+// naozhi upgrade to ensure they operate on the same plist.
+const LaunchdLabel = "com.naozhi.naozhi"
+
+// keep unexported alias so internal helpers stay readable
+const launchdLabel = LaunchdLabel
 
 func restartSystemd() error {
 	// Only restart if the unit is currently active — avoid starting a stopped

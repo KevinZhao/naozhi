@@ -14,6 +14,7 @@ func runUpgrade(args []string) {
 	fs := flag.NewFlagSet("upgrade", flag.ExitOnError)
 	checkOnly := fs.Bool("check-only", false, "check for a newer version without downloading")
 	noRestart := fs.Bool("no-restart", false, "skip service restart after upgrade")
+	force := fs.Bool("force", false, "allow upgrading from a dev build to a release")
 	fs.Usage = func() {
 		fmt.Fprintf(os.Stderr, `Usage: naozhi upgrade [flags]
 
@@ -45,7 +46,11 @@ Flags:
 	}
 
 	if version == "dev" {
-		fmt.Printf("Running a dev build; latest release is %s.\n", rel.Tag)
+		if !*force {
+			fmt.Fprintf(os.Stderr, "Running a dev build. Use --force to replace it with release %s.\n", rel.Tag)
+			os.Exit(1)
+		}
+		fmt.Printf("dev build — upgrading to %s (--force)\n", rel.Tag)
 	} else {
 		fmt.Printf("New version available: %s → %s\n", version, rel.Tag)
 	}
@@ -74,7 +79,7 @@ Flags:
 	}
 	fmt.Printf("Checksum verified.\n")
 
-	// 5. Replace binary.
+	// 5. Replace binary (atomic: stage → rename).
 	fmt.Printf("Installing to %s…\n", selfPath)
 	backupPath, err := selfupdate.Replace(newBin, selfPath)
 	if err != nil {
@@ -82,21 +87,20 @@ Flags:
 	}
 
 	// 6. Restart service (unless skipped or not running).
-	if !*noRestart {
-		if selfupdate.ServiceRunning() {
-			fmt.Printf("Restarting service…\n")
-			if err := selfupdate.RestartService(); err != nil {
-				// Upgrade succeeded but restart failed — roll back and report.
-				fmt.Fprintf(os.Stderr, "error: service restart failed: %v\n", err)
-				fmt.Fprintf(os.Stderr, "Rolling back binary…\n")
-				if rbErr := selfupdate.Rollback(selfPath, backupPath); rbErr != nil {
-					fatalf("rollback failed: %v (original binary backed up at %s)\n", rbErr, backupPath)
-				}
-				fatalf("upgrade rolled back; fix the service issue and retry\n")
+	serviceWasRunning := selfupdate.ServiceRunning()
+	if !*noRestart && serviceWasRunning {
+		fmt.Printf("Restarting service…\n")
+		if err := selfupdate.RestartService(); err != nil {
+			// Upgrade succeeded but restart failed — roll back and report.
+			fmt.Fprintf(os.Stderr, "error: service restart failed: %v\n", err)
+			fmt.Fprintf(os.Stderr, "Rolling back binary…\n")
+			if rbErr := selfupdate.Rollback(selfPath, backupPath); rbErr != nil {
+				fatalf("rollback failed: %v (original binary backed up at %s)\n", rbErr, backupPath)
 			}
-		} else {
-			fmt.Printf("Service not running — skipping restart.\n")
+			fatalf("upgrade rolled back; fix the service issue and retry\n")
 		}
+	} else if !serviceWasRunning {
+		fmt.Printf("Service not running — skipping restart.\n")
 	}
 
 	// 7. Clean up backup on success.
@@ -104,7 +108,7 @@ Flags:
 
 	fmt.Printf("\n✓ naozhi upgraded to %s\n", rel.Tag)
 
-	if *noRestart || !selfupdate.ServiceRunning() {
+	if *noRestart || !serviceWasRunning {
 		fmt.Printf("  Restart the service manually to apply the new binary.\n")
 	}
 }
