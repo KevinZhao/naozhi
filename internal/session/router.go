@@ -47,7 +47,7 @@ func validateModel(model string) error {
 		return fmt.Errorf("%w: exceeds %d bytes", ErrInvalidModel, maxModelBytes)
 	}
 	if !modelRe.MatchString(model) {
-		return fmt.Errorf("%w: must match %s", ErrInvalidModel, modelRe)
+		return fmt.Errorf("%w: must be alphanumeric with optional dots, colons, hyphens or underscores", ErrInvalidModel)
 	}
 	return nil
 }
