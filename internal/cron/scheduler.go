@@ -1354,6 +1354,121 @@ func (s *Scheduler) jobRunningGuard(id string) *atomic.Bool {
 	return actual.(*atomic.Bool)
 }
 
+// jobSnapshot captures the mutable Job fields executeOpt reads under s.mu so
+// the long-running send/notify pipeline can run without holding the lock.
+// Snapshot is taken once after the rate-limit/jitter gate and reused for the
+// rest of the execution; concurrent SetJobPrompt/UpdateJob therefore land
+// for the next tick rather than racing the in-flight result. The shape
+// mirrors the original inline reads — no fields added/removed.
+type jobSnapshot struct {
+	prompt     string
+	workDir    string
+	jobID      string
+	platName   string
+	chatID     string
+	notifyPlat string
+	notifyChat string
+	notify     *bool // nil = unset
+	fresh      bool
+	schedule   string
+}
+
+// snapshotJob reads j under s.mu so a concurrent SetJobPrompt /
+// UpdateJob cannot tear the read across fields. Always returns a value
+// (never nil); j is dereferenced inside the lock.
+func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	snap := jobSnapshot{
+		prompt:     j.Prompt,
+		workDir:    j.WorkDir,
+		jobID:      j.ID,
+		platName:   j.Platform,
+		chatID:     j.ChatID,
+		notifyPlat: j.NotifyPlatform,
+		notifyChat: j.NotifyChatID,
+		fresh:      j.FreshContext,
+		schedule:   j.Schedule,
+	}
+	if j.Notify != nil {
+		v := *j.Notify
+		snap.notify = &v
+	}
+	return snap
+}
+
+// freshContextPreflight handles the fresh-mode prologue: ctx-cancel guard
+// (CRON3), work-dir reachability check (CRON2), Reset, and the post-Reset
+// existence re-check that prevents a leaked CLI process tied to a deleted
+// job ("cron:<id>" orphan).
+//
+// Returns:
+//   - stubRefresh: closure that re-registers the sidebar stub on error
+//     paths so the cron row stays visible. Caller invokes after error
+//     branches; never invoke on success (live session owns the row).
+//   - ok: false means the caller MUST return immediately. The helper has
+//     already written the appropriate slog.Info/Warn + (if applicable)
+//     recordResult + deliverNotice for the failure mode.
+//
+// In persistent mode (snap.fresh=false) the helper short-circuits with
+// ok=true and a no-op stubRefresh so the caller's flow is uniform.
+func (s *Scheduler) freshContextPreflight(j *Job, snap jobSnapshot, key string, lg *slog.Logger, notifyTo NotifyTarget) (stubRefresh func(), ok bool) {
+	if !snap.fresh {
+		return func() {}, true
+	}
+	// CRON3 guard: Scheduler.Stop() cancels stopCtx as its first act; if a
+	// scheduled tick fired just before Stop() took that edge it is still
+	// inside execute() here. Running Reset + GetOrCreate past this point
+	// would race with Router.Shutdown's session-drain and can leak a
+	// brand-new CLI process tied to an orphan "cron:<id>" key that
+	// outlives naozhi. Early-exit on ctx cancellation; the job will run
+	// again on the next start.
+	if err := s.stopCtx.Err(); err != nil {
+		lg.Info("cron fresh spawn suppressed during shutdown", "err", err)
+		return func() {}, false
+	}
+	// CRON2 guard: verify workDir still exists before discarding the
+	// existing session. Without this, an admin who removed the workspace
+	// would trigger Reset → spawnSession → shim StartShim with a bogus
+	// cwd → the job records an error *and* the prior session context is
+	// gone. By checking first we preserve the session for the next run
+	// after the directory is restored. Empty workDir falls back to the
+	// router's default cwd (always reachable).
+	if !workDirReachable(snap.workDir) {
+		lg.Warn("cron fresh spawn aborted: work_dir unreachable",
+			"work_dir", snap.workDir)
+		s.recordResult(j, "", "work_dir unreachable", "")
+		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.jobID))
+		return func() {}, false
+	}
+	s.router.Reset(key)
+	lg.Info("cron fresh context: session reset before run")
+	stubRefresh = func() {
+		s.mu.RLock()
+		jobCopy, exists := s.jobs[snap.jobID]
+		var j2 Job
+		if exists {
+			j2 = *jobCopy
+		}
+		s.mu.RUnlock()
+		if exists {
+			s.registerStub(&j2)
+		}
+	}
+	// Re-check job existence after Reset: a concurrent DeleteJobByID
+	// could have run between the pre-execute snapshot and Reset, in
+	// which case GetOrCreate below would leak a brand-new CLI process
+	// tied to an orphan "cron:<id>" key until TTL cleanup.
+	s.mu.RLock()
+	_, stillExists := s.jobs[snap.jobID]
+	s.mu.RUnlock()
+	if !stillExists {
+		lg.Info("cron job deleted mid-execute, skipping GetOrCreate")
+		return stubRefresh, false
+	}
+	return stubRefresh, true
+}
+
 // executeOpt runs a cron job: send prompt to session, post result to chat.
 // viaTriggerNow=true skips jitter delay (explicit user "run now" expects
 // immediate execution); scheduled tick callers pass false.
@@ -1382,127 +1497,56 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		applyJitter(s.stopCtx, j.Schedule, s.jitterMax)
 	}
 
-	// Snapshot mutable fields under lock to avoid data race with SetJobPrompt.
-	s.mu.Lock()
-	prompt := j.Prompt
-	workDir := j.WorkDir
-	jobID := j.ID
-	platName := j.Platform
-	chatID := j.ChatID
-	notifyPlat := j.NotifyPlatform
-	notifyChat := j.NotifyChatID
-	fresh := j.FreshContext
-	schedule := j.Schedule
-	var notifyOpt *bool
-	if j.Notify != nil {
-		v := *j.Notify
-		notifyOpt = &v
-	}
-	s.mu.Unlock()
+	// Snapshot mutable Job fields once under s.mu so the rest of the
+	// execution can run lock-free; concurrent SetJobPrompt/UpdateJob land
+	// for the next tick rather than racing this in-flight result.
+	snap := s.snapshotJob(j)
 
-	// Resolve the effective notification target for this run. Returns empty
-	// struct when no delivery should happen, so both success and failure
-	// paths below can call notify*() unconditionally-guarded by IsSet().
-	notifyTo := s.resolveNotifyTarget(platName, chatID, notifyPlat, notifyChat, notifyOpt)
+	// Resolve the effective notification target. Returns empty struct
+	// when no delivery should happen, so both success and failure paths
+	// below can call notify*() unconditionally-guarded by IsSet().
+	notifyTo := s.resolveNotifyTarget(snap.platName, snap.chatID, snap.notifyPlat, snap.notifyChat, snap.notify)
 
-	// Named `lg` instead of `log` to avoid shadowing the standard `log`
-	// package imported at the top of the file. While no current code inside
-	// execute() calls into the `log` package, the shadow would silently
-	// redirect any future `log.Printf` edit to this local *slog.Logger and
-	// fail to compile (or worse, compile against a shadowed name). R60-GO-M2.
-	lg := slog.With("cron_id", jobID, "platform", platName, "chat", chatID)
-	lg.Info("cron job executing", "prompt_len", len(prompt))
+	// `lg` instead of `log` to avoid shadowing the standard `log` package
+	// imported at the top of the file (R60-GO-M2).
+	lg := slog.With("cron_id", snap.jobID, "platform", snap.platName, "chat", snap.chatID)
+	lg.Info("cron job executing", "prompt_len", len(snap.prompt))
 	execStart := time.Now()
 
-	// Per-job timeout scales with schedule period (80%, capped by s.execTimeout
-	// as the global upper bound). Prevents a recurring-review-style job from
-	// colliding with its own next tick when the work legitimately takes close
-	// to a full period, while still bounding runaway jobs at the configured
-	// ceiling. See computeJobTimeout for the clamp rules.
-	jobTimeout := computeJobTimeout(schedule, s.execTimeout)
+	// Per-job timeout scales with schedule period (80%, capped by
+	// s.execTimeout). See computeJobTimeout for the clamp rules.
+	jobTimeout := computeJobTimeout(snap.schedule, s.execTimeout)
 	ctx, cancel := context.WithTimeout(s.stopCtx, jobTimeout)
 	defer cancel()
 
-	agentID, cleanText := session.ResolveAgent(prompt, s.agentCommands)
+	agentID, cleanText := session.ResolveAgent(snap.prompt, s.agentCommands)
 	opts := s.agents[agentID]
 	opts.Exempt = true // cron sessions must not count toward maxProcs or evict user sessions
-	if workDir != "" {
-		// Re-check allowedRoot at execute time to close the symlink-swap race:
-		// validateWorkspace at creation resolved symlinks once, but the target
-		// could have been retargeted since. workDirUnderRoot re-evaluates
-		// both sides on every call; allowedRootResolved is only used as a
-		// fallback if the per-call EvalSymlinks on the root fails.
-		if s.allowedRoot != "" && !workDirUnderRoot(workDir, s.allowedRoot, s.allowedRootResolved) {
+	if snap.workDir != "" {
+		// Re-check allowedRoot at execute time to close the symlink-swap
+		// race: validateWorkspace at creation resolved symlinks once, but
+		// the target could have been retargeted since.
+		if s.allowedRoot != "" && !workDirUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved) {
 			lg.Warn("cron job work_dir outside allowed_root; aborting run",
-				"work_dir", workDir)
+				"work_dir", snap.workDir)
 			s.recordResult(j, "", "work_dir outside allowed_root", "")
 			return
 		}
-		opts.Workspace = filepath.Clean(workDir)
+		opts.Workspace = filepath.Clean(snap.workDir)
 	}
-	key := session.CronKey(jobID)
+	key := session.CronKey(snap.jobID)
 
 	// Fresh mode: drop any existing session (and its process + history) so
-	// GetOrCreate spawns a brand-new CLI. Reset is a no-op when no session
-	// exists yet, so first-run behavior is identical to persistent mode.
-	// On error paths (GetOrCreate/Send failure) the sidebar stub is rebuilt
-	// so the cron row does not vanish from the dashboard. On the success
-	// path we skip the stub refresh because the live session carries its
-	// own sidebar entry; re-registering would trigger a spurious broadcast
-	// and briefly revert the row state before the next executeSucceeded.
-	stubRefresh := func() {}
-	if fresh {
-		// CRON3 guard: Scheduler.Stop() cancels stopCtx as its first act; if a
-		// scheduled tick fired just before Stop() took that edge it is still
-		// inside execute() here. Running Reset + GetOrCreate past this point
-		// would race with Router.Shutdown's session-drain and can leak a brand-
-		// new CLI process tied to an orphan "cron:<id>" key that outlives
-		// naozhi (shim cleanup only covers sessions that were in the map at
-		// Shutdown). Early-exit on ctx cancellation instead — the job will
-		// run again on the next start.
-		if err := s.stopCtx.Err(); err != nil {
-			lg.Info("cron fresh spawn suppressed during shutdown", "err", err)
-			return
-		}
-		// CRON2 guard: verify workDir still exists before discarding the
-		// existing session. Without this, an admin who removed the workspace
-		// would trigger Reset → spawnSession → shim StartShim with a bogus
-		// cwd → the job records an error *and* the prior session context is
-		// gone. By checking first we preserve the session for the next run
-		// after the directory is restored. The empty-workDir case falls
-		// back to the router's default cwd (always reachable).
-		if !workDirReachable(workDir) {
-			lg.Warn("cron fresh spawn aborted: work_dir unreachable",
-				"work_dir", workDir)
-			s.recordResult(j, "", "work_dir unreachable", "")
-			s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", jobID))
-			return
-		}
-		s.router.Reset(key)
-		lg.Info("cron fresh context: session reset before run")
-		stubRefresh = func() {
-			s.mu.RLock()
-			jobCopy, ok := s.jobs[jobID]
-			var j2 Job
-			if ok {
-				j2 = *jobCopy
-			}
-			s.mu.RUnlock()
-			if ok {
-				s.registerStub(&j2)
-			}
-		}
-		// Re-check job existence after Reset: a concurrent DeleteJobByID could
-		// have run between the pre-execute snapshot and Reset, in which case
-		// GetOrCreate below would leak a brand-new CLI process tied to an
-		// orphan "cron:<id>" key until TTL cleanup.
-		s.mu.RLock()
-		_, stillExists := s.jobs[jobID]
-		s.mu.RUnlock()
-		if !stillExists {
-			lg.Info("cron job deleted mid-execute, skipping GetOrCreate")
-			return
-		}
+	// GetOrCreate spawns a brand-new CLI. The helper handles ctx-cancel,
+	// workDir reachability, and post-Reset job-existence re-check. On
+	// error paths the returned stubRefresh re-registers the sidebar row
+	// so the cron entry doesn't vanish from the dashboard. On the success
+	// path we skip stubRefresh because the live session carries its own
+	// sidebar entry. Persistent mode short-circuits inside the helper
+	// with a no-op stubRefresh.
+	stubRefresh, ok := s.freshContextPreflight(j, snap, key, lg, notifyTo)
+	if !ok {
+		return
 	}
 
 	sess, _, err := s.router.GetOrCreate(ctx, key, opts)
@@ -1523,7 +1567,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			lg.Error("cron session error", "err", err)
 		}
 		s.recordResult(j, "", "session error: "+err.Error(), "")
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", jobID))
+		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", snap.jobID))
 		stubRefresh()
 		return
 	}
@@ -1558,7 +1602,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			lg.Error("cron send error", "err", err)
 		}
 		s.recordResult(j, "", "send error: "+err.Error(), "")
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", jobID))
+		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", snap.jobID))
 		stubRefresh()
 		return
 	}
@@ -1575,7 +1619,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		// LastError plumbing.
 		metrics.CronExecutionSlowTotal.Add(1)
 		lg.Warn("cron execution slow",
-			"job_id", jobID,
+			"job_id", snap.jobID,
 			"elapsed_ms", elapsed.Milliseconds(),
 			"threshold_ms", cronSlowThreshold.Milliseconds())
 	}
@@ -1586,7 +1630,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// 传空只会出现在错误路径，recordResult 的 "" 分支自行短路。
 	s.recordResult(j, result.Text, "", result.SessionID)
 
-	replyText := fmt.Sprintf("[Cron %s] %s", jobID, result.Text)
+	replyText := fmt.Sprintf("[Cron %s] %s", snap.jobID, result.Text)
 	s.deliverNotice(notifyTo, replyText)
 }
 
