@@ -121,3 +121,35 @@ func TestNewDispatcher_NilRouterStaysUntypedNil(t *testing.T) {
 	// discardQueue with a nil router must be a no-op, not a panic.
 	d.discardQueue("irrelevant:key:0:general")
 }
+
+// TestNewDispatcher_ResolverFabricatedWhenNil pins the contract that
+// removed the legacy nil-resolver inline branches in dispatch.go /
+// commands.go. Production wiring always passes a Resolver but headless
+// constructions (and the in-tree test harnesses below) leave it nil; the
+// constructor must fabricate a project-less fallback so that the IM,
+// /urgent, and slash-command paths can dereference d.resolver
+// unconditionally. If a future refactor drops the fabrication and
+// reintroduces nil, the next IM message would crash with a nil pointer
+// dereference instead of returning a sane unbound-chat key.
+func TestNewDispatcher_ResolverFabricatedWhenNil(t *testing.T) {
+	t.Parallel()
+
+	// Case 1: no Resolver, no ProjectMgr — should still get a usable resolver.
+	d := NewDispatcher(DispatcherConfig{
+		Agents: map[string]session.AgentOpts{"general": {}},
+	})
+	if d.resolver == nil {
+		t.Fatal("NewDispatcher must fabricate a Resolver when cfg.Resolver is nil")
+	}
+	got := d.keyForChat("im", "direct", "user1", "general")
+	if got != "im:direct:user1:general" {
+		t.Errorf("unbound-chat key form drifted: got %q", got)
+	}
+
+	// Case 2: explicit Resolver passes through unchanged.
+	custom := session.NewKeyResolver(map[string]session.AgentOpts{"general": {}}, nil)
+	d2 := NewDispatcher(DispatcherConfig{Resolver: custom})
+	if d2.resolver != custom {
+		t.Fatal("explicit Resolver must be preserved, not replaced by a fresh fabrication")
+	}
+}

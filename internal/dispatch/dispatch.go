@@ -47,11 +47,18 @@ type Dispatcher struct {
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
 	scheduler     *cron.Scheduler
-	projectMgr    *project.Manager
-	// resolver centralises (key, opts) derivation. When non-nil the main
-	// IM path uses it instead of the inlined projectMgr+agents merge.
-	// Nil keeps legacy behaviour for tests / headless constructions that
-	// don't wire a resolver. See docs/rfc/key-resolver.md Phase 2.
+	// projectMgr is retained ONLY for slash-command UX text (e.g. echoing
+	// the bound project's name back to the user from /new, /cd, /project).
+	// All routing-affecting reads of project bindings go through resolver
+	// — do not reintroduce ProjectForChat / EffectivePlanner* calls in
+	// the IM / queue / send paths or the legacy duplicate-routing branches
+	// that R-key-resolver collapsed will quietly come back.
+	projectMgr *project.Manager
+	// resolver centralises (key, opts) derivation for the IM and slash-
+	// command paths. NewDispatcher guarantees this field is non-nil — when
+	// callers don't supply a resolver the constructor fabricates a project-
+	// less fallback so call sites can dereference unconditionally.
+	// See docs/rfc/key-resolver.md Phase 2.
 	resolver    *session.KeyResolver
 	guard       SessionGuard // used by Dashboard/WS path
 	queue       *MessageQueue
@@ -77,21 +84,14 @@ type Dispatcher struct {
 }
 
 // keyForChat returns the routed session key for the given chat coordinates
-// and agentID. Prefers the KeyResolver (project-bound general → planner);
-// falls back to the inlined lookup when no resolver is wired. Kept as a
-// Dispatcher method so slash-command handlers share a single derivation
-// path with the main IM path — see docs/rfc/key-resolver.md §4.2-4.4.
+// and agentID. Delegates to KeyResolver, which encodes project-bound
+// general → planner precedence. NewDispatcher guarantees resolver is
+// non-nil even for headless/test wiring (falls back to a project-less
+// resolver), so no nil-branch is needed here. Kept as a Dispatcher method
+// so slash-command handlers share a single derivation path with the main
+// IM path — see docs/rfc/key-resolver.md §4.2-4.4.
 func (d *Dispatcher) keyForChat(platform, chatType, chatID, agentID string) string {
-	if d.resolver != nil {
-		return d.resolver.KeyForChat(platform, chatType, chatID, agentID)
-	}
-	// Legacy fallback: duplicate minimal project-binding check.
-	if d.projectMgr != nil && agentID == "general" {
-		if proj := d.projectMgr.ProjectForChat(platform, chatType, chatID); proj != nil {
-			return proj.PlannerSessionKey()
-		}
-	}
-	return session.SessionKey(platform, chatType, chatID, agentID)
+	return d.resolver.KeyForChat(platform, chatType, chatID, agentID)
 }
 
 // Metrics returns a snapshot of operational counters for /health.
@@ -120,10 +120,11 @@ type DispatcherConfig struct {
 	AgentCommands map[string]string
 	Scheduler     *cron.Scheduler
 	ProjectMgr    *project.Manager
-	// Resolver, when non-nil, is used by the main IM path for (key, opts)
-	// derivation instead of the legacy inlined merge. Nil keeps the
-	// legacy path for headless/test constructions. Production wiring in
-	// cmd/naozhi.main should always pass a live KeyResolver.
+	// Resolver is the central (key, opts) derivation. Optional: when nil,
+	// NewDispatcher fabricates a fallback resolver from cfg.Agents and a
+	// DataSource derived from cfg.ProjectMgr (which may itself be nil for
+	// pure-headless tests). Production wiring in cmd/naozhi.main always
+	// passes a shared live KeyResolver.
 	Resolver    *session.KeyResolver
 	Guard       SessionGuard
 	Queue       *MessageQueue
@@ -150,10 +151,26 @@ type DispatcherConfig struct {
 // guards like `if d.router != nil` behave as readers expect.
 // Production wiring (server.Start) never passes nil; the guard covers
 // headless/test wiring that may leave the field zeroed.
+//
+// Resolver is required for the main IM path. To keep test/headless
+// constructions ergonomic the constructor builds a fallback resolver
+// from (cfg.Agents, project DataSource derived from cfg.ProjectMgr)
+// when cfg.Resolver is nil — the project data source short-circuits
+// when ProjectMgr is also nil so behaviour matches pre-resolver code.
+// This eliminates the legacy nil-resolver inline branches scattered
+// across dispatch / commands / urgent.
 func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 	var router SessionRouter
 	if cfg.Router != nil {
 		router = cfg.Router
+	}
+	resolver := cfg.Resolver
+	if resolver == nil {
+		var data session.PlannerDataSource
+		if cfg.ProjectMgr != nil {
+			data = project.NewDataSource(cfg.ProjectMgr)
+		}
+		resolver = session.NewKeyResolver(cfg.Agents, data)
 	}
 	return &Dispatcher{
 		router:                router,
@@ -162,7 +179,7 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		agentCommands:         cfg.AgentCommands,
 		scheduler:             cfg.Scheduler,
 		projectMgr:            cfg.ProjectMgr,
-		resolver:              cfg.Resolver,
+		resolver:              resolver,
 		guard:                 cfg.Guard,
 		queue:                 cfg.Queue,
 		dedup:                 cfg.Dedup,
@@ -257,42 +274,12 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 		// include slash commands, ignored non-text items, or dedup hits.
 		d.messageCount.Add(1)
 
-		// Determine session key and opts. Prefer KeyResolver (centralises
-		// project-binding precedence + aliasing-safe ExtraArgs merge as
-		// internal invariants — see docs/rfc/key-resolver.md §3.1 and
-		// session/routing.go). Legacy inlined merge retained as fallback
-		// for headless/test constructions that don't wire a resolver.
-		var key string
-		var opts session.AgentOpts
-		if d.resolver != nil {
-			key, opts = d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
-		} else {
-			// Legacy path: duplicates resolver logic for zero-resolver
-			// test wiring. R37-CONCUR1 aliasing protection lives here
-			// until all legacy callers are migrated.
-			opts = d.agents[agentID]
-			if d.projectMgr != nil {
-				if proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
-					if agentID == "general" {
-						key = proj.PlannerSessionKey()
-						opts.Exempt = true
-						opts.Workspace = proj.Path
-						if m := d.projectMgr.EffectivePlannerModel(proj); m != "" {
-							opts.Model = m
-						}
-						if p := d.projectMgr.EffectivePlannerPrompt(proj); p != "" {
-							opts.ExtraArgs = append(opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)], "--append-system-prompt", p)
-						}
-					} else {
-						key = session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
-						opts.Workspace = proj.Path
-					}
-				}
-			}
-			if key == "" {
-				key = session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
-			}
-		}
+		// Determine session key and opts via KeyResolver — single source of
+		// truth for project-binding precedence and aliasing-safe ExtraArgs
+		// merge (see docs/rfc/key-resolver.md §3.1 and session/routing.go).
+		// NewDispatcher always builds a resolver, so no nil-branch fallback
+		// is needed.
+		key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
 
 		// Convert platform images to CLI image data
 		var images []cli.ImageData

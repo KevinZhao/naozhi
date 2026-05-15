@@ -181,24 +181,9 @@ func (d *Dispatcher) handleUrgentCommand(ctx context.Context, msg platform.Incom
 	// gets the same project-bound opts as the main IM path (previously
 	// /urgent set only Exempt+Workspace and silently dropped planner
 	// model/prompt overrides — see docs/rfc/key-resolver.md §2.1 #3).
-	// Legacy fallback preserves the old "Exempt+Workspace only" behaviour
-	// for headless/test constructions that don't wire a resolver.
+	// NewDispatcher always builds a resolver, so no nil-branch fallback.
 	agentID := "general"
-	var key string
-	var opts session.AgentOpts
-	if d.resolver != nil {
-		key, opts = d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
-	} else {
-		key = session.SessionKey(msg.Platform, msg.ChatType, msg.ChatID, agentID)
-		opts = d.agents[agentID]
-		if d.projectMgr != nil {
-			if proj := d.projectMgr.ProjectForChat(msg.Platform, msg.ChatType, msg.ChatID); proj != nil {
-				key = proj.PlannerSessionKey()
-				opts.Exempt = true
-				opts.Workspace = proj.Path
-			}
-		}
-	}
+	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
 
 	log.Info("/urgent dispatched", "session_key", key, "text_len", len(text))
 
