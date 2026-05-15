@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -44,6 +45,9 @@ func TestRunInstallMissingConfig(t *testing.T) {
 }
 
 func TestLaunchdPlistPath(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("launchd plist path only meaningful on darwin")
+	}
 	path := launchdPlistPath()
 	if !strings.HasSuffix(path, "Library/LaunchAgents/com.naozhi.naozhi.plist") {
 		t.Errorf("unexpected plist path: %s", path)
