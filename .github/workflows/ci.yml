@@ -4,11 +4,9 @@ on:
   push:
     branches:
       - master
-      - dev
   pull_request:
     branches:
       - master
-      - dev
 
 # Cancel in-progress runs on the same ref to save CI budget.
 concurrency:
@@ -80,13 +78,11 @@ jobs:
         continue-on-error: true
 
   # RNEW-TEST-432: Windows build-only job. Not a supported runtime — the
-  # gate exists to surface regressions outside internal/shim (which uses
-  # POSIX-only syscalls that cannot compile on Windows). Job-level
-  # continue-on-error tolerates known-breaking shim compilation.
+  # gate exists to surface regressions in packages that must compile on
+  # all platforms (shim syscall isolation completed 2026-05-15).
   build-windows:
     runs-on: windows-latest
     timeout-minutes: 10
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v5
 
