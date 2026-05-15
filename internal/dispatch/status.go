@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // formatEventLine converts a CLI event to a short status line for IM display.
@@ -22,7 +23,7 @@ func formatEventLine(ev cli.Event) string {
 			}
 			// Show first meaningful line of thinking, truncated
 			first := firstLine(block.Text)
-			return "💭 " + cli.TruncateRunes(first, 50)
+			return "💭 " + textutil.TruncateRunes(first, 50)
 		case "tool_use":
 			return formatToolUse(block.Name, block.Input)
 		}
@@ -95,17 +96,17 @@ func formatToolUse(name string, input json.RawMessage) string {
 	case "Bash":
 		var s bashInput
 		if json.Unmarshal(input, &s) == nil && s.Command != "" {
-			return "⚡ " + cli.TruncateRunes(s.Command, 50)
+			return "⚡ " + textutil.TruncateRunes(s.Command, 50)
 		}
 	case "Grep":
 		var s grepInput
 		if json.Unmarshal(input, &s) == nil && s.Pattern != "" {
-			return "🔍 grep " + cli.TruncateRunes(s.Pattern, 40)
+			return "🔍 grep " + textutil.TruncateRunes(s.Pattern, 40)
 		}
 	case "Glob":
 		var s globInput
 		if json.Unmarshal(input, &s) == nil && s.Pattern != "" {
-			return "🔍 " + cli.TruncateRunes(s.Pattern, 40)
+			return "🔍 " + textutil.TruncateRunes(s.Pattern, 40)
 		}
 	case "Agent":
 		var s agentInput
@@ -113,7 +114,7 @@ func formatToolUse(name string, input json.RawMessage) string {
 			// R184-GO-L1: Agent.Description can be multi-line or arbitrarily
 			// long (matches the CLI spawn arg); all other tool_use arms truncate
 			// to a status-banner-friendly rune count, so mirror that here.
-			return "🤖 " + cli.TruncateRunes(s.Description, 50)
+			return "🤖 " + textutil.TruncateRunes(s.Description, 50)
 		}
 	}
 	// Fallback: ACP tool_call titles or unknown tools

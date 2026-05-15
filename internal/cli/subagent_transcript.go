@@ -9,6 +9,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // TranscriptReader streams a subagent's on-disk jsonl transcript (see RFC
@@ -212,8 +214,8 @@ func mapUserLine(raw transcriptLine, ts int64) []EventEntry {
 		return []EventEntry{{
 			Time:    ts,
 			Type:    "text",
-			Summary: TruncateRunes(s, 120),
-			Detail:  TruncateRunes(s, 2000),
+			Summary: textutil.TruncateRunes(s, 120),
+			Detail:  textutil.TruncateRunes(s, 2000),
 		}}
 	}
 
@@ -234,8 +236,8 @@ func mapUserLine(raw transcriptLine, ts int64) []EventEntry {
 			out = append(out, EventEntry{
 				Time:    ts,
 				Type:    "text",
-				Summary: TruncateRunes(txt, 120),
-				Detail:  TruncateRunes(txt, 2000),
+				Summary: textutil.TruncateRunes(txt, 120),
+				Detail:  textutil.TruncateRunes(txt, 2000),
 			})
 		case "tool_result":
 			summary, detail, persistedPath, skip := flattenToolResult(block["content"])
@@ -277,16 +279,16 @@ func mapAssistantLine(raw transcriptLine, ts int64) []EventEntry {
 			out = append(out, EventEntry{
 				Time:    ts,
 				Type:    "thinking",
-				Summary: TruncateRunes(txt, 120),
-				Detail:  TruncateRunes(txt, 2000),
+				Summary: textutil.TruncateRunes(txt, 120),
+				Detail:  textutil.TruncateRunes(txt, 2000),
 			})
 		case "text":
 			txt, _ := block["text"].(string)
 			out = append(out, EventEntry{
 				Time:    ts,
 				Type:    "text",
-				Summary: TruncateRunes(txt, 120),
-				Detail:  TruncateRunes(txt, 2000),
+				Summary: textutil.TruncateRunes(txt, 120),
+				Detail:  textutil.TruncateRunes(txt, 2000),
 			})
 		case "tool_use":
 			name, _ := block["name"].(string)
@@ -317,7 +319,7 @@ func flattenToolResult(c any) (string, string, string, bool) {
 		if strings.Contains(v, "<persisted-output>") || strings.Contains(v, "saved at:") {
 			persisted = extractPersistedPath(v)
 		}
-		return firstLineTrunc(v, 120), TruncateRunes(v, 16000), persisted, false
+		return firstLineTrunc(v, 120), textutil.TruncateRunes(v, 16000), persisted, false
 	case []any:
 		var b strings.Builder
 		onlyRefs := true
@@ -343,7 +345,7 @@ func flattenToolResult(c any) (string, string, string, bool) {
 			return "", "", "", true
 		}
 		s := b.String()
-		return firstLineTrunc(s, 120), TruncateRunes(s, 16000), "", false
+		return firstLineTrunc(s, 120), textutil.TruncateRunes(s, 16000), "", false
 	default:
 		return "", "", "", true
 	}
@@ -388,7 +390,7 @@ func firstLineTrunc(s string, max int) string {
 	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
 		s = s[:idx]
 	}
-	return TruncateRunes(s, max)
+	return textutil.TruncateRunes(s, max)
 }
 
 func parseTranscriptTime(ts string) int64 {
@@ -413,7 +415,7 @@ func formatAssistantToolUseDetail(name string, input any) string {
 	switch name {
 	case "Bash":
 		if cmd, _ := m["command"].(string); cmd != "" {
-			return "Bash " + TruncateRunes(cmd, 120)
+			return "Bash " + textutil.TruncateRunes(cmd, 120)
 		}
 	case "Read":
 		if p, _ := m["file_path"].(string); p != "" {

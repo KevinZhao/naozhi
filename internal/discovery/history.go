@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // historyLine is the minimal schema for a ~/.claude/projects/.../{sessionId}.jsonl line.
@@ -260,8 +261,8 @@ func parseJSONL(path string) ([]cli.EventEntry, error) {
 			if text == "" || IsClaudeSystemInjectedText(text) {
 				continue
 			}
-			summary := cli.TruncateRunes(text, 120)
-			detail := cli.TruncateRunes(text, 2000)
+			summary := textutil.TruncateRunes(text, 120)
+			detail := textutil.TruncateRunes(text, 2000)
 			entries = append(entries, cli.EventEntry{
 				UUID:    uuidFromClaudeLine(hl, ts, "user", summary, detail),
 				Time:    ts,
@@ -288,8 +289,8 @@ func parseJSONL(path string) ([]cli.EventEntry, error) {
 				if b.Type != "text" || strings.TrimSpace(b.Text) == "" {
 					continue
 				}
-				summary := cli.TruncateRunes(b.Text, 120)
-				detail := cli.TruncateRunes(b.Text, 16000)
+				summary := textutil.TruncateRunes(b.Text, 120)
+				detail := textutil.TruncateRunes(b.Text, 16000)
 				entries = append(entries, cli.EventEntry{
 					UUID:    uuidFromClaudeBlock(hl, idx, ts, "text", summary, detail),
 					Time:    ts,
@@ -317,7 +318,7 @@ func uuidFromClaudeLine(hl historyLine, ts int64, typ, summary, detail string) s
 	if u := normalizeClaudeUUID(hl.UUID); u != "" {
 		return u
 	}
-	return cli.DeriveLegacyUUID(ts, typ, summary, detail)
+	return textutil.DeriveLegacyUUID(ts, typ, summary, detail)
 }
 
 // uuidFromClaudeBlock handles assistant records whose line-level UUID
@@ -335,9 +336,9 @@ func uuidFromClaudeBlock(hl historyLine, blockIndex int, ts int64, typ, summary,
 		if blockIndex == 0 {
 			return u
 		}
-		return cli.DeriveLegacyUUID(ts, typ, u+"#"+intToA(blockIndex), detail)
+		return textutil.DeriveLegacyUUID(ts, typ, u+"#"+intToA(blockIndex), detail)
 	}
-	return cli.DeriveLegacyUUID(ts, typ, summary+"#"+intToA(blockIndex), detail)
+	return textutil.DeriveLegacyUUID(ts, typ, summary+"#"+intToA(blockIndex), detail)
 }
 
 // normalizeClaudeUUID strips dashes from a Claude-style UUID so its

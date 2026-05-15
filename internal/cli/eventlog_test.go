@@ -177,30 +177,6 @@ func TestEventLog_Entries_IsCopy(t *testing.T) {
 	}
 }
 
-func TestTruncateRunes_Short(t *testing.T) {
-	t.Parallel()
-	got := TruncateRunes("hello", 10)
-	if got != "hello" {
-		t.Errorf("got %q, want %q", got, "hello")
-	}
-}
-
-func TestTruncateRunes_Truncated(t *testing.T) {
-	t.Parallel()
-	got := TruncateRunes("hello world", 5)
-	if got != "hello..." {
-		t.Errorf("got %q, want %q", got, "hello...")
-	}
-}
-
-func TestTruncateRunes_Unicode(t *testing.T) {
-	t.Parallel()
-	got := TruncateRunes("你好世界测试", 4)
-	if got != "你好世界..." {
-		t.Errorf("got %q, want %q", got, "你好世界...")
-	}
-}
-
 // ─── Subscribe tests ─────────────────────────────────────────────────────────
 
 func TestEventLog_Subscribe_Notified(t *testing.T) {

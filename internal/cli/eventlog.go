@@ -5,7 +5,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 )
 
 const defaultEventLogSize = 500
@@ -344,8 +343,8 @@ func (l *EventLog) invokePersistSink(entries []EventEntry) {
 
 // stampUUID guarantees every appended EventEntry has a non-empty
 // UUID. Legacy callers that already set UUID (e.g. history replay
-// paths using DeriveLegacyUUID for determinism) keep their value;
-// everything else gets a fresh newEventUUID.
+// paths using textutil.DeriveLegacyUUID for determinism) keep their
+// value; everything else gets a fresh newEventUUID.
 //
 // Called from Append / AppendBatch inside the l.mu write-lock so
 // the ring buffer always stores the definitive UUID downstream
@@ -1086,27 +1085,4 @@ func (l *EventLog) BgSubagents() []SubagentInfo {
 	out := make([]SubagentInfo, len(l.bgAgents))
 	copy(out, l.bgAgents)
 	return out
-}
-
-// TruncateRunes truncates s to at most maxRunes runes, appending "..." if truncated.
-// Uses byte-level rune decoding to avoid allocating a full []rune slice.
-func TruncateRunes(s string, maxRunes int) string {
-	// Fast path for short strings: byte count is an upper bound on rune
-	// count, so len(s) <= maxRunes guarantees no truncation is possible.
-	// Tool names and short summaries ("Read", "Write") go through
-	// TruncateRunes at ~5 events/s per active session; skipping the
-	// utf8 decode loop eliminates a steady CPU baseline.
-	if len(s) <= maxRunes {
-		return s
-	}
-	i, count := 0, 0
-	for i < len(s) {
-		if count == maxRunes {
-			return s[:i] + "..."
-		}
-		_, size := utf8.DecodeRuneInString(s[i:])
-		i += size
-		count++
-	}
-	return s
 }

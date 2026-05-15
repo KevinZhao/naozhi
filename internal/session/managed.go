@@ -17,6 +17,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/history"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 const (
@@ -437,7 +438,7 @@ func (s *ManagedSession) touchLastActive() {
 func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, images []cli.ImageData, onEvent cli.EventCallback, priority string) (*cli.SendResult, error) {
 	s.touchLastActive()
 
-	prompt := cli.TruncateRunes(text, 120)
+	prompt := textutil.TruncateRunes(text, 120)
 	if len(images) > 0 {
 		prompt += " [+" + strconv.Itoa(len(images)) + " image(s)]"
 	}
@@ -539,7 +540,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	s.touchLastActive()
 
 	// Cache the user prompt for Snapshot (matches how process.go logs user events).
-	prompt := cli.TruncateRunes(text, 120)
+	prompt := textutil.TruncateRunes(text, 120)
 	if len(images) > 0 {
 		prompt += " [+" + strconv.Itoa(len(images)) + " image(s)]"
 	}

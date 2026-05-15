@@ -26,6 +26,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // EventCallback is called for each intermediate event during Send.
@@ -42,8 +44,8 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 	entry := EventEntry{
 		Time:    time.Now().UnixMilli(),
 		Type:    "user",
-		Summary: TruncateRunes(text, 120),
-		Detail:  TruncateRunes(text, 2000),
+		Summary: textutil.TruncateRunes(text, 120),
+		Detail:  textutil.TruncateRunes(text, 2000),
 	}
 	if len(images) > 0 {
 		entry.Summary += " [+" + strconv.Itoa(len(images)) + " image(s)]"

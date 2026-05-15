@@ -16,11 +16,10 @@ import (
 	"slices"
 	"strings"
 	"sync"
-	"syscall"
 	"time"
 
-	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // Scanner holds the mutable caches that used to be package-level globals
@@ -657,7 +656,7 @@ func extractLastPromptUncached(path string, fileSize int64) string {
 		}
 	}
 
-	return cli.TruncateRunes(lastPrompt, 120)
+	return textutil.TruncateRunes(lastPrompt, 120)
 }
 
 // scanUserPrompt scans lines from the current file position and returns
@@ -1062,7 +1061,7 @@ func WaitAndCleanup(ctx context.Context, pid int, procStartTime uint64, claudeDi
 	ctxCancelled := waitForExit(ctx, pid)
 	if !ctxCancelled && procStartTime != 0 {
 		if actual, err := ProcStartTime(pid); err == nil && actual == procStartTime {
-			_ = syscall.Kill(pid, syscall.SIGKILL)
+			procKillSIGKILL(pid)
 		}
 	}
 	if claudeDir != "" {
@@ -1096,7 +1095,7 @@ func waitForExit(ctx context.Context, pid int) bool {
 	t := time.NewTimer(wait)
 	defer t.Stop()
 	for time.Now().Before(deadline) {
-		if err := syscall.Kill(pid, 0); err != nil {
+		if !procPidAlive(pid) {
 			return false
 		}
 		select {

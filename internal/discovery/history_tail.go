@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // tailChunkSize is the size of each reverse-read chunk. 256KB balances
@@ -311,8 +312,8 @@ func parseHistoryLine(line []byte) ([]cli.EventEntry, bool) {
 		if text == "" || IsClaudeSystemInjectedText(text) {
 			return nil, false
 		}
-		summary := cli.TruncateRunes(text, 120)
-		detail := cli.TruncateRunes(text, 2000)
+		summary := textutil.TruncateRunes(text, 120)
+		detail := textutil.TruncateRunes(text, 2000)
 		return []cli.EventEntry{{
 			UUID:    uuidFromClaudeLine(hl, ts, "user", summary, detail),
 			Time:    ts,
@@ -335,8 +336,8 @@ func parseHistoryLine(line []byte) ([]cli.EventEntry, bool) {
 			if b.Type != "text" || strings.TrimSpace(b.Text) == "" {
 				continue
 			}
-			summary := cli.TruncateRunes(b.Text, 120)
-			detail := cli.TruncateRunes(b.Text, 16000)
+			summary := textutil.TruncateRunes(b.Text, 120)
+			detail := textutil.TruncateRunes(b.Text, 16000)
 			out = append(out, cli.EventEntry{
 				UUID:    uuidFromClaudeBlock(hl, idx, ts, "text", summary, detail),
 				Time:    ts,

@@ -53,6 +53,7 @@ cmd/naozhi/main.go
   -> netutil      Client-IP extraction with trusted-proxy handling
   -> osutil       Home/path expansion, process helpers, sd_notify
   -> ratelimit    Per-key LRU rate limiter (used by login/WS/upload)
+  -> textutil     Zero-dependency leaf: rune-bounded truncation + legacy UUID derivation
 ```
 
 ### CLI Process Lifecycle

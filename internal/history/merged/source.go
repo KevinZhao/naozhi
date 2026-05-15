@@ -13,8 +13,9 @@
 //     on the very first event, making the gap VERY visible.
 //   - Dedup. Once a naozhi-native entry is written, its UUID is
 //     stable (crypto/rand) AND a Claude JSONL copy of the same
-//     turn derives the SAME uuid (DeriveLegacyUUID) — MergedSource
-//     collapses the two to one entry rather than doubling it.
+//     turn derives the SAME uuid (textutil.DeriveLegacyUUID) —
+//     MergedSource collapses the two to one entry rather than
+//     doubling it.
 //
 // Ordering:
 //   - Merged result is strictly ordered by (Time, UUID) ascending.
@@ -120,7 +121,7 @@ func entryCmp(a, b cli.EventEntry) int {
 //
 // Missing UUID: entries without a UUID cannot be deduped by key.
 // They're kept as-is (no dedup pass); the Persister's stampUUID +
-// discovery's DeriveLegacyUUID together ensure this case is rare —
+// discovery's textutil.DeriveLegacyUUID together ensure this case is rare —
 // legacy data produced before the UUID migration, or an entry
 // manufactured by some future path that skipped Append. We don't
 // try to synthesize a dedup key here because any rule we pick

@@ -16,6 +16,8 @@ import (
 	"math"
 	"strings"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // EventEntryFromEvent converts an Event to a single EventEntry.
@@ -67,14 +69,14 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 			entry.ToolUseID = ev.ToolUseID
 			entry.TaskType = ev.TaskType
 			if ev.Description != "" {
-				entry.Summary = TruncateRunes(ev.Description, 120)
+				entry.Summary = textutil.TruncateRunes(ev.Description, 120)
 			}
 		case "task_progress", "task_updated":
 			entry.Type = "task_progress"
 			entry.TaskID = ev.TaskID
 			entry.ToolUseID = ev.ToolUseID
 			if ev.Description != "" {
-				entry.Summary = TruncateRunes(ev.Description, 120)
+				entry.Summary = textutil.TruncateRunes(ev.Description, 120)
 			}
 			entry.LastTool = ev.LastToolName
 			if ev.Usage != nil {
@@ -87,7 +89,7 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 			entry.TaskID = ev.TaskID
 			entry.ToolUseID = ev.ToolUseID
 			if ev.Description != "" {
-				entry.Summary = TruncateRunes(ev.Description, 120)
+				entry.Summary = textutil.TruncateRunes(ev.Description, 120)
 			}
 			entry.Status = ev.Status
 			if ev.Usage != nil {
@@ -112,8 +114,8 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 			switch block.Type {
 			case "thinking":
 				entry.Type = "thinking"
-				entry.Summary = TruncateRunes(block.Text, 120)
-				entry.Detail = TruncateRunes(block.Text, 2000)
+				entry.Summary = textutil.TruncateRunes(block.Text, 120)
+				entry.Detail = textutil.TruncateRunes(block.Text, 2000)
 			case "tool_use":
 				entry.Type = "tool_use"
 				entry.Summary = block.Name
@@ -128,7 +130,7 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 						entry.Subagent = inp.Name
 					}
 					entry.TeamName = inp.TeamName
-					entry.Summary = TruncateRunes(inp.Description, 120)
+					entry.Summary = textutil.TruncateRunes(inp.Description, 120)
 					entry.Background = inp.RunInBackground
 					entry.ToolUseID = block.ID
 				case "TodoWrite":
@@ -148,8 +150,8 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 				}
 			case "text":
 				entry.Type = "text"
-				entry.Summary = TruncateRunes(block.Text, 120)
-				entry.Detail = TruncateRunes(block.Text, 16000)
+				entry.Summary = textutil.TruncateRunes(block.Text, 120)
+				entry.Detail = textutil.TruncateRunes(block.Text, 16000)
 			default:
 				continue
 			}
@@ -167,7 +169,7 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 			// Summary is a one-line digest used for sidebar preview;
 			// AskQuestion field carries the full card payload.
 			if len(ev.AskQuestion.Items) > 0 {
-				entry.Summary = TruncateRunes(ev.AskQuestion.Items[0].Question, 120)
+				entry.Summary = textutil.TruncateRunes(ev.AskQuestion.Items[0].Question, 120)
 			} else {
 				entry.Summary = "AskUserQuestion"
 			}
@@ -181,8 +183,8 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 	case "result":
 		entry := base
 		entry.Type = "result"
-		entry.Summary = TruncateRunes(ev.Result, 200)
-		entry.Detail = TruncateRunes(ev.Result, 16000)
+		entry.Summary = textutil.TruncateRunes(ev.Result, 200)
+		entry.Detail = textutil.TruncateRunes(ev.Result, 16000)
 		entry.Cost = ev.CostUSD
 		return []EventEntry{entry}
 	}
@@ -289,7 +291,7 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 			// R187-PERF-L1: cap pattern to prevent an adversarial LLM response
 			// from inflating EventLog entries (300 runes matches the default
 			// tail below).
-			return toolName + " " + TruncateRunes(s.Pattern, 300)
+			return toolName + " " + textutil.TruncateRunes(s.Pattern, 300)
 		}
 	case "Grep":
 		var s struct {
@@ -298,7 +300,7 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 		}
 		if json.Unmarshal(input, &s) == nil && s.Pattern != "" {
 			// R187-PERF-L1: cap pattern (see Glob note).
-			result := toolName + " " + TruncateRunes(s.Pattern, 300)
+			result := toolName + " " + textutil.TruncateRunes(s.Pattern, 300)
 			if s.Path != "" {
 				result += " in " + shortPath(s.Path)
 			}
@@ -314,7 +316,7 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 				return toolName + " " + s.Description
 			}
 			if s.Command != "" {
-				return toolName + " " + TruncateRunes(s.Command, 80)
+				return toolName + " " + textutil.TruncateRunes(s.Command, 80)
 			}
 		}
 	case "Agent":
@@ -322,7 +324,7 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 			Description string `json:"description"`
 		}
 		if json.Unmarshal(input, &s) == nil && s.Description != "" {
-			return toolName + " " + TruncateRunes(s.Description, 60)
+			return toolName + " " + textutil.TruncateRunes(s.Description, 60)
 		}
 	default:
 		// R188-PERF-P2-C: replaced map[string]json.RawMessage decode with
@@ -344,20 +346,20 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 			// previous semantics without the per-call slice alloc.
 			switch {
 			case inp.Description != "":
-				return toolName + " " + TruncateRunes(inp.Description, 80)
+				return toolName + " " + textutil.TruncateRunes(inp.Description, 80)
 			case inp.FilePath != "":
-				return toolName + " " + TruncateRunes(inp.FilePath, 80)
+				return toolName + " " + textutil.TruncateRunes(inp.FilePath, 80)
 			case inp.Path != "":
-				return toolName + " " + TruncateRunes(inp.Path, 80)
+				return toolName + " " + textutil.TruncateRunes(inp.Path, 80)
 			case inp.Command != "":
-				return toolName + " " + TruncateRunes(inp.Command, 80)
+				return toolName + " " + textutil.TruncateRunes(inp.Command, 80)
 			case inp.Pattern != "":
-				return toolName + " " + TruncateRunes(inp.Pattern, 80)
+				return toolName + " " + textutil.TruncateRunes(inp.Pattern, 80)
 			case inp.Prompt != "":
-				return toolName + " " + TruncateRunes(inp.Prompt, 80)
+				return toolName + " " + textutil.TruncateRunes(inp.Prompt, 80)
 			}
 		}
 	}
 
-	return toolName + ": " + TruncateRunes(string(input), 300)
+	return toolName + ": " + textutil.TruncateRunes(string(input), 300)
 }
