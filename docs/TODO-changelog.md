@@ -1428,3 +1428,35 @@ SyncDir 里对 `syscall.EINVAL` 的使用不拆 —— Windows 下 `os.Open(dir)
 - **R218-PERF-P2-1** `session/router.go countExempt` 每次调用 O(N) 全扫（`countActive` 已有原子快路径，`countExempt` 无）— 需 `exemptCount atomic.Int64` 原子计数
 - **R218-PERF-P2-2** `server/wshub.go` `notifySubscribers` 高并发 channel send 无 pacing（50 WS × 10 subs = 500 sends/event）— 需 benchmark 验证是否瓶颈再决定 batch/sync.Cond 替代
 - **R218-PERF-P2-3** `cli/eventlog.go AppendBatch` sinkCopy append 在 `l.mu` 锁内迭代，并发 reader 在大量历史回放时被阻塞 — 需将 sinkCopy 构建移出锁范围
+
+---
+
+## R220 — 第 35 轮 5-agent 并行 review NEEDS-DESIGN 归档（2026-05-15）
+
+### 直接修（已落地，见本轮 commits）
+- [x] `internal/textutil/truncate.go` `TruncateRunes` 添加 `maxRunes <= 0` 防御性检查
+- [x] `internal/node/reverseconn.go` 3 处 `writeJSON //nolint` 改为记录 `slog.Debug` 便于诊断网络失败
+
+### NEEDS-DESIGN（登记，不直接修）
+
+#### Go / 并发
+
+- **R220-GO-P2-1** `cron/scheduler.go recordResult` 调用 `onExecute` 回调无 panic recover，callback panic 会导致整个 execute goroutine 崩溃丢失 job 结果 — 需在 onExecute 调用处添加 defer recover + slog.Error
+- **R220-GO-P2-2** `dispatch/dispatch.go ownerLoop` collectTimer Stop 后的 drain 逻辑在 ctx.Done 路径和正常路径行为不一致，可能出现 timer 事件泄漏 — 需统一 Stop+drain 模式
+
+#### Security
+
+- **R220-SEC-P2-1** `upload_store.go` Put() 配额检查 check-then-act 不是原子的，高并发下两个 goroutine 可能同时通过检查导致突破配额 — 需在持锁期间完成整个 check+insert
+- **R220-SEC-P2-2** `csrf.go trustedProxy` 模式下 `X-Forwarded-Host` 仅取逗号分隔的第一个值，配置错误的反向代理可能注入额外的 host 导致 CORS 绕过 — 需文档化 trustedProxy 部署要求或增加值格式校验
+- **R220-SEC-P3-1** `attachment/store.go` 文件权限 0o600 依赖 umask，宽松 umask（如 0002）下文件可能被创建为 0o644 — 写入后显式 `os.Chmod` 强制权限不依赖 umask
+
+#### Architecture
+
+- **R220-ARCH-P2-1** `upstream/connector.go` resolver 字段可选但 discoverFunc 也可选，二者均 nil 时 upstream 功能静默退化，无诊断日志 — 在两者均 nil 但 upstream 已配置时 slog.Warn
+- **R220-ARCH-P2-2** `node/reverseconn.go baseCtx` 使用 `context.Background()` 而非继承 Connector 的 ctx，SIGTERM 时 graceful shutdown 延迟 — 需 newReverseConn 接受父 context 参数
+
+#### Performance
+
+- **R220-PERF-P1-1** `cli/eventlog.go applyEntryStateLocked` task_start/task_progress 路径对 turnAgents/bgAgents 做 O(N) 线性扫描查找 TaskID — 需维护 taskID → index 映射
+- **R220-PERF-P1-2** `session/managed.go EventEntriesSince` dead session 分支对 persistedHistory 做完整线性扫描 — 需 `slices.BinarySearchFunc` 快速定位
+- **R220-PERF-P2-1** `server/wshub.go resubscribeEvents` 硬编码 12×5s 轮询无指数退避 — 需可配置或指数退避策略（总时长 ~20s 而非固定 60s）

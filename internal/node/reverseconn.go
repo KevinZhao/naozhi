@@ -444,7 +444,9 @@ func (c *ReverseConn) RefreshSubscription(key string) {
 	hasSubs := len(c.subs[key]) > 0
 	c.subMu.Unlock()
 	if hasSubs {
-		c.writeJSON(ReverseMsg{Type: "subscribe", Key: key}) //nolint
+		if err := c.writeJSON(ReverseMsg{Type: "subscribe", Key: key}); err != nil {
+			slog.Debug("reverseconn: refresh subscribe write failed", "node", c.id, "key", key, "err", err)
+		}
 	}
 }
 
@@ -454,7 +456,9 @@ func (c *ReverseConn) Unsubscribe(cl EventSink, key string) {
 	c.subMu.Unlock()
 
 	if empty {
-		c.writeJSON(ReverseMsg{Type: "unsubscribe", Key: key}) //nolint
+		if err := c.writeJSON(ReverseMsg{Type: "unsubscribe", Key: key}); err != nil {
+			slog.Debug("reverseconn: unsubscribe write failed", "node", c.id, "key", key, "err", err)
+		}
 	}
 	cl.SendJSON(ServerMsg{Type: "unsubscribed", Key: key, Node: c.id})
 }
@@ -465,7 +469,9 @@ func (c *ReverseConn) RemoveClient(cl EventSink) {
 	c.subMu.Unlock()
 
 	for _, key := range emptyKeys {
-		c.writeJSON(ReverseMsg{Type: "unsubscribe", Key: key}) //nolint
+		if err := c.writeJSON(ReverseMsg{Type: "unsubscribe", Key: key}); err != nil {
+			slog.Debug("reverseconn: remove client unsubscribe write failed", "node", c.id, "key", key, "err", err)
+		}
 	}
 }
 
