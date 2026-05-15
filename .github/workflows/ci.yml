@@ -8,6 +8,10 @@ on:
     branches:
       - master
 
+permissions:
+  contents: read
+  issues: write   # needed by the vuln job to open/comment on security issues
+
 # Cancel in-progress runs on the same ref to save CI budget.
 concurrency:
   group: ci-${{ github.ref }}
@@ -37,8 +41,9 @@ jobs:
   vuln:
     runs-on: ubuntu-latest
     timeout-minutes: 10
-    # Vulnerability findings should be visible but not block feature PRs;
-    # operators review them asynchronously.
+    # Vulnerability findings do not block feature PRs — operators review
+    # asynchronously. A GitHub Issue is opened automatically on failure so
+    # findings are not silently lost.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v5
@@ -49,7 +54,38 @@ jobs:
           cache: true
 
       - name: Run govulncheck
+        id: govulncheck
         run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
+
+      - name: Open issue on vulnerability findings
+        if: failure() && github.ref == 'refs/heads/master'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const title = `[vuln] govulncheck findings on ${context.sha.slice(0,7)}`;
+            const { data: issues } = await github.rest.issues.listForRepo({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              state: 'open',
+              labels: 'security,automated',
+            });
+            const existing = issues.find(i => i.title.startsWith('[vuln]'));
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: existing.number,
+                body: `New findings on ${context.sha.slice(0,7)} — [run](${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId})`,
+              });
+            } else {
+              await github.rest.issues.create({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                title,
+                body: `govulncheck found vulnerabilities on master.\n\n**Commit:** ${context.sha}\n**Run:** ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}\n\nReview the run log and update affected dependencies.`,
+                labels: ['security', 'automated'],
+              });
+            }
 
   # darwin hard gate: catches proc_darwin.go / sdnotify_darwin / symlink
   # path divergences that pass Linux silently (e.g. /var → /private/var).
