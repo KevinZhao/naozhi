@@ -369,6 +369,9 @@ func main() {
 		case "doctor":
 			runDoctor(os.Args[2:])
 			return
+		case "upgrade":
+			runUpgrade(os.Args[2:])
+			return
 		}
 	}
 

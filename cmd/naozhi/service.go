@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/selfupdate"
 )
 
 const (
@@ -20,15 +22,14 @@ const (
 	// installer leaves the evidence in the canonical place operators
 	// check first. Cleared on successful install.
 	systemdUnitBackupSuffix = ".naozhi-install.bak"
-	launchdLabel            = "com.naozhi.naozhi"
 )
 
+// launchdLabel and launchdPlistPath are authoritative in internal/selfupdate
+// so that naozhi install and naozhi upgrade always operate on the same plist.
+const launchdLabel = selfupdate.LaunchdLabel
+
 func launchdPlistPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fatalf("determine home directory: %v", err)
-	}
-	return filepath.Join(home, "Library", "LaunchAgents", launchdLabel+".plist")
+	return selfupdate.LaunchdPlistPath()
 }
 
 // serviceUser returns the effective user and home directory for the service.
