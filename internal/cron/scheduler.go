@@ -1546,6 +1546,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// with a no-op stubRefresh.
 	stubRefresh, ok := s.freshContextPreflight(j, snap, key, lg, notifyTo)
 	if !ok {
+		stubRefresh()
 		return
 	}
 
