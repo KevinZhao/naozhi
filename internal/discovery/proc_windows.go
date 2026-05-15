@@ -1,4 +1,11 @@
+//go:build !linux && !darwin
+
 package discovery
+
+import "errors"
+
+// ErrUnsupportedPlatform is returned by platform stubs on non-POSIX systems.
+var ErrUnsupportedPlatform = errors.New("operation not supported on this platform")
 
 // ProcStartTime stub for Windows. The shim/discovery stack is POSIX-only;
 // release.yml excludes windows, and CI's build-windows job is a
@@ -9,3 +16,7 @@ package discovery
 func ProcStartTime(_ int) (uint64, error) {
 	return 0, ErrUnsupportedPlatform
 }
+
+func detectCLIName(_ int) string { return "cli" }
+func procPidAlive(_ int) bool    { return false }
+func procKillSIGKILL(_ int)      {}
