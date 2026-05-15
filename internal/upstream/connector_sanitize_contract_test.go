@@ -72,15 +72,24 @@ func TestLogSystemEvent_GoesThroughSanitizeForLog(t *testing.T) {
 	}
 }
 
-// readConnectorSource returns the contents of connector.go relative to this
-// test file. Resilient to `go test` being invoked from any working directory.
+// readConnectorSource returns the concatenated contents of connector.go
+// and its split siblings (connector_conn.go / connector_rpc.go /
+// connector_subscribe.go) relative to this test file. Resilient to
+// `go test` being invoked from any working directory. After R-split the
+// LogSystemEvent call site lives in connector_rpc.go; reading all four
+// keeps this contract stable through future re-splits.
 func readConnectorSource(t *testing.T) string {
 	t.Helper()
 	_, thisFile, _, _ := runtime.Caller(0)
-	p := filepath.Join(filepath.Dir(thisFile), "connector.go")
-	data, err := os.ReadFile(p)
-	if err != nil {
-		t.Fatalf("read connector.go: %v", err)
+	dir := filepath.Dir(thisFile)
+	var sb strings.Builder
+	for _, name := range []string{"connector.go", "connector_conn.go", "connector_rpc.go", "connector_subscribe.go"} {
+		data, err := os.ReadFile(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		sb.Write(data)
+		sb.WriteByte('\n')
 	}
-	return string(data)
+	return sb.String()
 }
