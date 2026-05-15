@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -893,10 +894,7 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	if len(rev) == 0 {
 		return nil
 	}
-	// Reverse in place — chronological order for the caller.
-	for i, j := 0, len(rev)-1; i < j; i, j = i+1, j-1 {
-		rev[i], rev[j] = rev[j], rev[i]
-	}
+	slices.Reverse(rev)
 	return rev
 }
 
@@ -951,9 +949,7 @@ func (l *EventLog) EntriesBefore(beforeMS int64, limit int) []EventEntry {
 	if len(rev) == 0 {
 		return nil
 	}
-	for i, j := 0, len(rev)-1; i < j; i, j = i+1, j-1 {
-		rev[i], rev[j] = rev[j], rev[i]
-	}
+	slices.Reverse(rev)
 	return rev
 }
 
