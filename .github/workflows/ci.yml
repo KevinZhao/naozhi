@@ -23,6 +23,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          cache: true
 
       - name: Build
         run: go build ./...
@@ -32,9 +33,6 @@ jobs:
 
       - name: Test
         run: go test -race -timeout 300s ./...
-
-      # TODO: add coverage upload (codecov or similar) once the project
-      # decides on a coverage target. Skipped now to keep CI minimal.
 
   vuln:
     runs-on: ubuntu-latest
@@ -48,12 +46,10 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@latest
+          cache: true
 
       - name: Run govulncheck
-        run: govulncheck ./...
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.1.4 ./...
 
   # RNEW-TEST-432: darwin build-tag coverage — catches
   # proc_darwin.go / sdnotify_darwin / atomicfile_nonunix divergences
@@ -67,6 +63,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          cache: true
 
       - name: Build (darwin hard gate)
         run: go build ./...
@@ -79,7 +76,8 @@ jobs:
 
   # RNEW-TEST-432: Windows build-only job. Not a supported runtime — the
   # gate exists to surface regressions in packages that must compile on
-  # all platforms (shim syscall isolation completed 2026-05-15).
+  # all platforms. Shim/discovery syscall isolation was completed 2026-05-15
+  # (_unix.go / _windows.go build-tag split), so this is now a hard gate.
   build-windows:
     runs-on: windows-latest
     timeout-minutes: 10
@@ -89,6 +87,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          cache: true
 
       - name: Build
         run: go build ./...
