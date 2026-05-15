@@ -14,11 +14,9 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"os/signal"
 	"path/filepath"
 	"runtime/debug"
 	"sync"
-	"syscall"
 	"time"
 )
 
@@ -104,7 +102,7 @@ func Run(cfg Config) error {
 	}()
 
 	// Signal handling
-	signal.Ignore(syscall.SIGHUP, syscall.SIGPIPE)
+	ignoreHupPipe()
 
 	// Start CLI subprocess
 	cli, err := startCLI(cfg.CLIPath, cfg.CLIArgs, cfg.CWD)
@@ -117,9 +115,9 @@ func Run(cfg Config) error {
 	_ = CleanStaleSocket(cfg.SocketPath)
 
 	// Create unix socket listener with atomic permissions
-	oldUmask := syscall.Umask(0177)
+	oldUmask := setUmask(0177)
 	listener, err := net.Listen("unix", cfg.SocketPath)
-	syscall.Umask(oldUmask)
+	setUmask(oldUmask)
 	if err != nil {
 		cli.kill()
 		return fmt.Errorf("listen %s: %w", cfg.SocketPath, err)
@@ -206,7 +204,7 @@ func Run(cfg Config) error {
 	// does NOT cancel — if no new attach arrives within 30s, the shim exits,
 	// which is the intended systemctl-stop behavior.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
+	notifyTerminate(sigCh)
 	go func() {
 		for range sigCh {
 			s.mu.Lock()
@@ -231,7 +229,7 @@ func Run(cfg Config) error {
 
 	// SIGUSR2: immediate shutdown
 	usr2Ch := make(chan os.Signal, 1)
-	signal.Notify(usr2Ch, syscall.SIGUSR2)
+	notifyUSR2(usr2Ch)
 	go func() {
 		<-usr2Ch
 		slog.Info("SIGUSR2 received, immediate shutdown")
@@ -988,7 +986,7 @@ type cliProc struct {
 
 func startCLI(cliPath string, args []string, cwd string) (*cliProc, error) {
 	cmd := exec.Command(cliPath, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	setSetsid(cmd)
 	if cwd != "" {
 		cmd.Dir = cwd
 	}
@@ -1057,7 +1055,7 @@ func (c *cliProc) interrupt() {
 		return
 	}
 	if c.cmd.Process != nil {
-		_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGINT)
+		_ = sendProcGroupSIGINT(c.cmd.Process.Pid)
 	}
 }
 
@@ -1065,7 +1063,7 @@ func (c *cliProc) kill() {
 	c.killOnce.Do(func() {
 		_ = c.stdin.Close()
 		if c.cmd.Process != nil {
-			_ = syscall.Kill(-c.cmd.Process.Pid, syscall.SIGKILL)
+			_ = sendProcGroupSIGKILL(c.cmd.Process.Pid)
 		}
 	})
 	c.wait()
