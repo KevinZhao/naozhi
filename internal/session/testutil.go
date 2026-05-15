@@ -69,9 +69,6 @@ func (p *TestProcess) EventEntriesSince(afterMS int64) []cli.EventEntry {
 func (p *TestProcess) EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry {
 	return p.EventLog.EntriesBefore(beforeMS, limit)
 }
-func (p *TestProcess) LastEntryOfType(typ string) cli.EventEntry {
-	return p.EventLog.LastEntryOfType(typ)
-}
 func (p *TestProcess) LastActivitySummary() string                { return p.EventLog.LastActivitySummary() }
 func (p *TestProcess) LastEventAt() time.Time                     { return p.EventLog.LastEventAt() }
 func (p *TestProcess) UserTurnCount() int64                       { return p.EventLog.UserTurnCount() }
