@@ -73,7 +73,6 @@ type processIface interface {
 	EventLastN(n int) []cli.EventEntry
 	EventEntriesSince(afterMS int64) []cli.EventEntry
 	EventEntriesBefore(beforeMS int64, limit int) []cli.EventEntry
-	LastEntryOfType(typ string) cli.EventEntry
 	LastActivitySummary() string
 	// LastEventAt returns the wall-clock time of the most recent live event
 	// appended to the process's EventLog, or zero Time when nothing has
