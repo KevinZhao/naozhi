@@ -21,6 +21,7 @@
 package session_test
 
 import (
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/server"
 	"github.com/naozhi/naozhi/internal/session"
@@ -28,11 +29,12 @@ import (
 )
 
 // Enforce *session.Router satisfies every consumer's interface. All
-// three consumers from docs/rfc/consumer-interfaces.md are covered;
+// four consumers from docs/rfc/consumer-interfaces.md are covered;
 // any new Router method signature drift surfaces here as a single
-// CI failure instead of three scattered ones.
+// CI failure instead of four scattered ones.
 var (
 	_ dispatch.SessionRouter = (*session.Router)(nil)
 	_ server.HubRouter       = (*session.Router)(nil)
 	_ upstream.SessionRouter = (*session.Router)(nil)
+	_ cron.SessionRouter     = (*session.Router)(nil)
 )

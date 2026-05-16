@@ -17,6 +17,7 @@
 package session
 
 import (
+	"slices"
 	"strings"
 )
 
@@ -81,8 +82,20 @@ func NewKeyResolver(defaults map[string]AgentOpts, data PlannerDataSource) *KeyR
 // backing array — without this, two concurrent goroutines reading the
 // same `defaults[agentID].ExtraArgs` would corrupt each other's opts
 // when cap > len (R37-CONCUR1).
+//
+// Aliasing safety extends to ALL return paths, not just the planner
+// branch that appends — even the "early return" paths clone ExtraArgs
+// so a downstream caller that does `opts.ExtraArgs = append(...)` on
+// the returned slice cannot poison the shared defaults map. Without
+// this clone, R215-ARCH-P2-8: a non-planner caller appending to opts
+// would silently mutate r.defaults[agentID].ExtraArgs whenever
+// cap > len.
 func (r *KeyResolver) ResolveForChat(platform, chatType, chatID, agentID string) (key string, opts AgentOpts) {
 	base := r.defaults[agentID] // zero-value safe
+	// Defensive clone of the shared backing array. cheap (typical
+	// ExtraArgs is empty or 1-2 entries) and removes a subtle aliasing
+	// foot-gun for callers further down the chain.
+	base.ExtraArgs = slices.Clone(base.ExtraArgs)
 
 	if r.data == nil {
 		return SessionKey(platform, chatType, chatID, agentID), base

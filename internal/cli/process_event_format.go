@@ -120,7 +120,6 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 				entry.Type = "tool_use"
 				entry.Summary = block.Name
 				entry.Tool = block.Name
-				entry.Detail = formatToolDetail(block)
 				switch block.Name {
 				case "Agent":
 					inp := parseAgentInput(block.Input)
@@ -133,7 +132,20 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 					entry.Summary = textutil.TruncateRunes(inp.Description, 120)
 					entry.Background = inp.RunInBackground
 					entry.ToolUseID = block.ID
+					// R217-PERF-9: derive Detail from already-parsed
+					// agentInput to skip a second json.Unmarshal of
+					// block.Input via formatToolDetail →
+					// FormatToolInput("Agent", ...). The output mirrors the
+					// FormatToolInput Agent branch:
+					//   "Agent " + truncate(description, 60), or "Agent"
+					// when description is empty / input is malformed.
+					if inp.Description != "" {
+						entry.Detail = "Agent " + textutil.TruncateRunes(inp.Description, 60)
+					} else {
+						entry.Detail = "Agent"
+					}
 				case "TodoWrite":
+					entry.Detail = formatToolDetail(block)
 					if todos, ok := ParseTodos(block.Input); ok {
 						entry.Type = "todo"
 						entry.Tool = "TodoWrite"
@@ -147,6 +159,8 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 						// silently falls back to the one-line summary.
 						entry.Detail = TodosDetailJSON(todos)
 					}
+				default:
+					entry.Detail = formatToolDetail(block)
 				}
 			case "text":
 				entry.Type = "text"

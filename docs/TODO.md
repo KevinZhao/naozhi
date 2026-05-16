@@ -1,6 +1,8 @@
 # TODO
 
-> 最后更新 2026-05-15 Round 218 —— 深度 5-agent 并行 review 第 32 轮：4 处 FIX-READY 落地（eventlog slices.Reverse、validateModel error message、ManagedSession loadCliProcess helper、sanitizeResumeLastPrompt IndexFunc 短路）+ NEEDS-DESIGN 归档见 Round 218 节。
+> 最后更新 2026-05-16 Round 218 —— 深度 5-agent 并行 review 第 32 轮：6 处 FIX-READY 落地（PR #40：SubagentLinker goroutine 限并发 + contract_test cron pin；PR #22：eventlog slices.Reverse、validateModel error message、ManagedSession loadCliProcess helper、sanitizeResumeLastPrompt IndexFunc 短路）+ NEEDS-DESIGN 归档见 Round 218 节。
+>
+> 上一轮更新 2026-05-13 Round 217 —— 深度 5-agent 并行 review 第 31 轮：约 18 处 FIX-READY 落地（安全/Go 正确性/小性能/小质量/CR-1 限制常量统一）+ NEEDS-DESIGN 归档见 Round 217 节。
 > 历史 Round 变更详情（narrative + 已修复归档）见 [`docs/TODO-changelog.md`](TODO-changelog.md)。
 >
 > 上一轮更新 2026-05-12 (Round 216 —— 深度 5-agent 并行 review 第 30 轮：15 处 FIX-READY 落地 + NEEDS-DESIGN 归档见 Round 216 节)
@@ -56,47 +58,54 @@
 - [~] **R30-DES1 — 需架构决策（2026-04-29 Round 112 评估降级）**：本轮尝试在 `execute()` 入口加 `stopCtx.Err()` 守卫覆盖 fresh + persistent 两种模式，但这与 Round 95 的设计意图冲突（Round 95 明确将 persistent 模式的 ctx 取消委托给 Router.Shutdown，`TestCRON3_PersistentModeUnaffectedByGuard` 把此行为作为测试护栏）。fresh 分支的 stopCtx.Err() 守卫（`scheduler.go:1260`）已覆盖最危险的"fresh → Reset → 孤立 CLI"路径。persistent 模式的真正修复需要架构级协调：要么把 Router.Shutdown 和 Scheduler.Stop 串联锁定（需 S11 级决策），要么在 GetOrCreate 路径里加 shutdown-awareness（改动面大）。当前降级，等 S11 整体方案落地后重开。
 - [ ] **R29-DES1 — `drainStaleEvents` push-back + goto drain 可吞 interrupted result 事件**: 本轮新发现的 invariant 冲突。在 interrupted/interruptedRun 分支的 for 循环中，若事件顺序为 `[old_nonresult, new_event, old_result]`，读到 `new_event` 后 push-back + `goto drain`，接着 drain 到 `old_result` 时因 `recvAt < cutoff` 被丢弃。interrupted 语义要求 settle 窗口必须拿到 old_result，否则下一 turn 迟到的 result 会污染结果。
 
-## Round 218 — 5-agent 并行 review 第 32 轮（2026-05-15）NEEDS-DESIGN
+## Round 218 — 5-agent 并行 review 第 32 轮（2026-05-16）NEEDS-DESIGN
 
-> 5 reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描共约 80 条发现。
-> 4 条 FIX-READY 已落地（详见 git log）。以下是需设计决策、破坏兼容、跨包重构、
+> 5 reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描共约 100+ 条发现。
+> 6 条 FIX-READY 已落地（PR #40 + PR #22）。以下是需设计决策、破坏兼容、跨包重构、
 > 或方案不唯一不适合本轮直接修的条目。
 
 ### Go 正确性 — 跨包改动
 
-- [ ] **R218-GO-1 — `discoveryCache.startLoop` 初始 `go dc.refresh()` 无 WaitGroup 追踪（P2）**: `startLoop` 启动一个裸 goroutine 做初始 refresh，Server Shutdown 取消 ctx 后该 goroutine 仍在后台运行，可能访问已清理的 projectMgr。方案：给 `discoveryCache` 添加 `wg sync.WaitGroup`，`startLoop` 前 `wg.Add(1)` + defer Done，暴露 `Wait()` 供 Server.Shutdown 调用。涉及：`internal/server/discovery_cache.go:47-60`, `internal/server/server.go` Shutdown 路径。
+- [ ] **R218-GO-1 — `dispatch.go:1143` `sendAskQuestionCard` 里 `rctx` 派生自 turnCtx**: turnCtx 生命周期短暂，若初始 Reply 在 15s 内完成但后续事件触发 timeout，rctx 可能立即过期。建议：rctx 派生自独立的 server-level ctx 或 context.Background()。`internal/dispatch/dispatch.go:1143`。
+- [ ] **R218-GO-2 — `dispatch.go:969-1002` sendAskQuestionCard goroutine 访问可能已释放的 tracker**: stop() 先执行后该 goroutine 仍对已释放 platform 进行类型断言。建议：加 context timeout 或在 stop() 里主动取消待发送卡片 goroutine。`internal/dispatch/dispatch.go:969-1002`。
+- [ ] **R218B-GO-1 — `discoveryCache.startLoop` 初始 `go dc.refresh()` 无 WaitGroup 追踪（P2）**: `startLoop` 启动一个裸 goroutine 做初始 refresh，Server Shutdown 取消 ctx 后该 goroutine 仍在后台运行，可能访问已清理的 projectMgr。方案：给 `discoveryCache` 添加 `wg sync.WaitGroup`，`startLoop` 前 `wg.Add(1)` + defer Done，暴露 `Wait()` 供 Server.Shutdown 调用。涉及：`internal/server/discovery_cache.go:47-60`, `internal/server/server.go` Shutdown 路径。
+- [ ] **R218B-GO-2 — `handleOwnerLoopPanic` 用 `context.Background()` 向用户回送错误（P1 重申 R217-GO-2）**: recovery handler 创建 Background ctx 通知用户，若 appCtx 已取消（shutdown 期间）会挂起。方案：接受 parentCtx 参数或用 `context.WithTimeout(context.Background(), 5*time.Second)`。涉及：`internal/dispatch/dispatch.go:510`。
+- [ ] **R218B-GO-3 — `readLoop` linker.Resolve goroutine 无 context 绑定（P1）**: `go linker.Resolve(taskID, toolUseID, ...)` 启动时无 cancellation。进程 shutdown 后 Resolve 可能继续访问磁盘。方案：`linker.Resolve` 接受 ctx 参数，绑定到 process 生命周期。涉及：`internal/cli/process_readloop.go:324`，`internal/cli/subagent_link.go`。Breaking：是（接口变更）。
+- [ ] **R218B-GO-4 — `shimSend` 在 Kill/Detach 路径错误被忽略（P3）**: `Kill()` 和 `Detach()` 用 `_ = p.shimSendLocked(...)` 吞掉写入错误，无日志无 metric，网络瞬断时 shim 不知道 kill 指令失败。方案：对写入错误加 `slog.Debug`。涉及：`internal/cli/process.go:489, 582`。
 
-- [ ] **R218-GO-2 — `handleOwnerLoopPanic` 用 `context.Background()` 向用户回送错误（P1 重申 R217-GO-2）**: recovery handler 创建 Background ctx 通知用户，若 appCtx 已取消（shutdown 期间）会挂起。方案：接受 parentCtx 参数或用 `context.WithTimeout(context.Background(), 5*time.Second)`。涉及：`internal/dispatch/dispatch.go:510`。
+### 安全 — 新发现（非重复）
 
-- [ ] **R218-GO-3 — `readLoop` linker.Resolve goroutine 无 context 绑定（P1）**: `go linker.Resolve(taskID, toolUseID, ...)` 启动时无 cancellation。进程 shutdown 后 Resolve 可能继续访问磁盘。方案：`linker.Resolve` 接受 ctx 参数，绑定到 process 生命周期。涉及：`internal/cli/process_readloop.go:324`，`internal/cli/subagent_link.go`。Breaking：是（接口变更）。
-
-- [ ] **R218-GO-4 — `shimSend` 在 Kill/Detach 路径错误被忽略（P3）**: `Kill()` 和 `Detach()` 用 `_ = p.shimSendLocked(...)` 吞掉写入错误，无日志无 metric，网络瞬断时 shim 不知道 kill 指令失败。方案：对写入错误加 `slog.Debug`。涉及：`internal/cli/process.go:489, 582`。
-
-### 安全 — 需 operator 决策
-
-- [ ] **R218-SEC-1 — attachment MIME 类型检查在 size gate 后（潜在绕过，P2）**: `parseAttachmentFile` 中 `isPDF := declared == "application/pdf"` 基于 Content-Type header（客户端可控），size gate 依赖 `isPDF` 走不同分支（PDF 用 `maxPDFBytes`，其他用 `maxImageBytes`）。攻击者可伪造 Content-Type=application/pdf 使 PDF 的更大 size limit 应用于实际是图片的文件。现有 magic byte 检查（`detected != "application/pdf"` 最终拒绝）兜底，但客户端可绕过 size gate 上传至 maxPDFBytes。**现状可接受**（magic byte 二次校验存在），添加注释说明 defense-in-depth 设计意图即可，或将 size gate 移到 sniff 之后。涉及：`internal/server/dashboard_send.go:160-178`。
-
-- [ ] **R218-SEC-2 — `project_files.go` stat→open TOCTOU 窗口（P3）**: `statRelWithRoot` 调用 `EvalSymlinks + Stat`，后续 preview handler 再次 `Open` 同路径。两次调用之间攻击者可替换 symlink 指向敏感文件。现有 `EvalSymlinks` 已 resolve 到真实路径，但 preview 端点重新 join + Open 而不是用已 resolved 路径。方案：`statRelWithRoot` 返回 `resolved string` 供 preview handler 直接复用，避免二次 EvalSymlinks。涉及：`internal/server/project_files.go:444-491`。
-
-- [ ] **R218-SEC-3 — `modelRe` 允许 `:` 和 `/` 可能构造 flag 注入（P3）**: `^[A-Za-z0-9][A-Za-z0-9._:/\-]*$` 允许如 `claude-3:evil.com` 这样的模型名。Claude CLI 是否将其解析为 flag 取决于 CLI 实现，当前无已知路径，但建议收紧或加注释说明允许原因（AWS Bedrock ARN 格式需要 `/` 和 `:`）。涉及：`internal/session/router.go:38`。
+- [ ] **R218-SEC-1 — Feishu url_verification 缺 hookSem 保护（R215-SEC-P3-3 重申）**: url_verification 分支未受 hookSem（max 20）限速，token 泄漏后可 flood challenge endpoint。建议：把 url_verification 也纳入 hookSem，或加独立 IP 级 rate limit。`internal/platform/feishu/transport_hook.go:192-232`。
+- [ ] **R218-SEC-2 — scratch `--append-system-prompt` 缺 NUL sanitize（R215-SEC-P2-2 重申）**: buildScratchSystemPrompt 构造的 context block 若含 NUL 字节会在 execve 处静默截断。建议：context 走 validateArgvStrings 等价检查。`internal/session/scratch.go buildScratchSystemPrompt`。
+- [ ] **R218B-SEC-1 — attachment MIME 类型检查在 size gate 后（潜在绕过，P2）**: `parseAttachmentFile` 中 `isPDF := declared == "application/pdf"` 基于 Content-Type header（客户端可控），size gate 依赖 `isPDF` 走不同分支（PDF 用 `maxPDFBytes`，其他用 `maxImageBytes`）。攻击者可伪造 Content-Type=application/pdf 使 PDF 的更大 size limit 应用于实际是图片的文件。现有 magic byte 检查（`detected != "application/pdf"` 最终拒绝）兜底，但客户端可绕过 size gate 上传至 maxPDFBytes。**现状可接受**（magic byte 二次校验存在），添加注释说明 defense-in-depth 设计意图即可，或将 size gate 移到 sniff 之后。涉及：`internal/server/dashboard_send.go:160-178`。
+- [ ] **R218B-SEC-2 — `project_files.go` stat→open TOCTOU 窗口（P3）**: `statRelWithRoot` 调用 `EvalSymlinks + Stat`，后续 preview handler 再次 `Open` 同路径。两次调用之间攻击者可替换 symlink 指向敏感文件。现有 `EvalSymlinks` 已 resolve 到真实路径，但 preview 端点重新 join + Open 而不是用已 resolved 路径。方案：`statRelWithRoot` 返回 `resolved string` 供 preview handler 直接复用，避免二次 EvalSymlinks。涉及：`internal/server/project_files.go:444-491`。
+- [ ] **R218B-SEC-3 — `modelRe` 允许 `:` 和 `/` 可能构造 flag 注入（P3）**: `^[A-Za-z0-9][A-Za-z0-9._:/\-]*$` 允许如 `claude-3:evil.com` 这样的模型名。Claude CLI 是否将其解析为 flag 取决于 CLI 实现，当前无已知路径，但建议收紧或加注释说明允许原因（AWS Bedrock ARN 格式需要 `/` 和 `:`）。涉及：`internal/session/router.go:38`。
 
 ### 性能 — 需 benchmark 确认
 
-- [ ] **R218-PERF-1 — `resubscribeEvents` 每次调用 `time.NewTimer` 分配（P1）**: 客户端重连 flap 时多路并发 `resubscribeEvents` 各自分配 Timer，GC 压力在 N client 同时断线重连场景可观。方案：改用 `time.AfterFunc` 或 Timer 池。注意现有代码已在循环内 Reset 复用同一 Timer（`timer.Reset(5s)`），只是首次分配无法避免——实际影响有限，benchmark 后决策。涉及：`internal/server/wshub.go:1080`。
+- [ ] **R218B-PERF-1 — `resubscribeEvents` 每次调用 `time.NewTimer` 分配（P1）**: 客户端重连 flap 时多路并发 `resubscribeEvents` 各自分配 Timer，GC 压力在 N client 同时断线重连场景可观。方案：改用 `time.AfterFunc` 或 Timer 池。注意现有代码已在循环内 Reset 复用同一 Timer（`timer.Reset(5s)`），只是首次分配无法避免——实际影响有限，benchmark 后决策。涉及：`internal/server/wshub.go:1080`。
+- [ ] **R218B-PERF-2 — `ownerLoop` 每次 collect 窗口 `time.NewTimer` 分配（P2）**: `collectTimer := time.NewTimer(d.queue.CollectDelay())` 在 ownerLoop 函数体内分配，ownerLoop 是每条消息的热路径。方案：改 `time.AfterFunc` 或在 Dispatcher 持有复用 Timer。涉及：`internal/dispatch/dispatch.go:448`。
 
-- [ ] **R218-PERF-2 — `ownerLoop` 每次 collect 窗口 `time.NewTimer` 分配（P2）**: `collectTimer := time.NewTimer(d.queue.CollectDelay())` 在 ownerLoop 函数体内分配，ownerLoop 是每条消息的热路径。方案：改 `time.AfterFunc` 或在 Dispatcher 持有复用 Timer。涉及：`internal/dispatch/dispatch.go:448`。
+### 架构 — 新发现
 
-### 架构 — 大重构
+- [ ] **R218-ARCH-1 — cron.SessionRouter 未纳入 contract_test（已修复，见 PR #40）**: ~~四个 consumer 中 cron 独缺编译期 pin，Router 签名漂移对 cron 无编译报警。~~ — 已修复，见 PR #40
+- [ ] **R218-ARCH-2 — 4 个 consumer SessionRouter 接口定义方法重叠但无共享基础**: dispatch/cron/server/upstream 各声明独立 SessionRouter，方法签名漂移只能靠 contract_test 间接检测，无法共享 `CoreRouter` 提供编译期强绑定。方案：定义 `session.CoreRouter` interface，4 个包 embed 扩展。非 breaking，中等工作量。
+- [ ] **R218-ARCH-3 — Protocol 接口 SupportsX / Capabilities 双轨（R214-ARCH-1 重申）**: Protocol 同时有 SupportsReplay/SupportsPriority 和 Capabilities() Caps，新 backend 实现者不清楚该实现哪个。建议撤除老 Supports* 方法，强制 Capabilities() 单一入口。Non-breaking，小工作量。`internal/cli/protocol.go`。
+- [ ] **R218B-ARCH-1 — `wshub.TrackSend`/`sendClosed` 与 `sendWG` 同步设计文档缺失（P2）**: `sendTrackMu + sendClosed` 序列化 `sendWG.Add(1)` 与 `Shutdown.Wait` 的竞态，逻辑正确但复杂，新增发送路径若不调 `TrackSend` 而直接 `sendWG.Add` 即破坏 Shutdown 契约。方案：在 `wshub.go` 顶部注释明确"所有向 sendWG 注册的路径必须通过 TrackSend"并加测试锁。涉及：`internal/server/wshub.go:101-107,1362-1385`。
+- [ ] **R218B-ARCH-2 — `Dispatcher.projectMgr` 与 `resolver` 双信息源（P3）**: `projectMgr` 仅用于 slash-command UX，`resolver` 持有 DataSource；并发修改下两者可能对同一项目产生不一致视图。方案：将 slash-command 的 projectMgr 访问路由到 resolver 暴露的接口，统一信息源。涉及：`internal/dispatch/dispatch.go:39-84`。
 
-- [ ] **R218-ARCH-1 — `wshub.TrackSend`/`sendClosed` 与 `sendWG` 同步设计文档缺失（P2）**: `sendTrackMu + sendClosed` 序列化 `sendWG.Add(1)` 与 `Shutdown.Wait` 的竞态，逻辑正确但复杂，新增发送路径若不调 `TrackSend` 而直接 `sendWG.Add` 即破坏 Shutdown 契约。方案：在 `wshub.go` 顶部注释明确"所有向 sendWG 注册的路径必须通过 TrackSend"并加测试锁。涉及：`internal/server/wshub.go:101-107,1362-1385`。
+### 代码质量 — 新发现
 
-- [ ] **R218-ARCH-2 — `Dispatcher.projectMgr` 与 `resolver` 双信息源（P3）**: `projectMgr` 仅用于 slash-command UX，`resolver` 持有 DataSource；并发修改下两者可能对同一项目产生不一致视图。方案：将 slash-command 的 projectMgr 访问路由到 resolver 暴露的接口，统一信息源。涉及：`internal/dispatch/dispatch.go:39-84`。
+- [ ] **R218-CR-1 — `dispatch.go:900-950` dispatchCommand 10+ case switch 无表驱动**: 无法编译期验证所有命令被测试覆盖。建议：`map[string]commandHandler` 表驱动 + 循环分派。`internal/dispatch/dispatch.go:900-950`。
+- [ ] **R218-CR-2 — `dispatch.go:770-790` ErrNoActiveProcess 错误信息不区分 cron vs chat key**: 用户在 fresh_context cron 中看到"请 /new 重置"会困惑。建议：按 key 前缀区分返回文案。`internal/dispatch/dispatch.go:770-790`。
+- [ ] **R218-CR-3 — `dispatch.go:545-560` takeoverFn 返回值被丢弃**: 即使 takeover 失败也继续走 GetOrCreate+Send，若 takeover 意图阻止后续操作会被静默忽略。`internal/dispatch/dispatch.go:545-560`。
 
-### 代码质量
+### 已修复锚（PR #22）
 
-- [ ] **R218-CR-1 — `validateBackend` error message 重申 validateModel 已修（本轮落地）**: `validateModel` 此前回显 regex pattern 到 error message（`must match ^[A-Za-z0-9]...`），本轮已改为 human-readable 文字（同 validateBackend 风格）。保留作为已修锚。
-
-- [ ] **R218-CR-2 — `CQ-NEW-P1-3 sanitizeResumeLastPrompt` byte-by-byte 循环（本轮落地）**: 已用 `strings.IndexFunc` 短路替代，保留作已修锚。
+- [x] **R218B-CR-1 — `validateModel` error message 回显 regex pattern**: 已改为 human-readable 文字（同 validateBackend 风格）。
+- [x] **R218B-CR-2 — `sanitizeResumeLastPrompt` byte-by-byte 循环**: 已用 `strings.IndexFunc` 短路替代。
+- [x] **R218B-CR-3 — `EventLog.EntriesSince/EntriesBefore` 手写 reverse 循环**: 已替换为 `slices.Reverse`。
+- [x] **R218B-CR-4 — `ManagedSession.SubagentLinker/AgentEventLog` 重复类型断言**: 已抽出 `loadCliProcess` helper 复用。
 
 ## Round 217 — 5-agent 并行 review 第 31 轮（2026-05-13）NEEDS-DESIGN
 
@@ -135,7 +144,7 @@
 - [ ] **R217-PERF-6 — `selectForIdx` 每 flush 新建 slice**: caller-owned scratch 改造。Breaking：函数签名。
 - [ ] **R217-PERF-7 — `marshalPooled` 对小重复帧（session_state running/ready）总是 copy**: 预 marshal 静态形状帧。
 - [ ] **R217-PERF-8 — `linker.Resolve` 每 task_started 事件 spawn goroutine**: bounded worker pool。多 agent turn 下显著。
-- [ ] **R217-PERF-9 — `FormatToolInput` Agent tool_use 双解码 input**: json.RawMessage 中转。
+- [x] **R217-PERF-9 — `FormatToolInput` Agent tool_use 双解码 input**: json.RawMessage 中转。 — 已修复，见 PR #43
 - [ ] **R217-PERF-10 — `dashboard_session.handleList` workspaces []string 每 poll alloc**: sync.Pool；需 benchmark + 仔细处理 escape。
 
 ### 架构 — 大重构
@@ -437,7 +446,7 @@
   - 待决策：保留 Info 作为 audit trail 还是降 Debug 减噪？
   - 涉及：`internal/session/router.go:2264,2486,2757,2890`
 
-- [ ] **R214-CODE-6 — TODO(RFC v4 phase 3) 无 ticket 引用**: `session/managed.go:950`（AgentIntrospector 抽象）与 `node/protocol.go:33`（agent_event de-dup）无 TODO.md 对应锚点。
+- [x] **R214-CODE-6 — TODO(RFC v4 phase 3) 无 ticket 引用**: `session/managed.go:950`（AgentIntrospector 抽象）与 `node/protocol.go:33`（agent_event de-dup）无 TODO.md 对应锚点。 — 已修复，见 PR #38
   - 方案：在 TODO.md 对应条目引 consumer-interfaces.md 或为两者单独建 ticket。
   - 涉及：`internal/session/managed.go:950`, `internal/node/protocol.go:33`
 
@@ -733,7 +742,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：先释放 historyMu.RUnlock 再调 EventEntries，或在注释基础上加 lock-order lint。
   - 涉及: `internal/session/managed.go:1976-1988`
 
-- [ ] **R215-GO-P2-1 — `session/router.go:978-994` 两处 history-load goroutine 用独立 semaphore 共享同一 WaitGroup**: 期望 `historyLoadConcurrency=10` 的含义可能是"总"而非"每 tier"；当前最多 20 并发磁盘读。
+- [x] **R215-GO-P2-1 — `session/router.go:978-994` 两处 history-load goroutine 用独立 semaphore 共享同一 WaitGroup**: 期望 `historyLoadConcurrency=10` 的含义可能是"总"而非"每 tier"；当前最多 20 并发磁盘读。 — 已修复，见 PR #37
   - 方案：共享单一 sem，或明确文档化"per-tier"意图。
   - 涉及: 两个 semaphore 构造点
 
@@ -823,11 +832,11 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：抽 `internal/keys` 或类似共享包，或加契约测试并排断言。
   - 涉及: `internal/session/key.go:99-110`, `internal/project/project.go:92-94`
 
-- [ ] **R215-CR-P2-1 — dispatch/server 两处 Error→用户消息 switch 漂移**: `context.DeadlineExceeded` 在 server/errors_usermsg.go 有 mapping 而 dispatch/dispatch.go 没有。
+- [x] **R215-CR-P2-1 — dispatch/server 两处 Error→用户消息 switch 漂移**: `context.DeadlineExceeded` 在 server/errors_usermsg.go 有 mapping 而 dispatch/dispatch.go 没有。 — 已修复，见 PR #36
   - 方案：抽 `usermsg.Translate(err, ErrCtx{...}) string` 单入口。
   - 涉及: `internal/dispatch/dispatch.go:624-666`, `internal/server/errors_usermsg.go:22-60`
 
-- [ ] **R215-CR-P2-2 — `formatAssistantToolUseDetail` 与 `FormatToolInput` 双实现且分歧**: Bash 截断长度 120 vs 80；后者覆盖 Glob/Grep/Agent/MCP 前者不覆盖。
+- [x] **R215-CR-P2-2 — `formatAssistantToolUseDetail` 与 `FormatToolInput` 双实现且分歧**: Bash 截断长度 120 vs 80；后者覆盖 Glob/Grep/Agent/MCP 前者不覆盖。 — 已修复，见 PR #44
   - 方案：FormatToolInput 扩 `any` 入参或加 `FormatToolInputFromAny`，subagent_transcript 复用。
   - 涉及: `internal/cli/subagent_transcript.go:410-433`
 
