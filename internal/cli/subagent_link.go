@@ -34,6 +34,14 @@ var agentHexRe = regexp.MustCompile(`^[A-Za-z0-9]{8,64}$`)
 // window (default 3 s). The on-resolve callback then starts the silent
 // TranscriptReader tailer and backfills EventEntry.InternalAgentID so
 // persistHistory captures the linkage (see §3.3.7 SeedFromHistory).
+// maxConcurrentResolves caps the number of Resolve goroutines that may
+// execute concurrently per SubagentLinker. Each Resolve sleeps up to
+// retryLimit*retryInterval (default 3 s) waiting for the CLI to flush its
+// jsonl; a single multi-agent turn can emit 10+ task_started events in
+// rapid succession, each spawning a goroutine. Without a cap, long-running
+// agents accumulate hundreds of parked goroutines per session.
+const maxConcurrentResolves = 8
+
 type SubagentLinker struct {
 	mu              sync.RWMutex
 	byTaskID        map[string]LinkInfo
@@ -49,6 +57,10 @@ type SubagentLinker struct {
 
 	onResolveMu  sync.Mutex
 	onResolveFns []func(taskID, toolUseID, internalAgentID string)
+
+	// resolveSem bounds concurrent Resolve goroutines. Buffered channel
+	// acts as a counting semaphore: acquire by sending, release by receiving.
+	resolveSem chan struct{}
 
 	// Tunable via tests. Defaults: 250ms * 12 = 3s grace; 200ms dir cache.
 	retryInterval time.Duration
@@ -88,6 +100,7 @@ func NewSubagentLinker() *SubagentLinker {
 		byTaskID:      make(map[string]LinkInfo),
 		byToolUseID:   make(map[string]LinkInfo),
 		byName:        make(map[string][]LinkInfo),
+		resolveSem:    make(chan struct{}, maxConcurrentResolves),
 		retryInterval: 250 * time.Millisecond,
 		retryLimit:    12,
 		cacheTTL:      200 * time.Millisecond,
@@ -210,7 +223,7 @@ func (l *SubagentLinker) ProjectSessionDir() string {
 // for older CLI versions or sidechain agents whose filename convention
 // differs.
 func (l *SubagentLinker) Resolve(taskID, toolUseID, name, description string, agentToolUseMS int64) (LinkInfo, bool) {
-	// Step 1: already resolved?
+	// Step 1: already resolved? (cheap fast path, no semaphore needed)
 	l.mu.RLock()
 	if info, ok := l.byTaskID[taskID]; ok {
 		l.mu.RUnlock()
@@ -235,6 +248,27 @@ func (l *SubagentLinker) Resolve(taskID, toolUseID, name, description string, ag
 	if info, ok := l.resolveByTaskIDFast(taskID, toolUseID, subagentDir, sessionID); ok {
 		return info, true
 	}
+
+	// Acquire a slot before the retry loop. Each retry sleeps up to
+	// retryInterval, so a multi-agent turn that emits 10+ task_started
+	// events would park 10+ goroutines for up to 3 s each without this cap.
+	// resolveSem is nil in linkers constructed by tests that don't call
+	// NewSubagentLinker (legacy test helpers), so guard with a nil check.
+	//
+	// Timeout matches the total retry budget (retryLimit * retryInterval)
+	// so we drop rather than extend the grace window when all slots are busy.
+	if l.resolveSem != nil {
+		t := time.NewTimer(time.Duration(l.retryLimit+1) * l.retryInterval)
+		select {
+		case l.resolveSem <- struct{}{}:
+			t.Stop()
+			defer func() { <-l.resolveSem }()
+		case <-t.C:
+			slog.Debug("agent_link: resolve semaphore full, dropping", "task_id", taskID)
+			return LinkInfo{}, false
+		}
+	}
+
 	var picked metaEntry
 	var pickedFirst firstLineMeta
 
@@ -540,9 +574,28 @@ func (l *SubagentLinker) fireOnResolveLocked(taskID, toolUseID, internalAgentID 
 //
 // Cache miss → rawScan populates dirCache. Cache hit → returns the cached
 // slice by reference; callers must not mutate it.
+//
+// Hot-path RLock fast-path (R215-CR-P2-4): under a turn with N parallel
+// Agent tool_use events, every Resolve calls scanMetaFiles. Without the
+// fast-path each one serialises on l.mu (write lock) even when the cache
+// is fresh — pure cache hits should run concurrently. We try RLock
+// first; if the cache is fresh, return immediately. On miss we upgrade
+// to the write lock and double-check (another goroutine may have
+// populated the cache between our RUnlock and Lock).
 func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
+	l.mu.RLock()
+	if !l.dirCache.at.IsZero() && time.Since(l.dirCache.at) < l.cacheTTL {
+		entries := l.dirCache.entries
+		l.mu.RUnlock()
+		return entries
+	}
+	l.mu.RUnlock()
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// Double-check: another goroutine may have populated the cache
+	// between our RUnlock and Lock. The TTL still applies so a stale
+	// entry from before the gap is correctly rejected.
 	if !l.dirCache.at.IsZero() && time.Since(l.dirCache.at) < l.cacheTTL {
 		return l.dirCache.entries
 	}

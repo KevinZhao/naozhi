@@ -251,6 +251,81 @@ func makeArgsWithCap(content []string, capacity int) []string {
 	return s
 }
 
+// TestResolveForChat_NonPlannerNoAliasing locks R215-ARCH-P2-8: even
+// branches that do NOT append must clone ExtraArgs so a downstream
+// caller appending to opts.ExtraArgs cannot poison the shared
+// defaults backing array.
+//
+// Covers the 3 non-planner return paths:
+//
+//   - r.data == nil (no project layer at all)
+//   - r.data != nil + chat unbound
+//   - r.data != nil + chat bound + non-general agent
+//
+// All three previously returned `base` whose ExtraArgs aliased
+// r.defaults[agentID].ExtraArgs verbatim. The aliasing canary append
+// at the end of each subtest forces the bug to surface as a poisoned
+// shared slot if the clone is ever removed.
+func TestResolveForChat_NonPlannerNoAliasing(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		agentID  string
+		hasData  bool
+		bound    bool
+		bindName string
+	}{
+		{name: "data_nil", agentID: "general"},
+		{name: "data_nonNil_chat_unbound", agentID: "general", hasData: true},
+		{
+			name:     "data_nonNil_chat_bound_nongeneral",
+			agentID:  "code-reviewer",
+			hasData:  true,
+			bound:    true,
+			bindName: "p",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			shared := makeArgsWithCap([]string{"--base"}, 8)
+			defaults := map[string]AgentOpts{
+				tc.agentID: {Model: "sonnet", ExtraArgs: shared},
+			}
+			canaryBefore := append([]string(nil), shared[:cap(shared)]...)
+
+			var data PlannerDataSource
+			if tc.hasData {
+				ds := &fakeDataSource{}
+				if tc.bound {
+					ds.byChat = map[string]ProjectBinding{
+						"feishu:direct:alice": {
+							Bound: true, Name: tc.bindName, WorkspaceDir: "/w",
+						},
+					}
+				}
+				data = ds
+			}
+			r := NewKeyResolver(defaults, data)
+
+			_, opts := r.ResolveForChat("feishu", "direct", "alice", tc.agentID)
+
+			// Force aliasing: append into opts.ExtraArgs. With the
+			// clone in place this writes into a private backing array;
+			// without it, the append (cap=8, len=1) writes the new
+			// element directly into shared[1] and the canary fires.
+			opts.ExtraArgs = append(opts.ExtraArgs, "--injected")
+
+			peek := defaults[tc.agentID].ExtraArgs
+			peekCap := peek[:cap(peek)]
+			if !reflect.DeepEqual(canaryBefore, peekCap) {
+				t.Errorf("aliasing leaked: defaults backing array mutated\n"+
+					"before cap=%d: %#v\nafter  cap=%d: %#v",
+					cap(peek), canaryBefore, cap(peek), peekCap)
+			}
+		})
+	}
+}
+
 // ----- ResolveForPlannerKey ----------------------------------------------
 
 func TestResolveForPlannerKey(t *testing.T) {
