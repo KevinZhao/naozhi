@@ -5872,3 +5872,72 @@ func TestDashboardJS_CronSessionsHiddenByDefault(t *testing.T) {
 		t.Error("dashboard.js: cron-key guard in dismissSession must appear BEFORE DELETE /api/sessions path so × never destroys a scheduled job")
 	}
 }
+
+// TestDashboardJS_NewSessionPaletteLocalOnly pins the contract that the
+// "New session" command palette must list ONLY local-node projects. Remote
+// projects are surfaced via their own node-scoped sidebar; mixing them
+// into the palette led to confused operators creating sessions on the
+// wrong host. Three invariants:
+//  1. A `localProjects()` helper exists and filters projectsData by node.
+//  2. createNewSession's empty-state branch consults localProjects(), not
+//     projectsData.length, so a host with only remote projects still gets
+//     the single-input fallback modal instead of a palette listing remotes.
+//  3. renderPaletteList's iteration source is localProjects(), not
+//     projectsData.forEach, so the palette never offers remote folders.
+func TestDashboardJS_NewSessionPaletteLocalOnly(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// Invariant 1: helper definition + node-normalized filter.
+	if !strings.Contains(js, "function localProjects()") {
+		t.Error("dashboard.js missing localProjects() helper — palette local-only filter has no source of truth")
+	}
+	if !strings.Contains(js, "p.filter(p => (p.node || 'local') === 'local')") &&
+		!strings.Contains(js, "projectsData.filter(p => (p.node || 'local') === 'local')") {
+		t.Error("dashboard.js: localProjects() must normalize missing node to 'local' so legacy projects without the field still appear")
+	}
+
+	// Invariant 2: createNewSession empty-state branch must consult the
+	// helper, not the raw array length. Otherwise a host with N remote
+	// projects but zero local ones would still pop the palette and list
+	// only remotes (which would then be filtered out by invariant 3,
+	// leaving an empty palette).
+	createIdx := strings.Index(js, "function createNewSession()")
+	if createIdx < 0 {
+		t.Fatal("createNewSession not found")
+	}
+	createEnd := strings.Index(js[createIdx:], "\nfunction ")
+	if createEnd < 0 {
+		createEnd = len(js) - createIdx
+	}
+	createBody := js[createIdx : createIdx+createEnd]
+	if !strings.Contains(createBody, "if (!localProjects().length) {") {
+		t.Error("createNewSession empty-state branch must use localProjects().length so remote-only hosts still get the single-input fallback modal")
+	}
+	if strings.Contains(createBody, "if (!projectsData.length) {") {
+		t.Error("createNewSession still gates on projectsData.length — remote projects would defeat the empty-state fallback")
+	}
+
+	// Invariant 3: renderPaletteList iterates localProjects(), not the
+	// raw array. This is the load-bearing line that actually hides remote
+	// folders from the New session UI.
+	renderIdx := strings.Index(js, "function renderPaletteList(state, query)")
+	if renderIdx < 0 {
+		t.Fatal("renderPaletteList not found")
+	}
+	renderEnd := strings.Index(js[renderIdx:], "\nfunction ")
+	if renderEnd < 0 {
+		renderEnd = len(js) - renderIdx
+	}
+	renderBody := js[renderIdx : renderIdx+renderEnd]
+	if !strings.Contains(renderBody, "localProjects().forEach(p => {") {
+		t.Error("renderPaletteList must iterate localProjects() to hide remote folders from the New session palette")
+	}
+	if strings.Contains(renderBody, "projectsData.forEach(p => {") {
+		t.Error("renderPaletteList still iterates projectsData directly — remote folders would leak into the palette")
+	}
+}
