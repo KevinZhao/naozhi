@@ -4811,6 +4811,18 @@ function keyTailDisplay(keyParts) {
   return keyParts[keyParts.length - 1] || '';
 }
 
+// localProjects returns only projects that live on the local node so the
+// "New session" palette never offers folders that physically reside on a
+// remote naozhi. Cross-node creation is intentionally excluded here: opening
+// a remote project's CLI must happen from that node's own session list.
+// `node` is normalized the same way the rest of the dashboard does it
+// (missing/empty → 'local') so legacy projects without a node field still
+// surface in the palette.
+function localProjects() {
+  if (!Array.isArray(projectsData)) return [];
+  return projectsData.filter(p => (p.node || 'local') === 'local');
+}
+
 function createNewSession() {
   // Fetch backends upfront so the picker (if any) is ready when the modal
   // renders. Failure falls back to the single-backend UI — cli.backends
@@ -4819,7 +4831,7 @@ function createNewSession() {
     const ws = defaultWorkspace || '';
     const backendPicker = renderBackendPicker(backendsData);
 
-    if (!projectsData.length) {
+    if (!localProjects().length) {
       const overlay = document.createElement('div');
       overlay.className = 'modal-overlay';
       overlay.innerHTML =
@@ -4931,7 +4943,9 @@ function renderPaletteList(state, query) {
   if (!list) return;
   const q = query.trim();
   const scored = [];
-  projectsData.forEach(p => {
+  // Palette is local-only by design: remote projects are surfaced via their
+  // own node-scoped sidebar instead. See localProjects() for the rationale.
+  localProjects().forEach(p => {
     if (!q) {
       scored.push({project: p, nameRanges: [], pathRanges: [], score: 0});
       return;
