@@ -159,6 +159,15 @@ func uploadOwner(w http.ResponseWriter, r *http.Request, auth *AuthHandlers, tru
 // endpoint sets allowPDF=true.
 func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachment, error) {
 	declared := fh.Header.Get("Content-Type")
+	// declared (Content-Type header) is client-controlled and used here only
+	// to pick the size gate (PDF gets a higher cap than images). A spoofed
+	// `application/pdf` Content-Type therefore lets a non-PDF up to maxPDFBytes
+	// past the metadata gate — this is intentional defense-in-depth: the
+	// http.DetectContentType sniff below (R218B-SEC-1) re-validates against
+	// magic bytes and rejects spoofed PDFs before we persist anything, and
+	// images that lie about being PDFs would still fail the image-prefix path
+	// since `declared` would not start with "image/". The size gate is "best
+	// effort early reject", not the final authority.
 	isPDF := declared == "application/pdf"
 	if isPDF && !allowPDF {
 		return cli.Attachment{}, fmt.Errorf("PDF attachments must be sent via /api/sessions/upload")
