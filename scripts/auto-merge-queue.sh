@@ -129,8 +129,12 @@ process_pr() {
           needs_human=1
           break
         fi
-        if gh run view "$run_id" --repo "$REPO" --log-failed 2>/dev/null \
-           | grep -E "^[^[:space:]]+\s+(Test|UNKNOWN STEP)\s.*FAIL: ($FLAKY_PATTERN)" \
+        # Match both forms:
+        #   --- FAIL: TestXxx (timing)            ← classic test failure
+        #   panic: Fail in goroutine after TestXxx ← goroutine-leak after t.Fatal
+        local logs
+        logs=$(gh run view "$run_id" --repo "$REPO" --log-failed 2>/dev/null || echo "")
+        if echo "$logs" | grep -E "FAIL: ($FLAKY_PATTERN)|panic: Fail in goroutine after ($FLAKY_PATTERN)" \
            >/dev/null; then
           log "    $check_name: matches flaky pattern"
         else
