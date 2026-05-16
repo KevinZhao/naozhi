@@ -111,7 +111,7 @@
 ### 代码质量 — 小改动等合并窗口
 
 - [ ] **R217-CR-1 — `sanitizeClientFilename` 改用 `utf8.RuneCountInString` 短路前已落地（本轮）**：保留作为已修锚。
-- [ ] **R217-CR-2 — `processIface.LastEntryOfType` 在生产路径无调用**: 接口最小化原则，删未用方法（影响 TestProcess stub）。
+- [x] **R217-CR-2 — `processIface.LastEntryOfType` 在生产路径无调用**: 接口最小化原则，删未用方法（影响 TestProcess stub）。 — 已修复，见 PR #30
 - [ ] **R217-CR-3 — `Cleanup` 三阶段加锁窗口**：worst-case stuckKill 目标进程在 Pass 2 已被 spawnSession 替换。`shouldPrune` 已 mitigates，stuckKill 路径未 re-check。需要 pass-2 再次 verify。
 - [ ] **R217-CR-4 — `Hub god struct 36 字段 / `node.Conn` 18+ 方法巨型接口**: 子聚合拆分。
 - [ ] **R217-CR-5 — cross-node 错误注入方向不对称**: 反向有 LogSystemEvent，正向 node.Conn.Send 失败只 slog 不进 EventLog。
@@ -142,7 +142,7 @@
 - [ ] **R216-GO-1 — `ReattachProcessNoCallback` 无 sendMu 保护（R51-CONCUR-002 再确认）**: reconcile 周期调用对运行中 session 发生，docstring 明确标注 "Send() 不在飞行中"，但运行期 reconcile 不满足该假设。需跨 managed.go / router.go 改 lock ordering，合并 RFC。
 - [ ] **R216-GO-2 — `shim.Run()` package-level `shimLogFile *os.File` global**: 包级变量被 deferred panic handler 跨 goroutine 读取，race detector 会报。方案：改 local + closure，或 atomic.Pointer。
   - 涉及：`internal/shim/server.go:78`
-- [ ] **R216-GO-3 — shim accept loop 内 `defer timer.Stop()` 错位**: defer 绑 function scope 而非 select arm，timer 累积泄漏。
+- [x] **R216-GO-3 — shim accept loop 内 `defer timer.Stop()` 错位**: defer 绑 function scope 而非 select arm，timer 累积泄漏。 — 已修复，见 PR #20
   - 涉及：`internal/shim/server.go:300-353`
 - [ ] **R216-GO-4 — `ReconnectShims()` 用 `context.Background()` 启动路径**: N sessions × 15s/timeout，SIGTERM 无法取消启动阶段重连。方案：接受 appCtx 参数。
   - 涉及：`internal/session/router.go:1109-1111`
@@ -183,7 +183,7 @@
 
 ### Round 194 新发现（2026-05-07）
 
-- [ ] **RNEW-004 — cron `executeOpt` 的 `context.Canceled` 分支跳过 `recordResult` + `stubRefresh`**: `scheduler.go:1395-1413` 当 ctx（derived from stopCtx）在 GetOrCreate 后 Send 前被 cancel，函数走 canceled early-exit 但未调 `recordResult`，cron row 的 `LastRunAt` 保持空；stub 可能消失直到下 tick，live session 进程仍在跑 —— 仪表盘与实际状态分裂。
+- [x] **RNEW-004 — cron `executeOpt` 的 `context.Canceled` 分支跳过 `recordResult` + `stubRefresh`**: `scheduler.go:1395-1413` 当 ctx（derived from stopCtx）在 GetOrCreate 后 Send 前被 cancel，函数走 canceled early-exit 但未调 `recordResult`，cron row 的 `LastRunAt` 保持空；stub 可能消失直到下 tick，live session 进程仍在跑 —— 仪表盘与实际状态分裂。 — 已修复，见 PR #18
   - 方案: canceled 分支也调 `stubRefresh()`；或 `defer stubRefresh()` + 成功路径抑制 flag。
   - 涉及: `internal/cron/scheduler.go:1395-1413, 1432`
 
@@ -699,11 +699,11 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：加方法级注释说明双重检查的 rationale（atomic 读为 fast-path optimisation）。
   - 涉及: `internal/session/managed.go:463-473`
 
-- [ ] **R215-GO-P2-3 — `shim.Manager.StartShimWithBackend` 匿名 struct 6× 重复**: `struct{token string; err error}` 6 处出现，未来加字段要同步 6 次。
+- [x] **R215-GO-P2-3 — `shim.Manager.StartShimWithBackend` 匿名 struct 6× 重复**: `struct{token string; err error}` 6 处出现，未来加字段要同步 6 次。 — 已修复，见 PR #20
   - 方案：package-private `type shimReadyMsg struct{...}`。
   - 涉及: `internal/shim/manager.go:280-321`
 
-- [ ] **R215-GO-P2-4 — Unicode 控制字符测试文件用原生字节而非 \uXXXX 转义**: 9 处 staticcheck ST1018，易被编辑器/git hook 破坏。
+- [x] **R215-GO-P2-4 — Unicode 控制字符测试文件用原生字节而非 \uXXXX 转义**: 9 处 staticcheck ST1018，易被编辑器/git hook 破坏。 — 已修复，见 PR #31
   - 方案：改 `` / `‮` 等转义。
   - 涉及: `internal/osutil/loginject_test.go` 等测试文件
 
