@@ -19,6 +19,8 @@ type discoveryCache struct {
 	mu       sync.RWMutex
 	sessions []discovery.DiscoveredSession
 
+	wg sync.WaitGroup // tracks the initial refresh goroutine started by startLoop
+
 	claudeDir  string
 	getExclude func() (pids map[int]bool, sessionIDs map[string]bool, cwds map[string]bool)
 	projectMgr *project.Manager
@@ -45,7 +47,11 @@ func newDiscoveryCache(claudeDir string, getExclude func() (map[int]bool, map[st
 
 // startLoop begins periodic scanning every 10 seconds.
 func (dc *discoveryCache) startLoop(ctx context.Context) {
-	go dc.refresh()
+	dc.wg.Add(1)
+	go func() {
+		defer dc.wg.Done()
+		dc.refresh()
+	}()
 	go func() {
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
@@ -58,6 +64,12 @@ func (dc *discoveryCache) startLoop(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// Wait blocks until all goroutines started by startLoop have exited.
+// Call this during server shutdown after cancelling the context.
+func (dc *discoveryCache) Wait() {
+	dc.wg.Wait()
 }
 
 // refresh runs a discovery scan and updates the cached snapshot.

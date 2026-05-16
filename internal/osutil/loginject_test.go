@@ -114,20 +114,24 @@ func TestSanitizeForLog_RewritesControlBytes(t *testing.T) {
 		{"carriage_return", "error: \rfake log line"},
 		{"tab", "error:\tinjected attr"},
 		{"DEL", "error: \x7f"},
-		{"C1_NEL", "error: second line"},
-		{"bidi_RLO", "error: ‮fake_backwards"},
-		{"bidi_LRI", "error: ⁦isolated"},
-		{"LS", "error:  fake line"},
-		{"PS", "error:  fake paragraph"},
+		// R215-GO-P2-5: use \uXXXX escapes for invisible control runes
+		// (C1, bidi, LS/PS) so the file does not carry raw control bytes
+		// that editors / git hooks / copy-paste paths would silently
+		// mangle. Each label names the codepoint. staticcheck ST1018.
+		{"C1_NEL", "error: \u0085second line"},
+		{"bidi_RLO", "error: \u202efake_backwards"},
+		{"bidi_LRI", "error: \u2066isolated"},
+		{"LS", "error: \u2028fake line"},
+		{"PS", "error: \u2029fake paragraph"},
 		// All unsafe classes at once.
-		{"mixed_hostile", "\n\r\t\x7f‮  "},
+		{"mixed_hostile", "\n\r\t\x7f\u0085\u202e\u2028\u2029"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			got := SanitizeForLog(tc.in, 0)
 			// All the unsafe runes above MUST be stripped from the output.
-			unsafeChars := []string{"\n", "\r", "\t", "\x7f", "", "‮", "⁦", " ", " "}
+			unsafeChars := []string{"\n", "\r", "\t", "\x7f", "\u0085", "\u202e", "\u2066", "\u2028", "\u2029"}
 			for _, c := range unsafeChars {
 				if strings.Contains(got, c) {
 					t.Errorf("SanitizeForLog(%q) = %q — still contains unsafe char %q", tc.in, got, c)
