@@ -71,7 +71,7 @@
 - [ ] **R218B-GO-1 — `discoveryCache.startLoop` 初始 `go dc.refresh()` 无 WaitGroup 追踪（P2）**: `startLoop` 启动一个裸 goroutine 做初始 refresh，Server Shutdown 取消 ctx 后该 goroutine 仍在后台运行，可能访问已清理的 projectMgr。方案：给 `discoveryCache` 添加 `wg sync.WaitGroup`，`startLoop` 前 `wg.Add(1)` + defer Done，暴露 `Wait()` 供 Server.Shutdown 调用。涉及：`internal/server/discovery_cache.go:47-60`, `internal/server/server.go` Shutdown 路径。
 - [ ] **R218B-GO-2 — `handleOwnerLoopPanic` 用 `context.Background()` 向用户回送错误（P1 重申 R217-GO-2）**: recovery handler 创建 Background ctx 通知用户，若 appCtx 已取消（shutdown 期间）会挂起。方案：接受 parentCtx 参数或用 `context.WithTimeout(context.Background(), 5*time.Second)`。涉及：`internal/dispatch/dispatch.go:510`。
 - [ ] **R218B-GO-3 — `readLoop` linker.Resolve goroutine 无 context 绑定（P1）**: `go linker.Resolve(taskID, toolUseID, ...)` 启动时无 cancellation。进程 shutdown 后 Resolve 可能继续访问磁盘。方案：`linker.Resolve` 接受 ctx 参数，绑定到 process 生命周期。涉及：`internal/cli/process_readloop.go:324`，`internal/cli/subagent_link.go`。Breaking：是（接口变更）。
-- [ ] **R218B-GO-4 — `shimSend` 在 Kill/Detach 路径错误被忽略（P3）**: `Kill()` 和 `Detach()` 用 `_ = p.shimSendLocked(...)` 吞掉写入错误，无日志无 metric，网络瞬断时 shim 不知道 kill 指令失败。方案：对写入错误加 `slog.Debug`。涉及：`internal/cli/process.go:489, 582`。
+- [x] **R218B-GO-4 — `shimSend` 在 Kill/Detach 路径错误被忽略（P3）**: `Kill()` 和 `Detach()` 用 `_ = p.shimSendLocked(...)` 吞掉写入错误，无日志无 metric，网络瞬断时 shim 不知道 kill 指令失败。方案：对写入错误加 `slog.Debug`。涉及：`internal/cli/process.go:489, 582`。 — 已修复，见 PR #48
 
 ### 安全 — 新发现（非重复）
 
@@ -79,7 +79,7 @@
 - [ ] **R218-SEC-2 — scratch `--append-system-prompt` 缺 NUL sanitize（R215-SEC-P2-2 重申）**: buildScratchSystemPrompt 构造的 context block 若含 NUL 字节会在 execve 处静默截断。建议：context 走 validateArgvStrings 等价检查。`internal/session/scratch.go buildScratchSystemPrompt`。
 - [ ] **R218B-SEC-1 — attachment MIME 类型检查在 size gate 后（潜在绕过，P2）**: `parseAttachmentFile` 中 `isPDF := declared == "application/pdf"` 基于 Content-Type header（客户端可控），size gate 依赖 `isPDF` 走不同分支（PDF 用 `maxPDFBytes`，其他用 `maxImageBytes`）。攻击者可伪造 Content-Type=application/pdf 使 PDF 的更大 size limit 应用于实际是图片的文件。现有 magic byte 检查（`detected != "application/pdf"` 最终拒绝）兜底，但客户端可绕过 size gate 上传至 maxPDFBytes。**现状可接受**（magic byte 二次校验存在），添加注释说明 defense-in-depth 设计意图即可，或将 size gate 移到 sniff 之后。涉及：`internal/server/dashboard_send.go:160-178`。
 - [ ] **R218B-SEC-2 — `project_files.go` stat→open TOCTOU 窗口（P3）**: `statRelWithRoot` 调用 `EvalSymlinks + Stat`，后续 preview handler 再次 `Open` 同路径。两次调用之间攻击者可替换 symlink 指向敏感文件。现有 `EvalSymlinks` 已 resolve 到真实路径，但 preview 端点重新 join + Open 而不是用已 resolved 路径。方案：`statRelWithRoot` 返回 `resolved string` 供 preview handler 直接复用，避免二次 EvalSymlinks。涉及：`internal/server/project_files.go:444-491`。
-- [ ] **R218B-SEC-3 — `modelRe` 允许 `:` 和 `/` 可能构造 flag 注入（P3）**: `^[A-Za-z0-9][A-Za-z0-9._:/\-]*$` 允许如 `claude-3:evil.com` 这样的模型名。Claude CLI 是否将其解析为 flag 取决于 CLI 实现，当前无已知路径，但建议收紧或加注释说明允许原因（AWS Bedrock ARN 格式需要 `/` 和 `:`）。涉及：`internal/session/router.go:38`。
+- [x] **R218B-SEC-3 — `modelRe` 允许 `:` 和 `/` 可能构造 flag 注入（P3）**: `^[A-Za-z0-9][A-Za-z0-9._:/\-]*$` 允许如 `claude-3:evil.com` 这样的模型名。Claude CLI 是否将其解析为 flag 取决于 CLI 实现，当前无已知路径，但建议收紧或加注释说明允许原因（AWS Bedrock ARN 格式需要 `/` 和 `:`）。涉及：`internal/session/router.go:38`。 — 已修复（加注释说明），见 PR #49
 
 ### 性能 — 需 benchmark 确认
 
