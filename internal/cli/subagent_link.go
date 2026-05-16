@@ -540,9 +540,28 @@ func (l *SubagentLinker) fireOnResolveLocked(taskID, toolUseID, internalAgentID 
 //
 // Cache miss → rawScan populates dirCache. Cache hit → returns the cached
 // slice by reference; callers must not mutate it.
+//
+// Hot-path RLock fast-path (R215-CR-P2-4): under a turn with N parallel
+// Agent tool_use events, every Resolve calls scanMetaFiles. Without the
+// fast-path each one serialises on l.mu (write lock) even when the cache
+// is fresh — pure cache hits should run concurrently. We try RLock
+// first; if the cache is fresh, return immediately. On miss we upgrade
+// to the write lock and double-check (another goroutine may have
+// populated the cache between our RUnlock and Lock).
 func (l *SubagentLinker) scanMetaFiles(dir string) []metaEntry {
+	l.mu.RLock()
+	if !l.dirCache.at.IsZero() && time.Since(l.dirCache.at) < l.cacheTTL {
+		entries := l.dirCache.entries
+		l.mu.RUnlock()
+		return entries
+	}
+	l.mu.RUnlock()
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	// Double-check: another goroutine may have populated the cache
+	// between our RUnlock and Lock. The TTL still applies so a stale
+	// entry from before the gap is correctly rejected.
 	if !l.dirCache.at.IsZero() && time.Since(l.dirCache.at) < l.cacheTTL {
 		return l.dirCache.entries
 	}

@@ -774,6 +774,13 @@ func (s *Server) Start(ctx context.Context) error {
 			s.sessionH.WaitWarmHistory()
 		}
 
+		// Wait for the initial discovery refresh goroutine (R218-GO-1).
+		// ctx is already cancelled above; Wait ensures the goroutine has
+		// exited before projectMgr-dependent state is torn down.
+		if s.discoveryCache != nil {
+			s.discoveryCache.Wait()
+		}
+
 		// Stop RunnablePlatforms (e.g. WebSocket connections)
 		for _, p := range s.platforms {
 			if rp, ok := p.(platform.RunnablePlatform); ok {
