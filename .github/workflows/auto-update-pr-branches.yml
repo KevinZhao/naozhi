@@ -1,0 +1,62 @@
+name: Auto-update PR branches
+
+# 个人 user 仓库无 GitHub merge queue (Team plan only)，用 Actions 定时
+# 把"已挂 auto-merge 且 BEHIND"的 PR 自动 update-branch，让 strict 模式
+# 下的合并队列不阻塞。CI 重跑全绿后 GitHub auto-merge 自动 squash 合入。
+#
+# 设计要点:
+#   - 只动已经挂了 auto-merge 的 PR——尊重作者意图，不主动 update
+#     未挂 auto-merge 的草稿/讨论中 PR
+#   - 失败 (例如 DIRTY 冲突) 不阻塞循环——单个 PR 报错不影响其他
+#   - 串行执行——并发 update 多个 PR 在 strict 模式下没意义
+#     (master 一动，剩余的 PR 又 BEHIND)，串行反而更省 Actions 配额
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: auto-update-pr-branches
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Update behind auto-merge PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          mapfile -t prs < <(
+            gh pr list --repo "$REPO" --state open \
+              --json number,mergeStateStatus,autoMergeRequest,title \
+              --jq '.[] | select(.autoMergeRequest != null and .mergeStateStatus == "BEHIND") | "\(.number)\t\(.title)"'
+          )
+
+          if [ ${#prs[@]} -eq 0 ]; then
+            echo "No BEHIND auto-merge PRs."
+            exit 0
+          fi
+
+          echo "Found ${#prs[@]} BEHIND auto-merge PR(s):"
+          printf '  #%s\n' "${prs[@]}"
+
+          for entry in "${prs[@]}"; do
+            num=$(printf '%s' "$entry" | cut -f1)
+            title=$(printf '%s' "$entry" | cut -f2-)
+            echo "::group::PR #${num} — ${title}"
+            if gh pr update-branch "$num" --repo "$REPO" 2>&1; then
+              echo "::notice::Updated PR #${num}"
+            else
+              echo "::warning::Failed to update PR #${num} (likely DIRTY/conflict — skipping)"
+            fi
+            echo "::endgroup::"
+          done
