@@ -648,7 +648,14 @@ func (d *Dispatcher) sendAndReply(
 		case errors.Is(err, session.ErrNoActiveProcess):
 			// Session has no attached process (paused / reclaimed). A fresh
 			// send will re-spawn via GetOrCreate; the user just needs to retry.
-			errMsg = "会话已休眠，请重新发送消息以唤醒。"
+			// R218-CR-2: distinguish cron-namespace keys so an operator running
+			// fresh_context cron jobs doesn't see an irrelevant "/new 重置" hint
+			// — cron keys aren't user-typeable and /new doesn't apply.
+			if session.IsCronKey(key) {
+				errMsg = "定时任务会话已休眠，下一次触发会自动唤醒。"
+			} else {
+				errMsg = "会话已休眠，请重新发送消息以唤醒。"
+			}
 		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 			// Mirrors server/errors_usermsg.go — when ctx is cancelled by
 			// shutdown or hits its deadline, surface a "system restart" hint
