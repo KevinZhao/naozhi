@@ -395,7 +395,7 @@
   - 待决策：保留 Info 作为 audit trail 还是降 Debug 减噪？
   - 涉及：`internal/session/router.go:2264,2486,2757,2890`
 
-- [ ] **R214-CODE-6 — TODO(RFC v4 phase 3) 无 ticket 引用**: `session/managed.go:950`（AgentIntrospector 抽象）与 `node/protocol.go:33`（agent_event de-dup）无 TODO.md 对应锚点。
+- [x] **R214-CODE-6 — TODO(RFC v4 phase 3) 无 ticket 引用**: `session/managed.go:950`（AgentIntrospector 抽象）与 `node/protocol.go:33`（agent_event de-dup）无 TODO.md 对应锚点。 — 已修复，见 PR #38
   - 方案：在 TODO.md 对应条目引 consumer-interfaces.md 或为两者单独建 ticket。
   - 涉及：`internal/session/managed.go:950`, `internal/node/protocol.go:33`
 
@@ -691,7 +691,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：先释放 historyMu.RUnlock 再调 EventEntries，或在注释基础上加 lock-order lint。
   - 涉及: `internal/session/managed.go:1976-1988`
 
-- [ ] **R215-GO-P2-1 — `session/router.go:978-994` 两处 history-load goroutine 用独立 semaphore 共享同一 WaitGroup**: 期望 `historyLoadConcurrency=10` 的含义可能是"总"而非"每 tier"；当前最多 20 并发磁盘读。
+- [x] **R215-GO-P2-1 — `session/router.go:978-994` 两处 history-load goroutine 用独立 semaphore 共享同一 WaitGroup**: 期望 `historyLoadConcurrency=10` 的含义可能是"总"而非"每 tier"；当前最多 20 并发磁盘读。 — 已修复，见 PR #37
   - 方案：共享单一 sem，或明确文档化"per-tier"意图。
   - 涉及: 两个 semaphore 构造点
 
@@ -781,7 +781,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：抽 `internal/keys` 或类似共享包，或加契约测试并排断言。
   - 涉及: `internal/session/key.go:99-110`, `internal/project/project.go:92-94`
 
-- [ ] **R215-CR-P2-1 — dispatch/server 两处 Error→用户消息 switch 漂移**: `context.DeadlineExceeded` 在 server/errors_usermsg.go 有 mapping 而 dispatch/dispatch.go 没有。
+- [x] **R215-CR-P2-1 — dispatch/server 两处 Error→用户消息 switch 漂移**: `context.DeadlineExceeded` 在 server/errors_usermsg.go 有 mapping 而 dispatch/dispatch.go 没有。 — 已修复，见 PR #36
   - 方案：抽 `usermsg.Translate(err, ErrCtx{...}) string` 单入口。
   - 涉及: `internal/dispatch/dispatch.go:624-666`, `internal/server/errors_usermsg.go:22-60`
 
