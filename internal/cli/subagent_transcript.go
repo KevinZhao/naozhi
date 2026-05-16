@@ -404,27 +404,24 @@ func parseTranscriptTime(ts string) int64 {
 	return t.UnixMilli()
 }
 
-// formatAssistantToolUseDetail mirrors internal/cli/process.go's formatToolDetail
-// but accepts a raw map[string]any from the transcript rather than a typed
-// ContentBlock. Kept lightweight — surfaces common Bash/Read/Edit payloads.
+// formatAssistantToolUseDetail mirrors process_event_format.go's
+// FormatToolInput but accepts the already-decoded map[string]any payload
+// from the on-disk transcript rather than a json.RawMessage.
+//
+// R215-CR-P2-2: delegate to FormatToolInput so the live readLoop path and
+// the on-disk replay path share a single source of truth — this avoids the
+// previous Bash 120 vs 80 cap drift and gives transcript replay full
+// Glob/Grep/Agent/MCP coverage + shortPath normalisation for free.
+//
+// transcript replay is a cold path (only runs when the user pulls subagent
+// history), so the extra Marshal round-trip is acceptable.
 func formatAssistantToolUseDetail(name string, input any) string {
-	m, ok := input.(map[string]any)
-	if !ok {
+	if input == nil {
 		return name
 	}
-	switch name {
-	case "Bash":
-		if cmd, _ := m["command"].(string); cmd != "" {
-			return "Bash " + textutil.TruncateRunes(cmd, 120)
-		}
-	case "Read":
-		if p, _ := m["file_path"].(string); p != "" {
-			return "Read " + p
-		}
-	case "Edit", "Write":
-		if p, _ := m["file_path"].(string); p != "" {
-			return name + " " + p
-		}
+	raw, err := json.Marshal(input)
+	if err != nil || len(raw) == 0 {
+		return name
 	}
-	return name
+	return FormatToolInput(name, raw)
 }
