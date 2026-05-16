@@ -161,16 +161,6 @@ func (f *fakeProcess) EventEntriesBefore(beforeMS int64, limit int) []cli.EventE
 	}
 	return out
 }
-func (f *fakeProcess) LastEntryOfType(typ string) cli.EventEntry {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for i := len(f.entries) - 1; i >= 0; i-- {
-		if f.entries[i].Type == typ {
-			return f.entries[i]
-		}
-	}
-	return cli.EventEntry{}
-}
 func (f *fakeProcess) LastActivitySummary() string { return "" }
 func (f *fakeProcess) LastEventAt() time.Time {
 	f.mu.Lock()
