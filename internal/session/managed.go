@@ -947,8 +947,9 @@ func (s *ManagedSession) EventEntries() []cli.EventEntry {
 // unit tests in internal/cli/subagent_link_test.go are the canonical spot
 // for that coverage.
 //
-// TODO(RFC v4 phase 3+): if a second backend needs internal agent-view
-// support (e.g. ACP / Kiro), abstract via:
+// TODO(RFC v4 phase 3+, tracked in docs/TODO.md R214-CODE-6 / R217-ARCH-2):
+// if a second backend needs internal agent-view support (e.g. ACP / Kiro),
+// abstract via:
 //
 //	type AgentIntrospector interface {
 //	    Linker() *cli.SubagentLinker
