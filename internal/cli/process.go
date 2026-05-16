@@ -486,7 +486,9 @@ func (p *Process) Kill() {
 		// until OS TCP keepalive expires (minutes), holding shimWMu and
 		// starving every concurrent shimSend (heartbeat/ping/interrupt).
 		if err := p.shimConn.SetWriteDeadline(time.Now().Add(time.Second)); err == nil {
-			_ = p.shimSendLocked(shimClientMsg{Type: "kill"})
+			if err := p.shimSendLocked(shimClientMsg{Type: "kill"}); err != nil {
+				slog.Debug("kill: shimSend failed", "err", err)
+			}
 		}
 		_ = p.shimConn.Close()
 		p.shimWMu.Unlock()
@@ -579,7 +581,9 @@ func (p *Process) Detach() {
 	// precisely what Detach is meant to avoid (Router.Shutdown's
 	// wg.Wait() would stall past SIGTERM grace). Same pattern as Kill().
 	if err := p.shimConn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err == nil {
-		_ = p.shimSendLocked(shimClientMsg{Type: "detach"})
+		if err := p.shimSendLocked(shimClientMsg{Type: "detach"}); err != nil {
+			slog.Debug("detach: shimSend failed", "err", err)
+		}
 	}
 	_ = p.shimConn.Close()
 	p.shimWMu.Unlock()
