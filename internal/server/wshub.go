@@ -103,6 +103,14 @@ type Hub struct {
 	// not live behind clientWG, so they need their own barrier against
 	// Shutdown completing its sendWG.Wait before an Add lands. Call
 	// TrackSend instead of sendWG.Add directly from those paths.
+	//
+	// CONTRACT (R218B-ARCH-1): every code path that registers a goroutine on
+	// sendWG MUST go through TrackSend(). A direct h.sendWG.Add(1) bypasses
+	// the sendClosed gate and can race Shutdown.Wait into returning while the
+	// goroutine is still alive — at which point it may dereference router /
+	// nodes / clients maps that Shutdown has already torn down. If you add a
+	// new background-send entry point, route it through TrackSend and respect
+	// the shuttingDown bool to abort cleanly.
 	sendTrackMu sync.Mutex
 	sendClosed  bool
 
