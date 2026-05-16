@@ -454,14 +454,25 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 		return nil, err
 	}
 	if result.SessionID != "" && s.getSessionID() == "" {
-		// Serialise session-ID capture through sendMu. Two concurrent
-		// passthrough turns would otherwise both observe an empty ID and
-		// both invoke onSessionID (which takes r.mu and writes
-		// r.sessionIDToKey); the lock ordering contract at the top of
-		// router.go (sendMu → r.mu) already covers Send's capture path,
-		// so SendPassthrough must honour the same order. sendMu is only
-		// held around this short CAS — it does not serialise the
-		// passthrough turn itself.
+		// Double-check the session-ID capture (R215-GO-P2-2):
+		//
+		//   1. The outer atomic-Load `s.getSessionID() == ""` is a fast-path
+		//      filter — once any prior turn has captured an ID, every later
+		//      turn skips the lock entirely (the steady-state cost is one
+		//      atomic load).
+		//   2. The inner re-check under sendMu enforces correctness when two
+		//      concurrent passthrough turns both observe empty on the outer
+		//      check: only the first to take sendMu calls onSessionID
+		//      (which writes r.sessionIDToKey under r.mu).
+		//
+		// Without the inner re-check, the second turn could double-invoke
+		// onSessionID with a stale-but-equal ID and (in tests) double-count
+		// router-side maps. Without the outer check, every passthrough turn
+		// would pay sendMu even after the ID is captured.
+		//
+		// Lock ordering: sendMu → r.mu (top-of-router.go contract). sendMu is
+		// only held around the short CAS — it does not serialise the
+		// passthrough turn itself, which is the whole point of passthrough.
 		s.sendMu.Lock()
 		if s.getSessionID() == "" {
 			s.setSessionID(result.SessionID)
