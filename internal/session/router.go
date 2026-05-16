@@ -35,6 +35,13 @@ import (
 // config; keep the regex in sync if either changes.
 const maxModelBytes = 128
 
+// modelRe constrains the `--model` argument to a charset that is non-flag-like.
+// The leading anchor `^[A-Za-z0-9]` (no leading `-`) prevents flag injection
+// (e.g. `--model -rce` could otherwise be parsed by the CLI as a separate flag).
+// `:` and `/` are allowed because AWS Bedrock model IDs and inference profile
+// ARNs use them (e.g. `arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-haiku-20240307-v1:0`).
+// R218-SEC-3 / R218B-SEC-3: keep the leading char gate strict; relaxing it to
+// allow `:` or `/` at the start would re-open the flag-injection surface.
 var modelRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/\-]*$`)
 
 // validateModel returns nil for empty (use router default) or any string
