@@ -77,7 +77,7 @@
 
 - [ ] **R218-SEC-1 — Feishu url_verification 缺 hookSem 保护（R215-SEC-P3-3 重申）**: url_verification 分支未受 hookSem（max 20）限速，token 泄漏后可 flood challenge endpoint。建议：把 url_verification 也纳入 hookSem，或加独立 IP 级 rate limit。`internal/platform/feishu/transport_hook.go:192-232`。
 - [ ] **R218-SEC-2 — scratch `--append-system-prompt` 缺 NUL sanitize（R215-SEC-P2-2 重申）**: buildScratchSystemPrompt 构造的 context block 若含 NUL 字节会在 execve 处静默截断。建议：context 走 validateArgvStrings 等价检查。`internal/session/scratch.go buildScratchSystemPrompt`。
-- [ ] **R218B-SEC-1 — attachment MIME 类型检查在 size gate 后（潜在绕过，P2）**: `parseAttachmentFile` 中 `isPDF := declared == "application/pdf"` 基于 Content-Type header（客户端可控），size gate 依赖 `isPDF` 走不同分支（PDF 用 `maxPDFBytes`，其他用 `maxImageBytes`）。攻击者可伪造 Content-Type=application/pdf 使 PDF 的更大 size limit 应用于实际是图片的文件。现有 magic byte 检查（`detected != "application/pdf"` 最终拒绝）兜底，但客户端可绕过 size gate 上传至 maxPDFBytes。**现状可接受**（magic byte 二次校验存在），添加注释说明 defense-in-depth 设计意图即可，或将 size gate 移到 sniff 之后。涉及：`internal/server/dashboard_send.go:160-178`。
+- [x] **R218B-SEC-1 — attachment MIME 类型检查在 size gate 后（潜在绕过，P2）**: `parseAttachmentFile` 中 `isPDF := declared == "application/pdf"` 基于 Content-Type header（客户端可控），size gate 依赖 `isPDF` 走不同分支（PDF 用 `maxPDFBytes`，其他用 `maxImageBytes`）。攻击者可伪造 Content-Type=application/pdf 使 PDF 的更大 size limit 应用于实际是图片的文件。现有 magic byte 检查（`detected != "application/pdf"` 最终拒绝）兜底，但客户端可绕过 size gate 上传至 maxPDFBytes。**现状可接受**（magic byte 二次校验存在），添加注释说明 defense-in-depth 设计意图即可，或将 size gate 移到 sniff 之后。涉及：`internal/server/dashboard_send.go:160-178`。 — 已修复（加注释说明 defense-in-depth），见 PR #51
 - [ ] **R218B-SEC-2 — `project_files.go` stat→open TOCTOU 窗口（P3）**: `statRelWithRoot` 调用 `EvalSymlinks + Stat`，后续 preview handler 再次 `Open` 同路径。两次调用之间攻击者可替换 symlink 指向敏感文件。现有 `EvalSymlinks` 已 resolve 到真实路径，但 preview 端点重新 join + Open 而不是用已 resolved 路径。方案：`statRelWithRoot` 返回 `resolved string` 供 preview handler 直接复用，避免二次 EvalSymlinks。涉及：`internal/server/project_files.go:444-491`。
 - [x] **R218B-SEC-3 — `modelRe` 允许 `:` 和 `/` 可能构造 flag 注入（P3）**: `^[A-Za-z0-9][A-Za-z0-9._:/\-]*$` 允许如 `claude-3:evil.com` 这样的模型名。Claude CLI 是否将其解析为 flag 取决于 CLI 实现，当前无已知路径，但建议收紧或加注释说明允许原因（AWS Bedrock ARN 格式需要 `/` 和 `:`）。涉及：`internal/session/router.go:38`。 — 已修复（加注释说明），见 PR #49
 
@@ -91,7 +91,7 @@
 - [ ] **R218-ARCH-1 — cron.SessionRouter 未纳入 contract_test（已修复，见 PR #40）**: ~~四个 consumer 中 cron 独缺编译期 pin，Router 签名漂移对 cron 无编译报警。~~ — 已修复，见 PR #40
 - [ ] **R218-ARCH-2 — 4 个 consumer SessionRouter 接口定义方法重叠但无共享基础**: dispatch/cron/server/upstream 各声明独立 SessionRouter，方法签名漂移只能靠 contract_test 间接检测，无法共享 `CoreRouter` 提供编译期强绑定。方案：定义 `session.CoreRouter` interface，4 个包 embed 扩展。非 breaking，中等工作量。
 - [ ] **R218-ARCH-3 — Protocol 接口 SupportsX / Capabilities 双轨（R214-ARCH-1 重申）**: Protocol 同时有 SupportsReplay/SupportsPriority 和 Capabilities() Caps，新 backend 实现者不清楚该实现哪个。建议撤除老 Supports* 方法，强制 Capabilities() 单一入口。Non-breaking，小工作量。`internal/cli/protocol.go`。
-- [ ] **R218B-ARCH-1 — `wshub.TrackSend`/`sendClosed` 与 `sendWG` 同步设计文档缺失（P2）**: `sendTrackMu + sendClosed` 序列化 `sendWG.Add(1)` 与 `Shutdown.Wait` 的竞态，逻辑正确但复杂，新增发送路径若不调 `TrackSend` 而直接 `sendWG.Add` 即破坏 Shutdown 契约。方案：在 `wshub.go` 顶部注释明确"所有向 sendWG 注册的路径必须通过 TrackSend"并加测试锁。涉及：`internal/server/wshub.go:101-107,1362-1385`。
+- [x] **R218B-ARCH-1 — `wshub.TrackSend`/`sendClosed` 与 `sendWG` 同步设计文档缺失（P2）**: `sendTrackMu + sendClosed` 序列化 `sendWG.Add(1)` 与 `Shutdown.Wait` 的竞态，逻辑正确但复杂，新增发送路径若不调 `TrackSend` 而直接 `sendWG.Add` 即破坏 Shutdown 契约。方案：在 `wshub.go` 顶部注释明确"所有向 sendWG 注册的路径必须通过 TrackSend"并加测试锁。涉及：`internal/server/wshub.go:101-107,1362-1385`。 — 已修复（升级字段注释为 contract），见 PR #51
 - [ ] **R218B-ARCH-2 — `Dispatcher.projectMgr` 与 `resolver` 双信息源（P3）**: `projectMgr` 仅用于 slash-command UX，`resolver` 持有 DataSource；并发修改下两者可能对同一项目产生不一致视图。方案：将 slash-command 的 projectMgr 访问路由到 resolver 暴露的接口，统一信息源。涉及：`internal/dispatch/dispatch.go:39-84`。
 
 ### 代码质量 — 新发现
@@ -746,9 +746,10 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：共享单一 sem，或明确文档化"per-tier"意图。
   - 涉及: 两个 semaphore 构造点
 
-- [ ] **R215-GO-P2-2 — `ManagedSession.Send` onSessionID 双重检查样式可读性差**: 外层无锁读 atomic、内层 sendMu 后二次 check。功能正确但模式对新维护者不友好。
+- [x] **R215-GO-P2-2 — `ManagedSession.Send` onSessionID 双重检查样式可读性差**: 外层无锁读 atomic、内层 sendMu 后二次 check。功能正确但模式对新维护者不友好。
   - 方案：加方法级注释说明双重检查的 rationale（atomic 读为 fast-path optimisation）。
   - 涉及: `internal/session/managed.go:463-473`
+  - 已修复（注释明确 fast-path filter + sendMu re-check 双层语义），见 PR #52
 
 - [x] **R215-GO-P2-3 — `shim.Manager.StartShimWithBackend` 匿名 struct 6× 重复**: `struct{token string; err error}` 6 处出现，未来加字段要同步 6 次。 — 已修复，见 PR #20
   - 方案：package-private `type shimReadyMsg struct{...}`。
