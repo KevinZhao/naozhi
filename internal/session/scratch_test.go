@@ -487,3 +487,78 @@ func TestScratchPool_OpenContextSharesBudgetWithQuote(t *testing.T) {
 		t.Errorf("prompt length %d exceeds budget+overhead", len(prompt))
 	}
 }
+
+// R218-SEC-2 / R215-SEC-P2-2: a NUL byte slipping into the system-prompt
+// argv silently truncates the rest at execve. buildScratchSystemPrompt
+// drops NUL + bare C0 controls as a last-line defense even if upstream
+// sanitization regresses.
+func TestBuildScratchSystemPrompt_StripsArgvControlBytes(t *testing.T) {
+	tests := []struct {
+		name        string
+		quote       string
+		ctx         string
+		mustContain string // substring expected to survive
+		mustNotByte byte   // byte that must NOT appear anywhere in output
+	}{
+		{
+			name:        "nul in quote dropped",
+			quote:       "before\x00after",
+			ctx:         "",
+			mustContain: "beforeafter",
+			mustNotByte: 0x00,
+		},
+		{
+			name:        "nul in context dropped",
+			quote:       "Q",
+			ctx:         "ctx\x00line",
+			mustContain: "ctxline",
+			mustNotByte: 0x00,
+		},
+		{
+			name:        "bell C0 dropped",
+			quote:       "ring\x07ring",
+			ctx:         "",
+			mustContain: "ringring",
+			mustNotByte: 0x07,
+		},
+		{
+			name:        "tab and newline preserved as layout",
+			quote:       "a\tb",
+			ctx:         "x\ny",
+			mustContain: "a\tb",
+			mustNotByte: 0x00,
+		},
+		{
+			name:        "del 0x7f dropped",
+			quote:       "ok\x7f",
+			ctx:         "",
+			mustContain: "ok",
+			mustNotByte: 0x7f,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := buildScratchSystemPrompt(tt.quote, false, tt.ctx)
+			if !strings.Contains(got, tt.mustContain) {
+				t.Errorf("missing expected substring %q in %q", tt.mustContain, got)
+			}
+			for i := 0; i < len(got); i++ {
+				if got[i] == tt.mustNotByte {
+					t.Errorf("forbidden byte 0x%02x leaked into prompt at index %d", tt.mustNotByte, i)
+					break
+				}
+			}
+		})
+	}
+}
+
+// stripArgvControlBytes is a hot path on already-clean inputs (the
+// upstream paths sanitize first); the fast path must not allocate.
+func TestStripArgvControlBytes_CleanInputReturnsSameString(t *testing.T) {
+	in := "用户正在就主对话中选中的以下内容进行追问。\n<selected_quote>\nhello world\n</selected_quote>"
+	got := stripArgvControlBytes(in)
+	if got != in {
+		t.Errorf("clean input mutated: got %q, want %q", got, in)
+	}
+}

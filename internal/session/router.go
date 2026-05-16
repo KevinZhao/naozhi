@@ -2037,18 +2037,40 @@ func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resume
 		return nil, nil
 	}
 
+	// R215-GO-P1-1: split the historyMu critical section so that p.EventEntries()
+	// is invoked WITHOUT holding session.historyMu. EventEntries acquires
+	// cli.Process.eventLog.mu internally; if any future caller decides to call
+	// back into a session method while holding eventLog.mu (e.g. a sink that
+	// asks the owner session for its persistedHistory) the previous order
+	// (historyMu → eventLog.mu) would deadlock against the reverse path.
+	//
+	// Two-phase pattern:
+	//  1. Under historyMu.RLock: snapshot whatever we need from session-owned
+	//     state — here, the live process pointer and a copy of persistedHistory.
+	//     Critical-section boundary is tight and only touches session fields.
+	//  2. After releasing historyMu: invoke EventEntries() on the snapshotted
+	//     process, which is safe because *cli.Process is immutable once
+	//     loadProcess returns (the pointer can only be replaced by storeProcess
+	//     under sendMu, which we don't acquire — but the old Process keeps its
+	//     own eventLog alive until GC, so reading entries from it is sound).
 	var entries []cli.EventEntry
 	oldSess.historyMu.RLock()
-	if p := oldSess.loadProcess(); p != nil && !p.Alive() {
+	p := oldSess.loadProcess()
+	var persistedSnapshot []cli.EventEntry
+	if (p == nil || p.Alive()) && len(oldSess.persistedHistory) > 0 {
+		persistedSnapshot = make([]cli.EventEntry, len(oldSess.persistedHistory))
+		copy(persistedSnapshot, oldSess.persistedHistory)
+	}
+	oldSess.historyMu.RUnlock()
+
+	if p != nil && !p.Alive() {
 		// Dead process: EventEntries() includes both injected history and live events
 		// logged during the last run. Use this instead of persistedHistory, which only
 		// holds the JSONL-loaded snapshot and misses events accumulated since that load.
 		entries = p.EventEntries()
-	} else if len(oldSess.persistedHistory) > 0 {
-		entries = make([]cli.EventEntry, len(oldSess.persistedHistory))
-		copy(entries, oldSess.persistedHistory)
+	} else {
+		entries = persistedSnapshot
 	}
-	oldSess.historyMu.RUnlock()
 
 	// Build session chain: inherit old chain and append old session ID,
 	// but only when the old ID differs from resumeID (i.e. a truly new
