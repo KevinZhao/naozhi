@@ -294,19 +294,20 @@ func Run(cfg Config) error {
 			slog.Info("CLI exited", "code", cli.exitCode)
 			s.saveStateCLIDead()
 			exitTimer := time.NewTimer(60 * time.Second)
-			defer exitTimer.Stop()
 			select {
 			case conn := <-acceptCh:
+				exitTimer.Stop()
 				spawnClient(conn)
 				reconnectTimer := time.NewTimer(60 * time.Second)
-				defer reconnectTimer.Stop()
 				select {
 				case <-s.done:
+					reconnectTimer.Stop()
 					slog.Info("exiting: done after cli exit + reconnect")
 				case <-reconnectTimer.C:
 					slog.Info("exiting: 60s timeout after cli exit + reconnect")
 				}
 			case <-s.done:
+				exitTimer.Stop()
 				slog.Info("exiting: done after cli exit")
 			case <-exitTimer.C:
 				slog.Info("exiting: 60s timeout after cli exit")
@@ -329,19 +330,20 @@ func Run(cfg Config) error {
 			slog.Warn("watchdog fired, CLI killed")
 			s.saveStateCLIDead()
 			wdTimer := time.NewTimer(60 * time.Second)
-			defer wdTimer.Stop()
 			select {
 			case conn := <-acceptCh:
+				wdTimer.Stop()
 				spawnClient(conn)
 				wdReconnectTimer := time.NewTimer(60 * time.Second)
-				defer wdReconnectTimer.Stop()
 				select {
 				case <-s.done:
+					wdReconnectTimer.Stop()
 					slog.Info("exiting: done after watchdog + reconnect")
 				case <-wdReconnectTimer.C:
 					slog.Info("exiting: 60s timeout after watchdog + reconnect")
 				}
 			case <-s.done:
+				wdTimer.Stop()
 				slog.Info("exiting: done after watchdog")
 			case <-wdTimer.C:
 				slog.Info("exiting: 60s timeout after watchdog")
