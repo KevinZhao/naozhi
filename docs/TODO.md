@@ -835,7 +835,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：`NewKeyResolver(nil,nil)` 合法，让 Resolver 非 nil 强制；或加 CI 规则禁止 legacy 分支新增。
   - 涉及: `internal/dispatch/dispatch.go:266-295`, `internal/server/dashboard.go:475-512`
 
-- [ ] **R215-CR-P2-4 — `scanMetaFiles` 写锁扫描缓存**: 并发 Resolve 全部串行在 write lock 上。
+- [x] **R215-CR-P2-4 — `scanMetaFiles` 写锁扫描缓存**: 并发 Resolve 全部串行在 write lock 上。 — 已修复，见 PR #34
   - 方案：RLock 先做 fast-path 命中；miss 升级写锁。
   - 涉及: `internal/cli/subagent_link.go:543-556`
 
@@ -888,7 +888,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：`atomic.Pointer[snapshotBox]` 一次 load 拿全部不变字段。
   - 涉及: `internal/session/managed.go:850-910`
 
-- [ ] **R215-ARCH-P2-8 — `KeyResolver.ResolveForChat` 非 planner 分支 base.ExtraArgs slice 仍共享 backing array**: 只 planner 分支做 three-arg slice；若 caller append 且 cap>len 会污染 defaults。
+- [x] **R215-ARCH-P2-8 — `KeyResolver.ResolveForChat` 非 planner 分支 base.ExtraArgs slice 仍共享 backing array**: 只 planner 分支做 three-arg slice；若 caller append 且 cap>len 会污染 defaults。 — 已修复，见 PR #33
   - 方案：ResolveForChat/ResolveForKey 返回前无条件 `slices.Clone(base.ExtraArgs)`。
   - 涉及: `internal/session/routing.go:85,114-121`
 
