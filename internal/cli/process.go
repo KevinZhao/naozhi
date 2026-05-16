@@ -485,7 +485,11 @@ func (p *Process) Kill() {
 		// write entirely — without a deadline, shimSendLocked can block
 		// until OS TCP keepalive expires (minutes), holding shimWMu and
 		// starving every concurrent shimSend (heartbeat/ping/interrupt).
-		if err := p.shimConn.SetWriteDeadline(time.Now().Add(time.Second)); err == nil {
+		// R218B-GO-4: log the SetWriteDeadline error at debug to aid
+		// diagnosing transient socket failures during Kill.
+		if err := p.shimConn.SetWriteDeadline(time.Now().Add(time.Second)); err != nil {
+			slog.Debug("kill: SetWriteDeadline failed, skipping shim kill send", "err", err)
+		} else {
 			if err := p.shimSendLocked(shimClientMsg{Type: "kill"}); err != nil {
 				slog.Debug("kill: shimSend failed", "err", err)
 			}
@@ -580,7 +584,11 @@ func (p *Process) Detach() {
 	// dead socket until TCP keepalive expires (minutes), which is
 	// precisely what Detach is meant to avoid (Router.Shutdown's
 	// wg.Wait() would stall past SIGTERM grace). Same pattern as Kill().
-	if err := p.shimConn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err == nil {
+	// R218B-GO-4: log the SetWriteDeadline error at debug to aid
+	// diagnosing transient socket failures during Detach.
+	if err := p.shimConn.SetWriteDeadline(time.Now().Add(2 * time.Second)); err != nil {
+		slog.Debug("detach: SetWriteDeadline failed, skipping shim detach send", "err", err)
+	} else {
 		if err := p.shimSendLocked(shimClientMsg{Type: "detach"}); err != nil {
 			slog.Debug("detach: shimSend failed", "err", err)
 		}
