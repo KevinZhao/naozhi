@@ -649,6 +649,13 @@ func (d *Dispatcher) sendAndReply(
 			// Session has no attached process (paused / reclaimed). A fresh
 			// send will re-spawn via GetOrCreate; the user just needs to retry.
 			errMsg = "会话已休眠，请重新发送消息以唤醒。"
+		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+			// Mirrors server/errors_usermsg.go — when ctx is cancelled by
+			// shutdown or hits its deadline, surface a "system restart" hint
+			// instead of the generic /new reset prompt. Without this branch
+			// the IM user sees "处理失败" while the dashboard reads "系统正在重启"
+			// for the same underlying error (R215-CR-P2-1 drift).
+			errMsg = "系统正在重启，请稍后重试。"
 		default:
 			errMsg = "处理失败，请发送 /new 重置后重试。"
 		}
