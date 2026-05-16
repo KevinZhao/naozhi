@@ -492,6 +492,14 @@ func SanitizeQuote(s string) (string, bool) {
 // deployment model this is acceptable (no other tenants share the host),
 // but any future multi-tenant deployment must route the quoted context
 // through stdin or an env var instead of argv.
+//
+// R218-SEC-2 / R215-SEC-P2-2 defense-in-depth: the final string passes
+// through stripArgvControlBytes so a NUL byte (which would silently
+// truncate the argv element at execve) cannot survive even if a future
+// caller skips SanitizeQuote / renderTurnLine. Both upstream paths
+// already scrub NULs, but the cost of a second O(n) sweep is trivial
+// compared to the failure mode (CLI receives a half-truncated prompt
+// and answers the wrong question, with no error).
 func buildScratchSystemPrompt(quote string, truncated bool, contextBlock string) string {
 	var b strings.Builder
 	b.WriteString("用户正在就主对话中选中的以下内容进行追问。请基于此内容回答后续问题，不要在回复中重复引用原文。")
@@ -506,7 +514,36 @@ func buildScratchSystemPrompt(quote string, truncated bool, contextBlock string)
 		b.WriteString("\n…[已截断]")
 	}
 	b.WriteString("\n</selected_quote>")
-	return b.String()
+	return stripArgvControlBytes(b.String())
+}
+
+// stripArgvControlBytes drops bytes that would corrupt argv when passed to
+// execve: NUL (\x00) truncates the argument, and bare C0 control bytes
+// (other than \t \n \r, which buildScratchSystemPrompt deliberately uses
+// for layout) can confuse argument parsers in downstream CLIs. Mirrors the
+// gate enforced by config.validateArgvStrings on YAML-supplied argv.
+func stripArgvControlBytes(s string) string {
+	// Fast path: most calls pass already-clean text.
+	clean := true
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b == 0 || (b < 0x20 && b != '\t' && b != '\n' && b != '\r') || b == 0x7f {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
+	out := make([]byte, 0, len(s))
+	for i := 0; i < len(s); i++ {
+		b := s[i]
+		if b == 0 || (b < 0x20 && b != '\t' && b != '\n' && b != '\r') || b == 0x7f {
+			continue
+		}
+		out = append(out, b)
+	}
+	return string(out)
 }
 
 // renderContextTurns serialises a handful of user/assistant turns surrounding
