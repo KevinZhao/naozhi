@@ -886,8 +886,16 @@ func NewRouter(cfg RouterConfig) *Router {
 	// PersistSink is installed (via spawnSession / ReconnectShims),
 	// so replayed entries are tagged replayPhase=true and dropped by
 	// the Persister rather than re-persisted.
+	//
+	// historyLoadSem is shared across tier 1 and tier 2 so the cap
+	// expresses "total concurrent history-load disk I/O", not "10 per
+	// tier". Without this share the worst case was ~2× cap on a deploy
+	// that triggered both tiers (e.g. event-log persister enabled but
+	// some sessions only have Claude JSONL). R215-GO-P2-1.
+	historyLoadSem := make(chan struct{}, historyLoadConcurrency)
+
 	if r.eventLogPersister != nil {
-		sem := make(chan struct{}, historyLoadConcurrency)
+		sem := historyLoadSem
 		for _, s := range r.sessions {
 			s := s
 			r.historyWg.Add(1)
@@ -936,7 +944,10 @@ func NewRouter(cfg RouterConfig) *Router {
 	//      so successful ReconnectShims runs do not get duplicated.
 	if r.claudeDir != "" {
 		shimKeys := r.shimManagedKeys()
-		sem := make(chan struct{}, historyLoadConcurrency) // limit concurrent disk I/O
+		// Shared with tier 1 above — see historyLoadSem rationale at the
+		// top of this block (R215-GO-P2-1: cap = total disk I/O, not per
+		// tier).
+		sem := historyLoadSem
 		for _, s := range r.sessions {
 			s := s
 			if s.getSessionID() == "" {
