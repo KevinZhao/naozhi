@@ -123,7 +123,7 @@
 - [ ] **R217-PERF-6 — `selectForIdx` 每 flush 新建 slice**: caller-owned scratch 改造。Breaking：函数签名。
 - [ ] **R217-PERF-7 — `marshalPooled` 对小重复帧（session_state running/ready）总是 copy**: 预 marshal 静态形状帧。
 - [ ] **R217-PERF-8 — `linker.Resolve` 每 task_started 事件 spawn goroutine**: bounded worker pool。多 agent turn 下显著。
-- [ ] **R217-PERF-9 — `FormatToolInput` Agent tool_use 双解码 input**: json.RawMessage 中转。
+- [x] **R217-PERF-9 — `FormatToolInput` Agent tool_use 双解码 input**: json.RawMessage 中转。 — 已修复，见 PR #43
 - [ ] **R217-PERF-10 — `dashboard_session.handleList` workspaces []string 每 poll alloc**: sync.Pool；需 benchmark + 仔细处理 escape。
 
 ### 架构 — 大重构
@@ -815,7 +815,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：抽 `usermsg.Translate(err, ErrCtx{...}) string` 单入口。
   - 涉及: `internal/dispatch/dispatch.go:624-666`, `internal/server/errors_usermsg.go:22-60`
 
-- [ ] **R215-CR-P2-2 — `formatAssistantToolUseDetail` 与 `FormatToolInput` 双实现且分歧**: Bash 截断长度 120 vs 80；后者覆盖 Glob/Grep/Agent/MCP 前者不覆盖。
+- [x] **R215-CR-P2-2 — `formatAssistantToolUseDetail` 与 `FormatToolInput` 双实现且分歧**: Bash 截断长度 120 vs 80；后者覆盖 Glob/Grep/Agent/MCP 前者不覆盖。 — 已修复，见 PR #44
   - 方案：FormatToolInput 扩 `any` 入参或加 `FormatToolInputFromAny`，subagent_transcript 复用。
   - 涉及: `internal/cli/subagent_transcript.go:410-433`
 
