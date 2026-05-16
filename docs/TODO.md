@@ -66,7 +66,7 @@
 
 ### Go 正确性 — 跨包改动
 
-- [ ] **R218-GO-1 — `dispatch.go:1143` `sendAskQuestionCard` 里 `rctx` 派生自 turnCtx**: turnCtx 生命周期短暂，若初始 Reply 在 15s 内完成但后续事件触发 timeout，rctx 可能立即过期。建议：rctx 派生自独立的 server-level ctx 或 context.Background()。`internal/dispatch/dispatch.go:1143`。
+- [x] **R218-GO-1 — `dispatch.go:1143` `sendAskQuestionCard` 里 `rctx` 派生自 turnCtx**: turnCtx 生命周期短暂，若初始 Reply 在 15s 内完成但后续事件触发 timeout，rctx 可能立即过期。建议：rctx 派生自独立的 server-level ctx 或 context.Background()。`internal/dispatch/dispatch.go:1143`。 — 已修复，见 PR #54
 - [ ] **R218-GO-2 — `dispatch.go:969-1002` sendAskQuestionCard goroutine 访问可能已释放的 tracker**: stop() 先执行后该 goroutine 仍对已释放 platform 进行类型断言。建议：加 context timeout 或在 stop() 里主动取消待发送卡片 goroutine。`internal/dispatch/dispatch.go:969-1002`。
 - [ ] **R218B-GO-1 — `discoveryCache.startLoop` 初始 `go dc.refresh()` 无 WaitGroup 追踪（P2）**: `startLoop` 启动一个裸 goroutine 做初始 refresh，Server Shutdown 取消 ctx 后该 goroutine 仍在后台运行，可能访问已清理的 projectMgr。方案：给 `discoveryCache` 添加 `wg sync.WaitGroup`，`startLoop` 前 `wg.Add(1)` + defer Done，暴露 `Wait()` 供 Server.Shutdown 调用。涉及：`internal/server/discovery_cache.go:47-60`, `internal/server/server.go` Shutdown 路径。
 - [ ] **R218B-GO-2 — `handleOwnerLoopPanic` 用 `context.Background()` 向用户回送错误（P1 重申 R217-GO-2）**: recovery handler 创建 Background ctx 通知用户，若 appCtx 已取消（shutdown 期间）会挂起。方案：接受 parentCtx 参数或用 `context.WithTimeout(context.Background(), 5*time.Second)`。涉及：`internal/dispatch/dispatch.go:510`。
@@ -76,7 +76,7 @@
 ### 安全 — 新发现（非重复）
 
 - [ ] **R218-SEC-1 — Feishu url_verification 缺 hookSem 保护（R215-SEC-P3-3 重申）**: url_verification 分支未受 hookSem（max 20）限速，token 泄漏后可 flood challenge endpoint。建议：把 url_verification 也纳入 hookSem，或加独立 IP 级 rate limit。`internal/platform/feishu/transport_hook.go:192-232`。
-- [ ] **R218-SEC-2 — scratch `--append-system-prompt` 缺 NUL sanitize（R215-SEC-P2-2 重申）**: buildScratchSystemPrompt 构造的 context block 若含 NUL 字节会在 execve 处静默截断。建议：context 走 validateArgvStrings 等价检查。`internal/session/scratch.go buildScratchSystemPrompt`。
+- [x] **R218-SEC-2 — scratch `--append-system-prompt` 缺 NUL sanitize（R215-SEC-P2-2 重申）**: buildScratchSystemPrompt 构造的 context block 若含 NUL 字节会在 execve 处静默截断。建议：context 走 validateArgvStrings 等价检查。`internal/session/scratch.go buildScratchSystemPrompt`。 — 已修复，见 PR #55
 - [x] **R218B-SEC-1 — attachment MIME 类型检查在 size gate 后（潜在绕过，P2）**: `parseAttachmentFile` 中 `isPDF := declared == "application/pdf"` 基于 Content-Type header（客户端可控），size gate 依赖 `isPDF` 走不同分支（PDF 用 `maxPDFBytes`，其他用 `maxImageBytes`）。攻击者可伪造 Content-Type=application/pdf 使 PDF 的更大 size limit 应用于实际是图片的文件。现有 magic byte 检查（`detected != "application/pdf"` 最终拒绝）兜底，但客户端可绕过 size gate 上传至 maxPDFBytes。**现状可接受**（magic byte 二次校验存在），添加注释说明 defense-in-depth 设计意图即可，或将 size gate 移到 sniff 之后。涉及：`internal/server/dashboard_send.go:160-178`。 — 已修复（加注释说明 defense-in-depth），见 PR #51
 - [ ] **R218B-SEC-2 — `project_files.go` stat→open TOCTOU 窗口（P3）**: `statRelWithRoot` 调用 `EvalSymlinks + Stat`，后续 preview handler 再次 `Open` 同路径。两次调用之间攻击者可替换 symlink 指向敏感文件。现有 `EvalSymlinks` 已 resolve 到真实路径，但 preview 端点重新 join + Open 而不是用已 resolved 路径。方案：`statRelWithRoot` 返回 `resolved string` 供 preview handler 直接复用，避免二次 EvalSymlinks。涉及：`internal/server/project_files.go:444-491`。
 - [x] **R218B-SEC-3 — `modelRe` 允许 `:` 和 `/` 可能构造 flag 注入（P3）**: `^[A-Za-z0-9][A-Za-z0-9._:/\-]*$` 允许如 `claude-3:evil.com` 这样的模型名。Claude CLI 是否将其解析为 flag 取决于 CLI 实现，当前无已知路径，但建议收紧或加注释说明允许原因（AWS Bedrock ARN 格式需要 `/` 和 `:`）。涉及：`internal/session/router.go:38`。 — 已修复（加注释说明），见 PR #49
@@ -97,7 +97,7 @@
 ### 代码质量 — 新发现
 
 - [ ] **R218-CR-1 — `dispatch.go:900-950` dispatchCommand 10+ case switch 无表驱动**: 无法编译期验证所有命令被测试覆盖。建议：`map[string]commandHandler` 表驱动 + 循环分派。`internal/dispatch/dispatch.go:900-950`。
-- [ ] **R218-CR-2 — `dispatch.go:770-790` ErrNoActiveProcess 错误信息不区分 cron vs chat key**: 用户在 fresh_context cron 中看到"请 /new 重置"会困惑。建议：按 key 前缀区分返回文案。`internal/dispatch/dispatch.go:770-790`。
+- [x] **R218-CR-2 — `dispatch.go:770-790` ErrNoActiveProcess 错误信息不区分 cron vs chat key**: 用户在 fresh_context cron 中看到"请 /new 重置"会困惑。建议：按 key 前缀区分返回文案。`internal/dispatch/dispatch.go:770-790`。 — 已修复，见 PR #54
 - [ ] **R218-CR-3 — `dispatch.go:545-560` takeoverFn 返回值被丢弃**: 即使 takeover 失败也继续走 GetOrCreate+Send，若 takeover 意图阻止后续操作会被静默忽略。`internal/dispatch/dispatch.go:545-560`。
 
 ### 已修复锚（PR #22）
@@ -738,9 +738,10 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 
 ### go-reviewer（避开已归档后剩余 P1/P2）
 
-- [ ] **R215-GO-P1-1 — `collectPreviousHistory` 持 historyMu.RLock 跨 `p.EventEntries()` 调用**: `managed.go:1979` 把 session 层锁与 cli.Process.eventLog.mu 的锁顺序绑死（historyMu→eventLog.mu）但仅靠注释维持。任何未来反向路径（eventLog.mu 先拿再回调 session 取 historyMu）即 ABBA。
+- [x] **R215-GO-P1-1 — `collectPreviousHistory` 持 historyMu.RLock 跨 `p.EventEntries()` 调用**: `managed.go:1979` 把 session 层锁与 cli.Process.eventLog.mu 的锁顺序绑死（historyMu→eventLog.mu）但仅靠注释维持。任何未来反向路径（eventLog.mu 先拿再回调 session 取 historyMu）即 ABBA。
   - 方案：先释放 historyMu.RUnlock 再调 EventEntries，或在注释基础上加 lock-order lint。
   - 涉及: `internal/session/managed.go:1976-1988`
+  - 已修复（拆两阶段：锁内 snapshot persistedHistory + process 指针，锁外调 EventEntries），见 PR #55
 
 - [x] **R215-GO-P2-1 — `session/router.go:978-994` 两处 history-load goroutine 用独立 semaphore 共享同一 WaitGroup**: 期望 `historyLoadConcurrency=10` 的含义可能是"总"而非"每 tier"；当前最多 20 并发磁盘读。 — 已修复，见 PR #37
   - 方案：共享单一 sem，或明确文档化"per-tier"意图。
@@ -777,9 +778,10 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：config 载入时对 model 加 `[A-Za-z0-9._-]+` allowlist。
   - 涉及: `internal/config/config.go validateConfig`
 
-- [ ] **R215-SEC-P2-2 — Scratch `--append-system-prompt` 包含 IM 原文未做 NUL sanitize**: `buildScratchSystemPrompt` 构造的 context block 若含 NUL 字节会在 execve 处静默截断。
+- [x] **R215-SEC-P2-2 — Scratch `--append-system-prompt` 包含 IM 原文未做 NUL sanitize**: `buildScratchSystemPrompt` 构造的 context block 若含 NUL 字节会在 execve 处静默截断。
   - 方案：context 走 validateArgvStrings 等价检查。
   - 涉及: `internal/session/scratch.go buildScratchSystemPrompt`
+  - 已修复（合并 R218-SEC-2，加 stripArgvControlBytes defense-in-depth），见 PR #55
 
 - [ ] **R215-SEC-P2-3 — 非 Linux 平台 attachment 路径校验 `path.Clean` vs `filepath.Clean` 不一致**: Linux 生产无影响；macOS/Windows 部署存在 case-insensitive / 分隔符绕过风险。
   - 方案：非 Linux 平台补 `filepath.Clean(filepath.FromSlash(relRaw))`；或文档化"Linux-only deployment"。
@@ -807,9 +809,10 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：引入 1-slot pool 或为 Append 写专用 sink 路径。
   - 涉及: `internal/cli/eventlog.go:627`
 
-- [ ] **R215-PERF-P2-2 — `framing.ReadFramedBody` `strconv.Atoi(string(digits))`**: recovery + agent tailer 热路径，每条都多一次 alloc。
+- [x] **R215-PERF-P2-2 — `framing.ReadFramedBody` `strconv.Atoi(string(digits))`**: recovery + agent tailer 热路径，每条都多一次 alloc。
   - 方案：手写 `parseDecimalBytes([]byte)` 避免 string 中转。
   - 涉及: `internal/eventlog/persist/framing.go:215`
+  - 已修复（与 R218-PERF-10 同批落地，inline byte-level decimal parse），代码见 framing.go:210-220
 
 - [ ] **R215-PERF-P2-3 — `wshub.marshalPooled` 返回副本即便单订阅者**: `SendRaw` enqueue 后不再持 slice，小 batch 场景可省 copy。
   - 方案：单订阅 fast-path 直接传 pooled buffer，两订阅起再 clone。
