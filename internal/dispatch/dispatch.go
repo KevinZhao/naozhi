@@ -969,16 +969,20 @@ func (t *replyTracker) todoLoop() {
 // immediately while the card post completes in the background, bounded by
 // its own 15s ctx. Any error falls back to a plain-text fallback post.
 //
-// Safety: snapshot (p, chatID, turnCtx) so later mutations to t don't
-// race with the goroutine; the turn context drives cancellation so a
-// session tear-down stops the post cleanly.
+// Safety: snapshot (p, chatID) so later mutations to t don't race with the
+// goroutine. R218-GO-1: rctx derives from context.Background() rather than
+// turnCtx — the turn ctx may already be near its deadline (or cancelled by
+// a fresh /new from the user) by the time the card is dispatched, which
+// would silently abort the Feishu Open API call mid-flight and leave the
+// user staring at an empty status line. The card is essentially a UI
+// notification with its own 15s budget; it should outlive the originating
+// turn so the user actually sees the question.
 func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
 	if aq == nil || len(aq.Items) == 0 {
 		return
 	}
 	p := t.p
 	chatID := t.chatID
-	turnCtx := t.ctx
 
 	go func() {
 		defer func() {
@@ -987,7 +991,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
 					"chat_id", chatID, "tool_use_id", aq.ToolUseID, "panic", r)
 			}
 		}()
-		rctx, cancel := context.WithTimeout(turnCtx, 15*time.Second)
+		rctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
 
 		if sender, ok := platform.AsQuestionCardSender(p); ok {
