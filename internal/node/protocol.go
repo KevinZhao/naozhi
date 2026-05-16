@@ -30,10 +30,11 @@ type ServerMsg struct {
 	// clients silently ignore unknown fields and older servers never emit
 	// the "agent_*" message types to trigger them.
 	//
-	// TODO(RFC v4 phase 3): agent_event has no per-message seq; on client
-	// reconnect during a buffered-replay + live-push overlap, the dashboard
-	// must de-dup via (time, type, tool_use_id) composite key. Consider
-	// adding a monotonic seq here if Phase 3 observes duplicates in practice.
+	// TODO(RFC v4 phase 3, tracked in docs/TODO.md R214-CODE-6): agent_event
+	// has no per-message seq; on client reconnect during a buffered-replay +
+	// live-push overlap, the dashboard must de-dup via
+	// (time, type, tool_use_id) composite key. Consider adding a monotonic
+	// seq here if Phase 3 observes duplicates in practice.
 	TaskID    string          `json:"task_id,omitempty"`
 	AgentMeta *AgentMetaPatch `json:"meta,omitempty"`
 }
