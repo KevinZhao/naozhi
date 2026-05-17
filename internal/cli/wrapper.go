@@ -169,7 +169,7 @@ func candidatePaths(name string) []string {
 // Spawn starts a new CLI process via shim and returns a connected Process.
 func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error) {
 	if w.ShimManager == nil {
-		return nil, fmt.Errorf("ShimManager not configured")
+		return nil, fmt.Errorf("shim manager not configured")
 	}
 
 	proto := w.Protocol.Clone()
@@ -266,7 +266,7 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 // Used after naozhi restart to resume an active session.
 func (w *Wrapper) SpawnReconnect(ctx context.Context, key string, lastSeq int64, proto Protocol, noOutputTimeout, totalTimeout time.Duration) (*Process, []shim.ServerMsg, error) {
 	if w.ShimManager == nil {
-		return nil, nil, fmt.Errorf("ShimManager not configured")
+		return nil, nil, fmt.Errorf("shim manager not configured")
 	}
 
 	handle, err := w.ShimManager.Reconnect(ctx, key, lastSeq)

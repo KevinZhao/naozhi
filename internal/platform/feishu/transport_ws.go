@@ -257,7 +257,7 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 	// R186-SEC-L: symmetric with transport_hook's cap. WS path is signed by
 	// Feishu's SDK, but the dedup map still grows one key per delivered event;
 	// bounding the key size guards against an unexpected wire-format bump.
-	if len(eventID) > 256 {
+	if len(eventID) > maxEventIDLen {
 		slog.Warn("feishu ws: event_id too long, skipping dedup for this delivery",
 			"len", len(eventID))
 		eventID = ""
@@ -305,8 +305,8 @@ func (f *Feishu) parseSDKEvent(event *larkim.P2MessageReceiveV1) (parsedEvent, b
 		// ~4 KiB (~1333 CJK chars); 8 KiB is 2× that official ceiling.
 		// Keeping WS and webhook paths symmetric prevents a regression where
 		// one transport silently accepts what the other rejects. R184-SEC-H1a.
-		const maxTextBytes = 8 * 1024
-		if len(text) > maxTextBytes {
+		// maxIncomingTextBytes is shared with transport_hook.go.
+		if len(text) > maxIncomingTextBytes {
 			slog.Warn("feishu ws: text exceeds limit, dropping",
 				"size", len(text))
 			return parsedEvent{}, false

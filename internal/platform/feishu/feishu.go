@@ -43,12 +43,6 @@ const (
 	maxImageDownloadBytes = 10 * 1024 * 1024
 	maxAudioDownloadBytes = 20 * 1024 * 1024
 
-	// defaultMaxReplyLen is the fallback split-length applied when
-	// Config.MaxReplyLen is not set. Feishu's upstream per-message text limit
-	// is ~4000 bytes (~1333 CJK chars); matching that keeps replies within
-	// the platform's single-card rendering budget.
-	defaultMaxReplyLen = 4000
-
 	// tokenTTLBuffer is the number of seconds subtracted from Feishu's
 	// reported token expiry before caching, so the cached token is never
 	// used right up to its expiry boundary (clock skew, network latency).
@@ -69,6 +63,29 @@ const (
 	// strings in practice; this limit protects the dedup map from a
 	// header-flood with giant nonces inflating heap.
 	maxWebhookNonceLen = 128
+
+	// maxEventIDLen caps the inbound event_id length before it lands in
+	// recentEventIDs. Feishu event IDs are short hex/UUID strings in
+	// practice; same dedup-map heap-flood concern as maxWebhookNonceLen.
+	// Shared by transport_ws.go and transport_hook.go.
+	maxEventIDLen = 256
+
+	// maxIncomingTextBytes caps the inbound message text byte length
+	// after decoding. ~8 KiB is well above any reasonable single-message
+	// payload from a human user and bounds the worst-case path that
+	// flows into dispatch. Shared by transport_ws.go and transport_hook.go.
+	maxIncomingTextBytes = 8 * 1024
+
+	// webhookTimestampFutureSkew is the maximum seconds that a webhook
+	// X-Lark-Request-Timestamp header may be in the future before being
+	// rejected. Tolerates clock skew without giving attackers a wide
+	// pre-issuance window for nonce-replay (see verifyTimestamp).
+	webhookTimestampFutureSkew = 30
+
+	// webhookTimestampMaxAge is the maximum seconds that a webhook timestamp
+	// may be in the past before being rejected. 5 minutes covers normal
+	// network latency and legitimate Feishu-side retries (see R218-SEC-13).
+	webhookTimestampMaxAge = 5 * 60
 )
 
 var feishuHTTPClient = &http.Client{
@@ -244,7 +261,7 @@ type Feishu struct {
 // New creates a Feishu platform adapter. transcriber may be nil to disable voice.
 func New(cfg Config, transcriber transcribe.Service) *Feishu {
 	if cfg.MaxReplyLen <= 0 {
-		cfg.MaxReplyLen = defaultMaxReplyLen
+		cfg.MaxReplyLen = platform.DefaultMaxReplyLen
 	}
 	mode := cfg.ConnectionMode
 	if mode == "" {
@@ -1273,10 +1290,10 @@ func verifyTimestamp(timestamp string) bool {
 		return false
 	}
 	now := time.Now().Unix()
-	if ts > now+30 {
+	if ts > now+webhookTimestampFutureSkew {
 		return false
 	}
-	if now-ts > 300 {
+	if now-ts > webhookTimestampMaxAge {
 		return false
 	}
 	return true

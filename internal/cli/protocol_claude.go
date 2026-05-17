@@ -74,8 +74,32 @@ func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
 		// have passed a user-facing label; we still want a fresh session.
 		args = append(args, "--resume", opts.ResumeID)
 	}
-	args = append(args, opts.ExtraArgs...)
+	args = append(args, capExtraArgsBytes(opts.ExtraArgs)...)
 	return args
+}
+
+// maxExtraArgsBytes caps the total byte length of opts.ExtraArgs joined. The
+// kernel's ARG_MAX is ~2 MiB on Linux; once argv+envp+padding crosses that,
+// exec returns E2BIG and the spawn fails opaquely. Realistic ExtraArgs payloads
+// (e.g. scratch session --append-system-prompt with 24 KiB quote +
+// project-level system prompts) stay well under 128 KiB. Drop the entire slice
+// rather than truncating mid-arg, since flag-value pairs cannot be safely cut.
+const maxExtraArgsBytes = 128 * 1024
+
+// capExtraArgsBytes guards against a runaway caller (or accumulated stacked
+// scratch contexts) producing an argv that exceeds ARG_MAX. Returns the input
+// unchanged when within the cap; logs and returns nil when over.
+func capExtraArgsBytes(extra []string) []string {
+	total := 0
+	for _, a := range extra {
+		total += len(a) + 1 // +1 for argv NUL separator
+		if total > maxExtraArgsBytes {
+			slog.Warn("cli: ExtraArgs exceeds byte cap, dropping",
+				"total_bytes", total, "cap", maxExtraArgsBytes, "count", len(extra))
+			return nil
+		}
+	}
+	return extra
 }
 
 func (p *ClaudeProtocol) Init(_ *JSONRW, _, _ string) (string, error) {

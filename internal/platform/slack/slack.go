@@ -67,7 +67,7 @@ var slackHTTPClient = &http.Client{
 // New creates a Slack platform adapter.
 func New(cfg Config) *Slack {
 	if cfg.MaxReplyLen <= 0 {
-		cfg.MaxReplyLen = 4000
+		cfg.MaxReplyLen = platform.DefaultMaxReplyLen
 	}
 	api := slack.New(
 		cfg.BotToken,

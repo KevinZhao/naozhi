@@ -211,6 +211,8 @@ type Attachment struct {
 // constructors (many tests, dispatch/coalesce, platform adapters) compiling
 // without edits; migrations that promote Kind/WorkspacePath fields happen on
 // a case-by-case basis. Final removal is tracked in docs/TODO.md.
+//
+// Deprecated: Use Attachment directly with an explicit Kind field.
 type ImageData = Attachment
 
 // InputMessage is what we write to claude CLI stdin.

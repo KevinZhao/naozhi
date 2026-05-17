@@ -361,7 +361,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		// per-bucket cap (50000), i.e. ~3 GiB heap worst-case. Drop the ID
 		// (skip dedup) so a single replayed event may double-process but the
 		// server stays within memory budget.
-		if len(eventID) > 256 {
+		if len(eventID) > maxEventIDLen {
 			slog.Warn("feishu webhook: event_id too long, skipping dedup for this delivery",
 				"len", len(eventID))
 			eventID = ""
@@ -409,8 +409,8 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			// client or attacker-crafted payload. Reject at 8 KiB (2x the
 			// official limit) so we don't ferry multi-KB slog attrs or push
 			// oversized messages into the downstream CLI stdin path.
-			const maxTextBytes = 8 * 1024
-			if len(text) > maxTextBytes {
+			// maxIncomingTextBytes is shared with transport_ws.go.
+			if len(text) > maxIncomingTextBytes {
 				slog.Warn("feishu webhook: text exceeds limit, dropping",
 					"msg_id", event.Message.MessageID, "len", len(text))
 				return

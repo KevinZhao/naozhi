@@ -993,8 +993,17 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	info, err := os.Stat(resolved)
+	// Lstat (not Stat) closes the symlink-swap TOCTOU window: between
+	// EvalSymlinks resolving the path and the subsequent os.Open, an
+	// attacker with write access to attachRootAbs could swap a file for a
+	// symlink pointing outside the workspace. Lstat reports the symlink
+	// itself, letting us reject and refuse to follow.
+	info, err := os.Lstat(resolved)
 	if err != nil || info.IsDir() {
+		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
+		return
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}

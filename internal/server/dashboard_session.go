@@ -45,7 +45,13 @@ func sanitizeResumeLastPrompt(s string, maxLen int) string {
 	}
 	needsClean := (maxLen > 0 && len(s) > maxLen) ||
 		strings.IndexFunc(s, func(r rune) bool {
-			return r != '\t' && (r < 0x20 || r == 0x7f || r > 0x7f)
+			if r == '\t' {
+				return false
+			}
+			if r < 0x20 || r == 0x7f {
+				return true
+			}
+			return osutil.IsLogInjectionRune(r)
 		}) >= 0
 	if !needsClean {
 		return s
