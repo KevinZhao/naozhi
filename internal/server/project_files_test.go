@@ -1083,7 +1083,15 @@ func TestHandleFileGet_RejectsSymlinkAtResolvedPath(t *testing.T) {
 // than silently followed (which would let an attacker probe whether
 // arbitrary out-of-workspace targets exist via response timing).
 func TestStatRelWithRoot_RejectsSymlinkAfterResolve(t *testing.T) {
-	root := t.TempDir()
+	// statRelWithRoot expects an already-EvalSymlinks-ed root (its callers
+	// resolve once and reuse). On macOS, t.TempDir() returns paths under
+	// /var/folders which is a symlink to /private/var/folders, so without
+	// resolving here the workspace prefix check would reject every entry.
+	rawRoot := t.TempDir()
+	root, err := filepath.EvalSymlinks(rawRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if err := os.WriteFile(filepath.Join(root, "real.txt"), []byte("real"), 0o644); err != nil {
 		t.Fatal(err)
 	}
