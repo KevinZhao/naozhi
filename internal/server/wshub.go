@@ -218,6 +218,15 @@ func NewHub(opts HubOptions) *Hub {
 	if parent == nil {
 		parent = context.Background()
 	}
+	// R219-CR-11: warn at startup when no MessageQueue is wired. Production
+	// dashboard.registerDashboard always passes a queue (HubOptions.Queue =
+	// s.msgQueue); a nil queue is only legitimate for unit tests that bypass
+	// the queue path. Surfacing this at startup means a misconfigured deploy
+	// (queue silently dropped from HubOptions) is visible in journald instead
+	// of only manifesting as the deprecated sessionSendLegacy fallback.
+	if opts.Queue == nil {
+		slog.Warn("hub: MessageQueue not configured, falling back to legacy guard path (test/headless wiring only — production deploys should set HubOptions.Queue)")
+	}
 	ctx, cancel := context.WithCancel(parent)
 	h := &Hub{
 		clients:          make(map[*wsClient]struct{}),
