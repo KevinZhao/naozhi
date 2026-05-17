@@ -431,9 +431,10 @@
 - [ ] **R214-CODE-1 — 错误→用户消息映射逻辑双重维护**: `dispatch/dispatch.go:577-613`（带 emoji / 动态时长）与 `server/errors_usermsg.go`（无 emoji）各自 switch，新 error 两处改。本轮（R214）已在 dispatch 侧补齐 `ErrMessageTooLarge`/`ErrOrphanedSlot`，未来方向是抽共享 `errmsg.UserMessage(err, noOutputTimeout, totalTimeout)`。
   - 涉及：`internal/dispatch/dispatch.go`, `internal/server/errors_usermsg.go`
 
-- [ ] **R214-CODE-2 — slog 属性键命名不一致**: `"session_key"`（dispatch）/ `"key"`（router/wshub/managed.go 部分）/ `"chat_key"`（commands.go）三套指向"key 类"概念，grep 只能看到部分。
+- [x] **R214-CODE-2 — slog 属性键命名不一致**: `"session_key"`（dispatch）/ `"key"`（router/wshub/managed.go 部分）/ `"chat_key"`（commands.go）三套指向"key 类"概念，grep 只能看到部分。
   - 方案：全项目约定 3-segment 用 `"chat_key"`、4-segment 用 `"key"`，dispatch 侧统一到 `"key"`。
   - 涉及：`internal/dispatch/*.go`, `internal/session/*.go`, `internal/server/*.go`
+  - 已修复，见 PR #59
 
 - [ ] **R214-CODE-3 — readLoop 439 行圈复杂度最高**: `process.go::readLoop` 协议解析 + 状态机 + SubagentLinker + heartbeat + EOF 分类 + panic recover 全耦合。只有端到端测试覆盖。
   - 方案：抽 `handleShimMessage(msg)` + `classifyEOF(msg)` 辅助函数；与 `docs/rfc/process-split.md` 协同。
@@ -832,9 +833,10 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 
 ### code-reviewer（避开已归档后剩余 P1/P2）
 
-- [ ] **R215-CR-P1-1 — `session.isPlannerKey` 与 `project.IsPlannerKey` 双实现**: 内部再现一份拆 cycle，但两份漂移不可被编译期捕获。
+- [x] **R215-CR-P1-1 — `session.isPlannerKey` 与 `project.IsPlannerKey` 双实现**: 内部再现一份拆 cycle，但两份漂移不可被编译期捕获。
   - 方案：抽 `internal/keys` 或类似共享包，或加契约测试并排断言。
   - 涉及: `internal/session/key.go:99-110`, `internal/project/project.go:92-94`
+  - 已修复（采用并排契约测试方案），见 PR #58
 
 - [x] **R215-CR-P2-1 — dispatch/server 两处 Error→用户消息 switch 漂移**: `context.DeadlineExceeded` 在 server/errors_usermsg.go 有 mapping 而 dispatch/dispatch.go 没有。 — 已修复，见 PR #36
   - 方案：抽 `usermsg.Translate(err, ErrCtx{...}) string` 单入口。
