@@ -75,7 +75,7 @@
 
 ### 安全 — 新发现（非重复）
 
-- [ ] **R218-SEC-1 — Feishu url_verification 缺 hookSem 保护（R215-SEC-P3-3 重申）**: url_verification 分支未受 hookSem（max 20）限速，token 泄漏后可 flood challenge endpoint。建议：把 url_verification 也纳入 hookSem，或加独立 IP 级 rate limit。`internal/platform/feishu/transport_hook.go:192-232`。
+- [x] **R218-SEC-1 — Feishu url_verification 缺 hookSem 保护（R215-SEC-P3-3 重申）**: url_verification 分支未受 hookSem（max 20）限速，token 泄漏后可 flood challenge endpoint。建议：把 url_verification 也纳入 hookSem，或加独立 IP 级 rate limit。`internal/platform/feishu/transport_hook.go:192-232`。 — 已修复，见 PR #63
 - [x] **R218-SEC-2 — scratch `--append-system-prompt` 缺 NUL sanitize（R215-SEC-P2-2 重申）**: buildScratchSystemPrompt 构造的 context block 若含 NUL 字节会在 execve 处静默截断。建议：context 走 validateArgvStrings 等价检查。`internal/session/scratch.go buildScratchSystemPrompt`。 — 已修复，见 PR #55
 - [x] **R218B-SEC-1 — attachment MIME 类型检查在 size gate 后（潜在绕过，P2）**: `parseAttachmentFile` 中 `isPDF := declared == "application/pdf"` 基于 Content-Type header（客户端可控），size gate 依赖 `isPDF` 走不同分支（PDF 用 `maxPDFBytes`，其他用 `maxImageBytes`）。攻击者可伪造 Content-Type=application/pdf 使 PDF 的更大 size limit 应用于实际是图片的文件。现有 magic byte 检查（`detected != "application/pdf"` 最终拒绝）兜底，但客户端可绕过 size gate 上传至 maxPDFBytes。**现状可接受**（magic byte 二次校验存在），添加注释说明 defense-in-depth 设计意图即可，或将 size gate 移到 sniff 之后。涉及：`internal/server/dashboard_send.go:160-178`。 — 已修复（加注释说明 defense-in-depth），见 PR #51
 - [ ] **R218B-SEC-2 — `project_files.go` stat→open TOCTOU 窗口（P3）**: `statRelWithRoot` 调用 `EvalSymlinks + Stat`，后续 preview handler 再次 `Open` 同路径。两次调用之间攻击者可替换 symlink 指向敏感文件。现有 `EvalSymlinks` 已 resolve 到真实路径，但 preview 端点重新 join + Open 而不是用已 resolved 路径。方案：`statRelWithRoot` 返回 `resolved string` 供 preview handler 直接复用，避免二次 EvalSymlinks。涉及：`internal/server/project_files.go:444-491`。
@@ -775,9 +775,10 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：spawn 前对从 disk 读出的 PlannerPrompt 再跑一次 validator。
   - 涉及: `internal/project/manager.go EffectivePlannerPrompt`, `internal/server/project_api.go:352`, `internal/session/routing.go:119`
 
-- [ ] **R215-SEC-P2-1 — `opts.Model` 未校验 flag 注入字符**: `cli.model` / `agents[*].model` YAML 字段经 validateArgvStrings 只检 NUL/C0；若模型名以 `-` 开头被 Claude CLI 误作 flag。当前未暴露用户级模型选择，但若未来 IM 暴露为 per-session 即直接注入。
+- [x] **R215-SEC-P2-1 — `opts.Model` 未校验 flag 注入字符**: `cli.model` / `agents[*].model` YAML 字段经 validateArgvStrings 只检 NUL/C0；若模型名以 `-` 开头被 Claude CLI 误作 flag。当前未暴露用户级模型选择，但若未来 IM 暴露为 per-session 即直接注入。
   - 方案：config 载入时对 model 加 `[A-Za-z0-9._-]+` allowlist。
   - 涉及: `internal/config/config.go validateConfig`
+  - 已修复，见 PR #64
 
 - [x] **R215-SEC-P2-2 — Scratch `--append-system-prompt` 包含 IM 原文未做 NUL sanitize**: `buildScratchSystemPrompt` 构造的 context block 若含 NUL 字节会在 execve 处静默截断。
   - 方案：context 走 validateArgvStrings 等价检查。
@@ -796,9 +797,10 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：cron API 绑 `validateWorkspace(workdir, allowedRoot)`。
   - 涉及: `internal/server/dashboard_cron.go`
 
-- [ ] **R215-SEC-P3-3 — URL verification challenge 无 hookSem 保护**: 若 VerificationToken 泄漏，challenge endpoint 可被 flood。
+- [x] **R215-SEC-P3-3 — URL verification challenge 无 hookSem 保护**: 若 VerificationToken 泄漏，challenge endpoint 可被 flood。
   - 方案：把 hookSem 也包在 `url_verification` 分支，或加每 IP rate limit。
   - 涉及: `internal/platform/feishu/transport_hook.go:192-232`
+  - 已修复，见 PR #63
 
 ### performance-optimizer（避开已归档后剩余 P1/P2）
 
@@ -827,9 +829,10 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：server 端缓存 `[]SessionSnapshot`，基于 storeGen 重建。
   - 涉及: `internal/server/dashboard_session.go:307-324`
 
-- [ ] **R215-PERF-P2-6 — `process_event_format.FormatToolInput` 未知工具 fallback `string(input)` 复制**: 整个 RawMessage 复制，MCP 工具 input 动辄 KB 级。
+- [x] **R215-PERF-P2-6 — `process_event_format.FormatToolInput` 未知工具 fallback `string(input)` 复制**: 整个 RawMessage 复制，MCP 工具 input 动辄 KB 级。
   - 方案：加 `TruncateRunesBytes([]byte, max) string` 只在截断后转 string。
   - 涉及: `internal/cli/process_event_format.go:362`
+  - 已修复，见 PR #62
 
 ### code-reviewer（避开已归档后剩余 P1/P2）
 

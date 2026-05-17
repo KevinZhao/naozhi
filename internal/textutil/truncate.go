@@ -42,3 +42,29 @@ func TruncateRunes(s string, maxRunes int) string {
 	}
 	return s
 }
+
+// TruncateRunesBytes mirrors TruncateRunes for a []byte input: it returns a
+// string with at most maxRunes runes, appending "..." only when the input
+// was actually trimmed. The conversion to string is deferred to the result
+// (a byte-slice prefix or constructed truncated string) so callers passing
+// large []byte payloads — e.g. cli.FormatToolInput's unknown-tool fallback
+// dumping a multi-KB MCP tool-input json.RawMessage — avoid the full
+// string(b) heap copy when truncation is the common case. R215-PERF-P2-6.
+func TruncateRunesBytes(b []byte, maxRunes int) string {
+	if maxRunes <= 0 {
+		return string(b)
+	}
+	if len(b) <= maxRunes {
+		return string(b)
+	}
+	i, count := 0, 0
+	for i < len(b) {
+		if count == maxRunes {
+			return string(b[:i]) + "..."
+		}
+		_, size := utf8.DecodeRune(b[i:])
+		i += size
+		count++
+	}
+	return string(b)
+}
