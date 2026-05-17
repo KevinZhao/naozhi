@@ -149,12 +149,12 @@
 - [ ] **R220-PERF-3 — `EventLog.EntriesSince` 初始 catch-up 在 RLock 下复制 500 entry × 512B（P2）**: 反向扫描+复制全在 l.mu RLock 内，subscriber 初始订阅时阻塞 Append 一段时间。方案：先 snapshot ring 索引（head/count），release RLock，再在临时 slice 内拷贝。涉及：`internal/cli/eventlog.go:869`。
 - [ ] **R220-PERF-4 — `Cleanup` pass2 对 candidate 做 proc.Alive + proc.IsRunning 二次锁获取（P2）**: pass1 在 r.mu RLock 下收集 candidate proc 指针，pass2 又对每个 candidate 取 `proc.mu.RLock` 跑 IsRunning，与热 Send 路径锁竞争。方案：pass1 同时 capture proc.GetState() 一次，pass2 直接读 state。涉及：`internal/session/router.go:2920-2946`。
 - [ ] **R220-PERF-5 — `hub.debounceMu` 高频锁获取无 atomic 短路（P2）**: 50 tab × 5 evt/s 让 debounceMu 拿 ~300×/s 包括 timer callback 重入。方案：atomic.Bool "pending" flag 在 fast path 取代 mutex acquire；首次 set 触发 AfterFunc。涉及：`internal/server/wshub.go:140-149`。
-- [ ] **R220-PERF-6 — `Snapshot.TurnAgents` 即使 turnAgents 为 nil 也走 RLock+slice 复制（P3）**: 大多数 session 任意时刻 turnAgents 为空，仍每次 1 Hz × N tab × 50 sess 走锁。方案：`atomic.Int32 turnAgentCount`，Snapshot 在 count==0 时跳过 RLock+复制。
+- [x] **R220-PERF-6 — `Snapshot.TurnAgents` 即使 turnAgents 为 nil 也走 RLock+slice 复制（P3）**: 大多数 session 任意时刻 turnAgents 为空，仍每次 1 Hz × N tab × 50 sess 走锁。方案：`atomic.Int32 turnAgentCount`，Snapshot 在 count==0 时跳过 RLock+复制。 — 已修复，本批 PR #84
 
 ### 代码质量 — 错误消息一致性
 
-- [ ] **R220-CR-1 — 多处 "X too long" 错误消息不带 limit 数值（P3）**: `session/key.go:133`, `session/workspace.go:53`, `session/label.go:32`, `shim/manager.go:47` 仍用 bare "too long" 而非 "exceeds N-byte limit"，导致 API consumer 不知道 cap 值。本轮已修 notify_chat_id；剩余 4 处建议作为统一格式批量修。方案：单 PR 把 4 处错误格式化加 limit。Breaking：API 错误消息字符串变化，下游不应依赖。
-- [ ] **R220-CR-2 — `Guard.lastWait` R217-GO-1 leak 无 inline TODO 关联注释（P3）**: `sessionSendLegacy` 用 `Guard.AcquireTimeout` 但无 `// TODO(R217-GO-1)` 标记，未来 reviewer 会把 leak 当新发现重报。方案：在 send.go AcquireTimeout 调用点加 inline 注释指 R217-GO-1。涉及：`internal/server/send.go:565`。
+- [x] **R220-CR-1 — 多处 "X too long" 错误消息不带 limit 数值（P3）**: `session/key.go:133`, `session/workspace.go:53`, `session/label.go:32`, `shim/manager.go:47` 仍用 bare "too long" 而非 "exceeds N-byte limit"，导致 API consumer 不知道 cap 值。本轮已修 notify_chat_id；剩余 4 处建议作为统一格式批量修。方案：单 PR 把 4 处错误格式化加 limit。Breaking：API 错误消息字符串变化，下游不应依赖。 — 已修复，本批 PR #84
+- [x] **R220-CR-2 — `Guard.lastWait` R217-GO-1 leak 无 inline TODO 关联注释（P3）**: `sessionSendLegacy` 用 `Guard.AcquireTimeout` 但无 `// TODO(R217-GO-1)` 标记，未来 reviewer 会把 leak 当新发现重报。方案：在 send.go AcquireTimeout 调用点加 inline 注释指 R217-GO-1。涉及：`internal/server/send.go:565`。 — 已修复，本批 PR #84
 
 ## Round 218 — 5-agent 并行 review 第 32 轮（2026-05-16）NEEDS-DESIGN
 
