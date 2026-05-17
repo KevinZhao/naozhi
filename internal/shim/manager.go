@@ -899,8 +899,21 @@ var shimEnvAllowedPrefixes = []string{
 	"LANG=", "LC_", "TZ=",
 	"XDG_",
 
-	// Claude CLI / Anthropic
-	"ANTHROPIC_", "CLAUDE_",
+	// Claude CLI / Anthropic — explicit list of variables the CLI / SDK
+	// reads to authenticate and select the model. Avoid the wildcard
+	// "ANTHROPIC_" prefix because Bedrock deployments do not need
+	// ANTHROPIC_API_KEY at all yet a wildcard would still forward host
+	// ANTHROPIC_API_KEY into the shim subprocess where the Bash tool
+	// could read it via `env | grep ANTHROPIC`. Listing the canonical
+	// envs explicitly keeps the surface to what the CLI actually
+	// consumes (anthropic-sdk-typescript / anthropic-sdk-python and
+	// claude-code itself). R219-SEC-3.
+	"ANTHROPIC_API_KEY=",
+	"ANTHROPIC_AUTH_TOKEN=",
+	"ANTHROPIC_MODEL=",
+	"ANTHROPIC_BASE_URL=",
+	"ANTHROPIC_BEDROCK_BASE_URL=",
+	"CLAUDE_",
 
 	// AWS (Bedrock auth) — explicit list of variables required by the AWS
 	// SDK to authenticate Bedrock. Avoid the wildcard "AWS_" prefix because

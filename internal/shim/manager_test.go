@@ -516,7 +516,12 @@ func TestFilterShimEnv_AllowsExpectedPrefixes(t *testing.T) {
 		{"XDG_RUNTIME_DIR=/run/user/1000", true},
 		{"XDG_CONFIG_HOME=/home/user/.config", true},
 		{"ANTHROPIC_API_KEY=sk-abc", true},
+		{"ANTHROPIC_AUTH_TOKEN=tok", true},
+		{"ANTHROPIC_MODEL=claude-opus", true},
+		{"ANTHROPIC_BASE_URL=https://api.example.com", true},
+		{"ANTHROPIC_BEDROCK_BASE_URL=https://bedrock.example.com", true},
 		{"CLAUDE_MODEL=claude-opus", true},
+		{"CLAUDE_CODE_USE_BEDROCK=1", true},
 		{"AWS_REGION=us-east-1", true},
 		{"AWS_DEFAULT_REGION=us-east-1", true},
 		{"AWS_ACCESS_KEY_ID=AKIA...", true},
@@ -538,6 +543,13 @@ func TestFilterShimEnv_AllowsExpectedPrefixes(t *testing.T) {
 		{"VIRTUAL_ENV=/home/user/venv", true},
 		{"CONDA_PREFIX=/opt/conda", true},
 		{"JAVA_HOME=/usr/lib/jvm/java-17", true},
+
+		// Blocked — ANTHROPIC_* outside the explicit allowlist (R219-SEC-3).
+		// The wildcard "ANTHROPIC_" prefix used to forward any ANTHROPIC_*
+		// variable; collapse to the documented CLI/SDK surface so unrelated
+		// envs cannot leak into the shim subprocess.
+		{"ANTHROPIC_LOG_LEVEL=debug", false},
+		{"ANTHROPIC_INTERNAL_DEBUG=1", false},
 
 		// Blocked — generic secrets / unrelated
 		{"DATABASE_URL=postgres://...", false},
