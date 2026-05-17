@@ -221,8 +221,25 @@ CC assistant tool_use{AskUserQuestion, input:{questions}}
 - [ ] `disallowedTools` 配置开关验证
 - [ ] `/new` 期间旧卡片回答不影响新 session
 
+## 附录：阻塞式 bridge 可行性二次验证（2026-05-17, CC 2.1.143）
+
+7 天后用 `--brief` `--remote-control` 等新开关复测，确认在 `claude -p` 物理边界内**没有**任何 agent→user 的阻塞 bridge：
+
+| 候选 | 结论 | 证据 |
+|---|---|---|
+| `AskUserQuestion` (复测) | 仍 auto-error，latency ~7ms | tool_use 后立刻收到 `is_error=True content="Answer questions?"`，与 2.1.132 基线一致 |
+| `AskUserQuestion` 新副作用 | 模型在同一 turn 内**重试 2-3 次**才放弃 | 单 turn 内 t+13/24/33s 三连 tool_use，每次都被 auto-error，最终 `num_turns=4` 才结束 |
+| `--brief` → `SendMessage` | 不是 user-bridge，是 **agent-to-agent** | 模型自述："SendMessage is for inter-agent communication, designed to send messages to spawned sub-agents, not to the user directly" |
+| `--remote-control` + `-p` | 兼容但**不改变工具集**，仍只能用同 29 个工具 | init.tools 与 baseline 完全相同 |
+
+**重要新发现**：2.1.143 的 AQ 重试行为意味着 naozhi 一轮内可能渲染**多张**重复卡片。当前 `extractAskQuestion` 实现按 `tool_use_id` 区分，每张卡都会发，dashboard/飞书会看到 2-3 张内容相近的卡片接连出现。要么过滤同一 turn 内的后续 AQ，要么 UI 把它们 dedupe / 合并 — 见 TODO。
+
+**结论**：RFC 主线（观察→渲染卡片→用户答案作下一轮 user 消息）继续有效，没有更优替代方案。
+
+复测脚本未提交（一次性可行性验证用），结果如上表所述。
+
 ## 参考
 
-- 实测脚本：`test/e2e/askuser/aq{1..7}_*.py`
+- 实测脚本：`test/e2e/askuser/aq{1..7}_*.py`（2.1.132 基线）
 - 原始事件 log：`test/e2e/askuser/out/aq{1,3,4,5,6,7}_full.log`
-- CC 版本：2.1.132（Bedrock 后端 claude-opus-4-6）
+- CC 版本：2.1.132（基线）/ 2.1.143（复测）（Bedrock 后端 claude-opus-4-6）
