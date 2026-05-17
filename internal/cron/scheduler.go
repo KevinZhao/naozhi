@@ -1505,10 +1505,11 @@ type jobSnapshot struct {
 
 // snapshotJob reads j under s.mu so a concurrent SetJobPrompt /
 // UpdateJob cannot tear the read across fields. Always returns a value
-// (never nil); j is dereferenced inside the lock.
+// (never nil); j is dereferenced inside the lock. RLock is sufficient
+// since snapshotJob is read-only and runs from executeOpt outside s.mu.
 func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.mu.RLock()
+	defer s.mu.RUnlock()
 	snap := jobSnapshot{
 		prompt:     j.Prompt,
 		workDir:    j.WorkDir,
