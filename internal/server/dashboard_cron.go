@@ -44,21 +44,87 @@ const (
 // on validation failure, allowing log-flood from an authenticated attacker.
 const maxCronWorkDirBytesDashboard = 1024
 
+// stringFieldPolicy carries the per-field knobs for validateStringField:
+// what to call this field in error messages, whether Tab/LF are accepted,
+// and whether the three failure classes ("invalid characters" / "invalid
+// control characters" / "invalid unicode control characters") collapse
+// into a single error label. Centralising these knobs keeps the security
+// policy in one place — every cron-edge field shares the same UTF-8 + C0
+// + IsLogInjectionRune three-pass scan, so a future safety change touches
+// validateStringField alone instead of five copy-pasted loops. R219-CR-5.
+type stringFieldPolicy struct {
+	// name is the wire-visible field label embedded in error messages.
+	name string
+	// allowTab whitelists 0x09 in the byte scan (cron prompt / title body).
+	allowTab bool
+	// allowLF whitelists 0x0a in the byte scan (cron prompt only — cron
+	// schedules and absolute paths cannot legally contain a newline).
+	allowLF bool
+	// collapseErrors maps every failure class onto "<name> contains invalid
+	// characters" instead of the WorkDir/Prompt-style three-tier messages.
+	// True for notify_chat_id and schedule (where API consumers historically
+	// only see one error string); false for work_dir / prompt where the
+	// distinction between "control byte" and "bidi rune" carries audit
+	// signal.
+	collapseErrors bool
+}
+
+// validateStringField runs the three-pass UTF-8 → C0+DEL byte → log-injection
+// rune scan that every cron-handler-edge user-controlled string requires.
+// The caller owns the length check (units differ: WorkDir/Prompt cap bytes,
+// Title caps runes, NotifyChatID caps bytes) and any field-specific extras
+// (validateCronWorkDir's filepath.IsAbs check). R219-CR-5.
+func validateStringField(s string, p stringFieldPolicy) error {
+	// R179-GO-P1: validate UTF-8 before the rune-range loop below. A
+	// `for _, r := range s` over broken UTF-8 silently produces utf8.RuneError
+	// (U+FFFD) for each invalid byte, which IsLogInjectionRune does not flag
+	// — this lets a crafted string with lone continuation bytes smuggle
+	// arbitrary bytes into cron_jobs.json / WS broadcasts. Mirrors
+	// validateProjectName.
+	if !utf8.ValidString(s) {
+		return fmt.Errorf("%s contains invalid characters", p.name)
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 0x20 && c != 0x7f {
+			continue
+		}
+		if c == '\t' && p.allowTab {
+			continue
+		}
+		if c == '\n' && p.allowLF {
+			continue
+		}
+		if p.collapseErrors {
+			return fmt.Errorf("%s contains invalid characters", p.name)
+		}
+		return fmt.Errorf("%s contains invalid control characters", p.name)
+	}
+	// Reject Unicode bidi override / embedding / directional isolate
+	// characters (U+202A–U+202E, U+2066–U+2069) and Unicode line/paragraph
+	// separators (U+2028/U+2029) which encode as valid UTF-8 sequences with
+	// all bytes >= 0x20 and therefore pass the byte loop above. These
+	// characters can flip terminal rendering and corrupt log pipelines that
+	// use U+2028 as a line boundary. Matches the filter applied by
+	// sanitizeKeyComponent in the session package so cron fields and
+	// session-key fields reject the same log-injection class uniformly.
+	for _, r := range s {
+		if osutil.IsLogInjectionRune(r) {
+			if p.collapseErrors {
+				return fmt.Errorf("%s contains invalid characters", p.name)
+			}
+			return fmt.Errorf("%s contains invalid unicode control characters", p.name)
+		}
+	}
+	return nil
+}
+
 // validateCronWorkDir rejects work_dir strings with embedded control
 // characters that would corrupt slog attribute logging (ANSI injection into
 // structured logs, CR/LF line-wrapping into log pipelines). Length check
 // matches prompt/schedule guards so all three fields reject the same class
 // of log-injection payloads at the handler edge, before validateWorkspace
 // sees them.
-//
-// The second pass (rune-level) also rejects Unicode bidi override /
-// embedding / directional isolate characters (U+202A–U+202E, U+2066–U+2069)
-// and Unicode line/paragraph separators (U+2028/U+2029) which encode as
-// valid UTF-8 sequences with all bytes >= 0x20 and therefore pass the
-// byte loop above. These characters can flip terminal rendering and corrupt
-// log pipelines that use U+2028 as a line boundary. Matches the filter
-// applied by sanitizeKeyComponent in the session package so cron fields
-// and session-key fields reject the same log-injection class uniformly.
 //
 // R172-SEC-L1: relative paths are rejected up front so the cron edge
 // boundary does not depend on validateWorkspace to fail on "." / "foo/bar"
@@ -70,24 +136,8 @@ func validateCronWorkDir(wd string) error {
 	if len(wd) > maxCronWorkDirBytesDashboard {
 		return fmt.Errorf("work_dir exceeds %d-byte limit", maxCronWorkDirBytesDashboard)
 	}
-	// R179-GO-P1: validate UTF-8 before the rune-range loop below. A `for _, r
-	// := range s` over broken UTF-8 silently produces utf8.RuneError (U+FFFD)
-	// for each invalid byte, which IsLogInjectionRune does not flag — this lets
-	// a crafted string with lone continuation bytes smuggle arbitrary bytes
-	// into cron_jobs.json / WS broadcasts. Mirrors validateProjectName.
-	if !utf8.ValidString(wd) {
-		return fmt.Errorf("work_dir contains invalid characters")
-	}
-	for i := 0; i < len(wd); i++ {
-		c := wd[i]
-		if c == 0 || c < 0x20 || c == 0x7f {
-			return fmt.Errorf("work_dir contains invalid control characters")
-		}
-	}
-	for _, r := range wd {
-		if osutil.IsLogInjectionRune(r) {
-			return fmt.Errorf("work_dir contains invalid unicode control characters")
-		}
+	if err := validateStringField(wd, stringFieldPolicy{name: "work_dir"}); err != nil {
+		return err
 	}
 	if !filepath.IsAbs(wd) {
 		return fmt.Errorf("work_dir must be an absolute path")
@@ -106,23 +156,7 @@ func validateNotifyTarget(platform, chatID string) error {
 	if len(chatID) > maxNotifyChatIDLen {
 		return fmt.Errorf("notify_chat_id too long")
 	}
-	// R179-GO-P1: guard against invalid UTF-8 before the rune loop — see
-	// validateCronWorkDir for the full attack rationale.
-	if !utf8.ValidString(chatID) {
-		return fmt.Errorf("notify_chat_id contains invalid characters")
-	}
-	for i := 0; i < len(chatID); i++ {
-		c := chatID[i]
-		if c < 0x20 || c == 0x7f {
-			return fmt.Errorf("notify_chat_id contains invalid characters")
-		}
-	}
-	for _, r := range chatID {
-		if osutil.IsLogInjectionRune(r) {
-			return fmt.Errorf("notify_chat_id contains invalid characters")
-		}
-	}
-	return nil
+	return validateStringField(chatID, stringFieldPolicy{name: "notify_chat_id", collapseErrors: true})
 }
 
 // validateCronScheduleChars rejects C0/C1/bidi/LS/PS runes in a cron
@@ -134,22 +168,7 @@ func validateNotifyTarget(platform, chatID string) error {
 // across every user-controlled string entering scheduler paths.
 // R177-SEC-9.
 func validateCronScheduleChars(schedule string) error {
-	// R179-GO-P1: UTF-8 guard before the rune loop below.
-	if !utf8.ValidString(schedule) {
-		return fmt.Errorf("schedule contains invalid characters")
-	}
-	for i := 0; i < len(schedule); i++ {
-		c := schedule[i]
-		if c < 0x20 || c == 0x7f {
-			return fmt.Errorf("schedule contains invalid characters")
-		}
-	}
-	for _, r := range schedule {
-		if osutil.IsLogInjectionRune(r) {
-			return fmt.Errorf("schedule contains invalid characters")
-		}
-	}
-	return nil
+	return validateStringField(schedule, stringFieldPolicy{name: "schedule", collapseErrors: true})
 }
 
 // validateCronPrompt rejects prompts larger than the dashboard cap or
@@ -202,22 +221,7 @@ func validateCronPrompt(prompt string) error {
 	if len(prompt) > maxCronPromptBytesDashboard {
 		return fmt.Errorf("prompt exceeds %d-byte limit", maxCronPromptBytesDashboard)
 	}
-	// R179-GO-P1: UTF-8 guard before the rune loop — see validateCronWorkDir.
-	if !utf8.ValidString(prompt) {
-		return fmt.Errorf("prompt contains invalid characters")
-	}
-	for i := 0; i < len(prompt); i++ {
-		c := prompt[i]
-		if c == 0 || (c < 0x20 && c != '\t' && c != '\n') || c == 0x7f {
-			return fmt.Errorf("prompt contains invalid control characters")
-		}
-	}
-	for _, r := range prompt {
-		if osutil.IsLogInjectionRune(r) {
-			return fmt.Errorf("prompt contains invalid unicode control characters")
-		}
-	}
-	return nil
+	return validateStringField(prompt, stringFieldPolicy{name: "prompt", allowTab: true, allowLF: true})
 }
 
 // CronHandlers groups the cron job management API endpoints.

@@ -251,6 +251,16 @@ func NewHub(opts HubOptions) *Hub {
 	}
 	h.tailers = newTailerRegistry(h)
 	h.wiredLinkers = make(map[*cli.SubagentLinker]struct{})
+	// R219-CR-11: a nil queue makes every WS send fall through to
+	// sessionSendLegacy (the deprecated guard path). Test harnesses and
+	// headless tools deliberately wire a nil Queue, but a production Hub
+	// constructed without one silently loses the dispatch queue's
+	// rate-limiting / collect-window / passthrough modes — emit a warning
+	// at construction so an operator notices in journalctl on first start
+	// rather than discovering it at the first /urgent.
+	if opts.Queue == nil {
+		slog.Warn("server: Hub constructed without MessageQueue; falling back to legacy guard path (dispatch queue features disabled)")
+	}
 	return h
 }
 

@@ -561,7 +561,9 @@ func (h *Hub) runTurnPassthrough(key, text string, images []cli.ImageData, prior
 // Deprecated: sessionSend with a configured MessageQueue handles all production
 // paths. sessionSendLegacy keeps the pre-queue guard/interrupt behaviour only
 // for test code paths that do not wire a MessageQueue. New call sites should
-// use sessionSend.
+// use sessionSend. NewHub emits a slog.Warn on construction when Queue is nil
+// so production wiring with a missing queue surfaces in journalctl rather than
+// silently falling through here. R219-CR-11.
 func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError func(string)) (bool, sendAckStatus, error) {
 	key := p.Key
 
