@@ -675,7 +675,23 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 	// lock hold time is bounded by the ring write itself. The slice
 	// is populated inside the loop and handed to invokePersistSink
 	// after unlock.
-	sinkCopy := make([]EventEntry, 0, len(entries))
+	//
+	// Fast path: when no persist sink is wired we skip the per-batch
+	// allocation entirely. invokePersistSink does the same nil check at
+	// :337 but only after we've already paid for the slice; routers
+	// without a sink (test harnesses, headless tools, the InjectHistory
+	// replay path before the persister is attached) hit this branch on
+	// every batch and a 500-slot allocation per replay adds up. Read the
+	// sink pointer once here so the body and the post-unlock dispatch
+	// agree on whether to capture; a Store racing this read is fine —
+	// the late-attached sink will pick up subsequent batches and the
+	// missed ones are bounded by the same replayPhase contract that
+	// already gates the early append phase.
+	sinkAttached := l.persistSinkPtr.Load() != nil
+	var sinkCopy []EventEntry
+	if sinkAttached {
+		sinkCopy = make([]EventEntry, 0, len(entries))
+	}
 	l.mu.Lock()
 	for _, e := range entries {
 		if e.Time == 0 {
@@ -695,7 +711,9 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 			l.count++
 		}
 
-		sinkCopy = append(sinkCopy, e)
+		if sinkAttached {
+			sinkCopy = append(sinkCopy, e)
+		}
 
 		if fire, p := l.applyEntryStateLocked(e); fire {
 			pendingDone = append(pendingDone, p)
@@ -1003,12 +1021,13 @@ func (l *EventLog) UserTurnCount() int64 {
 
 // loadAtomicString and storeAtomicString are thin wrappers around the
 // shared textutil.LoadAtomicString / textutil.StoreAtomicString helpers
-// (R219-CR-1: was a word-for-word copy of session.loadStringAtomic /
-// storeStringAtomic). Kept as package-private aliases so the dense Append
-// hot path stays readable and call sites do not have to spell out the
-// textutil import path. Behavioural contract — fast-path short-circuit on
-// equal value, last-writer-wins under l.mu — is documented on the textutil
-// helpers; do not re-document the rationale here to keep the two in sync.
+// (R219-CR-1: was a word-for-word copy of session.loadAtomicString /
+// storeAtomicString — both word orders inverted before the rename). Kept
+// as package-private aliases so the dense Append hot path stays readable
+// and call sites do not have to spell out the textutil import path.
+// Behavioural contract — fast-path short-circuit on equal value,
+// last-writer-wins under l.mu — is documented on the textutil helpers;
+// do not re-document the rationale here to keep the two in sync.
 func loadAtomicString(v *atomic.Pointer[string]) string {
 	return textutil.LoadAtomicString(v)
 }

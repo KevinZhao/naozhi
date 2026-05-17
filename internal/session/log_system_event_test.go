@@ -80,17 +80,17 @@ func TestLogSystemEvent_MultipleCallsAllLand(t *testing.T) {
 func TestLogSystemEvent_DoesNotOverwriteLivePrompt(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
-	storeStringAtomic(&s.lastPrompt, "live user message")
-	storeStringAtomic(&s.lastActivity, "live tool")
+	storeAtomicString(&s.lastPrompt, "live user message")
+	storeAtomicString(&s.lastActivity, "live tool")
 
 	s.LogSystemEvent("retry failed")
 
 	// System events should not feed the prompt/activity scan — those
 	// fields must remain what Send wrote.
-	if got := loadStringAtomic(&s.lastPrompt); got != "live user message" {
+	if got := loadAtomicString(&s.lastPrompt); got != "live user message" {
 		t.Errorf("lastPrompt = %q, want to remain \"live user message\"", got)
 	}
-	if got := loadStringAtomic(&s.lastActivity); got != "live tool" {
+	if got := loadAtomicString(&s.lastActivity); got != "live tool" {
 		t.Errorf("lastActivity = %q, want to remain \"live tool\"", got)
 	}
 

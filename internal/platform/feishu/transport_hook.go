@@ -116,8 +116,15 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		// Nonce dedup: prevent replay attacks within the nonce TTL window.
 		// Any authenticated webhook mode (EncryptKey or VerificationToken)
 		// requires a nonce — a stolen webhook otherwise replays freely inside
-		// the 5min timestamp window. url_verification challenges also reach
-		// here but are exempt below.
+		// the 5min timestamp window. url_verification challenges still pass
+		// the format/length checks below but skip seenNonces insertion: each
+		// challenge is one-shot from Feishu's verification endpoint and
+		// adding them to the dedup map would let an attacker who can
+		// authenticate fill seenNonces with unique-nonce challenge requests
+		// up to maxSeenNonces, after which legitimate event webhooks return
+		// 429 until the TTL sweep catches up. The challenge reflection path
+		// itself is still rate-limited by hookSem.
+		isURLVerification := envelope.Type == "url_verification"
 		if ts := r.Header.Get("X-Lark-Request-Timestamp"); ts != "" {
 			nonce := r.Header.Get("X-Lark-Request-Nonce")
 			if nonce != "" {
@@ -150,33 +157,38 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 						return
 					}
 				}
-				// Global cap: refuse new nonces once the map hits maxSeenNonces
-				// so a flood of unique-nonce requests cannot bloat heap.
-				// Reserve-then-check pattern: increment first, then attempt
-				// insert; decrement on duplicate or over-cap. Without this,
-				// a concurrent burst of N webhooks could each pass the Load()
-				// guard before any Add(1) fires, letting count overshoot the
-				// cap by up to N (bounded by hookSem but still observable).
-				if n := f.seenNoncesCount.Add(1); n > maxSeenNonces {
-					f.seenNoncesCount.Add(-1)
-					slog.Warn("feishu webhook nonce map at cap, dropping request",
-						"cap", maxSeenNonces)
-					w.WriteHeader(http.StatusTooManyRequests)
-					return
-				}
-				key := ts + ":" + nonce
-				expiry := time.Now().Add(nonceTTL).Unix()
-				if _, loaded := f.seenNonces.LoadOrStore(key, expiry); loaded {
-					// Undo our speculative increment since no new entry landed.
-					f.seenNoncesCount.Add(-1)
-					// Log only the length and timestamp rather than the raw
-					// nonce header value — attacker-supplied bytes can contain
-					// newlines or JSON metacharacters that distort structured
-					// log output and downstream log-ingest parsers.
-					slog.Warn("feishu webhook replay detected",
-						"nonce_len", len(nonce), "ts", ts)
-					w.WriteHeader(http.StatusUnauthorized)
-					return
+				// url_verification challenges skip the seenNonces map (see
+				// godoc above the timestamp gate). Format checks above still
+				// run so a malformed nonce is still rejected.
+				if !isURLVerification {
+					// Global cap: refuse new nonces once the map hits maxSeenNonces
+					// so a flood of unique-nonce requests cannot bloat heap.
+					// Reserve-then-check pattern: increment first, then attempt
+					// insert; decrement on duplicate or over-cap. Without this,
+					// a concurrent burst of N webhooks could each pass the Load()
+					// guard before any Add(1) fires, letting count overshoot the
+					// cap by up to N (bounded by hookSem but still observable).
+					if n := f.seenNoncesCount.Add(1); n > maxSeenNonces {
+						f.seenNoncesCount.Add(-1)
+						slog.Warn("feishu webhook nonce map at cap, dropping request",
+							"cap", maxSeenNonces)
+						w.WriteHeader(http.StatusTooManyRequests)
+						return
+					}
+					key := ts + ":" + nonce
+					expiry := time.Now().Add(nonceTTL).Unix()
+					if _, loaded := f.seenNonces.LoadOrStore(key, expiry); loaded {
+						// Undo our speculative increment since no new entry landed.
+						f.seenNoncesCount.Add(-1)
+						// Log only the length and timestamp rather than the raw
+						// nonce header value — attacker-supplied bytes can contain
+						// newlines or JSON metacharacters that distort structured
+						// log output and downstream log-ingest parsers.
+						slog.Warn("feishu webhook replay detected",
+							"nonce_len", len(nonce), "ts", ts)
+						w.WriteHeader(http.StatusUnauthorized)
+						return
+					}
 				}
 			} else if f.cfg.EncryptKey != "" || f.cfg.VerificationToken != "" {
 				// Authenticated modes must always supply a nonce; missing

@@ -154,7 +154,7 @@ func validateNotifyTarget(platform, chatID string) error {
 		return fmt.Errorf("invalid notify_platform")
 	}
 	if len(chatID) > maxNotifyChatIDLen {
-		return fmt.Errorf("notify_chat_id too long")
+		return fmt.Errorf("notify_chat_id exceeds %d-byte limit", maxNotifyChatIDLen)
 	}
 	return validateStringField(chatID, stringFieldPolicy{name: "notify_chat_id", collapseErrors: true})
 }
@@ -193,6 +193,12 @@ func validateCronScheduleChars(schedule string) error {
 // 卡片布局不允许）、长度 256 rune、禁控制字符 + 日志注入 rune。空值合法
 // （允许用户不填，UI 自动 fallback 到 Prompt 首行）。
 // 与 validateCronPrompt 一致的清洗集，只多禁换行。
+//
+// 不接入 R219-CR-5 抽出的 validateStringField 是因为它把单行约束（\n/\r 即
+// 报"title must be a single line"，与"contains invalid control characters"
+// 含义不同）和 rune-级长度计量 (utf8.RuneCountInString) 一起做，stringFieldPolicy
+// 当前只覆盖 Tab/LF allow-list 与 byte-级长度，不覆盖单行专用错误消息分支；
+// 强行接入会反向把 4 个 cron 验证器都污染成"如果支持单行就额外提示"的样板。
 func validateCronTitle(title string) error {
 	if title == "" {
 		return nil

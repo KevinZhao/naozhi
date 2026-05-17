@@ -728,7 +728,7 @@ func TestCleanupRunningSession_LiveEventsBlockStuckKill(t *testing.T) {
 	if !proc.Alive() {
 		t.Fatal("running session with live events must survive Cleanup; stuckKill regression")
 	}
-	if got := loadStringAtomic(&s.deathReason); got == "stuck_running" {
+	if got := loadAtomicString(&s.deathReason); got == "stuck_running" {
 		t.Errorf("deathReason = %q, want empty (session should not be classified as stuck)", got)
 	}
 }
@@ -755,7 +755,7 @@ func TestCleanupRunningSession_NoLiveEventsStillKilled(t *testing.T) {
 
 	if proc.Alive() {
 		// expected — Kill() set isAlive=false
-	} else if got := loadStringAtomic(&s.deathReason); got != "stuck_running" {
+	} else if got := loadAtomicString(&s.deathReason); got != "stuck_running" {
 		t.Errorf("deathReason = %q, want %q", got, "stuck_running")
 	}
 	if proc.Alive() {
@@ -959,14 +959,14 @@ func TestGetOrCreate_ExistingAlive_TouchesLastActive(t *testing.T) {
 	r := newTestRouter(3)
 	proc := newIdleProc()
 	s := injectSession(r, "key1", proc)
-	oldActive := s.GetLastActive()
+	oldActive := s.LastActive()
 	time.Sleep(2 * time.Millisecond)
 
 	_, _, err := r.GetOrCreate(context.Background(), "key1", AgentOpts{})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !s.GetLastActive().After(oldActive) {
+	if !s.LastActive().After(oldActive) {
 		t.Error("GetOrCreate should update lastActive for existing alive session")
 	}
 }

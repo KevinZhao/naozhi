@@ -138,7 +138,7 @@ func TestRegisterCronStub_EmptyValuesDoNotClobber(t *testing.T) {
 	if got := r.sessions["cron:job-4"].Workspace(); got != "/keep" {
 		t.Errorf("workspace clobbered by empty refresh: got %q", got)
 	}
-	if got := loadStringAtomic(&r.sessions["cron:job-4"].lastPrompt); got != "keepme" {
+	if got := loadAtomicString(&r.sessions["cron:job-4"].lastPrompt); got != "keepme" {
 		t.Errorf("lastPrompt clobbered by empty refresh: got %q", got)
 	}
 }

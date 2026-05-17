@@ -91,7 +91,7 @@ func TestSetDeathReason_UpgradesExplicitEmpty(t *testing.T) {
 }
 
 // TestLoadAtomicString_NilPointer_ReturnsEmpty matches the session-side
-// contract test for loadStringAtomic: the untouched zero-value
+// contract test for loadAtomicString: the untouched zero-value
 // atomic.Pointer[string] must collapse to "" on read.
 func TestLoadAtomicString_NilPointer_ReturnsEmpty(t *testing.T) {
 	t.Parallel()

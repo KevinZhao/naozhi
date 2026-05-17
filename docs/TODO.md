@@ -121,6 +121,41 @@
 - [ ] **R219-ARCH-12 — DESIGN.md 实际状态机已偏离描述（P3）**: DESIGN.md 描述 4 状态 `Spawning/Ready/Running/Dead`，实现已加 Paused/Suspended/stub/scratch ephemeral/exempt 等 7+ 状态。方案：DESIGN.md 补真实状态枚举 + state diagram 或链 ADR。
 - [ ] **R219-ARCH-13 — DESIGN.md L292 event log 持久化"单文件 single goroutine"承诺与 per-session writer N goroutine 现实不符（P3）**: 文档与实现漂移。方案：DESIGN.md 改"per-session writer, batched fsync, 100ms flush tick"。
 
+## Round 220 — 5-agent 并行 review 第 34 轮（2026-05-17）NEEDS-DESIGN
+
+> 5 reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描共约 110 条发现。
+> 9 条 FIX-READY 已落地（本批 PR：删 ListAllJobs/NextRunByID 死代码、validateCronTitle godoc、
+> ManagedSession.GetLastActive→LastActive、cli/session loadAtomicString 命名统一、
+> notify_chat_id 错误消息加 limit、scheduler.platforms/agents immutable 注释、
+> AppendBatch nil-sink fast-path、BackendIDs 排序结果缓存、url_verification skip nonce dedup）。
+> 以下是需设计决策、破坏兼容、跨包重构、或方案不唯一不适合本轮直接修的条目。
+
+### 安全 — 需 operator 决策
+
+- [ ] **R220-SEC-1 — `shimEnvAllowedPrefixes` 通配 `GIT_` 前缀转发 `GIT_PROXY_COMMAND`/`GIT_SSH_COMMAND`/`GIT_EXEC_PATH` 到 CLI 子进程（P3）**: 这三类 git env 设置 git 执行外部命令的路径，宿主环境若被毒化即可让 Bash tool 通过 `git clone` 触达 RCE。方案：`shimEnvAllowedPrefixes` 把 `"GIT_"` 拆成显式列表（`GIT_AUTHOR_NAME=`, `GIT_COMMITTER_NAME=`, `GIT_AUTHOR_EMAIL=`, `GIT_COMMITTER_EMAIL=`, `GIT_CONFIG_GLOBAL=`），排除 PROXY/SSH/EXEC_PATH。涉及：`internal/shim/manager.go:892`。
+- [ ] **R220-SEC-2 — `dashboardToken == ""` 短路出现在 `ConstantTimeCompare` 之后造成时序信道（P3）**: login handler 在 ConstantTimeCompare 后再判 `if a.dashboardToken == "" || !matched`，`||` 短路使"未配 token"路径比"配置但 token 错"路径快，远端可经时序区分两态。方案：启动期 `if cfg.DashboardToken == "" { return all-allowed handler }` 把 nil-token 旁路抽到 mux 装配阶段。涉及：`internal/server/dashboard_auth.go:282`。
+- [ ] **R220-SEC-3 — `gzipMiddleware` 在 `MaxBytesReader` 之前解压，gzip-bomb 可绕过 per-handler body cap（P2）**: gzip 中间件包裹整个 mux，每个 handler 调 `MaxBytesReader` 但只限制压缩字节；1KB gzip → 解压可达 GB 级。方案：在 gzipResponseWriter 内部对解压输出再套 io.LimitReader（cap 设为 2× MaxBytesReader 上界）。涉及：`internal/server/server.go:735`。
+
+### Go 正确性 — 跨包改动
+
+- [ ] **R220-GO-1 — `cli.SubagentLinker.Resolve` retryInterval 250ms `time.Sleep` 无 ctx 中断（P1，与 R219-GO-1 同批修复）**: Resolve 多次 retry 间隔用 `time.Sleep(l.retryInterval)`，shutdown ctx 取消时 goroutine 仍要等满 retry 间隔（最多 12 次 × 250ms = 3s）。方案：`select { case <-time.After(l.retryInterval): case <-ctx.Done(): return }`，与 R219-GO-1 接 ctx 改造同批进行。涉及：`internal/cli/subagent_link.go:288,326`。
+- [ ] **R220-GO-2 — `project_files.go` `serveRender`/`servePreview`/`serveRaw` 三处独立二次 os.Open 共享 R219-SEC-2 TOCTOU 缺口（P1，扩展 R219-SEC-2）**: R219-SEC-2 只点了 serveRender，但 servePreview（第 742 行）与 serveRaw（第 836 行）也各自独立 `os.Open(resolved)` 二次读盘；preview 路径还把内容塞进 JSON 返回。方案：handleFileGet 统一在 Lstat 阶段持已 open 的 *os.File 传递到三个 helper，避免 double-open race。
+- [ ] **R220-GO-3 — `cron.applyJitter` 不识别 jitter window 内 DeleteJob，jobRunningGuard 留死锁式 hold 阻塞 TriggerNow（P2）**: applyJitter 接受 `s.stopCtx` 但不检查 `s.jobs[j.ID]` 是否仍在；jitter window 内 DeleteJob 会让 guard 一直 hold 到 jitter 到期才发现 job 已删，期间 TriggerNow 同 ID 失败。方案：jitter 期间订阅 per-job cancel channel，或 applyJitter 返回后再判 job 存在性。涉及：`internal/cron/scheduler.go:1508`。
+
+### 性能 — 协议接口变更或需 benchmark
+
+- [ ] **R220-PERF-1 — `countActive()` evictOldest/Takeover/spawnSession 路径全 map scan（P1）**: 4 个 caller 各自 `r.mu.Lock()` 下做完整 map 扫描，500 session 量级会显著增加锁内 CPU；Cleanup 已用 `newActive` 增量，evict/takeover 没接。方案：传 `delta int` 给热路径做原子加，countActive 仅在 Cleanup 全量重算。涉及：`internal/session/router.go:2126,2400,2472,4067`。
+- [ ] **R220-PERF-2 — `EventLog.SetAgentInternalID` 全 ring backward scan 在 OnResolve 异步回调写锁内执行（P2）**: 每次 resolve 走 500 entry backward scan 到 patch InternalAgentID/JSONLPath/FirstPromptID，期间堵 Append。方案：维护 `toolUseID → ringIndex` 小 map，直接 slot patch，O(1) 替代 O(N)。涉及：`internal/cli/eventlog.go:560`。
+- [ ] **R220-PERF-3 — `EventLog.EntriesSince` 初始 catch-up 在 RLock 下复制 500 entry × 512B（P2）**: 反向扫描+复制全在 l.mu RLock 内，subscriber 初始订阅时阻塞 Append 一段时间。方案：先 snapshot ring 索引（head/count），release RLock，再在临时 slice 内拷贝。涉及：`internal/cli/eventlog.go:869`。
+- [ ] **R220-PERF-4 — `Cleanup` pass2 对 candidate 做 proc.Alive + proc.IsRunning 二次锁获取（P2）**: pass1 在 r.mu RLock 下收集 candidate proc 指针，pass2 又对每个 candidate 取 `proc.mu.RLock` 跑 IsRunning，与热 Send 路径锁竞争。方案：pass1 同时 capture proc.GetState() 一次，pass2 直接读 state。涉及：`internal/session/router.go:2920-2946`。
+- [ ] **R220-PERF-5 — `hub.debounceMu` 高频锁获取无 atomic 短路（P2）**: 50 tab × 5 evt/s 让 debounceMu 拿 ~300×/s 包括 timer callback 重入。方案：atomic.Bool "pending" flag 在 fast path 取代 mutex acquire；首次 set 触发 AfterFunc。涉及：`internal/server/wshub.go:140-149`。
+- [ ] **R220-PERF-6 — `Snapshot.TurnAgents` 即使 turnAgents 为 nil 也走 RLock+slice 复制（P3）**: 大多数 session 任意时刻 turnAgents 为空，仍每次 1 Hz × N tab × 50 sess 走锁。方案：`atomic.Int32 turnAgentCount`，Snapshot 在 count==0 时跳过 RLock+复制。
+
+### 代码质量 — 错误消息一致性
+
+- [ ] **R220-CR-1 — 多处 "X too long" 错误消息不带 limit 数值（P3）**: `session/key.go:133`, `session/workspace.go:53`, `session/label.go:32`, `shim/manager.go:47` 仍用 bare "too long" 而非 "exceeds N-byte limit"，导致 API consumer 不知道 cap 值。本轮已修 notify_chat_id；剩余 4 处建议作为统一格式批量修。方案：单 PR 把 4 处错误格式化加 limit。Breaking：API 错误消息字符串变化，下游不应依赖。
+- [ ] **R220-CR-2 — `Guard.lastWait` R217-GO-1 leak 无 inline TODO 关联注释（P3）**: `sessionSendLegacy` 用 `Guard.AcquireTimeout` 但无 `// TODO(R217-GO-1)` 标记，未来 reviewer 会把 leak 当新发现重报。方案：在 send.go AcquireTimeout 调用点加 inline 注释指 R217-GO-1。涉及：`internal/server/send.go:565`。
+
 ## Round 218 — 5-agent 并行 review 第 32 轮（2026-05-16）NEEDS-DESIGN
 
 > 5 reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描共约 100+ 条发现。
