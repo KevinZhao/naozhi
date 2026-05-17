@@ -151,15 +151,23 @@ func (s ProcessState) String() string {
 
 // Process manages a CLI subprocess via a shim connection.
 type Process struct {
-	shimConn    net.Conn
-	shimR       *bufio.Reader
-	shimW       *bufio.Writer
-	shimWMu     sync.Mutex
-	stdinWriter *shimWriter // cached shimStdinWriter instance
-	protocol    Protocol
-	caps        Caps // cached protocol capabilities (immutable after construction)
-	cliPID      int  // CLI PID reported by shim hello
-	shimPID     int  // shim PID reported by shim hello; used by Kill() for SIGUSR2 fallback
+	shimConn net.Conn
+	// shimCloseOnce serialises shimConn.Close across Kill / Detach / Close /
+	// readLoop EOF paths. Without it, concurrent close races (e.g. Kill racing
+	// readLoop's EOF cleanup) trigger a "use of closed network connection"
+	// error from the second Close that callers must currently swallow with a
+	// blank `_ =`. The Once eliminates the misleading-debug-log surface and
+	// matches the closeOnce idiom already used by EventLog subscribers.
+	// R219-GO-3.
+	shimCloseOnce sync.Once
+	shimR         *bufio.Reader
+	shimW         *bufio.Writer
+	shimWMu       sync.Mutex
+	stdinWriter   *shimWriter // cached shimStdinWriter instance
+	protocol      Protocol
+	caps          Caps // cached protocol capabilities (immutable after construction)
+	cliPID        int  // CLI PID reported by shim hello
+	shimPID       int  // shim PID reported by shim hello; used by Kill() for SIGUSR2 fallback
 
 	SessionID string
 	State     ProcessState
@@ -494,7 +502,7 @@ func (p *Process) Kill() {
 				slog.Debug("kill: shimSend failed", "err", err)
 			}
 		}
-		_ = p.shimConn.Close()
+		p.closeShimConn()
 		p.shimWMu.Unlock()
 
 		if p.shimPID > 0 {
@@ -593,8 +601,22 @@ func (p *Process) Detach() {
 			slog.Debug("detach: shimSend failed", "err", err)
 		}
 	}
-	_ = p.shimConn.Close()
+	p.closeShimConn()
 	p.shimWMu.Unlock()
+}
+
+// closeShimConn closes p.shimConn at most once across all teardown paths
+// (Kill / Detach / Close / readLoop EOF / connect-failure cleanup). Without
+// the sync.Once gate, the second concurrent Close returns "use of closed
+// network connection" which callers used to silently swallow with `_ =` —
+// hiding any genuine close error and producing misleading entries when
+// reviewers grep journalctl. R219-GO-3.
+func (p *Process) closeShimConn() {
+	p.shimCloseOnce.Do(func() {
+		if err := p.shimConn.Close(); err != nil {
+			slog.Debug("shimConn close failed", "err", err)
+		}
+	})
 }
 
 // GetState returns the current process state.

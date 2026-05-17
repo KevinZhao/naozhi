@@ -134,9 +134,14 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				// key and reaches slog attrs indirectly via helper logs in
 				// future refactors. Restrict to printable ASCII (0x21-0x7E)
 				// so byte-level C0/C1/bidi/LS/PS cannot corrupt structured
-				// log output. Real Feishu nonces are base-16-ish random
-				// strings so this is a pure-defense tightening — no valid
-				// traffic should trip it.
+				// log output. Real Feishu nonces are alphanumeric random
+				// strings (mix of upper/lower-case letters and digits, no
+				// punctuation) so accepting the full printable ASCII range
+				// is a pure-defense tightening — no valid traffic should
+				// trip it. (R219-CR-10: prior comment said "base-16-ish"
+				// which understated the accepted alphabet; the filter has
+				// always allowed full 0x21-0x7E to leave headroom for
+				// upstream changes to the nonce alphabet.)
 				for i := 0; i < len(nonce); i++ {
 					c := nonce[i]
 					if c < 0x21 || c > 0x7e {
