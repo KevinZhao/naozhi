@@ -137,6 +137,13 @@ curl -s -H "Authorization: Bearer $TOK" 'http://127.0.0.1:8180/api/debug/pprof/g
 | `naozhi_attachment_ref_meta_error_total` | tracker UpdateMetaFile 失败数(缺 sidecar / ENOSPC / perm) | 稳态 0;非零 = attachment 将回退到仅 uploaded_at TTL GC |
 | `naozhi_attachment_ref_drop_total` | tracker 非阻塞 enqueue 满 channel 丢弃数 | 稳态 0;非零 = 调用方提交过快或磁盘 latency 异常,同 Persister 运维 |
 | `naozhi_cron_execution_slow_total` | cron job 成功执行但耗时超过 `cronSlowThreshold`（当前 30s）的累计次数（R208-OBS1 的 MVP histogram 替身） | 持续增长 = 某些 job 长期压线超时；对照 job id（slog.Warn "cron execution slow"）确认是 prompt 设计问题还是 backend 退化 |
+| `naozhi_cron_run_started_total` | cron run 开始计数（CAS gate 通过后；docs/rfc/cron-run-history.md P0） | 与 `_ended_total` 差值远大于 inflight gauge = 进程崩溃打断在途 run；查 panic 日志 |
+| `naozhi_cron_run_ended_total` | cron run 终态计数（聚合 succeeded/failed/skipped/timed_out/canceled） | 与 `_started_total` 配合判断"开了但没收尾"的 run 数 |
+| `naozhi_cron_run_succeeded_total` | succeeded 终态计数 | 比例骤降 = backend / prompt 退化；对比 failed/timed_out 看根因 |
+| `naozhi_cron_run_failed_total` | failed 终态计数（session_error / send_error / workdir_* 等非超时错误） | 持续涨 = job 配置或目标不可达；按 LastErrorClass 分组排查 |
+| `naozhi_cron_run_skipped_total` | skipped 终态计数（overlap_skipped / paused_concurrent） | 持续涨 = 上一轮没跑完下一轮就来了；调长 schedule 或缩 prompt |
+| `naozhi_cron_run_timed_out_total` | timed_out 终态计数（DeadlineExceeded） | 涨 = 接近 jobTimeout 边界；对比 cron_execution_slow_total 看是否同因 |
+| `naozhi_cron_run_canceled_total` | canceled 终态计数（context.Canceled，shutdown / job 删除中途） | 重启高峰短时涨正常；稳态非零 = job 频繁被删/recreate |
 
 这个表的"完整性"由 `internal/metrics/metrics_doc_sync_test.go` 锁定：metrics.go 新增 counter 但未同步文档会在 CI 红。
 

@@ -403,29 +403,31 @@ func TestSchedulerDelete(t *testing.T) {
 
 // TestJobRunningGuardReentry locks in the R31-REL2 invariant: a second execute
 // for the same job ID while the first is still holding the guard must be
-// short-circuited by the CAS gate, not run concurrently.
+// short-circuited by the CAS gate, not run concurrently. The CAS gate now
+// lives inside *runInflight (cron-run-history.md P0); the test exercises
+// the embedded atomic.Bool's semantics through jobInflight.
 func TestJobRunningGuardReentry(t *testing.T) {
 	t.Parallel()
 	s := NewScheduler(SchedulerConfig{MaxJobs: 10})
 
-	g := s.jobRunningGuard("job-x")
-	if !g.CompareAndSwap(false, true) {
+	g := s.jobInflight("job-x")
+	if !g.running.CompareAndSwap(false, true) {
 		t.Fatal("initial CAS should succeed")
 	}
-	if g2 := s.jobRunningGuard("job-x"); g2 != g {
-		t.Fatal("jobRunningGuard should return the same *atomic.Bool for the same id")
+	if g2 := s.jobInflight("job-x"); g2 != g {
+		t.Fatal("jobInflight should return the same *runInflight for the same id")
 	}
-	if g.CompareAndSwap(false, true) {
+	if g.running.CompareAndSwap(false, true) {
 		t.Fatal("re-entrant CAS should fail while guard is held")
 	}
-	g.Store(false)
-	if !g.CompareAndSwap(false, true) {
+	g.running.Store(false)
+	if !g.running.CompareAndSwap(false, true) {
 		t.Fatal("CAS should succeed after guard released")
 	}
-	g.Store(false)
+	g.running.Store(false)
 
 	s.runningJobs.Delete("job-x")
-	if g3 := s.jobRunningGuard("job-x"); g3 == g {
+	if g3 := s.jobInflight("job-x"); g3 == g {
 		t.Fatal("guard should be freshly allocated after delete")
 	}
 }

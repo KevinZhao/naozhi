@@ -241,6 +241,34 @@ var (
 	// alert without schema churn.
 	CronExecutionSlowTotal = expvar.NewInt("naozhi_cron_execution_slow_total")
 
+	// CronRunStartedTotal counts cron run starts (after CAS gate, before
+	// IM notify). Pairs with CronRunEndedTotal — the difference (modulo
+	// inflight) approximates "runs interrupted by panic / process crash".
+	// Wired in scheduler.executeOpt's started branch.
+	CronRunStartedTotal = expvar.NewInt("naozhi_cron_run_started_total")
+
+	// CronRunEndedTotal counts cron run terminal transitions across all
+	// states (succeeded/failed/skipped/timed_out/canceled). Aggregated
+	// counter — per-state breakdown lives on naozhi_cron_run_<state>_total
+	// below. Wired in recordResult / overlap-skip branches.
+	CronRunEndedTotal = expvar.NewInt("naozhi_cron_run_ended_total")
+
+	// CronRunSucceededTotal / CronRunFailedTotal / CronRunSkippedTotal /
+	// CronRunTimedOutTotal / CronRunCanceledTotal — per-state breakdown of
+	// cron run terminations. The state taxonomy mirrors RunState in
+	// internal/cron/job.go; adding a new state requires a new counter
+	// here so dashboards stay in lockstep.
+	CronRunSucceededTotal = expvar.NewInt("naozhi_cron_run_succeeded_total")
+	CronRunFailedTotal    = expvar.NewInt("naozhi_cron_run_failed_total")
+	CronRunSkippedTotal   = expvar.NewInt("naozhi_cron_run_skipped_total")
+	CronRunTimedOutTotal  = expvar.NewInt("naozhi_cron_run_timed_out_total")
+	CronRunCanceledTotal  = expvar.NewInt("naozhi_cron_run_canceled_total")
+
+	// CronRunInflight is a gauge of currently executing cron runs. Bumped
+	// on CAS-gate success, decremented on terminal transition. Naming uses
+	// no `_total` suffix so the doc-sync regex treats it as a gauge.
+	CronRunInflight = expvar.NewInt("naozhi_cron_run_inflight")
+
 	// --- Startup phase timing gauges (RNEW-OPS-414) -----------------------
 	//
 	// Cold-start observability: historically the only signal operators had

@@ -70,17 +70,94 @@ type Job struct {
 	// 就永远是空的。仅 Send 成功路径写入；错误路径保留上一次的值。
 	LastSessionID string `json:"last_session_id,omitempty"`
 
+	// LastErrorClass 是 LastError 的机器可读分类（见 ErrorClass 常量）。
+	// 与 LastError 同时写入：错误路径 ErrorClass 非空 + ErrorMsg 同步；成功
+	// 路径两者均清零。前端用它选图标/着色，不再 substring-grep LastError。
+	// 旧 cron_jobs.json 反序列化后为空串，前端 fallback 到 LastError 是否
+	// 非空判断"是否失败"——双向兼容。
+	// 引入背景：docs/rfc/cron-run-history.md §9。
+	LastErrorClass ErrorClass `json:"last_error_class,omitempty"`
+
+	// RunCounters 是每个 job 的累计计数。落盘后 list API 直接读，避免每次
+	// 扫描 runs/<jobID>/ 目录。P0 阶段只维护 total/succeeded/failed/skipped/
+	// timed_out/canceled；avg_ms / p95_ms 在 P1 引入（EWMA + P²-quantile）。
+	// 旧 cron_jobs.json 反序列化为零值，与"从未跑过"不可区分——这是预期：
+	// 计数从首次 run 累积，不回填。
+	// 引入背景：docs/rfc/cron-run-history.md §3.2。
+	RunCounters JobRunCounters `json:"run_counters,omitempty"`
+
 	entryID robfigcron.EntryID // runtime only, not persisted
 }
 
-// generateID returns a 16-char hex string (8 bytes of entropy).
-func generateID() string {
-	b := make([]byte, 8)
+// RunState 是单次 cron 执行的终态分类。运行中态不进 RunState（用 runInflight
+// 表达），只有进入持久化路径的 run 才会带 State。
+type RunState string
+
+const (
+	RunStateRunning   RunState = "running" // 仅 inflight 用，不落盘
+	RunStateSucceeded RunState = "succeeded"
+	RunStateFailed    RunState = "failed"
+	RunStateSkipped   RunState = "skipped"
+	RunStateTimedOut  RunState = "timed_out"
+	RunStateCanceled  RunState = "canceled"
+)
+
+// TriggerKind 标识 run 的触发来源。manual = TriggerNow，scheduled = robfig
+// tick，catchup 给未来 missed-schedule 重跑保留位（P3）。
+type TriggerKind string
+
+const (
+	TriggerScheduled TriggerKind = "scheduled"
+	TriggerManual    TriggerKind = "manual"
+	TriggerCatchup   TriggerKind = "catchup"
+)
+
+// ErrorClass 是 cron run 错误的机器可读分类。executeOpt 各失败分支映射到
+// 固定常量，UI/metrics 据此分组，不再字符串匹配 LastError。
+//
+// 设计取舍：state 只表达终态（succeeded/failed/skipped/timed_out/canceled），
+// ErrorClass 表达"为什么 not succeeded"。例如 timed_out 都是 deadline_exceeded，
+// canceled 都是 context.Canceled——两者强相关，但分开存便于将来加新 class
+// 不动 state 枚举。
+type ErrorClass string
+
+const (
+	ErrClassNone               ErrorClass = ""
+	ErrClassSessionError       ErrorClass = "session_error"
+	ErrClassSendError          ErrorClass = "send_error"
+	ErrClassDeadlineExceeded   ErrorClass = "deadline_exceeded"
+	ErrClassCanceled           ErrorClass = "canceled"
+	ErrClassWorkDirUnreachable ErrorClass = "workdir_unreachable"
+	ErrClassWorkDirOutsideRoot ErrorClass = "workdir_outside_root"
+	ErrClassOverlapSkipped     ErrorClass = "overlap_skipped"
+	ErrClassPausedConcurrent   ErrorClass = "paused_concurrent"
+	ErrClassPanic              ErrorClass = "panic"
+)
+
+// hexIDBytes 是所有 cron 内部 ID（jobID / runID）的熵字节数。固定 8 字节
+// = 16 hex 字符；想加宽时改这一个常量即可两侧同步，避免 ID 宽度漂移。
+// R220-GO-2: 之前 generateID 与 generateRunID 各自定义 8，注释口口声声
+// "为将来扩展分离"但其实就是同源逻辑——把字节数提到常量后再保留两个
+// 公开名字以维持调用语义。
+const hexIDBytes = 8
+
+// generateHexID 返回 hexIDBytes 个 crypto/rand 字节的小写 hex 表示。
+// crypto/rand 在 Linux 下来自 getrandom(2)，失败仅在内核 entropy 池不
+// 可用的极端场景；视作不可恢复的环境错误，panic 等同于 fatal。
+func generateHexID() string {
+	b := make([]byte, hexIDBytes)
 	if _, err := rand.Read(b); err != nil {
 		panic("crypto/rand unavailable: " + err.Error())
 	}
 	return fmt.Sprintf("%x", b)
 }
+
+// generateRunID 返回 CronRun.RunID（16-char hex）。语义上独立于 jobID，
+// 共享 generateHexID 实现。
+func generateRunID() string { return generateHexID() }
+
+// generateID 返回 cron Job.ID（16-char hex）。
+func generateID() string { return generateHexID() }
 
 // MaxCronTitleLen 是 Job.Title 的字符上限（UTF-8 rune 计）。256 覆盖绝大多数
 // 人类可读名称，且与 dashboard 的 escAttr 线长相容。导出以便 server 包

@@ -1941,6 +1941,11 @@ function renderMainShell() {
       '</div>' +
       '</div>' +
     '</div>' +
+    // P2 cron-run-history (RFC \u00a78.2) \u2014 cron \u8be6\u60c5\u89c6\u56fe\u65f6\u95f4\u8f74\u5360\u4f4d\u3002
+    // \u53ea\u4e3a cron:<id> session \u6e32\u67d3\uff0c\u5176\u4f59 session \u7c7b\u578b\u4fdd\u6301\u539f\u6837\uff08\u5360\u4f4d div \u4e3a\u7a7a\uff0c
+    // \u4e0d\u5360\u5e03\u5c40\u7a7a\u95f4\uff09\u3002timeline \u5b9e\u9645\u5185\u5bb9\u7531 renderCronTimelineForSession \u586b\u5145\uff0c
+    // \u5199\u5728 renderMainShell \u4e4b\u540e\u4ee5\u62ff\u5230\u521a mount \u7684 DOM \u8282\u70b9\u3002
+    (isCronSessionKey(selectedKey) ? '<div class="cron-timeline-panel" id="cron-timeline-panel" data-job-id="' + escAttr(selectedKey.slice('cron:'.length)) + '"></div>' : '') +
     '<div class="events" id="events-scroll" role="log" aria-live="polite" aria-relevant="additions">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>' : '') + '</div>' +
     '<div class="nav-pill" id="nav-pill">' +
       '<button onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">&#x25B2;</button>' +
@@ -1997,6 +2002,15 @@ function renderMainShell() {
     if (now - lastTapMs < 300) { document.getElementById('msg-input')?.focus(); lastTapMs = 0; }
     else lastTapMs = now;
   }, {passive:true});
+
+  // P2 cron-run-history (RFC §8.2) — cron 详情视图时间轴 mount 钩子。
+  // renderMainShell 已经插入了 #cron-timeline-panel 的占位空 div；这里在
+  // session 切换 / 重绘后立即渲染 timeline 内容。如果 cron list 已经拿过
+  // recent_runs，第一次填充直接用本地缓存（避免多一次 fetch）；否则后台
+  // fetch 一次。
+  if (isCronSessionKey(selectedKey)) {
+    renderCronTimelineForSession(selectedKey.slice('cron:'.length));
+  }
 }
 
 // _fetchEventsInFlight gates concurrent HTTP polls of `/api/sessions/events`.
@@ -7941,9 +7955,30 @@ const wsm = {
       case 'cron_result':
         // RNEW-UX-010 — cron completion is a fire-and-forget background
         // event; the only sighted signal is a badge count bump. Announce
-        // politely so AT users learn the job landed.
+        // politely so AT users learn the job landed. P0 cron-run-history:
+        // cron_run_ended now drives the same refresh; keep cron_result for
+        // legacy compat (older naozhi backends still send only this).
         announce('定时任务已完成');
         fetchCronJobs().then(() => renderCronPanel());
+        break;
+      case 'cron_run_started':
+        // P0 cron-run-history (RFC §7.2) — drive the "运行中 Xs" inline
+        // badge without waiting for a list refetch. Optimistically patch
+        // local cronJobs entry so the UI flips to running immediately;
+        // a fetchCronJobs would also work but adds latency.
+        cronApplyRunStarted(msg);
+        break;
+      case 'cron_run_ended':
+        // P0 — terminal frame. Refetch list so counters / last_error_class
+        // hydrate from backend; the optimistic patch on the same row is
+        // overwritten cleanly. fresh=false / fresh=true behave identically
+        // here since the change set is JobID-scoped.
+        cronApplyRunEnded(msg);
+        fetchCronJobs().then(() => renderCronPanel());
+        // P2 cron-run-history (RFC §8.2) — 如果当前打开的就是该 job 的
+        // 详情页，刷新时间轴头 10 条；否则只刷新列表 stats（fetchCronJobs
+        // 已经做了）。msg.job_id 后端必发；缺省时跳过避免空 job_id 调用。
+        if (msg && msg.job_id) cronTimelineRefreshHead(msg.job_id);
         break;
       case 'pong':
         break;
@@ -10302,6 +10337,98 @@ function toggleCronMenu(id) {
   window.addEventListener('resize', cronMenuOnScroll);
 }
 
+// cronApplyRunStarted optimistically patches the in-memory cronJobs row so
+// the "运行中" badge renders without a list refetch. P0 cron-run-history
+// (RFC §7.2 / §8.1) — the run-ended event triggers the authoritative
+// refetch a few seconds later. Tolerates an unknown job_id (we may receive
+// a started event for a freshly created job before the local list pulls
+// it; in that case the next fetchCronJobs reconciles).
+function cronApplyRunStarted(msg) {
+  if (!msg || !msg.job_id) return;
+  const list = Array.isArray(cronJobs) ? cronJobs : [];
+  const j = list.find(x => x && x.id === msg.job_id);
+  if (!j) {
+    // Optimistic miss: fallback to a refetch so the UI catches up.
+    fetchCronJobs().then(() => renderCronPanel());
+    return;
+  }
+  j.current_run = {
+    run_id: msg.run_id,
+    started_at: msg.started_at,
+    phase: 'queued',
+    trigger: msg.trigger || '',
+    session_id: msg.session_id || '',
+  };
+  renderCronPanel();
+}
+
+// cronApplyRunEnded patches the local row before the authoritative
+// fetchCronJobs lands. We clear current_run so the running-badge stops
+// flashing immediately; the subsequent refetch fills in last_error_class
+// / counters / last_run_at.
+function cronApplyRunEnded(msg) {
+  if (!msg || !msg.job_id) return;
+  const list = Array.isArray(cronJobs) ? cronJobs : [];
+  const j = list.find(x => x && x.id === msg.job_id);
+  if (!j) return;
+  j.current_run = null;
+  // Provisional last_error_class / last_run_at so the row repaints with
+  // the new state before fetchCronJobs returns. Backend remains source
+  // of truth for the persisted snapshot.
+  if (msg.state && msg.state !== 'succeeded' && msg.state !== 'skipped') {
+    j.last_error_class = msg.error_class || '';
+  } else if (msg.state === 'succeeded') {
+    j.last_error_class = '';
+    j.last_error = '';
+  }
+  if (msg.ended_at) j.last_run_at = msg.ended_at;
+  renderCronPanel();
+}
+
+// formatRunningElapsed returns a colloquial "正在运行 12s / 2m" label for
+// the inline badge. Floors to seconds; wraps to "Nm Ss" past 60s.
+function formatRunningElapsed(startedAt) {
+  if (!startedAt) return '正在运行';
+  const ms = Date.now() - startedAt;
+  if (ms < 0) return '正在运行';
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return '运行中 ' + sec + 's';
+  const m = Math.floor(sec / 60);
+  const s = sec - m * 60;
+  if (m < 60) return '运行中 ' + m + 'm ' + s + 's';
+  const h = Math.floor(m / 60);
+  return '运行中 ' + h + 'h ' + (m - h * 60) + 'm';
+}
+
+// Polling timer that re-renders cron rows so "运行中 Xs" advances each
+// second while at least one job is running. Idle when no jobs are running.
+let cronRunningTickTimer = null;
+function ensureCronRunningTick() {
+  const anyRunning = Array.isArray(cronJobs) && cronJobs.some(j => j && j.current_run);
+  // Stop conditions（任何一个成立即清掉 timer）：
+  //   - 无 running job
+  //   - 当前选中了某个 session（renderCronPanel 第一行就 return，timer 等于在浪费 CPU）
+  //   - cron-list-items DOM 已不在文档（用户切到非 cron 视图）
+  // R220-FE-1: 修复 timer 永不停的内存/CPU 泄漏。
+  const cronListMounted = !!document.getElementById('cron-list-items');
+  const shouldRun = anyRunning && !selectedKey && cronListMounted;
+  if (shouldRun && !cronRunningTickTimer) {
+    cronRunningTickTimer = setInterval(() => {
+      // Defensive: 同样的三条件检查在 tick 内也跑一遍——避免 selectSession 切换
+      // 之后这一帧还在 schedule 但 DOM 已经换了。
+      if (selectedKey || !document.getElementById('cron-list-items')) {
+        clearInterval(cronRunningTickTimer);
+        cronRunningTickTimer = null;
+        return;
+      }
+      try { renderCronPanel(); } catch (_) {}
+    }, 1000);
+  } else if (!shouldRun && cronRunningTickTimer) {
+    clearInterval(cronRunningTickTimer);
+    cronRunningTickTimer = null;
+  }
+}
+
 // cronJobCardHtml renders a single cron row. v3 redesign: high-density row
 // replaces the v2 card (see docs/TODO.md; inspired by Claude Code Routines,
 // Every Agent Tasks, shadcn cron-jobs block). Structure:
@@ -10330,26 +10457,44 @@ function cronJobCardHtml(j) {
   const isPaused = !!j.paused;
   const isError = !!j.last_error && !isPaused;
   const isMissed = !!j.missed && !isPaused;
+  const isRunning = !!(j.current_run && j.current_run.started_at);
   const rowClasses = ['cj-row'];
   if (isPaused) rowClasses.push('paused');
   if (isError) rowClasses.push('is-error');
   if (isMissed) rowClasses.push('is-missed');
+  if (isRunning) rowClasses.push('is-running');
 
-  // When-column: paused → "已暂停"; else colloquial relative time.
+  // When-column: running → "运行中 Xs"（实时计时）; paused → "已暂停"; else colloquial relative time.
+  // P0 cron-run-history (RFC §8.1) — running takes precedence over paused
+  // (a TriggerNow on a paused job is rejected backend-side, so this just
+  // reflects the actual scheduled / manual run).
   let whenLabel = '';
   let whenImminent = false;
-  if (isPaused) {
+  if (isRunning) {
+    whenLabel = formatRunningElapsed(j.current_run.started_at);
+  } else if (isPaused) {
     whenLabel = '已暂停';
   } else if (j.next_run) {
     const w = formatWhenColloquial(j.next_run);
     whenLabel = w.label;
     whenImminent = w.imminent;
   }
-  const whenTitle = nextAbs ? ' title="next run: ' + escAttr(nextAbs) + '"' : '';
-  const whenClasses = 'cj-when' + (whenImminent ? ' imminent' : '') + (isPaused ? ' paused' : '');
+  const whenTitle = isRunning
+    ? ' title="run_id ' + escAttr(j.current_run.run_id || '') + (j.current_run.phase ? ' — phase ' + escAttr(j.current_run.phase) : '') + '"'
+    : (nextAbs ? ' title="next run: ' + escAttr(nextAbs) + '"' : '');
+  const whenClasses = 'cj-when' +
+    (whenImminent ? ' imminent' : '') +
+    (isPaused && !isRunning ? ' paused' : '') +
+    (isRunning ? ' running' : '');
   const whenCol = whenLabel
     ? '<div class="' + whenClasses + '"' + whenTitle + '>' + esc(whenLabel) + '</div>'
     : '<div class="cj-when"></div>';
+
+  // P2 cron-run-history (RFC §8.1 / §8.4) — 成功率小徽章 + recent_runs hover tooltip。
+  // 仅当 stats.total > 0 时渲染（新建 / 从未跑过的 job 没数据，徽章空白会显得噪声）。
+  // 三档配色：100%=绿（数字徽章）、80-99%=中性、<80%=红警告。
+  // Hover 出 5 个状态气泡（最旧→最新），CSS 用纯 :hover 触发 .cj-stats-pop 显隐。
+  const statsBadge = cronStatsBadgeHtml(j);
 
   // Sub-row: clickable schedule chip (→ edit modal) + selective icons + optional
   // last-run chip. Only shows icons when value ≠ default (notify off, fresh on,
@@ -10423,9 +10568,497 @@ function cronJobCardHtml(j) {
       subRow +
     '</div>' +
     whenCol +
+    statsBadge +
     '<div class="cj-actions">' + runBtn + menuBtn + '</div>' +
     errorStrip +
   '</div>';
+}
+
+// cronStatsBadgeHtml — P2 cron-run-history (RFC §8.1 / §8.4) 列表卡片成功率徽章。
+// 数据源：j.stats（total/succeeded/failed/skipped/timed_out/canceled）+ j.recent_runs。
+// 三档：100%=绿 N、80-99%=中性 99%、<80%=红 92% (118/120)。total=0 不渲染（噪声）。
+// Tooltip：hover 出 5 个状态气泡（按 recent_runs 顺序，最旧→最新）+ trigger 信息。
+function cronStatsBadgeHtml(j) {
+  const stats = j && j.stats;
+  if (!stats || !stats.total || stats.total <= 0) return '';
+  const total = stats.total | 0;
+  const ok = stats.succeeded | 0;
+  // 成功率 = succeeded / total（skipped / canceled 不计为失败也不计为成功，
+  // 但保留在分母里，与详情页"120 次"的口径一致；后续 P3 可拆开）。
+  const rate = total > 0 ? Math.round((ok * 100) / total) : 0;
+  let cls, label;
+  if (rate >= 100 && stats.failed === 0 && stats.timed_out === 0) {
+    cls = 'ok'; label = String(total);
+  } else if (rate >= 80) {
+    cls = 'mid'; label = rate + '%';
+  } else {
+    cls = 'bad'; label = rate + '% (' + ok + '/' + total + ')';
+  }
+  // recent_runs 5 条状态气泡（最旧→最新，与时间轴方向相反——气泡是"最近趋势条"，
+  // 习惯上从左到右走时间）。空数组 fallback 为单条空气泡占位。
+  const recent = Array.isArray(j.recent_runs) ? j.recent_runs.slice(0, 5).reverse() : [];
+  const dotsHtml = recent.length > 0
+    ? recent.map(r => {
+        const st = (r && r.state) || '';
+        const tip = formatAbsTime((r && r.started_at) || 0) +
+          (st ? ' · ' + cronStateLabel(st) : '') +
+          (r && r.trigger ? ' · ' + r.trigger : '');
+        return '<span class="cj-stats-dot ' + cronStateDotClass(st) + '" title="' + escAttr(tip) + '"></span>';
+      }).join('')
+    : '<span class="cj-stats-dot empty"></span>';
+  // 用绝对定位的 .cj-stats-pop 做悬浮 tooltip；浏览器原生 title 在 hover dots
+  // 时会被 dots 自身的 title 接管，主徽章再写一份避免双层 tooltip 闪烁。
+  const summary = '总 ' + total + '· 成功 ' + ok + '· 失败 ' + (stats.failed | 0) +
+    (stats.skipped ? '· 跳过 ' + stats.skipped : '') +
+    (stats.timed_out ? '· 超时 ' + stats.timed_out : '');
+  return '<div class="cj-stats ' + cls + '" tabindex="0" aria-label="' + escAttr('执行统计 ' + summary) + '">' +
+    '<span class="cj-stats-label">' + esc(label) + '</span>' +
+    '<div class="cj-stats-pop" role="tooltip">' +
+      '<div class="cj-stats-pop-row">' + dotsHtml + '</div>' +
+      '<div class="cj-stats-pop-meta">' + esc(summary) + '</div>' +
+    '</div>' +
+  '</div>';
+}
+
+// cronStateDotClass / cronStateLabel —— 单一状态色 / 文案表，详情页时间轴 +
+// 列表 tooltip 共用，避免两处不一致。RFC §8.2 配色：
+//   succeeded 绿 / failed 红 / skipped 灰 / timed_out 橙 / canceled 紫 / running 蓝脉动
+function cronStateDotClass(state) {
+  switch (state) {
+    case 'succeeded': return 'ok';
+    case 'failed': return 'err';
+    case 'skipped': return 'skip';
+    case 'timed_out': return 'warn';
+    case 'canceled': return 'cancel';
+    case 'running': return 'run';
+    default: return 'unk';
+  }
+}
+function cronStateLabel(state) {
+  switch (state) {
+    case 'succeeded': return '成功';
+    case 'failed': return '失败';
+    case 'skipped': return '跳过';
+    case 'timed_out': return '超时';
+    case 'canceled': return '已取消';
+    case 'running': return '运行中';
+    default: return state || '未知';
+  }
+}
+
+// cronErrorClassLabel —— 后端 ErrorClass 枚举的中文友好名。RFC §9 错误分类映射。
+// 未知值原样返回，方便排查（不应发生但容错）。
+function cronErrorClassLabel(cls) {
+  switch (cls) {
+    case 'session_error': return '会话错误';
+    case 'send_error': return '发送失败';
+    case 'deadline_exceeded': return '超时';
+    case 'canceled': return '已取消';
+    case 'workdir_unreachable': return '工作目录不可达';
+    case 'workdir_outside_root': return '工作目录越界';
+    case 'overlap_skipped': return '重叠跳过';
+    case 'paused_concurrent': return '暂停时被抢';
+    case 'panic': return '内部异常';
+    default: return cls || '';
+  }
+}
+
+// formatRunDuration —— 时间轴行 / 详情区"耗时"文案。>1000ms 用 "Xs"，否则 "Xms"。
+// 0 / 缺省返回 ''——running 状态没 duration_ms，调用方应传 0 跳过渲染。
+function formatRunDuration(ms) {
+  if (!ms || ms <= 0) return '';
+  if (ms < 1000) return ms + 'ms';
+  const s = ms / 1000;
+  if (s < 60) return s.toFixed(1).replace(/\.0$/, '') + 's';
+  const m = Math.floor(s / 60);
+  const ss = Math.round(s - m * 60);
+  return m + 'm ' + ss + 's';
+}
+
+// P2 cron-run-history (RFC §8.2) — 时间轴每个 job 的本地状态。
+// runs / nextBefore: 分页列表 + 游标；expanded: 展开行 run_id；details: 已 fetch
+// 的单条 run 详情缓存（不持久化，session 切换即丢）。
+const cronTimelineState = Object.create(null);
+
+// CRON_TIMELINE_FRESH_MS — 超过此 TTL 的 timeline 缓存视为陈旧，下次进入
+// cron session 详情时清掉强制重拉。R220-FE-3：用户切走再切回中间可能有
+// 新 run，但本地状态仍 stale，timeline 不主动刷新。
+const CRON_TIMELINE_FRESH_MS = 30 * 1000;
+
+function getCronTimelineState(jobId) {
+  if (!cronTimelineState[jobId]) {
+    cronTimelineState[jobId] = {
+      runs: [],
+      nextBefore: 0,
+      done: false,         // true = next_before 缺失，已到结尾
+      loading: false,
+      expanded: '',         // 当前展开的 run_id（最多一行展开）
+      details: Object.create(null),
+      lastMountAt: 0,       // 上次 mount 渲染的 ms 时戳；renderCronTimelineForSession 用来判 stale
+    };
+  }
+  return cronTimelineState[jobId];
+}
+
+// renderCronTimelineForSession — 根据本地缓存优先填充 timeline；如果 list 还没
+// 跑过 fetchCronJobs（hard reload 后 selectSession('cron:...') 直跳），则触发
+// 一次 fetchCronJobs 拉数据再渲染。
+function renderCronTimelineForSession(jobId) {
+  const host = document.getElementById('cron-timeline-panel');
+  if (!host) return;
+  const job = (cronJobs || []).find(x => x && x.id === jobId);
+  const st = getCronTimelineState(jobId);
+  // R220-FE-3: stale 检测——如果 lastMountAt 距今 > CRON_TIMELINE_FRESH_MS，
+  // 认为缓存陈旧（用户切走再切回，期间可能有新 run）。清空 runs 强制走
+  // recent_runs 预填路径；后续 cron_run_ended 也会触发 refreshHead。
+  if (st.lastMountAt > 0 && Date.now() - st.lastMountAt > CRON_TIMELINE_FRESH_MS) {
+    st.runs = [];
+    st.nextBefore = 0;
+    st.done = false;
+    st.expanded = '';
+    // details 不清——已 fetch 过的详情仍然有效，省一次往返。
+  }
+  // 首次 mount：用列表里 recent_runs 作为时间轴第一页（最多 10 条），
+  // next_before 取最旧一条的 started_at（用作 fetch 更早页的游标）。
+  // recent_runs 按 started_at 倒序 —— RFC §3 / §6.1 契约。
+  if (st.runs.length === 0 && job && Array.isArray(job.recent_runs) && job.recent_runs.length > 0) {
+    st.runs = job.recent_runs.slice();
+    const oldest = st.runs[st.runs.length - 1];
+    st.nextBefore = oldest && oldest.started_at ? oldest.started_at : 0;
+    st.done = job.recent_runs.length < 10; // recent_runs 上限 10，少于 10 即末页
+  }
+  st.lastMountAt = Date.now();
+  host.innerHTML = cronTimelineHtml(jobId, job, st);
+  // 没缓存且没 job → 拉一次列表（如果直接深链进来）。
+  if (!job && cronJobs.length === 0) {
+    fetchCronJobs().then(() => {
+      if (selectedKey === 'cron:' + jobId) renderCronTimelineForSession(jobId);
+    });
+  }
+}
+
+// cronTimelineHtml — 渲染整个"执行历史"section 的内层 HTML。
+// 头部：标题 + 总次数 + 成功率 + 最后错误分类。
+// 行列表：每条 run 一行（点击展开）+ [加载更多] 分页按钮。
+function cronTimelineHtml(jobId, job, st) {
+  const stats = job && job.stats;
+  const total = stats ? (stats.total | 0) : 0;
+  const ok = stats ? (stats.succeeded | 0) : 0;
+  const rate = total > 0 ? Math.round((ok * 100) / total) : 0;
+  const headTitle = total > 0
+    ? '执行历史 (' + total + ' 次, ' + rate + '% 成功)'
+    : '执行历史';
+  const lastErrCls = job && job.last_error_class;
+  const headSub = lastErrCls
+    ? '<span class="ct-head-err">最近一次：' + esc(cronErrorClassLabel(lastErrCls)) + '</span>'
+    : '';
+  const rowsHtml = st.runs.length === 0
+    ? '<div class="ct-empty">暂无执行记录。下次调度或点击"运行"按钮触发首次执行。</div>'
+    : st.runs.map(r => cronTimelineRowHtml(jobId, r, st)).join('');
+  // [加载更多] 按钮：done=true 显示"已到结尾"灰态，否则可点击拉下一页。
+  // st.runs.length === 0 时不显示按钮（无意义）。
+  let moreBtn = '';
+  if (st.runs.length > 0) {
+    if (st.done) {
+      moreBtn = '<button type="button" class="ct-more-btn" disabled aria-disabled="true">已到结尾</button>';
+    } else {
+      moreBtn = '<button type="button" class="ct-more-btn"' +
+        (st.loading ? ' disabled' : '') +
+        ' onclick="cronTimelineLoadMore(\'' + escJs(jobId) + '\')">' +
+        (st.loading ? '加载中…' : '加载更多') +
+      '</button>';
+    }
+  }
+  return '<div class="ct-head">' +
+      '<h3>' + esc(headTitle) + '</h3>' +
+      headSub +
+    '</div>' +
+    '<div class="ct-rows">' + rowsHtml + '</div>' +
+    (moreBtn ? '<div class="ct-more">' + moreBtn + '</div>' : '');
+}
+
+// cronTimelineRowHtml — 单条 run 行 + 可选展开区。
+// run 字段（CronRunSummary）：run_id / state / trigger / started_at / ended_at /
+// duration_ms / session_id / error_class。所有字段均可为空，渲染时 fallback。
+function cronTimelineRowHtml(jobId, r, st) {
+  if (!r) return '';
+  const runId = r.run_id || '';
+  const state = r.state || '';
+  const startedAbs = r.started_at ? formatAbsTime(r.started_at) : '';
+  // 行主时间用紧凑显示（"5月17日 14:30"）；hover 看完整 ISO。
+  const startedShort = r.started_at ? formatCronTimelineShort(r.started_at) : '—';
+  const dur = state === 'running'
+    ? '正在运行'
+    : formatRunDuration(r.duration_ms || 0);
+  const sessionShort = r.session_id ? r.session_id.slice(0, 8) : '';
+  const errCls = r.error_class || '';
+  const isExpanded = st.expanded === runId && runId;
+  const dotCls = cronStateDotClass(state);
+  const stateLbl = cronStateLabel(state);
+
+  // 副行：trigger / session 短 ID / error_class（缺省字段不渲染）
+  const subParts = [];
+  if (r.trigger) subParts.push('<span class="ctr-trigger">' + esc(r.trigger) + '</span>');
+  if (sessionShort) {
+    subParts.push('<span class="ctr-session" title="session_id: ' + escAttr(r.session_id || '') + '">' + esc(sessionShort) + '</span>');
+  }
+  if (errCls) {
+    subParts.push('<span class="ctr-errcls">' + esc(cronErrorClassLabel(errCls)) + '</span>');
+  }
+  const subRow = subParts.length > 0
+    ? '<div class="ctr-sub">' + subParts.join('<span class="ctr-sep">·</span>') + '</div>'
+    : '';
+
+  // 展开区：先显示骨架，cronTimelineToggleRow 触发 fetch 后异步替换内容。
+  // 展开容器始终在 DOM 里以便平滑高度过渡，靠 .open 类切换显示。
+  const detailHtml = isExpanded
+    ? cronTimelineDetailHtml(jobId, runId, r, st.details[runId])
+    : '';
+  const expandedClass = isExpanded ? ' open' : '';
+
+  return '<div class="ctr' + (isExpanded ? ' open' : '') + '" data-run-id="' + escAttr(runId) + '"' +
+      ' onclick="cronTimelineToggleRow(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')"' +
+      ' role="button" tabindex="0" aria-expanded="' + (isExpanded ? 'true' : 'false') + '"' +
+      ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();cronTimelineToggleRow(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')}">' +
+    '<div class="ctr-main">' +
+      '<span class="ctr-dot ' + dotCls + '" aria-hidden="true"></span>' +
+      '<span class="ctr-state">' + esc(stateLbl) + '</span>' +
+      '<span class="ctr-time"' + (startedAbs ? ' title="' + escAttr(startedAbs) + '"' : '') + '>' + esc(startedShort) + '</span>' +
+      (dur ? '<span class="ctr-dur">' + esc(dur) + '</span>' : '') +
+    '</div>' +
+    subRow +
+    '<div class="ctr-detail' + expandedClass + '" onclick="event.stopPropagation()">' + detailHtml + '</div>' +
+  '</div>';
+}
+
+// formatCronTimelineShort — "5月17日 14:30" 紧凑标签。今年同年省年份；不同年加年份前缀。
+function formatCronTimelineShort(ms) {
+  if (!ms) return '';
+  const d = new Date(ms);
+  if (isNaN(d.getTime())) return '';
+  const now = new Date();
+  const pad = n => (n < 10 ? '0' + n : '' + n);
+  const sameYear = d.getFullYear() === now.getFullYear();
+  const dateStr = (d.getMonth() + 1) + '月' + d.getDate() + '日';
+  const timeStr = pad(d.getHours()) + ':' + pad(d.getMinutes());
+  return (sameYear ? '' : d.getFullYear() + '年') + dateStr + ' ' + timeStr;
+}
+
+// cronTimelineDetailHtml — 展开行内的详情面板。
+// detail 为 null = 加载中骨架；为 object = 渲染 prompt/result/error_msg + fresh hint。
+function cronTimelineDetailHtml(jobId, runId, summary, detail) {
+  if (!detail) {
+    return '<div class="ctr-loading">加载详情中…</div>';
+  }
+  if (detail.__error) {
+    return '<div class="ctr-err-load">加载失败：' + esc(detail.__error) + '</div>';
+  }
+  // fresh=false 模式 hint：同一 session_id 的多次 run 共享上下文。
+  // 点击 chip 跳转到 session events 面板（已有 selectSession 路由）。
+  let freshHint = '';
+  if (detail.fresh === false && detail.session_id) {
+    const sid8 = detail.session_id.slice(0, 8);
+    freshHint = '<div class="ctr-fresh-hint">' +
+      '同一 session_id（<button type="button" class="ctr-sid-chip"' +
+        ' onclick="event.stopPropagation();cronTimelineJumpToSession(\'' + escJs(detail.session_id) + '\')"' +
+        ' title="' + escAttr('跳转到 session events: ' + detail.session_id) + '">' + esc(sid8) + '</button>）累积上下文。' +
+      '</div>';
+  }
+  const promptBlock = detail.prompt
+    ? '<div class="ctr-block"><div class="ctr-block-label">prompt</div>' +
+        '<pre class="ctr-block-body">' + esc(detail.prompt) + '</pre>' +
+      '</div>'
+    : '';
+  const resultBlock = detail.result
+    ? '<div class="ctr-block"><div class="ctr-block-label">result' +
+        (detail.result_bytes ? ' <span class="ctr-bytes">' + esc(String(detail.result_bytes)) + ' bytes</span>' : '') +
+        '</div>' +
+        '<pre class="ctr-block-body">' + esc(detail.result) + '</pre>' +
+      '</div>'
+    : '';
+  const errBlock = detail.error_msg
+    ? '<div class="ctr-block err"><div class="ctr-block-label">error' +
+        (detail.error_class ? ' · ' + esc(cronErrorClassLabel(detail.error_class)) : '') +
+        '</div>' +
+        '<pre class="ctr-block-body">' + esc(detail.error_msg) + '</pre>' +
+      '</div>'
+    : '';
+  const workDir = detail.work_dir
+    ? '<div class="ctr-meta-row">work_dir: <code>' + esc(detail.work_dir) + '</code></div>'
+    : '';
+  const empty = !promptBlock && !resultBlock && !errBlock && !workDir
+    ? '<div class="ctr-empty-detail">这次 run 没有保存额外详情。</div>'
+    : '';
+  return freshHint + promptBlock + resultBlock + errBlock + workDir + empty;
+}
+
+// cronTimelineToggleRow — 点击行：展开 / 折叠。展开时如果详情未缓存，
+// 触发 fetch /api/cron/runs/{run_id}?job_id=... 拉详情。
+function cronTimelineToggleRow(jobId, runId) {
+  if (!runId) return;
+  const st = getCronTimelineState(jobId);
+  if (st.expanded === runId) {
+    st.expanded = '';
+    renderCronTimelinePanel(jobId);
+    return;
+  }
+  st.expanded = runId;
+  renderCronTimelinePanel(jobId);
+  if (!st.details[runId]) {
+    cronTimelineFetchDetail(jobId, runId);
+  }
+}
+
+// cronTimelineFetchDetail — GET /api/cron/runs/{run_id}?job_id=... 异步拉详情。
+// 完成后写入 st.details[runId] 并重绘当前 panel；session 切走后丢弃结果。
+async function cronTimelineFetchDetail(jobId, runId) {
+  const st = getCronTimelineState(jobId);
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const url = '/api/cron/runs/' + encodeURIComponent(runId) + '?job_id=' + encodeURIComponent(jobId);
+    const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
+    st.details[runId] = data || { __error: 'empty response' };
+  } catch (err) {
+    // R220-FE-5: 401/403 走 authModal，与 fetchSessions 等其它路径保持一致；
+    // 单 cron 详情失败不应让用户看到 "HTTP 401" 字样而不知所措。
+    if (err && (err.status === 401 || err.status === 403)) {
+      showAuthModal();
+      st.details[runId] = { __error: '认证失败，请重新登录' };
+    } else if (err && err.status === 404) {
+      st.details[runId] = { __error: '记录不存在或已被清理' };
+    } else if (err && err.status) {
+      st.details[runId] = { __error: 'HTTP ' + err.status + ' ' + (err.message || '') };
+    } else {
+      st.details[runId] = { __error: '网络错误' };
+    }
+  }
+  // 只在仍停留在该 cron session 时才重绘，避免跨 session 写脏 DOM。
+  if (selectedKey === 'cron:' + jobId) renderCronTimelinePanel(jobId);
+}
+
+// renderCronTimelinePanel — 重绘当前 timeline 面板（不重新 mount shell）。
+// 用于 expand/collapse、loadMore、ws 刷新等场景。
+function renderCronTimelinePanel(jobId) {
+  const host = document.getElementById('cron-timeline-panel');
+  if (!host) return;
+  const job = (cronJobs || []).find(x => x && x.id === jobId);
+  const st = getCronTimelineState(jobId);
+  host.innerHTML = cronTimelineHtml(jobId, job, st);
+}
+
+// cronTimelineLoadMore — 分页加载更早的 run 列表。
+// GET /api/cron/runs?job_id=&limit=50&before=<oldest started_at>
+function cronTimelineLoadMore(jobId) {
+  const st = getCronTimelineState(jobId);
+  if (st.loading || st.done) return;
+  st.loading = true;
+  renderCronTimelinePanel(jobId);
+  (async () => {
+    try {
+      const headers = {};
+      const t = getToken();
+      if (t) headers['Authorization'] = 'Bearer ' + t;
+      let url = '/api/cron/runs?job_id=' + encodeURIComponent(jobId) + '&limit=50';
+      if (st.nextBefore) url += '&before=' + st.nextBefore;
+      const data = await fetchJSON(url, { headers, timeoutMs: 10000 });
+      const more = (data && Array.isArray(data.runs)) ? data.runs : [];
+      // 后端按 started_at 倒序返回；append 到现有列表尾部即可。
+      // 用 run_id 去重（极端 race 下后端可能返回首页已有的 run）。
+      const seen = new Set(st.runs.map(r => r && r.run_id));
+      for (const r of more) {
+        if (r && r.run_id && !seen.has(r.run_id)) st.runs.push(r);
+      }
+      // next_before == 0 / 缺失 → 没更多；存在 → 下次游标
+      if (data && data.next_before) {
+        st.nextBefore = data.next_before;
+      } else {
+        st.done = true;
+      }
+    } catch (err) {
+      // R220-FE-5: 401/403 走 authModal；showAPIError 仅做 toast 提示，不会
+      // 把用户带回登录态——这里要主动唤起 modal。
+      if (err && (err.status === 401 || err.status === 403)) {
+        showAuthModal();
+      } else if (err && err.status) {
+        showAPIError('加载执行历史', err.status, err.message || '');
+      } else {
+        showNetworkError('加载执行历史', err);
+      }
+    } finally {
+      st.loading = false;
+      if (selectedKey === 'cron:' + jobId) renderCronTimelinePanel(jobId);
+    }
+  })();
+}
+
+// cronTimelineJumpToSession — fresh=false hint chip 点击。直接打开
+// session: 前缀的会话面板（与已有 selectSession / selectedKey 路由对齐）。
+function cronTimelineJumpToSession(sessionId) {
+  if (!sessionId) return;
+  // sessionsData 的 key 是 sid(key, node) = `${key}\t${node}`（见 sid 定义）。
+  // 在缓存里查 session_id 字段命中的会话；命中 → 切到该 session 的 events 面板；
+  // 未命中 → toast 提示（cron 触发的下游会话可能 IM 异步 / 还没拉到 list）。
+  const all = sessionsData || {};
+  for (const sidKey in all) {
+    const s = all[sidKey];
+    if (s && s.session_id === sessionId) {
+      const parts = sidKey.split('\t');
+      const key = parts[0];
+      const node = parts[1] || 'local';
+      if (key) { selectSession(key, node); return; }
+    }
+  }
+  // 兜底：toast 提示，避免误导用户认为点击无效。
+  showToast('未找到对应 session（' + sessionId.slice(0, 8) + '…）', 'warning');
+}
+
+// cronTimelineRefreshHead — WS cron_run_ended 触发。如果当前打开的是该 job
+// 详情页，fetch /api/cron/runs?limit=10 替换头 10 条；否则只刷新列表 stats
+// （已有逻辑：fetchCronJobs + renderCronPanel）。
+async function cronTimelineRefreshHead(jobId) {
+  if (selectedKey !== 'cron:' + jobId) return;
+  const st = getCronTimelineState(jobId);
+  // R220-FE-4: in-flight guard。用户快速触发多次 TriggerNow 时 cron_run_ended
+  // 会连续到达，每次都启动 fetch；后返回的请求覆盖先返回的 → 顺序取决于
+  // 网络。用 token 保证只有最新一次请求的结果会被写回 st.runs。
+  const token = (st._refreshToken || 0) + 1;
+  st._refreshToken = token;
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const url = '/api/cron/runs?job_id=' + encodeURIComponent(jobId) + '&limit=10';
+    const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
+    // 过期请求：开始 fetch 之后又有更新一轮 refreshHead 启动了，丢弃本次结果。
+    if (st._refreshToken !== token) return;
+    if (selectedKey !== 'cron:' + jobId) return;
+    const head = (data && Array.isArray(data.runs)) ? data.runs : [];
+    if (head.length === 0) return;
+    // 把头 10 条与现有 runs 合并（用 run_id 去重 + 按 started_at 倒序排）。
+    // 排序兜底——server 已经倒序，但合并后 head 与旧 runs 可能在边界乱序。
+    const seen = new Set();
+    const merged = [];
+    for (const r of head) {
+      if (r && r.run_id && !seen.has(r.run_id)) {
+        merged.push(r);
+        seen.add(r.run_id);
+      }
+    }
+    for (const r of st.runs) {
+      if (r && r.run_id && !seen.has(r.run_id)) {
+        merged.push(r);
+        seen.add(r.run_id);
+      }
+    }
+    merged.sort((a, b) => (b.started_at || 0) - (a.started_at || 0));
+    st.runs = merged;
+    renderCronTimelinePanel(jobId);
+  } catch (e) {
+    // 静默：cron list 重绘会兜底刷成功率/统计；timeline 偶尔不刷不致命。
+    console.error('cron timeline refresh:', e);
+  }
 }
 
 // renderCronList repaints only the items container. Called by the filter
@@ -10463,6 +11096,10 @@ function renderCronList() {
   // CSS. Keeps paint cheap: host.innerHTML assignment unchanged, plus one
   // constant-size outer wrap.
   host.innerHTML = '<div class="cj-list">' + sorted.map(cronJobCardHtml).join('') + '</div>';
+  // P0 cron-run-history — start/stop the 1Hz running-tick driver based on
+  // whether any row is currently running. Cheap idle (clears the interval)
+  // when nothing's running.
+  ensureCronRunningTick();
 }
 
 // onCronSearchInput is the input oninput handler. Reads the live value,
@@ -10724,6 +11361,9 @@ async function cronDelete(id) {
       showAPIError('删除定时任务', r.status, raw);
       return;
     }
+    // R220-FE-2: 释放该 job 在前端持有的 timeline 状态（runs / details / pagination
+    // 游标 / fetched 标记），避免 cronTimelineState 累积已删除 job 的内存。
+    if (cronTimelineState[id]) delete cronTimelineState[id];
     fetchCronJobs().then(() => renderCronPanel());
   } catch (e) { showNetworkError('删除定时任务', e); }
 }

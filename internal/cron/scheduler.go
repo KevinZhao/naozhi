@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"log"
 	"log/slog"
 	mrand "math/rand/v2"
@@ -153,6 +154,43 @@ func (n NotifyTarget) IsSet() bool { return n.Platform != "" && n.ChatID != "" }
 // It receives the job ID, result text (or empty), and error message (or empty).
 type OnExecuteFunc func(jobID, result, errMsg string)
 
+// RunStartedEvent is broadcast when a cron run enters the running state
+// (after CAS gate, before IM notify resolution). Consumers (Hub) marshal
+// to a WS message; the cron package itself never serialises — this keeps
+// the package free of server / wshub coupling.
+type RunStartedEvent struct {
+	JobID     string
+	RunID     string
+	StartedAt time.Time
+	Trigger   TriggerKind
+	SessionID string // 可能为空：CAS 之后立刻广播时 GetOrCreate 还没跑
+	Fresh     bool
+}
+
+// RunEndedEvent is broadcast when a cron run reaches a terminal state
+// (succeeded / failed / skipped / timed_out / canceled). EndedAt and
+// DurationMS reflect the wall-clock that record path observes.
+type RunEndedEvent struct {
+	JobID      string
+	RunID      string
+	State      RunState
+	StartedAt  time.Time
+	EndedAt    time.Time
+	DurationMS int64
+	SessionID  string
+	ErrorClass ErrorClass
+	ErrorMsg   string
+	Trigger    TriggerKind
+}
+
+// OnRunStartedFunc / OnRunEndedFunc are server-side hooks for WS broadcast.
+// Both nil-safe; Scheduler invokes them outside s.mu so handlers may take
+// hub locks without inversion risk.
+type (
+	OnRunStartedFunc func(RunStartedEvent)
+	OnRunEndedFunc   func(RunEndedEvent)
+)
+
 // Scheduler manages cron jobs and executes them on schedule.
 type Scheduler struct {
 	cron *robfigcron.Cron
@@ -214,9 +252,11 @@ type Scheduler struct {
 	// a callback from robfig/cron whose signature has no ctx parameter, so
 	// the scheduler itself owns the root context so Stop() can cancel in-
 	// flight executions. Callers outside execute() take ctx as an argument.
-	stopCtx    context.Context
-	stopCancel context.CancelFunc
-	onExecute  OnExecuteFunc
+	stopCtx      context.Context
+	stopCancel   context.CancelFunc
+	onExecute    OnExecuteFunc
+	onRunStarted OnRunStartedFunc
+	onRunEnded   OnRunEndedFunc
 
 	// triggerWG tracks goroutines spawned by TriggerNow so Stop() can wait
 	// for them to finish. The scheduled entries are already drained by
@@ -228,12 +268,17 @@ type Scheduler struct {
 	// TriggerNow cannot overlap a scheduled tick for the same job (the cron
 	// chain's SkipIfStillRunning only protects the scheduled path). Entries
 	// are intentionally NOT cleared on job delete — a concurrent execute()
-	// may still hold the atomic.Bool and be about to CAS it back to false;
-	// if a fresh AddJob reused the same ID (low but non-zero given the hex8
-	// generator), creating a new guard entry would split the CAS gate between
-	// two goroutines and permit double execution. The leak is bounded by
-	// maxJobsHardCap so the trade is cheap vs. a correctness gap.
-	runningJobs sync.Map // map[jobID]*atomic.Bool
+	// may still hold the *runInflight (containing the atomic.Bool CAS gate)
+	// and be about to Store(false) it; if a fresh AddJob somehow reused the
+	// same ID (low but non-zero given the hex8 generator), creating a new
+	// guard entry would split the CAS gate between two goroutines and permit
+	// double execution. The leak is bounded by maxJobsHardCap so the trade
+	// is cheap vs. a correctness gap.
+	//
+	// P0 (cron-run-history.md): the per-job entry was *atomic.Bool; lifted
+	// to *runInflight so the CAS gate keeps its semantics while exposing
+	// RunID/StartedAt/Phase/SessionID/Trigger to list handlers.
+	runningJobs sync.Map // map[jobID]*runInflight
 
 	// storeMu serialises saveSnapshot writes so the last-writer-wins order
 	// matches the order snapshots were marshaled under s.mu. WriteFileAtomic
@@ -256,6 +301,11 @@ type Scheduler struct {
 	// stale payloads and eliminates the ordering window entirely.
 	saveSeq      atomic.Uint64 // assigned while holding s.mu
 	lastSavedSeq atomic.Uint64 // read/CAS'd while holding storeMu
+
+	// runStore persists a CronRun record per terminal execution (P1
+	// cron-run-history). nil-safe: empty StorePath disables persistence
+	// transparently (tests / no-disk deployments).
+	runStore *runStore
 }
 
 // SetOnExecute registers a callback invoked after each cron job execution.
@@ -263,6 +313,73 @@ func (s *Scheduler) SetOnExecute(fn OnExecuteFunc) {
 	s.mu.Lock()
 	s.onExecute = fn
 	s.mu.Unlock()
+}
+
+// SetOnRunStarted registers a callback for the run-started broadcast event.
+// nil disables the broadcast (testing path / no-WS mode).
+func (s *Scheduler) SetOnRunStarted(fn OnRunStartedFunc) {
+	s.mu.Lock()
+	s.onRunStarted = fn
+	s.mu.Unlock()
+}
+
+// SetOnRunEnded registers a callback for the run-ended broadcast event.
+// Invoked for every terminal state including skipped/canceled — the
+// callback should distinguish via RunEndedEvent.State.
+func (s *Scheduler) SetOnRunEnded(fn OnRunEndedFunc) {
+	s.mu.Lock()
+	s.onRunEnded = fn
+	s.mu.Unlock()
+}
+
+// CurrentRun returns the inflight snapshot for jobID, or (zero, false) when
+// the job is not currently executing. Used by the dashboard list API to
+// show "running 12s" badges.
+func (s *Scheduler) CurrentRun(jobID string) (runInflightView, bool) {
+	v, ok := s.runningJobs.Load(jobID)
+	if !ok {
+		return runInflightView{}, false
+	}
+	return v.(*runInflight).snapshot()
+}
+
+// RunInflightView is the exported shape for CurrentRun's snapshot,
+// surfaced by server-side handlers building the list / detail JSON
+// response. Kept here (cron package) so the field set stays single-
+// sourced; the server view re-marshals into its own wire shape.
+type RunInflightView = runInflightView
+
+// ListRuns returns up to limit CronRunSummary entries for jobID, newest
+// first. before is a cutoff (only runs with StartedAt < before); zero
+// means "no cutoff" (latest page).
+//
+// Safe to call when persistence is disabled (StorePath empty): returns
+// nil. The dashboard list endpoint and detail endpoint both go through
+// this method so the runs/ schema stays opaque to server/.
+func (s *Scheduler) ListRuns(jobID string, limit int, before time.Time) []CronRunSummary {
+	if s == nil || s.runStore == nil {
+		return nil
+	}
+	return s.runStore.List(jobID, limit, before)
+}
+
+// RecentRuns is the convenience wrapper for the cron list view's
+// recent_runs field. Cap is enforced inside ListRuns.
+func (s *Scheduler) RecentRuns(jobID string, n int) []CronRunSummary {
+	if s == nil || s.runStore == nil {
+		return nil
+	}
+	return s.runStore.Recent(jobID, n)
+}
+
+// GetRun returns the full CronRun for runID under jobID. Returns
+// (nil, fs.ErrNotExist) when missing; (nil, ErrCorruptRun) when present
+// but unusable. Server layer maps these to 404 / 500 respectively.
+func (s *Scheduler) GetRun(jobID, runID string) (*CronRun, error) {
+	if s == nil || s.runStore == nil {
+		return nil, fs.ErrNotExist
+	}
+	return s.runStore.Get(jobID, runID)
 }
 
 // maxJobsHardCap caps user-configurable MaxJobs to prevent accidental
@@ -414,6 +531,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 		jitterMax:           cfg.JitterMax,
 		stopCtx:             stopCtx,
 		stopCancel:          stopCancel,
+		runStore:            newRunStore(cfg.StorePath, 0, 0),
 	}
 }
 
@@ -489,6 +607,12 @@ func (s *Scheduler) Start() error {
 		s.registerStubByValue(st.id, st.workDir, st.prompt, st.lastSessionID)
 	}
 	s.cron.Start()
+	// P1 cron-run-history: cold-start GC pass over the runs/ tree to
+	// collect retention-policy violators that accumulated while this
+	// process was down. Cheap (one stat per file) and idempotent.
+	if s.runStore != nil {
+		s.runStore.trimAll(time.Now())
+	}
 	slog.Info("cron scheduler started", "jobs", jobCount)
 	return nil
 }
@@ -832,6 +956,14 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 		return nil, perr
 	}
 	save()
+	// P1 cron-run-history: drop the runs/<jobID>/ subtree alongside the
+	// job entry. Does NOT touch ~/.claude/projects/<cwd>/<session_id>.jsonl
+	// (RFC §2.3 / §4.4): those JSONL files are user-facing claude session
+	// logs, deletable only via session.Router or the user's own claude
+	// commands.
+	if s.runStore != nil {
+		s.runStore.DeleteJob(j.ID)
+	}
 	return j, nil
 }
 
@@ -1143,6 +1275,9 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 		return nil, perr
 	}
 	save()
+	if s.runStore != nil {
+		s.runStore.DeleteJob(j.ID)
+	}
 	return j, nil
 }
 
@@ -1332,17 +1467,21 @@ func (s *Scheduler) registerJob(j *Job) error {
 	return nil
 }
 
-// jobRunningGuard returns a lazily created *atomic.Bool per job ID used by
-// execute() to prevent concurrent runs of the same job (see execute).
-// Entries are cleared on DeleteJob; occasional leaks for never-deleted jobs
-// are bounded by the scheduler's maxJobs cap.
-func (s *Scheduler) jobRunningGuard(id string) *atomic.Bool {
+// jobInflight returns a lazily created *runInflight per job ID. The
+// embedded atomic.Bool keeps the original CAS-gate semantics (used by
+// executeOpt to reject concurrent runs); the surrounding metadata fields
+// expose RunID/StartedAt/Phase to the list API for the cron-run-history
+// P0 visibility work.
+//
+// Entries are intentionally NOT cleared on DeleteJob — see runningJobs's
+// struct comment for the ID-reuse split-CAS rationale.
+func (s *Scheduler) jobInflight(id string) *runInflight {
 	if v, ok := s.runningJobs.Load(id); ok {
-		return v.(*atomic.Bool)
+		return v.(*runInflight)
 	}
-	guard := &atomic.Bool{}
+	guard := &runInflight{}
 	actual, _ := s.runningJobs.LoadOrStore(id, guard)
-	return actual.(*atomic.Bool)
+	return actual.(*runInflight)
 }
 
 // jobSnapshot captures the mutable Job fields executeOpt reads under s.mu so
@@ -1407,24 +1546,10 @@ func (s *Scheduler) freshContextPreflight(j *Job, snap jobSnapshot, key string, 
 	if !snap.fresh {
 		return func() {}, true
 	}
-	// CRON3 guard: Scheduler.Stop() cancels stopCtx as its first act; if a
-	// scheduled tick fired just before Stop() took that edge it is still
-	// inside execute() here. Running Reset + GetOrCreate past this point
-	// would race with Router.Shutdown's session-drain and can leak a
-	// brand-new CLI process tied to an orphan "cron:<id>" key that
-	// outlives naozhi. Early-exit on ctx cancellation; the job will run
-	// again on the next start.
 	if err := s.stopCtx.Err(); err != nil {
 		lg.Info("cron fresh spawn suppressed during shutdown", "err", err)
 		return func() {}, false
 	}
-	// CRON2 guard: verify workDir still exists before discarding the
-	// existing session. Without this, an admin who removed the workspace
-	// would trigger Reset → spawnSession → shim StartShim with a bogus
-	// cwd → the job records an error *and* the prior session context is
-	// gone. By checking first we preserve the session for the next run
-	// after the directory is restored. Empty workDir falls back to the
-	// router's default cwd (always reachable).
 	if !workDirReachable(snap.workDir) {
 		lg.Warn("cron fresh spawn aborted: work_dir unreachable",
 			"work_dir", snap.workDir)
@@ -1446,10 +1571,6 @@ func (s *Scheduler) freshContextPreflight(j *Job, snap jobSnapshot, key string, 
 			s.registerStub(&j2)
 		}
 	}
-	// Re-check job existence after Reset: a concurrent DeleteJobByID
-	// could have run between the pre-execute snapshot and Reset, in
-	// which case GetOrCreate below would leak a brand-new CLI process
-	// tied to an orphan "cron:<id>" key until TTL cleanup.
 	s.mu.RLock()
 	_, stillExists := s.jobs[snap.jobID]
 	s.mu.RUnlock()
@@ -1460,23 +1581,145 @@ func (s *Scheduler) freshContextPreflight(j *Job, snap jobSnapshot, key string, 
 	return stubRefresh, true
 }
 
+// preflightResult bundles the closure / continuation-flag returned by the
+// P0 preflight wrapper. Pulled out so executeOpt's call site reads as one
+// destructure instead of two return values mixed with a side-effect rec.
+type preflightResult struct {
+	stubRefresh func()
+}
+
+// freshContextPreflightP0 wraps freshContextPreflight with the P0 finishRun
+// emission so the failure branches inside the legacy helper participate in
+// the run-history terminal protocol (broadcast cron_run_ended + counters +
+// LastErrorClass write). Implementation reuses the legacy helper for the
+// core logic but intercepts the two recorded-error paths.
+//
+// We keep freshContextPreflight intact for the existing test surface
+// (fresh_shutdown_test.go / cron2_workdir_test.go assert exact slog
+// messages and recordResult invocations) and layer the P0 protocol here.
+// When P1 lands and historical recordResult is fully replaced, this wrapper
+// collapses into the inner helper.
+func (s *Scheduler) freshContextPreflightP0(j *Job, snap jobSnapshot, key string, lg *slog.Logger, notifyTo NotifyTarget, runID string, startedAt time.Time, trigger TriggerKind) (preflightResult, bool) {
+	if !snap.fresh {
+		return preflightResult{stubRefresh: func() {}}, true
+	}
+	if err := s.stopCtx.Err(); err != nil {
+		lg.Info("cron fresh spawn suppressed during shutdown", "err", err)
+		// Treat shutdown-cancel as canceled (not failed); skipPersist=true
+		// preserves prior recordResult semantics where ctx-cancel did not
+		// touch LastRunAt. The broadcast still emits so the dashboard sees
+		// the run's terminal frame.
+		s.finishRun(finishArgs{
+			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
+			skipPersist: true,
+			prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+		})
+		return preflightResult{stubRefresh: func() {}}, false
+	}
+	if !workDirReachable(snap.workDir) {
+		lg.Warn("cron fresh spawn aborted: work_dir unreachable",
+			"work_dir", snap.workDir)
+		s.finishRun(finishArgs{
+			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+			state: RunStateFailed, errClass: ErrClassWorkDirUnreachable,
+			errMsg: "work_dir unreachable",
+			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+		})
+		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.jobID))
+		return preflightResult{stubRefresh: func() {}}, false
+	}
+	s.router.Reset(key)
+	lg.Info("cron fresh context: session reset before run")
+	stubRefresh := func() {
+		s.mu.RLock()
+		jobCopy, exists := s.jobs[snap.jobID]
+		var j2 Job
+		if exists {
+			j2 = *jobCopy
+		}
+		s.mu.RUnlock()
+		if exists {
+			s.registerStub(&j2)
+		}
+	}
+	s.mu.RLock()
+	_, stillExists := s.jobs[snap.jobID]
+	s.mu.RUnlock()
+	if !stillExists {
+		lg.Info("cron job deleted mid-execute, skipping GetOrCreate")
+		// Job deleted mid-execute: treat as canceled; no recordResult
+		// (matches historical behaviour) but broadcast for visibility.
+		s.finishRun(finishArgs{
+			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+			state: RunStateCanceled, errClass: ErrClassCanceled,
+			errMsg: "job deleted mid-execute", skipPersist: true,
+			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+		})
+		return preflightResult{stubRefresh: stubRefresh}, false
+	}
+	return preflightResult{stubRefresh: stubRefresh}, true
+}
+
 // executeOpt runs a cron job: send prompt to session, post result to chat.
 // viaTriggerNow=true skips jitter delay (explicit user "run now" expects
 // immediate execution); scheduled tick callers pass false.
+//
+// P0 cron-run-history (RFC §5):
+//  1. CAS gate populates *runInflight with RunID/StartedAt/Trigger/Phase.
+//  2. WS broadcast `cron_run_started` after CAS, before notify-target resolve.
+//  3. Each error branch maps to a specific (RunState, ErrorClass) tuple via
+//     finishRun, which:
+//     - writes recordResult (LastResult/LastError/LastErrorClass + Counters)
+//     - emits cron_run_ended broadcast
+//     - bumps the per-state metrics.CronRun*Total counter
+//     so all terminal paths share one observability hook.
 func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// Guard against concurrent execution of the same job. The cron chain's
 	// SkipIfStillRunning protects the scheduled-tick path, but TriggerNow
 	// that arrives while a tick is in flight bypasses the chain entirely
 	// (it calls execute directly when entryID == 0 or Run() on the entry
-	// which is separately serialized). Using a per-job *atomic.Bool kept
-	// outside Job (to preserve value-copy semantics of Job) provides a
-	// uniform CAS gate.
-	guard := s.jobRunningGuard(j.ID)
-	if !guard.CompareAndSwap(false, true) {
+	// which is separately serialized). The per-job *runInflight (containing
+	// the CAS atomic.Bool) keeps a uniform CAS gate while exposing run
+	// metadata to the list API.
+	inflight := s.jobInflight(j.ID)
+	if !inflight.running.CompareAndSwap(false, true) {
 		slog.Info("cron: job already running, skipping overlap", "cron_id", j.ID)
+		// Overlap is a skipped state (no LastRunAt update). Counters /
+		// broadcast still fire so dashboards can surface the skip.
+		s.emitOverlapSkipped(j, viaTriggerNow)
 		return
 	}
-	defer guard.Store(false)
+	defer func() {
+		inflight.running.Store(false)
+		inflight.reset()
+		metrics.CronRunInflight.Add(-1)
+	}()
+
+	// Populate the inflight metadata under the CAS-true window. RunID is
+	// generated once per run; StartedAt is captured before jitter so the
+	// "running 12s" badge in the UI counts true wall-clock from CAS.
+	runID := generateRunID()
+	startedAt := time.Now()
+	trigger := TriggerScheduled
+	if viaTriggerNow {
+		trigger = TriggerManual
+	}
+	{
+		rid := runID
+		st := startedAt
+		ph := PhaseQueued
+		tr := string(trigger)
+		empty := ""
+		inflight.runID.Store(&rid)
+		inflight.startedAt.Store(&st)
+		inflight.phase.Store(&ph)
+		inflight.trigger.Store(&tr)
+		inflight.sessionID.Store(&empty)
+		inflight.freshSnap.Store(j.FreshContext)
+	}
+	metrics.CronRunInflight.Add(1)
+	metrics.CronRunStartedTotal.Add(1)
 
 	// Apply jitter after CAS, before snapshot. After-CAS so concurrent overlap
 	// triggers are rejected immediately. Before-snapshot so an UpdateJob that
@@ -1485,6 +1728,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// operator expectation). TriggerNow skips jitter to preserve the
 	// "run now = run now" semantics.
 	if !viaTriggerNow && s.jitterMax > 0 {
+		inflight.setPhase(PhaseJittering)
 		applyJitter(s.stopCtx, j.Schedule, s.jitterMax)
 	}
 
@@ -1492,17 +1736,28 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// execution can run lock-free; concurrent SetJobPrompt/UpdateJob land
 	// for the next tick rather than racing this in-flight result.
 	snap := s.snapshotJob(j)
+	inflight.freshSnap.Store(snap.fresh)
 
 	// Resolve the effective notification target. Returns empty struct
 	// when no delivery should happen, so both success and failure paths
 	// below can call notify*() unconditionally-guarded by IsSet().
 	notifyTo := s.resolveNotifyTarget(snap.platName, snap.chatID, snap.notifyPlat, snap.notifyChat, snap.notify)
 
+	// Broadcast started — placed after snapshot so the event carries the
+	// effective fresh flag and after notifyTo resolution so server-side
+	// hub locks aren't held while we read s.mu.
+	s.emitRunStarted(RunStartedEvent{
+		JobID:     snap.jobID,
+		RunID:     runID,
+		StartedAt: startedAt,
+		Trigger:   trigger,
+		Fresh:     snap.fresh,
+	})
+
 	// `lg` instead of `log` to avoid shadowing the standard `log` package
 	// imported at the top of the file (R60-GO-M2).
-	lg := slog.With("cron_id", snap.jobID, "platform", snap.platName, "chat", snap.chatID)
+	lg := slog.With("cron_id", snap.jobID, "platform", snap.platName, "chat", snap.chatID, "run_id", runID)
 	lg.Info("cron job executing", "prompt_len", len(snap.prompt))
-	execStart := time.Now()
 
 	// Per-job timeout scales with schedule period (80%, capped by
 	// s.execTimeout). See computeJobTimeout for the clamp rules.
@@ -1520,7 +1775,12 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		if s.allowedRoot != "" && !workDirUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved) {
 			lg.Warn("cron job work_dir outside allowed_root; aborting run",
 				"work_dir", snap.workDir)
-			s.recordResult(j, "", "work_dir outside allowed_root", "")
+			s.finishRun(finishArgs{
+				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+				state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
+				errMsg: "work_dir outside allowed_root",
+				prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+			})
 			return
 		}
 		opts.Workspace = filepath.Clean(snap.workDir)
@@ -1535,12 +1795,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// path we skip stubRefresh because the live session carries its own
 	// sidebar entry. Persistent mode short-circuits inside the helper
 	// with a no-op stubRefresh.
-	stubRefresh, ok := s.freshContextPreflight(j, snap, key, lg, notifyTo)
+	preflight, ok := s.freshContextPreflightP0(j, snap, key, lg, notifyTo, runID, startedAt, trigger)
 	if !ok {
-		stubRefresh()
+		preflight.stubRefresh()
 		return
 	}
 
+	inflight.setPhase(PhaseSpawning)
 	sess, _, err := s.router.GetOrCreate(ctx, key, opts)
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -1550,17 +1811,31 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			// notification would be spam and the stored LastError would
 			// falsely blame the job itself.
 			lg.Info("cron session cancelled", "err", err)
-			stubRefresh()
+			s.finishRun(finishArgs{
+				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
+				skipPersist: true, // 与 historical recordResult skip 一致
+				prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+			})
+			preflight.stubRefresh()
 			return
 		}
+		state := RunStateFailed
+		errClass := ErrClassSessionError
 		if errors.Is(err, context.DeadlineExceeded) {
 			lg.Info("cron session deadline exceeded", "err", err)
+			state = RunStateTimedOut
+			errClass = ErrClassDeadlineExceeded
 		} else {
 			lg.Error("cron session error", "err", err)
 		}
-		s.recordResult(j, "", fmt.Sprintf("session error: %v", err), "")
+		s.finishRun(finishArgs{
+			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+			state: state, errClass: errClass, errMsg: fmt.Sprintf("session error: %v", err),
+			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+		})
 		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", snap.jobID))
-		stubRefresh()
+		preflight.stubRefresh()
 		return
 	}
 
@@ -1577,6 +1852,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// own cron.Stop() chain drain.
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), jobTimeout)
 	defer sendCancel()
+	inflight.setPhase(PhaseSending)
 	// Direct Send without sendWithBroadcast — cron jobs notify via onExecute callback instead.
 	result, err := sess.Send(sendCtx, cleanText, nil, nil)
 	if err != nil {
@@ -1585,30 +1861,46 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			// the operator-facing notice so shutdown races don't look like
 			// real failures.
 			lg.Info("cron send cancelled", "err", err)
-			stubRefresh()
+			s.finishRun(finishArgs{
+				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
+				skipPersist: true,
+				prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+			})
+			preflight.stubRefresh()
 			return
 		}
+		state := RunStateFailed
+		errClass := ErrClassSendError
 		if errors.Is(err, context.DeadlineExceeded) {
 			lg.Info("cron send deadline exceeded", "err", err)
+			state = RunStateTimedOut
+			errClass = ErrClassDeadlineExceeded
 		} else {
 			lg.Error("cron send error", "err", err)
 		}
-		s.recordResult(j, "", fmt.Sprintf("send error: %v", err), "")
+		s.finishRun(finishArgs{
+			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+			state: state, errClass: errClass, errMsg: fmt.Sprintf("send error: %v", err),
+			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+		})
 		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", snap.jobID))
-		stubRefresh()
+		preflight.stubRefresh()
 		return
 	}
+	if result.SessionID != "" {
+		inflight.setSessionID(result.SessionID)
+	}
 
-	elapsed := time.Since(execStart)
+	elapsed := time.Since(startedAt)
 	lg.Info("cron job completed",
 		"result_len", len(result.Text),
 		"elapsed_ms", elapsed.Milliseconds())
 	if elapsed > cronSlowThreshold {
 		// R208-OBS1: poor-man's histogram — a single counter that fires
 		// when a successful execution takes longer than cronSlowThreshold.
-		// Wired here (not in recordResult) so only success-path latency
-		// counts; error paths already surface via the existing
-		// LastError plumbing.
+		// Wired here (not in finishRun) so only success-path latency
+		// counts; error paths already surface via metrics state counters.
 		metrics.CronExecutionSlowTotal.Add(1)
 		lg.Warn("cron execution slow",
 			"job_id", snap.jobID,
@@ -1619,11 +1911,303 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// 路径下一次 Reset 会清掉 stub 的 chain，不保留这个 ID 的话
 	// dashboard 点击 cron 侧边栏就看不到上一次的 JSONL 历史。
 	// Send 路径的 result 帧总会带 SessionID（process.go 成功分支会填），
-	// 传空只会出现在错误路径，recordResult 的 "" 分支自行短路。
-	s.recordResult(j, result.Text, "", result.SessionID)
+	// 传空只会出现在错误路径，finishRun 的 "" 分支自行短路。
+	s.finishRun(finishArgs{
+		job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+		state: RunStateSucceeded, sessionID: result.SessionID, result: result.Text,
+		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
+	})
 
 	replyText := fmt.Sprintf("[Cron %s] %s", snap.jobID, result.Text)
 	s.deliverNotice(notifyTo, replyText)
+}
+
+// finishArgs bundles the parameters of finishRun so each call site reads
+// as a struct literal — many fields are optional (errClass / errMsg / sessionID
+// / result / skipPersist) and a positional signature would be brittle.
+//
+// snapshot fields (prompt/workDir/fresh) are populated only on paths that
+// have already taken the snapshotJob() — overlapSkipped / pre-snapshot
+// preflight failures pass them as zero values, which CronRun renders as
+// empty (the dashboard will fall back to Job.Prompt for display).
+type finishArgs struct {
+	job       *Job
+	runID     string
+	startedAt time.Time
+	trigger   TriggerKind
+	state     RunState
+	sessionID string
+	result    string
+	errClass  ErrorClass
+	errMsg    string
+	// skipPersist 同时控制两件事：跳过 Job 字段更新（LastRunAt/LastResult/
+	// LastError/LastErrorClass/Counters）和跳过 CronRun 磁盘历史。当前所有
+	// 调用点这两件事都同步：canceled / overlap_skipped / job-deleted-mid-
+	// execute 三种 transient 终态 — 都不应该污染 Job 快照，也不应该塞进
+	// runs/<jobID>/。如果将来要独立控制（比如"想记历史但不更新 Counters"），
+	// 拆成 skipJobUpdate / skipHistoryRecord 两个 bool；当前合一是 RFC §5
+	// 状态机表的直接映射。Metrics + WS broadcast 不受 skipPersist 影响——
+	// 故意如此，dashboard 必须能看到 skipped/canceled 帧。R220-ARCH-1.
+	skipPersist bool
+	prompt      string
+	workDir     string
+	fresh       bool
+}
+
+// finishRun is the single terminal hook for every cron execution path.
+// It centralises:
+//   - per-state metrics increment (CronRun*Total)
+//   - persistent state write via recordResult (success / non-canceled error)
+//   - cron_run_ended WS broadcast
+//   - JobRunCounters bump (under s.mu, alongside recordResult)
+//
+// Centralising avoids the historical pattern of recordResult-and-deliver-and-
+// log scattered across executeOpt's seven branches; adding a new error class
+// is now one mapping plus one finishArgs literal at the call site.
+func (s *Scheduler) finishRun(a finishArgs) {
+	endedAt := time.Now()
+	durationMS := endedAt.Sub(a.startedAt).Milliseconds()
+	if durationMS < 0 {
+		durationMS = 0 // monotonic clock skew safety
+	}
+	s.bumpRunStateMetrics(a.state)
+
+	// Persist (LastRunAt/LastResult/LastError/Counters) for terminal paths
+	// that historically updated state. Canceled / shutdown paths skipPersist
+	// to preserve "next start retries" semantics; same paths also skip the
+	// CronRun history record (transient by definition; would inflate runs/
+	// with shutdown noise).
+	//
+	// SECURITY: persistedResult / persistedErrMsg are post-redact + post-
+	// sanitise strings. Both the on-disk CronRun and the WS broadcast must
+	// use these — never the raw a.result / a.errMsg — otherwise an error
+	// containing an absolute filesystem path (e.g. "session error: open
+	// /home/ops/private-repo: permission denied") leaks the workspace
+	// layout to every authenticated dashboard client. R220-SEC-1.
+	//
+	// On the skipPersist path recordResultP0WithSanitised is bypassed, so
+	// we apply the same redact + sanitise pipeline inline. Cheap (regex-
+	// free path scan + ASCII control filter) and ensures no broadcast
+	// branch can echo raw err.Error() / fmt.Sprintf output to clients.
+	//
+	// jobPersistOK 表示 Job 字段 + cron_jobs.json 落盘是否真的成功。
+	// false → marshal 失败回滚了 Job in-memory 字段，或者 Job 已被并发
+	// 删除。两种情况下都不该再写 CronRun history（dashboard list 读
+	// Job 字段，timeline 读 CronRun，二者必须同步可见或同步缺失）。
+	// 这是 R220-ARCH-2 一致性窗口的修复。
+	persistedResult := a.result
+	persistedErrMsg := a.errMsg
+	jobPersistOK := false
+	if !a.skipPersist {
+		persistedResult, persistedErrMsg, jobPersistOK = s.recordResultP0WithSanitised(a.job, a.result, a.errMsg, a.sessionID, a.errClass, a.state)
+	} else {
+		persistedResult = sanitiseRunResult(persistedResult)
+		persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
+	}
+
+	// CronRun history (P1). Conditions:
+	//   - skipPersist=false（这次 run 应该被记录）
+	//   - jobPersistOK=true（Job 端写盘成功；否则 disk-divergence 风险）
+	//   - runStore 启用
+	if !a.skipPersist && jobPersistOK && s.runStore != nil {
+		s.runStore.Append(&CronRun{
+			RunID:       a.runID,
+			JobID:       a.job.ID,
+			State:       a.state,
+			Trigger:     a.trigger,
+			StartedAt:   a.startedAt,
+			EndedAt:     endedAt,
+			DurationMS:  durationMS,
+			SessionID:   a.sessionID,
+			Prompt:      a.prompt,
+			WorkDir:     a.workDir,
+			Fresh:       a.fresh,
+			Result:      persistedResult,
+			ResultBytes: len(a.result),
+			ErrorClass:  a.errClass,
+			ErrorMsg:    persistedErrMsg,
+		})
+	}
+
+	// Broadcast last so server-side hub locks aren't held while we hold s.mu.
+	// ErrorMsg uses persistedErrMsg (post-redact, post-sanitise) — see the
+	// SECURITY note above for why a.errMsg is never used here.
+	s.emitRunEnded(RunEndedEvent{
+		JobID:      a.job.ID,
+		RunID:      a.runID,
+		State:      a.state,
+		StartedAt:  a.startedAt,
+		EndedAt:    endedAt,
+		DurationMS: durationMS,
+		SessionID:  a.sessionID,
+		ErrorClass: a.errClass,
+		ErrorMsg:   persistedErrMsg,
+		Trigger:    a.trigger,
+	})
+	metrics.CronRunEndedTotal.Add(1)
+}
+
+// sanitiseRunResult applies the same rune truncation + SanitizeForLog
+// pipeline that recordResultP0WithSanitised uses, factored out so the
+// skipPersist path of finishRun can reach the same byte-output without
+// touching s.mu / persistJobsLocked. Idempotent w.r.t. clean strings.
+func sanitiseRunResult(s string) string {
+	const maxStoredRunes = 4 * 1024
+	if trimmed := textutil.TruncateRunesNoEllipsis(s, maxStoredRunes); len(trimmed) < len(s) {
+		s = trimmed + "…[truncated]"
+	}
+	return osutil.SanitizeForLog(s, 4*1024)
+}
+
+// sanitiseRunErrMsg applies the cron error-redaction + log-injection
+// scrub used by recordResultP0WithSanitised, for skipPersist branches
+// (canceled / shutdown / overlap-skipped) whose error strings still
+// flow into WS broadcasts and must not leak filesystem paths.
+func sanitiseRunErrMsg(s string) string {
+	s = redactPathsInCronError(s)
+	return osutil.SanitizeForLog(s, 512)
+}
+
+// bumpRunStateMetrics increments the per-state counter for the terminal
+// transition. Mirrored in metrics.go and pinned by counter_wiring_contract_test.
+func (s *Scheduler) bumpRunStateMetrics(state RunState) {
+	switch state {
+	case RunStateSucceeded:
+		metrics.CronRunSucceededTotal.Add(1)
+	case RunStateFailed:
+		metrics.CronRunFailedTotal.Add(1)
+	case RunStateSkipped:
+		metrics.CronRunSkippedTotal.Add(1)
+	case RunStateTimedOut:
+		metrics.CronRunTimedOutTotal.Add(1)
+	case RunStateCanceled:
+		metrics.CronRunCanceledTotal.Add(1)
+	}
+}
+
+// emitOverlapSkipped is the synthetic terminal event for the CAS-rejected
+// path. The CAS gate trips before any inflight metadata is populated, so
+// we synthesise a RunID + StartedAt locally and emit started→ended back-to-
+// back so the dashboard timeline still shows the skip. State counter +
+// ended counter both bump.
+func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
+	runID := generateRunID()
+	startedAt := time.Now()
+	trigger := TriggerScheduled
+	if viaTriggerNow {
+		trigger = TriggerManual
+	}
+	s.emitRunStarted(RunStartedEvent{
+		JobID:     j.ID,
+		RunID:     runID,
+		StartedAt: startedAt,
+		Trigger:   trigger,
+	})
+	metrics.CronRunStartedTotal.Add(1)
+	s.finishRun(finishArgs{
+		job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+		state: RunStateSkipped, errClass: ErrClassOverlapSkipped,
+		errMsg: "previous run still in flight", skipPersist: true,
+	})
+}
+
+// emitRunStarted invokes the registered server-side hook outside s.mu so
+// hub locks may be acquired by the handler without inversion risk. nil
+// hook = no broadcast (used by tests / no-WS deployments).
+func (s *Scheduler) emitRunStarted(ev RunStartedEvent) {
+	s.mu.RLock()
+	fn := s.onRunStarted
+	s.mu.RUnlock()
+	if fn != nil {
+		fn(ev)
+	}
+}
+
+func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
+	s.mu.RLock()
+	fn := s.onRunEnded
+	s.mu.RUnlock()
+	if fn != nil {
+		fn(ev)
+	}
+}
+
+// recordResultP0WithSanitised persists the terminal result (LastResult /
+// LastError / LastErrorClass / Counters) for non-skipPersist paths and
+// returns the post-sanitised (result, errMsg) pair so finishRun can reuse
+// the same byte content in the CronRun history record. The two outputs
+// must remain byte-identical or the dashboard list would diverge from
+// runs/<jobID>/<run_id>.json on disk.
+//
+// Returns ok=false in two failure modes:
+//   - target Job has been deleted between snapshot and recordResult (race
+//     with DeleteJobByID): caller should also skip the CronRun history
+//     record because writing it would create a runs/<jobID>/ subtree for
+//     a job that no longer exists in s.jobs.
+//   - persistJobsLocked / marshal failed and we rolled back Job fields
+//     in-memory: caller MUST also skip the CronRun history record so
+//     dashboard list view (reads Job fields) and timeline view (reads
+//     CronRun) don't diverge — they'd otherwise show contradictory state
+//     for the same run. R220-ARCH-2.
+//
+// R220-GO-1: previously a thin recordResultP0 wrapper existed for tests
+// pinning the (j, result, errMsg, sessionID, errClass, state) signature.
+// No production caller used it; finishRun goes direct. The wrapper was
+// dead code and has been removed; tests assert on outcomes (Job fields,
+// CronRun summary), not wrapper presence.
+func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState) (string, string, bool) {
+	const maxStoredRunes = 4 * 1024
+	if trimmed := textutil.TruncateRunesNoEllipsis(result, maxStoredRunes); len(trimmed) < len(result) {
+		result = trimmed + "…[truncated]"
+	}
+	errMsg = redactPathsInCronError(errMsg)
+	result = osutil.SanitizeForLog(result, 4*1024)
+	errMsg = osutil.SanitizeForLog(errMsg, 512)
+
+	s.mu.Lock()
+	if _, ok := s.jobs[j.ID]; !ok {
+		s.mu.Unlock()
+		return result, errMsg, false
+	}
+	prev := struct {
+		LastRunAt      time.Time
+		LastResult     string
+		LastError      string
+		LastErrorClass ErrorClass
+		LastSessionID  string
+		Counters       JobRunCounters
+	}{j.LastRunAt, j.LastResult, j.LastError, j.LastErrorClass, j.LastSessionID, j.RunCounters}
+
+	j.LastRunAt = time.Now()
+	j.LastResult = result
+	j.LastError = errMsg
+	j.LastErrorClass = errClass
+	if sessionID != "" {
+		j.LastSessionID = sessionID
+	}
+	j.RunCounters.addRun(state)
+
+	save, perr := s.persistJobsLocked()
+	if perr != nil {
+		j.LastRunAt = prev.LastRunAt
+		j.LastResult = prev.LastResult
+		j.LastError = prev.LastError
+		j.LastErrorClass = prev.LastErrorClass
+		j.LastSessionID = prev.LastSessionID
+		j.RunCounters = prev.Counters
+		s.mu.Unlock()
+		slog.Warn("cron: recordResultP0 persist failed; in-memory result reverted",
+			"job_id", j.ID, "err", perr)
+		return result, errMsg, false
+	}
+	fn := s.onExecute
+	s.mu.Unlock()
+
+	save()
+	if fn != nil {
+		fn(j.ID, result, errMsg)
+	}
+	return result, errMsg, true
 }
 
 // resolveNotifyTarget picks the IM destination for this execution's

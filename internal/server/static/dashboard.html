@@ -960,10 +960,18 @@ body.kbd-open .input-hints{display:none}
 .cj-row.is-error{box-shadow:inset 3px 0 0 var(--nz-red)}
 .cj-row.is-missed{box-shadow:inset 3px 0 0 var(--nz-amber)}
 .cj-row.is-error.is-missed{box-shadow:inset 3px 0 0 var(--nz-red)}
+/* P0 cron-run-history — 行右侧"运行中 Xs"角标的脉动状态。优先级高于 paused
+ * 边色条（实测 paused job 无法被 TriggerNow，只剩 schedule 路径，
+ * 实际重叠极少；但为了视觉一致性预留 is-running 类）。 */
+.cj-row.is-running{box-shadow:inset 3px 0 0 var(--nz-accent)}
+.cj-when.running{color:var(--nz-accent);font-weight:600;animation:cjRunPulse 1.4s ease-in-out infinite}
+@keyframes cjRunPulse{0%,100%{opacity:1}50%{opacity:.55}}
 /* 状态圆点：二态设计——●活跃 / ○暂停。错误/missed 用左侧色条表达，
  * 避免同一信息三处重复编码(圆点+色条+错误条) */
 .cj-dot{width:8px;height:8px;border-radius:50%;background:var(--nz-green);flex-shrink:0;justify-self:center}
 .cj-row.paused .cj-dot{background:transparent;border:1px solid var(--nz-text-faint);width:9px;height:9px}
+.cj-row.is-running .cj-dot{background:var(--nz-accent);box-shadow:0 0 0 0 var(--nz-accent);animation:cjDotPulse 1.4s ease-in-out infinite}
+@keyframes cjDotPulse{0%{box-shadow:0 0 0 0 rgba(99,179,237,.6)}70%{box-shadow:0 0 0 6px rgba(99,179,237,0)}100%{box-shadow:0 0 0 0 rgba(99,179,237,0)}}
 /* 主列：任务标题 + 节奏(副行) */
 .cj-main{min-width:0;display:flex;flex-direction:column;gap:2px}
 .cj-title{font-size:14px;color:var(--nz-text-strong);font-weight:500;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
@@ -1024,6 +1032,95 @@ body.kbd-open .input-hints{display:none}
 /* v3 hides the legacy .cc-actions wrapper (still emitted for contract
  * test compatibility) since actions moved to .cj-actions + ⋯ menu */
 .cj-row .cc-actions{display:none}
+
+/* ===== P2 cron-run-history — 列表卡片成功率徽章 + hover tooltip =====
+ * RFC §8.1 / §8.4。徽章嵌在 .cj-row 第 4 列（when 列后、actions 前），
+ * 不改变 grid 列定义（用 grid auto-flow 自动追加）。tooltip 用绝对定位的
+ * .cj-stats-pop，:hover/:focus-within 触发显示。 */
+.cj-row{grid-template-columns:18px minmax(0,1fr) auto auto auto}
+/* 小屏 < 640px：复用上面已有的 mobile rule —— 隐藏 .cj-when、回到 3 列
+ * (dot / main / actions)。stats 徽章信息密度高，触屏不易精准 hover，直接
+ * 隐藏避免 grid 多出空列；用户进详情页看完整时间轴更合适。 */
+@media(max-width:640px){
+  .cj-row{grid-template-columns:18px minmax(0,1fr) auto}
+  .cj-stats{display:none}
+}
+.cj-stats{position:relative;display:inline-flex;align-items:center;justify-content:center;min-width:36px;height:22px;padding:0 8px;border-radius:11px;border:1px solid var(--nz-border);background:var(--nz-bg-2);font-size:11px;line-height:1;color:var(--nz-text-mute);font-variant-numeric:tabular-nums;cursor:default;outline:none}
+.cj-stats:hover,.cj-stats:focus-visible{border-color:var(--nz-text-faint);color:var(--nz-text)}
+.cj-stats.ok{color:var(--nz-green);border-color:rgba(63,185,80,.35);background:rgba(63,185,80,.08)}
+.cj-stats.mid{color:var(--nz-text);border-color:var(--nz-border)}
+.cj-stats.bad{color:var(--nz-red);border-color:rgba(218,54,51,.4);background:rgba(218,54,51,.1);font-weight:600}
+.cj-stats-label{white-space:nowrap}
+.cj-stats-pop{position:absolute;bottom:calc(100% + 6px);right:0;display:none;min-width:180px;padding:8px 10px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.45);z-index:50;cursor:default;white-space:normal}
+.cj-stats:hover .cj-stats-pop,.cj-stats:focus-within .cj-stats-pop{display:block}
+.cj-stats-pop-row{display:flex;gap:6px;margin-bottom:6px}
+.cj-stats-dot{width:8px;height:8px;border-radius:50%;background:var(--nz-text-faint);flex-shrink:0;display:inline-block}
+.cj-stats-dot.ok{background:var(--nz-green)}
+.cj-stats-dot.err{background:var(--nz-red)}
+.cj-stats-dot.skip{background:var(--nz-text-faint)}
+.cj-stats-dot.warn{background:var(--nz-amber)}
+.cj-stats-dot.cancel{background:#a371f7}
+.cj-stats-dot.run{background:var(--nz-accent)}
+.cj-stats-dot.unk,.cj-stats-dot.empty{background:var(--nz-bg-2);border:1px dashed var(--nz-border)}
+.cj-stats-pop-meta{font-size:11px;color:var(--nz-text-mute);line-height:1.45}
+
+/* ===== P2 cron-run-history — 详情视图"执行历史"时间轴 =====
+ * 在 cron session view 里 mount 在 .events 之上。RFC §8.2。
+ * 行：状态点 + state 文字 + 紧凑时间 + 耗时；点击展开 prompt/result/error。 */
+.cron-timeline-panel{padding:14px 18px 8px;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-1);max-height:42vh;overflow-y:auto;flex-shrink:0}
+.cron-timeline-panel:empty{display:none;padding:0;border:0}
+.cron-timeline-panel .ct-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px}
+.cron-timeline-panel .ct-head h3{margin:0;font-size:13px;color:var(--nz-text-strong);font-weight:600;letter-spacing:.2px}
+.cron-timeline-panel .ct-head-err{font-size:11px;color:var(--nz-red);background:rgba(218,54,51,.1);border:1px solid rgba(218,54,51,.3);border-radius:4px;padding:2px 8px}
+.cron-timeline-panel .ct-empty{font-size:12px;color:var(--nz-text-mute);padding:14px 4px;line-height:1.6}
+.cron-timeline-panel .ct-rows{display:flex;flex-direction:column;border:1px solid var(--nz-border);border-radius:8px;overflow:hidden;background:var(--nz-bg-0)}
+.cron-timeline-panel .ctr{padding:8px 12px;border-bottom:1px solid var(--nz-border);cursor:pointer;transition:background .12s}
+.cron-timeline-panel .ctr:last-child{border-bottom:none}
+.cron-timeline-panel .ctr:hover{background:#1c2129}
+.cron-timeline-panel .ctr.open{background:#1c2129}
+.cron-timeline-panel .ctr-main{display:flex;align-items:center;gap:10px;font-size:13px;color:var(--nz-text)}
+.cron-timeline-panel .ctr-dot{width:8px;height:8px;border-radius:50%;flex-shrink:0;background:var(--nz-text-faint)}
+.cron-timeline-panel .ctr-dot.ok{background:var(--nz-green)}
+.cron-timeline-panel .ctr-dot.err{background:var(--nz-red)}
+.cron-timeline-panel .ctr-dot.skip{background:var(--nz-text-faint)}
+.cron-timeline-panel .ctr-dot.warn{background:var(--nz-amber)}
+.cron-timeline-panel .ctr-dot.cancel{background:#a371f7}
+.cron-timeline-panel .ctr-dot.run{background:var(--nz-accent);animation:cjDotPulse 1.4s ease-in-out infinite}
+.cron-timeline-panel .ctr-dot.unk{background:var(--nz-bg-2);border:1px dashed var(--nz-border)}
+.cron-timeline-panel .ctr-state{color:var(--nz-text-strong);font-weight:500;min-width:48px}
+.cron-timeline-panel .ctr-time{color:var(--nz-text-mute);font-variant-numeric:tabular-nums}
+.cron-timeline-panel .ctr-dur{color:var(--nz-text-mute);font-variant-numeric:tabular-nums;margin-left:auto}
+.cron-timeline-panel .ctr-sub{font-size:11px;color:var(--nz-text-mute);margin-top:3px;padding-left:18px;display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.cron-timeline-panel .ctr-sub .ctr-sep{opacity:.5}
+.cron-timeline-panel .ctr-trigger{color:var(--nz-text-mute)}
+.cron-timeline-panel .ctr-session{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:#a5d6ff;background:rgba(165,214,255,.08);border-radius:3px;padding:0 5px;font-size:10px}
+.cron-timeline-panel .ctr-errcls{color:var(--nz-red)}
+.cron-timeline-panel .ctr-detail{display:none;margin-top:8px;padding:10px 12px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;cursor:default}
+.cron-timeline-panel .ctr-detail.open{display:block}
+.cron-timeline-panel .ctr-loading{font-size:12px;color:var(--nz-text-mute);font-style:italic}
+.cron-timeline-panel .ctr-err-load{font-size:12px;color:var(--nz-red)}
+.cron-timeline-panel .ctr-empty-detail{font-size:12px;color:var(--nz-text-mute);font-style:italic}
+.cron-timeline-panel .ctr-fresh-hint{font-size:12px;color:var(--nz-text);background:rgba(31,111,235,.08);border:1px solid rgba(31,111,235,.25);border-radius:6px;padding:6px 10px;margin-bottom:8px;line-height:1.5}
+.cron-timeline-panel .ctr-sid-chip{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--nz-accent);background:transparent;border:1px solid var(--nz-border);border-radius:3px;padding:1px 6px;font-size:11px;cursor:pointer;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+.cron-timeline-panel .ctr-sid-chip:hover{background:rgba(31,111,235,.12);border-color:var(--nz-accent)}
+.cron-timeline-panel .ctr-block{margin-bottom:8px}
+.cron-timeline-panel .ctr-block:last-child{margin-bottom:0}
+.cron-timeline-panel .ctr-block-label{font-size:10px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px}
+.cron-timeline-panel .ctr-block.err .ctr-block-label{color:var(--nz-red)}
+.cron-timeline-panel .ctr-bytes{text-transform:none;font-size:10px;color:var(--nz-text-faint);margin-left:6px}
+.cron-timeline-panel .ctr-block-body{margin:0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:var(--nz-text);background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:4px;padding:8px 10px;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow-y:auto;line-height:1.5}
+.cron-timeline-panel .ctr-block.err .ctr-block-body{color:var(--nz-red)}
+.cron-timeline-panel .ctr-meta-row{font-size:11px;color:var(--nz-text-mute);margin-top:4px}
+.cron-timeline-panel .ctr-meta-row code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:3px;padding:0 4px}
+.cron-timeline-panel .ct-more{display:flex;justify-content:center;margin-top:10px}
+.cron-timeline-panel .ct-more-btn{padding:6px 14px;border-radius:6px;border:1px solid var(--nz-border);background:transparent;color:var(--nz-text);font-size:12px;font-family:inherit;cursor:pointer;min-height:30px}
+.cron-timeline-panel .ct-more-btn:hover:not([disabled]){border-color:var(--nz-accent);color:var(--nz-accent);background:rgba(31,111,235,.08)}
+.cron-timeline-panel .ct-more-btn[disabled]{opacity:.5;cursor:not-allowed}
+@media(max-width:640px){
+  .cron-timeline-panel{max-height:50vh;padding:10px 12px 6px}
+  .cron-timeline-panel .ctr-main{font-size:12px;gap:8px}
+  .cron-timeline-panel .ctr-dur{font-size:11px}
+}
 
 /* ===== Frequency picker (Claude-style compact row) =====
  * v2 polish: 单行横排 [Frequency ▾] [time] [weekday ▾ / day ▾]，
