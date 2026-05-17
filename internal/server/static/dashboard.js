@@ -11448,15 +11448,18 @@ function editCronJob(id) {
   // freqMarkTouched doc. 不要调 freqUpdate()——让 seed 保持到用户真的
   // 交互频率控件为止。
   //
-  // Do NOT seed overlay._cronWorkDir from job.work_dir — the submit path
-  // uses overlay._cronWorkDir only as a fallback when the input is empty,
-  // which is exactly the user-cleared-workdir case. Seeding the current
-  // value would prevent clearing. Picker clicks (cronSelectWorkspace)
-  // explicitly set _cronWorkDir; the input's pre-filled value covers the
-  // unchanged-workdir case.
+  // Seed overlay._cronWorkDir to job.work_dir. 之前注释推理为「input 的
+  // pre-fill 覆盖未改动场景」是错的：buildCronWorkspaceBodyInternal 仅在
+  // selected 命中 projectsData 中某个项目时把 input.value 设为 ''（隐藏
+  // custom form 分支），所以「项目命中」+「未触碰任何控件」直接保存会让
+  // newWorkDir 解析为 ''，PATCH 把 work_dir 清空、任务回退到 router 默认
+  // cwd（用户报告的 bug）。Picker 点选会经 cronSelectWorkspace 覆盖
+  // _cronWorkDir；用户点「自定义路径」走 toggleCronWsCustom 也会清掉
+  // _cronWorkDir 让 input 接管；要清空 work_dir 的用户需显式切到自定义
+  // 路径并清空输入框。
   overlay._cronSchedule = job.schedule || '';
   overlay._cronScheduleTouched = false;
-  overlay._cronWorkDir = '';
+  overlay._cronWorkDir = job.work_dir || '';
 }
 
 // buildEditCronWorkspaceBody is the edit-mode counterpart. v2 polish 之后
