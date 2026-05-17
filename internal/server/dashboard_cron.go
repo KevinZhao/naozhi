@@ -650,26 +650,16 @@ func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
 		count = n
 	}
 
-	var (
-		runs    []time.Time
-		err     error
-		tzName  = "UTC"
-		tzLabel = ""
-	)
-	if h.scheduler != nil {
-		runs, err = h.scheduler.PreviewScheduleN(schedule, count)
-		loc := h.scheduler.Location()
-		tzName = loc.String()
-		if n, offset := time.Now().In(loc).Zone(); n != "" {
-			tzLabel = formatTZOffset(tzName, offset)
-		}
-	} else {
-		// Fallback for tests/bootstrap where scheduler isn't wired: compute in UTC.
-		var next time.Time
-		next, err = cron.PreviewSchedule(schedule)
-		if err == nil {
-			runs = []time.Time{next}
-		}
+	// PreviewScheduleN / Location are nil-receiver-safe (R219-CR-6); the
+	// nil path computes in UTC for tests / dashboard bootstrap before the
+	// scheduler is wired, matching the behaviour of the deleted
+	// cron.PreviewSchedule package-level helper.
+	runs, err := h.scheduler.PreviewScheduleN(schedule, count)
+	loc := h.scheduler.Location()
+	tzName := loc.String()
+	tzLabel := ""
+	if n, offset := time.Now().In(loc).Zone(); n != "" {
+		tzLabel = formatTZOffset(tzName, offset)
 	}
 	if err != nil {
 		// Don't echo the raw robfig/cron parser error: it leaks field offsets
