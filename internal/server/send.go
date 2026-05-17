@@ -589,6 +589,8 @@ func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError func(string)) (bool, 
 	go func() {
 		defer release()
 		if needInterrupt {
+			// AcquireTimeout 在超时未获到锁时不会发起 Release，会让 Guard.lastWait 永久增长，
+			// 现状作为已知设计偏差跟踪在 TODO R217-GO-1（"Guard.lastWait 在不发起 Release 的路径下永久泄漏"）。
 			if !h.guard.AcquireTimeout(h.ctx, key, interruptAcquireTimeout) {
 				slog.Error("send: interrupt timed out", "key", key)
 				if onAsyncError != nil {
