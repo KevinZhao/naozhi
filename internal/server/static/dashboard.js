@@ -2547,7 +2547,7 @@ function onAskSubmit(btn) {
   // broadcast semantics all apply; we do NOT call sendMessage() because that
   // path reads from the input box and manages optimistic rendering — the card
   // already shows "已回答", so duplicating would clash.
-  sendAskAnswerViaAPI(answer).catch(err => {
+  sendAskAnswerViaAPI(answer, card).catch(err => {
     _askAnswered.delete(tuid);
     card.querySelectorAll('button').forEach(b => { b.disabled = false; });
     updateAskSubmitState(card);
@@ -2556,13 +2556,31 @@ function onAskSubmit(btn) {
   });
 }
 
-async function sendAskAnswerViaAPI(text) {
-  if (!selectedKey) throw new Error('no active session');
+// sendAskAnswerViaAPI routes the composed answer text to the session that
+// rendered the AskUserQuestion card. The renderer (eventHtml →
+// renderAskQuestionCard) is shared between the main transcript and the
+// scratch (aside) drawer, so we MUST pick the route from the card's DOM
+// ancestry rather than the global selectedKey — otherwise an answer chosen
+// inside the drawer would land in the parent session and silently bypass
+// the scratch CLI process.
+async function sendAskAnswerViaAPI(text, card) {
+  let key = selectedKey;
+  let node = selectedNode;
+  if (card && card.closest && card.closest('#aside-drawer')) {
+    const scratchKey = (typeof window.__getActiveScratchKey === 'function')
+      ? window.__getActiveScratchKey()
+      : '';
+    if (!scratchKey) throw new Error('no active scratch session');
+    key = scratchKey;
+    // Scratch sessions are always local — never forward to a remote node.
+    node = 'local';
+  }
+  if (!key) throw new Error('no active session');
   const headers = { 'Content-Type': 'application/json' };
   const token = getToken();
   if (token) headers['Authorization'] = 'Bearer ' + token;
-  const payload = { key: selectedKey, text: text };
-  if (selectedNode && selectedNode !== 'local') payload.node = selectedNode;
+  const payload = { key: key, text: text };
+  if (node && node !== 'local') payload.node = node;
   const r = await fetch('/api/sessions/send', { method: 'POST', headers, body: JSON.stringify(payload) });
   if (!r.ok) {
     const raw = await r.text().catch(() => '');
@@ -11632,6 +11650,14 @@ initSidebarSearch();
       if (typeof showNetworkError === 'function') showNetworkError('保存为正式会话', e);
     }
   }
+
+  // Expose the active scratch router-key so shared renderers (e.g. the
+  // AskUserQuestion submit handler) can route answers to the scratch CLI
+  // instead of the parent session whose `selectedKey` is what `onAskSubmit`
+  // would otherwise read. Returns '' when no scratch is open.
+  window.__getActiveScratchKey = function() {
+    return (state && state.key) ? state.key : '';
+  };
 
   // Expose the global used by the ↗ button in eventHtml.
   window.askAside = function(btn) {

@@ -536,6 +536,39 @@ func TestHandleWebhook_RefusesZeroCredential(t *testing.T) {
 	}
 }
 
+// TestWebhook_URLVerification_HookSemFull asserts R218-SEC-1: the
+// url_verification branch acquires hookSem before reflecting the challenge,
+// so a flooded handler returns 503 instead of letting an attacker who
+// scraped verification_token DoS the challenge endpoint without ever
+// hitting the concurrent-handler cap. The other branches (card_action,
+// im.message.receive_v1) already gate on hookSem; without this guard
+// url_verification was the only authenticated path that ignored the cap.
+func TestWebhook_URLVerification_HookSemFull(t *testing.T) {
+	t.Parallel()
+	f := makeWebhookFeishu(Config{AppID: "id", AppSecret: "secret"})
+	// Saturate the semaphore so the next acquire fails.
+	for i := 0; i < cap(f.hookSem); i++ {
+		f.hookSem <- struct{}{}
+	}
+	t.Cleanup(func() {
+		// Drain so test does not leak into shared global cleanup paths.
+		for i := 0; i < cap(f.hookSem); i++ {
+			<-f.hookSem
+		}
+	})
+	mux := http.NewServeMux()
+	f.registerWebhook(mux, func(ctx context.Context, msg platform.IncomingMessage) {})
+
+	body := []byte(`{"type":"url_verification","challenge":"c","token":"test_token"}`)
+	req := buildTokenRequest(body)
+	w := httptest.NewRecorder()
+	mux.ServeHTTP(w, req)
+
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("status = %d, want 503 (hookSem full must reject url_verification)", w.Code)
+	}
+}
+
 // TestHandleWebhook_AllowsWhenVerificationTokenSet confirms the zero-credential
 // guard's inverse: once VerificationToken is set the handler enters the
 // normal token-check path (not the 503 defense gate). Paired with the

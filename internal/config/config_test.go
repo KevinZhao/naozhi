@@ -367,3 +367,79 @@ func TestEnabledBackends_AllEmptyIDsFallback(t *testing.T) {
 		t.Errorf("got[0].Path = %q, want cli.path passthrough", got[0].Path)
 	}
 }
+
+// TestValidateModelString locks the R215-SEC-P2-1 allowlist contract: empty
+// is allowed (delegates to backend default / cli.model fallback), real model
+// strings (alnum + dot/underscore/dash) pass, and any leading-`-` / control
+// byte / weird unicode is refused so a future BuildArgs refactor cannot let
+// the model field be re-parsed as a CLI flag.
+func TestValidateModelString(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{"empty_ok", "", false},
+		{"claude_opus", "claude-opus-4-5", false},
+		{"sonnet", "sonnet", false},
+		{"haiku_ms", "haiku-4-5-20251001", false},
+		{"bedrock_dotted", "us.anthropic.claude-3-5-sonnet", false},
+		{"underscore", "kiro_alpha", false},
+		{"leading_dash_rejected", "-injected", true},
+		{"flag_pair_rejected", "--mcp-config", true},
+		{"space_rejected", "claude opus", true},
+		{"slash_rejected", "claude/opus", true},
+		{"newline_rejected", "claude\nopus", true},
+		{"too_long_rejected", string(make([]byte, 129)), true},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			err := validateModelString("test.model", tc.value)
+			if tc.wantErr && err == nil {
+				t.Errorf("validateModelString(%q) = nil, want error", tc.value)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("validateModelString(%q) = %v, want nil", tc.value, err)
+			}
+		})
+	}
+}
+
+// TestValidateConfig_ModelInjection asserts validateConfig propagates the
+// model allowlist refusal from each known model field — cli.model,
+// cli.backends[*].model, agents[*].model, projects.planner_defaults.model.
+// A regression that drops one of these branches lets a subset of model
+// fields still smuggle a leading `-`. R215-SEC-P2-1.
+func TestValidateConfig_ModelInjection(t *testing.T) {
+	t.Parallel()
+	bad := "-injected"
+	cases := []struct {
+		name string
+		mut  func(c *Config)
+	}{
+		{"cli.model", func(c *Config) { c.CLI.Model = bad }},
+		{"cli.backends[0].model", func(c *Config) {
+			c.CLI.Backends = []CLIBackendConfig{{ID: "claude", Model: bad}}
+		}},
+		{"agents.x.model", func(c *Config) {
+			c.Agents = map[string]AgentConfig{"x": {Model: bad}}
+		}},
+		{"projects.planner_defaults.model", func(c *Config) {
+			c.Projects.PlannerDefaults.Model = bad
+		}},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := &Config{}
+			tc.mut(cfg)
+			if err := validateConfig(cfg); err == nil {
+				t.Errorf("validateConfig should reject %s = %q", tc.name, bad)
+			}
+		})
+	}
+}
