@@ -11114,14 +11114,58 @@ initSidebarSearch();
 (function(){
   var ov=document.createElement('div');ov.className='lightbox-overlay';
   ov.setAttribute('role','dialog');ov.setAttribute('aria-modal','true');ov.setAttribute('aria-label','Image preview');
-  ov.innerHTML='<img alt=""><div class="lb-zoom-hint"></div>';document.body.appendChild(ov);
+  // Toolbar buttons sit absolute top-right; rotation buttons trigger 90° steps.
+  // The overlay's click-to-close handler ignores events that didn't target the
+  // overlay itself, so toolbar clicks won't propagate up and dismiss the modal.
+  ov.innerHTML='<div class="lb-toolbar">'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-left" aria-label="Rotate left" title="Rotate left (R)">↺</button>'
+    +'<button type="button" class="lb-tool-btn" data-lb-action="rotate-right" aria-label="Rotate right" title="Rotate right (Shift+R)">↻</button>'
+    +'</div>'
+    +'<img alt=""><div class="lb-zoom-hint"></div>';
+  document.body.appendChild(ov);
   var img=ov.querySelector('img'),hint=ov.querySelector('.lb-zoom-hint');
-  var scale=1,panX=0,panY=0,dragging=false,lx=0,ly=0,ht=null;
-  function showHint(){hint.textContent=Math.round(scale*100)+'%';hint.classList.add('visible');clearTimeout(ht);ht=setTimeout(function(){hint.classList.remove('visible')},1200)}
-  function apply(){img.style.transform=(scale===1&&!panX&&!panY)?'':'translate('+panX+'px,'+panY+'px) scale('+scale+')';ov.classList.toggle('zoomed',scale>1)}
-  function reset(){scale=1;panX=0;panY=0;dragging=false;img.style.transform='';ov.classList.remove('zoomed','dragging');hint.classList.remove('visible');clearTimeout(ht)}
+  var scale=1,panX=0,panY=0,rotation=0,dragging=false,lx=0,ly=0,ht=null,rotateAnimTimer=null;
+  function showHint(text){hint.textContent=text||(Math.round(scale*100)+'%');hint.classList.add('visible');clearTimeout(ht);ht=setTimeout(function(){hint.classList.remove('visible')},1200)}
+  function apply(){
+    // Rotation always emits a transform — even at neutral pan/scale — because
+    // resetting transform to '' would visibly snap the image back. Order
+    // matters: translate → scale → rotate keeps panning intuitive (drag in
+    // screen-space, not image-space).
+    var neutral=scale===1&&!panX&&!panY&&rotation===0;
+    img.style.transform=neutral?'':'translate('+panX+'px,'+panY+'px) scale('+scale+') rotate('+rotation+'deg)';
+    ov.classList.toggle('zoomed',scale>1);
+  }
+  function reset(){scale=1;panX=0;panY=0;rotation=0;dragging=false;img.style.transform='';img.classList.remove('lb-rotating');ov.classList.remove('zoomed','dragging');hint.classList.remove('visible');clearTimeout(ht);clearTimeout(rotateAnimTimer)}
   function close(){ov.classList.remove('active');reset()}
-  ov.addEventListener('click',function(e){if(e.target===ov)close()});
+  function rotateBy(deg){
+    // Accumulate the raw angle without normalization so the CSS transition
+    // always rotates the visually shorter 90° path. If we wrapped to
+    // (-180, 180] the browser would interpolate a 270° spin in the wrong
+    // direction (e.g. -180 → +180 renders as +360 of CW spin).
+    rotation+=deg;
+    img.classList.add('lb-rotating');
+    apply();
+    // Display label normalized to (-180, 180] so the hint stays human-readable
+    // ("90°" beats "450°"). The stored `rotation` keeps growing.
+    var disp=((rotation%360)+360)%360;
+    if(disp>180)disp-=360;
+    showHint(disp+'°');
+    clearTimeout(rotateAnimTimer);
+    // Strip the transition class once the animation settles so subsequent
+    // pan/zoom interactions stay snappy (no easing on every drag frame).
+    rotateAnimTimer=setTimeout(function(){img.classList.remove('lb-rotating')},280);
+  }
+  ov.addEventListener('click',function(e){
+    var btn=e.target&&e.target.closest&&e.target.closest('[data-lb-action]');
+    if(btn){
+      // Toolbar click — handle action and don't fall through to backdrop close.
+      var action=btn.getAttribute('data-lb-action');
+      if(action==='rotate-left')rotateBy(-90);
+      else if(action==='rotate-right')rotateBy(90);
+      return;
+    }
+    if(e.target===ov)close();
+  });
   // Scroll wheel zoom (toward cursor)
   ov.addEventListener('wheel',function(e){e.preventDefault();var f=e.deltaY<0?1.15:1/1.15,ns=Math.min(Math.max(scale*f,.5),10);var r=img.getBoundingClientRect(),cx=e.clientX-(r.left+r.width/2),cy=e.clientY-(r.top+r.height/2);panX-=cx*(ns/scale-1);panY-=cy*(ns/scale-1);scale=ns;apply();showHint()},{passive:false});
   // Mouse drag pan
@@ -11185,7 +11229,24 @@ initSidebarSearch();
     img.src=src;
     ov.classList.add('active');
   };
-  document.addEventListener('keydown',function(e){if(!ov.classList.contains('active'))return;if(e.key==='Escape')close();else if(e.key==='+'||e.key==='='){scale=Math.min(scale*1.2,10);apply();showHint()}else if(e.key==='-'){scale=Math.max(scale/1.2,.5);apply();showHint()}else if(e.key==='0'){reset();apply();showHint()}});
+  document.addEventListener('keydown',function(e){
+    if(!ov.classList.contains('active'))return;
+    // Skip shortcuts when an editable element holds focus — otherwise typing
+    // 'r' in a chat input or stacked dialog would silently rotate the
+    // backgrounded preview.
+    var ae=document.activeElement;
+    if(ae&&(ae.tagName==='INPUT'||ae.tagName==='TEXTAREA'||ae.isContentEditable)){
+      if(e.key==='Escape')close();
+      return;
+    }
+    if(e.key==='Escape'){close();return}
+    if(e.key==='+'||e.key==='='){scale=Math.min(scale*1.2,10);apply();showHint();return}
+    if(e.key==='-'){scale=Math.max(scale/1.2,.5);apply();showHint();return}
+    if(e.key==='0'){reset();apply();showHint();return}
+    // Rotation shortcuts: r = CCW 90°, R / Shift+R = CW 90°. Match by lowercase
+    // so the lightbox responds the same regardless of caps lock state.
+    if(e.key==='r'||e.key==='R'){e.preventDefault();rotateBy(e.shiftKey?90:-90);return}
+  });
 })();
 
 /* ─────────────────────────────────────────────────────────────────────────────
