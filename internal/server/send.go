@@ -589,6 +589,11 @@ func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError func(string)) (bool, 
 	go func() {
 		defer release()
 		if needInterrupt {
+			// AcquireTimeout writes a per-key entry into Guard.lastWait that
+			// is only cleared on Release; paths that bypass Release leave a
+			// permanent entry. See TODO R217-GO-1 for the planned LRU/TTL
+			// eviction. The defer h.guard.Release(key) below covers this
+			// site's happy and error paths.
 			if !h.guard.AcquireTimeout(h.ctx, key, interruptAcquireTimeout) {
 				slog.Error("send: interrupt timed out", "key", key)
 				if onAsyncError != nil {

@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"unicode/utf8"
 
@@ -29,7 +30,7 @@ func ValidateUserLabel(s string) (string, error) {
 		return "", nil
 	}
 	if len(s) > MaxUserLabelBytes {
-		return "", errors.New("label too long")
+		return "", fmt.Errorf("label exceeds %d-byte limit", MaxUserLabelBytes)
 	}
 	if !utf8.ValidString(s) {
 		return "", errors.New("invalid utf-8")

@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"unicode/utf8"
@@ -50,7 +51,7 @@ func ValidateRemoteWorkspacePath(workspace string) error {
 		return nil
 	}
 	if len(workspace) > MaxRemoteWorkspacePath {
-		return errors.New("workspace too long")
+		return fmt.Errorf("workspace exceeds %d-byte limit", MaxRemoteWorkspacePath)
 	}
 	if !utf8.ValidString(workspace) {
 		return errors.New("workspace is not valid UTF-8")
