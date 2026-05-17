@@ -93,12 +93,12 @@
 
 ### 代码质量 — 本轮新发现
 
-- [ ] **R219-CR-1 — `loadAtomicString`/`storeAtomicString` (`cli/eventlog.go`) 与 `loadStringAtomic`/`storeStringAtomic` (`session/managed.go`) 双胞胎（P2）**: 两个函数语义相同但跨包独立，命名词序还相反，新加调用易再造第三个变体。方案：抽到 `internal/syncutil` 或 `internal/textutil`，统一命名。Breaking：否。
+- [x] **R219-CR-1 — `loadAtomicString`/`storeAtomicString` (`cli/eventlog.go`) 与 `loadStringAtomic`/`storeStringAtomic` (`session/managed.go`) 双胞胎（P2）**: 两个函数语义相同但跨包独立，命名词序还相反，新加调用易再造第三个变体。方案：抽到 `internal/syncutil` 或 `internal/textutil`，统一命名。Breaking：否。 — 已修复（textutil.LoadAtomicString/StoreAtomicString，cli/session 各自留 1 行 thin wrapper），本批 PR #76
 - [ ] **R219-CR-2 — `cron.runeByteOffset` 重复实现 `textutil.TruncateRunes`（P2）**: `scheduler.go:1689` 自实现 14 行 rune-counting 循环，cron 已 import session→textutil。方案：删除 `runeByteOffset`，调用 `textutil.TruncateRunes`。Breaking：否。
-- [ ] **R219-CR-3 — `feishu/askquestion.go::truncateRunes` 重复实现 `textutil.TruncateRunes`（P2）**: 8 处调用点。方案：替换为 `textutil.TruncateRunes` 或新增 `TruncateRunesSilent` 不带 ellipsis 变体。需审计 8 处对 ellipsis 的依赖。
+- [x] **R219-CR-3 — `feishu/askquestion.go::truncateRunes` 重复实现 `textutil.TruncateRunes`（P2）**: 8 处调用点。方案：替换为 `textutil.TruncateRunes` 或新增 `TruncateRunesSilent` 不带 ellipsis 变体。需审计 8 处对 ellipsis 的依赖。 — 已修复（新增 textutil.TruncateRunesNoEllipsis + 9 处生产调用切换 + 删 feishu 私有版 19 行 + 8 case 新表驱动测试），本批 PR #76
 - [ ] **R219-CR-4 — `cron.scheduler` `*ByID`/`*` 三对方法 body 重复（P2）**: DeleteJob/PauseJob/ResumeJob 与 *ByID 各 6 个共享 lock+mutate+persist+unlock body，仅 lookup 步骤不同。方案：抽 `deleteJobLocked(j *Job) (saveFunc, error)` 共享。
 - [ ] **R219-CR-5 — `dashboard_cron.go` 5 个 validateCron* 重复 UTF-8 + C0 + IsLogInjectionRune 三重扫描（P2）**: 任何安全策略变更需改 5 处。方案：抽 `validateStringField(s, maxBytes, allowedCtrl)` helper，每个 validator 3 行 wrapper。
-- [ ] **R219-CR-6 — `cron.PreviewSchedule` 包级函数 vs `(*Scheduler).PreviewSchedule` 双轨（P2）**: 包级版用 UTC，方法版用 scheduler tz；divergence 易踩。方案：折叠 nil scheduler 守卫到方法或包级版改 unexported。
+- [x] **R219-CR-6 — `cron.PreviewSchedule` 包级函数 vs `(*Scheduler).PreviewSchedule` 双轨（P2）**: 包级版用 UTC，方法版用 scheduler tz；divergence 易踩。方案：折叠 nil scheduler 守卫到方法或包级版改 unexported。 — 已修复（PreviewSchedule/PreviewScheduleN/Location 全部 nil-receiver-safe + 删除包级版 + dashboard handlePreview if/else 收敛），本批 PR #76
 - [ ] **R219-CR-7 — `dispatch.sendAndReply` 241 行 5+ 职责（P2）**: 类同 R214-CODE-3 (readLoop)。方案：抽 `buildReplyContext` + `handleSendResult` helpers。
 - [ ] **R219-CR-8 — `shim/server.go::handleClient` 319 行无子拆（P2）**: 4 个内联 goroutine 通过裸 channel 通信。方案：抽 `handleClientHandshake / relayStdin / relayStdout`。
 - [ ] **R219-CR-9 — `processIface.GetState/GetSessionID` 违反 Go 命名约定（P2）**: 应去 `Get` 前缀。Breaking：是（接口变更，~12 处 callsite + mock 需改）。
