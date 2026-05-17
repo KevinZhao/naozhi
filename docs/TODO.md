@@ -1,6 +1,8 @@
 # TODO
 
-> 最后更新 2026-05-17 Round 219 —— 深度 5-agent 并行 review 第 33 轮：13 处 FIX-READY 落地（uuid hex stack-array / eventlog_bridge pooled encoder / EventEntries empty fast-path / pendingIdx flush cap shrink / config 0o077 perm mask / interruptAcquireTimeout 命名 / SessionConfig.Workspace godoc Deprecated / cron Sprintf / maxWebhookNonceLen 命名 / discovery ErrUnsupportedPlatform 单点 / dashboard_send.go path.Clean 注释）+ ~30 NEEDS-DESIGN 归档见 Round 219 节。
+> 最后更新 2026-05-17 Round 222 —— 深度 5-agent 并行 review 第 35 轮：12 处 FIX-READY 落地（sanitizeResumeLastPrompt IsLogInjectionRune 全开 + shim SetReadDeadline 错误传播 + cron snapshotJob RLock + rawScanSubagentsDir meta size cap + handleAttachment Lstat + filterShimEnv per-entry size cap + capExtraArgsBytes ARG_MAX 守卫 + sanitizeDownloadName 调 IsLogInjectionRune + feishu maxEventIDLen / maxIncomingTextBytes / 时间戳 const 抽取 + platform.DefaultMaxReplyLen + wrapper 错误消息小写 + ImageData godoc Deprecated + eventlog test 改用 Eventually）+ ~50 NEEDS-DESIGN 归档见 Round 222 节。
+>
+> 上一轮更新 2026-05-17 Round 219 —— 深度 5-agent 并行 review 第 33 轮：13 处 FIX-READY 落地（uuid hex stack-array / eventlog_bridge pooled encoder / EventEntries empty fast-path / pendingIdx flush cap shrink / config 0o077 perm mask / interruptAcquireTimeout 命名 / SessionConfig.Workspace godoc Deprecated / cron Sprintf / maxWebhookNonceLen 命名 / discovery ErrUnsupportedPlatform 单点 / dashboard_send.go path.Clean 注释）+ ~30 NEEDS-DESIGN 归档见 Round 219 节。
 >
 > 上一轮更新 2026-05-17 —— TODO 清理批：删除 35 个已完成 `- [x]` 条目（落地 PR 详情可在 git log 中以 review 锚点检索：R218-GO-1/SEC-1/SEC-2/CR-2、R218B-GO-4/SEC-1/SEC-3/ARCH-1/CR-1~4、R217-PERF-9/CR-2、R216-GO-3、R215-GO-P1-1/P2-1~4、R215-SEC-P2-1/P2-2/P3-3、R215-PERF-P2-2/P2-6、R215-CR-P1-1/P2-1/P2-2/P2-4、R215-ARCH-P2-8、R214-CODE-2/CODE-6、RNEW-004 等）。本次清理后剩余 ~227 个 open items。
 >
@@ -120,6 +122,91 @@
 - [ ] **R219-ARCH-11 — `discovery.DefaultScanner` package singleton 阻碍多租户隔离（P2 R172-ARCH-D9 重申）**: 自 R172 登记起未推进，server.discoveryCache 与 cmd/naozhi 都通过包级 wrapper 假设进程内单 scanner。方案：`RouterConfig.HistoryScanner *discovery.Scanner`，nil 走 DefaultScanner 兼容老路径。
 - [x] **R219-ARCH-12 — DESIGN.md 实际状态机已偏离描述（P3）**: DESIGN.md 描述 4 状态 `Spawning/Ready/Running/Dead`，实现已加 Paused/Suspended/stub/scratch ephemeral/exempt 等 7+ 状态。方案：DESIGN.md 补真实状态枚举 + state diagram 或链 ADR。 — 已修复（DESIGN.md 把 4 态明确为 cli.ProcessState 进程级状态机 + 链权威定义，把 Exempt/Stub/Scratch/Paused 单列为 ManagedSession 上层"语义标签"可正交组合），本批 PR #86
 - [x] **R219-ARCH-13 — DESIGN.md L292 event log 持久化"单文件 single goroutine"承诺与 per-session writer N goroutine 现实不符（P3）**: 文档与实现漂移。方案：DESIGN.md 改"per-session writer, batched fsync, 100ms flush tick"。 — 已修复（DESIGN.md L292 改"per-session 专用 writer goroutine + bufio + 100ms flush tick batched fsync"），本批 PR #86
+
+## Round 222 — 5-agent 并行 review 第 35 轮（2026-05-17）NEEDS-DESIGN
+
+> 5 reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描共约 80 条发现。
+> 12 条 FIX-READY 已落地本轮 PR（sanitizeResumeLastPrompt IsLogInjectionRune 全开 / shim
+> SetReadDeadline 错误传播 / cron snapshotJob RLock / rawScanSubagentsDir meta size cap /
+> handleAttachment Lstat / filterShimEnv per-entry size cap / capExtraArgsBytes ARG_MAX
+> 守卫 / sanitizeDownloadName 调 IsLogInjectionRune / feishu maxEventIDLen+maxIncomingTextBytes
+> 抽 const / platform.DefaultMaxReplyLen / feishu webhookTimestampFutureSkew+webhookTimestampMaxAge /
+> wrapper 错误消息小写 / ImageData godoc Deprecated / eventlog_integration_test 改用
+> testhelper.Eventually）。
+> 以下是需设计决策、破坏兼容、跨包重构、或方案不唯一不适合本轮直接修的条目。
+
+### 安全 — 需设计或部署影响
+
+- [ ] **R222-SEC-1 — Dashboard 主 CSP 仍含 `'unsafe-inline'` script-src/style-src（P1）**: `dashboard.go:384` 主应用 HTML 的 CSP 含 `'unsafe-inline'` 让 XSS 防护实际失效；login 页面已用 hash-based CSP 但主应用未跟。修复需把 dashboard.js 内联段拆出或为每段加 hash，是 frontend 改造；兼 SEC-NEW-4（CDN 在 script-src 但 unsafe-inline 旁路所有 nonce/hash）。涉及：`internal/server/dashboard.go:384`，`internal/server/static/dashboard.js`。
+- [ ] **R222-SEC-2 — `shimEnvAllowedPrefixes` 仍含 PYTHONPATH/PYTHONHOME/CONDA_/NVM_DIR/VIRTUAL_ENV（P2）**: 类似 R220-SEC-1（GIT_）但针对 Python/conda/nvm 生态。`PYTHONPATH=` 让多用户/CI 系统上低权限可写路径里的恶意模块被 Python 子进程优先载入（Bash tool 触发 `python3` 即可）；`VIRTUAL_ENV=` 同理；`CONDA_` 通配过宽（仅需 PREFIX/DEFAULT_ENV/SHLVL 三项）；`NVM_DIR=` 暴露 nvm 树供 PATH-mismatch 攻击。方案：拆显式 allowlist；可能影响依赖 PYTHONPATH/VIRTUAL_ENV 转发的部署，需 release note。涉及：`internal/shim/manager.go:959-961`。
+- [ ] **R222-SEC-3 — 缺 `GET /api/cron/runs` 与 `GET /api/cron/runs/{id}` rate limit（P3）**: 已认证 token 被盗后可高频枚举完整 run 历史并触发持续 IO；filesExistsLimiter 模式可复用。方案：在 server.New 织入 cronRunsLimiter（如 60req/min/IP），接到 dashboard_cron handler。涉及：`internal/server/dashboard_cron.go:963,1054`。
+- [ ] **R222-SEC-4 — `nz_anon` cookie 在无 TLS 部署下不带 Secure（P3）**: 启动期已有"未启 TLS"告警，但 cookie 自身不 fail-closed，攻击者同网络可窃取并认领 pending 上传。方案：多用户模式强制 Secure/no-TLS 启动失败。涉及：`internal/server/dashboard_send.go:44-50`。
+- [ ] **R222-SEC-5 — `handleAttachment` MIME 仅来自扩展名，无 magic byte 校验（P3）**: 当 attachment.sanitizeExt 之外的代码路径被加入（regression），可向 image/jpeg 头里塞非图片字节。方案：`http.DetectContentType` 比对扩展名；不一致则降级为 application/octet-stream + attachment disposition。涉及：`internal/server/dashboard_send.go:1016-1033`。
+- [ ] **R222-SEC-6 — `validateCronPrompt` LF-allowed 注释提到 `--append-system-prompt` 单行约束但策略只对 cron 安全（P3）**: 注释会误导未来把 LF-allowed 复制到 planner_prompt。方案：保留代码不改，加 contract test 锁 `project.ValidateConfig` 拒绝 PlannerPrompt 含 \n。涉及：`internal/server/dashboard_cron.go:184-188`。
+
+### Go 正确性 — 跨包改动 / shutdown 协调
+
+- [ ] **R222-GO-1 — `cron.executeOpt` 用 `context.Background()` 起 sendCtx，绕开 stopCtx 取消（P2）**: scheduler.go:1853 注释说为避免 shutdown 误记 cancel，但 Stop 后 Send 仍可阻塞 jobTimeout（最多 5 min），triggerWG.Wait 因此可能超 stopBudget。方案：sendCtx 来自 stopCtx 派生 + 短 grace；或在 wg goroutine 文档化"intentional orphan"。涉及：`internal/cron/scheduler.go:1853`。
+- [ ] **R222-GO-2 — `discovery/history_tail.go` 非 ctx 包装版用 `context.Background()`（P2）**: `loadHistoryTail`/`loadHistoryChainTail` 私有 wrapper 用 Background()，无法被 router historyCtx 取消，NFS 等慢 FS 上启动可能挂住。方案：调用方迁到 *Ctx 变体；删除非 ctx wrapper。涉及：`internal/discovery/history_tail.go:54,367`。
+- [ ] **R222-GO-3 — `cli.SubagentLinker.fireOnResolveLocked` 释放重取 mu 让 callback 跑期间存在 nested mu-release race（P2）**: 重入安全契约靠 godoc 维系，无静态守卫；callback 若再调 linker.Query 进入嵌套路径可能死锁。方案：copy fns 后释放两锁外执行所有 callback，移除 re-lock。涉及：`internal/cli/subagent_link.go:556-568`。
+- [ ] **R222-GO-4 — `heartbeatLoop` pongTimer 预先 Stop+Reset 在 Go<1.23 toolchain 下可能漏 stale tick 误判 pong miss（P2）**: 注释说 Go 1.23+ 自 drain，但需校验 go.mod 最低版。方案：grep go.mod toolchain 行；若已 ≥1.23 则在注释加锁定标记。涉及：`internal/cli/process_readloop.go:506-508`。
+- [ ] **R222-GO-5 — `cron/runstore.go` mtime sort 在 FS 时间精度低时 ordering 不稳，pagination cutoff 可能漏数据（P3）**: 评论已承认 StartedAt 才是真源；FAT32/tmpfs 在并发 cron 完成时同秒丢序。方案：non-cached 全扫路径读 JSON 排 StartedAt；或 mtime 作 secondary key。涉及：`internal/cron/runstore.go:397`。
+- [ ] **R222-GO-6 — `eventlog/persist/persister.go run()` 关闭路径 drain p.in 但不 drain p.opCh，pending DropKey/Flush 调方挂直至 ctx 兜底（P3）**: 方案：closeCh case 在 shutdownAll 前 drain opCh，对每个 done channel 发 ErrPersisterClosed。涉及：`internal/eventlog/persist/persister.go:483-495`。
+- [ ] **R222-GO-7 — `cli/subagent_link.go::readFirstLineMeta` ReadSlice 满 32KB 后将 partial 行丢给 Unmarshal 静默退化为 scan（P3）**: 长 thinking block 当作首行时 fast path 失败但无显式信号，性能默默掉。方案：`bufio.ErrBufferFull` 显式返 errFirstLineTooLong，调用方按 fallback 处理。涉及：`internal/cli/subagent_link.go:666-668`。
+- [ ] **R222-GO-8 — `session/router.go GetOrCreate` waiting timer drain 在 ctx.Done 分支可阻塞达 20ms（P3）**: Stop 返回 false 后 `<-waitT.C` 可能等下一 tick。方案：Reset(0) 强制立即 drain，或换 AfterFunc。涉及：`internal/session/router.go:1934-1936`。
+- [ ] **R222-GO-9 — `cli/process_readloop.go readLoop` panic recover 在 close(p.done) 之前调 onTurnDone，cb 看到 p.done 仍 alive 与"进程已死"语义冲突（P3）**: 方案：recover 设 flag 而非直接调 cb，让正常 terminal 路径跑 cb；或 godoc 显式标注 cb 在 partial 状态执行。涉及：`internal/cli/process_readloop.go:66-79`。
+- [ ] **R222-GO-10 — `cron.Scheduler.Stop` triggerWG goroutine 在 deadline hit 时泄漏（P3）**: 测试场景下 stopBudget 短可触发 goroutine-leak detector。方案：用内部信号通道串联，或 gate `go func` 在 !deadlineHit。涉及：`internal/cron/scheduler.go:754-765`。
+
+### 性能 — 协议接口或大重构
+
+- [ ] **R222-PERF-1 — `cli.Protocol.ReadEvent(string)` 每 stdout 行做 `[]byte(line)` heap copy（P1，重申 R67-PERF-1）**: ReadEvent 接口签名为 string，内部强制再分配 []byte 给 json.Unmarshal。5-50 evt/s × N session × 50-4KB 持续 alloc。方案：接口改 `ReadEvent([]byte)`，protocol_claude/protocol_acp + readLoop 同步。Breaking：是。
+- [ ] **R222-PERF-2 — `shimWriter.Write` 双路径都 `string(data[:len-1])` 拷贝到 shimClientMsg.Line（P1，重申 R71-PERF-H1）**: shimClientMsg.Line 是 string 而非 json.RawMessage；改 RawMessage 可零拷贝。Breaking：shim 协议字段类型变。涉及：`internal/cli/process_shim_io.go:54,83`。
+- [ ] **R222-PERF-3 — `readLoop` 每条 stdout 行做两次完整 JSON decode（P1）**: 先 Unmarshal shimMsg（含 `Line string`），再 ReadEvent 内 Unmarshal Event。最坏 2500 double-decode/s。方案：shimMsg.Line 改 json.RawMessage 直接传 ReadEvent；包内部改不 breaking。涉及：`internal/cli/process_readloop.go:199-207`。
+- [ ] **R222-PERF-4 — `eventPushLoop` 同 session N tab 各自 marshalPooled（P2，重申 R219-PERF-1 + R214-PERF-4）**: 10 tab × 50 session × 50 evt/s 最坏 25000 独立 JSON 编码/s。方案：Hub 层 per-key 单广播 goroutine 序列化一次后 fan-out 共享 []byte。涉及：`internal/server/wshub.go:1070`。
+- [ ] **R222-PERF-5 — `marshalPooled` 每次 make+copy 输出，broadcast 路径多客户端共享场景多余（P2）**: 拆 marshalPooledRef 不 copy 版供 broadcast，调方 put 回 pool。涉及：`internal/server/dashboard.go:88-90`。
+- [ ] **R222-PERF-6 — `handleList` storeGen 不变仍重建 sessionWorkspaces map / workspaces slice（P2，重申 R219-PERF-2）**: 引入 lastListVersion+lastListJSON 缓存命中直接 Write。涉及：`internal/server/dashboard_session.go:388`。
+- [ ] **R222-PERF-7 — `Snapshot()` 8 次顺序 atomic.Pointer.Load（P2，重申 R219-PERF-3 / R215-ARCH-P2-7）**: 打包 immutableBox + mutableBox。涉及：`internal/session/managed.go:841-857`。
+- [ ] **R222-PERF-8 — `invokePersistSinkSingle` 单槽 slice heap escape（P2，重申 R219-PERF-4）**: 需 -benchmem 验证后再决定 sync.Pool 或栈数组方案。涉及：`internal/cli/eventlog.go:653`。
+- [ ] **R222-PERF-9 — `newEventLogSink` 每 entry make+copy 出 pooled buffer（P2）**: bridgeEncPool 复用 encoder 但仍强制 copy。方案：批 batch 一次 make 切片分发；或 PersistSink 接受 []byte slice，sender 保证生命周期。涉及：`internal/session/eventlog_bridge.go:98-99`。
+- [ ] **R222-PERF-10 — `ListSessions` 持 RLock 收 refs 再释放，Snapshot 在锁外但每次双 make（P2）**: sync.Pool 复用 []*ManagedSession；或 inline 成单循环填 snapshots。涉及：`internal/session/router.go:3643-3654`。
+- [ ] **R222-PERF-11 — `EntriesSince` 多 tab 同 EventLog 各自调 + 各自 marshal（P2）**: EventLog 引入 last-batch JSON 缓存，notify 时直接复制。涉及：`internal/cli/eventlog.go:898-929`。
+- [ ] **R222-PERF-12 — `persister.handleBatch` Clock() 调两次（P3）**: 在 run() case `<-p.in` 分支单次捕获 now 传 handleBatch，省 vDSO。涉及：`internal/eventlog/persist/persister.go:636,681`。
+- [ ] **R222-PERF-13 — `shimMsg.Code *int` 每 cli_exited heap alloc（P3）**: 改 `Code int + CodePresent bool`。涉及：`internal/cli/process_readloop.go:38-44`。
+- [ ] **R222-PERF-14 — `heartbeatLoop` 30s ping 仍走 encodeShimMsg pool（P3）**: 预计算 `pingBytes = []byte(\"{\\\"type\\\":\\\"ping\\\"}\\n\")`，shimSendRaw 直送。涉及：`internal/cli/process_readloop.go:511-512`。
+- [ ] **R222-PERF-15 — `BroadcastCronRun*` 每次多次 SanitizeForLog（P3）**: 在 Job struct 上缓存 sanitized 字段；hex runID 跳过 sanitize。涉及：`internal/server/wshub.go:1407-1440`。
+
+### 代码质量 — 方法过长 / 共享 helper
+
+- [ ] **R222-CR-1 — `session.NewRouter` 350 行 6+ 阶段直列（P2）**: 拆 initWrappers / loadPersistedState / startEventLogPersister / startBackgroundLoops。涉及：`internal/session/router.go:706`。
+- [ ] **R222-CR-2 — `upstream/connector_rpc.go handleRequest` 522 行 18-case switch（P2）**: 抽 (*Connector).handleSend/handleTakeover 等私方法。涉及：`internal/upstream/connector_rpc.go:50`。
+- [ ] **R222-CR-3 — `session.reconnectShims` 334 行 9-state enum + 嵌套 goroutine（P2）**: 拆 classifyAndPlanShimAction + executeShimAction。涉及：`internal/session/router.go:1276`。
+- [ ] **R222-CR-4 — `cron.executeOpt` 247 行（P2）**: 抽 recordAndBroadcastRun。涉及：`internal/cron/scheduler.go:1677`。
+- [ ] **R222-CR-5 — 三处 firstLine/firstLineTrunc 跨包独立实现（P2）**: dispatch/status.go:135、cli/subagent_transcript.go:389、cron/job.go:192 各有版本。方案：抽 textutil.FirstLine（dispatch 语义最完整）；cli 版本变成 textutil.FirstLine + textutil.TruncateRunes 的一行 wrapper。涉及：3 文件。
+- [ ] **R222-CR-6 — `magic 120` filename cap、`maxLen` 等无名参数散落（P3）**: 提到 file/package 级常量带原由注释。涉及：`internal/server/dashboard_send.go:505`，`internal/server/dashboard_session.go:42`。
+- [ ] **R222-CR-7 — `firstLineTrunc` vs `firstLine` 空行处理语义分歧未文档化（P3）**: 给两者加 godoc 标注；或抽 textutil 时锁定唯一语义。
+- [ ] **R222-CR-8 — `sessionSendLegacy` Deprecated 注释无 tracking anchor（P3）**: 加 `// Removal tracked in docs/TODO.md R-LEGACY-SEND` + 新建 TODO 条目，含明确移除条件。涉及：`internal/server/send.go:561`。
+- [ ] **R222-CR-9 — `managed.go` TODO 引用 R217-ARCH-2 但 R219-ARCH-3 已 supersede（P3）**: 同步交叉引用。涉及：`internal/session/managed.go:941`。
+- [ ] **R222-CR-10 — 4 包各自定义 SessionRouter 但缺编译时静态断言（P3）**: 各包加 `var _ SessionRouter = (*session.Router)(nil)` 抓签名漂移。涉及：cron/dispatch/upstream/server consumer.go。
+
+### 架构 — 大重构 NEEDS-DESIGN
+
+- [ ] **R222-ARCH-1 — `session.Router` 已是 god object（73 方法 / ~20 字段 / 4100 行单文件）（P1）**: 拆 sessionStore + procPool + shimReconciler + persistenceCoord + historyLoader 五子组件，Router 退化为门面；contract_test.go 守的对外契约不破。是当前最大的架构债。
+- [ ] **R222-ARCH-2 — shim 协议细节泄漏到 session 层（P1）**: session/router.go 直调 `shim.SocketPath/KeyHash/WaitSocketGone/ServerMsg/State`；cli.Wrapper 应吸收为 `WaitSocketGoneForKey(key,dur)` + `Reconnect(ctx,key,lastSeq) (*Process, midTurn, err)`。
+- [ ] **R222-ARCH-3 — `internal/config` 反向 import `internal/session`（P1）**: 仅为读 `session.DefaultMaxProcs` 一个常量。方案：抽 internal/sessionconst 或 internal/defaults 子包，session/config 都依赖它。
+- [ ] **R222-ARCH-4 — `cli.PersistSink` 与 `persist.PersistSink` 双胞胎，bridge 翻译层（P1）**: 抽 internal/eventlog/schema 唯一 entry 类型来源；或保留 bridge 但显式重命名两端。
+- [ ] **R222-ARCH-5 — server 直接持有大量 cli.* 类型，绕过 session 抽象（P1）**: 14 个 server 文件 import cli.Attachment/ImageData/EventEntry/SubagentLinker。方案：扩展 platform.Attachment 或抽 internal/dispatch/dto。
+- [ ] **R222-ARCH-6 — Hub god-object 苗头（35+ 方法 / 1700 行）（P2）**: 拆 Hub + SubscriptionRegistry + MessageBroker。
+- [ ] **R222-ARCH-7 — `processIface` 30+ 方法（P2）**: 按 core/status/events/agents 切分四个小接口。
+- [ ] **R222-ARCH-8 — graceful shutdown 顺序约束散在 main.go + server.go + router.go（P2）**: 引入 internal/lifecycle.Coordinator + 拓扑 Stop。
+- [ ] **R222-ARCH-9 — env 探测散在 5+ 处独立读取（XDG_RUNTIME_DIR / HOME / APPDATA）（P2）**: Config.Paths 子结构集中；config.Load Normalize 阶段单点探测。
+- [ ] **R222-ARCH-10 — ManagedSession 语义标签隐式（exempt 字段 / Stub via RegisterCronStub / Scratch via key prefix / Paused via process==nil）（P2）**: 抽 SessionRole + SessionMode 两枚举。
+- [ ] **R222-ARCH-11 — workspace 三义混用（Config.Workspace / Config.Workspaces / Session.Workspace / Router.workspace / Router.workspaceOverrides）（P2）**: 改名 NodeIdentity / RemoteNodes / DefaultCWD；YAML 字段保 alias。
+- [ ] **R222-ARCH-12 — spawn 路径 workspace 决策散在 5+ 优先级点（P2）**: 抽 WorkspaceResolver（参考 KeyResolver 解耦经验）。
+- [ ] **R222-ARCH-13 — eventlog 子系统散在 Router/ManagedSession/cli.EventLog/persist.Persister/attachment.Tracker 五处（P2）**: 抽 internal/session/eventlogpipeline 子包封装。
+- [ ] **R222-ARCH-14 — backend 信息散在 Router 4 字段 + ManagedSession atomic + Wrapper（P3）**: type Backend struct 聚合，Router 持 backends map[string]*Backend。
+- [ ] **R222-ARCH-15 — cli.Event vs cli.EventEntry vs cli.EventLog 命名空间冲突（P3）**: 改 WireEvent + LogEntry。Breaking：是（cli 包外引用多）。
+- [ ] **R222-ARCH-16 — discovery 包职责不单一（pure path util + ClaudeProjectSlug + LoadHistory）（P3）**: 拆 discovery/path + discovery/proc + history/claudejsonl 合并。
+- [ ] **R222-ARCH-17 — Router 持 history 子系统 ctx/wg（lifecycle 越权）（P3）**: 与 R222-ARCH-1 一并迁。
 
 ## Round 220 — 5-agent 并行 review 第 34 轮（2026-05-17）NEEDS-DESIGN
 
