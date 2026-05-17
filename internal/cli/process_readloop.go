@@ -446,8 +446,10 @@ func (p *Process) readLoop() {
 			// socket and the bufio.Writer's fd is released promptly. Without
 			// this, if the process isn't subsequently Kill/Detach'd (e.g. when
 			// Router.Cleanup evicts it from the map), the fd leaks to GC.
-			// shimConn.Close is idempotent, so a later Kill/Detach is safe.
-			_ = p.shimConn.Close()
+			// closeShimConn is sync.Once-guarded so a later Kill/Detach is safe
+			// without producing a "use of closed network connection" debug log
+			// on the second close attempt. R219-GO-3.
+			p.closeShimConn()
 			return
 
 		case "pong":
