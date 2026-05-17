@@ -166,8 +166,8 @@ func TestBuildQuestionCardJSON_LongLabelTrimmed(t *testing.T) {
 		case map[string]any:
 			if tag, _ := t["tag"].(string); tag == "button" {
 				if textMap, ok := t["text"].(map[string]any); ok {
-					// Rune count is what matters — truncateRunes clips by rune,
-					// and a byte-length assertion would spuriously fail on
+					// Rune count is what matters — TruncateRunesNoEllipsis clips by
+					// rune, and a byte-length assertion would spuriously fail on
 					// multi-byte em dashes present in the "Label — Desc" join.
 					if c, _ := textMap["content"].(string); utf8.RuneCountInString(c) > maxRuneLen {
 						maxRuneLen = utf8.RuneCountInString(c)

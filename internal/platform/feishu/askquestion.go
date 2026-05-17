@@ -8,10 +8,10 @@ import (
 	"log/slog"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // Length caps for card-action value fields. Labels and headers ride in the
@@ -113,7 +113,7 @@ func buildMultiQuestionMarkdownCardJSON(card platform.QuestionCard) ([]byte, err
 			// Rune-aware truncation — byte-slicing [:20] would split multi-byte
 			// CJK codepoints and emit invalid UTF-8 into the card body, making
 			// json.Encoder.Encode fail and aborting the whole card send.
-			h = truncateRunes(item.Question, 20)
+			h = textutil.TruncateRunesNoEllipsis(item.Question, 20)
 		}
 		parts = append(parts, h+"："+item.Options[0].Label)
 	}
@@ -204,7 +204,7 @@ func buildQuestionCardJSON(card platform.QuestionCard) ([]byte, error) {
 			// Clip button label at rune boundary — byte-level [:100] could
 			// split a multi-byte CJK sequence into invalid UTF-8 that
 			// Feishu's relay would reject or render as mojibake.
-			btnText = truncateRunes(btnText, cardButtonTextMaxRunes)
+			btnText = textutil.TruncateRunesNoEllipsis(btnText, cardButtonTextMaxRunes)
 			a := action{Tag: "button", Type: "default"}
 			a.Text.Tag = "plain_text"
 			a.Text.Content = btnText
@@ -214,9 +214,9 @@ func buildQuestionCardJSON(card platform.QuestionCard) ([]byte, error) {
 			// inbound replay can't bounce 60 KB into CC stdin.
 			a.Value = map[string]any{
 				"kind":        "ask_answer",
-				"tool_use_id": truncateRunes(card.ToolUseID, cardValueIDMaxRunes),
-				"header":      truncateRunes(item.Header, cardValueHeaderMaxRunes),
-				"label":       truncateRunes(opt.Label, cardValueLabelMaxRunes),
+				"tool_use_id": textutil.TruncateRunesNoEllipsis(card.ToolUseID, cardValueIDMaxRunes),
+				"header":      textutil.TruncateRunesNoEllipsis(item.Header, cardValueHeaderMaxRunes),
+				"label":       textutil.TruncateRunesNoEllipsis(opt.Label, cardValueLabelMaxRunes),
 			}
 			acts = append(acts, a)
 		}
@@ -257,26 +257,6 @@ var markdownEscaper = strings.NewReplacer(
 // output are not expected here (headers and questions are short prose).
 func escapeMarkdown(s string) string {
 	return markdownEscaper.Replace(s)
-}
-
-// truncateRunes clips s to at most n runes, preserving UTF-8 boundaries.
-// Byte-level [:n] would split multi-byte sequences and leave Feishu's relay
-// with invalid UTF-8 that either rejects or mojibakes the button text.
-// No ellipsis is appended — button labels read cleaner without one.
-func truncateRunes(s string, n int) string {
-	if n <= 0 || utf8.RuneCountInString(s) <= n {
-		return s
-	}
-	i, count := 0, 0
-	for i < len(s) {
-		if count == n {
-			return s[:i]
-		}
-		_, size := utf8.DecodeRuneInString(s[i:])
-		i += size
-		count++
-	}
-	return s
 }
 
 // cardActionPayload is the value object our SendQuestionCard emits and the
@@ -418,8 +398,8 @@ func (f *Feishu) dispatchCardAction(
 // otherwise land 60 KB / bidi-injected strings on CC stdin. The caps match
 // send-time policy so round-trip drift stays bounded.
 func composeAskAnswerText(p cardActionPayload) string {
-	h := strings.TrimSpace(truncateRunes(osutil.SanitizeForLog(p.Header, 0), cardValueHeaderMaxRunes))
-	l := strings.TrimSpace(truncateRunes(osutil.SanitizeForLog(p.Label, 0), cardValueLabelMaxRunes))
+	h := strings.TrimSpace(textutil.TruncateRunesNoEllipsis(osutil.SanitizeForLog(p.Header, 0), cardValueHeaderMaxRunes))
+	l := strings.TrimSpace(textutil.TruncateRunesNoEllipsis(osutil.SanitizeForLog(p.Label, 0), cardValueLabelMaxRunes))
 	if l == "" {
 		return ""
 	}

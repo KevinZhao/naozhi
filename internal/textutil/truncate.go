@@ -43,6 +43,35 @@ func TruncateRunes(s string, maxRunes int) string {
 	return s
 }
 
+// TruncateRunesNoEllipsis truncates s to at most maxRunes runes WITHOUT
+// appending an ellipsis suffix. Used by IM card renderers (Feishu button
+// labels, headers, tool_use_id values) where a trailing "..." would clutter
+// the rendered card or — worse — push the result past the relay's own
+// per-field length cap. The byte-level rune decode mirrors TruncateRunes so
+// the only behavioural difference is the absent ellipsis. R219-CR-3.
+//
+// maxRunes <= 0 is treated as "no limit": return s unchanged. All call
+// sites pass positive constants; this guard prevents an infinite loop if a
+// misconfigured maxRunes ever reaches this function.
+func TruncateRunesNoEllipsis(s string, maxRunes int) string {
+	if maxRunes <= 0 {
+		return s
+	}
+	if len(s) <= maxRunes {
+		return s
+	}
+	i, count := 0, 0
+	for i < len(s) {
+		if count == maxRunes {
+			return s[:i]
+		}
+		_, size := utf8.DecodeRuneInString(s[i:])
+		i += size
+		count++
+	}
+	return s
+}
+
 // TruncateRunesBytes mirrors TruncateRunes for a []byte input: it returns a
 // string with at most maxRunes runes, appending "..." only when the input
 // was actually trimmed. The conversion to string is deferred to the result
