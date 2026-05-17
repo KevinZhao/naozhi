@@ -45,14 +45,19 @@ func newDiscoveryCache(claudeDir string, getExclude func() (map[int]bool, map[st
 	}
 }
 
-// startLoop begins periodic scanning every 10 seconds.
+// startLoop begins periodic scanning every 10 seconds. Both the initial
+// refresh and the ticker loop are tracked by dc.wg so Server.Shutdown can
+// Wait() on them after cancelling ctx — otherwise a tick fired between
+// ctx-cancel and projectMgr cleanup would race on disposed state. R218B-GO-1.
 func (dc *discoveryCache) startLoop(ctx context.Context) {
 	dc.wg.Add(1)
 	go func() {
 		defer dc.wg.Done()
 		dc.refresh()
 	}()
+	dc.wg.Add(1)
 	go func() {
+		defer dc.wg.Done()
 		ticker := time.NewTicker(10 * time.Second)
 		defer ticker.Stop()
 		for {
