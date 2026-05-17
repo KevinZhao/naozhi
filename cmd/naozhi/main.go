@@ -109,26 +109,21 @@ func readJSONWithRetry(path string, attempts int, sleep time.Duration) ([]byte, 
 	return nil, lastParseErr
 }
 
-// applyClaudeEnvSettings reads ~/.claude/settings.json and applies any env section
-// to the current process so spawned CC child processes inherit them via os.Environ().
-// Only sets vars not already present (shell-set vars take precedence) and only
-// for keys matching claudeEnvAllowedPrefixes.
+// filterClaudeEnv returns a copy of in containing only entries that pass the
+// allowlist (claudeEnvAllowedPrefixes), the deny list (awsEnvDenyList), and the
+// per-value safety check (no NUL/newline, ≤4096 bytes). Rejected keys are
+// logged at WARN once per call so operators can spot a malicious or misconfigured
+// ~/.claude/settings.json.
 //
-// Returns an error when the settings file cannot be read or parsed so callers
-// can surface the failure. A nil return with zero env applied (e.g. no `env`
-// section or all keys filtered) is NOT treated as an error.
-func applyClaudeEnvSettings() error {
-	data, err := readClaudeSettingsRaw()
-	if err != nil {
-		return err
-	}
-	var s struct {
-		Env map[string]string `json:"env"`
-	}
-	if err := json.Unmarshal(data, &s); err != nil {
-		return fmt.Errorf("unmarshal env section: %w", err)
-	}
-	for k, v := range s.Env {
+// Used by both applyClaudeEnvSettings (parent-process env injection) and
+// writeClaudeSettingsOverride (child --settings file emission) so the two paths
+// can never disagree on which keys are propagated. Historically AWS_PROFILE
+// leaked into the override file (bypassing the parent deny list) and overrode
+// the proxy-based bedrock auth chain; routing both paths through this helper
+// closes that gap.
+func filterClaudeEnv(in map[string]string) map[string]string {
+	out := make(map[string]string, len(in))
+	for k, v := range in {
 		if !matchesAnyPrefix(k, claudeEnvAllowedPrefixes) {
 			continue
 		}
@@ -145,6 +140,31 @@ func applyClaudeEnvSettings() error {
 			slog.Warn("claude settings env: rejecting unsafe value", "key", k, "len", len(v))
 			continue
 		}
+		out[k] = v
+	}
+	return out
+}
+
+// applyClaudeEnvSettings reads ~/.claude/settings.json and applies any env section
+// to the current process so spawned CC child processes inherit them via os.Environ().
+// Only sets vars not already present (shell-set vars take precedence) and only
+// for keys passing filterClaudeEnv.
+//
+// Returns an error when the settings file cannot be read or parsed so callers
+// can surface the failure. A nil return with zero env applied (e.g. no `env`
+// section or all keys filtered) is NOT treated as an error.
+func applyClaudeEnvSettings() error {
+	data, err := readClaudeSettingsRaw()
+	if err != nil {
+		return err
+	}
+	var s struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(data, &s); err != nil {
+		return fmt.Errorf("unmarshal env section: %w", err)
+	}
+	for k, v := range filterClaudeEnv(s.Env) {
 		if _, exists := os.LookupEnv(k); !exists {
 			if err := os.Setenv(k, v); err != nil {
 				slog.Warn("claude settings env: setenv failed", "key", k, "err", err)
@@ -216,6 +236,20 @@ func writeClaudeSettingsOverride(serverAddr string) string {
 	port := addrPort(serverAddr)
 	if hooksRaw, ok := settings["hooks"]; ok {
 		settings["hooks"] = filterHooks(hooksRaw, port)
+	}
+
+	// Filter env section through the same allowlist+deny+value-safety check
+	// applied to the parent process. Without this, keys like AWS_PROFILE that
+	// applyClaudeEnvSettings refuses can still leak into spawned claude via the
+	// override file, silently overriding the proxy-based bedrock auth chain.
+	if envRaw, ok := settings["env"]; ok {
+		var envMap map[string]string
+		if err := json.Unmarshal(envRaw, &envMap); err == nil {
+			filtered := filterClaudeEnv(envMap)
+			if filteredRaw, err := json.Marshal(filtered); err == nil {
+				settings["env"] = filteredRaw
+			}
+		}
 	}
 
 	out, err := json.Marshal(settings)
@@ -445,7 +479,17 @@ func main() {
 		case "kiro":
 			proto = &cli.ACPProtocol{}
 		case "", "claude":
-			proto = &cli.ClaudeProtocol{SettingsFile: settingsFile}
+			// RefreshSettings closes over cfg.Server.Addr so every spawn
+			// regenerates ~/.naozhi/claude-settings.json from the live
+			// ~/.claude/settings.json. Without this, edits made after naozhi
+			// start (adding ANTHROPIC_BEDROCK_BASE_URL, swapping models, etc.)
+			// are invisible to dashboard / cron / IM-spawned sessions until
+			// systemctl restart.
+			serverAddr := cfg.Server.Addr
+			proto = &cli.ClaudeProtocol{
+				SettingsFile:    settingsFile,
+				RefreshSettings: func() string { return writeClaudeSettingsOverride(serverAddr) },
+			}
 		default:
 			slog.Warn("skipping unknown cli.backends entry", "id", b.ID)
 			continue

@@ -232,6 +232,99 @@ func TestWriteClaudeSettingsOverride_firstRunWithCorruptSettingsFallsBackToEmpty
 	}
 }
 
+// TestWriteClaudeSettingsOverride_stripsDeniedAWSEnvKeys is the regression test
+// for the AWS_PROFILE leak: parent-process env injection (applyClaudeEnvSettings)
+// already refused these keys via awsEnvDenyList, but the override file was
+// emitted with the env section copied verbatim and that file is what
+// claude-spawned-by-naozhi actually reads. Result was that AWS_PROFILE=default
+// silently overrode CLAUDE_CODE_SKIP_BEDROCK_AUTH and the proxy-based bedrock
+// chain. Both paths now share filterClaudeEnv so deny-list keys are stripped
+// from both surfaces consistently.
+func TestWriteClaudeSettingsOverride_stripsDeniedAWSEnvKeys(t *testing.T) {
+	seedClaudeHome(t, `{
+  "env": {
+    "CLAUDE_CODE_USE_BEDROCK": "1",
+    "ANTHROPIC_BEDROCK_BASE_URL": "http://127.0.0.1:8889",
+    "AWS_REGION": "us-west-2",
+    "AWS_PROFILE": "default",
+    "AWS_ROLE_ARN": "arn:aws:iam::1:role/x",
+    "AWS_SHARED_CREDENTIALS_FILE": "/tmp/creds",
+    "FOO_BAR": "should-not-pass-allowlist"
+  }
+}`)
+	path := writeClaudeSettingsOverride(":8180")
+	if path == "" {
+		t.Fatal("empty path")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Parse and check the env section directly so a future formatting change
+	// (e.g. pretty-printing) doesn't make this test brittle.
+	var got struct {
+		Env map[string]string `json:"env"`
+	}
+	if err := json.Unmarshal(data, &got); err != nil {
+		t.Fatalf("override is invalid JSON: %v\n%s", err, data)
+	}
+
+	// Allowed keys must survive — these are the proxy-routing keys we want
+	// every spawned claude to inherit.
+	for _, k := range []string{"CLAUDE_CODE_USE_BEDROCK", "ANTHROPIC_BEDROCK_BASE_URL", "AWS_REGION"} {
+		if _, ok := got.Env[k]; !ok {
+			t.Errorf("expected key %q kept, env=%v", k, got.Env)
+		}
+	}
+	// Deny-list AWS keys must be stripped.
+	for _, k := range []string{"AWS_PROFILE", "AWS_ROLE_ARN", "AWS_SHARED_CREDENTIALS_FILE"} {
+		if _, ok := got.Env[k]; ok {
+			t.Errorf("deny-list key %q leaked into override: %v", k, got.Env)
+		}
+	}
+	// Allowlist-mismatched keys must be stripped (FOO_ is not a Claude/AWS/proxy prefix).
+	if _, ok := got.Env["FOO_BAR"]; ok {
+		t.Errorf("non-allowlisted key FOO_BAR leaked: %v", got.Env)
+	}
+}
+
+// TestWriteClaudeSettingsOverride_isCalledPerSpawn verifies the refresh contract:
+// editing ~/.claude/settings.json after the first override-write must propagate
+// when writeClaudeSettingsOverride is invoked again (which the
+// ClaudeProtocol.RefreshSettings closure does on every BuildArgs). Without this
+// the proxy-routing keys added today would not reach long-running naozhi
+// instances until systemctl restart.
+func TestWriteClaudeSettingsOverride_isCalledPerSpawn(t *testing.T) {
+	home := seedClaudeHome(t, `{"env":{"ANTHROPIC_MODEL":"old-model"}}`)
+	path1 := writeClaudeSettingsOverride(":8180")
+	if path1 == "" {
+		t.Fatal("first write empty path")
+	}
+	first, _ := os.ReadFile(path1)
+	if !strings.Contains(string(first), "old-model") {
+		t.Fatalf("first write missing old-model: %s", first)
+	}
+
+	// User edits global settings to add the proxy URL.
+	edited := `{"env":{"ANTHROPIC_MODEL":"new-model","ANTHROPIC_BEDROCK_BASE_URL":"http://127.0.0.1:8889"}}`
+	if err := os.WriteFile(filepath.Join(home, ".claude", "settings.json"), []byte(edited), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	path2 := writeClaudeSettingsOverride(":8180")
+	second, _ := os.ReadFile(path2)
+	if strings.Contains(string(second), "old-model") {
+		t.Errorf("override still has stale old-model: %s", second)
+	}
+	if !strings.Contains(string(second), "new-model") {
+		t.Errorf("override missing new-model: %s", second)
+	}
+	if !strings.Contains(string(second), "127.0.0.1:8889") {
+		t.Errorf("override missing newly-added BEDROCK_BASE_URL: %s", second)
+	}
+}
+
 func TestWriteClaudeSettingsOverride_filtersNaozhiHooks(t *testing.T) {
 	seedClaudeHome(t, `{
   "hooks": {
