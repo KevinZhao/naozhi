@@ -25,6 +25,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // ErrJobNotFound is returned by lookup/mutation APIs when no cron job matches.
@@ -1694,22 +1695,6 @@ func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
 	s.notifyTarget(target.Platform, target.ChatID, text)
 }
 
-// runeByteOffset returns the byte offset that contains maxRunes runes.
-// truncated is true iff s has more than maxRunes runes.
-// Zero allocations, unlike `[]rune(s)[:n]`.
-func runeByteOffset(s string, maxRunes int) (int, bool) {
-	i, count := 0, 0
-	for i < len(s) {
-		if count == maxRunes {
-			return i, true
-		}
-		_, size := utf8.DecodeRuneInString(s[i:])
-		i += size
-		count++
-	}
-	return i, false
-}
-
 // recordResult persists the last execution result on the job and invokes the onExecute callback.
 //
 // sessionID 是本次执行从 CLI 拿到的 Claude session_id。成功路径传非空值，
@@ -1718,10 +1703,15 @@ func runeByteOffset(s string, maxRunes int) (int, bool) {
 // cron 侧边栏仍然能按历史 ID 拉到 JSONL 内容而不是空白面板。
 func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
 	const maxStoredRunes = 4 * 1024
-	// Byte-level rune decode: avoids the two O(n) rune-slice allocations that
-	// `string([]rune(result)[:maxStoredRunes])` performs on a 4KB-result path.
-	if byteOffset, truncated := runeByteOffset(result, maxStoredRunes); truncated {
-		result = result[:byteOffset] + "…[truncated]"
+	// textutil.TruncateRunesNoEllipsis avoids the two O(n) rune-slice
+	// allocations that `string([]rune(result)[:maxStoredRunes])` performs and
+	// keeps the cron-specific "…[truncated]" suffix (TruncateRunes appends
+	// "..." which is not what dashboard rendering expects). Length compare
+	// is the O(1) truncation detector: TruncateRunesNoEllipsis returns either
+	// the input unchanged or a strictly shorter byte-length prefix, so any
+	// length drop signals truncation actually happened. R219-CR-2.
+	if shaped := textutil.TruncateRunesNoEllipsis(result, maxStoredRunes); len(shaped) < len(result) {
+		result = shaped + "…[truncated]"
 	}
 	// Redact absolute filesystem paths from errMsg before persisting to
 	// cron_jobs.json and broadcasting to all authenticated dashboard
@@ -1741,8 +1731,8 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
 	// SanitizeForLog gate used on remote workspace / feishu nonce paths.
 	// The length caps below (4K result, 512 err) double up with the rune
 	// truncation above but SanitizeForLog's cap is measured in runes, so
-	// a 4K-rune result that was already shaped by runeByteOffset is a
-	// no-op for length and only scrubs control runes.
+	// a 4K-rune result that was already shaped by TruncateRunesNoEllipsis
+	// above is a no-op for length and only scrubs control runes.
 	result = osutil.SanitizeForLog(result, 4*1024)
 	errMsg = osutil.SanitizeForLog(errMsg, 512)
 	s.mu.Lock()
