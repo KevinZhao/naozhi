@@ -1,13 +1,40 @@
 package session
 
 import (
+	"bytes"
 	"encoding/json"
 	"log/slog"
+	"sync"
 
 	"github.com/naozhi/naozhi/internal/attachment/tracker"
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 )
+
+// bridgeEncBuf pools a bytes.Buffer + json.Encoder pair so eventlog
+// bridge hot path (≥5 events/s × N sessions) avoids the encodeState
+// allocation that json.Marshal performs each call. Mirrors the
+// jsonEncPool idiom in internal/server/dashboard.go.
+type bridgeEncBuf struct {
+	buf *bytes.Buffer
+	enc *json.Encoder
+}
+
+var bridgeEncPool = sync.Pool{
+	New: func() any {
+		buf := new(bytes.Buffer)
+		enc := json.NewEncoder(buf)
+		// Match cli.EventEntry JSON shape: persist tier reads back via
+		// json.Unmarshal which already accepts unescaped HTML chars,
+		// and disabling escape avoids needless byte expansion.
+		enc.SetEscapeHTML(false)
+		return &bridgeEncBuf{buf: buf, enc: enc}
+	},
+}
+
+// bridgeEncMaxCap caps buffer reuse so a one-off oversized event does
+// not permanently pin large heap.
+const bridgeEncMaxCap = 64 * 1024
 
 // newEventLogSink translates a per-key persist.PersistSink (which
 // accepts persist.Entry batches) into the cli.PersistSink contract
@@ -45,13 +72,28 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 			return
 		}
 		out := make([]persist.Entry, 0, len(entries))
+		eb := bridgeEncPool.Get().(*bridgeEncBuf)
+		defer func() {
+			if eb.buf.Cap() <= bridgeEncMaxCap {
+				bridgeEncPool.Put(eb)
+			}
+		}()
 		for _, e := range entries {
-			buf, err := json.Marshal(e)
-			if err != nil {
+			eb.buf.Reset()
+			if err := eb.enc.Encode(e); err != nil {
 				slog.Warn("eventlog bridge: marshal entry failed",
 					"uuid", e.UUID, "type", e.Type, "err", err)
 				continue
 			}
+			raw := eb.buf.Bytes()
+			if n := len(raw); n > 0 && raw[n-1] == '\n' {
+				raw = raw[:n-1]
+			}
+			// Copy out of the pooled buffer so caller can hold the
+			// bytes past Put. PersistSink contract permits sink to
+			// retain entries.
+			buf := make([]byte, len(raw))
+			copy(buf, raw)
 			out = append(out, persist.Entry{JSON: buf, TimeMS: e.Time})
 
 			// Refcount bump for every attachment path the entry

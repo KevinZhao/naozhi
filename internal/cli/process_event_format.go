@@ -105,6 +105,11 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 		if ev.Message == nil {
 			return nil
 		}
+		// Skip the make() entirely when Content is empty — avoids the
+		// zero-cap slice-header alloc on rare empty thinking blocks.
+		if len(ev.Message.Content) == 0 {
+			return nil
+		}
 		// Pre-size to the content block count: single-block events pay 1
 		// alloc (same as the old nil+append path), and multi-block events
 		// (thinking+tool_use+text) avoid 2-3 append-driven growth reallocs.

@@ -33,7 +33,11 @@ func newEventUUID() string {
 		sum := sha256.Sum256([]byte("naozhi-crypto-rand-fallback-" + strconv.FormatInt(int64(uuidFallbackSeq.Add(1)), 10)))
 		copy(buf[:], sum[:])
 	}
-	return hex.EncodeToString(buf[:])
+	// hex.Encode into a stack-resident array avoids the intermediate
+	// []byte allocation that hex.EncodeToString performs internally.
+	var dst [32]byte
+	hex.Encode(dst[:], buf[:])
+	return string(dst[:])
 }
 
 // uuidFallbackSeq is the monotonic counter the crypto/rand fallback
