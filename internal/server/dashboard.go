@@ -14,6 +14,7 @@ import (
 
 	"golang.org/x/time/rate"
 
+	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -273,10 +274,22 @@ func (s *Server) registerDashboard() {
 	// Push session list changes to WS clients
 	s.router.SetOnChange(func() { s.hub.BroadcastSessionsUpdate() })
 
-	// Push cron execution results to WS clients
+	// Push cron execution results to WS clients. cron_result is preserved
+	// for backward compatibility; new clients should subscribe to the
+	// run-started / run-ended pair (P0 cron-run-history) which covers every
+	// terminal state including skipped and canceled.
 	if s.scheduler != nil {
 		s.scheduler.SetOnExecute(func(jobID, result, errMsg string) {
 			s.hub.BroadcastCronResult(jobID, result, errMsg)
+		})
+		s.scheduler.SetOnRunStarted(func(ev cron.RunStartedEvent) {
+			s.hub.BroadcastCronRunStarted(ev.JobID, ev.RunID, ev.StartedAt,
+				string(ev.Trigger), ev.SessionID, ev.Fresh)
+		})
+		s.scheduler.SetOnRunEnded(func(ev cron.RunEndedEvent) {
+			s.hub.BroadcastCronRunEnded(ev.JobID, ev.RunID, string(ev.State),
+				ev.StartedAt, ev.EndedAt, ev.DurationMS, ev.SessionID,
+				string(ev.ErrorClass), ev.ErrorMsg, string(ev.Trigger))
 		})
 	}
 
@@ -314,6 +327,9 @@ func (s *Server) registerDashboard() {
 	s.mux.HandleFunc("POST /api/cron/resume", auth(s.cronH.handleResume))
 	s.mux.HandleFunc("POST /api/cron/trigger", auth(s.cronH.handleTrigger))
 	s.mux.HandleFunc("GET /api/cron/preview", auth(s.cronH.handlePreview))
+	// P1 cron-run-history: per-job execution history.
+	s.mux.HandleFunc("GET /api/cron/runs", auth(s.cronH.handleRunsList))
+	s.mux.HandleFunc("GET /api/cron/runs/{run_id}", auth(s.cronH.handleRunDetail))
 	s.mux.HandleFunc("POST /api/auth/logout", auth(s.auth.handleLogout))
 	// pprof debug endpoints: auth-gated + loopback-only. Registered via
 	// a package-local helper that wraps the stdlib net/http/pprof

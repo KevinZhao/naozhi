@@ -1370,6 +1370,79 @@ func (h *Hub) BroadcastCronResult(jobID, result, errMsg string) {
 	h.broadcastToAuthenticated(data)
 }
 
+// cronRunStartedMsg / cronRunEndedMsg are P0 cron-run-history (RFC §7.2)
+// WS payloads. cron_result is preserved on the success path for backward
+// compatibility (clients that haven't migrated still see the result text);
+// new clients should subscribe to the run-started / run-ended pair, which
+// covers every terminal state including skipped/canceled where cron_result
+// historically did not fire.
+type cronRunStartedMsg struct {
+	Type      string `json:"type"`
+	JobID     string `json:"job_id"`
+	RunID     string `json:"run_id"`
+	StartedAt int64  `json:"started_at"`
+	Trigger   string `json:"trigger,omitempty"`
+	SessionID string `json:"session_id,omitempty"`
+	Fresh     bool   `json:"fresh,omitempty"`
+}
+
+type cronRunEndedMsg struct {
+	Type       string `json:"type"`
+	JobID      string `json:"job_id"`
+	RunID      string `json:"run_id"`
+	State      string `json:"state"`
+	StartedAt  int64  `json:"started_at"`
+	EndedAt    int64  `json:"ended_at"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	ErrorClass string `json:"error_class,omitempty"`
+	ErrorMsg   string `json:"error_msg,omitempty"`
+	Trigger    string `json:"trigger,omitempty"`
+}
+
+// BroadcastCronRunStarted emits cron_run_started to authenticated clients.
+// Called from the cron scheduler's onRunStarted hook (set in dashboard.go).
+func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, trigger, sessionID string, fresh bool) {
+	data, err := marshalPooled(cronRunStartedMsg{
+		Type:      "cron_run_started",
+		JobID:     osutil.SanitizeForLog(jobID, 64),
+		RunID:     osutil.SanitizeForLog(runID, 64),
+		StartedAt: startedAt.UnixMilli(),
+		Trigger:   trigger,
+		SessionID: osutil.SanitizeForLog(sessionID, 128),
+		Fresh:     fresh,
+	})
+	if err != nil {
+		return
+	}
+	h.broadcastToAuthenticated(data)
+}
+
+// BroadcastCronRunEnded emits cron_run_ended for every terminal state
+// (succeeded / failed / skipped / timed_out / canceled). The dashboard
+// uses State to decide colour and whether to refetch the list (counters
+// updated). errorMsg is already path-redacted + sanitised by the cron
+// package's recordResultP0 → SanitizeForLog pipeline.
+func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, endedAt time.Time, durationMS int64, sessionID, errClass, errMsg, trigger string) {
+	data, err := marshalPooled(cronRunEndedMsg{
+		Type:       "cron_run_ended",
+		JobID:      osutil.SanitizeForLog(jobID, 64),
+		RunID:      osutil.SanitizeForLog(runID, 64),
+		State:      state,
+		StartedAt:  startedAt.UnixMilli(),
+		EndedAt:    endedAt.UnixMilli(),
+		DurationMS: durationMS,
+		SessionID:  osutil.SanitizeForLog(sessionID, 128),
+		ErrorClass: errClass,
+		ErrorMsg:   errMsg,
+		Trigger:    trigger,
+	})
+	if err != nil {
+		return
+	}
+	h.broadcastToAuthenticated(data)
+}
+
 // DroppedMessages returns the total number of messages dropped across all
 // clients since the process started. Lock-free atomic load; see the struct
 // field comment for why this replaced a per-client RLock scan.

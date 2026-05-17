@@ -244,6 +244,31 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	jobs := h.scheduler.ListAllJobsWithNextRun()
+	type currentRunView struct {
+		RunID     string `json:"run_id"`
+		StartedAt int64  `json:"started_at"`
+		Phase     string `json:"phase,omitempty"`
+		Trigger   string `json:"trigger,omitempty"`
+		SessionID string `json:"session_id,omitempty"`
+	}
+	type runCountersView struct {
+		Total     int64 `json:"total,omitempty"`
+		Succeeded int64 `json:"succeeded,omitempty"`
+		Failed    int64 `json:"failed,omitempty"`
+		Skipped   int64 `json:"skipped,omitempty"`
+		TimedOut  int64 `json:"timed_out,omitempty"`
+		Canceled  int64 `json:"canceled,omitempty"`
+	}
+	type runSummaryView struct {
+		RunID      string `json:"run_id"`
+		State      string `json:"state"`
+		Trigger    string `json:"trigger,omitempty"`
+		StartedAt  int64  `json:"started_at"`
+		EndedAt    int64  `json:"ended_at,omitempty"`
+		DurationMS int64  `json:"duration_ms,omitempty"`
+		SessionID  string `json:"session_id,omitempty"`
+		ErrorClass string `json:"error_class,omitempty"`
+	}
 	type cronJobView struct {
 		ID             string `json:"id"`
 		Schedule       string `json:"schedule"`
@@ -260,6 +285,9 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		LastResult     string `json:"last_result,omitempty"`
 		LastRunAt      int64  `json:"last_run_at,omitempty"`
 		LastError      string `json:"last_error,omitempty"`
+		// LastErrorClass 是 P0 cron-run-history 的机器可读错误分类。前端用它
+		// 选图标/色板而非 substring-grep LastError。空 = 无错误 / 旧 job。
+		LastErrorClass string `json:"last_error_class,omitempty"`
 		NextRun        int64  `json:"next_run,omitempty"`
 		// Notify is a pointer so the view preserves the tri-state (nil vs
 		// explicit true/false). nil renders as "legacy default" on the client.
@@ -271,10 +299,22 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		// 显示 "上次应跑于 …"。未 missed 时两个字段都省略。
 		Missed      bool  `json:"missed,omitempty"`
 		MissedSince int64 `json:"missed_since,omitempty"`
+		// CurrentRun: P0 — 仅 job 正在执行时存在，前端据此显示"运行中 Xs"。
+		CurrentRun *currentRunView `json:"current_run,omitempty"`
+		// Stats: P0 — 累计执行计数；P1 引入 avg_ms / p95_ms 时不动 wire shape。
+		Stats *runCountersView `json:"stats,omitempty"`
+		// RecentRuns: P1 cron-run-history — newest-first 摘要数组；只在卡片
+		// 折叠态做 hover-tooltip 状态气泡。空 = 此 job 尚无持久化历史
+		// （新建 / 历史已被 GC 清空 / StorePath 为空）。
+		RecentRuns []runSummaryView `json:"recent_runs,omitempty"`
 	}
 	views := make([]cronJobView, 0, len(jobs))
 	for _, entry := range jobs {
 		j := entry.Job
+		// Prompt 不截断：dashboard.js 客户端 fuzzy-search 依赖完整 prompt
+		// 内容（filterCronJobs 在 j.prompt 上做 substring match）。截断后
+		// 搜索结果会假阴。8 KiB × 50 job = 400 KiB/响应 在 1 Hz 拉取下
+		// 是已知开销，待后续移到 server-side search 后再优化。
 		v := cronJobView{
 			ID:             j.ID,
 			Schedule:       j.Schedule,
@@ -290,6 +330,7 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			NotifyChatID:   j.NotifyChatID,
 			LastResult:     j.LastResult,
 			LastError:      j.LastError,
+			LastErrorClass: string(j.LastErrorClass),
 			Notify:         j.Notify,
 			FreshContext:   j.FreshContext,
 		}
@@ -307,6 +348,49 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 				v.Missed = true
 				v.MissedSince = prevAt.UnixMilli()
 			}
+		}
+		// CurrentRun & Stats — P0 cron-run-history。CurrentRun 只在 job 正
+		// 在执行时返回；空 stats 也省略以减少线上 noise。
+		if cur, ok := h.scheduler.CurrentRun(j.ID); ok {
+			v.CurrentRun = &currentRunView{
+				RunID:     cur.RunID,
+				StartedAt: cur.StartedAt.UnixMilli(),
+				Phase:     cur.Phase,
+				Trigger:   string(cur.Trigger),
+				SessionID: cur.SessionID,
+			}
+		}
+		if c := j.RunCounters; c.Total > 0 {
+			v.Stats = &runCountersView{
+				Total:     c.Total,
+				Succeeded: c.Succeeded,
+				Failed:    c.Failed,
+				Skipped:   c.Skipped,
+				TimedOut:  c.TimedOut,
+				Canceled:  c.Canceled,
+			}
+		}
+		// recent_runs: P1 — 5 条 newest-first 摘要给卡片 tooltip 用。
+		// 上限 5 是 wire 大小的折中：list response 总大小 = jobs × ~2KB。
+		// 详情页要更多用 GET /api/cron/runs.
+		if recent := h.scheduler.RecentRuns(j.ID, 5); len(recent) > 0 {
+			rv := make([]runSummaryView, 0, len(recent))
+			for _, r := range recent {
+				row := runSummaryView{
+					RunID:      r.RunID,
+					State:      string(r.State),
+					Trigger:    string(r.Trigger),
+					StartedAt:  r.StartedAt.UnixMilli(),
+					DurationMS: r.DurationMS,
+					SessionID:  r.SessionID,
+					ErrorClass: string(r.ErrorClass),
+				}
+				if !r.EndedAt.IsZero() {
+					row.EndedAt = r.EndedAt.UnixMilli()
+				}
+				rv = append(rv, row)
+			}
+			v.RecentRuns = rv
 		}
 		views = append(views, v)
 	}
@@ -853,4 +937,190 @@ func formatTZOffset(name string, offsetSeconds int) string {
 		minutes = -minutes
 	}
 	return fmt.Sprintf("%s (UTC%+03d:%02d)", name, hours, minutes)
+}
+
+// runIDLenLimit caps the run_id query parameter length, matching the
+// 16-hex generator + headroom for future entropy bumps. Mirrors
+// maxCronIDLenDashboard but kept separate so a future divergence
+// (longer run IDs without longer job IDs) doesn't regress either side.
+const runIDLenLimit = 64
+
+// GET /api/cron/runs?job_id=&limit=&before=
+//
+// Returns CronRun summaries for one job, newest first. limit default 50,
+// clamped to [1, cron.DefaultRunsKeepCount]. before is unix-ms; only runs
+// strictly older than that timestamp are returned (paging cursor).
+//
+// Response shape:
+//
+//	{ "runs":[ { run_id, state, trigger, started_at, ended_at,
+//	             duration_ms, session_id, error_class } ],
+//	  "next_before": <unix-ms>   // omitted when no more pages
+//	}
+//
+// Authenticated; no per-job ACL beyond the global dashboard auth gate
+// (mirrors handleList's policy).
+func (h *CronHandlers) handleRunsList(w http.ResponseWriter, r *http.Request) {
+	if h.scheduler == nil {
+		writeJSON(w, map[string]any{"runs": []any{}})
+		return
+	}
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" {
+		http.Error(w, "job_id is required", http.StatusBadRequest)
+		return
+	}
+	if len(jobID) > maxCronIDLenDashboard {
+		http.Error(w, "job_id too long", http.StatusBadRequest)
+		return
+	}
+	limit := 50
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		if len(raw) > 4 {
+			http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
+			return
+		}
+		n, err := strconv.Atoi(raw)
+		if err != nil || n < 1 {
+			http.Error(w, "limit must be a positive integer", http.StatusBadRequest)
+			return
+		}
+		if n > cron.DefaultRunsKeepCount {
+			n = cron.DefaultRunsKeepCount
+		}
+		limit = n
+	}
+	var before time.Time
+	if raw := r.URL.Query().Get("before"); raw != "" {
+		if len(raw) > 16 {
+			http.Error(w, "before must be a unix-ms integer", http.StatusBadRequest)
+			return
+		}
+		ms, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || ms <= 0 {
+			http.Error(w, "before must be a unix-ms integer", http.StatusBadRequest)
+			return
+		}
+		before = time.UnixMilli(ms)
+	}
+
+	rows := h.scheduler.ListRuns(jobID, limit, before)
+	type runSummaryView struct {
+		RunID      string `json:"run_id"`
+		State      string `json:"state"`
+		Trigger    string `json:"trigger,omitempty"`
+		StartedAt  int64  `json:"started_at"`
+		EndedAt    int64  `json:"ended_at,omitempty"`
+		DurationMS int64  `json:"duration_ms,omitempty"`
+		SessionID  string `json:"session_id,omitempty"`
+		ErrorClass string `json:"error_class,omitempty"`
+	}
+	out := make([]runSummaryView, 0, len(rows))
+	for _, r := range rows {
+		row := runSummaryView{
+			RunID:      r.RunID,
+			State:      string(r.State),
+			Trigger:    string(r.Trigger),
+			StartedAt:  r.StartedAt.UnixMilli(),
+			DurationMS: r.DurationMS,
+			SessionID:  r.SessionID,
+			ErrorClass: string(r.ErrorClass),
+		}
+		if !r.EndedAt.IsZero() {
+			row.EndedAt = r.EndedAt.UnixMilli()
+		}
+		out = append(out, row)
+	}
+	resp := map[string]any{"runs": out}
+	// next_before: emit only when this page was full (caller may have more).
+	// Conservative: a partial page can still indicate "no more" because runs
+	// older than this batch may have been GC'd; we let the dashboard treat
+	// next_before as "fetch older than this" hint.
+	if len(out) == limit && len(out) > 0 {
+		resp["next_before"] = out[len(out)-1].StartedAt
+	}
+	writeJSON(w, resp)
+}
+
+// GET /api/cron/runs/{run_id}?job_id=...
+//
+// Returns the full CronRun (Prompt + Result + ErrorMsg). 404 when missing,
+// 500 with "corrupt record" message when the file exists but fails to
+// parse / exceeds size cap. Used by the dashboard detail drawer.
+func (h *CronHandlers) handleRunDetail(w http.ResponseWriter, r *http.Request) {
+	if h.scheduler == nil {
+		http.Error(w, "cron not configured", http.StatusNotImplemented)
+		return
+	}
+	// Path param: /api/cron/runs/{run_id}; PathValue is supplied by the
+	// http.ServeMux pattern at registration time. Defensive in case the
+	// pattern is changed without updating this handler.
+	runID := r.PathValue("run_id")
+	if runID == "" {
+		http.Error(w, "run_id is required", http.StatusBadRequest)
+		return
+	}
+	if len(runID) > runIDLenLimit {
+		http.Error(w, "run_id too long", http.StatusBadRequest)
+		return
+	}
+	jobID := r.URL.Query().Get("job_id")
+	if jobID == "" {
+		http.Error(w, "job_id is required", http.StatusBadRequest)
+		return
+	}
+	if len(jobID) > maxCronIDLenDashboard {
+		http.Error(w, "job_id too long", http.StatusBadRequest)
+		return
+	}
+	run, err := h.scheduler.GetRun(jobID, runID)
+	if err != nil {
+		if errors.Is(err, cron.ErrCorruptRun) {
+			slog.Warn("cron run record corrupt", "job_id", jobID, "run_id", runID, "err", err)
+			http.Error(w, "run record corrupt", http.StatusInternalServerError)
+			return
+		}
+		// Default: treat any non-corrupt error (incl. fs.ErrNotExist)
+		// as "not found" — distinguishing "not exist" vs "perm denied"
+		// would leak filesystem layout to a remote caller.
+		http.Error(w, "run not found", http.StatusNotFound)
+		return
+	}
+	type runDetailView struct {
+		RunID       string `json:"run_id"`
+		JobID       string `json:"job_id"`
+		State       string `json:"state"`
+		Trigger     string `json:"trigger,omitempty"`
+		StartedAt   int64  `json:"started_at"`
+		EndedAt     int64  `json:"ended_at,omitempty"`
+		DurationMS  int64  `json:"duration_ms,omitempty"`
+		SessionID   string `json:"session_id,omitempty"`
+		Prompt      string `json:"prompt,omitempty"`
+		WorkDir     string `json:"work_dir,omitempty"`
+		Fresh       bool   `json:"fresh,omitempty"`
+		Result      string `json:"result,omitempty"`
+		ResultBytes int    `json:"result_bytes,omitempty"`
+		ErrorClass  string `json:"error_class,omitempty"`
+		ErrorMsg    string `json:"error_msg,omitempty"`
+	}
+	out := runDetailView{
+		RunID:       run.RunID,
+		JobID:       run.JobID,
+		State:       string(run.State),
+		Trigger:     string(run.Trigger),
+		StartedAt:   run.StartedAt.UnixMilli(),
+		DurationMS:  run.DurationMS,
+		SessionID:   run.SessionID,
+		Prompt:      run.Prompt,
+		WorkDir:     run.WorkDir,
+		Fresh:       run.Fresh,
+		Result:      run.Result,
+		ResultBytes: run.ResultBytes,
+		ErrorClass:  string(run.ErrorClass),
+		ErrorMsg:    run.ErrorMsg,
+	}
+	if !run.EndedAt.IsZero() {
+		out.EndedAt = run.EndedAt.UnixMilli()
+	}
+	writeJSON(w, out)
 }
