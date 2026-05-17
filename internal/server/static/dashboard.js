@@ -7959,7 +7959,9 @@ const wsm = {
         // cron_run_ended now drives the same refresh; keep cron_result for
         // legacy compat (older naozhi backends still send only this).
         announce('定时任务已完成');
-        fetchCronJobs().then(() => renderCronPanel());
+        // R221-FIX-P1-4: fetchCronJobs is async and rethrows on non-status
+        // errors; without .catch the WS dispatch sees an unhandled rejection.
+        fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
         break;
       case 'cron_run_started':
         // P0 cron-run-history (RFC §7.2) — drive the "运行中 Xs" inline
@@ -7974,11 +7976,13 @@ const wsm = {
         // overwritten cleanly. fresh=false / fresh=true behave identically
         // here since the change set is JobID-scoped.
         cronApplyRunEnded(msg);
-        fetchCronJobs().then(() => renderCronPanel());
+        fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
         // P2 cron-run-history (RFC §8.2) — 如果当前打开的就是该 job 的
         // 详情页，刷新时间轴头 10 条；否则只刷新列表 stats（fetchCronJobs
         // 已经做了）。msg.job_id 后端必发；缺省时跳过避免空 job_id 调用。
-        if (msg && msg.job_id) cronTimelineRefreshHead(msg.job_id);
+        // R221-FIX-P1-4: cronTimelineRefreshHead is async; swallow its
+        // rejection at the dispatch boundary.
+        if (msg && msg.job_id) cronTimelineRefreshHead(msg.job_id).catch(() => {});
         break;
       case 'pong':
         break;
@@ -10098,7 +10102,7 @@ function openCronPanel() {
   // renderCronPanel handles the zero-job "empty state" branch. A background
   // refresh reconciles with the server and re-renders if anything changed.
   renderCronPanel();
-  fetchCronJobs().then(() => renderCronPanel());
+  fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
 }
 
 // filterCronJobs is the pure match step for the R110-P2 cron panel filter.
@@ -10349,7 +10353,7 @@ function cronApplyRunStarted(msg) {
   const j = list.find(x => x && x.id === msg.job_id);
   if (!j) {
     // Optimistic miss: fallback to a refetch so the UI catches up.
-    fetchCronJobs().then(() => renderCronPanel());
+    fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
     return;
   }
   j.current_run = {
@@ -10729,11 +10733,13 @@ function renderCronTimelineForSession(jobId) {
   }
   st.lastMountAt = Date.now();
   host.innerHTML = cronTimelineHtml(jobId, job, st);
-  // 没缓存且没 job → 拉一次列表（如果直接深链进来）。
-  if (!job && cronJobs.length === 0) {
+  // 没找到 job → 拉一次列表（直接深链进来 OR 跨 tab 删除导致本地 cronJobs
+  // 已加载但缺这条）。R221-FIX-P1-5：原条件只在 cronJobs 为空时 fallback，
+  // 跨 tab 场景会永远停在空 timeline；改成 !job 即刻 reconcile。
+  if (!job) {
     fetchCronJobs().then(() => {
       if (selectedKey === 'cron:' + jobId) renderCronTimelineForSession(jobId);
-    });
+    }).catch(() => {});
   }
 }
 
@@ -11321,7 +11327,7 @@ async function cronPause(id) {
       showAPIError('暂停定时任务', r.status, raw);
       return;
     }
-    fetchCronJobs().then(() => renderCronPanel());
+    fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
   } catch (e) { showNetworkError('暂停定时任务', e); }
 }
 
@@ -11336,7 +11342,7 @@ async function cronResume(id) {
       showAPIError('恢复定时任务', r.status, raw);
       return;
     }
-    fetchCronJobs().then(() => renderCronPanel());
+    fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
   } catch (e) { showNetworkError('恢复定时任务', e); }
 }
 
@@ -11364,7 +11370,7 @@ async function cronDelete(id) {
     // R220-FE-2: 释放该 job 在前端持有的 timeline 状态（runs / details / pagination
     // 游标 / fetched 标记），避免 cronTimelineState 累积已删除 job 的内存。
     if (cronTimelineState[id]) delete cronTimelineState[id];
-    fetchCronJobs().then(() => renderCronPanel());
+    fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
   } catch (e) { showNetworkError('删除定时任务', e); }
 }
 
@@ -11552,7 +11558,7 @@ async function doEditCronJob(id) {
     }
     overlay.remove();
     showToast('定时任务已更新', 'success');
-    fetchCronJobs().then(() => renderCronPanel());
+    fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
   } catch (e) {
     showNetworkError('保存定时任务', e);
   }

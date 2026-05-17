@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // runStore persists CronRun records to disk. Layout (rooted at runsRoot,
@@ -90,24 +91,29 @@ const (
 // skip the entry, GC removes it.
 var ErrCorruptRun = errors.New("cron run: corrupt or oversize record")
 
-// runIDPattern matches the 16-hex shape produced by generateRunID.
-// Imposed at parse time so a stray non-run file in the runs/<jobID>/
-// directory cannot poison List output (e.g. index sidecars from a
-// future schema bump).
-var runIDPattern = func() func(string) bool {
-	return func(s string) bool {
-		if len(s) == 0 || len(s) > 64 {
+// IsValidID reports whether s matches the lowercase-hex shape produced
+// by generateRunID / generateID (currently 16 hex chars; upper bound 64
+// reserved for a future schema bump). Imposed at parse time so a stray
+// non-run file in runs/<jobID>/ cannot poison List output, and exposed
+// so HTTP handlers can fail-fast at the boundary instead of forwarding
+// non-hex IDs that the store would silently swallow as an empty result.
+// R221-FIX-P1-2.
+func IsValidID(s string) bool {
+	if len(s) == 0 || len(s) > 64 {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
 			return false
 		}
-		for i := 0; i < len(s); i++ {
-			c := s[i]
-			if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
-				return false
-			}
-		}
-		return true
 	}
-}()
+	return true
+}
+
+// runIDPattern is the package-internal alias kept for readability at
+// existing call sites.
+var runIDPattern = IsValidID
 
 // newRunStore constructs a runStore rooted at <storePath dir>/runs.
 // storePath="" disables the store (List returns empty, Append no-ops);
@@ -304,12 +310,18 @@ func (s *runStore) cacheInvalidate(jobID string) {
 
 // truncateForRetry shrinks a string for the over-cap retry path. Keeps
 // the prefix + "…[truncated]" sentinel so the UI can still indicate
-// data was lost without forcing a code change.
-func truncateForRetry(s string, max int) string {
-	if len(s) <= max {
+// data was lost without forcing a code change. maxRunes counts runes,
+// not bytes — a byte-level slice would split multi-byte UTF-8 (Chinese
+// prompts/results are common here) and produce a malformed string that
+// json.Marshal silently re-encodes as U+FFFD; in the worst case the
+// second marshal still exceeds maxRunBytes and the run record is never
+// persisted. Rune-aware truncation closes that hole. R221-FIX-P0-1.
+func truncateForRetry(s string, maxRunes int) string {
+	shrunk := textutil.TruncateRunesNoEllipsis(s, maxRunes)
+	if shrunk == s {
 		return s
 	}
-	return s[:max] + "…[truncated]"
+	return shrunk + "…[truncated]"
 }
 
 // List returns up to limit summaries for jobID, newest first. before is
@@ -548,12 +560,30 @@ func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
 	}
 	// Drop entries beyond keepCount; drop entries older than cutoff. The
 	// cache slice is newest-first, so iterate and stop at first old.
-	keep := entry.runs[:0]
+	//
+	// The cutoff is mtime-based (matches trimJobLocked which uses ModTime
+	// from os.DirEntry.Info). For long-running jobs StartedAt can predate
+	// mtime by hours, so using StartedAt here would evict cache rows whose
+	// disk files are still kept — leaving the 1Hz dashboard list endpoint
+	// looking at fewer rows than disk holds until the next warmCache. We
+	// approximate mtime via EndedAt (the rename happens immediately after
+	// finishRun marshals the record), with StartedAt as the fallback for
+	// the very rare in-progress snapshot where EndedAt is zero. R221-FIX-P1-3.
+	//
+	// Allocate a fresh backing array — `entry.runs[:0]` would alias and
+	// any caller that retains the slice (Recent's defensive copy is in
+	// place today, but a future code path might not) would observe the
+	// trim. R221-FIX-P0-2.
+	keep := make([]CronRunSummary, 0, len(entry.runs))
 	for i, r := range entry.runs {
 		if i >= s.keepCount {
 			break
 		}
-		if r.StartedAt.Before(cutoff) {
+		ts := r.EndedAt
+		if ts.IsZero() {
+			ts = r.StartedAt
+		}
+		if ts.Before(cutoff) {
 			break
 		}
 		keep = append(keep, r)
