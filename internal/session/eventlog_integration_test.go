@@ -11,22 +11,8 @@ import (
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
+	"github.com/naozhi/naozhi/internal/testhelper"
 )
-
-// waitFor polls fn up to timeout at 10ms intervals, returning true
-// as soon as fn returns true. Used instead of time.Sleep so the
-// goroutine-driven persister has deterministic testable semantics.
-func waitFor(t *testing.T, timeout time.Duration, fn func() bool) bool {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if fn() {
-			return true
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	return false
-}
 
 // newEventLogRouter is a test-only helper that constructs a Router
 // with the event-log persister enabled against a fresh tmpdir.
@@ -83,11 +69,9 @@ func TestEventLogIntegration_DirectSinkWorks(t *testing.T) {
 	sink([]cli.EventEntry{{UUID: "bb", Time: 200, Type: "user", Summary: "live"}}, false)
 
 	// Wait for the persister to drain + fsync.
-	if !waitFor(t, time.Second, func() bool {
+	testhelper.Eventually(t, func() bool {
 		return r.eventLogPersister.Stats().Written >= 1
-	}) {
-		t.Fatalf("persister never wrote: stats=%+v", r.eventLogPersister.Stats())
-	}
+	}, time.Second, "persister never wrote")
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
 	_ = r.eventLogPersister.Flush(ctx)
