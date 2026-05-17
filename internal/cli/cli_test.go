@@ -216,6 +216,91 @@ func TestClaudeProtocol_Init(t *testing.T) {
 	}
 }
 
+// TestClaudeProtocol_BuildArgs_RefreshSettings verifies BuildArgs invokes the
+// RefreshSettings hook and adopts its returned path. This is the spawn-time
+// refresh that lets edits to ~/.claude/settings.json reach dashboard / cron /
+// IM-spawned sessions without restarting naozhi.
+func TestClaudeProtocol_BuildArgs_RefreshSettings(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	p := &ClaudeProtocol{
+		SettingsFile:    "/old/path.json",
+		RefreshSettings: func() string { calls++; return "/new/path.json" },
+	}
+	args := p.BuildArgs(SpawnOptions{})
+
+	if calls != 1 {
+		t.Fatalf("RefreshSettings called %d times, want 1", calls)
+	}
+	if p.SettingsFile != "/new/path.json" {
+		t.Errorf("SettingsFile = %q, want /new/path.json", p.SettingsFile)
+	}
+	var foundNew bool
+	for i, a := range args {
+		if a == "--settings" && i+1 < len(args) && args[i+1] == "/new/path.json" {
+			foundNew = true
+		}
+		if a == "/old/path.json" {
+			t.Errorf("stale path leaked into argv: %v", args)
+		}
+	}
+	if !foundNew {
+		t.Errorf("--settings /new/path.json missing from argv: %v", args)
+	}
+}
+
+// TestClaudeProtocol_BuildArgs_RefreshSettings_EmptyKeepsPrior verifies the
+// "refresh failed" contract: when RefreshSettings returns "" (e.g. concurrent
+// rewriter made the read race), the prior SettingsFile must survive so
+// authentication keeps working with the last known-good override.
+func TestClaudeProtocol_BuildArgs_RefreshSettings_EmptyKeepsPrior(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{
+		SettingsFile:    "/known/good.json",
+		RefreshSettings: func() string { return "" },
+	}
+	args := p.BuildArgs(SpawnOptions{})
+	if p.SettingsFile != "/known/good.json" {
+		t.Errorf("SettingsFile = %q, want /known/good.json", p.SettingsFile)
+	}
+	var found bool
+	for i, a := range args {
+		if a == "--settings" && i+1 < len(args) && args[i+1] == "/known/good.json" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("known-good path missing from argv: %v", args)
+	}
+}
+
+// TestClaudeProtocol_Clone_PropagatesRefreshSettings ensures Clone copies the
+// refresher hook. wrapper.Spawn calls Clone to get an independent per-spawn
+// protocol; without propagation the cloned instance has no way to refresh and
+// silently regresses to the bug fixed here.
+func TestClaudeProtocol_Clone_PropagatesRefreshSettings(t *testing.T) {
+	t.Parallel()
+	calls := 0
+	src := &ClaudeProtocol{
+		SettingsFile:    "/initial.json",
+		RefreshSettings: func() string { calls++; return "/refreshed.json" },
+	}
+	clone := src.Clone().(*ClaudeProtocol)
+	if clone.RefreshSettings == nil {
+		t.Fatal("Clone dropped RefreshSettings")
+	}
+	_ = clone.BuildArgs(SpawnOptions{})
+	if calls != 1 {
+		t.Errorf("clone refresher not invoked, calls=%d", calls)
+	}
+	if clone.SettingsFile != "/refreshed.json" {
+		t.Errorf("clone SettingsFile = %q, want /refreshed.json", clone.SettingsFile)
+	}
+	if src.SettingsFile != "/initial.json" {
+		t.Errorf("source SettingsFile mutated by clone: %q", src.SettingsFile)
+	}
+}
+
 // --- ACPProtocol tests ---
 
 func TestACPProtocol_Name(t *testing.T) {

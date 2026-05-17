@@ -666,7 +666,7 @@ func (s *ManagedSession) InterruptViaControl() InterruptOutcome {
 		// on the 500ms settle timeout. Surface at Warn so the failure mode
 		// is visible even to callers that treat non-Sent as "fall back".
 		slog.Warn("session interrupt via control_request failed",
-			"session_key", s.key, "err", err)
+			"key", s.key, "err", err)
 		return InterruptError
 	}
 }

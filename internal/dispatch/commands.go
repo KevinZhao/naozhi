@@ -185,7 +185,7 @@ func (d *Dispatcher) handleUrgentCommand(ctx context.Context, msg platform.Incom
 	agentID := "general"
 	key, opts := d.resolver.ResolveForChat(msg.Platform, msg.ChatType, msg.ChatID, agentID)
 
-	log.Info("/urgent dispatched", "session_key", key, "text_len", len(text))
+	log.Info("/urgent dispatched", "key", key, "text_len", len(text))
 
 	// Ack with a reaction so the user knows the urgent was received.
 	d.ackQueuedWithReaction(ctx, msg, log)
