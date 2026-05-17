@@ -6,6 +6,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 const defaultEventLogSize = 500
@@ -999,44 +1001,20 @@ func (l *EventLog) UserTurnCount() int64 {
 	return l.userTurnCount.Load()
 }
 
-// loadAtomicString returns the stored string or "" when the pointer is nil
-// (never stored). Type-safe via atomic.Pointer[string]; no dynamic type check
-// is needed.
+// loadAtomicString and storeAtomicString are thin wrappers around the
+// shared textutil.LoadAtomicString / textutil.StoreAtomicString helpers
+// (R219-CR-1: was a word-for-word copy of session.loadStringAtomic /
+// storeStringAtomic). Kept as package-private aliases so the dense Append
+// hot path stays readable and call sites do not have to spell out the
+// textutil import path. Behavioural contract — fast-path short-circuit on
+// equal value, last-writer-wins under l.mu — is documented on the textutil
+// helpers; do not re-document the rationale here to keep the two in sync.
 func loadAtomicString(v *atomic.Pointer[string]) string {
-	if p := v.Load(); p != nil {
-		return *p
-	}
-	return ""
+	return textutil.LoadAtomicString(v)
 }
 
-// storeAtomicString writes a string value through atomic.Pointer[string].
-//
-// Fast-path short-circuit (R176-PERF-P1): when the currently stored string
-// equals s, skip the store entirely. Append runs storeAtomicString under
-// l.mu for every user / tool_use / thinking / agent / task_start /
-// task_progress / todo event, and the summaries are frequently repeated
-// (e.g. a "Bash" tool_use fires the same one-liner on every step). By
-// returning early on equality we avoid:
-//
-//  1. Allocating a fresh *string on the heap (the `&p` below forces
-//     escape — on the slow path that's unavoidable because atomic.Pointer
-//     must see a stable address; on the fast path we never take an
-//     address at all, so escape analysis can keep s on the stack).
-//  2. An atomic pointer write on a cache line that other goroutines' Load
-//     paths (Snapshot, LastPromptSummary, LastActivitySummary) read at
-//     high frequency.
-//
-// Safety: every caller writes while holding l.mu, so Load → compare →
-// Store is atomic with respect to concurrent stores on this pointer.
-// Concurrent readers either observe the old value (if we skipped) or the
-// new value (if we wrote) — both valid prior-art snapshots.
 func storeAtomicString(v *atomic.Pointer[string], s string) {
-	if cur := v.Load(); cur != nil && *cur == s {
-		return
-	}
-	p := new(string)
-	*p = s
-	v.Store(p)
+	textutil.StoreAtomicString(v, s)
 }
 
 // TurnAgents returns a copy of all currently active agents (foreground + background)

@@ -222,42 +222,19 @@ func (s *ManagedSession) setWorkspace(ws string) { storeStringAtomic(&s.workspac
 // IsExempt returns whether this session is exempt from TTL and eviction.
 func (s *ManagedSession) IsExempt() bool { return s.exempt }
 
-// loadStringAtomic reads an atomic.Pointer[string], returning "" when never stored.
-// Retained as a helper since several callers need the "nil → empty string" collapse.
+// loadStringAtomic and storeStringAtomic are thin wrappers around the shared
+// textutil.LoadAtomicString / textutil.StoreAtomicString helpers (R219-CR-1:
+// was a word-for-word copy of cli.loadAtomicString / storeAtomicString with
+// reversed naming). Kept as package-private aliases so the surrounding
+// accessor methods read cleanly. Behavioural contract — fast-path
+// short-circuit on equal value, last-writer-wins — is documented on the
+// textutil helpers; do not re-document it here to keep the two in sync.
 func loadStringAtomic(v *atomic.Pointer[string]) string {
-	if p := v.Load(); p != nil {
-		return *p
-	}
-	return ""
+	return textutil.LoadAtomicString(v)
 }
 
-// storeStringAtomic writes a string via atomic.Pointer[string]. Addresses
-// Go's "addressable value" requirement: &id inside a func body references a
-// local copy, but passing the string through this helper makes the pointer
-// semantics obvious at call sites.
-//
-// Fast-path short-circuit (R176-PERF-P1): when the currently stored string
-// equals s, skip the store entirely. Many callers (SetBackend /
-// SetCLIName / SetCLIVersion at reconnect, lastPrompt / lastActivity under
-// AppendBatch's tail loop, deathReason idempotent clears) pass the same
-// value they already hold; skipping redundant stores avoids per-call *string
-// heap allocation and an atomic write on a cache line that readers poll at
-// high rates (Snapshot / sidebar refresh).
-//
-// Safety: the compare-and-store is not atomic as a pair, so a concurrent
-// writer may slip a different value between our Load and Store. That is
-// the same race that already exists between two direct .Store calls on
-// the same pointer, so semantics are unchanged: we only promise
-// last-writer-wins, and the fast-path "skip when equal" preserves that
-// (if our s is equal to the observed value, writing s would produce the
-// same visible state regardless of the intermediate race).
 func storeStringAtomic(v *atomic.Pointer[string], s string) {
-	if cur := v.Load(); cur != nil && *cur == s {
-		return
-	}
-	p := new(string)
-	*p = s
-	v.Store(p)
+	textutil.StoreAtomicString(v, s)
 }
 
 // loadTotalCost reads the float64 cumulative cost from an atomic.Uint64

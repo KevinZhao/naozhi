@@ -46,6 +46,40 @@ func TestTruncateRunes_SingleRune(t *testing.T) {
 	}
 }
 
+// TestTruncateRunesNoEllipsis covers the IM-card variant: identical truncation
+// logic to TruncateRunes but with the trailing "..." suppressed so Feishu
+// button labels stay clean. Mirrors the parametric coverage of TruncateRunes
+// to prevent the two from diverging silently. R219-CR-3.
+func TestTruncateRunesNoEllipsis(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		max  int
+		want string
+	}{
+		{"short", "hello", 10, "hello"},
+		{"truncated", "hello world", 5, "hello"},
+		{"unicode", "你好世界测试", 4, "你好世界"},
+		{"boundary_equal", "abcde", 5, "abcde"},
+		{"single_rune", "🚀x", 1, "🚀"},
+		{"empty", "", 5, ""},
+		{"zero_max_no_limit", "hello", 0, "hello"},
+		{"negative_max_no_limit", "hello", -1, "hello"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := TruncateRunesNoEllipsis(tc.in, tc.max)
+			if got != tc.want {
+				t.Errorf("TruncateRunesNoEllipsis(%q,%d) = %q, want %q",
+					tc.in, tc.max, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestTruncateRunesBytes mirrors TruncateRunes parametric cases against the
 // []byte variant so the two helpers cannot diverge silently. R215-PERF-P2-6.
 func TestTruncateRunesBytes(t *testing.T) {
