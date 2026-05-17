@@ -132,8 +132,8 @@
 
 ### 安全 — 需 operator 决策
 
-- [ ] **R220-SEC-1 — `shimEnvAllowedPrefixes` 通配 `GIT_` 前缀转发 `GIT_PROXY_COMMAND`/`GIT_SSH_COMMAND`/`GIT_EXEC_PATH` 到 CLI 子进程（P3）**: 这三类 git env 设置 git 执行外部命令的路径，宿主环境若被毒化即可让 Bash tool 通过 `git clone` 触达 RCE。方案：`shimEnvAllowedPrefixes` 把 `"GIT_"` 拆成显式列表（`GIT_AUTHOR_NAME=`, `GIT_COMMITTER_NAME=`, `GIT_AUTHOR_EMAIL=`, `GIT_COMMITTER_EMAIL=`, `GIT_CONFIG_GLOBAL=`），排除 PROXY/SSH/EXEC_PATH。涉及：`internal/shim/manager.go:892`。
-- [ ] **R220-SEC-2 — `dashboardToken == ""` 短路出现在 `ConstantTimeCompare` 之后造成时序信道（P3）**: login handler 在 ConstantTimeCompare 后再判 `if a.dashboardToken == "" || !matched`，`||` 短路使"未配 token"路径比"配置但 token 错"路径快，远端可经时序区分两态。方案：启动期 `if cfg.DashboardToken == "" { return all-allowed handler }` 把 nil-token 旁路抽到 mux 装配阶段。涉及：`internal/server/dashboard_auth.go:282`。
+- [x] **R220-SEC-1 — `shimEnvAllowedPrefixes` 通配 `GIT_` 前缀转发 `GIT_PROXY_COMMAND`/`GIT_SSH_COMMAND`/`GIT_EXEC_PATH` 到 CLI 子进程（P3）**: 这三类 git env 设置 git 执行外部命令的路径，宿主环境若被毒化即可让 Bash tool 通过 `git clone` 触达 RCE。方案：`shimEnvAllowedPrefixes` 把 `"GIT_"` 拆成显式列表（`GIT_AUTHOR_NAME=`, `GIT_COMMITTER_NAME=`, `GIT_AUTHOR_EMAIL=`, `GIT_COMMITTER_EMAIL=`, `GIT_CONFIG_GLOBAL=`），排除 PROXY/SSH/EXEC_PATH。涉及：`internal/shim/manager.go:892`。 — 已修复（拆 8 项显式 allowlist：AUTHOR/COMMITTER NAME+EMAIL、CONFIG_GLOBAL/SYSTEM、DIR/WORK_TREE），本批 PR #90
+- [x] **R220-SEC-2 — `dashboardToken == ""` 短路出现在 `ConstantTimeCompare` 之后造成时序信道（P3）**: login handler 在 ConstantTimeCompare 后再判 `if a.dashboardToken == "" || !matched`，`||` 短路使"未配 token"路径比"配置但 token 错"路径快，远端可经时序区分两态。方案：启动期 `if cfg.DashboardToken == "" { return all-allowed handler }` 把 nil-token 旁路抽到 mux 装配阶段。涉及：`internal/server/dashboard_auth.go:282`。 — 已修复（位运算 matched & configured 强制两侧求值消除 `||` 短路 + 4 case 表驱动测试锁三档拒绝行为），本批 PR #90
 - [ ] **R220-SEC-3 — `gzipMiddleware` 在 `MaxBytesReader` 之前解压，gzip-bomb 可绕过 per-handler body cap（P2）**: gzip 中间件包裹整个 mux，每个 handler 调 `MaxBytesReader` 但只限制压缩字节；1KB gzip → 解压可达 GB 级。方案：在 gzipResponseWriter 内部对解压输出再套 io.LimitReader（cap 设为 2× MaxBytesReader 上界）。涉及：`internal/server/server.go:735`。
 
 ### Go 正确性 — 跨包改动

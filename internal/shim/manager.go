@@ -910,8 +910,23 @@ var shimEnvAllowedPrefixes = []string{
 	"AWS_ROLE_ARN=", "AWS_WEB_IDENTITY_TOKEN_FILE=",
 	"AWS_ENDPOINT_URL=", "AWS_BEDROCK_ENDPOINT=",
 
-	// Git (SSH, config)
-	"SSH_AUTH_SOCK=", "GIT_",
+	// Git (SSH, config) — explicit list of variables required for git
+	// identity / config lookups. Avoid the wildcard "GIT_" prefix because
+	// several GIT_* variables instruct git to execute attacker-controlled
+	// commands at network / SSH / commit time. Explicitly excluded:
+	//   - GIT_PROXY_COMMAND (runs arbitrary command for every TCP fetch)
+	//   - GIT_SSH_COMMAND   (replaces ssh binary git uses for fetch/push)
+	//   - GIT_SSH           (older variant of GIT_SSH_COMMAND)
+	//   - GIT_EXEC_PATH     (changes where git looks up its sub-binaries)
+	//   - GIT_EDITOR / GIT_PAGER / GIT_SEQUENCE_EDITOR (run on commit/rebase)
+	//   - GIT_EXTERNAL_DIFF (runs on diff)
+	// SSH_AUTH_SOCK= stays — ssh-agent is the standard identity channel
+	// for git over SSH, no command injection vector.
+	"SSH_AUTH_SOCK=",
+	"GIT_AUTHOR_NAME=", "GIT_AUTHOR_EMAIL=",
+	"GIT_COMMITTER_NAME=", "GIT_COMMITTER_EMAIL=",
+	"GIT_CONFIG_GLOBAL=", "GIT_CONFIG_SYSTEM=",
+	"GIT_DIR=", "GIT_WORK_TREE=",
 
 	// Common dev toolchains the CLI's Bash tool may invoke.
 	//
