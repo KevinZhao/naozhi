@@ -94,7 +94,7 @@
 ### 代码质量 — 本轮新发现
 
 - [x] **R219-CR-1 — `loadAtomicString`/`storeAtomicString` (`cli/eventlog.go`) 与 `loadStringAtomic`/`storeStringAtomic` (`session/managed.go`) 双胞胎（P2）**: 两个函数语义相同但跨包独立，命名词序还相反，新加调用易再造第三个变体。方案：抽到 `internal/syncutil` 或 `internal/textutil`，统一命名。Breaking：否。 — 已修复（textutil.LoadAtomicString/StoreAtomicString，cli/session 各自留 1 行 thin wrapper），本批 PR #76
-- [ ] **R219-CR-2 — `cron.runeByteOffset` 重复实现 `textutil.TruncateRunes`（P2）**: `scheduler.go:1689` 自实现 14 行 rune-counting 循环，cron 已 import session→textutil。方案：删除 `runeByteOffset`，调用 `textutil.TruncateRunes`。Breaking：否。
+- [x] **R219-CR-2 — `cron.runeByteOffset` 重复实现 `textutil.TruncateRunes`（P2）**: `scheduler.go:1689` 自实现 14 行 rune-counting 循环，cron 已 import session→textutil。方案：删除 `runeByteOffset`，调用 `textutil.TruncateRunes`。Breaking：否。 — 已修复（删 14 行私有版，改用 textutil.TruncateRunesNoEllipsis + 长度对比保留 "…[truncated]" 后缀），本批 PR #79
 - [x] **R219-CR-3 — `feishu/askquestion.go::truncateRunes` 重复实现 `textutil.TruncateRunes`（P2）**: 8 处调用点。方案：替换为 `textutil.TruncateRunes` 或新增 `TruncateRunesSilent` 不带 ellipsis 变体。需审计 8 处对 ellipsis 的依赖。 — 已修复（新增 textutil.TruncateRunesNoEllipsis + 9 处生产调用切换 + 删 feishu 私有版 19 行 + 8 case 新表驱动测试），本批 PR #76
 - [ ] **R219-CR-4 — `cron.scheduler` `*ByID`/`*` 三对方法 body 重复（P2）**: DeleteJob/PauseJob/ResumeJob 与 *ByID 各 6 个共享 lock+mutate+persist+unlock body，仅 lookup 步骤不同。方案：抽 `deleteJobLocked(j *Job) (saveFunc, error)` 共享。
 - [ ] **R219-CR-5 — `dashboard_cron.go` 5 个 validateCron* 重复 UTF-8 + C0 + IsLogInjectionRune 三重扫描（P2）**: 任何安全策略变更需改 5 处。方案：抽 `validateStringField(s, maxBytes, allowedCtrl)` helper，每个 validator 3 行 wrapper。
@@ -103,7 +103,7 @@
 - [ ] **R219-CR-8 — `shim/server.go::handleClient` 319 行无子拆（P2）**: 4 个内联 goroutine 通过裸 channel 通信。方案：抽 `handleClientHandshake / relayStdin / relayStdout`。
 - [ ] **R219-CR-9 — `processIface.GetState/GetSessionID` 违反 Go 命名约定（P2）**: 应去 `Get` 前缀。Breaking：是（接口变更，~12 处 callsite + mock 需改）。
 - [x] **R219-CR-10 — `transport_hook.go:136` 注释 "base-16-ish" 与代码 0x21-0x7E 全 ASCII filter 不符（P3）**: 文档与代码漂移。方案：要么收紧 filter 到 hex，要么更正注释。 — 已修复（更正注释为 alphanumeric + 解释 0x21-0x7E 全开是有意 headroom），本批 PR #75
-- [ ] **R219-CR-11 — `server.sessionSendLegacy` Deprecated 但生产 nil-queue fallback 仍可达（P3）**: 注释说仅用于"未 wire MessageQueue 的测试代码路径"，但 Hub.queue == nil 时生产也命中。方案：Hub.Start() 加 nil-queue 启动 warn 或 NewWithOptions 强制 non-nil queue。
+- [x] **R219-CR-11 — `server.sessionSendLegacy` Deprecated 但生产 nil-queue fallback 仍可达（P3）**: 注释说仅用于"未 wire MessageQueue 的测试代码路径"，但 Hub.queue == nil 时生产也命中。方案：Hub.Start() 加 nil-queue 启动 warn 或 NewWithOptions 强制 non-nil queue。 — 已修复（NewHub 加 startup slog.Warn，misconfigured 部署 journald 立即可见），本批 PR #79
 
 ### 架构 — 本轮新发现 / 重申
 
