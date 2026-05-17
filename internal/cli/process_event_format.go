@@ -375,5 +375,8 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 		}
 	}
 
-	return toolName + ": " + textutil.TruncateRunes(string(input), 300)
+	// R215-PERF-P2-6: pass the underlying []byte directly instead of
+	// string(input) so MCP tools whose input is multi-KB don't pay a full
+	// heap copy on every event when the truncation path is the common case.
+	return toolName + ": " + textutil.TruncateRunesBytes(input, 300)
 }
