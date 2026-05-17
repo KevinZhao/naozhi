@@ -272,14 +272,24 @@ func (a *AuthHandlers) handleLogin(w http.ResponseWriter, r *http.Request) {
 	// Same SHA-256 pre-digest trick as isAuthenticated so a timing probe
 	// cannot distinguish "wrong length" from "wrong bytes" — ConstantTimeCompare
 	// short-circuits on length mismatch. Aligns both auth entry points.
+	//
+	// R220-SEC-2: keep the "no token configured" decision inside the same
+	// branch as the constant-time compare result, AND combine via bitwise
+	// AND of two int comparisons (no `||` short-circuit). Previous form
+	// `if a.dashboardToken == "" || !matched` returned faster on empty
+	// token because the compare-result branch was skipped, leaving a
+	// remote-observable timing distinction between "no token" vs
+	// "configured but wrong". The `byte(...)` widening forces both
+	// operands to be evaluated regardless of the first comparison's
+	// result.
 	gotLogin := sha256.Sum256([]byte(req.Token))
 	wantLogin := sha256.Sum256([]byte(a.dashboardToken))
-	// Always execute the constant-time compare first so a timing probe cannot
-	// distinguish "no token configured" from "configured but wrong" via
-	// response latency. Gate the final auth decision on the short-circuit
-	// afterwards.
-	matched := subtle.ConstantTimeCompare(gotLogin[:], wantLogin[:]) == 1
-	if a.dashboardToken == "" || !matched {
+	matched := subtle.ConstantTimeCompare(gotLogin[:], wantLogin[:])
+	configured := 0
+	if a.dashboardToken != "" {
+		configured = 1
+	}
+	if matched&configured == 0 {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		if _, err := w.Write([]byte(`{"error":"invalid token"}`)); err != nil {
