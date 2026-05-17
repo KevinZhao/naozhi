@@ -530,7 +530,10 @@ func (m *Manager) connect(socketPath string, token []byte, lastSeq int64) (*Shim
 	// continue to use the same buffered state — we cannot use bufio.ReadBytes
 	// because it has no hard upper bound and would grow the buffer beyond
 	// our 64 KB policy before we could check.
-	conn.SetReadDeadline(time.Now().Add(10 * time.Second)) //nolint:errcheck
+	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("set hello read deadline: %w", err)
+	}
 	const maxHelloBytes = 64 * 1024
 	// Pre-allocated cap keeps the inner loop O(n) rather than O(n²). A 1 KB
 	// initial cap fits the realistic hello payload and only grows by powers
@@ -949,6 +952,15 @@ var shimEnvAllowedPrefixes = []string{
 	"JAVA_HOME=",
 }
 
+// maxShimEnvEntryBytes caps the byte length of any single forwarded env
+// variable value. Legitimate KEY=value pairs in the allowlist (PATH,
+// HOME, NVM_DIR, JAVA_HOME, language locale, etc.) are well under 4 KiB
+// in practice. A pathologically large value (e.g. a misconfigured
+// PYTHONPATH or an attacker-poisoned shell rc) inflates the forked
+// process's environment and slog attrs without contributing to CLI
+// behavior; reject and log instead.
+const maxShimEnvEntryBytes = 4 * 1024
+
 // filterShimEnv returns a copy of environ keeping only variables whose key
 // matches one of the allowed prefixes. This is defense-in-depth: the CLI
 // with --skip-permissions can still run `env` via Bash, but at least secrets
@@ -956,6 +968,9 @@ var shimEnvAllowedPrefixes = []string{
 func filterShimEnv(environ []string) []string {
 	filtered := make([]string, 0, len(environ)/2)
 	for _, kv := range environ {
+		if len(kv) > maxShimEnvEntryBytes {
+			continue
+		}
 		for _, prefix := range shimEnvAllowedPrefixes {
 			if strings.HasPrefix(kv, prefix) {
 				filtered = append(filtered, kv)

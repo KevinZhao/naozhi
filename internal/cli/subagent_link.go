@@ -627,6 +627,13 @@ func rawScanSubagentsDir(dir string) []metaEntry {
 			continue
 		}
 		metaPath := filepath.Join(dir, name)
+		// agentType is a short identifier; legitimate meta files are well under
+		// 8 KiB. Cap the read so a corrupt/oversized file (or a name collision
+		// with a stray multi-MB JSON) cannot inflate scan latency.
+		const maxMetaBytes = 8 * 1024
+		if st, err := os.Stat(metaPath); err != nil || st.Size() > maxMetaBytes {
+			continue
+		}
 		data, err := os.ReadFile(metaPath)
 		if err != nil {
 			continue

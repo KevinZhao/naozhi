@@ -17,6 +17,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // File API size / count limits. All values are deliberately conservative so a
@@ -286,14 +288,9 @@ func sanitizeDownloadName(p string) string {
 		switch {
 		case r < 0x20 || r == 0x7f:
 			// drop C0 controls
-		case r >= 0x80 && r <= 0x9f:
-			// drop C1 controls (not caught by r < 0x20)
-		case r == 0x2028 || r == 0x2029:
-			// drop LS / PS — line-breaking Unicode whitespace
-		case r >= 0x202a && r <= 0x202e:
-			// drop bidi override / embedding chars
-		case r >= 0x2066 && r <= 0x2069:
-			// drop bidi isolate chars
+		case osutil.IsLogInjectionRune(r):
+			// drop C1 controls + bidi override / isolate + LS / PS — same
+			// policy as dashboard_cron.go and sanitizeClientFilename.
 		case r == '"', r == '\\':
 			b.WriteRune('_')
 		default:
