@@ -899,21 +899,29 @@ var shimEnvAllowedPrefixes = []string{
 	"LANG=", "LC_", "TZ=",
 	"XDG_",
 
-	// Claude CLI / Anthropic — explicit list of variables the CLI / SDK
-	// reads to authenticate and select the model. Avoid the wildcard
-	// "ANTHROPIC_" prefix because Bedrock deployments do not need
-	// ANTHROPIC_API_KEY at all yet a wildcard would still forward host
-	// ANTHROPIC_API_KEY into the shim subprocess where the Bash tool
-	// could read it via `env | grep ANTHROPIC`. Listing the canonical
-	// envs explicitly keeps the surface to what the CLI actually
-	// consumes (anthropic-sdk-typescript / anthropic-sdk-python and
-	// claude-code itself). R219-SEC-3.
-	"ANTHROPIC_API_KEY=",
-	"ANTHROPIC_AUTH_TOKEN=",
-	"ANTHROPIC_MODEL=",
-	"ANTHROPIC_BASE_URL=",
+	// Claude CLI / Anthropic — explicit list of variables required by the
+	// CLI. Avoid the wildcard "ANTHROPIC_"/"CLAUDE_" prefixes (R214-SEC-3 /
+	// R219-SEC-3): a future Anthropic-issued variable, an internal company
+	// variable that happens to share the namespace, or a Bedrock deployment's
+	// stale ANTHROPIC_API_KEY would otherwise leak into the CLI subprocess
+	// where the Bash tool can `env | grep ANTHROPIC` to read it. Mirrors the
+	// AWS_ / GIT_ / NODE_ / PYTHON* explicit-list pattern below.
+	//
+	// Variables retained:
+	//   - ANTHROPIC_API_KEY      — direct Anthropic auth (non-Bedrock)
+	//   - ANTHROPIC_AUTH_TOKEN   — alternate auth for forks / proxies
+	//   - ANTHROPIC_MODEL        — pin Claude model selection
+	//   - ANTHROPIC_BASE_URL     — proxy / staging endpoint
+	//   - ANTHROPIC_BEDROCK_BASE_URL — Bedrock proxy endpoint
+	//   - CLAUDE_CODE_USE_BEDROCK    — Bedrock backend selector
+	//   - CLAUDE_CODE_SKIP_BEDROCK_AUTH — Bedrock proxy skips local AWS auth
+	//   - CLAUDE_BIN             — pin to a specific claude binary path
+	//   - CLAUDE_MODEL           — alias for ANTHROPIC_MODEL on some forks
+	"ANTHROPIC_API_KEY=", "ANTHROPIC_AUTH_TOKEN=",
+	"ANTHROPIC_MODEL=", "ANTHROPIC_BASE_URL=",
 	"ANTHROPIC_BEDROCK_BASE_URL=",
-	"CLAUDE_",
+	"CLAUDE_CODE_USE_BEDROCK=", "CLAUDE_CODE_SKIP_BEDROCK_AUTH=",
+	"CLAUDE_BIN=", "CLAUDE_MODEL=",
 
 	// AWS (Bedrock auth) — explicit list of variables required by the AWS
 	// SDK to authenticate Bedrock. Avoid the wildcard "AWS_" prefix because
