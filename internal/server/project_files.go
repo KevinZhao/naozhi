@@ -452,8 +452,13 @@ func statRelWithRoot(rootResolved, rel string) existsEntry {
 	if err != nil {
 		return existsEntry{Exists: false}
 	}
-	info, err := os.Stat(resolved)
-	if err != nil {
+	// R218B-SEC-2: Lstat (not Stat) so a symlink installed after
+	// resolveProjectFileWithRoot's EvalSymlinks (TOCTOU window) is
+	// reported as not-existing rather than silently followed. The
+	// resolved path is post-EvalSymlinks; encountering a symlink here
+	// means the entry was replaced between resolve and stat.
+	info, err := os.Lstat(resolved)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 {
 		return existsEntry{Exists: false}
 	}
 	if info.IsDir() {
@@ -572,8 +577,14 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
-	info, err := os.Stat(resolved)
-	if err != nil || info.IsDir() {
+	// R218B-SEC-2: Lstat instead of Stat so a symlink installed after
+	// resolveProjectFile's EvalSymlinks (TOCTOU window) is rejected here
+	// rather than silently followed. resolveProjectFile already returned
+	// a fully-resolved path with no symlinks; if `resolved` is now a
+	// symlink, an attacker replaced a real file with one in the gap.
+	// Reject as 404 to match the rest of the not-found / escape contract.
+	info, err := os.Lstat(resolved)
+	if err != nil || info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "file not found"})
 		return
 	}
