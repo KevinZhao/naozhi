@@ -10,6 +10,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // runstore_test.go covers internal/cron/runstore.go (RFC: docs/rfc/cron-run-history.md).
@@ -186,10 +187,47 @@ func TestRunStore_OversizePayloadShrinksAndPersists(t *testing.T) {
 		}
 		t.Fatalf("prompt did not get truncated marker; len=%d suffix=%q", len(got.Prompt), got.Prompt[start:])
 	}
-	// truncateForRetry keeps prefix[:256] + sentinel; verify expected length.
+	// truncateForRetry keeps the first 256 runes + sentinel; for ASCII
+	// input that's 256 bytes + sentinel byte length.
 	wantLen := 256 + len("…[truncated]")
 	if len([]byte(got.Prompt)) != wantLen {
 		t.Fatalf("truncated prompt bytes = %d want %d", len(got.Prompt), wantLen)
+	}
+}
+
+// TestRunStore_OversizeMultiByteUTF8DoesNotSplitRune covers R221-FIX-P0-1:
+// a multi-byte UTF-8 prompt that overflows maxRunBytes must not have its
+// retry truncation slice mid-rune. With the old byte-based slice, "汉" (3
+// bytes per rune) at byte 256 would land mid-sequence — json.Marshal would
+// silently U+FFFD-replace, and in the worst case the second marshal would
+// still exceed the cap, causing the run to be dropped entirely. Verify the
+// retry path produces a valid UTF-8 string that's correctly persisted.
+func TestRunStore_OversizeMultiByteUTF8DoesNotSplitRune(t *testing.T) {
+	t.Parallel()
+	s := newTestStore(t, 200, 30*24*time.Hour)
+	jobID := generateID()
+
+	// "汉" is 3 bytes per rune; 50 KiB / 3 = ~17066 runes — well over the
+	// 256-rune retry cap, and crucially every rune crosses byte boundaries.
+	huge := strings.Repeat("汉", 18*1024)
+	run := makeRun(jobID, time.Now())
+	run.Prompt = huge
+	s.Append(run)
+
+	got, err := s.Get(jobID, run.RunID)
+	if err != nil {
+		t.Fatalf("Get after oversize multi-byte append: %v", err)
+	}
+	if !strings.HasSuffix(got.Prompt, "…[truncated]") {
+		t.Fatalf("multi-byte prompt missing truncated marker; len=%d", len(got.Prompt))
+	}
+	if !utf8.ValidString(got.Prompt) {
+		t.Fatalf("retry-truncated prompt is invalid UTF-8 — rune was split mid-sequence")
+	}
+	// Must keep exactly 256 runes (not 256 bytes) of the prefix, then sentinel.
+	prefix := strings.TrimSuffix(got.Prompt, "…[truncated]")
+	if got := utf8.RuneCountInString(prefix); got != 256 {
+		t.Fatalf("retry truncation kept %d runes, want 256", got)
 	}
 }
 

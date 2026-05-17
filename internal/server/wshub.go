@@ -1408,7 +1408,7 @@ func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, 
 		JobID:     osutil.SanitizeForLog(jobID, 64),
 		RunID:     osutil.SanitizeForLog(runID, 64),
 		StartedAt: startedAt.UnixMilli(),
-		Trigger:   trigger,
+		Trigger:   osutil.SanitizeForLog(trigger, 32),
 		SessionID: osutil.SanitizeForLog(sessionID, 128),
 		Fresh:     fresh,
 	})
@@ -1424,6 +1424,10 @@ func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, 
 // updated). errorMsg is already path-redacted + sanitised by the cron
 // package's recordResultP0 → SanitizeForLog pipeline.
 func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, endedAt time.Time, durationMS int64, sessionID, errClass, errMsg, trigger string) {
+	// errClass/trigger are typed enums today (cron.ErrorClass / cron.TriggerKind)
+	// so currently safe; defensive sanitisation matches the treatment of jobID
+	// and shields a future code path that derives them from external config
+	// (e.g. webhook trigger names) from log/payload injection. R221-FIX-P2-7.
 	data, err := marshalPooled(cronRunEndedMsg{
 		Type:       "cron_run_ended",
 		JobID:      osutil.SanitizeForLog(jobID, 64),
@@ -1433,9 +1437,9 @@ func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, ended
 		EndedAt:    endedAt.UnixMilli(),
 		DurationMS: durationMS,
 		SessionID:  osutil.SanitizeForLog(sessionID, 128),
-		ErrorClass: errClass,
+		ErrorClass: osutil.SanitizeForLog(errClass, 64),
 		ErrorMsg:   errMsg,
-		Trigger:    trigger,
+		Trigger:    osutil.SanitizeForLog(trigger, 32),
 	})
 	if err != nil {
 		return
