@@ -60,7 +60,7 @@ const maxIncomingTextBytes = 8 * 1024
 // New creates a WeChat platform adapter.
 func New(cfg Config) *Weixin {
 	if cfg.MaxReplyLen <= 0 {
-		cfg.MaxReplyLen = 4000
+		cfg.MaxReplyLen = platform.DefaultMaxReplyLen
 	}
 	return &Weixin{
 		cfg: cfg,

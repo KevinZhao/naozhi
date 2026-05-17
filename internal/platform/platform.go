@@ -80,6 +80,13 @@ const (
 	ReactionQueued ReactionType = "queued"
 )
 
+// DefaultMaxReplyLen is the fallback per-message split-length applied when
+// a platform adapter's MaxReplyLen config is not set. Matches Feishu's and
+// Slack's documented per-message text ceiling (~4000 bytes / ~1333 CJK
+// chars), which is also a safe default for Weixin's 5000-byte ceiling.
+// Promoted here so all three adapters share one source of truth.
+const DefaultMaxReplyLen = 4000
+
 // Reactor is an optional capability: platforms that can add/remove reactions
 // on inbound messages implement it. Enables non-intrusive queue feedback —
 // a reaction on the user's own message instead of a separate bot reply.
