@@ -190,6 +190,21 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 		// short opaque tokens (typically <=32 chars); cap at 1 KiB so a malicious
 		// verified request cannot force us to reflect a multi-MB body back.
 		if envelope.Type == "url_verification" {
+			// R218-SEC-1: gate url_verification through hookSem like every
+			// other branch below. Without this, a leaked verification_token
+			// lets an attacker flood challenge endpoints (each request still
+			// passes auth) without ever hitting the concurrent-handler cap;
+			// since challenges run synchronously on the HTTP goroutine this
+			// only bounds in-flight challenge replies, but matches the
+			// semaphore contract the rest of the handler relies on.
+			select {
+			case f.hookSem <- struct{}{}:
+			default:
+				slog.Warn("feishu webhook: handler semaphore full, dropping url_verification")
+				w.WriteHeader(http.StatusServiceUnavailable)
+				return
+			}
+			defer func() { <-f.hookSem }()
 			if len(envelope.Challenge) > 1024 {
 				slog.Warn("feishu challenge too long", "len", len(envelope.Challenge))
 				w.WriteHeader(http.StatusBadRequest)
