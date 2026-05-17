@@ -35,12 +35,39 @@ import (
 )
 
 // shimMsg is a minimal struct for parsing shim protocol messages in readLoop.
+//
+// R222-PERF-13: Code uses a custom (int, bool) pair instead of *int so
+// every cli_exited frame avoids the 1× heap allocation that *int would
+// trigger when json.Unmarshal materialises the integer behind a pointer.
+// json.Unmarshal calls UnmarshalJSON which sets CodePresent=true; an
+// absent "code" field leaves CodePresent=false. Equivalent to the
+// pointer encoding's "distinguishes 0 from absent" guarantee.
 type shimMsg struct {
-	Type   string `json:"type"`
-	Seq    int64  `json:"seq,omitempty"`
-	Line   string `json:"line,omitempty"`
-	Code   *int   `json:"code,omitempty"`
-	Signal string `json:"signal,omitempty"`
+	Type   string      `json:"type"`
+	Seq    int64       `json:"seq,omitempty"`
+	Line   string      `json:"line,omitempty"`
+	Code   shimMsgCode `json:"code,omitempty"`
+	Signal string      `json:"signal,omitempty"`
+}
+
+// shimMsgCode wraps an int so json.Unmarshal can distinguish absent
+// from explicit zero without allocating *int. Decode-only; never
+// emitted from naozhi side. R222-PERF-13.
+type shimMsgCode struct {
+	Value   int
+	Present bool
+}
+
+// UnmarshalJSON implements json.Unmarshaler so the shim protocol's
+// optional "code" field decodes without per-message heap allocation.
+// json.Unmarshal calls this method only when the JSON object actually
+// contains a "code" key — absent keys leave the zero value
+// (Present=false). R222-PERF-13.
+func (c *shimMsgCode) UnmarshalJSON(data []byte) error {
+	c.Present = true
+	// Delegate to json.Unmarshal for full int parsing semantics (rejects
+	// strings/bools/floats outside int range identically to *int).
+	return json.Unmarshal(data, &c.Value)
 }
 
 // readLoop reads NDJSON messages from the shim socket and dispatches events.
@@ -406,8 +433,8 @@ func (p *Process) readLoop() {
 
 		case "cli_exited":
 			code := 0
-			if msg.Code != nil {
-				code = *msg.Code
+			if msg.Code.Present {
+				code = msg.Code.Value
 			}
 			log.Info("CLI exited via shim", "code", code)
 			reason := DeathReasonCLIExited
@@ -509,7 +536,11 @@ func (p *Process) heartbeatLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			if err := p.shimSend(shimClientMsg{Type: "ping"}); err != nil {
+			// R222-PERF-14: heartbeat ping payload is fully static (no
+			// runtime field). Using a pre-marshalled []byte skips the
+			// encodeShimMsg pool acquire + json.Encoder reflection
+			// every 30s × N live processes.
+			if err := p.shimSendRaw(shimPingBytes); err != nil {
 				log.Debug("heartbeat ping failed", "err", err)
 				p.Kill()
 				return
