@@ -6358,6 +6358,8 @@ function loadKatex() {
   if (katexReady || katexLoading) return;
   katexLoading = true;
   // Inject stylesheet on demand (moved out of <head> to unblock first paint).
+  // R219-SEC-4: KaTeX CDN link + script must carry SRI integrity hashes;
+  // contract pinned by TestDashboardJS_CDNScriptsHaveSRI.
   if (!document.querySelector('link[data-nz-katex]')) {
     const link = document.createElement('link');
     link.rel = 'stylesheet';
