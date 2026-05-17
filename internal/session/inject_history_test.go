@@ -22,11 +22,11 @@ func TestInjectHistory_UpdatesLastPromptAndActivity(t *testing.T) {
 	})
 
 	// Scan iterates newest→oldest; latest user entry wins.
-	if got, want := loadStringAtomic(&s.lastPrompt), "second question"; got != want {
+	if got, want := loadAtomicString(&s.lastPrompt), "second question"; got != want {
 		t.Errorf("lastPrompt = %q, want %q", got, want)
 	}
 	// tool_use / thinking: whichever is newest wins; here that's "thinking".
-	if got, want := loadStringAtomic(&s.lastActivity), "considering"; got != want {
+	if got, want := loadAtomicString(&s.lastActivity), "considering"; got != want {
 		t.Errorf("lastActivity = %q, want %q", got, want)
 	}
 }
@@ -37,18 +37,18 @@ func TestInjectHistory_UpdatesLastPromptAndActivity(t *testing.T) {
 func TestInjectHistory_DoesNotOverwriteNonEmpty(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "test:key"}
-	storeStringAtomic(&s.lastPrompt, "set by send")
-	storeStringAtomic(&s.lastActivity, "live tool")
+	storeAtomicString(&s.lastPrompt, "set by send")
+	storeAtomicString(&s.lastActivity, "live tool")
 
 	s.InjectHistory([]cli.EventEntry{
 		{Type: "user", Summary: "historical prompt"},
 		{Type: "tool_use", Summary: "historical tool"},
 	})
 
-	if got, want := loadStringAtomic(&s.lastPrompt), "set by send"; got != want {
+	if got, want := loadAtomicString(&s.lastPrompt), "set by send"; got != want {
 		t.Errorf("lastPrompt overwritten: got %q, want %q", got, want)
 	}
-	if got, want := loadStringAtomic(&s.lastActivity), "live tool"; got != want {
+	if got, want := loadAtomicString(&s.lastActivity), "live tool"; got != want {
 		t.Errorf("lastActivity overwritten: got %q, want %q", got, want)
 	}
 }

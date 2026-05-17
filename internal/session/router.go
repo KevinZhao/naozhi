@@ -242,11 +242,18 @@ type Router struct {
 	wrapper        *cli.Wrapper            // default (legacy single-backend) wrapper
 	wrappers       map[string]*cli.Wrapper // backend ID → wrapper (nil in legacy mode)
 	defaultBackend string                  // backend ID used when AgentOpts.Backend is empty
-	maxProcs       int
-	ttl            time.Duration
-	pruneTTL       time.Duration
-	model          string
-	extraArgs      []string
+	// backendIDs caches the dashboard-stable ordering returned by BackendIDs:
+	// default backend first, remaining IDs sorted ascending. wrappers is
+	// constructed once in NewRouter and never mutated, so this slice is
+	// computed once at construction and read-only thereafter — saves a
+	// per-call O(N) sort + 2 small allocations on the dashboard /api/sessions
+	// hot path.
+	backendIDs []string
+	maxProcs   int
+	ttl        time.Duration
+	pruneTTL   time.Duration
+	model      string
+	extraArgs  []string
 	// backendModels / backendExtraArgs optionally override model and args
 	// per backend ID. Read-only after NewRouter.
 	backendModels    map[string]string
@@ -555,36 +562,19 @@ func (r *Router) managerFor(backend string) *shim.Manager {
 
 // BackendIDs returns the list of backend IDs the router can spawn against,
 // with the default backend first. Suitable for UI enumeration.
+//
+// Returns a defensive copy of the cached r.backendIDs slice so callers
+// cannot mutate the cache (no caller in the tree mutates today, but the
+// dashboard enumeration handler does iterate without an explicit copy).
+// Test routers built by struct literal skip computeBackendIDs and fall
+// through to the legacy compute path below.
 func (r *Router) BackendIDs() []string {
-	if len(r.wrappers) == 0 {
-		if r.wrapper != nil {
-			id := r.wrapper.BackendID
-			if id == "" {
-				id = "claude"
-			}
-			return []string{id}
-		}
-		return nil
+	if r.backendIDs != nil {
+		out := make([]string, len(r.backendIDs))
+		copy(out, r.backendIDs)
+		return out
 	}
-	out := make([]string, 0, len(r.wrappers))
-	if r.defaultBackend != "" {
-		if _, ok := r.wrappers[r.defaultBackend]; ok {
-			out = append(out, r.defaultBackend)
-		}
-	}
-	// Sort the non-default remainder so dashboard enumeration is stable
-	// across process restarts — Go map iteration is randomised, so without
-	// this the dropdown order flips on every tick.
-	rest := make([]string, 0, len(r.wrappers))
-	for id := range r.wrappers {
-		if id == r.defaultBackend {
-			continue
-		}
-		rest = append(rest, id)
-	}
-	slices.Sort(rest)
-	out = append(out, rest...)
-	return out
+	return computeBackendIDs(r.wrapper, r.wrappers, r.defaultBackend)
 }
 
 // DefaultBackend returns the backend ID used when no explicit backend is
@@ -1059,7 +1049,42 @@ func NewRouter(cfg RouterConfig) *Router {
 	// NewRouter returns.
 	r.startAttachmentTracker()
 
+	r.backendIDs = computeBackendIDs(r.wrapper, r.wrappers, r.defaultBackend)
+
 	return r
+}
+
+// computeBackendIDs builds the dashboard-stable ordering used by BackendIDs:
+// default backend first, remaining IDs sorted ascending. wrappers is
+// constructed once in NewRouter and never mutated, so the slice is computed
+// here once and cached on r.backendIDs.
+func computeBackendIDs(wrapper *cli.Wrapper, wrappers map[string]*cli.Wrapper, defaultBackend string) []string {
+	if len(wrappers) == 0 {
+		if wrapper != nil {
+			id := wrapper.BackendID
+			if id == "" {
+				id = "claude"
+			}
+			return []string{id}
+		}
+		return nil
+	}
+	out := make([]string, 0, len(wrappers))
+	if defaultBackend != "" {
+		if _, ok := wrappers[defaultBackend]; ok {
+			out = append(out, defaultBackend)
+		}
+	}
+	rest := make([]string, 0, len(wrappers))
+	for id := range wrappers {
+		if id == defaultBackend {
+			continue
+		}
+		rest = append(rest, id)
+	}
+	slices.Sort(rest)
+	out = append(out, rest...)
+	return out
 }
 
 // attachHistorySource picks the right history.Source for a session based on
@@ -2434,19 +2459,19 @@ func (r *Router) evictOldest() bool {
 		if !s.isAlive() || s.loadProcess().IsRunning() {
 			continue
 		}
-		if oldest == nil || s.GetLastActive().Before(oldest.GetLastActive()) {
+		if oldest == nil || s.LastActive().Before(oldest.LastActive()) {
 			oldest = s
 		}
 	}
 	if oldest == nil {
 		return false
 	}
-	slog.Info("evicting oldest session", "key", oldest.key, "idle", time.Since(oldest.GetLastActive()))
+	slog.Info("evicting oldest session", "key", oldest.key, "idle", time.Since(oldest.LastActive()))
 	// OBS2: bump before Unlock so it aligns with the "decision to evict" point;
 	// the subsequent proc.Close() is async-capable and can fail, but the eviction
 	// decision is already committed (deathReason set, storeDirty marked below).
 	metrics.SessionEvictTotal.Add(1)
-	storeStringAtomic(&oldest.deathReason, "evicted")
+	storeAtomicString(&oldest.deathReason, "evicted")
 	// Keep oldest.process non-nil so concurrent holders don't get nil-panic.
 	// After Close(), Alive() returns false; countActive() below recounts correctly.
 	//
@@ -2739,21 +2764,21 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	fresh.SetCLIName(old.CLIName())
 	fresh.SetCLIVersion(old.CLIVersion())
 	fresh.SetUserLabel(old.UserLabel())
-	if dr := loadStringAtomic(&old.deathReason); dr != "" {
-		storeStringAtomic(&fresh.deathReason, dr)
+	if dr := loadAtomicString(&old.deathReason); dr != "" {
+		storeAtomicString(&fresh.deathReason, dr)
 	}
 	fresh.lastActive.Store(old.lastActive.Load())
-	// Go through storeStringAtomic so each write allocates a fresh *string —
+	// Go through storeAtomicString so each write allocates a fresh *string —
 	// direct `.Store(lp)` would share the underlying pointer with `old` and
 	// diverge from the rest of the codebase's "always helper" convention.
 	// Currently safe because strings are immutable, but keeping the invariant
 	// uniform avoids confusion if a future refactor ever makes the pointee
 	// mutable.
-	if lp := loadStringAtomic(&old.lastPrompt); lp != "" {
-		storeStringAtomic(&fresh.lastPrompt, lp)
+	if lp := loadAtomicString(&old.lastPrompt); lp != "" {
+		storeAtomicString(&fresh.lastPrompt, lp)
 	}
-	if la := loadStringAtomic(&old.lastActivity); la != "" {
-		storeStringAtomic(&fresh.lastActivity, la)
+	if la := loadAtomicString(&old.lastActivity); la != "" {
+		storeAtomicString(&fresh.lastActivity, la)
 	}
 	fresh.setSessionID(old.getSessionID())
 
@@ -2922,7 +2947,7 @@ func (r *Router) Cleanup() {
 		if proc == nil {
 			continue
 		}
-		candidates = append(candidates, cand{key, s, proc, s.GetLastActive()})
+		candidates = append(candidates, cand{key, s, proc, s.LastActive()})
 	}
 	ttl := r.ttl
 	totalTimeout := r.totalTimeout
@@ -2962,7 +2987,7 @@ func (r *Router) Cleanup() {
 			if age := now.Sub(effective); age > stuckThreshold {
 				slog.Warn("stuck running session detected, force killing",
 					"key", c.key, "running_for", age, "threshold", stuckThreshold)
-				storeStringAtomic(&c.s.deathReason, "stuck_running")
+				storeAtomicString(&c.s.deathReason, "stuck_running")
 				stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc})
 			}
 			continue
@@ -2972,7 +2997,7 @@ func (r *Router) Cleanup() {
 		if pid := c.proc.PID(); pid > 0 && !osutil.PidAlive(pid) {
 			slog.Warn("CLI process gone but session still alive, force killing",
 				"key", c.key, "pid", pid)
-			storeStringAtomic(&c.s.deathReason, "pid_gone")
+			storeAtomicString(&c.s.deathReason, "pid_gone")
 			stuckKill = append(stuckKill, expiredEntry{c.s, c.key, c.proc})
 			continue
 		}
@@ -2980,7 +3005,7 @@ func (r *Router) Cleanup() {
 		// Normal idle TTL expiry.
 		if now.Sub(effective) > ttl {
 			slog.Info("session expired", "key", c.key, "idle", now.Sub(effective))
-			storeStringAtomic(&c.s.deathReason, "idle_timeout")
+			storeAtomicString(&c.s.deathReason, "idle_timeout")
 			expired = append(expired, expiredEntry{c.s, c.key, c.proc})
 		}
 	}
@@ -3125,7 +3150,7 @@ func (r *Router) Cleanup() {
 // shouldPrune returns true if a non-exempt session should be removed from the map.
 // Covers: nil-process stubs, dead processes past pruneTTL. Caller must hold r.mu.
 func (r *Router) shouldPrune(s *ManagedSession, now time.Time) bool {
-	if now.Sub(s.GetLastActive()) <= r.pruneTTL {
+	if now.Sub(s.LastActive()) <= r.pruneTTL {
 		return false
 	}
 	proc := s.loadProcess()
@@ -3875,7 +3900,7 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 	s.SetCLIVersion(r.CLIVersion())
 	s.setSessionID(sessionID)
 	if lastPrompt != "" {
-		storeStringAtomic(&s.lastPrompt, lastPrompt)
+		storeAtomicString(&s.lastPrompt, lastPrompt)
 	}
 	r.trackSessionID(sessionID)
 	if sessionID != "" {
@@ -3927,8 +3952,8 @@ func (r *Router) RegisterCronStubWithChain(key, workspace, lastPrompt string, ch
 				existing.setWorkspace(workspace)
 				changed = true
 			}
-			if lastPrompt != "" && loadStringAtomic(&existing.lastPrompt) != lastPrompt {
-				storeStringAtomic(&existing.lastPrompt, lastPrompt)
+			if lastPrompt != "" && loadAtomicString(&existing.lastPrompt) != lastPrompt {
+				storeAtomicString(&existing.lastPrompt, lastPrompt)
 				changed = true
 			}
 			// prevSessionIDs 的所有历史写路径（spawnSession:1786 / RenameSession:2142
@@ -3977,7 +4002,7 @@ func (r *Router) RegisterCronStubWithChain(key, workspace, lastPrompt string, ch
 	s.SetCLIName(r.CLIName())
 	s.SetCLIVersion(r.CLIVersion())
 	if lastPrompt != "" {
-		storeStringAtomic(&s.lastPrompt, lastPrompt)
+		storeAtomicString(&s.lastPrompt, lastPrompt)
 	}
 	s.lastActive.Store(time.Now().UnixNano())
 	r.attachHistorySource(s)

@@ -114,13 +114,13 @@ func TestSessionPackage_NoLegacyAtomicValueForStrings(t *testing.T) {
 
 // TestLoadStringAtomic_NilPointer_ReturnsEmpty locks the helper's zero-value
 // contract: an untouched atomic.Pointer[string] has Load()==nil, and
-// loadStringAtomic must collapse that to "" (Snapshot / Backend / CLIName all
+// loadAtomicString must collapse that to "" (Snapshot / Backend / CLIName all
 // rely on this semantic to avoid nil-deref).
 func TestLoadStringAtomic_NilPointer_ReturnsEmpty(t *testing.T) {
 	t.Parallel()
 	var v atomic.Pointer[string]
-	if got := loadStringAtomic(&v); got != "" {
-		t.Errorf("loadStringAtomic(nil ptr) = %q, want \"\"", got)
+	if got := loadAtomicString(&v); got != "" {
+		t.Errorf("loadAtomicString(nil ptr) = %q, want \"\"", got)
 	}
 }
 
@@ -135,22 +135,22 @@ func TestLoadStringAtomic_NilPointer_ReturnsEmpty(t *testing.T) {
 func TestStoreStringAtomic_SkipsEqualWrite(t *testing.T) {
 	t.Parallel()
 	var v atomic.Pointer[string]
-	storeStringAtomic(&v, "hot-tool-label")
+	storeAtomicString(&v, "hot-tool-label")
 	firstPtr := v.Load()
 	if firstPtr == nil || *firstPtr != "hot-tool-label" {
 		t.Fatalf("first store failed: got %v", firstPtr)
 	}
 	// Second store with the same value MUST be a no-op: pointer identity unchanged.
-	storeStringAtomic(&v, "hot-tool-label")
+	storeAtomicString(&v, "hot-tool-label")
 	if got := v.Load(); got != firstPtr {
 		t.Errorf("equal-value second store allocated a new pointer (%p != %p) — fast path regression", got, firstPtr)
 	}
 	// Divergent store MUST write a fresh pointer.
-	storeStringAtomic(&v, "different-label")
+	storeAtomicString(&v, "different-label")
 	if got := v.Load(); got == firstPtr {
 		t.Errorf("divergent store skipped write — compare-before-store semantics broken")
 	}
-	if got := loadStringAtomic(&v); got != "different-label" {
+	if got := loadAtomicString(&v); got != "different-label" {
 		t.Errorf("after divergent store: got %q, want \"different-label\"", got)
 	}
 }
@@ -166,32 +166,32 @@ func TestStoreStringAtomic_NilToEmptyIsNotSkipped(t *testing.T) {
 	if v.Load() != nil {
 		t.Fatal("precondition: zero-value atomic.Pointer must Load() nil")
 	}
-	storeStringAtomic(&v, "")
+	storeAtomicString(&v, "")
 	if v.Load() == nil {
 		t.Error("first store of \"\" from nil pointer was skipped — fast path must not short-circuit when cur==nil")
 	}
 }
 
 // TestStoreStringAtomic_RoundTrip covers the common mutation path: store a
-// string, read it back via loadStringAtomic. A naive `v.Store(&s)` where `s`
+// string, read it back via loadAtomicString. A naive `v.Store(&s)` where `s`
 // is a loop-captured variable would let later writes mutate prior pointers;
 // the helper's by-value argument makes each call self-contained.
 func TestStoreStringAtomic_RoundTrip(t *testing.T) {
 	t.Parallel()
 	var v atomic.Pointer[string]
-	storeStringAtomic(&v, "first")
-	if got := loadStringAtomic(&v); got != "first" {
+	storeAtomicString(&v, "first")
+	if got := loadAtomicString(&v); got != "first" {
 		t.Errorf("after first store: got %q, want \"first\"", got)
 	}
-	storeStringAtomic(&v, "second")
-	if got := loadStringAtomic(&v); got != "second" {
+	storeAtomicString(&v, "second")
+	if got := loadAtomicString(&v); got != "second" {
 		t.Errorf("after second store: got %q, want \"second\"", got)
 	}
 	// Explicit empty store: the field pointer is non-nil but the payload is
 	// "". This is distinct from "never stored" (nil) — a future caller that
 	// cares to distinguish the two can do so via v.Load() directly.
-	storeStringAtomic(&v, "")
-	if got := loadStringAtomic(&v); got != "" {
+	storeAtomicString(&v, "")
+	if got := loadAtomicString(&v); got != "" {
 		t.Errorf("after empty store: got %q, want \"\"", got)
 	}
 	if v.Load() == nil {

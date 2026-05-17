@@ -211,29 +211,32 @@ func (s *ManagedSession) SessionKey() string { return s.key }
 
 // Workspace returns the effective cwd recorded for this session. Lock-free;
 // safe to call from Hub handlers and other call sites that don't hold r.mu.
-func (s *ManagedSession) Workspace() string { return loadStringAtomic(&s.workspace) }
+func (s *ManagedSession) Workspace() string { return loadAtomicString(&s.workspace) }
 
 // SetWorkspaceAtomic stores the workspace path. Router-internal helper — all
 // writers already hold r.mu, but we route through the helper so the string is
-// always handed to the atomic.Pointer via one place (matches storeStringAtomic
+// always handed to the atomic.Pointer via one place (matches storeAtomicString
 // convention for backend/cliName/cliVersion).
-func (s *ManagedSession) setWorkspace(ws string) { storeStringAtomic(&s.workspace, ws) }
+func (s *ManagedSession) setWorkspace(ws string) { storeAtomicString(&s.workspace, ws) }
 
 // IsExempt returns whether this session is exempt from TTL and eviction.
 func (s *ManagedSession) IsExempt() bool { return s.exempt }
 
-// loadStringAtomic and storeStringAtomic are thin wrappers around the shared
-// textutil.LoadAtomicString / textutil.StoreAtomicString helpers (R219-CR-1:
-// was a word-for-word copy of cli.loadAtomicString / storeAtomicString with
-// reversed naming). Kept as package-private aliases so the surrounding
-// accessor methods read cleanly. Behavioural contract — fast-path
-// short-circuit on equal value, last-writer-wins — is documented on the
-// textutil helpers; do not re-document it here to keep the two in sync.
-func loadStringAtomic(v *atomic.Pointer[string]) string {
+// loadAtomicString and storeAtomicString are thin wrappers around the shared
+// textutil.LoadAtomicString / textutil.StoreAtomicString helpers. Kept as
+// package-private aliases so the surrounding accessor methods read cleanly.
+// Behavioural contract — fast-path short-circuit on equal value,
+// last-writer-wins — is documented on the textutil helpers; do not
+// re-document it here to keep the two in sync.
+//
+// Naming follows the textutil canonical (action-type) so cli and session
+// thin wrappers no longer have inverted word order. R219-CR-1 closed the
+// duplication; this rename closes the naming inconsistency.
+func loadAtomicString(v *atomic.Pointer[string]) string {
 	return textutil.LoadAtomicString(v)
 }
 
-func storeStringAtomic(v *atomic.Pointer[string], s string) {
+func storeAtomicString(v *atomic.Pointer[string], s string) {
 	textutil.StoreAtomicString(v, s)
 }
 
@@ -255,30 +258,30 @@ func storeTotalCost(v *atomic.Uint64, cost float64) {
 }
 
 // Backend returns the backend ID ("" when the router default is in effect).
-func (s *ManagedSession) Backend() string { return loadStringAtomic(&s.backend) }
+func (s *ManagedSession) Backend() string { return loadAtomicString(&s.backend) }
 
 // SetBackend records the backend ID for this session. Called at spawn time
 // and (rarely) by reconnectShims after a naozhi restart.
-func (s *ManagedSession) SetBackend(id string) { storeStringAtomic(&s.backend, id) }
+func (s *ManagedSession) SetBackend(id string) { storeAtomicString(&s.backend, id) }
 
 // CLIName returns the CLI display name (e.g. "claude-code", "kiro").
-func (s *ManagedSession) CLIName() string { return loadStringAtomic(&s.cliName) }
+func (s *ManagedSession) CLIName() string { return loadAtomicString(&s.cliName) }
 
 // SetCLIName records the wrapper-provided CLI display name.
-func (s *ManagedSession) SetCLIName(name string) { storeStringAtomic(&s.cliName, name) }
+func (s *ManagedSession) SetCLIName(name string) { storeAtomicString(&s.cliName, name) }
 
 // CLIVersion returns the detected CLI version string.
-func (s *ManagedSession) CLIVersion() string { return loadStringAtomic(&s.cliVersion) }
+func (s *ManagedSession) CLIVersion() string { return loadAtomicString(&s.cliVersion) }
 
 // SetCLIVersion records the wrapper-provided CLI version.
-func (s *ManagedSession) SetCLIVersion(v string) { storeStringAtomic(&s.cliVersion, v) }
+func (s *ManagedSession) SetCLIVersion(v string) { storeAtomicString(&s.cliVersion, v) }
 
 // UserLabel returns the operator-set display label ("" when unset).
-func (s *ManagedSession) UserLabel() string { return loadStringAtomic(&s.userLabel) }
+func (s *ManagedSession) UserLabel() string { return loadAtomicString(&s.userLabel) }
 
 // SetUserLabel records an operator-set display label. Callers must have
 // already validated length/charset; the empty string clears any prior label.
-func (s *ManagedSession) SetUserLabel(v string) { storeStringAtomic(&s.userLabel, v) }
+func (s *ManagedSession) SetUserLabel(v string) { storeAtomicString(&s.userLabel, v) }
 
 // SetHistorySource installs the backend-specific disk-tier Source. Called
 // by the router at session construction; safe to call after the session is
@@ -357,7 +360,7 @@ func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
 
 	s.storeProcess(proc)
 	s.setSessionID(sessionID)
-	storeStringAtomic(&s.deathReason, "")
+	storeAtomicString(&s.deathReason, "")
 	s.lastActive.Store(time.Now().UnixNano())
 
 	if s.onSessionID != nil && sessionID != "" {
@@ -383,12 +386,12 @@ func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
 func (s *ManagedSession) ReattachProcessNoCallback(proc processIface, sessionID string) {
 	s.storeProcess(proc)
 	s.setSessionID(sessionID)
-	storeStringAtomic(&s.deathReason, "")
+	storeAtomicString(&s.deathReason, "")
 	s.lastActive.Store(time.Now().UnixNano())
 }
 
-// GetLastActive returns the last active time.
-func (s *ManagedSession) GetLastActive() time.Time {
+// LastActive returns the last active time.
+func (s *ManagedSession) LastActive() time.Time {
 	return time.Unix(0, s.lastActive.Load())
 }
 
@@ -418,7 +421,7 @@ func (s *ManagedSession) SendPassthrough(ctx context.Context, text string, image
 	if len(images) > 0 {
 		prompt += " [+" + strconv.Itoa(len(images)) + " image(s)]"
 	}
-	storeStringAtomic(&s.lastPrompt, prompt)
+	storeAtomicString(&s.lastPrompt, prompt)
 
 	proc := s.loadProcess()
 	if proc == nil {
@@ -499,15 +502,15 @@ func (s *ManagedSession) PassthroughDepth() int {
 func (s *ManagedSession) mapSendError(proc processIface, err error) {
 	switch {
 	case errors.Is(err, cli.ErrNoOutputTimeout):
-		storeStringAtomic(&s.deathReason, "no_output_timeout")
+		storeAtomicString(&s.deathReason, "no_output_timeout")
 	case errors.Is(err, cli.ErrTotalTimeout):
-		storeStringAtomic(&s.deathReason, "total_timeout")
+		storeAtomicString(&s.deathReason, "total_timeout")
 	case errors.Is(err, cli.ErrProcessExited):
 		reason := "process_exited"
 		if dr := proc.DeathReason(); dr != "" {
 			reason = dr
 		}
-		storeStringAtomic(&s.deathReason, reason)
+		storeAtomicString(&s.deathReason, reason)
 	}
 }
 
@@ -531,7 +534,7 @@ func (s *ManagedSession) Send(ctx context.Context, text string, images []cli.Ima
 	if len(images) > 0 {
 		prompt += " [+" + strconv.Itoa(len(images)) + " image(s)]"
 	}
-	storeStringAtomic(&s.lastPrompt, prompt)
+	storeAtomicString(&s.lastPrompt, prompt)
 
 	proc := s.loadProcess()
 	if proc == nil {
@@ -650,12 +653,12 @@ func (s *ManagedSession) InterruptViaControl() InterruptOutcome {
 
 // getSessionID returns the session ID lock-free via atomic.Pointer[string].
 func (s *ManagedSession) getSessionID() string {
-	return loadStringAtomic(&s.sessionID)
+	return loadAtomicString(&s.sessionID)
 }
 
 // setSessionID stores the session ID atomically.
 func (s *ManagedSession) setSessionID(id string) {
-	storeStringAtomic(&s.sessionID, id)
+	storeAtomicString(&s.sessionID, id)
 }
 
 // parseKeyParts lazily parses the immutable session key into cached components.
@@ -844,14 +847,14 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		ChatID:     s.keyChatID,
 		Agent:      s.keyAgentID,
 		SessionID:  s.getSessionID(),
-		LastActive: s.GetLastActive().UnixMilli(),
+		LastActive: s.LastActive().UnixMilli(),
 		Workspace:  s.Workspace(),
 		Backend:    s.Backend(),
 		CLIName:    s.CLIName(),
 		CLIVersion: s.CLIVersion(),
 		UserLabel:  s.UserLabel(),
 	}
-	snap.DeathReason = loadStringAtomic(&s.deathReason)
+	snap.DeathReason = loadAtomicString(&s.deathReason)
 
 	proc := s.loadProcess()
 	sessCost := loadTotalCost(&s.totalCost)
@@ -885,11 +888,11 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 	}
 
 	// Read cached values instead of copying the full event log.
-	if lp := loadStringAtomic(&s.lastPrompt); lp != "" {
+	if lp := loadAtomicString(&s.lastPrompt); lp != "" {
 		snap.LastPrompt = lp
 	}
 	if snap.LastActivity == "" {
-		if la := loadStringAtomic(&s.lastActivity); la != "" {
+		if la := loadAtomicString(&s.lastActivity); la != "" {
 			snap.LastActivity = la
 		}
 	}
@@ -1245,11 +1248,11 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	// is atomic so no lock is needed; the "only set if empty" check is a
 	// benign TOCTOU — a concurrent Send writing the same field races, but
 	// both values are "most recent" views and whichever lands is acceptable.
-	if prompt != "" && loadStringAtomic(&s.lastPrompt) == "" {
-		storeStringAtomic(&s.lastPrompt, prompt)
+	if prompt != "" && loadAtomicString(&s.lastPrompt) == "" {
+		storeAtomicString(&s.lastPrompt, prompt)
 	}
-	if activity != "" && loadStringAtomic(&s.lastActivity) == "" {
-		storeStringAtomic(&s.lastActivity, activity)
+	if activity != "" && loadAtomicString(&s.lastActivity) == "" {
+		storeAtomicString(&s.lastActivity, activity)
 	}
 }
 
@@ -1257,7 +1260,7 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 // lastPrompt and lastActivity when they haven't been set yet (e.g. after shim reconnect
 // where events were injected directly into the process, bypassing InjectHistory).
 func (s *ManagedSession) extractLastPromptFromProcess() {
-	if loadStringAtomic(&s.lastPrompt) != "" && loadStringAtomic(&s.lastActivity) != "" {
+	if loadAtomicString(&s.lastPrompt) != "" && loadAtomicString(&s.lastActivity) != "" {
 		return
 	}
 	p := s.loadProcess()
@@ -1278,10 +1281,10 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 			break
 		}
 	}
-	if prompt != "" && loadStringAtomic(&s.lastPrompt) == "" {
-		storeStringAtomic(&s.lastPrompt, prompt)
+	if prompt != "" && loadAtomicString(&s.lastPrompt) == "" {
+		storeAtomicString(&s.lastPrompt, prompt)
 	}
-	if activity != "" && loadStringAtomic(&s.lastActivity) == "" {
-		storeStringAtomic(&s.lastActivity, activity)
+	if activity != "" && loadAtomicString(&s.lastActivity) == "" {
+		storeAtomicString(&s.lastActivity, activity)
 	}
 }
