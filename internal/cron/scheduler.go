@@ -25,6 +25,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // ErrJobNotFound is returned by lookup/mutation APIs when no cron job matches.
@@ -1694,22 +1695,6 @@ func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
 	s.notifyTarget(target.Platform, target.ChatID, text)
 }
 
-// runeByteOffset returns the byte offset that contains maxRunes runes.
-// truncated is true iff s has more than maxRunes runes.
-// Zero allocations, unlike `[]rune(s)[:n]`.
-func runeByteOffset(s string, maxRunes int) (int, bool) {
-	i, count := 0, 0
-	for i < len(s) {
-		if count == maxRunes {
-			return i, true
-		}
-		_, size := utf8.DecodeRuneInString(s[i:])
-		i += size
-		count++
-	}
-	return i, false
-}
-
 // recordResult persists the last execution result on the job and invokes the onExecute callback.
 //
 // sessionID 是本次执行从 CLI 拿到的 Claude session_id。成功路径传非空值，
@@ -1718,10 +1703,13 @@ func runeByteOffset(s string, maxRunes int) (int, bool) {
 // cron 侧边栏仍然能按历史 ID 拉到 JSONL 内容而不是空白面板。
 func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
 	const maxStoredRunes = 4 * 1024
-	// Byte-level rune decode: avoids the two O(n) rune-slice allocations that
-	// `string([]rune(result)[:maxStoredRunes])` performs on a 4KB-result path.
-	if byteOffset, truncated := runeByteOffset(result, maxStoredRunes); truncated {
-		result = result[:byteOffset] + "…[truncated]"
+	// Byte-level rune decode via textutil.TruncateRunesNoEllipsis: avoids the
+	// two O(n) rune-slice allocations that `string([]rune(result)[:N])` would
+	// perform. Length comparison after the call detects truncation so the cron
+	// "…[truncated]" suffix can be appended (textutil's default "..." ellipsis
+	// would not match this UI contract). R219-CR-2.
+	if trimmed := textutil.TruncateRunesNoEllipsis(result, maxStoredRunes); len(trimmed) < len(result) {
+		result = trimmed + "…[truncated]"
 	}
 	// Redact absolute filesystem paths from errMsg before persisting to
 	// cron_jobs.json and broadcasting to all authenticated dashboard
