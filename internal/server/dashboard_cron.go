@@ -974,6 +974,10 @@ func (h *CronHandlers) handleRunsList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "job_id too long", http.StatusBadRequest)
 		return
 	}
+	if !cron.IsValidID(jobID) {
+		http.Error(w, "job_id must be lowercase hex", http.StatusBadRequest)
+		return
+	}
 	limit := 50
 	if raw := r.URL.Query().Get("limit"); raw != "" {
 		if len(raw) > 4 {
@@ -1064,6 +1068,10 @@ func (h *CronHandlers) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "run_id too long", http.StatusBadRequest)
 		return
 	}
+	if !cron.IsValidID(runID) {
+		http.Error(w, "run_id must be lowercase hex", http.StatusBadRequest)
+		return
+	}
 	jobID := r.URL.Query().Get("job_id")
 	if jobID == "" {
 		http.Error(w, "job_id is required", http.StatusBadRequest)
@@ -1071,6 +1079,10 @@ func (h *CronHandlers) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 	}
 	if len(jobID) > maxCronIDLenDashboard {
 		http.Error(w, "job_id too long", http.StatusBadRequest)
+		return
+	}
+	if !cron.IsValidID(jobID) {
+		http.Error(w, "job_id must be lowercase hex", http.StatusBadRequest)
 		return
 	}
 	run, err := h.scheduler.GetRun(jobID, runID)
