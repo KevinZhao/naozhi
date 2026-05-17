@@ -57,8 +57,6 @@ func ProcStartTime(pid int) (uint64, error) {
 	return usec, nil
 }
 
-var ErrUnsupportedPlatform = fmt.Errorf("operation not supported on this platform")
-
 func procPidAlive(pid int) bool { return syscall.Kill(pid, 0) == nil }
 func procKillSIGKILL(pid int)   { _ = syscall.Kill(pid, syscall.SIGKILL) }
 

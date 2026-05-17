@@ -2,11 +2,6 @@
 
 package discovery
 
-import "errors"
-
-// ErrUnsupportedPlatform is returned by platform stubs on non-POSIX systems.
-var ErrUnsupportedPlatform = errors.New("operation not supported on this platform")
-
 // ProcStartTime stub for Windows. The shim/discovery stack is POSIX-only;
 // release.yml excludes windows, and CI's build-windows job is a
 // compile-only regression gate (ci.yml continue-on-error). This stub
