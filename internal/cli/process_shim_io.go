@@ -182,6 +182,28 @@ func (p *Process) shimSend(msg shimClientMsg) error {
 	return p.shimW.Flush()
 }
 
+// shimPingBytes is the pre-marshalled NDJSON frame for heartbeat pings.
+// The heartbeat loop fires every 30s for every live process, so the
+// payload is fully static — there's no runtime field to fill in. Using
+// a package-level constant skips the encodeShimMsg pool acquire +
+// json.Encoder reflection on the hot path. R222-PERF-14.
+//
+// The trailing '\n' is mandatory: shim NDJSON framing uses '\n' as the
+// record separator, identical to what json.Encoder.Encode appends.
+var shimPingBytes = []byte(`{"type":"ping"}` + "\n")
+
+// shimSendRaw writes a pre-marshalled shim wire frame without going
+// through encodeShimMsg. The caller MUST guarantee data is a valid
+// NDJSON record (typically a package-level constant). R222-PERF-14.
+func (p *Process) shimSendRaw(data []byte) error {
+	p.shimWMu.Lock()
+	defer p.shimWMu.Unlock()
+	if _, err := p.shimW.Write(data); err != nil {
+		return err
+	}
+	return p.shimW.Flush()
+}
+
 // shimSendLocked is the locked variant of shimSend. The caller MUST hold
 // p.shimWMu. Kill() uses this to batch SetWriteDeadline+send+Close under a
 // single lock acquisition to avoid racing a concurrent shimSend.

@@ -536,7 +536,11 @@ func (p *Process) heartbeatLoop() {
 	for {
 		select {
 		case <-ticker.C:
-			if err := p.shimSend(shimClientMsg{Type: "ping"}); err != nil {
+			// R222-PERF-14: heartbeat ping payload is fully static (no
+			// runtime field). Using a pre-marshalled []byte skips the
+			// encodeShimMsg pool acquire + json.Encoder reflection
+			// every 30s × N live processes.
+			if err := p.shimSendRaw(shimPingBytes); err != nil {
 				log.Debug("heartbeat ping failed", "err", err)
 				p.Kill()
 				return
