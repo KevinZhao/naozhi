@@ -619,17 +619,33 @@ func validateConfig(cfg *Config) error {
 	if err := validateArgvStrings("cli.args", cfg.CLI.Args); err != nil {
 		return err
 	}
+	if err := validateModelString("cli.model", cfg.CLI.Model); err != nil {
+		return err
+	}
 	for _, b := range cfg.CLI.Backends {
 		if err := validateArgvStrings(fmt.Sprintf("cli.backends[%s].args", b.ID), b.Args); err != nil {
+			return err
+		}
+		if err := validateModelString(fmt.Sprintf("cli.backends[%s].model", b.ID), b.Model); err != nil {
 			return err
 		}
 	}
 	// agents[*].args 同样会被拼进 exec.Command（session/router.go 按 agentID
 	// 合并 AgentOpts.ExtraArgs），配置层漏过等于放弃 NUL/控制字符防御。
+	// agents[*].model 走 SpawnOptions.Model 进 BuildArgs；同步 allowlist
+	// 防御 leading-`-` 等再被 flag-parser 误解析。R215-SEC-P2-1.
 	for id, a := range cfg.Agents {
 		if err := validateArgvStrings(fmt.Sprintf("agents[%s].args", id), a.Args); err != nil {
 			return err
 		}
+		if err := validateModelString(fmt.Sprintf("agents[%s].model", id), a.Model); err != nil {
+			return err
+		}
+	}
+	// projects.planner_defaults.model 同走 BuildArgs（spawnSession 在 planner
+	// 路径覆盖 opts.Model），配置层 allowlist 与 cli.model 对齐。
+	if err := validateModelString("projects.planner_defaults.model", cfg.Projects.PlannerDefaults.Model); err != nil {
+		return err
 	}
 
 	return nil
@@ -650,6 +666,40 @@ func validateArgvStrings(field string, args []string) error {
 				return fmt.Errorf("%s[%d] contains control byte (0x%02x) — refusing (argv injection guard)", field, i, r)
 			}
 		}
+	}
+	return nil
+}
+
+// modelNameRe restricts model identifiers to characters that can never be
+// re-interpreted by Claude / Kiro / Gemini CLIs as a flag boundary. Real
+// Anthropic / vendor model strings are alphanumerics plus `.`, `_`, `-`
+// (e.g. "claude-opus-4-5", "kiro-1.0", "us.anthropic.claude-3-5-sonnet").
+// Empty is accepted by the caller (means "use backend default"); this regex
+// only validates non-empty strings.
+//
+// Why the leading character must be alphanumeric: BuildArgs appends
+// `--model <opts.Model>` to the argv, but a future refactor or alternate
+// backend that drops the `--model` flag and passes the model as a positional
+// could let "-foo" be re-parsed by the CLI's flag parser. The first char is
+// pinned to [A-Za-z0-9] so a leading `-` (or `.` ambiguous on some shells)
+// is rejected outright, eliminating that class of misuse at the
+// config-validation layer rather than relying on per-backend argv assembly
+// to stay correct forever.
+var modelNameRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
+
+// validateModelString gates a configured model identifier. Empty is allowed
+// (caller-defined fallback semantics: cli.model empty → backend default,
+// agent.model empty → cli.model). Non-empty values must match modelNameRe.
+// R215-SEC-P2-1.
+func validateModelString(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if len(value) > 128 {
+		return fmt.Errorf("%s %q is too long (max 128 chars)", field, value)
+	}
+	if !modelNameRe.MatchString(value) {
+		return fmt.Errorf("%s %q must match [A-Za-z0-9._-]+ — refusing (flag-injection guard)", field, value)
 	}
 	return nil
 }
