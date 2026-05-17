@@ -386,6 +386,14 @@ func extractPersistedPath(s string) string {
 	return "tool-results/" + base
 }
 
+// firstLineTrunc returns the literal first line of s (the slice up to the
+// first '\n', or all of s if no newline) truncated to max runes.
+//
+// Semantic note (R222-CR-7): unlike dispatch/status.go::firstLine which skips
+// leading blank lines, firstLineTrunc preserves an empty first line (returns
+// ""). Callers in subagent transcripts intentionally surface this so a
+// transcript whose first row has no content renders as empty rather than
+// silently scanning ahead for the next non-blank row.
 func firstLineTrunc(s string, max int) string {
 	if idx := strings.IndexByte(s, '\n'); idx >= 0 {
 		s = s[:idx]
