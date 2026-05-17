@@ -923,6 +923,15 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})
 		return
 	}
+	// path.Clean (POSIX, forward-slash only) is correct for the wire
+	// shape we accept (we already rejected backslash + IsAbs above), and
+	// matches the forward-slash attachmentDirPrefix HasPrefix check
+	// below. We deliberately do NOT swap to filepath.Clean here: on
+	// Windows that would treat backslash as a separator, but the
+	// pre-clean reject already disallows backslash entirely so
+	// filepath.Clean would be a no-op divergence with cross-platform
+	// risk. EvalSymlinks + attachRootAbs HasPrefix below provides the
+	// authoritative containment check after Join.
 	cleaned := path.Clean(relRaw)
 	if cleaned == ".." || strings.HasPrefix(cleaned, "../") || strings.Contains(cleaned, "/../") {
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid path"})

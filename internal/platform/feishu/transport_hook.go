@@ -125,7 +125,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				// anything pathologically large so a header-flood with giant
 				// nonces cannot bloat seenNonces (sync.Map retains entries for
 				// nonceTTL = 5min, cleaned up on a timer).
-				if len(nonce) > 128 {
+				if len(nonce) > maxWebhookNonceLen {
 					slog.Warn("feishu webhook nonce too long", "len", len(nonce))
 					w.WriteHeader(http.StatusBadRequest)
 					return

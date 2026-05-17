@@ -154,6 +154,13 @@ const (
 	sendAckBusy sendAckStatus = "busy"
 )
 
+// interruptAcquireTimeout is the upper bound the post-interrupt
+// AcquireTimeout waits for the previous turn's owner goroutine to
+// release the per-key guard. 2s tolerates a slow CLI shutdown while
+// keeping the user-visible "interrupted, please retry" feedback within
+// a single response cycle.
+const interruptAcquireTimeout = 2 * time.Second
+
 // sessionSend validates and dispatches a send request.
 // Returns (true, "", nil) if the request was a /clear or /new reset.
 // Returns (false, "", err) if validation failed (workspace forbidden, etc.).
@@ -580,7 +587,7 @@ func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError func(string)) (bool, 
 	go func() {
 		defer release()
 		if needInterrupt {
-			if !h.guard.AcquireTimeout(h.ctx, key, 2*time.Second) {
+			if !h.guard.AcquireTimeout(h.ctx, key, interruptAcquireTimeout) {
 				slog.Error("send: interrupt timed out", "key", key)
 				if onAsyncError != nil {
 					onAsyncError("会话中断超时，请稍后重试。")

@@ -1567,7 +1567,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		} else {
 			lg.Error("cron session error", "err", err)
 		}
-		s.recordResult(j, "", "session error: "+err.Error(), "")
+		s.recordResult(j, "", fmt.Sprintf("session error: %v", err), "")
 		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", snap.jobID))
 		stubRefresh()
 		return
@@ -1602,7 +1602,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		} else {
 			lg.Error("cron send error", "err", err)
 		}
-		s.recordResult(j, "", "send error: "+err.Error(), "")
+		s.recordResult(j, "", fmt.Sprintf("send error: %v", err), "")
 		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", snap.jobID))
 		stubRefresh()
 		return

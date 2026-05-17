@@ -63,6 +63,12 @@ const (
 	// 64 KiB is well above the largest legitimate Feishu webhook payload; a body
 	// larger than this is either a misconfigured sender or an attack attempt.
 	maxWebhookBodyBytes = 64 * 1024
+
+	// maxWebhookNonceLen bounds the X-Lark-Request-Nonce header length
+	// before insertion into seenNonces. Feishu nonces are 16-char random
+	// strings in practice; this limit protects the dedup map from a
+	// header-flood with giant nonces inflating heap.
+	maxWebhookNonceLen = 128
 )
 
 var feishuHTTPClient = &http.Client{

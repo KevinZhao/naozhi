@@ -857,7 +857,16 @@ func (w *perKeyWriter) flush(p *Persister) error {
 		// entriesSinceIdxWrite is a cursor into the stride cycle —
 		// reset modulo stride so successive batches stay aligned.
 		w.entriesSinceIdxWrite = (w.entriesSinceIdxWrite + len(w.pendingIdx)) % p.opts.IdxStride
-		w.pendingIdx = w.pendingIdx[:0]
+		// Shrink the backing array if a one-off large batch (e.g.
+		// InjectHistory replay of 500+ entries) bloated cap far
+		// beyond the steady-state IdxStride*2 sizing. Without this
+		// guard the per-session writer permanently retains the
+		// peak capacity once an oversized batch has flowed through.
+		if p.opts.IdxStride > 1 && cap(w.pendingIdx) > p.opts.IdxStride*4 {
+			w.pendingIdx = make([]schema.IdxEntry, 0, p.opts.IdxStride*2)
+		} else {
+			w.pendingIdx = w.pendingIdx[:0]
+		}
 	}
 	if err := w.idxWriter.Sync(); err != nil {
 		return fmt.Errorf("sync idx: %w", err)

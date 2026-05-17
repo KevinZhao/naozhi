@@ -147,9 +147,11 @@ type SessionConfig struct {
 	Watchdog  WatchdogConfig `yaml:"watchdog"`
 	Queue     QueueConfig    `yaml:"queue"`
 	StorePath string         `yaml:"store_path"`
-	CWD       string         `yaml:"cwd"`       // default working directory for CLI processes
-	Workspace string         `yaml:"workspace"` // deprecated alias for cwd (backward compat)
-	Shim      ShimConfig     `yaml:"shim"`
+	CWD       string         `yaml:"cwd"` // default working directory for CLI processes
+	// Deprecated: use CWD instead. Preserved for backward compatibility
+	// with existing config files; new fields should write only `cwd`.
+	Workspace string     `yaml:"workspace"`
+	Shim      ShimConfig `yaml:"shim"`
 }
 
 // QueueConfig controls IM message queuing when a session is busy.
@@ -273,8 +275,12 @@ func Load(path string) (*Config, error) {
 			return nil, fmt.Errorf("config file %s is a symlink; refusing to load (resolve the link or point --config at the target directly)",
 				path)
 		}
-		if fi.Mode()&0o044 != 0 {
-			return nil, fmt.Errorf("config file %s is group/world-readable (mode %04o); restrict with: chmod 0600 %s",
+		// Reject any group/world permission bit (read/write/execute).
+		// 0o044 only covered group-read + world-read; this widens to
+		// 0o077 so a chmod 0710 (group-execute) cannot bypass the
+		// gate, matching the policy used for shim state files.
+		if fi.Mode()&0o077 != 0 {
+			return nil, fmt.Errorf("config file %s is group/world-accessible (mode %04o); restrict with: chmod 0600 %s",
 				path, fi.Mode().Perm(), path)
 		}
 	}
