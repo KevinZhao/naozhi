@@ -105,6 +105,56 @@ func TestDashboardJS_CronEditScheduleSafety(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_CronEditWorkDirSeed 守住"编辑老任务不改工作目录就保存
+// 不会被清空"这条契约。Bug：editCronJob 之前刻意把 overlay._cronWorkDir
+// seed 成 ”，理由是「input 的 pre-fill 覆盖未改动场景」；但
+// buildCronWorkspaceBodyInternal 仅在 selected 命中 projectsData 中已知
+// project 时才把 input.value 设成空字符串（隐藏 custom form 分支）—— 也
+// 就是说当 work_dir 命中已知项目时，picker 显示项目名（看似正确），用户
+// 直接保存 doEditCronJob 算出 newWorkDir = ” 与 job.work_dir 比对不等
+// → PATCH body.work_dir = ” → 后端清空。
+//
+// 修复：editCronJob 必须 seed _cronWorkDir = job.work_dir || ”。
+// cronSelectWorkspace（用户点其他项目）和 toggleCronWsCustom（用户切到
+// 自定义路径）都会显式覆盖 _cronWorkDir，所以「换项目」「清空目录」两条
+// 路径都不受影响。
+func TestDashboardJS_CronEditWorkDirSeed(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	editStart := strings.Index(js, "function editCronJob(")
+	editEnd := strings.Index(js, "async function doEditCronJob(")
+	if editStart < 0 || editEnd < 0 || editEnd <= editStart {
+		t.Fatal("could not locate editCronJob function bounds")
+	}
+	editBody := js[editStart:editEnd]
+
+	if !strings.Contains(editBody, "overlay._cronWorkDir = job.work_dir || '';") {
+		t.Error("editCronJob must seed _cronWorkDir from job.work_dir — " +
+			"otherwise opening edit modal on a job with a known project work_dir " +
+			"and clicking Save without touching anything sends work_dir='' and " +
+			"the backend clears the override (regression: dashboard cron edit bug)")
+	}
+
+	// 确保 seed 行不是被注释掉的死代码：剥注释后仍存在。
+	var codeLines []string
+	for _, line := range strings.Split(editBody, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "//") {
+			continue
+		}
+		codeLines = append(codeLines, line)
+	}
+	codeOnly := strings.Join(codeLines, "\n")
+	if !strings.Contains(codeOnly, "overlay._cronWorkDir = job.work_dir") {
+		t.Error("the _cronWorkDir seed line must live in executable code, not a comment")
+	}
+}
+
 // TestDashboardJS_CronHumanizeFallbacks 守住 humanizeCron 对几类 v2 picker
 // 不 round-trip 的 legacy shape 必须给出可读中文标签（而非原 cron
 // 表达式），用于卡片列表和 legacy hint 的视觉展示。
