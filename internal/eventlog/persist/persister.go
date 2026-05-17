@@ -468,8 +468,13 @@ func (p *Persister) run() {
 	for {
 		select {
 		case job := <-p.in:
-			p.handleBatch(job)
-			p.lastDrainNS.Store(p.opts.Clock().UnixNano())
+			// Capture Clock() once per batch and reuse for both the
+			// dirty-flag/lastActivity bookkeeping inside handleBatch and
+			// the lastDrainNS atomic store below. Saves one vDSO call per
+			// hot-path batch (~5-50/s steady state). R222-PERF-12.
+			now := p.opts.Clock()
+			p.handleBatch(job, now)
+			p.lastDrainNS.Store(now.UnixNano())
 
 		case o := <-p.opCh:
 			p.handleOp(o)
@@ -485,7 +490,7 @@ func (p *Persister) run() {
 			for {
 				select {
 				case job := <-p.in:
-					p.handleBatch(job)
+					p.handleBatch(job, p.opts.Clock())
 				default:
 					p.shutdownAll()
 					return
@@ -541,16 +546,21 @@ func (p *Persister) handleOp(o op) {
 func (p *Persister) drainInChannel() {
 	// One Clock+atomic Store after the loop instead of one per batch:
 	// drain may pull dozens of queued batches in a tight burst.
-	// R216-PERF-7.
+	// R216-PERF-7. Each handleBatch reuses the same captured `now` so a
+	// burst of 50 batches needs only one vDSO call. R222-PERF-12.
+	var now time.Time
 	drained := false
 	for {
 		select {
 		case job := <-p.in:
-			p.handleBatch(job)
+			if !drained {
+				now = p.opts.Clock()
+			}
+			p.handleBatch(job, now)
 			drained = true
 		default:
 			if drained {
-				p.lastDrainNS.Store(p.opts.Clock().UnixNano())
+				p.lastDrainNS.Store(now.UnixNano())
 			}
 			return
 		}
@@ -625,7 +635,11 @@ func (p *Persister) tickIdleClose() {
 // entry, update the dirty flag for debounce. It NEVER fsyncs here;
 // the debounce ticker owns fsync so a 500-entry batch doesn't cause
 // 500 fsyncs.
-func (p *Persister) handleBatch(job batchJob) {
+//
+// `now` is captured by the caller (run loop or drainInChannel) so the
+// same clock reading covers both this function's bookkeeping and the
+// caller's lastDrainNS update. R222-PERF-12.
+func (p *Persister) handleBatch(job batchJob, now time.Time) {
 	w, err := p.writerFor(job.Key, job.Stem)
 	if err != nil {
 		slog.Error("event log persist: cannot open writer",
@@ -633,7 +647,6 @@ func (p *Persister) handleBatch(job batchJob) {
 		return
 	}
 
-	now := p.opts.Clock()
 	for _, e := range job.Entries {
 		rec := schema.NewEntry(w.nextSeq, e.JSON)
 		body, err := schema.MarshalRecord(rec)
