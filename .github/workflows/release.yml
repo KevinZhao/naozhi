@@ -12,7 +12,7 @@ jobs:
   check-branch:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
         with:
           fetch-depth: 0
       - name: Verify tag is on master
@@ -44,7 +44,7 @@ jobs:
           # CYGWIN and the shim requires POSIX process semantics (Setsid, Kill)
           # that have no Windows equivalent even with the syscall build-tag split.
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - uses: actions/setup-go@v6
         with:
@@ -73,7 +73,7 @@ jobs:
       # Need the repo for install.sh to ship as a release asset. install.sh
       # is intentionally static (no per-release substitution); it fetches
       # checksums.txt from whichever tag it targets at runtime.
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v6
 
       - uses: actions/download-artifact@v8
         with:
