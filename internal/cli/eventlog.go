@@ -229,6 +229,16 @@ type EventLog struct {
 	turnAgents []SubagentInfo // foreground agents in current turn; protected by mu
 	bgAgents   []SubagentInfo // background (run_in_background) agents; cleared on turn boundaries like turnAgents; protected by mu
 
+	// turnAgentCount mirrors len(turnAgents)+len(bgAgents) for lock-free
+	// reads from the ManagedSession.Snapshot hot path. Most sessions sit at
+	// zero outside an active subagent turn; the dashboard polls Snapshot at
+	// 1Hz × N tabs × ~50 sessions, so taking l.mu RLock + allocating a
+	// 0-length slice on every empty read is wasted work. Updated under
+	// l.mu alongside the slice mutations in applyEntryStateLocked's agent
+	// spawn and result/user reset branches (task_progress / task_done /
+	// SetAgentInternalID only mutate fields, not length). R220-PERF-6.
+	turnAgentCount atomic.Int32
+
 	// onAgentTaskDone fires after applyEntryStateLocked ingests a "task_done"
 	// entry, carrying the task_id and final status. The server layer uses
 	// this to close the corresponding agent tailer (RFC v4 §3.5.4). Fired
@@ -408,6 +418,7 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 		} else {
 			l.turnAgents = append(l.turnAgents, info)
 		}
+		l.turnAgentCount.Store(int32(len(l.turnAgents) + len(l.bgAgents)))
 	case "task_start":
 		// task_started arrives 0-200ms after the "agent" tool_use. Match
 		// by ToolUseID (authoritative; Agent tool_use → system.task_started
@@ -485,6 +496,7 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 	case "result", "user":
 		l.turnAgents = l.turnAgents[:0]
 		l.bgAgents = l.bgAgents[:0]
+		l.turnAgentCount.Store(0)
 	}
 	return false, pendingTaskDone{}
 }
@@ -1039,7 +1051,18 @@ func storeAtomicString(v *atomic.Pointer[string], s string) {
 // TurnAgents returns a copy of all currently active agents (foreground + background)
 // in the current turn. Both are cleared on turn boundaries (result/user events).
 // Returns nil when no agents are active.
+//
+// Fast path: most sessions have no active sub-agents at any given time, so
+// the atomic turnAgentCount lets Snapshot skip the RLock + 0-length slice
+// allocation on the common empty read. A reader briefly racing with a
+// just-mutated count sees at worst one stale poll cycle (1Hz dashboard
+// auto-heals on the next tick); the reset path drains both slices under
+// l.mu before storing 0, so a count==0 fast-path can never miss live data
+// already visible under the lock. R220-PERF-6.
 func (l *EventLog) TurnAgents() []SubagentInfo {
+	if l.turnAgentCount.Load() == 0 {
+		return nil
+	}
 	l.mu.RLock()
 	defer l.mu.RUnlock()
 	total := len(l.turnAgents) + len(l.bgAgents)

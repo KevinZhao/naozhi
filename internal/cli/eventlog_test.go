@@ -413,6 +413,33 @@ func TestEventLog_TurnAgents_IsCopy(t *testing.T) {
 	}
 }
 
+// TestEventLog_TurnAgentCount mirrors len(turnAgents)+len(bgAgents) for the
+// Snapshot fast-path. R220-PERF-6.
+func TestEventLog_TurnAgentCount(t *testing.T) {
+	t.Parallel()
+	l := NewEventLog(100)
+	if got := l.turnAgentCount.Load(); got != 0 {
+		t.Errorf("initial count = %d, want 0", got)
+	}
+	l.Append(EventEntry{Time: 1000, Type: "agent", Subagent: "Explore"})
+	if got := l.turnAgentCount.Load(); got != 1 {
+		t.Errorf("after fg spawn count = %d, want 1", got)
+	}
+	l.Append(EventEntry{Time: 2000, Type: "agent", Subagent: "bg-task", Background: true})
+	if got := l.turnAgentCount.Load(); got != 2 {
+		t.Errorf("after bg spawn count = %d, want 2 (1 fg + 1 bg)", got)
+	}
+	l.Append(EventEntry{Time: 3000, Type: "result", Summary: "done"})
+	if got := l.turnAgentCount.Load(); got != 0 {
+		t.Errorf("after result count = %d, want 0", got)
+	}
+	l.Append(EventEntry{Time: 4000, Type: "agent", Subagent: "planner"})
+	l.Append(EventEntry{Time: 5000, Type: "user", Summary: "hello"})
+	if got := l.turnAgentCount.Load(); got != 0 {
+		t.Errorf("after user count = %d, want 0", got)
+	}
+}
+
 // TestEventLog_LastEventAt verifies live Appends update lastEventAt
 // (used by Router.Cleanup as a long-turn activity heartbeat), and that
 // AppendBatch (history replay) does NOT overwrite it with historical
