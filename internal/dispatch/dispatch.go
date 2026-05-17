@@ -332,24 +332,24 @@ func (d *Dispatcher) BuildHandler() platform.MessageHandler {
 					switch outcome := d.router.InterruptSessionViaControl(key); outcome {
 					case session.InterruptSent:
 						log.Info("interrupt mode: aborted active turn to process follow-up",
-							"session_key", key)
+							"key", key)
 					case session.InterruptNoTurn:
 						// Session is spawning or idle — the turn isn't active yet,
 						// so nothing to interrupt. The follow-up will be drained
 						// by the owner loop after the first turn completes.
 						log.Debug("interrupt mode: session idle or spawning, will process follow-up after current turn",
-							"session_key", key)
+							"key", key)
 					case session.InterruptNoSession:
 						log.Debug("interrupt mode: session not found, falling back to collect",
-							"session_key", key)
+							"key", key)
 					case session.InterruptUnsupported:
 						log.Debug("interrupt mode: protocol does not support stdin interrupt, falling back to collect",
-							"session_key", key)
+							"key", key)
 					case session.InterruptError:
 						// Warn already emitted inside ManagedSession.InterruptViaControl;
 						// keep a paired trace here to anchor the dispatch side.
 						log.Warn("interrupt mode: transport error, falling back to collect",
-							"session_key", key)
+							"key", key)
 					}
 				}
 				if enqueued {
@@ -439,7 +439,7 @@ func (d *Dispatcher) ownerLoop(
 	// burst of 5 follow-ups meant 5 identical handler-chain allocs. Lifting
 	// it here costs exactly one alloc per ownerLoop regardless of drain
 	// depth. R61-PERF-12.
-	log = log.With("session_key", key, "agent", agentID)
+	log = log.With("key", key, "agent", agentID)
 
 	// Process first message.
 	d.sendAndReply(ctx, key, first.Text, first.Images, agentID, opts, msg, log, true)
