@@ -154,10 +154,18 @@ type OnExecuteFunc func(jobID, result, errMsg string)
 
 // Scheduler manages cron jobs and executes them on schedule.
 type Scheduler struct {
-	cron          *robfigcron.Cron
-	mu            sync.RWMutex
-	jobs          map[string]*Job
-	router        SessionRouter
+	cron *robfigcron.Cron
+	mu   sync.RWMutex
+	jobs map[string]*Job
+	// router is set once in NewScheduler and never reassigned.
+	router SessionRouter
+	// platforms / agents / agentCommands are populated from SchedulerConfig
+	// at NewScheduler and treated as immutable thereafter — notifyTarget
+	// reads platforms without s.mu (line ~1864) and executeOpt reads agents
+	// without s.mu (line ~1534). A future caller must NOT mutate these maps
+	// in place; if dynamic backend/agent registration ever lands, switch to
+	// atomic.Pointer[map[...]] swap-on-write so reads stay lock-free without
+	// racing the writer.
 	platforms     map[string]platform.Platform
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
@@ -721,19 +729,6 @@ func (s *Scheduler) ListJobs(plat, chatID string) []Job {
 	return result
 }
 
-// ListAllJobs returns all jobs regardless of platform/chat scope.
-// Returns value copies safe to read outside the lock.
-func (s *Scheduler) ListAllJobs() []Job {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-
-	result := make([]Job, 0, len(s.jobs))
-	for _, j := range s.jobs {
-		result = append(result, *j)
-	}
-	return result
-}
-
 // JobWithNextRun pairs a Job snapshot with its next scheduled run time so
 // callers rendering lists (dashboard) don't need a second round-trip per job.
 type JobWithNextRun struct {
@@ -1204,20 +1199,6 @@ func (s *Scheduler) NextRun(j *Job) time.Time {
 	if entryID == 0 {
 		return time.Time{}
 	}
-	entry := s.cron.Entry(entryID)
-	return entry.Next
-}
-
-// NextRunByID returns the next scheduled run time for a job by ID.
-func (s *Scheduler) NextRunByID(id string) time.Time {
-	s.mu.RLock()
-	j, ok := s.jobs[id]
-	if !ok || j.entryID == 0 {
-		s.mu.RUnlock()
-		return time.Time{}
-	}
-	entryID := j.entryID
-	s.mu.RUnlock()
 	entry := s.cron.Entry(entryID)
 	return entry.Next
 }
