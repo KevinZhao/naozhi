@@ -21,13 +21,34 @@ type ClaudeProtocol struct {
 	// Use writeClaudeSettingsOverride() to generate a filtered copy of user settings
 	// that strips hooks calling back into naozhi.
 	SettingsFile string
+
+	// RefreshSettings, when non-nil, is invoked at the start of every BuildArgs
+	// call and its return value (if non-empty) replaces SettingsFile for that
+	// spawn. This lets the override file track edits to ~/.claude/settings.json
+	// at session-spawn granularity, instead of being frozen at naozhi startup.
+	// Returning "" indicates "refresh failed; keep the existing SettingsFile" —
+	// callers that hit a read race or IO error should not nuke the prior path
+	// because the last known-good override still authenticates Bedrock.
+	//
+	// Clone propagates this field so per-spawn copies retain refresh ability.
+	RefreshSettings func() string
 }
 
 func (p *ClaudeProtocol) Name() string { return "stream-json" }
 
-func (p *ClaudeProtocol) Clone() Protocol { return &ClaudeProtocol{SettingsFile: p.SettingsFile} }
+func (p *ClaudeProtocol) Clone() Protocol {
+	return &ClaudeProtocol{
+		SettingsFile:    p.SettingsFile,
+		RefreshSettings: p.RefreshSettings,
+	}
+}
 
 func (p *ClaudeProtocol) BuildArgs(opts SpawnOptions) []string {
+	if p.RefreshSettings != nil {
+		if path := p.RefreshSettings(); path != "" {
+			p.SettingsFile = path
+		}
+	}
 	args := []string{
 		"-p",
 		"--output-format", "stream-json",
