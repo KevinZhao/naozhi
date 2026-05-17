@@ -6,9 +6,11 @@ import "sync/atomic"
 // stored. Retained as a helper since several callers need the "nil → empty
 // string" collapse without writing the same 4-line guard inline.
 //
-// History: cli.loadAtomicString and session.loadStringAtomic were word-for-word
-// identical implementations in two different packages with reversed naming.
-// Centralised here so a future variant can land in one place. R219-CR-1.
+// History: cli.loadAtomicString and session.loadStringAtomic were
+// word-for-word identical implementations in two different packages with
+// reversed naming. Centralised here so a future variant can land in one
+// place (R219-CR-1); the session-side wrapper was later renamed to
+// loadAtomicString so cli/session word order matches this canonical name.
 func LoadAtomicString(v *atomic.Pointer[string]) string {
 	if p := v.Load(); p != nil {
 		return *p
