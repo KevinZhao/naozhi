@@ -204,11 +204,19 @@ claude CLI 子进程的状态机：
   Ready ---> 关闭 stdin ---> 进程退出 ---> Dead (保留 session_id, 下次 --resume 恢复)
 ```
 
-状态说明：
+状态说明（`cli.ProcessState` 进程级 4 态枚举，权威定义见 `internal/cli/process.go::ProcessState`）：
 - **Spawning**: 进程启动中，等待 init 事件。超时 10s 未收到 init 则 kill
 - **Ready**: 进程空闲，可接受新消息
 - **Running**: 正在处理消息，等待 result。启用 Watchdog: 无输出超时 120s（配置默认值）+ 总超时 300s（配置默认值）。任何一个超时触发即杀死进程
 - **Dead**: 进程已退出。有 session_id 的保留供 resume；无 session_id 的在 Cleanup 时清除
+
+> 上述是 `cli.Process` 的进程级状态机；`session.ManagedSession` 上层另有若干**语义标签**（不是状态枚举），用来表达跨进程生命周期的 session 角色：
+> - `Exempt`：planner / cron stub 类 session，不计入 maxProcs 配额（见 `AgentOpts.Exempt`）
+> - `Stub`：cron 注册但尚未首次执行的占位 session（见 `RegisterCronStub`）
+> - `Scratch`：dashboard 抽屉临时 session，由 key 前缀 `scratch:` 标识，永远不入 sidebar
+> - `Paused / Suspended`：session 行为通过 `process == nil` + 可 resume 的 `SessionID` 表达（dead-resumable）
+>
+> 这些标签可正交组合（如 exempt + stub），底层进程仍走上面的 4 态机。
 
 Watchdog 机制：
 - `no_output_timeout`（默认 2min）：若连续无输出事件，杀死进程
