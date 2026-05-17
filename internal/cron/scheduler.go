@@ -770,16 +770,17 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 	return result
 }
 
-// DeleteJobByID removes a job by exact ID (unscoped, for dashboard use).
-func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
-	s.mu.Lock()
-
-	j, ok := s.jobs[id]
-	if !ok {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
-	}
-
+// deleteJobLocked performs the in-memory side effects of removing a job:
+// stop the cron entry, reset the bound session, and drop the map entry.
+// Caller must hold s.mu.Lock() and pass a non-nil job that exists in
+// s.jobs. Intentionally does NOT delete from s.runningJobs: a concurrent
+// execute() for this job may still hold the atomic.Bool and be about to
+// CAS it back to false; if a fresh AddJob somehow reused the same ID
+// (low but non-zero given the hex8 generator), creating a new guard entry
+// here could split the CAS gate between two goroutines and permit double
+// execution. Retaining the entry is bounded by maxJobsHardCap (one
+// *atomic.Bool per historical job) — cheap vs a correctness gap. R219-CR-4.
+func (s *Scheduler) deleteJobLocked(j *Job) {
 	if j.entryID != 0 {
 		s.cron.Remove(j.entryID)
 	}
@@ -787,13 +788,48 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 		s.router.Reset(session.CronKey(j.ID))
 	}
 	delete(s.jobs, j.ID)
-	// Intentionally do NOT delete from s.runningJobs here: a concurrent
-	// execute() for this job may still hold the atomic.Bool and be about to
-	// CAS it back to false; if a fresh AddJob somehow reused the same ID
-	// (low but non-zero given the hex8 generator), creating a new guard
-	// entry here could split the CAS gate between two goroutines and permit
-	// double execution. Retaining the entry is bounded by maxJobsHardCap
-	// (one *atomic.Bool per historical job) — cheap vs a correctness gap.
+}
+
+// pauseJobLocked transitions a job to Paused state under s.mu. Returns
+// ErrJobAlreadyPaused without mutation if the job is already paused so
+// the caller can map it to 409 Conflict. R219-CR-4.
+func (s *Scheduler) pauseJobLocked(j *Job) error {
+	if j.Paused {
+		return fmt.Errorf("%w: id %q", ErrJobAlreadyPaused, j.ID)
+	}
+	if j.entryID != 0 {
+		s.cron.Remove(j.entryID)
+		j.entryID = 0
+	}
+	j.Paused = true
+	return nil
+}
+
+// resumeJobLocked transitions a paused job back to active under s.mu by
+// re-registering the cron entry. Returns ErrJobNotPaused without mutation
+// if the job is not paused, or registerJob's error if re-registration
+// fails (e.g. schedule no longer parses) — leaving Paused=true so the
+// caller can retry. R219-CR-4.
+func (s *Scheduler) resumeJobLocked(j *Job) error {
+	if !j.Paused {
+		return fmt.Errorf("%w: id %q", ErrJobNotPaused, j.ID)
+	}
+	if err := s.registerJob(j); err != nil {
+		return err
+	}
+	j.Paused = false
+	return nil
+}
+
+// DeleteJobByID removes a job by exact ID (unscoped, for dashboard use).
+func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
+	s.mu.Lock()
+	j, ok := s.jobs[id]
+	if !ok {
+		s.mu.Unlock()
+		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
+	}
+	s.deleteJobLocked(j)
 	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
@@ -807,22 +843,15 @@ func (s *Scheduler) DeleteJobByID(id string) (*Job, error) {
 // PauseJobByID pauses a job by exact ID (unscoped, for dashboard use).
 func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 	s.mu.Lock()
-
 	j, ok := s.jobs[id]
 	if !ok {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 	}
-	if j.Paused {
+	if err := s.pauseJobLocked(j); err != nil {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("%w: id %q", ErrJobAlreadyPaused, j.ID)
+		return nil, err
 	}
-
-	if j.entryID != 0 {
-		s.cron.Remove(j.entryID)
-		j.entryID = 0
-	}
-	j.Paused = true
 	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
@@ -836,22 +865,15 @@ func (s *Scheduler) PauseJobByID(id string) (*Job, error) {
 // ResumeJobByID resumes a paused job by exact ID (unscoped, for dashboard use).
 func (s *Scheduler) ResumeJobByID(id string) (*Job, error) {
 	s.mu.Lock()
-
 	j, ok := s.jobs[id]
 	if !ok {
 		s.mu.Unlock()
 		return nil, fmt.Errorf("%w: id %q", ErrJobNotFound, id)
 	}
-	if !j.Paused {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("%w: id %q", ErrJobNotPaused, j.ID)
-	}
-
-	if err := s.registerJob(j); err != nil {
+	if err := s.resumeJobLocked(j); err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
-	j.Paused = false
 	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
@@ -1113,22 +1135,12 @@ func (s *Scheduler) Location() *time.Location {
 // DeleteJob removes a job by ID prefix (scoped to the given chat).
 func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 	s.mu.Lock()
-
 	j, err := s.findByPrefix(idPrefix, plat, chatID)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
-
-	if j.entryID != 0 {
-		s.cron.Remove(j.entryID)
-	}
-	if s.router != nil {
-		s.router.Reset(session.CronKey(j.ID))
-	}
-	delete(s.jobs, j.ID)
-	// Retain the runningJobs entry for the same reason as DeleteJobByID —
-	// a concurrent execute() may still be mid-CAS on this guard.
+	s.deleteJobLocked(j)
 	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
@@ -1142,22 +1154,15 @@ func (s *Scheduler) DeleteJob(idPrefix, plat, chatID string) (*Job, error) {
 // PauseJob pauses a job by ID prefix.
 func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 	s.mu.Lock()
-
 	j, err := s.findByPrefix(idPrefix, plat, chatID)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
-	if j.Paused {
+	if err := s.pauseJobLocked(j); err != nil {
 		s.mu.Unlock()
-		return nil, fmt.Errorf("%w: id %q", ErrJobAlreadyPaused, j.ID)
+		return nil, err
 	}
-
-	if j.entryID != 0 {
-		s.cron.Remove(j.entryID)
-		j.entryID = 0
-	}
-	j.Paused = true
 	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
@@ -1171,22 +1176,15 @@ func (s *Scheduler) PauseJob(idPrefix, plat, chatID string) (*Job, error) {
 // ResumeJob resumes a paused job by ID prefix.
 func (s *Scheduler) ResumeJob(idPrefix, plat, chatID string) (*Job, error) {
 	s.mu.Lock()
-
 	j, err := s.findByPrefix(idPrefix, plat, chatID)
 	if err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
-	if !j.Paused {
-		s.mu.Unlock()
-		return nil, fmt.Errorf("%w: id %q", ErrJobNotPaused, j.ID)
-	}
-
-	if err := s.registerJob(j); err != nil {
+	if err := s.resumeJobLocked(j); err != nil {
 		s.mu.Unlock()
 		return nil, err
 	}
-	j.Paused = false
 	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
 
