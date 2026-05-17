@@ -289,7 +289,7 @@ func (p *Process) Kill()
 - 并发控制：信号量限制最大活跃进程数，超出排队
 - 同一 session 的消息串行处理（排队，通过 sendMu 保护）
 - 持久化到 JSON 文件 (`~/.naozhi/sessions.json`)，启动时恢复
-- **Event log 持久化**（`~/.naozhi/events/<keyhash>.log` + `.idx`，见 `docs/rfc/event-log-persistence.md`）:每条 `cli.EventEntry` 单写单 goroutine 按 length-prefix framing 落盘,保留 Images / ImagePaths / AskQuestion 等 Claude JSONL 无法还原的字段。切 session / 刷新 dashboard / 重启服务后,图片等富字段仍可见
+- **Event log 持久化**（`~/.naozhi/events/<keyhash>.log` + `.idx`，见 `docs/rfc/event-log-persistence.md`）:每条 `cli.EventEntry` 由 per-session 专用 writer goroutine 按 length-prefix framing 落盘，写入经 bufio 缓冲 + 100ms flush tick 触发的 batched fsync 控制 IO 频率，保留 Images / ImagePaths / AskQuestion 等 Claude JSONL 无法还原的字段。切 session / 刷新 dashboard / 重启服务后,图片等富字段仍可见
 - 关闭前等待 running 完成（超时 30s），然后保存 store
 
 #### 保留 session-key 命名空间
