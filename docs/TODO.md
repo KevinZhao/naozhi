@@ -81,7 +81,7 @@
 - [ ] **R219-SEC-1 — `BuildArgs` `opts.ExtraArgs` 无 flag 允许列表（P1）**: `protocol_claude.go:77` `args = append(args, opts.ExtraArgs...)`，dashboard-authenticated 用户可注入 `--mcp-config`、`--add-dir`、`--skip-permissions` 等改变 CLI 行为的 flag。区别于 R217-SEC-1（`--append-system-prompt`），本条强调 `--mcp-config` 类可加载攻击者控制 MCP 服务器定义的 flag。方案：在 BuildArgs 加 flag 允许列表，拒绝列表外以 `--` 开头的 element。Breaking：是（依赖任意 extra args 的运维方需要迁移）。
 - [ ] **R219-SEC-2 — `serveRender` 在 Lstat 后第三次 os.Open 制造 inode-swap TOCTOU（P1）**: `handleFileGet` 已有 R218B-SEC-2 Lstat-after-resolve 防御，但 `mode == "render"` 走 `serveRender` 时再次 `os.Open(resolved)`，inode swap 攻击仍可绕过。方案：`serveRender` 使用 Lstat 时已 Open 的 fd 或加 `Sys().(*syscall.Stat_t).Ino` 验证。涉及：`internal/server/project_files.go:667`。
 - [ ] **R219-SEC-3 — `shimEnvAllowedPrefixes` 把 `ANTHROPIC_API_KEY` 泄漏到 Bedrock 部署的 shim 子进程（P2）**: `manager.go:900` 含通配前缀 `"ANTHROPIC_"`，Bedrock 部署不需要 `ANTHROPIC_API_KEY` 但仍然进 shim env，Bash tool 调用可 `env | grep ANTHROPIC` 拿到。方案：替换为显式条目 `"ANTHROPIC_AUTH_TOKEN="`、`"ANTHROPIC_MODEL="`，或 Bedrock 模式下排除 `ANTHROPIC_API_KEY`。涉及：`internal/shim/manager.go:900`。
-- [ ] **R219-SEC-4 — KaTeX CDN 加载无 SRI integrity hash（P2）**: `dashboard.js loadKatex()` 动态注入 KaTeX `<link>`/`<script>` 但无 `integrity=` SRI；CDN 被攻陷可注入恶意 `renderToString`。主 CDN 已有 SRI（CSP 注释），KaTeX 应一致。方案：在 loadKatex 动态创建的元素加 SRI 哈希。涉及：`internal/server/static/dashboard.js:2161,8651,6403`。
+- [x] **R219-SEC-4 — KaTeX CDN 加载无 SRI integrity hash（P2）**: `dashboard.js loadKatex()` 动态注入 KaTeX `<link>`/`<script>` 但无 `integrity=` SRI；CDN 被攻陷可注入恶意 `renderToString`。主 CDN 已有 SRI（CSP 注释），KaTeX 应一致。方案：在 loadKatex 动态创建的元素加 SRI 哈希。涉及：`internal/server/static/dashboard.js:2161,8651,6403`。 — 已修复（KaTeX/Mermaid 已加 sha384 SRI + crossOrigin='anonymous'，本批新增 TestDashboardJS_CDNScriptsHaveSRI 锁定契约），本批 PR #86
 - [ ] **R219-SEC-5 — `moveToShimsCgroup` 用 `Hello.CLIPID` 经 sudo 把任意 PID 移入 cgroup（P2）**: `manager_linux.go:72` 把 shim 自报的 CLIPID 经 strconv.Itoa 传给 `sudo busctl`，shim 被劫持可上报任意 PID。方案：通过 `/proc/<CLIPID>/status` 验证 PPid 等于 shim 实际 PID。涉及：`internal/shim/manager_linux.go:72`。
 
 ### 性能 — 本轮新发现 / 重申
@@ -118,8 +118,8 @@
 - [ ] **R219-ARCH-9 — `workspaceOverrides` 与 `sessions.json` 双 atomic write 不一致风险（P2）**: 两个独立 dirty bit/gen counter/atomic write，部分失败导致重启后 session 引用了不在 overrides.json 的 chat workspace，无 reconciliation 路径。方案：合成单文件 atomic write（sessions.json schema 加 workspace_overrides 字段）或启动期一致性检查。Breaking：是（store schema migration）。
 - [ ] **R219-ARCH-10 — `--dangerously-skip-permissions` hardcode 在 Protocol 层（P2 R215-SEC-P1-1 架构视角）**: 应该是 `BackendProfile` 或 `SpawnOptions.PermissionMode` 字段。方案：`SpawnOptions.PermissionMode {Skip, Default, AutoGrant}`，Protocol.BuildArgs 据此决定参数。Breaking：否（增量字段零值兼容）。
 - [ ] **R219-ARCH-11 — `discovery.DefaultScanner` package singleton 阻碍多租户隔离（P2 R172-ARCH-D9 重申）**: 自 R172 登记起未推进，server.discoveryCache 与 cmd/naozhi 都通过包级 wrapper 假设进程内单 scanner。方案：`RouterConfig.HistoryScanner *discovery.Scanner`，nil 走 DefaultScanner 兼容老路径。
-- [ ] **R219-ARCH-12 — DESIGN.md 实际状态机已偏离描述（P3）**: DESIGN.md 描述 4 状态 `Spawning/Ready/Running/Dead`，实现已加 Paused/Suspended/stub/scratch ephemeral/exempt 等 7+ 状态。方案：DESIGN.md 补真实状态枚举 + state diagram 或链 ADR。
-- [ ] **R219-ARCH-13 — DESIGN.md L292 event log 持久化"单文件 single goroutine"承诺与 per-session writer N goroutine 现实不符（P3）**: 文档与实现漂移。方案：DESIGN.md 改"per-session writer, batched fsync, 100ms flush tick"。
+- [x] **R219-ARCH-12 — DESIGN.md 实际状态机已偏离描述（P3）**: DESIGN.md 描述 4 状态 `Spawning/Ready/Running/Dead`，实现已加 Paused/Suspended/stub/scratch ephemeral/exempt 等 7+ 状态。方案：DESIGN.md 补真实状态枚举 + state diagram 或链 ADR。 — 已修复（DESIGN.md 把 4 态明确为 cli.ProcessState 进程级状态机 + 链权威定义，把 Exempt/Stub/Scratch/Paused 单列为 ManagedSession 上层"语义标签"可正交组合），本批 PR #86
+- [x] **R219-ARCH-13 — DESIGN.md L292 event log 持久化"单文件 single goroutine"承诺与 per-session writer N goroutine 现实不符（P3）**: 文档与实现漂移。方案：DESIGN.md 改"per-session writer, batched fsync, 100ms flush tick"。 — 已修复（DESIGN.md L292 改"per-session 专用 writer goroutine + bufio + 100ms flush tick batched fsync"），本批 PR #86
 
 ## Round 220 — 5-agent 并行 review 第 34 轮（2026-05-17）NEEDS-DESIGN
 
@@ -843,9 +843,10 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 
 ### performance-optimizer（避开已归档后剩余 P1/P2）
 
-- [ ] **R215-PERF-P1-1 — `eventlog_bridge.go:49` 每 EventEntry `json.Marshal`**: 持久化 sink closure 对每条 EventEntry 调 json.Marshal (reflection)，热路径。
+- [x] **R215-PERF-P1-1 — `eventlog_bridge.go:49` 每 EventEntry `json.Marshal`**: 持久化 sink closure 对每条 EventEntry 调 json.Marshal (reflection)，热路径。
   - 方案：EventEntry 提供 `MarshalJSONFast` 或改用 `bytes.Buffer + encoder` 复用。
   - 涉及: `internal/session/eventlog_bridge.go:49`
+  - 已修复（commit 7fc779f 引入 sync.Pool 复用 json.Encoder + bytes.Buffer，本批仅在源码里加 R215-PERF-P1-1 锚点注释让 reviewer 反查），本批 PR #86
 
 - [ ] **R215-PERF-P2-1 — `eventlog.Append` 单条路径 `[]EventEntry{e}` 每次 alloc**: AppendBatch 的 sinkCopy 已预分配，Append 单条仍每次分配 1 slice。
   - 方案：引入 1-slot pool 或为 Append 写专用 sink 路径。

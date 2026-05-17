@@ -15,6 +15,9 @@ import (
 // bridge hot path (≥5 events/s × N sessions) avoids the encodeState
 // allocation that json.Marshal performs each call. Mirrors the
 // jsonEncPool idiom in internal/server/dashboard.go.
+// R215-PERF-P1-1: replaces per-EventEntry json.Marshal reflection
+// path with pooled encoder to drop the heaviest steady-state alloc
+// in the persist sink closure.
 type bridgeEncBuf struct {
 	buf *bytes.Buffer
 	enc *json.Encoder
