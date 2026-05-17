@@ -44,7 +44,7 @@ func validateKeyForShim(k string) error {
 	// keys that passed every upstream gate.
 	const maxKeyBytes = 515
 	if len(k) > maxKeyBytes {
-		return errors.New("key too long")
+		return fmt.Errorf("key exceeds %d-byte limit", maxKeyBytes)
 	}
 	if !utf8.ValidString(k) {
 		return errors.New("key invalid utf-8")
