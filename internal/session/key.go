@@ -2,6 +2,7 @@ package session
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"unicode/utf8"
 )
@@ -130,7 +131,7 @@ func ValidateSessionKey(k string) error {
 		return errors.New("empty session key")
 	}
 	if len(k) > MaxSessionKeyBytes {
-		return errors.New("session key too long")
+		return fmt.Errorf("session key exceeds %d-byte limit", MaxSessionKeyBytes)
 	}
 	if !utf8.ValidString(k) {
 		return errors.New("session key invalid utf-8")
