@@ -16,6 +16,23 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
+// Config is the top-level naozhi configuration loaded from config.yaml.
+//
+// "workspace" naming caveat (R216-CR-5 / R217-CR-6): three distinct
+// concepts share the word "workspace" across Go fields and YAML keys —
+// they are NOT interchangeable, do not refactor without checking all
+// three:
+//
+//  1. Config.Workspace (yaml:"workspace") — this naozhi instance's own
+//     identity (ID / display name); see WorkspaceConfig.
+//  2. Config.Workspaces (yaml:"workspaces") — REMOTE-NODES map, an alias
+//     of Config.Nodes used for cross-node IM bridging. Plural.
+//  3. SessionConfig.Workspace (yaml:"workspace" inside `session:`) — a
+//     deprecated alias for SessionConfig.CWD (default cwd for spawned
+//     CLI processes). Single string, kept for backward compat.
+//
+// Consumers should read Workspace (1) for identity, Nodes (2) for the
+// remote-instance pool, and Session.CWD (3) for the spawn directory.
 type Config struct {
 	Server        ServerConfig           `yaml:"server"`
 	CLI           CLIConfig              `yaml:"cli"`
@@ -31,15 +48,21 @@ type Config struct {
 	// MUST call cfg.Normalize() before handing it to downstream code, or
 	// validateConfig / main.go will silently skip the entries set only on
 	// Workspaces. R71-ARCH-L1.
+	//
+	// NOT to be confused with Config.Workspace (singular, this-instance
+	// identity) or Session.Workspace (deprecated CWD alias). See the
+	// Config godoc above.
 	Nodes        map[string]NodeConfig       `yaml:"nodes"`
 	Workspaces   map[string]NodeConfig       `yaml:"workspaces"`
 	ReverseNodes map[string]ReverseNodeEntry `yaml:"reverse_nodes"`
 	Upstream     *UpstreamConfig             `yaml:"upstream"`
-	Workspace    WorkspaceConfig             `yaml:"workspace"` // local workspace identity
-	Transcribe   *TranscribeConfig           `yaml:"transcribe"`
-	Cron         CronConfig                  `yaml:"cron"`
-	Log          LogConfig                   `yaml:"log"`
-	Projects     ProjectsConfig              `yaml:"projects"`
+	// Workspace identifies THIS naozhi instance. Distinct from Workspaces
+	// (remote nodes) and Session.Workspace (deprecated CWD alias).
+	Workspace  WorkspaceConfig   `yaml:"workspace"`
+	Transcribe *TranscribeConfig `yaml:"transcribe"`
+	Cron       CronConfig        `yaml:"cron"`
+	Log        LogConfig         `yaml:"log"`
+	Projects   ProjectsConfig    `yaml:"projects"`
 
 	// Cached parsed durations (populated once in Load, avoids repeated ParseDuration)
 	cachedTTL             time.Duration `yaml:"-"`
