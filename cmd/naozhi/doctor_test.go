@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli"
 )
 
 // TestDoctor_HealthSuccess covers the happy path: health 200 with the
@@ -308,4 +310,162 @@ func renderFindings(fs []finding) string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// TestDoctor_BackendsSection_NoConfig pins that the section still
+// renders something useful when --config points at a non-existent file.
+// Operators run doctor on first install ("what does this binary
+// support?") before they've written config.yaml; the section must
+// degrade to "registry defaults only" rather than crash or emit nothing.
+// Cannot t.Parallel because backend.RegisterDefaults touches a global
+// registry and concurrent doctor renders would race the panic-recover.
+func TestDoctor_BackendsSection_NoConfig(t *testing.T) {
+	var buf bytes.Buffer
+	d := &doctor{
+		out:        &buf,
+		timeout:    2 * time.Second,
+		configPath: filepath.Join(t.TempDir(), "no-such-config.yaml"),
+	}
+	d.renderBackendsSection()
+	got := buf.String()
+
+	// Header is mandatory — the operator's grep target.
+	if !strings.Contains(got, "=== CLI Backends ===") {
+		t.Errorf("missing CLI Backends section header; got %q", got)
+	}
+	// Default line tells operator which backend is router default.
+	if !strings.Contains(got, "Default:") {
+		t.Errorf("missing Default: line; got %q", got)
+	}
+	// At least the two built-in backends must appear, even without
+	// config (degrade path uses Profile registry).
+	for _, want := range []string{"[claude]", "[kiro]"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("missing backend tag %q; got %q", want, got)
+		}
+	}
+	// Reverse Nodes section is unconditional (empty config → "no
+	// reverse_nodes configured" line still prints).
+	if !strings.Contains(got, "=== Reverse Nodes ===") {
+		t.Errorf("missing Reverse Nodes section header; got %q", got)
+	}
+	if !strings.Contains(got, "no reverse_nodes configured") {
+		t.Errorf("missing empty-reverse-nodes hint; got %q", got)
+	}
+}
+
+// TestDoctor_BackendsSection_WithConfig pins the happy path: a real
+// config.yaml with cli.backends configured plus a reverse_nodes entry.
+// The section must surface the configured default + each backend block
+// + the reverse_nodes block with per-backend cap requirements.
+func TestDoctor_BackendsSection_WithConfig(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	body := `cli:
+  backend: kiro
+  backends:
+    - id: claude
+    - id: kiro
+reverse_nodes:
+  macbook:
+    token: "test-token-not-real-in-prod"
+    display_name: "Macbook"
+`
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+
+	var buf bytes.Buffer
+	d := &doctor{
+		out:        &buf,
+		timeout:    2 * time.Second,
+		configPath: cfgPath,
+	}
+	d.renderBackendsSection()
+	got := buf.String()
+
+	if !strings.Contains(got, "Default: kiro") {
+		t.Errorf("Default line should reflect cli.backend=kiro; got %q", got)
+	}
+	for _, want := range []string{
+		"=== CLI Backends ===",
+		"[claude] claude-code",
+		"[kiro] kiro",
+		"proto=stream-json",
+		"proto=acp",
+		"history: ~/.claude/projects/",
+		"history: ~/.kiro/sessions/cli/",
+		"=== Reverse Nodes ===",
+		`node "macbook"`,
+		"requires node caps [acp]", // kiro's RequiredNodeCaps surfaces in reverse-nodes section
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output missing %q; full output:\n%s", want, got)
+		}
+	}
+	// Reverse-node section must list the per-backend cap rule for
+	// claude (no cap required) AND kiro (acp required).
+	if !strings.Contains(got, "claude: no special cap required") {
+		t.Errorf("reverse-node block missing claude no-cap line; got %q", got)
+	}
+}
+
+// TestFormatCapsForDoctor pins the rendering shape so dashboards / docs
+// linking to specific cap names don't silently drift.
+func TestFormatCapsForDoctor(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		caps cli.Caps
+		want string
+	}{
+		{"empty", cli.Caps{}, "(none)"},
+		{"replay_only", cli.Caps{Replay: true}, "Replay"},
+		{
+			"claude_full",
+			cli.Caps{Replay: true, Priority: true, StreamJSON: true},
+			"Replay,Priority,StreamJSON",
+		},
+		{
+			"acp_soft_interrupt",
+			cli.Caps{SoftInterrupt: true},
+			"SoftInterrupt",
+		},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := formatCapsForDoctor(tc.caps); got != tc.want {
+				t.Errorf("formatCapsForDoctor(%+v) = %q, want %q", tc.caps, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestHistoryDirForBackend pins the doctor history-dir lookup. After PR
+// #117 follow-up the lookup reads from backend.Profile.HistoryDir rather
+// than a private switch, so this test pins both the registry-default
+// values for the two built-in backends AND the unknown-id fallback.
+//
+// Cannot t.Parallel: historyDirForBackend self-bootstraps the global
+// backend registry via RegisterDefaults; running concurrently with
+// other tests that also touch the registry would race the recover() inside.
+func TestHistoryDirForBackend(t *testing.T) {
+	tests := []struct {
+		id   string
+		want string
+	}{
+		{"claude", "~/.claude/projects/"},
+		{"kiro", "~/.kiro/sessions/cli/"},
+		{"unknown-backend-xyz", "(none)"},
+	}
+	for _, tc := range tests {
+		tc := tc
+		t.Run(tc.id, func(t *testing.T) {
+			if got := historyDirForBackend(tc.id); got != tc.want {
+				t.Errorf("historyDirForBackend(%q) = %q, want %q", tc.id, got, tc.want)
+			}
+		})
+	}
 }

@@ -458,6 +458,23 @@ func main() {
 	// driven, so missing imports fail loudly. docs/rfc/multi-backend.md §3.
 	backend.RegisterDefaults()
 
+	// docs/rfc/multi-backend.md §11.1: warn-and-continue validation. An
+	// unknown cli.backends ID would otherwise be silently dropped by the
+	// loop below — surface each finding so journalctl shows the typo
+	// within the first 30s. error-level diags do NOT abort startup
+	// because runtime gracefully skips unknown IDs and erroring here
+	// would defeat the multi-backend rollout's "fail-soft" posture.
+	for _, diag := range cfg.Validate() {
+		switch diag.Level {
+		case "error":
+			slog.Error("config validation",
+				"field", diag.Field, "msg", diag.Msg, "hint", diag.Hint)
+		default:
+			slog.Warn("config validation",
+				"field", diag.Field, "msg", diag.Msg, "hint", diag.Hint)
+		}
+	}
+
 	backendsCfg := cfg.EnabledBackends()
 	defaultBackend := cfg.DefaultBackendID()
 	// Shared shim manager across all backends — every shim records its own

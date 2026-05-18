@@ -246,7 +246,14 @@ func (s *ReverseServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		remoteLabel = r.RemoteAddr
 	}
 	remoteLabel = truncateLabelUTF8(remoteLabel, maxLabel)
-	rc := newReverseConn(msg.NodeID, displayName, remoteLabel, conn)
+	// Forward the advertised capability set into the connection's
+	// NodeMeta so server-side dispatch can answer
+	// `Conn.Meta().HasCap("acp")` for backend-routing decisions
+	// (Sprint 6b of the multi-backend RFC). We pass the truncated
+	// hostname (msg.Hostname after maxLabel cut earlier) rather than
+	// remoteLabel so meta.Hostname stays distinct from RemoteAddr —
+	// only the former survives `r.RemoteAddr` fallback above.
+	rc := newReverseConnWithMeta(msg.NodeID, displayName, remoteLabel, conn, msg.Capabilities, msg.Hostname)
 	// Bound the register response write so a slow-read attacker can't
 	// park this goroutine indefinitely at the TCP window. newReverseConn
 	// applies 10s per write thereafter; this pre-handoff write needs the

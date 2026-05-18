@@ -65,6 +65,14 @@ type ReverseConn struct {
 	id          string
 	displayName string
 	remoteAddr  string
+	// meta is the immutable snapshot of register-time metadata
+	// (capabilities, hostname, registered-at). Built once in
+	// newReverseConn from the values flowing in via reverseserver.go's
+	// register frame; never mutated thereafter so concurrent Meta()
+	// readers (server-side selectNodeForBackend on every dispatch) need
+	// no locking. Stored by value so the public Meta() returns a
+	// pointer into a stable allocation.
+	meta NodeMeta
 
 	writeMu sync.Mutex
 	conn    *websocket.Conn
@@ -93,24 +101,52 @@ type ReverseConn struct {
 }
 
 func newReverseConn(id, displayName, remoteAddr string, conn *websocket.Conn) *ReverseConn {
+	return newReverseConnWithMeta(id, displayName, remoteAddr, conn, nil, "")
+}
+
+// newReverseConnWithMeta is the capability-aware constructor used by
+// reverseserver.go after a successful register. caps is the wire-form
+// slice from ReverseMsg.Capabilities; nil/empty means "node advertised
+// no caps" (legacy peer). hostname is the truncated remote-supplied
+// label, separate from remoteAddr (which is r.RemoteAddr fallback).
+//
+// Tests that don't care about caps go through newReverseConn instead;
+// it forwards here with empty values so the meta surface stays
+// uniformly populated.
+func newReverseConnWithMeta(id, displayName, remoteAddr string, conn *websocket.Conn, caps []string, hostname string) *ReverseConn {
 	baseCtx, baseCancel := context.WithCancel(context.Background())
 	return &ReverseConn{
 		id:          id,
 		displayName: displayName,
 		remoteAddr:  remoteAddr,
-		conn:        conn,
-		pending:     make(map[string]chan reverseResult),
-		subs:        make(map[string][]EventSink),
-		status:      "ok",
-		done:        make(chan struct{}),
-		baseCtx:     baseCtx,
-		baseCancel:  baseCancel,
+		meta: NodeMeta{
+			NodeID:       id,
+			DisplayName:  displayName,
+			Hostname:     hostname,
+			Capabilities: capsFromSlice(caps),
+			RegisteredAt: time.Now(),
+		},
+		conn:       conn,
+		pending:    make(map[string]chan reverseResult),
+		subs:       make(map[string][]EventSink),
+		status:     "ok",
+		done:       make(chan struct{}),
+		baseCtx:    baseCtx,
+		baseCancel: baseCancel,
 	}
 }
 
 func (c *ReverseConn) NodeID() string      { return c.id }
 func (c *ReverseConn) DisplayName() string { return c.displayName }
 func (c *ReverseConn) RemoteAddr() string  { return c.remoteAddr }
+
+// Meta returns the immutable register-time metadata snapshot. Pointer
+// receiver returns a pointer into a stable allocation so callers can
+// chain `c.Meta().HasCap("acp")` without a copy. Never nil — every
+// ReverseConn is constructed with a populated meta, even legacy paths
+// that omit caps (NodeMeta.Capabilities is nil; HasCap returns false
+// for non-empty cap queries, which is the correct denial semantics).
+func (c *ReverseConn) Meta() *NodeMeta { return &c.meta }
 
 func (c *ReverseConn) Status() string {
 	c.statusMu.RLock()
