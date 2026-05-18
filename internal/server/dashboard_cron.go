@@ -234,6 +234,16 @@ func validateCronPrompt(prompt string) error {
 type CronHandlers struct {
 	scheduler   *cron.Scheduler
 	allowedRoot string
+	// runsLimiter caps how often a single authenticated caller can hit
+	// `/api/cron/runs` and `/api/cron/runs/{run_id}`. Both endpoints fan
+	// out filesystem I/O against the per-job runs directory; an attacker
+	// holding a stolen dashboard token can otherwise enumerate the entire
+	// run history at unbounded rate. R222-SEC-3.
+	//
+	// Nil-guarded so tests built via newCronHandlersForTest (and other
+	// hand-rolled CronHandlers instances) skip the gate; wiring lives in
+	// server.New.
+	runsLimiter *ipLimiter
 }
 
 // GET /api/cron — list all cron jobs (unscoped, admin view).
@@ -961,6 +971,13 @@ const runIDLenLimit = 64
 // Authenticated; no per-job ACL beyond the global dashboard auth gate
 // (mirrors handleList's policy).
 func (h *CronHandlers) handleRunsList(w http.ResponseWriter, r *http.Request) {
+	// R222-SEC-3: gate per-IP before any scheduler / FS work so an attacker
+	// holding a stolen dashboard token cannot enumerate the run history at
+	// unbounded rate. Nil-guarded for hand-built tests.
+	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
+		return
+	}
 	if h.scheduler == nil {
 		writeJSON(w, map[string]any{"runs": []any{}})
 		return
@@ -1052,6 +1069,14 @@ func (h *CronHandlers) handleRunsList(w http.ResponseWriter, r *http.Request) {
 // 500 with "corrupt record" message when the file exists but fails to
 // parse / exceeds size cap. Used by the dashboard detail drawer.
 func (h *CronHandlers) handleRunDetail(w http.ResponseWriter, r *http.Request) {
+	// R222-SEC-3: same per-IP gate as handleRunsList. Detail reads also do
+	// FS I/O (read JSON file from disk) so they share the limiter and
+	// budget, not separate buckets — a single bucket prevents bypass-via-
+	// alternate-endpoint when both URLs share an identical token.
+	if h.runsLimiter != nil && !h.runsLimiter.AllowRequest(r) {
+		writeJSONStatus(w, http.StatusTooManyRequests, map[string]string{"error": "cron runs rate limit exceeded"})
+		return
+	}
 	if h.scheduler == nil {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return

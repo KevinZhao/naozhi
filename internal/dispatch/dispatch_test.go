@@ -743,23 +743,10 @@ func TestShouldSendWait(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// firstLine
+// firstLine — moved to internal/textutil.FirstLine in R222-CR-5.
+// Equivalent coverage lives in internal/textutil/firstline_test.go::TestFirstLine.
+// Keeping the dispatch-side cases here would duplicate that contract.
 // ---------------------------------------------------------------------------
-
-func TestFirstLine(t *testing.T) {
-	tests := []struct{ in, want string }{
-		{"hello", "hello"},
-		{"first\nsecond", "first"},
-		{"\nfirst", "first"},
-		{"  \n  real  \n", "real"},
-		{"", ""},
-	}
-	for _, tt := range tests {
-		if got := firstLine(tt.in); got != tt.want {
-			t.Errorf("firstLine(%q) = %q, want %q", tt.in, got, tt.want)
-		}
-	}
-}
 
 // ---------------------------------------------------------------------------
 // formatToolUse
