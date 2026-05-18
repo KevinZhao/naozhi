@@ -308,18 +308,19 @@ func (s *ManagedSession) loadHistorySource() history.Source {
 	return box.src
 }
 
-// snapshotChainIDs returns the session-ID chain (oldest → newest) under
+// SnapshotChainIDs returns the session-ID chain (oldest → newest) under
 // historyMu so concurrent mutation of prevSessionIDs doesn't produce a
 // torn slice. The current session ID is appended only when non-empty —
 // a just-spawned session that hasn't captured its first ID yet yields
 // the prev chain alone, which matches how router.go builds the chain
 // for JSONL loads today.
 //
-// Exported to package-internal only (not uppercased) because it exposes
-// mutable state via its return value; callers must not mutate the
-// returned slice. Intended for history.Source implementations to pull
-// the current chain at LoadBefore time.
-func (s *ManagedSession) snapshotChainIDs() []string {
+// Exported (Sprint 1a) so cli.Wrapper.NewHistorySource factories can
+// pull the current chain at LoadBefore time without the cli package
+// having to know about ManagedSession internals. Callers must not
+// mutate the returned slice — the underlying append/clone defends
+// against torn writes but not against caller-side modification.
+func (s *ManagedSession) SnapshotChainIDs() []string {
 	s.historyMu.RLock()
 	defer s.historyMu.RUnlock()
 	cur := s.getSessionID()
@@ -681,6 +682,12 @@ func (s *ManagedSession) InterruptViaControl() InterruptOutcome {
 func (s *ManagedSession) getSessionID() string {
 	return loadAtomicString(&s.sessionID)
 }
+
+// SessionID returns the current CLI session ID, lock-free. Public alias
+// for getSessionID used by the cli.HistorySessionView interface
+// (Sprint 1a, Wrapper.NewHistorySource factory wiring) and any future
+// caller that needs the current ID without taking r.mu.
+func (s *ManagedSession) SessionID() string { return s.getSessionID() }
 
 // setSessionID stores the session ID atomically.
 func (s *ManagedSession) setSessionID(id string) {
