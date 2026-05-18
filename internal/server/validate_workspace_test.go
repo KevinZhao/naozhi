@@ -85,7 +85,13 @@ func TestValidateWorkspace_SymlinkRoot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected accept for symlinked root, got %v", err)
 	}
-	want := proj // canonical resolved path
+	// On macOS t.TempDir() returns a path under /var/folders which itself
+	// resolves to /private/var/folders. Resolve the expected path the same
+	// way validateWorkspace does so the assertion is platform-portable.
+	want, err := filepath.EvalSymlinks(proj)
+	if err != nil {
+		t.Fatalf("EvalSymlinks(proj): %v", err)
+	}
 	if resolved != want {
 		t.Errorf("resolved = %q, want %q", resolved, want)
 	}
