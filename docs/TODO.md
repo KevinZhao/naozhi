@@ -185,6 +185,7 @@
 - [ ] **R222-CR-6 — `magic 120` filename cap、`maxLen` 等无名参数散落（P3）**: 提到 file/package 级常量带原由注释。涉及：`internal/server/dashboard_send.go:505`，`internal/server/dashboard_session.go:42`。
 - [ ] **R222-CR-7 — `firstLineTrunc` vs `firstLine` 空行处理语义分歧未文档化（P3）**: 给两者加 godoc 标注；或抽 textutil 时锁定唯一语义。
 - [ ] **R222-CR-8 — `sessionSendLegacy` Deprecated 注释无 tracking anchor（P3）**: 加 `// Removal tracked in docs/TODO.md R-LEGACY-SEND` + 新建 TODO 条目，含明确移除条件。涉及：`internal/server/send.go:561`。
+- [ ] **R-LEGACY-SEND — 删除 `Hub.sessionSendLegacy` 与其在 `sessionSend` 中的 fallback 分支（LOW，由 R222-CR-8 派生）**: sessionSendLegacy 是 MessageQueue 接入前的旧 send 路径，现仅供未配 Queue 的测试代码使用。NewHub 已在 Queue==nil 时打 slog.Warn，但仍允许构造。Removal 条件：(1) 所有驱动 Hub 的测试迁到真实 MessageQueue（或与其投递契约一致的 stub）；(2) NewHub 把 Queue==nil 从 Warn 升级为 Fatal（构造期 hard-fail）。两条都满足后，删除 sessionSendLegacy + sessionSend 中调它的 if 分支，把 guard/interrupt 语义收敛到唯一一处。涉及：`internal/server/send.go:561`，调用方在 `internal/server/send.go` sessionSend 内部分支。
 - [x] **R222-CR-9 — `managed.go` TODO 引用 R217-ARCH-2 但 R219-ARCH-3 已 supersede（P3）**: 同步交叉引用。涉及：`internal/session/managed.go:941`。 — 已修复（注释加 R219-ARCH-3 锚点），本批 PR #94
 - [x] **R222-CR-10 — 4 包各自定义 SessionRouter 但缺编译时静态断言（P3）**: 各包加 `var _ SessionRouter = (*session.Router)(nil)` 抓签名漂移。涉及：cron/dispatch/upstream/server consumer.go。 — 已修复（upstream 加 var _ SessionRouter，server 加 var _ HubRouter；cron/dispatch 既有断言保持），本批 PR #94
 
