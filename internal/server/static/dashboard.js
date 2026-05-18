@@ -1091,6 +1091,64 @@ function originBadgeHtml(key) {
   return '<span class="sc-origin kind-' + esc(info.kind) + '" title="' + escAttr(info.label) + '">' + esc(info.label) + '</span>';
 }
 
+// backendChipInfo derives the dashboard chip payload (label + color) for a
+// session's backend ID. Returns null when the deployment is single-backend
+// (cliBackends has 0 or 1 entry) so callers don't render a stray chip on
+// claude-only deployments. Multi-Backend RFC §8.3 D1.
+//
+// Falls back gracefully when:
+//   - cliBackends has not been fetched yet → returns null (chip will appear
+//     on next render once the cache populates; renderHeader is re-run on
+//     every snapshot/event update so the latency is sub-second).
+//   - The session.backend value isn't in cliBackends.backends — could happen
+//     for an evicted-and-removed-from-config backend; we display a neutral
+//     chip with the raw id so operators can see the orphan record.
+function backendChipInfo(backendID) {
+  if (!cliBackends || !Array.isArray(cliBackends.backends)) return null;
+  if (cliBackends.backends.length <= 1) return null; // single-backend mode
+  if (!backendID) backendID = cliBackends.default || '';
+  const entry = cliBackends.backends.find(b => b && b.id === backendID);
+  if (!entry) {
+    // Orphan record: keep the chip but use a neutral color so operators
+    // notice. Don't return null — losing the chip silently would hide a
+    // real "session pinned to a removed backend" state.
+    return {
+      label: backendID || 'unknown',
+      color: 'var(--nz-text-mute)',
+      tooltip: 'Backend not currently configured: ' + (backendID || '(empty)'),
+    };
+  }
+  return {
+    label: entry.reply_tag || entry.id,
+    color: entry.chip_color || 'var(--nz-accent)',
+    tooltip: (entry.display_name || entry.id) + (entry.version ? ' v' + entry.version : ''),
+  };
+}
+
+// backendChipHtml renders the per-session backend chip — the small colored
+// pill next to the IM origin badge. Empty string when single-backend mode
+// (no chip rendered, layout unchanged).
+function backendChipHtml(backendID) {
+  const info = backendChipInfo(backendID);
+  if (!info) return '';
+  return '<span class="sc-backend-chip" data-backend="' + escAttr(backendID || '') +
+    '" style="background-color:' + escAttr(info.color) + '" title="' + escAttr(info.tooltip) +
+    '">' + esc(info.label) + '</span>';
+}
+
+// formatCostByUnit returns the cost cell text for the dashboard header.
+// USD: "$0.0024" / "$1.23". credits: "0.024 credits" / "1.23 credits".
+// Empty unit (unknown backend) hides the cell. Multi-Backend RFC §8.3 D5.
+function formatCostByUnit(cost, unit) {
+  if (cost == null || !isFinite(cost)) cost = 0;
+  if (unit === 'credits') {
+    if (cost === 0) return '0 credits';
+    return (cost < 0.01 && cost > 0 ? cost.toFixed(4) : cost.toFixed(3)) + ' credits';
+  }
+  // Default: USD
+  return '$' + (cost < 0.01 && cost > 0 ? cost.toFixed(4) : cost.toFixed(2));
+}
+
 function cliIcon(name) {
   if (name === 'kiro') return '<svg class="sc-cli-icon" viewBox="0 0 16 16" fill="none"><path d="M8 1L14 5.5V10.5L8 15L2 10.5V5.5L8 1Z" fill="#f97316" opacity="0.85"/><path d="M6 5.5V10.5M6 8H9.5L6 5.5M6 8L9.5 10.5" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
   // Default: official Claude logomark (from claude.ai/favicon.svg)
@@ -1144,9 +1202,14 @@ function sessionCardHtml(s) {
   // IM threads vs dashboard-local conversations. originBadgeHtml returns ''
   // for non-IM prefixes so the meta line stays clean for those.
   const originBadge = originBadgeHtml(s.key);
+  // Multi-Backend RFC §8.3 D2: per-card backend chip (single-backend mode
+  // returns ''). Placed AFTER state dot but BEFORE IM origin so the visual
+  // hierarchy reads "what state" → "which backend" → "which IM thread".
+  const cardBackendChip = backendChipHtml(s.backend);
   const metaHtml = '<span class="sc-dot ' + dotCls + '"></span>' +
     '<span>' + esc(displayState) + '</span>' +
     nodeBadge +
+    cardBackendChip +
     originBadge +
     cronBadge +
     typeTag +
@@ -1895,23 +1958,51 @@ function renderMainShell() {
   // > agent name > key tail.
   const displayName = s.user_label || s.summary || s.last_prompt || (agentIsGeneric ? '' : s.agent) || keyTailDisplay(keyParts) || selectedKey || '';
 
-  // Detail line: left = CLI name + version, middle = IM origin chip (only
-  // for real IM threads — feishu/slack/discord/weixin), right = cost
-  // (hidden for kiro). originBadgeHtml returns '' for non-IM keys so the
-  // chip is invisible on dashboard/cron/scratch/planner sessions.
+  // Detail line: left = CLI name + version, middle = backend chip (multi-
+  // backend mode only) + IM origin chip (only for real IM threads —
+  // feishu/slack/discord/weixin), right = cost (formatted per session's
+  // cost_unit). originBadgeHtml / backendChipHtml return '' when the
+  // session/deployment doesn't warrant a chip so the layout stays clean.
   const effCLIName = s.cli_name || defaultCLIName;
   const effCLIVersion = s.cli_version || defaultCLIVersion;
   const cliLabel = effCLIName ? esc(effCLIName) + (effCLIVersion ? ' v' + esc(effCLIVersion) : '') : '';
   const headerOriginBadge = originBadgeHtml(selectedKey);
-  const showCost = effCLIName !== 'kiro';
+  // Multi-Backend RFC §8.3 D1: per-session backend chip (single-backend mode
+  // returns '').
+  const headerBackendChip = backendChipHtml(s.backend);
+  // Multi-Backend RFC §8.3 D5: cost unit comes from the SessionView so
+  // claude shows "$" and kiro shows "credits". Empty unit (unknown backend)
+  // hides the cell — keeps the layout clean rather than rendering "$NaN".
+  const costUnit = s.cost_unit || '';
   const cost = s.total_cost || 0;
-  const costText = '$' + (cost < 0.01 && cost > 0 ? cost.toFixed(4) : cost.toFixed(2));
+  const showCost = costUnit !== '';
+  const costText = formatCostByUnit(cost, costUnit);
   const costClass = 'detail-cost' + (cost >= 1 ? ' high-cost' : cost > 0 ? ' has-cost' : '');
   // R110-P3 cost tooltip: compute the same detail the live updater
   // (updateHeaderCost) writes, so the very first render isn't missing
   // hover content until a subsequent event refresh lands.
   const costTooltip = formatHeaderCostTooltip(s, selectedKey, selectedNode);
   const costTitleAttr = costTooltip ? ' title="' + escAttr(costTooltip) + '"' : '';
+  // Multi-Backend RFC §8.3 D6: context usage progress bar driven by the
+  // server-normalized SessionView field. Hidden when 0 (claude leaves it 0
+  // until estimator lands).
+  const ctxPct = typeof s.context_usage_percent === 'number' ? s.context_usage_percent : 0;
+  let ctxBarHtml = '';
+  if (ctxPct > 0) {
+    const ctxClass = ctxPct >= 95 ? 'ctx-bar high' : ctxPct >= 80 ? 'ctx-bar mid' : 'ctx-bar';
+    const ctxLabel = '上下文 ' + ctxPct.toFixed(1) + '%';
+    ctxBarHtml = '<span class="' + ctxClass + '" title="' + escAttr(ctxLabel) +
+      '" aria-label="' + escAttr(ctxLabel) + '"><span class="ctx-bar-fill" style="width:' +
+      Math.min(100, ctxPct).toFixed(1) + '%"></span></span>';
+  }
+  // Multi-Backend RFC §8.3 D7: turn duration timer (kiro real value;
+  // claude 0 until estimator lands → cell hidden).
+  let turnTimerHtml = '';
+  if (typeof s.turn_duration_ms === 'number' && s.turn_duration_ms > 0) {
+    const sec = (s.turn_duration_ms / 1000).toFixed(1);
+    turnTimerHtml = '<span class="detail-turn-timer" title="上一轮耗时 ' + esc(sec) + 's">' +
+      esc(sec) + 's</span>';
+  }
 
   // Rename is available only for managed sessions owned by this or a connected
   // naozhi instance. Discovered (_discovered:*) entries are external processes
@@ -1936,7 +2027,10 @@ function renderMainShell() {
       '<h2>' + esc(displayName) + renameBtn + downloadBtn + '</h2>' +
       '<div class="detail">' +
         '<span class="detail-left">' + cliLabel + '</span>' +
+        headerBackendChip +
         headerOriginBadge +
+        ctxBarHtml +
+        turnTimerHtml +
         (showCost ? '<span class="' + costClass + '" id="header-cost"' + costTitleAttr + '>' + costText + '</span>' : '') +
       '</div>' +
       '</div>' +
@@ -8576,7 +8670,9 @@ function updateHeaderCost() {
   const el = document.getElementById('header-cost');
   if (!el) return;
   const cost = s.total_cost || 0;
-  el.textContent = '$' + (cost < 0.01 && cost > 0 ? cost.toFixed(4) : cost.toFixed(2));
+  // Multi-Backend RFC §8.3 D5: format per session's cost_unit so live
+  // updates honor the same "credits" / "$" choice the initial render made.
+  el.textContent = formatCostByUnit(cost, s.cost_unit || '');
   el.className = 'detail-cost' + (cost >= 1 ? ' high-cost' : cost > 0 ? ' has-cost' : '');
   // R110-P3 cost-detail hover: keep the title attribute in sync so live
   // updates (ws session_state / result events) don't leave stale metadata
@@ -8604,7 +8700,26 @@ function formatHeaderCostTooltip(s, selKey, selNode) {
   const cost = s.total_cost || 0;
   if (cost <= 0 && !s.session_id) return '';
   const lines = [];
-  if (cost > 0) lines.push('累计花费: $' + cost.toFixed(4));
+  if (cost > 0) {
+    // Multi-Backend RFC §8.3 D5/D26: tooltip honors cost_unit so kiro
+    // sessions show "0.024 credits" rather than a confusing "$0.024".
+    const unit = s.cost_unit || '';
+    if (unit === 'credits') {
+      lines.push('累计花费: ' + cost.toFixed(4) + ' credits');
+    } else {
+      lines.push('累计花费: $' + cost.toFixed(4));
+    }
+  }
+  // D26: per-turn metering breakdown when kiro reports it. Each row is one
+  // billing dimension (kiro currently emits {value, unit:"credit"}); future
+  // backends may add multiple rows.
+  if (Array.isArray(s.metering_usage) && s.metering_usage.length > 0) {
+    s.metering_usage.forEach(m => {
+      if (!m || typeof m.value !== 'number') return;
+      const unit = m.unit_plural || m.unit || '';
+      lines.push('上一轮: ' + m.value.toFixed(4) + (unit ? ' ' + unit : ''));
+    });
+  }
   // firstSeen is stored per-(node,key) in localStorage by renderSidebar.
   // Read it here so the tooltip shows when THIS dashboard first saw the
   // session — matches operator mental model for "how long has this been
@@ -11807,6 +11922,11 @@ function showOnboarding() {
 
 /* ===== Initialization ===== */
 
+// Multi-Backend RFC §8.5: fire fetchCLIBackends at boot so the chip / cost
+// unit / context bar all have backend metadata available on the first
+// renderHeader call. Failure / single-backend deployments still work — the
+// chip-render helpers return '' when cliBackends is null.
+fetchCLIBackends();
 fetchSessions().then(maybeShowOnboarding);
 sessionPollTimer = setInterval(fetchSessions, 5000);
 scanDiscovered();

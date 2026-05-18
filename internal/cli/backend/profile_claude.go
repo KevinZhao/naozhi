@@ -21,6 +21,7 @@ func claudeProfile() Profile {
 		DisplayName:   "claude-code",
 		DefaultBinary: "claude",
 		DefaultTag:    "cc",
+		ChipColor:     "#7c5cff", // accent purple, mirrors --nz-accent default token
 		NewProtocol: func(d ProtocolDeps) cli.Protocol {
 			return &cli.ClaudeProtocol{
 				SettingsFile:    d.SettingsFile,

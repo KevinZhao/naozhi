@@ -44,6 +44,12 @@ type Profile struct {
 	// Config can still override.
 	DefaultTag string
 
+	// ChipColor is the dashboard chip background color for sessions on this
+	// backend. CSS color string ("#7c5cff" / "var(--nz-accent)" etc.).
+	// Empty means "use the dashboard's default token", and CLIBackendConfig
+	// can override per-deployment. Multi-Backend RFC §8.4.
+	ChipColor string
+
 	// NewProtocol constructs a fresh cli.Protocol implementation for this
 	// backend. Called once per session spawn. Receivers should not retain
 	// the ProtocolDeps after returning; they are scoped to the call.
