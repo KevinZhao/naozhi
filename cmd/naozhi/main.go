@@ -477,7 +477,9 @@ func main() {
 		var proto cli.Protocol
 		switch b.ID {
 		case "kiro":
-			proto = &cli.ACPProtocol{}
+			// Multi-Backend RFC §10 (Sprint 6a): seed BackendID so per-backend
+			// metric labels (cancel / RPC error) carry the correct dimension.
+			proto = &cli.ACPProtocol{BackendID: "kiro"}
 		case "", "claude":
 			// RefreshSettings closes over cfg.Server.Addr so every spawn
 			// regenerates ~/.naozhi/claude-settings.json from the live

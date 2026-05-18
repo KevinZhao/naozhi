@@ -1820,6 +1820,13 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 		if newCount < 0 {
 			r.activeCount.Store(0)
 		}
+		// Multi-Backend RFC §10 (Sprint 6a): reconcile the per-backend
+		// labeled gauge against the residual sessions. Per-key Dec
+		// instrumentation in the loop above would require carrying each
+		// session's backend through toClose; the batched recount is
+		// O(n) over r.sessions but n is bounded (~100s) and only runs
+		// on chat prefix reset which is rare (user /reset action).
+		r.reconcileSessionActiveByBackendLocked()
 	}
 	if _, existed := r.workspaceOverrides[chatKeyPrefix]; existed {
 		delete(r.workspaceOverrides, chatKeyPrefix)
@@ -2390,6 +2397,13 @@ func (r *Router) installFreshSessionLocked(
 	// inflating session_create_total with planner/scratch churn muddies the signal.
 	if !exempt {
 		metrics.SessionCreateTotal.Add(1)
+		// Multi-Backend RFC §10 (Sprint 6a): track per-backend gauge of
+		// active sessions. Mirrors r.activeCount.Add(1) above but split
+		// by backend so dashboards can answer "how many kiro vs claude
+		// sessions are live?". Decrement happens at all the same sites
+		// that decrement activeCount (resetLocked / Remove / evict /
+		// recompute paths).
+		metrics.RecordSessionActive(s.Backend(), 1)
 	}
 	return s
 }
@@ -2426,7 +2440,8 @@ func (r *Router) installPersistSink(proc processIface, key string) {
 }
 
 // countActive recounts alive processes (corrects drift from undetected exits).
-// Exempt sessions are not counted toward max_procs capacity.
+// Exempt sessions are not counted toward max_procs capacity. Caller must
+// hold r.mu.
 func (r *Router) countActive() {
 	count := int64(0)
 	for _, s := range r.sessions {
@@ -2438,6 +2453,66 @@ func (r *Router) countActive() {
 		}
 	}
 	r.activeCount.Store(count)
+	// Multi-Backend RFC §10 (Sprint 6a): keep the per-backend labeled
+	// gauge in sync with the freshly recounted r.sessions snapshot.
+	// Done in the same critical section as activeCount.Store so the
+	// two bookkeeping totals never diverge from each other.
+	r.reconcileSessionActiveByBackendLocked()
+}
+
+// reconcileSessionActiveByBackendLocked rebuilds the metrics.SessionActive
+// pair (legacy unlabeled mirror + per-backend labeled gauge) from
+// r.sessions. Caller must hold r.mu.
+//
+// Used by bulk teardown paths (countActive / cleanupSessionsByChatPrefix /
+// Cleanup prune) where per-key Inc/Dec bookkeeping in the loop would
+// require threading each session's backend through the batched-close
+// machinery. Single-session sites (Reset / Remove / evictOldest) call
+// metrics.RecordSessionActive(backend, -1) directly for lower overhead.
+//
+// Backends that previously had sessions but no longer do are explicitly
+// driven to zero — without ForEachKey the bucket would stay stuck at
+// its last non-zero value.
+func (r *Router) reconcileSessionActiveByBackendLocked() {
+	var total int64
+	perBackend := make(map[string]int64, 4)
+	for _, s := range r.sessions {
+		if s.exempt {
+			continue
+		}
+		if s.isAlive() {
+			total++
+			perBackend[s.Backend()]++
+		}
+	}
+	// Reconcile the unlabeled mirror (naozhi_session_active) by setting
+	// it to the freshly counted total. expvar.Int has no Set, so use
+	// Add(want - current) which is atomic enough for a gauge.
+	currentTotal := metrics.SessionActive.Value()
+	if delta := total - currentTotal; delta != 0 {
+		metrics.SessionActive.Add(delta)
+	}
+	// Reconcile the labeled gauge per backend.
+	allBackends := map[string]struct{}{}
+	for k := range perBackend {
+		allBackends[k] = struct{}{}
+	}
+	metrics.SessionActiveByBackend.ForEachKey(func(k string) {
+		allBackends[k] = struct{}{}
+	})
+	for backend := range allBackends {
+		current := metrics.SessionActiveByBackend.Get(backend)
+		want := perBackend[backend]
+		if delta := want - current; delta > 0 {
+			for i := int64(0); i < delta; i++ {
+				metrics.SessionActiveByBackend.Inc(backend)
+			}
+		} else if delta < 0 {
+			for i := int64(0); i < -delta; i++ {
+				metrics.SessionActiveByBackend.Dec(backend)
+			}
+		}
+	}
 }
 
 // countExempt returns the number of alive exempt (planner) sessions.
@@ -2476,6 +2551,13 @@ func (r *Router) evictOldest() bool {
 	// the subsequent proc.Close() is async-capable and can fail, but the eviction
 	// decision is already committed (deathReason set, storeDirty marked below).
 	metrics.SessionEvictTotal.Add(1)
+	// Multi-Backend RFC §10 (Sprint 6a): evictOldest below relies on
+	// r.countActive() to recompute the legacy total post-Close, but the
+	// labeled gauge needs an explicit decrement keyed on the evictee's
+	// backend. Done now (under the lock, before Unlock for Close) so the
+	// metric reflects the eviction decision instead of the post-Close
+	// recount which only sees the residual sessions.
+	metrics.RecordSessionActive(oldest.Backend(), -1)
 	storeAtomicString(&oldest.deathReason, "evicted")
 	// Keep oldest.process non-nil so concurrent holders don't get nil-panic.
 	// After Close(), Alive() returns false; countActive() below recounts correctly.
@@ -2541,11 +2623,16 @@ func (r *Router) resetLocked(key string) (processIface, bool) {
 	}
 	proc := s.loadProcess()
 	wasActive := !s.exempt && proc != nil && proc.Alive()
+	backend := s.Backend()
 	r.unregisterSessionLocked(key, s, false)
 	if wasActive {
 		if r.activeCount.Add(-1) < 0 {
 			r.activeCount.Store(0)
 		}
+		// Multi-Backend RFC §10 (Sprint 6a): mirror the activeCount
+		// decrement into the labeled gauge so per-backend dashboards
+		// stay in sync with the legacy unlabeled total.
+		metrics.RecordSessionActive(backend, -1)
 	}
 	r.storeDirty = true
 	r.storeGen.Add(1)
@@ -2649,6 +2736,7 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 		hadOld = true
 		proc := s.loadProcess()
 		wasActive := !s.exempt && proc != nil && proc.Alive()
+		oldBackend := s.Backend()
 		// keepBackendOverride=true: the new opts may carry its own backend,
 		// and spawnSession below consumes and clears the override atomically.
 		r.unregisterSessionLocked(key, s, true)
@@ -2656,6 +2744,11 @@ func (r *Router) ResetAndRecreate(ctx context.Context, key string, opts AgentOpt
 			if r.activeCount.Add(-1) < 0 {
 				r.activeCount.Store(0)
 			}
+			// Multi-Backend RFC §10 (Sprint 6a): per-backend gauge mirror.
+			// The follow-up spawnSession will Inc the gauge for the new
+			// backend (which may differ from oldBackend if opts.Backend
+			// changed) — net change is 0 if same backend, +1/-1 otherwise.
+			metrics.RecordSessionActive(oldBackend, -1)
 		}
 		r.storeDirty = true
 		r.storeGen.Add(1)
@@ -2839,11 +2932,14 @@ func (r *Router) Remove(key string) bool {
 	// unregisterSessionLocked the session is gone from r.sessions
 	// and the workspace lookup would fail.
 	workspaceSnapshot := s.Workspace()
+	backend := s.Backend()
 	r.unregisterSessionLocked(key, s, false)
 	if wasActive {
 		if r.activeCount.Add(-1) < 0 {
 			r.activeCount.Store(0)
 		}
+		// Multi-Backend RFC §10 (Sprint 6a): per-backend gauge mirror.
+		metrics.RecordSessionActive(backend, -1)
 	}
 	r.storeDirty = true
 	r.storeGen.Add(1)
@@ -3055,6 +3151,10 @@ func (r *Router) Cleanup() {
 		}
 	}
 	r.activeCount.Store(newActive)
+	// Multi-Backend RFC §10 (Sprint 6a): same reconciliation rationale
+	// as countActive — bulk path, recompute the labeled gauge in one
+	// pass instead of plumbing per-key Dec calls through the prune loop.
+	r.reconcileSessionActiveByBackendLocked()
 
 	// Snapshot sessions for periodic save (while still holding the lock).
 	// Skip save if nothing changed since last Cleanup cycle.

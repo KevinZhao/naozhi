@@ -258,7 +258,12 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	// here — reconnect does not fork a new CLI child, it only re-attaches to
 	// an already-running shim's socket. Incrementing only on Spawn keeps the
 	// metric aligned with "new CLI process births".
-	metrics.CLISpawnTotal.Add(1)
+	//
+	// Multi-Backend RFC §10 (Sprint 6a): RecordCLISpawn double-writes the
+	// legacy unlabeled CLISpawnTotal AND the new per-backend vector
+	// CLISpawnTotalByBackend. The legacy counter stays for a 4-week
+	// migration so existing pprof.md jq queries keep working.
+	metrics.RecordCLISpawn(w.BackendID)
 	return proc, nil
 }
 
