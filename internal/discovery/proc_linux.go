@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/naozhi/naozhi/internal/cli/backend"
 )
 
 // ProcStartTime reads the start time (field 22) from /proc/{pid}/stat.
@@ -45,8 +47,11 @@ func ProcStartTime(pid int) (uint64, error) {
 func procPidAlive(pid int) bool { return syscall.Kill(pid, 0) == nil }
 func procKillSIGKILL(pid int)   { _ = syscall.Kill(pid, syscall.SIGKILL) }
 
-// detectCLIName reads /proc/PID/cmdline to determine which CLI binary is running.
-// Returns "claude-code", "kiro", or "cli" as fallback.
+// detectCLIName reads /proc/PID/cmdline to determine which CLI binary is
+// running. Iterates registered backend.Profile entries in order, returning
+// the first one whose DetectInProc predicate matches. Adding a new backend
+// requires no change to this function — the Profile's DetectInProc handles
+// the matching. See docs/rfc/multi-backend.md §3.4.
 func detectCLIName(pid int) string {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cmdline", pid))
 	if err != nil {
@@ -57,12 +62,10 @@ func detectCLIName(pid int) string {
 		data = data[:i]
 	}
 	bin := filepath.Base(string(data))
-	switch {
-	case strings.Contains(bin, "kiro"):
-		return "kiro"
-	case strings.Contains(bin, "claude"):
-		return "claude-code"
-	default:
-		return "cli"
+	for _, p := range backend.All() {
+		if p.DetectInProc != nil && p.DetectInProc(bin) {
+			return p.DisplayName
+		}
 	}
+	return "cli"
 }
