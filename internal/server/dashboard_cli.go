@@ -77,11 +77,23 @@ func (h *CLIBackendsHandler) handle(w http.ResponseWriter, r *http.Request) {
 			info.Available = wr.CLIVersion != ""
 		}
 		// Multi-Backend RFC §8.2: dashboard renders chip color + reply tag
-		// from the per-backend Profile registry. Unknown ids leave the
-		// fields empty — dashboard falls back to default tokens.
+		// + features from the per-backend Profile registry. Unknown ids
+		// leave the fields empty — dashboard falls back to default tokens
+		// and treats every feature as false (most conservative degrade).
 		if p, ok := backend.Get(id); ok {
 			info.ReplyTag = p.DefaultTag
 			info.ChipColor = p.ChipColor
+			if len(p.Features) > 0 {
+				// Defensive copy — Profile.Features is the registry's
+				// authoritative map; serialising the same reference into
+				// every /api/cli/backends response would let a buggy
+				// caller mutate it through reflect / unsafe. Cheap (≤ 7
+				// keys) so always copy.
+				info.Features = make(map[string]bool, len(p.Features))
+				for k, v := range p.Features {
+					info.Features[k] = v
+				}
+			}
 		}
 		backends = append(backends, info)
 	}
