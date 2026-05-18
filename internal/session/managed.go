@@ -89,6 +89,12 @@ type processIface interface {
 	PID() int
 	InjectHistory(entries []cli.EventEntry)
 	TurnAgents() []cli.SubagentInfo
+	// Normalize-layer accessors (docs/rfc/multi-backend.md §8.8). kiro fills
+	// these from _kiro.dev/metadata; claude leaves zero values until an
+	// estimator lands. Lock-free.
+	ContextUsagePercent() float64
+	TurnDurationMs() int64
+	MeteringUsage() []cli.MeteringEntry
 }
 
 // processBox wraps processIface for use with atomic.Pointer (which requires a concrete type).
@@ -851,6 +857,26 @@ type SessionSnapshot struct {
 	// the historical user entries so the counter rebuilds to the historical
 	// value as part of normal startup.
 	MessageCount int64 `json:"message_count,omitempty"`
+
+	// Normalized cross-backend status fields (docs/rfc/multi-backend.md §8.8).
+	// Filled by Snapshot from Process accessors so dashboard / IM / cron all
+	// consume normalized data without parsing backend-private events.
+	//
+	// CostUnit is "USD" for claude-class backends and the unit reported by
+	// the backend for ACP-class (kiro reports "credits"). Empty when no
+	// known backend (dashboard hides the cell).
+	CostUnit string `json:"cost_unit,omitempty"`
+	// ContextUsagePercent is 0-100 conversation context utilisation. kiro
+	// reports a real value via _kiro.dev/metadata; claude leaves 0 until
+	// estimator lands.
+	ContextUsagePercent float64 `json:"context_usage_percent,omitempty"`
+	// TurnDurationMs is the duration of the most recently completed turn.
+	// kiro: from _kiro.dev/metadata. claude: 0 until estimator wires up.
+	TurnDurationMs int64 `json:"turn_duration_ms,omitempty"`
+	// MeteringUsage carries backend-reported per-turn billing rows when
+	// available (kiro). Each entry is one billing dimension, e.g.
+	// {value: 0.024, unit: "credit"}.
+	MeteringUsage []cli.MeteringEntry `json:"metering_usage,omitempty"`
 }
 
 func (s *ManagedSession) HasProcess() bool {
@@ -905,7 +931,20 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		// field at zero so UI code can gate visibility on `> 0` and skip the
 		// chip for brand-new sessions that haven't yet received a prompt.
 		snap.MessageCount = proc.UserTurnCount()
+
+		// Normalize layer (docs/rfc/multi-backend.md §8.8). Process getters
+		// return zero values for fields the backend never reports, so
+		// `> 0` gating in dashboard.js works for both claude (most fields
+		// zero today) and kiro (all fields populated).
+		snap.ContextUsagePercent = proc.ContextUsagePercent()
+		snap.TurnDurationMs = proc.TurnDurationMs()
+		snap.MeteringUsage = proc.MeteringUsage()
 	}
+
+	// CostUnit is derived from backend even when proc is nil so an evicted
+	// session still renders the right cost label until pruning. claude is
+	// the default for legacy stores predating the Backend field.
+	snap.CostUnit = costUnitForBackend(snap.Backend)
 
 	// Read cached values instead of copying the full event log.
 	if lp := loadAtomicString(&s.lastPrompt); lp != "" {
@@ -1307,5 +1346,25 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 	}
 	if activity != "" && loadAtomicString(&s.lastActivity) == "" {
 		storeAtomicString(&s.lastActivity, activity)
+	}
+}
+
+// costUnitForBackend returns the SessionSnapshot.CostUnit value for a given
+// backend. claude-class backends report cost in USD via Process.TotalCost();
+// ACP-class kiro reports per-turn metering in credits via _kiro.dev/metadata.
+// Empty backend (legacy stores predating the Backend field) defaults to USD
+// because such stores are necessarily claude-only.
+//
+// Adding a new backend: extend this switch alongside the matching
+// backend.Profile registration. The dashboard reads this value as the source
+// of truth for cost-cell formatting (see docs/rfc/multi-backend.md §8.3 D5).
+func costUnitForBackend(backend string) string {
+	switch backend {
+	case "kiro":
+		return "credits"
+	case "", "claude":
+		return "USD"
+	default:
+		return ""
 	}
 }

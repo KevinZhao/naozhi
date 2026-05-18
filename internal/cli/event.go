@@ -45,6 +45,16 @@ type Event struct {
 	// that don't need it. Not serialized.
 	RawParams json.RawMessage `json:"-"`
 
+	// Metadata is populated for backend-emitted normalized status frames
+	// (Type:"metadata"). Today the only producer is ACPProtocol's
+	// _kiro.dev/metadata notification handler — kiro reports real
+	// contextUsagePercentage / turnDurationMs / meteringUsage every turn.
+	// Other backends (claude stream-json) leave this nil; the session layer
+	// fills equivalent fields from CostUSD / wall clock. Dashboard reads
+	// only the normalized SessionSnapshot fields, never this raw struct.
+	// See docs/rfc/multi-backend.md §8.8.
+	Metadata *EventMetadata `json:"metadata,omitempty"`
+
 	// AskQuestion is populated for synthetic Type:"ask_question" events derived
 	// from an AskUserQuestion tool_use in the assistant stream. The CLI's
 	// headless -p mode auto-rejects the tool with is_error:true, so this is
@@ -58,6 +68,36 @@ type Event struct {
 	// (possibly interrupted) turn from events produced for the current turn
 	// after drain entered. Not serialized.
 	recvAt time.Time
+}
+
+// EventMetadata mirrors the cross-backend "what just happened on this turn"
+// status payload. Fields are optional — backends populate whichever
+// equivalents they have. See ACPProtocol.parseKiroMetadata for kiro mapping
+// and Process result-event handling for stream-json.
+type EventMetadata struct {
+	// ContextUsagePercent is the conversation context utilisation (0-100).
+	// kiro: from _kiro.dev/metadata.contextUsagePercentage. claude: estimated
+	// later by the session layer; cli leaves this 0 here.
+	ContextUsagePercent float64 `json:"context_usage_percent,omitempty"`
+
+	// TurnDurationMs is the duration of the just-completed turn, in ms.
+	// kiro: from _kiro.dev/metadata.turnDurationMs. claude: filled by Process
+	// from wall clock when a result event arrives; cli leaves this 0 here.
+	TurnDurationMs int64 `json:"turn_duration_ms,omitempty"`
+
+	// MeteringUsage is per-backend billing detail. kiro emits one or more
+	// entries with {value, unit:"credit"}. claude leaves this empty (cost
+	// already captured via CostUSD).
+	MeteringUsage []MeteringEntry `json:"metering_usage,omitempty"`
+}
+
+// MeteringEntry is one row of a backend-reported billing payload, modelled
+// after kiro 2.3.0's _kiro.dev/metadata.meteringUsage shape. Other backends
+// can reuse the same struct (Unit "USD" works just as well as "credit").
+type MeteringEntry struct {
+	Value      float64 `json:"value"`
+	Unit       string  `json:"unit"`
+	UnitPlural string  `json:"unit_plural,omitempty"`
 }
 
 // AskQuestion mirrors the shape of AskUserQuestion.input observed against

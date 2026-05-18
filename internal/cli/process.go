@@ -205,8 +205,19 @@ type Process struct {
 
 	eventLog  *EventLog
 	totalCost atomic.Uint64 // math.Float64bits(lastResultCostUSD); atomic so Snapshot is lock-free.
-	lastSeq   atomic.Int64  // last received shim seq, for reconnect
-	pongRecv  chan struct{} // signaled by readLoop on pong receipt
+
+	// Normalized metadata, populated for ACP-class backends from
+	// _kiro.dev/metadata events and (eventually) for stream-json from
+	// result events / wall clock. Lock-free reads from Snapshot mirror
+	// the totalCost pattern. See docs/rfc/multi-backend.md §8.8.
+	contextUsagePercentBits atomic.Uint64 // math.Float64bits of last ContextUsagePercent
+	turnDurationMs          atomic.Int64  // last TurnDurationMs (ms)
+	// meteringMu guards meteringUsage. Replaced whole on each metadata
+	// event so reads copy and the typical (no-metering) case stays cheap.
+	meteringMu    sync.Mutex
+	meteringUsage []MeteringEntry
+	lastSeq       atomic.Int64  // last received shim seq, for reconnect
+	pongRecv      chan struct{} // signaled by readLoop on pong receipt
 
 	// onTurnDone is called by readLoop when a result event transitions the
 	// process from Running to Ready without an active Send(). This allows
@@ -652,6 +663,58 @@ func (p *Process) GetSessionID() string {
 // TotalCost returns the cumulative cost (lock-free via atomic.Uint64).
 func (p *Process) TotalCost() float64 {
 	return math.Float64frombits(p.totalCost.Load())
+}
+
+// ContextUsagePercent returns the last reported context-window utilisation
+// (0-100). Always 0 for backends that don't report it (claude stream-json
+// today). Lock-free.
+func (p *Process) ContextUsagePercent() float64 {
+	return math.Float64frombits(p.contextUsagePercentBits.Load())
+}
+
+// TurnDurationMs returns the duration of the most recently completed turn,
+// in ms. 0 when no turn has completed yet. Lock-free.
+func (p *Process) TurnDurationMs() int64 {
+	return p.turnDurationMs.Load()
+}
+
+// MeteringUsage returns a defensive copy of the most recent backend-reported
+// billing rows. Empty for backends that report cost only via TotalCost
+// (claude). Returns a fresh slice on every call so callers can safely retain
+// the result.
+func (p *Process) MeteringUsage() []MeteringEntry {
+	p.meteringMu.Lock()
+	defer p.meteringMu.Unlock()
+	if len(p.meteringUsage) == 0 {
+		return nil
+	}
+	out := make([]MeteringEntry, len(p.meteringUsage))
+	copy(out, p.meteringUsage)
+	return out
+}
+
+// applyMetadata stores normalized metadata observed on a Type:"metadata"
+// event. Called from readLoop. Cheap; only ContextUsagePercent and
+// TurnDurationMs are atomically stored, MeteringUsage replaces the whole
+// slice under meteringMu. Each kiro turn emits at most one metadata frame
+// so contention is negligible.
+func (p *Process) applyMetadata(m *EventMetadata) {
+	if m == nil {
+		return
+	}
+	if m.ContextUsagePercent > 0 {
+		p.contextUsagePercentBits.Store(math.Float64bits(m.ContextUsagePercent))
+	}
+	if m.TurnDurationMs > 0 {
+		p.turnDurationMs.Store(m.TurnDurationMs)
+	}
+	if len(m.MeteringUsage) > 0 {
+		p.meteringMu.Lock()
+		// Defensive copy so subsequent caller mutations don't race the
+		// MeteringUsage() reader.
+		p.meteringUsage = append(p.meteringUsage[:0:0], m.MeteringUsage...)
+		p.meteringMu.Unlock()
+	}
 }
 
 // ProtocolName returns the protocol name.
