@@ -450,6 +450,15 @@ func buildServer(opts ServerOptions) *Server {
 		cronH: &CronHandlers{
 			scheduler:   scheduler,
 			allowedRoot: opts.AllowedRoot,
+			// R222-SEC-3: per-IP limiter for /api/cron/runs and
+			// /api/cron/runs/{run_id}. 60 req/min/IP with burst 60 mirrors the
+			// per-minute pace the dashboard uses when paginating run history
+			// (one initial fetch + occasional refresh) and leaves enough
+			// headroom for the run-detail drawer to fan out a few sequential
+			// reads. A stolen token can otherwise enumerate the entire on-disk
+			// run history at unbounded rate, both burning IO and exposing
+			// per-job activity timing.
+			runsLimiter: newIPLimiterWithProxy(rate.Every(time.Second), 60, opts.TrustedProxy),
 		},
 		transcribeH: &TranscribeHandler{
 			transcriber:       opts.Transcriber,
