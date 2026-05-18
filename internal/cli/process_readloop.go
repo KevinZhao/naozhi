@@ -90,6 +90,17 @@ func (p *Process) readLoop() {
 	// the whole process down silently. We log stack + transition to Dead so
 	// the router can reap this session and the dashboard surfaces the failure
 	// instead of the user seeing a stalled "running" forever.
+	//
+	// R222-GO-9 onTurnDone partial-state contract: when this recover fires,
+	// onTurnDone is invoked BEFORE the deferred close(p.done) above runs (the
+	// recover defer was registered AFTER close(p.done), so it executes first
+	// in LIFO order). Callbacks therefore observe p.done still open even
+	// though State==Dead. This is intentional: onTurnDone semantics are
+	// "turn boundary reached, reap progress" rather than "process channels
+	// fully torn down" — the normal terminal path also fires onTurnDone
+	// before the deferred channel closes. Callbacks must NOT use p.done as
+	// a "process is fully torn down" signal; use IsRunning / GetState
+	// instead, both of which already reflect StateDead at this point.
 	defer func() {
 		if r := recover(); r != nil {
 			log.Error("readLoop panic recovered",
