@@ -33,6 +33,17 @@ type Job struct {
 	// Optional working directory override for the CLI process.
 	WorkDir string `json:"work_dir,omitempty"`
 
+	// Backend pins the CLI backend (e.g. "claude" / "kiro") this job runs
+	// on. Empty = router default — old cron_jobs.json without this field
+	// deserialise to "" and continue routing through the operator's
+	// configured default, so there is zero migration work for existing
+	// installs. The Scheduler propagates this value to AgentOpts.Backend
+	// at execute time; validateBackend in the session router still gates
+	// shape-invalid input, and wrapperFor falls back to default for
+	// unknown but well-formed backend IDs.
+	// 引入背景：docs/rfc/multi-backend.md §9 Sprint 6c。
+	Backend string `json:"backend,omitempty"`
+
 	// Optional notification target for dashboard-created jobs.
 	// When set, execution results are also sent to this IM channel.
 	NotifyPlatform string `json:"notify_platform,omitempty"`

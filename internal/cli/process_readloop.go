@@ -254,6 +254,18 @@ func (p *Process) readLoop() {
 				continue
 			}
 
+			// Type:"metadata" is a normalize-channel event (kiro
+			// _kiro.dev/metadata today; future backends use the same
+			// shape). Apply to Process atomic state and skip downstream
+			// dispatch — these are status frames, not assistant output, so
+			// they should not flow through eventCh / EventLog. Snapshot
+			// reads the values lock-free.
+			// See docs/rfc/multi-backend.md §8.8.
+			if ev.Type == "metadata" {
+				p.applyMetadata(ev.Metadata)
+				continue
+			}
+
 			// Capture one time.Now() shared between ev.recvAt (handed to
 			// drainStaleEvents) and the EventEntry.Time values produced by
 			// logEventAt. Previously the two read wall-clock independently,
