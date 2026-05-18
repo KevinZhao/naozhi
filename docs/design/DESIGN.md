@@ -270,8 +270,15 @@ Protocol 实现应直接提供 `Capabilities() Caps`，调用方也应优先读
 | 输出 | NDJSON `type=result` | `session/update` 通知 + RPC response |
 | 握手 | 无 (session ID 从 init 事件获取) | `initialize` + `session/new` or `session/load` |
 | 恢复 | `--resume {sessionId}` | `session/load` RPC |
-| 权限 | `--dangerously-skip-permissions` | auto-grant `session/request_permission` |
-| 文本 | result 事件直接携带 | 累积 `agent_message_chunk` 文本 |
+| 权限 | `--dangerously-skip-permissions` | auto-grant `session/request_permission`（optionId 从 request `options[].optionId` 读，**不要硬编码**） |
+| 文本 | result 事件直接携带 | 累积 `agent_message_chunk` 文本（实测 ~2.2 字符/chunk，buffer 至 turn 完成才 emit） |
+| 软中断 | `control_request` over stdin | `session/cancel` **notification**（无 id），原 prompt 立即回 `stopReason:"cancelled"` |
+| RPC ID 类型 | n/a | **必须** `json.RawMessage`（kiro 用 UUID 字符串，不是 int） |
+| 历史持久化 | `~/.claude/projects/**/*.jsonl` | `~/.kiro/sessions/cli/<sid>.{json,jsonl}`（kiro 自带，按消息聚合） |
+
+> **多 backend 共存与切换**：见 [`docs/rfc/multi-backend.md`](../rfc/multi-backend.md) 与实测报告 [`multi-backend-validation.md`](../rfc/multi-backend-validation.md)。
+> 后端的 DisplayName / DefaultBinary / Protocol 工厂 / DetectInProc / RequiredNodeCaps 收敛到
+> `internal/cli/backend.Profile` 注册表，其他模块禁止 switch backend ID。
 
 ```go
 type Wrapper struct {
@@ -559,11 +566,23 @@ server:
   addr: ":8180"
 
 cli:
-  backend: "claude"              # "claude" (default) | "kiro"
-  path: "~/.local/bin/claude"    # CLI 二进制路径
+  backend: "claude"              # 默认 backend；"claude" | "kiro" | 未来扩展
+  path: "~/.local/bin/claude"    # 默认 CLI 二进制路径（与 backend 字段配套）
   model: "sonnet"                # 默认模型
   args:                          # 额外 CLI 参数
     - "--dangerously-skip-permissions"
+
+  # Multi-backend 并存（见 docs/rfc/multi-backend.md）
+  # 配置 backends 数组后，dashboard / IM / cron / reverse-node 都能 per-session
+  # 选 backend；不配则走 legacy 单 backend 模式（仅用上面的 cli.path / model / args）
+  #backends:
+  #  - id: "claude"
+  #    path: "~/.local/bin/claude"
+  #    model: "sonnet"
+  #  - id: "kiro"
+  #    path: "~/.local/bin/kiro-cli"
+  #    model: "claude-sonnet-4.6"
+  #    sessions_dir: "~/.kiro/sessions/cli"   # kiro 自带 jsonl 历史目录
 
 session:
   max_procs: 3                   # 最大并发 claude 进程数 (每进程 ~350MB)
