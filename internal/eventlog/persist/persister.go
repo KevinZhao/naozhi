@@ -492,6 +492,26 @@ func (p *Persister) run() {
 				case job := <-p.in:
 					p.handleBatch(job, p.opts.Clock())
 				default:
+					goto drainOps
+				}
+			}
+		drainOps:
+			// R222-GO-6: drain pending DropKey/Flush ops with
+			// ErrPersisterClosed so the caller's `<-done` arm completes
+			// promptly instead of waiting for ctx to fire. A caller that
+			// already passed the closed.Load() guard but raced into opCh
+			// before close(closeCh) lands here; without this drain the
+			// caller would block until ctx (often a 30s shutdown budget)
+			// expires. Non-blocking: opCh is buffered=8, so a bounded
+			// drain loop is sufficient.
+			for {
+				select {
+				case o := <-p.opCh:
+					if o.done != nil {
+						// Buffered (cap=1) so this never blocks.
+						o.done <- ErrPersisterClosed
+					}
+				default:
 					p.shutdownAll()
 					return
 				}

@@ -31,7 +31,7 @@ func TestLoadHistoryTail_LimitHonored(t *testing.T) {
 	}
 	makeSessionJSONL(t, claudeDir, dirName, sessionID, lines)
 
-	entries, err := loadHistoryTail(claudeDir, sessionID, cwd, 10)
+	entries, err := LoadHistoryTailCtx(context.Background(), claudeDir, sessionID, cwd, 10)
 	if err != nil {
 		t.Fatalf("loadHistoryTail error: %v", err)
 	}
@@ -59,7 +59,7 @@ func TestLoadHistoryTail_LimitLargerThanFile(t *testing.T) {
 	}
 	makeSessionJSONL(t, claudeDir, dirName, sessionID, lines)
 
-	entries, err := loadHistoryTail(claudeDir, sessionID, cwd, 100)
+	entries, err := LoadHistoryTailCtx(context.Background(), claudeDir, sessionID, cwd, 100)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestLoadHistoryTail_SpanningChunks(t *testing.T) {
 	}
 	makeSessionJSONL(t, claudeDir, dirName, sessionID, lines)
 
-	entries, err := loadHistoryTail(claudeDir, sessionID, cwd, 10)
+	entries, err := LoadHistoryTailCtx(context.Background(), claudeDir, sessionID, cwd, 10)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -124,7 +124,7 @@ func TestLoadHistoryTail_LimitZeroFallsBack(t *testing.T) {
 	makeSessionJSONL(t, claudeDir, dirName, sessionID, lines)
 
 	// limit <= 0 must delegate to the legacy LoadHistory implementation.
-	entries, err := loadHistoryTail(claudeDir, sessionID, cwd, 0)
+	entries, err := LoadHistoryTailCtx(context.Background(), claudeDir, sessionID, cwd, 0)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -136,7 +136,7 @@ func TestLoadHistoryTail_LimitZeroFallsBack(t *testing.T) {
 func TestLoadHistoryTail_MissingFile(t *testing.T) {
 	t.Parallel()
 	claudeDir := makeClaudeDir(t)
-	entries, err := loadHistoryTail(claudeDir, "does-not-exist", "", 50)
+	entries, err := LoadHistoryTailCtx(context.Background(), claudeDir, "does-not-exist", "", 50)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestLoadHistoryTail_SkipsMalformed(t *testing.T) {
 	}
 	makeSessionJSONL(t, claudeDir, dirName, sessionID, lines)
 
-	entries, err := loadHistoryTail(claudeDir, sessionID, cwd, 10)
+	entries, err := LoadHistoryTailCtx(context.Background(), claudeDir, sessionID, cwd, 10)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -272,7 +272,7 @@ func TestParseTail_HonestSizeReturnsAllEntries(t *testing.T) {
 	}
 	makeSessionJSONL(t, claudeDir, dirName, sessionID, lines)
 
-	entries, err := loadHistoryTail(claudeDir, sessionID, cwd, 10)
+	entries, err := LoadHistoryTailCtx(context.Background(), claudeDir, sessionID, cwd, 10)
 	if err != nil {
 		t.Fatalf("loadHistoryTail: %v", err)
 	}
@@ -336,7 +336,7 @@ func TestLoadHistoryChainTail_StopsAtBudget(t *testing.T) {
 
 	// Budget = 8 → walker visits newest (chain-c) first and pulls 8 entries;
 	// should NOT open chain-b or chain-a.
-	entries := loadHistoryChainTail(claudeDir, ids, cwd, 8)
+	entries := LoadHistoryChainTailCtx(context.Background(), claudeDir, ids, cwd, 8)
 	if len(entries) != 8 {
 		t.Fatalf("expected 8 entries, got %d", len(entries))
 	}
@@ -371,7 +371,7 @@ func TestLoadHistoryChainTail_SpillsIntoPriorSessions(t *testing.T) {
 	}
 
 	// Budget = 12 → chain-c gives 5, chain-b gives 5, chain-a gives 2 → 12 total.
-	entries := loadHistoryChainTail(claudeDir, ids, cwd, 12)
+	entries := LoadHistoryChainTailCtx(context.Background(), claudeDir, ids, cwd, 12)
 	if len(entries) != 12 {
 		t.Fatalf("expected 12 entries, got %d", len(entries))
 	}
@@ -393,13 +393,13 @@ func TestLoadHistoryChainTail_EmptyInputs(t *testing.T) {
 	t.Parallel()
 	claudeDir := makeClaudeDir(t)
 
-	if got := loadHistoryChainTail(claudeDir, nil, "/tmp/x", 10); got != nil {
+	if got := LoadHistoryChainTailCtx(context.Background(), claudeDir, nil, "/tmp/x", 10); got != nil {
 		t.Errorf("expected nil for empty ids, got %d entries", len(got))
 	}
-	if got := loadHistoryChainTail(claudeDir, []string{"a", "b"}, "/tmp/x", 0); got != nil {
+	if got := LoadHistoryChainTailCtx(context.Background(), claudeDir, []string{"a", "b"}, "/tmp/x", 0); got != nil {
 		t.Errorf("expected nil for limit=0, got %d entries", len(got))
 	}
-	if got := loadHistoryChainTail("", []string{"a"}, "/tmp/x", 10); got != nil {
+	if got := LoadHistoryChainTailCtx(context.Background(), "", []string{"a"}, "/tmp/x", 10); got != nil {
 		t.Errorf("expected nil for empty claudeDir, got %d entries", len(got))
 	}
 }
@@ -423,7 +423,7 @@ func TestLoadHistoryChainTail_SkipsMissing(t *testing.T) {
 		realID,
 		"missing-2", // non-UUID — skipped
 	}
-	entries := loadHistoryChainTail(claudeDir, ids, cwd, 10)
+	entries := LoadHistoryChainTailCtx(context.Background(), claudeDir, ids, cwd, 10)
 	if len(entries) != 1 {
 		t.Fatalf("expected 1 entry, got %d", len(entries))
 	}
@@ -758,7 +758,7 @@ func BenchmarkLoadHistoryTail_vs_LoadHistory(b *testing.B) {
 	})
 	b.Run("LoadHistoryTail_500", func(b *testing.B) {
 		for range b.N {
-			_, _ = loadHistoryTail(claudeDir, sessionID, cwd, 500)
+			_, _ = LoadHistoryTailCtx(context.Background(), claudeDir, sessionID, cwd, 500)
 		}
 	})
 }

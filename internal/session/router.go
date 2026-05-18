@@ -1931,9 +1931,14 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 		}
 		select {
 		case <-ctx.Done():
-			if !waitT.Stop() {
-				<-waitT.C
-			}
+			// R222-GO-8: Go 1.23+ Stop drains the timer channel even when it
+			// reports false (timer already fired). The legacy
+			// `if !Stop() { <-C }` idiom would block forever on a drained
+			// channel, and previously could also wait the full next tick if
+			// Stop was called between fire and receive. go.mod requires
+			// go 1.26+, so a bare Stop is sufficient and pendingTimer-leak
+			// safe; if go.mod is ever lowered below 1.23, restore the drain.
+			waitT.Stop()
 			return nil, 0, ctx.Err()
 		case <-waitT.C:
 		}

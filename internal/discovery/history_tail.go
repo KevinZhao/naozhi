@@ -37,7 +37,7 @@ const tailChunkSize = 256 * 1024
 // it down without waiting for 512 chunks of io.EOF responses under -race.
 var maxTailReadBytes int64 = 128 * 1024 * 1024
 
-// LoadHistoryTail reads up to `limit` recent user/assistant entries from
+// LoadHistoryTailCtx reads up to `limit` recent user/assistant entries from
 // a session JSONL by seeking from EOF backward and parsing only the tail.
 // Stops as soon as the limit is reached or the file head is hit.
 //
@@ -50,13 +50,13 @@ var maxTailReadBytes int64 = 128 * 1024 * 1024
 // drops from ~1-2s to ~30ms.
 //
 // `limit <= 0` falls back to the legacy full-file LoadHistory behaviour.
-func loadHistoryTail(claudeDir, sessionID, cwd string, limit int) ([]cli.EventEntry, error) {
-	return LoadHistoryTailCtx(context.Background(), claudeDir, sessionID, cwd, limit)
-}
-
-// LoadHistoryTailCtx is the context-aware variant. Cancellation is checked
-// between chunks and between parsed lines so a hung NFS read can still be
-// interrupted by Shutdown (subject to the underlying ReadAt's own blocking).
+//
+// Cancellation is checked between chunks and between parsed lines so a hung
+// NFS read can still be interrupted by Shutdown (subject to the underlying
+// ReadAt's own blocking). R222-GO-2 removed the non-ctx wrapper that hid
+// `context.Background()` from callers — every call site now threads the
+// router's historyCtx through, so shutdown actually stops in-flight tail
+// reads instead of waiting on the FS.
 func LoadHistoryTailCtx(ctx context.Context, claudeDir, sessionID, cwd string, limit int) ([]cli.EventEntry, error) {
 	return LoadHistoryTailBeforeCtx(ctx, claudeDir, sessionID, cwd, 0, limit)
 }
@@ -354,20 +354,18 @@ func parseHistoryLine(line []byte) ([]cli.EventEntry, bool) {
 	return nil, false
 }
 
-// LoadHistoryChainTail walks a prev-session-ID chain (in order oldest → newest
-// as stored) from newest to oldest and collects up to `limit` entries total,
-// stopping as soon as the budget is exhausted. Returns entries in
+// LoadHistoryChainTailCtx walks a prev-session-ID chain (in order oldest →
+// newest as stored) from newest to oldest and collects up to `limit` entries
+// total, stopping as soon as the budget is exhausted. Returns entries in
 // chronological order.
 //
 // Motivation: on long-lived chats the chain can be 32 IDs long. Loading
 // every JSONL only to discard all but the last 500 entries is wasteful.
 // Walking in reverse and stopping when the budget is met typically opens
 // only 1-2 files for a normal session.
-func loadHistoryChainTail(claudeDir string, ids []string, cwd string, limit int) []cli.EventEntry {
-	return LoadHistoryChainTailCtx(context.Background(), claudeDir, ids, cwd, limit)
-}
-
-// LoadHistoryChainTailCtx is the context-aware variant.
+//
+// R222-GO-2 removed the non-ctx wrapper that hid `context.Background()` from
+// callers — every call site now threads the router's historyCtx through.
 func LoadHistoryChainTailCtx(ctx context.Context, claudeDir string, ids []string, cwd string, limit int) []cli.EventEntry {
 	if limit <= 0 || len(ids) == 0 || claudeDir == "" {
 		return nil
