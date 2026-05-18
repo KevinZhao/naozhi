@@ -24,8 +24,10 @@ import (
 // renderers. 16 KiB runes is generous enough to hold a typical Read /
 // Bash / Edit invocation in full while keeping a hostile / runaway tool
 // from blowing up the WS frame size and slog attrs. Aligned with the
-// 16K cap process_event_format.go uses for the legacy unknown-tool path
-// (R215-PERF-P2-6) so both code paths are bounded by the same number.
+// 16K cap that process_event_format.go uses for full-content fields like
+// entry.Detail on assistant text (line 200) and Result blocks (line 233);
+// the label paths use a much smaller 300-rune cap, but those render only
+// short summaries. tool_call payloads are full-content, so 16K is correct.
 const toolJSONMaxRunes = 16000
 
 // truncateToolJSON converts a raw JSON byte slice into a string, capped at

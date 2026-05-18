@@ -544,6 +544,44 @@ func TestACPProtocol_ReadEvent_ToolCallUpdate_Completed(t *testing.T) {
 	}
 }
 
+// TestACPProtocol_ReadEvent_ToolCall_TruncatesLargePayload pins the
+// 16K-rune cap on Event.ToolCall.InputJSON / OutputJSON wired up by
+// truncateToolJSON. Without this guard a runaway shell tool dumping
+// MB-scale stdout would balloon WS frames and slog attrs. Asserts both
+// (a) the cap is honoured (output is shorter than the raw payload) and
+// (b) the "..." marker is appended so consumers can detect truncation.
+// PR #120 review medium follow-up.
+func TestACPProtocol_ReadEvent_ToolCall_TruncatesLargePayload(t *testing.T) {
+	t.Parallel()
+	// 20K runes — comfortably above toolJSONMaxRunes (16K) so the
+	// truncation branch fires deterministically.
+	const payloadLen = 20000
+	bigStdout := strings.Repeat("x", payloadLen)
+	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{` +
+		`"sessionUpdate":"tool_call_update","toolCallId":"tooluse_big","kind":"execute","status":"completed",` +
+		`"title":"big tool","rawOutput":{"items":[{"Json":{"stdout":"` + bigStdout + `"}}]}}}}`
+
+	p := &ACPProtocol{}
+	ev, _, err := p.ReadEvent(line)
+	if err != nil {
+		t.Fatalf("ReadEvent: %v", err)
+	}
+	if ev.ToolCall == nil {
+		t.Fatal("ToolCall must be populated for tool_call_update")
+	}
+	got := ev.ToolCall.OutputJSON
+	if len(got) >= payloadLen {
+		t.Errorf("OutputJSON not truncated: len=%d, want < %d", len(got), payloadLen)
+	}
+	if !strings.HasSuffix(got, "...") {
+		t.Errorf("OutputJSON missing truncation marker '...'; got tail %q", got[max(0, len(got)-20):])
+	}
+	// Sanity: the prefix must still be the original stdout content.
+	if !strings.Contains(got, "stdout") || !strings.Contains(got, "xxxxxxxx") {
+		t.Errorf("OutputJSON dropped real content; got %q", got[:min(80, len(got))])
+	}
+}
+
 func TestACPProtocol_ReadEvent_Response_TurnComplete(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{sessionID: "sess_1"}
