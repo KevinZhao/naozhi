@@ -171,11 +171,53 @@ func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData)
 	return err
 }
 
-// WriteInterrupt is not supported for ACP. ACP defines session/cancel as an
-// RPC method; wiring it in would require turn-scoped request IDs that the
-// current wrapper doesn't track. Callers must fall back to Interrupt() (SIGINT).
-func (p *ACPProtocol) WriteInterrupt(_ io.Writer, _ string) error {
-	return ErrInterruptUnsupported
+// WriteInterrupt sends a session/cancel notification (no id) over stdin to
+// abort the in-flight session/prompt. ACP semantics (verified against
+// kiro 2.3.0 on 2026-05-18, see docs/rfc/multi-backend-validation.md V1):
+//
+//   - session/cancel is a JSON-RPC NOTIFICATION (no id field), not a request.
+//     Sending it as a request triggered "Method not found" on kiro.
+//   - The original session/prompt RPC is then completed with
+//     {"result":{"stopReason":"cancelled"}, "id": <prompt-id>} within ms;
+//     readLoop already turns that into a normal turn-complete event, so no
+//     extra synchronization is required here.
+//   - Up to ~10 in-flight chunks may still arrive after the cancel notification
+//     (network in-flight); the readLoop tolerates them harmlessly.
+//   - The same sessionId immediately accepts the next session/prompt.
+//
+// Returns ErrInterruptUnsupported only when no session is established yet —
+// before the initialize/session_new handshake completes there is no session
+// to cancel. Callers see ErrInterruptUnsupported as "fall back to SIGINT"
+// (Process.Interrupt).
+//
+// requestID is ignored: notifications carry no id, so naozhi has no
+// correlation to log against. The control_request_id parameter is kept in
+// the Protocol interface for the stream-json side (control_request requires
+// it).
+func (p *ACPProtocol) WriteInterrupt(w io.Writer, _ string) error {
+	p.mu.Lock()
+	sid := p.sessionID
+	p.mu.Unlock()
+	if sid == "" {
+		return ErrInterruptUnsupported
+	}
+	notif := struct {
+		JSONRPC string         `json:"jsonrpc"`
+		Method  string         `json:"method"`
+		Params  map[string]any `json:"params"`
+	}{
+		JSONRPC: "2.0",
+		Method:  "session/cancel",
+		Params:  map[string]any{"sessionId": sid},
+	}
+	data, err := json.Marshal(notif)
+	if err != nil {
+		return fmt.Errorf("acp marshal session/cancel: %w", err)
+	}
+	if _, err := w.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("acp write session/cancel: %w", err)
+	}
+	return nil
 }
 
 // WriteUserMessageLocked ignores uuid and priority — ACP has neither concept.
@@ -233,6 +275,15 @@ func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 				msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))
 		}
 
+		// Decode the optional stopReason so callers can distinguish a normal
+		// turn end from a cancelled one. ACP spec values: "end_turn",
+		// "cancelled", "max_tokens", "tool_use_failure", "refusal". We expose
+		// the raw string in SubType — same field used by stream-json events.
+		var stop struct {
+			StopReason string `json:"stopReason"`
+		}
+		_ = json.Unmarshal(msg.Result, &stop) // best-effort; missing => empty
+
 		p.mu.Lock()
 		text := p.textBuf.String()
 		p.textBuf.Reset()
@@ -241,6 +292,7 @@ func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 
 		ev := Event{
 			Type:      "result",
+			SubType:   stop.StopReason,
 			Result:    text,
 			SessionID: sid,
 		}
