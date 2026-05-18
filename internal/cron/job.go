@@ -7,6 +7,8 @@ import (
 	"time"
 
 	robfigcron "github.com/robfig/cron/v3"
+
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // Job represents a scheduled cron task.
@@ -183,23 +185,11 @@ func JobTitleOrFallback(j *Job) string {
 	if t := strings.TrimSpace(j.Title); t != "" {
 		return t
 	}
-	p := strings.TrimSpace(j.Prompt)
-	if p == "" {
+	// R222-CR-5: 抽到 textutil.FirstLine 共用 dispatch/cron 同语义（TrimSpace 后
+	// 跨任意数量空白行扫第一非空行），消除三处独立实现的字面 firstLine 漂移风险。
+	line := textutil.FirstLine(j.Prompt)
+	if line == "" {
 		return ""
-	}
-	// 取首个非空行
-	line := p
-	if idx := strings.IndexByte(p, '\n'); idx >= 0 {
-		line = strings.TrimSpace(p[:idx])
-		if line == "" {
-			// 罕见：以空白换行开头，继续扫
-			for _, l := range strings.Split(p, "\n") {
-				if l = strings.TrimSpace(l); l != "" {
-					line = l
-					break
-				}
-			}
-		}
 	}
 	// rune-level 截断，保证不切断多字节
 	runes := []rune(line)

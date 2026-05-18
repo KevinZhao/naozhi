@@ -22,7 +22,7 @@ func formatEventLine(ev cli.Event) string {
 				return ""
 			}
 			// Show first meaningful line of thinking, truncated
-			first := firstLine(block.Text)
+			first := textutil.FirstLine(block.Text)
 			return "💭 " + textutil.TruncateRunes(first, 50)
 		case "tool_use":
 			return formatToolUse(block.Name, block.Input)
@@ -129,29 +129,6 @@ func shortenPath(p string) string {
 		return base
 	}
 	return dir + "/" + base
-}
-
-// firstLine returns the first non-empty line of s after TrimSpace.
-//
-// Semantic note (R222-CR-7): unlike cli/subagent_transcript.go::firstLineTrunc
-// which returns the literal first line (possibly empty), this variant skips
-// leading blank lines and falls through to the second line when the first is
-// whitespace-only. Used for status banners where an empty title would render
-// as a blank chip.
-func firstLine(s string) string {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexByte(s, '\n'); i >= 0 {
-		first := strings.TrimSpace(s[:i])
-		if first != "" {
-			return first
-		}
-		rest := strings.TrimSpace(s[i+1:])
-		if j := strings.IndexByte(rest, '\n'); j >= 0 {
-			return strings.TrimSpace(rest[:j])
-		}
-		return rest
-	}
-	return s
 }
 
 // statusAccumulator tracks accumulated status lines for IM display.
