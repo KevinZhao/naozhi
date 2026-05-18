@@ -95,7 +95,9 @@ func newTestDispatcher(srv *Server) *dispatch.Dispatcher {
 		Dedup:         srv.dedup,
 		AllowedRoot:   srv.allowedRoot,
 		ClaudeDir:     srv.claudeDir,
-		ReplyFooter:   srv.backendTag,
+		ReplyFooterFn: func(backendID string) string {
+			return srv.backendTag // tests retain legacy global tag for assertions
+		},
 		SendFn: func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error) {
 			return sess.Send(ctx, text, images, onEvent)
 		},

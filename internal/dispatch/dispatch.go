@@ -59,13 +59,13 @@ type Dispatcher struct {
 	// callers don't supply a resolver the constructor fabricates a project-
 	// less fallback so call sites can dereference unconditionally.
 	// See docs/rfc/key-resolver.md Phase 2.
-	resolver    *session.KeyResolver
-	guard       SessionGuard // used by Dashboard/WS path
-	queue       *MessageQueue
-	dedup       *platform.Dedup
-	allowedRoot string
-	claudeDir   string
-	replyFooter string
+	resolver      *session.KeyResolver
+	guard         SessionGuard // used by Dashboard/WS path
+	queue         *MessageQueue
+	dedup         *platform.Dedup
+	allowedRoot   string
+	claudeDir     string
+	replyFooterFn func(backendID string) string
 
 	noOutputTimeout       time.Duration
 	totalTimeout          time.Duration
@@ -131,7 +131,15 @@ type DispatcherConfig struct {
 	Dedup       *platform.Dedup
 	AllowedRoot string
 	ClaudeDir   string
-	ReplyFooter string
+	// ReplyFooterFn returns the per-session reply tag (e.g. "cc" / "kiro")
+	// given the session's backend ID. The IM reply path appends "\n\n— <tag>"
+	// to outbound messages so users can see which backend produced the reply.
+	// Empty backend means "session has no backend pinned yet" — fn typically
+	// resolves to the router default's tag.
+	//
+	// nil means "no footer", same as the legacy ReplyFooter="" default.
+	// docs/rfc/multi-backend.md §7 (per-session ReplyTag).
+	ReplyFooterFn func(backendID string) string
 
 	NoOutputTimeout       time.Duration
 	TotalTimeout          time.Duration
@@ -185,7 +193,7 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		dedup:                 cfg.Dedup,
 		allowedRoot:           cfg.AllowedRoot,
 		claudeDir:             cfg.ClaudeDir,
-		replyFooter:           cfg.ReplyFooter,
+		replyFooterFn:         cfg.ReplyFooterFn,
 		noOutputTimeout:       cfg.NoOutputTimeout,
 		totalTimeout:          cfg.TotalTimeout,
 		watchdogNoOutputKills: cfg.WatchdogNoOutputKills,
@@ -699,8 +707,18 @@ func (d *Dispatcher) sendAndReply(
 	if result.MergedCount > 1 && replyText != "" {
 		replyText += fmt.Sprintf("\n\n*— 合并了 %d 条消息的回复*", result.MergedCount)
 	}
-	if d.replyFooter != "" {
-		replyText += "\n\n— " + d.replyFooter
+	// Per-session ReplyFooter (Sprint 2). When sess is non-nil we resolve the
+	// tag from sess.Backend(); when nil (cron edge case where the session
+	// has been pruned but the reply path still fires) the fn receives "" and
+	// the implementation falls back to the router default.
+	if d.replyFooterFn != nil {
+		var backendID string
+		if sess != nil {
+			backendID = sess.Backend()
+		}
+		if footer := d.replyFooterFn(backendID); footer != "" {
+			replyText += "\n\n— " + footer
+		}
 	}
 	var outImages []platform.Image
 	for _, path := range cli.ExtractImagePaths(replyText) {
