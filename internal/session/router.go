@@ -21,14 +21,15 @@ import (
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/history"
 
-	// Blank import: triggers init() registration of the claude
-	// history-source factory with cli.RegisterHistoryFactory. Sprint
-	// 1a moves the dispatch out of attachHistorySource into the cli
-	// wrapper layer; the import survives here only as a side-effect
-	// trigger so existing deployments keep getting the claude factory.
+	// Blank imports: trigger init() registration of per-backend
+	// history-source factories with cli.RegisterHistoryFactory.
+	// Sprint 1a moved the dispatch out of attachHistorySource into the
+	// cli wrapper layer; the imports survive here only as side-effect
+	// triggers so existing deployments keep getting the right factory.
 	// Sprint 1b will consolidate side-effect imports into a single
 	// wireup package.
 	_ "github.com/naozhi/naozhi/internal/history/claudejsonl"
+	_ "github.com/naozhi/naozhi/internal/history/kirojsonl"
 	"github.com/naozhi/naozhi/internal/history/merged"
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
 	"github.com/naozhi/naozhi/internal/metrics"
