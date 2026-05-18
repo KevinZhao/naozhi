@@ -394,7 +394,21 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 	// inside the JSON is the real source of truth, but ReadDir + Stat is
 	// cheap; reading every JSON to sort by StartedAt would inflate list
 	// latency from O(N) stat to O(N) parse.
-	sort.Slice(items, func(i, j int) bool { return items[i].mtime.After(items[j].mtime) })
+	//
+	// R222-GO-5: when the underlying FS has low timestamp precision (FAT32 ≈
+	// 2 s, ext3 ≈ 1 s, tmpfs occasionally collapses concurrent atomic writes
+	// to the same nanosecond), two runs that complete in the same tick get
+	// identical mtimes and ReadDir's iteration order becomes load-bearing —
+	// flipping ordering on rerun and letting pagination cutoff (StartedAt <
+	// before) silently skip a record. Use runID as a deterministic secondary
+	// key: it's 16-char random hex, so the tie-breaker is stable across
+	// processes and re-reads even though it carries no time signal of its own.
+	sort.Slice(items, func(i, j int) bool {
+		if items[i].mtime.Equal(items[j].mtime) {
+			return items[i].runID > items[j].runID
+		}
+		return items[i].mtime.After(items[j].mtime)
+	})
 
 	out := make([]CronRunSummary, 0, limit)
 	for _, it := range items {
