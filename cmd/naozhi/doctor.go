@@ -13,9 +13,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/backend"
+	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -45,6 +49,8 @@ func runDoctor(args []string) {
 		"per-HTTP-check deadline")
 	jsonOut := fs.Bool("json", false,
 		"emit findings as JSON (one object per line) — easier to consume from CI / monitoring")
+	configPath := fs.String("config", "config.yaml",
+		"path to config.yaml; used to render the CLI Backends section (multi-backend RFC §11.2)")
 	if err := fs.Parse(args); err != nil {
 		os.Exit(2)
 	}
@@ -55,11 +61,12 @@ func runDoctor(args []string) {
 	}
 
 	d := &doctor{
-		addr:    strings.TrimRight(*addr, "/"),
-		token:   token,
-		timeout: *timeout,
-		out:     os.Stdout,
-		json:    *jsonOut,
+		addr:       strings.TrimRight(*addr, "/"),
+		token:      token,
+		timeout:    *timeout,
+		out:        os.Stdout,
+		json:       *jsonOut,
+		configPath: *configPath,
 	}
 	d.run()
 	if d.hasFail {
@@ -114,11 +121,12 @@ type finding struct {
 }
 
 type doctor struct {
-	addr    string
-	token   string
-	timeout time.Duration
-	out     io.Writer
-	json    bool
+	addr       string
+	token      string
+	timeout    time.Duration
+	out        io.Writer
+	json       bool
+	configPath string
 
 	hasFail  bool
 	findings []finding
@@ -134,6 +142,14 @@ func (d *doctor) run() {
 	d.checkStateDir()
 	d.checkZeroDowntimeScopes()
 	d.render()
+	// Backends section runs after the standard findings render so its
+	// section-header layout doesn't interleave with the per-finding ✓/✗
+	// stream. JSON mode skips the section entirely — JSON consumers
+	// already get backend metadata via /api/cli/backends and shouldn't
+	// have to parse free-form section headers from doctor's stdout.
+	if !d.json {
+		d.renderBackendsSection()
+	}
 }
 
 func (d *doctor) add(category, level, detail string) {
@@ -414,4 +430,220 @@ func runOutput(cmd *exec.Cmd) (string, error) {
 	bound := exec.CommandContext(ctx, cmd.Path, cmd.Args[1:]...)
 	out, err := bound.CombinedOutput()
 	return string(out), err
+}
+
+// renderBackendsSection prints the multi-backend RFC §11.2 status block
+// to d.out. It is intentionally derived from static data only (config
+// file + Profile registry + DetectBackendsCtx --version probe) so doctor
+// can run while naozhi.service is down — that's the most common time the
+// operator reaches for it. No HTTP, no shim, no server-side state is
+// touched.
+//
+// Layout (also see RFC §11.2):
+//
+//	=== CLI Backends ===
+//	Default: claude
+//
+//	[claude] claude-code 2.1.92    proto=stream-json  caps=Replay,Priority,StreamJSON
+//	  path: /home/user/.local/bin/claude
+//	  history: ~/.claude/projects/...
+//
+//	[kiro] kiro 2.3.0              proto=acp           caps=SoftInterrupt
+//	  path: /home/user/.local/bin/kiro-cli
+//	  history: ~/.kiro/sessions/cli/
+//
+//	=== Reverse Nodes ===
+//	(no reverse_nodes configured)
+//
+// or, when reverse_nodes are present:
+//
+//	node "macbook"   (live caps unknown — register a node to inspect)
+//	  can host: claude  (kiro requires "acp" cap)
+//
+// Reverse-node cap info is intentionally NOT live: doctor cannot start
+// the WebSocket hub without booting half the server, and the cap data
+// only appears once a node connects. We dump configured nodes plus a
+// per-backend "what would be required" line so an operator inspecting
+// the config sees the dependency before they ever bring the system up.
+func (d *doctor) renderBackendsSection() {
+	// Ensure Profile registry is initialised exactly once. RegisterDefaults
+	// panics on duplicates, so a recover() makes doctor resilient to a
+	// caller that already registered (currently nothing in cmd/naozhi
+	// shares the doctor process, but keep the guard for future robustness
+	// and for tests that init the registry from setup code).
+	func() {
+		defer func() { _ = recover() }()
+		backend.RegisterDefaults()
+	}()
+
+	// Best-effort config load. If config is missing or malformed, fall
+	// back to "no config" rendering — we still want to show what the
+	// binary CAN drive. The user typically runs doctor in two modes:
+	// "service is broken, give me triage data" (config exists) and
+	// "I just installed naozhi, what backends does it support" (no
+	// config yet).
+	cfg, cfgErr := config.Load(d.configPath)
+	defaultBackend := "claude"
+	var cfgBackends []config.CLIBackendConfig
+	var cfgReverseNodes map[string]config.ReverseNodeEntry
+	if cfgErr == nil && cfg != nil {
+		defaultBackend = cfg.DefaultBackendID()
+		cfgBackends = cfg.EnabledBackends()
+		cfgReverseNodes = cfg.ReverseNodes
+	} else {
+		// Synthesise an entry per registered Profile so the section is
+		// still informative without a config. ID order matches Profile
+		// registration order (claude, kiro, ...).
+		for _, p := range backend.All() {
+			cfgBackends = append(cfgBackends, config.CLIBackendConfig{ID: p.ID})
+		}
+	}
+
+	// Probe each registered backend's binary. Use a short context so a
+	// hung --version invocation can't freeze doctor; the caller should
+	// see the per-backend probe result quickly.
+	ctx, cancel := context.WithTimeout(context.Background(), d.timeout)
+	defer cancel()
+	probes := cli.DetectBackendsCtx(ctx)
+	probeByID := make(map[string]cli.BackendInfo, len(probes))
+	for _, p := range probes {
+		probeByID[p.ID] = p
+	}
+
+	// Index Profiles by ID for caps + history-dir lookup.
+	profileByID := make(map[string]backend.Profile, len(backend.All()))
+	for _, p := range backend.All() {
+		profileByID[p.ID] = p
+	}
+
+	fmt.Fprintln(d.out)
+	fmt.Fprintln(d.out, "=== CLI Backends ===")
+	if cfgErr != nil {
+		fmt.Fprintf(d.out, "(config %s not loaded: %v — showing registry defaults only)\n",
+			d.configPath, cfgErr)
+	}
+	fmt.Fprintf(d.out, "Default: %s\n\n", defaultBackend)
+
+	for _, b := range cfgBackends {
+		id := b.ID
+		if id == "" {
+			id = defaultBackend
+		}
+		profile, profileOK := profileByID[id]
+		probe := probeByID[id]
+		displayName := id
+		if profileOK {
+			displayName = profile.DisplayName
+		}
+		version := probe.Version
+		if version == "" {
+			version = "unknown"
+		}
+		// Render protocol + caps. NewProtocol lookup happens through the
+		// Profile so an unknown ID degrades gracefully to "proto=?".
+		protoName := "?"
+		capsStr := "(unknown)"
+		if profileOK {
+			proto := profile.NewProtocol(backend.ProtocolDeps{})
+			protoName = proto.Name()
+			capsStr = formatCapsForDoctor(cli.ProtocolCaps(proto))
+		}
+		fmt.Fprintf(d.out, "[%s] %s %s  proto=%s  caps=%s\n",
+			id, displayName, version, protoName, capsStr)
+		// path: prefer the probe (it walks $PATH). Fall back to the
+		// configured cli.backends[].path so an operator who set an
+		// override sees what they typed.
+		path := probe.Path
+		if path == "" {
+			path = b.Path
+		}
+		if path == "" && profileOK {
+			path = profile.DefaultBinary + " (not found on $PATH)"
+		}
+		fmt.Fprintf(d.out, "  path:    %s\n", path)
+		if !probe.Available {
+			fmt.Fprintf(d.out, "  status:  unavailable (--version probe failed)\n")
+		}
+		fmt.Fprintf(d.out, "  history: %s\n", historyDirForBackend(id))
+		if len(profile.RequiredNodeCaps) > 0 {
+			fmt.Fprintf(d.out, "  reverse-node caps required: %s\n",
+				strings.Join(profile.RequiredNodeCaps, ", "))
+		}
+		fmt.Fprintln(d.out)
+	}
+
+	// Reverse Nodes section.
+	fmt.Fprintln(d.out, "=== Reverse Nodes ===")
+	if len(cfgReverseNodes) == 0 {
+		fmt.Fprintln(d.out, "(no reverse_nodes configured)")
+		return
+	}
+	// Sort node IDs so output is deterministic across runs.
+	ids := make([]string, 0, len(cfgReverseNodes))
+	for id := range cfgReverseNodes {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		entry := cfgReverseNodes[id]
+		display := entry.DisplayName
+		if display == "" {
+			display = id
+		}
+		fmt.Fprintf(d.out, "node %q  display=%q  (live caps unknown — visible only after node connects)\n",
+			id, display)
+		// For each registered backend, list whether the node can
+		// host it based on RequiredNodeCaps. Doctor cannot inspect
+		// the live cap set, so we phrase the line as a
+		// pre-condition: "claude needs no special cap; kiro needs
+		// the 'acp' cap from the connected node".
+		for _, p := range backend.All() {
+			if len(p.RequiredNodeCaps) == 0 {
+				fmt.Fprintf(d.out, "  %s: no special cap required\n", p.ID)
+			} else {
+				fmt.Fprintf(d.out, "  %s: requires node caps [%s]\n",
+					p.ID, strings.Join(p.RequiredNodeCaps, ", "))
+			}
+		}
+	}
+}
+
+// formatCapsForDoctor renders Caps as a comma-separated list of the
+// flags that are TRUE. Empty result becomes "(none)" so the line
+// stays parseable. Order matches the struct field order so the
+// output is deterministic.
+func formatCapsForDoctor(c cli.Caps) string {
+	parts := make([]string, 0, 4)
+	if c.Replay {
+		parts = append(parts, "Replay")
+	}
+	if c.Priority {
+		parts = append(parts, "Priority")
+	}
+	if c.SoftInterrupt {
+		parts = append(parts, "SoftInterrupt")
+	}
+	if c.StreamJSON {
+		parts = append(parts, "StreamJSON")
+	}
+	if len(parts) == 0 {
+		return "(none)"
+	}
+	return strings.Join(parts, ",")
+}
+
+// historyDirForBackend returns the documented history directory for the
+// given backend ID. Hard-coded against what cmd/naozhi/main.go wires up
+// (~/.claude for claude, ~/.kiro/sessions/cli for kiro). When new
+// backends land, add a case rather than reading a config field — doctor
+// must work even when config is missing.
+func historyDirForBackend(id string) string {
+	switch id {
+	case "claude":
+		return "~/.claude/projects/"
+	case "kiro":
+		return "~/.kiro/sessions/cli/"
+	default:
+		return "(none)"
+	}
 }
