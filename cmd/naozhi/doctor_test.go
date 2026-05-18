@@ -448,10 +448,11 @@ func TestFormatCapsForDoctor(t *testing.T) {
 // than a private switch, so this test pins both the registry-default
 // values for the two built-in backends AND the unknown-id fallback.
 //
-// Cannot t.Parallel: historyDirForBackend self-bootstraps the global
-// backend registry via RegisterDefaults; running concurrently with
-// other tests that also touch the registry would race the recover() inside.
+// Safe under t.Parallel since PR #122 follow-up: historyDirForBackend now
+// bootstraps via backend.EnsureDefaults (sync.Once), which is concurrent-
+// safe and idempotent.
 func TestHistoryDirForBackend(t *testing.T) {
+	t.Parallel()
 	tests := []struct {
 		id   string
 		want string
@@ -463,6 +464,7 @@ func TestHistoryDirForBackend(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.id, func(t *testing.T) {
+			t.Parallel()
 			if got := historyDirForBackend(tc.id); got != tc.want {
 				t.Errorf("historyDirForBackend(%q) = %q, want %q", tc.id, got, tc.want)
 			}
