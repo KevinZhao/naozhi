@@ -4701,21 +4701,45 @@ async function fetchCLIBackends() {
 
 // renderBackendPicker returns an HTML fragment for a backend <select>, or
 // an empty string when only one backend is enabled. The selected value is
-// surfaced via document.getElementById('new-backend').value at submit time.
-function renderBackendPicker(backendsData) {
+// surfaced via document.getElementById(opts.selectId).value at submit time.
+//
+// opts (all optional):
+//   - selectId: id of the <select> element. Defaults to 'new-backend' so
+//     existing call sites (createNewSession / openProjectPalette /
+//     pickPaletteCustom) keep working unchanged. The cron editor passes
+//     'cron-backend' / 'edit-cron-backend' to avoid id collisions when
+//     more than one modal is open simultaneously (defensive — modals are
+//     usually exclusive but trapFocus ordering plus future stacking
+//     should not silently corrupt the wrong picker).
+//   - selectedId: if non-empty, this backend ID is pre-selected instead
+//     of backendsData.default. Used by the cron edit modal to round-trip
+//     a saved Job.Backend choice. Falls through to default when the
+//     value doesn't match any enabled backend (e.g. operator removed
+//     that backend from config.yaml).
+function renderBackendPicker(backendsData, opts) {
   if (!backendsData || !Array.isArray(backendsData.backends)) return '';
   const list = backendsData.backends;
   if (list.length <= 1) return '';
+  const o = opts || {};
+  const selectId = o.selectId || 'new-backend';
   const defaultID = backendsData.default || (list[0] && list[0].id) || '';
+  // Pre-select the saved value when it matches a current enabled backend;
+  // otherwise fall back to default. Iterating once keeps the lookup cheap.
+  let preselect = defaultID;
+  if (o.selectedId) {
+    for (const b of list) {
+      if (b && b.id === o.selectedId) { preselect = o.selectedId; break; }
+    }
+  }
   const options = list.map(b => {
-    const selected = b.id === defaultID ? ' selected' : '';
+    const selected = b.id === preselect ? ' selected' : '';
     const label = (b.display_name || b.id) + (b.version ? ' ' + b.version : '') + (b.available === false ? ' (unavailable)' : '');
     const disabled = b.available === false ? ' disabled' : '';
     return '<option value="' + escAttr(b.id) + '"' + selected + disabled + '>' + esc(label) + '</option>';
   }).join('');
   return '<div style="margin-bottom:12px">' +
-    '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="new-backend">CLI backend</label>' +
-    '<select id="new-backend" style="width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px">' +
+    '<label style="font-size:12px;color:var(--nz-text-mute);display:block;margin-bottom:4px" for="' + escAttr(selectId) + '">CLI backend</label>' +
+    '<select id="' + escAttr(selectId) + '" style="width:100%;padding:6px 8px;background:var(--nz-bg-0);color:var(--nz-text);border:1px solid var(--nz-border);border-radius:4px">' +
     options +
     '</select>' +
     '</div>';
@@ -9741,6 +9765,16 @@ function buildScheduleSection(initialDesc, initialRawExpr) {
 }
 
 function createNewCronJob() {
+  // Sprint 6c: fetch backends upfront so the picker (if any) is ready when
+  // the modal renders. Failure / single-backend deploys map to '' which
+  // collapses the picker section — same pattern as createNewSession.
+  fetchCLIBackends().then(backendsData => {
+    const backendHtml = renderBackendPicker(backendsData, { selectId: 'cron-backend' });
+    openCronCreateModal(backendHtml);
+  }).catch(() => openCronCreateModal(''));
+}
+
+function openCronCreateModal(backendHtml) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   // Default "每小时" matches the most common ask and gives users an
@@ -9761,6 +9795,7 @@ function createNewCronJob() {
       '</div>' +
       renderCronModalBody({
         scheduleHtml, wsBody, notifyHtml, contextHtml,
+        backendHtml,
         promptId: 'cron-prompt',
         promptPlaceholder: '例如：总结昨天的代码变更，push 到日报频道',
       }) +
@@ -9820,6 +9855,11 @@ function renderCronModalBody(opts) {
       '<div class="cf-label">名称 <span style="color:var(--nz-text-faint);font-weight:normal;font-size:11px">（可选）</span></div>' +
       '<input id="' + escAttr(opts.titleId || 'cron-title') + '" type="text" placeholder="' + escAttr(opts.titlePlaceholder || '例如：日报总结 · 周一早会准备') + '" maxlength="256" aria-label="任务名称">' +
     '</div>';
+  // backendHtml 由 caller 提供（Sprint 6c）。仅在多 backend 模式下非空，
+  // 单 backend 时 renderBackendPicker 返回空串、整段折叠。位置选 "其他设置"
+  // 区与 notify / fresh-context 同列，因为 backend 是 "怎么跑" 的运行时
+  // 设定，与 work_dir（"在哪里"）的资源/路径含义不同。
+  const backendBlock = opts.backendHtml ? opts.backendHtml : '';
   return '<div class="modal-body">' +
       '<div class="cron-modal-grid">' +
         titleField +
@@ -9838,6 +9878,7 @@ function renderCronModalBody(opts) {
         '<div class="cron-field cron-f-more">' +
           '<div class="cf-label">其他设置</div>' +
           '<div class="cron-more-stack">' +
+            backendBlock +
             opts.notifyHtml +
             opts.contextHtml +
           '</div>' +
@@ -10088,6 +10129,13 @@ async function doCreateCronJob() {
     if (notifyVals.notify_chat_id !== null) body.notify_chat_id = notifyVals.notify_chat_id;
     const freshCtx = collectCronContextValue();
     if (freshCtx === true) body.fresh_context = true;
+    // Sprint 6c: pick up the cron-modal backend choice (if any). The picker
+    // collapses entirely in single-backend deploys, so the element may be
+    // absent — treat that as "router default" and omit the field, matching
+    // the server's omitempty contract.
+    const backendEl = document.getElementById('cron-backend');
+    const backendVal = backendEl && backendEl.value ? backendEl.value : '';
+    if (backendVal) body.backend = backendVal;
     let data;
     try {
       data = await fetchJSON('/api/cron', {timeoutMs: 10000, method: 'POST', headers, body: JSON.stringify(body)});
@@ -11442,6 +11490,21 @@ function editCronJob(id) {
   const job = cronJobs.find(j => j.id === id);
   if (!job) { showToast('未找到该任务', 'warning'); return; }
 
+  // Sprint 6c: round-trip the saved backend choice. fetchCLIBackends is
+  // promise-based; we open the modal once it resolves so the picker (if
+  // multi-backend deploy) can pre-select the persisted value. Single-
+  // backend deploys collapse the picker — no UI difference for legacy
+  // installs.
+  fetchCLIBackends().then(backendsData => {
+    const backendHtml = renderBackendPicker(backendsData, {
+      selectId: 'edit-cron-backend',
+      selectedId: job.backend || '',
+    });
+    openCronEditModal(id, job, backendHtml);
+  }).catch(() => openCronEditModal(id, job, ''));
+}
+
+function openCronEditModal(id, job, backendHtml) {
   const overlay = document.createElement('div');
   overlay.className = 'modal-overlay';
   const notifyInitial = job.notify === true ? 'on' : (job.notify === false ? 'off' : '');
@@ -11478,6 +11541,7 @@ function editCronJob(id) {
       '</div>' +
       renderCronModalBody({
         scheduleHtml, wsBody, notifyHtml, contextHtml,
+        backendHtml,
         promptId: 'edit-cron-prompt',
         promptPlaceholder: '这个任务要做什么？',
         titleId: 'edit-cron-title',
@@ -11600,6 +11664,17 @@ async function doEditCronJob(id) {
   const freshCtx = collectCronContextValue();
   if (freshCtx !== null && freshCtx !== !!job.fresh_context) {
     body.fresh_context = freshCtx;
+  }
+
+  // Sprint 6c: backend pointer semantics — only PATCH when the user picked
+  // a different backend than the one stored on the job. Element absent =
+  // single-backend deploy (or fetch failed); skip the field entirely so
+  // the legacy unset path on the server stays unchanged.
+  const backendEl = document.getElementById('edit-cron-backend');
+  if (backendEl) {
+    const newBackend = backendEl.value || '';
+    const origBackend = job.backend || '';
+    if (newBackend !== origBackend) body.backend = newBackend;
   }
 
   if (Object.keys(body).length === 0) { overlay.remove(); return; }

@@ -265,6 +265,15 @@ func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 		return p.parseSessionUpdate(msg.Params)
 	}
 
+	// Notification: _kiro.dev/metadata — kiro's per-turn status frame.
+	// Carries contextUsagePercentage (0-1 float), turnDurationMs, meteringUsage.
+	// We surface it as a synthetic Type:"metadata" Event so dispatch / Process
+	// can update the SessionView normalize fields without parsing private
+	// methods elsewhere. See docs/rfc/multi-backend.md §8.8 / V10.
+	if msg.IsNotification() && msg.Method == "_kiro.dev/metadata" {
+		return parseKiroMetadata(msg.Params)
+	}
+
 	// Request from agent: session/request_permission.
 	// IDAsString tolerates kiro's UUID strings as well as numeric ids; HandleEvent
 	// echoes whatever the agent sent back verbatim. RawParams carries the raw
@@ -510,6 +519,58 @@ func (p *ACPProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) error {
 		metrics.RecordProtocolRPCError(p.BackendID, req.Method, code)
 	}
 	return err
+}
+
+// parseKiroMetadata decodes a _kiro.dev/metadata notification into a
+// normalized Type:"metadata" Event. Field mappings (verified against kiro
+// 2.3.0, V10):
+//   - contextUsagePercentage (float, 0-1) → ContextUsagePercent (0-100)
+//   - turnDurationMs (int)                → TurnDurationMs
+//   - meteringUsage [{value, unit, unitPlural}] → MeteringUsage
+//
+// kiro reports contextUsagePercentage as a 0-1 fraction (e.g. 0.0285 ≈ 2.85%);
+// we scale to 0-100 once here so consumers don't have to remember.
+//
+// Schema drift: log-and-skip rather than erroring so a future kiro version
+// that reshapes the payload doesn't break readLoop. Returning the synthetic
+// Event with an empty Metadata pointer would cause applyMetadata to no-op,
+// so on parse failure we return the same zero-Event-skip contract used by
+// parseSessionUpdate's default branch.
+func parseKiroMetadata(params json.RawMessage) (Event, bool, error) {
+	var raw struct {
+		SessionID              string  `json:"sessionId"`
+		ContextUsagePercentage float64 `json:"contextUsagePercentage"`
+		TurnDurationMs         int64   `json:"turnDurationMs"`
+		MeteringUsage          []struct {
+			Value      float64 `json:"value"`
+			Unit       string  `json:"unit"`
+			UnitPlural string  `json:"unitPlural"`
+		} `json:"meteringUsage"`
+	}
+	if err := json.Unmarshal(params, &raw); err != nil {
+		slog.Warn("acp: _kiro.dev/metadata unmarshal failed",
+			"err", err, "raw_len", len(params))
+		return Event{}, false, nil
+	}
+	meta := &EventMetadata{
+		ContextUsagePercent: raw.ContextUsagePercentage * 100,
+		TurnDurationMs:      raw.TurnDurationMs,
+	}
+	if len(raw.MeteringUsage) > 0 {
+		meta.MeteringUsage = make([]MeteringEntry, 0, len(raw.MeteringUsage))
+		for _, m := range raw.MeteringUsage {
+			meta.MeteringUsage = append(meta.MeteringUsage, MeteringEntry{
+				Value:      m.Value,
+				Unit:       m.Unit,
+				UnitPlural: m.UnitPlural,
+			})
+		}
+	}
+	return Event{
+		Type:      "metadata",
+		SessionID: raw.SessionID,
+		Metadata:  meta,
+	}, false, nil
 }
 
 // readUntilResponse reads lines until a JSON-RPC response with the matching ID is found.
