@@ -401,3 +401,23 @@ func TestLinker_Query_DefaultEmpty(t *testing.T) {
 	}
 	_ = strings.Split // keep import if needed later
 }
+
+// TestReadFirstLineMeta_OversizedFirstLine pins R222-GO-7: when the first
+// line of an agent jsonl exceeds the 32KB ReadSlice buffer, readFirstLineMeta
+// must surface errFirstLineTooLong instead of silently passing a truncated
+// prefix to json.Unmarshal (which previously yielded a generic JSON syntax
+// error that callers logged as a misleading "fast-path stat miss").
+func TestReadFirstLineMeta_OversizedFirstLine(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "agent-deadbeef.jsonl")
+	// Build a single line >32KB with no '\n' until the very end.
+	pad := strings.Repeat("x", 64*1024)
+	content := []byte(`{"sessionId":"abc","promptId":"p1","extra":"` + pad + `"}` + "\n")
+	if err := os.WriteFile(path, content, 0o644); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if _, err := readFirstLineMeta(path); err != errFirstLineTooLong {
+		t.Errorf("got err=%v, want errFirstLineTooLong", err)
+	}
+}

@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -664,6 +665,12 @@ type firstLineMeta struct {
 	Timestamp time.Time `json:"-"`
 }
 
+// errFirstLineTooLong signals that the agent jsonl's first line exceeds the
+// 32KB ReadSlice buffer. Without this sentinel, Unmarshal on the truncated
+// prefix would return a generic JSON syntax error and silently degrade the
+// fast path. R222-GO-7.
+var errFirstLineTooLong = errors.New("agent jsonl first line exceeds 32KB buffer")
+
 func readFirstLineMeta(path string) (firstLineMeta, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -672,8 +679,17 @@ func readFirstLineMeta(path string) (firstLineMeta, error) {
 	defer f.Close()
 	reader := bufio.NewReaderSize(f, 32*1024)
 	line, err := reader.ReadSlice('\n')
-	if err != nil && len(line) == 0 {
-		return firstLineMeta{}, err
+	if err != nil {
+		// ErrBufferFull means we got a partial line; do not feed truncated
+		// bytes to Unmarshal — surface the condition explicitly so the
+		// caller's "skip this candidate" branch is reached without logging
+		// a misleading JSON syntax error. R222-GO-7.
+		if err == bufio.ErrBufferFull {
+			return firstLineMeta{}, errFirstLineTooLong
+		}
+		if len(line) == 0 {
+			return firstLineMeta{}, err
+		}
 	}
 	var raw struct {
 		SessionID string `json:"sessionId"`
