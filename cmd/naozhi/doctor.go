@@ -633,17 +633,29 @@ func formatCapsForDoctor(c cli.Caps) string {
 }
 
 // historyDirForBackend returns the documented history directory for the
-// given backend ID. Hard-coded against what cmd/naozhi/main.go wires up
-// (~/.claude for claude, ~/.kiro/sessions/cli for kiro). When new
-// backends land, add a case rather than reading a config field — doctor
-// must work even when config is missing.
+// given backend ID, sourced from the Profile registry (added in PR #117
+// follow-up). Falls back to "(none)" when the backend is unknown OR
+// when its Profile has no HistoryDir set — both are valid states for an
+// in-memory-only backend.
+//
+// Reading from the Profile (rather than a private switch in doctor.go)
+// closes the compile-safety hole flagged in PR #117 review: adding a
+// new backend with a transcript directory now requires only a Profile
+// entry; doctor inherits the value automatically.
+//
+// Self-bootstraps the registry the same way renderBackendsSection does
+// so it remains usable from unit tests that import it without going
+// through the renderBackendsSection path. RegisterDefaults panics on
+// duplicate registration, so wrap in a recover() so a caller that has
+// already registered defaults (the long-running naozhi process at
+// startup) is not perturbed.
 func historyDirForBackend(id string) string {
-	switch id {
-	case "claude":
-		return "~/.claude/projects/"
-	case "kiro":
-		return "~/.kiro/sessions/cli/"
-	default:
-		return "(none)"
+	func() {
+		defer func() { _ = recover() }()
+		backend.RegisterDefaults()
+	}()
+	if p, ok := backend.Get(id); ok && p.HistoryDir != "" {
+		return p.HistoryDir
 	}
+	return "(none)"
 }

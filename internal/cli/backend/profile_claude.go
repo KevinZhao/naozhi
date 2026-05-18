@@ -34,6 +34,11 @@ func claudeProfile() Profile {
 		// Claude is the baseline backend; reverse-nodes do not need a
 		// special capability flag to host claude sessions.
 		RequiredNodeCaps: nil,
+		// claude-code persists session JSONL under ~/.claude/projects/.
+		// Display path stored with leading "~/" so doctor renders it
+		// verbatim; callers that need an absolute path expand it
+		// themselves via os.UserHomeDir.
+		HistoryDir: "~/.claude/projects/",
 		// Multi-Backend RFC §8.2 — claude supports the full naozhi UX
 		// surface: AskUserQuestion cards, passthrough multi-message
 		// queueing, @-mention embedded context, and image / audio input

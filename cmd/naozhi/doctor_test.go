@@ -443,12 +443,15 @@ func TestFormatCapsForDoctor(t *testing.T) {
 	}
 }
 
-// TestHistoryDirForBackend pins the doctor-only directory map. doctor
-// doesn't read this from cfg / RouterConfig because it must work without
-// a started service; instead the map mirrors the wiring in main.go. A
-// regression here means doctor would mislabel backend storage.
+// TestHistoryDirForBackend pins the doctor history-dir lookup. After PR
+// #117 follow-up the lookup reads from backend.Profile.HistoryDir rather
+// than a private switch, so this test pins both the registry-default
+// values for the two built-in backends AND the unknown-id fallback.
+//
+// Cannot t.Parallel: historyDirForBackend self-bootstraps the global
+// backend registry via RegisterDefaults; running concurrently with
+// other tests that also touch the registry would race the recover() inside.
 func TestHistoryDirForBackend(t *testing.T) {
-	t.Parallel()
 	tests := []struct {
 		id   string
 		want string
@@ -460,7 +463,6 @@ func TestHistoryDirForBackend(t *testing.T) {
 	for _, tc := range tests {
 		tc := tc
 		t.Run(tc.id, func(t *testing.T) {
-			t.Parallel()
 			if got := historyDirForBackend(tc.id); got != tc.want {
 				t.Errorf("historyDirForBackend(%q) = %q, want %q", tc.id, got, tc.want)
 			}

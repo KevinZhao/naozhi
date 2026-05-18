@@ -31,6 +31,11 @@ func kiroProfile() Profile {
 			return strings.Contains(cmdline, "kiro")
 		},
 		RequiredNodeCaps: []string{"acp"},
+		// kiro persists each session as ~/.kiro/sessions/cli/<sid>.json[l]
+		// (a sidecar JSON metadata file + a JSONL transcript). Consumed
+		// by internal/history/kirojsonl. Stored with leading "~/" for
+		// the same reason as claude (doctor display).
+		HistoryDir: "~/.kiro/sessions/cli/",
 		// Multi-Backend RFC §8.2 — kiro lacks several claude-only UX
 		// features:
 		//   - askuser: ACP has no AskUserQuestion equivalent (validate V13)
