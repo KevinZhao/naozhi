@@ -5745,6 +5745,28 @@ function localizeAPIError(status, raw) {
   if (status === 401) {
     return '鉴权失败，请重新登录' + withTail;
   }
+  // work_dir 专项：当后端返回 classifyWorkspaceErr 标签时把通用文案换成更
+  // 精确的中文，避免 "无权限或参数越界" 把 "不存在 / 不是目录 / 越界"
+  // 三种含义不同的失败合并成一句话，操作员看到无法自助修复。
+  // 与 internal/server/server.go classifyWorkspaceErr 输出保持一致。
+  if (raw) {
+    const r = String(raw);
+    if (r.indexOf('work_dir outside allowed root') !== -1) {
+      return '工作目录不在允许范围内（' + r.slice(0, 120) + '）';
+    }
+    if (r.indexOf('work_dir does not exist') !== -1) {
+      return '工作目录不存在' + withTail;
+    }
+    if (r.indexOf('work_dir is not a directory') !== -1) {
+      return '路径不是目录' + withTail;
+    }
+    if (r.indexOf('work_dir is not a valid path') !== -1) {
+      return '工作目录路径不合法' + withTail;
+    }
+    if (r.indexOf('work_dir must be an absolute path') !== -1) {
+      return '工作目录必须是绝对路径' + withTail;
+    }
+  }
   if (status === 403) {
     return '无权限或参数越界' + withTail;
   }
