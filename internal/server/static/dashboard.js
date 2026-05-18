@@ -5739,6 +5739,20 @@ function buildHomeHealthLines(stats) {
     if (stats.cli_version) cli += ' ' + stats.cli_version;
     lines.push({ text: cli, kind: 'info' });
   }
+  // Multi-Backend RFC §8.3 D22: when ≥2 backends are configured, show a
+  // one-liner summarizing per-backend availability + version. The rich
+  // per-feature table lives in the doctor status panel (built by
+  // renderBackendsStatusPanel below) — this line is just the at-a-glance
+  // health roll-up.
+  if (cliBackends && Array.isArray(cliBackends.backends) && cliBackends.backends.length > 1) {
+    const okCount = cliBackends.backends.filter(b => b && b.available).length;
+    const totalCount = cliBackends.backends.length;
+    const ids = cliBackends.backends.map(b => (b && b.id) || '?').join(' · ');
+    lines.push({
+      text: 'Backends: ' + okCount + '/' + totalCount + ' (' + ids + ')',
+      kind: okCount === totalCount ? 'info' : 'warn',
+    });
+  }
   // Line 3 (gated): watchdog kills > 0 is a prod signal operators should see.
   const wd = stats.watchdog || {};
   const totalKills = typeof wd.total_kills === 'number' ? wd.total_kills : 0;
@@ -5812,13 +5826,59 @@ function renderRecentSessionsPanel() {
           '<div class="recent-health-line ' + esc(l.kind || 'info') + '">' + esc(l.text) + '</div>'
         ).join('') +
       '</div>';
+  // Multi-Backend RFC §8.3 D22: doctor status panel — clickable details
+  // block under the health strip listing each enabled backend's caps +
+  // features. Single-backend mode skips it (the home page would be cluttered
+  // by a redundant "claude only" table).
+  const doctorHtml = renderBackendsDoctorPanel();
   host.innerHTML =
     '<div class="recent-panel">' +
       '<div class="recent-panel-title">最近会话</div>' +
       statsHtml +
       '<div class="recent-panel-list" role="list">' + rows + '</div>' +
       healthHtml +
+      doctorHtml +
     '</div>';
+}
+
+// renderBackendsDoctorPanel builds a foldable <details> panel listing each
+// enabled backend with its protocol caps + user-feature flags. Multi-Backend
+// RFC §8.3 D22. Returns '' for single-backend deployments / when cliBackends
+// is unavailable so the cold-start home page doesn't show a half-empty
+// section. The output includes a small "▼" affordance and a screen-reader
+// label so keyboard users know the section is expandable.
+function renderBackendsDoctorPanel() {
+  if (!cliBackends || !Array.isArray(cliBackends.backends)) return '';
+  if (cliBackends.backends.length <= 1) return '';
+  const rows = cliBackends.backends.map(b => {
+    if (!b) return '';
+    const id = esc(b.id || '?');
+    const name = esc(b.display_name || b.id || '?');
+    const ver = b.version ? ' v' + esc(b.version) : '';
+    const proto = b.protocol ? esc(b.protocol) : '';
+    const status = b.available
+      ? '<span class="doctor-status doctor-status-ok">●</span>'
+      : '<span class="doctor-status doctor-status-bad" title="binary missing or --version probe failed">○</span>';
+    const features = b.features && typeof b.features === 'object' ? b.features : {};
+    // Render features as compact pills — green for supported, struck for missing.
+    const featPills = Object.keys(features).sort().map(k => {
+      const on = features[k] === true;
+      return '<span class="doctor-feat ' + (on ? 'doctor-feat-on' : 'doctor-feat-off') +
+        '" title="' + escAttr(k) + (on ? '' : ' (not supported)') + '">' + esc(k) + '</span>';
+    }).join('');
+    return '<div class="doctor-row">' +
+      '<div class="doctor-row-head">' + status +
+        '<span class="doctor-row-name">[' + id + '] ' + name + ver + '</span>' +
+        (proto ? '<span class="doctor-row-proto">' + proto + '</span>' : '') +
+      '</div>' +
+      (featPills ? '<div class="doctor-row-feats">' + featPills + '</div>' : '') +
+    '</div>';
+  }).join('');
+  const defaultID = esc(cliBackends.default || '');
+  return '<details class="doctor-panel">' +
+    '<summary class="doctor-summary">▼ Backends 状态 (default: ' + defaultID + ')</summary>' +
+    '<div class="doctor-body">' + rows + '</div>' +
+  '</details>';
 }
 
 function showToast(msg, type, duration) {
