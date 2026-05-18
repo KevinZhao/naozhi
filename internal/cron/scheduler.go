@@ -1689,6 +1689,53 @@ func (s *Scheduler) freshContextPreflightP0(j *Job, snap jobSnapshot, key string
 //     - emits cron_run_ended broadcast
 //     - bumps the per-state metrics.CronRun*Total counter
 //     so all terminal paths share one observability hook.
+//
+// deadlineInterrupter is the narrow capability runDeadlineWatchdog needs
+// from a session: a way to abort an in-flight CLI turn via the protocol's
+// control_request channel. *session.ManagedSession satisfies this; cron
+// tests stub it with a counting mock to assert the watchdog fired
+// exactly when the deadline elapsed.
+type deadlineInterrupter interface {
+	InterruptViaControl() session.InterruptOutcome
+}
+
+// abortResult bundles the watchdog's exit signal: whether it actually
+// fired the interrupt (i.e. the ctx ended via DeadlineExceeded, not via
+// success-path Cancel) and what the InterruptViaControl outcome was when
+// it did. The fired flag is the discriminator the caller logs.
+type abortResult struct {
+	outcome session.InterruptOutcome
+	fired   bool
+}
+
+// runDeadlineWatchdog spawns a goroutine that waits on ctx and fires
+// sess.InterruptViaControl exactly when ctx ends with DeadlineExceeded.
+// The watchdog must run concurrently with sess.Send, NOT after — Send's
+// internal defer flips Process.State Running→Ready the instant ctx fires,
+// and InterruptViaControl gates on State==StateRunning, so calling it
+// post-Send is dead code (returns ErrNoActiveTurn → outcome=no_turn).
+//
+// The returned channel emits exactly one abortResult and is closed
+// implicitly when read. Caller must drain it before returning so the
+// goroutine cannot outlive the cron run (otherwise a fast cron tick could
+// race the next session.Reset against the in-flight interrupt write).
+//
+// On the success / non-deadline error path the caller cancels ctx
+// explicitly; the watchdog observes ctx.Err()==Canceled, skips
+// InterruptViaControl, and returns abortResult{fired:false}.
+func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan abortResult {
+	ch := make(chan abortResult, 1)
+	go func() {
+		<-ctx.Done()
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			ch <- abortResult{outcome: sess.InterruptViaControl(), fired: true}
+			return
+		}
+		ch <- abortResult{}
+	}()
+	return ch
+}
+
 func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// Guard against concurrent execution of the same job. The cron chain's
 	// SkipIfStillRunning protects the scheduled-tick path, but TriggerNow
@@ -1868,14 +1915,34 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), jobTimeout)
 	defer sendCancel()
 	inflight.setPhase(PhaseSending)
+
+	// Watchdog: deadline-fired interrupt of the in-flight CLI turn. See
+	// runDeadlineWatchdog for the rationale (must fire BEFORE Send returns,
+	// otherwise Process.State has already flipped to Ready and
+	// InterruptViaControl returns ErrNoActiveTurn → no-op).
+	abortCh := runDeadlineWatchdog(sendCtx, sess)
+
 	// Direct Send without sendWithBroadcast — cron jobs notify via onExecute callback instead.
 	result, err := sess.Send(sendCtx, cleanText, nil, nil)
+	// Cancel sendCtx so the watchdog returns promptly on the success / non-
+	// deadline error path; on the deadline path it's already done. Block
+	// on abortCh so the InterruptViaControl call (if any) completes before
+	// we record the run state — otherwise a fast cron tick could overlap
+	// the next session.Reset with the in-flight interrupt write.
+	sendCancel()
+	abort := <-abortCh
 	if err != nil {
 		if errors.Is(err, context.Canceled) {
 			// Same rationale as the session-error branch above: suppress
 			// the operator-facing notice so shutdown races don't look like
-			// real failures.
-			lg.Info("cron send cancelled", "err", err)
+			// real failures. abort.fired can still be true here when a
+			// stopCtx cancel races a near-deadline tick — surface it so
+			// operators have a signal that an interrupt attempt happened
+			// during the cancel path.
+			lg.Info("cron send cancelled",
+				"err", err,
+				"abort_fired", abort.fired,
+				"abort_outcome", abort.outcome)
 			s.finishRun(finishArgs{
 				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
 				state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
@@ -1888,9 +1955,17 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		state := RunStateFailed
 		errClass := ErrClassSendError
 		if errors.Is(err, context.DeadlineExceeded) {
-			lg.Info("cron send deadline exceeded", "err", err)
 			state = RunStateTimedOut
 			errClass = ErrClassDeadlineExceeded
+			// Log alongside the watchdog outcome so operators see both the
+			// deadline AND whether the CLI was successfully interrupted in
+			// the same line. ACP backends report "unsupported" here — we
+			// accept the silent no-op since ACP cron jobs are rare and a
+			// SIGINT fallback would couple two different abort semantics.
+			lg.Info("cron send deadline exceeded",
+				"err", err,
+				"abort_fired", abort.fired,
+				"abort_outcome", abort.outcome)
 		} else {
 			lg.Error("cron send error", "err", err)
 		}
