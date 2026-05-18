@@ -3641,12 +3641,30 @@ func (r *Router) HealthCheck() bool {
 	return true
 }
 
+// listRefsPool reuses the *ManagedSession slice that ListSessions allocates
+// to capture session pointers under r.mu. The slice is short-lived (single
+// poll) but at 1 Hz × N tabs × hundreds of sessions the per-call alloc is the
+// dominant cost on the dashboard's session list path. R222-PERF-10.
+var listRefsPool = sync.Pool{
+	New: func() any {
+		s := make([]*ManagedSession, 0, 64)
+		return &s
+	},
+}
+
 // ListSessions returns a snapshot of all sessions for the dashboard.
 // Collects references under r.mu, then releases before snapshotting
 // to avoid blocking the router while getSessionID() waits on sendMu.
 func (r *Router) ListSessions() []SessionSnapshot {
+	refsPtr := listRefsPool.Get().(*[]*ManagedSession)
+	refs := (*refsPtr)[:0]
 	r.mu.RLock()
-	refs := make([]*ManagedSession, 0, len(r.sessions))
+	if cap(refs) < len(r.sessions) {
+		// Pool slice too small for this poll — drop it (next caller will
+		// pull a fresh one) and grow once instead of paying the append
+		// growth path.
+		refs = make([]*ManagedSession, 0, len(r.sessions))
+	}
 	for _, s := range r.sessions {
 		refs = append(refs, s)
 	}
@@ -3656,6 +3674,13 @@ func (r *Router) ListSessions() []SessionSnapshot {
 	for i, s := range refs {
 		snapshots[i] = s.Snapshot()
 	}
+	// Clear pointers before returning to pool so a stuck pool entry does
+	// not pin Sessions past their last legitimate use.
+	for i := range refs {
+		refs[i] = nil
+	}
+	*refsPtr = refs[:0]
+	listRefsPool.Put(refsPtr)
 	return snapshots
 }
 
