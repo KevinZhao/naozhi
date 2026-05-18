@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -170,11 +171,53 @@ func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData)
 	return err
 }
 
-// WriteInterrupt is not supported for ACP. ACP defines session/cancel as an
-// RPC method; wiring it in would require turn-scoped request IDs that the
-// current wrapper doesn't track. Callers must fall back to Interrupt() (SIGINT).
-func (p *ACPProtocol) WriteInterrupt(_ io.Writer, _ string) error {
-	return ErrInterruptUnsupported
+// WriteInterrupt sends a session/cancel notification (no id) over stdin to
+// abort the in-flight session/prompt. ACP semantics (verified against
+// kiro 2.3.0 on 2026-05-18, see docs/rfc/multi-backend-validation.md V1):
+//
+//   - session/cancel is a JSON-RPC NOTIFICATION (no id field), not a request.
+//     Sending it as a request triggered "Method not found" on kiro.
+//   - The original session/prompt RPC is then completed with
+//     {"result":{"stopReason":"cancelled"}, "id": <prompt-id>} within ms;
+//     readLoop already turns that into a normal turn-complete event, so no
+//     extra synchronization is required here.
+//   - Up to ~10 in-flight chunks may still arrive after the cancel notification
+//     (network in-flight); the readLoop tolerates them harmlessly.
+//   - The same sessionId immediately accepts the next session/prompt.
+//
+// Returns ErrInterruptUnsupported only when no session is established yet —
+// before the initialize/session_new handshake completes there is no session
+// to cancel. Callers see ErrInterruptUnsupported as "fall back to SIGINT"
+// (Process.Interrupt).
+//
+// requestID is ignored: notifications carry no id, so naozhi has no
+// correlation to log against. The control_request_id parameter is kept in
+// the Protocol interface for the stream-json side (control_request requires
+// it).
+func (p *ACPProtocol) WriteInterrupt(w io.Writer, _ string) error {
+	p.mu.Lock()
+	sid := p.sessionID
+	p.mu.Unlock()
+	if sid == "" {
+		return ErrInterruptUnsupported
+	}
+	notif := struct {
+		JSONRPC string         `json:"jsonrpc"`
+		Method  string         `json:"method"`
+		Params  map[string]any `json:"params"`
+	}{
+		JSONRPC: "2.0",
+		Method:  "session/cancel",
+		Params:  map[string]any{"sessionId": sid},
+	}
+	data, err := json.Marshal(notif)
+	if err != nil {
+		return fmt.Errorf("acp marshal session/cancel: %w", err)
+	}
+	if _, err := w.Write(append(data, '\n')); err != nil {
+		return fmt.Errorf("acp write session/cancel: %w", err)
+	}
+	return nil
 }
 
 // WriteUserMessageLocked ignores uuid and priority — ACP has neither concept.
@@ -206,11 +249,15 @@ func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 		return p.parseSessionUpdate(msg.Params)
 	}
 
-	// Request from agent: session/request_permission
+	// Request from agent: session/request_permission.
+	// IDAsString tolerates kiro's UUID strings as well as numeric ids; HandleEvent
+	// echoes whatever the agent sent back verbatim. RawParams carries the raw
+	// options[] so HandleEvent can pick the optionId by kind without hardcoding
+	// the vendor-specific identifier.
 	if msg.IsRequest() && msg.Method == "session/request_permission" {
-		ev := Event{Type: "permission_request"}
-		if msg.ID != nil {
-			ev.RPCRequestID = *msg.ID
+		ev := Event{Type: "permission_request", RawParams: msg.Params}
+		if id, ok := msg.IDAsString(); ok {
+			ev.RPCRequestID = id
 		}
 		return ev, false, nil
 	}
@@ -228,6 +275,15 @@ func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 				msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))
 		}
 
+		// Decode the optional stopReason so callers can distinguish a normal
+		// turn end from a cancelled one. ACP spec values: "end_turn",
+		// "cancelled", "max_tokens", "tool_use_failure", "refusal". We expose
+		// the raw string in SubType — same field used by stream-json events.
+		var stop struct {
+			StopReason string `json:"stopReason"`
+		}
+		_ = json.Unmarshal(msg.Result, &stop) // best-effort; missing => empty
+
 		p.mu.Lock()
 		text := p.textBuf.String()
 		p.textBuf.Reset()
@@ -236,6 +292,7 @@ func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 
 		ev := Event{
 			Type:      "result",
+			SubType:   stop.StopReason,
 			Result:    text,
 			SessionID: sid,
 		}
@@ -245,9 +302,14 @@ func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 	return Event{}, false, nil
 }
 
+// permissionResponse encodes a JSON-RPC response to session/request_permission.
+// ID is json.RawMessage so the original agent-supplied id (UUID string for
+// kiro 2.3.0, int for some implementations) is round-tripped verbatim — the
+// JSON-RPC spec requires the response id to match the request id exactly,
+// including type. See V7b in docs/rfc/multi-backend-validation.md.
 type permissionResponse struct {
 	JSONRPC string           `json:"jsonrpc"`
-	ID      int              `json:"id"`
+	ID      json.RawMessage  `json:"id"`
 	Result  permissionResult `json:"result"`
 }
 
@@ -260,15 +322,77 @@ type permissionOutcome struct {
 	OptionID string `json:"optionId"`
 }
 
+// pickAllowOptionID returns the optionId of the first allow_* kind in opts,
+// or empty string when none match. Reading the optionId from the request is
+// required because vendor implementations differ on the exact identifier:
+// kiro 2.3.0 emits underscored names (allow_once / allow_always / reject_once)
+// while older ACP drafts documented hyphenated forms. Hardcoding either form
+// breaks the other backend silently.
+func pickAllowOptionID(opts []ACPPermissionOption) string {
+	// Prefer allow_once over allow_always so naozhi never auto-grants
+	// persistent permissions on behalf of the user.
+	for _, o := range opts {
+		if o.Kind == "allow_once" {
+			return o.OptionID
+		}
+	}
+	for _, o := range opts {
+		if o.Kind == "allow_always" {
+			return o.OptionID
+		}
+	}
+	// Last resort: any option whose kind starts with "allow"
+	for _, o := range opts {
+		if strings.HasPrefix(o.Kind, "allow") {
+			return o.OptionID
+		}
+	}
+	return ""
+}
+
 func (p *ACPProtocol) HandleEvent(w io.Writer, ev Event) bool {
 	if ev.Type != "permission_request" {
 		return false
 	}
+	// Pick optionId from the request's options[] rather than hardcoding.
+	// Falls back to "allow_once" string when params parsing fails — better to
+	// guess than to leave a permission_request unanswered (which stalls the
+	// turn indefinitely). The unknown-vendor branch is exercised in tests.
+	chosen := "allow_once"
+	if len(ev.RawParams) > 0 {
+		var params ACPPermissionRequestParams
+		if err := json.Unmarshal(ev.RawParams, &params); err == nil {
+			if id := pickAllowOptionID(params.Options); id != "" {
+				chosen = id
+			} else {
+				slog.Warn("acp: permission_request has no allow_* option, falling back",
+					"options", len(params.Options),
+					"chosen", chosen)
+			}
+		} else {
+			slog.Warn("acp: failed to parse permission_request params", "err", err)
+		}
+	}
+
+	// id may be empty when the original request had no id (a malformed
+	// request from the agent). Echo back json null so the JSON-RPC spec is
+	// at least syntactically honored.
+	idRaw := json.RawMessage(`null`)
+	if ev.RPCRequestID != "" {
+		// Try int first to mirror the wire shape; fall back to string.
+		if n, err := strconv.Atoi(ev.RPCRequestID); err == nil {
+			idRaw = json.RawMessage(strconv.Itoa(n))
+		} else {
+			b, _ := json.Marshal(ev.RPCRequestID)
+			idRaw = b
+		}
+	}
+
 	resp := permissionResponse{
 		JSONRPC: "2.0",
-		ID:      ev.RPCRequestID,
+		ID:      idRaw,
 		Result: permissionResult{
-			Outcome: permissionOutcome{Outcome: "selected", OptionID: "allow-once"},
+			Outcome: permissionOutcome{Outcome: "selected", OptionID: chosen},
 		},
 	}
 	data, err := json.Marshal(resp)
@@ -373,7 +497,12 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 			if err := json.Unmarshal(line, &msg); err != nil {
 				continue
 			}
-			if msg.IsResponse() && msg.ID != nil && *msg.ID == expectedID {
+			// expectedID is int because naozhi-originated requests always use
+			// int ids (see allocID). msg.ID is RawMessage to tolerate string
+			// ids on agent-originated requests; for matching responses we
+			// expect numeric round-trip.
+			gotID, gotOK := msg.IDAsInt()
+			if msg.IsResponse() && gotOK && gotID == expectedID {
 				if msg.Error != nil {
 					// R184-SEC-M1: sanitize RPC error text before it bubbles
 					// up through caller slog attrs. See ReadEvent above.

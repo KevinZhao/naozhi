@@ -22,6 +22,8 @@
 | [key-resolver.md](key-resolver.md) | Phase 1-6 已实装（PR #9）；Phase 7 dashboard buildSessionOpts 待 | 2026-05-14 | ARCH3：收敛 planner/agent session key 派生；chat-view / planner-view 双接口（v2 修 v1 漏掉 #6/#7 不继承 defaults 的语义；Phase 6 删 dispatch 侧 legacy nil-resolver 分支） |
 | [learning-system.md](learning-system.md) | 设计提案 | 2026-04-14 | 会话结束触发的闭环自学习（skills/MEMORY/USER） |
 | [message-queue.md](message-queue.md) | 设计提案（未实现） | 2026-04-14 | 替代 sessionGuard 丢消息的 per-session 消息队列策略 |
+| [multi-backend.md](multi-backend.md) | 设计提案 v2（基于实测修订） | 2026-05-18 | Claude + Kiro 多 backend 切换/并存：backend.Profile 抽象、kirojsonl 历史、ACP cancel notification、reverse cap 路由、per-session ReplyTag、Dashboard §8 26 项 UI 差异化规约 |
+| [multi-backend-validation.md](multi-backend-validation.md) | Phase 0 实测报告 | 2026-05-18 | V1-V12 验证点的脚本、原始输出与 2 个真 bug 复现（multi-backend.md 的支撑材料） |
 | [passthrough-mode.md](passthrough-mode.md) | v2.2 设计文档 | 2026-05-09 | 直通 CC CLI 原生 command queue，不做合并/节流 |
 | [passthrough-mode-cc-tui-analysis.md](passthrough-mode-cc-tui-analysis.md) | 分析报告 | 2026-05-09 | CC TUI mid-turn 机制的源码级分析，交叉验证实测数据 |
 | [passthrough-mode-validation.md](passthrough-mode-validation.md) | Phase 0 实测报告 | 2026-05-09 | V1-V9 验证点的脚本与原始日志汇总 |
