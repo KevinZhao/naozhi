@@ -551,6 +551,12 @@ func (p *Process) heartbeatLoop() {
 			// historical `if !Stop() { <-C }` dance is redundant on this
 			// toolchain. We still call Stop() to release the pending tick
 			// immediately rather than waiting for GC.
+			//
+			// LOCKED to toolchain ≥1.23: go.mod sets `go 1.26.3` so the runtime
+			// auto-drain is guaranteed. Down-revving go.mod below 1.23 would
+			// reintroduce a stale-tick path where Reset returns without first
+			// consuming the previous fire — recreate the explicit drain dance
+			// before lowering the toolchain. R222-GO-4.
 			pongTimer.Reset(interval / 2)
 			select {
 			case <-p.pongRecv:
