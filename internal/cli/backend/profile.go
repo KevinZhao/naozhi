@@ -66,6 +66,24 @@ type Profile struct {
 	// sessions (e.g. "acp" for kiro). nil/empty means "no special cap
 	// required" (claude is in this bucket).
 	RequiredNodeCaps []string
+
+	// Features is the user-facing capability map the dashboard reads to
+	// decide which UI controls to gray out (RFC §8.2). Distinct from the
+	// protocol-level cli.Caps (which is plumbed via Protocol.Capabilities)
+	// because dashboard cares about user features, not wire protocol bits.
+	//
+	// Keys are stable strings the frontend hard-codes:
+	//   - "askuser"           — AskUserQuestion 卡片支持
+	//   - "passthrough"       — /urgent + 多消息并发
+	//   - "embedded_context"  — @file mention
+	//   - "image_input"       — 图片上传
+	//   - "audio_input"       — 音频直接喂（不是先转写再喂）
+	//   - "mcp_http"          — HTTP MCP 服务器
+	//   - "mcp_sse"           — SSE MCP 服务器
+	//
+	// Missing key == false. Adding a new feature: extend the keys list in
+	// dashboard.js featureForCurrent + every Profile that supports it.
+	Features map[string]bool
 }
 
 // ProtocolDeps bundles dependencies needed to construct certain protocols.

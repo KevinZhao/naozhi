@@ -29,6 +29,12 @@ type BackendInfo struct {
 	// chip background. Empty falls back to the dashboard's default token
 	// (--nz-accent). Format is whatever CSS accepts — "#7c5cff", "var(...)".
 	ChipColor string `json:"chip_color,omitempty"`
+	// Features mirrors backend.Profile.Features verbatim — the dashboard
+	// reads it to gray out controls that the active backend doesn't
+	// support (askuser / passthrough / embedded_context / image_input /
+	// audio_input / mcp_http / mcp_sse). Missing key == false. Multi-Backend
+	// RFC §8.2.
+	Features map[string]bool `json:"features,omitempty"`
 }
 
 // knownBackends enumerates every backend naozhi can drive, in preferred

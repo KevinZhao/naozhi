@@ -34,5 +34,19 @@ func claudeProfile() Profile {
 		// Claude is the baseline backend; reverse-nodes do not need a
 		// special capability flag to host claude sessions.
 		RequiredNodeCaps: nil,
+		// Multi-Backend RFC §8.2 — claude supports the full naozhi UX
+		// surface: AskUserQuestion cards, passthrough multi-message
+		// queueing, @-mention embedded context, and image / audio input
+		// (the latter goes through Bedrock Transcribe before reaching
+		// the CLI). MCP servers connect over HTTP and SSE both.
+		Features: map[string]bool{
+			"askuser":          true,
+			"passthrough":      true,
+			"embedded_context": true,
+			"image_input":      true,
+			"audio_input":      true,
+			"mcp_http":         true,
+			"mcp_sse":          true,
+		},
 	}
 }
