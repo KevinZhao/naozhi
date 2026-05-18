@@ -7,6 +7,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/history"
+	"github.com/naozhi/naozhi/internal/history/kirojsonl"
 	"github.com/naozhi/naozhi/internal/history/merged"
 )
 
@@ -265,6 +266,46 @@ func TestRouter_KiroSessionsDirRoundTrip(t *testing.T) {
 
 	if saw != "/the/kiro/dir" {
 		t.Errorf("HistoryWiring.KiroSessionsDir = %q; want /the/kiro/dir", saw)
+	}
+}
+
+// TestAttachHistorySource_KiroBackendUsesKirojsonl pins the Sprint 1c
+// wiring: a multi-wrapper router with a real "kiro" wrapper must end up
+// with a *kirojsonl.Source as the fallback for kiro sessions, never the
+// claude factory. Anchors the init()-side-effect chain (router blank
+// import → cli registry → wrapper.historyFactory → attachHistorySource)
+// against a regression where, e.g., the kirojsonl import got pruned
+// during Sprint 1b consolidation and kiro sessions silently degraded
+// to NoopHistorySource.
+func TestAttachHistorySource_KiroBackendUsesKirojsonl(t *testing.T) {
+	t.Parallel()
+	r := &Router{
+		sessions: make(map[string]*ManagedSession),
+		wrappers: map[string]*cli.Wrapper{
+			"claude": cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "claude"),
+			"kiro":   cli.NewWrapper("/bin/false", &cli.ClaudeProtocol{}, "kiro"),
+		},
+		defaultBackend:     "claude",
+		claudeDir:          "/claude/dir",
+		kiroSessionsDir:    "/kiro/sessions/cli",
+		workspaceOverrides: make(map[string]string),
+		backendOverrides:   make(map[string]string),
+	}
+	r.wrapper = r.wrappers["claude"]
+
+	s := &ManagedSession{key: "feishu:direct:harry:general"}
+	s.SetBackend("kiro")
+	s.setWorkspace("/tmp/ws")
+
+	r.attachHistorySource(s)
+
+	src := s.loadHistorySource()
+	if src == nil {
+		t.Fatal("attachHistorySource left source nil")
+	}
+	// EventLogDir is empty → fallback installed directly, no merged wrapper.
+	if _, ok := src.(*kirojsonl.Source); !ok {
+		t.Fatalf("kiro session got %T; want *kirojsonl.Source", src)
 	}
 }
 

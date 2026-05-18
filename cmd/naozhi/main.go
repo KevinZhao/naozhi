@@ -577,21 +577,27 @@ func main() {
 		eventLogDir = filepath.Join(filepath.Dir(storePath), "events")
 	}
 	router := session.NewRouter(session.RouterConfig{
-		Wrapper:           wrapper,
-		Wrappers:          wrappers,
-		DefaultBackend:    defaultBackend,
-		MaxProcs:          cfg.Session.MaxProcs,
-		TTL:               cfg.ParseTTL(),
-		PruneTTL:          cfg.ParsePruneTTL(),
-		Model:             cfg.CLI.Model,
-		ExtraArgs:         cfg.CLI.Args,
-		BackendModels:     backendModels,
-		BackendExtraArgs:  backendExtraArgs,
-		Workspace:         workspace,
-		StorePath:         storePath,
-		NoOutputTimeout:   noOutputTimeout,
-		TotalTimeout:      totalTimeout,
-		ClaudeDir:         claudeDir,
+		Wrapper:          wrapper,
+		Wrappers:         wrappers,
+		DefaultBackend:   defaultBackend,
+		MaxProcs:         cfg.Session.MaxProcs,
+		TTL:              cfg.ParseTTL(),
+		PruneTTL:         cfg.ParsePruneTTL(),
+		Model:            cfg.CLI.Model,
+		ExtraArgs:        cfg.CLI.Args,
+		BackendModels:    backendModels,
+		BackendExtraArgs: backendExtraArgs,
+		Workspace:        workspace,
+		StorePath:        storePath,
+		NoOutputTimeout:  noOutputTimeout,
+		TotalTimeout:     totalTimeout,
+		ClaudeDir:        claudeDir,
+		// KiroSessionsDir feeds the kirojsonl history factory so
+		// Sprint 1c "load earlier" pages can fall back to the kiro
+		// CLI's per-session jsonl after naozhi restart. Default path
+		// is the kiro CLI's documented location; a config override is
+		// a follow-up sprint.
+		KiroSessionsDir:   osutil.ExpandHome("~/.kiro/sessions/cli"),
 		EventLogDir:       eventLogDir,
 		EventLogGenerator: "naozhi",
 	})
