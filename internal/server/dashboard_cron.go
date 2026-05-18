@@ -485,11 +485,9 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		validated, err := validateWorkspace(req.WorkDir, h.allowedRoot)
 		if err != nil {
-			// Avoid echoing the raw validation detail (which can reveal the
-			// allowedRoot boundary or path shape); operators can diagnose from
-			// server logs if needed.
+			status, msg := classifyWorkspaceErr(err)
 			slog.Debug("cron work_dir validation failed", "err", err)
-			http.Error(w, "invalid work_dir", http.StatusForbidden)
+			http.Error(w, msg, status)
 			return
 		}
 		req.WorkDir = validated
@@ -866,11 +864,9 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		}
 		validated, err := validateWorkspace(*req.WorkDir, h.allowedRoot)
 		if err != nil {
-			// Avoid echoing the raw validation detail (which can reveal the
-			// allowedRoot boundary or path shape); operators can diagnose from
-			// server logs if needed.
+			status, msg := classifyWorkspaceErr(err)
 			slog.Debug("cron work_dir validation failed", "err", err)
-			http.Error(w, "invalid work_dir", http.StatusForbidden)
+			http.Error(w, msg, status)
 			return
 		}
 		req.WorkDir = &validated

@@ -115,8 +115,28 @@ type Server struct {
 	appCtx context.Context
 }
 
+// Sentinel errors returned by validateWorkspace. Handlers map these onto
+// status codes + machine-readable reason tags; they intentionally carry no
+// path detail so error messages never leak host filesystem layout to
+// authenticated dashboard / IM clients (the slog Debug line in
+// validateWorkspace is the operator-side diagnostic surface).
+//
+// Why sentinels instead of one generic string: the previous design returned
+// the same "workspace is not a valid directory" for IsAbs / EvalSymlinks /
+// Stat / prefix-mismatch failures, leaving the dashboard to render a single
+// "无权限或参数越界" toast for four very different operator-actionable
+// causes. Cron handlers in particular have to distinguish "path doesn't
+// exist on this host" (operator typo) from "path outside allowedRoot"
+// (real boundary violation) so users can self-correct.
+var (
+	ErrWorkspaceInvalid     = errors.New("workspace not a valid path")
+	ErrWorkspaceNotExist    = errors.New("workspace path does not exist")
+	ErrWorkspaceNotDir      = errors.New("workspace path is not a directory")
+	ErrWorkspaceOutsideRoot = errors.New("workspace outside allowed root")
+)
+
 // validateWorkspace checks that workspace is an existing directory within allowedRoot.
-// Returns the cleaned, symlink-resolved path or an error.
+// Returns the cleaned, symlink-resolved path or one of the Err* sentinels above.
 //
 // Ordering: EvalSymlinks is performed first so the root-prefix check sees the
 // canonical resolved path; only then do we Stat the resolved form. This
@@ -124,13 +144,21 @@ type Server struct {
 // and a later EvalSymlinks could cause the two calls to observe different
 // filesystem entries.
 //
-// Errors are deliberately generic — the resolved path and underlying
-// os.PathError are NOT included so a dashboard or IM user cannot enumerate
-// host filesystem layout via crafted workspace queries. Diagnostic detail
-// goes to the caller's slog.
+// Symmetry with cron.workDirUnderRoot: both wsPath AND allowedRoot are
+// resolved via EvalSymlinks before the prefix check. Without this, a host
+// where allowedRoot itself contains a symlinked component (e.g. `/home →
+// /var/home` on some distros, Docker bind-mounts, AMI-customized layouts)
+// would always fail the prefix check because resolved wsPath lands under
+// the canonical path while allowedRoot stays in the un-resolved form.
+// The resolved-root fallback chain (live EvalSymlinks → cached resolved →
+// raw) mirrors internal/cron/scheduler.go workDirUnderRoot:443.
+//
+// Errors are sentinels — the resolved path and underlying os.PathError are
+// NOT included so a dashboard or IM user cannot enumerate host filesystem
+// layout via crafted workspace queries. Diagnostic detail goes to slog.Debug.
 func validateWorkspace(workspace, allowedRoot string) (string, error) {
 	if workspace == "" {
-		return "", fmt.Errorf("workspace is not a valid directory")
+		return "", ErrWorkspaceInvalid
 	}
 	// Explicit absolute-path contract: filepath.Clean preserves relative input
 	// verbatim, and when allowedRoot is absolute the HasPrefix check below
@@ -138,7 +166,7 @@ func validateWorkspace(workspace, allowedRoot string) (string, error) {
 	// Reject upfront so a future relative allowedRoot cannot silently admit
 	// `../etc/passwd` style traversal.
 	if !filepath.IsAbs(workspace) {
-		return "", fmt.Errorf("workspace is not a valid directory")
+		return "", ErrWorkspaceInvalid
 	}
 	wsPath := filepath.Clean(workspace)
 	resolved, err := filepath.EvalSymlinks(wsPath)
@@ -149,24 +177,72 @@ func validateWorkspace(workspace, allowedRoot string) (string, error) {
 		// a duplicate path column.
 		slog.Debug("validateWorkspace: EvalSymlinks failed",
 			"path", wsPath, "reason", pathErrReason(err))
-		return "", fmt.Errorf("workspace is not a valid directory")
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", ErrWorkspaceNotExist
+		}
+		return "", ErrWorkspaceInvalid
 	}
 	wsPath = resolved
 	info, err := os.Stat(wsPath)
-	if err != nil || !info.IsDir() {
-		reason := "not_a_directory"
-		if err != nil {
-			reason = pathErrReason(err)
-		}
+	if err != nil {
 		slog.Debug("validateWorkspace: Stat failed",
-			"path", wsPath, "reason", reason)
-		return "", fmt.Errorf("workspace is not a valid directory")
+			"path", wsPath, "reason", pathErrReason(err))
+		if errors.Is(err, fs.ErrNotExist) {
+			return "", ErrWorkspaceNotExist
+		}
+		return "", ErrWorkspaceInvalid
 	}
-	if allowedRoot != "" && wsPath != allowedRoot &&
-		!strings.HasPrefix(wsPath, allowedRoot+string(filepath.Separator)) {
-		return "", fmt.Errorf("workspace not allowed")
+	if !info.IsDir() {
+		slog.Debug("validateWorkspace: Stat failed",
+			"path", wsPath, "reason", "not_a_directory")
+		return "", ErrWorkspaceNotDir
+	}
+	if allowedRoot != "" {
+		// Resolve allowedRoot the same way wsPath was resolved above so a
+		// symlinked root component (e.g. `/home → /var/home`) doesn't cause
+		// every call to fail the prefix check. EvalSymlinks failure on root
+		// falls back to the raw path — matches cron.workDirUnderRoot.
+		rootResolved, err := filepath.EvalSymlinks(allowedRoot)
+		if err != nil {
+			slog.Debug("validateWorkspace: allowedRoot EvalSymlinks failed; falling back to raw",
+				"root", allowedRoot, "reason", pathErrReason(err))
+			rootResolved = allowedRoot
+		}
+		if wsPath != rootResolved &&
+			!strings.HasPrefix(wsPath, rootResolved+string(filepath.Separator)) {
+			return "", ErrWorkspaceOutsideRoot
+		}
 	}
 	return wsPath, nil
+}
+
+// classifyWorkspaceErr maps a validateWorkspace sentinel onto (HTTP status,
+// public message). Centralising the mapping here keeps every handler
+// (cron, send, takeover) returning consistent status codes and reason
+// tags. The reason tag is short ASCII so the dashboard's localizeAPIError
+// can show it verbatim in the tail without leaking host filesystem paths.
+//
+// Why two channels (status code + tag string): clients need the status
+// code for retry/redirect logic and the tag to render an actionable
+// message. "invalid work_dir" alone forced operators to read server logs
+// to know whether they typo'd the path, picked a non-existent project,
+// or hit the allowedRoot boundary.
+func classifyWorkspaceErr(err error) (int, string) {
+	switch {
+	case errors.Is(err, ErrWorkspaceOutsideRoot):
+		return http.StatusForbidden, "work_dir outside allowed root"
+	case errors.Is(err, ErrWorkspaceNotExist):
+		return http.StatusBadRequest, "work_dir does not exist"
+	case errors.Is(err, ErrWorkspaceNotDir):
+		return http.StatusBadRequest, "work_dir is not a directory"
+	case errors.Is(err, ErrWorkspaceInvalid):
+		return http.StatusBadRequest, "work_dir is not a valid path"
+	default:
+		// Defensive: unknown error type → conservative 403 generic.
+		// Should never happen because validateWorkspace only returns the
+		// sentinels above.
+		return http.StatusForbidden, "invalid work_dir"
+	}
 }
 
 // validateRemoteWorkspace is the primary-side syntactic check applied to a
