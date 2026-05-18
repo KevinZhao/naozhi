@@ -8249,6 +8249,10 @@ const wsm = {
 
   onEvent(msg) {
     if (msg.key !== selectedKey || (msg.node || 'local') !== selectedNode) return;
+    // Cron timed_out / failed 终态后丢弃后续 ghost 事件（CLI 子进程
+    // 在 deadline 命中后还会再吐 result，但 cron run 已记录为终态，
+    // 继续追加只会让用户看到"超时但还在工作"的分裂视觉）。
+    if (isCronSessionFrozen(msg.key)) return;
     const ev = msg.event;
     if (!ev) return;
     if (ev.time > this.lastEventTimeWs) this.lastEventTimeWs = ev.time;
@@ -10387,8 +10391,23 @@ function cronApplyRunStarted(msg) {
     trigger: msg.trigger || '',
     session_id: msg.session_id || '',
   };
+  // 一个新的 run 起步意味着上一次 timed_out 的"冻结"窗口已过去，
+  // 清掉 frozen 标记让用户能再次看到实时事件。否则 hourly 任务下一次
+  // 跑时前端仍然会丢事件，看起来像 bug。
+  cronFrozenRuns.delete(msg.job_id);
   renderCronPanel();
 }
+
+// cronFrozenRuns 是 timed_out（或其他非 succeeded/skipped 终态）后
+// 冻结事件流的 jobID 集合。命中后，wsm.onEvent 对该 cron session
+// 的实时事件直接丢弃，避免 dashboard 在 cron 历史卡显示"超时"
+// 的同时事件流仍在追加（CLI 子进程没立刻停，会再吐几个 ghost
+// 事件）。下一次 cron_run_started 同 job 时清空。
+//
+// 后端 cron deadline 已经主动 InterruptViaControl 让 CLI 收尾，
+// 但 control_request 到 result 事件之间还有 ~几百 ms ~ 几秒延迟；
+// 这里是第二道防线，让 dashboard 视觉上立即冻结。
+const cronFrozenRuns = new Set();
 
 // cronApplyRunEnded patches the local row before the authoritative
 // fetchCronJobs lands. We clear current_run so the running-badge stops
@@ -10405,12 +10424,28 @@ function cronApplyRunEnded(msg) {
   // of truth for the persisted snapshot.
   if (msg.state && msg.state !== 'succeeded' && msg.state !== 'skipped') {
     j.last_error_class = msg.error_class || '';
+    // 任何非 succeeded/skipped 终态都冻结：timed_out / failed / canceled。
+    // 新的 cron_run_started 会清除冻结。
+    cronFrozenRuns.add(msg.job_id);
   } else if (msg.state === 'succeeded') {
     j.last_error_class = '';
     j.last_error = '';
+    cronFrozenRuns.delete(msg.job_id);
+  } else if (msg.state === 'skipped') {
+    cronFrozenRuns.delete(msg.job_id);
   }
   if (msg.ended_at) j.last_run_at = msg.ended_at;
   renderCronPanel();
+}
+
+// isCronSessionFrozen 判断当前 selectedKey 是否是被冻结的 cron session。
+// cron session key 的形态是 "cron:" + jobID（见 session.CronKey）；只有
+// dashboard 当前看的就是这条 cron 的实时面板时才需要丢事件，其他视图
+// 不受影响。
+function isCronSessionFrozen(key) {
+  if (!key || typeof key !== 'string') return false;
+  if (!key.startsWith('cron:')) return false;
+  return cronFrozenRuns.has(key.slice('cron:'.length));
 }
 
 // formatRunningElapsed returns a colloquial "正在运行 12s / 2m" label for
