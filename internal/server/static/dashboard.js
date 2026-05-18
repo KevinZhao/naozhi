@@ -1136,6 +1136,117 @@ function backendChipHtml(backendID) {
     '">' + esc(info.label) + '</span>';
 }
 
+// featureForBackend resolves a backend feature flag (RFC §8.2). Returns
+// true when the feature is supported, false when missing / unknown
+// backend / no cache yet. Default-false on uncertainty matches the
+// spec's "missing key == false" — controls degrade to disabled rather
+// than letting users hit a backend that doesn't support them.
+//
+// Only "askuser", "passthrough", "embedded_context", "image_input",
+// "audio_input", "mcp_http", "mcp_sse" are recognized today; new
+// features must be added to the Profile.Features map AND a hard-coded
+// caller in dashboard.js (no automatic fallback path).
+function featureForBackend(backendID, name) {
+  if (!cliBackends || !Array.isArray(cliBackends.backends)) return false;
+  if (!backendID) backendID = cliBackends.default || '';
+  const entry = cliBackends.backends.find(b => b && b.id === backendID);
+  if (!entry || !entry.features) return false;
+  return entry.features[name] === true;
+}
+
+// featureForCurrent reads the active session's backend feature flag.
+// Used by feature-gate sites (file picker, voice button, /urgent hint)
+// to gray out controls that don't apply to the current session. Returns
+// true in single-backend mode (length<=1) so claude-only deployments
+// preserve all historical behavior.
+function featureForCurrent(name) {
+  if (!cliBackends || !Array.isArray(cliBackends.backends)) return true;
+  if (cliBackends.backends.length <= 1) return true; // single-backend mode
+  const sess = sessionsData[sid(selectedKey, selectedNode)];
+  const backendID = (sess && sess.backend) || cliBackends.default || '';
+  return featureForBackend(backendID, name);
+}
+
+// applyFeatureGates updates the input-area controls to reflect the
+// active session's backend features. Called after every renderMainShell
+// / selectSession / cliBackends fetch — cheap, just toggles aria + class.
+// Multi-Backend RFC §8.3 D9 / D11-D15.
+//
+// Important: NEVER silently disable. Per RFC §8.7: "all gated controls
+// must have a hover/aria tooltip explaining why" — the title attribute
+// carries the operator-readable reason.
+function applyFeatureGates() {
+  if (!cliBackends || !Array.isArray(cliBackends.backends)) return;
+  if (cliBackends.backends.length <= 1) return; // single-backend mode
+
+  const sess = sessionsData[sid(selectedKey, selectedNode)] || {};
+  const backendID = sess.backend || cliBackends.default || '';
+  const backendName = (() => {
+    const e = cliBackends.backends.find(b => b && b.id === backendID);
+    return (e && (e.display_name || e.id)) || backendID || 'this backend';
+  })();
+
+  // D14 image_input: file picker accepts both images + PDF; if image is
+  // disabled but PDF still works, leave the button enabled — most kiro
+  // deployments support image so this branch rarely hits in practice.
+  // Audio is governed separately (D15) by the voice button.
+  const imageOK = featureForBackend(backendID, 'image_input');
+  const filePickBtn = document.querySelector('button[onclick="openFilePicker()"]');
+  if (filePickBtn) {
+    if (!imageOK) {
+      filePickBtn.classList.add('feat-disabled');
+      filePickBtn.title = '当前后端 (' + backendName + ') 不支持图片上传';
+      filePickBtn.setAttribute('aria-disabled', 'true');
+      // Review #118 HIGH-1: rely on the native disabled property as the
+      // hard gate, not just CSS — `cursor:not-allowed` is cosmetic and
+      // a keyboard activation (Enter/Space on focus) would still fire
+      // onclick. Browsers skip click events on disabled buttons entirely,
+      // and `applyFeatureGates` is the single re-entry point so the
+      // pair stays in sync.
+      filePickBtn.disabled = true;
+    } else {
+      filePickBtn.classList.remove('feat-disabled');
+      filePickBtn.title = '上传图片或 PDF';
+      filePickBtn.removeAttribute('aria-disabled');
+      filePickBtn.disabled = false;
+    }
+  }
+
+  // D15 audio_input: kiro acp 申报 audio:false 但 naozhi 后端会先转写
+  // 再喂 prompt — 所以这里**不真正 disable**，只把 tooltip 改成提示性
+  // 文案，让用户知道音频会经过转写阶段。
+  const audioOK = featureForBackend(backendID, 'audio_input');
+  const micBtn = document.getElementById('btn-mic');
+  const holdBtn = document.getElementById('btn-hold-talk');
+  // Review #118 HIGH-2: when audio is supported again (e.g. user switches
+  // from kiro back to claude in the same browser session), we MUST reset
+  // titles to their template defaults — otherwise the kiro-era hint
+  // ("会先转写为文字") sticks forever. Default titles mirror
+  // renderMainShell template (line ~2152 / ~2154).
+  const micDefaultTitle = voiceInputMode ? '切换键盘' : '切换语音';
+  const holdDefaultTitle = '按住说话改录音';
+  if (!audioOK) {
+    const audioHint = '当前后端 (' + backendName + ') 不直接接收音频，naozhi 会先转写为文字再发送';
+    if (micBtn) {
+      micBtn.classList.add('feat-degraded');
+      micBtn.title = audioHint;
+    }
+    if (holdBtn) {
+      holdBtn.classList.add('feat-degraded');
+      holdBtn.title = audioHint;
+    }
+  } else {
+    if (micBtn) {
+      micBtn.classList.remove('feat-degraded');
+      micBtn.title = micDefaultTitle;
+    }
+    if (holdBtn) {
+      holdBtn.classList.remove('feat-degraded');
+      holdBtn.title = holdDefaultTitle;
+    }
+  }
+}
+
 // formatCostByUnit returns the cost cell text for the dashboard header.
 // USD: "$0.0024" / "$1.23". credits: "0.024 credits" / "1.23 credits".
 // Empty unit (unknown backend) hides the cell. Multi-Backend RFC §8.3 D5.
@@ -2105,6 +2216,11 @@ function renderMainShell() {
   if (isCronSessionKey(selectedKey)) {
     renderCronTimelineForSession(selectedKey.slice('cron:'.length));
   }
+
+  // Multi-Backend RFC §8.3 D9-D15: gray out input controls that the
+  // active session's backend doesn't support. Single-backend deployments
+  // short-circuit inside applyFeatureGates so this is a no-op there.
+  applyFeatureGates();
 }
 
 // _fetchEventsInFlight gates concurrent HTTP polls of `/api/sessions/events`.
@@ -4010,7 +4126,16 @@ function updateSendButton(state) {
 // This decouples image transfer from /send, avoids the 105 MB multipart body
 // and 15s ReadTimeout, and lets one bad file fail without blocking the rest.
 
-function openFilePicker() { document.getElementById('file-input').click(); }
+function openFilePicker() {
+  // Multi-Backend RFC §8.3 D14: respect feature gate. Toast instead of
+  // silently no-op so the user understands why the click did nothing —
+  // the .feat-disabled class is the visual cue, this is the audible cue.
+  if (!featureForCurrent('image_input')) {
+    showToast('当前后端不支持图片上传', 'warn');
+    return;
+  }
+  document.getElementById('file-input').click();
+}
 
 // Downscale any image to JPEG with max edge 1600 and quality 0.8.
 // Rationale: the CLI writes user messages as one NDJSON line to the shim,
@@ -4844,6 +4969,12 @@ async function fetchCLIBackends() {
     const data = await fetchJSON('/api/cli/backends', {credentials: 'same-origin'});
     cliBackends = data && Array.isArray(data.backends) ? data : null;
     cliBackendsFetchedAt = Date.now();
+    // Multi-Backend RFC §8.3 D9-D15: re-apply feature gates whenever the
+    // backends manifest lands. The boot path fires fetchCLIBackends() in
+    // parallel with fetchSessions, so the very first renderMainShell may
+    // have run with cliBackends==null — call gates here so the input
+    // controls update once the manifest is available.
+    if (typeof applyFeatureGates === 'function') applyFeatureGates();
     return cliBackends;
   } catch (e) {
     return null;
