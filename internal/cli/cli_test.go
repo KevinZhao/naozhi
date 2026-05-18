@@ -191,19 +191,110 @@ func TestClaudeProtocol_ReadEvent_SkipsControlResponse(t *testing.T) {
 	}
 }
 
-func TestACPProtocol_WriteInterrupt_Unsupported(t *testing.T) {
+// TestACPProtocol_WriteInterrupt_NoSession covers the pre-handshake case:
+// before initialize/session_new completes there is no sessionId to cancel,
+// so callers must fall back to SIGINT.
+func TestACPProtocol_WriteInterrupt_NoSession(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
 	var buf bytes.Buffer
 	err := p.WriteInterrupt(&buf, "req-1")
 	if err == nil {
-		t.Fatal("ACP WriteInterrupt must return an error")
+		t.Fatal("WriteInterrupt without session must return an error")
 	}
 	if !errors.Is(err, ErrInterruptUnsupported) {
 		t.Errorf("err = %v, want ErrInterruptUnsupported", err)
 	}
 	if buf.Len() != 0 {
-		t.Errorf("ACP WriteInterrupt must not write anything, got %q", buf.Bytes())
+		t.Errorf("must not write anything before handshake, got %q", buf.Bytes())
+	}
+}
+
+// TestACPProtocol_WriteInterrupt_SendsCancelNotification covers the post-
+// handshake happy path: a session/cancel notification (no id) is written to
+// stdin with the bound sessionId. See V1 in
+// docs/rfc/multi-backend-validation.md.
+func TestACPProtocol_WriteInterrupt_SendsCancelNotification(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	p.mu.Lock()
+	p.sessionID = "sess_xyz"
+	p.mu.Unlock()
+
+	var buf bytes.Buffer
+	err := p.WriteInterrupt(&buf, "ignored-by-acp")
+	if err != nil {
+		t.Fatalf("WriteInterrupt should succeed with active session, got %v", err)
+	}
+
+	out := bytes.TrimSpace(buf.Bytes())
+	var msg map[string]any
+	if err := json.Unmarshal(out, &msg); err != nil {
+		t.Fatalf("output is not valid JSON: %v", err)
+	}
+	if msg["jsonrpc"] != "2.0" {
+		t.Errorf("jsonrpc = %v, want 2.0", msg["jsonrpc"])
+	}
+	if msg["method"] != "session/cancel" {
+		t.Errorf("method = %v, want session/cancel", msg["method"])
+	}
+	// Critical: cancel is a notification, NOT a request — no id field.
+	if _, hasID := msg["id"]; hasID {
+		t.Error("session/cancel must be a notification (no id field); had id")
+	}
+	params := msg["params"].(map[string]any)
+	if params["sessionId"] != "sess_xyz" {
+		t.Errorf("params.sessionId = %v, want sess_xyz", params["sessionId"])
+	}
+	// Output must be newline-terminated so the agent's line-based reader
+	// processes it immediately.
+	if !bytes.HasSuffix(buf.Bytes(), []byte("\n")) {
+		t.Error("WriteInterrupt output should end with newline for line-based ACP framing")
+	}
+}
+
+// TestACPProtocol_ReadEvent_CancelledStopReason ensures the cancelled stopReason
+// is surfaced as Event.SubType so dispatch can distinguish it from end_turn.
+func TestACPProtocol_ReadEvent_CancelledStopReason(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	p.mu.Lock()
+	p.sessionID = "s1"
+	p.textBuf.WriteString("partial")
+	p.mu.Unlock()
+
+	line := `{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}`
+	ev, done, err := p.ReadEvent(line)
+	if err != nil {
+		t.Fatalf("ReadEvent: %v", err)
+	}
+	if !done {
+		t.Error("cancelled response should still mark turn complete")
+	}
+	if ev.Type != "result" {
+		t.Errorf("Type = %q, want result", ev.Type)
+	}
+	if ev.SubType != "cancelled" {
+		t.Errorf("SubType = %q, want cancelled (so dispatch can label the turn)", ev.SubType)
+	}
+	if ev.Result != "partial" {
+		t.Errorf("partial buffered text should still surface, got %q", ev.Result)
+	}
+}
+
+// TestACPProtocol_ReadEvent_NormalStopReasonRoundTrip ensures end_turn passes
+// through too — guards against a copy-paste regression that hardcodes
+// "cancelled".
+func TestACPProtocol_ReadEvent_NormalStopReasonRoundTrip(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	line := `{"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}}`
+	ev, done, err := p.ReadEvent(line)
+	if err != nil || !done {
+		t.Fatalf("expected done=true err=nil, got done=%v err=%v", done, err)
+	}
+	if ev.SubType != "end_turn" {
+		t.Errorf("SubType = %q, want end_turn", ev.SubType)
 	}
 }
 
