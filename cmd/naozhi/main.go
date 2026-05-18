@@ -488,7 +488,8 @@ func main() {
 		// start (adding ANTHROPIC_BEDROCK_BASE_URL, swapping models, etc.)
 		// are invisible to dashboard / cron / IM-spawned sessions until
 		// systemctl restart. claude profile copies these into its own
-		// ProtocolDeps; kiro profile ignores them.
+		// ProtocolDeps; kiro profile ignores them (and Sprint 6a seeds
+		// BackendID="kiro" inside the kiro profile factory itself).
 		serverAddr := cfg.Server.Addr
 		profile, ok := backend.Get(b.ID)
 		if !ok {

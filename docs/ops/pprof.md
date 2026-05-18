@@ -256,3 +256,80 @@ ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1
 1. `internal/metrics/metrics.go` 把 `expvar.NewInt` 换成 `prometheus.NewCounter`，保留 `*expvar.Int` 变量名别名（或定义 `type Counter interface { Add(int64) }`）
 2. 新增 `/metrics` 端点挂 `promhttp.Handler()`（同样 auth + loopback 保护）
 3. call sites 零改动
+
+---
+
+## Multi-Backend 标签维度（Sprint 6a）
+
+> Multi-Backend RFC §10 落地。multi-backend (claude + kiro) 启用后，"100 次 spawn"看不出哪些是 claude / 哪些是 kiro，引入 4 项带 `backend` 维度的指标。
+
+### 设计选择：expvar.Map（保持零依赖）
+
+仓库 `go.mod` 不含 prometheus（实测：`git grep prometheus go.sum go.mod` 无匹配），且 `internal/metrics/metrics.go` 顶部 docstring 明确"zero dependencies, stdlib-stable"。引入 prometheus 仅为加 label 与现有设计哲学冲突。`expvar.Map` 原生支持 keyed counter，JSON shape 友好，零成本。
+
+每个 labeled 指标在 `/api/debug/vars` 暴露为 JSON 对象，key 为 `|` 拼接的 label tuple；`metrics.LabeledCounter.Add(delta, labels...)` 是单一写入入口。详见 `internal/metrics/labeled.go`。
+
+### 双写迁移期（4 周）
+
+为不破坏现存 dashboard / jq 模板，每个有"legacy 无 label" counterpart 的指标走双写：调一次 `metrics.RecordCLISpawn(backend)` 同时 +1 legacy `expvar.Int` 和新 `expvar.Map`。预期 `Sum(by_backend) == legacy_total` 始终成立，`internal/metrics/multibackend_test.go::TestCLISpawnTotal_RecordsLabeledAndLegacy` 锁这一不变量。
+
+迁移期结束后（2026-06-15），可单 PR 移除 `CLISpawnTotal` 等 legacy `expvar.Int`，TODO 标记 `R222-OBS-MULTIBACKEND-LEGACY`。
+
+### 新指标列表
+
+| expvar 名称 | 类型 | Labels | 语义 | 何时警觉 |
+|---|---|---|---|---|
+| `naozhi_cli_spawn_total_by_backend` | counter | `backend` | `wrapper.Spawn` 成功（per-backend），与 legacy `naozhi_cli_spawn_total` 双写 | 单 backend 涨 / 另一持平 = 用户偏一边；某 backend 突 0 = 该 binary 不可用 |
+| `naozhi_session_active` | gauge (legacy mirror) | — | 当前活动 session 总数（exempt 不计） | 总数 vs `r.activeCount` 校验 |
+| `naozhi_session_active_by_backend` | gauge | `backend` | per-backend 活动 session 数 | 与 `_active` 总和应相等；不等 = 簿记漂移（`reconcileSessionActiveByBackendLocked` 兜底） |
+| `naozhi_protocol_rpc_error_total` | counter | `backend, method, code` | JSON-RPC 错误（仅 ACP 协议；stream-json 不上报） | 单 (backend, code) 突增 = agent 端某类 RPC 出问题；method=`""` 表示 ReadEvent 路径无法关联请求 |
+| `naozhi_acp_cancel_total` | counter | `backend` | `ACPProtocol.WriteInterrupt` 成功送出 `session/cancel` notification（pre-handshake 失败不计） | 与 `naozhi_interrupt_*` 一族 cross-check：`acp_cancel_total ≈ interrupt_sent_total` 中 ACP 部分；不等 = 路由 fallback SIGINT |
+| `naozhi_metrics_label_overflow_total` | counter | — | label tuple 长度超过 `maxLabelKeyLen=256` 折叠到 `_overflow_` 桶的累计次数 | **必须稳态 0**；非零 = 某 caller 未做 label sanitize（agent 注入的 method/code 字符串过长） |
+
+### 拉取示例
+
+```bash
+ssh ec2-user@prod-host 'curl -s -H "Authorization: Bearer $TOK" http://127.0.0.1:8180/api/debug/vars' | jq '{
+  cli_spawn_total: .naozhi_cli_spawn_total,
+  cli_spawn_by_backend: .naozhi_cli_spawn_total_by_backend,
+  session_active: .naozhi_session_active,
+  session_active_by_backend: .naozhi_session_active_by_backend,
+  rpc_errors: .naozhi_protocol_rpc_error_total,
+  acp_cancels: .naozhi_acp_cancel_total,
+  label_overflow: .naozhi_metrics_label_overflow_total
+}'
+```
+
+输出（典型 multi-backend 部署）：
+
+```json
+{
+  "cli_spawn_total": 412,
+  "cli_spawn_by_backend": {"claude": 380, "kiro": 32},
+  "session_active": 14,
+  "session_active_by_backend": {"claude": 11, "kiro": 3},
+  "rpc_errors": {"kiro|session/prompt|-32601": 2},
+  "acp_cancels": {"kiro": 5},
+  "label_overflow": 0
+}
+```
+
+### 双写期解除（follow-up 任务）
+
+**任务 R222-OBS-MULTIBACKEND-LEGACY**（建议 4 周后执行，2026-06-15 前后）：
+- 删除 `internal/metrics/metrics.go` 的 legacy `CLISpawnTotal`（保留 `_by_backend` vector）
+- 删除 `RecordCLISpawn` 中的 legacy 双写
+- 同步更新本文上方"当前 naozhi 计数器"表，删除 legacy 行
+- `metrics_test.go::TestCountersRegisteredUnderStableNames` 删除 `naozhi_cli_spawn_total` 项
+- 操作员 changelog: 通知 `_by_backend` 是新规范名，老 dashboard 需迁移 jq 表达式
+
+`naozhi_session_active` legacy mirror 的删除决策延到 R222 后续：因为这是 gauge 不是 counter，迁移成本更高（dashboards 通常直接读 gauge 值，不算 rate），保留双写更长期可接受。
+
+### 回归契约
+
+- `internal/metrics/multibackend_test.go::TestCLISpawnTotal_RecordsLabeledAndLegacy`: 锁双写不变量
+- `multibackend_test.go::TestProtocolRPCErrorTotal_LabelsRoundTrip`: 锁 (backend, method, code) tuple 不互相覆盖
+- `multibackend_test.go::TestACPCancelTotal_BackendLabel`: 锁 backend label 维度
+- `multibackend_test.go::TestRecordSessionActive_GaugeBookkeeping`: 锁 +1/-1 mirror 同步
+- `multibackend_test.go::TestLabelKey_OverlongCollapsesToOverflow`: 锁 cardinality bound
+- `counter_wiring_contract_test.go`: 锁 `metrics.RecordCLISpawn` source-grep 在 `wrapper.go`

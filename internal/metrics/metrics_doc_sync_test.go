@@ -48,21 +48,40 @@ func TestCountersDocSyncedWithPprofMd(t *testing.T) {
 		docSet[string(m[1])] = struct{}{}
 	}
 
-	// All counter names declared in metrics.go live in expvar.NewInt("...").
-	metricsGo := filepath.Join(repoRoot, "internal", "metrics", "metrics.go")
-	src, err := os.ReadFile(metricsGo)
+	// All counter names declared by the metrics package live in either
+	// expvar.NewInt("..."), expvar.NewMap("..."), or NewLabeledCounter("...").
+	// Multi-Backend RFC §10 (Sprint 6a) added the labeled forms; the
+	// doc-sync contract has to recognize them too or the new counters
+	// would falsely fail this test as "documented but not declared".
+	metricsDir := filepath.Join(repoRoot, "internal", "metrics")
+	entries, err := os.ReadDir(metricsDir)
 	if err != nil {
-		t.Fatalf("read %s: %v", metricsGo, err)
+		t.Fatalf("read dir %s: %v", metricsDir, err)
 	}
-	srcDecl := regexp.MustCompile(`expvar\.NewInt\("(naozhi_[a-z0-9_]+_total)"\)`)
-	decls := srcDecl.FindAllSubmatch(src, -1)
-	codeSet := make(map[string]struct{}, len(decls))
-	for _, m := range decls {
-		codeSet[string(m[1])] = struct{}{}
+	codeSet := make(map[string]struct{})
+	declRegexes := []*regexp.Regexp{
+		regexp.MustCompile(`expvar\.NewInt\("(naozhi_[a-z0-9_]+_total)"\)`),
+		regexp.MustCompile(`expvar\.NewMap\("(naozhi_[a-z0-9_]+_total)"\)`),
+		regexp.MustCompile(`NewLabeledCounter\("(naozhi_[a-z0-9_]+_total)"\)`),
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".go") || strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		path := filepath.Join(metricsDir, e.Name())
+		src, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		for _, re := range declRegexes {
+			for _, m := range re.FindAllSubmatch(src, -1) {
+				codeSet[string(m[1])] = struct{}{}
+			}
+		}
 	}
 
 	if len(codeSet) == 0 {
-		t.Fatalf("metrics.go: no expvar.NewInt declarations matched — regex out of sync with source?")
+		t.Fatalf("internal/metrics: no counter declarations matched — regexes out of sync with source?")
 	}
 
 	var missingInDoc, extraInDoc []string

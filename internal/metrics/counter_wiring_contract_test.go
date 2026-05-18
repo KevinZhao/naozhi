@@ -37,9 +37,14 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			pattern: `metrics\.SessionEvictTotal\.Add\(1\)`,
 		},
 		{
-			name:    "CLISpawnTotal fires at end of wrapper.Spawn success path",
+			// Sprint 6a (Multi-Backend RFC §10) replaced the direct
+			// metrics.CLISpawnTotal.Add(1) call with metrics.RecordCLISpawn,
+			// which double-writes the legacy unlabeled counter and the new
+			// per-backend labeled vector. Pin the helper rather than the
+			// underlying counter so the legacy/labeled pair cannot drift.
+			name:    "RecordCLISpawn fires at end of wrapper.Spawn success path",
 			path:    "../cli/wrapper.go",
-			pattern: `metrics\.CLISpawnTotal\.Add\(1\)`,
+			pattern: `metrics\.RecordCLISpawn\(`,
 		},
 		{
 			name:    "WSAuthFailTotal fires on both WS auth_fail branches",

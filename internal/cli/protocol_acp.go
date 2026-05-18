@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
@@ -50,11 +51,21 @@ type ACPProtocol struct {
 	sessionID string
 	// textBuf accumulates assistant_message_chunk text during a turn
 	textBuf strings.Builder
+	// BackendID labels metric increments emitted by this protocol instance.
+	// Multi-Backend RFC §10 (Sprint 6a): ReadEvent → metrics.RecordProtocolRPCError
+	// and WriteInterrupt → metrics.RecordACPCancel both need to know which
+	// CLI backend they belong to; piping it through here keeps protocol code
+	// independent of the cli/backend registry. Empty string falls back to
+	// LabelEmpty in the metric — useful for tests that don't wire it.
+	BackendID string
 }
 
 func (p *ACPProtocol) Name() string { return "acp" }
 
-func (p *ACPProtocol) Clone() Protocol { return &ACPProtocol{} }
+// Clone returns a fresh ACPProtocol that retains BackendID so per-spawn
+// metrics labelling is preserved across the wrapper.Spawn → proto.Clone()
+// pipeline.
+func (p *ACPProtocol) Clone() Protocol { return &ACPProtocol{BackendID: p.BackendID} }
 
 func (p *ACPProtocol) BuildArgs(opts SpawnOptions) []string {
 	args := []string{"acp"}
@@ -217,6 +228,11 @@ func (p *ACPProtocol) WriteInterrupt(w io.Writer, _ string) error {
 	if _, err := w.Write(append(data, '\n')); err != nil {
 		return fmt.Errorf("acp write session/cancel: %w", err)
 	}
+	// Multi-Backend RFC §10 (Sprint 6a): record only successful sends.
+	// The pre-handshake "no session yet" branch above returns early
+	// (ErrInterruptUnsupported) and intentionally does NOT count — those
+	// aren't real cancels reaching the agent.
+	metrics.RecordACPCancel(p.BackendID)
 	return nil
 }
 
@@ -274,6 +290,12 @@ func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 	// Response (turn complete for session/prompt)
 	if msg.IsResponse() {
 		if msg.Error != nil {
+			// Multi-Backend RFC §10 (Sprint 6a): record per-(backend, method,
+			// code) RPC errors. Method on a Response is unknown without
+			// caller-side correlation, so we pass "" and let operators read
+			// the labeled vector by code+backend. Future enhancement: track
+			// the in-flight method per RPC id (small table indexed by allocID).
+			metrics.RecordProtocolRPCError(p.BackendID, "", strconv.Itoa(msg.Error.Code))
 			// R184-SEC-M1: msg.Error.Message comes from the ACP agent (kiro /
 			// Gemini CLI / etc), a separate trust boundary. The error string
 			// flows into slog attrs (`readLoop` Warn) and surfaces on the
@@ -479,6 +501,23 @@ func (p *ACPProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) error {
 		return err
 	}
 	_, err = p.readUntilResponse(rw, req.ID)
+	if err != nil {
+		// Multi-Backend RFC §10 (Sprint 6a): record handshake / RPC errors
+		// at the call site since we know req.Method here. ErrACPRPC carries
+		// the JSON-RPC code; other errors (ErrACPTimeout, transport) are
+		// still recorded with code "" so operators can split protocol
+		// errors from transport errors via the code label.
+		code := ""
+		if errors.Is(err, ErrACPRPC) {
+			// Code is embedded in the err message via fmt.Errorf("%w %d: ...")
+			// — extracting it here would re-parse a structured error string,
+			// fragile. Leaving code "" loses one bit of detail but the
+			// metric still distinguishes "init failed" from "prompt failed"
+			// via the method label which is the higher-signal split.
+			code = ""
+		}
+		metrics.RecordProtocolRPCError(p.BackendID, req.Method, code)
+	}
 	return err
 }
 
