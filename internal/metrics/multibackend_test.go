@@ -256,18 +256,28 @@ func TestLabeledCounter_ConcurrentAdd(t *testing.T) {
 	}
 }
 
-// TestClampNonNegative asserts the optional clamp helper keeps the gauge
-// at >= 0 on demand without affecting the default Inc/Dec contract.
-func TestClampNonNegative(t *testing.T) {
-	gauge := NewLabeledGauge("test_metric_clamp_" + t.Name())
-	gauge.Dec("claude")
-	gauge.Dec("claude")
-	if got := gauge.Get("claude"); got != -2 {
-		t.Errorf("default semantics: gauge[claude] = %d, want -2 (uncamped)", got)
+// TestLabeledGauge_Add pins the single-call atomic delta path used by
+// router reconciliation. Verifies positive / negative / zero deltas all
+// land in one expvar map operation rather than N Inc/Dec iterations,
+// which was the racy pattern flagged in PR #113 review.
+func TestLabeledGauge_Add(t *testing.T) {
+	gauge := NewLabeledGauge("test_gauge_add_" + t.Name())
+	gauge.Add(5, "claude")
+	if got := gauge.Get("claude"); got != 5 {
+		t.Errorf("Add(5)=%d, want 5", got)
 	}
-	gauge.ClampNonNegative("claude")
-	if got := gauge.Get("claude"); got != 0 {
-		t.Errorf("post-clamp gauge[claude] = %d, want 0", got)
+	gauge.Add(-3, "claude")
+	if got := gauge.Get("claude"); got != 2 {
+		t.Errorf("Add(-3)=%d, want 2", got)
+	}
+	gauge.Add(0, "claude") // no-op fast path
+	if got := gauge.Get("claude"); got != 2 {
+		t.Errorf("Add(0)=%d, want 2 (unchanged)", got)
+	}
+	// Negative going below zero is allowed (matches Dec contract).
+	gauge.Add(-10, "claude")
+	if got := gauge.Get("claude"); got != -8 {
+		t.Errorf("Add(-10)=%d, want -8 (allowed)", got)
 	}
 }
 

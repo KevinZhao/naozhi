@@ -73,10 +73,10 @@ func RecordCLISpawn(backendID string) {
 // mirrored unlabeled int tracks the cluster-wide total.
 //
 // Negative drifts: per LabeledGauge.Dec doc, going negative is allowed
-// — it surfaces accounting bugs rather than masking them. Callers that
-// historically clamp to 0 (Router.activeCount) should call
-// SessionActiveByBackend.ClampNonNegative(backend) explicitly to mimic
-// that behaviour without changing default semantics for new sites.
+// — it surfaces accounting bugs rather than masking them. Bulk paths
+// (router.go reconciliation on eviction / cleanup) drive the gauge back
+// to the authoritative count via LabeledGauge.Add, so a negative drift
+// recovers within at most one cleanup tick.
 func RecordSessionActive(backendID string, delta int) {
 	if delta == 0 {
 		return

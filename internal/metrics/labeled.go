@@ -126,32 +126,24 @@ func (lg *LabeledGauge) Inc(labels ...string) { lg.m.Add(labelKey(labels), 1) }
 
 // Dec decrements the gauge for the label tuple by 1. The gauge is allowed
 // to go negative — that is itself an operator signal that bookkeeping is
-// off. (Matching activeCount.Add(-1) < 0 → Store(0) clamp would mask the
-// bug.) For aggressive clamping, callers can call ClampNonNegative.
+// off (matching activeCount.Add(-1) < 0 → Store(0) clamp would mask the
+// bug). The reconcile pass in router.go drives gauges back to authoritative
+// truth on bulk paths (eviction/cleanup); a CAS-free non-negative clamp
+// proved racy under concurrent Dec — Value() then Add(-Value()) without a
+// CAS opens a window where a concurrent Dec turns the clamp into a bigger
+// positive number than zero — and was removed.
 func (lg *LabeledGauge) Dec(labels ...string) { lg.m.Add(labelKey(labels), -1) }
 
-// ClampNonNegative ensures the gauge for the given labels is at least
-// zero. Used by Router.activeCount-style sites that prefer "stuck at 0"
-// over "drifts negative". Returns the post-clamp value.
-func (lg *LabeledGauge) ClampNonNegative(labels ...string) int64 {
-	key := labelKey(labels)
-	v := lg.m.Get(key)
-	if v == nil {
-		return 0
+// Add atomically applies delta to the gauge for the label tuple in a single
+// expvar.Map operation. Used by the router reconciliation path to avoid the
+// "loop of N Inc/Dec" anti-pattern that exposes partial intermediate values
+// to /debug/vars scrapers. expvar.Map.Add is atomic per key, so the entire
+// reconcile-to-authoritative-count is observable as one transition.
+func (lg *LabeledGauge) Add(delta int64, labels ...string) {
+	if delta == 0 {
+		return
 	}
-	iv, ok := v.(*expvar.Int)
-	if !ok {
-		return 0
-	}
-	if iv.Value() < 0 {
-		// expvar.Int has no Set when value is private; use Add to bump
-		// up to zero. No single-CAS atomic — between Value() read and
-		// Add() write a concurrent Inc/Dec may slip in. Acceptable: the
-		// race only briefly violates the non-negative invariant, which
-		// is the exact slack we'd be enforcing anyway.
-		iv.Add(-iv.Value())
-	}
-	return iv.Value()
+	lg.m.Add(labelKey(labels), delta)
 }
 
 // Get returns the current value for the given label tuple.
