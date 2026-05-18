@@ -2541,18 +2541,17 @@ func (r *Router) reconcileSessionActiveByBackendLocked() {
 	metrics.SessionActiveByBackend.ForEachKey(func(k string) {
 		allBackends[k] = struct{}{}
 	})
+	// Drive each backend's gauge to its authoritative count via a single
+	// atomic Add per key. The previous "loop of N Inc/Dec" exposed
+	// partial intermediate values to /debug/vars scrapers between
+	// iterations: we hold r.mu but not any lock on the expvar map, so a
+	// reader sweeping concurrently could observe e.g. N/2 sessions for
+	// 'kiro' while the loop was halfway through. expvar.Map.Add is
+	// atomic per key, so the reconcile transition is now a single jump.
 	for backend := range allBackends {
 		current := metrics.SessionActiveByBackend.Get(backend)
 		want := perBackend[backend]
-		if delta := want - current; delta > 0 {
-			for i := int64(0); i < delta; i++ {
-				metrics.SessionActiveByBackend.Inc(backend)
-			}
-		} else if delta < 0 {
-			for i := int64(0); i < -delta; i++ {
-				metrics.SessionActiveByBackend.Dec(backend)
-			}
-		}
+		metrics.SessionActiveByBackend.Add(want-current, backend)
 	}
 }
 

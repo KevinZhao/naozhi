@@ -503,20 +503,18 @@ func (p *ACPProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) error {
 	_, err = p.readUntilResponse(rw, req.ID)
 	if err != nil {
 		// Multi-Backend RFC §10 (Sprint 6a): record handshake / RPC errors
-		// at the call site since we know req.Method here. ErrACPRPC carries
-		// the JSON-RPC code; other errors (ErrACPTimeout, transport) are
-		// still recorded with code "" so operators can split protocol
-		// errors from transport errors via the code label.
-		code := ""
-		if errors.Is(err, ErrACPRPC) {
-			// Code is embedded in the err message via fmt.Errorf("%w %d: ...")
-			// — extracting it here would re-parse a structured error string,
-			// fragile. Leaving code "" loses one bit of detail but the
-			// metric still distinguishes "init failed" from "prompt failed"
-			// via the method label which is the higher-signal split.
-			code = ""
-		}
-		metrics.RecordProtocolRPCError(p.BackendID, req.Method, code)
+		// at the call site since we know req.Method here. We always pass
+		// code="" — extracting the JSON-RPC code from ErrACPRPC would
+		// require re-parsing the structured error string built by
+		// fmt.Errorf("%w %d: ...") which is fragile. The metric still
+		// distinguishes "init failed" from "prompt failed" via the method
+		// label, the higher-signal split, and operators can split protocol
+		// errors from transport errors (ErrACPTimeout) via err type if
+		// needed at the slog layer.
+		// TODO(R222-OBS-MULTIBACKEND-CODE): once readUntilResponse returns
+		// a typed error carrying the int code (instead of formatting it
+		// into the message), pass that here as the code label.
+		metrics.RecordProtocolRPCError(p.BackendID, req.Method, "")
 	}
 	return err
 }
