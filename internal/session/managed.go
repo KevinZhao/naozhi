@@ -614,6 +614,26 @@ const (
 	InterruptError
 )
 
+// String renders an InterruptOutcome as a stable lowercase tag so slog
+// attribute values stay grep-friendly across callers (cron / router /
+// dashboard) instead of leaking the iota integer.
+func (o InterruptOutcome) String() string {
+	switch o {
+	case InterruptSent:
+		return "sent"
+	case InterruptNoSession:
+		return "no_session"
+	case InterruptNoTurn:
+		return "no_turn"
+	case InterruptUnsupported:
+		return "unsupported"
+	case InterruptError:
+		return "error"
+	default:
+		return fmt.Sprintf("unknown(%d)", int(o))
+	}
+}
+
 // InterruptViaControl asks the CLI to abort the active turn by writing an
 // in-band control_request to stdin. Unlike Interrupt, this does NOT cancel
 // the Send() context — the in-flight Send will see the CLI's interrupted
