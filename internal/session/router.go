@@ -20,7 +20,15 @@ import (
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/eventlog/persist"
 	"github.com/naozhi/naozhi/internal/history"
-	"github.com/naozhi/naozhi/internal/history/claudejsonl"
+
+	// Blank import: triggers init() registration of the claude
+	// history-source factory with cli.RegisterHistoryFactory. Sprint
+	// 1a moves the dispatch out of attachHistorySource into the cli
+	// wrapper layer; the import survives here only as a side-effect
+	// trigger so existing deployments keep getting the claude factory.
+	// Sprint 1b will consolidate side-effect imports into a single
+	// wireup package.
+	_ "github.com/naozhi/naozhi/internal/history/claudejsonl"
 	"github.com/naozhi/naozhi/internal/history/merged"
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
 	"github.com/naozhi/naozhi/internal/metrics"
@@ -260,6 +268,11 @@ type Router struct {
 	backendExtraArgs map[string][]string
 	workspace        string // default cwd for CLI processes
 	claudeDir        string // ~/.claude dir for loading session history
+	// kiroSessionsDir is the kiro session-state root. Plumbed into
+	// cli.HistoryWiring at attachHistorySource time so a future
+	// kirojsonl factory can read it; Sprint 1a leaves this unwired
+	// (RouterConfig.KiroSessionsDir is empty in cmd/naozhi).
+	kiroSessionsDir string
 
 	// workspaceOverrides stores per-chat workspace overrides.
 	// Key format: "platform:chatType:chatID"
@@ -675,6 +688,13 @@ type RouterConfig struct {
 	NoOutputTimeout  time.Duration
 	TotalTimeout     time.Duration
 	ClaudeDir        string
+	// KiroSessionsDir is the kiro CLI's session-state root, typically
+	// ~/.kiro/sessions/cli. Empty means "kiro history fallback is
+	// disabled" — at Sprint 1a there is no kiro history backend, so
+	// the field is plumbed through cli.HistoryWiring but never read by
+	// any registered factory yet. Sprint 1c lands kirojsonl and main
+	// will start populating this from config.
+	KiroSessionsDir string
 	// EventLogDir is where naozhi's per-session event log files live.
 	// When empty, event log persistence is DISABLED and the router
 	// falls back to Claude CLI JSONL as the sole history source. When
@@ -766,6 +786,7 @@ func NewRouter(cfg RouterConfig) *Router {
 		backendExtraArgs:   cfg.BackendExtraArgs,
 		workspace:          cfg.Workspace,
 		claudeDir:          cfg.ClaudeDir,
+		kiroSessionsDir:    cfg.KiroSessionsDir,
 		workspaceOverrides: make(map[string]string),
 		backendOverrides:   make(map[string]string),
 		storePath:          cfg.StorePath,
@@ -1097,12 +1118,16 @@ func computeBackendIDs(wrapper *cli.Wrapper, wrappers map[string]*cli.Wrapper, d
 //     unset). It reads naozhi-native per-session logs that carry full
 //     EventEntry fidelity including Images, ImagePaths, and agent-team
 //     linkage.
-//   - The fallback tier is the per-backend source:
-//     "claude" / empty → claudejsonl.Source (reads ~/.claude/projects)
-//     anything else      → history.Noop (until a per-backend source lands)
-//   - MergedSource wraps both and returns a UUID-deduped, time-sorted
-//     result. Skipping the merge when the local tier is disabled keeps
-//     the old single-source path live for deployments that opt out.
+//   - The fallback tier comes from the backend's *cli.Wrapper via
+//     Wrapper.NewHistorySource (Sprint 1a). The wrapper holds a
+//     per-backend factory that knows which on-disk format to read —
+//     claudejsonl today, kirojsonl in Sprint 1c — so adding a new
+//     backend's history reader does not require an edit here.
+//     Unknown / unregistered backends degrade to NoopHistorySource.
+//   - MergedSource wraps both tiers and returns a UUID-deduped,
+//     time-sorted result. Skipping the merge when the local tier is
+//     disabled keeps the old single-source path live for deployments
+//     that opt out.
 func (r *Router) attachHistorySource(s *ManagedSession) {
 	if s == nil {
 		return
@@ -1112,11 +1137,26 @@ func (r *Router) attachHistorySource(s *ManagedSession) {
 		backend = r.defaultBackend
 	}
 
-	var fallback history.Source
-	switch {
-	case backend == "claude" && r.claudeDir != "":
-		fallback = claudejsonl.New(r.claudeDir, s.Workspace(), s.snapshotChainIDs)
-	default:
+	// Resolve the wrapper for this backend. wrappers may be nil (legacy
+	// single-wrapper deployments) and an unknown backend ID falls back to
+	// the router's default wrapper so a misconfigured Backend() still
+	// gets a usable source instead of silently routing to Noop.
+	wrapper := r.wrappers[backend]
+	if wrapper == nil {
+		wrapper = r.wrapper
+	}
+
+	deps := cli.HistoryWiring{
+		ClaudeDir:       r.claudeDir,
+		KiroSessionsDir: r.kiroSessionsDir,
+		EventLogDir:     r.eventLogDir,
+	}
+
+	// Wrapper.NewHistorySource is nil-safe and never returns nil; the
+	// extra guard below pins the contract at the boundary so future
+	// refactors of the cli package can't silently regress callers here.
+	var fallback history.Source = wrapper.NewHistorySource(s, deps)
+	if fallback == nil {
 		fallback = history.Noop{}
 	}
 
@@ -2797,7 +2837,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	old.storeProcess(nil)
 
 	// Rebind the history source to the renamed session — the old Source
-	// captured `old.snapshotChainIDs` which reads the now-orphaned struct.
+	// captured `old.SnapshotChainIDs` which reads the now-orphaned struct.
 	r.attachHistorySource(fresh)
 
 	// Swap map entries and maintain every derived index.
@@ -3988,7 +4028,7 @@ func (r *Router) RegisterCronStubWithChain(key, workspace, lastPrompt string, ch
 			}
 			// prevSessionIDs 的所有历史写路径（spawnSession:1786 / RenameSession:2142
 			// / 本函数 new 分支:3259）都在 r.mu 下做，读路径（961 / 1722 / 3083
-			// 以及下一行）也全部在 r.mu 下。managed.go:snapshotChainIDs 虽然用
+			// 以及下一行）也全部在 r.mu 下。managed.go:SnapshotChainIDs 虽然用
 			// historyMu.RLock，但因为写者不拿 historyMu，historyMu 对该字段
 			// 而言并不构成真正的同步——真正的 invariant 是"r.mu 写/r.mu 读"。
 			// 因此 chain 刷新直接在 r.mu 临界区内做，与其它写路径一致，不引入

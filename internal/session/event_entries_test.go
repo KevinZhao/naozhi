@@ -170,7 +170,7 @@ func TestSnapshotChainIDs_IncludesCurrentWhenSet(t *testing.T) {
 	s.prevSessionIDs = []string{"p1", "p2"}
 	s.setSessionID("cur")
 
-	got := s.snapshotChainIDs()
+	got := s.SnapshotChainIDs()
 	want := []string{"p1", "p2", "cur"}
 	if len(got) != len(want) {
 		t.Fatalf("len=%d want %d (%v)", len(got), len(want), got)
@@ -188,7 +188,7 @@ func TestSnapshotChainIDs_OmitsEmptyCurrent(t *testing.T) {
 	s.prevSessionIDs = []string{"p1"}
 	// No setSessionID call — current is "".
 
-	got := s.snapshotChainIDs()
+	got := s.SnapshotChainIDs()
 	if len(got) != 1 || got[0] != "p1" {
 		t.Errorf("got %v, want [p1]", got)
 	}
@@ -197,7 +197,7 @@ func TestSnapshotChainIDs_OmitsEmptyCurrent(t *testing.T) {
 func TestSnapshotChainIDs_AllEmpty(t *testing.T) {
 	t.Parallel()
 	s := &ManagedSession{key: "k"}
-	got := s.snapshotChainIDs()
+	got := s.SnapshotChainIDs()
 	if got != nil {
 		t.Errorf("got %v, want nil", got)
 	}
