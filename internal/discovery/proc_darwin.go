@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/naozhi/naozhi/internal/cli/backend"
 )
 
 // psPath pins the ps(1) binary to /bin/ps so a PATH-manipulation attack
@@ -61,7 +63,9 @@ func procPidAlive(pid int) bool { return syscall.Kill(pid, 0) == nil }
 func procKillSIGKILL(pid int)   { _ = syscall.Kill(pid, syscall.SIGKILL) }
 
 // detectCLIName uses ps(1) to determine which CLI binary is running.
-// Returns "claude-code", "kiro", or "cli" as fallback.
+// Iterates registered backend.Profile entries; the first whose
+// DetectInProc predicate matches the binary basename wins. Adding a new
+// backend requires no change to this function. See docs/rfc/multi-backend.md §3.4.
 func detectCLIName(pid int) string {
 	out, err := exec.Command(psPath, "-o", "command=", "-p", strconv.Itoa(pid)).Output()
 	if err != nil {
@@ -72,12 +76,10 @@ func detectCLIName(pid int) string {
 		cmd = cmd[:i]
 	}
 	bin := filepath.Base(cmd)
-	switch {
-	case strings.Contains(bin, "kiro"):
-		return "kiro"
-	case strings.Contains(bin, "claude"):
-		return "claude-code"
-	default:
-		return "cli"
+	for _, p := range backend.All() {
+		if p.DetectInProc != nil && p.DetectInProc(bin) {
+			return p.DisplayName
+		}
 	}
+	return "cli"
 }

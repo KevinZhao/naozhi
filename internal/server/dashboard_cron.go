@@ -171,6 +171,40 @@ func validateCronScheduleChars(schedule string) error {
 	return validateStringField(schedule, stringFieldPolicy{name: "schedule", collapseErrors: true})
 }
 
+// maxCronBackendLen mirrors the per-request backend length cap used by the
+// /api/sessions/send handler (send.go:262-272). 32 is comfortably above any
+// sensible backend ID ("claude" / "kiro" / future short tokens) and stops a
+// hostile multi-KB `backend=<payload>` from landing in slog attrs before the
+// router's own validateBackend fires. Keep in sync with send.go's literal.
+const maxCronBackendLen = 32
+
+// validateCronBackend enforces the same shape contract as send.go for the
+// dashboard-picked backend override on cron jobs:
+//   - empty is OK (router default fallback at execute time);
+//   - length <= 32 bytes;
+//   - charset [a-z0-9_-] only.
+//
+// Unknown backend IDs are NOT rejected here — the session router's
+// wrapperFor clamps unknowns to the configured default so the cron job
+// keeps running rather than failing every tick because the operator
+// removed a backend from config.yaml. This handler-edge gate stops only
+// shape-invalid input that would otherwise pollute logs / persisted JSON.
+func validateCronBackend(backend string) error {
+	if backend == "" {
+		return nil
+	}
+	if len(backend) > maxCronBackendLen {
+		return fmt.Errorf("backend exceeds %d-byte limit", maxCronBackendLen)
+	}
+	for i := 0; i < len(backend); i++ {
+		c := backend[i]
+		if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+			return fmt.Errorf("invalid backend character")
+		}
+	}
+	return nil
+}
+
 // validateCronPrompt rejects prompts larger than the dashboard cap or
 // containing control characters. Cron prompts are delivered via stdin as a
 // stream-json user message (cron/scheduler.go → session.Send → NewUserMessage),
@@ -317,6 +351,9 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		// 折叠态做 hover-tooltip 状态气泡。空 = 此 job 尚无持久化历史
 		// （新建 / 历史已被 GC 清空 / StorePath 为空）。
 		RecentRuns []runSummaryView `json:"recent_runs,omitempty"`
+		// Backend: Sprint 6c (docs/rfc/multi-backend.md §9). "" 表示
+		// 跟随 router default；前端编辑器据此回填 backend 下拉选项。
+		Backend string `json:"backend,omitempty"`
 	}
 	views := make([]cronJobView, 0, len(jobs))
 	for _, entry := range jobs {
@@ -343,6 +380,7 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			LastErrorClass: string(j.LastErrorClass),
 			Notify:         j.Notify,
 			FreshContext:   j.FreshContext,
+			Backend:        j.Backend,
 		}
 		if !j.LastRunAt.IsZero() {
 			v.LastRunAt = j.LastRunAt.UnixMilli()
@@ -444,6 +482,10 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		NotifyChatID   string `json:"notify_chat_id,omitempty"`
 		Notify         *bool  `json:"notify,omitempty"`
 		FreshContext   bool   `json:"fresh_context,omitempty"`
+		// Backend pins the CLI backend for this job ("" = router default).
+		// Sprint 6c (docs/rfc/multi-backend.md §9). Validated by
+		// validateCronBackend to match the send.go shape contract.
+		Backend string `json:"backend,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64 KB
 	if err := decodeJSONBody(r, &req); err != nil {
@@ -471,6 +513,10 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := validateCronPrompt(req.Prompt); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := validateCronBackend(req.Backend); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -521,6 +567,7 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		NotifyChatID:   req.NotifyChatID,
 		Notify:         req.Notify,
 		FreshContext:   req.FreshContext,
+		Backend:        req.Backend,
 		Paused:         req.Prompt == "", // auto-pause when no prompt
 	}
 	if err := h.scheduler.AddJob(job); err != nil {
@@ -819,6 +866,10 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		NotifyPlatform *string `json:"notify_platform,omitempty"`
 		NotifyChatID   *string `json:"notify_chat_id,omitempty"`
 		FreshContext   *bool   `json:"fresh_context,omitempty"`
+		// Backend pointer keeps "" semantics distinct from "leave alone":
+		// nil omits, pointer-to-"" clears the override (router default),
+		// pointer to a non-empty string sets it. Sprint 6c.
+		Backend *string `json:"backend,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
 	if err := decodeJSONBody(r, &req); err != nil {
@@ -827,7 +878,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Schedule == nil && req.Prompt == nil && req.Title == nil && req.WorkDir == nil &&
 		req.Notify == nil && req.NotifyPlatform == nil && req.NotifyChatID == nil &&
-		req.FreshContext == nil {
+		req.FreshContext == nil && req.Backend == nil {
 		http.Error(w, "at least one field must be provided", http.StatusBadRequest)
 		return
 	}
@@ -849,6 +900,12 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Schedule != nil {
 		if err := validateCronScheduleChars(*req.Schedule); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
+	if req.Backend != nil {
+		if err := validateCronBackend(*req.Backend); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
@@ -908,6 +965,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		NotifyPlatform: req.NotifyPlatform,
 		NotifyChatID:   req.NotifyChatID,
 		FreshContext:   req.FreshContext,
+		Backend:        req.Backend,
 	})
 	if err != nil {
 		switch {

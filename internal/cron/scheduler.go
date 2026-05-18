@@ -1047,6 +1047,11 @@ type JobUpdate struct {
 	// Title 是人类可读名称。nil 保持原值；pointer 到 "" 会清空
 	// （UI 侧回退到 Prompt 首行）。长度由 handler 层先行校验。
 	Title *string
+	// Backend 是 CLI backend ID（Sprint 6c, docs/rfc/multi-backend.md §9）。
+	// nil 保持原值；pointer 到 "" 显式清空，回落到 router default。
+	// 字符/长度由 dashboard handler 的 validateCronBackend 先行把关；
+	// 未知 backend 不在此处拒绝（router wrapperFor 会 fallback）。
+	Backend *string
 }
 
 // UpdateJob applies a partial edit to an existing cron job. Schedule changes
@@ -1119,6 +1124,9 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	}
 	if upd.Title != nil {
 		j.Title = *upd.Title
+	}
+	if upd.Backend != nil {
+		j.Backend = *upd.Backend
 	}
 
 	if upd.Schedule != nil && *upd.Schedule != j.Schedule {
@@ -1515,6 +1523,7 @@ type jobSnapshot struct {
 	notify     *bool // nil = unset
 	fresh      bool
 	schedule   string
+	backend    string // "" = router default
 }
 
 // snapshotJob reads j under s.mu so a concurrent SetJobPrompt /
@@ -1534,6 +1543,7 @@ func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
 		notifyChat: j.NotifyChatID,
 		fresh:      j.FreshContext,
 		schedule:   j.Schedule,
+		backend:    j.Backend,
 	}
 	if j.Notify != nil {
 		v := *j.Notify
@@ -1830,6 +1840,16 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	agentID, cleanText := session.ResolveAgent(snap.prompt, s.agentCommands)
 	opts := s.agents[agentID]
 	opts.Exempt = true // cron sessions must not count toward maxProcs or evict user sessions
+	// Sprint 6c (docs/rfc/multi-backend.md §9): per-job backend override.
+	// Empty snap.backend leaves opts.Backend untouched ("" already routes
+	// through the router default, and the agent profile may have its own
+	// backend pinned). A non-empty value wins because the user explicitly
+	// picked it for this cron job from the dashboard. validateBackend at
+	// the router boundary still rejects shape-invalid input (control chars,
+	// overlength); unknown-but-well-formed backends fall back via wrapperFor.
+	if snap.backend != "" {
+		opts.Backend = snap.backend
+	}
 	if snap.workDir != "" {
 		// Re-check allowedRoot at execute time to close the symlink-swap
 		// race: validateWorkspace at creation resolved symlinks once, but

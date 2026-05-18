@@ -196,6 +196,13 @@ func (f *fakeProcess) InterruptViaControl() error {
 func (f *fakeProcess) PID() int                         { return 0 }
 func (f *fakeProcess) InjectHistory(_ []cli.EventEntry) {}
 func (f *fakeProcess) TurnAgents() []cli.SubagentInfo   { return nil }
+
+// Normalize-layer stubs (multi-backend §8.8) — fakeProcess is used by router
+// tests that pre-date multi-backend, so all three return zero values to
+// preserve historical SessionSnapshot output.
+func (f *fakeProcess) ContextUsagePercent() float64       { return 0 }
+func (f *fakeProcess) TurnDurationMs() int64              { return 0 }
+func (f *fakeProcess) MeteringUsage() []cli.MeteringEntry { return nil }
 func (f *fakeProcess) SubscribeEvents() (<-chan struct{}, func()) {
 	ch := make(chan struct{})
 	return ch, func() {}

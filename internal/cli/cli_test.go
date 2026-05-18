@@ -759,6 +759,150 @@ func TestRPCMessage_NoUnmarshalErrorOnStringID(t *testing.T) {
 	}
 }
 
+// --- ACP _kiro.dev/metadata normalize tests (Sprint 4) ---
+
+// TestACPProtocol_ReadEvent_KiroMetadata_FullPayload ensures the synthetic
+// Type:"metadata" Event carries normalized fields from the kiro 2.3.0
+// _kiro.dev/metadata notification (V10 sample).
+func TestACPProtocol_ReadEvent_KiroMetadata_FullPayload(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	line := `{"jsonrpc":"2.0","method":"_kiro.dev/metadata","params":{"sessionId":"s1","contextUsagePercentage":0.0285,"turnDurationMs":2000,"meteringUsage":[{"value":0.024,"unit":"credit","unitPlural":"credits"}]}}`
+	ev, done, err := p.ReadEvent(line)
+	if err != nil {
+		t.Fatalf("ReadEvent: %v", err)
+	}
+	if done {
+		t.Error("metadata frame should not mark turn complete")
+	}
+	if ev.Type != "metadata" {
+		t.Fatalf("Type = %q, want metadata", ev.Type)
+	}
+	if ev.SessionID != "s1" {
+		t.Errorf("SessionID = %q, want s1", ev.SessionID)
+	}
+	if ev.Metadata == nil {
+		t.Fatal("Metadata should be populated")
+	}
+	// kiro reports 0-1 fraction; we scale to 0-100 in parseKiroMetadata so
+	// dashboard doesn't have to remember.
+	if got := ev.Metadata.ContextUsagePercent; got < 2.84 || got > 2.86 {
+		t.Errorf("ContextUsagePercent = %v, want ~2.85", got)
+	}
+	if ev.Metadata.TurnDurationMs != 2000 {
+		t.Errorf("TurnDurationMs = %d, want 2000", ev.Metadata.TurnDurationMs)
+	}
+	if len(ev.Metadata.MeteringUsage) != 1 {
+		t.Fatalf("MeteringUsage len = %d, want 1", len(ev.Metadata.MeteringUsage))
+	}
+	m := ev.Metadata.MeteringUsage[0]
+	if m.Value != 0.024 || m.Unit != "credit" || m.UnitPlural != "credits" {
+		t.Errorf("MeteringEntry = %+v, want value=0.024 unit=credit", m)
+	}
+}
+
+// TestACPProtocol_ReadEvent_KiroMetadata_MissingFields tolerates partial
+// payloads — kiro may omit metering on idle turns; downstream consumers
+// already treat zero as "no signal".
+func TestACPProtocol_ReadEvent_KiroMetadata_MissingFields(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	line := `{"jsonrpc":"2.0","method":"_kiro.dev/metadata","params":{"sessionId":"s1","contextUsagePercentage":0.5}}`
+	ev, _, err := p.ReadEvent(line)
+	if err != nil {
+		t.Fatalf("ReadEvent: %v", err)
+	}
+	if ev.Metadata == nil {
+		t.Fatal("Metadata should be populated even with partial payload")
+	}
+	if ev.Metadata.ContextUsagePercent != 50 {
+		t.Errorf("ContextUsagePercent = %v, want 50", ev.Metadata.ContextUsagePercent)
+	}
+	if ev.Metadata.TurnDurationMs != 0 {
+		t.Errorf("TurnDurationMs = %d, want 0 for missing field", ev.Metadata.TurnDurationMs)
+	}
+	if ev.Metadata.MeteringUsage != nil {
+		t.Errorf("MeteringUsage should be nil for missing field, got %v", ev.Metadata.MeteringUsage)
+	}
+}
+
+// TestACPProtocol_ReadEvent_KiroMetadata_SchemaDriftSwallowed locks the
+// schema-drift contract: a malformed _kiro.dev/metadata frame returns the
+// "skip this line" zero-Event without aborting readLoop.
+func TestACPProtocol_ReadEvent_KiroMetadata_SchemaDriftSwallowed(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	// params is an array instead of an object — clearly a schema drift.
+	line := `{"jsonrpc":"2.0","method":"_kiro.dev/metadata","params":[1,2,3]}`
+	ev, done, err := p.ReadEvent(line)
+	if err != nil {
+		t.Errorf("schema drift should not surface as readLoop error, got %v", err)
+	}
+	if done {
+		t.Error("schema drift should not mark turn complete")
+	}
+	if ev.Type != "" {
+		t.Errorf("schema drift should return zero Event, got Type=%q", ev.Type)
+	}
+}
+
+// TestProcess_ApplyMetadata_AndAccessors covers the lock-free getter/setter
+// pair on Process. Accessors return zeros until applyMetadata fires.
+func TestProcess_ApplyMetadata_AndAccessors(t *testing.T) {
+	t.Parallel()
+	p := &Process{}
+	if got := p.ContextUsagePercent(); got != 0 {
+		t.Errorf("zero-value ContextUsagePercent = %v, want 0", got)
+	}
+	if got := p.TurnDurationMs(); got != 0 {
+		t.Errorf("zero-value TurnDurationMs = %v, want 0", got)
+	}
+	if got := p.MeteringUsage(); got != nil {
+		t.Errorf("zero-value MeteringUsage = %v, want nil", got)
+	}
+
+	p.applyMetadata(&EventMetadata{
+		ContextUsagePercent: 42.5,
+		TurnDurationMs:      1500,
+		MeteringUsage: []MeteringEntry{
+			{Value: 0.01, Unit: "credit", UnitPlural: "credits"},
+			{Value: 0.02, Unit: "credit", UnitPlural: "credits"},
+		},
+	})
+	if got := p.ContextUsagePercent(); got != 42.5 {
+		t.Errorf("ContextUsagePercent = %v, want 42.5", got)
+	}
+	if got := p.TurnDurationMs(); got != 1500 {
+		t.Errorf("TurnDurationMs = %v, want 1500", got)
+	}
+	usage := p.MeteringUsage()
+	if len(usage) != 2 || usage[0].Value != 0.01 || usage[1].Value != 0.02 {
+		t.Errorf("MeteringUsage = %+v, want 2 entries", usage)
+	}
+
+	// Defensive copy — mutating the returned slice must not affect the
+	// next reader.
+	usage[0].Value = 99
+	if again := p.MeteringUsage(); again[0].Value != 0.01 {
+		t.Errorf("MeteringUsage returned shared slice; got mutated %v on second read", again)
+	}
+
+	// nil applyMetadata must not panic / mutate state.
+	p.applyMetadata(nil)
+	if p.ContextUsagePercent() != 42.5 {
+		t.Error("nil applyMetadata should be a no-op")
+	}
+
+	// Zero-fields applyMetadata must not regress prior values.
+	p.applyMetadata(&EventMetadata{})
+	if p.ContextUsagePercent() != 42.5 {
+		t.Error("zero-field applyMetadata should not overwrite existing percent")
+	}
+	if p.TurnDurationMs() != 1500 {
+		t.Error("zero-field applyMetadata should not overwrite existing duration")
+	}
+}
+
 // --- ACP error response test (C2 fix) ---
 
 func TestACPProtocol_ReadEvent_ErrorResponse(t *testing.T) {
