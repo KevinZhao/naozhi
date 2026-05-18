@@ -954,22 +954,41 @@ var shimEnvAllowedPrefixes = []string{
 
 	// Common dev toolchains the CLI's Bash tool may invoke.
 	//
-	// SECURITY: NODE_* and PYTHON* are listed by exact prefix (not bare
-	// "NODE_"/"PYTHON") because several variables in those namespaces can
-	// load arbitrary code into any Node.js / Python subprocess the CLI
+	// SECURITY: NODE_* / PYTHON* / CONDA_* / NVM are listed by explicit
+	// keys (not bare "NODE_" / "PYTHON" / "CONDA_") because several vars
+	// in those namespaces let an attacker load arbitrary code or shadow
+	// system paths in any Node.js / Python / conda subprocess the CLI
 	// spawns (Claude CLI itself is Node.js). Explicitly excluded:
-	//   - NODE_OPTIONS (can pass --require /path/to/evil.js)
-	//   - NODE_EXTRA_CA_CERTS, NODE_TLS_REJECT_UNAUTHORIZED (TLS bypass)
-	//   - PYTHONSTARTUP (runs on every python invocation)
-	//   - PYTHONINSPECT (drops into REPL after script)
+	//   - NODE_OPTIONS                 (can pass --require /path/to/evil.js)
+	//   - NODE_EXTRA_CA_CERTS,
+	//     NODE_TLS_REJECT_UNAUTHORIZED (TLS bypass)
+	//   - NODE_PATH                    (require() resolution shadowing)
+	//   - PYTHONSTARTUP                (runs on every python invocation)
+	//   - PYTHONINSPECT                (drops into REPL after script)
+	//   - PYTHONPATH                   (R222-SEC-2: any python subprocess
+	//                                   loads attacker-writable modules
+	//                                   ahead of stdlib; Bash tool reaches
+	//                                   this via `python3 -c …`)
+	//   - PYTHONHOME                   (R222-SEC-2: redirects sys.prefix
+	//                                   to attacker tree, same outcome)
+	//   - VIRTUAL_ENV                  (R222-SEC-2: pip / activated venv
+	//                                   shims trust this for site-packages
+	//                                   resolution; attacker tree behaves
+	//                                   like PYTHONPATH on activated venv)
+	//   - NVM_DIR                      (R222-SEC-2: node version manager
+	//                                   tree exposes a parallel `node`
+	//                                   binary that PATH-mismatch attacks
+	//                                   can prefer over the system one)
+	//   - CONDA_  (bare prefix)        (R222-SEC-2: too wide; only
+	//                                   PREFIX/DEFAULT_ENV/SHLVL are
+	//                                   benign identity bits — others
+	//                                   like CONDA_PYTHON_EXE point at
+	//                                   redirectable interpreters)
 	"GOPATH=", "GOROOT=", "GOBIN=",
 	"CARGO_HOME=", "RUSTUP_HOME=",
-	// NODE_PATH excluded: when pointed at an attacker-writable directory,
-	// `require()` resolution from any Node.js subprocess (Claude CLI is
-	// itself Node.js) loads code from that directory ahead of system paths.
-	"NVM_DIR=", "NODE_ENV=", "NPM_",
-	"PYTHONPATH=", "PYTHONHOME=", "PYTHONDONTWRITEBYTECODE=", "PYTHONUNBUFFERED=",
-	"VIRTUAL_ENV=", "CONDA_",
+	"NODE_ENV=", "NPM_",
+	"PYTHONDONTWRITEBYTECODE=", "PYTHONUNBUFFERED=",
+	"CONDA_PREFIX=", "CONDA_DEFAULT_ENV=", "CONDA_SHLVL=",
 	"JAVA_HOME=",
 }
 

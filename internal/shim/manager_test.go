@@ -537,14 +537,25 @@ func TestFilterShimEnv_AllowsExpectedPrefixes(t *testing.T) {
 		{"GOBIN=/home/user/go/bin", true},
 		{"CARGO_HOME=/home/user/.cargo", true},
 		{"RUSTUP_HOME=/home/user/.rustup", true},
-		{"NVM_DIR=/home/user/.nvm", true},
 		{"NODE_ENV=production", true},
 		{"NPM_TOKEN=abc", true},
-		{"PYTHONPATH=/usr/lib/python3", true},
-		{"PYTHONHOME=/usr", true},
-		{"VIRTUAL_ENV=/home/user/venv", true},
+		{"PYTHONDONTWRITEBYTECODE=1", true},
+		{"PYTHONUNBUFFERED=1", true},
 		{"CONDA_PREFIX=/opt/conda", true},
+		{"CONDA_DEFAULT_ENV=base", true},
+		{"CONDA_SHLVL=1", true},
 		{"JAVA_HOME=/usr/lib/jvm/java-17", true},
+
+		// Blocked — R222-SEC-2: trim Python/conda/nvm code-loading vectors
+		// previously allowed by bare "CONDA_" / VIRTUAL_ENV / NVM_DIR /
+		// PYTHONPATH / PYTHONHOME entries. See manager.go:shimEnvAllowedPrefixes
+		// for the per-key rationale.
+		{"NVM_DIR=/home/user/.nvm", false},
+		{"PYTHONPATH=/usr/lib/python3", false},
+		{"PYTHONHOME=/usr", false},
+		{"VIRTUAL_ENV=/home/user/venv", false},
+		{"CONDA_PYTHON_EXE=/opt/conda/bin/python", false},
+		{"CONDA_EXE=/opt/conda/bin/conda", false},
 
 		// Blocked — ANTHROPIC_* outside the explicit allowlist (R219-SEC-3).
 		// The wildcard "ANTHROPIC_" prefix used to forward any ANTHROPIC_*
