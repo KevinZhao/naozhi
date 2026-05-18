@@ -750,6 +750,20 @@ func (s *Scheduler) Stop() {
 	// derived ctx so stopCtx cancellation does not interrupt an in-flight
 	// webhook POST. Without this deadline, a stuck platform HTTP call
 	// could pin Stop() past systemd TimeoutStopSec.
+	//
+	// R222-GO-10: when the deadline pre-empts triggerDone, the wrapper
+	// goroutine started by `go func() { s.triggerWG.Wait(); close(...) }`
+	// stays parked on triggerWG.Wait — exactly the intentional-orphan path
+	// documented in the function-level CONTRACT block (lines 715–725). The
+	// cost is one wedged goroutine per process exit; reclaim happens when
+	// the OS tears the process down moments later. We deliberately do NOT
+	// add a sync.Once / chan-cancel reclaim path here: triggerWG.Wait does
+	// not accept a cancel signal, and Scheduler is single-shot (Stop is
+	// terminal). The `if !deadlineHit` outer gate already keeps us from
+	// spawning the wrapper when cron.Stop itself ate the budget. A
+	// goroutine-leak detector running in tests that shorten stopBudget to
+	// milliseconds will surface this orphan; tests that care should plumb
+	// a non-stuck deliverNotice fake instead.
 	if !deadlineHit {
 		triggerDone := make(chan struct{})
 		go func() {

@@ -1047,6 +1047,37 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// R222-SEC-5: defence-in-depth magic-byte check. If a future code path
+	// outside attachment.sanitizeExt drops a non-image into the attachment
+	// subtree, the extension-only MIME pin above would still serve it as
+	// e.g. image/jpeg — a browser would refuse to render it but XSS / drive-
+	// by-download channels remain. http.DetectContentType inspects the first
+	// 512 bytes; if the sniff disagrees with the extension's MIME we degrade
+	// to application/octet-stream + Content-Disposition: attachment so the
+	// payload cannot be rendered inline (e.g. as a crafted SVG). The fast-
+	// path (bytes start with the expected magic) keeps inline rendering for
+	// all legitimate uploads, since http.DetectContentType for a complete
+	// PNG/JPEG/GIF/WebP header returns the matching image MIME.
+	disposition := "inline"
+	disableInlineRender := false
+	var sniffBuf [512]byte
+	if n, _ := io.ReadFull(f, sniffBuf[:]); n > 0 {
+		if sniffed := http.DetectContentType(sniffBuf[:n]); !strings.EqualFold(sniffed, mime) {
+			slog.Warn("attachment: magic-byte mismatch, degrading to octet-stream",
+				"ext", ext, "ext_mime", mime, "sniffed", sniffed,
+				"path", filepath.Base(resolved))
+			mime = "application/octet-stream"
+			disposition = "attachment"
+			disableInlineRender = true
+		}
+	}
+	// Rewind so http.ServeContent below streams the full payload, not just
+	// the bytes after the sniff cursor.
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "seek failed"})
+		return
+	}
+
 	// RNEW-SEC-004: ETag is derived from sha256(size||mtime) and then
 	// truncated to 16 hex chars. The prior "%d-%d" form leaked both the
 	// exact size in bytes AND a nanosecond-precision mtime through the
@@ -1064,10 +1095,16 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("ETag", etag)
 	w.Header().Set("Content-Type", mime)
-	w.Header().Set("Content-Disposition", "inline")
+	w.Header().Set("Content-Disposition", disposition)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	w.Header().Set("Cache-Control", "private, max-age=3600")
+	if disableInlineRender {
+		// Belt-and-braces: when degraded, blank out frame embedding so the
+		// browser cannot side-load the byte stream into a context that
+		// ignores Content-Disposition (e.g. <img>, <iframe>).
+		w.Header().Set("X-Frame-Options", "DENY")
+	}
 	// Tight CSP: attachments are image-only, no inline scripts, no third-
 	// party resources. sandbox closes top-level-navigation XSS channels for
 	// formats (e.g. a future .svg) that slip past the ext check.
