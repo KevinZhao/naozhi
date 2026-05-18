@@ -67,6 +67,22 @@ type Profile struct {
 	// required" (claude is in this bucket).
 	RequiredNodeCaps []string
 
+	// HistoryDir is the on-disk directory where this backend persists
+	// session transcripts that internal/history/* sources read.
+	// Convention: stored with a leading "~/" so doctor / debug output
+	// can display the user-relative path verbatim. Consumers that need
+	// an absolute path must expand "~/" via os.UserHomeDir themselves.
+	// Empty string means "this backend has no on-disk history" — code
+	// composing paths must check before joining.
+	//
+	// Centralizing this on Profile (instead of a private
+	// `switch backend.ID` in cmd/naozhi/doctor.go) closes the
+	// compile-safety hole flagged in PR #117 review: adding a third
+	// backend now requires only a Profile entry, not an edit to a
+	// distant switch statement that the new-backend author may not
+	// know about.
+	HistoryDir string
+
 	// Features is the user-facing capability map the dashboard reads to
 	// decide which UI controls to gray out (RFC §8.2). Distinct from the
 	// protocol-level cli.Caps (which is plumbed via Protocol.Capabilities)
