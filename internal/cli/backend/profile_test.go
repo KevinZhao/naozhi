@@ -2,6 +2,7 @@ package backend
 
 import (
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -197,6 +198,45 @@ func TestRegisterDefaults_RegistersClaudeAndKiro(t *testing.T) {
 		}
 		if len(kiro.RequiredNodeCaps) != 1 || kiro.RequiredNodeCaps[0] != "acp" {
 			t.Errorf("kiro RequiredNodeCaps = %v; want [\"acp\"]", kiro.RequiredNodeCaps)
+		}
+	})
+}
+
+// TestEnsureDefaults_IdempotentAndConcurrent pins the contract added by
+// PR #122 follow-up: EnsureDefaults must (a) register defaults exactly
+// once even under N concurrent callers, and (b) be safe to call after
+// RegisterDefaults already ran. Earlier recover()-based bootstrap could
+// leak partial registrations when two goroutines raced through
+// RegisterDefaults.
+func TestEnsureDefaults_IdempotentAndConcurrent(t *testing.T) {
+	withCleanRegistry(t, func() {
+		const N = 50
+		var wg sync.WaitGroup
+		wg.Add(N)
+		for i := 0; i < N; i++ {
+			go func() {
+				defer wg.Done()
+				EnsureDefaults()
+			}()
+		}
+		wg.Wait()
+
+		all := All()
+		if len(all) != 2 {
+			t.Fatalf("after %d concurrent EnsureDefaults: All() len = %d; want 2", N, len(all))
+		}
+		if _, ok := Get("claude"); !ok {
+			t.Error("claude missing after concurrent EnsureDefaults")
+		}
+		if _, ok := Get("kiro"); !ok {
+			t.Error("kiro missing after concurrent EnsureDefaults")
+		}
+
+		// Subsequent calls must be no-ops (no panic, no extra registrations).
+		EnsureDefaults()
+		EnsureDefaults()
+		if got := len(All()); got != 2 {
+			t.Errorf("repeat EnsureDefaults registered extra: All() len = %d; want 2", got)
 		}
 	})
 }
