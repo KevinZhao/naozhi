@@ -792,8 +792,32 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid workspace"})
 			return
 		}
-		nc, ok := h.nodeAccess.LookupNode(w, node)
-		if !ok {
+		// Sprint 6b: single-pass node + cap lookup. Earlier this path
+		// called LookupNode AND selectNodeForBackend in sequence, opening
+		// a TOCTOU window where the node could disconnect between the two
+		// GetNode calls and emit inconsistent error formats (plain text
+		// vs JSON). selectNodeForBackend now is the single authority:
+		// returns nc on success, sentinel error on missing-node /
+		// unknown-backend / missing-cap. For claude / unset backend,
+		// RequiredNodeCaps is nil so the cap loop is a no-op.
+		// PR #119 review fix.
+		nc, err := selectNodeForBackend(h.nodeAccess, node, backend)
+		if err != nil {
+			cleanup()
+			// 400 across the board to keep the legacy LookupNode contract
+			// (TestHandleAPISend_UnknownNode pins this). The error
+			// message itself is structured (ErrUnknownBackend /
+			// ErrNodeNotConnected / ErrNodeMissingCap) so dashboards
+			// can errors.Is on the JSON body if richer routing is needed.
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
+		if nc == nil {
+			// nodeID was empty / "local" — fall through to local dispatch
+			// without a remote send. This branch should not be reachable
+			// here because the caller already gated on `node != "" &&
+			// node != "local"`, but the fallback keeps the contract
+			// matching selectNodeForBackend's documented semantics.
 			return
 		}
 		capturedKey, capturedText, capturedWorkspace := key, text, workspace

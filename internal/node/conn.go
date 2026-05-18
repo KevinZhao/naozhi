@@ -21,6 +21,14 @@ type Conn interface {
 	DisplayName() string
 	RemoteAddr() string
 	Status() string // "ok" | "error" | "connecting"
+	// Meta returns the register-time NodeMeta snapshot used by
+	// server-side dispatch (selectNodeForBackend) to gate
+	// backend-specific routing on advertised capabilities. Reverse
+	// nodes populate Capabilities from their register frame; HTTPClient
+	// peers carry an empty cap set today (legacy "host whatever the
+	// primary asks" semantics). Never returns nil; HasCap on the
+	// returned pointer is the canonical lookup.
+	Meta() *NodeMeta
 
 	FetchSessions(ctx context.Context) ([]map[string]any, error)
 	FetchProjects(ctx context.Context) ([]map[string]any, error)

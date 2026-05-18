@@ -1682,13 +1682,37 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 	nodeID := msg.Node
-	h.nodesMu.RLock()
-	nc, ok := h.nodes[nodeID]
-	h.nodesMu.RUnlock()
-
-	if !ok {
-		// Same rationale as handleRemoteSubscribe: do not reflect the raw
-		// client-supplied node ID in the error body.
+	// PR #119 review fix: gate msg.Backend with the same charset/length
+	// rule HTTP path enforces (send.go:262-272) so a hostile WS client
+	// can't push a 4 KB / control-char bag into the rejection error
+	// string echoed back via send_ack. Empty backend is allowed and
+	// flows through the router default below.
+	if !isValidBackendID(msg.Backend) {
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "invalid backend id"})
+		return
+	}
+	// Sprint 6b: backend-aware lookup. selectNodeForBackend handles
+	// "node not connected" and "node lacks RequiredNodeCaps for the
+	// picked backend" with structured errors so the WS client gets a
+	// specific reason (logged + surfaced via send_ack.Error). Empty
+	// msg.Backend bypasses the cap check entirely (legacy single-
+	// backend deployments and existing claude sessions both land
+	// here). Errors flow into a "send rejected" send_ack and bypass
+	// the goroutine launch / RPC entirely.
+	nc, err := selectNodeForBackend(hubNodeLookup{h}, nodeID, msg.Backend)
+	if err != nil {
+		slog.Debug("ws send: backend route rejected", "node", nodeID, "backend", msg.Backend, "err", err)
+		// Surface ErrNodeMissingCap / ErrUnknownBackend / ErrNodeNotConnected
+		// verbatim — the dashboard renders the actionable message; raw
+		// internals here are limited to the constants in
+		// select_node_for_backend.go (no host paths, no token bytes).
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: err.Error()})
+		return
+	}
+	if nc == nil {
+		// Defensive: msg.Node passed isValidNodeID + non-empty above,
+		// so selectNodeForBackend should not return (nil, nil) here.
+		// Treat as unknown node to keep the existing 400-ish surface.
 		slog.Debug("ws send: unknown node", "node", nodeID)
 		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: "unknown node"})
 		return
