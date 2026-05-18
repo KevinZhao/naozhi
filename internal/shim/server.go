@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -70,34 +71,39 @@ type Config struct {
 	CWD             string
 }
 
-// shimLogFile keeps the log file open for the shim's lifetime (prevents GC).
-var shimLogFile *os.File
+// shimLogFilePtr keeps the log file open for the shim's lifetime
+// (prevents GC). atomic.Pointer instead of a plain `*os.File` so the
+// deferred panic handler reads through a memory barrier when other
+// goroutines (signal handler, panic recover) might observe Run()'s
+// initialization concurrently. R216-GO-2.
+var shimLogFilePtr atomic.Pointer[os.File]
 
 // Run is the main entry point for the shim process.
 func Run(cfg Config) error {
 	// Redirect slog to a persistent log file so shim logs survive parent restart.
 	logPath := filepath.Join(filepath.Dir(cfg.StateFile), fmt.Sprintf("shim-%d.log", os.Getpid()))
 	if f, err := os.OpenFile(logPath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600); err == nil {
-		shimLogFile = f
-		slog.SetDefault(slog.New(slog.NewTextHandler(shimLogFile, &slog.HandlerOptions{Level: slog.LevelDebug})))
-		os.Stderr = shimLogFile
+		shimLogFilePtr.Store(f)
+		slog.SetDefault(slog.New(slog.NewTextHandler(f, &slog.HandlerOptions{Level: slog.LevelDebug})))
+		os.Stderr = f
 	}
 	slog.Info("shim starting", "pid", os.Getpid(), "key", cfg.Key)
 	defer func() {
+		f := shimLogFilePtr.Load()
 		if r := recover(); r != nil {
-			if shimLogFile != nil {
-				fmt.Fprintf(shimLogFile, "PANIC: %v\n", r)
+			if f != nil {
+				fmt.Fprintf(f, "PANIC: %v\n", r)
 			}
 		}
-		if shimLogFile != nil {
-			fmt.Fprintf(shimLogFile, "Run() returning at %s\n", time.Now().Format(time.RFC3339))
+		if f != nil {
+			fmt.Fprintf(f, "Run() returning at %s\n", time.Now().Format(time.RFC3339))
 		}
 		slog.Info("shim exiting")
 		// Flush + close the log file so the final "returning"/"exiting"
 		// lines survive sudden power loss or aggressive fs flush delays.
-		if shimLogFile != nil {
-			_ = shimLogFile.Sync()
-			_ = shimLogFile.Close()
+		if f != nil {
+			_ = f.Sync()
+			_ = f.Close()
 		}
 	}()
 
