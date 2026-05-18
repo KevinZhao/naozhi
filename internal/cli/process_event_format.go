@@ -102,6 +102,22 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 		}
 		return []EventEntry{entry}
 	case "assistant":
+		// ACP tool_call_update events (Sprint 5c / RFC §8.3 D17) carry no
+		// Message content — they're pure status/output progress updates
+		// for an existing tool_use bubble. Synthesise a thin entry so the
+		// dashboard can thread it onto the prior tool_use by ToolUseID.
+		if ev.SubType == "tool_result" && ev.ToolCall != nil {
+			entry := base
+			entry.Type = "tool_use"
+			entry.ToolUseID = ev.ToolUseID
+			if ev.ToolCall.Title != "" {
+				entry.Tool = ev.ToolCall.Title
+				entry.Summary = ev.ToolCall.Title
+			}
+			tc := *ev.ToolCall
+			entry.ToolCall = &tc
+			return []EventEntry{entry}
+		}
 		if ev.Message == nil {
 			return nil
 		}
@@ -166,6 +182,17 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 					}
 				default:
 					entry.Detail = formatToolDetail(block)
+				}
+				// Multi-Backend RFC §8.3 D17: ACP tool_call events bring a
+				// rich progress payload (kind / status / rawOutput) that
+				// the dashboard renders as a folded "▶ <title>: status →
+				// stdout" row. Forward the per-event ToolCall so the
+				// frontend doesn't have to re-derive it. Stream-json
+				// (Claude) leaves ev.ToolCall nil and uses the legacy
+				// Tool / Detail fields.
+				if ev.ToolCall != nil {
+					tc := *ev.ToolCall
+					entry.ToolCall = &tc
 				}
 			case "text":
 				entry.Type = "text"
