@@ -29,6 +29,7 @@ func (s *stubConn) NodeID() string      { return s.nodeID }
 func (s *stubConn) DisplayName() string { return s.nodeID }
 func (s *stubConn) RemoteAddr() string  { return "stub" }
 func (s *stubConn) Status() string      { return "ok" }
+func (s *stubConn) Meta() *NodeMeta     { return &NodeMeta{NodeID: s.nodeID} }
 func (s *stubConn) Close()              {}
 
 func (s *stubConn) FetchSessions(_ context.Context) ([]map[string]any, error) {

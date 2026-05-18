@@ -367,6 +367,27 @@ func (n *HTTPClient) DisplayName() string { return n.displayName }
 func (n *HTTPClient) Status() string      { return "ok" }
 func (n *HTTPClient) RemoteAddr() string  { return n.URL }
 
+// Meta returns a NodeMeta with no capabilities advertised. HTTPClient
+// peers (pull-mode, primary→peer HTTP) predate the capability
+// negotiation surface; the only safe default is "advertise nothing"
+// which makes selectNodeForBackend deny any backend whose
+// RequiredNodeCaps is non-empty (kiro). claude (RequiredNodeCaps==nil)
+// continues to dispatch to HTTPClient peers because HasCap returns
+// true for an empty cap query — preserving legacy single-backend
+// behaviour exactly.
+//
+// We allocate a fresh NodeMeta per call rather than caching one on the
+// receiver because HTTPClient is the cold path (legacy deployments)
+// and the savings would be invisible against the HTTP RPC cost. Tests
+// that need a cap-aware HTTPClient stub can wrap this and override
+// Meta themselves.
+func (n *HTTPClient) Meta() *NodeMeta {
+	return &NodeMeta{
+		NodeID:      n.ID,
+		DisplayName: n.displayName,
+	}
+}
+
 func (n *HTTPClient) Subscribe(c EventSink, key string, after int64) {
 	n.relayMu.Lock()
 	if n.relay == nil {

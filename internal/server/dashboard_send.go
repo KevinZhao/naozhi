@@ -796,6 +796,19 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 		if !ok {
 			return
 		}
+		// Sprint 6b: assert the target node advertised every
+		// RequiredNodeCaps the picked backend needs (kiro → "acp"). For
+		// claude / unset backend, RequiredNodeCaps is nil so this is a
+		// no-op and the call still hits the legacy single-backend
+		// dispatch path. Reject with 400 — the dashboard has the node
+		// caps in /api/cli/backends and should have prevented the bad
+		// combo client-side; falling back to a server-side 400 keeps
+		// the contract honest if the user races a node disconnect.
+		if _, err := selectNodeForBackend(h.nodeAccess, node, backend); err != nil {
+			cleanup()
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+			return
+		}
 		capturedKey, capturedText, capturedWorkspace := key, text, workspace
 		// Track via sendWG (when hub is available) so Shutdown waits for the
 		// in-flight RPC before closing node connections — without this the

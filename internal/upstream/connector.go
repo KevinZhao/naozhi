@@ -231,13 +231,20 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 		}
 	}()
 
-	// Register
+	// Register. Sprint 6b of the multi-backend RFC: auto-derive
+	// Capabilities from the locally-registered backend.Profile set so
+	// the primary's selectNodeForBackend can answer "does this node
+	// host kiro?" without operator-supplied YAML caps. Each enabled
+	// profile contributes its RequiredNodeCaps; we union and sort for
+	// deterministic on-the-wire output (eases packet capture review
+	// and primary-side log diffing).
 	reg := node.ReverseMsg{
-		Type:        "register",
-		NodeID:      c.cfg.NodeID,
-		Token:       c.cfg.Token,
-		DisplayName: c.cfg.DisplayName,
-		Hostname:    c.hostname,
+		Type:         "register",
+		NodeID:       c.cfg.NodeID,
+		Token:        c.cfg.Token,
+		DisplayName:  c.cfg.DisplayName,
+		Hostname:     c.hostname,
+		Capabilities: derivedCaps(),
 	}
 	if err := conn.WriteJSON(reg); err != nil {
 		return false, fmt.Errorf("register write: %w", err)
