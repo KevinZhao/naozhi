@@ -110,6 +110,16 @@ type ACPUpdateDetail struct {
 	ToolCallID    string          `json:"toolCallId,omitempty"`
 	Title         string          `json:"title,omitempty"`
 	Status        string          `json:"status,omitempty"`
+	// Kind classifies the tool category — e.g. "execute", "read", "write",
+	// "search". Multi-Backend RFC §8.3 D17 / V7 sample. Used by dashboard
+	// to pick a representative icon when rendering the progress row.
+	Kind string `json:"kind,omitempty"`
+	// RawInput / RawOutput are the tool's argument / result payloads. Kept
+	// as RawMessage so the dashboard can decide whether to render JSON or
+	// to extract a stdout string from the kiro-specific shape; cli/server
+	// don't need to decode them. RFC §8.3 D17 collapsible output panel.
+	RawInput  json.RawMessage `json:"rawInput,omitempty"`
+	RawOutput json.RawMessage `json:"rawOutput,omitempty"`
 }
 
 // ACPTextContent represents a text content block in ACP events.

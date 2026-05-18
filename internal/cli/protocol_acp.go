@@ -16,7 +16,30 @@ import (
 
 	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
+
+// toolJSONMaxRunes caps the rune count of tool_call input/output payloads
+// stuffed into Event.ToolCall before they are forwarded to dashboard / IM
+// renderers. 16 KiB runes is generous enough to hold a typical Read /
+// Bash / Edit invocation in full while keeping a hostile / runaway tool
+// from blowing up the WS frame size and slog attrs. Aligned with the
+// 16K cap process_event_format.go uses for the legacy unknown-tool path
+// (R215-PERF-P2-6) so both code paths are bounded by the same number.
+const toolJSONMaxRunes = 16000
+
+// truncateToolJSON converts a raw JSON byte slice into a string, capped at
+// toolJSONMaxRunes runes with a "..." marker appended when truncated.
+// Defers the string() conversion to TruncateRunesBytes so the heap copy is
+// elided whenever truncation is the common case (which it is — most tool
+// payloads are small but a stray Bash output can be MB-scale). nil / empty
+// input returns "" so callers can treat the field as optional.
+func truncateToolJSON(b []byte) string {
+	if len(b) == 0 {
+		return ""
+	}
+	return textutil.TruncateRunesBytes(b, toolJSONMaxRunes)
+}
 
 // ErrACPRPC wraps any agent-side JSON-RPC error ("error" field populated).
 // Typed so dispatch / upstream layers can errors.Is-classify ACP failures
@@ -462,16 +485,42 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 		return Event{Type: "assistant", SessionID: update.SessionID}, false, nil
 
 	case "tool_call":
+		// Initial invocation. Status defaults to "" (interpreted as
+		// "pending" by the dashboard); subsequent tool_call_update
+		// events thread by ID and may set "completed" / "failed".
+		// Multi-Backend RFC §8.3 D17 / V7 sample.
 		return Event{
-			Type:    "assistant",
-			SubType: "tool_use",
+			Type:      "assistant",
+			SubType:   "tool_use",
+			SessionID: update.SessionID,
+			ToolUseID: update.Update.ToolCallID,
+			ToolCall: &ToolCall{
+				ID:        update.Update.ToolCallID,
+				Title:     update.Update.Title,
+				Kind:      update.Update.Kind,
+				Status:    update.Update.Status,
+				InputJSON: truncateToolJSON(update.Update.RawInput),
+			},
 			Message: &AssistantMessage{
 				Content: []ContentBlock{{Type: "tool_use", Name: update.Update.Title}},
 			},
 		}, false, nil
 
 	case "tool_call_update":
-		return Event{Type: "assistant", SubType: "tool_result"}, false, nil
+		return Event{
+			Type:      "assistant",
+			SubType:   "tool_result",
+			SessionID: update.SessionID,
+			ToolUseID: update.Update.ToolCallID,
+			ToolCall: &ToolCall{
+				ID:         update.Update.ToolCallID,
+				Title:      update.Update.Title,
+				Kind:       update.Update.Kind,
+				Status:     update.Update.Status,
+				InputJSON:  truncateToolJSON(update.Update.RawInput),
+				OutputJSON: truncateToolJSON(update.Update.RawOutput),
+			},
+		}, false, nil
 
 	default:
 		return Event{Type: "system", SubType: update.Update.SessionUpdate}, false, nil
