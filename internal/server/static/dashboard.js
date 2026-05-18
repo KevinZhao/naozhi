@@ -1197,10 +1197,18 @@ function applyFeatureGates() {
       filePickBtn.classList.add('feat-disabled');
       filePickBtn.title = '当前后端 (' + backendName + ') 不支持图片上传';
       filePickBtn.setAttribute('aria-disabled', 'true');
+      // Review #118 HIGH-1: rely on the native disabled property as the
+      // hard gate, not just CSS — `cursor:not-allowed` is cosmetic and
+      // a keyboard activation (Enter/Space on focus) would still fire
+      // onclick. Browsers skip click events on disabled buttons entirely,
+      // and `applyFeatureGates` is the single re-entry point so the
+      // pair stays in sync.
+      filePickBtn.disabled = true;
     } else {
       filePickBtn.classList.remove('feat-disabled');
       filePickBtn.title = '上传图片或 PDF';
       filePickBtn.removeAttribute('aria-disabled');
+      filePickBtn.disabled = false;
     }
   }
 
@@ -1210,20 +1218,33 @@ function applyFeatureGates() {
   const audioOK = featureForBackend(backendID, 'audio_input');
   const micBtn = document.getElementById('btn-mic');
   const holdBtn = document.getElementById('btn-hold-talk');
-  const audioHint = audioOK
-    ? null
-    : '当前后端 (' + backendName + ') 不直接接收音频，naozhi 会先转写为文字再发送';
-  [micBtn, holdBtn].forEach(btn => {
-    if (!btn) return;
-    if (audioHint) {
-      btn.classList.add('feat-degraded');
-      btn.title = audioHint;
-    } else {
-      btn.classList.remove('feat-degraded');
-      // Restore default title (set inline in HTML); only override if we
-      // previously stomped it.
+  // Review #118 HIGH-2: when audio is supported again (e.g. user switches
+  // from kiro back to claude in the same browser session), we MUST reset
+  // titles to their template defaults — otherwise the kiro-era hint
+  // ("会先转写为文字") sticks forever. Default titles mirror
+  // renderMainShell template (line ~2152 / ~2154).
+  const micDefaultTitle = voiceInputMode ? '切换键盘' : '切换语音';
+  const holdDefaultTitle = '按住说话改录音';
+  if (!audioOK) {
+    const audioHint = '当前后端 (' + backendName + ') 不直接接收音频，naozhi 会先转写为文字再发送';
+    if (micBtn) {
+      micBtn.classList.add('feat-degraded');
+      micBtn.title = audioHint;
     }
-  });
+    if (holdBtn) {
+      holdBtn.classList.add('feat-degraded');
+      holdBtn.title = audioHint;
+    }
+  } else {
+    if (micBtn) {
+      micBtn.classList.remove('feat-degraded');
+      micBtn.title = micDefaultTitle;
+    }
+    if (holdBtn) {
+      holdBtn.classList.remove('feat-degraded');
+      holdBtn.title = holdDefaultTitle;
+    }
+  }
 }
 
 // formatCostByUnit returns the cost cell text for the dashboard header.
