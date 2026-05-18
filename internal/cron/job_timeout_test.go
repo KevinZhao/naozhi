@@ -14,10 +14,10 @@ func TestComputeJobTimeout(t *testing.T) {
 		want     time.Duration
 	}{
 		{
-			name:     "hourly job under 1h cap scales to 48m",
+			name:     "hourly job under 1h cap scales to 59m",
 			schedule: "@every 1h",
 			cap:      time.Hour,
-			want:     time.Duration(float64(time.Hour) * jobTimeoutRatio),
+			want:     time.Hour - jobTimeoutMargin,
 		},
 		{
 			name:     "6h schedule with 1h cap clamps to cap",
@@ -26,22 +26,22 @@ func TestComputeJobTimeout(t *testing.T) {
 			want:     time.Hour,
 		},
 		{
-			name:     "6h schedule with 8h cap scales to 4h48m",
+			name:     "6h schedule with 8h cap scales to 5h59m",
 			schedule: "@every 6h",
 			cap:      8 * time.Hour,
-			want:     time.Duration(float64(6*time.Hour) * jobTimeoutRatio),
+			want:     6*time.Hour - jobTimeoutMargin,
 		},
 		{
-			name:     "10m schedule scales to 8m",
+			name:     "10m schedule scales to 9m",
 			schedule: "@every 10m",
 			cap:      time.Hour,
-			want:     time.Duration(float64(10*time.Minute) * jobTimeoutRatio),
+			want:     10*time.Minute - jobTimeoutMargin,
 		},
 		{
 			name:     "5m schedule scales to 4m (above floor)",
 			schedule: "@every 5m",
 			cap:      time.Hour,
-			want:     time.Duration(float64(5*time.Minute) * jobTimeoutRatio),
+			want:     5*time.Minute - jobTimeoutMargin,
 		},
 		{
 			// minCronInterval blocks this at registration, but computeJobTimeout
@@ -59,10 +59,10 @@ func TestComputeJobTimeout(t *testing.T) {
 			want:     time.Hour,
 		},
 		{
-			name:     "daily cron expression scales to 19h12m under 24h cap",
+			name:     "daily cron expression scales to 23h59m under 24h cap",
 			schedule: "0 9 * * *",
 			cap:      24 * time.Hour,
-			want:     time.Duration(float64(24*time.Hour) * jobTimeoutRatio),
+			want:     24*time.Hour - jobTimeoutMargin,
 		},
 		{
 			// Defensive contract: caller-supplied cap below the 3m floor

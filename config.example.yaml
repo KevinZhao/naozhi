@@ -127,9 +127,9 @@ agent_commands:
 cron:
   store_path: "~/.naozhi/cron_jobs.json"
   max_jobs: 50
-  # Per-job timeout is schedule_period × 0.8, clamped to [3m, execution_timeout].
-  # Set this to the longest period you schedule × 0.8 (or slightly more) so long
-  # schedules get their full proportional budget; short schedules auto-scale down.
+  # Per-job timeout is schedule_period − 60s margin, clamped to [3m, execution_timeout].
+  # Set this to the longest period you schedule (or slightly more) so long
+  # schedules get their full budget; short schedules auto-scale down.
   execution_timeout: "8h"
   # IANA timezone for interpreting cron expressions (e.g. "0 9 * * *" = 9am in this zone).
   # Empty / "Local" uses the system local time (respects $TZ). Examples: "Asia/Shanghai", "UTC".
