@@ -82,6 +82,13 @@ func (p *TestProcess) InjectHistory(entries []cli.EventEntry) {
 }
 func (p *TestProcess) TurnAgents() []cli.SubagentInfo { return p.EventLog.TurnAgents() }
 
+// Normalize-layer stubs (docs/rfc/multi-backend.md §8.8). Tests don't drive
+// metadata through TestProcess; zero values match the pre-multi-backend
+// SessionSnapshot output so existing assertions continue to pass.
+func (p *TestProcess) ContextUsagePercent() float64       { return 0 }
+func (p *TestProcess) TurnDurationMs() int64              { return 0 }
+func (p *TestProcess) MeteringUsage() []cli.MeteringEntry { return nil }
+
 // InjectSession inserts a session with the given TestProcess into the router.
 // For use in tests that need sessions without spawning real CLI processes.
 func (r *Router) InjectSession(key string, proc *TestProcess) *ManagedSession {
