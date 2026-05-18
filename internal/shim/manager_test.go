@@ -520,8 +520,10 @@ func TestFilterShimEnv_AllowsExpectedPrefixes(t *testing.T) {
 		{"ANTHROPIC_MODEL=claude-opus", true},
 		{"ANTHROPIC_BASE_URL=https://api.example.com", true},
 		{"ANTHROPIC_BEDROCK_BASE_URL=https://bedrock.example.com", true},
-		{"CLAUDE_MODEL=claude-opus", true},
 		{"CLAUDE_CODE_USE_BEDROCK=1", true},
+		{"CLAUDE_CODE_SKIP_BEDROCK_AUTH=1", true},
+		{"CLAUDE_BIN=/usr/bin/claude", true},
+		{"CLAUDE_MODEL=claude-opus", true},
 		{"AWS_REGION=us-east-1", true},
 		{"AWS_DEFAULT_REGION=us-east-1", true},
 		{"AWS_ACCESS_KEY_ID=AKIA...", true},
@@ -577,6 +579,16 @@ func TestFilterShimEnv_AllowsExpectedPrefixes(t *testing.T) {
 		// variable into the CLI; collapse to the documented Bedrock surface.
 		{"AWS_MFA_TOKEN=arbitrary", false},
 		{"AWS_VAULT=session-name", false},
+
+		// Blocked — ANTHROPIC_* / CLAUDE_* outside the explicit allow list.
+		// R214-SEC-3 / R219-SEC-3: wildcard "ANTHROPIC_" / "CLAUDE_" used to
+		// forward any prefix-matching variable into the CLI; collapse to the
+		// documented surface so future Anthropic-issued variables don't
+		// silently leak into the Bash tool's reach.
+		{"ANTHROPIC_LOG=debug", false},
+		{"ANTHROPIC_TELEMETRY_TOKEN=tok", false},
+		{"CLAUDE_CONFIG_DIR=/tmp/c", false},
+		{"CLAUDE_TELEMETRY=1", false},
 	}
 
 	for _, tc := range tests {
