@@ -143,6 +143,24 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
    between turns. */
 .main-header .detail-turn-timer{color:var(--nz-text-mute);font-variant-numeric:tabular-nums;font-size:11px}
 
+/* RFC §8.3 D17 — ACP rich tool_call progress row. Folded summary + body
+   pattern mirrors .tr-wrap so users see one consistent affordance for
+   all tool output. Status pill colors follow the traffic-light convention
+   the dashboard already uses elsewhere (--nz-amber / --nz-text-mute). */
+.tc-wrap{display:block;border:1px solid var(--nz-border);border-radius:6px;padding:0;background:var(--nz-bg-1);overflow:hidden}
+.tc-summary{display:flex;align-items:center;gap:8px;padding:6px 10px;cursor:pointer;font-size:13px;color:var(--nz-text);user-select:none}
+.tc-summary::-webkit-details-marker{display:none}
+.tc-summary:hover{background:var(--nz-bg-2)}
+.tc-icon{font-size:14px;opacity:.85}
+.tc-title{font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tc-kind{font-size:10px;padding:1px 6px;border-radius:3px;background:var(--nz-bg-2);color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
+.tc-status{font-size:10px;padding:1px 6px;border-radius:3px;font-weight:600;letter-spacing:.2px;flex-shrink:0}
+.tc-status-pending{background:var(--nz-bg-2);color:var(--nz-text-mute)}
+.tc-status-in_progress{background:rgba(56,139,253,.18);color:#79c0ff}
+.tc-status-completed{background:rgba(46,160,67,.18);color:#7ee787}
+.tc-status-failed{background:rgba(248,81,73,.20);color:#ff7b72}
+.tc-body{margin:0;padding:10px;background:var(--nz-bg-0);border-top:1px solid var(--nz-border);font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.5;color:var(--nz-text);white-space:pre-wrap;word-break:break-word;max-height:400px;overflow:auto}
+
 .events{flex:1;overflow-y:auto;overflow-x:hidden;padding:16px 0;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent;min-width:0}
 /* Message navigation pill */
 .nav-pill{position:absolute;right:16px;bottom:100px;display:flex;flex-direction:column;align-items:center;gap:0;background:rgba(22,27,34,.9);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid var(--nz-border);border-radius:20px;padding:4px;z-index:10;opacity:0;pointer-events:none;transition:opacity .2s;user-select:none}

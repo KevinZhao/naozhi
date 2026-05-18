@@ -63,6 +63,13 @@ type Event struct {
 	// See docs/rfc/askuser-question.md and test/e2e/askuser/.
 	AskQuestion *AskQuestion `json:"ask_question,omitempty"`
 
+	// ToolCall is populated for ACP tool_call / tool_call_update events.
+	// Dashboard renders a progress row (pending → in_progress → completed
+	// / failed) with collapsible rawOutput. Multi-Backend RFC §8.3 D17.
+	// stream-json (Claude) leaves this nil — Claude tool-use events flow
+	// through Message.Content[].Type=="tool_use" instead.
+	ToolCall *ToolCall `json:"tool_call,omitempty"`
+
 	// recvAt is the wall-clock moment readLoop pushed the event to eventCh.
 	// Used by drainStaleEvents to distinguish events belonging to a previous
 	// (possibly interrupted) turn from events produced for the current turn
@@ -98,6 +105,28 @@ type MeteringEntry struct {
 	Value      float64 `json:"value"`
 	Unit       string  `json:"unit"`
 	UnitPlural string  `json:"unit_plural,omitempty"`
+}
+
+// ToolCall is the per-event payload for ACP tool_call / tool_call_update
+// session/update notifications. Multi-Backend RFC §8.3 D17.
+//
+// Same struct serves both the initial "tool invocation" event (Status==""
+// or "pending") and subsequent updates ("in_progress" / "completed" /
+// "failed"). The dashboard threads them by ID — successive events with the
+// same ID overwrite the prior progress row rather than appending.
+//
+// Output is the raw JSON payload kiro emits (kiro shape:
+// `{"items":[{"Json":{"exit_status":"...", "stdout":"..."}}]}`); the
+// dashboard decides how to extract a stdout string vs render JSON. Keeping
+// it here as a string preserves the original formatting for "view raw".
+type ToolCall struct {
+	ID         string `json:"id"`
+	Name       string `json:"name,omitempty"`
+	Title      string `json:"title,omitempty"`
+	Kind       string `json:"kind,omitempty"`        // "execute" / "read" / "write" / "search" / vendor-specific
+	Status     string `json:"status,omitempty"`      // "" (initial) / "in_progress" / "completed" / "failed"
+	InputJSON  string `json:"input_json,omitempty"`  // raw JSON of rawInput
+	OutputJSON string `json:"output_json,omitempty"` // raw JSON of rawOutput
 }
 
 // AskQuestion mirrors the shape of AskUserQuestion.input observed against

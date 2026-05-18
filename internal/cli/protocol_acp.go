@@ -462,16 +462,42 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 		return Event{Type: "assistant", SessionID: update.SessionID}, false, nil
 
 	case "tool_call":
+		// Initial invocation. Status defaults to "" (interpreted as
+		// "pending" by the dashboard); subsequent tool_call_update
+		// events thread by ID and may set "completed" / "failed".
+		// Multi-Backend RFC §8.3 D17 / V7 sample.
 		return Event{
-			Type:    "assistant",
-			SubType: "tool_use",
+			Type:      "assistant",
+			SubType:   "tool_use",
+			SessionID: update.SessionID,
+			ToolUseID: update.Update.ToolCallID,
+			ToolCall: &ToolCall{
+				ID:        update.Update.ToolCallID,
+				Title:     update.Update.Title,
+				Kind:      update.Update.Kind,
+				Status:    update.Update.Status,
+				InputJSON: string(update.Update.RawInput),
+			},
 			Message: &AssistantMessage{
 				Content: []ContentBlock{{Type: "tool_use", Name: update.Update.Title}},
 			},
 		}, false, nil
 
 	case "tool_call_update":
-		return Event{Type: "assistant", SubType: "tool_result"}, false, nil
+		return Event{
+			Type:      "assistant",
+			SubType:   "tool_result",
+			SessionID: update.SessionID,
+			ToolUseID: update.Update.ToolCallID,
+			ToolCall: &ToolCall{
+				ID:         update.Update.ToolCallID,
+				Title:      update.Update.Title,
+				Kind:       update.Update.Kind,
+				Status:     update.Update.Status,
+				InputJSON:  string(update.Update.RawInput),
+				OutputJSON: string(update.Update.RawOutput),
+			},
+		}, false, nil
 
 	default:
 		return Event{Type: "system", SubType: update.Update.SessionUpdate}, false, nil

@@ -2422,7 +2422,16 @@ function appendEvents(events) {
 // NOTE: 'todo' is intentionally NOT in this set — TodoWrite updates are
 // rendered as their own chat bubbles via renderTodoList below.
 const INTERNAL_EVENT_TYPES = new Set(['tool_use','result','agent','task_start','task_progress','task_done']);
-function isInternalEvent(e) { return e && INTERNAL_EVENT_TYPES.has(e.type); }
+// Multi-Backend RFC §8.3 D17: ACP tool_call rich-progress events (carrying
+// e.tool_call payload) bypass the legacy "internal" filter so the kiro
+// progress row appears inline in the main transcript. stream-json
+// (Claude) tool_use entries lack the tool_call field and continue to be
+// filtered into the subagent transcript.
+function isInternalEvent(e) {
+  if (!e || !INTERNAL_EVENT_TYPES.has(e.type)) return false;
+  if (e.type === 'tool_use' && e.tool_call) return false;
+  return true;
+}
 
 // renderTodoList parses the JSON todos payload stored on EventEntry.detail and
 // emits a checklist block. Falls back to the summary line when detail is
@@ -2730,6 +2739,54 @@ function eventHtml(e, opts) {
     content = renderMd(cleanRaw || e.type);
   } else if (e.type === 'todo') {
     content = renderTodoList(e.detail, e.summary);
+  } else if (e.type === 'tool_use' && e.tool_call) {
+    // Multi-Backend RFC §8.3 D17: ACP rich tool progress row.
+    //   ▶ <title>          [kind · status]     ← summary line
+    //     stdout / stderr / raw                ← collapsed body
+    //
+    // Status pill colors (matches RFC §8.4 traffic-light convention):
+    //   ""           — neutral grey (initial invocation, awaiting result)
+    //   in_progress  — blue
+    //   completed    — green
+    //   failed       — red
+    //
+    // Output extraction is best-effort: kiro emits
+    // {"items":[{"Json":{"exit_status":"...","stdout":"..."}}]} but other
+    // backends may use a different shape. We try the kiro path first,
+    // then fall back to pretty-printed JSON.
+    const tc = e.tool_call;
+    const status = tc.status || '';
+    const kind = tc.kind || '';
+    const title = tc.title || tc.name || tc.id || '(tool)';
+    const statusClass = 'tc-status tc-status-' + (status || 'pending');
+    const statusLabel = status || 'pending';
+    let bodyText = '';
+    if (tc.output_json) {
+      try {
+        const parsed = JSON.parse(tc.output_json);
+        if (parsed && Array.isArray(parsed.items) && parsed.items.length > 0 &&
+            parsed.items[0] && parsed.items[0].Json && typeof parsed.items[0].Json.stdout === 'string') {
+          bodyText = parsed.items[0].Json.stdout;
+        } else {
+          bodyText = JSON.stringify(parsed, null, 2);
+        }
+      } catch { bodyText = tc.output_json; }
+    } else if (tc.input_json) {
+      try {
+        bodyText = JSON.stringify(JSON.parse(tc.input_json), null, 2);
+      } catch { bodyText = tc.input_json; }
+    }
+    const bodyHtml = bodyText
+      ? '<pre class="tc-body">' + esc(bodyText.length > 8000 ? bodyText.slice(0, 8000) + '\n…' : bodyText) + '</pre>'
+      : '';
+    const kindBadge = kind ? '<span class="tc-kind">' + esc(kind) + '</span>' : '';
+    content = '<details class="tc-wrap"' + (status === 'failed' ? ' open' : '') + '>' +
+      '<summary class="tc-summary">' +
+      '<span class="tc-icon" aria-hidden="true">🛠</span>' +
+      '<span class="tc-title">' + esc(title) + '</span>' +
+      kindBadge +
+      '<span class="' + statusClass + '">' + esc(statusLabel) + '</span>' +
+      '</summary>' + bodyHtml + '</details>';
   } else if (e.type === 'tool_result') {
     // RFC v4 agent-team-ui §3.6.7 — fold long outputs by default. The
     // summary is the first line (< 120 chars) and the full detail is

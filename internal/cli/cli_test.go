@@ -484,6 +484,66 @@ func TestACPProtocol_ReadEvent_ToolCall(t *testing.T) {
 	}
 }
 
+// TestACPProtocol_ReadEvent_ToolCall_RichPayload verifies that the
+// kind / status / rawInput passthrough survives ReadEvent.
+// Multi-Backend RFC §8.3 D17.
+func TestACPProtocol_ReadEvent_ToolCall_RichPayload(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{` +
+		`"sessionUpdate":"tool_call","toolCallId":"tooluse_X","title":"Running: cat /etc/hostname",` +
+		`"kind":"execute","rawInput":{"command":"cat /etc/hostname"}}}}`
+	ev, _, err := p.ReadEvent(line)
+	if err != nil {
+		t.Fatalf("ReadEvent: %v", err)
+	}
+	if ev.ToolCall == nil {
+		t.Fatal("ToolCall should be populated")
+	}
+	if ev.ToolCall.ID != "tooluse_X" {
+		t.Errorf("ID = %q, want tooluse_X", ev.ToolCall.ID)
+	}
+	if ev.ToolCall.Kind != "execute" {
+		t.Errorf("Kind = %q, want execute", ev.ToolCall.Kind)
+	}
+	if !strings.Contains(ev.ToolCall.InputJSON, "cat /etc/hostname") {
+		t.Errorf("InputJSON = %q; want to contain cat /etc/hostname", ev.ToolCall.InputJSON)
+	}
+	if ev.ToolUseID != "tooluse_X" {
+		t.Errorf("ToolUseID = %q, want tooluse_X", ev.ToolUseID)
+	}
+}
+
+// TestACPProtocol_ReadEvent_ToolCallUpdate_Completed verifies the update
+// path carries Status + RawOutput so the dashboard's progress row can
+// thread by ID and replace the "pending" pill.
+func TestACPProtocol_ReadEvent_ToolCallUpdate_Completed(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{` +
+		`"sessionUpdate":"tool_call_update","toolCallId":"tooluse_X","kind":"execute","status":"completed",` +
+		`"title":"Running: cat /etc/hostname","rawOutput":{"items":[{"Json":{"exit_status":"exit status: 0","stdout":"ip-10-0-141-156\n"}}]}}}}`
+	ev, done, err := p.ReadEvent(line)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if done {
+		t.Error("tool_call_update should not be done")
+	}
+	if ev.SubType != "tool_result" {
+		t.Errorf("SubType = %q, want tool_result", ev.SubType)
+	}
+	if ev.ToolCall == nil {
+		t.Fatal("ToolCall should be populated")
+	}
+	if ev.ToolCall.Status != "completed" {
+		t.Errorf("Status = %q, want completed", ev.ToolCall.Status)
+	}
+	if !strings.Contains(ev.ToolCall.OutputJSON, "ip-10-0-141-156") {
+		t.Errorf("OutputJSON should contain stdout, got %q", ev.ToolCall.OutputJSON)
+	}
+}
+
 func TestACPProtocol_ReadEvent_Response_TurnComplete(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{sessionID: "sess_1"}

@@ -151,6 +151,13 @@ type EventEntry struct {
 	// so Go callers (EventLog replay → WS broadcast) don't pay a JSON
 	// unmarshal per question bubble.
 	AskQuestion *AskQuestion `json:"ask_question,omitempty"`
+
+	// ToolCall is the per-event payload for ACP tool_call / tool_call_update
+	// rich progress rows. Multi-Backend RFC §8.3 D17. Same struct on initial
+	// invocation and updates; dashboard threads them by ID. Stream-json
+	// (Claude) leaves nil and uses Type=="tool_use" with Tool name + Detail
+	// for input.
+	ToolCall *ToolCall `json:"tool_call,omitempty"`
 }
 
 // SubagentInfo holds display information about an active sub-agent in the current turn.
