@@ -36,6 +36,18 @@ type Wrapper struct {
 	CLIVersion  string // semver from --version, e.g. "2.1.92"
 	Protocol    Protocol
 	ShimManager *shim.Manager
+
+	// historyFactory produces backend-specific history.Source instances
+	// for sessions whose Backend() matches this wrapper's BackendID.
+	// Bound at NewWrapper time via the package-level registry so adding
+	// a new backend's history reader is a single new init() call in the
+	// backend package — not a session-package edit.
+	//
+	// nil is fine: NewHistorySource degrades to NoopHistorySource so
+	// pre-registration spawns and unknown backends both behave
+	// uniformly (the dashboard sees an empty disk tier rather than a
+	// nil panic).
+	historyFactory HistoryFactoryFn
 }
 
 // NewWrapper creates a Wrapper with the given CLI path and protocol.
@@ -52,6 +64,10 @@ func NewWrapper(cliPath string, proto Protocol, backend string) *Wrapper {
 		Protocol:  proto,
 	}
 	w.CLIVersion = detectVersion(cliPath)
+	// Bind the history-source factory for this backend, if one has been
+	// registered (history backend packages register from their init()).
+	// nil is OK: NewHistorySource handles missing registrations.
+	w.historyFactory = pickHistoryFactory(w.BackendID)
 	return w
 }
 

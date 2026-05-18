@@ -453,10 +453,9 @@ func main() {
 	settingsFile := writeClaudeSettingsOverride(cfg.Server.Addr)
 
 	// Register the cli/backend.Profile registry with the built-in profiles
-	// (claude + kiro) before any code looks up display name / reply tag /
-	// detect predicate by ID. Explicit, not init()-driven, so missing imports
-	// fail loudly rather than silently fall back to "unknown backend".
-	// docs/rfc/multi-backend.md §3.
+	// (claude + kiro) before any consumer (discovery, main, server) looks
+	// up DisplayName / DefaultTag / DetectInProc by id. Explicit, not init()-
+	// driven, so missing imports fail loudly. docs/rfc/multi-backend.md §3.
 	backend.RegisterDefaults()
 
 	backendsCfg := cfg.EnabledBackends()
@@ -483,25 +482,30 @@ func main() {
 	var defaultWrapper *cli.Wrapper
 	for _, b := range backendsCfg {
 		var proto cli.Protocol
-		switch b.ID {
-		case "kiro":
-			proto = &cli.ACPProtocol{}
-		case "", "claude":
-			// RefreshSettings closes over cfg.Server.Addr so every spawn
-			// regenerates ~/.naozhi/claude-settings.json from the live
-			// ~/.claude/settings.json. Without this, edits made after naozhi
-			// start (adding ANTHROPIC_BEDROCK_BASE_URL, swapping models, etc.)
-			// are invisible to dashboard / cron / IM-spawned sessions until
-			// systemctl restart.
-			serverAddr := cfg.Server.Addr
-			proto = &cli.ClaudeProtocol{
-				SettingsFile:    settingsFile,
-				RefreshSettings: func() string { return writeClaudeSettingsOverride(serverAddr) },
+		// RefreshSettings closes over cfg.Server.Addr so every spawn
+		// regenerates ~/.naozhi/claude-settings.json from the live
+		// ~/.claude/settings.json. Without this, edits made after naozhi
+		// start (adding ANTHROPIC_BEDROCK_BASE_URL, swapping models, etc.)
+		// are invisible to dashboard / cron / IM-spawned sessions until
+		// systemctl restart. claude profile copies these into its own
+		// ProtocolDeps; kiro profile ignores them.
+		serverAddr := cfg.Server.Addr
+		profile, ok := backend.Get(b.ID)
+		if !ok {
+			// Empty ID is a legacy single-backend config; treat it as claude
+			// to preserve the historical default.
+			if b.ID == "" {
+				profile, ok = backend.Get("claude")
 			}
-		default:
-			slog.Warn("skipping unknown cli.backends entry", "id", b.ID)
-			continue
+			if !ok {
+				slog.Warn("skipping unknown cli.backends entry", "id", b.ID)
+				continue
+			}
 		}
+		proto = profile.NewProtocol(backend.ProtocolDeps{
+			SettingsFile:    settingsFile,
+			RefreshSettings: func() string { return writeClaudeSettingsOverride(serverAddr) },
+		})
 		w := cli.NewWrapper(b.Path, proto, b.ID)
 		w.ShimManager = shimMgr
 		wrappers[w.BackendID] = w

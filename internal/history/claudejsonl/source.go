@@ -11,7 +11,7 @@
 // session can mutate its chain (new /new, resume, workspace change) while
 // a pagination request is in flight, and we want the next page to see
 // the latest chain. The callback is expected to return a consistent
-// oldest → newest slice; ManagedSession.snapshotChainIDs is responsible
+// oldest → newest slice; ManagedSession.SnapshotChainIDs is responsible
 // for the locking.
 package claudejsonl
 
@@ -40,6 +40,31 @@ type Source struct {
 // so misconfiguration never produces a nil-pointer panic at call time.
 func New(claudeDir, cwd string, chainIDs ChainIDsFunc) *Source {
 	return &Source{claudeDir: claudeDir, cwd: cwd, chainIDs: chainIDs}
+}
+
+// init registers this backend's factory with cli.Wrapper so any
+// *cli.Wrapper constructed with BackendID="claude" picks up the
+// claude-jsonl history source automatically. The registration is
+// keyed only on the canonical backend ID — the empty-string alias
+// is handled by cli.normalizeBackendID before the lookup.
+//
+// Importing this package anywhere (session.NewRouter does so today;
+// future cmd-level wireup will likely consolidate) triggers the
+// registration via Go's init order. Sprint 1a: keep the binding
+// here so session can drop its direct dispatch in attachHistorySource
+// without simultaneously moving the import.
+func init() {
+	cli.RegisterHistoryFactory("claude", factory)
+}
+
+// factory is the cli.HistoryFactoryFn for claude-code. Returns
+// cli.NoopHistorySource when the wiring lacks a ClaudeDir so misconfig
+// at the router level still yields a non-nil source.
+func factory(s cli.HistorySessionView, deps cli.HistoryWiring) cli.HistorySource {
+	if deps.ClaudeDir == "" {
+		return cli.NoopHistorySource{}
+	}
+	return New(deps.ClaudeDir, s.Workspace(), s.SnapshotChainIDs)
 }
 
 // LoadBefore returns up to `limit` entries strictly older than beforeMS,
