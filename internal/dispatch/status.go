@@ -131,7 +131,13 @@ func shortenPath(p string) string {
 	return dir + "/" + base
 }
 
-// firstLine returns the first non-empty line of s.
+// firstLine returns the first non-empty line of s after TrimSpace.
+//
+// Semantic note (R222-CR-7): unlike cli/subagent_transcript.go::firstLineTrunc
+// which returns the literal first line (possibly empty), this variant skips
+// leading blank lines and falls through to the second line when the first is
+// whitespace-only. Used for status banners where an empty title would render
+// as a blank chip.
 func firstLine(s string) string {
 	s = strings.TrimSpace(s)
 	if i := strings.IndexByte(s, '\n'); i >= 0 {

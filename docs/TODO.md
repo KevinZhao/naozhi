@@ -82,7 +82,7 @@
 
 - [ ] **R219-SEC-1 — `BuildArgs` `opts.ExtraArgs` 无 flag 允许列表（P1）**: `protocol_claude.go:77` `args = append(args, opts.ExtraArgs...)`，dashboard-authenticated 用户可注入 `--mcp-config`、`--add-dir`、`--skip-permissions` 等改变 CLI 行为的 flag。区别于 R217-SEC-1（`--append-system-prompt`），本条强调 `--mcp-config` 类可加载攻击者控制 MCP 服务器定义的 flag。方案：在 BuildArgs 加 flag 允许列表，拒绝列表外以 `--` 开头的 element。Breaking：是（依赖任意 extra args 的运维方需要迁移）。
 - [ ] **R219-SEC-2 — `serveRender` 在 Lstat 后第三次 os.Open 制造 inode-swap TOCTOU（P1）**: `handleFileGet` 已有 R218B-SEC-2 Lstat-after-resolve 防御，但 `mode == "render"` 走 `serveRender` 时再次 `os.Open(resolved)`，inode swap 攻击仍可绕过。方案：`serveRender` 使用 Lstat 时已 Open 的 fd 或加 `Sys().(*syscall.Stat_t).Ino` 验证。涉及：`internal/server/project_files.go:667`。
-- [x] **R219-SEC-3 — `shimEnvAllowedPrefixes` 把 `ANTHROPIC_API_KEY` 泄漏到 Bedrock 部署的 shim 子进程（P2）**: `manager.go:900` 含通配前缀 `"ANTHROPIC_"`，Bedrock 部署不需要 `ANTHROPIC_API_KEY` 但仍然进 shim env，Bash tool 调用可 `env | grep ANTHROPIC` 拿到。方案：替换为显式条目 `"ANTHROPIC_AUTH_TOKEN="`、`"ANTHROPIC_MODEL="`，或 Bedrock 模式下排除 `ANTHROPIC_API_KEY`。涉及：`internal/shim/manager.go:900`。 — 已修复（拆 5 项显式 allowlist：API_KEY / AUTH_TOKEN / MODEL / BASE_URL / BEDROCK_BASE_URL；2 条反向测试锁拒绝 ANTHROPIC_LOG_LEVEL/INTERNAL_DEBUG），本批 PR #91
+- [x] **R219-SEC-3 — `shimEnvAllowedPrefixes` 把 `ANTHROPIC_API_KEY` 泄漏到 Bedrock 部署的 shim 子进程（P2）**: `manager.go:900` 含通配前缀 `"ANTHROPIC_"`，Bedrock 部署不需要 `ANTHROPIC_API_KEY` 但仍然进 shim env，Bash tool 调用可 `env | grep ANTHROPIC` 拿到。方案：替换为显式条目 `"ANTHROPIC_AUTH_TOKEN="`、`"ANTHROPIC_MODEL="`，或 Bedrock 模式下排除 `ANTHROPIC_API_KEY`。涉及：`internal/shim/manager.go:900`。 — 已修复：PR #91 先拆 5 项显式 allowlist（API_KEY / AUTH_TOKEN / MODEL / BASE_URL / BEDROCK_BASE_URL）+ 2 条反例；PR #93 进一步把 CLAUDE_ 通配前缀也收紧为 4 项显式（CLAUDE_CODE_USE_BEDROCK / SKIP_BEDROCK_AUTH / CLAUDE_BIN / CLAUDE_MODEL），表驱动测试加 4 反例锁拒绝 ANTHROPIC_LOG/TELEMETRY_TOKEN/CLAUDE_CONFIG_DIR/TELEMETRY，同时关闭 R214-SEC-3。
 - [x] **R219-SEC-4 — KaTeX CDN 加载无 SRI integrity hash（P2）**: `dashboard.js loadKatex()` 动态注入 KaTeX `<link>`/`<script>` 但无 `integrity=` SRI；CDN 被攻陷可注入恶意 `renderToString`。主 CDN 已有 SRI（CSP 注释），KaTeX 应一致。方案：在 loadKatex 动态创建的元素加 SRI 哈希。涉及：`internal/server/static/dashboard.js:2161,8651,6403`。 — 已修复（KaTeX/Mermaid 已加 sha384 SRI + crossOrigin='anonymous'，本批新增 TestDashboardJS_CDNScriptsHaveSRI 锁定契约），本批 PR #86
 - [ ] **R219-SEC-5 — `moveToShimsCgroup` 用 `Hello.CLIPID` 经 sudo 把任意 PID 移入 cgroup（P2）**: `manager_linux.go:72` 把 shim 自报的 CLIPID 经 strconv.Itoa 传给 `sudo busctl`，shim 被劫持可上报任意 PID。方案：通过 `/proc/<CLIPID>/status` 验证 PPid 等于 shim 实际 PID。涉及：`internal/shim/manager_linux.go:72`。
 
@@ -152,7 +152,7 @@
 - [x] **R222-GO-4 — `heartbeatLoop` pongTimer 预先 Stop+Reset 在 Go<1.23 toolchain 下可能漏 stale tick 误判 pong miss（P2）**: 注释说 Go 1.23+ 自 drain，但需校验 go.mod 最低版。方案：grep go.mod toolchain 行；若已 ≥1.23 则在注释加锁定标记。涉及：`internal/cli/process_readloop.go:506-508`。 — 已修复（go.mod 1.26.3 已 ≥1.23，注释加 LOCKED 标记 + 显式回退指引），本批 PR #96
 - [ ] **R222-GO-5 — `cron/runstore.go` mtime sort 在 FS 时间精度低时 ordering 不稳，pagination cutoff 可能漏数据（P3）**: 评论已承认 StartedAt 才是真源；FAT32/tmpfs 在并发 cron 完成时同秒丢序。方案：non-cached 全扫路径读 JSON 排 StartedAt；或 mtime 作 secondary key。涉及：`internal/cron/runstore.go:397`。
 - [ ] **R222-GO-6 — `eventlog/persist/persister.go run()` 关闭路径 drain p.in 但不 drain p.opCh，pending DropKey/Flush 调方挂直至 ctx 兜底（P3）**: 方案：closeCh case 在 shutdownAll 前 drain opCh，对每个 done channel 发 ErrPersisterClosed。涉及：`internal/eventlog/persist/persister.go:483-495`。
-- [ ] **R222-GO-7 — `cli/subagent_link.go::readFirstLineMeta` ReadSlice 满 32KB 后将 partial 行丢给 Unmarshal 静默退化为 scan（P3）**: 长 thinking block 当作首行时 fast path 失败但无显式信号，性能默默掉。方案：`bufio.ErrBufferFull` 显式返 errFirstLineTooLong，调用方按 fallback 处理。涉及：`internal/cli/subagent_link.go:666-668`。
+- [x] **R222-GO-7 — `cli/subagent_link.go::readFirstLineMeta` ReadSlice 满 32KB 后将 partial 行丢给 Unmarshal 静默退化为 scan（P3）**: 长 thinking block 当作首行时 fast path 失败但无显式信号，性能默默掉。方案：`bufio.ErrBufferFull` 显式返 errFirstLineTooLong，调用方按 fallback 处理。涉及：`internal/cli/subagent_link.go:666-668`。 — 已修复，本批 PR #95
 - [ ] **R222-GO-8 — `session/router.go GetOrCreate` waiting timer drain 在 ctx.Done 分支可阻塞达 20ms（P3）**: Stop 返回 false 后 `<-waitT.C` 可能等下一 tick。方案：Reset(0) 强制立即 drain，或换 AfterFunc。涉及：`internal/session/router.go:1934-1936`。
 - [ ] **R222-GO-9 — `cli/process_readloop.go readLoop` panic recover 在 close(p.done) 之前调 onTurnDone，cb 看到 p.done 仍 alive 与"进程已死"语义冲突（P3）**: 方案：recover 设 flag 而非直接调 cb，让正常 terminal 路径跑 cb；或 godoc 显式标注 cb 在 partial 状态执行。涉及：`internal/cli/process_readloop.go:66-79`。
 - [ ] **R222-GO-10 — `cron.Scheduler.Stop` triggerWG goroutine 在 deadline hit 时泄漏（P3）**: 测试场景下 stopBudget 短可触发 goroutine-leak detector。方案：用内部信号通道串联，或 gate `go func` 在 !deadlineHit。涉及：`internal/cron/scheduler.go:754-765`。
@@ -170,7 +170,7 @@
 - [ ] **R222-PERF-9 — `newEventLogSink` 每 entry make+copy 出 pooled buffer（P2）**: bridgeEncPool 复用 encoder 但仍强制 copy。方案：批 batch 一次 make 切片分发；或 PersistSink 接受 []byte slice，sender 保证生命周期。涉及：`internal/session/eventlog_bridge.go:98-99`。
 - [ ] **R222-PERF-10 — `ListSessions` 持 RLock 收 refs 再释放，Snapshot 在锁外但每次双 make（P2）**: sync.Pool 复用 []*ManagedSession；或 inline 成单循环填 snapshots。涉及：`internal/session/router.go:3643-3654`。
 - [ ] **R222-PERF-11 — `EntriesSince` 多 tab 同 EventLog 各自调 + 各自 marshal（P2）**: EventLog 引入 last-batch JSON 缓存，notify 时直接复制。涉及：`internal/cli/eventlog.go:898-929`。
-- [ ] **R222-PERF-12 — `persister.handleBatch` Clock() 调两次（P3）**: 在 run() case `<-p.in` 分支单次捕获 now 传 handleBatch，省 vDSO。涉及：`internal/eventlog/persist/persister.go:636,681`。
+- [x] **R222-PERF-12 — `persister.handleBatch` Clock() 调两次（P3）**: 在 run() case `<-p.in` 分支单次捕获 now 传 handleBatch，省 vDSO。涉及：`internal/eventlog/persist/persister.go:636,681`。 — 已修复（run + drainInChannel + shutdown drain 三入口收敛 + handleBatch 签名加 now time.Time 参数），本批 PR #95
 - [x] **R222-PERF-13 — `shimMsg.Code *int` 每 cli_exited heap alloc（P3）**: 改 `Code int + CodePresent bool`。涉及：`internal/cli/process_readloop.go:38-44`。 — 已修复（shimMsgCode struct{Value int; Present bool} + UnmarshalJSON，4 case round-trip 表 + 3 case invalid 锁三档语义），本批 PR #94
 - [x] **R222-PERF-14 — `heartbeatLoop` 30s ping 仍走 encodeShimMsg pool（P3）**: 预计算 `pingBytes = []byte(\"{\\\"type\\\":\\\"ping\\\"}\\n\")`，shimSendRaw 直送。涉及：`internal/cli/process_readloop.go:511-512`。 — 已修复（包级 shimPingBytes + Process.shimSendRaw helper，byte-equal 测试锁定与 encoder 路径输出一致），本批 PR #94
 - [x] **R222-PERF-15 — `BroadcastCronRun*` 每次多次 SanitizeForLog（P3）**: 在 Job struct 上缓存 sanitized 字段；hex runID 跳过 sanitize。涉及：`internal/server/wshub.go:1407-1440`。 — 已修复（新增 sanitizeHexIDForBroadcast helper：cron.IsValidID-shape 直接零分配返回，否则回退 SanitizeForLog；jobID/runID 短路），本批 PR #96
@@ -183,7 +183,7 @@
 - [ ] **R222-CR-4 — `cron.executeOpt` 247 行（P2）**: 抽 recordAndBroadcastRun。涉及：`internal/cron/scheduler.go:1677`。
 - [ ] **R222-CR-5 — 三处 firstLine/firstLineTrunc 跨包独立实现（P2）**: dispatch/status.go:135、cli/subagent_transcript.go:389、cron/job.go:192 各有版本。方案：抽 textutil.FirstLine（dispatch 语义最完整）；cli 版本变成 textutil.FirstLine + textutil.TruncateRunes 的一行 wrapper。涉及：3 文件。
 - [x] **R222-CR-6 — `magic 120` filename cap、`maxLen` 等无名参数散落（P3）**: 提到 file/package 级常量带原由注释。涉及：`internal/server/dashboard_send.go:505`，`internal/server/dashboard_session.go:42`。 — 已修复（dashboard_send.go 内联的 maxFilenameLen=120 提为 file-level 常量 maxClientFilenameRunes 并加原由注释；dashboard_session.go 的 maxResumeLastPromptBytes 既已是命名常量，本轮无需动），本批 PR #96
-- [ ] **R222-CR-7 — `firstLineTrunc` vs `firstLine` 空行处理语义分歧未文档化（P3）**: 给两者加 godoc 标注；或抽 textutil 时锁定唯一语义。
+- [x] **R222-CR-7 — `firstLineTrunc` vs `firstLine` 空行处理语义分歧未文档化（P3）**: 给两者加 godoc 标注；或抽 textutil 时锁定唯一语义。 — 已修复（dispatch/status.go::firstLine 与 cli/subagent_transcript.go::firstLineTrunc 加 godoc 互相交叉引用空行处理差异，R222-CR-5 收敛前防退化），本批 PR #95
 - [x] **R222-CR-8 — `sessionSendLegacy` Deprecated 注释无 tracking anchor（P3）**: 加 `// Removal tracked in docs/TODO.md R-LEGACY-SEND` + 新建 TODO 条目，含明确移除条件。涉及：`internal/server/send.go:561`。 — 已修复（Deprecated 注释加 `Removal tracked in docs/TODO.md R-LEGACY-SEND` 锚点 + 明确两条移除条件；下方新增 R-LEGACY-SEND 跟踪条目），本批 PR #96
 - [ ] **R-LEGACY-SEND — 删除 `Hub.sessionSendLegacy` 与其在 `sessionSend` 中的 fallback 分支（LOW，由 R222-CR-8 派生）**: sessionSendLegacy 是 MessageQueue 接入前的旧 send 路径，现仅供未配 Queue 的测试代码使用。NewHub 已在 Queue==nil 时打 slog.Warn，但仍允许构造。Removal 条件：(1) 所有驱动 Hub 的测试迁到真实 MessageQueue（或与其投递契约一致的 stub）；(2) NewHub 把 Queue==nil 从 Warn 升级为 Fatal（构造期 hard-fail）。两条都满足后，删除 sessionSendLegacy + sessionSend 中调它的 if 分支，把 guard/interrupt 语义收敛到唯一一处。涉及：`internal/server/send.go:561`，调用方在 `internal/server/send.go` sessionSend 内部分支。
 - [x] **R222-CR-9 — `managed.go` TODO 引用 R217-ARCH-2 但 R219-ARCH-3 已 supersede（P3）**: 同步交叉引用。涉及：`internal/session/managed.go:941`。 — 已修复（注释加 R219-ARCH-3 锚点），本批 PR #94
@@ -584,9 +584,10 @@
 
 - [ ] **R214-SEC-2 — dashboard CSP 保留 `'unsafe-inline'`**: 主 dashboard CSP 对 script-src / style-src 都开 unsafe-inline；登录页已用 hash-based CSP。与 RNEW-SEC-003 合并跟踪。
 
-- [ ] **R214-SEC-3 — ANTHROPIC_ 前缀全量透给 shim**: `shim/manager.go::shimEnvAllowedPrefixes` 允许 ANTHROPIC_* 全系列进子进程；Bedrock 部署下 `ANTHROPIC_API_KEY` 冗余却可被 Bash tool 读。
+- [x] **R214-SEC-3 — ANTHROPIC_ 前缀全量透给 shim**: `shim/manager.go::shimEnvAllowedPrefixes` 允许 ANTHROPIC_* 全系列进子进程；Bedrock 部署下 `ANTHROPIC_API_KEY` 冗余却可被 Bash tool 读。
   - 方案：明确排除 `ANTHROPIC_API_KEY=` 或按 backend 按需 allowlist。
   - 涉及：`internal/shim/manager.go:987-995`
+  - 已修复（与 R219-SEC-3 同根因，9 项显式白名单替换 ANTHROPIC_/CLAUDE_ 通配前缀），本批 PR #93
 
 - [ ] **R214-SEC-4 — ETag 8 字节 sha256 前缀可能被时间信道 probe**: `project_files.go:584` ETag 长度有限，理论上可通过 If-None-Match 猜测文件 size|mtime 重合。
   - 方案：加随机 salt 或使用内容哈希。
