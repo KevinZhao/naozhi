@@ -942,6 +942,8 @@ Cron 编辑器加 backend 下拉（与 new-session picker 同款），用 `/api/
 
 ## 11. Config Validate + doctor
 
+> **状态**：Sprint 6d 已实施 — `internal/config/validate.go` + `cmd/naozhi/doctor.go renderBackendsSection` 已上线，主程序在 `RegisterDefaults()` 之后调用 `cfg.Validate()` 并把每条诊断 slog.Warn / slog.Error 出来（不阻断启动，符合本节"warn 级别"决策）。
+
 ### 11.1 Validate
 
 `config.Load` 返回前调 `Validate()`，输出诊断列表（warn 级别，不阻断启动）：
@@ -971,7 +973,7 @@ type ValidationDiag struct {
 }
 ```
 
-启动时打印 diags，error 级别立即退出（避免 systemd Restart=on-failure 死循环 — 通过显式 exit code 0x42 信号 unit 文件设 `RestartPreventExitStatus=66`）。
+启动时打印 diags（实际实现：error → slog.Error，warn → slog.Warn，**均不阻断启动**，决策点 §14 第 3 项已选 "[]ValidationDiag 不阻断" 而非 "error 立即退出"）。
 
 ### 11.2 doctor
 
