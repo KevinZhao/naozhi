@@ -8,6 +8,12 @@ import (
 )
 
 // BackendInfo describes a probed CLI backend available on this host.
+//
+// ReplyTag / ChipColor are the dashboard-facing fields populated from the
+// matching backend.Profile (and optional CLIBackendConfig.ChipColor override)
+// at /api/cli/backends serialization time — see internal/server/dashboard_cli.go.
+// They live here rather than on backend.Profile so the JSON shape that the
+// dashboard.js frontend consumes is one struct, not a join. Multi-backend RFC §8.2.
 type BackendInfo struct {
 	ID          string `json:"id"`           // "claude" | "kiro"
 	DisplayName string `json:"display_name"` // "claude-code" | "kiro"
@@ -15,6 +21,14 @@ type BackendInfo struct {
 	Path        string `json:"path,omitempty"`
 	Version     string `json:"version,omitempty"`
 	Available   bool   `json:"available"`
+	// ReplyTag is the short tag (e.g. "cc", "kiro") appended to IM replies
+	// and rendered in dashboard chips. Empty when no Profile is registered
+	// for the ID (legacy/unknown backend).
+	ReplyTag string `json:"reply_tag,omitempty"`
+	// ChipColor is a CSS color string the dashboard uses for the backend
+	// chip background. Empty falls back to the dashboard's default token
+	// (--nz-accent). Format is whatever CSS accepts — "#7c5cff", "var(...)".
+	ChipColor string `json:"chip_color,omitempty"`
 }
 
 // knownBackends enumerates every backend naozhi can drive, in preferred

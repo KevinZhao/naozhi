@@ -20,6 +20,7 @@ func kiroProfile() Profile {
 		DisplayName:   "kiro",
 		DefaultBinary: "kiro-cli",
 		DefaultTag:    "kiro",
+		ChipColor:     "#ff7a3a", // saturation orange — distinct from claude purple
 		NewProtocol: func(_ ProtocolDeps) cli.Protocol {
 			// Multi-Backend RFC §10 (Sprint 6a): seed BackendID so the
 			// per-backend metric labels recorded by ReadEvent (RPC error)

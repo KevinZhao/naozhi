@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -74,6 +75,13 @@ func (h *CLIBackendsHandler) handle(w http.ResponseWriter, r *http.Request) {
 			// Version==""（二进制存在但 --version 解析失败）不应冒充
 			// Available=true —— dashboard 会以 disabled 样式显示。
 			info.Available = wr.CLIVersion != ""
+		}
+		// Multi-Backend RFC §8.2: dashboard renders chip color + reply tag
+		// from the per-backend Profile registry. Unknown ids leave the
+		// fields empty — dashboard falls back to default tokens.
+		if p, ok := backend.Get(id); ok {
+			info.ReplyTag = p.DefaultTag
+			info.ChipColor = p.ChipColor
 		}
 		backends = append(backends, info)
 	}
