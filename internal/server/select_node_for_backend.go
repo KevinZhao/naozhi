@@ -32,6 +32,30 @@ import (
 	"github.com/naozhi/naozhi/internal/node"
 )
 
+// maxBackendIDLen mirrors send.go:263's per-request cap. Used by both
+// HTTP and WS dispatch entry points so a hostile client can't blow up
+// JSON / slog attrs with a 4 KB backend string.
+const maxBackendIDLen = 32
+
+// isValidBackendID reports whether s passes the per-request charset +
+// length gate shared by HTTP /api/sessions/send and WS handleRemoteSend.
+// Empty is allowed (treated as "router default" by selectNodeForBackend).
+// PR #119 review fix — close the asymmetry where WS path forwarded
+// unvalidated msg.Backend straight into error strings.
+func isValidBackendID(s string) bool {
+	if len(s) > maxBackendIDLen {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.') {
+			return false
+		}
+	}
+	return true
+}
+
 // nodeLookup is the minimal surface selectNodeForBackend needs to find
 // an active reverse-node connection by id. Server's nodeAccess and
 // Hub's hubNodeLookup adapter both satisfy this; defining the

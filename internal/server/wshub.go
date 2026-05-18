@@ -1682,6 +1682,15 @@ func (h *Hub) handleRemoteSend(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 	nodeID := msg.Node
+	// PR #119 review fix: gate msg.Backend with the same charset/length
+	// rule HTTP path enforces (send.go:262-272) so a hostile WS client
+	// can't push a 4 KB / control-char bag into the rejection error
+	// string echoed back via send_ack. Empty backend is allowed and
+	// flows through the router default below.
+	if !isValidBackendID(msg.Backend) {
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Key: msg.Key, Error: "invalid backend id"})
+		return
+	}
 	// Sprint 6b: backend-aware lookup. selectNodeForBackend handles
 	// "node not connected" and "node lacks RequiredNodeCaps for the
 	// picked backend" with structured errors so the WS client gets a
