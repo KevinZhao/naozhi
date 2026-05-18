@@ -5742,7 +5742,7 @@ function buildHomeHealthLines(stats) {
   // Multi-Backend RFC §8.3 D22: when ≥2 backends are configured, show a
   // one-liner summarizing per-backend availability + version. The rich
   // per-feature table lives in the doctor status panel (built by
-  // renderBackendsStatusPanel below) — this line is just the at-a-glance
+  // renderBackendsDoctorPanel below) — this line is just the at-a-glance
   // health roll-up.
   if (cliBackends && Array.isArray(cliBackends.backends) && cliBackends.backends.length > 1) {
     const okCount = cliBackends.backends.filter(b => b && b.available).length;
@@ -5859,7 +5859,12 @@ function renderBackendsDoctorPanel() {
     const status = b.available
       ? '<span class="doctor-status doctor-status-ok">●</span>'
       : '<span class="doctor-status doctor-status-bad" title="binary missing or --version probe failed">○</span>';
-    const features = b.features && typeof b.features === 'object' ? b.features : {};
+    // !Array.isArray gate: typeof [] is 'object', so without this an array-typed
+    // features field would render numeric-keyed pills like "0", "1". Review
+    // (PR #121) catch — server contract says object{flag:bool}, but be defensive.
+    const features = b.features && typeof b.features === 'object' && !Array.isArray(b.features)
+      ? b.features
+      : {};
     // Render features as compact pills — green for supported, struck for missing.
     const featPills = Object.keys(features).sort().map(k => {
       const on = features[k] === true;
@@ -5875,8 +5880,10 @@ function renderBackendsDoctorPanel() {
     '</div>';
   }).join('');
   const defaultID = esc(cliBackends.default || '');
-  return '<details class="doctor-panel">' +
-    '<summary class="doctor-summary">▼ Backends 状态 (default: ' + defaultID + ')</summary>' +
+  // Arrow is supplied by the .doctor-summary::before CSS so it can flip
+  // 90° on [open]. Don't bake it into the text.
+  return '<details class="doctor-panel" aria-label="后端状态详情">' +
+    '<summary class="doctor-summary">Backends 状态 (default: ' + defaultID + ')</summary>' +
     '<div class="doctor-body">' + rows + '</div>' +
   '</details>';
 }
