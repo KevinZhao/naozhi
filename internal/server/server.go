@@ -16,6 +16,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/dispatch"
 	"github.com/naozhi/naozhi/internal/node"
@@ -352,6 +353,37 @@ func loadOrCreateCookieSecret(stateDir string) []byte {
 	return b
 }
 
+// replyTagForBackend resolves a backend ID (e.g. "claude" / "kiro") to the
+// short tag the dispatch layer appends to outbound IM replies ("cc" /
+// "kiro"). Reads from the cli/backend Profile registry; unknown ids return
+// "" so dispatch skips the footer rather than emitting garbled output.
+//
+// Empty backend ID resolves to "cc" so legacy single-backend deployments
+// without the Backend field on stored sessions keep their historical
+// "[cc]" footer. docs/rfc/multi-backend.md §7.
+//
+// Registry-not-ready path: production wires backend.RegisterDefaults() in
+// cmd/naozhi/main.go before any server constructs. Tests that build a
+// Server without that call would see backend.Get return false and lose the
+// tag — replyTagForBackendOnce ensures a one-shot lazy registration so tests
+// remain green without each having to wire the registry by hand.
+func replyTagForBackend(id string) string {
+	replyTagForBackendOnce.Do(func() {
+		if len(backend.All()) == 0 {
+			backend.RegisterDefaults()
+		}
+	})
+	if id == "" {
+		id = "claude"
+	}
+	if p, ok := backend.Get(id); ok {
+		return p.DefaultTag
+	}
+	return ""
+}
+
+var replyTagForBackendOnce sync.Once
+
 // New creates a new Server.
 // ServerOptions holds optional configuration for a Server.
 // All fields have zero-value defaults (empty string, nil, zero duration = disabled/unset).
@@ -449,11 +481,16 @@ func buildServer(opts ServerOptions) *Server {
 	agents := opts.Agents
 	agentCommands := opts.AgentCommands
 	scheduler := opts.Scheduler
-	backend := opts.Backend
-	tag := "cc"
-	if backend == "kiro" {
-		tag = "kiro"
-	}
+	defaultBackend := opts.Backend
+	// defaultTag is the fallback ReplyFooter tag for sessions whose
+	// Backend() is empty (legacy stores predating the multi-backend Backend
+	// field). docs/rfc/multi-backend.md §7.
+	defaultTag := replyTagForBackend(defaultBackend)
+	// tag is retained as the legacy server-global value (backendTag field +
+	// SessionStats.Backend). Per-session ReplyFooterFn (wired below) reads
+	// session.Backend() at IM-reply time so a kiro session in a claude-default
+	// deployment gets [kiro] correctly.
+	tag := defaultTag
 	claudeDir := ""
 	if home, err := os.UserHomeDir(); err == nil {
 		claudeDir = filepath.Join(home, ".claude")
@@ -708,19 +745,29 @@ func (s *Server) Start(ctx context.Context) error {
 	// dispatch / hub / project-api surfaces. docs/rfc/key-resolver.md
 	// Phase 4.
 	d := dispatch.NewDispatcher(dispatch.DispatcherConfig{
-		Router:                s.router,
-		Platforms:             s.platforms,
-		Agents:                s.agents,
-		AgentCommands:         s.agentCommands,
-		Scheduler:             s.scheduler,
-		ProjectMgr:            s.projectMgr,
-		Resolver:              s.resolver,
-		Guard:                 s.sessionGuard,
-		Queue:                 s.msgQueue,
-		Dedup:                 s.dedup,
-		AllowedRoot:           s.allowedRoot,
-		ClaudeDir:             s.claudeDir,
-		ReplyFooter:           s.backendTag,
+		Router:        s.router,
+		Platforms:     s.platforms,
+		Agents:        s.agents,
+		AgentCommands: s.agentCommands,
+		Scheduler:     s.scheduler,
+		ProjectMgr:    s.projectMgr,
+		Resolver:      s.resolver,
+		Guard:         s.sessionGuard,
+		Queue:         s.msgQueue,
+		Dedup:         s.dedup,
+		AllowedRoot:   s.allowedRoot,
+		ClaudeDir:     s.claudeDir,
+		ReplyFooterFn: func(backendID string) string {
+			// session.Backend() is empty for legacy / pre-multi-backend
+			// sessions; fall back to the router's configured default
+			// backend. replyTagForBackend handles unknown ids by
+			// returning "" so dispatch will skip the footer rather than
+			// emit a garbled tag.
+			if backendID == "" {
+				backendID = s.router.DefaultBackend()
+			}
+			return replyTagForBackend(backendID)
+		},
 		SendFn:                s.sendWithBroadcast,
 		TakeoverFn:            s.tryAutoTakeover,
 		NoOutputTimeout:       s.noOutputTimeout,

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
@@ -450,6 +451,13 @@ func main() {
 		slog.Warn("apply ~/.claude/settings.json env failed", "err", err)
 	}
 	settingsFile := writeClaudeSettingsOverride(cfg.Server.Addr)
+
+	// Register the cli/backend.Profile registry with the built-in profiles
+	// (claude + kiro) before any code looks up display name / reply tag /
+	// detect predicate by ID. Explicit, not init()-driven, so missing imports
+	// fail loudly rather than silently fall back to "unknown backend".
+	// docs/rfc/multi-backend.md §3.
+	backend.RegisterDefaults()
 
 	backendsCfg := cfg.EnabledBackends()
 	defaultBackend := cfg.DefaultBackendID()
