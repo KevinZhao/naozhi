@@ -426,7 +426,7 @@ func TestACPProtocol_ReadEvent_Response_TurnComplete(t *testing.T) {
 func TestACPProtocol_ReadEvent_PermissionRequest(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
-	line := `{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"s1","options":[{"optionId":"allow-once","kind":"allow_once"}]}}`
+	line := `{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"s1","options":[{"optionId":"allow_once","kind":"allow_once"}]}}`
 	ev, done, err := p.ReadEvent(line)
 	if err != nil {
 		t.Fatal(err)
@@ -437,8 +437,30 @@ func TestACPProtocol_ReadEvent_PermissionRequest(t *testing.T) {
 	if ev.Type != "permission_request" {
 		t.Errorf("Type = %q, want permission_request", ev.Type)
 	}
-	if ev.RPCRequestID != 7 {
-		t.Errorf("RPCRequestID = %d, want 7", ev.RPCRequestID)
+	if ev.RPCRequestID != "7" {
+		t.Errorf("RPCRequestID = %q, want \"7\"", ev.RPCRequestID)
+	}
+	if len(ev.RawParams) == 0 {
+		t.Error("RawParams should be populated for permission_request")
+	}
+}
+
+// TestACPProtocol_ReadEvent_PermissionRequest_StringID covers kiro 2.3.0's
+// UUID-string id form, which broke a *int decoder in the original
+// RPCMessage struct. See V8 in docs/rfc/multi-backend-validation.md.
+func TestACPProtocol_ReadEvent_PermissionRequest_StringID(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	line := `{"jsonrpc":"2.0","id":"82017692-c404-42d1-9334-ae28dfda0cee","method":"session/request_permission","params":{"sessionId":"s1","options":[{"optionId":"allow_once","kind":"allow_once"}]}}`
+	ev, _, err := p.ReadEvent(line)
+	if err != nil {
+		t.Fatalf("kiro UUID id should not fail unmarshal, got: %v", err)
+	}
+	if ev.Type != "permission_request" {
+		t.Errorf("Type = %q, want permission_request", ev.Type)
+	}
+	if ev.RPCRequestID != "82017692-c404-42d1-9334-ae28dfda0cee" {
+		t.Errorf("RPCRequestID = %q, want UUID", ev.RPCRequestID)
 	}
 }
 
@@ -446,7 +468,8 @@ func TestACPProtocol_HandleEvent_Permission(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
 	var buf bytes.Buffer
-	ev := Event{Type: "permission_request", RPCRequestID: 42}
+	rawParams := json.RawMessage(`{"sessionId":"s1","toolCall":{"toolCallId":"t1","title":"x"},"options":[{"optionId":"allow_once","name":"Yes","kind":"allow_once"},{"optionId":"reject_once","name":"No","kind":"reject_once"}]}`)
+	ev := Event{Type: "permission_request", RPCRequestID: "42", RawParams: rawParams}
 	handled := p.HandleEvent(&buf, ev)
 	if !handled {
 		t.Error("permission_request should be handled")
@@ -454,11 +477,66 @@ func TestACPProtocol_HandleEvent_Permission(t *testing.T) {
 	if buf.Len() == 0 {
 		t.Error("should have written permission response")
 	}
-	// Verify response JSON
+	// Verify response JSON. ID round-trips as a JSON number when the
+	// agent's id parses as an int (the legacy shape).
 	var resp map[string]any
-	json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp)
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
+		t.Fatalf("response unmarshal: %v", err)
+	}
 	if resp["id"] != float64(42) {
 		t.Errorf("response id = %v, want 42", resp["id"])
+	}
+	// Outcome must include the optionId picked from the request, not a
+	// hardcoded hyphen form.
+	result := resp["result"].(map[string]any)
+	outcome := result["outcome"].(map[string]any)
+	if got := outcome["optionId"]; got != "allow_once" {
+		t.Errorf("optionId = %v, want allow_once (read from request)", got)
+	}
+}
+
+// TestACPProtocol_HandleEvent_Permission_KiroUUID covers the kiro 2.3.0
+// shape where id is a UUID string and optionId uses underscores.
+func TestACPProtocol_HandleEvent_Permission_KiroUUID(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	var buf bytes.Buffer
+	rawParams := json.RawMessage(`{"sessionId":"s1","toolCall":{"toolCallId":"t1","title":"x"},"options":[{"optionId":"allow_once","name":"Yes","kind":"allow_once"},{"optionId":"allow_always","name":"Always","kind":"allow_always"},{"optionId":"reject_once","name":"No","kind":"reject_once"}]}`)
+	ev := Event{
+		Type:         "permission_request",
+		RPCRequestID: "82017692-c404-42d1-9334-ae28dfda0cee",
+		RawParams:    rawParams,
+	}
+	if !p.HandleEvent(&buf, ev) {
+		t.Fatal("permission_request should be handled")
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(bytes.TrimSpace(buf.Bytes()), &resp); err != nil {
+		t.Fatalf("response unmarshal: %v", err)
+	}
+	if resp["id"] != "82017692-c404-42d1-9334-ae28dfda0cee" {
+		t.Errorf("response id = %v, want UUID round-trip", resp["id"])
+	}
+	outcome := resp["result"].(map[string]any)["outcome"].(map[string]any)
+	if got := outcome["optionId"]; got != "allow_once" {
+		t.Errorf("optionId = %v, want allow_once (kiro form)", got)
+	}
+}
+
+// TestACPProtocol_HandleEvent_Permission_FallbackOnUnknownOptions ensures
+// that even if no allow_* option is present, naozhi still sends a response
+// (a stalled permission_request would block the turn forever).
+func TestACPProtocol_HandleEvent_Permission_FallbackOnUnknownOptions(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	var buf bytes.Buffer
+	rawParams := json.RawMessage(`{"sessionId":"s1","options":[{"optionId":"reject_once","name":"No","kind":"reject_once"}]}`)
+	ev := Event{Type: "permission_request", RPCRequestID: "1", RawParams: rawParams}
+	if !p.HandleEvent(&buf, ev) {
+		t.Fatal("must always handle permission_request, even on unknown options")
+	}
+	if buf.Len() == 0 {
+		t.Error("must always send a response, even on unknown options")
 	}
 }
 
@@ -476,25 +554,117 @@ func TestRPCMessage_IsNotification(t *testing.T) {
 	t.Parallel()
 	msg := RPCMessage{Method: "session/update"}
 	if !msg.IsNotification() {
-		t.Error("should be notification")
+		t.Error("should be notification (no id, has method)")
+	}
+	// Explicit JSON null is also "no id" per JSON-RPC.
+	msgNull := RPCMessage{ID: json.RawMessage(`null`), Method: "session/update"}
+	if !msgNull.IsNotification() {
+		t.Error("null id + method should be notification")
 	}
 }
 
 func TestRPCMessage_IsResponse(t *testing.T) {
 	t.Parallel()
-	id := 1
-	msg := RPCMessage{ID: &id, Result: json.RawMessage(`{}`)}
-	if !msg.IsResponse() {
-		t.Error("should be response")
+	cases := []struct {
+		name string
+		raw  string
+	}{
+		{"int id", `{"jsonrpc":"2.0","id":1,"result":{}}`},
+		{"string id (kiro UUID)", `{"jsonrpc":"2.0","id":"82017692-c404-42d1-9334-ae28dfda0cee","result":{}}`},
+		{"zero int id (legal but rare)", `{"jsonrpc":"2.0","id":0,"result":{}}`},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			var msg RPCMessage
+			if err := json.Unmarshal([]byte(c.raw), &msg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if !msg.IsResponse() {
+				t.Errorf("%q should be response", c.raw)
+			}
+		})
 	}
 }
 
 func TestRPCMessage_IsRequest(t *testing.T) {
 	t.Parallel()
-	id := 1
-	msg := RPCMessage{ID: &id, Method: "session/prompt"}
+	raw := `{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{}}`
+	var msg RPCMessage
+	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
 	if !msg.IsRequest() {
 		t.Error("should be request")
+	}
+}
+
+// TestRPCMessage_IDAsInt covers the dual-shape decoder: int passes through,
+// string returns ok=false, missing returns ok=false. See V8 in
+// docs/rfc/multi-backend-validation.md.
+func TestRPCMessage_IDAsInt(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		raw    string
+		want   int
+		wantOK bool
+	}{
+		{`{"jsonrpc":"2.0","id":7,"result":{}}`, 7, true},
+		{`{"jsonrpc":"2.0","id":0,"result":{}}`, 0, true},
+		{`{"jsonrpc":"2.0","id":"82017692-c404-42d1-9334-ae28dfda0cee","method":"x"}`, 0, false},
+		{`{"jsonrpc":"2.0","method":"notif"}`, 0, false},
+		{`{"jsonrpc":"2.0","id":null,"method":"notif"}`, 0, false},
+	}
+	for _, c := range cases {
+		var msg RPCMessage
+		if err := json.Unmarshal([]byte(c.raw), &msg); err != nil {
+			t.Fatalf("unmarshal %q: %v", c.raw, err)
+		}
+		got, ok := msg.IDAsInt()
+		if ok != c.wantOK || got != c.want {
+			t.Errorf("IDAsInt(%q) = (%d, %v); want (%d, %v)", c.raw, got, ok, c.want, c.wantOK)
+		}
+	}
+}
+
+// TestRPCMessage_IDAsString covers stringification: int -> "n", string ->
+// itself, missing/null -> ("", false).
+func TestRPCMessage_IDAsString(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		raw    string
+		want   string
+		wantOK bool
+	}{
+		{`{"jsonrpc":"2.0","id":7,"result":{}}`, "7", true},
+		{`{"jsonrpc":"2.0","id":"abc","result":{}}`, "abc", true},
+		{`{"jsonrpc":"2.0","id":"82017692-c404-42d1-9334-ae28dfda0cee","method":"x"}`, "82017692-c404-42d1-9334-ae28dfda0cee", true},
+		{`{"jsonrpc":"2.0","method":"notif"}`, "", false},
+		{`{"jsonrpc":"2.0","id":null,"method":"notif"}`, "", false},
+	}
+	for _, c := range cases {
+		var msg RPCMessage
+		if err := json.Unmarshal([]byte(c.raw), &msg); err != nil {
+			t.Fatalf("unmarshal %q: %v", c.raw, err)
+		}
+		got, ok := msg.IDAsString()
+		if ok != c.wantOK || got != c.want {
+			t.Errorf("IDAsString(%q) = (%q, %v); want (%q, %v)", c.raw, got, ok, c.want, c.wantOK)
+		}
+	}
+}
+
+// TestRPCMessage_NoUnmarshalErrorOnStringID ensures the master-broken case
+// (string id triggering "cannot unmarshal string into Go struct field
+// RPCMessage.id of type int") does not regress.
+func TestRPCMessage_NoUnmarshalErrorOnStringID(t *testing.T) {
+	t.Parallel()
+	raw := `{"jsonrpc":"2.0","id":"82017692-c404-42d1-9334-ae28dfda0cee","method":"session/request_permission","params":{}}`
+	var msg RPCMessage
+	if err := json.Unmarshal([]byte(raw), &msg); err != nil {
+		t.Fatalf("kiro UUID id triggered unmarshal error (regression of V8): %v", err)
+	}
+	if !msg.IsRequest() {
+		t.Error("should classify as request")
 	}
 }
 

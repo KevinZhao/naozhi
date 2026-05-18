@@ -34,7 +34,16 @@ type Event struct {
 	IsReplay bool   `json:"isReplay,omitempty"`
 
 	// RPCRequestID is set for ACP permission_request events that need a response.
-	RPCRequestID int `json:"-"`
+	// String-typed because kiro 2.3.0 emits UUID ids on session/request_permission;
+	// numeric ids (rare on ACP requests-from-agent) are stringified by IDAsString
+	// so HandleEvent always sees a stable opaque key. See rpc_types.go.
+	RPCRequestID string `json:"-"`
+
+	// RawParams carries the original JSON-RPC params for events that need
+	// downstream inspection (e.g. permission_request whose options[] are
+	// vendor-defined). Populated by ACPProtocol.ReadEvent; nil for events
+	// that don't need it. Not serialized.
+	RawParams json.RawMessage `json:"-"`
 
 	// AskQuestion is populated for synthetic Type:"ask_question" events derived
 	// from an AskUserQuestion tool_use in the assistant stream. The CLI's
