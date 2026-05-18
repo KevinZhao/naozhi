@@ -499,17 +499,23 @@ func sanitizeClientFilename(name string) string {
 		}
 	}
 	out := b.String()
-	// Cap length so a 4 KB filename cannot bloat the prompt or the
-	// meta sidecar. 120 runes is plenty for real filenames; longer values
-	// are almost certainly adversarial.
-	const maxFilenameLen = 120
-	// Byte short-circuit: a string ≤ 120 bytes cannot exceed 120 runes.
-	if len(out) > maxFilenameLen && utf8.RuneCountInString(out) > maxFilenameLen {
+	// Byte short-circuit: a string ≤ maxClientFilenameRunes bytes cannot
+	// exceed maxClientFilenameRunes runes (one byte per ASCII rune is the
+	// best case; multi-byte UTF-8 only increases byte count).
+	if len(out) > maxClientFilenameRunes && utf8.RuneCountInString(out) > maxClientFilenameRunes {
 		runes := []rune(out)
-		out = string(runes[:maxFilenameLen])
+		out = string(runes[:maxClientFilenameRunes])
 	}
 	return out
 }
+
+// maxClientFilenameRunes caps sanitizeClientFilename output length. The
+// value reaches three sinks (the .meta sidecar, the prepended text Claude
+// receives, and dashboard UI previews); a 4 KB filename would bloat the
+// prompt and the sidecar without any legitimate use case. 120 runes is
+// plenty for real filenames; longer values are almost certainly adversarial.
+// R222-CR-6.
+const maxClientFilenameRunes = 120
 
 // handleUpload accepts a single image OR PDF file and stores it for later
 // reference by file_ids. PDFs are held in memory until the matching send

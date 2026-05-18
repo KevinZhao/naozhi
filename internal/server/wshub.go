@@ -1403,10 +1403,15 @@ type cronRunEndedMsg struct {
 // BroadcastCronRunStarted emits cron_run_started to authenticated clients.
 // Called from the cron scheduler's onRunStarted hook (set in dashboard.go).
 func (h *Hub) BroadcastCronRunStarted(jobID, runID string, startedAt time.Time, trigger, sessionID string, fresh bool) {
+	// R222-PERF-15: jobID / runID are produced by cron.generateHexID — pure
+	// lowercase hex of fixed length. cron.IsValidID rejects anything else,
+	// so once it returns true we can skip SanitizeForLog (slow path allocates
+	// a strings.Map output even on the no-op branch when len > 0). Untrusted
+	// or shape-mismatched input still falls through to the sanitiser.
 	data, err := marshalPooled(cronRunStartedMsg{
 		Type:      "cron_run_started",
-		JobID:     osutil.SanitizeForLog(jobID, 64),
-		RunID:     osutil.SanitizeForLog(runID, 64),
+		JobID:     sanitizeHexIDForBroadcast(jobID, 64),
+		RunID:     sanitizeHexIDForBroadcast(runID, 64),
 		StartedAt: startedAt.UnixMilli(),
 		Trigger:   osutil.SanitizeForLog(trigger, 32),
 		SessionID: osutil.SanitizeForLog(sessionID, 128),
@@ -1428,10 +1433,11 @@ func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, ended
 	// so currently safe; defensive sanitisation matches the treatment of jobID
 	// and shields a future code path that derives them from external config
 	// (e.g. webhook trigger names) from log/payload injection. R221-FIX-P2-7.
+	// R222-PERF-15: see sanitizeHexIDForBroadcast — hex IDs short-circuit.
 	data, err := marshalPooled(cronRunEndedMsg{
 		Type:       "cron_run_ended",
-		JobID:      osutil.SanitizeForLog(jobID, 64),
-		RunID:      osutil.SanitizeForLog(runID, 64),
+		JobID:      sanitizeHexIDForBroadcast(jobID, 64),
+		RunID:      sanitizeHexIDForBroadcast(runID, 64),
 		State:      state,
 		StartedAt:  startedAt.UnixMilli(),
 		EndedAt:    endedAt.UnixMilli(),
@@ -1452,6 +1458,18 @@ func (h *Hub) BroadcastCronRunEnded(jobID, runID, state string, startedAt, ended
 // field comment for why this replaced a per-client RLock scan.
 func (h *Hub) DroppedMessages() int64 {
 	return h.droppedTotal.Load()
+}
+
+// sanitizeHexIDForBroadcast returns id unchanged when it matches the
+// cron.IsValidID hex shape (and fits within maxLen), otherwise routes
+// through the regular sanitiser. Avoids the strings.Map slow-path on
+// the common case where Job/Run IDs are produced by generateHexID.
+// R222-PERF-15.
+func sanitizeHexIDForBroadcast(id string, maxLen int) string {
+	if len(id) <= maxLen && cron.IsValidID(id) {
+		return id
+	}
+	return osutil.SanitizeForLog(id, maxLen)
 }
 
 // TrackSend reserves a sendWG slot for a background send goroutine and

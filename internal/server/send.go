@@ -564,6 +564,16 @@ func (h *Hub) runTurnPassthrough(key, text string, images []cli.ImageData, prior
 // use sessionSend. NewHub emits a slog.Warn on construction when Queue is nil
 // so production wiring with a missing queue surfaces in journalctl rather than
 // silently falling through here. R219-CR-11.
+//
+// Removal tracked in docs/TODO.md R-LEGACY-SEND. Unblock when:
+//  1. every test that drives Hub through this path migrates to wiring a
+//     real MessageQueue (or a stub that matches its delivery contract), and
+//  2. NewHub stops constructing a Hub with Queue == nil (turn the guard
+//     into a Fatal precondition rather than a slog.Warn).
+//
+// Once both conditions hold, delete sessionSendLegacy and its sole caller
+// branch in sessionSend together so the guard/interrupt semantics live in
+// exactly one place. R222-CR-8.
 func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError func(string)) (bool, sendAckStatus, error) {
 	key := p.Key
 

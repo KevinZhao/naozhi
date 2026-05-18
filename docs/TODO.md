@@ -142,14 +142,14 @@
 - [ ] **R222-SEC-3 — 缺 `GET /api/cron/runs` 与 `GET /api/cron/runs/{id}` rate limit（P3）**: 已认证 token 被盗后可高频枚举完整 run 历史并触发持续 IO；filesExistsLimiter 模式可复用。方案：在 server.New 织入 cronRunsLimiter（如 60req/min/IP），接到 dashboard_cron handler。涉及：`internal/server/dashboard_cron.go:963,1054`。
 - [ ] **R222-SEC-4 — `nz_anon` cookie 在无 TLS 部署下不带 Secure（P3）**: 启动期已有"未启 TLS"告警，但 cookie 自身不 fail-closed，攻击者同网络可窃取并认领 pending 上传。方案：多用户模式强制 Secure/no-TLS 启动失败。涉及：`internal/server/dashboard_send.go:44-50`。
 - [ ] **R222-SEC-5 — `handleAttachment` MIME 仅来自扩展名，无 magic byte 校验（P3）**: 当 attachment.sanitizeExt 之外的代码路径被加入（regression），可向 image/jpeg 头里塞非图片字节。方案：`http.DetectContentType` 比对扩展名；不一致则降级为 application/octet-stream + attachment disposition。涉及：`internal/server/dashboard_send.go:1016-1033`。
-- [ ] **R222-SEC-6 — `validateCronPrompt` LF-allowed 注释提到 `--append-system-prompt` 单行约束但策略只对 cron 安全（P3）**: 注释会误导未来把 LF-allowed 复制到 planner_prompt。方案：保留代码不改，加 contract test 锁 `project.ValidateConfig` 拒绝 PlannerPrompt 含 \n。涉及：`internal/server/dashboard_cron.go:184-188`。
+- [x] **R222-SEC-6 — `validateCronPrompt` LF-allowed 注释提到 `--append-system-prompt` 单行约束但策略只对 cron 安全（P3）**: 注释会误导未来把 LF-allowed 复制到 planner_prompt。方案：保留代码不改，加 contract test 锁 `project.ValidateConfig` 拒绝 PlannerPrompt 含 \n。涉及：`internal/server/dashboard_cron.go:184-188`。 — 已修复，本批 PR #96
 
 ### Go 正确性 — 跨包改动 / shutdown 协调
 
 - [ ] **R222-GO-1 — `cron.executeOpt` 用 `context.Background()` 起 sendCtx，绕开 stopCtx 取消（P2）**: scheduler.go:1853 注释说为避免 shutdown 误记 cancel，但 Stop 后 Send 仍可阻塞 jobTimeout（最多 5 min），triggerWG.Wait 因此可能超 stopBudget。方案：sendCtx 来自 stopCtx 派生 + 短 grace；或在 wg goroutine 文档化"intentional orphan"。涉及：`internal/cron/scheduler.go:1853`。
 - [ ] **R222-GO-2 — `discovery/history_tail.go` 非 ctx 包装版用 `context.Background()`（P2）**: `loadHistoryTail`/`loadHistoryChainTail` 私有 wrapper 用 Background()，无法被 router historyCtx 取消，NFS 等慢 FS 上启动可能挂住。方案：调用方迁到 *Ctx 变体；删除非 ctx wrapper。涉及：`internal/discovery/history_tail.go:54,367`。
 - [ ] **R222-GO-3 — `cli.SubagentLinker.fireOnResolveLocked` 释放重取 mu 让 callback 跑期间存在 nested mu-release race（P2）**: 重入安全契约靠 godoc 维系，无静态守卫；callback 若再调 linker.Query 进入嵌套路径可能死锁。方案：copy fns 后释放两锁外执行所有 callback，移除 re-lock。涉及：`internal/cli/subagent_link.go:556-568`。
-- [ ] **R222-GO-4 — `heartbeatLoop` pongTimer 预先 Stop+Reset 在 Go<1.23 toolchain 下可能漏 stale tick 误判 pong miss（P2）**: 注释说 Go 1.23+ 自 drain，但需校验 go.mod 最低版。方案：grep go.mod toolchain 行；若已 ≥1.23 则在注释加锁定标记。涉及：`internal/cli/process_readloop.go:506-508`。
+- [x] **R222-GO-4 — `heartbeatLoop` pongTimer 预先 Stop+Reset 在 Go<1.23 toolchain 下可能漏 stale tick 误判 pong miss（P2）**: 注释说 Go 1.23+ 自 drain，但需校验 go.mod 最低版。方案：grep go.mod toolchain 行；若已 ≥1.23 则在注释加锁定标记。涉及：`internal/cli/process_readloop.go:506-508`。 — 已修复（go.mod 1.26.3 已 ≥1.23，注释加 LOCKED 标记 + 显式回退指引），本批 PR #96
 - [ ] **R222-GO-5 — `cron/runstore.go` mtime sort 在 FS 时间精度低时 ordering 不稳，pagination cutoff 可能漏数据（P3）**: 评论已承认 StartedAt 才是真源；FAT32/tmpfs 在并发 cron 完成时同秒丢序。方案：non-cached 全扫路径读 JSON 排 StartedAt；或 mtime 作 secondary key。涉及：`internal/cron/runstore.go:397`。
 - [ ] **R222-GO-6 — `eventlog/persist/persister.go run()` 关闭路径 drain p.in 但不 drain p.opCh，pending DropKey/Flush 调方挂直至 ctx 兜底（P3）**: 方案：closeCh case 在 shutdownAll 前 drain opCh，对每个 done channel 发 ErrPersisterClosed。涉及：`internal/eventlog/persist/persister.go:483-495`。
 - [x] **R222-GO-7 — `cli/subagent_link.go::readFirstLineMeta` ReadSlice 满 32KB 后将 partial 行丢给 Unmarshal 静默退化为 scan（P3）**: 长 thinking block 当作首行时 fast path 失败但无显式信号，性能默默掉。方案：`bufio.ErrBufferFull` 显式返 errFirstLineTooLong，调用方按 fallback 处理。涉及：`internal/cli/subagent_link.go:666-668`。 — 已修复，本批 PR #95
@@ -173,7 +173,7 @@
 - [x] **R222-PERF-12 — `persister.handleBatch` Clock() 调两次（P3）**: 在 run() case `<-p.in` 分支单次捕获 now 传 handleBatch，省 vDSO。涉及：`internal/eventlog/persist/persister.go:636,681`。 — 已修复（run + drainInChannel + shutdown drain 三入口收敛 + handleBatch 签名加 now time.Time 参数），本批 PR #95
 - [x] **R222-PERF-13 — `shimMsg.Code *int` 每 cli_exited heap alloc（P3）**: 改 `Code int + CodePresent bool`。涉及：`internal/cli/process_readloop.go:38-44`。 — 已修复（shimMsgCode struct{Value int; Present bool} + UnmarshalJSON，4 case round-trip 表 + 3 case invalid 锁三档语义），本批 PR #94
 - [x] **R222-PERF-14 — `heartbeatLoop` 30s ping 仍走 encodeShimMsg pool（P3）**: 预计算 `pingBytes = []byte(\"{\\\"type\\\":\\\"ping\\\"}\\n\")`，shimSendRaw 直送。涉及：`internal/cli/process_readloop.go:511-512`。 — 已修复（包级 shimPingBytes + Process.shimSendRaw helper，byte-equal 测试锁定与 encoder 路径输出一致），本批 PR #94
-- [ ] **R222-PERF-15 — `BroadcastCronRun*` 每次多次 SanitizeForLog（P3）**: 在 Job struct 上缓存 sanitized 字段；hex runID 跳过 sanitize。涉及：`internal/server/wshub.go:1407-1440`。
+- [x] **R222-PERF-15 — `BroadcastCronRun*` 每次多次 SanitizeForLog（P3）**: 在 Job struct 上缓存 sanitized 字段；hex runID 跳过 sanitize。涉及：`internal/server/wshub.go:1407-1440`。 — 已修复（新增 sanitizeHexIDForBroadcast helper：cron.IsValidID-shape 直接零分配返回，否则回退 SanitizeForLog；jobID/runID 短路），本批 PR #96
 
 ### 代码质量 — 方法过长 / 共享 helper
 
@@ -182,9 +182,10 @@
 - [ ] **R222-CR-3 — `session.reconnectShims` 334 行 9-state enum + 嵌套 goroutine（P2）**: 拆 classifyAndPlanShimAction + executeShimAction。涉及：`internal/session/router.go:1276`。
 - [ ] **R222-CR-4 — `cron.executeOpt` 247 行（P2）**: 抽 recordAndBroadcastRun。涉及：`internal/cron/scheduler.go:1677`。
 - [ ] **R222-CR-5 — 三处 firstLine/firstLineTrunc 跨包独立实现（P2）**: dispatch/status.go:135、cli/subagent_transcript.go:389、cron/job.go:192 各有版本。方案：抽 textutil.FirstLine（dispatch 语义最完整）；cli 版本变成 textutil.FirstLine + textutil.TruncateRunes 的一行 wrapper。涉及：3 文件。
-- [ ] **R222-CR-6 — `magic 120` filename cap、`maxLen` 等无名参数散落（P3）**: 提到 file/package 级常量带原由注释。涉及：`internal/server/dashboard_send.go:505`，`internal/server/dashboard_session.go:42`。
+- [x] **R222-CR-6 — `magic 120` filename cap、`maxLen` 等无名参数散落（P3）**: 提到 file/package 级常量带原由注释。涉及：`internal/server/dashboard_send.go:505`，`internal/server/dashboard_session.go:42`。 — 已修复（dashboard_send.go 内联的 maxFilenameLen=120 提为 file-level 常量 maxClientFilenameRunes 并加原由注释；dashboard_session.go 的 maxResumeLastPromptBytes 既已是命名常量，本轮无需动），本批 PR #96
 - [x] **R222-CR-7 — `firstLineTrunc` vs `firstLine` 空行处理语义分歧未文档化（P3）**: 给两者加 godoc 标注；或抽 textutil 时锁定唯一语义。 — 已修复（dispatch/status.go::firstLine 与 cli/subagent_transcript.go::firstLineTrunc 加 godoc 互相交叉引用空行处理差异，R222-CR-5 收敛前防退化），本批 PR #95
-- [ ] **R222-CR-8 — `sessionSendLegacy` Deprecated 注释无 tracking anchor（P3）**: 加 `// Removal tracked in docs/TODO.md R-LEGACY-SEND` + 新建 TODO 条目，含明确移除条件。涉及：`internal/server/send.go:561`。
+- [x] **R222-CR-8 — `sessionSendLegacy` Deprecated 注释无 tracking anchor（P3）**: 加 `// Removal tracked in docs/TODO.md R-LEGACY-SEND` + 新建 TODO 条目，含明确移除条件。涉及：`internal/server/send.go:561`。 — 已修复（Deprecated 注释加 `Removal tracked in docs/TODO.md R-LEGACY-SEND` 锚点 + 明确两条移除条件；下方新增 R-LEGACY-SEND 跟踪条目），本批 PR #96
+- [ ] **R-LEGACY-SEND — 删除 `Hub.sessionSendLegacy` 与其在 `sessionSend` 中的 fallback 分支（LOW，由 R222-CR-8 派生）**: sessionSendLegacy 是 MessageQueue 接入前的旧 send 路径，现仅供未配 Queue 的测试代码使用。NewHub 已在 Queue==nil 时打 slog.Warn，但仍允许构造。Removal 条件：(1) 所有驱动 Hub 的测试迁到真实 MessageQueue（或与其投递契约一致的 stub）；(2) NewHub 把 Queue==nil 从 Warn 升级为 Fatal（构造期 hard-fail）。两条都满足后，删除 sessionSendLegacy + sessionSend 中调它的 if 分支，把 guard/interrupt 语义收敛到唯一一处。涉及：`internal/server/send.go:561`，调用方在 `internal/server/send.go` sessionSend 内部分支。
 - [x] **R222-CR-9 — `managed.go` TODO 引用 R217-ARCH-2 但 R219-ARCH-3 已 supersede（P3）**: 同步交叉引用。涉及：`internal/session/managed.go:941`。 — 已修复（注释加 R219-ARCH-3 锚点），本批 PR #94
 - [x] **R222-CR-10 — 4 包各自定义 SessionRouter 但缺编译时静态断言（P3）**: 各包加 `var _ SessionRouter = (*session.Router)(nil)` 抓签名漂移。涉及：cron/dispatch/upstream/server consumer.go。 — 已修复（upstream 加 var _ SessionRouter，server 加 var _ HubRouter；cron/dispatch 既有断言保持），本批 PR #94
 
