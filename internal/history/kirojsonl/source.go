@@ -40,6 +40,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli"
 )
@@ -150,8 +151,22 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 		return nil, nil
 	}
 
+	// Defence-in-depth: SessionIDFunc is exported, so a future caller
+	// (or a test) might supply a path-traversal sid like "../etc/passwd"
+	// that filepath.Join would happily resolve outside rootDir. Today the
+	// only producer is ManagedSession.SessionID, but the public API
+	// contract has no validation — reject any sid containing a path
+	// separator or "..". Treat the bad sid as "no session" rather than an
+	// error so callers paginate to the noop tail without surfacing the
+	// internal validation failure to dashboard users.
+	if strings.ContainsAny(sid, `/\`) || strings.Contains(sid, "..") {
+		slog.Warn("kirojsonl: refusing sid containing path separator or '..'",
+			"sid_len", len(sid))
+		return nil, nil
+	}
+
 	path := filepath.Join(s.rootDir, sid+".jsonl")
-	f, err := os.Open(path) // #nosec G304 -- sid is sourced from the live session view, not user input
+	f, err := os.Open(path) // #nosec G304 -- sid validated above against path traversal
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, nil
@@ -277,13 +292,11 @@ func decodeLine(line []byte) (cli.EventEntry, bool) {
 		return cli.EventEntry{}, false
 	}
 
+	// Empty content rows do appear in v1 (e.g. user-cancelled prompts);
+	// surface them as zero-length entries rather than dropping so
+	// pagination time-cursors keep moving. concatTextChunks already
+	// returns "" for empty/non-text content, no special handling needed.
 	summary := concatTextChunks(data.Content)
-	if summary == "" {
-		// Empty content rows do appear in v1 (e.g. user-cancelled
-		// prompts). Surface them as zero-length entries rather than
-		// dropping so pagination time-cursors keep moving.
-		summary = ""
-	}
 
 	return cli.EventEntry{
 		Time:    timeMS,
