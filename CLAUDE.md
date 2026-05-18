@@ -62,6 +62,12 @@ Each CLI process is long-lived (stdin/stdout stay open across turns). The Wrappe
 - `claude` (default): `ClaudeProtocol` -- stream-json, session ID from init event
 - `kiro`: `ACPProtocol` -- JSON-RPC 2.0, session ID from `session/new` response
 
+Multi-backend deployments use `cli.backends: [{id, path, model, args}, ...]` so dashboard / IM / cron / reverse-node can pick backend per session. See `docs/rfc/multi-backend.md` for the full design (backend.Profile registry, kirojsonl history source, ACP `session/cancel` notification, reverse-node capability routing). Implementation gotchas confirmed in `docs/rfc/multi-backend-validation.md`:
+- ACP `session/cancel` is a **notification** (no id), not a request
+- ACP RPC ID can be **string UUID** (kiro `permission_request`), not always int — use `json.RawMessage`
+- ACP permission `optionId` is `allow_once / allow_always / reject_once` (underscore, not hyphen) — read from request `options[].optionId`, do not hardcode
+- Kiro persists session state at `~/.kiro/sessions/cli/<sid>.{json,jsonl}` with stale-PID lock auto-recovery
+
 Protocol.Init() runs after spawn but before readLoop, handling any handshake (no-op for Claude, initialize + session/new for ACP). Session ID is captured during Init or from the first Send.
 
 Process states: `Spawning -> Ready <-> Running -> Dead`. Dead processes with a SessionID can be resumed via `--resume` (Claude) or `session/load` (ACP).
