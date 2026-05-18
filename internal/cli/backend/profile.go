@@ -130,6 +130,11 @@ var (
 	registryMu sync.RWMutex
 	registry   = map[string]registryEntry{}
 	nextOrder  int
+
+	// defaultsOnce serialises EnsureDefaults across goroutines. Safe to
+	// reset under tests via reset() (which clears registry too) so a
+	// fresh test can re-bootstrap deterministically.
+	defaultsOnce sync.Once
 )
 
 // Register adds a Profile to the registry. Panics on duplicate ID — there
@@ -196,18 +201,44 @@ func All() []Profile {
 // called once during startup before any consumer touches the registry.
 // Idempotency is intentionally NOT supported: calling twice will panic via
 // Register's duplicate check, surfacing accidental double-init.
+//
+// For library callers that may run before main has bootstrapped (doctor
+// helpers, ad-hoc test fixtures), prefer EnsureDefaults — it is safe under
+// concurrent use AND idempotent.
 func RegisterDefaults() {
 	Register(claudeProfile())
 	Register(kiroProfile())
 }
 
+// EnsureDefaults is the concurrent-safe, idempotent counterpart to
+// RegisterDefaults. The first call registers the built-in profiles via
+// sync.Once; every subsequent call is a no-op. Use this from helpers
+// that may execute before main runs (e.g. cmd/naozhi/doctor.go's
+// historyDirForBackend) or from concurrent goroutines that all need
+// "the registry is initialised" without coordinating.
+//
+// Deliberate non-recover behaviour: if RegisterDefaults panics for a
+// real reason (e.g. duplicate registration introduced by a programmer
+// error), the panic propagates out of sync.Once and surfaces — as it
+// should. Earlier iterations wrapped a recover() around RegisterDefaults
+// here, but that masked partial-registration races (review of PR #122)
+// where a panic mid-sequence could leave the registry with claude but
+// no kiro and silently swallow it.
+func EnsureDefaults() {
+	defaultsOnce.Do(RegisterDefaults)
+}
+
 // reset is a test-only helper that clears the registry. Lives in the main
 // file (not _test.go) so external test packages can also use it via
 // reflection if ever needed; it is unexported so production code cannot
-// accidentally invoke it.
+// accidentally invoke it. Also resets defaultsOnce so a subsequent
+// EnsureDefaults can re-bootstrap deterministically — without this,
+// cleared registry + already-fired Once would leave callers with an
+// empty registry forever.
 func reset() {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 	registry = map[string]registryEntry{}
 	nextOrder = 0
+	defaultsOnce = sync.Once{}
 }

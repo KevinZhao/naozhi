@@ -466,15 +466,14 @@ func runOutput(cmd *exec.Cmd) (string, error) {
 // per-backend "what would be required" line so an operator inspecting
 // the config sees the dependency before they ever bring the system up.
 func (d *doctor) renderBackendsSection() {
-	// Ensure Profile registry is initialised exactly once. RegisterDefaults
-	// panics on duplicates, so a recover() makes doctor resilient to a
-	// caller that already registered (currently nothing in cmd/naozhi
-	// shares the doctor process, but keep the guard for future robustness
-	// and for tests that init the registry from setup code).
-	func() {
-		defer func() { _ = recover() }()
-		backend.RegisterDefaults()
-	}()
+	// Ensure Profile registry is initialised — concurrent-safe and
+	// idempotent. EnsureDefaults wraps RegisterDefaults in a sync.Once;
+	// it does the right thing whether main has already registered, the
+	// helper is being called for the first time, or two parallel doctor
+	// invocations race the bootstrap. Replaces the earlier recover()
+	// pattern, which could leak a partial registry if a panic fired
+	// mid-RegisterDefaults (PR #122 review HIGH).
+	backend.EnsureDefaults()
 
 	// Best-effort config load. If config is missing or malformed, fall
 	// back to "no config" rendering — we still want to show what the
@@ -643,17 +642,13 @@ func formatCapsForDoctor(c cli.Caps) string {
 // new backend with a transcript directory now requires only a Profile
 // entry; doctor inherits the value automatically.
 //
-// Self-bootstraps the registry the same way renderBackendsSection does
-// so it remains usable from unit tests that import it without going
-// through the renderBackendsSection path. RegisterDefaults panics on
-// duplicate registration, so wrap in a recover() so a caller that has
-// already registered defaults (the long-running naozhi process at
-// startup) is not perturbed.
+// Self-bootstraps the registry via EnsureDefaults (sync.Once) so the
+// helper is callable from unit tests that import it directly, and is
+// safe under parallel goroutines — replaces the earlier recover()
+// pattern which could leak a partial registry on concurrent racing
+// callers (PR #122 review HIGH).
 func historyDirForBackend(id string) string {
-	func() {
-		defer func() { _ = recover() }()
-		backend.RegisterDefaults()
-	}()
+	backend.EnsureDefaults()
 	if p, ok := backend.Get(id); ok && p.HistoryDir != "" {
 		return p.HistoryDir
 	}
