@@ -585,11 +585,21 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	case p.eventCh <- ev:
 	default:
 		// Full buffer: drop is safe (EventLog kept the entry) but
-		// dropping a `result` event forces Send() into the
+		// dropping a `result` event forces a non-Replay Send() into the
 		// findResultSince fallback, so log at Warn for observability.
-		if ev.Type == "result" {
+		//
+		// R225-CR-13: under Replay-capable backends (passthrough), result
+		// events fall through here only when there is no owning slot
+		// (e.g. all slots already claimed and fanned out, or pre-handshake
+		// strays). That is an expected pathway, not an observability
+		// signal — keep it at Debug to avoid noise that masks the real
+		// non-Replay drop case below.
+		switch {
+		case ev.Type == "result" && !p.caps.Replay:
 			log.Warn("eventCh full, dropped result", "subtype", ev.SubType)
-		} else {
+		case ev.Type == "result":
+			log.Debug("eventCh full, dropped result (replay backend)", "subtype", ev.SubType)
+		default:
 			log.Debug("eventCh full, dropped", "type", ev.Type)
 		}
 	}
