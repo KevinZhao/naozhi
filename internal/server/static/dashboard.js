@@ -233,6 +233,23 @@ async function fetchSessions() {
           // Legacy 3-segment keys (shouldn't exist post-Round 167 but be
           // defensive) degrade to "general".
           const pendingAgent = parts.length >= 4 && parts[3] ? parts[3] : 'general';
+          // Pre-populate cli_name / cli_version / backend from the user's
+          // backend pick so the sidebar icon (cliIcon) and chat header
+          // (renderMainShell / updateHeaderCLI) show the right CLI brand
+          // BEFORE the first message spawns the wrapper. Without this, a
+          // kiro pending session inherits defaultCLIName ("claude-code")
+          // and renders the claude logomark — directly contradicting the
+          // operator's choice. See backendDisplayName godoc.
+          //
+          // pendingBackend is empty in single-backend mode (renderBackendPicker
+          // returns '' for ≤1 backend, so #new-backend doesn't exist and
+          // sessionBackends[key] is never set). Fall back to defaultCLIName
+          // — which is router.CLIName() = the lone configured backend's
+          // display name — so single-backend kiro deployments also get the
+          // right icon instead of degrading to the 'cli' default branch.
+          const pendingBackend = sessionBackends[key] || '';
+          const pendingCLIName = backendDisplayName(pendingBackend) || defaultCLIName;
+          const pendingCLIVersion = backendDisplayVersion(pendingBackend) || defaultCLIVersion;
           data.sessions.push({
             key: key,
             state: 'new',
@@ -243,6 +260,9 @@ async function fetchSessions() {
             last_prompt: '',
             node: sessionNodes[key] || 'local',
             project: matchProject(sessionWorkspaces[key]),
+            backend: pendingBackend,
+            cli_name: pendingCLIName,
+            cli_version: pendingCLIVersion,
           });
         }
       }
@@ -2078,8 +2098,8 @@ function renderMainShell() {
   // feishu/slack/discord/weixin), right = cost (formatted per session's
   // cost_unit). originBadgeHtml / backendChipHtml return '' when the
   // session/deployment doesn't warrant a chip so the layout stays clean.
-  const effCLIName = s.cli_name || defaultCLIName;
-  const effCLIVersion = s.cli_version || defaultCLIVersion;
+  const effCLIName = s.cli_name || backendDisplayName(sessionBackends[selectedKey]) || defaultCLIName;
+  const effCLIVersion = s.cli_version || backendDisplayVersion(sessionBackends[selectedKey]) || defaultCLIVersion;
   const cliLabel = effCLIName ? esc(effCLIName) + (effCLIVersion ? ' v' + esc(effCLIVersion) : '') : '';
   // UI Round 5 R5-3: model display for all backends.
   //   - claude path: SessionView.model is auto-populated from the
@@ -5117,6 +5137,46 @@ function renderBackendPicker(backendsData, opts) {
 function getSelectedBackend() {
   const el = document.getElementById('new-backend');
   return el && el.value ? el.value : '';
+}
+
+// backendDisplayName resolves a backend ID ("claude" / "kiro" / ...) to the
+// CLI display name surfaced by /api/cli/backends ("claude-code" / "kiro").
+// Used to populate cli_name on dashboard-only pending sessions BEFORE the
+// server has spawned the wrapper — without this, the sidebar icon
+// (cliIcon) and header label (renderMainShell / updateHeaderCLI) fall
+// through to defaultCLIName ("claude-code") and a kiro session shows the
+// claude logomark + "claude-code v..." until the first message lands and
+// the server-side SetCLIName broadcasts the correct value.
+//
+// Resolution order:
+//   1. cliBackends cache (canonical: dashboard already paid for this fetch
+//      to render the picker, so the lookup is free).
+//   2. Hardcoded ID→display map for the brief boot window where the
+//      backend list hasn't resolved yet. Mirrors profile_claude.go /
+//      profile_kiro.go DisplayName.
+//   3. Backend ID itself as last-resort fallback (better than empty;
+//      cliIcon's `=== 'kiro'` branch still works for kiro this way).
+function backendDisplayName(backendID) {
+  if (!backendID) return '';
+  if (cliBackends && Array.isArray(cliBackends.backends)) {
+    const e = cliBackends.backends.find(b => b && b.id === backendID);
+    if (e && (e.display_name || e.id)) return e.display_name || e.id;
+  }
+  if (backendID === 'claude') return 'claude-code';
+  return backendID;
+}
+
+// backendDisplayVersion returns the version string the dashboard should
+// show next to the backend display name for a pending session. Pulled
+// from the cached /api/cli/backends payload — that endpoint reports the
+// installed CLI version for each enabled backend, which is the same
+// value the wrapper would set on the session via SetCLIVersion once
+// spawned. Empty when cliBackends has not resolved yet (caller hides
+// the version suffix).
+function backendDisplayVersion(backendID) {
+  if (!backendID || !cliBackends || !Array.isArray(cliBackends.backends)) return '';
+  const e = cliBackends.backends.find(b => b && b.id === backendID);
+  return (e && e.version) ? e.version : '';
 }
 
 // R110-P3 agent picker (Round 167) — returns an HTML fragment for an agent
@@ -9091,8 +9151,11 @@ function updateHeaderCLI() {
   const s = sessionsData[sid(selectedKey, selectedNode)] || {};
   const el = document.querySelector('.main-header .detail-left');
   if (!el) return;
-  const name = s.cli_name || defaultCLIName;
-  const version = s.cli_version || defaultCLIVersion;
+  // Fallback chain mirrors renderMainShell — see backendDisplayName godoc
+  // for why pending sessions need the sessionBackends lookup before the
+  // global defaultCLIName fallback.
+  const name = s.cli_name || backendDisplayName(sessionBackends[selectedKey]) || defaultCLIName;
+  const version = s.cli_version || backendDisplayVersion(sessionBackends[selectedKey]) || defaultCLIVersion;
   const label = name ? esc(name) + (version ? ' v' + esc(version) : '') : '';
   if (el.innerHTML !== label) el.innerHTML = label;
 }
