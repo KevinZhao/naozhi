@@ -38,6 +38,11 @@ type Slack struct {
 	started   bool
 	botID     string
 	handlerWg sync.WaitGroup // tracks in-flight message handler goroutines
+	// hookSem caps concurrent inbound message handler goroutines so a hot or
+	// hostile workspace cannot spawn an unbounded fan-out (each goroutine
+	// drives a session.Send → CLI write that may block on shimWMu / queue
+	// drain). Mirrors feishu's hookSem cap=20. R226-SEC-4.
+	hookSem chan struct{}
 }
 
 // slackHTTPClient is shared by all Slack adapter instances for Web API calls
@@ -74,7 +79,7 @@ func New(cfg Config) *Slack {
 		slack.OptionAppLevelToken(cfg.AppToken),
 		slack.OptionHTTPClient(slackHTTPClient),
 	)
-	return &Slack{cfg: cfg, api: api}
+	return &Slack{cfg: cfg, api: api, hookSem: make(chan struct{}, 20)}
 }
 
 func (s *Slack) Name() string { return "slack" }
@@ -373,9 +378,21 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 		MentionMe: mentionMe,
 	}
 
+	// R226-SEC-4: cap concurrent handler goroutines. A non-blocking acquire
+	// keeps the socketmode dispatcher free; if the cap is full we drop the
+	// inbound event and rely on Slack's at-least-once redelivery (or the
+	// user's own retry) rather than spawning an unbounded fan-out.
+	select {
+	case s.hookSem <- struct{}{}:
+	default:
+		slog.Warn("slack: hookSem full, dropping inbound message",
+			"channel", ev.Channel, "cap", cap(s.hookSem))
+		return
+	}
 	s.handlerWg.Add(1)
 	go func() {
 		defer s.handlerWg.Done()
+		defer func() { <-s.hookSem }()
 		defer platform.RecoverHandler("slack")
 		s.handler(s.ctx, msg)
 	}()
