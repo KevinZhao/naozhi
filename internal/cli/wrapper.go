@@ -119,15 +119,35 @@ func detectVersionCtx(parent context.Context, cliPath string) string {
 	if err != nil {
 		return ""
 	}
-	s := strings.TrimSpace(string(out))
-	if i := strings.IndexByte(s, ' '); i > 0 {
-		s = s[:i]
-	}
-	if len(s) > 32 {
-		s = s[:32]
-	}
-	if len(s) > 0 && s[0] >= '0' && s[0] <= '9' {
-		return s
+	return parseVersionOutput(string(out))
+}
+
+// parseVersionOutput extracts the semver-like version token from a
+// "<binary> --version" stdout payload.
+//
+// Output formats observed across our backends:
+//
+//	claude   → "2.1.143 (Claude Code)"   (version is the first token)
+//	kiro     → "kiro-cli 2.3.0"           (version is the second token)
+//
+// Strategy: walk whitespace-split tokens and return the first one whose
+// leading byte is a digit (the canonical semver shape). Anything else —
+// build banner, "version" prefix, dash-prefixed suffix — is skipped.
+// The 32-byte cap prevents a hostile / malformed --version response from
+// blowing up downstream slog attrs and JSON payloads.
+//
+// Extracted from detectVersionCtx so the parser can be unit-tested
+// without spawning subprocesses (PR #122 follow-up — kiro 2.3.0 was
+// detected as "binary missing or --version crashed" because the original
+// parser only accepted format #1).
+func parseVersionOutput(s string) string {
+	for _, tok := range strings.Fields(s) {
+		if len(tok) > 0 && tok[0] >= '0' && tok[0] <= '9' {
+			if len(tok) > 32 {
+				tok = tok[:32]
+			}
+			return tok
+		}
 	}
 	return ""
 }
