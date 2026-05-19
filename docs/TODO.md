@@ -167,14 +167,14 @@
 - [ ] **R226-PERF-6 — `EventLog.applyEntryStateLocked` task 事件线性扫 turnAgents/bgAgents（P3）**: 多路 subagent 场景（>8 并行）双重 O(n)。方案：当 `len > 8` 时建 `map[string]int` 索引。`internal/cli/eventlog.go:405`。
 - [ ] **R226-PERF-7 — `handleList` 响应仍用 `map[string]any`（P2）**: 10 tabs × 1Hz × 2 alloc = 20 map alloc/s。方案：`type sessionListResp struct {...}`。`internal/server/dashboard_session.go:535,599`。
 - [ ] **R226-PERF-8 — `process_event_format.TodosDetailJSON` 二次 marshal（P2）**: `block.Input` → `[]TodoItem` → marshal，可直接从 `block.Input` 提 `"todos"` 字段 raw bytes。`internal/cli/process_event_format.go:173`。
-- [ ] **R226-PERF-9 — `ACPProtocol.WriteInterrupt` 每次 `json.Marshal`（P2）**: 静态模板 + UUID 拼接可省反射。`internal/cli/protocol_acp.go:274`。
+- [x] **R226-PERF-9 — `ACPProtocol.WriteInterrupt` 每次 `json.Marshal`（P2）**: 静态模板 + UUID 拼接可省反射。`internal/cli/protocol_acp.go:274`。 — 已修复（prefix/sid/suffix 三段拼接 + 仅 sid 走 json.Marshal 处理 escape），本批 PR #152
 - [ ] **R226-PERF-10 — `process_shim_io.shimWriter.Write` fast path `string(data[:len-1])` 拷贝（P3，封 R71-PERF-H1）**: shimClientMsg.Line 改 `json.RawMessage`。
 - [ ] **R226-PERF-11 — `ACPProtocol.mu` 同时保护 sessionID 和 textBuf（P3）**: chunk 高频时 textBuf 锁污染 sessionID 读路径。方案：sessionID 改 `atomic.Pointer[string]`（已有 model 先例）。`internal/cli/protocol_acp.go:88`。
 
 ### 代码质量 — 本轮新发现
 
 - [ ] **R226-CR-7 — `RegisterForResume` / `RegisterCronStubWithChain` 用 `r.CLIName/Version` 在多 backend 部署下显示错误（P1）**: 这两条路径只看默认 wrapper；router_core.go loadStore 已正确走 `wrapperFor(entry.Backend)`。方案：加 `backend string` 参数 → `wrapperFor`。Breaking：caller API。`internal/session/router_discovery.go:259,362`。
-- [ ] **R226-CR-8 — `cron/scheduler.freshContextPreflight` 死代码（P1）**: 仅由 `freshContextPreflightP0` 委托调用；测试只测 P0 版本。方案：内联 P0 → 删 wrapper + 删过期注释 "keep intact for test surface"。`internal/cron/scheduler.go:1570`。
+- [x] **R226-CR-8 — `cron/scheduler.freshContextPreflight` 死代码（P1）**: 仅由 `freshContextPreflightP0` 委托调用；测试只测 P0 版本。方案：内联 P0 → 删 wrapper + 删过期注释 "keep intact for test surface"。`internal/cron/scheduler.go:1570`。 — 已修复（删除整个未被调用的 wrapper + godoc 合并到 P0），本批 PR #152
 - [ ] **R226-CR-9 — dispatch/server 错误→中文消息双份重复（P2，封 R215-CR-P2-1 drift）**: 已加 sync 注释，但根治需提共享函数 `UserMessageForSendError(err, noOutTimeout, totalTimeout) (msg, severity)` 到 `internal/cli/usermsg.go` 或 `internal/session/usermsg.go`，dispatch + server 同时消费。方案明确。
 - [ ] **R226-CR-10 — `cron/scheduler.executeOpt` 320 行 7 失败分支（P2）**: 抽 `handleGetOrCreateError` / `handleSendError` / `deliverResult` helpers。`internal/cron/scheduler.go:1749-2070`。
 - [ ] **R226-CR-11 — `cron/scheduler.go` 2739 行单文件无拆分计划（P2）**: 拟 `scheduler_job.go`/`scheduler_run.go`/`scheduler_notify.go` 拆分；先写 split intent 文档，分阶段做。
@@ -254,7 +254,7 @@
 - [ ] **R225-PERF-10 — `marshalPooled` 每次 copy 一份独立 backing（P2）**: dashboard.go:83 高频 broadcast 下不可避免；考虑对固定组合 session_state 做 LRU 缓存。
 - [ ] **R225-PERF-11 — `eventlog.Append` UUID 生成在锁内（P2）**: eventlog.go:596 Append 持 mu.Lock 期间调 stampUUID → crypto/rand 系统调用。方案：在锁外预先生成。
 - [ ] **R225-PERF-12 — `agent_message_chunk` `p.mu.Lock` 复用保护 textBuf（P2）**: protocol_acp.go:494 高频 chunk 与 sessionID 共享一锁；evaluate 把 textBuf 移入 readLoop 私有或独立细粒度 mu。
-- [ ] **R225-PERF-13 — `subagent_link.SetAgentInternalID` 持 wlock 做 O(500) 回扫（P3）**: eventlog.go:553 短时阻塞所有 Append。方案：early-exit + 限制最大回扫深度（≤50）。
+- [x] **R225-PERF-13 — `subagent_link.SetAgentInternalID` 持 wlock 做 O(500) 回扫（P3）**: eventlog.go:553 短时阻塞所有 Append。方案：early-exit + 限制最大回扫深度（≤50）。 — 已修复（backfillScanCap=50；超窗口 stale tool_use_id 改由下次 resume 走 persistHistory snapshot 补齐），本批 PR #152
 - [ ] **R225-PERF-14 — `wsclient.sweepSubGenExpiredLocked` 在 hub 写锁下扫 map（P3）**: wsclient.go:143 阻塞 subscribe/unsubscribe 并发。方案：移到 client 自身轻量 mutex。
 - [ ] **R225-PERF-15 — `process_send.buildUserEntry` thumbnail goroutine 无并发上限（P3）**: 最多 20 个 goroutine CPU-bound JPEG encode 同时启动；建议限并发 4。
 - [ ] **R225-PERF-16 — `eventlog.EntriesSince/Entries/LastN` defer Unlock 在热路径（P3）**: 高频 broadcast 下显式 Unlock 微优。
@@ -269,10 +269,10 @@
 - [ ] **R225-CR-4 — `costUnitForBackend` 硬编码 switch 与 `backend.Profile` 无编译期约束（P2）**: managed.go:1400-1408 注释明示需要双改。方案：`backend.Profile.CostUnit` 字段，profile_claude/profile_kiro 各自填，session 调 `backend.MustGet(id).CostUnit`。R224-ARCH-1 同源。
 - [ ] **R225-CR-5 — `backendDisplayName / normalizeBackendID` 与 `backend.Profile.DisplayName/ID` 重复（P2 R224-ARCH-1 同源）**: cli/wrapper.go:75-95；新加 backend 改四处。方案：合并到 `backend.Get` 的 DisplayName/ID 字段。
 - [x] **R225-CR-6 — `protocol_acp.go:585` TODO 锚点拼写不存在（P3）**: TODO 引 `R222-OBS-MULTIBACKEND-CODE`，TODO.md 实际是 `R222-OBS-MULTIBACKEND-LEGACY`。方案：补条目或更名注释。 — 已修复（注释从 R222-OBS-MULTIBACKEND-CODE 更名为 R222-OBS-MULTIBACKEND-LEGACY 与 R224-CR-4 引入的真实锚点对齐），本批 PR #150
-- [ ] **R225-CR-7 — `BackendInfo.Features` 在 DetectBackendsCtx 不填、由 dashboard handler 二次注入（P3）**: detect.go：未来调用方直接读会拿到 nil map。方案：godoc 显式标注"dashboard-only 字段"或 DetectBackendsCtx 内填。
+- [x] **R225-CR-7 — `BackendInfo.Features` 在 DetectBackendsCtx 不填、由 dashboard handler 二次注入（P3）**: detect.go：未来调用方直接读会拿到 nil map。方案：godoc 显式标注"dashboard-only 字段"或 DetectBackendsCtx 内填。 — 已修复（godoc 加 "DASHBOARD-ONLY" 标注 + 写明 nil 不可假设），本批 PR #152
 - [ ] **R225-CR-8 — `Snapshot.Model` 注释未提 ACP 路径填空 / spawn-time 值（P3 与 R225-ACP-MODEL-INIT 关联）**: managed.go:850 注释暗示总是准确，但 ACP `session/new` 返回的 currentModelId 当前未回填。方案：注释补"ACP 在 Init 阶段才得到真实 model"。
 - [ ] **R225-CR-9 — `normalizeBackendID` default 分支不验注册 ID（P3）**: 未注册 backend 字符串能直通到 wrapper.BackendID，错误延后到 spawn 期。方案：default 分支调 `backend.Get` 失败 slog.Warn 或 NewWrapper fail-fast。
-- [ ] **R225-CR-10 — `cli.Resolve` 路径长字符串（ev.Description）被 closure 长时间持有（P3）**: process_readloop.go:393 max 8 个 Resolve goroutine 并发持有数 KB 字符串到 sem 释放。方案：调用前 `textutil.TruncateRunes(desc, 2000)`。
+- [x] **R225-CR-10 — `cli.Resolve` 路径长字符串（ev.Description）被 closure 长时间持有（P3）**: process_readloop.go:393 max 8 个 Resolve goroutine 并发持有数 KB 字符串到 sem 释放。方案：调用前 `textutil.TruncateRunes(desc, 2000)`。 — 已修复（resolveDescMaxRunes=2000 入闭包前 TruncateRunes），本批 PR #152
 - [x] **R225-CR-11 — `backend/profile.reset` 注释声称外部测试反射调用但 unexported 反射不可达（P3）**: profile.go:239 staticcheck U1000 未用；`cron.freshContextPreflight` 同款。方案：移到 *_test.go + 改 `resetForTest` 或 `//go:build testing`。 — 已修复（reset 在源码 + _test.go 内 0 调用者，测试已通过 withCleanRegistry helper 完整覆盖；删函数 + 同步 defaultsOnce 注释指向 withCleanRegistry。cron.freshContextPreflight 是另一根因，留作单独条目），本批 PR #150
 - [ ] **R225-CR-12 — `spawnSession` 函数注释承诺"持锁"但内部多次 Unlock/Lock（P2）**: router_lifecycle.go:506 让未来维护者误加嵌套调用导致死锁。方案：注释精确化 + LOCK: 批注，或重构锁生命周期由调用方负责。
 - [ ] **R225-CR-13 — `readLoop` passthrough 无主 result fall-through 触发 Warn 日志（P2）**: process_readloop.go:306 `eventCh full, dropped result` 在正常路径会误报。方案：fall-through 前加 `if !p.caps.Replay` 守卫或日志降到 Debug。
