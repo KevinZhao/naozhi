@@ -611,7 +611,7 @@ func (p *ACPProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) error {
 		// label, the higher-signal split, and operators can split protocol
 		// errors from transport errors (ErrACPTimeout) via err type if
 		// needed at the slog layer.
-		// TODO(R222-OBS-MULTIBACKEND-CODE): once readUntilResponse returns
+		// TODO(R222-OBS-MULTIBACKEND-LEGACY): once readUntilResponse returns
 		// a typed error carrying the int code (instead of formatting it
 		// into the message), pass that here as the code label.
 		metrics.RecordProtocolRPCError(p.BackendID, req.Method, "")
