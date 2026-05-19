@@ -2081,15 +2081,25 @@ function renderMainShell() {
   const effCLIName = s.cli_name || defaultCLIName;
   const effCLIVersion = s.cli_version || defaultCLIVersion;
   const cliLabel = effCLIName ? esc(effCLIName) + (effCLIVersion ? ' v' + esc(effCLIVersion) : '') : '';
-  // UI Round 5 R5-3: spawn-time model display, all backends. SessionView.model
-  // is sourced from cli.backends[].model → SpawnOptions.Model. Empty string
-  // means the operator did not configure one — surface that explicitly so
-  // it doesn't read as "no model" / "broken". Rendered in the .model-label
-  // span next to the cliLabel; styled mute-tone so the cli identity stays
-  // primary.
-  const modelLabel = s.model
-    ? '<span class="model-label" title="启动时模型">· ' + esc(s.model) + '</span>'
-    : '<span class="model-label model-label-unset" title="cli.backends[].model 未配置">· (模型未配置)</span>';
+  // UI Round 5 R5-3: model display for all backends.
+  //   - claude path: SessionView.model is auto-populated from the
+  //     system/init event ("global.anthropic.claude-opus-4-7[1m]"),
+  //     so it is always present after the first turn lands. Pre-init
+  //     turns (rare, brief window during spawn) and reconnect-without-
+  //     replay falls back to "(模型未配置)".
+  //   - kiro path: SessionView.model echoes cli.backends[].model from
+  //     config; "" if operator left it unset (kiro picks "auto").
+  // We compress noisy claude-style identifiers (e.g.
+  // "global.anthropic.claude-opus-4-7[1m]" → "claude-opus-4.7 1M") for
+  // the dashboard but keep the raw value in `title` for debug.
+  const rawModel = s.model || '';
+  const compactModel = rawModel
+    .replace(/^global\.anthropic\./, '')      // strip Bedrock-style prefix
+    .replace(/-(\d+)-(\d+)/, '-$1.$2')          // 4-7 → 4.7 (matches kiro list)
+    .replace(/\[(\d+m)\]$/i, ' $1');            // [1m] → " 1m"
+  const modelLabel = rawModel
+    ? '<span class="model-label" title="' + escAttr(rawModel) + '">· ' + esc(compactModel) + '</span>'
+    : '<span class="model-label model-label-unset" title="model 未在 system/init 上报；可能仍在 spawn 中">· (模型未配置)</span>';
   const headerOriginBadge = originBadgeHtml(selectedKey);
   // UI Round 5 R5-2: header backend chip removed. The "kiro v2.3.0" /
   // "claude-code 2.1.143" cliLabel already names the backend; the

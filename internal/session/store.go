@@ -60,6 +60,11 @@ type storeEntry struct {
 	Backend        string   `json:"backend,omitempty"`     // "claude" | "kiro" | ...
 	LastActive     int64    `json:"last_active,omitempty"` // unix nano
 	UserLabel      string   `json:"user_label,omitempty"`  // operator-set display name override
+	// Model is the last-known CLI model identifier captured from
+	// system/init (claude) or SpawnOptions.Model (kiro). Persisted so
+	// the dashboard can keep showing the right model after naozhi
+	// restart, before the next turn re-emits init. UI Round 5 R5-3.
+	Model string `json:"model,omitempty"`
 }
 
 // storeFormatVersion is the current schema version for `sessions.json`.
@@ -156,6 +161,7 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 				Backend:        s.Backend(),
 				LastActive:     s.lastActive.Load(),
 				UserLabel:      s.UserLabel(),
+				Model:          s.Model(),
 			})
 		}
 	}
