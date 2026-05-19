@@ -192,6 +192,17 @@ func (p *Process) Send(ctx context.Context, text string, images []ImageData, onE
 					p.SessionID = ev.SessionID
 				}
 				p.mu.Unlock()
+				// UI Round 5 R5-3: claude advertises the resolved model
+				// in system/init (e.g.
+				// "global.anthropic.claude-opus-4-7[1m]"). Spawn-time
+				// SpawnOptions.Model is empty for claude (CLI resolves
+				// from env / defaults internally), so this is the
+				// authoritative source. Only overwrite when init event
+				// actually has a value — guards against future CLI
+				// versions dropping the field.
+				if ev.Model != "" {
+					p.setModel(ev.Model)
+				}
 				continue
 			}
 
