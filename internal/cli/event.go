@@ -16,6 +16,15 @@ type Event struct {
 	Result    string            `json:"result,omitempty"`
 	CostUSD   float64           `json:"total_cost_usd,omitempty"`
 	Message   *AssistantMessage `json:"message,omitempty"`
+	// Model is populated for system/init events on stream-json (claude),
+	// where the CLI advertises the resolved model identifier (e.g.
+	// "global.anthropic.claude-opus-4-7[1m]"). readLoop forwards it to
+	// Process.setModel so the dashboard can show the LIVE model rather
+	// than the spawn-time SpawnOptions.Model — claude resolves env /
+	// CLI defaults internally, so we never know the answer before init.
+	// ACP path leaves this empty; SpawnOptions.Model from kiro config
+	// is authoritative there. UI Round 5 R5-3.
+	Model string `json:"model,omitempty"`
 
 	// Agent task fields (system/task_started, task_progress, task_notification).
 	TaskID       string     `json:"task_id,omitempty"`

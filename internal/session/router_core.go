@@ -740,6 +740,13 @@ func NewRouter(cfg RouterConfig) *Router {
 			if entry.UserLabel != "" {
 				s.SetUserLabel(entry.UserLabel)
 			}
+			// UI Round 5 R5-3: seed model from persisted store so the
+			// dashboard immediately renders "claude-opus-4.7" / etc on
+			// post-restart reattach, before the first new turn re-emits
+			// system/init.
+			if entry.Model != "" {
+				s.SetModel(entry.Model)
+			}
 			s.setSessionID(entry.SessionID)
 			if entry.LastActive != 0 {
 				s.lastActive.Store(entry.LastActive)
