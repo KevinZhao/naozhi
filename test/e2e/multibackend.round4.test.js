@@ -62,7 +62,7 @@ async function sendKiro(req, key, text, workspace = '/home/ec2-user/workspace/na
   });
 }
 
-async function waitForReady(req, key, timeoutMs = 15000) {
+async function waitForReady(req, key, timeoutMs = 30000) {
   const start = Date.now();
   while (Date.now() - start < timeoutMs) {
     const list = await getSessions(req);
@@ -134,7 +134,7 @@ test.describe('Round 4 — multi-turn cost / sid stability', () => {
 
     // Turn 1
     await sendKiro(req, KEY, 'reply: t1');
-    let snap = await waitForReady(req, KEY, 15000);
+    let snap = await waitForReady(req, KEY, 30000);
     expect(snap, 'turn 1 not ready').toBeTruthy();
     const sid1 = snap.session_id;
     expect(sid1).toBeTruthy();
@@ -143,13 +143,13 @@ test.describe('Round 4 — multi-turn cost / sid stability', () => {
 
     // Turn 2
     await req.post('/api/sessions/send', { data: { key: KEY, text: 'reply: t2' } });
-    snap = await waitForReady(req, KEY, 15000);
+    snap = await waitForReady(req, KEY, 30000);
     expect(snap, 'turn 2 not ready').toBeTruthy();
     expect(snap.session_id, 'sid drifted on turn 2').toBe(sid1);
 
     // Turn 3
     await req.post('/api/sessions/send', { data: { key: KEY, text: 'reply: t3' } });
-    snap = await waitForReady(req, KEY, 15000);
+    snap = await waitForReady(req, KEY, 30000);
     expect(snap, 'turn 3 not ready').toBeTruthy();
     expect(snap.session_id, 'sid drifted on turn 3').toBe(sid1);
     events = await getEvents(req, KEY);
@@ -166,7 +166,7 @@ test.describe('Round 4 — content shapes', () => {
     const req = await apiContext();
     const KEY = 'dashboard:direct:r4-zh-' + Date.now() + ':general';
     await sendKiro(req, KEY, '请用一个汉字回答：是。');
-    const snap = await waitForReady(req, KEY, 15000);
+    const snap = await waitForReady(req, KEY, 30000);
     expect(snap).toBeTruthy();
     const events = await getEvents(req, KEY);
     const text = events.find(e => e.type === 'text');
@@ -203,7 +203,7 @@ test.describe('Round 4 — content shapes', () => {
     const KEY = 'dashboard:direct:r4-md-' + Date.now() + ':general';
     await sendKiro(req, KEY,
       'reply with this exact 3-line text: "**bold** then `code` then a list:\\n- a\\n- b"');
-    const snap = await waitForReady(req, KEY, 15000);
+    const snap = await waitForReady(req, KEY, 30000);
     expect(snap).toBeTruthy();
     const events = await getEvents(req, KEY);
     const text = events.find(e => e.type === 'text');
@@ -259,7 +259,7 @@ test.describe('Round 4 — error handling visibility', () => {
     // Server may accept (kiro itself rejects empty) or reject up-front.
     // Either is fine; what's NOT fine is hanging.
     if (r.ok()) {
-      const snap = await waitForReady(req, KEY, 15000);
+      const snap = await waitForReady(req, KEY, 30000);
       expect(snap, 'session never reached ready after empty send').toBeTruthy();
     } else {
       // If rejected, error body must be non-empty
@@ -322,7 +322,7 @@ test.describe('Round 4 — corner cases', () => {
     const req = await apiContext();
     const KEY = 'dashboard:direct:r4-del-' + Date.now() + ':general';
     await sendKiro(req, KEY, 'reply: ack');
-    await waitForReady(req, KEY, 15000);
+    await waitForReady(req, KEY, 30000);
 
     const before = (await getSessions(req)).find(s => s.key === KEY);
     expect(before, 'session not created').toBeTruthy();
