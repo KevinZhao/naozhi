@@ -1100,11 +1100,24 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	disableInlineRender := false
 	var sniffBuf [512]byte
 	if n, _ := io.ReadFull(f, sniffBuf[:]); n > 0 {
-		if sniffed := http.DetectContentType(sniffBuf[:n]); !strings.EqualFold(sniffed, mime) {
+		sniffed := http.DetectContentType(sniffBuf[:n])
+		if !strings.EqualFold(sniffed, mime) {
 			slog.Warn("attachment: magic-byte mismatch, degrading to octet-stream",
 				"ext", ext, "ext_mime", mime, "sniffed", sniffed,
 				"path", filepath.Base(resolved))
 			mime = "application/octet-stream"
+			disposition = "attachment"
+			disableInlineRender = true
+		} else if isScriptableContentType(sniffed) {
+			// R226-SEC-10: defence-in-depth for SVG / XHTML / XML. Even if
+			// a future code path admits one of these content types past the
+			// extension allowlist with a matching ext_mime, sniff-coherence
+			// alone does not protect against XSS — SVG and XHTML can host
+			// `<script>` and inline event handlers. Force attachment +
+			// X-Frame-Options: DENY so the payload cannot script in the
+			// dashboard origin even if it slips through.
+			slog.Warn("attachment: scriptable content type, forcing attachment download",
+				"ext", ext, "sniffed", sniffed, "path", filepath.Base(resolved))
 			disposition = "attachment"
 			disableInlineRender = true
 		}
@@ -1149,4 +1162,22 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox; img-src 'self' data:")
 
 	http.ServeContent(w, r, filepath.Base(resolved), info.ModTime(), f)
+}
+
+// isScriptableContentType reports whether sniffed MIME is one of the
+// scriptable types (SVG / XHTML / XML) that can host `<script>` or inline
+// event handlers and therefore must never be served inline. R226-SEC-10.
+//
+// http.DetectContentType emits these with a `; charset=...` suffix for the
+// XML/XHTML cases, so we match by prefix after stripping parameters.
+func isScriptableContentType(sniffed string) bool {
+	mt := sniffed
+	if i := strings.IndexByte(mt, ';'); i >= 0 {
+		mt = strings.TrimSpace(mt[:i])
+	}
+	switch strings.ToLower(mt) {
+	case "image/svg+xml", "application/xhtml+xml", "text/xml", "application/xml":
+		return true
+	}
+	return false
 }
