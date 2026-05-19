@@ -149,19 +149,19 @@
 
 - [ ] **R226-SEC-2 — Dashboard 主页 CSP `script-src 'self' 'unsafe-inline'` 完全打掉 XSS 防护（P1）**: 任何注入到 dashboard HTML 或同源 JS 文件的脚本都能直接执行；登录页已用 hash 收敛了，主页应迁移到 nonce 或 per-script SHA-256。Breaking：需把 dashboard.html 内联事件 handler 全部抽到外部文件 + 加 nonce/hash。涉及 `internal/server/dashboard.go:389` + 全部内联脚本审计。
 - [ ] **R226-SEC-3 — 反向 node 在 `ws://`（无 TLS）下传 token 仅 `slog.Warn` 不阻断（P2）**: token 在第一条 WS 消息明文，passive 观察者可截获并冒充 node。方案：primary 端 `/ws-node` 加 `require_tls: true` 配置，默认 reject 非 wss 升级，除非显式 `insecure: true`。Breaking：现有 `ws://` 部署需加配置或迁 `wss://`。`internal/upstream/connector.go:210` + `internal/node/reverseserver.go:155`。
-- [ ] **R226-SEC-4 — Slack Socket Mode handler 无并发 cap（P2）**: 每条消息无限新建 goroutine（feishu 有 `hookSem` cap=20），高频/被攻 workspace 可 OOM。方案：仿 feishu 加 `slackSem chan struct{}` 容量 20，semaphore 满时 drop 并 slog.Warn。`internal/platform/slack/slack.go:376`。
+- [x] **R226-SEC-4 — Slack Socket Mode handler 无并发 cap（P2）**: 每条消息无限新建 goroutine（feishu 有 `hookSem` cap=20），高频/被攻 workspace 可 OOM。方案：仿 feishu 加 `slackSem chan struct{}` 容量 20，semaphore 满时 drop 并 slog.Warn。`internal/platform/slack/slack.go:376`。 — 已修复，本批 PR #154
 - [ ] **R226-SEC-5 — Discord 单条消息聚合下载无 cap（P2）**: 每附件 10MB 限制，但单消息可附 10 张 = 100MB / event；高频附图轰炸放大 OOM 风险。方案：`maxDiscordAttachmentsPerMessage = 5` 上限 + 总字节 cap。`internal/platform/discord/discord.go:363`。
 - [ ] **R226-SEC-6 — `allowed_root` 未配置只 warn 不阻断启动（P2）**: 拥有 dashboard token 的认证用户可把 cron `work_dir` 设到任意路径（如 `/etc`），CLI 子进程拿那个 CWD 跑，Write 工具可改 `/etc/passwd`。方案：当 `dashboard_token` 已配置且监听非 loopback 时，把 warn 升级为 fatal；或 `naozhi doctor` 加高严重度检查。`internal/server/server.go:513`。
 - [ ] **R226-SEC-7 — `/health` 端点无认证无限速（P3）**: 暴露 session 数 / watchdog kill 计数 / 平台名 / node 状态 / build 版本，外部 attacker 可高频枚举 infra 拓扑、估算重启时序。方案：加 per-IP rate limiter（60 req/min burst 10）。`internal/server/health.go`。
 - [ ] **R226-SEC-8 — `wshub` 同 session key 无订阅 cap（P3）**: 单 token 攻击者可开 1000 WS 全订同 session，每事件 fan-out N 倍 CPU/mem。方案：per-session-key 订阅 cap（如 20）。`internal/server/wshub.go`。
 - [ ] **R226-SEC-9 — Sandbox CSP `style-src 'unsafe-inline'`（P3）**: `serveRender`/`serveRaw` 仍允许 inline CSS，CSS exfiltration 攻击面在沙箱内仍存。方案：迁 nonce 或 hash。`internal/server/project_files.go:708,905`。
-- [ ] **R226-SEC-10 — 附件路径加 `Content-Disposition: attachment` 给 SVG/XML（P3）**: 当前 ext allowlist 已挡掉 SVG，但万一未来开放或 magic-byte sniffer 误判，仍是 defence-in-depth 缺口。方案：在 `handleAttachment` 中对 sniff 结果含 `image/svg+xml` / `application/xhtml+xml` / `text/xml` 的强制 attachment + `X-Frame-Options: DENY`。`internal/server/dashboard_send.go:1148`。
+- [x] **R226-SEC-10 — 附件路径加 `Content-Disposition: attachment` 给 SVG/XML（P3）**: 当前 ext allowlist 已挡掉 SVG，但万一未来开放或 magic-byte sniffer 误判，仍是 defence-in-depth 缺口。方案：在 `handleAttachment` 中对 sniff 结果含 `image/svg+xml` / `application/xhtml+xml` / `text/xml` 的强制 attachment + `X-Frame-Options: DENY`。`internal/server/dashboard_send.go:1148`。 — 已修复（新 isScriptableContentType helper 覆盖 SVG/XHTML/XML/application+xml；sniff 与 ext_mime 一致但仍 scriptable 时强制 attachment + X-Frame-Options: DENY），本批 PR #154
 
 ### 性能 — 本轮新发现
 
 - [ ] **R226-PERF-1 — `Protocol.ReadEvent(line string)` 每事件 `[]byte(line)` 堆拷贝（P1，封 R67-PERF-1 实施分支）**: 5-50 ev/s × N session 的强制 alloc。方案：Protocol 接口签名 `ReadEvent([]byte)`，shimMsg.Line 改 `json.RawMessage`。Breaking：是（接口）。
 - [ ] **R226-PERF-2 — `eventlog_bridge.newEventLogSink` 每 `Append` 1 单元 slice + JSON copy（P1）**: 5 sess × 5 ev/s ≈ 25 alloc/s + ~25 KB/s GC。方案：bridge 层加 `sync.Pool[[1]persist.Entry]` 复用 + 单条快路径 `AppendOne`。涉及 PersistSink 接口。`internal/session/eventlog_bridge.go:77`。
-- [ ] **R226-PERF-3 — `passthrough.writeUserMessageUnderShimLock` `&captureWriter{}` 逃逸到堆（P1）**: 每条 passthrough send 2 alloc。方案：`sync.Pool[*captureWriter]`，复用 backing slice（仿 `shimSendBufPool`）。`internal/cli/passthrough.go:182`。
+- [x] **R226-PERF-3 — `passthrough.writeUserMessageUnderShimLock` `&captureWriter{}` 逃逸到堆（P1）**: 每条 passthrough send 2 alloc。方案：`sync.Pool[*captureWriter]`，复用 backing slice（仿 `shimSendBufPool`）。`internal/cli/passthrough.go:182`。 — 已修复（captureWriterPool sync.Pool + get/put helper + 64KB shrink-cap 仿 shimSendBufPool 防大 paste pin 池条目），本批 PR #154
 - [ ] **R226-PERF-4 — ACP `agent_message_chunk` 每 chunk 一次 `json.Unmarshal`（P2）**: kiro streaming 高频路径，500 unmarshal/s 仅此一处。方案：手写 byte-scan 提取 `"text":"..."` value，跳过 reflect。`internal/cli/protocol_acp.go:517`。
 - [ ] **R226-PERF-5 — `eventlog.Append` 单条调用每次造 `[]EventEntry{e}` slice（P2）**: PersistSink 接口允许 retain slice 故复用受限。方案：加 `AppendOne(e)` 快路径或单元数组池。`internal/cli/eventlog.go:660`。
 - [ ] **R226-PERF-6 — `EventLog.applyEntryStateLocked` task 事件线性扫 turnAgents/bgAgents（P3）**: 多路 subagent 场景（>8 并行）双重 O(n)。方案：当 `len > 8` 时建 `map[string]int` 索引。`internal/cli/eventlog.go:405`。
@@ -181,7 +181,7 @@
 - [ ] **R226-CR-12 — `wshub.go` 1785 行 + `feishu.go` 1461 行无拆分计划（P3）**: wshub 至少抽 `wshub_events.go`；feishu 抽 `feishu_token.go` + `feishu_transport.go`。
 - [x] **R226-CR-13 — `Snapshot()` 在 read-only 路径里写 `s.SetModel(liveModel)`（P3）**: ListSessions 池化 + side-effect 矛盾。方案：把 model 镜像写迁到 storeProcess 或 post-result hook。`internal/session/managed.go:957`。 — 已修复（保留 mirror write 同时补充 godoc 明确意图，避免未来 SnapshotReadOnly 复制路径丢副作用），本批 PR #151
 - [ ] **R226-CR-14 — `session/testutil.go` 测试设施无 build constraint（P3）**: TestProcess/NewTestProcess 编进 prod binary。方案：`//go:build testing` 或迁 `testutil_test.go`（需先验证外部 test 依赖）。
-- [ ] **R226-CR-15 — `router_lifecycle.ResetChat` fast/fallback 双 path 共享 teardown 代码（P3）**: 抽 `resetKeyLocked(key, *ManagedSession)` helper。
+- [x] **R226-CR-15 — `router_lifecycle.ResetChat` fast/fallback 双 path 共享 teardown 代码（P3）**: 抽 `resetKeyLocked(key, *ManagedSession)` helper。 — 已修复（resetSessionLocked helper 同时收敛 fast/fallback 双路径 teardown；fallback 改为先收 keys 再迭代调用 helper，避免 r.sessions 迭代中 mutate），本批 PR #154
 - [ ] **R226-CR-16 — `Scheduler.UpdateJob` Pause 分支没委托给 `pauseJobLocked` / `resumeJobLocked`（P3）**: pause 逻辑双份维护。
 
 ### 架构 — 本轮新发现
@@ -275,7 +275,7 @@
 - [x] **R225-CR-10 — `cli.Resolve` 路径长字符串（ev.Description）被 closure 长时间持有（P3）**: process_readloop.go:393 max 8 个 Resolve goroutine 并发持有数 KB 字符串到 sem 释放。方案：调用前 `textutil.TruncateRunes(desc, 2000)`。 — 已修复（readLoop + InjectHistory 调用前 truncate 至 2000 runes），本批 PR #151
 - [x] **R225-CR-11 — `backend/profile.reset` 注释声称外部测试反射调用但 unexported 反射不可达（P3）**: profile.go:239 staticcheck U1000 未用；`cron.freshContextPreflight` 同款。方案：移到 *_test.go + 改 `resetForTest` 或 `//go:build testing`。 — 已修复（reset 在源码 + _test.go 内 0 调用者，测试已通过 withCleanRegistry helper 完整覆盖；删函数 + 同步 defaultsOnce 注释指向 withCleanRegistry。cron.freshContextPreflight 是另一根因，留作单独条目），本批 PR #150
 - [ ] **R225-CR-12 — `spawnSession` 函数注释承诺"持锁"但内部多次 Unlock/Lock（P2）**: router_lifecycle.go:506 让未来维护者误加嵌套调用导致死锁。方案：注释精确化 + LOCK: 批注，或重构锁生命周期由调用方负责。
-- [ ] **R225-CR-13 — `readLoop` passthrough 无主 result fall-through 触发 Warn 日志（P2）**: process_readloop.go:306 `eventCh full, dropped result` 在正常路径会误报。方案：fall-through 前加 `if !p.caps.Replay` 守卫或日志降到 Debug。
+- [x] **R225-CR-13 — `readLoop` passthrough 无主 result fall-through 触发 Warn 日志（P2）**: process_readloop.go:306 `eventCh full, dropped result` 在正常路径会误报。方案：fall-through 前加 `if !p.caps.Replay` 守卫或日志降到 Debug。 — 已修复（drop 分支改 switch：!p.caps.Replay 仍 Warn，Replay 后端降 Debug，非 result 保持 Debug），本批 PR #154
 
 ### 协议正确性 — 本轮新发现（与 fix/claude-model-from-init-v2 分支强相关）
 
