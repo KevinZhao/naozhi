@@ -88,6 +88,7 @@ func (p *TestProcess) TurnAgents() []cli.SubagentInfo { return p.EventLog.TurnAg
 func (p *TestProcess) ContextUsagePercent() float64       { return 0 }
 func (p *TestProcess) TurnDurationMs() int64              { return 0 }
 func (p *TestProcess) MeteringUsage() []cli.MeteringEntry { return nil }
+func (p *TestProcess) Model() string                      { return "" }
 
 // InjectSession inserts a session with the given TestProcess into the router.
 // For use in tests that need sessions without spawning real CLI processes.

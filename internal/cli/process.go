@@ -216,8 +216,16 @@ type Process struct {
 	// event so reads copy and the typical (no-metering) case stays cheap.
 	meteringMu    sync.Mutex
 	meteringUsage []MeteringEntry
-	lastSeq       atomic.Int64  // last received shim seq, for reconnect
-	pongRecv      chan struct{} // signaled by readLoop on pong receipt
+	// model is the spawn-time CLI model identifier ("claude-opus-4.7",
+	// "claude-sonnet-4.6", ""), set once by Wrapper.Spawn before
+	// readLoop starts. Empty string means "operator did not configure
+	// cli.backends[].model"; the dashboard renders that as
+	// "(模型未配置)". Atomic.Pointer[string] keeps Snapshot lock-free,
+	// matching how Wrapper.CLIVersion is exposed via WorkflowState. UI
+	// Round 5 R5-3.
+	model    atomic.Pointer[string]
+	lastSeq  atomic.Int64  // last received shim seq, for reconnect
+	pongRecv chan struct{} // signaled by readLoop on pong receipt
 
 	// onTurnDone is called by readLoop when a result event transitions the
 	// process from Running to Ready without an active Send(). This allows
@@ -710,9 +718,29 @@ func (p *Process) applyMetadata(m *EventMetadata) {
 	}
 	if len(m.MeteringUsage) > 0 {
 		p.meteringMu.Lock()
-		// Defensive copy so subsequent caller mutations don't race the
-		// MeteringUsage() reader.
-		p.meteringUsage = append(p.meteringUsage[:0:0], m.MeteringUsage...)
+		// UI Round 5 R5-4: per-unit accumulator. kiro reports per-turn
+		// increments; session-level totals must be summed naozhi-side
+		// because kiro emits no running total. Each metadata frame's
+		// entries get folded into the session's running tally by Unit.
+		// Pre-existing units stay; new units are appended. Bounded
+		// growth: kiro currently emits only "credit"; even worst-case
+		// the unit set is ≤4 (credit, token, etc.).
+		for _, in := range m.MeteringUsage {
+			merged := false
+			for i := range p.meteringUsage {
+				if p.meteringUsage[i].Unit == in.Unit {
+					p.meteringUsage[i].Value += in.Value
+					if in.UnitPlural != "" {
+						p.meteringUsage[i].UnitPlural = in.UnitPlural
+					}
+					merged = true
+					break
+				}
+			}
+			if !merged {
+				p.meteringUsage = append(p.meteringUsage, in)
+			}
+		}
 		p.meteringMu.Unlock()
 	}
 }
@@ -720,6 +748,27 @@ func (p *Process) applyMetadata(m *EventMetadata) {
 // ProtocolName returns the protocol name.
 func (p *Process) ProtocolName() string {
 	return p.protocol.Name()
+}
+
+// setModel records the spawn-time model. Called once by Wrapper.Spawn
+// before readLoop starts; never re-set afterwards. UI Round 5 R5-3.
+func (p *Process) setModel(model string) {
+	if model == "" {
+		p.model.Store(nil)
+		return
+	}
+	m := model
+	p.model.Store(&m)
+}
+
+// Model returns the spawn-time CLI model identifier, or "" if the
+// operator did not configure one. Lock-free; safe to call from any
+// goroutine including Snapshot's hot read path.
+func (p *Process) Model() string {
+	if m := p.model.Load(); m != nil {
+		return *m
+	}
+	return ""
 }
 
 // PID returns the CLI process ID (as reported by shim).
