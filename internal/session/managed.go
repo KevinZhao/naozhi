@@ -95,6 +95,10 @@ type processIface interface {
 	ContextUsagePercent() float64
 	TurnDurationMs() int64
 	MeteringUsage() []cli.MeteringEntry
+	// Model returns the spawn-time CLI model identifier (e.g.
+	// "claude-opus-4.7", "claude-sonnet-4.6") or "" when unconfigured.
+	// UI Round 5 R5-3.
+	Model() string
 }
 
 // processBox wraps processIface for use with atomic.Pointer (which requires a concrete type).
@@ -833,16 +837,21 @@ func TakeoverKey(cwdKey string) string {
 
 // SessionSnapshot is a point-in-time view of a session for the dashboard API.
 type SessionSnapshot struct {
-	Key             string             `json:"key"`
-	Platform        string             `json:"platform"`
-	Agent           string             `json:"agent"`
-	SessionID       string             `json:"session_id"`
-	State           string             `json:"state"`
-	Protocol        string             `json:"protocol"`
-	Backend         string             `json:"backend,omitempty"`     // "claude", "kiro", ...
-	CLIName         string             `json:"cli_name,omitempty"`    // "claude-code", "kiro"
-	CLIVersion      string             `json:"cli_version,omitempty"` // e.g. "2.1.92"
-	LastActive      int64              `json:"last_active"`           // unix ms
+	Key        string `json:"key"`
+	Platform   string `json:"platform"`
+	Agent      string `json:"agent"`
+	SessionID  string `json:"session_id"`
+	State      string `json:"state"`
+	Protocol   string `json:"protocol"`
+	Backend    string `json:"backend,omitempty"`     // "claude", "kiro", ...
+	CLIName    string `json:"cli_name,omitempty"`    // "claude-code", "kiro"
+	CLIVersion string `json:"cli_version,omitempty"` // e.g. "2.1.92"
+	// Model is the spawn-time CLI model identifier resolved from
+	// cli.backends[].model → SpawnOptions.Model → Process.Model. Empty
+	// when the operator did not configure one. The dashboard renders
+	// "(模型未配置)" in that case (UI Round 5 R5-3).
+	Model           string             `json:"model,omitempty"`
+	LastActive      int64              `json:"last_active"` // unix ms
 	TotalCost       float64            `json:"total_cost"`
 	Workspace       string             `json:"workspace,omitempty"`
 	DeathReason     string             `json:"death_reason,omitempty"`
@@ -917,6 +926,9 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 	} else {
 		snap.State = proc.GetState().String()
 		snap.Protocol = proc.ProtocolName()
+		// UI Round 5 R5-3: spawn-time CLI model. "" when operator did
+		// not pin one — dashboard shows "(模型未配置)".
+		snap.Model = proc.Model()
 		// Prefer whichever is larger: a freshly resumed process reports 0
 		// until the first `result` event arrives, but s.totalCost carries
 		// the historical cumulative value restored from sessions.json.
@@ -952,6 +964,26 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 	// session still renders the right cost label until pruning. claude is
 	// the default for legacy stores predating the Backend field.
 	snap.CostUnit = costUnitForBackend(snap.Backend)
+
+	// UI Round 5 R5-4: when CostUnit is "credits" (kiro family) the
+	// dashboard's header cost cell should show the SESSION-level total,
+	// not per-turn. claude path keeps snap.TotalCost from CLI's own
+	// running total (USD). For kiro we derive it from the accumulated
+	// MeteringUsage (Process.applyMetadata is now session-level).
+	if snap.CostUnit == "credits" && len(snap.MeteringUsage) > 0 {
+		var credits float64
+		for _, m := range snap.MeteringUsage {
+			if m.Unit == "credit" || m.Unit == "credits" {
+				credits += m.Value
+			}
+		}
+		// Only override when we found a credit-typed entry; if kiro ever
+		// emits a non-credit unit (token / cost) under cost_unit=credits,
+		// don't silently zero the running total.
+		if credits > 0 {
+			snap.TotalCost = credits
+		}
+	}
 
 	// Read cached values instead of copying the full event log.
 	if lp := loadAtomicString(&s.lastPrompt); lp != "" {

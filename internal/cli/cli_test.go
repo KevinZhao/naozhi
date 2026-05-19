@@ -1040,6 +1040,9 @@ func TestProcess_ApplyMetadata_AndAccessors(t *testing.T) {
 		t.Errorf("zero-value MeteringUsage = %v, want nil", got)
 	}
 
+	// UI Round 5 R5-4: per-unit accumulation. Two entries with the same
+	// Unit ("credit") within ONE applyMetadata call collapse into a single
+	// summed entry (0.01 + 0.02 = 0.03). Different units stay separate.
 	p.applyMetadata(&EventMetadata{
 		ContextUsagePercent: 42.5,
 		TurnDurationMs:      1500,
@@ -1055,15 +1058,34 @@ func TestProcess_ApplyMetadata_AndAccessors(t *testing.T) {
 		t.Errorf("TurnDurationMs = %v, want 1500", got)
 	}
 	usage := p.MeteringUsage()
-	if len(usage) != 2 || usage[0].Value != 0.01 || usage[1].Value != 0.02 {
-		t.Errorf("MeteringUsage = %+v, want 2 entries", usage)
+	if len(usage) != 1 {
+		t.Fatalf("MeteringUsage len = %d, want 1 (same-unit merge): %+v", len(usage), usage)
+	}
+	// Tolerate the float 0.01+0.02 ≠ 0.03 drift; assert close-enough.
+	if diff := usage[0].Value - 0.03; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("MeteringUsage[0].Value = %v, want ~0.03 (sum of 0.01 + 0.02)", usage[0].Value)
 	}
 
 	// Defensive copy — mutating the returned slice must not affect the
 	// next reader.
 	usage[0].Value = 99
-	if again := p.MeteringUsage(); again[0].Value != 0.01 {
+	if again := p.MeteringUsage(); again[0].Value > 0.04 {
 		t.Errorf("MeteringUsage returned shared slice; got mutated %v on second read", again)
+	}
+
+	// Second applyMetadata call adds another turn's metering. Session-
+	// level total must accumulate: 0.03 (turn 1) + 0.05 (turn 2) = 0.08.
+	p.applyMetadata(&EventMetadata{
+		MeteringUsage: []MeteringEntry{
+			{Value: 0.05, Unit: "credit", UnitPlural: "credits"},
+		},
+	})
+	usage2 := p.MeteringUsage()
+	if len(usage2) != 1 {
+		t.Fatalf("session-level metering len = %d, want 1: %+v", len(usage2), usage2)
+	}
+	if diff := usage2[0].Value - 0.08; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("session credits = %v, want ~0.08 (0.03 + 0.05)", usage2[0].Value)
 	}
 
 	// nil applyMetadata must not panic / mutate state.

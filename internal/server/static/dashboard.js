@@ -1261,7 +1261,12 @@ function formatCostByUnit(cost, unit) {
 }
 
 function cliIcon(name) {
-  if (name === 'kiro') return '<svg class="sc-cli-icon" viewBox="0 0 16 16" fill="none"><path d="M8 1L14 5.5V10.5L8 15L2 10.5V5.5L8 1Z" fill="#f97316" opacity="0.85"/><path d="M6 5.5V10.5M6 8H9.5L6 5.5M6 8L9.5 10.5" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+  // Kiro official ghost-style mark (sourced from https://kiro.dev/icon.svg).
+  // Inlined here so the asset works offline + survives CSP. Compressed to
+  // the essential shapes: rounded purple bg + white ghost body + 2 black
+  // eyes. The original 1200×1200 is recoordinatized for the 16×16 viewbox
+  // sidebar / header sc-cli-icon slot. UI Round 5 R5-1.
+  if (name === 'kiro') return '<svg class="sc-cli-icon" viewBox="0 0 1200 1200" fill="none" xmlns="http://www.w3.org/2000/svg"><rect width="1200" height="1200" rx="260" fill="#9046FF"/><path d="M398.554 818.914C316.315 1001.03 491.477 1046.74 620.672 940.156C658.687 1059.66 801.052 970.473 852.234 877.795C964.787 673.567 919.318 465.357 907.64 422.374C827.637 129.443 427.623 128.946 358.8 423.865C342.651 475.544 342.402 534.18 333.458 595.051C328.986 625.86 325.507 645.488 313.83 677.785C306.873 696.424 297.68 712.819 282.773 740.645C259.915 783.881 269.604 867.113 387.87 823.883L399.051 818.914H398.554Z" fill="white"/><ellipse cx="636" cy="487" rx="40" ry="63" fill="black"/><ellipse cx="771" cy="487" rx="40" ry="63" fill="black"/></svg>';
   // Default: official Claude logomark (from claude.ai/favicon.svg)
   return '<svg class="sc-cli-icon" viewBox="0 0 248 248" fill="none"><path d="M52.4285 162.873L98.7844 136.879L99.5485 134.602L98.7844 133.334H96.4921L88.7237 132.862L62.2346 132.153L39.3113 131.207L17.0249 130.026L11.4214 128.844L6.2 121.873L6.7094 118.447L11.4214 115.257L18.171 115.847L33.0711 116.911L55.485 118.447L71.6586 119.392L95.728 121.873H99.5485L100.058 120.337L98.7844 119.392L97.7656 118.447L74.5877 102.732L49.4995 86.1905L36.3823 76.62L29.3779 71.7757L25.8121 67.2858L24.2839 57.3608L30.6515 50.2716L39.3113 50.8623L41.4763 51.4531L50.2636 58.1879L68.9842 72.7209L93.4357 90.6804L97.0015 93.6343L98.4374 92.6652L98.6571 91.9801L97.0015 89.2625L83.757 65.2772L69.621 40.8192L63.2534 30.6579L61.5978 24.632C60.9565 22.1032 60.579 20.0111 60.579 17.4246L67.8381 7.49965L71.9133 6.19995L81.7193 7.49965L85.7946 11.0443L91.9074 24.9865L101.714 46.8451L116.996 76.62L121.453 85.4816L123.873 93.6343L124.764 96.1155H126.292V94.6976L127.566 77.9197L129.858 57.3608L132.15 30.8942L132.915 23.4505L136.608 14.4708L143.994 9.62643L149.725 12.344L154.437 19.0788L153.8 23.4505L150.998 41.6463L145.522 70.1215L141.957 89.2625H143.994L146.414 86.7813L156.093 74.0206L172.266 53.698L179.398 45.6635L187.803 36.802L193.152 32.5484H203.34L210.726 43.6549L207.415 55.1159L196.972 68.3492L188.312 79.5739L175.896 96.2095L168.191 109.585L168.882 110.689L170.738 110.53L198.755 104.504L213.91 101.787L231.994 98.7149L240.144 102.496L241.036 106.395L237.852 114.311L218.495 119.037L195.826 123.645L162.07 131.592L161.696 131.893L162.137 132.547L177.36 133.925L183.855 134.279H199.774L229.447 136.524L237.215 141.605L241.8 147.867L241.036 152.711L229.065 158.737L213.019 154.956L175.45 145.977L162.587 142.787H160.805V143.85L171.502 154.366L191.242 172.089L215.82 195.011L217.094 200.682L213.91 205.172L210.599 204.699L188.949 188.394L180.544 181.069L161.696 165.118H160.422V166.772L164.752 173.152L187.803 207.771L188.949 218.405L187.294 221.832L181.308 223.959L174.813 222.777L161.187 203.754L147.305 182.486L136.098 163.345L134.745 164.2L128.075 235.42L125.019 239.082L117.887 241.8L111.902 237.31L108.718 229.984L111.902 215.452L115.722 196.547L118.779 181.541L121.58 162.873L123.291 156.636L123.14 156.219L121.773 156.449L107.699 175.752L86.304 204.699L69.3663 222.777L65.291 224.431L58.2867 220.768L58.9235 214.27L62.8713 208.48L86.304 178.705L100.44 160.155L109.551 149.507L109.462 147.967L108.959 147.924L46.6977 188.512L35.6182 189.93L30.7788 185.44L31.4156 178.115L33.7079 175.752L52.4285 162.873Z" fill="#D97757"/></svg>';
 }
@@ -1313,14 +1318,13 @@ function sessionCardHtml(s) {
   // IM threads vs dashboard-local conversations. originBadgeHtml returns ''
   // for non-IM prefixes so the meta line stays clean for those.
   const originBadge = originBadgeHtml(s.key);
-  // Multi-Backend RFC §8.3 D2: per-card backend chip (single-backend mode
-  // returns ''). Placed AFTER state dot but BEFORE IM origin so the visual
-  // hierarchy reads "what state" → "which backend" → "which IM thread".
-  const cardBackendChip = backendChipHtml(s.backend);
+  // UI Round 5 R5-2: backend chip removed from session cards. The cli icon
+  // (cliIcon, kiro-ghost vs claude-logomark) already disambiguates backend
+  // visually, so the chip was redundant. backendChipHtml() helper kept for
+  // doctor panel where listing backends needs an explicit text label.
   const metaHtml = '<span class="sc-dot ' + dotCls + '"></span>' +
     '<span>' + esc(displayState) + '</span>' +
     nodeBadge +
-    cardBackendChip +
     originBadge +
     cronBadge +
     typeTag +
@@ -2077,10 +2081,21 @@ function renderMainShell() {
   const effCLIName = s.cli_name || defaultCLIName;
   const effCLIVersion = s.cli_version || defaultCLIVersion;
   const cliLabel = effCLIName ? esc(effCLIName) + (effCLIVersion ? ' v' + esc(effCLIVersion) : '') : '';
+  // UI Round 5 R5-3: spawn-time model display, all backends. SessionView.model
+  // is sourced from cli.backends[].model → SpawnOptions.Model. Empty string
+  // means the operator did not configure one — surface that explicitly so
+  // it doesn't read as "no model" / "broken". Rendered in the .model-label
+  // span next to the cliLabel; styled mute-tone so the cli identity stays
+  // primary.
+  const modelLabel = s.model
+    ? '<span class="model-label" title="启动时模型">· ' + esc(s.model) + '</span>'
+    : '<span class="model-label model-label-unset" title="cli.backends[].model 未配置">· (模型未配置)</span>';
   const headerOriginBadge = originBadgeHtml(selectedKey);
-  // Multi-Backend RFC §8.3 D1: per-session backend chip (single-backend mode
-  // returns '').
-  const headerBackendChip = backendChipHtml(s.backend);
+  // UI Round 5 R5-2: header backend chip removed. The "kiro v2.3.0" /
+  // "claude-code 2.1.143" cliLabel already names the backend; the
+  // surrounding chip was a duplicate signal that competed for attention
+  // with cost / turn-timer.
+  const headerBackendChip = '';
   // Multi-Backend RFC §8.3 D5: cost unit comes from the SessionView so
   // claude shows "$" and kiro shows "credits". Empty unit (unknown backend)
   // hides the cell — keeps the layout clean rather than rendering "$NaN".
@@ -2095,23 +2110,12 @@ function renderMainShell() {
   const costTooltip = formatHeaderCostTooltip(s, selectedKey, selectedNode);
   const costTitleAttr = costTooltip ? ' title="' + escAttr(costTooltip) + '"' : '';
   // Multi-Backend RFC §8.3 D6: context usage progress bar driven by the
-  // server-normalized SessionView field. Hidden when 0 (claude leaves it 0
-  // until estimator lands).
-  const ctxPct = typeof s.context_usage_percent === 'number' ? s.context_usage_percent : 0;
-  let ctxBarHtml = '';
-  if (ctxPct > 0) {
-    const ctxClass = ctxPct >= 95 ? 'ctx-bar high' : ctxPct >= 80 ? 'ctx-bar mid' : 'ctx-bar';
-    const ctxLabel = '上下文 ' + ctxPct.toFixed(1) + '%';
-    // Floor the rendered fill at 6% so a real-but-tiny value (kiro reports
-    // ctx fractions immediately on session start, e.g. 1.2%) is still
-    // visible — at 1% the bar was 0.5px wide on a 48px track and looked
-    // identical to "no data". Floor only affects the visual; the title +
-    // aria-label still carry the true value for screen readers / tooltips.
-    const fillPct = Math.min(100, Math.max(6, ctxPct));
-    ctxBarHtml = '<span class="' + ctxClass + '" title="' + escAttr(ctxLabel) +
-      '" aria-label="' + escAttr(ctxLabel) + '"><span class="ctx-bar-fill" style="width:' +
-      fillPct.toFixed(1) + '%"></span></span>';
-  }
+  // UI Round 5 R5-7: header no longer renders ctx-bar — the 48×6 px
+  // strip carried low signal (operator can't act on "ctx 12%"), competed
+  // with cost / turn-timer for attention, and at <5% looked identical to
+  // "no data". The server-side SessionView.ContextUsagePercent stays so
+  // doctor / future compact-mode renders can opt in.
+  const ctxBarHtml = '';
   // Multi-Backend RFC §8.3 D7: turn duration timer (kiro real value;
   // claude 0 until estimator lands → cell hidden).
   let turnTimerHtml = '';
@@ -2143,7 +2147,7 @@ function renderMainShell() {
       '<div class="main-header-content">' +
       '<h2>' + esc(displayName) + renameBtn + downloadBtn + '</h2>' +
       '<div class="detail">' +
-        '<span class="detail-left">' + cliLabel + '</span>' +
+        '<span class="detail-left">' + cliLabel + modelLabel + '</span>' +
         headerBackendChip +
         headerOriginBadge +
         ctxBarHtml +
@@ -3784,6 +3788,28 @@ function restoreScrollPos(key, node) {
     requestAnimationFrame(apply);
   });
   return true;
+}
+
+// maybeStickBottom is the conditional counterpart to stickEventsBottom:
+// it ONLY scrolls if the user is already pinned within `scrollSlackPx`
+// of the bottom. WS-pushed assistant chunks / result events go through
+// this so a user reading earlier history isn't yanked to the latest
+// reply mid-scroll. UI Round 5 R5-6.
+//
+// Trigger contract (per design doc §R5-6):
+//   - send-time optimistic bubble  → stickEventsBottom (unconditional)
+//   - selectSession                → stickEventsBottom (fresh view)
+//   - history "load earlier" page  → no scroll (preserve position)
+//   - WS push assistant_chunk      → maybeStickBottom (only if at bottom)
+//   - WS push result event         → maybeStickBottom (only if at bottom)
+const scrollSlackPx = 80;
+function maybeStickBottom() {
+  const el = document.getElementById('events-scroll');
+  if (!el) return;
+  const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
+  if (distance < scrollSlackPx) {
+    stickEventsBottom();
+  }
 }
 
 // stickEventsBottom forces the events pane to the last bubble and keeps it there
@@ -8724,7 +8750,12 @@ const wsm = {
       const opt = el.querySelector('.optimistic-msg');
       if (opt) opt.remove();
     }
-    const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+    // UI Round 5 R5-6: 80px slack (was 30) so a small natural scroll
+    // doesn't take the user out of the auto-stick band. User events
+    // always pin (operator just sent / IM thread refresh); AI chunks
+    // / result events only stick if user is in the band — preserves
+    // scroll position when the user is reading earlier history.
+    const wasBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - scrollSlackPx;
     const prevT = lastDividerTime(el);
     const evT = ev.time || 0;
     if (evT && (prevT === 0 || evT - prevT >= EVENT_DIVIDER_GAP_MS)) {

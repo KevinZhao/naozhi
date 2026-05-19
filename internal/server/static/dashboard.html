@@ -793,8 +793,19 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .ns-trigger .ns-dot.disconnected,.ns-trigger .ns-dot.error{background:var(--nz-red)}
 .ns-trigger .ns-dot.offline,.ns-trigger .ns-dot.off,.ns-trigger .ns-dot.unreachable{background:var(--nz-text-faint)}
 .ns-trigger .ns-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.ns-trigger .ns-alert{width:8px;height:8px;border-radius:50%;background:var(--nz-red);flex-shrink:0}
+/* UI Round 5 R5-5: alert dot sits AFTER the chevron and a hair to the
+   right so it is clearly "an indicator of the dropdown contents", not
+   "a status of the currently-selected node". The previous placement
+   between the label and chevron read as "this connection is in error". */
+.ns-trigger .ns-alert{width:8px;height:8px;border-radius:50%;background:var(--nz-red);flex-shrink:0;margin-left:2px}
 .ns-trigger .ns-alert[hidden]{display:none}
+
+/* UI Round 5 R5-3: spawn-time model label rendered inline next to the
+   cli identity in the main header detail row. Mute-tone keeps cli name
+   primary; the unset variant uses the dim foreground + italic so
+   "(模型未配置)" reads as a hint, not an error. */
+.main-header .model-label{margin-left:6px;color:var(--nz-text-mute);font-size:12px;font-variant-numeric:tabular-nums}
+.main-header .model-label-unset{color:var(--nz-text-faint);font-style:italic}
 .ns-trigger .ns-chev{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;flex-shrink:0;transition:transform .15s ease;opacity:.7}
 .ns-trigger[aria-expanded="true"] .ns-chev{transform:rotate(180deg)}
 .ns-dropdown{position:absolute;top:100%;left:12px;right:12px;margin-top:2px;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.4);z-index:20;max-height:60vh;overflow-y:auto;padding:4px 0}
@@ -1621,8 +1632,11 @@ body.kbd-open .sidebar-footer{display:none}
       <button type="button" class="ns-trigger" id="ns-trigger" aria-haspopup="listbox" aria-expanded="false" aria-controls="ns-dropdown" onclick="toggleNodeSelector(event)">
         <span class="ns-dot off" id="ns-trigger-dot"></span>
         <span class="ns-label" id="ns-trigger-label">Local</span>
-        <span class="ns-alert" id="ns-trigger-alert" hidden title="其他节点有异常"></span>
         <svg class="ns-chev" viewBox="0 0 24 24" aria-hidden="true"><polyline points="6 9 12 15 18 9"/></svg>
+        <!-- UI Round 5 R5-5: alert dot 移到 chevron 之外，明确"展开下拉里有
+             异常"而非"当前节点异常"。之前夹在 label 和 chevron 之间，操作员
+             误解为 connected 状态出错。 -->
+        <span class="ns-alert" id="ns-trigger-alert" hidden title="其他节点有异常"></span>
       </button>
       <div class="ns-dropdown" id="ns-dropdown" role="listbox" aria-label="选择节点" hidden></div>
     </div>

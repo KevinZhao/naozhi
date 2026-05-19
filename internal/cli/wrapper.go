@@ -263,6 +263,12 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 	)
 	proc.SetSlogKey(opts.Key)
 	proc.InitLinker(cwd)
+	// UI Round 5 R5-3: stamp the spawn-time model so SessionView can show
+	// "claude-opus-4.7" / "auto" in the dashboard header. opts.Model is
+	// resolved at SpawnOptions assembly (router.go), pulling from
+	// cli.backends[].model first, falling back to top-level cli.model.
+	// "" means the operator left it unconfigured.
+	proc.setModel(opts.Model)
 
 	// Protocol init handshake (stream-json: no-op; ACP: initialize + session/new)
 	rw := &JSONRW{
