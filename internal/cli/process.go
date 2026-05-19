@@ -169,6 +169,10 @@ type Process struct {
 	cliPID        int  // CLI PID reported by shim hello
 	shimPID       int  // shim PID reported by shim hello; used by Kill() for SIGUSR2 fallback
 
+	// SessionID is protected by mu. External readers MUST use
+	// GetSessionID() rather than reading the field directly to avoid
+	// racing readLoop's transition writes (system/init / result events).
+	// R225-GO-9.
 	SessionID string
 	State     ProcessState
 	// mu protects State / SessionID / onTurnDone. Read-only accessors
@@ -308,6 +312,12 @@ type Process struct {
 // slot stays in pendingSlots so FIFO positioning isn't broken, but the fan-out
 // goroutine drops the result instead of trying to deliver to a channel with
 // no listener. See docs/rfc/passthrough-mode.md §5.2.2.
+//
+// canceled is atomic.Bool so isCanceled() can be read race-free outside
+// Process.slotsMu (fanoutTurnResult is documented to run after releasing
+// slotsMu — see §5.2 lock ordering). Writes still happen under slotsMu so
+// the FIFO ordering of pendingSlots is preserved relative to the cancel
+// event. R225-GO-1.
 type sendSlot struct {
 	id       uint64
 	uuid     string
@@ -317,30 +327,20 @@ type sendSlot struct {
 	resultCh chan *SendResult
 	errCh    chan error
 
-	// Only mutated under Process.slotsMu
-	canceled  bool
+	// Only mutated under Process.slotsMu (atomic.Bool to allow lock-free
+	// reads from fanoutTurnResult outside slotsMu).
+	canceled  atomic.Bool
 	replayed  bool
 	enqueueAt time.Time
 	writtenAt time.Time
 }
 
-// isCanceled reads canceled under the lock-free atomic assumption that callers
-// outside slotsMu only read — writes happen with slotsMu held. Used by fanout
-// to avoid writing to a resultCh whose listener already returned.
-//
-// NB: this is not atomic in the strict sense, but the read-after-write ordering
-// in the Send/cancel/fanout interleaving is always slotsMu-synchronised at the
-// write side. The worst case of a racy read here is delivering one more
-// resultCh to a canceled slot — buffered channel absorbs it; Send listener is
-// already gone; memory is reclaimed at next GC. This is acceptable and lets
-// fanout proceed outside slotsMu (see §5.2 lock ordering).
+// isCanceled reads canceled atomically. Used by fanout to avoid writing to a
+// resultCh whose listener already returned. Writes go through slotsMu (so the
+// cancel event is FIFO-ordered against pendingSlots mutations) but reads from
+// fanout are lock-free, matching the §5.2 lock ordering note.
 func (s *sendSlot) isCanceled() bool {
-	// slotsMu is held by the caller in readLoop paths, but fanoutTurnResult
-	// is explicitly documented to run *after* releasing slotsMu so heavy
-	// channel writes don't serialize the readLoop. Re-reading here is a
-	// belt-and-suspenders check; a narrow race is harmless per the note
-	// above.
-	return s.canceled
+	return s.canceled.Load()
 }
 
 // SetSlogKey records the session key associated with this process so

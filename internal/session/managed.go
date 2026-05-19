@@ -954,6 +954,15 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		// When proc reports a model and it differs from / is more
 		// recent than what we persisted, mirror it back so the next
 		// saveStore tick captures it. Empty live → keep persisted.
+		//
+		// R226-CR-13: this SetModel is an intentional read-side write —
+		// dashboard polls Snapshot at 1Hz and proc-reported model is the
+		// authoritative source we need to ship into sessions.json.
+		// Snapshot is otherwise read-only; if a future caller needs a
+		// pure-read variant, factor a SnapshotReadOnly that skips this
+		// mirror rather than dropping it (skipping silently regresses to
+		// the symptom Round 5 R5-3 fixed: dashboard "model 未配置" blink
+		// after spawn until the first result event triggered a save).
 		liveModel := proc.Model()
 		if liveModel != "" {
 			if liveModel != s.Model() {

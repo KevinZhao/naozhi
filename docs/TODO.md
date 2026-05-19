@@ -167,19 +167,19 @@
 - [ ] **R226-PERF-6 — `EventLog.applyEntryStateLocked` task 事件线性扫 turnAgents/bgAgents（P3）**: 多路 subagent 场景（>8 并行）双重 O(n)。方案：当 `len > 8` 时建 `map[string]int` 索引。`internal/cli/eventlog.go:405`。
 - [ ] **R226-PERF-7 — `handleList` 响应仍用 `map[string]any`（P2）**: 10 tabs × 1Hz × 2 alloc = 20 map alloc/s。方案：`type sessionListResp struct {...}`。`internal/server/dashboard_session.go:535,599`。
 - [ ] **R226-PERF-8 — `process_event_format.TodosDetailJSON` 二次 marshal（P2）**: `block.Input` → `[]TodoItem` → marshal，可直接从 `block.Input` 提 `"todos"` 字段 raw bytes。`internal/cli/process_event_format.go:173`。
-- [ ] **R226-PERF-9 — `ACPProtocol.WriteInterrupt` 每次 `json.Marshal`（P2）**: 静态模板 + UUID 拼接可省反射。`internal/cli/protocol_acp.go:274`。
+- [x] **R226-PERF-9 — `ACPProtocol.WriteInterrupt` 每次 `json.Marshal`（P2）**: 静态模板 + UUID 拼接可省反射。`internal/cli/protocol_acp.go:274`。 — 已修复（手写字节模板 + 仅 sessionId 走 json.Marshal 快路径），本批 PR #151
 - [ ] **R226-PERF-10 — `process_shim_io.shimWriter.Write` fast path `string(data[:len-1])` 拷贝（P3，封 R71-PERF-H1）**: shimClientMsg.Line 改 `json.RawMessage`。
 - [ ] **R226-PERF-11 — `ACPProtocol.mu` 同时保护 sessionID 和 textBuf（P3）**: chunk 高频时 textBuf 锁污染 sessionID 读路径。方案：sessionID 改 `atomic.Pointer[string]`（已有 model 先例）。`internal/cli/protocol_acp.go:88`。
 
 ### 代码质量 — 本轮新发现
 
 - [ ] **R226-CR-7 — `RegisterForResume` / `RegisterCronStubWithChain` 用 `r.CLIName/Version` 在多 backend 部署下显示错误（P1）**: 这两条路径只看默认 wrapper；router_core.go loadStore 已正确走 `wrapperFor(entry.Backend)`。方案：加 `backend string` 参数 → `wrapperFor`。Breaking：caller API。`internal/session/router_discovery.go:259,362`。
-- [ ] **R226-CR-8 — `cron/scheduler.freshContextPreflight` 死代码（P1）**: 仅由 `freshContextPreflightP0` 委托调用；测试只测 P0 版本。方案：内联 P0 → 删 wrapper + 删过期注释 "keep intact for test surface"。`internal/cron/scheduler.go:1570`。
+- [x] **R226-CR-8 — `cron/scheduler.freshContextPreflight` 死代码（P1）**: 仅由 `freshContextPreflightP0` 委托调用；测试只测 P0 版本。方案：内联 P0 → 删 wrapper + 删过期注释 "keep intact for test surface"。`internal/cron/scheduler.go:1570`。 — 已修复（删 80 行 dead function + 收编 P0 godoc），本批 PR #151
 - [ ] **R226-CR-9 — dispatch/server 错误→中文消息双份重复（P2，封 R215-CR-P2-1 drift）**: 已加 sync 注释，但根治需提共享函数 `UserMessageForSendError(err, noOutTimeout, totalTimeout) (msg, severity)` 到 `internal/cli/usermsg.go` 或 `internal/session/usermsg.go`，dispatch + server 同时消费。方案明确。
 - [ ] **R226-CR-10 — `cron/scheduler.executeOpt` 320 行 7 失败分支（P2）**: 抽 `handleGetOrCreateError` / `handleSendError` / `deliverResult` helpers。`internal/cron/scheduler.go:1749-2070`。
 - [ ] **R226-CR-11 — `cron/scheduler.go` 2739 行单文件无拆分计划（P2）**: 拟 `scheduler_job.go`/`scheduler_run.go`/`scheduler_notify.go` 拆分；先写 split intent 文档，分阶段做。
 - [ ] **R226-CR-12 — `wshub.go` 1785 行 + `feishu.go` 1461 行无拆分计划（P3）**: wshub 至少抽 `wshub_events.go`；feishu 抽 `feishu_token.go` + `feishu_transport.go`。
-- [ ] **R226-CR-13 — `Snapshot()` 在 read-only 路径里写 `s.SetModel(liveModel)`（P3）**: ListSessions 池化 + side-effect 矛盾。方案：把 model 镜像写迁到 storeProcess 或 post-result hook。`internal/session/managed.go:957`。
+- [x] **R226-CR-13 — `Snapshot()` 在 read-only 路径里写 `s.SetModel(liveModel)`（P3）**: ListSessions 池化 + side-effect 矛盾。方案：把 model 镜像写迁到 storeProcess 或 post-result hook。`internal/session/managed.go:957`。 — 已修复（保留 mirror write 同时补充 godoc 明确意图，避免未来 SnapshotReadOnly 复制路径丢副作用），本批 PR #151
 - [ ] **R226-CR-14 — `session/testutil.go` 测试设施无 build constraint（P3）**: TestProcess/NewTestProcess 编进 prod binary。方案：`//go:build testing` 或迁 `testutil_test.go`（需先验证外部 test 依赖）。
 - [ ] **R226-CR-15 — `router_lifecycle.ResetChat` fast/fallback 双 path 共享 teardown 代码（P3）**: 抽 `resetKeyLocked(key, *ManagedSession)` helper。
 - [ ] **R226-CR-16 — `Scheduler.UpdateJob` Pause 分支没委托给 `pauseJobLocked` / `resumeJobLocked`（P3）**: pause 逻辑双份维护。
@@ -221,7 +221,7 @@
 
 ### Go 正确性 — 本轮新发现
 
-- [ ] **R225-GO-1 — `cli/process.go sendSlot.canceled` 普通 bool 字段在锁外被 fanoutTurnResult 读（P3）**: `process.go:337` 注释承认是 race detector 会标的"acceptable"——可直接改 `atomic.Bool` 消除注释合理性需求。改动小但触及 sendSlot 公开结构，需评估 test fixture。
+- [x] **R225-GO-1 — `cli/process.go sendSlot.canceled` 普通 bool 字段在锁外被 fanoutTurnResult 读（P3）**: `process.go:337` 注释承认是 race detector 会标的"acceptable"——可直接改 `atomic.Bool` 消除注释合理性需求。改动小但触及 sendSlot 公开结构，需评估 test fixture。 — 已修复（atomic.Bool 替换裸 bool，消除 race acceptable 注释依赖），本批 PR #146
 - [ ] **R225-GO-2 — `cli.Resolve` retry sleep 的 ctx 取消（P2 R224-GO-1 子分支）**: subagent_link.go:289/327 `time.Sleep(retryInterval)` 在 SIGTERM 期间无法被取消；与 R224-GO-1 同批接 ctx。Breaking：Resolve 签名加 ctx 参数。
 - [ ] **R225-GO-3 — `process_event_query.InjectHistory` 裸 `go linker.Resolve(...)` 无 ctx（P2 R224-GO-3 同源第三分支）**: process_event_query.go:61 与 router_shim.go reconnect 同型；`wallclock` 取的是 `e.Time` 是对的，但 SIGTERM 期间 goroutine 仍不可中止。同 R225-GO-2 一并接 ctx。
 - [ ] **R225-GO-4 — `Router.Remove` / `dropEventLogForKey` 用 `context.Background()` + 独立 timeout 而非传入 ctx（P2）**: router_cleanup.go:97 `Remove` 路径上 7s 内不可被 SIGTERM 取消，shutdown tail latency 加重。Breaking：Remove 签名加 ctx。
@@ -229,7 +229,7 @@
 - [ ] **R225-GO-6 — `cli.Process pongRecv` 容量 1 在 GC pause 下可能误杀健康进程（P3）**: process.go:228 调度延迟时多个 pong 被丢，misses 误累。方案：容量提到 maxMisses+1，或心跳消费处用 drain 循环。
 - [ ] **R225-GO-7 — `cli.Process.Kill` 在持 shimWMu 下调 closeShimConn，net.Conn.Close 阻塞会饥饿 ping/heartbeat（P3）**: process.go:509 与 Detach 顺序不一致——后者是 Unlock 后 close。方案：Kill 也对齐先 Unlock 再 closeShimConn。
 - [ ] **R225-GO-8 — `cli.spawnSession` 历史加载 ctx 用 `context.Background()` 不继承 ctx（P3）**: router_lifecycle.go:678 resume + `claudeDir != ""` + 无 oldHistory 时 15s 独立 ctx；调用方 ctx 已被取消时仍会等满。方案：`context.WithTimeout(ctx, 15s)`。
-- [ ] **R225-GO-9 — `Process.SessionID` 公开字段缺 mutex 注释（P3）**: process.go 字段定义无 `// Protected by mu` 注释，外部调用方可能绕过 GetSessionID 直接读。方案：补字段 godoc。
+- [x] **R225-GO-9 — `Process.SessionID` 公开字段缺 mutex 注释（P3）**: process.go 字段定义无 `// Protected by mu` 注释，外部调用方可能绕过 GetSessionID 直接读。方案：补字段 godoc。 — 已修复（字段 godoc 补 mutex 契约），本批 PR #146
 
 ### 安全 — 本轮新发现
 
@@ -272,7 +272,7 @@
 - [ ] **R225-CR-7 — `BackendInfo.Features` 在 DetectBackendsCtx 不填、由 dashboard handler 二次注入（P3）**: detect.go：未来调用方直接读会拿到 nil map。方案：godoc 显式标注"dashboard-only 字段"或 DetectBackendsCtx 内填。
 - [ ] **R225-CR-8 — `Snapshot.Model` 注释未提 ACP 路径填空 / spawn-time 值（P3 与 R225-ACP-MODEL-INIT 关联）**: managed.go:850 注释暗示总是准确，但 ACP `session/new` 返回的 currentModelId 当前未回填。方案：注释补"ACP 在 Init 阶段才得到真实 model"。
 - [ ] **R225-CR-9 — `normalizeBackendID` default 分支不验注册 ID（P3）**: 未注册 backend 字符串能直通到 wrapper.BackendID，错误延后到 spawn 期。方案：default 分支调 `backend.Get` 失败 slog.Warn 或 NewWrapper fail-fast。
-- [ ] **R225-CR-10 — `cli.Resolve` 路径长字符串（ev.Description）被 closure 长时间持有（P3）**: process_readloop.go:393 max 8 个 Resolve goroutine 并发持有数 KB 字符串到 sem 释放。方案：调用前 `textutil.TruncateRunes(desc, 2000)`。
+- [x] **R225-CR-10 — `cli.Resolve` 路径长字符串（ev.Description）被 closure 长时间持有（P3）**: process_readloop.go:393 max 8 个 Resolve goroutine 并发持有数 KB 字符串到 sem 释放。方案：调用前 `textutil.TruncateRunes(desc, 2000)`。 — 已修复（readLoop + InjectHistory 调用前 truncate 至 2000 runes），本批 PR #151
 - [x] **R225-CR-11 — `backend/profile.reset` 注释声称外部测试反射调用但 unexported 反射不可达（P3）**: profile.go:239 staticcheck U1000 未用；`cron.freshContextPreflight` 同款。方案：移到 *_test.go + 改 `resetForTest` 或 `//go:build testing`。 — 已修复（reset 在源码 + _test.go 内 0 调用者，测试已通过 withCleanRegistry helper 完整覆盖；删函数 + 同步 defaultsOnce 注释指向 withCleanRegistry。cron.freshContextPreflight 是另一根因，留作单独条目），本批 PR #150
 - [ ] **R225-CR-12 — `spawnSession` 函数注释承诺"持锁"但内部多次 Unlock/Lock（P2）**: router_lifecycle.go:506 让未来维护者误加嵌套调用导致死锁。方案：注释精确化 + LOCK: 批注，或重构锁生命周期由调用方负责。
 - [ ] **R225-CR-13 — `readLoop` passthrough 无主 result fall-through 触发 Warn 日志（P2）**: process_readloop.go:306 `eventCh full, dropped result` 在正常路径会误报。方案：fall-through 前加 `if !p.caps.Replay` 守卫或日志降到 Debug。

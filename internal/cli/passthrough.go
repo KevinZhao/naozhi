@@ -157,14 +157,14 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Ima
 		// Tombstone: keep slot in pendingSlots so FIFO positioning survives.
 		// When the real result arrives, fanout sees canceled=true and drops.
 		p.slotsMu.Lock()
-		slot.canceled = true
+		slot.canceled.Store(true)
 		p.slotsMu.Unlock()
 		return nil, ctx.Err()
 	case <-bail.C:
 		// Pure defensive fallback. Record slot as canceled so a late result
 		// won't try to write to a resultCh whose caller is long gone.
 		p.slotsMu.Lock()
-		slot.canceled = true
+		slot.canceled.Store(true)
 		p.slotsMu.Unlock()
 		slog.Warn("passthrough: slot orphaned", "slot_id", slot.id, "elapsed", time.Since(slot.enqueueAt))
 		return nil, ErrOrphanedSlot
