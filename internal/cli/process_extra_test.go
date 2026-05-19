@@ -1280,44 +1280,46 @@ func TestEventEntryFromEvent(t *testing.T) {
 // variant must stamp entries with the caller-supplied millisecond timestamp
 // rather than calling time.Now() internally. readLoop relies on this to
 // share a single wall-clock read between ev.recvAt and EventEntry.Time.
-//
-// Updated 2026-05-19: a non-empty result event now yields TWO entries
-// (legacy "result" cost-bearing entry + visible "text" entry for ACP/kiro
-// where ev.Result holds the assistant reply). Both must carry the same
-// caller-supplied timestamp.
 func TestEventEntriesFromEventAt_UsesExternalTime(t *testing.T) {
 	const fixedMS int64 = 1711111111111
 	ev := Event{Type: "result", Result: "x", CostUSD: 0.0}
 	entries := EventEntriesFromEventAt(ev, fixedMS)
-	if len(entries) != 2 {
-		t.Fatalf("want 2 entries (result+text for non-empty Result), got %d", len(entries))
+	if len(entries) != 1 {
+		t.Fatalf("want 1 result entry, got %d: %+v", len(entries), entries)
 	}
-	for i, e := range entries {
-		if e.Time != fixedMS {
-			t.Errorf("entries[%d].Time = %d, want %d", i, e.Time, fixedMS)
-		}
+	if entries[0].Time != fixedMS {
+		t.Errorf("entries[0].Time = %d, want %d", entries[0].Time, fixedMS)
 	}
 	if entries[0].Type != "result" {
 		t.Errorf("entries[0].Type = %q, want result", entries[0].Type)
-	}
-	if entries[1].Type != "text" {
-		t.Errorf("entries[1].Type = %q, want text (ACP visible reply)", entries[1].Type)
 	}
 }
 
-// TestEventEntriesFromEvent_EmptyResultNoTextEntry pins the negative case:
-// a result event with empty Result (claude convention — text already
-// streamed via assistant chunks) MUST NOT emit a parallel "text" entry.
-// Without this guard the dashboard would render an empty bubble at every
-// claude turn-end.
-func TestEventEntriesFromEvent_EmptyResultNoTextEntry(t *testing.T) {
-	ev := Event{Type: "result", Result: "", CostUSD: 0.0042}
-	entries := EventEntriesFromEvent(ev)
-	if len(entries) != 1 {
-		t.Fatalf("want 1 entry (no text for empty Result), got %d", len(entries))
-	}
-	if entries[0].Type != "result" {
-		t.Errorf("entries[0].Type = %q, want result", entries[0].Type)
+// TestEventEntriesFromEvent_ResultDoesNotEmitVisibleText pins the invariant
+// that a result event yields exactly ONE EventEntry — the metadata-only
+// "result" entry. The visible reply is the responsibility of preceding
+// assistant frames (claude streams text content blocks turn-mid, ACP
+// synthesises one at stopReason). An earlier implementation tried to mirror
+// ev.Result into a parallel "text" entry as a fallback for ACP, but that
+// produced a duplicate bubble on claude (where the same text had already
+// been logged from a preceding text content block) — see commit history for
+// the multi-event ReadEvent fix.
+func TestEventEntriesFromEvent_ResultDoesNotEmitVisibleText(t *testing.T) {
+	for _, ev := range []Event{
+		{Type: "result", Result: "", CostUSD: 0.0042},
+		{Type: "result", Result: "x", CostUSD: 0.0},
+	} {
+		entries := EventEntriesFromEvent(ev)
+		if len(entries) != 1 {
+			t.Fatalf("ev=%+v: want 1 entry, got %d (%+v)", ev, len(entries), entries)
+		}
+		if entries[0].Type != "result" {
+			t.Errorf("ev=%+v: entries[0].Type = %q, want result", ev, entries[0].Type)
+		}
+		if entries[0].Summary != "" || entries[0].Detail != "" {
+			t.Errorf("ev=%+v: result entry must not carry visible Summary/Detail (those would render as a duplicate bubble), got Summary=%q Detail=%q",
+				ev, entries[0].Summary, entries[0].Detail)
+		}
 	}
 }
 

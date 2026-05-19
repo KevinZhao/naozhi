@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"runtime/debug"
 	"strconv"
@@ -237,7 +238,7 @@ func (p *Process) readLoop() {
 		switch msg.Type {
 		case "stdout":
 			p.lastSeq.Store(msg.Seq)
-			ev, done, err := p.protocol.ReadEvent(msg.Line)
+			events, _, err := p.protocol.ReadEvent(msg.Line)
 			if err != nil {
 				// ACP RPC errors: kiro returned an error response to a request
 				// we sent (typically session/prompt). The turn is over from
@@ -246,12 +247,12 @@ func (p *Process) readLoop() {
 				// Send() unblock. Without this, state stays "running" forever
 				// (operator-visible as "kiro session never replies"; reproduced
 				// 2026-05-19 r3-cancel/r3-lifecycle stuck after restart).
-				if errors.Is(err, ErrACPRPC) && done {
-					ev = Event{
+				if errors.Is(err, ErrACPRPC) {
+					events = []Event{{
 						Type:    "result",
 						SubType: "error",
 						Result:  "[kiro] " + err.Error(),
-					}
+					}}
 					log.Warn("readLoop: kiro returned RPC error; surfacing as failed turn",
 						"err", err, "seq", msg.Seq)
 					// Fall through into the normal turn-end dispatch path
@@ -261,219 +262,27 @@ func (p *Process) readLoop() {
 					continue
 				}
 			}
-			if ev.Type == "" {
-				continue
-			}
-			if p.protocol.HandleEvent(p.shimStdinWriter(), ev) {
-				continue
-			}
-
-			// Type:"metadata" is a normalize-channel event (kiro
-			// _kiro.dev/metadata today; future backends use the same
-			// shape). Apply to Process atomic state and skip downstream
-			// dispatch — these are status frames, not assistant output, so
-			// they should not flow through eventCh / EventLog. Snapshot
-			// reads the values lock-free.
-			// See docs/rfc/multi-backend.md §8.8.
-			if ev.Type == "metadata" {
-				p.applyMetadata(ev.Metadata)
-				continue
-			}
-
-			// Capture one time.Now() shared between ev.recvAt (handed to
-			// drainStaleEvents) and the EventEntry.Time values produced by
-			// logEventAt. Previously the two read wall-clock independently,
-			// which is measurable at 5-50 events/s × N active sessions.
-			// R67-PERF-9. Also cache UnixMilli once — used up to 4× per
-			// event by the dispatch below.
-			now := time.Now()
-			nowMS := now.UnixMilli()
-
-			// ---- Passthrough mode hooks ----
-			// These run before the legacy eventCh / EventLog delivery paths.
-			// They are cheap no-ops when passthrough is not in use (zero
-			// pending slots, inTurn=false, protocol doesn't support replay).
-
-			// system/init: mark start of new turn for turn-aggregation owner
-			// tracking and watchdog baseline. Keeping this unconditional is
-			// harmless — onSystemInit only matters when pendingSlots is
-			// non-empty and a replay arrives later.
-			if ev.Type == "system" && ev.SubType == "init" && p.caps.Replay {
-				p.onSystemInit()
-			}
-
-			// user replay: claim slots into currentTurnSlots. Filter out of
-			// EventLog + eventCh so replay events don't pollute the dashboard
-			// transcript or trigger legacy result detection.
-			if ev.Type == "user" && ev.IsReplay {
-				p.slotsMu.Lock()
-				p.handleReplayEventLocked(ev)
-				p.slotsMu.Unlock()
-				continue // skip logEventAt / eventCh below
-			}
-
-			// result under passthrough: fan-out to claimed slots and skip
-			// legacy eventCh delivery. We still log to EventLog so dashboard
-			// sees the turn-complete event.
-			if ev.Type == "result" && p.caps.Replay {
-				// error_during_execution signals the CLI aborted the turn —
-				// e.g. a priority:"now" preempted it. Any older pending slot
-				// written before `now` that was never replayed was dropped
-				// by the CLI; fire ErrAbortedByUrgent for those.
-				if ev.SubType == "error_during_execution" {
-					victims := p.reapAbortedPreempted()
-					fireAbortErrors(victims)
-				}
-				owners := p.onTurnResult()
-				if len(owners) > 0 {
-					p.logEventAt(ev, nowMS)
-					// Fire onEvent for each owner's turn-scope callback
-					// before delivering the terminal result.
-					for _, owner := range owners {
-						if owner.onEvent != nil {
-							owner.onEvent(ev)
-						}
-					}
-					fanoutTurnResult(owners, ev)
+			// ReadEvent now returns a slice. Today the only multi-event frame
+			// is ACPProtocol's stopReason response, which emits
+			// (assistant text, result) — iterating preserves the single-event
+			// claude semantics while letting the ACP turn-end split land
+			// naturally. dispatchProtocolEvent reports back when killCh fired
+			// so the outer readLoop can return and trigger teardown.
+			killed := false
+			for _, ev := range events {
+				if ev.Type == "" {
 					continue
 				}
-				// No owners claim this result. Under passthrough this means
-				// either (a) an abort with no claimed slots, handled above,
-				// or (b) stray result during reconnect. Either way skip
-				// legacy eventCh; dashboard EventLog already has the entry.
-				if ev.SubType == "error_during_execution" {
-					p.logEventAt(ev, nowMS)
+				if p.protocol.HandleEvent(p.shimStdinWriter(), ev) {
 					continue
 				}
-				// Fall through to legacy path only for true stray results.
-			}
-
-			// SubagentLinker plumbing for RFC v4 agent-team-ui.
-			//   - system.init carries the parent session_uuid used as the
-			//     sub-key under ~/.claude/projects/<projectDir>/.
-			//   - system.task_started with task_type=="in_process_teammate"
-			//     is our cue that the CLI has (or is about to) write
-			//     subagents/agent-<hex>.jsonl; kick off an async Resolve
-			//     bounded by the linker's retry budget so readLoop stays
-			//     responsive.
-			// UI Round 5 R5-3: claude advertises the resolved model in
-			// system/init. readLoop is the always-on path (active even
-			// during reconnect when no Send() is consuming events), so
-			// capture here too — the parallel hook in process_send.go
-			// covers the case where Send() drains init before readLoop
-			// observes it (race; first to call setModel wins, both
-			// values are the same so it doesn't matter). Only overwrite
-			// when init event actually carries a model value.
-			if ev.Type == "system" && ev.SubType == "init" && ev.Model != "" {
-				p.setModel(ev.Model)
-			}
-			if p.linker != nil {
-				if ev.Type == "system" && ev.SubType == "init" && ev.SessionID != "" {
-					projectDir := resolveProjectDir(p.cwd)
-					p.linker.SetContext(projectDir, ev.SessionID)
-				}
-				// Trigger Resolve for BOTH in-process teammates (TeamCreate's
-				// Agent spawns; task_type="in_process_teammate") AND standalone
-				// sub-agents (Task(subagent_type=...); task_type often empty
-				// or vendor-specific). Both write subagents/agent-<task_id>.
-				// jsonl, so the linker's fast path (stat by task_id) is the
-				// right common denominator. Exclude local_bash — those only
-				// persist to tool-results/ and have no internal transcript.
-				if ev.Type == "system" && ev.SubType == "task_started" &&
-					ev.TaskType != "local_bash" && ev.TaskID != "" && ev.ToolUseID != "" {
-					taskID := ev.TaskID
-					toolUseID := ev.ToolUseID
-					name := ev.Description
-					if nameTrim := strings.TrimSpace(name); nameTrim != "" {
-						// task_started.description is "<name>: <prompt body>"
-						// for teammates; for sub-agents it's just the prompt.
-						// The linker's fast path works either way; trimming
-						// to the name prefix only helps the name-scan fallback.
-						if idx := strings.IndexByte(nameTrim, ':'); idx > 0 {
-							name = strings.TrimSpace(nameTrim[:idx])
-						} else {
-							name = nameTrim
-						}
-					}
-					linker := p.linker
-					go linker.Resolve(taskID, toolUseID, name, ev.Description, nowMS)
+				if p.dispatchProtocolEvent(ev, log) {
+					killed = true
+					break
 				}
 			}
-
-			// Always log to EventLog so dashboard subscribers see events
-			// even when no Send() is active (e.g., after service restart
-			// reconnects to a shim that's mid-turn).
-			p.logEventAt(ev, nowMS)
-
-			// If a result event arrives while no Send() is active (e.g.,
-			// after shim reconnect set state to Running via isMidTurn but
-			// the CLI finished before anyone called Send), transition
-			// back to Ready so the dashboard doesn't show a stale "running".
-			//
-			// The transition is gated on reconnectedMidTurn: outside the
-			// reconnect path, State=Running means Send() is actively waiting
-			// for this result and owns the State→Ready transition via its
-			// defer. Racing readLoop into that transition briefly flips the
-			// dashboard to "ready" before Send() returns, and — worse — lets a
-			// concurrent Send() start immediately after Send() unlocks mu but
-			// before its defer runs. The flag is one-shot: consumed on first
-			// stray-result here so a genuine next-turn Send() after reconnect
-			// is not confused with another stray result.
-			if ev.Type == "result" && p.reconnectedMidTurn.CompareAndSwap(true, false) {
-				p.mu.Lock()
-				wasRunning := p.State == StateRunning
-				if wasRunning {
-					p.State = StateReady
-				}
-				cb := p.onTurnDone
-				p.mu.Unlock()
-				if wasRunning && cb != nil {
-					// R183-CONCUR-M1: the killCh select below may fire cb again
-					// in the same readLoop iteration if Kill() was racing this
-					// stray-result path. See onTurnDone godoc for the idempotency
-					// contract that makes this safe.
-					cb()
-				}
-			}
-
-			select {
-			case <-p.killCh:
-				p.setDeathReason(DeathReasonKilled)
-				p.mu.Lock()
-				p.State = StateDead
-				cb := p.onTurnDone
-				p.mu.Unlock()
-				if cb != nil {
-					cb()
-				}
-				// Unblock any passthrough SendPassthrough callers immediately.
-				// The defer at readLoop end also calls discardAllPending, but
-				// that runs after we drain any remaining stdin frames — a kill
-				// race with active slots would otherwise wait for the outer
-				// loop to fully unwind (tens of ms under load).
-				p.discardAllPending(ErrProcessExited)
+			if killed {
 				return
-			default:
-			}
-
-			// Deliver to Send() for result detection and callback delivery.
-			// Non-blocking: if buffer is full (no active Send), the event
-			// is already safely in EventLog for dashboard visibility.
-			// recvAt is set just before handoff so drainStaleEvents can tell
-			// events queued before a new turn started from events produced
-			// for the new turn.
-			ev.recvAt = now
-			select {
-			case p.eventCh <- ev:
-			default:
-				// Full buffer: drop is safe (EventLog kept the entry) but
-				// dropping a `result` event forces Send() into the
-				// findResultSince fallback, so log at Warn for observability.
-				if ev.Type == "result" {
-					log.Warn("eventCh full, dropped result", "subtype", ev.SubType)
-				} else {
-					log.Debug("eventCh full, dropped", "type", ev.Type)
-				}
 			}
 
 		case "stderr":
@@ -557,6 +366,226 @@ func (p *Process) readLoop() {
 	}
 	// Passthrough: fan-out ErrProcessExited to any still-blocking SendPassthrough callers.
 	p.discardAllPending(ErrProcessExited)
+}
+
+// dispatchProtocolEvent runs the per-Event side of readLoop: passthrough hooks,
+// linker plumbing, EventLog append, mid-turn reconnect bookkeeping, and the
+// non-blocking handoff to Send via eventCh. Returns true if a kill signal was
+// observed during dispatch and the caller should unwind the read loop.
+//
+// Extracted from the inline switch body when Protocol.ReadEvent moved from a
+// single Event to a slice (ACP turn-end emits assistant+result), so each
+// dispatched Event sees the full pipeline regardless of how many wire frames
+// fed it.
+func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
+	// Type:"metadata" is a normalize-channel event (kiro
+	// _kiro.dev/metadata today; future backends use the same
+	// shape). Apply to Process atomic state and skip downstream
+	// dispatch — these are status frames, not assistant output, so
+	// they should not flow through eventCh / EventLog. Snapshot
+	// reads the values lock-free.
+	// See docs/rfc/multi-backend.md §8.8.
+	if ev.Type == "metadata" {
+		p.applyMetadata(ev.Metadata)
+		return false
+	}
+
+	// Capture one time.Now() shared between ev.recvAt (handed to
+	// drainStaleEvents) and the EventEntry.Time values produced by
+	// logEventAt. Previously the two read wall-clock independently,
+	// which is measurable at 5-50 events/s × N active sessions.
+	// R67-PERF-9. Also cache UnixMilli once — used up to 4× per
+	// event by the dispatch below.
+	now := time.Now()
+	nowMS := now.UnixMilli()
+
+	// ---- Passthrough mode hooks ----
+	// These run before the legacy eventCh / EventLog delivery paths.
+	// They are cheap no-ops when passthrough is not in use (zero
+	// pending slots, inTurn=false, protocol doesn't support replay).
+
+	// system/init: mark start of new turn for turn-aggregation owner
+	// tracking and watchdog baseline. Keeping this unconditional is
+	// harmless — onSystemInit only matters when pendingSlots is
+	// non-empty and a replay arrives later.
+	if ev.Type == "system" && ev.SubType == "init" && p.caps.Replay {
+		p.onSystemInit()
+	}
+
+	// user replay: claim slots into currentTurnSlots. Filter out of
+	// EventLog + eventCh so replay events don't pollute the dashboard
+	// transcript or trigger legacy result detection.
+	if ev.Type == "user" && ev.IsReplay {
+		p.slotsMu.Lock()
+		p.handleReplayEventLocked(ev)
+		p.slotsMu.Unlock()
+		return false
+	}
+
+	// result under passthrough: fan-out to claimed slots and skip
+	// legacy eventCh delivery. We still log to EventLog so dashboard
+	// sees the turn-complete event.
+	if ev.Type == "result" && p.caps.Replay {
+		// error_during_execution signals the CLI aborted the turn —
+		// e.g. a priority:"now" preempted it. Any older pending slot
+		// written before `now` that was never replayed was dropped
+		// by the CLI; fire ErrAbortedByUrgent for those.
+		if ev.SubType == "error_during_execution" {
+			victims := p.reapAbortedPreempted()
+			fireAbortErrors(victims)
+		}
+		owners := p.onTurnResult()
+		if len(owners) > 0 {
+			p.logEventAt(ev, nowMS)
+			// Fire onEvent for each owner's turn-scope callback
+			// before delivering the terminal result.
+			for _, owner := range owners {
+				if owner.onEvent != nil {
+					owner.onEvent(ev)
+				}
+			}
+			fanoutTurnResult(owners, ev)
+			return false
+		}
+		// No owners claim this result. Under passthrough this means
+		// either (a) an abort with no claimed slots, handled above,
+		// or (b) stray result during reconnect. Either way skip
+		// legacy eventCh; dashboard EventLog already has the entry.
+		if ev.SubType == "error_during_execution" {
+			p.logEventAt(ev, nowMS)
+			return false
+		}
+		// Fall through to legacy path only for true stray results.
+	}
+
+	// SubagentLinker plumbing for RFC v4 agent-team-ui.
+	//   - system.init carries the parent session_uuid used as the
+	//     sub-key under ~/.claude/projects/<projectDir>/.
+	//   - system.task_started with task_type=="in_process_teammate"
+	//     is our cue that the CLI has (or is about to) write
+	//     subagents/agent-<hex>.jsonl; kick off an async Resolve
+	//     bounded by the linker's retry budget so readLoop stays
+	//     responsive.
+	// UI Round 5 R5-3: claude advertises the resolved model in
+	// system/init. readLoop is the always-on path (active even
+	// during reconnect when no Send() is consuming events), so
+	// capture here too — the parallel hook in process_send.go
+	// covers the case where Send() drains init before readLoop
+	// observes it (race; first to call setModel wins, both
+	// values are the same so it doesn't matter). Only overwrite
+	// when init event actually carries a model value.
+	if ev.Type == "system" && ev.SubType == "init" && ev.Model != "" {
+		p.setModel(ev.Model)
+	}
+	if p.linker != nil {
+		if ev.Type == "system" && ev.SubType == "init" && ev.SessionID != "" {
+			projectDir := resolveProjectDir(p.cwd)
+			p.linker.SetContext(projectDir, ev.SessionID)
+		}
+		// Trigger Resolve for BOTH in-process teammates (TeamCreate's
+		// Agent spawns; task_type="in_process_teammate") AND standalone
+		// sub-agents (Task(subagent_type=...); task_type often empty
+		// or vendor-specific). Both write subagents/agent-<task_id>.
+		// jsonl, so the linker's fast path (stat by task_id) is the
+		// right common denominator. Exclude local_bash — those only
+		// persist to tool-results/ and have no internal transcript.
+		if ev.Type == "system" && ev.SubType == "task_started" &&
+			ev.TaskType != "local_bash" && ev.TaskID != "" && ev.ToolUseID != "" {
+			taskID := ev.TaskID
+			toolUseID := ev.ToolUseID
+			name := ev.Description
+			if nameTrim := strings.TrimSpace(name); nameTrim != "" {
+				// task_started.description is "<name>: <prompt body>"
+				// for teammates; for sub-agents it's just the prompt.
+				// The linker's fast path works either way; trimming
+				// to the name prefix only helps the name-scan fallback.
+				if idx := strings.IndexByte(nameTrim, ':'); idx > 0 {
+					name = strings.TrimSpace(nameTrim[:idx])
+				} else {
+					name = nameTrim
+				}
+			}
+			linker := p.linker
+			go linker.Resolve(taskID, toolUseID, name, ev.Description, nowMS)
+		}
+	}
+
+	// Always log to EventLog so dashboard subscribers see events
+	// even when no Send() is active (e.g., after service restart
+	// reconnects to a shim that's mid-turn).
+	p.logEventAt(ev, nowMS)
+
+	// If a result event arrives while no Send() is active (e.g.,
+	// after shim reconnect set state to Running via isMidTurn but
+	// the CLI finished before anyone called Send), transition
+	// back to Ready so the dashboard doesn't show a stale "running".
+	//
+	// The transition is gated on reconnectedMidTurn: outside the
+	// reconnect path, State=Running means Send() is actively waiting
+	// for this result and owns the State→Ready transition via its
+	// defer. Racing readLoop into that transition briefly flips the
+	// dashboard to "ready" before Send() returns, and — worse — lets a
+	// concurrent Send() start immediately after Send() unlocks mu but
+	// before its defer runs. The flag is one-shot: consumed on first
+	// stray-result here so a genuine next-turn Send() after reconnect
+	// is not confused with another stray result.
+	if ev.Type == "result" && p.reconnectedMidTurn.CompareAndSwap(true, false) {
+		p.mu.Lock()
+		wasRunning := p.State == StateRunning
+		if wasRunning {
+			p.State = StateReady
+		}
+		cb := p.onTurnDone
+		p.mu.Unlock()
+		if wasRunning && cb != nil {
+			// R183-CONCUR-M1: the killCh select below may fire cb again
+			// in the same readLoop iteration if Kill() was racing this
+			// stray-result path. See onTurnDone godoc for the idempotency
+			// contract that makes this safe.
+			cb()
+		}
+	}
+
+	select {
+	case <-p.killCh:
+		p.setDeathReason(DeathReasonKilled)
+		p.mu.Lock()
+		p.State = StateDead
+		cb := p.onTurnDone
+		p.mu.Unlock()
+		if cb != nil {
+			cb()
+		}
+		// Unblock any passthrough SendPassthrough callers immediately.
+		// The defer at readLoop end also calls discardAllPending, but
+		// that runs after we drain any remaining stdin frames — a kill
+		// race with active slots would otherwise wait for the outer
+		// loop to fully unwind (tens of ms under load).
+		p.discardAllPending(ErrProcessExited)
+		return true
+	default:
+	}
+
+	// Deliver to Send() for result detection and callback delivery.
+	// Non-blocking: if buffer is full (no active Send), the event
+	// is already safely in EventLog for dashboard visibility.
+	// recvAt is set just before handoff so drainStaleEvents can tell
+	// events queued before a new turn started from events produced
+	// for the new turn.
+	ev.recvAt = now
+	select {
+	case p.eventCh <- ev:
+	default:
+		// Full buffer: drop is safe (EventLog kept the entry) but
+		// dropping a `result` event forces Send() into the
+		// findResultSince fallback, so log at Warn for observability.
+		if ev.Type == "result" {
+			log.Warn("eventCh full, dropped result", "subtype", ev.SubType)
+		} else {
+			log.Debug("eventCh full, dropped", "type", ev.Type)
+		}
+	}
+	return false
 }
 
 // heartbeatLoop sends periodic ping messages to the shim and kills the process

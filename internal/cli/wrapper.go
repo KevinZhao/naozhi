@@ -379,11 +379,24 @@ func isMidTurn(replays []shim.ServerMsg, proto Protocol) bool {
 		if replays[i].Type != "replay" {
 			continue
 		}
-		ev, _, err := proto.ReadEvent(replays[i].Line)
-		if err != nil || ev.Type == "" {
+		events, _, err := proto.ReadEvent(replays[i].Line)
+		if err != nil || len(events) == 0 {
 			continue
 		}
-		lastType = ev.Type
+		// Walk the slice in reverse so the last semantic event in the wire
+		// frame wins (ACP turn-end emits assistant+result; only the result
+		// settles the mid-turn question).
+		picked := ""
+		for j := len(events) - 1; j >= 0; j-- {
+			if events[j].Type != "" {
+				picked = events[j].Type
+				break
+			}
+		}
+		if picked == "" {
+			continue
+		}
+		lastType = picked
 		break
 	}
 	// "result" marks turn complete; anything else means mid-turn
