@@ -4,9 +4,10 @@
 //
 // Other modules that previously hard-coded `switch backend.ID` knowledge —
 // wrapper.go, detect.go, cmd/naozhi/main.go, discovery/proc_*.go,
-// server/server.go — are intended to call backend.Get(id) / backend.All()
-// instead. This Sprint (0b) only introduces the package; the actual
-// 散点收敛 happens in Sprint 1b.
+// server/server.go — should call backend.Get(id) / backend.All() instead.
+// Migration is incremental: a few residual switch statements remain in cli/
+// and session/ and are tracked in docs/TODO.md under the backend-profile
+// consolidation theme.
 //
 // Registration is explicit: callers must invoke RegisterDefaults() (typically
 // from main early in startup). init() self-registration is deliberately

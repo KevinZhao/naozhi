@@ -924,6 +924,44 @@ func TestACPProtocol_ReadEvent_KiroMetadata_MissingFields(t *testing.T) {
 	}
 }
 
+// TestNormalizeContextUsage pins the dual-format + clamp contract for kiro's
+// contextUsagePercentage. Live deployment (PR #126 follow-up) found values
+// > 1.0 (kiro lets the counter run past 100% on overflow), so the helper
+// must accept BOTH 0-1 fractions AND already-percent inputs and clamp to
+// the dashboard-visible [0, 100] range.
+func TestNormalizeContextUsage(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   float64
+		want float64
+	}{
+		{"zero", 0, 0},
+		{"fraction small", 0.0285, 2.85},
+		{"fraction half", 0.5, 50},
+		{"fraction one", 1.0, 100},
+		{"already percent typical", 75, 75},
+		{"already percent overflow", 116.789, 100},
+		{"negative noise", -0.1, 0},
+		{"huge garbage", 1e9, 100},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := normalizeContextUsage(tc.in)
+			// Use abs-diff for the fractional comparison (float math).
+			diff := got - tc.want
+			if diff < 0 {
+				diff = -diff
+			}
+			if diff > 1e-9 {
+				t.Errorf("normalizeContextUsage(%v) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestACPProtocol_ReadEvent_KiroMetadata_SchemaDriftSwallowed locks the
 // schema-drift contract: a malformed _kiro.dev/metadata frame returns the
 // "skip this line" zero-Event without aborting readLoop.

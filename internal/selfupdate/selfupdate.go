@@ -13,6 +13,7 @@ package selfupdate
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -34,6 +35,12 @@ const (
 	// maxBinaryBytes caps the download size to guard against a rogue release
 	// asset or MITM response filling the disk.
 	maxBinaryBytes = 200 * 1024 * 1024 // 200 MB
+
+	// maxChecksumBytes caps the size of checksums.txt — a hardened upper
+	// bound, far larger than legitimate release manifests (a few KB) but
+	// small enough that a hostile mirror cannot exhaust memory by serving a
+	// giant file.
+	maxChecksumBytes = 64 * 1024 // 64 KB
 )
 
 // ErrUnsupportedPlatform is returned when the current OS has no release asset.
@@ -97,11 +104,11 @@ func Download(ctx context.Context, rel *Release, dir string) (binPath string, er
 	asset := assetName()
 	binPath = filepath.Join(dir, asset)
 
-	if err := fetchFile(ctx, rel.AssetURL, binPath); err != nil {
+	if err := fetchFile(ctx, rel.AssetURL, binPath, maxBinaryBytes); err != nil {
 		return "", fmt.Errorf("download binary: %w", err)
 	}
 	sumPath := filepath.Join(dir, "checksums.txt")
-	if err := fetchFile(ctx, rel.SumURL, sumPath); err != nil {
+	if err := fetchFile(ctx, rel.SumURL, sumPath, maxChecksumBytes); err != nil {
 		return "", fmt.Errorf("download checksums: %w", err)
 	}
 	if err := verifyChecksum(binPath, sumPath, asset); err != nil {
@@ -185,7 +192,7 @@ func assetName() string {
 	return fmt.Sprintf("naozhi-%s-%s", runtime.GOOS, runtime.GOARCH)
 }
 
-func fetchFile(ctx context.Context, url, dest string) error {
+func fetchFile(ctx context.Context, url, dest string, maxBytes int64) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
@@ -206,7 +213,7 @@ func fetchFile(ctx context.Context, url, dest string) error {
 	}
 	defer f.Close()
 
-	if _, err := io.Copy(f, io.LimitReader(resp.Body, maxBinaryBytes)); err != nil {
+	if _, err := io.Copy(f, io.LimitReader(resp.Body, maxBytes)); err != nil {
 		return err
 	}
 	// Flush to disk before the caller verifies the checksum.
@@ -243,7 +250,10 @@ func verifyChecksum(binPath, sumPath, asset string) error {
 		return err
 	}
 	actual := hex.EncodeToString(h.Sum(nil))
-	if actual != expected {
+	// SHA-256 hex digests are equal-length so length-leak isn't the concern,
+	// but constant-time compare is the standard hygiene for any digest
+	// equality check on attacker-controllable input.
+	if subtle.ConstantTimeCompare([]byte(actual), []byte(expected)) != 1 {
 		return fmt.Errorf("checksum mismatch: expected %s, got %s", expected, actual)
 	}
 	return nil

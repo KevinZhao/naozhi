@@ -270,9 +270,9 @@ type Router struct {
 	workspace        string // default cwd for CLI processes
 	claudeDir        string // ~/.claude dir for loading session history
 	// kiroSessionsDir is the kiro session-state root. Plumbed into
-	// cli.HistoryWiring at attachHistorySource time so a future
-	// kirojsonl factory can read it; Sprint 1a leaves this unwired
-	// (RouterConfig.KiroSessionsDir is empty in cmd/naozhi).
+	// cli.HistoryWiring at attachHistorySource time so the kirojsonl
+	// factory can read per-session JSONL from this path. Wired from
+	// RouterConfig.KiroSessionsDir in cmd/naozhi/main.go.
 	kiroSessionsDir string
 
 	// workspaceOverrides stores per-chat workspace overrides.
