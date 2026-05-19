@@ -1,6 +1,6 @@
 <div align="center">
 
-# Naozhi 脑汁
+# naozhi
 
 **把 Claude Code 的完整 agent 能力装进你的聊天窗口**
 

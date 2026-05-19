@@ -1291,7 +1291,7 @@ func TestDashboardJS_R110A11y_IconButtonLabels(t *testing.T) {
 // carries a brand lockup (mark + wordmark) so first-time operators
 // recognize they're on the right service. Tests the three salient pieces:
 //   - mark element (`.ab-mark`) present and decorative (aria-hidden)
-//   - Chinese wordmark "脑汁 Naozhi" visible
+//   - Wordmark "naozhi" visible
 //   - tagline present (so the brand isn't just the service name)
 //
 // We assert the CSS hooks exist too so a refactor that rips the brand
@@ -1311,7 +1311,7 @@ func TestDashboardJS_R110P3_AuthBrandLockup(t *testing.T) {
 	for _, want := range []string{
 		`<div class="auth-brand">`,
 		`<div class="ab-mark" aria-hidden="true">`,
-		`<span class="ab-name">脑汁 Naozhi</span>`,
+		`<span class="ab-name">naozhi</span>`,
 		`<span class="ab-tag">Claude Code on IM</span>`,
 	} {
 		if !strings.Contains(jsSrc, want) {
@@ -3733,7 +3733,7 @@ func TestDashboard_R153_InputAreaAndTakeoverLocalized(t *testing.T) {
 // TestDashboard_R151_EventStreamAndBannerLocalized pins the Round 151
 // localization pass for three related UI surfaces:
 //
-//  1. Sidebar header title "Dashboard" → "脑汁" (matches the project's
+//  1. Sidebar header title "Dashboard" → "naozhi" (matches the project's
 //     brand name used throughout CLAUDE.md / README / auth-modal brand
 //     lockup).
 //  2. Event-stream "Load earlier" pagination button (4 states) + the
@@ -3765,8 +3765,8 @@ func TestDashboard_R151_EventStreamAndBannerLocalized(t *testing.T) {
 	js := string(jsBytes)
 
 	// Invariant 1: sidebar header brand.
-	if !strings.Contains(html, `<h1>脑汁</h1>`) {
-		t.Error("sidebar header must show `<h1>脑汁</h1>` (was `Dashboard`)")
+	if !strings.Contains(html, `<h1>naozhi</h1>`) {
+		t.Error("sidebar header must show `<h1>naozhi</h1>` (was `Dashboard`)")
 	}
 	if strings.Contains(html, `<h1>Dashboard</h1>`) {
 		t.Error("sidebar header legacy `<h1>Dashboard</h1>` must be removed")

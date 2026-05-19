@@ -1,6 +1,6 @@
 # Contributing to naozhi
 
-谢谢有兴趣贡献 naozhi（脑汁）。该项目目前主要由 Kevin Zhao 维护，外部 PR 欢迎但先读这份文档，避免来回返工。
+谢谢有兴趣贡献 naozhi。该项目目前主要由 Kevin Zhao 维护，外部 PR 欢迎但先读这份文档，避免来回返工。
 
 ## Scope / 适用范围
 
