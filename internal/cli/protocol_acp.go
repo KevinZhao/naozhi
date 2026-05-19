@@ -94,6 +94,15 @@ func (p *ACPProtocol) Clone() Protocol { return &ACPProtocol{BackendID: p.Backen
 
 func (p *ACPProtocol) BuildArgs(opts SpawnOptions) []string {
 	args := []string{"acp"}
+	// kiro-cli acp accepts `--model <ID>` to seed the initial session's model
+	// (verified on kiro 2.3.0: session/new result.models.currentModelId echoes
+	// the flag value; omitting it falls back to "auto"). Plumbed through so
+	// `cli.backends[].model` lands on kiro the same way it does on Claude.
+	// Empty Model means "let kiro pick its default" — do not pass an empty
+	// flag value, kiro would reject the argv.
+	if opts.Model != "" {
+		args = append(args, "--model", opts.Model)
+	}
 	// Mirror ClaudeProtocol's ExtraArgs guard (capExtraArgsBytes lives in
 	// protocol_claude.go) so an ACP backend cannot bypass the ARG_MAX
 	// defense merely by routing the same user-supplied args through here.
