@@ -564,32 +564,66 @@ func (s *shimServer) readStdout() {
 
 func (s *shimServer) tryExtractSessionID(line []byte) {
 	// Fast gate: fires on every CLI stdout line (5-50/s during active turns).
-	// Only `init` / `result` events carry session_id; the vast majority of
-	// lines are assistant_delta / tool_use and contain neither token. A single
-	// memchr pass via bytes.Contains avoids a full json.Unmarshal + reflection
-	// + ~400B decoder-state alloc on every line. R65-PERF-H-3.
-	if !bytes.Contains(line, []byte(`"session_id"`)) {
+	// Only init / result / ACP session/new events carry session_id; the vast
+	// majority of lines are assistant_delta / tool_use and contain neither
+	// token. Two bytes.Contains scans cover both the claude (snake_case
+	// "session_id") and ACP/kiro (camelCase "sessionId") frame conventions.
+	// R65-PERF-H-3 design preserved: still no full decoder-state alloc when
+	// the line lacks both tokens.
+	hasSnake := bytes.Contains(line, []byte(`"session_id"`))
+	hasCamel := bytes.Contains(line, []byte(`"sessionId"`))
+	if !hasSnake && !hasCamel {
 		return
 	}
-	var ev struct {
-		Type      string `json:"type"`
-		SubType   string `json:"subtype"`
-		SessionID string `json:"session_id"`
+
+	if hasSnake {
+		var ev struct {
+			Type      string `json:"type"`
+			SubType   string `json:"subtype"`
+			SessionID string `json:"session_id"`
+		}
+		if json.Unmarshal(line, &ev) == nil && ev.SessionID != "" {
+			s.mu.Lock()
+			if ev.Type == "system" && ev.SubType == "init" {
+				s.state.SessionID = ev.SessionID
+			}
+			if ev.Type == "result" && s.state.SessionID == "" {
+				s.state.SessionID = ev.SessionID
+			}
+			s.mu.Unlock()
+			return
+		}
 	}
-	if json.Unmarshal(line, &ev) != nil {
-		return
+
+	if hasCamel {
+		// ACP / kiro: session/new response carries the canonical session ID
+		// in result.sessionId; subsequent session/update notifications also
+		// echo it. The first sighting wins so a later notification can't
+		// overwrite a freshly-assigned ID with a stale one.
+		var ev struct {
+			Result struct {
+				SessionID string `json:"sessionId"`
+			} `json:"result"`
+			Params struct {
+				SessionID string `json:"sessionId"`
+			} `json:"params"`
+		}
+		if json.Unmarshal(line, &ev) != nil {
+			return
+		}
+		sid := ev.Result.SessionID
+		if sid == "" {
+			sid = ev.Params.SessionID
+		}
+		if sid == "" {
+			return
+		}
+		s.mu.Lock()
+		if s.state.SessionID == "" {
+			s.state.SessionID = sid
+		}
+		s.mu.Unlock()
 	}
-	if ev.SessionID == "" {
-		return
-	}
-	s.mu.Lock()
-	if ev.Type == "system" && ev.SubType == "init" {
-		s.state.SessionID = ev.SessionID
-	}
-	if ev.Type == "result" && s.state.SessionID == "" {
-		s.state.SessionID = ev.SessionID
-	}
-	s.mu.Unlock()
 }
 
 // readStderr reads CLI stderr and forwards to client.

@@ -241,7 +241,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .md-blank{display:block;height:0.75em}
 /* User messages: right-aligned bubble */
 .event.user{flex-direction:row-reverse}
-.event.user .event-icon{background:rgba(88,166,255,.15);color:var(--nz-accent);font-size:13px}
+/* User-message avatar: previously rgba(88,166,255,.15) on the dark bg
+   gave ~1.3:1 contrast — operators reported the empty circle "looks like
+   a stuck spinner". Push background to .35 alpha (~3.2:1) and lighten the
+   emoji color so the 👤 reads as an avatar instead of a hollow ring. */
+.event.user .event-icon{background:rgba(88,166,255,.35);color:#e6edf3;font-size:13px}
 .event.user .event-content{flex:0 1 auto;max-width:80%;color:#e6edf3;background:rgba(88,166,255,.1);border:1px solid rgba(88,166,255,.2);padding:10px 14px;border-radius:18px 18px 4px 18px}
 /* Queued-send indicator: inline chip on the optimistic user bubble when
    send_ack returns status=queued. Replaces the previous top-of-screen
