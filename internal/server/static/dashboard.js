@@ -4892,14 +4892,14 @@ function showAuthModal() {
   overlay.className = 'modal-overlay';
   overlay.innerHTML =
     '<div class="modal" role="dialog" aria-modal="true" aria-label="Dashboard API token">' +
-      // R110-P3 brand lockup: `>_` mark + `脑汁 Naozhi` wordmark anchors the
+      // R110-P3 brand lockup: `>_` mark + `naozhi` wordmark anchors the
       // login screen so operators recognize they're on the right service.
       // Mirrors the `>_` glyph used in the empty state; pure text (no image
       // asset) keeps the static bundle tiny.
       '<div class="auth-brand">' +
         '<div class="ab-mark" aria-hidden="true">&gt;_</div>' +
         '<div class="ab-wordmark">' +
-          '<span class="ab-name">脑汁 Naozhi</span>' +
+          '<span class="ab-name">naozhi</span>' +
           '<span class="ab-tag">Claude Code on IM</span>' +
         '</div>' +
       '</div>' +
@@ -12241,7 +12241,7 @@ function showOnboarding() {
   overlay.className = 'modal-overlay onboarding-overlay';
   overlay.innerHTML =
     '<div class="modal onboarding" role="dialog" aria-modal="true" aria-label="Welcome to Naozhi">' +
-      '<h3>欢迎使用 脑汁 Dashboard</h3>' +
+      '<h3>欢迎使用 naozhi Dashboard</h3>' +
       '<div class="ob-sub">几秒钟了解核心用法</div>' +
       '<ul>' +
         '<li><span class="ob-icon">+</span><div><b>新建会话</b> — 点击左上角 <b>+</b> 或 <b>New session</b>，选择工作目录即可开始对话</div></li>' +
