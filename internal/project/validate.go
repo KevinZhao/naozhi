@@ -53,10 +53,19 @@ const maxDisplayNameRunes = 128
 // without permitting full words.
 const maxEmojiRunes = 8
 
-// maxPlannerPromptBytes is the hard cap on PlannerPrompt size. An
+// MaxPlannerPromptBytes is the hard cap on PlannerPrompt size. An
 // oversized prompt would inflate the exec.Command argv past Linux's
 // ARG_MAX (~2 MB) and make Spawn fail with a cryptic E2BIG.
-const maxPlannerPromptBytes = 8 * 1024
+//
+// Exported so internal/config can reuse the same byte cap when validating
+// projects.planner_defaults.prompt — keeping a single source of truth
+// avoids silent drift between dashboard PUT and the YAML reload path.
+const MaxPlannerPromptBytes = 8 * 1024
+
+// maxPlannerPromptBytes is the unexported alias retained for in-package
+// references; both names resolve to the same value. New external callers
+// should use MaxPlannerPromptBytes.
+const maxPlannerPromptBytes = MaxPlannerPromptBytes
 
 // maxPlannerModelBytes is the hard cap on PlannerModel length.
 const maxPlannerModelBytes = 256
