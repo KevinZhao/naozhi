@@ -30,18 +30,19 @@ func TestShutdown_SingleShotContract(t *testing.T) {
 	t.Parallel()
 	// router-split (Phase 4): Shutdown body and shutdown() helper moved to
 	// router_cleanup.go. The Router struct (and shutdownOnce field) remains
-	// in router.go. So check struct-field invariant in router.go and
-	// behavioural invariants in router_cleanup.go.
-	routerSrc, err := os.ReadFile("router.go")
+	// in router_core.go (renamed from router.go in Phase 6). So check
+	// struct-field invariant in router_core.go and behavioural invariants
+	// in router_cleanup.go.
+	routerSrc, err := os.ReadFile("router_core.go")
 	if err != nil {
-		t.Fatalf("read router.go: %v", err)
+		t.Fatalf("read router_core.go: %v", err)
 	}
 	cleanupSrc, err := os.ReadFile("router_cleanup.go")
 	if err != nil {
 		t.Fatalf("read router_cleanup.go: %v", err)
 	}
 
-	// 1) shutdownOnce field must still exist on Router (defined in router.go).
+	// 1) shutdownOnce field must still exist on Router (defined in router_core.go).
 	// A rename is fine (the error message suggests re-reading this test), but
 	// deletion means the single-shot invariant vanished.
 	if !regexp.MustCompile(`shutdownOnce\s+sync\.Once`).Match(routerSrc) {

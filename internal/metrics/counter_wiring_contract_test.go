@@ -63,8 +63,11 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			// it is incremented once per absorbed panic. Wiring outside the
 			// recover arm (or removing it entirely) would silence the
 			// operator's "spawn panic happened" signal.
+			//
+			// router-split (Phase 6): panicSafeSpawnFn stayed with router.go
+			// which was renamed to router_core.go.
 			name:    "SpawnPanicRecoveredTotal fires in panicSafeSpawnFn recover arm",
-			path:    "../session/router.go",
+			path:    "../session/router_core.go",
 			pattern: `metrics\.SpawnPanicRecoveredTotal\.Add\(1\)`,
 		},
 		{
@@ -72,8 +75,11 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			// hasInjectedHistory() short-circuit — must count. Wiring on the
 			// happy path would turn the signal into "all shim-managed loads"
 			// and drown out the "reconnect missed" flag.
+			//
+			// router-split (Phase 6): NewRouter (where this counter lives)
+			// stayed with router.go which was renamed to router_core.go.
 			name:    "ShimReconnectGraceBackfillTotal fires in grace-deferred backfill path",
-			path:    "../session/router.go",
+			path:    "../session/router_core.go",
 			pattern: `metrics\.ShimReconnectGraceBackfillTotal\.Add\(1\)`,
 		},
 		{
@@ -192,9 +198,11 @@ func TestOBS1_PanicRecoveredWiredIntoTopSites(t *testing.T) {
 // seam that would drive the bug at runtime.
 func TestOBS2_SpawnPanicRecoveredInRecoverArm(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("../session/router.go")
+	// router-split (Phase 6): panicSafeSpawnFn stayed with router.go which
+	// was renamed to router_core.go.
+	data, err := os.ReadFile("../session/router_core.go")
 	if err != nil {
-		t.Fatalf("read router.go: %v", err)
+		t.Fatalf("read router_core.go: %v", err)
 	}
 	// Match the recover arm up to the counter Add. `(?s)` lets `.` cross
 	// newlines; the non-greedy `.*?` ensures we find the nearest Add after
@@ -202,7 +210,7 @@ func TestOBS2_SpawnPanicRecoveredInRecoverArm(t *testing.T) {
 	re := regexp.MustCompile(`(?s)if r := recover\(\); r != nil \{.*?metrics\.SpawnPanicRecoveredTotal\.Add\(1\)`)
 	if !re.Match(data) {
 		t.Error("metrics.SpawnPanicRecoveredTotal.Add(1) not found inside a " +
-			"`if r := recover(); r != nil` arm in router.go. The counter must " +
+			"`if r := recover(); r != nil` arm in router_core.go. The counter must " +
 			"live in the recover branch of panicSafeSpawnFn — incrementing it " +
 			"on the happy path (every Spawn call) would turn 'panics absorbed' " +
 			"into 'spawn attempts' and break the R172-ARCH-D10 signal.")
