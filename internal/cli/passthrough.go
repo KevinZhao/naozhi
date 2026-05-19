@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -182,11 +183,17 @@ func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []I
 	// For ClaudeProtocol, WriteUserMessageLocked expects an io.Writer that
 	// accepts one '\n'-terminated line. We feed a thin capture-writer and
 	// forward the captured bytes through shimSendLocked.
-	cap := &captureWriter{}
-	if err := p.protocol.WriteUserMessageLocked(cap, uuidStr, text, images, priority); err != nil {
+	//
+	// R226-PERF-3: pool captureWriter so the per-passthrough-send 2 alloc
+	// (struct + backing slice) collapse on the hot path; the pool's
+	// shrink-cap mirrors shimSendBufPool to keep one-off 400KB image
+	// pastes from pinning huge backing arrays in pooled entries.
+	cw := getCaptureWriter()
+	defer putCaptureWriter(cw)
+	if err := p.protocol.WriteUserMessageLocked(cw, uuidStr, text, images, priority); err != nil {
 		return err
 	}
-	line := cap.bytes
+	line := cw.bytes
 	// Strip trailing newline — shimSendLocked re-adds its own framing via the
 	// shim's "write" frame structure.
 	if n := len(line); n > 0 && line[n-1] == '\n' {
@@ -208,6 +215,28 @@ type captureWriter struct {
 func (c *captureWriter) Write(b []byte) (int, error) {
 	c.bytes = append(c.bytes, b...)
 	return len(b), nil
+}
+
+// captureWriterPool reuses captureWriter values across passthrough sends.
+// Entries whose backing slice exceeds captureWriterMaxCap are dropped so
+// GC reclaims them; one-off large pastes do not pin a per-pool entry.
+var captureWriterPool = sync.Pool{
+	New: func() any { return &captureWriter{} },
+}
+
+const captureWriterMaxCap = 64 * 1024
+
+func getCaptureWriter() *captureWriter {
+	cw := captureWriterPool.Get().(*captureWriter)
+	cw.bytes = cw.bytes[:0]
+	return cw
+}
+
+func putCaptureWriter(cw *captureWriter) {
+	if cap(cw.bytes) > captureWriterMaxCap {
+		return
+	}
+	captureWriterPool.Put(cw)
 }
 
 // removeSlotByID removes a single slot from pendingSlots. Used on write-fail.
