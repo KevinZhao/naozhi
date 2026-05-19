@@ -151,10 +151,16 @@ func Replace(newBin, installPath string) (backupPath string, err error) {
 	}
 
 	if err := os.Rename(stagePath, installPath); err != nil {
+		// Collect cleanup/restore errors so the caller can see a corrupted
+		// install state (e.g. restore failed → install dir half-broken).
 		_ = os.Remove(stagePath)
-		_ = copyFile(backupPath, installPath) // best-effort restore
-		_ = os.Remove(backupPath)
-		return "", fmt.Errorf("rename staged binary into place: %w", err)
+		errs := []error{fmt.Errorf("rename staged binary into place: %w", err)}
+		if rerr := copyFile(backupPath, installPath); rerr != nil {
+			errs = append(errs, fmt.Errorf("restore backup after rename failure: %w", rerr))
+		} else {
+			_ = os.Remove(backupPath)
+		}
+		return "", errors.Join(errs...)
 	}
 	return backupPath, nil
 }

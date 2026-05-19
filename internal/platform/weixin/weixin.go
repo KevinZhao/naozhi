@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/platform"
 )
 
@@ -212,7 +213,7 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 			slog.Error("weixin getUpdates API error",
 				"ret", resp.Ret,
 				"errcode", resp.ErrCode,
-				"errmsg", resp.ErrMsg,
+				"errmsg", osutil.SanitizeForLog(resp.ErrMsg, 256),
 				"failures", fmt.Sprintf("%d/%d", consecutiveFailures, maxFailures),
 			)
 			if consecutiveFailures >= maxFailures {

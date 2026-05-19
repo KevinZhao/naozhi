@@ -11,11 +11,6 @@ package cli
 //     here but kept grouped with related DefaultNoOutputTimeout etc.
 //     to minimise Phase 2 diff).
 //
-// `isChanAlive` stays in process.go for Phase 2; it will move to
-// process_turn.go in Phase 4 together with drainStaleEvents which is
-// its sole user. Keeping the helper at the root keeps Phase 2 self-
-// contained.
-//
 // The shimMsg struct moves here with readLoop because it is only used
 // inside readLoop and by wrapper.go's Spawn handshake (same package,
 // no import change needed).

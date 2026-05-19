@@ -19,6 +19,10 @@ import (
 // intentionally drops wrapping details (paths, keys, goroutine IDs) so that
 // callers can pass the result straight to a browser. Unknown errors collapse
 // to a generic retry hint; operators should still see the raw error in logs.
+//
+// NOTE: keep in sync with dispatch/dispatch.go's sendAndReply error switch
+// (the IM path). Adding a sentinel in one place without mirroring the other
+// causes drift between dashboard and IM error messages.
 func asyncErrorMessage(err error) string {
 	if err == nil {
 		return ""
