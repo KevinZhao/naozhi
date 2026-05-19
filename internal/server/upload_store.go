@@ -180,20 +180,20 @@ func (s *uploadStore) removeEntryLocked(id string, e *uploadEntry) {
 	}
 	// Defensive empty→unknownOwner fold in case a future refactor
 	// bypasses Put's owner normalisation; matches Take/TakeAll semantics.
-	if e.Owner == "" {
-		e.Owner = unknownOwner
+	// Use a local variable so we don't mutate the caller's *uploadEntry.
+	owner := e.Owner
+	if owner == "" {
+		owner = unknownOwner
 	}
-	if e.Owner != "" {
-		if n := s.ownerCounts[e.Owner] - 1; n <= 0 {
-			delete(s.ownerCounts, e.Owner)
-		} else {
-			s.ownerCounts[e.Owner] = n
-		}
-		if b := s.ownerBytes[e.Owner] - sz; b <= 0 {
-			delete(s.ownerBytes, e.Owner)
-		} else {
-			s.ownerBytes[e.Owner] = b
-		}
+	if n := s.ownerCounts[owner] - 1; n <= 0 {
+		delete(s.ownerCounts, owner)
+	} else {
+		s.ownerCounts[owner] = n
+	}
+	if b := s.ownerBytes[owner] - sz; b <= 0 {
+		delete(s.ownerBytes, owner)
+	} else {
+		s.ownerBytes[owner] = b
 	}
 }
 

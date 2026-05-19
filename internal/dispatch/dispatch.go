@@ -615,6 +615,10 @@ func (d *Dispatcher) sendAndReply(
 	if err != nil {
 		d.replyErrorCount.Add(1)
 		log.Error("send to claude", "err", err)
+		// NOTE: keep this switch in sync with server/errors_usermsg.go which
+		// emits user-facing strings for the dashboard send path. The IM path
+		// (here) embeds timeout durations in Chinese; the WS path is generic.
+		// Adding a new sentinel here without mirroring there causes drift.
 		var errMsg string
 		switch {
 		case errors.Is(err, cli.ErrNoOutputTimeout):
