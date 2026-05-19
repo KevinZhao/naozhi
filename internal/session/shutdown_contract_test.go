@@ -16,7 +16,7 @@ import (
 // reusable (e.g. to support hot reloads or test harnesses that spin a
 // router up and down), each cycle that hits the I/O timeout would
 // accumulate one orphan goroutine, eventually exhausting the goroutine
-// quota. Unlike a plain linter rule, this test reads router.go directly
+// quota. Unlike a plain linter rule, this test reads router_cleanup.go directly
 // and asserts the single-shot primitives remain in place:
 //
 //  1. `shutdownOnce sync.Once` must still be a field on Router.
@@ -28,15 +28,23 @@ import (
 // leak/reuse tradeoff instead of silently creating an accumulation bug.
 func TestShutdown_SingleShotContract(t *testing.T) {
 	t.Parallel()
-	src, err := os.ReadFile("router.go")
+	// router-split (Phase 4): Shutdown body and shutdown() helper moved to
+	// router_cleanup.go. The Router struct (and shutdownOnce field) remains
+	// in router.go. So check struct-field invariant in router.go and
+	// behavioural invariants in router_cleanup.go.
+	routerSrc, err := os.ReadFile("router.go")
 	if err != nil {
 		t.Fatalf("read router.go: %v", err)
 	}
+	cleanupSrc, err := os.ReadFile("router_cleanup.go")
+	if err != nil {
+		t.Fatalf("read router_cleanup.go: %v", err)
+	}
 
-	// 1) shutdownOnce field must still exist. A rename is fine (the error
-	// message suggests re-reading this test), but deletion means the
-	// single-shot invariant vanished.
-	if !regexp.MustCompile(`shutdownOnce\s+sync\.Once`).Match(src) {
+	// 1) shutdownOnce field must still exist on Router (defined in router.go).
+	// A rename is fine (the error message suggests re-reading this test), but
+	// deletion means the single-shot invariant vanished.
+	if !regexp.MustCompile(`shutdownOnce\s+sync\.Once`).Match(routerSrc) {
 		t.Error("Router.shutdownOnce sync.Once field no longer present. " +
 			"If you intentionally made Shutdown reusable, you MUST also " +
 			"reclaim the wrapper goroutine around r.historyWg.Wait() in " +
@@ -47,7 +55,7 @@ func TestShutdown_SingleShotContract(t *testing.T) {
 	// 2) The Once.Do gate on Shutdown must still be the body. A future
 	// refactor that dispatches to shutdown() directly (e.g. to add a
 	// retry-after-error path) breaks idempotency and re-enters the leak.
-	if !regexp.MustCompile(`r\.shutdownOnce\.Do\(r\.shutdown\)`).Match(src) {
+	if !regexp.MustCompile(`r\.shutdownOnce\.Do\(r\.shutdown\)`).Match(cleanupSrc) {
 		t.Error("Router.Shutdown() no longer routes through shutdownOnce.Do. " +
 			"Replacing the Once gate with direct dispatch re-opens both the " +
 			"goroutine-leak-on-reuse path (R44-REL-HIST-GOROUTINE) and the " +
@@ -59,7 +67,7 @@ func TestShutdown_SingleShotContract(t *testing.T) {
 	// it suggests someone "cleaned up TODOs" without understanding the
 	// tradeoff — the comment is the single piece of text linking the
 	// goroutine to the contract in Shutdown's godoc.
-	if !regexp.MustCompile(`intentionally left running`).Match(src) {
+	if !regexp.MustCompile(`intentionally left running`).Match(cleanupSrc) {
 		t.Error("The 'Goroutine intentionally left running on timeout' comment " +
 			"around r.historyWg.Wait() was removed. Keep it: it anchors the " +
 			"R44-REL-HIST-GOROUTINE contract and tells the next reader why " +
