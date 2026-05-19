@@ -162,9 +162,12 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 		delete(r.sessionsByChat, chatKeyPrefix)
 	} else {
 		// Fallback O(n) scan for test-created routers without index.
+		// Pre-compute the prefix once so the loop body doesn't re-allocate
+		// `chatKeyPrefix + ":"` on every iteration.
+		prefix := chatKeyPrefix + ":"
 		var toDelete []string
 		for key, s := range r.sessions {
-			if len(key) > len(chatKeyPrefix) && key[:len(chatKeyPrefix)+1] == chatKeyPrefix+":" {
+			if len(key) > len(chatKeyPrefix) && key[:len(prefix)] == prefix {
 				toDelete = append(toDelete, key)
 				if p := s.loadProcess(); p != nil && p.Alive() {
 					toClose = append(toClose, p)

@@ -194,10 +194,24 @@ func parseAttachmentFile(fh *multipart.FileHeader, allowPDF bool) (cli.Attachmen
 		return cli.Attachment{}, errors.New("failed to read uploaded file")
 	}
 	defer f.Close()
-	data, err := io.ReadAll(f)
+	// fh.Size comes from the Content-Disposition header (client-controlled).
+	// The size gate above rejects oversize uploads based on that header, but
+	// a lying client could understate size to bypass the gate. Wrap the
+	// reader in a LimitReader as a defence-in-depth byte cap, with a +1
+	// margin so we can detect overflow.
+	var sizeLimit int64
+	if isPDF {
+		sizeLimit = maxPDFBytes
+	} else {
+		sizeLimit = maxImageBytes
+	}
+	data, err := io.ReadAll(io.LimitReader(f, sizeLimit+1))
 	if err != nil {
 		slog.Debug("upload: read multipart file failed", "err", err)
 		return cli.Attachment{}, errors.New("failed to read uploaded file")
+	}
+	if int64(len(data)) > sizeLimit {
+		return cli.Attachment{}, fmt.Errorf("file too large (max %d MB)", sizeLimit>>20)
 	}
 
 	// RNEW-SEC-002: defence-in-depth against a PDF-shaped gzip bomb. Our

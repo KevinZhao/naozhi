@@ -13,6 +13,8 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -677,6 +679,44 @@ func validateConfig(cfg *Config) error {
 		return err
 	}
 
+	// projects.planner_defaults.prompt 走 --append-system-prompt argv，
+	// 与 project.PlannerPrompt 完全同源。validateConfig 之前漏检此字段：
+	// 配置文件里写入 NUL / C0 / C1 / bidi / LS-PS 会绕过所有验证直接进 argv。
+	// 镜像 project.ValidateConfig 的同名规则；LF/CR 同样禁止——多行 prompt
+	// 必须经 CLAUDE.md 文件路径引入。
+	if err := validatePlannerPrompt("projects.planner_defaults.prompt", cfg.Projects.PlannerDefaults.Prompt); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validatePlannerPrompt enforces the same character-set policy as
+// project.ValidateConfig on PlannerPrompt: reject NUL, all C0 controls
+// (including LF/CR — multi-line prompts must come from CLAUDE.md), DEL,
+// C1 controls, bidi overrides/isolates, and LS/PS. Empty is accepted (means
+// "no global default"). R224-SEC-4 / R224-SEC-3.
+//
+// Reuses project.MaxPlannerPromptBytes so both paths share one cap and
+// can never drift silently.
+func validatePlannerPrompt(field, prompt string) error {
+	if prompt == "" {
+		return nil
+	}
+	if len(prompt) > project.MaxPlannerPromptBytes {
+		return fmt.Errorf("%s exceeds %d-byte limit", field, project.MaxPlannerPromptBytes)
+	}
+	for i := 0; i < len(prompt); i++ {
+		c := prompt[i]
+		if c == 0 || (c < 0x20 && c != '\t') || c == 0x7f {
+			return fmt.Errorf("%s contains invalid control characters (NUL/C0/DEL — argv corruption guard)", field)
+		}
+	}
+	for _, r := range prompt {
+		if osutil.IsLogInjectionRune(r) {
+			return fmt.Errorf("%s contains invalid unicode controls (C1/bidi/LS-PS)", field)
+		}
+	}
 	return nil
 }
 

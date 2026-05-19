@@ -3,9 +3,11 @@ package cli
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"time"
 )
 
@@ -13,9 +15,18 @@ import (
 // CLI's uuid field. We don't need RFC4122 formatting — CLI treats it as an
 // opaque round-trippable blob. Using crypto/rand avoids a new dep (google/uuid)
 // while still giving enough entropy that collisions are astronomically rare.
+//
+// crypto/rand never returns short reads on Linux; an error here is a sign of
+// a hard OS failure. We fall back to a hashed monotonic counter (mirroring
+// newEventUUID) rather than returning the all-zero UUID — every-zero would
+// silently break slot FIFO matching, which is worse than a tiny entropy hit.
 func newSlotUUID() string {
 	var b [16]byte
-	_, _ = rand.Read(b[:])
+	if _, err := rand.Read(b[:]); err != nil {
+		slog.Warn("crypto/rand.Read failed for slot UUID; using fallback identity", "err", err)
+		sum := sha256.Sum256([]byte("naozhi-slot-uuid-fallback-" + strconv.FormatInt(int64(uuidFallbackSeq.Add(1)), 10)))
+		copy(b[:], sum[:])
+	}
 	return hex.EncodeToString(b[:])
 }
 

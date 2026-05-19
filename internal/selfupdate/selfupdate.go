@@ -100,6 +100,13 @@ func LatestRelease(ctx context.Context) (*Release, error) {
 
 // Download fetches the binary and checksums.txt into dir, verifies the
 // SHA-256 checksum, and returns the path to the downloaded binary.
+//
+// The binary is written 0600 (non-executable, owner-only) until checksum
+// verification succeeds, then chmod'd to 0755. This closes a small TOCTOU
+// window where a yet-to-be-verified binary could be exec'd by a racing
+// process — even though tmp dirs are created 0700 today, defense-in-depth
+// means the file mode itself never claims "this is ready to execute"
+// before we've confirmed integrity.
 func Download(ctx context.Context, rel *Release, dir string) (binPath string, err error) {
 	asset := assetName()
 	binPath = filepath.Join(dir, asset)
@@ -113,6 +120,11 @@ func Download(ctx context.Context, rel *Release, dir string) (binPath string, er
 	}
 	if err := verifyChecksum(binPath, sumPath, asset); err != nil {
 		return "", err
+	}
+	// Verified: now flip to executable so Replace's copyFile preserves
+	// 0755 when staging into the install dir.
+	if err := os.Chmod(binPath, 0o755); err != nil {
+		return "", fmt.Errorf("chmod verified binary: %w", err)
 	}
 	return binPath, nil
 }
@@ -207,7 +219,12 @@ func fetchFile(ctx context.Context, url, dest string, maxBytes int64) error {
 		return fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, url)
 	}
 
-	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0755)
+	// Owner-only, non-executable until verifyChecksum proves integrity.
+	// Download flips ONLY the binary asset to 0755 after a successful
+	// checksum check (checksums.txt is read once and discarded so it
+	// stays at 0600). The staging file always lives in a 0700 tempdir
+	// so the mode is also covered by the directory ACL.
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}

@@ -43,6 +43,30 @@ func truncateToolJSON(b []byte) string {
 	return textutil.TruncateRunesBytes(b, toolJSONMaxRunes)
 }
 
+// toolCallLabelMaxBytes caps the byte length of ToolCall.Title / Kind / Status
+// before they are forwarded to dashboard / IM renderers. These fields come
+// from the agent (kiro/ACP, untrusted across the protocol boundary) and are
+// rendered into chip text/colour without further sanitization. A hostile or
+// runaway agent could send bidi-override or oversized strings that distort
+// the dashboard UI; cap to a tight 256 bytes and strip log-injection runes
+// (C0/C1/bidi/LS/PS) consistently with the rest of the codebase.
+const toolCallLabelMaxBytes = 256
+
+// sanitizeToolCallLabel cleans a short ACP-supplied label field.
+//
+// LOSSY: control characters and bidi/LS-PS runes are replaced with `_`
+// (via osutil.SanitizeForLog), and the result is byte-capped at
+// toolCallLabelMaxBytes. Callers that need the original verbatim string
+// must source it from a different field (e.g. truncateToolJSON for raw
+// tool input/output). Empty input is preserved so optional fields stay
+// optional.
+func sanitizeToolCallLabel(s string) string {
+	if s == "" {
+		return ""
+	}
+	return osutil.SanitizeForLog(s, toolCallLabelMaxBytes)
+}
+
 // ErrACPRPC wraps any agent-side JSON-RPC error ("error" field populated).
 // Typed so dispatch / upstream layers can errors.Is-classify ACP failures
 // distinctly from transport / timeout / parse faults.
@@ -511,6 +535,11 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 		// "pending" by the dashboard); subsequent tool_call_update
 		// events thread by ID and may set "completed" / "failed".
 		// Multi-Backend RFC §8.3 D17 / V7 sample.
+		// Sanitize agent-supplied label fields (Title/Kind/Status) before
+		// they reach the dashboard/IM renderers — kiro is across the
+		// protocol trust boundary and these fields render directly into
+		// chip text/colour without further escaping.
+		sanitizedTitle := sanitizeToolCallLabel(update.Update.Title)
 		return Event{
 			Type:      "assistant",
 			SubType:   "tool_use",
@@ -518,13 +547,13 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 			ToolUseID: update.Update.ToolCallID,
 			ToolCall: &ToolCall{
 				ID:        update.Update.ToolCallID,
-				Title:     update.Update.Title,
-				Kind:      update.Update.Kind,
-				Status:    update.Update.Status,
+				Title:     sanitizedTitle,
+				Kind:      sanitizeToolCallLabel(update.Update.Kind),
+				Status:    sanitizeToolCallLabel(update.Update.Status),
 				InputJSON: truncateToolJSON(update.Update.RawInput),
 			},
 			Message: &AssistantMessage{
-				Content: []ContentBlock{{Type: "tool_use", Name: update.Update.Title}},
+				Content: []ContentBlock{{Type: "tool_use", Name: sanitizedTitle}},
 			},
 		}, false, nil
 
@@ -536,9 +565,9 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 			ToolUseID: update.Update.ToolCallID,
 			ToolCall: &ToolCall{
 				ID:         update.Update.ToolCallID,
-				Title:      update.Update.Title,
-				Kind:       update.Update.Kind,
-				Status:     update.Update.Status,
+				Title:      sanitizeToolCallLabel(update.Update.Title),
+				Kind:       sanitizeToolCallLabel(update.Update.Kind),
+				Status:     sanitizeToolCallLabel(update.Update.Status),
 				InputJSON:  truncateToolJSON(update.Update.RawInput),
 				OutputJSON: truncateToolJSON(update.Update.RawOutput),
 			},

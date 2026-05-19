@@ -684,8 +684,14 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 		return
 	}
 
-	// Set read deadline for auth phase (shimAuthReadDeadline to send attach)
-	conn.SetReadDeadline(time.Now().Add(shimAuthReadDeadline)) //nolint:errcheck
+	// Set read deadline for auth phase (shimAuthReadDeadline to send attach).
+	// If the deadline can't be installed (conn already half-closed), the
+	// read loop below would block until TCP keepalive expires — leak the
+	// goroutine. Bail out immediately instead.
+	if err := conn.SetReadDeadline(time.Now().Add(shimAuthReadDeadline)); err != nil {
+		slog.Debug("shim: set auth read deadline failed", "err", err)
+		return
+	}
 
 	// Use LimitedReader to prevent pre-auth memory exhaustion
 	lr := &io.LimitedReader{R: conn, N: int64(maxClientLineBytes) + 1}
@@ -710,8 +716,13 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 		return
 	}
 
-	// Clear read deadline after successful auth
-	conn.SetReadDeadline(time.Time{}) //nolint:errcheck
+	// Clear read deadline after successful auth. If clearing fails, an old
+	// deadline could fire and prematurely kick a healthy client; bail out so
+	// the client reconnects cleanly.
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		slog.Debug("shim: clear auth read deadline failed", "err", err)
+		return
+	}
 
 	// Switch to bounded reader for the authenticated command loop.
 	// LimitedReader prevents a single oversized line from exhausting memory.
@@ -816,7 +827,9 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 							_ = flushWithDeadline()
 							return
 						}
-						w.Write(more) //nolint:errcheck
+						if _, err := w.Write(more); err != nil {
+							return
+						}
 					default:
 						flush = false
 					}
