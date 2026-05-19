@@ -707,10 +707,10 @@ func (d *Dispatcher) sendAndReply(
 	if result.MergedCount > 1 && replyText != "" {
 		replyText += fmt.Sprintf("\n\n*— 合并了 %d 条消息的回复*", result.MergedCount)
 	}
-	// Per-session ReplyFooter (Sprint 2). When sess is non-nil we resolve the
-	// tag from sess.Backend(); when nil (cron edge case where the session
-	// has been pruned but the reply path still fires) the fn receives "" and
-	// the implementation falls back to the router default.
+	// Per-session ReplyFooter: when sess is non-nil we resolve the tag from
+	// sess.Backend(); when nil (cron edge case where the session has been
+	// pruned but the reply path still fires) the fn receives "" and the
+	// implementation falls back to the router default.
 	if d.replyFooterFn != nil {
 		var backendID string
 		if sess != nil {

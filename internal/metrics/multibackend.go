@@ -8,7 +8,21 @@
 // expvar.Int (where it exists) AND the new expvar.Map. This keeps existing
 // docs/ops/pprof.md jq queries and dashboards working through a 4-week
 // migration window. After the window, the legacy ints can be removed in a
-// single follow-up PR — see TODO marker `R222-OBS-MULTIBACKEND-LEGACY`.
+// single follow-up PR.
+//
+// Legacy mirrors still kept (as of Round 224):
+//   - CLISpawnTotal       (metrics.go) — mirrored by CLISpawnTotalByBackend
+//   - SessionActive       (this file)  — mirrored by SessionActiveByBackend
+//
+// Removal preconditions:
+//  1. All ops dashboards / jq queries documented in docs/ops/pprof.md must
+//     be migrated to the labeled vector form (`*_by_backend`).
+//  2. The migration must be in production for ≥ 4 weeks so on-call has time
+//     to notice missing-metric breakage during normal operations.
+//
+// When both are met, drop the unlabeled vars + their lines in metrics_test.go
+// + the legacy bumps in RecordCLISpawn / RecordSessionActive. Tracked in
+// docs/TODO.md anchor `R-METRICS-LEGACY-EXPVAR`.
 
 package metrics
 

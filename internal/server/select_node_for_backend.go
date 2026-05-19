@@ -1,11 +1,12 @@
 // select_node_for_backend.go: backend-aware reverse-node routing.
 //
-// Sprint 6b of the multi-backend RFC plugged the "kiro session +
-// node that doesn't speak ACP" hole: before this file, dashboards /
-// IM channels could pick any reverse node from the picker and naozhi
-// would happily forward the send RPC; the remote shim would then fail
-// to spawn the kiro CLI (no `kiro` binary, no `acp` capability) and
-// the user saw a generic transport error.
+// This file plugs the "kiro session + node that doesn't speak ACP" hole
+// in the multi-backend RFC (docs/rfc/multi-backend.md §6 — backend-aware
+// dispatch): before this file, dashboards / IM channels could pick any
+// reverse node from the picker and naozhi would happily forward the send
+// RPC; the remote shim would then fail to spawn the kiro CLI (no `kiro`
+// binary, no `acp` capability) and the user saw a generic transport
+// error.
 //
 // Now every dispatch entry point (HTTP /api/sessions/send, WS
 // handleRemoteSend, future cron remote dispatch) calls
