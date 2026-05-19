@@ -638,7 +638,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(files)+len(fileIDs) > maxFilesPerSend {
-			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("too many files (max %d)", maxFilesPerSend)})
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": errTooManyFiles})
 			return
 		}
 		for _, fh := range files {
@@ -675,7 +675,7 @@ func (h *SendHandler) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if len(fileIDs) > maxFilesPerSend {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("too many files (max %d)", maxFilesPerSend)})
+		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": errTooManyFiles})
 		return
 	}
 
