@@ -5941,3 +5941,46 @@ func TestDashboardJS_NewSessionPaletteLocalOnly(t *testing.T) {
 		t.Error("renderPaletteList still iterates projectsData directly — remote folders would leak into the palette")
 	}
 }
+
+// TestDashboardJS_TableCurrencyDollarNotMathProtected pins the bugfix that
+// renderTable's `$...$` math-protect pass must NOT swallow currency tokens
+// inside a row. A pricing row like `| Pro | $20 | 1,000 | $0.04/credit |`
+// (four cells, four `$N`-style currency tokens) used to collide with the
+// non-greedy `\$[^$\n]+?\$` regex, which paired the first `$` with the next
+// `$` it found, swallowed the two pipes between them, and collapsed the
+// row from 4 cells to 2. The visible symptom was the two right-hand columns
+// rendering empty for every Pro/Pro+/Power row in Kiro pricing tables.
+//
+// Guards:
+//  1. The renderTable cells() function defines an isTableMathSpan helper.
+//  2. The `$...$` stash uses isTableMathSpan as predicate (not unconditional).
+//  3. isTableMathSpan rejects spans that contain a `|` and have no LaTeX
+//     special chars — the surface that distinguishes currency from math.
+func TestDashboardJS_TableCurrencyDollarNotMathProtected(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+	rtIdx := strings.Index(js, "function renderTable(lines)")
+	if rtIdx < 0 {
+		t.Fatal("renderTable not found")
+	}
+	rtEnd := strings.Index(js[rtIdx:], "\nfunction ")
+	if rtEnd < 0 {
+		t.Fatal("renderTable end not found")
+	}
+	body := js[rtIdx : rtIdx+rtEnd]
+	if !strings.Contains(body, "isTableMathSpan") {
+		t.Error("renderTable: isTableMathSpan helper must guard `$...$` stash so currency rows don't collapse")
+	}
+	if !strings.Contains(body, "stash(/\\$([^$\\n]+?)\\$/g, isTableMathSpan)") {
+		t.Error("renderTable: `$...$` stash must pass isTableMathSpan as predicate")
+	}
+	// The currency-vs-math distinction is the load-bearing logic. If the
+	// helper ever drops the no-pipe branch, currency rows regress.
+	if !strings.Contains(body, "inner.indexOf('|') !== -1") {
+		t.Error("isTableMathSpan: must reject `$...$` containing `|` without LaTeX chars (currency rows like `$20 | 1,000 | $0.04`)")
+	}
+}

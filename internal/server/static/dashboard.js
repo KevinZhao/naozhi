@@ -7926,18 +7926,35 @@ function renderTable(lines) {
   // or backtick code spans (e.g. `$|AB|=2$`, `$2^a - 2$ | < | ...`).
   // Protect those regions BEFORE splitting on `|`, otherwise a single math
   // formula would get sliced into many spurious columns.
+  //
+  // CAVEAT (currency vs math): a row like `| Pro | $20 | 1,000 | $0.04 |`
+  // contains four currency-style `$N` tokens, NOT two math spans. A naive
+  // `\$[^$]+\$` pass would greedily pair `$20 ... $0.04`, swallow the two
+  // pipes between them, and collapse the row from 4 cells to 2. To avoid
+  // that, only stash a `$...$` pair when its inner content unambiguously
+  // looks like LaTeX — either it carries a math-only character (\ ^ _ { })
+  // OR it sits entirely on one side of a pipe (no `|` inside). Pure-numeric
+  // tokens like `$20` / `$0.04/credit` then split as ordinary cells.
+  // Pipe-bearing math like `$|AB|=2$` should be authored with `\(...\)` or
+  // backticks inside tables — accepted limitation.
+  const isTableMathSpan = inner => {
+    if (/[\\^_{}]/.test(inner)) return true;
+    if (inner.indexOf('|') !== -1) return false;
+    return isMathInline(inner);
+  };
   const cells = l => {
     let s = l.trim().replace(/\\\|/g, PIPE);
     const guards = [];
-    const stash = (re) => {
-      s = s.replace(re, m => {
+    const stash = (re, predicate) => {
+      s = s.replace(re, (m, inner) => {
+        if (predicate && !predicate(inner == null ? m : inner)) return m;
         guards.push(m);
         return '\x00G' + (guards.length - 1) + '\x00';
       });
     };
     stash(/`[^`]+`/g);
-    stash(/\\\([^)]+?\\\)/g);
-    stash(/\$[^$\n]+?\$/g);
+    stash(/\\\(([^)]+?)\\\)/g);
+    stash(/\$([^$\n]+?)\$/g, isTableMathSpan);
     return s.replace(/^\||\|$/g, '')
       .split('|')
       .map(c => c.trim()
