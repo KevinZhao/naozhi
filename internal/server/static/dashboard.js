@@ -7447,6 +7447,17 @@ async function openFilePreview(wrapEl) {
   meta.textContent = (mime ? mime + ' \u00b7 ' : '') + formatFileSize(size);
   body.innerHTML = '<div class="fv-loading">loading\u2026</div>';
 
+  // SVG must be checked BEFORE the generic image/ branch: image/svg+xml starts
+  // with "image/" but cannot flow through <img src=...mode=raw>. The server
+  // refuses inline SVG via raw (project_files.go: serveRaw rejects svg+xml)
+  // because SVG can embed <script> and on* handlers that execute same-origin
+  // on top-level navigation. Route through the sandboxed-blob path instead,
+  // which serves attachment/octet-stream from the server and wraps the bytes
+  // in a Blob with type=image/svg+xml client-side.
+  if (mime.startsWith('image/svg+xml')) {
+    renderSandboxedBlob(project, node, path, body, 'image/svg+xml');
+    return;
+  }
   // Image / PDF: use raw endpoint directly, no JSON round trip.
   if (mime.startsWith('image/')) {
     body.innerHTML = '';
@@ -7477,7 +7488,7 @@ async function openFilePreview(wrapEl) {
   // feed the blob: URL into the iframe — blob origins are opaque, so even
   // if sandbox is stripped the document cannot read dashboard cookies.
   if (mime.startsWith('text/html') || mime.startsWith('application/xhtml')) {
-    renderHtmlInSandbox(project, node, path, body);
+    renderSandboxedBlob(project, node, path, body, 'text/html');
     return;
   }
 
@@ -7494,12 +7505,18 @@ async function openFilePreview(wrapEl) {
     const data = await r.json();
     if (data.binary) {
       const binMime = String(data.mime || '');
-      // HTML / XHTML land in `binary:true` by design (R176-SEC-H3: html
-      // bytes never flow through the preview JSON content field). Upgrade
-      // to the sandboxed blob render instead of showing a "please download"
-      // placeholder — that's the whole point of render mode.
+      // HTML / XHTML / SVG land in `binary:true` by design (R176-SEC-H3:
+      // active-content bytes never flow through the preview JSON content
+      // field). Upgrade to the sandboxed blob render instead of showing a
+      // "please download" placeholder — that's the whole point of render
+      // mode. Blob type matches the source MIME so the iframe parses bytes
+      // as the right document type.
       if (binMime.startsWith('text/html') || binMime.startsWith('application/xhtml')) {
-        renderHtmlInSandbox(project, node, path, body);
+        renderSandboxedBlob(project, node, path, body, 'text/html');
+        return;
+      }
+      if (binMime.startsWith('image/svg+xml')) {
+        renderSandboxedBlob(project, node, path, body, 'image/svg+xml');
         return;
       }
       body.innerHTML = '<div class="fv-binary">Binary file — click <strong>download</strong> to save.<span class="fv-mime">' + esc(binMime) + '</span></div>';
@@ -7539,24 +7556,27 @@ async function openFilePreview(wrapEl) {
   }
 }
 
-// _pendingHtmlBlobUrl holds the most recent blob URL fed into the preview
+// _pendingSandboxBlobUrl holds the most recent blob URL fed into the preview
 // iframe so closeFilePreview can revoke it. Blob URLs pin their backing
 // bytes in memory until revoked, and a 50 MB coverage report left open
 // across many file clicks would leak hard. Single-slot is enough because
 // the drawer only ever shows one file at a time.
-let _pendingHtmlBlobUrl = null;
+let _pendingSandboxBlobUrl = null;
 
-// _htmlRenderSeq is a monotonic token for renderHtmlInSandbox invocations.
+// _sandboxRenderSeq is a monotonic token for renderSandboxedBlob invocations.
 // The function is async: a user who opens file A and then clicks file B
 // before A's fetch resolves would, under a naive implementation, see A's
 // bytes rendered into B's drawer AND leak A's blob URL (its own invocation
 // has already passed the revoke-prior step). Every call bumps the seq and
 // captures its own copy; when fetch resolves, callers whose token no longer
-// equals _htmlRenderSeq revoke their own blob URL and abandon the render.
-let _htmlRenderSeq = 0;
+// equals _sandboxRenderSeq revoke their own blob URL and abandon the render.
+let _sandboxRenderSeq = 0;
 
-// renderHtmlInSandbox fetches workspace HTML, wraps it in a Blob, and
-// points a sandboxed iframe at the resulting blob URL.
+// renderSandboxedBlob fetches workspace bytes via mode=render, wraps them in
+// a typed Blob, and points a sandboxed iframe at the resulting blob URL.
+// Used for HTML and SVG — both can carry active content (scripts, on*) and
+// must NEVER reach the dashboard origin. blobType controls how the iframe
+// parses the bytes ('text/html' for .html / .xhtml, 'image/svg+xml' for .svg).
 //
 // Three defense layers stack here:
 //   (1) Server returns application/octet-stream + attachment, so a direct
@@ -7569,19 +7589,19 @@ let _htmlRenderSeq = 0;
 //       no forms, no top-level navigation, no popups, no fetch.
 // Any one of these would be sufficient; stacking all three is belt-and-
 // braces so a future change to any single layer does not regress security.
-async function renderHtmlInSandbox(project, node, path, body) {
+async function renderSandboxedBlob(project, node, path, body, blobType) {
   body.innerHTML = '<div class="fv-loading">loading…</div>';
   // Claim the invocation slot BEFORE awaiting anything. Every caller
   // snapshots the seq here; when its fetch resolves later it compares
-  // against the live _htmlRenderSeq to detect whether a newer render
+  // against the live _sandboxRenderSeq to detect whether a newer render
   // superseded it. This closes the "open A then open B before A resolves"
   // race where A would otherwise overwrite B's tracked blob URL and leak.
-  const mySeq = ++_htmlRenderSeq;
+  const mySeq = ++_sandboxRenderSeq;
   // Revoke any prior blob URL before overwriting. Missing this leaked a
   // ~50 MB report across every re-open of the drawer in manual testing.
-  if (_pendingHtmlBlobUrl) {
-    try { URL.revokeObjectURL(_pendingHtmlBlobUrl); } catch (_) { /* ignore */ }
-    _pendingHtmlBlobUrl = null;
+  if (_pendingSandboxBlobUrl) {
+    try { URL.revokeObjectURL(_pendingSandboxBlobUrl); } catch (_) { /* ignore */ }
+    _pendingSandboxBlobUrl = null;
   }
   try {
     const headers = {};
@@ -7591,27 +7611,30 @@ async function renderHtmlInSandbox(project, node, path, body) {
     // A newer invocation has already taken over the drawer — abandon.
     // Check happens at every await boundary: after fetch (headers arrived)
     // and after arrayBuffer (body fully drained).
-    if (mySeq !== _htmlRenderSeq) return;
+    if (mySeq !== _sandboxRenderSeq) return;
     if (!r.ok) {
       body.innerHTML = '<div class="fv-error">render failed (' + r.status + ')</div>';
       return;
     }
     const bytes = await r.arrayBuffer();
-    if (mySeq !== _htmlRenderSeq) return;
-    // Force type=text/html on the Blob — the server intentionally returned
-    // application/octet-stream so direct-URL hits don't render. The browser
-    // only interprets the bytes as HTML because we ask it to here.
-    const blob = new Blob([bytes], { type: 'text/html' });
+    if (mySeq !== _sandboxRenderSeq) return;
+    // Force the Blob's type from the caller — the server intentionally
+    // returned application/octet-stream so direct-URL hits don't render.
+    // The browser only interprets the bytes as HTML/SVG because we ask it
+    // to here. Callers MUST pass a type the server-side render whitelist
+    // already accepted (text/html, application/xhtml+xml, image/svg+xml);
+    // otherwise the iframe would display nothing.
+    const blob = new Blob([bytes], { type: blobType || 'text/html' });
     const url = URL.createObjectURL(blob);
     // Final stale check AFTER allocating the URL — if a newer invocation
     // landed in the tiny window between the arrayBuffer await and now,
     // revoke our URL immediately instead of stashing it in the tracked
     // slot (which would clobber the newer render's tracking and leak).
-    if (mySeq !== _htmlRenderSeq) {
+    if (mySeq !== _sandboxRenderSeq) {
       try { URL.revokeObjectURL(url); } catch (_) { /* ignore */ }
       return;
     }
-    _pendingHtmlBlobUrl = url;
+    _pendingSandboxBlobUrl = url;
 
     body.innerHTML = '';
     const frame = document.createElement('iframe');
@@ -7623,7 +7646,7 @@ async function renderHtmlInSandbox(project, node, path, body) {
     frame.referrerPolicy = 'no-referrer';
     body.appendChild(frame);
   } catch (e) {
-    if (mySeq !== _htmlRenderSeq) return;
+    if (mySeq !== _sandboxRenderSeq) return;
     body.innerHTML = '<div class="fv-error">' + esc(String(e && e.message || e)) + '</div>';
   }
 }
@@ -7664,12 +7687,12 @@ function closeFilePreview() {
   delete drawer.dataset.snippetMode;
   delete drawer.dataset.snippetName;
   _pendingSnippet = null;
-  // Release the HTML preview blob URL so the browser can GC the underlying
-  // bytes. Without this a 50 MB coverage report held its memory until the
-  // whole tab reloaded.
-  if (_pendingHtmlBlobUrl) {
-    try { URL.revokeObjectURL(_pendingHtmlBlobUrl); } catch (_) { /* ignore */ }
-    _pendingHtmlBlobUrl = null;
+  // Release the sandbox blob URL (HTML or SVG) so the browser can GC the
+  // underlying bytes. Without this a 50 MB coverage report held its memory
+  // until the whole tab reloaded.
+  if (_pendingSandboxBlobUrl) {
+    try { URL.revokeObjectURL(_pendingSandboxBlobUrl); } catch (_) { /* ignore */ }
+    _pendingSandboxBlobUrl = null;
   }
   const body = document.getElementById('fv-body');
   if (body) body.innerHTML = '';
@@ -7986,18 +8009,35 @@ function renderTable(lines) {
   // or backtick code spans (e.g. `$|AB|=2$`, `$2^a - 2$ | < | ...`).
   // Protect those regions BEFORE splitting on `|`, otherwise a single math
   // formula would get sliced into many spurious columns.
+  //
+  // CAVEAT (currency vs math): a row like `| Pro | $20 | 1,000 | $0.04 |`
+  // contains four currency-style `$N` tokens, NOT two math spans. A naive
+  // `\$[^$]+\$` pass would greedily pair `$20 ... $0.04`, swallow the two
+  // pipes between them, and collapse the row from 4 cells to 2. To avoid
+  // that, only stash a `$...$` pair when its inner content unambiguously
+  // looks like LaTeX — either it carries a math-only character (\ ^ _ { })
+  // OR it sits entirely on one side of a pipe (no `|` inside). Pure-numeric
+  // tokens like `$20` / `$0.04/credit` then split as ordinary cells.
+  // Pipe-bearing math like `$|AB|=2$` should be authored with `\(...\)` or
+  // backticks inside tables — accepted limitation.
+  const isTableMathSpan = inner => {
+    if (/[\\^_{}]/.test(inner)) return true;
+    if (inner.indexOf('|') !== -1) return false;
+    return isMathInline(inner);
+  };
   const cells = l => {
     let s = l.trim().replace(/\\\|/g, PIPE);
     const guards = [];
-    const stash = (re) => {
-      s = s.replace(re, m => {
+    const stash = (re, predicate) => {
+      s = s.replace(re, (m, inner) => {
+        if (predicate && !predicate(inner == null ? m : inner)) return m;
         guards.push(m);
         return '\x00G' + (guards.length - 1) + '\x00';
       });
     };
     stash(/`[^`]+`/g);
-    stash(/\\\([^)]+?\\\)/g);
-    stash(/\$[^$\n]+?\$/g);
+    stash(/\\\(([^)]+?)\\\)/g);
+    stash(/\$([^$\n]+?)\$/g, isTableMathSpan);
     return s.replace(/^\||\|$/g, '')
       .split('|')
       .map(c => c.trim()

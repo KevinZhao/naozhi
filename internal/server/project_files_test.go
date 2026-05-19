@@ -827,12 +827,19 @@ func TestHandleFileGet_RenderHTMLWithBOM(t *testing.T) {
 	}
 }
 
-// TestHandleFileGet_RenderRejectsNonHTML locks the MIME whitelist: the
-// render route must refuse anything that isn't literally text/html or
-// application/xhtml+xml. SVG is intentionally rejected here even though
-// it's technically XML — SVG can embed <script> and has its own forced-
-// download path via serveRaw. Every other file type has a dedicated route.
-func TestHandleFileGet_RenderRejectsNonHTML(t *testing.T) {
+// TestHandleFileGet_RenderRejectsNonAllowed locks the MIME whitelist: the
+// render route must refuse anything that isn't HTML/XHTML or SVG. SVG was
+// added because the dashboard now sandbox-renders it via the same blob+iframe
+// path as HTML; non-SVG XML, plain text, JSON, raster images, etc. all have
+// dedicated routes (preview / raw / download) and must not flow through render.
+//
+// The xhtml_nsmatch_xml_ext case is deliberately devious: a .xml file whose
+// content carries an XHTML namespace + <script>. detectMime pins it to the
+// extension's MIME (application/xml) regardless of byte sniff, so the render
+// gate must reject it on extension authority alone. Without this, an attacker
+// who can write into the workspace could try to smuggle script execution
+// through the render path by mislabelling extensions.
+func TestHandleFileGet_RenderRejectsNonAllowed(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
 		name    string
@@ -841,7 +848,6 @@ func TestHandleFileGet_RenderRejectsNonHTML(t *testing.T) {
 	}{
 		{"plain_text", "notes.txt", []byte("just text")},
 		{"json", "a.json", []byte(`{"a":1}`)},
-		{"svg", "pic.svg", []byte(`<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>`)},
 		{"xml", "doc.xml", []byte(`<?xml version="1.0"?><root/>`)},
 		{"xhtml_nsmatch_xml_ext", "evil.xml", []byte(`<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><script>alert(1)</script></html>`)},
 		{"png", "logo.png", []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a}},
@@ -858,9 +864,87 @@ func TestHandleFileGet_RenderRejectsNonHTML(t *testing.T) {
 			w := httptest.NewRecorder()
 			h.handleFileGet(w, req)
 			if w.Code != http.StatusUnsupportedMediaType {
-				t.Errorf("status = %d, want 415 (render must be HTML-only)", w.Code)
+				t.Errorf("status = %d, want 415 (render allowlist is HTML/XHTML/SVG only)", w.Code)
 			}
 		})
+	}
+}
+
+// TestHandleFileGet_RenderSVG pins the contract that workspace .svg files
+// flow through the render route with the same defense-in-depth headers as
+// HTML. Critical — Content-Type must remain application/octet-stream (not
+// image/svg+xml). A direct URL hit on this endpoint must DOWNLOAD, not
+// render: SVG can embed <script> and on* handlers that execute same-origin
+// on top-level navigation, and Firefox ignores the HTTP CSP sandbox there.
+// The dashboard JS pairs this response with a Blob({type:'image/svg+xml'})
+// and a sandbox=” iframe — that's the only path SVG bytes are ever parsed.
+func TestHandleFileGet_RenderSVG(t *testing.T) {
+	h, proj, projDir := newProjectHandlersForTest(t, nil)
+	// Deliberately include <script> so a regression that flips Content-Type
+	// to image/svg+xml or drops the attachment disposition would let the
+	// browser execute this on direct navigation.
+	svgBytes := []byte(`<svg xmlns="http://www.w3.org/2000/svg" width="40" height="40"><script>alert(1)</script><circle cx="20" cy="20" r="18" fill="red"/></svg>`)
+	if err := os.WriteFile(filepath.Join(projDir, "diagram.svg"), svgBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+proj+"&path=diagram.svg&mode=render", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body=%q)", w.Code, w.Body.String())
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("Content-Type = %q, want application/octet-stream (must NOT be image/svg+xml — direct URL nav must download, not render)", ct)
+	}
+	if cd := w.Header().Get("Content-Disposition"); !strings.HasPrefix(cd, "attachment") {
+		t.Errorf("Content-Disposition = %q, want attachment prefix", cd)
+	}
+	csp := w.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "sandbox") || !strings.Contains(csp, "default-src 'none'") {
+		t.Errorf("CSP missing defense-in-depth sandbox/default-src, got %q", csp)
+	}
+	if strings.Contains(csp, "allow-scripts") || strings.Contains(csp, "allow-same-origin") ||
+		strings.Contains(csp, "allow-forms") || strings.Contains(csp, "allow-top-navigation") {
+		t.Errorf("CSP must not grant any sandbox allow-* token, got %q", csp)
+	}
+	if corp := w.Header().Get("Cross-Origin-Resource-Policy"); corp != "same-origin" {
+		t.Errorf("Cross-Origin-Resource-Policy = %q, want same-origin", corp)
+	}
+	if cc := w.Header().Get("Cache-Control"); cc != "no-store" {
+		t.Errorf("Cache-Control = %q, want no-store", cc)
+	}
+	if xcto := w.Header().Get("X-Content-Type-Options"); xcto != "nosniff" {
+		t.Errorf("X-Content-Type-Options = %q, want nosniff", xcto)
+	}
+	if !bytes.Equal(w.Body.Bytes(), svgBytes) {
+		t.Error("body should match input SVG bytes verbatim (server does not rewrite)")
+	}
+}
+
+// TestHandleFileGet_RenderSVGSpoofedExt is the inverse of the SVG test —
+// detectMime pins .svg to image/svg+xml regardless of bytes, so a non-SVG
+// payload renamed to .svg flows through render. That's still safe because
+// the response is octet-stream + attachment + sandbox CSP; the iframe blob
+// type on the client is image/svg+xml so non-SVG bytes simply fail to parse.
+// Documents the deliberate trade-off: ext authority lets us short-circuit
+// MIME detection on every batch stat, at the cost of arbitrary bytes being
+// served via the render route — bounded by the same security headers.
+func TestHandleFileGet_RenderSVGSpoofedExt(t *testing.T) {
+	h, proj, projDir := newProjectHandlersForTest(t, nil)
+	if err := os.WriteFile(filepath.Join(projDir, "fake.svg"), []byte("not really svg"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+proj+"&path=fake.svg&mode=render", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200 — extension authority pins .svg → image/svg+xml", w.Code)
+	}
+	if ct := w.Header().Get("Content-Type"); ct != "application/octet-stream" {
+		t.Errorf("Content-Type = %q, want application/octet-stream regardless of bytes", ct)
 	}
 }
 

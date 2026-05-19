@@ -8,7 +8,7 @@ import (
 )
 
 // TestDashboardCSP_FrameSrcBlob locks the regression that broke workspace .html
-// preview: dashboard.js renderHtmlInSandbox fetches workspace HTML, wraps the
+// preview: dashboard.js renderSandboxedBlob fetches workspace HTML, wraps the
 // bytes in a Blob({type:'text/html'}), and points a sandboxed iframe at the
 // resulting blob: URL. The page-level CSP must list `blob:` under frame-src
 // (or fall through to a default-src that does) — `'self'` does not match the
@@ -35,7 +35,7 @@ func TestDashboardCSP_FrameSrcBlob(t *testing.T) {
 		t.Fatal("Content-Security-Policy header missing on /dashboard")
 	}
 
-	// frame-src must allow blob: so renderHtmlInSandbox can iframe a blob:
+	// frame-src must allow blob: so renderSandboxedBlob can iframe a blob:
 	// URL constructed from a fetched workspace .html. CSP `'self'` alone
 	// does not match the blob: scheme.
 	if !strings.Contains(csp, "frame-src") {
@@ -46,7 +46,7 @@ func TestDashboardCSP_FrameSrcBlob(t *testing.T) {
 	// is fixed in handleDashboard and we do not want to accept an
 	// accidentally over-permissive value either.
 	if !strings.Contains(csp, "frame-src 'self' blob:") {
-		t.Errorf("CSP frame-src must explicitly allow 'self' + blob: for renderHtmlInSandbox, got %q", csp)
+		t.Errorf("CSP frame-src must explicitly allow 'self' + blob: for renderSandboxedBlob, got %q", csp)
 	}
 
 	// Defense-in-depth: img-src already allows blob: (used by composer image
