@@ -20,8 +20,9 @@ import (
 // inside ReattachProcessNoCallback would violate the documented sendMu→r.mu
 // lock ordering and risk ABBA deadlock. Instead, pin the invariant at source
 // level: ReattachProcessNoCallback must have exactly one production caller
-// (the shim-reconnect path in router.go), and that caller must be preceded
-// by an `isAlive()` guard that aborts if the session is still live. Any new
+// (the shim-reconnect path in router_shim.go since the router-split refactor;
+// originally in router.go), and that caller must be preceded by an
+// `isAlive()` guard that aborts if the session is still live. Any new
 // caller — or any removal of the guard — must be reviewed through this
 // audit item.
 //
@@ -30,7 +31,7 @@ import (
 // itself), and asserts:
 //
 //  1. Exactly ONE production call site exists.
-//  2. It lives in router.go (not a test or some other file).
+//  2. It lives in router_shim.go (not a test or some other file).
 //  3. Within 200 bytes above the call, an `isAlive()` guard is present —
 //     the canonical shape `currentSess.isAlive()` gates the call on the
 //     session being known-dead.
@@ -42,11 +43,13 @@ import (
 // sendMu-aware ReattachProcess variant.
 func TestReattachProcessNoCallback_ContractContext(t *testing.T) {
 	t.Parallel()
-	// Scan router.go — the only production file that should reference the
-	// no-callback variant outside of its own definition in managed.go.
-	routerSrc, err := os.ReadFile("router.go")
+	// Scan router_shim.go — the only production file that should reference
+	// the no-callback variant outside of its own definition in managed.go.
+	// (The router-split refactor moved the shim-reconnect path here; prior
+	// to that the call lived in router.go.)
+	routerShimSrc, err := os.ReadFile("router_shim.go")
 	if err != nil {
-		t.Fatalf("read router.go: %v", err)
+		t.Fatalf("read router_shim.go: %v", err)
 	}
 	managedSrc, err := os.ReadFile("managed.go")
 	if err != nil {
@@ -92,15 +95,15 @@ func TestReattachProcessNoCallback_ContractContext(t *testing.T) {
 		}
 	}
 
-	if len(prodCallSites) != 1 || prodCallSites[0] != "router.go" {
+	if len(prodCallSites) != 1 || prodCallSites[0] != "router_shim.go" {
 		t.Errorf("ReattachProcessNoCallback production call sites = %v, "+
-			"want [router.go]. R31-REL1: the sendMu-waiver is safe ONLY in the "+
+			"want [router_shim.go]. R31-REL1: the sendMu-waiver is safe ONLY in the "+
 			"shim-reconnect path where the session is known-dead; any new caller "+
 			"must be reviewed through the audit item. If intentional, add the "+
 			"new file to a whitelist here with justification.", prodCallSites)
 	}
 
-	// 3) Verify the router.go call site is preceded by an isAlive() guard
+	// 3) Verify the router_shim.go call site is preceded by an isAlive() guard
 	// within a short window. We locate the first call and look back ~500
 	// characters for `isAlive()` — the typical shape is:
 	//    if currentSess != sess || (currentSess != nil && currentSess.isAlive()) {
@@ -109,10 +112,10 @@ func TestReattachProcessNoCallback_ContractContext(t *testing.T) {
 	//        continue
 	//    }
 	//    sess.ReattachProcessNoCallback(proc, ...)
-	routerStr := string(routerSrc)
+	routerStr := string(routerShimSrc)
 	callIdx := strings.Index(routerStr, "ReattachProcessNoCallback(")
 	if callIdx < 0 {
-		t.Fatal("ReattachProcessNoCallback call not found in router.go despite the earlier grep")
+		t.Fatal("ReattachProcessNoCallback call not found in router_shim.go despite the earlier grep")
 	}
 	windowStart := callIdx - 500
 	if windowStart < 0 {
@@ -120,7 +123,7 @@ func TestReattachProcessNoCallback_ContractContext(t *testing.T) {
 	}
 	window := routerStr[windowStart:callIdx]
 	if !strings.Contains(window, ".isAlive()") {
-		t.Error("ReattachProcessNoCallback call in router.go is no longer preceded " +
+		t.Error("ReattachProcessNoCallback call in router_shim.go is no longer preceded " +
 			"by an isAlive() guard within ~500 bytes. R31-REL1: the sendMu-waiver " +
 			"depends on the session being known-dead before Reattach. Either " +
 			"restore the `if currentSess.isAlive() { abort }` gate, or switch to " +

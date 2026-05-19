@@ -27,13 +27,15 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 	t.Parallel()
 	cases := []wiringCase{
 		{
+			// router-split (Phase 1): spawnSession moved to router_lifecycle.go.
 			name:    "SessionCreateTotal fires in spawnSession success path",
-			path:    "../session/router.go",
+			path:    "../session/router_lifecycle.go",
 			pattern: `metrics\.SessionCreateTotal\.Add\(1\)`,
 		},
 		{
+			// router-split (Phase 1): evictOldest moved to router_lifecycle.go.
 			name:    "SessionEvictTotal fires in evictOldest success path",
-			path:    "../session/router.go",
+			path:    "../session/router_lifecycle.go",
 			pattern: `metrics\.SessionEvictTotal\.Add\(1\)`,
 		},
 		{
@@ -61,8 +63,11 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			// it is incremented once per absorbed panic. Wiring outside the
 			// recover arm (or removing it entirely) would silence the
 			// operator's "spawn panic happened" signal.
+			//
+			// router-split (Phase 6): panicSafeSpawnFn stayed with router.go
+			// which was renamed to router_core.go.
 			name:    "SpawnPanicRecoveredTotal fires in panicSafeSpawnFn recover arm",
-			path:    "../session/router.go",
+			path:    "../session/router_core.go",
 			pattern: `metrics\.SpawnPanicRecoveredTotal\.Add\(1\)`,
 		},
 		{
@@ -70,8 +75,11 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			// hasInjectedHistory() short-circuit — must count. Wiring on the
 			// happy path would turn the signal into "all shim-managed loads"
 			// and drown out the "reconnect missed" flag.
+			//
+			// router-split (Phase 6): NewRouter (where this counter lives)
+			// stayed with router.go which was renamed to router_core.go.
 			name:    "ShimReconnectGraceBackfillTotal fires in grace-deferred backfill path",
-			path:    "../session/router.go",
+			path:    "../session/router_core.go",
 			pattern: `metrics\.ShimReconnectGraceBackfillTotal\.Add\(1\)`,
 		},
 		{
@@ -79,23 +87,26 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			// so every caller (HTTP / WS / dispatch) contributes to the same signal.
 			// Wiring inside ManagedSession.InterruptViaControl would work but
 			// leaks the metrics dependency into the lower layer.
+			//
+			// router-split (Phase 5): InterruptSessionViaControl moved to
+			// router_discovery.go.
 			name:    "InterruptSentTotal fires on InterruptSent branch",
-			path:    "../session/router.go",
+			path:    "../session/router_discovery.go",
 			pattern: `metrics\.InterruptSentTotal\.Add\(1\)`,
 		},
 		{
 			name:    "InterruptNoTurnTotal fires on InterruptNoTurn branch",
-			path:    "../session/router.go",
+			path:    "../session/router_discovery.go",
 			pattern: `metrics\.InterruptNoTurnTotal\.Add\(1\)`,
 		},
 		{
 			name:    "InterruptUnsupportedTotal fires on InterruptUnsupported branch",
-			path:    "../session/router.go",
+			path:    "../session/router_discovery.go",
 			pattern: `metrics\.InterruptUnsupportedTotal\.Add\(1\)`,
 		},
 		{
 			name:    "InterruptErrorTotal fires on InterruptError branch",
-			path:    "../session/router.go",
+			path:    "../session/router_discovery.go",
 			pattern: `metrics\.InterruptErrorTotal\.Add\(1\)`,
 		},
 		{
@@ -187,9 +198,11 @@ func TestOBS1_PanicRecoveredWiredIntoTopSites(t *testing.T) {
 // seam that would drive the bug at runtime.
 func TestOBS2_SpawnPanicRecoveredInRecoverArm(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("../session/router.go")
+	// router-split (Phase 6): panicSafeSpawnFn stayed with router.go which
+	// was renamed to router_core.go.
+	data, err := os.ReadFile("../session/router_core.go")
 	if err != nil {
-		t.Fatalf("read router.go: %v", err)
+		t.Fatalf("read router_core.go: %v", err)
 	}
 	// Match the recover arm up to the counter Add. `(?s)` lets `.` cross
 	// newlines; the non-greedy `.*?` ensures we find the nearest Add after
@@ -197,7 +210,7 @@ func TestOBS2_SpawnPanicRecoveredInRecoverArm(t *testing.T) {
 	re := regexp.MustCompile(`(?s)if r := recover\(\); r != nil \{.*?metrics\.SpawnPanicRecoveredTotal\.Add\(1\)`)
 	if !re.Match(data) {
 		t.Error("metrics.SpawnPanicRecoveredTotal.Add(1) not found inside a " +
-			"`if r := recover(); r != nil` arm in router.go. The counter must " +
+			"`if r := recover(); r != nil` arm in router_core.go. The counter must " +
 			"live in the recover branch of panicSafeSpawnFn — incrementing it " +
 			"on the happy path (every Spawn call) would turn 'panics absorbed' " +
 			"into 'spawn attempts' and break the R172-ARCH-D10 signal.")
@@ -229,11 +242,14 @@ func TestOBS2_WSAuthFailBothBranches(t *testing.T) {
 //
 // The check matches the outcome switch block in InterruptSessionViaControl
 // and looks for each of the 4 counters inside it. R172-ARCH-D10.
+//
+// router-split (Phase 5): InterruptSessionViaControl moved to
+// router_discovery.go.
 func TestOBS2_InterruptCountersInOutcomeSwitch(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("../session/router.go")
+	data, err := os.ReadFile("../session/router_discovery.go")
 	if err != nil {
-		t.Fatalf("read router.go: %v", err)
+		t.Fatalf("read router_discovery.go: %v", err)
 	}
 	// (?s) so `.*?` crosses newlines; match the switch head through the
 	// matching right brace heuristically with a reasonable upper bound to
@@ -249,7 +265,7 @@ func TestOBS2_InterruptCountersInOutcomeSwitch(t *testing.T) {
 		blocks = blockRe.FindAll(data, -1)
 	}
 	if len(blocks) == 0 {
-		t.Fatalf("no `switch outcome { ... }` block found in router.go; Interrupt " +
+		t.Fatalf("no `switch outcome { ... }` block found in router_discovery.go; Interrupt " +
 			"outcome counters must live inside that switch to stay per-outcome")
 	}
 	want := []string{

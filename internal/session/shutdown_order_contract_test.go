@@ -87,9 +87,10 @@ func TestShutdown_HistoryCtxCancelledFirst(t *testing.T) {
 // the failure mode R172-ARCH-D11 calls out explicitly.
 func TestShutdown_HistoryCtxCancelPreceedsHistoryWgWait(t *testing.T) {
 	t.Parallel()
-	src, err := os.ReadFile("router.go")
+	// router-split (Phase 4): shutdown() helper moved to router_cleanup.go.
+	src, err := os.ReadFile("router_cleanup.go")
 	if err != nil {
-		t.Fatalf("read router.go: %v", err)
+		t.Fatalf("read router_cleanup.go: %v", err)
 	}
 
 	// Locate the shutdown() function body. We tolerate any leading
@@ -98,7 +99,7 @@ func TestShutdown_HistoryCtxCancelPreceedsHistoryWgWait(t *testing.T) {
 	reShutdown := regexp.MustCompile(`(?ms)^func \(r \*Router\) shutdown\(\) \{(.*?)\n\}\n`)
 	m := reShutdown.FindSubmatch(src)
 	if m == nil {
-		t.Fatal("could not locate `func (r *Router) shutdown()` body in router.go — " +
+		t.Fatal("could not locate `func (r *Router) shutdown()` body in router_cleanup.go — " +
 			"did the signature change? Update this test to find the new anchor.")
 	}
 	body := m[1]
