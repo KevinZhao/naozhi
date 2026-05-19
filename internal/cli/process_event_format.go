@@ -227,12 +227,35 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 		}
 		return out
 	case "result":
+		// claude path: ev.Result is empty here because text was already streamed
+		// via assistant events (agent_message_chunk → text blocks). The result
+		// event only carries cost / sessionId metadata.
+		// ACP/kiro path: ev.Result holds the FULL accumulated assistant text
+		// (textBuf in protocol_acp.go:355) because ACP streams via
+		// agent_message_chunk *content* notifications that don't carry the
+		// text in the synthesized assistant Event — the full text only
+		// materialises at turn-end.
+		//
+		// Frontend dashboard.js INTERNAL_EVENT_TYPES filters "result" entries
+		// out (claude convention: result is metadata-only). So when ACP fills
+		// ev.Result we ALSO emit a parallel "text" entry that carries the
+		// reply visibly. Without this, kiro turn-end has no rendered bubble
+		// and the operator sees their own message but no reply.
+		// Reproduced live 2026-05-19; see PR #131 root-cause comment.
 		entry := base
 		entry.Type = "result"
 		entry.Summary = textutil.TruncateRunes(ev.Result, 200)
 		entry.Detail = textutil.TruncateRunes(ev.Result, 16000)
 		entry.Cost = ev.CostUSD
-		return []EventEntry{entry}
+		out := []EventEntry{entry}
+		if ev.Result != "" {
+			textEntry := base
+			textEntry.Type = "text"
+			textEntry.Summary = textutil.TruncateRunes(ev.Result, 120)
+			textEntry.Detail = textutil.TruncateRunes(ev.Result, 16000)
+			out = append(out, textEntry)
+		}
+		return out
 	}
 	return nil
 }

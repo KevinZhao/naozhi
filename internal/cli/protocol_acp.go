@@ -330,7 +330,15 @@ func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 			// dashboard, so untrusted control characters / bidi overrides must
 			// be scrubbed before they reach structured logs. Matches the
 			// R172-SEC-M4 / R175-SEC-P1 / R183-SEC-H1 sanitize policy.
-			return Event{}, false, fmt.Errorf("%w %d: %s", ErrACPRPC,
+			//
+			// done=true: an error response to session/prompt closes that turn
+			// from kiro's POV — there will be no further events for this id.
+			// Returning done=false would leave the session stuck in
+			// state=running until the next interrupt/restart (operator-visible
+			// as "kiro session never replies"; reproduced live 2026-05-19).
+			// readLoop translates ErrACPRPC into a synthetic result event so
+			// the dashboard sees the failure instead of a silent skip.
+			return Event{}, true, fmt.Errorf("%w %d: %s", ErrACPRPC,
 				msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))
 		}
 
