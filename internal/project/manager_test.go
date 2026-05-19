@@ -9,16 +9,13 @@ import (
 )
 
 // makeProjectDir creates a minimal project directory under root:
-// root/<name>/CLAUDE.md and optionally root/<name>/.naozhi/project.yaml.
+// root/<name>/ (any non-hidden subdirectory counts as a project) and
+// optionally root/<name>/.naozhi/project.yaml.
 func makeProjectDir(t *testing.T, root, name string, cfg *ProjectConfig) {
 	t.Helper()
 	projDir := filepath.Join(root, name)
 	if err := os.MkdirAll(projDir, 0755); err != nil {
 		t.Fatalf("create project dir: %v", err)
-	}
-	// CLAUDE.md is required for Scan() to pick up the project.
-	if err := os.WriteFile(filepath.Join(projDir, "CLAUDE.md"), []byte("# "+name), 0644); err != nil {
-		t.Fatalf("write CLAUDE.md: %v", err)
 	}
 	if cfg != nil {
 		cfgDir := filepath.Join(projDir, ".naozhi")
@@ -86,7 +83,6 @@ func TestScan_SkipsHiddenDirs(t *testing.T) {
 	// Create a hidden directory — should be skipped.
 	hidden := filepath.Join(root, ".hidden")
 	os.MkdirAll(hidden, 0755)
-	os.WriteFile(filepath.Join(hidden, "CLAUDE.md"), []byte("x"), 0644)
 
 	m, _ := NewManager(root, PlannerDefaults{})
 	m.Scan()
@@ -96,17 +92,23 @@ func TestScan_SkipsHiddenDirs(t *testing.T) {
 	}
 }
 
-func TestScan_SkipsDirsWithoutCLAUDEMd(t *testing.T) {
+// TestScan_PicksUpDirsWithoutCLAUDEMd locks the policy: any non-hidden
+// subdirectory under projects_root counts as a project, even without a
+// CLAUDE.md marker file. The dashboard "New session" palette + favorite
+// pinning rely on every workspace folder showing up so users can star
+// arbitrary folders.
+func TestScan_PicksUpDirsWithoutCLAUDEMd(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
-	// Directory without CLAUDE.md
-	os.MkdirAll(filepath.Join(root, "noclaudemd"), 0755)
+	// Bare directory — no CLAUDE.md, no .naozhi/project.yaml.
+	os.MkdirAll(filepath.Join(root, "bare"), 0755)
 
 	m, _ := NewManager(root, PlannerDefaults{})
 	m.Scan()
 
-	if all := m.All(); len(all) != 0 {
-		t.Errorf("Scan() picked up dir without CLAUDE.md; All() = %d", len(all))
+	all := m.All()
+	if len(all) != 1 || all[0].Name != "bare" {
+		t.Errorf("Scan() should pick up bare directory; All() = %+v", all)
 	}
 }
 
@@ -136,7 +138,6 @@ func TestScan_SkipsBadConfig(t *testing.T) {
 	root := t.TempDir()
 	projDir := filepath.Join(root, "badcfg")
 	os.MkdirAll(filepath.Join(projDir, ".naozhi"), 0755)
-	os.WriteFile(filepath.Join(projDir, "CLAUDE.md"), []byte("x"), 0644)
 	os.WriteFile(filepath.Join(projDir, ".naozhi", "project.yaml"), []byte("git_sync: [unclosed"), 0600)
 
 	m, _ := NewManager(root, PlannerDefaults{})
@@ -168,7 +169,7 @@ func TestScan_SkipsSemanticallyInvalidConfig(t *testing.T) {
 
 	// Valid baseline alongside each bad project: Scan must still pick
 	// these up so the test isolates the validator's behaviour from any
-	// unrelated skip path (missing CLAUDE.md, etc).
+	// unrelated skip path.
 	makeProjectDir(t, root, "good", nil)
 
 	cases := []struct {
@@ -220,9 +221,6 @@ func TestScan_SkipsSemanticallyInvalidConfig(t *testing.T) {
 		projDir := filepath.Join(root, tc.name)
 		if err := os.MkdirAll(filepath.Join(projDir, ".naozhi"), 0755); err != nil {
 			t.Fatalf("mkdir %s: %v", tc.name, err)
-		}
-		if err := os.WriteFile(filepath.Join(projDir, "CLAUDE.md"), []byte("x"), 0644); err != nil {
-			t.Fatalf("write CLAUDE.md %s: %v", tc.name, err)
 		}
 		if err := os.WriteFile(filepath.Join(projDir, ".naozhi", "project.yaml"), []byte(tc.yaml), 0600); err != nil {
 			t.Fatalf("write project.yaml %s: %v", tc.name, err)

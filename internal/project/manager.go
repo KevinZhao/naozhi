@@ -69,11 +69,6 @@ func (m *Manager) Scan() error {
 
 		absPath := filepath.Join(m.root, name)
 
-		// Only include directories that contain CLAUDE.md
-		if _, err := os.Stat(filepath.Join(absPath, "CLAUDE.md")); err != nil {
-			continue
-		}
-
 		cfg, err := loadConfig(absPath)
 		if err != nil {
 			slog.Warn("skip project with bad config", "name", name, "err", err)
