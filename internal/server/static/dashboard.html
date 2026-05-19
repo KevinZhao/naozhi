@@ -188,15 +188,43 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .tc-body{margin:0;padding:10px;background:var(--nz-bg-0);border-top:1px solid var(--nz-border);font-family:ui-monospace,Menlo,Monaco,Consolas,monospace;font-size:12px;line-height:1.5;color:var(--nz-text);white-space:pre-wrap;word-break:break-word;max-height:400px;overflow:auto}
 
 /* RFC §8.3 D9-D15 / §8.7 — feature-gated input controls. `feat-disabled`
-   is the hard gate (control is unusable on this backend); the opacity +
-   cursor change communicate the state and the title attribute carries
-   the operator-readable reason (the rule MUST be set together — never
-   silently disable). `feat-degraded` is the soft gate (control still
-   works but routes through a fallback path, e.g. audio→transcribe→text);
-   visual treatment is gentler to convey "still works, just different". */
-.btn-icon.feat-disabled{opacity:.4;cursor:not-allowed}
-.btn-icon.feat-disabled:hover{background:transparent}
-.btn-hold-talk.feat-degraded,.btn-icon.feat-degraded{opacity:.75}
+   is the hard gate (control is unusable on this backend); cursor +
+   diagonal stripe pattern + dimmer text communicate the state, and the
+   title attribute carries the operator-readable reason (the rule MUST be
+   set together — never silently disable). Earlier the gate used pure
+   opacity:.4 which made the emoji glyph almost invisible on dark
+   backgrounds; the WCAG AA-friendly stripe now signals "off" without
+   hiding the icon entirely.
+   `feat-degraded` is the soft gate (control still works but routes
+   through a fallback path, e.g. audio→transcribe→text); visual treatment
+   is gentler to convey "still works, just different". */
+.btn-icon.feat-disabled{
+  cursor:not-allowed;
+  color:var(--nz-text-dim);
+  background:repeating-linear-gradient(
+    135deg,
+    var(--nz-bg-1) 0 6px,
+    var(--nz-bg-2) 6px 12px
+  );
+  border-color:var(--nz-border);
+}
+.btn-icon.feat-disabled:hover{
+  /* Keep the stripe instead of clearing background — clearing would
+     make the emoji glyph fall through to body bg which has even lower
+     contrast on most themes. */
+  filter:brightness(1.05);
+}
+.btn-hold-talk.feat-degraded,.btn-icon.feat-degraded{
+  /* Soft gate: still operable, just hint at fallback path. opacity
+     dropped from .75 → .85 so the emoji stays legible on dark themes. */
+  opacity:.85;
+}
+
+/* RFC §8.3 D12 — AskUserQuestion fallback card on backends without the
+   askuser feature. Plain readable text, no interactive options, hint at top. */
+.ask-degraded .ask-degraded-hint{font-size:12px;color:var(--nz-text-mute);margin-bottom:8px}
+.ask-degraded .ask-degraded-q{margin:6px 0;padding:6px 10px;border-left:2px solid var(--nz-border);background:var(--nz-bg-1);border-radius:0 6px 6px 0}
+.ask-degraded .ask-degraded-opts{margin-top:4px;color:var(--nz-text-dim);font-size:13px;line-height:1.5}
 
 .events{flex:1;overflow-y:auto;overflow-x:hidden;padding:16px 0;scrollbar-width:thin;scrollbar-color:var(--nz-border) transparent;min-width:0}
 /* Message navigation pill */

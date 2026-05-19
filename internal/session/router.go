@@ -2416,10 +2416,26 @@ func (r *Router) installFreshSessionLocked(
 	if len(oldHistory) > 0 {
 		proc.InjectHistory(oldHistory)
 	}
-	s.setSessionID(resumeID)
-	r.trackSessionID(resumeID)
-	if resumeID != "" {
-		r.sessionIDToKey[resumeID] = key
+	// Effective session ID: prefer the resumeID the caller asked us to
+	// resume, but if there isn't one, fall back to whatever the protocol
+	// captured during Init / fresh handshake (ACP `session/new` returns a
+	// UUID synchronously; claude leaves it empty until the first turn's
+	// system/init event lands and process_send.go.SetSessionID kicks in).
+	//
+	// Without this fallback, a freshly-spawned kiro session has empty
+	// ManagedSession.sessionID until the user sends their first message,
+	// and the periodic saveStore loop (store.go:135 `if sid != ""`) drops
+	// the entry on the floor — losing the session across naozhi restarts.
+	// claude is unaffected because no resume + no first turn → empty sid
+	// matches its legacy behaviour.
+	effectiveSID := resumeID
+	if effectiveSID == "" {
+		effectiveSID = proc.GetSessionID()
+	}
+	s.setSessionID(effectiveSID)
+	if effectiveSID != "" {
+		r.trackSessionID(effectiveSID)
+		r.sessionIDToKey[effectiveSID] = key
 	}
 	s.touchLastActive()
 	r.attachHistorySource(s)
