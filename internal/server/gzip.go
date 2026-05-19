@@ -114,9 +114,9 @@ func (g *gzipResponseWriter) Write(p []byte) (int, error) {
 }
 
 // Flush forwards to both the gzip writer (so compressed bytes leave our buffer)
-// and the underlying ResponseWriter. Currently no handler uses Flusher, but
-// preserving the interface keeps the middleware transparent for future SSE /
-// chunked-response code paths.
+// and the underlying ResponseWriter. Streaming handlers (event push, chunked
+// responses) need this to land bytes promptly; without it, gzip would buffer
+// frames behind its own block boundary.
 func (g *gzipResponseWriter) Flush() {
 	if g.useGzip && g.gz != nil {
 		_ = g.gz.Flush()
@@ -141,6 +141,10 @@ func (g *gzipResponseWriter) close() {
 // verbatim so the underlying ResponseWriter keeps its Hijacker, and handlers
 // that write pre-compressed binary (images, archives) are skipped via the
 // Content-Type check in gzipResponseWriter.decide().
+//
+// This middleware is response-side only: it never touches r.Body, so request
+// body caps (MaxBytesReader) and gzip-bomb defenses on inbound payloads
+// remain orthogonal concerns owned by the request-parsing path.
 func gzipMiddleware(h http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// WebSocket upgrades hijack the TCP connection — wrapping the

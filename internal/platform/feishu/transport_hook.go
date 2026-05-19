@@ -74,6 +74,15 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			if envelope.Header != nil && envelope.Header.Token != "" {
 				token = envelope.Header.Token
 			}
+			// Reject pathologically long tokens before hashing — real Feishu
+			// tokens are ~32 bytes, so anything beyond maxWebhookTokenLen is
+			// either a malformed sender or an attempt to amplify the SHA-256
+			// cost inside constantTimeEqualString.
+			if len(token) > maxWebhookTokenLen {
+				slog.Warn("feishu token too long", "len", len(token))
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
 			// Hash both sides to a fixed-length digest before the constant-time
 			// compare so that pathologically short/long attacker tokens cannot
 			// leak the real token's length via timing on the length prefix

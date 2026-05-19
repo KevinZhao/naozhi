@@ -94,7 +94,10 @@ func (p *ACPProtocol) Clone() Protocol { return &ACPProtocol{BackendID: p.Backen
 
 func (p *ACPProtocol) BuildArgs(opts SpawnOptions) []string {
 	args := []string{"acp"}
-	args = append(args, opts.ExtraArgs...)
+	// Mirror ClaudeProtocol's ExtraArgs guard (capExtraArgsBytes lives in
+	// protocol_claude.go) so an ACP backend cannot bypass the ARG_MAX
+	// defense merely by routing the same user-supplied args through here.
+	args = append(args, capExtraArgsBytes(opts.ExtraArgs)...)
 	return args
 }
 
@@ -664,7 +667,11 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 	go func() {
 		for {
 			line, eof, err := rw.R.ReadLine()
-			if err != nil || eof {
+			if err != nil {
+				ch <- readResult{nil, fmt.Errorf("read ACP response: %w", err)}
+				return
+			}
+			if eof {
 				ch <- readResult{nil, fmt.Errorf("unexpected EOF during ACP init")}
 				return
 			}

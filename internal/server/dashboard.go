@@ -75,6 +75,11 @@ func putJSONEnc(e *jsonEncBuf) {
 // fresh []byte. Callers who would otherwise call json.Marshal on a hot path
 // (WS event fanout, session_state broadcasts) use this to avoid the per-call
 // encodeState allocation. Returned slice is safe to share/outlive the pool.
+//
+// HTML escaping is disabled on the pooled encoder (see jsonEncPool); the same
+// CLIENT-SIDE CONTRACT documented on writeJSON applies to any string field
+// carried over a marshalPooled-encoded message: clients MUST render strings
+// via textContent (or DOMPurify) and never assign them to innerHTML.
 func marshalPooled(v any) ([]byte, error) {
 	e := getJSONEnc()
 	defer putJSONEnc(e)
