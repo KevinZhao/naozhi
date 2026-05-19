@@ -273,20 +273,23 @@ func (p *ACPProtocol) WriteInterrupt(w io.Writer, _ string) error {
 	if sid == "" {
 		return ErrInterruptUnsupported
 	}
-	notif := struct {
-		JSONRPC string         `json:"jsonrpc"`
-		Method  string         `json:"method"`
-		Params  map[string]any `json:"params"`
-	}{
-		JSONRPC: "2.0",
-		Method:  "session/cancel",
-		Params:  map[string]any{"sessionId": sid},
-	}
-	data, err := json.Marshal(notif)
+	// R226-PERF-9: hand-build the static envelope and only json.Marshal
+	// the variable sid so we skip reflective marshalling of a tiny fixed
+	// notification. encoding/json takes a fast-path for plain string
+	// values (no struct reflection) and yields a properly escaped JSON
+	// string with surrounding quotes — identical to what the previous
+	// struct-based Marshal produced for the params.sessionId field.
+	// Newline appended for line-based ACP framing.
+	sidJSON, err := json.Marshal(sid)
 	if err != nil {
 		return fmt.Errorf("acp marshal session/cancel: %w", err)
 	}
-	if _, err := w.Write(append(data, '\n')); err != nil {
+	var buf [256]byte
+	out := buf[:0]
+	out = append(out, `{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":`...)
+	out = append(out, sidJSON...)
+	out = append(out, "}}\n"...)
+	if _, err := w.Write(out); err != nil {
 		return fmt.Errorf("acp write session/cancel: %w", err)
 	}
 	// Multi-Backend RFC §10 (Sprint 6a): record only successful sends.

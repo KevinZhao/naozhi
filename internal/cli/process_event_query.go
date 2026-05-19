@@ -10,7 +10,11 @@ package cli
 // is the heaviest — it seeds the SubagentLinker so dashboard drill-in
 // for live agent tasks survives a naozhi restart.
 
-import "time"
+import (
+	"time"
+
+	"github.com/naozhi/naozhi/internal/textutil"
+)
 
 // InjectHistory pre-populates the event log with historical entries. Also
 // seeds the SubagentLinker so team agent rows in the dashboard banner can
@@ -58,6 +62,10 @@ func (p *Process) InjectHistory(entries []EventEntry) {
 		}
 		seen[taskID] = struct{}{}
 		linker := p.linker
+		// R225-CR-10: cap description (matches process_readloop hot path)
+		// so the Resolve goroutine doesn't pin multi-KB strings until the
+		// resolveSem slot frees.
+		desc = textutil.TruncateRunes(desc, 2000)
 		go linker.Resolve(taskID, toolUseID, name, desc, wallclock)
 	}
 	for _, e := range entries {
