@@ -218,13 +218,13 @@ type Router struct {
 	backendExtraArgs map[string][]string
 	// 读写: core (init/DefaultWorkspace), lifecycle (GetWorkspace fallback)
 	workspace string // default cwd for CLI processes
-	// 读写: core (init), lifecycle (attachHistorySource), shim (reconnect)
+	// 读写: core (init), lifecycle (attachHistorySource), discovery (attachHistorySource via RegisterForResume / RegisterCronStubWithChain / Takeover), shim (reconnect)
 	claudeDir string // ~/.claude dir for loading session history
 	// kiroSessionsDir is the kiro session-state root. Plumbed into
 	// cli.HistoryWiring at attachHistorySource time so the kirojsonl
 	// factory can read per-session JSONL from this path. Wired from
 	// RouterConfig.KiroSessionsDir in cmd/naozhi/main.go.
-	// 读写: core (init), lifecycle (attachHistorySource)
+	// 读写: core (init), lifecycle (attachHistorySource), discovery (attachHistorySource via Register* / Takeover)
 	kiroSessionsDir string
 
 	// workspaceOverrides stores per-chat workspace overrides.
@@ -261,7 +261,7 @@ type Router struct {
 
 	// 读写: core (init), cleanup (saveIfDirty)
 	storePath string
-	// 读写: lifecycle (mutations), cleanup (saveIfDirty consume)
+	// 读写: lifecycle (spawn/Reset/Rename mutations), shim (reconnect post-attach), discovery (label/register/takeover), cleanup (saveIfDirty consume)
 	storeDirty bool // true when sessions changed since last save
 	// storeGen increments on each mutation. Writes happen under r.mu (write
 	// lock) but atomic.Uint64 also lets Version() read lock-free — the
@@ -270,9 +270,9 @@ type Router struct {
 	// RLock made each poll take two contended trips through r.mu.
 	// 读写: core (Version lock-free), lifecycle / cleanup / discovery (BumpVersion)
 	storeGen atomic.Uint64
-	// 读写: lifecycle (SetWorkspace), cleanup (saveIfDirty)
+	// 读写: lifecycle (SetWorkspace / ResetChat / RenameSession), discovery (Takeover), cleanup (saveIfDirty consume)
 	wsOverridesDirty bool // true when workspace overrides changed since last save
-	// 读写: lifecycle (SetWorkspace), core (lock-free read by future API)
+	// 读写: lifecycle (SetWorkspace / ResetChat / RenameSession), discovery (Takeover), cleanup (snapshot/check during save)
 	wsOverridesGen atomic.Uint64 // increments on each ws-override mutation, mirrors storeGen pattern
 
 	// knownIDs tracks ALL session IDs ever used by naozhi, including
@@ -359,7 +359,7 @@ type Router struct {
 	// event-log persist events to .meta sidecar updates. nil when
 	// eventLogDir is unset (refcount tracking has no source of
 	// events in that case). See docs/rfc/attachment-refcount.md.
-	// 读写: core (init), lifecycle (clearAttachmentTrackerRefs), cleanup
+	// 读写: core (init/stopAttachmentTracker), lifecycle (installPersistSink), cleanup (clearAttachmentTrackerRefs / Shutdown stop)
 	attachmentTracker *attachmentTracker
 }
 
