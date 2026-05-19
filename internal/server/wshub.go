@@ -788,7 +788,7 @@ func (h *Hub) handleSend(c *wsClient, msg node.ClientMsg) {
 		return
 	}
 	if len(msg.FileIDs) > maxFilesPerSend {
-		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: fmt.Sprintf("too many files (max %d)", maxFilesPerSend)})
+		c.SendJSON(node.ServerMsg{Type: "send_ack", ID: msg.ID, Status: "error", Error: errTooManyFiles})
 		return
 	}
 
