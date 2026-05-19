@@ -276,7 +276,12 @@ func (l *SubagentLinker) Resolve(taskID, toolUseID, name, description string, ag
 	// Steps 2-4: scan, filter by agentType, retry while empty.
 	for attempt := 0; attempt <= l.retryLimit; attempt++ {
 		entries := l.scanMetaFiles(subagentDir)
-		candidates := entries[:0:0]
+		// Allocate fresh — entries is the cached dirCache slice (see
+		// scanMetaFiles); the prior `entries[:0:0]` trick reused its
+		// header but always re-allocated on first append, so it offered
+		// no advantage and obscured the relationship between the cache
+		// slice and the per-attempt working slice.
+		candidates := make([]metaEntry, 0, len(entries))
 		for _, e := range entries {
 			if e.agentType == name {
 				candidates = append(candidates, e)
