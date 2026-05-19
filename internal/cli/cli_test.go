@@ -414,6 +414,49 @@ func TestACPProtocol_BuildArgs(t *testing.T) {
 	}
 }
 
+// TestACPProtocol_BuildArgs_Model verifies that opts.Model is forwarded as
+// `--model <id>` to kiro-cli acp. Without this the cli.backends[].model
+// config silently no-ops on kiro (router merge populates SpawnOptions.Model
+// but BuildArgs would drop it). Verified on kiro 2.3.0: session/new result
+// echoes the flag value via models.currentModelId.
+func TestACPProtocol_BuildArgs_Model(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	args := p.BuildArgs(SpawnOptions{Model: "claude-haiku-4.5"})
+	// Expect: ["acp", "--model", "claude-haiku-4.5"]
+	if len(args) < 3 {
+		t.Fatalf("BuildArgs short, got %v", args)
+	}
+	if args[0] != "acp" {
+		t.Errorf("first arg should be 'acp', got %q", args[0])
+	}
+	var sawFlag, sawValue bool
+	for i, a := range args {
+		if a == "--model" && i+1 < len(args) && args[i+1] == "claude-haiku-4.5" {
+			sawFlag = true
+			sawValue = true
+			break
+		}
+	}
+	if !sawFlag || !sawValue {
+		t.Errorf("BuildArgs missing --model claude-haiku-4.5, got %v", args)
+	}
+}
+
+// TestACPProtocol_BuildArgs_NoModel verifies that an empty Model produces no
+// --model flag in argv. Passing `--model ""` would make kiro reject the
+// argv outright, so an absent value must mean "absent flag".
+func TestACPProtocol_BuildArgs_NoModel(t *testing.T) {
+	t.Parallel()
+	p := &ACPProtocol{}
+	args := p.BuildArgs(SpawnOptions{})
+	for _, a := range args {
+		if a == "--model" {
+			t.Errorf("BuildArgs should not emit --model when Model empty, got %v", args)
+		}
+	}
+}
+
 func TestACPProtocol_WriteMessage(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{sessionID: "sess_test"}
