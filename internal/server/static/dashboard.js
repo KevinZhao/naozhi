@@ -2635,6 +2635,28 @@ function renderAskQuestionCard(e) {
     return '<div class="event ask_question"><span class="event-icon">?</span>' +
       '<div class="event-content">' + esc(e.summary || 'AskUserQuestion') + '</div></div>';
   }
+  // Multi-Backend RFC §8.3 D12 — when the active session's backend doesn't
+  // declare askuser, render a degraded card that lists the questions/options
+  // as plain text and tells the operator to type the answer manually. Stops
+  // the interactive submit-handler from sending an answer the backend can't
+  // route (kiro 2.3.0 has no AskUserQuestion equivalent — V13 validation).
+  if (!featureForCurrent('askuser')) {
+    const lines = aq.items.map(it => {
+      const header = it && it.header ? '<strong>' + esc(it.header) + '</strong>: ' : '';
+      const q = it && it.question ? esc(it.question) : '';
+      const opts = (it && Array.isArray(it.options))
+        ? it.options.map(o => '· ' + esc((o && o.label) || '')).join('<br>')
+        : '';
+      return '<div class="ask-degraded-q">' + header + q +
+        (opts ? '<div class="ask-degraded-opts">' + opts + '</div>' : '') + '</div>';
+    }).join('');
+    return '<div class="event ask_question ask-degraded"><span class="event-icon">?</span>' +
+      '<div class="event-content">' +
+        '<div class="ask-degraded-hint">' +
+          '当前后端不支持 AskUserQuestion，请直接回复你的选择：' +
+        '</div>' + lines +
+      '</div></div>';
+  }
   // A question with zero options would deadlock the submit button
   // (updateAskSubmitState requires every group to have a .selected option,
   // and a group with no .ask-opt can never satisfy that). Rather than
@@ -3150,6 +3172,29 @@ async function sendMessage() {
   const input = document.getElementById('msg-input');
   const text = getMsgValue(input);
   if (!text && pendingFiles.length === 0) return;
+
+  // Multi-Backend RFC §8.3 D9 — `/urgent` requires the backend's
+  // `passthrough` feature (preempt the running turn with a fresh user
+  // message). kiro / ACP backends don't preempt; the server-side
+  // dispatcher would either error or queue the message confusingly.
+  // Toast and abort send so the operator is told *why* before they
+  // wonder where their preemption went. Title-attr on /urgent button
+  // would be ideal but /urgent is a text prefix typed in the input;
+  // detect at send time instead.
+  if (text && /^\s*\/urgent\b/.test(text) && !featureForCurrent('passthrough')) {
+    showToast('当前后端不支持 /urgent 抢占（请用 Esc 中断后再发）', 'warning');
+    return;
+  }
+
+  // Multi-Backend RFC §8.3 D13 — `@-mention` embedded context only
+  // works when the backend reads file paths from inside the prompt
+  // (claude does; kiro doesn't). Strip-and-warn would silently change
+  // the prompt; better to abort + toast so the operator can paste the
+  // absolute path or content explicitly.
+  if (text && /(?:^|\s)@[\w./-]/.test(text) && !featureForCurrent('embedded_context')) {
+    showToast('当前后端不支持 @ 文件 mention，请粘贴绝对路径或文件内容', 'warning');
+    return;
+  }
 
   // Per-field byte cap matches server maxWSSendTextBytes (1 MB). Reject
   // up-front so oversize pastes don't round-trip and return a silent
