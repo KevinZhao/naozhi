@@ -5941,3 +5941,79 @@ func TestDashboardJS_NewSessionPaletteLocalOnly(t *testing.T) {
 		t.Error("renderPaletteList still iterates projectsData directly — remote folders would leak into the palette")
 	}
 }
+
+// TestDashboardJS_PendingSessionBackendBrand pins the fix for the user-
+// reported bug "选择新session的backend是kiro的时候，新session的左侧边栏图标显示
+// 的是cc的图标，对话框顶部也显示的是claude code和版本编号".
+//
+// Root cause: a dashboard-only "pending" session (created via the New
+// Session palette but not yet sent to the server) is rendered from a local
+// stub record that historically had no cli_name, so:
+//   - sessionCardHtml's `cliIcon(s.cli_name || 'cli')` fell into the
+//     default branch (claude logomark) regardless of the operator's pick.
+//   - renderMainShell / updateHeaderCLI's `s.cli_name || defaultCLIName`
+//     fell back to the global default ("claude-code") for a kiro session.
+//
+// Fix:
+//   1. backendDisplayName(backendID) helper resolves a backend ID to its
+//      display name (cliBackends cache → hardcoded {claude→claude-code,
+//      kiro→kiro} fallback → backend ID).
+//   2. The pending-session merge in fetchSessions populates
+//      cli_name/cli_version/backend on the injected record so the sidebar
+//      icon and chip render the operator's pick.
+//   3. renderMainShell + updateHeaderCLI extend the fallback chain so
+//      sessionsData[sKey] being empty (always true for pending sessions —
+//      the merge writes to data.sessions, not sessionsData) doesn't
+//      degrade to defaultCLIName.
+//
+// Regression guard: deleting any of these arms reintroduces the wrong
+// brand on a kiro pending session for the duration of the New-Session →
+// first-Send window.
+func TestDashboardJS_PendingSessionBackendBrand(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+
+	// Arm 1: backendDisplayName helper exists with the documented
+	// resolution order. The two known IDs must have hardcoded fallbacks
+	// for the boot window before /api/cli/backends resolves.
+	if !strings.Contains(js, "function backendDisplayName(backendID)") {
+		t.Error("backendDisplayName helper missing — kiro pending sessions cannot resolve display name")
+	}
+	if !strings.Contains(js, `if (backendID === 'claude') return 'claude-code';`) {
+		t.Error("backendDisplayName lacks 'claude' → 'claude-code' fallback for the pre-cliBackends-fetch window")
+	}
+	if !strings.Contains(js, "function backendDisplayVersion(backendID)") {
+		t.Error("backendDisplayVersion helper missing — kiro pending sessions cannot resolve version")
+	}
+
+	// Arm 2: the pending-session merge must stamp cli_name / cli_version /
+	// backend on the data.sessions push so the sidebar icon (cliIcon) and
+	// optional chips read the operator's pick. Falling back to
+	// defaultCLIName covers single-backend mode (no picker, sessionBackends
+	// empty) so single-backend kiro deployments also pick the right icon.
+	if !strings.Contains(js, "cli_name: pendingCLIName") {
+		t.Error("pending session push missing cli_name — sidebar icon falls back to claude logomark for kiro")
+	}
+	if !strings.Contains(js, "cli_version: pendingCLIVersion") {
+		t.Error("pending session push missing cli_version — header would show stale defaultCLIVersion")
+	}
+	if !strings.Contains(js, "backendDisplayName(pendingBackend) || defaultCLIName") {
+		t.Error("pending push must fall back to defaultCLIName so single-backend mode also resolves the right brand")
+	}
+
+	// Arm 3: renderMainShell + updateHeaderCLI fallback chains must
+	// consult sessionBackends[selectedKey] before defaultCLIName. Without
+	// this, the chat header for a freshly-created kiro pending session
+	// (sessionsData[sKey] is empty until the server snapshots back) would
+	// show "claude-code v…" until the first /api/sessions poll lands.
+	if !strings.Contains(js, "s.cli_name || backendDisplayName(sessionBackends[selectedKey]) || defaultCLIName") {
+		t.Error("renderMainShell / updateHeaderCLI missing sessionBackends fallback — kiro pending session header shows defaultCLIName")
+	}
+	if !strings.Contains(js, "s.cli_version || backendDisplayVersion(sessionBackends[selectedKey]) || defaultCLIVersion") {
+		t.Error("renderMainShell / updateHeaderCLI missing sessionBackends version fallback")
+	}
+}
