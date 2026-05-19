@@ -81,23 +81,26 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 			// so every caller (HTTP / WS / dispatch) contributes to the same signal.
 			// Wiring inside ManagedSession.InterruptViaControl would work but
 			// leaks the metrics dependency into the lower layer.
+			//
+			// router-split (Phase 5): InterruptSessionViaControl moved to
+			// router_discovery.go.
 			name:    "InterruptSentTotal fires on InterruptSent branch",
-			path:    "../session/router.go",
+			path:    "../session/router_discovery.go",
 			pattern: `metrics\.InterruptSentTotal\.Add\(1\)`,
 		},
 		{
 			name:    "InterruptNoTurnTotal fires on InterruptNoTurn branch",
-			path:    "../session/router.go",
+			path:    "../session/router_discovery.go",
 			pattern: `metrics\.InterruptNoTurnTotal\.Add\(1\)`,
 		},
 		{
 			name:    "InterruptUnsupportedTotal fires on InterruptUnsupported branch",
-			path:    "../session/router.go",
+			path:    "../session/router_discovery.go",
 			pattern: `metrics\.InterruptUnsupportedTotal\.Add\(1\)`,
 		},
 		{
 			name:    "InterruptErrorTotal fires on InterruptError branch",
-			path:    "../session/router.go",
+			path:    "../session/router_discovery.go",
 			pattern: `metrics\.InterruptErrorTotal\.Add\(1\)`,
 		},
 		{
@@ -231,11 +234,14 @@ func TestOBS2_WSAuthFailBothBranches(t *testing.T) {
 //
 // The check matches the outcome switch block in InterruptSessionViaControl
 // and looks for each of the 4 counters inside it. R172-ARCH-D10.
+//
+// router-split (Phase 5): InterruptSessionViaControl moved to
+// router_discovery.go.
 func TestOBS2_InterruptCountersInOutcomeSwitch(t *testing.T) {
 	t.Parallel()
-	data, err := os.ReadFile("../session/router.go")
+	data, err := os.ReadFile("../session/router_discovery.go")
 	if err != nil {
-		t.Fatalf("read router.go: %v", err)
+		t.Fatalf("read router_discovery.go: %v", err)
 	}
 	// (?s) so `.*?` crosses newlines; match the switch head through the
 	// matching right brace heuristically with a reasonable upper bound to
@@ -251,7 +257,7 @@ func TestOBS2_InterruptCountersInOutcomeSwitch(t *testing.T) {
 		blocks = blockRe.FindAll(data, -1)
 	}
 	if len(blocks) == 0 {
-		t.Fatalf("no `switch outcome { ... }` block found in router.go; Interrupt " +
+		t.Fatalf("no `switch outcome { ... }` block found in router_discovery.go; Interrupt " +
 			"outcome counters must live inside that switch to stay per-outcome")
 	}
 	want := []string{
