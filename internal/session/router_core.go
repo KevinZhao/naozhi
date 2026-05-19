@@ -1142,4 +1142,3 @@ func (r *Router) GetSession(key string) *ManagedSession {
 	defer r.mu.RUnlock()
 	return r.sessions[key]
 }
-

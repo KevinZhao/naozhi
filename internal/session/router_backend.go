@@ -88,6 +88,7 @@ func validateBackend(backend string) error {
 	}
 	return nil
 }
+
 // CLIName exposes the wrapper's CLI display name for status endpoints.
 // Returns empty when no wrapper is wired (tests, early boot).
 func (r *Router) CLIName() string {
@@ -227,6 +228,7 @@ func computeBackendIDs(wrapper *cli.Wrapper, wrappers map[string]*cli.Wrapper, d
 	out = append(out, rest...)
 	return out
 }
+
 // maxBackendOverrides caps the per-key backend override map so an
 // authenticated dashboard user cannot exhaust memory by POSTing unique keys.
 // backendOverrides entries are cleared on first spawnSession / Reset /
@@ -265,6 +267,7 @@ func (r *Router) GetSessionBackend(key string) string {
 	defer r.mu.RUnlock()
 	return r.backendOverrides[key]
 }
+
 // CLIPath returns the CLI binary path for health checks.
 func (r *Router) CLIPath() string {
 	if r.wrapper == nil {
