@@ -130,6 +130,32 @@ func (r *Router) GetWorkspace(chatKey string) string {
 	return r.workspace
 }
 
+// resetSessionLocked tears down a single session entry: closes the live
+// process (caller invokes Close() on the returned slice outside r.mu),
+// clears sessionIDToKey / backendOverrides, and removes the entry from
+// r.sessions. closedActive is incremented when the session was an active
+// (non-exempt) live process so callers can reconcile activeCount in one
+// shot. Caller MUST hold r.mu. R226-CR-15.
+func (r *Router) resetSessionLocked(key string, s *ManagedSession, toClose []processIface, closedActive int) ([]processIface, int) {
+	if p := s.loadProcess(); p != nil && p.Alive() {
+		toClose = append(toClose, p)
+		if !s.exempt {
+			closedActive++
+		}
+	}
+	if id := s.getSessionID(); id != "" {
+		delete(r.sessionIDToKey, id)
+	}
+	delete(r.sessions, key)
+	// Drop any per-session backend pick queued via SetSessionBackend.
+	// Without this, an abandoned dashboard "choose backend" pick for a
+	// key that is then reset leaks an entry into backendOverrides that
+	// is only cleared by a later spawnSession for the same key, which
+	// may never happen.
+	delete(r.backendOverrides, key)
+	return toClose, closedActive
+}
+
 // ResetChat resets all sessions belonging to a chat (all agents).
 func (r *Router) ResetChat(chatKeyPrefix string) {
 	r.mu.Lock()
@@ -138,53 +164,28 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 	if r.sessionsByChat != nil {
 		// O(k) path via index (k = agents per chat, typically 1-3).
 		for _, key := range r.sessionsByChat[chatKeyPrefix] {
-			s := r.sessions[key]
-			if s == nil {
-				continue
+			if s := r.sessions[key]; s != nil {
+				toClose, closedActive = r.resetSessionLocked(key, s, toClose, closedActive)
 			}
-			if p := s.loadProcess(); p != nil && p.Alive() {
-				toClose = append(toClose, p)
-				if !s.exempt {
-					closedActive++
-				}
-			}
-			if id := s.getSessionID(); id != "" {
-				delete(r.sessionIDToKey, id)
-			}
-			delete(r.sessions, key)
-			// Drop any per-session backend pick queued via SetSessionBackend.
-			// Without this, an abandoned dashboard "choose backend" pick for a
-			// key that is then reset leaks an entry into backendOverrides that
-			// is only cleared by a later spawnSession for the same key, which
-			// may never happen.
-			delete(r.backendOverrides, key)
 		}
 		delete(r.sessionsByChat, chatKeyPrefix)
 	} else {
 		// Fallback O(n) scan for test-created routers without index.
 		// Pre-compute the prefix once so the loop body doesn't re-allocate
-		// `chatKeyPrefix + ":"` on every iteration.
+		// `chatKeyPrefix + ":"` on every iteration. Collect keys first then
+		// invoke resetSessionLocked so we never mutate r.sessions while it
+		// is being iterated.
 		prefix := chatKeyPrefix + ":"
 		var toDelete []string
-		for key, s := range r.sessions {
+		for key := range r.sessions {
 			if len(key) > len(chatKeyPrefix) && key[:len(prefix)] == prefix {
 				toDelete = append(toDelete, key)
-				if p := s.loadProcess(); p != nil && p.Alive() {
-					toClose = append(toClose, p)
-					if !s.exempt {
-						closedActive++
-					}
-				}
 			}
 		}
 		for _, key := range toDelete {
 			if s := r.sessions[key]; s != nil {
-				if id := s.getSessionID(); id != "" {
-					delete(r.sessionIDToKey, id)
-				}
+				toClose, closedActive = r.resetSessionLocked(key, s, toClose, closedActive)
 			}
-			delete(r.sessions, key)
-			delete(r.backendOverrides, key)
 		}
 	}
 	if closedActive > 0 {
