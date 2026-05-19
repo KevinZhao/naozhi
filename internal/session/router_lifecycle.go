@@ -504,8 +504,10 @@ func collectPreviousHistory(oldSess *ManagedSession, oldPrevIDs []string, resume
 }
 
 // spawnSession creates a new process, optionally resuming an existing session.
-// Caller must hold r.mu. Releases r.mu during Spawn() to avoid blocking other
-// goroutines during potentially slow protocol init (e.g., ACP handshake).
+// LOCK: enter with r.mu held. This function releases and re-acquires r.mu
+// internally (around Spawn() and history collection) to avoid blocking other
+// goroutines during slow protocol init (e.g. ACP handshake). Callers MUST NOT
+// hold any other lock when invoking; the defer reacquires r.mu only.
 func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, opts AgentOpts) (*ManagedSession, error) {
 	// Mark this key as spawning so ReconnectShims does not mistake the freshly
 	// started shim's state file for an orphan. Every return path below leaves

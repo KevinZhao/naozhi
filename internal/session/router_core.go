@@ -1038,8 +1038,6 @@ func (r *Router) DefaultWorkspace() string {
 	return r.workspace
 }
 
-// stripResumeArgs removes --resume <value> from CLI args.
-
 // Version returns a monotonic counter incremented on every session mutation.
 // Used by the dashboard for efficient change detection without full JSON
 // comparison. storeGen is atomic so this is lock-free — the dashboard polls

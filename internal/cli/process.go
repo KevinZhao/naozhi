@@ -477,7 +477,6 @@ func (p *Process) IsRunning() bool {
 	return p.State == StateRunning
 }
 
-// isChanAlive reports whether done is still open (readLoop still running, so
 // Kill forcefully terminates the CLI process via shim.
 //
 // After sending the "kill" message and closing the naozhi-side conn, send
