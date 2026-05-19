@@ -138,11 +138,11 @@ func selectNodeForBackend(lookup nodeLookup, targetNode, backendID string) (node
 	// reporting all missing caps would help a doctor view but isn't
 	// needed for the dispatch reject path.
 	meta := nc.Meta()
-	for _, cap := range profile.RequiredNodeCaps {
-		if !meta.HasCap(cap) {
+	for _, requiredCap := range profile.RequiredNodeCaps {
+		if !meta.HasCap(requiredCap) {
 			return nil, fmt.Errorf(
 				"%w: node %q lacks capability %q for backend %q",
-				ErrNodeMissingCap, targetNode, cap, backendID)
+				ErrNodeMissingCap, targetNode, requiredCap, backendID)
 		}
 	}
 	return nc, nil
