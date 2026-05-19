@@ -133,7 +133,7 @@ var (
 	nextOrder  int
 
 	// defaultsOnce serialises EnsureDefaults across goroutines. Safe to
-	// reset under tests via reset() (which clears registry too) so a
+	// reset under tests via withCleanRegistry (profile_test.go) so a
 	// fresh test can re-bootstrap deterministically.
 	defaultsOnce sync.Once
 )
@@ -227,19 +227,4 @@ func RegisterDefaults() {
 // no kiro and silently swallow it.
 func EnsureDefaults() {
 	defaultsOnce.Do(RegisterDefaults)
-}
-
-// reset is a test-only helper that clears the registry. Lives in the main
-// file (not _test.go) so external test packages can also use it via
-// reflection if ever needed; it is unexported so production code cannot
-// accidentally invoke it. Also resets defaultsOnce so a subsequent
-// EnsureDefaults can re-bootstrap deterministically — without this,
-// cleared registry + already-fired Once would leave callers with an
-// empty registry forever.
-func reset() {
-	registryMu.Lock()
-	defer registryMu.Unlock()
-	registry = map[string]registryEntry{}
-	nextOrder = 0
-	defaultsOnce = sync.Once{}
 }
