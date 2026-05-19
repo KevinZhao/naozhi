@@ -107,10 +107,20 @@ type kiroRecord struct {
 }
 
 // kiroContentChunk is one element inside a Prompt or AssistantMessage's
-// content array. Only kind=="text" is consumed today.
+// content array. Only kind=="text" is rendered in the dashboard transcript;
+// thinking / toolUse / toolResult / image chunks are silently dropped to
+// match the Claude Code chat view contract (cc's discovery/history_tail.go
+// assistant arm only surfaces b.Type == "text").
+//
+// Data is held as RawMessage rather than string because non-text chunks
+// carry object payloads ("thinking" → {text, signature, redactedContent},
+// "toolUse" → {toolUseId, name, input}). A `string` field would fail
+// json.Unmarshal on the *whole* content array and silently drop every
+// AssistantMessage that contained a tool_use or thinking block — which is
+// nearly every record in a real kiro session.
 type kiroContentChunk struct {
-	Kind string `json:"kind"`
-	Data string `json:"data"`
+	Kind string          `json:"kind"`
+	Data json.RawMessage `json:"data"`
 }
 
 // kiroMessageData is the shared shape of Prompt.data and
@@ -204,6 +214,14 @@ func (s *Source) LoadBefore(ctx context.Context, beforeMS int64, limit int) ([]c
 // individually skipped — a bad single line never poisons the rest of
 // the file. Returns entries in arrival order (chronological per kiro's
 // append contract).
+//
+// Real-world kiro AssistantMessage records do not carry meta.timestamp
+// at all (only the originating Prompt does). To surface them in the
+// dashboard, parseFile remembers the most recent Prompt ts and grants
+// each subsequent AssistantMessage that ts plus a monotonic 1 ms
+// offset. The offset stays well under 1000 (kiro Prompt timestamps are
+// unix seconds, so adjacent prompts are ≥1000 ms apart) so chronology
+// across prompts is preserved.
 func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cli.EventEntry {
 	limited := io.LimitReader(f, maxFileBytes)
 	scanner := bufio.NewScanner(limited)
@@ -213,6 +231,9 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 
 	out := make([]cli.EventEntry, 0, 16)
 	processed := 0
+	// State across lines for assistant-timestamp salvage.
+	var lastPromptMS int64
+	var asstOffset int64
 	for scanner.Scan() {
 		// Cooperative cancellation. Done lookups every ctxCheckEvery
 		// lines keep the cost negligible while still guaranteeing
@@ -231,9 +252,25 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 			continue
 		}
 
-		entry, ok := decodeLine(line)
+		entry, ok := decodeLine(line, lastPromptMS, asstOffset)
 		if !ok {
 			continue
+		}
+		// Maintain the borrow state. A successful Prompt resets the
+		// per-prompt offset; a successful AssistantMessage ticks the
+		// offset so the next assistant in the same prompt window stays
+		// strictly later. Assistants that fall back to their own
+		// meta.timestamp (rare today, but the schema permits it) are
+		// detected by ts != lastPromptMS+1+asstOffset and don't
+		// advance the offset.
+		switch entry.Type {
+		case "user":
+			lastPromptMS = entry.Time
+			asstOffset = 0
+		case "text":
+			if lastPromptMS > 0 && entry.Time == lastPromptMS+1+asstOffset {
+				asstOffset++
+			}
 		}
 		if beforeMS > 0 && entry.Time >= beforeMS {
 			continue
@@ -253,7 +290,12 @@ func (s *Source) parseFile(ctx context.Context, f *os.File, beforeMS int64) []cl
 // (EventEntry{}, false) when the line is unusable (malformed JSON,
 // unknown kind, missing timestamp, or empty content) so the caller can
 // skip without aborting the whole file.
-func decodeLine(line []byte) (cli.EventEntry, bool) {
+//
+// lastPromptMS / asstOffset thread the parseFile-level borrow state
+// through so an AssistantMessage with no meta.timestamp inherits its
+// owning Prompt's ts plus a monotonic offset. Pass (0, 0) for the
+// stateless legacy semantics — orphan assistants are then dropped.
+func decodeLine(line []byte, lastPromptMS, asstOffset int64) (cli.EventEntry, bool) {
 	var rec kiroRecord
 	if err := json.Unmarshal(line, &rec); err != nil {
 		// Silent skip: this is the partial-final-line case during
@@ -269,7 +311,13 @@ func decodeLine(line []byte) (cli.EventEntry, bool) {
 	case "Prompt":
 		entryType = "user"
 	case "AssistantMessage":
-		entryType = "assistant"
+		// "text" matches the cc dashboard contract:
+		// internal/discovery/history_tail.go emits Type:"text" for
+		// assistant messages, and dashboard.js' eventHtml branch on
+		// e.type === 'text' is what renders the markdown bubble.
+		// Emitting "assistant" here would render through the unknown-
+		// type fallback and produce a malformed card.
+		entryType = "text"
 	default:
 		// Unknown / future kinds (tool_use, system, etc.) are skipped
 		// rather than emitted as a generic "system" entry. Emitting
@@ -286,17 +334,30 @@ func decodeLine(line []byte) (cli.EventEntry, bool) {
 
 	timeMS, ok := extractTimestampMS(data.Meta)
 	if !ok {
-		// Cannot place the entry on the dashboard timeline without a
-		// real timestamp — skip rather than synthesise. Forging a
-		// time would corrupt the "load earlier" upper-bound contract.
-		return cli.EventEntry{}, false
+		// AssistantMessage in real kiro sessions never carries
+		// meta.timestamp, so borrow the most recent Prompt ts plus a
+		// monotonic offset to anchor the assistant on the timeline.
+		// Prompts that miss their own ts (and any assistant before the
+		// first ts-bearing prompt) can't be anchored — drop them
+		// rather than forge ts=0, which would corrupt the strict-<
+		// pagination boundary by collapsing many records to epoch.
+		if entryType != "text" || lastPromptMS <= 0 {
+			return cli.EventEntry{}, false
+		}
+		timeMS = lastPromptMS + 1 + asstOffset
 	}
 
-	// Empty content rows do appear in v1 (e.g. user-cancelled prompts);
-	// surface them as zero-length entries rather than dropping so
-	// pagination time-cursors keep moving. concatTextChunks already
-	// returns "" for empty/non-text content, no special handling needed.
 	summary := concatTextChunks(data.Content)
+
+	// Strict cc-parity for AssistantMessage: drop the entry entirely
+	// when the model produced no plain-text output (only thinking +
+	// tool_use + an empty placeholder text chunk). Without this, every
+	// tool-driven turn injects a blank card into the transcript.
+	// Prompts (user messages) keep the legacy permissive behaviour:
+	// surface even an empty Summary so pagination time cursors advance.
+	if entryType == "text" && strings.TrimSpace(summary) == "" {
+		return cli.EventEntry{}, false
+	}
 
 	return cli.EventEntry{
 		Time:    timeMS,
@@ -316,32 +377,47 @@ func extractTimestampMS(meta *kiroMessageMeta) (int64, bool) {
 	return meta.Timestamp * 1000, true
 }
 
-// concatTextChunks joins all text-kind chunks into a single string with
-// no separator. Kiro typically emits one chunk per message but the
-// schema is a list, so handle multi-chunk defensively. Non-text chunks
-// (image, tool_call_request, ...) are skipped — they have no plain
-// text representation in the dashboard chat view.
+// concatTextChunks joins all kind=="text" chunks into a single string
+// with no separator. Kiro typically emits one text chunk per message but
+// the schema is a list, so handle multi-chunk defensively. Non-text
+// chunks (thinking, toolUse, toolResult, image, ...) are skipped — they
+// have no plain-text representation in the dashboard chat view, and the
+// cc dashboard makes the same trade-off in
+// discovery/history_tail.go's assistant arm.
+//
+// Each chunk's Data is a json.RawMessage. For text chunks we expect a
+// JSON string; a malformed chunk is skipped silently (matches the rest
+// of decodeLine's tolerance for partial-write tails).
 func concatTextChunks(chunks []kiroContentChunk) string {
 	if len(chunks) == 0 {
 		return ""
 	}
-	if len(chunks) == 1 && chunks[0].Kind == "text" {
-		return chunks[0].Data
-	}
+	textChunks := make([]string, 0, len(chunks))
 	total := 0
 	for _, c := range chunks {
-		if c.Kind == "text" {
-			total += len(c.Data)
+		if c.Kind != "text" {
+			continue
 		}
+		var s string
+		if err := json.Unmarshal(c.Data, &s); err != nil {
+			// Future schema drift (e.g. text payload becomes an object)
+			// should not break the rest of the message. Drop just this
+			// chunk; thinking/toolUse already pass through this same
+			// silent-skip path via the kind filter above.
+			continue
+		}
+		textChunks = append(textChunks, s)
+		total += len(s)
 	}
 	if total == 0 {
 		return ""
 	}
+	if len(textChunks) == 1 {
+		return textChunks[0]
+	}
 	buf := make([]byte, 0, total)
-	for _, c := range chunks {
-		if c.Kind == "text" {
-			buf = append(buf, c.Data...)
-		}
+	for _, s := range textChunks {
+		buf = append(buf, s...)
 	}
 	return string(buf)
 }

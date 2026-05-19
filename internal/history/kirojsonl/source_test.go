@@ -32,6 +32,15 @@ func assistantLine(text string, unixSec int64) string {
 	)
 }
 
+// assistantLineRaw builds an AssistantMessage with an arbitrary content
+// JSON array — needed for tests that mix text / thinking / toolUse chunks.
+func assistantLineRaw(contentJSON string, unixSec int64) string {
+	return fmt.Sprintf(
+		`{"version":"v1","kind":"AssistantMessage","data":{"message_id":"asst-%d","content":%s,"meta":{"timestamp":%d}}}`,
+		unixSec, contentJSON, unixSec,
+	)
+}
+
 // writeSession writes the given lines to <rootDir>/<sid>.jsonl, joined
 // with newlines plus a trailing newline (kiro emits them that way).
 func writeSession(t *testing.T, rootDir, sid string, lines []string) string {
@@ -87,8 +96,8 @@ func TestSource_LoadBefore_FullRoundTrip(t *testing.T) {
 	if got[0].Time != 1779081689*1000 {
 		t.Errorf("entry[0].Time=%d; want unix-sec→ms scale", got[0].Time)
 	}
-	if got[1].Type != "assistant" || got[1].Summary != "hi back" {
-		t.Errorf("entry[1]=%+v; want assistant/hi back", got[1])
+	if got[1].Type != "text" || got[1].Summary != "hi back" {
+		t.Errorf("entry[1]=%+v; want text/hi back", got[1])
 	}
 	if got[1].Time != 1779081690*1000 {
 		t.Errorf("entry[1].Time=%d; want unix-sec→ms scale", got[1].Time)
@@ -277,31 +286,114 @@ func TestSource_LoadBefore_UnknownKind(t *testing.T) {
 	if len(got) != 2 {
 		t.Fatalf("entries=%v; want 2 (Prompt + AssistantMessage)", got)
 	}
-	if got[0].Type != "user" || got[1].Type != "assistant" {
-		t.Errorf("entries types=%q,%q; want user,assistant", got[0].Type, got[1].Type)
+	if got[0].Type != "user" || got[1].Type != "text" {
+		t.Errorf("entries types=%q,%q; want user,text", got[0].Type, got[1].Type)
 	}
 }
 
-// TestSource_LoadBefore_MissingTimestamp pins the no-timestamp drop
-// rule: an AssistantMessage without meta.timestamp cannot be placed on
-// the dashboard timeline so it must be skipped silently. Faking a
-// time would corrupt the strict-< pagination boundary.
-func TestSource_LoadBefore_MissingTimestamp(t *testing.T) {
+// TestSource_LoadBefore_AssistantBorrowsPromptTimestamp pins the
+// kiro-specific timestamp salvage: real kiro AssistantMessage records
+// don't carry meta.timestamp at all (only the originating Prompt
+// does). To surface assistant text in the dashboard at all, each
+// AssistantMessage borrows the most recent Prompt ts plus a monotonic
+// ms offset. The offset keeps later-emitted assistants strictly after
+// earlier ones in chronological order, and stays well under the next
+// Prompt's ts (kiro Prompt timestamps are unix seconds, so adjacent
+// prompts are ≥1 s = 1000 ms apart).
+//
+// Without this, the entire transcript collapses to "user prompts only"
+// because every AssistantMessage gets dropped for missing ts.
+func TestSource_LoadBefore_AssistantBorrowsPromptTimestamp(t *testing.T) {
 	t.Parallel()
 	dir := t.TempDir()
-	sid := "no-ts"
+	sid := "borrow-ts"
+
+	// Two prompts each followed by two AssistantMessages with no meta.
+	noMetaAsst := func(text string) string {
+		return fmt.Sprintf(
+			`{"version":"v1","kind":"AssistantMessage","data":{"message_id":"a-%s","content":[{"kind":"text","data":%q}]}}`,
+			text, text,
+		)
+	}
 	writeSession(t, dir, sid, []string{
-		promptLine("with ts", 100),
-		// AssistantMessage without meta — should be dropped.
-		`{"version":"v1","kind":"AssistantMessage","data":{"message_id":"x","content":[{"kind":"text","data":"no time"}]}}`,
+		promptLine("first prompt", 100),
+		noMetaAsst("first reply A"),
+		noMetaAsst("first reply B"),
+		promptLine("second prompt", 200),
+		noMetaAsst("second reply"),
+	})
+
+	src := New(dir, func() string { return sid })
+	got, err := src.LoadBefore(context.Background(), 0, 100)
+	if err != nil {
+		t.Fatalf("LoadBefore: %v", err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("entries=%d; want 5 (2 prompts + 3 assistants)", len(got))
+	}
+
+	// Chronology must be: prompt1 < replyA < replyB < prompt2 < secondReply.
+	wantOrder := []string{"first prompt", "first reply A", "first reply B", "second prompt", "second reply"}
+	for i, want := range wantOrder {
+		if got[i].Summary != want {
+			t.Errorf("entry[%d].Summary=%q; want %q (chronology broken)", i, got[i].Summary, want)
+		}
+	}
+	if got[0].Time != 100_000 || got[3].Time != 200_000 {
+		t.Errorf("prompt times = %d/%d; want 100_000/200_000", got[0].Time, got[3].Time)
+	}
+	if !(got[1].Time > got[0].Time && got[2].Time > got[1].Time && got[2].Time < got[3].Time) {
+		t.Errorf("assistant ts under first prompt not strictly between prompts: %d/%d/%d",
+			got[0].Time, got[1].Time, got[2].Time)
+	}
+	if got[4].Time <= got[3].Time {
+		t.Errorf("assistant under second prompt ts=%d; want > prompt2 ts %d", got[4].Time, got[3].Time)
+	}
+}
+
+// TestSource_LoadBefore_OrphanedAssistantDropped pins the safety case:
+// an AssistantMessage with no own timestamp AND no preceding Prompt
+// (file starts with assistant) cannot be anchored — it must be dropped,
+// not given ts=0, otherwise the dashboard timeline would jump to epoch.
+func TestSource_LoadBefore_OrphanedAssistantDropped(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sid := "orphan"
+	writeSession(t, dir, sid, []string{
+		`{"version":"v1","kind":"AssistantMessage","data":{"message_id":"x","content":[{"kind":"text","data":"floating"}]}}`,
+		promptLine("anchor", 100),
 	})
 	src := New(dir, func() string { return sid })
 	got, err := src.LoadBefore(context.Background(), 0, 10)
 	if err != nil {
 		t.Fatalf("LoadBefore: %v", err)
 	}
-	if len(got) != 1 || got[0].Summary != "with ts" {
-		t.Errorf("entries=%v; want only the timestamped entry", got)
+	if len(got) != 1 || got[0].Summary != "anchor" {
+		t.Errorf("entries=%v; want only the prompt — orphan assistant must be dropped", got)
+	}
+}
+
+// TestSource_LoadBefore_MissingPromptTimestamp pins the user-message
+// rule: a Prompt without meta.timestamp still cannot be placed on the
+// timeline (no upstream record to borrow from), so it is dropped — and
+// any AssistantMessage that follows it loses its anchor too.
+func TestSource_LoadBefore_MissingPromptTimestamp(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sid := "no-prompt-ts"
+	writeSession(t, dir, sid, []string{
+		// Prompt without meta — dropped.
+		`{"version":"v1","kind":"Prompt","data":{"message_id":"p","content":[{"kind":"text","data":"no time"}]}}`,
+		// AssistantMessage without meta — orphaned, also dropped.
+		`{"version":"v1","kind":"AssistantMessage","data":{"message_id":"a","content":[{"kind":"text","data":"reply"}]}}`,
+	})
+	src := New(dir, func() string { return sid })
+	got, err := src.LoadBefore(context.Background(), 0, 10)
+	if err != nil {
+		t.Fatalf("LoadBefore: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("entries=%v; want zero entries (no anchorable records)", got)
 	}
 }
 
@@ -474,6 +566,92 @@ func TestSource_LoadBefore_EmptyContent(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Summary != "" || got[0].Type != "user" {
 		t.Errorf("got=%+v; want one user entry with empty summary", got)
+	}
+}
+
+// TestSource_LoadBefore_AssistantToolAndThinkingFiltered pins parity
+// with the Claude Code path (discovery/history_tail.go: assistant arm):
+// only non-empty text chunks become EventEntry rows. Thinking, toolUse,
+// and empty-text chunks are skipped silently so the dashboard transcript
+// shows just the model's outward-facing decisions / explanations rather
+// than the raw tool-call timeline.
+//
+// Real-world kiro AssistantMessage records routinely emit
+//
+//	[{kind:thinking,data:{...}}, {kind:text,data:""}, {kind:toolUse,...}]
+//
+// and the empty trailing text chunk in particular must not surface as
+// an empty bubble — without this filter every assistant turn produces
+// a blank message.
+func TestSource_LoadBefore_AssistantToolAndThinkingFiltered(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sid := "asst-filter"
+
+	// Mirrors the shape captured from a live kiro session: thinking
+	// payload is an object {text, signature, redactedContent}, toolUse
+	// payload is the full tool call envelope, and the text chunk is
+	// frequently emitted but empty.
+	// jsonl is newline-delimited, so each AssistantMessage record must
+	// be a single line — keep the content arrays on one line each.
+	thinkingOnly := `[{"kind":"thinking","data":{"text":"internal reasoning","signature":"sig","redactedContent":[]}},{"kind":"text","data":""},{"kind":"toolUse","data":{"toolUseId":"t1","name":"read","input":{}}}]`
+	textAndTool := `[{"kind":"text","data":"Now I understand the bug. Let me apply the fix."},{"kind":"toolUse","data":{"toolUseId":"t2","name":"edit","input":{}}}]`
+
+	writeSession(t, dir, sid, []string{
+		promptLine("user prompt", 100),
+		assistantLineRaw(thinkingOnly, 200), // must be dropped entirely
+		assistantLineRaw(textAndTool, 300),  // surfaces as one text entry
+	})
+
+	src := New(dir, func() string { return sid })
+	got, err := src.LoadBefore(context.Background(), 0, 10)
+	if err != nil {
+		t.Fatalf("LoadBefore: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("entries=%d, want 2 (prompt + one assistant text)", len(got))
+	}
+	if got[0].Type != "user" || got[0].Summary != "user prompt" {
+		t.Errorf("entry[0]=%+v; want user/user prompt", got[0])
+	}
+	if got[1].Type != "text" {
+		t.Errorf("entry[1].Type=%q; want text (cc-aligned)", got[1].Type)
+	}
+	if got[1].Summary != "Now I understand the bug. Let me apply the fix." {
+		t.Errorf("entry[1].Summary=%q; want the assistant's text chunk only", got[1].Summary)
+	}
+	if got[1].Time != 300_000 {
+		t.Errorf("entry[1].Time=%d; want 300_000", got[1].Time)
+	}
+}
+
+// TestSource_LoadBefore_AssistantEmptyTextDropped pins the whitespace
+// rule: an assistant content list with only blank/whitespace text must
+// not produce a bubble (matches cc's strings.TrimSpace == "" check).
+// Without this, every "assistant emits text:” before tool_use" turn
+// would inject an empty card into the transcript.
+func TestSource_LoadBefore_AssistantEmptyTextDropped(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	sid := "asst-empty"
+
+	writeSession(t, dir, sid, []string{
+		promptLine("hi", 100),
+		assistantLineRaw(`[{"kind":"text","data":""}]`, 200),
+		assistantLineRaw(`[{"kind":"text","data":"   \n  "}]`, 300),
+		assistantLineRaw(`[{"kind":"text","data":"real reply"}]`, 400),
+	})
+
+	src := New(dir, func() string { return sid })
+	got, err := src.LoadBefore(context.Background(), 0, 10)
+	if err != nil {
+		t.Fatalf("LoadBefore: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("entries=%d, want 2 (prompt + only the non-blank assistant)", len(got))
+	}
+	if got[1].Type != "text" || got[1].Summary != "real reply" {
+		t.Errorf("entry[1]=%+v; want text/real reply", got[1])
 	}
 }
 
