@@ -221,7 +221,7 @@
 
 ### Go 正确性 — 本轮新发现
 
-- [ ] **R225-GO-1 — `cli/process.go sendSlot.canceled` 普通 bool 字段在锁外被 fanoutTurnResult 读（P3）**: `process.go:337` 注释承认是 race detector 会标的"acceptable"——可直接改 `atomic.Bool` 消除注释合理性需求。改动小但触及 sendSlot 公开结构，需评估 test fixture。
+- [x] **R225-GO-1 — `cli/process.go sendSlot.canceled` 普通 bool 字段在锁外被 fanoutTurnResult 读（P3）**: `process.go:337` 注释承认是 race detector 会标的"acceptable"——可直接改 `atomic.Bool` 消除注释合理性需求。改动小但触及 sendSlot 公开结构，需评估 test fixture。 — 已修复（atomic.Bool 替换裸 bool，消除 race acceptable 注释依赖），本批 PR #146
 - [ ] **R225-GO-2 — `cli.Resolve` retry sleep 的 ctx 取消（P2 R224-GO-1 子分支）**: subagent_link.go:289/327 `time.Sleep(retryInterval)` 在 SIGTERM 期间无法被取消；与 R224-GO-1 同批接 ctx。Breaking：Resolve 签名加 ctx 参数。
 - [ ] **R225-GO-3 — `process_event_query.InjectHistory` 裸 `go linker.Resolve(...)` 无 ctx（P2 R224-GO-3 同源第三分支）**: process_event_query.go:61 与 router_shim.go reconnect 同型；`wallclock` 取的是 `e.Time` 是对的，但 SIGTERM 期间 goroutine 仍不可中止。同 R225-GO-2 一并接 ctx。
 - [ ] **R225-GO-4 — `Router.Remove` / `dropEventLogForKey` 用 `context.Background()` + 独立 timeout 而非传入 ctx（P2）**: router_cleanup.go:97 `Remove` 路径上 7s 内不可被 SIGTERM 取消，shutdown tail latency 加重。Breaking：Remove 签名加 ctx。
@@ -229,7 +229,7 @@
 - [ ] **R225-GO-6 — `cli.Process pongRecv` 容量 1 在 GC pause 下可能误杀健康进程（P3）**: process.go:228 调度延迟时多个 pong 被丢，misses 误累。方案：容量提到 maxMisses+1，或心跳消费处用 drain 循环。
 - [ ] **R225-GO-7 — `cli.Process.Kill` 在持 shimWMu 下调 closeShimConn，net.Conn.Close 阻塞会饥饿 ping/heartbeat（P3）**: process.go:509 与 Detach 顺序不一致——后者是 Unlock 后 close。方案：Kill 也对齐先 Unlock 再 closeShimConn。
 - [ ] **R225-GO-8 — `cli.spawnSession` 历史加载 ctx 用 `context.Background()` 不继承 ctx（P3）**: router_lifecycle.go:678 resume + `claudeDir != ""` + 无 oldHistory 时 15s 独立 ctx；调用方 ctx 已被取消时仍会等满。方案：`context.WithTimeout(ctx, 15s)`。
-- [ ] **R225-GO-9 — `Process.SessionID` 公开字段缺 mutex 注释（P3）**: process.go 字段定义无 `// Protected by mu` 注释，外部调用方可能绕过 GetSessionID 直接读。方案：补字段 godoc。
+- [x] **R225-GO-9 — `Process.SessionID` 公开字段缺 mutex 注释（P3）**: process.go 字段定义无 `// Protected by mu` 注释，外部调用方可能绕过 GetSessionID 直接读。方案：补字段 godoc。 — 已修复（字段 godoc 补 mutex 契约），本批 PR #146
 
 ### 安全 — 本轮新发现
 
