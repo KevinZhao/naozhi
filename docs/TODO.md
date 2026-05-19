@@ -1,6 +1,8 @@
 # TODO
 
-> 最后更新 2026-05-19 Round 225 —— 深度 5-agent 并行 review 第 37 轮：9 处 FIX-READY 落地（cli/passthrough newSlotUUID rand.Read 错误 fallback 与 newEventUUID 对齐 / shim writer 内层 w.Write 失败 early-return / shim SetReadDeadline 错误显式 close+return / upstream connector os.Hostname err 兜底 / dashboard_send io.LimitReader 防 fh.Size 撒谎 / readloop heartbeat Timer Stop 注释精度修正 / ResetChat fallback 分支 prefix 拼接外提 / protocol_acp ToolCall.Title/Kind/Status 加 SanitizeForLog(256) / selfupdate 0755→0600 + 验后 chmod 0755 + planner_defaults.prompt 加 validatePlannerPrompt 与 project.ValidateConfig 对齐）+ ~40 NEEDS-DESIGN 归档见 Round 225 节。
+> 最后更新 2026-05-19 Round 226 —— 深度 5-agent 并行 review 第 38 轮：13 处 FIX-READY 落地（process.Kill godoc 修正 / router_core 孤立 stripResumeArgs 注释删除 / process_readloop 过期 Phase 2 注释删除 / spawnSession LOCK 注释精度 / dispatch↔server 错误映射 sync 注释 / passthrough uuidFallbackSeq 跨文件指引 / upload_store removeEntryLocked 局部变量 owner fallback / select_node_for_backend cap → requiredCap / weixin getUpdates+sendMessage errmsg SanitizeForLog/%q / selfupdate Replace 错误 errors.Join 聚合）+ ~38 NEEDS-DESIGN 归档见 Round 226 节。
+>
+> 上一轮更新 2026-05-19 Round 225 —— 深度 5-agent 并行 review 第 37 轮：9 处 FIX-READY 落地（cli/passthrough newSlotUUID rand.Read 错误 fallback 与 newEventUUID 对齐 / shim writer 内层 w.Write 失败 early-return / shim SetReadDeadline 错误显式 close+return / upstream connector os.Hostname err 兜底 / dashboard_send io.LimitReader 防 fh.Size 撒谎 / readloop heartbeat Timer Stop 注释精度修正 / ResetChat fallback 分支 prefix 拼接外提 / protocol_acp ToolCall.Title/Kind/Status 加 SanitizeForLog(256) / selfupdate 0755→0600 + 验后 chmod 0755 + planner_defaults.prompt 加 validatePlannerPrompt 与 project.ValidateConfig 对齐）+ ~40 NEEDS-DESIGN 归档见 Round 225 节。
 >
 > 上一轮更新 2026-05-19 Round 224 —— 深度 5-agent 并行 review 第 36 轮：11 处 FIX-READY 落地（selfupdate constant-time compare + checksums.txt 64KB 独立上限 / feishu maxWebhookTokenLen 512 守卫 / protocol_acp ExtraArgs capExtraArgsBytes 对齐 / protocol_acp readUntilResponse 错误 %w 包装区分 EOF vs read err / subagent_link entries[:0:0] → make / gzipMiddleware response-only godoc + Flush godoc 修正 / dashboard.marshalPooled 安全契约交叉引用 / router.kiroSessionsDir Sprint 1a 注释更新 / backend/profile.go Sprint 0b/1b 路线图描述去除）+ ~40 NEEDS-DESIGN 归档见 Round 224 节。
 >
@@ -126,6 +128,80 @@
 - [ ] **R219-ARCH-11 — `discovery.DefaultScanner` package singleton 阻碍多租户隔离（P2 R172-ARCH-D9 重申）**: 自 R172 登记起未推进，server.discoveryCache 与 cmd/naozhi 都通过包级 wrapper 假设进程内单 scanner。方案：`RouterConfig.HistoryScanner *discovery.Scanner`，nil 走 DefaultScanner 兼容老路径。
 - [x] **R219-ARCH-12 — DESIGN.md 实际状态机已偏离描述（P3）**: DESIGN.md 描述 4 状态 `Spawning/Ready/Running/Dead`，实现已加 Paused/Suspended/stub/scratch ephemeral/exempt 等 7+ 状态。方案：DESIGN.md 补真实状态枚举 + state diagram 或链 ADR。 — 已修复（DESIGN.md 把 4 态明确为 cli.ProcessState 进程级状态机 + 链权威定义，把 Exempt/Stub/Scratch/Paused 单列为 ManagedSession 上层"语义标签"可正交组合），本批 PR #86
 - [x] **R219-ARCH-13 — DESIGN.md L292 event log 持久化"单文件 single goroutine"承诺与 per-session writer N goroutine 现实不符（P3）**: 文档与实现漂移。方案：DESIGN.md 改"per-session writer, batched fsync, 100ms flush tick"。 — 已修复（DESIGN.md L292 改"per-session 专用 writer goroutine + bufio + 100ms flush tick batched fsync"），本批 PR #86
+
+## Round 226 — 5-agent 并行 review 第 38 轮（2026-05-19 第三批）NEEDS-DESIGN
+
+> 5 reviewer（Go / 安全 / 性能 / 代码质量 / 架构）再跑一轮全仓深扫。13 处 FIX-READY 已落地本轮 PR：
+> - `process.Kill()` godoc 被前函数 `isChanAlive` 文段污染，删除残留首句（R226-CR-1）
+> - `router_core.go:1041` 孤立 `stripResumeArgs` 注释（函数已迁 router_lifecycle.go），整段删除（R226-CR-2）
+> - `process_readloop.go` 头部 Phase 2 过期注释（`isChanAlive` 已迁 process_turn.go），删除（R226-CR-3）
+> - `spawnSession` godoc 显式声明 LOCK 顺序与"不得持其他锁"约束（R226-CR-4）
+> - `dispatch/dispatch.go` 与 `server/errors_usermsg.go` 错误→中文消息映射加 `// keep in sync` 双向交叉引用注释（R226-CR-5）
+> - `passthrough.go newSlotUUID` 注释指明 `uuidFallbackSeq` 在 `cli/uuid.go` 包级声明（R226-CR-6）
+> - `upload_store.removeEntryLocked` 不再原地改写 `*uploadEntry.Owner`，改用局部变量 fallback，避免破坏调用方持有的 entry 字段不变式（R226-GO-1）
+> - `select_node_for_backend.go` 局部变量 `cap` → `requiredCap` 解除 builtin 遮蔽（R226-GO-2）
+> - `weixin/weixin.go getUpdates` 与 `weixin/api.go sendMessage` 的 `errmsg` 走 `osutil.SanitizeForLog(256)` / `%q`，与 feishu/slack 错误日志风格对齐，封堵 iLink relay 注入 ANSI/换行的 log 通道（R226-SEC-1）
+> - `selfupdate.Replace` 在 Rename 失败时用 `errors.Join` 聚合 cleanup/restore 错误，避免 restore 失败被静默吞掉（R226-GO-3）
+>
+> 以下是需设计决策、破坏兼容、跨包重构、或方案不唯一不适合本轮直接修的条目。
+
+### 安全 — 本轮新发现
+
+- [ ] **R226-SEC-2 — Dashboard 主页 CSP `script-src 'self' 'unsafe-inline'` 完全打掉 XSS 防护（P1）**: 任何注入到 dashboard HTML 或同源 JS 文件的脚本都能直接执行；登录页已用 hash 收敛了，主页应迁移到 nonce 或 per-script SHA-256。Breaking：需把 dashboard.html 内联事件 handler 全部抽到外部文件 + 加 nonce/hash。涉及 `internal/server/dashboard.go:389` + 全部内联脚本审计。
+- [ ] **R226-SEC-3 — 反向 node 在 `ws://`（无 TLS）下传 token 仅 `slog.Warn` 不阻断（P2）**: token 在第一条 WS 消息明文，passive 观察者可截获并冒充 node。方案：primary 端 `/ws-node` 加 `require_tls: true` 配置，默认 reject 非 wss 升级，除非显式 `insecure: true`。Breaking：现有 `ws://` 部署需加配置或迁 `wss://`。`internal/upstream/connector.go:210` + `internal/node/reverseserver.go:155`。
+- [ ] **R226-SEC-4 — Slack Socket Mode handler 无并发 cap（P2）**: 每条消息无限新建 goroutine（feishu 有 `hookSem` cap=20），高频/被攻 workspace 可 OOM。方案：仿 feishu 加 `slackSem chan struct{}` 容量 20，semaphore 满时 drop 并 slog.Warn。`internal/platform/slack/slack.go:376`。
+- [ ] **R226-SEC-5 — Discord 单条消息聚合下载无 cap（P2）**: 每附件 10MB 限制，但单消息可附 10 张 = 100MB / event；高频附图轰炸放大 OOM 风险。方案：`maxDiscordAttachmentsPerMessage = 5` 上限 + 总字节 cap。`internal/platform/discord/discord.go:363`。
+- [ ] **R226-SEC-6 — `allowed_root` 未配置只 warn 不阻断启动（P2）**: 拥有 dashboard token 的认证用户可把 cron `work_dir` 设到任意路径（如 `/etc`），CLI 子进程拿那个 CWD 跑，Write 工具可改 `/etc/passwd`。方案：当 `dashboard_token` 已配置且监听非 loopback 时，把 warn 升级为 fatal；或 `naozhi doctor` 加高严重度检查。`internal/server/server.go:513`。
+- [ ] **R226-SEC-7 — `/health` 端点无认证无限速（P3）**: 暴露 session 数 / watchdog kill 计数 / 平台名 / node 状态 / build 版本，外部 attacker 可高频枚举 infra 拓扑、估算重启时序。方案：加 per-IP rate limiter（60 req/min burst 10）。`internal/server/health.go`。
+- [ ] **R226-SEC-8 — `wshub` 同 session key 无订阅 cap（P3）**: 单 token 攻击者可开 1000 WS 全订同 session，每事件 fan-out N 倍 CPU/mem。方案：per-session-key 订阅 cap（如 20）。`internal/server/wshub.go`。
+- [ ] **R226-SEC-9 — Sandbox CSP `style-src 'unsafe-inline'`（P3）**: `serveRender`/`serveRaw` 仍允许 inline CSS，CSS exfiltration 攻击面在沙箱内仍存。方案：迁 nonce 或 hash。`internal/server/project_files.go:708,905`。
+- [ ] **R226-SEC-10 — 附件路径加 `Content-Disposition: attachment` 给 SVG/XML（P3）**: 当前 ext allowlist 已挡掉 SVG，但万一未来开放或 magic-byte sniffer 误判，仍是 defence-in-depth 缺口。方案：在 `handleAttachment` 中对 sniff 结果含 `image/svg+xml` / `application/xhtml+xml` / `text/xml` 的强制 attachment + `X-Frame-Options: DENY`。`internal/server/dashboard_send.go:1148`。
+
+### 性能 — 本轮新发现
+
+- [ ] **R226-PERF-1 — `Protocol.ReadEvent(line string)` 每事件 `[]byte(line)` 堆拷贝（P1，封 R67-PERF-1 实施分支）**: 5-50 ev/s × N session 的强制 alloc。方案：Protocol 接口签名 `ReadEvent([]byte)`，shimMsg.Line 改 `json.RawMessage`。Breaking：是（接口）。
+- [ ] **R226-PERF-2 — `eventlog_bridge.newEventLogSink` 每 `Append` 1 单元 slice + JSON copy（P1）**: 5 sess × 5 ev/s ≈ 25 alloc/s + ~25 KB/s GC。方案：bridge 层加 `sync.Pool[[1]persist.Entry]` 复用 + 单条快路径 `AppendOne`。涉及 PersistSink 接口。`internal/session/eventlog_bridge.go:77`。
+- [ ] **R226-PERF-3 — `passthrough.writeUserMessageUnderShimLock` `&captureWriter{}` 逃逸到堆（P1）**: 每条 passthrough send 2 alloc。方案：`sync.Pool[*captureWriter]`，复用 backing slice（仿 `shimSendBufPool`）。`internal/cli/passthrough.go:182`。
+- [ ] **R226-PERF-4 — ACP `agent_message_chunk` 每 chunk 一次 `json.Unmarshal`（P2）**: kiro streaming 高频路径，500 unmarshal/s 仅此一处。方案：手写 byte-scan 提取 `"text":"..."` value，跳过 reflect。`internal/cli/protocol_acp.go:517`。
+- [ ] **R226-PERF-5 — `eventlog.Append` 单条调用每次造 `[]EventEntry{e}` slice（P2）**: PersistSink 接口允许 retain slice 故复用受限。方案：加 `AppendOne(e)` 快路径或单元数组池。`internal/cli/eventlog.go:660`。
+- [ ] **R226-PERF-6 — `EventLog.applyEntryStateLocked` task 事件线性扫 turnAgents/bgAgents（P3）**: 多路 subagent 场景（>8 并行）双重 O(n)。方案：当 `len > 8` 时建 `map[string]int` 索引。`internal/cli/eventlog.go:405`。
+- [ ] **R226-PERF-7 — `handleList` 响应仍用 `map[string]any`（P2）**: 10 tabs × 1Hz × 2 alloc = 20 map alloc/s。方案：`type sessionListResp struct {...}`。`internal/server/dashboard_session.go:535,599`。
+- [ ] **R226-PERF-8 — `process_event_format.TodosDetailJSON` 二次 marshal（P2）**: `block.Input` → `[]TodoItem` → marshal，可直接从 `block.Input` 提 `"todos"` 字段 raw bytes。`internal/cli/process_event_format.go:173`。
+- [ ] **R226-PERF-9 — `ACPProtocol.WriteInterrupt` 每次 `json.Marshal`（P2）**: 静态模板 + UUID 拼接可省反射。`internal/cli/protocol_acp.go:274`。
+- [ ] **R226-PERF-10 — `process_shim_io.shimWriter.Write` fast path `string(data[:len-1])` 拷贝（P3，封 R71-PERF-H1）**: shimClientMsg.Line 改 `json.RawMessage`。
+- [ ] **R226-PERF-11 — `ACPProtocol.mu` 同时保护 sessionID 和 textBuf（P3）**: chunk 高频时 textBuf 锁污染 sessionID 读路径。方案：sessionID 改 `atomic.Pointer[string]`（已有 model 先例）。`internal/cli/protocol_acp.go:88`。
+
+### 代码质量 — 本轮新发现
+
+- [ ] **R226-CR-7 — `RegisterForResume` / `RegisterCronStubWithChain` 用 `r.CLIName/Version` 在多 backend 部署下显示错误（P1）**: 这两条路径只看默认 wrapper；router_core.go loadStore 已正确走 `wrapperFor(entry.Backend)`。方案：加 `backend string` 参数 → `wrapperFor`。Breaking：caller API。`internal/session/router_discovery.go:259,362`。
+- [ ] **R226-CR-8 — `cron/scheduler.freshContextPreflight` 死代码（P1）**: 仅由 `freshContextPreflightP0` 委托调用；测试只测 P0 版本。方案：内联 P0 → 删 wrapper + 删过期注释 "keep intact for test surface"。`internal/cron/scheduler.go:1570`。
+- [ ] **R226-CR-9 — dispatch/server 错误→中文消息双份重复（P2，封 R215-CR-P2-1 drift）**: 已加 sync 注释，但根治需提共享函数 `UserMessageForSendError(err, noOutTimeout, totalTimeout) (msg, severity)` 到 `internal/cli/usermsg.go` 或 `internal/session/usermsg.go`，dispatch + server 同时消费。方案明确。
+- [ ] **R226-CR-10 — `cron/scheduler.executeOpt` 320 行 7 失败分支（P2）**: 抽 `handleGetOrCreateError` / `handleSendError` / `deliverResult` helpers。`internal/cron/scheduler.go:1749-2070`。
+- [ ] **R226-CR-11 — `cron/scheduler.go` 2739 行单文件无拆分计划（P2）**: 拟 `scheduler_job.go`/`scheduler_run.go`/`scheduler_notify.go` 拆分；先写 split intent 文档，分阶段做。
+- [ ] **R226-CR-12 — `wshub.go` 1785 行 + `feishu.go` 1461 行无拆分计划（P3）**: wshub 至少抽 `wshub_events.go`；feishu 抽 `feishu_token.go` + `feishu_transport.go`。
+- [ ] **R226-CR-13 — `Snapshot()` 在 read-only 路径里写 `s.SetModel(liveModel)`（P3）**: ListSessions 池化 + side-effect 矛盾。方案：把 model 镜像写迁到 storeProcess 或 post-result hook。`internal/session/managed.go:957`。
+- [ ] **R226-CR-14 — `session/testutil.go` 测试设施无 build constraint（P3）**: TestProcess/NewTestProcess 编进 prod binary。方案：`//go:build testing` 或迁 `testutil_test.go`（需先验证外部 test 依赖）。
+- [ ] **R226-CR-15 — `router_lifecycle.ResetChat` fast/fallback 双 path 共享 teardown 代码（P3）**: 抽 `resetKeyLocked(key, *ManagedSession)` helper。
+- [ ] **R226-CR-16 — `Scheduler.UpdateJob` Pause 分支没委托给 `pauseJobLocked` / `resumeJobLocked`（P3）**: pause 逻辑双份维护。
+
+### 架构 — 本轮新发现
+
+- [ ] **R226-ARCH-1 — `server` 包成"上帝包"（P1）**: 92 个 .go + 12 子 handler，承担路由+UI+业务编排+Hub+nodeCache。建议：薄壳 server + 拆 `internal/server/api/{cron,project,scratch,discovery,...}` 子包；Hub/nodeCache 走显式注入。需 RFC。
+- [ ] **R226-ARCH-2 — `KeyResolver` 在 main/server/dispatch 三处独立构造（P1）**: 重复 + 无编译期保证同步 agent map。方案：单例 + 应用 wiring 注入，删 dispatcher fallback。
+- [ ] **R226-ARCH-3 — dispatch `sendFn` 接 `*session.ManagedSession + cli.SendResult` 破坏分层（P1）**: dispatch 名义有 `SessionRouter` 接口但发送闭包绕过。方案：定义 dispatch.Sender 接口，server 实现，dispatch 不再 import cli/session 具体类型。
+- [ ] **R226-ARCH-4 — `session.Router` 30+ 字段（P2，封 R225-ARCH-* 重申）**: 注解块边界天然拆分点（processPool/sessionStore/historyAttacher/shimReconciler/attachmentTracker）。需独立 RFC。
+- [ ] **R226-ARCH-5 — Platform 包间多份"形似独立"实现（P2）**: maxIncomingTextBytes / SafeHTTPClient / Start-Stop 模板 / messageID 编解码各家重复。方案：`platform.BasePlatform` + `SafeHTTPClient(opts)` + `MessageRefCodec`。
+- [ ] **R226-ARCH-6 — `workspace`/`workspaces`/`Session.cwd` 别名 + 无热重载（P2）**: 已有 deprecated warn 但仍接受双形；高频字段（agents/projects/cron）需 SIGHUP 重载。Breaking：v2 schema。
+- [ ] **R226-ARCH-7 — 状态分散到 7 处 store（P2）**: sessions.json / event log / knownIDs / project.yaml / cron store / shim state / scratch 各自 dirty + throttle，崩溃恢复语义不对齐。方案：先画恢复矩阵契约文档；再统一 `state.Store` facade。
+- [ ] **R226-ARCH-8 — `dispatch.replyTracker` 含 editLoop / todoLoop / askquestion 卡片+文字 fallback 全在 dispatch.go 内（P2）**: 抽 `internal/dispatch/imreply` 子包。
+- [ ] **R226-ARCH-9 — backend 维度配置散落 5 处（P2）**: Profile + main backendModels/backendExtraArgs map + replyTagForBackend + ReplyFooterFn fallback + StartShimWithBackend + reverse capability 字段。方案：Profile 当真正注册中心，model/args defaults/tag/shim hint 全进 Profile。
+- [ ] **R226-ARCH-10 — `TestProcess` 暴露 30+ 公有可写字段（P2）**: 新加 processIface 方法即破坏 mock。方案：拆细 procRunner/procReader/procIntrospector 子接口，InjectSession 改 builder 模式。
+- [ ] **R226-ARCH-11 — exempt 命名空间（cron:/project:/scratch:/quick:）共享标记但归属各异（P2）**: 每加一个内部子系统改 4 处过滤。方案：`KeyKind enum` + `Policy{Persist, Exempt, SidebarVisible, Sweepable}` 表，router 用查表代替 if-prefix 链。
+- [ ] **R226-ARCH-12 — 错误→用户中文消息没注册式映射（P2）**: 新加 sentinel 必须改 dispatch + server 两处。方案：`errmap.UserMessage(err) (msg, severity)` 注册表，各包注册自己的 sentinel。
+- [ ] **R226-ARCH-13 — `cmd/naozhi/main.go` 含 ~390 行 settings.json hook/env 过滤逻辑（P3）**: 影响测试覆盖。方案：迁 `internal/cli/settingsoverride`。
+- [ ] **R226-ARCH-14 — `cli` 包同时含 protocol/process/eventlog/history/shim io/image/thumbnail（P3）**: image/thumbnail/uuid/todo 抽到 `internal/cli/payload`；event log 迁 `internal/eventlog`（已有 persist 子包）。
+- [ ] **R226-ARCH-15 — 各 mutation 路径手动 fan-out `s.hub.BroadcastSessionsUpdate()`（P3）**: 隐式事件总线无显式 publish API。方案：`events.Bus` + 订阅模式。
+- [ ] **R226-ARCH-16 — panic recovery 在 dispatch/platform/cli/session 四处独立写（P3）**: metric 名也分。方案：`osutil.RecoverWith(label, ...)` helper。
 
 ## Round 225 — 5-agent 并行 review 第 37 轮（2026-05-19 第二批）NEEDS-DESIGN
 

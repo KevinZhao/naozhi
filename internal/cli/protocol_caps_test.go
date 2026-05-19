@@ -23,11 +23,11 @@ func (s *stubProto) WriteMessage(io.Writer, string, []ImageData) error {
 func (s *stubProto) WriteUserMessageLocked(io.Writer, string, string, []ImageData, string) error {
 	return nil
 }
-func (s *stubProto) SupportsPriority() bool                 { return s.priority }
-func (s *stubProto) SupportsReplay() bool                   { return s.replay }
-func (s *stubProto) WriteInterrupt(io.Writer, string) error { return nil }
-func (s *stubProto) ReadEvent(string) (Event, bool, error)  { return Event{}, false, nil }
-func (s *stubProto) HandleEvent(io.Writer, Event) bool      { return false }
+func (s *stubProto) SupportsPriority() bool                  { return s.priority }
+func (s *stubProto) SupportsReplay() bool                    { return s.replay }
+func (s *stubProto) WriteInterrupt(io.Writer, string) error  { return nil }
+func (s *stubProto) ReadEvent(string) ([]Event, bool, error) { return nil, false, nil }
+func (s *stubProto) HandleEvent(io.Writer, Event) bool       { return false }
 
 // stubProtoWithCaps embeds stubProto and overrides with a direct Capabilities().
 // When present, ProtocolCaps must prefer it over the SupportsX() fallback.

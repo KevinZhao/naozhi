@@ -14,7 +14,7 @@ const askUserQuestionLine = `{"type":"assistant","message":{"role":"assistant","
 func TestClaudeProtocol_ReadEvent_AskUserQuestion(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
-	ev, done, err := p.ReadEvent(askUserQuestionLine)
+	ev, done, err := readOne(t, p, askUserQuestionLine)
 	if err != nil {
 		t.Fatalf("ReadEvent err=%v", err)
 	}
@@ -58,7 +58,7 @@ func TestClaudeProtocol_ReadEvent_NonAskQuestionUntouched(t *testing.T) {
 	p := &ClaudeProtocol{}
 	// A bare text assistant message — no AskUserQuestion tool_use.
 	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}`
-	ev, _, err := p.ReadEvent(line)
+	ev, _, err := readOne(t, p, line)
 	if err != nil {
 		t.Fatalf("ReadEvent err=%v", err)
 	}
@@ -101,7 +101,7 @@ func TestExtractAskQuestion_IgnoresNonAskToolUse(t *testing.T) {
 func TestEventEntriesFromEventAt_AskQuestionEntry(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
-	ev, _, err := p.ReadEvent(askUserQuestionLine)
+	ev, _, err := readOne(t, p, askUserQuestionLine)
 	if err != nil {
 		t.Fatalf("ReadEvent err=%v", err)
 	}

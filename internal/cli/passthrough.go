@@ -20,6 +20,9 @@ import (
 // a hard OS failure. We fall back to a hashed monotonic counter (mirroring
 // newEventUUID) rather than returning the all-zero UUID — every-zero would
 // silently break slot FIFO matching, which is worse than a tiny entropy hit.
+//
+// uuidFallbackSeq is declared in cli/uuid.go (package-scoped). The fallback
+// path is shared with newEventUUID so the seq counter is not duplicated.
 func newSlotUUID() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
