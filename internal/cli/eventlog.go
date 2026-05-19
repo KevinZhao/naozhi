@@ -12,6 +12,14 @@ import (
 
 const defaultEventLogSize = 500
 
+// setAgentInternalIDMaxScan caps how many ring-buffer entries
+// SetAgentInternalID walks backwards looking for the matching "agent" /
+// "task_start" entries. The pair is almost always within the last few dozen
+// entries of the same turn; capping the scan keeps the EventLog wlock from
+// being held for the full O(maxSize) walk while concurrent Append calls
+// queue behind it. R225-PERF-13.
+const setAgentInternalIDMaxScan = 50
+
 // imageDataURIPrefix is the required leading substring for every entry in
 // EventEntry.Images. Today the only producer is MakeThumbnail (process.go:853),
 // which always returns "data:image/jpeg;base64,..." or "". Future refactors
@@ -574,20 +582,43 @@ func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, fir
 	// Backfill ring-buffer entries so future persistHistory / Entries /
 	// EntriesSince reads carry the linkage. Walk backwards — the matching
 	// "agent" and "task_start" entries are almost always among the last N
-	// entries; N small in practice (single turn) so the O(count) walk is cheap.
+	// entries (single turn). R225-PERF-13: cap the scan depth at
+	// setAgentInternalIDMaxScan and break once both expected entries (one
+	// "agent" + one "task_start" with this ToolUseID) have been backfilled,
+	// so the wlock isn't held for an O(maxSize) scan across all 500
+	// ring-buffer slots while every Append call is queued behind it.
 	start := (l.head - l.count + l.maxSize) % l.maxSize
-	for i := l.count - 1; i >= 0; i-- {
-		idx := (start + i) % l.maxSize
+	scanLimit := l.count
+	if scanLimit > setAgentInternalIDMaxScan {
+		scanLimit = setAgentInternalIDMaxScan
+	}
+	var foundAgent, foundTaskStart bool
+	for i := 0; i < scanLimit; i++ {
+		idx := (start + l.count - 1 - i) % l.maxSize
 		e := &l.entries[idx]
 		if e.ToolUseID != toolUseID {
 			continue
 		}
-		if e.Type != "agent" && e.Type != "task_start" {
+		switch e.Type {
+		case "agent":
+			if foundAgent {
+				continue
+			}
+			foundAgent = true
+		case "task_start":
+			if foundTaskStart {
+				continue
+			}
+			foundTaskStart = true
+		default:
 			continue
 		}
 		e.InternalAgentID = internalAgentID
 		e.JSONLPath = jsonlPath
 		e.FirstPromptID = firstPromptID
+		if foundAgent && foundTaskStart {
+			break
+		}
 	}
 }
 
