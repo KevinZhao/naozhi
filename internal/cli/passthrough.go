@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -182,7 +183,14 @@ func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []I
 	// For ClaudeProtocol, WriteUserMessageLocked expects an io.Writer that
 	// accepts one '\n'-terminated line. We feed a thin capture-writer and
 	// forward the captured bytes through shimSendLocked.
-	cap := &captureWriter{}
+	//
+	// R226-PERF-3: pool captureWriter + its backing slice (the slice is the
+	// dominant cost — typical user messages are 100B-4KB). The pool returns a
+	// pointer so the slice header stays heap-stable; reset to len 0 on Get to
+	// reuse capacity, return on Put.
+	cap := captureWriterPool.Get().(*captureWriter)
+	cap.bytes = cap.bytes[:0]
+	defer captureWriterPool.Put(cap)
 	if err := p.protocol.WriteUserMessageLocked(cap, uuidStr, text, images, priority); err != nil {
 		return err
 	}
@@ -195,6 +203,10 @@ func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []I
 	if len(line) > maxStdinLineBytes {
 		return fmt.Errorf("%w: %d bytes > %d", ErrMessageTooLarge, len(line), maxStdinLineBytes)
 	}
+	// shimSendLocked encodes shimClientMsg.Line as a JSON string, which copies
+	// the bytes into its own buffer. After Put returns to the pool, the slice
+	// backing array can be reused — the JSON encoding has already finished
+	// reading by then.
 	return p.shimSendLocked(shimClientMsg{Type: "write", Line: string(line)})
 }
 
@@ -208,6 +220,20 @@ type captureWriter struct {
 func (c *captureWriter) Write(b []byte) (int, error) {
 	c.bytes = append(c.bytes, b...)
 	return len(b), nil
+}
+
+// captureWriterPool reuses captureWriter values (and their backing byte
+// slices) across passthrough sends so the writer header + initial slice
+// allocation no longer heap-escape on every message. Each Get caller MUST
+// reset bytes via `c.bytes = c.bytes[:0]` before using the writer; Put
+// happens via defer in writeUserMessageUnderShimLock. R226-PERF-3.
+var captureWriterPool = sync.Pool{
+	New: func() any {
+		// 4KB initial capacity covers most messages; append grows as needed
+		// and the larger backing array is what we actually want to keep
+		// pooled for subsequent reuse.
+		return &captureWriter{bytes: make([]byte, 0, 4096)}
+	},
 }
 
 // removeSlotByID removes a single slot from pendingSlots. Used on write-fail.
