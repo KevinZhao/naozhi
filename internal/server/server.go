@@ -1042,8 +1042,9 @@ func isPlaintextPublicAddr(addr string) bool {
 	return true
 }
 
-// startProjectScanLoop periodically rescans the projects root for CLAUDE.md changes
-// and cleans up orphaned planner sessions for removed projects.
+// startProjectScanLoop periodically rescans the projects root for added or
+// removed subdirectories and cleans up orphaned planner sessions for removed
+// projects.
 func (s *Server) startProjectScanLoop(ctx context.Context) {
 	if s.projectMgr == nil {
 		return

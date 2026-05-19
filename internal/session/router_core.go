@@ -126,8 +126,8 @@ const (
 	// startup session history loading.
 	historyLoadConcurrency = 10
 
-	// ProjectScanInterval is how often the project root is rescanned
-	// for CLAUDE.md changes. Exported for use by server package.
+	// ProjectScanInterval is how often the project root is rescanned to
+	// pick up added or removed subdirectories. Exported for use by server package.
 	ProjectScanInterval = 60 * time.Second
 
 	// shimReconnectTimeout bounds individual shim reconnect/spawn RPCs at
