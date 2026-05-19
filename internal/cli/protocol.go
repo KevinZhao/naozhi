@@ -65,10 +65,22 @@ type Protocol interface {
 	// ErrInterruptUnsupported.
 	WriteInterrupt(w io.Writer, requestID string) error
 
-	// ReadEvent parses a single NDJSON line from stdout into a unified Event.
-	// Returns the event, whether this event completes the current turn, and any error.
-	// Events that should be silently skipped return a zero Event with done=false, err=nil.
-	ReadEvent(line string) (ev Event, done bool, err error)
+	// ReadEvent parses a single NDJSON line from stdout into zero or more
+	// unified Events. Returns the events, whether this line completes the
+	// current turn, and any error.
+	//
+	// Returning a slice (rather than a single Event) lets a protocol surface
+	// "one wire frame → multiple semantic events" without overloading a single
+	// Event with cross-cutting state. Today this matters for ACP turn-end:
+	// the JSON-RPC response that closes a turn carries the accumulated
+	// assistant text AND the cost/stopReason metadata; emitting them as two
+	// distinct events (assistant text + result) keeps downstream EventLog /
+	// dashboard consumers free of "result also carries visible text" special
+	// cases. claude stream-json always returns a one-element slice.
+	//
+	// Lines that should be silently skipped return a nil slice with
+	// done=false, err=nil.
+	ReadEvent(line string) (events []Event, done bool, err error)
 
 	// HandleEvent allows the protocol to react to events (e.g., auto-grant permissions).
 	// Returns true if the event was handled internally and should not be forwarded.

@@ -315,15 +315,19 @@ func (p *ACPProtocol) Capabilities() Caps {
 	return Caps{Replay: false, Priority: false, SoftInterrupt: true, StreamJSON: false}
 }
 
-func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
+func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	var msg RPCMessage
 	if err := json.Unmarshal([]byte(line), &msg); err != nil {
-		return Event{}, false, err
+		return nil, false, err
 	}
 
 	// Notification: session/update
 	if msg.IsNotification() && msg.Method == "session/update" {
-		return p.parseSessionUpdate(msg.Params)
+		ev, done, err := p.parseSessionUpdate(msg.Params)
+		if err != nil || ev.Type == "" {
+			return nil, done, err
+		}
+		return []Event{ev}, done, nil
 	}
 
 	// Notification: _kiro.dev/metadata — kiro's per-turn status frame.
@@ -332,7 +336,11 @@ func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 	// can update the SessionView normalize fields without parsing private
 	// methods elsewhere. See docs/rfc/multi-backend.md §8.8 / V10.
 	if msg.IsNotification() && msg.Method == "_kiro.dev/metadata" {
-		return parseKiroMetadata(msg.Params)
+		ev, done, err := parseKiroMetadata(msg.Params)
+		if err != nil || ev.Type == "" {
+			return nil, done, err
+		}
+		return []Event{ev}, done, nil
 	}
 
 	// Request from agent: session/request_permission.
@@ -345,7 +353,7 @@ func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 		if id, ok := msg.IDAsString(); ok {
 			ev.RPCRequestID = id
 		}
-		return ev, false, nil
+		return []Event{ev}, false, nil
 	}
 
 	// Response (turn complete for session/prompt)
@@ -371,7 +379,7 @@ func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 			// as "kiro session never replies"; reproduced live 2026-05-19).
 			// readLoop translates ErrACPRPC into a synthetic result event so
 			// the dashboard sees the failure instead of a silent skip.
-			return Event{}, true, fmt.Errorf("%w %d: %s", ErrACPRPC,
+			return nil, true, fmt.Errorf("%w %d: %s", ErrACPRPC,
 				msg.Error.Code, osutil.SanitizeForLog(msg.Error.Message, 256))
 		}
 
@@ -390,16 +398,46 @@ func (p *ACPProtocol) ReadEvent(line string) (Event, bool, error) {
 		sid := p.sessionID
 		p.mu.Unlock()
 
-		ev := Event{
+		// Turn boundary emits TWO events:
+		//
+		//   1. A synthesised assistant frame carrying the accumulated text as
+		//      a single "text" content block. This is the only place in the
+		//      ACP path where the visible reply materialises — agent_message_chunk
+		//      notifications carry incremental text but never make it onto
+		//      EventLog (they only feed textBuf), so without this event the
+		//      dashboard would have no bubble to render.
+		//
+		//   2. A pure result event carrying cost/stopReason/sessionId. Result
+		//      is still populated so process_send.Send() can plumb the text
+		//      into SendResult.Text for passthrough callers — but the
+		//      EventLog converter (process_event_format.go) treats result
+		//      strictly as turn metadata and never derives a visible entry
+		//      from it, so the assistant frame above is the single source
+		//      of the user-facing bubble.
+		//
+		// Emitting both as a slice (rather than overloading one Event with
+		// "result also carries text") keeps every downstream consumer free
+		// of the ACP/claude special case: each event has exactly one role.
+		var events []Event
+		if text != "" {
+			events = append(events, Event{
+				Type:      "assistant",
+				SessionID: sid,
+				Message: &AssistantMessage{
+					Content: []ContentBlock{{Type: "text", Text: text}},
+				},
+			})
+		}
+		events = append(events, Event{
 			Type:      "result",
 			SubType:   stop.StopReason,
 			Result:    text,
 			SessionID: sid,
-		}
-		return ev, true, nil
+		})
+		return events, true, nil
 	}
 
-	return Event{}, false, nil
+	return nil, false, nil
 }
 
 // permissionResponse encodes a JSON-RPC response to session/request_permission.

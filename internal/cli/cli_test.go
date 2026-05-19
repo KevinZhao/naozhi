@@ -8,6 +8,27 @@ import (
 	"testing"
 )
 
+// readOne is a test helper that flattens Protocol.ReadEvent's []Event return
+// into a single Event for tests that expect exactly one semantic event per
+// wire frame. Returns a zero Event when ReadEvent skipped the line (length 0
+// slice). Multi-event frames (only ACP turn-end today) have their own tests
+// that consume the slice directly — using readOne there would silently hide
+// the second event.
+func readOne(t *testing.T, p Protocol, line string) (Event, bool, error) {
+	t.Helper()
+	events, done, err := p.ReadEvent(line)
+	if err != nil {
+		return Event{}, done, err
+	}
+	if len(events) == 0 {
+		return Event{}, done, nil
+	}
+	if len(events) > 1 {
+		t.Fatalf("readOne: expected ≤1 event, got %d (use ReadEvent directly for multi-event frames)", len(events))
+	}
+	return events[0], done, nil
+}
+
 // --- ClaudeProtocol tests ---
 
 func TestClaudeProtocol_Name(t *testing.T) {
@@ -68,7 +89,7 @@ func TestClaudeProtocol_ReadEvent_Result(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
 	line := `{"type":"result","result":"done","session_id":"s1","total_cost_usd":0.05}`
-	ev, done, err := p.ReadEvent(line)
+	ev, done, err := readOne(t, p, line)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +105,7 @@ func TestClaudeProtocol_ReadEvent_Assistant(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
 	line := `{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"hi"}]}}`
-	ev, done, err := p.ReadEvent(line)
+	ev, done, err := readOne(t, p, line)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -101,7 +122,7 @@ func TestClaudeProtocol_ReadEvent_SkipsHooks(t *testing.T) {
 	p := &ClaudeProtocol{}
 	for _, sub := range []string{"hook_started", "hook_response"} {
 		line := `{"type":"system","subtype":"` + sub + `"}`
-		ev, done, err := p.ReadEvent(line)
+		ev, done, err := readOne(t, p, line)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -118,7 +139,7 @@ func TestClaudeProtocol_ReadEvent_SystemInit(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
 	line := `{"type":"system","subtype":"init","session_id":"sess_abc"}`
-	ev, done, err := p.ReadEvent(line)
+	ev, done, err := readOne(t, p, line)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +200,7 @@ func TestClaudeProtocol_ReadEvent_SkipsControlResponse(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
 	line := `{"type":"control_response","response":{"subtype":"success","request_id":"req-1"}}`
-	ev, done, err := p.ReadEvent(line)
+	ev, done, err := readOne(t, p, line)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,21 +285,34 @@ func TestACPProtocol_ReadEvent_CancelledStopReason(t *testing.T) {
 	p.mu.Unlock()
 
 	line := `{"jsonrpc":"2.0","id":3,"result":{"stopReason":"cancelled"}}`
-	ev, done, err := p.ReadEvent(line)
+	events, done, err := p.ReadEvent(line)
 	if err != nil {
 		t.Fatalf("ReadEvent: %v", err)
 	}
 	if !done {
 		t.Error("cancelled response should still mark turn complete")
 	}
-	if ev.Type != "result" {
-		t.Errorf("Type = %q, want result", ev.Type)
+	// ACP turn-end with buffered text emits two events: the synthesised
+	// assistant frame carrying the visible reply, then the result carrying
+	// the stopReason + Result for process_send. Both must be present so
+	// EventLog renders the bubble (assistant) and Send returns text (result).
+	if len(events) != 2 {
+		t.Fatalf("want 2 events (assistant text, result), got %d: %+v", len(events), events)
 	}
-	if ev.SubType != "cancelled" {
-		t.Errorf("SubType = %q, want cancelled (so dispatch can label the turn)", ev.SubType)
+	if events[0].Type != "assistant" {
+		t.Errorf("events[0].Type = %q, want assistant", events[0].Type)
 	}
-	if ev.Result != "partial" {
-		t.Errorf("partial buffered text should still surface, got %q", ev.Result)
+	if events[0].Message == nil || len(events[0].Message.Content) != 1 || events[0].Message.Content[0].Text != "partial" {
+		t.Errorf("events[0] should carry assistant text=partial, got %+v", events[0].Message)
+	}
+	if events[1].Type != "result" {
+		t.Errorf("events[1].Type = %q, want result", events[1].Type)
+	}
+	if events[1].SubType != "cancelled" {
+		t.Errorf("events[1].SubType = %q, want cancelled (so dispatch can label the turn)", events[1].SubType)
+	}
+	if events[1].Result != "partial" {
+		t.Errorf("partial buffered text should still ride on result.Result for SendResult.Text, got %q", events[1].Result)
 	}
 }
 
@@ -289,12 +323,16 @@ func TestACPProtocol_ReadEvent_NormalStopReasonRoundTrip(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
 	line := `{"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}}`
-	ev, done, err := p.ReadEvent(line)
+	events, done, err := p.ReadEvent(line)
 	if err != nil || !done {
 		t.Fatalf("expected done=true err=nil, got done=%v err=%v", done, err)
 	}
-	if ev.SubType != "end_turn" {
-		t.Errorf("SubType = %q, want end_turn", ev.SubType)
+	// Empty textBuf → no assistant frame; only the result event surfaces.
+	if len(events) != 1 || events[0].Type != "result" {
+		t.Fatalf("want single result event for empty turn-end, got %+v", events)
+	}
+	if events[0].SubType != "end_turn" {
+		t.Errorf("SubType = %q, want end_turn", events[0].SubType)
 	}
 }
 
@@ -480,7 +518,7 @@ func TestACPProtocol_ReadEvent_SessionUpdate_TextChunk(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
 	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello "}}}}`
-	ev, done, err := p.ReadEvent(line)
+	ev, done, err := readOne(t, p, line)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -515,7 +553,7 @@ func TestACPProtocol_ReadEvent_ToolCall(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
 	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"tool_call","toolCallId":"c1","title":"Reading file","status":"pending"}}}`
-	ev, done, err := p.ReadEvent(line)
+	ev, done, err := readOne(t, p, line)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -536,7 +574,7 @@ func TestACPProtocol_ReadEvent_ToolCall_RichPayload(t *testing.T) {
 	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{` +
 		`"sessionUpdate":"tool_call","toolCallId":"tooluse_X","title":"Running: cat /etc/hostname",` +
 		`"kind":"execute","rawInput":{"command":"cat /etc/hostname"}}}}`
-	ev, _, err := p.ReadEvent(line)
+	ev, _, err := readOne(t, p, line)
 	if err != nil {
 		t.Fatalf("ReadEvent: %v", err)
 	}
@@ -566,7 +604,7 @@ func TestACPProtocol_ReadEvent_ToolCallUpdate_Completed(t *testing.T) {
 	line := `{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{` +
 		`"sessionUpdate":"tool_call_update","toolCallId":"tooluse_X","kind":"execute","status":"completed",` +
 		`"title":"Running: cat /etc/hostname","rawOutput":{"items":[{"Json":{"exit_status":"exit status: 0","stdout":"ip-10-0-141-156\n"}}]}}}}`
-	ev, done, err := p.ReadEvent(line)
+	ev, done, err := readOne(t, p, line)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -605,7 +643,7 @@ func TestACPProtocol_ReadEvent_ToolCall_TruncatesLargePayload(t *testing.T) {
 		`"title":"big tool","rawOutput":{"items":[{"Json":{"stdout":"` + bigStdout + `"}}]}}}}`
 
 	p := &ACPProtocol{}
-	ev, _, err := p.ReadEvent(line)
+	ev, _, err := readOne(t, p, line)
 	if err != nil {
 		t.Fatalf("ReadEvent: %v", err)
 	}
@@ -633,21 +671,31 @@ func TestACPProtocol_ReadEvent_Response_TurnComplete(t *testing.T) {
 	p.mu.Unlock()
 
 	line := `{"jsonrpc":"2.0","id":5,"result":{"stopReason":"end_turn"}}`
-	ev, done, err := p.ReadEvent(line)
+	events, done, err := p.ReadEvent(line)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !done {
 		t.Error("response should be done=true")
 	}
-	if ev.Type != "result" {
-		t.Errorf("Type = %q, want result", ev.Type)
+	// Buffered text → two events: assistant text frame + result metadata.
+	if len(events) != 2 {
+		t.Fatalf("want 2 events (assistant text, result), got %d: %+v", len(events), events)
 	}
-	if ev.Result != "final answer" {
-		t.Errorf("Result = %q, want 'final answer'", ev.Result)
+	if events[0].Type != "assistant" || events[0].Message == nil ||
+		len(events[0].Message.Content) != 1 ||
+		events[0].Message.Content[0].Text != "final answer" {
+		t.Errorf("events[0] should carry assistant text='final answer', got %+v", events[0])
 	}
-	if ev.SessionID != "sess_1" {
-		t.Errorf("SessionID = %q, want sess_1", ev.SessionID)
+	result := events[1]
+	if result.Type != "result" {
+		t.Errorf("events[1].Type = %q, want result", result.Type)
+	}
+	if result.Result != "final answer" {
+		t.Errorf("result.Result = %q, want 'final answer' (still rides on the wire for SendResult.Text)", result.Result)
+	}
+	if result.SessionID != "sess_1" {
+		t.Errorf("result.SessionID = %q, want sess_1", result.SessionID)
 	}
 	// textBuf should be cleared
 	if p.textBuf.Len() != 0 {
@@ -659,7 +707,7 @@ func TestACPProtocol_ReadEvent_PermissionRequest(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
 	line := `{"jsonrpc":"2.0","id":7,"method":"session/request_permission","params":{"sessionId":"s1","options":[{"optionId":"allow_once","kind":"allow_once"}]}}`
-	ev, done, err := p.ReadEvent(line)
+	ev, done, err := readOne(t, p, line)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -684,7 +732,7 @@ func TestACPProtocol_ReadEvent_PermissionRequest_StringID(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
 	line := `{"jsonrpc":"2.0","id":"82017692-c404-42d1-9334-ae28dfda0cee","method":"session/request_permission","params":{"sessionId":"s1","options":[{"optionId":"allow_once","kind":"allow_once"}]}}`
-	ev, _, err := p.ReadEvent(line)
+	ev, _, err := readOne(t, p, line)
 	if err != nil {
 		t.Fatalf("kiro UUID id should not fail unmarshal, got: %v", err)
 	}
@@ -909,7 +957,7 @@ func TestACPProtocol_ReadEvent_KiroMetadata_FullPayload(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
 	line := `{"jsonrpc":"2.0","method":"_kiro.dev/metadata","params":{"sessionId":"s1","contextUsagePercentage":0.0285,"turnDurationMs":2000,"meteringUsage":[{"value":0.024,"unit":"credit","unitPlural":"credits"}]}}`
-	ev, done, err := p.ReadEvent(line)
+	ev, done, err := readOne(t, p, line)
 	if err != nil {
 		t.Fatalf("ReadEvent: %v", err)
 	}
@@ -949,7 +997,7 @@ func TestACPProtocol_ReadEvent_KiroMetadata_MissingFields(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
 	line := `{"jsonrpc":"2.0","method":"_kiro.dev/metadata","params":{"sessionId":"s1","contextUsagePercentage":0.5}}`
-	ev, _, err := p.ReadEvent(line)
+	ev, _, err := readOne(t, p, line)
 	if err != nil {
 		t.Fatalf("ReadEvent: %v", err)
 	}
@@ -1013,7 +1061,7 @@ func TestACPProtocol_ReadEvent_KiroMetadata_SchemaDriftSwallowed(t *testing.T) {
 	p := &ACPProtocol{}
 	// params is an array instead of an object — clearly a schema drift.
 	line := `{"jsonrpc":"2.0","method":"_kiro.dev/metadata","params":[1,2,3]}`
-	ev, done, err := p.ReadEvent(line)
+	ev, done, err := readOne(t, p, line)
 	if err != nil {
 		t.Errorf("schema drift should not surface as readLoop error, got %v", err)
 	}
@@ -1122,7 +1170,7 @@ func TestACPProtocol_ReadEvent_ErrorResponse(t *testing.T) {
 	p.mu.Unlock()
 
 	line := `{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"model overloaded"}}`
-	_, done, err := p.ReadEvent(line)
+	_, done, err := readOne(t, p, line)
 	if !done {
 		t.Error("error response MUST be done=true so the turn unblocks state=running")
 	}

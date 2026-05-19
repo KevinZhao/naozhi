@@ -363,29 +363,39 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 				if replay.Type != "replay" {
 					continue
 				}
-				ev, _, err := recWrapper.Protocol.ReadEvent(replay.Line)
-				if err != nil || ev.Type != "system" || ev.SubType != "task_started" {
+				events, _, err := recWrapper.Protocol.ReadEvent(replay.Line)
+				if err != nil || len(events) == 0 {
 					continue
 				}
-				if ev.TaskID == "" || ev.ToolUseID == "" {
-					continue
+				// Replay frames map 1:1 to a single semantic event in
+				// practice (the multi-event ACP turn-end response is not
+				// captured as a replay), but iterating the slice keeps the
+				// linker resilient if a future protocol fans out from one
+				// frame.
+				for _, ev := range events {
+					if ev.Type != "system" || ev.SubType != "task_started" {
+						continue
+					}
+					if ev.TaskID == "" || ev.ToolUseID == "" {
+						continue
+					}
+					// Skip local_bash — no internal transcript on disk.
+					if ev.TaskType == "local_bash" {
+						continue
+					}
+					if _, dup := seen[ev.TaskID]; dup {
+						continue
+					}
+					seen[ev.TaskID] = struct{}{}
+					name := strings.TrimSpace(ev.Description)
+					if i := strings.IndexByte(name, ':'); i > 0 {
+						name = strings.TrimSpace(name[:i])
+					}
+					taskID, toolUseID := ev.TaskID, ev.ToolUseID
+					desc := ev.Description
+					wallclock := time.Now().UnixMilli()
+					go linker.Resolve(taskID, toolUseID, name, desc, wallclock)
 				}
-				// Skip local_bash — no internal transcript on disk.
-				if ev.TaskType == "local_bash" {
-					continue
-				}
-				if _, dup := seen[ev.TaskID]; dup {
-					continue
-				}
-				seen[ev.TaskID] = struct{}{}
-				name := strings.TrimSpace(ev.Description)
-				if i := strings.IndexByte(name, ':'); i > 0 {
-					name = strings.TrimSpace(name[:i])
-				}
-				taskID, toolUseID := ev.TaskID, ev.ToolUseID
-				desc := ev.Description
-				wallclock := time.Now().UnixMilli()
-				go linker.Resolve(taskID, toolUseID, name, desc, wallclock)
 			}
 		}
 

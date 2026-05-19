@@ -169,20 +169,20 @@ func (p *ClaudeProtocol) WriteInterrupt(w io.Writer, requestID string) error {
 	return nil
 }
 
-func (p *ClaudeProtocol) ReadEvent(line string) (Event, bool, error) {
+func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	var ev Event
 	if err := json.Unmarshal([]byte(line), &ev); err != nil {
-		return Event{}, false, err
+		return nil, false, err
 	}
 	// Skip hook events
 	if ev.Type == "system" && (ev.SubType == "hook_started" || ev.SubType == "hook_response") {
-		return Event{}, false, nil
+		return nil, false, nil
 	}
 	// Skip control_response — it's a protocol-level ack for our own
 	// control_request (interrupt) and carries no user-visible payload.
 	// Forwarding it would confuse logEvent / EventEntriesFromEvent.
 	if ev.Type == "control_response" {
-		return Event{}, false, nil
+		return nil, false, nil
 	}
 	// AskUserQuestion surfacing: in `claude -p` (headless) mode the CLI
 	// auto-injects an is_error:true tool_result ~3ms after the tool_use,
@@ -197,7 +197,7 @@ func (p *ClaudeProtocol) ReadEvent(line string) (Event, bool, error) {
 			ev.AskQuestion = aq
 		}
 	}
-	return ev, ev.Type == "result", nil
+	return []Event{ev}, ev.Type == "result", nil
 }
 
 // askUserQuestionInput matches the `input` field of an AskUserQuestion tool_use
