@@ -1,7 +1,10 @@
 bin/
 dist/
 *.exe
-.claude/
+# .claude/ contents are local except for project-scoped skills which are
+# versioned alongside the code (see .claude/skills/dev-workflow).
+.claude/*
+!.claude/skills/
 .naozhi/
 sdk-test/
 /tmp/
