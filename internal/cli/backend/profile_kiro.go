@@ -11,9 +11,9 @@ import (
 // ACPProtocol per session. ProtocolDeps.SettingsFile / RefreshSettings are
 // ignored — ACP does not honor a claude-style settings override.
 //
-// RequiredNodeCaps lists "acp" so that reverse-node routing (Sprint 1b) can
-// reject hosts that do not advertise ACP support before attempting a kiro
-// session there.
+// RequiredNodeCaps lists "acp" so that reverse-node routing (per
+// internal/server/select_node_for_backend.go) can reject hosts that do not
+// advertise ACP support before attempting a kiro session there.
 func kiroProfile() Profile {
 	return Profile{
 		ID:            "kiro",
@@ -22,7 +22,7 @@ func kiroProfile() Profile {
 		DefaultTag:    "kiro",
 		ChipColor:     "#ff7a3a", // saturation orange — distinct from claude purple
 		NewProtocol: func(_ ProtocolDeps) cli.Protocol {
-			// Multi-Backend RFC §10 (Sprint 6a): seed BackendID so the
+			// Per Multi-Backend RFC §10: seed BackendID so the
 			// per-backend metric labels recorded by ReadEvent (RPC error)
 			// and WriteInterrupt (cancel) are populated correctly.
 			return &cli.ACPProtocol{BackendID: "kiro"}

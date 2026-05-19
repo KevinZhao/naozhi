@@ -25,6 +25,13 @@ const (
 	// paths. Kept below maxUploadPerOwner so a full batch can still be
 	// accompanied by an in-flight retry without tripping the per-owner quota.
 	maxFilesPerSend = 20
+	// errTooManyFiles is the user-facing error returned by every code path
+	// that tripped maxFilesPerSend. Pre-built as a compile-time constant so
+	// the hot error path skips fmt.Sprintf reflection (R224-PERF-5). The
+	// build assertion below this const block pins this literal to
+	// maxFilesPerSend; flip the cap without updating the message and the
+	// build fails.
+	errTooManyFiles = "too many files (max 20)"
 	// maxUploadBytesPerOwner bounds the sum of live entry payload sizes
 	// per owner. Added when PDFs joined the upload path: with images alone
 	// the 10 MB * 40 entries = 400 MB per-owner worst case was tolerable;
@@ -40,6 +47,11 @@ const (
 	// accommodates realistic bursts while preventing runaway growth.
 	maxUploadBytesGlobal = 512 * 1024 * 1024 // 512 MB
 )
+
+// _ pins errTooManyFiles literal "20" to maxFilesPerSend at compile time.
+// If maxFilesPerSend changes without updating the literal in errTooManyFiles
+// (and its three call sites' tests), this assertion fails to compile.
+var _ = [1]struct{}{}[20-maxFilesPerSend]
 
 type uploadEntry struct {
 	Image   cli.ImageData

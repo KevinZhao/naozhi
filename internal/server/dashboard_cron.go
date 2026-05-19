@@ -351,8 +351,8 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		// 折叠态做 hover-tooltip 状态气泡。空 = 此 job 尚无持久化历史
 		// （新建 / 历史已被 GC 清空 / StorePath 为空）。
 		RecentRuns []runSummaryView `json:"recent_runs,omitempty"`
-		// Backend: Sprint 6c (docs/rfc/multi-backend.md §9). "" 表示
-		// 跟随 router default；前端编辑器据此回填 backend 下拉选项。
+		// Backend: per docs/rfc/multi-backend.md §9 cron RPC contract. ""
+		// 表示跟随 router default；前端编辑器据此回填 backend 下拉选项。
 		Backend string `json:"backend,omitempty"`
 	}
 	views := make([]cronJobView, 0, len(jobs))
@@ -483,8 +483,8 @@ func (h *CronHandlers) handleCreate(w http.ResponseWriter, r *http.Request) {
 		Notify         *bool  `json:"notify,omitempty"`
 		FreshContext   bool   `json:"fresh_context,omitempty"`
 		// Backend pins the CLI backend for this job ("" = router default).
-		// Sprint 6c (docs/rfc/multi-backend.md §9). Validated by
-		// validateCronBackend to match the send.go shape contract.
+		// Per docs/rfc/multi-backend.md §9 cron RPC contract. Validated
+		// by validateCronBackend to match the send.go shape contract.
 		Backend string `json:"backend,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16) // 64 KB
@@ -868,7 +868,7 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 		FreshContext   *bool   `json:"fresh_context,omitempty"`
 		// Backend pointer keeps "" semantics distinct from "leave alone":
 		// nil omits, pointer-to-"" clears the override (router default),
-		// pointer to a non-empty string sets it. Sprint 6c.
+		// pointer to a non-empty string sets it.
 		Backend *string `json:"backend,omitempty"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<16)
