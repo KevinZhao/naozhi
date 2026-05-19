@@ -21,8 +21,11 @@ import (
 )
 
 // EventEntryFromEvent converts an Event to a single EventEntry.
-// Deprecated for multi-block assistant events — use EventEntriesFromEvent.
-// Kept for callers that only need the first entry (or non-assistant events).
+//
+// Deprecated: use EventEntriesFromEvent — for multi-block assistant events
+// (thinking + tool_use + text) this helper silently drops every block after
+// the first. Kept only because process_extra_test.go pins the legacy single-
+// entry shape; new callers must use EventEntriesFromEvent.
 func EventEntryFromEvent(ev Event) (EventEntry, bool) {
 	entries := EventEntriesFromEvent(ev)
 	if len(entries) == 0 {
