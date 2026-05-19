@@ -237,7 +237,7 @@
 - [ ] **R225-SEC-2 — `shim.moveToShimsCgroup` 不验 CLIPID 是否真的是 shim 子进程（P1 R219-SEC-5 重申）**: handle.Hello.CLIPID 来自 shim 自报，naozhi 直接 sudo busctl 把任意 PID 移入 cgroup（可能是 sshd / pid=1）。方案：读 `/proc/<CLIPID>/status` 验 PPid == cmd.Process.Pid。
 - [ ] **R225-SEC-3 — `selfupdate.Replace` 固定 `.staging/.bak` 路径多用户竞争（P2 R224-SEC-1 第③项）**: 固定路径在多用户共享 install dir 下可被另一 UID 抢先创建。方案：`os.CreateTemp(filepath.Dir(installPath), ".naozhi-upgrade-*.staging")` rename 到位。
 - [ ] **R225-SEC-4 — `selfupdate.checksums.txt` 未做 GPG/cosign 签名验证（P3 R224-SEC-1 第④项长期）**: GitHub Releases CDN 同时被妥协时 hash 与 binary 都可被换。方案：release 流程对 checksums.txt cosign 签名 + verifyChecksum 前置签名校验。
-- [ ] **R225-SEC-5 — `dashboard project_files preview` 允许 `.env` 走 text/plain 预览（P3）**: previewableByExt 把 `.env` 映为 text/plain；认证用户可 `?path=.env&mode=preview` 预览敏感配置。方案：servePreview 拒高风险文件名（`.env`/`*.key`/`*.pem`），或在文档明示这是预期。
+- [x] **R225-SEC-5 — `dashboard project_files preview` 允许 `.env` 走 text/plain 预览（P3）**: previewableByExt 把 `.env` 映为 text/plain；认证用户可 `?path=.env&mode=preview` 预览敏感配置。方案：servePreview 拒高风险文件名（`.env`/`*.key`/`*.pem`），或在文档明示这是预期。 — 已修复（previewableByExt 移除 .env 条目；落到 DetectContentType → application/octet-stream 被 servePreview MIME 守卫拒；新增 TestPreviewableByExt_DoesNotIncludeDotEnv 锁契约），本批 PR #150
 - [ ] **R225-SEC-6 — `EffectivePlannerPrompt` 的 byte 循环不调 `osutil.IsLogInjectionRune`（P3）**: project/manager.go:344 全局默认 prompt 路径只过滤 C0 字节，bidi override 字符可绕过。方案：在过滤循环之后加 rune 扫描调 IsLogInjectionRune（与 ValidateConfig 对齐）。
 
 ### 性能 — 本轮新发现
@@ -268,12 +268,12 @@
 - [ ] **R225-CR-3 — `Caps.SoftInterrupt=true` 与 `WriteInterrupt` 返回 `ErrInterruptUnsupported` 语义矛盾（P1）**: protocol_acp.go:288-291 / protocol.go:86 doc string 与代码冲突；R224-ARCH-7 同源。方案：对齐语义——pre-handshake 返回 false 而非 error，或 SoftInterrupt 字段语义改为"握手完成后支持"。
 - [ ] **R225-CR-4 — `costUnitForBackend` 硬编码 switch 与 `backend.Profile` 无编译期约束（P2）**: managed.go:1400-1408 注释明示需要双改。方案：`backend.Profile.CostUnit` 字段，profile_claude/profile_kiro 各自填，session 调 `backend.MustGet(id).CostUnit`。R224-ARCH-1 同源。
 - [ ] **R225-CR-5 — `backendDisplayName / normalizeBackendID` 与 `backend.Profile.DisplayName/ID` 重复（P2 R224-ARCH-1 同源）**: cli/wrapper.go:75-95；新加 backend 改四处。方案：合并到 `backend.Get` 的 DisplayName/ID 字段。
-- [ ] **R225-CR-6 — `protocol_acp.go:585` TODO 锚点拼写不存在（P3）**: TODO 引 `R222-OBS-MULTIBACKEND-CODE`，TODO.md 实际是 `R222-OBS-MULTIBACKEND-LEGACY`。方案：补条目或更名注释。
+- [x] **R225-CR-6 — `protocol_acp.go:585` TODO 锚点拼写不存在（P3）**: TODO 引 `R222-OBS-MULTIBACKEND-CODE`，TODO.md 实际是 `R222-OBS-MULTIBACKEND-LEGACY`。方案：补条目或更名注释。 — 已修复（注释从 R222-OBS-MULTIBACKEND-CODE 更名为 R222-OBS-MULTIBACKEND-LEGACY 与 R224-CR-4 引入的真实锚点对齐），本批 PR #150
 - [ ] **R225-CR-7 — `BackendInfo.Features` 在 DetectBackendsCtx 不填、由 dashboard handler 二次注入（P3）**: detect.go：未来调用方直接读会拿到 nil map。方案：godoc 显式标注"dashboard-only 字段"或 DetectBackendsCtx 内填。
 - [ ] **R225-CR-8 — `Snapshot.Model` 注释未提 ACP 路径填空 / spawn-time 值（P3 与 R225-ACP-MODEL-INIT 关联）**: managed.go:850 注释暗示总是准确，但 ACP `session/new` 返回的 currentModelId 当前未回填。方案：注释补"ACP 在 Init 阶段才得到真实 model"。
 - [ ] **R225-CR-9 — `normalizeBackendID` default 分支不验注册 ID（P3）**: 未注册 backend 字符串能直通到 wrapper.BackendID，错误延后到 spawn 期。方案：default 分支调 `backend.Get` 失败 slog.Warn 或 NewWrapper fail-fast。
 - [ ] **R225-CR-10 — `cli.Resolve` 路径长字符串（ev.Description）被 closure 长时间持有（P3）**: process_readloop.go:393 max 8 个 Resolve goroutine 并发持有数 KB 字符串到 sem 释放。方案：调用前 `textutil.TruncateRunes(desc, 2000)`。
-- [ ] **R225-CR-11 — `backend/profile.reset` 注释声称外部测试反射调用但 unexported 反射不可达（P3）**: profile.go:239 staticcheck U1000 未用；`cron.freshContextPreflight` 同款。方案：移到 *_test.go + 改 `resetForTest` 或 `//go:build testing`。
+- [x] **R225-CR-11 — `backend/profile.reset` 注释声称外部测试反射调用但 unexported 反射不可达（P3）**: profile.go:239 staticcheck U1000 未用；`cron.freshContextPreflight` 同款。方案：移到 *_test.go + 改 `resetForTest` 或 `//go:build testing`。 — 已修复（reset 在源码 + _test.go 内 0 调用者，测试已通过 withCleanRegistry helper 完整覆盖；删函数 + 同步 defaultsOnce 注释指向 withCleanRegistry。cron.freshContextPreflight 是另一根因，留作单独条目），本批 PR #150
 - [ ] **R225-CR-12 — `spawnSession` 函数注释承诺"持锁"但内部多次 Unlock/Lock（P2）**: router_lifecycle.go:506 让未来维护者误加嵌套调用导致死锁。方案：注释精确化 + LOCK: 批注，或重构锁生命周期由调用方负责。
 - [ ] **R225-CR-13 — `readLoop` passthrough 无主 result fall-through 触发 Warn 日志（P2）**: process_readloop.go:306 `eventCh full, dropped result` 在正常路径会误报。方案：fall-through 前加 `if !p.caps.Replay` 守卫或日志降到 Debug。
 
@@ -322,8 +322,8 @@
 
 ### 代码质量 — 本轮新发现
 
-- [ ] **R224-CR-1 — `R220-SEC-3` (gzipMiddleware 解压请求体 → 跳过 MaxBytesReader) 是误报，应关闭（P1）**: gzipMiddleware 仅包响应 ResponseWriter，从不读 r.Body 也不解压；MaxBytesReader 与之独立。该 TODO 描述的漏洞不存在，应在 TODO.md 关闭并把 R217-SEC-3 同源条目一并关闭。本批 PR 已加 godoc 注释 "response-side only" 防止再误读。
-- [ ] **R224-CR-2 — `R218B-GO-2` (panic handler 用 Background ctx 会挂起) 是误报，应关闭（P2）**: `dispatch.go:518` 已是 `context.WithTimeout(context.Background(), 15s)`，无法挂起；该函数必须有意从 parent ctx detach（parent 在 shutdown 已 cancel），才能给用户回 panic 错误。R218B-GO-2 / R217-GO-2 应关闭。
+- [x] **R224-CR-1 — `R220-SEC-3` (gzipMiddleware 解压请求体 → 跳过 MaxBytesReader) 是误报，应关闭（P1）**: gzipMiddleware 仅包响应 ResponseWriter，从不读 r.Body 也不解压；MaxBytesReader 与之独立。该 TODO 描述的漏洞不存在，应在 TODO.md 关闭并把 R217-SEC-3 同源条目一并关闭。本批 PR 已加 godoc 注释 "response-side only" 防止再误读。 — 已关闭（gzip.go:139-147 godoc 已明示 response-side only；同步关闭 R220-SEC-3 / R217-SEC-3），本批 PR #150
+- [x] **R224-CR-2 — `R218B-GO-2` (panic handler 用 Background ctx 会挂起) 是误报，应关闭（P2）**: `dispatch.go:518` 已是 `context.WithTimeout(context.Background(), 15s)`，无法挂起；该函数必须有意从 parent ctx detach（parent 在 shutdown 已 cancel），才能给用户回 panic 错误。R218B-GO-2 / R217-GO-2 应关闭。 — 已关闭（dispatch.go:518 已锁 15s 上限；同步关闭 R218B-GO-2 / R217-GO-2 同源条目），本批 PR #150
 - [x] **R224-CR-3 — `EventEntryFromEvent` Deprecated godoc 写错（P3）**: `process_event_format.go:23` 注释带 `Deprecated` 字面但不是 gopls 识别的 `// Deprecated:` 行格式（缺冒号），strike-through 不会触发。方案：改成标准 `// Deprecated: use EventEntriesFromEvent.`。注：函数仍被 process_extra_test.go 锁定行为，**不能删**，仅修注释。 — 已修复，本批 PR #141
 - [x] **R224-CR-4 — `metrics/multibackend.go` 4-week 双写迁移 `R222-OBS-MULTIBACKEND-LEGACY` 锚点是死引用（P2）**: 文件头部说 "see TODO marker R222-OBS-MULTIBACKEND-LEGACY" 但 TODO.md 中无此锚点。方案：补上具体条目（列出 legacy expvar.Int 名单 + 移除前提"ops dashboards 全部迁到 labeled counter 后 4 周")。 — 已修复（multibackend.go 文件头注释改为自描述：列出 2 个 legacy mirror（CLISpawnTotal / SessionActive）+ 2 条移除前提（dashboards 全迁 + ≥4 周 production soak），跟踪锚点改为 R-METRICS-LEGACY-EXPVAR），本批 PR #141
 - [ ] **R224-CR-5 — `server.New` deprecated wrapper 无移除条件（P2）**: `server.go:457` Deprecated 自 Round 214 起停摆，0 生产调用，~20 test call sites 阻塞。方案：① Deprecated godoc 加显式移除条件 "remove once all *_test.go migrated"；② 或关闭 R214-CODE-4 标 "won't fix — low-value churn"。
@@ -453,7 +453,7 @@
 
 - [x] **R220-SEC-1 — `shimEnvAllowedPrefixes` 通配 `GIT_` 前缀转发 `GIT_PROXY_COMMAND`/`GIT_SSH_COMMAND`/`GIT_EXEC_PATH` 到 CLI 子进程（P3）**: 这三类 git env 设置 git 执行外部命令的路径，宿主环境若被毒化即可让 Bash tool 通过 `git clone` 触达 RCE。方案：`shimEnvAllowedPrefixes` 把 `"GIT_"` 拆成显式列表（`GIT_AUTHOR_NAME=`, `GIT_COMMITTER_NAME=`, `GIT_AUTHOR_EMAIL=`, `GIT_COMMITTER_EMAIL=`, `GIT_CONFIG_GLOBAL=`），排除 PROXY/SSH/EXEC_PATH。涉及：`internal/shim/manager.go:892`。 — 已修复（拆 8 项显式 allowlist：AUTHOR/COMMITTER NAME+EMAIL、CONFIG_GLOBAL/SYSTEM、DIR/WORK_TREE），本批 PR #90
 - [x] **R220-SEC-2 — `dashboardToken == ""` 短路出现在 `ConstantTimeCompare` 之后造成时序信道（P3）**: login handler 在 ConstantTimeCompare 后再判 `if a.dashboardToken == "" || !matched`，`||` 短路使"未配 token"路径比"配置但 token 错"路径快，远端可经时序区分两态。方案：启动期 `if cfg.DashboardToken == "" { return all-allowed handler }` 把 nil-token 旁路抽到 mux 装配阶段。涉及：`internal/server/dashboard_auth.go:282`。 — 已修复（位运算 matched & configured 强制两侧求值消除 `||` 短路 + 4 case 表驱动测试锁三档拒绝行为），本批 PR #90
-- [ ] **R220-SEC-3 — `gzipMiddleware` 在 `MaxBytesReader` 之前解压，gzip-bomb 可绕过 per-handler body cap（P2）**: gzip 中间件包裹整个 mux，每个 handler 调 `MaxBytesReader` 但只限制压缩字节；1KB gzip → 解压可达 GB 级。方案：在 gzipResponseWriter 内部对解压输出再套 io.LimitReader（cap 设为 2× MaxBytesReader 上界）。涉及：`internal/server/server.go:735`。
+- [x] **R220-SEC-3 — `gzipMiddleware` 在 `MaxBytesReader` 之前解压，gzip-bomb 可绕过 per-handler body cap（P2）**: gzip 中间件包裹整个 mux，每个 handler 调 `MaxBytesReader` 但只限制压缩字节；1KB gzip → 解压可达 GB 级。方案：在 gzipResponseWriter 内部对解压输出再套 io.LimitReader（cap 设为 2× MaxBytesReader 上界）。涉及：`internal/server/server.go:735`。 — 已确认是误报关闭（gzipMiddleware 实际是 response-side only：`gzip.go:139-166` 只包 ResponseWriter 的输出做 gzip 压缩，从不读 r.Body / 不调用 gzip.NewReader 解压请求体；`gzipResponseWriter.decide()` 也仅基于响应 Content-Type 做条件压缩。请求体 gzip-bomb 是 request-parsing path 独立担忧，与本中间件正交，gzip.go:144-147 godoc 已明示。R217-SEC-3 / R224-CR-1 同根因，一并关闭）。
 
 ### Go 正确性 — 跨包改动
 
@@ -485,7 +485,7 @@
 
 - [ ] **R218-GO-2 — `dispatch.go:969-1002` sendAskQuestionCard goroutine 访问可能已释放的 tracker**: stop() 先执行后该 goroutine 仍对已释放 platform 进行类型断言。建议：加 context timeout 或在 stop() 里主动取消待发送卡片 goroutine。`internal/dispatch/dispatch.go:969-1002`。
 - [x] **R218B-GO-1 — `discoveryCache.startLoop` 初始 `go dc.refresh()` 无 WaitGroup 追踪（P2）**: `startLoop` 启动一个裸 goroutine 做初始 refresh，Server Shutdown 取消 ctx 后该 goroutine 仍在后台运行，可能访问已清理的 projectMgr。方案：给 `discoveryCache` 添加 `wg sync.WaitGroup`，`startLoop` 前 `wg.Add(1)` + defer Done，暴露 `Wait()` 供 Server.Shutdown 调用。涉及：`internal/server/discovery_cache.go:47-60`, `internal/server/server.go` Shutdown 路径。 — 已修复，见 PR #68
-- [ ] **R218B-GO-2 — `handleOwnerLoopPanic` 用 `context.Background()` 向用户回送错误（P1 重申 R217-GO-2）**: recovery handler 创建 Background ctx 通知用户，若 appCtx 已取消（shutdown 期间）会挂起。方案：接受 parentCtx 参数或用 `context.WithTimeout(context.Background(), 5*time.Second)`。涉及：`internal/dispatch/dispatch.go:510`。
+- [x] **R218B-GO-2 — `handleOwnerLoopPanic` 用 `context.Background()` 向用户回送错误（P1 重申 R217-GO-2）**: recovery handler 创建 Background ctx 通知用户，若 appCtx 已取消（shutdown 期间）会挂起。方案：接受 parentCtx 参数或用 `context.WithTimeout(context.Background(), 5*time.Second)`。涉及：`internal/dispatch/dispatch.go:510`。 — 误报关闭（dispatch.go:518 已是 `context.WithTimeout(context.Background(), 15*time.Second)`，挂起不存在；从 parent ctx detach 是有意设计，shutdown 期间 parent 已 cancel 时仍能给用户回 panic 错误。R224-CR-2 同根因），本批 PR #150
 - [ ] **R218B-GO-3 — `readLoop` linker.Resolve goroutine 无 context 绑定（P1）**: `go linker.Resolve(taskID, toolUseID, ...)` 启动时无 cancellation。进程 shutdown 后 Resolve 可能继续访问磁盘。方案：`linker.Resolve` 接受 ctx 参数，绑定到 process 生命周期。涉及：`internal/cli/process_readloop.go:324`，`internal/cli/subagent_link.go`。Breaking：是（接口变更）。
 
 ### 安全 — 新发现（非重复）
@@ -519,7 +519,7 @@
 
 - [ ] **R217-SEC-1 — `AgentOpts.ExtraArgs` 缺 flag allowlist（重申 R216-SEC-2）**: dashboard agent 编辑用户可在 `agents.*.args` 写入 `--mcp-config /host/secret` / `--append-system-prompt` 加载任意配置。配置层 `validateArgvStrings` 仅拒控制字节、不限制 flag 名。方案：`BuildArgs` 调用前对每元素 allowlist（`--model` / `--add-dir` / `--max-turns` / `--append-system-prompt`），或在 `validateConfig` 阶段明确允许的 flag 集合。**Breaking**：需要枚举所有现存 backend args 配置。涉及：`internal/cli/protocol_claude.go:56`、`internal/session/router.go:1959`。
 - [ ] **R217-SEC-2 — 远端 node workspace 仅做语法校验（重申 R61-SEC-2 设计）**: `dashboard_send.go:773 validateRemoteWorkspace` 仅 path-shape 检查，不调 EvalSymlinks（远端 root 在另一台机器无法本地 resolve）。当前注释承认这是设计意图。后续要做 cross-node trust：要么强制远端节点本地 EvalSymlinks 并回传校验结果，要么 dashboard 把 workspace allowlist 配在主节点。
-- [ ] **R217-SEC-3 — gzip 解压链路潜在 bomb 风险**: `internal/server/gzip.go` `gzip.NewReader` 解压无大小上限。当前 `MaxBytesReader` 是压缩字节级，若未来某 path 在 gzip middleware 之后才设 cap，会留下 bomb 窗口。方案：`io.LimitReader` 包装 gzip reader 输出，按 per-handler body cap。需先核实 gzip middleware 实际是否在 MaxBytesReader 之前。
+- [x] **R217-SEC-3 — gzip 解压链路潜在 bomb 风险**: `internal/server/gzip.go` `gzip.NewReader` 解压无大小上限。当前 `MaxBytesReader` 是压缩字节级，若未来某 path 在 gzip middleware 之后才设 cap，会留下 bomb 窗口。方案：`io.LimitReader` 包装 gzip reader 输出，按 per-handler body cap。需先核实 gzip middleware 实际是否在 MaxBytesReader 之前。 — 误报关闭（与 R220-SEC-3 / R224-CR-1 同根因：gzipMiddleware 是 response-side only，从不调 gzip.NewReader 解压请求体；gzip.go:139-147 godoc 已明示。本批 PR #150 同步关闭三处）。
 - [ ] **R217-SEC-4 — `gogo/protobuf v1.3.2` CVE-2021-3121（间接依赖）**: aws-sdk-go-v2 间接依赖。naozhi 不直接调用，但为消除告警可 `go get github.com/gogo/protobuf@latest` 或在 go.mod 加 replace。
 - [ ] **R217-SEC-5 — `golang.org/x/crypto v0.49.0` 偏旧（约 10 个月）**: 无已知 critical CVE 但建议跟随 toolchain 升级。
 - [ ] **R217-SEC-6 — `dashboardToken` 轮转无显式 session 失效机制**: 当前依赖 cookieMAC(secret, dashboardToken)，token 改后旧 cookie 自然失效，但需要 process restart。增设 server-side session generation counter 才能不重启即时撤销。Breaking：需要持久化 generation 状态。
@@ -529,7 +529,7 @@
 ### Go 正确性 — 跨包改动 / 需 ctx 传递
 
 - [ ] **R217-GO-1 — `Guard.lastWait` 在不发起 Release 的路径下永久泄漏**: 现状 ShouldSendWait 写 + Release 删；不调 Release 的 path 留下永久 entry。方案：sync.Map+TTL sweep（如 seenNonces），或显式 cap+LRU。
-- [ ] **R217-GO-2 — `handleOwnerLoopPanic` 用 `context.Background()`**: 当前签名不收 ctx，要改成 `(ctx, key, msg, r)` 影响测试与 owner-loop 路径。Breaking：函数签名变化。
+- [x] **R217-GO-2 — `handleOwnerLoopPanic` 用 `context.Background()`**: 当前签名不收 ctx，要改成 `(ctx, key, msg, r)` 影响测试与 owner-loop 路径。Breaking：函数签名变化。 — 误报关闭（与 R218B-GO-2 / R224-CR-2 同根因：dispatch.go:518 已 WithTimeout 15s，从 parent ctx detach 是 panic recovery 的有意设计），本批 PR #150
 - [ ] **R217-GO-3 — `historyCtx` 派生自 `context.Background()` 而非 app ctx（重申 R216-GO-4）**: 异常退出路径下 historyWg goroutine 不被取消。需 NewRouter 收 appCtx（构造函数签名变化）。
 - [ ] **R217-GO-4 — `spliceLog` 每 record `json.Unmarshal` 取已知 seq**: 重新解码 record body 只为读 seq；可由 idxEntries 索引位置直接拿。改动需谨慎（保证 seq 不被外部恶意改）。
 - [ ] **R217-GO-5 — `cron.Stop()` deadline 后泄漏 triggerWG goroutine（R44 重申）**: 单 shot 设计可接受；测试 -count=N 污染。长期需重构 triggerWG/Stop 协议。

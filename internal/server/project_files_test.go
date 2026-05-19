@@ -174,6 +174,18 @@ func TestMimeFromExtOnly(t *testing.T) {
 	}
 }
 
+// TestPreviewableByExt_DoesNotIncludeDotEnv locks R225-SEC-5: .env files
+// must NOT be in the previewableByExt allowlist. Mapping .env → text/plain
+// would let any authenticated dashboard user fetch ?path=.env&mode=preview
+// and have API keys / database URLs / OAuth secrets echoed back as JSON.
+// Falling through to DetectContentType gives application/octet-stream which
+// servePreview's MIME guard rejects.
+func TestPreviewableByExt_DoesNotIncludeDotEnv(t *testing.T) {
+	if mime, ok := previewableByExt[".env"]; ok {
+		t.Errorf("previewableByExt[%q] = %q, must NOT be in allowlist (R225-SEC-5)", ".env", mime)
+	}
+}
+
 func TestIsTextMime(t *testing.T) {
 	if !isTextMime("text/plain; charset=utf-8") {
 		t.Error("text/plain should be text")
