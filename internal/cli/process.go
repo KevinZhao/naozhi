@@ -436,7 +436,18 @@ func newShimProcess(conn net.Conn, reader *bufio.Reader, writer *bufio.Writer,
 		noOutputTimeout: noOutputTimeout,
 		totalTimeout:    totalTimeout,
 		eventLog:        NewEventLog(0),
-		pongRecv:        make(chan struct{}, 1),
+		// pongRecv buffers up to maxMisses+1 pongs so that a long GC pause or
+		// scheduler stall in heartbeatLoop does not drop pongs that arrive
+		// while no goroutine is selecting on the channel. Capacity 1 was
+		// fragile: the readLoop's "pong" arm uses a non-blocking send (drop
+		// on full), and a back-to-back pair of pongs queued during a stall
+		// would lose the second, causing heartbeatLoop to miscount as a
+		// pong-miss on the next ping cycle even though the shim was healthy.
+		// maxMisses (process_readloop.go:621) is the threshold for declaring
+		// the shim dead; sizing buffer at maxMisses+1 means even a stall
+		// spanning every miss in the budget cannot drop a pong before the
+		// receiver wakes up. R225-GO-6.
+		pongRecv: make(chan struct{}, 4),
 	}
 	p.stdinWriter = &shimWriter{p: p}
 	return p

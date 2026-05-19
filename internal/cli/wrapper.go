@@ -57,8 +57,24 @@ func NewWrapper(cliPath string, proto Protocol, backend string) *Wrapper {
 		cliPath = detectCLI(backend)
 	}
 	cliPath = osutil.ExpandHome(cliPath)
+	id := normalizeBackendID(backend)
+	// R225-CR-9: surface unrecognised backend ids early. normalizeBackendID
+	// passes through anything that is not empty/"claude" verbatim, so an
+	// operator typo like "claud" or a config from an in-progress
+	// not-yet-registered backend would silently flow through to the spawn
+	// path where the failure is delayed and harder to attribute. The
+	// checked set mirrors detect.go's knownBackends — adding a backend
+	// requires a single edit to that var, which already gates dashboard
+	// detection. Warn-only (not fail-fast) so test fixtures and
+	// experimental backends can still construct a Wrapper without
+	// pre-registering with knownBackends.
+	if !isKnownBackendID(id) {
+		slog.Warn("cli: unknown backend id, may fail at spawn",
+			"backend", osutil.SanitizeForLog(id, 64),
+			"raw", osutil.SanitizeForLog(backend, 64))
+	}
 	w := &Wrapper{
-		BackendID: normalizeBackendID(backend),
+		BackendID: id,
 		CLIPath:   cliPath,
 		CLIName:   backendDisplayName(backend),
 		Protocol:  proto,
@@ -69,6 +85,19 @@ func NewWrapper(cliPath string, proto Protocol, backend string) *Wrapper {
 	// nil is OK: NewHistorySource handles missing registrations.
 	w.historyFactory = pickHistoryFactory(w.BackendID)
 	return w
+}
+
+// isKnownBackendID reports whether id is a backend the cli package knows
+// how to drive. Mirrors the entries in detect.go's knownBackends — the
+// single source of truth for "what backends this cli build supports".
+// R225-CR-9.
+func isKnownBackendID(id string) bool {
+	for _, b := range knownBackends {
+		if b.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 // backendDisplayName maps a backend config value to its user-facing name.
