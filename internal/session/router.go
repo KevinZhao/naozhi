@@ -240,49 +240,75 @@ const (
 // holds r.mu (write) must NEVER acquire sendMu — release r.mu first.
 // s.historyMu protects persistedHistory independently; never held with sendMu or r.mu.
 // Read-only operations (ListSessions, GetSession, Stats, Version) use RLock.
+//
+// Maintenance rule (router-split refactor): every field below carries a
+// `// 读写: <files>` annotation listing which router_*.go files access it.
+// Reviewers MUST block PRs that add a new field without this annotation —
+// the annotation is the only mechanism that keeps fields-vs-methods coupling
+// visible after the file split. See docs/design/router-split-design.md.
 type Router struct {
-	mu           sync.RWMutex
+	// 读写: core (lock primitive itself), all router_*.go (acquired by methods)
+	mu sync.RWMutex
+	// 读写: core, lifecycle, cleanup
 	shutdownCond *sync.Cond // signaled when process state changes; conditioned on mu (write lock)
-	sessions     map[string]*ManagedSession
+	// 读写: core (init), lifecycle (spawn/reset/rename), shim (reconnect), cleanup (remove/cleanup), discovery (takeover/register)
+	sessions map[string]*ManagedSession
 	// sessionsByChat is a secondary index: chat key → session keys.
 	// Enables O(k) ResetChat instead of O(n) full scan (k = agents per chat, typically 1-3).
 	// Nil in test-created routers; all helpers below are nil-safe.
+	// 读写: core (indexAdd/Del helpers), lifecycle (ResetChat/install/unregister), cleanup, discovery
 	sessionsByChat map[string][]string
-	wrapper        *cli.Wrapper            // default (legacy single-backend) wrapper
-	wrappers       map[string]*cli.Wrapper // backend ID → wrapper (nil in legacy mode)
-	defaultBackend string                  // backend ID used when AgentOpts.Backend is empty
+	// 读写: core (init), backend (wrapperFor), lifecycle (spawn)
+	wrapper *cli.Wrapper // default (legacy single-backend) wrapper
+	// 读写: core (init), backend (wrapperFor/managerFor/BackendIDs), lifecycle, shim
+	wrappers map[string]*cli.Wrapper // backend ID → wrapper (nil in legacy mode)
+	// 读写: core (init), backend (DefaultBackend, wrapperFor)
+	defaultBackend string // backend ID used when AgentOpts.Backend is empty
 	// backendIDs caches the dashboard-stable ordering returned by BackendIDs:
 	// default backend first, remaining IDs sorted ascending. wrappers is
 	// constructed once in NewRouter and never mutated, so this slice is
 	// computed once at construction and read-only thereafter — saves a
 	// per-call O(N) sort + 2 small allocations on the dashboard /api/sessions
 	// hot path.
+	// 读写: core (init), backend (BackendIDs)
 	backendIDs []string
-	maxProcs   int
-	ttl        time.Duration
-	pruneTTL   time.Duration
-	model      string
-	extraArgs  []string
+	// 读写: core (init), lifecycle (countActive/evictOldest)
+	maxProcs int
+	// 读写: core (init), cleanup (shouldPrune)
+	ttl time.Duration
+	// 读写: core (init), cleanup (shouldPrune)
+	pruneTTL time.Duration
+	// 读写: core (init), lifecycle (resolveSpawnParams)
+	model string
+	// 读写: core (init), lifecycle (resolveSpawnParams)
+	extraArgs []string
 	// backendModels / backendExtraArgs optionally override model and args
 	// per backend ID. Read-only after NewRouter.
-	backendModels    map[string]string
+	// 读写: core (init), lifecycle (resolveSpawnParams)
+	backendModels map[string]string
+	// 读写: core (init), lifecycle (resolveSpawnParams)
 	backendExtraArgs map[string][]string
-	workspace        string // default cwd for CLI processes
-	claudeDir        string // ~/.claude dir for loading session history
+	// 读写: core (init/DefaultWorkspace), lifecycle (GetWorkspace fallback)
+	workspace string // default cwd for CLI processes
+	// 读写: core (init), lifecycle (attachHistorySource), shim (reconnect)
+	claudeDir string // ~/.claude dir for loading session history
 	// kiroSessionsDir is the kiro session-state root. Plumbed into
 	// cli.HistoryWiring at attachHistorySource time so the kirojsonl
 	// factory can read per-session JSONL from this path. Wired from
 	// RouterConfig.KiroSessionsDir in cmd/naozhi/main.go.
+	// 读写: core (init), lifecycle (attachHistorySource)
 	kiroSessionsDir string
 
 	// workspaceOverrides stores per-chat workspace overrides.
 	// Key format: "platform:chatType:chatID"
+	// 读写: core (init/load), lifecycle (SetWorkspace/GetWorkspace), cleanup (save)
 	workspaceOverrides map[string]string
 
 	// backendOverrides stores per-session backend preferences picked by
 	// the dashboard at session-creation time. Keyed by full session key
 	// (including agent suffix) so two sessions on the same chat can run
 	// against different backends.
+	// 读写: core (init), backend (Set/GetSessionBackend), lifecycle (unregisterSessionLocked)
 	backendOverrides map[string]string
 
 	// activeCount tracks currently alive processes (non-exempt only).
@@ -290,9 +316,11 @@ type Router struct {
 	// read lock-free so the dashboard /api/sessions hot path does not
 	// take a second r.mu RLock right after ListSessions() released one.
 	// R58-PERF-F1.
+	// 读写: core (Stats lock-free read), lifecycle (countActive/evict/install)
 	activeCount atomic.Int64
 
 	// pendingSpawns tracks Spawn() calls in progress (lock released during spawn)
+	// 读写: lifecycle (spawnSession)
 	pendingSpawns int
 
 	// spawningKeys records keys whose spawnSession is in flight. ReconnectShims
@@ -300,40 +328,54 @@ type Router struct {
 	// have written its state file after we dropped r.mu for wrapper.Spawn() but
 	// before the new ManagedSession is installed, and without this set a
 	// concurrent reconcile would shut the fresh shim down as an orphan.
+	// 读写: core (init), lifecycle (spawnSession write), shim (reconnect read)
 	spawningKeys map[string]struct{}
 
-	storePath  string
+	// 读写: core (init), cleanup (saveIfDirty)
+	storePath string
+	// 读写: lifecycle (mutations), cleanup (saveIfDirty consume)
 	storeDirty bool // true when sessions changed since last save
 	// storeGen increments on each mutation. Writes happen under r.mu (write
 	// lock) but atomic.Uint64 also lets Version() read lock-free — the
 	// dashboard polls Version() every few seconds from the /api/sessions
 	// hot path, and the previous RLock layered on top of ListSessions'
 	// RLock made each poll take two contended trips through r.mu.
-	storeGen         atomic.Uint64
-	wsOverridesDirty bool          // true when workspace overrides changed since last save
-	wsOverridesGen   atomic.Uint64 // increments on each ws-override mutation, mirrors storeGen pattern
+	// 读写: core (Version lock-free), lifecycle / cleanup / discovery (BumpVersion)
+	storeGen atomic.Uint64
+	// 读写: lifecycle (SetWorkspace), cleanup (saveIfDirty)
+	wsOverridesDirty bool // true when workspace overrides changed since last save
+	// 读写: lifecycle (SetWorkspace), core (lock-free read by future API)
+	wsOverridesGen atomic.Uint64 // increments on each ws-override mutation, mirrors storeGen pattern
 
 	// knownIDs tracks ALL session IDs ever used by naozhi, including
 	// sessions that have been removed/reset/evicted. Used by the
 	// discovered-session scanner to match CLI processes to naozhi keys,
 	// and as a secondary filter for filesystem-based recent sessions.
+	// 读写: core (init), discovery (trackSessionID/Discovery*), cleanup (saveIfDirty)
 	knownIDs map[string]bool
 	// knownIDsOrder preserves insertion order so overflow eviction drops the
 	// oldest (FIFO) rather than picking randomly via map iteration — random
 	// eviction could drop a still-active session ID, causing discovery to
 	// misclassify its CLI process as an external (non-naozhi) session.
-	knownIDsOrder   []string
-	knownIDsDirty   bool
-	knownIDsGen     uint64    // incremented on each knownIDs mutation (add/evict)
+	// 读写: core (init), discovery (trackSessionID)
+	knownIDsOrder []string
+	// 读写: discovery, cleanup
+	knownIDsDirty bool
+	// 读写: discovery, cleanup
+	knownIDsGen uint64 // incremented on each knownIDs mutation (add/evict)
+	// 读写: cleanup (Cleanup/saveIfDirty)
 	knownIDsSavedAt time.Time // last successful saveKnownIDs; throttles fsync to 5min
 
 	// sessionIDToKey is a reverse index from session ID to session key.
 	// Used by RegisterForResume for O(1) deduplication instead of O(n) scan.
 	// Maintained under r.mu by setSessionIDIndex/clearSessionIDIndex.
+	// 读写: core (init), lifecycle (install/unregister), discovery (RegisterForResume)
 	sessionIDToKey map[string]string
 
+	// 读写: core (init), lifecycle (spawn config)
 	noOutputTimeout time.Duration
-	totalTimeout    time.Duration
+	// 读写: core (init), lifecycle (spawn config)
+	totalTimeout time.Duration
 
 	// onChange is stored via atomic.Pointer so notifyChange can load it
 	// lock-free on the stream-event hot path (called after every result
@@ -347,18 +389,22 @@ type Router struct {
 	// but the address-of-a-parameter pattern is easy to break during
 	// future refactors. Wrapping `fn` in a named struct makes the heap
 	// escape obvious and the dereference pattern unambiguous. R59-GO-M3.
+	// 读写: core (SetOnChange/notifyChange)
 	onChange atomic.Pointer[onChangeHolder]
 
 	// onKeyRetired fires after Reset/Remove finish; lets side-indices keyed
 	// on the session key (e.g. dispatch.MessageQueue) drop their entries.
+	// 读写: core (SetOnKeyRetired/notifyKeyRetired), lifecycle (Reset), cleanup (Remove)
 	onKeyRetired atomic.Pointer[onKeyRetiredHolder]
 
 	// historyWg tracks startup history-loading goroutines so Shutdown waits for them.
+	// 读写: core (init Add/Done), cleanup (Shutdown Wait)
 	historyWg sync.WaitGroup
 
 	// historyCtx is cancelled on Shutdown so in-flight LoadHistory*Ctx calls
 	// abort promptly instead of blocking the drain on slow filesystems.
 	// Paired with historyCancel (set by NewRouter, called from Shutdown).
+	// 读写: core (init), lifecycle (attachHistorySource), cleanup (Shutdown cancel)
 	historyCtx    context.Context
 	historyCancel context.CancelFunc
 
@@ -367,6 +413,7 @@ type Router struct {
 	// (test teardown, hot-restart) might call it again; a double call would
 	// race the broadcast timer, re-close historyCtx via historyCancel (safe
 	// on its own but noisy) and double-detach shim processes. R49-REL-SHUTDOWN-ONCE.
+	// 读写: cleanup (Shutdown)
 	shutdownOnce sync.Once
 
 	// eventLogDir is the directory naozhi's per-session event log files
@@ -375,13 +422,16 @@ type Router struct {
 	// configuration. When non-empty, the Router uses eventLogPersister
 	// to spool cli.EventEntry batches to disk and naozhilog.Source to
 	// read them back on restart / pagination.
-	eventLogDir       string
+	// 读写: core (init), lifecycle (attachHistorySource), cleanup (dropEventLog)
+	eventLogDir string
+	// 读写: core (init), lifecycle (installPersistSink), cleanup (Shutdown)
 	eventLogPersister *persist.Persister
 
 	// attachmentTracker is the refcount tracker that bridges
 	// event-log persist events to .meta sidecar updates. nil when
 	// eventLogDir is unset (refcount tracking has no source of
 	// events in that case). See docs/rfc/attachment-refcount.md.
+	// 读写: core (init), lifecycle (clearAttachmentTrackerRefs), cleanup
 	attachmentTracker *attachmentTracker
 }
 
@@ -2030,6 +2080,8 @@ type spawnParams struct {
 // Pure-ish: no I/O except resolveResumeID's jsonl stat. No log output, no
 // process spawn — a test can exercise the merge rules without standing up
 // wrappers or filesystems beyond what resolveResumeID already needs.
+//
+// LOCK: caller must hold r.mu for writing.
 func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) spawnParams {
 	// Backend pick: opts wins, then one-shot dashboard override, then default.
 	// The override is consumed so a later Reset→spawn for the same key does
@@ -2372,10 +2424,12 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 }
 
 // installFreshSessionLocked attaches a freshly-spawned process to the
-// router indices + event log. Caller MUST hold r.mu. Extracted from
-// spawnSession (CQ2 Round 213); pure state-mutation block with no I/O.
-// Ordering matches the original inlined block verbatim; callers must
-// still invoke installPersistSink AFTER this returns (RFC §3.2.2).
+// router indices + event log. Extracted from spawnSession (CQ2 Round 213);
+// pure state-mutation block with no I/O. Ordering matches the original
+// inlined block verbatim; callers must still invoke installPersistSink AFTER
+// this returns (RFC §3.2.2).
+//
+// LOCK: caller must hold r.mu for writing.
 func (r *Router) installFreshSessionLocked(
 	key string,
 	proc *cli.Process,
@@ -2518,8 +2572,7 @@ func (r *Router) countActive() {
 }
 
 // reconcileSessionActiveByBackendLocked rebuilds the metrics.SessionActive
-// pair (legacy unlabeled mirror + per-backend labeled gauge) from
-// r.sessions. Caller must hold r.mu.
+// pair (legacy unlabeled mirror + per-backend labeled gauge) from r.sessions.
 //
 // Used by bulk teardown paths (countActive / cleanupSessionsByChatPrefix /
 // Cleanup prune) where per-key Inc/Dec bookkeeping in the loop would
@@ -2530,6 +2583,8 @@ func (r *Router) countActive() {
 // Backends that previously had sessions but no longer do are explicitly
 // driven to zero — without ForEachKey the bucket would stay stuck at
 // its last non-zero value.
+//
+// LOCK: caller must hold r.mu for writing.
 func (r *Router) reconcileSessionActiveByBackendLocked() {
 	var total int64
 	perBackend := make(map[string]int64, 4)
@@ -2650,11 +2705,13 @@ func (r *Router) evictOldest() bool {
 	return true
 }
 
-// unregisterSessionLocked removes a session from all routing indexes. Caller
-// must hold r.mu. If keepBackendOverride is true, backendOverrides[key] is
-// preserved so a following spawnSession can consume it atomically (used by
+// unregisterSessionLocked removes a session from all routing indexes.
+// If keepBackendOverride is true, backendOverrides[key] is preserved so a
+// following spawnSession can consume it atomically (used by
 // ResetAndRecreate / Takeover which reuse the same key). On terminal removal
 // paths (Reset / Remove / Cleanup prune) pass false to prevent override leaks.
+//
+// LOCK: caller must hold r.mu for writing.
 func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBackendOverride bool) {
 	if s == nil {
 		return
@@ -2670,8 +2727,10 @@ func (r *Router) unregisterSessionLocked(key string, s *ManagedSession, keepBack
 }
 
 // resetLocked performs the in-lock teardown shared by Reset and
-// ResetAndDiscardOverride. Caller holds r.mu and must run the
-// finishResetUnlocked sequence after releasing it.
+// ResetAndDiscardOverride. Caller must run the finishResetUnlocked
+// sequence after releasing the lock.
+//
+// LOCK: caller must hold r.mu for writing.
 func (r *Router) resetLocked(key string) (processIface, bool) {
 	s, ok := r.sessions[key]
 	if !ok {
