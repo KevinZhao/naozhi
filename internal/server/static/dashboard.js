@@ -2102,9 +2102,15 @@ function renderMainShell() {
   if (ctxPct > 0) {
     const ctxClass = ctxPct >= 95 ? 'ctx-bar high' : ctxPct >= 80 ? 'ctx-bar mid' : 'ctx-bar';
     const ctxLabel = '上下文 ' + ctxPct.toFixed(1) + '%';
+    // Floor the rendered fill at 6% so a real-but-tiny value (kiro reports
+    // ctx fractions immediately on session start, e.g. 1.2%) is still
+    // visible — at 1% the bar was 0.5px wide on a 48px track and looked
+    // identical to "no data". Floor only affects the visual; the title +
+    // aria-label still carry the true value for screen readers / tooltips.
+    const fillPct = Math.min(100, Math.max(6, ctxPct));
     ctxBarHtml = '<span class="' + ctxClass + '" title="' + escAttr(ctxLabel) +
       '" aria-label="' + escAttr(ctxLabel) + '"><span class="ctx-bar-fill" style="width:' +
-      Math.min(100, ctxPct).toFixed(1) + '%"></span></span>';
+      fillPct.toFixed(1) + '%"></span></span>';
   }
   // Multi-Backend RFC §8.3 D7: turn duration timer (kiro real value;
   // claude 0 until estimator lands → cell hidden).

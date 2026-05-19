@@ -209,6 +209,59 @@ func TestTryExtractSessionID_OtherEventTypes(t *testing.T) {
 	}
 }
 
+// TestTryExtractSessionID_ACPSessionNew covers the ACP / kiro path: the
+// JSON-RPC response to session/new carries the canonical sid in
+// result.sessionId (camelCase). Before PR #129 this was silently dropped
+// because the gate only matched "session_id" snake_case, leaving shim
+// state empty across naozhi restarts.
+func TestTryExtractSessionID_ACPSessionNew(t *testing.T) {
+	s := makeShimServerForTest(t)
+	line := []byte(`{"jsonrpc":"2.0","id":2,"result":{"sessionId":"acp-uuid-001"}}`)
+	s.tryExtractSessionID(line)
+
+	s.mu.Lock()
+	got := s.state.SessionID
+	s.mu.Unlock()
+
+	if got != "acp-uuid-001" {
+		t.Errorf("ACP sid = %q, want acp-uuid-001", got)
+	}
+}
+
+// TestTryExtractSessionID_ACPNotificationFallback covers later ACP frames
+// (session/update etc.) that echo sessionId in params; the first sighting
+// wins so the response path is preferred but notification frames are also
+// captured if response was missed.
+func TestTryExtractSessionID_ACPNotificationFallback(t *testing.T) {
+	s := makeShimServerForTest(t)
+	line := []byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"acp-uuid-002","update":{"sessionUpdate":"agent_message_chunk"}}}`)
+	s.tryExtractSessionID(line)
+
+	s.mu.Lock()
+	got := s.state.SessionID
+	s.mu.Unlock()
+
+	if got != "acp-uuid-002" {
+		t.Errorf("ACP notif sid = %q, want acp-uuid-002", got)
+	}
+}
+
+// TestTryExtractSessionID_ACPDoesNotOverwrite locks the same first-wins
+// invariant the claude path has: a later session/update notification must
+// NOT silently change the captured sid.
+func TestTryExtractSessionID_ACPDoesNotOverwrite(t *testing.T) {
+	s := makeShimServerForTest(t)
+	s.tryExtractSessionID([]byte(`{"jsonrpc":"2.0","id":2,"result":{"sessionId":"original-acp"}}`))
+	s.tryExtractSessionID([]byte(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"override-attempt"}}`))
+
+	s.mu.Lock()
+	got := s.state.SessionID
+	s.mu.Unlock()
+	if got != "original-acp" {
+		t.Errorf("ACP sid = %q, want original-acp (notif must not overwrite response)", got)
+	}
+}
+
 // --- enqueueWrite ---
 
 func TestEnqueueWrite_NoClient(t *testing.T) {
