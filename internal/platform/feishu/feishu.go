@@ -76,6 +76,14 @@ const (
 	// flows into dispatch. Shared by transport_ws.go and transport_hook.go.
 	maxIncomingTextBytes = 8 * 1024
 
+	// maxWebhookTokenLen bounds the verification token field accepted from
+	// the request body before constantTimeEqualString hashes both sides.
+	// Real Feishu tokens are ~32 bytes; 512 leaves wide headroom while
+	// preventing a 64 KiB body from forcing an attacker-controlled SHA-256
+	// over the entire token field on every request (small CPU DoS lever
+	// otherwise multiplied by hookSem concurrency).
+	maxWebhookTokenLen = 512
+
 	// webhookTimestampFutureSkew is the maximum seconds that a webhook
 	// X-Lark-Request-Timestamp header may be in the future before being
 	// rejected. Tolerates clock skew without giving attackers a wide
