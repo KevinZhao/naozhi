@@ -28,7 +28,17 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
+
+// resolveDescMaxRunes caps the description string passed into the
+// SubagentLinker.Resolve goroutine. Up to resolveSem-cap goroutines may
+// hold onto a closure containing this string for the entire retry budget
+// (≈3s today), so a multi-KB Description from a chatty teammate prompt
+// would pin tens of KB of heap per pending Resolve. 2000 runes preserves
+// enough prefix for the linker's name-scan fallback while clamping the
+// worst-case goroutine retention. R225-CR-10.
+const resolveDescMaxRunes = 2000
 
 // shimMsg is a minimal struct for parsing shim protocol messages in readLoop.
 //
@@ -506,7 +516,12 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 				}
 			}
 			linker := p.linker
-			go linker.Resolve(taskID, toolUseID, name, ev.Description, nowMS)
+			// R225-CR-10: trim description before handing it to the
+			// closure — pending Resolve goroutines may park up to
+			// retryBudget seconds × resolveSem cap, so a multi-KB
+			// Description would pin proportionally large heap.
+			desc := textutil.TruncateRunes(ev.Description, resolveDescMaxRunes)
+			go linker.Resolve(taskID, toolUseID, name, desc, nowMS)
 		}
 	}
 
