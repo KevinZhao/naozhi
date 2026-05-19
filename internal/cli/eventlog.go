@@ -574,10 +574,26 @@ func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, fir
 	// Backfill ring-buffer entries so future persistHistory / Entries /
 	// EntriesSince reads carry the linkage. Walk backwards — the matching
 	// "agent" and "task_start" entries are almost always among the last N
-	// entries; N small in practice (single turn) so the O(count) walk is cheap.
+	// entries; N small in practice (single turn) so the bounded walk is cheap.
+	//
+	// R225-PERF-13: cap the backward scan at backfillScanCap so a fully-loaded
+	// 500-entry ring doesn't block all Append callers behind the wlock when
+	// Resolve fires for an out-of-window tool_use_id. The matching agent /
+	// task_start entries land within a single turn (a few dozen entries at
+	// most); 50 is comfortably above that window. Scans that hit the cap
+	// without finding the entries silently drop the linkage — the next
+	// resume cycle picks it back up via persistHistory's saved snapshot.
+	const backfillScanCap = 50
 	start := (l.head - l.count + l.maxSize) % l.maxSize
-	for i := l.count - 1; i >= 0; i-- {
-		idx := (start + i) % l.maxSize
+	scan := l.count
+	if scan > backfillScanCap {
+		scan = backfillScanCap
+	}
+	// Walk newest → oldest: i=0 picks the newest entry, i=scan-1 picks
+	// the entry `scan` steps back. Capping at backfillScanCap stops the
+	// walk after 50 entries when the ring is fully loaded.
+	for i := 0; i < scan; i++ {
+		idx := (start + l.count - 1 - i + l.maxSize) % l.maxSize
 		e := &l.entries[idx]
 		if e.ToolUseID != toolUseID {
 			continue
