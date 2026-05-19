@@ -1187,11 +1187,13 @@ func (s *Scheduler) SetJobPrompt(id, prompt string) error {
 
 	j.Prompt = prompt
 	if j.Paused {
-		if err := s.registerJob(j); err != nil {
+		// Delegate unpause to the shared helper so the registerJob + Paused
+		// flag transition stays consistent with PauseJob/ResumeJob/UpdateJob
+		// paths. R226-CR-16.
+		if err := s.resumeJobLocked(j); err != nil {
 			s.mu.Unlock()
 			return err
 		}
-		j.Paused = false
 	}
 	save, perr := s.persistJobsLocked()
 	s.mu.Unlock()
