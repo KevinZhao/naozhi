@@ -89,7 +89,11 @@ func New(cfg *config.UpstreamConfig, router *session.Router, projMgr *project.Ma
 	if home, err := os.UserHomeDir(); err == nil {
 		claudeDir = filepath.Join(home, ".claude")
 	}
-	hostname, _ := os.Hostname()
+	hostname, err := os.Hostname()
+	if err != nil {
+		slog.Warn("upstream: os.Hostname failed; using 'unknown' identity", "err", err)
+		hostname = "unknown"
+	}
 	return &Connector{
 		cfg:              cfg,
 		router:           router,
