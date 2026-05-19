@@ -169,6 +169,10 @@ type Process struct {
 	cliPID        int  // CLI PID reported by shim hello
 	shimPID       int  // shim PID reported by shim hello; used by Kill() for SIGUSR2 fallback
 
+	// SessionID is protected by mu. External readers MUST use
+	// GetSessionID() rather than reading the field directly to avoid
+	// racing readLoop's transition writes (system/init / result events).
+	// R225-GO-9.
 	SessionID string
 	State     ProcessState
 	// mu protects State / SessionID / onTurnDone. Read-only accessors
