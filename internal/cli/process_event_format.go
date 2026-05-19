@@ -38,6 +38,12 @@ func EventEntryFromEvent(ev Event) (EventEntry, bool) {
 // Assistant messages can contain multiple content blocks (thinking + tool_use + text);
 // each block that maps to a known type produces its own entry so downstream consumers
 // (EventLog, dashboard) don't silently drop blocks after the first.
+//
+// Test-helper variant: this convenience wrapper reads time.Now() to stamp
+// the resulting entries. Production hot paths (readLoop) MUST use
+// EventEntriesFromEventAt to share a single time.Now() call between
+// ev.recvAt assignment and entry timestamping — calling this function
+// instead pays an extra wall-clock read per event. R225-PERF-5.
 func EventEntriesFromEvent(ev Event) []EventEntry {
 	return EventEntriesFromEventAt(ev, time.Now().UnixMilli())
 }
