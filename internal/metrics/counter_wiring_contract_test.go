@@ -27,13 +27,15 @@ func TestOBS2_CounterCallSiteWiring(t *testing.T) {
 	t.Parallel()
 	cases := []wiringCase{
 		{
+			// router-split (Phase 1): spawnSession moved to router_lifecycle.go.
 			name:    "SessionCreateTotal fires in spawnSession success path",
-			path:    "../session/router.go",
+			path:    "../session/router_lifecycle.go",
 			pattern: `metrics\.SessionCreateTotal\.Add\(1\)`,
 		},
 		{
+			// router-split (Phase 1): evictOldest moved to router_lifecycle.go.
 			name:    "SessionEvictTotal fires in evictOldest success path",
-			path:    "../session/router.go",
+			path:    "../session/router_lifecycle.go",
 			pattern: `metrics\.SessionEvictTotal\.Add\(1\)`,
 		},
 		{
