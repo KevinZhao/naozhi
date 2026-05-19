@@ -620,14 +620,17 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	}
 }
 
-// serveRender streams the bytes of a workspace .html file so the dashboard
-// can embed it as a **blob URL** inside a sandboxed iframe for visual review
-// (coverage reports, Playwright trace, pytest-html, etc).
+// serveRender streams the bytes of a workspace .html / .svg file so the
+// dashboard can embed it as a **blob URL** inside a sandboxed iframe for
+// visual review (coverage reports, Playwright trace, pytest-html, generated
+// SVG diagrams, etc).
 //
 // Threat model & design: workspace files are untrusted — Claude CLI's Write
-// tool can drop any <script>...</script> into a .html at any time. Rendering
-// that content same-origin to the dashboard is stored-XSS. Three specific
-// browser behaviors make naïve approaches unsafe:
+// tool can drop any <script>...</script> into a .html or a .svg at any time
+// (SVG supports inline <script>, on* event handlers, and external <use>
+// references just like HTML). Rendering that content same-origin to the
+// dashboard is stored-XSS. Three specific browser behaviors make naïve
+// approaches unsafe:
 //
 //  1. Firefox ignores the HTTP `Content-Security-Policy: sandbox` directive
 //     on top-level navigation (see the preexisting comment in serveRaw).
@@ -641,27 +644,29 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 //     an opaque origin regardless of URL).
 //
 // To make this robust across browsers this handler deliberately does NOT
-// serve `Content-Type: text/html`. Instead it returns `application/octet-
-// stream` + `Content-Disposition: attachment` so a direct URL navigation
-// always downloads the file instead of rendering it. The dashboard JS fetches
-// the bytes, wraps them in a Blob({type:'text/html'}), and feeds the
+// serve `Content-Type: text/html` or `image/svg+xml`. Instead it returns
+// `application/octet-stream` + `Content-Disposition: attachment` so a direct
+// URL navigation always downloads the file instead of rendering it. The
+// dashboard JS fetches the bytes, wraps them in a Blob with the right
+// effective type (text/html for HTML, image/svg+xml for SVG), and feeds the
 // resulting blob: URL into a sandboxed iframe. Blob URLs carry an opaque
 // origin — even if sandbox is stripped by a future refactor, the document
 // cannot read dashboard cookies or same-origin fetch.
 //
-// MIME gating still happens server-side (reject non-HTML at the boundary
-// instead of relying on the client) so bytes that would sniff as a different
-// type can't flow through this route at all.
+// MIME gating still happens server-side (reject non-allowlisted at the
+// boundary instead of relying on the client) so bytes that would sniff as a
+// different type can't flow through this route at all.
 //
 // Size cap mirrors serveRaw (maxRawBytes, 50 MB) so a pathologically large
 // file doesn't wedge the dashboard tab allocating the Blob.
 //
 // Known limitation: relative-path resources (<img src="./foo.png">, external
-// CSS, web fonts) inside the rendered HTML will fail because the blob URL
-// has no base path and default-src is 'none'. This matches B1 scope — most
-// report generators (`go tool cover -html`, Playwright trace, pytest-html)
-// emit self-contained single-file HTML and are unaffected. Relative-asset
-// support is B2, gated on actual user demand.
+// CSS, web fonts, SVG <use href="#sym">-into-other-files) inside the rendered
+// document will fail because the blob URL has no base path and default-src is
+// 'none'. This matches B1 scope — most report generators (`go tool cover
+// -html`, Playwright trace, pytest-html) and most SVG diagrams emit self-
+// contained single-file content and are unaffected. Relative-asset support is
+// B2, gated on actual user demand.
 func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, resolved string, info os.FileInfo) {
 	if info.Size() > maxRawBytes {
 		writeJSONStatus(w, http.StatusRequestEntityTooLarge, map[string]string{"error": "file too large for inline render; use download mode"})
@@ -686,10 +691,13 @@ func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, re
 	if i := strings.Index(mime, ";"); i > 0 {
 		base = strings.TrimSpace(mime[:i])
 	}
-	// Strict whitelist — XHTML, plain XML, SVG, PDF, images, text all route
-	// through their dedicated handlers. Render is HTML-only.
-	if base != "text/html" && base != "application/xhtml+xml" {
-		writeJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "render mode is HTML-only; use preview/raw/download for other types"})
+	// Strict whitelist — only HTML/XHTML and SVG flow through render. PDF,
+	// raster images, and text route through their dedicated handlers (preview/
+	// raw/download). detectMime pins .svg to image/svg+xml regardless of byte
+	// sniff, so an attacker cannot reach this branch with non-SVG bytes by
+	// renaming a .html file to .svg — the extension is authoritative for SVG.
+	if base != "text/html" && base != "application/xhtml+xml" && base != "image/svg+xml" {
+		writeJSONStatus(w, http.StatusUnsupportedMediaType, map[string]string{"error": "render mode supports HTML and SVG only; use preview/raw/download for other types"})
 		return
 	}
 

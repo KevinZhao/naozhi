@@ -5169,23 +5169,30 @@ func TestDashboardJS_LoadEarlierFallbackWhenAllInternal(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_HTMLRenderSandbox pins the B1 HTML-preview client contract.
+// TestDashboardJS_SandboxedBlobRender pins the sandbox-render client contract.
+// Originally written for HTML preview; now covers SVG too since both file
+// types share renderSandboxedBlob — they're the only workspace document types
+// that can carry active content (scripts, on* handlers).
 //
-// Three invariants must all hold, or workspace HTML can escape to same-origin
-// execution in the dashboard:
+// Four invariants must all hold, or workspace HTML/SVG can escape to same-
+// origin execution in the dashboard:
 //
 //  1. The iframe MUST be created with sandbox=” — any allow-* token
 //     re-grants a capability.
-//  2. The bytes must arrive via fetch → Blob({type:'text/html'}) → blob
-//     URL, NOT via iframe.src = fileApiUrl(...render). The server returns
+//  2. The bytes must arrive via fetch → Blob({type:...}) → blob URL, NOT
+//     via iframe.src = fileApiUrl(...render). The server returns
 //     application/octet-stream specifically so a direct URL hit downloads;
 //     client must never bypass that by pointing iframe.src at the API.
-//  3. The blob URL must be revoked when the drawer closes, or every open
+//  3. The Blob type must be parameterised (caller-supplied) — text/html for
+//     HTML/XHTML, image/svg+xml for SVG. Hard-coding either type would
+//     break the other surface or, worse, mis-parse SVG bytes as HTML and
+//     bypass the SVG-specific iframe parser path.
+//  4. The blob URL must be revoked when the drawer closes, or every open
 //     leaks up to maxRawBytes (50 MB) until the tab reloads.
 //
-// We scan the renderHtmlInSandbox helper body so the assertion is robust
+// We scan the renderSandboxedBlob helper body so the assertion is robust
 // against unrelated edits elsewhere in dashboard.js.
-func TestDashboardJS_HTMLRenderSandbox(t *testing.T) {
+func TestDashboardJS_SandboxedBlobRender(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
@@ -5193,9 +5200,9 @@ func TestDashboardJS_HTMLRenderSandbox(t *testing.T) {
 	}
 	js := string(data)
 
-	helperIdx := strings.Index(js, "async function renderHtmlInSandbox(")
+	helperIdx := strings.Index(js, "async function renderSandboxedBlob(")
 	if helperIdx < 0 {
-		t.Fatal("dashboard.js missing renderHtmlInSandbox — structural anchor for HTML sandbox contract")
+		t.Fatal("dashboard.js missing renderSandboxedBlob — structural anchor for HTML/SVG sandbox contract")
 	}
 	// The helper fits comfortably in 4 KiB; scoping keeps unrelated future
 	// mentions of "sandbox" or "allow-scripts" from tripping the checks.
@@ -5208,29 +5215,38 @@ func TestDashboardJS_HTMLRenderSandbox(t *testing.T) {
 	// Invariant 1: sandbox attribute is set with an empty string value.
 	sandboxRe := regexp.MustCompile(`setAttribute\(\s*['"]sandbox['"]\s*,\s*['"]\s*['"]\s*\)`)
 	if !sandboxRe.MatchString(helper) {
-		t.Error("renderHtmlInSandbox must call setAttribute('sandbox', '') — empty string grants zero capabilities; any other value weakens the iframe")
+		t.Error("renderSandboxedBlob must call setAttribute('sandbox', '') — empty string grants zero capabilities; any other value weakens the iframe")
 	}
 	for _, forbidden := range []string{"allow-scripts", "allow-same-origin", "allow-forms", "allow-top-navigation", "allow-popups"} {
 		if strings.Contains(helper, forbidden) {
-			t.Errorf("renderHtmlInSandbox must not include sandbox token %q — re-opens the escape it exists to prevent", forbidden)
+			t.Errorf("renderSandboxedBlob must not include sandbox token %q — re-opens the escape it exists to prevent", forbidden)
 		}
 	}
 
 	// Invariant 2: bytes routed through fetch + Blob + createObjectURL.
 	for _, required := range []string{"fileApiUrl(", "'render'", "arrayBuffer", "new Blob(", "URL.createObjectURL("} {
 		if !strings.Contains(helper, required) {
-			t.Errorf("renderHtmlInSandbox must use %s — bypassing the blob path re-exposes the Firefox CSP-sandbox top-level-nav gap", required)
+			t.Errorf("renderSandboxedBlob must use %s — bypassing the blob path re-exposes the Firefox CSP-sandbox top-level-nav gap", required)
 		}
 	}
-	// Blob type MUST be forced to text/html — server returns octet-stream,
-	// so only the client-constructed Blob's type tells the browser how to
-	// interpret the bytes.
-	typeRe := regexp.MustCompile(`type\s*:\s*['"]text/html['"]`)
+	// Invariant 3: Blob type is taken from the caller (parameterised), not
+	// hard-coded. The helper accepts a blobType arg and feeds it into the
+	// Blob constructor; both HTML and SVG branches in openFilePreview pass
+	// the appropriate MIME. Hard-coding 'text/html' here would mis-parse
+	// SVG; hard-coding 'image/svg+xml' would mis-parse HTML.
+	typeRe := regexp.MustCompile(`type\s*:\s*blobType`)
 	if !typeRe.MatchString(helper) {
-		t.Error("renderHtmlInSandbox must wrap bytes as Blob({type:'text/html'}) — without this the iframe gets octet-stream and shows download UI")
+		t.Error("renderSandboxedBlob must wrap bytes as Blob({type:blobType}) — caller-supplied so HTML and SVG each get the right parser")
+	}
+	// Both call sites must pass the matching MIME so the iframe parses
+	// correctly on each surface.
+	for _, lit := range []string{"renderSandboxedBlob(project, node, path, body, 'text/html')", "renderSandboxedBlob(project, node, path, body, 'image/svg+xml')"} {
+		if !strings.Contains(js, lit) {
+			t.Errorf("openFilePreview / preview-binary branch must contain literal call %q so the right Blob type reaches the iframe", lit)
+		}
 	}
 
-	// Invariant 3: blob URL is tracked and revoked on drawer close.
+	// Invariant 4: blob URL is tracked and revoked on drawer close.
 	closeIdx := strings.Index(js, "function closeFilePreview(")
 	if closeIdx < 0 {
 		t.Fatal("dashboard.js missing closeFilePreview — structural anchor for blob-revoke contract")
@@ -5240,24 +5256,24 @@ func TestDashboardJS_HTMLRenderSandbox(t *testing.T) {
 		closeEnd = len(js)
 	}
 	closeBody := js[closeIdx:closeEnd]
-	if !strings.Contains(closeBody, "revokeObjectURL") || !strings.Contains(closeBody, "_pendingHtmlBlobUrl") {
+	if !strings.Contains(closeBody, "revokeObjectURL") || !strings.Contains(closeBody, "_pendingSandboxBlobUrl") {
 		t.Error("closeFilePreview must revoke the tracked blob URL — each open otherwise leaks up to maxRawBytes (50 MB) until the tab reloads")
 	}
 
-	// Invariant 4: renderHtmlInSandbox uses a monotonic seq token to
+	// Invariant 5: renderSandboxedBlob uses a monotonic seq token to
 	// detect a superseding render while fetch is in flight, and revokes
 	// its own stale blob URL instead of overwriting the tracked slot.
 	// Missing this, rapidly opening file A then file B leaks A's blob.
-	if !strings.Contains(helper, "_htmlRenderSeq") {
-		t.Error("renderHtmlInSandbox must use _htmlRenderSeq token — without it, a second HTML open while the first fetch is in flight leaks the first blob URL")
+	if !strings.Contains(helper, "_sandboxRenderSeq") {
+		t.Error("renderSandboxedBlob must use _sandboxRenderSeq token — without it, a second open while the first fetch is in flight leaks the first blob URL")
 	}
 	// At minimum 3 staleness checks: after fetch headers, after arrayBuffer
 	// body, and one more either around the URL allocation or the catch
 	// branch. Count occurrences of the compare to catch regressions that
 	// drop a single check.
-	staleChecks := strings.Count(helper, "mySeq !== _htmlRenderSeq")
+	staleChecks := strings.Count(helper, "mySeq !== _sandboxRenderSeq")
 	if staleChecks < 3 {
-		t.Errorf("renderHtmlInSandbox must check mySeq !== _htmlRenderSeq at every await boundary (got %d, want >=3)", staleChecks)
+		t.Errorf("renderSandboxedBlob must check mySeq !== _sandboxRenderSeq at every await boundary (got %d, want >=3)", staleChecks)
 	}
 }
 
@@ -6015,5 +6031,48 @@ func TestDashboardJS_PendingSessionBackendBrand(t *testing.T) {
 	}
 	if !strings.Contains(js, "s.cli_version || backendDisplayVersion(sessionBackends[selectedKey]) || defaultCLIVersion") {
 		t.Error("renderMainShell / updateHeaderCLI missing sessionBackends version fallback")
+	}
+}
+
+// TestDashboardJS_TableCurrencyDollarNotMathProtected pins the bugfix that
+// renderTable's `$...$` math-protect pass must NOT swallow currency tokens
+// inside a row. A pricing row like `| Pro | $20 | 1,000 | $0.04/credit |`
+// (four cells, four `$N`-style currency tokens) used to collide with the
+// non-greedy `\$[^$\n]+?\$` regex, which paired the first `$` with the next
+// `$` it found, swallowed the two pipes between them, and collapsed the
+// row from 4 cells to 2. The visible symptom was the two right-hand columns
+// rendering empty for every Pro/Pro+/Power row in Kiro pricing tables.
+//
+// Guards:
+//  1. The renderTable cells() function defines an isTableMathSpan helper.
+//  2. The `$...$` stash uses isTableMathSpan as predicate (not unconditional).
+//  3. isTableMathSpan rejects spans that contain a `|` and have no LaTeX
+//     special chars — the surface that distinguishes currency from math.
+func TestDashboardJS_TableCurrencyDollarNotMathProtected(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+	rtIdx := strings.Index(js, "function renderTable(lines)")
+	if rtIdx < 0 {
+		t.Fatal("renderTable not found")
+	}
+	rtEnd := strings.Index(js[rtIdx:], "\nfunction ")
+	if rtEnd < 0 {
+		t.Fatal("renderTable end not found")
+	}
+	body := js[rtIdx : rtIdx+rtEnd]
+	if !strings.Contains(body, "isTableMathSpan") {
+		t.Error("renderTable: isTableMathSpan helper must guard `$...$` stash so currency rows don't collapse")
+	}
+	if !strings.Contains(body, "stash(/\\$([^$\\n]+?)\\$/g, isTableMathSpan)") {
+		t.Error("renderTable: `$...$` stash must pass isTableMathSpan as predicate")
+	}
+	// The currency-vs-math distinction is the load-bearing logic. If the
+	// helper ever drops the no-pipe branch, currency rows regress.
+	if !strings.Contains(body, "inner.indexOf('|') !== -1") {
+		t.Error("isTableMathSpan: must reject `$...$` containing `|` without LaTeX chars (currency rows like `$20 | 1,000 | $0.04`)")
 	}
 }
