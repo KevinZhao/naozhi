@@ -573,15 +573,44 @@ func (p *ACPProtocol) sendAndWaitResponse(rw *JSONRW, req RPCRequest) error {
 	return err
 }
 
+// normalizeContextUsage maps kiro's contextUsagePercentage onto a 0-100
+// percent range, accepting both 0-1 fractions and already-percent inputs
+// (see parseKiroMetadata header for why both forms occur in the wild).
+// Negative inputs (impossible per spec) are floored to 0; values > 100
+// are clamped — running past 100% is a real state on kiro when context
+// overflows, but the dashboard's red band already triggers at 95% and
+// the progress-bar width caps at 100%, so persisting a 116.78 just
+// confuses operators.
+func normalizeContextUsage(v float64) float64 {
+	if v < 0 {
+		return 0
+	}
+	if v <= 1.0 {
+		v *= 100
+	}
+	if v > 100 {
+		return 100
+	}
+	return v
+}
+
 // parseKiroMetadata decodes a _kiro.dev/metadata notification into a
 // normalized Type:"metadata" Event. Field mappings (verified against kiro
 // 2.3.0, V10):
-//   - contextUsagePercentage (float, 0-1) → ContextUsagePercent (0-100)
+//   - contextUsagePercentage (float)      → ContextUsagePercent (0-100, clamped)
 //   - turnDurationMs (int)                → TurnDurationMs
 //   - meteringUsage [{value, unit, unitPlural}] → MeteringUsage
 //
-// kiro reports contextUsagePercentage as a 0-1 fraction (e.g. 0.0285 ≈ 2.85%);
-// we scale to 0-100 once here so consumers don't have to remember.
+// contextUsagePercentage scaling: PoC validation captured kiro 2.3.0 emitting
+// 0-1 fractions (e.g. 0.0285 ≈ 2.85%), but a live deployment caught values
+// > 1 — kiro lets the counter run past 100% when context overflows, and a
+// later patch may also have reshaped the field to direct percentages. We
+// detect both shapes:
+//   - value <= 1.0  → treat as 0-1 fraction, multiply by 100
+//   - value > 1.0   → treat as already-percentage, keep as-is
+//
+// then clamp to [0, 100] so the dashboard's red/yellow/green bands and the
+// progress-bar width never fight ridiculous inputs.
 //
 // Schema drift: log-and-skip rather than erroring so a future kiro version
 // that reshapes the payload doesn't break readLoop. Returning the synthetic
@@ -605,7 +634,7 @@ func parseKiroMetadata(params json.RawMessage) (Event, bool, error) {
 		return Event{}, false, nil
 	}
 	meta := &EventMetadata{
-		ContextUsagePercent: raw.ContextUsagePercentage * 100,
+		ContextUsagePercent: normalizeContextUsage(raw.ContextUsagePercentage),
 		TurnDurationMs:      raw.TurnDurationMs,
 	}
 	if len(raw.MeteringUsage) > 0 {
