@@ -38,7 +38,19 @@ type Slack struct {
 	started   bool
 	botID     string
 	handlerWg sync.WaitGroup // tracks in-flight message handler goroutines
+	// hookSem caps concurrent inbound message-handler goroutines to bound
+	// memory under burst load. Mirrors feishu.Feishu.hookSem (cap=20). Without
+	// this, a single noisy workspace (legit or attacker-controlled) can spawn
+	// unbounded goroutines via Socket Mode message events, each holding any
+	// downstream Send/Reply state until the CLI finishes — eventually OOMing
+	// naozhi. R226-SEC-4.
+	hookSem chan struct{}
 }
+
+// slackHookConcurrency caps concurrent message handlers per Slack adapter.
+// 20 mirrors feishu.hookSem; raise per-deployment via config only after
+// observing handler queue depth in production.
+const slackHookConcurrency = 20
 
 // slackHTTPClient is shared by all Slack adapter instances for Web API calls
 // (auth.test / chat.postMessage / files.upload etc). Two defences in one:
@@ -74,7 +86,11 @@ func New(cfg Config) *Slack {
 		slack.OptionAppLevelToken(cfg.AppToken),
 		slack.OptionHTTPClient(slackHTTPClient),
 	)
-	return &Slack{cfg: cfg, api: api}
+	return &Slack{
+		cfg:     cfg,
+		api:     api,
+		hookSem: make(chan struct{}, slackHookConcurrency),
+	}
 }
 
 func (s *Slack) Name() string { return "slack" }
@@ -373,9 +389,22 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 		MentionMe: mentionMe,
 	}
 
+	// R226-SEC-4: cap concurrent handler goroutines so a flood of inbound
+	// Socket Mode messages cannot spawn unbounded goroutines. When the
+	// semaphore is saturated, drop the message + slog.Warn — preferable to
+	// OOM since the dispatcher already has its own queue + retry semantics.
+	// Non-blocking acquire mirrors feishu's pattern.
+	select {
+	case s.hookSem <- struct{}{}:
+	default:
+		slog.Warn("slack: handler semaphore full, dropping message",
+			"chat", msg.ChatID, "user", msg.UserID)
+		return
+	}
 	s.handlerWg.Add(1)
 	go func() {
 		defer s.handlerWg.Done()
+		defer func() { <-s.hookSem }()
 		defer platform.RecoverHandler("slack")
 		s.handler(s.ctx, msg)
 	}()

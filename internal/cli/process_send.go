@@ -53,11 +53,20 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 		if len(images) == 1 {
 			thumbs[0] = MakeThumbnail(images[0].Data, 600)
 		} else {
+			// R225-PERF-15: cap concurrent JPEG-encode goroutines so a single
+			// 20-image upload cannot saturate every CPU at once and starve
+			// other sessions' Send paths. 4 keeps small-batch latency near
+			// the unbounded baseline (image/jpeg encode is ~10-30 ms each)
+			// while bounding worst-case CPU use.
+			const thumbnailConcurrency = 4
+			sem := make(chan struct{}, thumbnailConcurrency)
 			var wg sync.WaitGroup
 			for i, img := range images {
 				wg.Add(1)
+				sem <- struct{}{}
 				go func(i int, data []byte) {
 					defer wg.Done()
+					defer func() { <-sem }()
 					thumbs[i] = MakeThumbnail(data, 600)
 				}(i, img.Data)
 			}

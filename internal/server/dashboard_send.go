@@ -1100,7 +1100,27 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	disableInlineRender := false
 	var sniffBuf [512]byte
 	if n, _ := io.ReadFull(f, sniffBuf[:]); n > 0 {
-		if sniffed := http.DetectContentType(sniffBuf[:n]); !strings.EqualFold(sniffed, mime) {
+		sniffed := http.DetectContentType(sniffBuf[:n])
+		// R226-SEC-10: defence-in-depth against future ext-allowlist drift —
+		// even when the sniffed MIME matches the ext-derived mime exactly,
+		// SVG / XHTML / XML payloads MUST never go inline. The current ext
+		// allowlist already excludes .svg / .xml / .xhtml, but a future
+		// reviewer who relaxes that without remembering the sniff guard would
+		// otherwise let a `<svg onload=...>` payload render as an embedded
+		// frame. http.DetectContentType returns these MIMEs with a `; charset=...`
+		// suffix in some Go versions, so match on the prefix.
+		isXMLLike := strings.HasPrefix(sniffed, "image/svg+xml") ||
+			strings.HasPrefix(sniffed, "application/xhtml+xml") ||
+			strings.HasPrefix(sniffed, "text/xml") ||
+			strings.HasPrefix(sniffed, "application/xml")
+		if isXMLLike {
+			slog.Warn("attachment: SVG/XML-like content detected, forcing attachment download",
+				"ext", ext, "ext_mime", mime, "sniffed", sniffed,
+				"path", filepath.Base(resolved))
+			mime = "application/octet-stream"
+			disposition = "attachment"
+			disableInlineRender = true
+		} else if !strings.EqualFold(sniffed, mime) {
 			slog.Warn("attachment: magic-byte mismatch, degrading to octet-stream",
 				"ext", ext, "ext_mime", mime, "sniffed", sniffed,
 				"path", filepath.Base(resolved))
