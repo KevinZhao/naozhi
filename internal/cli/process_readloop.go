@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/naozhi/naozhi/internal/osutil"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // shimMsg is a minimal struct for parsing shim protocol messages in readLoop.
@@ -506,7 +507,14 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 				}
 			}
 			linker := p.linker
-			go linker.Resolve(taskID, toolUseID, name, ev.Description, nowMS)
+			// R225-CR-10: cap description before handing it to a goroutine
+			// closure. ev.Description is unbounded user/agent text that the
+			// Resolve goroutine pins until the resolveSem slot frees, so a
+			// burst of multi-KB descriptions × 8 max parallel resolves can
+			// retain MBs of strings transiently. 2000 runes matches the
+			// Detail field cap downstream consumers already truncate to.
+			desc := textutil.TruncateRunes(ev.Description, 2000)
+			go linker.Resolve(taskID, toolUseID, name, desc, nowMS)
 		}
 	}
 

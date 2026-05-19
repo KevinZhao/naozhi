@@ -1552,60 +1552,6 @@ func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
 	return snap
 }
 
-// freshContextPreflight handles the fresh-mode prologue: ctx-cancel guard
-// (CRON3), work-dir reachability check (CRON2), Reset, and the post-Reset
-// existence re-check that prevents a leaked CLI process tied to a deleted
-// job ("cron:<id>" orphan).
-//
-// Returns:
-//   - stubRefresh: closure that re-registers the sidebar stub on error
-//     paths so the cron row stays visible. Caller invokes after error
-//     branches; never invoke on success (live session owns the row).
-//   - ok: false means the caller MUST return immediately. The helper has
-//     already written the appropriate slog.Info/Warn + (if applicable)
-//     recordResult + deliverNotice for the failure mode.
-//
-// In persistent mode (snap.fresh=false) the helper short-circuits with
-// ok=true and a no-op stubRefresh so the caller's flow is uniform.
-func (s *Scheduler) freshContextPreflight(j *Job, snap jobSnapshot, key string, lg *slog.Logger, notifyTo NotifyTarget) (stubRefresh func(), ok bool) {
-	if !snap.fresh {
-		return func() {}, true
-	}
-	if err := s.stopCtx.Err(); err != nil {
-		lg.Info("cron fresh spawn suppressed during shutdown", "err", err)
-		return func() {}, false
-	}
-	if !workDirReachable(snap.workDir) {
-		lg.Warn("cron fresh spawn aborted: work_dir unreachable",
-			"work_dir", snap.workDir)
-		s.recordResult(j, "", "work_dir unreachable", "")
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.jobID))
-		return func() {}, false
-	}
-	s.router.Reset(key)
-	lg.Info("cron fresh context: session reset before run")
-	stubRefresh = func() {
-		s.mu.RLock()
-		jobCopy, exists := s.jobs[snap.jobID]
-		var j2 Job
-		if exists {
-			j2 = *jobCopy
-		}
-		s.mu.RUnlock()
-		if exists {
-			s.registerStub(&j2)
-		}
-	}
-	s.mu.RLock()
-	_, stillExists := s.jobs[snap.jobID]
-	s.mu.RUnlock()
-	if !stillExists {
-		lg.Info("cron job deleted mid-execute, skipping GetOrCreate")
-		return stubRefresh, false
-	}
-	return stubRefresh, true
-}
-
 // preflightResult bundles the closure / continuation-flag returned by the
 // P0 preflight wrapper. Pulled out so executeOpt's call site reads as one
 // destructure instead of two return values mixed with a side-effect rec.
@@ -1613,17 +1559,24 @@ type preflightResult struct {
 	stubRefresh func()
 }
 
-// freshContextPreflightP0 wraps freshContextPreflight with the P0 finishRun
-// emission so the failure branches inside the legacy helper participate in
-// the run-history terminal protocol (broadcast cron_run_ended + counters +
-// LastErrorClass write). Implementation reuses the legacy helper for the
-// core logic but intercepts the two recorded-error paths.
+// freshContextPreflightP0 handles the fresh-mode prologue: ctx-cancel guard
+// (CRON3), work-dir reachability check (CRON2), Reset, and the post-Reset
+// existence re-check that prevents a leaked CLI process tied to a deleted
+// job ("cron:<id>" orphan). Each failure branch records a (RunState,
+// ErrorClass) tuple via finishRun so the run-history terminal protocol
+// (broadcast cron_run_ended + counters + LastErrorClass write) participates.
 //
-// We keep freshContextPreflight intact for the existing test surface
-// (fresh_shutdown_test.go / cron2_workdir_test.go assert exact slog
-// messages and recordResult invocations) and layer the P0 protocol here.
-// When P1 lands and historical recordResult is fully replaced, this wrapper
-// collapses into the inner helper.
+// Returns:
+//   - preflightResult.stubRefresh: closure that re-registers the sidebar
+//     stub on error paths so the cron row stays visible. Caller invokes
+//     after error branches; never invoke on success (live session owns
+//     the row).
+//   - ok: false means the caller MUST return immediately. The helper has
+//     already written the appropriate slog.Info/Warn + finishRun() for
+//     the failure mode.
+//
+// In persistent mode (snap.fresh=false) the helper short-circuits with
+// ok=true and a no-op stubRefresh so the caller's flow is uniform.
 func (s *Scheduler) freshContextPreflightP0(j *Job, snap jobSnapshot, key string, lg *slog.Logger, notifyTo NotifyTarget, runID string, startedAt time.Time, trigger TriggerKind) (preflightResult, bool) {
 	if !snap.fresh {
 		return preflightResult{stubRefresh: func() {}}, true
