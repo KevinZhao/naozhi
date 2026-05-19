@@ -1039,8 +1039,16 @@ func TestProcess_ApplyMetadata_AndAccessors(t *testing.T) {
 	}
 }
 
-// --- ACP error response test (C2 fix) ---
+// --- ACP error response test (C2 fix; updated 2026-05-19) ---
 
+// TestACPProtocol_ReadEvent_ErrorResponse pins the post-fix contract:
+// an RPC error response to session/prompt closes the turn (done=true) so
+// readLoop can synthesize a result event and unblock state=running.
+//
+// Earlier code had done=false here, which made every kiro internal-error
+// silently strand the session — readLoop would log "skip unparseable event"
+// and the dashboard would never see a turn end (operator-visible as "kiro
+// session never replies" until manual interrupt or restart).
 func TestACPProtocol_ReadEvent_ErrorResponse(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{sessionID: "sess_1"}
@@ -1050,11 +1058,14 @@ func TestACPProtocol_ReadEvent_ErrorResponse(t *testing.T) {
 
 	line := `{"jsonrpc":"2.0","id":3,"error":{"code":-32000,"message":"model overloaded"}}`
 	_, done, err := p.ReadEvent(line)
-	if done {
-		t.Error("error response should not be done=true")
+	if !done {
+		t.Error("error response MUST be done=true so the turn unblocks state=running")
 	}
 	if err == nil {
 		t.Fatal("expected error for RPC error response")
+	}
+	if !errors.Is(err, ErrACPRPC) {
+		t.Errorf("err should wrap ErrACPRPC, got %v", err)
 	}
 	if !strings.Contains(err.Error(), "model overloaded") {
 		t.Errorf("error = %q, should contain 'model overloaded'", err.Error())

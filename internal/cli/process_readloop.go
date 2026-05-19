@@ -242,10 +242,29 @@ func (p *Process) readLoop() {
 		switch msg.Type {
 		case "stdout":
 			p.lastSeq.Store(msg.Seq)
-			ev, _, err := p.protocol.ReadEvent(msg.Line)
+			ev, done, err := p.protocol.ReadEvent(msg.Line)
 			if err != nil {
-				log.Warn("readLoop: skip unparseable event", "err", err, "seq", msg.Seq)
-				continue
+				// ACP RPC errors: kiro returned an error response to a request
+				// we sent (typically session/prompt). The turn is over from
+				// kiro's POV — done=true comes back from ReadEvent so we
+				// can synthesize a visible "result" event and let the active
+				// Send() unblock. Without this, state stays "running" forever
+				// (operator-visible as "kiro session never replies"; reproduced
+				// 2026-05-19 r3-cancel/r3-lifecycle stuck after restart).
+				if errors.Is(err, ErrACPRPC) && done {
+					ev = Event{
+						Type:    "result",
+						SubType: "error",
+						Result:  "[kiro] " + err.Error(),
+					}
+					log.Warn("readLoop: kiro returned RPC error; surfacing as failed turn",
+						"err", err, "seq", msg.Seq)
+					// Fall through into the normal turn-end dispatch path
+					// below so the assistant bubble + state transition happen.
+				} else {
+					log.Warn("readLoop: skip unparseable event", "err", err, "seq", msg.Seq)
+					continue
+				}
 			}
 			if ev.Type == "" {
 				continue
