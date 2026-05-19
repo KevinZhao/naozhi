@@ -164,6 +164,13 @@ type ManagedSession struct {
 	// summary → last_prompt. Lock-free reads from Snapshot() mirror the
 	// backend/cliName/cliVersion pattern.
 	userLabel atomic.Pointer[string]
+	// model is the most-recent CLI model identifier captured from
+	// system/init (claude) or SpawnOptions.Model (kiro), persisted to
+	// sessions.json so it survives naozhi restart even when the next
+	// turn hasn't re-emitted init yet. Live process value (from
+	// proc.Model()) wins over this when both are available; this field
+	// is the fallback for restart / pre-init windows. UI Round 5 R5-3.
+	model atomic.Pointer[string]
 	// totalCost is the cumulative cost carried over from a previous process
 	// incarnation: written at construction (either in NewRouter() when
 	// restoring from store, or in spawnSession() when inheriting from the
@@ -292,6 +299,15 @@ func (s *ManagedSession) UserLabel() string { return loadAtomicString(&s.userLab
 // SetUserLabel records an operator-set display label. Callers must have
 // already validated length/charset; the empty string clears any prior label.
 func (s *ManagedSession) SetUserLabel(v string) { storeAtomicString(&s.userLabel, v) }
+
+// Model returns the persisted last-known CLI model identifier ("" when
+// not yet captured from system/init / SpawnOptions). UI Round 5 R5-3.
+func (s *ManagedSession) Model() string { return loadAtomicString(&s.model) }
+
+// SetModel records the latest known model id. Called by the readLoop
+// snapshotter when proc.Model() flips from "" to a real value, AND by
+// the store-restore path in NewRouter when seeding from sessions.json.
+func (s *ManagedSession) SetModel(v string) { storeAtomicString(&s.model, v) }
 
 // SetHistorySource installs the backend-specific disk-tier Source. Called
 // by the router at session construction; safe to call after the session is
@@ -915,6 +931,12 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		CLIName:    s.CLIName(),
 		CLIVersion: s.CLIVersion(),
 		UserLabel:  s.UserLabel(),
+		// UI Round 5 R5-3: seed Model from persisted ManagedSession; the
+		// proc-bearing branch below will overwrite if live proc has a
+		// fresher value. No-proc snapshots (evicted / pre-spawn) keep
+		// the persisted value so dashboard doesn't blink to
+		// "(模型未配置)" during restart-reattach.
+		Model: s.Model(),
 	}
 	snap.DeathReason = loadAtomicString(&s.deathReason)
 
@@ -926,9 +948,21 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 	} else {
 		snap.State = proc.GetState().String()
 		snap.Protocol = proc.ProtocolName()
-		// UI Round 5 R5-3: spawn-time CLI model. "" when operator did
-		// not pin one — dashboard shows "(模型未配置)".
-		snap.Model = proc.Model()
+		// UI Round 5 R5-3: model resolution priority
+		//   1. live proc.Model() (claude system/init or kiro SpawnOptions)
+		//   2. persisted s.Model() (post-restart, before next init)
+		// When proc reports a model and it differs from / is more
+		// recent than what we persisted, mirror it back so the next
+		// saveStore tick captures it. Empty live → keep persisted.
+		liveModel := proc.Model()
+		if liveModel != "" {
+			if liveModel != s.Model() {
+				s.SetModel(liveModel)
+			}
+			snap.Model = liveModel
+		} else {
+			snap.Model = s.Model()
+		}
 		// Prefer whichever is larger: a freshly resumed process reports 0
 		// until the first `result` event arrives, but s.totalCost carries
 		// the historical cumulative value restored from sessions.json.

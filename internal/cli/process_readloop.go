@@ -361,6 +361,17 @@ func (p *Process) readLoop() {
 			//     subagents/agent-<hex>.jsonl; kick off an async Resolve
 			//     bounded by the linker's retry budget so readLoop stays
 			//     responsive.
+			// UI Round 5 R5-3: claude advertises the resolved model in
+			// system/init. readLoop is the always-on path (active even
+			// during reconnect when no Send() is consuming events), so
+			// capture here too — the parallel hook in process_send.go
+			// covers the case where Send() drains init before readLoop
+			// observes it (race; first to call setModel wins, both
+			// values are the same so it doesn't matter). Only overwrite
+			// when init event actually carries a model value.
+			if ev.Type == "system" && ev.SubType == "init" && ev.Model != "" {
+				p.setModel(ev.Model)
+			}
 			if p.linker != nil {
 				if ev.Type == "system" && ev.SubType == "init" && ev.SessionID != "" {
 					projectDir := resolveProjectDir(p.cwd)
