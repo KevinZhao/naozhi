@@ -34,6 +34,12 @@ type BackendInfo struct {
 	// support (askuser / passthrough / embedded_context / image_input /
 	// audio_input / mcp_http / mcp_sse). Missing key == false. Multi-Backend
 	// RFC §8.2.
+	//
+	// DASHBOARD-ONLY: this field is left nil by DetectBackendsCtx and
+	// populated only by the /api/cli/backends handler in
+	// internal/server/dashboard_cli.go. Non-handler callers (cmd/naozhi
+	// doctor, tests, future SDK consumers) will see Features == nil and
+	// must not assume the map is allocated. R225-CR-7.
 	Features map[string]bool `json:"features,omitempty"`
 }
 
