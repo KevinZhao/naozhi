@@ -189,7 +189,11 @@ test.describe('Backend picker + chips', () => {
     await ctx.close();
   });
 
-  test('every existing session card carries a backend chip', async ({ browser }) => {
+  // UI Round 5 R5-2 (PR #136) removed sidebar backend chips intentionally —
+  // the cli icon (R5-1: kiro ghost vs claude logomark) carries the backend
+  // signal now. Updated invariant: every session card MUST carry a cli icon
+  // SVG, and the icon shape distinguishes backend.
+  test('every session card carries a cli icon (kiro ghost vs claude logomark)', async ({ browser }) => {
     const ctx = await loginContext(browser);
     const page = await ctx.newPage();
     await page.goto('/dashboard');
@@ -197,21 +201,24 @@ test.describe('Backend picker + chips', () => {
 
     const cards = await page.$$('.session-card');
     if (cards.length === 0) {
-      test.skip(true, 'no sessions to assert chip on');
+      test.skip(true, 'no sessions to assert icon on');
     }
-    // Every card should have at least one .sc-backend-chip span
-    const chipCounts = await page.$$eval('.session-card', cards =>
-      cards.map(c => c.querySelectorAll('.sc-backend-chip').length)
+    // Every card has exactly one .sc-cli-icon
+    const iconCounts = await page.$$eval('.session-card', cards =>
+      cards.map(c => c.querySelectorAll('.sc-cli-icon').length)
     );
-    expect(chipCounts.every(n => n >= 1), `chip counts: ${chipCounts}`).toBeTruthy();
+    expect(iconCounts.every(n => n >= 1), `icon counts: ${iconCounts}`).toBeTruthy();
 
-    // Chip color matches Profile.ChipColor (claude purple OR kiro orange)
-    const chipBgs = await page.$$eval('.session-card .sc-backend-chip', els =>
-      els.map(e => getComputedStyle(e).backgroundColor)
+    // The set of icon shapes used must include either ghost (kiro,
+    // viewBox 0 0 1200 1200) or claude (viewBox 0 0 248 248). No
+    // session card should fall through to the default placeholder.
+    const viewboxes = await page.$$eval('.session-card .sc-cli-icon', els =>
+      els.map(e => e.getAttribute('viewBox') || '')
     );
-    // Chips should not be transparent / "rgba(0, 0, 0, 0)"
-    const transparent = chipBgs.filter(c => c === 'rgba(0, 0, 0, 0)' || !c);
-    expect(transparent.length, 'chips with no background color').toBe(0);
+    const validShapes = viewboxes.filter(vb =>
+      vb.includes('1200') || vb.includes('248')
+    );
+    expect(validShapes.length, `unexpected icon viewBoxes: ${JSON.stringify(viewboxes)}`).toBe(viewboxes.length);
 
     await ctx.close();
   });
