@@ -809,11 +809,36 @@ func (s *Scheduler) AddJob(j *Job) error {
 		return fmt.Errorf("title too long: %d runes > %d cap", n, MaxCronTitleLen)
 	}
 
+	// addJobLocked runs under s.mu (defer Unlock). Splitting the locked
+	// section into a helper means every early-return path goes through
+	// defer and removes the prior pattern of 4 manual s.mu.Unlock() calls
+	// (R228-GO-2): adding a new validation step inside the locked section
+	// no longer risks leaking a held mutex on the new error path.
+	save, perr := s.addJobLocked(j)
+	if perr != nil {
+		// addJobLocked may surface either a pre-mutation error (capacity
+		// rejection — no save returned) or a post-mutation persist error
+		// (in-memory insertion already happened). The caller cannot tell
+		// the two apart from the error alone, but in either case there
+		// is no save() to invoke — addJobLocked returns nil for save in
+		// both branches.
+		return perr
+	}
+	save()
+	s.registerStub(j)
+	return nil
+}
+
+// addJobLocked performs the AddJob mutation under s.mu. Returns the
+// post-unlock save closure (nil on error) and any error. Split from
+// AddJob so a single defer handles unlock across all early-return
+// paths. R228-GO-2.
+func (s *Scheduler) addJobLocked(j *Job) (func(), error) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 
 	if len(s.jobs) >= s.maxJobs {
-		s.mu.Unlock()
-		return fmt.Errorf("max cron jobs reached (%d)", s.maxJobs)
+		return nil, fmt.Errorf("max cron jobs reached (%d)", s.maxJobs)
 	}
 
 	// Per-chat limit to prevent one chat from exhausting global quota.
@@ -824,12 +849,11 @@ func (s *Scheduler) AddJob(j *Job) error {
 		}
 	}
 	if chatCount >= s.maxJobsPerChat {
-		s.mu.Unlock()
-		return fmt.Errorf("per-chat cron limit reached (%d)", s.maxJobsPerChat)
+		return nil, fmt.Errorf("per-chat cron limit reached (%d)", s.maxJobsPerChat)
 	}
 
 	j.ID = generateID()
-	// Retry on unlikely ID collision
+	// Retry on unlikely ID collision.
 	for _, exists := s.jobs[j.ID]; exists; _, exists = s.jobs[j.ID] {
 		j.ID = generateID()
 	}
@@ -837,24 +861,20 @@ func (s *Scheduler) AddJob(j *Job) error {
 
 	if !j.Paused {
 		if err := s.registerJob(j); err != nil {
-			s.mu.Unlock()
-			return err
+			return nil, err
 		}
 	}
 	s.jobs[j.ID] = j
 	save, perr := s.persistJobsLocked()
-	s.mu.Unlock()
-
 	if perr != nil {
-		// In-memory insertion + cron scheduling already happened; we cannot
-		// roll those back safely (another goroutine may have observed the
-		// registered entry). Surface the error so the HTTP layer returns a
-		// 500 and the operator sees the persistence gap.
-		return perr
+		// In-memory insertion + cron scheduling already happened; we
+		// cannot roll those back safely (another goroutine may have
+		// observed the registered entry). Surface the error so the
+		// HTTP layer returns a 500 and the operator sees the
+		// persistence gap.
+		return nil, perr
 	}
-	save()
-	s.registerStub(j)
-	return nil
+	return save, nil
 }
 
 // ListJobs returns jobs for a specific chat.

@@ -701,11 +701,13 @@ func (l *EventLog) Append(e EventEntry) {
 	// racing with a concurrent live Append's Store — the serialization on
 	// l.mu guarantees last-writer-wins matches entry-order, not
 	// entry-ordering-inverted by lock release scheduling.
-	switch e.Type {
-	case "user":
+	if e.Type == "user" {
 		storeAtomicString(&l.lastPromptSummary, e.Summary)
 		l.userTurnCount.Add(1)
-	case "tool_use", "thinking", "agent", "task_start", "task_progress", "todo":
+	} else if IsActivityType(e.Type) {
+		// IsActivityType is the shared predicate for the "activity" set;
+		// session.ManagedSession history scans also consume it so the
+		// live-tail and replay-tail stay aligned. R228-CR-3.
 		storeAtomicString(&l.lastActivitySummary, e.Summary)
 	}
 
@@ -823,12 +825,11 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 		// separate from the value so an empty final Summary still
 		// overwrites the atomic — Append stores unconditionally for these
 		// types, and diverging here would leave stale summaries visible.
-		switch e.Type {
-		case "user":
+		if e.Type == "user" {
 			lastPrompt = e.Summary
 			sawPrompt = true
 			userDelta++
-		case "tool_use", "thinking", "agent", "task_start", "task_progress", "todo":
+		} else if IsActivityType(e.Type) {
 			lastActivity = e.Summary
 			sawActivity = true
 		}
