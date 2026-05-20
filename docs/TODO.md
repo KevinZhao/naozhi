@@ -1438,7 +1438,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 ### Go 正确性 — 本轮新发现
 
 - [ ] **R228-GO-1 — `agent_tailer.DurationMS` `int64→int` 转换在 32-bit 平台溢出（P2）**: `time.Duration.Milliseconds()` 是 int64，向 `int` 转换在 32-bit Linux 上 ~24 天后会变负。方案：把 `AgentMetaPatch.DurationMS`、`SubagentInfo.DurationMS`、`node.AgentMetaPatch.DurationMS` 统一改为 int64（JSON 序列化无 breaking，但跨包字段类型变更）。涉及 `internal/server/agent_tailer.go:393` + `internal/cli/eventlog.go` + `internal/node/protocol.go`。
-- [ ] **R228-GO-2 — `cron.AddJob` 多手动 Unlock 无 defer（P2）**: `s.mu.Lock()` 后多个手动 `s.mu.Unlock()` 提前 return（5+ 处），未来在 lock 段内插入新逻辑容易漏 Unlock。方案：refactor 为内层函数提取 + defer。涉及 `internal/cron/scheduler.go:814-856`。
+- [x] **R228-GO-2 — `cron.AddJob` 多手动 Unlock 无 defer（P2）**: `s.mu.Lock()` 后多个手动 `s.mu.Unlock()` 提前 return（5+ 处），未来在 lock 段内插入新逻辑容易漏 Unlock。方案：refactor 为内层函数提取 + defer。涉及 `internal/cron/scheduler.go:814-856`。 — 已修复（抽 addJobLocked() 内层函数承担锁定段，defer s.mu.Unlock() 收敛所有 early-return 路径；外层 AddJob 仅做参数校验 + 锁外 save() / registerStub() 调用），本批 PR #181
 - [ ] **R228-GO-3 — `reconnectShims` replay goroutine 无 ctx 绑定（P2）**: 重放段对每个 `task_started` 启动裸 goroutine 调 `linker.Resolve`，SIGTERM 时延迟 shutdown。方案：与 R227-GO-2 / R225-GO-2 合并，Resolve 接 ctx。涉及 `internal/session/router_shim.go:361-394`。
 
 ### 安全 — 本轮新发现
@@ -1464,7 +1464,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 
 - [x] **R228-CR-1 — `maxScannerBufBytes=10MB` 与 shim `maxServerLineBytes=16MB` 不一致（P2）**: 10-16MB 之间合法事件被静默丢弃。方案：加 godoc 解释 6MB headroom，或对齐到 16MB。涉及 `internal/cli/process.go:30`。 — 已修复（godoc 解释 6MB headroom：shim 自身在 16MB 拒绝行，naozhi 永远不会看到 10-16MB 的"合法但被丢"行；headroom 留给协议帧 + base64 图像 tool_result），本批 PR #169
 - [x] **R228-CR-2 — `Caps.SoftInterrupt`/`Priority`/`StreamJSON` 三个字段被填但从未读（P2）**: 只有 Replay 被读。方案：删除三个 dead 字段并修 Capabilities 实现；或 godoc 标 reserved。涉及 `internal/cli/protocol.go:95-100`、`protocol_claude.go:137`、`protocol_acp.go:337`。 — 已修复（godoc 标 reserved + 指向 protocol_caps_test.go 锁定的契约；不删字段保留 forward-compat anchor），本批 PR #169
-- [ ] **R228-CR-3 — `isActivityType` 与 `EventLog.Append` activity 集无编译期 sync 保护（P2）**: 注释说"两边必须一起改"但无 contract test/共享函数。方案：抽 `cli.IsActivityType(t string) bool` 共享；或加 contract test。涉及 `internal/session/managed.go:1483-1488` + `internal/cli/eventlog.go:681`。
+- [x] **R228-CR-3 — `isActivityType` 与 `EventLog.Append` activity 集无编译期 sync 保护（P2）**: 注释说"两边必须一起改"但无 contract test/共享函数。方案：抽 `cli.IsActivityType(t string) bool` 共享；或加 contract test。涉及 `internal/session/managed.go:1483-1488` + `internal/cli/eventlog.go:681`。 — 已修复（新增 internal/cli/event_kinds.go 暴露 IsActivityType 共享 helper + event_kinds_test.go 锁定 15 case 表；EventLog.Append/AppendBatch 与 session.scanLastSummaries 三处调用点切换；删除 session 包私有 isActivityType 19 行），本批 PR #181
 - [x] **R228-CR-4 — `Process.LastEntryOfType` + `EventLog.LastEntryOfType` 导出但无 prod 调用（P3）**: 应 unexport 或加到 processIface。涉及 `internal/cli/process_event_query.go:188-191`、`internal/cli/eventlog.go:1058`。 — 已修复，本批 PR #170
 - [x] **R228-CR-5 — `cron/job.JobTitleOrFallback` `[]rune(line)` heap alloc（P3）**: 与 textutil.TruncateRunes 重叠但用 `…`(U+2026)。方案：要么接受 ASCII `...` 后缀改用 textutil；要么 textutil 加 ellipsis 参数 overload。涉及 `internal/cron/job.go:205-209`。 — 已修复（改用 textutil.TruncateRunesNoEllipsis 复用 byte-level 解码 + 短路快路径；通过 truncated != line 判定后本地补 U+2026 保留卡片视觉一致性），本批 PR #169
 
