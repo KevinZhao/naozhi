@@ -17,6 +17,7 @@ import (
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sysession"
 )
 
 //go:embed static/dashboard.html
@@ -298,6 +299,23 @@ func (s *Server) registerDashboard() {
 		})
 	}
 
+	// Push system-daemon Run events to WS clients (RFC §9.4).
+	// Manager.SetCallbacks accepts wiring after Manager.Start so this is
+	// safe even when sysession was constructed in main.go before the Hub
+	// existed.
+	if s.sysessionMgr != nil {
+		s.sysessionMgr.SetCallbacks(
+			func(ev sysession.DaemonRunStartedEvent) {
+				s.hub.BroadcastDaemonRunStarted(ev.Name, ev.RunID, string(ev.Trigger), ev.StartedAt)
+			},
+			func(ev sysession.DaemonRunEndedEvent) {
+				s.hub.BroadcastDaemonRunEnded(ev.Name, ev.RunID,
+					string(ev.State), string(ev.ErrorClass),
+					string(ev.Trigger), ev.DurationMS)
+			},
+		)
+	}
+
 	// Authenticated API routes
 	auth := s.auth.requireAuth
 	s.mux.HandleFunc("GET /api/cli/backends", auth(s.cliH.handle))
@@ -335,6 +353,9 @@ func (s *Server) registerDashboard() {
 	// P1 cron-run-history: per-job execution history.
 	s.mux.HandleFunc("GET /api/cron/runs", auth(s.cronH.handleRunsList))
 	s.mux.HandleFunc("GET /api/cron/runs/{run_id}", auth(s.cronH.handleRunDetail))
+	// system-session daemons (docs/rfc/system-session.md §9.2/§9.3)
+	s.mux.HandleFunc("GET /api/system/daemons", auth(s.handleSystemDaemons))
+	s.mux.HandleFunc("POST /api/system/labels/clear-origin", auth(s.handleClearLabelOrigin))
 	s.mux.HandleFunc("POST /api/auth/logout", auth(s.auth.handleLogout))
 	// pprof debug endpoints: auth-gated + loopback-only. Registered via
 	// a package-local helper that wraps the stdlib net/http/pprof

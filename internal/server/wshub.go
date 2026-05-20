@@ -1512,6 +1512,71 @@ func (h *Hub) DroppedMessages() int64 {
 	return h.droppedTotal.Load()
 }
 
+// daemonRunStartedMsg / daemonRunEndedMsg are the WS payloads for
+// docs/rfc/system-session.md §9.4.  Crucially we do NOT carry an
+// ErrorMsg field — error messages from the daemon's Runner subprocess
+// can echo back portions of the user-supplied prompt (CLI "context too
+// long" failures are a known case), and broadcasting that to every
+// authenticated dashboard client constitutes cross-tenant leakage.
+// Server-side slog still carries the full error for operator-side
+// debugging.
+type daemonRunStartedMsg struct {
+	Type      string `json:"type"`
+	Name      string `json:"name"`
+	RunID     string `json:"run_id"`
+	Trigger   string `json:"trigger,omitempty"`
+	StartedAt int64  `json:"started_at"`
+}
+
+type daemonRunEndedMsg struct {
+	Type       string `json:"type"`
+	Name       string `json:"name"`
+	RunID      string `json:"run_id"`
+	State      string `json:"state"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
+	ErrorClass string `json:"error_class,omitempty"`
+	Trigger    string `json:"trigger,omitempty"`
+}
+
+// BroadcastDaemonRunStarted emits daemon_run_started.
+//
+// name / runID / trigger / state come from compiled-in enums (not
+// operator-supplied), but we run them through SanitizeForLog anyway as
+// defence-in-depth — a future caller might wire a daemon name from
+// config or pass through external content; sanitising at the broadcast
+// boundary keeps us safe regardless.
+func (h *Hub) BroadcastDaemonRunStarted(name, runID, trigger string, startedAt time.Time) {
+	data, err := marshalPooled(daemonRunStartedMsg{
+		Type:      "daemon_run_started",
+		Name:      osutil.SanitizeForLog(name, 64),
+		RunID:     sanitizeHexIDForBroadcast(runID, 64),
+		Trigger:   osutil.SanitizeForLog(trigger, 32),
+		StartedAt: startedAt.UnixMilli(),
+	})
+	if err != nil {
+		return
+	}
+	h.broadcastToAuthenticated(data)
+}
+
+// BroadcastDaemonRunEnded emits daemon_run_ended.  ErrorMsg is
+// intentionally absent — see daemonRunEndedMsg above.
+func (h *Hub) BroadcastDaemonRunEnded(name, runID, state, errClass, trigger string, durationMS int64) {
+	data, err := marshalPooled(daemonRunEndedMsg{
+		Type:       "daemon_run_ended",
+		Name:       osutil.SanitizeForLog(name, 64),
+		RunID:      sanitizeHexIDForBroadcast(runID, 64),
+		State:      osutil.SanitizeForLog(state, 32),
+		DurationMS: durationMS,
+		ErrorClass: osutil.SanitizeForLog(errClass, 64),
+		Trigger:    osutil.SanitizeForLog(trigger, 32),
+	})
+	if err != nil {
+		return
+	}
+	h.broadcastToAuthenticated(data)
+}
+
 // sanitizeHexIDForBroadcast returns id unchanged when it matches the
 // cron.IsValidID hex shape (and fits within maxLen), otherwise routes
 // through the regular sanitiser. Avoids the strings.Map slow-path on

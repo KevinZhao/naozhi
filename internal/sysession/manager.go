@@ -124,13 +124,23 @@ type daemonRecord struct {
 // Manager is single-shot — Stop is terminal.  A future restart should
 // build a fresh Manager.
 type Manager struct {
-	enabled   bool
-	cfg       Config
-	tickFn    tickerFactory
-	daemons   []*daemonRecord
-	wg        sync.WaitGroup
-	ctx       context.Context
-	cancel    context.CancelFunc
+	enabled bool
+	cfg     Config
+	tickFn  tickerFactory
+	daemons []*daemonRecord
+	wg      sync.WaitGroup
+	ctx     context.Context
+	cancel  context.CancelFunc
+
+	// Lifecycle hooks.  Held under hookMu so SetCallbacks (called late
+	// during startup wiring, after Hub is built) doesn't race
+	// recordRun callers.  Reads are common (every Tick); writes are
+	// once or twice during init; sync.RWMutex is overkill at this
+	// frequency, but a regular Mutex is sufficient and simpler.
+	hookMu       sync.Mutex
+	onRunStarted func(DaemonRunStartedEvent)
+	onRunEnded   func(DaemonRunEndedEvent)
+
 	startOnce sync.Once
 	stopOnce  sync.Once
 }
@@ -155,9 +165,11 @@ func NewManager(cfg Config) (*Manager, error) {
 	}
 
 	m := &Manager{
-		enabled: cfg.Enabled,
-		cfg:     cfg,
-		tickFn:  cfg.NewTicker,
+		enabled:      cfg.Enabled,
+		cfg:          cfg,
+		tickFn:       cfg.NewTicker,
+		onRunStarted: cfg.OnRunStarted,
+		onRunEnded:   cfg.OnRunEnded,
 	}
 	if !cfg.Enabled {
 		// Build nothing; Start is a no-op.
@@ -283,6 +295,30 @@ func (m *Manager) Inspector() []DaemonStatus {
 	return out
 }
 
+// SetCallbacks installs (or replaces) the OnRunStarted / OnRunEnded
+// hooks.  Safe to call after Start — main.go uses this so the WS hub
+// (which is built after the Manager) can wire daemon_run_* broadcasts.
+//
+// Pass nil to clear a hook.  Either argument may be nil independently.
+func (m *Manager) SetCallbacks(onRunStarted func(DaemonRunStartedEvent), onRunEnded func(DaemonRunEndedEvent)) {
+	m.hookMu.Lock()
+	defer m.hookMu.Unlock()
+	m.onRunStarted = onRunStarted
+	m.onRunEnded = onRunEnded
+}
+
+func (m *Manager) loadOnRunStarted() func(DaemonRunStartedEvent) {
+	m.hookMu.Lock()
+	defer m.hookMu.Unlock()
+	return m.onRunStarted
+}
+
+func (m *Manager) loadOnRunEnded() func(DaemonRunEndedEvent) {
+	m.hookMu.Lock()
+	defer m.hookMu.Unlock()
+	return m.onRunEnded
+}
+
 // DaemonStatus is the public read-only view of a daemon's state.
 // Mirrors the JSON shape the dashboard endpoint emits (see RFC §9.2).
 type DaemonStatus struct {
@@ -356,8 +392,8 @@ func (m *Manager) runOnce(rec *daemonRecord, trigger DaemonTriggerKind) {
 	runID := newRunID()
 	startedAt := time.Now()
 
-	if m.cfg.OnRunStarted != nil {
-		m.cfg.OnRunStarted(DaemonRunStartedEvent{
+	if cb := m.loadOnRunStarted(); cb != nil {
+		cb(DaemonRunStartedEvent{
 			Name:      rec.daemon.Name(),
 			RunID:     runID,
 			Trigger:   trigger,
@@ -446,8 +482,8 @@ func (m *Manager) recordRun(rec *daemonRecord, runID string, trigger DaemonTrigg
 		// touching counters.
 	}
 
-	if m.cfg.OnRunEnded != nil {
-		m.cfg.OnRunEnded(DaemonRunEndedEvent{
+	if cb := m.loadOnRunEnded(); cb != nil {
+		cb(DaemonRunEndedEvent{
 			Name:       rec.daemon.Name(),
 			RunID:      runID,
 			State:      dr.State,

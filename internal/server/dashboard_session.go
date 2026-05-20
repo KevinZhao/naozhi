@@ -396,15 +396,13 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		// Cron stub sessions must never appear in the sidebar either. The
-		// cron-panel-consolidation RFC (docs/rfc/cron-panel-consolidation.md)
-		// collapses cron visibility into the dedicated 「定时任务」 panel —
-		// the dashboard sidebar / mainShell are reserved for human
-		// conversation surfaces. Keep running/ready counts inclusive so
-		// operators still see maxProcs pressure while a cron job is
-		// mid-execution. This is the canonical filter; the prior frontend
-		// `cronVisibleKeys` whitelist was a pure UI bandage.
-		if session.IsCronKey(snap.Key) {
+		// Cron and system-daemon stub sessions must never appear in the
+		// sidebar either:  cron flows through the dedicated 「定时任务」
+		// panel (cron-panel-consolidation RFC), and sys: daemons are
+		// naozhi-internal infrastructure surfaced via the System drawer
+		// (docs/rfc/system-session.md §9.2).  Keep running/ready counts
+		// inclusive so maxProcs pressure remains visible in stats.
+		if session.IsCronKey(snap.Key) || session.IsSysKey(snap.Key) {
 			switch snap.State {
 			case "running":
 				running++
