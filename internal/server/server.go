@@ -470,6 +470,12 @@ func NewWithOptions(opts ServerOptions) *Server {
 // call sites at once — they can migrate in-place at any future touch.
 // Gopls / staticcheck will flag new positional-style call sites so the
 // migration path stays discoverable.
+//
+// Removal condition (R214-CODE-4 / R224-CR-5): delete this wrapper once
+// every *_test.go in this package and its consumers calls NewWithOptions
+// directly. Track via `git grep -l "server.New("` returning zero hits.
+// New positional-style call sites should NOT be added — start with
+// NewWithOptions and let this function shrink to test-only legacy.
 func New(addr string, router *session.Router, platforms map[string]platform.Platform, agents map[string]session.AgentOpts, agentCommands map[string]string, scheduler *cron.Scheduler, backend string, opts ServerOptions) *Server {
 	opts.Addr = addr
 	opts.Router = router

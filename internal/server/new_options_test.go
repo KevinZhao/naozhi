@@ -140,8 +140,12 @@ func TestServerNew_MarkedDeprecated(t *testing.T) {
 		t.Fatal("func New(addr string ...) not found in server.go")
 	}
 	// Look back for the `// Deprecated:` line within the preceding
-	// godoc block (cap at 600 chars — the current block is ~500).
-	start := idx - 600
+	// godoc block. R224-CR-5 added a "Removal condition" section after
+	// the Deprecated marker so the bare 600-char window no longer covers
+	// the marker itself; widen to 1200 chars (still well below pathological
+	// drift). The intent — Deprecated marker exists immediately above `func
+	// New(` — is preserved; only the trailing prose grew.
+	start := idx - 1200
 	if start < 0 {
 		start = 0
 	}
