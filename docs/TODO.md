@@ -1384,7 +1384,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R227-PERF-7 — `ACPProtocol.WriteMessage` 每次 prompt 用 map[string]any（P2）**: 3-5 个 map + RPCRequest 分配 + marshal。方案：定义具名 struct。
 - [ ] **R227-PERF-8 — `BroadcastSessionsUpdate` time.AfterFunc 每次 alloc（P2）**: 高频 notify 下每次 timer + WG 开销。方案：Hub 持久 *Timer + Reset。
 - [ ] **R227-PERF-9 — `EventLog.Append` invokePersistSink 单条 slice 逃逸（P2）**: 5-50/s × N session 热路径。方案：EventLog 内置 [1]EventEntry scratch + sync.Pool。涉及 `internal/cli/eventlog.go:660`。
-- [ ] **R227-PERF-10 — `Snapshot()` MeteringUsage []slice 每次 alloc（P2）**: 大多数为 nil 或 1 条。方案：proc.MeteringUsage() 返回内部数组只读 view，或延迟 alloc 到 JSON 序列化。
+- [x] **R227-PERF-10 — `Snapshot()` MeteringUsage []slice 每次 alloc（P2）**: 大多数为 nil 或 1 条。方案：proc.MeteringUsage() 返回内部数组只读 view，或延迟 alloc 到 JSON 序列化。 — 已修复（meteringLen atomic.Int32 镜像 len(meteringUsage)，applyMetadata 在 meteringMu 内更新；MeteringUsage 进 RLock 前先 Load 短路 nil 返回，覆盖 claude-class + pre-metering kiro turn 主导路径），本批 PR #189
 - [~] **R227-PERF-11 — `EventLog.Append` storeAtomicString 每次 *string alloc（评估关闭 2026-05-20）**: 条目自标"降级仅观察"。复核 textutil.StoreAtomicString 已用 atomic.Pointer.Load + 字符串相等短路（同值不重新 Store *string），命中率 ~99%（lastActivitySummary 在同 tool_use 持续时不变）。sync.Pool[string] 在 textutil 是叶子包做不到 lock-free 复用，且分支预测器对短路命中早已优化。本批 PR #168 关闭归档。
 - [ ] **R227-PERF-12 — `ACPProtocol.parseSessionUpdate` tool_call/tool_call_update 分支双 alloc（P2）**: AssistantMessage ptr + ContentBlock slice。方案：tool name 直接存 ToolCall.Title；ContentBlock 改 [1]ContentBlock + count。
 - [x] **R227-PERF-15 — `protocol_acp.ReadEvent` 每个 turn-end 都 unmarshal stopReason（P3）**: msg.Result 多数为 null 或 {}。方案：bytes.Contains 快速检测后再 unmarshal。 — 已修复，本批 PR #176
