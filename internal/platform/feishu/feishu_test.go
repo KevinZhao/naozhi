@@ -42,7 +42,11 @@ func TestVerifySignature(t *testing.T) {
 	}{
 		{"valid signature", timestamp, nonce, encryptKey, body, validSig, true},
 		{"invalid signature", timestamp, nonce, encryptKey, body, "bad", false},
-		{"empty encrypt key bypasses", timestamp, nonce, "", body, "anything", true},
+		// R224-SEC-2: empty key now fails closed instead of returning true.
+		// Callers must gate on cfg.EncryptKey != "" externally; this guards
+		// against a future caller forgetting the outer check and silently
+		// bypassing signature verification.
+		{"empty encrypt key fails closed", timestamp, nonce, "", body, "anything", false},
 		{"wrong body", timestamp, nonce, encryptKey, []byte("wrong"), validSig, false},
 		{"wrong timestamp", "9999", nonce, encryptKey, body, validSig, false},
 	}
