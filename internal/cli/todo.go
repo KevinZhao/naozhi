@@ -90,11 +90,35 @@ func TodosDetailJSON(todos []TodoItem) string {
 	return string(b)
 }
 
+// Status emoji used by TodosSummary / TodosMarkdown. Centralised so a
+// future policy switch (e.g. ASCII-only deployment, alternative status
+// glyphs) can land in one place. R227-CR-13.
+//
+// Byte-boundary safety: every glyph below is a multi-byte UTF-8 sequence
+// (📋 / ✅ are 4 bytes, ▶ / ☐ are 3 bytes). Downstream consumers that
+// truncate by byte length (IM message body caps, dashboard chip width)
+// MUST cut on a rune boundary — not a byte boundary — or the trailing
+// glyph will surface as a U+FFFD replacement char. textutil.TruncateRunes
+// already enforces rune-boundary cuts; new consumers should route through
+// it instead of slicing s[:N].
+const (
+	todoStatusEmojiSummary = "📋" // overall list header
+	todoStatusEmojiDone    = "✅" // completed
+	todoStatusEmojiActive  = "▶" // in_progress
+	todoStatusEmojiPending = "☐" // pending / unknown-empty status
+	todoStatusEmojiUnknown = "?" // future status values not yet recognised
+	todoStatusFieldSep     = " · "
+)
+
 // TodosSummary returns a compact one-line overview suitable for the event
 // summary field, e.g. "📋 5项 · ✅2 ▶1 ☐2".
 // Unknown statuses (e.g. future values Claude Code may emit) are counted
 // separately and surfaced with "?N" so silent miscategorisation doesn't hide
 // state changes from the UI.
+//
+// The output uses multi-byte emoji glyphs (📋 ✅ ▶ ☐). Callers that need
+// to truncate the result for display MUST cut on a rune boundary — see the
+// emoji-constants block above for the byte-boundary safety contract. R227-CR-13.
 func TodosSummary(todos []TodoItem) string {
 	var done, active, pending, unknown int
 	for _, t := range todos {
@@ -111,23 +135,28 @@ func TodosSummary(todos []TodoItem) string {
 	}
 	var b strings.Builder
 	b.Grow(40)
-	b.WriteString("📋 ")
+	b.WriteString(todoStatusEmojiSummary)
+	b.WriteByte(' ')
 	b.WriteString(strconv.Itoa(len(todos)))
 	b.WriteString("项")
 	if done > 0 {
-		b.WriteString(" · ✅")
+		b.WriteString(todoStatusFieldSep)
+		b.WriteString(todoStatusEmojiDone)
 		b.WriteString(strconv.Itoa(done))
 	}
 	if active > 0 {
-		b.WriteString(" · ▶")
+		b.WriteString(todoStatusFieldSep)
+		b.WriteString(todoStatusEmojiActive)
 		b.WriteString(strconv.Itoa(active))
 	}
 	if pending > 0 {
-		b.WriteString(" · ☐")
+		b.WriteString(todoStatusFieldSep)
+		b.WriteString(todoStatusEmojiPending)
 		b.WriteString(strconv.Itoa(pending))
 	}
 	if unknown > 0 {
-		b.WriteString(" · ?")
+		b.WriteString(todoStatusFieldSep)
+		b.WriteString(todoStatusEmojiUnknown)
 		b.WriteString(strconv.Itoa(unknown))
 	}
 	return b.String()
