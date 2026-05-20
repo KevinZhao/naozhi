@@ -199,7 +199,9 @@ func TestDoctor_ExpvarNoToken(t *testing.T) {
 func TestDoctor_StateDirProbes(t *testing.T) {
 	tmp := t.TempDir()
 	fake := filepath.Join(tmp, "home")
-	if err := os.MkdirAll(filepath.Join(fake, ".naozhi"), 0o755); err != nil {
+	// 0o700 satisfies the R229-SEC-13 perm gate; the writability probe
+	// should then succeed and report pass.
+	if err := os.MkdirAll(filepath.Join(fake, ".naozhi"), 0o700); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
 	// Swap $HOME for this test so UserHomeDir points at our tmp.
@@ -209,6 +211,33 @@ func TestDoctor_StateDirProbes(t *testing.T) {
 	if d.findings[0].Level != "pass" {
 		t.Errorf("fresh writable dir → level %q, want pass (detail=%q)",
 			d.findings[0].Level, d.findings[0].Detail)
+	}
+}
+
+// TestDoctor_StateDirGroupWorldReadable pins R229-SEC-13: when ~/.naozhi
+// has any group/world permission bits set, doctor must emit a warn rather
+// than silently passing. EventLog/sessions.json files inside use 0600 but
+// a 0755 parent still lets local users list keys + traverse.
+func TestDoctor_StateDirGroupWorldReadable(t *testing.T) {
+	tmp := t.TempDir()
+	fake := filepath.Join(tmp, "home")
+	stateDir := filepath.Join(fake, ".naozhi")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	// Re-chmod to defeat any umask-driven downgrade by MkdirAll.
+	if err := os.Chmod(stateDir, 0o755); err != nil {
+		t.Fatalf("chmod: %v", err)
+	}
+	t.Setenv("HOME", fake)
+	d := &doctor{out: io.Discard}
+	d.checkStateDir()
+	if d.findings[0].Level != "warn" {
+		t.Errorf("0o755 state dir → level %q, want warn (detail=%q)",
+			d.findings[0].Level, d.findings[0].Detail)
+	}
+	if !strings.Contains(d.findings[0].Detail, "group/world-accessible") {
+		t.Errorf("warn detail missing perm hint: %q", d.findings[0].Detail)
 	}
 }
 

@@ -79,6 +79,11 @@ type healthDispatchStats struct {
 // the embedded fields into the top-level object so the wire shape stays
 // identical to the prior `map[string]any` version. R60-PERF-001.
 type healthAuthSection struct {
+	// Version is the build tag (git describe injected via -X main.version=...).
+	// R229-SEC-7: previously exposed at the top level for unauthenticated
+	// probes; moved into the auth-only section so a public /health cannot
+	// fingerprint the running binary.
+	Version           string                  `json:"version,omitempty"`
 	Sessions          healthSessionStats      `json:"sessions"`
 	WorkspaceID       string                  `json:"workspace_id"`
 	WorkspaceName     string                  `json:"workspace_name"`
@@ -153,24 +158,20 @@ type healthAttachTrackStats struct {
 type healthResp struct {
 	Status string `json:"status"`
 	Uptime string `json:"uptime"`
-	// Version is the build tag (e.g. git describe output injected via
-	// -X main.version=...). Exposed at the top level so unauthenticated
-	// probes (load balancers, uptime monitors) can confirm which binary is
-	// live without needing the dashboard token. Empty → field omitted so
-	// older deployments that never set the ldflag keep the legacy shape.
-	Version string `json:"version,omitempty"`
 	// Anonymous pointer embed: json package promotes non-nil pointer's
 	// fields into the enclosing object, so authenticated probes get the
 	// exact same top-level keys as before while unauthenticated probes
 	// serialize down to just status/uptime.
+	//
+	// R229-SEC-7: Version moved into healthAuthSection so unauthenticated
+	// probes cannot fingerprint the build.
 	*healthAuthSection
 }
 
 func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp := healthResp{
-		Status:  "ok",
-		Uptime:  time.Since(h.startedAt).Round(time.Second).String(),
-		Version: h.version,
+		Status: "ok",
+		Uptime: time.Since(h.startedAt).Round(time.Second).String(),
 	}
 	if !h.auth.isAuthenticated(r) {
 		writeJSON(w, resp)
@@ -179,6 +180,7 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 
 	active, total := h.router.Stats()
 	auth := &healthAuthSection{
+		Version:       h.version,
 		Sessions:      healthSessionStats{Active: active, Total: total},
 		WorkspaceID:   h.workspaceID,
 		WorkspaceName: h.workspaceName,
