@@ -341,14 +341,12 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 			reply("格式错误: " + err.Error() + "\n用法: /cron add \"<schedule>\" <prompt>")
 			return
 		}
-		job := &cron.Job{
-			Schedule:  schedule,
-			Prompt:    prompt,
+		job := cron.NewJob(schedule, prompt, cron.JobIMContext{
 			Platform:  msg.Platform,
 			ChatID:    msg.ChatID,
 			ChatType:  msg.ChatType,
 			CreatedBy: msg.UserID,
-		}
+		})
 		if err := d.scheduler.AddJob(job); err != nil {
 			// AddJob wraps the raw schedule string + robfig/cron parser
 			// internals into the error; echoing that to IM leaks both the

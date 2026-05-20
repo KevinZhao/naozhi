@@ -22,7 +22,7 @@ import (
 	"syscall"
 
 	"github.com/naozhi/naozhi/internal/discovery"
-	"github.com/naozhi/naozhi/internal/dispatch"
+	"github.com/naozhi/naozhi/internal/limits"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
@@ -126,7 +126,10 @@ func (c *Connector) handleRequest(appCtx, connCtx context.Context, req node.Reve
 		// ceiling to reject it. Matches the primary-side dashboard cap
 		// chain (maxWSSendTextBytes=1 MB → coalesce soft cap 4 MB → shim
 		// 12 MB). R68-SEC-H1.
-		if n := len(p.Text); n > dispatch.MaxCoalescedTextBytes() {
+		//
+		// Source of truth lives in internal/limits so this reverse-RPC
+		// trust boundary doesn't have to import dispatch (R228-ARCH-9).
+		if n := len(p.Text); n > limits.MaxCoalescedText {
 			return nil, fmt.Errorf("send text too long: %d bytes", n)
 		}
 		opts := session.AgentOpts{}
