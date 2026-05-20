@@ -701,11 +701,11 @@ func (l *EventLog) Append(e EventEntry) {
 	// racing with a concurrent live Append's Store — the serialization on
 	// l.mu guarantees last-writer-wins matches entry-order, not
 	// entry-ordering-inverted by lock release scheduling.
-	switch e.Type {
-	case "user":
+	switch {
+	case e.Type == "user":
 		storeAtomicString(&l.lastPromptSummary, e.Summary)
 		l.userTurnCount.Add(1)
-	case "tool_use", "thinking", "agent", "task_start", "task_progress", "todo":
+	case IsActivityType(e.Type):
 		storeAtomicString(&l.lastActivitySummary, e.Summary)
 	}
 
@@ -823,12 +823,12 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 		// separate from the value so an empty final Summary still
 		// overwrites the atomic — Append stores unconditionally for these
 		// types, and diverging here would leave stale summaries visible.
-		switch e.Type {
-		case "user":
+		switch {
+		case e.Type == "user":
 			lastPrompt = e.Summary
 			sawPrompt = true
 			userDelta++
-		case "tool_use", "thinking", "agent", "task_start", "task_progress", "todo":
+		case IsActivityType(e.Type):
 			lastActivity = e.Summary
 			sawActivity = true
 		}
@@ -1105,6 +1105,22 @@ func (l *EventLog) lastEntryOfType(typ string) EventEntry {
 // LastActivitySummary returns the summary of the most recent "tool_use" or "thinking" entry.
 func (l *EventLog) LastActivitySummary() string {
 	return loadAtomicString(&l.lastActivitySummary)
+}
+
+// IsActivityType reports whether t is a CLI event type that updates
+// EventLog.lastActivitySummary. The set is a hard contract between
+// Append/AppendBatch (which Store the summary atom) and any caller scanning
+// history for "the last activity" — both must agree on the type set or a
+// late-injected history entry would be skipped by the scanner while the
+// live atom shows the same type. Adding a new activity type is a one-line
+// edit here that propagates to every call site (R228-CR-3 closes the
+// previous duplicate in session/managed.go::isActivityType).
+func IsActivityType(t string) bool {
+	switch t {
+	case "tool_use", "thinking", "agent", "task_start", "task_progress", "todo":
+		return true
+	}
+	return false
 }
 
 // LastEventAt returns the wall-clock time of the most recent live Append,

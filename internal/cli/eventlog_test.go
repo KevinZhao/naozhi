@@ -492,3 +492,40 @@ func TestEventLog_LastEventAt(t *testing.T) {
 		t.Errorf("live Append after batch did not advance LastEventAt: %v vs prev %v", got, prevLive)
 	}
 }
+
+// TestIsActivityType locks the activity-type contract that EventLog.Append /
+// AppendBatch / scanLastSummaries (in session/managed.go) all consume. Any
+// future addition / removal of an activity type must update IsActivityType
+// AND the matching switch arms in Append/AppendBatch — this test pins the
+// "in" set; the Append-side coverage is implicit in
+// TestEventLog_LastActivitySummary_Append (existing). R228-CR-3.
+func TestIsActivityType(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		typ  string
+		want bool
+	}{
+		// Activity types — must match Append/AppendBatch switch arms.
+		{"tool_use", true},
+		{"thinking", true},
+		{"agent", true},
+		{"task_start", true},
+		{"task_progress", true},
+		{"todo", true},
+
+		// Non-activity types — Append routes user separately, others have
+		// no activity-summary semantic.
+		{"user", false},
+		{"assistant", false},
+		{"result", false},
+		{"system", false},
+		{"task_done", false},
+		{"", false},
+		{"Tool_Use", false}, // case-sensitive — wire format is lowercase only
+	}
+	for _, tc := range cases {
+		if got := IsActivityType(tc.typ); got != tc.want {
+			t.Errorf("IsActivityType(%q) = %v, want %v", tc.typ, got, tc.want)
+		}
+	}
+}
