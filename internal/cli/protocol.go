@@ -92,11 +92,36 @@ type Protocol interface {
 // SupportsX() methods sprinkled everywhere. The struct is value-copy
 // cheap (all bool); future fields may include timeout tiers or
 // version hints. See RNEW-ARCH-404.
+//
+// Reserved-but-unread fields (R228-CR-2): only Replay is consumed on
+// hot paths (passthrough.go, process_readloop.go). Priority,
+// SoftInterrupt and StreamJSON are populated by every Protocol
+// implementation but currently have no consumers in production code —
+// they remain in the struct as forward-compatibility anchors so a
+// future feature gate (e.g. soft-cancel UX, priority-aware queueing)
+// can read them without rewriting the per-protocol Capabilities()
+// methods. Tests in protocol_caps_test.go pin the populated values so
+// the contract does not silently drift before a consumer is wired.
 type Caps struct {
-	Replay        bool // true if the protocol can replay events from disk (Claude stream-json)
-	Priority      bool // true if the protocol supports priority queueing (Claude has a spawn-priority path)
-	SoftInterrupt bool // true if WriteInterrupt is a safe soft cancel once a session is established (ACP session/cancel notification; Claude uses SIGINT). Pre-handshake calls may still return ErrInterruptUnsupported because there is nothing to cancel yet — see ACPProtocol.WriteInterrupt for the canonical example.
-	StreamJSON    bool // true if the protocol's wire format is stream-json (Claude) vs something else (ACP JSON-RPC)
+	// Replay is the only field read in production today. true if the
+	// protocol replays stdin user messages back as events with a
+	// round-tripped uuid (Claude stream-json); required for passthrough
+	// slot matching.
+	Replay bool
+	// Priority is reserved. Set by ClaudeProtocol but not yet consumed —
+	// today /urgent gates on Process.SupportsPriority() directly.
+	Priority bool
+	// SoftInterrupt is reserved. true if WriteInterrupt is a safe soft
+	// cancel once a session is established (ACP session/cancel
+	// notification; Claude uses SIGINT). Pre-handshake calls may still
+	// return ErrInterruptUnsupported because there is nothing to cancel
+	// yet — see ACPProtocol.WriteInterrupt for the canonical example.
+	SoftInterrupt bool
+	// StreamJSON is reserved. true if the protocol's wire format is
+	// stream-json (Claude) vs something else (ACP JSON-RPC). Today
+	// Name()=="acp" type-checks suffice; this field anticipates a
+	// third backend whose name does not encode the wire shape.
+	StreamJSON bool
 }
 
 // ProtocolCaps returns the capability set of any Protocol. Default
