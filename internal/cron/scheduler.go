@@ -1568,6 +1568,21 @@ type preflightResult struct {
 	stubRefresh func()
 }
 
+// preflightArgs bundles the eight inputs freshContextPreflightP0 needs.
+// Mirrors the finishArgs / inflightCAS struct-literal pattern used elsewhere
+// in this scheduler so adding a parameter (e.g. a future cancel channel) is
+// a single struct-field edit instead of churning every call site. R229-CR-8.
+type preflightArgs struct {
+	job       *Job
+	snap      jobSnapshot
+	key       string
+	lg        *slog.Logger
+	notifyTo  NotifyTarget
+	runID     string
+	startedAt time.Time
+	trigger   TriggerKind
+}
+
 // freshContextPreflightP0 handles the fresh-mode prologue: ctx-cancel guard
 // (CRON3), work-dir reachability check (CRON2), Reset, and the post-Reset
 // existence re-check that prevents a leaked CLI process tied to a deleted
@@ -1586,18 +1601,19 @@ type preflightResult struct {
 //
 // In persistent mode (snap.fresh=false) the helper short-circuits with
 // ok=true and a no-op stubRefresh so the caller's flow is uniform.
-func (s *Scheduler) freshContextPreflightP0(j *Job, snap jobSnapshot, key string, lg *slog.Logger, notifyTo NotifyTarget, runID string, startedAt time.Time, trigger TriggerKind) (preflightResult, bool) {
+func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (preflightResult, bool) {
+	snap := args.snap
 	if !snap.fresh {
 		return preflightResult{stubRefresh: func() {}}, true
 	}
 	if err := s.stopCtx.Err(); err != nil {
-		lg.Info("cron fresh spawn suppressed during shutdown", "err", err)
+		args.lg.Info("cron fresh spawn suppressed during shutdown", "err", err)
 		// Treat shutdown-cancel as canceled (not failed); skipPersist=true
 		// preserves prior recordResult semantics where ctx-cancel did not
 		// touch LastRunAt. The broadcast still emits so the dashboard sees
 		// the run's terminal frame.
 		s.finishRun(finishArgs{
-			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
 			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
 			skipPersist: true,
 			prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
@@ -1605,19 +1621,19 @@ func (s *Scheduler) freshContextPreflightP0(j *Job, snap jobSnapshot, key string
 		return preflightResult{stubRefresh: func() {}}, false
 	}
 	if !workDirReachable(snap.workDir) {
-		lg.Warn("cron fresh spawn aborted: work_dir unreachable",
+		args.lg.Warn("cron fresh spawn aborted: work_dir unreachable",
 			"work_dir", snap.workDir)
 		s.finishRun(finishArgs{
-			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
 			state: RunStateFailed, errClass: ErrClassWorkDirUnreachable,
 			errMsg: "work_dir unreachable",
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.jobID))
+		s.deliverNotice(args.notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.jobID))
 		return preflightResult{stubRefresh: func() {}}, false
 	}
-	s.router.Reset(key)
-	lg.Info("cron fresh context: session reset before run")
+	s.router.Reset(args.key)
+	args.lg.Info("cron fresh context: session reset before run")
 	stubRefresh := func() {
 		s.mu.RLock()
 		jobCopy, exists := s.jobs[snap.jobID]
@@ -1634,11 +1650,11 @@ func (s *Scheduler) freshContextPreflightP0(j *Job, snap jobSnapshot, key string
 	_, stillExists := s.jobs[snap.jobID]
 	s.mu.RUnlock()
 	if !stillExists {
-		lg.Info("cron job deleted mid-execute, skipping GetOrCreate")
+		args.lg.Info("cron job deleted mid-execute, skipping GetOrCreate")
 		// Job deleted mid-execute: treat as canceled; no recordResult
 		// (matches historical behaviour) but broadcast for visibility.
 		s.finishRun(finishArgs{
-			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
 			state: RunStateCanceled, errClass: ErrClassCanceled,
 			errMsg: "job deleted mid-execute", skipPersist: true,
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
@@ -1845,7 +1861,10 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// path we skip stubRefresh because the live session carries its own
 	// sidebar entry. Persistent mode short-circuits inside the helper
 	// with a no-op stubRefresh.
-	preflight, ok := s.freshContextPreflightP0(j, snap, key, lg, notifyTo, runID, startedAt, trigger)
+	preflight, ok := s.freshContextPreflightP0(preflightArgs{
+		job: j, snap: snap, key: key, lg: lg, notifyTo: notifyTo,
+		runID: runID, startedAt: startedAt, trigger: trigger,
+	})
 	if !ok {
 		preflight.stubRefresh()
 		return
