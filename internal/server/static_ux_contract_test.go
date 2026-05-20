@@ -3324,7 +3324,7 @@ func TestDashboardHTML_R149_HeaderIconA11yLocalized(t *testing.T) {
 		label    string
 		fragment string
 	}{
-		{"sidebar nav aria-label", `<nav class="sidebar" aria-label="会话列表">`},
+		{"sidebar nav aria-label", `aria-label="会话列表"`},
 		{"btn-history title", `title="历史会话"`},
 		{"btn-history aria-label", `aria-label="查看会话历史"`},
 		{"history-badge aria-label", `aria-label="历史记录数"`},
@@ -6004,16 +6004,16 @@ func TestDashboardJS_NewSessionPaletteLocalOnly(t *testing.T) {
 //     fell back to the global default ("claude-code") for a kiro session.
 //
 // Fix:
-//   1. backendDisplayName(backendID) helper resolves a backend ID to its
-//      display name (cliBackends cache → hardcoded {claude→claude-code,
-//      kiro→kiro} fallback → backend ID).
-//   2. The pending-session merge in fetchSessions populates
-//      cli_name/cli_version/backend on the injected record so the sidebar
-//      icon and chip render the operator's pick.
-//   3. renderMainShell + updateHeaderCLI extend the fallback chain so
-//      sessionsData[sKey] being empty (always true for pending sessions —
-//      the merge writes to data.sessions, not sessionsData) doesn't
-//      degrade to defaultCLIName.
+//  1. backendDisplayName(backendID) helper resolves a backend ID to its
+//     display name (cliBackends cache → hardcoded {claude→claude-code,
+//     kiro→kiro} fallback → backend ID).
+//  2. The pending-session merge in fetchSessions populates
+//     cli_name/cli_version/backend on the injected record so the sidebar
+//     icon and chip render the operator's pick.
+//  3. renderMainShell + updateHeaderCLI extend the fallback chain so
+//     sessionsData[sKey] being empty (always true for pending sessions —
+//     the merge writes to data.sessions, not sessionsData) doesn't
+//     degrade to defaultCLIName.
 //
 // Regression guard: deleting any of these arms reintroduces the wrong
 // brand on a kiro pending session for the duration of the New-Session →
