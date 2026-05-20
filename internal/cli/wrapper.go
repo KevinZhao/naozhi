@@ -114,7 +114,12 @@ func backendDisplayName(backend string) string {
 
 // normalizeBackendID collapses empty/legacy aliases to the canonical ID.
 // Empty strings (from legacy configs omitting cli.backend) map to "claude".
+// Case-folds the input so an operator who writes "Claude" or "KIRO" in
+// config still hits the canonical key downstream — otherwise the backend
+// lookup fails silently and ops sees a "post-normalisation" log line that
+// looks correct, masking the misconfiguration. (R227-CR-6)
 func normalizeBackendID(backend string) string {
+	backend = strings.ToLower(strings.TrimSpace(backend))
 	switch backend {
 	case "", "claude":
 		return "claude"

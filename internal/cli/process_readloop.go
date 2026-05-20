@@ -494,17 +494,16 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 			ev.TaskType != "local_bash" && ev.TaskID != "" && ev.ToolUseID != "" {
 			taskID := ev.TaskID
 			toolUseID := ev.ToolUseID
-			name := ev.Description
-			if nameTrim := strings.TrimSpace(name); nameTrim != "" {
-				// task_started.description is "<name>: <prompt body>"
-				// for teammates; for sub-agents it's just the prompt.
-				// The linker's fast path works either way; trimming
-				// to the name prefix only helps the name-scan fallback.
-				if idx := strings.IndexByte(nameTrim, ':'); idx > 0 {
-					name = strings.TrimSpace(nameTrim[:idx])
-				} else {
-					name = nameTrim
-				}
+			// task_started.description is "<name>: <prompt body>" for
+			// teammates; for sub-agents it's just the prompt. The
+			// linker's fast path works either way; trimming to the
+			// name prefix only helps the name-scan fallback. Single
+			// TrimSpace pass — the colon-prefix branch trims again
+			// because the prefix can carry leading whitespace from
+			// the producer. (R227-PERF-20)
+			name := strings.TrimSpace(ev.Description)
+			if idx := strings.IndexByte(name, ':'); idx > 0 {
+				name = strings.TrimSpace(name[:idx])
 			}
 			linker := p.linker
 			// R225-CR-10: cap description before handing it to a goroutine
