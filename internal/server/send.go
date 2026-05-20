@@ -580,7 +580,13 @@ func (h *Hub) sessionSendLegacy(p sendParams, onAsyncError func(string)) (bool, 
 	acquired := h.guard.TryAcquire(key)
 	needInterrupt := !acquired
 	if needInterrupt {
-		h.router.InterruptSession(key)
+		// R229-CR-5: prefer InterruptSessionSafe (control_request → SIGINT
+		// fallback) over raw InterruptSession. Raw SIGINT terminates Claude
+		// `-p` outright, burning a shim slot and losing resume context — the
+		// fast path here calls control_request first so the live shim/session
+		// survives for the queued follow-up. Falls back to SIGINT only when
+		// the protocol genuinely has no stdin-level interrupt (ACP).
+		h.router.InterruptSessionSafe(key)
 		slog.Debug("send: interrupted running session", "key", key)
 	}
 
