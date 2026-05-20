@@ -92,9 +92,15 @@ func CoalesceMessages(msgs []QueuedMsg) (string, []cli.ImageData) {
 			truncated++
 			continue
 		}
-		// Direct Fprintf into the builder — avoids the intermediate string
-		// that fmt.Sprintf would allocate on every queued message.
-		fmt.Fprintf(&b, "\n[%s] %s\n", m.EnqueueAt.Format("15:04"), m.Text)
+		// R228-PERF-19: direct WriteString avoids fmt's reflection path on
+		// the per-message hot loop. Format("15:04") still allocates a
+		// small string but that's unavoidable with time.Time.
+		b.WriteByte('\n')
+		b.WriteByte('[')
+		b.WriteString(m.EnqueueAt.Format("15:04"))
+		b.WriteString("] ")
+		b.WriteString(m.Text)
+		b.WriteByte('\n')
 	}
 	if truncated > 0 {
 		fmt.Fprintf(&b, "\n[系统] 已省略 %d 条后续消息（合并超出长度上限）。\n", truncated)
