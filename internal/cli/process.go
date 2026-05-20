@@ -735,6 +735,11 @@ func (p *Process) applyMetadata(m *EventMetadata) {
 		// Pre-existing units stay; new units are appended. Bounded
 		// growth: kiro currently emits only "credit"; even worst-case
 		// the unit set is ≤4 (credit, token, etc.).
+		// Hard cap on distinct units: the comment above asserts kiro
+		// emits ≤4 today, but a buggy upstream that started inventing
+		// new unit strings every turn would otherwise grow this slice
+		// without bound for the lifetime of the session. (R227-CR-11)
+		const maxMeteringUnits = 16
 		for _, in := range m.MeteringUsage {
 			merged := false
 			for i := range p.meteringUsage {
@@ -748,6 +753,9 @@ func (p *Process) applyMetadata(m *EventMetadata) {
 				}
 			}
 			if !merged {
+				if len(p.meteringUsage) >= maxMeteringUnits {
+					continue
+				}
 				p.meteringUsage = append(p.meteringUsage, in)
 			}
 		}
