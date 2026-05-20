@@ -44,6 +44,15 @@ func TestDashboardSidebarCollapseContract(t *testing.T) {
 		t.Error("dashboard.html: collapse buttons must call toggleSidebarCollapsed()")
 	}
 
+	// HTML: aria-controls must point at a real element id. Both triggers
+	// reference the sidebar; the sidebar must carry id="sidebar".
+	if !strings.Contains(html, `<nav class="sidebar" id="sidebar"`) {
+		t.Error("dashboard.html: sidebar nav must carry id=\"sidebar\" for aria-controls to be valid")
+	}
+	if !strings.Contains(html, `aria-controls="sidebar"`) {
+		t.Error("dashboard.html: collapse triggers must declare aria-controls=\"sidebar\"")
+	}
+
 	// HTML: the floating restore handle, kept outside .container so its
 	// position:fixed isn't affected by mobile drawer transforms on .sidebar.
 	if !strings.Contains(html, `id="btn-sidebar-show"`) {
@@ -65,11 +74,16 @@ func TestDashboardSidebarCollapseContract(t *testing.T) {
 		t.Error("dashboard.html: #btn-sidebar-show must live OUTSIDE .container (after </div>)")
 	}
 
-	// CSS: gating + restore-handle reveal both keyed off body.sidebar-collapsed.
+	// CSS: gating + restore-handle reveal + main-header padding all keyed
+	// off body.sidebar-collapsed. The padding rule is the fix for the
+	// floating handle (32×32 @ left:10px) overlapping the chat title;
+	// dropping it puts the handle on top of h2 text on cold-load.
 	for _, want := range []string{
-		`body.sidebar-collapsed .sidebar{display:none}`,
-		`body.sidebar-collapsed .resizer{display:none}`,
+		// Combined rule: .sidebar AND .resizer share a single display:none.
+		`body.sidebar-collapsed .sidebar,
+  body.sidebar-collapsed .resizer{display:none}`,
 		`body.sidebar-collapsed .sidebar-show-handle{display:inline-flex}`,
+		`body.sidebar-collapsed .main-header{padding-left:54px}`,
 	} {
 		if !strings.Contains(html, want) {
 			t.Errorf("dashboard.html CSS missing collapse rule: %q", want)
@@ -82,21 +96,38 @@ func TestDashboardSidebarCollapseContract(t *testing.T) {
 		t.Error("dashboard.html: collapse rules must be gated by @media(min-width:769px)")
 	}
 
-	// JS: toggle helper + persistence key + keyboard shortcut + mobile guard.
+	// JS: toggle helper + persistence key + keyboard shortcut + mobile guard
+	// + IME-composition guard + viewport-boundary listener + focus relocation.
 	for _, want := range []string{
 		`function toggleSidebarCollapsed()`,
-		`function applySidebarCollapsed(`,
+		`function applySidebarCollapsed(collapsed, moveFocus)`,
 		`'sidebar-collapsed'`,
 		`LS_SIDEBAR_COLLAPSED = 'sidebar_collapsed'`,
 		`lsSet(LS_SIDEBAR_COLLAPSED`,
 		`lsGet(LS_SIDEBAR_COLLAPSED`,
-		// keyboard shortcut: `[` triggers toggle outside inputs.
+		// Keyboard shortcut: `[` triggers toggle outside inputs.
 		`if (e.key !== '[')`,
-		// mobile guard: matchMedia(max-width: 768px) short-circuits the toggle.
+		// CJK IME composition: don't fire while a composition is active.
+		`if (e.isComposing) return;`,
+		// Mobile guard: matchMedia(max-width: 768px) short-circuits the toggle.
 		`(max-width: 768px)`,
+		// Focus relocation: user-driven toggle hands focus to the now-visible
+		// button so keyboard nav doesn't fall back to <body>.
+		`next.focus({preventScroll: true})`,
+		// Viewport-boundary listener: re-applies preference when crossing
+		// the mobile breakpoint (DevTools / rotation / resize).
+		`mql.addEventListener('change'`,
 	} {
 		if !strings.Contains(js, want) {
 			t.Errorf("dashboard.js missing collapse-related fragment: %q", want)
 		}
+	}
+
+	// JS: dead code that the previous round shipped — the title-rewrite
+	// branch on btnHide could never be visible because btnHide is
+	// display:none'd in the same paint as collapsed=true. Pin its absence
+	// so it doesn't get re-introduced by a future "fix".
+	if strings.Contains(js, "btnHide.title = collapsed") {
+		t.Error("dashboard.js: btnHide.title rewrite is dead code (button is display:none in the collapsed paint); remove it")
 	}
 }
