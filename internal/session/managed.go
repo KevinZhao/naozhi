@@ -1489,16 +1489,12 @@ func costUnitForBackend(backendID string) string {
 
 var costUnitForBackendOnce sync.Once
 
-// isActivityType mirrors the EventLog.Append type set that updates
-// lastActivitySummary, so any caller scanning history for "what was
-// the last activity" sees the same surface. Keeping the predicate
-// here (rather than reaching into cli) avoids importing cli from
-// session for a fixed string set; the trade-off is that adding a new
-// activity type requires touching both files. (R227-CR-1)
+// isActivityType delegates to cli.IsActivityType so EventLog.Append's
+// lastActivitySummary surface and the cold-path JSONL scan in
+// extractLastPromptCold agree on the same set by construction. The
+// previous local copy required hand-synchronizing two switch sites and
+// silently drifted whenever a new activity type landed (R228-CR-3 —
+// supersedes the trade-off note from R227-CR-1).
 func isActivityType(t string) bool {
-	switch t {
-	case "tool_use", "thinking", "agent", "task_start", "task_progress", "todo":
-		return true
-	}
-	return false
+	return cli.IsActivityType(t)
 }

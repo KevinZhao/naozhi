@@ -97,6 +97,26 @@ func sanitizeImagesAligned(imgs, paths []string) ([]string, []string) {
 	return filtered, filteredPaths
 }
 
+// IsActivityType reports whether an EventEntry.Type counts as a "live
+// activity" event for the purposes of lastActivitySummary tracking.
+//
+// EventLog.Append / AppendBatch update lastActivitySummary for any entry
+// whose Type matches this set; session.ManagedSession.extractLastPromptCold
+// (and any other caller scanning history for "what was the last activity")
+// MUST query through this function so the in-memory snapshot and the
+// cold-path JSONL replay agree on the same surface.
+//
+// Adding a new activity type now requires touching one place instead of
+// two switch sites that previously had to stay synchronized by hand
+// (R228-CR-3).
+func IsActivityType(t string) bool {
+	switch t {
+	case "tool_use", "thinking", "agent", "task_start", "task_progress", "todo":
+		return true
+	}
+	return false
+}
+
 // EventEntry is a simplified event record for the dashboard.
 type EventEntry struct {
 	// UUID is a 32-char lowercase hex identity for this event,
@@ -674,11 +694,11 @@ func (l *EventLog) Append(e EventEntry) {
 	// racing with a concurrent live Append's Store — the serialization on
 	// l.mu guarantees last-writer-wins matches entry-order, not
 	// entry-ordering-inverted by lock release scheduling.
-	switch e.Type {
-	case "user":
+	switch {
+	case e.Type == "user":
 		storeAtomicString(&l.lastPromptSummary, e.Summary)
 		l.userTurnCount.Add(1)
-	case "tool_use", "thinking", "agent", "task_start", "task_progress", "todo":
+	case IsActivityType(e.Type):
 		storeAtomicString(&l.lastActivitySummary, e.Summary)
 	}
 
@@ -792,12 +812,12 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 		// separate from the value so an empty final Summary still
 		// overwrites the atomic — Append stores unconditionally for these
 		// types, and diverging here would leave stale summaries visible.
-		switch e.Type {
-		case "user":
+		switch {
+		case e.Type == "user":
 			lastPrompt = e.Summary
 			sawPrompt = true
 			userDelta++
-		case "tool_use", "thinking", "agent", "task_start", "task_progress", "todo":
+		case IsActivityType(e.Type):
 			lastActivity = e.Summary
 			sawActivity = true
 		}
