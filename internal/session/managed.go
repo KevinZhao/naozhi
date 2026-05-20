@@ -989,9 +989,9 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 		// after spawn until the first result event triggered a save).
 		liveModel := proc.Model()
 		if liveModel != "" {
-			if liveModel != s.Model() {
-				s.SetModel(liveModel)
-			}
+			// SetModel internally short-circuits when the value is unchanged,
+			// so the outer equality check would just duplicate that work.
+			s.SetModel(liveModel)
 			snap.Model = liveModel
 		} else {
 			snap.Model = s.Model()
@@ -1066,11 +1066,11 @@ func (s *ManagedSession) Snapshot() SessionSnapshot {
 }
 
 // hasInjectedHistory reports whether persistedHistory contains any entries.
-// Used by the startup history loader (router.go, R53-ARCH-001 fix) to decide
-// whether the deferred JSONL backfill path is needed: if ReconnectShims
-// already injected history via proc.InjectHistory → s.InjectHistory → the
-// persistedHistory append at managed.go:778, the flag is set and we skip
-// the redundant FS read. Read-only, no copy — callers just need a boolean.
+// Used by the startup history loader (R53-ARCH-001 fix) to decide whether
+// the deferred JSONL backfill path is needed: if ReconnectShims already
+// injected history via proc.InjectHistory → s.InjectHistory's
+// persistedHistory append, the flag is set and we skip the redundant FS
+// read. Read-only, no copy — callers just need a boolean.
 func (s *ManagedSession) hasInjectedHistory() bool {
 	s.historyMu.RLock()
 	defer s.historyMu.RUnlock()
@@ -1378,19 +1378,7 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	// it out of historyMu lets concurrent readers (EventEntries / EventEntriesSince
 	// / EventEntriesBefore) proceed during 500-entry JSONL replays at startup.
 	// R61-PERF-9.
-	var prompt, activity string
-	for i := len(entries) - 1; i >= 0; i-- {
-		e := entries[i]
-		if prompt == "" && e.Type == "user" {
-			prompt = e.Summary
-		}
-		if activity == "" && isActivityType(e.Type) {
-			activity = e.Summary
-		}
-		if prompt != "" && activity != "" {
-			break
-		}
-	}
+	prompt, activity := scanLastSummaries(entries)
 
 	s.historyMu.Lock()
 	s.persistedHistory = append(s.persistedHistory, entries...)
@@ -1433,8 +1421,19 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 	if p == nil {
 		return
 	}
-	entries := p.EventEntries()
-	var prompt, activity string
+	prompt, activity := scanLastSummaries(p.EventEntries())
+	if prompt != "" && loadAtomicString(&s.lastPrompt) == "" {
+		storeAtomicString(&s.lastPrompt, prompt)
+	}
+	if activity != "" && loadAtomicString(&s.lastActivity) == "" {
+		storeAtomicString(&s.lastActivity, activity)
+	}
+}
+
+// scanLastSummaries walks entries in reverse, returning the most-recent
+// user-prompt summary and the most-recent activity summary. Stops early once
+// both are found. Used by InjectHistory and extractLastPromptFromProcess.
+func scanLastSummaries(entries []cli.EventEntry) (prompt, activity string) {
 	for i := len(entries) - 1; i >= 0; i-- {
 		e := entries[i]
 		if prompt == "" && e.Type == "user" {
@@ -1447,12 +1446,7 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 			break
 		}
 	}
-	if prompt != "" && loadAtomicString(&s.lastPrompt) == "" {
-		storeAtomicString(&s.lastPrompt, prompt)
-	}
-	if activity != "" && loadAtomicString(&s.lastActivity) == "" {
-		storeAtomicString(&s.lastActivity, activity)
-	}
+	return prompt, activity
 }
 
 // costUnitForBackend returns the SessionSnapshot.CostUnit value for a given

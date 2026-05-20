@@ -24,6 +24,8 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 )
 
+// Remove removes a session from the router and kills its process.
+// Used by the dashboard to hide sessions from the list.
 func (r *Router) Remove(key string) bool {
 	r.mu.Lock()
 	s, ok := r.sessions[key]

@@ -1,14 +1,12 @@
 package cron
 
 import (
-	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
-	"log"
 	"log/slog"
 	mrand "math/rand/v2"
 	"os"
@@ -507,7 +505,7 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 			allowedRootResolved = r
 		}
 	}
-	cronLogger := robfigcron.PrintfLogger(log.New(slogWriter{}, "cron: ", 0))
+	cronLogger := robfigcron.PrintfLogger(slogPrintfLogger{})
 	loc := cfg.Location
 	if loc == nil {
 		loc = time.Local
@@ -2683,27 +2681,21 @@ func applyJitter(ctx context.Context, schedule string, jitterMax time.Duration) 
 	}
 }
 
-// slogWriter adapts slog to io.Writer so robfig/cron's PrintfLogger can route
-// through the project's structured logger instead of standard log.
+// slogPrintfLogger satisfies the Printf interface that robfig/cron's
+// PrintfLogger expects, routing every emitted line through slog instead of
+// the standard log package.
 //
 // Observability note: robfig/cron wraps this via non-verbose PrintfLogger
 // (logger.go:28 in the vendored lib) which only emits Error() — its Info()
-// path is compiled out when logInfo=false. So every line reaching Write is
+// path is compiled out when logInfo=false. So every line reaching Printf is
 // effectively an error-grade event (recover panic, skip-if-still-running
-// notice, schedule parse failure). Previously logged at Warn; keep at Warn
-// rather than elevating to Error because SkipIfStillRunning fires on normal
-// slow-job scenarios that operators don't want paging on. Format emitted
-// via log.New(w, "cron: ", 0) is `"cron: <msg>, error=<err>"`; strip the
-// "cron: " prefix for readability and pass the rest as a single message
-// attribute for structured logging consumers.
-type slogWriter struct{}
+// notice, schedule parse failure). Logged at Warn rather than Error because
+// SkipIfStillRunning fires on normal slow-job scenarios that operators don't
+// want paging on.
+type slogPrintfLogger struct{}
 
-func (slogWriter) Write(p []byte) (int, error) {
-	// Trim on the byte slice first so the single string conversion only
-	// happens on the already-shortened payload — avoids one alloc per cron
-	// log line.
-	msg := string(bytes.TrimRight(p, "\n"))
-	msg = strings.TrimPrefix(msg, "cron: ")
+func (slogPrintfLogger) Printf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	msg = strings.TrimRight(msg, "\n")
 	slog.Warn("cron logger", "msg", msg)
-	return len(p), nil
 }
