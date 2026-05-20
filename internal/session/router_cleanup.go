@@ -662,6 +662,7 @@ func (r *Router) shutdown() {
 			// finish and naozhi exits cleanly.
 			defer func() {
 				if r := recover(); r != nil {
+					metrics.PanicRecoveredTotal.Add(1)
 					slog.Error("session shutdown: detach panicked",
 						"panic", r, "stack", string(debug.Stack()))
 				}
