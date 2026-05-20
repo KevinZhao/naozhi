@@ -18,6 +18,8 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/textutil"
+	"github.com/naozhi/naozhi/internal/usermsg"
 )
 
 // platformReplyTimeout caps every outbound platform.Reply / EditMessage
@@ -627,68 +629,27 @@ func (d *Dispatcher) sendAndReply(
 	if err != nil {
 		d.replyErrorCount.Add(1)
 		log.Error("send to claude", "err", err)
-		// NOTE: keep this switch in sync with server/errors_usermsg.go which
-		// emits user-facing strings for the dashboard send path. The IM path
-		// (here) embeds timeout durations in Chinese; the WS path is generic.
-		// Adding a new sentinel here without mirroring there causes drift.
+		// IM path keeps two timeout-aware specialisations (the configured
+		// no-output / total durations rendered in Chinese) before falling
+		// back to the shared sentinel→message helper. Dashboard send path
+		// (server/errors_usermsg.go) collapses the timeout cases to the
+		// generic "处理超时，请简化任务后重试。" because it has no per-
+		// session timeout configured.
+		// /clear early-return mirrors the prior behaviour: the user just
+		// triggered the reset, so we suppress the extra "会话已重置" reply.
+		if errors.Is(err, cli.ErrSessionReset) {
+			return
+		}
 		var errMsg string
 		switch {
 		case errors.Is(err, cli.ErrNoOutputTimeout):
 			d.watchdogNoOutputKills.Add(1)
-			errMsg = fmt.Sprintf("⏱️ 处理超时（%s 无输出），请简化任务后重试。", formatChineseDuration(d.noOutputTimeout))
+			errMsg = fmt.Sprintf("⏱️ 处理超时（%s 无输出），请简化任务后重试。", textutil.FormatChineseDuration(d.noOutputTimeout))
 		case errors.Is(err, cli.ErrTotalTimeout):
 			d.watchdogTotalKills.Add(1)
-			errMsg = fmt.Sprintf("⏱️ 处理超时（总耗时超过 %s），请拆分为更小的任务。", formatChineseDuration(d.totalTimeout))
-		case errors.Is(err, cli.ErrProcessExited):
-			// Subprocess died mid-turn. The next user message triggers
-			// GetOrCreate to spawn a fresh process transparently; tell
-			// the user to resend (do NOT claim "already reconnected" —
-			// the reconnect happens on their next message).
-			errMsg = "进程意外退出，请重新发送消息，系统会自动重启会话。"
-		case errors.Is(err, cli.ErrAbortedByUrgent):
-			// /urgent preempted this message before the model saw it.
-			// Dispatcher keeps the user-facing message short — the urgent
-			// follow-up's own reply is already being processed.
-			errMsg = "上一条消息已被 /urgent 打断，请在当前任务完成后重发。"
-		case errors.Is(err, cli.ErrReconnectedUnknown):
-			errMsg = "系统已重启，处理状态未知，请查看历史记录或重发。"
-		case errors.Is(err, cli.ErrSessionReset):
-			// User triggered /new or /clear — they know what happened; suppress
-			// the extra bot reply (return early without posting errMsg).
-			return
-		case errors.Is(err, cli.ErrTooManyPending):
-			errMsg = "当前会话排队已满，请稍候或使用 /stop 取消。"
-		case errors.Is(err, cli.ErrProcessBusy):
-			// Legacy (non-passthrough) state machine says "turn already running".
-			// Surface this distinctly so users don't get the generic /new reset
-			// hint for what is actually a transient "wait for current turn".
-			errMsg = "当前会话正在处理上一条消息，请稍候再发。"
-		case errors.Is(err, cli.ErrMessageTooLarge):
-			// Distinct from the generic "/new" hint — a reset won't help, the
-			// only remedy is to shorten the message or downscale attachments.
-			errMsg = "消息内容过大，请缩短后重试。"
-		case errors.Is(err, cli.ErrOrphanedSlot):
-			errMsg = "处理超时，请稍后重试。"
-		case errors.Is(err, session.ErrNoActiveProcess):
-			// Session has no attached process (paused / reclaimed). A fresh
-			// send will re-spawn via GetOrCreate; the user just needs to retry.
-			// R218-CR-2: distinguish cron-namespace keys so an operator running
-			// fresh_context cron jobs doesn't see an irrelevant "/new 重置" hint
-			// — cron keys aren't user-typeable and /new doesn't apply.
-			if session.IsCronKey(key) {
-				errMsg = "定时任务会话已休眠，下一次触发会自动唤醒。"
-			} else {
-				errMsg = "会话已休眠，请重新发送消息以唤醒。"
-			}
-		case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
-			// Mirrors server/errors_usermsg.go — when ctx is cancelled by
-			// shutdown or hits its deadline, surface a "system restart" hint
-			// instead of the generic /new reset prompt. Without this branch
-			// the IM user sees "处理失败" while the dashboard reads "系统正在重启"
-			// for the same underlying error (R215-CR-P2-1 drift).
-			errMsg = "系统正在重启，请稍后重试。"
+			errMsg = fmt.Sprintf("⏱️ 处理超时（总耗时超过 %s），请拆分为更小的任务。", textutil.FormatChineseDuration(d.totalTimeout))
 		default:
-			errMsg = "处理失败，请发送 /new 重置后重试。"
+			errMsg = usermsg.ForSendError(err, key)
 		}
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, 3); err != nil {
 			d.sendFailCount.Add(1)
@@ -813,35 +774,6 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 			d.markReplySuccess()
 		}
 	}
-}
-
-// formatChineseDuration formats a duration into a short Chinese string.
-// Mixed durations (90m → "1 小时 30 分钟", 90s → "1 分钟 30 秒") are
-// rendered with the largest meaningful unit pair; pure-round durations
-// collapse to a single unit for readability.
-func formatChineseDuration(d time.Duration) string {
-	if d <= 0 {
-		return "未知"
-	}
-	if d >= time.Hour {
-		h := int(d / time.Hour)
-		rem := d - time.Duration(h)*time.Hour
-		m := int(rem / time.Minute)
-		if m == 0 {
-			return fmt.Sprintf("%d 小时", h)
-		}
-		return fmt.Sprintf("%d 小时 %d 分钟", h, m)
-	}
-	if d >= time.Minute {
-		m := int(d / time.Minute)
-		rem := d - time.Duration(m)*time.Minute
-		s := int(rem / time.Second)
-		if s == 0 {
-			return fmt.Sprintf("%d 分钟", m)
-		}
-		return fmt.Sprintf("%d 分钟 %d 秒", m, s)
-	}
-	return fmt.Sprintf("%d 秒", int(d.Seconds()))
 }
 
 // replyTracker manages IM status message streaming (thinking -> tool_use -> result).
