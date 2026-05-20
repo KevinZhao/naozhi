@@ -1,9 +1,11 @@
 package server
 
 import (
+	"encoding/json"
 	"testing"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/node"
 )
 
 // TestCapHistoryBatch locks in R68-PERF-H1: eventPushLoop must truncate
@@ -94,4 +96,33 @@ func repeatByte(b byte, n int) string {
 		out[i] = b
 	}
 	return string(out)
+}
+
+// TestWSPreMarshalledFrames locks the byte-for-byte contract between
+// wshub.go's pre-encoded error frames and the JSON output that the
+// equivalent SendJSON(node.ServerMsg{...}) call would produce. Field
+// reordering or omitempty changes in node.ServerMsg would silently
+// break older clients that rely on a specific JSON shape, so any drift
+// must surface here. R229-PERF-4.
+func TestWSPreMarshalledFrames(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		got  []byte
+		msg  node.ServerMsg
+	}{
+		{"not authenticated", wsErrNotAuthMsg, node.ServerMsg{Type: "error", Error: "not authenticated"}},
+		{"rate limited", wsErrRateLimitedMsg, node.ServerMsg{Type: "error", Error: "rate limited"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			want, err := json.Marshal(tc.msg)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if string(tc.got) != string(want) {
+				t.Fatalf("pre-marshalled frame drift\n  got=%s\n want=%s", tc.got, want)
+			}
+		})
+	}
 }
