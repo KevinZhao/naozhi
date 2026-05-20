@@ -226,48 +226,19 @@ var cronParser = robfigcron.NewParser(
 // Prevents resource exhaustion from overly frequent schedules like "@every 1s".
 const minCronInterval = 5 * time.Minute
 
-// jobTimeoutMargin is the fixed safety gap between a job's deadline and its
-// next scheduled tick. period − margin gives a long task as much wall-clock
-// budget as we can afford while still leaving room for SkipIfStillRunning /
-// jobRunningGuard to clear before the next trigger. A constant beats a
-// ratio because operators reading the cron UI can predict the deadline:
-// "hourly → 59 min" is intuitive, "hourly → 48 min" was not (a 0.8 ratio
-// silently halved the headroom for hourly + dropped further for sub-hourly).
-const jobTimeoutMargin = 60 * time.Second
-
-// minJobTimeout floors the scaled timeout so schedules near minCronInterval
-// (5m − 60s = 4m) still leave the job a workable budget. 3m matches the
-// smallest prompt-roundtrip plus startup shim reconnect observed in prod.
-const minJobTimeout = 3 * time.Minute
-
-// computeJobTimeout returns the per-run deadline for a job whose schedule is
-// `schedule`. The timeout is period − jobTimeoutMargin, clamped to
-// [minJobTimeout, maxCap]. maxCap is the scheduler-level ceiling
-// (SchedulerConfig.ExecTimeout) so operators retain a global upper bound.
+// computeJobTimeout returns the per-run deadline for a job. The timeout is
+// always maxCap (SchedulerConfig.ExecTimeout) — independent of schedule
+// period.
 //
-// Clamp order matters: cap is applied last so a caller-configured cap that
-// happens to sit below minJobTimeout (pathological / misconfiguration —
-// the SchedulerConfig.ExecTimeout default in scheduler.go is 5m, above the
-// 3m floor; config.yaml in this repo overrides to 8h) still wins. Without
-// that final cap clamp a 30s-cap caller would get 3m back, which would
-// violate the "operators retain a global upper bound" contract.
-//
-// If schedule is unparseable or the period is non-positive (fixed times, DST
-// edge), returns maxCap — safer to fall back to the historical single-timeout
-// behaviour than to misapply the margin to an undefined period.
+// Why no period scaling: a long-running task (e.g. hourly job that takes 70m)
+// should not be killed mid-flight just because the next scheduled tick is
+// approaching. robfig/cron's SkipIfStillRunning chain wrapper already handles
+// that case correctly: the next scheduled tick is dropped, the in-flight run
+// continues, and the tick after that gets a clean slot. The schedule parameter
+// is kept for signature stability and future extension.
 func computeJobTimeout(schedule string, maxCap time.Duration) time.Duration {
-	period := schedulePeriod(schedule, time.Now())
-	if period <= 0 {
-		return maxCap
-	}
-	scaled := period - jobTimeoutMargin
-	if scaled < minJobTimeout {
-		scaled = minJobTimeout
-	}
-	if scaled > maxCap {
-		scaled = maxCap
-	}
-	return scaled
+	_ = schedule
+	return maxCap
 }
 
 // schedulePeriod 估算给定 cron 表达式在参考时刻 now 附近的周期（相邻两次
