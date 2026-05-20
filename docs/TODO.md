@@ -171,7 +171,7 @@
 - [ ] **R226-PERF-8 — `process_event_format.TodosDetailJSON` 二次 marshal（P2）**: `block.Input` → `[]TodoItem` → marshal，可直接从 `block.Input` 提 `"todos"` 字段 raw bytes。`internal/cli/process_event_format.go:173`。
 - [x] **R226-PERF-9 — `ACPProtocol.WriteInterrupt` 每次 `json.Marshal`（P2）**: 静态模板 + UUID 拼接可省反射。`internal/cli/protocol_acp.go:274`。 — 已修复（手写字节模板 + 仅 sessionId 走 json.Marshal 快路径），本批 PR #151
 - [ ] **R226-PERF-10 — `process_shim_io.shimWriter.Write` fast path `string(data[:len-1])` 拷贝（P3，封 R71-PERF-H1）**: shimClientMsg.Line 改 `json.RawMessage`。
-- [ ] **R226-PERF-11 — `ACPProtocol.mu` 同时保护 sessionID 和 textBuf（P3）**: chunk 高频时 textBuf 锁污染 sessionID 读路径。方案：sessionID 改 `atomic.Pointer[string]`（已有 model 先例）。`internal/cli/protocol_acp.go:88`。
+- [x] **R226-PERF-11 — `ACPProtocol.mu` 同时保护 sessionID 和 textBuf（P3）**: chunk 高频时 textBuf 锁污染 sessionID 读路径。方案：sessionID 改 `atomic.Pointer[string]`（已有 model 先例）。`internal/cli/protocol_acp.go:88`。 — 已修复，本批 PR #158
 
 ### 代码质量 — 本轮新发现
 
@@ -237,10 +237,10 @@
 
 - [ ] **R225-SEC-1 — `cli.Wrapper.BuildArgs ExtraArgs` 缺 flag 允许列表（P1 R219-SEC-1 重申）**: 认证 dashboard 用户可以通过 ExtraArgs 注入 `--mcp-config`/`--add-dir`/`--skip-permissions` 等改变 CLI 行为的参数。capExtraArgsBytes 仅查字节长度。方案：维护 flag denylist（或 allowlist），在 BuildArgs 之前过滤；Breaking：依赖任意 ExtraArgs 的 ops 需迁移。
 - [ ] **R225-SEC-2 — `shim.moveToShimsCgroup` 不验 CLIPID 是否真的是 shim 子进程（P1 R219-SEC-5 重申）**: handle.Hello.CLIPID 来自 shim 自报，naozhi 直接 sudo busctl 把任意 PID 移入 cgroup（可能是 sshd / pid=1）。方案：读 `/proc/<CLIPID>/status` 验 PPid == cmd.Process.Pid。
-- [ ] **R225-SEC-3 — `selfupdate.Replace` 固定 `.staging/.bak` 路径多用户竞争（P2 R224-SEC-1 第③项）**: 固定路径在多用户共享 install dir 下可被另一 UID 抢先创建。方案：`os.CreateTemp(filepath.Dir(installPath), ".naozhi-upgrade-*.staging")` rename 到位。
+- [x] **R225-SEC-3 — `selfupdate.Replace` 固定 `.staging/.bak` 路径多用户竞争（P2 R224-SEC-1 第③项）**: 固定路径在多用户共享 install dir 下可被另一 UID 抢先创建。方案：`os.CreateTemp(filepath.Dir(installPath), ".naozhi-upgrade-*.staging")` rename 到位。 — 已修复（CreateTemp 随机后缀 + 测试改 Glob），本批 PR #158
 - [ ] **R225-SEC-4 — `selfupdate.checksums.txt` 未做 GPG/cosign 签名验证（P3 R224-SEC-1 第④项长期）**: GitHub Releases CDN 同时被妥协时 hash 与 binary 都可被换。方案：release 流程对 checksums.txt cosign 签名 + verifyChecksum 前置签名校验。
 - [x] **R225-SEC-5 — `dashboard project_files preview` 允许 `.env` 走 text/plain 预览（P3）**: previewableByExt 把 `.env` 映为 text/plain；认证用户可 `?path=.env&mode=preview` 预览敏感配置。方案：servePreview 拒高风险文件名（`.env`/`*.key`/`*.pem`），或在文档明示这是预期。 — 已修复（previewableByExt 移除 .env 条目；落到 DetectContentType → application/octet-stream 被 servePreview MIME 守卫拒；新增 TestPreviewableByExt_DoesNotIncludeDotEnv 锁契约），本批 PR #150
-- [ ] **R225-SEC-6 — `EffectivePlannerPrompt` 的 byte 循环不调 `osutil.IsLogInjectionRune`（P3）**: project/manager.go:344 全局默认 prompt 路径只过滤 C0 字节，bidi override 字符可绕过。方案：在过滤循环之后加 rune 扫描调 IsLogInjectionRune（与 ValidateConfig 对齐）。
+- [x] **R225-SEC-6 — `EffectivePlannerPrompt` 的 byte 循环不调 `osutil.IsLogInjectionRune`（P3）**: project/manager.go:344 全局默认 prompt 路径只过滤 C0 字节，bidi override 字符可绕过。方案：在过滤循环之后加 rune 扫描调 IsLogInjectionRune（与 ValidateConfig 对齐）。 — 已修复，本批 PR #158
 
 ### 性能 — 本轮新发现
 
@@ -254,7 +254,7 @@
 - [ ] **R225-PERF-8 — `shimWriter.Write` fast path `string(data[:len-1])` 强制 byte→string copy（P2）**: process_shim_io.go:54 每条 stdin 一次必要 alloc。方案：`shimClientMsg.Line` 改 `[]byte` + 自定义 Marshaler，或在已知 data 不被改时用 `unsafe.String`。
 - [ ] **R225-PERF-9 — `wshub.eventPushLoop` 同一 session 多 WS 各自 marshal（P2）**: wshub.go:1028 50 个标签页同 session 时同批事件 marshal 50 次。方案：Hub 层一次 marshal fan-out 同一 immutable []byte 引用。
 - [ ] **R225-PERF-10 — `marshalPooled` 每次 copy 一份独立 backing（P2）**: dashboard.go:83 高频 broadcast 下不可避免；考虑对固定组合 session_state 做 LRU 缓存。
-- [ ] **R225-PERF-11 — `eventlog.Append` UUID 生成在锁内（P2）**: eventlog.go:596 Append 持 mu.Lock 期间调 stampUUID → crypto/rand 系统调用。方案：在锁外预先生成。
+- [x] **R225-PERF-11 — `eventlog.Append` UUID 生成在锁内（P2）**: eventlog.go:596 Append 持 mu.Lock 期间调 stampUUID → crypto/rand 系统调用。方案：在锁外预先生成。 — 已修复（Append + AppendBatch 同改），本批 PR #158
 - [ ] **R225-PERF-12 — `agent_message_chunk` `p.mu.Lock` 复用保护 textBuf（P2）**: protocol_acp.go:494 高频 chunk 与 sessionID 共享一锁；evaluate 把 textBuf 移入 readLoop 私有或独立细粒度 mu。
 - [x] **R225-PERF-13 — `subagent_link.SetAgentInternalID` 持 wlock 做 O(500) 回扫（P3）**: eventlog.go:553 短时阻塞所有 Append。方案：early-exit + 限制最大回扫深度（≤50）。 — 已修复（setAgentInternalIDMaxScan = 50 上限 + foundAgent/foundTaskStart 标记两条都 backfill 后 break），本批 PR #157
 - [ ] **R225-PERF-14 — `wsclient.sweepSubGenExpiredLocked` 在 hub 写锁下扫 map（P3）**: wsclient.go:143 阻塞 subscribe/unsubscribe 并发。方案：移到 client 自身轻量 mutex。
