@@ -1532,6 +1532,10 @@ type jobSnapshot struct {
 // UpdateJob cannot tear the read across fields. Always returns a value
 // (never nil); j is dereferenced inside the lock. RLock is sufficient
 // since snapshotJob is read-only and runs from executeOpt outside s.mu.
+//
+// LOCK: Must NOT be called while s.mu is already held — acquires
+// s.mu.RLock internally. robfig/cron callbacks must never hold s.mu
+// when invoking snapshotJob (R227-CR-3).
 func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
