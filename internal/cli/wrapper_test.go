@@ -147,6 +147,42 @@ func TestNewWrapper_EmptyPathAutoDetects(t *testing.T) {
 // backend) or a fatal Error (default backend). If a future refactor
 // populates CLIVersion with a placeholder or defaults-on-error, that
 // detection path silently breaks — this test is the tripwire.
+// TestNewWrapper_DisplayNameMatchesNormalizedID locks the R228-ARCH-15
+// contract: NewWrapper feeds the post-normalize id (case-folded,
+// whitespace-trimmed) into backendDisplayName so case variants like
+// "Kiro"/"KIRO" surface as "kiro" instead of leaking the raw operator
+// string. Pre-fix the default arm received the raw value, so "Kiro"
+// rendered as "Kiro" while "kiro" rendered as "kiro" — same backend,
+// two display labels in dashboard chips.
+func TestNewWrapper_DisplayNameMatchesNormalizedID(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in            string
+		wantBackendID string
+		wantCLIName   string
+	}{
+		{"kiro", "kiro", "kiro"},
+		{"Kiro", "kiro", "kiro"},
+		{"KIRO", "kiro", "kiro"},
+		{"  kiro  ", "kiro", "kiro"},
+		{"Claude", "claude", "claude-code"},
+		{"", "claude", "claude-code"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			w := NewWrapper("/definitely/not/a/real/path/claude-xyz", &ClaudeProtocol{}, tc.in)
+			if w.BackendID != tc.wantBackendID {
+				t.Errorf("BackendID = %q, want %q", w.BackendID, tc.wantBackendID)
+			}
+			if w.CLIName != tc.wantCLIName {
+				t.Errorf("CLIName = %q, want %q", w.CLIName, tc.wantCLIName)
+			}
+		})
+	}
+}
+
 func TestNewWrapper_UnavailableBinaryLeavesVersionEmpty(t *testing.T) {
 	t.Parallel()
 	// Use an absolute path that cannot exist so detectVersion's exec.Command

@@ -76,8 +76,12 @@ func NewWrapper(cliPath string, proto Protocol, backend string) *Wrapper {
 	w := &Wrapper{
 		BackendID: id,
 		CLIPath:   cliPath,
-		CLIName:   backendDisplayName(backend),
-		Protocol:  proto,
+		// R228-ARCH-15: feed the canonical id (post-normalize) into
+		// backendDisplayName so case variants like "Kiro" / "KIRO" hit
+		// the same display branch as "kiro" instead of falling through
+		// to the default arm and surfacing the raw operator-typed value.
+		CLIName:  backendDisplayName(id),
+		Protocol: proto,
 	}
 	w.CLIVersion = detectVersion(cliPath)
 	// Bind the history-source factory for this backend, if one has been
