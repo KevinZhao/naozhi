@@ -1568,6 +1568,23 @@ type preflightResult struct {
 	stubRefresh func()
 }
 
+// preflightArgs bundles the inputs to freshContextPreflightP0. R229-CR-8.
+// Mirrors finishArgs's struct-bag pattern: the helper has 8 inputs that all
+// flow through to the same finishRun/deliverNotice call sites and keeping
+// them as positional args made future additions (e.g. a new error-class)
+// risk silent argument-order swaps. Named fields also let tests express
+// intent without reading parameter positions.
+type preflightArgs struct {
+	job       *Job
+	snap      jobSnapshot
+	key       string
+	lg        *slog.Logger
+	notifyTo  NotifyTarget
+	runID     string
+	startedAt time.Time
+	trigger   TriggerKind
+}
+
 // freshContextPreflightP0 handles the fresh-mode prologue: ctx-cancel guard
 // (CRON3), work-dir reachability check (CRON2), Reset, and the post-Reset
 // existence re-check that prevents a leaked CLI process tied to a deleted
@@ -1586,7 +1603,9 @@ type preflightResult struct {
 //
 // In persistent mode (snap.fresh=false) the helper short-circuits with
 // ok=true and a no-op stubRefresh so the caller's flow is uniform.
-func (s *Scheduler) freshContextPreflightP0(j *Job, snap jobSnapshot, key string, lg *slog.Logger, notifyTo NotifyTarget, runID string, startedAt time.Time, trigger TriggerKind) (preflightResult, bool) {
+func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (preflightResult, bool) {
+	snap := args.snap
+	lg := args.lg
 	if !snap.fresh {
 		return preflightResult{stubRefresh: func() {}}, true
 	}
@@ -1597,7 +1616,7 @@ func (s *Scheduler) freshContextPreflightP0(j *Job, snap jobSnapshot, key string
 		// touch LastRunAt. The broadcast still emits so the dashboard sees
 		// the run's terminal frame.
 		s.finishRun(finishArgs{
-			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
 			state: RunStateCanceled, errClass: ErrClassCanceled, errMsg: err.Error(),
 			skipPersist: true,
 			prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
@@ -1608,15 +1627,15 @@ func (s *Scheduler) freshContextPreflightP0(j *Job, snap jobSnapshot, key string
 		lg.Warn("cron fresh spawn aborted: work_dir unreachable",
 			"work_dir", snap.workDir)
 		s.finishRun(finishArgs{
-			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
 			state: RunStateFailed, errClass: ErrClassWorkDirUnreachable,
 			errMsg: "work_dir unreachable",
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.jobID))
+		s.deliverNotice(args.notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.jobID))
 		return preflightResult{stubRefresh: func() {}}, false
 	}
-	s.router.Reset(key)
+	s.router.Reset(args.key)
 	lg.Info("cron fresh context: session reset before run")
 	stubRefresh := func() {
 		s.mu.RLock()
@@ -1638,7 +1657,7 @@ func (s *Scheduler) freshContextPreflightP0(j *Job, snap jobSnapshot, key string
 		// Job deleted mid-execute: treat as canceled; no recordResult
 		// (matches historical behaviour) but broadcast for visibility.
 		s.finishRun(finishArgs{
-			job: j, runID: runID, startedAt: startedAt, trigger: trigger,
+			job: args.job, runID: args.runID, startedAt: args.startedAt, trigger: args.trigger,
 			state: RunStateCanceled, errClass: ErrClassCanceled,
 			errMsg: "job deleted mid-execute", skipPersist: true,
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
@@ -1845,7 +1864,10 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// path we skip stubRefresh because the live session carries its own
 	// sidebar entry. Persistent mode short-circuits inside the helper
 	// with a no-op stubRefresh.
-	preflight, ok := s.freshContextPreflightP0(j, snap, key, lg, notifyTo, runID, startedAt, trigger)
+	preflight, ok := s.freshContextPreflightP0(preflightArgs{
+		job: j, snap: snap, key: key, lg: lg, notifyTo: notifyTo,
+		runID: runID, startedAt: startedAt, trigger: trigger,
+	})
 	if !ok {
 		preflight.stubRefresh()
 		return
