@@ -191,7 +191,10 @@ func TestP0_PreflightWorkdirUnreachableMapsCorrectErrorClass(t *testing.T) {
 		jobID: "job-w", schedule: "@every 5m", workDir: j.WorkDir, fresh: true,
 	}
 	lg := slog.New(slog.NewTextHandler(io.Discard, nil))
-	res, ok := s.freshContextPreflightP0(j, snap, session.CronKey(j.ID), lg, NotifyTarget{}, "r1", time.Now(), TriggerScheduled)
+	res, ok := s.freshContextPreflightP0(preflightArgs{
+		job: j, snap: snap, key: session.CronKey(j.ID), lg: lg,
+		notifyTo: NotifyTarget{}, runID: "r1", startedAt: time.Now(), trigger: TriggerScheduled,
+	})
 	if ok {
 		t.Fatal("preflight should bail when workdir unreachable")
 	}

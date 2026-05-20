@@ -181,7 +181,7 @@
 - [x] **R229-PERF-8 — sanitizeImagesAligned 双 pass（P3）**: 当前一遍 allOK 扫 + 一遍 filter；R229 review 提议合并，但 fast-path 0 alloc 是设计意图。方案：保留双 pass 但写注释解释 fast-path；或只在 hot profile 显示 cost 时再优化。Breaking：否。 — 已修复（保留双 pass 形态 + godoc 显式说明设计权衡 + 警告"勿单 pass 化"，避免后续 review 反复提议），本批 PR #174
 - [ ] **R229-PERF-9 — extractLastPromptUncached 大文件 fallback 全文扫两次（P3）**: 50 MB JSONL tail 无 prompt 时再读全文。方案：负面结果加 mtime keyed 短 TTL 缓存。Breaking：否。
 - [ ] **R229-PERF-10 — ListSessions 每次 make([]SessionSnapshot)（P3）**: 1 Hz × N 客户端持续分配 ~20 KB。方案：sync.Pool 池化 slice 或流式 JSON 编码。Breaking：否。
-- [ ] **R229-PERF-11 — writePump 每条消息都 SetWriteDeadline + time.Now（P3）**: 高 throughput 客户端 vDSO 调用累积。方案：滚动 deadline 或定期刷新。Breaking：否。
+- [x] **R229-PERF-11 — writePump 每条消息都 SetWriteDeadline + time.Now（P3）**: 高 throughput 客户端 vDSO 调用累积。方案：滚动 deadline 或定期刷新。Breaking：否。 — 已修复，本批 PR #176
 - [ ] **R229-PERF-12 — Subscribe 每次 alloc subscriber+buffered chan（P3）**: 反复 tab reload 持续微分配。方案：sync.Pool 池化 subscriber。Breaking：否。
 
 ### Code 质量（剩余）
@@ -193,7 +193,7 @@
 - [x] **R229-CR-5 — sessionSendLegacy 用 InterruptSession 而非 InterruptSessionSafe（P3）**: SIGINT 终止 claude -p 损失 resume。方案：换 InterruptSessionSafe（先尝试 control_request）。Breaking：否（ACP 不变 / Claude 升级到非破坏性中断）。 — 已修复（sessionSendLegacy 改用 InterruptSessionSafe，与 wshub.handleInterrupt 等其他 dashboard 入口对齐；server 测试全绿），本批 PR #173
 - [ ] **R229-CR-6 — managed.go 1489 行混合 struct/方法/工具（P3）**: 方案：抽 keys_util.go（SessionKey/sanitize/SanitizeLogAttr）。Breaking：否。
 - [ ] **R229-CR-7 — dispatch.go 1281 行 replyTracker 与 Dispatcher 同居（P3）**: 方案：抽 dispatch/reply_tracker.go。Breaking：否。
-- [ ] **R229-CR-8 — freshContextPreflightP0 8 位置参数（P3）**: 方案：仿 finishArgs 抽 preflightArgs struct。Breaking：否（内部）。
+- [x] **R229-CR-8 — freshContextPreflightP0 8 位置参数（P3）**: 方案：仿 finishArgs 抽 preflightArgs struct。Breaking：否（内部）。 — 已修复，本批 PR #176
 
 ### Architecture（剩余 P1，需设计）
 
@@ -1387,7 +1387,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R227-PERF-10 — `Snapshot()` MeteringUsage []slice 每次 alloc（P2）**: 大多数为 nil 或 1 条。方案：proc.MeteringUsage() 返回内部数组只读 view，或延迟 alloc 到 JSON 序列化。
 - [~] **R227-PERF-11 — `EventLog.Append` storeAtomicString 每次 *string alloc（评估关闭 2026-05-20）**: 条目自标"降级仅观察"。复核 textutil.StoreAtomicString 已用 atomic.Pointer.Load + 字符串相等短路（同值不重新 Store *string），命中率 ~99%（lastActivitySummary 在同 tool_use 持续时不变）。sync.Pool[string] 在 textutil 是叶子包做不到 lock-free 复用，且分支预测器对短路命中早已优化。本批 PR #168 关闭归档。
 - [ ] **R227-PERF-12 — `ACPProtocol.parseSessionUpdate` tool_call/tool_call_update 分支双 alloc（P2）**: AssistantMessage ptr + ContentBlock slice。方案：tool name 直接存 ToolCall.Title；ContentBlock 改 [1]ContentBlock + count。
-- [ ] **R227-PERF-15 — `protocol_acp.ReadEvent` 每个 turn-end 都 unmarshal stopReason（P3）**: msg.Result 多数为 null 或 {}。方案：bytes.Contains 快速检测后再 unmarshal。
+- [x] **R227-PERF-15 — `protocol_acp.ReadEvent` 每个 turn-end 都 unmarshal stopReason（P3）**: msg.Result 多数为 null 或 {}。方案：bytes.Contains 快速检测后再 unmarshal。 — 已修复，本批 PR #176
 - [ ] **R227-PERF-16 — `EventEntriesSince` dead-session 分支全量扫描+stable sort（P3）**: 500 entry × N tab 重订阅。方案：InjectHistory 时排序一次，消除 EntriesSince 重复排序。**降级**：500 entry stable sort < 1µs，可接受。
 - [ ] **R227-PERF-17 — `shim.ServerMsg.MarshalLine` 每次 json.Marshal alloc（P3）**: shim binary 独立。方案：sync.Pool[bufEnc]。**降级**：shim 独立 binary，不影响主进程，单独 PR 处理。
 - [ ] **R227-PERF-18 — `eventPushLoop` EventEntriesSince per-goroutine 独立 slice（P3）**: 50 订阅 tab × 同 session 各自分配。方案：扩展 EntriesSinceInto(dst) 接口接受 caller-owned buffer。Breaking。

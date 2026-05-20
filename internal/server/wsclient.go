@@ -389,6 +389,26 @@ func (c *wsClient) writePump() {
 		c.conn.Close()
 	}()
 
+	// R229-PERF-11: rolling deadline. SetWriteDeadline + time.Now ran on
+	// every event, costing two vDSO calls per Append on a high-throughput
+	// client (50 ev/s × N tabs). Refresh the deadline only when the
+	// remaining slack drops below half of wsWriteWait — the same write
+	// timeout invariant ("a stalled writer is killed within ~wsWriteWait")
+	// holds because the deadline is always at most wsWriteWait in the
+	// future and at least wsWriteWait/2.
+	const refreshInterval = wsWriteWait / 2
+	var nextRefreshAt time.Time
+	refreshDeadline := func() error {
+		now := time.Now()
+		if !now.Before(nextRefreshAt) {
+			if err := c.conn.SetWriteDeadline(now.Add(wsWriteWait)); err != nil {
+				return err
+			}
+			nextRefreshAt = now.Add(refreshInterval)
+		}
+		return nil
+	}
+
 	for {
 		select {
 		case message := <-c.send:
@@ -396,7 +416,7 @@ func (c *wsClient) writePump() {
 			// so the defer closes/unregisters. Without a deadline, WriteMessage
 			// could block on a half-closed socket until TCP keepalive expires,
 			// leaving the hub broadcasting to a zombie client.
-			if err := c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait)); err != nil {
+			if err := refreshDeadline(); err != nil {
 				return
 			}
 			if err := c.conn.WriteMessage(websocket.TextMessage, message); err != nil {
@@ -405,7 +425,7 @@ func (c *wsClient) writePump() {
 		case <-c.done:
 			return
 		case <-ticker.C:
-			if err := c.conn.SetWriteDeadline(time.Now().Add(wsWriteWait)); err != nil {
+			if err := refreshDeadline(); err != nil {
 				return
 			}
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
