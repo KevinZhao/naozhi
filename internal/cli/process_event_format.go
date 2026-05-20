@@ -319,6 +319,41 @@ func shortPath(p string) string {
 	return p
 }
 
+// Per-tool input shapes for FormatToolInput. Promoted from anonymous struct
+// literals inside the function body to package-level named types: the encoding/json
+// reflection cache keys on (Type, []byte) and a fresh anonymous-type literal
+// inside the function defeats reuse, costing a fresh reflect lookup + a small
+// alloc for the type's name on every event. Naming the types preserves the
+// "tool's payload shape lives next to the dispatch switch" readability while
+// stabilising the cache key. R229-PERF-2.
+type (
+	toolInputFilePath struct {
+		FilePath string `json:"file_path"`
+	}
+	toolInputPattern struct {
+		Pattern string `json:"pattern"`
+	}
+	toolInputGrep struct {
+		Pattern string `json:"pattern"`
+		Path    string `json:"path"`
+	}
+	toolInputBash struct {
+		Description string `json:"description"`
+		Command     string `json:"command"`
+	}
+	toolInputAgent struct {
+		Description string `json:"description"`
+	}
+	toolInputFallback struct {
+		Description string `json:"description"`
+		FilePath    string `json:"file_path"`
+		Path        string `json:"path"`
+		Command     string `json:"command"`
+		Pattern     string `json:"pattern"`
+		Prompt      string `json:"prompt"`
+	}
+)
+
 // FormatToolInput extracts a human-readable summary from a tool's JSON input.
 // Uses per-tool struct parsing to avoid map allocation on the hot path.
 func FormatToolInput(toolName string, input json.RawMessage) string {
@@ -328,16 +363,12 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 
 	switch toolName {
 	case "Read", "Write", "Edit":
-		var s struct {
-			FilePath string `json:"file_path"`
-		}
+		var s toolInputFilePath
 		if json.Unmarshal(input, &s) == nil && s.FilePath != "" {
 			return toolName + " " + shortPath(s.FilePath)
 		}
 	case "Glob":
-		var s struct {
-			Pattern string `json:"pattern"`
-		}
+		var s toolInputPattern
 		if json.Unmarshal(input, &s) == nil && s.Pattern != "" {
 			// R187-PERF-L1: cap pattern to prevent an adversarial LLM response
 			// from inflating EventLog entries (300 runes matches the default
@@ -345,10 +376,7 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 			return toolName + " " + textutil.TruncateRunes(s.Pattern, 300)
 		}
 	case "Grep":
-		var s struct {
-			Pattern string `json:"pattern"`
-			Path    string `json:"path"`
-		}
+		var s toolInputGrep
 		if json.Unmarshal(input, &s) == nil && s.Pattern != "" {
 			// R187-PERF-L1: cap pattern (see Glob note).
 			result := toolName + " " + textutil.TruncateRunes(s.Pattern, 300)
@@ -358,10 +386,7 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 			return result
 		}
 	case "Bash":
-		var s struct {
-			Description string `json:"description"`
-			Command     string `json:"command"`
-		}
+		var s toolInputBash
 		if json.Unmarshal(input, &s) == nil {
 			if s.Description != "" {
 				return toolName + " " + s.Description
@@ -371,9 +396,7 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 			}
 		}
 	case "Agent":
-		var s struct {
-			Description string `json:"description"`
-		}
+		var s toolInputAgent
 		if json.Unmarshal(input, &s) == nil && s.Description != "" {
 			return toolName + " " + textutil.TruncateRunes(s.Description, 60)
 		}
@@ -383,14 +406,7 @@ func FormatToolInput(toolName string, input json.RawMessage) string {
 		// MCP tools that add new schemas still work, and we skip the reflect
 		// + map alloc cost on the unknown-tool fallback path.
 		// Fallback: try common keys with a struct (rare path for unknown tools)
-		var inp struct {
-			Description string `json:"description"`
-			FilePath    string `json:"file_path"`
-			Path        string `json:"path"`
-			Command     string `json:"command"`
-			Pattern     string `json:"pattern"`
-			Prompt      string `json:"prompt"`
-		}
+		var inp toolInputFallback
 		if json.Unmarshal(input, &inp) == nil {
 			// Avoid a []string{...} slice literal on the unknown-tool
 			// fallback path — a chain of short-circuit checks matches the
