@@ -165,14 +165,14 @@
 - [ ] **R229-GO-4 — spawnSession 内 inline JSONL load 未挂 historyWg（P2）**: `router_lifecycle.go:693` 15s 历史加载可超过 30s shutdown 窗口，触碰 r.claudeDir。方案：加 r.historyWg.Add/Done + 检 r.historyCtx.Err。Breaking：否。
 - [ ] **R229-GO-5 — InjectHistory lastPrompt/lastActivity 仅"为空才设"易被旧 JSONL 覆盖新 Send（P2）**: 启动期 500 条 JSONL replay 期间 concurrent Send 写入的最新值可能被 stale 值替代。方案：比较时间戳或始终偏向 Send 写入值。Breaking：否。
 - [ ] **R229-GO-6 — dropEventLogForKey/clearAttachmentTrackerRefs 用 context.Background 不继承 shutdown ctx（P2）**: shutdown 期 Remove 仍各等 2-5s。方案：传 r.historyCtx 或专用 stopCtx。Breaking：否。
-- [ ] **R229-GO-7 — selfupdate.go 多处 return err 缺 fmt.Errorf 包装（P3）**: 297-414 行多处直接 return err。方案：统一加上下文 %w 包装。Breaking：否。
-- [ ] **R229-GO-8 — dashboard_scratch.go scratch 复制源历史用 EventEntriesBefore 而非 EventEntriesBeforeCtx（P3）**: 死进程 ring buffer 空时 promoted scratch 历史不全。方案：改用 Ctx 版走 historySource fallback。Breaking：否。
-- [ ] **R229-GO-9 — StartCleanupLoop 重启循环无次数上限（P3）**: 持续 panic 时无限自重启。方案：连续失败 10 次后停跑 + Error 报警。Breaking：否。
+- [x] **R229-GO-7 — selfupdate.go 多处 return err 缺 fmt.Errorf 包装（P3）**: 297-414 行多处直接 return err。方案：统一加上下文 %w 包装。Breaking：否。 — 已修复（fetchFile/verifyChecksum/copyFile/SelfPath/LatestRelease 全 return err 加 fmt.Errorf 上下文 %w 包装），本批 PR #171
+- [x] **R229-GO-8 — dashboard_scratch.go scratch 复制源历史用 EventEntriesBefore 而非 EventEntriesBeforeCtx（P3）**: 死进程 ring buffer 空时 promoted scratch 历史不全。方案：改用 Ctx 版走 historySource fallback。Breaking：否。 — 已修复（collectScratchContext 加 ctx 参数，handleOpen 传 r.Context()；before-window 改 sess.EventEntriesBeforeCtx 让死 session 走 disk fallback），本批 PR #171
+- [x] **R229-GO-9 — StartCleanupLoop 重启循环无次数上限（P3）**: 持续 panic 时无限自重启。方案：连续失败 10 次后停跑 + Error 报警。Breaking：否。 — 已修复（公共 StartCleanupLoop 签名不变，内部抽 startCleanupLoop(ctx, interval, attempt) helper；panic 处理在 attempt+1≥cleanupLoopMaxRestarts(=10) 时打 "exceeded max restarts" Error 后 return；50s 自愈窗口覆盖偶发 panic），本批 PR #171
 
 ### Performance（剩余）
 
 - [ ] **R229-PERF-1 — Protocol.ReadEvent string→[]byte 双 copy（P1）**: 每个 stream 事件分配 1 个 []byte（line size，50 B–200 KB）。方案：Protocol.ReadEvent 签名改 []byte，shimMsg.Line 改 json.RawMessage 同步消除中间 string 拷贝。Breaking：是（Protocol 接口变更，所有实现 + fakes 更新）。
-- [ ] **R229-PERF-2 — FormatToolInput 匿名 struct 命名 escape 到堆（P2）**: tool_use 事件每个调用 1 次 Unmarshal+1 次 scratch alloc。方案：包级命名 struct 替换匿名 literal。Breaking：否。
+- [x] **R229-PERF-2 — FormatToolInput 匿名 struct 命名 escape 到堆（P2）**: tool_use 事件每个调用 1 次 Unmarshal+1 次 scratch alloc。方案：包级命名 struct 替换匿名 literal。Breaking：否。 — 已修复（提 6 个 toolInputXxx 命名类型到包级，函数体内只 var s toolInputXxx，json reflect 缓存键稳定，无名字 escape；TestFormatToolInput 全表通过），本批 PR #171
 - [ ] **R229-PERF-3 — EventEntriesFromEventAt base 大结构体多次拷贝（P2）**: 5-block 事件 5×~240 B 栈拷贝。方案：循环内仅设变化字段。Breaking：否（需仔细处理字段重置）。
 - [ ] **R229-PERF-4 — wsclient.SendJSON 每次 json.Marshal 同样的小结构（P2）**: error/auth 类响应可预 marshal。方案：扩展 wsAuthOkMsg 模式覆盖最常见 error 响应。Breaking：否。
 - [ ] **R229-PERF-5 — EventLog.Append 单 entry 路径每次分配 1-slot 切片（P2）**: 5-50 events/s 持续分配。方案：sync.Pool of length-1 slices 或 EventLog 字段缓存。Breaking：否（注意 sink 留持契约）。
@@ -189,7 +189,7 @@
 - [ ] **R229-CR-1 — cron.executeOpt 329 行高复杂度（P3）**: 单函数内含 CAS / preflight / spawn / send / classify / dispatch / record / notify 全流程。方案：抽出 executeTurn 子函数。Breaking：否。
 - [ ] **R229-CR-2 — NewRouter 359 行未被 router-split 重构覆盖（P3）**: 持久化 init / restore / 异步 history 三段可拆 helper。方案：抽 newRouterRestoreSessions / newRouterStartHistoryLoads。Breaking：否。
 - [ ] **R229-CR-3 — reconnectShims 350 行 + 单分支 90 行（P3）**: 已抽 classifyShimState，shimStateReconnect case 仍臃肿。方案：抽 processDiscoveredShim helper。Breaking：否。
-- [ ] **R229-CR-4 — sessionSendLegacy 可达且去除条件未推进（P3）**: send.go:561 仍在生产路径上。方案：升级 NewHub 缺 Queue 时的 Warn 到 Error；推进 R-LEGACY-SEND 移除条件。Breaking：否。
+- [x] **R229-CR-4 — sessionSendLegacy 可达且去除条件未推进（P3）**: send.go:561 仍在生产路径上。方案：升级 NewHub 缺 Queue 时的 Warn 到 Error；推进 R-LEGACY-SEND 移除条件。Breaking：否。 — 已修复（NewHub 在 opts.Queue==nil 时把 slog.Warn 升级 slog.Error 并标 R-LEGACY-SEND blocker；不阻断启动，因 test fixture 仍有部分 nil Queue，待全部迁移到真实 MessageQueue 后下一步改 fatal 即可删 sessionSendLegacy），本批 PR #171
 - [ ] **R229-CR-5 — sessionSendLegacy 用 InterruptSession 而非 InterruptSessionSafe（P3）**: SIGINT 终止 claude -p 损失 resume。方案：换 InterruptSessionSafe（先尝试 control_request）。Breaking：否（ACP 不变 / Claude 升级到非破坏性中断）。
 - [ ] **R229-CR-6 — managed.go 1489 行混合 struct/方法/工具（P3）**: 方案：抽 keys_util.go（SessionKey/sanitize/SanitizeLogAttr）。Breaking：否。
 - [ ] **R229-CR-7 — dispatch.go 1281 行 replyTracker 与 Dispatcher 同居（P3）**: 方案：抽 dispatch/reply_tracker.go。Breaking：否。

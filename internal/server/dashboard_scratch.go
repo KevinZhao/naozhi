@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -137,7 +138,7 @@ func (h *ScratchHandler) handleOpen(w http.ResponseWriter, r *http.Request) {
 	// effort" fill: take the last N entries as the before-window and leave
 	// after empty. This matches the old behaviour of earlier dashboards
 	// that never sent a time hint.
-	before, after := collectScratchContext(src, req.SourceMessageTime, turns)
+	before, after := collectScratchContext(r.Context(), src, req.SourceMessageTime, turns)
 
 	sc, err := h.pool.Open(session.OpenOptions{
 		SourceKey:     req.SourceKey,
@@ -191,7 +192,12 @@ func (h *ScratchHandler) handleOpen(w http.ResponseWriter, r *http.Request) {
 // The event-log accessors return a chronological-order slice; ordering is
 // preserved for the pool's renderer which relies on newest-first truncation
 // on the before-side and oldest-first on the after-side.
-func collectScratchContext(sess *session.ManagedSession, sourceMessageTime int64, turns int) (before, after []cli.EventEntry) {
+//
+// The before-window uses EventEntriesBeforeCtx so a quoted message older than
+// the in-memory ring buffer (dead session, ring rotated past) still gets
+// historical context via the disk-tier history.Source instead of returning
+// empty (R229-GO-8).
+func collectScratchContext(ctx context.Context, sess *session.ManagedSession, sourceMessageTime int64, turns int) (before, after []cli.EventEntry) {
 	if sess == nil || turns <= 0 {
 		return nil, nil
 	}
@@ -201,7 +207,7 @@ func collectScratchContext(sess *session.ManagedSession, sourceMessageTime int64
 	// too many survive filtering — slight over-fetch is cheaper than under.
 	fetch := turns * 3
 	if sourceMessageTime > 0 {
-		before = sess.EventEntriesBefore(sourceMessageTime, fetch)
+		before = sess.EventEntriesBeforeCtx(ctx, sourceMessageTime, fetch)
 		// EventEntriesSince(t) returns entries with Time > t, so passing
 		// (sourceMessageTime - 1) yields entries with Time >= sourceMessageTime;
 		// the loop then skips the exact-match entry so the quoted message

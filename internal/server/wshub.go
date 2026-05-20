@@ -251,15 +251,19 @@ func NewHub(opts HubOptions) *Hub {
 	}
 	h.tailers = newTailerRegistry(h)
 	h.wiredLinkers = make(map[*cli.SubagentLinker]struct{})
-	// R219-CR-11: a nil queue makes every WS send fall through to
+	// R219-CR-11 / R229-CR-4: a nil queue makes every WS send fall through to
 	// sessionSendLegacy (the deprecated guard path). Test harnesses and
 	// headless tools deliberately wire a nil Queue, but a production Hub
 	// constructed without one silently loses the dispatch queue's
-	// rate-limiting / collect-window / passthrough modes — emit a warning
-	// at construction so an operator notices in journalctl on first start
-	// rather than discovering it at the first /urgent.
+	// rate-limiting / collect-window / passthrough modes — emit slog.Error
+	// (not Warn) at construction so an operator triaging journalctl sees
+	// the misconfiguration with the same severity as the resulting
+	// per-message degradation. R229-CR-4 raises this from Warn to Error to
+	// advance the R-LEGACY-SEND removal: once every test fixture wires a
+	// real MessageQueue, this branch can become a hard fatal at construction
+	// and sessionSendLegacy can be deleted.
 	if opts.Queue == nil {
-		slog.Warn("server: Hub constructed without MessageQueue; falling back to legacy guard path (dispatch queue features disabled)")
+		slog.Error("server: Hub constructed without MessageQueue; falling back to legacy guard path (dispatch queue features disabled, R-LEGACY-SEND blocker)")
 	}
 	return h
 }
