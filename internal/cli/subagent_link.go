@@ -361,7 +361,7 @@ func (l *SubagentLinker) Resolve(taskID, toolUseID, name, description string, ag
 		if toolUseID != "" {
 			l.byToolUseID[toolUseID] = info
 		}
-		l.fireOnResolveLocked(taskID, toolUseID, "")
+		l.fireCallbacksDropLock(taskID, toolUseID, "")
 		return info, true
 	}
 
@@ -396,7 +396,7 @@ func (l *SubagentLinker) Resolve(taskID, toolUseID, name, description string, ag
 		l.byToolUseID[toolUseID] = info
 	}
 	l.byName[name] = append(l.byName[name], info)
-	l.fireOnResolveLocked(taskID, toolUseID, info.InternalAgentID)
+	l.fireCallbacksDropLock(taskID, toolUseID, info.InternalAgentID)
 	return info, true
 }
 
@@ -468,7 +468,7 @@ func (l *SubagentLinker) resolveByTaskIDFast(taskID, toolUseID, subagentDir, ses
 	if name != "" {
 		l.byName[name] = append(l.byName[name], info)
 	}
-	l.fireOnResolveLocked(taskID, toolUseID, info.InternalAgentID)
+	l.fireCallbacksDropLock(taskID, toolUseID, info.InternalAgentID)
 	l.mu.Unlock()
 	slog.Info("agent_link: resolved by task_id fast path",
 		"task_id", taskID, "agent_type", name, "jsonl_size", st.Size())
@@ -552,14 +552,18 @@ func claudeProjectsRoot() string {
 	return filepath.Join(home, ".claude", "projects")
 }
 
-// fireOnResolveLocked runs every registered callback OUTSIDE the main mu
+// fireCallbacksDropLock runs every registered callback OUTSIDE the main mu
 // lock but INSIDE onResolveMu to guarantee serial delivery across all
-// subscribers. Caller holds l.mu as a write lock; we drop it around the
-// callback so a slow listener (e.g. the server tailer starting goroutine)
-// cannot block a concurrent Resolve. The mu-release-reacquire pattern also
-// matches the pre-multi-subscriber semantics so call-sites don't need
-// reordering.
-func (l *SubagentLinker) fireOnResolveLocked(taskID, toolUseID, internalAgentID string) {
+// subscribers. Caller MUST hold l.mu as a write lock; this function
+// releases l.mu around the callback dispatch and re-acquires it before
+// returning, so the caller's `defer l.mu.Unlock()` still fires correctly.
+//
+// The name carries the lock contract: previously named ...Locked (the
+// usual Go convention is "caller holds the lock and the function does not
+// touch it"), but this function intentionally drops and re-acquires l.mu —
+// the rename to ...DropLock prevents future maintainers from treating it
+// as a normal "Locked" helper and double-unlocking. (R227-GO-3)
+func (l *SubagentLinker) fireCallbacksDropLock(taskID, toolUseID, internalAgentID string) {
 	l.onResolveMu.Lock()
 	fns := make([]func(string, string, string), len(l.onResolveFns))
 	copy(fns, l.onResolveFns)

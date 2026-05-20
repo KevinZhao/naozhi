@@ -452,7 +452,7 @@ func (r *wsRelay) reconnect() {
 		// a restart don't all hit the listener at identical offsets. backoff
 		// itself keeps the doubling shape; jitter only scatters the wall-time
 		// a single attempt fires at.
-		t := time.NewTimer(jitterBackoff(backoff))
+		t := time.NewTimer(osutil.JitterBackoff(backoff))
 		select {
 		case <-r.done:
 			t.Stop()

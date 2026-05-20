@@ -15,6 +15,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/naozhi/naozhi/internal/config"
 	"github.com/naozhi/naozhi/internal/node"
+	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
 )
@@ -172,7 +173,7 @@ func (c *Connector) Run(ctx context.Context) {
 		// Jitter the sleep so many connectors restarted together (e.g. fleet
 		// SIGHUP) don't hammer the primary on aligned deadlines. backoff
 		// still doubles deterministically; we only scatter wall-time.
-		timer := time.NewTimer(jitterBackoff(backoff))
+		timer := time.NewTimer(osutil.JitterBackoff(backoff))
 		select {
 		case <-ctx.Done():
 			timer.Stop()

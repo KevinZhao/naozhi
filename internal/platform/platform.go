@@ -254,7 +254,7 @@ func ReplyWithRetry(ctx context.Context, p Platform, msg OutgoingMessage, maxAtt
 	var lastErr error
 	for i := 0; i < maxAttempts; i++ {
 		if i > 0 {
-			wait := jitterBackoff(backoff)
+			wait := osutil.JitterBackoff(backoff)
 			timer := time.NewTimer(wait)
 			select {
 			case <-ctx.Done():
@@ -280,12 +280,4 @@ func ReplyWithRetry(ctx context.Context, p Platform, msg OutgoingMessage, maxAtt
 	}
 	slog.Error("platform reply failed after all attempts", "platform", p.Name(), "chat", msg.ChatID, "attempts", maxAttempts, "err", lastErr)
 	return "", lastErr
-}
-
-// jitterBackoff is a thin wrapper kept for historical callers inside this
-// package (and the existing backoff_test.go). The single source of truth
-// now lives in osutil.JitterBackoff so node/upstream reconnect loops can
-// share the exact same shape without three divergent copies.
-func jitterBackoff(d time.Duration) time.Duration {
-	return osutil.JitterBackoff(d)
 }
