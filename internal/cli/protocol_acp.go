@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -29,6 +30,12 @@ import (
 // the label paths use a much smaller 300-rune cap, but those render only
 // short summaries. tool_call payloads are full-content, so 16K is correct.
 const toolJSONMaxRunes = 16000
+
+// stopReasonKey is the JSON key probed by ReadEvent before paying for a
+// reflect-driven Unmarshal of msg.Result. Captured as a package-level
+// []byte so the bytes.Contains call doesn't allocate on each turn end.
+// (R227-PERF-15)
+var stopReasonKey = []byte(`"stopReason"`)
 
 // truncateToolJSON converts a raw JSON byte slice into a string, capped at
 // toolJSONMaxRunes runes with a "..." marker appended when truncated.
@@ -413,10 +420,19 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		// turn end from a cancelled one. ACP spec values: "end_turn",
 		// "cancelled", "max_tokens", "tool_use_failure", "refusal". We expose
 		// the raw string in SubType — same field used by stream-json events.
+		//
+		// Fast-path: msg.Result is frequently null or `{}` and the JSON path
+		// never carries a stopReason key on those replies. A bytes.Contains
+		// probe lets us skip the reflect-driven Unmarshal on every clean
+		// turn end (R227-PERF-15). False positives (the literal string
+		// appearing inside a different field's value) just take the slow
+		// path, so the probe stays correctness-preserving.
 		var stop struct {
 			StopReason string `json:"stopReason"`
 		}
-		_ = json.Unmarshal(msg.Result, &stop) // best-effort; missing => empty
+		if bytes.Contains(msg.Result, stopReasonKey) {
+			_ = json.Unmarshal(msg.Result, &stop) // best-effort; missing => empty
+		}
 
 		p.mu.Lock()
 		text := p.textBuf.String()
