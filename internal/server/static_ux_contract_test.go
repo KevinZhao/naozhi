@@ -5869,10 +5869,10 @@ func TestDashboardJS_CronSessionsHiddenByDefault(t *testing.T) {
 
 	// 3. renderMainShell must NOT inject a cron-timeline-panel placeholder
 	//    nor mount the timeline from its tail hook. The timeline lives
-	//    inside the 定时任务 drawer.
-	if strings.Contains(js, "id=\"cron-timeline-panel\"") {
-		t.Error("dashboard.js: renderMainShell must not place a #cron-timeline-panel — cron timeline lives in the 定时任务 drawer instead")
-	}
+	//    inside the 定时任务 drawer; cronDrawerHtml re-uses the same
+	//    `id="cron-timeline-panel"` so the renderer / load-more / refresh
+	//    helpers keep working — that's why this assertion is scoped to
+	//    renderMainShell's body rather than the whole file.
 	mainShellIdx := strings.Index(js, "function renderMainShell")
 	if mainShellIdx >= 0 {
 		// Scope to a generous window covering the function body.
@@ -5881,9 +5881,20 @@ func TestDashboardJS_CronSessionsHiddenByDefault(t *testing.T) {
 			end = len(js)
 		}
 		body := js[mainShellIdx:end]
+		if strings.Contains(body, "id=\"cron-timeline-panel\"") {
+			t.Error("dashboard.js: renderMainShell must not place a #cron-timeline-panel — cron timeline lives in the 定时任务 drawer instead")
+		}
 		if strings.Contains(body, "renderCronTimelineForSession(selectedKey.slice(") {
 			t.Error("dashboard.js: renderMainShell tail must not call renderCronTimelineForSession — cron drawer drives its own paint via cronDetailJobId")
 		}
+	}
+	// And the drawer renderer must own the timeline host. If both are gone,
+	// PR4 broke the timeline reuse path.
+	if !strings.Contains(js, "function cronDrawerHtml") {
+		t.Error("dashboard.js: cronDrawerHtml must exist — it owns the per-job drawer markup including the timeline host")
+	}
+	if !strings.Contains(js, "id=\"cron-timeline-panel\"") {
+		t.Error("dashboard.js: cronDrawerHtml must mount #cron-timeline-panel inside the drawer history section so the timeline renderer is reused unchanged")
 	}
 
 	// 4. dismissSession still recognises the cron prefix as a defensive

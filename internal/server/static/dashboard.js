@@ -9757,6 +9757,21 @@ let cronJobs = [];
 // when the server has no default configured. Used to render helpful copy
 // alongside the notify toggle in create/edit modals.
 let cronNotifyDefault = null;
+
+// cron-panel-consolidation RFC §4.5: cronDetailJobId is the only state
+// gate for the per-job drawer. null = drawer closed; otherwise the
+// currently-displayed job ID (NOT key — the drawer keys off cron job
+// ID, not the synthesised "cron:<id>" session key, since cron stubs
+// no longer surface as managed sessions on the dashboard side).
+//
+// Lifecycle:
+//   - openCronDetail(jobId) sets it and re-renders the cron panel.
+//   - closeCronDetail() resets to null and removes drawer DOM.
+//   - WS cron_run_started / cron_run_ended consult this gate (PR5)
+//     instead of selectedKey.
+//   - F5 / reload does NOT persist (RFC §4.5 Q5).
+let cronDetailJobId = null;
+
 // cron-panel-consolidation RFC §4.2: sidebar / mainShell are now reserved
 // for human conversation surfaces and never paint cron-scheduler sessions.
 // The previous `cronVisibleKeys` whitelist + markCronSessionVisible plumbing
@@ -10690,11 +10705,9 @@ async function doCreateCronJob() {
     if (data.id) {
       // cron-panel-consolidation RFC §4.2: a freshly-created cron job no
       // longer pushes itself into the sidebar (cron stubs are filtered
-      // server-side) nor takes over mainShell. PR4 wires the per-job
-      // drawer; for now the new row simply appears in the 定时任务 list
-      // on the next fetchCronJobs tick. Keep the panel open so the
-      // operator sees the row land.
-      openCronPanel();
+      // server-side) nor takes over mainShell. Open the per-job drawer
+      // directly so the operator sees the row they just configured.
+      openCronDetail(data.id);
     }
   } catch (e) { showNetworkError('创建定时任务', e); }
 }
@@ -10883,7 +10896,7 @@ function positionCronMenu(menu, anchor) {
 // emitted in toggleCronMenu so a rename on one side is a caller-site break.
 const CRON_MENU_ACTIONS = {
   'run': (id) => cronTriggerNow(id),
-  'open': (id) => openCronSession(id),
+  'open': (id) => openCronDetail(id),
   'edit': (id) => editCronJob(id),
   'pause': (id) => cronPause(id),
   'resume': (id) => cronResume(id),
@@ -11104,11 +11117,13 @@ function cronJobCardHtml(j) {
   const isError = !!j.last_error && !isPaused;
   const isMissed = !!j.missed && !isPaused;
   const isRunning = !!(j.current_run && j.current_run.started_at);
+  const isActive = cronDetailJobId === j.id;
   const rowClasses = ['cj-row'];
   if (isPaused) rowClasses.push('paused');
   if (isError) rowClasses.push('is-error');
   if (isMissed) rowClasses.push('is-missed');
   if (isRunning) rowClasses.push('is-running');
+  if (isActive) rowClasses.push('is-active');
 
   // When-column: running → "运行中 Xs"（实时计时）; paused → "已暂停"; else colloquial relative time.
   // P0 cron-run-history (RFC §8.1) — running takes precedence over paused
@@ -11206,8 +11221,8 @@ function cronJobCardHtml(j) {
   }
 
   return '<div class="' + rowClasses.join(' ') + ' cron-card" data-cron-id="' + escAttr(j.id) + '" role="button" tabindex="0" ' +
-    'onclick="openCronSession(\'' + escJs(j.id) + '\')" ' +
-    'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronSession(\'' + escJs(j.id) + '\')}">' +
+    'onclick="openCronDetail(\'' + escJs(j.id) + '\')" ' +
+    'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronDetail(\'' + escJs(j.id) + '\')}">' +
     '<span class="cj-dot" aria-hidden="true"></span>' +
     '<div class="cj-main">' +
       '<div class="cj-title' + (hasTitle ? '' : ' placeholder') + '" title="' + escAttr(titleStr || emptyPromptHint) + '">' + esc(displayTitle) + '</div>' +
@@ -11346,44 +11361,9 @@ function getCronTimelineState(jobId) {
   return cronTimelineState[jobId];
 }
 
-// renderCronTimelineForSession — 根据本地缓存优先填充 timeline；如果 list 还没
-// 跑过 fetchCronJobs（hard reload 后 selectSession('cron:...') 直跳），则触发
-// 一次 fetchCronJobs 拉数据再渲染。
-function renderCronTimelineForSession(jobId) {
-  const host = document.getElementById('cron-timeline-panel');
-  if (!host) return;
-  const job = (cronJobs || []).find(x => x && x.id === jobId);
-  const st = getCronTimelineState(jobId);
-  // R220-FE-3: stale 检测——如果 lastMountAt 距今 > CRON_TIMELINE_FRESH_MS，
-  // 认为缓存陈旧（用户切走再切回，期间可能有新 run）。清空 runs 强制走
-  // recent_runs 预填路径；后续 cron_run_ended 也会触发 refreshHead。
-  if (st.lastMountAt > 0 && Date.now() - st.lastMountAt > CRON_TIMELINE_FRESH_MS) {
-    st.runs = [];
-    st.nextBefore = 0;
-    st.done = false;
-    st.expanded = '';
-    // details 不清——已 fetch 过的详情仍然有效，省一次往返。
-  }
-  // 首次 mount：用列表里 recent_runs 作为时间轴第一页（最多 10 条），
-  // next_before 取最旧一条的 started_at（用作 fetch 更早页的游标）。
-  // recent_runs 按 started_at 倒序 —— RFC §3 / §6.1 契约。
-  if (st.runs.length === 0 && job && Array.isArray(job.recent_runs) && job.recent_runs.length > 0) {
-    st.runs = job.recent_runs.slice();
-    const oldest = st.runs[st.runs.length - 1];
-    st.nextBefore = oldest && oldest.started_at ? oldest.started_at : 0;
-    st.done = job.recent_runs.length < 10; // recent_runs 上限 10，少于 10 即末页
-  }
-  st.lastMountAt = Date.now();
-  host.innerHTML = cronTimelineHtml(jobId, job, st);
-  // 没找到 job → 拉一次列表（直接深链进来 OR 跨 tab 删除导致本地 cronJobs
-  // 已加载但缺这条）。R221-FIX-P1-5：原条件只在 cronJobs 为空时 fallback，
-  // 跨 tab 场景会永远停在空 timeline；改成 !job 即刻 reconcile。
-  if (!job) {
-    fetchCronJobs().then(() => {
-      if (selectedKey === 'cron:' + jobId) renderCronTimelineForSession(jobId);
-    }).catch(() => {});
-  }
-}
+// renderCronTimelineForJob is the canonical drawer-side entry point.
+// renderCronTimelineForSession (the legacy mainShell-coupled variant) has
+// been removed — see cronDrawerHtml above.
 
 // cronTimelineHtml — 渲染整个"执行历史"section 的内层 HTML。
 // 头部：标题 + 总次数 + 成功率 + 最后错误分类。
@@ -11636,7 +11616,11 @@ function cronTimelineLoadMore(jobId) {
       }
     } finally {
       st.loading = false;
-      if (selectedKey === 'cron:' + jobId) renderCronTimelinePanel(jobId);
+      // cron-panel-consolidation: only re-render the timeline panel if the
+      // operator is still looking at the drawer for this job. The drawer
+      // could have been closed or switched mid-fetch — st.runs is already
+      // populated for next time, so no information is lost.
+      if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
     }
   })();
 }
@@ -11784,6 +11768,220 @@ function clearCronSearch() {
   renderCronList();
 }
 
+// renderCronDrawer paints the per-job detail pane (cron-panel-consolidation
+// RFC §4.4 / §4.5). Idempotent and called from:
+//   - renderCronPanel (shell-preserving repaint and initial mount)
+//   - openCronDetail (operator click / freshly-created job)
+//   - ensureCronRunningTick (1Hz running-timer rerender path, indirect via
+//     renderCronPanel)
+//
+// Behaviour:
+//   - cronDetailJobId === null      → drawer hidden (no .is-open class)
+//   - jobId set, job present        → render 6-section drawer
+//   - jobId set, job missing        → "task deleted" empty state with
+//                                     auto-close after a frame so the
+//                                     drawer doesn't latch onto a ghost row
+function renderCronDrawer() {
+  const host = document.getElementById('cron-detail-pane');
+  if (!host) return;
+  const body = host.parentElement;
+  if (cronDetailJobId === null) {
+    host.classList.remove('is-open');
+    host.innerHTML = '';
+    if (body) body.classList.remove('has-drawer');
+    return;
+  }
+  if (body) body.classList.add('has-drawer');
+  const job = (cronJobs || []).find(x => x && x.id === cronDetailJobId);
+  if (!job) {
+    // Either deep-link before fetchCronJobs has populated the cache, or
+    // the operator deleted the active job from another tab. Render a
+    // placeholder so the layout stays stable; reconcile after fetch.
+    host.classList.add('is-open');
+    host.innerHTML = '<header class="cron-drawer-header">' +
+        '<div class="cdh-row1">' +
+          '<h2 class="cdh-title placeholder">任务已不在列表中</h2>' +
+          '<div class="cdh-actions">' +
+            '<button class="cdh-btn-icon" onclick="closeCronDetail()" title="关闭" aria-label="关闭">&times;</button>' +
+          '</div>' +
+        '</div>' +
+      '</header>' +
+      '<div class="cron-drawer-empty">该任务可能已被删除或同步未到。</div>';
+    // Reconcile in the background so a delayed first fetch doesn't strand
+    // the drawer in placeholder mode.
+    if (!Array.isArray(cronJobs) || cronJobs.length === 0) {
+      fetchCronJobs().then(() => renderCronDrawer()).catch(() => {});
+    }
+    return;
+  }
+  host.classList.add('is-open');
+  host.innerHTML = cronDrawerHtml(job);
+  // Re-mount timeline content. The drawer's history section embeds the
+  // existing #cron-timeline-panel host, so the same renderer (and the
+  // refreshHead / loadMore reconcilers) keep working without rewrites.
+  renderCronTimelineForJob(cronDetailJobId);
+}
+
+// cronDrawerHtml builds the per-job drawer body. Pure function — given a
+// cron job object returns an HTML string. Keeping this separate from the
+// DOM-manipulation in renderCronDrawer makes it easy to unit-test the
+// generated markup via static_ux_contract_test.go later.
+function cronDrawerHtml(j) {
+  const id = j.id || '';
+  const idShort = id.slice(0, 8);
+  const titleStr = (j.title || '').trim() || firstNonEmptyLine(j.prompt || '', 60) || '未命名任务';
+  const human = humanizeCron(j.schedule);
+  const workdir = j.work_dir || '';
+  const promptText = j.prompt || '';
+  const isPaused = !!j.paused;
+  const isRunning = !!(j.current_run && j.current_run.started_at);
+
+  // Header with split id-copy + close.
+  const headerHtml = '<header class="cron-drawer-header">' +
+    '<div class="cdh-row1">' +
+      '<h2 class="cdh-title" title="' + escAttr(titleStr) + '">' + esc(titleStr) + '</h2>' +
+      '<div class="cdh-actions">' +
+        '<button class="cdh-btn-icon" onclick="copyText(\'' + escJs(id) + '\')" title="复制任务 ID" aria-label="复制任务 ID">&#8869;</button>' +
+        '<button class="cdh-btn-icon" onclick="closeCronDetail()" title="关闭 (Esc)" aria-label="关闭">&times;</button>' +
+      '</div>' +
+    '</div>' +
+    '<div class="cdh-row2">' +
+      '<span class="cj-schedule" role="button" tabindex="0"' +
+        ' onclick="editCronJob(\'' + escJs(id) + '\')"' +
+        ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();editCronJob(\'' + escJs(id) + '\')}"' +
+        ' title="点击修改时间">' + esc(human) + '</span>' +
+      (workdir ? '<span class="cdh-chip mono" title="' + escAttr(workdir) + '">' + esc(workdir) + '</span>' : '') +
+      '<span class="cdh-chip mono">id ' + esc(idShort) + '</span>' +
+    '</div>' +
+  '</header>';
+
+  // Summary section: prompt + meta.
+  const notifyText = j.notify === false ? '\uD83D\uDD15 已关闭' : '\uD83D\uDD14 默认 IM 通知';
+  const freshText = j.fresh_context ? '\u2713 每次重置' : '\u2014 不重置';
+  const summaryHtml = '<section class="cron-drawer-summary">' +
+    '<div class="cds-prompt">' +
+      '<label>提示词</label>' +
+      '<p class="cds-prompt-body">' + esc(promptText || '（未设置）') + '</p>' +
+    '</div>' +
+    '<div class="cds-meta">' +
+      '<div><label>通知</label><span>' + esc(notifyText) + '</span></div>' +
+      '<div><label>上下文</label><span>' + esc(freshText) + '</span></div>' +
+      (workdir ? '<div><label>目录</label><span class="mono">' + esc(workdir) + '</span></div>' : '') +
+    '</div>' +
+  '</section>';
+
+  // Action row.
+  const triggerDisabled = isPaused || isRunning;
+  const triggerLabel = isRunning ? '\u25B7 运行中…' : '\u25B7 立即执行';
+  const triggerTooltip = isPaused
+    ? '已暂停。请先恢复任务。'
+    : (isRunning ? '上一次执行尚未完成，请等待结束。' : '立即执行一次');
+  const pauseBtn = isPaused
+    ? '<button type="button" class="cda-btn" onclick="cronResume(\'' + escJs(id) + '\')" title="恢复任务调度">\u25B6 恢复</button>'
+    : '<button type="button" class="cda-btn" onclick="cronPause(\'' + escJs(id) + '\')" title="暂停后调度跳过">\u23F8 暂停</button>';
+  const actionsHtml = '<nav class="cron-drawer-actions" aria-label="任务操作">' +
+    '<button type="button" class="cda-btn primary"' +
+      (triggerDisabled ? ' disabled aria-disabled="true"' : '') +
+      ' onclick="cronTriggerNow(\'' + escJs(id) + '\')"' +
+      ' title="' + escAttr(triggerTooltip) + '">' + esc(triggerLabel) + '</button>' +
+    pauseBtn +
+    '<button type="button" class="cda-btn" onclick="editCronJob(\'' + escJs(id) + '\')" title="编辑任务定义">\u270E 编辑</button>' +
+    '<button type="button" class="cda-btn danger" onclick="cronDelete(\'' + escJs(id) + '\')" title="删除任务及其历史">\uD83D\uDDD1 删除</button>' +
+  '</nav>';
+
+  // Current execution (conditional).
+  let currentHtml = '';
+  if (isRunning) {
+    const cr = j.current_run;
+    const elapsed = formatRunningElapsed(cr.started_at);
+    const phase = cr.phase ? cronPhaseLabel(cr.phase) : '执行中…';
+    const triggerKind = cronTriggerLabel(cr.trigger);
+    const runShort = (cr.run_id || '').slice(0, 8);
+    const sessShort = (cr.session_id || '').slice(0, 8);
+    const sessChip = sessShort ? ' \u00B7 session ' + esc(sessShort) : '';
+    currentHtml = '<section class="cron-drawer-current" role="status" aria-live="polite">' +
+      '<h3>当前执行</h3>' +
+      '<div class="cdc-card">' +
+        '<div class="cdc-row1">' +
+          '<span class="ctr-dot run" aria-hidden="true"></span>' +
+          '<span class="cdc-state">运行中</span>' +
+          '<span class="cdc-clock">' + esc(elapsed) + '</span>' +
+          (triggerKind ? '<span class="cdc-trigger">' + esc(triggerKind) + '</span>' : '') +
+        '</div>' +
+        '<div class="cdc-row2">' + esc(phase) + '</div>' +
+        '<div class="cdc-row3 mono">run ' + esc(runShort) + esc(sessChip) + '</div>' +
+      '</div>' +
+    '</section>';
+  }
+
+  // History section (timeline reuses cron-timeline-panel host id).
+  const historyHtml = '<section class="cron-drawer-history">' +
+    '<div class="cron-timeline-panel" id="cron-timeline-panel" data-job-id="' + escAttr(id) + '"></div>' +
+  '</section>';
+
+  return headerHtml + summaryHtml + actionsHtml + currentHtml + historyHtml;
+}
+
+// cronPhaseLabel maps backend phase strings to operator-friendly Chinese.
+// Falls back to a neutral "执行中…" for unknown phases so the UI never
+// shows raw enum names. RFC UI §4.4.
+function cronPhaseLabel(phase) {
+  switch (phase) {
+    case 'queued':
+    case 'dispatch':
+      return '已派发，等待调度';
+    case 'send':
+      return '等待 CLI 响应';
+    case 'waiting':
+      return '等待中';
+    default:
+      return '执行中…';
+  }
+}
+
+// cronTriggerLabel maps trigger source enum to operator-friendly Chinese.
+// Used both in the drawer's current-execution row and (later) the timeline
+// row trigger column. RFC UI §7.3.
+function cronTriggerLabel(trigger) {
+  switch (trigger) {
+    case 'scheduled': return '按计划';
+    case 'manual':    return '手动触发';
+    case 'catchup':   return '错过补跑';
+    default:          return '';
+  }
+}
+
+// renderCronTimelineForJob is a thin wrapper around the legacy
+// renderCronTimelineForSession that uses cronDetailJobId-keyed reconcile
+// instead of selectedKey. It re-uses the same #cron-timeline-panel host
+// (now living inside the drawer instead of mainShell), so cronTimelineHtml
+// / cronTimelineRowHtml / cronTimelineDetailHtml work unchanged.
+function renderCronTimelineForJob(jobId) {
+  const host = document.getElementById('cron-timeline-panel');
+  if (!host) return;
+  const job = (cronJobs || []).find(x => x && x.id === jobId);
+  const st = getCronTimelineState(jobId);
+  if (st.lastMountAt > 0 && Date.now() - st.lastMountAt > CRON_TIMELINE_FRESH_MS) {
+    st.runs = [];
+    st.nextBefore = 0;
+    st.done = false;
+    st.expanded = '';
+  }
+  if (st.runs.length === 0 && job && Array.isArray(job.recent_runs) && job.recent_runs.length > 0) {
+    st.runs = job.recent_runs.slice();
+    const oldest = st.runs[st.runs.length - 1];
+    st.nextBefore = oldest && oldest.started_at ? oldest.started_at : 0;
+    st.done = job.recent_runs.length < 10;
+  }
+  st.lastMountAt = Date.now();
+  host.innerHTML = cronTimelineHtml(jobId, job, st);
+  if (!job) {
+    fetchCronJobs().then(() => {
+      if (cronDetailJobId === jobId) renderCronTimelineForJob(jobId);
+    }).catch(() => {});
+  }
+}
+
 function renderCronPanel() {
   // Guard against an async race: fetchCronJobs().then(renderCronPanel) fires
   // after the user may have already clicked a cron card and opened a session.
@@ -11793,10 +11991,11 @@ function renderCronPanel() {
   const main = document.getElementById('main');
   // Shell-preserving repaint: when the cron panel is already mounted (user
   // is just typing in the search box or toggling a chip), we only want to
-  // repaint the list. Rebuilding the shell would wipe the input value and
-  // steal focus. Detect by probing for the list host element.
+  // repaint the list + drawer. Rebuilding the shell would wipe the input
+  // value and steal focus. Detect by probing for the list host element.
   if (document.getElementById('cron-list-items')) {
     renderCronList();
+    renderCronDrawer();
     return;
   }
   // cron-v2-polish §3.3: missed banner。Count 取自 cronJobs 本地缓存，
@@ -11860,37 +12059,78 @@ function renderCronPanel() {
     '</div>' +
     '<div class="cron-detail">' +
       '<div class="cron-detail-body">' +
-        '<div class="cron-list-head">' +
-          '<h3>定时任务' + summaryChip + '</h3>' +
-          '<button type="button" class="cron-new-btn" onclick="createNewCronJob()" aria-label="新建定时任务">' +
-            '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>' +
-            ' 新建' +
-          '</button>' +
+        '<div class="cron-list-pane" id="cron-list-pane">' +
+          '<div class="cron-list-head">' +
+            '<h3>定时任务' + summaryChip + '</h3>' +
+            '<button type="button" class="cron-new-btn" onclick="createNewCronJob()" aria-label="新建定时任务">' +
+              '<svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>' +
+              ' 新建' +
+            '</button>' +
+          '</div>' +
+          filterBar +
+          missedBanner +
+          '<div id="cron-list-items"></div>' +
         '</div>' +
-        filterBar +
-        missedBanner +
-        '<div id="cron-list-items"></div>' +
+        // cron-panel-consolidation RFC §4.1 / §4.2: drawer pane is always
+        // present in the DOM but only shown (`.is-open`) when
+        // cronDetailJobId is non-null. Inline content is filled by
+        // renderCronDrawer below; the existing `#cron-timeline-panel`
+        // host lives inside the drawer, so cronTimelineHtml /
+        // cronTimelineLoadMore / cronTimelineRefreshHead all keep
+        // working unchanged.
+        '<aside class="cron-detail-pane" id="cron-detail-pane" role="region" aria-label="任务详情"></aside>' +
       '</div>' +
     '</div>';
   main.innerHTML = html;
   // Paint list now that the shell is mounted; subsequent keystrokes / chip
   // flips route through renderCronList directly without touching the shell.
   renderCronList();
+  renderCronDrawer();
 }
 
-// openCronSession is the legacy entry point that previously redirected to
-// `selectSession('cron:<id>')` so the operator could see the cron timeline
-// inside the main events scroll. cron-panel-consolidation RFC §4.2 retires
-// that flow — clicks on a cron row now belong to the 定时任务 drawer.
-// PR3 leaves this as a no-op stub: between PR3 and PR4 landing, clicks
-// on cron list rows are intentionally inert (the 定时任务 panel still
-// shows the list, but no detail surface yet). PR4 replaces this with
-// `openCronDetail(jobId)` which sets `cronDetailJobId` and triggers a
-// drawer re-render. Calling code paths (cronJobCardHtml onclick, the
-// 'open' menu action) keep referencing `openCronSession` until PR4
-// finishes the rename so PR3 is reviewable in isolation.
-function openCronSession(_cronId) {
-  // intentionally no-op; PR4 will route into the cron drawer.
+// openCronDetail opens the per-job drawer in the 定时任务 panel.
+// cron-panel-consolidation RFC §4.2 / §4.5 — primary entry point for
+// "operator clicked a cron list row" and "operator just created a job".
+// Behaviour:
+//   - Sets cronDetailJobId so subsequent renderCronPanel paints render
+//     the drawer at the right spot.
+//   - Calls renderCronPanel — the shell-preserving repaint will lay out
+//     the two-column shell on first call and just patch the drawer +
+//     list active state on subsequent calls.
+//   - Idempotent on the same jobId (no flicker if invoked twice).
+function openCronDetail(jobId) {
+  if (!jobId) return;
+  cronDetailJobId = jobId;
+  // Make sure the cron panel is the foreground view. openCronPanel handles
+  // selectedKey reset / WS unsubscribe / mobile-shell push and is cheap to
+  // re-call — internally it short-circuits the renderCronPanel rebuild via
+  // the shell-preserving branch.
+  if (typeof openCronPanel === 'function') openCronPanel();
+  // Force a drawer paint even if the panel was already open (openCronPanel's
+  // shell-preserving branch only repaints the list).
+  renderCronPanel();
+}
+
+// closeCronDetail clears the drawer state and re-renders the cron panel
+// shell so the list reclaims full width. Called by the drawer's ✕ button,
+// the global Esc handler, and the "task deleted" toast cleanup. No-op
+// when no drawer is open.
+function closeCronDetail() {
+  if (cronDetailJobId === null) return;
+  cronDetailJobId = null;
+  // Remove `.is-active` from any list row so the sidebar-style highlight
+  // clears synchronously even before renderCronList re-paints.
+  document.querySelectorAll('.cj-row.is-active').forEach(el => el.classList.remove('is-active'));
+  renderCronPanel();
+}
+
+// openCronSession is the legacy entry point retained as a thin alias so
+// any in-flight code path (cached HTML attributes, the old menu action,
+// future bookmarks) still routes into the drawer. cron-panel-consolidation
+// RFC §4.2 retired the selectSession-into-mainShell flow; new code should
+// call openCronDetail directly.
+function openCronSession(cronId) {
+  openCronDetail(cronId);
 }
 
 async function fetchCronJobs() {
@@ -12012,6 +12252,14 @@ async function cronDelete(id) {
     // R220-FE-2: 释放该 job 在前端持有的 timeline 状态（runs / details / pagination
     // 游标 / fetched 标记），避免 cronTimelineState 累积已删除 job 的内存。
     if (cronTimelineState[id]) delete cronTimelineState[id];
+    // cron-panel-consolidation RFC §4.5 state-machine row "G. 删除中":
+    // close the drawer if it was showing the just-deleted job. The
+    // subsequent renderCronPanel (via fetchCronJobs.then) will repaint
+    // the empty drawer — calling closeCronDetail explicitly here keeps
+    // the visual feedback synchronous (no flash of the deleted task).
+    if (cronDetailJobId === id) {
+      cronDetailJobId = null;
+    }
     fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
   } catch (e) { showNetworkError('删除定时任务', e); }
 }

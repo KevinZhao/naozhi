@@ -1241,6 +1241,81 @@ body.kbd-open .input-hints{display:none}
   .cron-timeline-panel .ctr-dur{font-size:11px}
 }
 
+/* ===== cron-panel-consolidation RFC §4 — drawer + list-pane =====
+ * Two-column shell when cronDetailJobId is non-null; collapses to single
+ * column when no drawer is open. Toggled via .has-drawer on the body.
+ * Drawer hosts the existing #cron-timeline-panel inside its history
+ * section so the timeline renderer (cronTimelineHtml three-piece set) is
+ * reused unchanged — the only override is below to flatten the timeline's
+ * stand-alone padding / border / max-height inside the drawer context. */
+.cron-detail-body{padding:0;display:flex;flex-direction:row;align-items:stretch;min-height:0;gap:0}
+.cron-detail-body > .cron-list-pane{flex:1 1 auto;min-width:0;padding:16px 20px;overflow-y:auto;background:var(--nz-bg-0)}
+.cron-detail-body.has-drawer > .cron-list-pane{flex:0 0 380px}
+.cron-detail-pane{flex:1 1 auto;min-width:0;display:none;flex-direction:column;overflow-y:auto;background:var(--nz-bg-0);border-left:1px solid var(--nz-border)}
+.cron-detail-pane.is-open{display:flex}
+/* Drawer header */
+.cron-drawer-header{position:sticky;top:0;z-index:2;background:var(--nz-bg-0);padding:14px 20px 10px;border-bottom:1px solid var(--nz-border);display:flex;flex-direction:column;gap:6px}
+.cron-drawer-header .cdh-row1{display:flex;align-items:center;gap:8px}
+.cron-drawer-header .cdh-title{margin:0;font-size:18px;font-weight:600;color:var(--nz-text-strong);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1;min-width:0}
+.cron-drawer-header .cdh-title.placeholder{color:var(--nz-text-mute);font-style:italic}
+.cron-drawer-header .cdh-actions{display:flex;gap:4px;flex-shrink:0}
+.cron-drawer-header .cdh-btn-icon{width:32px;height:32px;border-radius:6px;border:1px solid transparent;background:transparent;color:var(--nz-text-mute);cursor:pointer;font-size:16px;line-height:1;display:inline-flex;align-items:center;justify-content:center;font-family:inherit;-webkit-tap-highlight-color:transparent}
+.cron-drawer-header .cdh-btn-icon:hover{background:var(--nz-bg-1);color:var(--nz-text-strong);border-color:var(--nz-border)}
+.cron-drawer-header .cdh-row2{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--nz-text-mute)}
+.cron-drawer-header .cdh-row2 .cj-schedule{cursor:pointer}
+.cron-drawer-header .cdh-chip{font-size:11px;color:var(--nz-text-mute);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:4px;padding:1px 6px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cron-drawer-header .cdh-chip.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+/* Drawer summary */
+.cron-drawer-summary{padding:14px 20px;border-bottom:1px solid var(--nz-border);display:flex;flex-direction:column;gap:10px}
+.cron-drawer-summary .cds-prompt label,.cron-drawer-summary .cds-meta label{display:block;font-size:11px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px}
+.cron-drawer-summary .cds-prompt-body{font-size:13px;color:var(--nz-text);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;padding:10px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow-y:auto;margin:0}
+.cron-drawer-summary .cds-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px 16px}
+.cron-drawer-summary .cds-meta > div{font-size:13px}
+.cron-drawer-summary .cds-meta span{color:var(--nz-text)}
+.cron-drawer-summary .cds-meta span.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+/* Drawer actions */
+.cron-drawer-actions{display:flex;gap:8px;padding:12px 20px;border-bottom:1px solid var(--nz-border);flex-wrap:wrap;align-items:center}
+.cron-drawer-actions .cda-btn{min-height:36px;padding:0 14px;border-radius:6px;border:1px solid var(--nz-border);background:var(--nz-bg-2);color:var(--nz-text);cursor:pointer;font-size:13px;font-family:inherit;display:inline-flex;align-items:center;gap:4px;-webkit-tap-highlight-color:transparent}
+.cron-drawer-actions .cda-btn:hover:not([disabled]){background:var(--nz-border);color:var(--nz-text-strong)}
+.cron-drawer-actions .cda-btn[disabled]{opacity:.55;cursor:not-allowed}
+.cron-drawer-actions .cda-btn.primary{border-color:var(--nz-accent);color:var(--nz-accent);background:transparent}
+.cron-drawer-actions .cda-btn.primary:hover:not([disabled]){background:rgba(31,111,235,.12)}
+.cron-drawer-actions .cda-btn.danger{margin-left:auto;color:var(--nz-red);border-color:rgba(218,54,51,.45);background:transparent}
+.cron-drawer-actions .cda-btn.danger:hover{background:rgba(218,54,51,.12)}
+/* Drawer current execution */
+.cron-drawer-current{padding:14px 20px;border-bottom:1px solid var(--nz-border)}
+.cron-drawer-current h3{margin:0 0 10px;font-size:13px;color:var(--nz-text-strong);font-weight:600;letter-spacing:.2px}
+.cron-drawer-current .cdc-card{background:rgba(31,111,235,.08);border:1px solid var(--nz-accent);border-radius:8px;padding:12px}
+.cron-drawer-current .cdc-row1{display:flex;align-items:center;gap:8px;font-size:14px;color:var(--nz-text-strong)}
+.cron-drawer-current .cdc-state{font-weight:600;color:var(--nz-accent)}
+.cron-drawer-current .cdc-clock{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-variant-numeric:tabular-nums;color:var(--nz-text-strong);font-size:18px;margin-left:4px}
+.cron-drawer-current .cdc-trigger{margin-left:auto;font-size:12px;color:var(--nz-text-mute);background:var(--nz-bg-1);border-radius:4px;padding:2px 6px}
+.cron-drawer-current .cdc-row2{margin-top:8px;font-size:12px;color:var(--nz-text-mute)}
+.cron-drawer-current .cdc-row3{margin-top:6px;font-size:11px;color:var(--nz-text-faint);font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+/* Drawer history (override timeline panel for in-drawer use) */
+.cron-drawer-history{padding:14px 20px;flex:1 1 auto}
+.cron-drawer-history .cron-timeline-panel{padding:0;background:transparent;border:none;max-height:none;overflow:visible}
+.cron-drawer-history .cron-timeline-panel .ct-head{position:sticky;top:0;background:var(--nz-bg-0);padding:0 0 8px;border-bottom:1px solid var(--nz-border);z-index:1;margin-bottom:10px}
+/* Drawer empty state (jobId set but job not in cronJobs) */
+.cron-drawer-empty{padding:20px;color:var(--nz-text-mute);font-size:13px;text-align:center;line-height:1.6}
+/* List row selection (cj-row.is-active) */
+.cj-row.is-active{background:#1f2937;box-shadow:inset 4px 0 0 var(--nz-accent)}
+.cj-row.is-active .cj-title{color:var(--nz-text-strong)}
+.cj-row.is-active.is-error{box-shadow:inset 4px 0 0 var(--nz-accent),inset 0 0 0 1px rgba(218,54,51,.45)}
+.cj-row.is-active.is-missed{box-shadow:inset 4px 0 0 var(--nz-accent),inset 0 0 0 1px rgba(210,153,34,.45)}
+.cj-row.is-active.is-running{background:#1c2939;box-shadow:inset 4px 0 0 var(--nz-accent)}
+/* Single-column responsive: drawer pushes over the list under main width.
+ * Threshold is generous (~720) since the list pane is fixed at 380 + 16
+ * padding when drawer opens — under 720 the drawer would render at <300px
+ * which can't fit both prompt and timeline. */
+@media(max-width:720px){
+  .cron-detail-body.has-drawer > .cron-list-pane{display:none}
+  .cron-detail-pane.is-open{flex:1 1 auto;border-left:none}
+}
+@media(max-width:540px){
+  .cron-drawer-header,.cron-drawer-summary,.cron-drawer-actions,.cron-drawer-current,.cron-drawer-history{padding-left:14px;padding-right:14px}
+}
+
 /* ===== Frequency picker (Claude-style compact row) =====
  * v2 polish: 单行横排 [Frequency ▾] [time] [weekday ▾ / day ▾]，
  * 对齐 Claude Scheduled Tasks 的 Frequency 控件风格。原来的 tab 切换
