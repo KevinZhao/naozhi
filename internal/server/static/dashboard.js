@@ -12619,6 +12619,66 @@ async function doEditCronJob(id) {
   });
 })();
 
+/* ===== Sidebar fully-collapse (PC only) =====
+   Toggle body.sidebar-collapsed so .main occupies the full viewport. State is
+   persisted via lsSet so a refresh keeps the user's preference. The mobile
+   layout (≤768px) already treats the sidebar as a fixed drawer overlay, so
+   the toggle is a no-op there: we suppress the click and let mobile's own
+   list/chat-view classes drive visibility. Keyboard shortcut: `[` (mirroring
+   editor conventions like VS Code's Ctrl+B / Cursor's `[`). */
+const LS_SIDEBAR_COLLAPSED = 'sidebar_collapsed';
+
+function isMobileViewport() {
+  return window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
+}
+
+function applySidebarCollapsed(collapsed) {
+  document.body.classList.toggle('sidebar-collapsed', !!collapsed);
+  const btnHide = document.getElementById('btn-sidebar-collapse');
+  const btnShow = document.getElementById('btn-sidebar-show');
+  if (btnHide) {
+    btnHide.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    btnHide.title = collapsed ? '展开侧边栏 (按 [)' : '收起侧边栏 (按 [)';
+  }
+  if (btnShow) {
+    btnShow.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  }
+}
+
+function toggleSidebarCollapsed() {
+  // Mobile drawer has its own list/chat-view contract — do not piggyback on
+  // it; just bail so the existing back-button + drawer flow stays canonical.
+  if (isMobileViewport()) return;
+  const next = !document.body.classList.contains('sidebar-collapsed');
+  applySidebarCollapsed(next);
+  lsSet(LS_SIDEBAR_COLLAPSED, next ? 1 : 0);
+}
+
+(function initSidebarCollapsed(){
+  // Honor persisted preference on cold-load. Skip on mobile so a previously
+  // collapsed PC session doesn't black-box the drawer when the user pops the
+  // dashboard open on a phone (different viewport, different mental model).
+  if (isMobileViewport()) return;
+  const v = lsGet(LS_SIDEBAR_COLLAPSED, 0);
+  if (v === 1 || v === '1' || v === true) {
+    applySidebarCollapsed(true);
+  }
+})();
+
+document.addEventListener('keydown', function(e) {
+  // `[` toggles collapse on PC. Skip when typing into an input/textarea/
+  // contenteditable, when any modifier is held, or while a modal/palette is
+  // open — same skip logic the `/` shortcut uses for sidebar search.
+  if (e.key !== '[') return;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+  const tgt = e.target;
+  if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+  if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
+  if (isMobileViewport()) return;
+  e.preventDefault();
+  toggleSidebarCollapsed();
+});
+
 /* ===== Onboarding ===== */
 
 // Show a one-time intro for first-time visitors. Dismissal is sticky per
