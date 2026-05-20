@@ -166,8 +166,8 @@
 - [x] **R226-PERF-3 — `passthrough.writeUserMessageUnderShimLock` `&captureWriter{}` 逃逸到堆（P1）**: 每条 passthrough send 2 alloc。方案：`sync.Pool[*captureWriter]`，复用 backing slice（仿 `shimSendBufPool`）。`internal/cli/passthrough.go:182`。 — 已修复（captureWriterPool sync.Pool init cap=4096 + Get 后 reset + defer Put；shimSendLocked JSON 编码已 copy 字节, 复用安全），本批 PR #153
 - [ ] **R226-PERF-4 — ACP `agent_message_chunk` 每 chunk 一次 `json.Unmarshal`（P2）**: kiro streaming 高频路径，500 unmarshal/s 仅此一处。方案：手写 byte-scan 提取 `"text":"..."` value，跳过 reflect。`internal/cli/protocol_acp.go:517`。
 - [ ] **R226-PERF-5 — `eventlog.Append` 单条调用每次造 `[]EventEntry{e}` slice（P2）**: PersistSink 接口允许 retain slice 故复用受限。方案：加 `AppendOne(e)` 快路径或单元数组池。`internal/cli/eventlog.go:660`。
-- [ ] **R226-PERF-6 — `EventLog.applyEntryStateLocked` task 事件线性扫 turnAgents/bgAgents（P3）**: 多路 subagent 场景（>8 并行）双重 O(n)。方案：当 `len > 8` 时建 `map[string]int` 索引。`internal/cli/eventlog.go:405`。
-- [ ] **R226-PERF-7 — `handleList` 响应仍用 `map[string]any`（P2）**: 10 tabs × 1Hz × 2 alloc = 20 map alloc/s。方案：`type sessionListResp struct {...}`。`internal/server/dashboard_session.go:535,599`。
+- [~] **R226-PERF-6 — `EventLog.applyEntryStateLocked` task 事件线性扫 turnAgents/bgAgents（P3）**: 多路 subagent 场景（>8 并行）双重 O(n)。方案：当 `len > 8` 时建 `map[string]int` 索引。`internal/cli/eventlog.go:405`。 — 评估后不实施（typical turnAgents len 1-3，result/user 事件已自动重置；threshold-based map 需 4 个同步映射 cover ToolUseID/TaskID × turn/bg，维护成本远高于收益；P3 + 无 >8 subagent 实测案例），本批 PR #164
+- [x] **R226-PERF-7 — `handleList` 响应仍用 `map[string]any`（P2）**: 10 tabs × 1Hz × 2 alloc = 20 map alloc/s。方案：`type sessionListResp struct {...}`。`internal/server/dashboard_session.go:535,599`。 — 已修复（新增 sessionListLocalResp/sessionListMultiResp 两个 named struct + 两个调用点切换；JSON 字节兼容；history_sessions omitempty 保留，多节点 Nodes 不带 omitempty 匹配原 unconditional 赋值），本批 PR #164
 - [ ] **R226-PERF-8 — `process_event_format.TodosDetailJSON` 二次 marshal（P2）**: `block.Input` → `[]TodoItem` → marshal，可直接从 `block.Input` 提 `"todos"` 字段 raw bytes。`internal/cli/process_event_format.go:173`。
 - [x] **R226-PERF-9 — `ACPProtocol.WriteInterrupt` 每次 `json.Marshal`（P2）**: 静态模板 + UUID 拼接可省反射。`internal/cli/protocol_acp.go:274`。 — 已修复（手写字节模板 + 仅 sessionId 走 json.Marshal 快路径），本批 PR #151
 - [ ] **R226-PERF-10 — `process_shim_io.shimWriter.Write` fast path `string(data[:len-1])` 拷贝（P3，封 R71-PERF-H1）**: shimClientMsg.Line 改 `json.RawMessage`。
@@ -260,8 +260,8 @@
 - [ ] **R225-PERF-14 — `wsclient.sweepSubGenExpiredLocked` 在 hub 写锁下扫 map（P3）**: wsclient.go:143 阻塞 subscribe/unsubscribe 并发。方案：移到 client 自身轻量 mutex。
 - [x] **R225-PERF-15 — `process_send.buildUserEntry` thumbnail goroutine 无并发上限（P3）**: 最多 20 个 goroutine CPU-bound JPEG encode 同时启动；建议限并发 4。 — 已修复（capacity=4 信号量 + 9 行 diff），本批 PR #153
 - [x] **R225-PERF-16 — `eventlog.EntriesSince/Entries/LastN` defer Unlock 在热路径（P3）**: 高频 broadcast 下显式 Unlock 微优。 — 已修复（三个读取函数改显式 RUnlock；函数体内无非 Unlock 清理，语义不变），本批 PR #157
-- [ ] **R225-PERF-17 — `TruncateRunes(string, ...)` 无字节快检（P3）**: process_event_format.go:132 走 rune 迭代；`TruncateRunesBytes` 已有快检，应让 string 版同样先 `len <= maxRunes*4` 短路。
-- [ ] **R225-PERF-18 — `indexAdd` map[string][]string 线性扫描去重（P3）**: router_core.go:496 改 `map[string]map[string]struct{}` O(1) 去重。
+- [~] **R225-PERF-17 — `TruncateRunes(string, ...)` 无字节快检（P3）**: process_event_format.go:132 走 rune 迭代；`TruncateRunesBytes` 已有快检，应让 string 版同样先 `len <= maxRunes*4` 短路。 — 评估后无需修改（`TruncateRunes` line 31 已有 `if len(s) <= maxRunes { return s }` 等价快检，与 `TruncateRunesBytes` line 86 语义一致；TODO 描述的 `len <= maxRunes*4` 上界数学上不成立 — UTF-8 byte 数是 rune 数上界而非下界，加该条件会漏截），本批 PR #164
+- [x] **R225-PERF-18 — `indexAdd` map[string][]string 线性扫描去重（P3）**: router_core.go:496 改 `map[string]map[string]struct{}` O(1) 去重。 — 已修复（field 改 `map[string]map[string]struct{}` + indexAdd/indexDel 改 set 操作 + ResetChat 消费方改 `for key := range set` + init 同步；5 改动点 2 文件），本批 PR #164
 
 ### 代码质量 — 本轮新发现
 
@@ -302,7 +302,7 @@
 - [ ] **R224-GO-5 — `eventlog.invokePersistSink` `replay` 标志读取存在 sink Store/sinkReady Store 之间的 race window（P2）**: `eventlog.go:360` 读 `!sinkReady.Load()` 在锁外，`SetPersistSink` 先 Store sink 后 Store sinkReady（line 336-337），中间窗口内一个 entry 会被错误标记 `replay=true`。方案：SetPersistSink 顺序反转，或合并到一个 atomic.Pointer 携带 sink+ready。
 - [ ] **R224-GO-6 — `shim/server.go SetReadDeadline` 错误 nolint 静默吞（P2）**: `:654, :680` SetReadDeadline 失败 nolint:errcheck 直接吞；conn 已关闭时后续 ReadBytes 无 deadline 阻塞 goroutine 泄漏；deadline 清除失败时 post-auth 读立即 timeout 踢掉合法客户端。方案：失败时显式关闭 conn 并 return。
 - [ ] **R224-GO-7 — `shim/server.go writer goroutine` 内层 `w.Write(more)` 错误 nolint 吞（P2）**: `:785` 写失败后 `:790` 仍调 `flushWithDeadline()`，可能将损坏的 buf 状态 flush 出去。方案：内层 write 失败立即 return。
-- [ ] **R224-GO-8 — `shim/server.go resetIdleTimer` Stop() 后未 drain `idleTimer.C`（P3）**: `:457` Go &lt;1.23 toolchain 上 idle event 残留导致 reset 后立即触发空闲关闭。方案：标准 Stop+drain 模式 `if !Stop() { select { case <-C: default: } }`。
+- [x] **R224-GO-8 — `shim/server.go resetIdleTimer` Stop() 后未 drain `idleTimer.C`（P3）**: `:457` Go &lt;1.23 toolchain 上 idle event 残留导致 reset 后立即触发空闲关闭。方案：标准 Stop+drain 模式 `if !Stop() { select { case <-C: default: } }`。 — 已修复（Stop() 返回 false 时非阻塞 drain；Go 1.26 toolchain 已自动处理，保留 drain 是 belt-and-suspenders 防御未来调用方缓存 channel），本批 PR #164
 
 ### 安全 — 本轮新发现
 
