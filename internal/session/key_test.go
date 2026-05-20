@@ -10,7 +10,7 @@ func TestReservedNamespacePrefixes(t *testing.T) {
 	t.Parallel()
 	// Sanity: canonical constants carry their trailing colon so substring
 	// checks cannot accidentally match "cronographer:" or "projectile:".
-	for _, p := range []string{CronKeyPrefix, ProjectKeyPrefix, ScratchKeyPrefix} {
+	for _, p := range []string{CronKeyPrefix, ProjectKeyPrefix, ScratchKeyPrefix, SysKeyPrefix} {
 		if p == "" {
 			t.Errorf("empty reserved prefix in set")
 		}
@@ -26,6 +26,7 @@ func TestReservedNamespacePrefixes(t *testing.T) {
 		CronKeyPrefix:    true,
 		ProjectKeyPrefix: true,
 		ScratchKeyPrefix: true,
+		SysKeyPrefix:     true,
 	}
 	for _, p := range reservedKeyPrefixes {
 		if !wantSet[p] {
@@ -54,6 +55,8 @@ func TestIsReservedNamespace(t *testing.T) {
 		{"project bare prefix", "project:", true},
 		{"scratch", "scratch:abc:general:general", true},
 		{"scratch bare prefix", "scratch:", true},
+		{"sys daemon", "sys:auto-titler", true},
+		{"sys bare prefix", "sys:", true},
 		// Substring collisions must NOT be classified as reserved: keeping
 		// trailing-colon tokens in the prefix set prevents this, but
 		// testing it explicitly locks the contract so future refactors
@@ -62,6 +65,7 @@ func TestIsReservedNamespace(t *testing.T) {
 		{"cronographer false positive", "cronographer:direct:1:x", false},
 		{"projectile false positive", "projectile:direct:1:x", false},
 		{"scratchpad false positive", "scratchpad:direct:1:x", false},
+		{"systemic false positive", "systemic:direct:1:x", false},
 	}
 	for _, tt := range tests {
 		tt := tt
@@ -99,6 +103,42 @@ func TestIsCronKey(t *testing.T) {
 	}
 }
 
+func TestIsSysKey(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		key  string
+		want bool
+	}{
+		{"empty", "", false},
+		{"sys daemon", "sys:auto-titler", true},
+		{"sys bare prefix", "sys:", true},
+		{"cron", "cron:job-1", false},
+		{"feishu", "feishu:group:chat:general", false},
+		{"systemic false positive", "systemic:x", false},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsSysKey(tt.key); got != tt.want {
+				t.Errorf("IsSysKey(%q) = %v, want %v", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSysKey(t *testing.T) {
+	t.Parallel()
+	if got := SysKey("auto-titler"); got != "sys:auto-titler" {
+		t.Errorf("SysKey(%q) = %q, want %q", "auto-titler", got, "sys:auto-titler")
+	}
+	// Round-trip: SysKey output must satisfy IsSysKey.
+	if !IsSysKey(SysKey("any-name")) {
+		t.Error("SysKey output should satisfy IsSysKey")
+	}
+}
+
 // TestExemptKeyPrefixesUsesConstants locks the invariant that
 // router.go's exemptKeyPrefixes references the canonical constants,
 // not bare string literals that could drift. The concrete values live
@@ -109,6 +149,7 @@ func TestExemptKeyPrefixesUsesConstants(t *testing.T) {
 	want := map[string]bool{
 		CronKeyPrefix:    true,
 		ProjectKeyPrefix: true,
+		SysKeyPrefix:     true,
 	}
 	for _, p := range exemptKeyPrefixes {
 		if !want[p] {
@@ -135,6 +176,7 @@ func TestIsExemptKey(t *testing.T) {
 	}{
 		{"cron", "cron:foo", true},
 		{"project", "project:bar:planner", true},
+		{"sys", "sys:auto-titler", true},
 		{"scratch NOT exempt", "scratch:abc:general:general", false},
 		{"IM NOT exempt", "feishu:group:chat:general", false},
 		{"empty NOT exempt", "", false},

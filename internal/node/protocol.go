@@ -46,7 +46,7 @@ type AgentMetaPatch struct {
 	LastTool   string `json:"last_tool,omitempty"`
 	LastDetail string `json:"last_detail,omitempty"`
 	ToolUses   int    `json:"tool_uses,omitempty"`
-	DurationMS int    `json:"duration_ms,omitempty"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
 }
 
 // ClientMsg is a message sent from the WebSocket client.

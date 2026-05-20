@@ -17,7 +17,6 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -250,11 +249,21 @@ func isUnknownRPCMethodErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "unknown method")
 }
 
+// cronStubChecker is the 1-method consumer interface SessionHandlers needs
+// from cron.Scheduler — handleEvents revives a dismissed cron stub when a
+// dashboard tab requests its event tail. Defined here so the server package
+// does not import cron's full type just for this single call. R228-ARCH-17.
+//
+// *cron.Scheduler satisfies this implicitly.
+type cronStubChecker interface {
+	EnsureStub(key string) bool
+}
+
 // SessionHandlers groups the session list, events, delete, and resume API endpoints.
 type SessionHandlers struct {
 	router      *session.Router
 	projectMgr  *project.Manager
-	scheduler   *cron.Scheduler // optional; used by handleEvents to revive dismissed cron stubs
+	scheduler   cronStubChecker // optional; used by handleEvents to revive dismissed cron stubs
 	claudeDir   string
 	allowedRoot string
 	agents      map[string]session.AgentOpts
@@ -396,15 +405,13 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 			}
 			continue
 		}
-		// Cron stub sessions must never appear in the sidebar either. The
-		// cron-panel-consolidation RFC (docs/rfc/cron-panel-consolidation.md)
-		// collapses cron visibility into the dedicated 「定时任务」 panel —
-		// the dashboard sidebar / mainShell are reserved for human
-		// conversation surfaces. Keep running/ready counts inclusive so
-		// operators still see maxProcs pressure while a cron job is
-		// mid-execution. This is the canonical filter; the prior frontend
-		// `cronVisibleKeys` whitelist was a pure UI bandage.
-		if session.IsCronKey(snap.Key) {
+		// Cron and system-daemon stub sessions must never appear in the
+		// sidebar either:  cron flows through the dedicated 「定时任务」
+		// panel (cron-panel-consolidation RFC), and sys: daemons are
+		// naozhi-internal infrastructure surfaced via the System drawer
+		// (docs/rfc/system-session.md §9.2).  Keep running/ready counts
+		// inclusive so maxProcs pressure remains visible in stats.
+		if session.IsCronKey(snap.Key) || session.IsSysKey(snap.Key) {
 			switch snap.State {
 			case "running":
 				running++

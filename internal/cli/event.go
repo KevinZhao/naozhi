@@ -167,9 +167,9 @@ type AskQuestionOpt struct {
 
 // TaskUsage holds resource consumption stats from agent task events.
 type TaskUsage struct {
-	TotalTokens int `json:"total_tokens"`
-	ToolUses    int `json:"tool_uses"`
-	DurationMS  int `json:"duration_ms"`
+	TotalTokens int   `json:"total_tokens"`
+	ToolUses    int   `json:"tool_uses"`
+	DurationMS  int64 `json:"duration_ms"`
 }
 
 type AssistantMessage struct {

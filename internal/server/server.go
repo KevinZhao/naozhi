@@ -24,6 +24,7 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/sysession"
 	"github.com/naozhi/naozhi/internal/transcribe"
 	"golang.org/x/time/rate"
 )
@@ -91,6 +92,11 @@ type Server struct {
 	// beyond their 10-minute idle TTL. Owned by Server so Shutdown can stop
 	// the sweeper alongside the rest of the teardown chain.
 	scratchPool *session.ScratchPool
+
+	// sysessionMgr drives system-daemon Tick scheduling (docs/rfc/system-session.md).
+	// nil when disabled in config; the GET /api/system/daemons endpoint
+	// returns an empty list in that case.
+	sysessionMgr *sysession.Manager
 
 	// Watchdog kill counters — incremented atomically, exposed via /health and /api/sessions.
 	watchdogNoOutputKills atomic.Int64
@@ -435,6 +441,11 @@ type ServerOptions struct {
 	AgentCommands map[string]string
 	Scheduler     *cron.Scheduler
 	Backend       string // "claude" | "kiro" | "" (empty → "claude")
+	// SysessionManager is the system-daemon Manager (docs/rfc/system-session.md).
+	// nil disables /api/system/* endpoints — Manager.Start should be invoked
+	// by the caller (cmd/naozhi/main.go) before the server starts serving so
+	// the inspector reads see live data on first poll.
+	SysessionManager *sysession.Manager
 }
 
 // NewWithOptions constructs a Server from a single ServerOptions value.
@@ -551,6 +562,7 @@ func buildServer(opts ServerOptions) *Server {
 		resolver:        resolver,
 		nodes:           nodes,
 		knownNodes:      knownNodes,
+		sysessionMgr:    opts.SysessionManager,
 
 		// Extracted handler groups
 		auth: &AuthHandlers{

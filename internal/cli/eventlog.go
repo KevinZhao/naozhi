@@ -149,7 +149,7 @@ type EventEntry struct {
 	LastTool   string   `json:"last_tool,omitempty"`   // most recent tool in agent task
 	ToolUses   int      `json:"tool_uses,omitempty"`   // tool call count in agent task
 	Tokens     int      `json:"tokens,omitempty"`      // total tokens consumed by agent task
-	DurationMS int      `json:"duration_ms,omitempty"` // elapsed ms for agent task
+	DurationMS int64    `json:"duration_ms,omitempty"` // elapsed ms for agent task
 	Status     string   `json:"status,omitempty"`      // agent task status (completed, error, etc.)
 	// Agent team internal-view linkage (RFC v4 agent-team-ui §3.2.2).
 	// All four fields are persisted to sessions/*.jsonl on "agent" and
@@ -205,7 +205,7 @@ type SubagentInfo struct {
 	LastTool   string `json:"last_tool,omitempty"`
 	LastDetail string `json:"last_detail,omitempty"`
 	ToolUses   int    `json:"tool_uses,omitempty"`
-	DurationMS int    `json:"duration_ms,omitempty"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
 }
 
 type subscriber struct {
