@@ -129,23 +129,51 @@ func Download(ctx context.Context, rel *Release, dir string) (binPath string, er
 	return binPath, nil
 }
 
+// stagingPattern is the os.CreateTemp pattern Replace uses for the
+// staging file. Kept as a package-level constant so tests can glob for
+// stale staging files after forcing a Replace failure (the random suffix
+// makes the exact filename unpredictable). R225-SEC-3.
+const stagingPattern = ".naozhi-upgrade-*.staging"
+
 // Replace atomically swaps newBin into installPath:
 //  1. Backs up the current binary to installPath + backupSuffix.
 //  2. Writes newBin to a staging file in the same directory.
 //  3. os.Rename (atomic on same filesystem) stages → installPath.
 //  4. On any failure after backup, restores the backup.
+//
+// The staging file uses os.CreateTemp with a randomised suffix instead of
+// a fixed `.naozhi-upgrade.staging` name. On a multi-user host where
+// $installDir is writable by more than one UID (shared /usr/local/bin),
+// the fixed name gave a hostile UID a known target it could pre-create
+// or symlink before the upgrade ran; CreateTemp's O_EXCL+random suffix
+// removes the predictability without changing the atomic-rename contract.
+// R225-SEC-3.
 func Replace(newBin, installPath string) (backupPath string, err error) {
 	backupPath = installPath + backupSuffix
-	stagePath := installPath + ".naozhi-upgrade.staging"
 
 	// Backup current binary so we can roll back on service-restart failure.
 	if err := copyFile(installPath, backupPath); err != nil {
 		return "", fmt.Errorf("backup current binary: %w", err)
 	}
 
-	// Write to a staging file in the same directory (guarantees same device
-	// for the subsequent Rename, which is atomic on POSIX).
+	// CreateTemp gives an O_EXCL'd staging file in the same directory as
+	// installPath, so the subsequent Rename stays a same-device atomic op.
+	stageF, err := os.CreateTemp(filepath.Dir(installPath), stagingPattern)
+	if err != nil {
+		_ = os.Remove(backupPath)
+		return "", fmt.Errorf("create staging file: %w", err)
+	}
+	stagePath := stageF.Name()
+	// Close immediately — copyFile re-opens for write. Closing first means
+	// a copyFile failure does not leak the original O_EXCL fd.
+	if err := stageF.Close(); err != nil {
+		_ = os.Remove(stagePath)
+		_ = os.Remove(backupPath)
+		return "", fmt.Errorf("close staging file: %w", err)
+	}
+
 	if err := copyFile(newBin, stagePath); err != nil {
+		_ = os.Remove(stagePath)
 		_ = os.Remove(backupPath)
 		return "", fmt.Errorf("stage new binary: %w", err)
 	}
@@ -215,7 +243,23 @@ func fetchFile(ctx context.Context, url, dest string, maxBytes int64) error {
 	if err != nil {
 		return err
 	}
-	client := &http.Client{Timeout: defaultTimeout}
+	// Bound the redirect chain (GitHub release URLs hop release → CDN, but
+	// further hops are unexpected) and refuse downgrades to plain http so a
+	// hostile DNS / CDN cannot redirect into a metadata-server SSRF or
+	// strip TLS off the asset download. Mirrors the LatestRelease client's
+	// CheckRedirect on the same call site. (R227-SEC-5)
+	client := &http.Client{
+		Timeout: defaultTimeout,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			if len(via) > 5 {
+				return fmt.Errorf("too many redirects")
+			}
+			if req.URL.Scheme != "https" {
+				return fmt.Errorf("redirect to non-https URL refused: %s", req.URL.Scheme)
+			}
+			return nil
+		},
+	}
 	resp, err := client.Do(req)
 	if err != nil {
 		return err

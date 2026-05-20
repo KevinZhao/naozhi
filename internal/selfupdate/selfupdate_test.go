@@ -161,10 +161,12 @@ func TestReplace_StagingCleanedOnRenameFailure(t *testing.T) {
 		t.Fatal("expected Replace to fail when installPath is a directory")
 	}
 
-	// Staging file should be cleaned up.
-	stagePath := installPath + ".naozhi-upgrade.staging"
-	if _, err := os.Stat(stagePath); !os.IsNotExist(err) {
-		t.Errorf("staging file %s should have been removed on failure", stagePath)
+	// Staging file should be cleaned up. CreateTemp's randomised suffix
+	// makes the exact filename unpredictable; glob against the same
+	// pattern Replace uses so we still catch a leak. R225-SEC-3.
+	stale, _ := filepath.Glob(filepath.Join(dir, stagingPattern))
+	if len(stale) > 0 {
+		t.Errorf("staging files should have been removed on failure: %v", stale)
 	}
 }
 
