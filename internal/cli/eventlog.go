@@ -43,6 +43,17 @@ const imageDataURIPrefix = "data:image/"
 // thumbnail it drew. Pass nil when the caller has no paths. The returned
 // filtered paths slice is nil when every Images entry was valid (no
 // allocation) OR when every path was dropped.
+//
+// Two-pass design (R229-PERF-8): the first pass is a pure read scan that
+// short-circuits on the first invalid entry and returns the inputs untouched
+// when every URI is well-formed — the common case under MakeThumbnail. The
+// second pass only runs when the fast path failed and is the only place that
+// allocates (`filtered` and `filteredPaths`). Folding the two passes into a
+// single allocate-then-fill loop would force the happy path (every Append +
+// AppendBatch with images) to pay one slice allocation per call even when
+// nothing needs filtering, defeating the "happy path is zero-alloc" invariant
+// that justifies the redundant scan. Do NOT collapse into one loop without
+// re-running the bench at internal/cli/eventlog_images_align_test.go.
 func sanitizeImagesAligned(imgs, paths []string) ([]string, []string) {
 	if len(imgs) == 0 {
 		return imgs, nil

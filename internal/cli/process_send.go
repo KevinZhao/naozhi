@@ -107,6 +107,17 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 }
 
 // Send writes a user message to stdin and reads events until result.
+//
+// onEvent semantics (R229-GO-3): the callback fires only for assistant events
+// whose Message.Content contains at least one "thinking" or "tool_use" block.
+// Plain assistant text deltas (block.Type=="text") and ACP tool_call_update
+// progress events (ev.SubType=="tool_result", ev.Message==nil) do NOT trigger
+// it, so callers driving streaming-progress UIs (cron status updates, upstream
+// /api/sessions/{key}/progress, dashboard interim bubbles) MUST treat onEvent
+// as "long-running tool activity heartbeat", not "any new content arrived".
+// Subscribers that need the full event stream should attach via EventLog.Subscribe
+// instead — Send writes every event to the log under the same lock that this
+// callback fires from, so no events are lost.
 func (p *Process) Send(ctx context.Context, text string, images []ImageData, onEvent EventCallback) (*SendResult, error) {
 	p.mu.Lock()
 	if p.State == StateRunning {

@@ -5810,23 +5810,29 @@ func TestDashboardJS_RNEW_UX003_FetchJSONHelper(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_CronSessionsHiddenByDefault pins the policy that cron-
-// scheduler sessions (key prefix "cron:") are not rendered in the sidebar
-// unless explicitly opened by the operator. The 定时任务 panel owns cron
-// lifecycle end-to-end; the sidebar is reserved for operator-opened
-// conversations. If someone accidentally removes the filter, every cron
-// job would spill back into the sidebar and the dismiss-×-deletes-the-job
-// regression (× calling DELETE /api/sessions on a cron key) would return.
+// TestDashboardJS_CronSessionsHiddenByDefault pins the cron-panel-consolidation
+// RFC §4.2 invariants: cron-scheduler sessions never appear in the sidebar,
+// the cron timeline never mounts inside mainShell, and the dashboard does
+// not maintain any UI-side whitelist (cronVisibleKeys / markCronSessionVisible
+// are gone). The 定时任务 panel owns cron lifecycle end-to-end via its
+// per-job drawer (PR4); the sidebar is reserved for human conversations.
 //
-// The test locks four co-dependent invariants:
-//  1. `cronVisibleKeys` set exists as the ephemeral whitelist.
-//  2. renderSidebar computes a `visibleItems` that filters out un-listed
-//     cron keys before any grouping/search branch runs.
-//  3. The "promote to sidebar" call sites — openCronSession (panel click)
-//     and doCreateCronJob (just-created job) — invoke markCronSessionVisible.
-//  4. dismissSession has a cron-specific branch that removes from the set
-//     WITHOUT calling DELETE /api/sessions — the cron scheduler is the
-//     sole owner of cron-job lifecycle.
+// The test locks five co-dependent invariants:
+//  1. The retired UI-bandage helpers (cronVisibleKeys, markCronSessionVisible)
+//     are absent — server-side filtering in /api/sessions is the canonical
+//     exclusion (internal/server/dashboard_session.go).
+//  2. sessionCardHtml has no cron decoration paths (sc-cron-card class,
+//     sc-cron chip) — cron rows can never appear here, so styling them
+//     would just be dead code that drifts.
+//  3. renderMainShell no longer mounts a #cron-timeline-panel placeholder
+//     and no longer calls renderCronTimelineForSession from its tail
+//     hook — the timeline lives in the cron drawer instead.
+//  4. dismissSession retains a defensive guard for cron keys (in case a
+//     future server bug leaks one through) that does NOT hit
+//     DELETE /api/sessions — the cron scheduler remains sole owner of
+//     cron-job lifecycle.
+//  5. isCronSessionKey is preserved as the single-source-of-truth helper
+//     for the "cron:" prefix check (used by the dismiss guard).
 func TestDashboardJS_CronSessionsHiddenByDefault(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
@@ -5835,52 +5841,79 @@ func TestDashboardJS_CronSessionsHiddenByDefault(t *testing.T) {
 	}
 	js := string(data)
 
-	// 1. Whitelist set + helper exist.
-	if !strings.Contains(js, "let cronVisibleKeys = new Set()") {
-		t.Error("dashboard.js: cronVisibleKeys whitelist Set must exist — cron sidebar policy depends on it")
+	// 1. Retired UI-bandage helpers must be gone. The server now filters
+	//    cron stubs in /api/sessions (see TestSessionsList_CronFilteredOut),
+	//    so the dashboard never needs to track which cron keys to "show".
+	if strings.Contains(js, "let cronVisibleKeys = new Set()") {
+		t.Error("dashboard.js: cronVisibleKeys whitelist must be removed — server-side /api/sessions filter is the canonical exclusion")
+	}
+	if strings.Contains(js, "function markCronSessionVisible(") {
+		t.Error("dashboard.js: markCronSessionVisible helper must be removed — there is no longer a sidebar-promote concept")
 	}
 	if !strings.Contains(js, "function isCronSessionKey(key)") {
-		t.Error("dashboard.js: isCronSessionKey helper must exist as single source of truth for the cron: prefix check")
-	}
-	if !strings.Contains(js, "function markCronSessionVisible(key)") {
-		t.Error("dashboard.js: markCronSessionVisible helper must exist to keep the policy centralised")
+		t.Error("dashboard.js: isCronSessionKey helper must remain as the single-source-of-truth for the cron: prefix check (used by the dismiss defensive guard)")
 	}
 
-	// 2. renderSidebar filters into visibleItems before grouping/search.
-	//    Locked as one expression — if future refactors split the filter
-	//    per branch, the substring will stop matching and flag it.
-	if !strings.Contains(js, "!isCronSessionKey(s.key) || cronVisibleKeys.has(s.key)") {
-		t.Error("dashboard.js: renderSidebar must gate cron sessions via `!isCronSessionKey(s.key) || cronVisibleKeys.has(s.key)` before rendering")
+	// 2. sessionCardHtml no longer paints cron rows. If a cron key did
+	//    accidentally leak through the server filter, it would render as
+	//    a plain card; the dismiss guard below catches the × button.
+	//    Check for the emission pattern (a quoted classname literal that
+	//    would actually land in the DOM) rather than bare substring so
+	//    historical references in nearby comments don't trip the test.
+	if strings.Contains(js, "' sc-cron-card'") || strings.Contains(js, "\" sc-cron-card\"") {
+		t.Error("dashboard.js: .sc-cron-card classname must not be emitted by sessionCardHtml — cron rows never render in the sidebar")
+	}
+	if strings.Contains(js, "<span class=\\\"sc-cron\\\"") || strings.Contains(js, "<span class=\"sc-cron\"") {
+		t.Error("dashboard.js: <span class=\"sc-cron\"> chip must not be emitted by sessionCardHtml")
 	}
 
-	// 3. Promote-to-sidebar call sites. These two are the ONLY officially
-	//    supported entrypoints; a new entrypoint must also call
-	//    markCronSessionVisible or the session will stay hidden.
-	if n := strings.Count(js, "markCronSessionVisible("); n < 2 {
-		t.Errorf("dashboard.js: markCronSessionVisible must be called from openCronSession and doCreateCronJob (>=2 call sites), got %d", n)
+	// 3. renderMainShell must NOT inject a cron-timeline-panel placeholder
+	//    nor mount the timeline from its tail hook. The timeline lives
+	//    inside the 定时任务 drawer; cronDrawerHtml re-uses the same
+	//    `id="cron-timeline-panel"` so the renderer / load-more / refresh
+	//    helpers keep working — that's why this assertion is scoped to
+	//    renderMainShell's body rather than the whole file.
+	mainShellIdx := strings.Index(js, "function renderMainShell")
+	if mainShellIdx >= 0 {
+		// Scope to a generous window covering the function body.
+		end := mainShellIdx + 8000
+		if end > len(js) {
+			end = len(js)
+		}
+		body := js[mainShellIdx:end]
+		if strings.Contains(body, "id=\"cron-timeline-panel\"") {
+			t.Error("dashboard.js: renderMainShell must not place a #cron-timeline-panel — cron timeline lives in the 定时任务 drawer instead")
+		}
+		if strings.Contains(body, "renderCronTimelineForSession(selectedKey.slice(") {
+			t.Error("dashboard.js: renderMainShell tail must not call renderCronTimelineForSession — cron drawer drives its own paint via cronDetailJobId")
+		}
+	}
+	// And the drawer renderer must own the timeline host. If both are gone,
+	// PR4 broke the timeline reuse path.
+	if !strings.Contains(js, "function cronDrawerHtml") {
+		t.Error("dashboard.js: cronDrawerHtml must exist — it owns the per-job drawer markup including the timeline host")
+	}
+	if !strings.Contains(js, "id=\"cron-timeline-panel\"") {
+		t.Error("dashboard.js: cronDrawerHtml must mount #cron-timeline-panel inside the drawer history section so the timeline renderer is reused unchanged")
 	}
 
-	// 4. dismissSession cron branch: removes from whitelist but must not
-	//    hit DELETE /api/sessions. We verify this structurally — the
-	//    cron-key guard + `cronVisibleKeys.delete` must be present, and
-	//    they must appear BEFORE the DELETE /api/sessions fetch.
+	// 4. dismissSession still recognises the cron prefix as a defensive
+	//    guard but the branch must NOT issue DELETE /api/sessions, and it
+	//    must not depend on cronVisibleKeys (which no longer exists).
 	dismissIdx := strings.Index(js, "async function dismissSession(")
 	if dismissIdx < 0 {
 		t.Fatal("dashboard.js: dismissSession function not found")
 	}
-	// Scope the search to dismissSession's body — ~3KB is more than enough
-	// for the function even after future edits without leaking into the
-	// next function.
 	end := dismissIdx + 4000
 	if end > len(js) {
 		end = len(js)
 	}
 	body := js[dismissIdx:end]
 	if !strings.Contains(body, "if (isCronSessionKey(key))") {
-		t.Error("dashboard.js: dismissSession must short-circuit on cron keys via `if (isCronSessionKey(key))`")
+		t.Error("dashboard.js: dismissSession must retain the cron-key defensive guard via `if (isCronSessionKey(key))`")
 	}
-	if !strings.Contains(body, "cronVisibleKeys.delete(key)") {
-		t.Error("dashboard.js: dismissSession cron branch must remove from the whitelist with cronVisibleKeys.delete(key)")
+	if strings.Contains(body, "cronVisibleKeys.delete(") {
+		t.Error("dashboard.js: dismissSession cron branch must not reference the retired cronVisibleKeys set")
 	}
 	cronBranchIdx := strings.Index(body, "if (isCronSessionKey(key))")
 	deleteAPIIdx := strings.Index(body, "'/api/sessions'")

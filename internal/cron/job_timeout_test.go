@@ -5,6 +5,10 @@ import (
 	"time"
 )
 
+// TestComputeJobTimeout verifies the per-run deadline is the configured
+// maxCap regardless of schedule. Long-running tasks that overshoot their
+// schedule period are not killed; the next scheduled tick is dropped by
+// robfig/cron's SkipIfStillRunning chain wrapper.
 func TestComputeJobTimeout(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -14,63 +18,37 @@ func TestComputeJobTimeout(t *testing.T) {
 		want     time.Duration
 	}{
 		{
-			name:     "hourly job under 1h cap scales to 59m",
+			name:     "hourly under 8h cap returns cap",
 			schedule: "@every 1h",
-			cap:      time.Hour,
-			want:     time.Hour - jobTimeoutMargin,
+			cap:      8 * time.Hour,
+			want:     8 * time.Hour,
 		},
 		{
-			name:     "6h schedule with 1h cap clamps to cap",
+			name:     "6h schedule with 1h cap returns cap",
 			schedule: "@every 6h",
 			cap:      time.Hour,
 			want:     time.Hour,
 		},
 		{
-			name:     "6h schedule with 8h cap scales to 5h59m",
-			schedule: "@every 6h",
-			cap:      8 * time.Hour,
-			want:     6*time.Hour - jobTimeoutMargin,
-		},
-		{
-			name:     "10m schedule scales to 9m",
+			name:     "10m schedule with 1h cap returns cap",
 			schedule: "@every 10m",
 			cap:      time.Hour,
-			want:     10*time.Minute - jobTimeoutMargin,
+			want:     time.Hour,
 		},
 		{
-			name:     "5m schedule scales to 4m (above floor)",
-			schedule: "@every 5m",
-			cap:      time.Hour,
-			want:     5*time.Minute - jobTimeoutMargin,
-		},
-		{
-			// minCronInterval blocks this at registration, but computeJobTimeout
-			// still needs a defensive floor for jobs loaded from a hand-edited
-			// store file or a schedule that evaluates below 3m worth of budget.
-			name:     "sub-floor schedule floors at minJobTimeout",
-			schedule: "@every 1m",
-			cap:      time.Hour,
-			want:     minJobTimeout,
-		},
-		{
-			name:     "unparseable schedule falls back to cap",
+			name:     "unparseable schedule returns cap",
 			schedule: "not a cron expression",
 			cap:      time.Hour,
 			want:     time.Hour,
 		},
 		{
-			name:     "daily cron expression scales to 23h59m under 24h cap",
+			name:     "daily cron expression returns cap",
 			schedule: "0 9 * * *",
 			cap:      24 * time.Hour,
-			want:     24*time.Hour - jobTimeoutMargin,
+			want:     24 * time.Hour,
 		},
 		{
-			// Defensive contract: caller-supplied cap below the 3m floor
-			// still wins. Production never hits this (default cap is 5m,
-			// clamped ≥ 5m in applyDefaults), but the helper is called
-			// directly from tests and must not let a pathological tiny cap
-			// be overridden upward.
-			name:     "cap below floor wins over floor",
+			name:     "tiny cap is honoured (operator hard ceiling)",
 			schedule: "@every 10m",
 			cap:      30 * time.Second,
 			want:     30 * time.Second,

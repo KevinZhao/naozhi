@@ -153,7 +153,7 @@
 - [ ] **R229-SEC-8 — per-token WS 连接数无上限（P2）**: `wshub.go:307` 单 token 持有者可建 500 个 WS 连接绕过 maxSubscribersPerKey=20。方案：WS 升级时按 cookie MAC 或 IP 桶检查 per-token 连接 cap（如 20）。Breaking：否。
 - [ ] **R229-SEC-9 — sandbox CSP `style-src 'unsafe-inline'`（P3）**: `project_files.go:730/928` 渲染沙箱允许内联 style，存在 CSS exfiltration 风险。方案：替换为 nonce/hash。Breaking：是（依赖内联 CSS 的报告渲染失败）。
 - [ ] **R229-SEC-10 — readLoop 无单事件总字节上限（P3）**: 篡改的 CLI 可发 10 MiB 嵌套 JSON 致 CPU 高占用。方案：`ReadEvent` 解析后对 ev.Message.Content 总字节数加 4 MiB 上限。Breaking：否。
-- [ ] **R229-SEC-11 — WS 认证前读限制过大（P3）**: 认证前阶段沿用框架默认大小限制。方案：Upgrade 后立即 SetReadLimit(512)，认证后扩到正常。Breaking：否。
+- [x] **R229-SEC-11 — WS 认证前读限制过大（P3）**: 认证前阶段沿用框架默认大小限制。方案：Upgrade 后立即 SetReadLimit(512)，认证后扩到正常。Breaking：否。 — 已修复（readPump 入口按 authenticated.Load() 选 wsPreAuthMessageSize=512 / wsMaxMessageSize；auth case 成功后立即调高），本批 PR #174
 - [ ] **R229-SEC-12 — CDN allowlist 与 SRI 配合不足（P3）**: dashboard CSP `script-src` 含 `https://cdn.jsdelivr.net`，SRI 失败时 CSP 仍允许加载。方案：迁 nonce 模式后从 script-src 移除 CDN 域名。Breaking：是（与 R229-SEC-6 合并）。
 - [ ] **R229-SEC-13 — EventLog/sessions.json 文件权限依赖 umask（P3）**: 默认未显式 0600，state_dir 父目录权限不当时本地他人可读对话历史。方案：osutil.WriteFileAtomic 显式 0600 + 启动期 state_dir 权限检查（参考 cookie_secret 0600 模式）。Breaking：否。
 
@@ -161,10 +161,10 @@
 
 - [ ] **R229-GO-1 — ReattachProcessNoCallback 清 deathReason 与 mapSendError Store 存在 logical race（P1）**: `managed.go:413` 与 reconnectShims 路径下，cron Send 中飞时 reconnect 可能立即抹掉刚写入的 deathReason，损失诊断。方案：TryLock sendMu 失败时跳过清理或文档化所有调用点。Breaking：否。
 - [ ] **R229-GO-2 — Snapshot() 包含读侧写副作用（P1）**: `managed.go:990` Snapshot 触发 `s.SetModel(liveModel)` mirror，违反 Snapshot 命名约定。方案：抽取 SnapshotReadOnly + 在 spawnSession/notifyChange 显式调 mirror。Breaking：是（重命名）。
-- [ ] **R229-GO-3 — Send → onEvent 仅在 thinking/tool_use 触发（P2）**: 纯文本 assistant 事件不触发 onEvent，cron/upstream 流式 progress 看到"假停滞"。方案：所有 assistant 事件触发或在 godoc 明确语义。Breaking：否。
+- [x] **R229-GO-3 — Send → onEvent 仅在 thinking/tool_use 触发（P2）**: 纯文本 assistant 事件不触发 onEvent，cron/upstream 流式 progress 看到"假停滞"。方案：所有 assistant 事件触发或在 godoc 明确语义。Breaking：否。 — 已修复（Process.Send godoc 显式声明 onEvent 仅在 thinking/tool_use 触发，并指引订阅方走 EventLog.Subscribe 拿全量流），本批 PR #174
 - [ ] **R229-GO-4 — spawnSession 内 inline JSONL load 未挂 historyWg（P2）**: `router_lifecycle.go:693` 15s 历史加载可超过 30s shutdown 窗口，触碰 r.claudeDir。方案：加 r.historyWg.Add/Done + 检 r.historyCtx.Err。Breaking：否。
 - [ ] **R229-GO-5 — InjectHistory lastPrompt/lastActivity 仅"为空才设"易被旧 JSONL 覆盖新 Send（P2）**: 启动期 500 条 JSONL replay 期间 concurrent Send 写入的最新值可能被 stale 值替代。方案：比较时间戳或始终偏向 Send 写入值。Breaking：否。
-- [ ] **R229-GO-6 — dropEventLogForKey/clearAttachmentTrackerRefs 用 context.Background 不继承 shutdown ctx（P2）**: shutdown 期 Remove 仍各等 2-5s。方案：传 r.historyCtx 或专用 stopCtx。Breaking：否。
+- [x] **R229-GO-6 — dropEventLogForKey/clearAttachmentTrackerRefs 用 context.Background 不继承 shutdown ctx（P2）**: shutdown 期 Remove 仍各等 2-5s。方案：传 r.historyCtx 或专用 stopCtx。Breaking：否。 — 已修复（两个 helper 改 parent 为 r.historyCtx，nil 时 fallback Background；shutdown cancel 即时传递到 DropKey / OnSessionRemoved，缩短 graceful drain），本批 PR #174
 - [x] **R229-GO-7 — selfupdate.go 多处 return err 缺 fmt.Errorf 包装（P3）**: 297-414 行多处直接 return err。方案：统一加上下文 %w 包装。Breaking：否。 — 已修复（fetchFile/verifyChecksum/copyFile/SelfPath/LatestRelease 全 return err 加 fmt.Errorf 上下文 %w 包装），本批 PR #171
 - [x] **R229-GO-8 — dashboard_scratch.go scratch 复制源历史用 EventEntriesBefore 而非 EventEntriesBeforeCtx（P3）**: 死进程 ring buffer 空时 promoted scratch 历史不全。方案：改用 Ctx 版走 historySource fallback。Breaking：否。 — 已修复（collectScratchContext 加 ctx 参数，handleOpen 传 r.Context()；before-window 改 sess.EventEntriesBeforeCtx 让死 session 走 disk fallback），本批 PR #171
 - [x] **R229-GO-9 — StartCleanupLoop 重启循环无次数上限（P3）**: 持续 panic 时无限自重启。方案：连续失败 10 次后停跑 + Error 报警。Breaking：否。 — 已修复（公共 StartCleanupLoop 签名不变，内部抽 startCleanupLoop(ctx, interval, attempt) helper；panic 处理在 attempt+1≥cleanupLoopMaxRestarts(=10) 时打 "exceeded max restarts" Error 后 return；50s 自愈窗口覆盖偶发 panic），本批 PR #171
@@ -178,7 +178,7 @@
 - [ ] **R229-PERF-5 — EventLog.Append 单 entry 路径每次分配 1-slot 切片（P2）**: 5-50 events/s 持续分配。方案：sync.Pool of length-1 slices 或 EventLog 字段缓存。Breaking：否（注意 sink 留持契约）。
 - [ ] **R229-PERF-6 — discovery.Scan 每次 O(N) os.ReadDir 调用（P2）**: 已有 promptCache/summaryCache，但 listJSONLsByMtime 未缓存。方案：(claudeDir, cwd) → mtime invalidated 缓存。Breaking：否。
 - [ ] **R229-PERF-7 — SetAgentInternalID 写锁覆盖 ring buffer 反向扫描（P2）**: 8 个 sub-agent 并发 resolve 时 Append 串行化。方案：扫描阶段 RLock，需变更时升级写锁。Breaking：否。
-- [ ] **R229-PERF-8 — sanitizeImagesAligned 双 pass（P3）**: 当前一遍 allOK 扫 + 一遍 filter；R229 review 提议合并，但 fast-path 0 alloc 是设计意图。方案：保留双 pass 但写注释解释 fast-path；或只在 hot profile 显示 cost 时再优化。Breaking：否。
+- [x] **R229-PERF-8 — sanitizeImagesAligned 双 pass（P3）**: 当前一遍 allOK 扫 + 一遍 filter；R229 review 提议合并，但 fast-path 0 alloc 是设计意图。方案：保留双 pass 但写注释解释 fast-path；或只在 hot profile 显示 cost 时再优化。Breaking：否。 — 已修复（保留双 pass 形态 + godoc 显式说明设计权衡 + 警告"勿单 pass 化"，避免后续 review 反复提议），本批 PR #174
 - [ ] **R229-PERF-9 — extractLastPromptUncached 大文件 fallback 全文扫两次（P3）**: 50 MB JSONL tail 无 prompt 时再读全文。方案：负面结果加 mtime keyed 短 TTL 缓存。Breaking：否。
 - [ ] **R229-PERF-10 — ListSessions 每次 make([]SessionSnapshot)（P3）**: 1 Hz × N 客户端持续分配 ~20 KB。方案：sync.Pool 池化 slice 或流式 JSON 编码。Breaking：否。
 - [x] **R229-PERF-11 — writePump 每条消息都 SetWriteDeadline + time.Now（P3）**: 高 throughput 客户端 vDSO 调用累积。方案：滚动 deadline 或定期刷新。Breaking：否。 — 已修复，本批 PR #176

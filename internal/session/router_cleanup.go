@@ -92,11 +92,23 @@ func (r *Router) Remove(key string) bool {
 // (.log + .idx). Safe to call with no persister configured or for
 // keys that were never written to — the Persister's DropKey path
 // tolerates missing files.
+//
+// R229-GO-6: derive the timeout ctx from r.historyCtx so a Shutdown
+// in flight cancels DropKey at the next syscall boundary instead of
+// letting Remove block for the full 2s budget per call. r.historyCtx
+// is cancelled as the very first step of shutdown(); DropKey will see
+// ctx.Err() == context.Canceled and bail early. r.historyCtx is nil
+// only in tests that bypass NewRouter; fall back to Background there
+// to preserve the previous behaviour.
 func (r *Router) dropEventLogForKey(key string) {
 	if r.eventLogPersister == nil {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	parent := r.historyCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 2*time.Second)
 	defer cancel()
 	if err := r.eventLogPersister.DropKey(ctx, key); err != nil {
 		slog.Warn("event log drop failed", "key", key, "err", err)
@@ -111,11 +123,20 @@ func (r *Router) dropEventLogForKey(key string) {
 // We use a short ctx timeout so a permission-denied subtree or
 // slow FS cannot wedge Router.Remove. A failure only delays
 // attachment GC by a generation; correctness is unaffected.
+//
+// R229-GO-6: parent the timeout on r.historyCtx so Shutdown propagates
+// cancellation to OnSessionRemoved (FS walks can otherwise tie up the
+// shutdown deadline for the full 5s budget per Remove). Tests without
+// NewRouter wiring keep the previous Background behaviour via fallback.
 func (r *Router) clearAttachmentTrackerRefs(key, workspace string) {
 	if r.attachmentTracker == nil || workspace == "" {
 		return
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	parent := r.historyCtx
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, 5*time.Second)
 	defer cancel()
 	if err := r.attachmentTracker.OnSessionRemoved(ctx, persist.KeyHash(key), workspace); err != nil {
 		slog.Warn("attachment tracker clear failed",

@@ -132,9 +132,12 @@ agent_commands:
 cron:
   store_path: "~/.naozhi/cron_jobs.json"
   max_jobs: 50
-  # Per-job timeout is schedule_period − 60s margin, clamped to [3m, execution_timeout].
-  # Set this to the longest period you schedule (or slightly more) so long
-  # schedules get their full budget; short schedules auto-scale down.
+  # Per-run hard ceiling for any cron job. Independent of schedule period —
+  # an hourly job that takes 70 minutes will NOT be killed; the next scheduled
+  # tick is dropped (robfig/cron SkipIfStillRunning) and the tick after that
+  # picks up cleanly. Only purpose of this cap is to prevent a wedged claude
+  # CLI from holding an inflight slot forever. Set to the longest tolerable
+  # single-run wall-clock for your workload.
   execution_timeout: "8h"
   # IANA timezone for interpreting cron expressions (e.g. "0 9 * * *" = 9am in this zone).
   # Empty / "Local" uses the system local time (respects $TZ). Examples: "Asia/Shanghai", "UTC".
