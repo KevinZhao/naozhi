@@ -5,9 +5,42 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
+
+// TestParseVersionOutput pins the parser against the two known --version
+// formats (claude, kiro) plus failure / edge cases. Without this, kiro's
+// "kiro-cli 2.3.0" output silently degraded to empty version string,
+// which `cli backend version probe failed` masked at runtime. Lives in
+// detect_test.go alongside parseVersionOutput's owner (R228-ARCH-16).
+func TestParseVersionOutput(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		in   string
+		want string
+	}{
+		{"claude format", "2.1.143 (Claude Code)\n", "2.1.143"},
+		{"kiro format", "kiro-cli 2.3.0\n", "2.3.0"},
+		{"version-prefix", "version 1.2.3\n", "1.2.3"},
+		{"empty", "", ""},
+		{"no semver token", "claude (no version available)\n", ""},
+		{"trailing whitespace", "  4.5.6   \n", "4.5.6"},
+		{"truncate over 32 bytes", "9.9.9-" + strings.Repeat("x", 100), "9.9.9-" + strings.Repeat("x", 26)},
+		{"multiline first match wins", "naozhi build\n7.8.9\n", "7.8.9"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := parseVersionOutput(tc.in); got != tc.want {
+				t.Errorf("parseVersionOutput(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+		})
+	}
+}
 
 // TestDetectVersionCtx_CancelledCtxAbortsPromptly locks R55-QUAL-004's
 // ctx plumbing: when the caller's ctx is already cancelled, the probe

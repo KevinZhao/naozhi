@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"slices"
+	"strings"
 )
 
 // BackendInfo describes a probed CLI backend available on this host.
@@ -95,6 +96,35 @@ func DetectBackendsCtx(ctx context.Context) []BackendInfo {
 		out = append(out, info)
 	}
 	return out
+}
+
+// parseVersionOutput extracts the semver-like version token from a
+// "<binary> --version" stdout payload.
+//
+// Output formats observed across our backends:
+//
+//	claude   → "2.1.143 (Claude Code)"   (version is the first token)
+//	kiro     → "kiro-cli 2.3.0"           (version is the second token)
+//
+// Strategy: walk whitespace-split tokens and return the first one whose
+// leading byte is a digit (the canonical semver shape). Anything else —
+// build banner, "version" prefix, dash-prefixed suffix — is skipped.
+// The 32-byte cap prevents a hostile / malformed --version response from
+// blowing up downstream slog attrs and JSON payloads.
+//
+// Lives in detect.go (not wrapper.go) because version parsing is a
+// detection concern: the function is only ever called by detectVersionCtx
+// to fill BackendInfo.Version. R228-ARCH-16.
+func parseVersionOutput(s string) string {
+	for _, tok := range strings.Fields(s) {
+		if len(tok) > 0 && tok[0] >= '0' && tok[0] <= '9' {
+			if len(tok) > 32 {
+				tok = tok[:32]
+			}
+			return tok
+		}
+	}
+	return ""
 }
 
 // SortBackendsAvailableFirst places available backends before unavailable
