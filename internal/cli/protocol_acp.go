@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,12 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
+
+// stopReasonProbe is the single byte sequence we scan msg.Result for before
+// paying the json.Unmarshal cost on every turn-end Response. Defined as a
+// package-level var so the slice header is allocated once at init rather
+// than on every ReadEvent call. R227-PERF-15.
+var stopReasonProbe = []byte(`"stopReason"`)
 
 // toolJSONMaxRunes caps the rune count of tool_call input/output payloads
 // stuffed into Event.ToolCall before they are forwarded to dashboard / IM
@@ -413,10 +420,19 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		// turn end from a cancelled one. ACP spec values: "end_turn",
 		// "cancelled", "max_tokens", "tool_use_failure", "refusal". We expose
 		// the raw string in SubType — same field used by stream-json events.
+		//
+		// R227-PERF-15: ACP turn-end Responses are extremely common (one per
+		// session/prompt) and msg.Result is usually `null` or `{}` — bytes
+		// substring probe avoids the reflection-based json.Unmarshal cost
+		// when the field is absent. Cheap false-positive case (key in a
+		// nested string value) merely pays a normal Unmarshal that would
+		// have run anyway.
 		var stop struct {
 			StopReason string `json:"stopReason"`
 		}
-		_ = json.Unmarshal(msg.Result, &stop) // best-effort; missing => empty
+		if bytes.Contains(msg.Result, stopReasonProbe) {
+			_ = json.Unmarshal(msg.Result, &stop) // best-effort; missing => empty
+		}
 
 		p.mu.Lock()
 		text := p.textBuf.String()
