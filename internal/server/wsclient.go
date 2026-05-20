@@ -310,7 +310,10 @@ func (c *wsClient) readPump() {
 			}
 		case "subscribe":
 			if !c.authenticated.Load() {
-				c.SendJSON(node.ServerMsg{Type: "error", Error: "not authenticated"})
+				// R229-PERF-4: pre-marshalled frame avoids reflect.Marshal on
+				// the not-authenticated rejection path. Byte-equal to the old
+				// SendJSON output is locked by TestWSPreMarshalledFrames.
+				c.SendRaw(wsErrNotAuthMsg)
 				continue
 			}
 			c.hub.handleSubscribe(c, msg)
@@ -321,21 +324,21 @@ func (c *wsClient) readPump() {
 			c.hub.handleUnsubscribe(c, msg)
 		case "send":
 			if !c.authenticated.Load() {
-				c.SendJSON(node.ServerMsg{Type: "error", Error: "not authenticated"})
+				c.SendRaw(wsErrNotAuthMsg)
 				continue
 			}
 			if !c.sendLimiter.Allow() {
-				c.SendJSON(node.ServerMsg{Type: "error", Error: "rate limited"})
+				c.SendRaw(wsErrRateLimitedMsg)
 				continue
 			}
 			c.hub.handleSend(c, msg)
 		case "interrupt":
 			if !c.authenticated.Load() {
-				c.SendJSON(node.ServerMsg{Type: "error", Error: "not authenticated"})
+				c.SendRaw(wsErrNotAuthMsg)
 				continue
 			}
 			if !c.interruptLimiter.Allow() {
-				c.SendJSON(node.ServerMsg{Type: "error", Error: "rate limited"})
+				c.SendRaw(wsErrRateLimitedMsg)
 				continue
 			}
 			c.hub.handleInterrupt(c, msg)
@@ -351,7 +354,7 @@ func (c *wsClient) readPump() {
 			c.SendRaw(wsPongMsg)
 		case "agent_subscribe":
 			if !c.authenticated.Load() {
-				c.SendJSON(node.ServerMsg{Type: "error", Error: "not authenticated"})
+				c.SendRaw(wsErrNotAuthMsg)
 				continue
 			}
 			// Reuse sendLimiter's budget — a client cannot spin subscribe

@@ -565,6 +565,22 @@ func (l *EventLog) fireTaskDoneCallbacks(pending []pendingTaskDone) {
 	}
 }
 
+// fireOneTaskDoneCallback is the single-entry fast path used by Append's
+// hot path to avoid a one-slot slice literal escape. Append observes at
+// most one pending task_done per call (a single Event maps to one
+// EventEntry), so the batch-shaped helper above is unnecessary overhead
+// here. AppendBatch keeps using the slice variant because it accumulates
+// across multi-entry batches. R224-PERF-1.
+func (l *EventLog) fireOneTaskDoneCallback(pending pendingTaskDone) {
+	l.onAgentTaskDoneMu.Lock()
+	fn := l.onAgentTaskDoneFn
+	l.onAgentTaskDoneMu.Unlock()
+	if fn == nil {
+		return
+	}
+	fn(pending.TaskID, pending.Status)
+}
+
 // SetAgentInternalID writes the SubagentLinker-resolved linkage back into
 // the most recent matching "agent" / "task_start" EventEntry and the live
 // SubagentInfo. Called from the Linker's OnResolve callback.
@@ -704,8 +720,12 @@ func (l *EventLog) Append(e EventEntry) {
 	// Fire task_done callbacks OUTSIDE l.mu so a slow subscriber (e.g. the
 	// server tailer registry closing N tailers) cannot serialise concurrent
 	// Append calls or wedge the ring buffer mid-write. R201-CRIT-1.
+	//
+	// R224-PERF-1: use the single-entry fast path so the one-slot slice
+	// literal `[]pendingTaskDone{pending}` does not heap-escape on every
+	// task_done event. AppendBatch still calls the slice form below.
 	if firePending {
-		l.fireTaskDoneCallbacks([]pendingTaskDone{pending})
+		l.fireOneTaskDoneCallback(pending)
 	}
 
 	// Invoke persistence sink OUTSIDE l.mu. Passing a fresh one-slot
