@@ -375,11 +375,28 @@ func (r *Router) shouldPrune(s *ManagedSession, now time.Time) bool {
 	return !proc.Alive() // exited process past pruneTTL
 }
 
+// maxCleanupLoopRestarts caps how many times the panic-recovery defer
+// will resurrect the cleanup loop after a panic. A bug that panics on
+// every tick would otherwise spin forever, accumulating debug.Stack
+// allocations and AfterFunc timers without ever making forward
+// progress. After hitting the cap we surface a single Error log with
+// the cumulative panic count and let the loop stay down so an operator
+// notices in journald / restarts the process. (R229-GO-9)
+const maxCleanupLoopRestarts = 10
+
 // StartCleanupLoop runs Cleanup periodically and saves dirty session state
 // on a shorter interval to reduce data loss on crash.
 func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
+	r.startCleanupLoop(ctx, interval, 0)
+}
+
+// startCleanupLoop is the worker behind StartCleanupLoop. The panicCount
+// parameter is bumped each time the deferred recover restarts the loop;
+// it is part of the function signature rather than Router state so the
+// counter cannot be read or reset out-of-band by other lifecycle paths.
+func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, panicCount int) {
 	// time.NewTicker(d) panics for d<=0; the panic-recovery defer would then
-	// schedule another StartCleanupLoop via AfterFunc, which would re-panic on
+	// schedule another startCleanupLoop via AfterFunc, which would re-panic on
 	// the same NewTicker call, producing an unbounded retry chain. Reject the
 	// misconfiguration up front.
 	if interval <= 0 {
@@ -391,11 +408,20 @@ func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 		// Panic recovery: a bug inside Cleanup or saveIfDirty would silently
 		// kill the loop, allowing sessions to accumulate indefinitely past
 		// their TTL and losing the periodic sessions.json flush. Log with
-		// stack so ops can diagnose, then re-enter the loop via a tail call.
+		// stack so ops can diagnose, then re-enter the loop via a tail call —
+		// but only up to maxCleanupLoopRestarts so a deterministic panic on
+		// every tick eventually stops thrashing.
 		defer func() {
 			if rec := recover(); rec != nil {
+				nextCount := panicCount + 1
 				slog.Error("router cleanup loop panic recovered",
-					"panic", rec, "stack", string(debug.Stack()))
+					"panic", rec, "stack", string(debug.Stack()),
+					"panic_count", nextCount, "max_restarts", maxCleanupLoopRestarts)
+				if nextCount >= maxCleanupLoopRestarts {
+					slog.Error("router cleanup loop exceeded max restart budget; staying down",
+						"panic_count", nextCount, "max_restarts", maxCleanupLoopRestarts)
+					return
+				}
 				// Restart the loop so TTL expiry and saveIfDirty continue.
 				// Guard against ctx already cancelled so we do not resurrect
 				// after Shutdown. Brief backoff before relaunch so a bug that
@@ -407,7 +433,7 @@ func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 						if ctx.Err() != nil {
 							return
 						}
-						r.StartCleanupLoop(ctx, interval)
+						r.startCleanupLoop(ctx, interval, nextCount)
 					})
 				}
 			}
