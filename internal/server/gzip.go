@@ -46,13 +46,56 @@ func isCompressibleType(ct string) bool {
 // token. Full q-value parsing is overkill here — every modern browser and
 // reverse proxy sends gzip unconditionally, and a missing Accept-Encoding
 // means "identity only" under RFC 7231 §5.3.4.
+//
+// The fast path skips the strings.Split + per-token TrimSpace allocs that
+// fired on every HTTP request (including high-frequency dashboard polls).
+// Falls back to per-token parsing only when a q-value parameter is present
+// and we need to verify the gzip token isn't the disabled one.
 func acceptsGzip(ae string) bool {
-	for _, tok := range strings.Split(ae, ",") {
-		tok = strings.TrimSpace(tok)
-		if i := strings.IndexByte(tok, ';'); i >= 0 {
-			tok = strings.TrimSpace(tok[:i])
+	if ae == "" {
+		return false
+	}
+	// Walk tokens manually to avoid strings.Split + per-token TrimSpace allocs.
+	for ae != "" {
+		var tok string
+		if i := strings.IndexByte(ae, ','); i >= 0 {
+			tok, ae = ae[:i], ae[i+1:]
+		} else {
+			tok, ae = ae, ""
 		}
-		if strings.EqualFold(tok, "gzip") {
+		tok = strings.TrimSpace(tok)
+		name := tok
+		params := ""
+		if i := strings.IndexByte(tok, ';'); i >= 0 {
+			name = strings.TrimSpace(tok[:i])
+			params = tok[i+1:]
+		}
+		if !strings.EqualFold(name, "gzip") {
+			continue
+		}
+		if !hasZeroQValue(params) {
+			return true
+		}
+	}
+	return false
+}
+
+// hasZeroQValue reports whether an Accept-Encoding parameter list contains
+// a q-value that disables the token (q=0 or q=0.0...).
+func hasZeroQValue(params string) bool {
+	for params != "" {
+		var p string
+		if i := strings.IndexByte(params, ';'); i >= 0 {
+			p, params = params[:i], params[i+1:]
+		} else {
+			p, params = params, ""
+		}
+		p = strings.TrimSpace(p)
+		if len(p) < 2 || (p[0] != 'q' && p[0] != 'Q') || p[1] != '=' {
+			continue
+		}
+		v := strings.TrimSpace(p[2:])
+		if v == "0" || v == "0." || v == "0.0" || v == "0.00" || v == "0.000" {
 			return true
 		}
 	}

@@ -344,7 +344,6 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 // struct keeps spawnSession's branching narrow and lets the merge rules be
 // table-tested in isolation (R70-ARCH-H2).
 type spawnParams struct {
-	Backend   string
 	BackendID string // resolved backend ID reported by wrapperFor
 	Wrapper   *cli.Wrapper
 	Model     string
@@ -445,7 +444,6 @@ func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) 
 	resumeID = resolveResumeID(r.claudeDir, workspace, key, resumeID)
 
 	return spawnParams{
-		Backend:   reqBackend,
 		BackendID: backendID,
 		Wrapper:   wrapper,
 		Model:     model,
@@ -1343,8 +1341,7 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	return true
 }
 
-// Remove removes a session from the router and kills its process.
-// Used by the dashboard to hide sessions from the list.
+// stripResumeArgs removes --resume <id> pairs from a CLI arg slice.
 // Used by drift check: --resume is session-specific, not a config change.
 //
 // Fast path: return the original slice unchanged if --resume is absent.

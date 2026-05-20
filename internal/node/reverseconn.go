@@ -574,13 +574,17 @@ func (c *ReverseConn) readLoop() {
 	// Set a 90s read deadline so we detect silent disconnections (NAT timeout,
 	// crash without clean close) rather than blocking forever on ReadJSON.
 	const reverseReadTimeout = 90 * time.Second
-	c.conn.SetReadDeadline(time.Now().Add(reverseReadTimeout))
+	if err := c.conn.SetReadDeadline(time.Now().Add(reverseReadTimeout)); err != nil {
+		return
+	}
 	c.conn.SetPongHandler(func(string) error {
-		c.conn.SetReadDeadline(time.Now().Add(reverseReadTimeout))
+		// Errors propagate to the next ReadJSON iteration, which exits the
+		// loop cleanly; nothing useful for the handler itself to return.
+		_ = c.conn.SetReadDeadline(time.Now().Add(reverseReadTimeout))
 		return nil
 	})
 	c.conn.SetPingHandler(func(appData string) error {
-		c.conn.SetReadDeadline(time.Now().Add(reverseReadTimeout))
+		_ = c.conn.SetReadDeadline(time.Now().Add(reverseReadTimeout))
 		return c.conn.WriteControl(
 			websocket.PongMessage, []byte(appData), time.Now().Add(time.Second),
 		)
@@ -592,7 +596,9 @@ func (c *ReverseConn) readLoop() {
 			slog.Debug("reverse node disconnected", "node", c.id, "err", err)
 			return
 		}
-		c.conn.SetReadDeadline(time.Now().Add(reverseReadTimeout))
+		if err := c.conn.SetReadDeadline(time.Now().Add(reverseReadTimeout)); err != nil {
+			return
+		}
 
 		switch msg.Type {
 		case "response":

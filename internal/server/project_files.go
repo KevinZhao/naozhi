@@ -943,6 +943,15 @@ func (h *ProjectHandlers) serveRaw(w http.ResponseWriter, r *http.Request, resol
 }
 
 func (h *ProjectHandlers) serveDownload(w http.ResponseWriter, r *http.Request, resolved string, info os.FileInfo) {
+	// SEC-009: deny credential-bearing files even on the explicit download
+	// path. servePreview already excludes .env via previewableByExt + the
+	// MIME guard, but download had no equivalent stop, letting authenticated
+	// users pull .env / .netrc / *.pem out of any workspace.
+	if isSensitiveDownloadName(filepath.Base(resolved)) {
+		writeJSONStatus(w, http.StatusForbidden, map[string]string{"error": "file type not downloadable"})
+		return
+	}
+
 	f, err := os.Open(resolved)
 	if err != nil {
 		writeJSONStatus(w, http.StatusInternalServerError, map[string]string{"error": "open failed"})
@@ -959,4 +968,48 @@ func (h *ProjectHandlers) serveDownload(w http.ResponseWriter, r *http.Request, 
 	w.Header().Set("Cache-Control", "no-store")
 
 	http.ServeContent(w, r, filepath.Base(resolved), info.ModTime(), f)
+}
+
+// sensitiveDownloadNames lists exact filenames that commonly contain
+// credentials and should never be served as a download. Compared
+// case-insensitively so ".ENV" doesn't slip through on case-preserving FS.
+var sensitiveDownloadNames = map[string]struct{}{
+	".env":             {},
+	".env.local":       {},
+	".env.dev":         {},
+	".env.development": {},
+	".env.prod":        {},
+	".env.production":  {},
+	".env.staging":     {},
+	".env.test":        {},
+	".netrc":           {},
+	".npmrc":           {},
+	".pypirc":          {},
+	".dockercfg":       {},
+}
+
+// sensitiveDownloadExts lists extensions that strongly imply key material.
+var sensitiveDownloadExts = map[string]struct{}{
+	".key": {},
+	".pem": {},
+	".p12": {},
+	".pfx": {},
+	".crt": {}, // certs are usually fine, but combined with adjacent .key files
+}
+
+// isSensitiveDownloadName reports whether base (no path component) names a
+// well-known credential-bearing file. Match both fixed names and risky
+// extensions so workspace dotfiles like .env.production / id_rsa.pem cannot
+// be exfiltrated through the download endpoint.
+func isSensitiveDownloadName(base string) bool {
+	low := strings.ToLower(base)
+	if _, ok := sensitiveDownloadNames[low]; ok {
+		return true
+	}
+	if ext := filepath.Ext(low); ext != "" {
+		if _, ok := sensitiveDownloadExts[ext]; ok {
+			return true
+		}
+	}
+	return false
 }

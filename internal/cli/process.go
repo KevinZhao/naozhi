@@ -228,7 +228,10 @@ type Process struct {
 	turnDurationMs          atomic.Int64  // last TurnDurationMs (ms)
 	// meteringMu guards meteringUsage. Replaced whole on each metadata
 	// event so reads copy and the typical (no-metering) case stays cheap.
-	meteringMu    sync.Mutex
+	// Read-mostly: dashboard Snapshot polls call MeteringUsage at 1Hz × N
+	// tabs while writes only happen on metadata events (≤1/turn). RWMutex
+	// lets concurrent reads proceed without serializing on the writer.
+	meteringMu    sync.RWMutex
 	meteringUsage []MeteringEntry
 	// model is the spawn-time CLI model identifier ("claude-opus-4.7",
 	// "claude-sonnet-4.6", ""), set once by Wrapper.Spawn before
@@ -711,8 +714,8 @@ func (p *Process) TurnDurationMs() int64 {
 // (claude). Returns a fresh slice on every call so callers can safely retain
 // the result.
 func (p *Process) MeteringUsage() []MeteringEntry {
-	p.meteringMu.Lock()
-	defer p.meteringMu.Unlock()
+	p.meteringMu.RLock()
+	defer p.meteringMu.RUnlock()
 	if len(p.meteringUsage) == 0 {
 		return nil
 	}

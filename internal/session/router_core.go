@@ -116,9 +116,10 @@ const (
 	//   - Cron stubs: each job consumes 1 slot via RegisterCronStub,
 	//     with cron.DefaultMaxJobsPerChat (currently 10) as the per-chat cap.
 	//   - Project planners: up to 1 per project.
-	//   - Scratch drawers: up to ~5-10 per active dashboard session.
+	// Scratch drawers are NOT exempt (ScratchPool.Open sets Exempt=false), so
+	// they consume regular session slots, not exempt slots.
 	// At high cron density the pool can be dominated by cron stubs,
-	// squeezing planner/scratch slots. Tracked as acknowledged trade-off;
+	// squeezing planner slots. Tracked as acknowledged trade-off;
 	// a dedicated maxCronExemptSessions sub-cap is a possible follow-up.
 	maxExemptSessions = 20
 
@@ -792,7 +793,6 @@ func NewRouter(cfg RouterConfig) *Router {
 	if r.eventLogPersister != nil {
 		sem := historyLoadSem
 		for _, s := range r.sessions {
-			s := s
 			r.historyWg.Add(1)
 			go func() {
 				defer r.historyWg.Done()
@@ -844,7 +844,6 @@ func NewRouter(cfg RouterConfig) *Router {
 		// tier).
 		sem := historyLoadSem
 		for _, s := range r.sessions {
-			s := s
 			if s.getSessionID() == "" {
 				continue
 			}

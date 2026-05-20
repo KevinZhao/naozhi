@@ -22,6 +22,13 @@ func TestAcceptsGzip(t *testing.T) {
 		{"deflate", false},
 		{"", false},
 		{"identity", false},
+		// R229-PERF: explicitly disabled gzip via q=0 must NOT be accepted.
+		{"gzip;q=0", false},
+		{"gzip;Q=0", false},
+		{"gzip; q=0.0", false},
+		{"deflate, gzip;q=0", false},
+		// q=0 on a sibling token shouldn't disable gzip.
+		{"gzip, br;q=0", true},
 	}
 	for _, tc := range tests {
 		if got := acceptsGzip(tc.header); got != tc.want {

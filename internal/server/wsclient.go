@@ -238,14 +238,25 @@ func (c *wsClient) readPump() {
 	// ones get the full pong window so the PongHandler keeps them alive.
 	// Single write avoids the earlier "set wsPongWait then immediately
 	// overwrite with wsAuthTimeout" dead-code pattern.
+	// Failing to set the deadline means the next ReadMessage could block
+	// forever on a half-closed connection — match writePump's pattern of
+	// returning on SetWriteDeadline failure rather than silently dropping
+	// the error.
+	var deadlineErr error
 	if c.authenticated.Load() {
-		c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
+		deadlineErr = c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
 	} else {
-		c.conn.SetReadDeadline(time.Now().Add(wsAuthTimeout))
+		deadlineErr = c.conn.SetReadDeadline(time.Now().Add(wsAuthTimeout))
+	}
+	if deadlineErr != nil {
+		return
 	}
 	c.conn.SetPongHandler(func(string) error {
 		if c.authenticated.Load() {
-			c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
+			// Pong handler errors propagate to ReadMessage as a hard error,
+			// terminating the loop on the next iteration. No need to bail
+			// from the handler itself.
+			_ = c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
 		}
 		return nil
 	})
@@ -268,7 +279,9 @@ func (c *wsClient) readPump() {
 			}
 			c.hub.handleAuth(c, msg)
 			if c.authenticated.Load() {
-				c.conn.SetReadDeadline(time.Now().Add(wsPongWait))
+				if err := c.conn.SetReadDeadline(time.Now().Add(wsPongWait)); err != nil {
+					return
+				}
 			}
 		case "subscribe":
 			if !c.authenticated.Load() {
