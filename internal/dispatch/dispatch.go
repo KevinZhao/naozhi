@@ -22,6 +22,11 @@ import (
 	"github.com/naozhi/naozhi/internal/usermsg"
 )
 
+// platformReplyTimeout caps every outbound platform.Reply / EditMessage
+// call dispatch makes. Shared by all four call sites so a future per-
+// platform tuning lands in one place. R228-ARCH-12.
+const platformReplyTimeout = 15 * time.Second
+
 // SessionGuard prevents multiple concurrent messages to the same session.
 // Two implementations share this surface:
 //   - session.Guard — per-key mutex used by the Dashboard/WebSocket path
@@ -524,7 +529,7 @@ func (d *Dispatcher) handleOwnerLoopPanic(key string, msg platform.IncomingMessa
 				slog.Error("ownerLoop reply panic recovered", "key", key, "panic", rr)
 			}
 		}()
-		notifyCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		notifyCtx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
 		defer cancel()
 		d.replyText(notifyCtx, msg, "处理异常，请稍后重试。", nil)
 	}()
@@ -750,7 +755,10 @@ func (d *Dispatcher) sendAndReply(
 func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, chatID, text string) {
 	maxLen := p.MaxReplyLength()
 	if maxLen <= 0 {
-		maxLen = 4000
+		// R228-ARCH-1: fall back to the package-level default rather than a
+		// floating literal so a bump in platform.DefaultMaxReplyLen is
+		// picked up here automatically.
+		maxLen = platform.DefaultMaxReplyLen
 	}
 
 	chunks := platform.SplitText(text, maxLen)
@@ -952,7 +960,7 @@ func (t *replyTracker) sendAskQuestionCard(aq *cli.AskQuestion) {
 					"chat_id", chatID, "tool_use_id", aq.ToolUseID, "panic", r)
 			}
 		}()
-		rctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		rctx, cancel := context.WithTimeout(context.Background(), platformReplyTimeout)
 		defer cancel()
 
 		if sender, ok := platform.AsQuestionCardSender(p); ok {
@@ -1025,7 +1033,7 @@ func (t *replyTracker) sendTodoMessage(text string) {
 	}
 	t.lastTodoText = text
 
-	rctx, cancel := context.WithTimeout(t.ctx, 15*time.Second)
+	rctx, cancel := context.WithTimeout(t.ctx, platformReplyTimeout)
 	defer cancel()
 	if _, err := t.p.Reply(rctx, platform.OutgoingMessage{ChatID: t.chatID, Text: text}); err != nil {
 		slog.Debug("todo reply failed", "chat_id", t.chatID, "err", err)
@@ -1115,7 +1123,7 @@ func (t *replyTracker) onEvent(ev cli.Event) {
 			// shutdown WaitGroups. 15s is well above normal p99 Feishu
 			// reply latency (<2s) and respects the parent ctx for early
 			// cancel.
-			rctx, cancel := context.WithTimeout(t.ctx, 15*time.Second)
+			rctx, cancel := context.WithTimeout(t.ctx, platformReplyTimeout)
 			defer cancel()
 			id, err := t.p.Reply(rctx, platform.OutgoingMessage{ChatID: t.chatID, Text: snapshot})
 			if err == nil {

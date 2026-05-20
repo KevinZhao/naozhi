@@ -2,6 +2,7 @@ package cron
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"strings"
 	"time"
@@ -162,7 +163,9 @@ func generateHexID() string {
 	if _, err := rand.Read(b); err != nil {
 		panic("crypto/rand unavailable: " + err.Error())
 	}
-	return fmt.Sprintf("%x", b)
+	// R228-CR-9: hex.EncodeToString skips fmt's reflection path; matches
+	// textutil/uuid.go encoding style.
+	return hex.EncodeToString(b)
 }
 
 // generateRunID 返回 CronRun.RunID（16-char hex）。语义上独立于 jobID，

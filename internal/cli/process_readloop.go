@@ -78,7 +78,8 @@ func (p *Process) readLoop() {
 	//   3. close(done): signal readLoop exit to waiters
 	//   4. close(eventCh): isChanAlive relies on done closing BEFORE eventCh so
 	//      any producer guarded by "is done open?" never sends on a closed
-	//      eventCh. See drainStaleEvents / isChanAlive for the invariant.
+	//      eventCh. See drainStaleEvents / isChanAlive (defined in
+	//      process_turn.go) for the invariant.
 	// If you reorder these defers, re-verify the isChanAlive invariant.
 	defer close(p.eventCh)
 	defer close(p.done)

@@ -313,10 +313,14 @@ func (t *agentTailer) pollOnce() bool {
 		// everything (keeps the tail).
 		for _, e := range events {
 			t.buffered = append(t.buffered, e)
-			t.updateMetaFromEventLocked(e)
+			t.updateMetaFromEventLocked(e, now)
 		}
 		if over := len(t.buffered) - 500; over > 0 {
-			t.buffered = t.buffered[over:]
+			// R228-PERF-13: copy the retained tail into a fresh backing array
+			// so the dropped prefix's events become unreachable and the
+			// backing array stops growing past 500+over.
+			retained := append([]cli.EventEntry(nil), t.buffered[over:]...)
+			t.buffered = retained
 		}
 	}
 	// Snapshot subs only when there are events to fan out — idle ticks
@@ -359,6 +363,11 @@ func (t *agentTailer) pollOnce() bool {
 	}
 
 	// Idle reap — only when truly silent (no subscribers + no recent growth).
+	// idle, refCount, and the subs snapshot above were all read inside the
+	// same t.mu critical section, so this is not a TOCTOU: the three
+	// values describe a consistent point in time and t.lastActive cannot
+	// have advanced after the unlock without a new event arriving in a
+	// subsequent pollOnce. R228-GO-P3-2.
 	if idle && refCount == 0 {
 		t.reg.closeTask(t.key, t.taskID, "")
 		return false
@@ -366,7 +375,11 @@ func (t *agentTailer) pollOnce() bool {
 	return true
 }
 
-func (t *agentTailer) updateMetaFromEventLocked(e cli.EventEntry) {
+// updateMetaFromEventLocked refreshes meta counters from a single event.
+// `now` is the wall clock captured by the caller under t.mu so all events
+// in a single pollOnce share one DurationMS reading and avoid per-event
+// time.Since vDSO calls. R228-PERF-4.
+func (t *agentTailer) updateMetaFromEventLocked(e cli.EventEntry, now time.Time) {
 	switch e.Type {
 	case "tool_use":
 		t.meta.ToolUses++
@@ -390,7 +403,7 @@ func (t *agentTailer) updateMetaFromEventLocked(e cli.EventEntry) {
 		t.meta.LastTool = "thinking"
 	}
 	if !t.startedAt.IsZero() {
-		t.meta.DurationMS = int(time.Since(t.startedAt).Milliseconds())
+		t.meta.DurationMS = int(now.Sub(t.startedAt).Milliseconds())
 	}
 }
 

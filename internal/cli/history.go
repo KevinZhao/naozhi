@@ -66,9 +66,9 @@ type HistoryWiring struct {
 	// claude factory reads per-session JSONL files from beneath this
 	// directory.
 	ClaudeDir string
-	// KiroSessionsDir is ~/.kiro/sessions/cli, used by the future
-	// kirojsonl source. Sprint 1a leaves this unwired; Sprint 1b will
-	// populate it from cmd/naozhi/main.go.
+	// KiroSessionsDir is ~/.kiro/sessions/cli. Wired from cmd/naozhi/main.go;
+	// the kirojsonl factory reads per-session JSONL files from beneath this
+	// directory. R228-CR-P3-6.
 	KiroSessionsDir string
 	// EventLogDir is naozhi's per-session event log directory. Listed
 	// here for symmetry; current backend factories don't read it

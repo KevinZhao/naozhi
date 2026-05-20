@@ -477,6 +477,12 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 		tokenOK = subtle.ConstantTimeCompare(got[:], want[:]) == 1
 	}
 	if h.dashToken == "" || tokenOK {
+		// R228-GO-P3-3: distinguish "no token configured (single-user
+		// trust)" from "valid token presented" so operators can tell from
+		// logs which mode their deployment is running in.
+		if h.dashToken == "" {
+			slog.Debug("ws auth: no-token mode, authenticating unconditionally")
+		}
 		c.authenticated.Store(true)
 		// Derive uploadOwner from the provided token so WS token-auth enforces
 		// the same per-owner upload quota as HTTP Bearer auth. Without this,

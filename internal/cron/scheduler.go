@@ -1803,6 +1803,12 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 
 	agentID, cleanText := session.ResolveAgent(snap.prompt, s.agentCommands)
 	opts := s.agents[agentID]
+	// R228-GO-P3-8: clip ExtraArgs to its own length so any subsequent append
+	// downstream allocates a fresh backing array instead of mutating the
+	// shared map value. Mirrors session/routing.go's slices.Clone defence.
+	if len(opts.ExtraArgs) > 0 {
+		opts.ExtraArgs = opts.ExtraArgs[:len(opts.ExtraArgs):len(opts.ExtraArgs)]
+	}
 	opts.Exempt = true // cron sessions must not count toward maxProcs or evict user sessions
 	// Sprint 6c (docs/rfc/multi-backend.md §9): per-job backend override.
 	// Empty snap.backend leaves opts.Backend untouched ("" already routes

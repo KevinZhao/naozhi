@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -186,11 +187,21 @@ func (s *uploadStore) removeEntryLocked(id string, e *uploadEntry) {
 		owner = unknownOwner
 	}
 	if n := s.ownerCounts[owner] - 1; n <= 0 {
+		// R228-GO-P3-6: an underflow (n < 0) means a Put/Take pair is
+		// unbalanced — log so the bug surfaces during operations rather
+		// than silently masking the accounting drift, mirroring the
+		// totalBytes defensive log above.
+		if n < 0 {
+			slog.Warn("upload store: ownerCounts underflow, resetting to zero", "owner", owner)
+		}
 		delete(s.ownerCounts, owner)
 	} else {
 		s.ownerCounts[owner] = n
 	}
 	if b := s.ownerBytes[owner] - sz; b <= 0 {
+		if b < 0 {
+			slog.Warn("upload store: ownerBytes underflow, resetting to zero", "owner", owner)
+		}
 		delete(s.ownerBytes, owner)
 	} else {
 		s.ownerBytes[owner] = b
