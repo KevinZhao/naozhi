@@ -12,6 +12,44 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
+// JobIMContext bundles the originating IM-channel coordinates a cron Job
+// inherits from the message that created it. Kept as a tiny local type
+// (not platform.IncomingMessage) so external callers don't have to import
+// the platform package just to construct a Job — and so adding a new IM
+// field to platform.IncomingMessage doesn't ripple into Job's wire schema.
+//
+// All fields are optional: dashboard-created jobs leave the whole struct
+// zero-value (the dashboard handler sets dashboard-specific Notify fields
+// directly on the returned Job).
+type JobIMContext struct {
+	Platform  string
+	ChatID    string
+	ChatType  string
+	CreatedBy string
+}
+
+// NewJob constructs a Job ready to hand to Scheduler.AddJob from the
+// (schedule, prompt) pair plus the IM-channel context that originated it.
+// Centralising this constructor prevents cross-package callers (dispatch,
+// dashboard, IM command handlers) from spelling out the cron.Job{} struct
+// literal — a Job field rename today breaks every literal call site.
+//
+// CreatedAt is intentionally NOT stamped here: AddJob is the choke point
+// that owns Job persistence and needs a single coherent timestamp source.
+// Pre-stamping in NewJob would cause a tiny but real skew (LastRunAt
+// comparisons, missed-schedule detection) when the constructor is called
+// far ahead of AddJob.
+func NewJob(schedule, prompt string, ctx JobIMContext) *Job {
+	return &Job{
+		Schedule:  schedule,
+		Prompt:    prompt,
+		Platform:  ctx.Platform,
+		ChatID:    ctx.ChatID,
+		ChatType:  ctx.ChatType,
+		CreatedBy: ctx.CreatedBy,
+	}
+}
+
 // Job represents a scheduled cron task.
 type Job struct {
 	ID        string    `json:"id"`
