@@ -17,7 +17,6 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/naozhi/naozhi/internal/cli"
-	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
 	"github.com/naozhi/naozhi/internal/node"
 	"github.com/naozhi/naozhi/internal/osutil"
@@ -250,11 +249,21 @@ func isUnknownRPCMethodErr(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "unknown method")
 }
 
+// cronStubChecker is the 1-method consumer interface SessionHandlers needs
+// from cron.Scheduler — handleEvents revives a dismissed cron stub when a
+// dashboard tab requests its event tail. Defined here so the server package
+// does not import cron's full type just for this single call. R228-ARCH-17.
+//
+// *cron.Scheduler satisfies this implicitly.
+type cronStubChecker interface {
+	EnsureStub(key string) bool
+}
+
 // SessionHandlers groups the session list, events, delete, and resume API endpoints.
 type SessionHandlers struct {
 	router      *session.Router
 	projectMgr  *project.Manager
-	scheduler   *cron.Scheduler // optional; used by handleEvents to revive dismissed cron stubs
+	scheduler   cronStubChecker // optional; used by handleEvents to revive dismissed cron stubs
 	claudeDir   string
 	allowedRoot string
 	agents      map[string]session.AgentOpts

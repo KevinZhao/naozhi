@@ -74,6 +74,46 @@ func newEventLogSink(persisterSink persist.PersistSink, attachTracker *tracker.T
 		if len(entries) == 0 {
 			return
 		}
+
+		// R228-PERF-1: single-entry fast path avoids a heap allocation
+		// for the 1-cap []persist.Entry slice. A stack-local [1]persist.Entry
+		// array keeps the backing array on the stack; slicing it to [:0]
+		// lets the compiler prove the escape is bounded to this frame.
+		// marshal/copy/refcount semantics are identical to the loop below.
+		if len(entries) == 1 {
+			eb := bridgeEncPool.Get().(*bridgeEncBuf)
+			eb.buf.Reset()
+			e := entries[0]
+			if err := eb.enc.Encode(e); err != nil {
+				slog.Warn("eventlog bridge: marshal entry failed",
+					"uuid", e.UUID, "type", e.Type, "err", err)
+				if eb.buf.Cap() <= bridgeEncMaxCap {
+					bridgeEncPool.Put(eb)
+				}
+				return
+			}
+			raw := eb.buf.Bytes()
+			if n := len(raw); n > 0 && raw[n-1] == '\n' {
+				raw = raw[:n-1]
+			}
+			// Copy out of the pooled buffer so caller can hold the
+			// bytes past Put. PersistSink contract permits sink to
+			// retain entries.
+			buf := make([]byte, len(raw))
+			copy(buf, raw)
+			if eb.buf.Cap() <= bridgeEncMaxCap {
+				bridgeEncPool.Put(eb)
+			}
+			var stackArr [1]persist.Entry
+			out := append(stackArr[:0], persist.Entry{JSON: buf, TimeMS: e.Time})
+			// Refcount bump — same guard as multi-entry path below.
+			if !replayPhase && attachTracker != nil && keyhash != "" && len(e.ImagePaths) > 0 {
+				attachTracker.OnPersistedEntry(keyhash, e.ImagePaths, e.Time)
+			}
+			persisterSink(out, replayPhase)
+			return
+		}
+
 		out := make([]persist.Entry, 0, len(entries))
 		eb := bridgeEncPool.Get().(*bridgeEncBuf)
 		defer func() {

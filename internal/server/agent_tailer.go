@@ -403,7 +403,7 @@ func (t *agentTailer) updateMetaFromEventLocked(e cli.EventEntry, now time.Time)
 		t.meta.LastTool = "thinking"
 	}
 	if !t.startedAt.IsZero() {
-		t.meta.DurationMS = int(now.Sub(t.startedAt).Milliseconds())
+		t.meta.DurationMS = now.Sub(t.startedAt).Milliseconds()
 	}
 }
 
