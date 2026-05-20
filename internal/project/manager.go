@@ -359,9 +359,10 @@ func (m *Manager) EffectivePlannerPrompt(p *Project) string {
 		}
 	}
 	// R225-SEC-6: 字节循环只覆盖 NUL/C0/DEL，跳不到 C1/bidi override/LS-PS（多字节
-	// UTF-8，首字节 >= 0xC2）。与 ValidateConfig + validatePlannerPrompt 对齐：
-	// rune 扫描 IsLogInjectionRune 命中即整串丢弃，避免 bidi 字符流入 argv 或
-	// 下游 slog attr 翻转 journalctl 渲染。
+	// UTF-8，首字节 >= 0xC2）。ValidateConfig 已在写路径上跑同一份 IsLogInjectionRune
+	// 扫描，但被篡改的 project.yaml 或绕开 ValidateConfig 的全局默认仍可能落到此处 —
+	// 运行时再扫一遍是 defense-in-depth；rune 用 U+XXXX 格式化避免 bidi 字面值翻转
+	// journalctl 渲染。
 	for _, r := range raw {
 		if osutil.IsLogInjectionRune(r) {
 			slog.Warn("planner prompt contains injection rune (C1/bidi/LS-PS); dropping",

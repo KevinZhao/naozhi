@@ -139,23 +139,51 @@ func Download(ctx context.Context, rel *Release, dir string) (binPath string, er
 	return binPath, nil
 }
 
+// stagingPattern is the os.CreateTemp pattern Replace uses for the
+// staging file. Kept as a package-level constant so tests can glob for
+// stale staging files after forcing a Replace failure (the random suffix
+// makes the exact filename unpredictable). R225-SEC-3.
+const stagingPattern = ".naozhi-upgrade-*.staging"
+
 // Replace atomically swaps newBin into installPath:
 //  1. Backs up the current binary to installPath + backupSuffix.
 //  2. Writes newBin to a staging file in the same directory.
 //  3. os.Rename (atomic on same filesystem) stages → installPath.
 //  4. On any failure after backup, restores the backup.
+//
+// The staging file uses os.CreateTemp with a randomised suffix instead of
+// a fixed `.naozhi-upgrade.staging` name. On a multi-user host where
+// $installDir is writable by more than one UID (shared /usr/local/bin),
+// the fixed name gave a hostile UID a known target it could pre-create
+// or symlink before the upgrade ran; CreateTemp's O_EXCL+random suffix
+// removes the predictability without changing the atomic-rename contract.
+// R225-SEC-3.
 func Replace(newBin, installPath string) (backupPath string, err error) {
 	backupPath = installPath + backupSuffix
-	stagePath := installPath + ".naozhi-upgrade.staging"
 
 	// Backup current binary so we can roll back on service-restart failure.
 	if err := copyFile(installPath, backupPath); err != nil {
 		return "", fmt.Errorf("backup current binary: %w", err)
 	}
 
-	// Write to a staging file in the same directory (guarantees same device
-	// for the subsequent Rename, which is atomic on POSIX).
+	// CreateTemp gives an O_EXCL'd staging file in the same directory as
+	// installPath, so the subsequent Rename stays a same-device atomic op.
+	stageF, err := os.CreateTemp(filepath.Dir(installPath), stagingPattern)
+	if err != nil {
+		_ = os.Remove(backupPath)
+		return "", fmt.Errorf("create staging file: %w", err)
+	}
+	stagePath := stageF.Name()
+	// Close immediately — copyFile re-opens for write. Closing first means
+	// a copyFile failure does not leak the original O_EXCL fd.
+	if err := stageF.Close(); err != nil {
+		_ = os.Remove(stagePath)
+		_ = os.Remove(backupPath)
+		return "", fmt.Errorf("close staging file: %w", err)
+	}
+
 	if err := copyFile(newBin, stagePath); err != nil {
+		_ = os.Remove(stagePath)
 		_ = os.Remove(backupPath)
 		return "", fmt.Errorf("stage new binary: %w", err)
 	}
@@ -216,9 +244,8 @@ func extractTag(rawURL string) string {
 }
 
 // isGitHubHost returns true when host is exactly github.com or any
-// *.github.com subdomain (objects.githubusercontent.com etc. are reached via
-// secondary redirects but those happen inside fetchFile, which has its own
-// redirect policy).
+// *.github.com subdomain. Used by LatestRelease where redirects should stay on
+// the github.com proper (HTML release page → /releases/tag/ on github.com).
 func isGitHubHost(host string) bool {
 	// Strip optional port.
 	if i := strings.IndexByte(host, ':'); i >= 0 {
@@ -229,6 +256,24 @@ func isGitHubHost(host string) bool {
 		return true
 	}
 	return strings.HasSuffix(host, ".github.com")
+}
+
+// isGitHubAssetHost is the looser allowlist used by fetchFile, since release
+// asset downloads legitimately 302 from github.com to
+// objects.githubusercontent.com. Anything else is refused so a hostile
+// redirect can't pivot the binary/checksums fetch to an attacker-controlled
+// host (which would defeat SHA-256 verification — both files travel the same
+// path and could be replaced in lock-step).
+func isGitHubAssetHost(host string) bool {
+	if i := strings.IndexByte(host, ':'); i >= 0 {
+		host = host[:i]
+	}
+	host = strings.ToLower(host)
+	if host == "github.com" || host == "githubusercontent.com" {
+		return true
+	}
+	return strings.HasSuffix(host, ".github.com") ||
+		strings.HasSuffix(host, ".githubusercontent.com")
 }
 
 // checkPlatform returns ErrUnsupportedPlatform on operating systems that have
@@ -255,14 +300,17 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 	// pivot the binary or checksums.txt download to an attacker-controlled
 	// host. Without this guard the SHA-256 verification is no longer
 	// load-bearing — both files travel the same path and could be replaced
-	// in lock-step.
+	// in lock-step. (R228-SEC-1/SEC-9，覆盖 R227-SEC-5 的 https-only 检查)
 	client := &http.Client{
 		Timeout: defaultTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > 5 {
 				return fmt.Errorf("too many redirects")
 			}
-			if !isGitHubHost(req.URL.Host) {
+			if req.URL.Scheme != "https" {
+				return fmt.Errorf("redirect to non-https URL refused: %s", req.URL.Scheme)
+			}
+			if !isGitHubAssetHost(req.URL.Host) {
 				return fmt.Errorf("redirect target outside github.com: %s", req.URL.Host)
 			}
 			return nil

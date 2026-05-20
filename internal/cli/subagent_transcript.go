@@ -78,7 +78,13 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]EventEntry, e
 		}
 	}
 
-	freshBytes, err := io.ReadAll(f)
+	// Bound a single read so an unexpectedly large transcript (or a
+	// symlink-swap pointing at a huge file) cannot pin tens of MB on a
+	// hot polling path. Subagent jsonl files are typically a few hundred
+	// KB; 16 MB leaves ample headroom for long-running agents.
+	// (R227-CR-4)
+	const maxTranscriptReadBytes = 16 * 1024 * 1024
+	freshBytes, err := io.ReadAll(io.LimitReader(f, maxTranscriptReadBytes))
 	if err != nil {
 		return nil, err
 	}

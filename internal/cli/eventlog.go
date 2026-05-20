@@ -510,7 +510,13 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 	case "result", "user":
 		l.turnAgents = l.turnAgents[:0]
 		l.bgAgents = l.bgAgents[:0]
-		l.turnAgentCount.Store(0)
+		// Most non-agent turns leave turnAgentCount at zero already;
+		// skipping the redundant atomic Store avoids cache-coherence
+		// traffic on every result event in agent-free workloads.
+		// (R227-PERF-14)
+		if l.turnAgentCount.Load() != 0 {
+			l.turnAgentCount.Store(0)
+		}
 	}
 	return false, pendingTaskDone{}
 }

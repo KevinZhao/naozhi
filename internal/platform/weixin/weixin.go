@@ -269,8 +269,13 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 				continue
 			}
 
-			// Cache context_token for reply
-			if msg.ContextToken != "" {
+			// Cache context_token for reply. Bound the stored length so a
+			// misbehaving (or compromised) iLink relay can't pin arbitrary
+			// memory per user for the 24h TTL window. Real tokens are UUID-
+			// scale strings; legitimate values stay well under 512 bytes.
+			// (R227-SEC-8)
+			const maxContextTokenLen = 512
+			if msg.ContextToken != "" && len(msg.ContextToken) <= maxContextTokenLen {
 				w.contextTokens.Store(from, &tokenEntry{
 					token:     msg.ContextToken,
 					updatedNs: time.Now().UnixNano(),

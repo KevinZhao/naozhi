@@ -715,21 +715,33 @@ func (s *ManagedSession) setSessionID(id string) {
 }
 
 // parseKeyParts lazily parses the immutable session key into cached components.
+// Hand-rolled split avoids the []string allocation that strings.SplitN would
+// produce — every new session triggers exactly one parseKeyParts on its first
+// Snapshot, and dashboards poll dozens of sessions per second. (R227-PERF-13)
 func (s *ManagedSession) parseKeyParts() {
 	s.keyOnce.Do(func() {
-		parts := strings.SplitN(s.key, ":", 4)
-		if len(parts) >= 1 {
-			s.keyPlatform = parts[0]
+		k := s.key
+		idx := strings.IndexByte(k, ':')
+		if idx < 0 {
+			s.keyPlatform = k
+			return
 		}
-		if len(parts) >= 2 {
-			s.keyChatType = parts[1]
+		s.keyPlatform = k[:idx]
+		k = k[idx+1:]
+		idx = strings.IndexByte(k, ':')
+		if idx < 0 {
+			s.keyChatType = k
+			return
 		}
-		if len(parts) >= 3 {
-			s.keyChatID = parts[2]
+		s.keyChatType = k[:idx]
+		k = k[idx+1:]
+		idx = strings.IndexByte(k, ':')
+		if idx < 0 {
+			s.keyChatID = k
+			return
 		}
-		if len(parts) >= 4 {
-			s.keyAgentID = parts[3]
-		}
+		s.keyChatID = k[:idx]
+		s.keyAgentID = k[idx+1:]
 	})
 }
 
@@ -1371,7 +1383,7 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 		if prompt == "" && e.Type == "user" {
 			prompt = e.Summary
 		}
-		if activity == "" && (e.Type == "tool_use" || e.Type == "thinking") {
+		if activity == "" && isActivityType(e.Type) {
 			activity = e.Summary
 		}
 		if prompt != "" && activity != "" {
@@ -1427,7 +1439,7 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 		if prompt == "" && e.Type == "user" {
 			prompt = e.Summary
 		}
-		if activity == "" && (e.Type == "tool_use" || e.Type == "thinking") {
+		if activity == "" && isActivityType(e.Type) {
 			activity = e.Summary
 		}
 		if prompt != "" && activity != "" {
@@ -1460,4 +1472,18 @@ func costUnitForBackend(backend string) string {
 	default:
 		return ""
 	}
+}
+
+// isActivityType mirrors the EventLog.Append type set that updates
+// lastActivitySummary, so any caller scanning history for "what was
+// the last activity" sees the same surface. Keeping the predicate
+// here (rather than reaching into cli) avoids importing cli from
+// session for a fixed string set; the trade-off is that adding a new
+// activity type requires touching both files. (R227-CR-1)
+func isActivityType(t string) bool {
+	switch t {
+	case "tool_use", "thinking", "agent", "task_start", "task_progress", "todo":
+		return true
+	}
+	return false
 }

@@ -568,10 +568,15 @@ func (l *SubagentLinker) fireOnResolveLocked(taskID, toolUseID, internalAgentID 
 		return
 	}
 	l.mu.Unlock()
+	// Re-acquire l.mu via defer so a panicking callback still leaves
+	// l.mu Locked when the stack unwinds — otherwise the caller's own
+	// `defer l.mu.Unlock()` would unlock an already-unlocked mutex and
+	// fault, and the second panic from sync would also corrupt the
+	// readLoop's panic-recover bookkeeping. (R227-GO-1)
+	defer l.mu.Lock()
 	for _, fn := range fns {
 		fn(taskID, toolUseID, internalAgentID)
 	}
-	l.mu.Lock()
 }
 
 // scanMetaFiles reads subagentDir and parses each .meta.json to surface

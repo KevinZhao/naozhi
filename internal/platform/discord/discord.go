@@ -275,10 +275,24 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 		url         string
 		contentType string
 	}
+	// Cap the number of images per inbound message to bound the async
+	// download goroutine's footprint: Discord allows up to 10 attachments
+	// per message and each may be up to 10 MB, so without a cap a hostile
+	// or misbehaving client could pin ~100 MB per event in flight while
+	// the goroutine downloads them serially. The CLI prompt rarely
+	// benefits from more than a handful of images. (R227-SEC-6)
+	const maxDiscordAttachmentsPerMessage = 5
 	var pending []pendingImage
 	for _, att := range m.Attachments {
 		if !isImageContentType(att.ContentType) {
 			continue
+		}
+		if len(pending) >= maxDiscordAttachmentsPerMessage {
+			slog.Warn("discord attachments truncated",
+				"channel", m.ChannelID,
+				"kept", maxDiscordAttachmentsPerMessage,
+				"total", len(m.Attachments))
+			break
 		}
 		pending = append(pending, pendingImage{url: att.URL, contentType: att.ContentType})
 	}
@@ -358,6 +372,12 @@ func downloadURL(rawURL string) ([]byte, string, error) {
 	}
 	if !discordCDNHosts[u.Hostname()] {
 		return nil, "", fmt.Errorf("attachment URL host not in whitelist: %s", u.Hostname())
+	}
+	// Refuse non-https schemes so a future Discord CDN downgrade or a
+	// crafted javascript:// URL cannot bypass TLS verification on the
+	// attachment download path. (R227-SEC-13)
+	if u.Scheme != "https" {
+		return nil, "", fmt.Errorf("attachment URL must use https: %s", u.Scheme)
 	}
 	resp, err := discordHTTPClient.Get(rawURL)
 	if err != nil {
