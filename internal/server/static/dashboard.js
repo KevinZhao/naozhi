@@ -11031,6 +11031,11 @@ function cronApplyRunStarted(msg) {
   // 清掉 frozen 标记让用户能再次看到实时事件。否则 hourly 任务下一次
   // 跑时前端仍然会丢事件，看起来像 bug。
   cronFrozenRuns.delete(msg.job_id);
+  // Round 2 R-4: WS-confirmed run start clears the optimistic cooldown
+  // lock — the disabled-running label takes over from this point. If the
+  // started event came from a non-manual trigger (scheduled/catchup), the
+  // cooldown lock was never set so this is a no-op.
+  cronTriggerCooldownClear(msg.job_id);
   renderCronPanel();
 }
 
@@ -11924,16 +11929,39 @@ function cronDrawerHtml(j) {
   '</section>';
 
   // Action row.
-  const triggerDisabled = isPaused || isRunning;
-  const triggerLabel = isRunning ? '\u25B7 运行中…' : '\u25B7 立即执行';
-  const triggerTooltip = isPaused
-    ? '已暂停。请先恢复任务。'
-    : (isRunning ? '上一次执行尚未完成，请等待结束。' : '立即执行一次');
+  // Round 2 R-4 disable matrix (RFC §4.3.1):
+  //   normal      → "立即执行" (enabled, primary)
+  //   paused      → "立即执行" (disabled, "请先恢复")
+  //   running     → "运行中…"  (disabled + pulse, "请等待结束")
+  //   just-triggered (≤ 1s)   → "触发中…"  (disabled + spinner)
+  //   just-triggered (1-3 s)  → "已派发 ✓" (disabled, success)
+  //   just-triggered (3-10 s) → "已派发 ✓" (disabled, quiet hold)
+  // running takes precedence over just-triggered so a real WS-confirmed
+  // run-state always wins over the optimistic local lock.
+  const cooldown = cronTriggerCooldownState(id);
+  let triggerDisabled = false;
+  let triggerLabel = '\u25B7 立即执行';
+  let triggerTooltip = '立即执行一次';
+  let triggerCls = 'cda-btn primary';
+  if (isPaused) {
+    triggerDisabled = true;
+    triggerTooltip = '已暂停。请先恢复任务。';
+  } else if (isRunning) {
+    triggerDisabled = true;
+    triggerLabel = '\u25B7 运行中…';
+    triggerTooltip = '上一次执行尚未完成，请等待结束。';
+    triggerCls += ' is-running';
+  } else if (cooldown) {
+    triggerDisabled = true;
+    triggerLabel = '\u25B7 ' + cooldown.label;
+    triggerCls += cooldown.phase === 'sending' ? ' is-sending' : ' is-sent';
+    triggerTooltip = '刚已触发一次，请稍候。';
+  }
   const pauseBtn = isPaused
     ? '<button type="button" class="cda-btn" onclick="cronResume(\'' + escJs(id) + '\')" title="恢复任务调度">\u25B6 恢复</button>'
     : '<button type="button" class="cda-btn" onclick="cronPause(\'' + escJs(id) + '\')" title="暂停后调度跳过">\u23F8 暂停</button>';
   const actionsHtml = '<nav class="cron-drawer-actions" aria-label="任务操作">' +
-    '<button type="button" class="cda-btn primary"' +
+    '<button type="button" class="' + triggerCls + '"' +
       (triggerDisabled ? ' disabled aria-disabled="true"' : '') +
       ' onclick="cronTriggerNow(\'' + escJs(id) + '\')"' +
       ' title="' + escAttr(triggerTooltip) + '">' + esc(triggerLabel) + '</button>' +
@@ -12339,31 +12367,130 @@ async function fetchCronJobs() {
 // without waiting for the next scheduled tick. Useful when the operator
 // wants to verify a prompt edit or rerun after a transient failure.
 //
+// Round 2 review R-4: visual-feedback contract (cron-panel-consolidation-ui
+// RFC §4.3.1). The backend's jobRunningGuard already serializes against
+// double-click — the issue is *user perception*. WS cron_run_started lands
+// 200-500 ms after the API ACK, so a naive "fire-and-forget + toast" leaves
+// the button looking pristine for that whole window and operators reflexively
+// click again. The flow we want is:
+//
+//   click → button locks (spinner) → API returns OK → "已派发 ✓" 2 s
+//        → debounce floor stays in effect another N s → unlock when WS
+//          cron_run_started lands OR debounce floor elapses, whichever
+//          is later.
+//
+// 10 s is the debounce floor: longer than the worst-case API + WS round
+// trip we've measured (~3 s under load) but short enough that a real
+// scheduled tick during the window won't get visually swallowed.
+//
 // Contract notes:
 //   - Backend rejects paused jobs with 409 ErrJobPaused; the button is
 //     hidden for paused jobs (cronJobCardHtml), so 409 here usually means a
 //     pause landed between render and click — surface it via showAPIError
-//     rather than a custom message.
-//   - Backend's jobRunningGuard + SkipIfStillRunning chain serializes
-//     against the scheduled-tick path, so a double-click at worst sees one
-//     execution plus an "already running, skipping overlap" Info log. No
-//     frontend debounce is needed.
-//   - Success response is {status:"triggered"}; the eventual run completion
-//     arrives via the existing cron_update WS event (last_run_at / last_result)
-//     which already repaints the card.
+//     and immediately clear cronJustTriggered so the user can retry.
+//   - 409 "already running" maps to the same "请等待结束" path the
+//     disabled-running-state already shows; we reuse showAPIError so the
+//     status code remains visible for L2 support.
+//   - We do NOT wait for cron_run_started before unlocking — under WS
+//     disconnection the event might never arrive. The 10 s floor + the
+//     subsequent fetchCronJobs poll will reconcile.
+
+// cronJustTriggered tracks the per-jobId trigger timestamp (ms).
+// Used by cronTriggerCooldownState() to compute disable + label state for
+// both the drawer's primary action and the list row's ghost Run button so
+// they stay in sync. Cleared by cronTriggerCooldownClear() on WS
+// cron_run_started (preferred) or after the 10 s floor elapses.
+const cronJustTriggered = Object.create(null);
+const CRON_TRIGGER_COOLDOWN_MS = 10 * 1000;
+
+function cronTriggerCooldownState(id) {
+  const t = cronJustTriggered[id];
+  if (!t) return null;
+  const dt = Date.now() - t;
+  if (dt < 0 || dt >= CRON_TRIGGER_COOLDOWN_MS) {
+    delete cronJustTriggered[id];
+    return null;
+  }
+  // 0..1000 ms → spinner; 1000..3000 ms → ✓; 3000..10000 ms → quiet hold.
+  if (dt < 1000) return { phase: 'sending', label: '触发中…' };
+  if (dt < 3000) return { phase: 'sent',    label: '已派发 ✓' };
+  return { phase: 'cooldown', label: '已派发 ✓' };
+}
+
+function cronTriggerCooldownClear(id) {
+  if (cronJustTriggered[id]) delete cronJustTriggered[id];
+}
+
+// cronTriggerCooldownTickTimer drives label transitions (sending → sent →
+// cooldown) and final unlock. Runs at 200 ms while any job is in cooldown
+// to make the spinner→✓ transition feel snappy without burning CPU when
+// the button is idle.
+let cronTriggerCooldownTickTimer = null;
+function ensureCronTriggerCooldownTick() {
+  const anyHot = Object.keys(cronJustTriggered).length > 0;
+  if (anyHot && !cronTriggerCooldownTickTimer) {
+    cronTriggerCooldownTickTimer = setInterval(() => {
+      // Sweep stale entries; if any expired, repaint the affected rows /
+      // drawer so the button leaves cooldown.
+      let anyExpired = false;
+      const now = Date.now();
+      for (const k of Object.keys(cronJustTriggered)) {
+        if (now - cronJustTriggered[k] >= CRON_TRIGGER_COOLDOWN_MS) {
+          delete cronJustTriggered[k];
+          anyExpired = true;
+        }
+      }
+      if (anyExpired || true) {
+        // Repaint drawer cooldown labels so the spinner→✓→idle transitions
+        // happen even if no other event fires. The repaint is targeted to
+        // the actions row so it doesn't wipe focus / scroll position.
+        if (cronDetailJobId !== null) renderCronDrawer();
+      }
+      if (Object.keys(cronJustTriggered).length === 0) {
+        clearInterval(cronTriggerCooldownTickTimer);
+        cronTriggerCooldownTickTimer = null;
+      }
+    }, 200);
+  }
+}
+
 async function cronTriggerNow(id) {
+  // Reentrancy guard: if a cooldown is already in flight for this id, drop
+  // the click silently — the disabled button state should have prevented it
+  // already, but keyboard activation paths (Enter on a non-disabled button
+  // in the same paint window) can still slip through.
+  if (cronJustTriggered[id]) return;
+  cronJustTriggered[id] = Date.now();
+  ensureCronTriggerCooldownTick();
+  // Repaint drawer immediately so the button flips to the spinner without
+  // waiting for the 200 ms tick. List ghost Run isn't repainted per row
+  // (would be expensive on 500-job dashboards) — its disabled-after-trigger
+  // state is read at render time.
+  if (cronDetailJobId === id) renderCronDrawer();
   try {
     const headers = { 'Content-Type': 'application/json' };
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch('/api/cron/trigger', { method: 'POST', headers, body: JSON.stringify({ id }) });
     if (!r.ok) {
+      // Failure — clear the cooldown immediately so the user can retry.
+      // The 10 s floor would be punishing on a transient 502.
+      cronTriggerCooldownClear(id);
+      if (cronDetailJobId === id) renderCronDrawer();
       const raw = await r.text().catch(() => '');
       showAPIError('立即执行定时任务', r.status, raw);
       return;
     }
-    showToast('已触发执行', 'success', 2000);
-  } catch (e) { showNetworkError('立即执行定时任务', e); }
+    // Success — leave cooldown in place; the tick timer will transition
+    // the label and finally clear it. cronJobs row state will be updated
+    // by the WS cron_run_started event (which also clears the cooldown
+    // via the dispatch handler — see ws msg case below).
+    showToast('已派发执行', 'success', 1500);
+  } catch (e) {
+    cronTriggerCooldownClear(id);
+    if (cronDetailJobId === id) renderCronDrawer();
+    showNetworkError('立即执行定时任务', e);
+  }
 }
 
 async function cronPause(id) {

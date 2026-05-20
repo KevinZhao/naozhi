@@ -1257,6 +1257,25 @@ body.kbd-open .input-hints{display:none}
 .cron-drawer-actions .cda-btn.primary:hover:not([disabled]){background:rgba(31,111,235,.12)}
 .cron-drawer-actions .cda-btn.danger{margin-left:auto;color:var(--nz-red);border-color:rgba(218,54,51,.45);background:transparent}
 .cron-drawer-actions .cda-btn.danger:hover{background:rgba(218,54,51,.12)}
+/* Round 2 R-4 — trigger button visual feedback states (RFC §4.3.1).
+ * is-running: pulse the same accent ring as cdc-card so the disabled
+ *             button reads as "actively waiting", not just "greyed".
+ * is-sending: 1 s spinner orbiting the ▷ glyph; opacity stays full so
+ *             "I clicked, something happened" feels confirmed even
+ *             during the API round-trip.
+ * is-sent:    2 s solid green-ish accent + ✓ baked into the label;
+ *             after that the cooldown timer keeps the button quiet
+ *             until 10 s elapses or WS cron_run_started lands. */
+.cron-drawer-actions .cda-btn.primary.is-running{animation:cdaTriggerPulse 1.4s ease-in-out infinite;opacity:.85}
+.cron-drawer-actions .cda-btn.primary.is-sending{opacity:.85;background:rgba(31,111,235,.06);border-color:var(--nz-accent);color:var(--nz-accent)}
+.cron-drawer-actions .cda-btn.primary.is-sending::before{content:"";display:inline-block;width:10px;height:10px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;margin-right:6px;animation:cdaSpinner .8s linear infinite}
+.cron-drawer-actions .cda-btn.primary.is-sent{opacity:1;background:rgba(63,185,80,.12);border-color:var(--nz-green);color:var(--nz-green)}
+@keyframes cdaTriggerPulse{0%,100%{box-shadow:0 0 0 0 rgba(88,166,255,.35)}50%{box-shadow:0 0 0 6px rgba(88,166,255,0)}}
+@keyframes cdaSpinner{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){
+  .cron-drawer-actions .cda-btn.primary.is-running,
+  .cron-drawer-actions .cda-btn.primary.is-sending::before{animation:none}
+}
 /* Drawer current execution */
 .cron-drawer-current{padding:14px 20px;border-bottom:1px solid var(--nz-border)}
 .cron-drawer-current h3{margin:0 0 10px;font-size:13px;color:var(--nz-text-strong);font-weight:600;letter-spacing:.2px}
