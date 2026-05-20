@@ -866,6 +866,17 @@ type SessionSnapshot struct {
 	// cli.backends[].model → SpawnOptions.Model → Process.Model. Empty
 	// when the operator did not configure one. The dashboard renders
 	// "(模型未配置)" in that case (UI Round 5 R5-3).
+	//
+	// Backend-specific behaviour:
+	//   - claude (stream-json): the configured model flows through as-is;
+	//     the value matches what the operator set in cli.backends[].model.
+	//   - kiro / ACP: this field still reflects the spawn-time configured
+	//     value (or empty). The real model id reported by ACP
+	//     `session/new`'s `result.models.currentModelId` is currently NOT
+	//     read back into Process.Model — see R225-ACP-MODEL-INIT in
+	//     docs/TODO.md. Until that lands, dashboards consuming Snapshot
+	//     for ACP backends should expect the configured value, not the
+	//     in-effect runtime model. R225-CR-8.
 	Model           string             `json:"model,omitempty"`
 	LastActive      int64              `json:"last_active"` // unix ms
 	TotalCost       float64            `json:"total_cost"`

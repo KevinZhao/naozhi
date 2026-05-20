@@ -34,6 +34,15 @@ type BackendInfo struct {
 	// support (askuser / passthrough / embedded_context / image_input /
 	// audio_input / mcp_http / mcp_sse). Missing key == false. Multi-Backend
 	// RFC §8.2.
+	//
+	// IMPORTANT: dashboard-only field. DetectBackendsCtx leaves this nil
+	// (the cli package cannot import internal/cli/backend without forming
+	// an import cycle). It is filled by the dashboard handler at
+	// /api/cli/backends serialisation time — see
+	// internal/server/dashboard_cli.go where backend.Get(id).Features
+	// is copied into each entry. Callers reading BackendInfo from
+	// DetectBackendsCtx directly will observe nil and must treat every
+	// feature as false (the safest degrade). R225-CR-7.
 	Features map[string]bool `json:"features,omitempty"`
 }
 

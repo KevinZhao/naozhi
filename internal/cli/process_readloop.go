@@ -631,6 +631,24 @@ func (p *Process) heartbeatLoop() {
 	for {
 		select {
 		case <-ticker.C:
+			// R225-GO-6: drain any pongs that may have queued in pongRecv
+			// during a scheduler stall in this heartbeatLoop goroutine.
+			// pongRecv was bumped to capacity maxMisses+1 so the readLoop's
+			// non-blocking send no longer drops pongs during stalls — but a
+			// pong delivered just before this iteration also must not
+			// satisfy the wait below for the *next* ping (otherwise we'd
+			// declare the shim healthy before it has had a chance to
+			// respond to the upcoming ping). Empty the buffer first so the
+			// pong consumed in the select is unambiguously the response to
+			// the ping we are about to send.
+			for {
+				select {
+				case <-p.pongRecv:
+					continue
+				default:
+				}
+				break
+			}
 			// R222-PERF-14: heartbeat ping payload is fully static (no
 			// runtime field). Using a pre-marshalled []byte skips the
 			// encodeShimMsg pool acquire + json.Encoder reflection

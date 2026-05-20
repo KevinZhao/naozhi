@@ -226,7 +226,7 @@
 - [ ] **R225-GO-3 — `process_event_query.InjectHistory` 裸 `go linker.Resolve(...)` 无 ctx（P2 R224-GO-3 同源第三分支）**: process_event_query.go:61 与 router_shim.go reconnect 同型；`wallclock` 取的是 `e.Time` 是对的，但 SIGTERM 期间 goroutine 仍不可中止。同 R225-GO-2 一并接 ctx。
 - [ ] **R225-GO-4 — `Router.Remove` / `dropEventLogForKey` 用 `context.Background()` + 独立 timeout 而非传入 ctx（P2）**: router_cleanup.go:97 `Remove` 路径上 7s 内不可被 SIGTERM 取消，shutdown tail latency 加重。Breaking：Remove 签名加 ctx。
 - [ ] **R225-GO-5 — `cron.SetOnExecute / SetOnRunStarted / SetOnRunEnded` 裸 callback 字段（P2）**: scheduler.go:312 三 setter 在 s.mu 下写、`emitRun*` 在 RUnlock 后调，外部测试若直接读字段触发 race。方案：`atomic.Pointer[OnRunStartedFunc]`，与 `Router.onChange` 模式对齐。
-- [ ] **R225-GO-6 — `cli.Process pongRecv` 容量 1 在 GC pause 下可能误杀健康进程（P3）**: process.go:228 调度延迟时多个 pong 被丢，misses 误累。方案：容量提到 maxMisses+1，或心跳消费处用 drain 循环。
+- [x] **R225-GO-6 — `cli.Process pongRecv` 容量 1 在 GC pause 下可能误杀健康进程（P3）**: process.go:228 调度延迟时多个 pong 被丢，misses 误累。方案：容量提到 maxMisses+1，或心跳消费处用 drain 循环。 — 已修复，本批 PR #156
 - [ ] **R225-GO-7 — `cli.Process.Kill` 在持 shimWMu 下调 closeShimConn，net.Conn.Close 阻塞会饥饿 ping/heartbeat（P3）**: process.go:509 与 Detach 顺序不一致——后者是 Unlock 后 close。方案：Kill 也对齐先 Unlock 再 closeShimConn。
 - [x] **R225-GO-8 — `cli.spawnSession` 历史加载 ctx 用 `context.Background()` 不继承 ctx（P3）**: router_lifecycle.go:678 resume + `claudeDir != ""` + 无 oldHistory 时 15s 独立 ctx；调用方 ctx 已被取消时仍会等满。方案：`context.WithTimeout(ctx, 15s)`。 — 已修复（context.WithTimeout(ctx, 15s) 派生调用方 ctx；注释补充 r.historyCtx 仍不能用的 Shutdown 路径分离原因），本批 PR #157
 - [x] **R225-GO-9 — `Process.SessionID` 公开字段缺 mutex 注释（P3）**: process.go 字段定义无 `// Protected by mu` 注释，外部调用方可能绕过 GetSessionID 直接读。方案：补字段 godoc。 — 已修复（字段 godoc 补 mutex 契约），本批 PR #146
@@ -246,7 +246,7 @@
 - [ ] **R225-PERF-2 — `process_readloop` `system/task_started` 无背压裸 `go linker.Resolve`（P1）**: process_readloop.go:393 多 sub-agent 并发启动时短时间产生大量 goroutine。方案：用 buffered channel 信号量 / 工作池限并发；与 R224-GO-1 信号量改造统筹。
 - [ ] **R225-PERF-3 — `subagent_transcript.readLocked` `io.ReadAll(f)` 无上限（P1）**: subagent_transcript.go:81 长 session transcript 几十 MB；agent_tailer 轮询会反复 alloc。方案：`io.LimitReader` + 利用 offset seek 仅读增量。
 - [ ] **R225-PERF-4 — `applyMetadata meteringUsage merge` 用 slice O(n×m)（P2）**: process.go:717-745 meteringMu 锁内字符串 Unit 等比；MeteringUsage() 每读一次 make+copy。方案：`map[string]*MeteringEntry` 内部存储；Snapshot 路径缓存空 case。
-- [ ] **R225-PERF-5 — `EventEntriesFromEvent` 双 wall clock 调用（P2）**: process_event_format.go:38 公开 API 不带 At 后缀的版本会再读一次 time.Now；统一走 EventEntriesFromEventAt 为内部唯一路径，公开版改文档化"测试专用"。
+- [x] **R225-PERF-5 — `EventEntriesFromEvent` 双 wall clock 调用（P2）**: process_event_format.go:38 公开 API 不带 At 后缀的版本会再读一次 time.Now；统一走 EventEntriesFromEventAt 为内部唯一路径，公开版改文档化"测试专用"。 — 已修复，本批 PR #156
 - [ ] **R225-PERF-6 — `Snapshot SubagentInfo` slice copy（P2）**: managed.go TurnAgents 即便 turnAgentCount 已快速短路，Snapshot 中其他分配仍存在；评估 SubagentInfo slice sync.Pool。
 - [ ] **R225-PERF-7 — `protocol_acp.readUntilResponse` 每次握手起独立 goroutine + channel（P2）**: protocol_acp.go:677 改预先 SetReadDeadline 让 ReadLine 自然超时返回，省掉 goroutine + channel + pulse；含 R224-GO-2 同位修改。
 - [ ] **R225-PERF-8 — `shimWriter.Write` fast path `string(data[:len-1])` 强制 byte→string copy（P2）**: process_shim_io.go:54 每条 stdin 一次必要 alloc。方案：`shimClientMsg.Line` 改 `[]byte` + 自定义 Marshaler，或在已知 data 不被改时用 `unsafe.String`。
@@ -269,9 +269,9 @@
 - [ ] **R225-CR-4 — `costUnitForBackend` 硬编码 switch 与 `backend.Profile` 无编译期约束（P2）**: managed.go:1400-1408 注释明示需要双改。方案：`backend.Profile.CostUnit` 字段，profile_claude/profile_kiro 各自填，session 调 `backend.MustGet(id).CostUnit`。R224-ARCH-1 同源。
 - [ ] **R225-CR-5 — `backendDisplayName / normalizeBackendID` 与 `backend.Profile.DisplayName/ID` 重复（P2 R224-ARCH-1 同源）**: cli/wrapper.go:75-95；新加 backend 改四处。方案：合并到 `backend.Get` 的 DisplayName/ID 字段。
 - [x] **R225-CR-6 — `protocol_acp.go:585` TODO 锚点拼写不存在（P3）**: TODO 引 `R222-OBS-MULTIBACKEND-CODE`，TODO.md 实际是 `R222-OBS-MULTIBACKEND-LEGACY`。方案：补条目或更名注释。 — 已修复（注释从 R222-OBS-MULTIBACKEND-CODE 更名为 R222-OBS-MULTIBACKEND-LEGACY 与 R224-CR-4 引入的真实锚点对齐），本批 PR #150
-- [ ] **R225-CR-7 — `BackendInfo.Features` 在 DetectBackendsCtx 不填、由 dashboard handler 二次注入（P3）**: detect.go：未来调用方直接读会拿到 nil map。方案：godoc 显式标注"dashboard-only 字段"或 DetectBackendsCtx 内填。
-- [ ] **R225-CR-8 — `Snapshot.Model` 注释未提 ACP 路径填空 / spawn-time 值（P3 与 R225-ACP-MODEL-INIT 关联）**: managed.go:850 注释暗示总是准确，但 ACP `session/new` 返回的 currentModelId 当前未回填。方案：注释补"ACP 在 Init 阶段才得到真实 model"。
-- [ ] **R225-CR-9 — `normalizeBackendID` default 分支不验注册 ID（P3）**: 未注册 backend 字符串能直通到 wrapper.BackendID，错误延后到 spawn 期。方案：default 分支调 `backend.Get` 失败 slog.Warn 或 NewWrapper fail-fast。
+- [x] **R225-CR-7 — `BackendInfo.Features` 在 DetectBackendsCtx 不填、由 dashboard handler 二次注入（P3）**: detect.go：未来调用方直接读会拿到 nil map。方案：godoc 显式标注"dashboard-only 字段"或 DetectBackendsCtx 内填。 — 已修复，本批 PR #156
+- [x] **R225-CR-8 — `Snapshot.Model` 注释未提 ACP 路径填空 / spawn-time 值（P3 与 R225-ACP-MODEL-INIT 关联）**: managed.go:850 注释暗示总是准确，但 ACP `session/new` 返回的 currentModelId 当前未回填。方案：注释补"ACP 在 Init 阶段才得到真实 model"。 — 已修复，本批 PR #156
+- [x] **R225-CR-9 — `normalizeBackendID` default 分支不验注册 ID（P3）**: 未注册 backend 字符串能直通到 wrapper.BackendID，错误延后到 spawn 期。方案：default 分支调 `backend.Get` 失败 slog.Warn 或 NewWrapper fail-fast。 — 已修复，本批 PR #156
 - [x] **R225-CR-10 — `cli.Resolve` 路径长字符串（ev.Description）被 closure 长时间持有（P3）**: process_readloop.go:393 max 8 个 Resolve goroutine 并发持有数 KB 字符串到 sem 释放。方案：调用前 `textutil.TruncateRunes(desc, 2000)`。 — 已修复（readLoop + InjectHistory 调用前 truncate 至 2000 runes），本批 PR #151
 - [x] **R225-CR-11 — `backend/profile.reset` 注释声称外部测试反射调用但 unexported 反射不可达（P3）**: profile.go:239 staticcheck U1000 未用；`cron.freshContextPreflight` 同款。方案：移到 *_test.go + 改 `resetForTest` 或 `//go:build testing`。 — 已修复（reset 在源码 + _test.go 内 0 调用者，测试已通过 withCleanRegistry helper 完整覆盖；删函数 + 同步 defaultsOnce 注释指向 withCleanRegistry。cron.freshContextPreflight 是另一根因，留作单独条目），本批 PR #150
 - [ ] **R225-CR-12 — `spawnSession` 函数注释承诺"持锁"但内部多次 Unlock/Lock（P2）**: router_lifecycle.go:506 让未来维护者误加嵌套调用导致死锁。方案：注释精确化 + LOCK: 批注，或重构锁生命周期由调用方负责。
