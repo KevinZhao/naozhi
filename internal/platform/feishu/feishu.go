@@ -1267,9 +1267,16 @@ func (f *Feishu) getAccessToken(_ context.Context) (string, error) {
 // Also hex-encodes via encoding/hex to avoid the fmt.Sprintf "%x" parse
 // overhead, and compares as bytes under ConstantTimeCompare without stringy
 // intermediate allocation.
+//
+// R224-SEC-2: callers MUST gate this call on `encryptKey != ""` themselves.
+// The earlier "empty key → return true" internal fallback was a footgun:
+// any future caller forgetting the outer guard would silently bypass
+// signature verification entirely. Empty key now returns false (a missing
+// signature cannot be valid), forcing the configuration check to live at
+// the call site where it's auditable.
 func verifySignature(timestamp, nonce, encryptKey string, body []byte, signature string) bool {
 	if encryptKey == "" {
-		return true
+		return false
 	}
 	h := sha256.New()
 	h.Write([]byte(timestamp))

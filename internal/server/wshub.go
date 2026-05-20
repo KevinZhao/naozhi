@@ -39,10 +39,20 @@ const wsAuthRetryAfterSeconds = 60
 // on every authentication or ping reply. Since these are emitted on the auth
 // hot path (one per connection) and the pong path (every keepalive), the
 // pre-encode collapses them to a single shared []byte. R218-PERF-15.
+//
+// R229-PERF-4: extended to cover the most common error responses (auth gate
+// failures + per-client rate-limit notices) emitted from readPump's switch.
+// These were marshalled via SendJSON on every readPump iteration that fell
+// through to the not-authenticated / rate-limited branch — a steady-state
+// cost on connections that get throttled. Frame strings must stay byte-for-
+// byte identical to `node.ServerMsg{Type: "error", Error: "..."}` JSON
+// output (no field reordering: ServerMsg defines Type before Error).
 var (
 	wsAuthOkMsg          = []byte(`{"type":"auth_ok"}`)
 	wsPongMsg            = []byte(`{"type":"pong"}`)
 	wsAuthFailInvalidMsg = []byte(`{"type":"auth_fail","error":"invalid token"}`)
+	wsErrNotAuthMsg      = []byte(`{"type":"error","error":"not authenticated"}`)
+	wsErrRateLimitedMsg  = []byte(`{"type":"error","error":"rate limited"}`)
 )
 
 // Hub manages WebSocket client connections and event subscriptions.

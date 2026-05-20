@@ -174,7 +174,7 @@
 - [ ] **R229-PERF-1 — Protocol.ReadEvent string→[]byte 双 copy（P1）**: 每个 stream 事件分配 1 个 []byte（line size，50 B–200 KB）。方案：Protocol.ReadEvent 签名改 []byte，shimMsg.Line 改 json.RawMessage 同步消除中间 string 拷贝。Breaking：是（Protocol 接口变更，所有实现 + fakes 更新）。
 - [x] **R229-PERF-2 — FormatToolInput 匿名 struct 命名 escape 到堆（P2）**: tool_use 事件每个调用 1 次 Unmarshal+1 次 scratch alloc。方案：包级命名 struct 替换匿名 literal。Breaking：否。 — 已修复（提 6 个 toolInputXxx 命名类型到包级，函数体内只 var s toolInputXxx，json reflect 缓存键稳定，无名字 escape；TestFormatToolInput 全表通过），本批 PR #171
 - [ ] **R229-PERF-3 — EventEntriesFromEventAt base 大结构体多次拷贝（P2）**: 5-block 事件 5×~240 B 栈拷贝。方案：循环内仅设变化字段。Breaking：否（需仔细处理字段重置）。
-- [ ] **R229-PERF-4 — wsclient.SendJSON 每次 json.Marshal 同样的小结构（P2）**: error/auth 类响应可预 marshal。方案：扩展 wsAuthOkMsg 模式覆盖最常见 error 响应。Breaking：否。
+- [x] **R229-PERF-4 — wsclient.SendJSON 每次 json.Marshal 同样的小结构（P2）**: error/auth 类响应可预 marshal。方案：扩展 wsAuthOkMsg 模式覆盖最常见 error 响应。Breaking：否。 — 已修复（新增 wsErrNotAuthMsg/wsErrRateLimitedMsg 包级常量；readPump 4 处 not-authenticated + 2 处 rate-limited 分支改 SendRaw；TestWSPreMarshalledFrames 锁定 byte-equal 契约），本批 PR #173
 - [ ] **R229-PERF-5 — EventLog.Append 单 entry 路径每次分配 1-slot 切片（P2）**: 5-50 events/s 持续分配。方案：sync.Pool of length-1 slices 或 EventLog 字段缓存。Breaking：否（注意 sink 留持契约）。
 - [ ] **R229-PERF-6 — discovery.Scan 每次 O(N) os.ReadDir 调用（P2）**: 已有 promptCache/summaryCache，但 listJSONLsByMtime 未缓存。方案：(claudeDir, cwd) → mtime invalidated 缓存。Breaking：否。
 - [ ] **R229-PERF-7 — SetAgentInternalID 写锁覆盖 ring buffer 反向扫描（P2）**: 8 个 sub-agent 并发 resolve 时 Append 串行化。方案：扫描阶段 RLock，需变更时升级写锁。Breaking：否。
@@ -190,7 +190,7 @@
 - [ ] **R229-CR-2 — NewRouter 359 行未被 router-split 重构覆盖（P3）**: 持久化 init / restore / 异步 history 三段可拆 helper。方案：抽 newRouterRestoreSessions / newRouterStartHistoryLoads。Breaking：否。
 - [ ] **R229-CR-3 — reconnectShims 350 行 + 单分支 90 行（P3）**: 已抽 classifyShimState，shimStateReconnect case 仍臃肿。方案：抽 processDiscoveredShim helper。Breaking：否。
 - [x] **R229-CR-4 — sessionSendLegacy 可达且去除条件未推进（P3）**: send.go:561 仍在生产路径上。方案：升级 NewHub 缺 Queue 时的 Warn 到 Error；推进 R-LEGACY-SEND 移除条件。Breaking：否。 — 已修复（NewHub 在 opts.Queue==nil 时把 slog.Warn 升级 slog.Error 并标 R-LEGACY-SEND blocker；不阻断启动，因 test fixture 仍有部分 nil Queue，待全部迁移到真实 MessageQueue 后下一步改 fatal 即可删 sessionSendLegacy），本批 PR #171
-- [ ] **R229-CR-5 — sessionSendLegacy 用 InterruptSession 而非 InterruptSessionSafe（P3）**: SIGINT 终止 claude -p 损失 resume。方案：换 InterruptSessionSafe（先尝试 control_request）。Breaking：否（ACP 不变 / Claude 升级到非破坏性中断）。
+- [x] **R229-CR-5 — sessionSendLegacy 用 InterruptSession 而非 InterruptSessionSafe（P3）**: SIGINT 终止 claude -p 损失 resume。方案：换 InterruptSessionSafe（先尝试 control_request）。Breaking：否（ACP 不变 / Claude 升级到非破坏性中断）。 — 已修复（sessionSendLegacy 改用 InterruptSessionSafe，与 wshub.handleInterrupt 等其他 dashboard 入口对齐；server 测试全绿），本批 PR #173
 - [ ] **R229-CR-6 — managed.go 1489 行混合 struct/方法/工具（P3）**: 方案：抽 keys_util.go（SessionKey/sanitize/SanitizeLogAttr）。Breaking：否。
 - [ ] **R229-CR-7 — dispatch.go 1281 行 replyTracker 与 Dispatcher 同居（P3）**: 方案：抽 dispatch/reply_tracker.go。Breaking：否。
 - [ ] **R229-CR-8 — freshContextPreflightP0 8 位置参数（P3）**: 方案：仿 finishArgs 抽 preflightArgs struct。Breaking：否（内部）。
@@ -395,7 +395,7 @@
 ### 安全 — 本轮新发现
 
 - [ ] **R224-SEC-1 — `selfupdate` 临时文件 0755 + 固定 staging/backup 路径，存在 fetch→verify TOCTOU + 多用户竞争（P1）**: `selfupdate.go:203` `os.OpenFile(dest, ..., 0755)` 写 binary 到 `/tmp/...` 在 verifyChecksum 之前可执行权限可写；`Replace` 用固定 `installPath + .staging/.bak` 路径，多用户 install dir 下可被其他 UID 抢先创建。方案：① 临时文件 0600 写入，verify 后 chmod；② `os.CreateTemp` 替换固定 staging path；③ verify 路径直接用已打开 fd 而非重新路径查找；④ 长期加 GPG/cosign 签名校验 checksums.txt（checksums.txt 自身未签名，CDN/release 同时被改 hash 匹配仍不可信）。涉及：`internal/selfupdate/selfupdate.go:119-203`。
-- [ ] **R224-SEC-2 — `verifySignature` 在 `encryptKey == ""` 直接返回 true（P2）**: `feishu.go:1263` 函数语义"空 key → 签名通过"是隐性危险：任何未来调用者忘记外围 `if EncryptKey != ""` 门控等同于跳过签名检查。方案：移除内部 return true 提前返回，调用方在外围 if 块内调并检查结果。
+- [x] **R224-SEC-2 — `verifySignature` 在 `encryptKey == ""` 直接返回 true（P2）**: `feishu.go:1263` 函数语义"空 key → 签名通过"是隐性危险：任何未来调用者忘记外围 `if EncryptKey != ""` 门控等同于跳过签名检查。方案：移除内部 return true 提前返回，调用方在外围 if 块内调并检查结果。 — 已修复（fail-closed：空 key 返回 false；唯一调用点 transport_hook.go 已外围 if 门控；feishu_test 用例 "empty encrypt key bypasses" 改为 "fails closed" 锁定新契约），本批 PR #173
 - [ ] **R224-SEC-3 — `EffectivePlannerPrompt` 放行 LF/CR 与 ValidateConfig 拒绝 LF/CR 策略不一致（P2）**: `project/manager.go:357` 注释明放行 `0x0a/0x0d` 让 markdown CLAUDE.md 风格 prompt 通过；但 LF 在 stream-json NDJSON 帧中是行分隔符，注入可破坏协议帧。直接对齐拒绝会破坏现有 multi-line prompt 配置；需设计：是否把 multi-line CLAUDE.md 风格 prompt 经预处理（把 LF 替换为 ` ` 或 `\\n` literal）后才进入 argv，或拒绝 multi-line prompt 强制 operator 改用 CLAUDE.md 文件路径。
 - [ ] **R224-SEC-4 — `defaults.Prompt` 全局默认 prompt 不经 project.ValidateConfig（P2）**: `manager.go:344` 全局默认通过 `validateArgvStrings` 仅查 C0 字节，但 `project.ValidateConfig` 还查 IsLogInjectionRune（C1/bidi/LS-PS）。bidi 字符可绕过到 `--append-system-prompt` argv。方案：对 `cfg.Projects.PlannerDefaults.Prompt` 同样调 `project.ValidateConfig`。
 - [ ] **R224-SEC-5 — `WriteTimeout: 60s` 对大文件流式响应不足（P2）**: `server.go:870` 全局 60s 写超时；50MB raw 文件下载在慢网络可被截断。WS 走 Hijack 不受影响，但 preview/raw/download 受影响。方案：对文件路由用 `http.ResponseController.SetWriteDeadline` 扩展或抬升全局并对其他路由 per-handler 收紧。
@@ -403,7 +403,7 @@
 
 ### 性能 — 本轮新发现 / 重申
 
-- [ ] **R224-PERF-1 — `eventlog.fireTaskDoneCallbacks([]pendingTaskDone{pending})` 单元素 slice literal escape（P2 R219-PERF-4 / R222-PERF-8 未覆盖分支）**: `eventlog.go:654` 与 `invokePersistSink` 单元素 slice 同款 escape，每个 task_done 事件一次额外 alloc。方案：`var buf [1]pendingTaskDone; buf[0] = pending; fire(buf[:])` 栈数组，或 `sync.Pool[[]T]`。
+- [x] **R224-PERF-1 — `eventlog.fireTaskDoneCallbacks([]pendingTaskDone{pending})` 单元素 slice literal escape（P2 R219-PERF-4 / R222-PERF-8 未覆盖分支）**: `eventlog.go:654` 与 `invokePersistSink` 单元素 slice 同款 escape，每个 task_done 事件一次额外 alloc。方案：`var buf [1]pendingTaskDone; buf[0] = pending; fire(buf[:])` 栈数组，或 `sync.Pool[[]T]`。 — 已修复（新增 fireOneTaskDoneCallback 单参数 fast path，Append firePending 分支调它，绕开 1 元素 slice literal heap escape；AppendBatch 仍走 slice 形式，因为它真累积多条），本批 PR #173
 - [ ] **R224-PERF-2 — `handleList workspaces []string + wsMap map[string]string` 1 Hz × N tab 重复分配（P2 R219-PERF-2 未覆盖 inner alloc）**: `dashboard_session.go:394` storeGen 命中 in 顶层缓存之前已分配 workspaces slice + wsMap。方案：workspaces 走 sync.Pool（参考 listRefsPool R222-PERF-10 先例）；ResolveWorkspaces 接受 caller 复用 map 或缓存 wsMap 与 storeGen 绑定。
 - [ ] **R224-PERF-3 — `Snapshot()` `TurnAgents()` RLock + slice copy 在 sub-agent turn 期间频繁触发（P3 R219-PERF-3 / R222-PERF-7 未覆盖）**: `managed.go:894` 当 turnAgentCount > 0 时仍进 RLock + copy；500 Snapshot/s × sub-agent turn 与 SetAgentInternalID WLock 竞争。方案：`TurnAgents()` 改 atomic.Pointer[[]Agent] copy-on-write，applyEntryStateLocked 修改时 atomic.Store 新 slice。
 - [x] **R224-PERF-4 — ETag/Content-Disposition 路径上的 `fmt.Sprintf` 反射 overhead（P3）**: `dashboard_send.go:1112`/`project_files.go:592, 324, 337` 多处用 fmt.Sprintf 构造 header；ETag seed 可改 `strconv.AppendInt + 栈数组`，Content-Disposition 改 strings.Builder。 — 部分修复（ETag seed 两处都改 strconv.AppendInt 写 48B 栈缓冲，Content-Disposition 的 fmt.Sprintf 暂缓），本批 PR #160
