@@ -180,7 +180,7 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		}
 		resolver = session.NewKeyResolver(cfg.Agents, data)
 	}
-	return &Dispatcher{
+	d := &Dispatcher{
 		router:                router,
 		platforms:             cfg.Platforms,
 		agents:                cfg.Agents,
@@ -201,6 +201,13 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 		sendFn:                cfg.SendFn,
 		takeoverFn:            cfg.TakeoverFn,
 	}
+	// Headless / test wirings may leave TakeoverFn nil. The dispatch hot
+	// path calls takeoverFn unconditionally on first message, so install
+	// a noop fallback rather than scattering nil guards. (R227-CR-12)
+	if d.takeoverFn == nil {
+		d.takeoverFn = func(context.Context, string, string, session.AgentOpts) bool { return false }
+	}
+	return d
 }
 
 // BuildHandler returns a platform.MessageHandler wired to this Dispatcher.
