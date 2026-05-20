@@ -375,9 +375,24 @@ func (r *Router) shouldPrune(s *ManagedSession, now time.Time) bool {
 	return !proc.Alive() // exited process past pruneTTL
 }
 
+// cleanupLoopMaxRestarts caps how many times the cleanup loop may be
+// resurrected after a panic before giving up. A genuine bug that panics
+// every tick would otherwise spin forever — silently log-spamming and
+// burning a goroutine budget — when the right move is to surface the
+// failure loudly and stop. R229-GO-9.
+const cleanupLoopMaxRestarts = 10
+
 // StartCleanupLoop runs Cleanup periodically and saves dirty session state
 // on a shorter interval to reduce data loss on crash.
 func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
+	r.startCleanupLoop(ctx, interval, 0)
+}
+
+// startCleanupLoop is the panic-restart-aware variant. attempt counts how
+// many restarts have happened so far; the panic handler bails out once it
+// reaches cleanupLoopMaxRestarts so a tick that panics deterministically
+// cannot trap the process in an unbounded restart cycle.
+func (r *Router) startCleanupLoop(ctx context.Context, interval time.Duration, attempt int) {
 	// time.NewTicker(d) panics for d<=0; the panic-recovery defer would then
 	// schedule another StartCleanupLoop via AfterFunc, which would re-panic on
 	// the same NewTicker call, producing an unbounded retry chain. Reject the
@@ -395,21 +410,35 @@ func (r *Router) StartCleanupLoop(ctx context.Context, interval time.Duration) {
 		defer func() {
 			if rec := recover(); rec != nil {
 				slog.Error("router cleanup loop panic recovered",
-					"panic", rec, "stack", string(debug.Stack()))
+					"panic", rec, "stack", string(debug.Stack()),
+					"attempt", attempt, "max_restarts", cleanupLoopMaxRestarts)
 				// Restart the loop so TTL expiry and saveIfDirty continue.
 				// Guard against ctx already cancelled so we do not resurrect
 				// after Shutdown. Brief backoff before relaunch so a bug that
 				// panics on every tick cannot pile up a cloud of short-lived
 				// restart goroutines; 5s bounds the recovery latency at the
 				// same order as the cleanup tick.
-				if ctx.Err() == nil {
-					time.AfterFunc(5*time.Second, func() {
-						if ctx.Err() != nil {
-							return
-						}
-						r.StartCleanupLoop(ctx, interval)
-					})
+				//
+				// Cap restart attempts: a deterministic panic on every tick
+				// would otherwise spin the recovery chain indefinitely. After
+				// cleanupLoopMaxRestarts we stop and let TTL/save coverage
+				// degrade — operators see the loud Error log line and can
+				// restart the process to retry. R229-GO-9.
+				if ctx.Err() != nil {
+					return
 				}
+				if attempt+1 >= cleanupLoopMaxRestarts {
+					slog.Error("router cleanup loop exceeded max restarts, giving up",
+						"attempts", attempt+1,
+						"impact", "TTL pruning and saveIfDirty paused; restart naozhi to recover")
+					return
+				}
+				time.AfterFunc(5*time.Second, func() {
+					if ctx.Err() != nil {
+						return
+					}
+					r.startCleanupLoop(ctx, interval, attempt+1)
+				})
 			}
 		}()
 		cleanupTicker := time.NewTicker(interval)
