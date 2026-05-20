@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // ErrNotFound is returned when a project name does not exist in the manager.
@@ -352,6 +354,20 @@ func (m *Manager) EffectivePlannerPrompt(p *Project) string {
 		if c == 0 || (c < 0x20 && c != 0x09 && c != 0x0a && c != 0x0d) {
 			slog.Warn("planner prompt contains control byte; dropping",
 				"project", p.Name, "byte", c)
+			return ""
+		}
+	}
+	// Byte-level scan above only catches 7-bit ASCII control chars; bidi
+	// override / LS-PS / C1 sneak through as multi-byte UTF-8 sequences
+	// whose individual bytes are all >= 0x20. ValidateConfig already runs
+	// the same IsLogInjectionRune sweep on the write path, but a tampered
+	// project.yaml or a global default loaded outside ValidateConfig can
+	// still surface here — defense-in-depth keeps the runtime path
+	// aligned with the on-disk validator. R225-SEC-6.
+	for _, r := range raw {
+		if osutil.IsLogInjectionRune(r) {
+			slog.Warn("planner prompt contains injection rune; dropping",
+				"project", p.Name, "rune", r)
 			return ""
 		}
 	}
