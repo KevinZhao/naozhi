@@ -689,7 +689,7 @@ func readFirstLineMeta(path string) (firstLineMeta, error) {
 		// bytes to Unmarshal — surface the condition explicitly so the
 		// caller's "skip this candidate" branch is reached without logging
 		// a misleading JSON syntax error. R222-GO-7.
-		if err == bufio.ErrBufferFull {
+		if errors.Is(err, bufio.ErrBufferFull) {
 			return firstLineMeta{}, errFirstLineTooLong
 		}
 		if len(line) == 0 {

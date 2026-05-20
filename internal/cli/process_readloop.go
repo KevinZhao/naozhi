@@ -475,11 +475,12 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	// observes it (race; first to call setModel wins, both
 	// values are the same so it doesn't matter). Only overwrite
 	// when init event actually carries a model value.
-	if ev.Type == "system" && ev.SubType == "init" && ev.Model != "" {
+	isSystemInit := ev.Type == "system" && ev.SubType == "init"
+	if isSystemInit && ev.Model != "" {
 		p.setModel(ev.Model)
 	}
 	if p.linker != nil {
-		if ev.Type == "system" && ev.SubType == "init" && ev.SessionID != "" {
+		if isSystemInit && ev.SessionID != "" {
 			projectDir := resolveProjectDir(p.cwd)
 			p.linker.SetContext(projectDir, ev.SessionID)
 		}
