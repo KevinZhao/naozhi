@@ -1002,9 +1002,9 @@ func TestProcess_InjectHistory(t *testing.T) {
 		t.Errorf("EventEntriesSince(1500) = 0, want >= 1")
 	}
 
-	last := p.LastEntryOfType("user")
+	last := p.lastEntryOfType("user")
 	if last.Type != "user" {
-		t.Errorf("LastEntryOfType(user).Type = %q, want user", last.Type)
+		t.Errorf("lastEntryOfType(user).Type = %q, want user", last.Type)
 	}
 
 	_ = p.LastActivitySummary()
