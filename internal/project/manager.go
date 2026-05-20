@@ -11,6 +11,8 @@ import (
 	"strings"
 	"sync"
 	"unicode/utf8"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // ErrNotFound is returned when a project name does not exist in the manager.
@@ -348,10 +350,22 @@ func (m *Manager) EffectivePlannerPrompt(p *Project) string {
 	for i := 0; i < len(raw); i++ {
 		c := raw[i]
 		// 0x09 tab / 0x0A LF / 0x0D CR 是 markdown/CLAUDE.md 合法内容，放行；
-		// 其余 C0 控制字节 + NUL 会破坏 argv 或 stream-json，整串丢弃。
-		if c == 0 || (c < 0x20 && c != 0x09 && c != 0x0a && c != 0x0d) {
+		// 其余 C0 控制字节 + NUL + DEL 会破坏 argv 或 stream-json，整串丢弃。
+		// 与 project.ValidateConfig / config.validatePlannerPrompt 对齐 DEL 处理。
+		if c == 0 || (c < 0x20 && c != 0x09 && c != 0x0a && c != 0x0d) || c == 0x7f {
 			slog.Warn("planner prompt contains control byte; dropping",
 				"project", p.Name, "byte", c)
+			return ""
+		}
+	}
+	// R225-SEC-6: 字节循环只覆盖 NUL/C0/DEL，跳不到 C1/bidi override/LS-PS（多字节
+	// UTF-8，首字节 >= 0xC2）。与 ValidateConfig + validatePlannerPrompt 对齐：
+	// rune 扫描 IsLogInjectionRune 命中即整串丢弃，避免 bidi 字符流入 argv 或
+	// 下游 slog attr 翻转 journalctl 渲染。
+	for _, r := range raw {
+		if osutil.IsLogInjectionRune(r) {
+			slog.Warn("planner prompt contains injection rune (C1/bidi/LS-PS); dropping",
+				"project", p.Name, "rune", fmt.Sprintf("U+%04X", r))
 			return ""
 		}
 	}
