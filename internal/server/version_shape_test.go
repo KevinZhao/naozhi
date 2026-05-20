@@ -10,13 +10,13 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
-// TestHealth_VersionPresentOnUnauthedProbe pins the contract that the build
-// tag is exposed at the top level of /health without requiring the
-// dashboard token. External probes (load balancers, uptime monitors) rely
-// on `version` to confirm which binary is live, so a regression that
-// accidentally moves the field into the authenticated sub-section would
-// silently break ops tooling.
-func TestHealth_VersionPresentOnUnauthedProbe(t *testing.T) {
+// TestHealth_VersionAbsentOnUnauthedProbe pins R229-SEC-7: the build tag is
+// no longer exposed to unauthenticated probes. Public /health must only
+// return status + uptime so an attacker on the open internet cannot
+// fingerprint the running binary version. Authenticated probes still get
+// the version via the embedded auth section (covered by
+// TestHealth_VersionPresentOnAuthedProbe below).
+func TestHealth_VersionAbsentOnUnauthedProbe(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": &mockPlatform{}}
 	srv := New(":0", router, platforms, nil, nil, nil, "claude", ServerOptions{
@@ -33,16 +33,13 @@ func TestHealth_VersionPresentOnUnauthedProbe(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v body=%s", err, w.Body.String())
 	}
-	got, ok := body["version"]
-	if !ok {
-		t.Fatalf("version missing from unauthed /health; body=%s", w.Body.String())
+	if v, ok := body["version"]; ok {
+		t.Errorf("version leaked to unauthed /health; got %v body=%s", v, w.Body.String())
 	}
-	if got != "v1.2.3-test" {
-		t.Errorf("version = %v, want v1.2.3-test", got)
-	}
-	// Unauthenticated probe must still only have the base fields + version.
-	// Anything else leaking in indicates the auth embed regressed.
-	allowed := map[string]bool{"status": true, "uptime": true, "version": true}
+	// Unauthenticated probe must only carry status + uptime — anything else
+	// indicates the auth embed regressed and is leaking infrastructure
+	// topology.
+	allowed := map[string]bool{"status": true, "uptime": true}
 	for k := range body {
 		if !allowed[k] {
 			t.Errorf("unauthed /health leaked %q (body=%s)", k, w.Body.String())
@@ -50,20 +47,21 @@ func TestHealth_VersionPresentOnUnauthedProbe(t *testing.T) {
 	}
 }
 
-// TestHealth_VersionOmittedWhenUnset verifies that a zero-value Version
-// option yields no `version` field on /health — preserving the legacy wire
-// shape for deployments that never set the -X main.version ldflag (e.g.
-// `go run ./cmd/naozhi`). omitempty on a string treats "" as absent.
-func TestHealth_VersionOmittedWhenUnset(t *testing.T) {
+// TestHealth_VersionPresentOnAuthedProbe pins that the build tag still
+// reaches authenticated probes (operators with a valid dashboard token).
+// R229-SEC-7 only restricted the unauthed surface; auth flow must keep
+// returning version so the dashboard footer continues to render.
+func TestHealth_VersionPresentOnAuthedProbe(t *testing.T) {
 	router := session.NewRouter(session.RouterConfig{})
 	platforms := map[string]platform.Platform{"test": &mockPlatform{}}
 	srv := New(":0", router, platforms, nil, nil, nil, "claude", ServerOptions{
 		DashboardToken: "secret",
-		// Version deliberately empty
+		Version:        "v1.2.3-test",
 	})
 	srv.registerDashboard()
 
 	req := httptest.NewRequest(http.MethodGet, "/health", nil)
+	req.Header.Set("Authorization", "Bearer secret")
 	w := httptest.NewRecorder()
 	srv.healthH.handleHealth(w, req)
 
@@ -71,8 +69,12 @@ func TestHealth_VersionOmittedWhenUnset(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decode: %v body=%s", err, w.Body.String())
 	}
-	if v, ok := body["version"]; ok {
-		t.Errorf("version should be absent when unset, got %v", v)
+	got, ok := body["version"]
+	if !ok {
+		t.Fatalf("version missing from authed /health; body=%s", w.Body.String())
+	}
+	if got != "v1.2.3-test" {
+		t.Errorf("version = %v, want v1.2.3-test", got)
 	}
 }
 
