@@ -93,12 +93,20 @@ type ACPProtocol struct {
 	// NOTE: allocID() narrows to int for RPCRequest.ID/RPCMessage.ID JSON
 	// compatibility; 64-bit platforms only (naozhi does not support 32-bit).
 	nextID atomic.Int64
-	// sessionID is guarded by mu. Init writes once before startReadLoop, but
-	// readLoop (ReadEvent) and Send (WriteMessage) goroutines both read it
-	// concurrently afterwards, so touches on both reads pair with the single
-	// write via mu to satisfy the Go memory model and keep -race quiet.
-	sessionID string
-	// textBuf accumulates assistant_message_chunk text during a turn
+	// sessionID was previously guarded by mu, but mu also serialises
+	// agent_message_chunk text accumulation (textBuf) on the high-frequency
+	// streaming path. Splitting sessionID into atomic.Pointer[string] lets
+	// concurrent WriteMessage / WriteInterrupt / readLoop turn-boundary
+	// reads bypass mu and not contend with per-chunk textBuf writes. Init
+	// stores once per process lifetime before startReadLoop; reconnect
+	// spins up a fresh ACPProtocol instance (so the "writes once" claim
+	// holds per instance — never amended). nil/unset surfaces as "" via
+	// loadSessionID's nil-deref guard. R226-PERF-11 / R227-CR-14.
+	sessionID atomic.Pointer[string]
+	// textBuf accumulates assistant_message_chunk text during a turn.
+	// Guarded by mu since it's mutated from readLoop and reset from
+	// WriteMessage / on turn boundary; sessionID's split-out (above) is
+	// what makes mu's contention narrowly scoped to textBuf again.
 	textBuf strings.Builder
 	// BackendID labels metric increments emitted by this protocol instance.
 	// Multi-Backend RFC §10 (Sprint 6a): ReadEvent → metrics.RecordProtocolRPCError
@@ -110,6 +118,23 @@ type ACPProtocol struct {
 }
 
 func (p *ACPProtocol) Name() string { return "acp" }
+
+// storeSessionID publishes the session id atomically so concurrent
+// readers see a consistent value. atomic.Pointer requires a pointer
+// parameter; the indirection is negligible compared with the lock-acquire
+// it replaces. R226-PERF-11.
+func (p *ACPProtocol) storeSessionID(id string) {
+	p.sessionID.Store(&id)
+}
+
+// loadSessionID returns the published session id, or "" before Init has
+// written one. R226-PERF-11.
+func (p *ACPProtocol) loadSessionID() string {
+	if s := p.sessionID.Load(); s != nil {
+		return *s
+	}
+	return ""
+}
 
 // Clone returns a fresh ACPProtocol that retains BackendID so per-spawn
 // metrics labelling is preserved across the wrapper.Spawn → proto.Clone()
@@ -168,9 +193,7 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, err
 		if err := p.sendAndWaitResponse(rw, loadReq); err != nil {
 			return "", fmt.Errorf("acp session/load: %w", err)
 		}
-		p.mu.Lock()
-		p.sessionID = resumeID
-		p.mu.Unlock()
+		p.storeSessionID(resumeID)
 	} else {
 		newID := p.allocID()
 		newReq := RPCRequest{
@@ -193,21 +216,19 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, err
 		if err := json.Unmarshal(resp.Result, &result); err != nil {
 			return "", fmt.Errorf("acp parse session/new result: %w", err)
 		}
-		p.mu.Lock()
-		p.sessionID = result.SessionID
-		p.mu.Unlock()
+		p.storeSessionID(result.SessionID)
 	}
 
-	p.mu.Lock()
-	sid := p.sessionID
-	p.mu.Unlock()
-	return sid, nil
+	return p.loadSessionID(), nil
 }
 
 func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData) error {
+	// sessionID lives on its own atomic.Pointer so this read does not
+	// contend with per-chunk textBuf writes happening on readLoop.
+	// R226-PERF-11.
+	sid := p.loadSessionID()
 	p.mu.Lock()
 	p.textBuf.Reset() // reset text accumulator for new turn
-	sid := p.sessionID
 	p.mu.Unlock()
 
 	// Build prompt content blocks
@@ -267,9 +288,7 @@ func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData)
 // the Protocol interface for the stream-json side (control_request requires
 // it).
 func (p *ACPProtocol) WriteInterrupt(w io.Writer, _ string) error {
-	p.mu.Lock()
-	sid := p.sessionID
-	p.mu.Unlock()
+	sid := p.loadSessionID()
 	if sid == "" {
 		return ErrInterruptUnsupported
 	}
@@ -398,8 +417,11 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		p.mu.Lock()
 		text := p.textBuf.String()
 		p.textBuf.Reset()
-		sid := p.sessionID
 		p.mu.Unlock()
+		// sessionID lives on its own atomic.Pointer; read after releasing
+		// mu so the textBuf-only critical section stays narrow.
+		// R226-PERF-11.
+		sid := p.loadSessionID()
 
 		// Turn boundary emits TWO events:
 		//
@@ -818,6 +840,9 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 			_ = sl.proc.shimConn.SetReadDeadline(time.Now())
 			_ = sl.proc.shimConn.SetReadDeadline(time.Time{})
 		}
+		// Non-shim readers (no SetReadDeadline hook) leak the goroutine
+		// until the underlying ACP process pipe closes — tracked as
+		// R224-GO-2 NEEDS-DESIGN. (R227-CR-10)
 		return nil, fmt.Errorf("%w (id=%d)", ErrACPTimeout, expectedID)
 	}
 }

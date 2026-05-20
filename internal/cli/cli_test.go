@@ -238,9 +238,7 @@ func TestACPProtocol_WriteInterrupt_NoSession(t *testing.T) {
 func TestACPProtocol_WriteInterrupt_SendsCancelNotification(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
-	p.mu.Lock()
-	p.sessionID = "sess_xyz"
-	p.mu.Unlock()
+	p.storeSessionID("sess_xyz")
 
 	var buf bytes.Buffer
 	err := p.WriteInterrupt(&buf, "ignored-by-acp")
@@ -279,8 +277,8 @@ func TestACPProtocol_WriteInterrupt_SendsCancelNotification(t *testing.T) {
 func TestACPProtocol_ReadEvent_CancelledStopReason(t *testing.T) {
 	t.Parallel()
 	p := &ACPProtocol{}
+	p.storeSessionID("s1")
 	p.mu.Lock()
-	p.sessionID = "s1"
 	p.textBuf.WriteString("partial")
 	p.mu.Unlock()
 
@@ -497,7 +495,8 @@ func TestACPProtocol_BuildArgs_NoModel(t *testing.T) {
 
 func TestACPProtocol_WriteMessage(t *testing.T) {
 	t.Parallel()
-	p := &ACPProtocol{sessionID: "sess_test"}
+	p := &ACPProtocol{}
+	p.storeSessionID("sess_test")
 	var buf bytes.Buffer
 	if err := p.WriteMessage(&buf, "hello acp", nil); err != nil {
 		t.Fatal(err)
@@ -665,7 +664,8 @@ func TestACPProtocol_ReadEvent_ToolCall_TruncatesLargePayload(t *testing.T) {
 
 func TestACPProtocol_ReadEvent_Response_TurnComplete(t *testing.T) {
 	t.Parallel()
-	p := &ACPProtocol{sessionID: "sess_1"}
+	p := &ACPProtocol{}
+	p.storeSessionID("sess_1")
 	p.mu.Lock()
 	p.textBuf.WriteString("final answer")
 	p.mu.Unlock()
@@ -1164,7 +1164,8 @@ func TestProcess_ApplyMetadata_AndAccessors(t *testing.T) {
 // session never replies" until manual interrupt or restart).
 func TestACPProtocol_ReadEvent_ErrorResponse(t *testing.T) {
 	t.Parallel()
-	p := &ACPProtocol{sessionID: "sess_1"}
+	p := &ACPProtocol{}
+	p.storeSessionID("sess_1")
 	p.mu.Lock()
 	p.textBuf.WriteString("partial text")
 	p.mu.Unlock()
@@ -1556,7 +1557,8 @@ func TestClaudeProtocol_WriteMessage_WithImages(t *testing.T) {
 
 func TestACPProtocol_WriteMessage_WithImages(t *testing.T) {
 	t.Parallel()
-	p := &ACPProtocol{sessionID: "sess_img"}
+	p := &ACPProtocol{}
+	p.storeSessionID("sess_img")
 	var buf bytes.Buffer
 	images := []ImageData{
 		{Data: []byte("jpeg-bytes"), MimeType: "image/jpeg"},
