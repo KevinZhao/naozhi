@@ -364,7 +364,7 @@
 - [x] **R225-CR-9 — `normalizeBackendID` default 分支不验注册 ID（P3）**: 未注册 backend 字符串能直通到 wrapper.BackendID，错误延后到 spawn 期。方案：default 分支调 `backend.Get` 失败 slog.Warn 或 NewWrapper fail-fast。 — 已修复，本批 PR #156
 - [x] **R225-CR-10 — `cli.Resolve` 路径长字符串（ev.Description）被 closure 长时间持有（P3）**: process_readloop.go:393 max 8 个 Resolve goroutine 并发持有数 KB 字符串到 sem 释放。方案：调用前 `textutil.TruncateRunes(desc, 2000)`。 — 已修复（readLoop + InjectHistory 调用前 truncate 至 2000 runes），本批 PR #151
 - [x] **R225-CR-11 — `backend/profile.reset` 注释声称外部测试反射调用但 unexported 反射不可达（P3）**: profile.go:239 staticcheck U1000 未用；`cron.freshContextPreflight` 同款。方案：移到 *_test.go + 改 `resetForTest` 或 `//go:build testing`。 — 已修复（reset 在源码 + _test.go 内 0 调用者，测试已通过 withCleanRegistry helper 完整覆盖；删函数 + 同步 defaultsOnce 注释指向 withCleanRegistry。cron.freshContextPreflight 是另一根因，留作单独条目），本批 PR #150
-- [ ] **R225-CR-12 — `spawnSession` 函数注释承诺"持锁"但内部多次 Unlock/Lock（P2）**: router_lifecycle.go:506 让未来维护者误加嵌套调用导致死锁。方案：注释精确化 + LOCK: 批注，或重构锁生命周期由调用方负责。
+- [x] **R225-CR-12 — `spawnSession` 函数注释承诺"持锁"但内部多次 Unlock/Lock（P2）**: router_lifecycle.go:506 让未来维护者误加嵌套调用导致死锁。方案：注释精确化 + LOCK: 批注，或重构锁生命周期由调用方负责。 — 已确认归档（router_lifecycle.go:527-531 现有 godoc 已显式标 `LOCK: enter with r.mu held. This function releases and re-acquires r.mu internally (around Spawn() and history collection) to avoid blocking other goroutines during slow protocol init (e.g. ACP handshake). Callers MUST NOT hold any other lock when invoking; the defer reacquires r.mu only.` —— 注释已精确化锁生命周期 + 调用方约束，无需额外改动），本批 PR #183
 - [x] **R225-CR-13 — `readLoop` passthrough 无主 result fall-through 触发 Warn 日志（P2）**: process_readloop.go:306 `eventCh full, dropped result` 在正常路径会误报。方案：fall-through 前加 `if !p.caps.Replay` 守卫或日志降到 Debug。 — 已修复（dispatchProtocolEvent result drop 分支按 caps.Replay 分流：Replay backend 走 Debug + 增加路径说明注释；非 Replay backend 仍 Warn 保留原有可观测信号），本批 PR
 
 ### 协议正确性 — 本轮新发现（与 fix/claude-model-from-init-v2 分支强相关）
@@ -656,7 +656,7 @@
 - [ ] **R217-CR-3 — `Cleanup` 三阶段加锁窗口**：worst-case stuckKill 目标进程在 Pass 2 已被 spawnSession 替换。`shouldPrune` 已 mitigates，stuckKill 路径未 re-check。需要 pass-2 再次 verify。
 - [ ] **R217-CR-4 — `Hub god struct 36 字段 / `node.Conn` 18+ 方法巨型接口**: 子聚合拆分。
 - [ ] **R217-CR-5 — cross-node 错误注入方向不对称**: 反向有 LogSystemEvent，正向 node.Conn.Send 失败只 slog 不进 EventLog。
-- [ ] **R217-CR-6 — workspace 三重重载命名混淆 `cfg.Session.Workspace` / `cfg.Workspaces` / `cfg.Workspace`**: 重命名或文档化。
+- [x] **R217-CR-6 — workspace 三重重载命名混淆 `cfg.Session.Workspace` / `cfg.Workspaces` / `cfg.Workspace`**: 重命名或文档化。 — 已确认归档（PR #69 已落地：`internal/config/config.go` 顶部 Config struct godoc 块（第 24-37 行）显式列出三种语义 1) Workspace = this-instance identity 2) Workspaces = REMOTE-NODES alias 3) SessionConfig.Workspace = deprecated CWD alias，并指引读 Workspace/Nodes/Session.CWD；Workspaces 字段段亦交叉引用顶部 godoc。R216-CR-5 同根因关闭），本批 PR #183
 - [ ] **R217-CR-7 — `project.DisplayName` / `Emoji` schema 校验但 dashboard UI 不读**：要么 wire UI，要么删 schema。
 
 ## Round 216 — 5-agent 并行 review 第 30 轮（2026-05-12）NEEDS-DESIGN
@@ -1400,7 +1400,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [x] **R227-CR-7 — `EventEntryFromEvent` Deprecated 但 process_extra_test.go 是唯一调用者（P3）**: 让 deprecated 函数长期存在。方案：迁测试到 EventEntriesFromEvent 后删除。 — 已修复（process_extra_test.go 两处调用迁到 EventEntriesFromEvent；router_shim.go 注释同步更名；deprecated wrapper 删除），本批 PR #166
 - [ ] **R227-CR-8 — `TodosDetailJSON` 二次 marshal（P2）**: ParseTodos Unmarshal 后又 Marshal。方案：直接抽取 block.Input 的 todos 字段原始字节。重申 R226-PERF-8。
 - [x] **R227-CR-9 — `formatChineseDuration` 仅在 dispatch 包，cron 通知也需要（P3）**: 用户从 IM 看到中英不一致。方案：迁到 textutil/platform 公共包。 — 已修复（迁到 internal/textutil.FormatChineseDuration 公开 API；dispatch 改 import + 调用；测试随实现迁到 textutil 包），本批 PR #166
-- [ ] **R227-CR-13 — `TodosSummary` 用 emoji 字符（P3）**: 4 字节 emoji 在字段过短时可能截在非 emoji 边界。方案：评估 emoji 政策，必要时换 ASCII。
+- [x] **R227-CR-13 — `TodosSummary` 用 emoji 字符（P3）**: 4 字节 emoji 在字段过短时可能截在非 emoji 边界。方案：评估 emoji 政策，必要时换 ASCII。 — 已修复（保留 emoji 但抽 5 个包级常量 todoStatusEmojiSummary/Done/Active/Pending/Unknown + todoStatusFieldSep；TodosSummary godoc 与常量块明示"下游必须按 rune 边界截断"契约 + 引用 textutil.TruncateRunes；新增 TestTodoStatusEmojiConstants_RuneBoundary 5 case 表锁单 rune + per-glyph 字节宽度 + TestTodosSummary_RuneBoundarySafe 走全分支 utf8.ValidString），本批 PR #183
 
 ### 架构 — 本轮新发现
 
@@ -1453,7 +1453,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 ### 性能 — 本轮新发现
 
 - [ ] **R228-PERF-1 — `eventlog_bridge.newEventLogSink` 单条 Append 路径每次 `make([]persist.Entry, 0, 1)`（P1 与 R226-PERF-2 同根）**: 单条 Append 路径每次 1 entry 仍分配一个 1-cap slice。方案：栈局部 `[1]persist.Entry` 数组 + slice。涉及 `internal/session/eventlog_bridge.go:77`。
-- [ ] **R228-PERF-2 — `TodoWrite` 双 marshal（decode + recode）（P1）**: `EventEntriesFromEventAt` 对 TodoWrite 调 `ParseTodos` 再调 `TodosDetailJSON`，原始 `block.Input` 已是 `{"todos":[...]}`。方案：从 `block.Input` 提取 "todos" raw bytes 直接赋给 `entry.Detail`。涉及 `internal/cli/todo.go:40-46` + `internal/cli/process_event_format.go:178-190`。
+- [x] **R228-PERF-2 — `TodoWrite` 双 marshal（decode + recode）（P1）**: `EventEntriesFromEventAt` 对 TodoWrite 调 `ParseTodos` 再调 `TodosDetailJSON`，原始 `block.Input` 已是 `{"todos":[...]}`。方案：从 `block.Input` 提取 "todos" raw bytes 直接赋给 `entry.Detail`。涉及 `internal/cli/todo.go:40-46` + `internal/cli/process_event_format.go:178-190`。 — 已确认归档（R226-PERF-8 PR #166 已落地：todo.go:52 `ParseTodosWithRaw` 返回 `(todos, rawTodos, ok)`；process_event_format.go:165-176 在 TodoWrite 分支直接 `entry.Detail = string(rawTodos)`，不再走 `TodosDetailJSON` 二次 marshal。本批 R228-PERF-2 与 R226-PERF-8 同根因，关闭归档），本批 PR #183
 - [ ] **R228-PERF-3 — `subagent_transcript.readLocked` 每次 `os.Open` 不复用 fd（P2）**: 每 200ms × 50 active tailer = 250 open/close fd/s。方案：缓存 `*os.File`，Tail 用 Seek 复用，inode 变化时重 Open。涉及 `internal/cli/subagent_transcript.go:63-88`。
 - [ ] **R228-PERF-4 — `protocol_acp.WriteMessage` 每条消息 `map[string]any` 逐张图 alloc（P2）**: 文本+单图常见路径 2 个 map alloc。方案：定义 `acpImageBlock` 具体结构体；prompt 预分配。涉及 `internal/cli/protocol_acp.go:234-258`。
 - [ ] **R228-PERF-5 — `agent_tailer.pollOnce` fan-out 时每 subscriber 各自 marshal（P2 与 R225-PERF-9 同类）**: 同一事件 N 次 marshal。方案：fan-out 前一次 `marshalPooled`，改用 `SendRaw`。涉及 `internal/server/agent_tailer.go:338-358`。
