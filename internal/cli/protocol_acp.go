@@ -229,6 +229,41 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, err
 	return p.loadSessionID(), nil
 }
 
+// acpImageSource is the inner "source" object inside an ACP image content
+// block. Promoted from an inline map[string]string so json.Marshal can use
+// the precomputed reflect cache (one-time cost) instead of paying the
+// per-call map iteration + interface boxing each WriteMessage invocation.
+// R228-PERF-4.
+type acpImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
+}
+
+// acpPromptBlock represents a single content block in an ACP session/prompt
+// "prompt" array. ACP accepts heterogeneous block types ("image" + "text"),
+// each with disjoint fields. Two variants are encoded as one struct via
+// pointer fields:
+//
+//   - text block: only Type + Text. Source is nil (omitempty drops it).
+//     Text uses a *string so empty text produces {"type":"text","text":""}
+//     (byte-equal to the prior map[string]string{"type":"text","text":""}
+//     literal) instead of being silently dropped by omitempty.
+//   - image block: only Type + Source. Text is nil (omitempty drops it).
+type acpPromptBlock struct {
+	Type   string          `json:"type"`
+	Source *acpImageSource `json:"source,omitempty"`
+	Text   *string         `json:"text,omitempty"`
+}
+
+// acpPromptParams is the typed shape of session/prompt's params field.
+// Replaces a map[string]any so RPCRequest.Params marshaling does not have
+// to iterate a 2-key map + box each value into interface{} per call.
+type acpPromptParams struct {
+	SessionID string           `json:"sessionId"`
+	Prompt    []acpPromptBlock `json:"prompt"`
+}
+
 func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData) error {
 	// sessionID lives on its own atomic.Pointer so this read does not
 	// contend with per-chunk textBuf writes happening on readLoop.
@@ -238,28 +273,36 @@ func (p *ACPProtocol) WriteMessage(w io.Writer, text string, images []ImageData)
 	p.textBuf.Reset() // reset text accumulator for new turn
 	p.mu.Unlock()
 
-	// Build prompt content blocks
-	var prompt []any
+	// Build prompt content blocks. R228-PERF-4: typed []acpPromptBlock
+	// replaces []any so the encoding/json reflect cache hits the same
+	// concrete shape every call instead of paying a per-block map +
+	// interface{} boxing cost on the WriteMessage hot path.
+	hasText := text != ""
+	prompt := make([]acpPromptBlock, 0, len(images)+1)
 	for _, img := range images {
-		prompt = append(prompt, map[string]any{
-			"type": "image",
-			"source": map[string]string{
-				"type":       "base64",
-				"media_type": img.MimeType,
-				"data":       base64.StdEncoding.EncodeToString(img.Data),
+		prompt = append(prompt, acpPromptBlock{
+			Type: "image",
+			Source: &acpImageSource{
+				Type:      "base64",
+				MediaType: img.MimeType,
+				Data:      base64.StdEncoding.EncodeToString(img.Data),
 			},
 		})
 	}
-	if text != "" || len(prompt) == 0 {
-		prompt = append(prompt, map[string]string{"type": "text", "text": text})
+	if hasText || len(prompt) == 0 {
+		// Always emit a non-nil *string so the wire frame keeps the
+		// "text" key even for empty text — matches the prior map literal
+		// `map[string]string{"type":"text","text":""}` byte-for-byte.
+		t := text
+		prompt = append(prompt, acpPromptBlock{Type: "text", Text: &t})
 	}
 
 	id := p.allocID()
 	req := RPCRequest{
 		JSONRPC: "2.0", ID: id, Method: "session/prompt",
-		Params: map[string]any{
-			"sessionId": sid,
-			"prompt":    prompt,
+		Params: acpPromptParams{
+			SessionID: sid,
+			Prompt:    prompt,
 		},
 	}
 	data, err := json.Marshal(req)
