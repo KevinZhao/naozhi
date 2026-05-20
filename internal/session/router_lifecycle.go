@@ -365,15 +365,37 @@ type spawnParams struct {
 //
 // LOCK: caller must hold r.mu for writing.
 func (r *Router) resolveSpawnParamsLocked(key, resumeID string, opts AgentOpts) spawnParams {
-	// Backend pick: opts wins, then one-shot dashboard override, then default.
+	// Backend pick precedence (highest to lowest):
+	//  1. AgentOpts.Backend                — explicit per-request choice
+	//  2. one-shot r.backendOverrides[key] — dashboard "pick backend"
+	//  3. existing r.sessions[key].Backend — resume continuity
+	//  4. r.defaultBackend (via wrapperFor) — router fallback
+	//
 	// The override is consumed so a later Reset→spawn for the same key does
-	// not silently carry the old pick.
+	// not silently carry the old pick. The session-backend fallback closes
+	// a kiro→cc downgrade bug: a kiro session whose CLI process exited
+	// (TTL idle, ACP transport drop) but whose ManagedSession is still in
+	// r.sessions would, on the next message, call back through GetOrCreate
+	// → spawnSession with an empty opts.Backend and a one-shot override
+	// already consumed by the first spawn. Without the existing-session
+	// fallback the second spawn picks r.defaultBackend (typically claude),
+	// resolveResumeID then ENOENTs the kiro session_id under
+	// ~/.claude/projects/, downgrades resume to "fresh", and the dashboard
+	// silently flips the backend chip from kiro→cc — losing both the
+	// conversation and the operator's original pick.
 	reqBackend := opts.Backend
 	if len(r.backendOverrides) > 0 {
 		if reqBackend == "" {
 			reqBackend = r.backendOverrides[key]
 		}
 		delete(r.backendOverrides, key)
+	}
+	if reqBackend == "" {
+		if old := r.sessions[key]; old != nil {
+			if b := old.Backend(); b != "" {
+				reqBackend = b
+			}
+		}
 	}
 	wrapper, backendID := r.wrapperFor(reqBackend)
 

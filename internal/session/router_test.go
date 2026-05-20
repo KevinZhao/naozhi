@@ -2117,6 +2117,69 @@ func TestResolveSpawnParamsLocked(t *testing.T) {
 			t.Errorf("Args = %v, want %v", sp.Args, want)
 		}
 	})
+
+	// Regression: a session whose process exited but whose entry is still
+	// in r.sessions must resume against the SAME backend it ran on. Before
+	// this fix, resolveSpawnParamsLocked fell through to r.defaultBackend
+	// when opts.Backend was empty AND backendOverrides[key] was already
+	// consumed (one-shot). For a kiro session that meant the second turn
+	// silently respawned under claude with the kiro session_id, which then
+	// fails the .claude/projects jsonl stat and downgrades to a fresh
+	// claude session — the dashboard chip flips from kiro→cc and the
+	// kiro conversation is lost. Naozhi-RFKB-1.
+	t.Run("resume falls back to existing session backend when opts/override empty", func(t *testing.T) {
+		r := mkRouter()
+		key := "feishu:user:bob:agent1"
+		old := &ManagedSession{key: key}
+		old.SetBackend("kiro")
+		r.sessions[key] = old
+		sp := r.resolveSpawnParamsLocked(key,
+			"00000000-0000-0000-0000-000000000000", AgentOpts{})
+		if sp.BackendID != "kiro" {
+			t.Errorf("BackendID = %q, want kiro (inherited from existing session)", sp.BackendID)
+		}
+		// Backend-scoped overrides must follow the inherited backend so a
+		// kiro respawn keeps using kiro's model + args.
+		if sp.Model != "kiro-model" {
+			t.Errorf("Model = %q, want kiro-model", sp.Model)
+		}
+		if len(sp.Args) != 1 || sp.Args[0] != "--kiro-arg" {
+			t.Errorf("Args = %v, want [--kiro-arg]", sp.Args)
+		}
+	})
+
+	// Existing-session backend MUST NOT override an explicit opts.Backend.
+	// This protects the rare flow where the operator picks a different
+	// backend for the next session via dashboard before the old one tears
+	// down — ResetAndRecreate / Takeover both feed AgentOpts.Backend.
+	t.Run("opts.Backend beats existing session backend", func(t *testing.T) {
+		r := mkRouter()
+		key := "feishu:user:bob:agent1"
+		old := &ManagedSession{key: key}
+		old.SetBackend("kiro")
+		r.sessions[key] = old
+		sp := r.resolveSpawnParamsLocked(key, "",
+			AgentOpts{Backend: "claude"})
+		if sp.BackendID != "claude" {
+			t.Errorf("BackendID = %q, want claude (opts.Backend wins)", sp.BackendID)
+		}
+	})
+
+	// One-shot backendOverride must still beat session.Backend(), matching
+	// the documented precedence: opts > one-shot override > existing
+	// session > default.
+	t.Run("backendOverride beats existing session backend", func(t *testing.T) {
+		r := mkRouter()
+		key := "feishu:user:bob:agent1"
+		old := &ManagedSession{key: key}
+		old.SetBackend("kiro")
+		r.sessions[key] = old
+		r.backendOverrides[key] = "claude"
+		sp := r.resolveSpawnParamsLocked(key, "", AgentOpts{})
+		if sp.BackendID != "claude" {
+			t.Errorf("BackendID = %q, want claude (override wins over session)", sp.BackendID)
+		}
+	})
 }
 
 // ---------------------------------------------------------------------------
