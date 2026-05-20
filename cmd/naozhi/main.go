@@ -34,6 +34,7 @@ import (
 	"github.com/naozhi/naozhi/internal/server"
 	"github.com/naozhi/naozhi/internal/session"
 	"github.com/naozhi/naozhi/internal/shim"
+	"github.com/naozhi/naozhi/internal/sysession"
 	"github.com/naozhi/naozhi/internal/transcribe"
 	"github.com/naozhi/naozhi/internal/upstream"
 )
@@ -757,6 +758,18 @@ func main() {
 	}
 	metrics.StartupPhaseSchedulerMs.Set(time.Since(t0).Milliseconds())
 
+	// Build the system-session (background daemon) Manager.  Disabled
+	// when cfg.Sysession.Enabled is false; degraded silently when the
+	// runner can't be initialised so a missing/broken claude binary
+	// doesn't break naozhi startup as a whole.
+	sysMgr, err := buildSysessionManager(cfg, router, defaultWrapper, storePath)
+	if err != nil {
+		slog.Warn("sysession manager unavailable; daemons disabled", "err", err)
+	}
+	if sysMgr != nil {
+		sysMgr.Start(ctx)
+	}
+
 	// Configure remote nodes for multi-node aggregation
 	var nodes map[string]node.Conn
 	if len(cfg.Nodes) > 0 {
@@ -800,6 +813,7 @@ func main() {
 		Transcriber:       stt,
 		StartupCtx:        ctx,
 		Version:           version,
+		SysessionManager:  sysMgr,
 		OnReady: func() {
 			if err := osutil.SdNotify("READY=1"); err != nil {
 				slog.Warn("sd_notify READY failed", "err", err)
@@ -876,6 +890,19 @@ func main() {
 				slog.Warn("sd_notify STOPPING failed", "err", err)
 			}
 			cancel()
+			// Sysession Manager must stop FIRST: daemon Tick paths call into
+			// router (VisitSessions / SetUserLabelWithOrigin); leaving them
+			// running while Scheduler.Stop or Router.Shutdown tear down
+			// downstream state would race.  Manager.Stop is hard wg.Wait
+			// (RFC v2.1 §5.2) — a daemon that ignores ctx will panic the
+			// process at shutdown rather than leak goroutines.  5s budget
+			// is comfortable headroom for Runner subprocess teardown via
+			// exec.CommandContext.
+			if sysMgr != nil {
+				sysStopCtx, sysStopCancel := context.WithTimeout(context.Background(), 5*time.Second)
+				sysMgr.Stop(sysStopCtx)
+				sysStopCancel()
+			}
 			// Scheduler must stop fully before router.Shutdown: in-flight cron
 			// jobs still call into router (GetOrCreate/Send), so tearing the
 			// router down in parallel would race against those calls.
@@ -1112,4 +1139,138 @@ func logWebhookEndpoints(cfg *config.Config, platforms map[string]platform.Platf
 			slog.Info("platform webhook endpoint", "platform", name, "path", "/webhook/weixin", "addr", addr)
 		}
 	}
+}
+
+// buildSysessionManager wires sysession.Manager from cfg.Sysession.
+//
+// Returns (nil, nil) when the framework is disabled — that's the
+// happy path for deployments that don't want background daemons yet.
+//
+// Returns (nil, err) when enabled but unusable (e.g. work dir cannot
+// be chmodded 0700, default backend has no binary path).  Caller
+// should log the error and proceed without daemons rather than
+// aborting startup — sysession is opt-in infrastructure, not a
+// release-critical path.
+//
+// Step 11 will replace the nil OnRunStarted/OnRunEnded with WS-hub
+// callbacks; Phase 1 ships without them so the dashboard reads fall
+// back to polling /api/system/daemons.
+func buildSysessionManager(cfg *config.Config, router *session.Router,
+	defaultWrapper *cli.Wrapper, storePath string,
+) (*sysession.Manager, error) {
+	if !cfg.Sysession.Enabled {
+		// Return nil rather than a no-op Manager so the caller's nil
+		// guard is meaningful — main.go's Start/Stop loops both check
+		// `if sysMgr != nil`, and a stubbed always-non-nil result would
+		// turn that into dead code.
+		return nil, nil
+	}
+
+	// Resolve work dir: explicit override first, then a sibling of
+	// sessions.json (= dataDir/sys-sessions/).  Empty storePath means
+	// the operator opted out of state persistence; fall back to ~/.naozhi
+	// to keep the directory under user control.
+	workDir := osutil.ExpandHome(cfg.Sysession.Runner.WorkDir)
+	if workDir == "" {
+		base := filepath.Dir(storePath)
+		if base == "" || base == "." {
+			home, _ := os.UserHomeDir()
+			base = filepath.Join(home, ".naozhi")
+		}
+		workDir = filepath.Join(base, "sys-sessions")
+	}
+	resolvedWorkDir, err := sysession.EnsureWorkDir(workDir)
+	if err != nil {
+		return nil, fmt.Errorf("ensure sys-sessions dir: %w", err)
+	}
+
+	// Startup sweep — non-fatal; a busted directory should not block
+	// daemon startup.  Default 7 days when unset; "0" disables.
+	jsonlMaxAge := 7 * 24 * time.Hour
+	if v := cfg.Sysession.Runner.JSONLMaxAge; v != "" {
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			slog.Warn("sysession: bad jsonl_max_age; using default 7d", "err", err, "value", v)
+		} else {
+			jsonlMaxAge = parsed
+		}
+	}
+	if _, err := sysession.SweepOldJSONL(resolvedWorkDir, jsonlMaxAge); err != nil {
+		slog.Warn("sysession: startup sweep failed", "err", err, "dir", resolvedWorkDir)
+	}
+
+	// Build Runner from the default backend's binary.
+	binPath := ""
+	if defaultWrapper != nil {
+		binPath = defaultWrapper.CLIPath
+	}
+	runner, err := sysession.NewRunner(sysession.RunnerConfig{
+		BinPath:      binPath,
+		WorkDir:      resolvedWorkDir,
+		Model:        cfg.Sysession.Runner.Model,
+		EnvAllowlist: nil, // PATH+HOME default is enough for claude -p
+	})
+	if err != nil {
+		return nil, fmt.Errorf("new runner: %w", err)
+	}
+
+	tickTimeout := 30 * time.Second
+	if v := cfg.Sysession.TickTimeout; v != "" {
+		parsed, err := time.ParseDuration(v)
+		if err != nil {
+			slog.Warn("sysession: bad tick_timeout; using default 30s", "err", err, "value", v)
+		} else {
+			tickTimeout = parsed
+		}
+	}
+
+	// Translate per-daemon configs.
+	daemons := make(map[string]sysession.DaemonRuntimeConfig, len(cfg.Sysession.Daemons))
+	for name, dcfg := range cfg.Sysession.Daemons {
+		tick := 30 * time.Second
+		if dcfg.Tick != "" {
+			parsed, err := time.ParseDuration(dcfg.Tick)
+			if err != nil {
+				slog.Warn("sysession: bad daemon tick; using default 30s",
+					"daemon", name, "err", err, "value", dcfg.Tick)
+			} else {
+				tick = parsed
+			}
+		}
+		specific := sysession.DaemonConfig{}
+		if dcfg.MinUserTurns > 0 {
+			specific["min_user_turns"] = dcfg.MinUserTurns
+		}
+		if dcfg.MinRenameInterval != "" {
+			parsed, err := time.ParseDuration(dcfg.MinRenameInterval)
+			if err != nil {
+				slog.Warn("sysession: bad min_rename_interval",
+					"daemon", name, "err", err, "value", dcfg.MinRenameInterval)
+			} else {
+				specific["min_rename_interval"] = parsed
+			}
+		}
+		if dcfg.BatchPerTick > 0 {
+			specific["batch_per_tick"] = dcfg.BatchPerTick
+		}
+		specific["include_group_chat"] = dcfg.IncludeGroupChat
+		daemons[name] = sysession.DaemonRuntimeConfig{
+			Enabled:  dcfg.Enabled,
+			Tick:     tick,
+			Specific: specific,
+		}
+	}
+
+	mgr, err := sysession.NewManager(sysession.Config{
+		Enabled:     true,
+		TickTimeout: tickTimeout,
+		Runner:      runner,
+		Router:      router,
+		Daemons:     daemons,
+		// OnRunStarted/OnRunEnded are wired in Step 11 (WS broadcast).
+	})
+	if err != nil {
+		return nil, fmt.Errorf("new manager: %w", err)
+	}
+	return mgr, nil
 }

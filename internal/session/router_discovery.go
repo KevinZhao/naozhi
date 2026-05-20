@@ -21,31 +21,65 @@ import (
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
-// SetUserLabel updates the operator-set display label for the given session.
-// Passing an empty label clears any prior value. Callers are responsible for
-// validating label length/charset via ValidateUserLabel; this method only
-// performs the store + version bump + onChange broadcast so connected
-// dashboards see the change immediately (not on the next /api/sessions poll).
+// SetUserLabel is the human-driven label setter (dashboard rename, IM
+// /label commands, upstream RPC). It always records origin="user", which
+// permanently locks out sysession daemon overwrites until ClearUserLabelOrigin
+// resets it (RFC v2.1 §7.3).
+//
+// Passing an empty label clears the prior value. Callers are responsible for
+// validating length/charset via ValidateUserLabel.
 //
 // Returns false when the session key is unknown (no mutation performed).
 //
-// No-op fast path: when the requested label equals the current value, skip
-// the dirty flag + version bump + WS broadcast. A dashboard that replays the
-// same label (e.g. blur-without-edit on an editable title) otherwise forces a
-// full saveIfDirty cycle (2-5 ms fsync on SSD) and a sessions_update fanout
-// to every connected client for zero behavioural change. R176-PERF-P1.
+// No-op fast path: when the requested label equals the current value AND
+// origin is already "user", skip the dirty flag + version bump + WS broadcast.
+// R176-PERF-P1.
 func (r *Router) SetUserLabel(key, label string) bool {
+	return r.SetUserLabelWithOrigin(key, label, "user")
+}
+
+// SetUserLabelWithOrigin is the lower-level label writer that also records
+// who set the label. origin must be "user" or "auto"; any other value is
+// treated as "user" (defensive — only the human-facing API and AutoTitler
+// reach this path, and accidentally widening the namespace must not silently
+// mark something as daemon-overwritable).
+//
+// Crucially, when origin=="auto" and the current LabelOrigin is "user",
+// the write is rejected (returns false). This closes the daemon-vs-user
+// race window from RFC v2.1 §11.1: AutoTitler reads a Snapshot showing
+// origin="auto", invokes a 5–25s LLM call, and during that window a human
+// rename via SetUserLabel can flip origin to "user" — we MUST re-read
+// origin atomically under r.mu before letting the daemon overwrite, or
+// the user's manual edit gets silently lost.
+//
+// Returns false when the session key is unknown OR when the daemon-vs-user
+// race-protection rejects the write.
+func (r *Router) SetUserLabelWithOrigin(key, label, origin string) bool {
+	if origin != "user" && origin != "auto" {
+		origin = "user"
+	}
 	r.mu.Lock()
 	s := r.sessions[key]
 	if s == nil {
 		r.mu.Unlock()
 		return false
 	}
-	if s.UserLabel() == label {
+	// Race-window close: re-read origin under the lock. Empty origin is
+	// equivalent to "user" (legacy / pre-v2.1 stores), so daemons must
+	// also leave those alone.
+	currentOrigin := s.LabelOrigin()
+	if origin == "auto" && (currentOrigin == "user" || currentOrigin == "") && s.UserLabel() != "" {
+		// User had set a label (or legacy entry counts as user); daemon stops.
+		r.mu.Unlock()
+		return false
+	}
+	// No-op fast path: same label and same origin → don't dirty the store.
+	if s.UserLabel() == label && currentOrigin == origin {
 		r.mu.Unlock()
 		return true
 	}
 	s.SetUserLabel(label)
+	s.setLabelOrigin(origin)
 	r.storeDirty = true
 	r.storeGen.Add(1)
 	r.mu.Unlock()
@@ -54,6 +88,62 @@ func (r *Router) SetUserLabel(key, label string) bool {
 	// refreshes instantly rather than waiting up to one poll interval. R64-GO-H1.
 	r.notifyChange()
 	return true
+}
+
+// ClearUserLabelOrigin clears both the LabelOrigin and the UserLabel so a
+// sysession daemon (e.g. AutoTitler) can take back over. We clear the label
+// AS WELL so the "empty origin = legacy/user-set" backward-compat rule in
+// SetUserLabelWithOrigin remains unambiguous: legacy stores have non-empty
+// label + empty origin, and that's still treated as user-set; explicit
+// Clear has empty label + empty origin, and that's the daemon's signal to
+// retake control.
+//
+// Dashboard "restore auto naming" action calls this via
+// POST /api/system/labels/clear-origin (RFC v2.1 §9.3).
+//
+// Returns false when the session key is unknown.
+func (r *Router) ClearUserLabelOrigin(key string) bool {
+	r.mu.Lock()
+	s := r.sessions[key]
+	if s == nil {
+		r.mu.Unlock()
+		return false
+	}
+	if s.LabelOrigin() == "" && s.UserLabel() == "" {
+		r.mu.Unlock()
+		return true // already cleared, no-op
+	}
+	s.SetUserLabel("")
+	s.setLabelOrigin("")
+	r.storeDirty = true
+	r.storeGen.Add(1)
+	r.mu.Unlock()
+	r.notifyChange()
+	return true
+}
+
+// VisitSessions iterates over all live sessions in the router, invoking fn
+// for each one. fn returning false stops iteration early. The visit is
+// lock-protected (RLock) so the session map cannot mutate mid-iteration,
+// but each Snapshot is computed inline without leaking the *ManagedSession
+// to the caller.
+//
+// This is the daemon-friendly read path: AutoTitler's tick filters >100
+// sessions and only acts on at most one per tick, so a streaming visit
+// avoids the GC overhead of the slice-returning Snapshot() variant. RFC
+// v2.1 §8 / §M8.
+//
+// Note: fn must not call back into Router methods that take r.mu (it runs
+// under RLock). Idiomatic usage is to copy the SessionSnapshot fields the
+// daemon needs and resume work after VisitSessions returns.
+func (r *Router) VisitSessions(fn func(SessionSnapshot) bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	for _, s := range r.sessions {
+		if !fn(s.Snapshot()) {
+			return
+		}
+	}
 }
 
 // InterruptSession sends SIGINT to the CLI process for the given session key.
@@ -285,10 +375,14 @@ func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string)
 // The stub has no process and no session ID; the first GetOrCreate call
 // (at cron execute time) will spawn a real CLI process and reuse this entry.
 //
-// 等价于 RegisterCronStubWithChain(key, workspace, lastPrompt, nil)，
-// 保留给不关心 history chain 的调用方（测试、旧集成）。
+// Misuse (key not IsCronKey) panics: callsites that pass a wrong-prefix
+// key would otherwise silently leave dangling no-op stubs that fail later
+// in obscure ways (RFC v2.1 §8.1).
 func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
-	r.RegisterCronStubWithChain(key, workspace, lastPrompt, nil)
+	if !IsCronKey(key) {
+		panic(fmt.Sprintf("session: RegisterCronStub called with non-cron key %q", key))
+	}
+	r.registerStub(key, workspace, lastPrompt, nil)
 }
 
 // RegisterCronStubWithChain 在 RegisterCronStub 的基础上注入一个
@@ -298,11 +392,51 @@ func (r *Router) RegisterCronStub(key, workspace, lastPrompt string) {
 // fresh_context=true 场景每次 Reset 都会让 stub 的 chain 为空，dashboard
 // 点击定时任务只能看到一个空白的事件面板。
 //
-// chainIDs 空 / nil 时行为与 RegisterCronStub 相同。existing 分支下如果
-// 新 chain 与旧 chain 不同，会同步刷新 prevSessionIDs 并重挂
-// historySource，保证 cron 每次执行完 recordResult 后侧边栏立刻能查到
-// 最新一次的 JSONL（而不是等下次重启）。
+// chainIDs 空 / nil 时行为与 RegisterCronStub 相同。
 func (r *Router) RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string) {
+	if !IsCronKey(key) {
+		panic(fmt.Sprintf("session: RegisterCronStubWithChain called with non-cron key %q", key))
+	}
+	r.registerStub(key, workspace, lastPrompt, chainIDs)
+}
+
+// RegisterSystemStub creates a suspended exempt session for a sysession
+// daemon. Key format is "sys:<daemon-name>" (validated via IsSysKey;
+// callsite misuse panics, mirroring RegisterCronStub).
+//
+// Phase 1 daemons typically do NOT register a stub — Runner-style daemons
+// (AutoTitler) only spawn transient claude -p subprocesses (RFC v2.1 §6).
+// This entry point is reserved for future daemons that need a long-lived
+// ManagedSession (e.g. a stateful aggregator that survives across ticks).
+//
+// existing 分支下如果 workspace/lastPrompt 没变就 no-op（避免每 tick 强刷
+// 触发不必要的 saveIfDirty + WS fanout）。
+func (r *Router) RegisterSystemStub(key, workspace, lastPrompt string) {
+	if !IsSysKey(key) {
+		panic(fmt.Sprintf("session: RegisterSystemStub called with non-sys key %q", key))
+	}
+	r.registerStub(key, workspace, lastPrompt, nil)
+}
+
+// registerStub is the shared exempt-stub registration path used by
+// RegisterCronStub / RegisterCronStubWithChain / RegisterSystemStub.
+// Callers must validate the key namespace before invoking this; the
+// helper itself does no namespace check (its single shared implementation
+// is intentionally namespace-agnostic so cron and sys can co-evolve their
+// public wrappers without a fork in this body — RFC v2.1 §8.1).
+//
+// existing 分支下如果新 chain 与旧 chain 不同，会同步刷新 prevSessionIDs
+// 并重挂 historySource，保证 cron 每次执行完 recordResult 后侧边栏立刻
+// 能查到最新一次的 JSONL（而不是等下次重启）。
+//
+// prevSessionIDs 的所有历史写路径（spawnSession / RenameSession / 本函数
+// new 分支）都在 r.mu 下做，读路径同样在 r.mu 下。managed.go:SnapshotChainIDs
+// 虽然用 historyMu.RLock，但因为写者不拿 historyMu，historyMu 对该字段
+// 而言并不构成真正的同步——真正的 invariant 是"r.mu 写/r.mu 读"。因此
+// chain 刷新直接在 r.mu 临界区内做，与其它写路径一致，不引入混合锁协议；
+// attachHistorySource 只读 r 的不可变字段 + 写 s 的 atomic.Pointer，同样
+// 安全可以在 r.mu 下调。
+func (r *Router) registerStub(key, workspace, lastPrompt string, chainIDs []string) {
 	r.mu.Lock()
 	if existing, ok := r.sessions[key]; ok {
 		changed := false
@@ -316,14 +450,6 @@ func (r *Router) RegisterCronStubWithChain(key, workspace, lastPrompt string, ch
 				storeAtomicString(&existing.lastPrompt, lastPrompt)
 				changed = true
 			}
-			// prevSessionIDs 的所有历史写路径（spawnSession:1786 / RenameSession:2142
-			// / 本函数 new 分支:3259）都在 r.mu 下做，读路径（961 / 1722 / 3083
-			// 以及下一行）也全部在 r.mu 下。managed.go:SnapshotChainIDs 虽然用
-			// historyMu.RLock，但因为写者不拿 historyMu，historyMu 对该字段
-			// 而言并不构成真正的同步——真正的 invariant 是"r.mu 写/r.mu 读"。
-			// 因此 chain 刷新直接在 r.mu 临界区内做，与其它写路径一致，不引入
-			// 混合锁协议；attachHistorySource 只读 r 的不可变字段 + 写 s 的
-			// atomic.Pointer，同样安全可以在 r.mu 下调。
 			if len(chainIDs) > 0 && !slices.Equal(existing.prevSessionIDs, chainIDs) {
 				existing.prevSessionIDs = slices.Clone(chainIDs)
 				// workspace 变了 historySource 里也要刷（cwd 变化会导致

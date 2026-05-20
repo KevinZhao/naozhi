@@ -35,6 +35,17 @@ const (
 	ProjectKeyPrefix = "project:"
 	// ScratchKeyPrefix is already defined in scratch.go; listed here only in
 	// documentation for grep-ability. Do not redefine.
+	// SysKeyPrefix is used for naozhi-internal background daemon sessions.
+	// Key shape is "sys:{daemon-name}" where {daemon-name} matches
+	// `^[a-z][a-z0-9-]{1,30}$`. See docs/rfc/system-session.md and
+	// internal/sysession/registry.go (BuiltinDaemons name validation).
+	//
+	// Phase 1 daemons typically do NOT register a stub at all — Runner-style
+	// daemons (AutoTitler) only spawn transient claude -p subprocesses and
+	// never need a long-lived ManagedSession. The prefix is reserved here
+	// for future daemons that DO need a persistent stub (e.g. a metrics
+	// aggregator that must survive across ticks).
+	SysKeyPrefix = "sys:"
 )
 
 // reservedKeyPrefixes is the authoritative list of namespaces that do NOT
@@ -48,6 +59,7 @@ var reservedKeyPrefixes = []string{
 	CronKeyPrefix,
 	ProjectKeyPrefix,
 	ScratchKeyPrefix,
+	SysKeyPrefix,
 }
 
 // IsReservedNamespace reports whether the given key belongs to any reserved
@@ -77,6 +89,22 @@ func IsCronKey(key string) bool {
 // detect if the constant drifted.
 func CronKey(id string) string {
 	return CronKeyPrefix + id
+}
+
+// IsSysKey reports whether the key belongs to the system-daemon namespace.
+// See SysKeyPrefix.
+func IsSysKey(key string) bool {
+	return strings.HasPrefix(key, SysKeyPrefix)
+}
+
+// SysKey synthesises the session key for a system daemon. Caller must
+// have validated name against `^[a-z][a-z0-9-]{1,30}$` (typically via
+// internal/sysession/registry.go's startup-time check on BuiltinDaemons).
+// Phase 1 most daemons run Runner-style transient subprocesses and do NOT
+// register a stub via this key; the helper is kept for symmetry with
+// CronKey and for future daemons that need a persistent ManagedSession.
+func SysKey(name string) string {
+	return SysKeyPrefix + name
 }
 
 // plannerKeyFor is the session-package local replica of
