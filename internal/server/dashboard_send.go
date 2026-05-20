@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -1143,8 +1144,17 @@ func (h *SendHandler) handleAttachment(w http.ResponseWriter, r *http.Request) {
 	// track when a user's workspace attachments change. The hash
 	// preserves cacheability (same inputs → same ETag) and collision
 	// resistance is ample for a per-object validator.
-	etagSeed := fmt.Sprintf("%d|%d", info.Size(), info.ModTime().UnixNano())
-	etagSum := sha256.Sum256([]byte(etagSeed))
+	// R224-PERF-4: build etagSeed via strconv.AppendInt into a stack buffer
+	// instead of fmt.Sprintf — this header is set on every authenticated
+	// attachment GET, and fmt.Sprintf's reflection-driven formatter shows up
+	// in CPU profiles for download-heavy workspaces. The two int64s + 1-byte
+	// separator fit easily in 48 bytes; the SHA-256 input is byte-identical
+	// to the prior "%d|%d" form so the resulting ETag is unchanged.
+	var etagBuf [48]byte
+	etagSeed := strconv.AppendInt(etagBuf[:0], info.Size(), 10)
+	etagSeed = append(etagSeed, '|')
+	etagSeed = strconv.AppendInt(etagSeed, info.ModTime().UnixNano(), 10)
+	etagSum := sha256.Sum256(etagSeed)
 	etag := `"` + hex.EncodeToString(etagSum[:8]) + `"`
 	if inm := r.Header.Get("If-None-Match"); inm != "" && inm == etag {
 		w.Header().Set("ETag", etag)
