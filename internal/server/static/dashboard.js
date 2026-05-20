@@ -8537,6 +8537,12 @@ const wsm = {
         // badge without waiting for a list refetch. Optimistically patch
         // local cronJobs entry so the UI flips to running immediately;
         // a fetchCronJobs would also work but adds latency.
+        // cron-panel-consolidation RFC §4.6: cronApplyRunStarted internally
+        // calls renderCronPanel, whose shell-preserving branch repaints
+        // both the list AND the per-job drawer (renderCronDrawer). The
+        // drawer's "当前执行" section therefore appears the same frame
+        // the WS event lands, gated only on cronDetailJobId — no
+        // selectedKey check is needed any more.
         cronApplyRunStarted(msg);
         break;
       case 'cron_run_ended':
@@ -8546,9 +8552,13 @@ const wsm = {
         // here since the change set is JobID-scoped.
         cronApplyRunEnded(msg);
         fetchCronJobs().then(() => renderCronPanel()).catch(() => {});
-        // P2 cron-run-history (RFC §8.2) — 如果当前打开的就是该 job 的
-        // 详情页，刷新时间轴头 10 条；否则只刷新列表 stats（fetchCronJobs
-        // 已经做了）。msg.job_id 后端必发；缺省时跳过避免空 job_id 调用。
+        // P2 cron-run-history (RFC §8.2) — refresh the timeline head
+        // (most-recent 10 runs) when the operator currently has the drawer
+        // open for this job. cron-panel-consolidation RFC §4.6: the gate
+        // moved from selectedKey === 'cron:<id>' to cronDetailJobId ===
+        // job_id (selectedKey is null in cron-panel mode). msg.job_id is
+        // backend-mandatory; the guard against falsy job_id stays for
+        // defence-in-depth.
         // R221-FIX-P1-4: cronTimelineRefreshHead is async; swallow its
         // rejection at the dispatch boundary.
         if (msg && msg.job_id) cronTimelineRefreshHead(msg.job_id).catch(() => {});
@@ -11562,8 +11572,9 @@ async function cronTimelineFetchDetail(jobId, runId) {
       st.details[runId] = { __error: '网络错误' };
     }
   }
-  // 只在仍停留在该 cron session 时才重绘，避免跨 session 写脏 DOM。
-  if (selectedKey === 'cron:' + jobId) renderCronTimelinePanel(jobId);
+  // cron-panel-consolidation RFC §4.6: 用 cronDetailJobId 判定当前 drawer
+  // 还停在同一 job 上；selectedKey 在 cron 面板下永远为 null，已不能用。
+  if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
 }
 
 // renderCronTimelinePanel — 重绘当前 timeline 面板（不重新 mount shell）。
@@ -11646,11 +11657,16 @@ function cronTimelineJumpToSession(sessionId) {
   showToast('未找到对应 session（' + sessionId.slice(0, 8) + '…）', 'warning');
 }
 
-// cronTimelineRefreshHead — WS cron_run_ended 触发。如果当前打开的是该 job
-// 详情页，fetch /api/cron/runs?limit=10 替换头 10 条；否则只刷新列表 stats
-// （已有逻辑：fetchCronJobs + renderCronPanel）。
+// cronTimelineRefreshHead — WS cron_run_ended 触发。如果当前 drawer 打开
+// 的就是该 job（cronDetailJobId === jobId），fetch /api/cron/runs?limit=10
+// 替换头 10 条；否则只刷新列表 stats（已有逻辑：fetchCronJobs +
+// renderCronPanel）。
+//
+// cron-panel-consolidation RFC §4.6: 路由门由 selectedKey 切到
+// cronDetailJobId — cron 面板下 selectedKey 始终为 null（openCronPanel 已
+// 清空），不再适合做"当前看的是哪条 cron"判定。
 async function cronTimelineRefreshHead(jobId) {
-  if (selectedKey !== 'cron:' + jobId) return;
+  if (cronDetailJobId !== jobId) return;
   const st = getCronTimelineState(jobId);
   // R220-FE-4: in-flight guard。用户快速触发多次 TriggerNow 时 cron_run_ended
   // 会连续到达，每次都启动 fetch；后返回的请求覆盖先返回的 → 顺序取决于
@@ -11665,7 +11681,7 @@ async function cronTimelineRefreshHead(jobId) {
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
     // 过期请求：开始 fetch 之后又有更新一轮 refreshHead 启动了，丢弃本次结果。
     if (st._refreshToken !== token) return;
-    if (selectedKey !== 'cron:' + jobId) return;
+    if (cronDetailJobId !== jobId) return;
     const head = (data && Array.isArray(data.runs)) ? data.runs : [];
     if (head.length === 0) return;
     // 把头 10 条与现有 runs 合并（用 run_id 去重 + 按 started_at 倒序排）。
