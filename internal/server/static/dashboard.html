@@ -802,6 +802,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .sc-body{flex:1;min-width:0}
 .session-card .sc-header{display:flex;align-items:baseline;gap:8px}
 .session-card .sc-prompt{font-size:15px;color:#e6edf3;font-weight:500;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* AutoTitler badge: emoji robot inline with the prompt; clicking
+ * resets label_origin so the daemon can rename on the next tick. */
+.session-card .sc-prompt .sc-auto-label{display:inline-block;background:transparent;border:0;padding:0 0 0 4px;margin-left:2px;font:inherit;color:inherit;opacity:.65;cursor:pointer;line-height:1;vertical-align:baseline;-webkit-tap-highlight-color:transparent}
+.session-card .sc-prompt .sc-auto-label:hover{opacity:1}
+.session-card .sc-prompt .sc-auto-label:focus-visible{outline:2px solid var(--nz-accent);outline-offset:2px;border-radius:3px}
 .session-card.new-card{border-left-style:dashed;border-left-color:var(--nz-accent)}
 .session-card.active.dead-card{opacity:1}
 .session-card .sc-meta{font-size:12px;color:var(--nz-text-mute);display:flex;align-items:center;gap:4px;margin-top:3px;overflow:hidden;white-space:nowrap}

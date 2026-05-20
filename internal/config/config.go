@@ -65,6 +65,7 @@ type Config struct {
 	Cron       CronConfig        `yaml:"cron"`
 	Log        LogConfig         `yaml:"log"`
 	Projects   ProjectsConfig    `yaml:"projects"`
+	Sysession  SysessionConfig   `yaml:"sysession,omitempty"`
 
 	// Cached parsed durations (populated once in Load, avoids repeated ParseDuration)
 	cachedTTL             time.Duration `yaml:"-"`
@@ -234,6 +235,65 @@ type CronConfig struct {
 type CronNotifyTarget struct {
 	Platform string `yaml:"platform"` // "feishu" / "slack" / "discord" / "weixin"
 	ChatID   string `yaml:"chat_id"`
+}
+
+// SysessionConfig configures the system-session daemon framework
+// (docs/rfc/system-session.md).  Phase 1 ships AutoTitler only;
+// future daemons land under Daemons[<name>].
+type SysessionConfig struct {
+	// Enabled is the master switch.  When false (default), no daemon
+	// goroutines spin up regardless of per-daemon Enabled flags — a
+	// quick kill-switch operators can flip without losing per-daemon
+	// configuration.
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// TickTimeout caps a single Tick.  Daemons that exceed it return
+	// DaemonRunTimedOut.  Default 30s.
+	TickTimeout string `yaml:"tick_timeout,omitempty"`
+
+	// Runner configures the shared LLM-call abstraction.  Empty values
+	// fall back to runtime defaults computed from the data dir +
+	// router.defaultBackend.
+	Runner SysessionRunnerConfig `yaml:"runner,omitempty"`
+
+	// Daemons enumerates per-daemon enable+tick+specific knobs.
+	// Keys must match a compiled-in daemon name; unknown keys are
+	// silently ignored to keep config forward-compatible.
+	Daemons map[string]SysessionDaemonConfig `yaml:"daemons,omitempty"`
+}
+
+// SysessionRunnerConfig configures the transient-system-session Runner.
+type SysessionRunnerConfig struct {
+	// Model overrides --model.  Empty leaves --model off so the binary
+	// uses its own default.
+	Model string `yaml:"model,omitempty"`
+
+	// WorkDir is the cwd for spawned subprocesses.  Empty defaults to
+	// <dataDir>/sys-sessions/.  MUST be 0700 — Runner enforces.
+	WorkDir string `yaml:"work_dir,omitempty"`
+
+	// JSONLMaxAge controls the startup sweep retention window.  Empty
+	// defaults to 168h (7 days).  Set "0" to disable sweep entirely
+	// (operators with their own gardening process).
+	JSONLMaxAge string `yaml:"jsonl_max_age,omitempty"`
+}
+
+// SysessionDaemonConfig holds the common-shape fields every daemon
+// consumes plus a free-form Specific map for daemon-private knobs.
+type SysessionDaemonConfig struct {
+	Enabled bool   `yaml:"enabled,omitempty"`
+	Tick    string `yaml:"tick,omitempty"`
+
+	// AutoTitler-specific fields.  Decoded into the daemon's
+	// DaemonConfig in main.go's wiring.  We don't model them as
+	// untyped map[string]any here because YAML decoding into Go
+	// generally works better with concrete fields — and AutoTitler
+	// is the only daemon for now, so the cost of explicit fields is
+	// trivial.
+	MinUserTurns      int    `yaml:"min_user_turns,omitempty"`
+	MinRenameInterval string `yaml:"min_rename_interval,omitempty"`
+	BatchPerTick      int    `yaml:"batch_per_tick,omitempty"`
+	IncludeGroupChat  bool   `yaml:"include_group_chat,omitempty"`
 }
 
 type LogConfig struct {

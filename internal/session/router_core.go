@@ -71,7 +71,13 @@ var ErrNoActiveProcess = errors.New("session has no active process")
 // there is one source of truth for reserved namespaces. Scratch keys are
 // deliberately NOT exempt — they are short-lived and should pay the
 // normal TTL / eviction cost.
-var exemptKeyPrefixes = []string{CronKeyPrefix, ProjectKeyPrefix}
+//
+// SysKeyPrefix is exempt: system daemon stubs (when daemons opt to register
+// one — see docs/rfc/system-session.md) must outlive the regular TTL/LRU
+// pressure. Phase 1 daemons typically don't register stubs at all (Runner
+// path), but the prefix is reserved here to keep the policy consistent
+// with future stub-using daemons.
+var exemptKeyPrefixes = []string{CronKeyPrefix, ProjectKeyPrefix, SysKeyPrefix}
 
 // isExemptKey reports whether key belongs to an exempt namespace. Callers
 // that already have a ManagedSession should prefer reading s.exempt —
@@ -716,6 +722,21 @@ func NewRouter(cfg RouterConfig) *Router {
 	// Restore sessions from store
 	if restored := loadStore(r.storePath); restored != nil {
 		for key, entry := range restored {
+			// SECURITY:  reject sys: entries here even though saveStore
+			// already skips them (RFC v2.1 §3.4 / Sec-HIGH-1).  Treat
+			// any sys: entry on disk as evidence of a tampered
+			// sessions.json — the legitimate naozhi binary never
+			// writes them, and resurrecting one would let an attacker
+			// pre-seed a synthetic ManagedSession with chosen
+			// label_origin etc.  Daemons re-register stubs at startup
+			// if they need them, so dropping the persisted copy is
+			// safe.
+			if IsSysKey(key) {
+				slog.Warn("session store: dropping unexpected sys: entry",
+					"key", key,
+					"hint", "sys entries should never persist; possible sessions.json tampering")
+				continue
+			}
 			// Resolve the wrapper that owned this session's backend so the
 			// snapshot carries the correct CLI identity even after a pure
 			// restore (no shim reconnect). Pre-multi-backend entries have
@@ -738,6 +759,13 @@ func NewRouter(cfg RouterConfig) *Router {
 			s.SetCLIVersion(cliVersion)
 			if entry.UserLabel != "" {
 				s.SetUserLabel(entry.UserLabel)
+			}
+			// LabelOrigin restore: empty in pre-v2.1 stores is treated as
+			// "user" by daemons (RFC §7.3 / §13), so we don't synthesise a
+			// default here — leaving the field at "" preserves the legacy
+			// "human-set" semantics. Only persist explicit non-empty origin.
+			if entry.LabelOrigin != "" {
+				s.setLabelOrigin(entry.LabelOrigin)
 			}
 			// UI Round 5 R5-3: seed model from persisted store so the
 			// dashboard immediately renders "claude-opus-4.7" / etc on
