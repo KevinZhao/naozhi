@@ -545,6 +545,31 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 		c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "too many subscriptions"})
 		return
 	}
+	// R226-SEC-8: per-session-key cap across all connections. A single
+	// authenticated token could otherwise open many WS connections each
+	// subscribed to the same key, multiplying every event fan-out by N.
+	// 20 generously covers legitimate multi-tab/multi-device usage; the
+	// O(connections) scan is bounded by maxWSConns=500 and only runs on
+	// subscribe (low frequency) — not on each broadcast.
+	if _, alreadySub := c.subscriptions[key]; !alreadySub {
+		count := 0
+		for other := range h.clients {
+			if other.subscriptions == nil {
+				continue
+			}
+			if _, has := other.subscriptions[key]; has {
+				count++
+				if count >= maxSubscribersPerKey {
+					break
+				}
+			}
+		}
+		if count >= maxSubscribersPerKey {
+			h.mu.Unlock()
+			c.SendJSON(node.ServerMsg{Type: "error", Key: key, Error: "too many subscribers for key"})
+			return
+		}
+	}
 	// Unsubscribe from previous subscription
 	if unsub, ok := c.subscriptions[key]; ok {
 		unsub()
@@ -1208,6 +1233,13 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 // envelope instead of a hand-picked 256 that silently disables pooling
 // whenever connCount grows past it.
 const maxWSConns = 500
+
+// maxSubscribersPerKey caps the number of distinct WS connections that may
+// be subscribed to the same session key. Without this, a single authenticated
+// token can open many connections all subscribed to one session, multiplying
+// every event broadcast's fan-out cost by N. 20 is comfortably above the
+// realistic multi-tab / multi-device working set (R226-SEC-8).
+const maxSubscribersPerKey = 20
 
 // broadcastClientSnapPool reuses the []*wsClient backing array across
 // broadcasts so high-frequency session_state / sessions_update traffic does

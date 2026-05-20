@@ -398,6 +398,54 @@ func TestHub_RemoteSubscribe_UnknownNode(t *testing.T) {
 	}
 }
 
+// TestHub_Subscribe_PerKeyCap covers R226-SEC-8: a single authenticated token
+// could otherwise open many WS connections all subscribing to one session,
+// multiplying every event broadcast's fan-out cost by N. After
+// maxSubscribersPerKey clients are subscribed to the same key, the next
+// subscribe attempt must be rejected with "too many subscribers for key".
+func TestHub_Subscribe_PerKeyCap(t *testing.T) {
+	hub, _ := newTestHub("")
+	defer hub.Shutdown()
+
+	const key = "test:d:u:general"
+
+	// Pre-seed maxSubscribersPerKey distinct clients each holding a placeholder
+	// subscription for `key`. Bypassing handleSubscribe avoids the
+	// "session not found" cleanup that otherwise removes the placeholder, so
+	// the cap-counting branch sees the full population.
+	hub.mu.Lock()
+	for i := 0; i < maxSubscribersPerKey; i++ {
+		c := newTestWSClient()
+		hub.clients[c] = struct{}{}
+		c.subscriptions[key] = func() {}
+	}
+	hub.mu.Unlock()
+
+	// A new client subscribing to the same key must be rejected.
+	overflow := newTestWSClient()
+	hub.mu.Lock()
+	hub.clients[overflow] = struct{}{}
+	hub.mu.Unlock()
+
+	hub.handleSubscribe(overflow, node.ClientMsg{Type: "subscribe", Key: key})
+
+	msg := readClientMsg(t, overflow, 2*time.Second)
+	if msg.Type != "error" {
+		t.Fatalf("type = %q, want error", msg.Type)
+	}
+	if msg.Error != "too many subscribers for key" {
+		t.Errorf("error = %q, want %q", msg.Error, "too many subscribers for key")
+	}
+
+	// The overflow client must NOT have leaked a placeholder subscription.
+	hub.mu.RLock()
+	_, leaked := overflow.subscriptions[key]
+	hub.mu.RUnlock()
+	if leaked {
+		t.Error("rejected subscribe leaked placeholder into overflow.subscriptions")
+	}
+}
+
 func TestHub_RemoteUnsubscribe_NoRelay(t *testing.T) {
 	hub, _ := newTestHub("")
 	client := newTestWSClient()
