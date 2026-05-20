@@ -181,11 +181,14 @@ type Router struct {
 	shutdownCond *sync.Cond // signaled when process state changes; conditioned on mu (write lock)
 	// 读写: core (init), lifecycle (spawn/reset/rename), shim (reconnect), cleanup (remove/cleanup), discovery (takeover/register)
 	sessions map[string]*ManagedSession
-	// sessionsByChat is a secondary index: chat key → session keys.
+	// sessionsByChat is a secondary index: chat key → set of session keys.
 	// Enables O(k) ResetChat instead of O(n) full scan (k = agents per chat, typically 1-3).
+	// Inner type is a set (map[string]struct{}) so indexAdd does O(1) dedupe
+	// and indexDel does O(1) removal — the prior []string variant scanned the
+	// slice on every Add/Del. R225-PERF-18.
 	// Nil in test-created routers; all helpers below are nil-safe.
 	// 读写: core (indexAdd/Del helpers), lifecycle (ResetChat/install/unregister), cleanup, discovery
-	sessionsByChat map[string][]string
+	sessionsByChat map[string]map[string]struct{}
 	// 读写: core (init), backend (wrapperFor), lifecycle (spawn)
 	wrapper *cli.Wrapper // default (legacy single-backend) wrapper
 	// 读写: core (init), backend (wrapperFor/managerFor/BackendIDs), lifecycle, shim
@@ -497,12 +500,12 @@ func (r *Router) indexAdd(key string) {
 		return
 	}
 	ck := chatKeyFor(key)
-	for _, k := range r.sessionsByChat[ck] {
-		if k == key {
-			return
-		}
+	set := r.sessionsByChat[ck]
+	if set == nil {
+		set = make(map[string]struct{})
+		r.sessionsByChat[ck] = set
 	}
-	r.sessionsByChat[ck] = append(r.sessionsByChat[ck], key)
+	set[key] = struct{}{}
 }
 
 // indexDel removes key from the chat→sessions index. No-op when index is nil.
@@ -512,17 +515,13 @@ func (r *Router) indexDel(key string) {
 		return
 	}
 	ck := chatKeyFor(key)
-	keys := r.sessionsByChat[ck]
-	for i, k := range keys {
-		if k == key {
-			last := len(keys) - 1
-			keys[i] = keys[last]
-			r.sessionsByChat[ck] = keys[:last]
-			if len(r.sessionsByChat[ck]) == 0 {
-				delete(r.sessionsByChat, ck)
-			}
-			return
-		}
+	set := r.sessionsByChat[ck]
+	if set == nil {
+		return
+	}
+	delete(set, key)
+	if len(set) == 0 {
+		delete(r.sessionsByChat, ck)
 	}
 }
 
@@ -644,7 +643,7 @@ func NewRouter(cfg RouterConfig) *Router {
 
 	r := &Router{
 		sessions:           make(map[string]*ManagedSession),
-		sessionsByChat:     make(map[string][]string),
+		sessionsByChat:     make(map[string]map[string]struct{}),
 		wrapper:            defaultWrapper,
 		wrappers:           wrappers,
 		defaultBackend:     defaultBackend,

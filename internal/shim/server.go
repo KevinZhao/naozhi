@@ -458,7 +458,17 @@ func (s *shimServer) resetIdleTimer(d time.Duration) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.idleTimer != nil {
-		s.idleTimer.Stop()
+		// Stop returns false if the timer already fired but the C channel
+		// hasn't been drained yet. Without the non-blocking drain, a stale
+		// idle event could outlive the Stop and bleed into the next reset
+		// cycle on Go toolchains older than 1.23 (R224-GO-8). Modern
+		// toolchains auto-drain on Reset; the select is belt-and-suspenders.
+		if !s.idleTimer.Stop() {
+			select {
+			case <-s.idleTimer.C:
+			default:
+			}
+		}
 	}
 	s.idleTimer = time.NewTimer(d)
 }
