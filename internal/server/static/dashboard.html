@@ -861,7 +861,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .recent-dot.dot-new{background:var(--nz-status-new);border:1px dashed var(--nz-accent)}
 .recent-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .recent-time{color:var(--nz-text-dim);font-size:11px;flex-shrink:0;font-variant-numeric:tabular-nums}
-.sc-cron{display:inline-flex;align-items:center;gap:2px;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;color:#ffd9a8;background:rgba(249,115,22,.16);border:1px solid rgba(249,115,22,.35);flex-shrink:0}
 /* R110-P3 IM-origin chip: shared structure, per-platform hue variants. The
    base rule stays muted so unrecognized/future platforms still render safely
    (originBadgeHtml returns '' for unknowns, but defence in depth). Platform
@@ -872,8 +871,6 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .sc-origin.kind-slack{color:#d8b4fe;background:rgba(168,85,247,.14);border-color:rgba(168,85,247,.35)}
 .sc-origin.kind-discord{color:#b4c0ff;background:rgba(88,101,242,.16);border-color:rgba(88,101,242,.38)}
 .sc-origin.kind-weixin{color:#a7f3d0;background:rgba(16,185,129,.14);border-color:rgba(16,185,129,.35)}
-.session-card.sc-cron-card{border-left:3px solid #f97316}
-.session-card.sc-cron-card .sc-cli-icon{position:relative}
 /* History bottom sheet (mobile) */
 .history-sheet{position:fixed;bottom:0;left:0;right:0;z-index:200;background:var(--nz-bg-1);border-top:1px solid var(--nz-border);border-radius:16px 16px 0 0;max-height:60vh;overflow-y:auto;animation:sheet-in .25s ease;padding-bottom:max(8px,env(safe-area-inset-bottom))}
 .sheet-handle{width:36px;height:4px;background:var(--nz-text-faint);border-radius:2px;margin:8px auto}
@@ -981,55 +978,34 @@ body.kbd-open .input-hints{display:none}
 .cron-detail{flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden}
 .cron-detail-body{padding:16px 20px;overflow-y:auto;flex:1;min-height:0}
 .cron-detail h3{font-size:16px;color:var(--nz-text-strong);margin-bottom:12px}
-.cron-detail .cd-field{margin-bottom:10px}
-.cron-detail .cd-label{font-size:11px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.3px}
-.cron-detail .cd-value{font-size:14px;color:var(--nz-text);margin-top:2px;word-break:break-word}
-.cron-detail .cd-result{background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;padding:10px;font-size:13px;color:var(--nz-text);max-height:400px;overflow-y:auto;white-space:pre-wrap;word-break:break-word;margin-top:4px}
+/* cron-panel-consolidation RFC §4.7: legacy v2 .cron-detail .cd-field /
+ * .cd-label / .cd-value / .cd-result detail-table styles deleted; the new
+ * per-job drawer uses .cron-drawer-summary further below. */
 /* Cron list header */
 .cron-list-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:12px}
 .cron-list-head h3{margin:0;font-size:16px;color:var(--nz-text-strong)}
 .cron-new-btn{padding:6px 14px;border-radius:6px;border:1px solid var(--nz-border);background:var(--nz-bg-2);color:var(--nz-text);cursor:pointer;font-size:13px;display:inline-flex;align-items:center;gap:4px;min-height:36px;font-family:inherit}
 .cron-new-btn:hover{background:var(--nz-border);color:var(--nz-text-strong)}
 .cron-new-btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
-/* Cron card */
+/* Cron card outer (anchor) — v3 row uses .cj-row for the visual; the
+ * .cron-card class remains as an E2E selector anchor (e2e/dashboard.test.js)
+ * and provides the card shell (border-radius / margin / background / hover)
+ * that .cj-row's grid layout sits on top of. The v2 .cc-* element classes
+ * (cc-next-badge / cc-title / cc-prompt / cc-schedule / cc-meta / cc-result
+ * / cc-actions / cc-btn / cc-human / cc-notify) were used by the original
+ * card layout; v3 cronJobCardHtml emits cj-* element classes only — the
+ * cc-actions wrapper survives in cronJobCardHtml's `__unused` symbol branch
+ * solely as a contract anchor for TestDashboardJS_R110P2_CronRunNowButton
+ * and is never reached at runtime, so its CSS is gone. */
 .cron-card{padding:12px;padding-right:100px;border:1px solid var(--nz-border);border-radius:8px;margin-bottom:10px;background:var(--nz-bg-1);cursor:pointer;transition:border-color .15s,background .15s;position:relative}
 .cron-card:hover{border-color:var(--nz-text-faint);background:#1c2129}
-/* Increment E: Next run 徽章 —— 右上角抢眼位置，10 分钟内高亮。
- * padding-right 90px 给徽章留位避免压住 actions 行；移动端窄屏下
- * 回退到 meta 行（@media）。 */
-.cron-card .cc-next-badge{position:absolute;top:10px;right:12px;font-size:11px;color:var(--nz-text-mute);display:flex;gap:4px;align-items:baseline;pointer-events:none}
-.cron-card .cc-next-badge .cc-next-label{font-size:10px;text-transform:uppercase;letter-spacing:.5px;opacity:.7}
-.cron-card .cc-next-badge .cc-next-rel{font-weight:500}
-.cron-card .cc-next-badge.imminent{color:var(--nz-accent)}
-.cron-card .cc-next-badge.imminent .cc-next-rel{font-weight:600}
-/* Increment C: missed 徽章色 —— 在 cc-meta 行里和 notify/fresh 同级
- * 形状，但用 red token 强调 "这个需要你看一眼"。*/
-.cron-card .cc-notify.missed{color:var(--nz-red);font-weight:600}
 /* Increment C: missed banner —— 整个 cron 面板顶部告警条，红色强调 +
  * 可点切 filter。alert role 提示屏幕阅读器。 */
 .cron-missed-banner{display:flex;align-items:center;gap:8px;padding:10px 14px;margin:0 0 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.35);border-radius:8px;color:var(--nz-red);font-size:13px;cursor:pointer;transition:background .15s}
 .cron-missed-banner:hover{background:rgba(239,68,68,.15)}
 .cron-missed-banner .cmb-icon{font-size:16px;line-height:1}
 .cron-missed-banner .cmb-text{flex:1;color:var(--nz-text)}
-@media (max-width:540px){.cron-card{padding-right:12px}.cron-card .cc-next-badge{position:static;margin-bottom:4px}}
-.cron-card .cc-title{font-size:15px;color:var(--nz-text-strong);font-weight:600;overflow-wrap:anywhere;margin-bottom:4px;line-height:1.35}
-.cron-card .cc-prompt{font-size:14px;color:var(--nz-text-strong);font-weight:500;overflow-wrap:anywhere}
-.cron-card .cc-prompt.secondary{font-size:12px;color:var(--nz-text-mute);font-weight:400;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.cron-card .cc-prompt.placeholder{color:var(--nz-text-dim);font-weight:400;font-style:italic}
-.cron-card .cc-schedule{font-size:12px;color:var(--nz-accent);margin-top:4px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-.cron-card .cc-meta{font-size:12px;color:var(--nz-text-mute);margin-top:6px;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
-.cron-card .cc-meta .cc-ws{color:#a5d6ff;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
-.cron-card .cc-result{margin-top:6px;font-size:12px;display:flex;gap:6px;align-items:flex-start;line-height:1.5;word-break:break-word}
-.cron-card .cc-result .cc-icon{flex-shrink:0;margin-top:1px}
-.cron-card .cc-result.ok{color:var(--nz-green)}
-.cron-card .cc-result.ok .cc-text{color:var(--nz-text);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.cron-card .cc-result.err{color:var(--nz-red)}
-.cron-card .cc-result.err .cc-text{color:var(--nz-red);display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}
-.cron-card .cc-actions{display:flex;gap:8px;margin-top:10px;flex-wrap:wrap}
-.cron-card .cc-btn{min-height:36px;padding:0 14px;border-radius:6px;border:1px solid var(--nz-border);background:var(--nz-bg-2);color:var(--nz-text);cursor:pointer;font-size:12px;font-family:inherit;display:inline-flex;align-items:center;justify-content:center;-webkit-tap-highlight-color:transparent}
-.cron-card .cc-btn:hover{background:var(--nz-border);color:var(--nz-text-strong)}
-.cron-card .cc-btn.danger{color:var(--nz-red);border-color:rgba(218,54,51,.45);background:transparent}
-.cron-card .cc-btn.danger:hover{background:rgba(218,54,51,.12);color:var(--nz-red)}
+@media (max-width:540px){.cron-card{padding-right:12px}}
 .cron-empty{text-align:center;padding:40px 20px}
 .cron-empty-icon{font-size:40px;opacity:.35;margin-bottom:12px}
 .cron-empty-hint{color:var(--nz-text-mute);margin-bottom:6px}
@@ -1150,7 +1126,6 @@ body.kbd-open .input-hints{display:none}
 }
 /* v3 hides the legacy .cc-actions wrapper (still emitted for contract
  * test compatibility) since actions moved to .cj-actions + ⋯ menu */
-.cj-row .cc-actions{display:none}
 
 /* ===== P2 cron-run-history — 列表卡片成功率徽章 + hover tooltip =====
  * RFC §8.1 / §8.4。徽章嵌在 .cj-row 第 4 列（when 列后、actions 前），
@@ -1335,9 +1310,6 @@ body.kbd-open .input-hints{display:none}
 .freq-time{padding:8px 10px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:8px;color:var(--nz-text-strong);font-size:14px;font-family:inherit;outline:none;min-height:38px}
 .freq-time:hover{border-color:var(--nz-text-faint)}
 .freq-time:focus{border-color:var(--nz-accent)}
-/* Card humanized label —— 卡片底部"每天 09:00"这类人类可读标签 */
-.cron-card .cc-human{font-size:13px;color:var(--nz-accent);margin-top:4px}
-
 /* ===== Cron editor — single-column modal (both PC and mobile) =====
  * v2 polish: 从双列 grid 改成单列 flex，对齐 Claude Scheduled Tasks 的
  * modal 布局。保留 cf-label 文案（做什么 / 什么时候 / 在哪里 / 其他设置）
@@ -1391,8 +1363,6 @@ body.kbd-open .input-hints{display:none}
 /* Mobile polish for Cron cards + modal */
 @media(max-width:768px){
   .cron-detail-body{padding:12px}
-  .cron-card .cc-btn{min-height:40px;padding:0 16px;font-size:13px;flex:1 1 auto}
-  .cron-card .cc-actions{gap:8px}
   .cron-new-btn{min-height:40px}
   /* Bottom-sheet modal: cap height so textarea/lists stay scrollable above keyboard */
   .modal{max-height:85dvh;display:flex;flex-direction:column}
