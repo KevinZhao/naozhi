@@ -409,7 +409,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 				// Without this log, Feishu schema drift silently drops every
 				// message and operators see no reply with no trace.
 				slog.Debug("feishu webhook: text content unmarshal failed",
-					"err", err, "msg_id", event.Message.MessageID)
+					"err", err, "msg_id", osutil.SanitizeForLog(event.Message.MessageID, 64))
 				return
 			}
 			text := content.Text
@@ -421,7 +421,7 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			// maxIncomingTextBytes is shared with transport_ws.go.
 			if len(text) > maxIncomingTextBytes {
 				slog.Warn("feishu webhook: text exceeds limit, dropping",
-					"msg_id", event.Message.MessageID, "len", len(text))
+					"msg_id", osutil.SanitizeForLog(event.Message.MessageID, 64), "len", len(text))
 				return
 			}
 			// Strip all @-mention tokens in a single pass. Previously each
@@ -461,14 +461,14 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			if err := json.Unmarshal([]byte(event.Message.Content), &content); err != nil || content.ImageKey == "" {
 				if err != nil {
 					slog.Debug("feishu webhook: image content unmarshal failed",
-						"err", err, "msg_id", event.Message.MessageID)
+						"err", err, "msg_id", osutil.SanitizeForLog(event.Message.MessageID, 64))
 				}
 				return
 			}
 			if !isValidFeishuResourceKey(content.ImageKey) {
 				slog.Warn("feishu webhook: rejecting malformed image_key",
 					"key", osutil.SanitizeForLog(content.ImageKey, 64),
-					"msg_id", event.Message.MessageID)
+					"msg_id", osutil.SanitizeForLog(event.Message.MessageID, 64))
 				return
 			}
 			select {
@@ -504,14 +504,14 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			if err := json.Unmarshal([]byte(event.Message.Content), &content); err != nil || content.FileKey == "" {
 				if err != nil {
 					slog.Debug("feishu webhook: audio content unmarshal failed",
-						"err", err, "msg_id", event.Message.MessageID)
+						"err", err, "msg_id", osutil.SanitizeForLog(event.Message.MessageID, 64))
 				}
 				return
 			}
 			if !isValidFeishuResourceKey(content.FileKey) {
 				slog.Warn("feishu webhook: rejecting malformed file_key",
 					"key", osutil.SanitizeForLog(content.FileKey, 64),
-					"msg_id", event.Message.MessageID)
+					"msg_id", osutil.SanitizeForLog(event.Message.MessageID, 64))
 				return
 			}
 			select {
