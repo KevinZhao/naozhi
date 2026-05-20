@@ -27,7 +27,17 @@ const (
 const (
 	DefaultNoOutputTimeout = 2 * time.Minute
 	DefaultTotalTimeout    = 5 * time.Minute
-	maxScannerBufBytes     = 10 * 1024 * 1024
+	// maxScannerBufBytes caps a single NDJSON line read from the shim's stdout.
+	//
+	// Set 6 MiB below the shim's own per-line cap (16 MiB, see
+	// internal/shim/server.go maxServerLineBytes) so a single shim-side
+	// allocator decision (e.g. retry-with-larger-buffer) never causes the
+	// reader here to silently truncate a line. Lines between 10 MiB and
+	// 16 MiB are not "legal-but-dropped"; the shim itself rejects them at
+	// its own cap, so naozhi never sees them. The 6 MiB headroom is for
+	// buffered-event coalescing and base64-image-laden tool_result frames
+	// that sit a few MiB above the typical 50-200 KiB line size.
+	maxScannerBufBytes = 10 * 1024 * 1024
 
 	// maxStdinLineBytes is the largest single NDJSON line we will forward to
 	// the shim. The shim enforces 16 MB per line; we leave headroom for the

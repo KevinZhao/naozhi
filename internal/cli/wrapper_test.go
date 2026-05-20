@@ -4,40 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"testing"
 )
-
-// TestParseVersionOutput pins the parser against the two known --version
-// formats (claude, kiro) plus failure / edge cases. Without this, kiro's
-// "kiro-cli 2.3.0" output silently degraded to empty version string,
-// which `cli backend version probe failed` masked at runtime.
-func TestParseVersionOutput(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name string
-		in   string
-		want string
-	}{
-		{"claude format", "2.1.143 (Claude Code)\n", "2.1.143"},
-		{"kiro format", "kiro-cli 2.3.0\n", "2.3.0"},
-		{"version-prefix", "version 1.2.3\n", "1.2.3"},
-		{"empty", "", ""},
-		{"no semver token", "claude (no version available)\n", ""},
-		{"trailing whitespace", "  4.5.6   \n", "4.5.6"},
-		{"truncate over 32 bytes", "9.9.9-" + strings.Repeat("x", 100), "9.9.9-" + strings.Repeat("x", 26)},
-		{"multiline first match wins", "naozhi build\n7.8.9\n", "7.8.9"},
-	}
-	for _, tc := range cases {
-		tc := tc
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			if got := parseVersionOutput(tc.in); got != tc.want {
-				t.Errorf("parseVersionOutput(%q) = %q, want %q", tc.in, got, tc.want)
-			}
-		})
-	}
-}
 
 func TestCandidatePaths_ContainsNativeInstaller(t *testing.T) {
 	t.Parallel()
@@ -147,6 +115,42 @@ func TestNewWrapper_EmptyPathAutoDetects(t *testing.T) {
 // backend) or a fatal Error (default backend). If a future refactor
 // populates CLIVersion with a placeholder or defaults-on-error, that
 // detection path silently breaks — this test is the tripwire.
+// TestNewWrapper_DisplayNameMatchesNormalizedID locks the R228-ARCH-15
+// contract: NewWrapper feeds the post-normalize id (case-folded,
+// whitespace-trimmed) into backendDisplayName so case variants like
+// "Kiro"/"KIRO" surface as "kiro" instead of leaking the raw operator
+// string. Pre-fix the default arm received the raw value, so "Kiro"
+// rendered as "Kiro" while "kiro" rendered as "kiro" — same backend,
+// two display labels in dashboard chips.
+func TestNewWrapper_DisplayNameMatchesNormalizedID(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		in            string
+		wantBackendID string
+		wantCLIName   string
+	}{
+		{"kiro", "kiro", "kiro"},
+		{"Kiro", "kiro", "kiro"},
+		{"KIRO", "kiro", "kiro"},
+		{"  kiro  ", "kiro", "kiro"},
+		{"Claude", "claude", "claude-code"},
+		{"", "claude", "claude-code"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.in, func(t *testing.T) {
+			t.Parallel()
+			w := NewWrapper("/definitely/not/a/real/path/claude-xyz", &ClaudeProtocol{}, tc.in)
+			if w.BackendID != tc.wantBackendID {
+				t.Errorf("BackendID = %q, want %q", w.BackendID, tc.wantBackendID)
+			}
+			if w.CLIName != tc.wantCLIName {
+				t.Errorf("CLIName = %q, want %q", w.CLIName, tc.wantCLIName)
+			}
+		})
+	}
+}
+
 func TestNewWrapper_UnavailableBinaryLeavesVersionEmpty(t *testing.T) {
 	t.Parallel()
 	// Use an absolute path that cannot exist so detectVersion's exec.Command

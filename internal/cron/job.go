@@ -205,12 +205,16 @@ func JobTitleOrFallback(j *Job) string {
 	if line == "" {
 		return ""
 	}
-	// rune-level 截断，保证不切断多字节
-	runes := []rune(line)
-	if len(runes) > titleFallbackRuneLimit {
-		line = string(runes[:titleFallbackRuneLimit]) + "…"
+	// R228-CR-5: 改用 textutil.TruncateRunesNoEllipsis 复用 byte-level 解码 +
+	// 短路快路径（len ≤ maxRunes 时无需解码 UTF-8），消除 []rune(line) 的全
+	// 量 heap 分配。textutil 的 ASCII "..." 后缀与 cron 卡片的 U+2026 风格
+	// 不一致，所以本地补 "…"。靠返回 string 与原值 != 判断是否真发生截断
+	// 比再做一次 utf8.RuneCountInString(line) 便宜。
+	truncated := textutil.TruncateRunesNoEllipsis(line, titleFallbackRuneLimit)
+	if truncated != line {
+		return truncated + "…"
 	}
-	return line
+	return truncated
 }
 
 // cronParser is the shared parser for all schedule validation and preview.

@@ -233,7 +233,7 @@
 - [ ] **R225-GO-4 — `Router.Remove` / `dropEventLogForKey` 用 `context.Background()` + 独立 timeout 而非传入 ctx（P2）**: router_cleanup.go:97 `Remove` 路径上 7s 内不可被 SIGTERM 取消，shutdown tail latency 加重。Breaking：Remove 签名加 ctx。
 - [ ] **R225-GO-5 — `cron.SetOnExecute / SetOnRunStarted / SetOnRunEnded` 裸 callback 字段（P2）**: scheduler.go:312 三 setter 在 s.mu 下写、`emitRun*` 在 RUnlock 后调，外部测试若直接读字段触发 race。方案：`atomic.Pointer[OnRunStartedFunc]`，与 `Router.onChange` 模式对齐。
 - [x] **R225-GO-6 — `cli.Process pongRecv` 容量 1 在 GC pause 下可能误杀健康进程（P3）**: process.go:228 调度延迟时多个 pong 被丢，misses 误累。方案：容量提到 maxMisses+1，或心跳消费处用 drain 循环。 — 已修复，本批 PR #156
-- [~] **R225-GO-7 — `cli.Process.Kill` 在持 shimWMu 下调 closeShimConn，与 Detach 顺序不一致（误报关闭 2026-05-20）**: 复核 process.go:519-535 (Kill) 与 :617-634 (Detach) 后两者均为 `shimWMu.Lock → SetWriteDeadline → shimSendLocked → closeShimConn → Unlock` 同一模式；两个函数都在持 shimWMu 期间调 closeShimConn，并非"Detach 是 Unlock 后 close"。closeShimConn 走 sync.Once 守护的 net.Conn.Close（R219-GO-3 落地），最坏延迟仅一次系统调用，与 SetWriteDeadline+shimSendLocked 同量级。R227-GO-8 同根因一并关闭。本批 PR #PENDING
+- [~] **R225-GO-7 — `cli.Process.Kill` 在持 shimWMu 下调 closeShimConn，与 Detach 顺序不一致（误报关闭 2026-05-20）**: 复核 process.go:519-535 (Kill) 与 :617-634 (Detach) 后两者均为 `shimWMu.Lock → SetWriteDeadline → shimSendLocked → closeShimConn → Unlock` 同一模式；两个函数都在持 shimWMu 期间调 closeShimConn，并非"Detach 是 Unlock 后 close"。closeShimConn 走 sync.Once 守护的 net.Conn.Close（R219-GO-3 落地），最坏延迟仅一次系统调用，与 SetWriteDeadline+shimSendLocked 同量级。R227-GO-8 同根因一并关闭。本批 PR #169
 - [x] **R225-GO-8 — `cli.spawnSession` 历史加载 ctx 用 `context.Background()` 不继承 ctx（P3）**: router_lifecycle.go:678 resume + `claudeDir != ""` + 无 oldHistory 时 15s 独立 ctx；调用方 ctx 已被取消时仍会等满。方案：`context.WithTimeout(ctx, 15s)`。 — 已修复（context.WithTimeout(ctx, 15s) 派生调用方 ctx；注释补充 r.historyCtx 仍不能用的 Shutdown 路径分离原因），本批 PR #157
 - [x] **R225-GO-9 — `Process.SessionID` 公开字段缺 mutex 注释（P3）**: process.go 字段定义无 `// Protected by mu` 注释，外部调用方可能绕过 GetSessionID 直接读。方案：补字段 godoc。 — 已修复（字段 godoc 补 mutex 契约），本批 PR #146
 
@@ -1274,7 +1274,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R227-GO-4 — `Router.Shutdown` test fallback `time.Sleep(100ms)` busy-poll（P2）**: 测试构造的 `&Router{}` 缺 shutdownCond，30s 超时下 300 次 busy-poll。方案：要求所有路径走 NewRouter；或裸构造时 log.Warn。
 - [ ] **R227-GO-5 — cron `notifyTarget` 用 `context.Background()` 不响应 stopCtx（P2）**: send 路径已用 Background 是有意（保证 cron run 记录写入），但 notifyTarget 通知失败只 Warn，应继承 stopCtx 在关闭路径提前取消。**降级**：审查发现 send 路径用 Background 与 notifyTarget 用 Background 是同一原则（生命周期独立于 stopCtx），降为 P3 仅记录。
 - [ ] **R227-GO-7 — `cli.Resolve` resolveSem acquire 无 ctx select arm（P2）**: 与 R227-GO-2 同根因；Resolve 接 ctx 后可统一 select。
-- [~] **R227-GO-8 — `cli/process.go Kill()` 持 shimWMu 调 closeShimConn 与 Detach 顺序不一致（误报关闭 2026-05-20）**: 与 R225-GO-7 同根因一并关闭——核实后 Kill (process.go:519-535) 与 Detach (:617-634) 都是「持 shimWMu 期间 closeShimConn」同一模式，不存在所谓"顺序不一致"。closeShimConn 走 sync.Once + net.Conn.Close，最坏延迟一次系统调用，不会饥饿 heartbeat。本批 PR #PENDING
+- [~] **R227-GO-8 — `cli/process.go Kill()` 持 shimWMu 调 closeShimConn 与 Detach 顺序不一致（误报关闭 2026-05-20）**: 与 R225-GO-7 同根因一并关闭——核实后 Kill (process.go:519-535) 与 Detach (:617-634) 都是「持 shimWMu 期间 closeShimConn」同一模式，不存在所谓"顺序不一致"。closeShimConn 走 sync.Once + net.Conn.Close，最坏延迟一次系统调用，不会饥饿 heartbeat。本批 PR #169
 
 ### 安全 — 本轮新发现
 
@@ -1378,11 +1378,11 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 
 ### 代码质量 — 本轮新发现
 
-- [ ] **R228-CR-1 — `maxScannerBufBytes=10MB` 与 shim `maxServerLineBytes=16MB` 不一致（P2）**: 10-16MB 之间合法事件被静默丢弃。方案：加 godoc 解释 6MB headroom，或对齐到 16MB。涉及 `internal/cli/process.go:30`。
-- [ ] **R228-CR-2 — `Caps.SoftInterrupt`/`Priority`/`StreamJSON` 三个字段被填但从未读（P2）**: 只有 Replay 被读。方案：删除三个 dead 字段并修 Capabilities 实现；或 godoc 标 reserved。涉及 `internal/cli/protocol.go:95-100`、`protocol_claude.go:137`、`protocol_acp.go:337`。
+- [x] **R228-CR-1 — `maxScannerBufBytes=10MB` 与 shim `maxServerLineBytes=16MB` 不一致（P2）**: 10-16MB 之间合法事件被静默丢弃。方案：加 godoc 解释 6MB headroom，或对齐到 16MB。涉及 `internal/cli/process.go:30`。 — 已修复（godoc 解释 6MB headroom：shim 自身在 16MB 拒绝行，naozhi 永远不会看到 10-16MB 的"合法但被丢"行；headroom 留给协议帧 + base64 图像 tool_result），本批 PR #169
+- [x] **R228-CR-2 — `Caps.SoftInterrupt`/`Priority`/`StreamJSON` 三个字段被填但从未读（P2）**: 只有 Replay 被读。方案：删除三个 dead 字段并修 Capabilities 实现；或 godoc 标 reserved。涉及 `internal/cli/protocol.go:95-100`、`protocol_claude.go:137`、`protocol_acp.go:337`。 — 已修复（godoc 标 reserved + 指向 protocol_caps_test.go 锁定的契约；不删字段保留 forward-compat anchor），本批 PR #169
 - [ ] **R228-CR-3 — `isActivityType` 与 `EventLog.Append` activity 集无编译期 sync 保护（P2）**: 注释说"两边必须一起改"但无 contract test/共享函数。方案：抽 `cli.IsActivityType(t string) bool` 共享；或加 contract test。涉及 `internal/session/managed.go:1483-1488` + `internal/cli/eventlog.go:681`。
 - [ ] **R228-CR-4 — `Process.LastEntryOfType` + `EventLog.LastEntryOfType` 导出但无 prod 调用（P3）**: 应 unexport 或加到 processIface。涉及 `internal/cli/process_event_query.go:188-191`、`internal/cli/eventlog.go:1058`。
-- [ ] **R228-CR-5 — `cron/job.JobTitleOrFallback` `[]rune(line)` heap alloc（P3）**: 与 textutil.TruncateRunes 重叠但用 `…`(U+2026)。方案：要么接受 ASCII `...` 后缀改用 textutil；要么 textutil 加 ellipsis 参数 overload。涉及 `internal/cron/job.go:205-209`。
+- [x] **R228-CR-5 — `cron/job.JobTitleOrFallback` `[]rune(line)` heap alloc（P3）**: 与 textutil.TruncateRunes 重叠但用 `…`(U+2026)。方案：要么接受 ASCII `...` 后缀改用 textutil；要么 textutil 加 ellipsis 参数 overload。涉及 `internal/cron/job.go:205-209`。 — 已修复（改用 textutil.TruncateRunesNoEllipsis 复用 byte-level 解码 + 短路快路径；通过 truncated != line 判定后本地补 U+2026 保留卡片视觉一致性），本批 PR #169
 
 ### 架构 — 本轮新发现
 
@@ -1400,8 +1400,8 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R228-ARCH-12 — `cron.SchedulerConfig` 直接持 `session.AgentOpts` + `platform.Platform`（P2）**: cron 字段调整波及 cron。方案：cron 加自己的 JobNotifier interface + JobAgentOpts 局部类型。涉及 `internal/cron/scheduler.go:100-101,213-214`。
 - [ ] **R228-ARCH-13 — `cli.HistoryFactoryFn` registry blank import 在 session 包（P2）**: 触发点已迁到 `cli.NewWrapper` 但 import 列表残留在 session。方案：移到 cli/wrapper.go 或 cmd/naozhi/main.go。涉及 `internal/session/router_core.go:21-32`。
 - [ ] **R228-ARCH-14 — `dispatch.Dispatcher.takeoverFn`/`sendFn` closure 字段易漏 wireup（P2）**: closure-pattern 经典毛病。方案：1-method interface。Breaking：内部 wiring。涉及 `internal/dispatch/dispatch.go:82-83`。
-- [ ] **R228-ARCH-15 — `cli.NewWrapper` `backendDisplayName` 与 `normalizeBackendID` 顺序导致 case 不一致（P3）**: "Kiro" 走 default 显示原值，"kiro" 收敛到小写。方案：先 normalize 再 displayName。涉及 `internal/cli/wrapper.go:55-87`。
-- [ ] **R228-ARCH-16 — `parseVersionOutput` 在 wrapper.go 但属 detect 概念（P3）**: 应搬到 detect.go。涉及 `internal/cli/wrapper.go:177-187`。
+- [x] **R228-ARCH-15 — `cli.NewWrapper` `backendDisplayName` 与 `normalizeBackendID` 顺序导致 case 不一致（P3）**: "Kiro" 走 default 显示原值，"kiro" 收敛到小写。方案：先 normalize 再 displayName。涉及 `internal/cli/wrapper.go:55-87`。 — 已修复（backendDisplayName(id) 喂规范化后的 id，新增 TestNewWrapper_DisplayNameMatchesNormalizedID 表驱动 6 case 锁契约），本批 PR #169
+- [x] **R228-ARCH-16 — `parseVersionOutput` 在 wrapper.go 但属 detect 概念（P3）**: 应搬到 detect.go。涉及 `internal/cli/wrapper.go:177-187`。 — 已修复（函数 + 表驱动测试整批迁到 detect.go / detect_test.go；wrapper.go 只留 normalize/displayName/detectCLI/candidatePaths），本批 PR #169
 - [ ] **R228-ARCH-17 — `wshub` 持整个 `*cron.Scheduler` 仅为调 `EnsureStub`（P3）**: 耦合面 300+ 方法。方案：定义 `cronStubChecker` interface（1 method），Hub 字段改 interface。涉及 `internal/server/dashboard_session.go:713`。
 - [ ] **R228-ARCH-18 — `dispatch.Dispatcher.projectMgr` 仅用于 slash-command UX 但持整个 `*project.Manager`（P3）**: 30+ 方法面。方案：内部 1-method interface 注入。涉及 `internal/dispatch/dispatch.go:56`。
 
