@@ -26,10 +26,21 @@ const (
 	// non-pathological payloads. 1.5 MB leaves headroom for JSON escape
 	// expansion without paying 2 MB per connection. R68-GO-H1.
 	wsMaxMessageSize = 1536 * 1024
-	wsWriteWait      = 10 * time.Second
-	wsPongWait       = 60 * time.Second
-	wsPingPeriod     = (wsPongWait * 9) / 10
-	wsAuthTimeout    = 5 * time.Second
+	// wsPreAuthMessageSize tightens the read budget while the connection is
+	// unauthenticated. The only legal message in this state is `auth` whose
+	// Token field is bounded by the dashboard token max (~256 bytes); 512
+	// gives plenty of slack for the JSON framing and an "interrupt" form
+	// that some old clients still send pre-auth (silently dropped, but
+	// enforcement happens after Unmarshal). Cap is lifted to wsMaxMessageSize
+	// once auth succeeds. Reduces pre-auth memory amplification: a flood of
+	// upgraded-but-unauth connections each parking a 1.5 MB read buffer can
+	// pin ~750 MB at the 500-conn cap; with this gate the pre-auth budget
+	// drops to ~256 KB. R229-SEC-11.
+	wsPreAuthMessageSize = 512
+	wsWriteWait          = 10 * time.Second
+	wsPongWait           = 60 * time.Second
+	wsPingPeriod         = (wsPongWait * 9) / 10
+	wsAuthTimeout        = 5 * time.Second
 
 	// maxWSSendTextBytes bounds a single "send" msg.Text payload. See
 	// handleSend for the rationale; summary: wsMaxMessageSize bounds the
@@ -233,7 +244,17 @@ func (c *wsClient) readPump() {
 		c.conn.Close()
 	}()
 
-	c.conn.SetReadLimit(wsMaxMessageSize)
+	// R229-SEC-11: tighten the read budget for unauthenticated connections.
+	// Pre-auth the only legal frame is `auth` (a few-hundred-byte JSON);
+	// granting the full 1.5 MB buffer to every upgraded socket meant a flood
+	// of unauth connections could pin ~750 MB before the 5s wsAuthTimeout
+	// reaped them. The cap is lifted to wsMaxMessageSize on the auth-success
+	// path below.
+	if c.authenticated.Load() {
+		c.conn.SetReadLimit(wsMaxMessageSize)
+	} else {
+		c.conn.SetReadLimit(wsPreAuthMessageSize)
+	}
 	// Unauthenticated connections get the shorter auth window; authenticated
 	// ones get the full pong window so the PongHandler keeps them alive.
 	// Single write avoids the earlier "set wsPongWait then immediately
@@ -279,6 +300,10 @@ func (c *wsClient) readPump() {
 			}
 			c.hub.handleAuth(c, msg)
 			if c.authenticated.Load() {
+				// R229-SEC-11: lift the 512-byte pre-auth read limit now that
+				// the peer is trusted to send legitimate `send` payloads up
+				// to wsMaxMessageSize.
+				c.conn.SetReadLimit(wsMaxMessageSize)
 				if err := c.conn.SetReadDeadline(time.Now().Add(wsPongWait)); err != nil {
 					return
 				}
