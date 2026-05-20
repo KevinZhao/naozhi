@@ -144,11 +144,18 @@ func TestDashboardJS_CronPanelConsolidation(t *testing.T) {
 	}
 
 	// 7. cronDelete clears cronDetailJobId for the active row.
+	// Round 2 R-12 expanded the function (multi-branch confirm copy +
+	// running-detection), so bound by next top-level function rather
+	// than a fixed byte count.
 	delIdx := strings.Index(js, "async function cronDelete(id)")
 	if delIdx >= 0 {
-		end := delIdx + 2500
-		if end > len(js) {
-			end = len(js)
+		nextFn := strings.Index(js[delIdx+30:], "\nasync function ")
+		if nextFn < 0 {
+			nextFn = strings.Index(js[delIdx+30:], "\nfunction ")
+		}
+		end := len(js)
+		if nextFn >= 0 {
+			end = delIdx + 30 + nextFn
 		}
 		body := js[delIdx:end]
 		if !strings.Contains(body, "cronDetailJobId === id") {
@@ -468,5 +475,85 @@ func TestDashboardJS_R2_R1_LayoutObserver(t *testing.T) {
 	//    deactivates as soon as JS sets the attribute.
 	if !strings.Contains(html, ":not([data-cron-layout])") {
 		t.Error("dashboard.html: pre-JS @media fallback must guard with :not([data-cron-layout]) so it deactivates once JS runs")
+	}
+}
+
+// TestDashboardJS_R2_R12_DeleteCopy pins the Round 2 review R-12 destructive-
+// flow rewrite (RFC §7.5). Three branches are required:
+//  1. Normal delete — references run count + JSONL preservation hint
+//  2. Running delete — special copy explaining the in-flight execution
+//     will continue but won't be recorded
+//  3. Never-run delete — terse copy without history hint
+//
+// All three flow through a 3 s countdown via confirmDialog's countdownSecs.
+func TestDashboardJS_R2_R12_DeleteCopy(t *testing.T) {
+	t.Parallel()
+	jsData, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(jsData)
+	htmlData, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(htmlData)
+
+	// 1. confirmDialog must support countdownSecs option. Old call sites
+	//    (boolean confirmText only) keep working because countdownSecs
+	//    defaults to 0 = no countdown.
+	if !strings.Contains(js, "countdownSecs") {
+		t.Error("confirmDialog: must accept countdownSecs option for destructive flows (RFC §7.5)")
+	}
+
+	// 2. cronDelete must compute the running branch + non-running branch.
+	delIdx := strings.Index(js, "async function cronDelete(id)")
+	if delIdx < 0 {
+		t.Fatal("dashboard.js: cronDelete not found")
+	}
+	delEnd := delIdx + 5000
+	if delEnd > len(js) {
+		delEnd = len(js)
+	}
+	delBody := js[delIdx:delEnd]
+
+	// Running branch — must mention "正在执行" + "继续运行直到完成" + "不会被记录".
+	if !strings.Contains(delBody, "正在执行") ||
+		!strings.Contains(delBody, "继续运行直到完成") ||
+		!strings.Contains(delBody, "不会被记录") {
+		t.Error("cronDelete: running branch must explain in-flight execution continues + result not recorded (RFC §7.5)")
+	}
+
+	// Normal branch — must mention JSONL + "claude --resume" but bury it
+	// behind the "在终端" path, not the headline.
+	if !strings.Contains(delBody, "JSONL") || !strings.Contains(delBody, "claude --resume") {
+		t.Error("cronDelete: normal branch must mention JSONL + claude --resume revival path (RFC §7.5)")
+	}
+	// "在终端用" guards against the resume command being moved to the
+	// headline (which would alarm L1 operators who don't shell).
+	if !strings.Contains(delBody, "在终端用") {
+		t.Error("cronDelete: claude --resume must be qualified with 在终端用 so non-shell users skip past it (RFC §7.5)")
+	}
+
+	// 3 s countdown wired.
+	if !strings.Contains(delBody, "countdownSecs: 3") {
+		t.Error("cronDelete: must pass countdownSecs: 3 (RFC §7.5 — 3 s is the documented friction floor)")
+	}
+
+	// Title must include the task name when available.
+	if !strings.Contains(delBody, "删除「' + title + '」？") &&
+		!strings.Contains(delBody, "'删除「' + title + '」？'") {
+		t.Error("cronDelete: title must wrap the task name in 「」 when set so users see what they're deleting")
+	}
+
+	// 3. CSS — confirm-msg pre-wrap + countdown pulse + reduced-motion.
+	if !strings.Contains(html, ".confirm-msg") || !strings.Contains(html, "white-space:pre-wrap") {
+		t.Error("dashboard.html: .confirm-msg must use white-space:pre-wrap so multi-paragraph delete copy renders correctly")
+	}
+	if !strings.Contains(html, "@keyframes confirmCountdown") {
+		t.Error("dashboard.html: countdown pulse keyframe missing")
+	}
+	if !strings.Contains(html, "button.danger[disabled]{animation:none}") {
+		t.Error("dashboard.html: prefers-reduced-motion must disable the countdown pulse")
 	}
 }

@@ -531,7 +531,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .modal .modal-btns button.danger{background:var(--nz-red);border-color:var(--nz-red);color:#fff}
 .modal .modal-btns button.danger:hover{filter:brightness(1.1)}
 .modal.confirm-dialog p{margin:8px 0 4px;color:var(--nz-text);line-height:1.5}
+/* Round 2 R-12: .confirm-msg honours newlines for multi-paragraph
+ * destructive copy (RFC §7.5). Default <p> styling collapses them, so
+ * white-space:pre-wrap is required. Other dialogs that pass single-line
+ * `message` strings render identically because pre-wrap is a superset
+ * of normal whitespace handling. */
+.modal.confirm-dialog .confirm-msg{white-space:pre-wrap;word-break:break-word}
 .modal.confirm-dialog .confirm-detail{color:var(--nz-text-mute);font-size:13px;margin-top:8px;word-break:break-all}
+/* Round 2 R-12: countdown disables the destructive primary for N s; the
+ * built-in [disabled] dimming reads as "waiting" but isn't directional.
+ * A subtle pulse on the disabled state communicates "tick…tick…tick" so
+ * fat-finger Enter doesn't feel like a broken button. */
+.modal.confirm-dialog .modal-btns button.danger[disabled]{opacity:.55;cursor:not-allowed;animation:confirmCountdown 1s ease-in-out infinite;background:var(--nz-red);border-color:var(--nz-red);color:#fff}
+@keyframes confirmCountdown{0%,100%{opacity:.55}50%{opacity:.75}}
+@media (prefers-reduced-motion:reduce){
+  .modal.confirm-dialog .modal-btns button.danger[disabled]{animation:none}
+}
 /* RNEW-UX-013 prompt-dialog shares modal shell with confirm-dialog but has an
    input. Message above the input uses the mute colour so the input itself
    stays the primary focal point. */

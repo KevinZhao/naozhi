@@ -6632,30 +6632,49 @@ function confirmDialog(opts) {
     const cancelText = (opts && opts.cancelText) || '取消';
     const variant = (opts && opts.variant) || 'danger';
     const confirmClass = variant === 'danger' ? 'danger' : 'primary';
+    // Round 2 R-12: optional countdown (seconds) before the confirm
+    // button activates. Used by destructive flows to insert a "速度带"
+    // — short enough to not annoy, long enough to catch fat-fingered
+    // double-Enter. Default 0 = no countdown (legacy behaviour).
+    const countdownSecs = (opts && typeof opts.countdownSecs === 'number') ? Math.max(0, Math.floor(opts.countdownSecs)) : 0;
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay confirm-overlay';
+    // message may include line breaks now (RFC §7.5 multi-paragraph
+    // copy). Render via <pre>-style white-space:pre-wrap on .confirm-msg
+    // so existing toast-style single-line callers still look right.
     overlay.innerHTML =
       '<div class="modal confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">' +
         '<h3 id="confirm-title">' + esc(title) + '</h3>' +
-        (message ? '<p>' + esc(message) + '</p>' : '') +
+        (message ? '<p class="confirm-msg">' + esc(message) + '</p>' : '') +
         (detail ? '<p class="confirm-detail"><code>' + esc(detail) + '</code></p>' : '') +
         '<div class="modal-btns">' +
           '<button type="button" class="confirm-cancel">' + esc(cancelText) + '</button>' +
-          '<button type="button" class="' + confirmClass + ' confirm-ok">' + esc(confirmText) + '</button>' +
+          '<button type="button" class="' + confirmClass + ' confirm-ok"' + (countdownSecs > 0 ? ' disabled' : '') + '>' +
+            esc(confirmText) + (countdownSecs > 0 ? ' (' + countdownSecs + ')' : '') +
+          '</button>' +
         '</div>' +
       '</div>';
 
     let settled = false;
+    let tickTimer = null;
     const finish = (ok) => {
       if (settled) return;
       settled = true;
+      if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
       overlay.remove();
       resolve(!!ok);
     };
 
+    const okBtn = overlay.querySelector('.confirm-ok');
     overlay.querySelector('.confirm-cancel').addEventListener('click', () => finish(false));
-    overlay.querySelector('.confirm-ok').addEventListener('click', () => finish(true));
+    okBtn.addEventListener('click', () => {
+      // Defensive: while disabled the click won't fire on a real button,
+      // but if a custom CSS rule ever overrides pointer-events we still
+      // refuse early activation by checking the disabled attribute.
+      if (okBtn.hasAttribute('disabled')) return;
+      finish(true);
+    });
     // Backdrop click cancels. Guard against inner clicks bubbling through
     // by checking that the click's target is the overlay itself.
     overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(false); });
@@ -6671,6 +6690,24 @@ function confirmDialog(opts) {
     // Focus cancel first — protects against a stray Enter auto-firing the
     // destructive primary. User must explicitly Tab or click to confirm.
     setTimeout(() => overlay.querySelector('.confirm-cancel').focus(), 50);
+
+    if (countdownSecs > 0) {
+      let remaining = countdownSecs;
+      tickTimer = setInterval(() => {
+        remaining -= 1;
+        if (remaining <= 0) {
+          clearInterval(tickTimer);
+          tickTimer = null;
+          okBtn.removeAttribute('disabled');
+          okBtn.textContent = confirmText;
+          // Live region for SR — announce activation politely so a
+          // keyboard user knows they can now Tab + Enter.
+          okBtn.setAttribute('aria-live', 'polite');
+        } else {
+          okBtn.textContent = confirmText + ' (' + remaining + ')';
+        }
+      }, 1000);
+    }
   });
 }
 
@@ -12524,14 +12561,46 @@ async function cronResume(id) {
 }
 
 async function cronDelete(id) {
+  // Round 2 R-12 (RFC §7.5): destructive flow rewrite.
+  // - Statistic in title ("32 次执行记录") so user weighs the loss
+  // - Mention JSONL preservation + how to find session_id without
+  //   leaking the raw `claude --resume` command at the L1/L2 user
+  // - Different copy when the job is currently running (CLI sub-
+  //   process won't be killed; that's a surprising behaviour
+  //   operators MUST know before confirming)
+  // - 3 s countdown via confirmDialog's new countdownSecs option —
+  //   long enough to catch fat-finger Enter, short enough not to
+  //   annoy
   const job = (Array.isArray(cronJobs) ? cronJobs.find(j => j.id === id) : null) || {};
+  const title = job.title || job.user_label || '';
+  const runCount = (job.stats && (job.stats.total | 0)) || 0;
+  const isRunning = !!(job.current_run);
   const promptPreview = (job.prompt || '').slice(0, 200);
+
+  const headline = title ? '删除「' + title + '」？' : '删除定时任务？';
+  let body;
+  if (isRunning) {
+    const elapsed = job.current_run.started_at
+      ? formatRunningElapsed(job.current_run.started_at)
+      : '';
+    const elapsedHint = elapsed ? '（已运行 ' + elapsed + '）' : '';
+    body = '⚠ 该任务正在执行' + elapsedHint + '。\n\n' +
+      '删除后任务定义和' + (runCount > 0 ? ' ' + runCount + ' 条 ' : '')
+      + '历史记录立即清除，但当前正在跑的这次执行将继续运行直到完成（CLI 子进程不会被强行 kill）。完成结果不会被记录到任何地方。';
+  } else if (runCount > 0) {
+    body = '此操作将永久删除该任务及其全部 ' + runCount + ' 次执行记录，不可撤销。\n\n' +
+      'CLI 的对话历史 JSONL 文件保留在磁盘，需要时可在终端用 claude --resume 复活；session_id 在执行历史的「详情」里能找到。';
+  } else {
+    body = '此操作将永久删除该任务，不可撤销。该任务尚未执行过，不会有历史会话残留。';
+  }
+
   const ok = await confirmDialog({
-    title: '删除定时任务？',
-    message: '任务将被永久删除，下次不再触发。',
+    title: headline,
+    message: body,
     detail: promptPreview ? promptPreview : ('id: ' + id),
     confirmText: '删除',
     variant: 'danger',
+    countdownSecs: 3,
   });
   if (!ok) return;
   try {
