@@ -377,6 +377,18 @@ func (d *doctor) checkStateDir() {
 		d.add("state dir", "fail", dir+" exists but is not a directory")
 		return
 	}
+	// R229-SEC-13: warn on group/world readable state_dir. EventLog and
+	// sessions.json files inside use 0600 explicitly via WriteFileAtomic,
+	// but the parent dir's mode determines whether other local users can
+	// list filenames + traverse to read sidecar artefacts. cookie_secret
+	// uses the same 0600 floor — surface the mismatch via doctor so
+	// operators see it once, not via a quiet log line at every startup.
+	if mode := info.Mode().Perm(); mode&0o077 != 0 {
+		d.add("state dir", "warn",
+			fmt.Sprintf("%s is group/world-accessible (mode %04o); restrict with: chmod 0700 %s",
+				dir, mode, dir))
+		return
+	}
 	// Writability probe — avoids chmod/owner noise that a raw Stat
 	// wouldn't catch (e.g. naozhi running as a different uid).
 	tmp, err := os.CreateTemp(dir, ".doctor-probe-*")
