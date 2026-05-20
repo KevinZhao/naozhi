@@ -18,6 +18,7 @@ import (
 	"github.com/naozhi/naozhi/internal/platform"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // SessionGuard prevents multiple concurrent messages to the same session.
@@ -630,10 +631,10 @@ func (d *Dispatcher) sendAndReply(
 		switch {
 		case errors.Is(err, cli.ErrNoOutputTimeout):
 			d.watchdogNoOutputKills.Add(1)
-			errMsg = fmt.Sprintf("⏱️ 处理超时（%s 无输出），请简化任务后重试。", formatChineseDuration(d.noOutputTimeout))
+			errMsg = fmt.Sprintf("⏱️ 处理超时（%s 无输出），请简化任务后重试。", textutil.FormatChineseDuration(d.noOutputTimeout))
 		case errors.Is(err, cli.ErrTotalTimeout):
 			d.watchdogTotalKills.Add(1)
-			errMsg = fmt.Sprintf("⏱️ 处理超时（总耗时超过 %s），请拆分为更小的任务。", formatChineseDuration(d.totalTimeout))
+			errMsg = fmt.Sprintf("⏱️ 处理超时（总耗时超过 %s），请拆分为更小的任务。", textutil.FormatChineseDuration(d.totalTimeout))
 		case errors.Is(err, cli.ErrProcessExited):
 			// Subprocess died mid-turn. The next user message triggers
 			// GetOrCreate to spawn a fresh process transparently; tell
@@ -805,35 +806,6 @@ func (d *Dispatcher) SendSplitReply(ctx context.Context, p platform.Platform, ch
 			d.markReplySuccess()
 		}
 	}
-}
-
-// formatChineseDuration formats a duration into a short Chinese string.
-// Mixed durations (90m → "1 小时 30 分钟", 90s → "1 分钟 30 秒") are
-// rendered with the largest meaningful unit pair; pure-round durations
-// collapse to a single unit for readability.
-func formatChineseDuration(d time.Duration) string {
-	if d <= 0 {
-		return "未知"
-	}
-	if d >= time.Hour {
-		h := int(d / time.Hour)
-		rem := d - time.Duration(h)*time.Hour
-		m := int(rem / time.Minute)
-		if m == 0 {
-			return fmt.Sprintf("%d 小时", h)
-		}
-		return fmt.Sprintf("%d 小时 %d 分钟", h, m)
-	}
-	if d >= time.Minute {
-		m := int(d / time.Minute)
-		rem := d - time.Duration(m)*time.Minute
-		s := int(rem / time.Second)
-		if s == 0 {
-			return fmt.Sprintf("%d 分钟", m)
-		}
-		return fmt.Sprintf("%d 分钟 %d 秒", m, s)
-	}
-	return fmt.Sprintf("%d 秒", int(d.Seconds()))
 }
 
 // replyTracker manages IM status message streaming (thinking -> tool_use -> result).

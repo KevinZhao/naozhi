@@ -541,35 +541,6 @@ func TestSendSplitReply_ZeroMax_Defaults4000(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// formatChineseDuration
-// ---------------------------------------------------------------------------
-
-func TestFormatChineseDuration(t *testing.T) {
-	tests := []struct {
-		d    time.Duration
-		want string
-	}{
-		{0, "未知"},
-		{-time.Second, "未知"},
-		{2 * time.Hour, "2 小时"},
-		{3 * time.Minute, "3 分钟"},
-		{45 * time.Second, "45 秒"},
-		// 混合分秒、时分（R23-QUAL-001）
-		{90 * time.Second, "1 分钟 30 秒"},
-		{90 * time.Minute, "1 小时 30 分钟"},
-		// 时 + 不足 1 分钟的尾巴 → 秒被忽略（分钟精度上呈现为整点）
-		{time.Hour + time.Second, "1 小时"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.d.String(), func(t *testing.T) {
-			if got := formatChineseDuration(tt.d); got != tt.want {
-				t.Errorf("formatChineseDuration(%v) = %q, want %q", tt.d, got, tt.want)
-			}
-		})
-	}
-}
-
-// ---------------------------------------------------------------------------
 // replyTracker
 // ---------------------------------------------------------------------------
 
