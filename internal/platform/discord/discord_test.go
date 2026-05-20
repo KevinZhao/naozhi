@@ -207,3 +207,31 @@ func TestOnMessageCreate_EmptyAfterMentionStrip(t *testing.T) {
 		t.Error("empty text after mention strip should be skipped")
 	}
 }
+
+func TestAggregateAttachmentBytesAllow(t *testing.T) {
+	t.Parallel()
+	cap := maxDiscordTotalAttachmentBytes
+	cases := []struct {
+		name  string
+		soFar int
+		next  int
+		want  bool
+	}{
+		{"zero plus zero", 0, 0, true},
+		{"first chunk small", 0, 1024, true},
+		{"exactly at cap", cap - 100, 100, true},
+		{"just over cap", cap - 100, 101, false},
+		{"way over cap", 0, cap + 1, false},
+		{"already over cap stays over", cap, 1, false},
+		{"negative next rejected", 0, -1, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := aggregateAttachmentBytesAllow(tc.soFar, tc.next); got != tc.want {
+				t.Errorf("aggregateAttachmentBytesAllow(%d, %d) = %v, want %v",
+					tc.soFar, tc.next, got, tc.want)
+			}
+		})
+	}
+}

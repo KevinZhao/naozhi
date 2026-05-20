@@ -152,10 +152,10 @@
 - [ ] **R226-SEC-2 — Dashboard 主页 CSP `script-src 'self' 'unsafe-inline'` 完全打掉 XSS 防护（P1）**: 任何注入到 dashboard HTML 或同源 JS 文件的脚本都能直接执行；登录页已用 hash 收敛了，主页应迁移到 nonce 或 per-script SHA-256。Breaking：需把 dashboard.html 内联事件 handler 全部抽到外部文件 + 加 nonce/hash。涉及 `internal/server/dashboard.go:389` + 全部内联脚本审计。
 - [ ] **R226-SEC-3 — 反向 node 在 `ws://`（无 TLS）下传 token 仅 `slog.Warn` 不阻断（P2）**: token 在第一条 WS 消息明文，passive 观察者可截获并冒充 node。方案：primary 端 `/ws-node` 加 `require_tls: true` 配置，默认 reject 非 wss 升级，除非显式 `insecure: true`。Breaking：现有 `ws://` 部署需加配置或迁 `wss://`。`internal/upstream/connector.go:210` + `internal/node/reverseserver.go:155`。
 - [x] **R226-SEC-4 — Slack Socket Mode handler 无并发 cap（P2）**: 每条消息无限新建 goroutine（feishu 有 `hookSem` cap=20），高频/被攻 workspace 可 OOM。方案：仿 feishu 加 `slackSem chan struct{}` 容量 20，semaphore 满时 drop 并 slog.Warn。`internal/platform/slack/slack.go:376`。 — 已修复（hookSem chan cap=20 + 非阻塞 acquire + drop 时 slog.Warn, 与 feishu transport_hook 写法一致），本批 PR #153
-- [ ] **R226-SEC-5 — Discord 单条消息聚合下载无 cap（P2）**: 每附件 10MB 限制，但单消息可附 10 张 = 100MB / event；高频附图轰炸放大 OOM 风险。方案：`maxDiscordAttachmentsPerMessage = 5` 上限 + 总字节 cap。`internal/platform/discord/discord.go:363`。
+- [x] **R226-SEC-5 — Discord 单条消息聚合下载无 cap（P2）**: 每附件 10MB 限制，但单消息可附 10 张 = 100MB / event；高频附图轰炸放大 OOM 风险。方案：`maxDiscordAttachmentsPerMessage = 5` 上限 + 总字节 cap。`internal/platform/discord/discord.go:363`。 — 已修复（在已有 5 张 cap 之上加 32 MiB 聚合字节 cap，超额时 slog.Warn 并停止下载；`aggregateAttachmentBytesAllow` 抽出做 7 case table-driven test），本批 PR
 - [ ] **R226-SEC-6 — `allowed_root` 未配置只 warn 不阻断启动（P2）**: 拥有 dashboard token 的认证用户可把 cron `work_dir` 设到任意路径（如 `/etc`），CLI 子进程拿那个 CWD 跑，Write 工具可改 `/etc/passwd`。方案：当 `dashboard_token` 已配置且监听非 loopback 时，把 warn 升级为 fatal；或 `naozhi doctor` 加高严重度检查。`internal/server/server.go:513`。
 - [ ] **R226-SEC-7 — `/health` 端点无认证无限速（P3）**: 暴露 session 数 / watchdog kill 计数 / 平台名 / node 状态 / build 版本，外部 attacker 可高频枚举 infra 拓扑、估算重启时序。方案：加 per-IP rate limiter（60 req/min burst 10）。`internal/server/health.go`。
-- [ ] **R226-SEC-8 — `wshub` 同 session key 无订阅 cap（P3）**: 单 token 攻击者可开 1000 WS 全订同 session，每事件 fan-out N 倍 CPU/mem。方案：per-session-key 订阅 cap（如 20）。`internal/server/wshub.go`。
+- [x] **R226-SEC-8 — `wshub` 同 session key 无订阅 cap（P3）**: 单 token 攻击者可开 1000 WS 全订同 session，每事件 fan-out N 倍 CPU/mem。方案：per-session-key 订阅 cap（如 20）。`internal/server/wshub.go`。 — 已修复（`maxSubscribersPerKey=20` 在 handleSubscribe 持 h.mu 时 O(N≤500) 扫描 hits，超额返回 "too many subscribers for key"；同步关闭重申条目 R227-SEC-11），本批 PR
 - [ ] **R226-SEC-9 — Sandbox CSP `style-src 'unsafe-inline'`（P3）**: `serveRender`/`serveRaw` 仍允许 inline CSS，CSS exfiltration 攻击面在沙箱内仍存。方案：迁 nonce 或 hash。`internal/server/project_files.go:708,905`。
 - [x] **R226-SEC-10 — 附件路径加 `Content-Disposition: attachment` 给 SVG/XML（P3）**: 当前 ext allowlist 已挡掉 SVG，但万一未来开放或 magic-byte sniffer 误判，仍是 defence-in-depth 缺口。方案：在 `handleAttachment` 中对 sniff 结果含 `image/svg+xml` / `application/xhtml+xml` / `text/xml` 的强制 attachment + `X-Frame-Options: DENY`。`internal/server/dashboard_send.go:1148`。 — 已修复（sniff prefix 命中 image/svg+xml / application/xhtml+xml / text/xml / application/xml 时无条件 attachment + DENY frame, defence-in-depth 不替换既有 mismatch 路径），本批 PR #153
 
@@ -260,7 +260,7 @@
 - [ ] **R225-PERF-14 — `wsclient.sweepSubGenExpiredLocked` 在 hub 写锁下扫 map（P3）**: wsclient.go:143 阻塞 subscribe/unsubscribe 并发。方案：移到 client 自身轻量 mutex。
 - [x] **R225-PERF-15 — `process_send.buildUserEntry` thumbnail goroutine 无并发上限（P3）**: 最多 20 个 goroutine CPU-bound JPEG encode 同时启动；建议限并发 4。 — 已修复（capacity=4 信号量 + 9 行 diff），本批 PR #153
 - [x] **R225-PERF-16 — `eventlog.EntriesSince/Entries/LastN` defer Unlock 在热路径（P3）**: 高频 broadcast 下显式 Unlock 微优。 — 已修复（三个读取函数改显式 RUnlock；函数体内无非 Unlock 清理，语义不变），本批 PR #157
-- [~] **R225-PERF-17 — `TruncateRunes(string, ...)` 无字节快检（P3）**: process_event_format.go:132 走 rune 迭代；`TruncateRunesBytes` 已有快检，应让 string 版同样先 `len <= maxRunes*4` 短路。 — 评估后无需修改（`TruncateRunes` line 31 已有 `if len(s) <= maxRunes { return s }` 等价快检，与 `TruncateRunesBytes` line 86 语义一致；TODO 描述的 `len <= maxRunes*4` 上界数学上不成立 — UTF-8 byte 数是 rune 数上界而非下界，加该条件会漏截），本批 PR #164
+- [~] **R225-PERF-17 — `TruncateRunes(string, ...)` 无字节快检（P3，误报关闭 2026-05-20）**: reviewer 提议 `len(s) <= maxRunes*4` 短路其实方向反了——UTF-8 每 rune 1-4 字节意味着 byte 长度 ≤ rune 数*4 是 rune 数的**上界**而非下界，全 ASCII `len=200, maxRunes=50` 时 byte=200 ≤ 200 但 runes=200 > 50，加这种快检会漏截。当前 `len(s) <= maxRunes` 快检已与 `TruncateRunesBytes` 一致，无可优化空间。
 - [x] **R225-PERF-18 — `indexAdd` map[string][]string 线性扫描去重（P3）**: router_core.go:496 改 `map[string]map[string]struct{}` O(1) 去重。 — 已修复（field 改 `map[string]map[string]struct{}` + indexAdd/indexDel 改 set 操作 + ResetChat 消费方改 `for key := range set` + init 同步；5 改动点 2 文件），本批 PR #164
 
 ### 代码质量 — 本轮新发现
@@ -1281,7 +1281,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R227-SEC-7 — 反向 node WS 在 ws:// 明文下传 token（P2）**: 内网嗅探可截获 token 冒充节点。方案：r.TLS == nil 拒绝 Upgrade，或加 insecure_node 显式豁免。重申 R226-SEC-3。
 - [ ] **R227-SEC-9 — Dashboard 主页 CSP `script-src 'self' 'unsafe-inline'` 完全打开 XSS 通道（P2）**: 任何同源 XSS 注入即可执行任意脚本。方案：迁移到 CSP nonce 模式。Breaking。涉及 `internal/server/dashboard.go:389`。重申 R226-SEC-2。
 - [ ] **R227-SEC-10 — `/health` 端点无认证无限速，泄漏基础设施拓扑（P3）**: 外部攻击者可枚举 session count / watchdog kills / node 状态 / build 版本。方案：per-IP rate limiter + 敏感字段移到认证 /api/stats。重申 R226-SEC-7。
-- [ ] **R227-SEC-11 — WS Hub 同 session key 无订阅数量上限（P3）**: 单 token 可开 1000 WS 订阅同 session 引 fan-out CPU spike。方案：subscribe 时检查同 key 当前订阅数 ≤20。重申 R226-SEC-8。
+- [x] **R227-SEC-11 — WS Hub 同 session key 无订阅数量上限（P3）**: 单 token 可开 1000 WS 订阅同 session 引 fan-out CPU spike。方案：subscribe 时检查同 key 当前订阅数 ≤20。重申 R226-SEC-8。 — 已修复（同 R226-SEC-8），本批 PR
 - [ ] **R227-SEC-12 — `mode=download` 路径可下载 .env / .npmrc / .netrc 等点开头配置（P3）**: previewableByExt 排除 .env 但 download 模式不受此保护。方案：download 模式额外 blocklist；或运维文档明确 allowed_root 不含秘密文件。
 - [ ] **R227-SEC-14 — `feishu/transport_ws.go` parseSDKEvent 没有 maxIncomingTextBytes 检查（P3）**: **降级**：审查发现 transport_ws.go:309 已有此检查，本条为误报。
 
