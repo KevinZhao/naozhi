@@ -166,7 +166,7 @@ func TestDashboardJS_CronPanelConsolidation(t *testing.T) {
 	if openIdx < 0 {
 		t.Error("openCronDetail: signature must accept (jobId, originRow) so the click handler can pass `this` for focus restoration")
 	} else {
-		end := openIdx + 2000
+		end := openIdx + 3000
 		if end > len(js) {
 			end = len(js)
 		}
@@ -179,13 +179,8 @@ func TestDashboardJS_CronPanelConsolidation(t *testing.T) {
 		}
 		// And must NOT have the redundant explicit renderCronPanel call we
 		// removed in PR review — openCronPanel already triggers it.
-		if strings.Count(body, "renderCronPanel()") > 0 {
-			// note: openCronPanel call is fine; the redundant explicit
-			// renderCronPanel() call inside openCronDetail's body must be gone.
-			renderCount := strings.Count(body, "renderCronPanel()")
-			if renderCount > 0 {
-				t.Errorf("openCronDetail: must not call renderCronPanel() directly (redundant — openCronPanel already does); found %d call(s)", renderCount)
-			}
+		if renderCount := strings.Count(body, "renderCronPanel()"); renderCount > 0 {
+			t.Errorf("openCronDetail: must not call renderCronPanel() directly (redundant — openCronPanel already does); found %d call(s)", renderCount)
 		}
 	}
 	closeIdx := strings.Index(js, "function closeCronDetail()")
@@ -221,6 +216,44 @@ func TestDashboardJS_CronPanelConsolidation(t *testing.T) {
 		body := js[rendererIdx2:end]
 		if !strings.Contains(body, "_cronDrawerFetchedFor.has(cronDetailJobId)") {
 			t.Error("renderCronDrawer: missing-job branch must consult _cronDrawerFetchedFor before fetchCronJobs to prevent infinite recursion when the system has zero cron jobs")
+		}
+	}
+
+	// 11. RFC §9.3 / §9.4: 1Hz running-tick timer must use a targeted
+	//     paint (cronRunningTickPaint) that updates only the running
+	//     clocks, NOT a full renderCronPanel() rebuild — otherwise text
+	//     selection / scroll / focus inside drawer timeline detail
+	//     blocks gets wiped every second when any cron is running.
+	if !strings.Contains(js, "function cronRunningTickPaint()") {
+		t.Error("dashboard.js: cronRunningTickPaint() must exist as the lightweight 1Hz update path (RFC §9.3 \"重绘抽屉头计时器\")")
+	}
+	tickIdx := strings.Index(js, "function ensureCronRunningTick()")
+	if tickIdx >= 0 {
+		end := tickIdx + 2000
+		if end > len(js) {
+			end = len(js)
+		}
+		body := js[tickIdx:end]
+		if !strings.Contains(body, "cronRunningTickPaint()") {
+			t.Error("ensureCronRunningTick: timer body must call cronRunningTickPaint() (not renderCronPanel) — full rebuild every second wipes user text selection / scroll inside drawer timeline blocks")
+		}
+		if strings.Contains(body, "try { renderCronPanel()") || strings.Contains(body, "renderCronPanel(); }") {
+			t.Error("ensureCronRunningTick: must NOT call renderCronPanel() inside the 1Hz tick — use cronRunningTickPaint() for surgical clock updates")
+		}
+	}
+
+	// 12. RFC §9.4 perf hygiene: openCronDetail must short-circuit when
+	//     called with the same jobId already on display so a second click
+	//     doesn't fire another fetchCronJobs / re-steal focus to the h2.
+	openIdx2 := strings.Index(js, "function openCronDetail(jobId, originRow)")
+	if openIdx2 >= 0 {
+		end := openIdx2 + 3000
+		if end > len(js) {
+			end = len(js)
+		}
+		body := js[openIdx2:end]
+		if !strings.Contains(body, "if (cronDetailJobId === jobId)") {
+			t.Error("openCronDetail: must short-circuit when cronDetailJobId === jobId already (avoid redundant openCronPanel + fetchCronJobs + focus-steal on repeated clicks)")
 		}
 	}
 }

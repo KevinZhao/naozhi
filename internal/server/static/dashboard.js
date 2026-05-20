@@ -11102,6 +11102,51 @@ function formatRunningElapsed(startedAt) {
 // Polling timer that re-renders cron rows so "运行中 Xs" advances each
 // second while at least one job is running. Idle when no jobs are running.
 let cronRunningTickTimer = null;
+
+// cronRunningTickPaint is the lightweight 1Hz update path. RFC §9.3
+// explicitly mandates "复用该 timer 顺便重绘抽屉头计时器" — repaint just
+// the running clocks, not the whole panel + drawer. A naive
+// renderCronPanel() rebuild every second wipes any text selection inside
+// the timeline detail blocks, scroll position inside .ctr-block-body,
+// and any in-flight :hover / :focus on cj-stats popovers. Targeted DOM
+// patches sidestep all of that.
+//
+// Targets:
+//   - .cj-when.running / .cj-when-inline.running   list-row clock
+//   - .cdc-clock                                    drawer current-execution clock
+//
+// Each clock has data-cron-id (or is reachable from the row that does),
+// and we recompute formatRunningElapsed from cronJobs in memory. If the
+// running row vanishes (cron_run_ended landed but the timer hadn't yet
+// stopped), the clock is left stale until the next renderCronList paint
+// — that's the worst case, and renderCronList runs anyway when WS lands.
+function cronRunningTickPaint() {
+  const list = Array.isArray(cronJobs) ? cronJobs : [];
+  if (list.length === 0) return;
+  for (const j of list) {
+    if (!j || !j.current_run || !j.current_run.started_at) continue;
+    const label = formatRunningElapsed(j.current_run.started_at);
+    // List-row when columns. Use attribute selector so paused / non-running
+    // rows are skipped — those have static labels and shouldn't be touched.
+    const sel = '.cj-row[data-cron-id="' + (window.CSS && CSS.escape ? CSS.escape(j.id) : j.id) + '"]';
+    const row = document.querySelector(sel);
+    if (row) {
+      const when = row.querySelector('.cj-when.running');
+      if (when) when.textContent = label;
+      const whenInline = row.querySelector('.cj-when-inline');
+      if (whenInline) whenInline.textContent = label;
+    }
+  }
+  // Drawer clock (only one — the drawer shows a single job at a time).
+  if (cronDetailJobId) {
+    const job = list.find(x => x && x.id === cronDetailJobId);
+    if (job && job.current_run && job.current_run.started_at) {
+      const clock = document.querySelector('#cron-detail-pane .cdc-clock');
+      if (clock) clock.textContent = formatRunningElapsed(job.current_run.started_at);
+    }
+  }
+}
+
 function ensureCronRunningTick() {
   const anyRunning = Array.isArray(cronJobs) && cronJobs.some(j => j && j.current_run);
   // Stop conditions（任何一个成立即清掉 timer）：
@@ -11120,7 +11165,11 @@ function ensureCronRunningTick() {
         cronRunningTickTimer = null;
         return;
       }
-      try { renderCronPanel(); } catch (_) {}
+      // cron-panel-consolidation RFC §9.3 / §9.4: targeted clock update
+      // instead of whole-panel rebuild. Preserves text selection / scroll /
+      // focus inside the drawer's timeline detail blocks while the
+      // "运行中 12s" counter still ticks every second.
+      try { cronRunningTickPaint(); } catch (_) {}
     }, 1000);
   } else if (!shouldRun && cronRunningTickTimer) {
     clearInterval(cronRunningTickTimer);
@@ -12157,6 +12206,17 @@ function renderCronPanel() {
 //   - Idempotent on the same jobId (no flicker if invoked twice).
 function openCronDetail(jobId, originRow) {
   if (!jobId) return;
+  // Short-circuit when the drawer is already showing this exact job — a
+  // second click should NOT re-trigger openCronPanel (which fires another
+  // fetchCronJobs) nor steal focus to the h2 mid-read. RFC §9.4 perf
+  // hygiene: collapse no-op repeated clicks. We still update
+  // _cronDrawerLastActiveRow in case a fresher row reference is being
+  // passed, so closeCronDetail's focus-restore lands on the most recent
+  // origin.
+  if (cronDetailJobId === jobId) {
+    if (originRow instanceof Element) _cronDrawerLastActiveRow = originRow;
+    return;
+  }
   // Record the row that initiated the open so Esc / closeCronDetail can
   // restore focus there. Falls back to the first row whose data-cron-id
   // matches when the caller doesn't pass one (e.g. doCreateCronJob after
