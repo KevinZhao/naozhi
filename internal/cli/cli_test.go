@@ -1152,6 +1152,61 @@ func TestProcess_ApplyMetadata_AndAccessors(t *testing.T) {
 	}
 }
 
+// TestProcess_MeteringUsage_FastPath pins the R227-PERF-10 invariant: when
+// no metering rows exist the atomic length probe lets MeteringUsage skip
+// the RLock entirely. After applyMetadata fires, meteringLen tracks
+// len(meteringUsage) so the fast-path stays accurate.
+func TestProcess_MeteringUsage_FastPath(t *testing.T) {
+	t.Parallel()
+	p := &Process{}
+	// Zero-value: meteringLen is 0, MeteringUsage returns nil without
+	// touching meteringMu (verified by the absence of races in -race).
+	if got := p.meteringLen.Load(); got != 0 {
+		t.Errorf("zero-value meteringLen = %d, want 0", got)
+	}
+	if got := p.MeteringUsage(); got != nil {
+		t.Errorf("zero-value MeteringUsage = %v, want nil", got)
+	}
+
+	// After the first applyMetadata, meteringLen must mirror the slice
+	// length so the fast-path no longer short-circuits.
+	p.applyMetadata(&EventMetadata{
+		MeteringUsage: []MeteringEntry{
+			{Value: 0.01, Unit: "credit", UnitPlural: "credits"},
+		},
+	})
+	if got := p.meteringLen.Load(); got != 1 {
+		t.Errorf("post-apply meteringLen = %d, want 1", got)
+	}
+	if got := p.MeteringUsage(); len(got) != 1 {
+		t.Errorf("post-apply MeteringUsage len = %d, want 1", len(got))
+	}
+
+	// Second call adds a different unit — meteringLen must reflect the
+	// post-merge slice length (not the input batch length).
+	p.applyMetadata(&EventMetadata{
+		MeteringUsage: []MeteringEntry{
+			{Value: 100, Unit: "token", UnitPlural: "tokens"},
+		},
+	})
+	if got := p.meteringLen.Load(); got != 2 {
+		t.Errorf("post-second-apply meteringLen = %d, want 2", got)
+	}
+	if got := p.MeteringUsage(); len(got) != 2 {
+		t.Errorf("post-second-apply MeteringUsage len = %d, want 2", len(got))
+	}
+
+	// Same-unit merge keeps slice length stable; meteringLen stays 2.
+	p.applyMetadata(&EventMetadata{
+		MeteringUsage: []MeteringEntry{
+			{Value: 0.02, Unit: "credit", UnitPlural: "credits"},
+		},
+	})
+	if got := p.meteringLen.Load(); got != 2 {
+		t.Errorf("same-unit-merge meteringLen = %d, want 2 (no growth)", got)
+	}
+}
+
 // --- ACP error response test (C2 fix; updated 2026-05-19) ---
 
 // TestACPProtocol_ReadEvent_ErrorResponse pins the post-fix contract:
