@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/limits"
 )
 
 // maxCoalescedTextBytes is a *soft* cap on the merged prompt size. The
@@ -17,13 +18,12 @@ import (
 // handlers) bound individual queued entries; without this cap a queue
 // with MaxDepth=N could amplify N × 1 MB into a single CLI stdin write.
 // R60-GO-M4.
-const maxCoalescedTextBytes = 4 * 1024 * 1024
-
-// MaxCoalescedTextBytes exports the soft cap so cross-trust-boundary
-// RPC handlers (e.g. upstream connector's `send` case) can reject
-// oversized payloads before they reach CoalesceMessages. Returning the
-// internal constant keeps the source of truth single.
-func MaxCoalescedTextBytes() int { return maxCoalescedTextBytes }
+//
+// Source of truth lives in internal/limits so cross-trust-boundary
+// callers (upstream connector's reverse RPC) don't have to reverse-import
+// dispatch just to read the cap (R228-ARCH-9). Aliased here as a package
+// alias so the dense coalesce hot loop reads naturally.
+const maxCoalescedTextBytes = limits.MaxCoalescedText
 
 // CoalesceMessages merges multiple queued messages into a single prompt.
 //
