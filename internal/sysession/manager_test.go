@@ -131,7 +131,6 @@ func TestManager_NewRequiresRouterWhenEnabled(t *testing.T) {
 }
 
 func TestManager_TickRunsAndRecords(t *testing.T) {
-	t.Parallel()
 	pulse, tickFn := pulseTicker()
 
 	// Replace the auto-titler factory with our signal daemon for the
@@ -199,7 +198,6 @@ func TestManager_TickRunsAndRecords(t *testing.T) {
 }
 
 func TestManager_OverlappingTicksAreSkipped(t *testing.T) {
-	t.Parallel()
 	pulse, tickFn := pulseTicker()
 
 	// Daemon Tick blocks until released so we can stack a second tick
@@ -268,7 +266,6 @@ func TestManager_OverlappingTicksAreSkipped(t *testing.T) {
 }
 
 func TestManager_PanicRecoveredAndInflightReset(t *testing.T) {
-	t.Parallel()
 	pulse, tickFn := pulseTicker()
 
 	d := &signalDaemon{
@@ -328,7 +325,6 @@ func TestManager_PanicRecoveredAndInflightReset(t *testing.T) {
 }
 
 func TestManager_CircuitBreakerTripsOnConsecutiveCLIErrors(t *testing.T) {
-	t.Parallel()
 	pulse, tickFn := pulseTicker()
 
 	upstreamErr := errors.New("upstream went away")
@@ -391,7 +387,6 @@ func TestManager_CircuitBreakerTripsOnConsecutiveCLIErrors(t *testing.T) {
 }
 
 func TestManager_ValidationDoesNotTripBreaker(t *testing.T) {
-	t.Parallel()
 	pulse, tickFn := pulseTicker()
 
 	d := &signalDaemon{

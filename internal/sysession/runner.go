@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -110,8 +111,23 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 		if ctx.Err() != nil {
 			return "", ctx.Err()
 		}
-		return "", fmt.Errorf("sysession: %s -p failed: %w (stderr: %q)",
-			filepath.Base(r.cfg.BinPath), err, stderr.String())
+		// Sec-LOW-2:  stderr from claude -p can echo back portions of
+		// stdin (= the prompt = user conversation excerpts) when the
+		// CLI errors — e.g. "context too long" diagnostics.  Logging
+		// it at Debug keeps it available for local troubleshooting
+		// (operators with shell access can crank slog level) while
+		// keeping it OUT of the error chain that flows into
+		// recordRun → slog.Error("circuit breaker tripped",
+		// "last_error", err).  That second path lands in production
+		// log aggregators which we don't want feeding conversation
+		// fragments cross-tenant.
+		if stderr.Len() > 0 {
+			slog.Debug("sysession: runner stderr",
+				"binary", filepath.Base(r.cfg.BinPath),
+				"stderr", stderr.String())
+		}
+		return "", fmt.Errorf("sysession: %s -p failed: %w",
+			filepath.Base(r.cfg.BinPath), err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
@@ -131,14 +147,22 @@ type limitedWriter struct {
 }
 
 func (lw *limitedWriter) Write(p []byte) (int, error) {
+	// Always claim we consumed the whole input — io.Writer's contract
+	// says n must equal len(p) when err is nil, and exec.Cmd's stderr
+	// pump treats n<len(p) as a partial write and re-tries indefinitely.
+	// Anything past max is silently discarded.
 	remaining := lw.max - lw.n
 	if remaining <= 0 {
 		return len(p), nil
 	}
-	if len(p) > remaining {
-		p = p[:remaining]
+	chunk := p
+	if len(chunk) > remaining {
+		chunk = chunk[:remaining]
 	}
-	written, err := lw.w.Write(p)
+	written, err := lw.w.Write(chunk)
 	lw.n += written
-	return written, err
+	if err != nil {
+		return written, err
+	}
+	return len(p), nil
 }

@@ -121,6 +121,18 @@ func newRunID() string {
 // distinguishes panic-recovered errors (which produce a synthetic
 // fmt.Errorf wrapping the panic value) from organic errors so we can
 // tag them as DaemonErrorClassPanic without string-matching.
+//
+// Priority order matters:
+//
+//  1. nil → success (early out).
+//  2. isPanic → panic class, regardless of any wrapped error value.
+//     A daemon that captured a ctx error before panicking would
+//     otherwise classify as timeout/canceled and silently slip past
+//     the breaker — RFC §7.4 explicitly counts panics toward the
+//     CLI-failure breaker because they indicate broken daemon code.
+//  3. ctx.DeadlineExceeded / Canceled → timeout / canceled.
+//  4. ErrValidation sentinel → validation (does NOT trip breaker).
+//  5. Default → upstream (counts toward breaker).
 func classifyError(err error, isPanic bool) (DaemonRunState, DaemonErrorClass) {
 	if err == nil {
 		return DaemonRunSucceeded, DaemonErrorClassNone

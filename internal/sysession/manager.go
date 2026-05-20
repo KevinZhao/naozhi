@@ -5,10 +5,16 @@ import (
 	"fmt"
 	"log/slog"
 	mrand "math/rand/v2"
+	"os"
 	"sync"
 	"sync/atomic"
 	"time"
 )
+
+// osExit is os.Exit indirected through a package var so tests can swap
+// it for a panic recovery.  Stop calls this on the deadline-exceeded
+// path; production code never overrides it.
+var osExit = os.Exit
 
 // Config is the top-level sysession configuration handed to NewManager.
 // Mirrors the YAML shape under config.sysession (see RFC §7.5).
@@ -242,11 +248,23 @@ func (m *Manager) Start(parent context.Context) {
 }
 
 // Stop cancels the daemon ctx and waits for all goroutines to finish.
-// stopCtx bounds the wait — when it expires before goroutines drain, we
-// PANIC rather than leaking goroutines that may still call into Router
-// after Router.Stop.  RFC v2.1 §5.2:  Tick must honour ctx; if it
-// doesn't, the daemon is broken and the operator should hear about it
-// loudly at shutdown rather than silently corrupting state.
+// stopCtx bounds the wait — when it expires before goroutines drain we
+// log loudly and force-exit with code 2 rather than leaking goroutines
+// that may still call into Router after Router.Stop.  RFC v2.1 §5.2:
+// Tick must honour ctx; if it doesn't, the daemon is broken and the
+// operator should hear about it loudly at shutdown rather than
+// silently corrupting state.
+//
+// We prefer os.Exit(2) over panic for the deadline path:
+//   - panic would dump goroutine stacks to stderr; those stacks may
+//     contain in-flight buildExcerpt strings (= user conversation
+//     fragments).  Container logs would then leak conversation
+//     content that the deliberately-omitted WS ErrorMsg field works
+//     hard to keep server-side (RFC §9.4 / Sec-LOW-2).
+//   - exit code 2 is a discriminable signal to systemd that this was
+//     a hard shutdown failure, not a clean exit (0) and not a panic
+//     (typically 2 already, but the explicit slog message makes the
+//     cause attributable).
 //
 // Stop is idempotent.  Subsequent calls are no-ops.
 func (m *Manager) Stop(stopCtx context.Context) {
@@ -264,7 +282,9 @@ func (m *Manager) Stop(stopCtx context.Context) {
 		case <-done:
 			slog.Info("sysession: manager stopped cleanly")
 		case <-stopCtx.Done():
-			panic("sysession: Stop deadline exceeded; daemons did not honour ctx — this is a daemon bug, not a transient error")
+			slog.Error("sysession: Stop deadline exceeded; daemons did not honour ctx — this is a daemon bug, not a transient error",
+				"hint", "force-exit so leaking goroutines don't write to a torn-down router")
+			osExit(2)
 		}
 	})
 }

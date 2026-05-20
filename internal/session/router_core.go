@@ -722,6 +722,21 @@ func NewRouter(cfg RouterConfig) *Router {
 	// Restore sessions from store
 	if restored := loadStore(r.storePath); restored != nil {
 		for key, entry := range restored {
+			// SECURITY:  reject sys: entries here even though saveStore
+			// already skips them (RFC v2.1 §3.4 / Sec-HIGH-1).  Treat
+			// any sys: entry on disk as evidence of a tampered
+			// sessions.json — the legitimate naozhi binary never
+			// writes them, and resurrecting one would let an attacker
+			// pre-seed a synthetic ManagedSession with chosen
+			// label_origin etc.  Daemons re-register stubs at startup
+			// if they need them, so dropping the persisted copy is
+			// safe.
+			if IsSysKey(key) {
+				slog.Warn("session store: dropping unexpected sys: entry",
+					"key", key,
+					"hint", "sys entries should never persist; possible sessions.json tampering")
+				continue
+			}
 			// Resolve the wrapper that owned this session's backend so the
 			// snapshot carries the correct CLI identity even after a pure
 			// restore (no shim reconnect). Pre-multi-backend entries have

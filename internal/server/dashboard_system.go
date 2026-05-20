@@ -15,6 +15,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -26,11 +27,16 @@ import (
 // handleSystemDaemons serves the read-only daemon status list.  Returns
 // an empty array (not 404) when sysession is disabled so dashboard JS
 // can rely on the response shape.
+//
+// Encoding goes through a bytes.Buffer first so a marshal error produces
+// a clean 500 rather than the ResponseWriter footgun where Encode has
+// already streamed bytes (header sent, status frozen at 200) before the
+// error path tries to upgrade the response.
 func (s *Server) handleSystemDaemons(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	if s.sysessionMgr == nil {
 		// Empty array preserves the "GET always returns JSON array"
 		// contract for the dashboard polling loop.
+		w.Header().Set("Content-Type", "application/json; charset=utf-8")
 		_, _ = w.Write([]byte("[]"))
 		return
 	}
@@ -38,11 +44,15 @@ func (s *Server) handleSystemDaemons(w http.ResponseWriter, _ *http.Request) {
 	if statuses == nil {
 		statuses = []sysession.DaemonStatus{}
 	}
-	enc := json.NewEncoder(w)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	enc.SetEscapeHTML(false)
 	if err := enc.Encode(statuses); err != nil {
 		http.Error(w, "encode daemon list", http.StatusInternalServerError)
+		return
 	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	_, _ = w.Write(buf.Bytes())
 }
 
 // clearLabelOriginRequest is the POST body for /api/system/labels/clear-origin.

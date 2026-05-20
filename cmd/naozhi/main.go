@@ -1159,7 +1159,11 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 	defaultWrapper *cli.Wrapper, storePath string,
 ) (*sysession.Manager, error) {
 	if !cfg.Sysession.Enabled {
-		return sysession.NewManager(sysession.Config{Enabled: false})
+		// Return nil rather than a no-op Manager so the caller's nil
+		// guard is meaningful — main.go's Start/Stop loops both check
+		// `if sysMgr != nil`, and a stubbed always-non-nil result would
+		// turn that into dead code.
+		return nil, nil
 	}
 
 	// Resolve work dir: explicit override first, then a sibling of

@@ -134,6 +134,21 @@ func (a *autoTitler) Configure(cfg DaemonConfig) error {
 func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 	report := TickReport{Skipped: make(map[string]int)}
 
+	// Snapshot the entire highwater map BEFORE entering VisitSessions
+	// so the per-session lookup inside the visitor doesn't acquire
+	// a.mu under r.mu's RLock — that nesting would create a fragile
+	// lock-order constraint (Sec-MEDIUM-2).
+	a.mu.Lock()
+	hwCopy := make(map[string]autoTitlerHighwater, len(a.highwater))
+	for k, v := range a.highwater {
+		hwCopy[k] = v
+	}
+	// Track which keys we observe this tick so we can prune dead
+	// entries from the highwater map at the end (also Sec-MEDIUM-2:
+	// prevents unbounded growth as sessions come and go).
+	observed := make(map[string]struct{}, len(a.highwater))
+	a.mu.Unlock()
+
 	// Phase 1: enumerate candidates via the streaming visitor.  We
 	// collect into a small slice (capped at batchPerTick * 4 for
 	// fairness) because we want lastActive ordering, but iterate first
@@ -149,6 +164,7 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 
 	a.router.VisitSessions(func(snap session.SessionSnapshot) bool {
 		report.Examined++
+		observed[snap.Key] = struct{}{}
 
 		// 1. Reserved namespace — daemons skip cron/scratch/sys/project.
 		if session.IsReservedNamespace(snap.Key) {
@@ -174,10 +190,9 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 			report.Skipped["min_user_turns"]++
 			return true
 		}
-		// 5. Min-rename-interval and high-water gate.
-		a.mu.Lock()
-		hw := a.highwater[snap.Key]
-		a.mu.Unlock()
+		// 5. Min-rename-interval and high-water gate.  Reads from
+		//    the pre-snapshotted hwCopy — no a.mu under r.mu.RLock.
+		hw := hwCopy[snap.Key]
 		if !hw.lastRenamedAt.IsZero() && time.Since(hw.lastRenamedAt) < a.minRenameInterval {
 			report.Skipped["min_rename_interval"]++
 			return true
@@ -201,6 +216,17 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 		// once we have plenty of options.
 		return len(candidates) < a.batchPerTick*4
 	})
+
+	// Sec-MEDIUM-2 part 2:  prune highwater entries for sessions that
+	// no longer appear in the router (dismissed / restarted / TTL'd).
+	// Bounded by the live session count rather than naozhi's lifetime.
+	a.mu.Lock()
+	for k := range a.highwater {
+		if _, ok := observed[k]; !ok {
+			delete(a.highwater, k)
+		}
+	}
+	a.mu.Unlock()
 
 	// Pick the top N by lastActive (most recent first) so a busy
 	// session doesn't get starved by a stale one with the same turn
@@ -244,7 +270,7 @@ func (a *autoTitler) renameOne(ctx context.Context, key, seed string, turnCount 
 		return fmt.Errorf("empty excerpt for %s: %w", key, ErrValidation)
 	}
 	prompt := autoTitlerSystemPrompt +
-		"\n---BEGIN CONVERSATION EXCERPT---\n" + excerpt + "\n---END CONVERSATION EXCERPT---" +
+		"\n" + excerptBeginMarker + "\n" + excerpt + "\n" + excerptEndMarker +
 		autoTitlerReminderTail
 
 	out, err := a.runner.Run(ctx, prompt)
@@ -273,11 +299,21 @@ func (a *autoTitler) renameOne(ctx context.Context, key, seed string, turnCount 
 	return nil
 }
 
+// excerptBeginMarker / excerptEndMarker are also stripped from the
+// excerpt so a user can't embed a fake delimiter to confuse the LLM
+// about where the data block ends.  Sec-MEDIUM-1.
+const (
+	excerptBeginMarker = "---BEGIN CONVERSATION EXCERPT---"
+	excerptEndMarker   = "---END CONVERSATION EXCERPT---"
+	excerptMarkerSafe  = "[EXCERPT_MARKER]"
+)
+
 // buildExcerpt sanitises the raw seed text so:
 //   - Control characters / log-injection runes are dropped.
 //   - Lines are capped at autoTitlerLineCapBytes.
 //   - Total bytes are capped at autoTitlerExcerptCapBytes.
 //   - Result is valid UTF-8.
+//   - Embedded EXCERPT delimiter strings are neutralised.
 func buildExcerpt(seed string) string {
 	if seed == "" {
 		return ""
@@ -321,12 +357,16 @@ func buildExcerpt(seed string) string {
 		b.WriteRune(r)
 		lineWritten += w
 	}
-	return strings.TrimSpace(b.String())
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
+	out := strings.TrimSpace(b.String())
+	// Sec-MEDIUM-1:  if a user crafts a message containing the literal
+	// EXCERPT delimiter, two END markers in the prompt would create a
+	// "post-data" section the LLM may treat as ground truth.  Replace
+	// both BEGIN and END markers with an inert placeholder so the
+	// structural boundary stays unique to the framework's own header /
+	// footer.
+	if strings.Contains(out, excerptBeginMarker) || strings.Contains(out, excerptEndMarker) {
+		out = strings.ReplaceAll(out, excerptBeginMarker, excerptMarkerSafe)
+		out = strings.ReplaceAll(out, excerptEndMarker, excerptMarkerSafe)
 	}
-	return b
+	return out
 }
