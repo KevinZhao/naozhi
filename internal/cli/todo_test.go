@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestParseTodos(t *testing.T) {
@@ -124,6 +125,79 @@ func TestParseTodosWithRaw_RawIsArrayLiteral(t *testing.T) {
 	}
 	if len(out) != 2 {
 		t.Fatalf("round-trip len mismatch: %d", len(out))
+	}
+}
+
+// TestTodoStatusEmojiConstants_RuneBoundary pins the R227-CR-13 contract:
+// the emoji constants TodosSummary writes to its output are valid UTF-8
+// rune sequences, so consumers slicing on a rune boundary (textutil.TruncateRunes
+// / utf8.DecodeRuneInString) can never land inside a multi-byte glyph.
+//
+// The test also fences the byte-length expectations: a downstream consumer
+// that wrongly truncates by len(byte) would surface U+FFFD if the cut fell
+// mid-glyph. Locking the per-emoji byte counts here lets reviewers catch a
+// change to the emoji table that would silently break IM message-byte caps
+// the next time a 4-byte emoji is replaced with a 3-byte one (or vice versa).
+func TestTodoStatusEmojiConstants_RuneBoundary(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		got      string
+		wantSize int // bytes per glyph
+	}{
+		{"summary 📋", todoStatusEmojiSummary, 4},
+		{"done ✅", todoStatusEmojiDone, 3},
+		{"active ▶", todoStatusEmojiActive, 3},
+		{"pending ☐", todoStatusEmojiPending, 3},
+		{"unknown ?", todoStatusEmojiUnknown, 1},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if !utf8.ValidString(tc.got) {
+				t.Fatalf("%s: not valid UTF-8: %q", tc.name, tc.got)
+			}
+			if utf8.RuneCountInString(tc.got) != 1 {
+				t.Fatalf("%s: must be a single rune for clean truncation, got %d runes",
+					tc.name, utf8.RuneCountInString(tc.got))
+			}
+			if got := len(tc.got); got != tc.wantSize {
+				t.Errorf("%s: byte size = %d, want %d (any change here may break downstream byte-cap consumers — see godoc)",
+					tc.name, got, tc.wantSize)
+			}
+		})
+	}
+}
+
+// TestTodosSummary_RuneBoundarySafe pins the R227-CR-13 cross-cutting
+// contract: every byte position in TodosSummary's output sits on a UTF-8
+// rune boundary, so caller-side rune-aware truncation can never slice mid
+// glyph. utf8.DecodeRuneInString returns RuneError + size 1 for an invalid
+// start byte; we walk the entire output to assert no such position exists.
+func TestTodosSummary_RuneBoundarySafe(t *testing.T) {
+	t.Parallel()
+	got := TodosSummary([]TodoItem{
+		{Content: "A", Status: "completed"},
+		{Content: "B", Status: "in_progress"},
+		{Content: "C", Status: "pending"},
+		{Content: "D", Status: "weird-future-status"},
+	})
+	if !utf8.ValidString(got) {
+		t.Fatalf("output is not valid UTF-8: %q", got)
+	}
+	// All four counters should appear so the tested string actually
+	// exercises every emoji branch.
+	for _, want := range []string{
+		todoStatusEmojiSummary,
+		todoStatusEmojiDone,
+		todoStatusEmojiActive,
+		todoStatusEmojiPending,
+		todoStatusEmojiUnknown,
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("output %q missing emoji %q (one branch did not fire)", got, want)
+		}
 	}
 }
 
