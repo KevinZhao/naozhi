@@ -52,18 +52,66 @@ func buildBusctlArgs(scopeName string, pids []int) []string {
 	return args
 }
 
+// readPPidFromProcStatus reads /proc/<pid>/status and returns the PPid
+// field. Returns (0, err) when the file is unreadable or malformed so
+// callers can decide between skipping or rejecting the operation.
+//
+// The status file format is one "Key:\tValue" pair per line; PPid is
+// always present and a small decimal integer.
+func readPPidFromProcStatus(pid int) (int, error) {
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/status", pid))
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		if !strings.HasPrefix(line, "PPid:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			return 0, fmt.Errorf("malformed PPid line in /proc/%d/status", pid)
+		}
+		ppid, err := strconv.Atoi(fields[1])
+		if err != nil {
+			return 0, fmt.Errorf("parse PPid %q: %w", fields[1], err)
+		}
+		return ppid, nil
+	}
+	return 0, fmt.Errorf("PPid not found in /proc/%d/status", pid)
+}
+
 // moveToShimsCgroup moves shim and CLI processes to an independent systemd
 // scope so they survive service restarts. Uses busctl to call StartTransientUnit
 // directly with KillMode=none, making the processes invisible to the
 // naozhi.service lifecycle. Falls back to direct cgroup move if
 // busctl is not available.
+//
+// R229-SEC-4: cliPID is taken from the shim's self-reported Hello.CLIPID
+// frame. A compromised or buggy shim could put any PID (sshd, pid 1) on
+// the wire and trick naozhi into adopting an arbitrary process via the
+// privileged sudo busctl call. Validate that /proc/<cliPID>/status reports
+// PPid == shimPID before passing the value through; on mismatch drop the
+// CLI PID from the scope (the shim PID alone is still adopted via its own
+// cmd.Process.Pid which was not attacker-supplied).
 func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int) {
 	scopeName := fmt.Sprintf("naozhi-shim-%d.scope", shimPID)
 
 	// Build PID list for the scope
 	pids := []int{shimPID}
 	if cliPID > 0 {
-		pids = append(pids, cliPID)
+		ppid, err := readPPidFromProcStatus(cliPID)
+		switch {
+		case err != nil:
+			// Process may have already exited (ESRCH) or /proc unreadable;
+			// skip the CLI adoption rather than risk hitting an unrelated PID.
+			slog.Warn("moveToShimsCgroup: cannot validate CLI PID PPid, skipping CLI adoption",
+				"shim_pid", shimPID, "cli_pid", cliPID, "err", err)
+		case ppid != shimPID:
+			slog.Warn("moveToShimsCgroup: CLI PID PPid mismatch, refusing to adopt — shim may be compromised",
+				"shim_pid", shimPID, "cli_pid", cliPID, "got_ppid", ppid)
+		default:
+			pids = append(pids, cliPID)
+		}
 	}
 
 	args := buildBusctlArgs(scopeName, pids)
@@ -80,9 +128,11 @@ func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int) {
 		sanitized := osutil.SanitizeForLog(string(out), 512)
 		slog.Warn("moveToShimsCgroup: systemd scope failed, trying direct cgroup — zero-downtime restart may not survive service restart",
 			"pid", shimPID, "err", err, "output", sanitized)
-		moveToShimsCgroupDirect(parentCtx, shimPID)
-		if cliPID > 0 {
-			moveToShimsCgroupDirect(parentCtx, cliPID)
+		// Only adopt the PIDs that passed PPid validation above (R229-SEC-4).
+		// pids[0] is always the shim PID; pids[1:] (if present) is the
+		// validated CLI PID.
+		for _, pid := range pids {
+			moveToShimsCgroupDirect(parentCtx, pid)
 		}
 		return
 	}
