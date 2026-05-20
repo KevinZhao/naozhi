@@ -71,7 +71,13 @@ var ErrNoActiveProcess = errors.New("session has no active process")
 // there is one source of truth for reserved namespaces. Scratch keys are
 // deliberately NOT exempt — they are short-lived and should pay the
 // normal TTL / eviction cost.
-var exemptKeyPrefixes = []string{CronKeyPrefix, ProjectKeyPrefix}
+//
+// SysKeyPrefix is exempt: system daemon stubs (when daemons opt to register
+// one — see docs/rfc/system-session.md) must outlive the regular TTL/LRU
+// pressure. Phase 1 daemons typically don't register stubs at all (Runner
+// path), but the prefix is reserved here to keep the policy consistent
+// with future stub-using daemons.
+var exemptKeyPrefixes = []string{CronKeyPrefix, ProjectKeyPrefix, SysKeyPrefix}
 
 // isExemptKey reports whether key belongs to an exempt namespace. Callers
 // that already have a ManagedSession should prefer reading s.exempt —
@@ -738,6 +744,13 @@ func NewRouter(cfg RouterConfig) *Router {
 			s.SetCLIVersion(cliVersion)
 			if entry.UserLabel != "" {
 				s.SetUserLabel(entry.UserLabel)
+			}
+			// LabelOrigin restore: empty in pre-v2.1 stores is treated as
+			// "user" by daemons (RFC §7.3 / §13), so we don't synthesise a
+			// default here — leaving the field at "" preserves the legacy
+			// "human-set" semantics. Only persist explicit non-empty origin.
+			if entry.LabelOrigin != "" {
+				s.setLabelOrigin(entry.LabelOrigin)
 			}
 			// UI Round 5 R5-3: seed model from persisted store so the
 			// dashboard immediately renders "claude-opus-4.7" / etc on

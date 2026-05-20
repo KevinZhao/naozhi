@@ -165,6 +165,16 @@ type ManagedSession struct {
 	// summary → last_prompt. Lock-free reads from Snapshot() mirror the
 	// backend/cliName/cliVersion pattern.
 	userLabel atomic.Pointer[string]
+	// labelOrigin records who set userLabel: "" / "user" (operator-driven)
+	// or "auto" (sysession daemon). The empty/"user" cases are equivalent
+	// (legacy compatibility); only "auto" identifies a daemon-written label
+	// that may be overwritten by future daemon ticks. Once a human writes
+	// (origin="user"), daemons must permanently leave that session alone
+	// unless ClearUserLabelOrigin resets it back to "". See
+	// docs/rfc/system-session.md §7.3. Read paths are lock-free; writes
+	// must go through Router.SetUserLabelWithOrigin so the r.mu-protected
+	// re-read closes the daemon-vs-user race window (RFC §11.1).
+	labelOrigin atomic.Pointer[string]
 	// model is the most-recent CLI model identifier captured from
 	// system/init (claude) or SpawnOptions.Model (kiro), persisted to
 	// sessions.json so it survives naozhi restart even when the next
@@ -299,7 +309,22 @@ func (s *ManagedSession) UserLabel() string { return loadAtomicString(&s.userLab
 
 // SetUserLabel records an operator-set display label. Callers must have
 // already validated length/charset; the empty string clears any prior label.
+//
+// Deprecated for daemon callers: prefer Router.SetUserLabelWithOrigin so the
+// LabelOrigin field stays consistent. This bare setter is preserved for
+// internal callers (router restore, tests) that already know the origin
+// context they want to preserve.
 func (s *ManagedSession) SetUserLabel(v string) { storeAtomicString(&s.userLabel, v) }
+
+// LabelOrigin returns the recorded origin of the current UserLabel:
+// "" (legacy / empty equivalent to "user") / "user" / "auto". Lock-free.
+func (s *ManagedSession) LabelOrigin() string { return loadAtomicString(&s.labelOrigin) }
+
+// setLabelOrigin records the origin of the current UserLabel. Unexported
+// because the only legitimate writers are Router.SetUserLabelWithOrigin
+// and ClearUserLabelOrigin, which run under r.mu so the re-read protocol
+// (RFC §11.1) stays atomic with the userLabel update.
+func (s *ManagedSession) setLabelOrigin(v string) { storeAtomicString(&s.labelOrigin, v) }
 
 // Model returns the persisted last-known CLI model identifier ("" when
 // not yet captured from system/init / SpawnOptions). UI Round 5 R5-3.
@@ -890,18 +915,24 @@ type SessionSnapshot struct {
 	//     docs/TODO.md. Until that lands, dashboards consuming Snapshot
 	//     for ACP backends should expect the configured value, not the
 	//     in-effect runtime model. R225-CR-8.
-	Model           string             `json:"model,omitempty"`
-	LastActive      int64              `json:"last_active"` // unix ms
-	TotalCost       float64            `json:"total_cost"`
-	Workspace       string             `json:"workspace,omitempty"`
-	DeathReason     string             `json:"death_reason,omitempty"`
-	ChatType        string             `json:"chat_type,omitempty"`
-	ChatID          string             `json:"chat_id,omitempty"`
-	Node            string             `json:"node,omitempty"`
-	LastPrompt      string             `json:"last_prompt,omitempty"`      // most recent user message
-	LastActivity    string             `json:"last_activity,omitempty"`    // most recent tool/thinking status
-	Summary         string             `json:"summary,omitempty"`          // Claude-generated session title
-	UserLabel       string             `json:"user_label,omitempty"`       // operator-set override for sidebar/header title
+	Model        string  `json:"model,omitempty"`
+	LastActive   int64   `json:"last_active"` // unix ms
+	TotalCost    float64 `json:"total_cost"`
+	Workspace    string  `json:"workspace,omitempty"`
+	DeathReason  string  `json:"death_reason,omitempty"`
+	ChatType     string  `json:"chat_type,omitempty"`
+	ChatID       string  `json:"chat_id,omitempty"`
+	Node         string  `json:"node,omitempty"`
+	LastPrompt   string  `json:"last_prompt,omitempty"`   // most recent user message
+	LastActivity string  `json:"last_activity,omitempty"` // most recent tool/thinking status
+	Summary      string  `json:"summary,omitempty"`       // Claude-generated session title
+	UserLabel    string  `json:"user_label,omitempty"`    // operator-set override for sidebar/header title
+	// LabelOrigin records who set UserLabel: "" / "user" (human) or "auto"
+	// (sysession daemon). Frontend uses this to show a small bot icon on
+	// auto-labeled sessions and to enable the "restore auto naming"
+	// action (POST /api/system/labels/clear-origin). See
+	// docs/rfc/system-session.md §7.3 / §9.3.
+	LabelOrigin     string             `json:"label_origin,omitempty"`
 	Project         string             `json:"project,omitempty"`          // project name (filled by server)
 	ProjectFallback bool               `json:"project_fallback,omitempty"` // true when Project is a workspace-basename fallback, not a registered project
 	IsPlanner       bool               `json:"is_planner,omitempty"`       // true for project planner sessions
@@ -943,18 +974,19 @@ func (s *ManagedSession) HasProcess() bool {
 func (s *ManagedSession) Snapshot() SessionSnapshot {
 	s.parseKeyParts()
 	snap := SessionSnapshot{
-		Key:        s.key,
-		Platform:   s.keyPlatform,
-		ChatType:   s.keyChatType,
-		ChatID:     s.keyChatID,
-		Agent:      s.keyAgentID,
-		SessionID:  s.getSessionID(),
-		LastActive: s.LastActive().UnixMilli(),
-		Workspace:  s.Workspace(),
-		Backend:    s.Backend(),
-		CLIName:    s.CLIName(),
-		CLIVersion: s.CLIVersion(),
-		UserLabel:  s.UserLabel(),
+		Key:         s.key,
+		Platform:    s.keyPlatform,
+		ChatType:    s.keyChatType,
+		ChatID:      s.keyChatID,
+		Agent:       s.keyAgentID,
+		SessionID:   s.getSessionID(),
+		LastActive:  s.LastActive().UnixMilli(),
+		Workspace:   s.Workspace(),
+		Backend:     s.Backend(),
+		CLIName:     s.CLIName(),
+		CLIVersion:  s.CLIVersion(),
+		UserLabel:   s.UserLabel(),
+		LabelOrigin: s.LabelOrigin(),
 		// UI Round 5 R5-3: seed Model from persisted ManagedSession; the
 		// proc-bearing branch below will overwrite if live proc has a
 		// fresher value. No-proc snapshots (evicted / pre-spawn) keep

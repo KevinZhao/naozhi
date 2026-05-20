@@ -60,6 +60,11 @@ type storeEntry struct {
 	Backend        string   `json:"backend,omitempty"`     // "claude" | "kiro" | ...
 	LastActive     int64    `json:"last_active,omitempty"` // unix nano
 	UserLabel      string   `json:"user_label,omitempty"`  // operator-set display name override
+	// LabelOrigin records who set UserLabel: "" / "user" (human-set) or
+	// "auto" (sysession daemon-set). See ManagedSession.LabelOrigin and
+	// docs/rfc/system-session.md §7.3. Empty is forward-compatible with
+	// pre-v2.1 stores (treated as "user" — daemons must leave it alone).
+	LabelOrigin string `json:"label_origin,omitempty"`
 	// Model is the last-known CLI model identifier captured from
 	// system/init (claude) or SpawnOptions.Model (kiro). Persisted so
 	// the dashboard can keep showing the right model after naozhi
@@ -124,6 +129,16 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 		if IsScratchKey(s.key) {
 			continue
 		}
+		// System daemon stubs (sys:{name}) are register-on-startup (see
+		// docs/rfc/system-session.md §3.4). Skipping persistence here is an
+		// independent guard from isExemptKey (which only governs TTL/LRU);
+		// a future stub-using daemon would otherwise leave dangling entries
+		// in sessions.json that the next naozhi binary may not know how to
+		// resurrect — and persisting them would broaden the attack surface
+		// for sessions.json tampering (RFC §14).
+		if IsSysKey(s.key) {
+			continue
+		}
 		// Use getSessionID to avoid data race with concurrent Send.
 		// Fallback to process's SessionID which is set earlier (on system/init),
 		// before Send() completes and propagates it to ManagedSession.
@@ -161,6 +176,7 @@ func saveStore(path string, sessions map[string]*ManagedSession) error {
 				Backend:        s.Backend(),
 				LastActive:     s.lastActive.Load(),
 				UserLabel:      s.UserLabel(),
+				LabelOrigin:    s.LabelOrigin(),
 				Model:          s.Model(),
 			})
 		}
