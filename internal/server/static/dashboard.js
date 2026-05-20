@@ -12885,6 +12885,93 @@ async function doEditCronJob(id) {
   });
 })();
 
+/* ===== Sidebar fully-collapse (PC only) =====
+   Toggle body.sidebar-collapsed so .main occupies the full viewport. State is
+   persisted via lsSet so a refresh keeps the user's preference. The mobile
+   layout (≤768px) already treats the sidebar as a fixed drawer overlay, so
+   the toggle is a no-op there: we suppress the click and let mobile's own
+   list/chat-view classes drive visibility. Keyboard shortcut: `[` (mirroring
+   editor conventions like VS Code's Ctrl+B / Cursor's `[`). */
+const LS_SIDEBAR_COLLAPSED = 'sidebar_collapsed';
+
+function isMobileViewport() {
+  return window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
+}
+
+// applySidebarCollapsed is the single state-mutator. moveFocus drives whether
+// to relocate keyboard focus to the now-visible button — true on user-driven
+// toggle (the previously-focused button is about to be display:none'd, which
+// would punt focus back to <body>); false on cold-start / viewport-boundary
+// re-apply (don't steal focus from the user's first interaction).
+function applySidebarCollapsed(collapsed, moveFocus) {
+  document.body.classList.toggle('sidebar-collapsed', !!collapsed);
+  const btnHide = document.getElementById('btn-sidebar-collapse');
+  const btnShow = document.getElementById('btn-sidebar-show');
+  if (btnHide) btnHide.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  if (btnShow) btnShow.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  if (moveFocus) {
+    const next = collapsed ? btnShow : btnHide;
+    if (next && typeof next.focus === 'function') {
+      try { next.focus({preventScroll: true}); } catch (_) { next.focus(); }
+    }
+  }
+}
+
+function toggleSidebarCollapsed() {
+  // Mobile drawer has its own list/chat-view contract — do not piggyback on
+  // it; just bail so the existing back-button + drawer flow stays canonical.
+  if (isMobileViewport()) return;
+  const next = !document.body.classList.contains('sidebar-collapsed');
+  applySidebarCollapsed(next, true);
+  lsSet(LS_SIDEBAR_COLLAPSED, next ? 1 : 0);
+}
+
+(function initSidebarCollapsed(){
+  // Honor persisted preference on cold-load. Skip on mobile so a previously
+  // collapsed PC session doesn't black-box the drawer when the user pops the
+  // dashboard open on a phone (different viewport, different mental model).
+  if (isMobileViewport()) return;
+  if (lsGet(LS_SIDEBAR_COLLAPSED, 0)) {
+    applySidebarCollapsed(true, false);
+  }
+})();
+
+// Re-apply preference when the viewport crosses the mobile boundary (DevTools,
+// tablet rotation, manual resize). On mobile we drop the PC class so the
+// drawer rules win; switching back to PC re-applies the saved flag.
+if (window.matchMedia) {
+  const mql = window.matchMedia('(max-width: 768px)');
+  const onMqlChange = (e) => {
+    if (e.matches) {
+      document.body.classList.remove('sidebar-collapsed');
+    } else {
+      applySidebarCollapsed(!!lsGet(LS_SIDEBAR_COLLAPSED, 0), false);
+    }
+  };
+  if (typeof mql.addEventListener === 'function') {
+    mql.addEventListener('change', onMqlChange);
+  } else if (typeof mql.addListener === 'function') {
+    mql.addListener(onMqlChange); // Safari ≤13 fallback
+  }
+}
+
+document.addEventListener('keydown', function(e) {
+  // `[` toggles collapse on PC. Skip when typing into an input/textarea/
+  // contenteditable, when any modifier is held, while an IME composition is
+  // active (CJK input fires `[` for fullwidth bracket), or while a modal/
+  // palette is open. Mirrors the skip logic the `/` shortcut uses for
+  // sidebar search.
+  if (e.key !== '[') return;
+  if (e.isComposing) return;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+  const tgt = e.target;
+  if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+  if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
+  if (isMobileViewport()) return;
+  e.preventDefault();
+  toggleSidebarCollapsed();
+});
+
 /* ===== Onboarding ===== */
 
 // Show a one-time intro for first-time visitors. Dismissal is sticky per
