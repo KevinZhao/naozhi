@@ -330,9 +330,13 @@ func (p *ACPProtocol) SupportsPriority() bool { return false }
 func (p *ACPProtocol) SupportsReplay() bool   { return false }
 
 // Capabilities returns the hard-coded Caps for ACP JSON-RPC.
-// ACP has no stdin-level interrupt but session/cancel is a safe soft
-// cancel RPC, so SoftInterrupt=true even though WriteInterrupt
-// currently returns ErrInterruptUnsupported. See RNEW-ARCH-404.
+// ACP has no stdin-level interrupt, but session/cancel is a safe soft
+// cancel RPC once the initialize+session_new handshake has completed,
+// so SoftInterrupt=true. WriteInterrupt still returns
+// ErrInterruptUnsupported in the narrow pre-handshake window where
+// there is no session to cancel; callers fall back to SIGINT. The
+// SoftInterrupt bit advertises the post-handshake capability — its
+// godoc on Caps.SoftInterrupt reflects this. See RNEW-ARCH-404.
 func (p *ACPProtocol) Capabilities() Caps {
 	return Caps{Replay: false, Priority: false, SoftInterrupt: true, StreamJSON: false}
 }

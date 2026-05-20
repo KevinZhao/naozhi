@@ -95,7 +95,7 @@ type Protocol interface {
 type Caps struct {
 	Replay        bool // true if the protocol can replay events from disk (Claude stream-json)
 	Priority      bool // true if the protocol supports priority queueing (Claude has a spawn-priority path)
-	SoftInterrupt bool // true if WriteInterrupt is a no-op safe soft cancel (ACP has this; Claude SIGINTs)
+	SoftInterrupt bool // true if WriteInterrupt is a safe soft cancel once a session is established (ACP session/cancel notification; Claude uses SIGINT). Pre-handshake calls may still return ErrInterruptUnsupported because there is nothing to cancel yet — see ACPProtocol.WriteInterrupt for the canonical example.
 	StreamJSON    bool // true if the protocol's wire format is stream-json (Claude) vs something else (ACP JSON-RPC)
 }
 
