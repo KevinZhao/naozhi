@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -1460,18 +1461,27 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 // Empty backend (legacy stores predating the Backend field) defaults to USD
 // because such stores are necessarily claude-only.
 //
-// Adding a new backend: extend this switch alongside the matching
-// backend.Profile registration. The dashboard reads this value as the source
-// of truth for cost-cell formatting (see docs/rfc/multi-backend.md §8.3 D5).
-func costUnitForBackend(backend string) string {
-	switch backend {
-	case "kiro":
-		return "credits"
-	case "", "claude":
-		return "USD"
-	default:
-		return ""
+// The actual unit string lives on backend.Profile.CostUnit, looked up via
+// backend.Get. Adding a new backend means setting CostUnit on its profile —
+// no edit here required (R225-CR-4 / R224-ARCH-1). The dashboard reads this
+// value as the source of truth for cost-cell formatting (see
+// docs/rfc/multi-backend.md §8.3 D5).
+func costUnitForBackend(backendID string) string {
+	// Legacy stores predating the Backend field — claude-only.
+	if backendID == "" {
+		backendID = "claude"
 	}
+	// EnsureDefaults is idempotent and concurrent-safe; call it here so
+	// test fixtures and pre-main code paths (doctor helpers, scratch tools)
+	// see the registry populated without each call site bootstrapping.
+	backend.EnsureDefaults()
+	if p, ok := backend.Get(backendID); ok {
+		return p.CostUnit
+	}
+	// Unregistered backend ID (e.g. config typo, in-progress backend not
+	// yet wired into RegisterDefaults). Returning "" makes the dashboard
+	// hide the cost cell rather than render a misleading unit.
+	return ""
 }
 
 // isActivityType mirrors the EventLog.Append type set that updates

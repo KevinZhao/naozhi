@@ -36,6 +36,10 @@ func kiroProfile() Profile {
 		// by internal/history/kirojsonl. Stored with leading "~/" for
 		// the same reason as claude (doctor display).
 		HistoryDir: "~/.kiro/sessions/cli/",
+		// kiro accrues per-turn metering as ACP-protocol "credits" rather
+		// than dollar cost. Dashboard cost cells render unitless with the
+		// "credits" suffix.
+		CostUnit: "credits",
 		// Multi-Backend RFC §8.2 — kiro lacks several claude-only UX
 		// features:
 		//   - askuser: ACP has no AskUserQuestion equivalent (validate V13)
