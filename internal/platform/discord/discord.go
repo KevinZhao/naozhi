@@ -317,11 +317,12 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 		MentionMe: mentionMe,
 	}
 
-	// Download images in the async goroutine, not in discordgo's event dispatch
+	// Download images in the async goroutine, not in discordgo's event dispatch.
 	d.handlerWg.Add(1)
 	go func() {
 		defer d.handlerWg.Done()
 		defer platform.RecoverHandler("discord")
+		var total int
 		for _, p := range pending {
 			data, mime, err := downloadURL(p.url)
 			if err != nil {
@@ -329,10 +330,37 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 					"err", err, "url", osutil.SanitizeForLog(p.url, 256))
 				continue
 			}
+			if !aggregateAttachmentBytesAllow(total, len(data)) {
+				slog.Warn("discord attachments aggregate cap reached",
+					"channel", m.ChannelID,
+					"kept", len(msg.Images),
+					"cap_bytes", maxDiscordTotalAttachmentBytes,
+					"so_far_bytes", total,
+					"next_bytes", len(data))
+				break
+			}
+			total += len(data)
 			msg.Images = append(msg.Images, platform.Image{Data: data, MimeType: mime})
 		}
 		d.handler(d.stopCtx, msg)
 	}()
+}
+
+// maxDiscordTotalAttachmentBytes caps the aggregate downloaded bytes per
+// inbound message in addition to the per-image 10 MB cap inside downloadURL.
+// At maxDiscordAttachmentsPerMessage (5) × 10 MB the worst-case is 50 MB
+// pinned in heap until the dispatcher consumes the message; 32 MiB still
+// accommodates ordinary screenshots while limiting the amplification factor
+// a hostile client can cause. (R226-SEC-5)
+const maxDiscordTotalAttachmentBytes = 32 * 1024 * 1024
+
+// aggregateAttachmentBytesAllow reports whether adding next bytes to soFar
+// stays within maxDiscordTotalAttachmentBytes.
+func aggregateAttachmentBytesAllow(soFar, next int) bool {
+	if next < 0 {
+		return false
+	}
+	return soFar+next <= maxDiscordTotalAttachmentBytes
 }
 
 func isImageContentType(ct string) bool {
