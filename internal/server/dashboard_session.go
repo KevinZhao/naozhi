@@ -189,6 +189,37 @@ type nodeStatusEntry struct {
 	RemoteAddr  string `json:"remote_addr,omitempty"`
 }
 
+// sessionListLocalResp is the /api/sessions response shape for single-node
+// deployments (no remote nodes configured). Replaces a per-poll
+// `make(map[string]any, 3)` + 3 string-keyed boxed assignments — a struct
+// literal marshals byte-identically (sessions / stats / history_sessions
+// keys in the same order as the prior map iteration order Go fixed for
+// json.Marshal at v1.12+) while skipping the map bucket alloc + 3
+// interface{} boxes per request. `history_sessions` is omitempty so
+// deployments without JSONL history serialize the same 2-key object as
+// before. R226-PERF-7.
+type sessionListLocalResp struct {
+	Sessions        []session.SessionSnapshot `json:"sessions"`
+	Stats           sessionStats              `json:"stats"`
+	HistorySessions []discovery.RecentSession `json:"history_sessions,omitempty"`
+}
+
+// sessionListMultiResp is the /api/sessions response shape for multi-node
+// deployments (>=1 configured remote node). `Sessions` is []any because
+// the multi-node merge concatenates local SessionSnapshot values with
+// remote node session entries (arbitrary map[string]any decoded from
+// peer JSON). `Nodes` has no omitempty: this struct is only used when
+// the node map is populated, so the field is always present in the
+// JSON output, matching the prior `resp["nodes"] = nodeStatus`
+// unconditional assignment. `HistorySessions` keeps omitempty for the
+// same reason as the single-node variant. R226-PERF-7.
+type sessionListMultiResp struct {
+	Sessions        []any                      `json:"sessions"`
+	Stats           sessionStats               `json:"stats"`
+	Nodes           map[string]nodeStatusEntry `json:"nodes"`
+	HistorySessions []discovery.RecentSession  `json:"history_sessions,omitempty"`
+}
+
 // projectListEntry is the per-project element in /api/sessions "stats.projects".
 // Named struct (vs map[string]any{6 keys}) eliminates P inner-map allocs and
 // 6×P interface{} boxing ops per 1 Hz dashboard poll. `omitempty` tags
@@ -528,16 +559,18 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	knownNodes := h.nodeAccess.KnownNodes()
 
 	// No configured nodes at all: use simple single-node response format.
-	// Pre-size resp to 3 so the optional history_sessions insert doesn't
-	// trigger a bucket rehash on fresh-deployment dashboards that always
-	// have JSONL history to show. R64-PERF-10.
+	// Use a named struct (sessionListLocalResp) instead of map[string]any
+	// so the 1 Hz dashboard poll skips the map-bucket alloc + interface{}
+	// boxing on every request. JSON output is byte-identical to the prior
+	// map literal because the field tags + omitempty preserve key order
+	// and the optional history_sessions semantics. R226-PERF-7.
 	if len(knownNodes) == 0 {
-		resp := make(map[string]any, 3)
-		resp["sessions"] = snapshots
-		resp["stats"] = stats
-		history := h.historySessions()
-		if len(history) > 0 {
-			resp["history_sessions"] = history
+		resp := sessionListLocalResp{
+			Sessions: snapshots,
+			Stats:    stats,
+		}
+		if history := h.historySessions(); len(history) > 0 {
+			resp.HistorySessions = history
 		}
 		writeJSON(w, resp)
 		return
@@ -592,17 +625,19 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Pre-size for the 3 always-set keys + optional history_sessions to skip
-	// the bucket rehash on the common "repo with JSONL history + nodes
-	// configured" path. Mirrors the single-node path pattern at line ~314.
-	// R65-PERF-L-3.
-	resp := make(map[string]any, 4)
-	resp["sessions"] = allSessions
-	resp["stats"] = stats
-	resp["nodes"] = nodeStatus
-	history := h.historySessions()
-	if len(history) > 0 {
-		resp["history_sessions"] = history
+	// Use a named struct (sessionListMultiResp) instead of map[string]any
+	// so the multi-node hot path mirrors the single-node optimisation: no
+	// map-bucket alloc, no interface{} boxing of sessions/stats/nodes on
+	// every 1 Hz poll. JSON output stays byte-identical because the
+	// field tags preserve key names and history_sessions keeps omitempty.
+	// R226-PERF-7.
+	resp := sessionListMultiResp{
+		Sessions: allSessions,
+		Stats:    stats,
+		Nodes:    nodeStatus,
+	}
+	if history := h.historySessions(); len(history) > 0 {
+		resp.HistorySessions = history
 	}
 	writeJSON(w, resp)
 }
