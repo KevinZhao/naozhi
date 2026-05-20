@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -18,6 +19,12 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
+
+// acpStopReasonKey is the on-wire key that ACP uses inside a session/prompt
+// response Result to carry the turn-end reason. Most kiro responses ship as
+// `null` or `{}` so checking for this byte sequence before json.Unmarshal
+// skips the reflect+alloc cost on the streaming hot path. R227-PERF-15.
+var acpStopReasonKey = []byte(`"stopReason"`)
 
 // toolJSONMaxRunes caps the rune count of tool_call input/output payloads
 // stuffed into Event.ToolCall before they are forwarded to dashboard / IM
@@ -413,10 +420,17 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		// turn end from a cancelled one. ACP spec values: "end_turn",
 		// "cancelled", "max_tokens", "tool_use_failure", "refusal". We expose
 		// the raw string in SubType — same field used by stream-json events.
+		//
+		// R227-PERF-15: short-circuit when the response carries no stopReason
+		// at all (kiro 2.3.0 commonly returns `null` or `{}` on success).
+		// json.Unmarshal of an empty / null Result still pays a reflect setup
+		// + struct-field walk; bytes.Contains is a tight scan that skips both.
 		var stop struct {
 			StopReason string `json:"stopReason"`
 		}
-		_ = json.Unmarshal(msg.Result, &stop) // best-effort; missing => empty
+		if bytes.Contains(msg.Result, acpStopReasonKey) {
+			_ = json.Unmarshal(msg.Result, &stop) // best-effort; missing => empty
+		}
 
 		p.mu.Lock()
 		text := p.textBuf.String()
