@@ -47,6 +47,11 @@ var ErrJobNotPaused = errors.New("cron: job not paused")
 // against the operator's pause intent.
 var ErrJobPaused = errors.New("cron: job is paused")
 
+// ErrJobNoPrompt is returned by TriggerNow when the target job has no prompt
+// configured. Sentinel form so dashboard handlers can errors.Is and emit an
+// HTTP 422 (vs 400) instead of relying on string matching.
+var ErrJobNoPrompt = errors.New("cron: job has no prompt")
+
 // ErrPersistFailed is returned by mutation APIs (AddJob/DeleteJob/Update/
 // Pause/Resume/SetJobPrompt) when the post-mutation JSON serialisation fails.
 // The in-memory state has already been changed and cannot be rolled back —
@@ -1376,7 +1381,7 @@ func (s *Scheduler) TriggerNow(id string) error {
 	}
 	if j.Prompt == "" {
 		s.mu.Unlock()
-		return fmt.Errorf("job %s has no prompt", id)
+		return fmt.Errorf("%w: id %q", ErrJobNoPrompt, id)
 	}
 	entryID := j.entryID
 	// Register the trigger goroutine with triggerWG before releasing s.mu.
