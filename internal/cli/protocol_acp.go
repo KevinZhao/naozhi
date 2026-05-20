@@ -403,6 +403,14 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		if err != nil || ev.Type == "" {
 			return nil, done, err
 		}
+		// R229-SEC-10: cap total content bytes to bound per-event CPU /
+		// memory amplification across downstream consumers (EventLog ring,
+		// JSONL persist, dashboard fan-out). Mirror of the cap applied in
+		// ClaudeProtocol.ReadEvent.
+		if ev.Message != nil && contentBytes(ev.Message) > maxAssistantMessageContentBytes {
+			return nil, done, fmt.Errorf("ACP event content exceeds %d bytes (got %d), dropping",
+				maxAssistantMessageContentBytes, contentBytes(ev.Message))
+		}
 		return []Event{ev}, done, nil
 	}
 
