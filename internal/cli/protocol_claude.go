@@ -190,6 +190,16 @@ func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	if ev.Type == "control_response" {
 		return nil, false, nil
 	}
+	// R229-SEC-10: cap total content bytes to bound per-event CPU / memory
+	// amplification. A tampered CLI could emit a 10 MiB nested JSON event
+	// (within shim-line cap) whose Message.Content has megabytes of text
+	// across hundreds of blocks — every downstream consumer (EventLog ring,
+	// JSONL persist, dashboard fan-out) then pays O(N) work. Drop the event
+	// rather than truncate so the dashboard doesn't render half a turn.
+	if ev.Message != nil && contentBytes(ev.Message) > maxAssistantMessageContentBytes {
+		return nil, false, fmt.Errorf("event content exceeds %d bytes (got %d), dropping",
+			maxAssistantMessageContentBytes, contentBytes(ev.Message))
+	}
 	// AskUserQuestion surfacing: in `claude -p` (headless) mode the CLI
 	// auto-injects an is_error:true tool_result ~3ms after the tool_use,
 	// bailing the model back to a text response inside the same turn

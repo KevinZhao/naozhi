@@ -185,6 +185,33 @@ type ContentBlock struct {
 	Input json.RawMessage `json:"input,omitempty"` // tool_use input
 }
 
+// maxAssistantMessageContentBytes caps the total bytes of an
+// AssistantMessage's content blocks accepted by ReadEvent. R229-SEC-10:
+// a tampered or buggy CLI / shim could emit a single 10 MiB+ event whose
+// nested content blocks are deeply structured but harmless-looking JSON;
+// every downstream stage (EventLog ring, dashboard fan-out, JSONL persist)
+// then pays O(N) per consumer. The 4 MiB ceiling sits comfortably above the
+// largest legitimate content payload observed in production
+// (base64 image + thinking block ≈ 1.5 MiB) yet caps single-event CPU /
+// memory amplification well below the 10 MiB shim line cap.
+const maxAssistantMessageContentBytes = 4 * 1024 * 1024
+
+// contentBytes sums the user-visible byte size of an AssistantMessage's
+// content blocks. Only fields that grow with model output are counted; the
+// fixed-size discriminators (Type/ID/Name) are excluded so a message of
+// many tiny tool_use blocks does not falsely trip the cap.
+func contentBytes(m *AssistantMessage) int {
+	if m == nil {
+		return 0
+	}
+	total := 0
+	for i := range m.Content {
+		total += len(m.Content[i].Text)
+		total += len(m.Content[i].Input)
+	}
+	return total
+}
+
 // UnmarshalJSON lets AssistantMessage tolerate a "content" field that is
 // either the normal []ContentBlock (assistant messages, tool_result users)
 // or a plain string (CLI's replay-user-messages echoes the original user
