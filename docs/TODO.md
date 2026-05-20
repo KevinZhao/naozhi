@@ -416,7 +416,7 @@
 - [x] **R224-CR-2 — `R218B-GO-2` (panic handler 用 Background ctx 会挂起) 是误报，应关闭（P2）**: `dispatch.go:518` 已是 `context.WithTimeout(context.Background(), 15s)`，无法挂起；该函数必须有意从 parent ctx detach（parent 在 shutdown 已 cancel），才能给用户回 panic 错误。R218B-GO-2 / R217-GO-2 应关闭。 — 已关闭（dispatch.go:518 已锁 15s 上限；同步关闭 R218B-GO-2 / R217-GO-2 同源条目），本批 PR #150
 - [x] **R224-CR-3 — `EventEntryFromEvent` Deprecated godoc 写错（P3）**: `process_event_format.go:23` 注释带 `Deprecated` 字面但不是 gopls 识别的 `// Deprecated:` 行格式（缺冒号），strike-through 不会触发。方案：改成标准 `// Deprecated: use EventEntriesFromEvent.`。注：函数仍被 process_extra_test.go 锁定行为，**不能删**，仅修注释。 — 已修复，本批 PR #141
 - [x] **R224-CR-4 — `metrics/multibackend.go` 4-week 双写迁移 `R222-OBS-MULTIBACKEND-LEGACY` 锚点是死引用（P2）**: 文件头部说 "see TODO marker R222-OBS-MULTIBACKEND-LEGACY" 但 TODO.md 中无此锚点。方案：补上具体条目（列出 legacy expvar.Int 名单 + 移除前提"ops dashboards 全部迁到 labeled counter 后 4 周")。 — 已修复（multibackend.go 文件头注释改为自描述：列出 2 个 legacy mirror（CLISpawnTotal / SessionActive）+ 2 条移除前提（dashboards 全迁 + ≥4 周 production soak），跟踪锚点改为 R-METRICS-LEGACY-EXPVAR），本批 PR #141
-- [ ] **R224-CR-5 — `server.New` deprecated wrapper 无移除条件（P2）**: `server.go:457` Deprecated 自 Round 214 起停摆，0 生产调用，~20 test call sites 阻塞。方案：① Deprecated godoc 加显式移除条件 "remove once all *_test.go migrated"；② 或关闭 R214-CODE-4 标 "won't fix — low-value churn"。
+- [x] **R224-CR-5 — `server.New` deprecated wrapper 无移除条件（P2）**: `server.go:457` Deprecated 自 Round 214 起停摆，0 生产调用，~20 test call sites 阻塞。方案：① Deprecated godoc 加显式移除条件 "remove once all *_test.go migrated"；② 或关闭 R214-CODE-4 标 "won't fix — low-value churn"。 — 已修复（采用方案 ①：Deprecated 块下追加 "Removal condition" 段，明确 `git grep -l "server.New("` 应为零才能删；同时禁止新增 positional-style 调用点。R214-CODE-4 同根因留作 *_test.go 迁移驱动），本批 PR #187
 - [~] **R224-CR-6 — `process_turn.go` 文件级 ownership 注释列错位（误报关闭 2026-05-20）**: 条目自身已记「无操作，当作澄清」——`isChanAlive` 在同文件第 188-193 行确实由本文件拥有，文档与代码自洽，是 reviewer 自己的误报。本批 PR #168 关闭归档。
 - [x] **R224-CR-7 — Sprint-numbered 注释批量过期（P3）**: `dispatch.go:710` "Sprint 2"、`select_node_for_backend.go:3` "Sprint 6b"、`dashboard_cron.go:354` "Sprint 6c"、`profile_kiro.go:14` "Sprint 1b reverse-node routing"（已落地于 upstream/caps.go）等多处把 Sprint 编号当时间锚点，长期看变误导。方案：扫一遍把 Sprint X 替换为功能描述或 PR 锚点。 — 已修复（dispatch.go / select_node_for_backend.go / dashboard_cron.go × 3 / profile_kiro.go × 2 共 6 处 Sprint 编号替换为功能描述或 RFC §章节锚点），本批 PR #141
 - [x] **R224-CR-8 — `sanitizeStderrLine` 缺独立 unit test（P3）**: `process_turn.go` 安全敏感（log injection 防御）但仅有 readLoop 端到端覆盖。方案：补 table-driven test（normal ASCII / ANSI escape / C0 / 超长截断）。 — 已修复（process_turn_test.go 覆盖 ASCII/CSI/OSC/C0/C1/bidi/LS-PS/CJK/emoji passthrough/截断标记/UTF-8 边界），本批 PR #160
@@ -1356,7 +1356,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R227-GO-2 — `cli/subagent_link.Resolve` retry 循环 `time.Sleep(retryInterval)` 无 ctx 取消（P1）**: SIGTERM 期间最多 8 个 Resolve goroutine 各自卡 3s。修复需 Resolve 接 context.Context 参数（Breaking）。涉及 `internal/cli/subagent_link.go:294,332`。重申 R225-GO-2。
 - [x] **R227-GO-3 — `fireOnResolveLocked` 命名违反 Go 锁约定（P2）**: `...Locked` 通常意味"调用者持锁，函数不操作锁"，但本函数手动 Unlock+Lock。本轮 R227-GO-1 修了 panic-safe，但语义命名仍是陷阱：未来若有人在持锁场景再调一次将 double-unlock。建议重命名为 `fireCallbacksDropLock` 并在 godoc 明确"releases and reacquires l.mu"。 — 已修复，本批 PR #170
 - [ ] **R227-GO-4 — `Router.Shutdown` test fallback `time.Sleep(100ms)` busy-poll（P2）**: 测试构造的 `&Router{}` 缺 shutdownCond，30s 超时下 300 次 busy-poll。方案：要求所有路径走 NewRouter；或裸构造时 log.Warn。
-- [ ] **R227-GO-5 — cron `notifyTarget` 用 `context.Background()` 不响应 stopCtx（P2）**: send 路径已用 Background 是有意（保证 cron run 记录写入），但 notifyTarget 通知失败只 Warn，应继承 stopCtx 在关闭路径提前取消。**降级**：审查发现 send 路径用 Background 与 notifyTarget 用 Background 是同一原则（生命周期独立于 stopCtx），降为 P3 仅记录。
+- [~] **R227-GO-5 — cron `notifyTarget` 用 `context.Background()` 不响应 stopCtx（误报关闭 2026-05-20）**: 复核后确认与 send 路径同款意图——cron run 记录写入与最终通知归属同一生命周期，必须独立于 stopCtx 才能在 graceful shutdown 期间把已跑完的 turn 结果递达 IM。条目自标"降为 P3 仅记录"，本批 PR #187 关闭归档。
 - [ ] **R227-GO-7 — `cli.Resolve` resolveSem acquire 无 ctx select arm（P2）**: 与 R227-GO-2 同根因；Resolve 接 ctx 后可统一 select。
 - [~] **R227-GO-8 — `cli/process.go Kill()` 持 shimWMu 调 closeShimConn 与 Detach 顺序不一致（误报关闭 2026-05-20）**: 与 R225-GO-7 同根因一并关闭——核实后 Kill (process.go:519-535) 与 Detach (:617-634) 都是「持 shimWMu 期间 closeShimConn」同一模式，不存在所谓"顺序不一致"。closeShimConn 走 sync.Once + net.Conn.Close，最坏延迟一次系统调用，不会饥饿 heartbeat。本批 PR #169
 
@@ -1371,14 +1371,14 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R227-SEC-10 — `/health` 端点无认证无限速，泄漏基础设施拓扑（P3）**: 外部攻击者可枚举 session count / watchdog kills / node 状态 / build 版本。方案：per-IP rate limiter + 敏感字段移到认证 /api/stats。重申 R226-SEC-7。
 - [x] **R227-SEC-11 — WS Hub 同 session key 无订阅数量上限（P3）**: 单 token 可开 1000 WS 订阅同 session 引 fan-out CPU spike。方案：subscribe 时检查同 key 当前订阅数 ≤20。重申 R226-SEC-8。 — 已修复（同 R226-SEC-8），本批 PR
 - [ ] **R227-SEC-12 — `mode=download` 路径可下载 .env / .npmrc / .netrc 等点开头配置（P3）**: previewableByExt 排除 .env 但 download 模式不受此保护。方案：download 模式额外 blocklist；或运维文档明确 allowed_root 不含秘密文件。
-- [ ] **R227-SEC-14 — `feishu/transport_ws.go` parseSDKEvent 没有 maxIncomingTextBytes 检查（P3）**: **降级**：审查发现 transport_ws.go:309 已有此检查，本条为误报。
+- [~] **R227-SEC-14 — `feishu/transport_ws.go` parseSDKEvent 没有 maxIncomingTextBytes 检查（误报关闭 2026-05-20）**: 复核 transport_ws.go:309 已有 `if len(text) > maxIncomingTextBytes` 守卫 + slog.Warn，与 transport_hook.go 保持对称。条目自标"本条为误报"。本批 PR #187 关闭归档。
 
 ### 性能 — 本轮新发现
 
 - [ ] **R227-PERF-1 — `Protocol.ReadEvent(line string)` 内 `[]byte(line)` 复制（P1）**: 5-50 events/s × N session 每行额外 heap alloc。方案：接口签名改 `ReadEvent(line []byte)`，readLoop 传入 trimmed []byte。涉及 `internal/cli/protocol_claude.go:174` + `protocol_acp.go:323`。Breaking（package 内部接口）。
 - [ ] **R227-PERF-2 — `ACPProtocol.ReadEvent` 对 agent_message_chunk 路径双 unmarshal（P1）**: 整行 unmarshal 为 RPCMessage 后每个分支再 unmarshal Params/Result。流式文本场景两次全量 JSON 解析。方案：method 短路检查后 lazy-unmarshal。
 - [ ] **R227-PERF-3 — `eventlog_bridge.newEventLogSink` per-entry make+copy（P1）**: 5-50 events/s × N session 的小对象 GC 压力。方案：合并为 batch make+copy。涉及 `internal/session/eventlog_bridge.go:98`。
-- [ ] **R227-PERF-4 — `wsClient.SendJSON(v)` 调 json.Marshal 每次分配 encodeState（P1）**: WS 控制路径 40+ 调用点。**降级**：源码注释已论证 stdlib 内部已 pool encodeState，pool+copy 反而更贵。降为不修。
+- [~] **R227-PERF-4 — `wsClient.SendJSON(v)` 调 json.Marshal 每次分配 encodeState（误报关闭 2026-05-20）**: 复核后确认 encoding/json 内部 sync.Pool 已 pool encodeState (`encode.go:312-322` newEncodeState/freeEncodeState)，naozhi 加一层 sync.Pool 仅多一次 allocator round-trip 反而更贵。R229-PERF-4 已通过预 marshal 静态帧（wsErrNotAuthMsg/wsErrRateLimitedMsg 等）覆盖了真热的小响应路径。本批 PR #187 关闭归档。
 - [ ] **R227-PERF-5 — `WriteUserMessageLocked` json.Marshal encodeState alloc（P2）**: 用户 prompt 发送频率不高但每次 alloc。方案：sync.Pool 复用 bytes.Buffer + Encoder。
 - [ ] **R227-PERF-6 — `Cleanup` + `saveIfDirty` 每次写锁内 map clone 3 份（P2）**: 50 session × 30s 间隔每分钟 2 次 O(n) clone。方案：传 []*ManagedSession 切片，配合 listRefsPool。
 - [ ] **R227-PERF-7 — `ACPProtocol.WriteMessage` 每次 prompt 用 map[string]any（P2）**: 3-5 个 map + RPCRequest 分配 + marshal。方案：定义具名 struct。
@@ -1388,10 +1388,10 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [~] **R227-PERF-11 — `EventLog.Append` storeAtomicString 每次 *string alloc（评估关闭 2026-05-20）**: 条目自标"降级仅观察"。复核 textutil.StoreAtomicString 已用 atomic.Pointer.Load + 字符串相等短路（同值不重新 Store *string），命中率 ~99%（lastActivitySummary 在同 tool_use 持续时不变）。sync.Pool[string] 在 textutil 是叶子包做不到 lock-free 复用，且分支预测器对短路命中早已优化。本批 PR #168 关闭归档。
 - [ ] **R227-PERF-12 — `ACPProtocol.parseSessionUpdate` tool_call/tool_call_update 分支双 alloc（P2）**: AssistantMessage ptr + ContentBlock slice。方案：tool name 直接存 ToolCall.Title；ContentBlock 改 [1]ContentBlock + count。
 - [x] **R227-PERF-15 — `protocol_acp.ReadEvent` 每个 turn-end 都 unmarshal stopReason（P3）**: msg.Result 多数为 null 或 {}。方案：bytes.Contains 快速检测后再 unmarshal。 — 已修复，本批 PR #176
-- [ ] **R227-PERF-16 — `EventEntriesSince` dead-session 分支全量扫描+stable sort（P3）**: 500 entry × N tab 重订阅。方案：InjectHistory 时排序一次，消除 EntriesSince 重复排序。**降级**：500 entry stable sort < 1µs，可接受。
+- [~] **R227-PERF-16 — `EventEntriesSince` dead-session 分支全量扫描+stable sort（误报关闭 2026-05-20）**: 条目自标"500 entry stable sort < 1µs，可接受"——dead-session 重订阅是低频路径（tab reload），微秒级开销远低于其他热路径。InjectHistory 端排序也会让 replay 与 live append 之间的语义需要重新定义。本批 PR #187 关闭归档。
 - [ ] **R227-PERF-17 — `shim.ServerMsg.MarshalLine` 每次 json.Marshal alloc（P3）**: shim binary 独立。方案：sync.Pool[bufEnc]。**降级**：shim 独立 binary，不影响主进程，单独 PR 处理。
 - [ ] **R227-PERF-18 — `eventPushLoop` EventEntriesSince per-goroutine 独立 slice（P3）**: 50 订阅 tab × 同 session 各自分配。方案：扩展 EntriesSinceInto(dst) 接口接受 caller-owned buffer。Breaking。
-- [ ] **R227-PERF-19 — `Cleanup` Pass 1 candidates 用 time.Time 而非 lastActiveNS int64（P3 微优）**: time.Unix 分配 + Pass 2 重构 time.Duration。**降级**：传染性大，ROI 低。
+- [~] **R227-PERF-19 — `Cleanup` Pass 1 candidates 用 time.Time 而非 lastActiveNS int64（误报关闭 2026-05-20）**: 条目自标"传染性大，ROI 低"——Cleanup 是 30s tick 的低频路径，time.Time 接口更直观且与 LastActive() 公开 API 对齐；改 int64 会让 candidate slice 类型与 ManagedSession.LastActive() 返回签名分裂，下游若拿到 candidate slice 需各自 time.Unix 还原，传染面广。本批 PR #187 关闭归档。
 
 ### 代码质量 — 本轮新发现
 
