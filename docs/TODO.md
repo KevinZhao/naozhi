@@ -1370,7 +1370,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R227-SEC-9 — Dashboard 主页 CSP `script-src 'self' 'unsafe-inline'` 完全打开 XSS 通道（P2）**: 任何同源 XSS 注入即可执行任意脚本。方案：迁移到 CSP nonce 模式。Breaking。涉及 `internal/server/dashboard.go:389`。重申 R226-SEC-2。
 - [ ] **R227-SEC-10 — `/health` 端点无认证无限速，泄漏基础设施拓扑（P3）**: 外部攻击者可枚举 session count / watchdog kills / node 状态 / build 版本。方案：per-IP rate limiter + 敏感字段移到认证 /api/stats。重申 R226-SEC-7。
 - [x] **R227-SEC-11 — WS Hub 同 session key 无订阅数量上限（P3）**: 单 token 可开 1000 WS 订阅同 session 引 fan-out CPU spike。方案：subscribe 时检查同 key 当前订阅数 ≤20。重申 R226-SEC-8。 — 已修复（同 R226-SEC-8），本批 PR
-- [ ] **R227-SEC-12 — `mode=download` 路径可下载 .env / .npmrc / .netrc 等点开头配置（P3）**: previewableByExt 排除 .env 但 download 模式不受此保护。方案：download 模式额外 blocklist；或运维文档明确 allowed_root 不含秘密文件。
+- [x] **R227-SEC-12 — `mode=download` 路径可下载 .env / .npmrc / .netrc 等点开头配置（P3）**: previewableByExt 排除 .env 但 download 模式不受此保护。方案：download 模式额外 blocklist；或运维文档明确 allowed_root 不含秘密文件。 — 已关闭（实施已落地：`internal/server/project_files.go::serveDownload` 入口加 `isSensitiveDownloadName(filepath.Base(resolved))` 守卫，命中 sensitiveDownloadNames（.env / .env.local / .env.dev / .env.development / .env.prod / .env.production / .env.staging / .env.test / .netrc / .npmrc / .pypirc / .dockercfg）或 sensitiveDownloadExts（.key / .pem / .p12 / .pfx / .crt）返 403 "file type not downloadable"；commit 61cde08 R229-SEC-9 落地。R228-SEC-3 同根因），本批 PR #188
 - [~] **R227-SEC-14 — `feishu/transport_ws.go` parseSDKEvent 没有 maxIncomingTextBytes 检查（误报关闭 2026-05-20）**: 复核 transport_ws.go:309 已有 `if len(text) > maxIncomingTextBytes` 守卫 + slog.Warn，与 transport_hook.go 保持对称。条目自标"本条为误报"。本批 PR #187 关闭归档。
 
 ### 性能 — 本轮新发现
