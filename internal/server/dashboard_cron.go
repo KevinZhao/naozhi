@@ -748,6 +748,8 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "job not found", http.StatusNotFound)
 		case errors.Is(err, cron.ErrJobPaused):
 			http.Error(w, "job is paused", http.StatusConflict)
+		case errors.Is(err, cron.ErrJobNoPrompt):
+			http.Error(w, "job has no prompt", http.StatusUnprocessableEntity)
 		default:
 			slog.Debug("cron trigger failed", "err", err)
 			http.Error(w, "trigger failed", http.StatusBadRequest)

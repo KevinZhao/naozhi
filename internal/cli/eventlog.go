@@ -631,6 +631,13 @@ func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, fir
 // Append adds an entry to the log, overwriting the oldest entry when full.
 // Signals all subscribers non-blockingly after appending.
 func (l *EventLog) Append(e EventEntry) {
+	// R225-PERF-11: stamp UUID *before* taking l.mu — newEventUUID calls
+	// crypto/rand.Read which on Linux is a getrandom() syscall. Holding l.mu
+	// across that syscall serialises every concurrent Append behind the
+	// kernel entropy pool and bloats lock-hold time on the 5-50 events/s
+	// per-session hot path. stampUUID is a pure function of the entry's UUID
+	// field — caller-set UUIDs (history replay paths) are preserved unchanged.
+	stampUUID(&e)
 	l.mu.Lock()
 	// Single time.Now() feeds both the event timestamp (if absent) and the
 	// lastEventAt heartbeat below. Both reads used to happen independently
@@ -642,7 +649,6 @@ func (l *EventLog) Append(e EventEntry) {
 	if e.Time == 0 {
 		e.Time = now.UnixMilli()
 	}
-	stampUUID(&e)
 	// Server-side enforcement that every image entry is a data:image/* URI.
 	// Today's sole producer (MakeThumbnail) already conforms, but enforcing
 	// the contract here rather than trusting callers means any future
@@ -747,12 +753,19 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 	if sinkAttached {
 		sinkCopy = make([]EventEntry, 0, len(entries))
 	}
+	// R225-PERF-11: stamp UUIDs in-place *before* l.mu so the N
+	// crypto/rand.Read syscalls (getrandom, one per missing UUID) don't run
+	// under the write-lock. InjectHistory's 500-entry replay would otherwise
+	// hold l.mu across 500 syscalls during shim reconnect and starve every
+	// concurrent Append. Caller-set UUIDs (history replay) are preserved.
+	for i := range entries {
+		stampUUID(&entries[i])
+	}
 	l.mu.Lock()
 	for _, e := range entries {
 		if e.Time == 0 {
 			e.Time = defaultTime
 		}
-		stampUUID(&e)
 		// S15 (Round 174): same enforcement as Append. Replays from history
 		// (InjectHistory → AppendBatch) should never contain non-image data
 		// URIs today, but defense-in-depth is trivially cheap and locks the
@@ -905,27 +918,28 @@ func (l *EventLog) CloseSubscribers() {
 
 // Entries returns a copy of all entries in chronological order.
 //
-// R225-PERF-16: explicit RUnlock before return (no defer) — the broadcast
-// fan-out path calls this at high frequency and skipping the defer registration
-// trims a few ns per call without changing semantics. The function has no
-// non-Unlock cleanup so the simpler form is correct.
+// Uses defer RUnlock: a panic during make([]EventEntry, l.count) (e.g. OOM
+// for very large rings) would otherwise leave the lock permanently held and
+// deadlock subsequent writers. The defer cost is a handful of ns and not
+// material on the broadcast fan-out path.
 func (l *EventLog) Entries() []EventEntry {
 	l.mu.RLock()
+	defer l.mu.RUnlock()
 	out := make([]EventEntry, l.count)
 	start := (l.head - l.count + l.maxSize) % l.maxSize
 	for i := 0; i < l.count; i++ {
 		out[i] = l.entries[(start+i)%l.maxSize]
 	}
-	l.mu.RUnlock()
 	return out
 }
 
 // LastN returns the most recent n entries in chronological order.
 // If n <= 0 or n >= count, all entries are returned.
 //
-// R225-PERF-16: explicit RUnlock; see Entries for rationale.
+// Uses defer RUnlock; see Entries for rationale.
 func (l *EventLog) LastN(n int) []EventEntry {
 	l.mu.RLock()
+	defer l.mu.RUnlock()
 	count := l.count
 	if n > 0 && n < count {
 		count = n
@@ -935,7 +949,6 @@ func (l *EventLog) LastN(n int) []EventEntry {
 	for i := 0; i < count; i++ {
 		out[i] = l.entries[(start+i)%l.maxSize]
 	}
-	l.mu.RUnlock()
 	return out
 }
 
@@ -948,8 +961,8 @@ func (l *EventLog) LastN(n int) []EventEntry {
 // of two separate modular indexing expressions.
 func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	l.mu.RLock()
+	defer l.mu.RUnlock()
 	if l.count == 0 {
-		l.mu.RUnlock()
 		return nil
 	}
 	// First pass: collect matches in reverse order. Most calls match 0-5
@@ -973,8 +986,6 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 		}
 		rev = append(rev, l.entries[idx])
 	}
-	// R225-PERF-16: explicit RUnlock (no defer) — see Entries for rationale.
-	l.mu.RUnlock()
 	if len(rev) == 0 {
 		return nil
 	}

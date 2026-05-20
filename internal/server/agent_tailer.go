@@ -319,12 +319,17 @@ func (t *agentTailer) pollOnce() bool {
 			t.buffered = t.buffered[over:]
 		}
 	}
-	// Snapshot subs + events for broadcast outside the lock.
-	subs := make([]*wsClient, 0, len(t.subs))
-	for c := range t.subs {
-		subs = append(subs, c)
+	// Snapshot subs only when there are events to fan out — idle ticks
+	// otherwise paid an O(N) map copy per poll for nothing.
+	var subs []*wsClient
+	var meta node.AgentMetaPatch
+	if len(events) > 0 {
+		subs = make([]*wsClient, 0, len(t.subs))
+		for c := range t.subs {
+			subs = append(subs, c)
+		}
+		meta = t.meta
 	}
-	meta := t.meta
 	idle := now.Sub(t.lastActive) > agentTailerIdleGrace
 	refCount := t.refCount.Load()
 	t.mu.Unlock()

@@ -152,10 +152,10 @@
 - [ ] **R226-SEC-2 — Dashboard 主页 CSP `script-src 'self' 'unsafe-inline'` 完全打掉 XSS 防护（P1）**: 任何注入到 dashboard HTML 或同源 JS 文件的脚本都能直接执行；登录页已用 hash 收敛了，主页应迁移到 nonce 或 per-script SHA-256。Breaking：需把 dashboard.html 内联事件 handler 全部抽到外部文件 + 加 nonce/hash。涉及 `internal/server/dashboard.go:389` + 全部内联脚本审计。
 - [ ] **R226-SEC-3 — 反向 node 在 `ws://`（无 TLS）下传 token 仅 `slog.Warn` 不阻断（P2）**: token 在第一条 WS 消息明文，passive 观察者可截获并冒充 node。方案：primary 端 `/ws-node` 加 `require_tls: true` 配置，默认 reject 非 wss 升级，除非显式 `insecure: true`。Breaking：现有 `ws://` 部署需加配置或迁 `wss://`。`internal/upstream/connector.go:210` + `internal/node/reverseserver.go:155`。
 - [x] **R226-SEC-4 — Slack Socket Mode handler 无并发 cap（P2）**: 每条消息无限新建 goroutine（feishu 有 `hookSem` cap=20），高频/被攻 workspace 可 OOM。方案：仿 feishu 加 `slackSem chan struct{}` 容量 20，semaphore 满时 drop 并 slog.Warn。`internal/platform/slack/slack.go:376`。 — 已修复（hookSem chan cap=20 + 非阻塞 acquire + drop 时 slog.Warn, 与 feishu transport_hook 写法一致），本批 PR #153
-- [ ] **R226-SEC-5 — Discord 单条消息聚合下载无 cap（P2）**: 每附件 10MB 限制，但单消息可附 10 张 = 100MB / event；高频附图轰炸放大 OOM 风险。方案：`maxDiscordAttachmentsPerMessage = 5` 上限 + 总字节 cap。`internal/platform/discord/discord.go:363`。
+- [x] **R226-SEC-5 — Discord 单条消息聚合下载无 cap（P2）**: 每附件 10MB 限制，但单消息可附 10 张 = 100MB / event；高频附图轰炸放大 OOM 风险。方案：`maxDiscordAttachmentsPerMessage = 5` 上限 + 总字节 cap。`internal/platform/discord/discord.go:363`。 — 已修复（在已有 5 张 cap 之上加 32 MiB 聚合字节 cap，超额时 slog.Warn 并停止下载；`aggregateAttachmentBytesAllow` 抽出做 7 case table-driven test），本批 PR
 - [ ] **R226-SEC-6 — `allowed_root` 未配置只 warn 不阻断启动（P2）**: 拥有 dashboard token 的认证用户可把 cron `work_dir` 设到任意路径（如 `/etc`），CLI 子进程拿那个 CWD 跑，Write 工具可改 `/etc/passwd`。方案：当 `dashboard_token` 已配置且监听非 loopback 时，把 warn 升级为 fatal；或 `naozhi doctor` 加高严重度检查。`internal/server/server.go:513`。
 - [ ] **R226-SEC-7 — `/health` 端点无认证无限速（P3）**: 暴露 session 数 / watchdog kill 计数 / 平台名 / node 状态 / build 版本，外部 attacker 可高频枚举 infra 拓扑、估算重启时序。方案：加 per-IP rate limiter（60 req/min burst 10）。`internal/server/health.go`。
-- [ ] **R226-SEC-8 — `wshub` 同 session key 无订阅 cap（P3）**: 单 token 攻击者可开 1000 WS 全订同 session，每事件 fan-out N 倍 CPU/mem。方案：per-session-key 订阅 cap（如 20）。`internal/server/wshub.go`。
+- [x] **R226-SEC-8 — `wshub` 同 session key 无订阅 cap（P3）**: 单 token 攻击者可开 1000 WS 全订同 session，每事件 fan-out N 倍 CPU/mem。方案：per-session-key 订阅 cap（如 20）。`internal/server/wshub.go`。 — 已修复（`maxSubscribersPerKey=20` 在 handleSubscribe 持 h.mu 时 O(N≤500) 扫描 hits，超额返回 "too many subscribers for key"；同步关闭重申条目 R227-SEC-11），本批 PR
 - [ ] **R226-SEC-9 — Sandbox CSP `style-src 'unsafe-inline'`（P3）**: `serveRender`/`serveRaw` 仍允许 inline CSS，CSS exfiltration 攻击面在沙箱内仍存。方案：迁 nonce 或 hash。`internal/server/project_files.go:708,905`。
 - [x] **R226-SEC-10 — 附件路径加 `Content-Disposition: attachment` 给 SVG/XML（P3）**: 当前 ext allowlist 已挡掉 SVG，但万一未来开放或 magic-byte sniffer 误判，仍是 defence-in-depth 缺口。方案：在 `handleAttachment` 中对 sniff 结果含 `image/svg+xml` / `application/xhtml+xml` / `text/xml` 的强制 attachment + `X-Frame-Options: DENY`。`internal/server/dashboard_send.go:1148`。 — 已修复（sniff prefix 命中 image/svg+xml / application/xhtml+xml / text/xml / application/xml 时无条件 attachment + DENY frame, defence-in-depth 不替换既有 mismatch 路径），本批 PR #153
 
@@ -254,13 +254,13 @@
 - [ ] **R225-PERF-8 — `shimWriter.Write` fast path `string(data[:len-1])` 强制 byte→string copy（P2）**: process_shim_io.go:54 每条 stdin 一次必要 alloc。方案：`shimClientMsg.Line` 改 `[]byte` + 自定义 Marshaler，或在已知 data 不被改时用 `unsafe.String`。
 - [ ] **R225-PERF-9 — `wshub.eventPushLoop` 同一 session 多 WS 各自 marshal（P2）**: wshub.go:1028 50 个标签页同 session 时同批事件 marshal 50 次。方案：Hub 层一次 marshal fan-out 同一 immutable []byte 引用。
 - [ ] **R225-PERF-10 — `marshalPooled` 每次 copy 一份独立 backing（P2）**: dashboard.go:83 高频 broadcast 下不可避免；考虑对固定组合 session_state 做 LRU 缓存。
-- [x] **R225-PERF-11 — `eventlog.Append` UUID 生成在锁内（P2）**: eventlog.go:596 Append 持 mu.Lock 期间调 stampUUID → crypto/rand 系统调用。方案：在锁外预先生成。 — 已修复（Append + AppendBatch 同改），本批 PR #158
+- [x] **R225-PERF-11 — `eventlog.Append` UUID 生成在锁内（P2）**: eventlog.go:596 Append 持 mu.Lock 期间调 stampUUID → crypto/rand 系统调用。方案：在锁外预先生成（Append 单条 + AppendBatch 循环前 in-place 全部预 stamp，caller-set UUID 保留）。 — 已修复，本批 PR #158
 - [ ] **R225-PERF-12 — `agent_message_chunk` `p.mu.Lock` 复用保护 textBuf（P2）**: protocol_acp.go:494 高频 chunk 与 sessionID 共享一锁；evaluate 把 textBuf 移入 readLoop 私有或独立细粒度 mu。
 - [x] **R225-PERF-13 — `subagent_link.SetAgentInternalID` 持 wlock 做 O(500) 回扫（P3）**: eventlog.go:553 短时阻塞所有 Append。方案：early-exit + 限制最大回扫深度（≤50）。 — 已修复（setAgentInternalIDMaxScan = 50 上限 + foundAgent/foundTaskStart 标记两条都 backfill 后 break），本批 PR #157
 - [ ] **R225-PERF-14 — `wsclient.sweepSubGenExpiredLocked` 在 hub 写锁下扫 map（P3）**: wsclient.go:143 阻塞 subscribe/unsubscribe 并发。方案：移到 client 自身轻量 mutex。
 - [x] **R225-PERF-15 — `process_send.buildUserEntry` thumbnail goroutine 无并发上限（P3）**: 最多 20 个 goroutine CPU-bound JPEG encode 同时启动；建议限并发 4。 — 已修复（capacity=4 信号量 + 9 行 diff），本批 PR #153
 - [x] **R225-PERF-16 — `eventlog.EntriesSince/Entries/LastN` defer Unlock 在热路径（P3）**: 高频 broadcast 下显式 Unlock 微优。 — 已修复（三个读取函数改显式 RUnlock；函数体内无非 Unlock 清理，语义不变），本批 PR #157
-- [ ] **R225-PERF-17 — `TruncateRunes(string, ...)` 无字节快检（P3）**: process_event_format.go:132 走 rune 迭代；`TruncateRunesBytes` 已有快检，应让 string 版同样先 `len <= maxRunes*4` 短路。
+- [~] **R225-PERF-17 — `TruncateRunes(string, ...)` 无字节快检（P3，误报关闭 2026-05-20）**: reviewer 提议 `len(s) <= maxRunes*4` 短路其实方向反了——UTF-8 每 rune 1-4 字节意味着 byte 长度 ≤ rune 数*4 是 rune 数的**上界**而非下界，全 ASCII `len=200, maxRunes=50` 时 byte=200 ≤ 200 但 runes=200 > 50，加这种快检会漏截。当前 `len(s) <= maxRunes` 快检已与 `TruncateRunesBytes` 一致，无可优化空间。
 - [ ] **R225-PERF-18 — `indexAdd` map[string][]string 线性扫描去重（P3）**: router_core.go:496 改 `map[string]map[string]struct{}` O(1) 去重。
 
 ### 代码质量 — 本轮新发现
@@ -318,7 +318,7 @@
 - [ ] **R224-PERF-1 — `eventlog.fireTaskDoneCallbacks([]pendingTaskDone{pending})` 单元素 slice literal escape（P2 R219-PERF-4 / R222-PERF-8 未覆盖分支）**: `eventlog.go:654` 与 `invokePersistSink` 单元素 slice 同款 escape，每个 task_done 事件一次额外 alloc。方案：`var buf [1]pendingTaskDone; buf[0] = pending; fire(buf[:])` 栈数组，或 `sync.Pool[[]T]`。
 - [ ] **R224-PERF-2 — `handleList workspaces []string + wsMap map[string]string` 1 Hz × N tab 重复分配（P2 R219-PERF-2 未覆盖 inner alloc）**: `dashboard_session.go:394` storeGen 命中 in 顶层缓存之前已分配 workspaces slice + wsMap。方案：workspaces 走 sync.Pool（参考 listRefsPool R222-PERF-10 先例）；ResolveWorkspaces 接受 caller 复用 map 或缓存 wsMap 与 storeGen 绑定。
 - [ ] **R224-PERF-3 — `Snapshot()` `TurnAgents()` RLock + slice copy 在 sub-agent turn 期间频繁触发（P3 R219-PERF-3 / R222-PERF-7 未覆盖）**: `managed.go:894` 当 turnAgentCount > 0 时仍进 RLock + copy；500 Snapshot/s × sub-agent turn 与 SetAgentInternalID WLock 竞争。方案：`TurnAgents()` 改 atomic.Pointer[[]Agent] copy-on-write，applyEntryStateLocked 修改时 atomic.Store 新 slice。
-- [ ] **R224-PERF-4 — ETag/Content-Disposition 路径上的 `fmt.Sprintf` 反射 overhead（P3）**: `dashboard_send.go:1112`/`project_files.go:592, 324, 337` 多处用 fmt.Sprintf 构造 header；ETag seed 可改 `strconv.AppendInt + 栈数组`，Content-Disposition 改 strings.Builder。
+- [x] **R224-PERF-4 — ETag/Content-Disposition 路径上的 `fmt.Sprintf` 反射 overhead（P3）**: `dashboard_send.go:1112`/`project_files.go:592, 324, 337` 多处用 fmt.Sprintf 构造 header；ETag seed 可改 `strconv.AppendInt + 栈数组`，Content-Disposition 改 strings.Builder。 — 部分修复（ETag seed 两处都改 strconv.AppendInt 写 48B 栈缓冲，Content-Disposition 的 fmt.Sprintf 暂缓），本批 PR #160
 - [x] **R224-PERF-5 — 错误信息 fmt.Sprintf 含编译期常量（P3）**: `wshub.go:791` "too many files (max %d)" 等错误 path 上的 fmt.Sprintf 完全可预先 const。方案：包级 const string 直接引用。 — 已修复（抽 `errTooManyFiles` 包级 const + 3 处调用点切换 + 编译期断言锁定字面量与 maxFilesPerSend 同步），本批 PR #141
 - [ ] **R224-PERF-6 — `ACPProtocol.parseSessionUpdate` 嵌套三次 json.Unmarshal（P2）**: `protocol_acp.go:474, 476` 相比 stream-json 双解码再多一次 update.Update.Content 嵌套解码。方案：声明 Content 为 `json.RawMessage` 推迟第三次解码，或与 R222-PERF-1 / R222-PERF-3 同批做 ReadEvent([]byte) 接口改造。
 
@@ -331,7 +331,7 @@
 - [ ] **R224-CR-5 — `server.New` deprecated wrapper 无移除条件（P2）**: `server.go:457` Deprecated 自 Round 214 起停摆，0 生产调用，~20 test call sites 阻塞。方案：① Deprecated godoc 加显式移除条件 "remove once all *_test.go migrated"；② 或关闭 R214-CODE-4 标 "won't fix — low-value churn"。
 - [ ] **R224-CR-6 — `process_turn.go` 文件级 ownership 注释列错位（P3）**: `process_turn.go:15` 列 "isChanAlive" 为本文件拥有，但实际定义在同文件第 188-193 行；文档自洽。code-reviewer 误报本身——但 file 头还顺带列了 "sanitizeStderrLine" 在本文件，这是对的。无操作，当作澄清。
 - [x] **R224-CR-7 — Sprint-numbered 注释批量过期（P3）**: `dispatch.go:710` "Sprint 2"、`select_node_for_backend.go:3` "Sprint 6b"、`dashboard_cron.go:354` "Sprint 6c"、`profile_kiro.go:14` "Sprint 1b reverse-node routing"（已落地于 upstream/caps.go）等多处把 Sprint 编号当时间锚点，长期看变误导。方案：扫一遍把 Sprint X 替换为功能描述或 PR 锚点。 — 已修复（dispatch.go / select_node_for_backend.go / dashboard_cron.go × 3 / profile_kiro.go × 2 共 6 处 Sprint 编号替换为功能描述或 RFC §章节锚点），本批 PR #141
-- [ ] **R224-CR-8 — `sanitizeStderrLine` 缺独立 unit test（P3）**: `process_turn.go` 安全敏感（log injection 防御）但仅有 readLoop 端到端覆盖。方案：补 table-driven test（normal ASCII / ANSI escape / C0 / 超长截断）。
+- [x] **R224-CR-8 — `sanitizeStderrLine` 缺独立 unit test（P3）**: `process_turn.go` 安全敏感（log injection 防御）但仅有 readLoop 端到端覆盖。方案：补 table-driven test（normal ASCII / ANSI escape / C0 / 超长截断）。 — 已修复（process_turn_test.go 覆盖 ASCII/CSI/OSC/C0/C1/bidi/LS-PS/CJK/emoji passthrough/截断标记/UTF-8 边界），本批 PR #160
 - [ ] **R224-CR-9 — `dispatch.replyTracker` 240 行 5+ 职责（P2 god object 苗头）**: edit-banner 速率限制 / todo 去重投递 / askQuestion 卡片回送 / initial-Reply lifecycle / loopWG 协调 5 类正交职责挤一对象 + 7 同步原语。方案：拆 BannerEditor / TodoStreamer / AskQuestionPoster / TurnLifecycle 4 对象，replyTracker 退化 wiring 容器。
 
 ### 架构 — 本轮新发现 / 重申
@@ -1281,7 +1281,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R227-SEC-7 — 反向 node WS 在 ws:// 明文下传 token（P2）**: 内网嗅探可截获 token 冒充节点。方案：r.TLS == nil 拒绝 Upgrade，或加 insecure_node 显式豁免。重申 R226-SEC-3。
 - [ ] **R227-SEC-9 — Dashboard 主页 CSP `script-src 'self' 'unsafe-inline'` 完全打开 XSS 通道（P2）**: 任何同源 XSS 注入即可执行任意脚本。方案：迁移到 CSP nonce 模式。Breaking。涉及 `internal/server/dashboard.go:389`。重申 R226-SEC-2。
 - [ ] **R227-SEC-10 — `/health` 端点无认证无限速，泄漏基础设施拓扑（P3）**: 外部攻击者可枚举 session count / watchdog kills / node 状态 / build 版本。方案：per-IP rate limiter + 敏感字段移到认证 /api/stats。重申 R226-SEC-7。
-- [ ] **R227-SEC-11 — WS Hub 同 session key 无订阅数量上限（P3）**: 单 token 可开 1000 WS 订阅同 session 引 fan-out CPU spike。方案：subscribe 时检查同 key 当前订阅数 ≤20。重申 R226-SEC-8。
+- [x] **R227-SEC-11 — WS Hub 同 session key 无订阅数量上限（P3）**: 单 token 可开 1000 WS 订阅同 session 引 fan-out CPU spike。方案：subscribe 时检查同 key 当前订阅数 ≤20。重申 R226-SEC-8。 — 已修复（同 R226-SEC-8），本批 PR
 - [ ] **R227-SEC-12 — `mode=download` 路径可下载 .env / .npmrc / .netrc 等点开头配置（P3）**: previewableByExt 排除 .env 但 download 模式不受此保护。方案：download 模式额外 blocklist；或运维文档明确 allowed_root 不含秘密文件。
 - [ ] **R227-SEC-14 — `feishu/transport_ws.go` parseSDKEvent 没有 maxIncomingTextBytes 检查（P3）**: **降级**：审查发现 transport_ws.go:309 已有此检查，本条为误报。
 
