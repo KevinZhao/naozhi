@@ -12,6 +12,14 @@ import (
 
 const defaultEventLogSize = 500
 
+// setAgentInternalIDMaxScan caps how many ring-buffer entries
+// SetAgentInternalID walks backwards looking for the matching "agent" /
+// "task_start" entries. The pair is almost always within the last few dozen
+// entries of the same turn; capping the scan keeps the EventLog wlock from
+// being held for the full O(maxSize) walk while concurrent Append calls
+// queue behind it. R225-PERF-13.
+const setAgentInternalIDMaxScan = 50
+
 // imageDataURIPrefix is the required leading substring for every entry in
 // EventEntry.Images. Today the only producer is MakeThumbnail (process.go:853),
 // which always returns "data:image/jpeg;base64,..." or "". Future refactors
@@ -574,20 +582,43 @@ func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, fir
 	// Backfill ring-buffer entries so future persistHistory / Entries /
 	// EntriesSince reads carry the linkage. Walk backwards — the matching
 	// "agent" and "task_start" entries are almost always among the last N
-	// entries; N small in practice (single turn) so the O(count) walk is cheap.
+	// entries (single turn). R225-PERF-13: cap the scan depth at
+	// setAgentInternalIDMaxScan and break once both expected entries (one
+	// "agent" + one "task_start" with this ToolUseID) have been backfilled,
+	// so the wlock isn't held for an O(maxSize) scan across all 500
+	// ring-buffer slots while every Append call is queued behind it.
 	start := (l.head - l.count + l.maxSize) % l.maxSize
-	for i := l.count - 1; i >= 0; i-- {
-		idx := (start + i) % l.maxSize
+	scanLimit := l.count
+	if scanLimit > setAgentInternalIDMaxScan {
+		scanLimit = setAgentInternalIDMaxScan
+	}
+	var foundAgent, foundTaskStart bool
+	for i := 0; i < scanLimit; i++ {
+		idx := (start + l.count - 1 - i) % l.maxSize
 		e := &l.entries[idx]
 		if e.ToolUseID != toolUseID {
 			continue
 		}
-		if e.Type != "agent" && e.Type != "task_start" {
+		switch e.Type {
+		case "agent":
+			if foundAgent {
+				continue
+			}
+			foundAgent = true
+		case "task_start":
+			if foundTaskStart {
+				continue
+			}
+			foundTaskStart = true
+		default:
 			continue
 		}
 		e.InternalAgentID = internalAgentID
 		e.JSONLPath = jsonlPath
 		e.FirstPromptID = firstPromptID
+		if foundAgent && foundTaskStart {
+			break
+		}
 	}
 }
 
@@ -867,22 +898,28 @@ func (l *EventLog) CloseSubscribers() {
 }
 
 // Entries returns a copy of all entries in chronological order.
+//
+// R225-PERF-16: explicit RUnlock before return (no defer) — the broadcast
+// fan-out path calls this at high frequency and skipping the defer registration
+// trims a few ns per call without changing semantics. The function has no
+// non-Unlock cleanup so the simpler form is correct.
 func (l *EventLog) Entries() []EventEntry {
 	l.mu.RLock()
-	defer l.mu.RUnlock()
 	out := make([]EventEntry, l.count)
 	start := (l.head - l.count + l.maxSize) % l.maxSize
 	for i := 0; i < l.count; i++ {
 		out[i] = l.entries[(start+i)%l.maxSize]
 	}
+	l.mu.RUnlock()
 	return out
 }
 
 // LastN returns the most recent n entries in chronological order.
 // If n <= 0 or n >= count, all entries are returned.
+//
+// R225-PERF-16: explicit RUnlock; see Entries for rationale.
 func (l *EventLog) LastN(n int) []EventEntry {
 	l.mu.RLock()
-	defer l.mu.RUnlock()
 	count := l.count
 	if n > 0 && n < count {
 		count = n
@@ -892,6 +929,7 @@ func (l *EventLog) LastN(n int) []EventEntry {
 	for i := 0; i < count; i++ {
 		out[i] = l.entries[(start+i)%l.maxSize]
 	}
+	l.mu.RUnlock()
 	return out
 }
 
@@ -904,8 +942,8 @@ func (l *EventLog) LastN(n int) []EventEntry {
 // of two separate modular indexing expressions.
 func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	l.mu.RLock()
-	defer l.mu.RUnlock()
 	if l.count == 0 {
+		l.mu.RUnlock()
 		return nil
 	}
 	// First pass: collect matches in reverse order. Most calls match 0-5
@@ -929,6 +967,8 @@ func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 		}
 		rev = append(rev, l.entries[idx])
 	}
+	// R225-PERF-16: explicit RUnlock (no defer) — see Entries for rationale.
+	l.mu.RUnlock()
 	if len(rev) == 0 {
 		return nil
 	}

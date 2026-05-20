@@ -676,7 +676,15 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		// 30s drain window would resume with empty dashboard history. A
 		// fresh 15s timeout gives slow storage room to breathe while
 		// still bounding the request path.
-		histCtx, histCancel := context.WithTimeout(context.Background(), 15*time.Second)
+		//
+		// R225-GO-8: derive from the caller's ctx (not context.Background)
+		// so a cancelled GetOrCreate / TriggerNow ctx propagates through to
+		// LoadHistoryChainTailCtx — without this, a request that the user
+		// gave up on would still keep the JSONL reader busy for the full
+		// 15s. The historyCtx safety property is preserved because Shutdown
+		// cancels via a different ctx path (s.stopCtx → caller ctx is the
+		// dispatch / cron ctx, not r.historyCtx).
+		histCtx, histCancel := context.WithTimeout(ctx, 15*time.Second)
 		// defer cancel inside a narrow func scope: the success path still
 		// wants to call Cancel promptly to release the timer rather than
 		// waiting for spawnSession to return, but using defer here removes

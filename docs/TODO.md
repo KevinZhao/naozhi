@@ -182,7 +182,7 @@
 - [x] **R226-CR-13 — `Snapshot()` 在 read-only 路径里写 `s.SetModel(liveModel)`（P3）**: ListSessions 池化 + side-effect 矛盾。方案：把 model 镜像写迁到 storeProcess 或 post-result hook。`internal/session/managed.go:957`。 — 已修复（保留 mirror write 同时补充 godoc 明确意图，避免未来 SnapshotReadOnly 复制路径丢副作用），本批 PR #151
 - [ ] **R226-CR-14 — `session/testutil.go` 测试设施无 build constraint（P3）**: TestProcess/NewTestProcess 编进 prod binary。方案：`//go:build testing` 或迁 `testutil_test.go`（需先验证外部 test 依赖）。
 - [x] **R226-CR-15 — `router_lifecycle.ResetChat` fast/fallback 双 path 共享 teardown 代码（P3）**: 抽 `resetKeyLocked(key, *ManagedSession)` helper。 — 已修复（抽 resetSessionLocked(key, &toClose, &closedActive) helper, 索引 + fallback 路径共用; 行为不变），本批 PR #153
-- [ ] **R226-CR-16 — `Scheduler.UpdateJob` Pause 分支没委托给 `pauseJobLocked` / `resumeJobLocked`（P3）**: pause 逻辑双份维护。
+- [x] **R226-CR-16 — `Scheduler.UpdateJob` Pause 分支没委托给 `pauseJobLocked` / `resumeJobLocked`（P3）**: pause 逻辑双份维护。 — 已修复（实际重复路径在 SetJobPrompt unpause 分支：内联 registerJob + Paused=false 改为委托 resumeJobLocked，统一恢复语义），本批 PR #157
 
 ### 架构 — 本轮新发现
 
@@ -228,7 +228,7 @@
 - [ ] **R225-GO-5 — `cron.SetOnExecute / SetOnRunStarted / SetOnRunEnded` 裸 callback 字段（P2）**: scheduler.go:312 三 setter 在 s.mu 下写、`emitRun*` 在 RUnlock 后调，外部测试若直接读字段触发 race。方案：`atomic.Pointer[OnRunStartedFunc]`，与 `Router.onChange` 模式对齐。
 - [x] **R225-GO-6 — `cli.Process pongRecv` 容量 1 在 GC pause 下可能误杀健康进程（P3）**: process.go:228 调度延迟时多个 pong 被丢，misses 误累。方案：容量提到 maxMisses+1，或心跳消费处用 drain 循环。 — 已修复，本批 PR #156
 - [ ] **R225-GO-7 — `cli.Process.Kill` 在持 shimWMu 下调 closeShimConn，net.Conn.Close 阻塞会饥饿 ping/heartbeat（P3）**: process.go:509 与 Detach 顺序不一致——后者是 Unlock 后 close。方案：Kill 也对齐先 Unlock 再 closeShimConn。
-- [ ] **R225-GO-8 — `cli.spawnSession` 历史加载 ctx 用 `context.Background()` 不继承 ctx（P3）**: router_lifecycle.go:678 resume + `claudeDir != ""` + 无 oldHistory 时 15s 独立 ctx；调用方 ctx 已被取消时仍会等满。方案：`context.WithTimeout(ctx, 15s)`。
+- [x] **R225-GO-8 — `cli.spawnSession` 历史加载 ctx 用 `context.Background()` 不继承 ctx（P3）**: router_lifecycle.go:678 resume + `claudeDir != ""` + 无 oldHistory 时 15s 独立 ctx；调用方 ctx 已被取消时仍会等满。方案：`context.WithTimeout(ctx, 15s)`。 — 已修复（context.WithTimeout(ctx, 15s) 派生调用方 ctx；注释补充 r.historyCtx 仍不能用的 Shutdown 路径分离原因），本批 PR #157
 - [x] **R225-GO-9 — `Process.SessionID` 公开字段缺 mutex 注释（P3）**: process.go 字段定义无 `// Protected by mu` 注释，外部调用方可能绕过 GetSessionID 直接读。方案：补字段 godoc。 — 已修复（字段 godoc 补 mutex 契约），本批 PR #146
 
 ### 安全 — 本轮新发现
@@ -254,10 +254,10 @@
 - [ ] **R225-PERF-10 — `marshalPooled` 每次 copy 一份独立 backing（P2）**: dashboard.go:83 高频 broadcast 下不可避免；考虑对固定组合 session_state 做 LRU 缓存。
 - [ ] **R225-PERF-11 — `eventlog.Append` UUID 生成在锁内（P2）**: eventlog.go:596 Append 持 mu.Lock 期间调 stampUUID → crypto/rand 系统调用。方案：在锁外预先生成。
 - [ ] **R225-PERF-12 — `agent_message_chunk` `p.mu.Lock` 复用保护 textBuf（P2）**: protocol_acp.go:494 高频 chunk 与 sessionID 共享一锁；evaluate 把 textBuf 移入 readLoop 私有或独立细粒度 mu。
-- [ ] **R225-PERF-13 — `subagent_link.SetAgentInternalID` 持 wlock 做 O(500) 回扫（P3）**: eventlog.go:553 短时阻塞所有 Append。方案：early-exit + 限制最大回扫深度（≤50）。
+- [x] **R225-PERF-13 — `subagent_link.SetAgentInternalID` 持 wlock 做 O(500) 回扫（P3）**: eventlog.go:553 短时阻塞所有 Append。方案：early-exit + 限制最大回扫深度（≤50）。 — 已修复（setAgentInternalIDMaxScan = 50 上限 + foundAgent/foundTaskStart 标记两条都 backfill 后 break），本批 PR #157
 - [ ] **R225-PERF-14 — `wsclient.sweepSubGenExpiredLocked` 在 hub 写锁下扫 map（P3）**: wsclient.go:143 阻塞 subscribe/unsubscribe 并发。方案：移到 client 自身轻量 mutex。
 - [x] **R225-PERF-15 — `process_send.buildUserEntry` thumbnail goroutine 无并发上限（P3）**: 最多 20 个 goroutine CPU-bound JPEG encode 同时启动；建议限并发 4。 — 已修复（capacity=4 信号量 + 9 行 diff），本批 PR #153
-- [ ] **R225-PERF-16 — `eventlog.EntriesSince/Entries/LastN` defer Unlock 在热路径（P3）**: 高频 broadcast 下显式 Unlock 微优。
+- [x] **R225-PERF-16 — `eventlog.EntriesSince/Entries/LastN` defer Unlock 在热路径（P3）**: 高频 broadcast 下显式 Unlock 微优。 — 已修复（三个读取函数改显式 RUnlock；函数体内无非 Unlock 清理，语义不变），本批 PR #157
 - [ ] **R225-PERF-17 — `TruncateRunes(string, ...)` 无字节快检（P3）**: process_event_format.go:132 走 rune 迭代；`TruncateRunesBytes` 已有快检，应让 string 版同样先 `len <= maxRunes*4` 短路。
 - [ ] **R225-PERF-18 — `indexAdd` map[string][]string 线性扫描去重（P3）**: router_core.go:496 改 `map[string]map[string]struct{}` O(1) 去重。
 
