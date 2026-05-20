@@ -36,8 +36,8 @@ func TestDashboardJS_CronPanelConsolidation(t *testing.T) {
 	}
 
 	// 2. Lifecycle helpers.
-	if !strings.Contains(js, "function openCronDetail(jobId)") {
-		t.Error("dashboard.js: openCronDetail(jobId) must exist as the canonical drawer-open entry point")
+	if !strings.Contains(js, "function openCronDetail(jobId, originRow)") {
+		t.Error("dashboard.js: openCronDetail(jobId, originRow) must exist as the canonical drawer-open entry point")
 	}
 	if !strings.Contains(js, "function closeCronDetail()") {
 		t.Error("dashboard.js: closeCronDetail() must exist for ✕ button / Esc / delete-active flow")
@@ -56,8 +56,8 @@ func TestDashboardJS_CronPanelConsolidation(t *testing.T) {
 	if !strings.Contains(cardBody, "onclick=\"openCronDetail(\\'' + escJs(j.id)") {
 		t.Error("cronJobCardHtml: row click must invoke openCronDetail (was openCronSession before consolidation)")
 	}
-	if !strings.Contains(cardBody, "openCronDetail(\\'' + escJs(j.id) + '\\')") {
-		t.Error("cronJobCardHtml: keyboard handler must invoke openCronDetail with the same escJs'd id")
+	if !strings.Contains(cardBody, "openCronDetail(\\'' + escJs(j.id) + '\\', this)") {
+		t.Error("cronJobCardHtml: must pass `this` (the row element) into openCronDetail so closeCronDetail can restore focus (RFC §6.4)")
 	}
 	// is-active class wiring.
 	if !strings.Contains(cardBody, "cronDetailJobId === j.id") {
@@ -153,6 +153,74 @@ func TestDashboardJS_CronPanelConsolidation(t *testing.T) {
 		body := js[delIdx:end]
 		if !strings.Contains(body, "cronDetailJobId === id") {
 			t.Error("cronDelete: must check cronDetailJobId === id and clear it so the drawer closes synchronously")
+		}
+	}
+
+	// 8. RFC §6.4 keyboard a11y: drawer head h2 must be a programmatic
+	//    focus target (tabindex="-1"); openCronDetail must move focus
+	//    there; closeCronDetail must restore focus to the originating row.
+	if !strings.Contains(js, "<h2 class=\"cdh-title\" tabindex=\"-1\"") {
+		t.Error("cronDrawerHtml: cdh-title <h2> must carry tabindex=\"-1\" so openCronDetail can programmatically focus it (RFC §6.4)")
+	}
+	openIdx := strings.Index(js, "function openCronDetail(jobId, originRow)")
+	if openIdx < 0 {
+		t.Error("openCronDetail: signature must accept (jobId, originRow) so the click handler can pass `this` for focus restoration")
+	} else {
+		end := openIdx + 2000
+		if end > len(js) {
+			end = len(js)
+		}
+		body := js[openIdx:end]
+		if !strings.Contains(body, "_cronDrawerLastActiveRow") {
+			t.Error("openCronDetail: must record the originating row in _cronDrawerLastActiveRow")
+		}
+		if !strings.Contains(body, ".cdh-title") || !strings.Contains(body, "focus") {
+			t.Error("openCronDetail: must focus the drawer header .cdh-title h2 after the panel paints (RFC §6.4)")
+		}
+		// And must NOT have the redundant explicit renderCronPanel call we
+		// removed in PR review — openCronPanel already triggers it.
+		if strings.Count(body, "renderCronPanel()") > 0 {
+			// note: openCronPanel call is fine; the redundant explicit
+			// renderCronPanel() call inside openCronDetail's body must be gone.
+			renderCount := strings.Count(body, "renderCronPanel()")
+			if renderCount > 0 {
+				t.Errorf("openCronDetail: must not call renderCronPanel() directly (redundant — openCronPanel already does); found %d call(s)", renderCount)
+			}
+		}
+	}
+	closeIdx := strings.Index(js, "function closeCronDetail()")
+	if closeIdx >= 0 {
+		end := closeIdx + 2000
+		if end > len(js) {
+			end = len(js)
+		}
+		body := js[closeIdx:end]
+		if !strings.Contains(body, "_cronDrawerLastActiveRow") {
+			t.Error("closeCronDetail: must consult _cronDrawerLastActiveRow to restore focus to the originating row (RFC §6.4)")
+		}
+	}
+
+	// 9. Global Esc handler must route to closeCronDetail when the drawer
+	//    is open. Without this hook the drawer ✕ button's title="关闭 (Esc)"
+	//    is a lie. Scope the search to a window covering the global keydown
+	//    listener that handles popovers.
+	if !strings.Contains(js, "if (cronDetailJobId !== null) { closeCronDetail();") {
+		t.Error("Global Esc handler must call closeCronDetail() when cronDetailJobId !== null (RFC §6.4)")
+	}
+
+	// 10. renderCronDrawer's "task missing" branch must guard against
+	//     infinite recursion via _cronDrawerFetchedFor — otherwise a system
+	//     in which every cron has been deleted will loop forever when the
+	//     operator deep-links to a deleted job.
+	rendererIdx2 := strings.Index(js, "function renderCronDrawer()")
+	if rendererIdx2 >= 0 {
+		end := rendererIdx2 + 4000
+		if end > len(js) {
+			end = len(js)
+		}
+		body := js[rendererIdx2:end]
+		if !strings.Contains(body, "_cronDrawerFetchedFor.has(cronDetailJobId)") {
+			t.Error("renderCronDrawer: missing-job branch must consult _cronDrawerFetchedFor before fetchCronJobs to prevent infinite recursion when the system has zero cron jobs")
 		}
 	}
 }

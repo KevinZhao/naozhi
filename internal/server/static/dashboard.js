@@ -2563,14 +2563,15 @@ function appendEvents(events) {
 // NOTE: 'todo' is intentionally NOT in this set — TodoWrite updates are
 // rendered as their own chat bubbles via renderTodoList below.
 const INTERNAL_EVENT_TYPES = new Set(['tool_use','result','agent','task_start','task_progress','task_done']);
-// Multi-Backend RFC §8.3 D17: ACP tool_call rich-progress events (carrying
-// e.tool_call payload) bypass the legacy "internal" filter so the kiro
-// progress row appears inline in the main transcript. stream-json
-// (Claude) tool_use entries lack the tool_call field and continue to be
-// filtered into the subagent transcript.
+// Unified backend behaviour (supersedes Multi-Backend RFC §8.3 D17): both
+// Claude (stream-json) and Kiro (ACP) tool_use events are filtered out of
+// the main transcript so the chat reads cleanly. Transient tool activity
+// is still surfaced via the running banner (applyEventToTurnState below)
+// while the turn is in flight, and the subagent panel still renders the
+// rich tool_call progress row via eventHtml(includeInternal=true) so
+// operators can drill into per-agent tool runs when needed.
 function isInternalEvent(e) {
   if (!e || !INTERNAL_EVENT_TYPES.has(e.type)) return false;
-  if (e.type === 'tool_use' && e.tool_call) return false;
   return true;
 }
 
@@ -2903,7 +2904,11 @@ function eventHtml(e, opts) {
   } else if (e.type === 'todo') {
     content = renderTodoList(e.detail, e.summary);
   } else if (e.type === 'tool_use' && e.tool_call) {
-    // Multi-Backend RFC §8.3 D17: ACP rich tool progress row.
+    // ACP rich tool progress row (kiro). Originally introduced by
+    // Multi-Backend RFC §8.3 D17. The main transcript filters tool_use
+    // events out (see isInternalEvent), so this branch only fires inside
+    // the subagent panel where eventHtml(..., {includeInternal:true})
+    // surfaces the per-agent tool runs:
     //   ▶ <title>          [kind · status]     ← summary line
     //     stdout / stderr / raw                ← collapsed body
     //
@@ -4112,6 +4117,13 @@ document.addEventListener('keydown', function(e) {
   let closed = false;
   if (activePopover) { closeHistoryPopover(); closed = true; }
   if (document.getElementById('nav-list-popover')) { navDismissPopover(); closed = true; }
+  // cron-panel-consolidation RFC §6.4: Esc closes the cron drawer when
+  // it's open. Routed before / alongside other popover dismissals so the
+  // drawer ✕ button's title="关闭 (Esc)" promise is actually kept.
+  // The drawer is NOT a modal — Esc only acts when no input or modal is
+  // foregrounded (gates above), and focus is restored to the originating
+  // .cj-row by closeCronDetail itself.
+  if (cronDetailJobId !== null) { closeCronDetail(); closed = true; }
   if (closed) e.preventDefault();
 });
 
@@ -9782,6 +9794,24 @@ let cronNotifyDefault = null;
 //   - F5 / reload does NOT persist (RFC §4.5 Q5).
 let cronDetailJobId = null;
 
+// _cronDrawerFetchedFor tracks per-jobId reconcile attempts inside the
+// drawer's "task missing" branch. Without this guard, deep-linking to a
+// deleted job in a system where every cron has been removed (cronJobs
+// legitimately empty even after fetch) would loop:
+// renderCronDrawer → fetchCronJobs → still empty → renderCronDrawer → …
+// The Set is cleared whenever the drawer renders successfully so a
+// later fetch (job re-created or another tab synced) can be retried.
+const _cronDrawerFetchedFor = new Set();
+
+// _cronDrawerLastActiveRow records the .cj-row DOM element that was most
+// recently activated by openCronDetail. closeCronDetail uses it to
+// restore focus to the operator's last row (RFC §6.4 — keyboard a11y).
+// WeakRef would be ideal but isn't worth the polyfill complexity for
+// cron list sizes; a regular reference is fine since renderCronList
+// re-creates rows on each paint, and the next openCronDetail just
+// overwrites this with a fresh element.
+let _cronDrawerLastActiveRow = null;
+
 // cron-panel-consolidation RFC §4.2: sidebar / mainShell are now reserved
 // for human conversation surfaces and never paint cron-scheduler sessions.
 // The previous `cronVisibleKeys` whitelist + markCronSessionVisible plumbing
@@ -11231,8 +11261,8 @@ function cronJobCardHtml(j) {
   }
 
   return '<div class="' + rowClasses.join(' ') + ' cron-card" data-cron-id="' + escAttr(j.id) + '" role="button" tabindex="0" ' +
-    'onclick="openCronDetail(\'' + escJs(j.id) + '\')" ' +
-    'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronDetail(\'' + escJs(j.id) + '\')}">' +
+    'onclick="openCronDetail(\'' + escJs(j.id) + '\', this)" ' +
+    'onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();openCronDetail(\'' + escJs(j.id) + '\', this)}">' +
     '<span class="cj-dot" aria-hidden="true"></span>' +
     '<div class="cj-main">' +
       '<div class="cj-title' + (hasTitle ? '' : ' placeholder') + '" title="' + escAttr(titleStr || emptyPromptHint) + '">' + esc(displayTitle) + '</div>' +
@@ -11816,7 +11846,7 @@ function renderCronDrawer() {
     host.classList.add('is-open');
     host.innerHTML = '<header class="cron-drawer-header">' +
         '<div class="cdh-row1">' +
-          '<h2 class="cdh-title placeholder">任务已不在列表中</h2>' +
+          '<h2 class="cdh-title placeholder" tabindex="-1">任务已不在列表中</h2>' +
           '<div class="cdh-actions">' +
             '<button class="cdh-btn-icon" onclick="closeCronDetail()" title="关闭" aria-label="关闭">&times;</button>' +
           '</div>' +
@@ -11824,12 +11854,19 @@ function renderCronDrawer() {
       '</header>' +
       '<div class="cron-drawer-empty">该任务可能已被删除或同步未到。</div>';
     // Reconcile in the background so a delayed first fetch doesn't strand
-    // the drawer in placeholder mode.
-    if (!Array.isArray(cronJobs) || cronJobs.length === 0) {
+    // the drawer in placeholder mode. Guarded by a per-jobId "fetched once"
+    // flag so a system in which every cron job has been deleted (cronJobs
+    // legitimately empty after fetch) cannot loop renderCronDrawer →
+    // fetchCronJobs → empty → renderCronDrawer indefinitely.
+    if (!_cronDrawerFetchedFor.has(cronDetailJobId) && (!Array.isArray(cronJobs) || cronJobs.length === 0)) {
+      _cronDrawerFetchedFor.add(cronDetailJobId);
       fetchCronJobs().then(() => renderCronDrawer()).catch(() => {});
     }
     return;
   }
+  // Reset the fetched-once gate when we successfully render — re-opening a
+  // different drawer that's also missing should be allowed to fetch again.
+  _cronDrawerFetchedFor.delete(cronDetailJobId);
   host.classList.add('is-open');
   host.innerHTML = cronDrawerHtml(job);
   // Re-mount timeline content. The drawer's history section embeds the
@@ -11855,7 +11892,7 @@ function cronDrawerHtml(j) {
   // Header with split id-copy + close.
   const headerHtml = '<header class="cron-drawer-header">' +
     '<div class="cdh-row1">' +
-      '<h2 class="cdh-title" title="' + escAttr(titleStr) + '">' + esc(titleStr) + '</h2>' +
+      '<h2 class="cdh-title" tabindex="-1" title="' + escAttr(titleStr) + '">' + esc(titleStr) + '</h2>' +
       '<div class="cdh-actions">' +
         '<button class="cdh-btn-icon" onclick="copyText(\'' + escJs(id) + '\')" title="复制任务 ID" aria-label="复制任务 ID">&#8869;</button>' +
         '<button class="cdh-btn-icon" onclick="closeCronDetail()" title="关闭 (Esc)" aria-label="关闭">&times;</button>' +
@@ -12108,29 +12145,55 @@ function renderCronPanel() {
 // cron-panel-consolidation RFC §4.2 / §4.5 — primary entry point for
 // "operator clicked a cron list row" and "operator just created a job".
 // Behaviour:
+//   - Records the originating .cj-row DOM element so closeCronDetail can
+//     restore focus to it (RFC §6.4).
 //   - Sets cronDetailJobId so subsequent renderCronPanel paints render
 //     the drawer at the right spot.
-//   - Calls renderCronPanel — the shell-preserving repaint will lay out
-//     the two-column shell on first call and just patch the drawer +
-//     list active state on subsequent calls.
+//   - Calls openCronPanel which internally renderCronPanel — the
+//     shell-preserving branch already paints both list AND drawer in
+//     one pass, so no further explicit renderCronPanel is needed.
+//   - Programmatically focuses the drawer header h2 once the DOM
+//     materialises (RFC §6.4 — SR announces the task name on open).
 //   - Idempotent on the same jobId (no flicker if invoked twice).
-function openCronDetail(jobId) {
+function openCronDetail(jobId, originRow) {
   if (!jobId) return;
+  // Record the row that initiated the open so Esc / closeCronDetail can
+  // restore focus there. Falls back to the first row whose data-cron-id
+  // matches when the caller doesn't pass one (e.g. doCreateCronJob after
+  // a fetch repaints the list).
+  if (originRow instanceof Element) {
+    _cronDrawerLastActiveRow = originRow;
+  } else {
+    const candidate = document.querySelector('.cj-row[data-cron-id="' + (window.CSS && CSS.escape ? CSS.escape(jobId) : jobId) + '"]');
+    if (candidate) _cronDrawerLastActiveRow = candidate;
+  }
   cronDetailJobId = jobId;
-  // Make sure the cron panel is the foreground view. openCronPanel handles
-  // selectedKey reset / WS unsubscribe / mobile-shell push and is cheap to
-  // re-call — internally it short-circuits the renderCronPanel rebuild via
-  // the shell-preserving branch.
+  // openCronPanel handles selectedKey reset / WS unsubscribe / mobile
+  // shell push and triggers renderCronPanel — that path repaints both
+  // the list (with .is-active on the new row) AND the drawer in one
+  // shell-preserving pass. No second renderCronPanel needed.
   if (typeof openCronPanel === 'function') openCronPanel();
-  // Force a drawer paint even if the panel was already open (openCronPanel's
-  // shell-preserving branch only repaints the list).
-  renderCronPanel();
+  // Move keyboard focus into the drawer header on the next frame so the
+  // h2 has been laid out by the time .focus() runs. tabindex="-1" is
+  // applied via cronDrawerHtml so the h2 is a programmatic focus target
+  // without entering the document tab order. RFC §6.4.
+  // Use rAF (paired with a setTimeout fallback for headless environments
+  // where rAF may not fire promptly) to defer until after the layout.
+  const focusDrawerHead = () => {
+    const h2 = document.querySelector('#cron-detail-pane .cdh-title');
+    if (h2 && typeof h2.focus === 'function') {
+      try { h2.focus({ preventScroll: false }); } catch (_) { try { h2.focus(); } catch (_) {} }
+    }
+  };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(focusDrawerHead);
+  else setTimeout(focusDrawerHead, 0);
 }
 
 // closeCronDetail clears the drawer state and re-renders the cron panel
 // shell so the list reclaims full width. Called by the drawer's ✕ button,
 // the global Esc handler, and the "task deleted" toast cleanup. No-op
-// when no drawer is open.
+// when no drawer is open. Restores focus to the row that opened the
+// drawer (RFC §6.4) so keyboard users land back where they were.
 function closeCronDetail() {
   if (cronDetailJobId === null) return;
   cronDetailJobId = null;
@@ -12138,6 +12201,25 @@ function closeCronDetail() {
   // clears synchronously even before renderCronList re-paints.
   document.querySelectorAll('.cj-row.is-active').forEach(el => el.classList.remove('is-active'));
   renderCronPanel();
+  // Restore focus. After renderCronList's repaint the cached element may
+  // be detached from the DOM (innerHTML rebuild); look up the row by id
+  // first and fall back to the cached reference if it's still connected.
+  const restoreFocus = () => {
+    let target = null;
+    const cached = _cronDrawerLastActiveRow;
+    if (cached && cached.isConnected) {
+      target = cached;
+    } else if (cached && cached.dataset && cached.dataset.cronId) {
+      const fresh = document.querySelector('.cj-row[data-cron-id="' + (window.CSS && CSS.escape ? CSS.escape(cached.dataset.cronId) : cached.dataset.cronId) + '"]');
+      if (fresh) target = fresh;
+    }
+    _cronDrawerLastActiveRow = null;
+    if (target && typeof target.focus === 'function') {
+      try { target.focus({ preventScroll: false }); } catch (_) { try { target.focus(); } catch (_) {} }
+    }
+  };
+  if (typeof requestAnimationFrame === 'function') requestAnimationFrame(restoreFocus);
+  else setTimeout(restoreFocus, 0);
 }
 
 // openCronSession is the legacy entry point retained as a thin alias so
