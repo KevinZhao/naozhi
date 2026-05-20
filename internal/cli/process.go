@@ -231,8 +231,14 @@ type Process struct {
 	// Read-mostly: dashboard Snapshot polls call MeteringUsage at 1Hz × N
 	// tabs while writes only happen on metadata events (≤1/turn). RWMutex
 	// lets concurrent reads proceed without serializing on the writer.
+	//
+	// R227-PERF-10: meteringLen mirrors len(meteringUsage) under
+	// meteringMu so MeteringUsage() can short-circuit without taking
+	// RLock when the slice is empty (claude-class backends and pre-
+	// metering kiro turns — the dominant Snapshot polling case).
 	meteringMu    sync.RWMutex
 	meteringUsage []MeteringEntry
+	meteringLen   atomic.Int32
 	// model is the spawn-time CLI model identifier ("claude-opus-4.7",
 	// "claude-sonnet-4.6", ""), set once by Wrapper.Spawn before
 	// readLoop starts. Empty string means "operator did not configure
@@ -713,7 +719,14 @@ func (p *Process) TurnDurationMs() int64 {
 // billing rows. Empty for backends that report cost only via TotalCost
 // (claude). Returns a fresh slice on every call so callers can safely retain
 // the result.
+//
+// R227-PERF-10: Snapshot polling at 1Hz × N tabs hits this on every poll;
+// claude-class sessions and pre-metering kiro turns leave the slice empty,
+// so an atomic length probe lets the dominant case skip the RLock entirely.
 func (p *Process) MeteringUsage() []MeteringEntry {
+	if p.meteringLen.Load() == 0 {
+		return nil
+	}
 	p.meteringMu.RLock()
 	defer p.meteringMu.RUnlock()
 	if len(p.meteringUsage) == 0 {
@@ -772,6 +785,11 @@ func (p *Process) applyMetadata(m *EventMetadata) {
 				p.meteringUsage = append(p.meteringUsage, in)
 			}
 		}
+		// R227-PERF-10: publish the post-merge length so MeteringUsage's
+		// fast-path can skip the RLock. Stored under meteringMu so the
+		// read-side atomic Load sees the same length the slice actually
+		// has after Unlock.
+		p.meteringLen.Store(int32(len(p.meteringUsage)))
 		p.meteringMu.Unlock()
 	}
 }
