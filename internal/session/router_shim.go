@@ -404,7 +404,7 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 		//
 		// Replay events are intentionally NOT injected into persistedHistory:
 		// they originate from the shim stdout ring buffer, which has no native
-		// per-event timestamp, so EventEntryFromEvent stamps them all with
+		// per-event timestamp, so EventEntriesFromEvent stamps them all with
 		// time.Now() at reconnect moment — this breaks chronological ordering
 		// against user entries loaded from JSONL (which carry real ts).
 		//

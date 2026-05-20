@@ -20,20 +20,6 @@ import (
 	"github.com/naozhi/naozhi/internal/textutil"
 )
 
-// EventEntryFromEvent converts an Event to a single EventEntry.
-//
-// Deprecated: use EventEntriesFromEvent — for multi-block assistant events
-// (thinking + tool_use + text) this helper silently drops every block after
-// the first. Kept only because process_extra_test.go pins the legacy single-
-// entry shape; new callers must use EventEntriesFromEvent.
-func EventEntryFromEvent(ev Event) (EventEntry, bool) {
-	entries := EventEntriesFromEvent(ev)
-	if len(entries) == 0 {
-		return EventEntry{}, false
-	}
-	return entries[0], true
-}
-
 // EventEntriesFromEvent converts an Event to zero or more EventEntry values.
 // Assistant messages can contain multiple content blocks (thinking + tool_use + text);
 // each block that maps to a known type produces its own entry so downstream consumers
@@ -176,18 +162,18 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 					}
 				case "TodoWrite":
 					entry.Detail = formatToolDetail(block)
-					if todos, ok := ParseTodos(block.Input); ok {
+					if todos, rawTodos, ok := ParseTodosWithRaw(block.Input); ok {
 						entry.Type = "todo"
 						entry.Tool = "TodoWrite"
 						entry.Summary = TodosSummary(todos)
 						// Dashboard renderTodoList expects a JSON array of
 						// TodoItem, not the full `{"todos":[...]}` envelope
-						// that block.Input carries. Marshal the decoded slice
-						// so the frontend sees `[{...}, {...}]` and renders
-						// the checklist; otherwise JSON.parse yields an
-						// object, Array.isArray returns false, and the UI
-						// silently falls back to the one-line summary.
-						entry.Detail = TodosDetailJSON(todos)
+						// that block.Input carries. R226-PERF-8: reuse the
+						// already-parsed RawMessage from block.Input instead
+						// of re-marshalling the typed slice — the frontend
+						// sees `[{...}, {...}]` either way, but we save the
+						// per-event Marshal+copy.
+						entry.Detail = string(rawTodos)
 					}
 				default:
 					entry.Detail = formatToolDetail(block)

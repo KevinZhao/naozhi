@@ -1155,7 +1155,7 @@ func TestProcess_ReadLoop_ShimError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// EventEntryFromEvent — comprehensive
+// EventEntriesFromEvent — comprehensive (single-entry shape)
 // ---------------------------------------------------------------------------
 
 func TestEventEntryFromEvent(t *testing.T) {
@@ -1264,13 +1264,14 @@ func TestEventEntryFromEvent(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			entry, ok := EventEntryFromEvent(tt.event)
+			entries := EventEntriesFromEvent(tt.event)
+			ok := len(entries) > 0
 			if ok != tt.wantOK {
 				t.Errorf("ok = %v, want %v", ok, tt.wantOK)
 				return
 			}
-			if tt.wantOK && entry.Type != tt.wantType {
-				t.Errorf("Type = %q, want %q", entry.Type, tt.wantType)
+			if tt.wantOK && entries[0].Type != tt.wantType {
+				t.Errorf("Type = %q, want %q", entries[0].Type, tt.wantType)
 			}
 		})
 	}
@@ -1334,10 +1335,16 @@ func TestEventEntryFromEvent_TodoWriteDetailIsArray(t *testing.T) {
 	ev := Event{Type: "assistant", Message: &AssistantMessage{
 		Content: []ContentBlock{{Type: "tool_use", Name: "TodoWrite", Input: raw}},
 	}}
-	entry, ok := EventEntryFromEvent(ev)
-	if !ok || entry.Type != "todo" {
-		t.Fatalf("ok=%v type=%q", ok, entry.Type)
+	entries := EventEntriesFromEvent(ev)
+	if len(entries) == 0 || entries[0].Type != "todo" {
+		t.Fatalf("len=%d type=%q", len(entries), func() string {
+			if len(entries) == 0 {
+				return ""
+			}
+			return entries[0].Type
+		}())
 	}
+	entry := entries[0]
 	var parsed []TodoItem
 	if err := json.Unmarshal([]byte(entry.Detail), &parsed); err != nil {
 		t.Fatalf("Detail must be a JSON array of TodoItem, got %q: %v", entry.Detail, err)
