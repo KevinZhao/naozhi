@@ -1270,7 +1270,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 ### Go 正确性 — 本轮新发现
 
 - [ ] **R227-GO-2 — `cli/subagent_link.Resolve` retry 循环 `time.Sleep(retryInterval)` 无 ctx 取消（P1）**: SIGTERM 期间最多 8 个 Resolve goroutine 各自卡 3s。修复需 Resolve 接 context.Context 参数（Breaking）。涉及 `internal/cli/subagent_link.go:294,332`。重申 R225-GO-2。
-- [ ] **R227-GO-3 — `fireOnResolveLocked` 命名违反 Go 锁约定（P2）**: `...Locked` 通常意味"调用者持锁，函数不操作锁"，但本函数手动 Unlock+Lock。本轮 R227-GO-1 修了 panic-safe，但语义命名仍是陷阱：未来若有人在持锁场景再调一次将 double-unlock。建议重命名为 `fireCallbacksDropLock` 并在 godoc 明确"releases and reacquires l.mu"。
+- [x] **R227-GO-3 — `fireOnResolveLocked` 命名违反 Go 锁约定（P2）**: `...Locked` 通常意味"调用者持锁，函数不操作锁"，但本函数手动 Unlock+Lock。本轮 R227-GO-1 修了 panic-safe，但语义命名仍是陷阱：未来若有人在持锁场景再调一次将 double-unlock。建议重命名为 `fireCallbacksDropLock` 并在 godoc 明确"releases and reacquires l.mu"。 — 已修复，本批 PR #170
 - [ ] **R227-GO-4 — `Router.Shutdown` test fallback `time.Sleep(100ms)` busy-poll（P2）**: 测试构造的 `&Router{}` 缺 shutdownCond，30s 超时下 300 次 busy-poll。方案：要求所有路径走 NewRouter；或裸构造时 log.Warn。
 - [ ] **R227-GO-5 — cron `notifyTarget` 用 `context.Background()` 不响应 stopCtx（P2）**: send 路径已用 Background 是有意（保证 cron run 记录写入），但 notifyTarget 通知失败只 Warn，应继承 stopCtx 在关闭路径提前取消。**降级**：审查发现 send 路径用 Background 与 notifyTarget 用 Background 是同一原则（生命周期独立于 stopCtx），降为 P3 仅记录。
 - [ ] **R227-GO-7 — `cli.Resolve` resolveSem acquire 无 ctx select arm（P2）**: 与 R227-GO-2 同根因；Resolve 接 ctx 后可统一 select。
@@ -1381,7 +1381,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [x] **R228-CR-1 — `maxScannerBufBytes=10MB` 与 shim `maxServerLineBytes=16MB` 不一致（P2）**: 10-16MB 之间合法事件被静默丢弃。方案：加 godoc 解释 6MB headroom，或对齐到 16MB。涉及 `internal/cli/process.go:30`。 — 已修复（godoc 解释 6MB headroom：shim 自身在 16MB 拒绝行，naozhi 永远不会看到 10-16MB 的"合法但被丢"行；headroom 留给协议帧 + base64 图像 tool_result），本批 PR #169
 - [x] **R228-CR-2 — `Caps.SoftInterrupt`/`Priority`/`StreamJSON` 三个字段被填但从未读（P2）**: 只有 Replay 被读。方案：删除三个 dead 字段并修 Capabilities 实现；或 godoc 标 reserved。涉及 `internal/cli/protocol.go:95-100`、`protocol_claude.go:137`、`protocol_acp.go:337`。 — 已修复（godoc 标 reserved + 指向 protocol_caps_test.go 锁定的契约；不删字段保留 forward-compat anchor），本批 PR #169
 - [ ] **R228-CR-3 — `isActivityType` 与 `EventLog.Append` activity 集无编译期 sync 保护（P2）**: 注释说"两边必须一起改"但无 contract test/共享函数。方案：抽 `cli.IsActivityType(t string) bool` 共享；或加 contract test。涉及 `internal/session/managed.go:1483-1488` + `internal/cli/eventlog.go:681`。
-- [ ] **R228-CR-4 — `Process.LastEntryOfType` + `EventLog.LastEntryOfType` 导出但无 prod 调用（P3）**: 应 unexport 或加到 processIface。涉及 `internal/cli/process_event_query.go:188-191`、`internal/cli/eventlog.go:1058`。
+- [x] **R228-CR-4 — `Process.LastEntryOfType` + `EventLog.LastEntryOfType` 导出但无 prod 调用（P3）**: 应 unexport 或加到 processIface。涉及 `internal/cli/process_event_query.go:188-191`、`internal/cli/eventlog.go:1058`。 — 已修复，本批 PR #170
 - [x] **R228-CR-5 — `cron/job.JobTitleOrFallback` `[]rune(line)` heap alloc（P3）**: 与 textutil.TruncateRunes 重叠但用 `…`(U+2026)。方案：要么接受 ASCII `...` 后缀改用 textutil；要么 textutil 加 ellipsis 参数 overload。涉及 `internal/cron/job.go:205-209`。 — 已修复（改用 textutil.TruncateRunesNoEllipsis 复用 byte-level 解码 + 短路快路径；通过 truncated != line 判定后本地补 U+2026 保留卡片视觉一致性），本批 PR #169
 
 ### 架构 — 本轮新发现
@@ -1391,7 +1391,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R228-ARCH-3 — `server/wshub` 直接持 `*cli.SubagentLinker` 指针长寿命缓存（P1 与 RFC v4 phase 3+ TODO 同根）**: Linker 重建后旧 map key 残留为 GC root。方案：session 层暴露 `WireLinkerOnce(key, ...)` API，把指针弱引用封进 session 包。涉及 `internal/server/wshub.go:165` + `internal/server/dashboard_agent_events.go:66,72,80`。
 - [ ] **R228-ARCH-4 — `cli.AskQuestion`/Item/Opt 与 `platform.QuestionCard`/Item/Option 双套结构体（P2）**: dispatch 手工字段拷贝，加字段易漏。方案：抽到共享包（如新建 `internal/askq` 或 `internal/eventlog/schema`）。涉及 `internal/cli/event.go:141-166` + `internal/platform/platform.go:108-141`。
 - [ ] **R228-ARCH-5 — `cli/image.go MimeFromPath/ExtractImagePaths/safeImageDirs` 与 `platform.ImageExt` 重叠（P2）**: cli 包混入了与协议无关的 MIME/安全目录工具。方案：抽到 `internal/imageutil` 或 `internal/osutil`。涉及 `internal/cli/image.go:61-77`。
-- [ ] **R228-ARCH-6 — 3 份 `jitterBackoff` wrapper 全是 `osutil.JitterBackoff` 16-行 stub（P2）**: 包内私有 wrapper 无任何价值。方案：删 3 个 wrapper + 等价测试，调用方直接调 osutil。涉及 `internal/node/backoff.go`、`internal/upstream/backoff.go`、`internal/platform/platform.go:289-291`。
+- [x] **R228-ARCH-6 — 3 份 `jitterBackoff` wrapper 全是 `osutil.JitterBackoff` 16-行 stub（P2）**: 包内私有 wrapper 无任何价值。方案：删 3 个 wrapper + 等价测试，调用方直接调 osutil。涉及 `internal/node/backoff.go`、`internal/upstream/backoff.go`、`internal/platform/platform.go:289-291`。 — 已修复，本批 PR #170
 - [ ] **R228-ARCH-7 — `processIface` 32-method 胖接口 + 内部强转回 `*cli.Process`（P2）**: 抽象漏了。方案：要么删 interface 直接用 `*cli.Process`；要么拆成 3 个小接口。需设计决策。涉及 `internal/session/managed.go:33-102` + `router_lifecycle.go:829`。
 - [ ] **R228-ARCH-8 — 4 个 platform adapter 各自 `var fooHTTPClient` SSRF-defense client（P2）**: 4 份近一致的 redirect+TLS 1.2 floor client。方案：`internal/platform.NewSafeHTTPClient(timeout)` helper。涉及 feishu/discord/weixin/slack 各自顶部 var。
 - [ ] **R228-ARCH-9 — `dispatch.MaxCoalescedTextBytes()` 被 upstream 反向调用作 RPC 入口大小限制（P2）**: upstream → dispatch 反向依赖只为复用一个常量。方案：抽到 `internal/limits` 包。涉及 `internal/upstream/connector_rpc.go:129`。
