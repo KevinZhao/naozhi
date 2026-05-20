@@ -1471,10 +1471,19 @@ func costUnitForBackend(backendID string) string {
 	if backendID == "" {
 		backendID = "claude"
 	}
-	// EnsureDefaults is idempotent and concurrent-safe; call it here so
-	// test fixtures and pre-main code paths (doctor helpers, scratch tools)
-	// see the registry populated without each call site bootstrapping.
-	backend.EnsureDefaults()
+	// Lazy bootstrap pattern (matches server.replyTagForBackend): production
+	// wires backend.RegisterDefaults() in cmd/naozhi/main.go before any
+	// session is constructed. Tests that build a Snapshot without calling
+	// RegisterDefaults would otherwise see backend.Get return false and lose
+	// the unit — costUnitForBackendOnce ensures one-shot lazy registration so
+	// tests stay green. Guard with a registry-empty check so we cooperate
+	// with sibling tests (server pkg withDefaultBackends) that already
+	// pre-registered, rather than panicking on duplicate Register.
+	costUnitForBackendOnce.Do(func() {
+		if len(backend.All()) == 0 {
+			backend.RegisterDefaults()
+		}
+	})
 	if p, ok := backend.Get(backendID); ok {
 		return p.CostUnit
 	}
@@ -1483,6 +1492,8 @@ func costUnitForBackend(backendID string) string {
 	// hide the cost cell rather than render a misleading unit.
 	return ""
 }
+
+var costUnitForBackendOnce sync.Once
 
 // isActivityType mirrors the EventLog.Append type set that updates
 // lastActivitySummary, so any caller scanning history for "what was
