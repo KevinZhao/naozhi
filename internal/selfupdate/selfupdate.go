@@ -294,7 +294,7 @@ func assetName() string {
 func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fetchURL, nil)
 	if err != nil {
-		return err
+		return fmt.Errorf("build request for %s: %w", fetchURL, err)
 	}
 	// Pin every hop to github.com / *.github.com so a hostile redirect cannot
 	// pivot the binary or checksums.txt download to an attacker-controlled
@@ -318,7 +318,7 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("fetch %s: %w", fetchURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
@@ -332,7 +332,7 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 	// so the mode is also covered by the directory ACL.
 	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		return err
+		return fmt.Errorf("open staging file %s: %w", dest, err)
 	}
 	defer f.Close()
 
@@ -342,7 +342,7 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 	// cause. Surface the truncation explicitly.
 	n, err := io.Copy(f, io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
-		return err
+		return fmt.Errorf("write staging file %s: %w", dest, err)
 	}
 	if n > maxBytes {
 		return fmt.Errorf("response body exceeds %d bytes (truncated) from %s", maxBytes, fetchURL)
@@ -372,13 +372,13 @@ func verifyChecksum(binPath, sumPath, asset string) error {
 
 	f, err := os.Open(binPath)
 	if err != nil {
-		return err
+		return fmt.Errorf("open binary %s: %w", binPath, err)
 	}
 	defer f.Close()
 
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
-		return err
+		return fmt.Errorf("hash binary %s: %w", binPath, err)
 	}
 	actual := hex.EncodeToString(h.Sum(nil))
 	// SHA-256 hex digests are equal-length so length-leak isn't the concern,
@@ -395,23 +395,23 @@ func verifyChecksum(binPath, sumPath, asset string) error {
 func copyFile(src, dst string) error {
 	in, err := os.Open(src)
 	if err != nil {
-		return err
+		return fmt.Errorf("open source %s: %w", src, err)
 	}
 	defer in.Close()
 
 	info, err := in.Stat()
 	if err != nil {
-		return err
+		return fmt.Errorf("stat source %s: %w", src, err)
 	}
 
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
 	if err != nil {
-		return err
+		return fmt.Errorf("open dest %s: %w", dst, err)
 	}
 	defer out.Close()
 
 	if _, err := io.Copy(out, in); err != nil {
-		return err
+		return fmt.Errorf("copy %s -> %s: %w", src, dst, err)
 	}
 	return out.Sync()
 }
