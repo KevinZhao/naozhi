@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -61,17 +62,23 @@ func LatestRelease(ctx context.Context) (*Release, error) {
 		return nil, err
 	}
 
-	url := fmt.Sprintf("https://github.com/%s/releases/latest", repo)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	latestURL := fmt.Sprintf("https://github.com/%s/releases/latest", repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, latestURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("build request: %w", err)
 	}
 	// We want the final URL after the redirect, not the body.
+	// CheckRedirect pins every hop to github.com / *.github.com so a hostile
+	// CDN/DNS cannot send us to evil.com/tag/v9 (extractTag would then accept
+	// an attacker-controlled tag string and we'd build the asset URL off it).
 	client := &http.Client{
 		Timeout: defaultTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			if len(via) > 5 {
 				return fmt.Errorf("too many redirects")
+			}
+			if !isGitHubHost(req.URL.Host) {
+				return fmt.Errorf("redirect target outside github.com: %s", req.URL.Host)
 			}
 			return nil
 		},
@@ -90,7 +97,10 @@ func LatestRelease(ctx context.Context) (*Release, error) {
 	}
 
 	asset := assetName()
-	base := fmt.Sprintf("https://github.com/%s/releases/download/%s", repo, tag)
+	// Defense-in-depth: PathEscape the tag before it joins the download URL
+	// so a redirect-leak that smuggled `?x=y` or path separators through the
+	// regex extractor cannot pivot to a different host or query.
+	base := fmt.Sprintf("https://github.com/%s/releases/download/%s", repo, url.PathEscape(tag))
 	return &Release{
 		Tag:      tag,
 		AssetURL: base + "/" + asset,
@@ -215,12 +225,55 @@ func SelfPath() (string, error) {
 
 var tagRe = regexp.MustCompile(`/releases/tag/([^/?#]+)$`)
 
-func extractTag(url string) string {
-	m := tagRe.FindStringSubmatch(url)
+// tagAllowedRe accepts only the semver-ish character set that real release
+// tags use (e.g. "v1.2.3", "v1.2.3-rc.1"). Refuses path separators, percent-
+// encoded bytes, or anything else that could pivot the asset download URL
+// to a different path/host when the redirect chain is hostile.
+var tagAllowedRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+func extractTag(rawURL string) string {
+	m := tagRe.FindStringSubmatch(rawURL)
 	if len(m) < 2 {
 		return ""
 	}
-	return m[1]
+	tag := m[1]
+	if !tagAllowedRe.MatchString(tag) {
+		return ""
+	}
+	return tag
+}
+
+// isGitHubHost returns true when host is exactly github.com or any
+// *.github.com subdomain. Used by LatestRelease where redirects should stay on
+// the github.com proper (HTML release page → /releases/tag/ on github.com).
+func isGitHubHost(host string) bool {
+	// Strip optional port.
+	if i := strings.IndexByte(host, ':'); i >= 0 {
+		host = host[:i]
+	}
+	host = strings.ToLower(host)
+	if host == "github.com" {
+		return true
+	}
+	return strings.HasSuffix(host, ".github.com")
+}
+
+// isGitHubAssetHost is the looser allowlist used by fetchFile, since release
+// asset downloads legitimately 302 from github.com to
+// objects.githubusercontent.com. Anything else is refused so a hostile
+// redirect can't pivot the binary/checksums fetch to an attacker-controlled
+// host (which would defeat SHA-256 verification — both files travel the same
+// path and could be replaced in lock-step).
+func isGitHubAssetHost(host string) bool {
+	if i := strings.IndexByte(host, ':'); i >= 0 {
+		host = host[:i]
+	}
+	host = strings.ToLower(host)
+	if host == "github.com" || host == "githubusercontent.com" {
+		return true
+	}
+	return strings.HasSuffix(host, ".github.com") ||
+		strings.HasSuffix(host, ".githubusercontent.com")
 }
 
 // checkPlatform returns ErrUnsupportedPlatform on operating systems that have
@@ -238,16 +291,16 @@ func assetName() string {
 	return fmt.Sprintf("naozhi-%s-%s", runtime.GOOS, runtime.GOARCH)
 }
 
-func fetchFile(ctx context.Context, url, dest string, maxBytes int64) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, fetchURL, nil)
 	if err != nil {
 		return err
 	}
-	// Bound the redirect chain (GitHub release URLs hop release → CDN, but
-	// further hops are unexpected) and refuse downgrades to plain http so a
-	// hostile DNS / CDN cannot redirect into a metadata-server SSRF or
-	// strip TLS off the asset download. Mirrors the LatestRelease client's
-	// CheckRedirect on the same call site. (R227-SEC-5)
+	// Pin every hop to github.com / *.github.com so a hostile redirect cannot
+	// pivot the binary or checksums.txt download to an attacker-controlled
+	// host. Without this guard the SHA-256 verification is no longer
+	// load-bearing — both files travel the same path and could be replaced
+	// in lock-step. (R228-SEC-1/SEC-9，覆盖 R227-SEC-5 的 https-only 检查)
 	client := &http.Client{
 		Timeout: defaultTimeout,
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
@@ -256,6 +309,9 @@ func fetchFile(ctx context.Context, url, dest string, maxBytes int64) error {
 			}
 			if req.URL.Scheme != "https" {
 				return fmt.Errorf("redirect to non-https URL refused: %s", req.URL.Scheme)
+			}
+			if !isGitHubAssetHost(req.URL.Host) {
+				return fmt.Errorf("redirect target outside github.com: %s", req.URL.Host)
 			}
 			return nil
 		},
@@ -266,7 +322,7 @@ func fetchFile(ctx context.Context, url, dest string, maxBytes int64) error {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, url)
+		return fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, fetchURL)
 	}
 
 	// Owner-only, non-executable until verifyChecksum proves integrity.
@@ -280,8 +336,16 @@ func fetchFile(ctx context.Context, url, dest string, maxBytes int64) error {
 	}
 	defer f.Close()
 
-	if _, err := io.Copy(f, io.LimitReader(resp.Body, maxBytes)); err != nil {
+	// Read up to maxBytes+1: a write of (maxBytes+1) bytes means the response
+	// body actually exceeded maxBytes and we silently truncated, which would
+	// later surface as a confusing "checksum mismatch" instead of the real
+	// cause. Surface the truncation explicitly.
+	n, err := io.Copy(f, io.LimitReader(resp.Body, maxBytes+1))
+	if err != nil {
 		return err
+	}
+	if n > maxBytes {
+		return fmt.Errorf("response body exceeds %d bytes (truncated) from %s", maxBytes, fetchURL)
 	}
 	// Flush to disk before the caller verifies the checksum.
 	return f.Sync()

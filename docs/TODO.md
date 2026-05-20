@@ -254,7 +254,7 @@
 - [ ] **R225-PERF-8 — `shimWriter.Write` fast path `string(data[:len-1])` 强制 byte→string copy（P2）**: process_shim_io.go:54 每条 stdin 一次必要 alloc。方案：`shimClientMsg.Line` 改 `[]byte` + 自定义 Marshaler，或在已知 data 不被改时用 `unsafe.String`。
 - [ ] **R225-PERF-9 — `wshub.eventPushLoop` 同一 session 多 WS 各自 marshal（P2）**: wshub.go:1028 50 个标签页同 session 时同批事件 marshal 50 次。方案：Hub 层一次 marshal fan-out 同一 immutable []byte 引用。
 - [ ] **R225-PERF-10 — `marshalPooled` 每次 copy 一份独立 backing（P2）**: dashboard.go:83 高频 broadcast 下不可避免；考虑对固定组合 session_state 做 LRU 缓存。
-- [x] **R225-PERF-11 — `eventlog.Append` UUID 生成在锁内（P2）**: eventlog.go:596 Append 持 mu.Lock 期间调 stampUUID → crypto/rand 系统调用。方案：在锁外预先生成。 — 已修复（Append + AppendBatch 同改），本批 PR #158
+- [x] **R225-PERF-11 — `eventlog.Append` UUID 生成在锁内（P2）**: eventlog.go:596 Append 持 mu.Lock 期间调 stampUUID → crypto/rand 系统调用。方案：在锁外预先生成（Append 单条 + AppendBatch 循环前 in-place 全部预 stamp，caller-set UUID 保留）。 — 已修复，本批 PR #158
 - [ ] **R225-PERF-12 — `agent_message_chunk` `p.mu.Lock` 复用保护 textBuf（P2）**: protocol_acp.go:494 高频 chunk 与 sessionID 共享一锁；evaluate 把 textBuf 移入 readLoop 私有或独立细粒度 mu。
 - [x] **R225-PERF-13 — `subagent_link.SetAgentInternalID` 持 wlock 做 O(500) 回扫（P3）**: eventlog.go:553 短时阻塞所有 Append。方案：early-exit + 限制最大回扫深度（≤50）。 — 已修复（setAgentInternalIDMaxScan = 50 上限 + foundAgent/foundTaskStart 标记两条都 backfill 后 break），本批 PR #157
 - [ ] **R225-PERF-14 — `wsclient.sweepSubGenExpiredLocked` 在 hub 写锁下扫 map（P3）**: wsclient.go:143 阻塞 subscribe/unsubscribe 并发。方案：移到 client 自身轻量 mutex。
@@ -318,7 +318,7 @@
 - [ ] **R224-PERF-1 — `eventlog.fireTaskDoneCallbacks([]pendingTaskDone{pending})` 单元素 slice literal escape（P2 R219-PERF-4 / R222-PERF-8 未覆盖分支）**: `eventlog.go:654` 与 `invokePersistSink` 单元素 slice 同款 escape，每个 task_done 事件一次额外 alloc。方案：`var buf [1]pendingTaskDone; buf[0] = pending; fire(buf[:])` 栈数组，或 `sync.Pool[[]T]`。
 - [ ] **R224-PERF-2 — `handleList workspaces []string + wsMap map[string]string` 1 Hz × N tab 重复分配（P2 R219-PERF-2 未覆盖 inner alloc）**: `dashboard_session.go:394` storeGen 命中 in 顶层缓存之前已分配 workspaces slice + wsMap。方案：workspaces 走 sync.Pool（参考 listRefsPool R222-PERF-10 先例）；ResolveWorkspaces 接受 caller 复用 map 或缓存 wsMap 与 storeGen 绑定。
 - [ ] **R224-PERF-3 — `Snapshot()` `TurnAgents()` RLock + slice copy 在 sub-agent turn 期间频繁触发（P3 R219-PERF-3 / R222-PERF-7 未覆盖）**: `managed.go:894` 当 turnAgentCount > 0 时仍进 RLock + copy；500 Snapshot/s × sub-agent turn 与 SetAgentInternalID WLock 竞争。方案：`TurnAgents()` 改 atomic.Pointer[[]Agent] copy-on-write，applyEntryStateLocked 修改时 atomic.Store 新 slice。
-- [ ] **R224-PERF-4 — ETag/Content-Disposition 路径上的 `fmt.Sprintf` 反射 overhead（P3）**: `dashboard_send.go:1112`/`project_files.go:592, 324, 337` 多处用 fmt.Sprintf 构造 header；ETag seed 可改 `strconv.AppendInt + 栈数组`，Content-Disposition 改 strings.Builder。
+- [x] **R224-PERF-4 — ETag/Content-Disposition 路径上的 `fmt.Sprintf` 反射 overhead（P3）**: `dashboard_send.go:1112`/`project_files.go:592, 324, 337` 多处用 fmt.Sprintf 构造 header；ETag seed 可改 `strconv.AppendInt + 栈数组`，Content-Disposition 改 strings.Builder。 — 部分修复（ETag seed 两处都改 strconv.AppendInt 写 48B 栈缓冲，Content-Disposition 的 fmt.Sprintf 暂缓），本批 PR #160
 - [x] **R224-PERF-5 — 错误信息 fmt.Sprintf 含编译期常量（P3）**: `wshub.go:791` "too many files (max %d)" 等错误 path 上的 fmt.Sprintf 完全可预先 const。方案：包级 const string 直接引用。 — 已修复（抽 `errTooManyFiles` 包级 const + 3 处调用点切换 + 编译期断言锁定字面量与 maxFilesPerSend 同步），本批 PR #141
 - [ ] **R224-PERF-6 — `ACPProtocol.parseSessionUpdate` 嵌套三次 json.Unmarshal（P2）**: `protocol_acp.go:474, 476` 相比 stream-json 双解码再多一次 update.Update.Content 嵌套解码。方案：声明 Content 为 `json.RawMessage` 推迟第三次解码，或与 R222-PERF-1 / R222-PERF-3 同批做 ReadEvent([]byte) 接口改造。
 
@@ -331,7 +331,7 @@
 - [ ] **R224-CR-5 — `server.New` deprecated wrapper 无移除条件（P2）**: `server.go:457` Deprecated 自 Round 214 起停摆，0 生产调用，~20 test call sites 阻塞。方案：① Deprecated godoc 加显式移除条件 "remove once all *_test.go migrated"；② 或关闭 R214-CODE-4 标 "won't fix — low-value churn"。
 - [ ] **R224-CR-6 — `process_turn.go` 文件级 ownership 注释列错位（P3）**: `process_turn.go:15` 列 "isChanAlive" 为本文件拥有，但实际定义在同文件第 188-193 行；文档自洽。code-reviewer 误报本身——但 file 头还顺带列了 "sanitizeStderrLine" 在本文件，这是对的。无操作，当作澄清。
 - [x] **R224-CR-7 — Sprint-numbered 注释批量过期（P3）**: `dispatch.go:710` "Sprint 2"、`select_node_for_backend.go:3` "Sprint 6b"、`dashboard_cron.go:354` "Sprint 6c"、`profile_kiro.go:14` "Sprint 1b reverse-node routing"（已落地于 upstream/caps.go）等多处把 Sprint 编号当时间锚点，长期看变误导。方案：扫一遍把 Sprint X 替换为功能描述或 PR 锚点。 — 已修复（dispatch.go / select_node_for_backend.go / dashboard_cron.go × 3 / profile_kiro.go × 2 共 6 处 Sprint 编号替换为功能描述或 RFC §章节锚点），本批 PR #141
-- [ ] **R224-CR-8 — `sanitizeStderrLine` 缺独立 unit test（P3）**: `process_turn.go` 安全敏感（log injection 防御）但仅有 readLoop 端到端覆盖。方案：补 table-driven test（normal ASCII / ANSI escape / C0 / 超长截断）。
+- [x] **R224-CR-8 — `sanitizeStderrLine` 缺独立 unit test（P3）**: `process_turn.go` 安全敏感（log injection 防御）但仅有 readLoop 端到端覆盖。方案：补 table-driven test（normal ASCII / ANSI escape / C0 / 超长截断）。 — 已修复（process_turn_test.go 覆盖 ASCII/CSI/OSC/C0/C1/bidi/LS-PS/CJK/emoji passthrough/截断标记/UTF-8 边界），本批 PR #160
 - [ ] **R224-CR-9 — `dispatch.replyTracker` 240 行 5+ 职责（P2 god object 苗头）**: edit-banner 速率限制 / todo 去重投递 / askQuestion 卡片回送 / initial-Reply lifecycle / loopWG 协调 5 类正交职责挤一对象 + 7 同步原语。方案：拆 BannerEditor / TodoStreamer / AskQuestionPoster / TurnLifecycle 4 对象，replyTracker 退化 wiring 容器。
 
 ### 架构 — 本轮新发现 / 重申

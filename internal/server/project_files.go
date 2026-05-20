@@ -596,7 +596,15 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 	// ETag hashes (size, mtime-ns) so the header does not leak exact byte
 	// count or nanosecond modification timestamp to authenticated clients.
 	// Matches the attachment endpoint convention — see handleAttachment.
-	etagSum := sha256.Sum256([]byte(fmt.Sprintf("%d|%d", info.Size(), info.ModTime().UnixNano())))
+	//
+	// R224-PERF-4: same strconv-into-stack-buffer trick as dashboard_send's
+	// handleAttachment to skip fmt.Sprintf's reflection path. SHA-256 input
+	// is byte-identical to the prior "%d|%d" form so the ETag is unchanged.
+	var etagBuf [48]byte
+	etagSeed := strconv.AppendInt(etagBuf[:0], info.Size(), 10)
+	etagSeed = append(etagSeed, '|')
+	etagSeed = strconv.AppendInt(etagSeed, info.ModTime().UnixNano(), 10)
+	etagSum := sha256.Sum256(etagSeed)
 	etag := `"` + hex.EncodeToString(etagSum[:8]) + `"`
 	if inm := r.Header.Get("If-None-Match"); inm != "" && inm == etag {
 		w.Header().Set("ETag", etag)

@@ -144,7 +144,8 @@ func (w *Weixin) Reply(ctx context.Context, msg platform.OutgoingMessage) (strin
 	// logged but dropped — the iLink Bot API does not accept attachments.
 	if len(msg.Images) > 0 {
 		slog.Warn("weixin: image attachments are not supported; dropping images",
-			"chat", msg.ChatID, "image_count", len(msg.Images))
+			"chat", osutil.SanitizeForLog(msg.ChatID, 128),
+			"image_count", len(msg.Images))
 	}
 	if msg.Text == "" {
 		return "", nil
@@ -157,7 +158,11 @@ func (w *Weixin) Reply(ctx context.Context, msg platform.OutgoingMessage) (strin
 		contextToken = entry.token
 	}
 	if contextToken == "" {
-		return "", fmt.Errorf("weixin: no context_token for user %s (no inbound message yet)", msg.ChatID)
+		// %q + sanitize: ChatID arrives from the iLink relay; if it ever
+		// carried a control byte, embedding it raw in an error string would
+		// leak through any caller that surfaces err.Error() to logs or IM.
+		return "", fmt.Errorf("weixin: no context_token for user %q (no inbound message yet)",
+			osutil.SanitizeForLog(msg.ChatID, 128))
 	}
 
 	if err := w.api.sendMessage(ctx, msg.ChatID, msg.Text, contextToken); err != nil {
@@ -245,12 +250,16 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 				// don't currently forward. Debug-level so bursts of media from
 				// one user don't flood operator logs; still queryable when
 				// troubleshooting "why didn't my message go through".
-				slog.Debug("weixin non-text message ignored", "from", msg.FromUserID, "msg_id", msg.MessageID, "items", len(msg.ItemList))
+				slog.Debug("weixin non-text message ignored",
+					"from", osutil.SanitizeForLog(msg.FromUserID, 128),
+					"msg_id", msg.MessageID,
+					"items", len(msg.ItemList))
 				continue
 			}
 			if len(text) > maxIncomingTextBytes {
 				slog.Warn("weixin text exceeds cap, dropping",
-					"from", msg.FromUserID, "msg_id", msg.MessageID,
+					"from", osutil.SanitizeForLog(msg.FromUserID, 128),
+					"msg_id", msg.MessageID,
 					"size", len(text), "cap", maxIncomingTextBytes)
 				continue
 			}

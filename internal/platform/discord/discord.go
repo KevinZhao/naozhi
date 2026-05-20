@@ -325,7 +325,8 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 		for _, p := range pending {
 			data, mime, err := downloadURL(p.url)
 			if err != nil {
-				slog.Warn("discord download attachment failed", "err", err, "url", p.url)
+				slog.Warn("discord download attachment failed",
+					"err", err, "url", osutil.SanitizeForLog(p.url, 256))
 				continue
 			}
 			msg.Images = append(msg.Images, platform.Image{Data: data, MimeType: mime})
@@ -362,6 +363,12 @@ func downloadURL(rawURL string) ([]byte, string, error) {
 	u, err := url.Parse(rawURL)
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid attachment URL: %w", err)
+	}
+	// Discord legitimate CDN URLs are always https; refuse plaintext so a MITM
+	// or malicious crafted message cannot serve substituted bytes that would
+	// then be forwarded as if they were a trusted Discord attachment.
+	if u.Scheme != "https" {
+		return nil, "", fmt.Errorf("attachment URL must be https, got %q", u.Scheme)
 	}
 	if !discordCDNHosts[u.Hostname()] {
 		return nil, "", fmt.Errorf("attachment URL host not in whitelist: %s", u.Hostname())

@@ -22,6 +22,7 @@ import (
 
 	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/discovery"
+	"github.com/naozhi/naozhi/internal/metrics"
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/shim"
 )
@@ -529,6 +530,7 @@ func (r *Router) StartShimReconcileLoop(ctx context.Context, interval time.Durat
 		// cool-down so a panicking iteration cannot hot-loop.
 		defer func() {
 			if rec := recover(); rec != nil {
+				metrics.PanicRecoveredTotal.Add(1)
 				slog.Error("router shim-reconcile loop panic recovered",
 					"panic", rec, "stack", string(debug.Stack()))
 				if ctx.Err() == nil {

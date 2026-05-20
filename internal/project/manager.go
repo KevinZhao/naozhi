@@ -350,24 +350,23 @@ func (m *Manager) EffectivePlannerPrompt(p *Project) string {
 	for i := 0; i < len(raw); i++ {
 		c := raw[i]
 		// 0x09 tab / 0x0A LF / 0x0D CR 是 markdown/CLAUDE.md 合法内容，放行；
-		// 其余 C0 控制字节 + NUL 会破坏 argv 或 stream-json，整串丢弃。
-		if c == 0 || (c < 0x20 && c != 0x09 && c != 0x0a && c != 0x0d) {
+		// 其余 C0 控制字节 + NUL + DEL 会破坏 argv 或 stream-json，整串丢弃。
+		// 与 project.ValidateConfig / config.validatePlannerPrompt 对齐 DEL 处理。
+		if c == 0 || (c < 0x20 && c != 0x09 && c != 0x0a && c != 0x0d) || c == 0x7f {
 			slog.Warn("planner prompt contains control byte; dropping",
 				"project", p.Name, "byte", c)
 			return ""
 		}
 	}
-	// Byte-level scan above only catches 7-bit ASCII control chars; bidi
-	// override / LS-PS / C1 sneak through as multi-byte UTF-8 sequences
-	// whose individual bytes are all >= 0x20. ValidateConfig already runs
-	// the same IsLogInjectionRune sweep on the write path, but a tampered
-	// project.yaml or a global default loaded outside ValidateConfig can
-	// still surface here — defense-in-depth keeps the runtime path
-	// aligned with the on-disk validator. R225-SEC-6.
+	// R225-SEC-6: 字节循环只覆盖 NUL/C0/DEL，跳不到 C1/bidi override/LS-PS（多字节
+	// UTF-8，首字节 >= 0xC2）。ValidateConfig 已在写路径上跑同一份 IsLogInjectionRune
+	// 扫描，但被篡改的 project.yaml 或绕开 ValidateConfig 的全局默认仍可能落到此处 —
+	// 运行时再扫一遍是 defense-in-depth；rune 用 U+XXXX 格式化避免 bidi 字面值翻转
+	// journalctl 渲染。
 	for _, r := range raw {
 		if osutil.IsLogInjectionRune(r) {
-			slog.Warn("planner prompt contains injection rune; dropping",
-				"project", p.Name, "rune", r)
+			slog.Warn("planner prompt contains injection rune (C1/bidi/LS-PS); dropping",
+				"project", p.Name, "rune", fmt.Sprintf("U+%04X", r))
 			return ""
 		}
 	}

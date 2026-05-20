@@ -639,6 +639,53 @@ func TestEffectivePlannerPrompt_GlobalDefault(t *testing.T) {
 	}
 }
 
+// TestEffectivePlannerPrompt_RejectsInjectionRunes covers R225-SEC-6: the
+// byte-level loop in EffectivePlannerPrompt only catches NUL/C0; C1 and
+// bidi override codepoints encode as multi-byte UTF-8 (first byte >= 0xC2)
+// and must be filtered by a separate rune scan calling IsLogInjectionRune.
+// Mirrors validatePlannerPrompt's policy in internal/config so config-time
+// vs runtime acceptance never drift.
+func TestEffectivePlannerPrompt_RejectsInjectionRunes(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name   string
+		prompt string
+	}{
+		{"NUL", "ok\x00bar"},
+		{"ESC", "ok\x1bbar"},
+		{"DEL", "ok\x7fbar"},
+		{"C1_NEL", "okbar"},
+		{"BidiOverride_RLO", "ok‮bar"},
+		{"BidiIsolate_RLI", "ok⁧bar"},
+		{"LineSeparator", "ok bar"},
+		{"InvalidUTF8", "ok\xffbar"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := &Manager{}
+			p := &Project{Config: ProjectConfig{PlannerPrompt: tc.prompt}}
+			got := m.EffectivePlannerPrompt(p)
+			if got != "" {
+				t.Errorf("EffectivePlannerPrompt(%q) = %q, want \"\" (rejected)", tc.prompt, got)
+			}
+		})
+	}
+}
+
+// TestEffectivePlannerPrompt_AllowsCJKAndMultiline confirms the new rune
+// scan does not over-reject — Chinese / Japanese / emoji + CR/LF/Tab must
+// still flow through (CLAUDE.md content is the canonical input).
+func TestEffectivePlannerPrompt_AllowsCJKAndMultiline(t *testing.T) {
+	t.Parallel()
+	m := &Manager{}
+	prompt := "项目说明\n\t第一行\rTask: 写测试 ✅"
+	p := &Project{Config: ProjectConfig{PlannerPrompt: prompt}}
+	got := m.EffectivePlannerPrompt(p)
+	if got != prompt {
+		t.Errorf("EffectivePlannerPrompt = %q, want %q", got, prompt)
+	}
+}
+
 // ---- rebuildBindingIndex (via BindChat collision) ----
 
 func TestRebuildBindingIndex_OverwriteOnBind(t *testing.T) {
