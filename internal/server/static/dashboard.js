@@ -387,15 +387,12 @@ function renderSidebar(data) {
     return bFS - aFS;
   });
 
-  // Hide cron-scheduler sessions from the sidebar unless the operator has
-  // explicitly opened one (tracked via cronVisibleKeys). This is applied
-  // once here so every downstream branch — search filter, project
-  // grouping, fallback flat list — sees the same "visible" universe. The
-  // upstream allSessionsCache still holds every session so history-badge
-  // counts and other aggregates are unaffected.
-  const visibleItems = allItems.filter(s =>
-    !isCronSessionKey(s.key) || cronVisibleKeys.has(s.key)
-  );
+  // cron-panel-consolidation RFC §4.2: cron stubs are filtered server-side
+  // (internal/server/dashboard_session.go) so allItems never contains cron
+  // keys here. The previous `cronVisibleKeys` whitelist + per-render filter
+  // are gone — both branches below (search-filter / project-grouping) walk
+  // allItems directly.
+  const visibleItems = allItems;
 
   // UX-P3 sidebar search: if the filter input is visible and non-empty,
   // skip the project grouping entirely and render the filtered set as a
@@ -472,12 +469,10 @@ function renderSidebar(data) {
     });
 
     const groupKeys = Object.keys(groups);
-    // Visible cron sessions (those in cronVisibleKeys) either fell into a
-    // project group via s.project above, or — if they have no project —
-    // dropped into `ungrouped`. No dedicated cron-group header is rendered
-    // any more: the sidebar is reserved for operator-opened conversations,
-    // and the 定时任务 panel owns the full scheduled-task catalog. See
-    // cronVisibleKeys comment block.
+    // cron-panel-consolidation RFC §4.2: no dedicated cron sidebar section;
+    // cron stubs are filtered server-side and the dashboard sidebar is
+    // reserved for human conversation surfaces. Scheduled-task management
+    // lives in the 定时任务 panel.
     if (groupKeys.length > 0) {
       // Pre-compute per-group sort keys once — avoids repeated map lookups
       // inside the sort comparator (fav flag, max firstSeen, display name).
@@ -528,10 +523,9 @@ function renderSidebar(data) {
         // visual noise.
       });
       // NOTE: the dedicated 定时任务 sidebar section was removed.
-      // Cron sessions now hide by default (see cronVisibleKeys) and
-      // visible ones flow into their project's group. If they have no
-      // project, they fall into the catch-all "未分组" bucket below,
-      // which is consistent with how other project-less sessions behave.
+      // cron stubs no longer reach the dashboard at all (server-side
+      // filter, see cron-panel-consolidation RFC §4.3). Truly project-less
+      // sessions still fall into the catch-all "未分组" bucket below.
       if (ungrouped.length > 0) {
         // Final catch-all: sessions with no project name AND no workspace
         // (rare — usually transient takeover/planner edge cases). The old
@@ -1295,12 +1289,12 @@ function sessionCardHtml(s) {
   const sNode = s.node || 'local';
   const isActive = selectedKey === s.key && selectedNode === sNode;
   const isNew = s.state === 'new';
-  const isCron = isCronSessionKey(s.key);
-  // sc-cron-card (not cron-card) because `.cron-card` is also the cron
-  // panel's job card class — reusing it here pulled the panel's padding /
-  // border / padding-right:100px into the sidebar card and pushed the time
-  // + agent badge into the wrong positions.
-  const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '') + (isCron ? ' sc-cron-card' : '');
+  // cron-panel-consolidation RFC §4.2: cron sessions never render here
+  // (server-side filter), so the prior `sc-cron-card` / `sc-cron` chip
+  // were removed. If the filter ever leaked, the row would still render
+  // as a normal card — the dismissSession isCron guard then prevents the
+  // × button from accidentally invoking cron-job deletion.
+  const cls = 'session-card' + (isActive ? ' active' : '') + (isNew ? ' new-card' : '');
 
   // Line 1: prompt. user_label (operator-set via rename) wins over any
   // auto-derived title so the rename is visible immediately across refreshes.
@@ -1329,7 +1323,6 @@ function sessionCardHtml(s) {
 
   const dismissBtn = '<button type="button" class="btn-dismiss" data-key="' + escAttr(s.key) + '" data-node="' + escAttr(sNode) + '" onclick="event.stopPropagation();dismissSession(this.dataset.key,this.dataset.node)" title="remove" aria-label="Remove session">&times;</button>';
 
-  const cronBadge = isCron ? '<span class="sc-cron" title="Scheduled cron task">\u23F0 cron</span>' : '';
   const typeTag = s.source === 'terminal' ? sessionTypeTag(s.cli_name, s.entrypoint) : '';
   const agentCount = s.subagents ? s.subagents.length : 0;
   const agentBadge = agentCount > 0 ? '<span class="sc-agents">\u{1F916}\u00D7' + agentCount + '</span>' : '';
@@ -1346,7 +1339,6 @@ function sessionCardHtml(s) {
     '<span>' + esc(displayState) + '</span>' +
     nodeBadge +
     originBadge +
-    cronBadge +
     typeTag +
     agentBadge;
 
@@ -1785,26 +1777,24 @@ async function dismissSession(key, node, opts) {
   // stale backend pick.
   delete sessionBackends[key];
 
-  // Cron sessions get a "hide from sidebar" semantics instead of a true
-  // delete: the × button is a UI-level dismiss, not a destructive one.
-  // Deleting the managed session here would NOT remove the scheduled job
-  // (the cron scheduler re-registers a stub on every refresh — see
-  // session.RegisterCronStub), and the user would just see the card
-  // pop back the next time the job ticks. Worse, if we hit
-  // DELETE /api/sessions the router would reject or tear down state the
-  // scheduler still considers live. Single-source-of-truth for cron
-  // lifecycle is the 定时任务 panel (cronDelete → DELETE /api/cron).
+  // cron-panel-consolidation RFC §4.2: defensive guard. Cron stubs are
+  // filtered server-side so this branch should never run in production —
+  // but if a future server bug ever leaks a cron key through, we must
+  // NOT call DELETE /api/sessions (the scheduler still owns the stub).
   if (isCronSessionKey(key)) {
-    cronVisibleKeys.delete(key);
+    // cron-panel-consolidation RFC §4.2: cron stubs are filtered server-side
+    // and should never appear in the sidebar at all — this branch only
+    // executes if a future server bug leaks one through. Guard-rail behaviour:
+    // remove the rogue card from the DOM but DO NOT call DELETE /api/sessions
+    // (the cron scheduler still owns the stub) and DO NOT mutate any cron
+    // panel state. Single source of truth for cron-job lifecycle remains
+    // the 定时任务 panel (cronDelete → DELETE /api/cron).
     if (selectedKey === key) {
       selectedKey = null;
       if (wsm.subscribedKey === key) wsm.unsubscribe();
       document.getElementById('main').innerHTML = mainEmptyHtml();
       wireQuickAskInput();
     }
-    // Drop the card out of the DOM immediately for a snappy dismiss;
-    // lastVersion=0 + a debounced fetch reconciles with the server on
-    // the next tick (same pattern as the discovered-session branch).
     const card = document.querySelector('.session-card[data-key="' + key + '"]');
     if (card) card.remove();
     lastVersion = 0;
@@ -2186,11 +2176,10 @@ function renderMainShell() {
       '</div>' +
       '</div>' +
     '</div>' +
-    // P2 cron-run-history (RFC \u00a78.2) \u2014 cron \u8be6\u60c5\u89c6\u56fe\u65f6\u95f4\u8f74\u5360\u4f4d\u3002
-    // \u53ea\u4e3a cron:<id> session \u6e32\u67d3\uff0c\u5176\u4f59 session \u7c7b\u578b\u4fdd\u6301\u539f\u6837\uff08\u5360\u4f4d div \u4e3a\u7a7a\uff0c
-    // \u4e0d\u5360\u5e03\u5c40\u7a7a\u95f4\uff09\u3002timeline \u5b9e\u9645\u5185\u5bb9\u7531 renderCronTimelineForSession \u586b\u5145\uff0c
-    // \u5199\u5728 renderMainShell \u4e4b\u540e\u4ee5\u62ff\u5230\u521a mount \u7684 DOM \u8282\u70b9\u3002
-    (isCronSessionKey(selectedKey) ? '<div class="cron-timeline-panel" id="cron-timeline-panel" data-job-id="' + escAttr(selectedKey.slice('cron:'.length)) + '"></div>' : '') +
+    // cron-panel-consolidation RFC §4.2: cron timeline used to mount here
+    // (#cron-timeline-panel placeholder above the events scroll). It now
+    // lives entirely inside the 定时任务 panel's per-job drawer; mainShell
+    // is reserved for human conversation surfaces.
     '<div class="events" id="events-scroll" role="log" aria-live="polite" aria-relevant="additions">' + (s.state === 'running' ? '<div class="empty-state loading-indicator">\u6b63\u5728\u52a0\u8f7d\u4e8b\u4ef6\u2026</div>' : '') + '</div>' +
     '<div class="nav-pill" id="nav-pill">' +
       '<button onclick="navMsg(\'prev\')" id="nav-prev" title="\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f (Alt+\u2191)" aria-label="\u8df3\u5230\u4e0a\u4e00\u6761\u7528\u6237\u6d88\u606f">&#x25B2;</button>' +
@@ -2248,14 +2237,10 @@ function renderMainShell() {
     else lastTapMs = now;
   }, {passive:true});
 
-  // P2 cron-run-history (RFC §8.2) — cron 详情视图时间轴 mount 钩子。
-  // renderMainShell 已经插入了 #cron-timeline-panel 的占位空 div；这里在
-  // session 切换 / 重绘后立即渲染 timeline 内容。如果 cron list 已经拿过
-  // recent_runs，第一次填充直接用本地缓存（避免多一次 fetch）；否则后台
-  // fetch 一次。
-  if (isCronSessionKey(selectedKey)) {
-    renderCronTimelineForSession(selectedKey.slice('cron:'.length));
-  }
+  // cron-panel-consolidation RFC §4.2: the cron timeline mount hook that
+  // used to live here (renderCronTimelineForSession on selectedKey ===
+  // 'cron:<id>') is gone. cron drawer rendering happens inside the 定时任务
+  // panel itself, keyed off cronDetailJobId rather than selectedKey.
 
   // Multi-Backend RFC §8.3 D9-D15: gray out input controls that the
   // active session's backend doesn't support. Single-backend deployments
@@ -9772,30 +9757,19 @@ let cronJobs = [];
 // when the server has no default configured. Used to render helpful copy
 // alongside the notify toggle in create/edit modals.
 let cronNotifyDefault = null;
-// cronVisibleKeys gates which cron-scheduler sessions the sidebar paints.
-// Policy (operator-confirmed): cron sessions are NOT shown in the sidebar
-// by default — they live in the "定时任务" panel. When the operator
-// explicitly opens a cron session (from the panel, or right after creating
-// one), we add its key here so the sidebar surfaces it. Dismissing the
-// session card (×) removes the key again; it does NOT delete the cron job
-// itself (see dismissSession's isCron branch). Deliberately NOT persisted
-// across reloads — the white-list is an ephemeral "I'm currently looking
-// at this" marker, not a permanent preference.
-let cronVisibleKeys = new Set();
-
-// isCronSessionKey 是 sidebar 过滤和 dismiss 分支共享的判定。
-// 与 cron_stub 约定的 key shape ("cron:<jobID>") 对齐，保持与后端
-// session.CronKeyPrefix 单一真源。
+// cron-panel-consolidation RFC §4.2: sidebar / mainShell are now reserved
+// for human conversation surfaces and never paint cron-scheduler sessions.
+// The previous `cronVisibleKeys` whitelist + markCronSessionVisible plumbing
+// were UI bandages on top of /api/sessions returning cron stubs; PR2 moves
+// that filter into the server (internal/server/dashboard_session.go), so
+// the dashboard can simply assume no cron rows ever arrive. The single
+// helper retained from the old block is `isCronSessionKey`, kept for the
+// dismissSession safety check (defence-in-depth: even if a future server
+// bug leaks a cron key, the × button must not delete the cron job, only
+// untrack the row). New cron-detail visibility lives in `cronDetailJobId`
+// (PR4 / cronDetailJobId state machine).
 function isCronSessionKey(key) {
   return typeof key === 'string' && key.indexOf('cron:') === 0;
-}
-
-// markCronSessionVisible 把一个 cron session key 加入白名单并触发侧栏
-// 重绘。给 openCronSession / doCreateCronJob / 未来的"打开到侧栏"入口
-// 共享，这样可见性策略只在一个地方维护。
-function markCronSessionVisible(key) {
-  if (!isCronSessionKey(key)) return;
-  cronVisibleKeys.add(key);
 }
 // R110-P2 cron filter state — module-level so renderCronList can read the
 // live values each paint without a closure. Mirrors the sidebar-search
@@ -10714,17 +10688,13 @@ async function doCreateCronJob() {
     showToast('定时任务已创建', 'success');
     fetchCronJobs();
     if (data.id) {
-      const key = 'cron:' + data.id;
-      // Freshly-created cron sessions are surfaced in the sidebar
-      // immediately — right after creation is the one moment the
-      // operator does want to see the job they just set up. Post-dismiss
-      // they fall back to panel-only per the default cron visibility
-      // policy (see cronVisibleKeys comment).
-      markCronSessionVisible(key);
-      sessionWorkspaces[key] = workDir || defaultWorkspace || '/tmp';
-      lastVersion = 0;
-      await fetchSessions();
-      selectSession(key, 'local');
+      // cron-panel-consolidation RFC §4.2: a freshly-created cron job no
+      // longer pushes itself into the sidebar (cron stubs are filtered
+      // server-side) nor takes over mainShell. PR4 wires the per-job
+      // drawer; for now the new row simply appears in the 定时任务 list
+      // on the next fetchCronJobs tick. Keep the panel open so the
+      // operator sees the row land.
+      openCronPanel();
     }
   } catch (e) { showNetworkError('创建定时任务', e); }
 }
@@ -11908,19 +11878,19 @@ function renderCronPanel() {
   renderCronList();
 }
 
-function openCronSession(cronId) {
-  const key = 'cron:' + cronId;
-  // Cron sessions are sidebar-hidden by default; explicitly opening one
-  // from the 定时任务 panel promotes it into the visible set so the
-  // sidebar can surface (and keep) it until the operator × 's it away.
-  markCronSessionVisible(key);
-  // Ensure the session appears in the sidebar (may be pending if never sent)
-  if (!sessionsData[sid(key, 'local')] && !sessionWorkspaces[key]) {
-    sessionWorkspaces[key] = defaultWorkspace || '/tmp';
-    lastVersion = 0;
-    debouncedFetchSessions();
-  }
-  selectSession(key, 'local');
+// openCronSession is the legacy entry point that previously redirected to
+// `selectSession('cron:<id>')` so the operator could see the cron timeline
+// inside the main events scroll. cron-panel-consolidation RFC §4.2 retires
+// that flow — clicks on a cron row now belong to the 定时任务 drawer.
+// PR3 leaves this as a no-op stub: between PR3 and PR4 landing, clicks
+// on cron list rows are intentionally inert (the 定时任务 panel still
+// shows the list, but no detail surface yet). PR4 replaces this with
+// `openCronDetail(jobId)` which sets `cronDetailJobId` and triggers a
+// drawer re-render. Calling code paths (cronJobCardHtml onclick, the
+// 'open' menu action) keep referencing `openCronSession` until PR4
+// finishes the rename so PR3 is reviewable in isolation.
+function openCronSession(_cronId) {
+  // intentionally no-op; PR4 will route into the cron drawer.
 }
 
 async function fetchCronJobs() {
