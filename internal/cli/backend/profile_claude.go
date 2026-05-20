@@ -39,6 +39,9 @@ func claudeProfile() Profile {
 		// verbatim; callers that need an absolute path expand it
 		// themselves via os.UserHomeDir.
 		HistoryDir: "~/.claude/projects/",
+		// Process.TotalCost reports cumulative spend in USD via the CLI's
+		// own metering. Dashboard cost cells render with $ prefix.
+		CostUnit: "USD",
 		// Multi-Backend RFC §8.2 — claude supports the full naozhi UX
 		// surface: AskUserQuestion cards, passthrough multi-message
 		// queueing, @-mention embedded context, and image / audio input

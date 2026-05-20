@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/cli/backend"
 	"github.com/naozhi/naozhi/internal/history"
 	"github.com/naozhi/naozhi/internal/textutil"
 )
@@ -1460,19 +1461,39 @@ func (s *ManagedSession) extractLastPromptFromProcess() {
 // Empty backend (legacy stores predating the Backend field) defaults to USD
 // because such stores are necessarily claude-only.
 //
-// Adding a new backend: extend this switch alongside the matching
-// backend.Profile registration. The dashboard reads this value as the source
-// of truth for cost-cell formatting (see docs/rfc/multi-backend.md §8.3 D5).
-func costUnitForBackend(backend string) string {
-	switch backend {
-	case "kiro":
-		return "credits"
-	case "", "claude":
-		return "USD"
-	default:
-		return ""
+// The actual unit string lives on backend.Profile.CostUnit, looked up via
+// backend.Get. Adding a new backend means setting CostUnit on its profile —
+// no edit here required (R225-CR-4 / R224-ARCH-1). The dashboard reads this
+// value as the source of truth for cost-cell formatting (see
+// docs/rfc/multi-backend.md §8.3 D5).
+func costUnitForBackend(backendID string) string {
+	// Legacy stores predating the Backend field — claude-only.
+	if backendID == "" {
+		backendID = "claude"
 	}
+	// Lazy bootstrap pattern (matches server.replyTagForBackend): production
+	// wires backend.RegisterDefaults() in cmd/naozhi/main.go before any
+	// session is constructed. Tests that build a Snapshot without calling
+	// RegisterDefaults would otherwise see backend.Get return false and lose
+	// the unit — costUnitForBackendOnce ensures one-shot lazy registration so
+	// tests stay green. Guard with a registry-empty check so we cooperate
+	// with sibling tests (server pkg withDefaultBackends) that already
+	// pre-registered, rather than panicking on duplicate Register.
+	costUnitForBackendOnce.Do(func() {
+		if len(backend.All()) == 0 {
+			backend.RegisterDefaults()
+		}
+	})
+	if p, ok := backend.Get(backendID); ok {
+		return p.CostUnit
+	}
+	// Unregistered backend ID (e.g. config typo, in-progress backend not
+	// yet wired into RegisterDefaults). Returning "" makes the dashboard
+	// hide the cost cell rather than render a misleading unit.
+	return ""
 }
+
+var costUnitForBackendOnce sync.Once
 
 // isActivityType mirrors the EventLog.Append type set that updates
 // lastActivitySummary, so any caller scanning history for "what was

@@ -84,6 +84,17 @@ type Profile struct {
 	// know about.
 	HistoryDir string
 
+	// CostUnit is the dashboard-facing label for cumulative cost cells:
+	// "USD" for claude (Process.TotalCost reports dollars), "credits" for
+	// kiro (per-turn metering accrues in ACP credit units). Empty means
+	// "this backend has no cost concept" — the dashboard hides the cell.
+	//
+	// Centralising on Profile lets session.costUnitForBackend look the
+	// value up via backend.Get instead of maintaining its own switch
+	// (R225-CR-4 / R224-ARCH-1). Adding a new backend with a non-empty
+	// cost surface only requires populating this field.
+	CostUnit string
+
 	// Features is the user-facing capability map the dashboard reads to
 	// decide which UI controls to gray out (RFC §8.2). Distinct from the
 	// protocol-level cli.Caps (which is plumbed via Protocol.Capabilities)
