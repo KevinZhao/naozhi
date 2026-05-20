@@ -1279,13 +1279,34 @@ body.kbd-open .input-hints{display:none}
 .cj-row.is-active.is-error{box-shadow:inset 4px 0 0 var(--nz-accent),inset 0 0 0 1px rgba(218,54,51,.45)}
 .cj-row.is-active.is-missed{box-shadow:inset 4px 0 0 var(--nz-accent),inset 0 0 0 1px rgba(210,153,34,.45)}
 .cj-row.is-active.is-running{background:#1c2939;box-shadow:inset 4px 0 0 var(--nz-accent)}
-/* Single-column responsive: drawer pushes over the list under main width.
- * Threshold is generous (~720) since the list pane is fixed at 380 + 16
- * padding when drawer opens — under 720 the drawer would render at <300px
- * which can't fit both prompt and timeline. */
+/* cron-panel-consolidation-ui RFC §2 (Round 2 R-1) — responsive collapse
+ * gated on the *main column width* rather than the viewport width. The
+ * sidebar can occupy 200–60vw, so 1280px viewport with a 720px sidebar
+ * leaves only ~560px for main; a viewport @media query miscategorises
+ * those operators as "wide enough for two columns" and the drawer ends
+ * up at < 240px wide where prompt + timeline can't coexist.
+ *
+ * The data-cron-layout attribute is written by a ResizeObserver on the
+ * .main element (see dashboard.js setupCronLayoutObserver). Three modes:
+ *   wide     — main ≥ 1100   list 380, drawer ≥ 720
+ *   medium   — main ≥ 820    list 360, drawer ≥ 460
+ *   narrow   — main ≥ 560    list 320, drawer barely fits
+ *   single   — main <  560   drawer pushes over the list
+ *
+ * The legacy @media fallback below stays as a safety net for the
+ * pre-JS-init paint window so users never see a 250px-wide drawer flash.
+ */
+.cron-detail-body[data-cron-layout="wide"].has-drawer > .cron-list-pane{flex:0 0 380px}
+.cron-detail-body[data-cron-layout="medium"].has-drawer > .cron-list-pane{flex:0 0 360px}
+.cron-detail-body[data-cron-layout="narrow"].has-drawer > .cron-list-pane{flex:0 0 320px}
+.cron-detail-body[data-cron-layout="single"].has-drawer > .cron-list-pane{display:none}
+.cron-detail-body[data-cron-layout="single"] .cron-detail-pane.is-open{flex:1 1 auto;border-left:none}
+/* Pre-JS / no-ResizeObserver fallback. Kept conservative (720) so an
+ * older browser without ResizeObserver still gets a single-column safe
+ * layout under the threshold rather than a cramped two-column. */
 @media(max-width:720px){
-  .cron-detail-body.has-drawer > .cron-list-pane{display:none}
-  .cron-detail-pane.is-open{flex:1 1 auto;border-left:none}
+  .cron-detail-body:not([data-cron-layout]).has-drawer > .cron-list-pane{display:none}
+  .cron-detail-body:not([data-cron-layout]) .cron-detail-pane.is-open{flex:1 1 auto;border-left:none}
 }
 @media(max-width:540px){
   .cron-drawer-header,.cron-drawer-summary,.cron-drawer-actions,.cron-drawer-current,.cron-drawer-history{padding-left:14px;padding-right:14px}

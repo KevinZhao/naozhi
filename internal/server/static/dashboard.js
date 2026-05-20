@@ -12139,6 +12139,76 @@ function renderCronPanel() {
   // flips route through renderCronList directly without touching the shell.
   renderCronList();
   renderCronDrawer();
+  // cron-panel-consolidation-ui RFC §2 (Round 2 R-1) — wire the layout
+  // observer once the shell is in the DOM. The CSS rules key off
+  // `[data-cron-layout]` on `.cron-detail-body`; this writes that
+  // attribute based on the *element's actual width*, not the viewport.
+  setupCronLayoutObserver();
+}
+
+// setupCronLayoutObserver picks the right two-column / single-column
+// layout for the cron panel based on the available main-column width
+// rather than the viewport width. The previous implementation used a
+// single `@media(max-width:720)` rule, which silently broke when a
+// 1080p user widened their sidebar past ~360px: the viewport stays at
+// 1920 ("wide"), but the main column drops below the 720 cutoff and
+// the drawer ends up at <300px wide where the prompt + timeline can't
+// share the row.
+//
+// We tier into 4 modes — wide/medium/narrow/single — keyed off the
+// `.cron-detail-body` element width since that's the parent of both
+// list-pane and drawer-pane. ResizeObserver fires whenever the user
+// drags the sidebar resizer, opens devtools, rotates the device, or
+// resizes the window, so the layout always reflects reality.
+//
+// Idempotent: stores the observer on the body element via a Symbol-
+// keyed property so re-mounts (renderCronPanel after fetchCronJobs)
+// don't pile up observers. Falls back to a one-shot resize listener
+// in browsers without ResizeObserver (none we ship today, but cheap
+// insurance).
+function setupCronLayoutObserver() {
+  const body = document.querySelector('.cron-detail-body');
+  if (!body) return;
+  const apply = (w) => {
+    let mode;
+    if (w >= 1100) mode = 'wide';
+    else if (w >= 820) mode = 'medium';
+    else if (w >= 560) mode = 'narrow';
+    else mode = 'single';
+    if (body.dataset.cronLayout !== mode) body.dataset.cronLayout = mode;
+  };
+  // Initial paint can run before layout settles (especially when the
+  // panel is opened from a header click while the user just
+  // resized the sidebar). Use offsetWidth which forces a synchronous
+  // layout — fine here because we only run on shell mount.
+  apply(body.offsetWidth);
+  if (typeof ResizeObserver !== 'function') {
+    // Fallback — listen on window resize. Less precise (won't catch
+    // sidebar drags) but better than a static breakpoint.
+    if (!window._cronLayoutWindowListener) {
+      window._cronLayoutWindowListener = () => {
+        const el = document.querySelector('.cron-detail-body');
+        if (el) apply(el.offsetWidth);
+      };
+      window.addEventListener('resize', window._cronLayoutWindowListener);
+    }
+    return;
+  }
+  // Re-binding the observer to a freshly-mounted DOM node is fine —
+  // the previous observer's handle goes away when the old DOM does.
+  // We still guard via _cronLayoutObs so the observer is idempotent
+  // across same-shell repaints.
+  if (body._cronLayoutObs) body._cronLayoutObs.disconnect();
+  const obs = new ResizeObserver(entries => {
+    for (const e of entries) {
+      const w = (e.contentBoxSize && e.contentBoxSize[0])
+        ? e.contentBoxSize[0].inlineSize
+        : e.contentRect.width;
+      apply(w);
+    }
+  });
+  obs.observe(body);
+  body._cronLayoutObs = obs;
 }
 
 // openCronDetail opens the per-job drawer in the 定时任务 panel.
