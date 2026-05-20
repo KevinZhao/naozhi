@@ -615,7 +615,15 @@ func (d *Dispatcher) sendAndReply(
 		}
 	}
 
-	tracker := newIMEventTracker(ctx, p, msg.ChatID)
+	// sess.Backend() is the per-session backend ID ("claude" / "kiro").
+	// Passing it into the tracker lets onEvent skip tool_use status
+	// banner updates for kiro turns; an empty string is treated as
+	// "no special handling" and matches the Claude path.
+	var trackerBackend string
+	if sess != nil {
+		trackerBackend = sess.Backend()
+	}
+	tracker := newIMEventTracker(ctx, p, msg.ChatID, trackerBackend)
 	defer tracker.stop()
 
 	result, err := d.sendFn(ctx, key, sess, text, images, tracker.onEvent)
@@ -899,6 +907,21 @@ type replyTracker struct {
 	// R216-PERF-13.
 	supportsInterim bool
 
+	// backend is the session backend ID ("claude" / "kiro" / "") captured
+	// at tracker construction. Read by onEvent to decide whether to
+	// surface tool_use events as IM status lines.
+	//
+	// Kiro emits a `tool_call` per internal tool invocation (fs_read,
+	// execute_bash, …) that the ACP protocol layer normalises into an
+	// Event with a tool_use ContentBlock. Surfacing those in the IM
+	// banner produces noisy "🔧 fs_read / 🔧 execute_bash / …" updates
+	// that aren't useful to chat users — Claude's tool_use events get
+	// curated icons (📖 / ⚡ / ✏️) keyed on Claude-only tool names that
+	// don't apply to kiro, so the kiro fallback is the bare wrench
+	// fallback. Hide them entirely for kiro backends; Claude continues
+	// to surface tool_use as before.
+	backend string
+
 	// askQuestionFired signals that this turn emitted at least one
 	// AskUserQuestion card. Read by sendAndReply to suppress the bailout
 	// text that `claude -p` always produces after auto-rejecting the
@@ -927,7 +950,7 @@ func (t *replyTracker) getThinkingMsgID() string {
 	return ""
 }
 
-func newIMEventTracker(ctx context.Context, p platform.Platform, chatID string) *replyTracker {
+func newIMEventTracker(ctx context.Context, p platform.Platform, chatID, backend string) *replyTracker {
 	supportsInterim := platform.SupportsInterimMessages(p)
 	t := &replyTracker{
 		ctx:             ctx,
@@ -938,6 +961,7 @@ func newIMEventTracker(ctx context.Context, p platform.Platform, chatID string) 
 		todoWake:        make(chan struct{}, 1),
 		done:            make(chan struct{}),
 		supportsInterim: supportsInterim,
+		backend:         backend,
 	}
 	// statusLines is only ever written when supportsInterim is true (see
 	// onEvent's gate). Skip the per-turn make on platforms (Weixin,
@@ -1153,6 +1177,26 @@ func (t *replyTracker) onEvent(ev cli.Event) {
 	}
 
 	if !t.supportsInterim {
+		return
+	}
+
+	// Kiro tool_call events arrive normalised as a tool_use ContentBlock
+	// (see protocol_acp.go parseSessionUpdate). The kiro tool surface
+	// (fs_read / execute_bash / …) doesn't map onto formatToolUse's
+	// curated icon table, so every call falls through to the bare
+	// "🔧 <tool>" fallback and floods the IM banner with rapidly-changing
+	// wrench lines that contribute no real signal — chat users only care
+	// about the eventual reply text. Skip status-banner emission for
+	// tool_use blocks when the session is on the kiro backend; Claude
+	// keeps its existing rich rendering.
+	//
+	// We drop the entire event (no fallback "💭 思考中…") rather than
+	// substituting a generic placeholder: kiro turns can be tool-heavy
+	// and a placeholder banner that never advances looks like a hung
+	// session. The initial Reply for the turn fires off the first
+	// non-tool_use event (typically the result event after sendAndReply
+	// posts the final reply) so the user still gets feedback.
+	if t.backend == "kiro" && eventHasToolUse(ev) {
 		return
 	}
 

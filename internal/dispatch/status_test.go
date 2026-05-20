@@ -196,3 +196,67 @@ func TestShortenPath(t *testing.T) {
 		}
 	}
 }
+
+
+func TestEventHasToolUse(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name string
+		ev   cli.Event
+		want bool
+	}{
+		{
+			name: "nil message",
+			ev:   cli.Event{Type: "assistant"},
+			want: false,
+		},
+		{
+			name: "empty content",
+			ev: cli.Event{
+				Type:    "assistant",
+				Message: &cli.AssistantMessage{Content: nil},
+			},
+			want: false,
+		},
+		{
+			name: "thinking only",
+			ev: cli.Event{
+				Type: "assistant",
+				Message: &cli.AssistantMessage{
+					Content: []cli.ContentBlock{{Type: "thinking", Text: "x"}},
+				},
+			},
+			want: false,
+		},
+		{
+			name: "single tool_use",
+			ev: cli.Event{
+				Type: "assistant",
+				Message: &cli.AssistantMessage{
+					Content: []cli.ContentBlock{{Type: "tool_use", Name: "fs_read"}},
+				},
+			},
+			want: true,
+		},
+		{
+			name: "thinking + tool_use mixed",
+			ev: cli.Event{
+				Type: "assistant",
+				Message: &cli.AssistantMessage{
+					Content: []cli.ContentBlock{
+						{Type: "thinking", Text: "x"},
+						{Type: "tool_use", Name: "Bash"},
+					},
+				},
+			},
+			want: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := eventHasToolUse(tc.ev); got != tc.want {
+				t.Errorf("eventHasToolUse = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}

@@ -575,7 +575,7 @@ func TestFormatChineseDuration(t *testing.T) {
 
 func TestReplyTracker_NonInterim_WaitReadyInstant(t *testing.T) {
 	fp := &fakePlatform{supportsInterim: false}
-	tracker := newIMEventTracker(context.Background(), fp, "c1")
+	tracker := newIMEventTracker(context.Background(), fp, "c1", "")
 	defer tracker.stop()
 	tracker.onEvent(cli.Event{
 		Type:    "assistant",
@@ -597,7 +597,7 @@ func TestReplyTracker_Interim_InitialReply(t *testing.T) {
 	fp := &fakePlatform{supportsInterim: true, replyMsgID: "thinking-1"}
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	tracker := newIMEventTracker(ctx, fp, "c1")
+	tracker := newIMEventTracker(ctx, fp, "c1", "")
 	defer tracker.stop()
 	tracker.onEvent(cli.Event{
 		Type:    "assistant",
@@ -614,7 +614,7 @@ func TestReplyTracker_Interim_InitialReply(t *testing.T) {
 
 func TestReplyTracker_RenderStatus(t *testing.T) {
 	fp := &fakePlatform{supportsInterim: false}
-	tracker := newIMEventTracker(context.Background(), fp, "c1")
+	tracker := newIMEventTracker(context.Background(), fp, "c1", "")
 	defer tracker.stop()
 	tracker.linesMu.Lock()
 	tracker.statusLines = appendStatusLine(tracker.statusLines, "💭 thinking")
@@ -628,7 +628,7 @@ func TestReplyTracker_RenderStatus(t *testing.T) {
 
 func TestReplyTracker_Stop_Idempotent(t *testing.T) {
 	fp := &fakePlatform{supportsInterim: false}
-	tracker := newIMEventTracker(context.Background(), fp, "c1")
+	tracker := newIMEventTracker(context.Background(), fp, "c1", "")
 	tracker.stop()
 	tracker.stop()
 }
@@ -636,7 +636,7 @@ func TestReplyTracker_Stop_Idempotent(t *testing.T) {
 func TestReplyTracker_WaitReady_CtxCancel(t *testing.T) {
 	fp := &fakePlatform{supportsInterim: true}
 	ctx, cancel := context.WithCancel(context.Background())
-	tracker := newIMEventTracker(ctx, fp, "c1")
+	tracker := newIMEventTracker(ctx, fp, "c1", "")
 	defer tracker.stop()
 	cancel()
 	done := make(chan struct{})
@@ -645,6 +645,78 @@ func TestReplyTracker_WaitReady_CtxCancel(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("waitReady should return on context cancel")
+	}
+}
+
+// TestReplyTracker_KiroSkipsToolUse pins the contract that kiro sessions
+// hide tool_use events from the IM status banner. Kiro's tool_call events
+// (fs_read, execute_bash, …) arrive normalised as tool_use ContentBlocks
+// (see protocol_acp.go parseSessionUpdate); surfacing them as banner
+// updates produces noisy "🔧 <tool>" lines that Claude users never see
+// because Claude tool names map to curated icons. Hiding them entirely
+// for kiro means the banner only fires for thinking / final-reply paths.
+func TestReplyTracker_KiroSkipsToolUse(t *testing.T) {
+	fp := &fakePlatform{supportsInterim: true, replyMsgID: "kiro-1"}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	tracker := newIMEventTracker(ctx, fp, "c1", "kiro")
+	defer tracker.stop()
+
+	// A kiro tool_use event must NOT trigger the initial Reply (banner
+	// stays silent because there's nothing else to show).
+	tracker.onEvent(cli.Event{
+		Type:      "assistant",
+		SubType:   "tool_use",
+		SessionID: "s1",
+		Message: &cli.AssistantMessage{
+			Content: []cli.ContentBlock{{Type: "tool_use", Name: "fs_read"}},
+		},
+	})
+
+	// Give the spawned Reply goroutine a beat to land if the gate failed.
+	time.Sleep(50 * time.Millisecond)
+
+	if got := fp.replyCount(); got != 0 {
+		t.Errorf("kiro tool_use must not fire initial Reply, got %d replies (last=%q)",
+			got, fp.lastReply())
+	}
+
+	// Sanity: a non-tool_use thinking event still fires the banner so
+	// the kiro skip is targeted at tool_use only, not "all events".
+	tracker.onEvent(cli.Event{
+		Type: "assistant",
+		Message: &cli.AssistantMessage{
+			Content: []cli.ContentBlock{{Type: "thinking", Text: "planning"}},
+		},
+	})
+	tracker.waitReady(ctx)
+	if got := fp.replyCount(); got != 1 {
+		t.Errorf("kiro thinking event should fire banner, got %d replies", got)
+	}
+}
+
+// TestReplyTracker_ClaudePreservesToolUse is the negative control for
+// TestReplyTracker_KiroSkipsToolUse: with backend="claude" (or any
+// non-kiro value) tool_use events MUST still surface as banner updates,
+// matching the pre-existing behaviour. This pins the "kiro-only skip"
+// contract so a refactor that broadens the gate is caught immediately.
+func TestReplyTracker_ClaudePreservesToolUse(t *testing.T) {
+	fp := &fakePlatform{supportsInterim: true, replyMsgID: "cc-1"}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	tracker := newIMEventTracker(ctx, fp, "c1", "claude")
+	defer tracker.stop()
+
+	tracker.onEvent(cli.Event{
+		Type:    "assistant",
+		SubType: "tool_use",
+		Message: &cli.AssistantMessage{
+			Content: []cli.ContentBlock{{Type: "tool_use", Name: "Read"}},
+		},
+	})
+	tracker.waitReady(ctx)
+	if got := fp.replyCount(); got != 1 {
+		t.Errorf("claude tool_use must fire initial Reply, got %d", got)
 	}
 }
 

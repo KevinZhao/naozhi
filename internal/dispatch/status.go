@@ -131,6 +131,22 @@ func shortenPath(p string) string {
 	return dir + "/" + base
 }
 
+// eventHasToolUse reports whether the event carries at least one
+// tool_use ContentBlock. Used by the IM dispatch path to skip status
+// banner updates for backends (currently kiro) whose tool_use surface
+// adds noise rather than signal.
+func eventHasToolUse(ev cli.Event) bool {
+	if ev.Message == nil {
+		return false
+	}
+	for _, block := range ev.Message.Content {
+		if block.Type == "tool_use" {
+			return true
+		}
+	}
+	return false
+}
+
 // statusAccumulator tracks accumulated status lines for IM display.
 const maxStatusLines = 8
 
