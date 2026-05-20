@@ -17,26 +17,71 @@ type todoWriteInput struct {
 	Todos []TodoItem `json:"todos"`
 }
 
+// todoWriteInputRaw mirrors todoWriteInput but keeps the inner todos array
+// as its original JSON bytes so callers that need both the parsed slice
+// (for summary counts) and the on-wire array string (for dashboard
+// rendering) can avoid the extra Marshal+copy that the old TodosDetailJSON
+// helper paid on every TodoWrite event. R226-PERF-8.
+type todoWriteInputRaw struct {
+	Todos json.RawMessage `json:"todos"`
+}
+
 // ParseTodos extracts the todos array from a TodoWrite tool_use input.
 // Returns (todos, true) on success, (nil, false) when input is malformed
 // or the todos field is missing/empty.
+//
+// Equivalent to discarding the rawTodos return of ParseTodosWithRaw;
+// kept for callers that only need the typed slice.
 func ParseTodos(input json.RawMessage) ([]TodoItem, bool) {
+	todos, _, ok := ParseTodosWithRaw(input)
+	return todos, ok
+}
+
+// ParseTodosWithRaw extracts the todos array from a TodoWrite tool_use
+// input and additionally returns the original JSON bytes of the todos
+// field (a JSON array literal). Callers that need a "stable JSON
+// representation" for the dashboard (the historical TodosDetailJSON
+// payload) can use rawTodos directly instead of re-marshalling the
+// parsed slice.
+//
+// Returns (nil, nil, false) when input is malformed or the todos field
+// is missing/empty.
+//
+// rawTodos is borrowed from input — callers that retain it past the
+// lifetime of input must copy it.
+func ParseTodosWithRaw(input json.RawMessage) (todos []TodoItem, rawTodos json.RawMessage, ok bool) {
 	if len(input) == 0 {
-		return nil, false
+		return nil, nil, false
 	}
-	var w todoWriteInput
-	if err := json.Unmarshal(input, &w); err != nil {
-		return nil, false
+	// Single Unmarshal pass into a parallel struct that keeps the todos
+	// array as RawMessage. Then a second Unmarshal of just that
+	// RawMessage into the typed slice — still cheaper than the prior
+	// "full Unmarshal then Marshal of the resulting slice" pattern,
+	// because only the leaves are decoded once and the outer JSON envelope
+	// (the `{"todos":...}` wrapper) is never re-encoded.
+	var rawW todoWriteInputRaw
+	if err := json.Unmarshal(input, &rawW); err != nil {
+		return nil, nil, false
 	}
-	if len(w.Todos) == 0 {
-		return nil, false
+	if len(rawW.Todos) == 0 || string(rawW.Todos) == "null" {
+		return nil, nil, false
 	}
-	return w.Todos, true
+	if err := json.Unmarshal(rawW.Todos, &todos); err != nil {
+		return nil, nil, false
+	}
+	if len(todos) == 0 {
+		return nil, nil, false
+	}
+	return todos, rawW.Todos, true
 }
 
 // TodosDetailJSON returns a stable JSON representation of the todos list so
 // downstream consumers (dashboard UI) can parse without needing access to the
 // original tool input. Returns "" on marshal error.
+//
+// Prefer ParseTodosWithRaw + string(rawTodos) when the original tool_use
+// input is still in scope: it skips the redundant Marshal that this
+// helper performs.
 func TodosDetailJSON(todos []TodoItem) string {
 	b, err := json.Marshal(todos)
 	if err != nil {
