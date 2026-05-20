@@ -65,6 +65,26 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .sidebar{width:360px;min-width:200px;max-width:60vw;border-right:none;display:flex;flex-direction:column}
 .resizer{width:4px;cursor:col-resize;background:var(--nz-border);flex-shrink:0;transition:background .15s}
 .resizer:hover,.resizer.dragging{background:var(--nz-accent)}
+/* Sidebar fully-collapsed state (PC ≥769px). body.sidebar-collapsed hides
+   the sidebar + resizer entirely so .main occupies the full viewport. The
+   floating .sidebar-show-handle is the only visible affordance for re-
+   opening; it sits flush against the left edge. Restore is one click (or
+   `[` shortcut). On mobile (≤768px) the sidebar is already a fixed drawer
+   overlay, so this state is a no-op there and the existing
+   mobile-list-view / mobile-chat-view rules keep winning. */
+.sidebar-show-handle{display:none;position:fixed;top:10px;left:10px;z-index:30;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text-mute);cursor:pointer;width:32px;height:32px;align-items:center;justify-content:center;padding:0;line-height:1;transition:all .15s;-webkit-tap-highlight-color:transparent}
+.sidebar-show-handle:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-accent)}
+.sidebar-show-handle:focus-visible{outline:2px solid var(--nz-accent);outline-offset:2px}
+.sidebar-show-handle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+@media(min-width:769px){
+  body.sidebar-collapsed .sidebar,
+  body.sidebar-collapsed .resizer{display:none}
+  body.sidebar-collapsed .sidebar-show-handle{display:inline-flex}
+  /* Make room for the floating handle so the chat title doesn't slide
+     under it. handle = 32px @ left:10px, so 10+32+12 padding = 54px keeps
+     the title clear and leaves a 12px breathing gap. */
+  body.sidebar-collapsed .main-header{padding-left:54px}
+}
 .sidebar-header{padding:16px;border-bottom:1px solid var(--nz-border)}
 .sidebar-header .header-row{display:flex;align-items:center;justify-content:space-between}
 .sidebar-header h1{font-size:19px;color:var(--nz-text-strong);font-weight:600}
@@ -531,7 +551,22 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .modal .modal-btns button.danger{background:var(--nz-red);border-color:var(--nz-red);color:#fff}
 .modal .modal-btns button.danger:hover{filter:brightness(1.1)}
 .modal.confirm-dialog p{margin:8px 0 4px;color:var(--nz-text);line-height:1.5}
+/* Round 2 R-12: .confirm-msg honours newlines for multi-paragraph
+ * destructive copy (RFC §7.5). Default <p> styling collapses them, so
+ * white-space:pre-wrap is required. Other dialogs that pass single-line
+ * `message` strings render identically because pre-wrap is a superset
+ * of normal whitespace handling. */
+.modal.confirm-dialog .confirm-msg{white-space:pre-wrap;word-break:break-word}
 .modal.confirm-dialog .confirm-detail{color:var(--nz-text-mute);font-size:13px;margin-top:8px;word-break:break-all}
+/* Round 2 R-12: countdown disables the destructive primary for N s; the
+ * built-in [disabled] dimming reads as "waiting" but isn't directional.
+ * A subtle pulse on the disabled state communicates "tick…tick…tick" so
+ * fat-finger Enter doesn't feel like a broken button. */
+.modal.confirm-dialog .modal-btns button.danger[disabled]{opacity:.55;cursor:not-allowed;animation:confirmCountdown 1s ease-in-out infinite;background:var(--nz-red);border-color:var(--nz-red);color:#fff}
+@keyframes confirmCountdown{0%,100%{opacity:.55}50%{opacity:.75}}
+@media (prefers-reduced-motion:reduce){
+  .modal.confirm-dialog .modal-btns button.danger[disabled]{animation:none}
+}
 /* RNEW-UX-013 prompt-dialog shares modal shell with confirm-dialog but has an
    input. Message above the input uses the mute colour so the input itself
    stays the primary focal point. */
@@ -1257,6 +1292,25 @@ body.kbd-open .input-hints{display:none}
 .cron-drawer-actions .cda-btn.primary:hover:not([disabled]){background:rgba(31,111,235,.12)}
 .cron-drawer-actions .cda-btn.danger{margin-left:auto;color:var(--nz-red);border-color:rgba(218,54,51,.45);background:transparent}
 .cron-drawer-actions .cda-btn.danger:hover{background:rgba(218,54,51,.12)}
+/* Round 2 R-4 — trigger button visual feedback states (RFC §4.3.1).
+ * is-running: pulse the same accent ring as cdc-card so the disabled
+ *             button reads as "actively waiting", not just "greyed".
+ * is-sending: 1 s spinner orbiting the ▷ glyph; opacity stays full so
+ *             "I clicked, something happened" feels confirmed even
+ *             during the API round-trip.
+ * is-sent:    2 s solid green-ish accent + ✓ baked into the label;
+ *             after that the cooldown timer keeps the button quiet
+ *             until 10 s elapses or WS cron_run_started lands. */
+.cron-drawer-actions .cda-btn.primary.is-running{animation:cdaTriggerPulse 1.4s ease-in-out infinite;opacity:.85}
+.cron-drawer-actions .cda-btn.primary.is-sending{opacity:.85;background:rgba(31,111,235,.06);border-color:var(--nz-accent);color:var(--nz-accent)}
+.cron-drawer-actions .cda-btn.primary.is-sending::before{content:"";display:inline-block;width:10px;height:10px;border-radius:50%;border:2px solid currentColor;border-top-color:transparent;margin-right:6px;animation:cdaSpinner .8s linear infinite}
+.cron-drawer-actions .cda-btn.primary.is-sent{opacity:1;background:rgba(63,185,80,.12);border-color:var(--nz-green);color:var(--nz-green)}
+@keyframes cdaTriggerPulse{0%,100%{box-shadow:0 0 0 0 rgba(88,166,255,.35)}50%{box-shadow:0 0 0 6px rgba(88,166,255,0)}}
+@keyframes cdaSpinner{from{transform:rotate(0)}to{transform:rotate(360deg)}}
+@media (prefers-reduced-motion:reduce){
+  .cron-drawer-actions .cda-btn.primary.is-running,
+  .cron-drawer-actions .cda-btn.primary.is-sending::before{animation:none}
+}
 /* Drawer current execution */
 .cron-drawer-current{padding:14px 20px;border-bottom:1px solid var(--nz-border)}
 .cron-drawer-current h3{margin:0 0 10px;font-size:13px;color:var(--nz-text-strong);font-weight:600;letter-spacing:.2px}
@@ -1279,13 +1333,34 @@ body.kbd-open .input-hints{display:none}
 .cj-row.is-active.is-error{box-shadow:inset 4px 0 0 var(--nz-accent),inset 0 0 0 1px rgba(218,54,51,.45)}
 .cj-row.is-active.is-missed{box-shadow:inset 4px 0 0 var(--nz-accent),inset 0 0 0 1px rgba(210,153,34,.45)}
 .cj-row.is-active.is-running{background:#1c2939;box-shadow:inset 4px 0 0 var(--nz-accent)}
-/* Single-column responsive: drawer pushes over the list under main width.
- * Threshold is generous (~720) since the list pane is fixed at 380 + 16
- * padding when drawer opens — under 720 the drawer would render at <300px
- * which can't fit both prompt and timeline. */
+/* cron-panel-consolidation-ui RFC §2 (Round 2 R-1) — responsive collapse
+ * gated on the *main column width* rather than the viewport width. The
+ * sidebar can occupy 200–60vw, so 1280px viewport with a 720px sidebar
+ * leaves only ~560px for main; a viewport @media query miscategorises
+ * those operators as "wide enough for two columns" and the drawer ends
+ * up at < 240px wide where prompt + timeline can't coexist.
+ *
+ * The data-cron-layout attribute is written by a ResizeObserver on the
+ * .main element (see dashboard.js setupCronLayoutObserver). Three modes:
+ *   wide     — main ≥ 1100   list 380, drawer ≥ 720
+ *   medium   — main ≥ 820    list 360, drawer ≥ 460
+ *   narrow   — main ≥ 560    list 320, drawer barely fits
+ *   single   — main <  560   drawer pushes over the list
+ *
+ * The legacy @media fallback below stays as a safety net for the
+ * pre-JS-init paint window so users never see a 250px-wide drawer flash.
+ */
+.cron-detail-body[data-cron-layout="wide"].has-drawer > .cron-list-pane{flex:0 0 380px}
+.cron-detail-body[data-cron-layout="medium"].has-drawer > .cron-list-pane{flex:0 0 360px}
+.cron-detail-body[data-cron-layout="narrow"].has-drawer > .cron-list-pane{flex:0 0 320px}
+.cron-detail-body[data-cron-layout="single"].has-drawer > .cron-list-pane{display:none}
+.cron-detail-body[data-cron-layout="single"] .cron-detail-pane.is-open{flex:1 1 auto;border-left:none}
+/* Pre-JS / no-ResizeObserver fallback. Kept conservative (720) so an
+ * older browser without ResizeObserver still gets a single-column safe
+ * layout under the threshold rather than a cramped two-column. */
 @media(max-width:720px){
-  .cron-detail-body.has-drawer > .cron-list-pane{display:none}
-  .cron-detail-pane.is-open{flex:1 1 auto;border-left:none}
+  .cron-detail-body:not([data-cron-layout]).has-drawer > .cron-list-pane{display:none}
+  .cron-detail-body:not([data-cron-layout]) .cron-detail-pane.is-open{flex:1 1 auto;border-left:none}
 }
 @media(max-width:540px){
   .cron-drawer-header,.cron-drawer-summary,.cron-drawer-actions,.cron-drawer-current,.cron-drawer-history{padding-left:14px;padding-right:14px}
@@ -1651,11 +1726,12 @@ body.kbd-open .sidebar-footer{display:none}
 </head>
 <body>
 <div class="container">
-  <nav class="sidebar" aria-label="会话列表">
+  <nav class="sidebar" id="sidebar" aria-label="会话列表">
     <div class="sidebar-header">
       <div class="header-row">
         <h1>naozhi</h1>
         <div class="hdr-btns">
+          <button class="hdr-btn" id="btn-sidebar-collapse" onclick="toggleSidebarCollapsed()" title="收起侧边栏 (按 [)" aria-label="收起侧边栏" aria-controls="sidebar" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><polyline points="15 18 9 12 15 6"/><line x1="3" y1="6" x2="3" y2="18"/></svg></button>
           <button class="hdr-btn" id="btn-sidebar-search" onclick="toggleSidebarSearch()" title="搜索会话 (按 /)" aria-label="搜索会话" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
           <button class="hdr-btn" id="btn-history" onclick="toggleHistory()" title="历史会话" aria-label="查看会话历史" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="hdr-badge" id="history-badge" style="display:none" aria-label="历史记录数"></span></button>
           <button class="hdr-btn" onclick="createNewSession()" title="New Session" aria-label="Create new session"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
@@ -1721,6 +1797,14 @@ body.kbd-open .sidebar-footer{display:none}
     </div>
   </main>
 </div>
+<!-- Sidebar restore handle (PC). Default-hidden; CSS reveals it only when
+     body.sidebar-collapsed is set on viewports >=769px. Mobile keeps the
+     existing drawer behavior, so this affordance never appears there.
+     Kept outside .container so its position:fixed isn't affected by sidebar
+     transforms used on mobile. -->
+<button type="button" class="sidebar-show-handle" id="btn-sidebar-show" onclick="toggleSidebarCollapsed()" title="展开侧边栏 (按 [)" aria-label="展开侧边栏" aria-controls="sidebar" aria-expanded="false">
+  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><polyline points="9 18 15 12 9 6"/><line x1="3" y1="6" x2="3" y2="18"/></svg>
+</button>
 <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 <!-- RNEW-UX-010 — dedicated polite live region for non-toast announcements
      (WS state transitions, new sessions, cron completions). Kept separate

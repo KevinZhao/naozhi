@@ -6632,30 +6632,49 @@ function confirmDialog(opts) {
     const cancelText = (opts && opts.cancelText) || '取消';
     const variant = (opts && opts.variant) || 'danger';
     const confirmClass = variant === 'danger' ? 'danger' : 'primary';
+    // Round 2 R-12: optional countdown (seconds) before the confirm
+    // button activates. Used by destructive flows to insert a "速度带"
+    // — short enough to not annoy, long enough to catch fat-fingered
+    // double-Enter. Default 0 = no countdown (legacy behaviour).
+    const countdownSecs = (opts && typeof opts.countdownSecs === 'number') ? Math.max(0, Math.floor(opts.countdownSecs)) : 0;
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay confirm-overlay';
+    // message may include line breaks now (RFC §7.5 multi-paragraph
+    // copy). Render via <pre>-style white-space:pre-wrap on .confirm-msg
+    // so existing toast-style single-line callers still look right.
     overlay.innerHTML =
       '<div class="modal confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">' +
         '<h3 id="confirm-title">' + esc(title) + '</h3>' +
-        (message ? '<p>' + esc(message) + '</p>' : '') +
+        (message ? '<p class="confirm-msg">' + esc(message) + '</p>' : '') +
         (detail ? '<p class="confirm-detail"><code>' + esc(detail) + '</code></p>' : '') +
         '<div class="modal-btns">' +
           '<button type="button" class="confirm-cancel">' + esc(cancelText) + '</button>' +
-          '<button type="button" class="' + confirmClass + ' confirm-ok">' + esc(confirmText) + '</button>' +
+          '<button type="button" class="' + confirmClass + ' confirm-ok"' + (countdownSecs > 0 ? ' disabled' : '') + '>' +
+            esc(confirmText) + (countdownSecs > 0 ? ' (' + countdownSecs + ')' : '') +
+          '</button>' +
         '</div>' +
       '</div>';
 
     let settled = false;
+    let tickTimer = null;
     const finish = (ok) => {
       if (settled) return;
       settled = true;
+      if (tickTimer) { clearInterval(tickTimer); tickTimer = null; }
       overlay.remove();
       resolve(!!ok);
     };
 
+    const okBtn = overlay.querySelector('.confirm-ok');
     overlay.querySelector('.confirm-cancel').addEventListener('click', () => finish(false));
-    overlay.querySelector('.confirm-ok').addEventListener('click', () => finish(true));
+    okBtn.addEventListener('click', () => {
+      // Defensive: while disabled the click won't fire on a real button,
+      // but if a custom CSS rule ever overrides pointer-events we still
+      // refuse early activation by checking the disabled attribute.
+      if (okBtn.hasAttribute('disabled')) return;
+      finish(true);
+    });
     // Backdrop click cancels. Guard against inner clicks bubbling through
     // by checking that the click's target is the overlay itself.
     overlay.addEventListener('click', (e) => { if (e.target === overlay) finish(false); });
@@ -6671,6 +6690,24 @@ function confirmDialog(opts) {
     // Focus cancel first — protects against a stray Enter auto-firing the
     // destructive primary. User must explicitly Tab or click to confirm.
     setTimeout(() => overlay.querySelector('.confirm-cancel').focus(), 50);
+
+    if (countdownSecs > 0) {
+      let remaining = countdownSecs;
+      tickTimer = setInterval(() => {
+        remaining -= 1;
+        if (remaining <= 0) {
+          clearInterval(tickTimer);
+          tickTimer = null;
+          okBtn.removeAttribute('disabled');
+          okBtn.textContent = confirmText;
+          // Live region for SR — announce activation politely so a
+          // keyboard user knows they can now Tab + Enter.
+          okBtn.setAttribute('aria-live', 'polite');
+        } else {
+          okBtn.textContent = confirmText + ' (' + remaining + ')';
+        }
+      }, 1000);
+    }
   });
 }
 
@@ -11031,6 +11068,11 @@ function cronApplyRunStarted(msg) {
   // 清掉 frozen 标记让用户能再次看到实时事件。否则 hourly 任务下一次
   // 跑时前端仍然会丢事件，看起来像 bug。
   cronFrozenRuns.delete(msg.job_id);
+  // Round 2 R-4: WS-confirmed run start clears the optimistic cooldown
+  // lock — the disabled-running label takes over from this point. If the
+  // started event came from a non-manual trigger (scheduled/catchup), the
+  // cooldown lock was never set so this is a no-op.
+  cronTriggerCooldownClear(msg.job_id);
   renderCronPanel();
 }
 
@@ -11924,16 +11966,39 @@ function cronDrawerHtml(j) {
   '</section>';
 
   // Action row.
-  const triggerDisabled = isPaused || isRunning;
-  const triggerLabel = isRunning ? '\u25B7 运行中…' : '\u25B7 立即执行';
-  const triggerTooltip = isPaused
-    ? '已暂停。请先恢复任务。'
-    : (isRunning ? '上一次执行尚未完成，请等待结束。' : '立即执行一次');
+  // Round 2 R-4 disable matrix (RFC §4.3.1):
+  //   normal      → "立即执行" (enabled, primary)
+  //   paused      → "立即执行" (disabled, "请先恢复")
+  //   running     → "运行中…"  (disabled + pulse, "请等待结束")
+  //   just-triggered (≤ 1s)   → "触发中…"  (disabled + spinner)
+  //   just-triggered (1-3 s)  → "已派发 ✓" (disabled, success)
+  //   just-triggered (3-10 s) → "已派发 ✓" (disabled, quiet hold)
+  // running takes precedence over just-triggered so a real WS-confirmed
+  // run-state always wins over the optimistic local lock.
+  const cooldown = cronTriggerCooldownState(id);
+  let triggerDisabled = false;
+  let triggerLabel = '\u25B7 立即执行';
+  let triggerTooltip = '立即执行一次';
+  let triggerCls = 'cda-btn primary';
+  if (isPaused) {
+    triggerDisabled = true;
+    triggerTooltip = '已暂停。请先恢复任务。';
+  } else if (isRunning) {
+    triggerDisabled = true;
+    triggerLabel = '\u25B7 运行中…';
+    triggerTooltip = '上一次执行尚未完成，请等待结束。';
+    triggerCls += ' is-running';
+  } else if (cooldown) {
+    triggerDisabled = true;
+    triggerLabel = '\u25B7 ' + cooldown.label;
+    triggerCls += cooldown.phase === 'sending' ? ' is-sending' : ' is-sent';
+    triggerTooltip = '刚已触发一次，请稍候。';
+  }
   const pauseBtn = isPaused
     ? '<button type="button" class="cda-btn" onclick="cronResume(\'' + escJs(id) + '\')" title="恢复任务调度">\u25B6 恢复</button>'
     : '<button type="button" class="cda-btn" onclick="cronPause(\'' + escJs(id) + '\')" title="暂停后调度跳过">\u23F8 暂停</button>';
   const actionsHtml = '<nav class="cron-drawer-actions" aria-label="任务操作">' +
-    '<button type="button" class="cda-btn primary"' +
+    '<button type="button" class="' + triggerCls + '"' +
       (triggerDisabled ? ' disabled aria-disabled="true"' : '') +
       ' onclick="cronTriggerNow(\'' + escJs(id) + '\')"' +
       ' title="' + escAttr(triggerTooltip) + '">' + esc(triggerLabel) + '</button>' +
@@ -12139,6 +12204,76 @@ function renderCronPanel() {
   // flips route through renderCronList directly without touching the shell.
   renderCronList();
   renderCronDrawer();
+  // cron-panel-consolidation-ui RFC §2 (Round 2 R-1) — wire the layout
+  // observer once the shell is in the DOM. The CSS rules key off
+  // `[data-cron-layout]` on `.cron-detail-body`; this writes that
+  // attribute based on the *element's actual width*, not the viewport.
+  setupCronLayoutObserver();
+}
+
+// setupCronLayoutObserver picks the right two-column / single-column
+// layout for the cron panel based on the available main-column width
+// rather than the viewport width. The previous implementation used a
+// single `@media(max-width:720)` rule, which silently broke when a
+// 1080p user widened their sidebar past ~360px: the viewport stays at
+// 1920 ("wide"), but the main column drops below the 720 cutoff and
+// the drawer ends up at <300px wide where the prompt + timeline can't
+// share the row.
+//
+// We tier into 4 modes — wide/medium/narrow/single — keyed off the
+// `.cron-detail-body` element width since that's the parent of both
+// list-pane and drawer-pane. ResizeObserver fires whenever the user
+// drags the sidebar resizer, opens devtools, rotates the device, or
+// resizes the window, so the layout always reflects reality.
+//
+// Idempotent: stores the observer on the body element via a Symbol-
+// keyed property so re-mounts (renderCronPanel after fetchCronJobs)
+// don't pile up observers. Falls back to a one-shot resize listener
+// in browsers without ResizeObserver (none we ship today, but cheap
+// insurance).
+function setupCronLayoutObserver() {
+  const body = document.querySelector('.cron-detail-body');
+  if (!body) return;
+  const apply = (w) => {
+    let mode;
+    if (w >= 1100) mode = 'wide';
+    else if (w >= 820) mode = 'medium';
+    else if (w >= 560) mode = 'narrow';
+    else mode = 'single';
+    if (body.dataset.cronLayout !== mode) body.dataset.cronLayout = mode;
+  };
+  // Initial paint can run before layout settles (especially when the
+  // panel is opened from a header click while the user just
+  // resized the sidebar). Use offsetWidth which forces a synchronous
+  // layout — fine here because we only run on shell mount.
+  apply(body.offsetWidth);
+  if (typeof ResizeObserver !== 'function') {
+    // Fallback — listen on window resize. Less precise (won't catch
+    // sidebar drags) but better than a static breakpoint.
+    if (!window._cronLayoutWindowListener) {
+      window._cronLayoutWindowListener = () => {
+        const el = document.querySelector('.cron-detail-body');
+        if (el) apply(el.offsetWidth);
+      };
+      window.addEventListener('resize', window._cronLayoutWindowListener);
+    }
+    return;
+  }
+  // Re-binding the observer to a freshly-mounted DOM node is fine —
+  // the previous observer's handle goes away when the old DOM does.
+  // We still guard via _cronLayoutObs so the observer is idempotent
+  // across same-shell repaints.
+  if (body._cronLayoutObs) body._cronLayoutObs.disconnect();
+  const obs = new ResizeObserver(entries => {
+    for (const e of entries) {
+      const w = (e.contentBoxSize && e.contentBoxSize[0])
+        ? e.contentBoxSize[0].inlineSize
+        : e.contentRect.width;
+      apply(w);
+    }
+  });
+  obs.observe(body);
+  body._cronLayoutObs = obs;
 }
 
 // openCronDetail opens the per-job drawer in the 定时任务 panel.
@@ -12269,31 +12404,130 @@ async function fetchCronJobs() {
 // without waiting for the next scheduled tick. Useful when the operator
 // wants to verify a prompt edit or rerun after a transient failure.
 //
+// Round 2 review R-4: visual-feedback contract (cron-panel-consolidation-ui
+// RFC §4.3.1). The backend's jobRunningGuard already serializes against
+// double-click — the issue is *user perception*. WS cron_run_started lands
+// 200-500 ms after the API ACK, so a naive "fire-and-forget + toast" leaves
+// the button looking pristine for that whole window and operators reflexively
+// click again. The flow we want is:
+//
+//   click → button locks (spinner) → API returns OK → "已派发 ✓" 2 s
+//        → debounce floor stays in effect another N s → unlock when WS
+//          cron_run_started lands OR debounce floor elapses, whichever
+//          is later.
+//
+// 10 s is the debounce floor: longer than the worst-case API + WS round
+// trip we've measured (~3 s under load) but short enough that a real
+// scheduled tick during the window won't get visually swallowed.
+//
 // Contract notes:
 //   - Backend rejects paused jobs with 409 ErrJobPaused; the button is
 //     hidden for paused jobs (cronJobCardHtml), so 409 here usually means a
 //     pause landed between render and click — surface it via showAPIError
-//     rather than a custom message.
-//   - Backend's jobRunningGuard + SkipIfStillRunning chain serializes
-//     against the scheduled-tick path, so a double-click at worst sees one
-//     execution plus an "already running, skipping overlap" Info log. No
-//     frontend debounce is needed.
-//   - Success response is {status:"triggered"}; the eventual run completion
-//     arrives via the existing cron_update WS event (last_run_at / last_result)
-//     which already repaints the card.
+//     and immediately clear cronJustTriggered so the user can retry.
+//   - 409 "already running" maps to the same "请等待结束" path the
+//     disabled-running-state already shows; we reuse showAPIError so the
+//     status code remains visible for L2 support.
+//   - We do NOT wait for cron_run_started before unlocking — under WS
+//     disconnection the event might never arrive. The 10 s floor + the
+//     subsequent fetchCronJobs poll will reconcile.
+
+// cronJustTriggered tracks the per-jobId trigger timestamp (ms).
+// Used by cronTriggerCooldownState() to compute disable + label state for
+// both the drawer's primary action and the list row's ghost Run button so
+// they stay in sync. Cleared by cronTriggerCooldownClear() on WS
+// cron_run_started (preferred) or after the 10 s floor elapses.
+const cronJustTriggered = Object.create(null);
+const CRON_TRIGGER_COOLDOWN_MS = 10 * 1000;
+
+function cronTriggerCooldownState(id) {
+  const t = cronJustTriggered[id];
+  if (!t) return null;
+  const dt = Date.now() - t;
+  if (dt < 0 || dt >= CRON_TRIGGER_COOLDOWN_MS) {
+    delete cronJustTriggered[id];
+    return null;
+  }
+  // 0..1000 ms → spinner; 1000..3000 ms → ✓; 3000..10000 ms → quiet hold.
+  if (dt < 1000) return { phase: 'sending', label: '触发中…' };
+  if (dt < 3000) return { phase: 'sent',    label: '已派发 ✓' };
+  return { phase: 'cooldown', label: '已派发 ✓' };
+}
+
+function cronTriggerCooldownClear(id) {
+  if (cronJustTriggered[id]) delete cronJustTriggered[id];
+}
+
+// cronTriggerCooldownTickTimer drives label transitions (sending → sent →
+// cooldown) and final unlock. Runs at 200 ms while any job is in cooldown
+// to make the spinner→✓ transition feel snappy without burning CPU when
+// the button is idle.
+let cronTriggerCooldownTickTimer = null;
+function ensureCronTriggerCooldownTick() {
+  const anyHot = Object.keys(cronJustTriggered).length > 0;
+  if (anyHot && !cronTriggerCooldownTickTimer) {
+    cronTriggerCooldownTickTimer = setInterval(() => {
+      // Sweep stale entries; if any expired, repaint the affected rows /
+      // drawer so the button leaves cooldown.
+      let anyExpired = false;
+      const now = Date.now();
+      for (const k of Object.keys(cronJustTriggered)) {
+        if (now - cronJustTriggered[k] >= CRON_TRIGGER_COOLDOWN_MS) {
+          delete cronJustTriggered[k];
+          anyExpired = true;
+        }
+      }
+      if (anyExpired || true) {
+        // Repaint drawer cooldown labels so the spinner→✓→idle transitions
+        // happen even if no other event fires. The repaint is targeted to
+        // the actions row so it doesn't wipe focus / scroll position.
+        if (cronDetailJobId !== null) renderCronDrawer();
+      }
+      if (Object.keys(cronJustTriggered).length === 0) {
+        clearInterval(cronTriggerCooldownTickTimer);
+        cronTriggerCooldownTickTimer = null;
+      }
+    }, 200);
+  }
+}
+
 async function cronTriggerNow(id) {
+  // Reentrancy guard: if a cooldown is already in flight for this id, drop
+  // the click silently — the disabled button state should have prevented it
+  // already, but keyboard activation paths (Enter on a non-disabled button
+  // in the same paint window) can still slip through.
+  if (cronJustTriggered[id]) return;
+  cronJustTriggered[id] = Date.now();
+  ensureCronTriggerCooldownTick();
+  // Repaint drawer immediately so the button flips to the spinner without
+  // waiting for the 200 ms tick. List ghost Run isn't repainted per row
+  // (would be expensive on 500-job dashboards) — its disabled-after-trigger
+  // state is read at render time.
+  if (cronDetailJobId === id) renderCronDrawer();
   try {
     const headers = { 'Content-Type': 'application/json' };
     const t = getToken();
     if (t) headers['Authorization'] = 'Bearer ' + t;
     const r = await fetch('/api/cron/trigger', { method: 'POST', headers, body: JSON.stringify({ id }) });
     if (!r.ok) {
+      // Failure — clear the cooldown immediately so the user can retry.
+      // The 10 s floor would be punishing on a transient 502.
+      cronTriggerCooldownClear(id);
+      if (cronDetailJobId === id) renderCronDrawer();
       const raw = await r.text().catch(() => '');
       showAPIError('立即执行定时任务', r.status, raw);
       return;
     }
-    showToast('已触发执行', 'success', 2000);
-  } catch (e) { showNetworkError('立即执行定时任务', e); }
+    // Success — leave cooldown in place; the tick timer will transition
+    // the label and finally clear it. cronJobs row state will be updated
+    // by the WS cron_run_started event (which also clears the cooldown
+    // via the dispatch handler — see ws msg case below).
+    showToast('已派发执行', 'success', 1500);
+  } catch (e) {
+    cronTriggerCooldownClear(id);
+    if (cronDetailJobId === id) renderCronDrawer();
+    showNetworkError('立即执行定时任务', e);
+  }
 }
 
 async function cronPause(id) {
@@ -12327,14 +12561,46 @@ async function cronResume(id) {
 }
 
 async function cronDelete(id) {
+  // Round 2 R-12 (RFC §7.5): destructive flow rewrite.
+  // - Statistic in title ("32 次执行记录") so user weighs the loss
+  // - Mention JSONL preservation + how to find session_id without
+  //   leaking the raw `claude --resume` command at the L1/L2 user
+  // - Different copy when the job is currently running (CLI sub-
+  //   process won't be killed; that's a surprising behaviour
+  //   operators MUST know before confirming)
+  // - 3 s countdown via confirmDialog's new countdownSecs option —
+  //   long enough to catch fat-finger Enter, short enough not to
+  //   annoy
   const job = (Array.isArray(cronJobs) ? cronJobs.find(j => j.id === id) : null) || {};
+  const title = job.title || job.user_label || '';
+  const runCount = (job.stats && (job.stats.total | 0)) || 0;
+  const isRunning = !!(job.current_run);
   const promptPreview = (job.prompt || '').slice(0, 200);
+
+  const headline = title ? '删除「' + title + '」？' : '删除定时任务？';
+  let body;
+  if (isRunning) {
+    const elapsed = job.current_run.started_at
+      ? formatRunningElapsed(job.current_run.started_at)
+      : '';
+    const elapsedHint = elapsed ? '（已运行 ' + elapsed + '）' : '';
+    body = '⚠ 该任务正在执行' + elapsedHint + '。\n\n' +
+      '删除后任务定义和' + (runCount > 0 ? ' ' + runCount + ' 条 ' : '')
+      + '历史记录立即清除，但当前正在跑的这次执行将继续运行直到完成（CLI 子进程不会被强行 kill）。完成结果不会被记录到任何地方。';
+  } else if (runCount > 0) {
+    body = '此操作将永久删除该任务及其全部 ' + runCount + ' 次执行记录，不可撤销。\n\n' +
+      'CLI 的对话历史 JSONL 文件保留在磁盘，需要时可在终端用 claude --resume 复活；session_id 在执行历史的「详情」里能找到。';
+  } else {
+    body = '此操作将永久删除该任务，不可撤销。该任务尚未执行过，不会有历史会话残留。';
+  }
+
   const ok = await confirmDialog({
-    title: '删除定时任务？',
-    message: '任务将被永久删除，下次不再触发。',
+    title: headline,
+    message: body,
     detail: promptPreview ? promptPreview : ('id: ' + id),
     confirmText: '删除',
     variant: 'danger',
+    countdownSecs: 3,
   });
   if (!ok) return;
   try {
@@ -12618,6 +12884,93 @@ async function doEditCronJob(id) {
     lsRemove(LS_SIDEBAR_W);
   });
 })();
+
+/* ===== Sidebar fully-collapse (PC only) =====
+   Toggle body.sidebar-collapsed so .main occupies the full viewport. State is
+   persisted via lsSet so a refresh keeps the user's preference. The mobile
+   layout (≤768px) already treats the sidebar as a fixed drawer overlay, so
+   the toggle is a no-op there: we suppress the click and let mobile's own
+   list/chat-view classes drive visibility. Keyboard shortcut: `[` (mirroring
+   editor conventions like VS Code's Ctrl+B / Cursor's `[`). */
+const LS_SIDEBAR_COLLAPSED = 'sidebar_collapsed';
+
+function isMobileViewport() {
+  return window.matchMedia && window.matchMedia('(max-width: 768px)').matches;
+}
+
+// applySidebarCollapsed is the single state-mutator. moveFocus drives whether
+// to relocate keyboard focus to the now-visible button — true on user-driven
+// toggle (the previously-focused button is about to be display:none'd, which
+// would punt focus back to <body>); false on cold-start / viewport-boundary
+// re-apply (don't steal focus from the user's first interaction).
+function applySidebarCollapsed(collapsed, moveFocus) {
+  document.body.classList.toggle('sidebar-collapsed', !!collapsed);
+  const btnHide = document.getElementById('btn-sidebar-collapse');
+  const btnShow = document.getElementById('btn-sidebar-show');
+  if (btnHide) btnHide.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  if (btnShow) btnShow.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+  if (moveFocus) {
+    const next = collapsed ? btnShow : btnHide;
+    if (next && typeof next.focus === 'function') {
+      try { next.focus({preventScroll: true}); } catch (_) { next.focus(); }
+    }
+  }
+}
+
+function toggleSidebarCollapsed() {
+  // Mobile drawer has its own list/chat-view contract — do not piggyback on
+  // it; just bail so the existing back-button + drawer flow stays canonical.
+  if (isMobileViewport()) return;
+  const next = !document.body.classList.contains('sidebar-collapsed');
+  applySidebarCollapsed(next, true);
+  lsSet(LS_SIDEBAR_COLLAPSED, next ? 1 : 0);
+}
+
+(function initSidebarCollapsed(){
+  // Honor persisted preference on cold-load. Skip on mobile so a previously
+  // collapsed PC session doesn't black-box the drawer when the user pops the
+  // dashboard open on a phone (different viewport, different mental model).
+  if (isMobileViewport()) return;
+  if (lsGet(LS_SIDEBAR_COLLAPSED, 0)) {
+    applySidebarCollapsed(true, false);
+  }
+})();
+
+// Re-apply preference when the viewport crosses the mobile boundary (DevTools,
+// tablet rotation, manual resize). On mobile we drop the PC class so the
+// drawer rules win; switching back to PC re-applies the saved flag.
+if (window.matchMedia) {
+  const mql = window.matchMedia('(max-width: 768px)');
+  const onMqlChange = (e) => {
+    if (e.matches) {
+      document.body.classList.remove('sidebar-collapsed');
+    } else {
+      applySidebarCollapsed(!!lsGet(LS_SIDEBAR_COLLAPSED, 0), false);
+    }
+  };
+  if (typeof mql.addEventListener === 'function') {
+    mql.addEventListener('change', onMqlChange);
+  } else if (typeof mql.addListener === 'function') {
+    mql.addListener(onMqlChange); // Safari ≤13 fallback
+  }
+}
+
+document.addEventListener('keydown', function(e) {
+  // `[` toggles collapse on PC. Skip when typing into an input/textarea/
+  // contenteditable, when any modifier is held, while an IME composition is
+  // active (CJK input fires `[` for fullwidth bracket), or while a modal/
+  // palette is open. Mirrors the skip logic the `/` shortcut uses for
+  // sidebar search.
+  if (e.key !== '[') return;
+  if (e.isComposing) return;
+  if (e.ctrlKey || e.metaKey || e.altKey || e.shiftKey) return;
+  const tgt = e.target;
+  if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA' || tgt.isContentEditable)) return;
+  if (document.querySelector('.modal-overlay, .cmd-palette-overlay')) return;
+  if (isMobileViewport()) return;
+  e.preventDefault();
+  toggleSidebarCollapsed();
+});
 
 /* ===== Onboarding ===== */
 
