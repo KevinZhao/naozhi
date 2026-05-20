@@ -561,11 +561,10 @@ type RouterConfig struct {
 	TotalTimeout     time.Duration
 	ClaudeDir        string
 	// KiroSessionsDir is the kiro CLI's session-state root, typically
-	// ~/.kiro/sessions/cli. Empty means "kiro history fallback is
-	// disabled" — at Sprint 1a there is no kiro history backend, so
-	// the field is plumbed through cli.HistoryWiring but never read by
-	// any registered factory yet. Sprint 1c lands kirojsonl and main
-	// will start populating this from config.
+	// ~/.kiro/sessions/cli. Empty disables kiro history fallback; non-
+	// empty enables the kirojsonl factory (registered via blank import
+	// in this file's import block). Set by cmd/naozhi/main.go from
+	// config. R228-CR-P3-4.
 	KiroSessionsDir string
 	// EventLogDir is where naozhi's per-session event log files live.
 	// When empty, event log persistence is DISABLED and the router

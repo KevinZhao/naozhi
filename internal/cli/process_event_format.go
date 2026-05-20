@@ -26,6 +26,8 @@ import (
 // (thinking + tool_use + text) this helper silently drops every block after
 // the first. Kept only because process_extra_test.go pins the legacy single-
 // entry shape; new callers must use EventEntriesFromEvent.
+// Removal anchor: R228-CR-P3-8 — remove once process_extra_test.go migrates
+// off the single-entry shape.
 func EventEntryFromEvent(ev Event) (EventEntry, bool) {
 	entries := EventEntriesFromEvent(ev)
 	if len(entries) == 0 {

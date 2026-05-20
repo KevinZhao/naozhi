@@ -45,9 +45,10 @@ import (
 //   - The fallback tier comes from the backend's *cli.Wrapper via
 //     Wrapper.NewHistorySource (Sprint 1a). The wrapper holds a
 //     per-backend factory that knows which on-disk format to read —
-//     claudejsonl today, kirojsonl in Sprint 1c — so adding a new
-//     backend's history reader does not require an edit here.
-//     Unknown / unregistered backends degrade to NoopHistorySource.
+//     claudejsonl and kirojsonl are both registered via blank imports
+//     in router_core.go — so adding a new backend's history reader
+//     does not require an edit here. Unknown / unregistered backends
+//     degrade to NoopHistorySource. R228-CR-P3-3.
 //   - MergedSource wraps both tiers and returns a UUID-deduped,
 //     time-sorted result. Skipping the merge when the local tier is
 //     disabled keeps the old single-source path live for deployments
