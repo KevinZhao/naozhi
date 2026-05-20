@@ -137,11 +137,10 @@ func (r *Router) ResetChat(chatKeyPrefix string) {
 	var closedActive int
 	if r.sessionsByChat != nil {
 		// O(k) path via index (k = agents per chat, typically 1-3).
-		// Snapshot the slice before tearing down: resetSessionLocked deletes
-		// from r.sessions only, but we also delete the index entry below in
-		// one shot — iteration order over the indexed slice is the same as
-		// before extraction. R226-CR-15.
-		for _, key := range r.sessionsByChat[chatKeyPrefix] {
+		// resetSessionLocked deletes from r.sessions only; we drop the
+		// whole index entry below. Iteration order over a map set is not
+		// guaranteed but each resetSessionLocked is independent. R226-CR-15.
+		for key := range r.sessionsByChat[chatKeyPrefix] {
 			r.resetSessionLocked(key, &toClose, &closedActive)
 		}
 		delete(r.sessionsByChat, chatKeyPrefix)
