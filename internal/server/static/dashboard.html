@@ -63,27 +63,35 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Hira
 .container{display:flex;height:100%;height:100dvh;overflow:hidden;width:100%}
 
 .sidebar{width:360px;min-width:200px;max-width:60vw;border-right:none;display:flex;flex-direction:column}
-.resizer{width:4px;cursor:col-resize;background:var(--nz-border);flex-shrink:0;transition:background .15s}
+.resizer{position:relative;width:4px;cursor:col-resize;background:var(--nz-border);flex-shrink:0;transition:background .15s}
 .resizer:hover,.resizer.dragging{background:var(--nz-accent)}
+/* Mid-line collapse handle on the resizer (Notion / Cursor pattern). Vertically
+   centered, low-chrome by default — hover anywhere on the resizer (or the
+   handle itself) brings it to full opacity. Click toggles collapse; mousedown
+   stops propagation so the resizer drag never starts on the handle. */
+.resizer-handle{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:18px;height:44px;border-radius:9px;background:var(--nz-bg-1);border:1px solid var(--nz-border);color:var(--nz-text-mute);cursor:pointer;display:flex;align-items:center;justify-content:center;padding:0;line-height:1;opacity:0;transition:opacity .15s,background .15s,color .15s,border-color .15s;z-index:5;-webkit-tap-highlight-color:transparent}
+.resizer:hover .resizer-handle,.resizer-handle:hover,.resizer-handle:focus-visible{opacity:1}
+.resizer-handle:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-accent)}
+.resizer-handle:focus-visible{outline:2px solid var(--nz-accent);outline-offset:2px;opacity:1}
+.resizer-handle svg{width:12px;height:12px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round;transition:transform .15s}
 /* Sidebar fully-collapsed state (PC ≥769px). body.sidebar-collapsed hides
-   the sidebar + resizer entirely so .main occupies the full viewport. The
-   floating .sidebar-show-handle is the only visible affordance for re-
-   opening; it sits flush against the left edge. Restore is one click (or
-   `[` shortcut). On mobile (≤768px) the sidebar is already a fixed drawer
-   overlay, so this state is a no-op there and the existing
-   mobile-list-view / mobile-chat-view rules keep winning. */
-.sidebar-show-handle{display:none;position:fixed;top:10px;left:10px;z-index:30;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;color:var(--nz-text-mute);cursor:pointer;width:32px;height:32px;align-items:center;justify-content:center;padding:0;line-height:1;transition:all .15s;-webkit-tap-highlight-color:transparent}
-.sidebar-show-handle:hover{background:var(--nz-bg-2);color:var(--nz-text);border-color:var(--nz-accent)}
-.sidebar-show-handle:focus-visible{outline:2px solid var(--nz-accent);outline-offset:2px}
-.sidebar-show-handle svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
+   the sidebar entirely so .main occupies the full viewport. The resizer
+   stays as a thin vertical strip with the same mid-line handle so collapse
+   and restore share one affordance. On mobile (≤768px) the sidebar is
+   already a fixed drawer overlay, so this state is a no-op there and the
+   existing mobile-list-view / mobile-chat-view rules keep winning. */
 @media(min-width:769px){
-  body.sidebar-collapsed .sidebar,
-  body.sidebar-collapsed .resizer{display:none}
-  body.sidebar-collapsed .sidebar-show-handle{display:inline-flex}
-  /* Make room for the floating handle so the chat title doesn't slide
-     under it. handle = 32px @ left:10px, so 10+32+12 padding = 54px keeps
-     the title clear and leaves a 12px breathing gap. */
-  body.sidebar-collapsed .main-header{padding-left:54px}
+  body.sidebar-collapsed .sidebar{display:none}
+  /* Flip the chevron when collapsed so the same DOM node serves both
+     directions. Restore = click handle = expand. */
+  body.sidebar-collapsed .resizer-handle svg{transform:rotate(180deg)}
+  /* When collapsed, surface the handle without requiring hover so users
+     can find the restore affordance immediately. */
+  body.sidebar-collapsed .resizer-handle{opacity:.55}
+  body.sidebar-collapsed .resizer-handle:hover{opacity:1}
+  /* The resizer doubles as the restore strip; widen its hit area slightly
+     and disable the col-resize cursor since there's nothing to resize. */
+  body.sidebar-collapsed .resizer{cursor:default;width:6px}
 }
 .sidebar-header{padding:16px;border-bottom:1px solid var(--nz-border)}
 .sidebar-header .header-row{display:flex;align-items:center;justify-content:space-between}
@@ -1270,6 +1278,18 @@ body.kbd-open .input-hints{display:none}
 .cron-timeline-panel .ctr-block.err .ctr-block-label{color:var(--nz-red)}
 .cron-timeline-panel .ctr-bytes{text-transform:none;font-size:10px;color:var(--nz-text-faint);margin-left:6px}
 .cron-timeline-panel .ctr-block-body{margin:0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:var(--nz-text);background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:4px;padding:8px 10px;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow-y:auto;line-height:1.5}
+/* Markdown variant for result block: drop the monospace/pre-wrap so renderMd's
+   headings/lists/tables/code-blocks render natively; raise max-height a bit
+   because md output tends to be taller than equivalent <pre>. Inner .md-pre
+   keeps its own monospace styling. */
+.cron-timeline-panel .ctr-block-body.md{font-family:inherit;font-size:13px;white-space:normal;word-break:normal;overflow-wrap:anywhere;max-height:380px;line-height:1.55}
+.cron-timeline-panel .ctr-block-body.md p{margin:0 0 8px}
+.cron-timeline-panel .ctr-block-body.md p:last-child{margin-bottom:0}
+.cron-timeline-panel .ctr-block-body.md > :first-child{margin-top:0}
+.cron-timeline-panel .ctr-block-body.md > :last-child{margin-bottom:0}
+.cron-timeline-panel .ctr-md-toggle{margin-left:auto;float:right;background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);font-size:10px;font-family:inherit;padding:0 6px;border-radius:3px;cursor:pointer;line-height:1.6;text-transform:none;letter-spacing:0}
+.cron-timeline-panel .ctr-md-toggle:hover{color:var(--nz-text);border-color:var(--nz-accent)}
+.cron-timeline-panel .ctr-block-label{display:flex;align-items:center;gap:4px}
 .cron-timeline-panel .ctr-block.err .ctr-block-body{color:var(--nz-red)}
 .cron-timeline-panel .ctr-meta-row{font-size:11px;color:var(--nz-text-mute);margin-top:4px}
 .cron-timeline-panel .ctr-meta-row code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:3px;padding:0 4px}
@@ -1831,7 +1851,6 @@ body.kbd-open .sidebar-footer{display:none}
       <div class="header-row">
         <h1>naozhi</h1>
         <div class="hdr-btns">
-          <button class="hdr-btn" id="btn-sidebar-collapse" onclick="toggleSidebarCollapsed()" title="收起侧边栏 (按 [)" aria-label="收起侧边栏" aria-controls="sidebar" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><polyline points="15 18 9 12 15 6"/><line x1="3" y1="6" x2="3" y2="18"/></svg></button>
           <button class="hdr-btn" id="btn-sidebar-search" onclick="toggleSidebarSearch()" title="搜索会话 (按 /)" aria-label="搜索会话" aria-expanded="false"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></button>
           <button class="hdr-btn" id="btn-history" onclick="toggleHistory()" title="历史会话" aria-label="查看会话历史" aria-haspopup="dialog"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg><span class="hdr-badge" id="history-badge" style="display:none" aria-label="历史记录数"></span></button>
           <button class="hdr-btn" onclick="createNewSession()" title="New Session" aria-label="Create new session"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>
@@ -1870,7 +1889,9 @@ body.kbd-open .sidebar-footer{display:none}
       <div class="skeleton-card" aria-hidden="true"><div class="skeleton-line sk-title"></div><div class="skeleton-line sk-meta"></div></div>
     </div>
   </nav>
-  <div class="resizer" id="resizer" role="separator" aria-orientation="vertical" aria-label="拖动调整侧栏宽度" tabindex="0"></div>
+  <div class="resizer" id="resizer" role="separator" aria-orientation="vertical" aria-label="拖动调整侧栏宽度" tabindex="0">
+    <button type="button" class="resizer-handle" id="btn-sidebar-toggle" onclick="toggleSidebarCollapsed()" title="收起/展开侧边栏 (按 [)" aria-label="切换侧边栏" aria-controls="sidebar" aria-expanded="true"><svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><polyline points="15 18 9 12 15 6"/></svg></button>
+  </div>
   <main class="main" id="main" aria-label="会话内容">
     <!-- Cold-start empty state. MUST stay in lockstep with mainEmptyHtml() in
          dashboard.js — dismiss/remove paths call that helper to repaint this
@@ -1897,14 +1918,6 @@ body.kbd-open .sidebar-footer{display:none}
     </div>
   </main>
 </div>
-<!-- Sidebar restore handle (PC). Default-hidden; CSS reveals it only when
-     body.sidebar-collapsed is set on viewports >=769px. Mobile keeps the
-     existing drawer behavior, so this affordance never appears there.
-     Kept outside .container so its position:fixed isn't affected by sidebar
-     transforms used on mobile. -->
-<button type="button" class="sidebar-show-handle" id="btn-sidebar-show" onclick="toggleSidebarCollapsed()" title="展开侧边栏 (按 [)" aria-label="展开侧边栏" aria-controls="sidebar" aria-expanded="false">
-  <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false"><polyline points="9 18 15 12 9 6"/><line x1="3" y1="6" x2="3" y2="18"/></svg>
-</button>
 <div class="toast" id="toast" role="status" aria-live="polite" aria-atomic="true"></div>
 <!-- RNEW-UX-010 — dedicated polite live region for non-toast announcements
      (WS state transitions, new sessions, cron completions). Kept separate

@@ -1813,6 +1813,23 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	if !viaTriggerNow && s.jitterMax > 0 {
 		inflight.setPhase(PhaseJittering)
 		applyJitter(s.stopCtx, j.Schedule, s.jitterMax)
+
+		// R220-GO-3: a DeleteJob that lands during the jitter window leaves
+		// the inflight CAS still held until we finish — blocking TriggerNow
+		// for the same id with an "already running" overlap skip. Re-check
+		// the job is still registered after the jitter wait so the deferred
+		// inflight.running.Store(false) above releases promptly. snapshotJob
+		// reads under s.mu so a stale dereference is impossible after Delete
+		// (the field reads return the last-known values and we never use
+		// them past this point).
+		s.mu.RLock()
+		_, stillRegistered := s.jobs[j.ID]
+		s.mu.RUnlock()
+		if !stillRegistered {
+			slog.Debug("cron: job deleted during jitter window, aborting run",
+				"cron_id", j.ID, "run_id", runID)
+			return
+		}
 	}
 
 	// Snapshot mutable Job fields once under s.mu so the rest of the
