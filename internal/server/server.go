@@ -446,6 +446,14 @@ type ServerOptions struct {
 	// by the caller (cmd/naozhi/main.go) before the server starts serving so
 	// the inspector reads see live data on first poll.
 	SysessionManager *sysession.Manager
+	// SysWorkDir is the absolute filesystem path that sysession's Runner
+	// uses as cwd for transient `claude -p` subprocesses (typically
+	// <workspaceRoot>/sys-sessions). When set, every session JSONL whose
+	// resolved workspace matches this path is hidden from the catch-all
+	// history panel — without it AutoTitler prompt fragments leak into
+	// the user's "recent sessions" list. Empty disables the filter
+	// (matches the behaviour when sysession is disabled). R245-ARCH.
+	SysWorkDir string
 }
 
 // NewWithOptions constructs a Server from a single ServerOptions value.
@@ -666,6 +674,8 @@ func buildServer(opts ServerOptions) *Server {
 		router:        router,
 		projectMgr:    opts.ProjectManager,
 		scheduler:     scheduler,
+		cronSessions:  scheduler, // *cron.Scheduler implements cronSessionLister via KnownSessionIDs
+		sysWorkDir:    opts.SysWorkDir,
 		claudeDir:     claudeDir,
 		allowedRoot:   opts.AllowedRoot,
 		agents:        agents,

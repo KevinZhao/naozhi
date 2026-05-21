@@ -78,6 +78,38 @@ func TestIsReservedNamespace(t *testing.T) {
 	}
 }
 
+func TestIsUserVisibleKey(t *testing.T) {
+	t.Parallel()
+	// IsUserVisibleKey is the negation of IsReservedNamespace.  Re-test the
+	// public surface explicitly so a future refactor that decouples the two
+	// (e.g. a custom carve-out for project planner keys) can't silently
+	// re-expose cron / sys to the history panel.  R245-ARCH.
+	tests := []struct {
+		name string
+		key  string
+		want bool
+	}{
+		{"empty mirrors IsReservedNamespace=false", "", true},
+		{"standard IM key visible", "feishu:group:chat-123:general", true},
+		{"standard IM direct visible", "slack:direct:U123:general", true},
+		{"cron hidden", "cron:job-123", false},
+		{"project planner hidden", "project:myrepo:planner", false},
+		{"scratch hidden", "scratch:abc:general:general", false},
+		{"sys daemon hidden", "sys:auto-titler", false},
+		{"cronographer false positive STILL VISIBLE", "cronographer:direct:1:x", true},
+		{"systemic false positive STILL VISIBLE", "systemic:direct:1:x", true},
+	}
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := IsUserVisibleKey(tt.key); got != tt.want {
+				t.Errorf("IsUserVisibleKey(%q) = %v, want %v", tt.key, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestIsCronKey(t *testing.T) {
 	t.Parallel()
 	tests := []struct {

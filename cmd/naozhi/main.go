@@ -762,7 +762,7 @@ func main() {
 	// when cfg.Sysession.Enabled is false; degraded silently when the
 	// runner can't be initialised so a missing/broken claude binary
 	// doesn't break naozhi startup as a whole.
-	sysMgr, err := buildSysessionManager(cfg, router, defaultWrapper, storePath)
+	sysMgr, sysWorkDir, err := buildSysessionManager(cfg, router, defaultWrapper, storePath)
 	if err != nil {
 		slog.Warn("sysession manager unavailable; daemons disabled", "err", err)
 	}
@@ -814,6 +814,7 @@ func main() {
 		StartupCtx:        ctx,
 		Version:           version,
 		SysessionManager:  sysMgr,
+		SysWorkDir:        sysWorkDir,
 		OnReady: func() {
 			if err := osutil.SdNotify("READY=1"); err != nil {
 				slog.Warn("sd_notify READY failed", "err", err)
@@ -1157,13 +1158,13 @@ func logWebhookEndpoints(cfg *config.Config, platforms map[string]platform.Platf
 // back to polling /api/system/daemons.
 func buildSysessionManager(cfg *config.Config, router *session.Router,
 	defaultWrapper *cli.Wrapper, storePath string,
-) (*sysession.Manager, error) {
+) (*sysession.Manager, string, error) {
 	if !cfg.Sysession.Enabled {
 		// Return nil rather than a no-op Manager so the caller's nil
 		// guard is meaningful — main.go's Start/Stop loops both check
 		// `if sysMgr != nil`, and a stubbed always-non-nil result would
 		// turn that into dead code.
-		return nil, nil
+		return nil, "", nil
 	}
 
 	// Resolve work dir: explicit override first, then a sibling of
@@ -1181,7 +1182,7 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 	}
 	resolvedWorkDir, err := sysession.EnsureWorkDir(workDir)
 	if err != nil {
-		return nil, fmt.Errorf("ensure sys-sessions dir: %w", err)
+		return nil, "", fmt.Errorf("ensure sys-sessions dir: %w", err)
 	}
 
 	// Startup sweep — non-fatal; a busted directory should not block
@@ -1225,7 +1226,7 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("new runner: %w", err)
+		return nil, "", fmt.Errorf("new runner: %w", err)
 	}
 
 	tickTimeout := 30 * time.Second
@@ -1284,7 +1285,7 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		// OnRunStarted/OnRunEnded are wired in Step 11 (WS broadcast).
 	})
 	if err != nil {
-		return nil, fmt.Errorf("new manager: %w", err)
+		return nil, "", fmt.Errorf("new manager: %w", err)
 	}
-	return mgr, nil
+	return mgr, resolvedWorkDir, nil
 }

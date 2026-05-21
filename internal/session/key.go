@@ -76,6 +76,21 @@ func IsReservedNamespace(key string) bool {
 	return false
 }
 
+// IsUserVisibleKey reports whether the key represents a session a human
+// user should see in the generic session list / history panel / project
+// sidebar.  The negation of IsReservedNamespace:  cron / project /
+// scratch / sys keys all live in dedicated UI surfaces (cron panel,
+// project sidebar groupings, scratch drawer, system drawer) and must
+// be hidden from the catch-all "recent sessions" view.
+//
+// Keep this function as the single source of truth for "should this
+// key appear in a generic listing":  every new listing API must consult
+// it instead of re-growing strings.HasPrefix checks per call site.
+// R245-ARCH (cron+sys hide-from-history).
+func IsUserVisibleKey(key string) bool {
+	return !IsReservedNamespace(key)
+}
+
 // IsCronKey reports whether the key belongs to the cron namespace. See
 // CronKeyPrefix.
 func IsCronKey(key string) bool {

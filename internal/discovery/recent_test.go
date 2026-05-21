@@ -456,7 +456,7 @@ func makeWorkspace(t *testing.T) (claudeDir, workspace, encodedDir string) {
 func TestRecentSessions_EmptyDir(t *testing.T) {
 	t.Parallel()
 	claudeDir := makeClaudeDir(t)
-	got := RecentSessions(claudeDir, 10, 7*24*time.Hour, nil)
+	got := RecentSessions(claudeDir, 10, 7*24*time.Hour, nil, nil)
 	if len(got) != 0 {
 		t.Errorf("expected empty sessions from empty dir, got %d", len(got))
 	}
@@ -464,7 +464,7 @@ func TestRecentSessions_EmptyDir(t *testing.T) {
 
 func TestRecentSessions_EmptyClaudeDir(t *testing.T) {
 	t.Parallel()
-	got := RecentSessions("", 10, 7*24*time.Hour, nil)
+	got := RecentSessions("", 10, 7*24*time.Hour, nil, nil)
 	if got != nil {
 		t.Errorf("expected nil for empty claudeDir, got %v", got)
 	}
@@ -491,7 +491,7 @@ func TestRecentSessions_FallbackFromJSONL(t *testing.T) {
 	dirFilesCache.Delete(projDir)
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil)
+	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, nil)
 	if len(got) == 0 {
 		t.Fatal("expected at least one session")
 	}
@@ -536,7 +536,7 @@ func TestRecentSessions_WithSessionsIndex(t *testing.T) {
 	dirFilesCache.Delete(projDir)
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil)
+	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, nil)
 	if len(got) == 0 {
 		t.Fatal("expected at least one session")
 	}
@@ -589,7 +589,7 @@ func TestRecentSessions_Limit(t *testing.T) {
 	dirFilesCache.Delete(projDir)
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-	got := RecentSessions(claudeDir, 2, 365*24*time.Hour, nil)
+	got := RecentSessions(claudeDir, 2, 365*24*time.Hour, nil, nil)
 	if len(got) != 2 {
 		t.Errorf("expected 2 sessions (limit=2), got %d", len(got))
 	}
@@ -616,7 +616,7 @@ func TestRecentSessions_ExcludeByID(t *testing.T) {
 	dirFilesCache.Delete(projDir)
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, map[string]bool{sid: true})
+	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, map[string]bool{sid: true}, nil)
 	for _, s := range got {
 		if s.SessionID == sid {
 			t.Errorf("excluded session %q appeared in results", sid)
@@ -637,7 +637,7 @@ func TestRecentSessions_SkipsHiddenProjectDirs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil)
+	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, nil)
 	for _, s := range got {
 		if s.SessionID == sid {
 			t.Errorf("session from hidden dir should have been skipped, but appeared: %+v", s)
@@ -678,7 +678,7 @@ func TestRecentSessions_MaxAge(t *testing.T) {
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
 	// maxAge = 1 minute; the file is 1 hour old so it must be filtered out.
-	got := RecentSessions(claudeDir, 10, time.Minute, nil)
+	got := RecentSessions(claudeDir, 10, time.Minute, nil, nil)
 	for _, s := range got {
 		if s.SessionID == sid {
 			t.Errorf("session should be filtered by maxAge, but appeared: %+v", s)
@@ -717,7 +717,7 @@ func TestRecentSessions_SortedByLastActive(t *testing.T) {
 	dirFilesCache.Delete(projDir)
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
-	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil)
+	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, nil)
 	if len(got) < 2 {
 		t.Fatalf("expected at least 2 sessions, got %d", len(got))
 	}
@@ -757,8 +757,127 @@ func TestRecentSessions_ZeroLimit(t *testing.T) {
 	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
 
 	// limit=0 means "return all"
-	got := RecentSessions(claudeDir, 0, 365*24*time.Hour, nil)
+	got := RecentSessions(claudeDir, 0, 365*24*time.Hour, nil, nil)
 	if len(got) < 3 {
 		t.Errorf("limit=0 should return all sessions, got %d", len(got))
+	}
+}
+
+// ---------------------------------------------------------------------------
+// RecentSessionsFilter (R245-ARCH)
+// ---------------------------------------------------------------------------
+
+// stubFilter is a table-friendly RecentSessionsFilter for unit tests.
+type stubFilter struct {
+	skipWorkspaces map[string]bool
+	skipSessionIDs map[string]bool
+}
+
+func (s stubFilter) SkipWorkspace(ws string) bool   { return s.skipWorkspaces[ws] }
+func (s stubFilter) SkipSessionID(sid string) bool  { return s.skipSessionIDs[sid] }
+
+func TestRecentSessions_FilterSkipsWorkspace(t *testing.T) {
+	t.Parallel()
+	claudeDir, workspace, encodedDir := makeWorkspace(t)
+
+	projDir := filepath.Join(claudeDir, "projects", encodedDir)
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sid := "aaaaaaaa-0001-0001-0001-000000000001"
+	if err := os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeSessionsIndex(t, projDir, sessionsIndex{
+		OriginalPath: workspace,
+		Entries:      []sessionsIndexEntry{{SessionID: sid, Summary: "should be hidden"}},
+	})
+	dirFilesCache.Delete(projDir)
+	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
+
+	filter := stubFilter{skipWorkspaces: map[string]bool{workspace: true}}
+	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, filter)
+	for _, s := range got {
+		if s.SessionID == sid {
+			t.Errorf("workspace-blacklisted session leaked into result: %+v", s)
+		}
+	}
+}
+
+func TestRecentSessions_FilterSkipsSessionID(t *testing.T) {
+	t.Parallel()
+	claudeDir, workspace, encodedDir := makeWorkspace(t)
+
+	projDir := filepath.Join(claudeDir, "projects", encodedDir)
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	visibleSID := "bbbbbbbb-0001-0001-0001-000000000002"
+	hiddenSID := "bbbbbbbb-0001-0001-0001-000000000003"
+	for _, sid := range []string{visibleSID, hiddenSID} {
+		if err := os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeSessionsIndex(t, projDir, sessionsIndex{
+		OriginalPath: workspace,
+		Entries: []sessionsIndexEntry{
+			{SessionID: visibleSID, Summary: "show"},
+			{SessionID: hiddenSID, Summary: "hide"},
+		},
+	})
+	dirFilesCache.Delete(projDir)
+	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
+
+	filter := stubFilter{skipSessionIDs: map[string]bool{hiddenSID: true}}
+	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, filter)
+
+	var sawVisible, sawHidden bool
+	for _, s := range got {
+		if s.SessionID == visibleSID {
+			sawVisible = true
+		}
+		if s.SessionID == hiddenSID {
+			sawHidden = true
+		}
+	}
+	if !sawVisible {
+		t.Errorf("non-blacklisted session was filtered: visibleSID=%s", visibleSID)
+	}
+	if sawHidden {
+		t.Errorf("blacklisted session leaked into result: hiddenSID=%s", hiddenSID)
+	}
+}
+
+// TestRecentSessions_NilFilterIsNoop guards against future "if filter == nil
+// { return nil }" defensive code that would silently empty the history list.
+func TestRecentSessions_NilFilterIsNoop(t *testing.T) {
+	t.Parallel()
+	claudeDir, workspace, encodedDir := makeWorkspace(t)
+
+	projDir := filepath.Join(claudeDir, "projects", encodedDir)
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	sid := "cccccccc-0001-0001-0001-000000000004"
+	if err := os.WriteFile(filepath.Join(projDir, sid+".jsonl"), []byte("data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeSessionsIndex(t, projDir, sessionsIndex{
+		OriginalPath: workspace,
+		Entries:      []sessionsIndexEntry{{SessionID: sid, Summary: "ok"}},
+	})
+	dirFilesCache.Delete(projDir)
+	t.Cleanup(func() { dirFilesCache.Delete(projDir) })
+
+	got := RecentSessions(claudeDir, 10, 365*24*time.Hour, nil, nil)
+	var saw bool
+	for _, s := range got {
+		if s.SessionID == sid {
+			saw = true
+		}
+	}
+	if !saw {
+		t.Errorf("nil filter must behave like no-op; session missing: %s", sid)
 	}
 }
