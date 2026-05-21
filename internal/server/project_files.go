@@ -122,8 +122,14 @@ var previewableByExt = map[string]string{
 // rawPreviewMimes identifies file types the browser can render inline via <img>
 // or <iframe>. Any MIME prefix here is allowed through mode=raw without forcing
 // a download.
+//
+// SVG is intentionally absent: serveRaw rejects "image/svg+xml" downstream
+// (stored XSS via <script> in workspace SVGs), and listing it here would create
+// dead "passes preview, fails serveRaw" branches that a future refactor could
+// silently turn into an XSS regression. SVG previews flow through serveRender
+// (blob URL path) only.
 var rawPreviewMimes = []string{
-	"image/png", "image/jpeg", "image/gif", "image/webp", "image/svg+xml",
+	"image/png", "image/jpeg", "image/gif", "image/webp",
 	"application/pdf",
 }
 
