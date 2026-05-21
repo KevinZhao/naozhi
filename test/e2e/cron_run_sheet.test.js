@@ -258,7 +258,7 @@ test.describe('Cron run-detail sheet — desktop', () => {
 
   // ── PR-1 followup ─────────────────────────────────────────────────────────
 
-  test('followup #1: 首次打开 sheet 时选中行 scroll 到可视区中心', async ({ browser }) => {
+  test('followup #1: 首次打开 sheet 时选中行 scroll 到可视区（首/末行可能贴边）', async ({ browser }) => {
     const ctx = await browser.newContext({ ...desktop });
     const page = await ctx.newPage();
     await page.goto(mock.url + '/dashboard');
