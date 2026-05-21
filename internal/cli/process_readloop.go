@@ -317,17 +317,7 @@ func (p *Process) readLoop() {
 				reason = DeathReasonCLIExited + "_signal_" + osutil.SanitizeForLog(msg.Signal, 32)
 			}
 			p.setDeathReason(reason)
-			p.mu.Lock()
-			p.State = StateDead
-			cb := p.onTurnDone
-			p.mu.Unlock()
-			if cb != nil {
-				cb()
-			}
-			// Passthrough slot cleanup: every pending slot's caller is
-			// blocked inside SendPassthrough waiting on resultCh/errCh.
-			// Fire ErrProcessExited so they unblock with a clear error.
-			p.discardAllPending(ErrProcessExited)
+			p.transitionToDead()
 			// Close shim conn so heartbeatLoop stops writing pings into a dead
 			// socket and the bufio.Writer's fd is released promptly. Without
 			// this, if the process isn't subsequently Kill/Detach'd (e.g. when
@@ -359,6 +349,33 @@ func (p *Process) readLoop() {
 	// classified (shim EOF / read error / drained). If none of those paths
 	// fired, Kill() was what unblocked ReadSlice via shimConn.Close, which
 	// surfaces as net.ErrClosed and is already classified as DeathReasonShimEOF.
+	p.transitionToDead()
+}
+
+// transitionToDead performs the closing handshake when readLoop concludes a
+// process has stopped producing events: flips State to Dead, fires the
+// onTurnDone callback once, and unblocks any SendPassthrough callers parked
+// on pendingSlots with ErrProcessExited.
+//
+// Called from two readLoop exit points:
+//
+//  1. The cli_exited shim message (orderly CLI exit). Caller sets the
+//     deathReason explicitly and follows up with closeShimConn() to release
+//     the heartbeat fd. R219-GO-3.
+//
+//  2. The fallback exit when readLoop falls past the read loop without a
+//     cli_exited frame (Kill() / shim EOF / read error). Caller has already
+//     stamped DeathReasonShimEOF when classifying the read error; no
+//     closeShimConn here because Kill()/shimConn.Close is what unblocked us.
+//
+// This helper deliberately does NOT call setDeathReason or closeShimConn so
+// each caller keeps its specific death-classification + cleanup contract.
+//
+// onTurnDone idempotency: this function may run after a partial-state
+// recovery in the panic defer (R222-GO-9). The defer guards against
+// double-fire by checking p.State before calling cb, so callers here can
+// rely on at-most-once semantics for the callback per readLoop instance.
+func (p *Process) transitionToDead() {
 	p.mu.Lock()
 	p.State = StateDead
 	cb := p.onTurnDone
@@ -366,7 +383,9 @@ func (p *Process) readLoop() {
 	if cb != nil {
 		cb()
 	}
-	// Passthrough: fan-out ErrProcessExited to any still-blocking SendPassthrough callers.
+	// Passthrough slot cleanup: every pending slot's caller is blocked inside
+	// SendPassthrough waiting on resultCh/errCh. Fire ErrProcessExited so they
+	// unblock with a clear error.
 	p.discardAllPending(ErrProcessExited)
 }
 
