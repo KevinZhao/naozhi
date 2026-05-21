@@ -210,6 +210,19 @@ function startMockServer(overrides = {}) {
       }
       return;
     }
+    // dashboard.html 末尾还引用 agent_view.js — 不伺服会触发 global-error
+    // toast "页面遇到异常: [object Object]" 干扰 e2e 视觉截图。
+    if (pathname === '/static/agent_view.js') {
+      try {
+        const js = fs.readFileSync(path.join(STATIC_DIR, 'agent_view.js'));
+        res.writeHead(200, { 'Content-Type': 'application/javascript' });
+        res.end(js);
+      } catch {
+        res.writeHead(404);
+        res.end();
+      }
+      return;
+    }
     if (pathname === '/sw.js') {
       res.writeHead(200, { 'Content-Type': 'application/javascript' });
       res.end('// mock sw');
