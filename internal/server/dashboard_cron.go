@@ -178,10 +178,26 @@ func validateCronScheduleChars(schedule string) error {
 // session router's validateBackend allows 64 as the protocol-edge bound.
 const maxCronBackendLen = maxBackendIDLen
 
+// cronRunSummaryView is the JSON shape for a single cron run summary.
+// Shared between handleList (recent-run preview embedded in the cron
+// dashboard list) and handleRunsList (per-job paginated history).
+// Both wire shapes must stay in lockstep, so the type is package-level
+// rather than declared twice in handler bodies.
+type cronRunSummaryView struct {
+	RunID      string `json:"run_id"`
+	State      string `json:"state"`
+	Trigger    string `json:"trigger,omitempty"`
+	StartedAt  int64  `json:"started_at"`
+	EndedAt    int64  `json:"ended_at,omitempty"`
+	DurationMS int64  `json:"duration_ms,omitempty"`
+	SessionID  string `json:"session_id,omitempty"`
+	ErrorClass string `json:"error_class,omitempty"`
+}
+
 // validateCronBackend enforces the same shape contract as send.go for the
 // dashboard-picked backend override on cron jobs:
 //   - empty is OK (router default fallback at execute time);
-//   - length <= 32 bytes;
+//   - length <= maxBackendIDLen bytes;
 //   - charset [a-z0-9_-] only.
 //
 // Unknown backend IDs are NOT rejected here — the session router's
@@ -189,12 +205,17 @@ const maxCronBackendLen = maxBackendIDLen
 // keeps running rather than failing every tick because the operator
 // removed a backend from config.yaml. This handler-edge gate stops only
 // shape-invalid input that would otherwise pollute logs / persisted JSON.
+//
+// NOTE: charset here is intentionally tighter than isValidBackendID
+// (which the WS path uses and additionally allows uppercase + '.').
+// Tracked as NEEDS-DESIGN; the cron path keeps the older [a-z0-9_-]
+// rule until the cross-path policy is unified.
 func validateCronBackend(backend string) error {
 	if backend == "" {
 		return nil
 	}
-	if len(backend) > maxCronBackendLen {
-		return fmt.Errorf("backend exceeds %d-byte limit", maxCronBackendLen)
+	if len(backend) > maxBackendIDLen {
+		return fmt.Errorf("backend exceeds %d-byte limit", maxBackendIDLen)
 	}
 	for i := 0; i < len(backend); i++ {
 		c := backend[i]
@@ -303,16 +324,6 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		TimedOut  int64 `json:"timed_out,omitempty"`
 		Canceled  int64 `json:"canceled,omitempty"`
 	}
-	type runSummaryView struct {
-		RunID      string `json:"run_id"`
-		State      string `json:"state"`
-		Trigger    string `json:"trigger,omitempty"`
-		StartedAt  int64  `json:"started_at"`
-		EndedAt    int64  `json:"ended_at,omitempty"`
-		DurationMS int64  `json:"duration_ms,omitempty"`
-		SessionID  string `json:"session_id,omitempty"`
-		ErrorClass string `json:"error_class,omitempty"`
-	}
 	type cronJobView struct {
 		ID             string `json:"id"`
 		Schedule       string `json:"schedule"`
@@ -350,7 +361,7 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		// RecentRuns: P1 cron-run-history — newest-first 摘要数组；只在卡片
 		// 折叠态做 hover-tooltip 状态气泡。空 = 此 job 尚无持久化历史
 		// （新建 / 历史已被 GC 清空 / StorePath 为空）。
-		RecentRuns []runSummaryView `json:"recent_runs,omitempty"`
+		RecentRuns []cronRunSummaryView `json:"recent_runs,omitempty"`
 		// Backend: per docs/rfc/multi-backend.md §9 cron RPC contract. ""
 		// 表示跟随 router default；前端编辑器据此回填 backend 下拉选项。
 		Backend string `json:"backend,omitempty"`
@@ -422,9 +433,9 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		// 上限 5 是 wire 大小的折中：list response 总大小 = jobs × ~2KB。
 		// 详情页要更多用 GET /api/cron/runs.
 		if recent := h.scheduler.RecentRuns(j.ID, 5); len(recent) > 0 {
-			rv := make([]runSummaryView, 0, len(recent))
+			rv := make([]cronRunSummaryView, 0, len(recent))
 			for _, r := range recent {
-				row := runSummaryView{
+				row := cronRunSummaryView{
 					RunID:      r.RunID,
 					State:      string(r.State),
 					Trigger:    string(r.Trigger),
@@ -445,11 +456,12 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 
 	loc := h.scheduler.Location()
 	name, offset := time.Now().In(loc).Zone()
-	tzLabel := formatTZOffset(loc.String(), offset)
+	locName := loc.String()
+	tzLabel := formatTZOffset(locName, offset)
 
 	resp := map[string]any{
 		"jobs":           views,
-		"timezone":       loc.String(),
+		"timezone":       locName,
 		"timezone_label": tzLabel,
 		"timezone_abbr":  name,
 	}
@@ -1082,19 +1094,9 @@ func (h *CronHandlers) handleRunsList(w http.ResponseWriter, r *http.Request) {
 	}
 
 	rows := h.scheduler.ListRuns(jobID, limit, before)
-	type runSummaryView struct {
-		RunID      string `json:"run_id"`
-		State      string `json:"state"`
-		Trigger    string `json:"trigger,omitempty"`
-		StartedAt  int64  `json:"started_at"`
-		EndedAt    int64  `json:"ended_at,omitempty"`
-		DurationMS int64  `json:"duration_ms,omitempty"`
-		SessionID  string `json:"session_id,omitempty"`
-		ErrorClass string `json:"error_class,omitempty"`
-	}
-	out := make([]runSummaryView, 0, len(rows))
+	out := make([]cronRunSummaryView, 0, len(rows))
 	for _, r := range rows {
-		row := runSummaryView{
+		row := cronRunSummaryView{
 			RunID:      r.RunID,
 			State:      string(r.State),
 			Trigger:    string(r.Trigger),
@@ -1196,6 +1198,12 @@ func (h *CronHandlers) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		ErrorClass  string `json:"error_class,omitempty"`
 		ErrorMsg    string `json:"error_msg,omitempty"`
 	}
+	// SanitizeForLog the Prompt + WorkDir fields read off disk: dashboard
+	// validate* gates already strip control / bidi characters at the write
+	// edge, but a CronRun persisted before the policy was tightened (or
+	// hand-edited on disk) can carry runes that would render dangerously
+	// in the dashboard. Result/ErrorMsg are already sanitised inside
+	// recordResultP0WithSanitised before persistence.
 	out := runDetailView{
 		RunID:       run.RunID,
 		JobID:       run.JobID,
@@ -1204,8 +1212,8 @@ func (h *CronHandlers) handleRunDetail(w http.ResponseWriter, r *http.Request) {
 		StartedAt:   run.StartedAt.UnixMilli(),
 		DurationMS:  run.DurationMS,
 		SessionID:   run.SessionID,
-		Prompt:      run.Prompt,
-		WorkDir:     run.WorkDir,
+		Prompt:      osutil.SanitizeForLog(run.Prompt, cron.MaxPromptBytes),
+		WorkDir:     osutil.SanitizeForLog(run.WorkDir, maxCronWorkDirBytesDashboard),
 		Fresh:       run.Fresh,
 		Result:      run.Result,
 		ResultBytes: run.ResultBytes,

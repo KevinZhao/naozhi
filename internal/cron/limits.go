@@ -24,4 +24,14 @@ const (
 	// expressions are short (e.g. "@every 30m", "0 9 * * *"); anything
 	// beyond this is almost certainly abuse.
 	MaxScheduleBytes = 256
+
+	// maxStoredResultRunes bounds CronRun.Result + Job.LastResult after
+	// rune-safe truncation; the persisted record is hard-capped at
+	// MaxRunRecordBytes (32 KB) downstream, but trimming early avoids
+	// the cost of carrying multi-KB strings through SanitizeForLog and
+	// JSON marshal. Three call sites (sanitiseRunResult /
+	// recordResultP0WithSanitised / recordResult) previously each
+	// declared this as a function-local const, drifting in lockstep
+	// only by convention.
+	maxStoredResultRunes = 4 * 1024
 )

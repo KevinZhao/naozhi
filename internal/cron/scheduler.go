@@ -1870,6 +1870,10 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	ctx, cancel := context.WithTimeout(s.stopCtx, jobTimeout)
 	defer cancel()
 
+	// s.agentCommands and s.agents are assigned once at scheduler
+	// construction (cfg.AgentCommands / cfg.Agents) and never mutated;
+	// reading them without s.mu is safe. If a future SetAgents API is
+	// introduced both reads must move under s.mu.
 	agentID, cleanText := session.ResolveAgent(snap.prompt, s.agentCommands)
 	opts := s.agents[agentID]
 	// R228-GO-P3-8: clip ExtraArgs to its own length so any subsequent append
@@ -2204,11 +2208,10 @@ func (s *Scheduler) finishRun(a finishArgs) {
 // skipPersist path of finishRun can reach the same byte-output without
 // touching s.mu / persistJobsLocked. Idempotent w.r.t. clean strings.
 func sanitiseRunResult(s string) string {
-	const maxStoredRunes = 4 * 1024
-	if trimmed := textutil.TruncateRunesNoEllipsis(s, maxStoredRunes); len(trimmed) < len(s) {
+	if trimmed := textutil.TruncateRunesNoEllipsis(s, maxStoredResultRunes); len(trimmed) < len(s) {
 		s = trimmed + "…[truncated]"
 	}
-	return osutil.SanitizeForLog(s, 4*1024)
+	return osutil.SanitizeForLog(s, maxStoredResultRunes)
 }
 
 // sanitiseRunErrMsg applies the cron error-redaction + log-injection
@@ -2302,12 +2305,11 @@ func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
 // dead code and has been removed; tests assert on outcomes (Job fields,
 // CronRun summary), not wrapper presence.
 func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState) (string, string, bool) {
-	const maxStoredRunes = 4 * 1024
-	if trimmed := textutil.TruncateRunesNoEllipsis(result, maxStoredRunes); len(trimmed) < len(result) {
+	if trimmed := textutil.TruncateRunesNoEllipsis(result, maxStoredResultRunes); len(trimmed) < len(result) {
 		result = trimmed + "…[truncated]"
 	}
 	errMsg = redactPathsInCronError(errMsg)
-	result = osutil.SanitizeForLog(result, 4*1024)
+	result = osutil.SanitizeForLog(result, maxStoredResultRunes)
 	errMsg = osutil.SanitizeForLog(errMsg, 512)
 
 	s.mu.Lock()
@@ -2410,15 +2412,15 @@ func (s *Scheduler) deliverNotice(target NotifyTarget, text string) {
 // j.LastSessionID，保留上一次成功执行留下的 ID，这样 dashboard 点击
 // cron 侧边栏仍然能按历史 ID 拉到 JSONL 内容而不是空白面板。
 func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
-	const maxStoredRunes = 4 * 1024
 	// textutil.TruncateRunesNoEllipsis avoids the two O(n) rune-slice
-	// allocations that `string([]rune(result)[:maxStoredRunes])` performs and
-	// keeps the cron-specific "…[truncated]" suffix (TruncateRunes appends
-	// "..." which is not what dashboard rendering expects). Length compare
-	// is the O(1) truncation detector: TruncateRunesNoEllipsis returns either
-	// the input unchanged or a strictly shorter byte-length prefix, so any
-	// length drop signals truncation actually happened. R219-CR-2.
-	if shaped := textutil.TruncateRunesNoEllipsis(result, maxStoredRunes); len(shaped) < len(result) {
+	// allocations that `string([]rune(result)[:maxStoredResultRunes])`
+	// performs and keeps the cron-specific "…[truncated]" suffix
+	// (TruncateRunes appends "..." which is not what dashboard rendering
+	// expects). Length compare is the O(1) truncation detector:
+	// TruncateRunesNoEllipsis returns either the input unchanged or a
+	// strictly shorter byte-length prefix, so any length drop signals
+	// truncation actually happened. R219-CR-2.
+	if shaped := textutil.TruncateRunesNoEllipsis(result, maxStoredResultRunes); len(shaped) < len(result) {
 		result = shaped + "…[truncated]"
 	}
 	// Redact absolute filesystem paths from errMsg before persisting to
@@ -2581,7 +2583,7 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 	defer replyCancel()
 	maxLen := p.MaxReplyLength()
 	if maxLen <= 0 {
-		maxLen = 4000
+		maxLen = platform.DefaultMaxReplyLen
 	}
 	chunks := platform.SplitText(text, maxLen)
 	for _, chunk := range chunks {
