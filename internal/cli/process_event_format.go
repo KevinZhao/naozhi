@@ -204,9 +204,10 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 				entry.Type = "text"
 				entry.Summary = textutil.TruncateRunes(block.Text, 120)
 				entry.Detail = textutil.TruncateRunes(block.Text, 16000)
-			default:
-				continue
 			}
+			// No default branch: the outer guard switch above already
+			// `continue`s on unknown block.Type, so anything reaching this
+			// switch is one of the three handled kinds.
 			out = append(out, entry)
 		}
 		// Surface the AskUserQuestion card as a dedicated EventEntry alongside

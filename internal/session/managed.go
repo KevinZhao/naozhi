@@ -240,10 +240,10 @@ func (s *ManagedSession) SessionKey() string { return s.key }
 // safe to call from Hub handlers and other call sites that don't hold r.mu.
 func (s *ManagedSession) Workspace() string { return loadAtomicString(&s.workspace) }
 
-// SetWorkspaceAtomic stores the workspace path. Router-internal helper — all
-// writers already hold r.mu, but we route through the helper so the string is
-// always handed to the atomic.Pointer via one place (matches storeAtomicString
-// convention for backend/cliName/cliVersion).
+// setWorkspace stores the workspace path atomically. Router-internal helper —
+// all writers already hold r.mu, but we route through the helper so the string
+// is always handed to the atomic.Pointer via one place (matches
+// storeAtomicString convention for backend/cliName/cliVersion).
 func (s *ManagedSession) setWorkspace(ws string) { storeAtomicString(&s.workspace, ws) }
 
 // IsExempt returns whether this session is exempt from TTL and eviction.

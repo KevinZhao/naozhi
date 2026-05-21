@@ -407,9 +407,11 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		// memory amplification across downstream consumers (EventLog ring,
 		// JSONL persist, dashboard fan-out). Mirror of the cap applied in
 		// ClaudeProtocol.ReadEvent.
-		if ev.Message != nil && contentBytes(ev.Message) > maxAssistantMessageContentBytes {
-			return nil, done, fmt.Errorf("ACP event content exceeds %d bytes (got %d), dropping",
-				maxAssistantMessageContentBytes, contentBytes(ev.Message))
+		if ev.Message != nil {
+			if n := contentBytes(ev.Message); n > maxAssistantMessageContentBytes {
+				return nil, done, fmt.Errorf("ACP event content exceeds %d bytes (got %d), dropping",
+					maxAssistantMessageContentBytes, n)
+			}
 		}
 		return []Event{ev}, done, nil
 	}

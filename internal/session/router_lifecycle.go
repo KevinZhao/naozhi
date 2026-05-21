@@ -305,9 +305,9 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 		// a typical shim spawn takes 100-300 ms.
 		r.mu.Unlock()
 		if waitT == nil {
-			waitT = time.NewTimer(20 * time.Millisecond)
+			waitT = time.NewTimer(spawningKeyPollInterval)
 		} else {
-			waitT.Reset(20 * time.Millisecond)
+			waitT.Reset(spawningKeyPollInterval)
 		}
 		select {
 		case <-ctx.Done():
@@ -699,8 +699,23 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 			r.historyWg.Add(1)
 			func() {
 				defer r.historyWg.Done()
-				histCtx, histCancel := context.WithTimeout(ctx, 15*time.Second)
+				// Parent on historyCtx so Shutdown's historyCancel()
+				// propagates immediately into the reader at its next
+				// ctx check, instead of waiting up to 15s for the
+				// timeout to fire. Caller ctx (GetOrCreate) is wired
+				// back in via context.AfterFunc so a cancelled
+				// GetOrCreate still releases the reader (R225-GO-8
+				// invariant); R229-GO-4 follow-up.
+				parent := r.historyCtx
+				if parent == nil {
+					parent = context.Background()
+				}
+				histCtx, histCancel := context.WithTimeout(parent, 15*time.Second)
 				defer histCancel()
+				if ctx != nil {
+					stop := context.AfterFunc(ctx, histCancel)
+					defer stop()
+				}
 				allEntries := discovery.LoadHistoryChainTailCtx(
 					histCtx, r.claudeDir, ids, workspace, maxPersistedHistory,
 				)
