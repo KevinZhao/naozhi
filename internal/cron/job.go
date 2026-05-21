@@ -161,7 +161,10 @@ type TriggerKind string
 const (
 	TriggerScheduled TriggerKind = "scheduled"
 	TriggerManual    TriggerKind = "manual"
-	TriggerCatchup   TriggerKind = "catchup"
+	// TriggerCatchup is reserved for the missed-schedule replay path (P3,
+	// not yet implemented). No production code emits it today; consumers
+	// should treat unknown trigger strings as forward-compatible.
+	TriggerCatchup TriggerKind = "catchup"
 )
 
 // ErrorClass 是 cron run 错误的机器可读分类。executeOpt 各失败分支映射到
@@ -183,7 +186,9 @@ const (
 	ErrClassWorkDirOutsideRoot ErrorClass = "workdir_outside_root"
 	ErrClassOverlapSkipped     ErrorClass = "overlap_skipped"
 	ErrClassPausedConcurrent   ErrorClass = "paused_concurrent"
-	ErrClassPanic              ErrorClass = "panic"
+	// ErrClassPanic is reserved for the future panic-recovery path
+	// (P3, not yet implemented); finishRun does not emit it today.
+	ErrClassPanic ErrorClass = "panic"
 )
 
 // hexIDBytes 是所有 cron 内部 ID（jobID / runID）的熵字节数。固定 8 字节
