@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strconv"
 	"sync"
 	"testing"
 
@@ -144,7 +145,7 @@ func TestReattachProcess_ConcurrentInjectHistory(t *testing.T) {
 					Type: "user",
 					// Distinct summaries: writer index and sequence
 					// so the union check below is exact.
-					Summary: "w" + itoa(w) + "i" + itoa(i),
+					Summary: "w" + strconv.Itoa(w) + "i" + strconv.Itoa(i),
 				}})
 			}
 		}()
@@ -218,28 +219,4 @@ func TestEventEntries_DefaultEndpoint_ReturnsFullHistoryAfterReattach(t *testing
 	if got[len(got)-1].Summary != "post-restart turn" {
 		t.Errorf("last entry=%q want post-restart turn", got[len(got)-1].Summary)
 	}
-}
-
-// itoa is a tiny non-allocating int→string helper for the concurrent test
-// (avoids strconv import noise in this single test file).
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	neg := n < 0
-	if neg {
-		n = -n
-	}
-	var buf [20]byte
-	i := len(buf)
-	for n > 0 {
-		i--
-		buf[i] = byte('0' + n%10)
-		n /= 10
-	}
-	if neg {
-		i--
-		buf[i] = '-'
-	}
-	return string(buf[i:])
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/naozhi/naozhi/internal/textutil"
 	"github.com/naozhi/naozhi/internal/transcribe"
 )
 
@@ -137,7 +138,7 @@ func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Requ
 	const maxTranscribeRespBytes = 1 << 20 // 1 MiB
 	if len(text) > maxTranscribeRespBytes {
 		slog.Warn("transcribe text truncated", "orig_len", len(text), "cap", maxTranscribeRespBytes)
-		text = text[:rtruncByteLen(text, maxTranscribeRespBytes)]
+		text = text[:textutil.TruncateAtRuneBoundary(text, maxTranscribeRespBytes)]
 	}
 
 	slog.Info("transcribe ok", "text_len", len(text), "mime", mimeType, "size", len(data))

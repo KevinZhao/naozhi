@@ -797,7 +797,11 @@ type replyTracker struct {
 	editCh        chan struct{} // buffered(1), signals editLoop to redraw
 	done          chan struct{} // closed when the owning turn completes; exits editLoop
 	linesMu       sync.Mutex    // guards statusLines
-	statusLines   []string      // pre-allocated capped ring; joined lazily
+	// statusLines is a pre-allocated slice capped at maxStatusLines (8) by
+	// appendStatusLine — it grows up to that bound and then drops the head
+	// via copy-to-front (see status.go). Joining to a single string is
+	// deferred to the read path (renderStatus). R230-CQ-15.
+	statusLines []string
 
 	// TodoWrite delivery: onEvent publishes the latest checklist text into
 	// pendingTodo (atomic.Pointer — single-writer race-free overwrite) and
