@@ -205,24 +205,12 @@ type ManagedSession struct {
 	persistedHistory []cli.EventEntry
 
 	// persistedSeededLen is the prefix length of persistedHistory that has
-	// already been forwarded into the *current* proc.EventLog via the
-	// ReattachProcess catch-up. It is reset to 0 on every storeProcess(new)
-	// (under historyMu) so a fresh proc starts with seededLen=0 and gets the
-	// full persistedHistory snapshot at attach time.
-	//
-	// Why this exists: without it, kiro (and any non-claude backend) sessions
-	// that get reconnected via ReconnectShims after a naozhi restart end up
-	// with an empty proc.EventLog while persistedHistory holds the real
-	// pre-restart conversation — naozhilog tier1 already wrote it but the
-	// proc didn't exist yet. Subsequent dashboard polls hit the live proc
-	// branch of EventEntries / EventEntriesBefore, see the empty ring, and
-	// the user "loses" their history after the first message lands in the
-	// new proc.
-	//
-	// InjectHistory uses this to decide whether each batch is "new tail" that
-	// must be forwarded to proc, vs. a re-injection of the already-seeded
-	// prefix that would double-render the same entries. Read/written under
-	// historyMu so it stays in sync with persistedHistory append/snapshot.
+	// already been forwarded into the current proc.EventLog. Reset whenever a
+	// fresh proc is published, so InjectHistory only forwards the unseeded
+	// tail rather than re-injecting the already-seeded prefix. Read/written
+	// under historyMu in sync with persistedHistory. See
+	// attachProcessAndSnapshotPersisted for the publish/snapshot ordering.
+	// R231-CQ-6.
 	persistedSeededLen int
 
 	// prevSessionIDs tracks previous session IDs for this key (oldest → newest).
