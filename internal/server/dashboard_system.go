@@ -68,6 +68,10 @@ type clearLabelOriginRequest struct {
 // Returns 200 with {"ok": true} on success, 400 for missing/invalid
 // keys, 404 when the key is unknown.
 func (s *Server) handleClearLabelOrigin(w http.ResponseWriter, r *http.Request) {
+	// Cap the body so a multi-MB hostile payload cannot be buffered
+	// before json.Decoder surfaces an error; mirrors every other
+	// dashboard mutation endpoint.
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodyBytes)
 	var req clearLabelOriginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		http.Error(w, "invalid JSON body", http.StatusBadRequest)
