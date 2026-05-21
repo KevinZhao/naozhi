@@ -484,6 +484,23 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 				return false, pendingTaskDone{}
 			}
 		}
+		// task_started/task_done both consult bgAgents on miss; mirror
+		// that fallback here so background-agent progress events are
+		// not silently dropped on the floor.
+		for i := range l.bgAgents {
+			if l.bgAgents[i].TaskID != "" && l.bgAgents[i].TaskID == e.TaskID {
+				if e.LastTool != "" {
+					l.bgAgents[i].LastTool = e.LastTool
+				}
+				if e.ToolUses > 0 {
+					l.bgAgents[i].ToolUses = e.ToolUses
+				}
+				if e.DurationMS > 0 {
+					l.bgAgents[i].DurationMS = e.DurationMS
+				}
+				return false, pendingTaskDone{}
+			}
+		}
 	case "task_done":
 		status := e.Status
 		if status == "" {

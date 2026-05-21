@@ -110,10 +110,6 @@ func IsValidID(s string) bool {
 	return true
 }
 
-// runIDPattern is the package-internal alias kept for readability at
-// existing call sites.
-var runIDPattern = IsValidID
-
 // newRunStore constructs a runStore rooted at <storePath dir>/runs.
 // storePath="" disables the store (List returns empty, Append no-ops);
 // callers can pass a Scheduler in tests without wiring up a tempdir.
@@ -156,11 +152,11 @@ func (s *runStore) Append(run *CronRun) {
 	if s == nil || s.disabled || run == nil || run.JobID == "" || run.RunID == "" {
 		return
 	}
-	if !runIDPattern(run.RunID) {
+	if !IsValidID(run.RunID) {
 		slog.Warn("cron run: skipping append with invalid run_id", "run_id", run.RunID)
 		return
 	}
-	if !runIDPattern(run.JobID) {
+	if !IsValidID(run.JobID) {
 		// jobID 历史上是 16-hex；非 hex 可能是测试 fixture / 篡改文件。
 		// 拒绝 append 而非创建可疑目录。
 		slog.Warn("cron run: skipping append with non-hex job_id", "job_id", run.JobID)
@@ -258,6 +254,15 @@ func (s *runStore) cacheGet(jobID string, limit int) ([]CronRunSummary, bool) {
 	// Cold cache: warm from disk under jobLock so concurrent Append's
 	// cacheHeadPush observes the freshly-warmed slice (and would no-op
 	// before, but warm is now true).
+	//
+	// Double-lock note: between the unlock above and the re-lock below
+	// another goroutine may also enter cacheGet for this jobID and call
+	// warmCache concurrently. warmCache is idempotent (entry.warm
+	// transitions from false to true exactly once thanks to the per-job
+	// lock guard), so the second caller sees warm=true on its own
+	// re-acquire and returns the populated slice. Either caller may
+	// observe warm=false on re-acquire if warmCache returned a disk
+	// error; both then fall back to the direct read path below.
 	if err := s.warmCache(jobID); err != nil {
 		// Disk error — caller falls back to direct disk read.
 		return nil, false
@@ -331,7 +336,7 @@ func (s *runStore) List(jobID string, limit int, before time.Time) []CronRunSumm
 	if s == nil || s.disabled || jobID == "" {
 		return nil
 	}
-	if !runIDPattern(jobID) {
+	if !IsValidID(jobID) {
 		return nil
 	}
 	if limit <= 0 {
@@ -380,7 +385,7 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 			continue
 		}
 		runID := strings.TrimSuffix(name, ".json")
-		if !runIDPattern(runID) {
+		if !IsValidID(runID) {
 			continue
 		}
 		info, err := e.Info()
@@ -404,8 +409,10 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 	// processes and re-reads even though it carries no time signal of its own.
 	slices.SortFunc(items, func(a, b item) int {
 		if a.mtime.Equal(b.mtime) {
+			// runID DESC tie-break: hex strings → reverse cmp.Compare.
 			return cmp.Compare(b.runID, a.runID)
 		}
+		// mtime DESC: newer first.
 		if a.mtime.After(b.mtime) {
 			return -1
 		}
@@ -445,7 +452,7 @@ func (s *runStore) Get(jobID, runID string) (*CronRun, error) {
 	if s == nil || s.disabled {
 		return nil, fs.ErrNotExist
 	}
-	if !runIDPattern(jobID) || !runIDPattern(runID) {
+	if !IsValidID(jobID) || !IsValidID(runID) {
 		return nil, fs.ErrNotExist
 	}
 	path := filepath.Join(s.root, jobID, runID+".json")
@@ -477,7 +484,7 @@ func (s *runStore) DeleteJob(jobID string) {
 	if s == nil || s.disabled || jobID == "" {
 		return
 	}
-	if !runIDPattern(jobID) {
+	if !IsValidID(jobID) {
 		return
 	}
 	lock := s.jobLock(jobID)
@@ -520,7 +527,7 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 			continue
 		}
 		runID := strings.TrimSuffix(name, ".json")
-		if !runIDPattern(runID) {
+		if !IsValidID(runID) {
 			continue
 		}
 		info, err := e.Info()
@@ -626,12 +633,20 @@ func (s *runStore) trimAll(now time.Time) {
 			continue
 		}
 		jobID := e.Name()
-		if !runIDPattern(jobID) {
+		if !IsValidID(jobID) {
 			continue
 		}
-		lock := s.jobLock(jobID)
-		lock.Lock()
-		s.trimJobLocked(jobID, now)
-		lock.Unlock()
+		s.trimJobUnderLock(jobID, now)
 	}
+}
+
+// trimJobUnderLock acquires the per-job lock with defer-unlock so a
+// panic inside trimJobLocked (e.g. an FS quirk surfacing through
+// os.ReadDir on a FUSE mount) cannot deadlock subsequent Append calls
+// for the same jobID.
+func (s *runStore) trimJobUnderLock(jobID string, now time.Time) {
+	lock := s.jobLock(jobID)
+	lock.Lock()
+	defer lock.Unlock()
+	s.trimJobLocked(jobID, now)
 }

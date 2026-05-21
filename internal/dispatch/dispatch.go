@@ -698,13 +698,24 @@ func (d *Dispatcher) sendAndReply(
 		}
 	}
 	var outImages []platform.Image
-	for _, path := range cli.ExtractImagePaths(replyText) {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			continue
+	imagePaths := cli.ExtractImagePaths(replyText)
+	if len(imagePaths) > 0 {
+		// One pass through replyText for all paths: previously the per-path
+		// strings.ReplaceAll loop scanned the whole message text N times,
+		// turning a multi-image reply into O(N * len(replyText)). Building
+		// a single Replacer keeps it O(len(replyText)). Each path is always
+		// added to replacePairs (even when ReadFile fails) so the user-visible
+		// behaviour matches the prior strings.ReplaceAll loop where every
+		// extracted path got rewritten to "[图片]" regardless of read success.
+		replacePairs := make([]string, 0, 2*len(imagePaths))
+		for _, path := range imagePaths {
+			data, err := os.ReadFile(path)
+			if err == nil {
+				outImages = append(outImages, platform.Image{Data: data, MimeType: cli.MimeFromPath(path)})
+			}
+			replacePairs = append(replacePairs, path, "[图片]")
 		}
-		outImages = append(outImages, platform.Image{Data: data, MimeType: cli.MimeFromPath(path)})
-		replyText = strings.ReplaceAll(replyText, path, "[图片]")
+		replyText = strings.NewReplacer(replacePairs...).Replace(replyText)
 	}
 
 	tracker.waitReady(ctx)

@@ -162,7 +162,12 @@ func Replace(newBin, installPath string) (backupPath string, err error) {
 	backupPath = installPath + backupSuffix
 
 	// Backup current binary so we can roll back on service-restart failure.
-	if err := copyFile(installPath, backupPath); err != nil {
+	// Force 0600 on the backup: the install dir is sometimes shared
+	// (/usr/local/bin), and inheriting the live binary's 0755 would leave
+	// a world-executable copy of the prior version readable by other UIDs
+	// for the duration of the upgrade. Rollback reopens it and chmod 0755
+	// after a successful restore.
+	if err := copyFileBackup(installPath, backupPath); err != nil {
 		return "", fmt.Errorf("backup current binary: %w", err)
 	}
 
@@ -196,6 +201,11 @@ func Replace(newBin, installPath string) (backupPath string, err error) {
 		if rerr := copyFile(backupPath, installPath); rerr != nil {
 			errs = append(errs, fmt.Errorf("restore backup after rename failure: %w", rerr))
 		} else {
+			// copyFile preserves the backup's 0600 mode; flip back to
+			// 0755 so the restored binary remains executable by systemd.
+			if cerr := os.Chmod(installPath, 0o755); cerr != nil {
+				errs = append(errs, fmt.Errorf("chmod restored binary: %w", cerr))
+			}
 			_ = os.Remove(backupPath)
 		}
 		return "", errors.Join(errs...)
@@ -204,9 +214,14 @@ func Replace(newBin, installPath string) (backupPath string, err error) {
 }
 
 // Rollback restores backupPath → installPath and removes the backup file.
+// The backup is created with 0600 mode (see copyFileBackup) so we chmod
+// the restored binary back to 0755 to keep it executable for systemd.
 func Rollback(installPath, backupPath string) error {
 	if err := copyFile(backupPath, installPath); err != nil {
 		return fmt.Errorf("rollback restore: %w", err)
+	}
+	if err := os.Chmod(installPath, 0o755); err != nil {
+		return fmt.Errorf("rollback chmod: %w", err)
 	}
 	_ = os.Remove(backupPath)
 	return nil
@@ -409,6 +424,29 @@ func copyFile(src, dst string) error {
 	}
 
 	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
+	if err != nil {
+		return fmt.Errorf("open destination %s: %w", dst, err)
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return fmt.Errorf("copy %s to %s: %w", src, dst, err)
+	}
+	return out.Sync()
+}
+
+// copyFileBackup copies src to dst with owner-only permissions, regardless
+// of src's mode bits. Use for the .naozhi-upgrade.bak path on shared
+// install directories so the brief window before the backup is removed
+// does not expose the prior binary copy as world-readable / executable.
+func copyFileBackup(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("open source %s: %w", src, err)
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return fmt.Errorf("open destination %s: %w", dst, err)
 	}

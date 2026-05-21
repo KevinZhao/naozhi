@@ -104,6 +104,13 @@ func (r *Router) startAttachmentTracker() {
 // worker goroutine. Called from Router.shutdown AFTER the persister
 // itself has stopped so no more OnPersistedEntry callbacks arrive
 // while we're trying to drain.
+//
+// Intentionally parents on context.Background, NOT r.historyCtx:
+// shutdown's first action cancels historyCtx, so deriving from it
+// here would yield an already-cancelled context and the tracker
+// drain loop would get zero time to flush pending bumps. R230-GO-5
+// tracks splitting shutdown into a dedicated stop-ctx; until that
+// lands the 5s budget is the load-bearing bound.
 func (r *Router) stopAttachmentTracker() {
 	if r.attachmentTracker == nil {
 		return
