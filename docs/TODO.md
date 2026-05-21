@@ -1625,3 +1625,68 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [x] **R228-ARCH-17 — `wshub` 持整个 `*cron.Scheduler` 仅为调 `EnsureStub`（P3）**: 耦合面 300+ 方法。方案：定义 `cronStubChecker` interface（1 method），Hub 字段改 interface。涉及 `internal/server/dashboard_session.go:713`。 — 已修复（dashboard_session.go 内定义 cronStubChecker { EnsureStub(key string) bool } + SessionHandlers.scheduler 字段类型收窄到接口；*cron.Scheduler 隐式满足，server.go 构造点零改动；goimports 自动移除 cron import。Hub.scheduler 仍是 *cron.Scheduler，因调用面 >1 方法，不在本轮范围），本批 PR #185
 - [ ] **R228-ARCH-18 — `dispatch.Dispatcher.projectMgr` 仅用于 slash-command UX 但持整个 `*project.Manager`（P3）**: 30+ 方法面。方案：内部 1-method interface 注入。涉及 `internal/dispatch/dispatch.go:56`。
 
+## Round 230 — 5-agent 并行 code review（2026-05-21）NEEDS-DESIGN
+
+> 5 reviewer（Go / 安全 / 性能 / 代码质量 / 架构）并行扫描共 82 条发现。
+> 11 条 FIX-READY 已落本轮 PR（limitedWriter 短写错误返回 / runner.go bytes.TrimSpace + var _ Runner / filterEnv 缓存 / runstore.go slices.SortFunc / process_event_format.go 死 default 删除 / cron computeJobTimeout 注释更新 + sendCtx 30s 数值注释 + addJobLocked O(maxJobs) 注释 / wshub.go dashTokenHash 预计算 / eventlog.go turnAgents/bgAgents 收缩 cap）。
+> 以下条目为非 breaking 但需要更大改动 / 需设计决策 / 跨模块的发现，登记追踪。
+
+### Security（剩余）
+
+- [ ] **R230-SEC-7 — dashboard_token 8-15 char 公网监听只 Warn（P2）**: `cmd/naozhi/main.go:938` 公网部署时 8 字节 token 仍允许启动只 slog.Warn。方案：监听非 loopback 时最小长度提升到 16 + slog.Error+os.Exit(1)，或加 entropy 估算拒字典词。Breaking：是（部分公网部署需调长 token）。
+- [ ] **R230-SEC-10 — cron notify_chat_id 发送时未再次校验（P3）**: `internal/cron/scheduler.go` notifier 路径直接读 in-memory `j.NotifyChatID` 调 platform.Reply。`cron_jobs.json` 被篡改后绕过 validateNotifyTarget。方案：executeOpt 发 notify 前再调 validateNotifyTarget，或在 scheduler load 期 round-trip 校验一遍。Breaking：否。
+- [ ] **R230-SEC-11 — runsLimiter nil-guard 静默放行（P3）**: `internal/server/dashboard_cron.go:1029` `if h.runsLimiter != nil` 在测试桥接合理，但 `server.New` 重构漏 wire 时 silently 退化为无限速。方案：buildServer 构造 cronH 后 assert `h.runsLimiter != nil` when scheduler != nil。Breaking：否。
+- [ ] **R230-SEC-12 — GET /dashboard 未认证路径不限速（P3）**: `internal/server/dashboard.go:376` 未登录用户可无限调 `/dashboard` 触发 login 模板渲染。方案：未认证 path per-IP 30/min 限速器（与 wsUpgradeLimiter 同级）。Breaking：否。
+
+### Go 正确性 / 并发（剩余）
+
+- [ ] **R230-GO-1 — SnapshotChainIDs `historyMu` 实际不保护 prevSessionIDs（P1）**: `internal/session/managed.go:368-385` reader 取 historyMu.RLock 读 `prevSessionIDs`，但 writer（registerStub / spawnSession / RenameSession）在 r.mu 下写而不持 historyMu。方案：要么写侧补 historyMu.Lock，要么把 SnapshotChainIDs 改用 r.mu.RLock 并修正注释。Breaking：否。
+- [ ] **R230-GO-4 — spawnSession inline history load 同步 IIFE 包了 historyWg（P2）**: `internal/session/router_lifecycle.go:699-711` `historyWg.Add(1)/Done()` 套在直接调用的 `func(){…}()` 上，对 Shutdown.Wait 是 noop。方案：若意图异步则补 `go`；若意图同步则删 historyWg 包装并加注释。Breaking：否。
+- [ ] **R230-GO-7 — executeOpt sendCtx 用 context.Background 让 5h 任务无法 shutdown 期取消（P2）**: `internal/cron/scheduler.go:1955` 5h execTimeout 的 cron 任务 stopCtx fire 后仍跑满。方案：deadline watchdog 扩展为 stopCtx 触发也调 InterruptViaControl，或 sendCtx 改用 `context.WithTimeout(s.stopCtx, jobTimeout+grace)`。Breaking：否。
+- [ ] **R230-GO-8 — finishRun bumpRunStateMetrics 在 persist 回滚前已计数（P2）**: `internal/cron/scheduler.go:2103` persist 失败时 in-memory job 字段回滚但 CronRunSucceededTotal 已 +1。方案：bumpRunStateMetrics 移到 recordResultP0WithSanitised 返回 ok 之后。Breaking：否。
+- [ ] **R230-GO-10 — spawnSession 用 caller ctx 而非 r.historyCtx（P3）**: `internal/session/router_lifecycle.go:702` HTTP 短超时上下文取消会让 session 历史加载半截。方案：`context.WithTimeout(r.historyCtx, 15*time.Second)`。Breaking：否。
+- [ ] **R230-GO-13 — runstore cacheHeadPush 每次 prepend O(N) copy（P3）**: `internal/cron/runstore.go:232` keepCount=200 时每个 Append 都 200-element copy。方案：改用 oldest-first 内部存储，copySummariesLocked 时反转。Breaking：否（内部）。
+- [ ] **R230-GO-15 — emitOverlapSkipped CronRunStartedTotal 与正常路径计数顺序不一致（P3）**: `internal/cron/scheduler.go:2236` vs `1805`。方案：把 `CronRunStartedTotal.Add(1)` 收敛到 emitRunStarted 内一处。Breaking：否。
+- [ ] **R230-GO-18 — registerStub 用 chainIDs 完全替换 prevSessionIDs（P2）**: `internal/session/router_discovery.go:454` 每次重新注册 stub 把 fresh_context=false 累积的多 session 链折成 1 element。方案：existing chain 非空时只追加，不替换。Breaking：否。
+
+### Performance（剩余）
+
+- [ ] **R230-PERF-1 — connector_subscribe 每次 notify 都 Snapshot()（P1）**: `internal/upstream/connector_subscribe.go:74` 每事件 10 atomic.Load + SetModel 副作用，仅为读 State。方案：为 ManagedSession 提供轻量 `State() string` / `DeathReason() string`。Breaking：否（新增方法）。
+- [ ] **R230-PERF-2 — eventlog.Append 单条路径每次分配 `[]EventEntry{e}`（P1）**: `internal/cli/eventlog.go:736` 字面切片在 atomic.Pointer sink 调用上逃逸到堆，5-50 events/s × N session 持续 alloc。方案：EventLog 字段缓冲 `sinkOneBuf [1]EventEntry`（Append 已串行）替代 sync.Pool。Breaking：否。
+- [ ] **R230-PERF-4 — handleSubscribe per-key 限额线性扫描全部连接（P2）**: `internal/server/wshub.go:570` h.mu.Lock 下 O(connections × key) 扫描。方案：维护 `subscriberCounts map[string]int` O(1)。Breaking：否。
+- [ ] **R230-PERF-6 — completeSubscribe 调两次 Snapshot()（P2）**: `internal/server/wshub.go:702/720` 复用同一 snap 即可。方案：在调用点共享 snap，740 行使用包级 `var emptyEntries []cli.EventEntry`。Breaking：否。
+- [ ] **R230-PERF-7 — handleList 每次重建 projectList slice（P2）**: `internal/server/dashboard_session.go:527-576` 1Hz × N tab 持续分配，project list 实际分钟级变化。方案：`initStaticStats` 或 rescan 时缓存。Breaking：否。
+- [ ] **R230-PERF-8 — resubscribeEvents 每轮 h.mu.RLock + map read 检查 subGen（P2）**: `internal/server/wshub.go:1159` 12 iter × N 客户端瞬间死亡触发并发。方案：用已传入的 gen 参数局部变量比较，免锁。Breaking：否（内部函数）。
+- [ ] **R230-PERF-10 — connector_subscribe Snapshot+EventEntriesSince 双取 eventlog.mu（P3）**: `internal/upstream/connector_subscribe.go:60-79` 高活跃会话每事件持锁两次。方案：与 R230-PERF-1 联合用 State() + lastState 缓存跳过无变化。Breaking：否。
+- [ ] **R230-PERF-12 — EventLog.Subscribe map 不收缩、无初始容量（P3）**: `internal/cli/eventlog.go:911-912` CloseSubscribers nil 后下次 Subscribe 1→2→4 growth rounding。方案：const subscribersMapInitCap=4 显式预分配；与 R229-PERF-12 联合实现 sync.Pool。Breaking：否。
+
+### Code 质量（剩余）
+
+- [ ] **R230-CR-1 — recordResult 变成测试-only 死代码（P2）**: `internal/cron/scheduler.go:2390` 生产路径走 recordResultP0WithSanitised；recordResult 仅 persist_failure_test.go 两处调用。方案：重写测试调 P0 版后删 recordResult；或保留并明确标 test-helper-only。Breaking：否。
+- [ ] **R230-CR-2 — computeJobTimeout schedule 参数明确忽略（P2）**: `internal/cron/job.go:277` 函数签名带 schedule 参数但 `_ = schedule`。方案：删除函数 inline `s.execTimeout` 到两处 caller，或保留但去 schedule 参数。Breaking：否（unexported）。
+- [ ] **R230-CR-3 — addJobLocked 自己上锁违反 *Locked 命名约定（P2）**: `internal/cron/scheduler.go:846` 其他 `*Locked` 函数（pause/resume/persist）都遵守 caller-holds-lock。方案：重命名为 addJob，或挪出锁让 caller 持。Breaking：否。
+- [ ] **R230-CR-4 — TriggerNow entryID==0/!=0 两个 goroutine 体几乎相同（P2）**: `internal/cron/scheduler.go:1423-1488` 两条 60 行近一致路径。方案：抽 `triggerNowExecute(jobID string)` 共享。Breaking：否。
+- [ ] **R230-CR-5 — ManagedSession 三个 SessionID 访问点（getSessionID/SessionID/GetSessionID）（P2）**: `internal/session/managed.go:727-735` cli.HistorySessionView 与 processIface 各要一份。方案：godoc 集中说明三访问点关系，或合并到一个主入口。Breaking：否。
+- [ ] **R230-CR-7 — executeOpt 错误分类逻辑散在 4 个 finishRun 分支（P2）**: `internal/cron/scheduler.go:1760-2053` `(state, errClass)` 映射内联。方案：抽 `classifySendError(err) (RunState, ErrorClass)` ~15 行。Breaking：否。
+- [ ] **R230-CR-8 — registerStub vs registerStubByValue 双轨（P2）**: `internal/cron/scheduler.go:641-663` 仅参数风格不同。方案：folder 成 1-line wrapper。Breaking：否。
+- [ ] **R230-CR-11 — recordResultP0 RunCounters.addRun 不在 persist 失败时回滚（P3）**: `internal/cron/scheduler.go:2304` 计数+1 在 persist 检查前；marshal 失败后 in-memory 字段回滚但 counter 没回。方案：addRun 移到 perr==nil 分支后。Breaking：否。
+- [ ] **R230-CR-Diag — Snapshot godoc 未声明读侧 SetModel 副作用（P3）**: `internal/session/managed.go:854` 与 R226-CR-13 内联注释呼应，但方法 godoc 未提示。方案：godoc 加 "Note: side-effect mirrors live model into persisted field; see SnapshotReadOnly future variant"。Breaking：否（与 R229-GO-2 合并）。
+
+### Architecture（剩余）
+
+- [ ] **R230-ARCH-1 — DESIGN.md 第 5 节 HTTP Server 描述与现实严重失真（P1）**: `docs/design/DESIGN.md:492-516` 说 server 只注册 /health；实际 92 个文件 / 60+ 路由。方案：DESIGN.md 加"实际 vs 理想"对比 + ADR 链接 server-split RFC。Breaking：否。
+- [ ] **R230-ARCH-2 — dispatch/cron/upstream/sysession 各自定义 SessionRouter 接口（P1）**: 4 包同名 `SessionRouter` 各持不同方法集。方案：约定 `XxxSessionRouter` 命名空间 + `internal/session/contracts/` 集中接口约束。Breaking：是。
+- [ ] **R230-ARCH-3 — cron Scheduler 直持 platforms map 越层调 Reply（P1）**: cron 已悄悄成为第二个 dispatch（持 Agents map / 复刻 retry+SplitText）。方案：cron 内禁用 platform.Platform，强制走 dispatch facade。Breaking：是（与 R219-ARCH-8 合并）。
+- [ ] **R230-ARCH-4 — processIface god interface 拆分优先级（P1）**: `internal/session/managed.go:35-102` 30+ 方法含 dashboard-only 字段。方案：先剥 dashboard 字段到 ProcessIntrospector，process 核心剩 8-10 方法。Breaking：是。
+- [ ] **R230-ARCH-5 — 保留 key 命名空间策略表分散在 5 处（P1）**: cron:/project:/scratch:/sys: 在 reservedKeyPrefixes/exemptKeyPrefixes/saveStore/Cleanup/Sidebar 各列。方案：`KeyKind enum + Policy struct` 单一事实源 + vet 阻断。Breaking：否。
+- [ ] **R230-ARCH-6 — 4 个 platform adapter 各自 8KiB inbound text byte cap（P2）**: feishu/slack/discord/weixin 各自 maxIncomingTextBytes=8KiB。方案：`platform.DefaultMaxIncomingBytes`（与 DefaultMaxReplyLen 同级）。Breaking：否。
+- [ ] **R230-ARCH-7 — slack/discord 各写一份 messageRef codec（P2）**: 都用 `strings.SplitN(msgID, ":", 2)`。方案：`platform.CompositeMessageID{ChatID, MsgID}` + Encode/Decode。Breaking：否。
+- [ ] **R230-ARCH-9 — Platform caps 抽象不到位（P2）**: `cli.ProtocolCaps` 已聚合，但 Platform 仍混用 `MaxReplyLength` 值 / `SupportsInterimMessages` bool / `AsReactor` 接口断言三种返回风格。方案：`PlatformCaps` 结构体聚合（与 R229-ARCH-6 合并）。Breaking：是。
+- [ ] **R230-ARCH-10 — Hub 三 setter vs SysessionMgr 字段注入风格不一（P2）**: `wshub.go:282-291` SetScheduler/SetUploadStore/SetScratchPool 是 setter；ServerOptions.SysessionManager 是字段。方案：四个一律走 HubOptions required 字段。Breaking：否（与 R219-ARCH-5 合并）。
+- [ ] **R230-ARCH-11 — Session mode 4 态文档 vs 实际 7+ 态无单一权威类型（P2）**: `cli.ProcessState` 4 态 + ManagedSession.exempt + key 前缀派生 stub + process==nil 派生 paused。方案：`session.SessionMode enum {Active, Stub, Paused, Scratch, Exempt}` 正交叠加 + 类型化 transitions。Breaking：是。
+- [ ] **R230-ARCH-13 — scratchPool 与 router.sessions 双池强迫 Hub 分流（P2）**: `internal/session/scratch.go` + `dashboard_scratch.go` 每加一个 scratch 操作两路径都得复刻。方案：合到 sessions map + Tag=Scratch 或文档化双池约束。Breaking：是。
+- [ ] **R230-ARCH-14 — 文件化状态多实例并发写无 flock（P2）**: 6 个独立 atomic write store 假设单实例独占。方案：state file 加 `flock(LOCK_EX) + writer_pid + writer_host + generation`。Breaking：是。
+- [ ] **R230-ARCH-15 — main.go ~390 行 backend-specific settings.json 重写（P2）**: kiro backend 不需要。方案：抽 `BackendProfile.PrepareEnv()`，main 只调 profile。Breaking：否（与 R229-ARCH-7 合并）。
+- [ ] **R230-ARCH-17 — DESIGN.md 缺 Backend Extension Points 节（P3）**: System Session（已有 internal/sysession）/ Cron Dashboard（Phase 5 已完成）/ Gemini CLI 集成均无章节。方案：DESIGN.md 加 "Backend Extension Points" 节列 4 接口（Profile / Protocol / HistorySource / shim hint）。Breaking：否。
+- [ ] **R230-ARCH-18 — Version 双语义（DataVersion vs RenderVersion）无 godoc（P3）**: `router_core.go:1071/1086` Version() 同名两用法。方案：godoc 加两种语义说明，pending 真正拆 counter。Breaking：否（与 R229-ARCH-20 合并）。
+
