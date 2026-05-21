@@ -1299,8 +1299,12 @@ body.kbd-open .input-hints{display:none}
   .cron-timeline-panel .ctr-dur{font-size:11px}
 }
 /* timeline 行选中态 — sheet 打开后该行高亮，提示用户当前看的是哪一条 run */
-.cron-timeline-panel .ctr.is-selected{background:#1c2939;box-shadow:inset 3px 0 0 var(--nz-accent)}
-.cron-timeline-panel .ctr.is-selected .ctr-state{color:var(--nz-text-strong)}
+/* PR-1 followup #3: 选中态视觉加强。色条 3→4px (与 cj-row.is-active 同级)
+ * + 背景蓝调更明显 + 状态文字 strong + dot 描边 outline 标记被选中。 */
+.cron-timeline-panel .ctr.is-selected{background:rgba(31,111,235,.12);box-shadow:inset 4px 0 0 var(--nz-accent)}
+.cron-timeline-panel .ctr.is-selected .ctr-state{color:var(--nz-text-strong);font-weight:600}
+.cron-timeline-panel .ctr.is-selected .ctr-time{color:var(--nz-text-strong)}
+.cron-timeline-panel .ctr.is-selected .ctr-dot{box-shadow:0 0 0 2px var(--nz-bg-1),0 0 0 3px var(--nz-accent)}
 
 /* ===== cron-history-redesign §6 — Run-Detail Sheet 共组件 =====
  * 桌面 (≥769)：position:absolute 仅覆盖 detail-pane（不挡列表，方便切 cron）
