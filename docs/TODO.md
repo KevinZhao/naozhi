@@ -403,7 +403,7 @@
 
 - [ ] **R225-PERF-1 — `Protocol.ReadEvent(line string)` 接口签名导致 `[]byte(line)` 强制堆 copy（P1 R67-PERF-1 ACP 分支补）**: protocol_claude.go:174 / protocol_acp.go:296 都 `json.Unmarshal([]byte(line), ...)`；最热路径每事件一次 alloc。方案：接口签名改 `ReadEvent(line []byte)`，readLoop 把 trimmed 直接传入。Breaking：是（接口）。
 - [ ] **R225-PERF-2 — `process_readloop` `system/task_started` 无背压裸 `go linker.Resolve`（P1）**: process_readloop.go:393 多 sub-agent 并发启动时短时间产生大量 goroutine。方案：用 buffered channel 信号量 / 工作池限并发；与 R224-GO-1 信号量改造统筹。
-- [ ] **R225-PERF-3 — `subagent_transcript.readLocked` `io.ReadAll(f)` 无上限（P1）**: subagent_transcript.go:81 长 session transcript 几十 MB；agent_tailer 轮询会反复 alloc。方案：`io.LimitReader` + 利用 offset seek 仅读增量。
+- [x] **R225-PERF-3 — `subagent_transcript.readLocked` `io.ReadAll(f)` 无上限（P1）**: subagent_transcript.go:81 长 session transcript 几十 MB；agent_tailer 轮询会反复 alloc。方案：`io.LimitReader` + 利用 offset seek 仅读增量。 — 已修复（R227-CR-4 落地：subagent_transcript.go:86 `maxTranscriptReadBytes = 16 * 1024 * 1024` + `io.LimitReader(f, ...)`，offset seek 已在 readLocked 顶端通过 `r.offset` / `r.tail` 保证仅读增量），本批 PR #192
 - [ ] **R225-PERF-4 — `applyMetadata meteringUsage merge` 用 slice O(n×m)（P2）**: process.go:717-745 meteringMu 锁内字符串 Unit 等比；MeteringUsage() 每读一次 make+copy。方案：`map[string]*MeteringEntry` 内部存储；Snapshot 路径缓存空 case。
 - [x] **R225-PERF-5 — `EventEntriesFromEvent` 双 wall clock 调用（P2）**: process_event_format.go:38 公开 API 不带 At 后缀的版本会再读一次 time.Now；统一走 EventEntriesFromEventAt 为内部唯一路径，公开版改文档化"测试专用"。 — 已修复，本批 PR #156
 - [ ] **R225-PERF-6 — `Snapshot SubagentInfo` slice copy（P2）**: managed.go TurnAgents 即便 turnAgentCount 已快速短路，Snapshot 中其他分配仍存在；评估 SubagentInfo slice sync.Pool。
@@ -412,7 +412,7 @@
 - [ ] **R225-PERF-9 — `wshub.eventPushLoop` 同一 session 多 WS 各自 marshal（P2）**: wshub.go:1028 50 个标签页同 session 时同批事件 marshal 50 次。方案：Hub 层一次 marshal fan-out 同一 immutable []byte 引用。
 - [ ] **R225-PERF-10 — `marshalPooled` 每次 copy 一份独立 backing（P2）**: dashboard.go:83 高频 broadcast 下不可避免；考虑对固定组合 session_state 做 LRU 缓存。
 - [x] **R225-PERF-11 — `eventlog.Append` UUID 生成在锁内（P2）**: eventlog.go:596 Append 持 mu.Lock 期间调 stampUUID → crypto/rand 系统调用。方案：在锁外预先生成（Append 单条 + AppendBatch 循环前 in-place 全部预 stamp，caller-set UUID 保留）。 — 已修复，本批 PR #158
-- [ ] **R225-PERF-12 — `agent_message_chunk` `p.mu.Lock` 复用保护 textBuf（P2）**: protocol_acp.go:494 高频 chunk 与 sessionID 共享一锁；evaluate 把 textBuf 移入 readLoop 私有或独立细粒度 mu。
+- [x] **R225-PERF-12 — `agent_message_chunk` `p.mu.Lock` 复用保护 textBuf（P2）**: protocol_acp.go:494 高频 chunk 与 sessionID 共享一锁；evaluate 把 textBuf 移入 readLoop 私有或独立细粒度 mu。 — 已修复（R226-PERF-11 落地：sessionID 已切到独立 atomic.Pointer[string]（protocol_acp.go:103-112），mu 当前只守 textBuf 一条字段；agent_message_chunk 与 WriteMessage / WriteInterrupt / readLoop sessionID 读不再争抢同一把锁），本批 PR #192
 - [x] **R225-PERF-13 — `subagent_link.SetAgentInternalID` 持 wlock 做 O(500) 回扫（P3）**: eventlog.go:553 短时阻塞所有 Append。方案：early-exit + 限制最大回扫深度（≤50）。 — 已修复（setAgentInternalIDMaxScan = 50 上限 + foundAgent/foundTaskStart 标记两条都 backfill 后 break），本批 PR #157
 - [ ] **R225-PERF-14 — `wsclient.sweepSubGenExpiredLocked` 在 hub 写锁下扫 map（P3）**: wsclient.go:143 阻塞 subscribe/unsubscribe 并发。方案：移到 client 自身轻量 mutex。
 - [x] **R225-PERF-15 — `process_send.buildUserEntry` thumbnail goroutine 无并发上限（P3）**: 最多 20 个 goroutine CPU-bound JPEG encode 同时启动；建议限并发 4。 — 已修复（capacity=4 信号量 + 9 行 diff），本批 PR #153
@@ -618,12 +618,12 @@
 
 - [ ] **R220-GO-1 — `cli.SubagentLinker.Resolve` retryInterval 250ms `time.Sleep` 无 ctx 中断（P1，与 R219-GO-1 同批修复）**: Resolve 多次 retry 间隔用 `time.Sleep(l.retryInterval)`，shutdown ctx 取消时 goroutine 仍要等满 retry 间隔（最多 12 次 × 250ms = 3s）。方案：`select { case <-time.After(l.retryInterval): case <-ctx.Done(): return }`，与 R219-GO-1 接 ctx 改造同批进行。涉及：`internal/cli/subagent_link.go:288,326`。
 - [ ] **R220-GO-2 — `project_files.go` `serveRender`/`servePreview`/`serveRaw` 三处独立二次 os.Open 共享 R219-SEC-2 TOCTOU 缺口（P1，扩展 R219-SEC-2）**: R219-SEC-2 只点了 serveRender，但 servePreview（第 742 行）与 serveRaw（第 836 行）也各自独立 `os.Open(resolved)` 二次读盘；preview 路径还把内容塞进 JSON 返回。方案：handleFileGet 统一在 Lstat 阶段持已 open 的 *os.File 传递到三个 helper，避免 double-open race。
-- [ ] **R220-GO-3 — `cron.applyJitter` 不识别 jitter window 内 DeleteJob，jobRunningGuard 留死锁式 hold 阻塞 TriggerNow（P2）**: applyJitter 接受 `s.stopCtx` 但不检查 `s.jobs[j.ID]` 是否仍在；jitter window 内 DeleteJob 会让 guard 一直 hold 到 jitter 到期才发现 job 已删，期间 TriggerNow 同 ID 失败。方案：jitter 期间订阅 per-job cancel channel，或 applyJitter 返回后再判 job 存在性。涉及：`internal/cron/scheduler.go:1508`。
+- [x] **R220-GO-3 — `cron.applyJitter` 不识别 jitter window 内 DeleteJob，jobRunningGuard 留死锁式 hold 阻塞 TriggerNow（P2）**: applyJitter 接受 `s.stopCtx` 但不检查 `s.jobs[j.ID]` 是否仍在；jitter window 内 DeleteJob 会让 guard 一直 hold 到 jitter 到期才发现 job 已删，期间 TriggerNow 同 ID 失败。方案：jitter 期间订阅 per-job cancel channel，或 applyJitter 返回后再判 job 存在性。涉及：`internal/cron/scheduler.go:1508`。 — 已修复（applyJitter 返回后 RLock 检查 `s.jobs[j.ID]` 存在性，已删则提前 return 让 deferred inflight.running.Store(false) 立即释放 CAS guard，TriggerNow 同 id 不再被"already running"误拒），本批 PR #192
 
 ### 性能 — 协议接口变更或需 benchmark
 
 - [ ] **R220-PERF-1 — `countActive()` evictOldest/Takeover/spawnSession 路径全 map scan（P1）**: 4 个 caller 各自 `r.mu.Lock()` 下做完整 map 扫描，500 session 量级会显著增加锁内 CPU；Cleanup 已用 `newActive` 增量，evict/takeover 没接。方案：传 `delta int` 给热路径做原子加，countActive 仅在 Cleanup 全量重算。涉及：`internal/session/router.go:2126,2400,2472,4067`。
-- [ ] **R220-PERF-2 — `EventLog.SetAgentInternalID` 全 ring backward scan 在 OnResolve 异步回调写锁内执行（P2）**: 每次 resolve 走 500 entry backward scan 到 patch InternalAgentID/JSONLPath/FirstPromptID，期间堵 Append。方案：维护 `toolUseID → ringIndex` 小 map，直接 slot patch，O(1) 替代 O(N)。涉及：`internal/cli/eventlog.go:560`。
+- [x] **R220-PERF-2 — `EventLog.SetAgentInternalID` 全 ring backward scan 在 OnResolve 异步回调写锁内执行（P2）**: 每次 resolve 走 500 entry backward scan 到 patch InternalAgentID/JSONLPath/FirstPromptID，期间堵 Append。方案：维护 `toolUseID → ringIndex` 小 map，直接 slot patch，O(1) 替代 O(N)。涉及：`internal/cli/eventlog.go:560`。 — 已修复（R225-PERF-13 落地：eventlog.go:21 `setAgentInternalIDMaxScan = 50` 上限 + foundAgent/foundTaskStart 双条匹配后 break early，wlock 持锁窗口从 O(maxSize=500) 降到 ≤50 entry），本批 PR #192
 - [ ] **R220-PERF-3 — `EventLog.EntriesSince` 初始 catch-up 在 RLock 下复制 500 entry × 512B（P2）**: 反向扫描+复制全在 l.mu RLock 内，subscriber 初始订阅时阻塞 Append 一段时间。方案：先 snapshot ring 索引（head/count），release RLock，再在临时 slice 内拷贝。涉及：`internal/cli/eventlog.go:869`。
 - [ ] **R220-PERF-4 — `Cleanup` pass2 对 candidate 做 proc.Alive + proc.IsRunning 二次锁获取（P2）**: pass1 在 r.mu RLock 下收集 candidate proc 指针，pass2 又对每个 candidate 取 `proc.mu.RLock` 跑 IsRunning，与热 Send 路径锁竞争。方案：pass1 同时 capture proc.GetState() 一次，pass2 直接读 state。涉及：`internal/session/router.go:2920-2946`。
 - [ ] **R220-PERF-5 — `hub.debounceMu` 高频锁获取无 atomic 短路（P2）**: 50 tab × 5 evt/s 让 debounceMu 拿 ~300×/s 包括 timer callback 重入。方案：atomic.Bool "pending" flag 在 fast path 取代 mutex acquire；首次 set 触发 AfterFunc。涉及：`internal/server/wshub.go:140-149`。
@@ -1333,7 +1333,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 涉及: `internal/cli/eventlog.go:627`
 
 
-- [ ] **R215-PERF-P2-3 — `wshub.marshalPooled` 返回副本即便单订阅者**: `SendRaw` enqueue 后不再持 slice，小 batch 场景可省 copy。
+- [x] **R215-PERF-P2-3 — `wshub.marshalPooled` 返回副本即便单订阅者**: `SendRaw` enqueue 后不再持 slice，小 batch 场景可省 copy。 — 已确认归档（dashboard.go:84-97 `marshalPooled` 必须 copy：源 backing 由 `jsonEncPool` 复用，下次 Get→Reset→Encode 会原地覆盖，省 copy 会让先前调用方拿到的 slice 被后续 marshalPooled 改写产生 fan-out 错乱；当前 SendRaw 链路异步消费，回写时机无法精确判断，copy 是池化语义的必要代价），本批 PR #192
   - 方案：单订阅 fast-path 直接传 pooled buffer，两订阅起再 clone。
   - 涉及: `internal/server/wshub.go:996,1020`
 

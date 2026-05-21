@@ -96,6 +96,19 @@ function defaultEvents() {
   ];
 }
 
+// defaultCronRuns — 为 cron-001 生成 5 条 recent_runs（mix succeeded/failed/skipped），
+// 用于测试 timeline 行选中、sheet 打开、↑↓ 切换、详情 fetch 等 PR-1 交互。
+function defaultCronRuns() {
+  const now = Date.now();
+  return [
+    { run_id: 'run-aaaa1111', state: 'failed',    started_at: now - 1*60*60*1000, ended_at: now - 1*60*60*1000 + 31000, duration_ms: 31000, trigger: 'cron',   session_id: 'sess-fail0001', error_class: 'network' },
+    { run_id: 'run-bbbb2222', state: 'succeeded', started_at: now - 2*60*60*1000, ended_at: now - 2*60*60*1000 + 12000, duration_ms: 12000, trigger: 'cron',   session_id: 'sess-ok000002' },
+    { run_id: 'run-cccc3333', state: 'succeeded', started_at: now - 3*60*60*1000, ended_at: now - 3*60*60*1000 + 9000,  duration_ms: 9000,  trigger: 'manual', session_id: 'sess-ok000003' },
+    { run_id: 'run-dddd4444', state: 'skipped',   started_at: now - 4*60*60*1000, ended_at: now - 4*60*60*1000 + 100,   duration_ms: 100,   trigger: 'cron'                                  },
+    { run_id: 'run-eeee5555', state: 'succeeded', started_at: now - 5*60*60*1000, ended_at: now - 5*60*60*1000 + 11000, duration_ms: 11000, trigger: 'cron',   session_id: 'sess-ok000005' },
+  ];
+}
+
 function defaultCronJobs() {
   return [
     {
@@ -108,6 +121,8 @@ function defaultCronJobs() {
       next_run: Date.now() + 3600000,
       last_run_at: Date.now() - 3600000,
       last_result: 'Server is healthy',
+      recent_runs: defaultCronRuns(),
+      stats: { total: 120, succeeded: 110, failed: 8, skipped: 2 },
     },
     {
       id: 'cron-002',
@@ -370,6 +385,60 @@ function startMockServer(overrides = {}) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ valid: false, error: 'empty schedule' }));
       }
+      return;
+    }
+
+    // /api/cron/runs/<run_id>?job_id=… — 单条 run 详情（PR-1 sheet 用）
+    if (pathname.startsWith('/api/cron/runs/') && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const runId = pathname.slice('/api/cron/runs/'.length);
+      const jobId = url.searchParams.get('job_id') || '';
+      const job = cronJobsData.find(j => j.id === jobId);
+      const summary = job && Array.isArray(job.recent_runs)
+        ? job.recent_runs.find(r => r.run_id === runId)
+        : null;
+      if (!summary) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'run not found' }));
+        return;
+      }
+      // 构造详情：prompt + result + （失败时）error_msg
+      const detail = {
+        run_id: runId,
+        job_id: jobId,
+        state: summary.state,
+        started_at: summary.started_at,
+        ended_at: summary.ended_at,
+        duration_ms: summary.duration_ms,
+        trigger: summary.trigger,
+        session_id: summary.session_id,
+        prompt: job.prompt || '',
+        work_dir: job.work_dir || '',
+        fresh: false,
+      };
+      if (summary.state === 'succeeded') {
+        detail.result = 'Task completed successfully.\nServer responded: 200 OK.\n(' + runId + ')';
+        detail.result_bytes = detail.result.length;
+      } else if (summary.state === 'failed') {
+        detail.error_msg = 'connection refused: dial tcp 10.0.0.5:443: i/o timeout';
+        detail.error_class = summary.error_class || 'network';
+      } else if (summary.state === 'skipped') {
+        detail.error_msg = 'previous run still in progress';
+      }
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(detail));
+      return;
+    }
+
+    // /api/cron/runs?job_id=&limit=&before= — 翻页加载历史 runs (PR-1 加载更多)
+    if (pathname === '/api/cron/runs' && req.method === 'GET') {
+      if (!checkAuth()) return;
+      const jobId = url.searchParams.get('job_id') || '';
+      const job = cronJobsData.find(j => j.id === jobId);
+      const runs = job && Array.isArray(job.recent_runs) ? job.recent_runs : [];
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      // 测试只用首页：next_before 缺失 → done
+      res.end(JSON.stringify({ runs, next_before: 0 }));
       return;
     }
 

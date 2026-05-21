@@ -4157,15 +4157,149 @@ document.addEventListener('keydown', function(e) {
   let closed = false;
   if (activePopover) { closeHistoryPopover(); closed = true; }
   if (document.getElementById('nav-list-popover')) { navDismissPopover(); closed = true; }
+  // cron-history-redesign §6: Esc 优先关 run-detail sheet（如果打开）。
+  // sheet 是 drawer 的二级浮层，关 sheet 而不连带关 drawer 才符合用户心智。
+  if (cronRunSheetState && cronRunSheetState.open) { closeRunDetailSheet(); closed = true; }
   // cron-panel-consolidation RFC §6.4: Esc closes the cron drawer when
   // it's open. Routed before / alongside other popover dismissals so the
   // drawer ✕ button's title="关闭 (Esc)" promise is actually kept.
   // The drawer is NOT a modal — Esc only acts when no input or modal is
   // foregrounded (gates above), and focus is restored to the originating
   // .cj-row by closeCronDetail itself.
-  if (cronDetailJobId !== null) { closeCronDetail(); closed = true; }
+  else if (cronDetailJobId !== null) { closeCronDetail(); closed = true; }
   if (closed) e.preventDefault();
 });
+
+// cron-history-redesign §6: ↑↓ 切上一条 / 下一条 run（仅当 sheet 打开时）。
+// 与 Cmd/Ctrl+Up/Down 的会话切换错开（那个有 metaKey 守卫）。
+document.addEventListener('keydown', function(e) {
+  if (!cronRunSheetState || !cronRunSheetState.open) return;
+  if (e.key !== 'ArrowUp' && e.key !== 'ArrowDown') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const tag = (e.target.tagName || '').toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || e.target.isContentEditable) return;
+  e.preventDefault();
+  navigateRunSheet(e.key === 'ArrowUp' ? 'prev' : 'next');
+});
+
+// syncSheetGeometry — 桌面端用 JS 把 sheet 的 left/top/height 同步到
+// .cron-detail-pane 的 boundingClientRect 右半（cron-history-redesign 实测）。
+// CSS 不能用 absolute（sheet 在 body，无法锚到 detail-pane；reparent 会被
+// renderCronDrawer 的 innerHTML 重写吞掉），因此走 fixed + 显式坐标。
+// ResizeObserver 监听 detail-pane（拖宽 sidebar / 窗口 resize 都会触发），
+// sheet 打开期间持续跟随。关闭时断开 observer 释放资源。
+//
+// 移动端（matches max-width:768）不调用此函数，CSS 媒体查询自带 bottom-sheet 布局。
+let _cronRunSheetGeomObs = null;
+function syncSheetGeometry() {
+  if (typeof window === 'undefined') return;
+  if (!window.matchMedia('(min-width:769px)').matches) {
+    // 移动端清掉 inline geometry 防留尾巴
+    const sh = document.getElementById('cron-run-sheet');
+    if (sh) {
+      sh.style.left = '';
+      sh.style.top = '';
+      sh.style.height = '';
+      sh.style.width = '';
+    }
+    return;
+  }
+  const sheet = document.getElementById('cron-run-sheet');
+  const detail = document.getElementById('cron-detail-pane');
+  if (!sheet || !detail) return;
+  const r = detail.getBoundingClientRect();
+  // sheet 占 detail-pane 右侧 480px（或 detail 60%，取小者）。timeline 至少
+  // 露出左侧 ≥ 200px 让 same-row toggle 可达。
+  const w = Math.min(480, Math.max(280, Math.floor(r.width * 0.6)));
+  sheet.style.left = (r.right - w) + 'px';
+  sheet.style.top = r.top + 'px';
+  sheet.style.height = r.height + 'px';
+  sheet.style.width = w + 'px';
+}
+function startSheetGeomObserver() {
+  if (typeof ResizeObserver !== 'function') return;
+  if (_cronRunSheetGeomObs) return;
+  const detail = document.getElementById('cron-detail-pane');
+  if (!detail) return;
+  _cronRunSheetGeomObs = new ResizeObserver(() => syncSheetGeometry());
+  _cronRunSheetGeomObs.observe(detail);
+  window.addEventListener('scroll', syncSheetGeometry, { passive: true });
+}
+function stopSheetGeomObserver() {
+  if (_cronRunSheetGeomObs) { _cronRunSheetGeomObs.disconnect(); _cronRunSheetGeomObs = null; }
+  window.removeEventListener('scroll', syncSheetGeometry);
+}
+
+// cron-history-redesign §6: sheet header 按钮事件绑定 + 移动端 swipe-down 关闭。
+// 一次性绑定（DOM 元素从 cold start 起就存在），避免每次 open 都重绑。
+function initCronRunSheetHandlers() {
+  const sheet = document.getElementById('cron-run-sheet');
+  if (!sheet) return;
+  const prev = document.getElementById('crs-prev');
+  const next = document.getElementById('crs-next');
+  const copy = document.getElementById('crs-copy');
+  const close = document.getElementById('crs-close');
+  if (prev) prev.addEventListener('click', () => navigateRunSheet('prev'));
+  if (next) next.addEventListener('click', () => navigateRunSheet('next'));
+  if (copy) copy.addEventListener('click', () => {
+    if (cronRunSheetState.runId) copyText(cronRunSheetState.runId);
+  });
+  if (close) close.addEventListener('click', () => closeRunDetailSheet());
+
+  // 移动端 swipe-down 关闭。仅在 max-width:768 下绑定（matchMedia listener 处理 viewport 切换）。
+  let touchStartY = 0;
+  let touchActive = false;
+  let dragOffset = 0;
+  const SWIPE_CLOSE_THRESHOLD = 80;
+  sheet.addEventListener('touchstart', (e) => {
+    if (!isMobile()) return;
+    if (!cronRunSheetState.open) return;
+    // 只响应 header 区域的滑动（避免和 body 内 <pre> 滚动冲突）
+    if (!e.target.closest('.crs-header')) return;
+    if (!e.touches || e.touches.length !== 1) return;
+    touchStartY = e.touches[0].clientY;
+    touchActive = true;
+    dragOffset = 0;
+    sheet.style.transition = 'none';
+  }, { passive: true });
+  sheet.addEventListener('touchmove', (e) => {
+    if (!touchActive) return;
+    if (!e.touches || e.touches.length !== 1) return;
+    const dy = e.touches[0].clientY - touchStartY;
+    if (dy < 0) { dragOffset = 0; return; } // 向上滑不动
+    dragOffset = dy;
+    sheet.style.transform = 'translateY(' + dy + 'px)';
+  }, { passive: true });
+  sheet.addEventListener('touchend', () => {
+    if (!touchActive) return;
+    touchActive = false;
+    sheet.style.transition = '';
+    sheet.style.transform = '';
+    if (dragOffset >= SWIPE_CLOSE_THRESHOLD) {
+      // closeRunDetailSheet 把焦点还给 timeline 行；如果该行已被 unmount
+      // (用户切了 cron / 列表重渲染)，闭包里的 row.focus() 会静默失败。
+      // 此处做兜底：保证 sheet 内已隐藏元素不再被聚焦。
+      if (sheet.contains(document.activeElement) && document.activeElement.blur) {
+        document.activeElement.blur();
+      }
+      closeRunDetailSheet();
+    }
+    dragOffset = 0;
+  });
+  sheet.addEventListener('touchcancel', () => {
+    if (!touchActive) return;
+    touchActive = false;
+    sheet.style.transition = '';
+    sheet.style.transform = '';
+    dragOffset = 0;
+  });
+}
+
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', initCronRunSheetHandlers);
+} else {
+  initCronRunSheetHandlers();
+}
 
 // Keyboard shortcut: Cmd/Ctrl+1..9 — switch to Nth session in current project group
 // Cmd/Ctrl+Up/Down — prev/next session in group
@@ -11459,8 +11593,10 @@ function formatRunDuration(ms) {
 }
 
 // P2 cron-run-history (RFC §8.2) — 时间轴每个 job 的本地状态。
-// runs / nextBefore: 分页列表 + 游标；expanded: 展开行 run_id；details: 已 fetch
-// 的单条 run 详情缓存（不持久化，session 切换即丢）。
+// runs / nextBefore: 分页列表 + 游标；details: 已 fetch 的单条 run 详情缓存
+// （不持久化，session 切换即丢）。
+// cron-history-redesign §6: v2 的 `expanded` 字段已废弃 — 选中态由
+// cronRunSheetState.runId 驱动，详情面板搬到独立 sheet。
 const cronTimelineState = Object.create(null);
 
 // CRON_TIMELINE_FRESH_MS — 超过此 TTL 的 timeline 缓存视为陈旧，下次进入
@@ -11475,7 +11611,6 @@ function getCronTimelineState(jobId) {
       nextBefore: 0,
       done: false,         // true = next_before 缺失，已到结尾
       loading: false,
-      expanded: '',         // 当前展开的 run_id（最多一行展开）
       details: Object.create(null),
       lastMountAt: 0,       // 上次 mount 渲染的 ms 时戳；renderCronTimelineForSession 用来判 stale
     };
@@ -11527,7 +11662,8 @@ function cronTimelineHtml(jobId, job, st) {
     (moreBtn ? '<div class="ct-more">' + moreBtn + '</div>' : '');
 }
 
-// cronTimelineRowHtml — 单条 run 行 + 可选展开区。
+// cronTimelineRowHtml — 单条 run 行（cron-history-redesign §6 后改为只选中态，
+// 不再 inline 展开详情）。点行 → openRunDetailSheet 打开浮层（桌面右滑/移动 bottom sheet）。
 // run 字段（CronRunSummary）：run_id / state / trigger / started_at / ended_at /
 // duration_ms / session_id / error_class。所有字段均可为空，渲染时 fallback。
 function cronTimelineRowHtml(jobId, r, st) {
@@ -11542,7 +11678,8 @@ function cronTimelineRowHtml(jobId, r, st) {
     : formatRunDuration(r.duration_ms || 0);
   const sessionShort = r.session_id ? r.session_id.slice(0, 8) : '';
   const errCls = r.error_class || '';
-  const isExpanded = st.expanded === runId && runId;
+  // cron-history-redesign §6: 选中态由 cronRunSheetState.runId 决定（与 sheet 联动）。
+  const isSelected = !!(runId && cronRunSheetState && cronRunSheetState.runId === runId && cronRunSheetState.jobId === jobId);
   const dotCls = cronStateDotClass(state);
   const stateLbl = cronStateLabel(state);
 
@@ -11559,17 +11696,10 @@ function cronTimelineRowHtml(jobId, r, st) {
     ? '<div class="ctr-sub">' + subParts.join('<span class="ctr-sep">·</span>') + '</div>'
     : '';
 
-  // 展开区：先显示骨架，cronTimelineToggleRow 触发 fetch 后异步替换内容。
-  // 展开容器始终在 DOM 里以便平滑高度过渡，靠 .open 类切换显示。
-  const detailHtml = isExpanded
-    ? cronTimelineDetailHtml(jobId, runId, r, st.details[runId])
-    : '';
-  const expandedClass = isExpanded ? ' open' : '';
-
-  return '<div class="ctr' + (isExpanded ? ' open' : '') + '" data-run-id="' + escAttr(runId) + '"' +
-      ' onclick="cronTimelineToggleRow(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')"' +
-      ' role="button" tabindex="0" aria-expanded="' + (isExpanded ? 'true' : 'false') + '"' +
-      ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();cronTimelineToggleRow(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')}">' +
+  return '<div class="ctr' + (isSelected ? ' is-selected' : '') + '" data-run-id="' + escAttr(runId) + '"' +
+      ' onclick="cronTimelineSelectRun(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')"' +
+      ' role="button" tabindex="0" aria-pressed="' + (isSelected ? 'true' : 'false') + '"' +
+      ' onkeydown="if(event.key===\'Enter\'||event.key===\' \'){event.preventDefault();cronTimelineSelectRun(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')}">' +
     '<div class="ctr-main">' +
       '<span class="ctr-dot ' + dotCls + '" aria-hidden="true"></span>' +
       '<span class="ctr-state">' + esc(stateLbl) + '</span>' +
@@ -11577,7 +11707,6 @@ function cronTimelineRowHtml(jobId, r, st) {
       (dur ? '<span class="ctr-dur">' + esc(dur) + '</span>' : '') +
     '</div>' +
     subRow +
-    '<div class="ctr-detail' + expandedClass + '" onclick="event.stopPropagation()">' + detailHtml + '</div>' +
   '</div>';
 }
 
@@ -11659,22 +11788,228 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
   return freshHint + promptBlock + resultBlock + errBlock + workDir + empty;
 }
 
-// cronTimelineToggleRow — 点击行：展开 / 折叠。展开时如果详情未缓存，
-// 触发 fetch /api/cron/runs/{run_id}?job_id=... 拉详情。
-function cronTimelineToggleRow(jobId, runId) {
+// cronTimelineSelectRun — 点击 timeline 行（cron-history-redesign §6）。
+// 不再 inline 展开，而是 open run-detail sheet（桌面右滑 / 移动 bottom sheet）。
+// 同一行二次点击 = 关 sheet（toggle 语义）。
+function cronTimelineSelectRun(jobId, runId) {
   if (!runId) return;
-  const st = getCronTimelineState(jobId);
-  if (st.expanded === runId) {
-    st.expanded = '';
-    renderCronTimelinePanel(jobId);
+  if (cronRunSheetState.jobId === jobId && cronRunSheetState.runId === runId && cronRunSheetState.open) {
+    closeRunDetailSheet();
     return;
   }
-  st.expanded = runId;
+  openRunDetailSheet(jobId, runId);
+}
+
+// Compatibility shim — 旧 inline-expand API（v2）保留为别名，避免外部
+// onclick 字符串硬编码 / 旧 e2e 测试 grep。新代码用 cronTimelineSelectRun。
+function cronTimelineToggleRow(jobId, runId) {
+  cronTimelineSelectRun(jobId, runId);
+}
+
+// ===== cron-history-redesign §6: Run-Detail Sheet 共组件 =====
+// 桌面：position:absolute 仅覆盖 detail-pane（Q1 决议）
+// 移动：position:fixed bottom sheet (75vh)
+// 渲染逻辑复用 cronTimelineDetailHtml（v2 写就，无须重写）。
+const cronRunSheetState = {
+  jobId: null,
+  runId: null,
+  open: false,
+  // detail 缓存：直接复用 cronTimelineState[jobId].details[runId]，
+  // 避免双份 cache + WS refresh 时只刷一处的隐患。
+};
+
+// openRunDetailSheet — 打开 sheet 并加载指定 run 的详情。
+// 1. 设置 cronRunSheetState（驱动 timeline 行 .is-selected）
+// 2. 重绘 timeline panel 让选中行高亮 + 自动 scrollIntoView (Q3: behavior 'auto')
+// 3. 渲染 sheet（先骨架，detail 异步加载）
+// 4. 焦点移到 sheet 标题（a11y）
+function openRunDetailSheet(jobId, runId) {
+  if (!jobId || !runId) return;
+  cronRunSheetState.jobId = jobId;
+  cronRunSheetState.runId = runId;
+  cronRunSheetState.open = true;
   renderCronTimelinePanel(jobId);
+  scrollSelectedRunIntoView(runId);
+  renderRunDetailSheet();
+  // 异步加载 detail（缓存命中时立即可见）
+  const st = getCronTimelineState(jobId);
   if (!st.details[runId]) {
     cronTimelineFetchDetail(jobId, runId);
   }
 }
+
+// closeRunDetailSheet — 关 sheet，焦点回 timeline 行。
+function closeRunDetailSheet() {
+  if (!cronRunSheetState.open) return;
+  const prevRunId = cronRunSheetState.runId;
+  const prevJobId = cronRunSheetState.jobId;
+  cronRunSheetState.jobId = null;
+  cronRunSheetState.runId = null;
+  cronRunSheetState.open = false;
+  // 触发 panel 重绘把 .is-selected 摘掉（用户 mental model：sheet 关 → 行去选中）
+  if (prevJobId) renderCronTimelinePanel(prevJobId);
+  renderRunDetailSheet();
+  // 焦点回到原 timeline 行（如果还在 DOM 里）
+  if (prevRunId) {
+    const row = document.querySelector('.cron-timeline-panel .ctr[data-run-id="' + cssEscapeAttr(prevRunId) + '"]');
+    if (row && typeof row.focus === 'function') row.focus();
+  }
+}
+
+// navigateRunSheet — ↑↓ 切换。
+// 'prev' = ↑ = UI 中更靠上 = 时间上更新的 run（idx-1，因 timeline 倒序：newer first）
+// 'next' = ↓ = UI 中更靠下 = 时间上更旧的 run（idx+1）
+// 命名以"UI 方向"为准（与键位语义一致），不以"时间方向"。
+function navigateRunSheet(direction) {
+  if (!cronRunSheetState.open || !cronRunSheetState.jobId) return;
+  const st = getCronTimelineState(cronRunSheetState.jobId);
+  if (!st.runs || st.runs.length === 0) return;
+  const idx = st.runs.findIndex(r => r && r.run_id === cronRunSheetState.runId);
+  if (idx < 0) return;
+  let nextIdx;
+  if (direction === 'prev') nextIdx = idx - 1;
+  else if (direction === 'next') nextIdx = idx + 1;
+  else return;
+  if (nextIdx < 0 || nextIdx >= st.runs.length) return;
+  const nextRun = st.runs[nextIdx];
+  if (!nextRun || !nextRun.run_id) return;
+  openRunDetailSheet(cronRunSheetState.jobId, nextRun.run_id);
+}
+
+// scrollSelectedRunIntoView — Q3 决议：behavior:'auto'（不 smooth）让快速 ↑↓
+// 不会"追动画"。timeline 列表 overflow-y:auto，scrollIntoView 默认对最近的可滚动祖先生效。
+function scrollSelectedRunIntoView(runId) {
+  if (!runId) return;
+  const row = document.querySelector('.cron-timeline-panel .ctr[data-run-id="' + cssEscapeAttr(runId) + '"]');
+  if (row && typeof row.scrollIntoView === 'function') {
+    row.scrollIntoView({ behavior: 'auto', block: 'nearest' });
+  }
+}
+
+// cssEscapeAttr — 在 attribute selector 里嵌 runId（hex UUID，理论上安全，
+// 但走一层 escape 防止极端情况下含特殊字符）。CSS.escape 在所有现代浏览器可用。
+// 降级路径：用 backslash 转义 ASCII 范围外的字符。注：不处理 NUL (\0)，
+// 因 runId 是后端生成的 hex UUID，不可能包含 NUL；如未来 runId 来源扩展，
+// 需改用六位 hex 序列（CSS.escape 标准行为）。
+function cssEscapeAttr(s) {
+  if (typeof CSS !== 'undefined' && typeof CSS.escape === 'function') return CSS.escape(s);
+  return String(s).replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+}
+
+// renderRunDetailSheet — 渲染 sheet 内容（header + body）。
+// state 为空时隐藏 sheet。复用 cronTimelineDetailHtml 渲染 body。
+//
+// 用 _cronRunSheetTimers 把所有 setTimeout 句柄记下，关闭/重开时统一 cancel —
+// 防止悬空 focus 把焦点移入正在 fade-out 的 sheet（破坏屏幕阅读器状态），
+// 也防止动画期间的 hidden=true 把刚 re-open 的 sheet 立刻 hide。
+function renderRunDetailSheet() {
+  const sheet = document.getElementById('cron-run-sheet');
+  const backdrop = document.getElementById('cron-run-sheet-backdrop');
+  if (!sheet) return;
+  // Cancel any pending focus / hide timers from a previous render. 一次 render
+  // 至多只能留下两个挂起的 timer（focus + hide），用 module-level 数组兜住。
+  if (Array.isArray(_cronRunSheetTimers) && _cronRunSheetTimers.length > 0) {
+    for (const id of _cronRunSheetTimers) clearTimeout(id);
+    _cronRunSheetTimers.length = 0;
+  }
+
+  if (!cronRunSheetState.open || !cronRunSheetState.jobId || !cronRunSheetState.runId) {
+    sheet.classList.remove('is-open');
+    sheet.setAttribute('aria-hidden', 'true');
+    if (backdrop) backdrop.classList.remove('is-open');
+    // 桌面：停 observer，但保留 inline geometry 让滑出动画完整跑完
+    // （位置不变，只是 transform 把它推到右屏外）。
+    stopSheetGeomObserver();
+    // 等过渡结束后再 hidden + 清 inline 样式，避免动画被切断；用 token 守护
+    // 防止快速 close→open→close 中间的回调把刚 reopen 的 sheet hide 掉。
+    const token = ++_cronRunSheetCloseToken;
+    _cronRunSheetTimers.push(setTimeout(() => {
+      if (token !== _cronRunSheetCloseToken) return;     // 已被新 open 抢走
+      if (cronRunSheetState.open) return;                 // 双保险：state 仍为 open，跳过
+      sheet.hidden = true;
+      sheet.style.left = '';
+      sheet.style.top = '';
+      sheet.style.height = '';
+      sheet.style.width = '';
+      if (backdrop) backdrop.hidden = true;
+    }, 250));
+    return;
+  }
+  sheet.hidden = false;
+  if (backdrop) backdrop.hidden = false;
+  // 强制 reflow 让 transition 触发（对刚 hidden→show 的元素必要）
+  // eslint-disable-next-line no-unused-expressions
+  sheet.offsetWidth;
+  sheet.classList.add('is-open');
+  sheet.setAttribute('aria-hidden', 'false');
+  if (backdrop) backdrop.classList.add('is-open');
+  // 桌面：同步几何 + 启 ResizeObserver 跟随 detail-pane 大小变化。
+  // 移动端 syncSheetGeometry 内部 short-circuit。
+  syncSheetGeometry();
+  startSheetGeomObserver();
+
+  const st = getCronTimelineState(cronRunSheetState.jobId);
+  const summary = (st.runs || []).find(r => r && r.run_id === cronRunSheetState.runId);
+  // Header 元数据
+  const dotEl = document.getElementById('crs-dot');
+  const titleEl = document.getElementById('crs-title');
+  const metaEl = document.getElementById('crs-meta');
+  const prevBtn = document.getElementById('crs-prev');
+  const nextBtn = document.getElementById('crs-next');
+  if (dotEl) {
+    dotEl.className = 'crs-dot ' + cronStateDotClass(summary ? summary.state : '');
+  }
+  if (titleEl) {
+    const lbl = cronStateLabel(summary ? summary.state : '');
+    const time = summary && summary.started_at ? formatCronTimelineShort(summary.started_at) : '—';
+    titleEl.textContent = lbl + ' · ' + time;
+  }
+  if (metaEl) {
+    if (summary) {
+      const dur = summary.state === 'running' ? '正在运行' : formatRunDuration(summary.duration_ms || 0);
+      const trig = summary.trigger ? ' · ' + summary.trigger : '';
+      const sess = summary.session_id ? ' · session ' + summary.session_id.slice(0, 8) : '';
+      metaEl.textContent = (dur || '') + trig + sess;
+    } else {
+      metaEl.textContent = '';
+    }
+  }
+  // ↑↓ 按钮启用态：边界处禁用。aria-disabled 与 disabled 同步以兼容旧版 AT。
+  if (prevBtn && nextBtn) {
+    const idx = (st.runs || []).findIndex(r => r && r.run_id === cronRunSheetState.runId);
+    const prevOff = idx <= 0;
+    const nextOff = idx < 0 || idx >= (st.runs || []).length - 1;
+    prevBtn.disabled = prevOff;
+    prevBtn.setAttribute('aria-disabled', prevOff ? 'true' : 'false');
+    nextBtn.disabled = nextOff;
+    nextBtn.setAttribute('aria-disabled', nextOff ? 'true' : 'false');
+  }
+  // Body：复用 cronTimelineDetailHtml
+  const body = document.getElementById('crs-body');
+  if (body) {
+    body.innerHTML = cronTimelineDetailHtml(
+      cronRunSheetState.jobId,
+      cronRunSheetState.runId,
+      summary,
+      st.details[cronRunSheetState.runId]
+    );
+  }
+  // 焦点到标题（a11y），只在首次打开时移焦点（避免 ↑↓ 切换时打断滚动）。
+  // 用挂起 timer 数组管理，关闭路径会 clearTimeout 防止焦点移入正在 fade-out 的 sheet。
+  if (titleEl && document.activeElement !== titleEl &&
+      !sheet.contains(document.activeElement)) {
+    _cronRunSheetTimers.push(setTimeout(() => {
+      // 二次确认 sheet 仍在 open 状态（用户可能在 50ms 内已关）
+      if (!cronRunSheetState.open) return;
+      try { titleEl.focus(); } catch (_) {}
+    }, 50));
+  }
+}
+
+// _cronRunSheetTimers / _cronRunSheetCloseToken — 见 renderRunDetailSheet 注释。
+// 单文件作用域，不暴露 window；contract test 不依赖名称。
+const _cronRunSheetTimers = [];
+let _cronRunSheetCloseToken = 0;
 
 // cronTimelineFetchDetail — GET /api/cron/runs/{run_id}?job_id=... 异步拉详情。
 // 完成后写入 st.details[runId] 并重绘当前 panel；session 切走后丢弃结果。
@@ -11704,6 +12039,12 @@ async function cronTimelineFetchDetail(jobId, runId) {
   // cron-panel-consolidation RFC §4.6: 用 cronDetailJobId 判定当前 drawer
   // 还停在同一 job 上；selectedKey 在 cron 面板下永远为 null，已不能用。
   if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
+  // cron-history-redesign §6: 同步刷新 sheet 内容（如果当前 sheet 看的就是这条 run）
+  if (cronRunSheetState.open &&
+      cronRunSheetState.jobId === jobId &&
+      cronRunSheetState.runId === runId) {
+    renderRunDetailSheet();
+  }
 }
 
 // renderCronTimelinePanel — 重绘当前 timeline 面板（不重新 mount shell）。
@@ -12156,7 +12497,6 @@ function renderCronTimelineForJob(jobId) {
     st.runs = [];
     st.nextBefore = 0;
     st.done = false;
-    st.expanded = '';
   }
   if (st.runs.length === 0 && job && Array.isArray(job.recent_runs) && job.recent_runs.length > 0) {
     st.runs = job.recent_runs.slice();
@@ -12375,6 +12715,11 @@ function openCronDetail(jobId, originRow) {
     const candidate = document.querySelector('.cj-row[data-cron-id="' + (window.CSS && CSS.escape ? CSS.escape(jobId) : jobId) + '"]');
     if (candidate) _cronDrawerLastActiveRow = candidate;
   }
+  // cron-history-redesign §10 边缘 case: 切到另一个 cron 时关 run-detail sheet。
+  // 不保留 sheet 状态（用户切 cron = 上下文切换，sheet 内容已不相关）。
+  if (cronRunSheetState && cronRunSheetState.open && cronRunSheetState.jobId !== jobId) {
+    closeRunDetailSheet();
+  }
   cronDetailJobId = jobId;
   // openCronPanel handles selectedKey reset / WS unsubscribe / mobile
   // shell push and triggers renderCronPanel — that path repaints both
@@ -12404,6 +12749,10 @@ function openCronDetail(jobId, originRow) {
 // drawer (RFC §6.4) so keyboard users land back where they were.
 function closeCronDetail() {
   if (cronDetailJobId === null) return;
+  // cron-history-redesign §10: drawer 关闭时连带关 sheet（drawer 是 sheet 的父级）。
+  if (cronRunSheetState && cronRunSheetState.open) {
+    closeRunDetailSheet();
+  }
   cronDetailJobId = null;
   // Remove `.is-active` from any list row so the sidebar-style highlight
   // clears synchronously even before renderCronList re-paints.
@@ -12931,6 +13280,10 @@ async function doEditCronJob(id) {
 
   let startX, startW;
   resizer.addEventListener('mousedown', function(e) {
+    // Mid-line collapse handle lives inside the resizer; let its click run
+    // without starting a drag. Also skip when collapsed (nothing to resize).
+    if (e.target && e.target.closest && e.target.closest('.resizer-handle')) return;
+    if (document.body.classList.contains('sidebar-collapsed')) return;
     e.preventDefault();
     startX = e.clientX;
     startW = sidebar.getBoundingClientRect().width;
@@ -12952,7 +13305,9 @@ async function doEditCronJob(id) {
     document.removeEventListener('mouseup', onUp);
     lsSet(LS_SIDEBAR_W, Math.round(sidebar.getBoundingClientRect().width));
   }
-  resizer.addEventListener('dblclick', function() {
+  resizer.addEventListener('dblclick', function(e) {
+    if (e.target && e.target.closest && e.target.closest('.resizer-handle')) return;
+    if (document.body.classList.contains('sidebar-collapsed')) return;
     sidebar.style.width = '360px';
     lsRemove(LS_SIDEBAR_W);
   });
@@ -12978,15 +13333,16 @@ function isMobileViewport() {
 // re-apply (don't steal focus from the user's first interaction).
 function applySidebarCollapsed(collapsed, moveFocus) {
   document.body.classList.toggle('sidebar-collapsed', !!collapsed);
-  const btnHide = document.getElementById('btn-sidebar-collapse');
-  const btnShow = document.getElementById('btn-sidebar-show');
-  if (btnHide) btnHide.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  if (btnShow) btnShow.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  if (moveFocus) {
-    const next = collapsed ? btnShow : btnHide;
-    if (next && typeof next.focus === 'function') {
-      try { next.focus({preventScroll: true}); } catch (_) { next.focus(); }
-    }
+  // Single mid-line handle on the resizer serves both directions; flip the
+  // aria-expanded + label so AT and tooltip agree with the visual state.
+  const btn = document.getElementById('btn-sidebar-toggle');
+  if (btn) {
+    btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    btn.setAttribute('aria-label', collapsed ? '展开侧边栏' : '收起侧边栏');
+    btn.setAttribute('title', collapsed ? '展开侧边栏 (按 [)' : '收起侧边栏 (按 [)');
+  }
+  if (moveFocus && btn && typeof btn.focus === 'function') {
+    try { btn.focus({preventScroll: true}); } catch (_) { btn.focus(); }
   }
 }
 
