@@ -51,6 +51,12 @@ const (
 	autoTitlerDefaultMinUserTurns      = 3
 	autoTitlerDefaultMinRenameInterval = 5 * time.Minute
 	autoTitlerDefaultBatchPerTick      = 1
+
+	// autoTitlerMaxTitleRunes is the hard rune-count ceiling enforced
+	// after ValidateUserLabel.  Mirrors the system-prompt ≤16 char
+	// instruction so a non-compliant model can't write an over-long
+	// label.
+	autoTitlerMaxTitleRunes = 16
 )
 
 // autoTitlerHighwater records when AutoTitler last successfully wrote
@@ -133,7 +139,18 @@ func (a *autoTitler) Configure(cfg DaemonConfig) error {
 // Skipped map for observability while only the first hard failure (e.g.
 // runner error) is returned to Manager.
 func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
-	report := TickReport{Skipped: make(map[string]int)}
+	// Lazily allocate Skipped — when no sessions match a skip reason
+	// (e.g. all sessions reach the rename path or no sessions exist)
+	// we never touch the map and avoid the alloc entirely.  Callers
+	// of TickReport tolerate a nil Skipped: flattenTickReport iterates
+	// via range, which is a no-op on nil maps.
+	report := TickReport{}
+	bumpSkip := func(reason string) {
+		if report.Skipped == nil {
+			report.Skipped = make(map[string]int, 4)
+		}
+		report.Skipped[reason]++
+	}
 
 	// Snapshot the entire highwater map BEFORE entering VisitSessions
 	// so the per-session lookup inside the visitor doesn't acquire
@@ -181,12 +198,12 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 
 		// 1. Reserved namespace — daemons skip cron/scratch/sys/project.
 		if session.IsReservedNamespace(snap.Key) {
-			report.Skipped["reserved_namespace"]++
+			bumpSkip("reserved_namespace")
 			return true
 		}
 		// 2. Group chat policy.
 		if !a.includeGroupChat && snap.ChatType == "group" {
-			report.Skipped["group_chat"]++
+			bumpSkip("group_chat")
 			return true
 		}
 		// 3. User-set labels are sacrosanct.  Empty origin + non-empty
@@ -194,24 +211,24 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 		//    ("auto") and fully-empty (origin=="" && label=="") are
 		//    eligible.
 		if snap.UserLabel != "" && snap.LabelOrigin != "auto" {
-			report.Skipped["origin_user"]++
+			bumpSkip("origin_user")
 			return true
 		}
 		// 4. Min-turn threshold:  the user has to have actually
 		//    talked enough to give the LLM something to summarize.
 		if snap.MessageCount < int64(a.minUserTurns) {
-			report.Skipped["min_user_turns"]++
+			bumpSkip("min_user_turns")
 			return true
 		}
 		// 5. Min-rename-interval and high-water gate.  Reads from
 		//    the pre-snapshotted hwCopy — no a.mu under r.mu.RLock.
 		hw := hwCopy[snap.Key]
 		if !hw.lastRenamedAt.IsZero() && now.Sub(hw.lastRenamedAt) < a.minRenameInterval {
-			report.Skipped["min_rename_interval"]++
+			bumpSkip("min_rename_interval")
 			return true
 		}
 		if snap.MessageCount-hw.lastRenameAtTurn < int64(a.minUserTurns) {
-			report.Skipped["no_new_turns"]++
+			bumpSkip("no_new_turns")
 			return true
 		}
 
@@ -316,10 +333,15 @@ func (a *autoTitler) renameOne(ctx context.Context, key, seed string, turnCount 
 	}
 	title, err := session.ValidateUserLabel(strings.TrimSpace(out))
 	if err != nil {
-		return fmt.Errorf("validate output (%s): %w", err, ErrValidation)
+		return fmt.Errorf("%w: validate output: %v", ErrValidation, err)
 	}
 	if title == "" {
 		return fmt.Errorf("runner returned empty title: %w", ErrValidation)
+	}
+	// System prompt requests ≤ 16 chars; enforce in code so a model
+	// that ignores the instruction can't write an over-long label.
+	if utf8.RuneCountInString(title) > autoTitlerMaxTitleRunes {
+		return fmt.Errorf("%w: title exceeds %d runes", ErrValidation, autoTitlerMaxTitleRunes)
 	}
 	if !a.router.SetUserLabelWithOrigin(key, title, "auto") {
 		// Race-window close fired:  user changed origin to "user" while
@@ -366,10 +388,12 @@ func buildExcerpt(seed string) string {
 	var b strings.Builder
 	b.Grow(min(len(seed), autoTitlerExcerptCapBytes))
 	lineWritten := 0
+	lineTruncated := false
 	for _, r := range seed {
 		if r == '\n' {
 			b.WriteRune('\n')
 			lineWritten = 0
+			lineTruncated = false
 			if b.Len() >= autoTitlerExcerptCapBytes {
 				break
 			}
@@ -386,6 +410,14 @@ func buildExcerpt(seed string) string {
 			continue // shouldn't happen post-ValidString, but defensive
 		}
 		if lineWritten+w > autoTitlerLineCapBytes {
+			// Once a line hits the cap, drop the rest of the line so the
+			// LLM doesn't see a silently-spliced prefix+suffix.  An
+			// ellipsis marks the truncation point so a downstream
+			// reviewer can tell the line was cut.
+			if !lineTruncated && b.Len()+len("…") <= autoTitlerExcerptCapBytes {
+				b.WriteString("…")
+				lineTruncated = true
+			}
 			continue
 		}
 		if b.Len()+w > autoTitlerExcerptCapBytes {

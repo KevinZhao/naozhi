@@ -55,7 +55,7 @@ func TestBuildExcerpt(t *testing.T) {
 		{"trims whitespace", "  hi  ", "hi"},
 		{"drops control chars", "ab\x00\x07c", "abc"},
 		{"keeps newlines", "a\nb\nc", "a\nb\nc"},
-		{"caps line length", strings.Repeat("a", autoTitlerLineCapBytes+50) + "\nshort", strings.Repeat("a", autoTitlerLineCapBytes) + "\nshort"},
+		{"caps line length", strings.Repeat("a", autoTitlerLineCapBytes+50) + "\nshort", strings.Repeat("a", autoTitlerLineCapBytes) + "…\nshort"},
 	}
 	for _, c := range cases {
 		c := c
