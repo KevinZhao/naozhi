@@ -1,6 +1,7 @@
 package sysession
 
 import (
+	"slices"
 	"strings"
 	"testing"
 )
@@ -25,6 +26,10 @@ func envHasKey(env []string, key string) bool {
 		}
 	}
 	return false
+}
+
+func containsKV(env []string, want string) bool {
+	return slices.Contains(env, want)
 }
 
 func TestFilterEnv_AlwaysPassthrough(t *testing.T) {
@@ -121,5 +126,65 @@ func TestFilterEnv_MixedExactAndPrefix(t *testing.T) {
 	}
 	if envHasKey(env, "FOO_BAR") {
 		t.Errorf("FOO_BAR leaked")
+	}
+}
+
+// TestFilterEnv_PassesBackendSelectors guards against the regression
+// that took down AutoTitler in production:  with `--setting-sources ""`
+// the CLI doesn't load settings.json, so the backend selectors must
+// flow through env or claude -p falls back to direct-Anthropic OAuth
+// and dies with "Not logged in" on every Tick.
+func TestFilterEnv_PassesBackendSelectors(t *testing.T) {
+	keys := []string{
+		"CLAUDE_CODE_USE_BEDROCK",
+		"CLAUDE_CODE_USE_VERTEX",
+		"CLAUDE_CODE_SKIP_BEDROCK_AUTH",
+		"ANTHROPIC_API_KEY",
+		"ANTHROPIC_AUTH_TOKEN",
+		"ANTHROPIC_BASE_URL",
+		"ANTHROPIC_BEDROCK_BASE_URL",
+		"AWS_REGION",
+		"AWS_DEFAULT_REGION",
+		"AWS_PROFILE",
+		"AWS_ACCESS_KEY_ID",
+		"AWS_SECRET_ACCESS_KEY",
+		"AWS_SESSION_TOKEN",
+		"ANTHROPIC_VERTEX_PROJECT_ID",
+		"CLOUD_ML_REGION",
+		"GOOGLE_APPLICATION_CREDENTIALS",
+		"ANTHROPIC_MODEL",
+		"ANTHROPIC_SMALL_FAST_MODEL",
+		"ANTHROPIC_DEFAULT_HAIKU_MODEL",
+		"ANTHROPIC_DEFAULT_SONNET_MODEL",
+		"ANTHROPIC_DEFAULT_OPUS_MODEL",
+	}
+	for _, k := range keys {
+		t.Setenv(k, "marker-"+k)
+	}
+
+	got := filterEnv(nil)
+	for _, k := range keys {
+		want := k + "=marker-" + k
+		if !containsKV(got, want) {
+			t.Errorf("backend selector %s missing from passthrough; got=%v", k, got)
+		}
+	}
+}
+
+// TestFilterEnv_DropsSecretsByDefault ensures we still strip
+// non-allowlisted secrets — the regression fix must not turn the
+// runner into a wide-open env tunnel.
+func TestFilterEnv_DropsSecretsByDefault(t *testing.T) {
+	t.Setenv("FEISHU_APP_SECRET", "super-secret")
+	t.Setenv("NAOZHI_DASHBOARD_TOKEN", "dash-token")
+	t.Setenv("DATABASE_URL", "postgres://x")
+
+	got := filterEnv(nil)
+	for _, k := range []string{"FEISHU_APP_SECRET", "NAOZHI_DASHBOARD_TOKEN", "DATABASE_URL"} {
+		for _, kv := range got {
+			if strings.HasPrefix(kv, k+"=") {
+				t.Errorf("secret %s leaked through filterEnv: %s", k, kv)
+			}
+		}
 	}
 }

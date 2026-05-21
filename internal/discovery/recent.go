@@ -25,20 +25,60 @@ type RecentSession struct {
 	Project    string `json:"project,omitempty"` // filled by server
 }
 
+// RecentSessionsFilter is the consumer-facing hook RecentSessions calls
+// before returning a session.  Both methods are best-effort:  an
+// implementation that returns false for everything degrades to the
+// pre-filter behaviour, never blocks the scan, and never panics.
+//
+// Implementations MUST be safe for concurrent reads (RecentSessions may
+// be called from multiple goroutines via the dashboard 1Hz poll).
+// Construction of the filter (e.g. snapshotting Scheduler.KnownSessionIDs)
+// should happen outside the hot loop — RecentSessions calls these
+// methods O(N) times per scan.
+type RecentSessionsFilter interface {
+	// SkipWorkspace reports whether all sessions under the given
+	// resolved workspace path should be hidden.  Used to hide
+	// naozhi-internal subsystem workdirs (e.g. sys-sessions).
+	// workspace is the absolute filesystem path returned by
+	// resolveWorkspaceWithIndex / resolveWorkspaceByParts; an empty
+	// string is never passed.
+	SkipWorkspace(workspace string) bool
+	// SkipSessionID reports whether the specific Claude session
+	// (identified by its UUID-style sessionID) should be hidden.
+	// Used to hide cron-spawned sessions which share their workspace
+	// with regular user sessions and so cannot be filtered by path.
+	SkipSessionID(sessionID string) bool
+}
+
+// noopRecentFilter is the stand-in used when callers pass nil — keeps
+// the scan loop branch-free without per-call nil checks.
+type noopRecentFilter struct{}
+
+func (noopRecentFilter) SkipWorkspace(string) bool { return false }
+func (noopRecentFilter) SkipSessionID(string) bool { return false }
+
 // RecentSessions scans ~/.claude/projects/* for recent sessions,
 // returning up to `limit` sessions modified within `maxAge`.
 // If limit <= 0, all sessions within the time window are returned.
 //
-// Two layers of filtering:
+// Filtering layers (in order):
 //  1. Directory-level: skip encoded hidden paths ("--" pattern from "/." in original path),
 //     which belong to automated tools like claude-mem observer.
 //  2. Workspace resolution: skip directories that can't be mapped back to a real
 //     directory on disk (session can't be resumed without the correct CWD).
+//  3. filter.SkipWorkspace: caller-supplied workspace blacklist (e.g. sys-sessions).
+//  4. excludeSessionIDs / filter.SkipSessionID: per-session-ID filtering.
 //
-// Sessions in excludeSessionIDs are always skipped.
-func RecentSessions(claudeDir string, limit int, maxAge time.Duration, excludeSessionIDs map[string]bool) []RecentSession {
+// filter may be nil; nil is equivalent to passing a no-op filter.
+// Sessions in excludeSessionIDs are always skipped (legacy parameter
+// kept for source-compat with discovery callers; new callers should
+// prefer filter.SkipSessionID for richer semantics).
+func RecentSessions(claudeDir string, limit int, maxAge time.Duration, excludeSessionIDs map[string]bool, filter RecentSessionsFilter) []RecentSession {
 	if claudeDir == "" {
 		return nil
+	}
+	if filter == nil {
+		filter = noopRecentFilter{}
 	}
 	projectsDir := filepath.Join(claudeDir, "projects")
 	entries, err := os.ReadDir(projectsDir)
@@ -71,11 +111,22 @@ func RecentSessions(claudeDir string, limit int, maxAge time.Duration, excludeSe
 			continue
 		}
 
+		// Layer 3: caller-supplied workspace blacklist.  Skip the entire
+		// directory (no per-file Stat) — sys-sessions JSONLs would
+		// otherwise leak AutoTitler prompt fragments into the user
+		// history panel.
+		if filter.SkipWorkspace(workspace) {
+			continue
+		}
+
 		// Try sessions-index.json first (has prompt/summary inline)
 		if idx != nil {
 			if sessions := recentFromParsedIndex(idx, projDir, workspace, excludeSessionIDs); len(sessions) > 0 {
 				for _, rs := range sessions {
 					if rs.LastActive < cutoff {
+						continue
+					}
+					if filter.SkipSessionID(rs.SessionID) {
 						continue
 					}
 					jsonlPaths[rs.SessionID] = filepath.Join(projDir, rs.SessionID+".jsonl")
@@ -88,6 +139,9 @@ func RecentSessions(claudeDir string, limit int, maxAge time.Duration, excludeSe
 		// Fallback: collect metadata only (no file reads for prompt yet)
 		for _, rs := range recentFromJSONLFiles(projDir, workspace, excludeSessionIDs) {
 			if rs.LastActive < cutoff {
+				continue
+			}
+			if filter.SkipSessionID(rs.SessionID) {
 				continue
 			}
 			jsonlPaths[rs.SessionID] = filepath.Join(projDir, rs.SessionID+".jsonl")
