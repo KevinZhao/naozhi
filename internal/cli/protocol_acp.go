@@ -409,7 +409,7 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		// ClaudeProtocol.ReadEvent.
 		if ev.Message != nil {
 			if n := contentBytes(ev.Message); n > maxAssistantMessageContentBytes {
-				return nil, done, fmt.Errorf("ACP event content exceeds %d bytes (got %d), dropping",
+				return nil, done, fmt.Errorf("acp: event content exceeds %d bytes (got %d), dropping",
 					maxAssistantMessageContentBytes, n)
 			}
 		}
@@ -797,17 +797,29 @@ func normalizeContextUsage(v float64) float64 {
 // Event with an empty Metadata pointer would cause applyMetadata to no-op,
 // so on parse failure we return the same zero-Event-skip contract used by
 // parseSessionUpdate's default branch.
+// kiroMeteringEntry mirrors a single entry of kiro's `meteringUsage`
+// array.  Promoted to a named type so the encoding/json type-descriptor
+// cache is shared across calls (anonymous nested struct types have
+// caller-local identity and force a fresh reflect-type lookup per
+// parseKiroMetadata invocation — R228-PERF-4 applied the same fix to
+// acpPromptBlock / acpImageSource).
+type kiroMeteringEntry struct {
+	Value      float64 `json:"value"`
+	Unit       string  `json:"unit"`
+	UnitPlural string  `json:"unitPlural"`
+}
+
+// kiroMetadataParams is the named decoder shape for the kiro metadata
+// notification body — see kiroMeteringEntry for the cache rationale.
+type kiroMetadataParams struct {
+	SessionID              string              `json:"sessionId"`
+	ContextUsagePercentage float64             `json:"contextUsagePercentage"`
+	TurnDurationMs         int64               `json:"turnDurationMs"`
+	MeteringUsage          []kiroMeteringEntry `json:"meteringUsage"`
+}
+
 func parseKiroMetadata(params json.RawMessage) (Event, bool, error) {
-	var raw struct {
-		SessionID              string  `json:"sessionId"`
-		ContextUsagePercentage float64 `json:"contextUsagePercentage"`
-		TurnDurationMs         int64   `json:"turnDurationMs"`
-		MeteringUsage          []struct {
-			Value      float64 `json:"value"`
-			Unit       string  `json:"unit"`
-			UnitPlural string  `json:"unitPlural"`
-		} `json:"meteringUsage"`
-	}
+	var raw kiroMetadataParams
 	if err := json.Unmarshal(params, &raw); err != nil {
 		slog.Warn("acp: _kiro.dev/metadata unmarshal failed",
 			"err", err, "raw_len", len(params))

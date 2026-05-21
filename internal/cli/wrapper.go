@@ -433,7 +433,7 @@ func (r *shimLineReader) ReadLine() ([]byte, bool, error) {
 			return []byte(msg.Line), false, nil
 		}
 		if msg.Type == "cli_exited" {
-			return nil, true, fmt.Errorf("CLI exited during init")
+			return nil, true, fmt.Errorf("cli exited during init")
 		}
 		// Skip other message types (stderr, pong, etc.) during init
 	}
