@@ -80,6 +80,13 @@ type tailerRegistry struct {
 	count      atomic.Int32
 	hub        *Hub
 	clientSubs map[*wsClient]map[tailerKey]struct{} // reverse index for client teardown
+	// runWG tracks every spawned t.run() goroutine so Shutdown can
+	// wait for the final pollOnce iteration to release its reference
+	// to t.reader before Hub teardown continues. Without this the
+	// goroutine can race with the surrounding Hub.Shutdown drain when
+	// the underlying transcript file is being torn down (-race detector
+	// flags the access).
+	runWG sync.WaitGroup
 }
 
 type tailerKey struct {
@@ -136,7 +143,11 @@ func (r *tailerRegistry) ensureTailer(key, taskID, toolUseID, jsonlPath string) 
 	}
 	r.byTask[tk] = t
 	r.count.Add(1)
-	go t.run()
+	r.runWG.Add(1)
+	go func() {
+		defer r.runWG.Done()
+		t.run()
+	}()
 	return t, true
 }
 
@@ -446,6 +457,9 @@ func (t *agentTailer) finalize(status string) {
 }
 
 // Shutdown stops every tailer the registry owns. Called by Hub.Shutdown.
+// Blocks until every t.run() goroutine has returned so the surrounding
+// Hub teardown can drop the underlying TranscriptReader without racing
+// the final pollOnce iteration.
 func (r *tailerRegistry) Shutdown() {
 	r.mu.Lock()
 	tailers := make([]*agentTailer, 0, len(r.byTask))
@@ -459,4 +473,5 @@ func (r *tailerRegistry) Shutdown() {
 	for _, t := range tailers {
 		t.finalize("shutdown")
 	}
+	r.runWG.Wait()
 }
