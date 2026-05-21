@@ -763,14 +763,20 @@ func (r *Router) installFreshSessionLocked(
 	s.SetBackend(backendID)
 	s.SetCLIName(wrapper.CLIName)
 	s.SetCLIVersion(wrapper.CLIVersion)
-	s.storeProcess(proc)
+	// attachProcessAndSnapshotPersisted: serialises storeProcess + seededLen
+	// reset under historyMu so a concurrent InjectHistory observes the
+	// (process, seededLen=len(persistedHistory)) pair and forwards only
+	// genuinely-new tail. The returned snapshot is the same content as
+	// oldHistory but goes through the same lock-protected path that the
+	// reconnect branch uses, keeping the semantics symmetric.
+	snapshot := s.attachProcessAndSnapshotPersisted(proc)
 	// Matches the reconnect path (ReconnectShims): notify the dashboard when
 	// a turn completes out-of-band (e.g. result arrives via readLoop without
 	// an active Send capturing it). SetOnTurnDone is mu-guarded inside Process,
 	// so calling it after storeProcess is safe.
 	proc.SetOnTurnDone(func() { r.notifyChange() })
-	if len(oldHistory) > 0 {
-		proc.InjectHistory(oldHistory)
+	if len(snapshot) > 0 {
+		proc.InjectHistory(snapshot)
 	}
 	// Effective session ID: prefer the resumeID the caller asked us to
 	// resume, but if there isn't one, fall back to whatever the protocol
@@ -1301,8 +1307,14 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	// under the new key. The old struct becomes an orphan with process=nil,
 	// so any goroutine holding a stale reference to `old` that attempts Send
 	// fails cleanly with "no active process".
+	//
+	// The proc's EventLog already carries the entries that match
+	// fresh.persistedHistory (they were forwarded earlier under `old`), so
+	// fresh.persistedSeededLen must mirror len(fresh.persistedHistory) — a
+	// fresh.InjectHistory after takeover should forward only newly-arrived
+	// tail. adoptProcessAlreadySeeded handles that under historyMu.
 	if proc := old.loadProcess(); proc != nil {
-		fresh.storeProcess(proc)
+		fresh.adoptProcessAlreadySeeded(proc)
 	}
 	old.storeProcess(nil)
 
