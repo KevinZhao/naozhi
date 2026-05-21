@@ -72,6 +72,28 @@ func TruncateRunesNoEllipsis(s string, maxRunes int) string {
 	return s
 }
 
+// TruncateAtRuneBoundary returns the largest n <= maxBytes such that s[:n]
+// ends on a rune boundary, or len(s) when s already fits within maxBytes.
+// Returns 0 when s starts mid-codepoint (shouldn't happen for valid UTF-8).
+//
+// Use when a caller needs a byte-cap (not rune-cap) but must avoid splitting a
+// multi-byte UTF-8 codepoint — e.g. /api/sessions resume last_prompt JSON
+// fields and dashboard transcribe responses where the wire format is sized in
+// bytes but garbled glyphs render as mojibake. Assumes s is valid UTF-8;
+// callers in flow from strings.Map / osutil.SanitizeForLog satisfy this.
+// R230-CQ-13.
+func TruncateAtRuneBoundary(s string, maxBytes int) int {
+	if maxBytes <= 0 || maxBytes >= len(s) {
+		return len(s)
+	}
+	for n := maxBytes; n > 0; n-- {
+		if utf8.RuneStart(s[n]) {
+			return n
+		}
+	}
+	return 0
+}
+
 // TruncateRunesBytes mirrors TruncateRunes for a []byte input: it returns a
 // string with at most maxRunes runes, appending "..." only when the input
 // was actually trimmed. The conversion to string is deferred to the result
