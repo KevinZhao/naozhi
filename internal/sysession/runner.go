@@ -84,11 +84,15 @@ func NewRunner(cfg RunnerConfig) (Runner, error) {
 		return nil, fmt.Errorf("sysession: resolve WorkDir: %w", err)
 	}
 	cfg.WorkDir = abs
-	return &runnerImpl{cfg: cfg}, nil
+	// EnvAllowlist + parent env are stable post-construction, so the
+	// filtered "KEY=value" slice is computed once. Avoids an os.Environ()
+	// syscall + O(N) scan on every Run() (AutoTitler call rate). R230-PERF-3.
+	return &runnerImpl{cfg: cfg, env: filterEnv(cfg.EnvAllowlist)}, nil
 }
 
 type runnerImpl struct {
 	cfg RunnerConfig
+	env []string
 }
 
 func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
@@ -100,7 +104,7 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 	cmd := exec.CommandContext(ctx, r.cfg.BinPath, args...)
 	cmd.Dir = r.cfg.WorkDir
 	cmd.Stdin = strings.NewReader(prompt)
-	cmd.Env = filterEnv(r.cfg.EnvAllowlist)
+	cmd.Env = r.env
 
 	// Capture stderr separately so panic-debug isn't lost when stdout is
 	// empty (e.g. binary error before output).  We only return stderr
@@ -144,8 +148,16 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("sysession: %s -p failed: %w",
 			filepath.Base(r.cfg.BinPath), err)
 	}
-	return strings.TrimSpace(stdout.String()), nil
+	// bytes.TrimSpace operates on []byte directly; the final string()
+	// conversion is the only allocation, vs strings.TrimSpace(string(out))
+	// which copies twice.
+	return string(bytes.TrimSpace(stdout.Bytes())), nil
 }
+
+// Compile-time guarantee that runnerImpl satisfies the Runner contract
+// described above (stdin pipe / --setting-sources / ctx honour). Adding
+// an unrelated method to the interface fails the build in this file.
+var _ Runner = (*runnerImpl)(nil)
 
 // limitedWriter caps an io.Writer so a runaway subprocess can't fill
 // memory with stderr.  Discards everything past max.  We don't emit a
@@ -177,7 +189,7 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 	written, err := lw.w.Write(chunk)
 	lw.n += written
 	if err != nil {
-		return written, err
+		return len(p), err
 	}
 	return len(p), nil
 }
