@@ -96,17 +96,33 @@ function defaultEvents() {
   ];
 }
 
-// defaultCronRuns — 为 cron-001 生成 5 条 recent_runs（mix succeeded/failed/skipped），
-// 用于测试 timeline 行选中、sheet 打开、↑↓ 切换、详情 fetch 等 PR-1 交互。
+// defaultCronRuns — 为 cron-001 生成 N 条 recent_runs（混合状态），覆盖
+// PR-1 timeline 行选中、sheet 打开、↑↓ 切换、详情 fetch、followup #1
+// scroll-into-view（多于 timeline 可视区） 等场景。
 function defaultCronRuns() {
   const now = Date.now();
-  return [
+  const head = [
     { run_id: 'run-aaaa1111', state: 'failed',    started_at: now - 1*60*60*1000, ended_at: now - 1*60*60*1000 + 31000, duration_ms: 31000, trigger: 'cron',   session_id: 'sess-fail0001', error_class: 'network' },
     { run_id: 'run-bbbb2222', state: 'succeeded', started_at: now - 2*60*60*1000, ended_at: now - 2*60*60*1000 + 12000, duration_ms: 12000, trigger: 'cron',   session_id: 'sess-ok000002' },
     { run_id: 'run-cccc3333', state: 'succeeded', started_at: now - 3*60*60*1000, ended_at: now - 3*60*60*1000 + 9000,  duration_ms: 9000,  trigger: 'manual', session_id: 'sess-ok000003' },
     { run_id: 'run-dddd4444', state: 'skipped',   started_at: now - 4*60*60*1000, ended_at: now - 4*60*60*1000 + 100,   duration_ms: 100,   trigger: 'cron'                                  },
     { run_id: 'run-eeee5555', state: 'succeeded', started_at: now - 5*60*60*1000, ended_at: now - 5*60*60*1000 + 11000, duration_ms: 11000, trigger: 'cron',   session_id: 'sess-ok000005' },
   ];
+  // 后追 15 条 succeeded 充实 timeline 让 followup #1 测试可触发 scroll
+  const tail = [];
+  for (let i = 6; i <= 20; i++) {
+    const id = String(i).padStart(4, '0');
+    tail.push({
+      run_id: 'run-tail' + id,
+      state: 'succeeded',
+      started_at: now - i*60*60*1000,
+      ended_at:   now - i*60*60*1000 + 10000,
+      duration_ms: 10000,
+      trigger: 'cron',
+      session_id: 'sess-tail' + id,
+    });
+  }
+  return head.concat(tail);
 }
 
 function defaultCronJobs() {
