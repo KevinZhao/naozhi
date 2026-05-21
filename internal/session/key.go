@@ -113,11 +113,13 @@ func SysKey(name string) string {
 // needs to construct planner keys without importing project (reverse
 // dependency), so we replicate the literal here.
 //
-// Consistency with project.PlannerKeyFor is enforced by double-ended
-// hardcoded assertions: session/routing_test.go asserts
-// plannerKeyFor("foo") == "project:foo:planner" and project_test.go's
-// TestPlannerKeyFor asserts the same literal. A format change must update
-// both.
+// MIRRORED: internal/project.PlannerKeyFor uses identical literals.
+// Consistency is enforced by double-ended hardcoded assertions:
+// session/routing_test.go asserts plannerKeyFor("foo") ==
+// "project:foo:planner" and project_test.go's TestPlannerKeyFor asserts
+// the same literal. A format change must update both — when this
+// mirror set grows beyond two implementations, consider extracting a
+// shared zero-dependency keyspec package instead.
 func plannerKeyFor(name string) string {
 	return ProjectKeyPrefix + name + ":planner"
 }

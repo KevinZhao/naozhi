@@ -418,11 +418,13 @@ type ServerOptions struct {
 	// R55-QUAL-004.
 	StartupCtx context.Context
 	// Version is the build version string (e.g. the `-X main.version=...`
-	// ldflag value). When non-empty it is surfaced as `version` on /health
-	// (both unauthenticated and authenticated) and as `version_tag` inside
-	// /api/sessions stats so the dashboard footer can render "v<tag>" and
-	// curl probes can verify which build is live. Empty value means
-	// "unknown" — /health omits the field, keeping the legacy wire shape.
+	// ldflag value). When non-empty it is surfaced as `version` on the
+	// authenticated portion of /health (R229-SEC-7 moved it out of the
+	// unauthenticated probe section) and as `version_tag` inside
+	// /api/sessions stats so the dashboard footer can render "v<tag>"
+	// and authenticated probes can verify which build is live. Empty
+	// value means "unknown" — /health omits the field, keeping the
+	// legacy wire shape.
 	Version string
 
 	// === Core dependencies (previously positional args of New) ===

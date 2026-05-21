@@ -408,11 +408,17 @@ func (q *MessageQueue) ShouldSendWait(key string) bool {
 	return q.ShouldNotify(key)
 }
 
-// Release implements SessionGuard. Releases ownership without draining.
-// R37-REL1: if messages landed during the busy window (concurrent Enqueue
-// while Dashboard/WS Guard held the session), they would otherwise be stuck
-// until the next Enqueue re-entered the queue. Callers that can process the
-// drained batch should use ReleaseWithDrain instead.
+// Release implements SessionGuard. Releases ownership without draining
+// — internally it calls ReleaseWithDrain(key, nil), which clears the
+// busy flag but leaves any queued messages parked in the sessionQueue
+// for a future Enqueue owner to consume via DoneOrDrain.  This is the
+// SessionGuard-compatible path; it is *not* a drain failure.
+//
+// R37-REL1: if messages landed during the busy window (concurrent
+// Enqueue while Dashboard/WS Guard held the session), they would
+// otherwise be stuck until the next Enqueue re-entered the queue.
+// Callers that can process the drained batch should use
+// ReleaseWithDrain instead.
 func (q *MessageQueue) Release(key string) {
 	// Peek depth under the lock so we can warn callers about stranded messages
 	// without changing Release's no-drain contract. Without this log the only

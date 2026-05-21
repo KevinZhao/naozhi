@@ -120,7 +120,9 @@ const (
 	//
 	// Shared across all exempt-marked sessions (BL2, known design limit):
 	//   - Cron stubs: each job consumes 1 slot via RegisterCronStub,
-	//     with cron.DefaultMaxJobsPerChat (currently 10) as the per-chat cap.
+	//     with cron.DefaultMaxJobsPerChat as the per-chat cap (see
+	//     internal/cron/scheduler.go for the current value — kept out
+	//     of this comment so it doesn't drift).
 	//   - Project planners: up to 1 per project.
 	// Scratch drawers are NOT exempt (ScratchPool.Open sets Exempt=false), so
 	// they consume regular session slots, not exempt slots.
@@ -245,7 +247,15 @@ type Router struct {
 	kiroSessionsDir string
 
 	// workspaceOverrides stores per-chat workspace overrides.
-	// Key format: "platform:chatType:chatID"
+	// Key format: "platform:chatType:chatID" (3-segment chat key —
+	// distinct from the 4-segment session key used in r.sessions).
+	//
+	// Two-key invariant: every chatKey present in sessionsByChat may
+	// have a workspaceOverrides entry; ResetChat clears both maps.
+	// SetWorkspace creates only the override entry (no session yet),
+	// and Reset(key)/evictOldest must NOT touch this map — it is
+	// driven by user intent (SetWorkspace) rather than the session
+	// lifecycle.
 	// 读写: core (init/load), lifecycle (SetWorkspace/GetWorkspace), cleanup (save)
 	workspaceOverrides map[string]string
 

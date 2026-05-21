@@ -28,11 +28,12 @@ import (
 const platformReplyTimeout = 15 * time.Second
 
 // SessionGuard prevents multiple concurrent messages to the same session.
-// Two implementations share this surface:
-//   - session.Guard — per-key mutex used by the Dashboard/WebSocket path
-//     (server/send.go) which retains interrupt-on-busy behaviour.
-//   - MessageQueue — also satisfies this interface; the IM path uses it
-//     so queue-mode gates and the guard contract stay compatible.
+// MessageQueue is the production implementation; the IM path injects a
+// MessageQueue here so queue-mode gates and the guard contract stay
+// compatible. session.Guard happens to satisfy the same shape and is
+// retained as a structural option for future Dashboard/WS reuse — note
+// that today server/send.go references *session.Guard concretely rather
+// than going through this interface.
 //
 // Keep the method set minimal: any future guard variant has to fit.
 type SessionGuard interface {
@@ -54,12 +55,18 @@ type Dispatcher struct {
 	agents        map[string]session.AgentOpts
 	agentCommands map[string]string
 	scheduler     *cron.Scheduler
-	// projectMgr is retained ONLY for slash-command UX text (e.g. echoing
-	// the bound project's name back to the user from /new, /cd, /project).
-	// All routing-affecting reads of project bindings go through resolver
-	// — do not reintroduce ProjectForChat / EffectivePlanner* calls in
-	// the IM / queue / send paths or the legacy duplicate-routing branches
-	// that R-key-resolver collapsed will quietly come back.
+	// projectMgr is used by slash-command handlers for: (a) UX echo of
+	// the bound project's name from /new, /cd, /project; (b) /cd guard
+	// against workspace-fixed projects; (c) /new resolution of planner
+	// vs agent keys when chat is bound; (d) /project [off|list|<name>]
+	// state mutations.
+	//
+	// Routing decisions on the IM hot path (BuildHandler / sendAndReply)
+	// MUST go through resolver only — do not reintroduce ProjectForChat
+	// / EffectivePlanner* calls in the IM / queue / send paths or the
+	// legacy duplicate-routing branches that R-key-resolver collapsed
+	// will quietly come back.  Any new ProjectForChat / EffectivePlanner*
+	// read on the hot path should fail review.
 	projectMgr *project.Manager
 	// resolver centralises (key, opts) derivation for the IM and slash-
 	// command paths. NewDispatcher guarantees this field is non-nil — when
