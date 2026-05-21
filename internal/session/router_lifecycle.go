@@ -679,53 +679,7 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 	)
 	r.mu.Unlock()
 
-	// Load conversation history from Claude's local JSONL when resuming.
-	// This restores dashboard event display after service restarts.
-	// Load the full chain (prev IDs + resume ID) to recover history
-	// that accumulated across multiple CLI session IDs.
-	if resumeID != "" && r.claudeDir != "" && len(oldHistory) == 0 {
-		ids := make([]string, 0, len(prevIDs)+1)
-		ids = append(ids, prevIDs...)
-		ids = append(ids, resumeID)
-		// R229-GO-4: track this in-flight history load via historyWg so
-		// Shutdown.Wait sees it and bound the load by historyCtx — a
-		// 15s budget per spawn could otherwise stretch past the 30s
-		// drain window when several concurrent spawnSession calls each
-		// open large JSONL chains. Skip entirely once historyCtx is
-		// cancelled (Shutdown started). The fresh 15s timeout still
-		// derives from caller ctx so a cancelled GetOrCreate releases
-		// the reader (R225-GO-8 invariant).
-		if r.historyCtx == nil || r.historyCtx.Err() == nil {
-			r.historyWg.Add(1)
-			func() {
-				defer r.historyWg.Done()
-				// Parent on historyCtx so Shutdown's historyCancel()
-				// propagates immediately into the reader at its next
-				// ctx check, instead of waiting up to 15s for the
-				// timeout to fire. Caller ctx (GetOrCreate) is wired
-				// back in via context.AfterFunc so a cancelled
-				// GetOrCreate still releases the reader (R225-GO-8
-				// invariant); R229-GO-4 follow-up.
-				parent := r.historyCtx
-				if parent == nil {
-					parent = context.Background()
-				}
-				histCtx, histCancel := context.WithTimeout(parent, 15*time.Second)
-				defer histCancel()
-				if ctx != nil {
-					stop := context.AfterFunc(ctx, histCancel)
-					defer stop()
-				}
-				allEntries := discovery.LoadHistoryChainTailCtx(
-					histCtx, r.claudeDir, ids, workspace, maxPersistedHistory,
-				)
-				if len(allEntries) > 0 {
-					s.InjectHistory(allEntries)
-					slog.Info("loaded session history on resume", "key", key, "entries", len(allEntries), "chain", len(ids))
-				}
-			}()
-		}
-	}
+	r.loadResumeHistoryOnSpawn(ctx, s, key, resumeID, workspace, prevIDs, oldHistory)
 
 	// RFC §3.2.2 ordering contract: SetPersistSink ONLY after every
 	// InjectHistory call above has completed. Any remaining bulk
@@ -871,6 +825,75 @@ func (r *Router) installPersistSink(proc processIface, key string) {
 		persist.KeyHash(key),
 	)
 	log.SetPersistSink(sink)
+}
+
+// loadResumeHistoryOnSpawn walks the previous CLI session-ID chain and, when
+// a resume is in progress with no in-memory history yet, synchronously loads
+// the JSONL chain from r.claudeDir and injects it into s. No-op when the
+// resume conditions are not met.
+//
+// Synchronous — runs on the spawnSession caller goroutine. The historyWg
+// Add/Done dance still tracks the call so Shutdown.Wait can drain in-flight
+// loads before tearing down dependent state (R229-GO-4: 15s budget per
+// spawn could stretch past the 30s drain window when several concurrent
+// spawnSession calls each open large JSONL chains). The IIFE surrounding
+// the body scopes the deferred historyWg.Done / context cancels so they
+// fire on every return path without leaking past the load attempt.
+//
+// Cancellation contract:
+//   - Parent on r.historyCtx so Shutdown's historyCancel() wakes the reader
+//     immediately rather than waiting for the 15s per-spawn timeout
+//     (R229-GO-4 follow-up).
+//   - Caller ctx (typically GetOrCreate's request ctx) is fanned in via
+//     context.AfterFunc so a cancelled GetOrCreate also releases the reader
+//     (R225-GO-8 invariant).
+//   - Skipped entirely once historyCtx is already cancelled (Shutdown started
+//     before this spawn reached the load step).
+//
+// Lock contract: must NOT be called with r.mu held — InjectHistory acquires
+// session.historyMu independently, and the inner reader can take seconds.
+//
+// Extracted from spawnSession so the per-fix churn stays inside this dedicated
+// helper instead of forcing readers to scroll past it in the long spawn path.
+func (r *Router) loadResumeHistoryOnSpawn(
+	ctx context.Context,
+	s *ManagedSession,
+	key, resumeID, workspace string,
+	prevIDs []string,
+	oldHistory []cli.EventEntry,
+) {
+	if resumeID == "" || r.claudeDir == "" || len(oldHistory) > 0 {
+		return
+	}
+	if r.historyCtx != nil && r.historyCtx.Err() != nil {
+		return
+	}
+
+	ids := make([]string, 0, len(prevIDs)+1)
+	ids = append(ids, prevIDs...)
+	ids = append(ids, resumeID)
+
+	r.historyWg.Add(1)
+	func() {
+		defer r.historyWg.Done()
+		parent := r.historyCtx
+		if parent == nil {
+			parent = context.Background()
+		}
+		histCtx, histCancel := context.WithTimeout(parent, 15*time.Second)
+		defer histCancel()
+		if ctx != nil {
+			stop := context.AfterFunc(ctx, histCancel)
+			defer stop()
+		}
+		allEntries := discovery.LoadHistoryChainTailCtx(
+			histCtx, r.claudeDir, ids, workspace, maxPersistedHistory,
+		)
+		if len(allEntries) > 0 {
+			s.InjectHistory(allEntries)
+			slog.Info("loaded session history on resume", "key", key, "entries", len(allEntries), "chain", len(ids))
+		}
+	}()
 }
 
 // countActive recounts alive processes (corrects drift from undetected exits).
