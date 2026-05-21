@@ -196,9 +196,11 @@ func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	// across hundreds of blocks — every downstream consumer (EventLog ring,
 	// JSONL persist, dashboard fan-out) then pays O(N) work. Drop the event
 	// rather than truncate so the dashboard doesn't render half a turn.
-	if ev.Message != nil && contentBytes(ev.Message) > maxAssistantMessageContentBytes {
-		return nil, false, fmt.Errorf("event content exceeds %d bytes (got %d), dropping",
-			maxAssistantMessageContentBytes, contentBytes(ev.Message))
+	if ev.Message != nil {
+		if n := contentBytes(ev.Message); n > maxAssistantMessageContentBytes {
+			return nil, false, fmt.Errorf("event content exceeds %d bytes (got %d), dropping",
+				maxAssistantMessageContentBytes, n)
+		}
 	}
 	// AskUserQuestion surfacing: in `claude -p` (headless) mode the CLI
 	// auto-injects an is_error:true tool_result ~3ms after the tool_use,
