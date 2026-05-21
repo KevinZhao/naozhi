@@ -1179,6 +1179,33 @@ body.kbd-open .input-hints{display:none}
   .cj-row{grid-template-columns:18px minmax(0,1fr) auto}
   .cj-stats{display:none}
 }
+/* 窄 list-pane 修复：narrow / single 模式 (list-pane ≤ 320) 下，三个 auto 列
+ * (cj-when 39 + cj-stats 52 + cj-actions 91) 总宽 ~180px 把 1fr 列 (cj-main)
+ * 挤到 ~0.4px，title/sub 被压成竖排单字。复用 mobile 644 媒体查询的策略：
+ * 隐藏 cj-when + cj-stats，回 3 列 (dot / main / actions)。时间靠 sub-row
+ * 的 cj-when-inline 兜住。stats 徽章在窄屏信息密度过高，进 detail 看完整
+ * 时间轴更合适，与 mobile 同款决策。
+ *
+ * data-cron-layout 由 setupCronLayoutObserver (dashboard.js) 写入 .cron-detail-body：
+ *   wide   ≥1100  list 380
+ *   medium ≥820   list 360
+ *   narrow ≥560   list 320  ← 此规则触发
+ *   single <560   list 全屏覆盖（cj-row 也走窄逻辑）
+ */
+.cron-detail-body[data-cron-layout="narrow"] .cj-row,
+.cron-detail-body[data-cron-layout="single"] .cj-row{grid-template-columns:18px minmax(0,1fr) auto;gap:8px}
+.cron-detail-body[data-cron-layout="narrow"] .cj-when,
+.cron-detail-body[data-cron-layout="single"] .cj-when,
+.cron-detail-body[data-cron-layout="narrow"] .cj-stats,
+.cron-detail-body[data-cron-layout="single"] .cj-stats{display:none}
+.cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-when-inline,
+.cron-detail-body[data-cron-layout="single"] .cj-sub .cj-when-inline{display:inline;color:var(--nz-text-mute)}
+.cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-when-inline.imminent,
+.cron-detail-body[data-cron-layout="single"] .cj-sub .cj-when-inline.imminent{color:var(--nz-accent);font-weight:600}
+.cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-when-inline.paused,
+.cron-detail-body[data-cron-layout="single"] .cj-sub .cj-when-inline.paused{color:var(--nz-text-faint)}
+.cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-ago,
+.cron-detail-body[data-cron-layout="single"] .cj-sub .cj-ago{display:none}
 .cj-stats{position:relative;display:inline-flex;align-items:center;justify-content:center;min-width:36px;height:22px;padding:0 8px;border-radius:11px;border:1px solid var(--nz-border);background:var(--nz-bg-2);font-size:11px;line-height:1;color:var(--nz-text-mute);font-variant-numeric:tabular-nums;cursor:default;outline:none}
 .cj-stats:hover,.cj-stats:focus-visible{border-color:var(--nz-text-faint);color:var(--nz-text)}
 .cj-stats.ok{color:var(--nz-green);border-color:rgba(63,185,80,.35);background:rgba(63,185,80,.08)}
@@ -1243,6 +1270,18 @@ body.kbd-open .input-hints{display:none}
 .cron-timeline-panel .ctr-block.err .ctr-block-label{color:var(--nz-red)}
 .cron-timeline-panel .ctr-bytes{text-transform:none;font-size:10px;color:var(--nz-text-faint);margin-left:6px}
 .cron-timeline-panel .ctr-block-body{margin:0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:var(--nz-text);background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:4px;padding:8px 10px;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow-y:auto;line-height:1.5}
+/* Markdown variant for result block: drop the monospace/pre-wrap so renderMd's
+   headings/lists/tables/code-blocks render natively; raise max-height a bit
+   because md output tends to be taller than equivalent <pre>. Inner .md-pre
+   keeps its own monospace styling. */
+.cron-timeline-panel .ctr-block-body.md{font-family:inherit;font-size:13px;white-space:normal;word-break:normal;overflow-wrap:anywhere;max-height:380px;line-height:1.55}
+.cron-timeline-panel .ctr-block-body.md p{margin:0 0 8px}
+.cron-timeline-panel .ctr-block-body.md p:last-child{margin-bottom:0}
+.cron-timeline-panel .ctr-block-body.md > :first-child{margin-top:0}
+.cron-timeline-panel .ctr-block-body.md > :last-child{margin-bottom:0}
+.cron-timeline-panel .ctr-md-toggle{margin-left:auto;float:right;background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);font-size:10px;font-family:inherit;padding:0 6px;border-radius:3px;cursor:pointer;line-height:1.6;text-transform:none;letter-spacing:0}
+.cron-timeline-panel .ctr-md-toggle:hover{color:var(--nz-text);border-color:var(--nz-accent)}
+.cron-timeline-panel .ctr-block-label{display:flex;align-items:center;gap:4px}
 .cron-timeline-panel .ctr-block.err .ctr-block-body{color:var(--nz-red)}
 .cron-timeline-panel .ctr-meta-row{font-size:11px;color:var(--nz-text-mute);margin-top:4px}
 .cron-timeline-panel .ctr-meta-row code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:3px;padding:0 4px}
