@@ -22,7 +22,11 @@ var envAlwaysPassthrough = map[string]struct{}{
 // filterEnv returns a "KEY=value" slice suitable for exec.Cmd.Env that
 // contains only:
 //   - the always-passthrough keys (PATH, HOME)
-//   - keys explicitly listed in allowlist
+//   - keys whose name exactly matches an entry in allowlist
+//   - keys whose name has a prefix listed in allowlist that ends with "_"
+//     (a trailing underscore in an allowlist entry is the prefix-mode
+//     opt-in — e.g. "ANTHROPIC_" matches every ANTHROPIC_* var, while
+//     "ANTHROPIC" matches only the bare key "ANTHROPIC")
 //
 // Everything else from the parent environment is dropped.  This is the
 // security-minded default for a daemon framework that may exec a CLI
@@ -33,16 +37,21 @@ var envAlwaysPassthrough = map[string]struct{}{
 // allowlist is matched case-sensitively (matching POSIX env semantics).
 // nil/empty allowlist is fine — only PATH and HOME flow through.
 func filterEnv(allowlist []string) []string {
-	allowed := make(map[string]struct{}, len(allowlist)+len(envAlwaysPassthrough))
+	exact := make(map[string]struct{}, len(allowlist)+len(envAlwaysPassthrough))
+	var prefixes []string
 	for k := range envAlwaysPassthrough {
-		allowed[k] = struct{}{}
+		exact[k] = struct{}{}
 	}
 	for _, k := range allowlist {
-		allowed[k] = struct{}{}
+		if strings.HasSuffix(k, "_") {
+			prefixes = append(prefixes, k)
+			continue
+		}
+		exact[k] = struct{}{}
 	}
 
 	parent := os.Environ()
-	out := make([]string, 0, len(allowed))
+	out := make([]string, 0, len(parent))
 	for _, kv := range parent {
 		// Split on first '=' only; values may contain '='.
 		idx := strings.IndexByte(kv, '=')
@@ -50,10 +59,16 @@ func filterEnv(allowlist []string) []string {
 			continue
 		}
 		key := kv[:idx]
-		if _, ok := allowed[key]; !ok {
+		if _, ok := exact[key]; ok {
+			out = append(out, kv)
 			continue
 		}
-		out = append(out, kv)
+		for _, p := range prefixes {
+			if strings.HasPrefix(key, p) {
+				out = append(out, kv)
+				break
+			}
+		}
 	}
 	return out
 }

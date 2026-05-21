@@ -751,6 +751,22 @@ func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, re
 // sink. dashboard.js currently uses `<pre><code>esc(content)</code></pre>`
 // with esc() HTML-escaping the payload, satisfying this contract. R71-SEC-L1.
 func (h *ProjectHandlers) servePreview(w http.ResponseWriter, resolved string, info os.FileInfo) {
+	// Mirror the serveDownload guard: a file like .netrc / .npmrc / id_rsa
+	// has a text MIME and would otherwise have its raw contents echoed in
+	// the JSON `content` field. The download path's credential allowlist
+	// must apply here too, otherwise an attacker can preview-read what
+	// they cannot download.
+	if isSensitiveDownloadName(filepath.Base(resolved)) {
+		writeJSON(w, map[string]any{
+			"content":   "",
+			"size":      info.Size(),
+			"mime":      "application/octet-stream",
+			"truncated": false,
+			"binary":    true,
+		})
+		return
+	}
+
 	size := info.Size()
 	readSize := size
 	truncated := false
@@ -986,6 +1002,14 @@ var sensitiveDownloadNames = map[string]struct{}{
 	".npmrc":           {},
 	".pypirc":          {},
 	".dockercfg":       {},
+	// SSH private keys and authorized_keys carry no extension by convention,
+	// so the extension allowlist below cannot catch them.
+	"id_rsa":          {},
+	"id_dsa":          {},
+	"id_ecdsa":        {},
+	"id_ed25519":      {},
+	"authorized_keys": {},
+	"credentials":     {}, // ~/.aws/credentials, docker credentials helpers, etc.
 }
 
 // sensitiveDownloadExts lists extensions that strongly imply key material.
@@ -995,6 +1019,7 @@ var sensitiveDownloadExts = map[string]struct{}{
 	".p12": {},
 	".pfx": {},
 	".crt": {}, // certs are usually fine, but combined with adjacent .key files
+	".p8":  {}, // Apple/AWS/JWT private keys
 }
 
 // isSensitiveDownloadName reports whether base (no path component) names a

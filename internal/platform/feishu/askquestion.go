@@ -338,7 +338,20 @@ func (f *Feishu) dispatchCardAction(
 	// in the same Dedup bucket.
 	eventID := ""
 	if messageID != "" {
-		eventID = "card_action:" + messageID + ":" + operatorID + ":" + val.ToolUseID
+		// Cap each user-controlled component before composition so a
+		// pathological Feishu payload (e.g. an unusually long open_id)
+		// can't blow past the SanitizeForLog truncation cap and shadow
+		// the message ID in the dedup key. Real Feishu open_ids are
+		// well under 64 bytes; the 64-cap is permissive.
+		op := operatorID
+		if len(op) > 64 {
+			op = op[:64]
+		}
+		tu := val.ToolUseID
+		if len(tu) > 64 {
+			tu = tu[:64]
+		}
+		eventID = "card_action:" + messageID + ":" + op + ":" + tu
 	}
 	msg := platform.IncomingMessage{
 		Platform:  "feishu",

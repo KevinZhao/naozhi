@@ -20,6 +20,7 @@
 | [cron-run-history.md](cron-run-history.md) | 设计提案 → 实施中 | 2026-05-17 | Cron 执行历史与生命周期可见性：CronRun 实体 / runs/ 滚动 ring / runInflight / WS started/ended / 时间轴 UI |
 | [cron-panel-consolidation.md](cron-panel-consolidation.md) | 设计提案 | 2026-05-20 | 把 cron 当前执行 + 历史从 sidebar/mainShell 全部收编进「定时任务」面板（drawer 布局；`/api/sessions` 过滤 cron stub） |
 | [cron-panel-consolidation-ui.md](cron-panel-consolidation-ui.md) | 设计提案（UI/UX 详细） | 2026-05-20 | 配套 cron-panel-consolidation：响应式断点、列表选中态、抽屉 6 段结构、状态机、文案、a11y、像素级 mockup |
+| [cron-history-redesign.md](cron-history-redesign.md) | Draft v1（提案中） | 2026-05-21 | 修订 cron-panel-consolidation-ui v2：detail 默认进历史 view、run 详情独立 sheet（桌面右抽屉/移动 bottom sheet 共组件）、双栏取代三栏、移动 3 级 push view、状态信号收敛、URL deep-link |
 | [event-log-persistence.md](event-log-persistence.md) | v3 GA 就绪 | 2026-05-10 | EventLog 磁盘持久化，图片与历史事件跨重启可见 |
 | [key-resolver.md](key-resolver.md) | Phase 1-6 已实装（PR #9）；Phase 7 dashboard buildSessionOpts 待 | 2026-05-14 | ARCH3：收敛 planner/agent session key 派生；chat-view / planner-view 双接口（v2 修 v1 漏掉 #6/#7 不继承 defaults 的语义；Phase 6 删 dispatch 侧 legacy nil-resolver 分支） |
 | [learning-system.md](learning-system.md) | 设计提案 | 2026-04-14 | 会话结束触发的闭环自学习（skills/MEMORY/USER） |

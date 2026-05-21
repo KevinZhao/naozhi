@@ -77,9 +77,19 @@ func (h *TranscribeHandler) handleTranscribe(w http.ResponseWriter, r *http.Requ
 	}
 	defer f.Close()
 
-	data, err := io.ReadAll(f)
+	// MaxBytesReader on r.Body bounds the outer multipart envelope, but
+	// ParseMultipartForm may stream a single large part to a tmp file
+	// without re-checking the per-part length. Wrap the reader with an
+	// explicit LimitReader (+1 sentinel) so a runaway part that slipped
+	// past the envelope cap (e.g. via base64-padded length-of-a-length
+	// confusion) cannot exhaust memory in io.ReadAll.
+	data, err := io.ReadAll(io.LimitReader(f, maxAudioSize+1))
 	if err != nil {
 		http.Error(w, "failed to read audio", http.StatusInternalServerError)
+		return
+	}
+	if len(data) > maxAudioSize {
+		http.Error(w, "audio too large", http.StatusRequestEntityTooLarge)
 		return
 	}
 

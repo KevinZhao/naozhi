@@ -1205,10 +1205,24 @@ func buildSysessionManager(cfg *config.Config, router *session.Router,
 		binPath = defaultWrapper.CLIPath
 	}
 	runner, err := sysession.NewRunner(sysession.RunnerConfig{
-		BinPath:      binPath,
-		WorkDir:      resolvedWorkDir,
-		Model:        cfg.Sysession.Runner.Model,
-		EnvAllowlist: nil, // PATH+HOME default is enough for claude -p
+		BinPath: binPath,
+		WorkDir: resolvedWorkDir,
+		Model:   cfg.Sysession.Runner.Model,
+		// claude -p needs the same Bedrock / Anthropic / proxy plumbing
+		// the main session-spawn path uses (applyClaudeEnvSettings
+		// pre-populated naozhi's own os.Environ from
+		// ~/.claude/settings.json at startup).  Trailing underscore =
+		// prefix match, see internal/sysession/env.go's filterEnv.
+		// AWS_ is bounded by the same denylist filterClaudeEnv uses for
+		// the parent — auth-source vars never make it into naozhi's
+		// env in the first place.
+		EnvAllowlist: []string{
+			"ANTHROPIC_",
+			"CLAUDE_",
+			"AWS_",
+			"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY",
+			"http_proxy", "https_proxy", "no_proxy",
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("new runner: %w", err)
