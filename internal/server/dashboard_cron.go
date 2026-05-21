@@ -171,12 +171,12 @@ func validateCronScheduleChars(schedule string) error {
 	return validateStringField(schedule, stringFieldPolicy{name: "schedule", collapseErrors: true})
 }
 
-// maxCronBackendLen mirrors the per-request backend length cap used by the
-// /api/sessions/send handler (send.go:262-272). 32 is comfortably above any
-// sensible backend ID ("claude" / "kiro" / future short tokens) and stops a
-// hostile multi-KB `backend=<payload>` from landing in slog attrs before the
-// router's own validateBackend fires. Keep in sync with send.go's literal.
-const maxCronBackendLen = 32
+// maxCronBackendLen aliases the package-level maxBackendIDLen
+// (select_node_for_backend.go) so cron validation, send handler, and
+// remote-send WS path share one source of truth for the per-request
+// backend length cap. The 32-byte cap is the server-edge bound; the
+// session router's validateBackend allows 64 as the protocol-edge bound.
+const maxCronBackendLen = maxBackendIDLen
 
 // validateCronBackend enforces the same shape contract as send.go for the
 // dashboard-picked backend override on cron jobs:

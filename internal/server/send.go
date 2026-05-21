@@ -260,7 +260,7 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 	// router default inside wrapperFor, but we reject obviously hostile
 	// input early so a 4 KB `backend=<payload>` cannot land in logs.
 	if p.Backend != "" {
-		if len(p.Backend) > 32 {
+		if len(p.Backend) > maxBackendIDLen {
 			return false, "", fmt.Errorf("invalid backend length")
 		}
 		for i := 0; i < len(p.Backend); i++ {
