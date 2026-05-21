@@ -80,16 +80,17 @@ type Hub struct {
 	// satisfies this interface implicitly; kept as an interface so
 	// tests can inject a fake and a future Router sub-aggregation
 	// can swap implementations without touching Hub internals.
-	router     HubRouter
-	agents     map[string]session.AgentOpts
-	agentCmds  map[string]string
-	dashToken  string
-	cookieMAC  string // HMAC-derived cookie value (different from dashToken)
-	guard      *session.Guard
-	queue      *dispatch.MessageQueue // per-key FIFO queue for dashboard sends
-	nodes      map[string]node.Conn
-	nodesMu    *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
-	projectMgr *project.Manager
+	router        HubRouter
+	agents        map[string]session.AgentOpts
+	agentCmds     map[string]string
+	dashToken     string
+	dashTokenHash [32]byte // sha256(dashToken), precomputed; empty when dashToken==""
+	cookieMAC     string   // HMAC-derived cookie value (different from dashToken)
+	guard         *session.Guard
+	queue         *dispatch.MessageQueue // per-key FIFO queue for dashboard sends
+	nodes         map[string]node.Conn
+	nodesMu       *sync.RWMutex // shared with Server.nodesMu — all nodes map access must use this
+	projectMgr    *project.Manager
 	// resolver centralises session key → opts derivation; used by
 	// sessionOptsFor / buildSessionOpts. Nil keeps legacy fallback
 	// wiring for tests that don't construct a resolver.
@@ -258,6 +259,11 @@ func NewHub(opts HubOptions) *Hub {
 		CheckOrigin:     func(r *http.Request) bool { return sameOriginOK(r, h.trustedProxy) },
 		ReadBufferSize:  8192,
 		WriteBufferSize: 8192,
+	}
+	if opts.DashToken != "" {
+		// Precompute sha256 so handleAuth only hashes the inbound token,
+		// halving the per-WS-auth hash work. R230-PERF-11.
+		h.dashTokenHash = sha256.Sum256([]byte(opts.DashToken))
 	}
 	h.tailers = newTailerRegistry(h)
 	h.wiredLinkers = make(map[*cli.SubagentLinker]struct{})
@@ -487,8 +493,9 @@ func (h *Hub) handleAuth(c *wsClient, msg node.ClientMsg) {
 	tokenOK := false
 	if h.dashToken != "" {
 		got := sha256.Sum256([]byte(msg.Token))
-		want := sha256.Sum256([]byte(h.dashToken))
-		tokenOK = subtle.ConstantTimeCompare(got[:], want[:]) == 1
+		// R230-PERF-11: h.dashTokenHash is precomputed at Hub construction;
+		// we only hash the inbound token per auth attempt.
+		tokenOK = subtle.ConstantTimeCompare(got[:], h.dashTokenHash[:]) == 1
 	}
 	if h.dashToken == "" || tokenOK {
 		// R228-GO-P3-3: distinguish "no token configured (single-user
