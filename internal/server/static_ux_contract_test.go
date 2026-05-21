@@ -302,37 +302,28 @@ func TestDashboardJS_CheatsheetDocumentsSlashCommands(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_SectionHeaderHasNewButton pins that every project section
-// header carries a compact `+` button that invokes newSessionInProject, so
-// groups with existing sessions — and empty favorite groups where the
-// full-width "New session in X" CTA used to live — can still create from the
-// header without using the top-right `+` (which opens a generic modal
-// requiring re-typing the workspace).
-func TestDashboardJS_SectionHeaderHasNewButton(t *testing.T) {
+// TestDashboardJS_SectionHeaderHasNoNewButton pins that the per-project
+// `+` button (sh-new) was removed from section headers — the top-right `+`
+// is now the sole create affordance. The legacy sectionEmptyHtml /
+// section-empty row was removed in the same direction and must not return.
+func TestDashboardJS_SectionHeaderHasNoNewButton(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
 		t.Fatalf("read dashboard.js: %v", err)
 	}
 	js := string(data)
-	// The new button must carry the sh-new class so CSS scoping works, must
-	// be inside sectionHeaderHtml (not elsewhere), and must wire to
-	// newSessionInProject.
-	if !strings.Contains(js, `class="sh-btn sh-new"`) {
-		t.Error("section header must include sh-btn.sh-new button")
+	if strings.Contains(js, `class="sh-btn sh-new"`) {
+		t.Error("section header must not include sh-btn.sh-new button (per-project + was removed)")
 	}
-	if !strings.Contains(js, `onclick="event.stopPropagation();newSessionInProject(this.dataset.name,this.dataset.node)"`) {
-		t.Error("sh-new button must wire onclick to newSessionInProject via stopPropagation")
+	if strings.Contains(js, "newSessionInProject(") {
+		t.Error("newSessionInProject was removed alongside the per-project + button; do not reintroduce")
 	}
-	// The legacy sectionEmptyHtml CTA was removed — guard against regressions:
-	// empty favorite groups now rely on the header sh-new `+` button alone,
-	// and a redundant full-width "New session in X" row directly below would
-	// just duplicate the affordance.
 	if strings.Contains(js, "function sectionEmptyHtml") {
-		t.Error("sectionEmptyHtml was removed; empty favorite groups rely on the header sh-new button alone")
+		t.Error("sectionEmptyHtml was removed; empty favorite groups have no per-project create CTA")
 	}
 	if strings.Contains(js, `class="section-empty"`) {
-		t.Error("section-empty row was removed; header sh-new button is the sole per-project create CTA")
+		t.Error("section-empty row was removed; do not reintroduce")
 	}
 }
 
@@ -2928,22 +2919,12 @@ func min2(a, b int) int {
 	return b
 }
 
-// TestDashboardJS_R110P2_SectionHeaderNewButtonConsistency pins two
-// invariants around the per-project "+" create affordance:
-//
-//  1. The `sh-new` compact + button is emitted by sectionHeaderHtml
-//     unconditionally — no `if (g.items.length === 0)` or similar gate
-//     that would bring back the original regression where groups with
-//     existing sessions had no per-project create affordance. The header
-//     `+` is now the sole per-project create surface (the old full-width
-//     "New session in X" row below empty favorite groups was removed as
-//     redundant), so regressing emission would leave empty favorite
-//     groups with no CTA at all.
-//  2. The per-project sh-new button's title + aria-label are localized
-//     to Chinese ("在 X 中新建会话") — the top-right header `+` already
-//     carries Chinese copy elsewhere; keeping the per-project one English
-//     would be a mixed-locale inconsistency.
-func TestDashboardJS_R110P2_SectionHeaderNewButtonConsistency(t *testing.T) {
+// TestDashboardJS_SectionHeaderNoPerProjectNewButton pins that the
+// per-project "+" affordance (newBtn / sh-new) was removed from
+// sectionHeaderHtml. Operators create new sessions exclusively from the
+// top-right `+` button now; the per-project icon was redundant noise in
+// the section header.
+func TestDashboardJS_SectionHeaderNoPerProjectNewButton(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
@@ -2951,66 +2932,19 @@ func TestDashboardJS_R110P2_SectionHeaderNewButtonConsistency(t *testing.T) {
 	}
 	js := string(data)
 
-	// Invariant 1: sh-new button is emitted unconditionally. Locate
-	// sectionHeaderHtml's body and assert there's no `if` before the
-	// `const newBtn = ...` declaration — emission must not be gated on
-	// items.length or similar. We scan a bounded window after the
-	// function declaration.
 	fnIdx := strings.Index(js, "function sectionHeaderHtml(p) {")
 	if fnIdx < 0 {
 		t.Fatal("dashboard.js missing sectionHeaderHtml function")
 	}
 	body := js[fnIdx:minInt(fnIdx+4000, len(js))]
-	newBtnIdx := strings.Index(body, "const newBtn =")
-	if newBtnIdx < 0 {
-		t.Fatal("sectionHeaderHtml body missing `const newBtn = ...` declaration")
+	if strings.Contains(body, "const newBtn =") {
+		t.Error("sectionHeaderHtml must not declare a per-project `newBtn` (the `+` icon was removed)")
 	}
-	// The chunk between the function start and the newBtn declaration
-	// must not include a conditional that would gate emission. Conditions
-	// that appear before `const newBtn` (like the github URL match for
-	// ghBtn, or the favorite-starBtn ternary) are fine; we only check
-	// that the newBtn declaration itself is unconditional (no `if` line
-	// starts on the same indentation level guarding the declaration).
-	// A cheaper structural test: the return statement must reference newBtn
-	// without any ternary that could drop it.
-	ret := body[newBtnIdx:]
-	retStart := strings.Index(ret, "return '<div")
-	if retStart < 0 {
-		t.Fatal("sectionHeaderHtml missing return '<div... statement")
+	if strings.Contains(body, "sh-new") {
+		t.Error("sectionHeaderHtml must not reference the `sh-new` class (per-project `+` was removed)")
 	}
-	returnStmt := ret[retStart:minInt(retStart+1000, len(ret))]
-	// newBtn must be concatenated directly (not inside a conditional arm).
-	// If someone introduced `(cond ? newBtn : '')`, this simple substring
-	// check on `+ newBtn +` would still match, so we also forbid the
-	// conditional wrapping pattern.
-	if !strings.Contains(returnStmt, "+\n    newBtn +") && !strings.Contains(returnStmt, "+ newBtn +") {
-		t.Error("sectionHeaderHtml return must include `newBtn` unconditionally; a conditional gate would regress the R110-P2 '+ New session in X' consistency fix")
-	}
-	if strings.Contains(returnStmt, "? newBtn :") || strings.Contains(returnStmt, ": newBtn)") {
-		t.Error("sectionHeaderHtml must not wrap newBtn in a ternary — that would gate emission and regress the consistency fix")
-	}
-
-	// The sh-new data-driven call site must still exist. After the removal
-	// of sectionEmptyHtml this is the only caller using this exact arg
-	// shape; if it disappears the header `+` button is broken.
-	shNewCallPattern := `newSessionInProject(this.dataset.name,this.dataset.node)`
-	if strings.Count(js, shNewCallPattern) < 1 {
-		t.Errorf("expected at least 1 `newSessionInProject(this.dataset.name,this.dataset.node)` call site (sh-new header button), got 0")
-	}
-
-	// Invariant 2: the sh-new button's title + aria-label are localized.
-	// Scope the check to the newBtn declaration to avoid false positives
-	// from the header `+` button's English "New Session" title at the
-	// top-right of the dashboard.
-	newBtnDecl := body[newBtnIdx:minInt(newBtnIdx+800, len(body))]
-	if !strings.Contains(newBtnDecl, `title="在 `) {
-		t.Error("sh-new button's title must be localized to Chinese (在 X 中新建会话)")
-	}
-	if !strings.Contains(newBtnDecl, `aria-label="在 `) {
-		t.Error("sh-new button's aria-label must be localized to Chinese (在 X 中新建会话)")
-	}
-	if !strings.Contains(newBtnDecl, `中新建会话`) {
-		t.Error("sh-new button must end its localized label with '中新建会话'")
+	if strings.Contains(js, "newSessionInProject(") {
+		t.Error("newSessionInProject helper must stay removed; reintroducing it would bring back the per-project `+` button")
 	}
 }
 
