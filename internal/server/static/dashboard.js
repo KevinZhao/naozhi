@@ -4182,6 +4182,54 @@ document.addEventListener('keydown', function(e) {
   navigateRunSheet(e.key === 'ArrowUp' ? 'prev' : 'next');
 });
 
+// syncSheetGeometry — 桌面端用 JS 把 sheet 的 left/top/height 同步到
+// .cron-detail-pane 的 boundingClientRect 右半（cron-history-redesign 实测）。
+// CSS 不能用 absolute（sheet 在 body，无法锚到 detail-pane；reparent 会被
+// renderCronDrawer 的 innerHTML 重写吞掉），因此走 fixed + 显式坐标。
+// ResizeObserver 监听 detail-pane（拖宽 sidebar / 窗口 resize 都会触发），
+// sheet 打开期间持续跟随。关闭时断开 observer 释放资源。
+//
+// 移动端（matches max-width:768）不调用此函数，CSS 媒体查询自带 bottom-sheet 布局。
+let _cronRunSheetGeomObs = null;
+function syncSheetGeometry() {
+  if (typeof window === 'undefined') return;
+  if (!window.matchMedia('(min-width:769px)').matches) {
+    // 移动端清掉 inline geometry 防留尾巴
+    const sh = document.getElementById('cron-run-sheet');
+    if (sh) {
+      sh.style.left = '';
+      sh.style.top = '';
+      sh.style.height = '';
+      sh.style.width = '';
+    }
+    return;
+  }
+  const sheet = document.getElementById('cron-run-sheet');
+  const detail = document.getElementById('cron-detail-pane');
+  if (!sheet || !detail) return;
+  const r = detail.getBoundingClientRect();
+  // sheet 占 detail-pane 右侧 480px（或 detail 60%，取小者）。timeline 至少
+  // 露出左侧 ≥ 200px 让 same-row toggle 可达。
+  const w = Math.min(480, Math.max(280, Math.floor(r.width * 0.6)));
+  sheet.style.left = (r.right - w) + 'px';
+  sheet.style.top = r.top + 'px';
+  sheet.style.height = r.height + 'px';
+  sheet.style.width = w + 'px';
+}
+function startSheetGeomObserver() {
+  if (typeof ResizeObserver !== 'function') return;
+  if (_cronRunSheetGeomObs) return;
+  const detail = document.getElementById('cron-detail-pane');
+  if (!detail) return;
+  _cronRunSheetGeomObs = new ResizeObserver(() => syncSheetGeometry());
+  _cronRunSheetGeomObs.observe(detail);
+  window.addEventListener('scroll', syncSheetGeometry, { passive: true });
+}
+function stopSheetGeomObserver() {
+  if (_cronRunSheetGeomObs) { _cronRunSheetGeomObs.disconnect(); _cronRunSheetGeomObs = null; }
+  window.removeEventListener('scroll', syncSheetGeometry);
+}
+
 // cron-history-redesign §6: sheet header 按钮事件绑定 + 移动端 swipe-down 关闭。
 // 一次性绑定（DOM 元素从 cold start 起就存在），避免每次 open 都重绑。
 function initCronRunSheetHandlers() {
@@ -11852,13 +11900,20 @@ function renderRunDetailSheet() {
     sheet.classList.remove('is-open');
     sheet.setAttribute('aria-hidden', 'true');
     if (backdrop) backdrop.classList.remove('is-open');
-    // 等过渡结束后再 hidden，避免动画被切断；用 token 守护防止快速 close→open→close
-    // 中间的回调把刚 reopen 的 sheet hide 掉。
+    // 桌面：停 observer，但保留 inline geometry 让滑出动画完整跑完
+    // （位置不变，只是 transform 把它推到右屏外）。
+    stopSheetGeomObserver();
+    // 等过渡结束后再 hidden + 清 inline 样式，避免动画被切断；用 token 守护
+    // 防止快速 close→open→close 中间的回调把刚 reopen 的 sheet hide 掉。
     const token = ++_cronRunSheetCloseToken;
     _cronRunSheetTimers.push(setTimeout(() => {
       if (token !== _cronRunSheetCloseToken) return;     // 已被新 open 抢走
       if (cronRunSheetState.open) return;                 // 双保险：state 仍为 open，跳过
       sheet.hidden = true;
+      sheet.style.left = '';
+      sheet.style.top = '';
+      sheet.style.height = '';
+      sheet.style.width = '';
       if (backdrop) backdrop.hidden = true;
     }, 250));
     return;
@@ -11871,6 +11926,10 @@ function renderRunDetailSheet() {
   sheet.classList.add('is-open');
   sheet.setAttribute('aria-hidden', 'false');
   if (backdrop) backdrop.classList.add('is-open');
+  // 桌面：同步几何 + 启 ResizeObserver 跟随 detail-pane 大小变化。
+  // 移动端 syncSheetGeometry 内部 short-circuit。
+  syncSheetGeometry();
+  startSheetGeomObserver();
 
   const st = getCronTimelineState(cronRunSheetState.jobId);
   const summary = (st.runs || []).find(r => r && r.run_id === cronRunSheetState.runId);

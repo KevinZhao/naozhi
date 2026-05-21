@@ -1298,10 +1298,14 @@ body.kbd-open .input-hints{display:none}
 .crs-body .ctr-meta-row{font-size:11px;color:var(--nz-text-mute);margin-top:4px}
 .crs-body .ctr-meta-row code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:3px;padding:0 4px}
 
-/* 桌面：sheet 仅覆盖 detail-pane（Q1 决议 — absolute 不是 fixed） */
+/* 桌面：sheet 浮在 detail-pane 右半（Q1 决议：列表常驻可见 + timeline 半数行
+ * 也常驻可见，让"同行二次点击关 sheet"这条 toggle 路径可达）。
+ * 由 JS 同步 left/top/width/height 到 .cron-detail-pane bounding rect 右半
+ * （见 dashboard.js syncSheetGeometry），CSS 只负责 transform 滑入动画。
+ * Playwright 实测：sheet 不能用 absolute（DOM 在 body，无法锚 detail-pane；
+ * reparent 会被 renderCronDrawer 的 innerHTML 重写吞掉），故走 fixed + JS。 */
 @media(min-width:769px){
-  .cron-detail-pane{position:relative}
-  .cron-run-sheet{position:absolute;top:0;right:0;bottom:0;width:min(480px,100%);transform:translateX(100%)}
+  .cron-run-sheet{transform:translateX(100%);border-left:1px solid var(--nz-border)}
   .cron-run-sheet.is-open{transform:translateX(0)}
 }
 

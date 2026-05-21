@@ -189,14 +189,12 @@ func TestDashboardHTML_CronHistoryRedesign_SheetMarkup(t *testing.T) {
 		}
 	}
 
-	// 2. 桌面：position:absolute（Q1 决议）。
-	if !strings.Contains(html, ".cron-run-sheet{position:absolute") &&
-		!strings.Contains(html, ".cron-run-sheet{position: absolute") {
-		t.Error("dashboard.html: 桌面 sheet 必须用 position:absolute（Q1 决议 — 仅覆盖 detail-pane，不挡列表）")
-	}
-	// detail-pane 必须设 position:relative，否则 absolute sheet 锚定到 viewport
-	if !strings.Contains(html, ".cron-detail-pane{position:relative}") {
-		t.Error("dashboard.html: .cron-detail-pane 必须设 position:relative — 让 absolute sheet 锚定到 detail-pane 而非 viewport")
+	// 2. 桌面 sheet 用 fixed + JS 同步几何到 detail-pane 右半（Playwright 实测后调整）。
+	// CSS 不再依赖 absolute 锚定（sheet DOM 在 body 中，无法锚到 detail-pane；
+	// 强行 reparent 会被 renderCronDrawer 的 innerHTML 吞掉）。
+	// 桌面 transition: translateX(100%) → 0；坐标由 syncSheetGeometry() 算。
+	if !strings.Contains(html, ".cron-run-sheet{transform:translateX(100%)") {
+		t.Error("dashboard.html: 桌面 .cron-run-sheet 必须以 translateX(100%) 起始隐藏态")
 	}
 
 	// 3. 移动：bottom sheet 布局。
