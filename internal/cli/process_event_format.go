@@ -126,6 +126,17 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 		// (thinking+tool_use+text) avoid 2-3 append-driven growth reallocs.
 		out := make([]EventEntry, 0, len(ev.Message.Content))
 		for _, block := range ev.Message.Content {
+			// R229-PERF-3: skip unknown block types BEFORE paying the
+			// `entry := base` struct copy (~240 B per iteration). The
+			// switch below already had `default: continue` at the tail —
+			// hoisting the same predicate avoids the wasted struct copy
+			// on event streams that mix thinking blocks with future
+			// unknown content kinds.
+			switch block.Type {
+			case "thinking", "tool_use", "text":
+			default:
+				continue
+			}
 			entry := base
 			switch block.Type {
 			case "thinking":

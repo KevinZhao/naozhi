@@ -687,39 +687,29 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		ids := make([]string, 0, len(prevIDs)+1)
 		ids = append(ids, prevIDs...)
 		ids = append(ids, resumeID)
-		// Budgeted tail walk: collect the most recent maxPersistedHistory
-		// entries and stop, which typically avoids opening most of a long
-		// prev-id chain.
-		//
-		// Deliberately NOT using r.historyCtx: that context is cancelled
-		// at Shutdown's first step, so a user message arriving during the
-		// 30s drain window would resume with empty dashboard history. A
-		// fresh 15s timeout gives slow storage room to breathe while
-		// still bounding the request path.
-		//
-		// R225-GO-8: derive from the caller's ctx (not context.Background)
-		// so a cancelled GetOrCreate / TriggerNow ctx propagates through to
-		// LoadHistoryChainTailCtx — without this, a request that the user
-		// gave up on would still keep the JSONL reader busy for the full
-		// 15s. The historyCtx safety property is preserved because Shutdown
-		// cancels via a different ctx path (s.stopCtx → caller ctx is the
-		// dispatch / cron ctx, not r.historyCtx).
-		histCtx, histCancel := context.WithTimeout(ctx, 15*time.Second)
-		// defer cancel inside a narrow func scope: the success path still
-		// wants to call Cancel promptly to release the timer rather than
-		// waiting for spawnSession to return, but using defer here removes
-		// the pre-existing footgun where a future early-return added above
-		// the inline cancel would leak the context.
-		func() {
-			defer histCancel()
-			allEntries := discovery.LoadHistoryChainTailCtx(
-				histCtx, r.claudeDir, ids, workspace, maxPersistedHistory,
-			)
-			if len(allEntries) > 0 {
-				s.InjectHistory(allEntries)
-				slog.Info("loaded session history on resume", "key", key, "entries", len(allEntries), "chain", len(ids))
-			}
-		}()
+		// R229-GO-4: track this in-flight history load via historyWg so
+		// Shutdown.Wait sees it and bound the load by historyCtx — a
+		// 15s budget per spawn could otherwise stretch past the 30s
+		// drain window when several concurrent spawnSession calls each
+		// open large JSONL chains. Skip entirely once historyCtx is
+		// cancelled (Shutdown started). The fresh 15s timeout still
+		// derives from caller ctx so a cancelled GetOrCreate releases
+		// the reader (R225-GO-8 invariant).
+		if r.historyCtx == nil || r.historyCtx.Err() == nil {
+			r.historyWg.Add(1)
+			func() {
+				defer r.historyWg.Done()
+				histCtx, histCancel := context.WithTimeout(ctx, 15*time.Second)
+				defer histCancel()
+				allEntries := discovery.LoadHistoryChainTailCtx(
+					histCtx, r.claudeDir, ids, workspace, maxPersistedHistory,
+				)
+				if len(allEntries) > 0 {
+					s.InjectHistory(allEntries)
+					slog.Info("loaded session history on resume", "key", key, "entries", len(allEntries), "chain", len(ids))
+				}
+			}()
+		}
 	}
 
 	// RFC §3.2.2 ordering contract: SetPersistSink ONLY after every

@@ -11619,13 +11619,30 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
         '<pre class="ctr-block-body">' + esc(detail.prompt) + '</pre>' +
       '</div>'
     : '';
-  const resultBlock = detail.result
-    ? '<div class="ctr-block"><div class="ctr-block-label">result' +
-        (detail.result_bytes ? ' <span class="ctr-bytes">' + esc(String(detail.result_bytes)) + ' bytes</span>' : '') +
-        '</div>' +
-        '<pre class="ctr-block-body">' + esc(detail.result) + '</pre>' +
-      '</div>'
-    : '';
+  // Result 走 markdown 渲染：claude 子进程的输出几乎都是带标题/列表/代码块的 md，
+  // 在 <pre> 里显示会丢失结构。允许通过 __rawResult 切换回 <pre> 原文，便于
+  // 调试 / 当 result 实际是纯文本时让 *_underscore_* 等字符不被误读。
+  // detail.result 已在服务端 rune-truncated 到 4K（见 cron/run.go），交给
+  // renderMd 是安全的；与会话气泡 text/user 事件复用同一渲染路径。
+  let resultBlock = '';
+  if (detail.result) {
+    const showRaw = !!detail.__rawResult;
+    const bytesLabel = detail.result_bytes
+      ? ' <span class="ctr-bytes">' + esc(String(detail.result_bytes)) + ' bytes</span>'
+      : '';
+    const toggleLabel = showRaw ? '渲染' : '原文';
+    const toggleTitle = showRaw ? '切换到 markdown 渲染' : '查看 markdown 原文';
+    const toggleBtn = '<button type="button" class="ctr-md-toggle"' +
+      ' onclick="event.stopPropagation();cronTimelineToggleResultMode(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\')"' +
+      ' title="' + escAttr(toggleTitle) + '">' + esc(toggleLabel) + '</button>';
+    const body = showRaw
+      ? '<pre class="ctr-block-body">' + esc(detail.result) + '</pre>'
+      : '<div class="ctr-block-body md">' + renderMd(detail.result) + '</div>';
+    resultBlock = '<div class="ctr-block">' +
+        '<div class="ctr-block-label">result' + bytesLabel + toggleBtn + '</div>' +
+        body +
+      '</div>';
+  }
   const errBlock = detail.error_msg
     ? '<div class="ctr-block err"><div class="ctr-block-label">error' +
         (detail.error_class ? ' · ' + esc(cronErrorClassLabel(detail.error_class)) : '') +
@@ -11697,6 +11714,22 @@ function renderCronTimelinePanel(jobId) {
   const job = (cronJobs || []).find(x => x && x.id === jobId);
   const st = getCronTimelineState(jobId);
   host.innerHTML = cronTimelineHtml(jobId, job, st);
+  // result 走 renderMd 后会埋入 mermaid/katex 异步占位（mermaid-N / ktx-N），
+  // 必须在 attach 到 DOM 后调用一次才能完成异步渲染。与 events bubble 路径
+  // 的 stickEventsBottom / runPendingAsync 调用语义保持一致。
+  runPendingAsync();
+}
+
+// cronTimelineToggleResultMode — result 区"原文 ↔ markdown"切换。
+// 把 detail.__rawResult 翻转后重绘当前面板；状态写在 details 缓存对象上，
+// 跨展开/折叠保持，session 切走丢弃（同 details 缓存生命周期）。
+function cronTimelineToggleResultMode(jobId, runId) {
+  if (!jobId || !runId) return;
+  const st = getCronTimelineState(jobId);
+  const d = st.details && st.details[runId];
+  if (!d || d.__error) return;
+  d.__rawResult = !d.__rawResult;
+  if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
 }
 
 // cronTimelineLoadMore — 分页加载更早的 run 列表。

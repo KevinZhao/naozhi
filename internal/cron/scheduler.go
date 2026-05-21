@@ -255,11 +255,15 @@ type Scheduler struct {
 	// a callback from robfig/cron whose signature has no ctx parameter, so
 	// the scheduler itself owns the root context so Stop() can cancel in-
 	// flight executions. Callers outside execute() take ctx as an argument.
-	stopCtx      context.Context
-	stopCancel   context.CancelFunc
-	onExecute    OnExecuteFunc
-	onRunStarted OnRunStartedFunc
-	onRunEnded   OnRunEndedFunc
+	stopCtx    context.Context
+	stopCancel context.CancelFunc
+	// R225-GO-5: callback fields accessed via atomic.Pointer so external
+	// readers (emit{Started,Ended} / recordResult variants) don't need to
+	// hold s.mu, and tests that read fields directly cannot race the setters
+	// that previously took s.mu only during write.
+	onExecute    atomic.Pointer[OnExecuteFunc]
+	onRunStarted atomic.Pointer[OnRunStartedFunc]
+	onRunEnded   atomic.Pointer[OnRunEndedFunc]
 
 	// triggerWG tracks goroutines spawned by TriggerNow so Stop() can wait
 	// for them to finish. The scheduled entries are already drained by
@@ -313,26 +317,32 @@ type Scheduler struct {
 
 // SetOnExecute registers a callback invoked after each cron job execution.
 func (s *Scheduler) SetOnExecute(fn OnExecuteFunc) {
-	s.mu.Lock()
-	s.onExecute = fn
-	s.mu.Unlock()
+	if fn == nil {
+		s.onExecute.Store(nil)
+		return
+	}
+	s.onExecute.Store(&fn)
 }
 
 // SetOnRunStarted registers a callback for the run-started broadcast event.
 // nil disables the broadcast (testing path / no-WS mode).
 func (s *Scheduler) SetOnRunStarted(fn OnRunStartedFunc) {
-	s.mu.Lock()
-	s.onRunStarted = fn
-	s.mu.Unlock()
+	if fn == nil {
+		s.onRunStarted.Store(nil)
+		return
+	}
+	s.onRunStarted.Store(&fn)
 }
 
 // SetOnRunEnded registers a callback for the run-ended broadcast event.
 // Invoked for every terminal state including skipped/canceled — the
 // callback should distinguish via RunEndedEvent.State.
 func (s *Scheduler) SetOnRunEnded(fn OnRunEndedFunc) {
-	s.mu.Lock()
-	s.onRunEnded = fn
-	s.mu.Unlock()
+	if fn == nil {
+		s.onRunEnded.Store(nil)
+		return
+	}
+	s.onRunEnded.Store(&fn)
 }
 
 // CurrentRun returns the inflight snapshot for jobID, or (zero, false) when
@@ -2252,20 +2262,14 @@ func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 // hub locks may be acquired by the handler without inversion risk. nil
 // hook = no broadcast (used by tests / no-WS deployments).
 func (s *Scheduler) emitRunStarted(ev RunStartedEvent) {
-	s.mu.RLock()
-	fn := s.onRunStarted
-	s.mu.RUnlock()
-	if fn != nil {
-		fn(ev)
+	if fn := s.onRunStarted.Load(); fn != nil {
+		(*fn)(ev)
 	}
 }
 
 func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
-	s.mu.RLock()
-	fn := s.onRunEnded
-	s.mu.RUnlock()
-	if fn != nil {
-		fn(ev)
+	if fn := s.onRunEnded.Load(); fn != nil {
+		(*fn)(ev)
 	}
 }
 
@@ -2337,12 +2341,11 @@ func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionI
 			"job_id", j.ID, "err", perr)
 		return result, errMsg, false
 	}
-	fn := s.onExecute
 	s.mu.Unlock()
 
 	save()
-	if fn != nil {
-		fn(j.ID, result, errMsg)
+	if fn := s.onExecute.Load(); fn != nil {
+		(*fn)(j.ID, result, errMsg)
 	}
 	return result, errMsg, true
 }
@@ -2478,12 +2481,11 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
 			"job_id", j.ID, "err", perr)
 		return
 	}
-	fn := s.onExecute
 	s.mu.Unlock()
 
 	save()
-	if fn != nil {
-		fn(j.ID, result, errMsg)
+	if fn := s.onExecute.Load(); fn != nil {
+		(*fn)(j.ID, result, errMsg)
 	}
 }
 
