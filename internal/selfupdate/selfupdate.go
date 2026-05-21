@@ -337,11 +337,11 @@ func fetchFile(ctx context.Context, fetchURL, dest string, maxBytes int64) error
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		return fmt.Errorf("HTTP request to %s: %w", fetchURL, err)
+		return fmt.Errorf("selfupdate: HTTP request to %s: %w", fetchURL, err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("HTTP %d fetching %s", resp.StatusCode, fetchURL)
+		return fmt.Errorf("selfupdate: HTTP %d fetching %s", resp.StatusCode, fetchURL)
 	}
 
 	// Owner-only, non-executable until verifyChecksum proves integrity.

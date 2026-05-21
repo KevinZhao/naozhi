@@ -133,6 +133,9 @@ type Manager struct {
 	enabled bool
 	cfg     Config
 	tickFn  tickerFactory
+	// daemons is populated once by NewManager and never mutated
+	// afterwards; safe to read concurrently from Inspector / Tick paths
+	// without taking a lock.
 	daemons []*daemonRecord
 	wg      sync.WaitGroup
 	ctx     context.Context
@@ -186,6 +189,10 @@ func NewManager(cfg Config) (*Manager, error) {
 		return nil, fmt.Errorf("sysession: NewManager requires Router when enabled")
 	}
 
+	// Single timestamp shared by every daemonRecord on this Manager
+	// instance — Manager represents one process start, so all daemons
+	// agree on the "since process start" baseline shown in the
+	// dashboard.
 	now := time.Now()
 	for _, factory := range builtinDaemons {
 		runtime, ok := cfg.Daemons[factory.Name]

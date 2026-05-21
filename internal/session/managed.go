@@ -519,10 +519,15 @@ func (s *ManagedSession) touchLastActive() {
 }
 
 // SendPassthrough is the concurrent-capable Send for passthrough mode.
-// Unlike Send, this does NOT acquire sendMu — the CLI's internal commandQueue
-// plus the Process-level sendSlot FIFO provide ordering, and serializing at
-// this layer would defeat passthrough's whole point (instant dispatch, tool-
-// boundary mid-turn injection).
+// Unlike Send, it does NOT serialise the entire turn under sendMu — the
+// CLI's internal commandQueue plus the Process-level sendSlot FIFO
+// provide ordering, and serialising at this layer would defeat
+// passthrough's whole point (instant dispatch, tool-boundary mid-turn
+// injection).
+//
+// sendMu is still acquired briefly around the first-turn session-ID
+// capture inner-check (see R215-GO-P2-2); the lock window is bounded
+// to that critical section and does not span the round-trip.
 //
 // Callers must verify SupportsPassthrough() before invoking. For protocols
 // that don't support replay, the dispatcher should fall back to the legacy

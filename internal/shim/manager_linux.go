@@ -3,6 +3,8 @@
 package shim
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -63,21 +65,26 @@ func readPPidFromProcStatus(pid int) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	// Scan rather than splitting the whole buffer:  /proc/<pid>/status
+	// is short but has ~50 lines, and we only need the one starting
+	// with "PPid:" — early-return saves an O(n) []string allocation.
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		line := scanner.Text()
 		if !strings.HasPrefix(line, "PPid:") {
 			continue
 		}
 		fields := strings.Fields(line)
 		if len(fields) < 2 {
-			return 0, fmt.Errorf("malformed PPid line in /proc/%d/status", pid)
+			return 0, fmt.Errorf("shim: malformed PPid line in /proc/%d/status", pid)
 		}
 		ppid, err := strconv.Atoi(fields[1])
 		if err != nil {
-			return 0, fmt.Errorf("parse PPid %q: %w", fields[1], err)
+			return 0, fmt.Errorf("shim: parse PPid %q: %w", fields[1], err)
 		}
 		return ppid, nil
 	}
-	return 0, fmt.Errorf("PPid not found in /proc/%d/status", pid)
+	return 0, fmt.Errorf("shim: PPid not found in /proc/%d/status", pid)
 }
 
 // moveToShimsCgroup moves shim and CLI processes to an independent systemd

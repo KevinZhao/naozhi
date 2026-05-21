@@ -15,8 +15,10 @@ import "github.com/naozhi/naozhi/internal/session"
 //
 // This is the post-RFC-v2.1 shape:  no Reset (transient subprocess path
 // doesn't share long-lived state), no Snapshot()-as-slice in the daemon
-// hot path (VisitSessions is the streaming alternative, but Snapshot is
-// still here for dashboard one-shot reads).
+// hot path — VisitSessions is the streaming alternative, and dashboard
+// one-shot reads go through ListSessions on *session.Router directly
+// (this interface intentionally doesn't expose them so daemons stay on
+// the streaming path).
 type SystemSessionRouter interface {
 	// VisitSessions streams every session through fn.  fn returning
 	// false stops iteration early.  Used by AutoTitler to filter

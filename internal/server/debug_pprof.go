@@ -85,7 +85,16 @@ func (s *Server) registerPprof() {
 			// `seconds` query parameter (default 1s, no cap) so a buggy or
 			// malicious loopback caller can request an indefinite trace.
 			// Stdlib limits to 1s default but we further bound at 30s.
-			if v := newURL.Query().Get("seconds"); v == "" || parsePositiveSeconds(v) > 30 {
+			// Rewrite when missing, non-positive, or above the 30s cap.
+			// Without the `<= 0` arm, `seconds=0` and `seconds=-1`
+			// would slip through unrewritten and the bound advertised
+			// by the comment above wouldn't actually be enforced.
+			if v := newURL.Query().Get("seconds"); v == "" {
+				q := newURL.Query()
+				q.Set("seconds", "30")
+				newURL.RawQuery = q.Encode()
+				rr.URL = &newURL
+			} else if n := parsePositiveSeconds(v); n <= 0 || n > 30 {
 				q := newURL.Query()
 				q.Set("seconds", "30")
 				newURL.RawQuery = q.Encode()

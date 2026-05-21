@@ -28,9 +28,9 @@ import (
 
 // SessionRouter is the subset of *session.Router that Dispatcher uses.
 // Method list is derived from `grep 'd\.router\.' internal/dispatch/`
-// (13 call sites, 8 distinct methods). Adding a new Router call from
-// dispatch requires extending this interface — kept small so growth is
-// visible in review.
+// (13 d.router.* call sites, dedup to 8 distinct methods). Adding a
+// new Router call from dispatch requires extending this interface —
+// kept small so growth is visible in review.
 type SessionRouter interface {
 	GetOrCreate(ctx context.Context, key string, opts session.AgentOpts) (*session.ManagedSession, session.SessionStatus, error)
 	GetSession(key string) *session.ManagedSession

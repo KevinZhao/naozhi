@@ -227,6 +227,12 @@ func (r *Router) resetSessionLocked(key string, toClose *[]processIface, closedA
 }
 
 // AgentOpts provides per-agent overrides for session creation.
+//
+// ExtraArgs aliasing contract:  callers receiving AgentOpts from
+// KeyResolver get a freshly-cloned ExtraArgs (safe to append).  Callers
+// populating AgentOpts to feed the router should treat ExtraArgs as
+// owned exclusively by them — do NOT keep aliases to slices held by
+// other goroutines (R215-ARCH-P2-8 / R37-CONCUR1).
 type AgentOpts struct {
 	Model     string
 	ExtraArgs []string
@@ -344,7 +350,7 @@ func (r *Router) GetOrCreate(ctx context.Context, key string, opts AgentOpts) (*
 // struct keeps spawnSession's branching narrow and lets the merge rules be
 // table-tested in isolation (R70-ARCH-H2).
 type spawnParams struct {
-	BackendID string // resolved backend ID reported by wrapperFor
+	BackendID string // effective backend ID after override/fallback resolution (may differ from opts.Backend)
 	Wrapper   *cli.Wrapper
 	Model     string
 	Args      []string

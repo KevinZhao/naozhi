@@ -1016,7 +1016,10 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 }
 
 // deleteJobLocked performs the in-memory side effects of removing a job:
-// stop the cron entry, reset the bound session, and drop the map entry.
+// stop the cron entry, reset the bound session (also evicts the cron
+// session from the router so the dashboard sidebar stub is removed),
+// and drop the map entry.
+//
 // Caller must hold s.mu.Lock() and pass a non-nil job that exists in
 // s.jobs. Intentionally does NOT delete from s.runningJobs: a concurrent
 // execute() for this job may still hold the atomic.Bool and be about to

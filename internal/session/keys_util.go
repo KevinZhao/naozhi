@@ -123,7 +123,15 @@ func SessionKey(platform, chatType, id, agentID string) string {
 	return sanitizeKeyComponent(platform) + ":" + sanitizeKeyComponent(chatType) + ":" + sanitizeKeyComponent(id) + ":" + sanitizeKeyComponent(agentID)
 }
 
-// TakeoverKey builds a session key for a takeover from a discovered process CWD.
+// TakeoverKey builds a session key for a takeover from a discovered
+// process CWD.
+//
+// cwdKey MUST already be sanitized (e.g. via SanitizeCWDKey) — TakeoverKey
+// concatenates it directly into the colon-delimited session key without
+// re-running sanitizeKeyComponent, so a raw path containing ':' or
+// other key separators would produce a malformed key.  Callers
+// (server/dashboard_discovered.go, upstream/connector_rpc.go) pass
+// SanitizeCWDKey output here.
 func TakeoverKey(cwdKey string) string {
 	return "local:takeover:" + cwdKey + ":general"
 }
