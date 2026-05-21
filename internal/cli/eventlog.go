@@ -733,7 +733,16 @@ func (l *EventLog) Append(e EventEntry) {
 	// Invoke persistence sink OUTSIDE l.mu. Passing a fresh one-slot
 	// slice matches PersistSink's retention contract (callers may hold
 	// the slice past return). The slice copy is O(1) because len=1.
-	l.invokePersistSink([]EventEntry{e})
+	//
+	// R230-PERF-1: skip the slice literal entirely when no sink is
+	// wired (test harnesses, headless tools, the InjectHistory replay
+	// phase before the persister attaches). The slice header + the
+	// `EventEntry` copy together heap-escape on every Append; bypassing
+	// them in the no-sink case saves one alloc per event in the hot
+	// stdout path. Mirrors AppendBatch's pre-loop sinkAttached gate.
+	if l.persistSinkPtr.Load() != nil {
+		l.invokePersistSink([]EventEntry{e})
+	}
 
 	l.notifySubscribers()
 }
