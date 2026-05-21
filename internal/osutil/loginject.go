@@ -1,6 +1,9 @@
 package osutil
 
-import "strings"
+import (
+	"strings"
+	"unicode/utf8"
+)
 
 // IsLogInjectionRune reports whether r is a Unicode codepoint that would
 // corrupt structured log output or terminal rendering when embedded in a
@@ -98,12 +101,15 @@ func SanitizeForLog(s string, maxLen int) string {
 		return r
 	}, s)
 	if maxLen > 0 && len(mapped) > maxLen {
-		// Byte-level truncate. The cap is a defense against oversized attack
-		// strings (e.g. a 4 KB err.Error spewed into every log line); we do
-		// not try to preserve rune boundaries because a truncated tail
-		// character will either render or drop quietly depending on the
-		// log sink, but neither path changes the injection surface.
+		// Byte-level truncate, then walk back to the nearest rune
+		// boundary so a multi-byte CJK character isn't split mid-rune
+		// (which would emit an invalid-UTF-8 sequence into structured
+		// log sinks).  The cap itself is a defense against oversized
+		// attack strings.
 		mapped = mapped[:maxLen]
+		for len(mapped) > 0 && !utf8.ValidString(mapped) {
+			mapped = mapped[:len(mapped)-1]
+		}
 	}
 	return mapped
 }
