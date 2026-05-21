@@ -1255,6 +1255,70 @@ body.kbd-open .input-hints{display:none}
   .cron-timeline-panel .ctr-main{font-size:12px;gap:8px}
   .cron-timeline-panel .ctr-dur{font-size:11px}
 }
+/* timeline 行选中态 — sheet 打开后该行高亮，提示用户当前看的是哪一条 run */
+.cron-timeline-panel .ctr.is-selected{background:#1c2939;box-shadow:inset 3px 0 0 var(--nz-accent)}
+.cron-timeline-panel .ctr.is-selected .ctr-state{color:var(--nz-text-strong)}
+
+/* ===== cron-history-redesign §6 — Run-Detail Sheet 共组件 =====
+ * 桌面 (≥769)：position:absolute 仅覆盖 detail-pane（不挡列表，方便切 cron）
+ * 移动 (<769)：position:fixed 全屏 bottom sheet（75vh，drag handle）
+ * 同一组件，渲染逻辑复用 cronTimelineDetailHtml。 */
+.cron-run-sheet[hidden]{display:none!important}
+.cron-run-sheet{position:fixed;background:var(--nz-bg-1);border:1px solid var(--nz-border);box-shadow:-8px 0 24px rgba(0,0,0,.5);z-index:200;display:flex;flex-direction:column;transition:transform .25s ease,opacity .15s ease;opacity:0;pointer-events:none}
+.cron-run-sheet.is-open{opacity:1;pointer-events:auto}
+.crs-header{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-0);flex-shrink:0}
+.crs-dot{width:10px;height:10px;border-radius:50%;background:var(--nz-text-faint);flex-shrink:0}
+.crs-dot.ok{background:var(--nz-green)}
+.crs-dot.err{background:var(--nz-red)}
+.crs-dot.skip{background:var(--nz-text-faint)}
+.crs-dot.warn{background:var(--nz-amber)}
+.crs-dot.cancel{background:#a371f7}
+.crs-dot.run{background:var(--nz-accent);animation:cjDotPulse 1.4s ease-in-out infinite}
+.crs-title-wrap{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.crs-title{margin:0;font-size:15px;font-weight:600;color:var(--nz-text-strong);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.crs-meta{font-size:11px;color:var(--nz-text-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.crs-actions{display:flex;gap:2px;flex-shrink:0}
+.crs-btn-icon{width:32px;height:32px;border-radius:6px;border:1px solid transparent;background:transparent;color:var(--nz-text-mute);cursor:pointer;font-size:14px;line-height:1;display:inline-flex;align-items:center;justify-content:center;font-family:inherit;-webkit-tap-highlight-color:transparent}
+.crs-btn-icon:hover:not([disabled]){background:var(--nz-bg-2);color:var(--nz-text-strong);border-color:var(--nz-border)}
+.crs-btn-icon[disabled]{opacity:.35;cursor:not-allowed}
+.crs-btn-icon.crs-close{font-size:18px}
+.crs-body{flex:1;overflow-y:auto;padding:14px 16px;background:var(--nz-bg-0)}
+.crs-body .ctr-block{margin-bottom:12px}
+.crs-body .ctr-block:last-child{margin-bottom:0}
+.crs-body .ctr-block-label{font-size:10px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;display:flex;align-items:center;gap:6px}
+.crs-body .ctr-block.err .ctr-block-label{color:var(--nz-red)}
+.crs-body .ctr-bytes{text-transform:none;font-size:10px;color:var(--nz-text-faint)}
+.crs-body .ctr-block-body{margin:0;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:var(--nz-text);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:4px;padding:10px 12px;white-space:pre-wrap;word-break:break-word;line-height:1.5;max-height:none}
+.crs-body .ctr-block.err .ctr-block-body{color:var(--nz-red)}
+.crs-body .ctr-loading,.crs-body .ctr-err-load,.crs-body .ctr-empty-detail{font-size:13px;color:var(--nz-text-mute);font-style:italic;padding:20px 4px;text-align:center}
+.crs-body .ctr-err-load{color:var(--nz-red)}
+.crs-body .ctr-fresh-hint{font-size:12px;color:var(--nz-text);background:rgba(31,111,235,.08);border:1px solid rgba(31,111,235,.25);border-radius:6px;padding:8px 10px;margin-bottom:10px;line-height:1.5}
+.crs-body .ctr-sid-chip{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;color:var(--nz-accent);background:transparent;border:1px solid var(--nz-border);border-radius:3px;padding:1px 6px;font-size:11px;cursor:pointer}
+.crs-body .ctr-sid-chip:hover{background:rgba(31,111,235,.12);border-color:var(--nz-accent)}
+.crs-body .ctr-meta-row{font-size:11px;color:var(--nz-text-mute);margin-top:4px}
+.crs-body .ctr-meta-row code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:3px;padding:0 4px}
+
+/* 桌面：sheet 仅覆盖 detail-pane（Q1 决议 — absolute 不是 fixed） */
+@media(min-width:769px){
+  .cron-detail-pane{position:relative}
+  .cron-run-sheet{position:absolute;top:0;right:0;bottom:0;width:min(480px,100%);transform:translateX(100%)}
+  .cron-run-sheet.is-open{transform:translateX(0)}
+}
+
+/* 移动：bottom sheet (75vh)，drag handle，软键盘适配 visualViewport */
+@media(max-width:768px){
+  .cron-run-sheet{left:0;right:0;bottom:0;top:auto;width:100%;height:auto;max-height:75vh;transform:translateY(100%);border-radius:16px 16px 0 0;border-bottom:none;border-left:none;border-right:none;box-shadow:0 -8px 24px rgba(0,0,0,.5);padding-bottom:max(0px,env(safe-area-inset-bottom))}
+  .cron-run-sheet.is-open{transform:translateY(0)}
+  .cron-run-sheet::before{content:'';display:block;width:36px;height:4px;background:var(--nz-text-faint);border-radius:2px;margin:8px auto;flex-shrink:0}
+  .crs-header{padding:8px 14px 10px}
+  .crs-actions .crs-btn-icon{width:36px;height:36px}
+  /* 移动端遮罩，点击关 sheet */
+  .cron-run-sheet-backdrop{position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:199;opacity:0;pointer-events:none;transition:opacity .2s ease}
+  .cron-run-sheet-backdrop.is-open{opacity:1;pointer-events:auto}
+}
+@media(min-width:769px){
+  .cron-run-sheet-backdrop{display:none}
+}
 
 /* ===== cron-panel-consolidation RFC §4 — drawer + list-pane =====
  * Two-column shell when cronDetailJobId is non-null; collapses to single
@@ -1865,6 +1929,28 @@ body.kbd-open .sidebar-footer{display:none}
     <div class="vo-hint" id="vo-hint"></div>
   </div>
 </div>
+<!-- cron-history-redesign §6: run detail sheet 共组件
+     桌面端：右滑抽屉（仅在 main 容器内）
+     移动端：bottom sheet (75vh)
+     沿用 cronTimelineDetailHtml 渲染逻辑；timeline 行不再 inline 展开。
+     默认隐藏，openRunDetailSheet() 加 .is-open 触发滑出。 -->
+<div class="cron-run-sheet-backdrop" id="cron-run-sheet-backdrop" hidden onclick="closeRunDetailSheet()"></div>
+<aside class="cron-run-sheet" id="cron-run-sheet" role="dialog" aria-modal="false" aria-labelledby="crs-title" aria-hidden="true" hidden>
+  <header class="crs-header">
+    <span class="crs-dot" id="crs-dot" aria-hidden="true"></span>
+    <div class="crs-title-wrap">
+      <h3 class="crs-title" id="crs-title" tabindex="-1">执行详情</h3>
+      <div class="crs-meta" id="crs-meta"></div>
+    </div>
+    <div class="crs-actions">
+      <button type="button" class="crs-btn-icon" id="crs-prev" title="上一条 (↑)" aria-label="上一条" disabled>&#8593;</button>
+      <button type="button" class="crs-btn-icon" id="crs-next" title="下一条 (↓)" aria-label="下一条" disabled>&#8595;</button>
+      <button type="button" class="crs-btn-icon" id="crs-copy" title="复制 run ID" aria-label="复制 run ID">&#8869;</button>
+      <button type="button" class="crs-btn-icon crs-close" id="crs-close" title="关闭 (Esc)" aria-label="关闭详情">&times;</button>
+    </div>
+  </header>
+  <div class="crs-body" id="crs-body"></div>
+</aside>
 <script src="/static/dashboard.js"></script>
 <script src="/static/agent_view.js"></script>
 </body>
