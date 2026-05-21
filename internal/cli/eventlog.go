@@ -519,8 +519,22 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 		}
 		return false, pendingTaskDone{}
 	case "result", "user":
-		l.turnAgents = l.turnAgents[:0]
-		l.bgAgents = l.bgAgents[:0]
+		// R230-PERF-5: a turn that spawned dozens of subagents (e.g. a
+		// TeamCreate fan-out) inflates the backing array; subsequent
+		// SnapshotTurnAgents copies pay len*sizeof on every Snapshot even
+		// when the live count is zero. Drop the array when it grew past a
+		// typical-turn threshold so the next turn re-grows from scratch.
+		const subagentTurnRetainCap = 8
+		if cap(l.turnAgents) > subagentTurnRetainCap {
+			l.turnAgents = nil
+		} else {
+			l.turnAgents = l.turnAgents[:0]
+		}
+		if cap(l.bgAgents) > subagentTurnRetainCap {
+			l.bgAgents = nil
+		} else {
+			l.bgAgents = l.bgAgents[:0]
+		}
 		// Most non-agent turns leave turnAgentCount at zero already;
 		// skipping the redundant atomic Store avoids cache-coherence
 		// traffic on every result event in agent-free workloads.
