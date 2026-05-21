@@ -131,8 +131,8 @@
 
 - [ ] **R231-CQ-1 — claude reconnect 路径双注入（P1，PR #202 复盘）**: `router_shim.go:439` 直接 `proc.InjectHistory(histEntries)`，随后 `ReattachProcessNoCallback` 调 `attachProcessAndSnapshotPersisted` 把 `sess.persistedHistory`（已由 tier1/tier2 异步 goroutine 通过 `sess.InjectHistory` 填充）snapshot 再次注入同一 proc。两批高度重叠时 EventLog 翻倍。方案：line 439 改为 `sess.InjectHistory(histEntries)` 走 persistedHistory + seededLen 流向，与 kiro 路径行为一致。需对照 #202 PR 测试与 EventLog 去重逻辑验证。
 - [ ] **R231-CQ-2 — attachProcessAndSnapshotPersisted(nil) 语义不明（P1）**: nil 分支重置 seededLen=0 但保留 persistedHistory；下次非 nil ReattachProcess 时会全量重注入。方案：明确 nil 参数语义（detach vs clear），或 nil 分支不修改 seededLen。
-- [ ] **R231-CQ-3 — managed.go ReattachProcessNoCallback 中冗余 `proc != nil` 检查（P3）**: attachProcessAndSnapshotPersisted 在 proc==nil 时已 return nil，外层冗余 guard。方案：移除或加注释。
-- [ ] **R231-CQ-4 — reattach_history_test.go itoa 重复（P3）**: 同 package strconv 已 import；测试自定义 itoa 违 DRY。方案：用 strconv.Itoa 或 testutil 提供 helper。
+- [x] **R231-CQ-3 — managed.go ReattachProcessNoCallback 中冗余 `proc != nil` 检查（P3）**: attachProcessAndSnapshotPersisted 在 proc==nil 时已 return nil，外层冗余 guard。方案：移除或加注释。 — 已修复（ReattachProcess + ReattachProcessNoCallback 两处的 `proc != nil && len(snapshot) > 0` 化简为 `len(snapshot) > 0`，并补注释说明 attachProcessAndSnapshotPersisted nil-snapshot 契约），本批 PR #210
+- [x] **R231-CQ-4 — reattach_history_test.go itoa 重复（P3）**: 同 package strconv 已 import；测试自定义 itoa 违 DRY。方案：用 strconv.Itoa 或 testutil 提供 helper。 — 已修复（reattach_history_test.go 改用 strconv.Itoa，删 23 行私实现 itoa），本批 PR #210
 - [ ] **R231-CQ-5 — attachProcessAndSnapshotPersisted vs adoptProcessAlreadySeeded 命名风格不对称（P3）**: 一动作+副词，一形容词描述结果。方案：统一命名风格。
 - [ ] **R231-CQ-6 — persistedSeededLen 字段 21 行 block 注释与函数 godoc 重复（P3）**: 方案：精简到 3-5 行 + "see attachProcessAndSnapshotPersisted" 交叉引用。
 - [ ] **R231-CQ-7 — managed.go forward 注释 "R191-GO-M1 不再相关" 与实际行为部分矛盾（P3）**: 注释说"是旧 proc 也没关系"但没解释为何旧 proc 注入无害。方案：补充"orphan proc 无 EventEntries 调用方"说明。
@@ -247,9 +247,9 @@
 - [ ] **R230-CQ-10 — NewRouter 359 行内联三阶段初始化（P2 R229-CR-2 重申）**: newRouterRestoreSessions / newRouterStartHistoryLoads 抽取。Breaking：否。
 - [ ] **R230-CQ-11 — handleOwnerLoopPanic 用 slog.Error 包级 logger 缺 key/agent 富化（P3）**: dispatch.go panic 路径与 ownerLoop 主路径属性不一致。方案：参数透传 lg。Breaking：否。
 - [ ] **R230-CQ-12 — backend 错误信息 3 处不一致（"invalid backend length"/"backend exceeds %d-byte limit"/"invalid backend identifier"）（P3）**: API 客户端字符串匹配会漏。方案：统一走 session.validateBackend 或共享格式化 helper。Breaking：是（外部串匹配方需迁）。
-- [ ] **R230-CQ-13 — rtruncByteLen 与 textutil.TruncateRunesNoEllipsis 重复（P3）**: dashboard_session.go 私实现一份。方案：统一调 textutil。Breaking：否。
+- [x] **R230-CQ-13 — rtruncByteLen 与 textutil.TruncateRunesNoEllipsis 重复（P3）**: dashboard_session.go 私实现一份。方案：统一调 textutil。Breaking：否。 — 已修复（新增 textutil.TruncateAtRuneBoundary 字节级 rune-boundary 反向截断 helper + 7 case 表驱动测试，dashboard_session.go / dashboard_transcribe.go 切换调用，删 rtruncByteLen 私实现 13 行），本批 PR #210
 - [ ] **R230-CQ-14 — cron/scheduler.go 2745 行单文件无拆分计划（P3 R226-CR-11 重申）**: 建议先建 scheduler_job.go / scheduler_run.go / scheduler_notify.go 骨架。Breaking：否。
-- [ ] **R230-CQ-15 — Process.statusLines 无环 cap 文档与实现不一致（P3）**: 命名"pre-allocated capped ring"但实际无 trim。方案：每写入 trim 至 maxStatusLines=20。Breaking：否。
+- [x] **R230-CQ-15 — Process.statusLines 无环 cap 文档与实现不一致（P3）**: 命名"pre-allocated capped ring"但实际无 trim。方案：每写入 trim 至 maxStatusLines=20。Breaking：否。 — 已修复（条目实际位于 dispatch.replyTracker.statusLines；行为正确——appendStatusLine 通过 maxStatusLines=8 + copy-to-front trim head；旧注释"pre-allocated capped ring"误导，改为精确描述 + 指向 status.go 的 trim 实现），本批 PR #210
 - [ ] **R230-CQ-16 — processIface godoc 描述与实际范围不符（P3）**: 注释只说 router 用，实际 wshub / server / cron 都用。方案：更新 godoc 表述实际边界。Breaking：否。
 - [ ] **R230-CQ-17 — shimManagers() 命名与 dedup 注释稍有歧义（P3）**: 实际按 *shim.Manager 指针 dedup。方案：注释精确化。Breaking：否。
 - [ ] **R230-CQ-18 — loadTotalCost/storeTotalCost 仍内联 math.Float64bits（P3）**: textutil 有 atomic string helper 但无 float64 版。方案：补 textutil.Load/StoreAtomicFloat64 或加交叉引用注释。Breaking：否。
