@@ -10,7 +10,6 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -403,11 +402,14 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 	// before) silently skip a record. Use runID as a deterministic secondary
 	// key: it's 16-char random hex, so the tie-breaker is stable across
 	// processes and re-reads even though it carries no time signal of its own.
-	sort.Slice(items, func(i, j int) bool {
-		if items[i].mtime.Equal(items[j].mtime) {
-			return items[i].runID > items[j].runID
+	slices.SortFunc(items, func(a, b item) int {
+		if a.mtime.Equal(b.mtime) {
+			return cmp.Compare(b.runID, a.runID)
 		}
-		return items[i].mtime.After(items[j].mtime)
+		if a.mtime.After(b.mtime) {
+			return -1
+		}
+		return 1
 	})
 
 	out := make([]CronRunSummary, 0, limit)

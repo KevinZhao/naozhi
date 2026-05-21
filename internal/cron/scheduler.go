@@ -852,6 +852,10 @@ func (s *Scheduler) addJobLocked(j *Job) (func(), error) {
 	}
 
 	// Per-chat limit to prevent one chat from exhausting global quota.
+	// O(maxJobs) linear scan; acceptable given maxJobsHardCap=500 and
+	// AddJob is called at human cadence (not on the hot path). A
+	// chatID-indexed map would mirror the sessionsByChat optimisation in
+	// the router but is premature given the bound.
 	chatCount := 0
 	for _, existing := range s.jobs {
 		if existing.Platform == j.Platform && existing.ChatID == j.ChatID {
@@ -1859,8 +1863,9 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	lg := slog.With("cron_id", snap.jobID, "platform", snap.platName, "chat", snap.chatID, "run_id", runID)
 	lg.Info("cron job executing", "prompt_len", len(snap.prompt))
 
-	// Per-job timeout scales with schedule period (80%, capped by
-	// s.execTimeout). See computeJobTimeout for the clamp rules.
+	// Per-job timeout is always s.execTimeout (period scaling was removed —
+	// see computeJobTimeout's godoc for why robfig/cron's SkipIfStillRunning
+	// chain wrapper handles long-running tasks correctly).
 	jobTimeout := computeJobTimeout(snap.schedule, s.execTimeout)
 	ctx, cancel := context.WithTimeout(s.stopCtx, jobTimeout)
 	defer cancel()
@@ -1967,8 +1972,8 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// logs make shutdown look like a failure. notifyTarget (this file)
 	// already uses Background for delivery after shutdown for the same
 	// reason; make Send consistent. Shutdown latency is bounded by
-	// Router.Shutdown's drain timeout (ShutdownTimeout) + cron.Stop()'s
-	// own cron.Stop() chain drain.
+	// Router.Shutdown's drain timeout (ShutdownTimeout, 30s in
+	// internal/session) + cron.Stop()'s own cron.Stop() chain drain.
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), jobTimeout)
 	defer sendCancel()
 	inflight.setPhase(PhaseSending)
