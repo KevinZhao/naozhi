@@ -49,7 +49,11 @@ type DaemonTriggerKind string
 
 const (
 	DaemonTriggerScheduled DaemonTriggerKind = "scheduled"
-	DaemonTriggerManual    DaemonTriggerKind = "manual"
+	// DaemonTriggerManual is reserved for the Phase 2 dashboard
+	// "trigger now" button. Phase 1 only produces Scheduled; manual
+	// will be passed by the future API endpoint that calls runOnce
+	// outside the ticker loop.
+	DaemonTriggerManual DaemonTriggerKind = "manual"
 )
 
 // DaemonRun is the in-memory record of a completed Tick.  Manager keeps

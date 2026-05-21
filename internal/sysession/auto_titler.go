@@ -99,9 +99,10 @@ func newAutoTitler(deps DaemonDeps) (Daemon, error) {
 		includeGroupChat:  false,
 		highwater:         make(map[string]autoTitlerHighwater),
 	}
-	if err := a.Configure(deps.Cfg); err != nil {
-		return nil, err
-	}
+	// Manager.NewManager invokes Configure(runtime.Specific) once
+	// after Build through the Configurable interface; we don't repeat
+	// it here so per-knob side effects (counters, validation) only
+	// run once.
 	return a, nil
 }
 
@@ -145,9 +146,20 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 	}
 	// Track which keys we observe this tick so we can prune dead
 	// entries from the highwater map at the end (also Sec-MEDIUM-2:
-	// prevents unbounded growth as sessions come and go).
-	observed := make(map[string]struct{}, len(a.highwater))
+	// prevents unbounded growth as sessions come and go). Floor at 16
+	// so the first few ticks (highwater empty) don't pay for repeated
+	// rehashing as VisitSessions streams hundreds of keys in.
+	observedHint := len(a.highwater)
+	if observedHint < 16 {
+		observedHint = 16
+	}
+	observed := make(map[string]struct{}, observedHint)
 	a.mu.Unlock()
+
+	// Capture wall-clock once per tick so the per-snapshot
+	// time.Since() check inside the visitor doesn't fan out into one
+	// vDSO call per session.
+	now := time.Now()
 
 	// Phase 1: enumerate candidates via the streaming visitor.  We
 	// collect into a small slice (capped at batchPerTick * 4 for
@@ -160,7 +172,8 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 		lastActive    int64
 		excerptSeed   string // last_prompt + summary, pre-filter
 	}
-	var candidates []candidate
+	candidates := make([]candidate, 0, a.batchPerTick*4)
+	earlyStop := false
 
 	a.router.VisitSessions(func(snap session.SessionSnapshot) bool {
 		report.Examined++
@@ -193,7 +206,7 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 		// 5. Min-rename-interval and high-water gate.  Reads from
 		//    the pre-snapshotted hwCopy — no a.mu under r.mu.RLock.
 		hw := hwCopy[snap.Key]
-		if !hw.lastRenamedAt.IsZero() && time.Since(hw.lastRenamedAt) < a.minRenameInterval {
+		if !hw.lastRenamedAt.IsZero() && now.Sub(hw.lastRenamedAt) < a.minRenameInterval {
 			report.Skipped["min_rename_interval"]++
 			return true
 		}
@@ -213,20 +226,32 @@ func (a *autoTitler) Tick(ctx context.Context) (TickReport, error) {
 			excerptSeed:   seed,
 		})
 		// Visit remains under RLock — collect quickly and stop early
-		// once we have plenty of options.
-		return len(candidates) < a.batchPerTick*4
+		// once we have plenty of options. earlyStop tells the post-
+		// visitor prune loop to skip: a partial `observed` set would
+		// otherwise drop highwater entries for live but un-visited
+		// sessions, defeating the per-session min_rename_interval gate
+		// for the rest of the tick.
+		if len(candidates) >= a.batchPerTick*4 {
+			earlyStop = true
+			return false
+		}
+		return true
 	})
 
 	// Sec-MEDIUM-2 part 2:  prune highwater entries for sessions that
 	// no longer appear in the router (dismissed / restarted / TTL'd).
 	// Bounded by the live session count rather than naozhi's lifetime.
-	a.mu.Lock()
-	for k := range a.highwater {
-		if _, ok := observed[k]; !ok {
-			delete(a.highwater, k)
+	// Skipped on early-stop because `observed` is a partial view —
+	// next tick will run a complete pass.
+	if !earlyStop {
+		a.mu.Lock()
+		for k := range a.highwater {
+			if _, ok := observed[k]; !ok {
+				delete(a.highwater, k)
+			}
 		}
+		a.mu.Unlock()
 	}
-	a.mu.Unlock()
 
 	// Pick the top N by lastActive (most recent first) so a busy
 	// session doesn't get starved by a stale one with the same turn
@@ -269,9 +294,21 @@ func (a *autoTitler) renameOne(ctx context.Context, key, seed string, turnCount 
 	if excerpt == "" {
 		return fmt.Errorf("empty excerpt for %s: %w", key, ErrValidation)
 	}
-	prompt := autoTitlerSystemPrompt +
-		"\n" + excerptBeginMarker + "\n" + excerpt + "\n" + excerptEndMarker +
-		autoTitlerReminderTail
+	// Single-allocation builder: 5 fixed strings + 2 newlines around
+	// excerpt. Pre-grown to the exact byte count so no internal
+	// realloc happens.
+	var pb strings.Builder
+	pb.Grow(len(autoTitlerSystemPrompt) + 1 + len(excerptBeginMarker) + 1 +
+		len(excerpt) + 1 + len(excerptEndMarker) + len(autoTitlerReminderTail))
+	pb.WriteString(autoTitlerSystemPrompt)
+	pb.WriteByte('\n')
+	pb.WriteString(excerptBeginMarker)
+	pb.WriteByte('\n')
+	pb.WriteString(excerpt)
+	pb.WriteByte('\n')
+	pb.WriteString(excerptEndMarker)
+	pb.WriteString(autoTitlerReminderTail)
+	prompt := pb.String()
 
 	out, err := a.runner.Run(ctx, prompt)
 	if err != nil {
@@ -279,7 +316,7 @@ func (a *autoTitler) renameOne(ctx context.Context, key, seed string, turnCount 
 	}
 	title, err := session.ValidateUserLabel(strings.TrimSpace(out))
 	if err != nil {
-		return fmt.Errorf("validate output: %w: %w", err, ErrValidation)
+		return fmt.Errorf("validate output (%s): %w", err, ErrValidation)
 	}
 	if title == "" {
 		return fmt.Errorf("runner returned empty title: %w", ErrValidation)
