@@ -132,18 +132,22 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 		}
 		// Sec-LOW-2:  stderr from claude -p can echo back portions of
 		// stdin (= the prompt = user conversation excerpts) when the
-		// CLI errors — e.g. "context too long" diagnostics.  Logging
-		// it at Debug keeps it available for local troubleshooting
-		// (operators with shell access can crank slog level) while
-		// keeping it OUT of the error chain that flows into
-		// recordRun → slog.Error("circuit breaker tripped",
-		// "last_error", err).  That second path lands in production
-		// log aggregators which we don't want feeding conversation
-		// fragments cross-tenant.
+		// CLI errors — e.g. "context too long" diagnostics.  We log a
+		// truncated head at Warn so a tripping breaker is debuggable
+		// from journalctl without operators having to flip slog level.
+		// 256 bytes is enough to see the CLI's diagnostic prefix
+		// ("Error: model not found", "auth failed", etc.) while
+		// limiting how much prompt content can leak into log
+		// aggregators.  ErrorMsg in the breaker log line is still
+		// sanitized (only "exit status N").
 		if stderr.Len() > 0 {
-			slog.Debug("sysession: runner stderr",
+			head := stderr.String()
+			if len(head) > 256 {
+				head = head[:256]
+			}
+			slog.Warn("sysession: runner stderr",
 				"binary", filepath.Base(r.cfg.BinPath),
-				"stderr", stderr.String())
+				"stderr_head", head)
 		}
 		return "", fmt.Errorf("sysession: %s -p failed: %w",
 			filepath.Base(r.cfg.BinPath), err)
