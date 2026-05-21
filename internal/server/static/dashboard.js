@@ -518,9 +518,7 @@ function renderSidebar(data) {
           html += g.items.map(sessionCardHtml).join('');
         }
         // Empty favorite groups intentionally render no row below the header:
-        // the header's `sh-new` `+` button already provides the create
-        // affordance, so a duplicate "New session in X" CTA would just add
-        // visual noise.
+        // the top-right `+` button is the sole create affordance.
       });
       // NOTE: the dedicated 定时任务 sidebar section was removed.
       // cron stubs no longer reach the dashboard at all (server-side
@@ -774,19 +772,12 @@ function sectionHeaderHtml(p) {
     ghBtn = '<button type="button" class="sh-btn github-on" data-url="' + escAttr(url) + '" title="在 GitHub 打开仓库：' + escAttr(url) + '" aria-label="在 GitHub 打开仓库 ' + escAttr(p.name) + '" onclick="event.stopPropagation();showGitRemote(this.dataset.url)">' + GITHUB_SVG + '</button>';
   }
 
-  // Compact `+` icon in every section header so creation is always one click
-  // away — also serves as the only per-project create affordance for empty
-  // favorite groups (the old full-width "New session in X" CTA under the
-  // header was removed as redundant).
-  const newBtn = '<button type="button" class="sh-btn sh-new" data-name="' + escAttr(p.name) + '" data-node="' + escAttr(node) + '" title="在 ' + escAttr(p.name) + ' 中新建会话" aria-label="在 ' + escAttr(p.name) + ' 中新建会话" onclick="event.stopPropagation();newSessionInProject(this.dataset.name,this.dataset.node)"><svg viewBox="0 0 24 24" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg></button>';
-
   const collapsedCls = collapsed ? ' is-collapsed' : '';
   return '<div class="section-header' + collapsedCls + '" role="group" aria-label="' + escAttr(p.name) + '">' +
     collapseBtn + starBtn +
     '<span class="sh-name" title="' + escAttr(p.name) + '">' + esc(p.name) + '</span>' +
     countBadge +
     ghBtn +
-    newBtn +
     '</div>';
 }
 
@@ -867,12 +858,6 @@ function showGitRemote(url) {
   // ssh URLs from being broadcast via the toast surface.
   const shown = url.length > 80 ? url.slice(0, 77) + '…' : url;
   showToast('GitHub remote: ' + shown);
-}
-
-function newSessionInProject(name, node) {
-  const p = projectsData.find(x => x.name === name && (x.node || 'local') === (node || 'local'));
-  if (!p) return;
-  doCreateInProject(p.path, p.name, p.node || 'local');
 }
 
 // --- History Popover ---
