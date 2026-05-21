@@ -22,6 +22,7 @@ import (
 	"github.com/naozhi/naozhi/internal/osutil"
 	"github.com/naozhi/naozhi/internal/project"
 	"github.com/naozhi/naozhi/internal/session"
+	"github.com/naozhi/naozhi/internal/textutil"
 )
 
 // maxResumeLastPromptBytes caps the last_prompt field on /api/sessions/resume.
@@ -71,23 +72,9 @@ func sanitizeResumeLastPrompt(s string, maxLen int) string {
 		// Truncate at a rune boundary so we never split a multi-byte UTF-8
 		// codepoint — the result feeds into sessions.json and the dashboard
 		// UI, where invalid UTF-8 surfaces as garbled glyphs.
-		mapped = mapped[:rtruncByteLen(mapped, maxLen)]
+		mapped = mapped[:textutil.TruncateAtRuneBoundary(mapped, maxLen)]
 	}
 	return mapped
-}
-
-// rtruncByteLen returns the largest n <= maxBytes such that s[:n] ends on a
-// rune boundary. Assumes s is valid UTF-8 (strings.Map output).
-func rtruncByteLen(s string, maxBytes int) int {
-	if maxBytes <= 0 || maxBytes >= len(s) {
-		return len(s)
-	}
-	for n := maxBytes; n > 0; n-- {
-		if utf8.RuneStart(s[n]) {
-			return n
-		}
-	}
-	return 0
 }
 
 // Note: user-label validation lives in the session package

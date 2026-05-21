@@ -80,6 +80,38 @@ func TestTruncateRunesNoEllipsis(t *testing.T) {
 	}
 }
 
+// TestTruncateAtRuneBoundary pins the byte-cap helper used by dashboard
+// resume / transcribe responses where the wire format sizes payloads in bytes
+// but a mid-codepoint split would render as mojibake. R230-CQ-13.
+func TestTruncateAtRuneBoundary(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name     string
+		in       string
+		maxBytes int
+		want     int
+	}{
+		{"short_returns_full_len", "hello", 10, 5},
+		{"exact_returns_full_len", "hello", 5, 5},
+		{"ascii_truncates_at_max", "hello world", 5, 5},
+		{"unicode_walks_back_to_boundary", "你好世界", 4, 3},
+		{"unicode_already_at_boundary", "你好世界", 6, 6},
+		{"zero_max_returns_len", "hello", 0, 5},
+		{"negative_max_returns_len", "hello", -1, 5},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			got := TruncateAtRuneBoundary(tc.in, tc.maxBytes)
+			if got != tc.want {
+				t.Errorf("TruncateAtRuneBoundary(%q,%d) = %d, want %d",
+					tc.in, tc.maxBytes, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestTruncateRunesBytes mirrors TruncateRunes parametric cases against the
 // []byte variant so the two helpers cannot diverge silently. R215-PERF-P2-6.
 func TestTruncateRunesBytes(t *testing.T) {

@@ -436,7 +436,9 @@ func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
 	storeAtomicString(&s.deathReason, "")
 	s.lastActive.Store(time.Now().UnixNano())
 
-	if proc != nil && len(snapshot) > 0 {
+	// attachProcessAndSnapshotPersisted returns nil snapshot when proc is nil,
+	// so len(snapshot) > 0 already implies proc != nil. R231-CQ-3.
+	if len(snapshot) > 0 {
 		proc.InjectHistory(snapshot)
 	}
 
@@ -465,7 +467,9 @@ func (s *ManagedSession) ReattachProcessNoCallback(proc processIface, sessionID 
 	s.setSessionID(sessionID)
 	storeAtomicString(&s.deathReason, "")
 	s.lastActive.Store(time.Now().UnixNano())
-	if proc != nil && len(snapshot) > 0 {
+	// attachProcessAndSnapshotPersisted returns nil snapshot when proc is nil,
+	// so len(snapshot) > 0 already implies proc != nil. R231-CQ-3.
+	if len(snapshot) > 0 {
 		proc.InjectHistory(snapshot)
 	}
 }
