@@ -12931,6 +12931,10 @@ async function doEditCronJob(id) {
 
   let startX, startW;
   resizer.addEventListener('mousedown', function(e) {
+    // Mid-line collapse handle lives inside the resizer; let its click run
+    // without starting a drag. Also skip when collapsed (nothing to resize).
+    if (e.target && e.target.closest && e.target.closest('.resizer-handle')) return;
+    if (document.body.classList.contains('sidebar-collapsed')) return;
     e.preventDefault();
     startX = e.clientX;
     startW = sidebar.getBoundingClientRect().width;
@@ -12952,7 +12956,9 @@ async function doEditCronJob(id) {
     document.removeEventListener('mouseup', onUp);
     lsSet(LS_SIDEBAR_W, Math.round(sidebar.getBoundingClientRect().width));
   }
-  resizer.addEventListener('dblclick', function() {
+  resizer.addEventListener('dblclick', function(e) {
+    if (e.target && e.target.closest && e.target.closest('.resizer-handle')) return;
+    if (document.body.classList.contains('sidebar-collapsed')) return;
     sidebar.style.width = '360px';
     lsRemove(LS_SIDEBAR_W);
   });
@@ -12978,15 +12984,16 @@ function isMobileViewport() {
 // re-apply (don't steal focus from the user's first interaction).
 function applySidebarCollapsed(collapsed, moveFocus) {
   document.body.classList.toggle('sidebar-collapsed', !!collapsed);
-  const btnHide = document.getElementById('btn-sidebar-collapse');
-  const btnShow = document.getElementById('btn-sidebar-show');
-  if (btnHide) btnHide.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  if (btnShow) btnShow.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
-  if (moveFocus) {
-    const next = collapsed ? btnShow : btnHide;
-    if (next && typeof next.focus === 'function') {
-      try { next.focus({preventScroll: true}); } catch (_) { next.focus(); }
-    }
+  // Single mid-line handle on the resizer serves both directions; flip the
+  // aria-expanded + label so AT and tooltip agree with the visual state.
+  const btn = document.getElementById('btn-sidebar-toggle');
+  if (btn) {
+    btn.setAttribute('aria-expanded', collapsed ? 'false' : 'true');
+    btn.setAttribute('aria-label', collapsed ? '展开侧边栏' : '收起侧边栏');
+    btn.setAttribute('title', collapsed ? '展开侧边栏 (按 [)' : '收起侧边栏 (按 [)');
+  }
+  if (moveFocus && btn && typeof btn.focus === 'function') {
+    try { btn.focus({preventScroll: true}); } catch (_) { btn.focus(); }
   }
 }
 
