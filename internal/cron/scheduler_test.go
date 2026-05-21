@@ -676,3 +676,78 @@ func TestSchedulerMaxJobsPerChat(t *testing.T) {
 		}
 	})
 }
+
+// ---------------------------------------------------------------------------
+// KnownSessionIDs (R245-ARCH cron+sys hide-from-history)
+// ---------------------------------------------------------------------------
+
+func TestKnownSessionIDs_NilScheduler(t *testing.T) {
+	t.Parallel()
+	var s *Scheduler
+	got := s.KnownSessionIDs()
+	if got == nil {
+		t.Fatalf("KnownSessionIDs on nil Scheduler must return non-nil map")
+	}
+	if len(got) != 0 {
+		t.Errorf("nil-Scheduler map should be empty, got %d entries", len(got))
+	}
+}
+
+func TestKnownSessionIDs_AggregatesFromJobs(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := NewScheduler(SchedulerConfig{
+		StorePath: filepath.Join(dir, "cron.json"),
+		MaxJobs:   5,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+
+	job1 := &Job{Schedule: "@every 1h", Prompt: "p1", Platform: "feishu", ChatID: "c1", ChatType: "direct"}
+	job2 := &Job{Schedule: "@every 1h", Prompt: "p2", Platform: "feishu", ChatID: "c2", ChatType: "direct"}
+	if err := s.AddJob(job1); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+	if err := s.AddJob(job2); err != nil {
+		t.Fatalf("AddJob: %v", err)
+	}
+
+	// Inject LastSessionID directly through the Scheduler's internal map —
+	// the public surface to set this is via execute() side-effect, which
+	// requires an actual running router.
+	s.mu.Lock()
+	s.jobs[job1.ID].LastSessionID = "11111111-aaaa-bbbb-cccc-000000000001"
+	s.jobs[job2.ID].LastSessionID = "" // empty must NOT show up
+	s.mu.Unlock()
+
+	got := s.KnownSessionIDs()
+	if !got["11111111-aaaa-bbbb-cccc-000000000001"] {
+		t.Errorf("LastSessionID from job1 missing: %v", got)
+	}
+	if got[""] {
+		t.Errorf("empty LastSessionID must not be added to set: %v", got)
+	}
+}
+
+func TestKnownSessionIDs_NoJobsReturnsEmpty(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s := NewScheduler(SchedulerConfig{
+		StorePath: filepath.Join(dir, "cron.json"),
+		MaxJobs:   5,
+	})
+	if err := s.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer s.Stop()
+
+	got := s.KnownSessionIDs()
+	if got == nil {
+		t.Fatalf("KnownSessionIDs must return non-nil map")
+	}
+	if len(got) != 0 {
+		t.Errorf("expected empty map, got %d: %v", len(got), got)
+	}
+}

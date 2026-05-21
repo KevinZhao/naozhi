@@ -246,11 +246,51 @@ type cronStubChecker interface {
 	EnsureStub(key string) bool
 }
 
+// cronSessionLister is the 1-method consumer interface used by
+// loadHistorySessions to hide cron-spawned JSONLs from the catch-all
+// history panel.  *cron.Scheduler satisfies this via KnownSessionIDs.
+// Defined here (not as a thicker import of cron.Scheduler) for the
+// same reason as cronStubChecker — keep server's coupling to cron
+// minimal and easy to test with a fake.  R245-ARCH (cron+sys
+// hide-from-history).
+type cronSessionLister interface {
+	KnownSessionIDs() map[string]bool
+}
+
+// historyFilter is the discovery.RecentSessionsFilter loadHistorySessions
+// constructs each scan.  Snapshots the cron-known set + sys workspace
+// once per call so the in-loop predicate is O(1) per session.
+type historyFilter struct {
+	skipWorkspace string          // sys-sessions absolute path; "" disables
+	skipSessions  map[string]bool // cron known IDs; nil disables
+}
+
+func (f historyFilter) SkipWorkspace(ws string) bool {
+	return f.skipWorkspace != "" && ws == f.skipWorkspace
+}
+
+func (f historyFilter) SkipSessionID(sid string) bool {
+	return f.skipSessions != nil && f.skipSessions[sid]
+}
+
 // SessionHandlers groups the session list, events, delete, and resume API endpoints.
 type SessionHandlers struct {
-	router      *session.Router
-	projectMgr  *project.Manager
-	scheduler   cronStubChecker // optional; used by handleEvents to revive dismissed cron stubs
+	router     *session.Router
+	projectMgr *project.Manager
+	scheduler  cronStubChecker // optional; used by handleEvents to revive dismissed cron stubs
+	// cronSessions is the optional Scheduler-side lister consulted when
+	// building the history panel.  When nil, cron-spawned JSONLs are NOT
+	// filtered from history (degraded behaviour matches pre-R245). The
+	// underlying type is *cron.Scheduler in production; tests may inject
+	// a stub. R245-ARCH (cron+sys hide-from-history).
+	cronSessions cronSessionLister
+	// sysWorkDir is the absolute filesystem path used by sysession's
+	// transient claude -p Runner.  When non-empty, every JSONL under
+	// this workspace path is hidden from the history panel — AutoTitler
+	// otherwise leaks prompt fragments into the catch-all "recent
+	// sessions" list. Empty (typical in tests / disabled sysession)
+	// degrades cleanly. R245-ARCH.
+	sysWorkDir  string
 	claudeDir   string
 	allowedRoot string
 	agents      map[string]session.AgentOpts
@@ -1293,7 +1333,21 @@ func (h *SessionHandlers) lookupSummariesCached(snapshots []session.SessionSnaps
 
 func (h *SessionHandlers) loadHistorySessions() []discovery.RecentSession {
 	excludeIDs := h.router.DiscoveryExcludeIDs()
-	all := discovery.RecentSessions(h.claudeDir, 200, 7*24*time.Hour, excludeIDs)
+
+	// R245-ARCH: hide cron-spawned and sys-session JSONLs from the
+	// catch-all history panel.  Both have dedicated UI surfaces (cron
+	// panel / system drawer) — leaking them here also exposed
+	// AutoTitler prompt fragments because sys workdir lives under
+	// ~/.claude/projects like a regular workspace.
+	//
+	// Snapshot Scheduler.KnownSessionIDs once per scan: it walks all
+	// jobs × runStore.Recent which can be O(jobs × 200) and we don't
+	// want to re-pay that cost per RecentSession candidate.
+	filter := historyFilter{skipWorkspace: h.sysWorkDir}
+	if h.cronSessions != nil {
+		filter.skipSessions = h.cronSessions.KnownSessionIDs()
+	}
+	all := discovery.RecentSessions(h.claudeDir, 200, 7*24*time.Hour, excludeIDs, filter)
 
 	// Resolve project names in batch.
 	if h.projectMgr != nil && len(all) > 0 {
