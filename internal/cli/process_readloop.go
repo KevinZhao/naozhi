@@ -122,34 +122,7 @@ func (p *Process) readLoop() {
 	// event doesn't force every subsequent iteration to re-grow from 4KB.
 	lineBuf := make([]byte, 0, 4096)
 	for {
-		// bufio.ReadBytes grows its internal buffer without bound; a buggy or
-		// hostile shim that emits a multi-GB line without '\n' would OOM
-		// naozhi before the post-read size check below fires. Accumulate via
-		// ReadSlice chunks so we can bail the moment the cap is exceeded.
-		line := lineBuf[:0]
-		var readErr error
-		capExceeded := false
-		for {
-			chunk, err := p.shimR.ReadSlice('\n')
-			if len(chunk) > 0 {
-				if len(line)+len(chunk) > maxScannerBufBytes {
-					capExceeded = true
-					break
-				}
-				line = append(line, chunk...)
-			}
-			if err == nil {
-				break // terminator found
-			}
-			// R182-GO-P1-2: use errors.Is so a wrapped ErrBufferFull (from
-			// future middleware or bufio chain) still matches. Matches the
-			// errors.Is(readErr, io.EOF) style used elsewhere in this loop.
-			if errors.Is(err, bufio.ErrBufferFull) {
-				continue // keep reading until newline or cap
-			}
-			readErr = err
-			break
-		}
+		line, capExceeded, readErr := readShimLine(p.shimR, lineBuf)
 		// Propagate grown capacity so the next iteration starts with the
 		// expanded backing array instead of reverting to the original 4096.
 		// Without this, a single large event forces every subsequent
@@ -181,23 +154,6 @@ func (p *Process) readLoop() {
 		}
 		if capExceeded {
 			log.Warn("readLoop: oversized shim message, skipping", "size", len(line))
-			// Drain the rest of this overlong line so the next iteration
-			// doesn't read the tail as a separate message.
-			for {
-				// bufio.ReadSlice only returns nil when the delimiter was
-				// found; ErrBufferFull means the internal buffer filled with
-				// no '\n'. Any other error terminates the drain.
-				_, err := p.shimR.ReadSlice('\n')
-				if err == nil {
-					break
-				}
-				// R182-GO-P1-2: errors.Is to survive future wrapping; same
-				// reason as the first call site above.
-				if !errors.Is(err, bufio.ErrBufferFull) {
-					readErr = err
-					break
-				}
-			}
 			if readErr != nil {
 				if errors.Is(readErr, io.EOF) || errors.Is(readErr, net.ErrClosed) {
 					log.Info("readLoop: shim connection closed after oversize drain")
@@ -368,6 +324,71 @@ func (p *Process) readLoop() {
 	}
 	// Passthrough: fan-out ErrProcessExited to any still-blocking SendPassthrough callers.
 	p.discardAllPending(ErrProcessExited)
+}
+
+// readShimLine reads one complete shim message line from r, accumulating
+// chunks across ReadSlice calls until a '\n' is found. Two distinct failure
+// modes are surfaced via the (capExceeded, readErr) pair:
+//
+//   - capExceeded=true: the assembled line would exceed maxScannerBufBytes.
+//     The helper drains the rest of the overlong line so the next call
+//     starts cleanly at the following message boundary. Caller should
+//     discard `line` and continue. If draining hits its own read error,
+//     readErr carries it forward so the caller can classify cause-of-death
+//     under the "after oversize drain" branch.
+//
+//   - readErr != nil (with capExceeded=false): a primary read error
+//     (io.EOF / net.ErrClosed / unexpected I/O fault). `line` may carry
+//     a partial message from before the error; caller decides whether
+//     to process or drop it.
+//
+// lineBuf is the previous iteration's accumulator: the helper truncates
+// it to length 0 and reuses its capacity. Caller owns the lifetime —
+// after this returns, caller must decide whether to retain (line) for
+// the next call (saves alloc) or shrink back to a fresh 4 KiB buffer.
+// See readLoop for the lineBufShrinkThreshold decision.
+//
+// R182-GO-P1-2: errors.Is on bufio.ErrBufferFull (not == comparison) so
+// future middleware that wraps the error still matches.
+//
+// No side effects on Process state — pure I/O. Extracted from readLoop
+// so per-fix churn on the line accumulator (R182-GO-P1-2 / R225-CR-7 /
+// R229-PERF-3 ground) lands in this helper instead of further bloating
+// the long readLoop body.
+func readShimLine(r *bufio.Reader, lineBuf []byte) (line []byte, capExceeded bool, readErr error) {
+	line = lineBuf[:0]
+	for {
+		chunk, err := r.ReadSlice('\n')
+		if len(chunk) > 0 {
+			if len(line)+len(chunk) > maxScannerBufBytes {
+				capExceeded = true
+				break
+			}
+			line = append(line, chunk...)
+		}
+		if err == nil {
+			return line, false, nil // terminator found
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue // keep reading until newline or cap
+		}
+		readErr = err
+		return line, false, readErr
+	}
+	// capExceeded path: drain the rest of the overlong line so the next call
+	// doesn't read its tail as a separate message. ReadSlice returns nil on
+	// '\n' delimiter; ErrBufferFull means buffer filled with no newline.
+	for {
+		_, err := r.ReadSlice('\n')
+		if err == nil {
+			break
+		}
+		if !errors.Is(err, bufio.ErrBufferFull) {
+			readErr = err
+			break
+		}
+	}
+	return line, true, readErr
 }
 
 // dispatchProtocolEvent runs the per-Event side of readLoop: passthrough hooks,
