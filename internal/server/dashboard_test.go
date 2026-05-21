@@ -1034,8 +1034,8 @@ func TestSanitizeResumeLastPrompt_RuneSafeTruncation(t *testing.T) {
 		// "你好" (3 bytes each in UTF-8). maxLen=3 should keep one rune,
 		// not "你" + first byte of "好" (which would be invalid UTF-8).
 		{"truncate at first rune boundary", "你好", 3, "你"},
-		// maxLen falls between a rune; rtruncByteLen walks back to the
-		// most recent valid boundary.
+		// maxLen falls between a rune; textutil.TruncateAtRuneBoundary walks
+		// back to the most recent valid boundary.
 		{"truncate before second rune", "你好", 4, "你"},
 		// ASCII-only: byte == rune, no walkback needed.
 		{"ascii truncate", "abcdef", 3, "abc"},
@@ -1051,8 +1051,8 @@ func TestSanitizeResumeLastPrompt_RuneSafeTruncation(t *testing.T) {
 			// get the rune-boundary-truncation result.
 			input := "\x00" + tc.in
 			want := "_" + tc.want
-			// rtruncByteLen returns up to maxLen bytes ending at a rune
-			// boundary; for a sentinel "_" + body the cap is len(want).
+			// textutil.TruncateAtRuneBoundary returns up to maxLen bytes ending
+			// at a rune boundary; for a sentinel "_" + body the cap is len(want).
 			got := sanitizeResumeLastPrompt(input, len(want))
 			if got != want {
 				t.Errorf("sanitizeResumeLastPrompt(%q, %d) = %q, want %q",
