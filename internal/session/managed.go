@@ -204,6 +204,27 @@ type ManagedSession struct {
 	// Populated by InjectHistory and carried over when the process is replaced.
 	persistedHistory []cli.EventEntry
 
+	// persistedSeededLen is the prefix length of persistedHistory that has
+	// already been forwarded into the *current* proc.EventLog via the
+	// ReattachProcess catch-up. It is reset to 0 on every storeProcess(new)
+	// (under historyMu) so a fresh proc starts with seededLen=0 and gets the
+	// full persistedHistory snapshot at attach time.
+	//
+	// Why this exists: without it, kiro (and any non-claude backend) sessions
+	// that get reconnected via ReconnectShims after a naozhi restart end up
+	// with an empty proc.EventLog while persistedHistory holds the real
+	// pre-restart conversation — naozhilog tier1 already wrote it but the
+	// proc didn't exist yet. Subsequent dashboard polls hit the live proc
+	// branch of EventEntries / EventEntriesBefore, see the empty ring, and
+	// the user "loses" their history after the first message lands in the
+	// new proc.
+	//
+	// InjectHistory uses this to decide whether each batch is "new tail" that
+	// must be forwarded to proc, vs. a re-injection of the already-seeded
+	// prefix that would double-render the same entries. Read/written under
+	// historyMu so it stays in sync with persistedHistory append/snapshot.
+	persistedSeededLen int
+
 	// prevSessionIDs tracks previous session IDs for this key (oldest → newest).
 	// Used on startup to load the full conversation chain from JSONL files.
 	// Capped at maxPrevSessionIDs to bound long-lived session memory and
@@ -410,10 +431,14 @@ func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
 
-	s.storeProcess(proc)
+	snapshot := s.attachProcessAndSnapshotPersisted(proc)
 	s.setSessionID(sessionID)
 	storeAtomicString(&s.deathReason, "")
 	s.lastActive.Store(time.Now().UnixNano())
+
+	if proc != nil && len(snapshot) > 0 {
+		proc.InjectHistory(snapshot)
+	}
 
 	if s.onSessionID != nil && sessionID != "" {
 		s.onSessionID(sessionID)
@@ -436,10 +461,59 @@ func (s *ManagedSession) ReattachProcess(proc processIface, sessionID string) {
 // that Send() just set. The lack of sendMu makes this a logical race on the
 // deathReason value, even though each individual Store is atomic.
 func (s *ManagedSession) ReattachProcessNoCallback(proc processIface, sessionID string) {
-	s.storeProcess(proc)
+	snapshot := s.attachProcessAndSnapshotPersisted(proc)
 	s.setSessionID(sessionID)
 	storeAtomicString(&s.deathReason, "")
 	s.lastActive.Store(time.Now().UnixNano())
+	if proc != nil && len(snapshot) > 0 {
+		proc.InjectHistory(snapshot)
+	}
+}
+
+// adoptProcessAlreadySeeded publishes proc and marks the entire current
+// persistedHistory as already-seeded into proc.EventLog. Used by Rename /
+// takeover paths where the proc was running under a different ManagedSession
+// and already has the matching entries in its ring; we must NOT re-inject
+// (would duplicate every bubble) but we DO need persistedSeededLen aligned
+// so the next InjectHistory tail still forwards.
+func (s *ManagedSession) adoptProcessAlreadySeeded(proc processIface) {
+	s.historyMu.Lock()
+	s.storeProcess(proc)
+	s.persistedSeededLen = len(s.persistedHistory)
+	s.historyMu.Unlock()
+}
+
+// attachProcessAndSnapshotPersisted publishes proc as the session's live
+// process and atomically snapshots the persistedHistory prefix that the new
+// proc still needs to be seeded with. The two writes share historyMu so
+// concurrent InjectHistory calls observe a consistent (process, seededLen)
+// pair: an InjectHistory that wins the lock first sees seededLen=0 and the
+// old (likely nil) process, appends to persistedHistory, and forwards to the
+// fresh process if one is already attached; an InjectHistory that loses the
+// race sees seededLen == len(persistedHistory) so its forwarding loop only
+// pushes the truly new tail (no double-injection).
+//
+// Returns a defensive copy because proc.InjectHistory consumes the slice and
+// runs after we release historyMu — handing it the live persistedHistory
+// backing array would race with subsequent appends.
+func (s *ManagedSession) attachProcessAndSnapshotPersisted(proc processIface) []cli.EventEntry {
+	s.historyMu.Lock()
+	if proc == nil {
+		s.storeProcess(nil)
+		s.persistedSeededLen = 0
+		s.historyMu.Unlock()
+		return nil
+	}
+	s.storeProcess(proc)
+	n := len(s.persistedHistory)
+	var snapshot []cli.EventEntry
+	if n > 0 {
+		snapshot = make([]cli.EventEntry, n)
+		copy(snapshot, s.persistedHistory)
+	}
+	s.persistedSeededLen = n
+	s.historyMu.Unlock()
+	return snapshot
 }
 
 // LastActive returns the last active time.
@@ -1293,22 +1367,48 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	// R61-PERF-9.
 	prompt, activity := scanLastSummaries(entries)
 
+	// Mutate persistedHistory AND read s.process under the same historyMu
+	// hold so a concurrent attachProcessAndSnapshotPersisted (also serialised
+	// on historyMu) cannot stamp seededLen between our load-process and our
+	// forward-decision: either it ran first (we observe the new proc and
+	// seededLen=full snapshot, forward only genuinely-new tail) or it runs
+	// after (we observe proc=nil, defer forwarding to the upcoming attach,
+	// which will snapshot our just-appended entries).
+	//
+	// proc.InjectHistory itself is invoked AFTER releasing historyMu — it
+	// takes proc.eventLog.mu and we never want two long locks held at once.
+	// R191-GO-M1's "reload proc after unlock" concern is no longer relevant:
+	// a fresh proc replacing the current one happens through attach helpers
+	// that share historyMu, so the in-lock loadProcess() is the authoritative
+	// snapshot for this caller.
 	s.historyMu.Lock()
 	s.persistedHistory = append(s.persistedHistory, entries...)
-	if len(s.persistedHistory) > maxPersistedHistory {
-		s.persistedHistory = s.persistedHistory[len(s.persistedHistory)-maxPersistedHistory:]
+	if trimmed := len(s.persistedHistory) - maxPersistedHistory; trimmed > 0 {
+		s.persistedHistory = s.persistedHistory[trimmed:]
+		// Cap-trim shifts the prefix backwards; clamp seededLen so it keeps
+		// pointing at "tail-end of what proc has already seen" rather than
+		// past the new start.
+		if s.persistedSeededLen >= trimmed {
+			s.persistedSeededLen -= trimmed
+		} else {
+			s.persistedSeededLen = 0
+		}
+	}
+	proc := s.loadProcess()
+	var forward []cli.EventEntry
+	if proc != nil && s.persistedSeededLen < len(s.persistedHistory) {
+		// Defensive copy: the slice escapes the lock and proc.InjectHistory
+		// outlives historyMu, so handing it persistedHistory's backing array
+		// would race with subsequent appends.
+		tail := s.persistedHistory[s.persistedSeededLen:]
+		forward = make([]cli.EventEntry, len(tail))
+		copy(forward, tail)
+		s.persistedSeededLen = len(s.persistedHistory)
 	}
 	s.historyMu.Unlock()
 
-	// R191-GO-M1: reload proc AFTER unlock so we see any fresh process stored
-	// between append and forward. The prior snapshot-under-lock path could
-	// forward entries to a dying process while a concurrent spawnSession stored
-	// a replacement, causing the replacement to miss the entries.
-	// proc.InjectHistory takes its own eventLog.mu write lock; calling it
-	// after releasing historyMu avoids holding two locks simultaneously and
-	// matches the rest of this file's loadProcess-then-call pattern.
-	if proc := s.loadProcess(); proc != nil {
-		proc.InjectHistory(entries)
+	if len(forward) > 0 {
+		proc.InjectHistory(forward)
 	}
 
 	// Update cached snapshot values only if not yet set by Send. Each Store
