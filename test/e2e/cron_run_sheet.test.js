@@ -26,21 +26,25 @@ test.beforeEach(({ browserName }, testInfo) => {
   }
 });
 
-const desktop = { viewport: { width: 1280, height: 800 } };
+// PR-1 followup #4: detail-pane < 600 时 sheet 全占（防止挤出 ~180 timeline 中间态）。
+// 测桌面双栏行为需要 detail-pane ≥ 600 — 1280 屏 - 320 sidebar = 960 main，
+// drawer 列 ~360（list-pane）→ detail-pane ≈ 600，临界。提到 1600 避免抖动。
+const desktop = { viewport: { width: 1600, height: 900 } };
+// 窄桌面（detail < 600），用于测 followup #4 sheet 全占模式
+const desktopNarrow = { viewport: { width: 1100, height: 800 } };
 const mobile = devices['iPhone 13'];
 
 // 进入 cron panel 并展开 cron-001 drawer 的公共序列
 async function openCronDrawer(page) {
   await page.click('#btn-cron');
   await page.waitForSelector('.cron-detail');
-  // cron-001 是非 paused 行，第一条；点开 drawer
   const row = page.locator('.cj-row[data-cron-id="cron-001"]');
   await expect(row).toBeVisible();
   await row.click();
-  // drawer 渲染完毕 — 等 timeline panel 出现且 5 条 row 都在
   await page.waitForSelector('#cron-timeline-panel .ctr');
-  // 确保 5 条 recent_runs 都 paint 完（否则下面 ↑↓ 边界判断会偏）
-  await expect(page.locator('#cron-timeline-panel .ctr')).toHaveCount(5);
+  // 至少 5 条（mock-server defaultCronRuns 现在生成 20 条，followup #1 实测需要）
+  const count = await page.locator('#cron-timeline-panel .ctr').count();
+  expect(count).toBeGreaterThanOrEqual(5);
 }
 
 // ─── Desktop ──────────────────────────────────────────────────────────────────
@@ -148,19 +152,22 @@ test.describe('Cron run-detail sheet — desktop', () => {
     await expect(page.locator('#crs-prev')).toBeEnabled();
     await expect(page.locator('#crs-next')).toBeEnabled();
 
-    // 一路 ↓ 到底 (run-eeee5555) — next 应 disabled
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowDown');
-    await page.keyboard.press('ArrowDown');
+    // 一路 ↓ 到最后一条 — next 应 disabled。mock 现在 20 条 runs，
+    // 用 last() locator 取末行避免硬编码 run_id。
+    const totalRuns = await page.locator('#cron-timeline-panel .ctr').count();
+    for (let i = 0; i < totalRuns - 2; i++) await page.keyboard.press('ArrowDown'); // 已在第 2 条
+    const lastRow = page.locator('#cron-timeline-panel .ctr').last();
+    const lastRunId = await lastRow.getAttribute('data-run-id');
     await expect(page.locator('#cron-timeline-panel .ctr.is-selected'))
-      .toHaveAttribute('data-run-id', 'run-eeee5555');
+      .toHaveAttribute('data-run-id', lastRunId || '');
     await expect(page.locator('#crs-next')).toBeDisabled();
     await expect(page.locator('#crs-next')).toHaveAttribute('aria-disabled', 'true');
 
-    // ↑ 切回上一条
+    // ↑ 切回倒数第二条
     await page.keyboard.press('ArrowUp');
+    const penult = await page.locator('#cron-timeline-panel .ctr').nth(totalRuns - 2).getAttribute('data-run-id');
     await expect(page.locator('#cron-timeline-panel .ctr.is-selected'))
-      .toHaveAttribute('data-run-id', 'run-dddd4444');
+      .toHaveAttribute('data-run-id', penult || '');
 
     await ctx.close();
   });
@@ -246,6 +253,108 @@ test.describe('Cron run-detail sheet — desktop', () => {
     await page.click('#cron-timeline-panel .ctr[data-run-id="run-aaaa1111"]');
     await expect(page.locator('#cron-run-sheet')).toBeVisible();
     expect(await page.locator('#cron-timeline-panel .ctr-detail').count()).toBe(0);
+    await ctx.close();
+  });
+
+  // ── PR-1 followup ─────────────────────────────────────────────────────────
+
+  test('followup #1: 首次打开 sheet 时选中行 scroll 到可视区（首/末行可能贴边）', async ({ browser }) => {
+    const ctx = await browser.newContext({ ...desktop });
+    const page = await ctx.newPage();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await openCronDrawer(page);
+    // mock 20 条 runs。先点首行让 sheet 定位（避免 click 末行被 sheet 几何变化干扰）
+    await page.click('#cron-timeline-panel .ctr[data-run-id="run-aaaa1111"]', { position: { x: 30, y: 20 } });
+    await expect(page.locator('#cron-run-sheet')).toBeVisible();
+    // 关 sheet
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(350);
+    // 滚 timeline 到顶（保证末行在视野外）
+    await page.evaluate(() => {
+      const tl = document.querySelector('.cron-drawer-history');
+      if (tl) tl.scrollTop = 0;
+    });
+    // 取末行 id 并点击它（点行左侧 30px 避开 sheet 区）
+    const lastRow = page.locator('#cron-timeline-panel .ctr').last();
+    const lastId = await lastRow.getAttribute('data-run-id');
+    await lastRow.scrollIntoViewIfNeeded();
+    await lastRow.click({ position: { x: 30, y: 20 } });
+    await expect(page.locator('#cron-run-sheet')).toBeVisible();
+    await page.waitForTimeout(150);
+    // followup #1: 选中行 scroll 后应在 viewport 范围内（block:'center' 保证）
+    const inView = await page.evaluate((id) => {
+      const row = document.querySelector(`#cron-timeline-panel .ctr[data-run-id="${id}"]`);
+      if (!row) return false;
+      const r = row.getBoundingClientRect();
+      return r.top >= 0 && r.bottom <= window.innerHeight;
+    }, lastId);
+    expect(inView).toBe(true);
+    await ctx.close();
+  });
+
+  test('followup #2: sheet top 从 drawer-header 底部开始（drawer 头不被遮）', async ({ browser }) => {
+    const ctx = await browser.newContext({ ...desktop });
+    const page = await ctx.newPage();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await openCronDrawer(page);
+    await page.click('#cron-timeline-panel .ctr[data-run-id="run-aaaa1111"]', { position: { x: 30, y: 20 } });
+    await page.waitForTimeout(350);
+    const m = await page.evaluate(() => {
+      const sb = document.getElementById('cron-run-sheet').getBoundingClientRect();
+      const hb = document.querySelector('.cron-drawer-header').getBoundingClientRect();
+      return { sheetTop: sb.top, headerBottom: hb.bottom };
+    });
+    // sheet top 应 ≥ drawer header bottom（允许 1px 误差）
+    expect(m.sheetTop).toBeGreaterThanOrEqual(m.headerBottom - 1);
+  });
+
+  test('followup #3: 选中行有强化视觉（左 4px 色条 + 蓝调背景 + 状态加粗）', async ({ browser }) => {
+    const ctx = await browser.newContext({ ...desktop });
+    const page = await ctx.newPage();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await openCronDrawer(page);
+    await page.click('#cron-timeline-panel .ctr[data-run-id="run-aaaa1111"]', { position: { x: 30, y: 20 } });
+    const styles = await page.evaluate(() => {
+      const row = document.querySelector('#cron-timeline-panel .ctr.is-selected');
+      const state = row.querySelector('.ctr-state');
+      const cs = (el) => getComputedStyle(el);
+      return {
+        rowBg: cs(row).backgroundColor,
+        rowShadow: cs(row).boxShadow,
+        stateWeight: cs(state).fontWeight,
+      };
+    });
+    // 蓝调背景（rgba(31,111,235,.12)）
+    expect(styles.rowBg).toContain('rgba(31, 111, 235');
+    // box-shadow inset 有 accent 色 + 4px 偏移（chrome 输出顺序：rgb 4px 0 0 0 inset）
+    expect(styles.rowShadow).toMatch(/4px.*inset/);
+    // state 字重 600
+    expect(parseInt(styles.stateWeight, 10)).toBeGreaterThanOrEqual(600);
+    await ctx.close();
+  });
+
+  test('followup #4: detail-pane < 600 时 sheet 全占（窄屏 fallback）', async ({ browser }) => {
+    const ctx = await browser.newContext({ ...desktopNarrow });
+    const page = await ctx.newPage();
+    await page.goto(mock.url + '/dashboard');
+    await page.waitForSelector('.session-card');
+    await openCronDrawer(page);
+    await page.click('#cron-timeline-panel .ctr[data-run-id="run-aaaa1111"]');
+    await expect(page.locator('#cron-run-sheet')).toBeVisible();
+    await page.waitForTimeout(350);
+    const m = await page.evaluate(() => {
+      const sb = document.getElementById('cron-run-sheet').getBoundingClientRect();
+      const db = document.getElementById('cron-detail-pane').getBoundingClientRect();
+      return { sheetW: sb.width, detailW: db.width, sheetX: sb.x, detailX: db.x };
+    });
+    // detail 应 < 600（fallback 触发条件）
+    expect(m.detailW).toBeLessThan(600);
+    // sheet 应填满 detail-pane 宽度（允许 1px 误差）
+    expect(Math.abs(m.sheetW - m.detailW)).toBeLessThan(2);
+    expect(Math.abs(m.sheetX - m.detailX)).toBeLessThan(2);
     await ctx.close();
   });
 });

@@ -4193,12 +4193,27 @@ function syncSheetGeometry() {
   const detail = document.getElementById('cron-detail-pane');
   if (!sheet || !detail) return;
   const r = detail.getBoundingClientRect();
-  // sheet 占 detail-pane 右侧 480px（或 detail 60%，取小者）。timeline 至少
-  // 露出左侧 ≥ 200px 让 same-row toggle 可达。
-  const w = Math.min(480, Math.max(280, Math.floor(r.width * 0.6)));
+  // PR-1 followup #4: 极窄 detail-pane (< 600px) 时 sheet 全占（与移动端 push
+  // 模式一致）；中宽 (≥ 600) 取右侧 60% 但不低于 280；宽 (≥ 800) 上限 480。
+  // 阈值：480 / 0.6 = 800，60%×600 = 360 (<480, 触发上限)，60%×500 = 300，
+  // 60%×460 = 276 (<280, 触发下限)。低于 600 时让 sheet 全占而不是挤出 ~180px
+  // timeline 的尴尬中间态。
+  let w;
+  if (r.width < 600) {
+    w = r.width;                                          // 全占
+  } else {
+    w = Math.min(480, Math.max(280, Math.floor(r.width * 0.6)));
+  }
+  // PR-1 followup #2: sheet 顶不贴 detail.top，而是从 drawer-header 底部开始。
+  // 让 drawer 头部的 ✎ ✕ 等操作按钮在 sheet 打开时仍可点击。
+  // drawer-header 在 detail-pane 内 sticky 顶，rect.top 等于 detail.top。
+  const drawerHead = detail.querySelector('.cron-drawer-header');
+  const headBottom = drawerHead ? drawerHead.getBoundingClientRect().bottom : r.top;
+  // 限幅：headBottom 必须在 detail 内（防 sticky 被 scroll 推超出 detail.bottom）
+  const top = Math.max(r.top, Math.min(headBottom, r.bottom - 80));
   sheet.style.left = (r.right - w) + 'px';
-  sheet.style.top = r.top + 'px';
-  sheet.style.height = r.height + 'px';
+  sheet.style.top = top + 'px';
+  sheet.style.height = (r.bottom - top) + 'px';
   sheet.style.width = w + 'px';
 }
 function startSheetGeomObserver() {
@@ -11808,13 +11823,17 @@ const cronRunSheetState = {
 // 2. 重绘 timeline panel 让选中行高亮 + 自动 scrollIntoView (Q3: behavior 'auto')
 // 3. 渲染 sheet（先骨架，detail 异步加载）
 // 4. 焦点移到 sheet 标题（a11y）
+//
+// PR-1 followup #1: 区分"首次打开"vs"↑↓切换"——首次打开用 block:'center'
+// 让选中行居中（视觉锚点强），切换用 'nearest' 避免快速连按列表跳。
 function openRunDetailSheet(jobId, runId) {
   if (!jobId || !runId) return;
+  const wasOpen = cronRunSheetState.open;
   cronRunSheetState.jobId = jobId;
   cronRunSheetState.runId = runId;
   cronRunSheetState.open = true;
   renderCronTimelinePanel(jobId);
-  scrollSelectedRunIntoView(runId);
+  scrollSelectedRunIntoView(runId, { block: wasOpen ? 'nearest' : 'center' });
   renderRunDetailSheet();
   // 异步加载 detail（缓存命中时立即可见）
   const st = getCronTimelineState(jobId);
@@ -11863,11 +11882,16 @@ function navigateRunSheet(direction) {
 
 // scrollSelectedRunIntoView — Q3 决议：behavior:'auto'（不 smooth）让快速 ↑↓
 // 不会"追动画"。timeline 列表 overflow-y:auto，scrollIntoView 默认对最近的可滚动祖先生效。
-function scrollSelectedRunIntoView(runId) {
+//
+// PR-1 followup #1 (Playwright 实测): 打开 sheet 时用 block:'center' 让选中行
+// 居中（用户期待"我点的那一行"在视觉中心好对比上下）。↑↓ 切换时用 'nearest'
+// 避免快速连按引起列表来回跳——只有当行已滚出视野才滚。
+function scrollSelectedRunIntoView(runId, opts) {
   if (!runId) return;
   const row = document.querySelector('.cron-timeline-panel .ctr[data-run-id="' + cssEscapeAttr(runId) + '"]');
   if (row && typeof row.scrollIntoView === 'function') {
-    row.scrollIntoView({ behavior: 'auto', block: 'nearest' });
+    const block = (opts && opts.block) || 'nearest';
+    row.scrollIntoView({ behavior: 'auto', block });
   }
 }
 
