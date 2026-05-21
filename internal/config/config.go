@@ -370,9 +370,17 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config file %s is group/world-readable (mode %04o); restrict with: chmod 0600 %s",
 			path, fi.Mode().Perm(), path)
 	}
-	data, err := io.ReadAll(f)
+	// Cap config reads at 1 MiB; the on-disk shape is ~hundreds of
+	// lines of YAML and a runaway file (or a hostile symlink to a
+	// large unrelated file) would otherwise force us to allocate the
+	// whole content twice (once here, once in expandEnvVars).
+	const maxConfigBytes = 1 << 20
+	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("read config: %w", err)
+	}
+	if len(data) > maxConfigBytes {
+		return nil, fmt.Errorf("config file %s exceeds %d bytes", path, maxConfigBytes)
 	}
 
 	// Expand ${VAR} environment variables

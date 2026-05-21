@@ -140,10 +140,11 @@ type Manager struct {
 
 	// Lifecycle hooks.  Held under hookMu so SetCallbacks (called late
 	// during startup wiring, after Hub is built) doesn't race
-	// recordRun callers.  Reads are common (every Tick); writes are
-	// once or twice during init; sync.RWMutex is overkill at this
-	// frequency, but a regular Mutex is sufficient and simpler.
-	hookMu       sync.Mutex
+	// recordRun callers.  Reads happen on every Tick (twice — once at
+	// run start, once at run end); writes are once or twice during
+	// init.  RWMutex lets concurrent ticks read in parallel without
+	// serialising on a single mutex.
+	hookMu       sync.RWMutex
 	onRunStarted func(DaemonRunStartedEvent)
 	onRunEnded   func(DaemonRunEndedEvent)
 
@@ -272,7 +273,11 @@ func (m *Manager) Stop(stopCtx context.Context) {
 		return
 	}
 	m.stopOnce.Do(func() {
-		m.cancel()
+		// m.cancel is set by Start; if Stop is called before Start
+		// (caller-order bug, but cheap to guard) the cancel is a no-op.
+		if m.cancel != nil {
+			m.cancel()
+		}
 		done := make(chan struct{})
 		go func() {
 			m.wg.Wait()
@@ -328,14 +333,14 @@ func (m *Manager) SetCallbacks(onRunStarted func(DaemonRunStartedEvent), onRunEn
 }
 
 func (m *Manager) loadOnRunStarted() func(DaemonRunStartedEvent) {
-	m.hookMu.Lock()
-	defer m.hookMu.Unlock()
+	m.hookMu.RLock()
+	defer m.hookMu.RUnlock()
 	return m.onRunStarted
 }
 
 func (m *Manager) loadOnRunEnded() func(DaemonRunEndedEvent) {
-	m.hookMu.Lock()
-	defer m.hookMu.Unlock()
+	m.hookMu.RLock()
+	defer m.hookMu.RUnlock()
 	return m.onRunEnded
 }
 

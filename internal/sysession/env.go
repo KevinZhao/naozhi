@@ -37,11 +37,11 @@ var envAlwaysPassthrough = map[string]struct{}{
 // allowlist is matched case-sensitively (matching POSIX env semantics).
 // nil/empty allowlist is fine — only PATH and HOME flow through.
 func filterEnv(allowlist []string) []string {
-	exact := make(map[string]struct{}, len(allowlist)+len(envAlwaysPassthrough))
+	// envAlwaysPassthrough is immutable; consult it directly during
+	// the per-key lookup below instead of copying its 2 entries into
+	// the per-call exact map.
+	exact := make(map[string]struct{}, len(allowlist))
 	var prefixes []string
-	for k := range envAlwaysPassthrough {
-		exact[k] = struct{}{}
-	}
 	for _, k := range allowlist {
 		if strings.HasSuffix(k, "_") {
 			prefixes = append(prefixes, k)
@@ -59,6 +59,10 @@ func filterEnv(allowlist []string) []string {
 			continue
 		}
 		key := kv[:idx]
+		if _, ok := envAlwaysPassthrough[key]; ok {
+			out = append(out, kv)
+			continue
+		}
 		if _, ok := exact[key]; ok {
 			out = append(out, kv)
 			continue

@@ -142,6 +142,13 @@ func moveToShimsCgroup(parentCtx context.Context, shimPID, cliPID int) {
 // moveToShimsCgroupDirect is the fallback: move a process to a root-level
 // cgroup directly. Less reliable than systemd scope (systemd may still
 // clean it up during restart).
+//
+// Caller contract (R229-SEC-4 / R230-SEC-fallback): pid MUST already be
+// PPid-validated by readPPidFromProcStatus. moveToShimsCgroup is the only
+// caller and only ever passes elements from its already-filtered `pids`
+// slice; do not invoke this from new code paths without re-asserting that
+// constraint, otherwise an attacker-controlled CLIPID could be moved into
+// the privileged cgroup via the fallback `sudo tee`.
 func moveToShimsCgroupDirect(parentCtx context.Context, pid int) {
 	// The procs path is pinned as a package-level const so the sudoers
 	// policy contract test can diff it against the shipped

@@ -1,7 +1,9 @@
 package sysession
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -27,9 +29,13 @@ import (
 //   - Honour ctx — exec.CommandContext is the standard mechanism.
 type Runner interface {
 	// Run execs a subprocess to evaluate prompt.  Returns trimmed
-	// stdout.  Returns ctx.Err() when ctx is cancelled (so callers
-	// can errors.Is(err, context.DeadlineExceeded) without reaching
-	// for exit codes).
+	// stdout.  Prefers ctx.Err() when the subprocess exit is
+	// attributable to context cancellation (i.e. cmd's error chain
+	// contains context.Canceled or context.DeadlineExceeded), so
+	// callers can errors.Is(err, context.DeadlineExceeded) without
+	// reaching for exit codes.  In the rare race where ctx fires
+	// concurrently with an organic non-zero exit, the raw exec error
+	// is returned instead so the dashboard sees the real failure.
 	Run(ctx context.Context, prompt string) (string, error)
 }
 
@@ -102,14 +108,23 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 	var stderr strings.Builder
 	cmd.Stderr = &limitedWriter{w: &stderr, max: 4096}
 
-	out, err := cmd.Output()
+	// Cap stdout so a runaway "claude -p" can't OOM the parent process.
+	// AutoTitler validates ≤16 Chinese chars; even with reasoning
+	// prefixes the upstream output is well below 64 KiB. Use the same
+	// limitedWriter pattern as stderr — it lies about n=len(p) so
+	// exec.Cmd's pump doesn't spin re-trying past the cap.
+	var stdout bytes.Buffer
+	cmd.Stdout = &limitedWriter{w: &stdout, max: 64 * 1024}
+
+	err := cmd.Run()
 	if err != nil {
-		// Prefer ctx.Err() so callers can errors.Is on
-		// context.DeadlineExceeded without parsing exec.ExitError.
-		// CommandContext sets process state to killed when ctx fires;
-		// we still want a clean DeadlineExceeded return value.
-		if ctx.Err() != nil {
-			return "", ctx.Err()
+		// Prefer ctx.Err() ONLY when err is the context cancellation
+		// surfacing through exec — otherwise an exec.ExitError that
+		// happened to coincide with ctx cancellation gets clobbered
+		// and the dashboard loses the real failure detail.
+		if ctxErr := ctx.Err(); ctxErr != nil &&
+			(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+			return "", ctxErr
 		}
 		// Sec-LOW-2:  stderr from claude -p can echo back portions of
 		// stdin (= the prompt = user conversation excerpts) when the
@@ -129,7 +144,7 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 		return "", fmt.Errorf("sysession: %s -p failed: %w",
 			filepath.Base(r.cfg.BinPath), err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	return strings.TrimSpace(stdout.String()), nil
 }
 
 // limitedWriter caps an io.Writer so a runaway subprocess can't fill

@@ -1,7 +1,9 @@
 package sysession
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -32,7 +34,7 @@ func SweepOldJSONL(dir string, maxAge time.Duration) (int, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		// Missing dir is fine — first run before any subprocess execs.
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return 0, nil
 		}
 		return 0, fmt.Errorf("sysession: read sweep dir %q: %w", dir, err)
