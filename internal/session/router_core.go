@@ -156,6 +156,13 @@ const (
 	// + a read-lock check, no FS I/O.
 	shimReconnectGraceDelay = 5 * time.Second
 
+	// spawningKeyPollInterval is how long GetOrCreate yields before
+	// re-checking r.spawningKeys when another goroutine is mid-spawn for
+	// the same key. Kept tiny so perceived latency stays flat — a
+	// typical shim spawn takes 100-300 ms, so two-three polls cover the
+	// happy path without burning CPU.
+	spawningKeyPollInterval = 20 * time.Millisecond
+
 	// knownIDsSaveInterval throttles knownIDs fsync to limit disk I/O.
 	// A crash losing up to this much session-ID tracking costs one
 	// discovery rescan cycle. Shared between Cleanup and saveIfDirty.
