@@ -9,8 +9,8 @@ import (
 func TestJobTitleOrFallback_ExplicitTitle(t *testing.T) {
 	t.Parallel()
 	j := &Job{Title: "  daily-briefing  ", Prompt: "ignored"}
-	if got := JobTitleOrFallback(j); got != "daily-briefing" {
-		t.Fatalf("JobTitleOrFallback = %q, want %q", got, "daily-briefing")
+	if got := jobTitleOrFallback(j); got != "daily-briefing" {
+		t.Fatalf("jobTitleOrFallback = %q, want %q", got, "daily-briefing")
 	}
 }
 
@@ -21,7 +21,7 @@ func TestJobTitleOrFallback_EmptyTitleFirstLine(t *testing.T) {
 	j := &Job{
 		Prompt: "Summarize today's calendar\nand highlight anything urgent",
 	}
-	if got := JobTitleOrFallback(j); got != "Summarize today's calendar" {
+	if got := jobTitleOrFallback(j); got != "Summarize today's calendar" {
 		t.Fatalf("fallback first-line = %q, want 'Summarize today's calendar'", got)
 	}
 }
@@ -31,7 +31,7 @@ func TestJobTitleOrFallback_EmptyTitleFirstLine(t *testing.T) {
 func TestJobTitleOrFallback_LeadingBlankLines(t *testing.T) {
 	t.Parallel()
 	j := &Job{Prompt: "\n\n  \nReal first line\ntail"}
-	if got := JobTitleOrFallback(j); got != "Real first line" {
+	if got := jobTitleOrFallback(j); got != "Real first line" {
 		t.Fatalf("fallback leading-blanks = %q, want 'Real first line'", got)
 	}
 }
@@ -43,7 +43,7 @@ func TestJobTitleOrFallback_LongLineTruncation(t *testing.T) {
 	// 80 个中文字符（每个 3 字节），超过 60-rune 限制。
 	line := strings.Repeat("测试", 40) // 80 runes
 	j := &Job{Prompt: line}
-	got := JobTitleOrFallback(j)
+	got := jobTitleOrFallback(j)
 	// 期望：前 60 rune + "…"
 	wantRunes := []rune(line)[:titleFallbackRuneLimit]
 	want := string(wantRunes) + "…"
@@ -67,7 +67,7 @@ func TestJobTitleOrFallback_EmptyJob(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := JobTitleOrFallback(tc.j); got != "" {
+			if got := jobTitleOrFallback(tc.j); got != "" {
 				t.Errorf("want empty string, got %q", got)
 			}
 		})
@@ -170,8 +170,8 @@ func TestUpdateJob_ClearTitle(t *testing.T) {
 	if updated.Title != "" {
 		t.Errorf("Title should be cleared, got %q", updated.Title)
 	}
-	// JobTitleOrFallback 现在应该回退到 prompt fallback
-	if got := JobTitleOrFallback(updated); got != "p" {
+	// jobTitleOrFallback 现在应该回退到 prompt fallback
+	if got := jobTitleOrFallback(updated); got != "p" {
 		t.Errorf("fallback after clear = %q, want %q", got, "p")
 	}
 }

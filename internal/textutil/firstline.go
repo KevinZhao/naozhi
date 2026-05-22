@@ -14,7 +14,7 @@ import "strings"
 //     line whose TrimSpace is non-empty. Returns "" if every line is blank.
 //
 // This unifies the logic that previously lived in dispatch/status.go::firstLine
-// (looked at first + second lines only) and cron/job.go::JobTitleOrFallback
+// (looked at first + second lines only) and cron/job.go::jobTitleOrFallback
 // (scanned all lines via strings.Split). The "scan all lines" behaviour is
 // the strict superset, so callers that previously stopped at the second line
 // still get correct output for inputs whose first two lines are non-empty.
