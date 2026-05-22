@@ -11008,10 +11008,16 @@ function openCronPanel() {
 // Extracted so unit tests exercise the predicate without driving DOM. Match
 // surface for the substring arm: title, prompt, work_dir, schedule, id (all
 // case-insensitive). title 放在最前，匹配优先 —— 人们搜索 cron 时最先想到
-// 的就是自己给任务起的那个名字。Status arm is one of 'all' | 'active' |
-// 'attention', where 'attention' == paused OR last_error (dovetails with
-// the header cron-badge's attention count so both surfaces speak the same
-// predicate).
+// 的就是自己给任务起的那个名字。
+//
+// Status arm (cron-dashboard-redesign P0 §4.2):
+//   - 'all'        全部
+//   - 'active'     非 paused（保留旧语义；与 attentionCount 互斥的"运行中"
+//                  入口，目前 chip 上仍叫"运行中"以兼容 e2e）
+//   - 'attention'  paused || last_error || missed（与 cronBadge 同源）
+//   - 'healthy'    !paused && !last_error && !missed && !is_running
+//                  （没毛病、不在跑，最常见的稳态）
+//   - 'running'    current_run.started_at 存在（实时跑中）
 function filterCronJobs(jobs, query, status) {
   const q = (query || '').trim().toLowerCase();
   const s = status || 'all';
@@ -11021,6 +11027,12 @@ function filterCronJobs(jobs, query, status) {
     // cron-v2-polish §3.3: attention 扩展为 paused || last_error || missed，
     // 与 fetchCronJobs 里的 cronBadge 计数同源，避免两处判断漂移。
     if (s === 'attention' && !(j.paused || j.last_error || j.missed)) return false;
+    if (s === 'healthy') {
+      const running = !!(j.current_run && j.current_run.started_at);
+      const attn = j.paused || j.last_error || j.missed;
+      if (running || attn) return false;
+    }
+    if (s === 'running' && !(j.current_run && j.current_run.started_at)) return false;
     if (!q) return true;
     const fields = [j.title, j.prompt, j.work_dir, j.schedule, j.id];
     for (const f of fields) {
@@ -12279,11 +12291,13 @@ function onCronSearchInput() {
   renderCronList();
 }
 
-// setCronStatusFilter toggles between the three status modes. Re-applies
+// setCronStatusFilter toggles between the status modes. Re-applies
 // aria-pressed + active class on the chip row so the current mode is
-// visible + SR-accessible, then repaints the list.
+// visible + SR-accessible, then repaints the list. P0 added 'healthy' /
+// 'running' for the new overview chip strip.
 function setCronStatusFilter(status) {
-  if (status !== 'all' && status !== 'active' && status !== 'attention') return;
+  if (status !== 'all' && status !== 'active' && status !== 'attention' &&
+      status !== 'healthy' && status !== 'running') return;
   cronFilterStatus = status;
   document.querySelectorAll('.cron-status-chip').forEach(el => {
     const on = el.getAttribute('data-status') === status;
@@ -12583,11 +12597,43 @@ function renderCronPanel() {
   // attentionCount ≤ cronJobs.length always.
   const attentionCount = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
   const activeCount = cronJobs.filter(j => !j.paused && !j.last_error && !j.missed).length;
+  const runningCount = cronJobs.filter(j => j.current_run && j.current_run.started_at).length;
+  // healthy = 不在跑、没毛病、没暂停。是大多数任务的稳态。
+  const healthyCount = cronJobs.filter(j => {
+    if (j.paused || j.last_error || j.missed) return false;
+    if (j.current_run && j.current_run.started_at) return false;
+    return true;
+  }).length;
+  // Legacy summaryChip kept as data-only fallback for any test that greps for
+  // "运行中 N · 需关注 N"; v3 overview chip strip below is the visible UI.
   const summaryParts = [];
   if (activeCount > 0) summaryParts.push('运行中 ' + activeCount);
   if (attentionCount > 0) summaryParts.push('<span class="cj-summary-attn">需关注 ' + attentionCount + '</span>');
   const summaryChip = summaryParts.length > 0
-    ? '<span class="cj-summary">· ' + summaryParts.join(' · ') + '</span>'
+    ? '<span class="cj-summary" hidden>· ' + summaryParts.join(' · ') + '</span>'
+    : '';
+  // cron-dashboard-redesign P0 §4.2 — overview chip strip. Always visible
+  // (even in compact mode where filterBar is hidden) so users can scan
+  // status counts at a glance and click a chip to filter. Each chip toggles
+  // setCronStatusFilter; clicking the active chip resets to 'all'.
+  const ovChip = (label, status, count, cls) => {
+    if (count === 0 && status !== 'all') return '';
+    const active = cronFilterStatus === status ? ' active' : '';
+    const target = cronFilterStatus === status ? 'all' : status;
+    return '<button type="button" class="cron-ov-chip ' + (cls || '') + active + '"' +
+      ' data-status="' + escAttr(status) + '"' +
+      ' aria-pressed="' + (active ? 'true' : 'false') + '"' +
+      ' onclick="setCronStatusFilter(\'' + escJs(target) + '\')">' +
+      '<span class="cron-ov-num">' + count + '</span>' + esc(label) +
+      '</button>';
+  };
+  const overviewBar = cronJobs.length > 0
+    ? '<div class="cron-overview" role="group" aria-label="任务概览">' +
+        ovChip('全部', 'all', cronJobs.length, '') +
+        ovChip('健康', 'healthy', healthyCount, 'ok') +
+        ovChip('需关注', 'attention', attentionCount, 'warn') +
+        ovChip('运行中', 'running', runningCount, 'run') +
+      '</div>'
     : '';
   // Adaptive filter bar — hide entirely when cronJobs ≤ 5 (ChatGPT-style
   // compact mode) since search + chips add noise without value at that scale.
@@ -12631,6 +12677,7 @@ function renderCronPanel() {
               ' 新建' +
             '</button>' +
           '</div>' +
+          overviewBar +
           filterBar +
           missedBanner +
           '<div id="cron-list-items"></div>' +

@@ -1028,28 +1028,41 @@ body.kbd-open .input-hints{display:none}
 /* Cron list header */
 .cron-list-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:12px}
 .cron-list-head h3{margin:0;font-size:16px;color:var(--nz-text-strong)}
+/* cron-dashboard-redesign P0 §4.2 — overview chip strip. Always visible
+ * (independent from filterBar's >5 threshold) so the four status counts
+ * are readable at a glance; each chip is also a one-click filter. */
+.cron-overview{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;align-items:center}
+.cron-ov-chip{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:12px;border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text-mute);font-size:12px;font-family:inherit;cursor:pointer;line-height:1.2;min-height:26px;transition:background .12s,border-color .12s,color .12s}
+.cron-ov-chip:hover{color:var(--nz-text);border-color:var(--nz-text-faint)}
+.cron-ov-chip:focus-visible{outline:1px solid var(--nz-accent);outline-offset:2px}
+.cron-ov-chip.active{background:rgba(31,111,235,.16);border-color:var(--nz-blue);color:var(--nz-accent)}
+.cron-ov-chip.active .cron-ov-num{color:var(--nz-accent)}
+.cron-ov-chip .cron-ov-num{font-weight:600;color:var(--nz-text-strong);font-variant-numeric:tabular-nums}
+.cron-ov-chip.ok .cron-ov-num{color:var(--nz-green)}
+.cron-ov-chip.warn{color:var(--nz-amber);border-color:rgba(210,153,34,.4);background:rgba(210,153,34,.08)}
+.cron-ov-chip.warn .cron-ov-num{color:var(--nz-amber)}
+.cron-ov-chip.run{color:var(--nz-accent);border-color:rgba(31,111,235,.4);background:rgba(31,111,235,.08)}
+.cron-ov-chip.run .cron-ov-num{color:var(--nz-accent)}
+.cron-ov-chip.run.active{background:rgba(31,111,235,.22)}
 .cron-new-btn{padding:6px 14px;border-radius:6px;border:1px solid var(--nz-border);background:var(--nz-bg-2);color:var(--nz-text);cursor:pointer;font-size:13px;display:inline-flex;align-items:center;gap:4px;min-height:36px;font-family:inherit}
 .cron-new-btn:hover{background:var(--nz-border);color:var(--nz-text-strong)}
 .cron-new-btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 /* Cron card outer (anchor) — v3 row uses .cj-row for the visual; the
- * .cron-card class remains as an E2E selector anchor (e2e/dashboard.test.js)
- * and provides the card shell (border-radius / margin / background / hover)
- * that .cj-row's grid layout sits on top of. The v2 .cc-* element classes
- * (cc-next-badge / cc-title / cc-prompt / cc-schedule / cc-meta / cc-result
- * / cc-actions / cc-btn / cc-human / cc-notify) were used by the original
- * card layout; v3 cronJobCardHtml emits cj-* element classes only — the
- * cc-actions wrapper survives in cronJobCardHtml's `__unused` symbol branch
- * solely as a contract anchor for TestDashboardJS_R110P2_CronRunNowButton
- * and is never reached at runtime, so its CSS is gone. */
-.cron-card{padding:12px;padding-right:100px;border:1px solid var(--nz-border);border-radius:8px;margin-bottom:10px;background:var(--nz-bg-1);cursor:pointer;transition:border-color .15s,background .15s;position:relative}
-.cron-card:hover{border-color:var(--nz-text-faint);background:#1c2129}
+ * .cron-card class remains as an E2E selector anchor (e2e/dashboard.test.js,
+ * multibackend.round3/5.test.js) but is otherwise visually inert.
+ *
+ * cron-dashboard-redesign P0 (2026-05-22): the legacy v2 padding/border/
+ * margin/background made each row look like an individual card despite the
+ * cj-row grid layout sitting on top — defeating the entire v3 high-density
+ * design. cj-list now provides the outer chrome (border-radius, background)
+ * and cj-row provides the row separator + interactive hover state. */
+.cron-card{position:relative}
 /* Increment C: missed banner —— 整个 cron 面板顶部告警条，红色强调 +
  * 可点切 filter。alert role 提示屏幕阅读器。 */
 .cron-missed-banner{display:flex;align-items:center;gap:8px;padding:10px 14px;margin:0 0 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.35);border-radius:8px;color:var(--nz-red);font-size:13px;cursor:pointer;transition:background .15s}
 .cron-missed-banner:hover{background:rgba(239,68,68,.15)}
 .cron-missed-banner .cmb-icon{font-size:16px;line-height:1}
 .cron-missed-banner .cmb-text{flex:1;color:var(--nz-text)}
-@media (max-width:540px){.cron-card{padding-right:12px}}
 .cron-empty{text-align:center;padding:40px 20px}
 .cron-empty-icon{font-size:40px;opacity:.35;margin-bottom:12px}
 .cron-empty-hint{color:var(--nz-text-mute);margin-bottom:6px}

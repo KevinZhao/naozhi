@@ -2,7 +2,9 @@ package server
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"embed"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -36,6 +38,58 @@ var dashboardJS embed.FS
 var agentViewJS embed.FS
 
 const authCookieName = "naozhi_auth"
+
+// staticAssetETags holds precomputed strong-form ETags for embedded dashboard
+// assets. cron-dashboard-redesign P0 §6 — combined with the existing
+// `Cache-Control: no-cache, must-revalidate`, ETag enables a 304 fast-path so
+// browsers actually skip body bytes when content hasn't changed (no-cache
+// alone forces every load to re-download, hurting both latency and bandwidth).
+//
+// Because the asset bytes are baked in at build time via //go:embed, the
+// SHA-256 hash never changes during a process's lifetime; computing it once at
+// init is sufficient. Strong ETag form ("hex") is fine since byte equality is
+// the actual semantics (no transformations).
+var staticAssetETags = func() map[string]string {
+	hash := func(b []byte) string {
+		s := sha256.Sum256(b)
+		return `"` + hex.EncodeToString(s[:16]) + `"`
+	}
+	out := map[string]string{}
+	if b, err := dashboardHTML.ReadFile("static/dashboard.html"); err == nil {
+		out["dashboard.html"] = hash(b)
+	}
+	if b, err := dashboardJS.ReadFile("static/dashboard.js"); err == nil {
+		out["dashboard.js"] = hash(b)
+	}
+	if b, err := agentViewJS.ReadFile("static/agent_view.js"); err == nil {
+		out["agent_view.js"] = hash(b)
+	}
+	return out
+}()
+
+// serveStaticWithETag writes the asset, attaching its precomputed ETag and
+// honouring If-None-Match for a 304 fast-path. Returns true when a 304 was
+// served so the caller can skip writing the body. Other security headers
+// (CSP/COOP/etc.) are still set by the caller before this point.
+func serveStaticWithETag(w http.ResponseWriter, r *http.Request, assetKey string) bool {
+	tag := staticAssetETags[assetKey]
+	if tag == "" {
+		return false
+	}
+	w.Header().Set("ETag", tag)
+	if match := r.Header.Get("If-None-Match"); match != "" {
+		// Multiple If-None-Match values are comma-separated; do a simple
+		// substring check rather than full RFC 7232 list parsing — our tag
+		// is unique enough that a substring hit ≈ a real match. Edge case
+		// (`*` wildcard) intentionally accepted: client wants any tag, so
+		// 304 is correct.
+		if match == "*" || strings.Contains(match, tag) {
+			w.WriteHeader(http.StatusNotModified)
+			return true
+		}
+	}
+	return false
+}
 
 // jsonEncBuf pairs a pooled bytes.Buffer with a json.Encoder bound to it.
 // Reused by writeJSON/writeJSONStatus so hot dashboard poll paths do not
@@ -430,6 +484,9 @@ func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	// <iframe> no-cors fetches — complements the existing X-Frame-Options.
 	w.Header().Set("Cross-Origin-Opener-Policy", "same-origin")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
+	if serveStaticWithETag(w, r, "dashboard.html") {
+		return
+	}
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("dashboard write", "err", err)
 	}
@@ -473,6 +530,9 @@ func (s *Server) handleDashboardJS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "dashboard.js") {
+		return
+	}
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("dashboard js write", "err", err)
 	}
@@ -490,6 +550,9 @@ func (s *Server) handleAgentViewJS(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/javascript")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Cache-Control", "no-cache, must-revalidate")
+	if serveStaticWithETag(w, r, "agent_view.js") {
+		return
+	}
 	if _, err := w.Write(data); err != nil {
 		slog.Debug("agent_view js write", "err", err)
 	}
