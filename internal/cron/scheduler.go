@@ -292,8 +292,9 @@ type Scheduler struct {
 	// now uses os.CreateTemp so the underlying .tmp file is unique per call
 	// and cannot be corrupted by parallel writers; storeMu remains only as
 	// a logical barrier against reordering (an older snapshot rename-winning
-	// over a newer one). Held only around the saveJobs call — snapshot
-	// construction stays on s.mu to avoid cross-lock latency.
+	// over a newer one). Held only around the WriteFileAtomic call inside
+	// saveMarshaledSeq — snapshot construction stays on s.mu to avoid
+	// cross-lock latency.
 	storeMu sync.Mutex
 
 	// saveSeq is a monotonic sequence tag attached to every marshaled
@@ -703,11 +704,16 @@ func (s *Scheduler) Start() error {
 		s.registerStubByValue(st.id, st.workDir, st.prompt, st.lastSessionID)
 	}
 	s.cron.Start()
-	// P1 cron-run-history: cold-start GC pass over the runs/ tree to
-	// collect retention-policy violators that accumulated while this
-	// process was down. Cheap (one stat per file) and idempotent.
+	// P1 cron-run-history: cold-start GC pass over 'runs/' tree to collect
+	// retention-policy violators that accumulated while this process was
+	// down. 异步执行避免在 jobs 多/历史目录大时阻塞 Start 返回（每个 job
+	// 一次 ReadDir + N 次 Remove）。
 	if s.runStore != nil {
-		s.runStore.trimAll(time.Now())
+		go func() {
+			slog.Info("cron run history: cold-start GC starting")
+			s.runStore.trimAll(time.Now())
+			slog.Info("cron run history: cold-start GC done")
+		}()
 	}
 	slog.Info("cron scheduler started", "jobs", jobCount)
 	return nil
@@ -2860,7 +2866,11 @@ type slogPrintfLogger struct{}
 func (slogPrintfLogger) Printf(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	msg = strings.TrimRight(msg, "\n")
-	if strings.Contains(msg, "panic") {
+	// 同时匹配 "panic" 和 "recovered"：robfig/cron 的 recover chain 把
+	// recovery 消息固定包含 "panic"（chain.go:30 "cron: panic running job:
+	// %v\n%s"），但 upstream 措辞调整时 "recovered" 是更稳定的兜底标记，
+	// 避免静默降级为 Warn 漏报真实故障。
+	if strings.Contains(msg, "panic") || strings.Contains(msg, "recovered") {
 		slog.Error("cron logger", "msg", msg)
 		return
 	}

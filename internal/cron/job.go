@@ -328,7 +328,10 @@ func previousTickBefore(schedule string, now time.Time) time.Time {
 	// 回推起点；加一个安全系数 3 应对月份/DST 的非等距触发
 	start := now.Add(-3 * period)
 	prev := time.Time{}
-	for {
+	// 上限守卫：极端 DST/月底场景下若 sched.Next 进展极慢，避免
+	// 在 dashboard 1Hz 轮询路径短暂阻塞。1000 次足以覆盖任何
+	// 合法 cron schedule 在 3×period 窗口内的迭代次数。
+	for i := 0; i < 1000; i++ {
 		next := sched.Next(start)
 		if !next.Before(now) {
 			return prev
@@ -336,6 +339,7 @@ func previousTickBefore(schedule string, now time.Time) time.Time {
 		prev = next
 		start = next
 	}
+	return prev
 }
 
 // HasMissedSchedule 判断 Job 是否曾经错过调度（进程休眠或重启空窗期）。
