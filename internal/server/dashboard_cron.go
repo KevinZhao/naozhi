@@ -1034,11 +1034,11 @@ func formatTZOffset(zoneName string, offsetSeconds int) string {
 	return fmt.Sprintf("%s (UTC%+03d:%02d)", zoneName, hours, minutes)
 }
 
-// runIDLenLimit caps the run_id query parameter length, matching the
-// 16-hex generator + headroom for future entropy bumps. Mirrors
-// maxCronIDLenDashboard but kept separate so a future divergence
-// (longer run IDs without longer job IDs) doesn't regress either side.
-const runIDLenLimit = 64
+// runIDLenLimit caps the run_id query parameter length. Run IDs and job IDs
+// share the same on-disk record format and feed the same cron.IsValidID
+// validator, so they share cron.MaxIDLen — diverging the two would let a
+// 16-hex generator bump on one side miss its mirror cap. R230B-CR-1.
+const runIDLenLimit = cron.MaxIDLen
 
 // GET /api/cron/runs?job_id=&limit=&before=
 //
