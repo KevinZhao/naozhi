@@ -377,23 +377,29 @@ const (
 //   - Total bytes are capped at autoTitlerExcerptCapBytes.
 //   - Result is valid UTF-8.
 //   - Embedded EXCERPT delimiter strings are neutralised.
+//
+// R232-PERF-7: single-pass rune walk uses utf8.DecodeRuneInString so an
+// invalid byte sequence yields (RuneError, width=1) and we skip the
+// offending byte without a separate utf8.ValidString pre-scan + re-decode
+// round-trip on the hot path.
 func buildExcerpt(seed string) string {
 	if seed == "" {
 		return ""
-	}
-	if !utf8.ValidString(seed) {
-		// Strip invalid bytes by re-decoding rune-by-rune.
-		var b strings.Builder
-		for _, r := range seed {
-			b.WriteRune(r)
-		}
-		seed = b.String()
 	}
 	var b strings.Builder
 	b.Grow(min(len(seed), autoTitlerExcerptCapBytes))
 	lineWritten := 0
 	lineTruncated := false
-	for _, r := range seed {
+	for i := 0; i < len(seed); {
+		r, w := utf8.DecodeRuneInString(seed[i:])
+		if r == utf8.RuneError && w == 1 {
+			// Invalid UTF-8 byte: skip it. Matches the prior
+			// ValidString + re-decode path's "strip invalid bytes"
+			// semantics without the second scan.
+			i++
+			continue
+		}
+		i += w
 		if r == '\n' {
 			b.WriteRune('\n')
 			lineWritten = 0
@@ -408,10 +414,6 @@ func buildExcerpt(seed string) string {
 		}
 		if r < 0x20 || (r >= 0x7F && r <= 0x9F) {
 			continue
-		}
-		w := utf8.RuneLen(r)
-		if w < 0 {
-			continue // shouldn't happen post-ValidString, but defensive
 		}
 		if lineWritten+w > autoTitlerLineCapBytes {
 			// Once a line hits the cap, drop the rest of the line so the

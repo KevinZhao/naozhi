@@ -56,6 +56,12 @@ func TestBuildExcerpt(t *testing.T) {
 		{"drops control chars", "ab\x00\x07c", "abc"},
 		{"keeps newlines", "a\nb\nc", "a\nb\nc"},
 		{"caps line length", strings.Repeat("a", autoTitlerLineCapBytes+50) + "\nshort", strings.Repeat("a", autoTitlerLineCapBytes) + "…\nshort"},
+		// R232-PERF-7: invalid UTF-8 byte (lone 0xC3 continuation start
+		// without follow-up) is dropped while surrounding ASCII survives.
+		{"strips invalid utf-8 bytes", "ab\xc3xy", "abxy"},
+		// CJK multi-byte runes survive intact (3 bytes each) — guards
+		// the single-pass DecodeRuneInString from over-eager byte skip.
+		{"keeps cjk runes", "你好", "你好"},
 	}
 	for _, c := range cases {
 		c := c
