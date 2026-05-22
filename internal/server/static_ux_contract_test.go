@@ -6060,3 +6060,87 @@ func TestDashboardJS_TableCurrencyDollarNotMathProtected(t *testing.T) {
 		t.Error("isTableMathSpan: must reject `$...$` containing `|` without LaTeX chars (currency rows like `$20 | 1,000 | $0.04`)")
 	}
 }
+
+// TestDashboardHTML_CronCardLegacyStylesStripped pins
+// cron-dashboard-redesign P0 §4.2: the legacy v2 .cron-card padding/border/
+// margin was making each cj-row look like a standalone card, defeating the
+// v3 high-density row design. The class must remain (E2E selectors anchor
+// on it) but be visually inert — only `position:relative` survives.
+func TestDashboardHTML_CronCardLegacyStylesStripped(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(data)
+	idx := strings.Index(html, ".cron-card{")
+	if idx < 0 {
+		t.Fatal(".cron-card{ declaration not found")
+	}
+	end := strings.Index(html[idx:], "}")
+	if end < 0 {
+		t.Fatal(".cron-card declaration unterminated")
+	}
+	body := html[idx : idx+end+1]
+	for _, forbidden := range []string{"padding:", "border:", "margin", "background:"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf(".cron-card{} must not declare %q (legacy v2 card styling — defeats v3 row layout)", forbidden)
+		}
+	}
+}
+
+// TestDashboardJS_CronOverviewBar pins cron-dashboard-redesign P0 §4.2:
+// the four-chip overview strip is rendered above the filter bar, including
+// counts for healthy + running buckets. The strip MUST always render (not
+// gated by the >5 jobs threshold filterBar uses) so users get status counts
+// at a glance even with a small number of jobs.
+func TestDashboardJS_CronOverviewBar(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+	for _, want := range []string{
+		"cron-overview",
+		"cron-ov-chip",
+		"healthyCount",
+		"runningCount",
+		"overviewBar",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("dashboard.js missing P0 overview marker %q", want)
+		}
+	}
+	if !strings.Contains(js, "status !== 'healthy'") || !strings.Contains(js, "status !== 'running'") {
+		t.Error("setCronStatusFilter must accept 'healthy' and 'running' status values")
+	}
+	if !strings.Contains(js, "if (s === 'healthy')") {
+		t.Error("filterCronJobs must implement the 'healthy' predicate")
+	}
+	if !strings.Contains(js, "if (s === 'running'") {
+		t.Error("filterCronJobs must implement the 'running' predicate")
+	}
+}
+
+// TestStaticAssetETags_Computed verifies serveStaticWithETag wires up
+// precomputed ETags for the three embedded assets and the 304 fast-path is
+// available. cron-dashboard-redesign P0 §6 — combined with no-cache must-
+// revalidate, ETag enables browsers to skip body bytes when content hasn't
+// changed instead of re-downloading on every navigation.
+func TestStaticAssetETags_Computed(t *testing.T) {
+	t.Parallel()
+	for _, key := range []string{"dashboard.html", "dashboard.js", "agent_view.js"} {
+		tag, ok := staticAssetETags[key]
+		if !ok {
+			t.Errorf("staticAssetETags missing key %q", key)
+			continue
+		}
+		if !strings.HasPrefix(tag, `"`) || !strings.HasSuffix(tag, `"`) {
+			t.Errorf("ETag for %q must be quoted strong-form, got %q", key, tag)
+		}
+		if len(tag) != 34 {
+			t.Errorf("ETag for %q wrong length: got %d, want 34", key, len(tag))
+		}
+	}
+}
