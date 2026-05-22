@@ -163,6 +163,12 @@ const (
 	// TriggerCatchup is reserved for the missed-schedule replay path (P3,
 	// not yet implemented). No production code emits it today; consumers
 	// should treat unknown trigger strings as forward-compatible.
+	//
+	// WARNING (R232-CR-8): pure placeholder — no executeOpt / recordResult
+	// path emits this value. Removing it before the catchup feature lands
+	// is safe and will not regress behaviour. Kept as a forward-compat
+	// reservation only; do not branch UI/metrics off this constant
+	// expecting nonzero counts.
 	TriggerCatchup TriggerKind = "catchup"
 )
 
@@ -187,6 +193,11 @@ const (
 	ErrClassPausedConcurrent   ErrorClass = "paused_concurrent"
 	// ErrClassPanic is reserved for the future panic-recovery path
 	// (P3, not yet implemented); finishRun does not emit it today.
+	//
+	// WARNING (R232-CR-8): pure placeholder — finishRun has no panic
+	// recover that maps onto this class yet. Treat as forward-compat
+	// reservation; do not assume nonzero counts in metrics dashboards
+	// or write tests asserting recordResult ever sets this value.
 	ErrClassPanic ErrorClass = "panic"
 )
 

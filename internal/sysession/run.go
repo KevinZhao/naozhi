@@ -53,6 +53,11 @@ const (
 	// "trigger now" button. Phase 1 only produces Scheduled; manual
 	// will be passed by the future API endpoint that calls runOnce
 	// outside the ticker loop.
+	//
+	// WARNING (R232-CR-8): pure placeholder — no production caller
+	// emits this value. Treat as forward-compat reservation only; do
+	// not branch UI/metrics off this constant expecting nonzero counts
+	// before the trigger-now endpoint lands.
 	DaemonTriggerManual DaemonTriggerKind = "manual"
 )
 
