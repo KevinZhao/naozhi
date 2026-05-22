@@ -353,7 +353,15 @@ func (s *Scheduler) CurrentRun(jobID string) (runInflightView, bool) {
 	if !ok {
 		return runInflightView{}, false
 	}
-	return v.(*runInflight).snapshot()
+	// Defensive: runningJobs is sync.Map[string]*runInflight by contract,
+	// but the type-erased Load makes a future refactor that stores a
+	// different type or a nil value silently panic here. The two-value
+	// assertion + nil check turns that into a graceful "no inflight".
+	inf, ok := v.(*runInflight)
+	if !ok || inf == nil {
+		return runInflightView{}, false
+	}
+	return inf.snapshot()
 }
 
 // RunInflightView is the exported shape for CurrentRun's snapshot,
@@ -717,11 +725,7 @@ func (s *Scheduler) registerStub(j *Job) {
 	if s.router == nil {
 		return
 	}
-	var chain []string
-	if j.LastSessionID != "" {
-		chain = []string{j.LastSessionID}
-	}
-	s.router.RegisterCronStubWithChain(session.CronKey(j.ID), j.WorkDir, j.Prompt, chain)
+	s.router.RegisterCronStubWithChain(session.CronKey(j.ID), j.WorkDir, j.Prompt, stubChain(j.LastSessionID))
 }
 
 // registerStubByValue is the pointer-free variant used from Start() where the
@@ -730,11 +734,17 @@ func (s *Scheduler) registerStubByValue(id, workDir, prompt, lastSessionID strin
 	if s.router == nil {
 		return
 	}
-	var chain []string
-	if lastSessionID != "" {
-		chain = []string{lastSessionID}
+	s.router.RegisterCronStubWithChain(session.CronKey(id), workDir, prompt, stubChain(lastSessionID))
+}
+
+// stubChain returns the single-element resume chain for a cron stub when
+// LastSessionID is set, or nil otherwise. Centralises the chain-building
+// shared by registerStub / registerStubByValue.
+func stubChain(lastSessionID string) []string {
+	if lastSessionID == "" {
+		return nil
 	}
-	s.router.RegisterCronStubWithChain(session.CronKey(id), workDir, prompt, chain)
+	return []string{lastSessionID}
 }
 
 // EnsureStub lazily (re-)registers a dashboard stub session for the given
@@ -1616,11 +1626,18 @@ func (s *Scheduler) registerJob(j *Job) error {
 // struct comment for the ID-reuse split-CAS rationale.
 func (s *Scheduler) jobInflight(id string) *runInflight {
 	if v, ok := s.runningJobs.Load(id); ok {
-		return v.(*runInflight)
+		if inf, ok := v.(*runInflight); ok && inf != nil {
+			return inf
+		}
 	}
 	guard := &runInflight{}
 	actual, _ := s.runningJobs.LoadOrStore(id, guard)
-	return actual.(*runInflight)
+	if inf, ok := actual.(*runInflight); ok && inf != nil {
+		return inf
+	}
+	// Should be unreachable given LoadOrStore's contract, but never return
+	// nil to callers — they immediately call methods on the result.
+	return guard
 }
 
 // jobSnapshot captures the mutable Job fields executeOpt reads under s.mu so
@@ -2832,16 +2849,21 @@ func applyJitter(ctx context.Context, schedule string, jitterMax time.Duration) 
 // the standard log package.
 //
 // Observability note: robfig/cron wraps this via non-verbose PrintfLogger
-// (logger.go:28 in the vendored lib) which only emits Error() — its Info()
-// path is compiled out when logInfo=false. So every line reaching Printf is
-// effectively an error-grade event (recover panic, skip-if-still-running
-// notice, schedule parse failure). Logged at Warn rather than Error because
-// SkipIfStillRunning fires on normal slow-job scenarios that operators don't
-// want paging on.
+// (logger.go:28 in the vendored lib) which compiles Info() out entirely
+// when logInfo=false. SkipIfStillRunning calls Info (chain.go:88) and
+// therefore never reaches Printf at all; only Error() lines do — i.e.
+// recover-panic recoveries and schedule parse failures. Panic recoveries
+// are logged at Error (a real fault); anything else stays at Warn so
+// upstream library changes that route new events through Error remain
+// visible without silently demoting them.
 type slogPrintfLogger struct{}
 
 func (slogPrintfLogger) Printf(format string, args ...any) {
 	msg := fmt.Sprintf(format, args...)
 	msg = strings.TrimRight(msg, "\n")
+	if strings.Contains(msg, "panic") {
+		slog.Error("cron logger", "msg", msg)
+		return
+	}
 	slog.Warn("cron logger", "msg", msg)
 }
