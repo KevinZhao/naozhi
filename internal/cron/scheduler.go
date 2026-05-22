@@ -1692,13 +1692,6 @@ func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
 	return snap
 }
 
-// preflightResult bundles the closure / continuation-flag returned by the
-// P0 preflight wrapper. Pulled out so executeOpt's call site reads as one
-// destructure instead of two return values mixed with a side-effect rec.
-type preflightResult struct {
-	stubRefresh func()
-}
-
 // preflightArgs bundles the inputs to freshContextPreflightP0. R229-CR-8.
 // Mirrors finishArgs's struct-bag pattern: the helper has 8 inputs that all
 // flow through to the same finishRun/deliverNotice call sites and keeping
@@ -1724,21 +1717,24 @@ type preflightArgs struct {
 // (broadcast cron_run_ended + counters + LastErrorClass write) participates.
 //
 // Returns:
-//   - preflightResult.stubRefresh: closure that re-registers the sidebar
-//     stub on error paths so the cron row stays visible. Caller invokes
-//     after error branches; never invoke on success (live session owns
-//     the row).
+//   - stubRefresh: closure that re-registers the sidebar stub on error
+//     paths so the cron row stays visible. Caller invokes after error
+//     branches; never invoke on success (live session owns the row).
 //   - ok: false means the caller MUST return immediately. The helper has
 //     already written the appropriate slog.Info/Warn + finishRun() for
 //     the failure mode.
 //
 // In persistent mode (snap.fresh=false) the helper short-circuits with
 // ok=true and a no-op stubRefresh so the caller's flow is uniform.
-func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (preflightResult, bool) {
+//
+// R232-CR-7：原 preflightResult{stubRefresh: ...} 单字段 wrapper struct
+// 已删除，直接返回二元组。
+func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh func(), ok bool) {
 	snap := args.snap
 	lg := args.lg
+	noopRefresh := func() {}
 	if !snap.fresh {
-		return preflightResult{stubRefresh: func() {}}, true
+		return noopRefresh, true
 	}
 	if err := s.stopCtx.Err(); err != nil {
 		lg.Info("cron fresh spawn suppressed during shutdown", "err", err)
@@ -1752,7 +1748,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (preflightResult
 			skipPersist: true,
 			prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		return preflightResult{stubRefresh: func() {}}, false
+		return noopRefresh, false
 	}
 	if !workDirReachable(snap.workDir) {
 		lg.Warn("cron fresh spawn aborted: work_dir unreachable",
@@ -1764,11 +1760,11 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (preflightResult
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
 		s.deliverNotice(args.notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.jobID))
-		return preflightResult{stubRefresh: func() {}}, false
+		return noopRefresh, false
 	}
 	s.router.Reset(args.key)
 	lg.Info("cron fresh context: session reset before run")
-	stubRefresh := func() {
+	refresh := func() {
 		s.mu.RLock()
 		jobCopy, exists := s.jobs[snap.jobID]
 		var j2 Job
@@ -1793,9 +1789,9 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (preflightResult
 			errMsg: "job deleted mid-execute", skipPersist: true,
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		return preflightResult{stubRefresh: stubRefresh}, false
+		return refresh, false
 	}
-	return preflightResult{stubRefresh: stubRefresh}, true
+	return refresh, true
 }
 
 // executeOpt runs a cron job: send prompt to session, post result to chat.
@@ -2017,12 +2013,12 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// path we skip stubRefresh because the live session carries its own
 	// sidebar entry. Persistent mode short-circuits inside the helper
 	// with a no-op stubRefresh.
-	preflight, ok := s.freshContextPreflightP0(preflightArgs{
+	stubRefresh, ok := s.freshContextPreflightP0(preflightArgs{
 		job: j, snap: snap, key: key, lg: lg, notifyTo: notifyTo,
 		runID: runID, startedAt: startedAt, trigger: trigger,
 	})
 	if !ok {
-		preflight.stubRefresh()
+		stubRefresh()
 		return
 	}
 
@@ -2042,7 +2038,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 				skipPersist: true, // 与 historical recordResult skip 一致
 				prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 			})
-			preflight.stubRefresh()
+			stubRefresh()
 			return
 		}
 		state := RunStateFailed
@@ -2060,7 +2056,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
 		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", snap.jobID))
-		preflight.stubRefresh()
+		stubRefresh()
 		return
 	}
 
@@ -2112,7 +2108,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 				skipPersist: true,
 				prompt:      snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 			})
-			preflight.stubRefresh()
+			stubRefresh()
 			return
 		}
 		state := RunStateFailed
@@ -2138,7 +2134,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
 		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", snap.jobID))
-		preflight.stubRefresh()
+		stubRefresh()
 		return
 	}
 	if result.SessionID != "" {
