@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"fmt"
 	"io"
 	"log/slog"
@@ -372,8 +373,8 @@ func Load(path string) (*Config, error) {
 	}
 	// Cap config reads at 1 MiB; the on-disk shape is ~hundreds of
 	// lines of YAML and a runaway file (or a hostile symlink to a
-	// large unrelated file) would otherwise force us to allocate the
-	// whole content twice (once here, once in expandEnvVars).
+	// large unrelated file) would otherwise force us to allocate
+	// large slices for the YAML body.
 	const maxConfigBytes = 1 << 20
 	data, err := io.ReadAll(io.LimitReader(f, maxConfigBytes+1))
 	if err != nil {
@@ -383,11 +384,13 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config file %s exceeds %d bytes", path, maxConfigBytes)
 	}
 
-	// Expand ${VAR} environment variables
-	expanded := expandEnvVars(string(data))
+	// Expand ${VAR} environment variables. expandEnvVarsBytes returns
+	// the input slice unchanged when no placeholder is present (R231-PERF-10),
+	// avoiding the prior `string(data)` round-trip on the common path.
+	expanded := expandEnvVarsBytes(data)
 
 	var cfg Config
-	if err := yaml.Unmarshal([]byte(expanded), &cfg); err != nil {
+	if err := yaml.Unmarshal(expanded, &cfg); err != nil {
 		// yaml.v3 echoes the offending line in its error, which after
 		// ${VAR} expansion may contain decrypted secrets (app_secret,
 		// dashboard_token, etc.). Return a generic error to callers but
@@ -1038,6 +1041,24 @@ func expandEnvVars(s string) string {
 		key := strings.TrimSuffix(strings.TrimPrefix(match, "${"), "}")
 		if val, ok := os.LookupEnv(key); ok {
 			return val
+		}
+		return match
+	})
+}
+
+// expandEnvVarsBytes is the []byte-input variant of expandEnvVars used by
+// Load to avoid a redundant `string(data)` allocation on the YAML body.
+// When no `${` placeholder is present, the input slice is returned unchanged
+// (no copy). When placeholders exist, the result is a freshly allocated
+// slice containing the substitutions.
+func expandEnvVarsBytes(b []byte) []byte {
+	if !bytes.Contains(b, []byte("${")) {
+		return b
+	}
+	return envVarRe.ReplaceAllFunc(b, func(match []byte) []byte {
+		key := string(bytes.TrimSuffix(bytes.TrimPrefix(match, []byte("${")), []byte("}")))
+		if val, ok := os.LookupEnv(key); ok {
+			return []byte(val)
 		}
 		return match
 	})

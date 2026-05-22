@@ -30,6 +30,37 @@ func TestExpandEnvVars(t *testing.T) {
 	}
 }
 
+func TestExpandEnvVarsBytes(t *testing.T) {
+	os.Setenv("TEST_NAOZHI_VAR", "hello")
+	defer os.Unsetenv("TEST_NAOZHI_VAR")
+
+	tests := []struct {
+		input    string
+		expected string
+	}{
+		{"${TEST_NAOZHI_VAR}", "hello"},
+		{"prefix-${TEST_NAOZHI_VAR}-suffix", "prefix-hello-suffix"},
+		{"${UNSET_VAR_12345}", "${UNSET_VAR_12345}"},
+		{"no vars here", "no vars here"},
+		{"${TEST_NAOZHI_VAR} and ${TEST_NAOZHI_VAR}", "hello and hello"},
+		{"", ""},
+	}
+
+	for _, tt := range tests {
+		got := string(expandEnvVarsBytes([]byte(tt.input)))
+		if got != tt.expected {
+			t.Errorf("expandEnvVarsBytes(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+
+	// No-placeholder fast path returns the input slice unchanged (no copy).
+	src := []byte("plain yaml: value\n")
+	got := expandEnvVarsBytes(src)
+	if &got[0] != &src[0] {
+		t.Errorf("no-placeholder path should return input slice unchanged, got copy")
+	}
+}
+
 func TestParseTTL(t *testing.T) {
 	tests := []struct {
 		yaml     string
