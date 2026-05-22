@@ -5467,16 +5467,23 @@ function keyTailDisplay(keyParts) {
   return keyParts[keyParts.length - 1] || '';
 }
 
-// localProjects returns only projects that live on the local node so the
-// "New session" palette never offers folders that physically reside on a
-// remote naozhi. Cross-node creation is intentionally excluded here: opening
-// a remote project's CLI must happen from that node's own session list.
+// nodeFilteredProjects returns the projects that live on the currently
+// selected node so the "New session" palette only offers folders that
+// physically reside on that node. When the user switches the node selector
+// to a remote, the palette retargets to that remote's project list — so
+// "create session in this remote workspace" is one click away. Cross-node
+// creation is intentionally excluded: opening a project's CLI must happen
+// from the node where that project lives.
+//
 // `node` is normalized the same way the rest of the dashboard does it
 // (missing/empty → 'local') so legacy projects without a node field still
-// surface in the palette.
-function localProjects() {
+// surface when the local node is selected. Single-node hosts (no remotes
+// connected) are unaffected: selectedNode stays 'local' and the filter
+// reduces to the previous local-only behaviour.
+function nodeFilteredProjects() {
   if (!Array.isArray(projectsData)) return [];
-  return projectsData.filter(p => (p.node || 'local') === 'local');
+  const target = selectedNode || 'local';
+  return projectsData.filter(p => (p.node || 'local') === target);
 }
 
 function createNewSession() {
@@ -5484,10 +5491,13 @@ function createNewSession() {
   // renders. Failure falls back to the single-backend UI — cli.backends
   // returns {} on older naozhi which fetchCLIBackends maps to null.
   fetchCLIBackends().then(backendsData => {
-    const ws = defaultWorkspace || '';
+    // defaultWorkspace 来自 local stats，远程节点没有对应的 client 端字段，
+    // 因此选中 remote 时不预填路径，让用户显式输入远程上的工作目录。
+    const isLocal = (selectedNode || 'local') === 'local';
+    const ws = isLocal ? (defaultWorkspace || '') : '';
     const backendPicker = renderBackendPicker(backendsData);
 
-    if (!localProjects().length) {
+    if (!nodeFilteredProjects().length) {
       const overlay = document.createElement('div');
       overlay.className = 'modal-overlay';
       overlay.innerHTML =
@@ -5599,9 +5609,10 @@ function renderPaletteList(state, query) {
   if (!list) return;
   const q = query.trim();
   const scored = [];
-  // Palette is local-only by design: remote projects are surfaced via their
-  // own node-scoped sidebar instead. See localProjects() for the rationale.
-  localProjects().forEach(p => {
+  // Palette is scoped to selectedNode: switching the node selector retargets
+  // the palette so remote workspaces can be opened in one click. See
+  // nodeFilteredProjects() for the rationale.
+  nodeFilteredProjects().forEach(p => {
     if (!q) {
       scored.push({project: p, nameRanges: [], pathRanges: [], score: 0});
       return;
@@ -5734,9 +5745,14 @@ function buildQuickRow(idx) {
 }
 
 function pickPaletteQuick() {
-  const workspace = defaultWorkspace || '';
+  // 快速新建跟随当前选中节点：选中 remote 时让 quick session 也落在远程上，
+  // 否则用户切到远程 workspace 后再点「快速新建」会意外回退到 local。
+  // defaultWorkspace 仍来自 local 的 stats（接口尚未按节点返回），使用前
+  // 兜底为空串，由后端 SessionDispatcher 的远程默认工作目录解析。
+  const node = selectedNode || 'local';
+  const workspace = node === 'local' ? (defaultWorkspace || '') : '';
   const folderName = workspace ? (workspace.replace(/\/+$/, '').split('/').pop() || 'quick') : 'quick';
-  doCreateInProject(workspace, folderName, 'local');
+  doCreateInProject(workspace, folderName, node);
 }
 
 function buildCustomRow(query, idx) {
@@ -5814,7 +5830,9 @@ function pickPaletteCustom(initialValue) {
   const preselectedAgent = getSelectedAgent();
   const overlay = document.querySelector('.cmd-palette-overlay');
   if (overlay) overlay.remove();
-  const ws = defaultWorkspace || '';
+  // 选中 remote 节点时不用 local 的 defaultWorkspace 占位符，避免误导用户。
+  const isLocal = (selectedNode || 'local') === 'local';
+  const ws = isLocal ? (defaultWorkspace || '') : '';
   const prefill = initialValue && (initialValue.startsWith('/') || initialValue.startsWith('~')) ? initialValue : '';
   // Re-render the backend + agent pickers inside the modal and pre-select the
   // palette's choice, so switching to Custom Workspace doesn't drop either.
@@ -5959,18 +5977,24 @@ function doCreateSession() {
   // right AgentOpts entry.
   const key = buildDashboardSessionKey(ts, folderName, agent);
 
+  // 自定义工作目录的会话目标节点 = 当前选中节点。否则用户从 remote 节点视图
+  // 触发「自定义工作目录」时会被强制拉回 local，与「在远程项目里新建」的
+  // 操作直觉相违。
+  const targetNode = selectedNode || 'local';
+
   if (workspace) sessionWorkspaces[key] = workspace;
   if (backend) sessionBackends[key] = backend;
+  if (targetNode !== 'local') sessionNodes[key] = targetNode;
 
   stopPreviewPolling();
   wsm.unsubscribe();
   selectedKey = key;
-  selectedNode = 'local';
+  selectedNode = targetNode;
   try { localStorage.setItem('nz_selectedNode', selectedNode); } catch(_) {}
   if (typeof updateNodeSelector === 'function') updateNodeSelector();
   lastEventTime = 0;
   mobileEnterChat();
-  setActiveSessionCard(key, 'local');
+  setActiveSessionCard(key, targetNode);
   renderMainShell();
   navRebuild();
   lastVersion = 0;
