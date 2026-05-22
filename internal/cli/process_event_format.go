@@ -109,8 +109,13 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 				entry.Tool = ev.ToolCall.Title
 				entry.Summary = ev.ToolCall.Title
 			}
-			tc := *ev.ToolCall
-			entry.ToolCall = &tc
+			// Share the producer's *ToolCall directly. EventLog.Append copies the
+			// surrounding EventEntry by value but the *ToolCall payload itself is
+			// only read by downstream consumers (dashboard render path and history
+			// snapshots) — none mutate it after handing the entry to Append.
+			// Avoids the per-event ~112 B struct copy + heap alloc on the
+			// tool_result hot path. R230-PERF-2.
+			entry.ToolCall = ev.ToolCall
 			return []EventEntry{entry}
 		}
 		if ev.Message == nil {
@@ -196,9 +201,13 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 				// frontend doesn't have to re-derive it. Stream-json
 				// (Claude) leaves ev.ToolCall nil and uses the legacy
 				// Tool / Detail fields.
+				//
+				// R230-PERF-2: share the producer's pointer instead of
+				// copying *ev.ToolCall onto the heap. Downstream consumers
+				// (dashboard render / history snapshot) treat ToolCall as
+				// read-only after the entry is published.
 				if ev.ToolCall != nil {
-					tc := *ev.ToolCall
-					entry.ToolCall = &tc
+					entry.ToolCall = ev.ToolCall
 				}
 			case "text":
 				entry.Type = "text"
