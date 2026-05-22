@@ -2,6 +2,8 @@ package server
 
 import (
 	"log/slog"
+	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -103,6 +105,25 @@ func newTailerRegistry(hub *Hub) *tailerRegistry {
 	}
 }
 
+// jsonlPathUnderAllowedRoot returns true when jsonlPath is anchored under
+// allowedRoot. Pure prefix check is unsafe ("/var/foo" prefix-matches
+// "/var/fooBar"), so anchor on the cleaned root + os.PathSeparator. Symlinks
+// are not resolved here: ensureTailer's caller (the Linker OnResolve handler)
+// already operates on CLI-emitted paths inside the workspace; this guard is
+// defence-in-depth, not a TOCTOU-safe gate. R232-SEC-14.
+func jsonlPathUnderAllowedRoot(jsonlPath, allowedRoot string) bool {
+	abs := filepath.Clean(jsonlPath)
+	if !filepath.IsAbs(abs) {
+		return false
+	}
+	root := filepath.Clean(allowedRoot)
+	if abs == root {
+		return false
+	}
+	prefix := root + string(filepath.Separator)
+	return strings.HasPrefix(abs, prefix)
+}
+
 // ensureTailer is called by the Linker OnResolve callback or by an
 // agent_subscribe message before the silent tailer has started. Idempotent:
 // repeated calls for the same (key, taskID) return the existing tailer.
@@ -111,6 +132,19 @@ func newTailerRegistry(hub *Hub) *tailerRegistry {
 func (r *tailerRegistry) ensureTailer(key, taskID, toolUseID, jsonlPath string) (*agentTailer, bool) {
 	if jsonlPath == "" {
 		return nil, false
+	}
+	// R232-SEC-14: when allowedRoot is configured, refuse jsonlPath outside
+	// it. The Linker normally sources JSONLPath from CLI-emitted absolute
+	// paths under the workspace root, but a malformed init/parallel-stream
+	// event could in principle drive ensureTailer at an arbitrary FS
+	// location and have the silent tailer Stat/Tail it. Empty allowedRoot
+	// (legacy unrestricted deployments) keeps prior behaviour.
+	if r != nil && r.hub != nil && r.hub.allowedRoot != "" {
+		if !jsonlPathUnderAllowedRoot(jsonlPath, r.hub.allowedRoot) {
+			slog.Warn("agent_tailer: jsonl path outside allowed_root rejected",
+				"key", key, "task", taskID, "path", jsonlPath)
+			return nil, false
+		}
 	}
 	tk := tailerKey{key, taskID}
 
