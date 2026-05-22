@@ -64,6 +64,11 @@ type recentCacheEntry struct {
 	mu   sync.Mutex
 	runs []CronRunSummary // newest-first
 	warm bool             // false until first warm() pass; List/Recent will lazy-warm
+	// appendsSinceTrim counts Append calls since the last full trimJobLocked
+	// pass. Used by skipAppendTrim to batch ReadDir-driven trims when the
+	// cache shows we're well under keepCount. Reset to 0 by Append after
+	// calling trimJobLocked. R232-PERF-8.
+	appendsSinceTrim int
 }
 
 const (
@@ -202,10 +207,70 @@ func (s *runStore) Append(run *CronRun) {
 	// yet be warm for this jobID — that's fine: cacheHeadPush is a no-op
 	// then, and the next Recent call will lazy-warm via warmCache.
 	s.cacheHeadPush(run.JobID, run.summary())
-	if s.enableTrimGC {
+	if s.enableTrimGC && !s.skipAppendTrim(run.JobID) {
 		s.trimJobLocked(run.JobID, time.Now())
 	}
 }
+
+// skipAppendTrim returns true when the cache for jobID indicates the on-disk
+// run count is comfortably below keepCount and the keepWindow age policy
+// won't have anything to evict yet (oldest cached row newer than cutoff).
+// In that case Append's per-call trimJobLocked → ReadDir is pure overhead;
+// running it once every appendTrimBatch Appends is enough to clean up
+// background drift without paying ReadDir on every call. R232-PERF-8.
+//
+// Falls back to "do not skip" when the cache is cold or the safety margins
+// don't hold — a missed trim is bounded by appendTrimBatch and the next
+// trimAll cold-pass, so over-keeping a few entries is acceptable; missing a
+// trim entirely is not.
+func (s *runStore) skipAppendTrim(jobID string) bool {
+	v, ok := s.recentCache.Load(jobID)
+	if !ok {
+		return false
+	}
+	entry := v.(*recentCacheEntry)
+	entry.mu.Lock()
+	defer entry.mu.Unlock()
+	if !entry.warm {
+		return false
+	}
+	// Force a trim every appendTrimBatch Appends so window-based eviction
+	// still happens for jobs that never approach keepCount.
+	entry.appendsSinceTrim++
+	if entry.appendsSinceTrim >= appendTrimBatch {
+		entry.appendsSinceTrim = 0
+		return false
+	}
+	// Plenty of headroom under count cap?  Cache reflects the on-disk
+	// newest-first slice (capped to keepCount), so len(runs) is a safe
+	// upper bound on disk rows that survived the last trim.
+	if len(entry.runs)+appendTrimBatch >= s.keepCount {
+		entry.appendsSinceTrim = 0
+		return false
+	}
+	// Oldest cached row still inside keepWindow?  Use EndedAt to mirror
+	// trimJobLocked's mtime-based cutoff (cacheTrimAfterDisk also approximates
+	// mtime via EndedAt — keep these two paths consistent).
+	if len(entry.runs) > 0 {
+		oldest := entry.runs[len(entry.runs)-1]
+		ts := oldest.EndedAt
+		if ts.IsZero() {
+			ts = oldest.StartedAt
+		}
+		cutoff := time.Now().Add(-s.keepWindow)
+		if !ts.After(cutoff) {
+			entry.appendsSinceTrim = 0
+			return false
+		}
+	}
+	return true
+}
+
+// appendTrimBatch is the maximum number of Append calls we'll let pass
+// without running trimJobLocked when skipAppendTrim's safety conditions
+// hold. Picked low enough that even a runaway 1 Hz job sees a trim every
+// 10 s.
+const appendTrimBatch = 10
 
 // cacheHeadPush prepends summary to the recentCache slice for jobID. The
 // caller must hold jobLock(jobID) so the push is serialised against

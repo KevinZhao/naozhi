@@ -168,7 +168,11 @@ func (w *Weixin) Reply(ctx context.Context, msg platform.OutgoingMessage) (strin
 	if err := w.api.sendMessage(ctx, msg.ChatID, msg.Text, contextToken); err != nil {
 		return "", fmt.Errorf("weixin send: %w", err)
 	}
-	return fmt.Sprintf("weixin:%s:%d", msg.ChatID, time.Now().UnixMilli()), nil
+	// R232-SEC-11: ChatID arrives from the iLink relay; sanitize before
+	// embedding in the returned MessageID so any control byte / log-injection
+	// sequence cannot survive into downstream slog/IM surfaces that print the
+	// id verbatim.
+	return fmt.Sprintf("weixin:%s:%d", osutil.SanitizeForLog(msg.ChatID, 128), time.Now().UnixMilli()), nil
 }
 
 // EditMessage is not supported by WeChat iLink Bot API.

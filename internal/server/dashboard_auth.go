@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"regexp"
@@ -179,6 +180,20 @@ func (a *AuthHandlers) serveLoginPage(w http.ResponseWriter) {
 // token field. Hashes are extracted from loginPageHTML at package init so
 // the string stays authoritative for both page bytes and CSP.
 var loginPageCSP = buildLoginPageCSP()
+
+// init enforces R232-SEC-9: extract failures (zero matches for either tag)
+// would silently fall back to 'none', which serves the page with a CSP that
+// blocks its own inline <script>/<style> — a "login broken" surface that
+// only manifests at first request. Panic at package init so the regression
+// is caught at process start.
+func init() {
+	scripts := extractInlineBlocks(loginPageHTML, inlineScriptRe)
+	styles := extractInlineBlocks(loginPageHTML, inlineStyleRe)
+	if len(scripts) == 0 || len(styles) == 0 {
+		panic(fmt.Sprintf("dashboard_auth: loginPageCSP self-test failed: scripts=%d styles=%d (regex drift in loginPageHTML)",
+			len(scripts), len(styles)))
+	}
+}
 
 func buildLoginPageCSP() string {
 	var scriptHashes, styleHashes []string
