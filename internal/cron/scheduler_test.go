@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -73,8 +74,19 @@ func TestStoreRoundTrip(t *testing.T) {
 		},
 	}
 
-	if err := saveJobs(path, jobs); err != nil {
-		t.Fatalf("saveJobs: %v", err)
+	// 直接 json.Marshal + os.WriteFile，绕过 saveJobs（生产路径用的是
+	// persistJobsLocked + saveMarshaledSeq；saveJobs 已删除）。测试关心的
+	// 是 loadJobs 能恢复出磁盘上写好的 JSON 数组。
+	entries := make([]*Job, 0, len(jobs))
+	for _, j := range jobs {
+		entries = append(entries, j)
+	}
+	data, err := json.Marshal(entries)
+	if err != nil {
+		t.Fatalf("marshal jobs: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("write jobs: %v", err)
 	}
 
 	loaded, err := loadJobs(path)
@@ -228,20 +240,6 @@ func TestSchedulerStartFailsOnOversize(t *testing.T) {
 	}
 	if info.Size() != originalSize {
 		t.Errorf("store file clobbered after failed Start: size=%d want=%d", info.Size(), originalSize)
-	}
-}
-
-func TestSaveJobsCreatesDir(t *testing.T) {
-	t.Parallel()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "sub", "dir", "cron_jobs.json")
-
-	err := saveJobs(path, map[string]*Job{})
-	if err != nil {
-		t.Fatalf("saveJobs with nested dir: %v", err)
-	}
-	if _, err := os.Stat(path); err != nil {
-		t.Fatalf("file not created: %v", err)
 	}
 }
 

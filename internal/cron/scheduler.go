@@ -2321,7 +2321,7 @@ func sanitiseRunResult(s string) string {
 // flow into WS broadcasts and must not leak filesystem paths.
 func sanitiseRunErrMsg(s string) string {
 	s = redactPathsInCronError(s)
-	return osutil.SanitizeForLog(s, 512)
+	return osutil.SanitizeForLog(s, maxCronErrMsgRunes)
 }
 
 // bumpRunStateMetrics increments the per-state counter for the terminal
@@ -2411,7 +2411,7 @@ func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionI
 	}
 	errMsg = redactPathsInCronError(errMsg)
 	result = osutil.SanitizeForLog(result, maxStoredResultRunes)
-	errMsg = osutil.SanitizeForLog(errMsg, 512)
+	errMsg = osutil.SanitizeForLog(errMsg, maxCronErrMsgRunes)
 
 	s.mu.Lock()
 	if _, ok := s.jobs[j.ID]; !ok {
@@ -2545,7 +2545,7 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
 	// a 4K-rune result that was already shaped by TruncateRunesNoEllipsis
 	// above is a no-op for length and only scrubs control runes.
 	result = osutil.SanitizeForLog(result, maxStoredResultRunes)
-	errMsg = osutil.SanitizeForLog(errMsg, 512)
+	errMsg = osutil.SanitizeForLog(errMsg, maxCronErrMsgRunes)
 	s.mu.Lock()
 	// If the job was deleted between execute()'s snapshot and recordResult's
 	// write-back, skip both the persist and the onExecute callback: broadcasting
@@ -2614,9 +2614,8 @@ func redactPathsInCronError(s string) string {
 	if s == "" {
 		return s
 	}
-	const maxErrLen = 2048
-	if len(s) > maxErrLen {
-		s = s[:maxErrLen] + "…"
+	if len(s) > maxRedactErrLen {
+		s = s[:maxRedactErrLen] + "…"
 	}
 	// Fast path: if the string contains no POSIX slash and no Windows
 	// backslash, there is nothing path-shaped to redact — skip the Builder
