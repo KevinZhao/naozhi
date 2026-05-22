@@ -239,8 +239,16 @@ func detectMime(resolved string, head []byte) string {
 		return "image/svg+xml"
 	}
 	// Base name override for extensionless files like Dockerfile / Makefile.
+	// 隐藏文件（.makefile / .gitignore）filepath.Ext 返回 ""，此时
+	// filepath.Base 已是 ".makefile" 形式，再前缀拼 "." 会得到 "..makefile"
+	// 与表 key 不符。所以先按 base 直查（命中 .makefile/.gitignore 等已带
+	// 点号的 key），未命中再退回 "."+base 适配 dockerfile / makefile 这类
+	// 不带点号的常规扩展名文件。R232-SEC-8。
 	if ext == "" {
 		base := strings.ToLower(filepath.Base(resolved))
+		if v, ok := previewableByExt[base]; ok {
+			return v
+		}
 		if v, ok := previewableByExt["."+base]; ok {
 			return v
 		}
