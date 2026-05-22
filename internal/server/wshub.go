@@ -363,11 +363,17 @@ func (h *Hub) HandleUpgrade(w http.ResponseWriter, r *http.Request) {
 		// capped at maxHistoryPushEntries in eventPushLoop (≤~50 × ~200 B =
 		// ~10 KB per frame), so 256 slots × ~10 KB = ~2.5 MB worst-case
 		// per-client. R68-PERF-H1.
-		send:             make(chan []byte, 256),
-		hub:              h,
-		remoteIP:         ip,
-		sendLimiter:      rate.NewLimiter(rate.Every(time.Second), 5), // 5 sends/s burst, 1/s sustained
-		interruptLimiter: rate.NewLimiter(rate.Every(200*time.Millisecond), 3),
+		send:        make(chan []byte, 256),
+		hub:         h,
+		remoteIP:    ip,
+		sendLimiter: rate.NewLimiter(rate.Every(time.Second), 5), // 5 sends/s burst, 1/s sustained
+		// R232-SEC-10: interrupt was previously 5/s sustained burst 3
+		// (rate.Every(200ms)), strictly more permissive than sendLimiter
+		// — an authenticated client could DoS a single session by
+		// hammering interrupt without ever consuming sendLimiter budget.
+		// Cap at 1 interrupt every 2s with burst 2 (matches "abort the
+		// turn" UX cadence — stop, retry once if the first didn't take).
+		interruptLimiter: rate.NewLimiter(rate.Every(2*time.Second), 2),
 		subscriptions:    make(map[string]func()),
 		subGen:           make(map[string]uint64),
 		done:             make(chan struct{}),
