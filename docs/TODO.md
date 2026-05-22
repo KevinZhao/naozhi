@@ -137,7 +137,7 @@
 - [x] **R231-CQ-4 — reattach_history_test.go itoa 重复（P3）**: 同 package strconv 已 import；测试自定义 itoa 违 DRY。方案：用 strconv.Itoa 或 testutil 提供 helper。 — 已修复（reattach_history_test.go 改用 strconv.Itoa，删 23 行私实现 itoa），本批 PR #210
 - [ ] **R231-CQ-5 — attachProcessAndSnapshotPersisted vs adoptProcessAlreadySeeded 命名风格不对称（P3）**: 一动作+副词，一形容词描述结果。方案：统一命名风格。
 - [x] **R231-CQ-6 — persistedSeededLen 字段 21 行 block 注释与函数 godoc 重复（P3）**: 方案：精简到 3-5 行 + "see attachProcessAndSnapshotPersisted" 交叉引用。 — 已修复，本批 PR #211
-- [ ] **R231-CQ-7 — managed.go forward 注释 "R191-GO-M1 不再相关" 与实际行为部分矛盾（P3）**: 注释说"是旧 proc 也没关系"但没解释为何旧 proc 注入无害。方案：补充"orphan proc 无 EventEntries 调用方"说明。
+- [x] **R231-CQ-7 — managed.go forward 注释 "R191-GO-M1 不再相关" 与实际行为部分矛盾（P3）**: 注释说"是旧 proc 也没关系"但没解释为何旧 proc 注入无害。方案：补充"orphan proc 无 EventEntries 调用方"说明。 — 已修复，本批 PR #213
 - [ ] **R231-CQ-8 — reattach_history_test 不覆盖 cap-trim 分支（P2）**: writers*perWriter=200 < maxPersistedHistory=500 触发不到 trim 路径。方案：补 trim 场景测试 + 验证无重复。
 - [ ] **R231-CQ-9 — InjectHistory cap-trim seededLen=0 clamp 破坏"不重注"保证（P2）**: 当 trimmed > seededLen 时 seededLen clamp 到 0，下次 InjectHistory 全量 forward 含 proc 已见过的历史段。方案：明确 degrade-to-reseed 语义而非 no-op，调用处加 note。
 
@@ -252,10 +252,10 @@
 - [x] **R230-CQ-13 — rtruncByteLen 与 textutil.TruncateRunesNoEllipsis 重复（P3）**: dashboard_session.go 私实现一份。方案：统一调 textutil。Breaking：否。 — 已修复（新增 textutil.TruncateAtRuneBoundary 字节级 rune-boundary 反向截断 helper + 7 case 表驱动测试，dashboard_session.go / dashboard_transcribe.go 切换调用，删 rtruncByteLen 私实现 13 行），本批 PR #210
 - [ ] **R230-CQ-14 — cron/scheduler.go 2745 行单文件无拆分计划（P3 R226-CR-11 重申）**: 建议先建 scheduler_job.go / scheduler_run.go / scheduler_notify.go 骨架。Breaking：否。
 - [x] **R230-CQ-15 — Process.statusLines 无环 cap 文档与实现不一致（P3）**: 命名"pre-allocated capped ring"但实际无 trim。方案：每写入 trim 至 maxStatusLines=20。Breaking：否。 — 已修复（条目实际位于 dispatch.replyTracker.statusLines；行为正确——appendStatusLine 通过 maxStatusLines=8 + copy-to-front trim head；旧注释"pre-allocated capped ring"误导，改为精确描述 + 指向 status.go 的 trim 实现），本批 PR #210
-- [ ] **R230-CQ-16 — processIface godoc 描述与实际范围不符（P3）**: 注释只说 router 用，实际 wshub / server / cron 都用。方案：更新 godoc 表述实际边界。Breaking：否。
-- [ ] **R230-CQ-17 — shimManagers() 命名与 dedup 注释稍有歧义（P3）**: 实际按 *shim.Manager 指针 dedup。方案：注释精确化。Breaking：否。
-- [ ] **R230-CQ-18 — loadTotalCost/storeTotalCost 仍内联 math.Float64bits（P3）**: textutil 有 atomic string helper 但无 float64 版。方案：补 textutil.Load/StoreAtomicFloat64 或加交叉引用注释。Breaking：否。
-- [ ] **R230-CQ-19 — validateCronPrompt 对 \r 拒绝行为缺注释说明（P3）**: 与 validateCronTitle 显式 \r case 风格不一致。方案：加注释说明 prompt 不接 \r 是 JSON+UTF-8 入库约定。Breaking：否。
+- [x] **R230-CQ-16 — processIface godoc 描述与实际范围不符（P3）**: 注释只说 router 用，实际 wshub / server / cron 都用。方案：更新 godoc 表述实际边界。Breaking：否。 — 已修复，本批 PR #213
+- [x] **R230-CQ-17 — shimManagers() 命名与 dedup 注释稍有歧义（P3）**: 实际按 *shim.Manager 指针 dedup。方案：注释精确化。Breaking：否。 — 已修复，本批 PR #213
+- [x] **R230-CQ-18 — loadTotalCost/storeTotalCost 仍内联 math.Float64bits（P3）**: textutil 有 atomic string helper 但无 float64 版。方案：补 textutil.Load/StoreAtomicFloat64 或加交叉引用注释。Breaking：否。 — 已修复，本批 PR #213
+- [x] **R230-CQ-19 — validateCronPrompt 对 \r 拒绝行为缺注释说明（P3）**: 与 validateCronTitle 显式 \r case 风格不一致。方案：加注释说明 prompt 不接 \r 是 JSON+UTF-8 入库约定。Breaking：否。 — 已修复，本批 PR #213
 
 ### Security（剩余 — 本轮新发现）
 
