@@ -468,9 +468,11 @@ func TestDashboardJS_R2_R1_LayoutObserver(t *testing.T) {
 		t.Error("renderCronPanel: must invoke setupCronLayoutObserver() after shell mount so the data-cron-layout attribute is initialised")
 	}
 
-	// 2. Three breakpoints (1100 / 820 / 560) must appear in the JS.
-	for _, threshold := range []string{"1100", "820", "560"} {
-		if !strings.Contains(js, "w >= "+threshold) {
+	// 2. Three breakpoints must appear in the JS. cron-dashboard-redesign
+	// P0 follow-up retuned the thresholds (gauging off list-pane width
+	// instead of body width): wide ≥600, medium ≥420, narrow ≥300.
+	for _, threshold := range []string{"600", "420", "300"} {
+		if !strings.Contains(js, "lpW >= "+threshold) {
 			t.Errorf("setupCronLayoutObserver: must compare against %s threshold (RFC §2 four-tier matrix)", threshold)
 		}
 	}

@@ -1128,7 +1128,10 @@ body.kbd-open .input-hints{display:none}
 .cj-main{min-width:0;display:flex;flex-direction:column;gap:2px}
 .cj-title{font-size:14px;color:var(--nz-text-strong);font-weight:500;line-height:1.35;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cj-title.placeholder{color:var(--nz-text-dim);font-style:italic;font-weight:400}
-.cj-sub{font-size:12px;color:var(--nz-text-mute);line-height:1.35;display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.cj-sub{font-size:12px;color:var(--nz-text-mute);line-height:1.35;display:flex;gap:10px;align-items:center;flex-wrap:nowrap;overflow:hidden;min-width:0}
+.cj-sub > *{flex-shrink:0}
+.cj-sub .cj-schedule{white-space:nowrap}
+.cj-sub .cj-when-inline,.cj-sub .cj-ago{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
 .cj-sub .cj-schedule{color:var(--nz-text);cursor:pointer;text-decoration:underline dotted var(--nz-text-faint);text-underline-offset:2px;transition:text-decoration-color .12s,color .12s;outline:none;border-radius:3px}
 .cj-sub .cj-schedule:hover{color:var(--nz-text-strong);text-decoration-color:var(--nz-text-mute)}
 .cj-sub .cj-schedule:focus-visible{outline:1px solid var(--nz-accent);outline-offset:2px}
@@ -1209,18 +1212,41 @@ body.kbd-open .input-hints{display:none}
  *   narrow ≥560   list 320  ← 此规则触发
  *   single <560   list 全屏覆盖（cj-row 也走窄逻辑）
  */
+.cron-detail-body[data-cron-layout="medium"] .cj-row,
 .cron-detail-body[data-cron-layout="narrow"] .cj-row,
 .cron-detail-body[data-cron-layout="single"] .cj-row{grid-template-columns:18px minmax(0,1fr) auto;gap:8px}
+.cron-detail-body[data-cron-layout="medium"] .cj-when,
 .cron-detail-body[data-cron-layout="narrow"] .cj-when,
 .cron-detail-body[data-cron-layout="single"] .cj-when,
+.cron-detail-body[data-cron-layout="medium"] .cj-stats,
 .cron-detail-body[data-cron-layout="narrow"] .cj-stats,
 .cron-detail-body[data-cron-layout="single"] .cj-stats{display:none}
+/* cron-dashboard-redesign P0 follow-up — list rows show only title +
+ * schedule. Everything else (icons / last-ago chip / when-inline /
+ * stats badge / when-column / next-time across all layout modes) is
+ * collapsed to keep row noise to a minimum; users see all this in
+ * the drawer detail anyway. The elements stay in the DOM so contract
+ * tests + e2e selectors keep working — we just hide them visually. */
+.cj-list .cj-row .cj-when,
+.cj-list .cj-row .cj-stats,
+.cj-list .cj-row .cj-sub .cj-icon,
+.cj-list .cj-row .cj-sub .cj-ago,
+.cj-list .cj-row .cj-sub .cj-when-inline{display:none !important}
+.cj-list .cj-row{grid-template-columns:18px minmax(0,1fr) auto !important;gap:8px}
+/* Hide ghost-Run on list rows; the drawer's primary action button
+ * provides the same affordance with more context. Keeps the row
+ * actions to a single ⋯ entrypoint. */
+.cj-list .cj-row .cj-actions .cj-run{display:none}
+.cron-detail-body[data-cron-layout="medium"] .cj-sub .cj-when-inline,
 .cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-when-inline,
 .cron-detail-body[data-cron-layout="single"] .cj-sub .cj-when-inline{display:inline;color:var(--nz-text-mute)}
+.cron-detail-body[data-cron-layout="medium"] .cj-sub .cj-when-inline.imminent,
 .cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-when-inline.imminent,
 .cron-detail-body[data-cron-layout="single"] .cj-sub .cj-when-inline.imminent{color:var(--nz-accent);font-weight:600}
+.cron-detail-body[data-cron-layout="medium"] .cj-sub .cj-when-inline.paused,
 .cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-when-inline.paused,
 .cron-detail-body[data-cron-layout="single"] .cj-sub .cj-when-inline.paused{color:var(--nz-text-faint)}
+.cron-detail-body[data-cron-layout="medium"] .cj-sub .cj-ago,
 .cron-detail-body[data-cron-layout="narrow"] .cj-sub .cj-ago,
 .cron-detail-body[data-cron-layout="single"] .cj-sub .cj-ago{display:none}
 .cj-stats{position:relative;display:inline-flex;align-items:center;justify-content:center;min-width:36px;height:22px;padding:0 8px;border-radius:11px;border:1px solid var(--nz-border);background:var(--nz-bg-2);font-size:11px;line-height:1;color:var(--nz-text-mute);font-variant-numeric:tabular-nums;cursor:default;outline:none}
