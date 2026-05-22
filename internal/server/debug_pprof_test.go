@@ -31,8 +31,12 @@ func TestIsLoopbackRemote_PerAddrShape(t *testing.T) {
 		{"[2001:db8::1]:80", false},
 		{"8.8.8.8:443", false},
 
+		// R232-SEC-15: empty addr means UDS; treat as loopback so
+		// pprof/expvar work over a Unix socket where filesystem
+		// permissions already gate access.
+		{"", true},
+
 		// Garbage — must fail (fail-closed)
-		{"", false},
 		{"not-an-ip", false},
 		{"localhost:8080", false}, // hostname never resolves in this helper by design
 		{"::garbage", false},

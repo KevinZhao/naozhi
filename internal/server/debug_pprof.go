@@ -124,7 +124,15 @@ func (s *Server) registerPprof() {
 // the raw string for non-standard middlewares that might strip the
 // port. Returns false on any parse error so the caller treats the
 // ambiguous case as "remote".
+//
+// R232-SEC-15: empty RemoteAddr means the request arrived over a Unix
+// domain socket; net/http leaves the field blank in that case. Treat
+// it as loopback because UDS access is already gated by filesystem
+// permissions on the socket path.
 func isLoopbackRemote(remoteAddr string) bool {
+	if remoteAddr == "" {
+		return true
+	}
 	host := remoteAddr
 	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		host = h
