@@ -278,6 +278,17 @@ func validateCronTitle(title string) error {
 	return nil
 }
 
+// validateCronPrompt allows Tab and LF (multi-paragraph playbooks) but
+// stringFieldPolicy with allowLF=true still rejects \r (CR). That asymmetry
+// is intentional: prompts are written into cron_jobs.json as JSON-quoted
+// strings (json.Marshal escapes \n inside the quoted value, so NDJSON
+// framing on the wire stays intact), but a bare CR would still survive the
+// JSON encode and later corrupt `tail -f` / `journalctl` views by carriage-
+// returning over the previous log line — a log-poisoning surface unrelated
+// to wire framing. There is no legitimate reason for an authored prompt to
+// contain CR (Linux line endings are LF, dashboard textareas normalise
+// CRLF→LF before submit), so rejecting it here is cheap defence-in-depth
+// matching validateCronTitle's explicit '\r' branch. R230-CQ-19.
 func validateCronPrompt(prompt string) error {
 	if len(prompt) > maxCronPromptBytesDashboard {
 		return fmt.Errorf("prompt exceeds %d-byte limit", maxCronPromptBytesDashboard)

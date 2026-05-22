@@ -30,8 +30,19 @@ const (
 	maxPrevSessionIDs = 32
 )
 
-// processIface abstracts the CLI process lifecycle methods used by the router
-// and session layer. *cli.Process satisfies this interface.
+// processIface abstracts the CLI process lifecycle methods used across the
+// session-aware code paths. Despite the package name, callers extend beyond
+// internal/session itself: internal/server (Hub broadcast + dashboard
+// snapshots), internal/dispatch (turn coalescing), internal/cron (cron Send
+// with ack), and internal/upstream (reverse-node RPC) all reach a Process
+// through ManagedSession.loadProcess() and consume this interface. Keep new
+// methods minimal — the surface has already been flagged as a god-interface
+// (R215-ARCH-P1-3 / R219-ARCH-7 / R224-ARCH-5) pending a future split into
+// ProcessLifecycle / EventSource / ProcessSender facets.
+//
+// *cli.Process is the only production implementation; testutil.TestProcess is
+// the test fake.
+// R230-CQ-16.
 type processIface interface {
 	Alive() bool
 	IsRunning() bool
@@ -280,6 +291,13 @@ func storeAtomicString(v *atomic.Pointer[string], s string) {
 // field, decoding the IEEE-754 bit pattern via math.Float64frombits.
 // Returns 0 when the field has never been written (Load() → 0 maps to
 // float64 zero, same default the plain-float64 field had).
+//
+// Cross-ref: textutil exposes LoadAtomicString / StoreAtomicString for the
+// `atomic.Pointer[string]` mirror pattern (R219-CR-1) but does not yet
+// cover the `atomic.Uint64`-encoded float64 case used here. These helpers
+// stay package-local until a second call site emerges; lifting them into
+// textutil now would invert the dependency (textutil is a leaf package
+// that must not import session-specific contracts). R230-CQ-18.
 func loadTotalCost(v *atomic.Uint64) float64 {
 	return math.Float64frombits(v.Load())
 }
@@ -289,6 +307,8 @@ func loadTotalCost(v *atomic.Uint64) float64 {
 // packing/unpacking convention in one place — R183-CONCUR-M2 made the
 // field atomic to harden against future post-publication writers, and
 // having a helper keeps call sites free of bit-level noise.
+//
+// See loadTotalCost for the textutil cross-reference.
 func storeTotalCost(v *atomic.Uint64, cost float64) {
 	v.Store(math.Float64bits(cost))
 }
@@ -1378,6 +1398,14 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	// a fresh proc replacing the current one happens through attach helpers
 	// that share historyMu, so the in-lock loadProcess() is the authoritative
 	// snapshot for this caller.
+	//
+	// Stale proc note (R231-CQ-7): if the proc captured here was already
+	// orphaned by a concurrent storeProcess(nil) during ResetChat / Remove,
+	// proc.InjectHistory below still mutates that orphan's EventLog ring,
+	// but no one calls EventEntries() on an orphan — Router.loadProcess()
+	// returns the new pointer and dashboards/cron snapshot through that.
+	// The orphan ring is GC'd when the last reference (this closure)
+	// drops, so the extra append is a harmless no-op rather than a leak.
 	s.historyMu.Lock()
 	s.persistedHistory = append(s.persistedHistory, entries...)
 	if trimmed := len(s.persistedHistory) - maxPersistedHistory; trimmed > 0 {

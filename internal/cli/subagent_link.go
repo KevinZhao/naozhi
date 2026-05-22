@@ -262,7 +262,15 @@ func (l *SubagentLinker) Resolve(taskID, toolUseID, name, description string, ag
 		t := time.NewTimer(time.Duration(l.retryLimit+1) * l.retryInterval)
 		select {
 		case l.resolveSem <- struct{}{}:
-			t.Stop()
+			// Stop returns false when the timer already fired; drain the
+			// channel so a tied select that picked the semaphore arm does
+			// not leak a runtime timer with a non-empty C.
+			if !t.Stop() {
+				select {
+				case <-t.C:
+				default:
+				}
+			}
 			defer func() { <-l.resolveSem }()
 		case <-t.C:
 			slog.Debug("agent_link: resolve semaphore full, dropping", "task_id", taskID)

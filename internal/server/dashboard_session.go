@@ -418,40 +418,23 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		if snap.DeathReason != "" && snap.LastActive < cutoff24h {
 			continue
 		}
-		// Scratch (ephemeral aside) sessions must never appear in the sidebar.
-		// They own a CLI process and therefore show up in router.ListSessions,
-		// but the drawer UX treats them as private to one dashboard tab. Keep
-		// running/ready counts inclusive of scratches so maxProcs pressure
-		// stays visible in stats.
-		if session.IsScratchKey(snap.Key) {
-			switch snap.State {
-			case "running":
-				running++
-			case "ready":
-				ready++
-			}
-			continue
-		}
-		// Cron and system-daemon stub sessions must never appear in the
-		// sidebar either:  cron flows through the dedicated 「定时任务」
-		// panel (cron-panel-consolidation RFC), and sys: daemons are
-		// naozhi-internal infrastructure surfaced via the System drawer
-		// (docs/rfc/system-session.md §9.2).  Keep running/ready counts
-		// inclusive so maxProcs pressure remains visible in stats.
-		if session.IsCronKey(snap.Key) || session.IsSysKey(snap.Key) {
-			switch snap.State {
-			case "running":
-				running++
-			case "ready":
-				ready++
-			}
-			continue
-		}
+		// Always count running/ready first so maxProcs pressure stays visible
+		// in stats regardless of whether the session is sidebar-eligible.
 		switch snap.State {
 		case "running":
 			running++
 		case "ready":
 			ready++
+		}
+		// Scratch (ephemeral aside) sessions own a CLI process and therefore
+		// show up in router.ListSessions, but the drawer UX treats them as
+		// private to one dashboard tab. Cron flows through the dedicated
+		// 「定时任务」panel (cron-panel-consolidation RFC), and sys: daemons
+		// are naozhi-internal infrastructure surfaced via the System drawer
+		// (docs/rfc/system-session.md §9.2). None of them belong in the
+		// sidebar listing.
+		if session.IsScratchKey(snap.Key) || session.IsCronKey(snap.Key) || session.IsSysKey(snap.Key) {
+			continue
 		}
 		snapshots[n] = snap
 		n++

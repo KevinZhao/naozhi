@@ -94,6 +94,12 @@ const (
 	// may be in the past before being rejected. 5 minutes covers normal
 	// network latency and legitimate Feishu-side retries (see R218-SEC-13).
 	webhookTimestampMaxAge = 5 * 60
+
+	// wsStopTimeout caps how long Stop() waits for the lark-ws SDK to exit.
+	// The SDK's Start() may block in select{} if its internal disconnect path
+	// stalls, so we don't wait forever on shutdown — log + return to keep
+	// systemd's stop deadline meaningful.
+	wsStopTimeout = 5 * time.Second
 )
 
 var feishuHTTPClient = &http.Client{
@@ -568,8 +574,9 @@ func (f *Feishu) Stop() error {
 		cancel()
 		// SDK's Start() may block indefinitely (select{}); don't wait forever.
 		// Use NewTimer + defer Stop so the fast path (SDK exits cleanly)
-		// doesn't leave a 5s timer goroutine parked until the timeout elapses.
-		timer := time.NewTimer(5 * time.Second)
+		// doesn't leave a wsStopTimeout timer goroutine parked until the
+		// timeout elapses.
+		timer := time.NewTimer(wsStopTimeout)
 		select {
 		case <-done:
 			timer.Stop()
@@ -741,50 +748,25 @@ func (f *Feishu) sendImage(ctx context.Context, chatID string, img platform.Imag
 		return "", fmt.Errorf("get access token: %w", err)
 	}
 
-	content, err := json.Marshal(map[string]string{"image_key": imageKey})
+	// Feishu's send-message endpoint requires `content` to be a stringified
+	// JSON (not a nested object). Use typed structs instead of map[string]any
+	// to eliminate interface{} boxing per reply, matching sendCard's pattern.
+	content, err := json.Marshal(struct {
+		ImageKey string `json:"image_key"`
+	}{ImageKey: imageKey})
 	if err != nil {
 		return "", fmt.Errorf("marshal content: %w", err)
 	}
-	reqBody, err := json.Marshal(map[string]any{
-		"receive_id": chatID,
-		"msg_type":   "image",
-		"content":    string(content),
-	})
+	reqBody, err := json.Marshal(struct {
+		ReceiveID string `json:"receive_id"`
+		MsgType   string `json:"msg_type"`
+		Content   string `json:"content"`
+	}{ReceiveID: chatID, MsgType: "image", Content: string(content)})
 	if err != nil {
 		return "", fmt.Errorf("marshal request body: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST",
-		f.baseURL+"/open-apis/im/v1/messages?receive_id_type=chat_id",
-		bytes.NewReader(reqBody))
-	if err != nil {
-		return "", fmt.Errorf("create request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+token)
-
-	resp, err := feishuHTTPClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("send image message: %w", err)
-	}
-	defer resp.Body.Close()
-
-	var result struct {
-		Code int `json:"code"`
-		Data struct {
-			MessageID string `json:"message_id"`
-		} `json:"data"`
-		Msg string `json:"msg"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxAPIRespBodyBytes)).Decode(&result); err != nil {
-		return "", fmt.Errorf("decode response: %w", err)
-	}
-	if result.Code != 0 {
-		// Return typed error so callers can use IsPermanent to short-circuit
-		// retries on e.g. invalid token / permission errors.
-		return "", &APIError{Code: result.Code, Msg: result.Msg, Op: "send_image"}
-	}
-	return result.Data.MessageID, nil
+	return f.postMessage(ctx, token, reqBody)
 }
 
 // DownloadImage downloads an image from a message via Feishu API.

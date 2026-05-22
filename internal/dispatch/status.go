@@ -131,7 +131,9 @@ func shortenPath(p string) string {
 	return dir + "/" + base
 }
 
-// statusAccumulator tracks accumulated status lines for IM display.
+// maxStatusLines is the maximum number of status lines retained in the
+// IM thinking banner before head entries are dropped via copy-to-front
+// in appendStatusLine.
 const maxStatusLines = 8
 
 // appendStatusLine adds a status line, collapsing consecutive thinking lines.
