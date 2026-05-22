@@ -239,8 +239,16 @@ func detectMime(resolved string, head []byte) string {
 		return "image/svg+xml"
 	}
 	// Base name override for extensionless files like Dockerfile / Makefile.
+	// R232-SEC-8: dotfile names like ".makefile" report Ext()=="" but
+	// filepath.Base keeps the leading dot, so the previous "."+base
+	// concatenation produced "..makefile" and missed the lookup. Try the
+	// base verbatim first (matches dotfiles), then the dot-prefixed form
+	// (matches "Dockerfile" → ".dockerfile").
 	if ext == "" {
 		base := strings.ToLower(filepath.Base(resolved))
+		if v, ok := previewableByExt[base]; ok {
+			return v
+		}
 		if v, ok := previewableByExt["."+base]; ok {
 			return v
 		}
