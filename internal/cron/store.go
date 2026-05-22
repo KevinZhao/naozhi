@@ -10,10 +10,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"time"
-
-	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // maxCronStoreBytes caps the size of cron_jobs.json during Load. The realistic
@@ -25,31 +22,6 @@ import (
 // empty in-memory state that would be persisted back and silently clobber the
 // operator's real jobs.
 const maxCronStoreBytes = 16 * 1024 * 1024
-
-func saveJobs(path string, jobs map[string]*Job) error {
-	if path == "" {
-		return nil
-	}
-	if dir := filepath.Dir(path); dir != "" {
-		if err := os.MkdirAll(dir, 0700); err != nil {
-			return fmt.Errorf("create cron store directory: %w", err)
-		}
-	}
-
-	entries := make([]*Job, 0, len(jobs))
-	for _, j := range jobs {
-		entries = append(entries, j)
-	}
-
-	data, err := json.Marshal(entries)
-	if err != nil {
-		return fmt.Errorf("marshal cron store: %w", err)
-	}
-	if err := osutil.WriteFileAtomic(path, data, 0600); err != nil {
-		return fmt.Errorf("save cron store: %w", err)
-	}
-	return nil
-}
 
 // loadJobs reads and parses the on-disk cron job store. The three possible
 // outcomes are distinguished deliberately:
