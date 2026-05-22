@@ -604,6 +604,16 @@ func NewScheduler(cfg SchedulerConfig) *Scheduler {
 	if loc == nil {
 		loc = time.Local
 	}
+	// R232-CR-4: surface "general" fallback being absent. ResolveAgent returns
+	// "general" when the prompt has no slash-prefix; if that agent isn't
+	// configured, executeOpt reads a zero AgentOpts (empty Backend / Model /
+	// SystemPromptFile) and the cron tick spawns with backend defaults
+	// silently. Logging at construction makes the misconfiguration visible
+	// without changing runtime behaviour.
+	if _, ok := cfg.Agents["general"]; !ok {
+		slog.Debug("cron: 'general' agent missing from agents map; cron jobs without slash-prefix will fall back to backend defaults",
+			"agent_count", len(cfg.Agents))
+	}
 	return &Scheduler{
 		cron: robfigcron.New(
 			robfigcron.WithLocation(loc),

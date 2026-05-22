@@ -269,43 +269,53 @@ func mapUserLine(raw transcriptLine, ts int64) []EventEntry {
 	return out
 }
 
+// transcriptAssistantBlock keeps tool_use input as RawMessage so the on-disk
+// replay path can hand it straight to FormatToolInput without the previous
+// map→Marshal→Unmarshal round-trip (R232-CR-17). pollOnce is hot enough that
+// the saved alloc per tool_use block is worth a typed decode.
+type transcriptAssistantBlock struct {
+	Type  string          `json:"type"`
+	Text  string          `json:"text"`
+	Name  string          `json:"name"`
+	Input json.RawMessage `json:"input"`
+}
+
 func mapAssistantLine(raw transcriptLine, ts int64) []EventEntry {
 	if raw.Message == nil || len(raw.Message.Content) == 0 {
 		return nil
 	}
-	var blocks []map[string]any
+	var blocks []transcriptAssistantBlock
 	if err := json.Unmarshal(raw.Message.Content, &blocks); err != nil {
 		return nil
 	}
 	var out []EventEntry
 	for _, block := range blocks {
-		switch block["type"] {
+		switch block.Type {
 		case "thinking":
-			txt, _ := block["text"].(string)
 			out = append(out, EventEntry{
 				Time:    ts,
 				Type:    "thinking",
-				Summary: textutil.TruncateRunes(txt, 120),
-				Detail:  textutil.TruncateRunes(txt, 2000),
+				Summary: textutil.TruncateRunes(block.Text, 120),
+				Detail:  textutil.TruncateRunes(block.Text, 2000),
 			})
 		case "text":
-			txt, _ := block["text"].(string)
 			out = append(out, EventEntry{
 				Time:    ts,
 				Type:    "text",
-				Summary: textutil.TruncateRunes(txt, 120),
-				Detail:  textutil.TruncateRunes(txt, 2000),
+				Summary: textutil.TruncateRunes(block.Text, 120),
+				Detail:  textutil.TruncateRunes(block.Text, 2000),
 			})
 		case "tool_use":
-			name, _ := block["name"].(string)
 			entry := EventEntry{
 				Time:    ts,
 				Type:    "tool_use",
-				Tool:    name,
-				Summary: name,
+				Tool:    block.Name,
+				Summary: block.Name,
 			}
-			if input, ok := block["input"]; ok {
-				entry.Detail = formatAssistantToolUseDetail(name, input)
+			if len(block.Input) > 0 {
+				entry.Detail = FormatToolInput(block.Name, block.Input)
+			} else {
+				entry.Detail = block.Name
 			}
 			// Per RFC §3.4.1, Agent tool_use inside an agent transcript
 			// DOWNGRADES to plain tool_use — we explicitly disable drill-in
@@ -401,26 +411,4 @@ func parseTranscriptTime(ts string) int64 {
 		return 0
 	}
 	return t.UnixMilli()
-}
-
-// formatAssistantToolUseDetail mirrors process_event_format.go's
-// FormatToolInput but accepts the already-decoded map[string]any payload
-// from the on-disk transcript rather than a json.RawMessage.
-//
-// R215-CR-P2-2: delegate to FormatToolInput so the live readLoop path and
-// the on-disk replay path share a single source of truth — this avoids the
-// previous Bash 120 vs 80 cap drift and gives transcript replay full
-// Glob/Grep/Agent/MCP coverage + shortPath normalisation for free.
-//
-// transcript replay is a cold path (only runs when the user pulls subagent
-// history), so the extra Marshal round-trip is acceptable.
-func formatAssistantToolUseDetail(name string, input any) string {
-	if input == nil {
-		return name
-	}
-	raw, err := json.Marshal(input)
-	if err != nil || len(raw) == 0 {
-		return name
-	}
-	return FormatToolInput(name, raw)
 }

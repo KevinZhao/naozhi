@@ -42,15 +42,41 @@ func TestClaudeProtocol_Name(t *testing.T) {
 func TestClaudeProtocol_BuildArgs(t *testing.T) {
 	t.Parallel()
 	p := &ClaudeProtocol{}
-	args := p.BuildArgs(SpawnOptions{Model: "opus", ResumeID: "sess_123"})
+	// UUID-shaped ResumeID matches what claude CLI actually emits;
+	// resumeIDRe accepts [A-Za-z0-9-]{1,128} (R232-SEC-12).
+	resume := "0123abcd-4567-89ef-0123-456789abcdef"
+	args := p.BuildArgs(SpawnOptions{Model: "opus", ResumeID: resume})
 
 	found := map[string]bool{}
 	for _, a := range args {
 		found[a] = true
 	}
-	for _, want := range []string{"-p", "stream-json", "--verbose", "opus", "sess_123"} {
+	for _, want := range []string{"-p", "stream-json", "--verbose", "opus", resume} {
 		if !found[want] {
 			t.Errorf("BuildArgs missing %q, got %v", want, args)
+		}
+	}
+}
+
+// TestClaudeProtocol_BuildArgs_RejectsBadResumeID locks the regex tightening
+// from R232-SEC-12: characters outside [A-Za-z0-9-] silently drop --resume
+// rather than passing through to argv.
+func TestClaudeProtocol_BuildArgs_RejectsBadResumeID(t *testing.T) {
+	t.Parallel()
+	p := &ClaudeProtocol{}
+	cases := []string{
+		"sess_123",               // underscore (legacy form, no longer accepted)
+		"sess.123",               // dot
+		"id with space",          // whitespace
+		strings.Repeat("a", 129), // overlong
+	}
+	for _, bad := range cases {
+		args := p.BuildArgs(SpawnOptions{Model: "sonnet", ResumeID: bad})
+		for _, a := range args {
+			if a == "--resume" {
+				t.Errorf("BuildArgs(%q): emitted --resume despite invalid resume id; args=%v", bad, args)
+				break
+			}
 		}
 	}
 }
