@@ -439,6 +439,16 @@ func (m *Manager) runOnce(rec *daemonRecord, trigger DaemonTriggerKind) {
 		isPanic bool
 	)
 
+	// R232-GO-5: tickCtx + cancel 必须先于 combined defer 声明。defer LIFO
+	// 倒序执行——先压栈的最后跑——所以 combined defer (recover + Store +
+	// recordRun) 必须 *先* 声明才能 *后* 跑：recordRun 需要在 cancel 之前
+	// 看到一个仍未取消的 tickCtx 状态，避免 record 路径里把 deadline
+	// 信息记成 "ctx canceled" 而非真实的 timeout/normal 终态。原代码
+	// 把 cancel defer 放在 combined defer 之后，倒序执行时反而是
+	// recordRun 先跑、cancel 后跑——注释承诺与实际行为反了。
+	tickCtx, cancel := context.WithTimeout(m.ctx, m.cfg.TickTimeout)
+	defer cancel()
+
 	defer func() {
 		if r := recover(); r != nil {
 			isPanic = true
@@ -454,9 +464,6 @@ func (m *Manager) runOnce(rec *daemonRecord, trigger DaemonTriggerKind) {
 		rec.inflight.Store(false)
 		m.recordRun(rec, runID, trigger, startedAt, report, tickErr, isPanic)
 	}()
-
-	tickCtx, cancel := context.WithTimeout(m.ctx, m.cfg.TickTimeout)
-	defer cancel()
 
 	report, tickErr = rec.daemon.Tick(tickCtx)
 }
