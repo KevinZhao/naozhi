@@ -6179,6 +6179,71 @@ func TestDashboardHTML_CronCockpitAndStickyActionsCSS(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_TranscriptTabs pins cron-dashboard-redesign P2b §4.4.2:
+// the run-detail sheet renders a 4-tab container (chat / tools / prompt /
+// raw), the chat tab uses cronRunTranscriptHtml on detail.__transcript,
+// and the tool output is rendered through esc + <pre> only — never
+// renderMd — to keep arbitrary subprocess stdout from injecting HTML.
+func TestDashboardJS_TranscriptTabs(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+	for _, want := range []string{
+		"function cronRunTranscriptHtml(",
+		"function cronRunTurnHtml(",
+		"function cronRunSheetSelectTab(",
+		"function cronTimelineFetchTranscript(",
+		`'/api/cron/runs/' + encodeURIComponent(runId) + '/transcript?job_id='`,
+		`tabBtn('chat'`,
+		`tabBtn('tools'`,
+		`tabBtn('prompt'`,
+		`tabBtn('raw'`,
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("dashboard.js missing P2b transcript marker %q", want)
+		}
+	}
+	// Tool output XSS guard: turn-renderer for kind === 'tool_use' OR
+	// 'tool_result' must wrap the body with esc(...) inside <pre>, never
+	// pass raw fields through renderMd. The simple grep below confirms
+	// renderMd is NOT applied to t.output / t.input.
+	if strings.Contains(js, "renderMd(t.output") || strings.Contains(js, "renderMd(t.input") {
+		t.Error("tool output / input MUST NOT go through renderMd — XSS hazard from arbitrary subprocess stdout")
+	}
+	// kind === 'tool_result' branch: content must escape body.
+	if !strings.Contains(js, "<pre class=\"crs-tool-body\">' + esc(t.output") {
+		t.Error("tool_result body must use <pre> + esc(t.output) — never raw or renderMd")
+	}
+}
+
+// TestDashboardHTML_TranscriptTabsCSS pins the styling side of P2b: tab
+// bar + transcript turn cards have stylesheet entries.
+func TestDashboardHTML_TranscriptTabsCSS(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		".crs-tabs{",
+		".crs-tab{",
+		".crs-tab.active{",
+		".crs-transcript{",
+		".crs-turn{",
+		".crs-tool-card{",
+		".crs-tool-card.err{",
+		".crs-avatar.assistant{",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("dashboard.html missing P2b CSS marker %q", want)
+		}
+	}
+}
+
 // TestStaticAssetETags_Computed verifies serveStaticWithETag wires up
 // precomputed ETags for the three embedded assets and the 304 fast-path is
 // available. cron-dashboard-redesign P0 §6 — combined with no-cache must-
