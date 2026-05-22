@@ -112,7 +112,7 @@
 - [ ] **R232-GO-2 — historyWg.Add(1) vs historyCtx.Err() TOCTOU（P2）**: R230-GO-1 仍 open。方案：把 Add(1) 提到 ctx.Err() 检查之前，跳过分支立即 Done()。Breaking：否。
 - [ ] **R232-GO-3 — sysession.Manager Stop-before-Start 边角（P2）**: stopOnce.Do 仅用 m.cancel != nil 守卫，未建立 started 标志。方案：原子 started 标志早返回。Breaking：否。
 - [ ] **R232-GO-4 — limitedWriter.Write error 分支返回 len(p) 违反 io.Writer 契约（P2）**: 目前是有意为之（exec.Cmd pump 不重试），注释已说明。属"违反契约的设计取舍"，跟踪至 godoc 升级或封装。Breaking：否（行为修正风险大，跟踪不直修）。
-- [ ] **R232-GO-5 — runOnce defer 顺序与注释不符（P3）**: combined defer 与 tickCtx cancel defer LIFO 实际是 cancel 先跑，注释声称相反。方案：把 tickCtx 声明提到 combined defer 之前。Breaking：否。
+- [x] **R232-GO-5 — runOnce defer 顺序与注释不符（P3）**: combined defer 与 tickCtx cancel defer LIFO 实际是 cancel 先跑，注释声称相反。方案：把 tickCtx 声明提到 combined defer 之前。Breaking：否。 — 已修复，本批 PR #223
 - [ ] **R232-GO-6 — runOnce post-Run goroutine 看到 cancel 后的 tickCtx 误分类风险（P3）**: 同 R232-GO-5。
 
 ### 性能 — 本轮新发现
@@ -137,7 +137,7 @@
 - [ ] **R232-SEC-5 — backend ID charset 双标 cron CRUD vs WS（P2）**: validateCronBackend [a-z0-9_-] vs isValidBackendID [a-zA-Z0-9_.-]。R230B-SEC-2 已记，本轮补充新边角：handleList 读路径不校验大写 ID 透传响应。方案：统一到单一 helper。Breaking：是。
 - [ ] **R232-SEC-6 — serveRaw 透传 text/markdown MIME 不强制 attachment（P2）**: 浏览器嗅探可能渲染 HTML。方案：text/* 子类型统一强制 Content-Disposition: attachment。Breaking：否。
 - [ ] **R232-SEC-7 — JFIF+PDF 双容器绕过 PDF 检测以 KindImageInline 进入（P2）**: 方案：增二次魔数检测拒绝嵌套 PDF。Breaking：否。
-- [ ] **R232-SEC-8 — detectMime 隐藏文件 (.makefile) 点号拼接错误（P3）**: 无扩展名分支用 "."+base 拼接，".makefile" 被映射 octet-stream。方案：ext=="" 分支用原始 base 查表。Breaking：否。
+- [x] **R232-SEC-8 — detectMime 隐藏文件 (.makefile) 点号拼接错误（P3）**: 无扩展名分支用 "."+base 拼接，".makefile" 被映射 octet-stream。方案：ext=="" 分支用原始 base 查表。Breaking：否。 — 已修复，本批 PR #223
 - [ ] **R232-SEC-9 — buildLoginPageCSP 正则提取 inline script/style 错误只在运行时暴露（P3）**: 无编译期自测。方案：加 init() 自测或常量化 hash + TestLoginPage。Breaking：否。
 - [ ] **R232-SEC-10 — interruptLimiter 频率高于 sendLimiter（P3）**: 15/s vs 5/s 可对单 session DoS。方案：interruptLimiter 改 rate.Every(2s) burst=2。Breaking：否。
 - [ ] **R232-SEC-11 — weixin Reply MessageID 拼接含未转义 ChatID（P3）**: 方案：用 SanitizeForLog 或 url.PathEscape 处理 ChatID。Breaking：否。
@@ -155,8 +155,8 @@
 - [ ] **R232-CR-5 — computeJobTimeout schedule 参数无效（P2）**: 函数体 `_ = schedule; return maxCap`，注释"signature stability"。方案：删 schedule 参数。Breaking：是（机械重构）。
 - [x] **R232-CR-6 — auto_titler.renameOne 双层长度校验缺注释（P2）**: ValidateUserLabel 字节上限 + autoTitlerMaxTitleRunes rune 检查。方案：注释解释 16 rune 是 auto-titler 严格上限。Breaking：否。 — 已修复，本批 PR #220
 - [ ] **R232-CR-7 — preflightResult 单字段 wrapper struct（P2）**: 方案：直接返回 (func(), bool) 二元组。Breaking：否（内部类型）。
-- [ ] **R232-CR-8 — TriggerCatchup / ErrClassPanic / DaemonTriggerManual 占位常量（P3）**: 散布在导出 API 中无生产路径产生。方案：注释加警告或改 unexported。Breaking：否。
-- [ ] **R232-CR-9 — JobTitleOrFallback 死导出符号（P3）**: 仅 title_test.go 用，前端实现 fallback。方案：降 unexported 或删除。Breaking：否（前端不依赖）。
+- [x] **R232-CR-8 — TriggerCatchup / ErrClassPanic / DaemonTriggerManual 占位常量（P3）**: 散布在导出 API 中无生产路径产生。方案：注释加警告或改 unexported。Breaking：否。 — 已修复（注释加 WARNING），本批 PR #223
+- [x] **R232-CR-9 — JobTitleOrFallback 死导出符号（P3）**: 仅 title_test.go 用，前端实现 fallback。方案：降 unexported 或删除。Breaking：否（前端不依赖）。 — 已修复（降 unexported），本批 PR #223
 - [ ] **R232-CR-10 — sysession.SweepOldJSONL 单次启动扫描而非 daemon（P3）**: 注释承诺 Phase 2 TransientSweeper 未兑现。方案：sweep.go godoc 注释明确单次语义；TODO 跟踪 Phase 2。Breaking：否。
 - [x] **R232-CR-11 — saveMarshaledSeq 注释说"Atomic CAS"实际 Load+Store（P3）**: 方案：注释改为"在 storeMu 持锁状态下 Load+Store，非 CAS"。Breaking：否（注释）。 — 已修复，本批 PR #220
 - [ ] **R232-CR-12 — registerStub / registerStubByValue / stubChain 三 helper 结构（P3）**: pointer vs value 仅参数差异。方案：合并到一个传四个 string 的 helper。Breaking：否（私有）。
@@ -1816,7 +1816,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 ### Code 质量（剩余）
 
 - [ ] **R230C-CR-1 — recordResult 变成测试-only 死代码（P2）**: `internal/cron/scheduler.go:2390` 生产路径走 recordResultP0WithSanitised；recordResult 仅 persist_failure_test.go 两处调用。方案：重写测试调 P0 版后删 recordResult；或保留并明确标 test-helper-only。Breaking：否。
-- [ ] **R230C-CR-2 — computeJobTimeout schedule 参数明确忽略（P2）**: `internal/cron/job.go:277` 函数签名带 schedule 参数但 `_ = schedule`。方案：删除函数 inline `s.execTimeout` 到两处 caller，或保留但去 schedule 参数。Breaking：否（unexported）。
+- [x] **R230C-CR-2 — computeJobTimeout schedule 参数明确忽略（P2）**: `internal/cron/job.go:277` 函数签名带 schedule 参数但 `_ = schedule`。方案：删除函数 inline `s.execTimeout` 到两处 caller，或保留但去 schedule 参数。Breaking：否（unexported）。 — 已修复（删参数），本批 PR #223
 - [ ] **R230C-CR-3 — addJobLocked 自己上锁违反 *Locked 命名约定（P2）**: `internal/cron/scheduler.go:846` 其他 `*Locked` 函数（pause/resume/persist）都遵守 caller-holds-lock。方案：重命名为 addJob，或挪出锁让 caller 持。Breaking：否。
 - [ ] **R230C-CR-4 — TriggerNow entryID==0/!=0 两个 goroutine 体几乎相同（P2）**: `internal/cron/scheduler.go:1423-1488` 两条 60 行近一致路径。方案：抽 `triggerNowExecute(jobID string)` 共享。Breaking：否。
 - [ ] **R230C-CR-5 — ManagedSession 三个 SessionID 访问点（getSessionID/SessionID/GetSessionID）（P2）**: `internal/session/managed.go:727-735` cli.HistorySessionView 与 processIface 各要一份。方案：godoc 集中说明三访问点关系，或合并到一个主入口。Breaking：否。
