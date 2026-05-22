@@ -11761,6 +11761,12 @@ function formatCronTimelineShort(ms) {
 
 // cronTimelineDetailHtml — 展开行内的详情面板。
 // detail 为 null = 加载中骨架；为 object = 渲染 prompt/result/error_msg + fresh hint。
+//
+// cron-dashboard-redesign P2b §4.4.2 — 在 detail 存在的基础上，如果
+// detail.__transcript 也加载好（cronTimelineFetchDetail 同步 fetch），
+// 上方多渲染一个 4-tab 容器 (对话 / 工具 / 提示词 / 原始日志)，把现有
+// 三 <pre> 块作为"原始日志"兜底 tab；这样当 transcript 端点 5xx 或返回
+// fallback:"raw"/"missing" 时，用户切到原始日志依然能看到完整内容。
 function cronTimelineDetailHtml(jobId, runId, summary, detail) {
   if (!detail) {
     return '<div class="ctr-loading">加载详情中…</div>';
@@ -11821,7 +11827,183 @@ function cronTimelineDetailHtml(jobId, runId, summary, detail) {
   const empty = !promptBlock && !resultBlock && !errBlock && !workDir
     ? '<div class="ctr-empty-detail">这次 run 没有保存额外详情。</div>'
     : '';
-  return freshHint + promptBlock + resultBlock + errBlock + workDir + empty;
+  const rawTabBody = freshHint + promptBlock + resultBlock + errBlock + workDir + empty;
+
+  // P2b: 4-tab container. activeTab is stashed on the detail object so
+  // toggling tabs survives a cronTimelineFetchDetail re-render. Default
+  // depends on whether a transcript is actually available — when it is
+  // not, jump straight to "原始日志" so the user isn't staring at an
+  // empty conversation tab.
+  const transcript = detail.__transcript || null;
+  const hasTurns = transcript && Array.isArray(transcript.turns) && transcript.turns.length > 0;
+  if (!detail.__activeTab) {
+    detail.__activeTab = hasTurns ? 'chat' : 'raw';
+  }
+  const active = detail.__activeTab;
+  const turnCount = hasTurns ? transcript.turns.length : 0;
+  const toolCount = hasTurns
+    ? transcript.turns.filter(t => t && t.kind === 'tool_use').length
+    : 0;
+  const tabBtn = (key, label, count) => {
+    const cls = 'crs-tab' + (active === key ? ' active' : '');
+    const ariaSel = active === key ? 'true' : 'false';
+    const countHtml = (typeof count === 'number' && count > 0)
+      ? ' <span class="crs-tab-count">' + count + '</span>'
+      : '';
+    return '<button type="button" class="' + cls + '"' +
+      ' role="tab" aria-selected="' + ariaSel + '"' +
+      ' onclick="event.stopPropagation();cronRunSheetSelectTab(\'' + escJs(jobId) + '\',\'' + escJs(runId) + '\',\'' + escJs(key) + '\')">' +
+      esc(label) + countHtml +
+    '</button>';
+  };
+  const tabBar = '<div class="crs-tabs" role="tablist">' +
+    tabBtn('chat', '对话', turnCount) +
+    tabBtn('tools', '工具', toolCount) +
+    tabBtn('prompt', '提示词', 0) +
+    tabBtn('raw', '原始日志', 0) +
+  '</div>';
+
+  let tabBody = '';
+  if (active === 'chat') {
+    tabBody = hasTurns
+      ? cronRunTranscriptHtml(transcript, { only: null })
+      : '<div class="ctr-empty-detail">' +
+          (transcript && transcript.fallback === 'missing'
+            ? '没找到对话流文件，可能 session 被清理或新 backend 不写 JSONL。请看「原始日志」tab。'
+            : transcript && transcript.fallback === 'raw'
+            ? '对话流无法解析。请看「原始日志」tab。'
+            : '正在加载对话流…') +
+        '</div>';
+  } else if (active === 'tools') {
+    tabBody = hasTurns
+      ? cronRunTranscriptHtml(transcript, { only: 'tool_use' })
+      : '<div class="ctr-empty-detail">无工具调用。</div>';
+  } else if (active === 'prompt') {
+    tabBody = detail.prompt
+      ? '<pre class="ctr-block-body">' + esc(detail.prompt) + '</pre>'
+      : '<div class="ctr-empty-detail">这次 run 未持久化提示词。</div>';
+  } else {
+    // raw — legacy three-block view
+    tabBody = rawTabBody;
+  }
+  return tabBar + '<div class="crs-tab-body" role="tabpanel">' + tabBody + '</div>';
+}
+
+// cronRunTranscriptHtml renders a list of transcript turns as a vertical
+// timeline. cron-dashboard-redesign P2b §4.4.4.
+//
+// Security: assistant `text` runs through renderMd (already esc-safe).
+// Tool `output` and `error` strings go through esc + <pre> ONLY — never
+// renderMd — because those originate from arbitrary subprocess stdout
+// and may contain unescaped HTML/JS that markdown parsers can let slip
+// through. Tool input is JSON-stringified (unhelpful for raw HTML).
+function cronRunTranscriptHtml(transcript, opts) {
+  const onlyKind = opts && opts.only;
+  const turns = Array.isArray(transcript.turns) ? transcript.turns : [];
+  if (turns.length === 0) {
+    return '<div class="ctr-empty-detail">无内容。</div>';
+  }
+  const parts = [];
+  for (const t of turns) {
+    if (!t) continue;
+    if (onlyKind && t.kind !== onlyKind) continue;
+    parts.push(cronRunTurnHtml(t));
+  }
+  if (parts.length === 0) {
+    return '<div class="ctr-empty-detail">无匹配内容。</div>';
+  }
+  if (transcript.truncated) {
+    parts.push('<div class="ctr-empty-detail">…（已截断；超过显示上限，剩余内容请用 jq / less 查看 JSONL 原文）</div>');
+  }
+  return '<div class="crs-transcript">' + parts.join('') + '</div>';
+}
+
+// cronRunTurnHtml renders one turn. Switches on kind to produce the
+// appropriate avatar + body markup.
+function cronRunTurnHtml(t) {
+  const ts = t.ts ? formatCronTimelineShort(t.ts) : '';
+  if (t.kind === 'user') {
+    return '<div class="crs-turn user">' +
+      '<div class="crs-avatar user" aria-hidden="true">U</div>' +
+      '<div class="crs-turn-body">' +
+        '<div class="crs-turn-head"><span class="crs-role">用户</span><span class="crs-time">' + esc(ts) + '</span></div>' +
+        '<pre class="crs-text">' + esc(t.text || '') + '</pre>' +
+      '</div>' +
+    '</div>';
+  }
+  if (t.kind === 'assistant') {
+    const tokens = t.tokens ? '<span class="crs-tokens">+' + (t.tokens >= 1000 ? (t.tokens / 1000).toFixed(1) + 'k' : t.tokens) + '</span>' : '';
+    return '<div class="crs-turn assistant">' +
+      '<div class="crs-avatar assistant" aria-hidden="true">C</div>' +
+      '<div class="crs-turn-body">' +
+        '<div class="crs-turn-head"><span class="crs-role">Claude</span><span class="crs-time">' + esc(ts) + '</span>' + tokens + '</div>' +
+        '<div class="crs-text md">' + renderMd(t.text || '') + '</div>' +
+      '</div>' +
+    '</div>';
+  }
+  if (t.kind === 'tool_use') {
+    const inputJson = t.input ? JSON.stringify(t.input, null, 2) : '';
+    const inputBlock = inputJson
+      ? '<pre class="crs-tool-body">' + esc(inputJson) + '</pre>'
+      : '';
+    return '<div class="crs-turn tool"><div class="crs-avatar tool" aria-hidden="true">⚙</div>' +
+      '<div class="crs-turn-body">' +
+        '<details class="crs-tool-card">' +
+          '<summary class="crs-tool-head">' +
+            '<span class="crs-tool-name">' + esc(t.tool || 'tool') + '</span>' +
+            '<span class="crs-tool-summary">' + esc(t.summary || '') + '</span>' +
+            '<span class="crs-time">' + esc(ts) + '</span>' +
+          '</summary>' +
+          inputBlock +
+        '</details>' +
+      '</div>' +
+    '</div>';
+  }
+  if (t.kind === 'tool_result') {
+    const isErr = t.status === 'error';
+    return '<div class="crs-turn tool-result' + (isErr ? ' err' : '') + '">' +
+      '<div class="crs-avatar tool" aria-hidden="true">' + (isErr ? '✖' : '↳') + '</div>' +
+      '<div class="crs-turn-body">' +
+        '<details class="crs-tool-card' + (isErr ? ' err' : '') + '">' +
+          '<summary class="crs-tool-head">' +
+            '<span class="crs-tool-name">输出' + (isErr ? '（失败）' : '') + '</span>' +
+            '<span class="crs-time">' + esc(ts) + '</span>' +
+          '</summary>' +
+          '<pre class="crs-tool-body">' + esc(t.output || '') + '</pre>' +
+        '</details>' +
+      '</div>' +
+    '</div>';
+  }
+  if (t.kind === 'error') {
+    return '<div class="crs-turn err">' +
+      '<div class="crs-avatar tool" aria-hidden="true">✖</div>' +
+      '<div class="crs-turn-body">' +
+        '<div class="crs-turn-head"><span class="crs-role" style="color:var(--nz-red)">系统错误</span><span class="crs-time">' + esc(ts) + '</span></div>' +
+        '<pre class="crs-text">' + esc(t.text || '') + '</pre>' +
+      '</div>' +
+    '</div>';
+  }
+  return '';
+}
+
+// cronRunSheetSelectTab toggles the active tab in the run-detail sheet.
+// We persist the choice on the detail object so re-renders (incoming
+// transcript fetch, prev/next navigation) keep the user on their tab.
+function cronRunSheetSelectTab(jobId, runId, tab) {
+  if (!jobId || !runId) return;
+  const st = getCronTimelineState(jobId);
+  const d = st && st.details && st.details[runId];
+  if (!d || d.__error) return;
+  d.__activeTab = tab;
+  d.__activeTabUserSet = true;
+  // Re-render only the bodies that may host this detail (the timeline
+  // panel still renders inline-expanded rows for backwards compat; the
+  // run sheet is the primary surface). renderRunDetailSheet falls back
+  // to a no-op when the sheet is closed.
+  if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
+  if (cronRunSheetState.open && cronRunSheetState.jobId === jobId && cronRunSheetState.runId === runId) {
+    renderRunDetailSheet();
+  }
 }
 
 // cronTimelineSelectRun — 点击 timeline 行（cron-history-redesign §6）。
@@ -12058,6 +12240,11 @@ let _cronRunSheetCloseToken = 0;
 
 // cronTimelineFetchDetail — GET /api/cron/runs/{run_id}?job_id=... 异步拉详情。
 // 完成后写入 st.details[runId] 并重绘当前 panel；session 切走后丢弃结果。
+//
+// cron-dashboard-redesign P2b: detail 落地后并发 fire transcript 端点，
+// 拉到的 turns 写入 st.details[runId].__transcript 并触发再次重绘。
+// transcript 端点失败不影响主 detail 路径——4-tab 渲染会优雅 fallback
+// 到「原始日志」tab，所以这里 silent-swallow 异常即可。
 async function cronTimelineFetchDetail(jobId, runId) {
   const st = getCronTimelineState(jobId);
   try {
@@ -12067,6 +12254,9 @@ async function cronTimelineFetchDetail(jobId, runId) {
     const url = '/api/cron/runs/' + encodeURIComponent(runId) + '?job_id=' + encodeURIComponent(jobId);
     const data = await fetchJSON(url, { headers, timeoutMs: 8000 });
     st.details[runId] = data || { __error: 'empty response' };
+    // Fire-and-forget transcript fetch. Silent on failure; the 4-tab
+    // renderer falls back to the raw view automatically.
+    cronTimelineFetchTranscript(jobId, runId).catch(() => {});
   } catch (err) {
     // R220-FE-5: 401/403 走 authModal，与 fetchSessions 等其它路径保持一致；
     // 单 cron 详情失败不应让用户看到 "HTTP 401" 字样而不知所措。
@@ -12085,6 +12275,49 @@ async function cronTimelineFetchDetail(jobId, runId) {
   // 还停在同一 job 上；selectedKey 在 cron 面板下永远为 null，已不能用。
   if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
   // cron-history-redesign §6: 同步刷新 sheet 内容（如果当前 sheet 看的就是这条 run）
+  if (cronRunSheetState.open &&
+      cronRunSheetState.jobId === jobId &&
+      cronRunSheetState.runId === runId) {
+    renderRunDetailSheet();
+  }
+}
+
+// cronTimelineFetchTranscript fetches the JSONL-derived turn timeline
+// for one run and stashes it on the detail object. cron-dashboard-
+// redesign P2b §4.4.4. Independent of cronTimelineFetchDetail so a
+// transcript failure cannot cascade into the main detail view.
+async function cronTimelineFetchTranscript(jobId, runId) {
+  const st = getCronTimelineState(jobId);
+  try {
+    const headers = {};
+    const t = getToken();
+    if (t) headers['Authorization'] = 'Bearer ' + t;
+    const url = '/api/cron/runs/' + encodeURIComponent(runId) + '/transcript?job_id=' + encodeURIComponent(jobId);
+    const data = await fetchJSON(url, { headers, timeoutMs: 12000 });
+    if (st.details && st.details[runId]) {
+      st.details[runId].__transcript = data || { fallback: 'missing', turns: [] };
+      // First-render race: cronTimelineDetailHtml may have settled on
+      // __activeTab='raw' because the transcript hadn't arrived yet.
+      // Now that the turns are in, promote that initial-default to
+      // 'chat' so users don't have to manually click. We only do this
+      // when the user *hasn't* explicitly clicked a tab — heuristic:
+      // they haven't if the active tab is the same default we'd have
+      // chosen with no transcript present.
+      const turns = data && Array.isArray(data.turns) ? data.turns : [];
+      const det = st.details[runId];
+      if (turns.length > 0 && det.__activeTab === 'raw' && !det.__activeTabUserSet) {
+        det.__activeTab = 'chat';
+      }
+    }
+  } catch (err) {
+    if (st.details && st.details[runId]) {
+      // Mark as fallback so the renderer flips to raw without showing
+      // a loading spinner forever. We don't surface a hard error to
+      // the user — original detail tab is still functional.
+      st.details[runId].__transcript = { fallback: 'missing', turns: [], __fetchErr: true };
+    }
+  }
+  if (cronDetailJobId === jobId) renderCronTimelinePanel(jobId);
   if (cronRunSheetState.open &&
       cronRunSheetState.jobId === jobId &&
       cronRunSheetState.runId === runId) {
