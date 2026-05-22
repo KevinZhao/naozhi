@@ -146,7 +146,6 @@ type Job struct {
 type RunState string
 
 const (
-	RunStateRunning   RunState = "running" // 仅 inflight 用，不落盘
 	RunStateSucceeded RunState = "succeeded"
 	RunStateFailed    RunState = "failed"
 	RunStateSkipped   RunState = "skipped"

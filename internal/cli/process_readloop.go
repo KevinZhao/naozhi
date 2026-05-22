@@ -548,13 +548,24 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 				name = strings.TrimSpace(name[:idx])
 			}
 			linker := p.linker
-			// R225-CR-10: cap description before handing it to a goroutine
-			// closure. ev.Description is unbounded user/agent text that the
-			// Resolve goroutine pins until the resolveSem slot frees, so a
-			// burst of multi-KB descriptions × 8 max parallel resolves can
-			// retain MBs of strings transiently. 2000 runes matches the
-			// Detail field cap downstream consumers already truncate to.
-			desc := textutil.TruncateRunes(ev.Description, 2000)
+			// R225-CR-10 / R230B-PERF-7: cap description before handing it
+			// to a goroutine closure. ev.Description is unbounded user/agent
+			// text that the Resolve goroutine pins until the resolveSem slot
+			// frees, so a burst of multi-KB descriptions × 8 max parallel
+			// resolves can retain MBs of strings transiently. SubagentLinker
+			// only retains the string for the bounded resolveSem window and
+			// never decodes it, so a byte-level cap is sufficient: any UTF-8
+			// payload ≤ 8000 bytes already contains ≤ 8000 runes (and at the
+			// 2000-rune retention budget previously used here, 2000 × 4 max
+			// bytes/rune = 8000). Skipping the rune-decode loop avoids the
+			// per-event utf8 scan on the readLoop hot path. Cut at the
+			// nearest rune boundary so any operator-side dump of the value
+			// remains valid UTF-8.
+			const maxResolveDescBytes = 8000
+			desc := ev.Description
+			if len(desc) > maxResolveDescBytes {
+				desc = desc[:textutil.TruncateAtRuneBoundary(desc, maxResolveDescBytes)]
+			}
 			go linker.Resolve(taskID, toolUseID, name, desc, nowMS)
 		}
 	}

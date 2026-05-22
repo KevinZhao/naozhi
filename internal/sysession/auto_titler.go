@@ -383,8 +383,12 @@ func (a *autoTitler) renameOne(ctx context.Context, key, seed string, turnCount 
 	if title == "" {
 		return fmt.Errorf("runner returned empty title: %w", ErrValidation)
 	}
-	// System prompt requests ≤ 16 chars; enforce in code so a model
-	// that ignores the instruction can't write an over-long label.
+	// Two-tier length gate is intentional: ValidateUserLabel enforces a
+	// general byte cap shared with user-typed labels, while
+	// autoTitlerMaxTitleRunes is the AutoTitler-specific 16-rune
+	// ceiling matching the system-prompt instruction. Keep both:  a
+	// model that ignores the prompt's "≤16 chars" still gets clipped
+	// here before the label is published. R232-CR-6.
 	if utf8.RuneCountInString(title) > autoTitlerMaxTitleRunes {
 		return fmt.Errorf("%w: title exceeds %d runes", ErrValidation, autoTitlerMaxTitleRunes)
 	}
@@ -421,23 +425,29 @@ const (
 // The previous total-byte cap was removed (operator decision: long
 // conversations should be reviewed in full). The per-line cap stays
 // as the last-line prompt-injection defence.
+//
+// R232-PERF-7: single-pass rune walk uses utf8.DecodeRuneInString so an
+// invalid byte sequence yields (RuneError, width=1) and we skip the
+// offending byte without a separate utf8.ValidString pre-scan + re-decode
+// round-trip on the hot path.
 func buildExcerpt(seed string) string {
 	if seed == "" {
 		return ""
-	}
-	if !utf8.ValidString(seed) {
-		// Strip invalid bytes by re-decoding rune-by-rune.
-		var b strings.Builder
-		for _, r := range seed {
-			b.WriteRune(r)
-		}
-		seed = b.String()
 	}
 	var b strings.Builder
 	b.Grow(len(seed))
 	lineWritten := 0
 	lineTruncated := false
-	for _, r := range seed {
+	for i := 0; i < len(seed); {
+		r, w := utf8.DecodeRuneInString(seed[i:])
+		if r == utf8.RuneError && w == 1 {
+			// Invalid UTF-8 byte: skip it. Matches the prior
+			// ValidString + re-decode path's "strip invalid bytes"
+			// semantics without the second scan.
+			i++
+			continue
+		}
+		i += w
 		if r == '\n' {
 			b.WriteRune('\n')
 			lineWritten = 0
@@ -449,10 +459,6 @@ func buildExcerpt(seed string) string {
 		}
 		if r < 0x20 || (r >= 0x7F && r <= 0x9F) {
 			continue
-		}
-		w := utf8.RuneLen(r)
-		if w < 0 {
-			continue // shouldn't happen post-ValidString, but defensive
 		}
 		if lineWritten+w > autoTitlerLineCapBytes {
 			// Once a line hits the cap, drop the rest of the line so the

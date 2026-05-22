@@ -23,7 +23,7 @@ func TestExpandEnvVars(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		got := expandEnvVars(tt.input)
+		got := string(expandEnvVars([]byte(tt.input)))
 		if got != tt.expected {
 			t.Errorf("expandEnvVars(%q) = %q, want %q", tt.input, got, tt.expected)
 		}
