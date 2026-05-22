@@ -46,3 +46,6 @@ preview-start.sh
 
 # Python bytecode cache (test/e2e/passthrough/*.py harness)
 __pycache__/
+
+# Local-only design notes (not for upstream)
+docs/design/competitor-distilled-2026-05.md
