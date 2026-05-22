@@ -166,18 +166,63 @@ func (p *ACPProtocol) BuildArgs(opts SpawnOptions) []string {
 	return args
 }
 
+// acpInitParams matches the parameters of the ACP "initialize" RPC.
+// Mirrors the spec subset naozhi sends: protocolVersion + clientCapabilities
+// + clientInfo. Defined as a named struct so json marshaling skips the
+// reflect-on-map-of-interface code path used by map[string]any. Cold path
+// (one call per spawn) but keeps the style consistent with acpPromptParams
+// (R228-PERF-4) so future readers don't have to reason about why one RPC
+// uses map and another uses struct. R230-PERF-1.
+type acpInitParams struct {
+	ProtocolVersion    int                   `json:"protocolVersion"`
+	ClientCapabilities acpClientCapabilities `json:"clientCapabilities"`
+	ClientInfo         acpClientInfo         `json:"clientInfo"`
+}
+
+type acpClientCapabilities struct {
+	FS       acpFSCapability `json:"fs"`
+	Terminal bool            `json:"terminal"`
+}
+
+type acpFSCapability struct {
+	ReadTextFile  bool `json:"readTextFile"`
+	WriteTextFile bool `json:"writeTextFile"`
+}
+
+type acpClientInfo struct {
+	Name    string `json:"name"`
+	Version string `json:"version"`
+}
+
+// acpSessionLoadParams matches the parameters of the ACP "session/load" RPC.
+// R230-PERF-1.
+type acpSessionLoadParams struct {
+	SessionID string `json:"sessionId"`
+	Cwd       string `json:"cwd"`
+}
+
+// acpSessionNewParams matches the parameters of the ACP "session/new" RPC.
+// MCPServers is currently always empty (naozhi does not register MCP servers
+// at session-new time); kept as []any to preserve wire shape if upstream
+// kiro starts requiring an explicit empty array versus omitting the field.
+// R230-PERF-1.
+type acpSessionNewParams struct {
+	Cwd        string `json:"cwd"`
+	McpServers []any  `json:"mcpServers"`
+}
+
 func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, error) {
 	// Step 1: initialize handshake
 	initID := p.allocID()
 	initReq := RPCRequest{
 		JSONRPC: "2.0", ID: initID, Method: "initialize",
-		Params: map[string]any{
-			"protocolVersion": 1,
-			"clientCapabilities": map[string]any{
-				"fs":       map[string]bool{"readTextFile": true, "writeTextFile": true},
-				"terminal": true,
+		Params: acpInitParams{
+			ProtocolVersion: 1,
+			ClientCapabilities: acpClientCapabilities{
+				FS:       acpFSCapability{ReadTextFile: true, WriteTextFile: true},
+				Terminal: true,
 			},
-			"clientInfo": map[string]any{"name": "naozhi", "version": "1.0.0"},
+			ClientInfo: acpClientInfo{Name: "naozhi", Version: "1.0.0"},
 		},
 	}
 	if err := p.sendAndWaitResponse(rw, initReq); err != nil {
@@ -195,7 +240,7 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, err
 		loadID := p.allocID()
 		loadReq := RPCRequest{
 			JSONRPC: "2.0", ID: loadID, Method: "session/load",
-			Params: map[string]any{"sessionId": resumeID, "cwd": cwd},
+			Params: acpSessionLoadParams{SessionID: resumeID, Cwd: cwd},
 		}
 		if err := p.sendAndWaitResponse(rw, loadReq); err != nil {
 			return "", fmt.Errorf("acp session/load: %w", err)
@@ -205,7 +250,7 @@ func (p *ACPProtocol) Init(rw *JSONRW, resumeID string, cwd string) (string, err
 		newID := p.allocID()
 		newReq := RPCRequest{
 			JSONRPC: "2.0", ID: newID, Method: "session/new",
-			Params: map[string]any{"cwd": cwd, "mcpServers": []any{}},
+			Params: acpSessionNewParams{Cwd: cwd, McpServers: []any{}},
 		}
 		data, err := json.Marshal(newReq)
 		if err != nil {
