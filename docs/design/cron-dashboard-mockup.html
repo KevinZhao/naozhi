@@ -1,0 +1,1243 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Cron Dashboard Mockup · naozhi</title>
+<style>
+  :root {
+    --nz-bg-0:#0d1117; --nz-bg-1:#161b22; --nz-bg-2:#1c2129;
+    --nz-border:#30363d; --nz-text:#c9d1d9; --nz-text-strong:#f0f6fc;
+    --nz-text-mute:#8b949e; --nz-text-faint:#6e7681; --nz-text-dim:#7d8590;
+    --nz-accent:#58a6ff; --nz-blue:#1f6feb; --nz-green:#3fb950;
+    --nz-red:#f85149; --nz-amber:#d29922; --nz-purple:#a371f7;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{background:#0a0d12;color:var(--nz-text);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;font-size:13px;line-height:1.45}
+  body{padding:24px 32px;max-width:1480px;margin:0 auto}
+  h1{font-size:18px;color:var(--nz-text-strong);margin-bottom:6px;font-weight:600}
+  .lede{color:var(--nz-text-mute);margin-bottom:24px;font-size:13px}
+  .lede code{background:var(--nz-bg-1);border:1px solid var(--nz-border);padding:1px 5px;border-radius:3px;font-size:12px}
+  .section-title{margin:32px 0 12px;font-size:14px;color:var(--nz-text-strong);font-weight:600;letter-spacing:.3px}
+  .section-title .tag{font-size:10px;background:rgba(88,166,255,.15);color:var(--nz-accent);border:1px solid rgba(88,166,255,.4);padding:2px 7px;border-radius:10px;margin-left:8px;letter-spacing:0;font-weight:500}
+
+  /* ===== shell ===== */
+  .shell{display:flex;border:1px solid var(--nz-border);border-radius:10px;overflow:hidden;background:var(--nz-bg-0);box-shadow:0 8px 24px rgba(0,0,0,.4);height:820px;position:relative}
+
+  .col-projects{flex:0 0 56px;background:var(--nz-bg-1);border-right:1px solid var(--nz-border);display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:10px}
+  .col-projects .pj-logo{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,#1f6feb,#a371f7);display:flex;align-items:center;justify-content:center;color:white;font-weight:600;font-size:11px;margin-bottom:6px}
+  .col-projects .pj-icon{width:36px;height:36px;border-radius:8px;background:var(--nz-bg-2);display:flex;align-items:center;justify-content:center;color:var(--nz-text-mute);cursor:pointer;font-size:14px;position:relative}
+  .col-projects .pj-icon.active{background:rgba(31,111,235,.2);color:var(--nz-accent);box-shadow:inset 0 0 0 1px var(--nz-blue)}
+  .col-projects .pj-icon .pj-dot{position:absolute;top:-2px;right:-2px;width:8px;height:8px;border-radius:50%;background:var(--nz-amber);border:2px solid var(--nz-bg-1)}
+  .col-projects .pj-expand{margin-top:auto;color:var(--nz-text-faint);font-size:18px;cursor:pointer;width:32px;height:32px;display:flex;align-items:center;justify-content:center;border-radius:6px}
+
+  .col-list{flex:0 0 360px;border-right:1px solid var(--nz-border);display:flex;flex-direction:column;background:var(--nz-bg-0)}
+  .list-header{padding:14px 16px 10px;border-bottom:1px solid var(--nz-border);display:flex;align-items:center;justify-content:space-between;gap:10px}
+  .list-header h2{font-size:14px;color:var(--nz-text-strong);font-weight:600}
+  .list-header .lh-new{padding:5px 11px;border-radius:6px;border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text);cursor:pointer;font-size:12px;font-family:inherit}
+  .list-overview{padding:10px 16px;border-bottom:1px solid var(--nz-border);display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:11px}
+  .ov-chip{display:inline-flex;align-items:center;gap:5px;padding:3px 9px;border-radius:11px;border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text-mute);cursor:pointer}
+  .ov-chip.active{background:rgba(31,111,235,.16);border-color:var(--nz-blue);color:var(--nz-accent)}
+  .ov-chip.warn{color:var(--nz-amber);border-color:rgba(210,153,34,.4);background:rgba(210,153,34,.08)}
+  .ov-chip .ov-num{font-weight:600;color:var(--nz-text-strong)}
+  .ov-chip.warn .ov-num{color:var(--nz-amber)}
+  .ov-chip.active .ov-num{color:var(--nz-accent)}
+  .ov-chip .ov-dot{width:6px;height:6px;border-radius:50%;background:var(--nz-green)}
+  .ov-chip.warn .ov-dot{background:var(--nz-amber)}
+
+  .list-rows{flex:1;overflow-y:auto;padding:6px 0}
+  .cj-row{display:grid;grid-template-columns:14px 1fr auto;gap:10px;align-items:center;padding:9px 16px;cursor:pointer;border-left:2px solid transparent}
+  .cj-row:hover{background:var(--nz-bg-1)}
+  .cj-row.selected{background:rgba(31,111,235,.1);border-left-color:var(--nz-blue)}
+  .cj-row .cj-status{width:8px;height:8px;border-radius:50%;background:var(--nz-green);justify-self:center}
+  .cj-row .cj-status.running{background:var(--nz-blue);box-shadow:0 0 0 4px rgba(31,111,235,.18);animation:pulse 1.4s infinite}
+  .cj-row .cj-status.failed{background:var(--nz-red)}
+  .cj-row .cj-status.warn{background:var(--nz-amber)}
+  @keyframes pulse{0%,100%{box-shadow:0 0 0 4px rgba(31,111,235,.25)}50%{box-shadow:0 0 0 7px rgba(31,111,235,.05)}}
+  .cj-main{min-width:0;display:flex;flex-direction:column;gap:2px}
+  .cj-name{color:var(--nz-text-strong);font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .cj-row.selected .cj-name{color:var(--nz-accent)}
+  .cj-sub{font-size:11px;color:var(--nz-text-mute);display:flex;gap:6px;align-items:center;white-space:nowrap;overflow:hidden}
+  .cj-sub .cj-sched{color:var(--nz-text-faint)}
+  .cj-sub .cj-sep{color:var(--nz-text-faint);opacity:.5}
+  .cj-sub .cj-when.imminent{color:var(--nz-accent);font-weight:600}
+  .cj-sub .cj-when.running{color:var(--nz-blue);font-weight:600}
+  .cj-sub .cj-when.warn{color:var(--nz-amber)}
+  .cj-right{display:flex;align-items:center;gap:8px;flex-shrink:0}
+  .cj-rate{font-size:10px;font-variant-numeric:tabular-nums;padding:2px 7px;border-radius:8px;background:rgba(63,185,80,.12);color:var(--nz-green);border:1px solid rgba(63,185,80,.3)}
+  .cj-rate.warn{background:rgba(210,153,34,.12);color:var(--nz-amber);border-color:rgba(210,153,34,.3)}
+  .cj-running-badge{font-size:10px;padding:2px 7px;border-radius:8px;background:rgba(31,111,235,.18);color:var(--nz-accent);border:1px solid rgba(31,111,235,.4)}
+
+  .col-detail{flex:1;display:flex;flex-direction:column;background:var(--nz-bg-0);min-width:0}
+  .det-head{padding:14px 22px 12px;border-bottom:1px solid var(--nz-border);display:flex;align-items:flex-start;gap:12px}
+  .det-head .dh-title{flex:1;min-width:0}
+  .det-head h2{font-size:18px;font-weight:600;color:var(--nz-text-strong);margin-bottom:4px;display:flex;align-items:center;gap:8px}
+  .det-head h2 .dh-status{width:10px;height:10px;border-radius:50%;background:var(--nz-green);flex-shrink:0}
+  .det-head .dh-meta{font-size:12px;color:var(--nz-text-mute);display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+  .det-head .dh-meta .dh-chip{font-size:11px;color:var(--nz-text-mute);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:4px;padding:1px 6px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+  .det-head .dh-actions{display:flex;gap:6px}
+  .det-head .dh-icon-btn{width:30px;height:30px;border-radius:6px;border:1px solid var(--nz-border);background:transparent;color:var(--nz-text-mute);cursor:pointer;font-size:14px;display:inline-flex;align-items:center;justify-content:center}
+
+  .det-cockpit{padding:16px 22px;border-bottom:1px solid var(--nz-border);display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:12px;background:linear-gradient(180deg,rgba(31,111,235,.04),transparent)}
+  .kpi{padding:12px 14px;border-radius:8px;border:1px solid var(--nz-border);background:var(--nz-bg-1)}
+  .kpi.primary{background:linear-gradient(135deg,rgba(31,111,235,.12),rgba(31,111,235,.04));border-color:rgba(31,111,235,.4)}
+  .kpi-label{font-size:10px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px}
+  .kpi-value{font-size:22px;color:var(--nz-text-strong);font-weight:600;font-variant-numeric:tabular-nums;line-height:1.1}
+  .kpi.primary .kpi-value{color:var(--nz-accent)}
+  .kpi-sub{font-size:11px;color:var(--nz-text-faint);margin-top:3px}
+
+  .det-prompt{padding:12px 22px;border-bottom:1px solid var(--nz-border)}
+  .det-prompt-row{display:flex;align-items:center;gap:8px;cursor:pointer}
+  .det-prompt-label{font-size:10px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px}
+  .det-prompt-preview{flex:1;font-size:12px;color:var(--nz-text);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+  .det-prompt-toggle{font-size:11px;color:var(--nz-accent);cursor:pointer;flex-shrink:0}
+
+  .det-history{flex:1;overflow-y:auto;padding:14px 22px}
+  .hist-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:10px}
+  .hist-head h3{font-size:13px;color:var(--nz-text-strong);font-weight:600}
+  .hist-filter{display:flex;gap:5px}
+  .hist-filter .ov-chip{font-size:10px;padding:2px 7px}
+  .hist-rows{border:1px solid var(--nz-border);border-radius:6px;background:var(--nz-bg-1);overflow:hidden}
+  .hist-row{display:grid;grid-template-columns:18px 60px 1fr 80px 80px 16px;gap:10px;align-items:center;padding:9px 12px;border-bottom:1px solid var(--nz-border);font-size:12px;cursor:pointer}
+  .hist-row:last-child{border-bottom:none}
+  .hist-row:hover{background:var(--nz-bg-2)}
+  .hist-row.selected{background:rgba(31,111,235,.12);box-shadow:inset 3px 0 0 var(--nz-accent)}
+  .hist-row .hr-dot{width:8px;height:8px;border-radius:50%;background:var(--nz-green);justify-self:center}
+  .hist-row .hr-dot.fail{background:var(--nz-red)}
+  .hist-row .hr-dot.run{background:var(--nz-blue);animation:pulse 1.4s infinite}
+  .hist-row .hr-status{font-size:11px;font-weight:500;color:var(--nz-green)}
+  .hist-row .hr-status.fail{color:var(--nz-red)}
+  .hist-row .hr-status.run{color:var(--nz-accent)}
+  .hist-row .hr-meta{color:var(--nz-text-mute);font-size:11px}
+  .hist-row .hr-meta .hr-id{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-0);border:1px solid var(--nz-border);padding:0 4px;border-radius:3px;font-size:10px;margin-left:6px}
+  .hist-row .hr-trigger{font-size:10px;color:var(--nz-text-faint);text-transform:uppercase;letter-spacing:.3px}
+  .hist-row .hr-dur{text-align:right;color:var(--nz-text);font-variant-numeric:tabular-nums;font-size:11px}
+  .hist-row .hr-arrow{color:var(--nz-text-faint);font-size:11px}
+
+  .det-actions{padding:12px 22px;border-top:1px solid var(--nz-border);background:var(--nz-bg-1);display:flex;align-items:center;gap:8px}
+  .det-actions .da-primary{padding:8px 18px;border-radius:6px;border:1px solid var(--nz-blue);background:var(--nz-blue);color:white;cursor:pointer;font-size:13px;font-weight:500;font-family:inherit;display:inline-flex;align-items:center;gap:6px}
+  .det-actions .da-btn{padding:7px 12px;border-radius:6px;border:1px solid var(--nz-border);background:transparent;color:var(--nz-text);cursor:pointer;font-size:13px;font-family:inherit}
+  .det-actions .da-danger{margin-left:auto;color:var(--nz-red);border-color:rgba(248,81,73,.4)}
+
+  .running-banner{padding:14px 22px;background:linear-gradient(135deg,rgba(31,111,235,.18),rgba(31,111,235,.06));border-bottom:1px solid rgba(31,111,235,.4);display:flex;align-items:center;gap:14px}
+  .rb-clock{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-variant-numeric:tabular-nums;font-size:28px;color:var(--nz-accent);font-weight:600;line-height:1}
+  .rb-info{flex:1}
+  .rb-state{font-size:13px;color:var(--nz-text-strong);font-weight:600;display:flex;align-items:center;gap:8px;margin-bottom:3px}
+  .rb-state::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--nz-blue);box-shadow:0 0 0 4px rgba(31,111,235,.25);animation:pulse 1.4s infinite}
+  .rb-detail{font-size:11px;color:var(--nz-text-mute)}
+  .rb-abort{padding:7px 14px;border-radius:6px;border:1px solid var(--nz-red);background:transparent;color:var(--nz-red);cursor:pointer;font-size:12px;font-family:inherit}
+
+  /* ===== run-detail-sheet (覆盖详情区右侧) ===== */
+  .run-sheet{position:absolute;top:0;right:0;bottom:0;width:55%;min-width:560px;background:var(--nz-bg-0);border-left:1px solid var(--nz-border);box-shadow:-12px 0 32px rgba(0,0,0,.5);display:flex;flex-direction:column;z-index:10;animation:slideIn .25s ease}
+  @keyframes slideIn{from{transform:translateX(100%)}to{transform:translateX(0)}}
+
+  .rs-head{padding:14px 18px 12px;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-1);display:flex;align-items:flex-start;gap:12px}
+  .rs-head-main{flex:1;min-width:0}
+  .rs-head-title{display:flex;align-items:center;gap:8px;margin-bottom:4px}
+  .rs-head-title .rs-status-pill{font-size:11px;padding:2px 9px;border-radius:11px;font-weight:600;letter-spacing:.3px;text-transform:uppercase}
+  .rs-head-title .rs-status-pill.ok{background:rgba(63,185,80,.15);color:var(--nz-green);border:1px solid rgba(63,185,80,.4)}
+  .rs-head-title .rs-status-pill.fail{background:rgba(248,81,73,.15);color:var(--nz-red);border:1px solid rgba(248,81,73,.4)}
+  .rs-head-title .rs-status-pill.run{background:rgba(31,111,235,.15);color:var(--nz-accent);border:1px solid rgba(31,111,235,.4)}
+  .rs-head-title h3{font-size:14px;color:var(--nz-text-strong);font-weight:600}
+  .rs-head-meta{font-size:11px;color:var(--nz-text-mute);display:flex;gap:8px;align-items:center;flex-wrap:wrap}
+  .rs-head-meta .dh-chip{font-size:10px;color:var(--nz-text-mute);background:var(--nz-bg-0);border:1px solid var(--nz-border);border-radius:3px;padding:1px 5px;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+  .rs-head-actions{display:flex;gap:4px;flex-shrink:0}
+  .rs-head-actions .rs-icon-btn{width:30px;height:30px;border-radius:6px;border:1px solid var(--nz-border);background:transparent;color:var(--nz-text-mute);cursor:pointer;font-size:14px;display:inline-flex;align-items:center;justify-content:center}
+  .rs-head-actions .rs-icon-btn:hover{color:var(--nz-text-strong);background:var(--nz-bg-2)}
+
+  /* run-stats grid: 6 个紧凑数字块 */
+  .rs-stats{padding:10px 18px;border-bottom:1px solid var(--nz-border);display:grid;grid-template-columns:repeat(4,1fr);gap:0;background:var(--nz-bg-1)}
+  .rs-stat{padding:8px 12px;border-right:1px solid var(--nz-border)}
+  .rs-stat:last-child{border-right:none}
+  .rs-stat-label{font-size:10px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:2px}
+  .rs-stat-value{font-size:14px;color:var(--nz-text-strong);font-weight:600;font-variant-numeric:tabular-nums}
+  .rs-stat-value.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+  .rs-stat-sub{font-size:10px;color:var(--nz-text-faint);margin-top:1px}
+
+  /* tab bar */
+  .rs-tabs{display:flex;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-0);padding:0 18px;gap:18px;flex-shrink:0}
+  .rs-tab{padding:10px 0 10px;font-size:12px;color:var(--nz-text-mute);cursor:pointer;border-bottom:2px solid transparent;display:inline-flex;align-items:center;gap:5px;font-weight:500}
+  .rs-tab:hover{color:var(--nz-text)}
+  .rs-tab.active{color:var(--nz-accent);border-bottom-color:var(--nz-accent)}
+  .rs-tab .tab-count{font-size:10px;background:var(--nz-bg-2);color:var(--nz-text-mute);padding:1px 6px;border-radius:8px;font-weight:500}
+  .rs-tab.active .tab-count{background:rgba(31,111,235,.18);color:var(--nz-accent)}
+
+  /* sheet body — conversation timeline */
+  .rs-body{flex:1;overflow-y:auto;padding:16px 18px}
+
+  /* turn block */
+  .turn{margin-bottom:14px;display:flex;gap:10px}
+  .turn-avatar{width:24px;height:24px;border-radius:6px;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;flex-shrink:0;color:white}
+  .turn-avatar.user{background:#444c56}
+  .turn-avatar.assistant{background:linear-gradient(135deg,#1f6feb,#a371f7)}
+  .turn-avatar.tool{background:var(--nz-bg-2);color:var(--nz-amber);border:1px solid var(--nz-border)}
+  .turn-body{flex:1;min-width:0}
+  .turn-head{display:flex;align-items:baseline;gap:8px;margin-bottom:5px;font-size:11px}
+  .turn-role{color:var(--nz-text-strong);font-weight:600}
+  .turn-time{color:var(--nz-text-faint);font-variant-numeric:tabular-nums}
+  .turn-tokens{margin-left:auto;color:var(--nz-text-faint);font-variant-numeric:tabular-nums}
+  .turn-content{font-size:13px;color:var(--nz-text);line-height:1.6}
+  .turn-content p{margin-bottom:8px}
+  .turn-content code{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;background:var(--nz-bg-1);border:1px solid var(--nz-border);padding:1px 5px;border-radius:3px;font-size:12px}
+  .turn-content ul{margin:6px 0 6px 20px}
+  .turn-content li{margin-bottom:3px}
+  .turn-content strong{color:var(--nz-text-strong)}
+
+  /* tool call block */
+  .tool-call{border:1px solid var(--nz-border);border-radius:6px;background:var(--nz-bg-1);margin-bottom:8px;overflow:hidden}
+  .tool-call-head{padding:8px 12px;display:flex;align-items:center;gap:8px;font-size:12px;cursor:pointer;background:var(--nz-bg-1)}
+  .tool-call-head:hover{background:var(--nz-bg-2)}
+  .tool-call-icon{width:18px;height:18px;border-radius:4px;background:var(--nz-bg-2);color:var(--nz-amber);display:inline-flex;align-items:center;justify-content:center;font-size:11px;flex-shrink:0;border:1px solid var(--nz-border)}
+  .tool-call-name{color:var(--nz-text-strong);font-weight:500;font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
+  .tool-call-summary{color:var(--nz-text-mute);font-size:11px;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
+  .tool-call-status{font-size:10px;color:var(--nz-green);background:rgba(63,185,80,.12);border:1px solid rgba(63,185,80,.3);padding:1px 6px;border-radius:8px}
+  .tool-call-status.fail{color:var(--nz-red);background:rgba(248,81,73,.12);border-color:rgba(248,81,73,.3)}
+  .tool-call-dur{font-size:10px;color:var(--nz-text-faint);font-variant-numeric:tabular-nums}
+  .tool-call-toggle{color:var(--nz-text-faint);font-size:10px;margin-left:4px}
+  .tool-call-body{padding:10px 12px;border-top:1px solid var(--nz-border);background:var(--nz-bg-0);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:11px;color:var(--nz-text);white-space:pre-wrap;line-height:1.55;max-height:240px;overflow-y:auto}
+  .tool-call-body .tc-key{color:var(--nz-text-mute)}
+  .tool-call-body .tc-out{color:var(--nz-text);border-top:1px dashed var(--nz-border);margin-top:6px;padding-top:6px}
+  .tool-call-body .tc-truncated{color:var(--nz-text-faint);font-style:italic;font-size:10px;margin-top:4px}
+
+  /* error box */
+  .err-box{border:1px solid rgba(248,81,73,.4);border-radius:6px;background:rgba(248,81,73,.08);padding:12px 14px;margin-bottom:12px}
+  .err-box-head{font-size:11px;color:var(--nz-red);text-transform:uppercase;letter-spacing:.4px;margin-bottom:6px;font-weight:600}
+  .err-box-body{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;color:var(--nz-text);white-space:pre-wrap;line-height:1.5}
+
+  /* sheet footer — actions */
+  .rs-foot{padding:10px 18px;border-top:1px solid var(--nz-border);background:var(--nz-bg-1);display:flex;align-items:center;gap:8px;flex-shrink:0}
+  .rs-foot .rs-foot-info{flex:1;font-size:11px;color:var(--nz-text-mute)}
+  .rs-foot button{padding:6px 12px;border-radius:5px;border:1px solid var(--nz-border);background:transparent;color:var(--nz-text);cursor:pointer;font-size:12px;font-family:inherit}
+  .rs-foot button:hover{background:var(--nz-bg-2);color:var(--nz-text-strong)}
+  .rs-foot button.primary{border-color:var(--nz-accent);color:var(--nz-accent)}
+  .rs-foot button.primary:hover{background:rgba(31,111,235,.12)}
+
+  /* live-streaming pulse for running runs */
+  .streaming-cursor{display:inline-block;width:8px;height:14px;background:var(--nz-accent);vertical-align:text-bottom;margin-left:2px;animation:cursorBlink 1s steps(2) infinite}
+  @keyframes cursorBlink{50%{opacity:0}}
+
+  .annotations{margin-top:24px;padding:18px 22px;background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:10px}
+  .annotations h3{font-size:13px;color:var(--nz-text-strong);font-weight:600;margin-bottom:10px}
+  .annotations ol{margin-left:18px;color:var(--nz-text-mute);font-size:12px;line-height:1.7}
+  .annotations ol li strong{color:var(--nz-text);font-weight:500}
+
+  .pager{position:absolute;top:50%;transform:translateY(-50%);background:var(--nz-bg-2);border:1px solid var(--nz-border);color:var(--nz-text-mute);width:30px;height:30px;border-radius:50%;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:14px;z-index:11}
+  .pager.prev{left:-15px}
+  .pager.next{right:calc(55% - 15px)}
+  .pager:hover{background:var(--nz-bg-1);color:var(--nz-text-strong)}
+</style>
+</head>
+<body>
+
+<h1>Cron Dashboard 改版 mockup</h1>
+<p class="lede">三个状态：<code>idle</code>（默认浏览）/ <code>running</code>（任务执行中）/ <code>run-detail</code>（点开某次运行查看细节）。重点放在「执行细节」展示。</p>
+
+<!-- ============= 状态 1 ============= -->
+<div class="section-title">状态 1：idle <span class="tag">默认浏览 · 历史只列表无图</span></div>
+
+<div class="shell">
+
+  <div class="col-projects">
+    <div class="pj-logo">脑汁</div>
+    <div class="pj-icon">N</div>
+    <div class="pj-icon">E</div>
+    <div class="pj-icon active">⏱</div>
+    <div class="pj-icon">G<span class="pj-dot"></span></div>
+    <div class="pj-icon">B</div>
+    <div class="pj-icon">R</div>
+    <div class="pj-icon">J</div>
+    <div class="pj-expand">»</div>
+  </div>
+
+  <div class="col-list">
+    <div class="list-header">
+      <h2>定时任务</h2>
+      <button class="lh-new">+ 新建</button>
+    </div>
+    <div class="list-overview">
+      <span class="ov-chip active"><span class="ov-num">4</span>全部</span>
+      <span class="ov-chip"><span class="ov-dot"></span><span class="ov-num">3</span>健康</span>
+      <span class="ov-chip warn"><span class="ov-dot"></span><span class="ov-num">1</span>需关注</span>
+      <span class="ov-chip"><span class="ov-num">1</span>运行中</span>
+    </div>
+    <div class="list-rows">
+      <div class="cj-row selected">
+        <span class="cj-status"></span>
+        <div class="cj-main">
+          <div class="cj-name">[Naozhi] 每日打 tag 并检查 release</div>
+          <div class="cj-sub"><span class="cj-sched">每天 03:00</span><span class="cj-sep">·</span><span class="cj-when imminent">明早 03:00 · 4h 12m</span></div>
+        </div>
+        <div class="cj-right"><span class="cj-rate">100%</span></div>
+      </div>
+      <div class="cj-row">
+        <span class="cj-status running"></span>
+        <div class="cj-main">
+          <div class="cj-name">[Naozhi] 每日 12:00 体检</div>
+          <div class="cj-sub"><span class="cj-sched">每天 12:00</span><span class="cj-sep">·</span><span class="cj-when running">运行中 12m 52s</span></div>
+        </div>
+        <div class="cj-right"><span class="cj-rate warn">92%</span></div>
+      </div>
+      <div class="cj-row">
+        <span class="cj-status running"></span>
+        <div class="cj-main">
+          <div class="cj-name">[Naozhi] 每小时拉取上游变更</div>
+          <div class="cj-sub"><span class="cj-sched">每小时</span><span class="cj-sep">·</span><span class="cj-when running">运行中 12m 52s</span></div>
+        </div>
+        <div class="cj-right"><span class="cj-rate">100%</span></div>
+      </div>
+      <div class="cj-row">
+        <span class="cj-status warn"></span>
+        <div class="cj-main">
+          <div class="cj-name">[...] 每小时 dashboard 巡检</div>
+          <div class="cj-sub"><span class="cj-sched">每小时</span><span class="cj-sep">·</span><span class="cj-when warn">逾期 53m · 上次失败</span></div>
+        </div>
+        <div class="cj-right"><span class="cj-rate warn">98%</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-detail">
+    <div class="det-head">
+      <div class="dh-title">
+        <h2><span class="dh-status"></span>[Naozhi] 每日打 tag 并检查 release</h2>
+        <div class="dh-meta">
+          <span>每天 03:00</span><span>·</span>
+          <span class="dh-chip">id 0d0e2437</span><span>·</span>
+          <span>已运行 5 次</span>
+        </div>
+      </div>
+      <div class="dh-actions">
+        <button class="dh-icon-btn">✎</button>
+        <button class="dh-icon-btn">‖</button>
+        <button class="dh-icon-btn">⋯</button>
+      </div>
+    </div>
+
+    <div class="det-cockpit">
+      <div class="kpi primary">
+        <div class="kpi-label">下次运行</div>
+        <div class="kpi-value">4h 12m</div>
+        <div class="kpi-sub">明早 5月23日 03:00</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">成功率</div>
+        <div class="kpi-value">100%</div>
+        <div class="kpi-sub">5 / 5 次成功</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">平均耗时</div>
+        <div class="kpi-value">3m 15s</div>
+        <div class="kpi-sub">上次 3m 44s</div>
+      </div>
+      <div class="kpi">
+        <div class="kpi-label">上次结果</div>
+        <div class="kpi-value" style="color:var(--nz-green)">成功</div>
+        <div class="kpi-sub">昨日 03:00</div>
+      </div>
+    </div>
+
+    <div class="det-prompt">
+      <div class="det-prompt-row">
+        <span class="det-prompt-label">提示词</span>
+        <span class="det-prompt-preview">你是 naozhi 项目的每日发版机器人，仓库 KevinZhao/naozhi，工作目录 /home/ec2-user/...</span>
+        <span class="det-prompt-toggle">展开 ▾</span>
+      </div>
+    </div>
+
+    <div class="det-history">
+      <div class="hist-head">
+        <h3>执行历史 · 5 次</h3>
+        <div class="hist-filter">
+          <span class="ov-chip active">全部</span>
+          <span class="ov-chip">仅失败</span>
+          <span class="ov-chip">手动</span>
+        </div>
+      </div>
+
+      <div class="hist-rows">
+        <div class="hist-row">
+          <span class="hr-dot"></span><span class="hr-status">成功</span>
+          <span class="hr-meta">5月21日 03:00 <span class="hr-id">d37f96da</span></span>
+          <span class="hr-trigger">scheduled</span><span class="hr-dur">3m 44s</span>
+          <span class="hr-arrow">›</span>
+        </div>
+        <div class="hist-row">
+          <span class="hr-dot"></span><span class="hr-status">成功</span>
+          <span class="hr-meta">5月20日 03:00 <span class="hr-id">95686357</span></span>
+          <span class="hr-trigger">scheduled</span><span class="hr-dur">3m 56s</span>
+          <span class="hr-arrow">›</span>
+        </div>
+        <div class="hist-row">
+          <span class="hr-dot"></span><span class="hr-status">成功</span>
+          <span class="hr-meta">5月19日 13:22 <span class="hr-id">b3b68b71</span></span>
+          <span class="hr-trigger">manual</span><span class="hr-dur">28.5s</span>
+          <span class="hr-arrow">›</span>
+        </div>
+        <div class="hist-row">
+          <span class="hr-dot"></span><span class="hr-status">成功</span>
+          <span class="hr-meta">5月19日 03:00 <span class="hr-id">e11d6138</span></span>
+          <span class="hr-trigger">scheduled</span><span class="hr-dur">1m 17s</span>
+          <span class="hr-arrow">›</span>
+        </div>
+        <div class="hist-row">
+          <span class="hr-dot"></span><span class="hr-status">成功</span>
+          <span class="hr-meta">5月18日 03:00 <span class="hr-id">31afcf74</span></span>
+          <span class="hr-trigger">scheduled</span><span class="hr-dur">3m 22s</span>
+          <span class="hr-arrow">›</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="det-actions">
+      <button class="da-primary">▶ 立即执行</button>
+      <button class="da-btn">‖ 暂停</button>
+      <button class="da-btn">✎ 编辑</button>
+      <button class="da-btn da-danger">🗑 删除</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============= 状态 2 ============= -->
+<div class="section-title">状态 2：run-detail <span class="tag">点击某次运行 → 右滑覆盖详情区</span></div>
+
+<div class="shell">
+
+  <div class="col-projects">
+    <div class="pj-logo">脑汁</div>
+    <div class="pj-icon">N</div>
+    <div class="pj-icon">E</div>
+    <div class="pj-icon active">⏱</div>
+    <div class="pj-icon">G<span class="pj-dot"></span></div>
+    <div class="pj-icon">B</div>
+    <div class="pj-icon">R</div>
+    <div class="pj-icon">J</div>
+    <div class="pj-expand">»</div>
+  </div>
+
+  <div class="col-list">
+    <div class="list-header"><h2>定时任务</h2><button class="lh-new">+ 新建</button></div>
+    <div class="list-overview">
+      <span class="ov-chip active"><span class="ov-num">4</span>全部</span>
+      <span class="ov-chip"><span class="ov-dot"></span><span class="ov-num">3</span>健康</span>
+      <span class="ov-chip warn"><span class="ov-dot"></span><span class="ov-num">1</span>需关注</span>
+      <span class="ov-chip"><span class="ov-num">1</span>运行中</span>
+    </div>
+    <div class="list-rows">
+      <div class="cj-row selected">
+        <span class="cj-status"></span>
+        <div class="cj-main">
+          <div class="cj-name">[Naozhi] 每日打 tag 并检查 release</div>
+          <div class="cj-sub"><span class="cj-sched">每天 03:00</span><span class="cj-sep">·</span><span class="cj-when imminent">明早 03:00 · 4h 12m</span></div>
+        </div>
+        <div class="cj-right"><span class="cj-rate">100%</span></div>
+      </div>
+      <div class="cj-row"><span class="cj-status running"></span><div class="cj-main"><div class="cj-name">[Naozhi] 每日 12:00 体检</div><div class="cj-sub"><span class="cj-sched">每天 12:00</span><span class="cj-sep">·</span><span class="cj-when running">运行中 12m 52s</span></div></div><div class="cj-right"><span class="cj-rate warn">92%</span></div></div>
+      <div class="cj-row"><span class="cj-status running"></span><div class="cj-main"><div class="cj-name">[Naozhi] 每小时拉取上游变更</div><div class="cj-sub"><span class="cj-sched">每小时</span><span class="cj-sep">·</span><span class="cj-when running">运行中 12m 52s</span></div></div><div class="cj-right"><span class="cj-rate">100%</span></div></div>
+      <div class="cj-row"><span class="cj-status warn"></span><div class="cj-main"><div class="cj-name">[...] 每小时 dashboard 巡检</div><div class="cj-sub"><span class="cj-sched">每小时</span><span class="cj-sep">·</span><span class="cj-when warn">逾期 53m</span></div></div><div class="cj-right"><span class="cj-rate warn">98%</span></div></div>
+    </div>
+  </div>
+
+  <div class="col-detail">
+    <!-- 底层 detail 还在，run-sheet 在右侧叠上 -->
+    <div class="det-head">
+      <div class="dh-title">
+        <h2><span class="dh-status"></span>[Naozhi] 每日打 tag 并检查 release</h2>
+        <div class="dh-meta"><span>每天 03:00</span><span>·</span><span class="dh-chip">id 0d0e2437</span></div>
+      </div>
+    </div>
+    <div class="det-cockpit">
+      <div class="kpi primary"><div class="kpi-label">下次运行</div><div class="kpi-value">4h 12m</div><div class="kpi-sub">明早 03:00</div></div>
+      <div class="kpi"><div class="kpi-label">成功率</div><div class="kpi-value">100%</div><div class="kpi-sub">5 / 5</div></div>
+      <div class="kpi"><div class="kpi-label">平均耗时</div><div class="kpi-value">3m 15s</div><div class="kpi-sub">上次 3m 44s</div></div>
+      <div class="kpi"><div class="kpi-label">上次结果</div><div class="kpi-value" style="color:var(--nz-green)">成功</div><div class="kpi-sub">昨日</div></div>
+    </div>
+    <div class="det-history">
+      <div class="hist-head"><h3>执行历史 · 5 次</h3><div class="hist-filter"><span class="ov-chip active">全部</span><span class="ov-chip">失败</span></div></div>
+      <div class="hist-rows">
+        <div class="hist-row selected"><span class="hr-dot"></span><span class="hr-status">成功</span><span class="hr-meta">5月21日 03:00 <span class="hr-id">d37f96da</span></span><span class="hr-trigger">scheduled</span><span class="hr-dur">3m 44s</span><span class="hr-arrow">›</span></div>
+        <div class="hist-row"><span class="hr-dot"></span><span class="hr-status">成功</span><span class="hr-meta">5月20日 03:00 <span class="hr-id">95686357</span></span><span class="hr-trigger">scheduled</span><span class="hr-dur">3m 56s</span><span class="hr-arrow">›</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- run-detail-sheet — 重头戏 -->
+  <div class="run-sheet">
+
+    <div class="rs-head">
+      <div class="rs-head-main">
+        <div class="rs-head-title">
+          <span class="rs-status-pill ok">成功</span>
+          <h3>2026-05-21 03:00:00</h3>
+        </div>
+        <div class="rs-head-meta">
+          <span>5 / 5 次运行</span><span>·</span>
+          <span>触发方式</span><span class="dh-chip">scheduled</span><span>·</span>
+          <span class="dh-chip">run d37f96da</span>
+        </div>
+      </div>
+      <div class="rs-head-actions">
+        <button class="rs-icon-btn" title="复制全文">⎘</button>
+        <button class="rs-icon-btn" title="重跑此 run">↻</button>
+        <button class="rs-icon-btn" title="关闭">×</button>
+      </div>
+    </div>
+
+    <!-- 关键 stats -->
+    <div class="rs-stats">
+      <div class="rs-stat">
+        <div class="rs-stat-label">耗时</div>
+        <div class="rs-stat-value">3m 44s</div>
+        <div class="rs-stat-sub">03:00:01 → 03:03:45</div>
+      </div>
+      <div class="rs-stat">
+        <div class="rs-stat-label">Tokens</div>
+        <div class="rs-stat-value">14.2k</div>
+        <div class="rs-stat-sub">in 8.1k · out 6.1k</div>
+      </div>
+      <div class="rs-stat">
+        <div class="rs-stat-label">工具调用</div>
+        <div class="rs-stat-value">7</div>
+        <div class="rs-stat-sub">bash 4 · read 2 · edit 1</div>
+      </div>
+      <div class="rs-stat">
+        <div class="rs-stat-label">Session</div>
+        <div class="rs-stat-value mono" style="color:var(--nz-accent);cursor:pointer">a7f9b2e1 ↗</div>
+        <div class="rs-stat-sub">点击跳转完整对话</div>
+      </div>
+    </div>
+
+    <!-- tabs -->
+    <div class="rs-tabs">
+      <span class="rs-tab active">对话 <span class="tab-count">12</span></span>
+      <span class="rs-tab">工具调用 <span class="tab-count">7</span></span>
+      <span class="rs-tab">提示词</span>
+      <span class="rs-tab">原始日志</span>
+    </div>
+
+    <!-- body — conversation timeline -->
+    <div class="rs-body">
+
+      <!-- prompt summary -->
+      <div class="turn">
+        <div class="turn-avatar user">U</div>
+        <div class="turn-body">
+          <div class="turn-head">
+            <span class="turn-role">提示词</span>
+            <span class="turn-time">03:00:01</span>
+          </div>
+          <div class="turn-content" style="color:var(--nz-text-mute);font-size:12px;font-style:italic">
+            你是 naozhi 项目的每日发版机器人，仓库 KevinZhao/naozhi，工作目录 /home/ec2-user/workspace/naozhi。严格按下列步骤执行，任何失败立即停止并给出简洁报告。
+            <span style="color:var(--nz-accent);cursor:pointer;font-style:normal">查看完整 ›</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- assistant turn 1 -->
+      <div class="turn">
+        <div class="turn-avatar assistant">C</div>
+        <div class="turn-body">
+          <div class="turn-head">
+            <span class="turn-role">Claude</span>
+            <span class="turn-time">03:00:04</span>
+            <span class="turn-tokens">+ 1.2k</span>
+          </div>
+          <div class="turn-content">
+            <p>开始执行每日发版检查。先拉取最新 master 并获取 tag 信息。</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- tool call: bash git fetch -->
+      <div class="turn">
+        <div class="turn-avatar tool">⚙</div>
+        <div class="turn-body">
+          <div class="tool-call">
+            <div class="tool-call-head">
+              <span class="tool-call-icon">$</span>
+              <span class="tool-call-name">Bash</span>
+              <span class="tool-call-summary">git fetch --tags origin master</span>
+              <span class="tool-call-status">成功</span>
+              <span class="tool-call-dur">2.1s</span>
+              <span class="tool-call-toggle">▾</span>
+            </div>
+            <div class="tool-call-body"><span class="tc-key">command</span> git fetch --tags origin master
+<span class="tc-key">timeout</span> 30000ms
+<div class="tc-out">From github.com:KevinZhao/naozhi
+ * branch              master     -> FETCH_HEAD
+   eada4af..f4b4739    master     -> origin/master</div></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- tool call: bash list tags -->
+      <div class="turn">
+        <div class="turn-avatar tool">⚙</div>
+        <div class="turn-body">
+          <div class="tool-call">
+            <div class="tool-call-head">
+              <span class="tool-call-icon">$</span>
+              <span class="tool-call-name">Bash</span>
+              <span class="tool-call-summary">git tag --sort=-v:refname | grep ... | head -1</span>
+              <span class="tool-call-status">成功</span>
+              <span class="tool-call-dur">0.4s</span>
+              <span class="tool-call-toggle">▸</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- assistant turn 2 -->
+      <div class="turn">
+        <div class="turn-avatar assistant">C</div>
+        <div class="turn-body">
+          <div class="turn-head">
+            <span class="turn-role">Claude</span>
+            <span class="turn-time">03:00:09</span>
+            <span class="turn-tokens">+ 2.4k</span>
+          </div>
+          <div class="turn-content">
+            <p>最近 tag 是 <code>v0.27.4</code>，自该 tag 起 master 有 <strong>14 个新提交</strong>。检查是否需要发版。</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- tool call: bash count commits -->
+      <div class="turn">
+        <div class="turn-avatar tool">⚙</div>
+        <div class="turn-body">
+          <div class="tool-call">
+            <div class="tool-call-head">
+              <span class="tool-call-icon">$</span>
+              <span class="tool-call-name">Bash</span>
+              <span class="tool-call-summary">git rev-list --count v0.27.4..origin/master</span>
+              <span class="tool-call-status">成功</span>
+              <span class="tool-call-dur">0.2s</span>
+              <span class="tool-call-toggle">▸</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- assistant final -->
+      <div class="turn">
+        <div class="turn-avatar assistant">C</div>
+        <div class="turn-body">
+          <div class="turn-head">
+            <span class="turn-role">Claude</span>
+            <span class="turn-time">03:03:42</span>
+            <span class="turn-tokens">+ 1.8k</span>
+          </div>
+          <div class="turn-content">
+            <p><strong>报告</strong></p>
+            <ul>
+              <li>master 自上次 tag (<code>v0.27.4</code>) 后有 14 次新提交</li>
+              <li>已打 tag <code>v0.27.5</code> 并 push 到 origin</li>
+              <li>GitHub Release 已创建：<code>v0.27.5</code></li>
+              <li>变更摘要：3 个 fix · 2 个 feat · 1 个 refactor</li>
+            </ul>
+            <p>所有步骤成功完成，无异常。</p>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
+    <div class="rs-foot">
+      <span class="rs-foot-info">上一次 5月20日 03:00 · 下一次 5月22日 03:00</span>
+      <button>‹ 上一次 run</button>
+      <button>下一次 run ›</button>
+      <button class="primary">↻ 重跑</button>
+    </div>
+
+  </div>
+</div>
+
+
+<!-- ============= 状态 3 ============= -->
+<div class="section-title">状态 3：run-detail · 失败 + 实时流 <span class="tag">查看正在运行的 run</span></div>
+
+<div class="shell">
+
+  <div class="col-projects">
+    <div class="pj-logo">脑汁</div>
+    <div class="pj-icon">N</div><div class="pj-icon">E</div><div class="pj-icon active">⏱</div>
+    <div class="pj-icon">G<span class="pj-dot"></span></div><div class="pj-icon">B</div>
+    <div class="pj-icon">R</div><div class="pj-icon">J</div>
+    <div class="pj-expand">»</div>
+  </div>
+
+  <div class="col-list">
+    <div class="list-header"><h2>定时任务</h2><button class="lh-new">+ 新建</button></div>
+    <div class="list-overview">
+      <span class="ov-chip"><span class="ov-num">4</span>全部</span>
+      <span class="ov-chip"><span class="ov-dot"></span><span class="ov-num">3</span>健康</span>
+      <span class="ov-chip warn"><span class="ov-dot"></span><span class="ov-num">1</span>需关注</span>
+      <span class="ov-chip active"><span class="ov-num">1</span>运行中</span>
+    </div>
+    <div class="list-rows">
+      <div class="cj-row"><span class="cj-status"></span><div class="cj-main"><div class="cj-name">[Naozhi] 每日打 tag 并检查 release</div><div class="cj-sub"><span class="cj-sched">每天 03:00</span><span class="cj-sep">·</span><span class="cj-when">明早 4h 12m</span></div></div><div class="cj-right"><span class="cj-rate">100%</span></div></div>
+      <div class="cj-row selected"><span class="cj-status running"></span><div class="cj-main"><div class="cj-name">[Naozhi] 每日 12:00 体检</div><div class="cj-sub"><span class="cj-sched">每天 12:00</span><span class="cj-sep">·</span><span class="cj-when running">运行中 12m 52s</span></div></div><div class="cj-right"><span class="cj-running-badge">▶ 运行中</span></div></div>
+      <div class="cj-row"><span class="cj-status running"></span><div class="cj-main"><div class="cj-name">[Naozhi] 每小时拉取上游变更</div><div class="cj-sub"><span class="cj-sched">每小时</span><span class="cj-sep">·</span><span class="cj-when running">运行中 12m 52s</span></div></div><div class="cj-right"><span class="cj-rate">100%</span></div></div>
+      <div class="cj-row"><span class="cj-status warn"></span><div class="cj-main"><div class="cj-name">[...] 每小时 dashboard 巡检</div><div class="cj-sub"><span class="cj-sched">每小时</span><span class="cj-sep">·</span><span class="cj-when warn">逾期 53m</span></div></div><div class="cj-right"><span class="cj-rate warn">98%</span></div></div>
+    </div>
+  </div>
+
+  <div class="col-detail">
+    <div class="det-head">
+      <div class="dh-title">
+        <h2><span class="dh-status" style="background:var(--nz-blue);box-shadow:0 0 0 4px rgba(31,111,235,.25);animation:pulse 1.4s infinite"></span>[Naozhi] 每日 12:00 体检</h2>
+        <div class="dh-meta"><span>每天 12:00</span><span>·</span><span class="dh-chip">id b3b68b71</span></div>
+      </div>
+    </div>
+    <div class="running-banner">
+      <div class="rb-clock">12:52</div>
+      <div class="rb-info">
+        <div class="rb-state">正在执行 · 已 12 分 52 秒</div>
+        <div class="rb-detail">触发 manual · 1.2k tokens · 平均耗时 14m 30s · 预计剩余 ~2m</div>
+      </div>
+      <button class="rb-abort">■ 中止</button>
+    </div>
+    <div class="det-history">
+      <div class="hist-head"><h3>执行历史 · 14 次</h3><div class="hist-filter"><span class="ov-chip active">全部</span><span class="ov-chip warn">失败 1</span></div></div>
+      <div class="hist-rows">
+        <div class="hist-row selected"><span class="hr-dot run"></span><span class="hr-status run">运行中</span><span class="hr-meta">5月22日 12:00 <span class="hr-id">b3b68b71</span></span><span class="hr-trigger">scheduled</span><span class="hr-dur" style="color:var(--nz-accent)">12m 52s…</span><span class="hr-arrow">›</span></div>
+        <div class="hist-row"><span class="hr-dot"></span><span class="hr-status">成功</span><span class="hr-meta">5月21日 12:00 <span class="hr-id">a92c44e1</span></span><span class="hr-trigger">scheduled</span><span class="hr-dur">14m 02s</span><span class="hr-arrow">›</span></div>
+        <div class="hist-row"><span class="hr-dot fail"></span><span class="hr-status fail">失败</span><span class="hr-meta">5月20日 12:00 <span class="hr-id">88e0fa31</span></span><span class="hr-trigger">scheduled</span><span class="hr-dur">18s</span><span class="hr-arrow">›</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- run-detail sheet — 实时流 -->
+  <div class="run-sheet">
+    <div class="rs-head">
+      <div class="rs-head-main">
+        <div class="rs-head-title">
+          <span class="rs-status-pill run">运行中 · 实时</span>
+          <h3>2026-05-22 12:00:00</h3>
+        </div>
+        <div class="rs-head-meta">
+          <span>第 14 次运行</span><span>·</span>
+          <span>触发</span><span class="dh-chip">scheduled</span><span>·</span>
+          <span class="dh-chip">run b3b68b71</span>
+        </div>
+      </div>
+      <div class="rs-head-actions">
+        <button class="rs-icon-btn" title="自动跟随">⤓</button>
+        <button class="rs-icon-btn" title="中止">■</button>
+        <button class="rs-icon-btn">×</button>
+      </div>
+    </div>
+
+    <div class="rs-stats">
+      <div class="rs-stat"><div class="rs-stat-label">已运行</div><div class="rs-stat-value" style="color:var(--nz-accent)">12m 52s</div><div class="rs-stat-sub">12:00:01 → 实时</div></div>
+      <div class="rs-stat"><div class="rs-stat-label">Tokens (in/out)</div><div class="rs-stat-value">1.2k</div><div class="rs-stat-sub">实时累计</div></div>
+      <div class="rs-stat"><div class="rs-stat-label">工具调用</div><div class="rs-stat-value">3</div><div class="rs-stat-sub">bash 2 · read 1</div></div>
+      <div class="rs-stat"><div class="rs-stat-label">Session</div><div class="rs-stat-value mono" style="color:var(--nz-accent);cursor:pointer">b3b68b71 ↗</div><div class="rs-stat-sub">实时跟随</div></div>
+    </div>
+
+    <div class="rs-tabs">
+      <span class="rs-tab active">对话 <span class="tab-count">5</span></span>
+      <span class="rs-tab">工具调用 <span class="tab-count">3</span></span>
+      <span class="rs-tab">提示词</span>
+      <span class="rs-tab">原始日志</span>
+    </div>
+
+    <div class="rs-body">
+      <div class="turn">
+        <div class="turn-avatar user">U</div>
+        <div class="turn-body">
+          <div class="turn-head"><span class="turn-role">提示词</span><span class="turn-time">12:00:01</span></div>
+          <div class="turn-content" style="color:var(--nz-text-mute);font-size:12px;font-style:italic">你是 naozhi 项目的体检机器人，每天 12:00 检查 dashboard 健康，扫描错误日志... <span style="color:var(--nz-accent);cursor:pointer;font-style:normal">查看完整 ›</span></div>
+        </div>
+      </div>
+
+      <div class="turn">
+        <div class="turn-avatar assistant">C</div>
+        <div class="turn-body">
+          <div class="turn-head"><span class="turn-role">Claude</span><span class="turn-time">12:00:04</span><span class="turn-tokens">+ 0.4k</span></div>
+          <div class="turn-content"><p>开始体检，先检查 systemctl 状态。</p></div>
+        </div>
+      </div>
+
+      <div class="turn">
+        <div class="turn-avatar tool">⚙</div>
+        <div class="turn-body">
+          <div class="tool-call">
+            <div class="tool-call-head">
+              <span class="tool-call-icon">$</span>
+              <span class="tool-call-name">Bash</span>
+              <span class="tool-call-summary">systemctl status naozhi --no-pager</span>
+              <span class="tool-call-status">成功</span><span class="tool-call-dur">0.3s</span>
+              <span class="tool-call-toggle">▸</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="turn">
+        <div class="turn-avatar tool">⚙</div>
+        <div class="turn-body">
+          <div class="tool-call">
+            <div class="tool-call-head">
+              <span class="tool-call-icon">$</span>
+              <span class="tool-call-name">Bash</span>
+              <span class="tool-call-summary">journalctl -u naozhi --since "1h ago" | grep -i error</span>
+              <span class="tool-call-status fail">失败 · exit 1</span>
+              <span class="tool-call-dur">11m 02s</span>
+              <span class="tool-call-toggle">▾</span>
+            </div>
+            <div class="tool-call-body"><span class="tc-key">timeout</span> 60000ms
+<span class="tc-key">command</span> journalctl -u naozhi --since "1h ago" | grep -i error
+<div class="tc-out" style="color:var(--nz-amber)">⚠ 工具调用超时 (11m02s)，疑似 grep 阻塞
+exit code: 1
+stderr: command terminated by timeout</div></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="turn">
+        <div class="turn-avatar assistant">C</div>
+        <div class="turn-body">
+          <div class="turn-head"><span class="turn-role">Claude</span><span class="turn-time">12:11:08</span><span class="turn-tokens">+ 0.3k</span></div>
+          <div class="turn-content">
+            <p>journalctl 命令超时，尝试用更短窗口重试<span class="streaming-cursor"></span></p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="rs-foot">
+      <span class="rs-foot-info" style="color:var(--nz-accent)">● 实时流式中 · 自动跟随末尾</span>
+      <button>跳到顶部</button>
+      <button class="primary" style="border-color:var(--nz-red);color:var(--nz-red)">■ 中止本次</button>
+    </div>
+  </div>
+</div>
+
+
+<!-- ============= mobile section ============= -->
+<div class="section-title">Mobile <span class="tag">375×812 · 三个屏并排 stack 导航</span></div>
+<p class="lede" style="margin-bottom:18px">桌面是「列表 + 详情」并列，移动端改成 stack 导航：列表 → 任务详情 → run 细节，三屏来回切。run-sheet 桌面是右滑覆盖，移动端是全屏接管（背景仍是上一屏）。</p>
+
+<div class="mobile-row">
+
+  <!-- mobile screen 1: list -->
+  <div class="phone">
+    <div class="phone-notch"></div>
+    <div class="phone-screen">
+      <div class="m-status-bar"><span>9:41</span><span class="m-status-icons">●●●● 5G ▮</span></div>
+
+      <div class="m-app-head">
+        <button class="m-icon-btn" title="项目">☰</button>
+        <div class="m-head-title">
+          <div class="m-head-main">定时任务</div>
+          <div class="m-head-sub">naozhi · 4 个</div>
+        </div>
+        <button class="m-icon-btn" title="新建">+</button>
+      </div>
+
+      <div class="m-overview">
+        <span class="ov-chip active"><span class="ov-num">4</span>全部</span>
+        <span class="ov-chip"><span class="ov-dot"></span><span class="ov-num">3</span>健康</span>
+        <span class="ov-chip warn"><span class="ov-dot"></span><span class="ov-num">1</span>需关注</span>
+        <span class="ov-chip"><span class="ov-num">1</span>运行中</span>
+      </div>
+
+      <div class="m-list">
+        <div class="m-cj-row">
+          <span class="cj-status"></span>
+          <div class="cj-main">
+            <div class="cj-name">[Naozhi] 每日打 tag 并检查 release</div>
+            <div class="cj-sub"><span class="cj-sched">每天 03:00</span><span class="cj-sep">·</span><span class="cj-when imminent">明早 4h 12m</span></div>
+          </div>
+          <span class="cj-rate">100%</span>
+          <span class="m-arrow">›</span>
+        </div>
+        <div class="m-cj-row">
+          <span class="cj-status running"></span>
+          <div class="cj-main">
+            <div class="cj-name">[Naozhi] 每日 12:00 体检</div>
+            <div class="cj-sub"><span class="cj-when running">运行中 12m 52s</span></div>
+          </div>
+          <span class="cj-running-badge">▶</span>
+          <span class="m-arrow">›</span>
+        </div>
+        <div class="m-cj-row">
+          <span class="cj-status running"></span>
+          <div class="cj-main">
+            <div class="cj-name">[Naozhi] 每小时拉取上游变更</div>
+            <div class="cj-sub"><span class="cj-when running">运行中 12m 52s</span></div>
+          </div>
+          <span class="cj-rate">100%</span>
+          <span class="m-arrow">›</span>
+        </div>
+        <div class="m-cj-row">
+          <span class="cj-status warn"></span>
+          <div class="cj-main">
+            <div class="cj-name">[...] 每小时 dashboard 巡检</div>
+            <div class="cj-sub"><span class="cj-when warn">逾期 53m · 上次失败</span></div>
+          </div>
+          <span class="cj-rate warn">98%</span>
+          <span class="m-arrow">›</span>
+        </div>
+      </div>
+
+      <!-- bottom tab bar -->
+      <div class="m-tabbar">
+        <div class="m-tab"><span>💬</span><span>会话</span></div>
+        <div class="m-tab"><span>🤖</span><span>Agent</span></div>
+        <div class="m-tab active"><span>⏱</span><span>定时</span></div>
+        <div class="m-tab"><span>⋯</span><span>更多</span></div>
+      </div>
+    </div>
+    <div class="phone-caption">① 列表屏 — 列表 stack 整屏，每行 56px 触摸友好</div>
+  </div>
+
+  <!-- mobile screen 2: job detail -->
+  <div class="phone">
+    <div class="phone-notch"></div>
+    <div class="phone-screen">
+      <div class="m-status-bar"><span>9:41</span><span class="m-status-icons">●●●● 5G ▮</span></div>
+
+      <div class="m-app-head">
+        <button class="m-icon-btn">‹</button>
+        <div class="m-head-title">
+          <div class="m-head-main" style="font-size:13px">每日打 tag 并检查 release</div>
+          <div class="m-head-sub">每天 03:00 · id 0d0e2437</div>
+        </div>
+        <button class="m-icon-btn">⋯</button>
+      </div>
+
+      <div class="m-detail-scroll">
+        <!-- KPI: 2x2 grid 替代桌面 1x4 -->
+        <div class="m-cockpit">
+          <div class="kpi primary">
+            <div class="kpi-label">下次运行</div>
+            <div class="kpi-value">4h 12m</div>
+            <div class="kpi-sub">明早 03:00</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">上次结果</div>
+            <div class="kpi-value" style="color:var(--nz-green)">成功</div>
+            <div class="kpi-sub">3m 44s 前</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">成功率</div>
+            <div class="kpi-value">100%</div>
+            <div class="kpi-sub">5 / 5</div>
+          </div>
+          <div class="kpi">
+            <div class="kpi-label">平均耗时</div>
+            <div class="kpi-value">3m 15s</div>
+            <div class="kpi-sub">-</div>
+          </div>
+        </div>
+
+        <!-- prompt collapsed -->
+        <div class="m-prompt">
+          <div class="det-prompt-row">
+            <span class="det-prompt-label">提示词</span>
+            <span class="det-prompt-toggle">展开 ▾</span>
+          </div>
+          <div class="det-prompt-preview" style="white-space:nowrap;overflow:hidden;text-overflow:ellipsis;margin-top:4px">你是 naozhi 项目的每日发版机器人...</div>
+        </div>
+
+        <!-- history list -->
+        <div class="m-section-head">
+          <h3>执行历史 · 5 次</h3>
+          <div class="hist-filter"><span class="ov-chip active">全部</span><span class="ov-chip">失败</span></div>
+        </div>
+
+        <div class="m-hist-rows">
+          <div class="m-hist-row">
+            <span class="hr-dot"></span>
+            <div class="m-hist-main">
+              <div class="m-hist-row1"><span class="hr-status">成功</span><span class="hr-dur">3m 44s</span></div>
+              <div class="m-hist-row2">5月21日 03:00 · scheduled</div>
+            </div>
+            <span class="m-arrow">›</span>
+          </div>
+          <div class="m-hist-row">
+            <span class="hr-dot"></span>
+            <div class="m-hist-main">
+              <div class="m-hist-row1"><span class="hr-status">成功</span><span class="hr-dur">3m 56s</span></div>
+              <div class="m-hist-row2">5月20日 03:00 · scheduled</div>
+            </div>
+            <span class="m-arrow">›</span>
+          </div>
+          <div class="m-hist-row">
+            <span class="hr-dot"></span>
+            <div class="m-hist-main">
+              <div class="m-hist-row1"><span class="hr-status">成功</span><span class="hr-dur">28.5s</span></div>
+              <div class="m-hist-row2">5月19日 13:22 · manual</div>
+            </div>
+            <span class="m-arrow">›</span>
+          </div>
+          <div class="m-hist-row">
+            <span class="hr-dot"></span>
+            <div class="m-hist-main">
+              <div class="m-hist-row1"><span class="hr-status">成功</span><span class="hr-dur">1m 17s</span></div>
+              <div class="m-hist-row2">5月19日 03:00 · scheduled</div>
+            </div>
+            <span class="m-arrow">›</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 底部固定操作 — 主按钮整宽 -->
+      <div class="m-fab-bar">
+        <button class="da-primary" style="flex:1">▶ 立即执行</button>
+        <button class="m-icon-btn-lg">‖</button>
+        <button class="m-icon-btn-lg" style="color:var(--nz-red)">🗑</button>
+      </div>
+    </div>
+    <div class="phone-caption">② 任务详情 — KPI 2×2 + 历史列表 + 底部主按钮</div>
+  </div>
+
+  <!-- mobile screen 3: run-detail bottom sheet -->
+  <div class="phone">
+    <div class="phone-notch"></div>
+    <div class="phone-screen">
+      <div class="m-status-bar"><span>9:41</span><span class="m-status-icons">●●●● 5G ▮</span></div>
+
+      <!-- 底层是上一屏（淡化） -->
+      <div class="m-bg-dim"></div>
+
+      <!-- bottom-sheet 占 88vh -->
+      <div class="m-sheet">
+        <div class="m-sheet-handle"></div>
+
+        <div class="m-sheet-head">
+          <div style="flex:1;min-width:0">
+            <div class="rs-head-title" style="margin-bottom:3px">
+              <span class="rs-status-pill ok">成功</span>
+            </div>
+            <div style="font-size:13px;color:var(--nz-text-strong);font-weight:600">2026-05-21 03:00:00</div>
+            <div class="rs-head-meta" style="margin-top:3px;font-size:10px">
+              <span class="dh-chip">scheduled</span>
+              <span class="dh-chip">d37f96da</span>
+            </div>
+          </div>
+          <button class="m-icon-btn">×</button>
+        </div>
+
+        <!-- stats 2x2 紧凑 -->
+        <div class="m-rs-stats">
+          <div class="rs-stat">
+            <div class="rs-stat-label">耗时</div>
+            <div class="rs-stat-value">3m 44s</div>
+          </div>
+          <div class="rs-stat">
+            <div class="rs-stat-label">Tokens</div>
+            <div class="rs-stat-value">14.2k</div>
+          </div>
+          <div class="rs-stat">
+            <div class="rs-stat-label">工具调用</div>
+            <div class="rs-stat-value">7</div>
+          </div>
+          <div class="rs-stat">
+            <div class="rs-stat-label">Session</div>
+            <div class="rs-stat-value mono" style="color:var(--nz-accent);font-size:11px">a7f9 ↗</div>
+          </div>
+        </div>
+
+        <!-- tabs 横向 scroll -->
+        <div class="m-rs-tabs">
+          <span class="rs-tab active">对话 <span class="tab-count">12</span></span>
+          <span class="rs-tab">工具 <span class="tab-count">7</span></span>
+          <span class="rs-tab">提示词</span>
+          <span class="rs-tab">日志</span>
+        </div>
+
+        <!-- body -->
+        <div class="m-rs-body">
+          <div class="turn">
+            <div class="turn-avatar user" style="width:20px;height:20px;font-size:10px">U</div>
+            <div class="turn-body">
+              <div class="turn-head" style="font-size:10px"><span class="turn-role">提示词</span><span class="turn-time">03:00:01</span></div>
+              <div class="turn-content" style="font-size:12px;color:var(--nz-text-mute);font-style:italic">你是 naozhi 项目的每日发版机器人... <span style="color:var(--nz-accent);font-style:normal">查看完整 ›</span></div>
+            </div>
+          </div>
+
+          <div class="turn">
+            <div class="turn-avatar assistant" style="width:20px;height:20px;font-size:10px">C</div>
+            <div class="turn-body">
+              <div class="turn-head" style="font-size:10px"><span class="turn-role">Claude</span><span class="turn-time">03:00:04</span><span class="turn-tokens">+1.2k</span></div>
+              <div class="turn-content" style="font-size:12px"><p>开始执行每日发版检查。先拉取最新 master 并获取 tag 信息。</p></div>
+            </div>
+          </div>
+
+          <div class="turn">
+            <div class="turn-avatar tool" style="width:20px;height:20px;font-size:10px">⚙</div>
+            <div class="turn-body">
+              <div class="tool-call">
+                <div class="tool-call-head" style="padding:6px 10px;flex-wrap:wrap;gap:5px">
+                  <span class="tool-call-icon" style="width:16px;height:16px;font-size:10px">$</span>
+                  <span class="tool-call-name" style="font-size:11px">Bash</span>
+                  <span class="tool-call-status" style="font-size:9px;padding:1px 5px">成功</span>
+                  <span class="tool-call-dur">2.1s</span>
+                  <div style="flex-basis:100%;font-family:ui-monospace,monospace;color:var(--nz-text-mute);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">git fetch --tags origin master</div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div class="turn">
+            <div class="turn-avatar assistant" style="width:20px;height:20px;font-size:10px">C</div>
+            <div class="turn-body">
+              <div class="turn-head" style="font-size:10px"><span class="turn-role">Claude</span><span class="turn-time">03:00:09</span><span class="turn-tokens">+2.4k</span></div>
+              <div class="turn-content" style="font-size:12px"><p>最近 tag 是 <code>v0.27.4</code>，自该 tag 起 master 有 14 个新提交。</p></div>
+            </div>
+          </div>
+
+          <div class="turn">
+            <div class="turn-avatar tool" style="width:20px;height:20px;font-size:10px">⚙</div>
+            <div class="turn-body">
+              <div class="tool-call">
+                <div class="tool-call-head" style="padding:6px 10px;flex-wrap:wrap;gap:5px">
+                  <span class="tool-call-icon" style="width:16px;height:16px;font-size:10px">$</span>
+                  <span class="tool-call-name" style="font-size:11px">Bash</span>
+                  <span class="tool-call-status" style="font-size:9px;padding:1px 5px">成功</span>
+                  <span class="tool-call-dur">0.4s</span>
+                  <div style="flex-basis:100%;font-family:ui-monospace,monospace;color:var(--nz-text-mute);font-size:10px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">git tag --sort=-v:refname | grep ...</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 底部翻页 -->
+        <div class="m-sheet-foot">
+          <button class="m-foot-btn">‹ 上次</button>
+          <button class="m-foot-btn primary">↻</button>
+          <button class="m-foot-btn">下次 ›</button>
+        </div>
+      </div>
+    </div>
+    <div class="phone-caption">③ run 细节 bottom-sheet — 88vh，drag handle，一指可关</div>
+  </div>
+
+</div>
+
+<!-- mobile-only styles -->
+<style>
+  .mobile-row{display:flex;gap:24px;flex-wrap:wrap;justify-content:center;margin:14px 0 10px}
+  .phone{display:flex;flex-direction:column;align-items:center}
+  .phone-notch{position:relative;z-index:2;width:120px;height:24px;background:#000;border-radius:0 0 18px 18px;margin-bottom:-24px}
+  .phone-screen{position:relative;width:340px;height:680px;background:var(--nz-bg-0);border:9px solid #000;border-radius:36px;overflow:hidden;display:flex;flex-direction:column;box-shadow:0 12px 40px rgba(0,0,0,.6)}
+  .phone-caption{margin-top:14px;font-size:11px;color:var(--nz-text-mute);max-width:340px;text-align:center;line-height:1.5}
+
+  .m-status-bar{display:flex;justify-content:space-between;padding:8px 22px 4px;font-size:11px;color:var(--nz-text-strong);font-weight:600;font-variant-numeric:tabular-nums}
+  .m-status-icons{font-size:9px;letter-spacing:1px}
+
+  .m-app-head{display:flex;align-items:center;gap:10px;padding:8px 14px;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-0)}
+  .m-icon-btn{width:36px;height:36px;border-radius:8px;border:none;background:transparent;color:var(--nz-text);cursor:pointer;font-size:18px;display:inline-flex;align-items:center;justify-content:center}
+  .m-icon-btn:active{background:var(--nz-bg-1)}
+  .m-head-title{flex:1;min-width:0;text-align:center}
+  .m-head-main{font-size:14px;font-weight:600;color:var(--nz-text-strong);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .m-head-sub{font-size:10px;color:var(--nz-text-mute);margin-top:1px}
+
+  .m-overview{display:flex;gap:5px;padding:8px 12px;border-bottom:1px solid var(--nz-border);overflow-x:auto;flex-wrap:nowrap;scrollbar-width:none}
+  .m-overview::-webkit-scrollbar{display:none}
+  .m-overview .ov-chip{flex-shrink:0;font-size:11px}
+
+  .m-list{flex:1;overflow-y:auto}
+  .m-cj-row{display:grid;grid-template-columns:14px 1fr auto 12px;gap:10px;align-items:center;padding:14px 14px;border-bottom:1px solid var(--nz-border);min-height:56px;background:var(--nz-bg-0)}
+  .m-cj-row:active{background:var(--nz-bg-1)}
+  .m-cj-row .cj-name{font-size:13px}
+  .m-cj-row .cj-sub{font-size:11px;flex-wrap:wrap}
+  .m-cj-row .m-arrow{color:var(--nz-text-faint);font-size:13px}
+
+  .m-tabbar{display:flex;border-top:1px solid var(--nz-border);background:var(--nz-bg-1);padding-bottom:env(safe-area-inset-bottom)}
+  .m-tab{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;padding:8px 0 6px;color:var(--nz-text-faint);font-size:9px;cursor:pointer}
+  .m-tab span:first-child{font-size:18px;line-height:1}
+  .m-tab.active{color:var(--nz-accent)}
+
+  /* job detail */
+  .m-detail-scroll{flex:1;overflow-y:auto;padding-bottom:8px}
+  .m-cockpit{display:grid;grid-template-columns:1fr 1fr;gap:8px;padding:12px;border-bottom:1px solid var(--nz-border)}
+  .m-cockpit .kpi{padding:10px 12px}
+  .m-cockpit .kpi-value{font-size:18px}
+
+  .m-prompt{padding:10px 14px;border-bottom:1px solid var(--nz-border)}
+
+  .m-section-head{padding:12px 14px 8px;display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:8px}
+  .m-section-head h3{font-size:12px;color:var(--nz-text-strong);font-weight:600}
+  .m-section-head .hist-filter .ov-chip{font-size:10px}
+
+  .m-hist-rows{}
+  .m-hist-row{display:grid;grid-template-columns:14px 1fr 12px;gap:10px;align-items:center;padding:11px 14px;border-bottom:1px solid var(--nz-border);min-height:54px}
+  .m-hist-row:active{background:var(--nz-bg-1)}
+  .m-hist-row .hr-dot{justify-self:center}
+  .m-hist-main{min-width:0}
+  .m-hist-row1{display:flex;align-items:center;justify-content:space-between;font-size:12px;margin-bottom:2px}
+  .m-hist-row1 .hr-status{font-weight:500}
+  .m-hist-row1 .hr-dur{color:var(--nz-text);font-variant-numeric:tabular-nums}
+  .m-hist-row2{font-size:11px;color:var(--nz-text-mute)}
+
+  .m-fab-bar{display:flex;gap:6px;padding:10px 12px;border-top:1px solid var(--nz-border);background:var(--nz-bg-1);padding-bottom:calc(10px + env(safe-area-inset-bottom))}
+  .m-fab-bar .da-primary{padding:11px 14px;font-size:14px;justify-content:center}
+  .m-icon-btn-lg{width:42px;height:42px;border-radius:8px;border:1px solid var(--nz-border);background:transparent;color:var(--nz-text);cursor:pointer;font-size:15px;display:inline-flex;align-items:center;justify-content:center}
+
+  /* run sheet — bottom sheet */
+  .m-bg-dim{position:absolute;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,.45);z-index:1}
+  .m-sheet{position:absolute;left:0;right:0;bottom:0;height:88%;background:var(--nz-bg-0);border-radius:18px 18px 0 0;display:flex;flex-direction:column;z-index:2;box-shadow:0 -12px 32px rgba(0,0,0,.6)}
+  .m-sheet-handle{width:40px;height:4px;background:var(--nz-text-faint);border-radius:2px;margin:8px auto 4px}
+  .m-sheet-head{display:flex;align-items:flex-start;gap:8px;padding:8px 14px 10px;border-bottom:1px solid var(--nz-border)}
+
+  .m-rs-stats{display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:0;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-1)}
+  .m-rs-stats .rs-stat{padding:8px 6px;border-right:1px solid var(--nz-border);text-align:center}
+  .m-rs-stats .rs-stat:last-child{border-right:none}
+  .m-rs-stats .rs-stat-label{font-size:9px;margin-bottom:2px}
+  .m-rs-stats .rs-stat-value{font-size:13px}
+
+  .m-rs-tabs{display:flex;border-bottom:1px solid var(--nz-border);background:var(--nz-bg-0);padding:0 14px;gap:14px;overflow-x:auto;scrollbar-width:none;flex-shrink:0}
+  .m-rs-tabs::-webkit-scrollbar{display:none}
+  .m-rs-tabs .rs-tab{padding:10px 0;font-size:12px;flex-shrink:0}
+
+  .m-rs-body{flex:1;overflow-y:auto;padding:12px 14px}
+  .m-rs-body .turn{margin-bottom:10px;gap:8px}
+
+  .m-sheet-foot{display:flex;gap:6px;padding:10px 14px;border-top:1px solid var(--nz-border);background:var(--nz-bg-1);padding-bottom:calc(10px + env(safe-area-inset-bottom))}
+  .m-foot-btn{flex:1;padding:10px;border-radius:8px;border:1px solid var(--nz-border);background:transparent;color:var(--nz-text);cursor:pointer;font-size:12px;font-family:inherit}
+  .m-foot-btn.primary{flex:0 0 50px;border-color:var(--nz-accent);color:var(--nz-accent)}
+</style>
+
+
+<div class="annotations">
+  <h3>「执行细节」(run-detail-sheet) 关键设计</h3>
+  <ol>
+    <li><strong>顶部状态药丸 + 时间</strong> — 一眼看出这次成功/失败/运行中，不是一堆 dot 让人猜。</li>
+    <li><strong>4 块 stats 横条</strong> — 耗时 / Tokens / 工具调用次数 / Session ID。Session ID 可点击跳到完整对话。</li>
+    <li><strong>Tab 分流不同场景</strong>：
+      <ul style="margin-left:20px;margin-top:4px">
+        <li><strong>对话</strong>（默认）— 把 stream-json 还原成时间线（user → assistant → tool calls）</li>
+        <li><strong>工具调用</strong> — 单看 7 次 bash/read/edit，按耗时/状态过滤定位异常</li>
+        <li><strong>提示词</strong> — 完整 prompt，方便调试</li>
+        <li><strong>原始日志</strong> — stream-json 原文，给开发者排查</li>
+      </ul>
+    </li>
+    <li><strong>对话 timeline 元素</strong> — 头像区分角色（user/Claude/tool），时间戳，tokens 增量，工具调用折叠成单行可展开（命令 + 状态药丸 + 耗时），失败的工具高亮红色。</li>
+    <li><strong>失败定位的关键</strong> — 对话流里直接看到哪一步 tool 红色，展开看 stderr，不用再翻日志。状态 3 例子：journalctl 超时，超时原因清晰可见。</li>
+    <li><strong>运行中实时流</strong> — 末尾光标闪烁，footer 显示「实时流式中」+ 自动跟随，可中止；停止流后变常规 detail。</li>
+    <li><strong>上/下次 run 翻页</strong> — sheet 底部翻页按钮，不用关 sheet 再点列表行。</li>
+    <li><strong>右滑覆盖而非下方展开</strong> — 不挤压历史列表，关闭后无错位。</li>
+  </ol>
+
+  <h3 style="margin-top:18px">Mobile 适配</h3>
+  <ol>
+    <li><strong>三栏布局塌缩成 stack 导航</strong> — 桌面项目栏 + 列表 + 详情并列；移动端「列表 → 任务详情 → run 细节」一次只显示一屏，左滑/返回按钮回退。</li>
+    <li><strong>触摸目标 ≥ 44px</strong> — cron 行 56px、历史行 54px、底部按钮 42px，FAB 主按钮 44px+，Apple HIG 标准。</li>
+    <li><strong>列表行精简</strong> — 桌面 cron 行右侧"成功率徽章"，移动端只保留必要：状态点 / 名称 / 调度+下次（一行截断）/ 徽章 / ›。</li>
+    <li><strong>KPI 2×2 网格</strong> — 桌面 1×4 横排在 360px 屏会被压扁；移动端改 2×2 正方形 grid，主要 KPI（下次运行 + 上次结果）放上排吸引眼球。</li>
+    <li><strong>run-sheet 改 bottom-sheet</strong> — 桌面右滑覆盖，移动端从下弹出占 88vh，顶部有 drag handle 可下拉关闭（符合 iOS/Android 系统习惯）；后面背景 dim 不滚动。</li>
+    <li><strong>tabs 横向滚动</strong> — 4 个 tab 在 320px 屏放不下时变 horizontal scroll，不挤压换行。</li>
+    <li><strong>工具调用卡片折行</strong> — 桌面单行 [icon][name][summary][status][dur]，移动端命令独占第二行，避免超长命令被切到只剩 git。</li>
+    <li><strong>底部主按钮 sticky</strong> — "立即执行"占满主区，旁边是 ‖（暂停）和 🗑（删）小图标按钮，FAB-style；适配 safe-area-inset-bottom。</li>
+    <li><strong>底 tab 栏</strong> — 会话/Agent/定时/更多，符合 dashboard 整体导航；当前项 active 高亮。</li>
+    <li><strong>翻页按钮置底</strong> — sheet 底部 ‹ 上次 / ↻ 重跑 / 下次 ›，单手拇指可达；不阻塞内容滚动。</li>
+  </ol>
+</div>
+
+</body>
+</html>
