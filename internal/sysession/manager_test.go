@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -54,6 +55,10 @@ func (f *fakeRouter) ClearUserLabelOrigin(key string) bool {
 }
 
 func (f *fakeRouter) RegisterSystemStub(_, _, _ string) {}
+
+// EventEntriesForKey: default base fake has no per-key event log; tests
+// that need it use snapshotFakeRouter, which overrides this method.
+func (f *fakeRouter) EventEntriesForKey(_ string) []cli.EventEntry { return nil }
 
 // fakeRunner returns canned text without exec'ing anything.
 type fakeRunner struct {

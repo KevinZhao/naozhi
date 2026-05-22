@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -16,9 +17,16 @@ import (
 // through caller-supplied snapshots.  Used by AutoTitler tests to
 // exercise the candidate-selection logic without spinning up a real
 // session.Router.
+//
+// Per-key event-log entries can be supplied via `entries`.  When a key
+// is missing from `entries`, EventEntriesForKey falls back to a single
+// synthetic user entry derived from the snapshot's LastPrompt — this
+// preserves backward-compatibility with table-driven tests written
+// before the full-history change.
 type snapshotFakeRouter struct {
 	*fakeRouter
-	snaps []session.SessionSnapshot
+	snaps   []session.SessionSnapshot
+	entries map[string][]cli.EventEntry
 
 	// rejectAuto, when true, makes SetUserLabelWithOrigin return false
 	// for origin="auto" — simulates the race-window guard firing.
@@ -42,6 +50,21 @@ func (s *snapshotFakeRouter) SetUserLabelWithOrigin(key, label, origin string) b
 		return false
 	}
 	return s.fakeRouter.SetUserLabelWithOrigin(key, label, origin)
+}
+
+func (s *snapshotFakeRouter) EventEntriesForKey(key string) []cli.EventEntry {
+	if e, ok := s.entries[key]; ok {
+		return e
+	}
+	// Backward-compat: if the test only set LastPrompt on the snapshot,
+	// surface it as a single user entry so renameOne sees a non-empty
+	// excerpt and the old assertions still pass.
+	for _, snap := range s.snaps {
+		if snap.Key == key && snap.LastPrompt != "" {
+			return []cli.EventEntry{{Type: "user", Summary: snap.LastPrompt}}
+		}
+	}
+	return nil
 }
 
 func TestBuildExcerpt(t *testing.T) {
@@ -75,16 +98,25 @@ func TestBuildExcerpt(t *testing.T) {
 	}
 }
 
-func TestBuildExcerpt_TotalCap(t *testing.T) {
+// TestBuildExcerpt_NoTotalCap: the previous 8 KiB total-byte ceiling
+// was deliberately removed so AutoTitler can review entire long
+// conversations.  Verify that a >>8 KiB seed survives the sanitiser
+// intact (line cap still applies — but here every line is short).
+func TestBuildExcerpt_NoTotalCap(t *testing.T) {
 	t.Parallel()
-	// Force the excerpt cap by feeding many short lines.
 	var sb strings.Builder
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < 5000; i++ {
 		sb.WriteString("hello\n")
 	}
-	got := buildExcerpt(sb.String())
-	if len(got) > autoTitlerExcerptCapBytes {
-		t.Errorf("excerpt len %d exceeds cap %d", len(got), autoTitlerExcerptCapBytes)
+	in := sb.String()
+	got := buildExcerpt(in)
+	if len(got) < 8*1024 {
+		t.Errorf("excerpt len %d unexpectedly small; want >= 8 KiB after total-cap removal", len(got))
+	}
+	// Trailing newline gets trimmed by TrimSpace; otherwise content matches.
+	want := strings.TrimSpace(in)
+	if got != want {
+		t.Errorf("excerpt content drift; len got=%d want=%d", len(got), len(want))
 	}
 }
 
@@ -293,6 +325,118 @@ func TestAutoTitler_HighwaterPreventsRapidRename(t *testing.T) {
 	}
 	if runner.calls.Load() != 1 {
 		t.Errorf("runner called %d times, want 1", runner.calls.Load())
+	}
+}
+
+// TestBuildExcerptFromHistory verifies the helper concatenates only
+// type=="user" entries (in chronological order) and ignores assistant
+// text, thinking, tool_use and other event types.
+func TestBuildExcerptFromHistory(t *testing.T) {
+	t.Parallel()
+	entries := []cli.EventEntry{
+		{Time: 100, Type: "user", Summary: "第一个问题"},
+		{Time: 110, Type: "text", Summary: "助手回复 A"},
+		{Time: 120, Type: "thinking", Summary: "思考"},
+		{Time: 130, Type: "tool_use", Summary: "Read file"},
+		{Time: 200, Type: "user", Summary: "第二个问题"},
+		{Time: 210, Type: "text", Summary: "助手回复 B"},
+		{Time: 300, Type: "user", Summary: "第三个问题"},
+		// Empty user summary should be skipped, not blank-line
+		// pollute the output.
+		{Time: 310, Type: "user", Summary: "  "},
+	}
+	got := buildExcerptFromHistory(entries)
+	want := "第一个问题\n第二个问题\n第三个问题"
+	if got != want {
+		t.Errorf("buildExcerptFromHistory:\n got %q\nwant %q", got, want)
+	}
+}
+
+// TestAutoTitler_PromptIncludesAllUserTurns ensures the rename prompt
+// reviews every user turn in the conversation, not just the LastPrompt
+// cached on SessionSnapshot. The previous implementation only saw the
+// most recent user message which produced misleading titles for long
+// conversations whose theme had drifted away from the latest exchange.
+func TestAutoTitler_PromptIncludesAllUserTurns(t *testing.T) {
+	t.Parallel()
+	key := "feishu:direct:u1:general"
+	snap := session.SessionSnapshot{
+		Key: key, MessageCount: 5,
+		// LastPrompt only carries the latest message — the visitor
+		// no longer reads it; the candidate is rebuilt from the full
+		// event log via EventEntriesForKey below.
+		LastPrompt: "第三个问题",
+	}
+	history := []cli.EventEntry{
+		{Time: 100, Type: "user", Summary: "讨论 deploy 流程"},
+		{Time: 110, Type: "text", Summary: "好的"},
+		{Time: 200, Type: "user", Summary: "切到 docker"},
+		{Time: 300, Type: "user", Summary: "第三个问题"},
+	}
+	router := newSnapshotFakeRouter([]session.SessionSnapshot{snap})
+	router.entries = map[string][]cli.EventEntry{key: history}
+
+	captured := make(chan string, 1)
+	runner := &capturingRunner{captured: captured, resp: "部署流程讨论"}
+	a, _ := newAutoTitler(DaemonDeps{Router: router, Runner: runner})
+	if _, err := a.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick err: %v", err)
+	}
+	select {
+	case prompt := <-captured:
+		// Every user turn should land in the prompt.
+		for _, want := range []string{"讨论 deploy 流程", "切到 docker", "第三个问题"} {
+			if !strings.Contains(prompt, want) {
+				t.Errorf("prompt missing user-turn excerpt %q\nfull:\n%s", want, prompt)
+			}
+		}
+		// Assistant text should NOT leak in.
+		if strings.Contains(prompt, "好的") {
+			t.Errorf("prompt unexpectedly contains assistant text\nfull:\n%s", prompt)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runner.Run was not invoked")
+	}
+}
+
+// TestAutoTitler_LongConversationNotTruncated locks in the operator
+// decision to remove the 8 KiB total-byte EXCERPT cap. A conversation
+// with hundreds of user turns must reach the runner intact (line cap
+// still applies per individual line, but the total budget is unbounded).
+func TestAutoTitler_LongConversationNotTruncated(t *testing.T) {
+	t.Parallel()
+	key := "feishu:direct:u1:general"
+	snap := session.SessionSnapshot{
+		Key: key, MessageCount: 200, LastPrompt: "marker-tail",
+	}
+	history := make([]cli.EventEntry, 0, 200)
+	for i := 0; i < 200; i++ {
+		history = append(history, cli.EventEntry{
+			Time:    int64(i + 1),
+			Type:    "user",
+			Summary: "marker-" + strings.Repeat("x", 32),
+		})
+	}
+	router := newSnapshotFakeRouter([]session.SessionSnapshot{snap})
+	router.entries = map[string][]cli.EventEntry{key: history}
+
+	captured := make(chan string, 1)
+	runner := &capturingRunner{captured: captured, resp: "长对话标题"}
+	a, _ := newAutoTitler(DaemonDeps{Router: router, Runner: runner})
+	if _, err := a.Tick(context.Background()); err != nil {
+		t.Fatalf("Tick err: %v", err)
+	}
+	select {
+	case prompt := <-captured:
+		// 200 marker lines should all survive (8 KiB cap was the
+		// previous truncation point — at 32-byte payload + prefix
+		// that would have stopped well before the 200th line).
+		got := strings.Count(prompt, "marker-")
+		if got != 200 {
+			t.Errorf("excerpt truncated: got %d marker lines, want 200", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("runner.Run was not invoked")
 	}
 }
 
