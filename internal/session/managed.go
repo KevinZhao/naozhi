@@ -1398,6 +1398,14 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 	// a fresh proc replacing the current one happens through attach helpers
 	// that share historyMu, so the in-lock loadProcess() is the authoritative
 	// snapshot for this caller.
+	//
+	// Stale proc note (R231-CQ-7): if the proc captured here was already
+	// orphaned by a concurrent storeProcess(nil) during ResetChat / Remove,
+	// proc.InjectHistory below still mutates that orphan's EventLog ring,
+	// but no one calls EventEntries() on an orphan — Router.loadProcess()
+	// returns the new pointer and dashboards/cron snapshot through that.
+	// The orphan ring is GC'd when the last reference (this closure)
+	// drops, so the extra append is a harmless no-op rather than a leak.
 	s.historyMu.Lock()
 	s.persistedHistory = append(s.persistedHistory, entries...)
 	if trimmed := len(s.persistedHistory) - maxPersistedHistory; trimmed > 0 {
