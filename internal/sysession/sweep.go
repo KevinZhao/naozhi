@@ -16,12 +16,17 @@ import (
 // logged with slog.Warn and counted toward the success path (one bad
 // file shouldn't abort the whole sweep).
 //
+// SEMANTICS — single-shot only (R232-CR-10): this function performs ONE
+// pass over dir and returns. There is no internal ticker / goroutine.
+// Callers wanting periodic gardening must invoke SweepOldJSONL from
+// their own scheduler (e.g. a cron job or a Manager.Tick implementation).
+//
 // This is the Phase 1 gardening hook for dataDir/sys-sessions/ — every
 // transient system session leaves a JSONL behind in the CLI's project
 // dir, and at default 30s tick that's ~2880 files/day.  RFC §6.5 plans
 // to upgrade this into a long-running TransientSweeper daemon in
-// Phase 2; the function shape stays the same so the migration is a
-// pull-up.
+// Phase 2 (tracked at docs/TODO.md R232-CR-10); the function shape
+// stays the same so the migration is a pull-up.
 //
 // We deliberately match only "*.jsonl" — claude CLI writes nothing
 // else under cwd, but if a future binary version drops other file

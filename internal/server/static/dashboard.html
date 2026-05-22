@@ -1028,28 +1028,41 @@ body.kbd-open .input-hints{display:none}
 /* Cron list header */
 .cron-list-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px;gap:12px}
 .cron-list-head h3{margin:0;font-size:16px;color:var(--nz-text-strong)}
+/* cron-dashboard-redesign P0 §4.2 — overview chip strip. Always visible
+ * (independent from filterBar's >5 threshold) so the four status counts
+ * are readable at a glance; each chip is also a one-click filter. */
+.cron-overview{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px;align-items:center}
+.cron-ov-chip{display:inline-flex;align-items:center;gap:5px;padding:4px 10px;border-radius:12px;border:1px solid var(--nz-border);background:var(--nz-bg-1);color:var(--nz-text-mute);font-size:12px;font-family:inherit;cursor:pointer;line-height:1.2;min-height:26px;transition:background .12s,border-color .12s,color .12s}
+.cron-ov-chip:hover{color:var(--nz-text);border-color:var(--nz-text-faint)}
+.cron-ov-chip:focus-visible{outline:1px solid var(--nz-accent);outline-offset:2px}
+.cron-ov-chip.active{background:rgba(31,111,235,.16);border-color:var(--nz-blue);color:var(--nz-accent)}
+.cron-ov-chip.active .cron-ov-num{color:var(--nz-accent)}
+.cron-ov-chip .cron-ov-num{font-weight:600;color:var(--nz-text-strong);font-variant-numeric:tabular-nums}
+.cron-ov-chip.ok .cron-ov-num{color:var(--nz-green)}
+.cron-ov-chip.warn{color:var(--nz-amber);border-color:rgba(210,153,34,.4);background:rgba(210,153,34,.08)}
+.cron-ov-chip.warn .cron-ov-num{color:var(--nz-amber)}
+.cron-ov-chip.run{color:var(--nz-accent);border-color:rgba(31,111,235,.4);background:rgba(31,111,235,.08)}
+.cron-ov-chip.run .cron-ov-num{color:var(--nz-accent)}
+.cron-ov-chip.run.active{background:rgba(31,111,235,.22)}
 .cron-new-btn{padding:6px 14px;border-radius:6px;border:1px solid var(--nz-border);background:var(--nz-bg-2);color:var(--nz-text);cursor:pointer;font-size:13px;display:inline-flex;align-items:center;gap:4px;min-height:36px;font-family:inherit}
 .cron-new-btn:hover{background:var(--nz-border);color:var(--nz-text-strong)}
 .cron-new-btn svg{width:14px;height:14px;stroke:currentColor;fill:none;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}
 /* Cron card outer (anchor) — v3 row uses .cj-row for the visual; the
- * .cron-card class remains as an E2E selector anchor (e2e/dashboard.test.js)
- * and provides the card shell (border-radius / margin / background / hover)
- * that .cj-row's grid layout sits on top of. The v2 .cc-* element classes
- * (cc-next-badge / cc-title / cc-prompt / cc-schedule / cc-meta / cc-result
- * / cc-actions / cc-btn / cc-human / cc-notify) were used by the original
- * card layout; v3 cronJobCardHtml emits cj-* element classes only — the
- * cc-actions wrapper survives in cronJobCardHtml's `__unused` symbol branch
- * solely as a contract anchor for TestDashboardJS_R110P2_CronRunNowButton
- * and is never reached at runtime, so its CSS is gone. */
-.cron-card{padding:12px;padding-right:100px;border:1px solid var(--nz-border);border-radius:8px;margin-bottom:10px;background:var(--nz-bg-1);cursor:pointer;transition:border-color .15s,background .15s;position:relative}
-.cron-card:hover{border-color:var(--nz-text-faint);background:#1c2129}
+ * .cron-card class remains as an E2E selector anchor (e2e/dashboard.test.js,
+ * multibackend.round3/5.test.js) but is otherwise visually inert.
+ *
+ * cron-dashboard-redesign P0 (2026-05-22): the legacy v2 padding/border/
+ * margin/background made each row look like an individual card despite the
+ * cj-row grid layout sitting on top — defeating the entire v3 high-density
+ * design. cj-list now provides the outer chrome (border-radius, background)
+ * and cj-row provides the row separator + interactive hover state. */
+.cron-card{position:relative}
 /* Increment C: missed banner —— 整个 cron 面板顶部告警条，红色强调 +
  * 可点切 filter。alert role 提示屏幕阅读器。 */
 .cron-missed-banner{display:flex;align-items:center;gap:8px;padding:10px 14px;margin:0 0 10px;background:rgba(239,68,68,.08);border:1px solid rgba(239,68,68,.35);border-radius:8px;color:var(--nz-red);font-size:13px;cursor:pointer;transition:background .15s}
 .cron-missed-banner:hover{background:rgba(239,68,68,.15)}
 .cron-missed-banner .cmb-icon{font-size:16px;line-height:1}
 .cron-missed-banner .cmb-text{flex:1;color:var(--nz-text)}
-@media (max-width:540px){.cron-card{padding-right:12px}}
 .cron-empty{text-align:center;padding:40px 20px}
 .cron-empty-icon{font-size:40px;opacity:.35;margin-bottom:12px}
 .cron-empty-hint{color:var(--nz-text-mute);margin-bottom:6px}
@@ -1395,16 +1408,65 @@ body.kbd-open .input-hints{display:none}
 .cron-drawer-header .cdh-row2 .cj-schedule{cursor:pointer}
 .cron-drawer-header .cdh-chip{font-size:11px;color:var(--nz-text-mute);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:4px;padding:1px 6px;max-width:240px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .cron-drawer-header .cdh-chip.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace}
-/* Drawer summary */
-.cron-drawer-summary{padding:14px 20px;border-bottom:1px solid var(--nz-border);display:flex;flex-direction:column;gap:10px}
-.cron-drawer-summary .cds-prompt label,.cron-drawer-summary .cds-meta label{display:block;font-size:11px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px}
-.cron-drawer-summary .cds-prompt-body{font-size:13px;color:var(--nz-text);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;padding:10px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:160px;overflow-y:auto;margin:0}
+/* cron-dashboard-redesign P1 §4.3 — KPI cockpit row at top of drawer.
+ * Four equal columns by default; collapses to 2x2 on narrow widths so the
+ * primary "下次运行" tile keeps its full numeric width. The .primary
+ * variant carries the accent gradient/border that anchors the eye. */
+.cron-drawer-cockpit{padding:14px 20px;border-bottom:1px solid var(--nz-border);display:grid;grid-template-columns:1.4fr 1fr 1fr 1fr;gap:10px;background:linear-gradient(180deg,rgba(31,111,235,.04),transparent)}
+.cron-kpi{padding:10px 12px;border-radius:8px;border:1px solid var(--nz-border);background:var(--nz-bg-1);min-width:0}
+.cron-kpi.primary{background:linear-gradient(135deg,rgba(31,111,235,.12),rgba(31,111,235,.04));border-color:rgba(31,111,235,.4)}
+.cron-kpi .ck-label{font-size:10px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cron-kpi .ck-value{font-size:20px;color:var(--nz-text-strong);font-weight:600;font-variant-numeric:tabular-nums;line-height:1.15;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cron-kpi.primary .ck-value{color:var(--nz-accent)}
+.cron-kpi.ok .ck-value{color:var(--nz-green)}
+.cron-kpi.warn .ck-value{color:var(--nz-amber)}
+.cron-kpi.bad .ck-value{color:var(--nz-red)}
+.cron-kpi.run .ck-value{color:var(--nz-accent)}
+.cron-kpi .ck-sub{font-size:11px;color:var(--nz-text-faint);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:720px){
+  .cron-drawer-cockpit{grid-template-columns:1fr 1fr}
+}
+
+/* cron-dashboard-redesign P1 §4.3 — running banner replaces the cockpit
+ * when the job is currently in flight. High-contrast accent treatment so
+ * the live elapsed clock + state are the focal point; old .cdc-* classes
+ * retained below for any test that greps the v2 surface. */
+.cron-drawer-running{padding:14px 20px;border-bottom:1px solid rgba(31,111,235,.4);background:linear-gradient(135deg,rgba(31,111,235,.18),rgba(31,111,235,.06));display:flex;align-items:center;gap:14px}
+.cron-drawer-running .cdr-clock{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-variant-numeric:tabular-nums;font-size:26px;color:var(--nz-accent);font-weight:600;line-height:1;flex-shrink:0}
+.cron-drawer-running .cdr-info{flex:1;min-width:0}
+.cron-drawer-running .cdr-state{font-size:13px;color:var(--nz-text-strong);font-weight:600;display:flex;align-items:center;gap:8px;margin-bottom:3px}
+.cron-drawer-running .cdr-state::before{content:"";width:8px;height:8px;border-radius:50%;background:var(--nz-accent);box-shadow:0 0 0 0 var(--nz-accent);animation:cjDotPulse 1.4s ease-in-out infinite;flex-shrink:0}
+.cron-drawer-running .cdr-detail{font-size:11px;color:var(--nz-text-mute);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* Drawer summary — cron-dashboard-redesign P1 §4.3 collapsed into <details>
+ * so prompt body + meta are now opt-in (default closed). The summary row
+ * (visible when closed) shows a one-line prompt preview so a glance still
+ * conveys what this job does. */
+.cron-drawer-summary{padding:0 20px;border-bottom:1px solid var(--nz-border)}
+.cron-drawer-summary .cds-summary-row{padding:12px 0;display:flex;align-items:center;gap:10px;cursor:pointer;list-style:none;font-size:12px;outline:none;-webkit-tap-highlight-color:transparent}
+.cron-drawer-summary .cds-summary-row::-webkit-details-marker{display:none}
+.cron-drawer-summary .cds-summary-row:hover .cds-summary-toggle{color:var(--nz-text-strong)}
+.cron-drawer-summary .cds-summary-row:focus-visible{outline:1px solid var(--nz-accent);outline-offset:2px;border-radius:4px}
+.cron-drawer-summary .cds-summary-label{font-size:10px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.4px;flex-shrink:0}
+.cron-drawer-summary .cds-summary-preview{flex:1;min-width:0;color:var(--nz-text);font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cron-drawer-summary .cds-summary-toggle{flex-shrink:0;font-size:11px;color:var(--nz-text-mute);transition:color .12s}
+.cron-drawer-summary[open] .cds-summary-toggle::before{content:"收起 "}
+.cron-drawer-summary:not([open]) .cds-summary-toggle::before{content:"展开 "}
+.cron-drawer-summary[open] .cds-summary-toggle{color:transparent}
+.cron-drawer-summary[open] .cds-summary-toggle::before{color:var(--nz-text-mute)}
+.cron-drawer-summary .cds-summary-body{padding-bottom:14px;display:flex;flex-direction:column;gap:10px}
+.cron-drawer-summary .cds-meta label{display:block;font-size:11px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.3px;margin-bottom:4px}
+.cron-drawer-summary .cds-prompt-body{font-size:13px;color:var(--nz-text);background:var(--nz-bg-1);border:1px solid var(--nz-border);border-radius:6px;padding:10px;line-height:1.5;white-space:pre-wrap;word-break:break-word;max-height:240px;overflow-y:auto;margin:0}
 .cron-drawer-summary .cds-meta{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px 16px}
 .cron-drawer-summary .cds-meta > div{font-size:13px}
 .cron-drawer-summary .cds-meta span{color:var(--nz-text)}
 .cron-drawer-summary .cds-meta span.mono{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-size:12px}
-/* Drawer actions */
+/* Drawer actions — cron-dashboard-redesign P1 §4.3 made sticky at bottom
+ * of the drawer scroll viewport (.is-sticky variant) so 立即执行 stays in
+ * reach when scrolling through long history. The base class without
+ * .is-sticky preserves the v2 layout for any test that asserts inline. */
 .cron-drawer-actions{display:flex;gap:8px;padding:12px 20px;border-bottom:1px solid var(--nz-border);flex-wrap:wrap;align-items:center}
+.cron-drawer-actions.is-sticky{position:sticky;bottom:0;z-index:3;background:var(--nz-bg-1);border-top:1px solid var(--nz-border);border-bottom:none;padding-bottom:calc(12px + env(safe-area-inset-bottom))}
 .cron-drawer-actions .cda-btn{min-height:36px;padding:0 14px;border-radius:6px;border:1px solid var(--nz-border);background:var(--nz-bg-2);color:var(--nz-text);cursor:pointer;font-size:13px;font-family:inherit;display:inline-flex;align-items:center;gap:4px;-webkit-tap-highlight-color:transparent}
 .cron-drawer-actions .cda-btn:hover:not([disabled]){background:var(--nz-border);color:var(--nz-text-strong)}
 .cron-drawer-actions .cda-btn[disabled]{opacity:.55;cursor:not-allowed}

@@ -439,6 +439,16 @@ func (m *Manager) runOnce(rec *daemonRecord, trigger DaemonTriggerKind) {
 		isPanic bool
 	)
 
+	// R232-GO-5/GO-6: declare tickCtx + defer cancel BEFORE the combined
+	// recover/inflight/recordRun defer. defer is LIFO, so this layout
+	// makes the combined defer run first (handles panic + clears CAS +
+	// records the run), then cancel() releases the timeout context.
+	// Reversing the order leaves any goroutine reading tickCtx during
+	// recordRun observing a context that was already cancelled by the
+	// inner defer — easy to misclassify as DaemonErrorClassCanceled.
+	tickCtx, cancel := context.WithTimeout(m.ctx, m.cfg.TickTimeout)
+	defer cancel()
+
 	defer func() {
 		if r := recover(); r != nil {
 			isPanic = true
@@ -454,9 +464,6 @@ func (m *Manager) runOnce(rec *daemonRecord, trigger DaemonTriggerKind) {
 		rec.inflight.Store(false)
 		m.recordRun(rec, runID, trigger, startedAt, report, tickErr, isPanic)
 	}()
-
-	tickCtx, cancel := context.WithTimeout(m.ctx, m.cfg.TickTimeout)
-	defer cancel()
 
 	report, tickErr = rec.daemon.Tick(tickCtx)
 }

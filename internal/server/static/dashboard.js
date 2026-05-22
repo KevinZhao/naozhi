@@ -11008,10 +11008,16 @@ function openCronPanel() {
 // Extracted so unit tests exercise the predicate without driving DOM. Match
 // surface for the substring arm: title, prompt, work_dir, schedule, id (all
 // case-insensitive). title 放在最前，匹配优先 —— 人们搜索 cron 时最先想到
-// 的就是自己给任务起的那个名字。Status arm is one of 'all' | 'active' |
-// 'attention', where 'attention' == paused OR last_error (dovetails with
-// the header cron-badge's attention count so both surfaces speak the same
-// predicate).
+// 的就是自己给任务起的那个名字。
+//
+// Status arm (cron-dashboard-redesign P0 §4.2):
+//   - 'all'        全部
+//   - 'active'     非 paused（保留旧语义；与 attentionCount 互斥的"运行中"
+//                  入口，目前 chip 上仍叫"运行中"以兼容 e2e）
+//   - 'attention'  paused || last_error || missed（与 cronBadge 同源）
+//   - 'healthy'    !paused && !last_error && !missed && !is_running
+//                  （没毛病、不在跑，最常见的稳态）
+//   - 'running'    current_run.started_at 存在（实时跑中）
 function filterCronJobs(jobs, query, status) {
   const q = (query || '').trim().toLowerCase();
   const s = status || 'all';
@@ -11021,6 +11027,12 @@ function filterCronJobs(jobs, query, status) {
     // cron-v2-polish §3.3: attention 扩展为 paused || last_error || missed，
     // 与 fetchCronJobs 里的 cronBadge 计数同源，避免两处判断漂移。
     if (s === 'attention' && !(j.paused || j.last_error || j.missed)) return false;
+    if (s === 'healthy') {
+      const running = !!(j.current_run && j.current_run.started_at);
+      const attn = j.paused || j.last_error || j.missed;
+      if (running || attn) return false;
+    }
+    if (s === 'running' && !(j.current_run && j.current_run.started_at)) return false;
     if (!q) return true;
     const fields = [j.title, j.prompt, j.work_dir, j.schedule, j.id];
     for (const f of fields) {
@@ -12279,11 +12291,13 @@ function onCronSearchInput() {
   renderCronList();
 }
 
-// setCronStatusFilter toggles between the three status modes. Re-applies
+// setCronStatusFilter toggles between the status modes. Re-applies
 // aria-pressed + active class on the chip row so the current mode is
-// visible + SR-accessible, then repaints the list.
+// visible + SR-accessible, then repaints the list. P0 added 'healthy' /
+// 'running' for the new overview chip strip.
 function setCronStatusFilter(status) {
-  if (status !== 'all' && status !== 'active' && status !== 'attention') return;
+  if (status !== 'all' && status !== 'active' && status !== 'attention' &&
+      status !== 'healthy' && status !== 'running') return;
   cronFilterStatus = status;
   document.querySelectorAll('.cron-status-chip').forEach(el => {
     const on = el.getAttribute('data-status') === status;
@@ -12397,20 +12411,37 @@ function cronDrawerHtml(j) {
     '</div>' +
   '</header>';
 
-  // Summary section: prompt + meta.
+  // cron-dashboard-redesign P1 §4.3 — KPI cockpit replaces the v2 prompt
+  // block + meta grid. Four headline numbers (next run / success rate /
+  // avg duration / last result) answer operators' first three questions
+  // without scrolling. When the job is currently running the cockpit
+  // collapses into the running banner (currentHtml below), so we suppress
+  // it here in the running branch.
+  const cockpitHtml = isRunning ? '' : cronDrawerCockpitHtml(j);
+
+  // Prompt + meta now live in a collapsible <details> so the cockpit
+  // owns the fold above. Defaults to closed; the prompt preview line in
+  // <summary> still reveals the first line at a glance.
   const notifyText = j.notify === false ? '\uD83D\uDD15 已关闭' : '\uD83D\uDD14 默认 IM 通知';
   const freshText = j.fresh_context ? '\u2713 每次重置' : '\u2014 不重置';
-  const summaryHtml = '<section class="cron-drawer-summary">' +
-    '<div class="cds-prompt">' +
-      '<label>提示词</label>' +
-      '<p class="cds-prompt-body">' + esc(promptText || '（未设置）') + '</p>' +
+  const promptPreview = firstNonEmptyLine(promptText, 80) || '（未设置）';
+  const summaryHtml = '<details class="cron-drawer-summary">' +
+    '<summary class="cds-summary-row">' +
+      '<span class="cds-summary-label">提示词</span>' +
+      '<span class="cds-summary-preview">' + esc(promptPreview) + '</span>' +
+      '<span class="cds-summary-toggle" aria-hidden="true"></span>' +
+    '</summary>' +
+    '<div class="cds-summary-body">' +
+      '<div class="cds-prompt">' +
+        '<p class="cds-prompt-body">' + esc(promptText || '（未设置）') + '</p>' +
+      '</div>' +
+      '<div class="cds-meta">' +
+        '<div><label>通知</label><span>' + esc(notifyText) + '</span></div>' +
+        '<div><label>上下文</label><span>' + esc(freshText) + '</span></div>' +
+        (workdir ? '<div><label>目录</label><span class="mono">' + esc(workdir) + '</span></div>' : '') +
+      '</div>' +
     '</div>' +
-    '<div class="cds-meta">' +
-      '<div><label>通知</label><span>' + esc(notifyText) + '</span></div>' +
-      '<div><label>上下文</label><span>' + esc(freshText) + '</span></div>' +
-      (workdir ? '<div><label>目录</label><span class="mono">' + esc(workdir) + '</span></div>' : '') +
-    '</div>' +
-  '</section>';
+  '</details>';
 
   // Action row.
   // Round 2 R-4 disable matrix (RFC §4.3.1):
@@ -12454,7 +12485,10 @@ function cronDrawerHtml(j) {
     '<button type="button" class="cda-btn danger" onclick="cronDelete(\'' + escJs(id) + '\')" title="删除任务及其历史">\uD83D\uDDD1 删除</button>' +
   '</nav>';
 
-  // Current execution (conditional).
+  // Current execution (conditional). cron-dashboard-redesign P1 §4.3 —
+  // when a run is in flight, the cockpit grid is replaced by a high-
+  // contrast running banner so the live elapsed clock + abort affordance
+  // become the focal point.
   let currentHtml = '';
   if (isRunning) {
     const cr = j.current_run;
@@ -12464,17 +12498,14 @@ function cronDrawerHtml(j) {
     const runShort = (cr.run_id || '').slice(0, 8);
     const sessShort = (cr.session_id || '').slice(0, 8);
     const sessChip = sessShort ? ' \u00B7 session ' + esc(sessShort) : '';
-    currentHtml = '<section class="cron-drawer-current" role="status" aria-live="polite">' +
-      '<h3>当前执行</h3>' +
-      '<div class="cdc-card">' +
-        '<div class="cdc-row1">' +
-          '<span class="ctr-dot run" aria-hidden="true"></span>' +
-          '<span class="cdc-state">运行中</span>' +
-          '<span class="cdc-clock">' + esc(elapsed) + '</span>' +
-          (triggerKind ? '<span class="cdc-trigger">' + esc(triggerKind) + '</span>' : '') +
+    currentHtml = '<section class="cron-drawer-running" role="status" aria-live="polite" data-job-id="' + escAttr(id) + '">' +
+      '<div class="cdr-clock">' + esc(elapsed) + '</div>' +
+      '<div class="cdr-info">' +
+        '<div class="cdr-state">正在执行 · ' + esc(phase) + '</div>' +
+        '<div class="cdr-detail">' +
+          (triggerKind ? '触发 ' + esc(triggerKind) + ' · ' : '') +
+          'run ' + esc(runShort) + esc(sessChip) +
         '</div>' +
-        '<div class="cdc-row2">' + esc(phase) + '</div>' +
-        '<div class="cdc-row3 mono">run ' + esc(runShort) + esc(sessChip) + '</div>' +
       '</div>' +
     '</section>';
   }
@@ -12484,7 +12515,124 @@ function cronDrawerHtml(j) {
     '<div class="cron-timeline-panel" id="cron-timeline-panel" data-job-id="' + escAttr(id) + '"></div>' +
   '</section>';
 
-  return headerHtml + summaryHtml + actionsHtml + currentHtml + historyHtml;
+  // cron-dashboard-redesign P1 §4.3 — final order.
+  // header → (cockpit | running banner) → prompt fold → history → sticky
+  // actions. The actions row sticks to the bottom of the drawer scroll
+  // viewport so 立即执行 stays in reach when scrolling through long
+  // history. The CSS class .cron-drawer-actions.is-sticky enables the
+  // position:sticky behaviour without affecting tests grepping the legacy
+  // classname.
+  return headerHtml + cockpitHtml + currentHtml + summaryHtml + historyHtml +
+    actionsHtml.replace('<nav class="cron-drawer-actions"', '<nav class="cron-drawer-actions is-sticky"');
+}
+
+// cronDrawerCockpitHtml builds the four-KPI cockpit row at the top of the
+// drawer (cron-dashboard-redesign P1 §4.3). The four numbers are the answer
+// to the three questions operators ask first when opening a job: when's
+// the next run / how does it usually go / what was the last result.
+//
+// Data sources (matching the design's "口径" table):
+//   - 下次运行: j.next_run (ms epoch) → relative humanized + absolute
+//   - 成功率:   Stats.Total / Stats.Succeeded — backend cumulative counter,
+//               not a 200-window client aggregate (avoids GC drift)
+//   - 平均耗时: arithmetic mean of recent_runs[].duration_ms (≤ 5),
+//               labelled "近 5 次" so users see the window
+//   - 上次结果: recent_runs[0].state — colored success/error/skip/etc
+function cronDrawerCockpitHtml(j) {
+  const nextMs = j && j.next_run;
+  let nextValue = '—';
+  let nextSub = '尚未排期';
+  if (nextMs) {
+    const w = formatWhenColloquial(nextMs);
+    nextValue = w && w.label ? w.label : formatAgoColloquial(nextMs);
+    nextSub = formatAbsTime(nextMs) || '';
+  } else if (j && j.paused) {
+    nextValue = '已暂停';
+    nextSub = '恢复后排期';
+  }
+  const nextCls = (nextMs && (formatWhenColloquial(nextMs) || {}).imminent) ? ' primary' : ' primary';
+
+  const stats = j && j.stats;
+  const total = stats ? (stats.total | 0) : 0;
+  const ok = stats ? (stats.succeeded | 0) : 0;
+  let rateValue = '—';
+  let rateSub = '尚无运行记录';
+  let rateCls = '';
+  if (total > 0) {
+    const pct = (ok / total) * 100;
+    rateValue = (pct >= 99.95 ? '100' : pct.toFixed(pct < 10 ? 1 : 0)) + '%';
+    rateSub = ok + ' / ' + total + ' 次成功';
+    rateCls = pct >= 99 ? ' ok' : pct >= 90 ? ' warn' : ' bad';
+  }
+
+  const recent = Array.isArray(j && j.recent_runs) ? j.recent_runs : [];
+  let avgValue = '—';
+  let avgSub = '需 ≥ 1 次运行';
+  if (recent.length > 0) {
+    let sum = 0, n = 0;
+    for (const r of recent) {
+      if (r && typeof r.duration_ms === 'number' && r.duration_ms > 0) {
+        sum += r.duration_ms;
+        n++;
+      }
+    }
+    if (n > 0) {
+      avgValue = formatDurationShort(sum / n);
+      avgSub = '近 ' + n + ' 次平均';
+    }
+  }
+
+  let lastValue = '—';
+  let lastSub = '尚无历史';
+  let lastCls = '';
+  if (recent.length > 0) {
+    const r0 = recent[0];
+    const stateMap = {
+      ok: { text: '成功', cls: ' ok' },
+      error: { text: '失败', cls: ' bad' },
+      timeout: { text: '超时', cls: ' bad' },
+      canceled: { text: '已取消', cls: ' warn' },
+      skipped: { text: '已跳过', cls: ' warn' },
+      running: { text: '运行中', cls: ' run' },
+    };
+    const m = stateMap[r0.state] || { text: r0.state || '—', cls: '' };
+    lastValue = m.text;
+    lastCls = m.cls;
+    lastSub = r0.started_at
+      ? formatAgoColloquial(r0.started_at) + (r0.duration_ms ? ' · ' + formatDurationShort(r0.duration_ms) : '')
+      : '';
+  }
+
+  const kpi = (label, value, sub, cls) =>
+    '<div class="cron-kpi' + (cls || '') + '">' +
+      '<div class="ck-label">' + esc(label) + '</div>' +
+      '<div class="ck-value">' + esc(value) + '</div>' +
+      '<div class="ck-sub">' + esc(sub) + '</div>' +
+    '</div>';
+
+  return '<section class="cron-drawer-cockpit" aria-label="任务关键指标">' +
+    kpi('下次运行', nextValue, nextSub, nextCls) +
+    kpi('成功率', rateValue, rateSub, rateCls) +
+    kpi('平均耗时', avgValue, avgSub, '') +
+    kpi('上次结果', lastValue, lastSub, lastCls) +
+  '</section>';
+}
+
+// formatDurationShort renders a millisecond duration as a compact human
+// string suitable for KPI tiles: "850ms" / "12s" / "3m 15s" / "1h 02m".
+// Stays under ~8 chars so the .ck-value column doesn't overflow at narrow
+// drawer widths.
+function formatDurationShort(ms) {
+  if (!ms || ms <= 0) return '—';
+  const s = ms / 1000;
+  if (s < 1) return Math.round(ms) + 'ms';
+  if (s < 60) return s.toFixed(s < 10 ? 1 : 0) + 's';
+  const m = Math.floor(s / 60);
+  const rs = Math.round(s - m * 60);
+  if (m < 60) return m + 'm ' + (rs < 10 ? '0' + rs : rs) + 's';
+  const h = Math.floor(m / 60);
+  const rm = m - h * 60;
+  return h + 'h ' + (rm < 10 ? '0' + rm : rm) + 'm';
 }
 
 // cronPhaseLabel maps backend phase strings to operator-friendly Chinese.
@@ -12583,11 +12731,43 @@ function renderCronPanel() {
   // attentionCount ≤ cronJobs.length always.
   const attentionCount = cronJobs.filter(j => j.paused || j.last_error || j.missed).length;
   const activeCount = cronJobs.filter(j => !j.paused && !j.last_error && !j.missed).length;
+  const runningCount = cronJobs.filter(j => j.current_run && j.current_run.started_at).length;
+  // healthy = 不在跑、没毛病、没暂停。是大多数任务的稳态。
+  const healthyCount = cronJobs.filter(j => {
+    if (j.paused || j.last_error || j.missed) return false;
+    if (j.current_run && j.current_run.started_at) return false;
+    return true;
+  }).length;
+  // Legacy summaryChip kept as data-only fallback for any test that greps for
+  // "运行中 N · 需关注 N"; v3 overview chip strip below is the visible UI.
   const summaryParts = [];
   if (activeCount > 0) summaryParts.push('运行中 ' + activeCount);
   if (attentionCount > 0) summaryParts.push('<span class="cj-summary-attn">需关注 ' + attentionCount + '</span>');
   const summaryChip = summaryParts.length > 0
-    ? '<span class="cj-summary">· ' + summaryParts.join(' · ') + '</span>'
+    ? '<span class="cj-summary" hidden>· ' + summaryParts.join(' · ') + '</span>'
+    : '';
+  // cron-dashboard-redesign P0 §4.2 — overview chip strip. Always visible
+  // (even in compact mode where filterBar is hidden) so users can scan
+  // status counts at a glance and click a chip to filter. Each chip toggles
+  // setCronStatusFilter; clicking the active chip resets to 'all'.
+  const ovChip = (label, status, count, cls) => {
+    if (count === 0 && status !== 'all') return '';
+    const active = cronFilterStatus === status ? ' active' : '';
+    const target = cronFilterStatus === status ? 'all' : status;
+    return '<button type="button" class="cron-ov-chip ' + (cls || '') + active + '"' +
+      ' data-status="' + escAttr(status) + '"' +
+      ' aria-pressed="' + (active ? 'true' : 'false') + '"' +
+      ' onclick="setCronStatusFilter(\'' + escJs(target) + '\')">' +
+      '<span class="cron-ov-num">' + count + '</span>' + esc(label) +
+      '</button>';
+  };
+  const overviewBar = cronJobs.length > 0
+    ? '<div class="cron-overview" role="group" aria-label="任务概览">' +
+        ovChip('全部', 'all', cronJobs.length, '') +
+        ovChip('健康', 'healthy', healthyCount, 'ok') +
+        ovChip('需关注', 'attention', attentionCount, 'warn') +
+        ovChip('运行中', 'running', runningCount, 'run') +
+      '</div>'
     : '';
   // Adaptive filter bar — hide entirely when cronJobs ≤ 5 (ChatGPT-style
   // compact mode) since search + chips add noise without value at that scale.
@@ -12631,6 +12811,7 @@ function renderCronPanel() {
               ' 新建' +
             '</button>' +
           '</div>' +
+          overviewBar +
           filterBar +
           missedBanner +
           '<div id="cron-list-items"></div>' +

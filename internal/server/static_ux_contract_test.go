@@ -6060,3 +6060,143 @@ func TestDashboardJS_TableCurrencyDollarNotMathProtected(t *testing.T) {
 		t.Error("isTableMathSpan: must reject `$...$` containing `|` without LaTeX chars (currency rows like `$20 | 1,000 | $0.04`)")
 	}
 }
+
+// TestDashboardHTML_CronCardLegacyStylesStripped pins
+// cron-dashboard-redesign P0 §4.2: the legacy v2 .cron-card padding/border/
+// margin was making each cj-row look like a standalone card, defeating the
+// v3 high-density row design. The class must remain (E2E selectors anchor
+// on it) but be visually inert — only `position:relative` survives.
+func TestDashboardHTML_CronCardLegacyStylesStripped(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(data)
+	idx := strings.Index(html, ".cron-card{")
+	if idx < 0 {
+		t.Fatal(".cron-card{ declaration not found")
+	}
+	end := strings.Index(html[idx:], "}")
+	if end < 0 {
+		t.Fatal(".cron-card declaration unterminated")
+	}
+	body := html[idx : idx+end+1]
+	for _, forbidden := range []string{"padding:", "border:", "margin", "background:"} {
+		if strings.Contains(body, forbidden) {
+			t.Errorf(".cron-card{} must not declare %q (legacy v2 card styling — defeats v3 row layout)", forbidden)
+		}
+	}
+}
+
+// TestDashboardJS_CronOverviewBar pins cron-dashboard-redesign P0 §4.2:
+// the four-chip overview strip is rendered above the filter bar, including
+// counts for healthy + running buckets. The strip MUST always render (not
+// gated by the >5 jobs threshold filterBar uses) so users get status counts
+// at a glance even with a small number of jobs.
+func TestDashboardJS_CronOverviewBar(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+	for _, want := range []string{
+		"cron-overview",
+		"cron-ov-chip",
+		"healthyCount",
+		"runningCount",
+		"overviewBar",
+	} {
+		if !strings.Contains(js, want) {
+			t.Errorf("dashboard.js missing P0 overview marker %q", want)
+		}
+	}
+	if !strings.Contains(js, "status !== 'healthy'") || !strings.Contains(js, "status !== 'running'") {
+		t.Error("setCronStatusFilter must accept 'healthy' and 'running' status values")
+	}
+	if !strings.Contains(js, "if (s === 'healthy')") {
+		t.Error("filterCronJobs must implement the 'healthy' predicate")
+	}
+	if !strings.Contains(js, "if (s === 'running'") {
+		t.Error("filterCronJobs must implement the 'running' predicate")
+	}
+}
+
+// TestDashboardJS_CronCockpit pins cron-dashboard-redesign P1 §4.3:
+// the four-KPI cockpit row is rendered by cronDrawerCockpitHtml, the
+// running banner sits in its own .cron-drawer-running section, and the
+// actions row is moved to the bottom of the drawer with .is-sticky for
+// position:sticky behaviour. Each piece has a single grep anchor so a
+// future regression in any of the three is caught at compile time.
+func TestDashboardJS_CronCockpit(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+	if !strings.Contains(js, "function cronDrawerCockpitHtml(j)") {
+		t.Error("cronDrawerCockpitHtml must exist (P1 KPI cockpit)")
+	}
+	for _, kpiLabel := range []string{"下次运行", "成功率", "平均耗时", "上次结果"} {
+		if !strings.Contains(js, kpiLabel) {
+			t.Errorf("cockpit must render KPI label %q", kpiLabel)
+		}
+	}
+	if !strings.Contains(js, "cron-drawer-running") {
+		t.Error("cronDrawerHtml must emit .cron-drawer-running banner for in-flight runs")
+	}
+	if !strings.Contains(js, "cron-drawer-actions is-sticky") {
+		t.Error("cronDrawerHtml must mark the actions row as .is-sticky for bottom-pinned UX")
+	}
+	if !strings.Contains(js, "function formatDurationShort(ms)") {
+		t.Error("formatDurationShort must exist for cockpit avg-duration formatting")
+	}
+}
+
+// TestDashboardHTML_CronCockpitAndStickyActionsCSS pins the CSS side of
+// cron-dashboard-redesign P1 §4.3: the cockpit grid, KPI tile, running
+// banner, and sticky-actions variant all need stylesheet entries.
+func TestDashboardHTML_CronCockpitAndStickyActionsCSS(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		".cron-drawer-cockpit{",
+		".cron-kpi{",
+		".cron-kpi.primary{",
+		".cron-drawer-running{",
+		".cron-drawer-actions.is-sticky{",
+		".cron-drawer-summary[open]",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("dashboard.html missing P1 cockpit/sticky CSS marker %q", want)
+		}
+	}
+}
+
+// TestStaticAssetETags_Computed verifies serveStaticWithETag wires up
+// precomputed ETags for the three embedded assets and the 304 fast-path is
+// available. cron-dashboard-redesign P0 §6 — combined with no-cache must-
+// revalidate, ETag enables browsers to skip body bytes when content hasn't
+// changed instead of re-downloading on every navigation.
+func TestStaticAssetETags_Computed(t *testing.T) {
+	t.Parallel()
+	for _, key := range []string{"dashboard.html", "dashboard.js", "agent_view.js"} {
+		tag, ok := staticAssetETags[key]
+		if !ok {
+			t.Errorf("staticAssetETags missing key %q", key)
+			continue
+		}
+		if !strings.HasPrefix(tag, `"`) || !strings.HasSuffix(tag, `"`) {
+			t.Errorf("ETag for %q must be quoted strong-form, got %q", key, tag)
+		}
+		if len(tag) != 34 {
+			t.Errorf("ETag for %q wrong length: got %d, want 34", key, len(tag))
+		}
+	}
+}

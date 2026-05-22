@@ -12,7 +12,12 @@ import (
 // session UUID (hex + hyphen). This is a defence-in-depth check at the CLI
 // argv boundary — without it, a crafted resume_id beginning with `-` could
 // be re-interpreted by the Claude CLI as a flag.
-var resumeIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,128}$`)
+//
+// R232-SEC-12: tightened from `[A-Za-z0-9._-]` to `[A-Za-z0-9-]`. Real
+// Claude session IDs are UUIDs (36-char hex+hyphen) with neither `.` nor
+// `_`; the broader charset was leftover slack that widened the argv
+// surface without any legitimate consumer relying on it.
+var resumeIDRe = regexp.MustCompile(`^[A-Za-z0-9-]{1,128}$`)
 
 // ClaudeProtocol implements Protocol for Claude CLI's stream-json format.
 type ClaudeProtocol struct {
