@@ -1,6 +1,9 @@
 package sysession
 
-import "github.com/naozhi/naozhi/internal/session"
+import (
+	"github.com/naozhi/naozhi/internal/cli"
+	"github.com/naozhi/naozhi/internal/session"
+)
 
 // SystemSessionRouter is the minimal slice of session.Router that the
 // sysession package depends on.  Defined here (consumer-side) so:
@@ -47,4 +50,12 @@ type SystemSessionRouter interface {
 	// don't use it.  Misuse with a non-sys: key panics — see
 	// session.RegisterSystemStub.
 	RegisterSystemStub(key, workspace, lastPrompt string)
+
+	// EventEntriesForKey returns the event-log entries for the given
+	// session key, or nil when unknown. Used by AutoTitler so the
+	// rename prompt can review the entire user-turn history rather
+	// than just the most recent prompt cached on SessionSnapshot.
+	// Returns the live process's EventLog when the session is alive,
+	// otherwise the persisted history slice.
+	EventEntriesForKey(key string) []cli.EventEntry
 }

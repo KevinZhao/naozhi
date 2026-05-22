@@ -18,6 +18,7 @@ import (
 	"slices"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/cli"
 	"github.com/naozhi/naozhi/internal/metrics"
 )
 
@@ -144,6 +145,25 @@ func (r *Router) VisitSessions(fn func(SessionSnapshot) bool) {
 			return
 		}
 	}
+}
+
+// EventEntriesForKey returns the full event-log entries for the given session
+// key, or nil when the key is unknown. AutoTitler uses this so the rename
+// prompt can review every user turn in the conversation rather than just the
+// LastPrompt cached on SessionSnapshot.
+//
+// Live-process branch goes through ManagedSession.EventEntries(), which itself
+// prefers the live process's ring buffer and falls back to persistedHistory
+// when the session is dead/suspended. r.mu is released before the read so the
+// inner historyMu acquisition does not nest under r.mu.
+func (r *Router) EventEntriesForKey(key string) []cli.EventEntry {
+	r.mu.RLock()
+	s := r.sessions[key]
+	r.mu.RUnlock()
+	if s == nil {
+		return nil
+	}
+	return s.EventEntries()
 }
 
 // InterruptSession sends SIGINT to the CLI process for the given session key.
