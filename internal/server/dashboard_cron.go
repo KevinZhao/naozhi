@@ -1019,13 +1019,19 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 // "America/St_Johns (UTC-03:30)". The integer-division approach would produce
 // "UTC-05:-30" for fractional negative offsets because the sub-hour remainder
 // inherits the sign; abs() the minute component to keep the format well-formed.
-func formatTZOffset(name string, offsetSeconds int) string {
+//
+// zoneName is the IANA zone identifier (loc.String()), e.g. "Asia/Shanghai" —
+// distinct from the abbreviation returned by time.Zone() ("CST"). Callers
+// pass loc.String() so the full label travels with the offset; the dashboard
+// surface separately exposes the zone abbreviation as `timezone_abbr`.
+// R230B-CR-2.
+func formatTZOffset(zoneName string, offsetSeconds int) string {
 	hours := offsetSeconds / 3600
 	minutes := (offsetSeconds % 3600) / 60
 	if minutes < 0 {
 		minutes = -minutes
 	}
-	return fmt.Sprintf("%s (UTC%+03d:%02d)", name, hours, minutes)
+	return fmt.Sprintf("%s (UTC%+03d:%02d)", zoneName, hours, minutes)
 }
 
 // runIDLenLimit caps the run_id query parameter length, matching the
