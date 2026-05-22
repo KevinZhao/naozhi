@@ -5116,8 +5116,12 @@ func TestDashboardJS_LoadEarlierFallbackWhenAllInternal(t *testing.T) {
 // Four invariants must all hold, or workspace HTML/SVG can escape to same-
 // origin execution in the dashboard:
 //
-//  1. The iframe MUST be created with sandbox=” — any allow-* token
-//     re-grants a capability.
+//  1. The iframe sandbox MUST be exactly 'allow-scripts'. allow-scripts is
+//     required so workspace HTML using MathJax / KaTeX / Mermaid / chart libs
+//     renders. Origin isolation comes from the blob URL (opaque origin) +
+//     withholding allow-same-origin: the iframe stays in an opaque origin and
+//     cannot read dashboard cookies, localStorage, or DOM. Adding any other
+//     allow-* token (especially allow-same-origin) collapses isolation.
 //  2. The bytes must arrive via fetch → Blob({type:...}) → blob URL, NOT
 //     via iframe.src = fileApiUrl(...render). The server returns
 //     application/octet-stream specifically so a direct URL hit downloads;
@@ -5151,14 +5155,18 @@ func TestDashboardJS_SandboxedBlobRender(t *testing.T) {
 	}
 	helper := js[helperIdx:end]
 
-	// Invariant 1: sandbox attribute is set with an empty string value.
-	sandboxRe := regexp.MustCompile(`setAttribute\(\s*['"]sandbox['"]\s*,\s*['"]\s*['"]\s*\)`)
+	// Invariant 1: sandbox attribute is set to exactly 'allow-scripts'.
+	// allow-scripts unlocks MathJax/KaTeX/Mermaid/chart libs in workspace
+	// HTML. Origin isolation comes from the blob URL (opaque origin), NOT
+	// from withholding scripts. allow-same-origin would collapse that
+	// isolation by giving the iframe dashboard origin — strictly forbidden.
+	sandboxRe := regexp.MustCompile(`setAttribute\(\s*['"]sandbox['"]\s*,\s*['"]allow-scripts['"]\s*\)`)
 	if !sandboxRe.MatchString(helper) {
-		t.Error("renderSandboxedBlob must call setAttribute('sandbox', '') — empty string grants zero capabilities; any other value weakens the iframe")
+		t.Error("renderSandboxedBlob must call setAttribute('sandbox', 'allow-scripts') — required for math/diagram libs; opaque-origin blob URL retains isolation")
 	}
-	for _, forbidden := range []string{"allow-scripts", "allow-same-origin", "allow-forms", "allow-top-navigation", "allow-popups"} {
+	for _, forbidden := range []string{"allow-same-origin", "allow-forms", "allow-top-navigation", "allow-popups"} {
 		if strings.Contains(helper, forbidden) {
-			t.Errorf("renderSandboxedBlob must not include sandbox token %q — re-opens the escape it exists to prevent", forbidden)
+			t.Errorf("renderSandboxedBlob must not include sandbox token %q — collapses opaque-origin isolation that allow-scripts depends on", forbidden)
 		}
 	}
 

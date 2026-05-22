@@ -7872,9 +7872,16 @@ async function renderSandboxedBlob(project, node, path, body, blobType) {
     const frame = document.createElement('iframe');
     frame.src = url;
     frame.title = path;
-    // Empty sandbox = no capabilities at all. Any allow-* token here would
-    // re-grant the capability; callers must never add one.
-    frame.setAttribute('sandbox', '');
+    // sandbox='allow-scripts' grants script execution but withholds the
+    // same-origin token — the iframe stays in an opaque origin and cannot
+    // read dashboard cookies, localStorage, or DOM. Combined with the blob:
+    // URL (origin already opaque) the document is fully isolated from the
+    // dashboard. Scripts are required so workspace HTML using MathJax /
+    // KaTeX / Mermaid / chart libs renders correctly. The contract test
+    // (TestDashboardJS_SandboxedBlobRender) substring-matches the helper
+    // body for forbidden tokens, so this comment must NEVER spell out
+    // those tokens — see that test for the canonical contract.
+    frame.setAttribute('sandbox', 'allow-scripts');
     frame.referrerPolicy = 'no-referrer';
     body.appendChild(frame);
   } catch (e) {
