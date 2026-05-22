@@ -5856,18 +5856,25 @@ func TestDashboardJS_CronSessionsHiddenByDefault(t *testing.T) {
 	}
 }
 
-// TestDashboardJS_NewSessionPaletteLocalOnly pins the contract that the
-// "New session" command palette must list ONLY local-node projects. Remote
-// projects are surfaced via their own node-scoped sidebar; mixing them
-// into the palette led to confused operators creating sessions on the
-// wrong host. Three invariants:
-//  1. A `localProjects()` helper exists and filters projectsData by node.
-//  2. createNewSession's empty-state branch consults localProjects(), not
-//     projectsData.length, so a host with only remote projects still gets
-//     the single-input fallback modal instead of a palette listing remotes.
-//  3. renderPaletteList's iteration source is localProjects(), not
-//     projectsData.forEach, so the palette never offers remote folders.
-func TestDashboardJS_NewSessionPaletteLocalOnly(t *testing.T) {
+// TestDashboardJS_NewSessionPaletteNodeScoped pins the contract that the
+// "New session" command palette must list only the projects belonging to
+// the currently selected node (selectedNode). When the user switches the
+// node selector to a remote, the palette retargets to that remote's
+// projects so a remote workspace can be opened in one click. Cross-node
+// creation is intentionally excluded: opening a project's CLI happens on
+// the node where the project lives.
+//
+// Three invariants:
+//  1. A `nodeFilteredProjects()` helper exists and filters projectsData
+//     against the (normalized) selectedNode value.
+//  2. createNewSession's empty-state branch consults nodeFilteredProjects(),
+//     not projectsData.length, so a node with no projects still gets the
+//     single-input fallback modal instead of a palette listing peer-node
+//     folders.
+//  3. renderPaletteList's iteration source is nodeFilteredProjects(), not
+//     projectsData.forEach, so the palette never offers folders that live
+//     on a different node than the one the operator picked.
+func TestDashboardJS_NewSessionPaletteNodeScoped(t *testing.T) {
 	t.Parallel()
 	data, err := dashboardJS.ReadFile("static/dashboard.js")
 	if err != nil {
@@ -5875,20 +5882,30 @@ func TestDashboardJS_NewSessionPaletteLocalOnly(t *testing.T) {
 	}
 	js := string(data)
 
-	// Invariant 1: helper definition + node-normalized filter.
-	if !strings.Contains(js, "function localProjects()") {
-		t.Error("dashboard.js missing localProjects() helper — palette local-only filter has no source of truth")
+	// Invariant 1: helper definition + node-normalized filter against
+	// selectedNode (not hard-coded 'local'). The filter must normalize
+	// missing/empty selectedNode to 'local' so single-node hosts behave
+	// exactly the same as before remote-aware filtering shipped.
+	if !strings.Contains(js, "function nodeFilteredProjects()") {
+		t.Error("dashboard.js missing nodeFilteredProjects() helper — palette node-scoped filter has no source of truth")
 	}
-	if !strings.Contains(js, "p.filter(p => (p.node || 'local') === 'local')") &&
-		!strings.Contains(js, "projectsData.filter(p => (p.node || 'local') === 'local')") {
-		t.Error("dashboard.js: localProjects() must normalize missing node to 'local' so legacy projects without the field still appear")
+	if !strings.Contains(js, "const target = selectedNode || 'local';") {
+		t.Error("dashboard.js: nodeFilteredProjects() must derive its target from selectedNode (with 'local' fallback) so switching node retargets the palette")
+	}
+	if !strings.Contains(js, "projectsData.filter(p => (p.node || 'local') === target)") {
+		t.Error("dashboard.js: nodeFilteredProjects() must filter projectsData by the normalized node value so legacy entries without the field still match the local node")
+	}
+	// Guard against regression: hard-coded 'local' filter would silently
+	// hide remote projects regardless of selectedNode.
+	if strings.Contains(js, "projectsData.filter(p => (p.node || 'local') === 'local')") {
+		t.Error("dashboard.js: nodeFilteredProjects() must not hard-code 'local' — remote projects would never surface even when the user switches node")
 	}
 
 	// Invariant 2: createNewSession empty-state branch must consult the
-	// helper, not the raw array length. Otherwise a host with N remote
-	// projects but zero local ones would still pop the palette and list
-	// only remotes (which would then be filtered out by invariant 3,
-	// leaving an empty palette).
+	// helper, not the raw array length. Otherwise selecting a remote with
+	// zero registered projects would still pop the palette and list local
+	// folders (which would then be filtered out by invariant 3, leaving
+	// an empty palette).
 	createIdx := strings.Index(js, "function createNewSession()")
 	if createIdx < 0 {
 		t.Fatal("createNewSession not found")
@@ -5898,16 +5915,16 @@ func TestDashboardJS_NewSessionPaletteLocalOnly(t *testing.T) {
 		createEnd = len(js) - createIdx
 	}
 	createBody := js[createIdx : createIdx+createEnd]
-	if !strings.Contains(createBody, "if (!localProjects().length) {") {
-		t.Error("createNewSession empty-state branch must use localProjects().length so remote-only hosts still get the single-input fallback modal")
+	if !strings.Contains(createBody, "if (!nodeFilteredProjects().length) {") {
+		t.Error("createNewSession empty-state branch must use nodeFilteredProjects().length so a node without projects still gets the single-input fallback modal")
 	}
 	if strings.Contains(createBody, "if (!projectsData.length) {") {
-		t.Error("createNewSession still gates on projectsData.length — remote projects would defeat the empty-state fallback")
+		t.Error("createNewSession still gates on projectsData.length — peer-node projects would defeat the empty-state fallback")
 	}
 
-	// Invariant 3: renderPaletteList iterates localProjects(), not the
-	// raw array. This is the load-bearing line that actually hides remote
-	// folders from the New session UI.
+	// Invariant 3: renderPaletteList iterates nodeFilteredProjects(), not
+	// the raw array. This is the load-bearing line that actually scopes
+	// the palette to the selected node.
 	renderIdx := strings.Index(js, "function renderPaletteList(state, query)")
 	if renderIdx < 0 {
 		t.Fatal("renderPaletteList not found")
@@ -5917,11 +5934,11 @@ func TestDashboardJS_NewSessionPaletteLocalOnly(t *testing.T) {
 		renderEnd = len(js) - renderIdx
 	}
 	renderBody := js[renderIdx : renderIdx+renderEnd]
-	if !strings.Contains(renderBody, "localProjects().forEach(p => {") {
-		t.Error("renderPaletteList must iterate localProjects() to hide remote folders from the New session palette")
+	if !strings.Contains(renderBody, "nodeFilteredProjects().forEach(p => {") {
+		t.Error("renderPaletteList must iterate nodeFilteredProjects() so the New session palette only offers folders that live on the selected node")
 	}
 	if strings.Contains(renderBody, "projectsData.forEach(p => {") {
-		t.Error("renderPaletteList still iterates projectsData directly — remote folders would leak into the palette")
+		t.Error("renderPaletteList still iterates projectsData directly — peer-node folders would leak into the palette")
 	}
 }
 
