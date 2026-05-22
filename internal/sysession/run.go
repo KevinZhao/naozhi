@@ -53,6 +53,10 @@ const (
 	// "trigger now" button. Phase 1 only produces Scheduled; manual
 	// will be passed by the future API endpoint that calls runOnce
 	// outside the ticker loop.
+	//
+	// R232-CR-8 WARNING: PLACEHOLDER — no producer in tree. Phase 2's
+	// trigger-now endpoint will be the first writer; until then this
+	// value is unreachable and any UI branch on it is dead code.
 	DaemonTriggerManual DaemonTriggerKind = "manual"
 )
 

@@ -163,6 +163,10 @@ const (
 	// TriggerCatchup is reserved for the missed-schedule replay path (P3,
 	// not yet implemented). No production code emits it today; consumers
 	// should treat unknown trigger strings as forward-compatible.
+	//
+	// R232-CR-8 WARNING: PLACEHOLDER — no producer in tree. Do not match
+	// on this value in dashboard / metrics filters until the catchup path
+	// lands and a writer is wired; matching today is dead code.
 	TriggerCatchup TriggerKind = "catchup"
 )
 
@@ -187,6 +191,10 @@ const (
 	ErrClassPausedConcurrent   ErrorClass = "paused_concurrent"
 	// ErrClassPanic is reserved for the future panic-recovery path
 	// (P3, not yet implemented); finishRun does not emit it today.
+	//
+	// R232-CR-8 WARNING: PLACEHOLDER — no producer in tree. Dashboard
+	// error-class filters that branch on this string will never hit
+	// until the panic-recovery deferred handler is wired into executeOpt.
 	ErrClassPanic ErrorClass = "panic"
 )
 
