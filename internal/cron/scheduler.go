@@ -2789,9 +2789,10 @@ func (s *Scheduler) persistJobsLocked() (func(), error) {
 // if lastSavedSeq has already advanced past our seq — this happens when Go's
 // sync.Mutex hands storeMu to a later writer (larger seq) before us, so our
 // data is strictly stale and writing it would roll back the disk state.
-// Atomic CAS on lastSavedSeq makes the "newer-than-landed" check itself
-// race-free across concurrent mutation goroutines. Closes R48-REL-PERSIST-
-// ORDERING-RACE.
+// Note: lastSavedSeq is read+stored under storeMu (Load+Store pattern), not a
+// CAS — storeMu serialises both the staleness check and the disk write so a
+// later seq can never race past us between Load and Store. Closes R48-REL-
+// PERSIST-ORDERING-RACE. R232-CR-11.
 func (s *Scheduler) saveMarshaledSeq(data []byte, seq uint64) {
 	s.storeMu.Lock()
 	defer s.storeMu.Unlock()
