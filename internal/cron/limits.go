@@ -34,4 +34,19 @@ const (
 	// declared this as a function-local const, drifting in lockstep
 	// only by convention.
 	maxStoredResultRunes = 4 * 1024
+
+	// maxRunErrorRunes bounds the cron error-message component (errMsg) after
+	// path redaction and SanitizeForLog. Three call sites (sanitiseRunErrMsg,
+	// recordResultP0WithSanitised, recordResult) previously each repeated
+	// `osutil.SanitizeForLog(s, 512)`; centralising avoids the same
+	// drift hazard the maxStoredResultRunes consolidation already addressed.
+	// R230B-CR-5.
+	maxRunErrorRunes = 512
+
+	// redactErrInputCap caps the *input* size redactPathsInCronError accepts
+	// before truncating. Sized larger than maxRunErrorRunes because the
+	// redactor runs before SanitizeForLog; it has to leave headroom for
+	// the path-stripping rewrite to fit a budget-friendly final string.
+	// R230B-CR-5.
+	redactErrInputCap = 2048
 )
