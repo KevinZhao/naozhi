@@ -2310,10 +2310,19 @@ func (s *Scheduler) finishRun(a finishArgs) {
 // touching s.mu / persistJobsLocked. Idempotent w.r.t. clean strings.
 func sanitiseRunResult(s string) string {
 	if trimmed := textutil.TruncateRunesNoEllipsis(s, maxStoredResultRunes); len(trimmed) < len(s) {
-		s = trimmed + "…[truncated]"
+		s = trimmed + truncatedSuffix
 	}
-	return osutil.SanitizeForLog(s, maxStoredResultRunes)
+	// SanitizeForLog's maxLen is byte-counted, so extend the cap by the
+	// suffix length so a 4K-rune input that just got the "…[truncated]"
+	// marker appended doesn't have its suffix byte-clipped on the way
+	// out. R232-PERF-9.
+	return osutil.SanitizeForLog(s, maxStoredResultRunes+len(truncatedSuffix))
 }
+
+// truncatedSuffix marks where sanitiseRunResult / recordResultP0WithSanitised
+// cut a result that exceeded maxStoredResultRunes. Centralised so the
+// downstream SanitizeForLog cap can compensate for its byte length.
+const truncatedSuffix = "…[truncated]"
 
 // sanitiseRunErrMsg applies the cron error-redaction + log-injection
 // scrub used by recordResultP0WithSanitised, for skipPersist branches
@@ -2321,7 +2330,7 @@ func sanitiseRunResult(s string) string {
 // flow into WS broadcasts and must not leak filesystem paths.
 func sanitiseRunErrMsg(s string) string {
 	s = redactPathsInCronError(s)
-	return osutil.SanitizeForLog(s, 512)
+	return osutil.SanitizeForLog(s, maxCronErrMsgRunes)
 }
 
 // bumpRunStateMetrics increments the per-state counter for the terminal
@@ -2407,11 +2416,15 @@ func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
 // CronRun summary), not wrapper presence.
 func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState) (string, string, bool) {
 	if trimmed := textutil.TruncateRunesNoEllipsis(result, maxStoredResultRunes); len(trimmed) < len(result) {
-		result = trimmed + "…[truncated]"
+		result = trimmed + truncatedSuffix
 	}
 	errMsg = redactPathsInCronError(errMsg)
-	result = osutil.SanitizeForLog(result, maxStoredResultRunes)
-	errMsg = osutil.SanitizeForLog(errMsg, 512)
+	// Extend SanitizeForLog's byte cap by the suffix length so an
+	// already-truncated result keeps the trailing marker intact;
+	// otherwise byte-level truncation could clip mid-suffix.
+	// R232-PERF-9.
+	result = osutil.SanitizeForLog(result, maxStoredResultRunes+len(truncatedSuffix))
+	errMsg = osutil.SanitizeForLog(errMsg, maxCronErrMsgRunes)
 
 	s.mu.Lock()
 	if _, ok := s.jobs[j.ID]; !ok {
@@ -2522,7 +2535,7 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
 	// strictly shorter byte-length prefix, so any length drop signals
 	// truncation actually happened. R219-CR-2.
 	if shaped := textutil.TruncateRunesNoEllipsis(result, maxStoredResultRunes); len(shaped) < len(result) {
-		result = shaped + "…[truncated]"
+		result = shaped + truncatedSuffix
 	}
 	// Redact absolute filesystem paths from errMsg before persisting to
 	// cron_jobs.json and broadcasting to all authenticated dashboard
@@ -2540,12 +2553,13 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
 	// and (c) any future slog attr that logs j.LastResult — each is a
 	// log-injection / stored-UI-spoofing vector. Apply the same
 	// SanitizeForLog gate used on remote workspace / feishu nonce paths.
-	// The length caps below (4K result, 512 err) double up with the rune
-	// truncation above but SanitizeForLog's cap is measured in runes, so
-	// a 4K-rune result that was already shaped by TruncateRunesNoEllipsis
-	// above is a no-op for length and only scrubs control runes.
-	result = osutil.SanitizeForLog(result, maxStoredResultRunes)
-	errMsg = osutil.SanitizeForLog(errMsg, 512)
+	// The length caps below double up with the rune truncation above;
+	// SanitizeForLog's cap is byte-counted, so extend the result cap by
+	// the suffix length so an already-truncated result keeps the
+	// "…[truncated]" marker intact instead of having it byte-clipped.
+	// R232-PERF-9.
+	result = osutil.SanitizeForLog(result, maxStoredResultRunes+len(truncatedSuffix))
+	errMsg = osutil.SanitizeForLog(errMsg, maxCronErrMsgRunes)
 	s.mu.Lock()
 	// If the job was deleted between execute()'s snapshot and recordResult's
 	// write-back, skip both the persist and the onExecute callback: broadcasting
@@ -2614,9 +2628,8 @@ func redactPathsInCronError(s string) string {
 	if s == "" {
 		return s
 	}
-	const maxErrLen = 2048
-	if len(s) > maxErrLen {
-		s = s[:maxErrLen] + "…"
+	if len(s) > maxRedactErrLen {
+		s = s[:maxRedactErrLen] + "…"
 	}
 	// Fast path: if the string contains no POSIX slash and no Windows
 	// backslash, there is nothing path-shaped to redact — skip the Builder
@@ -2789,9 +2802,10 @@ func (s *Scheduler) persistJobsLocked() (func(), error) {
 // if lastSavedSeq has already advanced past our seq — this happens when Go's
 // sync.Mutex hands storeMu to a later writer (larger seq) before us, so our
 // data is strictly stale and writing it would roll back the disk state.
-// Atomic CAS on lastSavedSeq makes the "newer-than-landed" check itself
-// race-free across concurrent mutation goroutines. Closes R48-REL-PERSIST-
-// ORDERING-RACE.
+// Note: lastSavedSeq is read+stored under storeMu (Load+Store pattern), not a
+// CAS — storeMu serialises both the staleness check and the disk write so a
+// later seq can never race past us between Load and Store. Closes R48-REL-
+// PERSIST-ORDERING-RACE. R232-CR-11.
 func (s *Scheduler) saveMarshaledSeq(data []byte, seq uint64) {
 	s.storeMu.Lock()
 	defer s.storeMu.Unlock()
