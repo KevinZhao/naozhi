@@ -390,12 +390,7 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 		reply(sb.String())
 
 	case "del":
-		if len(parts) < 3 {
-			reply("用法: /cron del <id>")
-			return
-		}
-		if len(parts[2]) > maxCronIDLen {
-			reply("无效 ID")
+		if !validateCronIDArg(parts, "del", reply) {
 			return
 		}
 		j, err := d.scheduler.DeleteJob(parts[2], msg.Platform, msg.ChatID)
@@ -411,12 +406,7 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 		log.Info("cron job deleted", "id", j.ID)
 
 	case "pause":
-		if len(parts) < 3 {
-			reply("用法: /cron pause <id>")
-			return
-		}
-		if len(parts[2]) > maxCronIDLen {
-			reply("无效 ID")
+		if !validateCronIDArg(parts, "pause", reply) {
 			return
 		}
 		j, err := d.scheduler.PauseJob(parts[2], msg.Platform, msg.ChatID)
@@ -429,12 +419,7 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 		log.Info("cron job paused", "id", j.ID)
 
 	case "resume":
-		if len(parts) < 3 {
-			reply("用法: /cron resume <id>")
-			return
-		}
-		if len(parts[2]) > maxCronIDLen {
-			reply("无效 ID")
+		if !validateCronIDArg(parts, "resume", reply) {
 			return
 		}
 		j, err := d.scheduler.ResumeJob(parts[2], msg.Platform, msg.ChatID)
@@ -456,6 +441,22 @@ func (d *Dispatcher) handleCronCommand(ctx context.Context, msg platform.Incomin
 			"  /cron pause <id>\n" +
 			"  /cron resume <id>")
 	}
+}
+
+// validateCronIDArg checks that parts contains a third token (the cron job ID)
+// and that the token is within maxCronIDLen.  Sends a usage / "无效 ID" reply
+// and returns false on failure so callers can early-return.  Centralises the
+// guard previously duplicated across /cron del | pause | resume.
+func validateCronIDArg(parts []string, sub string, reply func(string)) bool {
+	if len(parts) < 3 {
+		reply("用法: /cron " + sub + " <id>")
+		return false
+	}
+	if len(parts[2]) > maxCronIDLen {
+		reply("无效 ID")
+		return false
+	}
+	return true
 }
 
 // handleProjectCommand handles /project [name|off|list] commands.
@@ -563,11 +564,12 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		path = filepath.Join(home, path[1:])
 	}
 
+	chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
+
 	var absPath string
 	if filepath.IsAbs(path) {
 		absPath = filepath.Clean(path)
 	} else {
-		chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
 		currentWS := d.router.GetWorkspace(chatKey)
 		// R185-GO-L3: relative path requires a prior /cd <abs> to anchor
 		// workspace; without it, filepath.Join("", rel) == rel and EvalSymlinks
@@ -602,7 +604,6 @@ func (d *Dispatcher) handleCdCommand(ctx context.Context, msg platform.IncomingM
 		return
 	}
 
-	chatKey := session.ChatKey(msg.Platform, msg.ChatType, msg.ChatID)
 	d.router.SetWorkspace(chatKey, absPath)
 	d.router.ResetChat(chatKey)
 

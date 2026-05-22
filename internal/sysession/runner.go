@@ -10,6 +10,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+
+	"github.com/naozhi/naozhi/internal/osutil"
 )
 
 // Runner is the LLM-call abstraction used by all daemons.  Each Run()
@@ -141,10 +143,12 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 		// aggregators.  ErrorMsg in the breaker log line is still
 		// sanitized (only "exit status N").
 		if stderr.Len() > 0 {
-			head := stderr.String()
-			if len(head) > 256 {
-				head = head[:256]
-			}
+			// SanitizeForLog handles both byte-level truncation and
+			// rune-boundary safety, so a multi-byte CJK character at the
+			// 256-byte cap doesn't leak invalid UTF-8 into structured log
+			// sinks. It also scrubs C0/C1/bidi bytes the prompt fragment
+			// (echoed back by the CLI on error) might carry.
+			head := osutil.SanitizeForLog(stderr.String(), 256)
 			slog.Warn("sysession: runner stderr",
 				"binary", filepath.Base(r.cfg.BinPath),
 				"stderr_head", head)
