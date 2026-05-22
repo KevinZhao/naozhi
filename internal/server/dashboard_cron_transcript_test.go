@@ -376,6 +376,98 @@ func TestTranscript_RejectsNonRegularFile(t *testing.T) {
 	}
 }
 
+// TestTranscript_HappyPath_ClaudeDirContainsSymlink reproduces the macOS
+// case where /var → /private/var resolves to a different prefix than the
+// raw claudeDir. The path-escape check must canonicalise *both* sides
+// (resolved JSONL + claudeDir+projects root) before HasPrefix or every
+// legitimate run on macOS / Docker bind-mounts / AMI-customised layouts
+// would 404.
+func TestTranscript_HappyPath_ClaudeDirContainsSymlink(t *testing.T) {
+	t.Parallel()
+	tmp := t.TempDir()
+	// Real directory the data lives in.
+	realDir := filepath.Join(tmp, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("mkdir real: %v", err)
+	}
+	// claudeDir-as-seen-by-handler is a symlink to realDir, mimicking
+	// macOS /var → /private/var.
+	link := filepath.Join(tmp, "via-link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Skipf("symlinks unsupported: %v", err)
+	}
+
+	// Build the same fixture machinery but point claudeDir at the link.
+	storePath := filepath.Join(tmp, "cron_jobs.json")
+	workDir := filepath.Join(tmp, "workspace")
+	if err := os.MkdirAll(workDir, 0o755); err != nil {
+		t.Fatalf("mkdir workdir: %v", err)
+	}
+	sched := cron.NewScheduler(cron.SchedulerConfig{StorePath: storePath})
+	job := cron.Job{
+		ID:       strings.Repeat("a", 16),
+		Schedule: "@every 1h",
+		Prompt:   "fixture",
+		WorkDir:  workDir,
+	}
+	if err := sched.AddJob(&job); err != nil {
+		t.Fatalf("add job: %v", err)
+	}
+	sessionID := "12345678-1234-1234-1234-123456789abc"
+	jobID := job.ID
+	runID := strings.Repeat("b", 16)
+
+	runsDir := filepath.Join(tmp, "runs", jobID)
+	if err := os.MkdirAll(runsDir, 0o700); err != nil {
+		t.Fatalf("mkdir runs: %v", err)
+	}
+	now := time.Now().UTC()
+	run := cron.CronRun{
+		RunID:      runID,
+		JobID:      jobID,
+		State:      cron.RunStateSucceeded,
+		Trigger:    cron.TriggerScheduled,
+		StartedAt:  now.Add(-2 * time.Minute),
+		EndedAt:    now,
+		DurationMS: 2 * 60 * 1000,
+		SessionID:  sessionID,
+		WorkDir:    workDir,
+	}
+	runJSON, _ := json.Marshal(run)
+	if err := os.WriteFile(filepath.Join(runsDir, runID+".json"), runJSON, 0o600); err != nil {
+		t.Fatalf("write run: %v", err)
+	}
+
+	// Write the JSONL under realDir so the link resolves there.
+	projDir := filepath.Join(realDir, "projects", discovery.ClaudeProjectSlug(workDir))
+	if err := os.MkdirAll(projDir, 0o755); err != nil {
+		t.Fatalf("mkdir projects: %v", err)
+	}
+	ts := time.Now().UTC().Add(-30 * time.Second).Format(time.RFC3339Nano)
+	line := `{"type":"user","timestamp":"` + ts + `","message":{"role":"user","content":"hi"}}`
+	if err := os.WriteFile(filepath.Join(projDir, sessionID+".jsonl"), []byte(line), 0o600); err != nil {
+		t.Fatalf("write jsonl: %v", err)
+	}
+
+	// Handler points at the symlinked claudeDir — the prefix check must
+	// resolve both sides identically before comparing.
+	h := &CronHandlers{scheduler: sched, claudeDir: link}
+	w := callTranscript(h, jobID, runID)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp transcriptResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp.Fallback != "" {
+		t.Errorf("symlinked claudeDir must NOT trigger fallback; got %q", resp.Fallback)
+	}
+	if len(resp.Turns) != 1 {
+		t.Errorf("expected 1 turn, got %d", len(resp.Turns))
+	}
+}
+
 // TestTranscript_BugfixWiring asserts the route is registered and the
 // claudeDir field is populated on production wiring (smoke).
 func TestTranscript_RouteIsRegistered(t *testing.T) {

@@ -253,9 +253,22 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		writeJSON(w, resp)
 		return
 	}
-	allowedRoot := filepath.Join(h.claudeDir, "projects") + string(os.PathSeparator)
-	if !strings.HasPrefix(resolved+string(os.PathSeparator), allowedRoot) {
-		slog.Warn("cron transcript: path escape attempt", "raw", jsonlPath, "resolved", resolved, "claudeDir", h.claudeDir)
+	// Both the resolved JSONL path AND the claudeDir+projects root must be
+	// canonicalised before the prefix check. macOS canonicalises /var to
+	// /private/var, and any host where claudeDir contains a symlinked
+	// component (Docker bind-mounts, AMI-customised layouts) similarly
+	// drifts under EvalSymlinks. Without the symmetric resolve the prefix
+	// check rejects every legitimate JSONL on those hosts.
+	allowedRoot := filepath.Join(h.claudeDir, "projects")
+	resolvedRoot, rrErr := filepath.EvalSymlinks(allowedRoot)
+	if rrErr != nil {
+		// Fall back to the raw root if EvalSymlinks fails (root may not
+		// exist yet on a fresh setup); the strict check still applies.
+		resolvedRoot = allowedRoot
+	}
+	resolvedRoot += string(os.PathSeparator)
+	if !strings.HasPrefix(resolved+string(os.PathSeparator), resolvedRoot) {
+		slog.Warn("cron transcript: path escape attempt", "raw", jsonlPath, "resolved", resolved, "claudeDir", h.claudeDir, "allowedRoot", resolvedRoot)
 		resp.Fallback = "missing"
 		writeJSON(w, resp)
 		return
