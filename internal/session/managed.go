@@ -291,6 +291,13 @@ func storeAtomicString(v *atomic.Pointer[string], s string) {
 // field, decoding the IEEE-754 bit pattern via math.Float64frombits.
 // Returns 0 when the field has never been written (Load() → 0 maps to
 // float64 zero, same default the plain-float64 field had).
+//
+// Cross-ref: textutil exposes LoadAtomicString / StoreAtomicString for the
+// `atomic.Pointer[string]` mirror pattern (R219-CR-1) but does not yet
+// cover the `atomic.Uint64`-encoded float64 case used here. These helpers
+// stay package-local until a second call site emerges; lifting them into
+// textutil now would invert the dependency (textutil is a leaf package
+// that must not import session-specific contracts). R230-CQ-18.
 func loadTotalCost(v *atomic.Uint64) float64 {
 	return math.Float64frombits(v.Load())
 }
@@ -300,6 +307,8 @@ func loadTotalCost(v *atomic.Uint64) float64 {
 // packing/unpacking convention in one place — R183-CONCUR-M2 made the
 // field atomic to harden against future post-publication writers, and
 // having a helper keeps call sites free of bit-level noise.
+//
+// See loadTotalCost for the textutil cross-reference.
 func storeTotalCost(v *atomic.Uint64, cost float64) {
 	v.Store(math.Float64bits(cost))
 }
