@@ -2330,7 +2330,7 @@ const truncatedSuffix = "…[truncated]"
 // flow into WS broadcasts and must not leak filesystem paths.
 func sanitiseRunErrMsg(s string) string {
 	s = redactPathsInCronError(s)
-	return osutil.SanitizeForLog(s, 512)
+	return osutil.SanitizeForLog(s, maxCronErrMsgRunes)
 }
 
 // bumpRunStateMetrics increments the per-state counter for the terminal
@@ -2424,7 +2424,7 @@ func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionI
 	// otherwise byte-level truncation could clip mid-suffix.
 	// R232-PERF-9.
 	result = osutil.SanitizeForLog(result, maxStoredResultRunes+len(truncatedSuffix))
-	errMsg = osutil.SanitizeForLog(errMsg, 512)
+	errMsg = osutil.SanitizeForLog(errMsg, maxCronErrMsgRunes)
 
 	s.mu.Lock()
 	if _, ok := s.jobs[j.ID]; !ok {
@@ -2559,7 +2559,7 @@ func (s *Scheduler) recordResult(j *Job, result, errMsg, sessionID string) {
 	// "…[truncated]" marker intact instead of having it byte-clipped.
 	// R232-PERF-9.
 	result = osutil.SanitizeForLog(result, maxStoredResultRunes+len(truncatedSuffix))
-	errMsg = osutil.SanitizeForLog(errMsg, 512)
+	errMsg = osutil.SanitizeForLog(errMsg, maxCronErrMsgRunes)
 	s.mu.Lock()
 	// If the job was deleted between execute()'s snapshot and recordResult's
 	// write-back, skip both the persist and the onExecute callback: broadcasting
@@ -2628,9 +2628,8 @@ func redactPathsInCronError(s string) string {
 	if s == "" {
 		return s
 	}
-	const maxErrLen = 2048
-	if len(s) > maxErrLen {
-		s = s[:maxErrLen] + "…"
+	if len(s) > maxRedactErrLen {
+		s = s[:maxRedactErrLen] + "…"
 	}
 	// Fast path: if the string contains no POSIX slash and no Windows
 	// backslash, there is nothing path-shaped to redact — skip the Builder

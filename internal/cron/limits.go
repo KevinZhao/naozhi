@@ -34,4 +34,20 @@ const (
 	// declared this as a function-local const, drifting in lockstep
 	// only by convention.
 	maxStoredResultRunes = 4 * 1024
+
+	// maxCronErrMsgRunes bounds error strings persisted to cron_jobs.json
+	// and broadcast to dashboard clients. SanitizeForLog runs after
+	// redactPathsInCronError, so this cap is intentionally tighter than
+	// the result cap — error classifiers ("permission denied", "context
+	// deadline exceeded") fit comfortably within 512 runes and anything
+	// longer is almost always carrying redacted-path context that the
+	// dashboard truncates again on the wire. R230B-CR-5.
+	maxCronErrMsgRunes = 512
+
+	// maxRedactErrLen pre-truncates byte-length before redactPathsInCronError
+	// runs its O(n) scan + Builder allocation. It is deliberately larger
+	// than maxCronErrMsgRunes so a UTF-8-heavy errMsg whose rune count
+	// equals the SanitizeForLog cap survives intact through redaction
+	// (worst-case 4 bytes/rune). R230B-CR-5.
+	maxRedactErrLen = 2048
 )
