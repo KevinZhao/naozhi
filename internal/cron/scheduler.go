@@ -719,38 +719,34 @@ func (s *Scheduler) Start() error {
 	return nil
 }
 
-// registerStub creates (or refreshes) a router session entry for the job so it
-// appears in the dashboard workspace list. Safe to call without a router (tests).
-// Callers must not be holding s.mu — RegisterCronStubWithChain re-enters router state.
+// registerStubByValue creates (or refreshes) a router session entry for the
+// job so it appears in the dashboard workspace list. Safe to call without a
+// router (tests). Callers must not be holding s.mu — RegisterCronStubWithChain
+// re-enters router state.
 //
-// 当 job 存了 LastSessionID（最近一次成功执行的 session_id），会把它
-// 作为单元素 chain 传给 stub，这样 dashboard 点击 cron 侧边栏时能按
-// 该 ID 从 claude 项目目录找到 JSONL 历史。否则 fresh_context=true 的
-// 定时任务每次 Reset 都会把 stub 的 chain 清空，事件面板就永远是空白。
-func (s *Scheduler) registerStub(j *Job) {
-	if s.router == nil {
-		return
-	}
-	s.router.RegisterCronStubWithChain(session.CronKey(j.ID), j.WorkDir, j.Prompt, stubChain(j.LastSessionID))
-}
-
-// registerStubByValue is the pointer-free variant used from Start() where the
-// caller has already snapshotted mutable fields under s.mu.
+// 当 lastSessionID 非空（最近一次成功执行的 session_id），会作为单元素
+// chain 传给 stub，这样 dashboard 点击 cron 侧边栏时能按该 ID 从 claude
+// 项目目录找到 JSONL 历史。否则 fresh_context=true 的定时任务每次 Reset
+// 都会把 stub 的 chain 清空，事件面板就永远是空白。
+//
+// R232-CR-12 把原 registerStub(*Job) / registerStubByValue / stubChain 三
+// 个仅参数差异的 helper 合成单个值参数版本：避免持锁路径误传 *Job 指针
+// 后被并发 UpdateJob 改动；调用方一律先快照字段再传值。
 func (s *Scheduler) registerStubByValue(id, workDir, prompt, lastSessionID string) {
 	if s.router == nil {
 		return
 	}
-	s.router.RegisterCronStubWithChain(session.CronKey(id), workDir, prompt, stubChain(lastSessionID))
+	var chain []string
+	if lastSessionID != "" {
+		chain = []string{lastSessionID}
+	}
+	s.router.RegisterCronStubWithChain(session.CronKey(id), workDir, prompt, chain)
 }
 
-// stubChain returns the single-element resume chain for a cron stub when
-// LastSessionID is set, or nil otherwise. Centralises the chain-building
-// shared by registerStub / registerStubByValue.
-func stubChain(lastSessionID string) []string {
-	if lastSessionID == "" {
-		return nil
-	}
-	return []string{lastSessionID}
+// registerStubFromJob 是 registerStubByValue 的便捷包装，对未持锁、且对
+// *Job 字段稳定性已有把握（如 AddJob 后立刻调）的调用方简化字面。
+func (s *Scheduler) registerStubFromJob(j *Job) {
+	s.registerStubByValue(j.ID, j.WorkDir, j.Prompt, j.LastSessionID)
 }
 
 // EnsureStub lazily (re-)registers a dashboard stub session for the given
@@ -926,7 +922,7 @@ func (s *Scheduler) AddJob(j *Job) error {
 		return perr
 	}
 	save()
-	s.registerStub(j)
+	s.registerStubFromJob(j)
 	return nil
 }
 
@@ -1288,7 +1284,7 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 	save()
 	// Pass the snapshotted value (via result) to registerStub so a concurrent
 	// SetJobPrompt cannot tear the Prompt/WorkDir pointers we read.
-	s.registerStub(&result)
+	s.registerStubFromJob(&result)
 	slog.Info("cron job updated", "id", id,
 		"schedule_changed", upd.Schedule != nil,
 		"prompt_changed", upd.Prompt != nil,
@@ -1781,7 +1777,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (preflightResult
 		}
 		s.mu.RUnlock()
 		if exists {
-			s.registerStub(&j2)
+			s.registerStubFromJob(&j2)
 		}
 	}
 	s.mu.RLock()
