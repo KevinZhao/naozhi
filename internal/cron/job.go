@@ -63,7 +63,7 @@ type Job struct {
 	Paused    bool      `json:"paused"`
 
 	// Title 是人类可读的任务名称，用于卡片列表显示、搜索主 key、通知标题。
-	// 为空时 UI 自动回退到 Prompt 首行（见 JobTitleOrFallback），保持对旧
+	// 为空时 UI 自动回退到 Prompt 首行（见 jobTitleOrFallback），保持对旧
 	// cron_jobs.json 的向后兼容：JSON 反序列化后 Title == "" 不会破坏任何
 	// 渲染/搜索路径。上限 MaxCronTitleLen 字节。
 	// 引入背景：docs/rfc/cron-v2-polish.md §3.1。
@@ -226,15 +226,15 @@ const MaxCronTitleLen = 256
 // 长度上限（按 rune 算，避免切断中文）。60 rune 与卡片视觉宽度对齐。
 const titleFallbackRuneLimit = 60
 
-// JobTitleOrFallback 返回用于 UI 显示 / 搜索主 key 的人类可读名称：
+// jobTitleOrFallback 返回用于 UI 显示 / 搜索主 key 的人类可读名称：
 //  1. 如果 Job.Title 非空，直接返回（Trim 后）。
 //  2. 否则取 Prompt 的首个非空行，截断到 titleFallbackRuneLimit rune。
 //  3. 若 Prompt 也为空，返回空字符串——调用方（UI 层）自行决定占位符。
 //
-// 提供在 cron 包内，供 scheduler / dashboard / IM 通知复用，避免 fallback
-// 逻辑散落在各处 UI 代码里时序不一致（dashboard 和后端通知显示的标题
-// 出现分歧）。
-func JobTitleOrFallback(j *Job) string {
+// 包内私有：当前唯一调用者是 cron 包自身（搜索/通知/侧边栏元数据），
+// 前端 dashboard 显示走 cron_jobs.json 的 title 字段并独立做 fallback；
+// 没有跨包消费者。R232-CR-9 把它从导出降回 unexported。
+func jobTitleOrFallback(j *Job) string {
 	if j == nil {
 		return ""
 	}

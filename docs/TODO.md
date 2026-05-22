@@ -148,18 +148,18 @@
 
 ### 代码质量 / 重构 — 本轮新发现
 
-- [ ] **R232-CR-1 — internal/cron/store.go saveJobs 死代码（P2）**: 仅 scheduler_test.go 调，生产用 persistJobsLocked + saveMarshaledSeq。方案：测试改 json.Marshal+os.WriteFile 后删 saveJobs。Breaking：否。
+- [x] **R232-CR-1 — internal/cron/store.go saveJobs 死代码（P2）**: 仅 scheduler_test.go 调，生产用 persistJobsLocked + saveMarshaledSeq。方案：测试改 json.Marshal+os.WriteFile 后删 saveJobs。Breaking：否。 — 已修复，本批 PR #221
 - [x] **R232-CR-2 — RunStateRunning 死枚举（P2）**: 注释说"仅 inflight 不落盘"但代码无引用。方案：删常量；inflight 状态由 runInflight.Phase 表达。Breaking：否。 — 已修复，本批 PR #220
 - [ ] **R232-CR-3 — emitOverlapSkipped 发 back-to-back started→ended 假事件（P2）**: dashboard 短暂闪运行中气泡；SessionID/Phase 空字符串。方案：跳过 emitRunStarted 或 RunStartedEvent 加 Skipped bool。Breaking：是（WS schema）。
 - [ ] **R232-CR-4 — agents map 未配 "general" 静默零值（P2）**: 缺乏防御性 log。方案：NewScheduler debug log 或注释解释。Breaking：否。
 - [ ] **R232-CR-5 — computeJobTimeout schedule 参数无效（P2）**: 函数体 `_ = schedule; return maxCap`，注释"signature stability"。方案：删 schedule 参数。Breaking：是（机械重构）。
 - [x] **R232-CR-6 — auto_titler.renameOne 双层长度校验缺注释（P2）**: ValidateUserLabel 字节上限 + autoTitlerMaxTitleRunes rune 检查。方案：注释解释 16 rune 是 auto-titler 严格上限。Breaking：否。 — 已修复，本批 PR #220
-- [ ] **R232-CR-7 — preflightResult 单字段 wrapper struct（P2）**: 方案：直接返回 (func(), bool) 二元组。Breaking：否（内部类型）。
+- [x] **R232-CR-7 — preflightResult 单字段 wrapper struct（P2）**: 方案：直接返回 (func(), bool) 二元组。Breaking：否（内部类型）。 — 已修复，本批 PR #221
 - [ ] **R232-CR-8 — TriggerCatchup / ErrClassPanic / DaemonTriggerManual 占位常量（P3）**: 散布在导出 API 中无生产路径产生。方案：注释加警告或改 unexported。Breaking：否。
-- [ ] **R232-CR-9 — JobTitleOrFallback 死导出符号（P3）**: 仅 title_test.go 用，前端实现 fallback。方案：降 unexported 或删除。Breaking：否（前端不依赖）。
+- [x] **R232-CR-9 — JobTitleOrFallback 死导出符号（P3）**: 仅 title_test.go 用，前端实现 fallback。方案：降 unexported 或删除。Breaking：否（前端不依赖）。 — 已修复，本批 PR #221
 - [ ] **R232-CR-10 — sysession.SweepOldJSONL 单次启动扫描而非 daemon（P3）**: 注释承诺 Phase 2 TransientSweeper 未兑现。方案：sweep.go godoc 注释明确单次语义；TODO 跟踪 Phase 2。Breaking：否。
 - [x] **R232-CR-11 — saveMarshaledSeq 注释说"Atomic CAS"实际 Load+Store（P3）**: 方案：注释改为"在 storeMu 持锁状态下 Load+Store，非 CAS"。Breaking：否（注释）。 — 已修复，本批 PR #220
-- [ ] **R232-CR-12 — registerStub / registerStubByValue / stubChain 三 helper 结构（P3）**: pointer vs value 仅参数差异。方案：合并到一个传四个 string 的 helper。Breaking：否（私有）。
+- [x] **R232-CR-12 — registerStub / registerStubByValue / stubChain 三 helper 结构（P3）**: pointer vs value 仅参数差异。方案：合并到一个传四个 string 的 helper。Breaking：否（私有）。 — 已修复，本批 PR #221
 - [ ] **R232-CR-13 — dispatch unit test 走真 session.Router（P3）**: dispatch_test.go newTestDispatcher 实际是集成测试。方案：用 dispatch 自己的 SessionRouter fake。Breaking：否。
 - [ ] **R232-CR-14 — agent_tailer.attach 锁外逐条 SendJSON（P2）**: 500 条 buffered replay 无批量 marshal。方案：批量 node.ServerMsg{Type: "agent_history", Events: buffered}。Breaking：否（WS schema 兼容性需查）。
 - [ ] **R232-CR-15 — protocol_acp.Init session/new 分支手写 Marshal+WriteLine（P2）**: 与 initialize/load 走 sendAndWaitResponse 不一致。方案：抽 sendReq helper 或统一走 helper。Breaking：否。
