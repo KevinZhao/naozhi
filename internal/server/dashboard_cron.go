@@ -300,11 +300,17 @@ func validateCronPrompt(prompt string) error {
 type CronHandlers struct {
 	scheduler   *cron.Scheduler
 	allowedRoot string
+	// claudeDir is the absolute path to ~/.claude. Used by handleRunTranscript
+	// to locate the JSONL conversation file for a given run's session_id.
+	// Empty disables the transcript endpoint (returns fallback:"missing").
+	// cron-dashboard-redesign P2a §4.4.3.
+	claudeDir string
 	// runsLimiter caps how often a single authenticated caller can hit
-	// `/api/cron/runs` and `/api/cron/runs/{run_id}`. Both endpoints fan
-	// out filesystem I/O against the per-job runs directory; an attacker
-	// holding a stolen dashboard token can otherwise enumerate the entire
-	// run history at unbounded rate. R222-SEC-3.
+	// `/api/cron/runs`, `/api/cron/runs/{run_id}`, and the transcript
+	// endpoint. All three fan out filesystem I/O against the per-job runs
+	// directory or the JSONL on disk; an attacker holding a stolen dashboard
+	// token can otherwise enumerate the entire run history at unbounded
+	// rate. R222-SEC-3.
 	//
 	// Nil-guarded so tests built via newCronHandlersForTest (and other
 	// hand-rolled CronHandlers instances) skip the gate; wiring lives in
