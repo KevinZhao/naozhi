@@ -1016,23 +1016,36 @@ func (h *CronHandlers) handleUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 // formatTZOffset renders a timezone label like "Asia/Shanghai (UTC+08:00)" or
-// "America/St_Johns (UTC-03:30)". The integer-division approach would produce
-// "UTC-05:-30" for fractional negative offsets because the sub-hour remainder
-// inherits the sign; abs() the minute component to keep the format well-formed.
-func formatTZOffset(name string, offsetSeconds int) string {
+// "America/St_Johns (UTC-03:30)". The ianaName parameter is the IANA zone
+// identifier (loc.String()), NOT the abbr ("CST"/"NDT"). Both call sites
+// surface ianaName here and the abbr in a separate timezone_abbr response
+// field; the dashboard renders the IANA prefix because it's unambiguous
+// across DST transitions, while abbr is shown alongside as a familiar
+// short label. R230B-CR-2: parameter renamed from `name` to make the
+// expected input explicit and prevent future call sites from passing the
+// abbr by mistake.
+//
+// The integer-division approach would produce "UTC-05:-30" for fractional
+// negative offsets because the sub-hour remainder inherits the sign;
+// abs() the minute component to keep the format well-formed.
+func formatTZOffset(ianaName string, offsetSeconds int) string {
 	hours := offsetSeconds / 3600
 	minutes := (offsetSeconds % 3600) / 60
 	if minutes < 0 {
 		minutes = -minutes
 	}
-	return fmt.Sprintf("%s (UTC%+03d:%02d)", name, hours, minutes)
+	return fmt.Sprintf("%s (UTC%+03d:%02d)", ianaName, hours, minutes)
 }
 
-// runIDLenLimit caps the run_id query parameter length, matching the
-// 16-hex generator + headroom for future entropy bumps. Mirrors
-// maxCronIDLenDashboard but kept separate so a future divergence
-// (longer run IDs without longer job IDs) doesn't regress either side.
-const runIDLenLimit = 64
+// runIDLenLimit caps the run_id query parameter length. Run IDs and job
+// IDs share the same generator class (hex with headroom for future
+// entropy bumps) and the same on-disk JSON store, so they share the
+// cron.MaxIDLen constant. R230B-CR-1: previously a separate const was
+// kept "in case of divergence", but no concrete plan exists for run IDs
+// to grow longer than job IDs, and two parallel constants drifted in
+// review with no source of truth. Reuse one constant; revisit if a real
+// divergence requirement appears.
+const runIDLenLimit = cron.MaxIDLen
 
 // GET /api/cron/runs?job_id=&limit=&before=
 //

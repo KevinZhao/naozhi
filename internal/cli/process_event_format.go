@@ -109,8 +109,14 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 				entry.Tool = ev.ToolCall.Title
 				entry.Summary = ev.ToolCall.Title
 			}
-			tc := *ev.ToolCall
-			entry.ToolCall = &tc
+			// R230-PERF-2: share the ToolCall pointer rather than copying
+			// the struct. ev.ToolCall is freshly allocated by ACPProtocol
+			// per event and never mutated after EventEntriesFromEventAt
+			// returns; downstream consumers (eventlog Append, dashboard
+			// Marshal) only read its fields. Append takes EventEntry by
+			// value so the pointer is shared but the entry struct stays
+			// owned by the ring buffer.
+			entry.ToolCall = ev.ToolCall
 			return []EventEntry{entry}
 		}
 		if ev.Message == nil {
@@ -197,8 +203,11 @@ func EventEntriesFromEventAt(ev Event, nowMS int64) []EventEntry {
 				// (Claude) leaves ev.ToolCall nil and uses the legacy
 				// Tool / Detail fields.
 				if ev.ToolCall != nil {
-					tc := *ev.ToolCall
-					entry.ToolCall = &tc
+					// R230-PERF-2: share the ToolCall pointer; see the
+					// matching tool_result branch above for the safety
+					// argument (read-only downstream, EventEntry stored
+					// by value in the ring buffer).
+					entry.ToolCall = ev.ToolCall
 				}
 			case "text":
 				entry.Type = "text"
