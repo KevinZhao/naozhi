@@ -6123,6 +6123,62 @@ func TestDashboardJS_CronOverviewBar(t *testing.T) {
 	}
 }
 
+// TestDashboardJS_CronCockpit pins cron-dashboard-redesign P1 §4.3:
+// the four-KPI cockpit row is rendered by cronDrawerCockpitHtml, the
+// running banner sits in its own .cron-drawer-running section, and the
+// actions row is moved to the bottom of the drawer with .is-sticky for
+// position:sticky behaviour. Each piece has a single grep anchor so a
+// future regression in any of the three is caught at compile time.
+func TestDashboardJS_CronCockpit(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+	if !strings.Contains(js, "function cronDrawerCockpitHtml(j)") {
+		t.Error("cronDrawerCockpitHtml must exist (P1 KPI cockpit)")
+	}
+	for _, kpiLabel := range []string{"下次运行", "成功率", "平均耗时", "上次结果"} {
+		if !strings.Contains(js, kpiLabel) {
+			t.Errorf("cockpit must render KPI label %q", kpiLabel)
+		}
+	}
+	if !strings.Contains(js, "cron-drawer-running") {
+		t.Error("cronDrawerHtml must emit .cron-drawer-running banner for in-flight runs")
+	}
+	if !strings.Contains(js, "cron-drawer-actions is-sticky") {
+		t.Error("cronDrawerHtml must mark the actions row as .is-sticky for bottom-pinned UX")
+	}
+	if !strings.Contains(js, "function formatDurationShort(ms)") {
+		t.Error("formatDurationShort must exist for cockpit avg-duration formatting")
+	}
+}
+
+// TestDashboardHTML_CronCockpitAndStickyActionsCSS pins the CSS side of
+// cron-dashboard-redesign P1 §4.3: the cockpit grid, KPI tile, running
+// banner, and sticky-actions variant all need stylesheet entries.
+func TestDashboardHTML_CronCockpitAndStickyActionsCSS(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardHTML.ReadFile("static/dashboard.html")
+	if err != nil {
+		t.Fatalf("read dashboard.html: %v", err)
+	}
+	html := string(data)
+	for _, want := range []string{
+		".cron-drawer-cockpit{",
+		".cron-kpi{",
+		".cron-kpi.primary{",
+		".cron-drawer-running{",
+		".cron-drawer-actions.is-sticky{",
+		".cron-drawer-summary[open]",
+	} {
+		if !strings.Contains(html, want) {
+			t.Errorf("dashboard.html missing P1 cockpit/sticky CSS marker %q", want)
+		}
+	}
+}
+
 // TestStaticAssetETags_Computed verifies serveStaticWithETag wires up
 // precomputed ETags for the three embedded assets and the 304 fast-path is
 // available. cron-dashboard-redesign P0 §6 — combined with no-cache must-

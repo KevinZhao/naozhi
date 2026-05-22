@@ -67,7 +67,10 @@ func TestDashboardJS_CronPanelConsolidation(t *testing.T) {
 		t.Error("cronJobCardHtml: must push 'is-active' onto rowClasses when the drawer matches this job")
 	}
 
-	// 4. cronDrawerHtml structure — six sections.
+	// 4. cronDrawerHtml structure — sections present (cron-dashboard-redesign
+	// P1 evolved the contract: summary became collapsible <details>, the
+	// running view became .cron-drawer-running banner, and a new cockpit
+	// section sits at the top with KPI tiles).
 	if !strings.Contains(js, "function cronDrawerHtml(j)") {
 		t.Fatal("dashboard.js: cronDrawerHtml(j) must exist — owns the drawer markup")
 	}
@@ -79,15 +82,24 @@ func TestDashboardJS_CronPanelConsolidation(t *testing.T) {
 	drawerBody := js[drawerIdx:drawerEnd]
 	for _, marker := range []string{
 		"<header class=\"cron-drawer-header\">",
-		"<section class=\"cron-drawer-summary\">",
-		"<nav class=\"cron-drawer-actions\"",
-		"<section class=\"cron-drawer-current\"",
+		"<details class=\"cron-drawer-summary\">",
+		"<nav class=\"cron-drawer-actions",
+		"<section class=\"cron-drawer-running\"",
 		"<section class=\"cron-drawer-history\">",
 		"id=\"cron-timeline-panel\"",
 	} {
 		if !strings.Contains(drawerBody, marker) {
-			t.Errorf("cronDrawerHtml: missing structural marker %q — drawer 6-section contract broken", marker)
+			t.Errorf("cronDrawerHtml: missing structural marker %q — drawer section contract broken", marker)
 		}
+	}
+	// Cockpit section (P1) — 4 KPI tiles built by cronDrawerCockpitHtml.
+	// The function is referenced from cronDrawerHtml so the body grep
+	// implicitly covers wiring; we additionally assert the helper exists.
+	if !strings.Contains(js, "function cronDrawerCockpitHtml(j)") {
+		t.Error("dashboard.js: cronDrawerCockpitHtml(j) must exist — P1 §4.3 KPI cockpit")
+	}
+	if !strings.Contains(drawerBody, "cronDrawerCockpitHtml(j)") {
+		t.Error("cronDrawerHtml: must call cronDrawerCockpitHtml(j) for the KPI tiles")
 	}
 	// Empty-state branch is owned by renderCronDrawer (jobId set, job missing).
 	rendererIdx := strings.Index(js, "function renderCronDrawer()")
