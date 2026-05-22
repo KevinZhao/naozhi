@@ -30,8 +30,19 @@ const (
 	maxPrevSessionIDs = 32
 )
 
-// processIface abstracts the CLI process lifecycle methods used by the router
-// and session layer. *cli.Process satisfies this interface.
+// processIface abstracts the CLI process lifecycle methods used across the
+// session-aware code paths. Despite the package name, callers extend beyond
+// internal/session itself: internal/server (Hub broadcast + dashboard
+// snapshots), internal/dispatch (turn coalescing), internal/cron (cron Send
+// with ack), and internal/upstream (reverse-node RPC) all reach a Process
+// through ManagedSession.loadProcess() and consume this interface. Keep new
+// methods minimal — the surface has already been flagged as a god-interface
+// (R215-ARCH-P1-3 / R219-ARCH-7 / R224-ARCH-5) pending a future split into
+// ProcessLifecycle / EventSource / ProcessSender facets.
+//
+// *cli.Process is the only production implementation; testutil.TestProcess is
+// the test fake.
+// R230-CQ-16.
 type processIface interface {
 	Alive() bool
 	IsRunning() bool
