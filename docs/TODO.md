@@ -357,7 +357,7 @@
 ### Performance（剩余 — 本轮新发现）
 
 - [ ] **R230-PERF-1 — ACP Init / session/load / session/new 仍用 map[string]any 参数（P3）**: 已对 prompt 路径定义 acpPromptParams（R228-PERF-4），但握手三 RPC 仍 map。方案：定义 acpInitParams/acpSessionLoadParams/acpSessionNewParams 类型化。冷路径但风格不统一。Breaking：否。
-- [ ] **R230-PERF-2 — process_event_format tool_result 分支整 ToolCall 复制堆分配（P3）**: `tc := *ev.ToolCall` 每次 tool_result 1 alloc ~112B。方案：`entry.ToolCall = ev.ToolCall` 直接共享指针；Append 已按值拷贝 entry，所有权安全。Breaking：否。
+- [x] **R230-PERF-2 — process_event_format tool_result 分支整 ToolCall 复制堆分配（P3）**: `tc := *ev.ToolCall` 每次 tool_result 1 alloc ~112B。方案：`entry.ToolCall = ev.ToolCall` 直接共享指针；Append 已按值拷贝 entry，所有权安全。Breaking：否。 — 已修复，本批 PR #215
 ## Round 230B — 5-agent 并行 code review（PR #198）NEEDS-DESIGN
 
 > 5 reviewer（Go / 安全 / 性能 / 代码质量 / 架构）跑了全仓 review。本轮 17 处直接修已落本轮 PR；以下为非 breaking 但需要更大改动 / 需设计决策 / 跨模块的发现，登记追踪。
@@ -391,8 +391,8 @@
 
 ### Code 质量（剩余）
 
-- [ ] **R230B-CR-1 — `runIDLenLimit=64` 与 `cron.MaxIDLen` 各自定义（P3）**: 注释声明"kept separate"但未来漂移风险。方案：评估是否真要分开，否则统一。Breaking：否。
-- [ ] **R230B-CR-2 — `formatTZOffset` 接受 IANA name 并展示（P3）**: name 参数实为 loc.String() 而非 zone abbr，渲染 "Asia/Shanghai (UTC+08:00)" 与 timezone_abbr 重叠。方案：统一只传 zone abbr 或重命名参数。Breaking：否（仅展示文案）。
+- [x] **R230B-CR-1 — `runIDLenLimit=64` 与 `cron.MaxIDLen` 各自定义（P3）**: 注释声明"kept separate"但未来漂移风险。方案：评估是否真要分开，否则统一。Breaking：否。 — 已修复，本批 PR #215
+- [x] **R230B-CR-2 — `formatTZOffset` 接受 IANA name 并展示（P3）**: name 参数实为 loc.String() 而非 zone abbr，渲染 "Asia/Shanghai (UTC+08:00)" 与 timezone_abbr 重叠。方案：统一只传 zone abbr 或重命名参数。Breaking：否（仅展示文案）。 — 已修复，本批 PR #215
 - [ ] **R230B-CR-3 — `dashboard_cron.handleList`/`handleRunsList` map[string]any 响应（P3）**: 1Hz poll 反射 alloc。方案：定义命名 struct（参 R226-PERF-7 dashboard_session）。Breaking：否。
 - [ ] **R230B-CR-4 — `trimJobLocked` 用 mtime / `cacheTrimAfterDisk` 用 StartedAt（P3）**: disk vs cache 过期判断时间源不一致，长任务+短窗口下短暂分歧。方案：选其一统一。Breaking：否。
 - [ ] **R230B-CR-5 — `redactPathsInCronError` `maxErrLen=2048` + `SanitizeForLog 512` magic（P3）**: 散在两处的 cron 错误消息长度策略。方案：抽包级常量。Breaking：否。
