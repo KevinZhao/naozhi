@@ -1497,6 +1497,22 @@ access:
 ### Gemini CLI 集成
 ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 
+### 竞品能力提炼后续实现要点（2026-05-22 调研）
+完整设计要点见 [`docs/design/competitor-distilled-2026-05.md`](design/competitor-distilled-2026-05.md)。
+覆盖 Anthropic Cowork / AWS Quick / OpenAI Codex / OpenClaw / Hermes / OpenHuman / Manus / Genspark / MCP 生态调研，按优先级提炼 9 块能力：
+
+- **P0** 安全基线（Hermes 八条 P0 自查 + Smart approval XML fence + Redaction 默认 ON）
+- **P0** Cron `no_agent` watchdog + LLM job + delivery target 三段式
+- **P1** ACP server（让 IDE 接入 naozhi）
+- **P1** 多渠道 BaseAdapter 抽象 + WeCom/DingTalk
+- **P1** Connector / MCP vault Phase 1（OAuth + Trust 分级 + per-channel 启用）
+- **P1-P2** Self-Evolving Skills（Curator-lite → LLM 复审 fork）
+- **P2** Multi-agent Kanban（SQLite WAL + worker 池化）
+- **P2** OTel + 治理面（对位 Cowork 治理黑盒）
+- **P3** ACP client / Memory Tree / Wide Research 扇出
+
+后续按文档 §10 拆分为独立 RFC（`docs/rfc/security-baseline.md` / `cron-v2-no-agent.md` / `acp-server.md` / `multi-channel-adapter.md` / `connector-vault.md` / `skill-curator.md` / `kanban.md` / `otel-audit.md` 等）。
+
 ---
 
 ## Round 215 — 5-agent 深度 review 第 29 轮（2026-05-11）NEEDS-DESIGN 归档
