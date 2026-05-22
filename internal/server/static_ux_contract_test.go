@@ -6265,3 +6265,31 @@ func TestStaticAssetETags_Computed(t *testing.T) {
 		}
 	}
 }
+
+// TestDashboardJS_InlineMathAcceptsFunctionRefs pins the regression where
+// inline `$h(x)$` / `$f(x)$` / `$g(t)$` — bare function references with no
+// digit/operator inside — slipped through isMathInline's prose guard and
+// stayed visible as raw `$h(x)$` text in chat bubbles instead of being
+// rendered by KaTeX. The previous heuristic required a digit or operator
+// hint; we now also accept the function-call shape `letter(` / `)letter`
+// so single-letter function references render the same as the rest of
+// the formula they belong to.
+func TestDashboardJS_InlineMathAcceptsFunctionRefs(t *testing.T) {
+	t.Parallel()
+	data, err := dashboardJS.ReadFile("static/dashboard.js")
+	if err != nil {
+		t.Fatalf("read dashboard.js: %v", err)
+	}
+	js := string(data)
+	// The hint regex must include the function-call alternatives; the bare
+	// `[\d+\-*/=<>]` form would re-introduce the bug.
+	want := "if (!/[\\d+\\-*/=<>]|[a-zA-Z]\\(|\\)[a-zA-Z]/.test(tex)) return false;"
+	if !strings.Contains(js, want) {
+		t.Errorf("isMathInline must accept function-call shape (letter( / )letter) so $h(x)$ / $f(x)$ render via KaTeX; missing line %q", want)
+	}
+	// The original digit/operator-only form must NOT be present anymore.
+	stale := "if (!/[\\d+\\-*/=<>]/.test(tex)) return false;"
+	if strings.Contains(js, stale) {
+		t.Errorf("isMathInline still uses the old digit/operator-only hint regex %q — function-call references like $h(x)$ would not render", stale)
+	}
+}

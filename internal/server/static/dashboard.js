@@ -7178,14 +7178,18 @@ function runKatex() {
 //   1) contains an unambiguous LaTeX char (\ ^ _ { })
 //   2) otherwise must be built from "math alphabet" chars only (digits,
 //      single letters, operators, parens, punctuation) AND contain no two
-//      consecutive 3+ letter English words AND contain at least one digit
-//      or operator — this accepts `$x=1$` / `$2x$` / `$a+b$` and rejects
-//      any multi-word sentence that happened to slip past the outer guard.
+//      consecutive 3+ letter English words AND contain at least one math
+//      hint — digit, operator, OR a function-call pattern `letter(` /
+//      `)letter`. The function-call clause accepts `$h(x)$` / `$f(x)$` /
+//      `$g(t)$` which the previous "must contain digit/operator" rule
+//      mistakenly rejected (function references in prose carry no operator
+//      character themselves). Pure prose tokens like `$(test)$` still
+//      reject because they lack both a math hint and a function-call shape.
 function isMathInline(tex) {
   if (/[\\^_{}]/.test(tex)) return true;
   if (!/^[\s\d+\-*/=<>≤≥≠±·×÷!().,;\[\]|a-zA-Z]+$/.test(tex)) return false;
   if (/[a-zA-Z]{3,}\s+[a-zA-Z]{3,}/.test(tex)) return false;
-  if (!/[\d+\-*/=<>]/.test(tex)) return false;
+  if (!/[\d+\-*/=<>]|[a-zA-Z]\(|\)[a-zA-Z]/.test(tex)) return false;
   return true;
 }
 
