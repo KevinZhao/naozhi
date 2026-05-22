@@ -148,6 +148,11 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 			// 256-byte cap doesn't leak invalid UTF-8 into structured log
 			// sinks. It also scrubs C0/C1/bidi bytes the prompt fragment
 			// (echoed back by the CLI on error) might carry.
+			// 不在此处预截：byte-slice 截断会把多字节 rune 切到中段，而
+			// SanitizeForLog 的 walk-back rune 边界修正只在 mapped 长度
+			// 超过 maxLen 时触发；slow-path strings.Map 把非法 rune 替换
+			// 为 '_'（1 字节），mapped 长度 ≤ 输入长度，于是 walk-back
+			// 不会跑，最终输出残留 mid-rune 字节。
 			head := osutil.SanitizeForLog(stderr.String(), 256)
 			slog.Warn("sysession: runner stderr",
 				"binary", filepath.Base(r.cfg.BinPath),

@@ -224,7 +224,12 @@ func (s *runStore) cacheHeadPush(jobID string, summary CronRunSummary) {
 	}
 	// Newest-first: prepend. Cap to keepCount to bound memory; entries
 	// beyond cap are trimmed by trimJobLocked at the same time.
-	entry.runs = append([]CronRunSummary{summary}, entry.runs...)
+	// 用 grow-in-place + copy + 索引赋值替代 append([]T{x}, slice...)，
+	// 节省每次调用的一次性短命 1-元素切片头分配；shift 仍然是 O(N)
+	// 但底层数组可复用，少一次 backing array 拷贝（高频路径）。
+	entry.runs = append(entry.runs, CronRunSummary{})
+	copy(entry.runs[1:], entry.runs[:len(entry.runs)-1])
+	entry.runs[0] = summary
 	if len(entry.runs) > s.keepCount {
 		entry.runs = entry.runs[:s.keepCount]
 	}
@@ -380,6 +385,11 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 		if e.IsDir() {
 			continue
 		}
+		// 跳过 symlink，避免有人在 runs/<jobID>/ 目录下放指向 /etc/passwd
+		// 之类的软链接诱导 readRun 触发外部文件 read（path traversal 防御）。
+		if e.Type()&fs.ModeSymlink != 0 {
+			continue
+		}
 		name := e.Name()
 		if !strings.HasSuffix(name, ".json") {
 			continue
@@ -522,6 +532,10 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 		if e.IsDir() {
 			continue
 		}
+		// 跳过 symlink，与 diskListNewestFirst 对齐（path traversal 防御）。
+		if e.Type()&fs.ModeSymlink != 0 {
+			continue
+		}
 		name := e.Name()
 		if !strings.HasSuffix(name, ".json") {
 			continue
@@ -624,7 +638,9 @@ func (s *runStore) trimAll(now time.Time) {
 	entries, err := os.ReadDir(s.root)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {
-			slog.Debug("cron run: trimAll readdir", "root", s.root, "err", err)
+			// 非 NotExist 一般指向配置错误（路径指向非目录、权限不足
+			// 等），用 Warn 让运维定位；冷启动 GC 失败不致命，记录后继续。
+			slog.Warn("cron run: trimAll readdir failed", "root", s.root, "err", err)
 		}
 		return
 	}
