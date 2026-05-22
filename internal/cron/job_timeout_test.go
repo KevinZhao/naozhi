@@ -9,6 +9,12 @@ import (
 // maxCap regardless of schedule. Long-running tasks that overshoot their
 // schedule period are not killed; the next scheduled tick is dropped by
 // robfig/cron's SkipIfStillRunning chain wrapper.
+//
+// Schedule-shape coverage is preserved as documentation: the cases below
+// span @every minutes/hours, classic 5-field cron, and unparseable input.
+// All collapse to the same `cap` answer post-R230C-CR-2 (schedule param
+// dropped) — kept here so a future re-introduction of period-aware
+// scaling has table cases ready.
 func TestComputeJobTimeout(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
@@ -58,10 +64,10 @@ func TestComputeJobTimeout(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			got := computeJobTimeout(tc.schedule, tc.cap)
+			got := computeJobTimeout(tc.cap)
 			if got != tc.want {
-				t.Fatalf("computeJobTimeout(%q, %v) = %v, want %v",
-					tc.schedule, tc.cap, got, tc.want)
+				t.Fatalf("computeJobTimeout(%v) [schedule %q] = %v, want %v",
+					tc.cap, tc.schedule, got, tc.want)
 			}
 		})
 	}
