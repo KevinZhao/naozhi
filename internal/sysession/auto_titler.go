@@ -338,8 +338,12 @@ func (a *autoTitler) renameOne(ctx context.Context, key, seed string, turnCount 
 	if title == "" {
 		return fmt.Errorf("runner returned empty title: %w", ErrValidation)
 	}
-	// System prompt requests ≤ 16 chars; enforce in code so a model
-	// that ignores the instruction can't write an over-long label.
+	// Two-tier length gate is intentional: ValidateUserLabel enforces a
+	// general byte cap shared with user-typed labels, while
+	// autoTitlerMaxTitleRunes is the AutoTitler-specific 16-rune
+	// ceiling matching the system-prompt instruction. Keep both:  a
+	// model that ignores the prompt's "≤16 chars" still gets clipped
+	// here before the label is published. R232-CR-6.
 	if utf8.RuneCountInString(title) > autoTitlerMaxTitleRunes {
 		return fmt.Errorf("%w: title exceeds %d runes", ErrValidation, autoTitlerMaxTitleRunes)
 	}
