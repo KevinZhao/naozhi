@@ -52,8 +52,15 @@ func (r *Router) shimManagedKeys() map[string]bool {
 }
 
 // shimManagers returns the distinct ShimManager instances across wrappers.
-// Shared managers are deduplicated so a combined deployment (all backends
-// reusing the same state dir) only scans once.
+// Deduplication is by `*shim.Manager` pointer identity: two wrappers
+// (e.g. claude + kiro) configured to share a single ShimManager instance
+// — typical when both backends point at the same state dir — appear once
+// in the result. Wrappers that hold structurally-equivalent but separately-
+// constructed managers (different *shim.Manager addresses, even if every
+// field matches) appear twice; this is intentional, since each manager
+// owns its own UNIX socket / cgroup pool and Discover()/handshake calls
+// must hit each one.
+// R230-CQ-17.
 func (r *Router) shimManagers() []*shim.Manager {
 	var out []*shim.Manager
 	seen := make(map[*shim.Manager]bool)
