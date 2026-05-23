@@ -872,6 +872,31 @@ var stopBudget = 30 * time.Second
 // a ctx-aware pattern and reclaim the goroutine, otherwise restart
 // cycles accumulate stuck webhook goroutines until OOM. R44-REL-
 // TRIGGER-GOROUTINE.
+//
+// R217-GO-5 archive anchor (doc-and-accept, 2026-05-23): the triggerWG
+// goroutine leak observed when Stop's deadline pre-empts triggerWG.Wait
+// is intentional under the current design.
+//  1. After stopBudget elapses, the wrapper goroutine that closes
+//     triggerDone may stay parked on triggerWG.Wait if a platform
+//     webhook ignored its own timeout. Stop returns regardless.
+//  2. naozhi runs Scheduler single-shot in production: each process
+//     lifecycle calls NewScheduler → Start → Stop exactly once, so the
+//     orphaned goroutine is reclaimed by process exit moments later.
+//     No per-restart accumulation occurs because there is no per-
+//     restart Scheduler reuse.
+//  3. `go test -count=N` repeatedly constructs Schedulers in one
+//     process and DOES leak goroutines across iterations. Tests that
+//     care should use NewScheduler-per-test isolation (the existing
+//     test pattern) and avoid sharing Scheduler instances across
+//     sub-tests; a goroutine-leak detector run with a milliseconds-
+//     scale stopBudget will surface this orphan as documented above.
+//  4. A long-term fix requires a cancel-or-drain Stop protocol that
+//     coordinates with the OnExecute / deliverNotice callback chain
+//     (e.g. a triggerCtx threaded into deliverNotice so it can
+//     observe cancellation instead of relying on platform HTTP
+//     timeouts). That refactor crosses the Scheduler ↔ router ↔
+//     platform-channel boundary and is intentionally out of scope
+//     for this round; tracked under R44 + R217-GO-5.
 func (s *Scheduler) Stop() {
 	s.stopCancel()
 	cronDoneCtx := s.cron.Stop()
