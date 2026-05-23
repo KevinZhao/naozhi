@@ -181,12 +181,28 @@ func (c *wsClient) sweepSubGenExpiredLocked(nowNanos int64) int {
 	return reclaimed
 }
 
+// SendJSON marshals v and queues the bytes on the client's send channel.
+//
+// Design decision (R234-PERF-7, intentionally NOT optimised):
+// We deliberately do NOT use a sync.Pool of *bytes.Buffer + *json.Encoder
+// here, contrary to the pattern used in shimSendBufPool. Rationale:
+//   - encoding/json.Marshal returns a fresh []byte that can be handed
+//     directly to the unbuffered channel; the stdlib already pools its
+//     internal encodeState so the per-call alloc cost is one heap slice
+//     header + the marshaled bytes (which the channel must own anyway).
+//   - A pooled-buffer path would have to make+copy the bytes out of the
+//     pool buffer before Put-ing it back (otherwise the consumer goroutine
+//     could read after the next Put-Get races overwrite the bytes). That
+//     copy is the same allocation we are trying to avoid, so the pool only
+//     adds bookkeeping cost without reducing the dominant alloc.
+//   - The send path is single-producer per wsClient; there is no contention
+//     on the marshaler that a pool would otherwise alleviate.
+//
+// shimSendBufPool is different because the shim writer hands the marshaled
+// bytes directly to bufio.Writer.Write, which copies into its own buffer
+// before returning — the pool buffer is safe to reuse synchronously, and
+// the make-and-copy step is elided.
 func (c *wsClient) SendJSON(v any) {
-	// json.Marshal returns a fresh []byte we can hand directly to SendRaw
-	// (no copy needed; stdlib already pools encodeState internally). The
-	// previous encoder-pool path required a make+copy to isolate the send
-	// channel from the returned pool buffer, making it strictly more
-	// expensive than plain Marshal for this single-producer hot path.
 	data, err := json.Marshal(v)
 	if err != nil {
 		slog.Debug("ws SendJSON encode", "err", err)
