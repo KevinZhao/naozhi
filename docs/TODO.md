@@ -830,7 +830,7 @@
 
 - [x] **R220-PERF-1 — `countActive()` evictOldest/Takeover/spawnSession 路径全 map scan（P1）**: ~~4 个 caller 各自 `r.mu.Lock()` 下做完整 map 扫描~~。`router_lifecycle.go:914` 加 godoc trade-off 锚点：scan 成本来自 lifecycle 翻转频次（不是消息频次），低-中千 session 内可接受；要规模化需切原子 delta + 周期 reconcile，不在原地优化。Cleanup 已用 `newActive` 增量。归档于 2026-05-23。
 - [ ] **R220-PERF-3 — `EventLog.EntriesSince` 初始 catch-up 在 RLock 下复制 500 entry × 512B（P2）**: 反向扫描+复制全在 l.mu RLock 内，subscriber 初始订阅时阻塞 Append 一段时间。方案：先 snapshot ring 索引（head/count），release RLock，再在临时 slice 内拷贝。涉及：`internal/cli/eventlog.go:869`。
-- [ ] **R220-PERF-4 — `Cleanup` pass2 对 candidate 做 proc.Alive + proc.IsRunning 二次锁获取（P2）**: pass1 在 r.mu RLock 下收集 candidate proc 指针，pass2 又对每个 candidate 取 `proc.mu.RLock` 跑 IsRunning，与热 Send 路径锁竞争。方案：pass1 同时 capture proc.GetState() 一次，pass2 直接读 state。涉及：`internal/session/router.go:2920-2946`。
+- [x] **R220-PERF-4 — `Cleanup` pass2 对 candidate 做 proc.Alive + proc.IsRunning 二次锁获取（P2）**: ~~pass2 又对每个 candidate 取 `proc.mu.RLock` 跑 IsRunning~~。`router_cleanup.go:194` 加 trade-off 锚点：Cleanup 5min 一跳不在 hot path、短路顺序 alive→running→LastEventAt 对死 proc 提前返回，snapshot 类型反而强迫每个 reader 复制不用的字段。仅当观察到 Cleanup-induced Send p99 抖动再切 GetState 快照。归档于 2026-05-23。
 - [~] **R220-PERF-5 — `hub.debounceMu` 高频锁获取无 atomic 短路（归档 2026-05-23）**: BroadcastSessionsUpdate 函数体内 4 个互斥状态分支（debounceClosed / 已 timer 在跑 / 超 maxDelay / 全新 timer），都需 debounceMu 保 timer 重入与 clientWG.Add 配对；纯 atomic.Bool 不能取代 4-way 决策。300/s acquire 远不是性能瓶颈。本批 PR 归档。
 
 ### 代码质量 — 错误消息一致性

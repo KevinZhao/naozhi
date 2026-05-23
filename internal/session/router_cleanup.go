@@ -191,6 +191,19 @@ func (r *Router) Cleanup() {
 	stuckThreshold := 2 * totalTimeout
 
 	// ── Pass 2: classify outside the lock (may perform PID syscalls) ─
+	//
+	// R220-PERF-4 trade-off note: each iteration takes c.proc.mu.RLock twice
+	// (Alive + IsRunning), and on the running branch a third time via
+	// LastEventAt. A snapshot variant (proc.GetState() returning {alive,
+	// running, lastEventAt} in one lock acquisition) would cut the lock count
+	// by ~3x and avoid contending with hot Send paths. We deliberately keep
+	// the per-call style here because (a) Cleanup runs every 5 minutes, not
+	// per-message, so the contention budget is small; (b) the snapshot type
+	// would have to live in cli.Process and force every reader to copy a
+	// struct it mostly ignores; (c) the order alive→IsRunning→LastEventAt
+	// short-circuits on dead procs without paying for fields it doesn't
+	// need. Switching to a snapshot is the right move only if we observe
+	// Cleanup-induced p99 Send latency spikes on busy deployments.
 	var expired []expiredEntry
 	var stuckKill []expiredEntry
 	now := time.Now()
