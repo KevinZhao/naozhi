@@ -8048,6 +8048,16 @@ function renderMdUncached(s) {
         mermaidPending[id] = code;
         return '<div class="mermaid-wrap"><pre id="' + id + '" class="mermaid-pending"></pre></div>';
       }
+      // Opt-in math fence: ```math / ```latex / ```tex hand the entire block
+      // to KaTeX in displayMode. Mirrors the mermaid convention — authors
+      // explicitly mark intent so legitimate $-bearing source code (shell
+      // $VAR, Make $@, Perl $_, Python f-strings) keeps its existing
+      // verbatim rendering. KaTeX renderToString errors fall through to
+      // an error span with throwOnError:false so a malformed expression
+      // still surfaces the source instead of crashing the bubble.
+      if (lang === 'math' || lang === 'latex' || lang === 'tex') {
+        return '<div class="md-math-display">' + renderKatex(code, true) + '</div>';
+      }
       const langAttr = lang ? ' data-lang="' + escAttr(lang) + '"' : '';
       return '<div class="md-code-wrap"><pre class="md-pre"><code' + langAttr + '>' + esc(code) + '</code></pre>' +
         '<div class="md-code-actions">' +

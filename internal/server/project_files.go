@@ -42,6 +42,26 @@ const (
 	fileStatTimeout  = 2 * time.Second
 )
 
+// publicTmpProject is a reserved pseudo-project name that maps onto /tmp,
+// letting the dashboard preview/download chat-mentioned absolute paths under
+// /tmp without first registering /tmp as a real project.
+//
+// Trade-off: any authenticated dashboard user can read non-credential files
+// anywhere under /tmp, including artefacts other users / processes left
+// behind. Acceptable for naozhi's single-operator dashboard model; not safe
+// in multi-tenant deployments. Symlinks that resolve outside /tmp are still
+// rejected by resolveProjectFileWithRoot's prefix check, and the credential
+// allowlist (.env, id_rsa, *.pem, etc.) still applies, so a malicious file
+// dropped under /tmp cannot exfiltrate /etc/passwd or the operator's
+// keystore.
+//
+// The handler intercepts this name before the projectMgr lookup so a real
+// project named "__public_tmp__" on disk cannot accidentally shadow it.
+const (
+	publicTmpProject = "__public_tmp__"
+	publicTmpRoot    = "/tmp"
+)
+
 // textMimePrefixes identifies MIME types safe to return as UTF-8 text in
 // preview mode. http.DetectContentType tags source code as "text/plain" which
 // covers most cases; JSON/YAML/XML/JS are also safe even when the detector
@@ -386,14 +406,24 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project is required"})
 		return
 	}
-	// R183-SEC-M2: every other /api/projects path gates on validateProjectName
-	// before touching projectMgr; handleFilesExists previously passed raw
-	// req.Project straight into the map lookup. The miss path is currently
-	// silent, but one future slog.Debug("project not found", ...) is enough
-	// to open a log-injection hole. Enforce the trust-boundary policy up front.
-	if err := validateProjectName(req.Project); err != nil {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
-		return
+	// __public_tmp__ pseudo-project routes /tmp/... preview without a real
+	// project registration. Skip validateProjectName + projectMgr.Get for
+	// this reserved name and pin rootPath to /tmp; everything else flows
+	// through the same resolveProjectFileWithRoot guard so symlink escape /
+	// path-traversal / credential-name rejection still apply.
+	rootPath := ""
+	if req.Project == publicTmpProject {
+		rootPath = publicTmpRoot
+	} else {
+		// R183-SEC-M2: every other /api/projects path gates on validateProjectName
+		// before touching projectMgr; handleFilesExists previously passed raw
+		// req.Project straight into the map lookup. The miss path is currently
+		// silent, but one future slog.Debug("project not found", ...) is enough
+		// to open a log-injection hole. Enforce the trust-boundary policy up front.
+		if err := validateProjectName(req.Project); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
+			return
+		}
 	}
 	if len(req.Paths) == 0 {
 		writeJSON(w, map[string]any{"results": map[string]existsEntry{}})
@@ -404,10 +434,13 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	p := h.projectMgr.Get(req.Project)
-	if p == nil {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
-		return
+	if rootPath == "" {
+		p := h.projectMgr.Get(req.Project)
+		if p == nil {
+			writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+			return
+		}
+		rootPath = p.Path
 	}
 
 	ctx, cancel := context.WithTimeout(r.Context(), fileStatTimeout)
@@ -423,11 +456,11 @@ func (h *ProjectHandlers) handleFilesExists(w http.ResponseWriter, r *http.Reque
 	// Check empty BEFORE EvalSymlinks: EvalSymlinks("") returns (".", nil)
 	// on Linux which would bind path resolution to the process CWD.
 	// R61-GO-1.
-	if p.Path == "" {
+	if rootPath == "" {
 		writeJSON(w, map[string]any{"results": map[string]existsEntry{}})
 		return
 	}
-	rootResolved, err := filepath.EvalSymlinks(p.Path)
+	rootResolved, err := filepath.EvalSymlinks(rootPath)
 	if err != nil {
 		// Treat an unresolvable project root as "nothing exists" so the
 		// frontend renders plain text fallback. Matching the existing
@@ -567,19 +600,28 @@ func (h *ProjectHandlers) handleFileGet(w http.ResponseWriter, r *http.Request) 
 		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "project and path are required"})
 		return
 	}
-	// R183-SEC-M2: same trust-boundary gate as handleFilesExists above.
-	if err := validateProjectName(project); err != nil {
-		writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
-		return
+	// __public_tmp__ pseudo-project: see publicTmpProject godoc. Resolve
+	// against /tmp instead of looking up a real project, but keep the same
+	// path-traversal / symlink-escape / credential-name guards downstream.
+	rootPath := ""
+	if project == publicTmpProject {
+		rootPath = publicTmpRoot
+	} else {
+		// R183-SEC-M2: same trust-boundary gate as handleFilesExists above.
+		if err := validateProjectName(project); err != nil {
+			writeJSONStatus(w, http.StatusBadRequest, map[string]string{"error": "invalid project name"})
+			return
+		}
+
+		p := h.projectMgr.Get(project)
+		if p == nil {
+			writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
+			return
+		}
+		rootPath = p.Path
 	}
 
-	p := h.projectMgr.Get(project)
-	if p == nil {
-		writeJSONStatus(w, http.StatusNotFound, map[string]string{"error": "project not found"})
-		return
-	}
-
-	resolved, err := resolveProjectFile(p.Path, path)
+	resolved, err := resolveProjectFile(rootPath, path)
 	if err != nil {
 		// os.ErrNotExist (valid but missing) vs outside-workspace collapse to
 		// 404 — an attacker probing paths gets the same signal either way.
