@@ -401,8 +401,15 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 					}
 					taskID, toolUseID := ev.TaskID, ev.ToolUseID
 					desc := ev.Description
-					wallclock := time.Now().UnixMilli()
-					go linker.Resolve(taskID, toolUseID, name, desc, wallclock)
+					// R224-GO-3: pass 0 to disable the agentTS-10s
+					// freshness filter inside SubagentLinker.Resolve.
+					// Reconnect-time replay events have no per-event
+					// timestamp (the shim ring buffer never stamps them),
+					// so using time.Now().UnixMilli() here would mark
+					// every historical jsonl candidate "predates parent
+					// tool_use by >10s" and reject it. Replay must trust
+					// the persisted jsonl instead.
+					go linker.Resolve(taskID, toolUseID, name, desc, 0)
 				}
 			}
 		}
