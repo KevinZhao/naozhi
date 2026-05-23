@@ -428,6 +428,25 @@ type CronHandlers struct {
 	// hand-rolled CronHandlers instances) skip the gate; wiring lives in
 	// server.New.
 	runsLimiter *ipLimiter
+
+	// triggerLimiter caps per-IP `POST /api/cron/trigger` rate. Each call
+	// may spawn a session.GetOrCreate + sess.Send chain that, when fanned out
+	// at unbounded rate by a stolen token, can exhaust the maxJobs=500 shim /
+	// cgroup capacity within seconds. Bucket: ~1 trigger every 2 s sustained,
+	// burst 3, mirroring a human operator's debounce expectation. R234-SEC-2.
+	//
+	// Nil-guarded for the same test-construction reason as runsLimiter.
+	triggerLimiter *ipLimiter
+
+	// previewLimiter caps per-IP `GET /api/cron/preview` rate. The endpoint
+	// runs cronParser.Parse + sched.Next×count which is small per-call but
+	// trivial to amplify into sustained CPU burn from a single IP. Bucket:
+	// ~10 req/s sustained, burst 20, well above any plausible UI cadence
+	// (the cron editor previews on debounced keystroke, ~3 req/s peak).
+	// R234-SEC-11.
+	//
+	// Nil-guarded for the same test-construction reason as runsLimiter.
+	previewLimiter *ipLimiter
 }
 
 // GET /api/cron — list all cron jobs (unscoped, admin view).
@@ -802,6 +821,13 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cron not configured", http.StatusNotImplemented)
 		return
 	}
+	// R234-SEC-2: per-IP rate limit. Each trigger fans out a full
+	// session.GetOrCreate + sess.Send; without this gate, a stolen token can
+	// burn through the maxJobs=500 shim/cgroup budget in seconds.
+	if h.triggerLimiter != nil && !h.triggerLimiter.AllowRequest(r) {
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+		return
+	}
 
 	var req struct {
 		ID string `json:"id"`
@@ -843,6 +869,14 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 // the next N run times. count defaults to 1 and is clamped to [1, 10] so the
 // UI can show a multi-run preview without giving callers an unbounded knob.
 func (h *CronHandlers) handlePreview(w http.ResponseWriter, r *http.Request) {
+	// R234-SEC-11: per-IP rate limit. cronParser.Parse + sched.Next×count is
+	// cheap per-call but trivial to amplify; without the gate a single IP can
+	// pin a CPU at ~1 kreq/s. Limiter sits before query parsing so the work
+	// of validateCronScheduleChars is also gated.
+	if h.previewLimiter != nil && !h.previewLimiter.AllowRequest(r) {
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+		return
+	}
 	schedule := r.URL.Query().Get("schedule")
 	if schedule == "" {
 		http.Error(w, "schedule is required", http.StatusBadRequest)

@@ -618,6 +618,16 @@ func buildServer(opts ServerOptions) *Server {
 			// run history at unbounded rate, both burning IO and exposing
 			// per-job activity timing.
 			runsLimiter: newIPLimiterWithProxy(rate.Every(time.Second), 60, opts.TrustedProxy),
+			// R234-SEC-2: per-IP limiter for /api/cron/trigger. 1 trigger every
+			// 2 s sustained, burst 3 — comfortably above any human-operator
+			// debounce, well below the rate at which a stolen token could
+			// exhaust maxJobs=500 shim/cgroup capacity. See CronHandlers godoc.
+			triggerLimiter: newIPLimiterWithProxy(rate.Every(2*time.Second), 3, opts.TrustedProxy),
+			// R234-SEC-11: per-IP limiter for /api/cron/preview. 10 req/s
+			// sustained, burst 20 — well above the dashboard's debounced
+			// keystroke cadence (~3 req/s peak) but bounded enough that a
+			// single IP cannot pin CPU at ~1 kreq/s parser load.
+			previewLimiter: newIPLimiterWithProxy(rate.Every(100*time.Millisecond), 20, opts.TrustedProxy),
 		},
 		transcribeH: &TranscribeHandler{
 			transcriber:       opts.Transcriber,
@@ -792,6 +802,16 @@ func buildServer(opts ServerOptions) *Server {
 	// the regression surfaces during boot rather than under attack.
 	if s.scheduler != nil && s.cronH != nil && s.cronH.runsLimiter == nil {
 		panic("server: runsLimiter must be non-nil when scheduler is wired")
+	}
+	// R234-SEC-2 / R234-SEC-11: same fail-fast contract for the trigger and
+	// preview limiters. Both endpoints are exposed only when scheduler is
+	// wired, and both fan out non-trivial work (session spawn / parser CPU);
+	// silently dropping the limiter would re-open the very DoS we just closed.
+	if s.scheduler != nil && s.cronH != nil && s.cronH.triggerLimiter == nil {
+		panic("server: triggerLimiter must be non-nil when scheduler is wired")
+	}
+	if s.scheduler != nil && s.cronH != nil && s.cronH.previewLimiter == nil {
+		panic("server: previewLimiter must be non-nil when scheduler is wired")
 	}
 
 	return s
