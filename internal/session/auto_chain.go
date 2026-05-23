@@ -27,7 +27,8 @@
 package session
 
 import (
-	"sort"
+	"cmp"
+	"slices"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/discovery"
@@ -58,8 +59,11 @@ type AutoChainPolicy interface {
 }
 
 // GlobalAutoChainPolicy is the production AutoChainPolicy backed by
-// the global config block. Zero-value means "disabled" — callers should
-// always populate via cmd/naozhi wiring (see cfg.Session.AutoChain).
+// the global config block. The zero-value disables the feature via
+// EnabledFlag=false; if a caller sets EnabledFlag=true while leaving
+// WindowDur/CapValue zero, pickWorkspaceChain falls back to its own
+// hardcoded defaults (7d window, maxPrevSessionIDs cap). Callers
+// should populate via cmd/naozhi wiring (see cfg.Session.AutoChain).
 type GlobalAutoChainPolicy struct {
 	EnabledFlag bool
 	WindowDur   time.Duration
@@ -241,8 +245,8 @@ func pickWorkspaceChain(
 	if len(cands) == 0 {
 		return nil
 	}
-	sort.SliceStable(cands, func(i, j int) bool {
-		return cands[i].mtime < cands[j].mtime
+	slices.SortStableFunc(cands, func(a, b cand) int {
+		return cmp.Compare(a.mtime, b.mtime)
 	})
 	// Reserve one slot for the about-to-spawn session itself; chain holds
 	// strictly previous IDs, so the cap-1 ceiling matches §4.2 step 4.

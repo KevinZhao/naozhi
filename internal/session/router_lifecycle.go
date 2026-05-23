@@ -1343,11 +1343,17 @@ func (r *Router) RenameSession(oldKey, newKey string) bool {
 	// old.persistedHistory. When len<cap in that backing array, the append
 	// writes into bytes that fresh.persistedHistory also points to.
 	freshHistory := slices.Clone(old.persistedHistory)
+	// Clone prevSessionOrigins alongside prevSessionIDs so origin labels
+	// (manual / auto-spawn / auto-backfill) survive a rename. Without this
+	// the freshly-renamed session reloads from sessions.json with origins
+	// silently defaulting to "manual" via SetPrevSessionOrigins, dropping
+	// the auto-chain provenance recorded by §4.4-A/B.
 	fresh := &ManagedSession{
-		key:              newKey,
-		persistedHistory: freshHistory,
-		prevSessionIDs:   slices.Clone(old.prevSessionIDs),
-		exempt:           old.exempt,
+		key:                newKey,
+		persistedHistory:   freshHistory,
+		prevSessionIDs:     slices.Clone(old.prevSessionIDs),
+		prevSessionOrigins: slices.Clone(old.prevSessionOrigins),
+		exempt:             old.exempt,
 		onSessionID: func(id string) {
 			r.mu.Lock()
 			r.trackSessionID(id)

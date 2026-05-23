@@ -17,9 +17,9 @@
 package session
 
 import (
+	"cmp"
 	"log/slog"
 	"slices"
-	"sort"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/cli"
@@ -272,13 +272,30 @@ func (r *Router) runAutoChainBackfillOnce() {
 	// Deterministic ordering: oldest-active session takes its chain
 	// first so the early creation of one workspace's "first" session
 	// reliably prefixes the chain rather than randomly.
-	sort.SliceStable(candidates, func(i, j int) bool {
-		return candidates[i].lastActive.Load() < candidates[j].lastActive.Load()
+	slices.SortStableFunc(candidates, func(a, b *ManagedSession) int {
+		return cmp.Compare(a.lastActive.Load(), b.lastActive.Load())
 	})
 
 	// ── Phase 2 ──────────────────────────────────────────────────
 	consumed := map[string]bool{}
 	consumedSelf := selfExcluder{set: consumed}
+
+	// Build the combinedExcluder once — routerExcluder and extras are
+	// snapshots captured under r.mu in Phase 1 and do not change
+	// during Phase 2; consumedSelf wraps a map whose header stays
+	// stable across iterations (the map's contents grow as we record
+	// each decision, and IsExcluded sees those updates because the
+	// selfExcluder holds the map by reference).
+	inner := make([]SessionIDExcluder, 0, 2+len(extras))
+	inner = append(inner, routerExcluder, consumedSelf)
+	inner = append(inner, extras...)
+	excluder := combinedExcluder{inner: inner}
+
+	// Capture the cutoff clock once so every candidate in this batch
+	// sees the same window boundary. Without this, candidates picked
+	// milliseconds apart at the window edge would observe different
+	// cutoffs and produce non-deterministic batch results.
+	pickNow := time.Now()
 
 	type decision struct {
 		s   *ManagedSession
@@ -287,13 +304,7 @@ func (r *Router) runAutoChainBackfillOnce() {
 	decisions := make([]decision, 0, len(candidates))
 
 	for _, s := range candidates {
-		// excluderBase aggregates router + cron/sys + selfExcluder so
-		// each call sees both prior decisions and external state.
-		inner := make([]SessionIDExcluder, 0, 2+len(extras))
-		inner = append(inner, routerExcluder, consumedSelf)
-		inner = append(inner, extras...)
-		excluder := combinedExcluder{inner: inner}
-		ids := pickWorkspaceChain(s.Workspace(), r.autoChainListJSONL, excluder, r.autoChainPolicy, time.Now())
+		ids := pickWorkspaceChain(s.Workspace(), r.autoChainListJSONL, excluder, r.autoChainPolicy, pickNow)
 		if len(ids) == 0 {
 			metrics.AutoChainBackfillSkippedNoCandidates.Add(1)
 			skipped++
