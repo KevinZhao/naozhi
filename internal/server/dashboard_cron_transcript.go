@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/naozhi/naozhi/internal/cron"
 	"github.com/naozhi/naozhi/internal/discovery"
@@ -636,23 +637,43 @@ func parseISO8601MS(s string) int64 {
 }
 
 // truncateRunes caps a string to maxBytes by rune boundary, appending
-// an ellipsis indicator when truncation actually happened. We trim by
-// rune count rather than byte count so multi-byte UTF-8 sequences don't
-// get split mid-codepoint (which would render as U+FFFD in the browser).
+// an ellipsis indicator (3 bytes "…") when truncation actually happened.
+// We trim by rune count rather than byte count so multi-byte UTF-8 sequences
+// don't get split mid-codepoint (which would render as U+FFFD in the browser).
+//
+// R235-SEC-4: the previous implementation tested `i >= maxBytes-3` against the
+// rune's *start* offset and then cut at `cum` (the previous rune's start),
+// which could leave the result one rune over the cap when that earlier rune
+// was multi-byte. Fixed by walking until adding the next rune would push the
+// final byte length (after the "…" suffix) past maxBytes.
 func truncateRunes(s string, maxBytes int) string {
 	if len(s) <= maxBytes {
 		return s
 	}
-	// Walk by rune until we cross the byte budget.
-	cum := 0
-	for i, r := range s {
-		_ = r
-		if i >= maxBytes-3 {
-			return s[:cum] + "…"
-		}
-		cum = i
+	const ellipsis = "…" // 3 bytes UTF-8.
+	// Honour the cap even when maxBytes is too small to fit the ellipsis —
+	// without this the function would return the bare ellipsis (3 bytes) on
+	// any maxBytes < 3 input, violating the "caps to maxBytes" contract.
+	if maxBytes < len(ellipsis) {
+		return ""
 	}
-	return s
+	budget := maxBytes - len(ellipsis)
+	// cut tracks the byte offset where we may safely cut: the end of the
+	// last rune we have committed. Iterating with range gives us the start
+	// byte index of each rune; we commit a rune when its end position fits
+	// the budget.
+	cut := 0
+	for i, r := range s {
+		size := utf8.RuneLen(r)
+		if size < 0 {
+			size = len(string(utf8.RuneError))
+		}
+		if i+size > budget {
+			break
+		}
+		cut = i + size
+	}
+	return s[:cut] + ellipsis
 }
 
 // _ keeps strconv imported for future tweaks (line index in errors).

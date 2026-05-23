@@ -297,6 +297,12 @@ type Scheduler struct {
 	// cross-lock latency.
 	storeMu sync.Mutex
 
+	// storeDirOnce gates the one-time MkdirAll(filepath.Dir(storePath), 0700)
+	// that hardens the cron_jobs.json parent dir against group-readable XDG
+	// defaults. Idempotent — the saveMarshaledSeq hot path runs the dir-mode
+	// clamp once per process. R235-SEC-6.
+	storeDirOnce sync.Once
+
 	// saveSeq is a monotonic sequence tag attached to every marshaled
 	// snapshot at the moment persistJobsLocked captures it (under s.mu).
 	// saveMarshaled consults lastSavedSeq while holding storeMu and skips
@@ -2123,9 +2129,10 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	lg.Info("cron job executing", "prompt_len", len(snap.prompt))
 
 	// Per-job timeout is always s.execTimeout (period scaling was removed —
-	// see computeJobTimeout's godoc for why robfig/cron's SkipIfStillRunning
-	// chain wrapper handles long-running tasks correctly).
-	jobTimeout := computeJobTimeout(s.execTimeout)
+	// robfig/cron's SkipIfStillRunning chain wrapper drops a colliding tick
+	// instead of killing a long-running job, so the deadline does not need
+	// to anticipate the next tick).
+	jobTimeout := s.execTimeout
 	ctx, cancel := context.WithTimeout(s.stopCtx, jobTimeout)
 	defer cancel()
 
@@ -2157,12 +2164,12 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		// race: validateWorkspace at creation resolved symlinks once, but
 		// the target could have been retargeted since.
 		if s.allowedRoot != "" && !workDirUnderRoot(snap.workDir, s.allowedRoot, s.allowedRootResolved) {
-			lg.Warn("cron job work_dir outside allowed_root; aborting run",
+			lg.Warn("cron job work_dir outside allowed root; aborting run",
 				"work_dir", snap.workDir)
 			s.finishRun(finishArgs{
 				job: j, runID: runID, startedAt: startedAt, trigger: trigger,
 				state: RunStateFailed, errClass: ErrClassWorkDirOutsideRoot,
-				errMsg: "work_dir outside allowed_root",
+				errMsg: "work_dir outside allowed root",
 				prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 			})
 			return
@@ -2246,7 +2253,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// job), turning a transient session-spawn slowdown into a user-visible
 	// "send timed out" without the operator having any signal. The
 	// scheduler-level overlap guard (robfig SkipIfStillRunning chain
-	// wrapper, computeJobTimeout godoc) already prevents two concurrent
+	// wrapper) already prevents two concurrent
 	// runs of the same job from stacking budgets, so the doubled wall
 	// clock affects only the CURRENT run's recorded duration, not throughput.
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), jobTimeout)
@@ -2360,8 +2367,9 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 // empty (the dashboard will fall back to Job.Prompt for display).
 type finishArgs struct {
 	// job 是终结的目标 Job。state==Skipped 的 overlap 路径仍要传 *Job
-	// 因为 emitRunEnded 需要 Job.Schedule / Job.Label 上下文；DeleteJob
-	// 中途的竞态由 recordResultP0WithSanitised 内 jobs[id] 二次校验。
+	// 因为 emitRunEnded 需要 Job.ID 作为事件 key（其余字段由 finishRun 构造
+	// CronRun 时填）；DeleteJob 中途的竞态由 recordResultP0WithSanitised 内
+	// jobs[id] 二次校验。
 	job *Job
 	// runID / startedAt 与上游 emitRunStarted 的 RunStartedEvent 一一对
 	// 应；finishRun 据此发 RunEnded，订阅方 (dashboard hub) 用 RunID 配
@@ -2686,11 +2694,17 @@ func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionI
 			"job_id", j.ID, "err", perr)
 		return result, errMsg, false
 	}
+	// Snapshot j.ID before releasing s.mu so the post-unlock onExecute
+	// callback does not depend on the implicit "Job.ID is immutable across
+	// concurrent DeleteJob" contract — that contract holds today (DeleteJob
+	// removes the entry from s.jobs but never mutates *Job in place), but
+	// pinning the value here makes future refactors safer. R235-GO-1.
+	jobID := j.ID
 	s.mu.Unlock()
 
 	save()
 	if fn := s.onExecute.Load(); fn != nil {
-		(*fn)(j.ID, result, errMsg)
+		(*fn)(jobID, result, errMsg)
 	}
 	return result, errMsg, true
 }
@@ -2845,7 +2859,16 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		maxLen = platform.DefaultMaxReplyLen
 	}
 	chunks := platform.SplitText(text, maxLen)
-	for _, chunk := range chunks {
+	for i, chunk := range chunks {
+		// R235-GO-5: short-circuit on the shared replyCtx deadline so a long
+		// chunk list cannot run past cronNotifyTimeout when each ReplyWithRetry
+		// (3 attempts × per-attempt budget) consumes the budget mid-loop.
+		if err := replyCtx.Err(); err != nil {
+			slog.Warn("cron notify target deadline reached; remaining chunks dropped",
+				"platform", plat, "chat", chatID, "err", err,
+				"sent", i, "remaining", len(chunks)-i)
+			return
+		}
 		if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
 			ChatID: chatID,
 			Text:   chunk,
@@ -2966,6 +2989,20 @@ func (s *Scheduler) saveMarshaledSeq(data []byte, seq uint64) {
 			"our_seq", seq, "last_saved_seq", last)
 		return
 	}
+	// R235-SEC-6: parent dir 0700 mirrors runStore.newRunStore (R234-SEC-4).
+	// cron_jobs.json itself is mode 0600 (operator prompts + chat IDs), but
+	// without an explicit parent-dir clamp the file's existence and name leak
+	// to other local users via the default XDG config dir mode (often 0755).
+	// sync.Once keeps the MkdirAll out of the per-mutation hot path; if the
+	// directory disappears later (operator rm -rf), WriteFileAtomic will
+	// surface ENOENT and the operator can recover by restarting.
+	s.storeDirOnce.Do(func() {
+		if dir := filepath.Dir(s.storePath); dir != "" && dir != "." {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				slog.Warn("cron store parent dir mkdir failed", "err", err, "dir", dir)
+			}
+		}
+	})
 	if err := osutil.WriteFileAtomic(s.storePath, data, 0600); err != nil {
 		slog.Error("save cron store", "err", err, "disk_full", osutil.IsDiskFull(err))
 		return
