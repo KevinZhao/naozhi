@@ -1745,6 +1745,27 @@ func (s jobSnapshot) labelOrID() string {
 	return s.jobID
 }
 
+// cronNoticeBracket is the operator-visible prefix every cron-emitted IM
+// reply carries so users can distinguish a cron-triggered turn from an
+// interactive chat reply. Centralised here so future relabel (i18n,
+// rebrand) is a single edit; the historical pattern was four duplicated
+// `fmt.Sprintf("[Cron %s] ...", snap.labelOrID())` call sites in
+// freshContextPreflightP0 / executeOpt error branches / recordSuccess.
+// First step of R230B-ARCH-3 Notifier-interface extraction: once a
+// dispatch.Notifier is injected the prefix must be applied at exactly one
+// site rather than re-formatted by every caller.
+const cronNoticeBracket = "[Cron"
+
+// formatCronNotice builds the operator-facing IM reply text for a cron
+// notice. Every IM message cron emits — fresh-mode preflight skip, session
+// spawn failure, send failure, success result — funnels through this helper
+// so the prefix shape and label fallback (jobSnapshot.labelOrID) stay in
+// lockstep across success and error paths. body is the post-prefix message
+// text (Chinese reason string for errors, raw cli reply Text for success).
+func formatCronNotice(snap jobSnapshot, body string) string {
+	return fmt.Sprintf("%s %s] %s", cronNoticeBracket, snap.labelOrID(), body)
+}
+
 // snapshotJob reads j under s.mu so a concurrent SetJobPrompt /
 // UpdateJob cannot tear the read across fields. Always returns a value
 // (never nil); j is dereferenced inside the lock. RLock is sufficient
@@ -1843,7 +1864,7 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 			errMsg: "work_dir unreachable",
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(args.notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.labelOrID()))
+		s.deliverNotice(args.notifyTo, formatCronNotice(snap, "工作目录不可达，本次执行已跳过。"))
 		return noopRefresh, false
 	}
 	// CRON1 (acknowledged, non-blocking): Reset + GetOrCreate is NOT atomic.
@@ -2186,7 +2207,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("session error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", snap.labelOrID()))
+		s.deliverNotice(notifyTo, formatCronNotice(snap, "执行跳过，请稍后重试。"))
 		stubRefresh()
 		return
 	}
@@ -2261,7 +2282,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("send error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", snap.labelOrID()))
+		s.deliverNotice(notifyTo, formatCronNotice(snap, "执行失败，请稍后重试。"))
 		stubRefresh()
 		return
 	}
@@ -2329,8 +2350,7 @@ func (s *Scheduler) recordSuccess(a recordSuccessArgs) {
 		prompt: a.snap.prompt, workDir: a.snap.workDir, fresh: a.snap.fresh,
 	})
 
-	replyText := fmt.Sprintf("[Cron %s] %s", a.snap.labelOrID(), a.resultText)
-	s.deliverNotice(a.notifyTo, replyText)
+	s.deliverNotice(a.notifyTo, formatCronNotice(a.snap, a.resultText))
 }
 
 // finishArgs bundles the parameters of finishRun so each call site reads
