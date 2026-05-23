@@ -283,10 +283,13 @@ const minCronInterval = 5 * time.Minute
 // should not be killed mid-flight just because the next scheduled tick is
 // approaching. robfig/cron's SkipIfStillRunning chain wrapper already handles
 // that case correctly: the next scheduled tick is dropped, the in-flight run
-// continues, and the tick after that gets a clean slot. The schedule parameter
-// is kept for signature stability and future extension.
-func computeJobTimeout(schedule string, maxCap time.Duration) time.Duration {
-	_ = schedule
+// continues, and the tick after that gets a clean slot.
+//
+// R232-CR-5: schedule parameter removed. The previous signature kept it for
+// "future extension", but the period-scaling alternative is documented above
+// and ruled out, so the unused parameter only invited dead-code static analysis
+// hits and forced callers to pass strings the function ignored.
+func computeJobTimeout(maxCap time.Duration) time.Duration {
 	return maxCap
 }
 

@@ -1969,7 +1969,7 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// Per-job timeout is always s.execTimeout (period scaling was removed —
 	// see computeJobTimeout's godoc for why robfig/cron's SkipIfStillRunning
 	// chain wrapper handles long-running tasks correctly).
-	jobTimeout := computeJobTimeout(snap.schedule, s.execTimeout)
+	jobTimeout := computeJobTimeout(s.execTimeout)
 	ctx, cancel := context.WithTimeout(s.stopCtx, jobTimeout)
 	defer cancel()
 
