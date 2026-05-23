@@ -105,9 +105,14 @@ func MarshalRecord(r *Record) ([]byte, error) {
 }
 
 // UnmarshalRecord parses a single JSON-encoded record. Returns
-// ErrUnsupportedVersion when the record declares a WireVersion newer
-// than we can read; callers should stop reading the file on this error
-// (subsequent bytes are undefined).
+// ErrUnsupportedVersion when the record declares a WireVersion outside
+// the [MinReadVersion, WireVersion] band — i.e. either newer than this
+// reader supports OR older than the migration window still accepts.
+// Both branches surface the same sentinel because callers
+// (naozhilog.Source, dashboard fallback) react identically: stop
+// reading the file and fall through to the Claude CLI JSONL source.
+// Distinguishing "future" vs "stale" was considered but adds API
+// surface for no observed consumer behaviour.
 //
 // Does NOT validate Header / Entry exclusivity — a reader may want to
 // accept forward-compatible record types it doesn't fully understand
@@ -222,9 +227,16 @@ func NewEntry(seq uint64, entryJSON []byte) *Record {
 
 // Errors that users of this package may want to match with errors.Is.
 var (
-	ErrNilRecord              = errors.New("schema: nil record")
-	ErrInvalidVersion         = errors.New("schema: invalid version")
-	ErrUnsupportedVersion     = errors.New("schema: unsupported (newer) version")
+	ErrNilRecord      = errors.New("schema: nil record")
+	ErrInvalidVersion = errors.New("schema: invalid version")
+	// ErrUnsupportedVersion fires for both:
+	//   - record.V > WireVersion (the file was written by a newer naozhi)
+	//   - record.V < MinReadVersion (the file is older than the
+	//     compatibility window the current build keeps reading)
+	// Callers should treat both as "unreadable here" and fall back to
+	// the Claude CLI JSONL source. See UnmarshalRecord for the exact
+	// boundary check.
+	ErrUnsupportedVersion     = errors.New("schema: unsupported wire version")
 	ErrUnknownType            = errors.New("schema: unknown record type")
 	ErrHeaderMissingPayload   = errors.New("schema: type=header without header payload")
 	ErrHeaderHasEntry         = errors.New("schema: type=header with entry payload")
