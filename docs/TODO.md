@@ -702,7 +702,7 @@
 - [ ] **R224-GO-3 — `reconnectShims` replay 段把 `time.Now().UnixMilli()` 作为 agentToolUseMS 传入 Resolve（P1）**: `router.go:1535` reconnect 路径调 `linker.Resolve(taskID, toolUseID, name, desc, time.Now().UnixMilli())`，导致 `subagent_link.go:315` `agentTS - 10s` 时间过滤在 reconnect 路径上 100% 命中所有历史条目。replay 事件应使用事件本身的 recvAt/Time 或传 0 禁用过滤。涉及：`internal/session/router.go:1535`。
 - [ ] **R224-GO-4 — `subagent_link.fireOnResolveLocked` mu-release-reacquire 易死锁/panic（P2）**: `subagent_link.go:565` 持 `l.mu` write lock 时 Unlock + 跑 callback + 再 Lock，依赖 callback 不调 `linker.Resolve`（会触发写锁死锁）+ 单一 goroutine 进入此函数（否则第二个 Unlock panic 解锁未持有锁）。方案：先在 call site 拷贝 ID，Unlock 之后再 fire，整体移出锁外。
 - [ ] **R224-GO-5 — `eventlog.invokePersistSink` `replay` 标志读取存在 sink Store/sinkReady Store 之间的 race window（P2）**: `eventlog.go:360` 读 `!sinkReady.Load()` 在锁外，`SetPersistSink` 先 Store sink 后 Store sinkReady（line 336-337），中间窗口内一个 entry 会被错误标记 `replay=true`。方案：SetPersistSink 顺序反转，或合并到一个 atomic.Pointer 携带 sink+ready。
-- [ ] **R224-GO-6 — `shim/server.go SetReadDeadline` 错误 nolint 静默吞（P2）**: `:654, :680` SetReadDeadline 失败 nolint:errcheck 直接吞；conn 已关闭时后续 ReadBytes 无 deadline 阻塞 goroutine 泄漏；deadline 清除失败时 post-auth 读立即 timeout 踢掉合法客户端。方案：失败时显式关闭 conn 并 return。
+- [x] **R224-GO-6 — `shim/server.go SetReadDeadline` 错误 nolint 静默吞（P2）**: `:654, :680` SetReadDeadline 失败 nolint:errcheck 直接吞；conn 已关闭时后续 ReadBytes 无 deadline 阻塞 goroutine 泄漏；deadline 清除失败时 post-auth 读立即 timeout 踢掉合法客户端。方案：失败时显式关闭 conn 并 return。 — 已修复（2026-05-23 复核 internal/shim/server.go:701/732 两处 SetReadDeadline 已捕获 err 并在失败时 return，由 defer conn.Close() 兜底关闭；godoc 锚点同步标注 R224-GO-6），本批 PR
 - [ ] **R224-GO-7 — `shim/server.go writer goroutine` 内层 `w.Write(more)` 错误 nolint 吞（P2）**: `:785` 写失败后 `:790` 仍调 `flushWithDeadline()`，可能将损坏的 buf 状态 flush 出去。方案：内层 write 失败立即 return。
 
 ### 安全 — 本轮新发现
@@ -829,7 +829,7 @@
 ### 性能 — 协议接口变更或需 benchmark
 
 - [ ] **R220-PERF-1 — `countActive()` evictOldest/Takeover/spawnSession 路径全 map scan（P1）**: 4 个 caller 各自 `r.mu.Lock()` 下做完整 map 扫描，500 session 量级会显著增加锁内 CPU；Cleanup 已用 `newActive` 增量，evict/takeover 没接。方案：传 `delta int` 给热路径做原子加，countActive 仅在 Cleanup 全量重算。涉及：`internal/session/router.go:2126,2400,2472,4067`。
-- [ ] **R220-PERF-3 — `EventLog.EntriesSince` 初始 catch-up 在 RLock 下复制 500 entry × 512B（P2）**: 反向扫描+复制全在 l.mu RLock 内，subscriber 初始订阅时阻塞 Append 一段时间。方案：先 snapshot ring 索引（head/count），release RLock，再在临时 slice 内拷贝。涉及：`internal/cli/eventlog.go:869`。
+- [x] **R220-PERF-3 — `EventLog.EntriesSince` 初始 catch-up 在 RLock 下复制 500 entry × 512B（P2）**: 反向扫描+复制全在 l.mu RLock 内，subscriber 初始订阅时阻塞 Append 一段时间。方案：先 snapshot ring 索引（head/count），release RLock，再在临时 slice 内拷贝。涉及：`internal/cli/eventlog.go:869`。 → R234 godoc anchor: 当前 single-pass + lazy `make(initialCap=min(k,16))` 已把稳态 k=1-5 与 catch-up max-ring-size 两条路径都收敛到 RLock 内不可避免的一次拷贝；snapshot-then-unlock 方案要么需第二次拷贝抵消优化、要么需 unsafe 别名破坏 head 旋转下的正确性，保留现状。
 - [ ] **R220-PERF-4 — `Cleanup` pass2 对 candidate 做 proc.Alive + proc.IsRunning 二次锁获取（P2）**: pass1 在 r.mu RLock 下收集 candidate proc 指针，pass2 又对每个 candidate 取 `proc.mu.RLock` 跑 IsRunning，与热 Send 路径锁竞争。方案：pass1 同时 capture proc.GetState() 一次，pass2 直接读 state。涉及：`internal/session/router.go:2920-2946`。
 - [~] **R220-PERF-5 — `hub.debounceMu` 高频锁获取无 atomic 短路（归档 2026-05-23）**: BroadcastSessionsUpdate 函数体内 4 个互斥状态分支（debounceClosed / 已 timer 在跑 / 超 maxDelay / 全新 timer），都需 debounceMu 保 timer 重入与 clientWG.Add 配对；纯 atomic.Bool 不能取代 4-way 决策。300/s acquire 远不是性能瓶颈。本批 PR 归档。
 

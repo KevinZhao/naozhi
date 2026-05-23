@@ -697,7 +697,11 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 	// Set read deadline for auth phase (shimAuthReadDeadline to send attach).
 	// If the deadline can't be installed (conn already half-closed), the
 	// read loop below would block until TCP keepalive expires — leak the
-	// goroutine. Bail out immediately instead.
+	// goroutine. Bail out immediately instead. R224-GO-6: prior versions
+	// used `_ = conn.SetReadDeadline(...)` and dropped the error, which
+	// reproduced exactly the goroutine-leak symptom under torn-down conns;
+	// the explicit close happens via the outer `defer conn.Close()` (line
+	// above), so an early return is sufficient.
 	if err := conn.SetReadDeadline(time.Now().Add(shimAuthReadDeadline)); err != nil {
 		slog.Debug("shim: set auth read deadline failed", "err", err)
 		return
