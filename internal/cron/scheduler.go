@@ -1938,6 +1938,21 @@ func runDeadlineWatchdog(ctx context.Context, sess deadlineInterrupter) <-chan a
 	return ch
 }
 
+// classifyExecError maps a non-canceled error from GetOrCreate or Send to
+// (RunState, ErrorClass) for finishRun. context.Canceled is a separate
+// branch upstream (different skipPersist semantics + different log line)
+// and is intentionally NOT handled here. defaultClass distinguishes the
+// session-spawn path (ErrClassSessionError) from the send path
+// (ErrClassSendError); when err is context.DeadlineExceeded the
+// classification flips to (RunStateTimedOut, ErrClassDeadlineExceeded)
+// regardless of which call path produced it. R230C-CR-7.
+func classifyExecError(err error, defaultClass ErrorClass) (RunState, ErrorClass) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return RunStateTimedOut, ErrClassDeadlineExceeded
+	}
+	return RunStateFailed, defaultClass
+}
+
 func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// Guard against concurrent execution of the same job. The cron chain's
 	// SkipIfStillRunning protects the scheduled-tick path, but TriggerNow
@@ -2125,12 +2140,9 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			stubRefresh()
 			return
 		}
-		state := RunStateFailed
-		errClass := ErrClassSessionError
-		if errors.Is(err, context.DeadlineExceeded) {
+		state, errClass := classifyExecError(err, ErrClassSessionError)
+		if errClass == ErrClassDeadlineExceeded {
 			lg.Info("cron session deadline exceeded", "err", err)
-			state = RunStateTimedOut
-			errClass = ErrClassDeadlineExceeded
 		} else {
 			lg.Error("cron session error", "err", err)
 		}
@@ -2195,11 +2207,8 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			stubRefresh()
 			return
 		}
-		state := RunStateFailed
-		errClass := ErrClassSendError
-		if errors.Is(err, context.DeadlineExceeded) {
-			state = RunStateTimedOut
-			errClass = ErrClassDeadlineExceeded
+		state, errClass := classifyExecError(err, ErrClassSendError)
+		if errClass == ErrClassDeadlineExceeded {
 			// Log alongside the watchdog outcome so operators see both the
 			// deadline AND whether the CLI was successfully interrupted in
 			// the same line. ACP backends report "unsupported" here — we
