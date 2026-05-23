@@ -9,6 +9,13 @@ import (
 
 const maxImageFileSize = 10 * 1024 * 1024 // 10MB
 
+// maxExtractedImagePaths caps how many image paths a single text scan returns.
+// Bounds the per-message thumbnail decode + base64 budget; the dashboard only
+// renders thumbnails for the first few inline images anyway and an attacker-
+// crafted prompt with hundreds of /tmp/foo.png references must not amplify
+// into hundreds of file-system stats + decode jobs.
+const maxExtractedImagePaths = 10
+
 // safeImageDirs are the only directory prefixes from which image files may be read.
 // This prevents prompt-injection attacks that trick the CLI into emitting arbitrary paths.
 var safeImageDirs = []string{"/tmp/"}
@@ -19,7 +26,7 @@ var imagePathRe = regexp.MustCompile(`(/\S+\.(?:png|jpg|jpeg|gif|webp|bmp))`)
 // ExtractImagePaths finds local image file paths in text that actually exist on disk.
 // Only paths under safe directories (e.g., /tmp) are returned.
 func ExtractImagePaths(text string) []string {
-	matches := imagePathRe.FindAllString(text, 10) // cap at 10 images
+	matches := imagePathRe.FindAllString(text, maxExtractedImagePaths)
 	var valid []string
 	seen := make(map[string]bool)
 	for _, path := range matches {
