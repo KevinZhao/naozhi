@@ -638,6 +638,9 @@ func (r *Router) shutdown() {
 
 	// Wait for running sessions to complete (up to ShutdownTimeout)
 	deadline := time.Now().Add(ShutdownTimeout)
+	// R227-GO-4: log once per Shutdown when shutdownCond is nil (test
+	// shape) so the busy-poll fallback isn't silent.
+	shutdownCondMissingLogged := false
 	for {
 		running := false
 		for _, s := range r.sessions {
@@ -652,7 +655,16 @@ func (r *Router) shutdown() {
 		if r.shutdownCond != nil {
 			r.shutdownCond.Wait() // atomically releases and re-acquires r.mu
 		} else {
-			// Fallback for tests without shutdownCond
+			// Fallback for tests without shutdownCond. R227-GO-4: warn once
+			// per Shutdown so a bare `&Router{}` test construction surfaces
+			// the missing field instead of silently busy-polling for up to
+			// ShutdownTimeout/100ms iterations. Production callers always
+			// route through NewRouter (which initialises shutdownCond), so
+			// this branch is purely a test-shape sentinel.
+			if !shutdownCondMissingLogged {
+				slog.Warn("shutdown: Router constructed without shutdownCond — falling back to 100ms busy-poll; tests should use NewRouter")
+				shutdownCondMissingLogged = true
+			}
 			r.mu.Unlock()
 			time.Sleep(100 * time.Millisecond)
 			r.mu.Lock()
