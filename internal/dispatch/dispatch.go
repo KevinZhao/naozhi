@@ -496,16 +496,7 @@ func (d *Dispatcher) ownerLoop(
 		// when they arrived; clear those reactions now that their content
 		// was processed. Best-effort — errors only log.
 		d.clearQueuedReactions(ctx, msg.Platform, queued, log)
-		// Defensive Stop+drain before Reset: if a future refactor changes the
-		// loop shape so the <-collectTimer.C arm can be skipped (e.g. an
-		// early-continue branch), Reset without drain would let a stale tick
-		// fire immediately on the next iteration.
-		if !collectTimer.Stop() {
-			select {
-			case <-collectTimer.C:
-			default:
-			}
-		}
+		// Go 1.23+: Reset on a Timer whose channel was just consumed by the case arm above is race-free; no Stop+drain needed.
 		collectTimer.Reset(d.queue.CollectDelay())
 	}
 }
