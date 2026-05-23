@@ -1214,6 +1214,19 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 		}
 
 		// Check if a newer subscription (from handleSubscribe) has taken over.
+		//
+		// R230C-PERF-8 (archive 2026-05-23): the ticket proposed dropping this
+		// h.mu.RLock and "comparing against the local gen parameter directly".
+		// That misreads the invariant — `gen` is the generation captured when
+		// resubscribeEvents started, and `c.subGen[key]` is the *current* per-
+		// client generation written by handleSubscribe under h.mu.Lock when a
+		// fresh subscribe takes over the same key. The lock is the visibility
+		// barrier that lets this stale-resubscribe goroutine observe the new
+		// generation and bail out; without it Go memory model gives no read
+		// guarantee on the map slot. Only ~12 RLock probes per resubscribe and
+		// the contention is bounded by the per-client subscription map, so the
+		// "免锁" optimisation would buy nothing and forfeit the supersede
+		// signal that lets stale loops self-terminate. Keep as-is.
 		h.mu.RLock()
 		currentGen := c.subGen[key]
 		h.mu.RUnlock()
