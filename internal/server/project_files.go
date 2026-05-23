@@ -259,9 +259,18 @@ func detectMime(resolved string, head []byte) string {
 		return "image/svg+xml"
 	}
 	// Base name override for extensionless files like Dockerfile / Makefile.
+	// R232-SEC-8: paths whose basename starts with a dot (e.g. ".makefile",
+	// ".gitignore") have filepath.Ext == basename, so this branch was
+	// unreachable for them — and the previous "."+base concatenation produced
+	// "..makefile" which never matched previewableByExt. Look up by basename
+	// directly when ext is non-empty but Base starts with a dot.
 	if ext == "" {
 		base := strings.ToLower(filepath.Base(resolved))
 		if v, ok := previewableByExt["."+base]; ok {
+			return v
+		}
+	} else if base := strings.ToLower(filepath.Base(resolved)); strings.HasPrefix(base, ".") && base == ext {
+		if v, ok := previewableByExt[base]; ok {
 			return v
 		}
 	}
@@ -1089,16 +1098,20 @@ var sensitiveDownloadNames = map[string]struct{}{
 	// .yaml extensions are too broad for the extension allowlist (would block
 	// legitimate config files), so match them here by full filename.
 	// R232-SEC-4 + R230-SEC-? consolidated.
-	"service-account.json":   {},
-	"serviceaccount.json":    {},
-	"secrets.yaml":           {},
-	"secrets.yml":            {},
-	"secret.yaml":            {},
-	"secret.yml":             {},
-	"gcp-key.json":           {},
-	"gcloud-key.json":        {},
-	"firebase-adminsdk.json": {},
-	"kubeconfig":             {}, // legacy short name, also picked up via path
+	"service-account.json":                 {},
+	"serviceaccount.json":                  {},
+	"service_account.json":                 {},
+	"secrets.yaml":                         {},
+	"secrets.yml":                          {},
+	"secrets.json":                         {},
+	"secret.yaml":                          {},
+	"secret.yml":                           {},
+	"gcp-key.json":                         {},
+	"gcp_key.json":                         {},
+	"gcloud-key.json":                      {},
+	"firebase-adminsdk.json":               {},
+	"application_default_credentials.json": {},
+	"kubeconfig":                           {}, // legacy short name, also picked up via path
 }
 
 // sensitiveDownloadExts lists extensions that strongly imply key material.
