@@ -95,9 +95,14 @@ func (p *Process) drainStaleEvents(ctx context.Context) error {
 						// new turn. Try to put it back (buffered channel may
 						// have room); if the channel is already full we fall
 						// back to findResultSince which reads from EventLog.
+						// Mirror the warn in the post-drain holdback re-enqueue
+						// (line 179) so operators see both drop sites symmetrically
+						// — without it the interrupted-settle drop is silent.
 						select {
 						case p.eventCh <- ev:
 						default:
+							slog.Warn("drainStaleEvents: eventCh full during interrupted-settle, dropped fresh event",
+								"type", ev.Type, "session", ev.SessionID)
 						}
 						goto drain
 					}
