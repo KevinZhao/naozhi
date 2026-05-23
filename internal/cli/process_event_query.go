@@ -3,12 +3,12 @@ package cli
 // process_event_query.go — read-only EventLog accessors + Linker
 // lifecycle + InjectHistory seeding.
 //
-// Moved from process.go (Phase 6 of docs/rfc/process-split.md).
-// Zero semantic change; pure file move.
-//
-// Most methods here are thin passthroughs to p.eventLog. InjectHistory
-// is the heaviest — it seeds the SubagentLinker so dashboard drill-in
+// Most methods are thin passthroughs to p.eventLog. InjectHistory is
+// the heaviest — it seeds the SubagentLinker so dashboard drill-in
 // for live agent tasks survives a naozhi restart.
+//
+// R227-ARCH-19: dropped the "Phase 6 of process-split / zero semantic
+// change" preamble; refactor is complete, history lives in git log.
 
 import (
 	"time"

@@ -260,13 +260,21 @@ func (h *Hub) sessionSend(p sendParams, onAsyncError func(string)) (bool, sendAc
 	// router default inside wrapperFor, but we reject obviously hostile
 	// input early so a 4 KB `backend=<payload>` cannot land in logs.
 	if p.Backend != "" {
+		// R230-CQ-12: error string aligned with dashboard_cron's
+		// validateCronBackend so external API consumers (and the dashboard
+		// JS that does substring matching for friendlier UI copy) see the
+		// same message regardless of which entry point rejected the value.
+		// The character whitelist intentionally stays stricter than the
+		// router-side validateBackend (no uppercase, no dots) — see
+		// R230B-SEC-2 / R232-SEC-5 for the convergence plan; collapsing
+		// the rule today would broaden the input set per surface.
 		if len(p.Backend) > maxBackendIDLen {
-			return false, "", fmt.Errorf("invalid backend length")
+			return false, "", fmt.Errorf("backend exceeds %d-byte limit", maxBackendIDLen)
 		}
 		for i := 0; i < len(p.Backend); i++ {
 			c := p.Backend[i]
 			if !((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
-				return false, "", fmt.Errorf("invalid backend character")
+				return false, "", fmt.Errorf("invalid backend identifier")
 			}
 		}
 		h.router.SetSessionBackend(key, p.Backend)

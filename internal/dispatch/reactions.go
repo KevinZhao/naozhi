@@ -22,7 +22,7 @@ const reactionAckTimeout = 3 * time.Second
 // Best-effort by design: a reaction that fails to send is not worth retrying
 // — the caller falls back to the rate-limited text notice, and the user
 // still learns their message was received.
-func (d *Dispatcher) ackQueuedWithReaction(ctx context.Context, msg platform.IncomingMessage, log *slog.Logger) bool {
+func (d *Dispatcher) ackQueuedWithReaction(ctx context.Context, msg platform.IncomingMessage, lg *slog.Logger) bool {
 	if msg.MessageID == "" {
 		return false
 	}
@@ -39,9 +39,12 @@ func (d *Dispatcher) ackQueuedWithReaction(ctx context.Context, msg platform.Inc
 	rctx, cancel := context.WithTimeout(ctx, reactionAckTimeout)
 	defer cancel()
 	if err := reactor.AddReaction(rctx, msg.MessageID, platform.ReactionQueued); err != nil {
-		if log != nil {
-			log.Debug("add queued reaction failed, falling back to text", "err", err)
+		// R230-CQ-3: align nil-handling with clearQueuedReactions — fall back to
+		// slog.Default() so a missing logger never silently drops the failure.
+		if lg == nil {
+			lg = slog.Default()
 		}
+		lg.Debug("add queued reaction failed, falling back to text", "err", err)
 		return false
 	}
 	return true
@@ -52,15 +55,15 @@ func (d *Dispatcher) ackQueuedWithReaction(ctx context.Context, msg platform.Inc
 // a reaction on the user's message; fall back to a short text reply when
 // the platform is not reactor-capable. Rate-limited via ShouldNotify so a
 // burst of follower acks doesn't spam the chat.
-func (d *Dispatcher) ackMergedFollower(ctx context.Context, msg platform.IncomingMessage, mergedCount int, log *slog.Logger) {
-	if d.ackQueuedWithReaction(ctx, msg, log) {
+func (d *Dispatcher) ackMergedFollower(ctx context.Context, msg platform.IncomingMessage, mergedCount int, lg *slog.Logger) {
+	if d.ackQueuedWithReaction(ctx, msg, lg) {
 		return
 	}
 	if d.queue != nil && !d.queue.ShouldNotify(msg.ChatID) {
 		return
 	}
 	_ = mergedCount // reserved for future reaction variant showing count
-	d.replyText(ctx, msg, "已合并到上一条回复。", log)
+	d.replyText(ctx, msg, "已合并到上一条回复。", lg)
 }
 
 // clearQueuedReactions removes the "queued" reaction from each drained
@@ -68,7 +71,7 @@ func (d *Dispatcher) ackMergedFollower(ctx context.Context, msg platform.Incomin
 // Errors are logged and swallowed — a lingering reaction is cosmetically
 // unfortunate but not user-blocking, and retrying here would require more
 // state without meaningful gain.
-func (d *Dispatcher) clearQueuedReactions(ctx context.Context, platformName string, queued []QueuedMsg, log *slog.Logger) {
+func (d *Dispatcher) clearQueuedReactions(ctx context.Context, platformName string, queued []QueuedMsg, lg *slog.Logger) {
 	if len(queued) == 0 {
 		return
 	}
@@ -100,11 +103,13 @@ func (d *Dispatcher) clearQueuedReactions(ctx context.Context, platformName stri
 			return
 		}
 		if err := reactor.RemoveReaction(rctx, m.MessageID, platform.ReactionQueued); err != nil {
-			if log != nil {
-				log.Debug("remove queued reaction failed", "msg_id", m.MessageID, "err", err)
-			} else {
-				slog.Debug("remove queued reaction failed", "msg_id", m.MessageID, "err", err)
+			// R230-CQ-3: collapsed if/else into one fallback to match the
+			// pattern used in ackQueuedWithReaction / scheduler.go's `lg`.
+			useLg := lg
+			if useLg == nil {
+				useLg = slog.Default()
 			}
+			useLg.Debug("remove queued reaction failed", "msg_id", m.MessageID, "err", err)
 		}
 	}
 }
