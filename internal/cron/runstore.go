@@ -659,8 +659,11 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	if len(items) == 0 {
 		return
 	}
-	// Sort newest first so rank checking is index-based.
-	slices.SortFunc(items, func(a, b item) int { return cmp.Compare(b.mtime.UnixNano(), a.mtime.UnixNano()) })
+	// Sort newest first so rank checking is index-based. Use time.Compare
+	// over cmp.Compare(UnixNano) so monotonic-clock fields stay in scope
+	// (UnixNano() drops them) and post-2262 ModTime values that overflow
+	// int64 nanoseconds compare correctly. R234-GO-10.
+	slices.SortFunc(items, func(a, b item) int { return b.mtime.Compare(a.mtime) })
 	for i, it := range items {
 		// Both conditions must hold to keep.
 		keep := i < s.keepCount && it.mtime.After(cutoff)
