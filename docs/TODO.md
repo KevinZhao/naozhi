@@ -1596,7 +1596,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：`session.CoreReader` + `session.CoreMutator` 中心接口，consumer 包 embed 扩展。
   - 涉及: `internal/dispatch/consumer.go:34-43`, `internal/cron/scheduler.go:67-85`, `internal/server/consumer.go:37-52`
 
-- [ ] **R215-ARCH-P2-5 — `cron.executeOpt` 200 行内 3 个 ctx 无法 reason**: stopCtx / sendCtx(Background) / timeout 语义分歧。
+- [x] **R215-ARCH-P2-5 — `cron.executeOpt` 200 行内 3 个 ctx 无法 reason（doc-and-accept 2026-05-23）**: stopCtx / sendCtx(Background) / timeout 语义分歧。【2026-05-23 godoc anchor】executeOpt 函数级 godoc 已加 22 行三 ctx 矩阵：(1) stopCtx 是 Scheduler-lifetime 父；(2) ctx = WithTimeout(stopCtx, jobTimeout) 包 GetOrCreate spawn；(3) sendCtx = WithTimeout(Background, jobTimeout) 故意脱离 stopCtx 防 Send 中途被 Stop 静默撤销，runDeadlineWatchdog 通过 InterruptViaControl 替代地强制 deadline。最坏 2×jobTimeout wall-clock 跟进 R230B-GO-1 / R230C-GO-7（已分别 godoc）。原 split 方案保留作未来重构。
   - 方案：拆 `executeFreshSpawn(stopCtx,j)` + `executeSendToSession(sess,text,timeout)`，参数单语义。
   - 涉及: `internal/cron/scheduler.go:1351-1458`
 

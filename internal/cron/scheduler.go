@@ -1964,6 +1964,30 @@ func classifyExecError(err error, defaultClass ErrorClass) (RunState, ErrorClass
 	return RunStateFailed, defaultClass
 }
 
+// executeOpt drives one cron job through CAS gate → jitter → snapshot →
+// fresh-mode preflight → spawn → send → terminal record. R215-ARCH-P2-5:
+// three context.Context values flow through this function with deliberately
+// different semantics — readers must keep them straight when adding
+// branches:
+//
+//  1. s.stopCtx  — Scheduler-lifetime parent. Cancelled inside Stop(), used
+//     as the parent of `ctx`. A shutdown therefore unblocks the spawn-side
+//     GetOrCreate immediately.
+//
+//  2. ctx        — Spawn budget: WithTimeout(s.stopCtx, jobTimeout). Bounds
+//     GetOrCreate (CLI fork + handshake). Cancelled by either Stop() or the
+//     per-job execTimeout.
+//
+//  3. sendCtx    — Send budget: WithTimeout(context.Background(), jobTimeout).
+//     Intentionally NOT a child of stopCtx — once GetOrCreate has handed us
+//     a live session, Stop() cancelling sendCtx mid-Send would silently drop
+//     the result and re-run the job on the next start. The runDeadlineWatchdog
+//     enforces the deadline via InterruptViaControl while letting Send return
+//     a real result/error frame. Total wall-clock approaches 2×jobTimeout in
+//     the worst case where spawn consumes its full budget; tracked under
+//     R230B-GO-1 / R230C-GO-7.
+//
+// viaTriggerNow=true skips jitter (manual "run now" expects instant exec).
 func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// Guard against concurrent execution of the same job. The cron chain's
 	// SkipIfStillRunning protects the scheduled-tick path, but TriggerNow
