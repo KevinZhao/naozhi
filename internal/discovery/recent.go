@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/naozhi/naozhi/internal/textutil"
@@ -191,6 +192,36 @@ type dirFilesCacheEntry struct {
 // which is acceptable for the 7-day history sidebar.
 var dirFilesCache sync.Map // projDir → *dirFilesCacheEntry
 
+// dirFilesCacheMaxEntries caps how many distinct project directories the
+// cache retains before a generational sweep wipes it. Long-running
+// deployments with many ephemeral worktrees or scratch directories each
+// produce a distinct claude project slug; without a cap dirFilesCache
+// grows unbounded. 1024 covers thousands of historical workspaces while
+// keeping memory well under 1 MiB. Mirrors the discipline already used by
+// pathCacheMaxEntries in scanner.go.
+const dirFilesCacheMaxEntries = 1024
+
+// dirFilesCacheCount approximates the live entry count. It can briefly
+// drift past the threshold under concurrent writers; the sweep is
+// idempotent and best-effort, so a small overshoot is acceptable.
+var dirFilesCacheCount atomic.Int64
+
+// evictDirFilesCacheIfFull wipes the cache when its approximate size
+// exceeds dirFilesCacheMaxEntries. Generational eviction (vs LRU) keeps
+// the bookkeeping zero-cost on the read path; the worst case after a
+// sweep is one extra ReadDir per active workspace until the cache
+// re-warms — same as cold-startup cost.
+func evictDirFilesCacheIfFull() {
+	if dirFilesCacheCount.Load() < dirFilesCacheMaxEntries {
+		return
+	}
+	dirFilesCache.Range(func(k, _ any) bool {
+		dirFilesCache.Delete(k)
+		return true
+	})
+	dirFilesCacheCount.Store(0)
+}
+
 // cachedJSONLFileInfo returns .jsonl file metadata for a project directory,
 // using a cache validated by the directory's own mtime.
 func cachedJSONLFileInfo(projDir string) []jsonlFileInfo {
@@ -227,7 +258,16 @@ func cachedJSONLFileInfo(projDir string) []jsonlFileInfo {
 		})
 	}
 
-	dirFilesCache.Store(projDir, &dirFilesCacheEntry{dirMtime: dirMtime, files: files})
+	if _, loaded := dirFilesCache.LoadOrStore(projDir, &dirFilesCacheEntry{dirMtime: dirMtime, files: files}); !loaded {
+		// First-time insertion: bump live count and possibly trigger a
+		// generational sweep. Replacements (key already present) keep
+		// the count stable.
+		dirFilesCacheCount.Add(1)
+		evictDirFilesCacheIfFull()
+	} else {
+		// Replace existing entry without disturbing the count.
+		dirFilesCache.Store(projDir, &dirFilesCacheEntry{dirMtime: dirMtime, files: files})
+	}
 	return files
 }
 

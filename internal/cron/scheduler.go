@@ -467,9 +467,17 @@ func (s *Scheduler) KnownSessionIDs() map[string]bool {
 	if s == nil {
 		return map[string]bool{}
 	}
-	out := make(map[string]bool, 32)
 
 	s.mu.RLock()
+	// Pre-size for the worst case: one LastSessionID per job + per-job
+	// recent runs (capped) + a small headroom for in-flight running IDs.
+	// At maxJobsHardCap=500 × recentCap=200 this avoids ~8 rehashes
+	// vs. the previous fixed cap=32.
+	preallocCap := len(s.jobs)*(knownSessionIDsRecentCap+1) + 8
+	if preallocCap < 32 {
+		preallocCap = 32
+	}
+	out := make(map[string]bool, preallocCap)
 	jobIDs := make([]string, 0, len(s.jobs))
 	for id, j := range s.jobs {
 		jobIDs = append(jobIDs, id)
