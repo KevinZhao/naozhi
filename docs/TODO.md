@@ -106,15 +106,15 @@
 - [ ] **R234-ARCH-10 — dispatch ↔ platform 双向：platform webhook 回调 leak dispatch.IncomingMessage / Reply 内部类型（P2）**：建议在 `internal/platform` 定义最小 wire types，dispatch 提供 `From(IncomingMessage)` 适配。
 - [ ] **R234-ARCH-11 — 命名空间策略碎片化：sys: / cron: / scratch: / kiro: / chatKeyPrefix 5 类前缀无中央注册表（P2）**：建议 `internal/session/namespace.go` 集中 `NamespacePrefix` enum + `ParseKey(s)`，CI 加 grep test 拒绝裸字符串。前置 R233-ARCH-5。
 - [ ] **R234-ARCH-12 — Protocol/Sink/Tailer 三大事件接口契约未文档化（P2）**：建议新建 `docs/rfc/event-pipeline-contracts.md` + `internal/cli/protocoltest` 共享测试套件（类似 fstest.MapFS）。
-- [ ] **R234-ARCH-13 — server/agent_tailer 直 import cli，IO 路径绕过 router（P2）**：建议 tailer 走 `router.Tail(key) <-chan EventDTO`，router 内部决定从哪源取（persisted vs live）。
+- [x] **R234-ARCH-13 — server/agent_tailer 直 import cli，IO 路径绕过 router（P2）**：建议 tailer 走 `router.Tail(key) <-chan EventDTO`，router 内部决定从哪源取（persisted vs live）。已加架构 godoc 锚点（agent_tailer.go 顶部）说明 cli 直 import 的当前正当性 + 未来 DTO 方向 + 「不要扩大 cli 表面」guard。
 - [ ] **R234-ARCH-14 — buildServer 初始化顺序 fragile（P2）**：建议抽 `serverDeps` struct + `buildCore`/`buildHandlers`/`buildHub`/`wire` 分步。
 - [ ] **R234-ARCH-15 — sysession.runner 旁路 cli wrapper 但 auto_titler 仍要读 cli.EventEntry（P2）**：归到 R234-ARCH-3 的统一 RouterView 方案下解决。
 - [ ] **R234-ARCH-16 — server/discovery_cache.go 越层依赖 project + cli（P3）**：建议 router 暴露 `ExcludedSessionIDs() iter.Seq[string]`，discovery 自治。~30 行。
-- [ ] **R234-ARCH-17 — dispatch.consumer.go 引用 *session.ManagedSession 而非更窄 SessionHandle（P3）**：建议 `dispatch.SessionHandle interface { Send(...); Key() string }`。
+- [x] **R234-ARCH-17 — dispatch.consumer.go 引用 *session.ManagedSession 而非更窄 SessionHandle（P3）**：建议 `dispatch.SessionHandle interface { Send(...); Key() string }`。已在 SessionRouter godoc 文档化 deliberate trade-off：dispatch 需要 ~10 个 ManagedSession 方法，narrow handle 会复制全部签名；改为「新 helper 接受最小接口」guard，等 R230-ARCH-3 / R234-ARCH-3 RouterView DTO 落地再统一收敛。
 - [ ] **R234-ARCH-18 — internal/session/testutil.go 不带 _test 后缀 + 无 build tag（P3）**：可能被生产二进制 link。建议 rename 为 testutil_test.go 或加 `//go:build testing`。
 - [ ] **R234-ARCH-19 — internal/dispatch/dispatch_test.go 单文件 import cli/cron/platform/session 4 个生产包（P3）**：R234-ARCH-4 子症状。
 - [ ] **R234-ARCH-20 — wshub_agent.go 仅依赖 session 但被并入 server 包导致编译图污染（P3）**：建议挪到 `internal/server/wshub` 子包。
-- [ ] **R234-ARCH-21 — 跨包共享 limits 常量风格不一（cron/limits.go vs server/server.go vs dispatch/dispatch.go）（P3）**：建议集中到 `internal/limits`。
+- [x] **R234-ARCH-21 — 跨包共享 limits 常量风格不一（cron/limits.go vs server/server.go vs dispatch/dispatch.go）（P3）**：建议集中到 `internal/limits`。已在 dispatch/commands.go 加 single-source-of-truth 锚点（cron.Max* / dispatch.maxCron* / server.maxCron*Dashboard 三层命名约定 + 同步合约 + 改名 contract）；server/dashboard_cron.go 反向指引该锚点，避免再写第二份 godoc。集中迁移到 internal/limits 等更大规模重构再做。
 - [ ] **R234-ARCH-22 — `internal/cli/backend` 同时被 server 与 session 直接 import（P3）**：建议拆 `backend.Profile`（值类型）vs `backend.Launcher`（行为，仅 cli 用）。
 - [ ] **R234-ARCH-23 — cron 走 router 而 quick session 走 dispatch.SendSplitReply 路径不一致（P3）**：建议 ADR `docs/rfc/cron-vs-dispatch-paths.md` 或归 R230-ARCH-2 SendOrchestrator。
 - [ ] **R234-ARCH-24 — server/upload_store.go import cli 仅为 cli.ImageData（P3）**：建议 upload_store 输出自身 `Blob struct{Data []byte; MIME string}`，dashboard_send 转 cli.ImageData。
@@ -136,13 +136,13 @@
 
 ### 安全 — 本轮新发现
 
-- [ ] **R234-SEC-2 — `handleTrigger` 无 per-IP 速率限制（P1）**：`POST /api/cron/trigger` 每次触发 `session.GetOrCreate + sess.Send`，无任何限流；持有 token 的脚本可在秒级把 maxJobs=500 全部触发耗尽 shim/cgroup 资源。建议新增 `triggerLimiter *ipLimiter`（如 `rate.Every(2s), burst=3`）。
+- [x] **R234-SEC-2 — `handleTrigger` 无 per-IP 速率限制（P1）**：`POST /api/cron/trigger` 每次触发 `session.GetOrCreate + sess.Send`，无任何限流；持有 token 的脚本可在秒级把 maxJobs=500 全部触发耗尽 shim/cgroup 资源。建议新增 `triggerLimiter *ipLimiter`（如 `rate.Every(2s), burst=3`）。已实施：CronHandlers 新增 triggerLimiter（`rate.Every(2s), burst=3`），server.New fail-fast guard scheduler 已 wired 时强制 non-nil。
 - [ ] **R234-SEC-3 — `runsLimiter` 共享 list/detail/transcript 三端点 IO 代价 100x 不对称（P2）**：transcript 走 8MB JSONL+Scanner，list 走 cache。建议 transcript 单独 `transcriptLimiter`（`rate.Every(5s), burst=5`）。
 - [ ] **R234-SEC-5 — transcriptResponse Input json.RawMessage 透传未脱敏（P2）**：tool_use.input 含 Bash 命令明文，可能含 API 密钥/DSN。建议对 command/file_path/url 做 200 字符截断，或移除 Input 仅留 Summary。**dashboard JS breaking**。
 - [ ] **R234-SEC-6 — `handleList` 返回所有 job 的 LastResult/Prompt 全量轮询带宽放大（P2）**：50 jobs × (8KB prompt + 4KB result + 5×summary) ≈ 1MB/req × 1Hz = 1MB/s。建议 list 返回截断 prompt（1KB），detail 接口返回全量；或加 server-side `?search=`。**dashboard JS fuzzy-search 需迁移**。
 - [ ] **R234-SEC-7 — `Job.LastResult` 落盘无 secret-pattern 过滤（P2）**：claude 输出可能含明文 sk-ant-/ghp_/AKIA token。建议 `recordResultP0WithSanitised` 增加可配置黑名单 + 类似 `isSensitiveDownloadName` 的后处理。
 - [ ] **R234-SEC-8 — `flattenJSONLEvent` tool_use.Input 字段无大小守卫（P3）**：500 turns × 256KB/line = 128MB 序列化输出。建议 `len(b.Input) > maxToolInputBytes`（64KB）截断为 `[truncated]` 或置空。
-- [ ] **R234-SEC-11 — `handlePreview` 端点无速率限制（P3）**：`cronParser.Parse + sched.Next×count` 可被 1000 req/s 持续消耗 CPU。建议轻量 `previewLimiter`（`rate.Every(100ms), burst=20`）。
+- [x] **R234-SEC-11 — `handlePreview` 端点无速率限制（P3）**：`cronParser.Parse + sched.Next×count` 可被 1000 req/s 持续消耗 CPU。建议轻量 `previewLimiter`（`rate.Every(100ms), burst=20`）。已实施：CronHandlers 新增 previewLimiter（`rate.Every(100ms), burst=20`），server.New fail-fast guard 同 SEC-2。
 - [x] **R234-SEC-12 — `loadJobs` 不对 Prompt 跑 validateCronPrompt（P3）**：cron_jobs.json 被 operator 直接编辑后，含控制字符的 prompt 会流入 CronRun。建议 loadJobs 后对每个 j.Prompt 做 utf8.ValidString + validateCronPrompt 检查。 — 已修复（commit 3a63759，loadJobs 防御性丢弃含无效 UTF-8 / C0 控制字节的 prompt，本批 PR）
 
 ### 性能 — 本轮新发现
@@ -152,7 +152,7 @@
 - [ ] **R234-PERF-3 — protocol_claude.ReadEvent json.Unmarshal([]byte(line),...)（P1）**：阻塞在 shim 协议 bump，归 R231-PERF-1 主条目。
 - [ ] **R234-PERF-4 — KnownSessionIDs 无 TTL 缓存（P2）**：50 jobs × Recent(200) = 10000 row copy/dashboard poll。建议 `atomic.Pointer[knownSessionIDsCache]` 30s TTL + finishRun/DeleteJob 失效。归 R233-PERF-3 同主条目。
 - [ ] **R234-PERF-5 — TranscriptReader.readLocked 每 200ms 重 open/seek/read/close（P2）**：50 tailer × 5/s = 250 syscalls/s。建议 keep `*os.File`，`Seek+ReadAt`，仅 inode 变更（log rotation）才重开。归 R233-PERF-4 主条目。
-- [ ] **R234-PERF-7 — wsclient.Send 无 encoder pool（P2）**：每事件 fresh json.Marshal。建议 `sync.Pool` of `*bytes.Buffer + *json.Encoder`（同 shimSendBufPool 模式）。
+- [x] **R234-PERF-7 — wsclient.Send 无 encoder pool（P2）**：每事件 fresh json.Marshal。建议 `sync.Pool` of `*bytes.Buffer + *json.Encoder`（同 shimSendBufPool 模式）。已评估为 deliberate non-optimisation：unbuffered-channel 单生产者路径下 pool 必须 make+copy 才能 Put 回去，与直接 Marshal 等价 alloc 但多了 pool 开销；shimSendBufPool 不同因为 bufio.Writer.Write 同步拷贝。已在 SendJSON godoc 完整记录该 trade-off + 与 shim 路径的差异。
 - [ ] **R234-PERF-9 — runstore.skipAppendTrim time.Now 在 fast-exit 之前（P2，**已核实为误报**）**：实际 line 254 已先做 `len(entry.runs) > 0` 守卫，time.Now 在 fast-path 之后。归档关闭。
 - [ ] **R234-PERF-10 — parseTranscriptTime 每行 RFC3339Nano 解析 ~300ns（P2）**：250 line/s × 300ns = 75µs/s。建议 hand-parse 整数字段或 ParseInLocation+UTC 缓存。
 - [ ] **R234-PERF-13 — readShimLine 错误漏 cap drain 路径（P3）**：bufio chunk 临时切片漏。
