@@ -382,12 +382,27 @@ func (s *ManagedSession) loadHistorySource() history.Source {
 	return box.src
 }
 
-// SnapshotChainIDs returns the session-ID chain (oldest → newest) under
-// historyMu so concurrent mutation of prevSessionIDs doesn't produce a
-// torn slice. The current session ID is appended only when non-empty —
-// a just-spawned session that hasn't captured its first ID yet yields
-// the prev chain alone, which matches how router.go builds the chain
-// for JSONL loads today.
+// SnapshotChainIDs returns the session-ID chain (oldest → newest). The
+// current session ID is appended only when non-empty — a just-spawned
+// session that hasn't captured its first ID yet yields the prev chain
+// alone, which matches how router.go builds the chain for JSONL loads
+// today.
+//
+// Lock contract (R230C-GO-1): the authoritative invariant for
+// prevSessionIDs is "writers hold r.mu; readers either hold r.mu or
+// accept a stale-but-not-torn snapshot". All writers (registerStub /
+// spawnSession.installFreshSessionLocked / RenameSession /
+// router_core restore) write under r.mu.Lock(). This reader runs from
+// cli.Wrapper.NewHistorySource factories which do NOT hold r.mu, so
+// historyMu.RLock here is a defensive rope: it does not synchronise
+// with the r.mu writers, but the slices.Clone in writers + the append
+// pattern guarantee any value we observe was a complete prior snapshot
+// (Go's memory model on slice header writes is per-word atomic on
+// 64-bit). historyMu still serialises against the InjectHistory
+// persistedHistory append path which lives next to prevSessionIDs in
+// memory. A future cleanup is to take r.mu.RLock() here instead, but
+// that requires plumbing the router pointer into ManagedSession and
+// is not done as part of R230C-GO-1.
 //
 // Exported (Sprint 1a) so cli.Wrapper.NewHistorySource factories can
 // pull the current chain at LoadBefore time without the cli package
@@ -993,6 +1008,28 @@ func (s *ManagedSession) HasProcess() bool {
 	return s.loadProcess() != nil
 }
 
+// State returns just the live process state ("ready" / "busy" / etc.)
+// without performing the SetModel mirror or building a full
+// SessionSnapshot. Lock-free hot path for high-frequency observers
+// (R230C-PERF-1: connector_subscribe ticks per agent_message_chunk
+// event ~10-50/s and only needs State + DeathReason). Returns "ready"
+// when no process is attached, mirroring Snapshot's no-proc branch.
+func (s *ManagedSession) State() string {
+	proc := s.loadProcess()
+	if proc == nil {
+		return "ready"
+	}
+	return proc.GetState().String()
+}
+
+// DeathReason returns the recorded death cause string ("" when the
+// session is healthy or has not died yet). Companion to State() for
+// connector_subscribe's session_state push so the change-detection
+// branch can avoid a full Snapshot. R230C-PERF-1.
+func (s *ManagedSession) DeathReason() string {
+	return loadAtomicString(&s.deathReason)
+}
+
 // Snapshot returns a point-in-time view of this session.
 //
 // Side effect (R230C-CR-Diag / R229-GO-2): when a live process reports a
@@ -1474,6 +1511,18 @@ func (s *ManagedSession) InjectHistory(entries []cli.EventEntry) {
 		// Cap-trim shifts the prefix backwards; clamp seededLen so it keeps
 		// pointing at "tail-end of what proc has already seen" rather than
 		// past the new start.
+		//
+		// R231-CQ-9 — degrade-to-reseed semantic: when trimmed > seededLen
+		// the clamp lands on 0, which means the next forward span below will
+		// re-emit the entire post-trim ring (including some entries the proc
+		// has already observed). This is intentional: after a cap-trim the
+		// "exact already-seen prefix" is no longer recoverable (its leading
+		// entries were dropped), so we choose duplicate forwarding over data
+		// loss. The duplication only fires when the injected batch by itself
+		// exceeds maxPersistedHistory minus what proc already saw — i.e.
+		// boot-time JSONL replay of >cap entries; steady-state Send/result
+		// flow stays well under the cap and preserves the no-duplicate
+		// guarantee.
 		if s.persistedSeededLen >= trimmed {
 			s.persistedSeededLen -= trimmed
 		} else {

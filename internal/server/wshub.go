@@ -616,7 +616,13 @@ func (h *Hub) handleSubscribe(c *wsClient, msg node.ClientMsg) {
 	// subscribed to the same key, multiplying every event fan-out by N.
 	// 20 generously covers legitimate multi-tab/multi-device usage; the
 	// O(connections) scan is bounded by maxWSConns=500 and only runs on
-	// subscribe (low frequency) — not on each broadcast.
+	// subscribe (low frequency) — not on each broadcast. The inner loop
+	// terminates early once count reaches the cap (R230C-PERF-4 archived
+	// 2026-05-23): worst-case work is O(maxSubscribersPerKey) regardless
+	// of total connection count, so the optimisation TODO described
+	// ("subscriberCounts map[string]int O(1)") would only save a small
+	// constant on the cold subscribe path while adding a second invariant
+	// to maintain on every disconnect — not worth the bookkeeping.
 	if _, alreadySub := c.subscriptions[key]; !alreadySub {
 		count := 0
 		for other := range h.clients {
