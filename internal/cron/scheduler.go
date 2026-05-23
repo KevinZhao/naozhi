@@ -2199,6 +2199,20 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// wrapper, computeJobTimeout godoc) already prevents two concurrent
 	// runs of the same job from stacking budgets, so the doubled wall
 	// clock affects only the CURRENT run's recorded duration, not throughput.
+	//
+	// Cross-references — multiple subsequent reviews revisited this site:
+	//   - R215-ARCH-P2-5 — concern: stopCtx-cancel can't reach in-flight
+	//     Send. Bound by Stop()'s stopBudget (30s, see line ~852) plus the
+	//     runDeadlineWatchdog below: stopCtx-fired isn't propagated, but
+	//     jobTimeout still caps wall-clock; long-running CLI turns are left
+	//     running so Send returns with a real result rather than a bogus
+	//     canceled error. Intentional orphan, documented in Stop().
+	//   - R230C-GO-7 — concern: 5h execTimeout means stopCtx fire still
+	//     waits up to 5h. Mitigated by runDeadlineWatchdog calling
+	//     InterruptViaControl on sendCtx deadline (covers jobTimeout); for
+	//     stopCtx-during-long-job the wrapper goroutine in Stop() is the
+	//     intentional-orphan path (see Stop() CONTRACT block). Real fix
+	//     requires watchdog wired to stopCtx as well — out of scope here.
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), jobTimeout)
 	defer sendCancel()
 	inflight.setPhase(PhaseSending)

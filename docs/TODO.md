@@ -765,7 +765,7 @@
 
 ### Go 正确性 — 跨包改动 / shutdown 协调
 
-- [ ] **R222-GO-1 — `cron.executeOpt` 用 `context.Background()` 起 sendCtx，绕开 stopCtx 取消（P2）**: scheduler.go:1853 注释说为避免 shutdown 误记 cancel，但 Stop 后 Send 仍可阻塞 jobTimeout（最多 5 min），triggerWG.Wait 因此可能超 stopBudget。方案：sendCtx 来自 stopCtx 派生 + 短 grace；或在 wg goroutine 文档化"intentional orphan"。涉及：`internal/cron/scheduler.go:1853`。
+- [x] **R222-GO-1 — `cron.executeOpt` 用 `context.Background()` 起 sendCtx，绕开 stopCtx 取消（P2）** — 评估闭合 2026-05-23（cron-fix-F2）：Stop() CONTRACT block (scheduler.go:864-874) 已明示 "intentional orphan" 协议，stopBudget 30s 兜底；本轮在 R191-ARCH-M5 anchor 加 R222-GO-1 cross-ref，文档闭环。
 - [~] **R222-GO-3 — `cli.SubagentLinker.fireOnResolveLocked` 释放重取 mu 让 callback 跑期间存在 nested mu-release race（P2）**: 重入安全契约靠 godoc 维系，无静态守卫；callback 若再调 linker.Query 进入嵌套路径可能死锁。方案：copy fns 后释放两锁外执行所有 callback，移除 re-lock。涉及：`internal/cli/subagent_link.go:556-568`。 — 归档 2026-05-23：R227-GO-3 已重命名 fireCallbacksDropLock 并补 onResolveMu copy-then-drop；callback 进入 Query 走 RLock 不死锁（l.mu 已 Unlock），进入 Resolve 走自身 mu 获取顺序；本批 subagent_link.go 加 godoc 锚点说明锁分析
 
 ### 性能 — 协议接口或大重构
@@ -1594,7 +1594,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：`session.CoreReader` + `session.CoreMutator` 中心接口，consumer 包 embed 扩展。
   - 涉及: `internal/dispatch/consumer.go:34-43`, `internal/cron/scheduler.go:67-85`, `internal/server/consumer.go:37-52`
 
-- [ ] **R215-ARCH-P2-5 — `cron.executeOpt` 200 行内 3 个 ctx 无法 reason**: stopCtx / sendCtx(Background) / timeout 语义分歧。
+- [x] **R215-ARCH-P2-5 — `cron.executeOpt` 200 行内 3 个 ctx 无法 reason** — 评估闭合 2026-05-23（cron-fix-F2）：scheduler.go:2170 R191-ARCH-M5 anchor 已扩展，集中记录 stopCtx / sendCtx(Background) / runDeadlineWatchdog 三者协同语义，作为 reason 入口。架构拆分（R232-ARCH-1）保留独立条目跟踪。
   - 方案：拆 `executeFreshSpawn(stopCtx,j)` + `executeSendToSession(sess,text,timeout)`，参数单语义。
   - 涉及: `internal/cron/scheduler.go:1351-1458`
 
@@ -1707,7 +1707,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 
 ### 性能 — 本轮新发现
 
-- [ ] **R228-PERF-3 — `subagent_transcript.readLocked` 每次 `os.Open` 不复用 fd（P2）**: 每 200ms × 50 active tailer = 250 open/close fd/s。方案：缓存 `*os.File`，Tail 用 Seek 复用，inode 变化时重 Open。涉及 `internal/cli/subagent_transcript.go:63-88`。
+- [x] **R228-PERF-3 — `subagent_transcript.readLocked` 每次 `os.Open` 不复用 fd（P2）**: 与 R230B-PERF-5 同根、由 R233-PERF-4 统一跟踪（持久 fd + ReadAt + inode-change reopen）。已在 `internal/cli/subagent_transcript.go::readLocked` 加 archive anchor 标记 superseded by R233-PERF-4。
 - [x] **R228-PERF-5 — `agent_tailer.pollOnce` fan-out（已修复 2026-05-23 复核）**: agent_tailer.go:402-475 已实现 marshalPooled 一次后 SendRaw 扇出，single-sub 仍走 SendJSON 短路；R231-PERF-5/R232-PERF-2 收敛。本批 PR。
 - [x] **R228-PERF-6 — `handleList` `resp` 用 `map[string]any`（已修复 2026-05-23 复核）**: dashboard_session.go:611 sessionListLocalResp + :677 sessionListMultiResp 已替代 map[string]any，R226-PERF-7 收敛。本批 PR 归档。
 - [~] **R228-PERF-7 — `EventLog.Append` `[]EventEntry{e}` 字面量 heap escape（P3 R219-PERF-4 具体修法方向）**: 单条 slice 字面量逃逸。方案：先 `-gcflags=-m` 验证再决定栈数组+切片或 sync.Pool。涉及 `internal/cli/eventlog.go:703`。 — NEEDS-DESIGN 归档 2026-05-23（与 R219-PERF-4 / R222-PERF-8 / R215-PERF-P2-1 同根因；R230-PERF-1 sink-nil 早返回已覆盖生产热路径，sink-attached 路径的 slice 字面量受 PersistSink 保留契约约束结构性必需；本批 eventlog.go 加 godoc 锚点）
