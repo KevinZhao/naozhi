@@ -346,6 +346,19 @@ func (r *Router) trackSessionID(id string) {
 // GetOrCreate call for this key will resume the given session ID.
 // If another session already targets the same sessionID, the existing key
 // is returned (deduplication) and no new entry is created.
+//
+// R226-CR-7 known-limitation anchor: this path stamps the registered
+// session with r.CLIName() / r.CLIVersion() — i.e. the *default* wrapper's
+// metadata. In a multi-backend deployment where the resumed session was
+// originally produced by a non-default backend, the CLIName/Version
+// recorded here is wrong until the next live spawn refreshes it via
+// wrapperFor(entry.Backend) in router_core.loadStore. The "fix" requires
+// adding a backend string parameter so callers (server/dashboard_session,
+// server/send, cron scheduler) can pre-resolve wrapperFor at the call
+// site; that's a caller-API breaking change tracked under R226-CR-7 and
+// must remain consistent with RegisterCronStubWithChain. Until that
+// lands, treat the stamp as advisory metadata and re-read it after the
+// session next spawns.
 func (r *Router) RegisterForResume(key, sessionID, workspace, lastPrompt string) (effectiveKey string) {
 	r.mu.Lock()
 	if _, exists := r.sessions[key]; exists {
