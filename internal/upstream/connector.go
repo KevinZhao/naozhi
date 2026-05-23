@@ -313,6 +313,15 @@ func pingOnce(conn *websocket.Conn, writeMu *sync.Mutex) bool {
 	return true
 }
 
+// marshalResult is a tiny adapter around json.Marshal that names the output
+// type as json.RawMessage so connector_rpc.go's RPC return signature stays
+// readable. The handler contract is `(json.RawMessage, error)` — using
+// json.Marshal directly forces every call site to either name the
+// intermediate []byte or wrap with json.RawMessage(...) at the return,
+// both of which obscure what's a marshal vs a raw passthrough.
+//
+// Cheap allocation (one Marshal call) — no caching is worthwhile because
+// the inputs are RPC-result snapshots that change per call.
 func marshalResult(v any) (json.RawMessage, error) {
 	return json.Marshal(v)
 }
