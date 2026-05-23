@@ -17,6 +17,15 @@ type ipLimiter struct {
 	trustedProxy bool
 }
 
+// newIPLimiterWithProxy constructs an ipLimiter with the given sustained
+// rate and burst budget. trustedProxy threads through to AllowRequest so
+// the limiter keys on the real client IP (X-Forwarded-For last hop) when
+// behind a trusted ALB / CloudFront, and on the raw RemoteAddr when not.
+//
+// MaxKeys / TTL on the inner ratelimit.Limiter default to the package
+// defaults; use ratelimit.New directly when finer control is required
+// (login / WS-upgrade / unauth-dashboard limiters do this in
+// dashboard_auth.go).
 func newIPLimiterWithProxy(r rate.Limit, burst int, trustedProxy bool) *ipLimiter {
 	return &ipLimiter{
 		inner:        ratelimit.New(ratelimit.Config{Rate: r, Burst: burst}),
