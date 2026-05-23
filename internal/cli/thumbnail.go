@@ -23,8 +23,36 @@ import (
 // full RGBA decode (e.g., 4096x4096 = 64 MB RGBA).
 const maxThumbnailPixels = 4096 * 4096
 
+// DefaultThumbnailMaxDim is the dashboard / IM thumbnail box size in pixels.
+// 600px lets a typical 4:3 image render legible at retina-scale dashboard
+// chip dimensions (~300 CSS px) without forcing the JPEG encoder to push the
+// data URI past the 50-100 KiB band where EventLog ring memory pressure
+// becomes noticeable. Callers that want a different size (e.g. larger card
+// previews) can pass an explicit maxDim to MakeThumbnail; using this constant
+// keeps the dashboard / Discord / Slack / Feishu paths consistent. Pin this
+// before changing — the dashboard's lightbox affordance assumes the original
+// image is reachable separately and the thumbnail is "good enough at chip
+// scale". R234-CR-misc.
+const DefaultThumbnailMaxDim = 600
+
+// thumbnailJPEGQuality is the JPEG encoder quality setting applied to every
+// thumbnail. 70 sits in the perceptually-lossless band for natural images
+// while keeping the encoded payload roughly 50% smaller than quality=85;
+// re-tuning needs paired bench (encode time + payload size) since the JPEG
+// quantisation tables flip non-linearly across the 60-80 band.
+const thumbnailJPEGQuality = 70
+
+// thumbDecodeConcurrency caps simultaneous full-resolution image decodes
+// process-wide. Each decode allocates an RGBA buffer up to
+// maxThumbnailPixels × 4 bytes (≤64 MiB worst case); 4 in flight keeps peak
+// resident memory bounded near 256 MiB even when an upload burst hits all
+// active sessions at once.
+const thumbDecodeConcurrency = 4
+
 // thumbSem limits concurrent image decode operations to cap aggregate memory.
-var thumbSem = make(chan struct{}, 4)
+// Sized at thumbDecodeConcurrency; named constant kept so future tuning
+// touches a single location.
+var thumbSem = make(chan struct{}, thumbDecodeConcurrency)
 
 // MakeThumbnail generates a small JPEG data URI from raw image bytes.
 // Returns empty string if the image cannot be decoded or is too large.
@@ -84,7 +112,7 @@ func MakeThumbnail(data []byte, maxDim int) (result string) {
 	// No resize needed
 	if dw == sw && dh == sh {
 		var buf bytes.Buffer
-		if err := jpeg.Encode(&buf, src, &jpeg.Options{Quality: 70}); err != nil {
+		if err := jpeg.Encode(&buf, src, &jpeg.Options{Quality: thumbnailJPEGQuality}); err != nil {
 			return ""
 		}
 		return "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(buf.Bytes())

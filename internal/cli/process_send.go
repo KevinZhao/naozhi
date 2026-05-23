@@ -49,13 +49,17 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 		entry.Summary += " [+" + strconv.Itoa(len(images)) + " image(s)]"
 		thumbs := make([]string, len(images))
 		if len(images) == 1 {
-			thumbs[0] = MakeThumbnail(images[0].Data, 600)
+			thumbs[0] = MakeThumbnail(images[0].Data, DefaultThumbnailMaxDim)
 		} else {
 			// R225-PERF-15: cap concurrent JPEG-encode goroutines so a single
 			// 20-image upload cannot saturate every CPU at once and starve
 			// other sessions' Send paths. 4 keeps small-batch latency near
 			// the unbounded baseline (image/jpeg encode is ~10-30 ms each)
-			// while bounding worst-case CPU use.
+			// while bounding worst-case CPU use. Distinct from
+			// thumbDecodeConcurrency (thumbnail.go's image decode semaphore):
+			// this gates per-message goroutine fan-out within a single Send,
+			// while the package-level decoder semaphore bounds total RAM
+			// across simultaneous Sends. Two layers, two purposes.
 			const thumbnailConcurrency = 4
 			sem := make(chan struct{}, thumbnailConcurrency)
 			var wg sync.WaitGroup
@@ -65,7 +69,7 @@ func buildUserEntry(text string, images []ImageData) EventEntry {
 				go func(i int, data []byte) {
 					defer wg.Done()
 					defer func() { <-sem }()
-					thumbs[i] = MakeThumbnail(data, 600)
+					thumbs[i] = MakeThumbnail(data, DefaultThumbnailMaxDim)
 				}(i, img.Data)
 			}
 			wg.Wait()
