@@ -809,7 +809,9 @@ func (l *EventLog) Append(e EventEntry) {
 	// them in the no-sink case saves one alloc per event in the hot
 	// stdout path. Mirrors AppendBatch's pre-loop sinkAttached gate.
 	//
-	// R215-PERF-P2-1 / R219-PERF-4 / R228-PERF-7 archive anchor:
+	// R215-PERF-P2-1 / R217-PERF-4 / R219-PERF-4 / R222-PERF-8 /
+	// R226-PERF-5 / R227-PERF-9 / R228-PERF-7 / R229-PERF-5 /
+	// R230C-PERF-2 archive anchor (closed 2026-05-23):
 	// the remaining `[]EventEntry{e}` literal allocation on the
 	// sink-attached branch is structurally required by PersistSink's
 	// retention contract — the sink may keep the slice past return,
@@ -818,6 +820,8 @@ func (l *EventLog) Append(e EventEntry) {
 	// sync.Pool would just trade alloc for Get/Put overhead on a 48 B
 	// payload. Production hot path is the no-sink early-return above,
 	// so the marginal cost on the sink-attached path is accepted.
+	// All nine review IDs converged on R230C-PERF-2 and were closed
+	// together — see docs/TODO.md for the convergence note.
 	if l.persistSinkPtr.Load() != nil {
 		l.invokePersistSink([]EventEntry{e})
 	}
