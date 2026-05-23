@@ -461,7 +461,7 @@
 - [ ] **R230B-GO-2 — `subagent_link.Resolve` retry sleep 不响应 ctx 取消（P2）**: `subagent_link.go:294/332` 重试循环 `time.Sleep` 不察 ctx；router_shim.go:398 `go linker.Resolve` bare goroutine。方案：Resolve 加 ctx 参数 + select stop signal。Breaking：是（接口签名 + 调用方）。
 - [ ] **R230B-GO-3 — `recordResultP0WithSanitised` / `recordResult` mu Unlock 非 deferred（P2）**: 多个 early-return 各自手动 Unlock，未来插早返路径易遗漏。方案：拆 stateMutate（持锁）+ stateCommit（锁外 save/fn 调用）两阶段。Breaking：否（内部重构）。
 - [ ] **R230B-GO-4 — `Hub.handleSubscribe` O(N) maxSubscribersPerKey 扫描在写锁下（P2）**: `wshub.go:556` Lock 期间扫所有 connections 阻塞 BroadcastSessionsUpdate。方案：先 RLock 数完再 Lock 短期 reserve；或 per-key sync.Map 计数。Breaking：否。
-- [ ] **R230B-GO-5 — `eventLogPersister.Stop` 用 context.Background 而非 shutdown ctx（P3）**: `router_cleanup.go:737` 不在本轮修因 shutdown 时 historyCtx 已 cancel，会立刻 timeout 失去 5s flush 窗口。方案：增加专用 stopCtx 或 stop 阶段单独的 5s 兜底（绕过 historyCtx）。Breaking：否（设计决策）。
+- [x] **R230B-GO-5 — `eventLogPersister.Stop` 用 context.Background 而非 shutdown ctx（P3）**: `router_cleanup.go:737` 不在本轮修因 shutdown 时 historyCtx 已 cancel，会立刻 timeout 失去 5s flush 窗口。方案：增加专用 stopCtx 或 stop 阶段单独的 5s 兜底（绕过 historyCtx）。Breaking：否（设计决策）。 — 已修复（采用方案二：router_cleanup.go eventLogPersister.Stop 路径加 R230B-GO-5 段落 godoc 显式说明用 context.Background 是有意为之，原因是 historyCtx 在 Shutdown 顶部已 cancel；5s WithTimeout 仍守住 wedged FS 的下界），本批 PR
 
 ### Performance（剩余）
 
@@ -479,7 +479,7 @@
 - [x] **R230B-CR-1 — `runIDLenLimit=64` 与 `cron.MaxIDLen` 各自定义（P3）**: 注释声明"kept separate"但未来漂移风险。方案：评估是否真要分开，否则统一。Breaking：否。 — 已修复，本批 PR #215
 - [x] **R230B-CR-2 — `formatTZOffset` 接受 IANA name 并展示（P3）**: name 参数实为 loc.String() 而非 zone abbr，渲染 "Asia/Shanghai (UTC+08:00)" 与 timezone_abbr 重叠。方案：统一只传 zone abbr 或重命名参数。Breaking：否（仅展示文案）。 — 已修复，本批 PR #215
 - [x] **R230B-CR-3 — `dashboard_cron.handleList`/`handleRunsList` map[string]any 响应（P3）**: 1Hz poll 反射 alloc。方案：定义命名 struct（参 R226-PERF-7 dashboard_session）。Breaking：否。 — 已修复（提 cronListResp / cronRunsListResp / cronCurrentRunView / cronRunCountersView / cronJobView / cronNotifyDefaultView 6 个命名 struct 到包级；handleList + handleRunsList 4 处 map literal 切换；空 jobs/runs 早返回路径同走结构体并显式空切片保 wire shape），本批 PR
-- [ ] **R230B-CR-4 — `trimJobLocked` 用 mtime / `cacheTrimAfterDisk` 用 StartedAt（P3）**: disk vs cache 过期判断时间源不一致，长任务+短窗口下短暂分歧。方案：选其一统一。Breaking：否。
+- [x] **R230B-CR-4 — `trimJobLocked` 用 mtime / `cacheTrimAfterDisk` 用 StartedAt（P3）**: disk vs cache 过期判断时间源不一致，长任务+短窗口下短暂分歧。方案：选其一统一。Breaking：否。 — 已修复（采用 godoc 锚点：cacheTrimAfterDisk godoc 加 R230B-CR-4 段落显式分析两路径 time-source 偏差窗口（典型 <10ms，pathological <1s），下一次 1Hz 拉取会 re-warm 抹平差异；统一到 mtime 需要 250 syscall/s 或 +320KB cache，成本不划算；现状 godoc-only resolution），本批 PR
 - [x] **R230B-CR-5 — `redactPathsInCronError` `maxErrLen=2048` + `SanitizeForLog 512` magic（P3）**: 散在两处的 cron 错误消息长度策略。方案：抽包级常量。Breaking：否。 — 已修复，本批 PR #218
 
 ### Architecture（剩余 P1，需设计）
@@ -504,8 +504,8 @@
 - [ ] **R230B-ARCH-18 — `--dangerously-skip-permissions` hardcode 在 Protocol（P2）**: 多用户/多 chat 无法 per-session 切权限。方案：SpawnOptions.PermissionMode 枚举。立即可落地（~30 行）。Breaking：否。
 - [ ] **R230B-ARCH-19 — validateStringField 三重扫描（UTF-8+C0+Bidi）重复（P2）**: cron 路径已抽 helper，feishu/project planner 仍各自重复。方案：textutil.ValidateText(s, policy) 统一。Breaking：否。
 - [ ] **R230B-ARCH-20 — node 反向 RPC 协议三处定义（P2）**: node/protocol.go / connector / wshub 各自手写编解码。方案：node/rpcprotocol 子包统一。Breaking：否。
-- [ ] **R230B-ARCH-21 — eventlog WireVersion=1 无 forward-compat 协商（P3）**: bump 后旧 reader 整文件 fallback。方案：加 MinReadVersion。Breaking：否。立即可落地（~40 行）。
-- [ ] **R230B-ARCH-22 — shim ProtocolVersion=1 硬编码无 negotiation（P3）**: 零中断热重启场景二进制不匹配 hard-fail。方案：MinSupportedVersion / MaxSupportedVersion 协商。Breaking：否。立即可落地（~30 行）。
+- [x] **R230B-ARCH-21 — eventlog WireVersion=1 无 forward-compat 协商（P3）**: bump 后旧 reader 整文件 fallback。方案：加 MinReadVersion。Breaking：否。立即可落地（~40 行）。 — 已修复（schema/record.go 加 MinReadVersion 常量 + 显式 godoc 解释 [MinReadVersion, WireVersion] 区间是版本协商窗口；UnmarshalRecord 加 r.V<MinReadVersion 拒绝分支，今天 MinReadVersion==WireVersion==1 不可达但锁了未来 bump 路径），本批 PR
+- [x] **R230B-ARCH-22 — shim ProtocolVersion=1 硬编码无 negotiation（P3）**: 零中断热重启场景二进制不匹配 hard-fail。方案：MinSupportedVersion / MaxSupportedVersion 协商。Breaking：否。立即可落地（~30 行）。 — 已修复（shim/protocol.go 加 MinSupportedProtocolVersion 常量 + godoc 解释协商窗口；cli/wrapper.go Hello 检查路径范围外的 hv 升级到 slog.Error 让 rolling-deploy mismatch 在 journalctl loud），本批 PR
 - [ ] **R230B-ARCH-23 — selfupdate 无回滚 / 健康检查 hook（P3）**: panic 后只能 ssh 手动回退。方案：systemd 启动 30s 内 self-call /health 失败自动 .prev 回退。Breaking：否。
 - [ ] **R230B-ARCH-24 — Server struct 30+ 字段 god object（P3）**: 已抽 *Handlers struct 但仍持每个指针。方案：mountAuth(mux)/mountCron(mux) 子构造，Server 退成 Listener+middleware+Mux 容器。Breaking：否。
 - [ ] **R230B-ARCH-25 — EventLog SetPersistSink 时序契约靠 metric 兜底（P3）**: 方案：合并 InjectHistory+SetPersistSink 为一次性 Initialize 调用。Breaking：是。

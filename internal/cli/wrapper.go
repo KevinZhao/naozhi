@@ -264,6 +264,21 @@ func (w *Wrapper) Spawn(ctx context.Context, opts SpawnOptions) (*Process, error
 			"naozhi", shim.ProtocolVersion,
 			"key", opts.Key,
 		)
+		// R230B-ARCH-22 / RNEW-ARCH-403: when the shim reports a version
+		// outside [MinSupportedProtocolVersion, ProtocolVersion], log at
+		// Error so a rolling-deploy mismatch is loud in journalctl. We
+		// still don't hard-fail because v0 (= "field absent") is the
+		// historical bootstrap shape and refusing it would brick
+		// upgrades from pre-v1 shims; once that path is gone the
+		// branch can promote to a refused-attach error.
+		if hv > 0 && (hv < shim.MinSupportedProtocolVersion || hv > shim.ProtocolVersion) {
+			slog.Error("shim protocol_version outside supported range; reattach may misframe",
+				"shim", hv,
+				"min_supported", shim.MinSupportedProtocolVersion,
+				"max_supported", shim.ProtocolVersion,
+				"key", opts.Key,
+			)
+		}
 	}
 
 	cliPID := 0

@@ -672,6 +672,21 @@ func (s *runStore) cacheTrimAfterDisk(jobID string, cutoff time.Time) {
 	// finishRun marshals the record), with StartedAt as the fallback for
 	// the very rare in-progress snapshot where EndedAt is zero. R221-FIX-P1-3.
 	//
+	// R230B-CR-4: this approximation is the source of the "disk vs cache
+	// time-source divergence" review note. trimJobLocked uses mtime
+	// (resolution: filesystem rename time, ~ms after finishRun); cache
+	// uses EndedAt (Go-level time.Now() at finishRun entry, ~ms before
+	// rename). Divergence window: < ~10 ms typical, < ~1 s pathological.
+	// For a long-running job that finishes near the keepWindow boundary
+	// the cache row may be evicted ~ms before the disk row in the
+	// extreme case; the next 1Hz poll re-warms from disk so the gap is
+	// invisible to operators. Aligning both paths to mtime would require
+	// either an os.Stat per cache row (250 syscall/s on the dashboard
+	// path — see R232-PERF-3) or storing mtime alongside EndedAt
+	// (cache size +8B per row × keepCount=200 jobs × 200 rows = 320KB).
+	// Neither cost is justified for the observed divergence; godoc-only
+	// resolution stands until profile data shows otherwise.
+	//
 	// Allocate a fresh backing array — `entry.runs[:0]` would alias and
 	// any caller that retains the slice (Recent's defensive copy is in
 	// place today, but a future code path might not) would observe the

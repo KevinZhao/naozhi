@@ -43,7 +43,24 @@ type ServerMsg struct {
 	Msg string `json:"msg,omitempty"`
 }
 
+// ProtocolVersion is the wire format version naozhi and shim handshake on.
+// Bumped every time the JSON shape of ClientMsg / ServerMsg changes in a
+// way that older peers cannot safely tolerate.
 const ProtocolVersion = 1
+
+// MinSupportedProtocolVersion is the oldest ProtocolVersion this binary
+// will accept on a hello. R230B-ARCH-22 / RNEW-ARCH-403: keeps the
+// version negotiation window distinct from the current protocol so a
+// rolling deploy that bumps shim before naozhi (or vice versa) has a
+// well-defined transition window. While both peers ship the same
+// constant, this is just defence-in-depth — a mismatched binary refuses
+// the connection cleanly instead of mis-parsing fields it doesn't
+// understand.
+//
+// Today MinSupportedProtocolVersion == ProtocolVersion == 1; bumping to
+// 2 should advance both, and bumping MinSupportedProtocolVersion to N
+// is the explicit "we no longer accept ProtocolVersion < N" signal.
+const MinSupportedProtocolVersion = 1
 
 // boolPtr returns a pointer to b. Useful for ServerMsg fields that need explicit false.
 func boolPtr(b bool) *bool { return &b }
