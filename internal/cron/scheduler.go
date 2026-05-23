@@ -2524,11 +2524,17 @@ func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
 //     CronRun) don't diverge — they'd otherwise show contradictory state
 //     for the same run. R220-ARCH-2.
 //
-// R220-GO-1: previously a thin recordResultP0 wrapper existed for tests
-// pinning the (j, result, errMsg, sessionID, errClass, state) signature.
-// No production caller used it; finishRun goes direct. The wrapper was
-// dead code and has been removed; tests assert on outcomes (Job fields,
-// CronRun summary), not wrapper presence.
+// R220-GO-1 / R230B-SEC-1 / R232-ARCH-2: previously a thin recordResultP0
+// wrapper existed for tests pinning the (j, result, errMsg, sessionID,
+// errClass, state) signature. No production caller used it; finishRun goes
+// direct. The wrapper was dead code and has been removed; tests assert on
+// outcomes (Job fields, CronRun summary), not wrapper presence. The
+// "double-track recordResult vs recordResultP0WithSanitised" smell flagged
+// by R230B-SEC-1 (missing RunCounters.addRun + LastErrorClass on the dead
+// path) and R232-ARCH-2 (sanitize-arg drift across the two paths) is
+// therefore moot — only this single P0 path remains, and persist_failure_test
+// (the last "test stub" caller) already invokes this function directly.
+// Do NOT reintroduce a thinner wrapper without first checking those TODOs.
 func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState) (string, string, bool) {
 	if trimmed := textutil.TruncateRunesNoEllipsis(result, maxStoredResultRunes); len(trimmed) < len(result) {
 		result = trimmed + truncatedSuffix
