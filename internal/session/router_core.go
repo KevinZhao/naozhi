@@ -26,6 +26,18 @@ import (
 	// triggers so existing deployments keep getting the right factory.
 	// Sprint 1b will consolidate side-effect imports into a single
 	// wireup package.
+	//
+	// R230-ARCH-14 anchor: keeping these imports in router_core.go (rather
+	// than cmd/naozhi/main.go) means any test that constructs a Router
+	// indirectly registers every history backend, polluting the global
+	// cli.HistoryFactoryFn registry across test runs. The acceptable
+	// alternative is an internal/wireup package with an explicit
+	// RegisterDefaults() called from main.go so tests can opt out. The
+	// migration is queued for Sprint 1b; until then, treat
+	// cli.RegisterHistoryFactory side effects as a known shared mutable
+	// state — never assume a specific registry shape inside a session
+	// test, and use cli.ResetHistoryFactoryRegistry-style helpers if a
+	// future test needs isolation.
 	_ "github.com/naozhi/naozhi/internal/history/claudejsonl"
 	_ "github.com/naozhi/naozhi/internal/history/kirojsonl"
 	"github.com/naozhi/naozhi/internal/history/naozhilog"
