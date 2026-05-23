@@ -31,8 +31,13 @@ func TestIsLoopbackRemote_PerAddrShape(t *testing.T) {
 		{"[2001:db8::1]:80", false},
 		{"8.8.8.8:443", false},
 
+		// Unix domain socket — RemoteAddr is empty (filesystem perms
+		// already gate access). Linux abstract sockets show up as "@".
+		// R232-SEC-15.
+		{"", true},
+		{"@", true},
+
 		// Garbage — must fail (fail-closed)
-		{"", false},
 		{"not-an-ip", false},
 		{"localhost:8080", false}, // hostname never resolves in this helper by design
 		{"::garbage", false},
