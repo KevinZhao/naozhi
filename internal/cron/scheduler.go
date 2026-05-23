@@ -1806,14 +1806,36 @@ func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
 // risk silent argument-order swaps. Named fields also let tests express
 // intent without reading parameter positions.
 type preflightArgs struct {
-	job       *Job
-	snap      jobSnapshot
-	key       string
-	lg        *slog.Logger
-	notifyTo  NotifyTarget
-	runID     string
+	// job 是 freshContextPreflightP0 操作的目标 Job 指针（持有用于
+	// stub-refresh 闭包），调用前 caller 已 snapshot；preflight 不会修改
+	// *Job 字段，但失败分支会通过 finishArgs.job 把它转交给 finishRun。
+	job *Job
+	// snap 是 snapshotJob 拷贝出的快照（fresh / workDir / prompt /
+	// jobID / labelOrID）。preflight 优先读 snap 而非 *job，避免与并发
+	// DeleteJob/PauseJob 起读写竞争。
+	snap jobSnapshot
+	// key 是 router GetOrCreate / Reset 用到的 session key
+	// （`cron:<jobID>` 形式）。fresh 路径 Reset 该 key 后再让 caller
+	// 重新 GetOrCreate，确保新 CLI 进程接管。
+	key string
+	// lg 是带 jobID/runID 标签的 slog.Logger，preflight 自身只输出
+	// info/warn 不输出 error（error 由 finishRun 的 errMsg 落盘统一处理）。
+	lg *slog.Logger
+	// notifyTo 是 fresh-preflight 工作目录不可达分支用来回写
+	// 「[Cron …] 工作目录不可达」中文提示的目标；其它失败分支不通知，
+	// 因为「shutdown / Reset 失败」对终端用户没有可操作信号。
+	notifyTo NotifyTarget
+	// runID 是 caller 已生成的 8-char hex 运行 ID。失败分支转给
+	// finishRun，使 cron_run_ended 与 cron_run_started 配对（emitOverlapSkipped
+	// 同样模式）。
+	runID string
+	// startedAt 是 caller 进入 executeOpt 时记录的 wall-clock 起点；
+	// finishRun 据此算 durationMS。preflight 失败也保留这个起点而非
+	// 重新 time.Now()，让 dashboard 看到真实的"从触发到放弃"时长。
 	startedAt time.Time
-	trigger   TriggerKind
+	// trigger 区分 TriggerScheduled / TriggerManual；deliverNotice 与
+	// dashboard run timeline 对二者渲染不同图标。
+	trigger TriggerKind
 }
 
 // freshContextPreflightP0 handles the fresh-mode prologue: ctx-cancel guard
@@ -2315,15 +2337,35 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 // preflight failures pass them as zero values, which CronRun renders as
 // empty (the dashboard will fall back to Job.Prompt for display).
 type finishArgs struct {
-	job       *Job
+	// job 是终结的目标 Job。state==Skipped 的 overlap 路径仍要传 *Job
+	// 因为 emitRunEnded 需要 Job.Schedule / Job.Label 上下文；DeleteJob
+	// 中途的竞态由 recordResultP0WithSanitised 内 jobs[id] 二次校验。
+	job *Job
+	// runID / startedAt 与上游 emitRunStarted 的 RunStartedEvent 一一对
+	// 应；finishRun 据此发 RunEnded，订阅方 (dashboard hub) 用 RunID 配
+	// 对 started→ended 帧。
 	runID     string
 	startedAt time.Time
-	trigger   TriggerKind
-	state     RunState
+	// trigger 与 RunStartedEvent.Trigger 必须一致；errMsg/result 经过
+	// sanitiseRunResult / redactPathsInCronError 流水线后才会进 ws/disk。
+	trigger TriggerKind
+	// state 决定 metrics 计数桶 + 是否进 succeeded/failed counters。
+	// Skipped 不计入 Failed（dashboard "失败率" 排除 overlap 噪音）。
+	state RunState
+	// sessionID 是 GetOrCreate 分配的 CLI session_id（fresh=true 路径
+	// 必为空字符串——CAS 进入 spawn 但还未 GetOrCreate；持久化模式下
+	// 是上一次的 session_id）。空值 dashboard 隐藏「打开会话」按钮。
 	sessionID string
-	result    string
-	errClass  ErrorClass
-	errMsg    string
+	// result 是 CLI 末轮文本输出（已经 RFC §6 的 sanitiseRunResult，包
+	// 括 4K rune 截断 + …[truncated] 后缀 + SanitizeForLog 控制字符过滤）。
+	result string
+	// errClass 是机器可读的错误分类（PreflightFailed / WorkDirUnreachable
+	// / Canceled / Timeout / SpawnFailed / SendFailed / OverlapSkipped 等）。
+	// dashboard 用它选图标 + i18n 文案；errMsg 仅作展开详情。
+	errClass ErrorClass
+	// errMsg 是人类可读错误（ASCII 控制符已 escape，绝对路径已 redact）。
+	// 严格 ≤ maxCronErrMsgRunes (512 runes)，超长被 SanitizeForLog 截断。
+	errMsg string
 	// skipPersist 同时控制两件事：跳过 Job 字段更新（LastRunAt/LastResult/
 	// LastError/LastErrorClass/Counters）和跳过 CronRun 磁盘历史。当前所有
 	// 调用点这两件事都同步：canceled / overlap_skipped / job-deleted-mid-
