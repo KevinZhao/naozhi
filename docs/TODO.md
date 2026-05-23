@@ -216,7 +216,7 @@
 ### 性能 — 本轮新发现
 
 - [~] **R232-PERF-1 — protocol_acp parseSessionUpdate 每 token 双 Unmarshal（多轮 NEEDS-DESIGN 归档 2026-05-23）**: agent_message_chunk 分支已 typed-decode (ACPTextContent 2 字段)，热路径每帧 1 reflect 调用。彻底合并需 ACPUpdateDetail schema 改造（content 直接 inline ACPTextContent vs RawMessage）— Breaking 协议解析层。归档 NEEDS-DESIGN，本批 PR
-- [ ] **R232-PERF-2 — agent_tailer.pollOnce 每事件 × 每 client 重复 marshal（P1）**: 同 R230B-PERF-1 模式但 agent_tailer 路径未修。方案：扇出前 marshalPooled 一次，subscribers 用 SendRaw。Breaking：否。
+- [x] **R232-PERF-2 — agent_tailer.pollOnce 每事件 × 每 client 重复 marshal（P1）**: 同 R230B-PERF-1 模式但 agent_tailer 路径未修。方案：扇出前 marshalPooled 一次，subscribers 用 SendRaw。Breaking：否。 — 已修复（agent_tailer.go:402-443 单 sub 走 SendJSON 快路径，多 sub 时 marshalPooled 一次后 SendRaw 字节扇出；R225-PERF-9/R228-PERF-5/R231-PERF-5 同根因），本批 PR #263
 - [x] **R232-PERF-3 — subagent_transcript.readLocked 每 200ms 重 open+seek+read（P2）**: R230B-PERF-5 已记，补充 freshBytes io.ReadAll 切片不复用。方案：TranscriptReader 加 readBuf 复用 backing。Breaking：否。 — 已修复（TranscriptReader 加 readBuf []byte 字段；新增 readAllInto(io.Reader, []byte) helper 复用 caller 提供的 backing 替代 io.ReadAll；readBufRetainCap=256KiB 上限防止单次大读 pin 16MiB；R231-PERF-3 同根因），本批 PR
 - [~] **R232-PERF-4 — wshub.BroadcastSessionsUpdate AfterFunc 重复分配 timer（归档 2026-05-23）**: 实地复核：debounce 路径核心不变量是 `h.debounceTimer = nil` 由 AfterFunc callback 在 debounceMu 内清零（wshub.go:1424-1426），下一个 caller 据此判断是否要 `clientWG.Add(1)`。改为 NewTimer+Reset 复用模式要重写 callback ↔ caller 的 nil-flag 互锁机制（callback 不能 nil-out 共享 timer），与 Shutdown 的 `clientWG.Done()` paired-Stop 计数也要重排。debounce 50ms 窗口 + 500ms hard cap，AfterFunc 分配最高 ~20Hz，cold path 收益小风险大。"核心 broadcast 路径不动"约束下归档。本批 PR
 - [ ] **R232-PERF-5 — protocol_acp.readUntilResponse 每握手分配 goroutine + 2 channel（P2）**: 方案：done 改 atomic.Bool；ch 改 var ch [1]readResult 栈上。Breaking：否。
@@ -1711,7 +1711,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 
 - [ ] **R228-PERF-3 — `subagent_transcript.readLocked` 每次 `os.Open` 不复用 fd（P2）**: 每 200ms × 50 active tailer = 250 open/close fd/s。方案：缓存 `*os.File`，Tail 用 Seek 复用，inode 变化时重 Open。涉及 `internal/cli/subagent_transcript.go:63-88`。
 - [ ] **R228-PERF-5 — `agent_tailer.pollOnce` fan-out 时每 subscriber 各自 marshal（P2 与 R225-PERF-9 同类）**: 同一事件 N 次 marshal。方案：fan-out 前一次 `marshalPooled`，改用 `SendRaw`。涉及 `internal/server/agent_tailer.go:338-358`。
-- [ ] **R228-PERF-6 — `handleList` `resp` 用 `map[string]any` 而非具体结构体（P2）**: 1 Hz poll 每次 1 个 map。方案：定义 `sessionsResponse` struct + omitempty。涉及 `internal/server/dashboard_session.go:535`。
+- [x] **R228-PERF-6 — `handleList` `resp` 用 `map[string]any` 而非具体结构体（P2）**: 1 Hz poll 每次 1 个 map。方案：定义 `sessionsResponse` struct + omitempty。涉及 `internal/server/dashboard_session.go:535`。 — 已修复（dashboard_session.go:178-202 已定义 sessionListLocalResp / sessionListMultiResp 命名结构体，handleList:610-619 / 671 走结构体路径，R226-PERF-7/R62-PERF-1 已落地），本批 PR #263
 - [ ] **R228-PERF-7 — `EventLog.Append` `[]EventEntry{e}` 字面量 heap escape（P3 R219-PERF-4 具体修法方向）**: 单条 slice 字面量逃逸。方案：先 `-gcflags=-m` 验证再决定栈数组+切片或 sync.Pool。涉及 `internal/cli/eventlog.go:703`。
 
 ### 代码质量 — 本轮新发现
@@ -1741,7 +1741,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 
 - [ ] **R230C-SEC-7 — dashboard_token 8-15 char 公网监听只 Warn（P2）**: `cmd/naozhi/main.go:938` 公网部署时 8 字节 token 仍允许启动只 slog.Warn。方案：监听非 loopback 时最小长度提升到 16 + slog.Error+os.Exit(1)，或加 entropy 估算拒字典词。Breaking：是（部分公网部署需调长 token）。
 - [ ] **R230C-SEC-10 — cron notify_chat_id 发送时未再次校验（P3）**: `internal/cron/scheduler.go` notifier 路径直接读 in-memory `j.NotifyChatID` 调 platform.Reply。`cron_jobs.json` 被篡改后绕过 validateNotifyTarget。方案：executeOpt 发 notify 前再调 validateNotifyTarget，或在 scheduler load 期 round-trip 校验一遍。Breaking：否。
-- [ ] **R230C-SEC-11 — runsLimiter nil-guard 静默放行（P3）**: `internal/server/dashboard_cron.go:1029` `if h.runsLimiter != nil` 在测试桥接合理，但 `server.New` 重构漏 wire 时 silently 退化为无限速。方案：buildServer 构造 cronH 后 assert `h.runsLimiter != nil` when scheduler != nil。Breaking：否。
+- [x] **R230C-SEC-11 — runsLimiter nil-guard 静默放行（P3）**: `internal/server/dashboard_cron.go:1029` `if h.runsLimiter != nil` 在测试桥接合理，但 `server.New` 重构漏 wire 时 silently 退化为无限速。方案：buildServer 构造 cronH 后 assert `h.runsLimiter != nil` when scheduler != nil。Breaking：否。 — 已修复（buildServer 在 cronH 构造完成后增加 panic-on-missing assert，scheduler != nil 时强制 runsLimiter 已 wire；test-only newCronHandlersForTest 不经 buildServer 不受影响），本批 PR #263
 - [ ] **R230C-SEC-12 — GET /dashboard 未认证路径不限速（P3）**: `internal/server/dashboard.go:376` 未登录用户可无限调 `/dashboard` 触发 login 模板渲染。方案：未认证 path per-IP 30/min 限速器（与 wsUpgradeLimiter 同级）。Breaking：否。
 
 ### Go 正确性 / 并发（剩余）
@@ -1749,8 +1749,8 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [x] **R230C-GO-1 — SnapshotChainIDs `historyMu` 实际不保护 prevSessionIDs（已修复 2026-05-23）**: SnapshotChainIDs godoc 现明确 lock contract："writers hold r.mu; readers either hold r.mu or accept a stale-but-not-torn snapshot"，与 router_discovery.go:452 的 registerStub 注释对齐；historyMu.RLock 是针对 InjectHistory persistedHistory append 路径的真正同步，对 prevSessionIDs 是无害冗余防御。本批 PR。
 - [~] **R230C-GO-4 — spawnSession inline history load 同步 IIFE 包了 historyWg（误报关闭 2026-05-23）**: 实地复核 loadResumeHistoryOnSpawn godoc 已明确意图："Synchronous — runs on the spawnSession caller goroutine. The historyWg Add/Done dance still tracks the call so Shutdown.Wait can drain in-flight loads"。historyWg 是独立 WaitGroup（非 sessionsWg），让 Shutdown 等历史加载完成。归档关闭，本批 PR。
 - [ ] **R230C-GO-7 — executeOpt sendCtx 用 context.Background 让 5h 任务无法 shutdown 期取消（P2）**: `internal/cron/scheduler.go:1955` 5h execTimeout 的 cron 任务 stopCtx fire 后仍跑满。方案：deadline watchdog 扩展为 stopCtx 触发也调 InterruptViaControl，或 sendCtx 改用 `context.WithTimeout(s.stopCtx, jobTimeout+grace)`。Breaking：否。
-- [ ] **R230C-GO-8 — finishRun bumpRunStateMetrics 在 persist 回滚前已计数（P2）**: `internal/cron/scheduler.go:2103` persist 失败时 in-memory job 字段回滚但 CronRunSucceededTotal 已 +1。方案：bumpRunStateMetrics 移到 recordResultP0WithSanitised 返回 ok 之后。Breaking：否。
-- [ ] **R230C-GO-10 — spawnSession 用 caller ctx 而非 r.historyCtx（P3）**: `internal/session/router_lifecycle.go:702` HTTP 短超时上下文取消会让 session 历史加载半截。方案：`context.WithTimeout(r.historyCtx, 15*time.Second)`。Breaking：否。
+- [x] **R230C-GO-8 — finishRun bumpRunStateMetrics 在 persist 回滚前已计数（P2）**: `internal/cron/scheduler.go:2103` persist 失败时 in-memory job 字段回滚但 CronRunSucceededTotal 已 +1。方案：bumpRunStateMetrics 移到 recordResultP0WithSanitised 返回 ok 之后。Breaking：否。 — 已修复（finishRun 入口的 bump 撤掉，persist 解决后 `if a.skipPersist || jobPersistOK` 才计数；marshal 失败 jobPersistOK=false 不再泄漏 counter +1），本批 PR #263
+- [x] **R230C-GO-10 — spawnSession 用 caller ctx 而非 r.historyCtx（P3）**: `internal/session/router_lifecycle.go:702` HTTP 短超时上下文取消会让 session 历史加载半截。方案：`context.WithTimeout(r.historyCtx, 15*time.Second)`。Breaking：否。 — 已修复（loadResumeHistoryOnSpawn:889-908 已用 r.historyCtx 作 parent + 15s WithTimeout，caller ctx 仅通过 context.AfterFunc 旁路取消；R232-GO-2/R230-GO-1/R233-GO-1 之前已落地），本批 PR #263
 - [ ] **R230C-GO-13 — runstore cacheHeadPush 每次 prepend O(N) copy（P3）**: `internal/cron/runstore.go:232` keepCount=200 时每个 Append 都 200-element copy。方案：改用 oldest-first 内部存储，copySummariesLocked 时反转。Breaking：否（内部）。
 - [x] **R230C-GO-15 — emitOverlapSkipped CronRunStartedTotal 与正常路径计数顺序不一致（P3）**: 已把 metric 收敛到 emitRunStarted 函数内一处，executeOpt 与 emitOverlapSkipped 不再各自手动 Add；nil-hook 路径仍然计数（保持兼容），本批 PR。
 - [ ] **R230C-GO-18 — registerStub 用 chainIDs 完全替换 prevSessionIDs（P2）**: `internal/session/router_discovery.go:454` 每次重新注册 stub 把 fresh_context=false 累积的多 session 链折成 1 element。方案：existing chain 非空时只追加，不替换。Breaking：否。
