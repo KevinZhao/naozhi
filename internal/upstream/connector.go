@@ -107,11 +107,26 @@ func New(cfg *config.UpstreamConfig, router *session.Router, projMgr *project.Ma
 }
 
 // SetDiscoverFunc sets a callback that returns discovered sessions as JSON.
+//
+// Wiring contract: this MUST be called once during startup wiring (typically
+// from cmd/naozhi/main.go after the discovery subsystem is built) BEFORE
+// Connector.Run starts pumping reverse-RPC requests. The field is plain
+// (no atomic / mutex) — concurrent SetDiscoverFunc and handleRequest racing
+// over the same Connector would be a data race and is undefined behaviour.
+// Tests that rebuild a Connector per case are unaffected; production startup
+// is single-threaded through main.go so the read-after-write happens-before
+// is naturally satisfied. R233B-ARCH-9 archive anchor: when this field
+// eventually moves out of upstream into a server-supplied handler map,
+// drop both setters and let the constructor accept the funcs directly so
+// the wiring contract is enforced by the type system.
 func (c *Connector) SetDiscoverFunc(fn func() (json.RawMessage, error)) {
 	c.discoverFunc = fn
 }
 
 // SetPreviewFunc sets a callback that returns conversation history for a discovered session.
+//
+// Same wiring contract as SetDiscoverFunc — call once at startup before
+// Run begins. See SetDiscoverFunc godoc.
 func (c *Connector) SetPreviewFunc(fn func(sessionID string) (json.RawMessage, error)) {
 	c.previewFunc = fn
 }
