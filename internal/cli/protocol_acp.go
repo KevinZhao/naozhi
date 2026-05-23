@@ -925,17 +925,30 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 		msg *RPCMessage
 		err error
 	}
+	// R232-PERF-5: ch buffered cap 1 so a final-frame send from the goroutine
+	// after caller timeout never blocks; done is an atomic.Bool instead of a
+	// chan struct{} to drop the per-handshake chan alloc (handshake fires 3x
+	// per session start, batched startup paths produced ~9 chan allocs each).
+	// Caller signals abandonment with done.Store(true); goroutine polls it
+	// between ReadLine calls and via send()'s pre-channel-send check.
 	ch := make(chan readResult, 1)
-	done := make(chan struct{})
+	var done atomic.Bool
 	// send forwards a final result to the caller; if the caller has already
-	// timed out (close(done)) we drop it instead of blocking forever on ch
-	// (cap 1, no reader). Without this, a slow ACP peer that emits one final
+	// timed out (done.Load() == true) we drop it instead of blocking forever
+	// on ch (cap 1 means a previous send + abandonment would otherwise pin
+	// the goroutine). Without this, a slow ACP peer that emits one final
 	// frame after handshake timeout pinned the goroutine until the pipe
 	// closed, sometimes minutes later when the process itself was killed.
 	send := func(r readResult) {
+		if done.Load() {
+			return
+		}
 		select {
 		case ch <- r:
-		case <-done:
+		default:
+			// Channel already holds an earlier result the caller will read,
+			// or the caller raced timeout-then-load between our Load and
+			// send. Either way drop — caller cap is 1.
 		}
 	}
 	go func() {
@@ -974,10 +987,8 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 			}
 			// Check if caller gave up (timeout). The goroutine will be fully
 			// freed when the process pipe closes; this just avoids useless work.
-			select {
-			case <-done:
+			if done.Load() {
 				return
-			default:
 			}
 		}
 	}()
@@ -986,10 +997,10 @@ func (p *ACPProtocol) readUntilResponse(rw *JSONRW, expectedID int) (*RPCMessage
 	defer timer.Stop()
 	select {
 	case r := <-ch:
-		close(done)
+		done.Store(true)
 		return r.msg, r.err
 	case <-timer.C:
-		close(done)
+		done.Store(true)
 		// R184-CONCUR-H1: `done` is only polled between ReadLine calls; a
 		// reader parked inside the underlying bufio.ReadBytes syscall never
 		// observes it. If the goroutine has a shim-backed reader, poke the

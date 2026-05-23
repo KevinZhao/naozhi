@@ -583,11 +583,12 @@ func buildServer(opts ServerOptions) *Server {
 
 		// Extracted handler groups
 		auth: &AuthHandlers{
-			dashboardToken:   opts.DashboardToken,
-			cookieSecret:     cookieSecret,
-			loginLimiter:     newLoginLimiter(),
-			wsUpgradeLimiter: newWSUpgradeLimiter(),
-			trustedProxy:     opts.TrustedProxy,
+			dashboardToken:    opts.DashboardToken,
+			cookieSecret:      cookieSecret,
+			loginLimiter:      newLoginLimiter(),
+			wsUpgradeLimiter:  newWSUpgradeLimiter(),
+			unauthDashLimiter: newWSUpgradeLimiter(), // same bucket shape: 60/min sustained, 20 burst — fits human refresh cadence, blocks scanners. R230C-SEC-12.
+			trustedProxy:      opts.TrustedProxy,
 		},
 		cronH: &CronHandlers{
 			scheduler:   scheduler,
@@ -766,6 +767,16 @@ func buildServer(opts ServerOptions) *Server {
 				s.hub.BroadcastSessionsUpdate()
 			}
 		}
+	}
+
+	// R230C-SEC-11: when a scheduler is wired (cron endpoints active),
+	// runsLimiter MUST be non-nil. The handlers nil-guard the limiter to
+	// support test bridging that constructs a partial CronHandlers, but a
+	// future server.New refactor that forgets to wire runsLimiter would
+	// silently downgrade to unlimited rate. Fail-fast at construction so
+	// the regression surfaces during boot rather than under attack.
+	if s.scheduler != nil && s.cronH != nil && s.cronH.runsLimiter == nil {
+		panic("server: runsLimiter must be non-nil when scheduler is wired")
 	}
 
 	return s
