@@ -401,7 +401,19 @@ func (r *Router) reconnectShims(parentCtx context.Context) {
 					}
 					taskID, toolUseID := ev.TaskID, ev.ToolUseID
 					desc := ev.Description
-					wallclock := time.Now().UnixMilli()
+					// R224-GO-3: pass the event's own Time as agentToolUseMS
+					// instead of time.Now(). subagent_link.Resolve uses this
+					// timestamp to filter out subagent jsonl files whose first
+					// row is older than agentTS-10s ("same-name reuse"
+					// guard). On the reconnect/replay path the events are
+					// historical, so time.Now() always passes the guard
+					// (every replayed task looks "older than 10s") which
+					// effectively disables the staleness filter and lets
+					// stale jsonl files match. ev.Time may be 0 for very old
+					// replay frames that lack a recorded timestamp; Resolve
+					// treats agentToolUseMS<=0 as "skip the time filter",
+					// which is the correct fail-open for those rare cases.
+					wallclock := ev.Time
 					go linker.Resolve(taskID, toolUseID, name, desc, wallclock)
 				}
 			}
