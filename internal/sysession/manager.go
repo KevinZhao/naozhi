@@ -294,6 +294,18 @@ func (m *Manager) Start(parent context.Context) {
 //     (typically 2 already, but the explicit slog message makes the
 //     cause attributable).
 //
+// R232-ARCH-13: this divergence from cron Stop's "budget + leak" stance
+// is intentional — sysession daemons run user-prompt-derived strings
+// through a CLI subprocess and a stuck goroutine touching a torn-down
+// Router would risk leaking those into another session's reply (the
+// server side of "Sec-LOW-2"). Cron's budget+leak path is safe because
+// cron deliveries pass through dispatch's outbound retry which
+// re-resolves the active session. Aligning the two policies would
+// require either (a) sysession giving up its strict no-leak invariant
+// or (b) cron adopting force-exit (regression for cron jobs that legit
+// take longer than budget). Tracked as long-running design tension; do
+// not "harmonise" without revisiting Sec-LOW-2 and cron-shutdown-budget.
+//
 // Stop is idempotent.  Subsequent calls are no-ops.
 func (m *Manager) Stop(stopCtx context.Context) {
 	if !m.enabled {

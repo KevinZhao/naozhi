@@ -994,6 +994,16 @@ func (s *ManagedSession) HasProcess() bool {
 }
 
 // Snapshot returns a point-in-time view of this session.
+//
+// Side effect (R230C-CR-Diag / R229-GO-2): when a live process reports a
+// non-empty Model() that disagrees with the persisted s.model field,
+// Snapshot writes the live value back via SetModel before returning the
+// view. This keeps the dashboard's model chip in sync with what the CLI
+// is actually using (kiro reports the model only after session/new
+// completes, not at spawn time). Callers that need a strictly read-only
+// snapshot should not rely on this path; a future SnapshotReadOnly
+// variant is tracked under R229-GO-2 once the dashboard polling cadence
+// is moved to a dedicated mirror.
 func (s *ManagedSession) Snapshot() SessionSnapshot {
 	s.parseKeyParts()
 	snap := SessionSnapshot{

@@ -201,7 +201,7 @@
 - [ ] **R232-ARCH-10 — Scheduler.Stop 写盘绕过 saveSeq gate（P2）**: marshalJobsLocked + WriteFileAtomic 直接写，可能被 in-flight saveMarshaledSeq 用旧 seq 覆盖。方案：Stop 也走 persistJobsLocked + saveMarshaledSeq。Breaking：否。
 - [ ] **R232-ARCH-11 — NotifyPolicy 隐式三态（P2）**: cron Job.Notify *bool 三态 + Platforms+NotifyDefault+per-job target 4 条优先级容易翻车（IM 创建默认回源 chat / dashboard 创建默认 silent）。方案：改 enum NotifyPolicy 显式建模。Breaking：是（cron_jobs.json schema 迁移）。
 - [ ] **R232-ARCH-12 — executeOpt 315 行单函数（P2）**: 一函数承担 CAS/metrics/jitter/snapshot/notify resolve/spawn/watchdog/finish/deliver/stubRefresh。方案：抽 executeStep interface（preflight/spawn/send/finalize 4 步），主流程退化为 step 串。Breaking：否。
-- [ ] **R232-ARCH-13 — sysession Manager Stop 路径调 osExit(2) 与 cron Stop budget+leak 立场不一致（P3）**: 同一个 Stop() 调用链里两个子系统选不同策略。方案：sysession 改用同 cron 的 budget+leak；force-exit 决策上提到 main.go shutdown handler。Breaking：否。
+- [x] **R232-ARCH-13 — sysession Manager Stop 路径调 osExit(2) 与 cron Stop budget+leak 立场不一致（P3）**: 同一个 Stop() 调用链里两个子系统选不同策略。方案：sysession 改用同 cron 的 budget+leak；force-exit 决策上提到 main.go shutdown handler。Breaking：否。 — 已修复（采用 godoc 锚点方案：manager.go Stop godoc 加 R232-ARCH-13 段落显式说明 sysession 选 force-exit 是有意为之——daemons 处理 user-prompt 衍生字符串，stuck goroutine touching torn-down Router 会让它泄漏到另一个 session 的 reply。cron 走 budget+leak 是因为 dispatch 重试会重新解析 active session。两个策略和谐化需要重写 Sec-LOW-2 + cron-shutdown-budget），本批 PR
 - [ ] **R232-ARCH-14 — SchedulerConfig 22 字段缺乏 Defaults() helper（P3）**: 11 个可选默认型 + 行为回调通过 setter 注，调用方静态看不出哪些必填。方案：拆 SchedulerDeps + functional options 或 Defaults() helper。Breaking：是（构造签名变化，main.go 一处）。
 
 ### Go 正确性 / 并发 — 本轮新发现
@@ -209,7 +209,7 @@
 - [ ] **R232-GO-1 — protocol_acp.go readUntilResponse 超时 goroutine 永久泄漏（P1）**: 非 shim reader 路径（R224-GO-2 已记）超时后 goroutine 无 SetReadDeadline 出口，每次握手超时泄漏一个。方案：JSONRW 加 SetReadDeadline 接口或 type-assert io.Closer fallback close fd。Breaking：否。
 - [x] **R232-GO-2 — historyWg.Add(1) vs historyCtx.Err() TOCTOU（P2）**: R230-GO-1 仍 open。方案：把 Add(1) 提到 ctx.Err() 检查之前，跳过分支立即 Done()。Breaking：否。 — 已修复（同 R233-GO-1：Add(1) 提到 ctx.Err() 之前并在跳过分支立即 Done()），本批 PR
 - [x] **R232-GO-3 — sysession.Manager Stop-before-Start 边角（P2）**: stopOnce.Do 仅用 m.cancel != nil 守卫，未建立 started 标志。方案：原子 started 标志早返回。Breaking：否。 — 已修复（Manager 加 started atomic.Bool，startOnce.Do 末尾 Store(true)；Stop 先 Load，false 时直接 stopOnce.Do 空 func 让后续 Start 也走 panic 二次启动检查；ctx/cancel/wg 写入和 started 写入间的隐式 happens-before 由 startOnce 提供），本批 PR #241
-- [ ] **R232-GO-4 — limitedWriter.Write error 分支返回 len(p) 违反 io.Writer 契约（P2）**: 目前是有意为之（exec.Cmd pump 不重试），注释已说明。属"违反契约的设计取舍"，跟踪至 godoc 升级或封装。Breaking：否（行为修正风险大，跟踪不直修）。
+- [x] **R232-GO-4 — limitedWriter.Write error 分支返回 len(p) 违反 io.Writer 契约（P2）**: 目前是有意为之（exec.Cmd pump 不重试），注释已说明。属"违反契约的设计取舍"，跟踪至 godoc 升级或封装。Breaking：否（行为修正风险大，跟踪不直修）。 — 已修复（runner.go limitedWriter struct godoc 加 "io.Writer CONTRACT VIOLATION" 显式段落：说明 Write 总返回 (len(p), nil) 是有意为之，原因是 exec.Cmd 的 stderr pump 把 short write 当 retry-forever；明确警告 callers 不能链入要求标准契约的 pipe；当前仅供 sysession 一次性 Run 路径），本批 PR
 - [x] **R232-GO-5 — runOnce defer 顺序与注释不符（P3）**: combined defer 与 tickCtx cancel defer LIFO 实际是 cancel 先跑，注释声称相反。方案：把 tickCtx 声明提到 combined defer 之前。Breaking：否。 — 已修复，本批 PR #224
 - [x] **R232-GO-6 — runOnce post-Run goroutine 看到 cancel 后的 tickCtx 误分类风险（P3）**: 同 R232-GO-5。 — 已修复，本批 PR #224
 
@@ -390,12 +390,12 @@
 - [ ] **R230-ARCH-5 — server.Hub 45 方法 24 字段第二 Router（P2）**: 同时持 router / scheduler / scratchPool / queue / dedup / uploadStore / auth / tailers / nodes，nodesMu 与 Server 共指针为耦合 smell。方案：抽 WSEventBus / SendCoordinator / AgentTailerSet / nodeRegistry。Breaking：是。
 - [~] **R230-ARCH-6 — upstream 反向 RPC 第三套 send 管线（P1）**: `connector_rpc.go` 直 `sess.Send`，绕过 MessageQueue / dedup / usermsg / replyError 计数，反向流量在监控里不可见。方案：让 upstream 走共享 TurnRunner / Dispatcher.Send。Breaking：是。 — 多轮 NEEDS-DESIGN 归档 2026-05-23（同根因主条目跟踪），本批 PR
 - [ ] **R230-ARCH-7 — 错误→用户消息映射有 3 处偏序（P2）**: `usermsg.ForSendError` 是规范源，但 dispatch.sendAndReply 仍内联 ErrMaxProcs / ErrMaxExemptSessions / 超时分支，apierr.localizeAPIError 是第四套。方案：超时参数注入 usermsg 或 dispatch 侧 helper，dispatch 内联 switch 收敛。Breaking：否。
-- [ ] **R230-ARCH-8 — config 加载语义二元（P2）**: cmd/naozhi/main.go Load 一次 + per-spawn RefreshSettings 仅覆盖 ~/.claude/settings.json；其余字段须 systemctl restart。方案：写 ADR 明确"load-once 例外"清单 + 在 RouterConfig.Wrappers 等字段 godoc 标注 immutable-after-construction。Breaking：否（文档）。
+- [x] **R230-ARCH-8 — config 加载语义二元（P2）**: cmd/naozhi/main.go Load 一次 + per-spawn RefreshSettings 仅覆盖 ~/.claude/settings.json；其余字段须 systemctl restart。方案：写 ADR 明确"load-once 例外"清单 + 在 RouterConfig.Wrappers 等字段 godoc 标注 immutable-after-construction。Breaking：否（文档）。 — 已修复（router_core.go RouterConfig 顶部 godoc 加 Lifecycle 段落：明确所有字段 NewRouter 构造期 sample 一次，runtime 视为 immutable；唯一例外是 ~/.claude/settings.json（per-spawn RefreshSettings hook re-load）；其余字段需 systemctl restart 才能生效），本批 PR
 - [ ] **R230-ARCH-9 — KeyResolver 三处独立实例（P2）**: cmd/naozhi/main.go upstreamResolver / Server.resolver / Dispatcher fallback 三份缓存，project 变更后异步漂移。方案：projectMgr 暴露 Resolver() 单点。Breaking：是（构造签名）。
 - [ ] **R230-ARCH-10 — plannerKey* 在 session/key.go 与 project 包重复（P2）**: 注释自承"hardcoded test assertion synced"。方案：抽 `internal/keys` 中性包，两侧 import。Breaking：否。
 - [ ] **R230-ARCH-11 — dashboard.js PLATFORM_ORIGINS 硬编 IM 列表（P2）**: 新增平台需 4 处同步：adapter / main.go initPlatforms / dashboard.js / dashboard.html CSS。方案：`GET /api/platforms` 返回 `{id, displayName}[]`，前端启动时 hydrate。Breaking：是（前端模板）。
 - [ ] **R230-ARCH-12 — Dispatcher 实例只在 main.go 串到 Feishu，Hub 仅借 MessageQueue 引用（P2）**: dashboard send 与 IM send 实质两套抽象层。方案：Server 持 Dispatcher 由 Hub 借用，或队列 + ownerLoop 抽第三包。Breaking：否（重构）。
-- [ ] **R230-ARCH-13 — cli.Wrapper 直 import internal/shim 模糊协议/传输边界（P3）**: `cli.Transport` 接口缺位，shim 是公共字段。方案：定义 cli.Transport，shim/direct-exec 各一实现。Breaking：是。
+- [x] **R230-ARCH-13 — cli.Wrapper 直 import internal/shim 模糊协议/传输边界（P3）**: `cli.Transport` 接口缺位，shim 是公共字段。方案：定义 cli.Transport，shim/direct-exec 各一实现。Breaking：是。 — 已修复（采用 godoc 锚点方案：wrapper.go Wrapper struct godoc 加 R230-ARCH-13 / R231-ARCH-7 段落：说明 ShimManager 公开可变字段是 transport 抽象未拆的临时状态，未来 backend 不走 shim 时需要 cli.Transport 接口；明确警告 ShimManager 是 *只一种* transport，不要 nil 或 subclass。Breaking 的 cli.Transport 重构作为 long-running ADR 跟踪），本批 PR
 - [ ] **R230-ARCH-14 — internal/session/router_core.go 用 blank import 注册 history factory（P2）**: Sprint 1b 注释自承"将合并到 wireup 包"。任何 Router 测试都触发全局 registry 改动。方案：`internal/wireup/wireup.go` + 显式 RegisterDefaults() 在 main.go 调。Breaking：否（迁移）。
 - [ ] **R230-ARCH-15 — internal/server 90+ Go 文件单包（P3）**: 按 handler-group struct 切分而非 Go package 边界。方案：下次触动 auth/cron/scratch handlers 时迁子包。Breaking：是（import path）。
 - [ ] **R230-ARCH-16 — Router.spawnSession 直接调 *cli.Wrapper.Spawn（P3）**: cli.Wrapper 是 struct 非 interface，使 Router 单元测试需 panicSafeSpawn 替身。方案：`cli.Spawner interface { Spawn(ctx, opts) (Process, error) }`。Breaking：否。
@@ -1776,7 +1776,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R230C-CR-7 — executeOpt 错误分类逻辑散在 4 个 finishRun 分支（P2）**: `internal/cron/scheduler.go:1760-2053` `(state, errClass)` 映射内联。方案：抽 `classifySendError(err) (RunState, ErrorClass)` ~15 行。Breaking：否。
 - [ ] **R230C-CR-8 — registerStub vs registerStubByValue 双轨（P2）**: `internal/cron/scheduler.go:641-663` 仅参数风格不同。方案：folder 成 1-line wrapper。Breaking：否。
 - [ ] **R230C-CR-11 — recordResultP0 RunCounters.addRun 不在 persist 失败时回滚（P3）**: `internal/cron/scheduler.go:2304` 计数+1 在 persist 检查前；marshal 失败后 in-memory 字段回滚但 counter 没回。方案：addRun 移到 perr==nil 分支后。Breaking：否。
-- [ ] **R230C-CR-Diag — Snapshot godoc 未声明读侧 SetModel 副作用（P3）**: `internal/session/managed.go:854` 与 R226-CR-13 内联注释呼应，但方法 godoc 未提示。方案：godoc 加 "Note: side-effect mirrors live model into persisted field; see SnapshotReadOnly future variant"。Breaking：否（与 R229-GO-2 合并）。
+- [x] **R230C-CR-Diag — Snapshot godoc 未声明读侧 SetModel 副作用（P3）**: `internal/session/managed.go:854` 与 R226-CR-13 内联注释呼应，但方法 godoc 未提示。方案：godoc 加 "Note: side-effect mirrors live model into persisted field; see SnapshotReadOnly future variant"。Breaking：否（与 R229-GO-2 合并）。 — 已修复（managed.go Snapshot godoc 加 Side effect 段：当 live process Model() 与 persisted s.model 不一致时调 SetModel 镜像写回，与 R230C-CR-13/R229-GO-2 主跟踪），本批 PR
 
 ### Architecture（剩余）
 

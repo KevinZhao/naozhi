@@ -29,6 +29,17 @@ type SpawnOptions struct {
 }
 
 // Wrapper manages spawning CLI processes via shim.
+//
+// R230-ARCH-13 / R231-ARCH-7: ShimManager is currently a public mutable
+// pointer to internal/shim, which collapses two abstractions that the
+// long-running design wants split — protocol (stream-json vs ACP) and
+// transport (shim socket vs in-process / direct exec). Future backends
+// that don't run via shim (Gemini SDK / WebSocket peers) will need a
+// cli.Transport interface here instead. Until that ADR lands, treat
+// ShimManager as the *only* transport: setting it to nil disables
+// Spawn, and wrapping it with a custom Manager subclass is unsupported.
+// Wrapper is otherwise immutable after NewWrapper — the public field
+// access is for legacy wiring in cmd/naozhi only.
 type Wrapper struct {
 	BackendID   string // "claude" | "kiro" | future backends
 	CLIPath     string
