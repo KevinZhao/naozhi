@@ -825,6 +825,18 @@ func (s *Scheduler) Start() error {
 	// retention-policy violators that accumulated while this process was
 	// down. 异步执行避免在 jobs 多/历史目录大时阻塞 Start 返回（每个 job
 	// 一次 ReadDir + N 次 Remove）。
+	//
+	// R234-GO-3 / R234-GO-15: this goroutine is intentionally NOT tracked by
+	// any WaitGroup. Stop() does not wait for it because each per-job step
+	// inside trimAll is wrapped in trimJobUnderLock (per-job mutex with
+	// defer-unlock and panic safety) and only mutates runs/<jobID>/ files —
+	// abandoning mid-pass leaves the runs tree internally consistent: any
+	// half-deleted entries remain on disk for the next Start() pass to
+	// reclaim, which is exactly the cold-start contract. Adding a WG would
+	// force Stop() to block on os.ReadDir under load (slow disks / FUSE
+	// stalls) for no observable benefit. The TODO suggests piping ctx in
+	// per-jobID; revisit only if Stop()-during-cold-GC stalls become
+	// observable in production traces.
 	if s.runStore != nil {
 		go func() {
 			slog.Info("cron run history: cold-start GC starting")
