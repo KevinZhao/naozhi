@@ -7,6 +7,23 @@ import (
 // --- naozhi → shim ---
 
 // ClientMsg is a message sent from naozhi to shim.
+//
+// R71-PERF-H1 trade-off note (Line field): the writer in
+// internal/cli/process.go shimWriter.Write currently does string(data[:len-1])
+// to convert each CLI stdout line into Line, which heap-copies 200B-4KB per
+// line at 5-50 events/s × N session. A future revision that switches Line to
+// json.RawMessage (or adds a sibling lineBytes []byte + custom MarshalJSON)
+// can avoid the copy, but it requires:
+//
+//  1. ProtocolVersion bump + MinSupportedProtocolVersion negotiation, since
+//     wire-format consumers on either side may have parsed Line as a Go
+//     string and reject the new shape.
+//  2. Pool plumbing: returnShimSendEnc must zero the slice header so the
+//     pooled buffer cannot be observed after free.
+//
+// Until that protocol revision lands, keep Line as string. The cost is real
+// but bounded; the alternative half-fix (RawMessage without negotiation) is
+// a hard-to-debug field-shape bug across rolling shim/naozhi versions.
 type ClientMsg struct {
 	Type  string `json:"type"`               // attach, write, interrupt, close_stdin, kill, ping, shutdown, detach
 	Line  string `json:"line,omitempty"`     // write: raw NDJSON line for CLI stdin
