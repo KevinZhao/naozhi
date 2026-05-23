@@ -594,6 +594,14 @@ func main() {
 	if storePath != "" {
 		eventLogDir = filepath.Join(filepath.Dir(storePath), "events")
 	}
+	// Auto-workspace-chain policy: defaults to enabled=true / window=7d /
+	// cap=32 per docs/rfc/auto-workspace-chain.md. Operators can disable
+	// or tune via session.auto_chain in config.yaml.
+	autoChainPolicy := session.GlobalAutoChainPolicy{
+		EnabledFlag: cfg.Session.AutoChain.ResolvedEnabled(true),
+		WindowDur:   time.Duration(cfg.Session.AutoChain.ResolvedWindowHours(7*24)) * time.Hour,
+		CapValue:    cfg.Session.AutoChain.ResolvedCap(32),
+	}
 	router := session.NewRouter(session.RouterConfig{
 		Wrapper:          wrapper,
 		Wrappers:         wrappers,
@@ -618,6 +626,7 @@ func main() {
 		KiroSessionsDir:   osutil.ExpandHome("~/.kiro/sessions/cli"),
 		EventLogDir:       eventLogDir,
 		EventLogGenerator: "naozhi",
+		AutoChainPolicy:   autoChainPolicy,
 	})
 	metrics.StartupPhaseRouterMs.Set(time.Since(t0).Milliseconds())
 
@@ -757,6 +766,15 @@ func main() {
 		os.Exit(1)
 	}
 	metrics.StartupPhaseSchedulerMs.Set(time.Since(t0).Milliseconds())
+
+	// Auto-workspace-chain (docs/rfc/auto-workspace-chain.md §4.3):
+	// register cron Scheduler as a SessionIDExcluder so cron-spawned
+	// sessionIDs are never folded into a user session's
+	// prev_session_ids by the auto-chain spawn / backfill paths.
+	// sysession does not need an excluder — sysWorkDir lives outside
+	// any user workspace, so its JSONL files are excluded by path
+	// matching at the workspace level.
+	router.AddSessionIDExcluder(scheduler)
 
 	// Build the system-session (background daemon) Manager.  Disabled
 	// when cfg.Sysession.Enabled is false; degraded silently when the

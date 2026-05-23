@@ -388,6 +388,46 @@ type Router struct {
 	// events in that case). See docs/rfc/attachment-refcount.md.
 	// 读写: core (init/stopAttachmentTracker), lifecycle (installPersistSink), cleanup (clearAttachmentTrackerRefs / Shutdown stop)
 	attachmentTracker *attachmentTracker
+
+	// autoChainPolicy decides whether and how aggressively to attach
+	// prev_session_ids drawn from the same workspace's other JSONL
+	// files (auto-workspace-chain feature; docs/rfc/auto-workspace-chain.md).
+	// Never nil — defaults to disabledAutoChainPolicy when RouterConfig
+	// leaves the field empty, so the feature is opt-in even on a freshly
+	// constructed Router. Read-only after NewRouter.
+	autoChainPolicy AutoChainPolicy
+
+	// excluders aggregates SessionIDExcluder implementations registered
+	// via AddSessionIDExcluder (cron Scheduler, sysession Manager, future
+	// subsystems that own internal CLI sessionIDs). Read by the auto-chain
+	// spawn / backfill paths to guarantee no internal sessionID is folded
+	// into a user-facing chain (RFC §4.3 Arch-B2). Atomic copy-on-write so
+	// the read path stays lock-free under r.mu.
+	excluders atomic.Pointer[[]SessionIDExcluder]
+
+	// autoChainListJSONL is the listJSONL function injected into
+	// pickWorkspaceChain. Production wires discovery.ListWorkspaceJSONL;
+	// tests inject a fixture function that returns synthetic
+	// WorkspaceJSONL slices without touching disk. Read-only after
+	// NewRouter (config-time injection); not subject to lock contention.
+	autoChainListJSONL func(workspace string) []discovery.WorkspaceJSONL
+
+	// testHookBeforeSpawnPhase3 fires after spawnSession's auto-chain
+	// phase-2 candidate selection completes and BEFORE the phase-3
+	// re-validation lock is acquired (RFC §5.3.1). Exists so concurrent
+	// integration tests can pin TOCTOU race orderings without
+	// time.Sleep. Production builds leave it nil.
+	//
+	// Tests set this field directly. The hook runs synchronously, so
+	// blocking inside it stalls the spawn — test goroutines that need
+	// to inject excluder mutations during the gap close their wait
+	// channel inside the hook.
+	testHookBeforeSpawnPhase3 func()
+
+	// testHookBeforeBackfillPhase3 mirrors the spawn hook for the
+	// startup backfill path (RFC §5.3.1). Fires after Phase 2 decision
+	// collection finishes and BEFORE Phase 3's r.mu apply lock.
+	testHookBeforeBackfillPhase3 func()
 }
 
 // spawnerFunc is the signature panicSafeSpawnFn executes; abstracting it lets
@@ -625,6 +665,18 @@ type RouterConfig struct {
 	// panic; production sets it false so the sink drops + counters
 	// instead.
 	EventLogDevMode bool
+
+	// AutoChainPolicy drives the workspace auto-chain feature
+	// (docs/rfc/auto-workspace-chain.md). nil disables the feature
+	// (Router falls back to disabledAutoChainPolicy). Production
+	// wires GlobalAutoChainPolicy from cfg.Session.AutoChain.
+	AutoChainPolicy AutoChainPolicy
+
+	// AutoChainListJSONL is the discovery.ListWorkspaceJSONL hook used
+	// by the auto-chain feature. nil falls back to discovery.ListWorkspaceJSONL.
+	// Tests inject a fixture function so unit cases can synthesise
+	// JSONL listings without touching disk.
+	AutoChainListJSONL func(workspace string) []discovery.WorkspaceJSONL
 }
 
 // NewRouter creates a session router.
@@ -701,6 +753,24 @@ func NewRouter(cfg RouterConfig) *Router {
 		noOutputTimeout:    cfg.NoOutputTimeout,
 		totalTimeout:       cfg.TotalTimeout,
 		eventLogDir:        cfg.EventLogDir,
+		autoChainPolicy:    cfg.AutoChainPolicy,
+		autoChainListJSONL: cfg.AutoChainListJSONL,
+	}
+	// Auto-chain defaults: nil policy → safely-disabled stub so the
+	// rest of the code can call r.autoChainPolicy.Enabled(...) without
+	// nil checks. nil listJSONL → production discovery hook.
+	if r.autoChainPolicy == nil {
+		r.autoChainPolicy = disabledAutoChainPolicy{}
+	}
+	if r.autoChainListJSONL == nil {
+		// Capture claudeDir in a closure so the auto-chain decision
+		// signature stays workspace-only. discovery.ListWorkspaceJSONL
+		// requires both claudeDir and workspace; the router knows
+		// claudeDir from config and pickWorkspaceChain doesn't.
+		claudeDir := r.claudeDir
+		r.autoChainListJSONL = func(workspace string) []discovery.WorkspaceJSONL {
+			return discovery.ListWorkspaceJSONL(claudeDir, workspace)
+		}
 	}
 	// Spin up the event-log persister BEFORE we touch the session
 	// store; the startup load path needs a live sink to attach
@@ -776,9 +846,10 @@ func NewRouter(cfg RouterConfig) *Router {
 				cliVersion = restoreWrapper.CLIVersion
 			}
 			s := &ManagedSession{
-				key:            key,
-				prevSessionIDs: entry.PrevSessionIDs,
-				exempt:         isExemptKey(key),
+				key:                key,
+				prevSessionIDs:     entry.PrevSessionIDs,
+				prevSessionOrigins: entry.PrevSessionOrigins,
+				exempt:             isExemptKey(key),
 			}
 			storeTotalCost(&s.totalCost, entry.TotalCost)
 			s.setWorkspace(entry.Workspace)
@@ -820,6 +891,17 @@ func NewRouter(cfg RouterConfig) *Router {
 	// activity). Filesystem-discovered sessions are surfaced via the separate
 	// "history" panel so that Remove is a durable delete — the user must
 	// explicitly resume an entry before it re-enters the sidebar.
+
+	// Auto-workspace-chain backfill: synchronously fill prev_session_ids
+	// on every restored session that qualifies BEFORE we launch the Tier 1 /
+	// Tier 2 history-loading goroutines. Tier 2 reads the chain (via
+	// LoadHistoryChainTailCtx) — if the chain were still empty here, the
+	// loader would only see the current sessionID's JSONL, and the
+	// dashboard's "load earlier" button would stop at that boundary even
+	// though older JSONL files exist in the workspace. Pinned by
+	// TestNewRouter_AutoChainPrecedesTier2Loaders. See
+	// docs/rfc/auto-workspace-chain.md §4.4-B.
+	r.runAutoChainBackfillOnce()
 
 	// Async-load history for all suspended sessions so the dashboard
 	// shows conversation history without waiting for the next message.

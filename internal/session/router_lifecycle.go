@@ -669,6 +669,24 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 
 	oldHistory, prevIDs := collectPreviousHistory(old, oldPrevIDs, resumeID)
 
+	// ── Auto-workspace-chain attach (RFC docs/rfc/auto-workspace-chain.md
+	// §4.4-A). Three-phase lock pattern, guards against TOCTOU vs cron /
+	// sysession registering new internal sessionIDs in the gap between
+	// candidate selection and apply (New-B1):
+	//
+	//   Phase 1 — r.mu held: snapshot router-side excluder + extras ptr.
+	//   Phase 2 — lock free: pickWorkspaceChain runs (ReadDir behind cache).
+	//   Phase 3 — r.mu held: re-validate against the current excluder set.
+	//
+	// Skipped when this is an internal session (cron / sys / scratch),
+	// when policy disables auto-chain for the workspace, or when the
+	// session is inheriting prev / oldHistory from a prior incarnation
+	// (resume / chain rotation paths already established the chain).
+	autoChainAttached := r.maybeAttachAutoChainOnSpawn(key, workspace, prevIDs, oldHistory)
+	if len(autoChainAttached) > 0 {
+		prevIDs = autoChainAttached
+	}
+
 	r.mu.Lock()
 	// ── TOCTOU guard 2: Defends against concurrent spawnSession during history copy.
 	// While we held historyMu (not r.mu), another goroutine may have completed
@@ -684,6 +702,21 @@ func (r *Router) spawnSession(ctx context.Context, key string, resumeID string, 
 		oldHistory, prevIDs, oldTotalCost, opts.Exempt,
 	)
 	r.mu.Unlock()
+
+	// Stamp origin labels for the auto-chained segment AFTER the session
+	// is published (s.prevSessionIDs is now populated by
+	// installFreshSessionLocked). Doing this outside r.mu avoids holding
+	// r.mu through historyMu — the lock order is r.mu → historyMu, and
+	// SetPrevSessionOrigins takes only historyMu.
+	if len(autoChainAttached) > 0 {
+		s.SetPrevSessionOrigins(autoChainAttached, "auto-spawn")
+		slog.Info("auto-chain attached on spawn",
+			"key", key,
+			"workspace", workspace,
+			"chain_ids", autoChainAttached,
+			"chain_len", len(autoChainAttached))
+		metrics.AutoChainSpawnAttachTotal.Add(1)
+	}
 
 	r.loadResumeHistoryOnSpawn(ctx, s, key, resumeID, workspace, prevIDs, oldHistory)
 

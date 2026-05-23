@@ -100,6 +100,20 @@ session:
     no_output_timeout: "1800s"
     total_timeout: "14400s"
   store_path: "~/.naozhi/sessions.json"
+  # auto_chain — automatically join multiple naozhi sessions in the same
+  # workspace as one continuous chain, so dashboard "load earlier" can
+  # walk back across session boundaries. Default-on with 7d window /
+  # 32-cap. See docs/rfc/auto-workspace-chain.md.
+  #   enabled: false        — opt out entirely (no spawn-time attach,
+  #                           no startup backfill)
+  #   window_hours: 24      — only consider JSONL files modified in the
+  #                           last 24h (default 168 = 7d)
+  #   cap: 16               — chain max length (default 32, hard ceiling
+  #                           is maxPrevSessionIDs = 32)
+  # auto_chain:
+  #   enabled: true
+  #   window_hours: 168
+  #   cap: 32
   shim:
     idle_timeout: "8h"
   queue:

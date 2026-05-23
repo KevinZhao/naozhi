@@ -127,6 +127,79 @@ func TestSaveAndLoadPrevSessionIDs(t *testing.T) {
 	}
 }
 
+// TestSaveAndLoadPrevSessionOrigins is the auto-workspace-chain v3
+// schema roundtrip: save a session whose chain segments came from
+// mixed origins, load it back, ensure the parallel slice survives
+// JSON encode/decode.
+func TestSaveAndLoadPrevSessionOrigins(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	s := newSessionWithID("auto:k", "sess-current")
+	s.prevSessionIDs = []string{"sess-1", "sess-2", "sess-3"}
+	s.prevSessionOrigins = []string{"manual", "auto-spawn", "auto-backfill"}
+
+	sessions := map[string]*ManagedSession{"auto:k": s}
+	if err := saveStore(path, sessions); err != nil {
+		t.Fatalf("saveStore: %v", err)
+	}
+
+	restored := loadStore(path)
+	if restored == nil {
+		t.Fatal("loadStore returned nil")
+	}
+	got := restored["auto:k"]
+	if got == nil {
+		t.Fatal("entry not found")
+	}
+	want := []string{"manual", "auto-spawn", "auto-backfill"}
+	if len(got.PrevSessionOrigins) != len(want) {
+		t.Fatalf("PrevSessionOrigins len = %d, want %d (%v)", len(got.PrevSessionOrigins), len(want), got.PrevSessionOrigins)
+	}
+	for i := range want {
+		if got.PrevSessionOrigins[i] != want[i] {
+			t.Errorf("[%d] = %q, want %q", i, got.PrevSessionOrigins[i], want[i])
+		}
+	}
+}
+
+// TestLoadStore_LegacyMissingOrigins pins the v3 forward-compat
+// guarantee: an on-disk store from a pre-feature naozhi (no
+// prev_session_origins field) must still load. ManagedSession
+// snapshot defaults the missing tail to "manual".
+func TestLoadStore_LegacyMissingOrigins(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+
+	legacy := `[{"key":"legacy:k","session_id":"current","prev_session_ids":["a","b"]}]`
+	if err := os.WriteFile(path, []byte(legacy), 0600); err != nil {
+		t.Fatalf("write legacy store: %v", err)
+	}
+
+	restored := loadStore(path)
+	if restored == nil {
+		t.Fatal("loadStore returned nil on legacy schema")
+	}
+	got := restored["legacy:k"]
+	if got == nil {
+		t.Fatal("entry not found")
+	}
+	if len(got.PrevSessionOrigins) != 0 {
+		t.Errorf("expected nil PrevSessionOrigins for legacy schema, got %v", got.PrevSessionOrigins)
+	}
+	// Materialise via ManagedSession snapshot to ensure the "manual"
+	// default fires at the read seam.
+	s := &ManagedSession{
+		key:                got.Key,
+		prevSessionIDs:     got.PrevSessionIDs,
+		prevSessionOrigins: got.PrevSessionOrigins,
+	}
+	origins := s.SnapshotPrevSessionOrigins()
+	if len(origins) != 2 || origins[0] != "manual" || origins[1] != "manual" {
+		t.Errorf("SnapshotPrevSessionOrigins = %v, want [manual manual]", origins)
+	}
+}
+
 // TestStoreMetaPath pins the sidecar path derivation — sessions.json →
 // sessions.meta.json in the same directory. Locking this keeps storeMetaPath
 // separate from any ad-hoc callers that might otherwise drift.

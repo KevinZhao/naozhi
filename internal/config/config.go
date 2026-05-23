@@ -154,8 +154,46 @@ type SessionConfig struct {
 	CWD       string         `yaml:"cwd"` // default working directory for CLI processes
 	// Deprecated: use CWD instead. Preserved for backward compatibility
 	// with existing config files; new fields should write only `cwd`.
-	Workspace string     `yaml:"workspace"`
-	Shim      ShimConfig `yaml:"shim"`
+	Workspace string              `yaml:"workspace"`
+	Shim      ShimConfig          `yaml:"shim"`
+	AutoChain AutoChainYAMLConfig `yaml:"auto_chain,omitempty"`
+}
+
+// AutoChainYAMLConfig represents the auto-workspace-chain feature
+// settings (docs/rfc/auto-workspace-chain.md). Default-on with
+// 7-day window / 32-cap; only operators who want to opt out or
+// shrink the window need to set this block.
+//
+// Enabled is *bool so an absent key falls back to def-true while
+// preserving the ability to explicitly write enabled: false.
+type AutoChainYAMLConfig struct {
+	Enabled     *bool `yaml:"enabled,omitempty"`
+	WindowHours int   `yaml:"window_hours,omitempty"` // 0 → 168 (7d)
+	Cap         int   `yaml:"cap,omitempty"`          // 0 → 32
+}
+
+// ResolvedEnabled returns the effective on/off flag.
+func (c AutoChainYAMLConfig) ResolvedEnabled(def bool) bool {
+	if c.Enabled == nil {
+		return def
+	}
+	return *c.Enabled
+}
+
+// ResolvedWindowHours returns the effective window in hours.
+func (c AutoChainYAMLConfig) ResolvedWindowHours(def int) int {
+	if c.WindowHours <= 0 {
+		return def
+	}
+	return c.WindowHours
+}
+
+// ResolvedCap returns the effective chain length cap.
+func (c AutoChainYAMLConfig) ResolvedCap(def int) int {
+	if c.Cap <= 0 {
+		return def
+	}
+	return c.Cap
 }
 
 // QueueConfig controls IM message queuing when a session is busy.
