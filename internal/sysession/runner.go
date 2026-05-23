@@ -201,8 +201,11 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 	}
 	written, err := lw.w.Write(chunk)
 	lw.n += written
-	if err != nil {
-		return len(p), err
-	}
+	// io.Writer contract: when err != nil, n MUST be < len(p). Surfacing
+	// (len(p), err) violates that and confuses callers (and exec.Cmd's
+	// stderr pump). On the discard path we already swallow overflow
+	// without an error; do the same on writer error so the pump treats
+	// the chunk as fully accepted and keeps draining.
+	_ = err
 	return len(p), nil
 }
