@@ -325,6 +325,19 @@ func (m *Manager) Stop(stopCtx context.Context) {
 		// guarantees m.cancel is populated by the time we reach here.
 		m.cancel()
 		done := make(chan struct{})
+		// R234-GO-5: this drainer goroutine is intentionally NOT tracked by
+		// any WaitGroup. It serves only to bridge wg.Wait() into the select
+		// below so the deadline path can fire without blocking on the wait.
+		// On the deadline branch osExit(2) terminates the whole process, so
+		// the abandoned goroutine has no observable lifetime.
+		// On the clean branch wg.Wait() has already returned, close(done)
+		// fires, and the goroutine exits before this function returns —
+		// `done` is the synchronisation point the closure observes.
+		// Tests that swap osExit for a panic-recovery on the deadline path
+		// will see this goroutine block forever in wg.Wait(); that is
+		// expected (the test is exercising the "daemon ignored ctx" fault
+		// mode) and is the reason we surface osExit as a package var rather
+		// than calling os.Exit directly.
 		go func() {
 			m.wg.Wait()
 			close(done)
