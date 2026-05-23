@@ -605,7 +605,7 @@
 - [ ] **R226-PERF-4 — ACP `agent_message_chunk` 每 chunk 一次 `json.Unmarshal`（P2）**: kiro streaming 高频路径，500 unmarshal/s 仅此一处。方案：手写 byte-scan 提取 `"text":"..."` value，跳过 reflect。`internal/cli/protocol_acp.go:517`。
 - [ ] **R226-PERF-5 — `eventlog.Append` 单条调用每次造 `[]EventEntry{e}` slice（P2）**: PersistSink 接口允许 retain slice 故复用受限。方案：加 `AppendOne(e)` 快路径或单元数组池。`internal/cli/eventlog.go:660`。
 - [~] **R226-PERF-6 — `EventLog.applyEntryStateLocked` task 事件线性扫 turnAgents/bgAgents（P3）**: 多路 subagent 场景（>8 并行）双重 O(n)。方案：当 `len > 8` 时建 `map[string]int` 索引。`internal/cli/eventlog.go:405`。 — 评估后不实施（typical turnAgents len 1-3，result/user 事件已自动重置；threshold-based map 需 4 个同步映射 cover ToolUseID/TaskID × turn/bg，维护成本远高于收益；P3 + 无 >8 subagent 实测案例），本批 PR #164
-- [ ] **R226-PERF-10 — `process_shim_io.shimWriter.Write` fast path `string(data[:len-1])` 拷贝（P3，封 R71-PERF-H1）**: shimClientMsg.Line 改 `json.RawMessage`。
+- [x] **R226-PERF-10 — `process_shim_io.shimWriter.Write` fast path `string(data[:len-1])` 拷贝（P3，封 R71-PERF-H1）**: shimClientMsg.Line 改 `json.RawMessage`。 → R234 godoc anchor: shimWriter.Write 顶部加 R71/R226 cross-ref，说明 `shimClientMsg.Line` 改 `json.RawMessage` 需配套 shim wire-protocol revision + `returnShimSendEnc` slice-zero；当前迁移代价 > 收益（5-50 events/s × ~200B alloc），改完跨 shim peer 兼容才推进。
 
 ### 代码质量 — 本轮新发现
 
@@ -786,7 +786,7 @@
 - [ ] **R222-CR-1 — `session.NewRouter` 350 行 6+ 阶段直列（P2）**: 拆 initWrappers / loadPersistedState / startEventLogPersister / startBackgroundLoops。涉及：`internal/session/router.go:706`。
 - [ ] **R222-CR-2 — `upstream/connector_rpc.go handleRequest` 522 行 18-case switch（P2）**: 抽 (*Connector).handleSend/handleTakeover 等私方法。涉及：`internal/upstream/connector_rpc.go:50`。
 - [ ] **R222-CR-3 — `session.reconnectShims` 334 行 9-state enum + 嵌套 goroutine（P2）**: 拆 classifyAndPlanShimAction + executeShimAction。涉及：`internal/session/router.go:1276`。
-- [ ] **R222-CR-4 — `cron.executeOpt` 247 行（P2）**: 抽 recordAndBroadcastRun。涉及：`internal/cron/scheduler.go:1677`。
+- [x] **R222-CR-4 — `cron.executeOpt` 247 行（P2）**: 抽 recordAndBroadcastRun。涉及：`internal/cron/scheduler.go:1677`。【2026-05-23 R222-CR-4 修复】抽 `recordSuccess(recordSuccessArgs)` 把 success tail（setSessionID/slow-log/finishRun/deliverNotice ~30 行）从 executeOpt 移出，executeOpt 末尾退化为单结构体调用；新 helper 接受扁平化的 SessionID/Text 字段避免 cron 包再 import cli。
 - [ ] **R-LEGACY-SEND — 删除 `Hub.sessionSendLegacy` 与其在 `sessionSend` 中的 fallback 分支（LOW，由 R222-CR-8 派生）**: sessionSendLegacy 是 MessageQueue 接入前的旧 send 路径，现仅供未配 Queue 的测试代码使用。NewHub 已在 Queue==nil 时打 slog.Warn，但仍允许构造。Removal 条件：(1) 所有驱动 Hub 的测试迁到真实 MessageQueue（或与其投递契约一致的 stub）；(2) NewHub 把 Queue==nil 从 Warn 升级为 Fatal（构造期 hard-fail）。两条都满足后，删除 sessionSendLegacy + sessionSend 中调它的 if 分支，把 guard/interrupt 语义收敛到唯一一处。涉及：`internal/server/send.go:561`，调用方在 `internal/server/send.go` sessionSend 内部分支。
 
 ### 架构 — 大重构 NEEDS-DESIGN

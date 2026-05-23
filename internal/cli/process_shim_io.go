@@ -42,6 +42,23 @@ type shimWriter struct {
 	buf bytes.Buffer
 }
 
+// Write splits an outbound stdin payload into NDJSON `write` frames, one per
+// line. The fast path handles the common case (a single complete line) without
+// touching the internal bytes.Buffer.
+//
+// R71-PERF-H1 / R226-PERF-10 anchor: both fast and slow path do
+// `string(data[:len-1])` to populate `shimClientMsg.Line`, which is the
+// last remaining ~200B-4KB heap copy on the outbound hot path
+// (5-50 events/s × N sessions). The natural fix — replacing
+// `shimClientMsg.Line string` with `json.RawMessage` or a `lineBytes []byte`
+// + custom `MarshalJSON` — requires a shim wire-protocol revision because
+// the peer (internal/shim/protocol.go shimClientMsg counterpart) shares
+// this struct shape across the socket. The next revision must additionally
+// arrange for `returnShimSendEnc` to zero the slice pointer before pool
+// return so the buffer's backing array does not leak across goroutines.
+// Until that lane lands, the trimmed-string copy stays — the alternative
+// (sending unchecked []byte over `encoding/json`) would silently base64
+// every payload and break the shim parser. R71-PERF-H1, R226-PERF-10.
 func (w *shimWriter) Write(data []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
