@@ -11,6 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/naozhi/naozhi/internal/ratelimit"
 	"github.com/naozhi/naozhi/internal/session"
 )
 
@@ -44,6 +45,16 @@ type HealthHandler struct {
 	// Injected after Start() wires the Dispatcher; nil-safe. last_reply_success
 	// is zero-valued until the first successful user-visible reply.
 	dispatcherMetrics func() (int64, int64, int64, time.Time)
+	// unauthLimiter throttles unauthenticated /health probes (R226-SEC-7 /
+	// R228-SEC-4). Without back-pressure an external attacker can poll
+	// /health at line rate to fingerprint workspace presence and crudely
+	// time the watchdog/uptime fields visible to authenticated probes via
+	// /health-side-channel timing comparisons. Authenticated probes bypass
+	// the limiter so dashboard 1 Hz polling is unaffected. nil-safe so
+	// older test fixtures that construct HealthHandler manually do not
+	// silently fail open — guard returns true when the limiter is missing
+	// (matches AuthHandlers.unauthDashAllow contract).
+	unauthLimiter *ratelimit.Limiter
 }
 
 // healthWatchdogStats is the /health "watchdog" sub-object. Stack-allocated
@@ -174,6 +185,24 @@ func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 		Uptime: time.Since(h.startedAt).Round(time.Second).String(),
 	}
 	if !h.auth.isAuthenticated(r) {
+		// R226-SEC-7 / R228-SEC-4: per-IP rate-limit unauthenticated probes
+		// so a public scanner cannot fingerprint workspace presence at line
+		// rate. Same bucket shape as unauthDashLimiter (60/min sustained,
+		// 20 burst) is plenty for monitoring agents. trustedProxy is honored
+		// via the auth handler's clientIP helper so ALB/CloudFront probes
+		// limit the real caller. nil-limiter (older test fixtures) fails
+		// open to preserve prior behaviour.
+		if h.unauthLimiter != nil {
+			ip := clientIP(r, h.auth.trustedProxy)
+			if ip == "" {
+				ip = unknownIPKey
+			}
+			if !h.unauthLimiter.Allow(ip) {
+				w.Header().Set("Retry-After", "60")
+				http.Error(w, "too many requests", http.StatusTooManyRequests)
+				return
+			}
+		}
 		writeJSON(w, resp)
 		return
 	}

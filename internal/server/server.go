@@ -743,6 +743,11 @@ func buildServer(opts ServerOptions) *Server {
 			}
 			return s.hub.DroppedMessages()
 		},
+		// R226-SEC-7 / R228-SEC-4: rate-limit unauthenticated /health to
+		// stop external scanners from fingerprinting / timing the workspace.
+		// Same 60/min×20 burst as wsUpgradeLimiter / unauthDashLimiter —
+		// monitoring tools poll at sub-Hz cadence.
+		unauthLimiter: newWSUpgradeLimiter(),
 	}
 	// sendH is wired after registerDashboard creates hub
 
