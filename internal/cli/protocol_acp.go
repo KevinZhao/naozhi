@@ -519,10 +519,12 @@ func (p *ACPProtocol) ReadEvent(line string) ([]Event, bool, error) {
 		// at all (kiro 2.3.0 commonly returns `null` or `{}` on success).
 		// json.Unmarshal of an empty / null Result still pays a reflect setup
 		// + struct-field walk; bytes.Contains is a tight scan that skips both.
+		// R235-PERF-20: length-fast-path skips even the bytes.Contains call
+		// for `null` (4 bytes) / `{}` (2 bytes) — the key cannot fit there.
 		var stop struct {
 			StopReason string `json:"stopReason"`
 		}
-		if bytes.Contains(msg.Result, acpStopReasonKey) {
+		if len(msg.Result) >= len(acpStopReasonKey) && bytes.Contains(msg.Result, acpStopReasonKey) {
 			_ = json.Unmarshal(msg.Result, &stop) // best-effort; missing => empty
 		}
 

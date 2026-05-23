@@ -313,8 +313,10 @@ func (s *runStore) cacheHeadPush(jobID string, summary CronRunSummary) {
 	// Newest-first: prepend. Cap to keepCount to bound memory; entries
 	// beyond cap are trimmed by trimJobLocked at the same time.
 	// 用 grow-in-place + copy + 索引赋值替代 append([]T{x}, slice...)，
-	// 节省每次调用的一次性短命 1-元素切片头分配；shift 仍然是 O(N)
-	// 但底层数组可复用，少一次 backing array 拷贝（高频路径）。
+	// 节省每次调用的一次性短命 1-元素切片头分配；shift 仍然是 O(N)。
+	// 注：当 len(entry.runs) == cap(entry.runs) 时 append 仍会扩容，此时
+	// 并不省底层数组拷贝；只在 len < cap（trim 之后的常态）时纯靠 copy。
+	// R235-CR-11 / R235-PERF-3 跟踪未来改 ring buffer 的方向。
 	entry.runs = append(entry.runs, CronRunSummary{})
 	copy(entry.runs[1:], entry.runs[:len(entry.runs)-1])
 	entry.runs[0] = summary
@@ -514,15 +516,14 @@ func (s *runStore) diskListNewestFirst(jobID string, limit int, before time.Time
 	// key: it's 16-char random hex, so the tie-breaker is stable across
 	// processes and re-reads even though it carries no time signal of its own.
 	slices.SortFunc(items, func(a, b item) int {
-		if a.mtime.Equal(b.mtime) {
-			// runID DESC tie-break: hex strings → reverse cmp.Compare.
-			return cmp.Compare(b.runID, a.runID)
+		// mtime DESC: newer first. time.Time.Compare (Go 1.20+) returns
+		// -1/0/+1 in a single call vs. the prior Equal+After pair.
+		// R235-PERF-17.
+		if c := b.mtime.Compare(a.mtime); c != 0 {
+			return c
 		}
-		// mtime DESC: newer first.
-		if a.mtime.After(b.mtime) {
-			return -1
-		}
-		return 1
+		// Same mtime: runID DESC tie-break. R222-GO-5.
+		return cmp.Compare(b.runID, a.runID)
 	})
 
 	out := make([]CronRunSummary, 0, limit)
@@ -567,7 +568,20 @@ func (s *runStore) Get(jobID, runID string) (*CronRun, error) {
 
 // readRun parses a single run file. Returns ErrCorruptRun on parse
 // failure or oversize; fs.ErrNotExist propagates unchanged.
+//
+// R235-SEC-5: Lstat-then-ReadFile guards against an attacker (with write
+// access to runs/<jobID>/) replacing a legitimate .json with a symlink to
+// /etc/passwd or another sensitive file — diskListNewestFirst /
+// trimJobLocked already skip symlinks during their directory scans, but
+// Get() arrives here directly with a constructed path.
 func (s *runStore) readRun(path string) (*CronRun, error) {
+	li, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !li.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: not a regular file", ErrCorruptRun)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -619,6 +633,7 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	}
 	type item struct {
 		path  string
+		runID string
 		mtime time.Time
 	}
 	items := make([]item, 0, len(entries))
@@ -648,7 +663,11 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 		if !mtime.After(cutoff) {
 			anyExpired = true
 		}
-		items = append(items, item{path: filepath.Join(dir, name), mtime: mtime})
+		items = append(items, item{
+			path:  filepath.Join(dir, name),
+			runID: runID,
+			mtime: mtime,
+		})
 	}
 	// Fast path: under cap AND nothing expired → no sort, no remove. The
 	// common case for healthy 5-min cron jobs that ride well under the
@@ -659,8 +678,18 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	if len(items) == 0 {
 		return
 	}
-	// Sort newest first so rank checking is index-based.
-	slices.SortFunc(items, func(a, b item) int { return cmp.Compare(b.mtime.UnixNano(), a.mtime.UnixNano()) })
+	// Sort newest first so rank checking is index-based. Same total order as
+	// diskListNewestFirst: mtime DESC, then runID DESC for the equal-mtime
+	// tiebreak — without the runID secondary key the trim cutoff
+	// (i < s.keepCount) and the list cutoff would disagree about which
+	// equal-mtime record to drop, leaving a window where a record visible
+	// in the list could be removed by trim. R235-GO-7.
+	slices.SortFunc(items, func(a, b item) int {
+		if c := cmp.Compare(b.mtime.UnixNano(), a.mtime.UnixNano()); c != 0 {
+			return c
+		}
+		return cmp.Compare(b.runID, a.runID)
+	})
 	for i, it := range items {
 		// Both conditions must hold to keep.
 		keep := i < s.keepCount && it.mtime.After(cutoff)

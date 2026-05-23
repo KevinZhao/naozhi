@@ -73,4 +73,11 @@ const (
 	// equals the SanitizeForLog cap survives intact through redaction
 	// (worst-case 4 bytes/rune). R230B-CR-5.
 	maxRedactErrLen = 2048
+
+	// previousTickMaxIter caps previousTickBefore's sched.Next loop. See
+	// the comment on previousTickBefore for the per-schedule-class
+	// derivation; 1000 leaves a ~3× safety margin over the worst legitimate
+	// case (~365 iterations for a daily schedule across DST/leap-month).
+	// R235-CR-10.
+	previousTickMaxIter = 1000
 )

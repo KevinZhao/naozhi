@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -59,6 +62,41 @@ const tokenCleanupInterval = 1 * time.Hour
 // each replay.
 const maxIncomingTextBytes = platform.DefaultMaxIncomingBytes
 
+// maxWeixinMsgsPerPoll caps the number of messages processed per poll
+// response after json.Unmarshal. The 2 MB io.LimitReader bounds the body
+// size, but with ~20-byte minimal messages a hostile iLink relay could
+// otherwise pack ~100k records into a single response and spawn a goroutine
+// per record. Real iLink relays rarely emit more than a handful per poll.
+// R235-SEC-8.
+const maxWeixinMsgsPerPoll = 100
+
+// validateBaseURLScheme enforces that the operator-supplied iLink base URL
+// uses HTTPS. Any loopback host (localhost, 127.0.0.0/8, ::1, IPv6 zone IDs,
+// etc.) is exempt so developers can wire local mock servers. R235-SEC-1.
+func validateBaseURLScheme(baseURL string) error {
+	if baseURL == "" {
+		// defaultBaseURL is hard-coded https:// in api.go.
+		return nil
+	}
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("weixin base_url parse: %w", err)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return nil
+	case "http":
+		host := u.Hostname()
+		if strings.EqualFold(host, "localhost") {
+			return nil
+		}
+		if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+			return nil
+		}
+	}
+	return fmt.Errorf("weixin base_url must use https:// (got %q); the iLink poll response carries no HMAC, so TLS is the only authenticity guarantee", baseURL)
+}
+
 // New creates a WeChat platform adapter.
 func New(cfg Config) *Weixin {
 	if cfg.MaxReplyLen <= 0 {
@@ -82,6 +120,14 @@ func (w *Weixin) RegisterRoutes(_ *http.ServeMux, _ platform.MessageHandler) {}
 
 // Start implements RunnablePlatform. Launches getUpdates long-poll loop.
 func (w *Weixin) Start(handler platform.MessageHandler) error {
+	// R235-SEC-1: enforce HTTPS for the operator-supplied iLink relay URL.
+	// The poll response is fully trusted (no HMAC) so without TLS a
+	// MITM-able transport can inject arbitrary from_user_id / prompt text.
+	// Empty BaseURL → defaultBaseURL (https://) is used by newAPIClient.
+	// http://localhost / 127.0.0.1 / [::1] stay allowed for local dev mocks.
+	if err := validateBaseURLScheme(w.cfg.BaseURL); err != nil {
+		return err
+	}
 	w.startMu.Lock()
 	if w.started {
 		w.startMu.Unlock()
@@ -240,6 +286,15 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 		// Update cursor
 		if resp.GetUpdatesBuf != "" {
 			cursor = resp.GetUpdatesBuf
+		}
+
+		// R235-SEC-8: cap messages per poll. The 2 MiB body LimitReader caps
+		// total bytes, but a hostile relay could pack many short records;
+		// truncate rather than drop the poll so the cursor still advances.
+		if len(resp.Msgs) > maxWeixinMsgsPerPoll {
+			slog.Warn("weixin poll: msg count exceeds cap, truncating",
+				"count", len(resp.Msgs), "cap", maxWeixinMsgsPerPoll)
+			resp.Msgs = resp.Msgs[:maxWeixinMsgsPerPoll]
 		}
 
 		// Process messages

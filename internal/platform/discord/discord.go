@@ -25,6 +25,11 @@ type Config struct {
 	MaxReplyLen int
 }
 
+// discordHookConcurrency caps the number of in-flight inbound message
+// goroutines. Mirrors feishu.hookSem (20) and slack.slackHookConcurrency.
+// R235-SEC-3.
+const discordHookConcurrency = 20
+
 // Discord implements Platform and RunnablePlatform via WebSocket gateway.
 type Discord struct {
 	cfg        Config
@@ -36,6 +41,12 @@ type Discord struct {
 	stopCtx    context.Context
 	stopCancel context.CancelFunc
 	handlerWg  sync.WaitGroup
+	// hookSem caps concurrent inbound message-handler goroutines to bound
+	// memory + file descriptors under burst load. Each goroutine may also
+	// download up to maxDiscordAttachmentsPerMessage × 10 MB of attachments
+	// serially, so without this cap a high-traffic guild could pin many GB.
+	// Mirrors feishu.hookSem / slack.hookSem. R235-SEC-3.
+	hookSem chan struct{}
 }
 
 // New creates a Discord platform adapter.
@@ -43,7 +54,7 @@ func New(cfg Config) *Discord {
 	if cfg.MaxReplyLen <= 0 {
 		cfg.MaxReplyLen = 2000 // Discord's actual limit
 	}
-	return &Discord{cfg: cfg}
+	return &Discord{cfg: cfg, hookSem: make(chan struct{}, discordHookConcurrency)}
 }
 
 func (d *Discord) Name() string { return "discord" }
@@ -318,10 +329,22 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 		MentionMe: mentionMe,
 	}
 
+	// R235-SEC-3: cap concurrent handler goroutines (mirrors feishu/slack).
+	// Non-blocking acquire — when saturated, drop the message + slog.Warn so
+	// a flood cannot spawn unbounded goroutines, each of which may sequentially
+	// download up to 5 × 10 MB of attachments.
+	select {
+	case d.hookSem <- struct{}{}:
+	default:
+		slog.Warn("discord: handler semaphore full, dropping message",
+			"channel", m.ChannelID, "user", m.Author.ID)
+		return
+	}
 	// Download images in the async goroutine, not in discordgo's event dispatch.
 	d.handlerWg.Add(1)
 	go func() {
 		defer d.handlerWg.Done()
+		defer func() { <-d.hookSem }()
 		defer platform.RecoverHandler("discord")
 		var total int
 		for _, p := range pending {
