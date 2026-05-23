@@ -571,6 +571,14 @@ func claudeProjectsRoot() string {
 // touch it"), but this function intentionally drops and re-acquires l.mu —
 // the rename to ...DropLock prevents future maintainers from treating it
 // as a normal "Locked" helper and double-unlocking. (R227-GO-3)
+//
+// R222-GO-3 archive anchor: the prior concern about a callback re-entering
+// linker.Query under nested lock release is non-issue because (a) Query
+// takes RLock against l.mu which is fully released between the Unlock above
+// and the deferred re-Lock below, and (b) onResolveMu copy-then-drop
+// (lines 575–578) serialises subscriber dispatch independently of l.mu.
+// A callback that calls back into Resolve still goes through Resolve's own
+// mu acquisition, so the dispatch order is well-defined.
 func (l *SubagentLinker) fireCallbacksDropLock(taskID, toolUseID, internalAgentID string) {
 	l.onResolveMu.Lock()
 	fns := make([]func(string, string, string), len(l.onResolveFns))

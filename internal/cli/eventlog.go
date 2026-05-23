@@ -799,6 +799,16 @@ func (l *EventLog) Append(e EventEntry) {
 	// `EventEntry` copy together heap-escape on every Append; bypassing
 	// them in the no-sink case saves one alloc per event in the hot
 	// stdout path. Mirrors AppendBatch's pre-loop sinkAttached gate.
+	//
+	// R215-PERF-P2-1 / R219-PERF-4 / R228-PERF-7 archive anchor:
+	// the remaining `[]EventEntry{e}` literal allocation on the
+	// sink-attached branch is structurally required by PersistSink's
+	// retention contract — the sink may keep the slice past return,
+	// so a stack array (`[1]EventEntry` with `s[:]`) escapes via the
+	// atomic.Pointer-loaded function pointer regardless of -gcflags=-m.
+	// sync.Pool would just trade alloc for Get/Put overhead on a 48 B
+	// payload. Production hot path is the no-sink early-return above,
+	// so the marginal cost on the sink-attached path is accepted.
 	if l.persistSinkPtr.Load() != nil {
 		l.invokePersistSink([]EventEntry{e})
 	}
@@ -1214,6 +1224,16 @@ func (l *EventLog) UserTurnCount() int64 {
 // Behavioural contract — fast-path short-circuit on equal value,
 // last-writer-wins under l.mu — is documented on the textutil helpers;
 // do not re-document the rationale here to keep the two in sync.
+//
+// R215-PERF-P2-4 archive anchor: the `new(string)` heap alloc on actual
+// change is structurally required by atomic.Pointer[string] — Pointer.Store
+// needs an addressable string slot. The textutil.StoreAtomicString
+// fast-path skips the alloc when the value is unchanged, which covers the
+// common steady-state case (same prompt summary repeated). On real
+// change there is no zero-alloc atomic-string solution short of moving
+// to atomic.Value (which has comparable cost) or a uintptr+intern-table
+// scheme (much larger refactor for marginal gain on a low-frequency path
+// — turn boundaries, not per stdout line).
 func loadAtomicString(v *atomic.Pointer[string]) string {
 	return textutil.LoadAtomicString(v)
 }
