@@ -556,6 +556,12 @@ const cronSlowThreshold = 30 * time.Second
 // existing session just to fail on a GetOrCreate / spawn-shim call.
 // Empty workDir means "use router default" and is always reachable.
 // CRON2.
+//
+// 注意：workDirReachable 仅做 stat 可达性 + IsDir 检查，**不**强制
+// allowedRoot 内含。任何依赖"必须在工作根之内"的调用者必须额外调
+// workDirUnderRoot。当前调用点 (freshContextPreflightP0) 依赖
+// loadJobs 阶段已做过 root-containment 校验；不要在不调
+// workDirUnderRoot 的新调用点直接复用本函数。R234-CR-11。
 func workDirReachable(workDir string) bool {
 	if workDir == "" {
 		return true
@@ -2292,7 +2298,11 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 	})
 
-	replyText := fmt.Sprintf("[Cron %s] %s", snap.labelOrID(), result.Text)
+	// R234-SEC-1: deliverNotice 必须用经过 sanitiseRunResult 的文本，
+	// 否则未截断 / 未脱敏的 claude 输出会绕过所有保护落到 IM 渠道
+	// （prompt-injection / IM 富文本指令 / 巨量响应耗尽队列）。
+	// finishRun 在持久化路径已做过同样处理，这里复用相同管线。
+	replyText := fmt.Sprintf("[Cron %s] %s", snap.labelOrID(), sanitiseRunResult(result.Text))
 	s.deliverNotice(notifyTo, replyText)
 }
 
@@ -2697,13 +2707,14 @@ func redactPathsInCronError(s string) string {
 		n := textutil.TruncateAtRuneBoundary(s, maxRedactErrLen)
 		s = s[:n] + "…"
 	}
-	// Fast path: if the string contains no POSIX slash and no Windows
-	// backslash, there is nothing path-shaped to redact — skip the Builder
-	// allocation and return the input unchanged. recordResult runs on every
-	// cron execution, and common error classes ("dispatcher queue full",
-	// "session error: context deadline exceeded") have no embedded paths.
-	// R62-PERF-3.
-	if strings.IndexByte(s, '/') < 0 && strings.IndexByte(s, '\\') < 0 {
+	// Fast path: if the string contains no POSIX slash, no Windows
+	// backslash, and no '~/' tilde-home shorthand, there is nothing
+	// path-shaped to redact — skip the Builder allocation and return the
+	// input unchanged. recordResult runs on every cron execution, and
+	// common error classes ("dispatcher queue full", "session error:
+	// context deadline exceeded") have no embedded paths. R62-PERF-3 +
+	// R234-SEC-9（~/ 用户目录形态补漏）。
+	if strings.IndexByte(s, '/') < 0 && strings.IndexByte(s, '\\') < 0 && strings.IndexByte(s, '~') < 0 {
 		return s
 	}
 	var b strings.Builder
@@ -2717,7 +2728,14 @@ func redactPathsInCronError(s string) string {
 		isWin := i+2 < len(s) &&
 			((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z')) &&
 			s[i+1] == ':' && (s[i+2] == '\\' || s[i+2] == '/')
-		if !isPosix && !isWin {
+		// R234-SEC-9: 识别 "~/" 形态的 home-relative 路径，避免泄露用户
+		// 目录层级（容器/ssh 错误中常见）。仅在前置位为分隔符或行首时
+		// 触发，防止把 "weight ~5kg" 这种文本误伤。
+		isTildeHome := c == '~' && i+1 < len(s) && s[i+1] == '/' &&
+			(i == 0 || s[i-1] == ' ' || s[i-1] == '\t' || s[i-1] == '\n' ||
+				s[i-1] == '\'' || s[i-1] == '"' || s[i-1] == '`' ||
+				s[i-1] == ',' || s[i-1] == ';' || s[i-1] == '(' || s[i-1] == '=')
+		if !isPosix && !isWin && !isTildeHome {
 			b.WriteByte(c)
 			i++
 			continue

@@ -32,11 +32,24 @@ import (
 // (Scheduler.storeMu) is NOT shared with this store: the two write to
 // different files and serialising would only inflate latency.
 //
+// Lock hierarchy（R234-GO-7 文档化锁层级）：
+//
+//	Scheduler.s.mu  >  runStore.jobLock(jobID)  >  recentCacheEntry.mu
+//
+// 任何路径若已持 entry.mu，禁止再去获取 jobLock 或 s.mu，否则将与
+// Append（先 jobLock 后 entry.mu）出现死锁。当前 cacheGet 通过先释放
+// entry.mu 再走 warmCache → jobLock 的"释放-重取"模式遵守此层级；
+// 新增任何持锁路径必须先复核此约束再 review。
+//
 // Errors are surfaced via slog rather than propagated to callers (cron
 // never blocks on history failure — RFC §4.2). The exception: GC's
 // cumulative result is logged but not aborted on a single file failure.
 type runStore struct {
-	root         string
+	root string
+	// keepCount / keepWindow / maxRunBytes 在 newRunStore 之后即不可变，
+	// 任何后续 read 不需要锁保护。若将来引入运行时调整 API，必须先把
+	// 三者改为 atomic.Int64 / atomic.Value 之后才能放开 store 之外的
+	// 写入路径。R234-GO-13。
 	keepCount    int
 	keepWindow   time.Duration
 	maxRunBytes  int64
@@ -95,13 +108,16 @@ const (
 // skip the entry, GC removes it.
 var ErrCorruptRun = errors.New("cron run: corrupt or oversize record")
 
-// IsValidID reports whether s matches the lowercase-hex shape produced
-// by generateRunID / generateID (currently 16 hex chars; upper bound 64
-// reserved for a future schema bump). Imposed at parse time so a stray
-// non-run file in runs/<jobID>/ cannot poison List output, and exposed
-// so HTTP handlers can fail-fast at the boundary instead of forwarding
-// non-hex IDs that the store would silently swallow as an empty result.
-// R221-FIX-P1-2.
+// IsValidID reports whether s is a valid cron / cron-run identifier:
+// a non-empty lowercase hex string of at most 64 bytes. Currently job
+// and run IDs are generated as 16 hex chars; the 64-byte upper bound
+// is held in reserve for a future schema bump.
+//
+// 在 store 入口（parse / list / append / detail handler）做边界校验，
+// 防止 runs/<jobID>/ 下意外文件名（temp file、备份）污染 List 输出，
+// 也允许 HTTP 层在请求入口直接拒绝非法 ID 而不必下沉到磁盘 IO。
+// R221-FIX-P1-2 + R234-CR-10（godoc 改写为输入形态描述，不再引用
+// 私有的 generateRunID / generateID）。
 func IsValidID(s string) bool {
 	if len(s) == 0 || len(s) > 64 {
 		return false
@@ -129,6 +145,14 @@ func newRunStore(storePath string, keepCount int, keepWindow time.Duration) *run
 		keepWindow = DefaultRunsKeepWindow
 	}
 	root := filepath.Join(filepath.Dir(storePath), "runs")
+	// R234-SEC-4: 主动创建 runs/ 根目录并设 0o700。原先只在 Append 时
+	// 创建 runs/<jobID>/ 子目录用 0o700，而 runs/ 自身继承父目录权限
+	// （通常 0o755），同机器其他 OS 用户可枚举 jobID 列表，泄露 cron
+	// 任务存在与数量。失败仅记录 Warn — 后续 Append 仍会在子目录路径
+	// 上 MkdirAll，不影响功能。
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		slog.Warn("cron run: mkdir root failed", "root", root, "err", err)
+	}
 	return &runStore{
 		root:         root,
 		keepCount:    keepCount,
@@ -187,9 +211,9 @@ func (s *runStore) Append(run *CronRun) {
 		// 退化路径：把 Result 砍到极短，重新 marshal。Prompt 亦同。
 		// 这里不返回 — 一定要落盘一条记录，UI 才能看到 "曾有这么一条 run"。
 		shrunk := *run
-		shrunk.Result = truncateForRetry(shrunk.Result, 256)
-		shrunk.Prompt = truncateForRetry(shrunk.Prompt, 256)
-		shrunk.ErrorMsg = truncateForRetry(shrunk.ErrorMsg, 256)
+		shrunk.Result = truncateForRetry(shrunk.Result, maxRetryFieldRunes)
+		shrunk.Prompt = truncateForRetry(shrunk.Prompt, maxRetryFieldRunes)
+		shrunk.ErrorMsg = truncateForRetry(shrunk.ErrorMsg, maxRetryFieldRunes)
 		if data2, err2 := json.Marshal(&shrunk); err2 == nil && int64(len(data2)) <= s.maxRunBytes {
 			data = data2
 		} else {
@@ -395,8 +419,16 @@ func truncateForRetry(s string, maxRunes int) string {
 	if shrunk == s {
 		return s
 	}
-	return shrunk + "…[truncated]"
+	// R234-CR-9: 用 truncatedSuffix 常量统一裁剪标记，避免 sanitiseRunResult
+	// 用 const 而 truncateForRetry 用字面量导致两处可能漂移（grep 不到）。
+	return shrunk + truncatedSuffix
 }
+
+// maxRetryFieldRunes 是 over-cap retry 路径每个字段（Result/Prompt/ErrorMsg）
+// 各自允许的最大 rune 数。三处共用同一上限是有意——保证退化路径单条记录的
+// 字节数可估算（≤ 3 × runesToBytes(maxRetryFieldRunes) + 元数据），不易再次
+// 触发 maxRunBytes。R234-CR-9。
+const maxRetryFieldRunes = 256
 
 // List returns up to limit summaries for jobID, newest first. before is
 // a unix-ms cutoff: only runs with StartedAt < before are returned (paging).
@@ -725,6 +757,14 @@ func (s *runStore) trimAll(now time.Time) {
 		return
 	}
 	for _, e := range entries {
+		// R234-SEC-10: 跳过 symlink，与 diskListNewestFirst 对 symlink
+		// 文件的处理对齐。否则 runs/ 下放置一个指向外部目录的 symlink
+		// 目录（IsDir() 为 true 且 jobID 形似有效 hex），trimJobUnderLock
+		// 会沿 symlink 进入外部目录做 ReadDir + Remove，构成 path-traversal
+		// 写入风险。
+		if e.Type()&fs.ModeSymlink != 0 {
+			continue
+		}
 		if !e.IsDir() {
 			continue
 		}

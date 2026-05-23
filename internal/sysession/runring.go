@@ -16,10 +16,20 @@ const runRingCap = 50
 // All access is mu-protected.  We use a regular sync.Mutex (not RWMutex)
 // because reads happen from a single dashboard goroutine on a low cadence
 // (≤ 1Hz) so the lock-upgrade complexity isn't worth it.
+//
+// Invariants (R234-GO-14)：
+//   - len(buf) == runRingCap throughout the lifetime of the ring (set
+//     once in newRunRing, never reassigned).
+//   - 0 <= head < runRingCap at all times. Append wraps to 0 the moment
+//     it would otherwise advance to runRingCap.
+//   - filled becomes true on the first wrap and never returns to false.
+//
+// Snapshot 的两段 copy 依赖 0 <= head < runRingCap；任何重构要保持此约束，
+// 否则 out[runRingCap-r.head:] 切片表达式将越界 panic。
 type runRing struct {
 	mu     sync.Mutex
 	buf    []DaemonRun
-	head   int  // next write position
+	head   int  // next write position; invariant: 0 <= head < runRingCap
 	filled bool // true once the ring has wrapped
 }
 

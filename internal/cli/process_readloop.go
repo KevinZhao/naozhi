@@ -449,7 +449,11 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	// tracking and watchdog baseline. Keeping this unconditional is
 	// harmless — onSystemInit only matters when pendingSlots is
 	// non-empty and a replay arrives later.
-	if ev.Type == "system" && ev.SubType == "init" && p.caps.Replay {
+	// R234-PERF-12: 同一帧后续 (line ~518) 还要再判一次 system/init，
+	// 提前在这里求值一次复用，省两次 string 比较
+	// (5-50 events/s × N session)。
+	isSystemInit := ev.Type == "system" && ev.SubType == "init"
+	if isSystemInit && p.caps.Replay {
 		p.onSystemInit()
 	}
 
@@ -515,7 +519,7 @@ func (p *Process) dispatchProtocolEvent(ev Event, log *slog.Logger) bool {
 	// observes it (race; first to call setModel wins, both
 	// values are the same so it doesn't matter). Only overwrite
 	// when init event actually carries a model value.
-	isSystemInit := ev.Type == "system" && ev.SubType == "init"
+	// isSystemInit 已在上方求值，直接复用 (R234-PERF-12)。
 	if isSystemInit && ev.Model != "" {
 		p.setModel(ev.Model)
 	}
