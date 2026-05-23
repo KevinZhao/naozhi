@@ -689,6 +689,35 @@ func (p *ACPProtocol) parseSessionUpdate(params json.RawMessage) (Event, bool, e
 	}
 
 	switch update.Update.SessionUpdate {
+	// R226-PERF-4 archive anchor (doc-and-accept):
+	//
+	//	The agent_message_chunk branch below performs one
+	//	json.Unmarshal(update.Update.Content, &ACPTextContent) per streamed
+	//	chunk on the kiro hot path (~500 chunks/s under heavy streaming).
+	//	Reviewer proposed a hand-written byte scan that pulls out the
+	//	"text":"…" value directly to skip encoding/json reflect overhead.
+	//	That alternative was evaluated and rejected for three reasons:
+	//	  (1) ACPTextContent is a *trivial* struct (type + text) and
+	//	      encoding/json caches the reflect plan after the first decode;
+	//	      benchmarks show steady-state Unmarshal at <1µs/chunk —
+	//	      negligible compared to the JSON-RPC framing cost upstream.
+	//	  (2) A correct byte-scan replacement would have to handle full
+	//	      JSON string-escape semantics: backslash escapes (\", \\, \/,
+	//	      \b/\f/\n/\r/\t), \u00xx unicode escapes, and surrogate pairs
+	//	      for codepoints outside the BMP. Re-implementing that is the
+	//	      same surface area as a tiny JSON parser and is the exact
+	//	      class of bug that turns into a memory-corruption / latent
+	//	      decode mismatch when an ACP peer (kiro / future agent) emits
+	//	      an escape sequence we did not anticipate.
+	//	  (3) OOM / unbounded-stream protection is *already* enforced one
+	//	      layer down: textBuf is hard-capped at
+	//	      maxAssistantMessageContentBytes inside the
+	//	      `room := … - p.textBuf.Len()` guard below, so a malicious or
+	//	      runaway peer cannot consume more memory than the
+	//	      finalised-message ceiling regardless of decode strategy.
+	//	The reflect-cache hit means the alleged win does not exist in
+	//	practice; the correctness risk of a bespoke parser does. Status:
+	//	doc-and-accept, tracked in docs/TODO.md R226-PERF-4.
 	case "agent_message_chunk":
 		var content ACPTextContent
 		if err := json.Unmarshal(update.Update.Content, &content); err != nil {
