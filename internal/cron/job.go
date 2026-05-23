@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	robfigcron "github.com/robfig/cron/v3"
 
@@ -236,6 +237,21 @@ func generateID() string { return generateHexID() }
 // 人类可读名称，且与 dashboard 的 escAttr 线长相容。导出以便 server 包
 // 在 handler 层复用同一上限，避免两处数字不同步漂移。
 const MaxCronTitleLen = 256
+
+// validateTitleLen 校验 title 长度上限，统一两处错误消息（AddJob /
+// UpdateJob 各自原本写死同样的 fmt.Errorf("title too long: %d runes > %d
+// cap")）。zero-value title 直接返回 nil 由调用方决定是否兜底。
+//
+// 抽这个 helper 不只是去重——title_test.go strings.Contains 在两条路径上
+// 各匹配一次同样的字符串，先前任何一边静默调字面量都会绕过另一边的
+// 测试。集中后语义/格式漂移只可能在一处发生，CI 一次断言全覆盖。
+func validateTitleLen(title string) error {
+	n := utf8.RuneCountInString(title)
+	if n > MaxCronTitleLen {
+		return fmt.Errorf("title too long: %d runes > %d cap", n, MaxCronTitleLen)
+	}
+	return nil
+}
 
 // titleFallbackRuneLimit 是 Title 为空时 UI/搜索用 Prompt 首行截断的
 // 长度上限（按 rune 算，避免切断中文）。60 rune 与卡片视觉宽度对齐。

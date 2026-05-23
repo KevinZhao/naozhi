@@ -16,7 +16,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode/utf8"
 
 	robfigcron "github.com/robfig/cron/v3"
 
@@ -972,8 +971,8 @@ func (s *Scheduler) AddJob(j *Job) error {
 	}
 	// Title 长度校验在 scheduler 层兜底，避免绕过 dashboard handler（例如
 	// store 直接加载被篡改的 cron_jobs.json）把超长字符串持久化进内存。
-	if n := utf8.RuneCountInString(j.Title); n > MaxCronTitleLen {
-		return fmt.Errorf("title too long: %d runes > %d cap", n, MaxCronTitleLen)
+	if err := validateTitleLen(j.Title); err != nil {
+		return err
 	}
 
 	// addJobAcquiringLock runs under s.mu (defer Unlock). Splitting the locked
@@ -1296,8 +1295,8 @@ func (s *Scheduler) UpdateJob(id string, upd JobUpdate) (*Job, error) {
 		}
 	}
 	if upd.Title != nil {
-		if n := utf8.RuneCountInString(*upd.Title); n > MaxCronTitleLen {
-			return nil, fmt.Errorf("title too long: %d runes > %d cap", n, MaxCronTitleLen)
+		if err := validateTitleLen(*upd.Title); err != nil {
+			return nil, err
 		}
 	}
 
