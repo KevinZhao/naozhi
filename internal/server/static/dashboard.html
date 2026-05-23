@@ -1566,6 +1566,88 @@ body.kbd-open .input-hints{display:none}
   .cron-drawer-actions .cda-btn.primary.is-running,
   .cron-drawer-actions .cda-btn.primary.is-sending::before{animation:none}
 }
+/* ===== cron-dashboard-redesign P3 §4 — history row mobile compact =====
+ * On narrow screens (≤480px), the timeline rows shed two pieces of detail:
+ *   1. Sub-row (.ctr-sub) — trigger / error_class. The state dot already
+ *      encodes failure visually; trigger is rarely useful day-to-day and
+ *      can be inspected via the run-detail sheet on tap.
+ *   2. Sub-row padding-left compensation.
+ * Main row stays: ● state · time · duration. Time format already short
+ * ("19:00" without "今天" prefix on same-day entries — see formatCronTimelineShort).
+ * Vertical density tightens slightly: 7px row padding → 7px instead of 8px
+ * so 5 rows still fit cleanly above the fold on a 360×640 phone. */
+@media(max-width:480px){
+  .cron-timeline-panel .ctr{padding:7px 12px}
+  .cron-timeline-panel .ctr-sub{display:none}
+  .cron-timeline-panel .ctr-main{font-size:13px;gap:8px}
+  .cron-timeline-panel .ctr-state{min-width:40px}
+}
+
+/* ===== cron-dashboard-redesign P3 §3 — task spec sections =====
+ * Three primary cards (做什么 / 什么时候 / 在哪里) + one compact "其他"
+ * row, stacked vertically below the drawer header. Each card is a
+ * read-mostly view with a "编辑" link in the top-right that opens the
+ * existing edit modal. Visual language reuses the same surface tokens
+ * as the rest of the drawer (--nz-bg-1 cards on --nz-bg-0 page, with
+ * --nz-border outlines), so the section feels native — no new gradients,
+ * no extra colour weight, no chrome that competes with the existing
+ * cockpit / running banner / actions row.
+ *
+ * Mobile responsiveness:
+ *   - Cards stack vertically by default (display:block on the section).
+ *   - Padding: 14px @ ≤540px (matches drawer-actions / drawer-history),
+ *     16px @ 541-720, 18px @ ≥720 (handled by the section padding rule
+ *     plus the existing 540 max-width media query at the bottom).
+ *   - The "做什么" prompt body line-clamps to 6 lines via
+ *     -webkit-line-clamp; the toggle button reveals the rest in place.
+ */
+.cron-drawer-spec{display:flex;flex-direction:column;gap:10px;padding:14px 20px;background:var(--nz-bg-0)}
+.cron-spec-section{padding:12px 14px;border-radius:8px;border:1px solid var(--nz-border);background:var(--nz-bg-1);cursor:pointer;transition:border-color .12s,background .12s;-webkit-tap-highlight-color:transparent}
+.cron-spec-section:hover{border-color:var(--nz-text-faint);background:#1a2027}
+.cron-spec-section:focus-visible{outline:2px solid var(--nz-accent);outline-offset:2px}
+.cron-spec-section .css-head{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:8px}
+.cron-spec-section .css-label{margin:0;font-size:11px;color:var(--nz-text-mute);text-transform:uppercase;letter-spacing:.5px;font-weight:600}
+.cron-spec-section .css-edit{font-size:12px;color:var(--nz-text-faint);font-weight:400;flex-shrink:0;transition:color .12s}
+.cron-spec-section:hover .css-edit{color:var(--nz-accent)}
+.cron-spec-section .css-body{font-size:13px;color:var(--nz-text);line-height:1.55}
+.cron-spec-section .css-empty{color:var(--nz-text-faint);font-style:italic;font-size:12px}
+/* 做什么 — prompt body. Line-clamps to 6 lines until the toggle expands. */
+.cron-spec-section .css-prompt{position:relative}
+.cron-spec-section .css-prompt-body{font-size:13px;color:var(--nz-text);background:transparent;border:none;padding:0;margin:0;line-height:1.6;white-space:pre-wrap;word-break:break-word;font-family:inherit}
+.cron-spec-section .css-prompt[data-clamped="true"] .css-prompt-body{display:-webkit-box;-webkit-line-clamp:6;-webkit-box-orient:vertical;overflow:hidden}
+.cron-spec-section .css-prompt[data-clamped="true"] .css-prompt-body::after{content:"";position:absolute;left:0;right:0;bottom:24px;height:32px;background:linear-gradient(180deg,transparent,var(--nz-bg-1));pointer-events:none}
+.cron-spec-section:hover .css-prompt[data-clamped="true"] .css-prompt-body::after{background:linear-gradient(180deg,transparent,#1a2027)}
+.cron-spec-section .css-prompt-toggle{margin-top:6px;background:transparent;border:none;color:var(--nz-accent);cursor:pointer;font-size:12px;font-family:inherit;padding:2px 0;-webkit-tap-highlight-color:transparent}
+.cron-spec-section .css-prompt-toggle:hover{text-decoration:underline}
+/* 什么时候 — schedule + next-run lines. */
+.cron-spec-section .css-when-schedule{font-size:14px;color:var(--nz-text-strong);font-weight:500;margin-bottom:4px}
+.cron-spec-section .css-when-next{font-size:12px;color:var(--nz-text-mute)}
+.cron-spec-section .css-when-rel{color:var(--nz-text)}
+.cron-spec-section .css-when-rel.imminent{color:var(--nz-accent);font-weight:600}
+.cron-spec-section .css-when-abs{color:var(--nz-text-faint)}
+.cron-spec-section .css-when-paused{color:var(--nz-text-faint)}
+/* 在哪里 — workdir, single-line truncated path. */
+.cron-spec-section .css-workdir{font-size:13px;color:var(--nz-text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cron-spec-section .css-workdir.mono{font-family:var(--nz-font-mono)}
+/* 其他 — chips for notify + fresh-context. Compact, low-weight. */
+.cron-spec-section.css-other-section{padding:10px 14px}
+.cron-spec-section.css-other-section .css-body{display:flex;flex-wrap:wrap;gap:6px}
+.cron-spec-section .css-other-chip{display:inline-flex;align-items:center;font-size:12px;color:var(--nz-text-mute);background:var(--nz-bg-2);border:1px solid var(--nz-border);border-radius:12px;padding:2px 10px}
+@media(max-width:540px){
+  .cron-drawer-spec{padding:12px 14px;gap:8px}
+  .cron-spec-section{padding:11px 13px}
+  .cron-spec-section .css-prompt-body{font-size:13px}
+}
+
+/* ===== cron-dashboard-redesign P3 §4 — history collapse =====
+ * .ct-rows[data-collapsed="true"] hides everything past the 5th .ctr row;
+ * the [查看全部 N 条] button toggles data-collapsed=false and is replaced
+ * with the existing [加载更多] / [已到结尾] affordance, so deeper paging
+ * keeps working untouched. */
+.cron-drawer-history .ct-rows[data-collapsed="true"] > .ctr:nth-child(n+6){display:none}
+.cron-drawer-history .ct-show-all{background:transparent;border:1px solid var(--nz-border);color:var(--nz-text-mute);font-family:inherit;font-size:12px;padding:6px 14px;border-radius:6px;cursor:pointer;-webkit-tap-highlight-color:transparent;transition:color .12s,border-color .12s,background .12s}
+.cron-drawer-history .ct-show-all:hover{color:var(--nz-accent);border-color:var(--nz-accent);background:rgba(31,111,235,.06)}
+
 /* Drawer current execution */
 .cron-drawer-current{padding:14px 20px;border-bottom:1px solid var(--nz-border)}
 .cron-drawer-current h3{margin:0 0 10px;font-size:13px;color:var(--nz-text-strong);font-weight:600;letter-spacing:.2px}
@@ -1618,7 +1700,7 @@ body.kbd-open .input-hints{display:none}
   .cron-detail-body:not([data-cron-layout]) .cron-detail-pane.is-open{flex:1 1 auto;border-left:none}
 }
 @media(max-width:540px){
-  .cron-drawer-header,.cron-drawer-summary,.cron-drawer-actions,.cron-drawer-current,.cron-drawer-history{padding-left:14px;padding-right:14px}
+  .cron-drawer-header,.cron-drawer-summary,.cron-drawer-actions,.cron-drawer-current,.cron-drawer-history,.cron-drawer-spec{padding-left:14px;padding-right:14px}
 }
 
 /* ===== Frequency picker (Claude-style compact row) =====

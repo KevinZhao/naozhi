@@ -782,9 +782,14 @@ func TestHandleFileGet_RenderHTML(t *testing.T) {
 	if !strings.Contains(csp, "sandbox") || !strings.Contains(csp, "default-src 'none'") {
 		t.Errorf("CSP missing defense-in-depth sandbox/default-src, got %q", csp)
 	}
-	if strings.Contains(csp, "allow-scripts") || strings.Contains(csp, "allow-same-origin") ||
-		strings.Contains(csp, "allow-forms") || strings.Contains(csp, "allow-top-navigation") {
-		t.Errorf("CSP must not grant any sandbox allow-* token, got %q", csp)
+	// allow-scripts is intentional (workspace HTML routinely uses MathJax /
+	// KaTeX / Mermaid / chart libs). Origin isolation comes from blob URL +
+	// withholding allow-same-origin on the iframe — same-origin would
+	// collapse that isolation, so it must NEVER appear in the CSP either.
+	for _, forbidden := range []string{"allow-same-origin", "allow-forms", "allow-top-navigation", "allow-popups"} {
+		if strings.Contains(csp, forbidden) {
+			t.Errorf("CSP must not grant sandbox token %q (collapses opaque-origin isolation), got %q", forbidden, csp)
+		}
 	}
 	if corp := w.Header().Get("Cross-Origin-Resource-Policy"); corp != "same-origin" {
 		t.Errorf("Cross-Origin-Resource-Policy = %q, want same-origin", corp)
@@ -905,9 +910,14 @@ func TestHandleFileGet_RenderSVG(t *testing.T) {
 	if !strings.Contains(csp, "sandbox") || !strings.Contains(csp, "default-src 'none'") {
 		t.Errorf("CSP missing defense-in-depth sandbox/default-src, got %q", csp)
 	}
-	if strings.Contains(csp, "allow-scripts") || strings.Contains(csp, "allow-same-origin") ||
-		strings.Contains(csp, "allow-forms") || strings.Contains(csp, "allow-top-navigation") {
-		t.Errorf("CSP must not grant any sandbox allow-* token, got %q", csp)
+	// allow-scripts is intentional for the same reason as the HTML render
+	// path — keeps math/diagram libs working while blob+sandbox holds the
+	// origin opaque. allow-same-origin would re-grant dashboard origin and
+	// MUST NEVER appear in the CSP.
+	for _, forbidden := range []string{"allow-same-origin", "allow-forms", "allow-top-navigation", "allow-popups"} {
+		if strings.Contains(csp, forbidden) {
+			t.Errorf("CSP must not grant sandbox token %q (collapses opaque-origin isolation), got %q", forbidden, csp)
+		}
 	}
 	if corp := w.Header().Get("Cross-Origin-Resource-Policy"); corp != "same-origin" {
 		t.Errorf("Cross-Origin-Resource-Policy = %q, want same-origin", corp)

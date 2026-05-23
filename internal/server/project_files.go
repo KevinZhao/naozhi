@@ -731,10 +731,19 @@ func (h *ProjectHandlers) serveRender(w http.ResponseWriter, r *http.Request, re
 	w.Header().Set("Content-Disposition", contentDisposition("attachment", resolved))
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	// Belt-and-braces CSP: if a future change flips Content-Type back to
-	// text/html, the sandbox + default-src 'none' still denies script
-	// execution on supporting browsers. Harmless on the octet-stream path.
+	// text/html, the sandbox keeps the document in an opaque origin so it
+	// cannot reach dashboard cookies / DOM. Harmless on the octet-stream
+	// path.
+	//
+	// script-src 'unsafe-inline' 'unsafe-eval' is intentional: workspace
+	// HTML routinely embeds MathJax / KaTeX / Mermaid / chart libs as
+	// <script>...</script>, and MathJax in particular needs eval. Origin
+	// isolation comes from the blob URL (opaque) + iframe sandbox (no
+	// allow-same-origin), NOT from CSP — script execution here cannot read
+	// dashboard cookies regardless. Removing 'unsafe-inline' would silently
+	// break inline math rendering with no security benefit.
 	w.Header().Set("Content-Security-Policy",
-		"default-src 'none'; sandbox; style-src 'unsafe-inline'; img-src 'self' data:; font-src data:")
+		"default-src 'none'; sandbox allow-scripts; script-src 'unsafe-inline' 'unsafe-eval' blob: data:; style-src 'unsafe-inline'; img-src 'self' data: blob:; font-src data:")
 	w.Header().Set("Cross-Origin-Resource-Policy", "same-origin")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	// Workspace bytes must not sit in shared proxy caches under no-auth
