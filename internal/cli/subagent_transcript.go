@@ -26,6 +26,12 @@ type TranscriptReader struct {
 	mu     sync.Mutex
 	offset int64
 	tail   []byte // half-written trailing line from previous Read
+	// readBuf is reused across Tail/Read polls so io.ReadAll's
+	// growth-doubling alloc chain (4 KiB → 8 KiB → 16 KiB) does not fire
+	// every poll. Hot-path agent_tailer at 200 ms × 50 tailers
+	// → 250 alloc/s without; reusing the buffer drops that to 0 in
+	// steady state. R231-PERF-3 / R232-PERF-3.
+	readBuf []byte
 }
 
 // NewTranscriptReader constructs a reader anchored at path. path is trusted
@@ -84,11 +90,21 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]EventEntry, e
 	// KB; 16 MB leaves ample headroom for long-running agents.
 	// (R227-CR-4)
 	const maxTranscriptReadBytes = 16 * 1024 * 1024
-	freshBytes, err := io.ReadAll(io.LimitReader(f, maxTranscriptReadBytes))
+	// R231-PERF-3 / R232-PERF-3: reuse r.readBuf across poll calls to
+	// dodge io.ReadAll's growth-doubling allocs. readAllInto appends to
+	// r.readBuf[:0]; the cap is retained for next call unless it
+	// exceeds readBufRetainCap (one-off oversized poll won't pin memory).
+	const readBufRetainCap = 256 * 1024
+	r.readBuf = r.readBuf[:0]
+	freshBytes, err := readAllInto(io.LimitReader(f, maxTranscriptReadBytes), r.readBuf)
 	if err != nil {
 		return nil, err
 	}
 	readLen := int64(len(freshBytes))
+	r.readBuf = freshBytes
+	if cap(r.readBuf) > readBufRetainCap {
+		r.readBuf = nil
+	}
 
 	// Concatenate [prior partial][fresh bytes] for line splitting.
 	data := freshBytes
@@ -141,6 +157,30 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]EventEntry, e
 }
 
 // advanceOffset adjusts r.offset after an early `break` on limit. We honor
+// readAllInto reads everything from r into the supplied buffer, growing it
+// in-place via append. Mirrors io.ReadAll's contract (read until EOF,
+// nil err on success) but lets the caller hand in a reusable backing slice
+// so steady-state polling does not allocate a new buffer for every call.
+// R231-PERF-3 / R232-PERF-3.
+func readAllInto(r io.Reader, buf []byte) ([]byte, error) {
+	if buf == nil {
+		buf = make([]byte, 0, 512)
+	}
+	for {
+		if len(buf) == cap(buf) {
+			buf = append(buf, 0)[:len(buf)]
+		}
+		n, err := r.Read(buf[len(buf):cap(buf)])
+		buf = buf[:len(buf)+n]
+		if err != nil {
+			if err == io.EOF {
+				return buf, nil
+			}
+			return buf, err
+		}
+	}
+}
+
 // the invariant: r.offset + len(r.tail) points at the next byte the OS has
 // yet to hand us. When limit truncates processing mid-buffer, bytes between
 // `consumed` and the end of `data` are NOT re-buffered into r.tail — they
