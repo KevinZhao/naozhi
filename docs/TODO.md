@@ -125,14 +125,14 @@
 - [ ] **R234-GO-1 — runstore.cacheHeadPush O(N) memmove 仍未修（P1）**：`append+copy` 对 keepCount=200 slice 触发 200-element memmove 持 entry.mu 期间执行；1Hz×50 jobs = 250 次/s cache-line 污染。建议 `recentCacheEntry` 改 ring buffer（head int + buf [keepCount]CronRunSummary），head/tail O(1) prepend。同根因主条目 R233-PERF-2。
 - [x] **R234-GO-2 — `atomic.Pointer[string]` 存局部变量地址 escape-analysis 暗契约（P1）**：runinflight.go:107 + scheduler.go:2008 `setPhase`/`executeOpt` 两处 `Store(&localVar)` 模式依赖编译器隐式 escape。建议引入包级 `func strHeap(s string) *string { v := s; return &v }` helper 或改 `atomic.Value` 存 string。R233B-GO-1 同根因。 — 已修复（commit e9b0640，strHeap/timeHeap helpers 已落地，本批 PR）
 - [ ] **R234-GO-3 — scheduler.go:778 `go trimAll` goroutine 无 WaitGroup（P1）**：Stop 不等待此 goroutine 退出，半删 runs 目录残留 / 重启并发 trimAll 可能与 per-job lock 之外的 ReadDir+Remove 出现窗口。建议给 `trimAll` 加 `s.gcWG sync.WaitGroup`，Stop 先 gcWG.Wait()（带短超时）+ 传 ctx 让 trimAll 内每个 jobID 循环检查 `ctx.Err()`。
-- [ ] **R234-GO-4 — runstore.cacheGet 双锁窗口（P2）**：第一次释放 entry.mu 后 warmCache 在 entry.mu.Lock 前另一 Append 已 cacheHeadPush no-op + trimJobLocked 触发 cacheTrimAfterDisk no-op，warmCache 再读磁盘可能漏掉刚 Append 条目。建议在 warmCache 内 entry.mu.Lock 前先 jobLock.Lock（已有此模式）。
-- [ ] **R234-GO-5 — sysession.Manager.Stop wg.Wait goroutine 无 WG 跟踪（P2）**：osExit(2) 兜底当前安全（进程死亡），但若测试替换 osExit 为 panic-recovery，goroutine 永久阻塞。建议加注释 `// goroutine intentionally abandoned — osExit terminates the process` 或改为外层 select 不再包 goroutine。
+- [x] **R234-GO-4 — runstore.cacheGet 双锁窗口（P2）**：第一次释放 entry.mu 后 warmCache 在 entry.mu.Lock 前另一 Append 已 cacheHeadPush no-op + trimJobLocked 触发 cacheTrimAfterDisk no-op，warmCache 再读磁盘可能漏掉刚 Append 条目。建议在 warmCache 内 entry.mu.Lock 前先 jobLock.Lock（已有此模式）。 — 仓库已实现：`internal/cron/runstore.go:374-389` warmCache 在 entry.mu.Lock 前先取 jobLock，与 cacheGet 双锁窗口契约一致。
+- [x] **R234-GO-5 — sysession.Manager.Stop wg.Wait goroutine 无 WG 跟踪（P2）**：osExit(2) 兜底当前安全（进程死亡），但若测试替换 osExit 为 panic-recovery，goroutine 永久阻塞。建议加注释 `// goroutine intentionally abandoned — osExit terminates the process` 或改为外层 select 不再包 goroutine。 — 已修复（commit 824d9f7，sysession/manager.go:328 godoc 锚点解释 watcher goroutine 故意 orphan + osExit 契约）。
 - [x] **R234-GO-6 — scheduler.executeOpt inflight 初始化 6 次 atomic.Pointer.Store(&localVar) escape（P2）**：6 个局部变量各自 heap 分配。建议 `strHeap` / `timeHeap` helpers 或 mutex-protected 直接 value 字段。 — 已修复（commit e9b0640 同步修复，与 R234-GO-2 共享 helper，本批 PR）
 - [ ] **R234-GO-8 — runstore.diskListNewestFirst 不区分 mtime-only 与 full-parse 路径（P2）**：warmCache 走也会 ReadFile 全部文件。建议拆 `diskListMtime`（只 ReadDir+stat+sort）和 `diskReadSummaries`（batch ReadFile）。
-- [ ] **R234-GO-10 — runstore.trimJobLocked sort 用 cmp.Compare(UnixNano) 而非 time.Compare（P3）**：边界精度 + 风格。建议 `slices.SortFunc(items, func(a,b) int { return b.mtime.Compare(a.mtime) })`。
+- [x] **R234-GO-10 — runstore.trimJobLocked sort 用 cmp.Compare(UnixNano) 而非 time.Compare（P3）**：边界精度 + 风格。建议 `slices.SortFunc(items, func(a,b) int { return b.mtime.Compare(a.mtime) })`。 — 已修复（commit a130a96，runstore.go:665 改用 b.mtime.Compare(a.mtime) 保 monotonic + 防 2262 nanosecond 溢出）。
 - [ ] **R234-GO-11 — sysession.Manager.startOnce.Do 内 m.started.Store(true) 时序（P3）**：start.Store 应在 daemon goroutine 启动之前以匹配"Store 完成 ≡ goroutines running"语义。
-- [ ] **R234-GO-12 — Scheduler 锁层级文档（s.mu vs runStore.jobLock）未注释（P3）**：建议 Scheduler 结构体注释加 `s.mu > runStore.jobLock(jobID) > recentCacheEntry.mu`。
-- [ ] **R234-GO-15 — trimAll goroutine 无 ctx 传播 Stop 无法中断（P3）**：归 R234-GO-3 同主条目。
+- [x] **R234-GO-12 — Scheduler 锁层级文档（s.mu vs runStore.jobLock）未注释（P3）**：建议 Scheduler 结构体注释加 `s.mu > runStore.jobLock(jobID) > recentCacheEntry.mu`。 — 已修复（commit 42c6bc1，scheduler.go:218 godoc 锚点 `s.mu > jobLock > entry.mu` 完整层级）。
+- [x] **R234-GO-15 — trimAll goroutine 无 ctx 传播 Stop 无法中断（P3）**：归 R234-GO-3 同主条目。 — 已修复（commit db3b7f0，scheduler.go:829 godoc 显式声明 cold-start trimAll goroutine 故意 orphan 的设计契约 + 取舍解释；中断需求转 R234-GO-3 主条目继续跟踪）。
 
 ### 安全 — 本轮新发现
 
