@@ -221,6 +221,22 @@ func NewDispatcher(cfg DispatcherConfig) *Dispatcher {
 	if d.takeoverFn == nil {
 		d.takeoverFn = func(context.Context, string, string, session.AgentOpts) bool { return false }
 	}
+	// R228-ARCH-14 defensive nil-guard: sendFn is the closure-pattern field
+	// most likely to be silently missed during test wiring (TakeoverFn /
+	// watchdog counters already get noop fallbacks above). Production
+	// callers always set cfg.SendFn — a nil here means a test constructed
+	// the Dispatcher without it and is exercising a non-IM path that
+	// happens to hit sendAndReply by accident. Wire a clearly-failing
+	// stub so the test panics with a useful error string instead of a
+	// raw nil-func panic that bubbles up through the goroutine and is
+	// hard to attribute. The closure-pattern → interface migration
+	// tracked by R228-ARCH-14 stays open; this is the cheap defensive
+	// half of that fix.
+	if d.sendFn == nil {
+		d.sendFn = func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error) {
+			return nil, fmt.Errorf("dispatch: sendFn not wired (DispatcherConfig.SendFn missing) — production wiring sets this in server.NewWithOptions; test fixtures must inject a stub before calling sendAndReply / Dispatch")
+		}
+	}
 	// Same rationale for the watchdog kill counters: production wiring sets
 	// them, but tests routinely build a Dispatcher without these fields. The
 	// watchdog hot path calls .Add(1) unconditionally; nil here would panic.
