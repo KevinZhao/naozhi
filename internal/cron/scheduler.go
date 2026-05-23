@@ -1846,6 +1846,17 @@ func (s *Scheduler) freshContextPreflightP0(args preflightArgs) (stubRefresh fun
 		s.deliverNotice(args.notifyTo, fmt.Sprintf("[Cron %s] 工作目录不可达，本次执行已跳过。", snap.labelOrID()))
 		return noopRefresh, false
 	}
+	// CRON1 (acknowledged, non-blocking): Reset + GetOrCreate is NOT atomic.
+	// Between this Reset and the executeOpt-caller's GetOrCreate (two separate
+	// router lock acquisitions) a concurrent cron trigger / dashboard send
+	// targeting the same key can win the race and rebuild the session with
+	// stale opts, defeating fresh semantics. The runInflight CAS gate (cron
+	// side) makes a second cron tick for the same job a no-op overlap-skip,
+	// and dashboard sends to a `cron:<id>` key are firewalled at the
+	// reservedKeyPrefixes layer — so the only practical racer is a manual
+	// IM `/cron run <id>` arriving in the gap, which is rare enough that we
+	// accept the weak semantics rather than holding the router lock across
+	// spawn. Long-term fix tracked under TODO CRON1.
 	s.router.Reset(args.key)
 	lg.Info("cron fresh context: session reset before run")
 	refresh := func() {

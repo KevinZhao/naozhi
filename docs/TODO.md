@@ -1076,7 +1076,7 @@
   - 待决策: 接入单 consumer save goroutine + dirty flag 模式，与 session.saveIfDirty 对齐？还是保持同步提升确定性？
   - 涉及: `internal/cron/scheduler.go:998`
 
-- [ ] **CRON1 — `fresh_context` 下 `Reset + GetOrCreate` 非原子**: cron scheduler `execute` 在 fresh 模式先 `router.Reset(key)` 再 `router.GetOrCreate(ctx, key, opts)`，两次锁获取之间其他 cron trigger / dashboard send 若并发到达同 key 会用旧 opts 重建 session，绕过 fresh 语义。当前未暴露 bug（cron + dashboard 极少同 key），但语义薄弱。
+- [x] **CRON1 — `fresh_context` 下 `Reset + GetOrCreate` 非原子（doc-and-accept 2026-05-23）**: cron scheduler `execute` 在 fresh 模式先 `router.Reset(key)` 再 `router.GetOrCreate(ctx, key, opts)`，两次锁获取之间其他 cron trigger / dashboard send 若并发到达同 key 会用旧 opts 重建 session，绕过 fresh 语义。当前未暴露 bug（cron + dashboard 极少同 key），但语义薄弱。【2026-05-23 godoc anchor】freshContextPreflightP0 内 Reset 调用前已加 12 行 CRON1 注释解释为何接受弱语义：runInflight CAS gate 拦掉同 job 第二次 cron tick；dashboard send 到 `cron:<id>` 被 reservedKeyPrefixes 层防住；唯一现实 racer 是 gap 期手动 `/cron run <id>`，频率太低不值得持锁跨 spawn。本条仍跟进 ResetAndGetOrCreate atomic API。
   - 待决策: 在 Router 暴露原子 `ResetAndGetOrCreate(ctx, key, opts)`？还是文档化 cron key namespace 隔离？
   - 涉及: `internal/cron/scheduler.go:820`, `internal/session/router.go Reset/GetOrCreate`
 
