@@ -59,6 +59,24 @@ func isUnderSafeDir(path string) bool {
 }
 
 // MimeFromPath returns a MIME type based on file extension.
+//
+// R228-ARCH-5 archive anchor: this function is the inverse of
+// `platform.ImageExt(mime) string` — they together form a small but
+// genuinely two-way mapping (path→mime here; mime→ext over there).
+// A previous review proposed extracting both into a shared
+// `internal/imageutil` package. Decision: keep them in their current
+// owners. cli.MimeFromPath is consumed by cli's own `dispatch.go` image
+// pipeline (the only caller passes paths produced by ExtractImagePaths
+// above, so MIME inference is a CLI-protocol concern). platform.ImageExt
+// names files for outbound platform uploads (filename extension is a
+// presentation concern in the channel adapter). The two surfaces happen
+// to share a 5-entry switch but evolve under different drivers — adding
+// HEIC support, for instance, depends on whether the change is "Claude
+// CLI now emits .heic in tool_use" (here) vs "Feishu accepts image/heic
+// in upload API" (there). Co-locating them under imageutil would couple
+// the two evolution axes for a savings of <30 lines. The duplication is
+// acknowledged and accepted; consumers must update both sites when
+// extending the supported MIME set.
 func MimeFromPath(path string) string {
 	switch strings.ToLower(filepath.Ext(path)) {
 	case ".png":
