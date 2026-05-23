@@ -526,6 +526,17 @@ const defaultExecTimeout = 5 * time.Minute
 // 30s in-flight budget — see notifyTarget call site for the shutdown contract.
 const cronNotifyTimeout = 30 * time.Second
 
+// cronNotifyRetryAttempts is the per-chunk retry budget passed to
+// platform.ReplyWithRetry inside notifyTarget. 3 attempts is the same value
+// dispatch.replyText uses for user-facing turn output, keeping cron
+// notifications and dispatch replies on the same retry envelope so a
+// flaky webhook surface produces consistent outcomes across both paths.
+// Higher values would risk crowding cronNotifyTimeout (each attempt eats a
+// non-trivial slice of the 30 s budget); lower would surface transient
+// network blips as silent drops since the per-target failure is only
+// logged at Warn.
+const cronNotifyRetryAttempts = 3
+
 // DefaultMaxJobsPerChat bounds how many cron jobs a single chat (platform+
 // chat_id pair) may own. Prevents one loud group from consuming the
 // global MaxJobs quota. Exported so tests and docs can reference the
@@ -2770,7 +2781,7 @@ func (s *Scheduler) notifyTarget(plat, chatID, text string) {
 		if _, err := platform.ReplyWithRetry(replyCtx, p, platform.OutgoingMessage{
 			ChatID: chatID,
 			Text:   chunk,
-		}, 3); err != nil {
+		}, cronNotifyRetryAttempts); err != nil {
 			slog.Warn("cron notify target failed", "platform", plat, "chat", chatID, "err", err)
 		}
 	}
