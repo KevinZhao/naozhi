@@ -1401,7 +1401,7 @@
   - 方案: 流式 event 改增量渲染（只重渲染最后 N 行）；`running` 状态用 `textContent` 纯文本，`result` 事件后再 MD 渲染。
   - 涉及: `internal/server/static/dashboard.js:5678-5693, 6194-6280`
 
-- [ ] **RNEW-PERF-004 — `EventLog.notifySubscribers` 在 RLock 内做 channel send（已部分缓解）**: `internal/cli/eventlog.go:728-740` `subMu.RLock` 下遍历 subscribers 做非阻塞 channel send；50 WS × 10 sub 场景下每 Append 触发 50 次 send + atomic dropped 计数。**现有缓解**：R65-PERF-M-1 已把 `subMu` 从 `sync.Mutex` 升级为 `sync.RWMutex`（多个 notify 不互斥）+ `subCount atomic.Int32` fast-path 在零订阅时完全跳过锁（`eventlog.go:729`）。剩余窗口仅在 subscriber > 0 且多 Append 并发时触发，"snapshot then unlock" 能再省锁内 send 的串行化。降级为 MEDIUM/defense-in-depth。
+- [x] **RNEW-PERF-004 — `EventLog.notifySubscribers` 在 RLock 内做 channel send（已部分缓解）**: 已加 archive anchor 在 `internal/cli/eventlog.go::notifySubscribers`：snapshot-then-send 在并发 Append 路径上已经通过 RWMutex 的 R-acquire 共享允许并发 notify race 同一 channel；剩余串行化只在 map 迭代本身（R230B-PERF-8 已证明 single-bucket cheap）。snapshot 会引入 per-notify slice alloc，trade-off 不划算。Re-evaluate only with production profile evidence。
   - 方案: 先 RLock 下快照 subscriber slice → 释放锁 → 锁外做 channel send。
   - 涉及: `internal/cli/eventlog.go:728-740`
 

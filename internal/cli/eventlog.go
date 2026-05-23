@@ -979,6 +979,19 @@ func (l *EventLog) AppendBatch(entries []EventEntry) {
 // proof. Net gain on hot path is sub-percent at current N. If 5000+ session
 // dashboards become hot, swap the map for a ring buffer of *subscriber
 // rather than micro-branching here.
+//
+// RNEW-PERF-004 (MEDIUM/defense-in-depth, archived): the
+// "snapshot subscribers under RLock then send outside the lock"
+// proposal would let multiple notify calls send concurrently on
+// channels held by overlapping subscriber sets — but the current
+// non-blocking-send-under-RLock pattern *already* allows concurrent
+// notifyers to race on the same channel (the RWMutex's R-acquire is
+// shared). The remaining serialisation is on the map iterator
+// itself, which is single-bucket-cheap as discussed in R230B-PERF-8.
+// Snapshotting also doubles allocations (one slice per notify) which
+// likely outweighs the tiny critical-section reduction at 50 WS × 10
+// sub. Re-evaluate only if profiling shows the iteration loop
+// dominates Append wall-clock at production scale.
 func (l *EventLog) notifySubscribers() {
 	if l.subCount.Load() == 0 {
 		return
