@@ -2053,19 +2053,17 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	if viaTriggerNow {
 		trigger = TriggerManual
 	}
-	{
-		rid := runID
-		st := startedAt
-		ph := PhaseQueued
-		tr := string(trigger)
-		empty := ""
-		inflight.runID.Store(&rid)
-		inflight.startedAt.Store(&st)
-		inflight.phase.Store(&ph)
-		inflight.trigger.Store(&tr)
-		inflight.sessionID.Store(&empty)
-		inflight.freshSnap.Store(j.FreshContext)
-	}
+	// R234-GO-6: route every atomic.Pointer.Store through strHeap/timeHeap
+	// (runinflight.go) so the heap allocation is explicit rather than relying
+	// on escape-analysis lifting `&localVar`. Pre-existing semantics (one
+	// alloc per field on this path) are unchanged; the helpers exist purely
+	// as a readability + future-inliner safety anchor.
+	inflight.runID.Store(strHeap(runID))
+	inflight.startedAt.Store(timeHeap(startedAt))
+	inflight.phase.Store(strHeap(PhaseQueued))
+	inflight.trigger.Store(strHeap(string(trigger)))
+	inflight.sessionID.Store(strHeap(""))
+	inflight.freshSnap.Store(j.FreshContext)
 	metrics.CronRunInflight.Add(1)
 	// CronRunStartedTotal bumps inside emitRunStarted (R230C-GO-15).
 

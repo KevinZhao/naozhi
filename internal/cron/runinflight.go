@@ -45,6 +45,34 @@ const (
 	PhaseSending   = "sending"
 )
 
+// strHeap returns a *string referencing a fresh heap-allocated copy of s.
+// R234-GO-2 / R234-GO-6: setPhase / setSessionID and the 5-field initializer
+// in executeOpt previously called `r.phase.Store(&phase)` directly on a
+// parameter or local variable. That pattern depends on Go's escape analysis
+// promoting the operand to the heap when the address is captured by an
+// atomic.Pointer.Store; it is a soundness contract enforced by the
+// compiler today, but it is silent — readers cannot tell from the call site
+// that the local "must" escape, and a future inliner change could surprise.
+//
+// Routing every Store through strHeap makes the heap allocation explicit and
+// removes the escape-analysis dependency. The single named local (`p := s`)
+// captured by `&p` is unambiguously addressable storage that survives the
+// caller's stack frame regardless of inlining heuristics.
+//
+// Cost is identical to the prior code (one heap alloc per Store) — the
+// helper is purely a readability + correctness anchor.
+func strHeap(s string) *string {
+	p := s
+	return &p
+}
+
+// timeHeap is the time.Time analogue of strHeap. Same rationale: explicit
+// heap copy for atomic.Pointer[time.Time].Store.
+func timeHeap(t time.Time) *time.Time {
+	p := t
+	return &p
+}
+
 // reset 把 inflight 字段清回未运行态。CAS Store(false) 由 executeOpt defer
 // 调用；reset 单独抽出来是因为 DeleteJobByID 路径下我们不动 atomic.Bool
 // （见 scheduler.go runningJobs 注释——历史 entry 不清，避免 ID 复用 split
@@ -54,13 +82,11 @@ func (r *runInflight) reset() {
 	if r == nil {
 		return
 	}
-	empty := ""
-	r.runID.Store(&empty)
-	r.phase.Store(&empty)
-	r.trigger.Store(&empty)
-	r.sessionID.Store(&empty)
-	zero := time.Time{}
-	r.startedAt.Store(&zero)
+	r.runID.Store(strHeap(""))
+	r.phase.Store(strHeap(""))
+	r.trigger.Store(strHeap(""))
+	r.sessionID.Store(strHeap(""))
+	r.startedAt.Store(timeHeap(time.Time{}))
 	r.freshSnap.Store(false)
 }
 
@@ -111,7 +137,7 @@ func (r *runInflight) setPhase(phase string) {
 	if cur := r.phase.Load(); cur != nil && *cur == phase {
 		return
 	}
-	r.phase.Store(&phase)
+	r.phase.Store(strHeap(phase))
 }
 
 // setSessionID 写入 GetOrCreate 拿到的 session_id。同样 fast-path 去重。
@@ -122,7 +148,7 @@ func (r *runInflight) setSessionID(id string) {
 	if cur := r.sessionID.Load(); cur != nil && *cur == id {
 		return
 	}
-	r.sessionID.Store(&id)
+	r.sessionID.Store(strHeap(id))
 }
 
 // jobRunCounters 是 Job 的累计计数。维护策略详见 RFC §3.2：list API 直接
