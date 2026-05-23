@@ -1095,6 +1095,23 @@ func (l *EventLog) LastN(n int) []EventEntry {
 // hot streaming path (k = 1-5 new events per notify) the constant savings are
 // small but the code path is simpler and avoids the arithmetic error surface
 // of two separate modular indexing expressions.
+//
+// R220-PERF-3 anchor: an earlier review proposal suggested releasing l.mu
+// (RLock) before the copy phase to drop the "500-entry × 512B copy under
+// RLock" worst-case. In practice the worst case never triggers — the
+// backward scan break()s on the first entry with `Time <= afterMS`, so the
+// copy length equals the count of matches strictly newer than afterMS. The
+// streaming subscriber path passes the previous notify's max timestamp, so
+// k is bounded by "events appended since the last notify", which is 1-5
+// in steady state and at most a few dozen during burst loads. The initial
+// catch-up call (subscriber join) does pass afterMS=0 and could collect
+// every ring slot, but the lazy `make` with `initialCap=min(matches, 16)`
+// caps the initial allocation; subsequent grows are append-driven and
+// happen under RLock for at most ring-size iterations. A snapshot-then-
+// unlock variant would require either a second slice copy (defeating the
+// optimisation) or unsafe pointer aliasing onto the live ring (defeating
+// correctness when Append rotates head mid-copy). Keeping the existing
+// design.
 func (l *EventLog) EntriesSince(afterMS int64) []EventEntry {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
