@@ -160,13 +160,9 @@ type TriggerKind string
 const (
 	TriggerScheduled TriggerKind = "scheduled"
 	TriggerManual    TriggerKind = "manual"
-	// TriggerCatchup is RESERVED for the missed-schedule replay path (P3,
-	// not yet implemented). No production code emits this value — consumers
-	// receiving it today indicate either a forward-compat schema bump or a
-	// test fixture, never a real catchup run. Treat unknown trigger strings
-	// as forward-compatible to keep this seam stable. Tracked in
-	// docs/TODO.md R232-CR-8: keep as-is until the missed-schedule replay
-	// feature ships.
+	// TriggerCatchup is reserved for the missed-schedule replay path (P3,
+	// not yet implemented). No production code emits it today; consumers
+	// should treat unknown trigger strings as forward-compatible.
 	TriggerCatchup TriggerKind = "catchup"
 )
 
@@ -189,11 +185,8 @@ const (
 	ErrClassWorkDirOutsideRoot ErrorClass = "workdir_outside_root"
 	ErrClassOverlapSkipped     ErrorClass = "overlap_skipped"
 	ErrClassPausedConcurrent   ErrorClass = "paused_concurrent"
-	// ErrClassPanic is RESERVED for the future panic-recovery path
-	// (P3, not yet implemented); finishRun never emits it today. Any
-	// observation of "panic" in cron_jobs.json or run history must be
-	// from a forward-compat schema bump or a test fixture, not a real
-	// panic recovery. Tracked in docs/TODO.md R232-CR-8.
+	// ErrClassPanic is reserved for the future panic-recovery path
+	// (P3, not yet implemented); finishRun does not emit it today.
 	ErrClassPanic ErrorClass = "panic"
 )
 
@@ -275,15 +268,11 @@ var cronParser = robfigcron.NewParser(
 // Prevents resource exhaustion from overly frequent schedules like "@every 1s".
 const minCronInterval = 5 * time.Minute
 
-// computeJobTimeout returns the per-run deadline for a job. The timeout is
-// always maxCap (SchedulerConfig.ExecTimeout) — independent of schedule
-// period.
-//
-// Why no period scaling: a long-running task (e.g. hourly job that takes 70m)
-// should not be killed mid-flight just because the next scheduled tick is
-// approaching. robfig/cron's SkipIfStillRunning chain wrapper already handles
-// that case correctly: the next scheduled tick is dropped, the in-flight run
-// continues, and the tick after that gets a clean slot.
+// computeJobTimeout returns the per-run deadline for a job: always maxCap
+// (SchedulerConfig.ExecTimeout). A long-running job (e.g. hourly task that
+// takes 70m) must not be killed mid-flight just because the next scheduled
+// tick is approaching — robfig/cron's SkipIfStillRunning chain wrapper drops
+// the colliding tick instead.
 func computeJobTimeout(maxCap time.Duration) time.Duration {
 	return maxCap
 }

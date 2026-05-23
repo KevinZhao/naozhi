@@ -27,12 +27,6 @@ type stubCall struct {
 	chainIDs  []string
 }
 
-func (f *fakeSessionRouter) RegisterCronStub(key, workspace, prompt string) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	f.registerCalls = append(f.registerCalls, stubCall{key, workspace, prompt, nil})
-}
-
 func (f *fakeSessionRouter) RegisterCronStubWithChain(key, workspace, prompt string, chainIDs []string) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

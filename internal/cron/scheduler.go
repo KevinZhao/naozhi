@@ -70,15 +70,15 @@ var ErrPersistFailed = errors.New("cron: persist jobs failed")
 // makes accidental surface-area growth a compile error instead of a silent
 // regression.
 type SessionRouter interface {
-	// RegisterCronStub creates (or refreshes) a suspended exempt session
-	// entry so the cron job shows up in the dashboard sidebar before its
-	// first run. Key is always "cron:<jobID>".
-	RegisterCronStub(key, workspace, lastPrompt string)
-	// RegisterCronStubWithChain 在 RegisterCronStub 的基础上额外注入
-	// 一个 session-ID 链，赋给 stub 的 prevSessionIDs。这样 fresh_context
-	// cron 每次 Reset 后新建的 stub 仍然能通过 historySource 查到上一次
-	// 成功运行留下的 JSONL 历史（~/.claude/projects/<cwd>/<id>.jsonl）。
-	// chainIDs 为空 / nil 时等同于 RegisterCronStub。
+	// RegisterCronStubWithChain creates (or refreshes) a suspended exempt
+	// session entry so the cron job shows up in the dashboard sidebar before
+	// its first run. Key is always "cron:<jobID>".
+	//
+	// chainIDs 注入一组 session-ID 链给 stub 的 prevSessionIDs，让
+	// fresh_context cron 每次 Reset 后新建的 stub 仍能通过 historySource
+	// 查到上一次成功运行留下的 JSONL 历史
+	// （~/.claude/projects/<cwd>/<id>.jsonl）。chainIDs 为空 / nil 时
+	// 等同于无链 stub 注册。
 	RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string)
 	// Reset discards the session for the given key (used by fresh-mode
 	// cron jobs and by Delete/Rename flows).
@@ -492,7 +492,7 @@ const maxJobsHardCap = 500
 // default — no way to "disable" the cap without rebuilding).
 //
 // Relationship to exempt pool (BL2 acknowledged design):
-// Every cron job calls session.Router.RegisterCronStub at scheduler
+// Every cron job calls session.Router.RegisterCronStubWithChain at scheduler
 // Start / AddJob time and consumes 1 slot from session.maxExemptSessions
 // (currently 20). At DefaultMaxJobsPerChat=10 × 2 busy chats, the exempt
 // pool is fully consumed and planner/scratch exempt sessions may be
@@ -2630,8 +2630,12 @@ func redactPathsInCronError(s string) string {
 	if s == "" {
 		return s
 	}
+	// Byte-level cap, but split on a rune boundary — naked s[:maxRedactErrLen]
+	// can fall mid-codepoint for multibyte runes (CJK error messages from the
+	// CLI), producing invalid UTF-8 that then poisons cron_jobs.json.
 	if len(s) > maxRedactErrLen {
-		s = s[:maxRedactErrLen] + "…"
+		n := textutil.TruncateAtRuneBoundary(s, maxRedactErrLen)
+		s = s[:n] + "…"
 	}
 	// Fast path: if the string contains no POSIX slash and no Windows
 	// backslash, there is nothing path-shaped to redact — skip the Builder

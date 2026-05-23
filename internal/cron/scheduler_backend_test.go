@@ -20,7 +20,6 @@ type backendCapturingRouter struct {
 	captured []session.AgentOpts
 }
 
-func (r *backendCapturingRouter) RegisterCronStub(key, workspace, lastPrompt string) {}
 func (r *backendCapturingRouter) RegisterCronStubWithChain(key, workspace, lastPrompt string, chainIDs []string) {
 }
 func (r *backendCapturingRouter) Reset(key string) {}
