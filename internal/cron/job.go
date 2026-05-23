@@ -163,6 +163,9 @@ const (
 	// TriggerCatchup is reserved for the missed-schedule replay path (P3,
 	// not yet implemented). No production code emits it today; consumers
 	// should treat unknown trigger strings as forward-compatible.
+	// R235-CR-13: do NOT reference this value from production code paths
+	// until the missed-schedule replay design is settled — adding stray
+	// emit sites now would freeze a wire format that may still change.
 	TriggerCatchup TriggerKind = "catchup"
 )
 
@@ -268,15 +271,6 @@ var cronParser = robfigcron.NewParser(
 // Prevents resource exhaustion from overly frequent schedules like "@every 1s".
 const minCronInterval = 5 * time.Minute
 
-// computeJobTimeout returns the per-run deadline for a job: always maxCap
-// (SchedulerConfig.ExecTimeout). A long-running job (e.g. hourly task that
-// takes 70m) must not be killed mid-flight just because the next scheduled
-// tick is approaching — robfig/cron's SkipIfStillRunning chain wrapper drops
-// the colliding tick instead.
-func computeJobTimeout(maxCap time.Duration) time.Duration {
-	return maxCap
-}
-
 // schedulePeriod 估算给定 cron 表达式在参考时刻 now 附近的周期（相邻两次
 // 触发的间隔）。通过 sched.Next 两次外推实现，精度对 "每 N 分钟 /
 // 每天 HH:MM" 这类常见形态足够。无法解析 / 不等间隔（DST 切换窗口）
@@ -285,8 +279,7 @@ func computeJobTimeout(maxCap time.Duration) time.Duration {
 // now 必须由调用方显式提供，保证和上层 HasMissedSchedule /
 // previousTickBefore 读取的"现在"完全同步——避免在 DST 切换或 NTP 校
 // 正瞬间两者跨越不同小时，导致 period 估成 23h/25h 而产生 missed 假
-// 判定。computeJobTimeout / applyJitter 不在意这种纳秒级 skew，传
-// time.Now() 即可。
+// 判定。applyJitter 不在意这种纳秒级 skew，传 time.Now() 即可。
 func schedulePeriod(schedule string, now time.Time) time.Duration {
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {
@@ -322,9 +315,13 @@ func previousTickBefore(schedule string, now time.Time) time.Time {
 	start := now.Add(-3 * period)
 	prev := time.Time{}
 	// 上限守卫：极端 DST/月底场景下若 sched.Next 进展极慢，避免
-	// 在 dashboard 1Hz 轮询路径短暂阻塞。1000 次足以覆盖任何
-	// 合法 cron schedule 在 3×period 窗口内的迭代次数。
-	for i := 0; i < 1000; i++ {
+	// 在 dashboard 1Hz 轮询路径短暂阻塞。previousTickMaxIter（1000）
+	// 足以覆盖任何合法 cron schedule 在 3×period 窗口内的迭代次数：
+	//   - 最密集合法 schedule period == minCronInterval (5min) →
+	//     3×period / period == 3 次迭代。
+	//   - 月度 schedule period ≈ 31d → 3×period / 1d ≈ 93 次。
+	//   - DST/闰月最坏 ~365 次。1000 留 ~3× 安全裕量。
+	for i := 0; i < previousTickMaxIter; i++ {
 		next := sched.Next(start)
 		if !next.Before(now) {
 			return prev

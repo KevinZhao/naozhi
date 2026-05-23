@@ -110,6 +110,17 @@ func loadJobs(path string) (map[string]*Job, error) {
 		if j.ID == "" {
 			continue
 		}
+		// R235-CR-12: enforce ID hex shape on load. AddJob always produces
+		// IsValidID-conformant IDs (generateID), so a non-conformant ID came
+		// either from a hand-edited cron_jobs.json or from an attacker writing
+		// the file directly. runStore.Append rejects the same job at runtime
+		// (slog.Warn + return), but the entry would otherwise sit in s.jobs
+		// forever and round-trip back to disk on every persist.
+		if !IsValidID(j.ID) {
+			slog.Warn("cron store: dropping job with invalid ID",
+				"path", path, "cron_id_bytes", len(j.ID))
+			continue
+		}
 		// R234-SEC-12: defensive prompt validation. AddJob / dashboard PATCH
 		// already enforce validateCronPrompt (UTF-8 + no C0 controls except
 		// \t/\n/\r), but cron_jobs.json can be edited directly by an
@@ -122,6 +133,21 @@ func loadJobs(path string) (map[string]*Job, error) {
 		if !utf8.ValidString(j.Prompt) || containsCronC0(j.Prompt) {
 			slog.Warn("cron store: dropping job with invalid prompt bytes",
 				"path", path, "cron_id", j.ID, "prompt_bytes", len(j.Prompt))
+			continue
+		}
+		// R235-CR-5: same defensive rationale for Title / Backend. AddJob /
+		// dashboard PATCH validate these before accepting; an attacker
+		// hand-editing the JSON could smuggle bidi / control bytes into
+		// dashboard responses and platform notifications via Job.Title or
+		// Job.Backend, so drop offenders here as well.
+		if !utf8.ValidString(j.Title) || containsCronC0(j.Title) {
+			slog.Warn("cron store: dropping job with invalid title bytes",
+				"path", path, "cron_id", j.ID, "title_bytes", len(j.Title))
+			continue
+		}
+		if !utf8.ValidString(j.Backend) || containsCronC0(j.Backend) {
+			slog.Warn("cron store: dropping job with invalid backend bytes",
+				"path", path, "cron_id", j.ID, "backend_bytes", len(j.Backend))
 			continue
 		}
 		m[j.ID] = j
