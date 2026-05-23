@@ -115,6 +115,14 @@ func (f *Feishu) registerWebhook(mux *http.ServeMux, handler platform.MessageHan
 			timestamp := r.Header.Get("X-Lark-Request-Timestamp")
 			nonce := r.Header.Get("X-Lark-Request-Nonce")
 			sig := r.Header.Get("X-Lark-Signature")
+			// R235-SEC-5: cap signature length before []byte materialisation.
+			// Real Feishu signatures are 64 hex chars; an oversized header is
+			// either misconfigured or an attempted memory-amplification probe.
+			if len(sig) > maxWebhookSignatureLen {
+				slog.Warn("feishu signature header too long", "len", len(sig))
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
 			if !verifySignature(timestamp, nonce, f.cfg.EncryptKey, body, sig) {
 				slog.Warn("feishu signature verification failed")
 				w.WriteHeader(http.StatusUnauthorized)

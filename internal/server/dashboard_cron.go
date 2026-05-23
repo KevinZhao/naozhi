@@ -819,6 +819,14 @@ func (h *CronHandlers) handleTrigger(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "id too long", http.StatusBadRequest)
 		return
 	}
+	// R235-SEC-13: charset-validate the ID to keep parity with handleRunsList
+	// / handleRunDetail. TriggerNow currently rejects non-existent IDs via map
+	// lookup, but defending here too closes the gap if the scheduler API
+	// changes (e.g. fuzzy match) or if a logging path ever echoes the raw ID.
+	if !cron.IsValidID(req.ID) {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
 
 	if err := h.scheduler.TriggerNow(req.ID); err != nil {
 		switch {

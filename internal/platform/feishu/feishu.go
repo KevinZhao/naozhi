@@ -84,6 +84,13 @@ const (
 	// otherwise multiplied by hookSem concurrency).
 	maxWebhookTokenLen = 512
 
+	// maxWebhookSignatureLen bounds the X-Lark-Signature header length before
+	// it is materialised as []byte and fed to subtle.ConstantTimeCompare.
+	// Real Feishu signatures are 64 hex chars (sha256 hex). Cap at 256 to leave
+	// headroom while preventing an attacker from forcing a multi-MB header copy
+	// per request (R235-SEC-5).
+	maxWebhookSignatureLen = 256
+
 	// webhookTimestampFutureSkew is the maximum seconds that a webhook
 	// X-Lark-Request-Timestamp header may be in the future before being
 	// rejected. Tolerates clock skew without giving attackers a wide

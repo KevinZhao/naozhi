@@ -31,12 +31,24 @@ type Weixin struct {
 	handlerWg sync.WaitGroup // tracks in-flight message handler goroutines
 	cleanupWg sync.WaitGroup // tracks the token cleanup goroutine
 
+	// hookSem caps concurrent inbound-message handler goroutines spawned
+	// per poll cycle. The iLink relay can return a batch of messages in a
+	// single getUpdates response; a misbehaving or compromised relay
+	// returning thousands per poll would otherwise spawn unbounded
+	// goroutines simultaneously. Mirrors feishu/slack hookSem (R235-SEC-9).
+	hookSem chan struct{}
+
 	// contextTokens caches the latest context_token per user for reply.
 	// Value is *tokenEntry (token + last-updated unix seconds) so we can
 	// drop entries whose tokens have gone stale — otherwise users who
 	// message once and never return accumulate forever.
 	contextTokens sync.Map // map[userID]*tokenEntry
 }
+
+// weixinHookSemSize bounds concurrent in-flight handler goroutines per
+// poll cycle. 20 matches the feishu webhook hookSem cap; legitimate iLink
+// relays rarely return more than a handful of messages per poll.
+const weixinHookSemSize = 20
 
 type tokenEntry struct {
 	token     string
@@ -65,8 +77,9 @@ func New(cfg Config) *Weixin {
 		cfg.MaxReplyLen = platform.DefaultMaxReplyLen
 	}
 	return &Weixin{
-		cfg: cfg,
-		api: newAPIClient(cfg.BaseURL, cfg.Token),
+		cfg:     cfg,
+		api:     newAPIClient(cfg.BaseURL, cfg.Token),
+		hookSem: make(chan struct{}, weixinHookSemSize),
 	}
 }
 
@@ -305,8 +318,23 @@ func (w *Weixin) pollLoop(ctx context.Context) {
 				MentionMe: true, // direct messages always mention the bot
 			}
 
+			// R235-SEC-9: gate handler spawn through hookSem so a relay that
+			// returns a giant batch (or repeats messages quickly) cannot
+			// outpace dispatch and explode goroutine count. If the cap is
+			// exhausted we drop the message and emit a warning rather than
+			// blocking the poll loop indefinitely — pollLoop must keep
+			// draining cursors so other users' messages aren't starved.
+			select {
+			case w.hookSem <- struct{}{}:
+			default:
+				slog.Warn("weixin handler queue saturated, dropping message",
+					"from", osutil.SanitizeForLog(from, 128),
+					"msg_id", msg.MessageID)
+				continue
+			}
 			w.handlerWg.Add(1)
 			go func() {
+				defer func() { <-w.hookSem }()
 				defer w.handlerWg.Done()
 				defer platform.RecoverHandler("weixin")
 				w.handler(ctx, incoming)
