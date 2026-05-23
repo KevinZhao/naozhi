@@ -157,6 +157,16 @@ type Manager struct {
 	onRunStarted func(DaemonRunStartedEvent)
 	onRunEnded   func(DaemonRunEndedEvent)
 
+	// started is set to true inside Start's startOnce.Do.  Stop checks
+	// it before doing any cancellation/wait work so a Stop-before-Start
+	// caller (e.g. a wiring bug that fails between NewManager and Start)
+	// short-circuits cleanly instead of waiting on a never-built ctx.
+	// R232-GO-3: previous guard `m.cancel != nil` was correct only after
+	// Start ran but didn't disambiguate "Start never called" from "Start
+	// called but raced past the m.cancel assignment" — this atomic flag
+	// closes that ambiguity by happening exactly once under startOnce.
+	started atomic.Bool
+
 	startOnce sync.Once
 	stopOnce  sync.Once
 }
@@ -246,17 +256,21 @@ func (m *Manager) Start(parent context.Context) {
 	if !m.enabled {
 		return
 	}
-	started := false
+	startedThisCall := false
 	m.startOnce.Do(func() {
 		m.ctx, m.cancel = context.WithCancel(parent)
 		for _, rec := range m.daemons {
 			m.wg.Add(1)
 			go m.runDaemonLoop(rec)
 		}
+		// Publish the started flag AFTER ctx/cancel/goroutines are
+		// installed so a concurrent Stop that observes started=true is
+		// guaranteed to see m.cancel populated.
+		m.started.Store(true)
 		slog.Info("sysession: manager started", "daemons", len(m.daemons))
-		started = true
+		startedThisCall = true
 	})
-	if !started {
+	if !startedThisCall {
 		panic("sysession: Manager.Start called twice")
 	}
 }
@@ -285,12 +299,19 @@ func (m *Manager) Stop(stopCtx context.Context) {
 	if !m.enabled {
 		return
 	}
+	// R232-GO-3: short-circuit when Start was never called. The atomic
+	// `started` flag is set inside startOnce.Do so the only way to observe
+	// false here is "Start has not entered its critical section yet" — in
+	// that case there are no daemons to cancel and no wg slots to drain,
+	// and a later Start would still no-op because stopOnce already fired.
+	if !m.started.Load() {
+		m.stopOnce.Do(func() {})
+		return
+	}
 	m.stopOnce.Do(func() {
-		// m.cancel is set by Start; if Stop is called before Start
-		// (caller-order bug, but cheap to guard) the cancel is a no-op.
-		if m.cancel != nil {
-			m.cancel()
-		}
+		// m.cancel is set by Start; the started.Load() check above
+		// guarantees m.cancel is populated by the time we reach here.
+		m.cancel()
 		done := make(chan struct{})
 		go func() {
 			m.wg.Wait()
