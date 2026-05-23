@@ -124,7 +124,16 @@ func (s *Server) registerPprof() {
 // the raw string for non-standard middlewares that might strip the
 // port. Returns false on any parse error so the caller treats the
 // ambiguous case as "remote".
+//
+// Unix domain socket deployments are treated as loopback: net/http on
+// a UDS listener leaves RemoteAddr empty (or "@" on Linux abstract
+// sockets), and the kernel has already enforced local-only access via
+// filesystem permissions on the socket path. Without this gate
+// pprof/expvar would 403 on every UDS request. R232-SEC-15.
 func isLoopbackRemote(remoteAddr string) bool {
+	if remoteAddr == "" || remoteAddr == "@" {
+		return true
+	}
 	host := remoteAddr
 	if h, _, err := net.SplitHostPort(remoteAddr); err == nil {
 		host = h

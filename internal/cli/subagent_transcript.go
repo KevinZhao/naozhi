@@ -201,6 +201,16 @@ type transcriptMessage struct {
 	Content json.RawMessage `json:"content"`
 }
 
+// transcriptUserBlock mirrors transcriptAssistantBlock for the user role.
+// Content stays as RawMessage so flattenToolResult can decode the
+// polymorphic shape (string vs []any) lazily — same boxing-avoidance
+// motivation as R232-CR-17 / R230B-PERF-4.
+type transcriptUserBlock struct {
+	Type    string          `json:"type"`
+	Text    string          `json:"text"`
+	Content json.RawMessage `json:"content"`
+}
+
 // mapUserLine handles content as either plain string (teammate control channel
 // or plain prompt) or array of blocks (typically [{"tool_result": ...}]).
 func mapUserLine(raw transcriptLine, ts int64) []EventEntry {
@@ -225,28 +235,29 @@ func mapUserLine(raw transcriptLine, ts int64) []EventEntry {
 		}}
 	}
 
-	// Array form.
-	var arr []map[string]any
-	if err := json.Unmarshal(raw.Message.Content, &arr); err != nil {
+	// Array form. Typed decode avoids the `[]map[string]any` interface
+	// boxing per block — pollOnce is hot and replays may carry hundreds
+	// of tool_result blocks per assistant turn. R230B-PERF-4.
+	var blocks []transcriptUserBlock
+	if err := json.Unmarshal(raw.Message.Content, &blocks); err != nil {
 		return nil
 	}
 
 	var out []EventEntry
-	for _, block := range arr {
-		switch block["type"] {
+	for _, block := range blocks {
+		switch block.Type {
 		case "text":
-			txt, _ := block["text"].(string)
-			if txt == "" {
+			if block.Text == "" {
 				continue
 			}
 			out = append(out, EventEntry{
 				Time:    ts,
 				Type:    "text",
-				Summary: textutil.TruncateRunes(txt, 120),
-				Detail:  textutil.TruncateRunes(txt, 2000),
+				Summary: textutil.TruncateRunes(block.Text, 120),
+				Detail:  textutil.TruncateRunes(block.Text, 2000),
 			})
 		case "tool_result":
-			summary, detail, persistedPath, skip := flattenToolResult(block["content"])
+			summary, detail, persistedPath, skip := flattenToolResultRaw(block.Content)
 			if skip {
 				continue
 			}
@@ -326,45 +337,65 @@ func mapAssistantLine(raw transcriptLine, ts int64) []EventEntry {
 	return out
 }
 
-// flattenToolResult normalises the three observed shapes of tool_result content
-// (RFC §3.4.2). Returns summary, detail, persistedPath ("" when absent), skip.
-func flattenToolResult(c any) (string, string, string, bool) {
-	switch v := c.(type) {
-	case string:
-		persisted := ""
-		if strings.Contains(v, "<persisted-output>") || strings.Contains(v, "saved at:") {
-			persisted = extractPersistedPath(v)
-		}
-		return textutil.TruncateRunes(textutil.FirstLineLiteral(v), 120), textutil.TruncateRunes(v, 16000), persisted, false
-	case []any:
-		var b strings.Builder
-		onlyRefs := true
-		for _, item := range v {
-			m, _ := item.(map[string]any)
-			if m == nil {
-				continue
-			}
-			switch m["type"] {
-			case "text":
-				onlyRefs = false
-				if s, _ := m["text"].(string); s != "" {
-					if b.Len() > 0 {
-						b.WriteByte('\n')
-					}
-					b.WriteString(s)
-				}
-			case "tool_reference":
-				// Drop silently — pure schema envelope.
-			}
-		}
-		if onlyRefs {
-			return "", "", "", true
-		}
-		s := b.String()
-		return textutil.TruncateRunes(textutil.FirstLineLiteral(s), 120), textutil.TruncateRunes(s, 16000), "", false
-	default:
+// toolResultArrayItem is the typed decode target for the array form of a
+// tool_result block's content (RFC §3.4.2). Keeping these as a struct
+// avoids the per-item interface boxing the old `[]map[string]any` path
+// imposed on every replay frame. R230B-PERF-4.
+type toolResultArrayItem struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
+// flattenToolResultRaw normalises the three observed shapes of tool_result
+// content (RFC §3.4.2): string, array, or absent. Returns summary, detail,
+// persistedPath ("" when absent), skip.
+//
+// The string and []item paths are decoded directly from the RawMessage to
+// avoid the previous map[string]any boxing per item. Returns skip=true on
+// any decode failure (treated as malformed envelope) and on the
+// "tool_reference"-only array case (pure schema envelope, no UI value).
+func flattenToolResultRaw(c json.RawMessage) (string, string, string, bool) {
+	if len(c) == 0 {
 		return "", "", "", true
 	}
+	// String form: decoded with json.Unmarshal so escape sequences are
+	// resolved (the same semantics the old `case string:` arm had via
+	// json.Unmarshal into []map[string]any → string-typed elements).
+	var s string
+	if err := json.Unmarshal(c, &s); err == nil {
+		persisted := ""
+		if strings.Contains(s, "<persisted-output>") || strings.Contains(s, "saved at:") {
+			persisted = extractPersistedPath(s)
+		}
+		return textutil.TruncateRunes(textutil.FirstLineLiteral(s), 120), textutil.TruncateRunes(s, 16000), persisted, false
+	}
+
+	// Array form.
+	var items []toolResultArrayItem
+	if err := json.Unmarshal(c, &items); err != nil {
+		return "", "", "", true
+	}
+	var b strings.Builder
+	onlyRefs := true
+	for _, m := range items {
+		switch m.Type {
+		case "text":
+			onlyRefs = false
+			if m.Text != "" {
+				if b.Len() > 0 {
+					b.WriteByte('\n')
+				}
+				b.WriteString(m.Text)
+			}
+		case "tool_reference":
+			// Drop silently — pure schema envelope.
+		}
+	}
+	if onlyRefs {
+		return "", "", "", true
+	}
+	out := b.String()
+	return textutil.TruncateRunes(textutil.FirstLineLiteral(out), 120), textutil.TruncateRunes(out, 16000), "", false
 }
 
 // persistedPathRe matches the "saved at: <abs path>" line in Claude CLI's

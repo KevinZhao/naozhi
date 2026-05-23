@@ -574,6 +574,17 @@ func (l *EventLog) SetOnAgentTaskDone(fn func(taskID, status string)) {
 	l.onAgentTaskDoneMu.Unlock()
 }
 
+// loadAgentTaskDoneFn snapshots the current on-task-done callback under
+// onAgentTaskDoneMu so the dispatch loops (single + batch) below can read
+// it without holding l.mu and without duplicating the lock dance. Returns
+// nil when no callback is wired — callers should treat that as a no-op.
+func (l *EventLog) loadAgentTaskDoneFn() func(taskID, status string) {
+	l.onAgentTaskDoneMu.Lock()
+	fn := l.onAgentTaskDoneFn
+	l.onAgentTaskDoneMu.Unlock()
+	return fn
+}
+
 // fireTaskDoneCallbacks dispatches previously-collected task_done callbacks
 // outside l.mu. Append/AppendBatch accumulate pendingTaskDone entries while
 // holding l.mu, release the lock cleanly, and then call this helper — so a
@@ -585,9 +596,7 @@ func (l *EventLog) fireTaskDoneCallbacks(pending []pendingTaskDone) {
 	if len(pending) == 0 {
 		return
 	}
-	l.onAgentTaskDoneMu.Lock()
-	fn := l.onAgentTaskDoneFn
-	l.onAgentTaskDoneMu.Unlock()
+	fn := l.loadAgentTaskDoneFn()
 	if fn == nil {
 		return
 	}
@@ -601,11 +610,9 @@ func (l *EventLog) fireTaskDoneCallbacks(pending []pendingTaskDone) {
 // most one pending task_done per call (a single Event maps to one
 // EventEntry), so the batch-shaped helper above is unnecessary overhead
 // here. AppendBatch keeps using the slice variant because it accumulates
-// across multi-entry batches. R224-PERF-1.
+// across multi-entry batches. R224-PERF-1 / R232-CR-16.
 func (l *EventLog) fireOneTaskDoneCallback(pending pendingTaskDone) {
-	l.onAgentTaskDoneMu.Lock()
-	fn := l.onAgentTaskDoneFn
-	l.onAgentTaskDoneMu.Unlock()
+	fn := l.loadAgentTaskDoneFn()
 	if fn == nil {
 		return
 	}
