@@ -22,6 +22,31 @@ import (
 	"github.com/naozhi/naozhi/internal/session"
 )
 
+// connectorReqSemCap is the cap on concurrent in-flight RPC handler
+// goroutines per WebSocket connection. 16 keeps shim/cgroup pressure
+// bounded even when the primary fans out a burst of fetch_*
+// requests — most handlers complete in single-digit ms, so a deeper
+// pool only buys head-of-line tolerance for genuinely slow Send calls
+// which are already protected by their own watchdog. R234-DOC-01.
+const connectorReqSemCap = 16
+
+// connectorSubExitedCap is the buffer depth of the subExited channel
+// that streamEvents goroutines drop notes onto when they exit. 256
+// covers realistic burst sizes (Router Cleanup sweeping >64 sessions
+// while ReadJSON is blocked) and stays well above connectorReqSemCap
+// so a backed-up exit notification path never silently drops a key
+// out of activeSubs. Bumping this requires re-reasoning about the
+// "non-blocking drop" semantics in streamEvents. R71-GO-M1 / R234-DOC-01.
+const connectorSubExitedCap = 256
+
+// connectorWriteDeadline is the per-frame WriteJSON deadline. 10s is
+// generous enough that a primary serving 100s of concurrent reverse
+// nodes does not produce false timeouts on a healthy connection, but
+// short enough that a half-closed TCP path doesn't pin the reverse
+// goroutine for the kernel keepalive default (≈2h on Linux without
+// tuning). Mirrors the runOnce register-ack deadline. R234-DOC-01.
+const connectorWriteDeadline = 10 * time.Second
+
 func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error {
 	var writeMu sync.Mutex
 	writeJSON := func(v any) error {
@@ -31,14 +56,15 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 		// skip WriteJSON to avoid a deadline-less write that can block
 		// until TCP keepalive expires. Return the underlying error so the
 		// caller reconnects instead of silently hanging.
-		if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		if err := conn.SetWriteDeadline(time.Now().Add(connectorWriteDeadline)); err != nil {
 			return fmt.Errorf("set write deadline: %w", err)
 		}
 		return conn.WriteJSON(v)
 	}
 
 	// Limit concurrent request handling to avoid unbounded goroutine growth.
-	reqSem := make(chan struct{}, 16)
+	// See connectorReqSemCap godoc for sizing rationale.
+	reqSem := make(chan struct{}, connectorReqSemCap)
 
 	// connCtx is cancelled when this connection drops, ensuring stream
 	// goroutines exit promptly without blocking reconnect.
@@ -56,14 +82,13 @@ func (c *Connector) handleConn(ctx context.Context, conn *websocket.Conn) error 
 	}
 	activeSubs := map[string]func(){} // key → cancel func
 	subGen := map[string]uint64{}     // key → generation counter
-	// Capacity 256: streamEvents goroutines drop their subExited note
-	// non-blockingly, and the main loop drains between ReadJSON calls. A
-	// 64-slot channel could overflow during hub-wide resets (e.g. Router
-	// Cleanup sweeping >64 sessions at once while ReadJSON is blocked),
-	// leaving stale activeSubs entries. 256 covers realistic burst sizes
-	// for all deployments; the reqSem inflight cap is 16 so a 256-deep
-	// backlog is a generous safety margin. R71-GO-M1.
-	subExited := make(chan subExitNote, 256)
+	// streamEvents goroutines drop their subExited note non-blockingly,
+	// and the main loop drains between ReadJSON calls. A small buffer could
+	// overflow during hub-wide resets (e.g. Router Cleanup sweeping >64
+	// sessions at once while ReadJSON is blocked), leaving stale activeSubs
+	// entries. See connectorSubExitedCap godoc for sizing rationale and
+	// the relation to connectorReqSemCap. R71-GO-M1 / R234-DOC-01.
+	subExited := make(chan subExitNote, connectorSubExitedCap)
 
 	var wg sync.WaitGroup
 	// R51-REL-005: bound the shutdown-of-handleConn on a hard deadline so a
