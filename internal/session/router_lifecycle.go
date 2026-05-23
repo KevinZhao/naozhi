@@ -871,7 +871,14 @@ func (r *Router) loadResumeHistoryOnSpawn(
 	if resumeID == "" || r.claudeDir == "" || len(oldHistory) > 0 {
 		return
 	}
+
+	// R232-GO-2 / R230-GO-1 / R233-GO-1: hold the WaitGroup ticket across
+	// the historyCtx.Err() check so Shutdown's historyWg.Wait() cannot race
+	// past a late Add(1). The skip branch immediately Done()s; the load
+	// branch keeps the ticket until the IIFE returns.
+	r.historyWg.Add(1)
 	if r.historyCtx != nil && r.historyCtx.Err() != nil {
+		r.historyWg.Done()
 		return
 	}
 
@@ -879,7 +886,6 @@ func (r *Router) loadResumeHistoryOnSpawn(
 	ids = append(ids, prevIDs...)
 	ids = append(ids, resumeID)
 
-	r.historyWg.Add(1)
 	func() {
 		defer r.historyWg.Done()
 		parent := r.historyCtx

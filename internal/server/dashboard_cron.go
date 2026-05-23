@@ -187,6 +187,26 @@ type cronRunSummaryView struct {
 	ErrorClass string `json:"error_class,omitempty"`
 }
 
+// cronSummaryToView projects a cron.CronRunSummary into the wire shape used
+// by handleList's recent_runs preview and handleRunsList's paginated history.
+// R233-CR-3: the two callers had identical conversion blocks and would
+// silently diverge if a future field were added in only one place.
+func cronSummaryToView(r cron.CronRunSummary) cronRunSummaryView {
+	row := cronRunSummaryView{
+		RunID:      r.RunID,
+		State:      string(r.State),
+		Trigger:    string(r.Trigger),
+		StartedAt:  r.StartedAt.UnixMilli(),
+		DurationMS: r.DurationMS,
+		SessionID:  r.SessionID,
+		ErrorClass: string(r.ErrorClass),
+	}
+	if !r.EndedAt.IsZero() {
+		row.EndedAt = r.EndedAt.UnixMilli()
+	}
+	return row
+}
+
 // validateCronBackend enforces the same shape contract as send.go for the
 // dashboard-picked backend override on cron jobs:
 //   - empty is OK (router default fallback at execute time);
@@ -445,19 +465,7 @@ func (h *CronHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 		if recent := h.scheduler.RecentRuns(j.ID, 5); len(recent) > 0 {
 			rv := make([]cronRunSummaryView, 0, len(recent))
 			for _, r := range recent {
-				row := cronRunSummaryView{
-					RunID:      r.RunID,
-					State:      string(r.State),
-					Trigger:    string(r.Trigger),
-					StartedAt:  r.StartedAt.UnixMilli(),
-					DurationMS: r.DurationMS,
-					SessionID:  r.SessionID,
-					ErrorClass: string(r.ErrorClass),
-				}
-				if !r.EndedAt.IsZero() {
-					row.EndedAt = r.EndedAt.UnixMilli()
-				}
-				rv = append(rv, row)
+				rv = append(rv, cronSummaryToView(r))
 			}
 			v.RecentRuns = rv
 		}
@@ -1119,19 +1127,7 @@ func (h *CronHandlers) handleRunsList(w http.ResponseWriter, r *http.Request) {
 	rows := h.scheduler.ListRuns(jobID, limit, before)
 	out := make([]cronRunSummaryView, 0, len(rows))
 	for _, r := range rows {
-		row := cronRunSummaryView{
-			RunID:      r.RunID,
-			State:      string(r.State),
-			Trigger:    string(r.Trigger),
-			StartedAt:  r.StartedAt.UnixMilli(),
-			DurationMS: r.DurationMS,
-			SessionID:  r.SessionID,
-			ErrorClass: string(r.ErrorClass),
-		}
-		if !r.EndedAt.IsZero() {
-			row.EndedAt = r.EndedAt.UnixMilli()
-		}
-		out = append(out, row)
+		out = append(out, cronSummaryToView(r))
 	}
 	resp := map[string]any{"runs": out}
 	// next_before: emit only when this page was full (caller may have more).
