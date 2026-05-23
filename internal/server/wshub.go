@@ -1214,6 +1214,18 @@ func (h *Hub) resubscribeEvents(c *wsClient, key string, gen uint64, notify *<-c
 		}
 
 		// Check if a newer subscription (from handleSubscribe) has taken over.
+		// R230C-PERF-8 anchor: the TODO suggested comparing the passed-in gen
+		// to a local variable to avoid h.mu.RLock here. That would be wrong:
+		// gen is the snapshot at *entry* of resubscribeEvents, while
+		// c.subGen[key] is mutated by handleSubscribe under h.mu.Lock when a
+		// newer client subscribes to the same key. The whole point of the
+		// generation check is to detect that mutation; comparing gen to
+		// itself is a no-op. We must read c.subGen[key] under at least RLock
+		// because the map is concurrently rewritten — racing without the
+		// lock is a data race the Go race detector flags. The 12-iteration
+		// loop does pay one RLock per iteration, but each is uncontended in
+		// the common case (no concurrent subscribe) and the map read is
+		// O(1); the perf concern in the TODO does not survive review.
 		h.mu.RLock()
 		currentGen := c.subGen[key]
 		h.mu.RUnlock()
