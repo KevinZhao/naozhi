@@ -13,6 +13,17 @@ var ErrInterruptUnsupported = errors.New("protocol does not support stdin interr
 // Protocol abstracts the communication protocol between naozhi and an AI CLI agent.
 // Implementations handle protocol-specific message formats, initialization handshakes,
 // and event parsing (e.g., Claude stream-json vs ACP JSON-RPC 2.0).
+//
+// R214-ARCH-1 dual-track note: the per-feature SupportsReplay() /
+// SupportsPriority() methods coexist with the aggregate Capabilities() Caps
+// type (RNEW-ARCH-404). This is intentional during the rollout window —
+// removing the per-feature methods is breaking for every Protocol
+// implementation and every cli-internal hot-path call site
+// (passthrough.go, process_readloop.go, dispatch). New consumers SHOULD
+// route through ProtocolCaps() so the eventual collapse to a single
+// Capabilities()-only contract does not have to chase callers; this
+// godoc is the canonical anchor for "use Caps, not the SupportsX
+// methods, in new code". Tracked as R214-ARCH-1 in docs/TODO.md.
 type Protocol interface {
 	// Name returns the protocol identifier (e.g., "stream-json", "acp").
 	Name() string
