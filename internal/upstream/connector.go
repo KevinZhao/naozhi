@@ -51,6 +51,25 @@ var circuitBreakerThreshold = 6
 // 30s ceiling.
 var circuitBreakerBackoff = 5 * time.Minute
 
+// connectorHandshakeDeadline bounds the three handshake-phase syscalls
+// in runOnce: WebSocket dialer.HandshakeTimeout, the post-register
+// ReadJSON deadline, and the ping-loop SetWriteDeadline. 10s is short
+// enough that a wedged primary surfaces as a reconnect (and trips the
+// circuit breaker after a few attempts) rather than pinning the
+// connector for minutes; long enough to absorb realistic primary-side
+// latency on a freshly-restarted process. Mirrors connectorWriteDeadline
+// in connector_conn.go which covers the same role on the steady-state
+// write path. R234-DOC-05.
+const connectorHandshakeDeadline = 10 * time.Second
+
+// connectorReadTimeout is the post-register ReadDeadline reset by every
+// pong response. 90s = 3× ping ticker interval (30s in pingLoop) so a
+// transient packet loss tolerates one missed pong before the read
+// deadline fires and the connector reconnects. Bumping this without
+// also bumping the ping interval risks stale connections lingering on
+// network blackholes.
+const connectorReadTimeout = 90 * time.Second
+
 // reasonSessionReset is the Reason value emitted for the terminal
 // session_state message in streamEvents when the router has already dropped
 // the session (Reset raced ahead of the notify-close path). Centralised so
@@ -207,7 +226,7 @@ func (c *Connector) Run(ctx context.Context) {
 
 func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	dialer := websocket.Dialer{
-		HandshakeTimeout: 10 * time.Second,
+		HandshakeTimeout: connectorHandshakeDeadline,
 		// Pin TLS floor so downgraded clients can't be forced onto a weaker
 		// protocol via a compromised network segment. wss:// is already
 		// required by config validation.
@@ -274,7 +293,7 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 	// down — returning early is correct because ReadJSON below would block
 	// forever without a deadline. The same applies to the clear below and
 	// the pong-path deadlines downstream.
-	if err := conn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(connectorHandshakeDeadline)); err != nil {
 		return false, fmt.Errorf("set register read deadline: %w", err)
 	}
 	var ack node.ReverseMsg
@@ -294,14 +313,14 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 
 	// Enable WebSocket-level ping/pong for dead connection detection.
 	// ReadDeadline resets on any pong response from the primary.
-	const wsReadTimeout = 90 * time.Second
+	// See connectorReadTimeout godoc for the 90s = 3× ping-interval rationale.
 	conn.SetPongHandler(func(string) error {
 		// SetReadDeadline error here means the conn was torn down between
 		// the pong arrival and our refresh; surface it so the outer
 		// ReadJSON loop exits via its error path instead of blocking.
-		return conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+		return conn.SetReadDeadline(time.Now().Add(connectorReadTimeout))
 	})
-	if err := conn.SetReadDeadline(time.Now().Add(wsReadTimeout)); err != nil {
+	if err := conn.SetReadDeadline(time.Now().Add(connectorReadTimeout)); err != nil {
 		return false, fmt.Errorf("set initial read deadline: %w", err)
 	}
 
@@ -317,7 +336,7 @@ func (c *Connector) runOnce(ctx context.Context) (bool, error) {
 func pingOnce(conn *websocket.Conn, writeMu *sync.Mutex) bool {
 	writeMu.Lock()
 	defer writeMu.Unlock()
-	if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+	if err := conn.SetWriteDeadline(time.Now().Add(connectorHandshakeDeadline)); err != nil {
 		_ = conn.Close()
 		return false
 	}
