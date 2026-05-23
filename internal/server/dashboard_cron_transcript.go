@@ -268,7 +268,10 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	}
 	resolvedRoot += string(os.PathSeparator)
 	if !strings.HasPrefix(resolved+string(os.PathSeparator), resolvedRoot) {
-		slog.Warn("cron transcript: path escape attempt", "raw", jsonlPath, "resolved", resolved, "claudeDir", h.claudeDir, "allowedRoot", resolvedRoot)
+		// allowedRoot already conveys the prefix boundary for triage;
+		// claudeDir is intentionally omitted to avoid leaking the absolute
+		// install path through forwarded log streams.
+		slog.Warn("cron transcript: path escape attempt", "raw", jsonlPath, "resolved", resolved, "allowedRoot", resolvedRoot)
 		resp.Fallback = "missing"
 		writeJSON(w, resp)
 		return
@@ -530,14 +533,25 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 			}
 		}
 		if textBuf.Len() > 0 {
-			text := textBuf.String()
-			out = append([]transcriptTurn{{
+			// Prepend the assistant text turn ahead of the tool_use
+			// turns gathered above. Append + rotate keeps the slice
+			// growth amortised — the previous "prepend by reallocating"
+			// pattern allocated a fresh backing array per assistant
+			// message and copied every existing turn, which is wasted
+			// work when the assistant text shares the message with
+			// several tool_use blocks (the common case).
+			out = append(out, transcriptTurn{
 				Index:  nextIdx,
 				Kind:   "assistant",
 				TS:     ts,
-				Text:   truncateRunes(text, maxAssistantTextBytes),
+				Text:   truncateRunes(textBuf.String(), maxAssistantTextBytes),
 				Tokens: tok.Output,
-			}}, out...)
+			})
+			if n := len(out); n > 1 {
+				last := out[n-1]
+				copy(out[1:], out[:n-1])
+				out[0] = last
+			}
 			// re-number subsequent turns
 			for i := range out {
 				out[i].Index = nextIdx + i

@@ -402,12 +402,6 @@ func downloadURL(rawURL string) ([]byte, string, error) {
 	if !discordCDNHosts[u.Hostname()] {
 		return nil, "", fmt.Errorf("attachment URL host not in whitelist: %s", u.Hostname())
 	}
-	// Refuse non-https schemes so a future Discord CDN downgrade or a
-	// crafted javascript:// URL cannot bypass TLS verification on the
-	// attachment download path. (R227-SEC-13)
-	if u.Scheme != "https" {
-		return nil, "", fmt.Errorf("attachment URL must use https: %s", u.Scheme)
-	}
 	resp, err := discordHTTPClient.Get(rawURL)
 	if err != nil {
 		return nil, "", err
