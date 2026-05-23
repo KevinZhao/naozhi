@@ -334,8 +334,17 @@ type reactionCacheEntry struct {
 	expiry int64 // UnixNano; expired when time.Now().UnixNano() >= expiry (boundary-inclusive, matches sweep at cleanupNoncesTick)
 }
 
+// nonceCleanupInterval is set to nonceTTL/2 so an expired entry never sits
+// in seenNonces longer than ~1.5 × TTL after expiry. Previously the ticker
+// fired every full nonceTTL, which under the worst phase (insert just after
+// a tick) left expired entries in the map for up to 2 × TTL — harmless for
+// replay defense (verifyTimestamp gates that) but caused seenNoncesCount
+// to converge on maxSeenNonces faster than necessary under sustained
+// authenticated traffic, risking spurious 429s. R235-SEC-9.
+const nonceCleanupInterval = nonceTTL / 2
+
 func (f *Feishu) cleanupNonces(ctx context.Context) {
-	ticker := time.NewTicker(5 * time.Minute)
+	ticker := time.NewTicker(nonceCleanupInterval)
 	defer ticker.Stop()
 	for {
 		select {
