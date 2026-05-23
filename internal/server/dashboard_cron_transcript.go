@@ -472,7 +472,12 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 			if b.Type == "tool_result" {
 				parsed = true
 				outStr, _ := decodeStringOrBlocks(b.Content)
-				outStr = ansiEscRe.ReplaceAllString(outStr, "")
+				// ANSI escapes are rare in agent tool_result text; skip the
+				// regex (NFA traversal of every byte) when the ESC byte
+				// 0x1b is absent, which is the common case.
+				if strings.IndexByte(outStr, 0x1b) >= 0 {
+					outStr = ansiEscRe.ReplaceAllString(outStr, "")
+				}
 				outStr = truncateRunes(outStr, maxToolOutputBytes)
 				status := "ok"
 				if b.IsError {

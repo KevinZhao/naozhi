@@ -369,10 +369,13 @@ func (t *agentTailer) pollOnce() bool {
 		}
 	}
 	// Snapshot subs only when there are events to fan out — idle ticks
-	// otherwise paid an O(N) map copy per poll for nothing.
+	// otherwise paid an O(N) map copy per poll for nothing. Also skip when
+	// there are events but nobody is subscribed (silent buffer-only mode):
+	// the events are already retained in t.buffered for late subscribers,
+	// and allocating an empty []*wsClient just to range nothing is waste.
 	var subs []*wsClient
 	var meta node.AgentMetaPatch
-	if len(events) > 0 {
+	if len(events) > 0 && len(t.subs) > 0 {
 		subs = make([]*wsClient, 0, len(t.subs))
 		for c := range t.subs {
 			subs = append(subs, c)

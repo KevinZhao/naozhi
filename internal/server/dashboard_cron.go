@@ -171,13 +171,6 @@ func validateCronScheduleChars(schedule string) error {
 	return validateStringField(schedule, stringFieldPolicy{name: "schedule", collapseErrors: true})
 }
 
-// maxCronBackendLen aliases the package-level maxBackendIDLen
-// (select_node_for_backend.go) so cron validation, send handler, and
-// remote-send WS path share one source of truth for the per-request
-// backend length cap. The 32-byte cap is the server-edge bound; the
-// session router's validateBackend allows 64 as the protocol-edge bound.
-const maxCronBackendLen = maxBackendIDLen
-
 // cronRunSummaryView is the JSON shape for a single cron run summary.
 // Shared between handleList (recent-run preview embedded in the cron
 // dashboard list) and handleRunsList (per-job paginated history).
