@@ -70,11 +70,16 @@ func (c *Connector) streamEvents(ctx context.Context, writeJSON func(any) error,
 			// at loop entry (line 1031) and the only code path that
 			// reassigns it inside the loop (line 1057) also gates on
 			// non-nil. Do not introduce any assignment to sess without
-			// re-verifying this precondition — Snapshot() would panic.
-			snap := sess.Snapshot()
-			if snap.State != lastState {
-				lastState = snap.State
-				if err := writeJSON(node.ReverseMsg{Type: "session_state", Key: key, State: snap.State, Reason: snap.DeathReason}); err != nil {
+			// re-verifying this precondition — State() would panic on nil.
+			//
+			// R230C-PERF-1: read State() / DeathReason() directly instead
+			// of building a full Snapshot. Snapshot mirrors live model
+			// back into s.model and copies 10+ fields the connector
+			// doesn't need; State+DeathReason are 2 atomic loads each.
+			state := sess.State()
+			if state != lastState {
+				lastState = state
+				if err := writeJSON(node.ReverseMsg{Type: "session_state", Key: key, State: state, Reason: sess.DeathReason()}); err != nil {
 					slog.Debug("connector write session_state", "key", key, "err", err)
 				}
 			}

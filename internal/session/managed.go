@@ -993,6 +993,36 @@ func (s *ManagedSession) HasProcess() bool {
 	return s.loadProcess() != nil
 }
 
+// State returns the session's current process state as a string ("ready",
+// "running", "dead", "stopped", ...) without going through Snapshot's
+// full mirror-and-copy path. Callers that only need the state label
+// (e.g. connector_subscribe's session_state push) save 10+ atomic.Loads
+// per invocation. R230C-PERF-1.
+//
+// Mirrors Snapshot's branch:
+//   - proc == nil → "ready" (suspended / pre-spawn)
+//   - proc != nil → proc.GetState().String()
+//
+// Read-only: unlike Snapshot, this does NOT trigger SetModel mirroring
+// (that side effect is documented on Snapshot for the dashboard polling
+// path; State has no equivalent need since it is not a sessions.json
+// write trigger).
+func (s *ManagedSession) State() string {
+	proc := s.loadProcess()
+	if proc == nil {
+		return "ready"
+	}
+	return proc.GetState().String()
+}
+
+// DeathReason returns the diagnostic string set when the process died
+// (e.g. "no_output_timeout", "total_timeout"), or empty when alive.
+// R230C-PERF-1: lighter than Snapshot for the connector_subscribe push
+// loop which only consults DeathReason on state-change frames.
+func (s *ManagedSession) DeathReason() string {
+	return loadAtomicString(&s.deathReason)
+}
+
 // Snapshot returns a point-in-time view of this session.
 //
 // Side effect (R230C-CR-Diag / R229-GO-2): when a live process reports a
