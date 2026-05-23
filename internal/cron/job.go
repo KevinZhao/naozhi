@@ -381,8 +381,20 @@ func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
 	return false, time.Time{}
 }
 
-// validateSchedule checks if the cron expression is valid and respects the minimum interval.
+// validateSchedule checks if the cron expression is valid and respects the
+// minimum interval.
+//
+// R232-DOC-2: defense-in-depth length cap. Dashboard / IM write paths
+// already enforce MaxScheduleBytes (limits.go) at the request boundary,
+// but loadJobs replays whatever cron_jobs.json contains — a tampered
+// or legacy entry with a multi-MB schedule string would otherwise reach
+// robfig/cron's parser before any bound applies. Reject early so the
+// parser never sees pathological input and the operator gets a
+// uniform error message regardless of entry path.
 func validateSchedule(schedule string) error {
+	if len(schedule) > MaxScheduleBytes {
+		return fmt.Errorf("schedule too long: %d bytes > %d cap", len(schedule), MaxScheduleBytes)
+	}
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {
 		return err
