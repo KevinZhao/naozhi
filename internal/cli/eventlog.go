@@ -18,6 +18,15 @@ const defaultEventLogSize = 500
 // entries of the same turn; capping the scan keeps the EventLog wlock from
 // being held for the full O(maxSize) walk while concurrent Append calls
 // queue behind it. R225-PERF-13.
+//
+// R229-PERF-7: an "RLock-scan, upgrade to wlock on hit" variant was
+// considered to let parallel SetAgentInternalID calls share the read phase,
+// but Go's sync.RWMutex has no atomic upgrade primitive. RUnlock→Lock
+// reopens the window where Append can rotate the ring head between the
+// scan's idx capture and the write, landing the linkage in the wrong slot.
+// Cap=50 + early break (foundAgent && foundTaskStart) already collapses
+// the wlock window to <1µs in practice, so the simpler always-wlock path
+// is the correctness-preserving optimum.
 const setAgentInternalIDMaxScan = 50
 
 // imageDataURIPrefix is the required leading substring for every entry in
