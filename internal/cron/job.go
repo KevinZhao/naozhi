@@ -345,19 +345,33 @@ func previousTickBefore(schedule string, now time.Time) time.Time {
 	return prev
 }
 
+// missedScheduleStartupSuppressFactor 是 HasMissedSchedule 启动抑制窗口的
+// period 倍数。刚 boot 时所有 long-period job（"@daily" / "0 9 * * *"）都
+// 会"错过"——这是可预期的；5×period 给足让第一轮调度落地的余量，避免
+// 误把"还没轮到"标成 missed 触发 catchup。
+const missedScheduleStartupSuppressFactor = 5
+
+// missedScheduleSlackNumerator / missedScheduleSlackDenominator 表达 missed
+// 判定的延迟容忍系数 = 3/2 = 1.5×period。允许 50% 裕量应对 jitter + 上一次
+// 跑得稍晚到下一 tick 的合法情况，超过则判 missed。用整数 ratio 避免浮点
+// 比较。
+const (
+	missedScheduleSlackNumerator   = 3
+	missedScheduleSlackDenominator = 2
+)
+
 // HasMissedSchedule 判断 Job 是否曾经错过调度（进程休眠或重启空窗期）。
 // 返回 (missed, prevExpectedAt)：prevExpectedAt 是"按 schedule 算上一次
 // 应该跑的时刻"，调用方可用来显示 "上次应跑于 …"。
 //
 // 判定规则：
 //  1. schedule 无法解析 / period<=0 → 不算 missed（保守）。
-//  2. startedAt 不为零且 now - startedAt < 5 × period：刚启动的抑制窗口，
-//     避免刚 boot 时所有长周期 job 都被误判 missed。测试可以传
-//     time.Time{} 绕过。
+//  2. startedAt 不为零且 now - startedAt < missedScheduleStartupSuppressFactor
+//     × period：刚启动的抑制窗口。测试可以传 time.Time{} 绕过。
 //  3. 从未跑过 (LastRunAt.IsZero)：若 now - CreatedAt > period 则判 missed
 //     （任务创建后本应至少跑过一次）。
-//  4. 跑过：若 prevExpectedAt - LastRunAt > period × 1.5 则判 missed
-//     （允许 50% 裕量应对 jitter + 轻微延迟）。
+//  4. 跑过：若 prevExpectedAt - LastRunAt > period × missedScheduleSlackNumerator
+//     / missedScheduleSlackDenominator 则判 missed。
 //
 // 关联：docs/rfc/cron-v2-polish.md §3.3 Increment C。
 func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
@@ -368,9 +382,7 @@ func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
 	if period <= 0 {
 		return false, time.Time{}
 	}
-	// 启动抑制：刚 boot 时所有 long-period job 都会"错过"，这是可预期的。
-	// 5 × period 给足让第一轮调度落地的余量。
-	if !startedAt.IsZero() && now.Sub(startedAt) < 5*period {
+	if !startedAt.IsZero() && now.Sub(startedAt) < time.Duration(missedScheduleStartupSuppressFactor)*period {
 		return false, time.Time{}
 	}
 	prev := previousTickBefore(j.Schedule, now)
@@ -385,7 +397,7 @@ func HasMissedSchedule(j *Job, now, startedAt time.Time) (bool, time.Time) {
 		return false, time.Time{}
 	}
 	// 跑过：对比上次跑的时刻和"上次应跑的时刻"
-	if prev.Sub(j.LastRunAt) > period*3/2 {
+	if prev.Sub(j.LastRunAt) > period*missedScheduleSlackNumerator/missedScheduleSlackDenominator {
 		return true, prev
 	}
 	return false, time.Time{}
