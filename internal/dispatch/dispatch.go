@@ -36,6 +36,20 @@ const platformReplyTimeout = 15 * time.Second
 // than going through this interface.
 //
 // Keep the method set minimal: any future guard variant has to fit.
+//
+// R228-ARCH-11 anchor: a previous review proposed deleting this interface
+// on the basis that Dispatcher only ever uses *MessageQueue at runtime
+// (`if d.queue != nil ... else d.guard ...` reads either-or). That is the
+// hot-path branch only — SessionGuard remains the contract surface that
+// (a) MessageQueue.TryAcquire / ShouldSendWait / Release implement (see
+// msgqueue.go "SessionGuard compatibility" block), (b) session.Guard
+// satisfies structurally for the Dashboard/WS reuse sketched in
+// dashboard auth flows, and (c) tests use to inject fakes without
+// constructing a full MessageQueue. Removing the interface would couple
+// dispatch to a single concrete queue type and force every test to drag
+// in MessageQueue's WAL/persistence machinery. Keep the interface; the
+// branch in sendAndReply documents the runtime choice between queue and
+// guard, not a dead arm.
 type SessionGuard interface {
 	TryAcquire(key string) bool
 	ShouldSendWait(key string) bool
