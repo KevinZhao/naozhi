@@ -3,6 +3,7 @@ package cron
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,15 @@ import (
 
 	"github.com/naozhi/naozhi/internal/textutil"
 )
+
+// ErrScheduleTooShort is returned by validateSchedule (and surfaces via
+// AddJob / UpdateJob) when the parsed cron expression resolves to an
+// inter-tick interval below minCronInterval. Sentinel form so HTTP / IM
+// handlers can errors.Is and emit a focused "schedule too frequent"
+// message instead of string-matching the underlying fmt.Errorf body.
+// The actual interval is wrapped via fmt.Errorf("%w: ..."), so callers
+// keep the diagnostic detail. R234-ANCHOR.
+var ErrScheduleTooShort = errors.New("cron: schedule interval too short")
 
 // JobIMContext bundles the originating IM-channel coordinates a cron Job
 // inherits from the message that created it. Kept as a tiny local type
@@ -392,7 +402,10 @@ func validateSchedule(schedule string) error {
 	first := sched.Next(now)
 	second := sched.Next(first)
 	if interval := second.Sub(first); interval > 0 && interval < minCronInterval {
-		return fmt.Errorf("interval %v is too short, minimum is %v", interval, minCronInterval)
+		// Wrap ErrScheduleTooShort so callers can errors.Is for routing
+		// (e.g. dashboard 422 vs IM friendly hint) while still surfacing
+		// the actual interval in logs and operator-facing messages.
+		return fmt.Errorf("%w: interval %v, minimum is %v", ErrScheduleTooShort, interval, minCronInterval)
 	}
 	return nil
 }

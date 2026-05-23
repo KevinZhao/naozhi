@@ -9,8 +9,24 @@ import (
 
 const maxImageFileSize = 10 * 1024 * 1024 // 10MB
 
+// maxExtractedImages caps how many image-path matches ExtractImagePaths
+// returns from a single text scan. Bounding the regex's FindAllString
+// match count protects the per-message stat() / EvalSymlinks loop from
+// linear amplification on a hostile (or accidentally noisy) tool_result
+// payload that splatters dozens of fake-looking paths into output. 10
+// covers any realistic burst of inline images a single CLI turn would
+// emit; messages above that cap fall back to the leading 10 in document
+// order, which is the same de-facto policy the dashboard renders today.
+const maxExtractedImages = 10
+
 // safeImageDirs are the only directory prefixes from which image files may be read.
 // This prevents prompt-injection attacks that trick the CLI into emitting arbitrary paths.
+//
+// Trailing-slash invariant: every entry MUST end with `/` so a prefix
+// match cannot accept a confusable sibling directory (e.g. `/tmpfoo/...`
+// when the allowlist contained the bare `/tmp`). isUnderSafeDir relies
+// on this for correctness — adding a new dir without the trailing slash
+// would silently widen the allowlist.
 var safeImageDirs = []string{"/tmp/"}
 
 // imagePathRe matches absolute file paths ending in common image extensions.
@@ -19,7 +35,7 @@ var imagePathRe = regexp.MustCompile(`(/\S+\.(?:png|jpg|jpeg|gif|webp|bmp))`)
 // ExtractImagePaths finds local image file paths in text that actually exist on disk.
 // Only paths under safe directories (e.g., /tmp) are returned.
 func ExtractImagePaths(text string) []string {
-	matches := imagePathRe.FindAllString(text, 10) // cap at 10 images
+	matches := imagePathRe.FindAllString(text, maxExtractedImages)
 	var valid []string
 	seen := make(map[string]bool)
 	for _, path := range matches {
