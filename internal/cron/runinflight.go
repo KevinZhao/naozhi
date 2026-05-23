@@ -1,6 +1,7 @@
 package cron
 
 import (
+	"log/slog"
 	"sync/atomic"
 	"time"
 )
@@ -164,6 +165,18 @@ type JobRunCounters struct {
 }
 
 // addRun 把一次终态 run 累加到 counters。调用方持 s.mu.Lock。
+//
+// 不变式：Total == Succeeded + Failed + Skipped + TimedOut + Canceled。
+// 任何新增的终态 RunState 必须同时扩展 switch 与对应字段，否则 Total
+// 会与各分项之和漂移、dashboard list API 的 stats 字段就会出现 "总数
+// 多于已识别状态" 的不可解释 gap。R234-ANCHOR / counter_wiring_contract_test
+// 锁所有 RunStateXxx 终态—生产路径删除一个终态会让 contract test 立即
+// 失败，定位早于线上发现。
+//
+// 为什么 default 分支只 slog 而不 panic：addRun 在 finishRun 关键路径
+// 上，运行时 panic 会让一次 cron run 留下半写状态（Job.LastRunAt 已
+// 更新但 persistJobsLocked 尚未跑完），且 RunState 是有限封闭集合——
+// 走到 default 分支的可能只有未来代码漏改，记日志便于回溯。
 func (c *JobRunCounters) addRun(state RunState) {
 	c.Total++
 	switch state {
@@ -177,5 +190,10 @@ func (c *JobRunCounters) addRun(state RunState) {
 		c.TimedOut++
 	case RunStateCanceled:
 		c.Canceled++
+	default:
+		// 未识别状态：保持 Total++ 以维持 "调用次数" 语义，但分项总和
+		// 与 Total 的差额能立即被运维通过 dashboard 看到。
+		slog.Warn("cron counters: addRun received unknown RunState; counters invariant violated",
+			"state", string(state))
 	}
 }
