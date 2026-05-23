@@ -43,6 +43,18 @@ var agentHexRe = regexp.MustCompile(`^[A-Za-z0-9]{8,64}$`)
 // agents accumulate hundreds of parked goroutines per session.
 const maxConcurrentResolves = 8
 
+// staleAgentJSONLWindow guards against name-collision aliasing in Step 5
+// of Resolve: if a candidate jsonl's first-row timestamp predates the
+// parent's Agent tool_use by more than this window, the file belongs to a
+// previous turn that happened to reuse the same agent name (Claude CLI
+// keeps subagents/agent-<hex>.jsonl files across turns). The 10s value
+// covers worst-case CLI flush + clock-skew between the wrapper's
+// monotonic timestamp and the CLI's wall-clock first-line timestamp,
+// while staying well below typical multi-second between-turn idle gaps.
+// R10 design note in the original Resolve scan; lifted to a named const
+// so readers see the rationale without grepping the inline comment.
+const staleAgentJSONLWindow = 10 * time.Second
+
 type SubagentLinker struct {
 	mu              sync.RWMutex
 	byTaskID        map[string]LinkInfo
@@ -324,10 +336,11 @@ func (l *SubagentLinker) Resolve(taskID, toolUseID, name, description string, ag
 				continue
 			}
 			// R10: if the jsonl's first row timestamp predates the parent's
-			// Agent tool_use by more than 10s, treat as stale (same-name reuse).
+			// Agent tool_use by more than staleAgentJSONLWindow, treat as
+			// stale (same-name reuse from a previous turn).
 			if !first.Timestamp.IsZero() && agentToolUseMS > 0 {
 				agentTS := time.UnixMilli(agentToolUseMS)
-				if first.Timestamp.Before(agentTS.Add(-10 * time.Second)) {
+				if first.Timestamp.Before(agentTS.Add(-staleAgentJSONLWindow)) {
 					continue
 				}
 			}
