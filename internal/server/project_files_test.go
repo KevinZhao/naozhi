@@ -390,8 +390,11 @@ func TestHandleFilesExists_InvalidJSON(t *testing.T) {
 func TestHandleFilesExists_PublicTmp(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
 
-	// Drop a unique-named file directly under /tmp.
-	tmpFile, err := os.CreateTemp("", "naozhi-public-tmp-*.log")
+	// Drop a unique-named file directly under /tmp. Pin the dir explicitly
+	// because os.TempDir() on macOS returns /var/folders/..., which
+	// filepath.Rel("/tmp", ...) would express as a traversal that
+	// resolveProjectFileWithRoot correctly rejects.
+	tmpFile, err := os.CreateTemp("/tmp", "naozhi-public-tmp-*.log")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -444,7 +447,9 @@ func TestHandleFilesExists_PublicTmp(t *testing.T) {
 func TestHandleFileGet_PublicTmpPreview(t *testing.T) {
 	h, _, _ := newProjectHandlersForTest(t, nil)
 
-	tmpFile, err := os.CreateTemp("", "naozhi-public-tmp-preview-*.log")
+	// Pin /tmp explicitly: see TestHandleFilesExists_PublicTmp for the
+	// macOS os.TempDir() rationale.
+	tmpFile, err := os.CreateTemp("/tmp", "naozhi-public-tmp-preview-*.log")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -503,8 +508,9 @@ func TestHandleFileGet_PublicTmpRejectsCredential(t *testing.T) {
 
 	// Rename to .env exactly to trip isSensitiveDownloadName. We can't drop a
 	// file literally named ".env" under /tmp without trampling other tests, so
-	// stage one in a sub-directory we own.
-	subDir, err := os.MkdirTemp("", "naozhi-cred-*")
+	// stage one in a sub-directory we own. Pin /tmp explicitly: see
+	// TestHandleFilesExists_PublicTmp for the macOS os.TempDir() rationale.
+	subDir, err := os.MkdirTemp("/tmp", "naozhi-cred-*")
 	if err != nil {
 		t.Fatal(err)
 	}
