@@ -140,6 +140,32 @@ func (d *Dispatcher) markReplySuccess() {
 	d.lastReplySuccessNs.Store(time.Now().UnixNano())
 }
 
+// localizedSendError maps a sendFn error to the user-facing Chinese reply.
+// IM path keeps two timeout-aware specialisations (the configured no-output /
+// total durations rendered in Chinese with FormatChineseDuration) before
+// falling back to the shared usermsg.ForSendError helper. Dashboard send path
+// (server/errors_usermsg.go) collapses the timeout cases to the generic
+// "处理超时，请简化任务后重试。" because it has no per-session timeout
+// configured. R230-ARCH-7: extracted from sendAndReply so the inline switch
+// stops growing in the 200+ line happy-path function and the timeout-aware
+// branches stay near each other for review.
+//
+// Side effect: increments watchdog kill counters for the timeout sentinels —
+// these counters back the /health watchdog sub-object so they must fire
+// regardless of whether the user-facing reply succeeds.
+func (d *Dispatcher) localizedSendError(err error, key string) string {
+	switch {
+	case errors.Is(err, cli.ErrNoOutputTimeout):
+		d.watchdogNoOutputKills.Add(1)
+		return fmt.Sprintf("⏱️ 处理超时（%s 无输出），请简化任务后重试。", textutil.FormatChineseDuration(d.noOutputTimeout))
+	case errors.Is(err, cli.ErrTotalTimeout):
+		d.watchdogTotalKills.Add(1)
+		return fmt.Sprintf("⏱️ 处理超时（总耗时超过 %s），请拆分为更小的任务。", textutil.FormatChineseDuration(d.totalTimeout))
+	default:
+		return usermsg.ForSendError(err, key)
+	}
+}
+
 // DispatcherConfig holds all dependencies for constructing a Dispatcher.
 type DispatcherConfig struct {
 	Router        *session.Router
@@ -663,28 +689,12 @@ func (d *Dispatcher) sendAndReply(
 	if err != nil {
 		d.replyErrorCount.Add(1)
 		lg.Error("send to claude", "err", err)
-		// IM path keeps two timeout-aware specialisations (the configured
-		// no-output / total durations rendered in Chinese) before falling
-		// back to the shared sentinel→message helper. Dashboard send path
-		// (server/errors_usermsg.go) collapses the timeout cases to the
-		// generic "处理超时，请简化任务后重试。" because it has no per-
-		// session timeout configured.
 		// /clear early-return mirrors the prior behaviour: the user just
 		// triggered the reset, so we suppress the extra "会话已重置" reply.
 		if errors.Is(err, cli.ErrSessionReset) {
 			return
 		}
-		var errMsg string
-		switch {
-		case errors.Is(err, cli.ErrNoOutputTimeout):
-			d.watchdogNoOutputKills.Add(1)
-			errMsg = fmt.Sprintf("⏱️ 处理超时（%s 无输出），请简化任务后重试。", textutil.FormatChineseDuration(d.noOutputTimeout))
-		case errors.Is(err, cli.ErrTotalTimeout):
-			d.watchdogTotalKills.Add(1)
-			errMsg = fmt.Sprintf("⏱️ 处理超时（总耗时超过 %s），请拆分为更小的任务。", textutil.FormatChineseDuration(d.totalTimeout))
-		default:
-			errMsg = usermsg.ForSendError(err, key)
-		}
+		errMsg := d.localizedSendError(err, key)
 		if _, err := platform.ReplyWithRetry(ctx, p, platform.OutgoingMessage{ChatID: msg.ChatID, Text: errMsg}, 3); err != nil {
 			d.sendFailCount.Add(1)
 			lg.Warn("error reply also failed", "chat", msg.ChatID, "err", err)
