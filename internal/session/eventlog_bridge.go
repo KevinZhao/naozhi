@@ -1,3 +1,25 @@
+// Package session — eventlog_bridge.go
+//
+// Despite the file name "bridge", this file is the de facto fan-out hub
+// of the event-log persistence pipeline: a single PersistSink installed
+// per ManagedSession that routes every cli.EventEntry batch into BOTH
+// the persist tier (disk) AND the attachment refcount tracker, with a
+// pooled JSON encoder amortising the steady-state allocations.
+//
+// "Bridge" survives in the name for historical reasons — the original
+// (R215-PERF-P1-1 era) implementation only translated cli.EventEntry
+// batches into persist.Entry shape (one input, one output), making
+// "bridge" accurate. The attachment-tracker hand-off (added in the
+// refcount work, see attachment/tracker §3.2) and the encoder pool
+// turned this file into a multi-sink hub. R234-ARCH-25 proposes a
+// rename to event_pipeline.go + an explicit EventPipeline + []EventSink
+// abstraction; that is deferred behind the broader RouterView refactor
+// (R234-ARCH-3) so the fan-out shape can be expressed in the same
+// session.api package the rest of the unification will land under.
+//
+// Read order for newcomers: newEventLogSink (entry point) → the
+// per-batch loop that feeds attachment tracker first, then persists →
+// the bridgeEncPool helpers at the bottom of the file.
 package session
 
 import (
