@@ -11,7 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
@@ -71,15 +70,28 @@ const (
 
 	// maxAssistantTextBytes caps a single assistant text block.
 	maxAssistantTextBytes = 64 * 1024
+
+	// maxToolInputBytes caps the raw tool_use input object echoed back
+	// to the dashboard. The CLI may stream very large inputs (e.g.
+	// Edit / Write with multi-MB content); without a cap a single
+	// pathological event would balloon the JSON response and force
+	// the dashboard to render a giant nested object.
+	maxToolInputBytes = 32 * 1024
 )
 
-// ansiEscRe matches the most common ANSI CSI sequences (color, cursor
-// motion). We strip these from tool output before serialising so the
-// rendered <pre> doesn't show garbled bytes. Defensive: the dashboard
-// uses esc()-then-<pre> so the bytes wouldn't be interpreted as HTML
-// either way, but they'd render as literal escape codes which hurt
-// readability for a debugging-focused view.
-var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]`)
+// ansiEscRe matches the most common ANSI control sequences:
+//   - CSI (\x1b[ ... letter): colour, cursor motion, the everyday case.
+//   - OSC (\x1b] ... BEL or \x1b\\): hyperlinks (OSC 8) and window title;
+//     some renderers happily build a clickable element from these.
+//   - DCS / SOS / PM / APC (\x1b[PXZ^_] ... ST): rare but valid; we
+//     strip-rather-than-trust to keep <pre> output predictable.
+//   - Bare two-byte escapes (\x1b followed by a single non-printable):
+//     leftovers like ESC-c reset.
+//
+// Stripped from any text we surface to the dashboard so the rendered
+// <pre> doesn't show garbled bytes or interpret control codes the
+// browser handles natively (OSC 8 hyperlinks in particular).
+var ansiEscRe = regexp.MustCompile(`\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b[PX^_][^\x1b]*(?:\x1b\\)?|\x1b[@-Z\\-_]`)
 
 // transcriptResponse is the wire shape the dashboard consumes.
 type transcriptResponse struct {
@@ -315,11 +327,13 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	if !run.EndedAt.IsZero() {
 		endedMS = run.EndedAt.UnixMilli()
 	} else {
-		// Running run: include everything up to "now". A small slack
-		// (5s) handles clock skew between the cron wall-clock and the
-		// JSONL writer (CLI subprocess), neither of which is NTP-synced
-		// in test fixtures.
-		endedMS = time.Now().UnixMilli() + 5000
+		// Running run: include events up to "now" plus a 1-second slack
+		// for clock skew between the cron wall-clock and the JSONL
+		// writer (the CLI subprocess). 5s previously, but in fresh=false
+		// mode multiple runs share one JSONL — too generous a window
+		// can spill the *next* run's first events into this run's
+		// transcript response.
+		endedMS = time.Now().UnixMilli() + 1000
 	}
 
 	tokens := transcriptTokens{}
@@ -329,7 +343,11 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 	// buffer caps single-line bytes. Together they enforce the
 	// design's three-tier size budget without ever calling
 	// os.ReadFile on the underlying file.
-	lr := io.LimitReader(f, maxTranscriptBytes)
+	// Use *io.LimitedReader (not io.LimitReader) so we can inspect the
+	// remaining budget after Scan returns. f.Seek would over-read the
+	// underlying file because bufio.Scanner buffers ahead of the byte
+	// the caller actually consumed.
+	lr := &io.LimitedReader{R: f, N: maxTranscriptBytes}
 	scanner := bufio.NewScanner(lr)
 	scanner.Buffer(make([]byte, 0, 64*1024), maxTranscriptLineBytes)
 
@@ -382,9 +400,10 @@ func (h *CronHandlers) handleRunTranscript(w http.ResponseWriter, r *http.Reques
 		truncated = true
 	}
 
-	// LimitReader hit means we read maxTranscriptBytes worth without
-	// seeing EOF. Mark truncated too.
-	if pos, _ := f.Seek(0, io.SeekCurrent); pos >= maxTranscriptBytes {
+	// LimitedReader.N reaches 0 only when we exhausted the byte budget
+	// before EOF; reliably detects "we hit the cap" without depending
+	// on the underlying file's read position (bufio buffers ahead).
+	if lr.N <= 0 {
 		truncated = true
 	}
 
@@ -524,7 +543,7 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 					Tool:      b.Name,
 					ToolUseID: b.ID,
 					Summary:   summary,
-					Input:     json.RawMessage(b.Input),
+					Input:     capToolInput(b.Input),
 				})
 				parsed = true
 			}
@@ -553,11 +572,18 @@ func flattenJSONLEvent(ev *claudeJSONLEvent, ts int64, nextIdx int) ([]transcrip
 		}
 		_ = json.Unmarshal(ev.Message, &sys)
 		if sys.Subtype == "error" && sys.Message != "" {
+			msg := sys.Message
+			// Same ANSI strip as tool_result text — claude CLI errors can
+			// carry colourised diagnostics and we don't want them to land
+			// in the dashboard <pre> as raw escape sequences.
+			if strings.IndexByte(msg, 0x1b) >= 0 {
+				msg = ansiEscRe.ReplaceAllString(msg, "")
+			}
 			out = append(out, transcriptTurn{
 				Index: nextIdx,
 				Kind:  "error",
 				TS:    ts,
-				Text:  truncateRunes(sys.Message, maxAssistantTextBytes),
+				Text:  truncateRunes(msg, maxAssistantTextBytes),
 			})
 			parsed = true
 		}
@@ -635,25 +661,38 @@ func parseISO8601MS(s string) int64 {
 	return t.UnixMilli()
 }
 
-// truncateRunes caps a string to maxBytes by rune boundary, appending
-// an ellipsis indicator when truncation actually happened. We trim by
-// rune count rather than byte count so multi-byte UTF-8 sequences don't
-// get split mid-codepoint (which would render as U+FFFD in the browser).
+// capToolInput limits the raw tool_use input echoed back to the
+// dashboard. The input is preserved verbatim when it fits below the
+// cap so the UI can still render structured fields. Beyond the cap
+// we replace the value with a string sentinel so the response stays
+// bounded and the dashboard can show "truncated" affordances. The
+// raw bytes are passed through json.RawMessage to avoid re-marshal
+// cost on the common (small) path.
+func capToolInput(b json.RawMessage) any {
+	if len(b) == 0 {
+		return nil
+	}
+	if len(b) > maxToolInputBytes {
+		return map[string]string{"_truncated": "tool_use input exceeded size limit"}
+	}
+	return json.RawMessage(b)
+}
+
+// truncateRunes caps a string to maxBytes, breaking only at rune
+// boundaries so multi-byte UTF-8 sequences are never split (which
+// would render as U+FFFD). The 3-byte "…" is reserved from the
+// budget; the cut point is the byte offset of the rune that would
+// push the total past maxBytes, so s[:cut] keeps every prior rune
+// intact.
 func truncateRunes(s string, maxBytes int) string {
 	if len(s) <= maxBytes {
 		return s
 	}
-	// Walk by rune until we cross the byte budget.
-	cum := 0
-	for i, r := range s {
-		_ = r
-		if i >= maxBytes-3 {
-			return s[:cum] + "…"
+	const ellipsisLen = 3 // len("…")
+	for i := range s {
+		if i+ellipsisLen > maxBytes {
+			return s[:i] + "…"
 		}
-		cum = i
 	}
 	return s
 }
-
-// _ keeps strconv imported for future tweaks (line index in errors).
-var _ = strconv.Itoa
