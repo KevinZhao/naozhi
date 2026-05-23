@@ -49,10 +49,11 @@ type DaemonTriggerKind string
 
 const (
 	DaemonTriggerScheduled DaemonTriggerKind = "scheduled"
-	// DaemonTriggerManual is reserved for the Phase 2 dashboard
-	// "trigger now" button. Phase 1 only produces Scheduled; manual
-	// will be passed by the future API endpoint that calls runOnce
-	// outside the ticker loop.
+	// DaemonTriggerManual is RESERVED for the Phase 2 dashboard
+	// "trigger now" button. Phase 1 only produces Scheduled; no
+	// production code path emits this value today, and any DaemonRun
+	// observed with Trigger=manual is either a forward-compat schema
+	// bump or a test fixture. Tracked in docs/TODO.md R232-CR-8.
 	DaemonTriggerManual DaemonTriggerKind = "manual"
 )
 
