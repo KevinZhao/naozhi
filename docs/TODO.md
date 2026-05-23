@@ -133,13 +133,13 @@
 - [ ] **R232-SEC-1 — .conf/.cfg/.ini 预览 + download 路径暴露凭据（P1）**: 这三种扩展常存 DSN/secret，TODO P3 R230B-SEC-4 低估风险。方案：从 previewableByExt 移除，sensitiveDownloadName 加名称模式（*db*/*database*/*secret*）。Breaking：否（预览改不可预览）。
 - [ ] **R232-SEC-2 — 4 条 serve* 路径独立 TOCTOU（P2，扩展 R231-SEC-5）**: handleFileGet Lstat 后 serveRender/Preview/Raw/Download 各 open 一次。方案：handleFileGet 一次 OpenFile 拿 fd 传子函数；下游 Fstat 比 inode。Breaking：否。
 - [ ] **R232-SEC-3 — feishu transport_hook 签名失败前 nonce 未入库（P2）**: HMAC 失败提前返回时 timestamp 窗口内可换 nonce 重放。方案：失败时也写 nonce 或先 nonce 去重再签名校验。Breaking：否。
-- [ ] **R232-SEC-4 — sensitiveDownloadNames 漏 secrets.yaml/service-account.json/gcp-key.json（P2）**: 方案：在 sensitiveDownloadExts 加 .json 与 secret/credential/key 文件名模式结合。Breaking：否。
+- [x] **R232-SEC-4 — sensitiveDownloadNames 漏 secrets.yaml/service-account.json/gcp-key.json（P2）**: 方案：在 sensitiveDownloadExts 加 .json 与 secret/credential/key 文件名模式结合。Breaking：否。 — 已修复（sensitiveDownloadNames 加 8 条 cloud / generic credential 名 + case-insensitive 测试锁契约），本批 PR #238
 - [ ] **R232-SEC-5 — backend ID charset 双标 cron CRUD vs WS（P2）**: validateCronBackend [a-z0-9_-] vs isValidBackendID [a-zA-Z0-9_.-]。R230B-SEC-2 已记，本轮补充新边角：handleList 读路径不校验大写 ID 透传响应。方案：统一到单一 helper。Breaking：是。
 - [ ] **R232-SEC-6 — serveRaw 透传 text/markdown MIME 不强制 attachment（P2）**: 浏览器嗅探可能渲染 HTML。方案：text/* 子类型统一强制 Content-Disposition: attachment。Breaking：否。
 - [ ] **R232-SEC-7 — JFIF+PDF 双容器绕过 PDF 检测以 KindImageInline 进入（P2）**: 方案：增二次魔数检测拒绝嵌套 PDF。Breaking：否。
-- [ ] **R232-SEC-8 — detectMime 隐藏文件 (.makefile) 点号拼接错误（P3）**: 无扩展名分支用 "."+base 拼接，".makefile" 被映射 octet-stream。方案：ext=="" 分支用原始 base 查表。Breaking：否。
+- [x] **R232-SEC-8 — detectMime 隐藏文件 (.makefile) 点号拼接错误（P3）**: 无扩展名分支用 "."+base 拼接，".makefile" 被映射 octet-stream。方案：ext=="" 分支用原始 base 查表。Breaking：否。 — 已修复（detectMime 新增 dotfile-as-ext 分支：filepath.Base 以点开头且 base==ext 时直接查 previewableByExt[base]；TestDetectMime 表加 .makefile / sub/.makefile 用例锁契约），本批 PR #238
 - [x] **R232-SEC-9 — buildLoginPageCSP 正则提取 inline script/style 错误只在运行时暴露（P3）**: 无编译期自测。方案：加 init() 自测或常量化 hash + TestLoginPage。Breaking：否。 — 已修复（dashboard_auth.go init() 抽样 extractInlineBlocks，scripts/styles 任一为 0 立即 panic，把回归暴露在进程启动期而非首次登录请求），本批 PR #230
-- [ ] **R232-SEC-10 — interruptLimiter 频率高于 sendLimiter（P3）**: 15/s vs 5/s 可对单 session DoS。方案：interruptLimiter 改 rate.Every(2s) burst=2。Breaking：否。
+- [x] **R232-SEC-10 — interruptLimiter 频率高于 sendLimiter（P3）**: 15/s vs 5/s 可对单 session DoS。方案：interruptLimiter 改 rate.Every(2s) burst=2。Breaking：否。 — 已修复（wshub.go interruptLimiter 从 rate.Every(200ms)/burst 3 改为 rate.Every(2s)/burst 2，注释解释为何 sustained 必须低于 sendLimiter），本批 PR #238
 - [x] **R232-SEC-11 — weixin Reply MessageID 拼接含未转义 ChatID（P3）**: 方案：用 SanitizeForLog 或 url.PathEscape 处理 ChatID。Breaking：否。 — 已修复（Weixin.Reply 返回 MessageID 时对 msg.ChatID 走 osutil.SanitizeForLog(128)，与同函数 contextToken 缺失分支对齐），本批 PR #230
 - [x] **R232-SEC-12 — protocol_claude resumeIDRe 含 . 略扩 --resume 字符集（P3）**: 方案：缩到 [A-Za-z0-9-]。Breaking：否（合法 Resume ID 不含 . 或 _）。 — 已修复（resumeIDRe 缩到 [A-Za-z0-9-]{1,128}；测试 fixture 改 UUID-shaped + 新增 RejectsBadResumeID 表锁 underscore/dot/whitespace/overlong），本批 PR #224
 - [ ] **R232-SEC-13 — HTTPS+反向代理未设 trusted_proxy 时 cookie 无 Secure 标志（P3）**: 文档/doctor 缺提示。方案：doctor 加 HIGH 警告。Breaking：否。
@@ -152,7 +152,7 @@
 - [x] **R232-CR-2 — RunStateRunning 死枚举（P2）**: 注释说"仅 inflight 不落盘"但代码无引用。方案：删常量；inflight 状态由 runInflight.Phase 表达。Breaking：否。 — 已修复，本批 PR #220
 - [ ] **R232-CR-3 — emitOverlapSkipped 发 back-to-back started→ended 假事件（P2）**: dashboard 短暂闪运行中气泡；SessionID/Phase 空字符串。方案：跳过 emitRunStarted 或 RunStartedEvent 加 Skipped bool。Breaking：是（WS schema）。
 - [x] **R232-CR-4 — agents map 未配 "general" 静默零值（P2）**: 缺乏防御性 log。方案：NewScheduler debug log 或注释解释。Breaking：否。 — 已修复（NewScheduler 在缺 "general" 时 slog.Debug + 解释 fallback 到 backend defaults，无运行时行为变化），本批 PR #224
-- [ ] **R232-CR-5 — computeJobTimeout schedule 参数无效（P2）**: 函数体 `_ = schedule; return maxCap`，注释"signature stability"。方案：删 schedule 参数。Breaking：是（机械重构）。
+- [x] **R232-CR-5 — computeJobTimeout schedule 参数无效（P2）**: 函数体 `_ = schedule; return maxCap`，注释"signature stability"。方案：删 schedule 参数。Breaking：是（机械重构）。 — 已修复（job.go computeJobTimeout 收掉 schedule 参数；scheduler.go 唯一 caller 同步；TestComputeJobTimeout 表去掉 schedule 字段），本批 PR #238
 - [x] **R232-CR-6 — auto_titler.renameOne 双层长度校验缺注释（P2）**: ValidateUserLabel 字节上限 + autoTitlerMaxTitleRunes rune 检查。方案：注释解释 16 rune 是 auto-titler 严格上限。Breaking：否。 — 已修复，本批 PR #220
 - [x] **R232-CR-7 — preflightResult 单字段 wrapper struct（P2）**: 方案：直接返回 (func(), bool) 二元组。Breaking：否（内部类型）。 — 已修复，本批 PR #221
 - [x] **R232-CR-8 — TriggerCatchup / ErrClassPanic / DaemonTriggerManual 占位常量（P3）**: 散布在导出 API 中无生产路径产生。方案：注释加警告或改 unexported。Breaking：否。 — 已修复（三处 godoc 各加 RESERVED 警告 + 任意观察都视为 forward-compat schema 或 test fixture 的明确语义 + 反向引用 R232-CR-8 锚点），本批 PR #236
@@ -162,7 +162,7 @@
 - [x] **R232-CR-12 — registerStub / registerStubByValue / stubChain 三 helper 结构（P3）**: pointer vs value 仅参数差异。方案：合并到一个传四个 string 的 helper。Breaking：否（私有）。 — 已修复，本批 PR #221
 - [ ] **R232-CR-13 — dispatch unit test 走真 session.Router（P3）**: dispatch_test.go newTestDispatcher 实际是集成测试。方案：用 dispatch 自己的 SessionRouter fake。Breaking：否。
 - [ ] **R232-CR-14 — agent_tailer.attach 锁外逐条 SendJSON（P2）**: 500 条 buffered replay 无批量 marshal。方案：批量 node.ServerMsg{Type: "agent_history", Events: buffered}。Breaking：否（WS schema 兼容性需查）。
-- [ ] **R232-CR-15 — protocol_acp.Init session/new 分支手写 Marshal+WriteLine（P2）**: 与 initialize/load 走 sendAndWaitResponse 不一致。方案：抽 sendReq helper 或统一走 helper。Breaking：否。
+- [x] **R232-CR-15 — protocol_acp.Init session/new 分支手写 Marshal+WriteLine（P2）**: 与 initialize/load 走 sendAndWaitResponse 不一致。方案：抽 sendReq helper 或统一走 helper。Breaking：否。 — 已修复（抽 sendAndReturnResponse(rw, req) (*RPCMessage, error) helper：sendAndWaitResponse 退化为 wrapper，session/new 走需要返回值的新 helper，三条 RPC 路径同享 metrics.RecordProtocolRPCError 包装），本批 PR #238
 - [x] **R232-CR-16 — cli/eventlog.go fireOneTaskDoneCallback / fireTaskDoneCallbacks 重复逻辑（P2）**: 方案：fireOne 内联为 fireTaskDoneCallbacks 单元素 fast-path。Breaking：否。 — 已修复（抽 loadAgentTaskDoneFn helper 收敛 onAgentTaskDoneMu Lock+read+Unlock+nil 检查；fireOne / fireTaskDoneCallbacks 共用 helper，行为/锁顺序/调用方签名不变），本批 PR #236
 - [x] **R232-CR-17 — formatAssistantToolUseDetail map→JSON→parse round-trip（P3）**: 注释说 cold path 但 pollOnce 调用频繁。方案：保留原始 json.RawMessage 直传 FormatToolInput。Breaking：否。 — 已修复（mapAssistantLine 解码改 typed transcriptAssistantBlock，input 保持 json.RawMessage 直传 FormatToolInput；删 formatAssistantToolUseDetail 包装函数与 Marshal 往返），本批 PR #230
 
