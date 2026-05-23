@@ -20,6 +20,24 @@ import (
 //     用 atomic.Pointer 避免 time.Time struct copy 的 race detector 误报）。
 //
 // 该结构不持久化；进程崩溃时 inflight 信息丢失（设计：见 RFC §4.2）。
+//
+// R233-GO-3 设计权衡：每条 cron run 的 setPhase / setSessionID / runID /
+// startedAt / trigger / freshSnap 共 6 处 atomic.Pointer.Store(&local) 都
+// 会让局部变量 escape 到 heap，单次执行新增 ~6 次小对象分配。曾考虑改成
+// `mutex + 直接 value 字段`：dashboard list API 读频率（人工点列表）远低
+// 于 cron 写频率（每 trigger 4–5 次 setPhase），mutex 的 contention 在数
+// 量级上可接受。但 atomic.Pointer 路径有两个保留理由：
+//  1. cron list / current_run handler 走 RLock 风格的 lock-free 读，避免
+//     和 executeOpt 的写路径在同一把锁上排队（已多次出现 list 卡 1s+ 的
+//     报告，根因都是某把别处的 mutex 被 executeOpt 长时间持有）。
+//  2. heap escape 是每条 run O(6) 而不是每秒 O(N)：cron 频率（典型 1/min
+//     ~ 1/h）×6 在 GC 噪声下不可见，pprof 多次采样 alloc_space 这条始终
+//     在第 50+ 名外。属于"理论上可优化但实际不掉点"。
+//
+// 真要去掉这 6 处 escape，正确路径不是换 mutex 而是改 atomic.Value 持
+// string 拷贝（atomic.Value Store 接 interface{} 同样 escape，本质等价）
+// 或在结构里预分配 *string 槽位调用方 reset 时复用。两条都需要重写
+// snapshot 路径，权衡下 P2 长期保留即可。
 type runInflight struct {
 	// running 是 CAS 守卫：CompareAndSwap(false, true) 进入临界区，defer
 	// Store(false) 退出。即使其他字段未填，CAS 也能正常工作——这样后续

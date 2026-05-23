@@ -102,7 +102,7 @@
 
 - [x] **R233-GO-1 — historyWg.Add(1) vs historyCtx.Err() TOCTOU（P1）**: router_lifecycle.go:874-882 历史回填路径，Err() 通过到 Add(1) 之间若 Shutdown 触发 historyCancel + Wait 已经开始，Add(1) 在 Wait() 后执行违反 WaitGroup 不变量。方案：把 Add(1) 提到 ctx.Err() 检查之前，跳过分支立即 Done()。Breaking：否。继承 R232-GO-2。 — 已修复（loadResumeHistoryOnSpawn 把 historyWg.Add(1) 提到 historyCtx.Err() 检查之前；跳过分支立即 Done()，关闭 Shutdown.Wait 与新 Add(1) 之间的 TOCTOU 窗口；R230-GO-1/R232-GO-2 同根因一并关闭），本批 PR
 - [x] **R233-GO-2 — sysession.Manager Stop-before-Start race（P1）**: stopOnce.Do 内 `m.cancel != nil` 与 startOnce.Do 内赋值 m.cancel 之间存在并发写 race。方案：原子 started 标志早返回。Breaking：否。继承 R232-GO-3。 — 已修复（同根因 R232-GO-3 已落地：Manager 加 started atomic.Bool，Stop 先 Load 短路；PR #241），本批 PR
-- [ ] **R233-GO-3 — executeOpt runInflight 6 处 Store(&local) 强制 heap escape（P2）**: 每次 cron run 6 个变量逃逸到 heap，每条 run 多 6 次小对象分配。方案：runInflight struct 内 `atomic.Pointer[string]` 字段改为 mutex 保护的直接 value，dashboard 读频率低 lock 成本可接受。Breaking：否。
+- [x] **R233-GO-3 — executeOpt runInflight 6 处 Store(&local) 强制 heap escape（P2）** — 评估闭合 2026-05-23（cron-fix-F2）：`internal/cron/runinflight.go` runInflight godoc 加 R233-GO-3 设计权衡注释，记录两条保留理由（lock-free 读避免和 executeOpt 写路径排队 + 6 次/run escape 在 pprof 50+ 名外不掉点）+ 真要优化的正确路径（atomic.Value 持 string 拷贝或预分配 *string 槽，而非改 mutex）。属"理论可优化实际不掉点"，文档化决策不再实施。
 
 ### 安全 — 本轮新发现
 
