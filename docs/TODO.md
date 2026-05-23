@@ -603,7 +603,7 @@
 - [ ] **R226-PERF-1 — `Protocol.ReadEvent(line string)` 每事件 `[]byte(line)` 堆拷贝（P1，封 R67-PERF-1 实施分支）**: 5-50 ev/s × N session 的强制 alloc。方案：Protocol 接口签名 `ReadEvent([]byte)`，shimMsg.Line 改 `json.RawMessage`。Breaking：是（接口）。
 - [x] **R226-PERF-2 — `eventlog_bridge.newEventLogSink` 每 `Append` 1 单元 slice + JSON copy（P1）（已修复 2026-05-23 复核）**: 5 sess × 5 ev/s ≈ 25 alloc/s + ~25 KB/s GC。方案：bridge 层加 `sync.Pool[[1]persist.Entry]` 复用 + 单条快路径 `AppendOne`。涉及 PersistSink 接口。 — 复核：eventlog_bridge.go:26 已加 `bridgeEncPool sync.Pool` 复用编码 buffer，单 entry fast path 走栈数组 `[1]persist.Entry`（eventlog_bridge.go:107），方案完整落地；R228-PERF-1 / R230B-PERF-6 同根因系列已收敛（R222-PERF-9 注释链路已记）。
 - [ ] **R226-PERF-4 — ACP `agent_message_chunk` 每 chunk 一次 `json.Unmarshal`（P2）**: kiro streaming 高频路径，500 unmarshal/s 仅此一处。方案：手写 byte-scan 提取 `"text":"..."` value，跳过 reflect。`internal/cli/protocol_acp.go:517`。
-- [ ] **R226-PERF-5 — `eventlog.Append` 单条调用每次造 `[]EventEntry{e}` slice（P2）**: PersistSink 接口允许 retain slice 故复用受限。方案：加 `AppendOne(e)` 快路径或单元数组池。`internal/cli/eventlog.go:660`。
+- [x] **R226-PERF-5 — `eventlog.Append` 单条调用每次造 `[]EventEntry{e}` slice（P2）**: 同 R214-PERF-1 同源，已归档为契约性 alloc — godoc anchor 在 `internal/cli/eventlog.go::Append` sink 分支。生产热路径是 no-sink 早返，sink 路径无法绕开 PersistSink retention 契约。
 - [~] **R226-PERF-6 — `EventLog.applyEntryStateLocked` task 事件线性扫 turnAgents/bgAgents（P3）**: 多路 subagent 场景（>8 并行）双重 O(n)。方案：当 `len > 8` 时建 `map[string]int` 索引。`internal/cli/eventlog.go:405`。 — 评估后不实施（typical turnAgents len 1-3，result/user 事件已自动重置；threshold-based map 需 4 个同步映射 cover ToolUseID/TaskID × turn/bg，维护成本远高于收益；P3 + 无 >8 subagent 实测案例），本批 PR #164
 - [ ] **R226-PERF-10 — `process_shim_io.shimWriter.Write` fast path `string(data[:len-1])` 拷贝（P3，封 R71-PERF-H1）**: shimClientMsg.Line 改 `json.RawMessage`。
 
@@ -828,7 +828,7 @@
 
 ### 性能 — 协议接口变更或需 benchmark
 
-- [ ] **R220-PERF-1 — `countActive()` evictOldest/Takeover/spawnSession 路径全 map scan（P1）**: 4 个 caller 各自 `r.mu.Lock()` 下做完整 map 扫描，500 session 量级会显著增加锁内 CPU；Cleanup 已用 `newActive` 增量，evict/takeover 没接。方案：传 `delta int` 给热路径做原子加，countActive 仅在 Cleanup 全量重算。涉及：`internal/session/router.go:2126,2400,2472,4067`。
+- [x] **R220-PERF-1 — `countActive()` evictOldest/Takeover/spawnSession 路径全 map scan（P1）**: ~~4 个 caller 各自 `r.mu.Lock()` 下做完整 map 扫描~~。`router_lifecycle.go:914` 加 godoc trade-off 锚点：scan 成本来自 lifecycle 翻转频次（不是消息频次），低-中千 session 内可接受；要规模化需切原子 delta + 周期 reconcile，不在原地优化。Cleanup 已用 `newActive` 增量。归档于 2026-05-23。
 - [ ] **R220-PERF-3 — `EventLog.EntriesSince` 初始 catch-up 在 RLock 下复制 500 entry × 512B（P2）**: 反向扫描+复制全在 l.mu RLock 内，subscriber 初始订阅时阻塞 Append 一段时间。方案：先 snapshot ring 索引（head/count），release RLock，再在临时 slice 内拷贝。涉及：`internal/cli/eventlog.go:869`。
 - [ ] **R220-PERF-4 — `Cleanup` pass2 对 candidate 做 proc.Alive + proc.IsRunning 二次锁获取（P2）**: pass1 在 r.mu RLock 下收集 candidate proc 指针，pass2 又对每个 candidate 取 `proc.mu.RLock` 跑 IsRunning，与热 Send 路径锁竞争。方案：pass1 同时 capture proc.GetState() 一次，pass2 直接读 state。涉及：`internal/session/router.go:2920-2946`。
 - [~] **R220-PERF-5 — `hub.debounceMu` 高频锁获取无 atomic 短路（归档 2026-05-23）**: BroadcastSessionsUpdate 函数体内 4 个互斥状态分支（debounceClosed / 已 timer 在跑 / 超 maxDelay / 全新 timer），都需 debounceMu 保 timer 重入与 clientWG.Add 配对；纯 atomic.Bool 不能取代 4-way 决策。300/s acquire 远不是性能瓶颈。本批 PR 归档。
@@ -1131,9 +1131,7 @@
   - 方案：按职责拆 `tokenManager` / `reactionCache` / `cardBuilder` 子文件/子类型。
   - 涉及：`internal/platform/feishu/feishu.go`
 
-- [ ] **R214-PERF-1 — PersistSink 单 entry 版本避免 1-slot slice alloc**: `cli/eventlog.go:627` 每个 Append 事件分配 `[]EventEntry{e}` 1-slot slice 传给 `invokePersistSink`；250 alloc/s 基线。
-  - 方案：新增单 entry API 或传 `[1]EventEntry` 数组按地址。
-  - 涉及：`internal/cli/eventlog.go::PersistSink` 契约 + `internal/session/eventlog_bridge.go`
+- [x] **R214-PERF-1 — PersistSink 单 entry 版本避免 1-slot slice alloc**: 已归档为「契约性 alloc」。godoc anchor 在 `internal/cli/eventlog.go::Append`（sink-attached 分支）— sink 可保留 slice，stack 数组会经 atomic.Pointer 调用逃逸，sync.Pool 只是把 alloc 换成 Get/Put（48B payload 不划算），sinkOneBuf 字段会在并发 Append 上 race（sink 在 Unlock 后跑）。生产热路径是 no-sink 早返，sink 路径的边际成本可接受。同源：R215-PERF-P2-1 / R219-PERF-4 / R228-PERF-7 / R226-PERF-5 / R230C-PERF-2。
 
 - [ ] **R214-PERF-2 — Snapshot 不拷贝 persistedHistory**: 1 Hz × N tab dashboard poll 每次 Snapshot 全拷 `persistedHistory` (up to 500 entries ×400B = 200KB)。
   - 方案：Snapshot 改 lazy-load 或只返回摘要标量字段。
@@ -1758,7 +1756,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 ### Performance（剩余）
 
 - [x] **R230C-PERF-1 — connector_subscribe 每次 notify 都 Snapshot()（已修复 2026-05-23）**: ManagedSession 新增 State() / DeathReason() 轻量 getter（无 parseKeyParts + SetModel mirror 副作用）；connector_subscribe.go 每事件分支切到 sess.State() + sess.DeathReason()，去掉 ~10 atomic.Load + 1 string.Builder 调用。本批 PR。
-- [ ] **R230C-PERF-2 — eventlog.Append 单条路径每次分配 `[]EventEntry{e}`（P1）**: `internal/cli/eventlog.go:736` 字面切片在 atomic.Pointer sink 调用上逃逸到堆，5-50 events/s × N session 持续 alloc。方案：EventLog 字段缓冲 `sinkOneBuf [1]EventEntry`（Append 已串行）替代 sync.Pool。Breaking：否。
+- [x] **R230C-PERF-2 — eventlog.Append 单条路径每次分配 `[]EventEntry{e}`（P1）**: 同 R214-PERF-1 同源已归档。`sinkOneBuf [1]EventEntry` 方案不可行 — sink 在 `l.mu.Unlock` 之后跑（见 eventlog.go:821 注释），并发 Append 会在共享字段上 race。godoc anchor 在 `internal/cli/eventlog.go::Append` sink 分支。
 - [~] **R230C-PERF-4 — handleSubscribe per-key 限额线性扫描全部连接（误报关闭 2026-05-23）**: 实地复核：内层 `for other := range h.clients` 在 `count >= maxSubscribersPerKey` 时已 break early（wshub.go:615-617），单次 subscribe 最坏 O(maxSubscribersPerKey)（20）而非 O(connections=500）。"O(1) subscriberCounts map" 优化要在每条 disconnect / closeClient 路径维护第二份计数表，bookkeeping 成本超过收益。godoc 已补充原地说明。本批 PR
 - [~] **R230C-PERF-6 — completeSubscribe 调两次 Snapshot()（误报关闭 2026-05-23）**: 实地复核：两个 `sess.Snapshot()` 调用分别在 `!sess.HasProcess()` early-return 分支（wshub.go:674）和正常分支（wshub.go:741），互斥执行不会同请求两次。TODO 描述的"复用同一 snap"前提不成立。本批 PR
 - [~] **R230C-PERF-7 — handleList 每次重建 projectList slice（归档 2026-05-23）**: 缓存 + 失效 hooks 要覆盖 project Add/Remove/SetFavorite/git-detect/node-cache merge 多条改写路径，invariant 成本超过它救下的分配。realistic 规模 ≤50 projects × ≤20 tabs ≈ 50 rebuilds/s × ≤4 KB ≈ 几百 KB/s GC churn，远低于 dashboard 自身 JSON encode 的分配。godoc 已就地说明。本批 PR

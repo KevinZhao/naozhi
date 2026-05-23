@@ -809,15 +809,20 @@ func (l *EventLog) Append(e EventEntry) {
 	// them in the no-sink case saves one alloc per event in the hot
 	// stdout path. Mirrors AppendBatch's pre-loop sinkAttached gate.
 	//
-	// R215-PERF-P2-1 / R219-PERF-4 / R228-PERF-7 archive anchor:
-	// the remaining `[]EventEntry{e}` literal allocation on the
-	// sink-attached branch is structurally required by PersistSink's
-	// retention contract — the sink may keep the slice past return,
-	// so a stack array (`[1]EventEntry` with `s[:]`) escapes via the
-	// atomic.Pointer-loaded function pointer regardless of -gcflags=-m.
-	// sync.Pool would just trade alloc for Get/Put overhead on a 48 B
-	// payload. Production hot path is the no-sink early-return above,
-	// so the marginal cost on the sink-attached path is accepted.
+	// R215-PERF-P2-1 / R219-PERF-4 / R228-PERF-7 / R214-PERF-1 /
+	// R226-PERF-5 / R230C-PERF-2 archive anchor: the remaining
+	// `[]EventEntry{e}` literal allocation on the sink-attached branch
+	// is structurally required by PersistSink's retention contract —
+	// the sink may keep the slice past return, so a stack array
+	// (`[1]EventEntry` with `s[:]`) escapes via the atomic.Pointer-
+	// loaded function pointer regardless of -gcflags=-m. sync.Pool
+	// would just trade alloc for Get/Put overhead on a 48 B payload,
+	// and a single-entry struct field buffer (`sinkOneBuf [1]EventEntry`)
+	// would race once Append is reached from concurrent goroutines
+	// (Append is called under l.mu but the sink runs *after* Unlock,
+	// so two Appends could overlap on the shared buffer). Production
+	// hot path is the no-sink early-return above, so the marginal cost
+	// on the sink-attached path is accepted.
 	if l.persistSinkPtr.Load() != nil {
 		l.invokePersistSink([]EventEntry{e})
 	}
