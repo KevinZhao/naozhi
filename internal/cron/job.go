@@ -95,6 +95,21 @@ type Job struct {
 	// Explicit true/false lets dashboard users toggle delivery using the
 	// scheduler's notify_default target (or per-job override) without touching
 	// platform/chat fields.
+	//
+	// Three-state semantics (resolveNotifyTarget priority ladder):
+	//
+	//	Notify=&false   → 显式关闭：忽略所有 fallback，无任何投递（最高优先级）
+	//	NotifyPlatform/NotifyChatID 同时非空 → 强制 per-job 目标
+	//	Notify=&true    → 启用 + 走 scheduler.notify_default；若 default 也未配
+	//	                  仅 slog.Warn 而不阻塞 run（避免 IM 配置抖动让 cron 哑火）
+	//	Notify=nil      → 旧行为：IM-created job 回源 chat；dashboard-created job
+	//	                  （Platform=="dashboard"）天然 no-op（dashboard 无 reg）
+	//
+	// 解读优先级：disable > per-job override > enable+default > legacy。
+	// 这个 ladder 在 resolveNotifyTarget 实现，但 Notify 是用户可见的 schema
+	// 字段——godoc 在结构体侧也要锁住语义，避免 dashboard 表单与后端对齐
+	// 漂移。RFC（TODO R232-ARCH-11）讨论改 enum 显式建模，是 breaking 改动；
+	// 这条注释是 enum 落地前的当前真相。
 	Notify *bool `json:"notify,omitempty"`
 
 	// FreshContext, when true, resets the cron session before each run so the
