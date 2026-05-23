@@ -1183,6 +1183,17 @@ func (r *Router) finishResetUnlocked(key string, proc processIface) {
 // socket path derived from KeyHash, so callers don't need to plumb a
 // shim.Manager reference through every Reset path. Returns quickly if
 // the socket was never created.
+//
+// R228-ARCH-1 anchor: this helper, together with the inline
+// shim.SocketPath/KeyHash uses in router_shim.go, intentionally bypasses
+// cli.Wrapper.ShimManager and reaches into the shim package directly.
+// The reason is that "wait for the socket file to disappear" is a
+// filesystem fact independent of any per-wrapper Manager registry —
+// during multi-backend operation we may need to drain a stale socket
+// before its Manager has been (re)constructed for the new backend.
+// The cleaner long-term shape is cli.Wrapper.WaitSessionShimGone(key)
+// (RFC R228-ARCH-1), but until that interface lands the direct shim
+// access is the load-bearing safety net for restart-time cleanup.
 func waitSocketGoneForKey(key string, maxWait time.Duration) {
 	if key == "" {
 		return
