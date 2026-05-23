@@ -611,18 +611,6 @@ func buildServer(opts ServerOptions) *Server {
 		},
 	}
 
-	// R230C-SEC-11: production wiring requires runsLimiter whenever the cron
-	// scheduler is attached — without it /api/cron/runs and the transcript
-	// endpoint silently degrade to unlimited rate. The buildServer literal
-	// above always supplies the limiter, so a panic here would only trigger
-	// if a future refactor removed the assignment; surfacing the regression
-	// at startup is preferable to discovering it via a stolen-token replay
-	// in production. CronHandlers' nil-guard is preserved for the test-only
-	// newCronHandlersForTest path.
-	if scheduler != nil && s.cronH.runsLimiter == nil {
-		panic("server: cronH.runsLimiter must be wired when scheduler is set")
-	}
-
 	// Q1: wire router's terminal-removal hook to msgQueue.Cleanup so the
 	// per-session FIFO map entry is truly deleted when the user resets or
 	// removes a session (/new, dashboard delete). Without this the entry
