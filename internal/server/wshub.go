@@ -1399,6 +1399,17 @@ func (h *Hub) BroadcastSessionReady(key string) {
 // call; the actual broadcast fires only when no further calls arrive within the
 // window. A 500ms hard cap on the total debounce window guarantees the update
 // eventually fires even under sustained bursts, so clients never miss a refresh.
+//
+// R227-PERF-8 archive anchor (doc-and-accept, 2026-05-23): each new debounce
+// window opens via time.AfterFunc instead of a persistent *time.Timer + Reset.
+// AfterFunc allocates ~80B per call, but the debounce window is 50–500ms scale
+// and only fires once per quiescent burst; the cost is dwarfed by the
+// downstream sessions JSON marshal (multi-KB) inside doBroadcastSessionsUpdate.
+// A reusable persistent timer would also have to be serialised under
+// debounceMu (Reset on a fired-but-not-cleared timer schedules a phantom run
+// without a matching clientWG.Add), which adds lock-hold contention without
+// removing the alloc cost we'd save. Keep AfterFunc; revisit only if a
+// profile shows debounce alloc as a measurable hot path.
 func (h *Hub) BroadcastSessionsUpdate() {
 	const (
 		debounceInterval = 50 * time.Millisecond
