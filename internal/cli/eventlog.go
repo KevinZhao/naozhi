@@ -208,6 +208,18 @@ type SubagentInfo struct {
 	DurationMS int64  `json:"duration_ms,omitempty"`
 }
 
+// subscriber is the per-Subscribe handle. R229-PERF-12 reviewer
+// suggested pooling these via sync.Pool to dodge alloc on dashboard
+// reconnect spurts; that won't work because (a) closed channels cannot
+// be re-used (the unsub path calls close(sub.ch), and reusing a closed
+// channel makes a recv permanently return the zero value before any
+// future notify lands), and (b) sync.Once cannot be reset to its
+// pristine state without unsafe pointer surgery. The cheap path is
+// `make(chan struct{}, 1) + sync.Once{}` per Subscribe — both are tiny
+// allocations and tab-reload is human-cadence, so pooling buys ~2
+// alloc/subscribe at most. Documented to discourage future
+// "obvious" pool attempts that would silently break the close-once
+// invariant.
 type subscriber struct {
 	ch        chan struct{} // buffered(1)
 	closeOnce sync.Once
