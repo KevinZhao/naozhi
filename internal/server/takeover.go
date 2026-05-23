@@ -113,16 +113,7 @@ func (s *Server) tryAutoTakeover(ctx context.Context, chatKey, key string, opts 
 	if err != nil || len(discovered) == 0 {
 		return false
 	}
-	// Find the most recently active session whose CWD matches the workspace.
-	var best *discovery.DiscoveredSession
-	for i := range discovered {
-		ds := &discovered[i]
-		if ds.CWD == workspace {
-			if best == nil || ds.LastActive > best.LastActive {
-				best = ds
-			}
-		}
-	}
+	best := mostRecentSessionForCWD(discovered, workspace)
 	if best == nil {
 		return false
 	}
@@ -138,4 +129,29 @@ func (s *Server) tryAutoTakeover(ctx context.Context, chatKey, key string, opts 
 	}
 	slog.Info("auto-takeover completed", "key", key, "pid", best.PID, "session_id", best.SessionID, "workspace", best.CWD)
 	return true
+}
+
+// mostRecentSessionForCWD returns the discovered session whose CWD matches
+// workspace and whose LastActive is the largest, or nil when none match.
+// Pure helper — extracted so tests can pin the LastActive selection
+// invariant ("most recent wins, ties resolve to first-seen") without
+// running the full takeover pipeline. Returns a pointer into the input
+// slice; callers MUST NOT mutate the returned struct without first
+// copying.
+//
+// Returns nil for an empty slice or a workspace that no candidate
+// matches; callers treat nil as "no takeover candidate" and fall
+// through to the GetOrCreate path.
+func mostRecentSessionForCWD(discovered []discovery.DiscoveredSession, workspace string) *discovery.DiscoveredSession {
+	var best *discovery.DiscoveredSession
+	for i := range discovered {
+		ds := &discovered[i]
+		if ds.CWD != workspace {
+			continue
+		}
+		if best == nil || ds.LastActive > best.LastActive {
+			best = ds
+		}
+	}
+	return best
 }
