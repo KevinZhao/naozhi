@@ -118,6 +118,22 @@ func (s *Scratch) Touch() {
 // On Close / TTL expiry the pool calls router.Remove(key) which kills the
 // process and drops the session entry — scratches never persist through a
 // restart.
+//
+// Dual-pool invariant (R230C-ARCH-13 / R224-ARCH-13): scratches LIVE inside
+// router.sessions exactly like managed sessions. ScratchPool only owns
+// metadata + lifecycle (TTL sweep, max cap), but every Scratch.Key is also a
+// router-known key. Consequences:
+//
+//   - any code path that walks router.sessions (saveStore, sidebar listing,
+//     dashboard handleList, /api/sessions) MUST filter on ScratchKeyPrefix
+//     to avoid surfacing or persisting scratches through normal channels.
+//   - the regular Cleanup loop is intentionally allowed to evict idle
+//     scratches (Scratch.Exempt = false) — ScratchPool's own sweeper just
+//     adds a tighter TTL on top.
+//   - any new scratch operation requires a matching no-op or filter in the
+//     general session path. Adding a third pool here without documenting it
+//     compounds the divergence: prefer extending this pool or extracting an
+//     internal/session/scratch sub-package over a new pool field.
 type ScratchPool struct {
 	mu       sync.Mutex
 	items    map[string]*Scratch // ID -> Scratch

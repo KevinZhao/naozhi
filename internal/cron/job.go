@@ -297,18 +297,31 @@ func schedulePeriod(schedule string, now time.Time) time.Duration {
 	return second.Sub(first)
 }
 
+// previousTickWindowFactor 是 previousTickBefore 回推窗口的安全系数。
+// 等距 cron 表达式（"@every Nm"、"M H * * *"）只需 1×period 即可覆盖
+// 上一次触发；3× 是为了应对非等距形态（每月 29 日在 2 月跳到 3 月、DST
+// 切换让某次 period 翻倍）—— 在不引入精确日历计算的前提下给足裕量。
+const previousTickWindowFactor = 3
+
+// previousTickBeforeMaxIters 上限守卫：极端 DST/月底场景下若 sched.Next 进展
+// 极慢，避免在 dashboard 1Hz 轮询路径短暂阻塞。1000 次足以覆盖任何合法
+// cron schedule 在 previousTickWindowFactor × period 窗口内的迭代次数；
+// 命中说明 schedule 形态病态（应在 validateSchedule 层拦截），此时回退到
+// 最后一次成功的 prev 仍是安全保守值。
+const previousTickBeforeMaxIters = 1000
+
 // previousTickBefore 算给定 schedule 在 now 之前最近一次应该触发的时刻。
-// robfig/cron 只提供 Next()，没有 Prev()。这里用"从 now 回推 3 × period
-// 的窗口，在窗口内用 sched.Next(起点) 逼近最接近 now 的 tick"的办法：
+// robfig/cron 只提供 Next()，没有 Prev()。这里用"从 now 回推
+// previousTickWindowFactor × period 的窗口，在窗口内用 sched.Next(起点)
+// 逼近最接近 now 的 tick"的办法：
 //
 //  1. 先估计 period（Next 两次）
-//  2. 起点 = now - 3 × period（保证至少覆盖一个完整周期）
+//  2. 起点 = now - previousTickWindowFactor × period（保证至少覆盖一个完整周期）
 //  3. 起点不断 Next，直到下一次 Next 超过 now；此时当前 Next 即为"最后
 //     一次 ≤ now 的触发时刻"。
 //
-// 窗口乘 3 是为了应对 DST / 月份 / 闰年这类非等间隔形态（每月 29 日
-// 在 2 月可能 "跳 31 天"），给足裕量。每次 Next 是 O(1)，循环最多跑
-// 3-5 次，开销可忽略。无法解析的 schedule 返回零值 time。
+// 每次 Next 是 O(1)，循环最多跑 previousTickWindowFactor + 几次，开销可忽略。
+// 无法解析的 schedule 返回零值 time。
 func previousTickBefore(schedule string, now time.Time) time.Time {
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {
@@ -318,13 +331,10 @@ func previousTickBefore(schedule string, now time.Time) time.Time {
 	if period <= 0 {
 		return time.Time{}
 	}
-	// 回推起点；加一个安全系数 3 应对月份/DST 的非等距触发
-	start := now.Add(-3 * period)
+	// 回推起点；previousTickWindowFactor 应对月份/DST 的非等距触发。
+	start := now.Add(-time.Duration(previousTickWindowFactor) * period)
 	prev := time.Time{}
-	// 上限守卫：极端 DST/月底场景下若 sched.Next 进展极慢，避免
-	// 在 dashboard 1Hz 轮询路径短暂阻塞。1000 次足以覆盖任何
-	// 合法 cron schedule 在 3×period 窗口内的迭代次数。
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < previousTickBeforeMaxIters; i++ {
 		next := sched.Next(start)
 		if !next.Before(now) {
 			return prev
