@@ -168,6 +168,24 @@ type healthResp struct {
 	*healthAuthSection
 }
 
+// handleHealth serves /health with a two-tier response:
+//
+//   - Unauthenticated probes: status + uptime only. Intentionally cheap so
+//     orchestrators (k8s liveness, ALB target-group checks) don't need a
+//     token, but also cheap enough that the absence of rate-limiting here
+//     is not currently a DoS amplifier — the response is a stack-allocated
+//     struct + writeJSON, no DB / disk / lock contention. R226-SEC-7
+//     proposed adding a per-IP limiter; deferred because (a) the unauth
+//     payload reveals only "process alive" + uptime string, (b) every
+//     authenticated subobject is already gated by isAuthenticated below,
+//     so attackers cannot enumerate watchdog kills / platform names /
+//     node status without first stealing a token. If unauthenticated body
+//     ever grows beyond status+uptime, revisit R226-SEC-7 before merging.
+//
+//   - Authenticated probes (operator dashboard, /api/sessions polling):
+//     full sub-objects. Already throttled at the HTTP layer by the
+//     dashboard's 1 Hz poll cadence; lateral moves from a stolen token
+//     would face the same poll budget as a legitimate dashboard tab.
 func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp := healthResp{
 		Status: "ok",

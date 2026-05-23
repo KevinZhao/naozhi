@@ -278,7 +278,7 @@ func mapUserLine(raw transcriptLine, ts int64) []EventEntry {
 			Time:    ts,
 			Type:    "text",
 			Summary: textutil.TruncateRunes(s, 120),
-			Detail:  textutil.TruncateRunes(s, 2000),
+			Detail:  textutil.TruncateRunes(s, eventDetailMaxRunes),
 		}}
 	}
 
@@ -301,7 +301,7 @@ func mapUserLine(raw transcriptLine, ts int64) []EventEntry {
 				Time:    ts,
 				Type:    "text",
 				Summary: textutil.TruncateRunes(block.Text, 120),
-				Detail:  textutil.TruncateRunes(block.Text, 2000),
+				Detail:  textutil.TruncateRunes(block.Text, eventDetailMaxRunes),
 			})
 		case "tool_result":
 			summary, detail, persistedPath, skip := flattenToolResultRaw(block.Content)
@@ -354,14 +354,14 @@ func mapAssistantLine(raw transcriptLine, ts int64) []EventEntry {
 				Time:    ts,
 				Type:    "thinking",
 				Summary: textutil.TruncateRunes(block.Text, 120),
-				Detail:  textutil.TruncateRunes(block.Text, 2000),
+				Detail:  textutil.TruncateRunes(block.Text, eventDetailMaxRunes),
 			})
 		case "text":
 			out = append(out, EventEntry{
 				Time:    ts,
 				Type:    "text",
 				Summary: textutil.TruncateRunes(block.Text, 120),
-				Detail:  textutil.TruncateRunes(block.Text, 2000),
+				Detail:  textutil.TruncateRunes(block.Text, eventDetailMaxRunes),
 			})
 		case "tool_use":
 			entry := EventEntry{

@@ -196,6 +196,22 @@ type ContentBlock struct {
 // memory amplification well below the 10 MiB shim line cap.
 const maxAssistantMessageContentBytes = 4 * 1024 * 1024
 
+// eventDetailMaxRunes is the rune-count cap applied to EventEntry.Detail (and
+// SubagentLinker.Resolve description args, which flow into the same Detail
+// field after persistence). Detail is the verbatim quoted text shown in
+// dashboard previews; the dashboard collapses anything longer behind a
+// "show more" affordance, so storing past this bound just bloats the ring
+// buffer + persisted jsonl.
+//
+// 2000 runes was chosen empirically: it fits ~10 lines of typical assistant
+// prose at 80 columns (the dashboard preview height before scroll), large
+// enough to convey context for tool decisions while small enough that a
+// burst of 50 tool_use entries adds <100 KB to the ring buffer's RSS.
+// Centralising the constant here lets the cap evolve in one place even
+// though the surface area touches process_event_format / process_send /
+// process_event_query / subagent_transcript.
+const eventDetailMaxRunes = 2000
+
 // contentBytes sums the user-visible byte size of an AssistantMessage's
 // content blocks. Only fields that grow with model output are counted; the
 // fixed-size discriminators (Type/ID/Name) are excluded so a message of

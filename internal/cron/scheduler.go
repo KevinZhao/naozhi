@@ -505,6 +505,30 @@ func (s *Scheduler) KnownSessionIDs() map[string]bool {
 	return out
 }
 
+// Naming convention for cron quota constants (R234-CR-7):
+//
+//   - Unexported (`maxJobsHardCap`, `defaultMaxJobs`): scheduler-internal
+//     defaults that no test or external package needs to reference. The
+//     hard cap is a safety rail — operators set MaxJobs in config and the
+//     cap merely clamps unrealistic values (logged at Warn). The "default"
+//     applies only when the operator leaves the field zero/negative.
+//     Either constant changing is an internal tuning, not an API change.
+//
+//   - Exported (`DefaultMaxJobsPerChat`): per-chat quota that scheduler_test
+//     pins (see scheduler_test.go:648-673 — the test asserts the resolved
+//     `s.maxJobsPerChat` matches this constant when MaxJobsPerChat is unset)
+//     and that user-facing docs reference. Exported because changing it
+//     would break test fixtures and operator documentation simultaneously,
+//     so the symbol earns the API-stability contract.
+//
+// Why not unify the prefix: `MaxJobsHardCap` would mislead callers into
+// thinking the hard cap is configurable like MaxJobs is, and `DefaultMaxJobs`
+// (exported) would require pinning the global default in tests too. The
+// asymmetric naming is therefore intentional — uppercase tracks "public
+// contract", lowercase tracks "internal tuning". Future quota constants
+// should follow the same rule: export only what tests/docs/operators
+// already reference, not "to be safe".
+
 // maxJobsHardCap caps user-configurable MaxJobs to prevent accidental
 // overload. 500 jobs ≈ 500 tick timers; well within robfig/cron's tested
 // scale, but higher values tend to indicate a config mistake.
@@ -1806,14 +1830,36 @@ func (s *Scheduler) snapshotJob(j *Job) jobSnapshot {
 // risk silent argument-order swaps. Named fields also let tests express
 // intent without reading parameter positions.
 type preflightArgs struct {
-	job       *Job
-	snap      jobSnapshot
-	key       string
-	lg        *slog.Logger
-	notifyTo  NotifyTarget
-	runID     string
+	// job 是 freshContextPreflightP0 操作的目标 Job 指针（持有用于
+	// stub-refresh 闭包），调用前 caller 已 snapshot；preflight 不会修改
+	// *Job 字段，但失败分支会通过 finishArgs.job 把它转交给 finishRun。
+	job *Job
+	// snap 是 snapshotJob 拷贝出的快照（fresh / workDir / prompt /
+	// jobID / labelOrID）。preflight 优先读 snap 而非 *job，避免与并发
+	// DeleteJob/PauseJob 起读写竞争。
+	snap jobSnapshot
+	// key 是 router GetOrCreate / Reset 用到的 session key
+	// （`cron:<jobID>` 形式）。fresh 路径 Reset 该 key 后再让 caller
+	// 重新 GetOrCreate，确保新 CLI 进程接管。
+	key string
+	// lg 是带 jobID/runID 标签的 slog.Logger，preflight 自身只输出
+	// info/warn 不输出 error（error 由 finishRun 的 errMsg 落盘统一处理）。
+	lg *slog.Logger
+	// notifyTo 是 fresh-preflight 工作目录不可达分支用来回写
+	// 「[Cron …] 工作目录不可达」中文提示的目标；其它失败分支不通知，
+	// 因为「shutdown / Reset 失败」对终端用户没有可操作信号。
+	notifyTo NotifyTarget
+	// runID 是 caller 已生成的 8-char hex 运行 ID。失败分支转给
+	// finishRun，使 cron_run_ended 与 cron_run_started 配对（emitOverlapSkipped
+	// 同样模式）。
+	runID string
+	// startedAt 是 caller 进入 executeOpt 时记录的 wall-clock 起点；
+	// finishRun 据此算 durationMS。preflight 失败也保留这个起点而非
+	// 重新 time.Now()，让 dashboard 看到真实的"从触发到放弃"时长。
 	startedAt time.Time
-	trigger   TriggerKind
+	// trigger 区分 TriggerScheduled / TriggerManual；deliverNotice 与
+	// dashboard run timeline 对二者渲染不同图标。
+	trigger TriggerKind
 }
 
 // freshContextPreflightP0 handles the fresh-mode prologue: ctx-cancel guard
@@ -2007,19 +2053,17 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	if viaTriggerNow {
 		trigger = TriggerManual
 	}
-	{
-		rid := runID
-		st := startedAt
-		ph := PhaseQueued
-		tr := string(trigger)
-		empty := ""
-		inflight.runID.Store(&rid)
-		inflight.startedAt.Store(&st)
-		inflight.phase.Store(&ph)
-		inflight.trigger.Store(&tr)
-		inflight.sessionID.Store(&empty)
-		inflight.freshSnap.Store(j.FreshContext)
-	}
+	// R234-GO-6: route every atomic.Pointer.Store through strHeap/timeHeap
+	// (runinflight.go) so the heap allocation is explicit rather than relying
+	// on escape-analysis lifting `&localVar`. Pre-existing semantics (one
+	// alloc per field on this path) are unchanged; the helpers exist purely
+	// as a readability + future-inliner safety anchor.
+	inflight.runID.Store(strHeap(runID))
+	inflight.startedAt.Store(timeHeap(startedAt))
+	inflight.phase.Store(strHeap(PhaseQueued))
+	inflight.trigger.Store(strHeap(string(trigger)))
+	inflight.sessionID.Store(strHeap(""))
+	inflight.freshSnap.Store(j.FreshContext)
 	metrics.CronRunInflight.Add(1)
 	// CronRunStartedTotal bumps inside emitRunStarted (R230C-GO-15).
 
@@ -2315,15 +2359,35 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 // preflight failures pass them as zero values, which CronRun renders as
 // empty (the dashboard will fall back to Job.Prompt for display).
 type finishArgs struct {
-	job       *Job
+	// job 是终结的目标 Job。state==Skipped 的 overlap 路径仍要传 *Job
+	// 因为 emitRunEnded 需要 Job.Schedule / Job.Label 上下文；DeleteJob
+	// 中途的竞态由 recordResultP0WithSanitised 内 jobs[id] 二次校验。
+	job *Job
+	// runID / startedAt 与上游 emitRunStarted 的 RunStartedEvent 一一对
+	// 应；finishRun 据此发 RunEnded，订阅方 (dashboard hub) 用 RunID 配
+	// 对 started→ended 帧。
 	runID     string
 	startedAt time.Time
-	trigger   TriggerKind
-	state     RunState
+	// trigger 与 RunStartedEvent.Trigger 必须一致；errMsg/result 经过
+	// sanitiseRunResult / redactPathsInCronError 流水线后才会进 ws/disk。
+	trigger TriggerKind
+	// state 决定 metrics 计数桶 + 是否进 succeeded/failed counters。
+	// Skipped 不计入 Failed（dashboard "失败率" 排除 overlap 噪音）。
+	state RunState
+	// sessionID 是 GetOrCreate 分配的 CLI session_id（fresh=true 路径
+	// 必为空字符串——CAS 进入 spawn 但还未 GetOrCreate；持久化模式下
+	// 是上一次的 session_id）。空值 dashboard 隐藏「打开会话」按钮。
 	sessionID string
-	result    string
-	errClass  ErrorClass
-	errMsg    string
+	// result 是 CLI 末轮文本输出（已经 RFC §6 的 sanitiseRunResult，包
+	// 括 4K rune 截断 + …[truncated] 后缀 + SanitizeForLog 控制字符过滤）。
+	result string
+	// errClass 是机器可读的错误分类（PreflightFailed / WorkDirUnreachable
+	// / Canceled / Timeout / SpawnFailed / SendFailed / OverlapSkipped 等）。
+	// dashboard 用它选图标 + i18n 文案；errMsg 仅作展开详情。
+	errClass ErrorClass
+	// errMsg 是人类可读错误（ASCII 控制符已 escape，绝对路径已 redact）。
+	// 严格 ≤ maxCronErrMsgRunes (512 runes)，超长被 SanitizeForLog 截断。
+	errMsg string
 	// skipPersist 同时控制两件事：跳过 Job 字段更新（LastRunAt/LastResult/
 	// LastError/LastErrorClass/Counters）和跳过 CronRun 磁盘历史。当前所有
 	// 调用点这两件事都同步：canceled / overlap_skipped / job-deleted-mid-
@@ -2447,21 +2511,15 @@ func (s *Scheduler) finishRun(a finishArgs) {
 // pipeline that recordResultP0WithSanitised uses, factored out so the
 // skipPersist path of finishRun can reach the same byte-output without
 // touching s.mu / persistJobsLocked. Idempotent w.r.t. clean strings.
+//
+// truncateWithSuffix (limits.go) handles the rune trim + suffix; we extend
+// SanitizeForLog's byte cap by len(truncatedSuffix) so a 4K-rune input that
+// just got "…[truncated]" appended doesn't have its suffix byte-clipped on
+// the way out. R232-PERF-9 / R234-CR-1.
 func sanitiseRunResult(s string) string {
-	if trimmed := textutil.TruncateRunesNoEllipsis(s, maxStoredResultRunes); len(trimmed) < len(s) {
-		s = trimmed + truncatedSuffix
-	}
-	// SanitizeForLog's maxLen is byte-counted, so extend the cap by the
-	// suffix length so a 4K-rune input that just got the "…[truncated]"
-	// marker appended doesn't have its suffix byte-clipped on the way
-	// out. R232-PERF-9.
+	s = truncateWithSuffix(s, maxStoredResultRunes)
 	return osutil.SanitizeForLog(s, maxStoredResultRunes+len(truncatedSuffix))
 }
-
-// truncatedSuffix marks where sanitiseRunResult / recordResultP0WithSanitised
-// cut a result that exceeded maxStoredResultRunes. Centralised so the
-// downstream SanitizeForLog cap can compensate for its byte length.
-const truncatedSuffix = "…[truncated]"
 
 // sanitiseRunErrMsg applies the cron error-redaction + log-injection
 // scrub used by recordResultP0WithSanitised, for skipPersist branches
@@ -2578,9 +2636,12 @@ func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
 // (the last "test stub" caller) already invokes this function directly.
 // Do NOT reintroduce a thinner wrapper without first checking those TODOs.
 func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState) (string, string, bool) {
-	if trimmed := textutil.TruncateRunesNoEllipsis(result, maxStoredResultRunes); len(trimmed) < len(result) {
-		result = trimmed + truncatedSuffix
-	}
+	// truncateWithSuffix (limits.go) is the single source of truth for the
+	// rune-trim + …[truncated] suffix; both this path and sanitiseRunResult
+	// must produce byte-identical output so the skipPersist branch of
+	// finishRun and the disk record never disagree on visible content.
+	// R234-CR-1 consolidated three open-coded copies into the helper.
+	result = truncateWithSuffix(result, maxStoredResultRunes)
 	errMsg = redactPathsInCronError(errMsg)
 	// Extend SanitizeForLog's byte cap by the suffix length so an
 	// already-truncated result keeps the trailing marker intact;

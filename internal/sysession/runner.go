@@ -97,6 +97,24 @@ type runnerImpl struct {
 	env []string
 }
 
+// runnerStderrCapBytes caps the bytes captured from "claude -p" stderr.
+// 4 KiB is enough to surface the typical CLI diagnostic prefix
+// ("Error: model not found", "auth failed", "context too long" with
+// snippet, etc.) while bounding how much stdin-echo can leak into
+// the error wrap. The first 256 bytes additionally land in slog.Warn
+// (see Run's stderr-head log) — that is a separate, smaller cap and
+// is intentional defence-in-depth, not a duplicate.
+const runnerStderrCapBytes = 4096
+
+// runnerStdoutCapBytes caps "claude -p" stdout. AutoTitler validates
+// ≤16 Chinese characters; even with reasoning prefixes legitimate
+// upstream output is well below this 64 KiB cap. The cap exists so a
+// runaway CLI (infinite-loop reasoning, base64-blob hallucination)
+// cannot OOM the parent naozhi process. limitedWriter lies about
+// n=len(p) so exec.Cmd's stdout pump does not spin re-trying past
+// the cap (see limitedWriter godoc).
+const runnerStdoutCapBytes = 64 * 1024
+
 func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 	args := []string{"-p", "--output-format", "text", "--setting-sources", ""}
 	if r.cfg.Model != "" {
@@ -110,17 +128,17 @@ func (r *runnerImpl) Run(ctx context.Context, prompt string) (string, error) {
 
 	// Capture stderr separately so panic-debug isn't lost when stdout is
 	// empty (e.g. binary error before output).  We only return stderr
-	// in the error wrap — never in the success path.
+	// in the error wrap — never in the success path. See
+	// runnerStderrCapBytes for the cap rationale.
 	var stderr strings.Builder
-	cmd.Stderr = &limitedWriter{w: &stderr, max: 4096}
+	cmd.Stderr = &limitedWriter{w: &stderr, max: runnerStderrCapBytes}
 
 	// Cap stdout so a runaway "claude -p" can't OOM the parent process.
-	// AutoTitler validates ≤16 Chinese chars; even with reasoning
-	// prefixes the upstream output is well below 64 KiB. Use the same
-	// limitedWriter pattern as stderr — it lies about n=len(p) so
-	// exec.Cmd's pump doesn't spin re-trying past the cap.
+	// See runnerStdoutCapBytes for sizing rationale. limitedWriter lies
+	// about n=len(p) so exec.Cmd's pump doesn't spin re-trying past the
+	// cap.
 	var stdout bytes.Buffer
-	cmd.Stdout = &limitedWriter{w: &stdout, max: 64 * 1024}
+	cmd.Stdout = &limitedWriter{w: &stdout, max: runnerStdoutCapBytes}
 
 	err := cmd.Run()
 	if err != nil {

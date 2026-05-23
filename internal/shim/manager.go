@@ -109,14 +109,44 @@ type ShimHandle struct {
 }
 
 // ManagerConfig holds configuration for the shim manager.
+//
+// All fields are optional; NewManager applies sensible defaults (see the
+// constants/literals inside NewManager) when zero/empty so misconfigured
+// callers still get a usable Manager rather than a startup error. Per-field
+// godoc here documents what each knob actually controls — the historical
+// "holds configuration" one-liner forced readers to grep for the field
+// usage to discover semantics.
 type ManagerConfig struct {
-	StateDir        string
-	CLIPath         string
-	IdleTimeout     time.Duration
+	// StateDir is the directory where per-shim state JSON files live
+	// (one file per active shim, named <keyhash>.json). Defaults to
+	// ~/.naozhi/shims when empty. Created with mode 0700 because the
+	// state files embed AuthToken which grants direct socket attach.
+	StateDir string
+	// CLIPath is the default CLI binary path used by StartShim.
+	// Multi-backend callers should prefer StartShimWithBackend with an
+	// explicit cliPath instead of relying on this field.
+	CLIPath string
+	// IdleTimeout is the duration a shim sits with no client attached
+	// before exiting on its own. Defaults to 4h. Set lower for memory-
+	// pressure environments; the default trades off RAM against the
+	// wall-clock penalty of cold-spawning a fresh CLI subprocess.
+	IdleTimeout time.Duration
+	// WatchdogTimeout is the per-CLI-turn deadline enforced by the
+	// shim's internal watchdog. Defaults to 30m. A turn that exceeds
+	// this is force-killed; tune this if your turns legitimately run
+	// long (e.g. multi-hour code analyses).
 	WatchdogTimeout time.Duration
-	BufferSize      int
-	MaxBufBytes     int64
-	MaxShims        int
+	// BufferSize is the line capacity of the shim's stdout ring buffer.
+	// Defaults to 10000 lines. The ring serves replay on reconnect.
+	BufferSize int
+	// MaxBufBytes is the byte capacity of the shim's stdout ring buffer.
+	// Defaults to 50 MiB. Whichever cap (lines or bytes) trips first
+	// drives eviction.
+	MaxBufBytes int64
+	// MaxShims caps concurrent live shim processes. Defaults to 50.
+	// StartShim returns ErrMaxShims when at the cap; Reconnect bypasses
+	// this gate (it only attaches to already-running processes).
+	MaxShims int
 }
 
 // NewManager creates a shim manager.

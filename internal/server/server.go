@@ -538,8 +538,23 @@ func buildServer(opts ServerOptions) *Server {
 	// which is the legitimate single-user default but a real risk in
 	// multi-user deployments. Surface it once at startup so operators can
 	// audit their config rather than discovering the looseness via incident.
+	//
+	// R226-SEC-6: when both (a) a dashboard_token is configured (multi-user
+	// intent) AND (b) the bind address is non-loopback (network-reachable),
+	// raise the visibility from a single Warn line to two with explicit
+	// "high severity" wording. Upgrading to fatal is deferred — existing
+	// deployments rely on the warn-only contract and a hard-fail here
+	// would break upgrades; `naozhi doctor` is the right place for the
+	// fatal escalation. This pair-warn at least guarantees operators see
+	// the risk before an incident, mapping onto the TODO's "升级 warn 严重度"
+	// ask while preserving boot-compat.
 	if opts.AllowedRoot == "" {
 		slog.Warn("server.allowed_root is unset; dashboard /cd, cron WorkDir, and takeover CWD accept any absolute path — set allowed_root in config.yaml to restrict")
+		if opts.DashboardToken != "" && isPlaintextPublicAddr(opts.Addr) {
+			slog.Warn("HIGH: allowed_root unset on a token-protected, network-reachable dashboard — any authenticated user can set cron WorkDir to /etc or other system paths and let the CLI write there. Set server.allowed_root before exposing this listener.",
+				"addr", opts.Addr,
+			)
+		}
 	}
 
 	cookieSecret := loadOrCreateCookieSecret(opts.StateDir)

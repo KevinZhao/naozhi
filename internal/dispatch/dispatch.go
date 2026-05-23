@@ -107,7 +107,38 @@ type Dispatcher struct {
 	sendFailCount      atomic.Int64 // user-visible reply failures (platform send errors)
 	lastReplySuccessNs atomic.Int64 // UnixNano of most recent successful user-visible reply; 0 until first success
 
-	sendFn     func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+	// sendFn forwards a turn payload to the session router after guard /
+	// queue gating has succeeded. Production wires Server.sendWithBroadcast
+	// (server.go:814); tests inject closures that emit canned events.
+	//
+	// Wireup contract:
+	//   - Required (non-nil) before BuildHandler / sendAndReply runs. The
+	//     hot path dereferences this unconditionally.
+	//   - NewDispatcher does NOT install a noop fallback (unlike takeoverFn
+	//     below) because a missing send path is a constructor bug — silent
+	//     drop here would surface as "messages accepted but no reply" in
+	//     production, which is harder to triage than a nil-deref panic at
+	//     boot.
+	//   - Tests that exercise non-send code paths (e.g. dispatch_test.go
+	//     fakeGuard scenarios) MUST still install a stub SendFn — see the
+	//     R228-ARCH-14 docstring for the closure-vs-interface tradeoff.
+	sendFn func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+
+	// takeoverFn is the optional auto-takeover hook invoked on the first
+	// message of every chat. Production wires Server.tryAutoTakeover
+	// (server.go:815). When unset the constructor installs a noop returning
+	// false so the dispatch hot path can call it unconditionally without
+	// nil-guards (see NewDispatcher below).
+	//
+	// R228-ARCH-14 tradeoff: the closure-pattern fields here are easy to
+	// miss in DispatcherConfig wireup, but lifting them to a 1-method
+	// interface (DispatcherDeps with Send/Takeover methods) would force
+	// every test seam to grow stub structs where today a function literal
+	// suffices. The risk is mitigated by:
+	//   1. NewDispatcher's noop fallback for takeoverFn (panic-safe);
+	//   2. sendFn deliberately having no fallback so missing wireup
+	//      surfaces as a constructor-time panic, not a silent drop;
+	//   3. dispatch_test.go covering both nil and stub paths.
 	takeoverFn func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
 }
 

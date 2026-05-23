@@ -23,13 +23,28 @@ type bufLine struct {
 	data []byte
 }
 
-// NewRingBuffer creates a ring buffer with the given limits.
+// defaultRingMaxLines is the fallback line-count cap when NewRingBuffer
+// is called with maxLines<=0. 10k lines covers a typical Claude turn's
+// stdout (a few hundred lines of streaming) with margin for replay on
+// reconnect. Mirrors the ManagerConfig.BufferSize default — keep these
+// in sync; a divergence here is silent and only surfaces as confused
+// behaviour when the manager defaults its config but the ring builder
+// receives those defaults verbatim.
+const defaultRingMaxLines = 10000
+
+// defaultRingMaxBytes is the fallback byte cap (50 MiB). Whichever cap
+// (lines or bytes) trips first drives eviction. Mirrors
+// ManagerConfig.MaxBufBytes default; same sync-warning applies.
+const defaultRingMaxBytes int64 = 50 * 1024 * 1024
+
+// NewRingBuffer creates a ring buffer with the given limits. Non-positive
+// values fall back to defaultRingMaxLines / defaultRingMaxBytes.
 func NewRingBuffer(maxLines int, maxBytes int64) *RingBuffer {
 	if maxLines <= 0 {
-		maxLines = 10000
+		maxLines = defaultRingMaxLines
 	}
 	if maxBytes <= 0 {
-		maxBytes = 50 * 1024 * 1024 // 50MB
+		maxBytes = defaultRingMaxBytes
 	}
 	return &RingBuffer{
 		lines:    make([]bufLine, maxLines),

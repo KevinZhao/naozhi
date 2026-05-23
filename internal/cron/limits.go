@@ -1,5 +1,28 @@
 package cron
 
+import "github.com/naozhi/naozhi/internal/textutil"
+
+// truncatedSuffix marks where truncateWithSuffix cut a string that exceeded
+// the rune budget. Centralised so any downstream byte-cap can compensate for
+// its byte length (see truncateWithSuffix call sites that pass
+// maxStoredResultRunes+len(truncatedSuffix) into SanitizeForLog).
+const truncatedSuffix = "…[truncated]"
+
+// truncateWithSuffix returns s rune-truncated to maxRunes, appending
+// truncatedSuffix only when the input was actually shrunk. R234-CR-1:
+// previously sanitiseRunResult / recordResultP0WithSanitised / truncateForRetry
+// each open-coded the same `if shrunk < s { s = trimmed + truncatedSuffix }`
+// pattern, so adding a "…[shortened]" variant or changing the trim-on-equal
+// rule required hunting three sites. Centralised here so future tweaks are
+// one diff and grep-discoverable. Idempotent on already-clean strings.
+func truncateWithSuffix(s string, maxRunes int) string {
+	trimmed := textutil.TruncateRunesNoEllipsis(s, maxRunes)
+	if len(trimmed) >= len(s) {
+		return s
+	}
+	return trimmed + truncatedSuffix
+}
+
 // Shared input bounds for cron-related trust boundaries (IM `/cron` commands
 // and dashboard HTTP endpoints). Centralising these here avoids the prior
 // drift hazard where two duplicate constants (dispatch.maxCron* /

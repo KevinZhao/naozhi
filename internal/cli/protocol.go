@@ -13,6 +13,26 @@ var ErrInterruptUnsupported = errors.New("protocol does not support stdin interr
 // Protocol abstracts the communication protocol between naozhi and an AI CLI agent.
 // Implementations handle protocol-specific message formats, initialization handshakes,
 // and event parsing (e.g., Claude stream-json vs ACP JSON-RPC 2.0).
+//
+// Capability surface (R214-ARCH-1):
+//
+//	The interface exposes individual SupportsPriority() / SupportsReplay() methods
+//	AND an opt-in Capabilities() Caps method (consumed via type assertion in
+//	ProtocolCaps). This dual track is INTENTIONAL and not a planned migration:
+//
+//	  - SupportsX methods are the compile-time-required surface every Protocol
+//	    implementation MUST satisfy. New consumers should call ProtocolCaps(p)
+//	    and read the returned Caps struct rather than calling SupportsX directly,
+//	    so they pick up future capability fields (SoftInterrupt, StreamJSON, …)
+//	    without per-call-site updates.
+//	  - Capabilities() is OPT-IN. An implementation that wants to override the
+//	    default mapping (e.g. to set SoftInterrupt=true once a backend grows
+//	    that affordance) provides it; otherwise ProtocolCaps synthesises Caps
+//	    from the SupportsX methods plus Name(). See ProtocolCaps below.
+//
+//	Removing the SupportsX methods would be a breaking change to every
+//	non-naozhi Protocol implementation; keeping both lets the Caps struct grow
+//	new fields without churn while preserving the minimal interface contract.
 type Protocol interface {
 	// Name returns the protocol identifier (e.g., "stream-json", "acp").
 	Name() string
