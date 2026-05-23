@@ -457,7 +457,7 @@
 
 ### Go 正确性 / 并发（剩余）
 
-- [ ] **R230B-GO-1 — `cron.executeOpt` sendCtx 与 spawnCtx budget 不共享（P2）**: `scheduler.go:1955` sendCtx 用 `context.Background()` + jobTimeout，可能在 spawn 已耗 budget 后仍跑满 jobTimeout。总墙钟接近 2×jobTimeout。方案：sendCtx 用 `jobTimeout - time.Since(startedAt)` clamp ≥0。Breaking：否（行为变化，需评估 cron 长任务）。
+- [x] **R230B-GO-1 — `cron.executeOpt` sendCtx 与 spawnCtx budget 不共享（P2）**: 已归档（2026-05-23）— scheduler.go:2170 godoc 显式记载 worst-case ~2×jobTimeout 墙钟为有意设计：clamp 会让 cold-start spawn 把 send 预算压成几秒，把 spawn 慢转成用户可见的 send timeout；scheduler 级 SkipIfStillRunning chain wrapper 防并发栈叠 budget，doubled wall clock 只影响当前 run 持续时间不影响吞吐。本批 PR。
 - [ ] **R230B-GO-2 — `subagent_link.Resolve` retry sleep 不响应 ctx 取消（P2）**: `subagent_link.go:294/332` 重试循环 `time.Sleep` 不察 ctx；router_shim.go:398 `go linker.Resolve` bare goroutine。方案：Resolve 加 ctx 参数 + select stop signal。Breaking：是（接口签名 + 调用方）。
 - [ ] **R230B-GO-3 — `recordResultP0WithSanitised` / `recordResult` mu Unlock 非 deferred（P2）**: 多个 early-return 各自手动 Unlock，未来插早返路径易遗漏。方案：拆 stateMutate（持锁）+ stateCommit（锁外 save/fn 调用）两阶段。Breaking：否（内部重构）。
 - [~] **R230B-GO-4 — `Hub.handleSubscribe` O(N) maxSubscribersPerKey 扫描（归档 2026-05-23）**: 已部分修复——R230C-PERF-4 引入 early termination 当 count 到达 maxSubscribersPerKey 即 break，worst-case O(20) 而非 O(maxWSConns=500)；handleSubscribe 是冷路径不在每事件扇出。维护单独 counter map 需在 disconnect 路径 +/- 引入第二个不变量，收益小风险大。本批 PR 归档。

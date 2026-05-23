@@ -2167,6 +2167,21 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// reason; make Send consistent. Shutdown latency is bounded by
 	// Router.Shutdown's drain timeout (ShutdownTimeout, 30s in
 	// internal/session) + cron.Stop()'s own cron.Stop() chain drain.
+	//
+	// R230B-GO-1 / R222-GO-1 (worst-case wall clock): the spawn ctx above
+	// (line ~2062, derived from s.stopCtx with WithTimeout(jobTimeout)) and
+	// this sendCtx do NOT share a budget — a slow GetOrCreate that consumes
+	// most of jobTimeout still hands a fresh jobTimeout to Send below. A
+	// pathological run can therefore last ~2*jobTimeout + a brief scheduling
+	// gap before finishRun stamps a terminal state. This is intentional:
+	// clamping sendCtx to (jobTimeout - time.Since(startedAt)) would amplify
+	// flaky/cold-start spawns (~10s spawn → ~290s send budget on a 5min
+	// job), turning a transient session-spawn slowdown into a user-visible
+	// "send timed out" without the operator having any signal. The
+	// scheduler-level overlap guard (robfig SkipIfStillRunning chain
+	// wrapper, computeJobTimeout godoc) already prevents two concurrent
+	// runs of the same job from stacking budgets, so the doubled wall
+	// clock affects only the CURRENT run's recorded duration, not throughput.
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), jobTimeout)
 	defer sendCancel()
 	inflight.setPhase(PhaseSending)
