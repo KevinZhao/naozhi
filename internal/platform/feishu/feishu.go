@@ -71,10 +71,10 @@ const (
 	maxEventIDLen = 256
 
 	// maxIncomingTextBytes caps the inbound message text byte length
-	// after decoding. ~8 KiB is well above any reasonable single-message
-	// payload from a human user and bounds the worst-case path that
-	// flows into dispatch. Shared by transport_ws.go and transport_hook.go.
-	maxIncomingTextBytes = 8 * 1024
+	// after decoding. Aliases platform.DefaultMaxIncomingBytes so all four
+	// adapters share one source of truth (R230C-ARCH-6). Shared by
+	// transport_ws.go and transport_hook.go.
+	maxIncomingTextBytes = platform.DefaultMaxIncomingBytes
 
 	// maxWebhookTokenLen bounds the verification token field accepted from
 	// the request body before constantTimeEqualString hashes both sides.

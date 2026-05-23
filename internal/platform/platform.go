@@ -87,6 +87,43 @@ const (
 // Promoted here so all three adapters share one source of truth.
 const DefaultMaxReplyLen = 4000
 
+// DefaultMaxIncomingBytes caps the per-message text byte length that any
+// platform adapter forwards into dispatch. ~8 KiB is well above any
+// reasonable single-message payload from a human user and bounds the
+// worst-case path that flows into dispatch. The shim's 12 MB line ceiling
+// and the dispatch queue's 4 MB coalesce cap are final backstops, not the
+// intended security boundary — this constant is the policy entry point so
+// all adapters agree on a single value (R230C-ARCH-6).
+const DefaultMaxIncomingBytes = 8 * 1024
+
+// EncodeMessageRef joins (chatID, msgID) into the composite "chatID:msgID"
+// form that Slack and Discord adapters use for outbound EditMessage and
+// reaction handles. Centralised so a future change to the separator (e.g.
+// to support chat IDs that may legitimately contain ':') only touches one
+// pair of helpers (R230C-ARCH-7).
+//
+// Both halves are joined verbatim — adapters validate inputs at construction
+// time (Slack channel IDs are uppercase alphanumeric; Discord channel IDs
+// are decimal snowflake digits), so a literal ':' inside either half is not
+// expected. Callers that want to round-trip arbitrary strings must escape
+// before passing in.
+func EncodeMessageRef(chatID, msgID string) string {
+	return chatID + ":" + msgID
+}
+
+// DecodeMessageRef splits a composite "chatID:msgID" message reference into
+// its two halves. Returns ok=false when the input does not contain ':' — the
+// caller should treat that as a wire-format error rather than silently using
+// empty strings, since the split halves drive REST API calls keyed by both
+// IDs (e.g. Slack ChannelID + Timestamp, Discord ChannelID + MessageID).
+func DecodeMessageRef(ref string) (chatID, msgID string, ok bool) {
+	idx := strings.Index(ref, ":")
+	if idx < 0 {
+		return "", "", false
+	}
+	return ref[:idx], ref[idx+1:], true
+}
+
 // Reactor is an optional capability: platforms that can add/remove reactions
 // on inbound messages implement it. Enables non-intrusive queue feedback —
 // a reaction on the user's own message instead of a separate bot reply.

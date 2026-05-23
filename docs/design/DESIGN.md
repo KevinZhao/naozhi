@@ -309,6 +309,53 @@ func (p *Process) Close()
 func (p *Process) Kill()
 ```
 
+#### Backend Extension Points
+
+新增一个 backend（例如 Gemini CLI）只需要在四处显式注册，其它消费方都通过
+`backend.Profile` 注册表读取，禁止 `switch backend.ID`：
+
+1. **`backend.Profile`** (`internal/cli/backend/profile.go`)
+   单一注册表，承载 backend 的所有元数据与构造钩子：
+
+   - `ID` / `DisplayName` / `DefaultBinary` / `DefaultTag` / `ChipColor`
+   - `NewProtocol(deps) cli.Protocol` —— 每次 spawn 构造新协议实例
+   - `DetectInProc(cmdline)` —— 进程发现时按命令行匹配归类
+   - `RequiredNodeCaps` —— 反向 node 路由的能力门（如 `["acp"]`）
+   - `HistoryDir` —— 转写文件根目录（`~/...` 形式）
+   - `CostUnit` —— dashboard cost cell 单位（`USD` / `credits` / 空）
+   - `Features` —— UI 能力位（`askuser` / `passthrough` / `embedded_context` /
+     `image_input` / `audio_input` / `mcp_http` / `mcp_sse`）
+
+   注册流程：在 `internal/cli/backend/profile_<id>.go` 写一个返回 `Profile`
+   的工厂，`RegisterDefaults` 调用 `Register(<id>Profile())`。
+
+2. **`cli.Protocol`** (`internal/cli/protocol.go`)
+   `Profile.NewProtocol` 返回的具体协议实现，负责 NDJSON / JSON-RPC 等
+   线协议。每个新 backend 通常对应一个 `protocol_<id>.go`，声明
+   `Capabilities() cli.Caps` 显式标注 `Replay` / `Priority` /
+   `SoftInterrupt` / `StreamJSON` 等能力位（不要再依赖 `Name()` 反推默认）。
+   遇到不支持中断的协议返回 `cli.ErrInterruptUnsupported`。
+
+3. **`history.Source`** (`internal/history/`)
+   Backend 私有的转写读取器。在 `internal/history/<id>jsonl/` 实现：
+
+   - `Source.LoadHistory(ctx, dir, sid)` 把磁盘转写翻成 `cli.EventEntry` 流
+   - `Source.ListSessions(ctx, dir)` 让 dashboard 历史面板枚举可恢复 session
+   - 在子包 `init()` 里调 `cli.RegisterHistoryFactory(<id>, factory)`
+     —— `cli.Wrapper.NewWrapper` 在 spawn 时按 BackendID 取工厂；未注册的
+     backend fallback 到 `NoopHistorySource`（dashboard 显示空磁盘层）。
+
+4. **shim hint**（可选，仅在 backend 需要 reverse-node 路由时）
+   `Profile.RequiredNodeCaps` 在 `internal/server/select_node_for_backend.go`
+   中作为 capability gate：候选 node 的 `cli.backend.<id>.capabilities`
+   配置必须覆盖该列表才能承接此 backend 的 session。`StartShimWithBackend`
+   把 backend ID 透传到 shim binary，shim 据此选 CLI 路径与启动 argv。
+
+> 历史与展望：System Session daemon (`internal/sysession`) 与 Cron Dashboard
+> 都在 backend.Profile 之外（它们消费 session，不增加 backend）；
+> Gemini CLI 集成在 [`docs/rfc/multi-backend.md`](../rfc/multi-backend.md)
+> 中作为下一个候选，预期只动上述四点。
+
 ### 2. Session Router (~300 行)
 
 管理 session key 到长生命周期 claude 进程的映射。
@@ -573,6 +620,86 @@ naozhi/
 - `internal/config/`: ~50 行
 - `cmd/naozhi/main.go`: ~50 行
 - **总计: ~900 行**
+
+### 实际架构（截至 2026-05，R229-ARCH-21）
+
+上面是 v1 设计稿的预估，实际实现已显著扩大；本节给出当前包结构与主要依赖关系，
+便于新协作者建立心智图。详细的扩展点见 §模块设计 → CLI Wrapper Layer → Backend
+Extension Points。
+
+```text
+cmd/naozhi/main.go                  入口装配：config → server → router → platforms → cron
+
+internal/
+├── cli/                            CLI 进程封装 + 协议层（最大子树，65+ .go）
+│   ├── wrapper.go                  CLIWrapper.Spawn/Close
+│   ├── process*.go                 Process: stdin/stdout/shim/event 子领域
+│   ├── protocol_*.go               ClaudeProtocol (stream-json) / ACPProtocol (JSON-RPC)
+│   ├── eventlog*.go                EventLog: 内存事件流 + 订阅 + persist sink
+│   ├── subagent_link.go            SubagentLinker: tool_use → subagent 解析
+│   └── backend/                    Profile registry (DisplayName/DefaultBinary/Caps)
+├── session/                        会话路由 + 生命周期（god struct，已拆 6 文件）
+│   ├── router_core/lifecycle/...   Router 主体（拆分见 R233B-ARCH-2 待续）
+│   ├── managed.go                  ManagedSession: queue/dedup/历史注入
+│   └── eventlog_bridge.go          EventLog → PersistSink JSONL 桥接
+├── server/                         HTTP server + dashboard handler（90+ .go 单包）
+│   ├── server.go                   入口装配 + middleware
+│   ├── dashboard_*.go              dashboard handler 子分组
+│   ├── ws.go / hub.go              dashboard WebSocket
+│   ├── agent_tailer.go             subagent transcript 实时推送
+│   ├── project_files.go            项目文件浏览/预览（沙箱）
+│   └── health.go                   /health 端点
+├── platform/                       Channel Adapter
+│   ├── feishu/                     ws + webhook 双通道，签名/nonce/反向代理
+│   ├── slack/                      Events API + Web API
+│   ├── discord/                    discordgo session
+│   └── weixin/                     企业微信 webhook
+├── dispatch/                       消息出口协调（去重 + replyText + queue）
+├── cron/                           Cron Scheduler（CAS gate + watchdog + persist）
+├── sysession/                      系统后台会话（sys: 命名空间 + AutoTitler）
+├── upstream/                       node 反向协议（多机 wrapper 联动）
+├── shim/                           cgroup-isolated CLI 子进程 wrapper（Linux）
+├── discovery/                      claude/kiro/naozhi 历史 JSONL 扫描（factory + DefaultScanner）
+├── persist/                        EventLog JSONL 留持
+├── usermsg/                        错误 → 用户消息中文化映射
+├── osutil/                         AtomicWrite / IsLogInjectionRune / cgroup
+└── ...                             ratelimit / textutil / netutil / project / node ...
+```
+
+包间主要依赖（粗粒度，自上而下不回环；详见各包 godoc）：
+
+```text
+cmd/naozhi → server, platform/*, cron, dispatch, sysession, upstream, session
+server → session, dispatch, cron, platform, upstream, project
+dispatch → session, platform (registry)
+cron → session (Reader), platform (Notifier)
+sysession → session (sys-namespace stub registration)
+upstream → session (Reader), node (reverse protocol)
+session → cli (Process / EventLog / Caps), shim (manager hint), discovery, persist
+cli → backend (Profile), persist (PersistSink), shim (protocol shape), osutil
+platform → osutil
+所有包 → log/slog（结构化日志）
+```
+
+实际行数对比预估：
+
+- 预估总计 ~900 行（v1 设计稿）
+- 当前 `find internal -name '*.go' | wc -l` 远超预估（cli ~65 / server ~90 / session ~30+），
+  因 cron / sysession / upstream / shim / dashboard 等子系统在设计后陆续落地；
+- 单文件超 1KLOC 的有 internal/cron/scheduler.go（待 R232-ARCH-1 拆分）+
+  internal/cli/process_*.go 几个；其它包多保持在 200-500 行子文件粒度。
+
+新增能力（不在 v1 设计中）：
+
+- Cron Scheduler with persist + watchdog（`internal/cron/`）
+- 多 backend 支持（claude / kiro / future gemini）via backend.Profile registry
+- 反向 node 协议跨机分发（`internal/upstream/`）
+- shim cgroup 隔离 + watchdog kill（`internal/shim/`，Linux only）
+- System Session + AutoTitler（`internal/sysession/`）
+- Dashboard WebSocket + agent_tailer（实时 subagent transcript）
+- ScratchPool / 追问抽屉（短生命会话池）
+
+后续若架构再演进，更新这节是 P3 维护项；脱离 ±20% 时应触发新一轮 sync。
 
 ## 配置格式
 

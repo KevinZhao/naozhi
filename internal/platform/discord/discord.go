@@ -150,23 +150,23 @@ func (d *Discord) Reply(ctx context.Context, msg platform.OutgoingMessage) (stri
 		if err != nil {
 			return "", fmt.Errorf("discord send with images: %w", err)
 		}
-		return msg.ChatID + ":" + m.ID, nil
+		return platform.EncodeMessageRef(msg.ChatID, m.ID), nil
 	}
 
 	m, err := d.session.ChannelMessageSend(msg.ChatID, msg.Text, discordgo.WithContext(ctx))
 	if err != nil {
 		return "", fmt.Errorf("discord send: %w", err)
 	}
-	return msg.ChatID + ":" + m.ID, nil
+	return platform.EncodeMessageRef(msg.ChatID, m.ID), nil
 }
 
 // EditMessage updates an existing Discord message.
 func (d *Discord) EditMessage(ctx context.Context, msgID string, text string) error {
-	parts := strings.SplitN(msgID, ":", 2)
-	if len(parts) != 2 {
+	channel, id, ok := platform.DecodeMessageRef(msgID)
+	if !ok {
 		return fmt.Errorf("invalid discord msgID format: %q", msgID)
 	}
-	if _, err := d.session.ChannelMessageEdit(parts[0], parts[1], text, discordgo.WithContext(ctx)); err != nil {
+	if _, err := d.session.ChannelMessageEdit(channel, id, text, discordgo.WithContext(ctx)); err != nil {
 		return fmt.Errorf("discord edit message %s: %w", msgID, err)
 	}
 	return nil
@@ -194,11 +194,11 @@ func (d *Discord) AddReaction(ctx context.Context, messageID string, r platform.
 	if emoji == "" {
 		return fmt.Errorf("discord AddReaction: unsupported reaction %q", r)
 	}
-	parts := strings.SplitN(messageID, ":", 2)
-	if len(parts) != 2 {
+	channel, id, ok := platform.DecodeMessageRef(messageID)
+	if !ok {
 		return fmt.Errorf("invalid discord msgID format: %q", messageID)
 	}
-	if err := d.session.MessageReactionAdd(parts[0], parts[1], emoji, discordgo.WithContext(ctx)); err != nil {
+	if err := d.session.MessageReactionAdd(channel, id, emoji, discordgo.WithContext(ctx)); err != nil {
 		// AddReaction is idempotent from the platform's perspective; swallow
 		// discord's "unknown emoji" / "already reacted" variants so dispatch
 		// does not fall back to a text notice on a queue-drain retry. This
@@ -225,11 +225,11 @@ func (d *Discord) RemoveReaction(ctx context.Context, messageID string, r platfo
 	if emoji == "" {
 		return nil
 	}
-	parts := strings.SplitN(messageID, ":", 2)
-	if len(parts) != 2 {
+	channel, id, ok := platform.DecodeMessageRef(messageID)
+	if !ok {
 		return fmt.Errorf("invalid discord msgID format: %q", messageID)
 	}
-	if err := d.session.MessageReactionRemove(parts[0], parts[1], emoji, "@me", discordgo.WithContext(ctx)); err != nil {
+	if err := d.session.MessageReactionRemove(channel, id, emoji, "@me", discordgo.WithContext(ctx)); err != nil {
 		return fmt.Errorf("discord remove reaction: %w", err)
 	}
 	return nil
@@ -258,12 +258,13 @@ func (d *Discord) onMessageCreate(_ *discordgo.Session, m *discordgo.MessageCrea
 		}
 	}
 	text = strings.TrimSpace(text)
-	// Match the Feishu/Slack inbound cap: bots posting via the Discord API
+	// Match platform.DefaultMaxIncomingBytes: bots posting via the Discord API
 	// can exceed the 2000-char user UX limit, and any oversized prompt would
 	// bypass the HTTP-surface maxWSSendTextBytes guard. The shim's 12 MB
 	// line ceiling and the dispatch queue's 4 MB coalesce cap are final
 	// backstops, not the intended security boundary. R71-SEC-M4.
-	const maxDiscordInboundBytes = 8 * 1024
+	// R230C-ARCH-6: aliased to platform.DefaultMaxIncomingBytes.
+	const maxDiscordInboundBytes = platform.DefaultMaxIncomingBytes
 	if len(text) > maxDiscordInboundBytes {
 		slog.Warn("discord message exceeds inbound text cap, dropping",
 			"len", len(text), "channel", m.ChannelID)
