@@ -30,11 +30,16 @@ const (
 	// CronKeyPrefix is used for cron-scheduler-owned sessions. Key shape is
 	// "cron:{jobID}" — see internal/cron/scheduler.go RegisterCronStub.
 	CronKeyPrefix = "cron:"
+
 	// ProjectKeyPrefix is used for project-scoped planner sessions. Key
 	// shape is "project:{name}:planner" — see internal/project.IsPlannerKey.
 	ProjectKeyPrefix = "project:"
-	// ScratchKeyPrefix is already defined in scratch.go; listed here only in
-	// documentation for grep-ability. Do not redefine.
+
+	// ScratchKeyPrefix is defined in scratch.go (Key shape: "scratch:{id}:general:{srcAgent}").
+	// It lives there for historical proximity to ScratchPool but is enrolled
+	// into reservedKeyPrefixes below so namespace classification stays in
+	// one place. Do not redefine here. R234-DOC-04.
+
 	// SysKeyPrefix is used for naozhi-internal background daemon sessions.
 	// Key shape is "sys:{daemon-name}" where {daemon-name} matches
 	// `^[a-z][a-z0-9-]{1,30}$`. See docs/rfc/system-session.md and
