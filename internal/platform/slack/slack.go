@@ -357,12 +357,13 @@ func (s *Slack) handleMessage(ev *slackevents.MessageEvent) {
 	if text == "" {
 		return
 	}
-	// Match the Feishu webhook inbound cap so no platform path can force an
+	// Match platform.DefaultMaxIncomingBytes so no platform path can force an
 	// oversized prompt past the HTTP-surface maxWSSendTextBytes guard. The
 	// shim's 12 MB line ceiling and the dispatch queue's 4 MB coalesce cap
 	// are final backstops, not the intended security boundary. Slack's own
 	// UX limit is ~40 KB but API-posted messages can exceed that. R71-SEC-M3.
-	const maxSlackInboundBytes = 8 * 1024
+	// R230C-ARCH-6: aliased to platform.DefaultMaxIncomingBytes.
+	const maxSlackInboundBytes = platform.DefaultMaxIncomingBytes
 	if len(text) > maxSlackInboundBytes {
 		slog.Warn("slack message exceeds inbound text cap, dropping",
 			"len", len(text), "channel", ev.Channel)

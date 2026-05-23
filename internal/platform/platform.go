@@ -87,6 +87,15 @@ const (
 // Promoted here so all three adapters share one source of truth.
 const DefaultMaxReplyLen = 4000
 
+// DefaultMaxIncomingBytes caps the per-message text byte length that any
+// platform adapter forwards into dispatch. ~8 KiB is well above any
+// reasonable single-message payload from a human user and bounds the
+// worst-case path that flows into dispatch. The shim's 12 MB line ceiling
+// and the dispatch queue's 4 MB coalesce cap are final backstops, not the
+// intended security boundary — this constant is the policy entry point so
+// all adapters agree on a single value (R230C-ARCH-6).
+const DefaultMaxIncomingBytes = 8 * 1024
+
 // Reactor is an optional capability: platforms that can add/remove reactions
 // on inbound messages implement it. Enables non-intrusive queue feedback —
 // a reaction on the user's own message instead of a separate bot reply.
