@@ -2378,11 +2378,22 @@ func (s *Scheduler) bumpRunStateMetrics(state RunState) {
 	}
 }
 
-// emitOverlapSkipped is the synthetic terminal event for the CAS-rejected
-// path. The CAS gate trips before any inflight metadata is populated, so
-// we synthesise a RunID + StartedAt locally and emit started→ended back-to-
-// back so the dashboard timeline still shows the skip. State counter +
-// ended counter both bump.
+// emitOverlapSkipped runs the full RunStarted→finishRun lifecycle for a
+// CAS-rejected execution attempt. Despite the "Skipped" terminology, this
+// function emits BOTH a RunStarted event AND drives finishRun (which emits
+// RunEnded), so subscribers see the same started→ended pair as a normal
+// run; the state field carries RunStateSkipped + ErrClassOverlapSkipped so
+// dashboards can render it as a no-op pill instead of a real run timeline.
+// CronRunStartedTotal + the per-state metric (via finishRun) both bump.
+//
+// This dual-event emission is intentional: it keeps the runs/<id> dashboard
+// drawer renderable and prevents subscriber state machines from missing
+// the "started" anchor when a manual TriggerNow collides with an
+// in-flight run. R233B-CR-2.
+//
+// The CAS gate trips before any inflight metadata is populated, so we
+// synthesise a RunID + StartedAt locally — finishRun's skipPersist=true
+// short-circuit avoids writing the synthetic run to disk.
 func (s *Scheduler) emitOverlapSkipped(j *Job, viaTriggerNow bool) {
 	runID := generateRunID()
 	startedAt := time.Now()
