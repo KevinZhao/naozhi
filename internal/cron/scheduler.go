@@ -195,6 +195,24 @@ type (
 )
 
 // Scheduler manages cron jobs and executes them on schedule.
+//
+// Lock hierarchy (R234-GO-12). When more than one of these mutexes is held by
+// the same goroutine, they MUST be acquired in this strict outer-to-inner
+// order; reverse-order acquisition is a deadlock waiting to happen:
+//
+//	Scheduler.s.mu  >  Scheduler.storeMu  >  runStore.jobLock(jobID)  >  recentCacheEntry.mu
+//
+// Notes:
+//   - s.mu protects the in-memory job map and is held while marshaling the
+//     persisted snapshot (persistJobsLocked); the actual disk write under
+//     storeMu is split off so that fsync latency does not pin s.mu readers.
+//   - storeMu is only ever acquired AFTER releasing s.mu (see saveMarshaledSeq).
+//   - runStore.jobLock(jobID) is per-job and serialises Append / warmCache /
+//     trim against each other. It is acquired without s.mu and without storeMu.
+//   - recentCacheEntry.mu is the innermost; any caller holding it must NOT
+//     attempt to acquire jobLock or s.mu (cacheGet's "release entry.mu, take
+//     jobLock, re-acquire entry.mu" pattern is the canonical workaround when
+//     a path needs both — see runstore.go lock-hierarchy block for details).
 type Scheduler struct {
 	cron *robfigcron.Cron
 	mu   sync.RWMutex

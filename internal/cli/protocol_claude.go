@@ -6,7 +6,15 @@ import (
 	"io"
 	"log/slog"
 	"regexp"
+	"strings"
 )
+
+// askUserQuestionToolName is the Claude tool name we surface as an interactive
+// AskQuestion card. Defining the name once lets the raw-line short-circuit
+// (ReadEvent) and the per-block matcher (extractAskQuestion) stay in lock-step
+// when CC renames or capitalises the tool — diverging string literals would
+// silently regress the dashboard card surfacing.
+const askUserQuestionToolName = "AskUserQuestion"
 
 // resumeIDRe accepts only characters that can legally appear in a Claude
 // session UUID (hex + hyphen). This is a defence-in-depth check at the CLI
@@ -232,7 +240,17 @@ func (p *ClaudeProtocol) ReadEvent(line string) ([]Event, bool, error) {
 	// card so the next user turn carries the chosen option(s). The
 	// AskQuestion field rides on the same assistant event so the existing
 	// tool_use EventLog entry still flows through unchanged.
-	if ev.Type == "assistant" && ev.Message != nil {
+	//
+	// R234-PERF-16: short-circuit on the raw line. The vast majority of
+	// assistant events do not include AskUserQuestion tool_use blocks; a
+	// substring scan over the already-resident NDJSON line is far cheaper
+	// than walking ev.Message.Content (allocates iterator, dereferences
+	// each block's Type/Name strings) on every hot-path event. False
+	// positives — e.g. text containing the literal "AskUserQuestion" —
+	// fall through to extractAskQuestion which requires Type=="tool_use"
+	// AND Name==askUserQuestionToolName, so the predicate stays exact.
+	if ev.Type == "assistant" && ev.Message != nil &&
+		strings.Contains(line, askUserQuestionToolName) {
 		if aq := extractAskQuestion(ev.Message.Content); aq != nil {
 			ev.AskQuestion = aq
 		}
@@ -260,7 +278,7 @@ type askUserQuestionInput struct {
 // callers treat nil as "no card to render".
 func extractAskQuestion(blocks []ContentBlock) *AskQuestion {
 	for _, b := range blocks {
-		if b.Type != "tool_use" || b.Name != "AskUserQuestion" || len(b.Input) == 0 {
+		if b.Type != "tool_use" || b.Name != askUserQuestionToolName || len(b.Input) == 0 {
 			continue
 		}
 		var inp askUserQuestionInput
