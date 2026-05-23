@@ -160,9 +160,13 @@ type TriggerKind string
 const (
 	TriggerScheduled TriggerKind = "scheduled"
 	TriggerManual    TriggerKind = "manual"
-	// TriggerCatchup is reserved for the missed-schedule replay path (P3,
-	// not yet implemented). No production code emits it today; consumers
-	// should treat unknown trigger strings as forward-compatible.
+	// TriggerCatchup is RESERVED for the missed-schedule replay path (P3,
+	// not yet implemented). No production code emits this value — consumers
+	// receiving it today indicate either a forward-compat schema bump or a
+	// test fixture, never a real catchup run. Treat unknown trigger strings
+	// as forward-compatible to keep this seam stable. Tracked in
+	// docs/TODO.md R232-CR-8: keep as-is until the missed-schedule replay
+	// feature ships.
 	TriggerCatchup TriggerKind = "catchup"
 )
 
@@ -185,8 +189,11 @@ const (
 	ErrClassWorkDirOutsideRoot ErrorClass = "workdir_outside_root"
 	ErrClassOverlapSkipped     ErrorClass = "overlap_skipped"
 	ErrClassPausedConcurrent   ErrorClass = "paused_concurrent"
-	// ErrClassPanic is reserved for the future panic-recovery path
-	// (P3, not yet implemented); finishRun does not emit it today.
+	// ErrClassPanic is RESERVED for the future panic-recovery path
+	// (P3, not yet implemented); finishRun never emits it today. Any
+	// observation of "panic" in cron_jobs.json or run history must be
+	// from a forward-compat schema bump or a test fixture, not a real
+	// panic recovery. Tracked in docs/TODO.md R232-CR-8.
 	ErrClassPanic ErrorClass = "panic"
 )
 
