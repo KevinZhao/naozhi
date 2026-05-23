@@ -733,6 +733,14 @@ func (r *Router) shutdown() {
 	// disk. 5s matches the historyWg budget above — ample for the
 	// typical 200 ms debounce plus a final fsync, but bounded so a
 	// wedged disk doesn't hold Shutdown open.
+	//
+	// R230B-GO-5: ctx parent is context.Background, NOT r.historyCtx.
+	// historyCtx is cancelled at the very top of Shutdown (line ~700),
+	// so a child of it would observe ctx.Err() immediately and the
+	// persister would skip flushing — losing the in-flight batch the
+	// 5s window is meant to drain. Decoupling via Background keeps the
+	// 5s budget usable; the bounded WithTimeout still prevents a
+	// wedged FS from holding shutdown open.
 	if r.eventLogPersister != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()

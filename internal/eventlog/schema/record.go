@@ -23,6 +23,20 @@ import (
 // with a best-effort subset would mask real compatibility breakage.
 const WireVersion = 1
 
+// MinReadVersion is the oldest WireVersion that the current reader will
+// still accept. R230B-ARCH-21: when WireVersion bumps to 2, callers
+// upgrading from a v1-only build need to either drop their v1 files or
+// keep this value at 1 for one release cycle so the dashboard can still
+// read pre-bump history. Bumping MinReadVersion to N is the explicit
+// "we no longer guarantee back-compat with versions < N" signal.
+//
+// Today MinReadVersion == WireVersion == 1; Validate / UnmarshalRecord
+// reject anything below MinReadVersion AND anything above WireVersion.
+// The two boundaries are kept distinct so a future bump can advance
+// WireVersion (writes new format) while leaving MinReadVersion behind
+// (reads continue to accept the old format) for the migration window.
+const MinReadVersion = 1
+
 // Record types. Exactly one of Header / Entry is populated per record,
 // selected by Type.
 const (
@@ -105,11 +119,23 @@ func UnmarshalRecord(data []byte) (*Record, error) {
 	if err := json.Unmarshal(data, &r); err != nil {
 		return nil, fmt.Errorf("unmarshal record: %w", err)
 	}
+	if r.V <= 0 {
+		return nil, fmt.Errorf("record v=%d: %w", r.V, ErrInvalidVersion)
+	}
 	if r.V > WireVersion {
 		return nil, fmt.Errorf("record v=%d: %w", r.V, ErrUnsupportedVersion)
 	}
-	if r.V <= 0 {
-		return nil, fmt.Errorf("record v=%d: %w", r.V, ErrInvalidVersion)
+	// R230B-ARCH-21: forward-compat negotiation. v < MinReadVersion is
+	// flagged the same way as v > WireVersion — readers refuse rather
+	// than silently fudge through a known-broken format. Today
+	// MinReadVersion == 1 so this branch is unreachable, but pinning
+	// the contract now means a later bump (e.g. WireVersion=2,
+	// MinReadVersion=2 after migration) only requires changing two
+	// constants, not adding a new check. Order matters: r.V <= 0 is
+	// checked first so malformed records (negative / zero) keep
+	// surfacing ErrInvalidVersion rather than the unsupported alias.
+	if r.V < MinReadVersion {
+		return nil, fmt.Errorf("record v=%d: %w", r.V, ErrUnsupportedVersion)
 	}
 	return &r, nil
 }
