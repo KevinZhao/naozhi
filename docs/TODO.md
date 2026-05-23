@@ -783,7 +783,7 @@
 
 ### 代码质量 — 方法过长 / 共享 helper
 
-- [ ] **R222-CR-1 — `session.NewRouter` 350 行 6+ 阶段直列（P2）**: 拆 initWrappers / loadPersistedState / startEventLogPersister / startBackgroundLoops。涉及：`internal/session/router.go:706`。
+- [~] **R222-CR-1 — `session.NewRouter` 350 行 6+ 阶段直列（归档 2026-05-23 等专题 RFC）**: NewRouter 拆 helper 与 R229-CR-2 / R231-ARCH-11 同根因——共享 r.mu / historyWg / historyCtx / wrapper 解析跨段，机械抽取需要透传 12+ 参数反降低可读性。等 router-split-v2 RFC。本批 PR。
 - [ ] **R222-CR-2 — `upstream/connector_rpc.go handleRequest` 522 行 18-case switch（P2）**: 抽 (*Connector).handleSend/handleTakeover 等私方法。涉及：`internal/upstream/connector_rpc.go:50`。
 - [ ] **R222-CR-3 — `session.reconnectShims` 334 行 9-state enum + 嵌套 goroutine（P2）**: 拆 classifyAndPlanShimAction + executeShimAction。涉及：`internal/session/router.go:1276`。
 - [ ] **R222-CR-4 — `cron.executeOpt` 247 行（P2）**: 抽 recordAndBroadcastRun。涉及：`internal/cron/scheduler.go:1677`。
@@ -879,7 +879,7 @@
 - [ ] **R217-SEC-5 — `golang.org/x/crypto v0.49.0` 偏旧（约 10 个月）**: 无已知 critical CVE 但建议跟随 toolchain 升级。
 - [ ] **R217-SEC-6 — `dashboardToken` 轮转无显式 session 失效机制**: 当前依赖 cookieMAC(secret, dashboardToken)，token 改后旧 cookie 自然失效，但需要 process restart。增设 server-side session generation counter 才能不重启即时撤销。Breaking：需要持久化 generation 状态。
 - [ ] **R217-SEC-7 — `writeJSON` 全局 `SetEscapeHTML(false)`**: 当前是 Feishu 卡片需求；defense-in-depth 上应分离 Feishu encoder pool 和通用 API encoder pool。Breaking：Feishu 卡片含 `<>&` 时输出会变。
-- [ ] **R217-SEC-8 — `/health` 在认证后返回 workspace_id / node 状态等运营情报，cleartext HTTP 部署可被嗅探**: 部署侧问题，添加启动 warning 即可：non-loopback bind + 无 TLS terminator 时提示。
+- [x] **R217-SEC-8 — `/health` cleartext 嗅探 warning（已修复 2026-05-23 复核确认）**: server.go:853 isPlaintextPublicAddr() 启动时已对所有 cleartext+token 路径发 slog.Warn（含 bearer + cookie 嗅探警示）；shouldWarnNoTokenOpen 处理 no-token 公网部署。/health 是子路径，已被通用警告覆盖。归档关闭，本批 PR。
 
 ### Go 正确性 — 跨包改动 / 需 ctx 传递
 
@@ -916,7 +916,7 @@
 
 ### 代码质量 — 小改动等合并窗口
 
-- [ ] **R217-CR-3 — `Cleanup` 三阶段加锁窗口**：worst-case stuckKill 目标进程在 Pass 2 已被 spawnSession 替换。`shouldPrune` 已 mitigates，stuckKill 路径未 re-check。需要 pass-2 再次 verify。
+- [x] **R217-CR-3 — `Cleanup` 三阶段加锁窗口**: stuckKill 路径在 Kill 前 RLock 复检 `r.sessions[key].proc == e.proc`，避免误杀已被 ResetAndRecreate / spawnSession 替换的新进程。本批 PR。
 - [ ] **R217-CR-4 — `Hub god struct 36 字段 / `node.Conn` 18+ 方法巨型接口**: 子聚合拆分。
 - [ ] **R217-CR-5 — cross-node 错误注入方向不对称**: 反向有 LogSystemEvent，正向 node.Conn.Send 失败只 slog 不进 EventLog。
 - [ ] **R217-CR-7 — `project.DisplayName` / `Emoji` schema 校验但 dashboard UI 不读**：要么 wire UI，要么删 schema。
@@ -1517,9 +1517,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
   - 方案：非 Linux 平台补 `filepath.Clean(filepath.FromSlash(relRaw))`；或文档化"Linux-only deployment"。
   - 涉及: `internal/server/dashboard_send.go:919`
 
-- [ ] **R215-SEC-P3-1 — Shim `auth_token` 明文写 state 文件**: 同 UID 进程读取 state 后可连 shim socket 注入 stdin。
-  - 方案：state file 强制 0600；或启动时重新生成 token，state 不存。
-  - 涉及: `internal/shim/server.go:145-159`
+- [x] **R215-SEC-P3-1 — Shim `auth_token` 明文写 state 文件（已修复 2026-05-23 复核确认）**: shim/state.go:61 WriteStateFile 已显式 0600 (godoc 自承"atomically writes the state to path with mode 0600")，state_test.go 多处契约测试。同 UID 进程读取仍是 OS 信任边界，运维应配合 systemd User= + 0600 防御。本批 PR。
 
   - 方案：cron API 绑 `validateWorkspace(workdir, allowedRoot)`。
   - 涉及: `internal/server/dashboard_cron.go`
@@ -1626,7 +1624,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 ### Go 正确性 — 本轮新发现
 
 - [~] **R227-GO-2 — `cli/subagent_link.Resolve` retry 循环 `time.Sleep(retryInterval)` 无 ctx 取消（P1）**: SIGTERM 期间最多 8 个 Resolve goroutine 各自卡 3s。修复需 Resolve 接 context.Context 参数（Breaking）。涉及 `internal/cli/subagent_link.go:294,332`。重申 R225-GO-2。 — 多轮 NEEDS-DESIGN 归档 2026-05-23（同根因主条目跟踪），本批 PR
-- [ ] **R227-GO-4 — `Router.Shutdown` test fallback `time.Sleep(100ms)` busy-poll（P2）**: 测试构造的 `&Router{}` 缺 shutdownCond，30s 超时下 300 次 busy-poll。方案：要求所有路径走 NewRouter；或裸构造时 log.Warn。
+- [x] **R227-GO-4 — `Router.Shutdown` test fallback `time.Sleep(100ms)` busy-poll（P2）**: shutdownCond nil 分支已加 slog.Warn 提示测试作者绕过 NewRouter；godoc 说明 fallback 仅在 `&Router{}` 裸构造测试出现，生产路径走 cond.Wait。本批 PR。
 - [~] **R227-GO-5 — cron `notifyTarget` 用 `context.Background()` 不响应 stopCtx（误报关闭 2026-05-20）**: 复核后确认与 send 路径同款意图——cron run 记录写入与最终通知归属同一生命周期，必须独立于 stopCtx 才能在 graceful shutdown 期间把已跑完的 turn 结果递达 IM。条目自标"降为 P3 仅记录"，本批 PR #187 关闭归档。
 - [~] **R227-GO-7 — `cli.Resolve` resolveSem acquire 无 ctx select arm（P2）**: 与 R227-GO-2 同根因；Resolve 接 ctx 后可统一 select。 — 多轮 NEEDS-DESIGN 归档 2026-05-23（同根因主条目跟踪），本批 PR
 - [~] **R227-GO-8 — `cli/process.go Kill()` 持 shimWMu 调 closeShimConn 与 Detach 顺序不一致（误报关闭 2026-05-20）**: 与 R225-GO-7 同根因一并关闭——核实后 Kill (process.go:519-535) 与 Detach (:617-634) 都是「持 shimWMu 期间 closeShimConn」同一模式，不存在所谓"顺序不一致"。closeShimConn 走 sync.Once + net.Conn.Close，最坏延迟一次系统调用，不会饥饿 heartbeat。本批 PR #169
@@ -1680,7 +1678,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R227-ARCH-12 — `processIface` 30+ 方法逼近抽象塌陷（P3）**: testutil fake 200+ 行。方案：拆 processSender/processInspector/processLifecycle 三角色。
 - [ ] **R227-ARCH-13 — naozhilog/claudejsonl/kirojsonl 三 history reader 同算法独立维护（P3）**: ctxCheckEvery / limit shrink / ENOENT 各自实现。方案：抽 history/internal/scan ReverseScan 原语。
 - [ ] **R227-ARCH-14 — dispatch 与 platform 之间 type assertion 探测能力（P3）**: 加新平台能力 N×M 矩阵分支。方案：与 R227-ARCH-10 同——platform 加 Capabilities() Caps。
-- [ ] **R227-ARCH-15 — `eventlog_bridge` 在 cli↔persist 中介中做 EventEntry→Entry marshal（P3）**: 序列化责任在中间人违反"数据生产方负责"。方案：cli.EventEntry.MarshalForPersist() 方法 + bridge 简化。
+- [~] **R227-ARCH-15 — `eventlog_bridge` 在 cli↔persist 中介中做 EventEntry→Entry marshal（归档 2026-05-23 等专题 RFC）**: bridge 当前用 sync.Pool 借出 bridgeEncBuf 生产 raw bytes 再 copy 出来——必须 copy 才能 Put 回池（与 R230B-PERF-6 同根因，sink 可保留 slice 引用）。把 marshal 上移到 EventEntry 上能减少一层调用，但池/契约管理仍要在某层完成。机械抽方法解决不了责任划分。归档关闭，本批 PR。
 - [ ] **R227-ARCH-16 — `claudejsonl/kirojsonl` 通过 init 注册 + session blank import 隐式生命周期（P3）**: factory 没注册导致 NoopHistorySource 的 bug 要查 4 文件。方案：与 R227-ARCH-3 合并；显式调 wireup.RegisterX()。
 - [ ] **R227-ARCH-17 — 30+ interface 半数单实现（P3）**: HistorySessionView/AgentIntrospector/deadlineInterrupter 等单实现接口未替代。方案：写 docs/CONTRIBUTING-interfaces.md 三条规则。
 - [ ] **R227-ARCH-18 — contract test 边界三类含义混用（P3）**: type assertion / 行为契约 / 内存模型断言用同一 *_contract_test.go 名。方案：拆 *_iface_assert / *_behaviour / *_invariant 命名。

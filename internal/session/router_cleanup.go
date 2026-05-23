@@ -243,7 +243,23 @@ func (r *Router) Cleanup() {
 	}
 
 	closedCount := 0
+	// R217-CR-3: re-verify that the still-stuck process is the one currently
+	// installed for this key before we Kill. Pass 1 ran under r.mu.RLock
+	// then released; a concurrent ResetAndRecreate / spawnSession could have
+	// replaced the process in the gap between classify (pass 2) and kill
+	// (pass 3). Killing a fresh replacement would vaporise an unrelated
+	// in-flight turn. shouldPrune ran the same check for the prune path;
+	// the stuckKill path is the missing twin.
 	for _, e := range stuckKill {
+		r.mu.RLock()
+		current, ok := r.sessions[e.key]
+		stale := !ok || current != e.s || current.loadProcess() != e.proc
+		r.mu.RUnlock()
+		if stale {
+			slog.Info("stuckKill skipped: session replaced after pass 2",
+				"key", e.key)
+			continue
+		}
 		e.proc.Kill()
 		closedCount++
 	}
@@ -652,7 +668,16 @@ func (r *Router) shutdown() {
 		if r.shutdownCond != nil {
 			r.shutdownCond.Wait() // atomically releases and re-acquires r.mu
 		} else {
-			// Fallback for tests without shutdownCond
+			// Fallback for tests that constructed `&Router{}` directly
+			// instead of going through NewRouter (which always installs
+			// shutdownCond). 100ms busy-poll × ShutdownTimeout/100ms can
+			// burn 300 lock cycles waiting for IsRunning to flip; the
+			// production path uses the cond signal and never enters here.
+			//
+			// R227-GO-4: warn so the test author notices they bypassed
+			// NewRouter rather than silently paying the busy-poll cost
+			// on every shutdown.
+			slog.Warn("router shutdown: shutdownCond is nil, falling back to 100ms busy-poll; tests should construct Router via NewRouter")
 			r.mu.Unlock()
 			time.Sleep(100 * time.Millisecond)
 			r.mu.Lock()
