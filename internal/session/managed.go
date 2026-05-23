@@ -526,6 +526,22 @@ func (s *ManagedSession) adoptProcessAlreadySeeded(proc processIface) {
 func (s *ManagedSession) attachProcessAndSnapshotPersisted(proc processIface) []cli.EventEntry {
 	s.historyMu.Lock()
 	if proc == nil {
+		// R231-CQ-2: nil parameter = "session is now process-less" (detach
+		// path used by ResetAndRecreate / Cleanup / Remove). The decision to
+		// also reset persistedSeededLen=0 is deliberate: when a fresh process
+		// later attaches via this same function, it MUST be re-seeded with
+		// the full persistedHistory snapshot, otherwise the dashboard
+		// renders empty until new live events arrive. Leaving seededLen at
+		// its prior non-zero value would make the next attach skip the
+		// snapshot and the new proc's EventLog would start blank against
+		// the persisted history that the session still remembers.
+		//
+		// persistedHistory itself is NOT cleared — the chat key + workspace
+		// stay the same across the detach/reattach pair, so its content is
+		// still valid. Only the "what proc has been seeded with" pointer
+		// resets. Mirrors adoptProcessAlreadySeeded's symmetric contract:
+		// adopt = "proc already has the events"; attach(nil) = "no proc,
+		// next attach must re-seed from scratch".
 		s.storeProcess(nil)
 		s.persistedSeededLen = 0
 		s.historyMu.Unlock()

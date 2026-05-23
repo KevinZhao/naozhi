@@ -270,8 +270,15 @@ type EventLog struct {
 	// OUTSIDE l.mu to avoid back-pressure on hot Append paths; callers must
 	// be fast + re-entrant safe (the agent_tailer.closeTask path is).
 	// Zero/nil = no subscriber.
-	onAgentTaskDoneMu sync.Mutex
-	onAgentTaskDoneFn func(taskID, status string)
+	//
+	// R233B-PERF-6: stored via atomic.Pointer instead of mutex+func because
+	// every Append touches the load path on the hot stream-event ingest
+	// (50 sess × 50 evt/s ≈ 2500 reads/s). Mutex would serialise all those
+	// reads through a single CAS even though writes (one SetOnAgentTaskDone
+	// call per session lifetime) are vanishingly rare. Pointer mode matches
+	// PersistSink / OnExecuteFunc / textutil.LoadAtomicString already used
+	// across the codebase.
+	onAgentTaskDoneFn atomic.Pointer[func(taskID, status string)]
 
 	// subMu is an RWMutex because the hot path notifySubscribers only reads
 	// the subscribers map (iterate + non-blocking channel send, which is
@@ -564,25 +571,27 @@ func (l *EventLog) applyEntryStateLocked(e EventEntry) (fire bool, pending pendi
 }
 
 // SetOnAgentTaskDone installs a callback that fires when a "task_done"
-// EventEntry is appended. Serialised via its own mutex so multiple
-// subscribers are forbidden — setting a second time replaces the first.
-// Used by the server-side tailer registry to stop tailers promptly
-// once the parent stream marks an agent task finished.
+// EventEntry is appended. Atomic store — multiple subscribers are
+// forbidden (setting a second time replaces the first). Used by the
+// server-side tailer registry to stop tailers promptly once the parent
+// stream marks an agent task finished. nil clears.
 func (l *EventLog) SetOnAgentTaskDone(fn func(taskID, status string)) {
-	l.onAgentTaskDoneMu.Lock()
-	l.onAgentTaskDoneFn = fn
-	l.onAgentTaskDoneMu.Unlock()
+	if fn == nil {
+		l.onAgentTaskDoneFn.Store(nil)
+		return
+	}
+	l.onAgentTaskDoneFn.Store(&fn)
 }
 
-// loadAgentTaskDoneFn snapshots the current on-task-done callback under
-// onAgentTaskDoneMu so the dispatch loops (single + batch) below can read
-// it without holding l.mu and without duplicating the lock dance. Returns
-// nil when no callback is wired — callers should treat that as a no-op.
+// loadAgentTaskDoneFn returns the current on-task-done callback so the
+// dispatch loops (single + batch) below can read it without taking a
+// lock. Returns nil when no callback is wired — callers must treat
+// that as a no-op. R233B-PERF-6.
 func (l *EventLog) loadAgentTaskDoneFn() func(taskID, status string) {
-	l.onAgentTaskDoneMu.Lock()
-	fn := l.onAgentTaskDoneFn
-	l.onAgentTaskDoneMu.Unlock()
-	return fn
+	if p := l.onAgentTaskDoneFn.Load(); p != nil {
+		return *p
+	}
+	return nil
 }
 
 // fireTaskDoneCallbacks dispatches previously-collected task_done callbacks
