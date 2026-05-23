@@ -583,11 +583,12 @@ func buildServer(opts ServerOptions) *Server {
 
 		// Extracted handler groups
 		auth: &AuthHandlers{
-			dashboardToken:   opts.DashboardToken,
-			cookieSecret:     cookieSecret,
-			loginLimiter:     newLoginLimiter(),
-			wsUpgradeLimiter: newWSUpgradeLimiter(),
-			trustedProxy:     opts.TrustedProxy,
+			dashboardToken:    opts.DashboardToken,
+			cookieSecret:      cookieSecret,
+			loginLimiter:      newLoginLimiter(),
+			wsUpgradeLimiter:  newWSUpgradeLimiter(),
+			unauthDashLimiter: newWSUpgradeLimiter(), // same bucket shape: 60/min sustained, 20 burst — fits human refresh cadence, blocks scanners. R230C-SEC-12.
+			trustedProxy:      opts.TrustedProxy,
 		},
 		cronH: &CronHandlers{
 			scheduler:   scheduler,

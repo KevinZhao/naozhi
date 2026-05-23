@@ -450,6 +450,17 @@ func (s *Server) registerDashboard() {
 
 func (s *Server) handleDashboard(w http.ResponseWriter, r *http.Request) {
 	if s.dashboardToken != "" && !s.auth.isAuthenticated(r) {
+		// R230C-SEC-12: rate-limit unauthenticated GETs so a scanner cannot
+		// repeatedly hammer the login template renderer (CSP+HTML+cookie
+		// crypto path) and fingerprint deployments. Same 60/min×20 burst
+		// budget as wsUpgradeLimiter accommodates real users (tab-reload,
+		// mobile-wake, multiple browser windows) while limiting sustained
+		// abuse. Authenticated users are unaffected.
+		if !s.auth.unauthDashAllow(clientIP(r, s.auth.trustedProxy)) {
+			w.Header().Set("Retry-After", "60")
+			http.Error(w, "too many requests", http.StatusTooManyRequests)
+			return
+		}
 		s.auth.serveLoginPage(w)
 		return
 	}

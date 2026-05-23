@@ -34,7 +34,15 @@ type AuthHandlers struct {
 	// a looser budget; the inner /api/auth/login POST still uses the tight
 	// loginLimiter for brute-force guard.
 	wsUpgradeLimiter *ratelimit.Limiter
-	trustedProxy     bool // trust X-Forwarded-For for client IP extraction
+	// R230C-SEC-12: unauthDashLimiter throttles unauthenticated GET /dashboard.
+	// Unauthenticated users would otherwise hit the login template renderer
+	// (and the login-page CSP/HTML asset) without any back-pressure, which a
+	// scanner can use both to fingerprint the deployment and to push CPU on
+	// the embed.FS read + crypto/rand cookie path. Same bucket family as
+	// wsUpgradeLimiter (60/min sustained, 20 burst) is plenty for a real
+	// human refreshing the login page; sustained scanners drop to 429.
+	unauthDashLimiter *ratelimit.Limiter
+	trustedProxy      bool // trust X-Forwarded-For for client IP extraction
 }
 
 const maxLoginLimiters = 10000
@@ -88,6 +96,20 @@ func (a *AuthHandlers) wsUpgradeAllow(ip string) bool {
 		return true
 	}
 	return a.wsUpgradeLimiter.Allow(ip)
+}
+
+// unauthDashAllow reports whether the given IP is allowed one more
+// unauthenticated GET /dashboard. Returns true when the limiter has not
+// been wired (older test constructions) so test fixtures don't break.
+// R230C-SEC-12.
+func (a *AuthHandlers) unauthDashAllow(ip string) bool {
+	if ip == "" {
+		ip = unknownIPKey
+	}
+	if a.unauthDashLimiter == nil {
+		return true
+	}
+	return a.unauthDashLimiter.Allow(ip)
 }
 
 // cookieMAC returns an HMAC-derived value used as the auth cookie value.
