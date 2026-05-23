@@ -572,7 +572,7 @@
 - [ ] **R229-ARCH-18 — discovery/history/eventlog 三套读历史路径（P3）**: 方案：抽 HistoryService 单一入口归一化。Breaking：否。
 - [ ] **R229-ARCH-19 — feishu MentionMe 仍 loose 实现（P3）**: 方案：platform 协议 MentionMatch 强制精确 self-id 匹配。Breaking：是（feishu 行为变化，需 release note）。
 - [ ] **R229-ARCH-20 — BumpVersion 双语义（DataVersion 与 RenderVersion 混用）（P3）**: 方案：拆两计数器。Breaking：否（dashboard 加新字段，老前端忽略）。
-- [ ] **R229-ARCH-21 — DESIGN.md 与实际架构 LOC 严重偏离（P3）**: 方案：DESIGN.md 增加"实际架构"章节 + 当前包间依赖图。Breaking：否。
+- [x] **R229-ARCH-21 — DESIGN.md 与实际架构 LOC 严重偏离（P3）（已修复 2026-05-23）**: 方案：DESIGN.md 增加"实际架构"章节 + 当前包间依赖图。Breaking：否。 — DESIGN.md "项目结构" 节后追加 "实际架构（截至 2026-05）" 子节：列出 internal/ 各子包当前职责（cli/session/server/platform/dispatch/cron/sysession/upstream/shim/discovery 等）+ 包间主要依赖（自上而下不回环）+ 实际 LOC 对比预估说明 + 新增能力清单（cron/多 backend/upstream/shim/sysession 不在 v1）。本批 PR。
 
 ## Round 226 — 5-agent 并行 review 第 38 轮（2026-05-19 第三批）NEEDS-DESIGN
 
