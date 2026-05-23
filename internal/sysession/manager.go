@@ -325,6 +325,19 @@ func (m *Manager) Stop(stopCtx context.Context) {
 		// guarantees m.cancel is populated by the time we reach here.
 		m.cancel()
 		done := make(chan struct{})
+		// R234-GO-5: this watcher goroutine is intentionally not tracked by
+		// any WaitGroup / sync primitive. Its sole job is to close `done`
+		// when m.wg.Wait() returns, so the deadline-vs-clean-stop select
+		// below can react. On the deadline-exceeded branch we call osExit(2)
+		// which terminates the process — the OS reaps the goroutine. On the
+		// clean-stop branch m.wg.Wait() has already returned and the
+		// goroutine exits normally a few instructions later. The only
+		// pathological case is "tests replace osExit with a panic-recovery
+		// hook AND the daemons block forever": that goroutine then leaks,
+		// but production callers never override osExit so the leak is
+		// strictly a test-shape concern. Do NOT add wg tracking here without
+		// also reworking the deadline path to wait for the watcher first —
+		// otherwise a wedged daemon would hold Stop open beyond stopCtx.
 		go func() {
 			m.wg.Wait()
 			close(done)
