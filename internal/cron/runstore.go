@@ -88,6 +88,14 @@ const (
 	// metadata add up to ~13 KiB worst case; 32 KiB leaves headroom.
 	// Reading a file larger than this returns ErrCorruptRun.
 	MaxRunRecordBytes = 32 * 1024
+
+	// defaultListLimit is List's fallback page size when the caller passes
+	// limit <= 0. 50 matches the dashboard "recent runs" drawer default
+	// (server/dashboard_cron.go) so a List() with no explicit limit
+	// returns the same row count UI users see; tests that pass an
+	// arbitrary 0 don't have to mirror an unrelated magic number to keep
+	// expectations aligned with production traffic shape.
+	defaultListLimit = 50
 )
 
 // ErrCorruptRun is returned when a run JSON file fails to parse or
@@ -410,7 +418,7 @@ func (s *runStore) List(jobID string, limit int, before time.Time) []CronRunSumm
 		return nil
 	}
 	if limit <= 0 {
-		limit = 50
+		limit = defaultListLimit
 	}
 	if limit > DefaultRunsKeepCount {
 		limit = DefaultRunsKeepCount
