@@ -822,6 +822,13 @@ func (s *shimServer) handleClient(conn net.Conn, idleTimeout time.Duration) {
 			_ = conn.SetWriteDeadline(time.Time{})
 			return err
 		}
+		// R224-GO-7: every w.Write failure (outer + inner batch) returns
+		// immediately without calling flushWithDeadline. A failed Write
+		// leaves bufio.Writer.err set, so a subsequent Flush would attempt
+		// to drain the half-written buffer onto a dying conn — wedging the
+		// goroutine until the write deadline fires and producing torn
+		// frames on the client side. Bail out and let the outer
+		// `defer conn.Close()` tear everything down cleanly.
 		for {
 			select {
 			case data, ok := <-writeCh:
