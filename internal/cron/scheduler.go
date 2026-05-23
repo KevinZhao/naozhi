@@ -505,6 +505,30 @@ func (s *Scheduler) KnownSessionIDs() map[string]bool {
 	return out
 }
 
+// Naming convention for cron quota constants (R234-CR-7):
+//
+//   - Unexported (`maxJobsHardCap`, `defaultMaxJobs`): scheduler-internal
+//     defaults that no test or external package needs to reference. The
+//     hard cap is a safety rail — operators set MaxJobs in config and the
+//     cap merely clamps unrealistic values (logged at Warn). The "default"
+//     applies only when the operator leaves the field zero/negative.
+//     Either constant changing is an internal tuning, not an API change.
+//
+//   - Exported (`DefaultMaxJobsPerChat`): per-chat quota that scheduler_test
+//     pins (see scheduler_test.go:648-673 — the test asserts the resolved
+//     `s.maxJobsPerChat` matches this constant when MaxJobsPerChat is unset)
+//     and that user-facing docs reference. Exported because changing it
+//     would break test fixtures and operator documentation simultaneously,
+//     so the symbol earns the API-stability contract.
+//
+// Why not unify the prefix: `MaxJobsHardCap` would mislead callers into
+// thinking the hard cap is configurable like MaxJobs is, and `DefaultMaxJobs`
+// (exported) would require pinning the global default in tests too. The
+// asymmetric naming is therefore intentional — uppercase tracks "public
+// contract", lowercase tracks "internal tuning". Future quota constants
+// should follow the same rule: export only what tests/docs/operators
+// already reference, not "to be safe".
+
 // maxJobsHardCap caps user-configurable MaxJobs to prevent accidental
 // overload. 500 jobs ≈ 500 tick timers; well within robfig/cron's tested
 // scale, but higher values tend to indicate a config mistake.
