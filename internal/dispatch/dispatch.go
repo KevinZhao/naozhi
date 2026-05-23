@@ -107,7 +107,26 @@ type Dispatcher struct {
 	sendFailCount      atomic.Int64 // user-visible reply failures (platform send errors)
 	lastReplySuccessNs atomic.Int64 // UnixNano of most recent successful user-visible reply; 0 until first success
 
-	sendFn     func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+	// sendFn delivers a coalesced prompt to the CLI for the given session
+	// key and returns the assistant's reply. server/send.go:sendWithBroadcast
+	// is the production wiring; tests inject in-memory fakes via
+	// DispatcherConfig.SendFn. Closure-injected (rather than an interface)
+	// because the production impl needs to close over the *Hub broadcast
+	// path and rebuilding that as a 1-method interface adds no decoupling.
+	// Tracked under R224-ARCH-9 / R228-ARCH-14 — converting both Fn fields
+	// to interfaces would still drag cli.ImageData / cli.SendResult through
+	// the signature, so the immediate refactor target is reducing the
+	// concrete cli.* types in the signature, not the function-vs-method
+	// dichotomy.
+	sendFn func(ctx context.Context, key string, sess *session.ManagedSession, text string, images []cli.ImageData, onEvent cli.EventCallback) (*cli.SendResult, error)
+	// takeoverFn attempts to claim ownership of a CLI-discovered session
+	// (one that already exists from a previous process / external tool) and
+	// reuse its history instead of spawning a fresh process. Returns true
+	// when a takeover happened. Called once per first message per chat key
+	// so a falsy return is the common case (no external session found) —
+	// see sendAndReply for the only caller. NewDispatcher guarantees a
+	// non-nil default that always returns false so call sites stay
+	// branch-free.
 	takeoverFn func(ctx context.Context, chatKey, key string, opts session.AgentOpts) bool
 }
 
