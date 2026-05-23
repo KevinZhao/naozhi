@@ -213,16 +213,16 @@ func (s *Slack) Reply(ctx context.Context, msg platform.OutgoingMessage) (string
 	if err != nil {
 		return "", fmt.Errorf("slack send: %w", err)
 	}
-	return msg.ChatID + ":" + ts, nil
+	return platform.EncodeMessageRef(msg.ChatID, ts), nil
 }
 
 // EditMessage updates an existing Slack message.
 func (s *Slack) EditMessage(ctx context.Context, msgID string, text string) error {
-	parts := strings.SplitN(msgID, ":", 2)
-	if len(parts) != 2 {
+	channel, ts, ok := platform.DecodeMessageRef(msgID)
+	if !ok {
 		return fmt.Errorf("invalid slack msgID format: %q", msgID)
 	}
-	_, _, _, err := s.api.UpdateMessageContext(ctx, parts[0], parts[1],
+	_, _, _, err := s.api.UpdateMessageContext(ctx, channel, ts,
 		slack.MsgOptionText(text, false))
 	if err != nil {
 		return fmt.Errorf("slack edit message: %w", err)
@@ -242,11 +242,11 @@ func reactionEmojiName(r platform.ReactionType) string {
 
 // parseMsgRef splits our composite "channel:ts" messageID into a slack.ItemRef.
 func parseMsgRef(msgID string) (slack.ItemRef, error) {
-	parts := strings.SplitN(msgID, ":", 2)
-	if len(parts) != 2 {
+	channel, ts, ok := platform.DecodeMessageRef(msgID)
+	if !ok {
 		return slack.ItemRef{}, fmt.Errorf("invalid slack msgID format: %q", msgID)
 	}
-	return slack.ItemRef{Channel: parts[0], Timestamp: parts[1]}, nil
+	return slack.ItemRef{Channel: channel, Timestamp: ts}, nil
 }
 
 // AddReaction implements platform.Reactor by calling reactions.add on the
