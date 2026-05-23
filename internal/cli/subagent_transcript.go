@@ -94,6 +94,13 @@ func (r *TranscriptReader) readLocked(afterMS int64, limit int) ([]EventEntry, e
 	// dodge io.ReadAll's growth-doubling allocs. readAllInto appends to
 	// r.readBuf[:0]; the cap is retained for next call unless it
 	// exceeds readBufRetainCap (one-off oversized poll won't pin memory).
+	//
+	// R230B-PERF-5 archive anchor: the open+ReadAll+close per call still
+	// happens above, but the buffered read above already removes the
+	// growth-doubling part. The remaining open/close-per-poll cost is
+	// tracked as R233-PERF-4 (persistent fd + ReadAt + inode-change
+	// reopen) — that lane has the design space for log-rotation
+	// invalidation. Treating R230B-PERF-5 as superseded by R233-PERF-4.
 	const readBufRetainCap = 256 * 1024
 	r.readBuf = r.readBuf[:0]
 	freshBytes, err := readAllInto(io.LimitReader(f, maxTranscriptReadBytes), r.readBuf)

@@ -533,6 +533,15 @@ func (h *SessionHandlers) handleList(w http.ResponseWriter, r *http.Request) {
 	// growth reallocs on projects-heavy dashboards. Entries are projectListEntry
 	// named-struct values (not map[string]any) so the hot 1 Hz poll path skips
 	// the inner-map + interface{} boxing overhead. R70-PERF-M1.
+	//
+	// R230C-PERF-7: the slice itself is rebuilt on every /api/sessions poll
+	// (1 Hz × open dashboard tabs) even though projects change at minute-scale.
+	// Caching across polls would require invalidation hooks on every project
+	// CRUD path (Add/Remove/SetFavorite/git-detect/node-cache refresh) plus a
+	// remote-projects merge cursor; the cache invariant footprint dwarfs the
+	// allocation it saves. At realistic scale (≤50 projects × ≤20 tabs ≈ 50
+	// rebuilds/s, each ≤4 KB) this is a few hundred KB/s of GC churn — well
+	// below the dashboard's own JSON-encode allocation. Accept the rebuild.
 	var projectList []projectListEntry
 	if h.projectMgr != nil {
 		projects := h.projectMgr.All()
