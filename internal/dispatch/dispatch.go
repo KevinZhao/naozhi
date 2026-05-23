@@ -81,6 +81,19 @@ type Dispatcher struct {
 	// legacy duplicate-routing branches that R-key-resolver collapsed
 	// will quietly come back.  Any new ProjectForChat / EffectivePlanner*
 	// read on the hot path should fail review.
+	//
+	// R218B-ARCH-2 anchor: projectMgr and resolver are intentionally two
+	// references to the same underlying *project.Manager — resolver wraps
+	// it as DataSource for the hot path, while slash-command handlers
+	// need the full Manager API surface (BindChat / UnbindAllChat / All /
+	// Get + ProjectForChat) which DataSource intentionally narrows.
+	// Production wiring (cmd/naozhi/main.go) passes the same Manager
+	// pointer to both fields, so concurrent state is shared, not
+	// duplicated. The "dual information source" framing in the TODO is a
+	// type-shape observation, not a runtime hazard. Migrating slash-
+	// command access to a wider DataSource interface would just move the
+	// 5-method surface to another spot and add an indirection layer.
+	// Keep the direct reference here.
 	projectMgr *project.Manager
 	// resolver centralises (key, opts) derivation for the IM and slash-
 	// command paths. NewDispatcher guarantees this field is non-nil — when
