@@ -2186,6 +2186,24 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	// reason; make Send consistent. Shutdown latency is bounded by
 	// Router.Shutdown's drain timeout (ShutdownTimeout, 30s in
 	// internal/session) + cron.Stop()'s own cron.Stop() chain drain.
+	//
+	// Known wall-clock implications (TODO R222-GO-1 / R230B-GO-1 / R230C-GO-7):
+	//
+	//   - 总墙钟最坏 ≈ spawnBudget + jobTimeout（2 段串接而非共享），因为
+	//     GetOrCreate 已经走完 ctx 的预算，sendCtx 又重新拿满 jobTimeout。
+	//     execTimeout 默认 5min，实测 spawn 通常 <1s，所以这个 overshoot
+	//     在生产环境几乎不可观察；理论上 jobTimeout 设到 hours 级别 + spawn
+	//     卡 minutes 时可能让 cron 任务跑 ~2× jobTimeout。
+	//   - Stop() 后正在跑的 Send 仍可阻塞最多 jobTimeout，triggerWG.Wait
+	//     因此可能超 stopBudget。Router.Shutdown 的 drain 会兜底，但 cron
+	//     stopBudget 不再是硬墙。
+	//
+	// 为什么仍接受现状：deadline watchdog（runDeadlineWatchdog）在 jobTimeout
+	// 触发时主动调 InterruptViaControl 取消 CLI turn，所以"卡满 jobTimeout"
+	// 是有上界且可被 watchdog 截断的；改成 stopCtx-derived 反而会把 graceful
+	// shutdown 与 normal job timeout 两条独立的取消语义合并，错误分类
+	// （ErrClassDeadlineExceeded vs ErrClassCanceled）会塌成一团。等真正
+	// 出现 5h cron 任务卡 shutdown 的现场再切 stopCtx-derived + grace。
 	sendCtx, sendCancel := context.WithTimeout(context.Background(), jobTimeout)
 	defer sendCancel()
 	inflight.setPhase(PhaseSending)
