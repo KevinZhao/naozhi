@@ -175,6 +175,18 @@ func (p *Process) SendPassthrough(ctx context.Context, text string, images []Ima
 // writeUserMessageUnderShimLock writes one NDJSON user-message line directly
 // to the shim, bypassing shimWriter's fast-path that would re-acquire
 // shimWMu. Caller MUST hold shimWMu.
+//
+// R227-PERF-5 archive anchor (doc-and-accept, 2026-05-23): the inner
+// p.protocol.WriteUserMessageLocked call below relies on encoding/json which
+// allocates an encodeState per Marshal. We deliberately do NOT wrap that with
+// a naozhi-side sync.Pool[*bytes.Buffer + *json.Encoder] because (a) user
+// prompts arrive at ~1 msg/min/session — orders of magnitude lower than the
+// stream-event hot path, so encodeState alloc cost is invisible in profiles;
+// (b) encoding/json already maintains an internal sync.Pool for encodeState
+// (encode.go newEncodeState/freeEncodeState), so an outer pool merely adds a
+// round-trip; (c) the captureWriter + backing slice pool above (R226-PERF-3)
+// already removes the dominant allocation on this path. Same conclusion as
+// R227-PERF-4 (PR #187 archive anchor, wsClient.SendJSON encodeState).
 func (p *Process) writeUserMessageUnderShimLock(uuidStr, text string, images []ImageData, priority string) error {
 	// We can't feed through stdinWriter (shimWriter) because its Write path
 	// calls p.shimSend which takes shimWMu. Build the payload ourselves via
