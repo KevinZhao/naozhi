@@ -678,9 +678,25 @@ var smartQuoteNormalizer = strings.NewReplacer(
 	"\u2019", "\"", // RIGHT SINGLE QUOTATION MARK ’
 )
 
-// Cron input bounds are shared with the dashboard HTTP path; see
-// internal/cron/limits.go for rationale. Aliased here to avoid renaming
-// every existing call site. R216-CR-1.
+// Cron input bounds — single-source-of-truth provenance.
+//
+// Canonical values live in internal/cron/limits.go (cron.MaxPromptBytes,
+// cron.MaxIDLen, cron.MaxScheduleBytes). The dashboard HTTP path mirrors
+// the same constants under the *Dashboard suffix in
+// internal/server/dashboard_cron.go; the IM `/cron` parsers below mirror
+// them under the unsuffixed name. Both surfaces feed the same on-disk
+// cron_jobs.json schema, so the limits MUST stay in lockstep — drift would
+// let one entry-point accept input the other rejects, leaving rows that
+// validate on read and reject on round-trip.
+//
+// Convention (R234-ARCH-21):
+//   - cron.Max*       = source of truth (single value, no suffix);
+//   - dispatch.maxCron*           = IM-side alias (this file);
+//   - server.maxCron*Dashboard    = HTTP-side alias.
+//
+// Adding a new bound requires a `cron.MaxXxx` const + both aliases. Renaming
+// the canonical const is a 3-file change but is caught at compile time.
+// R216-CR-1, R234-ARCH-21.
 const (
 	maxCronPromptBytes   = cron.MaxPromptBytes
 	maxCronIDLen         = cron.MaxIDLen

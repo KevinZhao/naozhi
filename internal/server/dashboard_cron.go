@@ -28,9 +28,12 @@ var validNotifyPlatforms = map[string]struct{}{
 
 const maxNotifyChatIDLen = 256
 
-// Cron input bounds shared with the IM `/cron` path. Both surfaces feed the
-// same on-disk cron_jobs.json schema, so the limits must stay in lockstep —
-// see internal/cron/limits.go. R216-CR-1.
+// Cron input bounds — HTTP-side aliases of the canonical cron.Max* constants
+// declared in internal/cron/limits.go. The IM `/cron` path declares parallel
+// aliases under the unsuffixed name in internal/dispatch/commands.go. Both
+// surfaces feed the same on-disk cron_jobs.json schema, so the limits MUST
+// stay in lockstep; see the convention block in dispatch/commands.go for
+// the rename / addition contract. R216-CR-1, R234-ARCH-21.
 const (
 	maxCronPromptBytesDashboard   = cron.MaxPromptBytes
 	maxCronIDLenDashboard         = cron.MaxIDLen
