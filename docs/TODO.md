@@ -879,7 +879,7 @@
 - [ ] **R222-ARCH-1 — `session.Router` 已是 god object（73 方法 / ~20 字段 / 4100 行单文件）（P1）**: 拆 sessionStore + procPool + shimReconciler + persistenceCoord + historyLoader 五子组件，Router 退化为门面；contract_test.go 守的对外契约不破。是当前最大的架构债。
 - [ ] **R222-ARCH-2 — shim 协议细节泄漏到 session 层（P1）**: session/router.go 直调 `shim.SocketPath/KeyHash/WaitSocketGone/ServerMsg/State`；cli.Wrapper 应吸收为 `WaitSocketGoneForKey(key,dur)` + `Reconnect(ctx,key,lastSeq) (*Process, midTurn, err)`。
 - [ ] **R222-ARCH-3 — `internal/config` 反向 import `internal/session`（P1）**: 仅为读 `session.DefaultMaxProcs` 一个常量。方案：抽 internal/sessionconst 或 internal/defaults 子包，session/config 都依赖它。
-- [ ] **R222-ARCH-4 — `cli.PersistSink` 与 `persist.PersistSink` 双胞胎，bridge 翻译层（P1）**: 抽 internal/eventlog/schema 唯一 entry 类型来源；或保留 bridge 但显式重命名两端。
+- [x] **R222-ARCH-4 — `cli.PersistSink` 与 `persist.PersistSink` 双胞胎，bridge 翻译层（P1）**: 抽 internal/eventlog/schema 唯一 entry 类型来源；或保留 bridge 但显式重命名两端。**已在 `internal/cli/eventlog.go` PersistSink 上加 godoc 锚点解释两边类型故意分离的现状（cli 域 vs on-disk schema 域）+ session/eventlog_bridge 是唯一翻译点 + 收敛路径前提条件。作为 R227-ARCH-15 / R230B-ARCH-17 拆包工作的 anchor。**
 - [ ] **R222-ARCH-5 — server 直接持有大量 cli.* 类型，绕过 session 抽象（P1）**: 14 个 server 文件 import cli.Attachment/ImageData/EventEntry/SubagentLinker。方案：扩展 platform.Attachment 或抽 internal/dispatch/dto。
 - [ ] **R222-ARCH-6 — Hub god-object 苗头（35+ 方法 / 1700 行）（P2）**: 拆 Hub + SubscriptionRegistry + MessageBroker。
 - [ ] **R222-ARCH-7 — `processIface` 30+ 方法（P2）**: 按 core/status/events/agents 切分四个小接口。

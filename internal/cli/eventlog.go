@@ -370,6 +370,29 @@ type EventLog struct {
 // up the Append caller — EventLog takes pains to release l.mu
 // before invoking the sink specifically so slow sinks can't stall
 // the ring buffer.
+//
+// # Relationship with persist.PersistSink (R222-ARCH-4 anchor)
+//
+// internal/eventlog/persist also defines a `PersistSink` symbol —
+// the on-disk Persister's accept-from-bridge hook. The two are
+// deliberately distinct types today:
+//
+//   - cli.PersistSink (this type) takes []EventEntry, the cli-domain
+//     wire shape. Lives next to EventLog because EventLog is the
+//     producer.
+//   - persist.PersistSink takes persist/schema entries, the on-disk
+//     wire shape (uuid, replay flag, framing fields).
+//
+// session/eventlog_bridge.go is the only place that translates
+// between them — capturing the cli-side slice, building the
+// persist-side schema records, and forwarding to the Persister.
+// R222-ARCH-4 / R227-ARCH-15 propose collapsing the two types onto
+// a single internal/eventlog/schema struct so the bridge's marshal
+// step disappears, but that requires moving EventEntry out of
+// internal/cli (today multiple consumers in cli rely on the
+// in-package type for sub-agent linkage). Until that lands, treat
+// the two PersistSink names as a documented refactor seam, not a
+// drift.
 type PersistSink func(entries []EventEntry, replayPhase bool)
 
 // SetPersistSink installs the on-disk persistence hook. See the
