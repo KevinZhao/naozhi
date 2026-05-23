@@ -120,6 +120,12 @@ func TestDetectMime_SourceCodeExtensions(t *testing.T) {
 		{"a.json", `{"a":1}`, "application/json"},
 		{"Dockerfile", "FROM debian", "text/plain"}, // http default
 		{"a.txt", "hello", "text/plain"},
+		// R232-SEC-8: dotfile basenames whose entire name is treated as the
+		// "extension" by filepath.Ext (e.g. ".makefile") used to fall through
+		// to application/octet-stream because the ext-empty branch wrapped
+		// base in a leading dot, producing "..makefile" which never matched.
+		{".makefile", "all:\n\techo hi\n", "text/x-makefile"},
+		{"sub/.makefile", "all:\n\techo hi\n", "text/x-makefile"},
 	}
 	for _, tc := range cases {
 		got := detectMime(tc.path, []byte(tc.head))

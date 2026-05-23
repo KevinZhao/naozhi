@@ -239,9 +239,21 @@ func detectMime(resolved string, head []byte) string {
 		return "image/svg+xml"
 	}
 	// Base name override for extensionless files like Dockerfile / Makefile.
+	// R232-SEC-8: paths whose basename starts with a dot (e.g. ".makefile",
+	// ".gitignore") have filepath.Ext == basename, so this branch was unreachable
+	// for them — and the previous "." + base concatenation produced "..makefile"
+	// which never matched previewableByExt. Look up by basename directly when
+	// ext is non-empty but Base starts with a dot, to cover the genuine
+	// extensionless dotfile case as well.
 	if ext == "" {
 		base := strings.ToLower(filepath.Base(resolved))
 		if v, ok := previewableByExt["."+base]; ok {
+			return v
+		}
+	} else if base := strings.ToLower(filepath.Base(resolved)); strings.HasPrefix(base, ".") && base == ext {
+		// Dotfile whose entire name is treated as the extension by
+		// filepath.Ext (e.g. ".makefile"). Try the table directly.
+		if v, ok := previewableByExt[base]; ok {
 			return v
 		}
 	}
