@@ -1726,7 +1726,7 @@ ACP 协议验证通过，protocol_gemini.go 设计完成，待实现。
 - [ ] **R228-ARCH-8 — 4 个 platform adapter 各自 `var fooHTTPClient` SSRF-defense client（P2）**: 4 份近一致的 redirect+TLS 1.2 floor client。方案：`internal/platform.NewSafeHTTPClient(timeout)` helper。涉及 feishu/discord/weixin/slack 各自顶部 var。
 - [x] **R228-ARCH-11 — `dispatch.SessionGuard` interface 实际不做多态分发（误报关闭 2026-05-23）**: 复核现状 — interface 有 3 个实现：MessageQueue（生产 IM 路径）、session.Guard（Dashboard/WS via msgqueue.go SessionGuard-compat methods）、dispatch_test.go::fakeGuard（测试 seam）。删 interface 会逼测试穿过完整 queue.Enqueue/Drain 链路才能测 busy-flag 状态机，损失 fakeGuard ~10 LOC 的单测隔离。`d.queue != nil` 分支是运行时模式选择（queue-mode vs guard-mode wiring），不是结构性冗余。已就地加 godoc 锚点说明，归档关闭。
 - [ ] **R228-ARCH-12 — `cron.SchedulerConfig` 直接持 `session.AgentOpts` + `platform.Platform`（P2）**: cron 字段调整波及 cron。方案：cron 加自己的 JobNotifier interface + JobAgentOpts 局部类型。涉及 `internal/cron/scheduler.go:100-101,213-214`。
-- [ ] **R228-ARCH-13 — `cli.HistoryFactoryFn` registry blank import 在 session 包（P2）**: 触发点已迁到 `cli.NewWrapper` 但 import 列表残留在 session。方案：移到 cli/wrapper.go 或 cmd/naozhi/main.go。涉及 `internal/session/router_core.go:21-32`。
+- [x] **R228-ARCH-13 — `cli.HistoryFactoryFn` registry blank import 在 session 包（P2）**: ~~触发点已迁到 `cli.NewWrapper` 但 import 列表残留在 session~~。同根因合并到 R230-ARCH-14 主条目（`router_core.go:21-32` 已加共享状态契约锚点 2026-05-23），等 Sprint 1b 迁 wireup 时一并落地。归档于 2026-05-23。
 - [ ] **R228-ARCH-14 — `dispatch.Dispatcher.takeoverFn`/`sendFn` closure 字段易漏 wireup（P2）**: closure-pattern 经典毛病。方案：1-method interface。Breaking：内部 wiring。涉及 `internal/dispatch/dispatch.go:82-83`。
 - [ ] **R228-ARCH-18 — `dispatch.Dispatcher.projectMgr` 仅用于 slash-command UX 但持整个 `*project.Manager`（P3）**: 30+ 方法面。方案：内部 1-method interface 注入。涉及 `internal/dispatch/dispatch.go:56`。
 
