@@ -181,6 +181,14 @@ func filterByExcluder(ids []string, excluder SessionIDExcluder) []string {
 	return ids
 }
 
+// defaultAutoChainWindow is the fallback look-back window applied when a
+// policy returns Window<=0. Seven days matches RFC §4.2 — long enough to
+// cover an interrupted multi-day investigation across a weekend yet short
+// enough to keep the JSONL scan bounded on busy workspaces. A misconfigured
+// policy (zero / negative duration) silently inherits this floor instead of
+// degenerating to "no chain ever".
+const defaultAutoChainWindow = 7 * 24 * time.Hour
+
 // pickWorkspaceChain returns sessionIDs to auto-prefix to a freshly
 // created session's prev_session_ids. Pure: no router mutation.
 //
@@ -208,7 +216,7 @@ func pickWorkspaceChain(
 	}
 	window := policy.Window(workspace)
 	if window <= 0 {
-		window = 7 * 24 * time.Hour
+		window = defaultAutoChainWindow
 	}
 	chainCap := policy.Cap(workspace)
 	if chainCap <= 0 || chainCap > maxPrevSessionIDs {
