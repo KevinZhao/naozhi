@@ -108,6 +108,48 @@ func (h *Hub) maybeWireLinkerTailer(key string, sess *session.ManagedSession) {
 // only the WS layer don't drag server.handler state in.
 var agentTaskIDRe = regexp.MustCompile(`^[a-z0-9]{1,32}$`)
 
+// agent_subscribe_rejected `Reason` codes — string sentinels shared with
+// the dashboard JS handler at static/dashboard.js (search for the same
+// literals). Centralising them here makes "what reasons does the WS
+// layer emit?" greppable in one spot and protects against typo drift
+// between JSON producer (us) and consumer (dashboard) — a misspelled
+// "capactiy" used to silently fall through dashboard's switch and the
+// retry banner stayed dark.
+//
+// Adding a new code: append a constant here AND extend dashboard.js's
+// switch with a user-facing message. RFC v4 agent-team-ui §3.5.4 is
+// the source of truth for the protocol-level meanings.
+const (
+	// agentRejectRemoteNotSupported — task lives on a remote node; tailer
+	// requires local filesystem access. Dashboard falls back to the HTTP
+	// endpoint (which today returns 404 for the same case).
+	agentRejectRemoteNotSupported = "remote_not_supported"
+	// agentRejectSessionNotFound — session key resolved to no live
+	// ManagedSession. Either the session was reset/closed in flight, or
+	// the WS subscriber raced ahead of /api/sessions's eventual consistency.
+	agentRejectSessionNotFound = "session_not_found"
+	// agentRejectNoLinker — session is alive but its protocol does not
+	// expose a SubagentLinker (e.g. ACP, kiro). Subagent UI is hidden for
+	// these backends.
+	agentRejectNoLinker = "no_linker"
+	// agentRejectPending — Linker context not yet installed (awaiting the
+	// init event). Dashboard retries via polling once the parent stream
+	// settles. Mirrors the HTTP endpoint's 202 response.
+	agentRejectPending = "pending"
+	// agentRejectTombstone — Linker resolved the task but produced an empty
+	// agent ID / JSONL path (subagent finished before any tool_use, or the
+	// CLI emitted a malformed manifest). The task is effectively gone.
+	agentRejectTombstone = "tombstone"
+	// agentRejectCapacity — tailer registry hit agentTailerMax (50). New
+	// subscribes are refused until existing tailers idle-reap or close on
+	// task_done. Dashboard falls back to 3-second HTTP polling.
+	agentRejectCapacity = "capacity"
+	// agentRejectClosed — tailer was alive at ensureTailer() but closed
+	// between then and attach() (window of microseconds, but races on
+	// task_done). Dashboard treats this identically to a normal completion.
+	agentRejectClosed = "closed"
+)
+
 func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
 	if err := session.ValidateSessionKey(msg.Key); err != nil {
 		c.SendJSON(node.ServerMsg{Type: "error", Error: "invalid key"})
@@ -126,7 +168,7 @@ func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
 			Type:   "agent_subscribe_rejected",
 			Key:    msg.Key,
 			TaskID: msg.TaskID,
-			Reason: "remote_not_supported",
+			Reason: agentRejectRemoteNotSupported,
 		})
 		return
 	}
@@ -136,7 +178,7 @@ func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
 			Type:   "agent_subscribe_rejected",
 			Key:    msg.Key,
 			TaskID: msg.TaskID,
-			Reason: "session_not_found",
+			Reason: agentRejectSessionNotFound,
 		})
 		return
 	}
@@ -146,7 +188,7 @@ func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
 			Type:   "agent_subscribe_rejected",
 			Key:    msg.Key,
 			TaskID: msg.TaskID,
-			Reason: "no_linker",
+			Reason: agentRejectNoLinker,
 		})
 		return
 	}
@@ -159,7 +201,7 @@ func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
 			Type:   "agent_subscribe_rejected",
 			Key:    msg.Key,
 			TaskID: msg.TaskID,
-			Reason: "pending",
+			Reason: agentRejectPending,
 		})
 		return
 	}
@@ -168,7 +210,7 @@ func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
 			Type:   "agent_subscribe_rejected",
 			Key:    msg.Key,
 			TaskID: msg.TaskID,
-			Reason: "tombstone",
+			Reason: agentRejectTombstone,
 		})
 		return
 	}
@@ -181,7 +223,7 @@ func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
 			Type:   "agent_subscribe_rejected",
 			Key:    msg.Key,
 			TaskID: msg.TaskID,
-			Reason: "capacity",
+			Reason: agentRejectCapacity,
 		})
 		return
 	}
@@ -190,7 +232,7 @@ func (h *Hub) handleAgentSubscribe(c *wsClient, msg node.ClientMsg) {
 			Type:   "agent_subscribe_rejected",
 			Key:    msg.Key,
 			TaskID: msg.TaskID,
-			Reason: "closed",
+			Reason: agentRejectClosed,
 		})
 		return
 	}
