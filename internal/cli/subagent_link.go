@@ -43,6 +43,21 @@ var agentHexRe = regexp.MustCompile(`^[A-Za-z0-9]{8,64}$`)
 // agents accumulate hundreds of parked goroutines per session.
 const maxConcurrentResolves = 8
 
+// staleAgentReuseSlack is the lookback grace window applied when comparing
+// an agent jsonl's first-row timestamp to the parent's Agent tool_use
+// timestamp during candidate filtering. If the jsonl row predates the
+// tool_use by more than this slack, we treat the file as a stale same-name
+// reuse from a prior turn and drop it from the candidate set.
+//
+// 10 s is empirically sufficient: the Claude CLI flushes the first jsonl
+// row within ~500 ms of the parent-stream Agent tool_use under normal
+// load; the slack absorbs filesystem-level mtime/timestamp skew (NFS
+// granularity, agent-side bufio flush staggering) without admitting the
+// previous turn's transcript when the operator re-invokes the same named
+// agent within the same session. R10 anchor — see subagent_link.go Resolve
+// step 5 cross-check.
+const staleAgentReuseSlack = 10 * time.Second
+
 type SubagentLinker struct {
 	mu              sync.RWMutex
 	byTaskID        map[string]LinkInfo
@@ -324,10 +339,11 @@ func (l *SubagentLinker) Resolve(taskID, toolUseID, name, description string, ag
 				continue
 			}
 			// R10: if the jsonl's first row timestamp predates the parent's
-			// Agent tool_use by more than 10s, treat as stale (same-name reuse).
+			// Agent tool_use by more than staleAgentReuseSlack, treat as stale
+			// (same-name reuse from a prior turn).
 			if !first.Timestamp.IsZero() && agentToolUseMS > 0 {
 				agentTS := time.UnixMilli(agentToolUseMS)
-				if first.Timestamp.Before(agentTS.Add(-10 * time.Second)) {
+				if first.Timestamp.Before(agentTS.Add(-staleAgentReuseSlack)) {
 					continue
 				}
 			}
