@@ -174,6 +174,12 @@ func (r *tailerRegistry) ensureTailer(key, taskID, toolUseID, jsonlPath string) 
 		subs:       make(map[*wsClient]struct{}),
 		lastActive: time.Now(),
 		startedAt:  time.Now(),
+		// R235-PERF-4: pre-size the late-subscriber buffer to its 500-entry
+		// cap. Without this, the implicit nil slice grows via the runtime's
+		// doubling rule (1→2→4→…→512 = ~9 reallocations) before the first
+		// overflow trim. Each EventEntry is ~300 bytes so the doubling path
+		// allocates ~150 KB of orphan backing arrays per fresh tailer.
+		buffered: make([]cli.EventEntry, 0, 500),
 	}
 	r.byTask[tk] = t
 	r.count.Add(1)

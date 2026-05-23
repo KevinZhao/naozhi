@@ -2774,8 +2774,9 @@ func redactPathsInCronError(s string) string {
 	// input unchanged. recordResult runs on every cron execution, and
 	// common error classes ("dispatcher queue full", "session error:
 	// context deadline exceeded") have no embedded paths. R62-PERF-3 +
-	// R234-SEC-9（~/ 用户目录形态补漏）。
-	if strings.IndexByte(s, '/') < 0 && strings.IndexByte(s, '\\') < 0 && strings.IndexByte(s, '~') < 0 {
+	// R234-SEC-9（~/ 用户目录形态补漏）+ R235-PERF（用 strings.Contains
+	// "~/" 收紧检测，避免 "weight ~5kg" 这种文本走 builder slow path）。
+	if strings.IndexByte(s, '/') < 0 && strings.IndexByte(s, '\\') < 0 && !strings.Contains(s, "~/") {
 		return s
 	}
 	var b strings.Builder
