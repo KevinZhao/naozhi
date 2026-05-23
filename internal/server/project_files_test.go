@@ -383,6 +383,156 @@ func TestHandleFilesExists_InvalidJSON(t *testing.T) {
 	}
 }
 
+// TestHandleFilesExists_PublicTmp covers the __public_tmp__ pseudo-project
+// fallback: chat-mentioned /tmp/... paths can be resolved without first
+// registering /tmp as a real project. Symlink-escape and path-traversal
+// guards from resolveProjectFileWithRoot must still apply.
+func TestHandleFilesExists_PublicTmp(t *testing.T) {
+	h, _, _ := newProjectHandlersForTest(t, nil)
+
+	// Drop a unique-named file directly under /tmp. Pin the dir explicitly
+	// because os.TempDir() on macOS returns /var/folders/..., which
+	// filepath.Rel("/tmp", ...) would express as a traversal that
+	// resolveProjectFileWithRoot correctly rejects.
+	tmpFile, err := os.CreateTemp("/tmp", "naozhi-public-tmp-*.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tmpFile.WriteString("hello"); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+	t.Cleanup(func() { _ = os.Remove(tmpFile.Name()) })
+
+	rel, err := filepath.Rel("/tmp", tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body, _ := json.Marshal(existsReq{
+		Project: publicTmpProject,
+		Paths: []string{
+			rel,
+			"missing-" + rel,
+			"../etc/passwd", // traversal must still be rejected
+		},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/api/projects/files/exists", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	h.handleFilesExists(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Results map[string]existsEntry `json:"results"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if !resp.Results[rel].Exists {
+		t.Errorf("/tmp/%s should exist", rel)
+	}
+	if resp.Results["missing-"+rel].Exists {
+		t.Error("missing path should NOT exist")
+	}
+	if resp.Results["../etc/passwd"].Exists {
+		t.Error("traversal must be rejected even under __public_tmp__")
+	}
+}
+
+// TestHandleFileGet_PublicTmpPreview pins the read path: a /tmp/*.log file
+// previews as text via the __public_tmp__ pseudo-project.
+func TestHandleFileGet_PublicTmpPreview(t *testing.T) {
+	h, _, _ := newProjectHandlersForTest(t, nil)
+
+	// Pin /tmp explicitly: see TestHandleFilesExists_PublicTmp for the
+	// macOS os.TempDir() rationale.
+	tmpFile, err := os.CreateTemp("/tmp", "naozhi-public-tmp-preview-*.log")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tmpFile.WriteString("preview-me\n"); err != nil {
+		t.Fatal(err)
+	}
+	tmpFile.Close()
+	t.Cleanup(func() { _ = os.Remove(tmpFile.Name()) })
+
+	rel, err := filepath.Rel("/tmp", tmpFile.Name())
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=preview", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, body=%s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if resp["content"] != "preview-me\n" {
+		t.Errorf("content = %v", resp["content"])
+	}
+}
+
+// TestHandleFileGet_PublicTmpRejectsTraversal pins the symlink/traversal
+// guards under the pseudo-project.
+func TestHandleFileGet_PublicTmpRejectsTraversal(t *testing.T) {
+	h, _, _ := newProjectHandlersForTest(t, nil)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+publicTmpProject+"&path=../etc/passwd&mode=preview", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Errorf("status = %d, want 404 for traversal", w.Code)
+	}
+}
+
+// TestHandleFileGet_PublicTmpRejectsCredential pins the credential-name
+// allowlist still applies under the pseudo-project: a malicious /tmp/.env
+// must not be downloadable.
+func TestHandleFileGet_PublicTmpRejectsCredential(t *testing.T) {
+	h, _, _ := newProjectHandlersForTest(t, nil)
+
+	credPath := filepath.Join("/tmp", ".env.naozhi-test")
+	if err := os.WriteFile(credPath, []byte("SECRET=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Remove(credPath) })
+
+	// Rename to .env exactly to trip isSensitiveDownloadName. We can't drop a
+	// file literally named ".env" under /tmp without trampling other tests, so
+	// stage one in a sub-directory we own. Pin /tmp explicitly: see
+	// TestHandleFilesExists_PublicTmp for the macOS os.TempDir() rationale.
+	subDir, err := os.MkdirTemp("/tmp", "naozhi-cred-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(subDir) })
+	envPath := filepath.Join(subDir, ".env")
+	if err := os.WriteFile(envPath, []byte("SECRET=1\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rel, err := filepath.Rel("/tmp", envPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/projects/file?project="+publicTmpProject+"&path="+rel+"&mode=download", nil)
+	w := httptest.NewRecorder()
+	h.handleFileGet(w, req)
+	if w.Code != http.StatusForbidden {
+		t.Errorf("status = %d, want 403 for credential download", w.Code)
+	}
+}
+
 // TestHandleFilesExists_RateLimit pins the S13 per-IP limiter contract.
 // The endpoint does up to maxExistsPaths (100) filesystem stats per request
 // inside a fileStatTimeout budget, so unmetered access lets an authenticated
