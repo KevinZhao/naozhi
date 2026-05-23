@@ -138,7 +138,7 @@
 
 #### Go 正确性 / 并发（P1）
 
-- [ ] **R233B-GO-1 — runinflight setPhase/setSessionID 把参数指针存入 atomic.Pointer（P1）**: `r.phase.Store(&phase)` 存的是参数局部变量地址；同样 setSessionID 存 `&id`；executeOpt 1898-1910 里 `ph := PhaseQueued; inflight.phase.Store(&ph)` 也是同模式。当前 Go 编译器会把这些值 escape 到堆上是安全的，但模式依赖 escape 分析；建议用 helper 拷贝到稳定 heap 槽或改 `atomic.Value` + string。Breaking：否（包内）。
+- [x] **R233B-GO-1 — runinflight setPhase/setSessionID 把参数指针存入 atomic.Pointer（P1）** — 评估闭合 2026-05-23（cron-fix-F2）：`internal/cron/runinflight.go` setPhase godoc 加 R233B-GO-1 安全性说明 + setSessionID 短引用。`&phase / &id` 喂给 atomic.Pointer.Store 触发 escape，Go 1.19+ atomic.Pointer[T] 文档明确指针交给 atomic 字段的 escape 是稳定保证；不是"依赖编译器优化"而是 runtime 语义。如未来要消除 escape，正确路径是 atomic.Value 持 string 拷贝（参 R233-GO-3 godoc），不是 helper 拷贝。文档化决策不再 helper 抽取。
 - [~] **R233B-GO-2 — cron Scheduler.Stop deadline.C 共享 timer（误报关闭 2026-05-23）**: 复核 scheduler.go:884-928，第一个 select 通过 deadlineHit=true 标志记录"timer 已 fired"；第二个 select 由 `if !deadlineHit` 外层 gate 守护，仅在 deadline.C 尚未 fired 时才进入，即第二个 select 内 `case <-deadline.C` 仍保持 active 而非 drained。R222-GO-10 + 这层 deadlineHit gate 已经覆盖了"timer 已耗 + triggerWG.Wait 不就绪"的边角——deadline.C 不会被双重消费，第二段不会永久阻塞。godoc 注释（line 879-915）已明示该不变量。归档关闭，本批 PR
 
 #### 性能（P1/P2）

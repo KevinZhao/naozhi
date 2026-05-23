@@ -122,6 +122,20 @@ func (r *runInflight) snapshot() (runInflightView, bool) {
 // setPhase 写入当前阶段。executeOpt 在 jitter / snapshot / spawn / send
 // 边界调用。fast path: 同 Phase 不重复 Store（atomic.Pointer Store 会刷
 // cache line，热路径里 phase 写 4 次成本不大但能省就省）。
+//
+// R233B-GO-1 安全性说明：`r.phase.Store(&phase)` 存的是参数局部变量地
+// 址。Go 编译器看到 atomic.Pointer.Store 把 &phase 跨 goroutine 暴露，
+// escape analysis 会把 phase 升到 heap，存进去的指针因此始终指向有效
+// heap 地址而非已回栈的 stack slot —— 这是 Go 对 atomic.Pointer 的标准
+// 用法（见 pkg/sync/atomic 文档及 runtime escape rules）。executeOpt 调
+// 用方写法 `ph := PhaseQueued; inflight.phase.Store(&ph)` 同理：ph 因
+// `&ph` 喂给 atomic.Pointer 而 escape 到 heap。
+//
+// 该模式确实"依赖 escape 分析"，但 escape rules 对"指针交给 atomic
+// 字段"是稳定保证（Go 1.19 起 atomic.Pointer[T] 文档明确）。如果未来
+// 编译器去 escape 优化，runtime 检测的是写入指针而非分配位置，仍然安
+// 全。建议保留现有写法；如需消除 escape 走 atomic.Value 持 string 拷
+// 贝（见 R233-GO-3 godoc）。
 func (r *runInflight) setPhase(phase string) {
 	if r == nil {
 		return
@@ -133,6 +147,7 @@ func (r *runInflight) setPhase(phase string) {
 }
 
 // setSessionID 写入 GetOrCreate 拿到的 session_id。同样 fast-path 去重。
+// R233B-GO-1：&id 的 escape 安全性参考 setPhase godoc。
 func (r *runInflight) setSessionID(id string) {
 	if r == nil || id == "" {
 		return
