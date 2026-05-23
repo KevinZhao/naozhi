@@ -13,6 +13,38 @@ import (
 // the text is not an error.
 const envelopePrefixScanBytes = 64
 
+// errorEnvelopePrefixes lists the leading tokens that mark a CLI result
+// string as an API-error envelope rather than an assistant reply. All
+// entries MUST be lowercase — detection lowercases the input before
+// matching. Adding a new prefix here automatically widens the envelope
+// gate without touching the per-keyword classifier below; the gate and
+// classifier are decoupled by design so a new envelope wrapper (e.g. a
+// future "[claude error]" variant) does not require parallel edits to
+// every classifier branch.
+//
+// Order is by observed frequency in production logs (rate-limit / 429
+// envelopes dominate, then generic Anthropic envelopes); HasPrefix is
+// O(len(prefix)) so iteration order is a micro-optimisation, but the
+// cost of getting it wrong is also negligible.
+var errorEnvelopePrefixes = []string{
+	"api error",
+	"anthropic api error",
+	"error:",
+}
+
+// looksLikeErrorEnvelope returns true when lowerPrefix begins with any of
+// errorEnvelopePrefixes. Extracted so the test seam (apierr_test.go) and
+// any future caller (e.g. a lightweight is-error probe before logging
+// raw text) can share the prefix list.
+func looksLikeErrorEnvelope(lowerPrefix string) bool {
+	for _, p := range errorEnvelopePrefixes {
+		if strings.HasPrefix(lowerPrefix, p) {
+			return true
+		}
+	}
+	return false
+}
+
 // localizeAPIError rewrites common Claude / Anthropic API error strings that
 // surface verbatim in the CLI result into friendlier Chinese guidance for IM
 // users. When no known pattern matches, the original text is returned
@@ -41,10 +73,7 @@ func localizeAPIError(text string) string {
 		prefix = prefix[:envelopePrefixScanBytes]
 	}
 	lowerPrefix := strings.ToLower(prefix)
-	isEnvelope := strings.HasPrefix(lowerPrefix, "api error") ||
-		strings.HasPrefix(lowerPrefix, "error:") ||
-		strings.HasPrefix(lowerPrefix, "anthropic api error")
-	if !isEnvelope {
+	if !looksLikeErrorEnvelope(lowerPrefix) {
 		return text
 	}
 
