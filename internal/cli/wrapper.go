@@ -172,6 +172,22 @@ func detectVersionCtx(parent context.Context, cliPath string) string {
 }
 
 // detectCLI finds the CLI binary by checking known install paths then PATH.
+//
+// R231-ARCH-10 / R225-CR-5 anchor: this hardcoded switch and the matching
+// `backendDisplayName` literal switch above are the residual forms of the
+// "DisplayName/DefaultBinary should live on backend.Profile" migration. The
+// natural target — `backend.Get(backend).DefaultBinary` — would form an
+// import cycle (cli → backend → cli) because `internal/cli/backend` imports
+// the cli package to wire `Protocol` / `ProtocolDeps`. Resolving the cycle
+// requires either splitting backend.Profile's protocol-construction half
+// out into a separate `internal/cli/backend/profileonly` package (the
+// no-cli-dep slice consumers can read), or moving the Protocol interface
+// out of cli/ so backend can import it without a cycle. Both are larger
+// refactors than the current two-line switch warrants — when a third
+// backend (gemini-cli) lands the switch will mechanically grow to three
+// arms, at which point the refactor pays for itself. Until then, adding
+// a new backend means editing exactly two locations: `detectCLI` here
+// and `backendDisplayName` above.
 func detectCLI(backend string) string {
 	name := "claude"
 	if backend == "kiro" {
