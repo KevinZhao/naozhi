@@ -659,6 +659,19 @@ func (l *EventLog) fireOneTaskDoneCallback(pending pendingTaskDone) {
 // distinct internal_agent_id for the same tool_use_id overwrites (Resolve
 // should never produce divergent values for the same tool_use_id, but the
 // guard keeps the state machine simple if it ever does).
+//
+// R229-PERF-7 archive anchor (doc-and-accept, 2026-05-23): the full write lock
+// covers the ring-buffer reverse scan below. The proposed RLock-then-upgrade
+// optimisation (read-lock-recheck-write-lock) is rejected as net-negative:
+// SubagentLinker.Resolve is a startup-phase, one-shot event per sub-agent
+// (each tool_use_id resolves exactly once), so even N=8 concurrent sub-agents
+// = 8 total scans for a session — not a steady-state hot path. The scan is
+// also bounded by setAgentInternalIDMaxScan (capped well below maxSize=500)
+// and typically completes in single-digit µs because the matching entries sit
+// in the most-recent few dozen of the ring. Adding the upgrade-lock dance
+// (release RLock → take wlock → re-walk to recover position because the ring
+// could have shifted during the unlock window) doubles complexity for
+// sub-µs gain that won't move any real workload's latency P99.
 func (l *EventLog) SetAgentInternalID(toolUseID, internalAgentID, jsonlPath, firstPromptID string) {
 	if toolUseID == "" {
 		return
