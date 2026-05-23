@@ -45,6 +45,16 @@ const (
 	PhaseSending   = "sending"
 )
 
+// emptyStringPtr / zeroTimePtr 是 reset() 共享的零值指针。
+// 之前每次 reset 都用栈局部 `empty := ""` / `zero := time.Time{}` 取址 Store，
+// 触发逃逸分析把每个变量挪到堆上——叠加 1Hz × 50 jobs 体量大约 300 alloc/s。
+// 共享指针把 reset 路径的零值 alloc 降到零，值不可变，跨 goroutine 共享
+// 安全（atomic.Pointer.Load 返回的指针只用于 *p 解引用拷贝出值副本）。
+var (
+	emptyStringPtr = func() *string { s := ""; return &s }()
+	zeroTimePtr    = func() *time.Time { t := time.Time{}; return &t }()
+)
+
 // reset 把 inflight 字段清回未运行态。CAS Store(false) 由 executeOpt defer
 // 调用；reset 单独抽出来是因为 DeleteJobByID 路径下我们不动 atomic.Bool
 // （见 scheduler.go runningJobs 注释——历史 entry 不清，避免 ID 复用 split
@@ -54,13 +64,11 @@ func (r *runInflight) reset() {
 	if r == nil {
 		return
 	}
-	empty := ""
-	r.runID.Store(&empty)
-	r.phase.Store(&empty)
-	r.trigger.Store(&empty)
-	r.sessionID.Store(&empty)
-	zero := time.Time{}
-	r.startedAt.Store(&zero)
+	r.runID.Store(emptyStringPtr)
+	r.phase.Store(emptyStringPtr)
+	r.trigger.Store(emptyStringPtr)
+	r.sessionID.Store(emptyStringPtr)
+	r.startedAt.Store(zeroTimePtr)
 	r.freshSnap.Store(false)
 }
 

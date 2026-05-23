@@ -268,15 +268,6 @@ var cronParser = robfigcron.NewParser(
 // Prevents resource exhaustion from overly frequent schedules like "@every 1s".
 const minCronInterval = 5 * time.Minute
 
-// computeJobTimeout returns the per-run deadline for a job: always maxCap
-// (SchedulerConfig.ExecTimeout). A long-running job (e.g. hourly task that
-// takes 70m) must not be killed mid-flight just because the next scheduled
-// tick is approaching — robfig/cron's SkipIfStillRunning chain wrapper drops
-// the colliding tick instead.
-func computeJobTimeout(maxCap time.Duration) time.Duration {
-	return maxCap
-}
-
 // schedulePeriod 估算给定 cron 表达式在参考时刻 now 附近的周期（相邻两次
 // 触发的间隔）。通过 sched.Next 两次外推实现，精度对 "每 N 分钟 /
 // 每天 HH:MM" 这类常见形态足够。无法解析 / 不等间隔（DST 切换窗口）
@@ -285,8 +276,7 @@ func computeJobTimeout(maxCap time.Duration) time.Duration {
 // now 必须由调用方显式提供，保证和上层 HasMissedSchedule /
 // previousTickBefore 读取的"现在"完全同步——避免在 DST 切换或 NTP 校
 // 正瞬间两者跨越不同小时，导致 period 估成 23h/25h 而产生 missed 假
-// 判定。computeJobTimeout / applyJitter 不在意这种纳秒级 skew，传
-// time.Now() 即可。
+// 判定。applyJitter 不在意这种纳秒级 skew，传 time.Now() 即可。
 func schedulePeriod(schedule string, now time.Time) time.Duration {
 	sched, err := cronParser.Parse(schedule)
 	if err != nil {

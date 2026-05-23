@@ -56,6 +56,12 @@ const (
 	autoTitlerDefaultMinRenameInterval = 5 * time.Minute
 	autoTitlerDefaultBatchPerTick      = 1
 
+	// autoTitlerMaxBatchPerTick caps Configure-supplied batch_per_tick
+	// values. The candidate selection collects up to 4×batchPerTick
+	// rows and insertion-sorts them, which is fine for small N but
+	// quadratic. 32 is a safety ceiling; in practice operators set 1-4.
+	autoTitlerMaxBatchPerTick = 32
+
 	// autoTitlerMaxTitleRunes is the hard rune-count ceiling enforced
 	// after ValidateUserLabel.  Mirrors the system-prompt ≤16 char
 	// instruction so a non-compliant model can't write an over-long
@@ -130,6 +136,14 @@ func (a *autoTitler) Configure(cfg DaemonConfig) error {
 		a.minRenameInterval = v
 	}
 	if v, ok := cfg["batch_per_tick"].(int); ok && v > 0 {
+		// Cap at autoTitlerMaxBatchPerTick: candidate selection uses
+		// insertion sort (O(N²)) on the up-to 4×batchPerTick collected
+		// slice, which assumes the value stays small. An over-large
+		// config wouldn't crash but would degrade the periodic tick into
+		// a multi-millisecond CPU burn.
+		if v > autoTitlerMaxBatchPerTick {
+			v = autoTitlerMaxBatchPerTick
+		}
 		a.batchPerTick = v
 	}
 	if v, ok := cfg["include_group_chat"].(bool); ok {

@@ -218,6 +218,14 @@ func (lw *limitedWriter) Write(p []byte) (int, error) {
 	// stderr pump). On the discard path we already swallow overflow
 	// without an error; do the same on writer error so the pump treats
 	// the chunk as fully accepted and keeps draining.
-	_ = err
+	if err != nil {
+		// Inner writer is broken (closed pipe, full disk, etc). Force the
+		// cap so subsequent Write calls take the early-return discard
+		// path on line 207 instead of repeatedly attempting (and failing)
+		// to write through a known-bad sink. Without this, a steady
+		// stderr stream + a persistently failing writer would loop here
+		// at full bandwidth, with lw.n stuck below max forever.
+		lw.n = lw.max
+	}
 	return len(p), nil
 }
