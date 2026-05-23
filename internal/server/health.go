@@ -168,6 +168,26 @@ type healthResp struct {
 	*healthAuthSection
 }
 
+// handleHealth serves /health.
+//
+// THREAT MODEL (R229-SEC-7 / R226-SEC-7):
+//   - Unauthenticated probes get only `{"status":"ok","uptime":"..."}`. Build
+//     version, session counts, watchdog kill counters, platform names, node
+//     status, event-log + attachment-tracker stats are gated behind
+//     auth.isAuthenticated so a public probe cannot fingerprint the binary
+//     or estimate restart timing.
+//   - The unauth branch is intentionally cheap (one time.Since + one
+//     map[string]string marshal) so a flood does not amplify into router /
+//     auth-cookie work.
+//
+// Outstanding (R226-SEC-7, P3): no per-IP rate limit on the *unauthenticated*
+// branch. An attacker can still poll /health at high rate to estimate uptime
+// jitter / restart window. Mitigation deferred because (a) the response is
+// constant-cost and emits no log lines, (b) the dashboard front-end polls
+// the auth branch at 1 Hz and would need its requests counted separately.
+// When this lands it should reuse the IPLimiter from auth and wrap only the
+// unauth branch (60 req/min burst 10) so the dashboard polling path stays
+// unthrottled.
 func (h *HealthHandler) handleHealth(w http.ResponseWriter, r *http.Request) {
 	resp := healthResp{
 		Status: "ok",
