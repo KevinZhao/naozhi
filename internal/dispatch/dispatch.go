@@ -597,6 +597,25 @@ func (d *Dispatcher) sendAndReply(
 		} else {
 			lg.Error("get session", "err", err)
 		}
+		// R230-ARCH-7: this switch has 3 cases that are *also* in
+		// usermsg.ForSendError (ErrMaxProcs / ErrMaxExemptSessions /
+		// ErrNoCLIWrapper / context.Canceled). It is intentionally NOT
+		// folded into usermsg because the two paths diverge in ways that
+		// would force usermsg to leak delivery-path concerns:
+		//
+		//   - Default phrasing: usermsg's generic catch-all is "处理失败"
+		//     (R226-CR-9 dashboard-side phrasing); this is the GetOrCreate
+		//     site so we tell the user "会话创建失败" specifically.
+		//   - context.Canceled needs a *replacement* reply ctx because
+		//     the caller ctx is already Done on shutdown (R188-CONC-M1).
+		//     usermsg.ForSendError returns a string and cannot reach back
+		//     into the caller's ctx variable.
+		//
+		// Adding new GetOrCreate sentinels: register the message in
+		// usermsg.ForSendError FIRST (so dashboard send_ack and IM see the
+		// same Chinese label), then add a case here only if the dispatch
+		// path needs different phrasing or replyCtx handling. Bare
+		// duplication should fail review.
 		var errMsg string
 		replyCtx := ctx
 		switch {
