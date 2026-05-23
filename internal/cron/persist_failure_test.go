@@ -262,7 +262,7 @@ func TestPersistFailure_RecordResultRollsBack(t *testing.T) {
 	// (recordResultP0WithSanitised) directly. The discriminating fields
 	// (LastErrorClass, RunCounters) get rolled back the same way as the
 	// four LastRunAt/LastResult/LastError/LastSessionID fields.
-	_, _, _ = s.recordResultP0WithSanitised(j, "new-result", "new-error", "new-sess", ErrClassSessionError, RunStateFailed)
+	_, _, _ = s.recordResultP0WithSanitised(j, "new-result", "new-error", "new-sess", ErrClassSessionError, RunStateFailed, time.Now())
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -321,7 +321,7 @@ func TestPersistFailure_RecordResultHappyPathBroadcasts(t *testing.T) {
 	// production path directly so a future change to recordResultP0
 	// can't silently rot a happy-path test that exercises a separate
 	// helper.
-	_, _, _ = s.recordResultP0WithSanitised(j, "fresh-result", "", "sess-1", ErrClassNone, RunStateSucceeded)
+	_, _, _ = s.recordResultP0WithSanitised(j, "fresh-result", "", "sess-1", ErrClassNone, RunStateSucceeded, time.Now())
 
 	s.mu.Lock()
 	defer s.mu.Unlock()

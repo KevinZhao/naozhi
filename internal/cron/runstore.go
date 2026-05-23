@@ -566,6 +566,26 @@ func (s *runStore) DeleteJob(jobID string) {
 	lock.Lock()
 	defer lock.Unlock()
 	dir := filepath.Join(s.root, jobID)
+	// Symlink defence: jobID is hex-validated above, but s.root itself
+	// or runs/<jobID> could be a symlink that escapes the runs tree
+	// (e.g. an attacker who can write inside s.root). RemoveAll follows
+	// symlinks for the *contents* of the target, so a malicious link
+	// here would let DeleteJob nuke arbitrary directories. EvalSymlinks
+	// canonicalises the path; we then re-check it stays under s.root.
+	if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+		rootResolved, rerr := filepath.EvalSymlinks(s.root)
+		if rerr != nil {
+			rootResolved = s.root
+		}
+		// Trailing separator forces a directory boundary check —
+		// otherwise "/runs-evil" would match "/runs" prefix.
+		if !strings.HasPrefix(resolved+string(os.PathSeparator), rootResolved+string(os.PathSeparator)) {
+			slog.Warn("cron run: refusing to delete subtree outside runs root",
+				"dir", dir, "resolved", resolved, "root", rootResolved)
+			s.cacheInvalidate(jobID)
+			return
+		}
+	}
 	if err := os.RemoveAll(dir); err != nil {
 		slog.Warn("cron run: delete job runs subtree failed", "dir", dir, "err", err)
 	}
@@ -588,6 +608,7 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	}
 	type item struct {
 		path  string
+		runID string
 		mtime time.Time
 	}
 	items := make([]item, 0, len(entries))
@@ -617,7 +638,7 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 		if !mtime.After(cutoff) {
 			anyExpired = true
 		}
-		items = append(items, item{path: filepath.Join(dir, name), mtime: mtime})
+		items = append(items, item{path: filepath.Join(dir, name), runID: runID, mtime: mtime})
 	}
 	// Fast path: under cap AND nothing expired → no sort, no remove. The
 	// common case for healthy 5-min cron jobs that ride well under the
@@ -628,8 +649,20 @@ func (s *runStore) trimJobLocked(jobID string, now time.Time) {
 	if len(items) == 0 {
 		return
 	}
-	// Sort newest first so rank checking is index-based.
-	slices.SortFunc(items, func(a, b item) int { return cmp.Compare(b.mtime.UnixNano(), a.mtime.UnixNano()) })
+	// Sort newest first so rank checking is index-based. Tie-break on
+	// runID DESC mirrors diskListNewestFirst — without the same secondary
+	// key, low-precision filesystems (FAT32/ext3/tmpfs) could keep entries
+	// the list endpoint shows as discarded and discard entries the list
+	// shows as kept, leaving phantom rows in the dashboard.
+	slices.SortFunc(items, func(a, b item) int {
+		if a.mtime.Equal(b.mtime) {
+			return cmp.Compare(b.runID, a.runID)
+		}
+		if a.mtime.After(b.mtime) {
+			return -1
+		}
+		return 1
+	})
 	for i, it := range items {
 		// Both conditions must hold to keep.
 		keep := i < s.keepCount && it.mtime.After(cutoff)

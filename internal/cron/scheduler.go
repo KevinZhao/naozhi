@@ -424,7 +424,12 @@ func (s *Scheduler) GetRun(jobID, runID string) (*CronRun, error) {
 // matches the dashboard's display cap. Operators with very busy crons
 // (more than recentCap distinct SessionIDs in 7 days) accept that older
 // rotations may briefly resurface in history until their JSONL ages out.
-const knownSessionIDsRecentCap = 200
+//
+// Bound to DefaultRunsKeepCount so the two limits move together: if a
+// future change widens per-job retention, the session-ID dedup window
+// follows automatically. A larger value here would still be capped by
+// runStore.Recent, so this is the effective ceiling.
+const knownSessionIDsRecentCap = DefaultRunsKeepCount
 
 // IsExcluded reports whether the given Claude sessionID belongs to a
 // cron-spawned run. Implements session.SessionIDExcluder so the
@@ -1098,11 +1103,24 @@ func (s *Scheduler) ListAllJobsWithNextRun() []JobWithNextRun {
 	}
 	s.mu.RUnlock()
 
+	// Build entryID→Next lookup in one pass: robfig/cron's Entry() is
+	// O(N) over its internal entry slice, so the prior per-job call
+	// pattern was O(N²). One Entries() snapshot is O(N) and lets each
+	// pair lookup become O(1).
+	var entryNext map[robfigcron.EntryID]time.Time
+	if len(pairs) > 0 {
+		entries := s.cron.Entries()
+		entryNext = make(map[robfigcron.EntryID]time.Time, len(entries))
+		for _, e := range entries {
+			entryNext[e.ID] = e.Next
+		}
+	}
+
 	result := make([]JobWithNextRun, 0, len(pairs))
 	for _, p := range pairs {
 		var next time.Time
 		if p.entryID != 0 {
-			next = s.cron.Entry(p.entryID).Next
+			next = entryNext[p.entryID]
 		}
 		result = append(result, JobWithNextRun{Job: p.job, NextRun: next})
 	}
@@ -2072,10 +2090,11 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 	lg := slog.With("cron_id", snap.jobID, "platform", snap.platName, "chat", snap.chatID, "run_id", runID)
 	lg.Info("cron job executing", "prompt_len", len(snap.prompt))
 
-	// Per-job timeout is always s.execTimeout (period scaling was removed —
-	// see computeJobTimeout's godoc for why robfig/cron's SkipIfStillRunning
-	// chain wrapper handles long-running tasks correctly).
-	jobTimeout := computeJobTimeout(s.execTimeout)
+	// Per-job timeout is always s.execTimeout. A long-running job (e.g.
+	// hourly task that takes 70m) must not be killed mid-flight just
+	// because the next scheduled tick is approaching — robfig/cron's
+	// SkipIfStillRunning chain wrapper drops the colliding tick instead.
+	jobTimeout := s.execTimeout
 	ctx, cancel := context.WithTimeout(s.stopCtx, jobTimeout)
 	defer cancel()
 
@@ -2168,7 +2187,9 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("session error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", snap.labelOrID()))
+		if notifyTo.IsSet() {
+			s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行跳过，请稍后重试。", snap.labelOrID()))
+		}
 		stubRefresh()
 		return
 	}
@@ -2258,7 +2279,9 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 			state: state, errClass: errClass, errMsg: fmt.Sprintf("send error: %v", err),
 			prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 		})
-		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", snap.labelOrID()))
+		if notifyTo.IsSet() {
+			s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] 执行失败，请稍后重试。", snap.labelOrID()))
+		}
 		stubRefresh()
 		return
 	}
@@ -2292,8 +2315,13 @@ func (s *Scheduler) executeOpt(j *Job, viaTriggerNow bool) {
 		prompt: snap.prompt, workDir: snap.workDir, fresh: snap.fresh,
 	})
 
-	replyText := fmt.Sprintf("[Cron %s] %s", snap.labelOrID(), result.Text)
-	s.deliverNotice(notifyTo, replyText)
+	if notifyTo.IsSet() {
+		// Skip building the (potentially multi-KB) reply text when no
+		// notification target is configured — the silent-success path
+		// otherwise allocates result.Text twice for the common case
+		// where no IM channel is bound to this cron.
+		s.deliverNotice(notifyTo, fmt.Sprintf("[Cron %s] %s", snap.labelOrID(), result.Text))
+	}
 }
 
 // finishArgs bundles the parameters of finishRun so each call site reads
@@ -2372,7 +2400,12 @@ func (s *Scheduler) finishRun(a finishArgs) {
 	persistedErrMsg := a.errMsg
 	jobPersistOK := false
 	if !a.skipPersist {
-		persistedResult, persistedErrMsg, jobPersistOK = s.recordResultP0WithSanitised(a.job, a.result, a.errMsg, a.sessionID, a.errClass, a.state)
+		// Pass endedAt through so LastRunAt and CronRun.EndedAt agree to
+		// the nanosecond — a second time.Now() inside recordResult would
+		// drift by however long the redact/sanitise pipeline took
+		// (microseconds, but visible when sorting runs by EndedAt and
+		// LastRunAt was used as the tie-break).
+		persistedResult, persistedErrMsg, jobPersistOK = s.recordResultP0WithSanitised(a.job, a.result, a.errMsg, a.sessionID, a.errClass, a.state, endedAt)
 	} else {
 		persistedResult = sanitiseRunResult(persistedResult)
 		persistedErrMsg = sanitiseRunErrMsg(persistedErrMsg)
@@ -2567,7 +2600,12 @@ func (s *Scheduler) emitRunEnded(ev RunEndedEvent) {
 // therefore moot — only this single P0 path remains, and persist_failure_test
 // (the last "test stub" caller) already invokes this function directly.
 // Do NOT reintroduce a thinner wrapper without first checking those TODOs.
-func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState) (string, string, bool) {
+//
+// endedAt is plumbed in (not re-read via time.Now()) so LastRunAt and
+// CronRun.EndedAt agree to the nanosecond — the redact/sanitise pipeline
+// took microseconds otherwise, leaving a visible drift when sorting by
+// LastRunAt against EndedAt.
+func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionID string, errClass ErrorClass, state RunState, endedAt time.Time) (string, string, bool) {
 	if trimmed := textutil.TruncateRunesNoEllipsis(result, maxStoredResultRunes); len(trimmed) < len(result) {
 		result = trimmed + truncatedSuffix
 	}
@@ -2593,7 +2631,7 @@ func (s *Scheduler) recordResultP0WithSanitised(j *Job, result, errMsg, sessionI
 		Counters       JobRunCounters
 	}{j.LastRunAt, j.LastResult, j.LastError, j.LastErrorClass, j.LastSessionID, j.RunCounters}
 
-	j.LastRunAt = time.Now()
+	j.LastRunAt = endedAt
 	j.LastResult = result
 	j.LastError = errMsg
 	j.LastErrorClass = errClass
